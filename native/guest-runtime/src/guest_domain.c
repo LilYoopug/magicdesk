@@ -45,6 +45,9 @@ void md_domain_release(struct md_guest_domain *d) {
     if (d->root_process >= 0) close(d->root_process);
     free(d);
 }
+struct md_guest_domain *md_domain_unshare_prepare(struct md_guest_domain *d) {
+    return md_domain_fork(d, d && d->refs == 1);
+}
 int md_domain_restricted(const struct md_guest_domain *d) { return d && d->root >= 0; }
 int md_domain_restrict(struct md_guest_domain *d, pid_t pid, const char *path) {
     if (!d || d->root >= 0) return -EPERM;
@@ -102,6 +105,9 @@ int md_domain_native_call(long nr, const unsigned long a[6]) {
     MD_DOMAIN_KERNEL_CALLS(NATIVE_CASE)
 #undef NATIVE_CASE
     case SYS_lseek: case SYS_getdents64: case SYS_socketpair:
+    /* Keep the original wait4 stop for the guest-debugger adapter. Restricted
+     * filesystem roots do not remove the caller's kernel child relationship. */
+    case SYS_wait4:
     case SYS_getsockname: case SYS_getpeername:
     case SYS_recvfrom: case SYS_sendmmsg:
     case SYS_seccomp: case SYS_getresuid: case SYS_getresgid: return 1;

@@ -24,6 +24,7 @@
 struct md_guest_domain;
 struct md_guest_domain *md_domain_new(void);
 struct md_guest_domain *md_domain_fork(struct md_guest_domain *, int shared);
+struct md_guest_domain *md_domain_unshare_prepare(struct md_guest_domain *);
 void md_domain_release(struct md_guest_domain *);
 int md_domain_restricted(const struct md_guest_domain *);
 int md_domain_restrict(struct md_guest_domain *, pid_t, const char *);

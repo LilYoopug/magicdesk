@@ -6,6 +6,7 @@
 #include "fs_mounts.h"
 #include "namespace_broker.h"
 #include "guest_domain.h"
+#include "task_resources.h"
 #include "elf_admission.h"
 #include "interception.h"
 #include "interception_stacks.h"
@@ -106,7 +107,8 @@ struct thread {
     char endpoint[108];
     int filter_length;
     struct metadata_operation metadata;
-    struct md_guest_domain *domain;
+    struct md_task_resources resources;
+    struct md_resource_change resource_change;
     unsigned long cloning;
     struct md_identity identity;
     struct md_exec_identity pending_identity;
@@ -126,7 +128,6 @@ struct thread {
     struct md_shm_space *shm_space;
     struct md_shm_mapping *shm_pending;
     int shm_filter;
-    struct md_ipc_undo *ipc_undo;
     struct md_ipc_pending *ipc_pending;
     struct md_ipc_transport ipc_transport;
     int ipc_fd, ipc_cancel;
@@ -215,14 +216,14 @@ static void cleanup(void) {
     while (waitpid(-1, NULL, __WALL) > 0 || errno == EINTR) { }
     while (threads) {
         struct thread *next = threads->next;
-        md_domain_release(threads->domain);
         md_stacks_release(threads->stacks);
         md_watch_activation_release(threads->watch_activation);
         md_shm_abort(shm,&threads->shm_pending);
         md_shm_space_release(shm,threads->shm_space);
         md_ipc_cancel(ipc,&threads->ipc_pending);
         md_ipc_transport_close(&threads->ipc_transport);
-        md_ipc_undo_release(ipc,threads->ipc_undo);
+        md_resources_unshare_finish(ipc, &threads->resources, &threads->resource_change, -ECANCELED);
+        md_resources_release(ipc, &threads->resources);
         md_identity_release(&threads->identity);
         free(threads->identity_buffer);
         free(threads); threads = next;
@@ -272,9 +273,9 @@ static struct thread *thread(pid_t pid) {
         .metadata = {.peer = -1, .descriptor = -1, .prepared = -1},
         .identity = md_identity_copy(&launch_identity), .stacks = md_stacks_new(),
         .shm_space = md_shm_space_new(),
-        .ipc_undo = md_ipc_undo_new(), .ipc_fd = -1, .ipc_transport = {.fd=-1},
+        .ipc_fd = -1, .ipc_transport = {.fd=-1},
         .watch_activation = md_watch_activation_new()};
-    CHECK(t->stacks && t->watch_activation && t->shm_space && t->ipc_undo);
+    CHECK(t->stacks && t->watch_activation && t->shm_space);
     live++; total++; return t;
 }
 static void release_thread(struct thread *t) {
@@ -284,11 +285,11 @@ static void release_thread(struct thread *t) {
     CHECK(!md_shm_space_release(shm,t->shm_space)); t->shm_space = NULL;
     CHECK(!md_ipc_cancel(ipc,&t->ipc_pending));
     md_ipc_transport_close(&t->ipc_transport);
-    CHECK(!md_ipc_undo_release(ipc,t->ipc_undo)); t->ipc_undo = NULL;
+    CHECK(!md_resources_unshare_finish(ipc, &t->resources, &t->resource_change, -ECANCELED));
+    CHECK(!md_resources_release(ipc, &t->resources));
     free(t->identity_buffer); t->identity_buffer = NULL;
     md_broker_forget(broker, t->pid);
     release_operation(t);
-    md_domain_release(t->domain); t->domain = NULL;
     md_stacks_return(t->stacks, t->stack);
     md_stacks_release(t->stacks); t->stacks = NULL;
     md_watch_activation_release(t->watch_activation); t->watch_activation = NULL;
@@ -660,7 +661,7 @@ static void ipc_request(struct thread *t, const struct seccomp_notif *q) {
         if (t->ipc_cancel) {
             value=t->ipc_cancel; t->ipc_cancel=0;
             int error=md_ipc_cancel(ipc,&t->ipc_pending); if (error) value=error;
-        } else value=md_ipc_call(ipc,&t->ipc_pending,t->ipc_undo,&t->identity,t->pid,t->tgid,channel);
+        } else value=md_ipc_call(ipc,&t->ipc_pending,t->resources.sem_undo,&t->identity,t->pid,t->tgid,channel);
         if (value==MD_IPC_WAIT && t->ipc_fd<0) {
             struct seccomp_notif_addfd add={.id=q->id,.srcfd=md_ipc_wait_fd(t->ipc_pending),.newfd_flags=O_CLOEXEC};
             t->ipc_fd=ioctl(listener,SECCOMP_IOCTL_NOTIF_ADDFD,&add);
@@ -705,7 +706,7 @@ static void handle_notification(const struct seccomp_notif *request) {
         else image_request(t, &q);
         return;
     }
-    if (q.data.nr == SYS_getdents64 && md_domain_restricted(t->domain)) {
+    if (q.data.nr == SYS_getdents64 && md_domain_restricted(t->resources.fs)) {
         CHECK(t->phase == IDLE);
         struct seccomp_notif_resp reply = {.id = q.id, .flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE};
         CHECK(!ioctl(listener, SECCOMP_IOCTL_NOTIF_SEND, &reply) || errno == ENOENT); return;
@@ -722,19 +723,19 @@ static void handle_notification(const struct seccomp_notif *request) {
         if (t->phase != IDLE) TRACE("PROBE unexpected notification pid=%d phase=%d nr=%d pc=%#llx fd=%llu\n",
             t->pid, t->phase, q.data.nr, q.data.instruction_pointer, q.data.args[0]);
         CHECK(t->phase == IDLE);
-        if (!md_domain_restricted(t->domain)) {
+        if (!md_domain_restricted(t->resources.fs)) {
             delegate_begin(t, &q); return;
         }
         if ((int)q.data.args[0] < 0) {
             struct seccomp_notif_resp reply = {.id = q.id,
-                .error = (int)q.data.args[0] == AT_FDCWD ? md_domain_path_error(t->domain) : -EBADF};
+                .error = (int)q.data.args[0] == AT_FDCWD ? md_domain_path_error(t->resources.fs) : -EBADF};
             CHECK(!ioctl(listener, SECCOMP_IOCTL_NOTIF_SEND, &reply) || errno == ENOENT); return;
         }
         export_begin(t, &q); return;
     }
     int fd = duplicate_fd(q.pid, (int)q.data.args[0]);
     if (fd == -EPERM || fd == -EACCES || fd == -EINVAL || fd == -ENOSYS || fd == -ESRCH) {
-        if (t->phase == IDLE && !md_domain_restricted(t->domain)) {
+        if (t->phase == IDLE && !md_domain_restricted(t->resources.fs)) {
             delegate_begin(t, &q); return;
         }
         export_begin(t, &q); return;
@@ -804,7 +805,7 @@ static uid_t debugger_uid(pid_t pid) {
 }
 static int debugger_allowed(pid_t caller, pid_t pid) {
     struct thread *from=find_thread(caller), *to=find_thread(pid);
-    if (!from || !to || md_domain_restricted(from->domain)) return 0;
+    if (!from || !to || md_domain_restricted(from->resources.fs)) return 0;
     return from->identity.uid.effective==to->identity.uid.real
         && from->identity.uid.effective==to->identity.uid.effective
         && from->identity.uid.effective==to->identity.uid.saved
@@ -1035,14 +1036,14 @@ static int identity_call(struct thread *t, struct user_pt_regs *r, unsigned long
 }
 static int domain_path_apply(struct thread *t, long nr, const char *path) {
     if (nr == SYS_chdir)
-        return !strcmp(path, "/") ? md_domain_chdir_root(t->domain) : -ENOTSUP;
-    int error = md_domain_restrict(t->domain, t->pid, path);
+        return !strcmp(path, "/") ? md_domain_chdir_root(t->resources.fs) : -ENOTSUP;
+    int error = md_domain_restrict(t->resources.fs, t->pid, path);
     if (!error) {
         root_changes++;
         /* CLONE_FS members may run without another ptrace stop. Revoke their
          * published eligibility before acknowledging the shared restriction. */
         if (broker) for (struct thread *member = threads; member; member = member->next)
-            if (member->pid && member->domain == t->domain)
+            if (member->pid && member->resources.fs == t->resources.fs)
                 CHECK(!md_broker_task(broker, member->pid, 0, RAW_GATE, abi.watch_gate + 4));
     }
     TRACE("PROBE root-change pid=%d result=%d\n", t->pid, error);
@@ -1083,11 +1084,17 @@ static int domain_call(struct thread *t, struct user_pt_regs *r, unsigned long c
         int error = md_domain_socket_error((int)r->regs[0], (int)r->regs[2]);
         if (error) { return_value(t, r, error); return 1; }
     }
-    if (nr == SYS_unshare || nr == SYS_setns) { return_value(t, r, -ENOTSUP); return 1; }
+    if (nr == SYS_unshare) {
+        CHECK(t->phase == IDLE);
+        int error = md_resources_unshare_prepare(&t->resources, r->regs[0], &t->resource_change);
+        if (error) return_value(t, r, error);
+        else { t->original = *r; t->phase = OBSERVING; resume(t->pid, 0); }
+        return 1;
+    }
+    if (nr == SYS_setns) { return_value(t, r, -ENOTSUP); return 1; }
     if (nr == SYS_clone3) { return_value(t, r, -ENOSYS); return 1; }
     if (nr == SYS_clone) {
-        if (r->regs[0] & (CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET | CLONE_NEWNS
-                | CLONE_NEWIPC | CLONE_NEWUTS)) {
+        if (!md_resources_clone_supported(r->regs[0])) {
             return_value(t, r, -EINVAL); return 1;
         }
         t->cloning = r->regs[0]; return 0;
@@ -1097,7 +1104,7 @@ static int domain_call(struct thread *t, struct user_pt_regs *r, unsigned long c
         else domain_path_call(t, r);
         return 1;
     }
-    if (!md_domain_restricted(t->domain)) return 0;
+    if (!md_domain_restricted(t->resources.fs)) return 0;
     /* Read-only launch identity is independent of the restricted filesystem. */
     if (nr == SYS_uname && cookie == MD_INTERCEPT_DISPATCH) return 0;
     if (t->phase == PROC_OPENING && cookie == MD_INTERCEPT_NATIVE && nr == SYS_openat
@@ -1119,7 +1126,7 @@ static int domain_call(struct thread *t, struct user_pt_regs *r, unsigned long c
         if (cookie == MD_INTERCEPT_OBSERVE || cookie == MD_INTERCEPT_WATCH) return 0;
         resume(t->pid, 0); return 1;
     }
-    int error = cookie == MD_INTERCEPT_DISPATCH ? md_domain_path_error(t->domain) : -EPERM;
+    int error = cookie == MD_INTERCEPT_DISPATCH ? md_domain_path_error(t->resources.fs) : -EPERM;
     if (nr == SYS_chdir) {
         domain_path_call(t, r); return 1;
     }
@@ -1165,7 +1172,7 @@ static void resume(pid_t pid, int sig) {
         if (md_debugger_stop(debugger,pid,(SIGTRAP<<8)|0x7f,&info,0)) return;
     }
     if (broker) CHECK(!md_broker_task(broker, pid,
-        t->ready && phase == IDLE && t->endpoint[0] && !md_domain_restricted(t->domain), RAW_GATE, abi.watch_gate + 4));
+        t->ready && phase == IDLE && t->endpoint[0] && !md_domain_restricted(t->resources.fs), RAW_GATE, abi.watch_gate + 4));
     if (!native_trace(phase == OBSERVING || phase == EXPORT_ENTRY || phase == EXPORT_NOTIFY
             || phase == EXPORT_RETURN || phase == EXECUTING || phase == WATCH_CANCEL
             || phase == WATCH_ENTRY || phase == WATCH_READ || phase==DEBUG_WAIT_ENTRY || phase==DEBUG_WAIT_EXIT
@@ -1457,14 +1464,14 @@ int main(int argc, char **argv) {
                 struct thread *former = find_thread((pid_t)old);
                 if (former) {
                     release_operation(t);
-                    md_domain_release(t->domain);
-                    t->domain = former->domain; former->domain = NULL;
+                    CHECK(!md_resources_unshare_finish(ipc, &t->resources, &t->resource_change, -ECANCELED));
+                    CHECK(!md_resources_release(ipc, &t->resources));
+                    t->resources = former->resources;
+                    former->resources = (struct md_task_resources){0};
                     md_identity_release(&t->identity);
                     t->identity = md_identity_copy(&former->identity);
                     md_watch_activation_release(t->watch_activation);
                     t->watch_activation = former->watch_activation; former->watch_activation = NULL;
-                    CHECK(!md_ipc_undo_release(ipc,t->ipc_undo));
-                    t->ipc_undo=former->ipc_undo; former->ipc_undo=NULL;
                     memcpy(t->endpoint, former->endpoint, sizeof(t->endpoint));
                     release_thread(former);
                 }
@@ -1496,15 +1503,14 @@ int main(int argc, char **argv) {
             c->tgid = t->cloning & CLONE_THREAD ? t->tgid : c->pid;
             CHECK(!md_shm_space_release(shm,c->shm_space));
             c->shm_space = md_shm_space_fork(shm,t->shm_space,!!(t->cloning & CLONE_VM)); CHECK(c->shm_space);
-            CHECK(!md_ipc_undo_release(ipc,c->ipc_undo));
-            c->ipc_undo=md_ipc_undo_fork(t->ipc_undo,!!(t->cloning&CLONE_SYSVSEM)); CHECK(c->ipc_undo);
+            CHECK(!md_resources_release(ipc, &c->resources));
+            if (t->resources.fs) CHECK(!md_resources_fork(&t->resources, t->cloning, &c->resources));
             md_stacks_release(c->stacks);
             c->stacks = md_stacks_fork(t->stacks, !!(t->cloning & CLONE_VM)); CHECK(c->stacks);
             md_watch_activation_release(c->watch_activation);
             c->watch_activation = md_watch_activation_fork(t->watch_activation, !!(t->cloning & CLONE_THREAD));
             CHECK(c->watch_activation);
-            c->domain = md_domain_fork(t->domain, !!(t->cloning & CLONE_FS));
-            CHECK(!t->domain || c->domain); t->cloning = 0;
+            t->cloning = 0;
             memcpy(c->endpoint, t->endpoint, sizeof(c->endpoint));
             if (cancelling) CHECK(!md_process_signal_children(cancelling == 1 ? SIGTERM : SIGKILL));
             /* EVENT_WAIT: a newborn stop and its parent's birth event can
@@ -1710,6 +1716,9 @@ int main(int argc, char **argv) {
             if (t->phase == OBSERVING) {
                 struct user_pt_regs regs;
                 if (!registers(pid, &regs)) continue;
+                if (t->original.regs[8] == SYS_unshare)
+                    CHECK(!md_resources_unshare_finish(ipc, &t->resources, &t->resource_change, (long)regs.regs[0]));
+                if (t->original.regs[8] == SYS_clone) t->cloning = 0;
                 if ((long)regs.regs[0] >= 0 && (t->original.regs[8] == SYS_munmap || t->original.regs[8] == SYS_mmap)) {
                     size_t length = t->original.regs[1], page = (size_t)getpagesize();
                     CHECK(length <= SIZE_MAX-(page-1));
@@ -1743,6 +1752,7 @@ int main(int argc, char **argv) {
                 continue;
             }
             if (!t->ready && t->phase == IDLE && regs.regs[2] == MD_INTERCEPTION_MAGIC) {
+                if (!t->resources.fs) CHECK(!md_resources_init(&t->resources));
                 struct md_interception_abi received;
                 struct iovec local = {&received, sizeof(received)}, remote = {(void *)regs.regs[3], sizeof(received)};
                 CHECK(process_vm_readv(pid, &local, 1, &remote, 1, 0) == sizeof(received));
@@ -1787,7 +1797,6 @@ int main(int argc, char **argv) {
                     if (error) TRACE("PROBE admission error=%d\n", error);
                     CHECK(!error);
                 }
-                if (!t->domain) { t->domain = md_domain_new(); CHECK(t->domain); }
                 if ((int)regs.regs[0] >= 0) {
                     CHECK(listener == -1);
                     listener = duplicate_fd(pid, (int)regs.regs[0]); CHECK(listener >= 0);

@@ -522,6 +522,15 @@ and signal operations stay native. Guarded scratch-stack leases are recycled per
 address space, independently of libc thread-stack size. Fork, vfork and thread
 clone retain kernel lifetimes. The application owns SIGSYS and alternate stacks.
 
+Process resources have independent sharing rules. Root/cwd context follows
+`CLONE_FS`; semaphore undo follows `CLONE_SYSVSEM`; the kernel owns the actual
+descriptor table, cwd and umask. `unshare(CLONE_FS|CLONE_FILES|CLONE_SYSVSEM)`
+supports those flags separately or together. Guest-owned state is prepared
+before the native call and committed only on its successful syscall exit.
+Kernel errors and cancelled operations preserve the previous ownership.
+Exec detaches the kernel descriptor table without detaching shared filesystem
+context or semaphore undo. See the [resource contract](../native/guest-runtime/process-resources.md).
+
 Static PIE and fixed-address ET_EXEC use the same loader. ELF load alignment is
 retained, including 2 MiB alignment; an occupied fixed-address range fails without
 replacing existing mappings. Large valid images are bounded by address arithmetic

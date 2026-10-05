@@ -21,6 +21,7 @@ set(inodes ${src}/inode_store.c ${src}/inode_db.c ${src}/inode_events.c ${src}/i
     ${src}/inode_directory.c ${src}/inode_import.c ${src}/inode_socket.c ${src}/inode_backing.c ${src}/inode_snapshot.c ${src}/inode_fifo.c ${src}/file_open.c
     ${src}/guest_identity.c ${src}/credential_registry.c ${src}/inode_metadata.c ${src}/inode_capability.c ${src}/inode_acl.c ${src}/posix_acl.c)
 set(namespace_engine ${src}/fs_engine.c ${src}/ipc_credentials.c)
+set(ipc ${src}/sysv_ipc.c ${src}/sysv_ipc_db.c ${src}/sysv_sem.c ${src}/sysv_msg.c ${src}/sysv_ipc_transport.c)
 
 function(guest_executable name)
     add_executable(${name} ${ARGN})
@@ -44,9 +45,9 @@ guest_freestanding(bootstrap)
 target_compile_options(bootstrap PRIVATE -mgeneral-regs-only)
 target_link_options(bootstrap PRIVATE -Wl,--image-base=0x2000000000)
 
-guest_executable(supervisor ${src}/supervisor.c ${src}/command_access.c ../command-client/wire.c ${src}/launch_registry.c ${src}/process_owner.c ${src}/interception_stacks.c ${src}/guest_domain.c
+guest_executable(supervisor ${src}/supervisor.c ${src}/task_resources.c ${src}/command_access.c ../command-client/wire.c ${src}/launch_registry.c ${src}/process_owner.c ${src}/interception_stacks.c ${src}/guest_domain.c
     ${src}/watch_activation.c ${src}/sysv_shm.c ${src}/guest_debugger.c ${src}/process_image_view.c
-    ${src}/sysv_ipc.c ${src}/sysv_ipc_db.c ${src}/sysv_sem.c ${src}/sysv_msg.c ${src}/sysv_ipc_transport.c
+    ${ipc}
     ${src}/guest_identity.c ${src}/guest_accounts.c ${src}/elf_admission.c ${src}/elf.c ${src}/fs_client.c ${wire} ${raw}
     ${src}/fs_worker.c ${src}/fs_service.c ${namespace_engine} ${src}/image_catalogue.c ${inodes} ${mounts}
     ${src}/namespace_broker.c ${src}/watch_broker.c ${src}/proc_paths.c)
@@ -77,6 +78,14 @@ install(TARGETS bootstrap supervisor run service image RUNTIME DESTINATION lib)
 
 option(MAGICDESK_GUEST_FIXTURES "Build standalone native fixtures" OFF)
 if(MAGICDESK_GUEST_FIXTURES)
+    guest_executable(test_task_resources ../guest-exec-lab/test_task_resources.c
+        ${src}/task_resources.c ${src}/guest_domain.c ${src}/guest_identity.c ${ipc}
+        ${src}/event_wait.c ${raw})
+    target_compile_definitions(test_task_resources PRIVATE MD_NO_START MD_USE_LIBC)
+    target_compile_options(test_task_resources PRIVATE -iquote ${src} -UNDEBUG)
+    target_link_libraries(test_task_resources PRIVATE guest-sqlite m)
+    guest_executable(resource_guest ../guest-exec-lab/test_resource_guest.c)
+    target_compile_options(resource_guest PRIVATE -UNDEBUG)
     guest_executable(kernel_contract ../guest-exec-lab/test_kernel_contract.c)
     target_compile_options(kernel_contract PRIVATE -UNDEBUG)
     guest_executable(test_elf ../guest-exec-lab/test_elf.c ${src}/elf.c ${raw})

@@ -555,6 +555,16 @@ PHP with sysvsem/sysvmsg/pcntl, Symfony Lock and Apache prefork. These packages
 must already be present; the tests do not install software. `--case NAME` selects
 individual workflows. See the [SysV contract](../guest-runtime/sysv-ipc.md).
 
+`test_resources.py BUILD [--compare-installed]` stages a disposable minimal
+store and runs the same `resource_guest` executable natively and through Shroot
+under UID 2000. It checks independent FS/FD sharing, unshare failure rollback,
+exec and semaphore-undo lifetime. The optional comparison measures identical
+metadata and spawn workloads without compiling guest packages. It records the
+installed app identity, separate timings and opt-in runtime counters. Fixtures
+are removed unless `--keep` is explicitly selected. Build `resource_guest` and
+`test_task_resources` with `MAGICDESK_GUEST_FIXTURES=ON`; run the latter directly
+for the resource-owner unit contract. See [process resources](../guest-runtime/process-resources.md).
+
 Distribution and emulator workflows use the same runner and per-instance policy:
 
 ```sh
