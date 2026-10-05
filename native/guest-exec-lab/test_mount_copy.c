@@ -72,7 +72,7 @@ void test_mount_copy(const char *base) {
     struct md_fs_attachment entries[]={{source[0],"/tree",1},{source[1],"/tree/scope/child",0}};
     assert(!md_fs_mounts_open(&fs,entries,2));
     int scope=opened(&fs,"/tree/scope",O_PATH|O_DIRECTORY);
-    struct md_fs_location root; assert(!md_fs_root_capture(&fs,scope,&root)); close(scope);
+    struct md_fs_location root; assert(!md_fs_root_capture(&fs,scope,NULL,&root)); close(scope);
     /* Populate a cache that the copied topology must not duplicate. */
     for (unsigned i=0; i<32; ++i) {
         snprintf(path,sizeof(path),"%s/cache-%u",source[1],i);
@@ -158,7 +158,7 @@ void test_mount_copy(const char *base) {
     /* Empty views and inode roots need no attachment tree or descriptor cache. */
     assert(!md_fs_mounts_open(&fs,NULL,0));
     fd=md_inode_open(store_owner,-1,"/jail",O_PATH|O_DIRECTORY,0); assert(fd>=0);
-    assert(!md_fs_root_capture(&fs,fd,&root)); close(fd);
+    assert(!md_fs_root_capture(&fs,fd,NULL,&root)); close(fd);
     prior=descriptors();
     assert(!md_fs_mounts_copy(&fs,&root,&copy.mounts,&copied_root));
     assert(!copy.mounts->tree && !copy.mounts->native_ids && descriptors()==prior);

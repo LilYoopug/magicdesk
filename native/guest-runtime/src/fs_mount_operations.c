@@ -64,7 +64,6 @@ static int descriptor(struct md_filesystem *fs, const struct md_fs_request *q,
     if (origin) {
         retained.fd=origin->fd; retained.mount=origin->mount; p=&retained;
         if (q->operation==MD_FS_OBJECT_ID) r=md_view_record(&owner,q->directory[0],origin->mount,&p);
-        if (r==-EXDEV) r=-ENOTSUP;
     } else r=md_view_identity(fs,q->directory[0],&p);
     if (r == -EXDEV) return 0;
     if (r) { out->error = r; return 1; }
@@ -220,7 +219,7 @@ static void native(struct md_filesystem *fs, const struct md_fs_request *q,
             if (fstat(fd, &st)) r = -errno;
             else if (!S_ISREG(st.st_mode)) r = -EACCES;
             struct md_view_object *object;
-            if (!r) r = md_view_identity(&owner, fd, &object);
+            if (!r) r = md_view_record(&owner, fd, a->mount, &object);
             struct md_image_identity *identity = data;
             if (!r && a->view!=fs->mounts) r=-ENOENT;
             if (!r) r = md_view_path(fs, fd, a->mount, identity->path, sizeof(identity->path));

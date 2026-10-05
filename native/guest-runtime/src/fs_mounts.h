@@ -13,7 +13,9 @@ int md_fs_mounts_open(struct md_filesystem *, const struct md_fs_attachment *, u
  * success. Guest namespace publication additionally requires FD provenance. */
 int md_fs_mounts_copy(struct md_filesystem *, const struct md_fs_location *root,
         struct md_mount_namespace **copy, struct md_fs_location *copied_root);
-int md_fs_root_capture(struct md_filesystem *, int fd, struct md_fs_location *);
+/* Preserve the resolved mount when capturing a freshly opened root. Without
+ * provenance an ambiguous native object fails instead of choosing an alias. */
+int md_fs_root_capture(struct md_filesystem *, int fd, const struct md_fs_anchor *, struct md_fs_location *);
 int md_fs_root_select(struct md_filesystem *, const struct md_fs_location *);
 void md_fs_mounts_close(struct md_filesystem *);
 int md_fs_mount_table(struct md_filesystem *, unsigned mountinfo);

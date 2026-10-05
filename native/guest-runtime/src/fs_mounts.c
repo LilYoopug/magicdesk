@@ -40,21 +40,17 @@ struct md_view_object *md_view_object(struct md_filesystem *fs, const char *id) 
         if (!strcmp(p->id,id)) return p;
     return NULL;
 }
-static struct md_view_object *find(struct md_fs_mounts *m, const struct stat *st) {
+static struct md_view_object *find(struct md_fs_mounts *m, const struct stat *st, struct md_view_mount *mount) {
     for (struct md_view_object *p = m->table[bucket(st)]; p; p = p->next)
-        if (md_view_same(&p->identity, st)) return p;
+        if (p->mount==mount && md_view_same(&p->identity, st)) return p;
     return NULL;
 }
 int md_view_record(struct md_filesystem *fs, int fd, struct md_view_mount *mount, struct md_view_object **out) {
     struct stat st;
     if (fstat(fd, &st)) return -errno;
     struct md_fs_mounts *m = fs->mounts->tree;
-    struct md_view_object *p = find(m, &st);
-    if (p) {
-        /* One native object cannot silently acquire conflicting mount policy. */
-        if (p->mount != mount) return -EXDEV;
-        *out = p; return 0;
-    }
+    struct md_view_object *p = find(m, &st, mount);
+    if (p) { *out = p; return 0; }
     if (m->objects == MD_VIEW_OBJECT_LIMIT) return -ENFILE;
     p = calloc(1, sizeof(*p));
     if (!p) return -ENOMEM;
@@ -80,19 +76,29 @@ int md_view_identity(struct md_filesystem *fs, int fd, struct md_view_object **o
     struct stat st;
     if (fstat(fd, &st)) return -errno;
     struct md_fs_mounts *m = fs->mounts->tree;
-    struct md_view_object *p = find(m, &st);
+    struct md_view_object *p = NULL;
+    for (struct md_view_object *entry=m->table[bucket(&st)]; entry; entry=entry->next) {
+        if (!md_view_same(&entry->identity,&st)) continue;
+        /* An unannotated FD cannot choose between identical native objects
+         * reached through different mounts, even if their policies agree. */
+        if (p) return -ENOTSUP;
+        p=entry;
+    }
     if (p) { *out = p; return 0; }
     /* Admit inherited/native descriptors only when their current dentry is in
      * an explicitly attached tree. Registered identities survive unlink/rename. */
     char path[PATH_MAX], root[PATH_MAX];
     int r = md_view_fdpath(fd, path, sizeof(path));
     if (r) return r;
+    struct md_view_mount *mount=NULL;
     for (unsigned i = 0; i < m->count; ++i) {
         r = md_view_fdpath(m->mounts[i].source, root, sizeof(root));
         if (r) return r;
-        if (beneath(path, root)) return md_view_record(fs, fd, &m->mounts[i], out);
+        if (!beneath(path, root)) continue;
+        if (mount) return -ENOTSUP;
+        mount=&m->mounts[i];
     }
-    return -EXDEV;
+    return mount ? md_view_record(fs,fd,mount,out) : -EXDEV;
 }
 static int location_path(struct md_filesystem *fs, int fd, struct md_view_mount *m, char *out, size_t size) {
     if (!m) return md_inode_path(fs->store, fd, out, size);
@@ -126,10 +132,20 @@ int md_view_path(struct md_filesystem *fs, int fd, struct md_view_mount *m, char
     }
     return r;
 }
-int md_fs_root_capture(struct md_filesystem *fs, int fd, struct md_fs_location *out) {
+int md_fs_root_capture(struct md_filesystem *fs, int fd, const struct md_fs_anchor *origin,
+        struct md_fs_location *out) {
     *out = (struct md_fs_location){0};
+    if (origin) {
+        int error=md_view_anchor_check(fs,fd,origin);
+        if (error) return error;
+        if (origin->view!=fs->mounts) return -ESTALE;
+    }
+    struct stat st;
+    if (fstat(fd,&st)) return -errno;
+    if (!S_ISDIR(st.st_mode)) return -ENOTDIR;
     struct md_view_object *p = NULL;
-    int r = fs->mounts ? md_view_identity(fs,fd,&p) : -EXDEV;
+    int r = origin ? (origin->mount ? md_view_record(fs,fd,origin->mount,&p) : -EXDEV)
+        : fs->mounts ? md_view_identity(fs,fd,&p) : -EXDEV;
     if (!r) {
         if (syscall(SYS_faccessat2,fd,"",X_OK,AT_EMPTY_PATH|MD_AT_EACCESS)) return -errno;
         out->mount=p->mount->id; memcpy(out->object,p->id,sizeof(out->object));

@@ -17,6 +17,7 @@ struct md_view_object {
     struct md_view_object *next, *id_next;
     struct stat identity;
     int fd;
+    /* The object key is (mount, native device, native inode), not inode alone. */
     struct md_view_mount *mount;
     char id[33];
 };

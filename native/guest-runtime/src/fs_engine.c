@@ -20,14 +20,16 @@ static void change_root(struct md_filesystem *fs, const struct md_fs_request *q,
     if (!md_identity_may_chroot(fs->store->identity)) { out->error = -EPERM; return; }
     struct md_fs_request open = *q;
     open.operation = MD_FS_OPEN; open.flags = O_PATH | O_DIRECTORY | O_CLOEXEC;
-    if (md_mount_namespace_attached(fs->mounts)) md_fs_mounts_execute(fs, &open, out, NULL);
-    else md_fs_inode_execute(fs, &open, out, NULL);
+    struct md_fs_anchor *origin=NULL;
+    struct md_fs_output output={.origin=&origin};
+    if (md_mount_namespace_attached(fs->mounts) || open.origin[0]) md_fs_mounts_execute(fs, &open, out, &output);
+    else md_fs_inode_execute(fs, &open, out, &output);
     if (out->error) return;
     int fd = out->fd; out->fd = -1;
     struct md_fs_location root;
-    int error = md_fs_root_capture(fs,fd,&root);
+    int error = md_fs_root_capture(fs,fd,origin,&root);
     if (!error) error = md_task_registry_set_root(fs->tasks, q->actor, q->peer, &root);
-    close(fd); out->error = error == -EXDEV ? -ENOTSUP : error;
+    md_fs_anchor_release(origin); close(fd); out->error = error == -EXDEV ? -ENOTSUP : error;
 }
 
 void md_fs_stat_info(const struct stat *s, struct md_fs_info *out) {

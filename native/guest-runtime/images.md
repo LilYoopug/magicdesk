@@ -245,12 +245,16 @@ chroot can select a directory inside an attachment without discarding readonly
 policy, and clips mount-table paths to that selected root.
 
 Overlapping native sources and covering an already attached subtree are rejected.
-An inode encountered through conflicting mounts also fails explicitly: general
-aliasing needs open-description provenance, not a guessed native inode match.
+The engine keys native object IDs by mount, device and inode; explicit origins
+preserve alias-specific policy. Unannotated descriptors fail when lookup reveals
+multiple mounts. General alias admission still requires complete descriptor
+provenance, not a guessed native inode match.
 The initial tree is built at launch and retained by task resources independently
 of CLONE_FS. Its objects and native mount-ID map follow that view's lifetime,
-not the worker's current request. Guest-created mount namespaces and copying
-mount trees are not implemented.
+not the worker's current request. The worker can construct an unpublished copy
+with independent IDs, policy and rebased root; guest-created mount namespaces
+are not implemented. See [process resources](process-resources.md) for ownership
+and publication boundaries.
 
 Native metadata identity is retained across rename/unlink. Readonly policy also
 applies to descriptor-based metadata changes and writable reopens, not just

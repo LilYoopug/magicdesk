@@ -93,10 +93,17 @@ or new interception of close/read/write.
 
 Cross-view relative IO works, but path/image-path publication for an origin in
 another tree returns ENOENT instead of inventing a current-root path. Changing
-the task root through such an origin is unsupported. Native object-ID requests
-still reject conflicting aliases of one backing inode within a view; the object
-cache is not a replacement for explicit origin tracking. These limits remain
-separate from the working engine traversal contract.
+the task root through such an origin is unsupported.
+
+Native object IDs identify `(mount, device, inode)` within their retained view.
+The walker or a trusted origin selects the mount, so aliases can retain distinct
+IDs and readonly policy even after unlink. Image opening and root capture use
+the resolved mount rather than inferring it from the backing inode. Root capture
+requires a directory in the selected view and rejects mismatched or stale origins.
+An unannotated descriptor fails with ENOTSUP when cached identities or uncached
+source lookup reveal multiple mounts; a unique cached match retains the existing
+fast path. The cache is not a replacement for complete descriptor provenance,
+and public admission of duplicated/overlapping native sources remains disabled.
 
 ## Descriptor And Cwd Annotations
 
@@ -239,6 +246,11 @@ link/rename rejection and root restoration. It also checks inode/native mount ID
 reopen, FD-number reuse with another inode, rename, source-view teardown, completed
 FIFO identity/EOF, flock/OFD-lock release and EMFILE capture cleanup. These are
 engine checks, not guest namespace-creation tests.
+`test_mount_alias` constructs a candidate view with one source at writable and
+readonly targets. It checks both opening orders, distinct stable object IDs,
+image identity, retained opens after unlink, ambiguous unannotated descriptors,
+root capture and copied-root policy. It also checks invalid origins and descriptor
+cleanup. This internal fixture does not enable duplicated-source launch admission.
 `test_root_userspace.py` exercises stock Debian/Alpine chroot with each
 distribution's dynamic loader, shell and nested exec in disposable inode-backed
 and attached-native directories.

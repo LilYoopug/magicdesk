@@ -174,7 +174,7 @@ void test_fs_anchor(const char *base) {
     md_fs_execute(&current,&pair,&r,NULL); assert(r.error==-EXDEV);
     pair.operation=MD_FS_LINK; md_fs_execute(&current,&pair,&r,NULL); assert(r.error==-EXDEV);
     int jail=md_inode_open(s,-1,"/jail",O_PATH|O_DIRECTORY,0); assert(jail>=0);
-    assert(!md_fs_root_capture(&current,jail,&root)); close(jail);
+    assert(!md_fs_root_capture(&current,jail,NULL,&root)); close(jail);
     assert(!md_fs_root_select(&current,&root));
     opens(&current,old_root,"jail/../mnt/value",O_RDWR,0,0);
     opens(&current,old,"absolute",O_RDONLY,0,-ENOENT);
