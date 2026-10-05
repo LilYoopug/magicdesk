@@ -1,10 +1,12 @@
 #define _GNU_SOURCE
 #include "socket_ancillary.h"
+#include "socket_namespace.h"
 #include "ipc_credentials.h"
 #include "fs_rpc.h"
 #include "raw.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -97,11 +99,36 @@ static size_t append(void *out, size_t used, size_t capacity, int type, int leve
     if (room < CMSG_LEN(size)) *flags |= MSG_CTRUNC;
     if (room < sizeof(struct cmsghdr)) return used;
     size_t copied = room-CMSG_LEN(0) < size ? room-CMSG_LEN(0) : size;
-    if (level==SOL_SOCKET && type==SCM_RIGHTS) copied -= copied%sizeof(int);
     struct cmsghdr h = {.cmsg_len=CMSG_LEN(copied),.cmsg_level=level,.cmsg_type=type};
-    memcpy((char *)out+used,&h,sizeof(h)); memcpy((char *)out+used+CMSG_LEN(0),data,copied);
+    /* Ancillary copy faults leave the payload delivered, with no advance of
+     * the control cursor. SCM_RIGHTS has its own per-descriptor commit below. */
+    if (md_write_memory((char *)out+used,&h,sizeof(h)) < 0
+            || md_write_memory((char *)out+used+CMSG_LEN(0),data,copied) < 0) return used;
     size_t step = CMSG_SPACE(copied);
     return used + (step < room ? step : room);
+}
+static size_t publish_rights(void *out, size_t used, size_t capacity,
+        int *fds, size_t count, int *flags) {
+    size_t room=used<capacity?capacity-used:0;
+    size_t fit=room>CMSG_LEN(0)?(room-CMSG_LEN(0))/sizeof(int):0;
+    size_t delivered=0;
+    for (; delivered<count && delivered<fit; ++delivered) {
+        if (md_write_memory((char *)out+used+CMSG_LEN(0)+delivered*sizeof(int),
+                &fds[delivered],sizeof(int)) < 0) break;
+        /* Published FD numbers are caller-owned even if a later control/header
+         * write faults. Never roll them back or keep an extra data-OFD pin. */
+        fds[delivered]=-1;
+    }
+    if (delivered<count) *flags |= MSG_CTRUNC;
+    for (size_t i=delivered;i<count;++i) { RAW1(close,fds[i]); fds[i]=-1; }
+    if (!delivered) return used;
+    struct cmsghdr *target=(void *)((char *)out+used);
+    int level=SOL_SOCKET, type=SCM_RIGHTS; size_t length=CMSG_LEN(delivered*sizeof(int));
+    if (md_write_memory(&target->cmsg_level,&level,sizeof(level)) < 0
+            || md_write_memory(&target->cmsg_type,&type,sizeof(type)) < 0
+            || md_write_memory(&target->cmsg_len,&length,sizeof(length)) < 0) return used;
+    size_t step=CMSG_SPACE(delivered*sizeof(int));
+    return used+(step<room?step:room);
 }
 static void close_rights(struct msghdr *m) {
     for (struct cmsghdr *h=CMSG_FIRSTHDR(m); h; h=next_header(m,h))
@@ -111,7 +138,7 @@ static void close_rights(struct msghdr *m) {
         }
 }
 static long publish(const struct md_fs *fs, int socket, const struct msghdr *original,
-        struct msghdr m, void *storage, size_t native_size, void *destination) {
+        struct msghdr m, void *destination) {
     size_t capacity=original->msg_control?original->msg_controllen:0;
     struct ucred claimed={0}; int have_claim=0;
     /* Identify capabilities before rebuilding headers: the kernel can coalesce
@@ -127,7 +154,7 @@ static long publish(const struct md_fs *fs, int socket, const struct msghdr *ori
             else if (status != -ENODATA) { close_rights(&m); return status; }
         }
     }
-    void *out=(char *)storage+native_size; size_t used=0;
+    void *out=original->msg_control; size_t used=0;
     for (struct cmsghdr *h=CMSG_FIRSTHDR(&m); h; h=next_header(&m,h)) {
         const void *data=CMSG_DATA(h); size_t n=h->cmsg_len-CMSG_LEN(0);
         if (h->cmsg_level==SOL_SOCKET && h->cmsg_type==SCM_CREDENTIALS && n==sizeof(claimed) && have_claim) data=&claimed;
@@ -135,20 +162,23 @@ static long publish(const struct md_fs *fs, int socket, const struct msghdr *ori
             int *fds=(void *)CMSG_DATA(h); size_t count=0;
             for (size_t i=0;i<n/sizeof(int);i++) if (fds[i]>=0) fds[count++]=fds[i];
             if (!count) continue;
-            size_t room=used<capacity?capacity-used:0;
-            size_t fit=room>CMSG_LEN(0)?(room-CMSG_LEN(0))/sizeof(int):0;
-            for (size_t i=fit;i<count;i++) RAW1(close,fds[i]);
-            n=count*sizeof(int);
+            used=publish_rights(out,used,capacity,fds,count,&m.msg_flags);
+            continue;
         }
         used=append(out,used,capacity,h->cmsg_type,h->cmsg_level,data,n,&m.msg_flags);
     }
-    long copied=md_write_memory(original->msg_control,out,used);
-    m.msg_control=original->msg_control; m.msg_controllen=used;
-    if (!copied) copied=md_write_memory(destination,&m,sizeof(m));
-    if (copied < 0) {
-        struct msghdr cleanup={.msg_control=out,.msg_controllen=used};
-        close_rights(&cleanup);
+    struct msghdr *target=destination;
+    long copied=0;
+    if (original->msg_name) {
+        unsigned length=m.msg_namelen;
+        copied=length>sizeof(struct sockaddr_storage)?-EPROTO:
+            md_namespace_socket_restore(fs,socket,m.msg_name,&length);
+        if (!copied) copied=md_write_memory(original->msg_name,m.msg_name,
+            original->msg_namelen<length?original->msg_namelen:length);
+        if (!copied) copied=md_write_memory(&target->msg_namelen,&length,sizeof(length));
     }
+    if (!copied) copied=md_write_memory(&target->msg_flags,&m.msg_flags,sizeof(m.msg_flags));
+    if (!copied) copied=md_write_memory(&target->msg_controllen,&used,sizeof(used));
     return copied;
 }
 static size_t native_capacity(size_t capacity) {
@@ -160,18 +190,19 @@ long md_socket_ancillary_receive(const struct md_fs *fs, const char *exe, const 
     long r=md_read_memory(&original,(void *)a[1],sizeof(original));
     if (r < 0 || !fs->endpoint[0])
         return md_socket_address_call(fs,exe,SYS_recvmsg,a);
+    if ((int)original.msg_namelen<0) return -EINVAL;
     size_t capacity=original.msg_control?original.msg_controllen:0;
-    size_t native_size=native_capacity(capacity);
-    if (!native_size) return -ENOBUFS;
-    size_t size=native_size+capacity;
+    size_t size=native_capacity(capacity);
+    if (!size) return -ENOBUFS;
     _Alignas(struct cmsghdr) char local[2048]; void *storage=buffer(size,local,sizeof(local));
     if (!storage) return -ENOMEM;
     memset(storage,0,size);
-    struct msghdr m=original; m.msg_control=storage; m.msg_controllen=native_size;
-    unsigned long args[6]; memcpy(args,a,sizeof(args)); args[1]=(unsigned long)&m;
-    r=md_socket_address_call(fs,exe,SYS_recvmsg,args);
+    struct msghdr m=original; m.msg_control=storage; m.msg_controllen=size;
+    struct sockaddr_storage address={0};
+    if (original.msg_name) { m.msg_name=&address; m.msg_namelen=sizeof(address); }
+    r=RAW3(recvmsg,a[0],&m,a[2]);
     if (r >= 0) {
-        long error=publish(fs,(int)a[0],&original,m,storage,native_size,(void *)a[1]);
+        long error=publish(fs,(int)a[0],&original,m,(void *)a[1]);
         if (error < 0) r=error;
     }
     release(storage,local,size); return r;
@@ -181,11 +212,12 @@ long md_socket_ancillary_batch(const struct md_fs *fs, const unsigned long *a) {
     if (!count || !fs->endpoint[0]) return md_raw(SYS_recvmmsg,a[0],a[1],a[2],a[3],a[4],0);
     if (count > 1024) count=1024;
     struct item {
-        struct msghdr original; void *buffer; size_t native_size, size;
+        struct msghdr original; void *buffer; size_t size;
+        struct sockaddr_storage address;
         _Alignas(struct cmsghdr) char local[256];
     };
     size_t size=count*(sizeof(struct item)+sizeof(struct mmsghdr));
-    _Alignas(struct mmsghdr) char local[2048]; void *memory=buffer(size,local,sizeof(local));
+    _Alignas(struct mmsghdr) char local[4096]; void *memory=buffer(size,local,sizeof(local));
     if (!memory) return -ENOMEM;
     memset(memory,0,size);
     struct mmsghdr *messages=memory;
@@ -193,30 +225,38 @@ long md_socket_ancillary_batch(const struct md_fs *fs, const unsigned long *a) {
     long error=0; unsigned prepared=0;
     for (; prepared<count; prepared++) {
         struct item *item=&items[prepared];
-        error=md_read_memory(&messages[prepared],(void *)(a[1]+prepared*sizeof(*messages)),sizeof(*messages));
+        error=md_read_memory(&messages[prepared].msg_hdr,(void *)(a[1]+prepared*sizeof(*messages)),sizeof(struct msghdr));
         if (error < 0) break;
+        messages[prepared].msg_len=UINT_MAX;
         item->original=messages[prepared].msg_hdr;
+        if ((int)item->original.msg_namelen<0) { error=-EINVAL; break; }
         size_t capacity=item->original.msg_control?item->original.msg_controllen:0;
-        item->native_size=native_capacity(capacity);
-        if (!item->native_size) { error=-ENOBUFS; break; }
-        item->size=item->native_size+capacity;
+        item->size=native_capacity(capacity);
+        if (!item->size) { error=-ENOBUFS; break; }
         item->buffer=buffer(item->size,item->local,sizeof(item->local));
         if (!item->buffer) { error=-ENOMEM; break; }
         messages[prepared].msg_hdr.msg_control=item->buffer;
-        messages[prepared].msg_hdr.msg_controllen=item->native_size;
+        messages[prepared].msg_hdr.msg_controllen=item->size;
+        if (item->original.msg_name) {
+            messages[prepared].msg_hdr.msg_name=&item->address;
+            messages[prepared].msg_hdr.msg_namelen=sizeof(item->address);
+        }
     }
-    /* One native batch retains timeout, MSG_WAITFORONE and partial completion.
-     * Ancillary translation occurs only for messages the kernel delivered. */
+    /* Keep native timeout/MSG_WAITFORONE handling. A late timeout-copy EFAULT
+     * does not undo receives; msg_len commits each private, writable entry.
+     * User-header faults within a batch still need kernel/publication interlock
+     * (rights-batch-fault), not preflight memory writes or message replay. */
     long result=prepared?md_raw(SYS_recvmmsg,a[0],(unsigned long)messages,prepared,a[3],a[4],0):error;
-    for (long i=0;i<result;i++) {
+    unsigned completed=0;
+    while (completed<prepared && messages[completed].msg_len!=UINT_MAX) ++completed;
+    for (unsigned i=0;i<completed;i++) {
         void *destination=(void *)(a[1]+(unsigned long)i*sizeof(*messages));
         struct item *item=&items[i];
-        error=item->buffer?publish(fs,(int)a[0],&item->original,messages[i].msg_hdr,
-            item->buffer,item->native_size,destination):md_write_memory(destination,&messages[i].msg_hdr,sizeof(struct msghdr));
+        error=publish(fs,(int)a[0],&item->original,messages[i].msg_hdr,destination);
         if (!error) error=md_write_memory((char *)destination+offsetof(struct mmsghdr,msg_len),&messages[i].msg_len,sizeof(unsigned));
         if (error < 0) {
-            for (long j=i+1;j<result;j++) if (items[j].buffer) close_rights(&messages[j].msg_hdr);
-            result=i?i:error; break;
+            for (unsigned j=i+1;j<completed;j++) close_rights(&messages[j].msg_hdr);
+            result=i?(long)i:error; break;
         }
     }
     for (unsigned i=0;i<count;i++) release(items[i].buffer,items[i].local,items[i].size);

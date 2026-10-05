@@ -119,6 +119,13 @@ opens of the same inode through different mounts. An O_PATH pin alone is not an
 open-file-description identity. There is no mirror of ordinary data descriptions;
 read/write stays native and close is observed at its kernel completion.
 
+General application SCM_RIGHTS provenance is not inferred from a successful
+syscall return or a post-receive acknowledgement. Ancillary delivery can publish
+valid descriptors before a later output fault. Its shared receive/publication
+contract and remaining batch-fault boundary are described in
+[Unix IPC credentials](ipc-credentials.md); those delivery rules alone do not
+propagate arbitrary peer mount origins into the annotation table.
+
 Cross-view relative IO works, but path/image-path publication for an origin in
 another tree returns ENOENT instead of inventing a current-root path. Changing
 the task root through such an origin is unsupported.

@@ -543,7 +543,16 @@ selected disposable store. See the [debugger contract and measured coverage](../
 --instance STORE [--build BUILD]` compares normalized observations from the same
 static executable directly under shell and inside Shroot. Cases cover wait and
 ptrace contracts, signal delivery, descriptor lifetime, openat2 and concurrent
-rename confinement. Native capability gaps are recorded separately from guest
+rename confinement. The ancillary cases cover SCM_RIGHTS peek, truncation,
+253 descriptors, batch delivery, source addresses and partial publication faults;
+pipe EOF checks descriptor cleanup. `rights-socket-error` covers a kernel
+payload-copy fault, poll/epoll readiness and shared one-shot error consumption
+through SO_ERROR/read/recv, duplicated FDs and a forked peer.
+`rights-batch-fault` is an unresolved
+comparison: private recvmmsg headers allow later packets to be consumed before
+a user-header fault, without the kernel's deferred socket error. It remains a
+failing default case, not a skipped or expected-pass check. `--case NAME` selects
+a focused comparison. Native capability gaps are recorded separately from guest
 assertions. Build the `kernel_contract` and `test_elf` CMake fixture targets;
 the latter runs malformed ELF, page-size preflight and actual BSS mapping checks.
 

@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "test_ancillary_contract.h"
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -365,6 +366,6 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "resolution")) resolution();
     else if (!strcmp(argv[1], "resolution-race")) resolution_race();
     else if (!strcmp(argv[1], "proc-owners")) proc_owners();
-    else return 2;
+    else if (!md_test_ancillary_contract(argv[1])) return 2;
     printf("PASS %s\n", argv[1]); return 0;
 }

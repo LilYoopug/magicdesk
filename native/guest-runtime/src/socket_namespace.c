@@ -47,17 +47,18 @@ static long restore_address(const struct md_fs *fs, struct sockaddr_un *address,
     *length = (unsigned)header + out.result.size;
     return 0;
 }
+long md_namespace_socket_restore(const struct md_fs *fs, int socket, struct sockaddr_un *address, unsigned *length) {
+    if (*length < sizeof(address->sun_family) || address->sun_family != AF_UNIX) return 0;
+    long hidden=md_socket_identity_hidden(fs,socket,address,*length);
+    if (hidden<0) return hidden;
+    if (hidden) { *length=offsetof(struct sockaddr_un,sun_path); return 0; }
+    return restore_address(fs,address,length);
+}
 long md_namespace_socket_output(const struct md_fs *fs, long nr, const unsigned long *a) {
-    struct msghdr message;
     unsigned index = nr == SYS_recvfrom ? 4 : 1;
     unsigned capacity = 0;
     void *target = (void *)a[index];
-    if (nr == SYS_recvmsg) {
-        long r = md_read_memory(&message, (void *)a[1], sizeof(message));
-        if (r < 0) return r;
-        target = message.msg_name;
-        capacity = message.msg_namelen;
-    } else if (target) {
+    if (target) {
         long r = md_read_memory(&capacity, (void *)a[index + 1], sizeof(capacity));
         if (r < 0) return r;
     }
@@ -68,30 +69,16 @@ long md_namespace_socket_output(const struct md_fs *fs, long nr, const unsigned 
     unsigned length = sizeof(buffer.bytes);
     unsigned long args[6];
     memcpy(args, a, sizeof(args));
-    if (nr == SYS_recvmsg) {
-        message.msg_name = address;
-        message.msg_namelen = length;
-        args[1] = (unsigned long)&message;
-    } else {
-        args[index] = (unsigned long)address;
-        args[index + 1] = (unsigned long)&length;
-    }
+    args[index] = (unsigned long)address;
+    args[index + 1] = (unsigned long)&length;
     long result = md_raw(nr, args[0], args[1], args[2], args[3], args[4], args[5]);
     if (result < 0) return result;
-    if (nr == SYS_recvmsg) length = message.msg_namelen;
     long r = length > sizeof(buffer.bytes) ? -EPROTO : 0;
     if (!r) {
-        long hidden = md_socket_identity_hidden(fs, (int)((nr == SYS_accept || nr == SYS_accept4) ? result : a[0]), address, length);
-        if (hidden < 0) r = hidden;
-        else if (hidden) length = offsetof(struct sockaddr_un, sun_path);
-        else r = restore_address(fs, address, &length);
+        r = md_namespace_socket_restore(fs, (int)((nr == SYS_accept || nr == SYS_accept4) ? result : a[0]), address, &length);
     }
     if (!r) r = md_write_memory(target, address, capacity < length ? capacity : length);
-    if (nr == SYS_recvmsg) {
-        message.msg_name = target;
-        message.msg_namelen = length;
-        if (!r) r = md_write_memory((void *)a[1], &message, sizeof(message));
-    } else if (!r) r = md_write_memory((void *)a[index + 1], &length, sizeof(length));
+    if (!r) r = md_write_memory((void *)a[index + 1], &length, sizeof(length));
     if (r < 0 && (nr == SYS_accept || nr == SYS_accept4)) RAW1(close, result);
     return r < 0 ? r : result;
 }

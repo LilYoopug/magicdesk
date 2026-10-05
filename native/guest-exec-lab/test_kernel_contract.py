@@ -8,7 +8,10 @@ from test_oci_services import Suite
 
 CASES = ('waitid-peek', 'wait-errors', 'traceme-late-wait4', 'traceme-late-waitid',
          'traceme-thread-wait4', 'traceme-thread-waitid', 'ptrace-options', 'syscall-info',
-         'signal-delivery', 'file-lifetime', 'resolution', 'resolution-race', 'proc-owners')
+         'signal-delivery', 'file-lifetime', 'resolution', 'resolution-race', 'proc-owners',
+         'rights-peek', 'rights-truncate', 'rights-limit', 'rights-batch', 'rights-fault',
+         'rights-control-fault', 'rights-header-outputs', 'rights-name', 'rights-timeout-fault',
+         'rights-batch-fault', 'rights-socket-error')
 
 
 def observations(name, output):
