@@ -1144,4 +1144,10 @@
     <string name="appearance_dock_scale">Icon zoom on hover (%)</string>
     <string name="appearance_dock_lift">Icon lift on hover (dp)</string>
     <string name="appearance_dock_radius">Neighbor influence (%)</string>
+    <string name="setup_change_device_restrictions">Change device restrictions</string>
+    <string name="setup_disable_device_restrictions_confirm">Disable Android desktop device restrictions? This can restore desktop title-bar buttons and show a handle at the top of phone apps.\n\nSystem UI will restart. Status and navigation bars may briefly disappear. The phone will not reboot and no data will be erased.</string>
+    <string name="setup_enable_device_restrictions_confirm">Enable Android desktop device restrictions? This can hide the top handle on phone apps, but desktop title-bar buttons may disappear and MagicDesk may enter Limited mode.\n\nSystem UI will restart. Status and navigation bars may briefly disappear. The phone will not reboot and no data will be erased.</string>
+    <string name="setup_apply_restart_system_ui">Apply and restart System UI</string>
+    <string name="setup_restarting_system_ui">Restarting System UI&#8230;</string>
+    <string name="setup_system_ui_restart_wait">System UI was restarted recently. Wait at least one minute between attempts.</string>
 </resources>

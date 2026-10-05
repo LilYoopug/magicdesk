@@ -1166,4 +1166,10 @@
     <string name="appearance_dock_scale">Увеличение иконок при наведении (%)</string>
     <string name="appearance_dock_lift">Подъём иконок при наведении (dp)</string>
     <string name="appearance_dock_radius">Влияние на соседние иконки (%)</string>
+    <string name="setup_change_device_restrictions">Изменить ограничения устройства</string>
+    <string name="setup_disable_device_restrictions_confirm">Отключить ограничения десктопного режима Android? Это может вернуть кнопки заголовков окон и добавить полоску сверху в приложениях на телефоне.\n\nSystem UI будет перезапущен. Строка состояния и панель навигации могут ненадолго исчезнуть. Телефон не перезагрузится, данные не будут удалены.</string>
+    <string name="setup_enable_device_restrictions_confirm">Включить ограничения десктопного режима Android? Это может убрать полоску сверху в приложениях на телефоне, но кнопки заголовков окон могут исчезнуть, а MagicDesk — перейти в ограниченный режим.\n\nSystem UI будет перезапущен. Строка состояния и панель навигации могут ненадолго исчезнуть. Телефон не перезагрузится, данные не будут удалены.</string>
+    <string name="setup_apply_restart_system_ui">Применить и перезапустить System UI</string>
+    <string name="setup_restarting_system_ui">Перезапуск System UI…</string>
+    <string name="setup_system_ui_restart_wait">Недавно уже была попытка перезапуска System UI. Между попытками должна пройти как минимум минута.</string>
 </resources>

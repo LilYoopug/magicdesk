@@ -79,6 +79,17 @@ public class IntegrationStatusDialogsTest {
                         FrameworkDesktopShellApi.Mode.BASIC, RuntimeLimits.DEFAULT)));
     }
 
+    @Test public void onlyActualLimitedStatusUsesTheWarningColor() {
+        for (final var mode : FrameworkDesktopShellApi.Mode.values()) {
+            assertEquals(mode == FrameworkDesktopShellApi.Mode.BASIC ? UiColor.ATTENTION : UiColor.ACCENT,
+                    IntegrationStatusDialogs.desktopColor(new RuntimeCapabilities(35, true, true, true,
+                            DesktopSetupStatus.State.READY, mode, RuntimeLimits.DEFAULT)));
+            assertEquals(UiColor.ACCENT, IntegrationStatusDialogs.desktopColor(
+                    new RuntimeCapabilities(34, true, true, true, DesktopSetupStatus.State.READY,
+                            mode, RuntimeLimits.DEFAULT)));
+        }
+    }
+
     private static TermuxIntegration.Endpoint endpoint(boolean installed, boolean permissionRequired, String error) {
         return new TermuxIntegration.Endpoint("org.example.termux", true, installed, null, "", -1,
                 permissionRequired, error);

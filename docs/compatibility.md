@@ -63,12 +63,21 @@ mode restoration. Restoration receipts retain both the previous and applied mode
 so Close does not overwrite another owner's change. Disconnected
 physical displays are reconciled by stable identity when they return.
 
-Control Panel reports **Desktop: Limited** when required setup is complete but
+Control Panel highlights **Desktop: Limited** in the warning color when required setup is complete but
 WMShell advertises no desktop provider. The status opens an explanation of
 freeform fallback and firmware window-control limitations. **Unverified** means
 the provider probe could not be read, not that the provider is absent. These
 statuses do not change access grants or independent tool availability. Native
 provider detection is not a guarantee of correct captions on every firmware.
+
+In **Device Setup**, the **Device restrictions** value can be changed when the
+selected platform supports writing it and Desktop is closed. Confirmation
+explains that enabling restrictions may hide the phone's top App Handle but
+also remove desktop title-bar buttons. Applying the change restarts only SystemUI,
+without rebooting the phone or erasing data. The flag is verified before restart;
+denied writes leave SystemUI running. Restart attempts are limited to one per
+minute and never automatically repeated. This is independent of Android's
+external-display desktop-mode setting and is not performed at session boundaries.
 
 **Settings > Appearance > System theme during Desktop** can temporarily select
 Light or Dark for the whole Android system, including the phone. The default is

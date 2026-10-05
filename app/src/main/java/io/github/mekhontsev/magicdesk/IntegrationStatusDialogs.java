@@ -41,6 +41,11 @@ final class IntegrationStatusDialogs {
         };
     }
 
+    static UiColor desktopColor(RuntimeCapabilities capabilities) {
+        return desktopStatus(capabilities) == R.string.control_desktop_limited
+                ? UiColor.ATTENTION : UiColor.ACCENT;
+    }
+
     static void showDesktop(Activity activity, boolean canConfigure, Runnable access) {
         final var dialog = UiDialogs.builder(activity).setTitle(R.string.control_desktop_title)
                 .setMessage("").setNegativeButton(R.string.action_close, null)

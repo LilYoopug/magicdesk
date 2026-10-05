@@ -163,6 +163,7 @@ final class PhoneControlPanelController {
                 mActivity.getString(IntegrationStatusDialogs.termuxStatus(state.termux))));
         mDesktop.setText(mActivity.getString(R.string.control_desktop_status,
                 mActivity.getString(IntegrationStatusDialogs.desktopStatus(state.capabilities))));
+        UiAppearance.text(mDesktop, IntegrationStatusDialogs.desktopColor(state.capabilities));
         mLocalApps.setVisibility(state.displays.length > 0 ? View.GONE : View.VISIBLE);
         mDisplayTable.render(state.displays, state.desktopDisplays, state.shellReady,
                 state.sessionOperationInProgress || state.displayOperation,

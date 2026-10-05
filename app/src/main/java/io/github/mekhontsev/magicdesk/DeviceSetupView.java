@@ -82,6 +82,8 @@ final class DeviceSetupView {
         mShellValue = addStatusRow(mDetails, R.string.setup_item_shell);
         mRestrictionsValue = addStatusRow(
                 mDetails, R.string.setup_item_desktop_eligibility);
+        makeProfileValueInteractive(mRestrictionsValue, mActivity::confirmDeviceRestrictions);
+        mRestrictionsValue.setTooltipText(mActivity.getString(R.string.setup_change_device_restrictions));
         mCornersValue =
                 addStatusRow(mDetails, R.string.setup_item_window_corners);
         mRebootValue = addStatusRow(mDetails, R.string.setup_item_reboot);
@@ -176,6 +178,10 @@ final class DeviceSetupView {
     void setVendorWindowingVisible(final boolean visible) {
         setStatusRowVisible(mRestrictionsValue, visible);
         setStatusRowVisible(mCornersValue, visible);
+    }
+
+    void setRestrictionsEnabled(boolean enabled) {
+        mRestrictionsValue.setEnabled(enabled);
     }
 
     private static void setStatusRowVisible(

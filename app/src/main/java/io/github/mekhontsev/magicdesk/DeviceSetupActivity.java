@@ -27,6 +27,7 @@ public final class DeviceSetupActivity extends Activity {
     private boolean mManual;
     private boolean mBusy;
     private boolean mContentCreated;
+    private boolean mRestrictionsConfirmation;
     private DeviceSetupManager.Audit mAudit;
     private SessionProfile mSessionProfile;
     private final ShellAccess.StateListener mShellStateListener =
@@ -359,6 +360,26 @@ public final class DeviceSetupActivity extends Activity {
                         getApplicationContext(), mSessionProfile));
     }
 
+    void confirmDeviceRestrictions(final View ignored) {
+        if (mBusy || mRestrictionsConfirmation || mAudit == null
+                || !DesktopDecorationSettings.canChange(mAudit.platform.windowing())) return;
+        final var driver = mAudit.platform.windowing();
+        final boolean expected = !mAudit.restrictionsDisabled;
+        mRestrictionsConfirmation = true;
+        final var dialog = UiDialogs.builder(this)
+                .setTitle(R.string.setup_change_device_restrictions)
+                .setMessage(expected ? R.string.setup_disable_device_restrictions_confirm
+                        : R.string.setup_enable_device_restrictions_confirm)
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton(R.string.setup_apply_restart_system_ui, (d, which) ->
+                        runOperation(R.string.setup_restarting_system_ui, () -> {
+                            DesktopDecorationSettings.apply(getApplicationContext(), driver, expected);
+                            return DeviceSetupManager.audit(getApplicationContext(), mSessionProfile);
+                        })).create();
+        dialog.setOnDismissListener(d -> mRestrictionsConfirmation = false);
+        dialog.show();
+    }
+
     private void startMagicDesk() {
         if (mBusy) {
             return;
@@ -521,6 +542,8 @@ public final class DeviceSetupActivity extends Activity {
         mSetupView.diagnosticsAction().setEnabled(!busy);
         mSetupView.secondaryAction().setEnabled(!busy);
         mSetupView.restoreAction().setEnabled(!busy);
+        mSetupView.setRestrictionsEnabled(!busy && mAudit != null
+                && DesktopDecorationSettings.canChange(mAudit.platform.windowing()));
     }
 
     private void setStatusValue(

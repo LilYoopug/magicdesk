@@ -118,7 +118,7 @@ authorization or release existing Desktop services. Explicit setup actions own
 their changes independently of the audit result.
 The same audit refreshes WMShell's advertised desktop provider independently
 of the supported task-entry command signature. A configured device without that
-provider is **Limited**; an unreadable probe is **Unverified**. These observations
+provider is **Limited**, shown in the theme's warning color; an unreadable probe is **Unverified**. These observations
 do not disable independent tools or the explicit freeform fallback. A refreshed
 audit replaces the command cache, including after SystemUI restarts.
 Settings leaves independent preferences editable while
@@ -469,14 +469,15 @@ click as a synthetic touch is not equivalent to delivering its original mouse
 stream. Current validation gaps are recorded in
 [Compatibility](compatibility.md#known-limitations).
 
-### Keep native desktop decorations enabled
+### Native desktop decorations
 
 Native freeform captions and the fullscreen App Handle can be supplied by one
 firmware decoration module. Disabling that module to remove the handle can
 also remove freeform controls. MagicDesk preserves native decoration ownership;
 it does not restart SystemUI at session boundaries or draw substitute captions.
-A handle that cannot be hidden independently is a cosmetic firmware limitation,
-not justification for changing task lifecycle.
+Device Setup can explicitly toggle the platform's device-restriction property
+with a confirmed SystemUI restart. Its dialog explains both effects; there is no
+independent promise to hide the App Handle while retaining native captions.
 
 ### Do not recreate application tasks through display 0
 
@@ -4515,6 +4516,21 @@ Settings.Global force_resizable_activities = 1
 `DeviceSetupManager` owns these common requirements; `PlatformWindowingDriver`
 adds only optional firmware-specific configuration. A session owns its temporary
 display windowing default and restores that separately.
+
+On platforms that expose an explicit device-restriction writer, the corresponding
+Device Setup value is clickable. `DesktopDecorationSettings` verifies the
+confirmed old value, writes only this property through the platform, verifies
+readback, and then requests one SystemUI process restart through the current
+privileged service. Desktop and retained HOME ownership must be absent. Rejected
+property writes never restart SystemUI. The operation does not change required
+setup, rounded corners, the external-display global setting or reboot markers.
+`SystemUiRestart` targets the observed process with `am crash`, records its
+attempt before dispatch, and bounds recovery observation by a replacement PID
+and a responsive WMShell endpoint. Missing recovery is an explicit failure, not
+a retry or permission to reboot Android. A single-flight guard and persisted
+one-minute attempt interval prevent repeated UI requests from creating a crash
+loop; this is rate limiting, not a settling delay. Device Setup refreshes the
+shared capability audit after the operation, including partial failures.
 
 `SystemDesktopModeSetting` owns the optional Android global setting
 `force_desktop_mode_on_external_displays`, exposed in **Settings > Android system**.

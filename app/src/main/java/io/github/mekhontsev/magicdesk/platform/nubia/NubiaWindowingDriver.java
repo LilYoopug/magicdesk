@@ -41,6 +41,21 @@ final class NubiaWindowingDriver implements PlatformWindowingDriver {
     }
 
     @Override
+    public boolean canChangeDeviceRestrictions() { return true; }
+
+    @Override
+    public boolean deviceRestrictionsEnabled() throws IOException {
+        return !"false".equals(NubiaDesktopPropertyManager.read(
+                NubiaDesktopPropertyManager.Property.DEVICE_RESTRICTIONS));
+    }
+
+    @Override
+    public void setDeviceRestrictionsEnabled(final boolean enabled) throws IOException {
+        mWriter.write(NubiaDesktopPropertyManager.Property.DEVICE_RESTRICTIONS,
+                Boolean.toString(enabled));
+    }
+
+    @Override
     public boolean configure(
             final boolean restrictionsDisabled,
             final boolean roundedCornersDisabled) {

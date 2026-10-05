@@ -1133,4 +1133,10 @@
     <string name="appearance_dock_scale">ホバー時のアイコン拡大率 (%)</string>
     <string name="appearance_dock_lift">ホバー時のアイコン浮上量 (dp)</string>
     <string name="appearance_dock_radius">隣接アイコンへの影響 (%)</string>
+    <string name="setup_change_device_restrictions">端末の制限を変更</string>
+    <string name="setup_disable_device_restrictions_confirm">Android のデスクトップモードの端末制限を無効にしますか？ウィンドウのタイトルバーボタンが復元され、スマートフォンのアプリ上部にハンドルが表示されることがあります。\n\nシステム UI が再起動します。ステータスバーとナビゲーションバーが一時的に消えることがあります。端末は再起動せず、データも削除されません。</string>
+    <string name="setup_enable_device_restrictions_confirm">Android のデスクトップモードの端末制限を有効にしますか？スマートフォンのアプリ上部のハンドルが非表示になることがありますが、タイトルバーボタンが消え、MagicDesk が制限モードに切り替わる可能性があります。\n\nシステム UI が再起動します。ステータスバーとナビゲーションバーが一時的に消えることがあります。端末は再起動せず、データも削除されません。</string>
+    <string name="setup_apply_restart_system_ui">適用してシステム UI を再起動</string>
+    <string name="setup_restarting_system_ui">システム UI を再起動中…</string>
+    <string name="setup_system_ui_restart_wait">システム UI の再起動は最近試行されました。次の試行まで少なくとも 1 分お待ちください。</string>
 </resources>

@@ -1155,4 +1155,10 @@
     <string name="appearance_dock_scale">Agrandissement des icônes au survol (%)</string>
     <string name="appearance_dock_lift">Élévation des icônes au survol (dp)</string>
     <string name="appearance_dock_radius">Influence sur les icônes voisines (%)</string>
+    <string name="setup_change_device_restrictions">Modifier les restrictions</string>
+    <string name="setup_disable_device_restrictions_confirm">Désactiver les restrictions du mode bureau Android ? Cela peut rétablir les boutons des fenêtres et afficher une poignée en haut des applications du téléphone.\n\nL\'interface système va redémarrer. Les barres d\'état et de navigation peuvent disparaître brièvement. Le téléphone ne redémarrera pas et aucune donnée ne sera effacée.</string>
+    <string name="setup_enable_device_restrictions_confirm">Activer les restrictions du mode bureau Android ? Cela peut masquer la poignée en haut des applications du téléphone, mais les boutons des fenêtres peuvent disparaître et MagicDesk peut passer en mode Limité.\n\nL\'interface système va redémarrer. Les barres d\'état et de navigation peuvent disparaître brièvement. Le téléphone ne redémarrera pas et aucune donnée ne sera effacée.</string>
+    <string name="setup_apply_restart_system_ui">Appliquer et relancer l\'interface</string>
+    <string name="setup_restarting_system_ui">Redémarrage de l\'interface système…</string>
+    <string name="setup_system_ui_restart_wait">Une tentative de redémarrage de l\'interface système a eu lieu récemment. Attendez au moins une minute entre les tentatives.</string>
 </resources>

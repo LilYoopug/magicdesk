@@ -1144,4 +1144,10 @@
     <string name="appearance_dock_scale">Symbolvergrößerung bei Mauszeiger (%)</string>
     <string name="appearance_dock_lift">Symbolanhebung bei Mauszeiger (dp)</string>
     <string name="appearance_dock_radius">Einfluss auf Nachbarsymbole (%)</string>
+    <string name="setup_change_device_restrictions">Gerätebeschränkungen ändern</string>
+    <string name="setup_disable_device_restrictions_confirm">Gerätebeschränkungen für den Android-Desktop deaktivieren? Dies kann die Titelleistenschaltflächen wiederherstellen und einen Griff am oberen Rand von Telefon-Apps anzeigen.\n\nDie Systemoberfläche wird neu gestartet. Status- und Navigationsleiste können kurz verschwinden. Das Telefon wird nicht neu gestartet und es werden keine Daten gelöscht.</string>
+    <string name="setup_enable_device_restrictions_confirm">Gerätebeschränkungen für den Android-Desktop aktivieren? Dies kann den Griff am oberen Rand von Telefon-Apps ausblenden, aber Titelleistenschaltflächen können verschwinden und MagicDesk kann in den eingeschränkten Modus wechseln.\n\nDie Systemoberfläche wird neu gestartet. Status- und Navigationsleiste können kurz verschwinden. Das Telefon wird nicht neu gestartet und es werden keine Daten gelöscht.</string>
+    <string name="setup_apply_restart_system_ui">Anwenden und Oberfläche neu starten</string>
+    <string name="setup_restarting_system_ui">Systemoberfläche wird neu gestartet…</string>
+    <string name="setup_system_ui_restart_wait">Ein Neustart der Systemoberfläche wurde kürzlich versucht. Zwischen Versuchen muss mindestens eine Minute liegen.</string>
 </resources>

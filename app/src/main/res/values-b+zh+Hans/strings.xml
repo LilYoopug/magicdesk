@@ -1133,4 +1133,10 @@
     <string name="appearance_dock_scale">悬停时图标放大比例 (%)</string>
     <string name="appearance_dock_lift">悬停时图标抬升高度 (dp)</string>
     <string name="appearance_dock_radius">相邻图标影响范围 (%)</string>
+    <string name="setup_change_device_restrictions">更改设备限制</string>
+    <string name="setup_disable_device_restrictions_confirm">关闭 Android 桌面模式的设备限制？这可能恢复窗口标题栏按钮，并在手机应用顶部显示控制条。\n\n系统界面将重新启动。状态栏和导航栏可能会短暂消失。手机不会重启，也不会删除数据。</string>
+    <string name="setup_enable_device_restrictions_confirm">开启 Android 桌面模式的设备限制？这可能隐藏手机应用顶部的控制条，但窗口标题栏按钮可能消失，MagicDesk 可能进入受限模式。\n\n系统界面将重新启动。状态栏和导航栏可能会短暂消失。手机不会重启，也不会删除数据。</string>
+    <string name="setup_apply_restart_system_ui">应用并重启系统界面</string>
+    <string name="setup_restarting_system_ui">正在重启系统界面…</string>
+    <string name="setup_system_ui_restart_wait">最近已尝试重启系统界面。两次尝试之间请至少等待一分钟。</string>
 </resources>

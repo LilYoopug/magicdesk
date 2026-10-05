@@ -24,6 +24,7 @@ public final class BoundedStateAwaiter {
         INPUT_DEVICE,
         TRANSITION_HEALTH,
         RUNTIME_READY,
+        SYSTEM_UI_RESTART,
         RECORDING_STARTUP,
         VENDOR_STATE
     }

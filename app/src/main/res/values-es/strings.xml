@@ -1155,4 +1155,10 @@
     <string name="appearance_dock_scale">Ampliación de iconos al pasar el cursor (%)</string>
     <string name="appearance_dock_lift">Elevación de iconos al pasar el cursor (dp)</string>
     <string name="appearance_dock_radius">Influencia en iconos vecinos (%)</string>
+    <string name="setup_change_device_restrictions">Cambiar restricciones del dispositivo</string>
+    <string name="setup_disable_device_restrictions_confirm">¿Desactivar las restricciones del dispositivo para el escritorio de Android? Esto puede restaurar los botones de las ventanas y mostrar un control en la parte superior de las aplicaciones del teléfono.\n\nSe reiniciará la interfaz del sistema. Las barras de estado y navegación pueden desaparecer brevemente. El teléfono no se reiniciará ni se borrarán datos.</string>
+    <string name="setup_enable_device_restrictions_confirm">¿Activar las restricciones del dispositivo para el escritorio de Android? Esto puede ocultar el control superior de las aplicaciones del teléfono, pero los botones de las ventanas pueden desaparecer y MagicDesk puede pasar al modo Limitado.\n\nSe reiniciará la interfaz del sistema. Las barras de estado y navegación pueden desaparecer brevemente. El teléfono no se reiniciará ni se borrarán datos.</string>
+    <string name="setup_apply_restart_system_ui">Aplicar y reiniciar interfaz</string>
+    <string name="setup_restarting_system_ui">Reiniciando interfaz del sistema…</string>
+    <string name="setup_system_ui_restart_wait">Ya se intentó reiniciar la interfaz del sistema recientemente. Espera al menos un minuto entre intentos.</string>
 </resources>

@@ -11,6 +11,28 @@ import org.junit.Test;
 
 public final class NubiaWindowingDriverTest {
     @Test
+    public void explicitRestrictionChangeOnlyWritesThatProperty() throws Exception {
+        final List<String> values = new ArrayList<>();
+        final var driver = new NubiaWindowingDriver((property, value) -> {
+            assertEquals(NubiaDesktopPropertyManager.Property.DEVICE_RESTRICTIONS, property);
+            values.add(value);
+            return true;
+        }, (property, error) -> { throw new AssertionError(error); });
+        assertTrue(driver.canChangeDeviceRestrictions());
+        driver.setDeviceRestrictionsEnabled(true);
+        driver.setDeviceRestrictionsEnabled(false);
+        assertEquals(List.of("true", "false"), values);
+    }
+
+    @Test
+    public void explicitRestrictionDenialIsNotSwallowedAsOptionalSetup() {
+        final var driver = new NubiaWindowingDriver((property, value) -> {
+            throw new IOException("denied");
+        }, (property, error) -> { throw new AssertionError(error); });
+        org.junit.Assert.assertThrows(IOException.class, () -> driver.setDeviceRestrictionsEnabled(true));
+    }
+
+    @Test
     public void deniedPropertiesDoNotThrowOrRequireReboot() {
         final List<NubiaDesktopPropertyManager.Property> warnings = new ArrayList<>();
         final NubiaWindowingDriver windowing = new NubiaWindowingDriver(
