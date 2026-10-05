@@ -86,20 +86,26 @@ int md_fs_mount_table(struct md_filesystem *fs, unsigned info) {
     FILE *stream=fdopen(fd,"w+");
     if (!stream) { int error=-errno; close(fd); return error; }
     struct stat root;
-    int r=md_inode_stat(fs->store,-1,"/",0,&root);
+    int r=fs->native_root ? (fstat(fs->native_root->fd,&root) ? -errno : 0)
+        : md_inode_stat(fs->store,-1,"/",0,&root);
     unsigned dev_id=MD_FS_ROOT_MOUNT;
     if (!r) {
-        entry(stream,info,MD_FS_ROOT_MOUNT,MD_FS_ROOT_MOUNT,root.st_dev,"/","guestfs","guest",fs->store->readonly);
-        if (!fs->store->root_id) {
+        if (fs->native_root) {
+            const struct md_view_mount *m=fs->native_root->mount;
+            entry(stream,info,m->id,m->parent ? m->parent->id : MD_FS_ROOT_MOUNT,
+                root.st_dev,"/","none","attachment",m->readonly);
+        } else entry(stream,info,MD_FS_ROOT_MOUNT,MD_FS_ROOT_MOUNT,root.st_dev,"/","guestfs","guest",fs->store->readonly);
+        if (!fs->store->root_id && !fs->native_root) {
             r=native_entries(fs,stream,info,&dev_id);
             if (!r) entry(stream,info,MD_FS_SHM_MOUNT,dev_id,root.st_dev,"/dev/shm","guestfs","guest",fs->store->readonly);
         }
     }
     if (fs->mounts) for (unsigned i=0; !r && i<fs->mounts->count; ++i) {
         const struct md_view_mount *m=&fs->mounts->mounts[i];
-        char path[PATH_MAX]; r=md_inode_path(fs->store,m->target,path,sizeof(path));
-        if (r == -ENOENT && fs->store->root_id) { r=0; continue; }
-        if (!r) entry(stream,info,MD_FS_ATTACHMENT_MOUNT+i,MD_FS_ROOT_MOUNT,m->native.st_dev,path,"none","attachment",m->readonly);
+        char path[PATH_MAX]; r=md_view_path(fs,m->target,m->parent,path,sizeof(path));
+        if (r == -ENOENT && (fs->store->root_id || fs->native_root)) { r=0; continue; }
+        if (!r) entry(stream,info,m->id,m->parent ? m->parent->id : MD_FS_ROOT_MOUNT,
+            m->native.st_dev,path,"none","attachment",m->readonly);
     }
     if (!r && (fflush(stream) || ferror(stream))) r=-EIO;
     int readable=-1;

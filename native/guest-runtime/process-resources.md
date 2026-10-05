@@ -20,7 +20,7 @@ See [namespace execution](namespace-execution.md) for the launch filesystem and
 
 ## Guest Roots
 
-`chroot` selects a directory inode through the existing composed filesystem
+`chroot` selects a directory through the existing composed filesystem
 walker, checks search permission and guest CAP_SYS_CHROOT, and changes the
 calling task's filesystem context only after success. Shared CLONE_FS owners
 observe that change; fork or successful `unshare(CLONE_FS)` gives an independent
@@ -28,12 +28,15 @@ context. Exec retains it, including for nondumpable processes. Registry locks
 cover snapshots/publication, never filesystem IO.
 
 Absolute paths and absolute symlinks start at the selected root; `..` stops
-there. The root is an inode identity, not a pathname prefix, so renaming it does
-not change the view. Directory enumeration and getcwd use the same root. Cwd
+there. `md_fs_location` identifies the root by mount and backend object, not a
+pathname prefix. Inode-store roots and directories inside native attachments
+share this contract, including rename and retained-descriptor lifetime. Cwd
 and existing descriptors are not moved or revoked: relative access through a
 retained directory outside the new root remains possible, as with Linux chroot.
 getcwd returns ENOENT when the directory has no path within the selected root.
-Mount-table snapshots omit attachments outside it.
+Mount-table snapshots omit attachments outside it and retain visible parent/child
+mount IDs. Native roots preserve their attachment's readonly policy and the
+kernel's permission checks; guest CAP_SYS_CHROOT grants no Android authority.
 
 The syscall adapter receives task-local root selection, including when CLONE_VM
 peers have independently unshared filesystem contexts. It has no mutable global
@@ -41,8 +44,8 @@ current-root cache. Ordinary launches need no additional RPC, SQL query or
 per-request allocation. Only scoped-root adapter calls materialize a local
 filesystem configuration.
 
-Roots inside native attachments and arbitrary native/proc directories return
-ENOTSUP. Native-directory pathname traversal through inherited `/proc` or `/dev`
+Arbitrary native/proc roots outside explicit attachments return ENOTSUP.
+Native-directory pathname traversal through inherited `/proc` or `/dev`
 descriptors also remains unsupported after guest chroot. The separately admitted
 `/proc/self/fd` and `fdinfo` restriction retains its irreversible policy. These
 explicit limits are not successful mount or namespace emulation.
@@ -78,7 +81,7 @@ Concurrent named environments and launch-local attachments are not Linux
 namespaces. `CLONE_NEWNS`, `CLONE_NEWUSER`, `CLONE_NEWIPC`, `CLONE_NEWUTS`,
 `CLONE_NEWPID`, `CLONE_NEWNET`, cgroup/time namespaces and `setns` are not
 implemented. Their creation is not reported as successful. General guest
-mount mutation, native-backed roots and user-namespace mappings require
+mount mutation and user-namespace mappings require
 their own resource and authority contracts.
 
 This resource model does not establish security isolation from Android, other
@@ -94,13 +97,15 @@ failed-unshare rollback and exec inheritance. Guest-only cases check proc-root
 sharing and semaphore-undo splitting, final-owner cleanup and exec retention.
 Pipe acknowledgements order observations; an alarm is only a failure bound.
 
-`root_guest` checks nested roots, absolute symlinks, root-clamped traversal,
+`root_guest` runs the same checks with inode-backed and attached-native roots:
+nested roots, absolute symlinks, root-clamped traversal,
 unchanged inherited descriptors, failed-change rollback, CLONE_FS with and
 without CLONE_VM, unshare and exec in ordinary/nondumpable tasks. Model checks
-add root rename, enumeration, authenticated task snapshots, mount-table filtering
-and explicit rejection of native attachment roots.
+add root rename, enumeration, authenticated task snapshots, mount-table filtering,
+nested readonly/writable attachments and retained covered-directory descriptors.
 `test_root_userspace.py` exercises stock Debian/Alpine chroot with each
-distribution's dynamic loader, shell and nested exec in a disposable directory.
+distribution's dynamic loader, shell and nested exec in disposable inode-backed
+and attached-native directories.
 
 `test_resources.py BUILD --compare-installed` stages a disposable store under
 the selected shell UID and compares the same static metadata/spawn fixtures

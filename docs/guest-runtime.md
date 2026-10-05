@@ -361,8 +361,10 @@ and contains its shared data; restored instances have no lower dependencies.
 Image Env,
 WorkingDir, Entrypoint and Cmd feed the ordinary guest runner. `--bind HOST GUEST`
 and `--bind-ro HOST GUEST` attach existing directories to one launch, also for
-ordinary `--store` commands. Import/staging does not probe guest-execution kernel
-capabilities; execution does. See [images and filesystem views](../native/guest-runtime/images.md)
+ordinary `--store` commands. Nested targets use declaration order, parent first;
+each attachment retains its own readonly policy. Import/staging does not probe
+guest-execution kernel capabilities; execution does. See
+[images and filesystem views](../native/guest-runtime/images.md)
 for formats, explicit ownership mapping, source lifetimes and limitations.
 This provides OCI image execution, not Docker Engine or a container isolation boundary.
 The [application-image checks](../native/guest-runtime/images.md#checks) exercise
@@ -460,11 +462,12 @@ both USER_NOTIF and RPC use them. RPC checks the actor TID against the kernel
 peer TGID. The registry lock protects snapshots only, not filesystem IO, and
 ordinary requests allocate no group arrays.
 
-Guest `chroot` selects an inode-backed directory through the common filesystem
-walker, with search/CAP_SYS_CHROOT checks, CLONE_FS sharing, transactional
+Guest `chroot` selects an inode-backed or explicitly attached native directory
+through the common filesystem walker, with search/CAP_SYS_CHROOT checks, CLONE_FS sharing, transactional
 unshare and exec inheritance. Absolute symlinks, root-clamped `..`, getcwd and
-directory enumeration use the selected root. Existing cwd/descriptors remain
-usable, so chroot alone is not confinement. Roots inside native attachments,
+mount-table paths use the selected root. Its identity includes the mount and
+backend object, preserving native readonly policy. Existing cwd/descriptors remain
+usable, so chroot alone is not confinement. Arbitrary unattached native roots,
 mount mutation and Linux namespace creation remain unsupported. See the
 [process resource contract](../native/guest-runtime/process-resources.md).
 

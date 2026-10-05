@@ -25,7 +25,7 @@ struct md_guest_domain {
     unsigned owners;
     pthread_mutex_t lock;
     atomic_int scoped;
-    char guest_root[33];
+    struct md_fs_location guest_root;
     int root, cwd, root_process;
 };
 struct md_guest_domain *md_domain_new(void) {
@@ -43,7 +43,7 @@ struct md_guest_domain *md_domain_fork(struct md_guest_domain *d, int shared) {
     struct md_guest_domain *copy = md_domain_new();
     if (!copy) return NULL;
     pthread_mutex_lock(&d->lock);
-    memcpy(copy->guest_root, d->guest_root, sizeof(copy->guest_root));
+    copy->guest_root = d->guest_root;
     atomic_store(&copy->scoped, atomic_load(&d->scoped));
     if (copy && d->root >= 0) {
         copy->root = fcntl(d->root, F_DUPFD_CLOEXEC, 0);
@@ -76,20 +76,20 @@ struct md_guest_domain *md_domain_unshare_prepare(struct md_guest_domain *d) {
 int md_domain_scoped(const struct md_guest_domain *d) {
     return d && atomic_load_explicit(&d->scoped, memory_order_acquire);
 }
-void md_domain_root(struct md_guest_domain *d, char out[33]) {
-    out[0] = 0;
+void md_domain_root(struct md_guest_domain *d, struct md_fs_location *out) {
+    *out = (struct md_fs_location){0};
     if (!md_domain_scoped(d)) return;
     pthread_mutex_lock(&d->lock);
-    memcpy(out, d->guest_root, 33);
+    *out = d->guest_root;
     pthread_mutex_unlock(&d->lock);
 }
-int md_domain_set_root(struct md_guest_domain *d, const char root[33]) {
+int md_domain_set_root(struct md_guest_domain *d, const struct md_fs_location *root) {
     if (!d) return -ESRCH;
     pthread_mutex_lock(&d->lock);
     int error = d->root >= 0 ? -EPERM : 0;
     if (!error) {
-        memcpy(d->guest_root, root, 33);
-        atomic_store_explicit(&d->scoped, !!root[0], memory_order_release);
+        d->guest_root = *root;
+        atomic_store_explicit(&d->scoped, !!root->object[0] || root->mount, memory_order_release);
     }
     pthread_mutex_unlock(&d->lock); return error;
 }

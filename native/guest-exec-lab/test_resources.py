@@ -67,6 +67,10 @@ def main():
         check("guest namespace capabilities", runner + "/bin/test probe /tmp")
         check("guest roots", root + "/libmagicdesk_guest_run.so --user 0:0 --store "
               + root + "/store --deadline-seconds 60 -- /bin/root-test run", "PASS guest roots")
+        check("native root directory", "mkdir -m 700 " + root + "/attached")
+        check("guest native roots", root + "/libmagicdesk_guest_run.so --user 0:0 --store "
+              + root + "/store --bind " + root + "/attached /jail --deadline-seconds 60"
+              + " -- /bin/root-test attached", "PASS guest roots")
         if args.compare_installed:
             result["comparison"] = {}
             candidates = {"installed": "magicdesk-guest", "candidate": root + "/libmagicdesk_guest_run.so"}

@@ -53,11 +53,17 @@ def main():
             instance = getattr(args, kind)
             if not instance:
                 continue
-            case = {"name": kind, "passed": False}
-            suite.report["cases"].append(case)
-            output = suite.command(suite.run(instance, "--", "/bin/sh", "-ec", script(kind)), timeout=45)
-            assert "PASS dynamic root and nested exec" in output
-            case["passed"] = True
+            for backend in ("inode", "attachment"):
+                case = {"name": kind + "-" + backend, "passed": False}
+                suite.report["cases"].append(case)
+                options = []
+                if backend == "attachment":
+                    directory = suite.base + "/" + kind + "-root"
+                    suite.command(["mkdir", "-m", "700", directory])
+                    options = ["--bind", directory, "/tmp"]
+                output = suite.command(suite.run(instance, *options, "--", "/bin/sh", "-ec", script(kind)), timeout=45)
+                assert "PASS dynamic root and nested exec" in output
+                case["passed"] = True
         suite.report["passed"] = True
     finally:
         suite.finish()

@@ -106,7 +106,9 @@ int main(int argc,char **argv) {
     assert(argc==2); alarm(45); setbuf(stdout,NULL);
     if (!strcmp(argv[1],"exec")) { inside(); puts("PASS root survives exec"); return 0; }
     assert(!chdir("/")); assert(!chmod("/",0755));
-    assert(!mkdir("/jail",0755)); assert(!mkdir("/jail/sub",0755)); assert(!mkdir("/jail/proc",0755));
+    if (!strcmp(argv[1],"attached")) assert(!chmod("/jail",0755));
+    else assert(!mkdir("/jail",0755));
+    assert(!mkdir("/jail/sub",0755)); assert(!mkdir("/jail/proc",0755));
     write_file("/outside","outside"); write_file("/jail/value","inside");
     write_file("/jail/sub/nested","nested"); write_file("/jail/proc/sentinel","guest proc");
     assert(!symlink("/value","/jail/absolute"));

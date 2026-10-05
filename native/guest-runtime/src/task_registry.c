@@ -57,7 +57,7 @@ void md_task_registry_forget(struct md_task_registry *r, pid_t tid) {
     if (e) { md_identity_release(&e->value); md_domain_unpin(e->fs); free(e); }
 }
 int md_task_registry_read(struct md_task_registry *r, pid_t tid, pid_t peer,
-        struct md_identity *out, char root[33]) {
+        struct md_identity *out, struct md_fs_location *root) {
     if (!r || tid <= 0) return -ESRCH;
     pthread_mutex_lock(&r->lock);
     struct entry *e = r->entries[(unsigned)tid % BUCKETS];
@@ -69,7 +69,7 @@ int md_task_registry_read(struct md_task_registry *r, pid_t tid, pid_t peer,
     }
     pthread_mutex_unlock(&r->lock); return error;
 }
-int md_task_registry_set_root(struct md_task_registry *r, pid_t tid, pid_t peer, const char root[33]) {
+int md_task_registry_set_root(struct md_task_registry *r, pid_t tid, pid_t peer, const struct md_fs_location *root) {
     if (!r || tid <= 0) return -ESRCH;
     pthread_mutex_lock(&r->lock);
     struct entry *e = r->entries[(unsigned)tid % BUCKETS];

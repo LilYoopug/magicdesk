@@ -1,6 +1,7 @@
 #ifndef MD_FS_MOUNTS_H
 #define MD_FS_MOUNTS_H
 #include "fs_engine.h"
+#include "fs_location.h"
 
 #define MD_FS_MOUNTS_MAX 16
 enum { MD_FS_ROOT_MOUNT = 1, MD_FS_SHM_MOUNT = 2, MD_FS_ATTACHMENT_MOUNT = 3 };
@@ -8,6 +9,8 @@ struct md_fs_attachment { const char *source, *target; int readonly; };
 /* Explicit native directories, scoped to one launch. No mount syscall, identity
  * change, source creation or persisted configuration is performed here. */
 int md_fs_mounts_open(struct md_filesystem *, const struct md_fs_attachment *, unsigned count);
+int md_fs_root_capture(struct md_filesystem *, int fd, struct md_fs_location *);
+int md_fs_root_select(struct md_filesystem *, const struct md_fs_location *);
 void md_fs_mounts_close(struct md_filesystem *);
 int md_fs_mount_table(struct md_filesystem *, unsigned mountinfo);
 int md_fs_native_mount(struct md_filesystem *, uint64_t native, uint64_t *guest);

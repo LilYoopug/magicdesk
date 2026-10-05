@@ -12,6 +12,6 @@ void md_task_registry_forget(struct md_task_registry *, pid_t tid);
 /* peer==0 is a kernel-notification/internal caller. RPC callers must own the
  * TID's thread group; the supervisor may request on behalf of its tracee. */
 int md_task_registry_read(struct md_task_registry *, pid_t tid, pid_t peer,
-        struct md_identity *, char root[33]);
-int md_task_registry_set_root(struct md_task_registry *, pid_t tid, pid_t peer, const char root[33]);
+        struct md_identity *, struct md_fs_location *);
+int md_task_registry_set_root(struct md_task_registry *, pid_t tid, pid_t peer, const struct md_fs_location *);
 #endif

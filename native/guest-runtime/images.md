@@ -230,11 +230,24 @@ case goes directly to the inode engine. No mount policy enters the inode databas
 
 `--bind HOST GUEST` and `--bind-ro HOST GUEST` belong to one launch. Source and
 target must be existing directories. Guest targets `/`, `/dev`, `/proc` and
-`/sys`, and overlapping or nested attachments, are rejected. Both endpoints are
-retained by descriptors. Component
+`/sys` are rejected. Nested targets are resolved in declaration order, with the
+parent before its children. Each mount retains a source, a covered dentry, its
+parent mount, a stable launch-local ID and its own readonly policy. Both endpoints
+are retained by descriptors. Component
 resolution handles guest/native symlinks, dirfds, `..` across the boundary and
 openat2 scopes. Cross-view link/rename returns EXDEV; removing a mount root is
 EBUSY. Native permission/SELinux failures remain failures.
+
+An open descriptor into a covered directory retains that directory; it does not
+silently switch to the covering mount. Renaming a native mountpoint preserves
+the parent/child topology. Mount-table output and statx use the same IDs. Guest
+chroot can select a directory inside an attachment without discarding readonly
+policy, and clips mount-table paths to that selected root.
+
+Overlapping native sources and covering an already attached subtree are rejected.
+An inode encountered through conflicting mounts also fails explicitly: general
+aliasing needs open-description provenance, not a guessed native inode match.
+The tree is launch-owned; guest-created mount namespaces are not implemented.
 
 Native metadata identity is retained across rename/unlink. Readonly policy also
 applies to descriptor-based metadata changes and writable reopens, not just
@@ -278,7 +291,8 @@ digest failures, concurrent shared-layer publication, independent equal files,
 repeated-layer aliases, unreachable-source cleanup and self-contained backup.
 `test_snapshot.c` covers sharing, promotion,
 hardlink aliases, retained FDs, mmap and file watches. `test_mounts.c` checks
-cross-boundary resolution, readonly retained FDs and cursor publication.
+cross-boundary resolution, readonly retained FDs, cursor publication, nested
+topology, parent IDs, covered descriptors and roots inside native attachments.
 `test_oci_runtime.py` imports real Alpine and Debian OCI layouts and runs both
 through the production guest runtime under actual UID 2000, without Desktop.
 It reimports into the same layer pool, checks independent modifications and

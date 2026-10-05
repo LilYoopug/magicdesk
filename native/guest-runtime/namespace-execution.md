@@ -53,9 +53,9 @@ seccomp filter and the real kernel cwd/descriptors.
 - Cwd is a real backing-directory FD retained by the kernel. Relative requests
   capture it with openat; getcwd reconstructs the current virtual parent path.
   Renaming the directory preserves cwd and inherited dirfd identity.
-- Guest `chroot` selects a directory within the inode store, independently of
-  launch configuration. The authenticated task snapshot supplies its root to
-  this same walker. Absolute paths/symlinks, `..`, getcwd and directory entries
+- Guest `chroot` selects a directory within the inode store or an explicit native
+  attachment. The authenticated task snapshot supplies its root to this same
+  walker as a mount/object location. Absolute paths/symlinks, `..` and getcwd
   share that selection; existing cwd and descriptors are retained. See
   [process resources](process-resources.md#guest-roots) for inheritance and limits.
 - fstat/newfstatat/statx publish namespace link counts and logical owners/modes
@@ -89,7 +89,7 @@ seccomp filter and the real kernel cwd/descriptors.
   attachments retain kernel ACLs and launch-local readonly policy.
 - `/proc` and `/dev` map to the host, except `/dev/shm`, which belongs to the
   guest store. These implicit boundaries belong to the launch root, not a
-  nested chroot: `/proc` inside a selected guest directory is an ordinary guest
+  nested chroot: `/proc` inside a selected directory is an ordinary backend
   path. Relative operations based at a host directory recognize these
   boundaries too. Selected current-process/thread magic links are described below.
   Cross-mount symlinks and arbitrary proc aliases remain incomplete.

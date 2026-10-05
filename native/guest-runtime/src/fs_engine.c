@@ -22,13 +22,9 @@ static void change_root(struct md_filesystem *fs, const struct md_fs_request *q,
     else md_fs_inode_execute(fs, &open, out, NULL);
     if (out->error) return;
     int fd = out->fd; out->fd = -1;
-    struct md_fs_request access = {.operation = MD_FS_ACCESS, .directory = {fd, -1},
-        .mode = X_OK, .flags = MD_AT_EACCESS};
-    int error = md_inode_metadata(fs->store, &access);
-    char root[33];
-    if (!error) error = md_inode_object_id(fs->store, fd, root);
-    if (!error && !strcmp(root, MDI_ROOT)) root[0] = 0;
-    if (!error) error = md_task_registry_set_root(fs->tasks, q->actor, q->peer, root);
+    struct md_fs_location root;
+    int error = md_fs_root_capture(fs,fd,&root);
+    if (!error) error = md_task_registry_set_root(fs->tasks, q->actor, q->peer, &root);
     close(fd); out->error = error == -EXDEV ? -ENOTSUP : error;
 }
 
@@ -43,9 +39,9 @@ void md_fs_stat_info(const struct stat *s, struct md_fs_info *out) {
 void md_fs_execute(struct md_filesystem *fs,
         const struct md_fs_request *q, struct md_fs_result *out, const struct md_fs_output *output) {
     struct md_identity identity = {0};
-    char root[33] = "";
+    struct md_fs_location root = {0};
     if (fs->tasks) {
-        int error = md_task_registry_read(fs->tasks, q->actor, q->peer, &identity, root);
+        int error = md_task_registry_read(fs->tasks, q->actor, q->peer, &identity, &root);
         if (error) { *out = (struct md_fs_result){.fd = -1, .error = error}; return; }
     }
     const struct md_identity *previous = fs->store->identity;
@@ -71,12 +67,14 @@ void md_fs_execute(struct md_filesystem *fs,
     }
     unsigned previous_mask=fs->store->creation_mask;
     const char *previous_root=fs->store->root_id;
-    if (fs->tasks) fs->store->root_id=*root ? root : NULL;
+    struct md_view_object *previous_native_root=fs->native_root;
+    int root_error=fs->tasks ? md_fs_root_select(fs,&root) : 0;
     struct md_inode_boundary boundary={.path=output ? output->data : NULL,.capacity=output ? output->capacity : 0};
     struct md_inode_boundary *previous_boundary=fs->store->boundary;
     fs->store->boundary=&boundary;
     fs->store->creation_mask=q->attributes.creation_mask;
-    if (q->operation == MD_FS_CHROOT) change_root(fs, q, out);
+    if (root_error) *out=(struct md_fs_result){.fd=-1,.error=root_error};
+    else if (q->operation == MD_FS_CHROOT) change_root(fs, q, out);
     else if (fs->mounts) md_fs_mounts_execute(fs, q, out, output);
     else md_fs_inode_execute(fs, q, out, output);
     fs->store->boundary=previous_boundary;
@@ -89,6 +87,7 @@ void md_fs_execute(struct md_filesystem *fs,
     }
     fs->store->creation_mask=previous_mask;
     fs->store->root_id=previous_root;
+    fs->native_root=previous_native_root;
     fs->store->identity = previous;
     md_identity_release(&identity);
 }

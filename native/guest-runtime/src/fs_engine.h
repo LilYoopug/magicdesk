@@ -10,6 +10,7 @@ struct md_filesystem {
     struct md_inode_store *store;
     struct md_image_catalogue *images;
     struct md_fs_mounts *mounts;
+    struct md_view_object *native_root;
     struct md_mount_identity *mount_identity;
     struct md_task_registry *tasks;
     struct md_ipc_credentials *ipc;

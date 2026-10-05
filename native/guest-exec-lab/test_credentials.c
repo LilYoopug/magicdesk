@@ -82,10 +82,10 @@ static void root_context(struct md_inode_store *s) {
         if(task==125) assert(out.error==-ENOENT);
         else { assert(!out.error && out.fd>=0); close(out.fd); }
     }
-    char id[33]; struct md_identity snap;
-    assert(md_task_registry_read(fs.tasks,123,119,&snap,id)==-EPERM);
-    assert(md_task_registry_set_root(fs.tasks,123,119,MDI_ROOT)==-EPERM);
-    assert(!md_task_registry_read(fs.tasks,123,120,&snap,id) && *id);
+    struct md_fs_location location={0}; struct md_identity snap;
+    assert(md_task_registry_read(fs.tasks,123,119,&snap,&location)==-EPERM);
+    assert(md_task_registry_set_root(fs.tasks,123,119,&location)==-EPERM);
+    assert(!md_task_registry_read(fs.tasks,123,120,&snap,&location) && location.object[0]);
     md_identity_release(&snap);
     out=root_call(&fs,123,MD_FS_OPEN,-1,"/",O_RDONLY|O_DIRECTORY,NULL,0);
     assert(!out.error); int root=out.fd;

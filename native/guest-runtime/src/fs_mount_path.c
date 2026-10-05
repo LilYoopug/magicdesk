@@ -13,24 +13,34 @@ void md_view_location_close(struct md_view_location *p) {
     p->parent = p->fd = -1;
 }
 static int root(struct md_filesystem *fs) {
+    if (fs->native_root) {
+        int fd=fcntl(fs->native_root->fd,F_DUPFD_CLOEXEC,3);
+        return fd<0 ? -errno : fd;
+    }
     return md_inode_open(fs->store, MD_INODE_ROOT, "/", O_PATH | O_DIRECTORY | O_CLOEXEC, 0);
 }
 static int duplicate(int fd) { int copy = fcntl(fd, F_DUPFD_CLOEXEC, 3); return copy < 0 ? -errno : copy; }
-static int enter(struct md_filesystem *fs, int *fd, int *mount, uint64_t resolve) {
-    if (*mount >= 0) return 0;
+int md_view_open_component(struct md_filesystem *fs, struct md_view_mount *mount, int fd, const char *name) {
+    if (!mount) return md_inode_open(fs->store, fd, name, O_PATH | O_NOFOLLOW | O_CLOEXEC, 0);
+    int next = openat(fd, name, O_PATH | O_NOFOLLOW | O_CLOEXEC);
+    return next < 0 ? -errno : next;
+}
+static int enter(struct md_filesystem *fs, int *fd, struct md_view_mount **mount, uint64_t resolve) {
     struct stat st;
     if (fstat(*fd, &st)) return -errno;
-    for (unsigned i = 0; i < fs->mounts->count; ++i) if (md_view_same(&st, &fs->mounts->mounts[i].guest)) {
+    for (unsigned i = 0; i < fs->mounts->count; ++i) {
+        struct md_view_mount *m = &fs->mounts->mounts[i];
+        if (m->parent != *mount || !md_view_same(&st, &m->guest)) continue;
         if (resolve & RESOLVE_NO_XDEV) return -EXDEV;
-        int copy = duplicate(fs->mounts->mounts[i].source);
+        int copy = duplicate(m->source);
         if (copy < 0) return copy;
-        close(*fd); *fd = copy; *mount = (int)i; break;
+        close(*fd); *fd = copy; *mount = m; break;
     }
     return 0;
 }
 int md_view_walk(struct md_filesystem *fs, int base, const char *path, int follow, int missing,
         uint64_t resolve, struct md_view_location *out) {
-    *out = (struct md_view_location){.parent=-1,.fd=-1,.mount=-1};
+    *out = (struct md_view_location){.parent=-1,.fd=-1};
     if (!path || !*path) return -ENOENT;
     if (resolve & ~(RESOLVE_BENEATH | RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV | RESOLVE_CACHED)) return -EINVAL;
     if ((resolve & (RESOLVE_BENEATH | RESOLVE_IN_ROOT)) == (RESOLVE_BENEATH | RESOLVE_IN_ROOT)) return -EINVAL;
@@ -38,13 +48,16 @@ int md_view_walk(struct md_filesystem *fs, int base, const char *path, int follo
     if (path[0] == '/' && (resolve & RESOLVE_BENEATH)) return -EXDEV;
     if (strlen(path) >= PATH_MAX) return -ENAMETOOLONG;
     char todo[PATH_MAX]; strcpy(todo, path);
-    int fd = base == MD_INODE_ROOT || (path[0] == '/' && !(resolve & RESOLVE_IN_ROOT)) ? root(fs) : duplicate(base);
+    int from_root = base == MD_INODE_ROOT || (path[0] == '/' && !(resolve & RESOLVE_IN_ROOT));
+    int fd = from_root ? root(fs) : duplicate(base);
     if (fd < 0) return fd;
     struct md_view_object *object = NULL;
-    int r = md_view_identity(fs, fd, &object), mount = r ? -1 : object->mount;
+    int r = md_view_identity(fs, fd, &object);
+    struct md_view_mount *mount = r ? NULL : object->mount;
     if (r == -EXDEV) r = 0;
-    if (!r) r = enter(fs, &fd, &mount, resolve);
-    int boundary_fd = !r ? duplicate(fd) : -1, boundary_mount = mount;
+    if (!r && from_root) r = enter(fs, &fd, &mount, resolve);
+    int boundary_fd = !r ? duplicate(fd) : -1;
+    struct md_view_mount *boundary_mount = mount;
     if (!r && boundary_fd < 0) r = boundary_fd;
     struct stat boundary;
     if (!r && fstat(boundary_fd, &boundary)) r = -errno;
@@ -62,15 +75,19 @@ int md_view_walk(struct md_filesystem *fs, int base, const char *path, int follo
         int trailing = *end == '/';
         memmove(todo, end, strlen(end)+1);
         char *rest = todo; while (*rest == '/') ++rest;
-        int last = !*rest, next_mount = mount, next = -1;
+        int last = !*rest, next = -1;
+        struct md_view_mount *next_mount = mount;
         if (!strcmp(name, "..") && (resolve & (RESOLVE_BENEATH | RESOLVE_IN_ROOT)) && mount == boundary_mount && md_view_same(&current, &boundary)) {
             if (resolve & RESOLVE_BENEATH) { r = -EXDEV; break; }
             next = duplicate(fd);
-        } else if (!strcmp(name, "..") && mount >= 0 && md_view_same(&current, &fs->mounts->mounts[mount].native)) {
+        } else if (!strcmp(name,"..") && fs->native_root && mount==fs->native_root->mount
+                && md_view_same(&current,&fs->native_root->identity)) {
+            next = duplicate(fd);
+        } else if (!strcmp(name, "..") && mount && md_view_same(&current, &mount->native)) {
             if (resolve & RESOLVE_NO_XDEV) { r = -EXDEV; break; }
-            next = md_inode_open(fs->store, fs->mounts->mounts[mount].target, "..", O_PATH | O_DIRECTORY | O_CLOEXEC, 0);
-            next_mount = -1;
-        } else if (mount < 0) {
+            next = md_view_open_component(fs, mount->parent, mount->target, "..");
+            next_mount = mount->parent;
+        } else if (!mount) {
             /* The component walker must retain the unconsumed suffix when a
              * logical path crosses into a task-owned host filesystem. */
             struct md_inode_boundary *boundary=fs->store->boundary;
@@ -81,7 +98,7 @@ int md_view_walk(struct md_filesystem *fs, int base, const char *path, int follo
             if (next==-EREMOTE && (resolve&(RESOLVE_NO_XDEV|RESOLVE_IN_ROOT|RESOLVE_BENEATH))) next=-EXDEV;
             if (next==-EREMOTE && (resolve&(RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS))) next=-ENOTSUP;
         }
-        else { next = openat(fd, name, O_PATH | O_NOFOLLOW | O_CLOEXEC); if (next < 0) next = -errno; }
+        else next = md_view_open_component(fs, mount, fd, name);
         if (next == -ENOENT && last && missing && (!trailing || missing > 1)) {
             out->parent = fd; fd = -1; out->mount = mount; strcpy(out->name, name); break;
         }
@@ -101,12 +118,13 @@ int md_view_walk(struct md_filesystem *fs, int base, const char *path, int follo
                 if (resolve & RESOLVE_BENEATH) { r = -EXDEV; break; }
                 close(fd);
                 fd = resolve & RESOLVE_IN_ROOT ? duplicate(boundary_fd) : root(fs);
-                mount = resolve & RESOLVE_IN_ROOT ? boundary_mount : -1;
+                mount = resolve & RESOLVE_IN_ROOT ? boundary_mount
+                    : fs->native_root ? fs->native_root->mount : NULL;
                 if (fd < 0) r = fd;
             }
             continue;
         }
-        r = enter(fs, &next, &next_mount, resolve);
+        if (strcmp(name,".")) r = enter(fs, &next, &next_mount, resolve);
         if (!r && (!last || trailing) && !S_ISDIR(st.st_mode)) r = -ENOTDIR;
         if (r) { close(next); break; }
         if (last) {

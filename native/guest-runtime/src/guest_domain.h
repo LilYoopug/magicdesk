@@ -1,6 +1,7 @@
 #ifndef MD_GUEST_DOMAIN_H
 #define MD_GUEST_DOMAIN_H
 #include <sys/types.h>
+#include "fs_location.h"
 
 /* Kernel-only adapter transport in every domain. This shared list must not
  * include pathname, credential or argument-dependent policy operations. */
@@ -28,8 +29,8 @@ void md_domain_release(struct md_guest_domain *);
 void md_domain_pin(struct md_guest_domain *);
 void md_domain_unpin(struct md_guest_domain *);
 int md_domain_scoped(const struct md_guest_domain *);
-void md_domain_root(struct md_guest_domain *, char out[33]);
-int md_domain_set_root(struct md_guest_domain *, const char root[33]);
+void md_domain_root(struct md_guest_domain *, struct md_fs_location *);
+int md_domain_set_root(struct md_guest_domain *, const struct md_fs_location *);
 int md_domain_restricted(const struct md_guest_domain *);
 int md_domain_restrict(struct md_guest_domain *, pid_t, const char *);
 int md_domain_chdir_root(struct md_guest_domain *);
