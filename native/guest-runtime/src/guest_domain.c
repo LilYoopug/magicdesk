@@ -25,6 +25,7 @@ struct md_guest_domain {
     atomic_uint refs;
     unsigned owners;
     pthread_mutex_t lock;
+    struct md_resource_queue order;
     atomic_int path_state;
     struct md_fs_location guest_root;
     struct md_fs_anchor *cwd_origin;
@@ -36,6 +37,7 @@ struct md_guest_domain *md_domain_new(void) {
         atomic_init(&d->refs, 1); atomic_init(&d->path_state, 0);
         d->owners = 1; d->root = d->cwd = d->root_process = -1;
         if (pthread_mutex_init(&d->lock, NULL)) { free(d); return NULL; }
+        if (md_resource_queue_init(&d->order)) { pthread_mutex_destroy(&d->lock); free(d); return NULL; }
     }
     return d;
 }
@@ -72,10 +74,35 @@ void md_domain_unpin(struct md_guest_domain *d) {
     if (d->cwd >= 0) close(d->cwd);
     if (d->root_process >= 0) close(d->root_process);
     md_fs_anchor_release(d->cwd_origin);
+    md_resource_queue_destroy(&d->order);
     pthread_mutex_destroy(&d->lock); free(d);
 }
 struct md_guest_domain *md_domain_unshare_prepare(struct md_guest_domain *d) {
     return md_domain_fork(d, d && d->owners == 1);
+}
+int md_fs_order_begin(struct md_guest_domain *d, struct md_fs_order *op, struct md_resource_wakeup *wake) {
+    if (!d || !op) return -EINVAL;
+    if (op->fs) return -EBUSY;
+    md_domain_pin(d); op->fs=d;
+    int ready=md_resource_order_begin(&d->order,&op->order,wake);
+    if (ready<0) { md_domain_unpin(op->fs); op->fs=NULL; }
+    return ready;
+}
+enum md_resource_order_state md_fs_order_state(const struct md_fs_order *op) {
+    return md_resource_order_state(op ? &op->order : NULL);
+}
+int md_fs_order_start(struct md_fs_order *op) {
+    return md_resource_order_start(op ? &op->order : NULL);
+}
+static int order_retired(struct md_fs_order *op, int result) {
+    if (op && !op->order.queue) { md_domain_unpin(op->fs); op->fs=NULL; }
+    return result;
+}
+int md_fs_order_cancel(struct md_fs_order *op) {
+    return order_retired(op,md_resource_order_cancel(op ? &op->order : NULL));
+}
+int md_fs_order_complete(struct md_fs_order *op) {
+    return order_retired(op,md_resource_order_complete(op ? &op->order : NULL));
 }
 int md_domain_scoped(const struct md_guest_domain *d) {
     return d && (atomic_load_explicit(&d->path_state, memory_order_acquire) & ROOT_SET);

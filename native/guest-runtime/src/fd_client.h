@@ -9,5 +9,6 @@ static inline long md_fd_control(unsigned op, uint64_t id, long first, long seco
 #else
 long md_fd_control(unsigned op, uint64_t id, long first, long second);
 void md_fd_client_enable(void);
+long md_fd_capture_cwd(void);
 #endif
 #endif

@@ -1,41 +1,32 @@
 #ifndef MD_FD_ORIGINS_H
 #define MD_FD_ORIGINS_H
 #include "fs_anchor.h"
+#include "resource_order.h"
 
 /* Guest provenance only: no kernel FD, offset or open description is owned.
  * Task-owner operations run on the supervisor; pins do not count as owners. */
 struct md_fd_origins;
-struct md_fd_wakeup;
 struct md_fd_origin_entry;
 struct md_fd_origin_update {
     struct md_fd_origins *table;
     struct md_fd_origin_entry *entry;
 };
 
-enum md_fd_order_state { MD_FD_ORDER_IDLE, MD_FD_ORDER_QUEUED, MD_FD_ORDER_READY,
-    MD_FD_ORDER_RUNNING, MD_FD_ORDER_CANCELLING };
 /* Zero-initialized, intrusive, caller-owned request. Each record belongs to one
  * event loop; the shared table serializes admission across event loops.
  * Records remain alive until cancellation removes them or completion retires
  * them. A RUNNING cancellation still needs the exact kernel terminal event. */
 struct md_fd_order {
     struct md_fd_origins *table;
-    struct md_fd_order *previous, *next;
-    enum md_fd_order_state state;
-    struct md_fd_wakeup *wakeup;
+    struct md_resource_order order;
 };
-/* One retained, nonblocking eventfd per event loop, not per request. The token
- * duplicates the descriptor so retirement may safely signal after loop exit.
- * No callback or pointer to event-loop storage crosses the ownership boundary. */
-int md_fd_wakeup_create(int eventfd, struct md_fd_wakeup **);
-void md_fd_wakeup_release(struct md_fd_wakeup *);
 /* Short FD capture/publication only, never blocking receive/FIFO readiness.
  * Begin returns 1 when ready, 0 when queued, or a negative errno. No allocation,
  * waits or callbacks. Each accepted record pins its shared file-table owner. */
 /* NULL wakeup is for a synchronous owner. Readiness is a hint; the owning loop
  * rechecks through state(). The caller owns each record until its retirement. */
-int md_fd_order_begin(struct md_fd_origins *, struct md_fd_order *, struct md_fd_wakeup *);
-enum md_fd_order_state md_fd_order_state(const struct md_fd_order *);
+int md_fd_order_begin(struct md_fd_origins *, struct md_fd_order *, struct md_resource_wakeup *);
+enum md_resource_order_state md_fd_order_state(const struct md_fd_order *);
 int md_fd_order_start(struct md_fd_order *);
 /* Cancel returns 1 if kernel completion is still required, otherwise 0.
  * A newly ready successor wakes its owner without exposing its request pointer.

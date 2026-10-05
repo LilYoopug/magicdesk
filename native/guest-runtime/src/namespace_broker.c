@@ -24,6 +24,7 @@ struct operation {
     struct seccomp_notif notification;
     struct md_fs_context context;
     struct md_fd_order order;
+    struct md_fs_order fs_order;
     struct md_fd_origin_update update;
     struct md_fs_anchor *input_origin, *output_origin;
     struct md_fs_request request;
@@ -33,7 +34,7 @@ struct operation {
 };
 struct md_namespace_broker {
     struct md_fs_worker *worker;
-    struct md_fd_wakeup *wakeup;
+    struct md_resource_wakeup *wakeup;
     struct operation *all, *free;
     struct operation *waiting;
     struct task *tasks;
@@ -112,11 +113,11 @@ struct md_namespace_broker *md_broker_create(struct md_fs_worker *worker, int st
     if (b) {
         b->worker = worker; b->listener = -1;
         if (pthread_mutex_init(&b->lock, NULL)) { free(b); return NULL; }
-        if (md_fd_wakeup_create(md_fs_worker_wake_fd(worker),&b->wakeup)) {
+        if (md_resource_wakeup_create(md_fs_worker_wake_fd(worker),&b->wakeup)) {
             pthread_mutex_destroy(&b->lock); free(b); return NULL;
         }
         if (statistics && !(b->counts = calloc(512, sizeof(*b->counts)))) {
-            md_fd_wakeup_release(b->wakeup);
+            md_resource_wakeup_release(b->wakeup);
             pthread_mutex_destroy(&b->lock); free(b); return NULL;
         }
     }
@@ -132,9 +133,14 @@ static int recycle(struct md_namespace_broker *b, struct operation *op) {
     md_fs_anchor_release(op->input_origin); op->input_origin=NULL;
     md_fs_anchor_release(op->output_origin); op->output_origin=NULL;
     int error=0;
+    if (op->fs_order.fs) {
+        error=md_fs_order_cancel(&op->fs_order);
+        if (error==1) error=md_fs_order_complete(&op->fs_order);
+    }
     if (op->order.table) {
-        error=md_fd_order_cancel(&op->order);
-        if (error==1) error=md_fd_order_complete(&op->order);
+        int retired=md_fd_order_cancel(&op->order);
+        if (retired==1) retired=md_fd_order_complete(&op->order);
+        if (!error) error=retired;
     }
     md_fs_context_end(&op->context);
     pthread_mutex_lock(&b->lock);
@@ -180,6 +186,10 @@ static int capture(struct operation *op) {
         if ((int)q->data.args[0] == AT_FDCWD && op->request.path[0]) {
             char cwd[64]; snprintf(cwd, sizeof(cwd), "/proc/%u/cwd", q->pid);
             op->directory = open(cwd, O_PATH | O_DIRECTORY | O_CLOEXEC);
+            if (op->directory>=0) {
+                struct md_fs_location root;
+                md_domain_paths(op->fs_order.fs,&root,&op->input_origin);
+            }
         } else {
             op->directory = duplicate(op->task, q->pid, (int)q->data.args[0]);
             if (op->directory>=0)
@@ -260,9 +270,29 @@ static int perform(struct md_namespace_broker *b, struct operation *op, int prep
     struct counters *count=b->counts && (unsigned)op->notification.data.nr<512
         ? &b->counts[op->notification.data.nr] : NULL;
     if (prepared>0) {
-        int error=md_fd_order_start(&op->order);
-        if (error) return error;
+        if (md_fd_order_state(&op->order)==MD_RESOURCE_ORDER_READY) {
+            int error=md_fd_order_start(&op->order);
+            if (error) return error;
+        }
+        int cwd=*op->path!='/' && (int)op->notification.data.args[0]==AT_FDCWD && op->request.path[0];
+        if (cwd) {
+            if (!op->fs_order.fs) {
+                int ready=md_fs_order_begin(op->context.task.fs,&op->fs_order,b->wakeup);
+                if (ready<0) return ready;
+                if (!ready) {
+                    /* EVENT_WAIT: the shared CLONE_FS owner completes its cwd
+                     * mutation; notification cancellation retires this request. */
+                    op->waiting=b->waiting; b->waiting=op; return 0;
+                }
+            }
+            int error=md_fs_order_start(&op->fs_order);
+            if (error) return error;
+        }
         prepared=capture(op);
+        if (op->fs_order.fs) {
+            int error=md_fs_order_complete(&op->fs_order);
+            if (error) return error;
+        }
     }
     if (prepared) {
         if (prepared>0) execute(op,b->output,sizeof(b->output));
@@ -289,7 +319,8 @@ static int progress(struct md_namespace_broker *b) {
     while (*at) {
         struct operation *op=*at;
         int alive=valid(op);
-        if (alive && md_fd_order_state(&op->order)!=MD_FD_ORDER_READY) { at=&op->waiting; continue; }
+        if (alive && md_fd_order_state(&op->order)!=MD_RESOURCE_ORDER_READY
+                && md_fs_order_state(&op->fs_order)!=MD_RESOURCE_ORDER_READY) { at=&op->waiting; continue; }
         *at=op->waiting; op->waiting=NULL;
         int error=alive ? perform(b,op,1) : recycle(b,op);
         if (error) return error;
@@ -399,6 +430,9 @@ void md_broker_destroy(struct md_namespace_broker *b) {
         if (op->result.open_completion.kind == MD_OPEN_PIPE) close(op->result.open_completion.control);
         md_fd_origins_finish(&op->update,-1);
         md_fs_anchor_release(op->input_origin); md_fs_anchor_release(op->output_origin);
+        if (op->fs_order.fs) {
+            if (md_fs_order_cancel(&op->fs_order)==1) md_fs_order_complete(&op->fs_order);
+        }
         if (op->order.table) {
             if (md_fd_order_cancel(&op->order)==1) md_fd_order_complete(&op->order);
         }
@@ -410,6 +444,6 @@ void md_broker_destroy(struct md_namespace_broker *b) {
         if (t->process >= 0) close(t->process);
         free(t);
     }
-    md_fd_wakeup_release(b->wakeup);
+    md_resource_wakeup_release(b->wakeup);
     pthread_mutex_destroy(&b->lock); free(b);
 }

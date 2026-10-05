@@ -115,9 +115,11 @@ struct thread {
     struct md_task_resources resources;
     struct md_resource_change resource_change;
     struct md_fd_order fd_order;
+    struct md_fs_order fs_order;
+    struct md_fs_anchor *cwd_origin;
     struct md_fd_mutation fd_mutation;
     struct user_pt_regs fd_registers;
-    int fd_running;
+    int fd_running, fd_cwd;
     unsigned fd_job;
     struct md_fd_exchange *fd_exchange;
     unsigned long cloning;
@@ -151,7 +153,7 @@ struct denial { unsigned nr, adapted, count; enum phase phase; };
 static struct denial denials[64];
 static int result, signal_fd, listener = -1;
 static int fd_ready = -1;
-static struct md_fd_wakeup *fd_wakeup;
+static struct md_resource_wakeup *fd_wakeup;
 static struct md_fd_exchanges *fd_exchanges;
 static int cancelling;
 static struct md_launch_registration registration = {.directory=-1, .record=-1};
@@ -257,7 +259,7 @@ static void cleanup(void) {
     md_identity_release(&launch_identity);
     if (listener >= 0) close(listener);
     if (fd_ready >= 0) close(fd_ready);
-    md_fd_wakeup_release(fd_wakeup); fd_wakeup=NULL;
+    md_resource_wakeup_release(fd_wakeup); fd_wakeup=NULL;
     free(statistics);
 }
 _Noreturn static void fail(const char *what, int line) {
@@ -1117,6 +1119,11 @@ static void domain_path_call(struct thread *t, struct user_pt_regs *r) {
     domain_path_load(t);
 }
 static void fd_discard(struct thread *t) {
+    if (t->fd_running && t->fd_cwd && t->fd_registers.regs[8]!=SYS_openat)
+        CHECK(!md_domain_set_cwd(t->fs_order.fs,NULL));
+    md_fs_anchor_release(t->cwd_origin); t->cwd_origin=NULL;
+    if (t->fs_order.fs && md_fs_order_cancel(&t->fs_order)==1)
+        CHECK(!md_fs_order_complete(&t->fs_order));
     if (t->fd_running) CHECK(!md_fd_mutation_abandon(&t->fd_mutation,t->fd_order.table));
     else md_fd_mutation_discard(&t->fd_mutation);
     if (t->fd_order.table) {
@@ -1127,7 +1134,7 @@ static void fd_discard(struct thread *t) {
             CHECK(!md_fd_order_complete(&t->fd_order));
         }
     }
-    t->fd_running=0; t->fd_job=0;
+    t->fd_running=0; t->fd_job=0; t->fd_cwd=0;
     md_fd_exchange_close(fd_exchanges,t->fd_exchange); t->fd_exchange=NULL;
 }
 static void fd_finish(struct thread *t, long result) {
@@ -1136,13 +1143,30 @@ static void fd_finish(struct thread *t, long result) {
     if (exec || nr==SYS_unshare || (nr==SYS_close_range && (t->fd_registers.regs[2]&CLOSE_RANGE_UNSHARE)))
         CHECK(!md_resources_unshare_finish(ipc,&t->resources,&t->resource_change,result));
     if (exec && !result) md_fd_origins_exec(t->resources.files);
+    if (t->fd_cwd && nr!=SYS_openat && !result)
+        CHECK(!md_domain_set_cwd(t->fs_order.fs,md_domain_restricted(t->fs_order.fs) ? NULL : t->cwd_origin));
+    md_fs_anchor_release(t->cwd_origin); t->cwd_origin=NULL;
     CHECK(!md_fd_mutation_finish(&t->fd_mutation,t->resources.files,result));
+    if (t->fs_order.fs) CHECK(!md_fs_order_complete(&t->fs_order));
     CHECK(!md_fd_order_complete(&t->fd_order));
-    t->fd_running=0;
+    t->fd_running=0; t->fd_cwd=0;
 }
 static void fd_start(struct thread *t) {
-    CHECK(!md_fd_order_start(&t->fd_order));
+    if (md_fd_order_state(&t->fd_order)==MD_RESOURCE_ORDER_READY)
+        CHECK(!md_fd_order_start(&t->fd_order));
     struct user_pt_regs *r=&t->fd_registers;
+    int needs_fs=!t->fd_job && (t->fd_cwd || r->regs[8]==SYS_clone
+        || (r->regs[8]==SYS_unshare && (r->regs[0]&CLONE_FS)));
+    if (needs_fs) {
+        if (!t->fs_order.fs) {
+            int ready=md_fs_order_begin(t->resources.fs,&t->fs_order,fd_wakeup);
+            CHECK(ready>=0);
+            /* EVENT_WAIT: the CLONE_FS owner completes its exact mutation;
+             * terminal task cleanup cancels both ordered resource records. */
+            if (!ready) return;
+        }
+        CHECK(!md_fs_order_start(&t->fs_order));
+    }
     if (t->fd_job) {
         long result=0;
         if (t->fd_job==MD_FD_INPUT) {
@@ -1163,6 +1187,15 @@ static void fd_start(struct thread *t) {
         error=md_resources_unshare_prepare(&t->resources,r->regs[8]==SYS_unshare ? r->regs[0] : CLONE_FILES,
             &t->resource_change);
     if (!error) error=md_fd_mutation_prepare(t->resources.files,r->regs[8],args,&t->fd_mutation);
+    if (!error && t->fd_cwd) {
+        if (r->regs[8]==SYS_fchdir)
+            t->cwd_origin=md_fd_origins_get(t->resources.files,(int)r->regs[0],NULL);
+        else if (r->regs[8]==SYS_openat) {
+            struct md_fs_location root;
+            md_domain_paths(t->fs_order.fs,&root,&t->cwd_origin);
+            error=md_fd_origins_prepare(t->resources.files,t->cwd_origin,FD_CLOEXEC,&t->fd_mutation.update);
+        }
+    }
     if (error) {
         md_resources_unshare_finish(ipc,&t->resources,&t->resource_change,-ECANCELED);
         fd_discard(t); return_value(t,r,error); return;
@@ -1170,10 +1203,11 @@ static void fd_start(struct thread *t) {
     if (r->regs[8]==SYS_clone) { t->original=*r; t->phase=OBSERVING; }
     t->fd_running=1; resume(t->pid,0);
 }
-static void fd_begin(struct thread *t, const struct user_pt_regs *r) {
+static void fd_begin(struct thread *t, const struct user_pt_regs *r, int cwd) {
     if (!t->resources.files) { resume(t->pid,0); return; }
     CHECK(!t->fd_order.table && !t->fd_running);
     t->fd_job=0;
+    t->fd_cwd=cwd;
     t->fd_registers=*r;
     int ready=md_fd_order_begin(t->resources.files,&t->fd_order,fd_wakeup);
     CHECK(ready>=0);
@@ -1197,7 +1231,7 @@ static void fd_control(struct thread *t, struct user_pt_regs *r) {
     } else if (!id || id!=md_fd_exchange_id(t->fd_exchange)) result=-ESTALE;
     else if (operation==MD_FD_SENT || operation==MD_FD_RECEIVED) {
         if (t->fd_job!=(operation==MD_FD_SENT ? MD_FD_INPUT : MD_FD_RECEIVE)
-                || md_fd_order_state(&t->fd_order)!=MD_FD_ORDER_RUNNING) result=-EINVAL;
+                || md_fd_order_state(&t->fd_order)!=MD_RESOURCE_ORDER_RUNNING) result=-EINVAL;
         else {
             if (operation==MD_FD_RECEIVED) result=md_fd_exchange_received(t->fd_exchange);
             CHECK(!md_fd_order_complete(&t->fd_order)); t->fd_job=0;
@@ -1215,7 +1249,8 @@ static void fd_progress(void) {
     uint64_t value;
     while (read(fd_ready,&value,sizeof(value))<0 && errno==EINTR) { }
     for (struct thread *t=threads;t;t=t->next)
-        if (t->pid && !t->fd_running && md_fd_order_state(&t->fd_order)==MD_FD_ORDER_READY) fd_start(t);
+        if (t->pid && !t->fd_running && (md_fd_order_state(&t->fd_order)==MD_RESOURCE_ORDER_READY
+                || md_fs_order_state(&t->fs_order)==MD_RESOURCE_ORDER_READY)) fd_start(t);
 }
 static int domain_call(struct thread *t, struct user_pt_regs *r, unsigned long cookie) {
     long nr = r->regs[8];
@@ -1225,7 +1260,7 @@ static int domain_call(struct thread *t, struct user_pt_regs *r, unsigned long c
     }
     if (nr == SYS_unshare) {
         CHECK(t->phase == IDLE);
-        fd_begin(t,r);
+        fd_begin(t,r,0);
         return 1;
     }
     if (nr == SYS_setns) { return_value(t, r, -ENOTSUP); return 1; }
@@ -1552,7 +1587,7 @@ int main(int argc, char **argv) {
     int keep[] = {signal_fd, channel[0], command_owner};
     CHECK(!md_process_close_fds(keep, command_owner >= 0 ? 3 : 2));
     fd_ready=eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK); CHECK(fd_ready>=0);
-    CHECK(!md_fd_wakeup_create(fd_ready,&fd_wakeup));
+    CHECK(!md_resource_wakeup_create(fd_ready,&fd_wakeup));
     /* EVENT_WAIT: child readiness precedes attaching; timeout cancels this tree. */
     CHECK(md_event_wait_fd(channel[0], POLLIN, md_event_now() + 5000000000LL) >= 0);
     char byte; CHECK(read(channel[0], &byte, 1) == 1 && byte == 'r');
@@ -1741,7 +1776,13 @@ int main(int argc, char **argv) {
             }
             if (identity_call(t, &regs, cookie)) continue;
             if (domain_call(t, &regs, cookie)) continue;
-            if (cookie==MD_INTERCEPT_FD) { fd_begin(t,&regs); continue; }
+            if (cookie==MD_INTERCEPT_FD || cookie==MD_INTERCEPT_CWD) {
+                if (cookie==MD_INTERCEPT_CWD && regs.regs[8]==SYS_openat
+                        && (regs.pc!=abi.cwd_gate || (int)regs.regs[0]!=AT_FDCWD
+                            || regs.regs[1]!=abi.cwd_path || regs.regs[2]!=(O_PATH|O_DIRECTORY|O_CLOEXEC)
+                            || regs.regs[3])) { return_value(t,&regs,-EINVAL); continue; }
+                fd_begin(t,&regs,cookie==MD_INTERCEPT_CWD); continue;
+            }
             if (cookie == MD_INTERCEPT_MEMORY) {
                 CHECK(t->phase == IDLE);
                 int overlap = md_shm_intersects(t->shm_space,regs.regs[0],regs.regs[1]);
@@ -1775,7 +1816,7 @@ int main(int argc, char **argv) {
             if (cookie == MD_INTERCEPT_EXEC) {
                 CHECK(t->phase == DISPATCHING);
                 if (!restore_mask(t)) continue;
-                t->phase = EXECUTING; fd_begin(t,&regs); continue;
+                t->phase = EXECUTING; fd_begin(t,&regs,0); continue;
             }
             if (cookie == MD_INTERCEPT_OBSERVE) {
                 CHECK(t->ready && t->phase == IDLE);

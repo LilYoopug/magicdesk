@@ -156,6 +156,21 @@ Root selection and cwd are independent: changing the root does not move cwd,
 and cwd provenance alone does not activate the scoped-root adapter. The special
 proc-root chdir clears ordinary cwd provenance.
 
+Ordinary chdir resolves its directory through the filesystem transport and then
+performs native fchdir. The supervisor captures that descriptor's origin and
+publishes cwd provenance only after kernel success. A failed change retains the
+previous origin; an unconfirmed change at task death clears it. A native host
+chdir without a known origin also clears it after success. The kernel remains
+the cwd owner; no pathname cache or synthetic cwd replaces it.
+
+Relative direct requests capture `/proc/TID/cwd` and its current origin together
+under the filesystem-context turn. Task-affine requests use a dedicated bootstrap
+openat gate for `.`; it captures the kernel directory and publishes its origin
+to the temporary descriptor in that same turn. Later RPC input capture therefore
+uses a retained descriptor, not a fresh cwd lookup. Application filters remain
+in force. Initial cwd and unannotated native descriptors remain unknown until a
+successful change through an annotated directory.
+
 Filesystem opens from the direct broker and task-affine service publish their
 origins automatically. Native dup/dup3, F_DUPFD/F_DUPFD_CLOEXEC, F_SETFD, close
 and close_range update annotations from their actual kernel results. Fork,
@@ -163,7 +178,7 @@ unshare and exec use the same ordered ownership transition. The seccomp filter
 and restricted-domain policy share the descriptor-operation list; observation
 does not remove native descriptor capabilities after a proc-root restriction.
 
-This does not yet cover cwd changes, inherited/native descriptors or general
+This does not yet cover inherited/native descriptors or general
 application SCM_RIGHTS transfers. An unconfirmed native mutation at task death
 forgets any known affected destination instead of claiming rollback or retaining
 a potentially stale origin. An automatically assigned dup result is then unknown.
@@ -172,13 +187,20 @@ guest namespaces can be published.
 
 ### Publication Ordering
 
-The file-table owner provides an intrusive queue for short descriptor capture
-and publication operations. The supervisor and filesystem worker admit records
-through the same synchronized queue, while each record retains one event-loop
-owner. Mutexes cover metadata changes, never kernel calls or event waits.
-CLONE_FILES peers share the queue, while an independent table copy starts with
-an empty queue. Every accepted request pins its table through completion,
-including after the last task releases ownership.
+`resource_order` provides an intrusive queue embedded independently in each
+file-table and filesystem-context owner. Typed adapters pin their resource through
+completion, including after its last task owner exits. The supervisor and
+filesystem worker share the synchronized queues, while each record retains one
+event-loop owner. Mutexes cover metadata changes, never kernel calls or event
+waits. CLONE_FILES shares the file queue; CLONE_FS shares the filesystem queue.
+Independent resource copies start with empty queues.
+
+Operations needing both acquire files before filesystem context and release in
+reverse order. Shared-cwd peers with independent file tables still serialize on
+the same filesystem context. Cwd capture releases that turn once its descriptor
+and origin are retained, before filesystem execution or RPC. Fork captures both
+resources at the kernel birth event; filesystem unshare holds both through its
+kernel result. Neither waits for child completion while retaining a turn.
 
 A zero-initialized caller-owned record is queued or immediately ready, then
 explicitly started. Completion follows the exact kernel result and its metadata
@@ -190,7 +212,7 @@ Cancelling a queued or ready record removes it; cancelling a running record
 only records intent. It continues to own its turn until the kernel operation
 is confirmed complete. Cancellation or a timeout does not prove that a descriptor
 was never installed. Requests perform no queue allocation, callbacks or blocking
-waits, and unrelated file tables can progress independently.
+waits, and unrelated resource owners can progress independently.
 
 Both filesystem transports and the observed native mutations use this ordering.
 A blocking receive or FIFO rendezvous waits outside the queue; only its short
@@ -333,11 +355,18 @@ Three independent event loops exercise 3000 publications and concurrent
 cancellation; saturated wake descriptors and owner-loop teardown retain correct
 handoff. Exchange tests check actor/table binding, owner loss, malformed receipts,
 preparation failure and allocation-free publication.
+Filesystem-order checks cover all four CLONE_FS/CLONE_FILES combinations,
+independent file-table progress, running cancellation and retained cwd after
+all task owners exit, with allocation failure enabled.
 `resource_guest` compares native Linux and Shroot cwd/umask/FD semantics,
 failed-unshare rollback, close_range splitting/marking and exec inheritance. Guest-only cases check proc-root
 sharing, native descriptor mutation after proc-root restriction, 32-bit fcntl
 command semantics and semaphore-undo splitting, final-owner cleanup and exec retention.
 Pipe acknowledgements order observations; an alarm is only a failure bound.
+Concurrent cwd cases alternate successful and failed fchdir while peers perform
+relative ordinary/O_PATH opens and getcwd. Both shared and independent descriptor
+tables use the same shared filesystem context; guest opens exercise direct and
+task-affine transports.
 
 `fd_handoff` exercises native kernel publication under the selected executor,
 not Shroot emulation. A real CLONE_FILES peer replaces a slot with another open

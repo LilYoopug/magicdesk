@@ -219,28 +219,54 @@ static void ordering(struct md_fs_anchor *origin) {
     allocation_budget=0;
     assert(md_fd_order_begin(copy,&independent,NULL)==1 && !md_fd_order_start(&independent));
     assert(!md_fd_order_complete(&independent));
-    assert(!md_fd_order_cancel(&c) && c.state==MD_FD_ORDER_IDLE);
-    assert(!md_fd_order_cancel(&d) && d.state==MD_FD_ORDER_IDLE);
-    assert(md_fd_order_cancel(&a)==1 && a.state==MD_FD_ORDER_CANCELLING);
+    assert(!md_fd_order_cancel(&c) && md_fd_order_state(&c)==MD_RESOURCE_ORDER_IDLE);
+    assert(!md_fd_order_cancel(&d) && md_fd_order_state(&d)==MD_RESOURCE_ORDER_IDLE);
+    assert(md_fd_order_cancel(&a)==1 && md_fd_order_state(&a)==MD_RESOURCE_ORDER_CANCELLING);
     assert(md_fd_order_cancel(&a)==1);
-    assert(b.state==MD_FD_ORDER_QUEUED);
+    assert(md_fd_order_state(&b)==MD_RESOURCE_ORDER_QUEUED);
     /* Cancellation intent is not proof that the kernel did not install an FD. */
     md_fd_origins_finish(&update,23);
-    assert(!md_fd_order_complete(&a) && md_fd_order_state(&b)==MD_FD_ORDER_READY);
+    assert(!md_fd_order_complete(&a) && md_fd_order_state(&b)==MD_RESOURCE_ORDER_READY);
     expect(table,23,origin,0);
     assert(md_fd_order_begin(table,&c,NULL)==0);
-    assert(!md_fd_order_cancel(&b) && md_fd_order_state(&c)==MD_FD_ORDER_READY);
+    assert(!md_fd_order_cancel(&b) && md_fd_order_state(&c)==MD_RESOURCE_ORDER_READY);
     assert(!md_fd_order_start(&c));
     assert(!md_fd_order_complete(&c));
     assert(md_fd_order_begin(table,&d,NULL)==1 && !md_fd_order_start(&d));
     assert(md_fd_order_begin(table,&a,NULL)==0);
     md_fd_origins_release(shared); md_fd_origins_release(table);
     expect(d.table,23,origin,0);
-    assert(!md_fd_order_complete(&d) && md_fd_order_state(&a)==MD_FD_ORDER_READY && !d.table);
+    assert(!md_fd_order_complete(&d) && md_fd_order_state(&a)==MD_RESOURCE_ORDER_READY && !d.table);
     expect(a.table,23,origin,0);
     assert(!md_fd_order_cancel(&a) && !a.table);
     allocation_budget=-1;
     md_fd_origins_release(copy);
+}
+static void filesystem_ordering(struct md_fs_anchor *origin) {
+    for (unsigned bits=0;bits<4;++bits) {
+        unsigned flags=(bits&1 ? CLONE_FS : 0) | (bits&2 ? CLONE_FILES : 0);
+        struct md_task_resources parent={0}, child={0};
+        assert(!md_resources_init(&parent,origin->view));
+        assert(!md_domain_set_cwd(parent.fs,origin));
+        assert(!md_resources_fork(&parent,flags,&child));
+        struct md_fs_order a={0}, b={0};
+        struct md_fd_order files={0};
+        allocation_budget=0;
+        assert(md_fs_order_begin(parent.fs,&a,NULL)==1 && !md_fs_order_start(&a));
+        assert(md_fd_order_begin(child.files,&files,NULL)==1 && !md_fd_order_start(&files));
+        assert(md_fs_order_begin(child.fs,&b,NULL)==!(flags&CLONE_FS));
+        assert(md_fs_order_cancel(&a)==1);
+        assert(!md_resources_release(NULL,&parent) && !md_resources_release(NULL,&child));
+        assert(!md_fs_order_complete(&a));
+        assert(md_fs_order_state(&b)==MD_RESOURCE_ORDER_READY && !md_fs_order_start(&b));
+        struct md_fs_location root;
+        struct md_fs_anchor *cwd=NULL;
+        md_domain_paths(b.fs,&root,&cwd); assert(cwd==origin); md_fs_anchor_release(cwd);
+        assert(!md_fs_order_complete(&b) && !b.fs);
+        assert(!md_fd_order_complete(&files));
+        allocation_budget=-1;
+    }
+    puts("PASS independent filesystem ordering for every CLONE_FS/CLONE_FILES combination and owner teardown");
 }
 struct event_owner {
     struct md_fd_origins *table;
@@ -251,8 +277,8 @@ struct event_owner {
 static void *ordered_writer(void *opaque) {
     struct event_owner *owner=opaque;
     int fd=eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK); assert(fd>=0);
-    struct md_fd_wakeup *wakeup=NULL;
-    assert(!md_fd_wakeup_create(fd,&wakeup));
+    struct md_resource_wakeup *wakeup=NULL;
+    assert(!md_resource_wakeup_create(fd,&wakeup));
     /* EVENT_WAIT: all producers are ready; the fixture runner bounds failure. */
     pthread_barrier_wait(owner->start);
     for (unsigned i=0;i<1000;++i) {
@@ -263,7 +289,7 @@ static void *ordered_writer(void *opaque) {
             assert(md_fd_order_begin(owner->table,&op,wakeup)>=0);
         }
         int64_t deadline=md_event_now()+5000000000LL;
-        while (md_fd_order_state(&op)!=MD_FD_ORDER_READY) {
+        while (md_fd_order_state(&op)!=MD_RESOURCE_ORDER_READY) {
             /* EVENT_WAIT: another owner retires its exact operation; timeout
              * fails the fixture, never grants admission. Late hints are OK. */
             assert(!md_event_wait_fd(fd,POLLIN,deadline));
@@ -280,7 +306,7 @@ static void *ordered_writer(void *opaque) {
         assert(atomic_fetch_sub(owner->inside,1)==1);
         assert(!md_fd_order_complete(&op));
     }
-    close(fd); md_fd_wakeup_release(wakeup); return NULL;
+    close(fd); md_resource_wakeup_release(wakeup); return NULL;
 }
 static void event_ordering(struct md_fs_anchor *origin) {
     struct md_fd_origins *table=md_fd_origins_new(); assert(table);
@@ -295,8 +321,8 @@ static void event_ordering(struct md_fs_anchor *origin) {
     assert(committed==3000 && !atomic_load(&inside));
     pthread_barrier_destroy(&start);
     int fd=eventfd(0,EFD_NONBLOCK|EFD_CLOEXEC); assert(fd>=0);
-    struct md_fd_wakeup *wake=NULL;
-    assert(!md_fd_wakeup_create(fd,&wake));
+    struct md_resource_wakeup *wake=NULL;
+    assert(!md_resource_wakeup_create(fd,&wake));
     struct md_fd_order a={0}, b={0};
     assert(md_fd_order_begin(table,&a,NULL)==1 && !md_fd_order_start(&a));
     assert(!md_fd_order_begin(table,&b,wake));
@@ -304,13 +330,13 @@ static void event_ordering(struct md_fs_anchor *origin) {
     assert(write(fd,&full,sizeof(full))==sizeof(full));
     assert(!md_fd_order_complete(&a));
     assert(read(fd,&count,sizeof(count))==sizeof(count) && count==full);
-    assert(md_fd_order_state(&b)==MD_FD_ORDER_READY && !md_fd_order_cancel(&b));
+    assert(md_fd_order_state(&b)==MD_RESOURCE_ORDER_READY && !md_fd_order_cancel(&b));
     assert(md_fd_order_begin(table,&a,NULL)==1 && !md_fd_order_start(&a));
     assert(!md_fd_order_begin(table,&b,wake));
     /* The queued record retains the notification endpoint, not the loop. */
-    close(fd); md_fd_wakeup_release(wake);
+    close(fd); md_resource_wakeup_release(wake);
     assert(!md_fd_order_complete(&a));
-    assert(md_fd_order_state(&b)==MD_FD_ORDER_READY && !md_fd_order_cancel(&b));
+    assert(md_fd_order_state(&b)==MD_RESOURCE_ORDER_READY && !md_fd_order_cancel(&b));
     md_fd_origins_release(table);
 }
 static void mutations(struct md_fs_anchor *a, struct md_fs_anchor *b) {
@@ -397,6 +423,7 @@ void test_fd_origins(void) {
     assert(first && second);
     struct md_fs_anchor *a=capture(first,open("/",O_PATH|O_CLOEXEC));
     struct md_fs_anchor *b=capture(second,open("/",O_PATH|O_CLOEXEC));
+    filesystem_ordering(a);
     struct stat x,y; assert(!fstat(a->fd,&x) && !fstat(b->fd,&y));
     assert(x.st_dev==y.st_dev && x.st_ino==y.st_ino && a->view!=b->view);
     struct md_fd_origins *table=md_fd_origins_new(); assert(table);

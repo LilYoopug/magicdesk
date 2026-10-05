@@ -3,6 +3,7 @@
 #include <sys/types.h>
 #include "fs_location.h"
 #include "fs_anchor.h"
+#include "resource_order.h"
 
 /* Kernel-only adapter transport in every domain. This shared list must not
  * include pathname, credential or argument-dependent policy operations. */
@@ -28,6 +29,17 @@
 
 /* CLONE_FS-owned root context. Registry pins do not count as task owners. */
 struct md_guest_domain;
+/* Independent of the CLONE_FILES queue. Operations needing both resources
+ * always acquire files first, then filesystem context, and release in reverse. */
+struct md_fs_order {
+    struct md_guest_domain *fs;
+    struct md_resource_order order;
+};
+int md_fs_order_begin(struct md_guest_domain *, struct md_fs_order *, struct md_resource_wakeup *);
+enum md_resource_order_state md_fs_order_state(const struct md_fs_order *);
+int md_fs_order_start(struct md_fs_order *);
+int md_fs_order_cancel(struct md_fs_order *);
+int md_fs_order_complete(struct md_fs_order *);
 struct md_guest_domain *md_domain_new(void);
 struct md_guest_domain *md_domain_fork(struct md_guest_domain *, int shared);
 struct md_guest_domain *md_domain_unshare_prepare(struct md_guest_domain *);

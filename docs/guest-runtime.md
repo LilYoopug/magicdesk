@@ -549,8 +549,10 @@ semaphore undo. Origin owners retain only O_PATH anchors. Filesystem opens from
 both transports publish their origins in the same per-file-table order as native
 dup/fcntl/close, close_range, fork and exec observation. Task-affine FD replies use
 a retained shared kernel receipt, including receiver death before acknowledgement.
-Data IO and open-file-description lifetime remain kernel-owned. Automatic cwd
-provenance, inherited/native descriptors and general application SCM_RIGHTS
+Data IO and open-file-description lifetime remain kernel-owned. Cwd changes and
+relative-path capture use the same short-resource queue mechanism with an
+independent CLONE_FS owner. Native completion publishes cwd provenance; failed
+changes retain it. Initial cwd, inherited/native descriptor provenance and general application SCM_RIGHTS
 tracking remain incomplete; copied guest mount namespaces are not enabled. See the
 [resource contract](../native/guest-runtime/process-resources.md).
 

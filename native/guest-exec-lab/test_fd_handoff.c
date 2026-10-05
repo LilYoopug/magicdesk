@@ -223,7 +223,7 @@ static void ordered_handoff(const struct fixture *f, int control, int data) {
     assert(md_fd_order_begin(other,&independent,NULL)==1 && !md_fd_order_start(&independent));
     assert(!md_fd_order_complete(&independent));
     md_fd_origins_finish(&update,target);
-    assert(!md_fd_order_complete(&install) && md_fd_order_state(&mutation)==MD_FD_ORDER_READY);
+    assert(!md_fd_order_complete(&install) && md_fd_order_state(&mutation)==MD_RESOURCE_ORDER_READY);
     origin_at(files,target,source);
     assert(!md_fd_order_start(&mutation));
     assert(!md_fd_origins_prepare(files,replacement,FD_CLOEXEC,&update));

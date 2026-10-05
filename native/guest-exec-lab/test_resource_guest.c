@@ -151,6 +151,56 @@ static void restricted_descriptors(void) {
     reap(child);
     puts("PASS restricted proc-root preserves native descriptor mutation and flags");
 }
+struct cwd_context { int ready[2], go[2], directory[2], bad, writer; };
+static int cwd_worker(void *argument) {
+    struct cwd_context *c=argument;
+    put(c->ready[1]); get(c->go[0]);
+    for (unsigned i=0;i<250;++i) {
+        if (c->writer) {
+            assert(!fchdir(c->directory[i%2]));
+            assert(fchdir(c->bad)==-1 && errno==ENOTDIR);
+        } else {
+            /* Ordinary open uses direct notifications; O_PATH and getcwd use
+             * the task-affine transport. Either directory is a valid snapshot. */
+            int fd=open("item",i%2 ? O_PATH|O_CLOEXEC : O_RDONLY|O_CLOEXEC); assert(fd>=0);
+            struct stat st; assert(!fstat(fd,&st) && S_ISREG(st.st_mode));
+            assert(!close(fd));
+            char path[4096]; assert(getcwd(path,sizeof(path)));
+            assert(strstr(path,"/cwd-a") || strstr(path,"/cwd-b"));
+        }
+    }
+    return 0;
+}
+static void concurrent_cwd(unsigned flags) {
+    int original=open(".",O_PATH|O_DIRECTORY|O_CLOEXEC); assert(original>=0);
+    struct cwd_context contexts[3]={0};
+    struct cwd_context *base=contexts;
+    assert(!pipe(base->ready) && !pipe(base->go));
+    const char *names[]={"cwd-a","cwd-b"};
+    for (unsigned i=0;i<2;++i) {
+        assert(!mkdir(names[i],0700) || errno==EEXIST);
+        base->directory[i]=open(names[i],O_PATH|O_DIRECTORY|O_CLOEXEC); assert(base->directory[i]>=0);
+        int fd=openat(base->directory[i],"item",O_RDWR|O_CREAT|O_TRUNC|O_CLOEXEC,0700); assert(fd>=0);
+        assert(!close(fd));
+    }
+    base->bad=openat(base->directory[0],"item",O_PATH|O_CLOEXEC); assert(base->bad>=0);
+    assert(!fchdir(base->directory[0]));
+    pid_t children[3]; void *stacks[3];
+    for (unsigned i=0;i<3;++i) {
+        contexts[i]=*base; contexts[i].writer=i==0;
+        stacks[i]=malloc(1024*1024); assert(stacks[i]);
+        children[i]=clone(cwd_worker,(char *)stacks[i]+1024*1024,SIGCHLD|CLONE_FS|flags,contexts+i);
+        assert(children[i]>0);
+    }
+    for (unsigned i=0;i<3;++i) get(base->ready[0]);
+    for (unsigned i=0;i<3;++i) put(base->go[1]);
+    for (unsigned i=0;i<3;++i) { reap(children[i]); free(stacks[i]); }
+    assert(!fchdir(original) && !close(original));
+    assert(!close(base->directory[0]) && !close(base->directory[1]) && !close(base->bad));
+    close(base->ready[0]); close(base->ready[1]); close(base->go[0]); close(base->go[1]);
+    printf("PASS concurrent cwd: shared FS, files=%s, direct/RPC relative opens and failed fchdir\n",
+        flags&CLONE_FILES ? "shared" : "independent");
+}
 static void undo(void) {
     int sem = syscall(SYS_semget, IPC_PRIVATE, 1, 0600); assert(sem >= 0);
     assert(!syscall(SYS_semctl, sem, 0, SETVAL, 1));
@@ -260,6 +310,8 @@ int main(int argc, char **argv) {
     int guest = !strcmp(argv[1], "guest");
     assert(guest || !strcmp(argv[1], "native"));
     if (guest) restricted_descriptors();
+    concurrent_cwd(0);
+    concurrent_cwd(CLONE_FILES);
     case_sharing(0, -1, 0);
     case_sharing(CLONE_FS | CLONE_FILES, -1, 0);
     case_sharing(CLONE_FS | CLONE_FILES, CLONE_FS, 0);

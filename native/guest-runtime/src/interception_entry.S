@@ -1,5 +1,14 @@
 #include <asm/unistd.h>
 .text
+.global md_guest_open_cwd
+.type md_guest_open_cwd, %function
+md_guest_open_cwd:
+    mov x8, #__NR_openat
+    svc #0
+.global md_guest_cwd_return
+md_guest_cwd_return:
+    ret
+.size md_guest_open_cwd, .-md_guest_open_cwd
 .global md_guest_fd_control
 .type md_guest_fd_control, %function
 md_guest_fd_control:

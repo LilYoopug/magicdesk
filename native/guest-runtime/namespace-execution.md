@@ -59,8 +59,12 @@ seccomp filter and the real kernel cwd/descriptors.
   the caller's guest filesystem IDs and supplementary groups from the supervisor's
   registry; attached host objects retain real kernel permission checks.
 - Cwd is a real backing-directory FD retained by the kernel. Relative requests
-  capture it with openat; getcwd reconstructs the current virtual parent path.
-  Renaming the directory preserves cwd and inherited dirfd identity.
+  capture it and its provenance under the independently shared filesystem-context
+  turn. Direct notifications use `/proc/TID/cwd`; the task-affine adapter uses
+  a bootstrap openat gate. Native fchdir completion publishes the selected
+  descriptor's origin, with failed changes retaining the previous value.
+  getcwd reconstructs the current virtual parent path. Renaming the directory
+  preserves cwd and inherited dirfd identity.
 - Guest `chroot` selects a directory within the inode store or an explicit native
   attachment. The authenticated task snapshot supplies its mount view and root
   to this same walker as a mount/object location. Absolute paths/symlinks, `..` and getcwd

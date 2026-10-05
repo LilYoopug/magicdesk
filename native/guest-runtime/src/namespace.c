@@ -3,6 +3,7 @@
 #include "proc_paths.h"
 #include "fs_rpc.h"
 #include "fd_metadata.h"
+#include "fd_client.h"
 #include "linux_abi.h"
 #include "raw.h"
 #include "posix_acl.h"
@@ -28,7 +29,7 @@ long md_namespace_request(const struct md_fs *fs, struct md_fs_request *q, struc
         if (q->directory[i] != AT_FDCWD)
             continue;
         if (cwd < 0) {
-            long fd = RAW4(openat, AT_FDCWD, ".", O_PATH | O_DIRECTORY | O_CLOEXEC, 0);
+            long fd = md_fd_capture_cwd();
             if (fd < 0)
                 return fd;
             cwd = (int)fd;

@@ -76,8 +76,13 @@ table mutations. RPC control uses an immutable bootstrap BRK entry point,
 not a new syscall subject to an application's seccomp syscall allowlist.
 Only a ready supervised task uses it. FD payload delivery has a retained kernel
 recvmsg receipt, so receiver death does not require a guest acknowledgement.
+Native adapter chdir/fchdir and a dedicated bootstrap `openat(".")` entry point
+also have completion observation. They order kernel cwd changes and captured
+descriptor origins through the independently shared CLONE_FS context, acquiring
+the file-table turn first when both are needed. Cwd capture validates the exact
+bootstrap path pointer and flags; it is not an arbitrary filesystem bypass.
 See [publication ordering](process-resources.md#publication-ordering) for lifetime
-rules and the remaining cwd/inherited/general-SCM_RIGHTS boundaries.
+rules and the remaining inherited/native/general-SCM_RIGHTS boundaries.
 Directory reads validate and enumerate through one namespace operation without a
 preliminary metadata RPC. A reusable 64 KiB worker buffer bounds output independently
 of the RPC frame, with no per-read allocation. The engine's synchronous output callback runs after
