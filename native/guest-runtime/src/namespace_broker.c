@@ -165,6 +165,9 @@ static int reply(struct operation *op, const void *data) {
             || op->result.open_completion.kind != MD_OPEN_READY || op->undelivered) return 0;
     struct seccomp_notif_resp response = {.id = op->notification.id, .error = op->result.error};
     if (!response.error && op->notification.data.nr == SYS_openat) {
+        /* Keep installation/reply atomic against notification cancellation.
+         * This does not order CLONE_FILES peers or subsequent origin metadata;
+         * splitting ADDFD/SEND is not a descriptor-publication barrier. */
         struct seccomp_notif_addfd add = {.id = response.id, .srcfd = op->result.fd,
             .flags = SECCOMP_ADDFD_FLAG_SEND,
             .newfd_flags = (uint32_t)op->notification.data.args[2] & O_CLOEXEC};

@@ -46,11 +46,13 @@ def main():
     try:
         check("isolated staging", "mkdir -m 700 " + root)
         for name in ("bootstrap", "supervisor", "run", "service", "resource_guest", "root_guest",
-                     "test_task_resources", "test_inodes", "test_mounts", "test_credentials", "test_rpc"):
+                     "test_task_resources", "test_inodes", "test_mounts", "test_credentials", "test_rpc", "fd_handoff"):
             file = "libmagicdesk_guest_" + name + ".so"
             transport.upload(client, args.build / file, root + "/" + file)
         check("prepare fixtures", "chmod 700 " + root + "/*.so")
         check("resource ownership model", root + "/libmagicdesk_guest_test_task_resources.so")
+        check("native descriptor publication", root + "/libmagicdesk_guest_fd_handoff.so " + root + "/handoff",
+              "PASS native FD publication boundaries")
         for name in ("inodes", "mounts", "credentials", "rpc"):
             check("filesystem model " + name, root + "/libmagicdesk_guest_test_" + name + ".so "
                   + root + "/model-" + name)

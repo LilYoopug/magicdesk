@@ -135,6 +135,27 @@ mutations by CLONE_FILES peers and transfer provenance need transport integratio
 before copied guest namespaces can be published. The metadata lock does not
 order kernel syscalls or prove which description occupies a live FD number.
 
+### Kernel Publication Boundaries
+
+`ADDFD_FLAG_SEND` makes FD installation and the notification response atomic
+against cancellation. It does not keep the receiver stopped until subsequent
+supervisor metadata writes. A CLONE_FILES peer can replace that slot even when
+installation and response are separated. Replacement with another open
+description of the same inode is not detected by device/inode validation.
+
+A split ADDFD followed by a cancelled notification can leave an installed FD
+while the caller receives EINTR. A failed SEND is therefore not proof that no
+descriptor was installed, and rollback cannot blindly close a reusable FD number.
+SCM_RIGHTS similarly installs received FDs before an application acknowledgement;
+the acknowledgement is not a shared-table publication barrier.
+
+The runtime retains atomic notification delivery. Descriptor-origin annotations
+remain inactive until both transports order publication with kernel FD mutations.
+Such ordering must preserve independent file-table progress and must not hold a
+table-wide gate across a blocking receive or FIFO peer wait. O_PATH still requires
+the task-affine transport, since notification ADDFD rejects it.
+See the kernel's [userspace notification contract](https://www.kernel.org/doc/html/latest/userspace-api/seccomp_filter.html#userspace-notification).
+
 ## Guest Roots
 
 `chroot` selects a directory through the existing composed filesystem
@@ -225,6 +246,17 @@ check coherent origin/flag pairs. An annotated pipe must still reach EOF.
 failed-unshare rollback, close_range splitting/marking and exec inheritance. Guest-only cases check proc-root
 sharing and semaphore-undo splitting, final-owner cleanup and exec retention.
 Pipe acknowledgements order observations; an alarm is only a failure bound.
+
+`fd_handoff` exercises native kernel publication under the selected executor,
+not Shroot emulation. A real CLONE_FILES peer replaces a slot with another open
+description of the same inode before a split notification reply and before an
+SCM_RIGHTS receiver acknowledgement. The atomic-delivery case permits receiver
+replacement before later metadata work. Signal cancellation checks the installed
+FD left by split delivery and the untouched destination after cancelled atomic
+delivery. O_PATH rejection and descriptor cleanup are checked separately.
+Socket acknowledgements establish ordering without sleep or scheduler races;
+alarms and parent-death termination bound fixture failure. `test_resources.py`
+runs this alongside the model and intercepted guest checks.
 
 `root_guest` runs the same checks with inode-backed and attached-native roots:
 nested roots, absolute symlinks, root-clamped traversal,
