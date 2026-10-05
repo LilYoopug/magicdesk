@@ -19,8 +19,13 @@
 struct operation {
     struct md_fs_work work;
     struct operation *all, *free;
+    struct operation *waiting;
+    struct task *task;
     struct seccomp_notif notification;
     struct md_fs_context context;
+    struct md_fd_order order;
+    struct md_fd_origin_update update;
+    struct md_fs_anchor *input_origin, *output_origin;
     struct md_fs_request request;
     struct md_fs_result result;
     int listener, directory, undelivered;
@@ -28,7 +33,9 @@ struct operation {
 };
 struct md_namespace_broker {
     struct md_fs_worker *worker;
+    struct md_fd_wakeup *wakeup;
     struct operation *all, *free;
+    struct operation *waiting;
     struct task *tasks;
     pthread_mutex_t lock;
     int listener;
@@ -87,7 +94,8 @@ static void execute(struct operation *op,
         void *data, size_t capacity) {
     op->result = (struct md_fs_result){.fd = -1, .error = -ECANCELED};
     struct md_fs_output output = {.data = data, .capacity = capacity,
-        .deliver = deliver_directory, .context = op};
+        .deliver = deliver_directory, .context = op,
+        .origin=op->request.operation==MD_FS_OPEN ? &op->output_origin : NULL};
     if (valid(op)) md_fs_context_execute(&op->context, &op->request, &op->result, &output);
     if (op->result.error == -EXDEV && op->request.operation == MD_FS_FSTAT) {
         /* Native descriptors outside the namespace retain kernel metadata. */
@@ -104,24 +112,42 @@ struct md_namespace_broker *md_broker_create(struct md_fs_worker *worker, int st
     if (b) {
         b->worker = worker; b->listener = -1;
         if (pthread_mutex_init(&b->lock, NULL)) { free(b); return NULL; }
+        if (md_fd_wakeup_create(md_fs_worker_wake_fd(worker),&b->wakeup)) {
+            pthread_mutex_destroy(&b->lock); free(b); return NULL;
+        }
         if (statistics && !(b->counts = calloc(512, sizeof(*b->counts)))) {
+            md_fd_wakeup_release(b->wakeup);
             pthread_mutex_destroy(&b->lock); free(b); return NULL;
         }
     }
     return b;
 }
-static void recycle(struct md_namespace_broker *b, struct operation *op) {
+static int recycle(struct md_namespace_broker *b, struct operation *op) {
     if (op->directory >= 0) close(op->directory);
     if (op->result.fd >= 0) close(op->result.fd);
     if (op->result.open_completion.kind == MD_OPEN_PIPE) close(op->result.open_completion.control);
     op->directory = op->result.fd = -1;
     op->result.open_completion = (struct md_open_completion){0};
+    md_fd_origins_finish(&op->update,-1);
+    md_fs_anchor_release(op->input_origin); op->input_origin=NULL;
+    md_fs_anchor_release(op->output_origin); op->output_origin=NULL;
+    int error=0;
+    if (op->order.table) {
+        error=md_fd_order_cancel(&op->order);
+        if (error==1) error=md_fd_order_complete(&op->order);
+    }
     md_fs_context_end(&op->context);
     pthread_mutex_lock(&b->lock);
+    if (op->task) {
+        op->task->borrowed--;
+        if (!op->task->pid && op->task->process>=0) { close(op->task->process); op->task->process=-1; }
+        op->task=NULL;
+    }
     op->free = b->free; b->free = op;
     pthread_mutex_unlock(&b->lock);
+    return error;
 }
-static int prepare(struct md_filesystem *fs, struct operation *op, struct task *task, size_t capacity) {
+static int prepare(struct md_filesystem *fs, struct operation *op, size_t capacity) {
     const struct seccomp_notif *q = &op->notification;
     if (q->data.nr != SYS_openat && q->data.nr != SYS_newfstatat
             && q->data.nr != SYS_fstat && q->data.nr != SYS_getdents64) return 0;
@@ -144,17 +170,26 @@ static int prepare(struct md_filesystem *fs, struct operation *op, struct task *
     }
     int error=md_fs_context_begin(fs,(int)q->pid,0,&op->context);
     if (error) return error;
+    return 1;
+delegate:
+    return 0;
+}
+static int capture(struct operation *op) {
+    const struct seccomp_notif *q=&op->notification;
     if (*op->path != '/') {
         if ((int)q->data.args[0] == AT_FDCWD && op->request.path[0]) {
             char cwd[64]; snprintf(cwd, sizeof(cwd), "/proc/%u/cwd", q->pid);
             op->directory = open(cwd, O_PATH | O_DIRECTORY | O_CLOEXEC);
-        } else op->directory = duplicate(task, q->pid, (int)q->data.args[0]);
-        if (op->directory < 0) goto delegate;
+        } else {
+            op->directory = duplicate(op->task, q->pid, (int)q->data.args[0]);
+            if (op->directory>=0)
+                op->input_origin=md_fd_origins_get(op->context.task.files,(int)q->data.args[0],NULL);
+        }
+        if (op->directory < 0) return 0;
         op->request.directory[0] = op->directory;
+        op->request.origin[0]=op->input_origin;
     }
     return 1;
-delegate:
-    return 0;
 }
 static void metadata(const struct md_fs_info *i, struct stat *s) {
     *s = (struct stat){.st_dev = i->device, .st_ino = i->inode, .st_nlink = i->links,
@@ -169,13 +204,19 @@ static int reply(struct operation *op, const void *data) {
             || op->result.open_completion.kind != MD_OPEN_READY || op->undelivered) return 0;
     struct seccomp_notif_resp response = {.id = op->notification.id, .error = op->result.error};
     if (!response.error && op->notification.data.nr == SYS_openat) {
-        /* Keep installation/reply atomic against notification cancellation.
-         * This does not order CLONE_FILES peers or subsequent origin metadata;
-         * splitting ADDFD/SEND is not a descriptor-publication barrier. */
+        int error=md_fd_origins_prepare(op->context.task.files,op->output_origin,
+            op->notification.data.args[2]&O_CLOEXEC ? FD_CLOEXEC : 0,&op->update);
+        if (error) {
+            response.error=error;
+            return !ioctl(op->listener,SECCOMP_IOCTL_NOTIF_SEND,&response) || errno==ENOENT ? 1 : -errno;
+        }
+        /* Atomic kernel publication remains inside the same table turn as its
+         * origin publication. A resumed CLONE_FILES peer must acquire that turn. */
         struct seccomp_notif_addfd add = {.id = response.id, .srcfd = op->result.fd,
             .flags = SECCOMP_ADDFD_FLAG_SEND,
             .newfd_flags = (uint32_t)op->notification.data.args[2] & O_CLOEXEC};
-        if (ioctl(op->listener, SECCOMP_IOCTL_NOTIF_ADDFD, &add) >= 0) return 1;
+        int fd=ioctl(op->listener, SECCOMP_IOCTL_NOTIF_ADDFD, &add);
+        if (fd>=0) { md_fd_origins_finish(&op->update,fd); return 1; }
         response.error = -errno;
     } else if (!response.error && op->notification.data.nr == SYS_getdents64) {
         response.val = op->result.size;
@@ -215,10 +256,53 @@ void md_broker_forget(struct md_namespace_broker *b, int pid) {
     pthread_mutex_unlock(&b->lock);
     md_fs_worker_wake(b->worker);
 }
+static int perform(struct md_namespace_broker *b, struct operation *op, int prepared) {
+    struct counters *count=b->counts && (unsigned)op->notification.data.nr<512
+        ? &b->counts[op->notification.data.nr] : NULL;
+    if (prepared>0) {
+        int error=md_fd_order_start(&op->order);
+        if (error) return error;
+        prepared=capture(op);
+    }
+    if (prepared) {
+        if (prepared>0) execute(op,b->output,sizeof(b->output));
+        else op->result.error=prepared;
+        int result=reply(op,b->output);
+        if (result) {
+            if (count) count->handled++;
+            int error=recycle(b,op); return result<0 ? result : error;
+        }
+    }
+    if (op->order.table) {
+        int error=md_fd_order_complete(&op->order);
+        if (error) return error;
+    }
+    /* Delegation has not committed guest-visible IO; authenticate the later
+     * task-affine request independently, without holding this table's turn. */
+    md_fs_context_end(&op->context);
+    md_fs_worker_publish(b->worker,&op->work);
+    if (count) count->delegated++;
+    return 0;
+}
+static int progress(struct md_namespace_broker *b) {
+    struct operation **at=&b->waiting;
+    while (*at) {
+        struct operation *op=*at;
+        int alive=valid(op);
+        if (alive && md_fd_order_state(&op->order)!=MD_FD_ORDER_READY) { at=&op->waiting; continue; }
+        *at=op->waiting; op->waiting=NULL;
+        int error=alive ? perform(b,op,1) : recycle(b,op);
+        if (error) return error;
+    }
+    return 0;
+}
 static int receive(void *context, struct md_filesystem *fs, short events) {
     struct md_inode_store *s = fs->store;
     struct md_namespace_broker *b = context;
-    if (!events) return b->watches ? md_watch_broker_progress(b->watches, s) : 0;
+    if (!events) {
+        int error=progress(b);
+        return error ? error : b->watches ? md_watch_broker_progress(b->watches,s) : 0;
+    }
     if (events & (POLLERR | POLLNVAL)) return -EIO;
     if (!(events & POLLIN)) {
         if (events & POLLHUP) md_fs_worker_notifications(b->worker, -1, b, receive);
@@ -263,29 +347,18 @@ static int receive(void *context, struct md_filesystem *fs, short events) {
         op->all = b->all; b->all = op;
     }
     op->notification = q; op->listener = b->listener; op->directory = -1; op->undelivered = 0;
+    op->task=task;
     op->result = (struct md_fs_result){.fd = -1};
-    int prepared = eligible ? prepare(fs, op, task, sizeof(b->output)) : 0;
-    pthread_mutex_lock(&b->lock);
-    if (task) {
-        task->borrowed--;
-        if (!task->pid && task->process >= 0) { close(task->process); task->process = -1; }
-    }
-    pthread_mutex_unlock(&b->lock);
-    if (prepared) {
-        if (prepared>0) execute(op, b->output, sizeof(b->output));
-        else op->result.error=prepared;
-        int result = reply(op, b->output);
-        if (result) {
-            if (count) count->handled++;
-            recycle(b, op); return result < 0 ? result : 0;
+    int prepared = eligible ? prepare(fs, op, sizeof(b->output)) : 0;
+    if (prepared>0) {
+        int ready=md_fd_order_begin(op->context.task.files,&op->order,b->wakeup);
+        if (ready<0) prepared=ready;
+        else if (!ready) {
+            op->waiting=b->waiting; b->waiting=op;
+            return 0;
         }
     }
-    /* Only unsupported/read-only work is delegated. No mutation or partially
-     * delivered result is ever replayed through the guest adapter. */
-    md_fs_context_end(&op->context);
-    md_fs_worker_publish(b->worker, &op->work);
-    if (count) count->delegated++;
-    return 0;
+    return perform(b,op,prepared);
 }
 void md_broker_listen(struct md_namespace_broker *b, int listener) {
     b->listener = listener;
@@ -297,13 +370,15 @@ void md_broker_listen(struct md_namespace_broker *b, int listener) {
 }
 int md_broker_complete(struct md_namespace_broker *b, void (*delegate)(const struct seccomp_notif *)) {
     struct md_fs_work *work = md_fs_worker_completed(b->worker);
+    int error=0;
     while (work) {
         struct operation *op = (struct operation *)work;
         work = work->next;
         if (valid(op)) delegate(&op->notification);
-        recycle(b, op);
+        int retired=recycle(b,op);
+        if (!error) error=retired;
     }
-    return md_fs_worker_error(b->worker);
+    return error ? error : md_fs_worker_error(b->worker);
 }
 void md_broker_destroy(struct md_namespace_broker *b) {
     if (!b) return;
@@ -322,6 +397,11 @@ void md_broker_destroy(struct md_namespace_broker *b) {
         if (op->directory >= 0) close(op->directory);
         if (op->result.fd >= 0) close(op->result.fd);
         if (op->result.open_completion.kind == MD_OPEN_PIPE) close(op->result.open_completion.control);
+        md_fd_origins_finish(&op->update,-1);
+        md_fs_anchor_release(op->input_origin); md_fs_anchor_release(op->output_origin);
+        if (op->order.table) {
+            if (md_fd_order_cancel(&op->order)==1) md_fd_order_complete(&op->order);
+        }
         md_fs_context_end(&op->context);
         free(op);
     }
@@ -330,5 +410,6 @@ void md_broker_destroy(struct md_namespace_broker *b) {
         if (t->process >= 0) close(t->process);
         free(t);
     }
+    md_fd_wakeup_release(b->wakeup);
     pthread_mutex_destroy(&b->lock); free(b);
 }

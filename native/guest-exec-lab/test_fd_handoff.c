@@ -1,6 +1,8 @@
 #define _GNU_SOURCE
 #include "fs_mount_internal.h"
 #include "fd_origins.h"
+#include "fd_exchange.h"
+#include "fd_receipt.h"
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -10,11 +12,13 @@
 #include <linux/seccomp.h>
 #include <limits.h>
 #include <pthread.h>
+#include <sched.h>
 #include <signal.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -178,7 +182,7 @@ static struct md_fs_anchor *capture(int fd, struct md_mount_namespace *view) {
 static void origin_at(struct md_fd_origins *table, int fd, struct md_fs_anchor *expected) {
     unsigned flags;
     struct md_fs_anchor *actual=md_fd_origins_get(table,fd,&flags);
-    assert(actual==expected && flags==FD_CLOEXEC); md_fs_anchor_release(actual);
+    assert(actual==expected && flags==(expected ? FD_CLOEXEC : 0)); md_fs_anchor_release(actual);
 }
 static void ordered_handoff(const struct fixture *f, int control, int data) {
     int notify=-1;
@@ -188,10 +192,10 @@ static void ordered_handoff(const struct fixture *f, int control, int data) {
     assert(views[0] && views[1]);
     struct md_fs_anchor *source=capture(f->source,views[0]), *replacement=capture(f->replacement,views[1]);
     struct md_fd_origins *files=md_fd_origins_new(), *other=md_fd_origins_new(); assert(files && other);
-    struct md_fd_order install={0}, mutation={0}, independent={0}, *next=NULL;
+    struct md_fd_order install={0}, mutation={0}, independent={0};
     struct md_fd_origin_update update;
     assert(!md_fd_origins_prepare(files,source,FD_CLOEXEC,&update));
-    assert(md_fd_order_begin(files,&install)==1 && !md_fd_order_start(&install));
+    assert(md_fd_order_begin(files,&install,NULL)==1 && !md_fd_order_start(&install));
     int target=f->target;
     if (f->scenario==ORDERED_RIGHTS) {
         send_message(data,(struct message){.kind=INSTALLED},f->source);
@@ -211,15 +215,15 @@ static void ordered_handoff(const struct fixture *f, int control, int data) {
      * no timing assumption about when the receiver begins using the FD. */
     assert(!ioctl(notify,SECCOMP_IOCTL_NOTIF_RECV,&q) && q.data.nr==SYS_dup3);
     assert((int)q.data.args[0]==f->replacement && (int)q.data.args[1]==target);
-    assert(md_fd_order_begin(files,&mutation)==0 && md_fd_order_start(&mutation)==-EINVAL);
+    assert(md_fd_order_begin(files,&mutation,NULL)==0 && md_fd_order_start(&mutation)==-EINVAL);
     if (f->scenario==ORDERED_RIGHTS) {
         send_message(data,(struct message){.kind=CHECK,.position=11},-1);
         message=receive_message(control,NULL); assert(message.kind==ACK);
     } else peer_command(control,CHECK,target,11);
-    assert(md_fd_order_begin(other,&independent)==1 && !md_fd_order_start(&independent));
-    assert(!md_fd_order_complete(&independent,&next) && !next);
+    assert(md_fd_order_begin(other,&independent,NULL)==1 && !md_fd_order_start(&independent));
+    assert(!md_fd_order_complete(&independent));
     md_fd_origins_finish(&update,target);
-    assert(!md_fd_order_complete(&install,&next) && next==&mutation);
+    assert(!md_fd_order_complete(&install) && md_fd_order_state(&mutation)==MD_FD_ORDER_READY);
     origin_at(files,target,source);
     assert(!md_fd_order_start(&mutation));
     assert(!md_fd_origins_prepare(files,replacement,FD_CLOEXEC,&update));
@@ -231,7 +235,7 @@ static void ordered_handoff(const struct fixture *f, int control, int data) {
     /* This fixture acknowledgement follows the actual dup3 result. Production
      * integration needs its syscall-exit event, not notification SEND success. */
     md_fd_origins_finish(&update,target);
-    assert(!md_fd_order_complete(&mutation,&next) && !next);
+    assert(!md_fd_order_complete(&mutation));
     origin_at(files,target,replacement);
     if (f->scenario==ORDERED_RIGHTS) {
         send_message(data,(struct message){.kind=CONTINUE},-1); completed(control);
@@ -316,6 +320,75 @@ static void scenario(enum scenario scenario, const char *directory) {
     close(control[0]); close(data[0]); close(source); close(replacement); close(initial); close(target);
     assert(descriptors()==before);
 }
+struct receipt_child { int socket, receipt, truncated; pid_t parent; };
+static int receive_and_exit(void *opaque) {
+    struct receipt_child *f=opaque;
+    assert(!prctl(PR_SET_PDEATHSIG,SIGKILL));
+    if (getppid()!=f->parent) _exit(1);
+    struct md_fd_receipt *receipt=mmap(NULL,sizeof(*receipt),PROT_READ|PROT_WRITE,MAP_SHARED,f->receipt,0);
+    assert(receipt!=MAP_FAILED);
+    md_fd_receipt_reset(receipt);
+    if (f->truncated) receipt->message.msg_controllen=CMSG_LEN(sizeof(int));
+    syscall(SYS_recvmsg,f->socket,&receipt->message,MSG_CMSG_CLOEXEC|MSG_DONTWAIT);
+    /* No publication/FD-number acknowledgement from the receiver. */
+    _exit(0);
+}
+static void retained_receipt(const char *directory, unsigned count, int truncated) {
+    unsigned before=descriptors();
+    char path[PATH_MAX]; snprintf(path,sizeof(path),"%s/receipt",directory);
+    int source=create_file(path,11); assert(!unlink(path));
+    struct md_mount_namespace *view=md_mount_namespace_new(); assert(view);
+    struct md_fs_anchor *origin=capture(source,view);
+    struct md_fd_origins *files=md_fd_origins_new(); assert(files);
+    struct md_fd_exchanges *exchanges=md_fd_exchanges_create(); assert(exchanges);
+    struct md_fd_exchange *exchange=NULL;
+    int bases[2]={-1,-1};
+    assert(!md_fd_exchange_begin(exchanges,getpid(),files,bases,&exchange));
+    assert(!md_fd_exchange_offer(exchange,origin,count ? count : 1));
+    int fd=md_fd_exchange_receipt(exchange); assert(fd>=0);
+    struct md_fd_receipt *receipt=mmap(NULL,sizeof(*receipt),PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
+    assert(receipt!=MAP_FAILED);
+    int sockets[2]; assert(!socketpair(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC,0,sockets));
+    if (count) {
+        unsigned char byte=1;
+        struct iovec io={&byte,sizeof(byte)};
+        union { struct cmsghdr align; char bytes[CMSG_SPACE(2*sizeof(int))]; } control={0};
+        struct msghdr message={.msg_iov=&io,.msg_iovlen=1,.msg_control=control.bytes,
+            .msg_controllen=CMSG_SPACE(count*sizeof(int))};
+        control.align=(struct cmsghdr){.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_RIGHTS,.cmsg_len=CMSG_LEN(count*sizeof(int))};
+        int sources[2]={source,source}; memcpy(CMSG_DATA(&control.align),sources,count*sizeof(int));
+        assert(sendmsg(sockets[0],&message,MSG_NOSIGNAL)==1);
+    }
+    struct md_fd_order turn={0};
+    assert(md_fd_order_begin(files,&turn,NULL)==1 && !md_fd_order_start(&turn));
+    size_t stack_size=65536;
+    void *stack=mmap(NULL,stack_size,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    assert(stack!=MAP_FAILED);
+    struct receipt_child context={sockets[1],fd,truncated,getpid()};
+    pid_t child=clone(receive_and_exit,(char *)stack+stack_size,CLONE_FILES|SIGCHLD,&context);
+    assert(child>0);
+    int status;
+    /* EVENT_WAIT: actual receiver death; the fixture alarm bounds failure. */
+    assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
+    assert(md_fd_order_cancel(&turn)==1);
+    assert(!md_fd_exchange_received(exchange));
+    assert(!md_fd_order_complete(&turn));
+    int received[2];
+    int actual=md_fd_receipt_read(receipt,received);
+    assert(actual==(int)(truncated ? 1 : count));
+    assert(!!(receipt->message.msg_flags&MSG_CTRUNC)==!!truncated);
+    for (int i=0;i<actual;++i) {
+        assert(lseek(received[i],0,SEEK_CUR)==11);
+        assert(fcntl(received[i],F_GETFD)==FD_CLOEXEC);
+        origin_at(files,received[i],i ? NULL : origin);
+        close(received[i]);
+    }
+    munmap(stack,stack_size); munmap(receipt,sizeof(*receipt));
+    close(sockets[0]); close(sockets[1]); close(source);
+    md_fd_exchange_close(exchanges,exchange); md_fd_exchanges_destroy(exchanges);
+    md_fd_origins_release(files); md_fs_anchor_release(origin); md_mount_namespace_release(view);
+    assert(descriptors()==before);
+}
 int main(int argc, char **argv) {
     assert(argc==2 && !mkdir(argv[1],0700));
     alarm(30);
@@ -335,6 +408,11 @@ int main(int argc, char **argv) {
     puts("PASS ordered ADDFD_SEND: origin published before an intercepted shared-table replacement");
     scenario(ORDERED_RIGHTS,argv[1]);
     puts("PASS ordered SCM_RIGHTS: exact origins follow kernel completion, independent table progresses");
+    retained_receipt(argv[1],0,0);
+    retained_receipt(argv[1],1,0);
+    retained_receipt(argv[1],2,0);
+    retained_receipt(argv[1],2,1);
+    puts("PASS retained kernel receipt after CLONE_FILES receiver death: no delivery, one/two FDs and truncated delivery");
     puts("PASS native FD publication boundaries and descriptor cleanup");
     assert(!rmdir(argv[1]));
     return 0;

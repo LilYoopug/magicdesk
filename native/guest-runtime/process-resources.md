@@ -46,9 +46,9 @@ failure, timeout or worker shutdown. The filesystem worker/store must outlive
 them. Synchronous internal engine callers use a scoped context through
 `md_fs_execute`.
 
-Retained authentication is not kernel FD ordering or cancellation rollback.
-Input-descriptor provenance and publication still require the lifecycle
-integration described below; a failed reply does not undo committed IO.
+Retained authentication is not cancellation rollback. Input-descriptor capture
+and result publication use the file-table ordering described below; a failed
+reply does not undo committed IO.
 
 ## Mount Views
 
@@ -116,8 +116,8 @@ authorize a retry.
 The caller must associate each anchor with the correct captured descriptor.
 Device/inode validation rejects a mismatched object; it cannot distinguish two
 opens of the same inode through different mounts. An O_PATH pin alone is not an
-open-file-description identity. There is no mirror of ordinary data descriptions
-or new interception of close/read/write.
+open-file-description identity. There is no mirror of ordinary data descriptions;
+read/write stays native and close is observed at its kernel completion.
 
 Cross-view relative IO works, but path/image-path publication for an origin in
 another tree returns ENOENT instead of inventing a current-root path. Changing
@@ -156,38 +156,50 @@ Root selection and cwd are independent: changing the root does not move cwd,
 and cwd provenance alone does not activate the scoped-root adapter. The special
 proc-root chdir clears ordinary cwd provenance.
 
-These are owner/lifetime contracts, not automatic guest-FD tracking. Guest opens,
-dup/fcntl/close, received SCM_RIGHTS and cwd changes do not yet populate these
-annotations. Initial inherited descriptors, FD-number reuse, concurrent kernel
-mutations by CLONE_FILES peers and transfer provenance need transport integration
-before copied guest namespaces can be published. The metadata lock does not
-order kernel syscalls or prove which description occupies a live FD number.
+Filesystem opens from the direct broker and task-affine service publish their
+origins automatically. Native dup/dup3, F_DUPFD/F_DUPFD_CLOEXEC, F_SETFD, close
+and close_range update annotations from their actual kernel results. Fork,
+unshare and exec use the same ordered ownership transition. The seccomp filter
+and restricted-domain policy share the descriptor-operation list; observation
+does not remove native descriptor capabilities after a proc-root restriction.
+
+This does not yet cover cwd changes, inherited/native descriptors or general
+application SCM_RIGHTS transfers. An unconfirmed native mutation at task death
+forgets any known affected destination instead of claiming rollback or retaining
+a potentially stale origin. An automatically assigned dup result is then unknown.
+Complete provenance, including those terminal cases, is required before copied
+guest namespaces can be published.
 
 ### Publication Ordering
 
 The file-table owner provides an intrusive queue for short descriptor capture
-and publication operations. One event-loop owner serializes queue operations;
-worker and supervisor events must reach that owner rather than modify the queue
-concurrently. This is separate from the mutex protecting annotation entries.
+and publication operations. The supervisor and filesystem worker admit records
+through the same synchronized queue, while each record retains one event-loop
+owner. Mutexes cover metadata changes, never kernel calls or event waits.
 CLONE_FILES peers share the queue, while an independent table copy starts with
 an empty queue. Every accepted request pins its table through completion,
 including after the last task releases ownership.
 
 A zero-initialized caller-owned record is queued or immediately ready, then
 explicitly started. Completion follows the exact kernel result and its metadata
-publication, and returns the newly ready successor to the event-loop owner.
+publication, and signals the newly ready successor's retained eventfd token.
+No successor pointer crosses event-loop ownership. The token duplicates the
+nonblocking eventfd once per event loop, not per request; loop shutdown or FD
+reuse cannot redirect a later wake. A saturated eventfd already has a wake pending.
 Cancelling a queued or ready record removes it; cancelling a running record
 only records intent. It continues to own its turn until the kernel operation
 is confirmed complete. Cancellation or a timeout does not prove that a descriptor
 was never installed. Requests perform no queue allocation, callbacks or blocking
 waits, and unrelated file tables can progress independently.
 
-This API does not intercept syscalls or enable automatic annotations. Both
-transports still need common lifecycle admission, including descriptor capture,
-fork/exec and all competing mutations. A blocking receive or FIFO rendezvous
-must wait outside the queue; only its short descriptor-publication phase belongs
-inside it. Unordered readers of live FD numbers do not gain a kernel barrier
-from the metadata mutex or this queue's existence.
+Both filesystem transports and the observed native mutations use this ordering.
+A blocking receive or FIFO rendezvous waits outside the queue; only its short
+descriptor capture/publication phase belongs inside it. A cancelled queued
+notification is validated again before use. Unordered native producers and
+readers of live FD numbers do not gain a kernel barrier from the metadata mutex
+or this queue's existence. Close and replacement can release a native description
+with blocking cleanup; complete peer-dependent progress for such native resources
+is not established by the short-operation fixtures.
 
 ### Kernel Publication Boundaries
 
@@ -203,11 +215,28 @@ descriptor was installed, and rollback cannot blindly close a reusable FD number
 SCM_RIGHTS similarly installs received FDs before an application acknowledgement;
 the acknowledgement is not a shared-table publication barrier.
 
-The runtime retains atomic notification delivery. Descriptor-origin annotations
-remain inactive until both transports order publication with kernel FD mutations.
-Such ordering must preserve independent file-table progress and must not hold a
-table-wide gate across a blocking receive or FIFO peer wait. O_PATH still requires
-the task-affine transport, since notification ADDFD rejects it.
+The direct broker prepares the annotation before atomic ADDFD_SEND, publishes
+the returned FD number, then releases its table turn. An observed shared-table
+mutation cannot overtake that publication. Failed atomic delivery discards the
+prepared annotation, not a guessed descriptor number. O_PATH still requires the
+task-affine transport, since notification ADDFD rejects it.
+
+Task-affine RPC captures input origins under a short send turn. A launch-local
+exchange ID binds them to the authenticated actor and exact table; wire values
+are not pointers. The worker retains the exchange independently of its initiating
+task. Metadata-only replies need no receiving table turn. FD replies first send
+a sealed-size shared receipt, then a separate payload-FD parcel. The receiver
+waits for readiness outside the table turn and executes nonblocking recvmsg
+inside it. The kernel writes the installed FD numbers into the retained receipt.
+Normal completion or the receiving task's terminal event publishes those numbers
+before releasing the turn; no post-receive guest ACK is needed. Truncated delivery
+publishes exactly the installed prefix before client-side error cleanup.
+
+Only FD-producing RPC exchanges allocate a receipt mapping. Updates are prepared
+before delivery, and publication itself is allocation-free. Transport readiness,
+peer lifetime and syscall completion remain distinct from cancellation intent.
+The shared mapping is a lifetime mechanism, not protection against a malicious
+guest modifying its own memory. General application SCM_RIGHTS is not covered.
 See the kernel's [userspace notification contract](https://www.kernel.org/doc/html/latest/userspace-api/seccomp_filter.html#userspace-notification).
 
 ## Guest Roots
@@ -244,8 +273,8 @@ explicit limits are not successful mount or namespace emulation.
 
 Copying a descriptor table does not copy open-file descriptions: offsets remain
 shared, while close-on-exec flags and descriptor closure become independent.
-There is no supervisor mirror of every descriptor or new interception of
-ordinary close/read/write operations.
+There is no supervisor mirror of every open-file description. Reads and writes
+remain native; short table mutations have ordered completion observation.
 
 ## Resource Changes
 
@@ -266,13 +295,14 @@ participant resumes guest execution. Nonleader exec transfers the executing
 thread's resources to its resulting process identity; teardown of the replaced
 leader must not release the executing thread's owners. Kernel exec detaches
 shared descriptor tables, but not shared filesystem context or semaphore undo.
-The confirmed exec event detaches the corresponding annotation owner and removes
-close-on-exec entries after any nonleader resource transfer. Failed exec does
-not change that owner. `close_range` with CLOSE_RANGE_UNSHARE uses the same
+Exec prepares its detached annotation owner before the kernel call. The confirmed
+exec event commits that owner and removes close-on-exec entries before transferring
+the executing nonleader's resources. Failed exec does not change the owner.
+Fork copies annotations at its actual birth event and releases the turn before
+waiting for vfork completion. `close_range` with CLOSE_RANGE_UNSHARE uses the same
 prepare/commit/rollback transaction as `unshare(CLONE_FILES)`, then applies its
 range operation only after kernel success. Ordinary close_range, close and
-descriptor-flag syscalls retain their existing interception policy; complete
-annotation maintenance is not enabled.
+descriptor-flag calls use their actual results without emulating native data IO.
 
 ## Boundaries
 
@@ -299,9 +329,14 @@ check coherent origin/flag pairs. An annotated pipe must still reach EOF.
 Ordering checks cover shared versus copied queues, middle/tail cancellation,
 running cancellation awaiting completion, successor handoff, request reuse and
 table lifetime after all task owners exit, with allocation failure enabled.
+Three independent event loops exercise 3000 publications and concurrent
+cancellation; saturated wake descriptors and owner-loop teardown retain correct
+handoff. Exchange tests check actor/table binding, owner loss, malformed receipts,
+preparation failure and allocation-free publication.
 `resource_guest` compares native Linux and Shroot cwd/umask/FD semantics,
 failed-unshare rollback, close_range splitting/marking and exec inheritance. Guest-only cases check proc-root
-sharing and semaphore-undo splitting, final-owner cleanup and exec retention.
+sharing, native descriptor mutation after proc-root restriction, 32-bit fcntl
+command semantics and semaphore-undo splitting, final-owner cleanup and exec retention.
 Pipe acknowledgements order observations; an alarm is only a failure bound.
 
 `fd_handoff` exercises native kernel publication under the selected executor,
@@ -315,8 +350,12 @@ Positive cases feed a competing dup3 notification into the file-table queue
 for atomic ADDFD_SEND and SCM_RIGHTS delivery. They verify physical descriptor
 identity before allowing replacement and publish the exact source/replacement
 origins in order. The fixture's acknowledgement follows the actual dup3 result;
-production integration requires its syscall-exit event, not notification SEND
+production publication follows its syscall-exit event, not notification SEND
 success. These cases do not establish complete mutation interception in Shroot.
+Receipt cases let a real CLONE_FILES receiver exit immediately after recvmsg,
+without an ACK or sending FD numbers. The survivor observes the terminal event
+and publishes from retained kernel output: no delivery, one/two FDs and truncated
+delivery. Kernel flags, shared file position, origins and leaks are checked.
 Socket acknowledgements establish ordering without sleep or scheduler races;
 alarms and parent-death termination bound fixture failure. `test_resources.py`
 runs this alongside the model and intercepted guest checks.

@@ -16,7 +16,7 @@ target_compile_options(guest-sqlite PRIVATE -O2 -fno-pie)
 set(src ${CMAKE_CURRENT_SOURCE_DIR}/src)
 set(raw ${src}/raw.c ${src}/memory.c ${src}/raw.S)
 set(wire ${src}/fs_wire.c ${src}/event_wait.c)
-set(origins ${src}/fs_anchor.c ${src}/fd_origins.c)
+set(origins ${src}/fs_anchor.c ${src}/fd_origins.c ${src}/fd_mutation.c ${src}/fd_exchange.c)
 set(mounts ${src}/fs_mounts.c ${src}/fs_mount_path.c ${src}/fs_mount_operations.c ${src}/fs_mount_table.c)
 set(inodes ${src}/inode_store.c ${src}/inode_db.c ${src}/inode_events.c ${src}/inode_watch.c ${src}/watch_queue.c ${src}/inode_path.c
     ${src}/inode_directory.c ${src}/inode_import.c ${src}/inode_socket.c ${src}/inode_backing.c ${src}/inode_snapshot.c ${src}/inode_fifo.c ${src}/file_open.c
@@ -38,7 +38,7 @@ function(guest_freestanding name)
 endfunction()
 
 guest_executable(bootstrap ${src}/bootstrap.c ${src}/elf.c ${src}/exec.c
-    ${src}/interception.c ${src}/interception_entry.S ${src}/watch_calls.c ${src}/shm_calls.c ${src}/ipc_calls.c
+    ${src}/interception.c ${src}/interception_entry.S ${src}/fd_client.c ${src}/watch_calls.c ${src}/shm_calls.c ${src}/ipc_calls.c
     ${src}/file_calls.c ${src}/fs.c ${src}/proc_paths.c ${src}/proc_image.c ${src}/program_files.c
     ${src}/namespace.c ${src}/namespace_proc.c ${src}/socket_calls.c ${src}/socket_namespace.c ${src}/socket_identity.c ${src}/socket_ancillary.c ${src}/socket_routes.c ${src}/fd_metadata.c
     ${src}/fs_client.c ${src}/file_open.c ${wire} ${src}/raw.c ${src}/raw.S)

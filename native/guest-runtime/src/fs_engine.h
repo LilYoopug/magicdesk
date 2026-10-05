@@ -5,6 +5,7 @@
 #include "mount_namespace.h"
 #include "task_registry.h"
 struct md_image_catalogue;
+struct md_fd_exchanges;
 /* The worker borrows its store/images and retains an initial mount view.
  * Authenticated task requests borrow their own retained view for dispatch. */
 struct md_filesystem {
@@ -13,6 +14,7 @@ struct md_filesystem {
     struct md_mount_namespace *mounts;
     struct md_view_object *native_root;
     struct md_task_registry *tasks;
+    struct md_fd_exchanges *exchanges;
     struct md_ipc_credentials *ipc;
     const char *ipc_store;
 };

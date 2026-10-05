@@ -8,6 +8,12 @@
  * include pathname, credential or argument-dependent policy operations. */
 #define MD_GATE_TRANSPORT_CALLS(X) X(sendmsg) X(recvmsg) X(uname)
 
+/* Kernel descriptor operations with ordered provenance publication. Their
+ * observation does not grant pathname access or additional kernel authority. */
+#define MD_DOMAIN_FD_CALLS(X) X(close) X(dup) X(dup3) X(close_range)
+#define MD_DOMAIN_FD_ARGUMENTS(X) \
+    X(fcntl, 1, F_SETFD) X(fcntl, 1, F_DUPFD) X(fcntl, 1, F_DUPFD_CLOEXEC)
+
 /* No adaptation, observation or logical identity in any domain. Shared with
  * seccomp so these kernel operations need no userspace policy round trip. */
 #define MD_DOMAIN_KERNEL_CALLS(X) \
@@ -15,8 +21,7 @@
     X(sysinfo) X(sched_yield) X(sched_getaffinity) \
     X(getrusage) X(getrlimit) X(gettimeofday)
 #define MD_DOMAIN_KERNEL_ARGUMENTS(X) \
-    X(fcntl, 1, F_GETFD) X(fcntl, 1, F_SETFD) X(fcntl, 1, F_GETFL) \
-    X(fcntl, 1, F_SETFL) X(fcntl, 1, F_DUPFD) X(fcntl, 1, F_DUPFD_CLOEXEC) \
+    X(fcntl, 1, F_GETFD) X(fcntl, 1, F_GETFL) X(fcntl, 1, F_SETFL) \
     X(prlimit64, 0, 0) \
     X(prctl, 0, PR_GET_DUMPABLE) X(prctl, 0, PR_SET_NAME) \
     X(prctl, 0, PR_GET_NAME) X(prctl, 0, PR_GET_SECCOMP)

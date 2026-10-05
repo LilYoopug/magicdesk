@@ -2,6 +2,10 @@
 #include "fs_mount_internal.h"
 #include "task_resources.h"
 #include "task_registry.h"
+#include "event_wait.h"
+#include "fd_mutation.h"
+#include "fd_exchange.h"
+#include "fd_receipt.h"
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -9,8 +13,13 @@
 #include <limits.h>
 #include <pthread.h>
 #include <sched.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/eventfd.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
+#include <linux/close_range.h>
 #include <unistd.h>
 
 static int allocation_budget=-1;
@@ -190,48 +199,197 @@ static void registry_and_readers(struct md_fs_anchor *a, struct md_fs_anchor *b)
 static void ordering(struct md_fs_anchor *origin) {
     struct md_fd_origins *table=md_fd_origins_new(); assert(table);
     struct md_fd_origins *shared=md_fd_origins_fork(table,1); assert(shared==table);
-    struct md_fd_order a={0}, b={0}, c={0}, d={0}, independent={0}, *next=NULL;
+    struct md_fd_order a={0}, b={0}, c={0}, d={0}, independent={0};
     assert(md_fd_order_start(&a)==-EINVAL);
-    assert(md_fd_order_complete(&a,&next)==-EINVAL && !next);
+    assert(md_fd_order_complete(&a)==-EINVAL);
     struct md_fd_origin_update update;
     assert(!md_fd_origins_prepare(table,origin,0,&update));
     allocation_budget=0;
-    assert(md_fd_order_begin(table,&a)==1);
-    assert(md_fd_order_begin(table,&a)==-EBUSY);
-    assert(md_fd_order_complete(&a,&next)==-EINVAL);
+    assert(md_fd_order_begin(table,&a,NULL)==1);
+    assert(md_fd_order_begin(table,&a,NULL)==-EBUSY);
+    assert(md_fd_order_complete(&a)==-EINVAL);
     assert(!md_fd_order_start(&a));
-    assert(md_fd_order_begin(shared,&b)==0);
-    assert(md_fd_order_begin(table,&c)==0);
-    assert(md_fd_order_begin(table,&d)==0);
+    assert(md_fd_order_begin(shared,&b,NULL)==0);
+    assert(md_fd_order_begin(table,&c,NULL)==0);
+    assert(md_fd_order_begin(table,&d,NULL)==0);
     assert(md_fd_order_start(&b)==-EINVAL);
-    assert(md_fd_order_complete(&b,&next)==-EINVAL && !next);
+    assert(md_fd_order_complete(&b)==-EINVAL);
     allocation_budget=-1;
     struct md_fd_origins *copy=md_fd_origins_fork(table,0); assert(copy && copy!=table);
     allocation_budget=0;
-    assert(md_fd_order_begin(copy,&independent)==1 && !md_fd_order_start(&independent));
-    assert(!md_fd_order_complete(&independent,&next) && !next);
-    assert(!md_fd_order_cancel(&c,&next) && !next && c.state==MD_FD_ORDER_IDLE);
-    assert(!md_fd_order_cancel(&d,&next) && !next && d.state==MD_FD_ORDER_IDLE);
-    assert(md_fd_order_cancel(&a,&next)==1 && !next && a.state==MD_FD_ORDER_CANCELLING);
-    assert(md_fd_order_cancel(&a,&next)==1 && !next);
+    assert(md_fd_order_begin(copy,&independent,NULL)==1 && !md_fd_order_start(&independent));
+    assert(!md_fd_order_complete(&independent));
+    assert(!md_fd_order_cancel(&c) && c.state==MD_FD_ORDER_IDLE);
+    assert(!md_fd_order_cancel(&d) && d.state==MD_FD_ORDER_IDLE);
+    assert(md_fd_order_cancel(&a)==1 && a.state==MD_FD_ORDER_CANCELLING);
+    assert(md_fd_order_cancel(&a)==1);
     assert(b.state==MD_FD_ORDER_QUEUED);
     /* Cancellation intent is not proof that the kernel did not install an FD. */
     md_fd_origins_finish(&update,23);
-    assert(!md_fd_order_complete(&a,&next) && next==&b);
+    assert(!md_fd_order_complete(&a) && md_fd_order_state(&b)==MD_FD_ORDER_READY);
     expect(table,23,origin,0);
-    assert(md_fd_order_begin(table,&c)==0);
-    assert(!md_fd_order_cancel(&b,&next) && next==&c);
+    assert(md_fd_order_begin(table,&c,NULL)==0);
+    assert(!md_fd_order_cancel(&b) && md_fd_order_state(&c)==MD_FD_ORDER_READY);
     assert(!md_fd_order_start(&c));
-    assert(!md_fd_order_complete(&c,&next) && !next);
-    assert(md_fd_order_begin(table,&d)==1 && !md_fd_order_start(&d));
-    assert(md_fd_order_begin(table,&a)==0);
+    assert(!md_fd_order_complete(&c));
+    assert(md_fd_order_begin(table,&d,NULL)==1 && !md_fd_order_start(&d));
+    assert(md_fd_order_begin(table,&a,NULL)==0);
     md_fd_origins_release(shared); md_fd_origins_release(table);
     expect(d.table,23,origin,0);
-    assert(!md_fd_order_complete(&d,&next) && next==&a && !d.table);
+    assert(!md_fd_order_complete(&d) && md_fd_order_state(&a)==MD_FD_ORDER_READY && !d.table);
     expect(a.table,23,origin,0);
-    assert(!md_fd_order_cancel(&a,&next) && !next && !a.table);
+    assert(!md_fd_order_cancel(&a) && !a.table);
     allocation_budget=-1;
     md_fd_origins_release(copy);
+}
+struct event_owner {
+    struct md_fd_origins *table;
+    pthread_barrier_t *start;
+    unsigned *committed;
+    atomic_uint *inside;
+};
+static void *ordered_writer(void *opaque) {
+    struct event_owner *owner=opaque;
+    int fd=eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK); assert(fd>=0);
+    struct md_fd_wakeup *wakeup=NULL;
+    assert(!md_fd_wakeup_create(fd,&wakeup));
+    /* EVENT_WAIT: all producers are ready; the fixture runner bounds failure. */
+    pthread_barrier_wait(owner->start);
+    for (unsigned i=0;i<1000;++i) {
+        struct md_fd_order op={0};
+        int ready=md_fd_order_begin(owner->table,&op,wakeup); assert(ready>=0);
+        if (!ready && i%3==0) {
+            assert(!md_fd_order_cancel(&op));
+            assert(md_fd_order_begin(owner->table,&op,wakeup)>=0);
+        }
+        int64_t deadline=md_event_now()+5000000000LL;
+        while (md_fd_order_state(&op)!=MD_FD_ORDER_READY) {
+            /* EVENT_WAIT: another owner retires its exact operation; timeout
+             * fails the fixture, never grants admission. Late hints are OK. */
+            assert(!md_event_wait_fd(fd,POLLIN,deadline));
+            uint64_t hints;
+            ssize_t n;
+            do { n=read(fd,&hints,sizeof(hints)); } while (n<0 && errno==EINTR);
+            assert(n==sizeof(hints));
+        }
+        assert(!md_fd_order_start(&op));
+        assert(atomic_fetch_add(owner->inside,1)==0);
+        unsigned previous=*owner->committed;
+        assert(!md_fd_origins_set_flags(owner->table,9,previous&1 ? FD_CLOEXEC : 0));
+        *owner->committed=previous+1;
+        assert(atomic_fetch_sub(owner->inside,1)==1);
+        assert(!md_fd_order_complete(&op));
+    }
+    close(fd); md_fd_wakeup_release(wakeup); return NULL;
+}
+static void event_ordering(struct md_fs_anchor *origin) {
+    struct md_fd_origins *table=md_fd_origins_new(); assert(table);
+    put(table,9,origin,0);
+    pthread_barrier_t start; assert(!pthread_barrier_init(&start,NULL,3));
+    unsigned committed=0; atomic_uint inside=0;
+    struct event_owner owner={table,&start,&committed,&inside};
+    pthread_t threads[3];
+    for (unsigned i=0;i<3;++i) assert(!pthread_create(threads+i,NULL,ordered_writer,&owner));
+    /* EVENT_WAIT: all producer loops retire their records; runner bounds joins. */
+    for (unsigned i=0;i<3;++i) assert(!pthread_join(threads[i],NULL));
+    assert(committed==3000 && !atomic_load(&inside));
+    pthread_barrier_destroy(&start);
+    int fd=eventfd(0,EFD_NONBLOCK|EFD_CLOEXEC); assert(fd>=0);
+    struct md_fd_wakeup *wake=NULL;
+    assert(!md_fd_wakeup_create(fd,&wake));
+    struct md_fd_order a={0}, b={0};
+    assert(md_fd_order_begin(table,&a,NULL)==1 && !md_fd_order_start(&a));
+    assert(!md_fd_order_begin(table,&b,wake));
+    uint64_t full=UINT64_MAX-1, count;
+    assert(write(fd,&full,sizeof(full))==sizeof(full));
+    assert(!md_fd_order_complete(&a));
+    assert(read(fd,&count,sizeof(count))==sizeof(count) && count==full);
+    assert(md_fd_order_state(&b)==MD_FD_ORDER_READY && !md_fd_order_cancel(&b));
+    assert(md_fd_order_begin(table,&a,NULL)==1 && !md_fd_order_start(&a));
+    assert(!md_fd_order_begin(table,&b,wake));
+    /* The queued record retains the notification endpoint, not the loop. */
+    close(fd); md_fd_wakeup_release(wake);
+    assert(!md_fd_order_complete(&a));
+    assert(md_fd_order_state(&b)==MD_FD_ORDER_READY && !md_fd_order_cancel(&b));
+    md_fd_origins_release(table);
+}
+static void mutations(struct md_fs_anchor *a, struct md_fs_anchor *b) {
+    struct md_fd_origins *files=md_fd_origins_new(); assert(files);
+    put(files,10,a,0); put(files,11,b,0);
+    struct md_fd_mutation op;
+    unsigned long args[6]={10,11,O_CLOEXEC};
+    assert(!md_fd_mutation_prepare(files,SYS_dup3,args,&op));
+    allocation_budget=0;
+    assert(!md_fd_mutation_finish(&op,files,11));
+    allocation_budget=-1;
+    expect(files,11,a,FD_CLOEXEC);
+    args[1]=(1UL<<32)|F_DUPFD_CLOEXEC;
+    assert(!md_fd_mutation_prepare(files,SYS_fcntl,args,&op));
+    assert(!md_fd_mutation_finish(&op,files,12)); expect(files,12,a,FD_CLOEXEC);
+    args[1]=(1UL<<32)|F_SETFD; args[2]=FD_CLOEXEC;
+    assert(!md_fd_mutation_prepare(files,SYS_fcntl,args,&op));
+    assert(!md_fd_mutation_finish(&op,files,-EPERM)); expect(files,10,a,0);
+    assert(!md_fd_mutation_prepare(files,SYS_fcntl,args,&op));
+    assert(!md_fd_mutation_finish(&op,files,0)); expect(files,10,a,FD_CLOEXEC);
+    assert(!md_fd_mutation_prepare(files,SYS_close,args,&op));
+    assert(!md_fd_mutation_finish(&op,files,-EPERM)); expect(files,10,a,FD_CLOEXEC);
+    assert(!md_fd_mutation_prepare(files,SYS_close,args,&op));
+    assert(!md_fd_mutation_finish(&op,files,0)); expect(files,10,NULL,0);
+    args[0]=11; args[1]=12; args[2]=CLOSE_RANGE_CLOEXEC;
+    assert(!md_fd_mutation_prepare(files,SYS_close_range,args,&op));
+    assert(!md_fd_mutation_finish(&op,files,0));
+    expect(files,11,a,FD_CLOEXEC); expect(files,12,a,FD_CLOEXEC);
+    args[0]=11; args[1]=12; args[2]=0;
+    assert(!md_fd_mutation_prepare(files,SYS_dup3,args,&op));
+    assert(!md_fd_mutation_abandon(&op,files));
+    expect(files,11,a,FD_CLOEXEC); expect(files,12,NULL,0);
+    args[0]=11; args[1]=F_SETFD;
+    assert(!md_fd_mutation_prepare(files,SYS_fcntl,args,&op));
+    assert(!md_fd_mutation_abandon(&op,files)); expect(files,11,NULL,0);
+    md_fd_origins_release(files);
+}
+static void exchanges(struct md_fs_anchor *a, struct md_fs_anchor *b) {
+    struct md_fd_exchanges *set=md_fd_exchanges_create(); assert(set);
+    struct md_fd_origins *files=md_fd_origins_new(), *other=md_fd_origins_new(); assert(files && other);
+    put(files,7,a,0);
+    int bases[]={7,-1}, targets[]={10,11};
+    struct md_fd_exchange *owner=NULL;
+    assert(!md_fd_exchange_begin(set,120,files,bases,&owner));
+    uint64_t id=md_fd_exchange_id(owner); assert(id);
+    assert(!md_fd_exchange_acquire(set,id,121,files));
+    assert(!md_fd_exchange_acquire(set,id,120,other));
+    struct md_fd_exchange *worker=md_fd_exchange_acquire(set,id,120,files); assert(worker);
+    put(files,7,b,0);
+    assert(md_fd_exchange_input(worker,0)==a && !md_fd_exchange_input(worker,1));
+    assert(md_fd_exchange_received(owner)==-EAGAIN);
+    allocation_budget=0;
+    assert(md_fd_exchange_offer(worker,b,2)==-ENOMEM);
+    allocation_budget=-1;
+    assert(!md_fd_exchange_offer(worker,b,2));
+    struct md_fd_receipt *receipt=mmap(NULL,sizeof(*receipt),PROT_READ|PROT_WRITE,
+        MAP_SHARED,md_fd_exchange_receipt(worker),0);
+    assert(receipt!=MAP_FAILED);
+    assert(!md_fd_exchange_received(owner));
+    md_fd_receipt_reset(receipt);
+    struct cmsghdr *c=&receipt->control.align;
+    c->cmsg_len=CMSG_LEN(sizeof(targets)); c->cmsg_level=SOL_SOCKET; c->cmsg_type=SCM_RIGHTS;
+    int invalid[]={10,10}; memcpy(CMSG_DATA(c),invalid,sizeof(invalid));
+    assert(md_fd_exchange_received(owner)==-EPROTO);
+    memcpy(CMSG_DATA(c),targets,sizeof(targets));
+    assert(md_fd_exchange_offer(worker,a,1)==-EALREADY);
+    md_fd_exchange_close(set,owner);
+    assert(!md_fd_exchange_acquire(set,id,120,files));
+    allocation_budget=0;
+    assert(!md_fd_exchange_received(worker));
+    allocation_budget=-1;
+    expect(files,10,b,FD_CLOEXEC); expect(files,11,NULL,0);
+    assert(md_fd_exchange_received(worker)==-EALREADY);
+    assert(!munmap(receipt,sizeof(*receipt)));
+    md_fd_exchange_release(worker);
+    assert(!md_fd_exchange_begin(set,120,files,bases,&owner));
+    assert(md_fd_exchange_id(owner)!=id);
+    md_fd_exchange_close(set,owner);
+    md_fd_origins_release(files); md_fd_origins_release(other); md_fd_exchanges_destroy(set);
 }
 void test_fd_origins(void) {
     unsigned before=descriptors();
@@ -270,7 +428,8 @@ void test_fd_origins(void) {
     put(table,12,pipe_origin,0); md_fs_anchor_release(pipe_origin);
     char byte; assert(read(stream[0],&byte,1)==0); close(stream[0]);
     md_fd_origins_release(table);
-    cwd_context(a); ownership(a,b); rollback(a); registry_and_readers(a,b); ordering(a);
+    cwd_context(a); ownership(a,b); rollback(a); registry_and_readers(a,b); ordering(a); event_ordering(a);
+    mutations(a,b); exchanges(a,b);
     table=md_fd_origins_new(); assert(table);
     assert(!md_fd_origins_prepare(table,a,0,&update));
     md_fd_origins_release(table);
@@ -282,4 +441,6 @@ void test_fd_origins(void) {
     puts("PASS independent CLONE_FILES/CLONE_FS, unshare rollback, exec CLOEXEC and retained cwd");
     puts("PASS allocation-failure rollback, allocation-free publication and concurrent retained snapshots");
     puts("PASS per-file-table ordering: cancellation awaits kernel completion, independent owners progress, no allocations");
+    puts("PASS cross-loop ordering: 3000 publications, concurrent cancellation, saturated wake and owner teardown");
+    puts("PASS descriptor mutations and authenticated RPC exchange: prepare rollback, owner loss and exact publication");
 }

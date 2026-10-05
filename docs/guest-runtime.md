@@ -545,8 +545,13 @@ before the native call and committed only on its successful syscall exit.
 Kernel errors and cancelled operations preserve the previous ownership.
 Exec and `close_range(CLOSE_RANGE_UNSHARE)` also separate the annotation owner
 alongside the kernel table without detaching shared filesystem context or
-semaphore undo. Origin owners retain only O_PATH anchors; automatic guest-FD/cwd
-annotation capture and transfer tracking are not enabled. See the
+semaphore undo. Origin owners retain only O_PATH anchors. Filesystem opens from
+both transports publish their origins in the same per-file-table order as native
+dup/fcntl/close, close_range, fork and exec observation. Task-affine FD replies use
+a retained shared kernel receipt, including receiver death before acknowledgement.
+Data IO and open-file-description lifetime remain kernel-owned. Automatic cwd
+provenance, inherited/native descriptors and general application SCM_RIGHTS
+tracking remain incomplete; copied guest mount namespaces are not enabled. See the
 [resource contract](../native/guest-runtime/process-resources.md).
 
 Static PIE and fixed-address ET_EXEC use the same loader. ELF load alignment is

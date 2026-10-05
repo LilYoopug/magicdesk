@@ -77,12 +77,19 @@ static void syscall_test(void) {
         assert(!ptrace(PTRACE_TRACEME, 0, 0, 0)); raise(SIGSTOP);
         assert(syscall(SYS_getpid) == getpid());
         int fd = open("/etc/passwd", O_RDONLY); assert(fd >= 0);
-        char bytes[16]; assert(read(fd, bytes, sizeof(bytes)) > 0); close(fd);
+        char bytes[16]; assert(read(fd, bytes, sizeof(bytes)) > 0);
+        int copy=syscall(SYS_dup,fd); assert(copy>=0);
+        assert(syscall(SYS_dup3,fd,copy,O_CLOEXEC)==copy);
+        assert(!fcntl(copy,F_SETFD,0));
+        int high=fcntl(copy,F_DUPFD_CLOEXEC,128); assert(high>=128);
+        assert(!syscall(SYS_close_range,high,high,0));
+        assert(!close(copy) && !close(fd));
         _exit(9);
     }
     stop(child);
     assert(!ptrace(PTRACE_SETOPTIONS, child, 0, PTRACE_O_TRACESYSGOOD | PTRACE_O_TRACEEXIT));
     int entries = 0, exits = 0, opening = 0, exiting = 0, status;
+    int closing=0, duplicating=0, replacing=0, controlling=0, ranging=0;
     for (;;) {
         assert(!ptrace(PTRACE_SYSCALL, child, 0, 0));
         assert(waitpid(child, &status, __WALL) == child);
@@ -94,9 +101,15 @@ static void syscall_test(void) {
         assert(ptrace(PTRACE_GET_SYSCALL_INFO, child, sizeof(info), &info) > 0);
         if (info.op == PTRACE_SYSCALL_INFO_ENTRY) {
             entries++; if (info.entry.nr == SYS_openat) opening++;
+            closing+=info.entry.nr==SYS_close;
+            duplicating+=info.entry.nr==SYS_dup;
+            replacing+=info.entry.nr==SYS_dup3;
+            controlling+=info.entry.nr==SYS_fcntl;
+            ranging+=info.entry.nr==SYS_close_range;
         } else { assert(info.op == PTRACE_SYSCALL_INFO_EXIT); exits++; }
     }
     assert(entries >= 6 && exits == entries - 1 && opening == 1 && exiting == 1);
+    assert(closing==2 && duplicating==1 && replacing==1 && controlling==2 && ranging==1);
 }
 static void mixed_test(void) {
     int release[2]; assert(!pipe(release));

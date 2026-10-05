@@ -167,6 +167,9 @@ int md_domain_socket_error(int family, int protocol) {
     return family == AF_NETLINK && protocol == NETLINK_AUDIT ? -EPROTONOSUPPORT : 0;
 }
 int md_domain_native_call(long nr, const unsigned long a[6]) {
+#define FD_ARGUMENT(name, index, value) if (nr == SYS_##name && (unsigned)a[index] == (unsigned)(value)) return 1;
+    MD_DOMAIN_FD_ARGUMENTS(FD_ARGUMENT)
+#undef FD_ARGUMENT
 #define ARGUMENT(name, index, value) if (nr == SYS_##name && a[index] == (unsigned long)(value)) return 1;
     MD_DOMAIN_KERNEL_ARGUMENTS(ARGUMENT)
 #undef ARGUMENT
@@ -174,6 +177,7 @@ int md_domain_native_call(long nr, const unsigned long a[6]) {
 #define NATIVE_CASE(name) case SYS_##name:
     MD_GATE_TRANSPORT_CALLS(NATIVE_CASE)
     MD_DOMAIN_KERNEL_CALLS(NATIVE_CASE)
+    MD_DOMAIN_FD_CALLS(NATIVE_CASE)
 #undef NATIVE_CASE
     case SYS_lseek: case SYS_getdents64: case SYS_socketpair:
     /* Keep the original wait4 stop for the guest-debugger adapter. Restricted

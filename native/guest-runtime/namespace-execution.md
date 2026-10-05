@@ -35,8 +35,9 @@ connection ownership.
 host/proc object selection, using the shared `proc_paths.c` classifier. Paths, FD stat, directory
 read/seek and namespace mutations use the typed RPC contract when task-affine
 execution is needed. Ordinary open/stat notifications reach the same engine
-directly through `namespace_broker.c`. Data IO, mmap,
-fcntl, flock and ordinary descriptor duplication remain native. The client has
+directly through `namespace_broker.c`. Data IO, mmap and flock remain native.
+Descriptor duplication, close and descriptor-flag changes execute in the kernel
+with ordered supervisor observation, not filesystem emulation. The client has
 no SQLite, libc, mutable process-global cwd, FD cache or shared client lock.
 
 `program_files.c` supplies the same program-open/identity boundary to initial

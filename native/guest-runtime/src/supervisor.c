@@ -7,6 +7,9 @@
 #include "namespace_broker.h"
 #include "guest_domain.h"
 #include "task_resources.h"
+#include "fd_mutation.h"
+#include "fd_exchange.h"
+#include "fd_client.h"
 #include "elf_admission.h"
 #include "interception.h"
 #include "interception_stacks.h"
@@ -42,6 +45,7 @@
 #include "guest_debugger.h"
 #include "process_image_view.h"
 #include <sys/signalfd.h>
+#include <sys/eventfd.h>
 #include "launch_registry.h"
 #include <sys/socket.h>
 #include <sys/syscall.h>
@@ -110,6 +114,12 @@ struct thread {
     struct metadata_operation metadata;
     struct md_task_resources resources;
     struct md_resource_change resource_change;
+    struct md_fd_order fd_order;
+    struct md_fd_mutation fd_mutation;
+    struct user_pt_regs fd_registers;
+    int fd_running;
+    unsigned fd_job;
+    struct md_fd_exchange *fd_exchange;
     unsigned long cloning;
     struct md_identity identity;
     struct md_exec_identity pending_identity;
@@ -140,6 +150,9 @@ static unsigned live, total, calls, images, signals, copy_faults, fstat_failures
 struct denial { unsigned nr, adapted, count; enum phase phase; };
 static struct denial denials[64];
 static int result, signal_fd, listener = -1;
+static int fd_ready = -1;
+static struct md_fd_wakeup *fd_wakeup;
+static struct md_fd_exchanges *fd_exchanges;
 static int cancelling;
 static struct md_launch_registration registration = {.directory=-1, .record=-1};
 static int64_t cancellation_deadline;
@@ -164,6 +177,7 @@ static int set_registers(pid_t pid, struct user_pt_regs *regs);
 static void resume(pid_t pid, int sig);
 static int shield(struct thread *t);
 static int restore_mask(struct thread *t);
+static void fd_discard(struct thread *t);
 static void dispatch(struct thread *t);
 static void report_statistics(void);
 static int debugger_allowed(pid_t, pid_t);
@@ -217,6 +231,7 @@ static void cleanup(void) {
     while (waitpid(-1, NULL, __WALL) > 0 || errno == EINTR) { }
     while (threads) {
         struct thread *next = threads->next;
+        fd_discard(threads);
         md_stacks_release(threads->stacks);
         md_watch_activation_release(threads->watch_activation);
         md_shm_abort(shm,&threads->shm_pending);
@@ -238,8 +253,11 @@ static void cleanup(void) {
     md_launch_unregister(&registration);
     md_broker_destroy(broker); broker = NULL;
     md_task_registry_destroy(tasks); tasks = NULL;
+    md_fd_exchanges_destroy(fd_exchanges); fd_exchanges=NULL;
     md_identity_release(&launch_identity);
     if (listener >= 0) close(listener);
+    if (fd_ready >= 0) close(fd_ready);
+    md_fd_wakeup_release(fd_wakeup); fd_wakeup=NULL;
     free(statistics);
 }
 _Noreturn static void fail(const char *what, int line) {
@@ -280,6 +298,7 @@ static struct thread *thread(pid_t pid) {
     live++; total++; return t;
 }
 static void release_thread(struct thread *t) {
+    fd_discard(t);
     md_task_registry_forget(tasks, t->pid);
     md_identity_release(&t->identity);
     CHECK(!md_shm_abort(shm,&t->shm_pending));
@@ -1097,6 +1116,107 @@ static void domain_path_call(struct thread *t, struct user_pt_regs *r) {
             || !shield(t) || !skip(t->pid)) return;
     domain_path_load(t);
 }
+static void fd_discard(struct thread *t) {
+    if (t->fd_running) CHECK(!md_fd_mutation_abandon(&t->fd_mutation,t->fd_order.table));
+    else md_fd_mutation_discard(&t->fd_mutation);
+    if (t->fd_order.table) {
+        int running=md_fd_order_cancel(&t->fd_order);
+        /* Called only after a terminal task event, never merely on timeout. */
+        if (running==1) {
+            if (t->fd_job==MD_FD_RECEIVE) CHECK(!md_fd_exchange_received(t->fd_exchange));
+            CHECK(!md_fd_order_complete(&t->fd_order));
+        }
+    }
+    t->fd_running=0; t->fd_job=0;
+    md_fd_exchange_close(fd_exchanges,t->fd_exchange); t->fd_exchange=NULL;
+}
+static void fd_finish(struct thread *t, long result) {
+    long nr=t->fd_registers.regs[8];
+    int exec=nr==SYS_execve || nr==SYS_execveat;
+    if (exec || nr==SYS_unshare || (nr==SYS_close_range && (t->fd_registers.regs[2]&CLOSE_RANGE_UNSHARE)))
+        CHECK(!md_resources_unshare_finish(ipc,&t->resources,&t->resource_change,result));
+    if (exec && !result) md_fd_origins_exec(t->resources.files);
+    CHECK(!md_fd_mutation_finish(&t->fd_mutation,t->resources.files,result));
+    CHECK(!md_fd_order_complete(&t->fd_order));
+    t->fd_running=0;
+}
+static void fd_start(struct thread *t) {
+    CHECK(!md_fd_order_start(&t->fd_order));
+    struct user_pt_regs *r=&t->fd_registers;
+    if (t->fd_job) {
+        long result=0;
+        if (t->fd_job==MD_FD_INPUT) {
+            int bases[2]={(int)r->regs[2],(int)r->regs[3]};
+            result=md_fd_exchange_begin(fd_exchanges,t->pid,t->resources.files,bases,&t->fd_exchange);
+            if (!result) result=(long)md_fd_exchange_id(t->fd_exchange);
+        }
+        if (result<0) { CHECK(!md_fd_order_complete(&t->fd_order)); t->fd_job=0; }
+        r->regs[0]=result; r->pc+=4;
+        if (set_registers(t->pid,r)) resume(t->pid,0);
+        return;
+    }
+    unsigned long args[6];
+    for (unsigned i=0;i<6;++i) args[i]=r->regs[i];
+    int error=0;
+    if (r->regs[8]==SYS_execve || r->regs[8]==SYS_execveat || r->regs[8]==SYS_unshare
+            || (r->regs[8]==SYS_close_range && (r->regs[2]&CLOSE_RANGE_UNSHARE)))
+        error=md_resources_unshare_prepare(&t->resources,r->regs[8]==SYS_unshare ? r->regs[0] : CLONE_FILES,
+            &t->resource_change);
+    if (!error) error=md_fd_mutation_prepare(t->resources.files,r->regs[8],args,&t->fd_mutation);
+    if (error) {
+        md_resources_unshare_finish(ipc,&t->resources,&t->resource_change,-ECANCELED);
+        fd_discard(t); return_value(t,r,error); return;
+    }
+    if (r->regs[8]==SYS_clone) { t->original=*r; t->phase=OBSERVING; }
+    t->fd_running=1; resume(t->pid,0);
+}
+static void fd_begin(struct thread *t, const struct user_pt_regs *r) {
+    if (!t->resources.files) { resume(t->pid,0); return; }
+    CHECK(!t->fd_order.table && !t->fd_running);
+    t->fd_job=0;
+    t->fd_registers=*r;
+    int ready=md_fd_order_begin(t->resources.files,&t->fd_order,fd_wakeup);
+    CHECK(ready>=0);
+    if (ready) fd_start(t);
+    /* EVENT_WAIT: another operation owns this file table. fd_ready signals its
+     * exact completion; the launch deadline cancels the owned process tree. */
+}
+static void fd_control(struct thread *t, struct user_pt_regs *r) {
+    unsigned operation=(unsigned)r->regs[0];
+    uint64_t id=r->regs[1];
+    long result=0;
+    if (operation==MD_FD_INPUT || operation==MD_FD_RECEIVE) {
+        if (t->fd_order.table || (operation==MD_FD_INPUT ? t->fd_exchange!=NULL
+                : !id || id!=md_fd_exchange_id(t->fd_exchange))) result=-EINVAL;
+        else if (t->resources.files) {
+            t->fd_registers=*r; t->fd_job=operation;
+            int ready=md_fd_order_begin(t->resources.files,&t->fd_order,fd_wakeup);
+            if (ready<0) { t->fd_job=0; result=ready; }
+            else { if (ready) fd_start(t); return; }
+        }
+    } else if (!id || id!=md_fd_exchange_id(t->fd_exchange)) result=-ESTALE;
+    else if (operation==MD_FD_SENT || operation==MD_FD_RECEIVED) {
+        if (t->fd_job!=(operation==MD_FD_SENT ? MD_FD_INPUT : MD_FD_RECEIVE)
+                || md_fd_order_state(&t->fd_order)!=MD_FD_ORDER_RUNNING) result=-EINVAL;
+        else {
+            if (operation==MD_FD_RECEIVED) result=md_fd_exchange_received(t->fd_exchange);
+            CHECK(!md_fd_order_complete(&t->fd_order)); t->fd_job=0;
+        }
+    } else if (operation==MD_FD_END) {
+        if (t->fd_order.table) result=-EBUSY;
+        else { md_fd_exchange_close(fd_exchanges,t->fd_exchange); t->fd_exchange=NULL; }
+    } else result=-EINVAL;
+    if (result<0) TRACE("PROBE fd-control pid=%d op=%u id=%llu result=%ld\n",t->pid,operation,
+        (unsigned long long)id,result);
+    r->regs[0]=result; r->pc+=4;
+    if (set_registers(t->pid,r)) resume(t->pid,0);
+}
+static void fd_progress(void) {
+    uint64_t value;
+    while (read(fd_ready,&value,sizeof(value))<0 && errno==EINTR) { }
+    for (struct thread *t=threads;t;t=t->next)
+        if (t->pid && !t->fd_running && md_fd_order_state(&t->fd_order)==MD_FD_ORDER_READY) fd_start(t);
+}
 static int domain_call(struct thread *t, struct user_pt_regs *r, unsigned long cookie) {
     long nr = r->regs[8];
     if (nr == SYS_socket) {
@@ -1105,9 +1225,7 @@ static int domain_call(struct thread *t, struct user_pt_regs *r, unsigned long c
     }
     if (nr == SYS_unshare) {
         CHECK(t->phase == IDLE);
-        int error = md_resources_unshare_prepare(&t->resources, r->regs[0], &t->resource_change);
-        if (error) return_value(t, r, error);
-        else { t->original = *r; t->phase = OBSERVING; resume(t->pid, 0); }
+        fd_begin(t,r);
         return 1;
     }
     if (nr == SYS_setns) { return_value(t, r, -ENOTSUP); return 1; }
@@ -1142,7 +1260,7 @@ static int domain_call(struct thread *t, struct user_pt_regs *r, unsigned long c
     unsigned long args[6];
     for (unsigned i = 0; i < 6; i++) args[i] = r->regs[i];
     if (md_domain_native_call(nr, args)) {
-        if (cookie == MD_INTERCEPT_OBSERVE || cookie == MD_INTERCEPT_WATCH) return 0;
+        if (cookie == MD_INTERCEPT_OBSERVE || cookie == MD_INTERCEPT_WATCH || cookie==MD_INTERCEPT_FD) return 0;
         resume(t->pid, 0); return 1;
     }
     int error = cookie == MD_INTERCEPT_DISPATCH ? md_domain_path_error(t->resources.fs) : -EPERM;
@@ -1154,14 +1272,6 @@ static int domain_call(struct thread *t, struct user_pt_regs *r, unsigned long c
     return_value(t, r, error); return 1;
 }
 static int descriptor_call(struct thread *t, struct user_pt_regs *r, unsigned long cookie) {
-    if (cookie == MD_INTERCEPT_NATIVE && r->regs[8] == SYS_close_range
-            && ((unsigned)r->regs[2] & CLOSE_RANGE_UNSHARE)) {
-        CHECK(t->phase == IDLE);
-        int error = md_resources_unshare_prepare(&t->resources, CLONE_FILES, &t->resource_change);
-        if (error) return_value(t, r, error);
-        else { t->original = *r; t->phase = OBSERVING; resume(t->pid, 0); }
-        return 1;
-    }
     if (cookie != MD_INTERCEPT_DISPATCH || r->regs[8] != SYS_lseek) return 0;
     CHECK(t->ready && t->phase == IDLE);
     int fd = duplicate_fd(t->pid, (int)r->regs[0]);
@@ -1177,6 +1287,11 @@ static int descriptor_call(struct thread *t, struct user_pt_regs *r, unsigned lo
     if (statistics) statistics->native_seeks++;
     return_value(t, r, value); return 1;
 }
+static int debug_syscall_exit(struct thread *t, const struct user_pt_regs *regs) {
+    int active=t->debug_call_active;
+    t->debug_call_active=t->debug_adapter=0;
+    return active && md_debugger_syscall(debugger,t->pid,regs,0);
+}
 static void resume(pid_t pid, int sig) {
     struct thread *t = thread(pid);
     if (t->resume_lost) return;
@@ -1188,8 +1303,7 @@ static void resume(pid_t pid, int sig) {
         if (t->debug_call_active && t->debug_adapter) {
             struct user_pt_regs regs;
             if (!registers(pid,&regs)) return;
-            t->debug_call_active=t->debug_adapter=0;
-            if (md_debugger_syscall(debugger,pid,&regs,0)) return;
+            if (debug_syscall_exit(t,&regs)) return;
         }
         if (md_debugger_boundary(debugger,pid)) return;
     }
@@ -1200,7 +1314,7 @@ static void resume(pid_t pid, int sig) {
     }
     if (broker) CHECK(!md_broker_task(broker, pid,
         t->ready && phase == IDLE && t->endpoint[0] && !md_domain_restricted(t->resources.fs), RAW_GATE, abi.watch_gate + 4));
-    if (!native_trace(phase == OBSERVING || phase == EXPORT_ENTRY || phase == EXPORT_NOTIFY
+    if (!native_trace(t->fd_running || phase == OBSERVING || phase == EXPORT_ENTRY || phase == EXPORT_NOTIFY
             || phase == EXPORT_RETURN || phase == EXECUTING || phase == WATCH_CANCEL
             || phase == WATCH_ENTRY || phase == WATCH_READ || phase==DEBUG_WAIT_ENTRY || phase==DEBUG_WAIT_EXIT
             || phase==IPC_WAIT_ENTRY || phase==IPC_WAITING
@@ -1283,9 +1397,9 @@ static pid_t wait_event(int *status, struct rusage *usage, int64_t deadline) {
         /* EVENT_WAIT: ptrace stop/exit or cancellation via signalfd; expiry
          * fails and cancels the owned tree, never counts as readiness. */
         struct pollfd events[] = {{signal_fd, POLLIN, 0}, {broker ? -1 : listener, POLLIN, 0},
-            {md_fs_worker_fd(filesystem), POLLIN, 0}};
+            {md_fs_worker_fd(filesystem), POLLIN, 0}, {fd_ready,POLLIN,0}};
         int64_t bound = cancelling ? cancellation_deadline : deadline;
-        long outcome = md_event_wait(events, 3, bound);
+        long outcome = md_event_wait(events, 4, bound);
         if (outcome == -ETIMEDOUT && cancelling == 1) {
             /* EVENT_WAIT: graceful cancellation expired; drain killed children
              * for at most ten seconds before reporting incomplete cleanup. */
@@ -1296,6 +1410,7 @@ static pid_t wait_event(int *status, struct rusage *usage, int64_t deadline) {
         CHECK(outcome >= 0);
         if (events[0].revents) { drain(); continue; }
         if (events[2].revents) CHECK(!md_broker_complete(broker, delegated_notification));
+        if (events[3].revents) fd_progress();
         if (events[1].revents & POLLIN) external_stat();
         if (events[1].revents & POLLHUP) { close(listener); listener = -1; }
     }
@@ -1339,6 +1454,7 @@ int main(int argc, char **argv) {
     const char *selected_user = NULL, *selected_groups = NULL;
     launch_identity = md_identity_new(getuid(), getgid());
     tasks = md_task_registry_create(); CHECK(tasks);
+    fd_exchanges=md_fd_exchanges_create(); CHECK(fd_exchanges);
     struct md_identity owner = md_identity_new(getuid(), getgid());
     CHECK(!md_task_registry_publish(tasks, getpid(), getpid(), &owner, NULL));
     if (argument < argc && !strcmp(argv[argument], "--user")) {
@@ -1435,6 +1551,8 @@ int main(int argc, char **argv) {
     thread(leader)->born = 1; close(channel[1]);
     int keep[] = {signal_fd, channel[0], command_owner};
     CHECK(!md_process_close_fds(keep, command_owner >= 0 ? 3 : 2));
+    fd_ready=eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK); CHECK(fd_ready>=0);
+    CHECK(!md_fd_wakeup_create(fd_ready,&fd_wakeup));
     /* EVENT_WAIT: child readiness precedes attaching; timeout cancels this tree. */
     CHECK(md_event_wait_fd(channel[0], POLLIN, md_event_now() + 5000000000LL) >= 0);
     char byte; CHECK(read(channel[0], &byte, 1) == 1 && byte == 'r');
@@ -1444,7 +1562,7 @@ int main(int argc, char **argv) {
          * uses zero; creation requests already contain the guest's masked mode. */
         umask(0);
         CHECK(!md_task_registry_publish(tasks, leader, leader, &thread(leader)->identity, NULL));
-        int startup = md_fs_worker_start(store, endpoint, admitted_path, tasks, attachments, attachment_count, statistics != NULL, &filesystem);
+        int startup = md_fs_worker_start(store, endpoint, admitted_path, tasks, fd_exchanges, attachments, attachment_count, statistics != NULL, &filesystem);
         if (startup) errno = -startup;
         CHECK(!startup);
         struct md_mount_namespace *mounts=md_fs_worker_mounts(filesystem);
@@ -1492,6 +1610,11 @@ int main(int argc, char **argv) {
             md_broker_forget(broker, pid);
             unsigned long old; CHECK(!native_trace(PTRACE_GETEVENTMSG, pid, NULL, &old));
             t->debug_exec_old=(pid_t)old;
+            struct thread *executing=old && old!=(unsigned)pid ? find_thread((pid_t)old) : t;
+            if (executing) {
+                if (executing->fd_running) fd_finish(executing,0);
+                else CHECK(!md_resources_exec(&executing->resources));
+            }
             if (old && old != (unsigned)pid) {
                 md_debugger_rekey(debugger,(pid_t)old,pid);
                 struct thread *former = find_thread((pid_t)old);
@@ -1509,7 +1632,7 @@ int main(int argc, char **argv) {
                     release_thread(former);
                 }
             }
-            CHECK(!md_resources_exec(&t->resources));
+            fd_discard(t);
             md_stacks_return(t->stacks, t->stack);
             CHECK(!md_shm_abort(shm,&t->shm_pending));
             CHECK(!md_shm_space_release(shm,t->shm_space));
@@ -1539,6 +1662,7 @@ int main(int argc, char **argv) {
             c->shm_space = md_shm_space_fork(shm,t->shm_space,!!(t->cloning & CLONE_VM)); CHECK(c->shm_space);
             CHECK(!md_resources_release(ipc, &c->resources));
             if (t->resources.fs) CHECK(!md_resources_fork(&t->resources, t->cloning, &c->resources));
+            if (t->fd_running) fd_finish(t,(long)child);
             md_stacks_release(c->stacks);
             c->stacks = md_stacks_fork(t->stacks, !!(t->cloning & CLONE_VM)); CHECK(c->stacks);
             md_watch_activation_release(c->watch_activation);
@@ -1617,6 +1741,7 @@ int main(int argc, char **argv) {
             }
             if (identity_call(t, &regs, cookie)) continue;
             if (domain_call(t, &regs, cookie)) continue;
+            if (cookie==MD_INTERCEPT_FD) { fd_begin(t,&regs); continue; }
             if (cookie == MD_INTERCEPT_MEMORY) {
                 CHECK(t->phase == IDLE);
                 int overlap = md_shm_intersects(t->shm_space,regs.regs[0],regs.regs[1]);
@@ -1650,7 +1775,7 @@ int main(int argc, char **argv) {
             if (cookie == MD_INTERCEPT_EXEC) {
                 CHECK(t->phase == DISPATCHING);
                 if (!restore_mask(t)) continue;
-                t->phase = EXECUTING; resume(pid, 0); continue;
+                t->phase = EXECUTING; fd_begin(t,&regs); continue;
             }
             if (cookie == MD_INTERCEPT_OBSERVE) {
                 CHECK(t->ready && t->phase == IDLE);
@@ -1668,6 +1793,19 @@ int main(int argc, char **argv) {
                     || !shield(t) || !skip(pid)) continue;
             dispatch_with_stack(t);
         } else if (!event && sig == (SIGTRAP | 0x80)) {
+            if (t->fd_running) {
+                struct user_pt_regs returned;
+                if (!registers(pid,&returned)) continue;
+                long nr=t->fd_registers.regs[8];
+                fd_finish(t,(long)returned.regs[0]);
+                if (nr!=SYS_clone && nr!=SYS_execve && nr!=SYS_execveat) {
+                    if (t->phase==IDLE) {
+                        if (debug_syscall_exit(t,&returned)) continue;
+                        t->debug_step_call=md_debugger_step(debugger,pid);
+                    }
+                    resume(pid,0); continue;
+                }
+            }
             if (interrupted_operation(t)) continue;
             if (t->phase==DEBUG_WAIT_ENTRY) {
                 t->phase=DEBUG_WAIT_EXIT; resume(pid,0); continue;
@@ -1689,8 +1827,7 @@ int main(int argc, char **argv) {
                     if (regs.regs[8]==SYS_waitid && md_debugger_call(debugger,pid,&regs)) continue;
                     if (t->entered && t->process_image && md_debugger_syscall(debugger,pid,&regs,1)) continue;
                 } else {
-                    int active=t->debug_call_active; t->debug_call_active=0;
-                    if (active && md_debugger_syscall(debugger,pid,&regs,0)) continue;
+                    if (debug_syscall_exit(t,&regs)) continue;
                 }
                 resume(pid,0); continue;
             }
@@ -1750,13 +1887,6 @@ int main(int argc, char **argv) {
             if (t->phase == OBSERVING) {
                 struct user_pt_regs regs;
                 if (!registers(pid, &regs)) continue;
-                if (t->original.regs[8] == SYS_unshare
-                        || (t->original.regs[8] == SYS_close_range
-                            && ((unsigned)t->original.regs[2] & CLOSE_RANGE_UNSHARE)))
-                    CHECK(!md_resources_unshare_finish(ipc, &t->resources, &t->resource_change, (long)regs.regs[0]));
-                if (t->original.regs[8] == SYS_close_range && !regs.regs[0] && t->resources.files)
-                    CHECK(!md_fd_origins_close_range(t->resources.files, (unsigned)t->original.regs[0],
-                        (unsigned)t->original.regs[1], !!((unsigned)t->original.regs[2] & CLOSE_RANGE_CLOEXEC)));
                 if (t->original.regs[8] == SYS_clone) t->cloning = 0;
                 if ((long)regs.regs[0] >= 0 && (t->original.regs[8] == SYS_munmap || t->original.regs[8] == SYS_mmap)) {
                     size_t length = t->original.regs[1], page = (size_t)getpagesize();
@@ -1782,6 +1912,9 @@ int main(int argc, char **argv) {
         } else if (!event && sig == SIGTRAP) {
             struct user_pt_regs regs;
             if (!registers(pid, &regs)) continue;
+            if (abi.fd_control && regs.pc==abi.fd_control && t->ready) {
+                fd_control(t,&regs); continue;
+            }
             if (regs.pc==abi.enter && t->phase==IDLE && t->entered) {
                 t->process_image=regs.regs[2];
                 uint64_t entry=regs.regs[0], stack=regs.regs[1];

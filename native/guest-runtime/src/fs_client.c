@@ -4,9 +4,11 @@
 #include "inode_store.h"
 #include "ipc_credentials.h"
 #include "raw.h"
+#include "fd_client.h"
 #include <errno.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/mman.h>
 
 static int valid_entries(const char *data, size_t size) {
     int64_t previous = 0;
@@ -27,7 +29,7 @@ static int valid_entries(const char *data, size_t size) {
     return 1;
 }
 static long receive_reply(int socket, int64_t deadline, const struct md_fs_request *request, struct md_fs_response *out,
-                          struct md_fs_reply *reply) {
+                          struct md_fs_reply *reply, uint64_t exchange) {
     struct md_fs_rights rights = {0};
     long r;
     for (;;) {
@@ -36,13 +38,34 @@ static long receive_reply(int socket, int64_t deadline, const struct md_fs_reque
         r = md_event_wait_fd(socket, POLLIN, deadline); if (r < 0) return r;
     }
     if (r < 0) return r;
+    if (r>=(long)offsetof(struct md_fs_reply,data) && reply->receipt) {
+        if (reply->magic!=MD_FS_MAGIC || reply->version!=MD_FS_VERSION || reply->receipt!=1
+                || !exchange || reply->error || rights.count!=1 || !reply->descriptors
+                || reply->descriptors>MD_FS_MAX_FDS) {
+            md_fs_close_rights(&rights); return -EPROTO;
+        }
+        long memory=RAW6(mmap,NULL,sizeof(struct md_fd_receipt),PROT_READ|PROT_WRITE,MAP_SHARED,rights.fd[0],0);
+        md_fs_close_rights(&rights);
+        if (memory<0 && memory>=-4095) return memory;
+        long received;
+        for (;;) {
+            received=md_fs_receive_receipt(socket,(void *)memory,&rights,exchange);
+            if (received!=-EAGAIN && received!=-EINTR) break;
+            received=md_event_wait_fd(socket,POLLIN,deadline);
+            if (received<0) break;
+        }
+        RAW2(munmap,memory,sizeof(struct md_fd_receipt));
+        if (received<0) return received;
+    } else if (exchange && rights.count) {
+        md_fs_close_rights(&rights); return -EPROTO;
+    }
     uint32_t operation = request->operation;
     int opens = operation == MD_FS_MOUNT_TABLE || operation == MD_FS_OPEN || operation == MD_FS_CREATE || operation == MD_FS_TEMPORARY
         || operation == MD_FS_OPEN_OBJECT || operation == MD_FS_OPEN_IMAGE || operation == MD_FS_WATCH_CREATE
         || operation == MD_FS_GETACL || operation == MD_FS_XATTR_OPEN || operation == MD_FS_REOPEN || (operation == MD_FS_IPC && (request->flags == MD_IPC_PEER || request->flags == MD_IPC_MESSAGE_CREATE));
     if (r < (long)offsetof(struct md_fs_reply, data)
             || reply->magic != MD_FS_MAGIC || reply->version != MD_FS_VERSION
-            || reply->error > 0 || reply->error < -4095 || reply->host_path>1 || reply->reserved
+            || reply->error > 0 || reply->error < -4095 || reply->host_path>1 || reply->receipt>1
             || reply->open_completion > MD_OPEN_PIPE
             || (reply->open_completion && (reply->error || reply->host_path || reply->size
                 || (operation != MD_FS_OPEN && operation != MD_FS_REOPEN && operation != MD_FS_OPEN_OBJECT)
@@ -136,12 +159,27 @@ long md_fs_call_deliver(const char *name, unsigned timeout_ms,
     }
     if (!r) r = md_fs_peer((int)socket);
     length += offsetof(struct md_fs_packet, data);
+    uint64_t exchange=0;
     while (!r) {
+        long begin=md_fd_control(MD_FD_INPUT,0,request->directory[0],request->directory[1]);
+        if (begin<0) { r=begin; break; }
+        exchange=(uint64_t)begin; wire.packet.exchange=exchange;
         r = md_fs_send((int)socket, &wire.packet, length, &rights);
-        if (r == -EAGAIN || r == -EINTR) { r = md_event_wait_fd((int)socket, POLLOUT, deadline); continue; }
+        if (r>=0) out->delivery=MD_FS_UNCONFIRMED;
+        if (exchange) {
+            long sent=md_fd_control(MD_FD_SENT,exchange,0,0);
+            if (sent<0) { r=sent; break; }
+        }
+        if (r == -EAGAIN || r == -EINTR) {
+            if (exchange) {
+                long end=md_fd_control(MD_FD_END,exchange,0,0);
+                if (end<0) { exchange=0; r=end; break; }
+            }
+            exchange=0;
+            r = md_event_wait_fd((int)socket, POLLOUT, deadline); continue;
+        }
         if (r >= 0) {
-            out->delivery = MD_FS_UNCONFIRMED;
-            r = (size_t)r == length ? receive_reply((int)socket, deadline, request, out, &wire.reply) : -EIO;
+            r = (size_t)r == length ? receive_reply((int)socket, deadline, request, out, &wire.reply, exchange) : -EIO;
         }
         break;
     }
@@ -173,6 +211,16 @@ long md_fs_call_deliver(const char *name, unsigned timeout_ms,
                 r = sent < 0 ? sent : -EPROTO;
             } else r = committed ? committed : copied;
         }
+    }
+    if (exchange) {
+        long end=md_fd_control(MD_FD_END,exchange,0,0);
+        if (!r && end<0) r=end;
+    }
+    if (r<0 && out->result.fd>=0) {
+        RAW1(close,out->result.fd); out->result.fd=-1;
+        if (out->result.open_completion.kind==MD_OPEN_PIPE)
+            RAW1(close,out->result.open_completion.control);
+        out->result.open_completion=(struct md_open_completion){0};
     }
     RAW1(close, socket);
     return r;

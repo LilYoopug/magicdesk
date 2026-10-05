@@ -28,6 +28,12 @@ the kernel. `MD_DOMAIN_KERNEL_CALLS` and `MD_DOMAIN_KERNEL_ARGUMENTS` describe
 additional calls requiring no adaptation or observation in any guest domain.
 The domain checker and seccomp filter consume these same definitions. Argument
 predicates compare the full 64-bit value; other commands retain the dispatcher.
+`MD_DOMAIN_FD_CALLS` and `MD_DOMAIN_FD_ARGUMENTS` separately select short native
+descriptor mutations whose origins need ordered observation. Their fcntl command
+is normalized to the kernel's 32-bit argument. Close, dup/dup3, close_range and
+F_SETFD/F_DUPFD/F_DUPFD_CLOEXEC complete in the kernel; the supervisor publishes
+metadata at the syscall-exit event. These capabilities remain available after
+the admitted proc-root restriction, with application filters still in force.
 Application filters still evaluate kernel-fast-path calls. Logical credentials,
 root changes, filter installation and dumpability changes retain their observers.
 Watch descriptors install bounded FD-class read selectors lazily; reads in
@@ -39,8 +45,9 @@ address-space and descriptor ownership; see [filesystem watches](watches.md).
 Adapted calls run on guarded scratch stacks leased per address space.
 CLONE_VM shares the pool; fork copies mapping metadata without sharing leases;
 exec replaces it. Completed calls return their lease. Thread records are reused
-without a fixed thread-count ceiling. Heap work is confined to ownership changes
-and new concurrency, not each ordinary intercepted call.
+without a fixed thread-count ceiling. Stack leases and ordering records are reused.
+Origin-bearing opens and RPC exchanges allocate their own retained state; ordinary
+data IO does not allocate runtime bookkeeping.
 
 Regular-file seeks use a supervisor fast path after the original syscall's
 seccomp admission and domain checks. A task-affine duplicated FD retains the
@@ -64,6 +71,13 @@ ordinary path. A shared-root restriction revokes every CLONE_FS member before
 its caller resumes, including members not returning through a ptrace stop.
 O_PATH uses SCM_RIGHTS because ADDFD rejects it. Mutating opens and
 directory seeks retain the task-affine adapter and its no-replay contract.
+Both filesystem transports order descriptor capture and publication with native
+table mutations. RPC control uses an immutable bootstrap BRK entry point,
+not a new syscall subject to an application's seccomp syscall allowlist.
+Only a ready supervised task uses it. FD payload delivery has a retained kernel
+recvmsg receipt, so receiver death does not require a guest acknowledgement.
+See [publication ordering](process-resources.md#publication-ordering) for lifetime
+rules and the remaining cwd/inherited/general-SCM_RIGHTS boundaries.
 Directory reads validate and enumerate through one namespace operation without a
 preliminary metadata RPC. A reusable 64 KiB worker buffer bounds output independently
 of the RPC frame, with no per-read allocation. The engine's synchronous output callback runs after
@@ -102,6 +116,8 @@ group stops, concurrent TSYNC and non-leader exec have dedicated fixtures.
 
 Nested guest debugging uses the [debugger contract](debugging.md). The supervisor
 retains physical ptrace ownership; GDB requests do not replace syscall mediation.
+Native descriptor completion publishes origins before delivering the inferior's
+syscall-exit stop; internal adapter calls are not additional guest debugger events.
 
 Native `/proc` and `/dev` descriptors remain task-affine when the operation needs
 no guest inode authority. SELinux can allow local metadata access but reject

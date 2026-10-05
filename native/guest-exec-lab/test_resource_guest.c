@@ -125,6 +125,32 @@ static void range_sharing(unsigned flags, int invalid) {
     close(c.ready[0]); close(c.ready[1]); close(c.done[0]); close(c.done[1]);
     printf("PASS close_range flags=%#x invalid=%d\n",flags,invalid);
 }
+static void restricted_descriptors(void) {
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        int file=open("value",O_RDWR|O_CREAT,0600); assert(file>=0);
+        assert(!chroot("/proc/self/fdinfo"));
+        int copy=dup(file); assert(copy>=0);
+        int target=fcntl(file,F_DUPFD,100); assert(target>=100);
+        assert(dup3(copy,target,O_CLOEXEC)==target);
+        assert(fcntl(target,F_GETFD)==FD_CLOEXEC);
+        /* The kernel takes a 32-bit command even when the raw ABI has high bits. */
+        unsigned long high=1UL<<32;
+        assert(!syscall(SYS_fcntl,target,high|F_SETFD,0));
+        assert(fcntl(target,F_GETFD)==0);
+        int wide=syscall(SYS_fcntl,copy,high|F_DUPFD_CLOEXEC,101); assert(wide>=101);
+        assert(fcntl(wide,F_GETFD)==FD_CLOEXEC);
+        assert(!syscall(SYS_close_range,(unsigned)target,(unsigned)target,
+            CLOSE_RANGE_UNSHARE|CLOSE_RANGE_CLOEXEC));
+        assert(fcntl(target,F_GETFD)==FD_CLOEXEC);
+        assert(!syscall(SYS_close_range,(unsigned)wide,(unsigned)wide,0));
+        assert(fcntl(wide,F_GETFD)==-1 && errno==EBADF);
+        assert(!close(copy) && !close(target) && !close(file));
+        _exit(0);
+    }
+    reap(child);
+    puts("PASS restricted proc-root preserves native descriptor mutation and flags");
+}
 static void undo(void) {
     int sem = syscall(SYS_semget, IPC_PRIVATE, 1, 0600); assert(sem >= 0);
     assert(!syscall(SYS_semctl, sem, 0, SETVAL, 1));
@@ -233,6 +259,7 @@ int main(int argc, char **argv) {
     if (!strcmp(argv[1], "probe")) { probe(); return 0; }
     int guest = !strcmp(argv[1], "guest");
     assert(guest || !strcmp(argv[1], "native"));
+    if (guest) restricted_descriptors();
     case_sharing(0, -1, 0);
     case_sharing(CLONE_FS | CLONE_FILES, -1, 0);
     case_sharing(CLONE_FS | CLONE_FILES, CLONE_FS, 0);

@@ -78,8 +78,7 @@ void md_fs_context_execute(struct md_fs_context *context,
         *out=(struct md_fs_result){.fd=-1,.error=fs ? -EPERM : -EINVAL}; return;
     }
     if (output && output->origin) {
-        if (q->operation!=MD_FS_OPEN && q->operation!=MD_FS_CREATE && q->operation!=MD_FS_REOPEN
-                && q->operation!=MD_FS_OPEN_OBJECT && q->operation!=MD_FS_OPEN_IMAGE) {
+        if (!md_fs_operation_has_origin(q->operation)) {
             *out=(struct md_fs_result){.fd=-1,.error=-EINVAL}; return;
         }
     }

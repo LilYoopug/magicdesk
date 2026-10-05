@@ -20,6 +20,10 @@ enum md_fs_operation {
     MD_FS_CHROOT, MD_FS_LAST = MD_FS_CHROOT
 };
 enum { MD_FS_STAT_MOUNT = 1 };
+static inline int md_fs_operation_has_origin(unsigned operation) {
+    return operation==MD_FS_OPEN || operation==MD_FS_CREATE || operation==MD_FS_REOPEN
+        || operation==MD_FS_OPEN_OBJECT || operation==MD_FS_OPEN_IMAGE;
+}
 struct md_fs_attributes {
     uint32_t uid, gid;
     int64_t seconds[2], nanos[2];

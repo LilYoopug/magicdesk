@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "fd_exchange.h"
 #include "event_wait.h"
 #include "fs_service.h"
 #include "fs_engine.h"
@@ -117,15 +118,18 @@ static int valid(const struct md_fs_packet *q, size_t size, const struct md_fs_r
     return 0;
 }
 static int dispatch(struct md_fs_context *context, const struct md_fs_packet *q,
-        const struct md_fs_rights *input, struct md_fs_reply *out, struct md_fs_rights *output) {
+        const struct md_fs_rights *input, struct md_fs_reply *out, struct md_fs_rights *output,
+        struct md_fd_exchange *exchange, struct md_fs_anchor **origin) {
     struct md_fs_request request = {.actor = q->actor, .peer = context->peer, .operation = q->operation, .flags = q->flags, .mode = q->mode,
         .capacity = q->capacity, .offset = q->offset, .resolve = q->resolve, .attributes = q->attributes,
         .directory = {MD_INODE_ROOT, MD_INODE_ROOT}, .path = {q->data, q->data + q->length[0]}};
     unsigned index = 0;
     for (unsigned i = 0; i < 2; ++i) if (q->descriptors & (1U << i)) request.directory[i] = input->fd[index++];
+    for (unsigned i=0;i<2;++i) request.origin[i]=md_fd_exchange_input(exchange,i);
     struct md_fs_result result;
     struct md_fs_output buffer = {.data = out->data,
-        .capacity = q->operation == MD_FS_OPEN_IMAGE ? sizeof(out->data) : PATH_MAX};
+        .capacity = q->operation == MD_FS_OPEN_IMAGE ? sizeof(out->data) : PATH_MAX,
+        .origin=exchange && md_fs_operation_has_origin(q->operation) ? origin : NULL};
     md_fs_context_execute(context, &request, &result, &buffer);
     out->info = result.info; out->size = result.size; out->position = result.position;
     out->host_path=result.host_path;
@@ -134,7 +138,7 @@ static int dispatch(struct md_fs_context *context, const struct md_fs_packet *q,
     if (result.open_completion.kind == MD_OPEN_PIPE) output->fd[output->count++] = result.open_completion.control;
     return result.error;
 }
-enum peer_phase { REQUEST, REPLY, ACKNOWLEDGE, CONFIRM, RELEASE };
+enum peer_phase { REQUEST, REPLY, RIGHTS, ACKNOWLEDGE, CONFIRM, RELEASE };
 struct peer {
     pid_t process;
     enum peer_phase phase;
@@ -142,6 +146,7 @@ struct peer {
     struct md_fs_reply reply;
     struct md_fs_rights output;
     struct md_fs_context context;
+    struct md_fd_exchange *exchange;
     int watch_reader;
 };
 static int service_request(struct md_filesystem *fs, int socket,
@@ -157,10 +162,15 @@ static int service_request(struct md_filesystem *fs, int socket,
     if (n > 0) {
         reply->error = valid(&packet, (size_t)n, &input);
         if (!reply->error) reply->error=md_fs_context_begin(fs,packet.actor,peer->process,&peer->context);
+        if (!reply->error && packet.exchange) {
+            peer->exchange=md_fd_exchange_acquire(fs->exchanges,packet.exchange,packet.actor,peer->context.task.files);
+            if (!peer->exchange) reply->error=-ESTALE;
+        }
         if (!reply->error) {
             OBSERVE(MD_FS_BEFORE_DISPATCH, &packet);
             struct md_cost *cost = statistics ? &statistics->operation[packet.operation] : NULL;
             int64_t begin = md_cost_begin(cost);
+            struct md_fs_anchor *origin=NULL;
             if (packet.operation == MD_FS_WATCH_READ) {
                 ssize_t size = md_inode_watch_reserve(s, input.fd[0], reply->data, packet.capacity);
                 if (size < 0) reply->error = (int)size;
@@ -168,13 +178,24 @@ static int service_request(struct md_filesystem *fs, int socket,
                     reply->size = (size_t)size;
                     peer->watch_reader = input.fd[0]; input.count = 0;
                 }
-            } else reply->error = dispatch(&peer->context, &packet, &input, reply, &peer->output);
+            } else reply->error = dispatch(&peer->context, &packet, &input, reply, &peer->output,peer->exchange,&origin);
+            if (peer->exchange) {
+                int error=md_fd_exchange_offer(peer->exchange,origin,peer->output.count);
+                if (error) { md_fs_close_rights(&peer->output); reply->error=error; }
+            }
+            md_fs_anchor_release(origin);
             md_cost_end(cost, begin);
             OBSERVE(MD_FS_AFTER_DISPATCH, &packet);
         }
     } else reply->error = -EPROTO;
     md_fs_close_rights(&input);
+    if (reply->error) {
+        md_fs_close_rights(&peer->output);
+        reply->size=reply->host_path=reply->open_completion=0;
+        reply->position=0;
+    }
     reply->descriptors = peer->output.count;
+    reply->receipt=peer->output.count && md_fd_exchange_receipt(peer->exchange)>=0;
     peer->phase = REPLY;
     return 0;
 }
@@ -204,11 +225,21 @@ static int service_peer(struct md_filesystem *fs,
         peer->phase = RELEASE; fd->events = POLLIN; return 0;
     }
     if (peer->phase == REQUEST && service_request(fs, fd->fd, peer, statistics)) return 1;
-    if (peer->phase != REPLY) return 0;
-    size_t size = offsetof(struct md_fs_reply, data) + peer->reply.size;
-    long sent = md_fs_send(fd->fd, &peer->reply, size, &peer->output);
+    if (peer->phase==REPLY) {
+        size_t size=offsetof(struct md_fs_reply,data)+peer->reply.size;
+        struct md_fs_rights receipt={.count=1,.fd={md_fd_exchange_receipt(peer->exchange)}};
+        long sent=md_fs_send(fd->fd,&peer->reply,size,peer->reply.receipt ? &receipt : &peer->output);
+        if (sent==-EAGAIN || sent==-EINTR) { fd->events=POLLOUT; return 0; }
+        if (sent!=(long)size) return 1;
+        if (peer->reply.receipt) peer->phase=RIGHTS;
+    } else if (peer->phase!=RIGHTS) return 0;
+    long sent=1;
+    if (peer->phase==RIGHTS) {
+        unsigned char byte=1;
+        sent=md_fs_send(fd->fd,&byte,sizeof(byte),&peer->output);
+    }
     if (sent == -EAGAIN || sent == -EINTR) { fd->events = POLLOUT; return 0; }
-    if (sent != (long)size) return 1;
+    if (sent != 1) return 1;
     md_fs_close_rights(&peer->output);
     /* Client close acknowledges receipt. Do not race a nonblocking SEQPACKET
      * receive with server shutdown; never redispatch a completed mutation. */
@@ -225,6 +256,7 @@ static void close_peer(struct md_inode_store *s, struct pollfd *fd, struct peer 
     md_fs_close_rights(&peer->output);
     close(fd->fd); fd->fd = -1;
     md_fs_context_end(&peer->context);
+    md_fd_exchange_release(peer->exchange); peer->exchange=NULL;
     OBSERVE(MD_FS_CONNECTION_CLOSED, NULL);
 }
 int md_fs_serve(struct md_filesystem *fs, int listener, int stop_fd,

@@ -4,6 +4,8 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <stdint.h>
+#include <unistd.h>
 
 enum { BUCKETS=61 };
 struct md_fd_origin_entry {
@@ -19,6 +21,37 @@ struct md_fd_origins {
     struct md_fd_origin_entry **buckets;
     struct md_fd_order *first, *last;
 };
+struct md_fd_wakeup {
+    atomic_uint refs;
+    int fd;
+};
+int md_fd_wakeup_create(int fd, struct md_fd_wakeup **out) {
+    if (!out) return -EINVAL;
+    *out=NULL;
+    int flags=fcntl(fd,F_GETFL);
+    if (flags<0) return -errno;
+    if (!(flags&O_NONBLOCK)) return -EINVAL;
+    struct md_fd_wakeup *wake=malloc(sizeof(*wake));
+    if (!wake) return -ENOMEM;
+    wake->fd=fcntl(fd,F_DUPFD_CLOEXEC,0);
+    if (wake->fd<0) { int error=-errno; free(wake); return error; }
+    atomic_init(&wake->refs,1); *out=wake; return 0;
+}
+static struct md_fd_wakeup *wakeup_retain(struct md_fd_wakeup *wake) {
+    if (wake) atomic_fetch_add_explicit(&wake->refs,1,memory_order_relaxed);
+    return wake;
+}
+void md_fd_wakeup_release(struct md_fd_wakeup *wake) {
+    if (!wake || atomic_fetch_sub_explicit(&wake->refs,1,memory_order_acq_rel)!=1) return;
+    close(wake->fd); free(wake);
+}
+static int wakeup_signal(struct md_fd_wakeup *wake) {
+    if (!wake) return 0;
+    uint64_t one=1;
+    ssize_t n;
+    do { n=write(wake->fd,&one,sizeof(one)); } while (n<0 && errno==EINTR);
+    return n==(ssize_t)sizeof(one) || (n<0 && errno==EAGAIN) ? 0 : -EIO;
+}
 static void dispose(struct md_fd_origin_entry *entry) {
     while (entry) {
         struct md_fd_origin_entry *next=entry->next;
@@ -147,41 +180,68 @@ int md_fd_origins_close_range(struct md_fd_origins *t, unsigned first, unsigned 
 }
 void md_fd_origins_exec(struct md_fd_origins *t) { remove_entries(t,0,0,0,1); }
 
-int md_fd_order_begin(struct md_fd_origins *t, struct md_fd_order *op) {
+int md_fd_order_begin(struct md_fd_origins *t, struct md_fd_order *op, struct md_fd_wakeup *wake) {
     if (!t || !op) return -EINVAL;
     if (op->state!=MD_FD_ORDER_IDLE || op->table || op->previous || op->next) return -EBUSY;
-    op->table=md_fd_origins_pin(t); op->previous=t->last;
+    op->table=md_fd_origins_pin(t); op->wakeup=wakeup_retain(wake);
+    pthread_mutex_lock(&t->lock);
+    op->previous=t->last;
     if (t->last) t->last->next=op; else t->first=op;
     t->last=op;
     op->state=t->first==op ? MD_FD_ORDER_READY : MD_FD_ORDER_QUEUED;
-    return op->state==MD_FD_ORDER_READY;
+    int ready=op->state==MD_FD_ORDER_READY;
+    pthread_mutex_unlock(&t->lock); return ready;
+}
+enum md_fd_order_state md_fd_order_state(const struct md_fd_order *op) {
+    if (!op || !op->table) return MD_FD_ORDER_IDLE;
+    struct md_fd_origins *t=op->table;
+    pthread_mutex_lock(&t->lock);
+    enum md_fd_order_state state=op->state;
+    pthread_mutex_unlock(&t->lock); return state;
 }
 int md_fd_order_start(struct md_fd_order *op) {
-    if (!op || !op->table || op->state!=MD_FD_ORDER_READY) return -EINVAL;
-    op->state=MD_FD_ORDER_RUNNING; return 0;
-}
-static void retire(struct md_fd_order *op, struct md_fd_order **next) {
+    if (!op || !op->table) return -EINVAL;
     struct md_fd_origins *t=op->table;
+    pthread_mutex_lock(&t->lock);
+    int error=op->state!=MD_FD_ORDER_READY ? -EINVAL : 0;
+    if (!error) op->state=MD_FD_ORDER_RUNNING;
+    pthread_mutex_unlock(&t->lock); return error;
+}
+static int retire(struct md_fd_order *op) {
+    struct md_fd_origins *t=op->table;
+    struct md_fd_wakeup *owner=op->wakeup, *next=NULL;
     int first=t->first==op;
     if (op->previous) op->previous->next=op->next; else t->first=op->next;
     if (op->next) op->next->previous=op->previous; else t->last=op->previous;
     *op=(struct md_fd_order){0};
-    if (first && t->first) { t->first->state=MD_FD_ORDER_READY; *next=t->first; }
-    md_fd_origins_unpin(t);
-}
-int md_fd_order_cancel(struct md_fd_order *op, struct md_fd_order **next) {
-    if (!next) return -EINVAL;
-    *next=NULL;
-    if (!op || !op->table || op->state==MD_FD_ORDER_IDLE) return -EINVAL;
-    if (op->state==MD_FD_ORDER_RUNNING || op->state==MD_FD_ORDER_CANCELLING) {
-        op->state=MD_FD_ORDER_CANCELLING; return 1;
+    if (first && t->first) {
+        t->first->state=MD_FD_ORDER_READY;
+        next=wakeup_retain(t->first->wakeup);
     }
-    if (op->state!=MD_FD_ORDER_QUEUED && op->state!=MD_FD_ORDER_READY) return -EINVAL;
-    retire(op,next); return 0;
+    pthread_mutex_unlock(&t->lock);
+    md_fd_origins_unpin(t);
+    int error=wakeup_signal(next);
+    md_fd_wakeup_release(next); md_fd_wakeup_release(owner);
+    return error;
 }
-int md_fd_order_complete(struct md_fd_order *op, struct md_fd_order **next) {
-    if (!next) return -EINVAL;
-    *next=NULL;
-    if (!op || !op->table || (op->state!=MD_FD_ORDER_RUNNING && op->state!=MD_FD_ORDER_CANCELLING)) return -EINVAL;
-    retire(op,next); return 0;
+int md_fd_order_cancel(struct md_fd_order *op) {
+    if (!op || !op->table) return -EINVAL;
+    struct md_fd_origins *t=op->table;
+    pthread_mutex_lock(&t->lock);
+    if (op->state==MD_FD_ORDER_RUNNING || op->state==MD_FD_ORDER_CANCELLING) {
+        op->state=MD_FD_ORDER_CANCELLING; pthread_mutex_unlock(&t->lock); return 1;
+    }
+    if (op->state!=MD_FD_ORDER_QUEUED && op->state!=MD_FD_ORDER_READY) {
+        pthread_mutex_unlock(&t->lock); return -EINVAL;
+    }
+    return retire(op);
+}
+int md_fd_order_complete(struct md_fd_order *op) {
+    if (!op || !op->table) return -EINVAL;
+    struct md_fd_origins *t=op->table;
+    pthread_mutex_lock(&t->lock);
+    if (op->state!=MD_FD_ORDER_RUNNING && op->state!=MD_FD_ORDER_CANCELLING) {
+        pthread_mutex_unlock(&t->lock); return -EINVAL;
+    }
+    return retire(op);
 }

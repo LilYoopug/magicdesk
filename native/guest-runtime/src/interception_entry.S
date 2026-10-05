@@ -1,5 +1,11 @@
 #include <asm/unistd.h>
 .text
+.global md_guest_fd_control
+.type md_guest_fd_control, %function
+md_guest_fd_control:
+    brk #0x5ba
+    ret
+.size md_guest_fd_control, .-md_guest_fd_control
 .global md_guest_ipc_wait
 md_guest_ipc_wait:
     sub sp, sp, #32

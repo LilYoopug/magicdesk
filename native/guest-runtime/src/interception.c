@@ -8,6 +8,7 @@
 #include "interception.h"
 #include "guest_domain.h"
 #include "watch_calls.h"
+#include "fd_client.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/audit.h>
@@ -53,6 +54,7 @@ extern void md_guest_store_groups(void), md_guest_stored_groups(void);
 extern char md_guest_copy_begin[], md_guest_copy_end[];
 extern char md_guest_watch_gate[], md_guest_watch_return[];
 extern char md_guest_ipc_wait[], md_guest_ipc_wait_result[];
+extern long md_guest_fd_control(unsigned, uint64_t, long, long);
 static long dispatch_files(const struct md_fs *fs, long nr, unsigned long a0, unsigned long a1, unsigned long a2,
         unsigned long a3, unsigned long a4, unsigned long a5) {
     unsigned long args[] = {a0, a1, a2, a3, a4, a5};
@@ -115,6 +117,7 @@ long md_guest_dispatch(long nr, unsigned long a0, unsigned long a1, unsigned lon
         : dispatch_files(&md_files,nr,a0,a1,a2,a3,a4,a5);
 }
 static const struct md_interception_abi abi = {
+    .fd_control=(uintptr_t)md_guest_fd_control,
     .ipc_wait = (uintptr_t)md_guest_ipc_wait,
     .ipc_wait_result = (uintptr_t)md_guest_ipc_wait_result,
     .magic = MD_INTERCEPTION_MAGIC, .size = sizeof(struct md_interception_abi),
@@ -158,6 +161,8 @@ int md_interception_install(int inherited) {
     BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRACE | MD_INTERCEPT_OBSERVE),
 #define NATIVE(n) BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_##n, 0, 1), \
     BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+#define DESCRIPTOR(n) BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_##n, 0, 1), \
+    BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRACE | MD_INTERCEPT_FD),
         struct sock_filter filter[] = {
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_AARCH64, 1, 0),
@@ -181,9 +186,19 @@ int md_interception_install(int inherited) {
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_ENTER_IMAGE, 0, 1),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
-            OBSERVE(clone) OBSERVE(clone3) OBSERVE(chroot)
+            DESCRIPTOR(clone) OBSERVE(clone3) OBSERVE(chroot)
+            MD_DOMAIN_FD_CALLS(DESCRIPTOR)
+            /* Descriptor commands use the kernel's unsigned-int argument. */
+#define FD_ARGUMENT(n, index, value) \
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_##n, 0, 4), \
+            BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[index])), \
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, value, 0, 1), \
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRACE | MD_INTERCEPT_FD), \
+            BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+            MD_DOMAIN_FD_ARGUMENTS(FD_ARGUMENT)
+#undef FD_ARGUMENT
             NATIVE(read) NATIVE(write) NATIVE(readv) NATIVE(writev)
-            NATIVE(pread64) NATIVE(pwrite64) NATIVE(close)
+            NATIVE(pread64) NATIVE(pwrite64)
             NATIVE(futex) NATIVE(set_robust_list) NATIVE(get_robust_list)
             NATIVE(mmap) NATIVE(munmap) NATIVE(mprotect) NATIVE(madvise) NATIVE(brk)
             NATIVE(rt_sigaction) NATIVE(rt_sigprocmask) NATIVE(rt_sigreturn) NATIVE(sigaltstack)
@@ -263,6 +278,7 @@ int md_interception_install(int inherited) {
 #undef TRACE
 #undef OBSERVE
 #undef NATIVE
+#undef DESCRIPTOR
         struct sock_fprog program = {sizeof(filter) / sizeof(filter[0]), filter};
         result = RAW5(prctl, PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
         if (!result) {
@@ -271,6 +287,7 @@ int md_interception_install(int inherited) {
         }
     } else if (RAW1(prctl, PR_GET_SECCOMP) != SECCOMP_MODE_FILTER) result = -EINVAL;
     if (!result) md_guest_ready(listener, md_files.endpoint, MD_INTERCEPTION_MAGIC, &abi);
+    if (!result) md_fd_client_enable();
     if (listener >= 0) RAW1(close, listener);
     return result;
 }
