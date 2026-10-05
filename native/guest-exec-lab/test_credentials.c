@@ -82,7 +82,7 @@ static void concurrent_snapshots(void) {
         struct md_task_snapshot snapshot;
         assert(!md_task_registry_read(p.registry,123,120,&snapshot));
         unsigned k=snapshot.identity.uid.effective; assert(k<2);
-        assert(snapshot.mounts==p.resources[k].mounts && snapshot.root.mount==k+1
+        assert(snapshot.fs==p.resources[k].fs && snapshot.mounts==p.resources[k].mounts && snapshot.root.mount==k+1
             && snapshot.root.object[0]=='a'+(char)k && snapshot.files==p.resources[k].files && !snapshot.cwd);
         md_task_snapshot_release(&snapshot);
     }
@@ -137,9 +137,8 @@ static void root_context(struct md_inode_store *s) {
         if(task==125) assert(out.error==-ENOENT);
         else { assert(!out.error && out.fd>=0); close(out.fd); }
     }
-    struct md_fs_location location={0}; struct md_task_snapshot snap;
+    struct md_task_snapshot snap;
     assert(md_task_registry_read(fs.tasks,123,119,&snap)==-EPERM);
-    assert(md_task_registry_set_root(fs.tasks,123,119,&location)==-EPERM);
     assert(!md_task_registry_read(fs.tasks,123,120,&snap) && snap.root.object[0]);
     assert(snap.mounts==fs.mounts); md_task_snapshot_release(&snap);
     out=root_call(&fs,123,MD_FS_OPEN,-1,"/",O_RDONLY|O_DIRECTORY,NULL,0);
@@ -171,6 +170,53 @@ static void root_context(struct md_inode_store *s) {
     md_domain_release(parent); md_domain_release(split); md_domain_release(sibling);
     md_task_registry_destroy(fs.tasks); md_fs_mounts_close(&fs);
     md_identity_release(&ids); close(root);
+}
+static void retained_request_context(struct md_inode_store *s) {
+    assert(!md_inode_mkdir(s,-1,"/context-root",0755));
+    int fd=md_inode_create(s,-1,"/context-secret",0600); assert(fd>=0); close(fd);
+    struct md_identity privileged=md_identity_new(0,0), user=md_identity_new(1000,1000);
+    assert(!md_identity_setresuid(&privileged,1000,0,0));
+    struct md_filesystem fs={.store=s,.tasks=md_task_registry_create()}; assert(fs.tasks);
+    assert(!md_fs_mounts_open(&fs,NULL,0));
+    struct md_task_resources original={.fs=md_domain_new(),.mounts=fs.mounts,.files=md_fd_origins_new()};
+    struct md_task_resources replacement={.fs=md_domain_new(),.mounts=fs.mounts,.files=md_fd_origins_new()};
+    assert(original.fs && original.files && replacement.fs && replacement.files);
+    assert(!md_task_registry_publish(fs.tasks,123,120,&privileged,&original));
+    struct md_fs_context context;
+    assert(md_fs_context_begin(&fs,123,119,&context)==-EPERM && !context.filesystem);
+    md_fs_context_end(&context);
+    assert(!md_fs_context_begin(&fs,123,120,&context));
+    assert(context.task.fs==original.fs && context.task.files==original.files);
+    struct md_fs_request q={.actor=123,.peer=120,.operation=MD_FS_ACCESS,
+        .directory={-1,-1},.path={"/context-secret",NULL},.mode=R_OK};
+    struct md_fs_result out;
+    md_fs_context_execute(&context,&q,&out,NULL); assert(out.error==-EACCES);
+    q.flags=MD_AT_EACCESS;
+    md_fs_context_execute(&context,&q,&out,NULL); assert(!out.error);
+    assert(context.task.identity.uid.fs==0 && context.task.identity.uid.real==1000);
+    assert(!md_task_registry_publish(fs.tasks,123,120,&user,&replacement));
+    md_domain_release(original.fs); md_fd_origins_release(original.files);
+    md_fs_execute(&fs,&q,&out,NULL); assert(out.error==-EACCES);
+    md_task_registry_forget(fs.tasks,123);
+    md_fs_context_execute(&context,&q,&out,NULL); assert(!out.error);
+    assert(s->identity && s->identity->uid.fs==0 && !s->root_id && !fs.native_root);
+    q.actor=124; md_fs_context_execute(&context,&q,&out,NULL); assert(out.error==-EPERM);
+    q.actor=123; q.peer=0;
+    md_fs_context_execute(&context,&q,&out,NULL); assert(out.error==-EPERM);
+    q.peer=120; q.flags=q.mode=0; q.operation=MD_FS_CHROOT; q.path[0]="/context-root";
+    assert(!md_task_registry_publish(fs.tasks,123,120,&user,&replacement));
+    md_fs_context_execute(&context,&q,&out,NULL); assert(!out.error);
+    struct md_fs_location location;
+    struct md_fs_anchor *cwd=NULL;
+    md_domain_paths(context.task.fs,&location,&cwd); assert(location.object[0] && !cwd);
+    md_domain_paths(replacement.fs,&location,&cwd); assert(!location.object[0] && !location.mount && !cwd);
+    md_fs_context_end(&context);
+    md_fs_context_execute(&context,&q,&out,NULL); assert(out.error==-EINVAL);
+    md_fs_context_end(&context);
+    md_task_registry_destroy(fs.tasks); md_fs_mounts_close(&fs);
+    md_domain_release(replacement.fs); md_fd_origins_release(replacement.files);
+    md_identity_release(&privileged); md_identity_release(&user);
+    puts("PASS retained request identity/resources, actor binding, root publication after task replacement and cleanup");
 }
 static void accounts(struct md_inode_store *s) {
     struct md_filesystem fs={.store=s}; struct md_identity selected={0};
@@ -204,6 +250,7 @@ int main(int argc, char **argv) {
     assert(!change(s,base,MD_FS_CHMOD,0755,0,0));
     accounts(s);
     root_context(s);
+    retained_request_context(s);
     assert(!md_inode_mkdir(s,-1,"/tmp",01777));
     int fd=md_inode_create(s,-1,"/tmp/owned",0640); assert(fd>=0);
     assert(write(fd,"data",4)==4);

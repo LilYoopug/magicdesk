@@ -90,6 +90,7 @@ int md_task_registry_read(struct md_task_registry *r, pid_t tid, pid_t peer,
     int error = !e ? -ESRCH : peer && peer != r->owner && peer != e->tgid ? -EPERM : 0;
     if (!error) {
         out->identity=md_identity_copy(&e->value);
+        out->fs=e->fs; md_domain_pin(out->fs);
         md_domain_paths(e->fs,&out->root,&out->cwd);
         out->mounts=md_mount_namespace_retain(e->mounts);
         out->files=md_fd_origins_pin(e->files);
@@ -98,17 +99,9 @@ int md_task_registry_read(struct md_task_registry *r, pid_t tid, pid_t peer,
 }
 void md_task_snapshot_release(struct md_task_snapshot *snapshot) {
     md_identity_release(&snapshot->identity);
+    md_domain_unpin(snapshot->fs);
     md_mount_namespace_release(snapshot->mounts);
     md_fd_origins_unpin(snapshot->files);
     md_fs_anchor_release(snapshot->cwd);
     *snapshot=(struct md_task_snapshot){0};
-}
-int md_task_registry_set_root(struct md_task_registry *r, pid_t tid, pid_t peer, const struct md_fs_location *root) {
-    if (!r || tid <= 0) return -ESRCH;
-    pthread_mutex_lock(&r->lock);
-    struct entry *e = r->entries[(unsigned)tid % BUCKETS];
-    while (e && e->tid != tid) e = e->next;
-    int error = !e ? -ESRCH : peer && peer != r->owner && peer != e->tgid ? -EPERM : 0;
-    if (!error) error = md_domain_set_root(e->fs, root);
-    pthread_mutex_unlock(&r->lock); return error;
 }

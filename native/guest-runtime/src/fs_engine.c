@@ -12,9 +12,10 @@
 #include <string.h>
 #include <unistd.h>
 
-static void change_root(struct md_filesystem *fs, const struct md_fs_request *q, struct md_fs_result *out) {
+static void change_root(struct md_filesystem *fs, struct md_guest_domain *context,
+        const struct md_fs_request *q, struct md_fs_result *out) {
     *out = (struct md_fs_result){.fd = -1};
-    if (!fs->tasks) { out->error = -ENOTSUP; return; }
+    if (!context) { out->error = -ENOTSUP; return; }
     if (q->origin[0] && q->origin[0]->view!=fs->mounts && q->directory[0]!=MD_INODE_ROOT
             && (!q->path[0] || q->path[0][0]!='/')) { out->error=-ENOTSUP; return; }
     if (!md_identity_may_chroot(fs->store->identity)) { out->error = -EPERM; return; }
@@ -28,7 +29,7 @@ static void change_root(struct md_filesystem *fs, const struct md_fs_request *q,
     int fd = out->fd; out->fd = -1;
     struct md_fs_location root;
     int error = md_fs_root_capture(fs,fd,origin,&root);
-    if (!error) error = md_task_registry_set_root(fs->tasks, q->actor, q->peer, &root);
+    if (!error) error = md_domain_set_root(context, &root);
     md_fs_anchor_release(origin); close(fd); out->error = error == -EXDEV ? -ENOTSUP : error;
 }
 
@@ -40,58 +41,83 @@ void md_fs_stat_info(const struct stat *s, struct md_fs_info *out) {
         .change_seconds = s->st_ctim.tv_sec, .access_nanos = (uint32_t)s->st_atim.tv_nsec,
         .modify_nanos = (uint32_t)s->st_mtim.tv_nsec, .change_nanos = (uint32_t)s->st_ctim.tv_nsec};
 }
+int md_fs_context_begin(struct md_filesystem *fs, int actor, int peer, struct md_fs_context *context) {
+    *context=(struct md_fs_context){0};
+    if (!fs || !fs->store) return -EINVAL;
+    if (fs->tasks) {
+        int error=md_task_registry_read(fs->tasks,actor,peer,&context->task);
+        if (error) return error;
+        context->authenticated=context->has_identity=1;
+    } else if (fs->store->identity) {
+        context->task.identity=md_identity_copy(fs->store->identity);
+        context->has_identity=1;
+    }
+    context->filesystem=fs; context->actor=actor; context->peer=peer;
+    return 0;
+}
+void md_fs_context_end(struct md_fs_context *context) {
+    md_task_snapshot_release(&context->task);
+    *context=(struct md_fs_context){0};
+}
 void md_fs_execute(struct md_filesystem *fs,
         const struct md_fs_request *q, struct md_fs_result *out, const struct md_fs_output *output) {
+    struct md_fs_context context;
+    int error=md_fs_context_begin(fs,q->actor,q->peer,&context);
+    if (error) {
+        if (output && output->origin) *output->origin=NULL;
+        *out=(struct md_fs_result){.fd=-1,.error=error}; return;
+    }
+    md_fs_context_execute(&context,q,out,output);
+    md_fs_context_end(&context);
+}
+void md_fs_context_execute(struct md_fs_context *context,
+        const struct md_fs_request *q, struct md_fs_result *out, const struct md_fs_output *output) {
+    struct md_filesystem *fs=context->filesystem;
+    if (output && output->origin) *output->origin=NULL;
+    if (!fs || context->actor!=q->actor || context->peer!=q->peer) {
+        *out=(struct md_fs_result){.fd=-1,.error=fs ? -EPERM : -EINVAL}; return;
+    }
     if (output && output->origin) {
-        *output->origin=NULL;
         if (q->operation!=MD_FS_OPEN && q->operation!=MD_FS_CREATE && q->operation!=MD_FS_REOPEN
                 && q->operation!=MD_FS_OPEN_OBJECT && q->operation!=MD_FS_OPEN_IMAGE) {
             *out=(struct md_fs_result){.fd=-1,.error=-EINVAL}; return;
         }
     }
-    struct md_task_snapshot task = {0};
-    if (fs->tasks) {
-        int error = md_task_registry_read(fs->tasks, q->actor, q->peer, &task);
-        if (error) { *out = (struct md_fs_result){.fd = -1, .error = error}; return; }
-    }
-    struct md_identity *identity=&task.identity;
+    const struct md_task_snapshot *task=&context->task;
+    struct md_identity identity=task->identity;
     const struct md_identity *previous = fs->store->identity;
-    if (!fs->tasks && previous) *identity = md_identity_copy(previous);
     if (q->operation == MD_FS_IPC) {
         if (!fs->ipc && fs->ipc_store) {
             int error = md_ipc_credentials_open(fs->ipc_store, &fs->ipc);
             if (error) {
                 *out = (struct md_fs_result){.fd=-1,.error=error};
-                md_task_snapshot_release(&task); return;
+                return;
             }
         }
-        md_ipc_credentials_execute(fs->ipc, identity, q, out, output);
-        md_task_snapshot_release(&task);
+        md_ipc_credentials_execute(fs->ipc, &identity, q, out, output);
         return;
     }
-    if (fs->tasks && !task.mounts) {
+    if (context->authenticated && !task->mounts) {
         *out=(struct md_fs_result){.fd=-1,.error=-ENOTSUP};
-        md_task_snapshot_release(&task); return;
+        return;
     }
-    if (fs->tasks || previous) {
-        if (q->operation == MD_FS_ACCESS && !(q->flags & MD_AT_EACCESS)) {
-            identity->uid.fs = identity->uid.real; identity->gid.fs = identity->gid.real;
-            identity->caps.effective = identity->uid.real ? 0 : identity->caps.permitted;
-        }
-        fs->store->identity = identity;
+    if (context->has_identity && q->operation == MD_FS_ACCESS && !(q->flags & MD_AT_EACCESS)) {
+        identity.uid.fs = identity.uid.real; identity.gid.fs = identity.gid.real;
+        identity.caps.effective = identity.uid.real ? 0 : identity.caps.permitted;
     }
+    fs->store->identity = context->has_identity ? &identity : NULL;
     unsigned previous_mask=fs->store->creation_mask;
     const char *previous_root=fs->store->root_id;
     struct md_view_object *previous_native_root=fs->native_root;
     struct md_mount_namespace *previous_mounts=fs->mounts;
-    if (fs->tasks) fs->mounts=task.mounts;
-    int root_error=fs->tasks ? md_fs_root_select(fs,&task.root) : 0;
+    if (context->authenticated) fs->mounts=task->mounts;
+    int root_error=context->authenticated ? md_fs_root_select(fs,&task->root) : 0;
     struct md_inode_boundary boundary={.path=output ? output->data : NULL,.capacity=output ? output->capacity : 0};
     struct md_inode_boundary *previous_boundary=fs->store->boundary;
     fs->store->boundary=&boundary;
     fs->store->creation_mask=q->attributes.creation_mask;
     if (root_error) *out=(struct md_fs_result){.fd=-1,.error=root_error};
-    else if (q->operation == MD_FS_CHROOT) change_root(fs, q, out);
+    else if (q->operation == MD_FS_CHROOT) change_root(fs, task->fs, q, out);
     else if (md_mount_namespace_attached(fs->mounts) || q->origin[0] || q->origin[1]) md_fs_mounts_execute(fs, q, out, output);
     else md_fs_inode_execute(fs, q, out, output);
     fs->store->boundary=previous_boundary;
@@ -105,9 +131,8 @@ void md_fs_execute(struct md_filesystem *fs,
     fs->store->creation_mask=previous_mask;
     fs->store->root_id=previous_root;
     fs->native_root=previous_native_root;
-    if (fs->tasks) fs->mounts=previous_mounts;
+    if (context->authenticated) fs->mounts=previous_mounts;
     fs->store->identity = previous;
-    md_task_snapshot_release(&task);
 }
 void md_fs_inode_execute(struct md_filesystem *fs,
         const struct md_fs_request *q, struct md_fs_result *out, const struct md_fs_output *output) {

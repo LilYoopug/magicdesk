@@ -20,6 +20,7 @@ struct operation {
     struct md_fs_work work;
     struct operation *all, *free;
     struct seccomp_notif notification;
+    struct md_fs_context context;
     struct md_fs_request request;
     struct md_fs_result result;
     int listener, directory, undelivered;
@@ -82,12 +83,12 @@ static int deliver_directory(void *context, const void *data, size_t size) {
     if (n < 0 && (errno == EPERM || errno == EACCES)) op->undelivered = 1;
     return n == (ssize_t)size ? 0 : -EFAULT;
 }
-static void execute(struct md_filesystem *fs, struct operation *op,
+static void execute(struct operation *op,
         void *data, size_t capacity) {
     op->result = (struct md_fs_result){.fd = -1, .error = -ECANCELED};
     struct md_fs_output output = {.data = data, .capacity = capacity,
         .deliver = deliver_directory, .context = op};
-    if (valid(op)) md_fs_execute(fs, &op->request, &op->result, &output);
+    if (valid(op)) md_fs_context_execute(&op->context, &op->request, &op->result, &output);
     if (op->result.error == -EXDEV && op->request.operation == MD_FS_FSTAT) {
         /* Native descriptors outside the namespace retain kernel metadata. */
         struct stat st;
@@ -115,11 +116,12 @@ static void recycle(struct md_namespace_broker *b, struct operation *op) {
     if (op->result.open_completion.kind == MD_OPEN_PIPE) close(op->result.open_completion.control);
     op->directory = op->result.fd = -1;
     op->result.open_completion = (struct md_open_completion){0};
+    md_fs_context_end(&op->context);
     pthread_mutex_lock(&b->lock);
     op->free = b->free; b->free = op;
     pthread_mutex_unlock(&b->lock);
 }
-static int prepare(struct operation *op, struct task *task, size_t capacity) {
+static int prepare(struct md_filesystem *fs, struct operation *op, struct task *task, size_t capacity) {
     const struct seccomp_notif *q = &op->notification;
     if (q->data.nr != SYS_openat && q->data.nr != SYS_newfstatat
             && q->data.nr != SYS_fstat && q->data.nr != SYS_getdents64) return 0;
@@ -140,6 +142,8 @@ static int prepare(struct operation *op, struct task *task, size_t capacity) {
         op->request.flags = q->data.nr == SYS_openat ? (uint32_t)q->data.args[2]
             : *op->path ? (uint32_t)(q->data.args[3] & AT_SYMLINK_NOFOLLOW) : 0;
     }
+    int error=md_fs_context_begin(fs,(int)q->pid,0,&op->context);
+    if (error) return error;
     if (*op->path != '/') {
         if ((int)q->data.args[0] == AT_FDCWD && op->request.path[0]) {
             char cwd[64]; snprintf(cwd, sizeof(cwd), "/proc/%u/cwd", q->pid);
@@ -260,7 +264,7 @@ static int receive(void *context, struct md_filesystem *fs, short events) {
     }
     op->notification = q; op->listener = b->listener; op->directory = -1; op->undelivered = 0;
     op->result = (struct md_fs_result){.fd = -1};
-    int prepared = eligible && prepare(op, task, sizeof(b->output));
+    int prepared = eligible ? prepare(fs, op, task, sizeof(b->output)) : 0;
     pthread_mutex_lock(&b->lock);
     if (task) {
         task->borrowed--;
@@ -268,7 +272,8 @@ static int receive(void *context, struct md_filesystem *fs, short events) {
     }
     pthread_mutex_unlock(&b->lock);
     if (prepared) {
-        execute(fs, op, b->output, sizeof(b->output));
+        if (prepared>0) execute(op, b->output, sizeof(b->output));
+        else op->result.error=prepared;
         int result = reply(op, b->output);
         if (result) {
             if (count) count->handled++;
@@ -277,6 +282,7 @@ static int receive(void *context, struct md_filesystem *fs, short events) {
     }
     /* Only unsupported/read-only work is delegated. No mutation or partially
      * delivered result is ever replayed through the guest adapter. */
+    md_fs_context_end(&op->context);
     md_fs_worker_publish(b->worker, &op->work);
     if (count) count->delegated++;
     return 0;
@@ -316,6 +322,7 @@ void md_broker_destroy(struct md_namespace_broker *b) {
         if (op->directory >= 0) close(op->directory);
         if (op->result.fd >= 0) close(op->result.fd);
         if (op->result.open_completion.kind == MD_OPEN_PIPE) close(op->result.open_completion.control);
+        md_fs_context_end(&op->context);
         free(op);
     }
     while (b->tasks) {

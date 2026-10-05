@@ -116,9 +116,9 @@ static int valid(const struct md_fs_packet *q, size_t size, const struct md_fs_r
             || (q->operation == MD_FS_FSTAT && !(q->descriptors & 1))) return -EINVAL;
     return 0;
 }
-static int dispatch(struct md_filesystem *fs, pid_t peer, const struct md_fs_packet *q,
+static int dispatch(struct md_fs_context *context, const struct md_fs_packet *q,
         const struct md_fs_rights *input, struct md_fs_reply *out, struct md_fs_rights *output) {
-    struct md_fs_request request = {.actor = q->actor, .peer = peer, .operation = q->operation, .flags = q->flags, .mode = q->mode,
+    struct md_fs_request request = {.actor = q->actor, .peer = context->peer, .operation = q->operation, .flags = q->flags, .mode = q->mode,
         .capacity = q->capacity, .offset = q->offset, .resolve = q->resolve, .attributes = q->attributes,
         .directory = {MD_INODE_ROOT, MD_INODE_ROOT}, .path = {q->data, q->data + q->length[0]}};
     unsigned index = 0;
@@ -126,7 +126,7 @@ static int dispatch(struct md_filesystem *fs, pid_t peer, const struct md_fs_pac
     struct md_fs_result result;
     struct md_fs_output buffer = {.data = out->data,
         .capacity = q->operation == MD_FS_OPEN_IMAGE ? sizeof(out->data) : PATH_MAX};
-    md_fs_execute(fs, &request, &result, &buffer);
+    md_fs_context_execute(context, &request, &result, &buffer);
     out->info = result.info; out->size = result.size; out->position = result.position;
     out->host_path=result.host_path;
     out->open_completion=result.open_completion.kind;
@@ -141,6 +141,7 @@ struct peer {
     int64_t deadline;
     struct md_fs_reply reply;
     struct md_fs_rights output;
+    struct md_fs_context context;
     int watch_reader;
 };
 static int service_request(struct md_filesystem *fs, int socket,
@@ -155,6 +156,7 @@ static int service_request(struct md_filesystem *fs, int socket,
     *reply = (struct md_fs_reply){.magic = MD_FS_MAGIC, .version = MD_FS_VERSION};
     if (n > 0) {
         reply->error = valid(&packet, (size_t)n, &input);
+        if (!reply->error) reply->error=md_fs_context_begin(fs,packet.actor,peer->process,&peer->context);
         if (!reply->error) {
             OBSERVE(MD_FS_BEFORE_DISPATCH, &packet);
             struct md_cost *cost = statistics ? &statistics->operation[packet.operation] : NULL;
@@ -166,7 +168,7 @@ static int service_request(struct md_filesystem *fs, int socket,
                     reply->size = (size_t)size;
                     peer->watch_reader = input.fd[0]; input.count = 0;
                 }
-            } else reply->error = dispatch(fs, peer->process, &packet, &input, reply, &peer->output);
+            } else reply->error = dispatch(&peer->context, &packet, &input, reply, &peer->output);
             md_cost_end(cost, begin);
             OBSERVE(MD_FS_AFTER_DISPATCH, &packet);
         }
@@ -222,6 +224,7 @@ static void close_peer(struct md_inode_store *s, struct pollfd *fd, struct peer 
     }
     md_fs_close_rights(&peer->output);
     close(fd->fd); fd->fd = -1;
+    md_fs_context_end(&peer->context);
     OBSERVE(MD_FS_CONNECTION_CLOSED, NULL);
 }
 int md_fs_serve(struct md_filesystem *fs, int listener, int stop_fd,

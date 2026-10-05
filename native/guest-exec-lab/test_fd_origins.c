@@ -187,6 +187,52 @@ static void registry_and_readers(struct md_fs_anchor *a, struct md_fs_anchor *b)
     assert(!pthread_join(reader,NULL)); pthread_barrier_destroy(&readers.start);
     md_task_snapshot_release(&snapshot);
 }
+static void ordering(struct md_fs_anchor *origin) {
+    struct md_fd_origins *table=md_fd_origins_new(); assert(table);
+    struct md_fd_origins *shared=md_fd_origins_fork(table,1); assert(shared==table);
+    struct md_fd_order a={0}, b={0}, c={0}, d={0}, independent={0}, *next=NULL;
+    assert(md_fd_order_start(&a)==-EINVAL);
+    assert(md_fd_order_complete(&a,&next)==-EINVAL && !next);
+    struct md_fd_origin_update update;
+    assert(!md_fd_origins_prepare(table,origin,0,&update));
+    allocation_budget=0;
+    assert(md_fd_order_begin(table,&a)==1);
+    assert(md_fd_order_begin(table,&a)==-EBUSY);
+    assert(md_fd_order_complete(&a,&next)==-EINVAL);
+    assert(!md_fd_order_start(&a));
+    assert(md_fd_order_begin(shared,&b)==0);
+    assert(md_fd_order_begin(table,&c)==0);
+    assert(md_fd_order_begin(table,&d)==0);
+    assert(md_fd_order_start(&b)==-EINVAL);
+    assert(md_fd_order_complete(&b,&next)==-EINVAL && !next);
+    allocation_budget=-1;
+    struct md_fd_origins *copy=md_fd_origins_fork(table,0); assert(copy && copy!=table);
+    allocation_budget=0;
+    assert(md_fd_order_begin(copy,&independent)==1 && !md_fd_order_start(&independent));
+    assert(!md_fd_order_complete(&independent,&next) && !next);
+    assert(!md_fd_order_cancel(&c,&next) && !next && c.state==MD_FD_ORDER_IDLE);
+    assert(!md_fd_order_cancel(&d,&next) && !next && d.state==MD_FD_ORDER_IDLE);
+    assert(md_fd_order_cancel(&a,&next)==1 && !next && a.state==MD_FD_ORDER_CANCELLING);
+    assert(md_fd_order_cancel(&a,&next)==1 && !next);
+    assert(b.state==MD_FD_ORDER_QUEUED);
+    /* Cancellation intent is not proof that the kernel did not install an FD. */
+    md_fd_origins_finish(&update,23);
+    assert(!md_fd_order_complete(&a,&next) && next==&b);
+    expect(table,23,origin,0);
+    assert(md_fd_order_begin(table,&c)==0);
+    assert(!md_fd_order_cancel(&b,&next) && next==&c);
+    assert(!md_fd_order_start(&c));
+    assert(!md_fd_order_complete(&c,&next) && !next);
+    assert(md_fd_order_begin(table,&d)==1 && !md_fd_order_start(&d));
+    assert(md_fd_order_begin(table,&a)==0);
+    md_fd_origins_release(shared); md_fd_origins_release(table);
+    expect(d.table,23,origin,0);
+    assert(!md_fd_order_complete(&d,&next) && next==&a && !d.table);
+    expect(a.table,23,origin,0);
+    assert(!md_fd_order_cancel(&a,&next) && !next && !a.table);
+    allocation_budget=-1;
+    md_fd_origins_release(copy);
+}
 void test_fd_origins(void) {
     unsigned before=descriptors();
     struct md_mount_namespace *first=md_mount_namespace_new(), *second=md_mount_namespace_new();
@@ -224,7 +270,7 @@ void test_fd_origins(void) {
     put(table,12,pipe_origin,0); md_fs_anchor_release(pipe_origin);
     char byte; assert(read(stream[0],&byte,1)==0); close(stream[0]);
     md_fd_origins_release(table);
-    cwd_context(a); ownership(a,b); rollback(a); registry_and_readers(a,b);
+    cwd_context(a); ownership(a,b); rollback(a); registry_and_readers(a,b); ordering(a);
     table=md_fd_origins_new(); assert(table);
     assert(!md_fd_origins_prepare(table,a,0,&update));
     md_fd_origins_release(table);
@@ -235,4 +281,5 @@ void test_fd_origins(void) {
     puts("PASS sparse FD origins: prepared publication, cancellation, alias replacement, flags, ranges and EOF");
     puts("PASS independent CLONE_FILES/CLONE_FS, unshare rollback, exec CLOEXEC and retained cwd");
     puts("PASS allocation-failure rollback, allocation-free publication and concurrent retained snapshots");
+    puts("PASS per-file-table ordering: cancellation awaits kernel completion, independent owners progress, no allocations");
 }

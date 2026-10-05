@@ -17,6 +17,7 @@ struct md_fd_origins {
     unsigned owners;
     pthread_mutex_t lock;
     struct md_fd_origin_entry **buckets;
+    struct md_fd_order *first, *last;
 };
 static void dispose(struct md_fd_origin_entry *entry) {
     while (entry) {
@@ -145,3 +146,42 @@ int md_fd_origins_close_range(struct md_fd_origins *t, unsigned first, unsigned 
     remove_entries(t,first,last,cloexec,0); return 0;
 }
 void md_fd_origins_exec(struct md_fd_origins *t) { remove_entries(t,0,0,0,1); }
+
+int md_fd_order_begin(struct md_fd_origins *t, struct md_fd_order *op) {
+    if (!t || !op) return -EINVAL;
+    if (op->state!=MD_FD_ORDER_IDLE || op->table || op->previous || op->next) return -EBUSY;
+    op->table=md_fd_origins_pin(t); op->previous=t->last;
+    if (t->last) t->last->next=op; else t->first=op;
+    t->last=op;
+    op->state=t->first==op ? MD_FD_ORDER_READY : MD_FD_ORDER_QUEUED;
+    return op->state==MD_FD_ORDER_READY;
+}
+int md_fd_order_start(struct md_fd_order *op) {
+    if (!op || !op->table || op->state!=MD_FD_ORDER_READY) return -EINVAL;
+    op->state=MD_FD_ORDER_RUNNING; return 0;
+}
+static void retire(struct md_fd_order *op, struct md_fd_order **next) {
+    struct md_fd_origins *t=op->table;
+    int first=t->first==op;
+    if (op->previous) op->previous->next=op->next; else t->first=op->next;
+    if (op->next) op->next->previous=op->previous; else t->last=op->previous;
+    *op=(struct md_fd_order){0};
+    if (first && t->first) { t->first->state=MD_FD_ORDER_READY; *next=t->first; }
+    md_fd_origins_unpin(t);
+}
+int md_fd_order_cancel(struct md_fd_order *op, struct md_fd_order **next) {
+    if (!next) return -EINVAL;
+    *next=NULL;
+    if (!op || !op->table || op->state==MD_FD_ORDER_IDLE) return -EINVAL;
+    if (op->state==MD_FD_ORDER_RUNNING || op->state==MD_FD_ORDER_CANCELLING) {
+        op->state=MD_FD_ORDER_CANCELLING; return 1;
+    }
+    if (op->state!=MD_FD_ORDER_QUEUED && op->state!=MD_FD_ORDER_READY) return -EINVAL;
+    retire(op,next); return 0;
+}
+int md_fd_order_complete(struct md_fd_order *op, struct md_fd_order **next) {
+    if (!next) return -EINVAL;
+    *next=NULL;
+    if (!op || !op->table || (op->state!=MD_FD_ORDER_RUNNING && op->state!=MD_FD_ORDER_CANCELLING)) return -EINVAL;
+    retire(op,next); return 0;
+}

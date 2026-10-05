@@ -21,6 +21,7 @@ def main():
                         help="Label a partial layer-two experiment separately from full browser startup")
     parser.add_argument("--quiet", action="store_true", help="Keep full process output in the JSON report")
     parser.add_argument("--admit-elf", help="Explicit sealed-ELF logical credential admission")
+    parser.add_argument("--user", help="Explicit guest identity, independent of image admission")
     parser.add_argument("--expect-artifact", help="Fresh guest PNG path; require its signature after exit")
     parser.add_argument("--expect-output", help="Require this literal in the output, e.g. a rendered DOM marker")
     parser.add_argument("program", nargs=argparse.REMAINDER)
@@ -46,6 +47,7 @@ def main():
               "scope": args.scope, "layerOneEstablished": False,
               "procRootDomain": True,
               "admittedElf": args.admit_elf,
+              "guestUser": args.user,
               "sandboxSupportEstablished": False, "consoleClosed": False,
               "workloadCompleted": False, "commands": [], "uploads": []}
     console = client.call("console.open", {"directory": "/data/local/tmp"})["sessionId"]
@@ -77,6 +79,7 @@ def main():
         launch = shlex.join(["timeout", "-k", "5", str(args.deadline_seconds + 10), runner,
                              "--diagnostics",
                              "--deadline-seconds", str(args.deadline_seconds),
+                             *(["--user", args.user] if args.user else []),
                              *(["--admit-elf", args.admit_elf] if args.admit_elf else []),
                              "--store", args.store, "--"] + args.program)
         result = command(launch, check=False)

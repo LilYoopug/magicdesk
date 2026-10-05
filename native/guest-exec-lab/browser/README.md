@@ -22,10 +22,24 @@ python native/guest-exec-lab/browser/run.py --build build/guest-browser --store 
 python native/guest-exec-lab/browser/test_browser.py --build build/guest-browser --store DEVICE_GUEST_STORE
 ```
 
-The Chromium store contains an ordinary mode-0755 copy of Debian's sandbox
-helper at `/tmp/md-chrome-helper-ordinary`. The test explicitly selects it with
-`--admit-elf`; no actual host set-ID executable or privilege elevation is used.
-The unadmitted-helper negative control must fail.
+The full-browser fixture defaults to Debian's packaged helper at
+`/usr/lib/chromium/chrome-sandbox`; `--helper` selects another guest path. It must
+match the helper actually used by Chromium: the browser prefers a sibling
+`chrome-sandbox`, while `CHROME_DEVEL_SANDBOX` is a fallback for eligible
+user-managed builds, not an override of that sibling. See Chromium's
+[helper selection](https://chromium.googlesource.com/chromium/src/+/main/sandbox/linux/suid/client/setuid_sandbox_host.cc).
+The test explicitly admits that ELF with `--admit-elf`. Guest set-ID metadata
+does not turn its backing into a host set-ID executable or grant Android root.
+All four runs explicitly select the same guest user, `2000:2000`: three admit
+the helper and the negative control does not. The latter must fail before
+rendering or installing application filters, with the helper's proc-root change
+denied. Omitting both `--user` and `--admit-elf` would also omit the explicit
+guest-credential check and is not an equivalent admission control.
+
+The separate credential and retained-resource fixtures use an ordinary mode-0755
+copy at `/tmp/md-chrome-helper-ordinary`, invoked directly for helper IPC and
+renderer controls. Full-browser helper selection and admission rejection belong
+to `test_browser.py`.
 
 Each run stages an immutable helper bundle and records device/build identity,
 actual UID, hashes, command, output, exit status and console cleanup. The
@@ -43,7 +57,9 @@ requires a successful exit and expectations. `sandboxSupportEstablished` and
 
 - `test_browser.py`: three stock Chromium launches with fresh profiles, computed
   JavaScript/DOM values, real installed filters, PNG output and zero exit. No
-  sandbox-disabling flags. Child signal exits and diagnostics remain in reports.
+  sandbox-disabling flags. A fourth run verifies rejection of the unadmitted
+  helper under the same guest identity. Child signal exits and diagnostics remain
+  in reports.
 - `test_credentials.py`: explicit sealed-image catalogue, first-entry and exec
   logical credentials, secure auxv/loader, irreversible drops, no_new_privs,
   denied real credentials and retained descriptors.
@@ -54,8 +70,7 @@ requires a successful exit and expectations. `sandboxSupportEstablished` and
   offsets, regular/directory/O_PATH/pipe FD reuse, shared dup/fork/thread seeks,
   seek, kernel-fast-path and internal-transport ERRNO/TRAP/KILL precedence,
   restricted-domain argument checks, failed exec descriptor cleanup, signals, group death,
-  job control, sockets, three stock zygote/renderer
-  starts and rejection of a helper not explicitly admitted.
+  job control, sockets and three stock zygote/renderer starts.
 - `test_renderer.py`: a separately labelled layer-two experiment. Its parent
   uses `--no-sandbox`, while `renderer-prefix.py` removes that flag from
   renderer children. This does not satisfy full-browser acceptance and must not

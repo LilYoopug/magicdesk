@@ -23,9 +23,11 @@ umask, so default ACL inheritance and mode-only creation share one policy.
 There is no automatic identity change after a denied operation. Explicit guest
 users and sealed-image admission share the supervisor's per-task credential model
 without changing the real UID; see [interception](interception.md).
-The authenticated task snapshot retains its mount view together with identity
-and root. The worker borrows that view during dispatch; it cannot substitute its
-initial attachments when a task has no view. Task lifetime and sharing follow
+Both filesystem transports retain an authenticated `md_fs_context` through
+delivery cleanup, including identity, filesystem owner, root, cwd origin, mount
+view and file-table handle. Dispatch does not repeat the task lookup. The worker
+borrows the captured view during execution; it cannot substitute its initial
+attachments when a task has no view. Task lifetime and sharing follow
 [process resources](process-resources.md#mount-views), independently of SQLite
 connection ownership.
 

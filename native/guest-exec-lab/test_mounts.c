@@ -205,10 +205,12 @@ static void task_mount_views(const char *base) {
     q.actor=125; q.peer=120;
     md_fs_execute(&fs,&q,&out,NULL); assert(out.error==-ENOTSUP);
     struct md_task_snapshot snapshots[2];
+    struct md_fs_context contexts[2];
     for(unsigned i=0;i<2;++i) {
         q.actor=123+i; q.operation=MD_FS_CHROOT; q.path[0]=entries[i].target; q.flags=0;
         md_fs_execute(&fs,&q,&out,NULL); assert(!out.error);
         assert(!md_task_registry_read(tasks,123+i,120,&snapshots[i]));
+        assert(!md_fs_context_begin(&fs,123+i,120,&contexts[i]));
         assert(snapshots[i].root.mount && snapshots[i].mounts==views[i].mounts);
     }
     /* A mismatched retained root must fail, not find the worker's other tree. */
@@ -222,6 +224,16 @@ static void task_mount_views(const char *base) {
         md_fs_mounts_close(&views[i]);
     }
     md_task_registry_destroy(tasks);
+    fs.tasks=NULL;
+    for(unsigned i=0;i<2;++i) {
+        q.actor=123+i; q.operation=MD_FS_OPEN; q.path[0]="/value"; q.flags=O_RDWR;
+        md_fs_context_execute(&contexts[i],&q,&out,NULL);
+        if(i) assert(out.error==-EROFS); else { assert(!out.error); close(out.fd); }
+        q.flags=O_RDONLY;
+        md_fs_context_execute(&contexts[i],&q,&out,NULL); assert(!out.error);
+        assert(read(out.fd,bytes,6)==6 && !memcmp(bytes,"native",6)); close(out.fd);
+        md_fs_context_end(&contexts[i]);
+    }
     fs=(struct md_filesystem){.store=s};
     for(unsigned i=0;i<2;++i) {
         fs.mounts=snapshots[i].mounts;

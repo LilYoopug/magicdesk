@@ -15,12 +15,40 @@ The kernel owns cwd, umask, descriptor tables and open-file descriptions.
 The filesystem context owns guest root selection, optional cwd provenance and the admitted proc-root
 restriction. `task_registry` pins that context alongside each task's identity;
 registry references do not count as task owners. Both filesystem request
-transports capture identity, root, cwd origin, mount view and descriptor-origin
-table in one authenticated registry snapshot. The file-table handle remains live;
-it is not a frozen copy of its entries. A missing task mount view fails explicitly; the worker's
-initial view is not a fallback for another task.
+transports use `md_fs_context` to capture identity, filesystem owner, root, cwd
+origin, mount view and descriptor-origin table in one authenticated registry
+snapshot. The file-table handle remains live; it is not a frozen copy of its
+entries. A missing task mount view fails explicitly; the worker's initial view
+is not a fallback for another task.
 See [namespace execution](namespace-execution.md) for the launch filesystem and
 [interception](interception.md) for restricted domains.
+
+## Request Context
+
+The namespace notification broker and task-affine RPC service retain the same
+request context from admission through execution and delivery cleanup. It binds
+the task and authenticated peer once; dispatch cannot substitute either identity
+or resolve a replacement task record. Direct notifications capture it before
+duplicating input descriptors; RPC captures it after packet validation and before
+dispatch, including watch reads. Delegation releases the direct context; the
+task-affine request authenticates independently.
+
+Registry replacement, task exit and resource-owner release do not invalidate an
+admitted request. Guest chroot publishes into its captured filesystem owner,
+not a fresh lookup of the task ID. Real-ID access checks use a local credential
+value without changing the captured identity. Execution borrows the retained
+view/root and restores the worker's previous context on both success and failure.
+
+Context storage belongs to the existing operation or peer pool, and retaining
+resources adds no per-request heap allocation or RPC. References survive reply,
+watch acknowledgement and client-release phases, and are released on completion,
+failure, timeout or worker shutdown. The filesystem worker/store must outlive
+them. Synchronous internal engine callers use a scoped context through
+`md_fs_execute`.
+
+Retained authentication is not kernel FD ordering or cancellation rollback.
+Input-descriptor provenance and publication still require the lifecycle
+integration described below; a failed reply does not undo committed IO.
 
 ## Mount Views
 
@@ -135,6 +163,32 @@ mutations by CLONE_FILES peers and transfer provenance need transport integratio
 before copied guest namespaces can be published. The metadata lock does not
 order kernel syscalls or prove which description occupies a live FD number.
 
+### Publication Ordering
+
+The file-table owner provides an intrusive queue for short descriptor capture
+and publication operations. One event-loop owner serializes queue operations;
+worker and supervisor events must reach that owner rather than modify the queue
+concurrently. This is separate from the mutex protecting annotation entries.
+CLONE_FILES peers share the queue, while an independent table copy starts with
+an empty queue. Every accepted request pins its table through completion,
+including after the last task releases ownership.
+
+A zero-initialized caller-owned record is queued or immediately ready, then
+explicitly started. Completion follows the exact kernel result and its metadata
+publication, and returns the newly ready successor to the event-loop owner.
+Cancelling a queued or ready record removes it; cancelling a running record
+only records intent. It continues to own its turn until the kernel operation
+is confirmed complete. Cancellation or a timeout does not prove that a descriptor
+was never installed. Requests perform no queue allocation, callbacks or blocking
+waits, and unrelated file tables can progress independently.
+
+This API does not intercept syscalls or enable automatic annotations. Both
+transports still need common lifecycle admission, including descriptor capture,
+fork/exec and all competing mutations. A blocking receive or FIFO rendezvous
+must wait outside the queue; only its short descriptor-publication phase belongs
+inside it. Unordered readers of live FD numbers do not gain a kernel barrier
+from the metadata mutex or this queue's existence.
+
 ### Kernel Publication Boundaries
 
 `ADDFD_FLAG_SEND` makes FD installation and the notification response atomic
@@ -242,6 +296,9 @@ close-on-exec flags, ranges, cwd/root independence, all CLONE_FS/CLONE_FILES
 combinations and lifetime past task/registry removal. Allocation-failure injection
 checks each preparation step and allocation-free publication; concurrent readers
 check coherent origin/flag pairs. An annotated pipe must still reach EOF.
+Ordering checks cover shared versus copied queues, middle/tail cancellation,
+running cancellation awaiting completion, successor handoff, request reuse and
+table lifetime after all task owners exit, with allocation failure enabled.
 `resource_guest` compares native Linux and Shroot cwd/umask/FD semantics,
 failed-unshare rollback, close_range splitting/marking and exec inheritance. Guest-only cases check proc-root
 sharing and semaphore-undo splitting, final-owner cleanup and exec retention.
@@ -254,6 +311,12 @@ SCM_RIGHTS receiver acknowledgement. The atomic-delivery case permits receiver
 replacement before later metadata work. Signal cancellation checks the installed
 FD left by split delivery and the untouched destination after cancelled atomic
 delivery. O_PATH rejection and descriptor cleanup are checked separately.
+Positive cases feed a competing dup3 notification into the file-table queue
+for atomic ADDFD_SEND and SCM_RIGHTS delivery. They verify physical descriptor
+identity before allowing replacement and publish the exact source/replacement
+origins in order. The fixture's acknowledgement follows the actual dup3 result;
+production integration requires its syscall-exit event, not notification SEND
+success. These cases do not establish complete mutation interception in Shroot.
 Socket acknowledgements establish ordering without sleep or scheduler races;
 alarms and parent-death termination bound fixture failure. `test_resources.py`
 runs this alongside the model and intercepted guest checks.
@@ -267,6 +330,13 @@ nested readonly/writable attachments and retained covered-directory descriptors.
 They also alternate two task mount views on one worker, check independent readonly
 policy and mount-table output, retain snapshots past registry teardown, and check
 coherent identity/root/mount publication under concurrent readers and writers.
+Request-context checks retain authentication and roots across registry replacement
+and teardown, reject actor/peer substitution, preserve captured credentials across
+real/effective access checks, and commit chroot only to the captured filesystem
+owner. `test_rpc` replaces the authenticated task record immediately before
+dispatch: the first creation retains its original owner, the next sees the new
+owner, and an unknown actor cannot create a file. Both retained mount views keep
+their original readonly policy after task and registry teardown.
 `test_mount_copy` checks distinct IDs, explicit native/inode root rebasing,
 independent readonly policy, moved covered directories and source-view teardown.
 RLIMIT_NOFILE exhaustion at every descriptor-acquisition step checks rollback

@@ -1,4 +1,6 @@
 #define _GNU_SOURCE
+#include "fs_mount_internal.h"
+#include "fd_origins.h"
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -21,7 +23,8 @@
 #include <unistd.h>
 
 enum { LISTENER, REPLACE, CHECK, ACK, DONE, STOP, INSTALLED, CONTINUE };
-enum scenario { SPLIT, ATOMIC, CANCEL_SPLIT, CANCEL_ATOMIC, PATH_FD, RIGHTS };
+enum scenario { SPLIT, ATOMIC, CANCEL_SPLIT, CANCEL_ATOMIC, PATH_FD, RIGHTS,
+    ORDERED_ATOMIC, ORDERED_RIGHTS };
 struct message { int kind, number, error; long position; };
 struct fixture { int control, data, source, replacement, target; enum scenario scenario; };
 
@@ -63,7 +66,8 @@ static struct message receive_message(int socket, int *fd) {
     return value;
 }
 static void signal_handler(int signal) { (void)signal; }
-static int listener(void) {
+static int ordered(enum scenario scenario) { return scenario==ORDERED_ATOMIC || scenario==ORDERED_RIGHTS; }
+static int listener(int order) {
     struct sock_filter code[]={
         BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,arch)),
         BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,AUDIT_ARCH_AARCH64,1,0),
@@ -71,6 +75,8 @@ static int listener(void) {
         BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
         BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_getppid,0,1),
         BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_dup3,0,1),
+        BPF_STMT(BPF_RET|BPF_K,order ? SECCOMP_RET_USER_NOTIF : SECCOMP_RET_ALLOW),
         BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
     };
     struct sock_fprog program={sizeof(code)/sizeof(*code),code};
@@ -90,26 +96,34 @@ static void replace(const struct fixture *f, int fd) {
 }
 static void *requester(void *context) {
     struct fixture *f=context;
-    if (f->scenario==RIGHTS) {
+    if (f->scenario==RIGHTS || f->scenario==ORDERED_RIGHTS) {
         int fd=-1;
         struct message value=receive_message(f->data,&fd);
         assert(value.kind==INSTALLED && fd>=0 && lseek(fd,0,SEEK_CUR)==11);
         send_message(f->control,(struct message){.kind=INSTALLED,.number=fd},-1);
-        value=receive_message(f->data,NULL); assert(value.kind==CONTINUE);
+        value=receive_message(f->data,NULL);
+        if (value.kind==CHECK) {
+            assert(lseek(fd,0,SEEK_CUR)==value.position);
+            send_message(f->control,(struct message){.kind=ACK},-1);
+            value=receive_message(f->data,NULL);
+        }
+        assert(value.kind==CONTINUE);
         assert(lseek(fd,0,SEEK_CUR)==29);
         close(fd);
         send_message(f->control,(struct message){.kind=DONE},-1);
         return NULL;
     }
-    int fd=listener();
-    send_message(f->control,(struct message){.kind=LISTENER},fd);
-    close(fd);
+    if (!ordered(f->scenario)) {
+        int fd=listener(0);
+        send_message(f->control,(struct message){.kind=LISTENER},fd);
+        close(fd);
+    }
     errno=0;
     long result=syscall(SYS_getppid);
     int error=result<0 ? errno : 0;
-    if (f->scenario==SPLIT || f->scenario==ATOMIC) {
+    if (f->scenario==SPLIT || f->scenario==ATOMIC || f->scenario==ORDERED_ATOMIC) {
         assert(result==f->target);
-        if (f->scenario==ATOMIC) replace(f,f->target);
+        if (f->scenario==ATOMIC || f->scenario==ORDERED_ATOMIC) replace(f,f->target);
         assert(lseek(f->target,0,SEEK_CUR)==29);
     } else {
         assert(result==-1 && error==(f->scenario==PATH_FD ? ENOTSUP : EINTR));
@@ -125,6 +139,11 @@ static void child(struct fixture *f, pid_t parent) {
     alarm(20);
     struct sigaction action={.sa_handler=signal_handler}; sigemptyset(&action.sa_mask);
     assert(!sigaction(SIGUSR1,&action,NULL));
+    if (ordered(f->scenario)) {
+        /* Install before creating peers so either peer's dup3 reaches the gate. */
+        int fd=listener(1);
+        send_message(f->control,(struct message){.kind=LISTENER},fd); close(fd);
+    }
     pthread_t task; assert(!pthread_create(&task,NULL,requester,f));
     for (;;) {
         struct message value=receive_message(f->control,NULL);
@@ -148,6 +167,82 @@ static int create_file(const char *path, long position) {
     int fd=open(path,O_RDWR|O_CREAT|O_EXCL|O_CLOEXEC,0600); assert(fd>=0);
     assert(lseek(fd,position,SEEK_SET)==position); return fd;
 }
+static struct md_fs_anchor *capture(int fd, struct md_mount_namespace *view) {
+    struct md_filesystem fs={.mounts=view};
+    struct md_fs_anchor *origin=NULL;
+    struct md_fs_result result={.fd=fd};
+    struct md_fs_output output={.origin=&origin};
+    md_view_capture(&fs,view,NULL,&result,&output);
+    assert(!result.error && origin); return origin;
+}
+static void origin_at(struct md_fd_origins *table, int fd, struct md_fs_anchor *expected) {
+    unsigned flags;
+    struct md_fs_anchor *actual=md_fd_origins_get(table,fd,&flags);
+    assert(actual==expected && flags==FD_CLOEXEC); md_fs_anchor_release(actual);
+}
+static void ordered_handoff(const struct fixture *f, int control, int data) {
+    int notify=-1;
+    struct message message=receive_message(control,&notify);
+    assert(message.kind==LISTENER && notify>=0);
+    struct md_mount_namespace *views[]={md_mount_namespace_new(),md_mount_namespace_new()};
+    assert(views[0] && views[1]);
+    struct md_fs_anchor *source=capture(f->source,views[0]), *replacement=capture(f->replacement,views[1]);
+    struct md_fd_origins *files=md_fd_origins_new(), *other=md_fd_origins_new(); assert(files && other);
+    struct md_fd_order install={0}, mutation={0}, independent={0}, *next=NULL;
+    struct md_fd_origin_update update;
+    assert(!md_fd_origins_prepare(files,source,FD_CLOEXEC,&update));
+    assert(md_fd_order_begin(files,&install)==1 && !md_fd_order_start(&install));
+    int target=f->target;
+    if (f->scenario==ORDERED_RIGHTS) {
+        send_message(data,(struct message){.kind=INSTALLED},f->source);
+        message=receive_message(control,NULL); assert(message.kind==INSTALLED);
+        target=message.number;
+        send_message(control,(struct message){.kind=REPLACE,.number=target},-1);
+    } else {
+        struct seccomp_notif q={0};
+        /* EVENT_WAIT: exact publication request; fixture alarms bound failure. */
+        assert(!ioctl(notify,SECCOMP_IOCTL_NOTIF_RECV,&q) && q.data.nr==SYS_getppid);
+        struct seccomp_notif_addfd add={.id=q.id,.srcfd=f->source,.newfd=target,
+            .flags=SECCOMP_ADDFD_FLAG_SETFD|SECCOMP_ADDFD_FLAG_SEND,.newfd_flags=O_CLOEXEC};
+        assert(ioctl(notify,SECCOMP_IOCTL_NOTIF_ADDFD,&add)==target);
+    }
+    struct seccomp_notif q={0};
+    /* EVENT_WAIT: the competing mutation reaches its kernel admission stop;
+     * no timing assumption about when the receiver begins using the FD. */
+    assert(!ioctl(notify,SECCOMP_IOCTL_NOTIF_RECV,&q) && q.data.nr==SYS_dup3);
+    assert((int)q.data.args[0]==f->replacement && (int)q.data.args[1]==target);
+    assert(md_fd_order_begin(files,&mutation)==0 && md_fd_order_start(&mutation)==-EINVAL);
+    if (f->scenario==ORDERED_RIGHTS) {
+        send_message(data,(struct message){.kind=CHECK,.position=11},-1);
+        message=receive_message(control,NULL); assert(message.kind==ACK);
+    } else peer_command(control,CHECK,target,11);
+    assert(md_fd_order_begin(other,&independent)==1 && !md_fd_order_start(&independent));
+    assert(!md_fd_order_complete(&independent,&next) && !next);
+    md_fd_origins_finish(&update,target);
+    assert(!md_fd_order_complete(&install,&next) && next==&mutation);
+    origin_at(files,target,source);
+    assert(!md_fd_order_start(&mutation));
+    assert(!md_fd_origins_prepare(files,replacement,FD_CLOEXEC,&update));
+    struct seccomp_notif_resp reply={.id=q.id,.flags=SECCOMP_USER_NOTIF_FLAG_CONTINUE};
+    assert(!ioctl(notify,SECCOMP_IOCTL_NOTIF_SEND,&reply));
+    if (f->scenario==ORDERED_RIGHTS) {
+        message=receive_message(control,NULL); assert(message.kind==ACK);
+    } else completed(control);
+    /* This fixture acknowledgement follows the actual dup3 result. Production
+     * integration needs its syscall-exit event, not notification SEND success. */
+    md_fd_origins_finish(&update,target);
+    assert(!md_fd_order_complete(&mutation,&next) && !next);
+    origin_at(files,target,replacement);
+    if (f->scenario==ORDERED_RIGHTS) {
+        send_message(data,(struct message){.kind=CONTINUE},-1); completed(control);
+        assert(!md_fd_origins_close_range(files,(unsigned)target,(unsigned)target,0));
+        assert(!md_fd_origins_get(files,target,NULL));
+    }
+    md_fd_origins_release(files); md_fd_origins_release(other);
+    md_fs_anchor_release(source); md_fs_anchor_release(replacement);
+    md_mount_namespace_release(views[0]); md_mount_namespace_release(views[1]);
+    close(notify);
+}
 static void scenario(enum scenario scenario, const char *directory) {
     unsigned before=descriptors();
     int control[2], data[2];
@@ -166,7 +261,8 @@ static void scenario(enum scenario scenario, const char *directory) {
     pid_t parent=getpid(), pid=fork(); assert(pid>=0);
     if (!pid) { close(control[0]); close(data[0]); child(&f,parent); }
     close(control[1]); close(data[1]);
-    if (scenario==RIGHTS) {
+    if (ordered(scenario)) ordered_handoff(&f,control[0],data[0]);
+    else if (scenario==RIGHTS) {
         send_message(data[0],(struct message){.kind=INSTALLED},source);
         struct message value=receive_message(control[0],NULL); assert(value.kind==INSTALLED);
         peer_command(control[0],REPLACE,value.number,0);
@@ -235,6 +331,10 @@ int main(int argc, char **argv) {
     puts("PASS ADDFD rejects O_PATH without replacing destination");
     scenario(RIGHTS,argv[1]);
     puts("PASS SCM_RIGHTS: shared-table replacement precedes receiver acknowledgement");
+    scenario(ORDERED_ATOMIC,argv[1]);
+    puts("PASS ordered ADDFD_SEND: origin published before an intercepted shared-table replacement");
+    scenario(ORDERED_RIGHTS,argv[1]);
+    puts("PASS ordered SCM_RIGHTS: exact origins follow kernel completion, independent table progresses");
     puts("PASS native FD publication boundaries and descriptor cleanup");
     assert(!rmdir(argv[1]));
     return 0;

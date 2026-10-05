@@ -2,6 +2,8 @@
 #include "event_wait.h"
 #include "fs_service.h"
 #include "fs_engine.h"
+#include "fs_mounts.h"
+#include "task_resources.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -25,9 +27,15 @@
 } } while (0)
 static char root[PATH_MAX];
 static unsigned serial;
-enum fault { NORMAL, SIGNAL, HOLD_AFTER, COUNT_CLOSE, HOLD_DIRECTORY, COUNT_REPLY };
+enum fault { NORMAL, SIGNAL, HOLD_AFTER, COUNT_CLOSE, HOLD_DIRECTORY, COUNT_REPLY, REPLACE_TASK };
 struct service { pid_t pid; int stop, events, control; char endpoint[96], directory[PATH_MAX]; };
-struct hooks { enum fault fault; int notify, control; pid_t client; };
+struct replacement {
+    struct md_filesystem *filesystem;
+    struct md_task_resources resources[2];
+    struct md_identity identities[2];
+    int swapped;
+};
+struct hooks { enum fault fault; int notify, control; pid_t client; struct replacement *replacement; };
 static void byte(int fd) { CHECK(write(fd, "x", 1) == 1); }
 static void event(int fd) {
     char value;
@@ -43,6 +51,12 @@ static void joined(pid_t pid, int expected_signal) {
 }
 static void observe(enum md_fs_checkpoint point, const struct md_fs_packet *packet, void *context) {
     struct hooks *h = context;
+    if (point==MD_FS_BEFORE_DISPATCH && h->replacement && !h->replacement->swapped
+            && packet->operation==MD_FS_CREATE) {
+        struct replacement *r=h->replacement;
+        CHECK(!md_task_registry_publish(r->filesystem->tasks,packet->actor,h->client,&r->identities[1],&r->resources[1]));
+        r->swapped=1;
+    }
     if (point == MD_FS_REPLY_SENT) {
         if (h->fault == COUNT_REPLY) byte(h->notify);
         return;
@@ -72,9 +86,34 @@ static void start(struct service *s, enum fault fault, const char *existing, uns
     if (!s->pid) {
         close(stop[1]); close(ready[0]); close(notice[0]); close(control[1]);
         CHECK(md_inode_store_open(s->directory, 0, &store) == 0);
-        struct hooks hooks = {fault, notice[1], control[0], parent};
+        struct md_filesystem fs={.store=store};
+        struct replacement replacement={.filesystem=&fs};
+        if (fault==REPLACE_TASK) {
+            CHECK(!md_fs_mounts_open(&fs,NULL,0));
+            fs.tasks=md_task_registry_create(); CHECK(fs.tasks);
+            int root_fd=md_inode_open(store,-1,"/",O_PATH|O_DIRECTORY,0); CHECK(root_fd>=0);
+            struct md_fs_request chmod={.operation=MD_FS_CHMOD,.directory={root_fd,-1},.mode=0777};
+            CHECK(!md_inode_metadata(store,&chmod)); close(root_fd);
+            for(unsigned i=0;i<2;++i) {
+                replacement.identities[i]=md_identity_new(111*(i+1),111*(i+1));
+                replacement.resources[i]=(struct md_task_resources){.fs=md_domain_new(),
+                    .mounts=fs.mounts,.files=md_fd_origins_new()};
+                CHECK(replacement.resources[i].fs && replacement.resources[i].files);
+            }
+            CHECK(!md_task_registry_publish(fs.tasks,parent,parent,&replacement.identities[0],&replacement.resources[0]));
+        }
+        struct hooks hooks = {.fault=fault,.notify=notice[1],.control=control[0],.client=parent,
+            .replacement=fault==REPLACE_TASK ? &replacement : NULL};
         md_fs_observe(observe, &hooks); byte(ready[1]); close(ready[1]);
-        CHECK(md_fs_serve(&(struct md_filesystem){.store=store}, listener, stop[0], timeout, NULL, NULL) == 0);
+        CHECK(md_fs_serve(&fs, listener, stop[0], timeout, NULL, NULL) == 0);
+        if (fault==REPLACE_TASK) {
+            CHECK(replacement.swapped);
+            md_task_registry_destroy(fs.tasks); md_fs_mounts_close(&fs);
+            for(unsigned i=0;i<2;++i) {
+                md_domain_release(replacement.resources[i].fs); md_fd_origins_release(replacement.resources[i].files);
+                md_identity_release(&replacement.identities[i]);
+            }
+        }
         md_inode_store_close(store); close(listener); close(stop[0]); close(notice[1]); close(control[0]);
         _exit(0);
     }
@@ -99,6 +138,22 @@ static struct md_fs_response call(const char *endpoint, uint32_t op, int a, cons
     CHECK(r == 0 && out.delivery == MD_FS_REPLIED && out.result.error == error);
     CHECK(out.result.fd < 0 || (fcntl(out.result.fd, F_GETFD) & FD_CLOEXEC));
     return out;
+}
+static void captured_authentication(void) {
+    struct service s; start(&s,REPLACE_TASK,NULL,5000);
+    for(unsigned i=0;i<2;++i) {
+        int fd=call(s.endpoint,MD_FS_CREATE,-1,i ? "/after" : "/before",-1,NULL,0,0644,0).result.fd;
+        CHECK(fd>=0);
+        struct md_fs_response r=call(s.endpoint,MD_FS_FSTAT,fd,NULL,-1,NULL,0,0,0);
+        CHECK(r.result.info.uid==111*(i+1) && r.result.info.gid==111*(i+1)); close(fd);
+    }
+    struct md_fs_request q={.actor=INT32_MAX,.operation=MD_FS_CREATE,.directory={-1,-1},
+        .path={"/unauthenticated",NULL},.mode=0644};
+    struct md_fs_response r;
+    CHECK(!md_fs_call(s.endpoint,5000,&q,&r) && r.result.error==-ESRCH && r.result.fd<0);
+    call(s.endpoint,MD_FS_STAT,-1,"/unauthenticated",-1,NULL,0,0,-ENOENT);
+    stop(&s,0);
+    puts("PASS RPC uses captured credentials through task replacement; rejected actors cannot mutate the store");
 }
 static void semantics(const char *exe) {
     struct service s; start(&s, NORMAL, NULL, 5000);
@@ -672,6 +727,7 @@ int main(int argc, char **argv) {
     CHECK(argc == 2 && argv[1][0] == '/' && strlen(argv[1]) < sizeof(root)); strcpy(root, argv[1]);
     CHECK(mkdir(root, 0700) == 0);
     engine_buffers();
+    captured_authentication();
     semantics(argv[0]); directories(argv[0]); lost_directory_reply(); concurrent(); contention(); reentrant(); malformed(); idle(); lost_reply();
     reply_lifetime(); watch_delivery(); descriptor_stress(10000);
     for (enum reply_fault fault = UNEXPECTED_FD; fault < REPLY_FAULT_COUNT; fault++) faulty_reply(fault);

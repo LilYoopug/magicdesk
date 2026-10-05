@@ -28,13 +28,6 @@ def main():
     cases += [("zygote-" + str(index), ["/usr/bin/python3", "/tmp/zygote_stage.py",
                 "/tmp/md-chrome-helper-ordinary", "/usr/lib/chromium/chromium", "--fork-renderer"],
                "PASS stock Chromium renderer filter and nonempty Mojo startup", 0) for index in range(3)]
-    # This ordinary file has no trusted set-ID admission. The full browser must
-    # reject it, even when its separate IPC/renderer fixture can execute it.
-    cases += [("helper-rejected", ["/usr/bin/env", "CHROME_DEVEL_SANDBOX=/tmp/md-chrome-helper-ordinary",
-                "/usr/lib/chromium/chromium", "--headless", "--no-first-run",
-                "--user-data-dir=/tmp/md-rejected-" + uuid.uuid4().hex,
-                "--dump-dom", "data:text/html,<body>MD-UNADMITTED</body>"],
-               "The SUID sandbox helper binary was found, but is not configured correctly.", 134)]
     try:
         for name, program, marker, expected_exit in cases:
             command = [sys.executable, str(Path(__file__).with_name("run.py")),
@@ -56,8 +49,6 @@ def main():
             assert run["expectedOutput"]["found"], entry
             output = run["commands"][-1]["output"]
             assert "PROBE FAIL" not in output and "fstatFailures=0" in output
-            if name == "helper-rejected":
-                assert "<body>MD-UNADMITTED</body>" not in output and "PROBE complete status=134" in output
             if name == "job-control":
                 stops, wakes = map(int, re.search(r"PROBE job-control stops=(\d+) wakes=(\d+)", output).groups())
                 assert stops >= 64 and wakes >= 64, (stops, wakes)
