@@ -2,6 +2,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/close_range.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdio.h>
@@ -93,6 +94,36 @@ static void case_sharing(unsigned flags, int split, int root) {
     pid_t pid = fork(); assert(pid >= 0);
     if (!pid) { sharing(flags, split, root); _exit(0); }
     reap(pid);
+}
+struct range_context { int ready[2], done[2], file, invalid; unsigned flags; };
+static int range_child(void *argument) {
+    struct range_context *c=argument;
+    long result=syscall(SYS_close_range,(unsigned)c->file+c->invalid,(unsigned)c->file,c->flags);
+    if (c->invalid) {
+        assert(result==-1 && errno==EINVAL);
+        assert(!fcntl(c->file,F_SETFD,FD_CLOEXEC));
+    } else {
+        assert(!result);
+        if (c->flags & CLOSE_RANGE_CLOEXEC) assert(fcntl(c->file,F_GETFD)==FD_CLOEXEC);
+        else assert(fcntl(c->file,F_GETFD)==-1 && errno==EBADF);
+    }
+    put(c->ready[1]); get(c->done[0]); return 0;
+}
+static void range_sharing(unsigned flags, int invalid) {
+    struct range_context c={.flags=flags,.invalid=invalid};
+    assert(!pipe(c.ready) && !pipe(c.done));
+    c.file=open("value",O_RDONLY); assert(c.file>=0);
+    void *stack=malloc(1024*1024); assert(stack);
+    pid_t pid=clone(range_child,(char *)stack+1024*1024,SIGCHLD|CLONE_FILES,&c);
+    assert(pid>0); get(c.ready[0]);
+    int split=(flags & CLOSE_RANGE_UNSHARE) && !invalid;
+    if (split) assert(fcntl(c.file,F_GETFD)==0);
+    else if (invalid || (flags & CLOSE_RANGE_CLOEXEC)) assert(fcntl(c.file,F_GETFD)==FD_CLOEXEC);
+    else assert(fcntl(c.file,F_GETFD)==-1 && errno==EBADF);
+    put(c.done[1]); reap(pid); free(stack);
+    if (split || invalid || (flags & CLOSE_RANGE_CLOEXEC)) assert(!close(c.file));
+    close(c.ready[0]); close(c.ready[1]); close(c.done[0]); close(c.done[1]);
+    printf("PASS close_range flags=%#x invalid=%d\n",flags,invalid);
 }
 static void undo(void) {
     int sem = syscall(SYS_semget, IPC_PRIVATE, 1, 0600); assert(sem >= 0);
@@ -209,6 +240,12 @@ int main(int argc, char **argv) {
     case_sharing(CLONE_FS | CLONE_FILES, CLONE_FS | CLONE_FILES, 0);
     case_sharing(CLONE_VM | CLONE_FS | CLONE_FILES, -2, 0);
     case_sharing(CLONE_FS | CLONE_FILES, -3, 0);
+    range_sharing(0,0);
+    range_sharing(CLOSE_RANGE_CLOEXEC,0);
+    range_sharing(CLOSE_RANGE_UNSHARE,0);
+    range_sharing(CLOSE_RANGE_UNSHARE|CLOSE_RANGE_CLOEXEC,0);
+    range_sharing(CLOSE_RANGE_UNSHARE,1);
+    range_sharing(CLOSE_RANGE_UNSHARE|CLOSE_RANGE_CLOEXEC,1);
     if (guest) {
         case_sharing(CLONE_FS, -1, 1);
         case_sharing(CLONE_FS, CLONE_FS, 1);

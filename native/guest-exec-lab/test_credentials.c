@@ -68,6 +68,7 @@ static void concurrent_snapshots(void) {
         p.identities[i]=md_identity_new(i,i);
         p.resources[i].fs=md_domain_new(); assert(p.resources[i].fs);
         p.resources[i].mounts=md_mount_namespace_new(); assert(p.resources[i].mounts);
+        p.resources[i].files=md_fd_origins_new(); assert(p.resources[i].files);
         struct md_fs_location root={.mount=i+1,.object="a"}; root.object[0]+=(char)i;
         assert(!md_domain_set_root(p.resources[i].fs,&root));
     }
@@ -82,7 +83,7 @@ static void concurrent_snapshots(void) {
         assert(!md_task_registry_read(p.registry,123,120,&snapshot));
         unsigned k=snapshot.identity.uid.effective; assert(k<2);
         assert(snapshot.mounts==p.resources[k].mounts && snapshot.root.mount==k+1
-            && snapshot.root.object[0]=='a'+(char)k);
+            && snapshot.root.object[0]=='a'+(char)k && snapshot.files==p.resources[k].files && !snapshot.cwd);
         md_task_snapshot_release(&snapshot);
     }
     assert(!pthread_join(writer,NULL));
@@ -90,8 +91,9 @@ static void concurrent_snapshots(void) {
     for(unsigned i=0;i<2;++i) {
         md_identity_release(&p.identities[i]); md_domain_release(p.resources[i].fs);
         md_mount_namespace_release(p.resources[i].mounts);
+        md_fd_origins_release(p.resources[i].files);
     }
-    puts("PASS concurrent identity/root/mount snapshots are coherent and retained");
+    puts("PASS concurrent identity/root/mount/files snapshots are coherent and retained");
 }
 static int change(struct md_inode_store *s, int fd, unsigned op, unsigned mode, uint32_t uid, uint32_t gid) {
     struct md_fs_request q = {.operation=op,.directory={fd,-1},.mode=mode,.flags=MD_AT_EACCESS};

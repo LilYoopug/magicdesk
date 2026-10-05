@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <unistd.h>
 
+void test_fd_origins(void);
 static int descriptors(void) {
     DIR *dir = opendir("/proc/self/fd"); assert(dir);
     int count = 0;
@@ -23,6 +24,7 @@ static void contract(void) {
     assert(child.mounts==parent.mounts);
     assert(!md_resources_fork(&parent, 0, &sibling));
     assert(sibling.fs != parent.fs && sibling.sem_undo != parent.sem_undo);
+    assert(sibling.files!=parent.files);
     assert(sibling.mounts==parent.mounts);
     struct md_resource_change change;
     assert(!md_resources_unshare_prepare(&child, CLONE_FS | CLONE_SYSVSEM, &change));
@@ -75,6 +77,7 @@ int main(void) {
     int before = descriptors();
     for (unsigned i = 0; i < 100; i++) contract();
     assert(descriptors() == before);
+    test_fd_origins();
     puts("PASS resource ownership, transactional unshare, retained roots and descriptor lifetime");
     return 0;
 }

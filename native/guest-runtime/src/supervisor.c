@@ -26,6 +26,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/filter.h>
+#include <linux/close_range.h>
 #include "linux_abi.h"
 #include <linux/seccomp.h>
 #include <signal.h>
@@ -1153,6 +1154,14 @@ static int domain_call(struct thread *t, struct user_pt_regs *r, unsigned long c
     return_value(t, r, error); return 1;
 }
 static int descriptor_call(struct thread *t, struct user_pt_regs *r, unsigned long cookie) {
+    if (cookie == MD_INTERCEPT_NATIVE && r->regs[8] == SYS_close_range
+            && ((unsigned)r->regs[2] & CLOSE_RANGE_UNSHARE)) {
+        CHECK(t->phase == IDLE);
+        int error = md_resources_unshare_prepare(&t->resources, CLONE_FILES, &t->resource_change);
+        if (error) return_value(t, r, error);
+        else { t->original = *r; t->phase = OBSERVING; resume(t->pid, 0); }
+        return 1;
+    }
     if (cookie != MD_INTERCEPT_DISPATCH || r->regs[8] != SYS_lseek) return 0;
     CHECK(t->ready && t->phase == IDLE);
     int fd = duplicate_fd(t->pid, (int)r->regs[0]);
@@ -1500,6 +1509,7 @@ int main(int argc, char **argv) {
                     release_thread(former);
                 }
             }
+            CHECK(!md_resources_exec(&t->resources));
             md_stacks_return(t->stacks, t->stack);
             CHECK(!md_shm_abort(shm,&t->shm_pending));
             CHECK(!md_shm_space_release(shm,t->shm_space));
@@ -1740,8 +1750,13 @@ int main(int argc, char **argv) {
             if (t->phase == OBSERVING) {
                 struct user_pt_regs regs;
                 if (!registers(pid, &regs)) continue;
-                if (t->original.regs[8] == SYS_unshare)
+                if (t->original.regs[8] == SYS_unshare
+                        || (t->original.regs[8] == SYS_close_range
+                            && ((unsigned)t->original.regs[2] & CLOSE_RANGE_UNSHARE)))
                     CHECK(!md_resources_unshare_finish(ipc, &t->resources, &t->resource_change, (long)regs.regs[0]));
+                if (t->original.regs[8] == SYS_close_range && !regs.regs[0] && t->resources.files)
+                    CHECK(!md_fd_origins_close_range(t->resources.files, (unsigned)t->original.regs[0],
+                        (unsigned)t->original.regs[1], !!((unsigned)t->original.regs[2] & CLOSE_RANGE_CLOEXEC)));
                 if (t->original.regs[8] == SYS_clone) t->cloning = 0;
                 if ((long)regs.regs[0] >= 0 && (t->original.regs[8] == SYS_munmap || t->original.regs[8] == SYS_mmap)) {
                     size_t length = t->original.regs[1], page = (size_t)getpagesize();

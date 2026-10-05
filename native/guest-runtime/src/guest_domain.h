@@ -2,6 +2,7 @@
 #define MD_GUEST_DOMAIN_H
 #include <sys/types.h>
 #include "fs_location.h"
+#include "fs_anchor.h"
 
 /* Kernel-only adapter transport in every domain. This shared list must not
  * include pathname, credential or argument-dependent policy operations. */
@@ -29,7 +30,9 @@ void md_domain_release(struct md_guest_domain *);
 void md_domain_pin(struct md_guest_domain *);
 void md_domain_unpin(struct md_guest_domain *);
 int md_domain_scoped(const struct md_guest_domain *);
-void md_domain_root(struct md_guest_domain *, struct md_fs_location *);
+/* Snapshot retains cwd provenance; release it separately from this domain. */
+void md_domain_paths(struct md_guest_domain *, struct md_fs_location *, struct md_fs_anchor **cwd);
+int md_domain_set_cwd(struct md_guest_domain *, struct md_fs_anchor *);
 int md_domain_set_root(struct md_guest_domain *, const struct md_fs_location *);
 int md_domain_restricted(const struct md_guest_domain *);
 int md_domain_restrict(struct md_guest_domain *, pid_t, const char *);

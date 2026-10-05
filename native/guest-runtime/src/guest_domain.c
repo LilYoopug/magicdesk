@@ -20,18 +20,20 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+enum { ROOT_SET=1, CWD_SET=2 };
 struct md_guest_domain {
     atomic_uint refs;
     unsigned owners;
     pthread_mutex_t lock;
-    atomic_int scoped;
+    atomic_int path_state;
     struct md_fs_location guest_root;
+    struct md_fs_anchor *cwd_origin;
     int root, cwd, root_process;
 };
 struct md_guest_domain *md_domain_new(void) {
     struct md_guest_domain *d = calloc(1, sizeof(*d));
     if (d) {
-        atomic_init(&d->refs, 1); atomic_init(&d->scoped, 0);
+        atomic_init(&d->refs, 1); atomic_init(&d->path_state, 0);
         d->owners = 1; d->root = d->cwd = d->root_process = -1;
         if (pthread_mutex_init(&d->lock, NULL)) { free(d); return NULL; }
     }
@@ -44,7 +46,8 @@ struct md_guest_domain *md_domain_fork(struct md_guest_domain *d, int shared) {
     if (!copy) return NULL;
     pthread_mutex_lock(&d->lock);
     copy->guest_root = d->guest_root;
-    atomic_store(&copy->scoped, atomic_load(&d->scoped));
+    copy->cwd_origin=md_fs_anchor_retain(d->cwd_origin);
+    atomic_store(&copy->path_state, atomic_load(&d->path_state));
     if (copy && d->root >= 0) {
         copy->root = fcntl(d->root, F_DUPFD_CLOEXEC, 0);
         copy->root_process = fcntl(d->root_process, F_DUPFD_CLOEXEC, 0);
@@ -68,20 +71,36 @@ void md_domain_unpin(struct md_guest_domain *d) {
     if (d->root >= 0) close(d->root);
     if (d->cwd >= 0) close(d->cwd);
     if (d->root_process >= 0) close(d->root_process);
+    md_fs_anchor_release(d->cwd_origin);
     pthread_mutex_destroy(&d->lock); free(d);
 }
 struct md_guest_domain *md_domain_unshare_prepare(struct md_guest_domain *d) {
     return md_domain_fork(d, d && d->owners == 1);
 }
 int md_domain_scoped(const struct md_guest_domain *d) {
-    return d && atomic_load_explicit(&d->scoped, memory_order_acquire);
+    return d && (atomic_load_explicit(&d->path_state, memory_order_acquire) & ROOT_SET);
 }
-void md_domain_root(struct md_guest_domain *d, struct md_fs_location *out) {
+void md_domain_paths(struct md_guest_domain *d, struct md_fs_location *out, struct md_fs_anchor **cwd) {
     *out = (struct md_fs_location){0};
-    if (!md_domain_scoped(d)) return;
+    *cwd=NULL;
+    if (!d || !atomic_load_explicit(&d->path_state,memory_order_acquire)) return;
     pthread_mutex_lock(&d->lock);
     *out = d->guest_root;
+    *cwd=md_fs_anchor_retain(d->cwd_origin);
     pthread_mutex_unlock(&d->lock);
+}
+int md_domain_set_cwd(struct md_guest_domain *d, struct md_fs_anchor *cwd) {
+    if (!d) return -ESRCH;
+    struct md_fs_anchor *old=NULL;
+    pthread_mutex_lock(&d->lock);
+    int error=d->root>=0 && cwd ? -EPERM : 0;
+    if (!error) {
+        old=d->cwd_origin; d->cwd_origin=md_fs_anchor_retain(cwd);
+        int state=atomic_load_explicit(&d->path_state,memory_order_relaxed) & ~CWD_SET;
+        atomic_store_explicit(&d->path_state,state | (cwd ? CWD_SET : 0),memory_order_release);
+    }
+    pthread_mutex_unlock(&d->lock);
+    md_fs_anchor_release(old); return error;
 }
 int md_domain_set_root(struct md_guest_domain *d, const struct md_fs_location *root) {
     if (!d) return -ESRCH;
@@ -89,7 +108,8 @@ int md_domain_set_root(struct md_guest_domain *d, const struct md_fs_location *r
     int error = d->root >= 0 ? -EPERM : 0;
     if (!error) {
         d->guest_root = *root;
-        atomic_store_explicit(&d->scoped, !!root->object[0] || root->mount, memory_order_release);
+        int state=atomic_load_explicit(&d->path_state,memory_order_relaxed) & ~ROOT_SET;
+        atomic_store_explicit(&d->path_state,state | ((root->object[0] || root->mount) ? ROOT_SET : 0), memory_order_release);
     }
     pthread_mutex_unlock(&d->lock); return error;
 }
@@ -133,7 +153,7 @@ int md_domain_chdir_root(struct md_guest_domain *d) {
     int fd = fcntl(d->root, F_DUPFD_CLOEXEC, 0);
     if (fd < 0) return -errno;
     if (d->cwd >= 0) close(d->cwd);
-    d->cwd = fd; return 0;
+    d->cwd = fd; return md_domain_set_cwd(d,NULL);
 }
 int md_domain_path_error(const struct md_guest_domain *d) {
     if (!md_domain_restricted(d)) return -EINVAL;

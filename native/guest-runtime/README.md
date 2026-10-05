@@ -40,7 +40,7 @@ distribution-management UI belong to the existing application services.
 - [Process lifetime](process-lifetime.md) and [debugging](debugging.md):
   supervision, nested GDB/LLDB/strace workflows and explicit limitations.
 - [Process resources](process-resources.md): clone/unshare/exec ownership,
-  filesystem context, task-owned mount views, descriptor tables and semaphore undo.
+  filesystem context, task-owned mount views, descriptor-origin annotations and semaphore undo.
 - [Watches](watches.md), [named pipes](fifos.md),
   [Unix credentials](ipc-credentials.md), [shared memory](shared-memory.md) and
   [SysV IPC](sysv-ipc.md): independent ownership and validation boundaries.

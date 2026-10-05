@@ -8,15 +8,16 @@ Android Activities, named environments or launcher configuration.
 | --- | --- | --- | --- |
 | Filesystem context | `CLONE_FS` | `CLONE_FS` | Retained |
 | Mount view | Shared independently of `CLONE_FS` | Namespace creation unsupported | Retained |
-| Descriptor table | `CLONE_FILES` | `CLONE_FILES` | Kernel detaches it |
+| Descriptor-origin annotations | `CLONE_FILES` | `CLONE_FILES`, `CLOSE_RANGE_UNSHARE` | Detach; remove close-on-exec entries |
 | Semaphore undo | `CLONE_SYSVSEM` | `CLONE_SYSVSEM` | Retained |
 
 The kernel owns cwd, umask, descriptor tables and open-file descriptions.
-The filesystem context owns guest root selection and the admitted proc-root
+The filesystem context owns guest root selection, optional cwd provenance and the admitted proc-root
 restriction. `task_registry` pins that context alongside each task's identity;
-registry references do not count as CLONE_FS owners. Both filesystem request
-transports capture identity, root and the retained mount view in one authenticated
-registry snapshot. A missing task mount view fails explicitly; the worker's
+registry references do not count as task owners. Both filesystem request
+transports capture identity, root, cwd origin, mount view and descriptor-origin
+table in one authenticated registry snapshot. The file-table handle remains live;
+it is not a frozen copy of its entries. A missing task mount view fails explicitly; the worker's
 initial view is not a fallback for another task.
 See [namespace execution](namespace-execution.md) for the launch filesystem and
 [interception](interception.md) for restricted domains.
@@ -86,11 +87,9 @@ authorize a retry.
 
 The caller must associate each anchor with the correct captured descriptor.
 Device/inode validation rejects a mismatched object; it cannot distinguish two
-opens of the same inode through different mounts. Kernel FD-number reuse, dup,
-fork/CLONE_FILES, exec/close-on-exec, descriptor transfer and shared cwd therefore
-need a lifecycle contract before syscall adapters can publish copied namespaces.
-An O_PATH pin alone is not an open-file-description identity. There is no mirror
-of ordinary data descriptions or new interception of close/read/write.
+opens of the same inode through different mounts. An O_PATH pin alone is not an
+open-file-description identity. There is no mirror of ordinary data descriptions
+or new interception of close/read/write.
 
 Cross-view relative IO works, but path/image-path publication for an origin in
 another tree returns ENOENT instead of inventing a current-root path. Changing
@@ -98,6 +97,36 @@ the task root through such an origin is unsupported. Native object-ID requests
 still reject conflicting aliases of one backing inode within a view; the object
 cache is not a replacement for explicit origin tracking. These limits remain
 separate from the working engine traversal contract.
+
+## Descriptor And Cwd Annotations
+
+`fd_origins` is a sparse metadata table keyed by guest FD number. It retains
+anchors and descriptor flags, never readable/writable descriptions or offsets.
+The owner follows CLONE_FILES independently of both CLONE_FS and mount-view
+ownership. A fork without CLONE_FILES copies annotations; shared owners see one
+table. Registry and in-flight request pins keep it alive without counting as
+task owners. An absent entry means unknown provenance, not EBADF.
+
+The owner is small; buckets and entries are allocated only for explicit
+annotations. A prepared update reserves memory and retains its origin before a
+kernel mutation. Publication after success needs no allocation; cancellation
+leaves the old entry intact. Replacing a destination with an unknown origin
+clears its previous annotation. Range closure, close-on-exec marking and exec
+cleanup operate on existing entries without per-FD allocation. Locks cover only
+metadata; removed anchors are released outside them.
+
+The filesystem context similarly retains an optional cwd anchor. CLONE_FS
+shares it, an independent context copies the reference, and exec retains it.
+Root selection and cwd are independent: changing the root does not move cwd,
+and cwd provenance alone does not activate the scoped-root adapter. The special
+proc-root chdir clears ordinary cwd provenance.
+
+These are owner/lifetime contracts, not automatic guest-FD tracking. Guest opens,
+dup/fcntl/close, received SCM_RIGHTS and cwd changes do not yet populate these
+annotations. Initial inherited descriptors, FD-number reuse, concurrent kernel
+mutations by CLONE_FILES peers and transfer provenance need transport integration
+before copied guest namespaces can be published. The metadata lock does not
+order kernel syscalls or prove which description occupies a live FD number.
 
 ## Guest Roots
 
@@ -155,6 +184,13 @@ participant resumes guest execution. Nonleader exec transfers the executing
 thread's resources to its resulting process identity; teardown of the replaced
 leader must not release the executing thread's owners. Kernel exec detaches
 shared descriptor tables, but not shared filesystem context or semaphore undo.
+The confirmed exec event detaches the corresponding annotation owner and removes
+close-on-exec entries after any nonleader resource transfer. Failed exec does
+not change that owner. `close_range` with CLOSE_RANGE_UNSHARE uses the same
+prepare/commit/rollback transaction as `unshare(CLONE_FILES)`, then applies its
+range operation only after kernel success. Ordinary close_range, close and
+descriptor-flag syscalls retain their existing interception policy; complete
+annotation maintenance is not enabled.
 
 ## Boundaries
 
@@ -173,8 +209,13 @@ successful browser execution is not proof of complete sandbox equivalence.
 
 With `MAGICDESK_GUEST_FIXTURES=ON`, `test_task_resources` checks independent
 ownership, transaction rollback, retained-root copies and descriptor leaks.
+Its `test_fd_origins` cases cover descriptor replacement, unknown origins,
+close-on-exec flags, ranges, cwd/root independence, all CLONE_FS/CLONE_FILES
+combinations and lifetime past task/registry removal. Allocation-failure injection
+checks each preparation step and allocation-free publication; concurrent readers
+check coherent origin/flag pairs. An annotated pipe must still reach EOF.
 `resource_guest` compares native Linux and Shroot cwd/umask/FD semantics,
-failed-unshare rollback and exec inheritance. Guest-only cases check proc-root
+failed-unshare rollback, close_range splitting/marking and exec inheritance. Guest-only cases check proc-root
 sharing and semaphore-undo splitting, final-owner cleanup and exec retention.
 Pipe acknowledgements order observations; an alarm is only a failure bound.
 
