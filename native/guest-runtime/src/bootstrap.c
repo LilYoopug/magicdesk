@@ -125,12 +125,6 @@ void md_boot(uintptr_t *kernel_stack) {
     if (namespace) {
         if (md_copy(md_files.endpoint,sizeof(md_files.endpoint),argv[root_arg]) || !md_files.endpoint[0])
             md_die("invalid namespace endpoint",-EINVAL);
-        if (!inherited) {
-            long root=md_namespace_open(&md_files,AT_FDCWD,cwd ? cwd : "/",O_PATH|O_DIRECTORY|O_CLOEXEC,0);
-            if(root<0) md_die("open namespace root",root);
-            r=RAW1(fchdir,root); RAW1(close,root);
-            if(r<0) md_die("enter namespace root",r);
-        }
     } else {
     if (argv[root_arg][0] != '/' || md_copy(md_files.root, sizeof(md_files.root), argv[root_arg]))
         md_die("rootfs must be an absolute path", -EINVAL);
@@ -141,6 +135,14 @@ void md_boot(uintptr_t *kernel_stack) {
     }
     r = md_interception_install(inherited);
     if (r < 0) md_die("install syscall adapter", r);
+    if (namespace && !inherited) {
+        /* Initial placement uses the same authenticated descriptor publication
+         * and native cwd completion as later chdir, before loading guest code. */
+        long root=md_namespace_open(&md_files,AT_FDCWD,cwd ? cwd : "/",O_PATH|O_DIRECTORY|O_CLOEXEC,0);
+        if(root<0) md_die("open namespace root",root);
+        r=RAW1(fchdir,root); RAW1(close,root);
+        if(r<0) md_die("enter namespace root",r);
+    }
     struct md_command command;
     if (!execfn) execfn = argv[root_arg + 1];
     if (inherited) {

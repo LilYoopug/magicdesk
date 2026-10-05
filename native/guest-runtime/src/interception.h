@@ -25,7 +25,8 @@ enum md_interception_kind {
     MD_INTERCEPT_WATCH = 46,
     MD_INTERCEPT_MEMORY = 47,
     MD_INTERCEPT_FD = 48,
-    MD_INTERCEPT_CWD = 49
+    MD_INTERCEPT_CWD = 49,
+    MD_INTERCEPT_CAPTURE = 50
 };
 
 /* Bootstrap-owned entry points, published before entering guest code. The
@@ -40,8 +41,7 @@ struct md_interception_abi {
     uintptr_t enter;
     uintptr_t ipc_wait, ipc_wait_result;
     uintptr_t fd_control;
-    uintptr_t cwd_gate;
-    uintptr_t cwd_path;
+    uintptr_t capture_gate;
 };
 
 int md_interception_install(int inherited);

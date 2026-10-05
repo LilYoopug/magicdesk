@@ -34,9 +34,10 @@ def main():
     session = client.call("console.open", {"directory": "/data/local/tmp"})["sessionId"]
     result = {"device": state["device"], "app": state["app"], "root": root, "checks": []}
 
-    def check(name, command, contains=None):
+    def check(name, command, contains=None, patterns=()):
         value = client.call("console.execute", {"sessionId": session, "command": command})
         passed = value["exitCode"] == 0 and (contains is None or contains in value["output"])
+        passed = passed and all(re.search(pattern, value["output"]) for pattern in patterns)
         result["checks"].append({"name": name, "passed": passed, **value})
         print(("PASS " if passed else "FAIL ") + name + "\n" + value["output"], flush=True)
         if not passed:
@@ -65,6 +66,14 @@ def main():
         check("native resource semantics", root + "/libmagicdesk_guest_resource_guest.so native " + root + "/native",
               "PASS process resources")
         runner = root + "/libmagicdesk_guest_run.so --store " + root + "/store --deadline-seconds 60 -- "
+        for protected in (False, True):
+            check("initial cwd and proc origins" + (" protected" if protected else ""),
+                          root + "/libmagicdesk_guest_run.so --diagnostics --cwd /tmp --store "
+                          + root + "/store --deadline-seconds 60 -- /bin/test "
+                          + ("origins-protected" if protected else "origins") + " /tmp",
+                          "PASS initial cwd and proc aliases",
+                          patterns=(r"PROBE image-cwd pid=\d+ known=1",
+                                    r"PROBE path-capture pid=\d+ base=\d+ known=1"))
         check("guest resource semantics", runner + shlex.join(["/bin/test", "guest", "/tmp"]), "PASS process resources")
         check("guest namespace capabilities", runner + "/bin/test probe /tmp")
         check("guest roots", root + "/libmagicdesk_guest_run.so --user 0:0 --store "

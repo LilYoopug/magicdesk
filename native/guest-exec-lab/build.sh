@@ -20,7 +20,7 @@ inode_compile() {
         "$runtime/inode_watch.c" "$runtime/watch_queue.c" "$runtime/inode_path.c" \
         "$runtime/inode_directory.c" "$runtime/inode_import.c" "$runtime/inode_socket.c" \
         "$runtime/inode_backing.c" "$runtime/inode_snapshot.c" "$runtime/inode_fifo.c" "$runtime/file_open.c" "$runtime/guest_identity.c" \
-        "$runtime/task_registry.c" "$runtime/guest_domain.c" "$runtime/mount_namespace.c" "$runtime/fs_anchor.c" "$runtime/fd_origins.c" "$runtime/inode_metadata.c" \
+        "$runtime/task_registry.c" "$runtime/guest_domain.c" "$runtime/mount_namespace.c" "$runtime/fs_anchor.c" "$runtime/resource_order.c" "$runtime/fd_origins.c" "$runtime/fd_exchange.c" "$runtime/inode_metadata.c" \
         "$runtime/inode_capability.c" "$runtime/inode_acl.c" "$runtime/posix_acl.c" "$@"
 }
 node "$src/test_signature.mjs" "$work"
@@ -54,7 +54,8 @@ importroot=$(mktemp -d "$work/path-test/import.XXXXXX")
 timeout 45 "$work/test-import" "$importroot/tests"
 "$cc" -iquote "$runtime" -std=c17 -O2 -Wall -Wextra -Werror -Wframe-larger-than=16384 \
     -ffreestanding -fno-builtin -fno-stack-protector -DMD_NO_START -nostdlib -r \
-    "$runtime/fs_client.c" "$runtime/fs_wire.c" "$runtime/event_wait.c" "$runtime/raw.c" "$runtime/memory.c" "$runtime/raw.S" \
+    "$runtime/fs_client.c" "$runtime/fs_wire.c" "$runtime/fd_client.c" "$runtime/interception_entry.S" \
+    "$runtime/event_wait.c" "$runtime/raw.c" "$runtime/raw.S" \
     -o "$work/fs-client-freestanding.o"
 if [ -n "$(llvm-nm -u "$work/fs-client-freestanding.o")" ]; then
     printf 'Filesystem RPC client has unresolved runtime dependencies\n' >&2
@@ -62,7 +63,7 @@ if [ -n "$(llvm-nm -u "$work/fs-client-freestanding.o")" ]; then
 fi
 printf 'PASS freestanding RPC client: no unresolved libc/SQLite/runtime dependencies\n'
 inode_compile "$cc" -iquote "$runtime" -std=c17 -O2 -g -Wall -Wextra -Werror -fno-builtin -DMD_NO_START \
-    -DMD_INODE_TESTING -DMD_FS_TESTING "$src/test_rpc.c" "$runtime/fs_client.c" \
+    -DMD_INODE_TESTING -DMD_FS_TESTING -DMD_USE_LIBC "$src/test_rpc.c" "$runtime/fs_client.c" \
     "$runtime/image_catalogue.c" "$runtime/elf_admission.c" "$runtime/elf.c" \
     "$runtime/fs_mounts.c" "$runtime/fs_mount_path.c" "$runtime/fs_mount_operations.c" "$runtime/fs_mount_table.c" \
     "$runtime/fs_wire.c" "$runtime/event_wait.c" "$runtime/fs_service.c" "$runtime/fs_engine.c" "$runtime/ipc_credentials.c" \
@@ -79,9 +80,9 @@ case "$($cc -dumpmachine)" in *android*) spawn_lib=-landroid-spawn ;; esac
 procroot=$(mktemp -d "$work/path-test/proc.XXXXXX")
 timeout 30 "$work/test-proc" "$procroot/files" native
 adapter_fixture() {
-"$cc" -iquote "$runtime" -std=c17 -O2 -g -Wall -Wextra -Werror -UNDEBUG -fno-builtin -DMD_NO_START "$@" \
+"$cc" -iquote "$runtime" -std=c17 -O2 -g -Wall -Wextra -Werror -UNDEBUG -fno-builtin -DMD_NO_START -DMD_USE_LIBC "$@" \
     "$runtime/socket_calls.c" "$runtime/socket_namespace.c" "$runtime/socket_identity.c" "$runtime/socket_ancillary.c" "$runtime/socket_routes.c" "$runtime/file_calls.c" "$runtime/fs.c" "$runtime/proc_paths.c" \
-    "$runtime/namespace.c" "$runtime/namespace_proc.c" "$runtime/proc_image.c" "$runtime/fd_metadata.c" "$runtime/fs_client.c" "$runtime/fs_wire.c" "$runtime/file_open.c" \
+    "$runtime/namespace.c" "$runtime/namespace_proc.c" "$runtime/proc_image.c" "$runtime/fd_metadata.c" "$runtime/fd_client.c" "$runtime/fs_client.c" "$runtime/fs_wire.c" "$runtime/file_open.c" \
     "$runtime/event_wait.c" "$runtime/raw.c" "$runtime/memory.c" "$runtime/raw.S"
 }
 adapter_fixture -DMD_SOCKET_DRIVER "$src/test_sockets.c" -o "$work/bundle/md-sockets-test"
@@ -158,7 +159,7 @@ inode_compile guest_cc -pie -DMD_INODE_TESTING "$sysroot/usr/lib/aarch64-linux-g
     "$sysroot/usr/lib/aarch64-linux-gnu/crtn.o" -Wl,--dynamic-linker=/lib/ld-linux-aarch64.so.1 \
     -L"$sysroot/usr/lib/aarch64-linux-gnu" -l:libsqlite3.so.0 -l:libm.so.6 \
     -o "$work/md-import-fixture"
-inode_compile guest_cc -pie -fno-builtin -DMD_NO_START -DMD_INODE_TESTING -DMD_FS_TESTING \
+inode_compile guest_cc -pie -fno-builtin -DMD_NO_START -DMD_USE_LIBC -DMD_INODE_TESTING -DMD_FS_TESTING \
     "$sysroot/usr/lib/aarch64-linux-gnu/Scrt1.o" "$sysroot/usr/lib/aarch64-linux-gnu/crti.o" \
     "$src/test_rpc.c" "$runtime/fs_client.c" "$runtime/fs_wire.c" "$runtime/event_wait.c" "$runtime/fs_service.c" "$runtime/fs_engine.c" "$runtime/ipc_credentials.c" \
     "$runtime/image_catalogue.c" "$runtime/elf_admission.c" "$runtime/elf.c" \

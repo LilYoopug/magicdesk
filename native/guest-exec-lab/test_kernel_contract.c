@@ -300,6 +300,54 @@ static void resolution_race(void) {
     close(dir); assert(!rmdir("root/slot") && !rmdir("root") && !rmdir("outside"));
     puts("OBS rename-confinement=1");
 }
+struct proc_owners { int original, replacement; };
+static void proc_path_result(const char *name, const char *path) {
+    int fd=open(path,O_PATH|O_CLOEXEC), open_error=fd<0 ? errno : 0;
+    if (fd>=0) assert(!close(fd));
+    struct stat st;
+    int result=stat(path,&st), stat_error=result<0 ? errno : 0;
+    printf("OBS proc-path=%s open=%d errno=%d stat=%d errno=%d\n",
+        name,fd<0 ? -1 : 0,open_error,result,stat_error);
+}
+static void proc_value(const char *prefix, int fd, char expected) {
+    char path[128], value=0;
+    snprintf(path,sizeof(path),"%s/fd/%d",prefix,fd);
+    int copy=open(path,O_RDONLY|O_CLOEXEC); assert(copy>=0);
+    assert(read(copy,&value,1)==1 && value==expected && !close(copy));
+}
+static void *proc_owner_thread(void *opaque) {
+    struct proc_owners *c=opaque;
+    assert(!unshare(CLONE_FILES|CLONE_FS));
+    assert(dup3(c->replacement,c->original,O_CLOEXEC)==c->original);
+    assert(!chdir("other"));
+    proc_value("/proc/self",c->original,'a');
+    proc_value("/proc/thread-self",c->original,'b');
+    struct stat leader, own, current;
+    assert(!stat("/proc/self/cwd",&leader) && !stat("/proc/thread-self/cwd",&own) && !stat(".",&current));
+    assert(leader.st_ino!=own.st_ino && own.st_ino==current.st_ino);
+    char path[128];
+    snprintf(path,sizeof(path),"/proc/thread-self/task/%ld/fd/%d",syscall(SYS_gettid),c->original);
+    proc_path_result("thread-task",path);
+    snprintf(path,sizeof(path),"/proc/0%ld/cwd",syscall(SYS_gettid));
+    proc_path_result("padded-tid",path);
+    return NULL;
+}
+static void proc_owners(void) {
+    struct proc_owners c={.original=open("first",O_RDWR|O_CREAT|O_EXCL|O_CLOEXEC,0600),
+        .replacement=open("second",O_RDWR|O_CREAT|O_EXCL|O_CLOEXEC,0600)};
+    assert(c.original>=0 && c.replacement>=0 && !mkdir("other",0700));
+    assert(write(c.original,"a",1)==1 && write(c.replacement,"b",1)==1);
+    char path[128];
+    snprintf(path,sizeof(path),"/proc/self/fd/0%d",c.original);
+    proc_path_result("padded-fd",path);
+    pthread_t thread; assert(!pthread_create(&thread,NULL,proc_owner_thread,&c));
+    /* EVENT_WAIT: the worker verifies its detached resources; alarm bounds failure. */
+    assert(!pthread_join(thread,NULL));
+    proc_value("/proc/self",c.original,'a');
+    proc_value("/proc/thread-self",c.original,'a');
+    assert(!close(c.original) && !close(c.replacement));
+    puts("OBS proc-self-and-thread-self independent-fs=1 independent-files=1");
+}
 int main(int argc, char **argv) {
     assert(argc == 3 && !chdir(argv[2])); setbuf(stdout, NULL);
     // EVENT_WAIT: ptrace stops, pipes and barriers; alarm fails a stuck fixture.
@@ -316,6 +364,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "file-lifetime")) file_lifetime();
     else if (!strcmp(argv[1], "resolution")) resolution();
     else if (!strcmp(argv[1], "resolution-race")) resolution_race();
+    else if (!strcmp(argv[1], "proc-owners")) proc_owners();
     else return 2;
     printf("PASS %s\n", argv[1]); return 0;
 }

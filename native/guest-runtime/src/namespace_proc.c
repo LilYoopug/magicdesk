@@ -3,6 +3,7 @@
 #include "proc_paths.h"
 #include "fd_metadata.h"
 #include "interception.h"
+#include "fd_client.h"
 #include "raw.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -85,13 +86,23 @@ static int link_operation(long nr, const unsigned long *a) {
     default: return 0;
     }
 }
-static long host_readlink(const struct md_fs *fs, const char *path, const unsigned long *a) {
+static long capture(const struct md_proc_path *ref, const char *path, int directory) {
+    /* /proc/self addresses the group leader, whose FS/files can have been
+     * unshared from this thread. Preserve that native lookup as unknown. */
+    if (ref->process==(int)RAW0(gettid)) {
+        if (ref->kind==MD_PROC_FD) return md_fd_capture_path(path,ref->descriptor,directory);
+        if (ref->kind==MD_PROC_CWD) return md_fd_capture_path(path,AT_FDCWD,directory);
+    }
+    return RAW4(openat,AT_FDCWD,path,O_PATH|O_CLOEXEC|(directory ? O_DIRECTORY : 0),0);
+}
+static long host_readlink(const struct md_fs *fs, const struct md_proc_path *ref,
+        const char *path, const unsigned long *a) {
     if (!a[3]) return -EINVAL;
     char text[PATH_MAX];
     long n = RAW4(readlinkat, AT_FDCWD, path, text, sizeof(text) - 1);
     if (n < 0) return n;
     text[n] = 0;
-    long fd = RAW4(openat, AT_FDCWD, path, O_PATH | O_CLOEXEC, 0);
+    long fd = capture(ref,path,0);
     if (fd >= 0) {
         struct md_fs_request q = {.operation = MD_FS_PATH, .directory = {(int)fd, -1}};
         struct md_fs_response out;
@@ -158,7 +169,7 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
         if (ref.kind == MD_PROC_EXE) return link_result(exe, a);
         if (ref.kind == MD_PROC_ROOT) return link_result("/", a);
         if (ref.ordinary_link) return RAW4(readlinkat, AT_FDCWD, path, a[2], a[3]);
-        return host_readlink(fs, path, a);
+        return host_readlink(fs, &ref, path, a);
     }
     if (native)
         return nr==SYS_statx ? md_namespace_native_statx(fs,args)
@@ -168,7 +179,7 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
         if (ref.kind == MD_PROC_ROOT)
             return md_namespace_open(fs, AT_FDCWD, "/",
                                      (int)a[2], (unsigned)a[3]);
-        long original = RAW4(openat, AT_FDCWD, path, O_PATH | O_CLOEXEC, 0);
+        long original = capture(&ref,path,0);
         if (original < 0) return original;
         /* The followed magic link already selected an existing object. Creation
          * and exclusive-link semantics were handled above, not by its backing. */
@@ -188,8 +199,7 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
         fd = md_namespace_open(fs, AT_FDCWD, "/",
                                O_PATH | O_CLOEXEC | (tail ? O_DIRECTORY : 0), 0);
     else
-        fd = RAW4(openat, AT_FDCWD, anchor, O_PATH | O_CLOEXEC | (tail ? O_DIRECTORY : 0) |
-                  (native && link_operation(nr, a) ? O_NOFOLLOW : 0), 0);
+        fd = capture(&ref,anchor,tail);
     if (fd < 0) return fd;
     long r;
     if (tail) {

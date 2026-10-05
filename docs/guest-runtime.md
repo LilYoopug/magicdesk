@@ -552,8 +552,12 @@ a retained shared kernel receipt, including receiver death before acknowledgemen
 Data IO and open-file-description lifetime remain kernel-owned. Cwd changes and
 relative-path capture use the same short-resource queue mechanism with an
 independent CLONE_FS owner. Native completion publishes cwd provenance; failed
-changes retain it. Initial cwd, inherited/native descriptor provenance and general application SCM_RIGHTS
-tracking remain incomplete; copied guest mount namespaces are not enabled. See the
+changes retain it. Initial namespace cwd uses this same path before guest code
+loads. Current-thread proc cwd/FD aliases retain their origins through native
+O_PATH capture; aliases of another thread's resources remain unknown instead of
+borrowing the caller's metadata. Inherited/native descriptors and general
+application SCM_RIGHTS tracking remain incomplete; copied guest mount namespaces
+are not enabled. See the
 [resource contract](../native/guest-runtime/process-resources.md).
 
 Static PIE and fixed-address ET_EXEC use the same loader. ELF load alignment is

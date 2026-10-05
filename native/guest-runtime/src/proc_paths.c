@@ -35,22 +35,27 @@ static long number(const char **p) {
     return (long)n;
 }
 struct md_proc_path md_proc_path(const char *path) {
-    struct md_proc_path out = {0};
+    struct md_proc_path out = {.descriptor=-1};
     if (*path != '/') return out;
     const char *p = path;
     int foreign = 0;
     if (word(&p, "dev")) {
         if (word(&p, "fd")) {
-            if (number(&p) < 0) return out;
-        } else if (word(&p, "stdin") || word(&p, "stdout") || word(&p, "stderr"))
-            out.ordinary_link = 1;
+            out.descriptor=(int)number(&p);
+            if (out.descriptor < 0) return out;
+        } else if (word(&p, "stdin")) { out.ordinary_link=1; out.descriptor=0; }
+        else if (word(&p, "stdout")) { out.ordinary_link=1; out.descriptor=1; }
+        else if (word(&p, "stderr")) { out.ordinary_link=1; out.descriptor=2; }
         else return out;
+        out.process=(int)RAW0(getpid);
         out.kind = MD_PROC_FD;
     } else if (word(&p, "proc")) {
         if (word(&p,"mounts")) {
             out.kind=MD_PROC_MOUNTS; out.tail=p; out.anchor_length=(size_t)(p-path); return out;
         }
-        if (!word(&p, "self") && !word(&p, "thread-self")) {
+        if (word(&p,"self")) out.process=(int)RAW0(getpid);
+        else if (word(&p,"thread-self")) out.process=(int)RAW0(gettid);
+        else {
             long pid = number(&p);
             if (pid < 0) return out;
             foreign = pid != RAW0(getpid) && pid != RAW0(gettid);
@@ -63,7 +68,8 @@ struct md_proc_path md_proc_path(const char *path) {
             out.process = (int)tid;
         }
         if (word(&p, "fd")) {
-            if (number(&p) < 0) return out;
+            out.descriptor=(int)number(&p);
+            if (out.descriptor < 0) return out;
             out.kind = MD_PROC_FD;
         } else if (word(&p, "cwd")) out.kind = MD_PROC_CWD;
         else if (word(&p, "root")) out.kind = MD_PROC_ROOT;

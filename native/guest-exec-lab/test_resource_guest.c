@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ipc.h>
+#include <sys/prctl.h>
 #include <sys/sem.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -201,6 +202,53 @@ static void concurrent_cwd(unsigned flags) {
     printf("PASS concurrent cwd: shared FS, files=%s, direct/RPC relative opens and failed fchdir\n",
         flags&CLONE_FILES ? "shared" : "independent");
 }
+struct alias_context { int ready[2], go[2], directory[2], target, writer; };
+static int alias_worker(void *argument) {
+    struct alias_context *c=argument;
+    char path[128];
+    snprintf(path,sizeof(path),"/proc/thread-self/fd/%d/item",c->target);
+    put(c->ready[1]); get(c->go[0]);
+    for (unsigned i=0;i<250;++i) {
+        if (c->writer) assert(dup3(c->directory[i%2],c->target,O_CLOEXEC)==c->target);
+        else {
+            int fd=open(path,i%2 ? O_PATH|O_CLOEXEC : O_RDONLY|O_CLOEXEC); assert(fd>=0);
+            struct stat st; assert(!fstat(fd,&st) && S_ISREG(st.st_mode));
+            assert(st.st_size==1 || st.st_size==2);
+            if (!(i%2)) {
+                char bytes[3]; ssize_t n=read(fd,bytes,sizeof(bytes));
+                assert((n==1 && bytes[0]=='a') || (n==2 && !memcmp(bytes,"bb",2)));
+            }
+            assert(!close(fd));
+        }
+    }
+    return 0;
+}
+static void concurrent_aliases(void) {
+    struct alias_context contexts[3]={0};
+    struct alias_context *base=contexts;
+    assert(!pipe(base->ready) && !pipe(base->go));
+    const char *names[]={"alias-a","alias-b"}, *contents[]={"a","bb"};
+    for (unsigned i=0;i<2;++i) {
+        assert(!mkdir(names[i],0700) || errno==EEXIST);
+        base->directory[i]=open(names[i],O_PATH|O_DIRECTORY|O_CLOEXEC); assert(base->directory[i]>=0);
+        int fd=openat(base->directory[i],"item",O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC,0600); assert(fd>=0);
+        assert(write(fd,contents[i],i+1)==(ssize_t)i+1 && !close(fd));
+    }
+    base->target=fcntl(base->directory[0],F_DUPFD_CLOEXEC,0); assert(base->target>=0);
+    pid_t children[3]; void *stacks[3];
+    for (unsigned i=0;i<3;++i) {
+        contexts[i]=*base; contexts[i].writer=i==0;
+        stacks[i]=malloc(1024*1024); assert(stacks[i]);
+        children[i]=clone(alias_worker,(char *)stacks[i]+1024*1024,SIGCHLD|CLONE_FILES,contexts+i);
+        assert(children[i]>0);
+    }
+    for (unsigned i=0;i<3;++i) get(base->ready[0]);
+    for (unsigned i=0;i<3;++i) put(base->go[1]);
+    for (unsigned i=0;i<3;++i) { reap(children[i]); free(stacks[i]); }
+    assert(!close(base->target) && !close(base->directory[0]) && !close(base->directory[1]));
+    close(base->ready[0]); close(base->ready[1]); close(base->go[0]); close(base->go[1]);
+    puts("PASS concurrent proc aliases: shared files, dup3 and retained directory capture");
+}
 static void undo(void) {
     int sem = syscall(SYS_semget, IPC_PRIVATE, 1, 0600); assert(sem >= 0);
     assert(!syscall(SYS_semctl, sem, 0, SETVAL, 1));
@@ -289,6 +337,34 @@ static void probe(void) {
         reap(pid);
     }
 }
+static void origins(const char *cwd, int protected) {
+    char actual[4096]; assert(getcwd(actual,sizeof(actual)) && !strcmp(actual,cwd));
+    int fd=open("origin-file",O_RDWR|O_CREAT|O_TRUNC|O_CLOEXEC,0600); assert(fd>=0);
+    assert(write(fd,"origin",6)==6 && lseek(fd,2,SEEK_SET)==2);
+    if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
+    for (unsigned i=0;i<6;++i) {
+        char path[128];
+        switch (i) {
+        case 0: snprintf(path,sizeof(path),"/proc/self/fd/%d",fd); break;
+        case 1: snprintf(path,sizeof(path),"/proc/thread-self/fd/%d",fd); break;
+        case 2: snprintf(path,sizeof(path),"/proc/%d/fd/%d",getpid(),fd); break;
+        case 3: snprintf(path,sizeof(path),"/proc/%d/task/%ld/fd/%d",getpid(),syscall(SYS_gettid),fd); break;
+        case 4: snprintf(path,sizeof(path),"/dev/fd/%d",fd); break;
+        default: snprintf(path,sizeof(path),"/proc/./self/fd//./%d",fd); break;
+        }
+        int copy=open(path,O_RDONLY|O_CLOEXEC); char bytes[6];
+        assert(copy>=0 && read(copy,bytes,sizeof(bytes))==6 && !memcmp(bytes,"origin",6));
+        assert(lseek(fd,0,SEEK_CUR)==2 && !close(copy));
+        struct stat original, alias;
+        assert(!fstat(fd,&original) && !stat(path,&alias));
+        assert(original.st_dev==alias.st_dev && original.st_ino==alias.st_ino);
+    }
+    int directory=open("/proc/thread-self/cwd",O_PATH|O_DIRECTORY|O_CLOEXEC); assert(directory>=0);
+    assert(!fchdir(directory) && !close(directory));
+    assert(getcwd(actual,sizeof(actual)) && !strcmp(actual,cwd));
+    assert(!close(fd) && !unlink("origin-file"));
+    puts("PASS initial cwd and proc aliases retain native offsets and protected metadata access");
+}
 int main(int argc, char **argv) {
     setbuf(stdout, NULL); alarm(40);
     if (argc == 5 && !strcmp(argv[1], "exec-undo")) {
@@ -303,6 +379,9 @@ int main(int argc, char **argv) {
         put(atoi(argv[2])); get(atoi(argv[3])); return 0;
     }
     assert(argc == 3); executable = argv[0];
+    if (!strcmp(argv[1],"origins") || !strcmp(argv[1],"origins-protected")) {
+        origins(argv[2],!strcmp(argv[1],"origins-protected")); return 0;
+    }
     assert(!chdir(argv[2]));
     if (!strcmp(argv[1], "noop")) return 0;
     if (!strcmp(argv[1], "metadata") || !strcmp(argv[1], "spawn")) { workload(argv[1]); return 0; }
@@ -312,6 +391,7 @@ int main(int argc, char **argv) {
     if (guest) restricted_descriptors();
     concurrent_cwd(0);
     concurrent_cwd(CLONE_FILES);
+    concurrent_aliases();
     case_sharing(0, -1, 0);
     case_sharing(CLONE_FS | CLONE_FILES, -1, 0);
     case_sharing(CLONE_FS | CLONE_FILES, CLONE_FS, 0);

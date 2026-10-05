@@ -116,10 +116,10 @@ struct thread {
     struct md_resource_change resource_change;
     struct md_fd_order fd_order;
     struct md_fs_order fs_order;
-    struct md_fs_anchor *cwd_origin;
+    struct md_fs_anchor *fd_origin;
     struct md_fd_mutation fd_mutation;
     struct user_pt_regs fd_registers;
-    int fd_running, fd_cwd;
+    int fd_running, fd_cwd, fd_capture;
     unsigned fd_job;
     struct md_fd_exchange *fd_exchange;
     unsigned long cloning;
@@ -618,6 +618,13 @@ static void image_request(struct thread *t, const struct seccomp_notif *q) {
                     t->identity = next->value; t->mapped_image = 0; t->entered = 1;
                     TRACE("PROBE entered-image pid=%d uid=%u euid=%u secure=%d\n", t->pid,
                         t->identity.uid.real, t->identity.uid.effective, next->secure);
+                    if (diagnostics) {
+                        struct md_fs_location root;
+                        struct md_fs_anchor *cwd=NULL;
+                        md_domain_paths(t->resources.fs,&root,&cwd);
+                        TRACE("PROBE image-cwd pid=%d known=%d\n",t->pid,cwd!=NULL);
+                        md_fs_anchor_release(cwd);
+                    }
                 } else {
                     CHECK(errno == ENOENT);
                     CHECK(!md_task_registry_publish(tasks, t->pid, t->tgid, &t->identity, &t->resources));
@@ -1121,7 +1128,7 @@ static void domain_path_call(struct thread *t, struct user_pt_regs *r) {
 static void fd_discard(struct thread *t) {
     if (t->fd_running && t->fd_cwd && t->fd_registers.regs[8]!=SYS_openat)
         CHECK(!md_domain_set_cwd(t->fs_order.fs,NULL));
-    md_fs_anchor_release(t->cwd_origin); t->cwd_origin=NULL;
+    md_fs_anchor_release(t->fd_origin); t->fd_origin=NULL;
     if (t->fs_order.fs && md_fs_order_cancel(&t->fs_order)==1)
         CHECK(!md_fs_order_complete(&t->fs_order));
     if (t->fd_running) CHECK(!md_fd_mutation_abandon(&t->fd_mutation,t->fd_order.table));
@@ -1134,7 +1141,7 @@ static void fd_discard(struct thread *t) {
             CHECK(!md_fd_order_complete(&t->fd_order));
         }
     }
-    t->fd_running=0; t->fd_job=0; t->fd_cwd=0;
+    t->fd_running=0; t->fd_job=0; t->fd_cwd=0; t->fd_capture=0;
     md_fd_exchange_close(fd_exchanges,t->fd_exchange); t->fd_exchange=NULL;
 }
 static void fd_finish(struct thread *t, long result) {
@@ -1144,12 +1151,12 @@ static void fd_finish(struct thread *t, long result) {
         CHECK(!md_resources_unshare_finish(ipc,&t->resources,&t->resource_change,result));
     if (exec && !result) md_fd_origins_exec(t->resources.files);
     if (t->fd_cwd && nr!=SYS_openat && !result)
-        CHECK(!md_domain_set_cwd(t->fs_order.fs,md_domain_restricted(t->fs_order.fs) ? NULL : t->cwd_origin));
-    md_fs_anchor_release(t->cwd_origin); t->cwd_origin=NULL;
+        CHECK(!md_domain_set_cwd(t->fs_order.fs,md_domain_restricted(t->fs_order.fs) ? NULL : t->fd_origin));
+    md_fs_anchor_release(t->fd_origin); t->fd_origin=NULL;
     CHECK(!md_fd_mutation_finish(&t->fd_mutation,t->resources.files,result));
     if (t->fs_order.fs) CHECK(!md_fs_order_complete(&t->fs_order));
     CHECK(!md_fd_order_complete(&t->fd_order));
-    t->fd_running=0; t->fd_cwd=0;
+    t->fd_running=0; t->fd_cwd=0; t->fd_capture=0;
 }
 static void fd_start(struct thread *t) {
     if (md_fd_order_state(&t->fd_order)==MD_RESOURCE_ORDER_READY)
@@ -1187,14 +1194,15 @@ static void fd_start(struct thread *t) {
         error=md_resources_unshare_prepare(&t->resources,r->regs[8]==SYS_unshare ? r->regs[0] : CLONE_FILES,
             &t->resource_change);
     if (!error) error=md_fd_mutation_prepare(t->resources.files,r->regs[8],args,&t->fd_mutation);
-    if (!error && t->fd_cwd) {
-        if (r->regs[8]==SYS_fchdir)
-            t->cwd_origin=md_fd_origins_get(t->resources.files,(int)r->regs[0],NULL);
-        else if (r->regs[8]==SYS_openat) {
+    if (!error && t->fd_cwd && r->regs[8]==SYS_fchdir)
+        t->fd_origin=md_fd_origins_get(t->resources.files,(int)r->regs[0],NULL);
+    if (!error && t->fd_capture) {
+        if ((int)r->regs[4]==AT_FDCWD) {
             struct md_fs_location root;
-            md_domain_paths(t->fs_order.fs,&root,&t->cwd_origin);
-            error=md_fd_origins_prepare(t->resources.files,t->cwd_origin,FD_CLOEXEC,&t->fd_mutation.update);
-        }
+            md_domain_paths(t->fs_order.fs,&root,&t->fd_origin);
+        } else t->fd_origin=md_fd_origins_get(t->resources.files,(int)r->regs[4],NULL);
+        error=md_fd_origins_prepare(t->resources.files,t->fd_origin,FD_CLOEXEC,&t->fd_mutation.update);
+        TRACE("PROBE path-capture pid=%d base=%d known=%d\n",t->pid,(int)r->regs[4],t->fd_origin!=NULL);
     }
     if (error) {
         md_resources_unshare_finish(ipc,&t->resources,&t->resource_change,-ECANCELED);
@@ -1203,11 +1211,12 @@ static void fd_start(struct thread *t) {
     if (r->regs[8]==SYS_clone) { t->original=*r; t->phase=OBSERVING; }
     t->fd_running=1; resume(t->pid,0);
 }
-static void fd_begin(struct thread *t, const struct user_pt_regs *r, int cwd) {
+static void fd_begin(struct thread *t, const struct user_pt_regs *r, unsigned operation) {
     if (!t->resources.files) { resume(t->pid,0); return; }
     CHECK(!t->fd_order.table && !t->fd_running);
     t->fd_job=0;
-    t->fd_cwd=cwd;
+    t->fd_capture=operation==MD_INTERCEPT_CAPTURE;
+    t->fd_cwd=operation==MD_INTERCEPT_CWD || (t->fd_capture && (int)r->regs[4]==AT_FDCWD);
     t->fd_registers=*r;
     int ready=md_fd_order_begin(t->resources.files,&t->fd_order,fd_wakeup);
     CHECK(ready>=0);
@@ -1776,12 +1785,15 @@ int main(int argc, char **argv) {
             }
             if (identity_call(t, &regs, cookie)) continue;
             if (domain_call(t, &regs, cookie)) continue;
-            if (cookie==MD_INTERCEPT_FD || cookie==MD_INTERCEPT_CWD) {
-                if (cookie==MD_INTERCEPT_CWD && regs.regs[8]==SYS_openat
-                        && (regs.pc!=abi.cwd_gate || (int)regs.regs[0]!=AT_FDCWD
-                            || regs.regs[1]!=abi.cwd_path || regs.regs[2]!=(O_PATH|O_DIRECTORY|O_CLOEXEC)
-                            || regs.regs[3])) { return_value(t,&regs,-EINVAL); continue; }
-                fd_begin(t,&regs,cookie==MD_INTERCEPT_CWD); continue;
+            if (cookie==MD_INTERCEPT_FD || cookie==MD_INTERCEPT_CWD || cookie==MD_INTERCEPT_CAPTURE) {
+                if (cookie==MD_INTERCEPT_CAPTURE
+                        && (regs.pc!=abi.capture_gate || regs.regs[8]!=SYS_openat
+                            || (int)regs.regs[0]!=AT_FDCWD || regs.regs[3]
+                            || (regs.regs[2]!=(O_PATH|O_CLOEXEC) && regs.regs[2]!=(O_PATH|O_DIRECTORY|O_CLOEXEC))
+                            || ((int)regs.regs[4]<0 && (int)regs.regs[4]!=AT_FDCWD))) {
+                    return_value(t,&regs,-EINVAL); continue;
+                }
+                fd_begin(t,&regs,(unsigned)cookie); continue;
             }
             if (cookie == MD_INTERCEPT_MEMORY) {
                 CHECK(t->phase == IDLE);

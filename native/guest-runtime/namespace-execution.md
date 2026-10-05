@@ -147,6 +147,14 @@ virtual link counts, even after all names have been unlinked. Entry/no-follow
 operations retain the proc symlink's own identity. `/dev/stdin` readlink still
 returns the native link text, rather than pretending it is a proc magic link.
 
+Current-thread cwd/FD captures retain their mount origin under the corresponding
+resource queue through native open and descriptor publication. Captures retain
+their original spelling for kernel lookup, including rejection of invalid
+numeric components or nonexistent task subdirectories. Aliases of the group
+leader from another thread keep native lookup without claiming the
+caller's provenance: CLONE_FS and CLONE_FILES may have been independently split.
+The shared [resource contract](process-resources.md) defines that distinction.
+
 A directory suffix such as `/proc/self/fd/N/child` captures the directory first
 and uses the common namespace path dispatcher. Directory enumeration, symlinks,
 creation and metadata therefore share normal virtual-directory semantics. For

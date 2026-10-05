@@ -76,11 +76,16 @@ table mutations. RPC control uses an immutable bootstrap BRK entry point,
 not a new syscall subject to an application's seccomp syscall allowlist.
 Only a ready supervised task uses it. FD payload delivery has a retained kernel
 recvmsg receipt, so receiver death does not require a guest acknowledgement.
-Native adapter chdir/fchdir and a dedicated bootstrap `openat(".")` entry point
-also have completion observation. They order kernel cwd changes and captured
-descriptor origins through the independently shared CLONE_FS context, acquiring
-the file-table turn first when both are needed. Cwd capture validates the exact
-bootstrap path pointer and flags; it is not an arbitrary filesystem bypass.
+Native adapter chdir/fchdir and a dedicated bootstrap O_PATH capture entry point
+also have completion observation. The gate captures `.` or a current-thread proc
+FD alias. Cwd capture orders both independently shared CLONE_FS and CLONE_FILES
+owners, acquiring the file-table turn first; descriptor capture needs only that
+table. The gate validates its entry address, syscall, flags and origin selector.
+The adapter supplies `.` or the original parsed proc alias without rewriting
+it into a canonical spelling; the kernel still validates the actual path. Like
+internal RPC receipts, this is trusted adapter coordination, not isolation from
+a malicious guest modifying its own memory. Kernel permissions and application
+seccomp filters remain in force.
 See [publication ordering](process-resources.md#publication-ordering) for lifetime
 rules and the remaining inherited/native/general-SCM_RIGHTS boundaries.
 Directory reads validate and enumerate through one namespace operation without a

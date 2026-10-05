@@ -9,6 +9,9 @@ static inline long md_fd_control(unsigned op, uint64_t id, long first, long seco
 #else
 long md_fd_control(unsigned op, uint64_t id, long first, long second);
 void md_fd_client_enable(void);
-long md_fd_capture_cwd(void);
 #endif
+long md_fd_capture_cwd(void);
+/* Trusted adapter capture of cwd (AT_FDCWD) or a current-thread proc FD alias.
+ * Preserve the actual kernel path; retain no readable/writable description. */
+long md_fd_capture_path(const char *path, int source, int directory);
 #endif

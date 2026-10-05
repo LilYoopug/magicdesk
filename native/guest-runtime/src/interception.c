@@ -55,8 +55,7 @@ extern char md_guest_copy_begin[], md_guest_copy_end[];
 extern char md_guest_watch_gate[], md_guest_watch_return[];
 extern char md_guest_ipc_wait[], md_guest_ipc_wait_result[];
 extern long md_guest_fd_control(unsigned, uint64_t, long, long);
-extern char md_guest_cwd_return[];
-extern const char md_guest_cwd_path[];
+extern char md_guest_anchor_return[];
 static long dispatch_files(const struct md_fs *fs, long nr, unsigned long a0, unsigned long a1, unsigned long a2,
         unsigned long a3, unsigned long a4, unsigned long a5) {
     unsigned long args[] = {a0, a1, a2, a3, a4, a5};
@@ -120,8 +119,7 @@ long md_guest_dispatch(long nr, unsigned long a0, unsigned long a1, unsigned lon
 }
 static const struct md_interception_abi abi = {
     .fd_control=(uintptr_t)md_guest_fd_control,
-    .cwd_gate=(uintptr_t)md_guest_cwd_return,
-    .cwd_path=(uintptr_t)md_guest_cwd_path,
+    .capture_gate=(uintptr_t)md_guest_anchor_return,
     .ipc_wait = (uintptr_t)md_guest_ipc_wait,
     .ipc_wait_result = (uintptr_t)md_guest_ipc_wait_result,
     .magic = MD_INTERCEPTION_MAGIC, .size = sizeof(struct md_interception_abi),
@@ -156,7 +154,7 @@ int md_interception_install(int inherited) {
     if (!inherited) {
         uintptr_t gate = (uintptr_t)md_raw_return;
         uintptr_t watch = (uintptr_t)md_guest_watch_return;
-        uintptr_t cwd = (uintptr_t)md_guest_cwd_return;
+        uintptr_t capture = (uintptr_t)md_guest_anchor_return;
 #define COUNT(name) + 1
         enum { transport_instructions = 2 * (1 MD_GATE_TRANSPORT_CALLS(COUNT)) };
 #undef COUNT
@@ -180,12 +178,12 @@ int md_interception_install(int inherited) {
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)watch, 0, 1),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, instruction_pointer) + 4),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)(cwd >> 32), 0, 5),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)(capture >> 32), 0, 5),
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, instruction_pointer)),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)cwd, 0, 3),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)capture, 0, 3),
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_openat, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRACE | MD_INTERCEPT_CWD),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRACE | MD_INTERCEPT_CAPTURE),
             /* Descriptor metadata must remain serviceable after an application
              * installs a higher-precedence filter or becomes nondumpable. */
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),

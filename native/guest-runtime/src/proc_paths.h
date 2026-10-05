@@ -11,6 +11,7 @@ struct md_proc_path {
     const char *tail;
     int ordinary_link;
     int process;
+    int descriptor;
     enum md_proc_kind foreign_kind;
 };
 int md_host_path(const char *);

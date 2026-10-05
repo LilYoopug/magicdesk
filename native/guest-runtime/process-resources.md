@@ -168,8 +168,21 @@ under the filesystem-context turn. Task-affine requests use a dedicated bootstra
 openat gate for `.`; it captures the kernel directory and publishes its origin
 to the temporary descriptor in that same turn. Later RPC input capture therefore
 uses a retained descriptor, not a fresh cwd lookup. Application filters remain
-in force. Initial cwd and unannotated native descriptors remain unknown until a
-successful change through an annotated directory.
+in force. Initial namespace cwd is selected through these same publication and
+native-fchdir completion paths after interception is ready and before guest code
+loads. Exec retains the existing cwd. Direct-rootfs bootstrap cwd and
+unannotated native descriptors have unknown provenance.
+
+Proc aliases of the current thread's descriptor table use the same bootstrap
+O_PATH capture gate. The file-table turn covers source-origin selection,
+native proc open and result publication; concurrent dup/close cannot substitute
+the source between those steps. The temporary descriptor then supplies the
+ordinary filesystem transport, including metadata, readlink, reopen and directory
+suffix traversal. No readable/writable description is retained. `/proc/self`
+selects the group leader, while `/proc/thread-self` selects the calling thread.
+An alias of a different thread's resources retains native lookup with unknown
+provenance; it never borrows the caller's annotations, even when the owners
+happen to be shared.
 
 Filesystem opens from the direct broker and task-affine service publish their
 origins automatically. Native dup/dup3, F_DUPFD/F_DUPFD_CLOEXEC, F_SETFD, close
@@ -367,6 +380,12 @@ Concurrent cwd cases alternate successful and failed fchdir while peers perform
 relative ordinary/O_PATH opens and getcwd. Both shared and independent descriptor
 tables use the same shared filesystem context; guest opens exercise direct and
 task-affine transports.
+Initial-cwd and proc-alias cases also run nondumpable, checking known origin at
+image entry/capture, independent reopened offsets and virtual metadata. A shared
+file-table case races dup3 replacement against ordinary/O_PATH proc directory
+suffix opens. The native/guest kernel-contract `proc-owners` case independently
+unshares filesystem and descriptor state in a pthread, checking leader versus
+current-thread aliases and invalid proc path errors against the kernel.
 
 `fd_handoff` exercises native kernel publication under the selected executor,
 not Shroot emulation. A real CLONE_FILES peer replaces a slot with another open
