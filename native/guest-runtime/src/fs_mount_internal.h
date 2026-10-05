@@ -34,18 +34,30 @@ struct md_mount_namespace {
 };
 struct md_view_location {
     int parent, fd, boundary;
+    struct md_mount_namespace *view;
     struct md_view_mount *mount;
     char name[NAME_MAX+1];
+};
+struct md_fs_anchor {
+    atomic_uint refs;
+    struct md_inode_store *store;
+    struct md_mount_namespace *view;
+    struct md_view_mount *mount;
+    int fd;
+    dev_t device;
+    ino_t inode;
 };
 int md_view_same(const struct stat *, const struct stat *);
 int md_view_record(struct md_filesystem *, int fd, struct md_view_mount *, struct md_view_object **);
 int md_view_identity(struct md_filesystem *, int fd, struct md_view_object **);
 int md_view_path(struct md_filesystem *, int fd, struct md_view_mount *, char *, size_t);
 struct md_view_object *md_view_object(struct md_filesystem *, const char *id);
-int md_view_open_component(struct md_filesystem *, struct md_view_mount *, int fd, const char *name);
-int md_view_walk(struct md_filesystem *, int base, const char *path, int follow, int missing,
+int md_view_walk(struct md_filesystem *, int base, const struct md_fs_anchor *, const char *path, int follow, int missing,
         uint64_t resolve, struct md_view_location *);
 void md_view_location_close(struct md_view_location *);
 int md_view_fdpath(int fd, char *, size_t);
 int md_mount_id_allocate(unsigned *);
+int md_view_anchor_check(struct md_filesystem *, int fd, const struct md_fs_anchor *);
+void md_view_capture(struct md_filesystem *, struct md_mount_namespace *, struct md_view_mount *,
+        struct md_fs_result *, const struct md_fs_output *);
 #endif

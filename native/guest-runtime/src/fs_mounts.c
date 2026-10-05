@@ -175,7 +175,7 @@ int md_fs_mounts_open(struct md_filesystem *fs, const struct md_fs_attachment *e
         m->source = open(entry->source, O_PATH | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (m->source < 0) { r = -errno; break; }
         struct md_view_location target_location;
-        r = md_view_walk(fs, MD_INODE_ROOT, entry->target, 1, 0, 0, &target_location);
+        r = md_view_walk(fs, MD_INODE_ROOT, NULL, entry->target, 1, 0, 0, &target_location);
         if (r) break;
         m->target = target_location.fd; target_location.fd = -1;
         m->parent = target_location.mount;

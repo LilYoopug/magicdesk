@@ -16,7 +16,7 @@ target_compile_options(guest-sqlite PRIVATE -O2 -fno-pie)
 set(src ${CMAKE_CURRENT_SOURCE_DIR}/src)
 set(raw ${src}/raw.c ${src}/memory.c ${src}/raw.S)
 set(wire ${src}/fs_wire.c ${src}/event_wait.c)
-set(mounts ${src}/fs_mounts.c ${src}/fs_mount_path.c ${src}/fs_mount_operations.c ${src}/fs_mount_table.c)
+set(mounts ${src}/fs_mounts.c ${src}/fs_mount_path.c ${src}/fs_mount_operations.c ${src}/fs_mount_table.c ${src}/fs_anchor.c)
 set(inodes ${src}/inode_store.c ${src}/inode_db.c ${src}/inode_events.c ${src}/inode_watch.c ${src}/watch_queue.c ${src}/inode_path.c
     ${src}/inode_directory.c ${src}/inode_import.c ${src}/inode_socket.c ${src}/inode_backing.c ${src}/inode_snapshot.c ${src}/inode_fifo.c ${src}/file_open.c
     ${src}/guest_identity.c ${src}/task_registry.c ${src}/guest_domain.c ${src}/mount_namespace.c ${src}/inode_metadata.c ${src}/inode_capability.c ${src}/inode_acl.c ${src}/posix_acl.c)
@@ -108,7 +108,7 @@ if(MAGICDESK_GUEST_FIXTURES)
     target_sources(test_rpc PRIVATE ${src}/fs_client.c ${src}/fs_service.c ${namespace_engine} ${mounts}
         ${src}/image_catalogue.c ${src}/elf_admission.c ${src}/guest_identity.c ${src}/elf.c ${wire} ${raw})
     target_compile_definitions(test_rpc PRIVATE MD_FS_TESTING MD_NO_START MD_USE_LIBC)
-    target_sources(test_mounts PRIVATE ../guest-exec-lab/test_mount_copy.c ${namespace_engine} ${mounts} ${src}/image_catalogue.c
+    target_sources(test_mounts PRIVATE ../guest-exec-lab/test_mount_copy.c ../guest-exec-lab/test_fs_anchor.c ${namespace_engine} ${mounts} ${src}/image_catalogue.c
         ${src}/elf_admission.c ${src}/guest_identity.c ${src}/elf.c ${src}/fs_client.c ${wire} ${raw})
     target_compile_definitions(test_mounts PRIVATE MD_NO_START MD_USE_LIBC)
     guest_executable(watch_guest ../guest-exec-lab/test_watch_guest.c)

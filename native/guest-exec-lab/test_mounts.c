@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 void test_mount_copy(const char *base);
+void test_fs_anchor(const char *base);
 
 static struct md_fs_result call(struct md_filesystem *fs, unsigned op, int fd, const char *path,
         unsigned flags, unsigned mode, void *data, size_t size) {
@@ -365,5 +366,6 @@ int main(int argc, char **argv) {
     nested_mounts(argv[1]);
     task_mount_views(argv[1]);
     test_mount_copy(argv[1]);
+    test_fs_anchor(argv[1]);
     return 0;
 }

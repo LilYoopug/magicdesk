@@ -2,7 +2,7 @@
 #include "fs_engine.h"
 #include "image_catalogue.h"
 #include "inode_watch.h"
-#include "fs_mounts.h"
+#include "fs_mount_internal.h"
 #include "task_registry.h"
 #include "ipc_credentials.h"
 #include "inode_internal.h"
@@ -15,6 +15,8 @@
 static void change_root(struct md_filesystem *fs, const struct md_fs_request *q, struct md_fs_result *out) {
     *out = (struct md_fs_result){.fd = -1};
     if (!fs->tasks) { out->error = -ENOTSUP; return; }
+    if (q->origin[0] && q->origin[0]->view!=fs->mounts && q->directory[0]!=MD_INODE_ROOT
+            && (!q->path[0] || q->path[0][0]!='/')) { out->error=-ENOTSUP; return; }
     if (!md_identity_may_chroot(fs->store->identity)) { out->error = -EPERM; return; }
     struct md_fs_request open = *q;
     open.operation = MD_FS_OPEN; open.flags = O_PATH | O_DIRECTORY | O_CLOEXEC;
@@ -38,6 +40,13 @@ void md_fs_stat_info(const struct stat *s, struct md_fs_info *out) {
 }
 void md_fs_execute(struct md_filesystem *fs,
         const struct md_fs_request *q, struct md_fs_result *out, const struct md_fs_output *output) {
+    if (output && output->origin) {
+        *output->origin=NULL;
+        if (q->operation!=MD_FS_OPEN && q->operation!=MD_FS_CREATE && q->operation!=MD_FS_REOPEN
+                && q->operation!=MD_FS_OPEN_OBJECT && q->operation!=MD_FS_OPEN_IMAGE) {
+            *out=(struct md_fs_result){.fd=-1,.error=-EINVAL}; return;
+        }
+    }
     struct md_task_snapshot task = {0};
     if (fs->tasks) {
         int error = md_task_registry_read(fs->tasks, q->actor, q->peer, &task);
@@ -81,7 +90,7 @@ void md_fs_execute(struct md_filesystem *fs,
     fs->store->creation_mask=q->attributes.creation_mask;
     if (root_error) *out=(struct md_fs_result){.fd=-1,.error=root_error};
     else if (q->operation == MD_FS_CHROOT) change_root(fs, q, out);
-    else if (md_mount_namespace_attached(fs->mounts)) md_fs_mounts_execute(fs, q, out, output);
+    else if (md_mount_namespace_attached(fs->mounts) || q->origin[0] || q->origin[1]) md_fs_mounts_execute(fs, q, out, output);
     else md_fs_inode_execute(fs, q, out, output);
     fs->store->boundary=previous_boundary;
     if (out->error==-EREMOTE) {
@@ -214,5 +223,8 @@ void md_fs_inode_execute(struct md_filesystem *fs,
     return;
 opened:
     if (r < 0) out->error = r;
-    else out->fd = r;
+    else {
+        out->fd = r;
+        md_view_capture(fs,fs->mounts,NULL,out,output);
+    }
 }

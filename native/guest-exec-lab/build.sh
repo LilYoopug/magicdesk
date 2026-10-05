@@ -64,7 +64,7 @@ printf 'PASS freestanding RPC client: no unresolved libc/SQLite/runtime dependen
 inode_compile "$cc" -iquote "$runtime" -std=c17 -O2 -g -Wall -Wextra -Werror -fno-builtin -DMD_NO_START \
     -DMD_INODE_TESTING -DMD_FS_TESTING "$src/test_rpc.c" "$runtime/fs_client.c" \
     "$runtime/image_catalogue.c" "$runtime/elf_admission.c" "$runtime/elf.c" \
-    "$runtime/fs_mounts.c" "$runtime/fs_mount_path.c" "$runtime/fs_mount_operations.c" "$runtime/fs_mount_table.c" \
+    "$runtime/fs_mounts.c" "$runtime/fs_mount_path.c" "$runtime/fs_mount_operations.c" "$runtime/fs_mount_table.c" "$runtime/fs_anchor.c" \
     "$runtime/fs_wire.c" "$runtime/event_wait.c" "$runtime/fs_service.c" "$runtime/fs_engine.c" "$runtime/ipc_credentials.c" \
     "$runtime/raw.c" "$runtime/memory.c" "$runtime/raw.S" -lsqlite3 -o "$work/test-rpc"
 rpcroot=$(mktemp -d "$work/path-test/rpc.XXXXXX")
@@ -162,7 +162,7 @@ inode_compile guest_cc -pie -fno-builtin -DMD_NO_START -DMD_INODE_TESTING -DMD_F
     "$sysroot/usr/lib/aarch64-linux-gnu/Scrt1.o" "$sysroot/usr/lib/aarch64-linux-gnu/crti.o" \
     "$src/test_rpc.c" "$runtime/fs_client.c" "$runtime/fs_wire.c" "$runtime/event_wait.c" "$runtime/fs_service.c" "$runtime/fs_engine.c" "$runtime/ipc_credentials.c" \
     "$runtime/image_catalogue.c" "$runtime/elf_admission.c" "$runtime/elf.c" \
-    "$runtime/fs_mounts.c" "$runtime/fs_mount_path.c" "$runtime/fs_mount_operations.c" "$runtime/fs_mount_table.c" \
+    "$runtime/fs_mounts.c" "$runtime/fs_mount_path.c" "$runtime/fs_mount_operations.c" "$runtime/fs_mount_table.c" "$runtime/fs_anchor.c" \
     "$runtime/raw.c" "$runtime/memory.c" "$runtime/raw.S" \
     "$sysroot/usr/lib/aarch64-linux-gnu/crtn.o" -Wl,--dynamic-linker=/lib/ld-linux-aarch64.so.1 \
     -L"$sysroot/usr/lib/aarch64-linux-gnu" -l:libsqlite3.so.0 -l:libm.so.6 \

@@ -57,12 +57,47 @@ so copy cost depends on mount count, not the number of previously opened files.
 Only O_PATH references are retained; FIFO reader/writer counts and flock/OFD-lock
 lifetime remain with application descriptions.
 
-Candidate construction is not guest CLONE_NEWNS. Existing descriptors and cwd
-need their own origin contract before a candidate can replace a task's view.
-An old descriptor must not be reassigned by looking up its inode or current path
-in the new tree. Exact description comparison does not solve lifetime ownership:
-retaining a readable/writable comparison FD would keep FIFO peers and file locks
-alive. Guest namespace creation still fails explicitly.
+Candidate construction is not guest CLONE_NEWNS. Publishing a replacement view
+requires task descriptor/cwd provenance through every kernel lifetime transition.
+Guest namespace creation still fails explicitly.
+
+## Path Origins
+
+The filesystem engine accepts optional `md_fs_anchor` origins for its captured
+base descriptors. Each anchor retains the exact mount view, mount and an O_PATH
+reference. It borrows the worker's backing store, which must outlive the anchor.
+Successful open/reopen operations can return an owned anchor when explicitly
+requested. Other calls allocate no anchor; RPC clients cannot serialize pointers
+or claim a view. The transport must obtain provenance from trusted task resources.
+
+Relative paths, relative symlinks and `..` follow the origin's tree and policy,
+even when the task selects a copied tree. Absolute paths and absolute symlinks
+start at the task's current root. `RESOLVE_IN_ROOT` instead keeps the captured
+base as the resolution root. `RESOLVE_NO_XDEV` checks mount/view changes,
+including an absolute symlink resetting traversal. Link and rename cannot join
+different mount instances. stat metadata and reopen retain the origin's mount ID
+and readonly policy rather than inferring them from the current view.
+
+Anchors neither retain readable/writable descriptions nor replace the input FD
+for data operations. Directory offsets, FIFO peers and flock/OFD-lock release
+remain kernel-owned. Anchor-capture failure closes the result FD and any pending
+FIFO rendezvous descriptor. It does not undo earlier filesystem mutations or
+authorize a retry.
+
+The caller must associate each anchor with the correct captured descriptor.
+Device/inode validation rejects a mismatched object; it cannot distinguish two
+opens of the same inode through different mounts. Kernel FD-number reuse, dup,
+fork/CLONE_FILES, exec/close-on-exec, descriptor transfer and shared cwd therefore
+need a lifecycle contract before syscall adapters can publish copied namespaces.
+An O_PATH pin alone is not an open-file-description identity. There is no mirror
+of ordinary data descriptions or new interception of close/read/write.
+
+Cross-view relative IO works, but path/image-path publication for an origin in
+another tree returns ENOENT instead of inventing a current-root path. Changing
+the task root through such an origin is unsupported. Native object-ID requests
+still reject conflicting aliases of one backing inode within a view; the object
+cache is not a replacement for explicit origin tracking. These limits remain
+separate from the working engine traversal contract.
 
 ## Guest Roots
 
@@ -157,6 +192,12 @@ independent readonly policy, moved covered directories and source-view teardown.
 RLIMIT_NOFILE exhaustion at every descriptor-acquisition step checks rollback
 without leaks or changed outputs. A populated source cache does not grow copy
 cost; pipe EOF and flock/OFD-lock release remain observable with both views alive.
+`test_fs_anchor` checks old origins against copied trees with different policy,
+absolute/relative links, nested parent traversal, openat2 constraints, cross-view
+link/rename rejection and root restoration. It also checks inode/native mount IDs,
+reopen, FD-number reuse with another inode, rename, source-view teardown, completed
+FIFO identity/EOF, flock/OFD-lock release and EMFILE capture cleanup. These are
+engine checks, not guest namespace-creation tests.
 `test_root_userspace.py` exercises stock Debian/Alpine chroot with each
 distribution's dynamic loader, shell and nested exec in disposable inode-backed
 and attached-native directories.

@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include "file_capability.h"
 #include "file_open.h"
+#include "fs_anchor.h"
 
 enum md_fs_operation {
     MD_FS_CREATE = 1, MD_FS_OPEN, MD_FS_MKDIR, MD_FS_SYMLINK, MD_FS_READLINK,
@@ -31,6 +32,9 @@ struct md_fs_request {
     int actor, peer;
     uint32_t operation, flags, mode;
     int directory[2];
+    /* Optional trusted provenance for the already captured base descriptors.
+     * RPC peers cannot supply pointers or claim another task's mount view. */
+    const struct md_fs_anchor *origin[2];
     const char *path[2];
     uint32_t capacity;
     uint64_t resolve;
@@ -60,5 +64,8 @@ struct md_fs_output {
     size_t capacity;
     int (*deliver)(void *, const void *, size_t);
     void *context;
+    /* Optional owned path anchor from a successful file open/reopen. No origin
+     * allocation occurs when omitted; caller releases a returned anchor. */
+    struct md_fs_anchor **origin;
 };
 #endif
