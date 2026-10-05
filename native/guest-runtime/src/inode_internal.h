@@ -18,6 +18,7 @@ struct md_inode_store {
     sqlite3 *db;
     int objects, root, watch_presence, locked, recording, readonly, reflink_unavailable;
     const struct md_identity *identity;
+    const char *root_id;
     unsigned creation_mask;
     struct md_inode_boundary *boundary;
     char *stat_path;
@@ -32,6 +33,9 @@ struct md_inode_store {
     void *context;
 #endif
 };
+static inline const char *mdi_root(const struct md_inode_store *s) {
+    return s->root_id ? s->root_id : MDI_ROOT;
+}
 struct mdi_node {
     char id[33], parent[33], backing[33];
     mode_t kind;

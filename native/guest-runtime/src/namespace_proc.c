@@ -49,12 +49,13 @@ long md_namespace_native_descriptor(int base) {
     long r=descriptor_path(base,host);
     return r<0 ? r : md_host_path(host);
 }
-long md_namespace_relative_mount(int base, char *path) {
+long md_namespace_relative_mount(const struct md_fs *fs, int base, char *path) {
     if (!*path || *path == '/') return 0;
     char host[PATH_MAX];
     long n=descriptor_path(base,host);
     if (n<0) return n;
     if (!md_host_path(host)) return 0;
+    if (fs->scoped_root) return -ENOTSUP;
     struct stat info;
     n = base == AT_FDCWD ? RAW4(newfstatat, base, ".", &info, 0) : RAW2(fstat, base, &info);
     if (n < 0) return n;

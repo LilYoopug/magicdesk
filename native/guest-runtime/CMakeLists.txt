@@ -19,7 +19,7 @@ set(wire ${src}/fs_wire.c ${src}/event_wait.c)
 set(mounts ${src}/fs_mounts.c ${src}/fs_mount_path.c ${src}/fs_mount_operations.c ${src}/fs_mount_table.c)
 set(inodes ${src}/inode_store.c ${src}/inode_db.c ${src}/inode_events.c ${src}/inode_watch.c ${src}/watch_queue.c ${src}/inode_path.c
     ${src}/inode_directory.c ${src}/inode_import.c ${src}/inode_socket.c ${src}/inode_backing.c ${src}/inode_snapshot.c ${src}/inode_fifo.c ${src}/file_open.c
-    ${src}/guest_identity.c ${src}/credential_registry.c ${src}/inode_metadata.c ${src}/inode_capability.c ${src}/inode_acl.c ${src}/posix_acl.c)
+    ${src}/guest_identity.c ${src}/task_registry.c ${src}/guest_domain.c ${src}/inode_metadata.c ${src}/inode_capability.c ${src}/inode_acl.c ${src}/posix_acl.c)
 set(namespace_engine ${src}/fs_engine.c ${src}/ipc_credentials.c)
 set(ipc ${src}/sysv_ipc.c ${src}/sysv_ipc_db.c ${src}/sysv_sem.c ${src}/sysv_msg.c ${src}/sysv_ipc_transport.c)
 
@@ -86,6 +86,8 @@ if(MAGICDESK_GUEST_FIXTURES)
     target_link_libraries(test_task_resources PRIVATE guest-sqlite m)
     guest_executable(resource_guest ../guest-exec-lab/test_resource_guest.c)
     target_compile_options(resource_guest PRIVATE -UNDEBUG)
+    guest_executable(root_guest ../guest-exec-lab/test_root_guest.c)
+    target_compile_options(root_guest PRIVATE -UNDEBUG)
     guest_executable(kernel_contract ../guest-exec-lab/test_kernel_contract.c)
     target_compile_options(kernel_contract PRIVATE -UNDEBUG)
     guest_executable(test_elf ../guest-exec-lab/test_elf.c ${src}/elf.c ${raw})

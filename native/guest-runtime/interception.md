@@ -159,11 +159,14 @@ thread-local; libc may broadcast them. `getgroups/setgroups` use checked copies,
 with task-affine bounded batches for nondumpable/protected memory. An incomplete
 input does not commit a new group list. Initial no_new_privs is inherited from
 the executor and can only increase. Filesystem requests use the same identities
-through `credential_registry`; this is guest DAC, not seccomp-domain confinement.
+through `task_registry`, together with their filesystem-root snapshot; this is
+guest DAC and path selection, not seccomp-domain confinement.
 
 The proc-root model handles the restricted self/fd or fdinfo roots used by the
-tested helper, with CLONE_FS ownership and irreversible narrowing. It is not a
-general chroot or mount namespace. Namespace creation is not fabricated.
+tested helper, with CLONE_FS ownership and irreversible narrowing. Ordinary
+inode-backed guest chroot uses the same resource owner and the filesystem engine;
+its limits are in [process resources](process-resources.md#guest-roots).
+Neither mechanism creates a mount namespace. Namespace creation is not fabricated.
 
 Stock Debian Chromium passes three fresh-profile headless JavaScript/DOM runs
 and PNG production with its normal helper and no sandbox-disabling flags. Tests

@@ -9,8 +9,8 @@ extern struct md_fs md_files;
 extern char md_bootstrap[PATH_MAX];
 extern char md_executable[PATH_MAX];
 extern char md_hostname[MD_HOSTNAME_SIZE];
-long md_guest_exec(const char *, char *const [], char *const []);
-long md_guest_execat(int, const char *, char *const [], char *const [], int);
+long md_guest_exec(const struct md_fs *, const char *, char *const [], char *const []);
+long md_guest_execat(const struct md_fs *, int, const char *, char *const [], char *const [], int);
 // Storage remains live until the loader takes ownership of argv strings.
 struct md_command {
     char path[PATH_MAX];

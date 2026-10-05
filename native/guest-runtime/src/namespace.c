@@ -95,7 +95,7 @@ long md_namespace_mutable(const struct md_fs *fs, int fd) {
     return r == -EXDEV ? RAW3(fcntl, fd, F_DUPFD_CLOEXEC, 3) : r;
 }
 long md_namespace_open(const struct md_fs *fs, int base, const char *path, int flags, unsigned mode) {
-    if (md_host_path(path))
+    if (md_fs_host_path(fs, path))
         return RAW4(openat, base, path, flags, mode);
     /* Legacy open ignores file-type bits; openat2 validates its mode separately. */
     struct open_how how = {.flags = (unsigned)flags,
@@ -392,6 +392,7 @@ long md_namespace_call(const struct md_fs *fs, const char *exe, long nr, const u
         base = AT_FDCWD;
         break;
     case SYS_chdir:
+    case SYS_chroot:
     case SYS_truncate:
     case SYS_statfs:
     case SYS_setxattr:
@@ -415,11 +416,11 @@ long md_namespace_call(const struct md_fs *fs, const char *exe, long nr, const u
     long r = md_read_string(first, sizeof(first), (const char *)pointer);
     if (r < 0)
         return r;
-    r = md_namespace_relative_mount(base, first);
+    r = md_namespace_relative_mount(fs, base, first);
     if (r < 0)
         return r;
     /* Direct and symlink-resolved host boundaries use the same task adapter. */
-    if (md_host_path(first) && nr != SYS_inotify_add_watch)
+    if (md_fs_host_path(fs, first) && nr != SYS_inotify_add_watch && nr != SYS_chroot)
         return md_namespace_host_call(fs, exe, nr, a, path_index, first);
     return md_namespace_path_call(fs, nr, a, base, first);
 }
@@ -427,6 +428,11 @@ static long path_metadata(const struct md_fs *, long, const unsigned long *, int
 long md_namespace_path_call(const struct md_fs *fs, long nr, const unsigned long *a,
                             int base, const char *first) {
     switch (nr) {
+    case SYS_chroot: {
+        struct md_fs_request q = {.operation=MD_FS_CHROOT, .directory={base,-1}, .path={first,NULL}};
+        struct md_fs_response out;
+        return md_namespace_request(fs, &q, &out);
+    }
     case SYS_openat:
         return md_namespace_open(fs, base, first, (int)a[2], (unsigned)a[3]);
     case SYS_mknodat: {
@@ -576,10 +582,10 @@ __attribute__((noinline)) static long path_metadata(const struct md_fs *fs, long
         r = md_read_string(second, sizeof(second), (const char *)a[3]);
         if (r < 0)
             return r;
-        r = md_namespace_relative_mount((int)a[2], second);
+        r = md_namespace_relative_mount(fs, (int)a[2], second);
         if (r < 0)
             return r;
-        if (md_host_path(second))
+        if (md_fs_host_path(fs, second))
             return -EXDEV;
         q.operation = nr == SYS_linkat ? MD_FS_LINK : MD_FS_RENAME;
         q.directory[1] = (int)a[2];

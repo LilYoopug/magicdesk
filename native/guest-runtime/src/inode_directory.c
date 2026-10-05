@@ -46,7 +46,7 @@ ssize_t md_inode_getdents_deliver(struct md_inode_store *s, int fd, void *out, s
     size_t used = 0;
     while (!r && offset < 2) {
         struct mdi_node entry = node;
-        if (offset == 1) r = mdi_node(s, node.parent, &entry);
+        if (offset == 1) r = mdi_node(s, !strcmp(node.id, mdi_root(s)) ? node.id : node.parent, &entry);
         if (r) break;
         size_t n = record((char *)out + used, capacity-used, offset ? ".." : ".",
             offset ? 2 : 1, entry.logical_inode, offset+1, DT_DIR);

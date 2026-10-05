@@ -16,7 +16,7 @@
 #include "sysv_ipc.h"
 #include <linux/memfd.h>
 #include <sys/mman.h>
-#include "credential_registry.h"
+#include "task_registry.h"
 #include "guest_user.h"
 #include "guest_accounts.h"
 #include "process_owner.h"
@@ -153,7 +153,7 @@ static struct md_shm *shm;
 static struct md_ipc *ipc;
 static const char *shm_store;
 static struct md_namespace_broker *broker;
-static struct md_credentials *credentials;
+static struct md_task_registry *tasks;
 static struct md_identity launch_identity;
 static int virtual_identity;
 static struct md_admission admission = {.source = -1};
@@ -236,7 +236,7 @@ static void cleanup(void) {
     filesystem = NULL;
     md_launch_unregister(&registration);
     md_broker_destroy(broker); broker = NULL;
-    md_credentials_destroy(credentials); credentials = NULL;
+    md_task_registry_destroy(tasks); tasks = NULL;
     md_identity_release(&launch_identity);
     if (listener >= 0) close(listener);
     free(statistics);
@@ -279,7 +279,7 @@ static struct thread *thread(pid_t pid) {
     live++; total++; return t;
 }
 static void release_thread(struct thread *t) {
-    md_credentials_forget(credentials, t->pid);
+    md_task_registry_forget(tasks, t->pid);
     md_identity_release(&t->identity);
     CHECK(!md_shm_abort(shm,&t->shm_pending));
     CHECK(!md_shm_space_release(shm,t->shm_space)); t->shm_space = NULL;
@@ -591,14 +591,14 @@ static void image_request(struct thread *t, const struct seccomp_notif *q) {
                 reply.error = -EFAULT;
             if (!reply.error) {
                 reply.val = next->secure;
-                CHECK(!md_credentials_publish(credentials, t->pid, t->tgid, &next->value));
+                CHECK(!md_task_registry_publish(tasks, t->pid, t->tgid, &next->value, t->resources.fs));
                 if (!ioctl(listener, SECCOMP_IOCTL_NOTIF_SEND, &reply)) {
                     t->identity = next->value; t->mapped_image = 0; t->entered = 1;
                     TRACE("PROBE entered-image pid=%d uid=%u euid=%u secure=%d\n", t->pid,
                         t->identity.uid.real, t->identity.uid.effective, next->secure);
                 } else {
                     CHECK(errno == ENOENT);
-                    CHECK(!md_credentials_publish(credentials, t->pid, t->tgid, &t->identity));
+                    CHECK(!md_task_registry_publish(tasks, t->pid, t->tgid, &t->identity, t->resources.fs));
                 }
                 return;
             }
@@ -904,7 +904,7 @@ static void identity_copy_finish(struct thread *t, int error) {
         struct md_identity ids = md_identity_copy(&t->identity);
         if (pid && pid != t->pid) {
             md_identity_release(&ids);
-            error = r.regs[8] == SYS_capset ? -EPERM : md_credentials_read(credentials, pid, 0, &ids);
+            error = r.regs[8] == SYS_capset ? -EPERM : md_task_registry_read(tasks, pid, 0, &ids, NULL);
             if (error) ids = (struct md_identity){0};
         }
         if (!error && r.regs[8] == SYS_capget && !r.regs[1]) {
@@ -1034,6 +1034,12 @@ static int identity_call(struct thread *t, struct user_pt_regs *r, unsigned long
     }
     return_value(t, r, value); return 1;
 }
+static void dispatch_with_stack(struct thread *);
+static int guest_root_path(struct thread *t, long nr, const char *path) {
+    return nr == SYS_chroot && t->endpoint[0] && !md_domain_restricted(t->resources.fs)
+        && (md_domain_scoped(t->resources.fs)
+            || (strcmp(path, "/proc/self/fd") && strcmp(path, "/proc/self/fdinfo")));
+}
 static int domain_path_apply(struct thread *t, long nr, const char *path) {
     if (nr == SYS_chdir)
         return !strcmp(path, "/") ? md_domain_chdir_root(t->resources.fs) : -ENOTSUP;
@@ -1051,6 +1057,9 @@ static int domain_path_apply(struct thread *t, long nr, const char *path) {
 }
 static void domain_path_finish(struct thread *t, int error) {
     struct user_pt_regs r = t->original;
+    if (!error && guest_root_path(t, r.regs[8], t->metadata.path)) {
+        dispatch_with_stack(t); return;
+    }
     if (!error) error = domain_path_apply(t, r.regs[8], t->metadata.path);
     r.regs[0] = (uint64_t)error;
     if (!set_registers(t->pid, &r) || !restore_mask(t)) return;
@@ -1069,6 +1078,13 @@ static void domain_path_call(struct thread *t, struct user_pt_regs *r) {
     char path[4096];
     int error = read_string(t->pid, r->regs[0], path, sizeof(path));
     if (error != -EPERM && error != -EACCES) {
+        if (!error && guest_root_path(t, r->regs[8], path)) {
+            CHECK(t->ready && t->phase == IDLE);
+            t->original = *r;
+            if (!tracee_request(t, PTRACE_GETSIGMASK, (void *)sizeof(t->mask), &t->mask, "get-mask")
+                    || !shield(t) || !skip(t->pid)) return;
+            dispatch_with_stack(t); return;
+        }
         if (!error) error = domain_path_apply(t, r->regs[8], path);
         return_value(t, r, error); return;
     }
@@ -1153,7 +1169,7 @@ static int descriptor_call(struct thread *t, struct user_pt_regs *r, unsigned lo
 static void resume(pid_t pid, int sig) {
     struct thread *t = thread(pid);
     if (t->resume_lost) return;
-    CHECK(!md_credentials_publish(credentials, t->pid, t->tgid, &t->identity));
+    CHECK(!md_task_registry_publish(tasks, t->pid, t->tgid, &t->identity, t->resources.fs));
     enum phase phase = t->phase;
     if (t->debug_options_dirty && debugger_options(pid,t->debug_options)) return;
     if (phase!=IDLE && t->debug_call_active) t->debug_adapter=1;
@@ -1201,6 +1217,7 @@ static void dispatch(struct thread *t) {
     regs.pc = DISPATCH; regs.sp = t->stack; regs.regs[30] = DONE;
     regs.regs[0] = t->original.regs[8];
     for (unsigned i = 0; i < 6; i++) regs.regs[i + 1] = t->original.regs[i];
+    regs.regs[7] = md_domain_scoped(t->resources.fs);
     if (!set_registers(t->pid, &regs)) return;
     t->phase = DISPATCHING; resume(t->pid, 0);
 }
@@ -1310,9 +1327,9 @@ int main(int argc, char **argv) {
     }
     const char *selected_user = NULL, *selected_groups = NULL;
     launch_identity = md_identity_new(getuid(), getgid());
-    credentials = md_credentials_create(); CHECK(credentials);
+    tasks = md_task_registry_create(); CHECK(tasks);
     struct md_identity owner = md_identity_new(getuid(), getgid());
-    CHECK(!md_credentials_publish(credentials, getpid(), getpid(), &owner));
+    CHECK(!md_task_registry_publish(tasks, getpid(), getpid(), &owner, NULL));
     if (argument < argc && !strcmp(argv[argument], "--user")) {
         CHECK(argument + 2 < argc);
         selected_user = argv[argument + 1]; virtual_identity = 1; argument += 2;
@@ -1415,8 +1432,8 @@ int main(int argc, char **argv) {
         /* The guest was forked with the caller's mask. Only the native owner
          * uses zero; creation requests already contain the guest's masked mode. */
         umask(0);
-        CHECK(!md_credentials_publish(credentials, leader, leader, &thread(leader)->identity));
-        int startup = md_fs_worker_start(store, endpoint, admitted_path, credentials, attachments, attachment_count, statistics != NULL, &filesystem);
+        CHECK(!md_task_registry_publish(tasks, leader, leader, &thread(leader)->identity, NULL));
+        int startup = md_fs_worker_start(store, endpoint, admitted_path, tasks, attachments, attachment_count, statistics != NULL, &filesystem);
         if (startup) errno = -startup;
         CHECK(!startup);
         broker = md_broker_create(filesystem, statistics != NULL); CHECK(broker);

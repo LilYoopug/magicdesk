@@ -3,12 +3,34 @@
 #include "image_catalogue.h"
 #include "inode_watch.h"
 #include "fs_mounts.h"
-#include "credential_registry.h"
+#include "task_registry.h"
 #include "ipc_credentials.h"
 #include "inode_internal.h"
 #include "linux_abi.h"
 #include <errno.h>
+#include <fcntl.h>
 #include <string.h>
+#include <unistd.h>
+
+static void change_root(struct md_filesystem *fs, const struct md_fs_request *q, struct md_fs_result *out) {
+    *out = (struct md_fs_result){.fd = -1};
+    if (!fs->tasks) { out->error = -ENOTSUP; return; }
+    if (!md_identity_may_chroot(fs->store->identity)) { out->error = -EPERM; return; }
+    struct md_fs_request open = *q;
+    open.operation = MD_FS_OPEN; open.flags = O_PATH | O_DIRECTORY | O_CLOEXEC;
+    if (fs->mounts) md_fs_mounts_execute(fs, &open, out, NULL);
+    else md_fs_inode_execute(fs, &open, out, NULL);
+    if (out->error) return;
+    int fd = out->fd; out->fd = -1;
+    struct md_fs_request access = {.operation = MD_FS_ACCESS, .directory = {fd, -1},
+        .mode = X_OK, .flags = MD_AT_EACCESS};
+    int error = md_inode_metadata(fs->store, &access);
+    char root[33];
+    if (!error) error = md_inode_object_id(fs->store, fd, root);
+    if (!error && !strcmp(root, MDI_ROOT)) root[0] = 0;
+    if (!error) error = md_task_registry_set_root(fs->tasks, q->actor, q->peer, root);
+    close(fd); out->error = error == -EXDEV ? -ENOTSUP : error;
+}
 
 void md_fs_stat_info(const struct stat *s, struct md_fs_info *out) {
     *out = (struct md_fs_info){.device = s->st_dev, .inode = s->st_ino, .links = s->st_nlink,
@@ -21,12 +43,13 @@ void md_fs_stat_info(const struct stat *s, struct md_fs_info *out) {
 void md_fs_execute(struct md_filesystem *fs,
         const struct md_fs_request *q, struct md_fs_result *out, const struct md_fs_output *output) {
     struct md_identity identity = {0};
-    if (fs->credentials) {
-        int error = md_credentials_read(fs->credentials, q->actor, q->peer, &identity);
+    char root[33] = "";
+    if (fs->tasks) {
+        int error = md_task_registry_read(fs->tasks, q->actor, q->peer, &identity, root);
         if (error) { *out = (struct md_fs_result){.fd = -1, .error = error}; return; }
     }
     const struct md_identity *previous = fs->store->identity;
-    if (!fs->credentials && previous) identity = md_identity_copy(previous);
+    if (!fs->tasks && previous) identity = md_identity_copy(previous);
     if (q->operation == MD_FS_IPC) {
         if (!fs->ipc && fs->ipc_store) {
             int error = md_ipc_credentials_open(fs->ipc_store, &fs->ipc);
@@ -39,7 +62,7 @@ void md_fs_execute(struct md_filesystem *fs,
         md_identity_release(&identity);
         return;
     }
-    if (fs->credentials || previous) {
+    if (fs->tasks || previous) {
         if (q->operation == MD_FS_ACCESS && !(q->flags & MD_AT_EACCESS)) {
             identity.uid.fs = identity.uid.real; identity.gid.fs = identity.gid.real;
             identity.caps.effective = identity.uid.real ? 0 : identity.caps.permitted;
@@ -47,20 +70,25 @@ void md_fs_execute(struct md_filesystem *fs,
         fs->store->identity = &identity;
     }
     unsigned previous_mask=fs->store->creation_mask;
+    const char *previous_root=fs->store->root_id;
+    if (fs->tasks) fs->store->root_id=*root ? root : NULL;
     struct md_inode_boundary boundary={.path=output ? output->data : NULL,.capacity=output ? output->capacity : 0};
     struct md_inode_boundary *previous_boundary=fs->store->boundary;
     fs->store->boundary=&boundary;
     fs->store->creation_mask=q->attributes.creation_mask;
-    if (fs->mounts) md_fs_mounts_execute(fs, q, out, output);
+    if (q->operation == MD_FS_CHROOT) change_root(fs, q, out);
+    else if (fs->mounts) md_fs_mounts_execute(fs, q, out, output);
     else md_fs_inode_execute(fs, q, out, output);
     fs->store->boundary=previous_boundary;
     if (out->error==-EREMOTE) {
-        if (q->operation==MD_FS_LINK || q->operation==MD_FS_RENAME) out->error=-EXDEV;
+        if (q->operation==MD_FS_CHROOT) out->error=-ENOTSUP;
+        else if (q->operation==MD_FS_LINK || q->operation==MD_FS_RENAME) out->error=-EXDEV;
         else if (boundary.path && boundary.capacity) {
             out->error=0; out->host_path=1; out->size=strlen(boundary.path)+1;
         }
     }
     fs->store->creation_mask=previous_mask;
+    fs->store->root_id=previous_root;
     fs->store->identity = previous;
     md_identity_release(&identity);
 }

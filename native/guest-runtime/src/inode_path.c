@@ -8,7 +8,7 @@
 #include <stdio.h>
 
 int mdi_host_boundary(struct md_inode_store *s, const char *parent, const char *name, const char *tail, uint64_t resolve) {
-    if (!s->boundary || strcmp(parent,MDI_ROOT)) return 0;
+    if (!s->boundary || s->root_id || strcmp(parent,MDI_ROOT)) return 0;
     if (strcmp(name,"proc") && strcmp(name,"dev")) return 0;
     const char *suffix=s->boundary->suffix ? s->boundary->suffix : "";
     const char *next=*tail ? tail : suffix; while (*next=='/') ++next;
@@ -40,7 +40,7 @@ int mdi_walk_resolved(struct md_inode_store *s, int dirfd, const char *path,
     char todo[PATH_MAX]; memcpy(todo, path, length+1);
     struct mdi_node current;
     int r = (path[0] == '/' && !(resolve & RESOLVE_IN_ROOT)) || dirfd == MD_INODE_ROOT
-        ? mdi_node(s, MDI_ROOT, &current) : mdi_fd(s, dirfd, &current);
+        ? mdi_node(s, mdi_root(s), &current) : mdi_fd(s, dirfd, &current);
     if (r) return r;
     if (current.kind != S_IFDIR) return -ENOTDIR;
     struct mdi_node boundary = current;
@@ -72,7 +72,8 @@ int mdi_walk_resolved(struct md_inode_store *s, int dirfd, const char *path,
             if ((resolve & (RESOLVE_BENEATH | RESOLVE_IN_ROOT)) && !strcmp(current.id, boundary.id)) {
                 if (resolve & RESOLVE_BENEATH) return -EXDEV;
                 next = current; r = 0;
-            } else r = mdi_node(s, current.parent, &next);
+            } else if (!strcmp(current.id, mdi_root(s))) { next = current; r = 0; }
+            else r = mdi_node(s, current.parent, &next);
         }
         else r = mdi_lookup(s, current.id, name, &next);
         if (r == -ENOENT && last && missing && !special) {
@@ -96,7 +97,7 @@ int mdi_walk_resolved(struct md_inode_store *s, int dirfd, const char *path,
             if (target[0] == '/') {
                 if (resolve & RESOLVE_BENEATH) return -EXDEV;
                 if (resolve & RESOLVE_IN_ROOT) current = boundary;
-                else if ((r = mdi_node(s, MDI_ROOT, &current))) return r;
+                else if ((r = mdi_node(s, mdi_root(s), &current))) return r;
             }
             continue;
         }
@@ -130,7 +131,8 @@ int mdi_ancestor(struct md_inode_store *s, const char *ancestor, const char *chi
 static int directory_path(struct md_inode_store *s, struct mdi_node node, char *out, size_t size) {
     int r = node.kind == S_IFDIR ? 0 : -ENOTDIR;
     char path[PATH_MAX] = "";
-    while (!r && strcmp(node.id, MDI_ROOT)) {
+    while (!r && strcmp(node.id, mdi_root(s))) {
+        if (!strcmp(node.id, MDI_ROOT)) return -ENOENT;
         sqlite3_stmt *q = NULL;
         r = mdi_query_acquire(s, MDI_DIRECTORY_NAME, &q);
         if (!r) r = mdi_bind_id(q, 1, node.parent);
@@ -166,7 +168,7 @@ int md_inode_path(struct md_inode_store *s, int dirfd, char *out, size_t size) {
     int r = mdi_begin(s, 0);
     if (r) return r;
     struct mdi_node node;
-    r = dirfd == MD_INODE_ROOT ? mdi_node(s, MDI_ROOT, &node) : mdi_fd(s, dirfd, &node);
+    r = dirfd == MD_INODE_ROOT ? mdi_node(s, mdi_root(s), &node) : mdi_fd(s, dirfd, &node);
     if (!r) r = mdi_node_path(s, &node, out, size);
     return mdi_finish(s, r);
 }

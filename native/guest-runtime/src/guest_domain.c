@@ -8,6 +8,8 @@
 #include "linux_abi.h"
 #include <limits.h>
 #include <poll.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,39 +20,82 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
-struct md_guest_domain { unsigned refs; int root, cwd, root_process; };
+struct md_guest_domain {
+    atomic_uint refs;
+    unsigned owners;
+    pthread_mutex_t lock;
+    atomic_int scoped;
+    char guest_root[33];
+    int root, cwd, root_process;
+};
 struct md_guest_domain *md_domain_new(void) {
     struct md_guest_domain *d = calloc(1, sizeof(*d));
-    if (d) *d = (struct md_guest_domain){.refs = 1, .root = -1, .cwd = -1, .root_process = -1};
+    if (d) {
+        atomic_init(&d->refs, 1); atomic_init(&d->scoped, 0);
+        d->owners = 1; d->root = d->cwd = d->root_process = -1;
+        if (pthread_mutex_init(&d->lock, NULL)) { free(d); return NULL; }
+    }
     return d;
 }
 struct md_guest_domain *md_domain_fork(struct md_guest_domain *d, int shared) {
     if (!d) return NULL;
-    if (shared) { d->refs++; return d; }
+    if (shared) { d->owners++; md_domain_pin(d); return d; }
     struct md_guest_domain *copy = md_domain_new();
+    if (!copy) return NULL;
+    pthread_mutex_lock(&d->lock);
+    memcpy(copy->guest_root, d->guest_root, sizeof(copy->guest_root));
+    atomic_store(&copy->scoped, atomic_load(&d->scoped));
     if (copy && d->root >= 0) {
         copy->root = fcntl(d->root, F_DUPFD_CLOEXEC, 0);
         copy->root_process = fcntl(d->root_process, F_DUPFD_CLOEXEC, 0);
         if (d->cwd >= 0) copy->cwd = fcntl(d->cwd, F_DUPFD_CLOEXEC, 0);
         if (copy->root < 0 || copy->root_process < 0 || (d->cwd >= 0 && copy->cwd < 0)) {
-            md_domain_release(copy); return NULL;
+            pthread_mutex_unlock(&d->lock); md_domain_release(copy); return NULL;
         }
     }
+    pthread_mutex_unlock(&d->lock);
     return copy;
 }
 void md_domain_release(struct md_guest_domain *d) {
-    if (!d || --d->refs) return;
+    if (!d) return;
+    --d->owners; md_domain_unpin(d);
+}
+void md_domain_pin(struct md_guest_domain *d) {
+    if (d) atomic_fetch_add_explicit(&d->refs, 1, memory_order_relaxed);
+}
+void md_domain_unpin(struct md_guest_domain *d) {
+    if (!d || atomic_fetch_sub_explicit(&d->refs, 1, memory_order_acq_rel) != 1) return;
     if (d->root >= 0) close(d->root);
     if (d->cwd >= 0) close(d->cwd);
     if (d->root_process >= 0) close(d->root_process);
-    free(d);
+    pthread_mutex_destroy(&d->lock); free(d);
 }
 struct md_guest_domain *md_domain_unshare_prepare(struct md_guest_domain *d) {
-    return md_domain_fork(d, d && d->refs == 1);
+    return md_domain_fork(d, d && d->owners == 1);
+}
+int md_domain_scoped(const struct md_guest_domain *d) {
+    return d && atomic_load_explicit(&d->scoped, memory_order_acquire);
+}
+void md_domain_root(struct md_guest_domain *d, char out[33]) {
+    out[0] = 0;
+    if (!md_domain_scoped(d)) return;
+    pthread_mutex_lock(&d->lock);
+    memcpy(out, d->guest_root, 33);
+    pthread_mutex_unlock(&d->lock);
+}
+int md_domain_set_root(struct md_guest_domain *d, const char root[33]) {
+    if (!d) return -ESRCH;
+    pthread_mutex_lock(&d->lock);
+    int error = d->root >= 0 ? -EPERM : 0;
+    if (!error) {
+        memcpy(d->guest_root, root, 33);
+        atomic_store_explicit(&d->scoped, !!root[0], memory_order_release);
+    }
+    pthread_mutex_unlock(&d->lock); return error;
 }
 int md_domain_restricted(const struct md_guest_domain *d) { return d && d->root >= 0; }
 int md_domain_restrict(struct md_guest_domain *d, pid_t pid, const char *path) {
-    if (!d || d->root >= 0) return -EPERM;
+    if (!d || d->root >= 0 || md_domain_scoped(d)) return -EPERM;
     /* The root contract admits a process-owned proc directory.
      * Other roots fail; no fake success is used for unsupported guest chroot. */
     if (strncmp(path, "/proc/self/", 11)) return -ENOTSUP;
@@ -64,7 +109,13 @@ int md_domain_restrict(struct md_guest_domain *d, pid_t pid, const char *path) {
     int process = error ? -1 : syscall(SYS_pidfd_open, pid, MD_PIDFD_THREAD);
     if (!error && process < 0 && errno == EINVAL) process = syscall(SYS_pidfd_open, pid, 0);
     if (!error && process < 0) error = -errno;
-    if (error) close(fd); else { d->root = fd; d->root_process = process; }
+    if (!error) {
+        pthread_mutex_lock(&d->lock);
+        if (d->root >= 0 || md_domain_scoped(d)) error = -EPERM;
+        else { d->root = fd; d->root_process = process; }
+        pthread_mutex_unlock(&d->lock);
+    }
+    if (error) { close(fd); if (process >= 0) close(process); }
     return error;
 }
 static int root_alive(const struct md_guest_domain *d) {

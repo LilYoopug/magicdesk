@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "fs_mounts.h"
 #include "inode_watch.h"
+#include "task_registry.h"
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -12,7 +13,7 @@
 
 static struct md_fs_result call(struct md_filesystem *fs, unsigned op, int fd, const char *path,
         unsigned flags, unsigned mode, void *data, size_t size) {
-    struct md_fs_request q = {.operation=op,.directory={fd,-1},.path={path,NULL},.flags=flags,.mode=mode,.capacity=(unsigned)size};
+    struct md_fs_request q = {.actor=123,.operation=op,.directory={fd,-1},.path={path,NULL},.flags=flags,.mode=mode,.capacity=(unsigned)size};
     struct md_fs_output output = {.data=data,.capacity=size};
     struct md_fs_result r;
     md_fs_execute(fs, &q, &r, &output); return r;
@@ -128,9 +129,25 @@ int main(int argc, char **argv) {
         }
         md_fs_mounts_close(&plain);
     }
+    struct md_guest_domain *context=md_domain_new(); assert(context);
+    struct md_identity identity=md_identity_new(0,0);
+    fs.tasks=md_task_registry_create(); assert(fs.tasks);
+    assert(!md_task_registry_publish(fs.tasks,123,123,&identity,context));
+    result=call(&fs,MD_FS_CHROOT,-1,"/volume",0,0,NULL,0); assert(result.error==-ENOTSUP);
+    result=call(&fs,MD_FS_CHROOT,-1,"/etc",0,0,NULL,0); assert(!result.error);
+    result=call(&fs,MD_FS_OPEN,-1,"/guest",O_RDONLY,0,NULL,0); assert(result.error==-ENOENT);
+    result=call(&fs,MD_FS_OPEN,directory,"renamed",O_RDONLY,0,NULL,0);
+    assert(!result.error); close(result.fd);
+    result=call(&fs,MD_FS_MOUNT_TABLE,-1,NULL,1,0,NULL,0); assert(!result.error);
+    ssize_t count=read(result.fd,bytes,sizeof(bytes)-1); assert(count>0); bytes[count]=0;
+    assert(strstr(bytes,"guestfs") && !strstr(bytes,"/proc") && !strstr(bytes,"/volume") && !strstr(bytes,"/readonly"));
+    close(result.fd);
+    md_task_registry_destroy(fs.tasks); fs.tasks=NULL;
+    md_identity_release(&identity); md_domain_release(context);
     close(fd); close(directory);
     md_fs_mounts_close(&fs); md_inode_store_close(s);
     puts("PASS native attachments, cross-boundary symlinks/dirfds, readonly retained FDs, mount identity and directory publication");
     puts("PASS host-boundary symlinks, guest shared memory, resolution constraints and guest mount tables");
+    puts("PASS scoped roots, retained attachments and filtered mount tables");
     return 0;
 }

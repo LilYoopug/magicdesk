@@ -36,9 +36,11 @@ static void contract(void) {
     assert(!md_resources_unshare_prepare(&child, CLONE_SYSVSEM, &change));
     assert(!md_resources_unshare_finish(NULL, &child, &change, 0));
     assert(child.sem_undo != parent.sem_undo);
+    md_domain_pin(child.fs);
     assert(!md_resources_unshare_prepare(&child, CLONE_FS, &change));
     assert(change.next.fs == child.fs); // A sole owner needs no duplicate.
     assert(!md_resources_unshare_finish(NULL, &child, &change, 0));
+    md_domain_unpin(child.fs);
     assert(!md_domain_restrict(child.fs, getpid(), "/proc/self/fdinfo"));
     assert(!md_domain_chdir_root(child.fs));
     assert(md_domain_restricted(child.fs) && !md_domain_restricted(parent.fs));

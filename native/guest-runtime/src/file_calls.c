@@ -51,9 +51,9 @@ static long open_extended(const struct md_fs *fs, const char *exe, const unsigne
      * Android's root when the supplied descriptor belongs to the guest. */
     char mounted[PATH_MAX];
     md_copy(mounted, sizeof(mounted), path);
-    r = md_namespace_relative_mount((int)a[0], mounted);
+    r = md_namespace_relative_mount(fs, (int)a[0], mounted);
     if (r < 0) return r;
-    if (md_host_path(mounted) && !(how.resolve & RESOLVE_IN_ROOT)) {
+    if (md_fs_host_path(fs, mounted) && !(how.resolve & RESOLVE_IN_ROOT)) {
         struct md_proc_path ref = md_proc_path(mounted);
         if (ref.kind == MD_PROC_FOREIGN) return -ENOTSUP;
         if (ref.kind == MD_PROC_CMDLINE || ref.kind == MD_PROC_AUXV) {

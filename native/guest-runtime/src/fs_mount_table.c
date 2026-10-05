@@ -90,12 +90,15 @@ int md_fs_mount_table(struct md_filesystem *fs, unsigned info) {
     unsigned dev_id=MD_FS_ROOT_MOUNT;
     if (!r) {
         entry(stream,info,MD_FS_ROOT_MOUNT,MD_FS_ROOT_MOUNT,root.st_dev,"/","guestfs","guest",fs->store->readonly);
-        r=native_entries(fs,stream,info,&dev_id);
-        if (!r) entry(stream,info,MD_FS_SHM_MOUNT,dev_id,root.st_dev,"/dev/shm","guestfs","guest",fs->store->readonly);
+        if (!fs->store->root_id) {
+            r=native_entries(fs,stream,info,&dev_id);
+            if (!r) entry(stream,info,MD_FS_SHM_MOUNT,dev_id,root.st_dev,"/dev/shm","guestfs","guest",fs->store->readonly);
+        }
     }
     if (fs->mounts) for (unsigned i=0; !r && i<fs->mounts->count; ++i) {
         const struct md_view_mount *m=&fs->mounts->mounts[i];
         char path[PATH_MAX]; r=md_inode_path(fs->store,m->target,path,sizeof(path));
+        if (r == -ENOENT && fs->store->root_id) { r=0; continue; }
         if (!r) entry(stream,info,MD_FS_ATTACHMENT_MOUNT+i,MD_FS_ROOT_MOUNT,m->native.st_dev,path,"none","attachment",m->readonly);
     }
     if (!r && (fflush(stream) || ferror(stream))) r=-EIO;

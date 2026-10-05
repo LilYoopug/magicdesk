@@ -45,13 +45,19 @@ def main():
 
     try:
         check("isolated staging", "mkdir -m 700 " + root)
-        for name in ("bootstrap", "supervisor", "run", "service", "resource_guest"):
+        for name in ("bootstrap", "supervisor", "run", "service", "resource_guest", "root_guest",
+                     "test_task_resources", "test_inodes", "test_mounts", "test_credentials", "test_rpc"):
             file = "libmagicdesk_guest_" + name + ".so"
             transport.upload(client, args.build / file, root + "/" + file)
         check("prepare fixtures", "chmod 700 " + root + "/*.so")
+        check("resource ownership model", root + "/libmagicdesk_guest_test_task_resources.so")
+        for name in ("inodes", "mounts", "credentials", "rpc"):
+            check("filesystem model " + name, root + "/libmagicdesk_guest_test_" + name + ".so "
+                  + root + "/model-" + name)
         check("fixture directories", "mkdir -p " + root + "/native " + root + "/source/tmp "
               + root + "/source/bin")
         check("stage guest image", "cp " + root + "/libmagicdesk_guest_resource_guest.so " + root + "/source/bin/test")
+        check("stage root fixture", "cp " + root + "/libmagicdesk_guest_root_guest.so " + root + "/source/bin/root-test")
         check("import fixture", root + "/libmagicdesk_guest_service.so --import " + root + "/source " + root + "/store")
         check("native kernel namespace capabilities", root + "/libmagicdesk_guest_resource_guest.so probe " + root + "/native")
         check("native resource semantics", root + "/libmagicdesk_guest_resource_guest.so native " + root + "/native",
@@ -59,6 +65,8 @@ def main():
         runner = root + "/libmagicdesk_guest_run.so --store " + root + "/store --deadline-seconds 60 -- "
         check("guest resource semantics", runner + shlex.join(["/bin/test", "guest", "/tmp"]), "PASS process resources")
         check("guest namespace capabilities", runner + "/bin/test probe /tmp")
+        check("guest roots", root + "/libmagicdesk_guest_run.so --user 0:0 --store "
+              + root + "/store --deadline-seconds 60 -- /bin/root-test run", "PASS guest roots")
         if args.compare_installed:
             result["comparison"] = {}
             candidates = {"installed": "magicdesk-guest", "candidate": root + "/libmagicdesk_guest_run.so"}

@@ -455,10 +455,18 @@ is empty. `image run --user current` explicitly retains the Android identity.
 credential drops, virtual capability sets/securebits and no_new_privs. The supervisor tracks them per task across
 fork, threads and exec. Libc's process-wide set-ID coordination remains libc's
 responsibility. Auxv and admitted-image transitions use this same model.
-`credential_registry` publishes immutable snapshots to the filesystem worker;
+`task_registry` publishes identity and filesystem-root snapshots to the worker;
 both USER_NOTIF and RPC use them. RPC checks the actor TID against the kernel
 peer TGID. The registry lock protects snapshots only, not filesystem IO, and
 ordinary requests allocate no group arrays.
+
+Guest `chroot` selects an inode-backed directory through the common filesystem
+walker, with search/CAP_SYS_CHROOT checks, CLONE_FS sharing, transactional
+unshare and exec inheritance. Absolute symlinks, root-clamped `..`, getcwd and
+directory enumeration use the selected root. Existing cwd/descriptors remain
+usable, so chroot alone is not confinement. Roots inside native attachments,
+mount mutation and Linux namespace creation remain unsupported. See the
+[process resource contract](../native/guest-runtime/process-resources.md).
 
 `inode_metadata` enforces directory search, file access, ownership changes,
 sticky directories, setgid-parent inheritance, watch registration and timestamp permissions against
@@ -806,7 +814,8 @@ They observe real installed application filters and require process completion.
 Firefox has a separate headless screenshot workflow.
 
 These results establish application execution, not complete security isolation.
-The limited proc-root model is not general chroot. Interpreter/library admission,
+The restricted proc-root policy and ordinary guest chroot do not establish
+native Linux sandbox equivalence. Interpreter/library admission,
 mapped-code protection, complete descriptor/root confinement and authenticated
 filesystem authorization remain unfinished. The same-UID filesystem service does
 not automatically enforce a caller's seccomp domain. Unadapted syscalls retain

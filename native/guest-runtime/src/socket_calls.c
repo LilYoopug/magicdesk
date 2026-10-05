@@ -160,9 +160,9 @@ long md_socket_address_call(const struct md_fs *fs, const char *exe, long nr, co
     memcpy(path, address.sun_path, size);
     path[size] = 0;
     if (nr == SYS_bind)
-        return fs->endpoint[0] && !md_host_path(path) ? md_namespace_socket_bind(fs, (int)a[0], path) : -ENOTSUP;
+        return fs->endpoint[0] && !md_fs_host_path(fs, path) ? md_namespace_socket_bind(fs, (int)a[0], path) : -ENOTSUP;
     long fd = -1;
-    if (fs->endpoint[0] && !md_host_path(path)) {
+    if (fs->endpoint[0] && !md_fs_host_path(fs, path)) {
         r = md_namespace_socket_address(fs, path, &address, &length);
         if (r < 0) return r;
     } else {

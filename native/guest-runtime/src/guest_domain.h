@@ -19,13 +19,17 @@
     X(prctl, 0, PR_GET_DUMPABLE) X(prctl, 0, PR_SET_NAME) \
     X(prctl, 0, PR_GET_NAME) X(prctl, 0, PR_GET_SECCOMP)
 
-/* Shared, irrevocably restricted proc-root views. This is
- * not a general guest chroot or a credential implementation. */
+/* CLONE_FS-owned root context. Registry pins do not count as task owners. */
 struct md_guest_domain;
 struct md_guest_domain *md_domain_new(void);
 struct md_guest_domain *md_domain_fork(struct md_guest_domain *, int shared);
 struct md_guest_domain *md_domain_unshare_prepare(struct md_guest_domain *);
 void md_domain_release(struct md_guest_domain *);
+void md_domain_pin(struct md_guest_domain *);
+void md_domain_unpin(struct md_guest_domain *);
+int md_domain_scoped(const struct md_guest_domain *);
+void md_domain_root(struct md_guest_domain *, char out[33]);
+int md_domain_set_root(struct md_guest_domain *, const char root[33]);
 int md_domain_restricted(const struct md_guest_domain *);
 int md_domain_restrict(struct md_guest_domain *, pid_t, const char *);
 int md_domain_chdir_root(struct md_guest_domain *);

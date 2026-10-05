@@ -124,10 +124,10 @@ void md_command_close(struct md_command *c) {
     if (c->interpreter_fd >= 0) RAW1(close, c->interpreter_fd);
     c->fd = c->interpreter_fd = -1;
 }
-long md_guest_exec(const char *program, char *const argv[], char *const env[]) {
-    return md_guest_execat(AT_FDCWD, program, argv, env, 0);
+long md_guest_exec(const struct md_fs *fs, const char *program, char *const argv[], char *const env[]) {
+    return md_guest_execat(fs, AT_FDCWD, program, argv, env, 0);
 }
-long md_guest_execat(int base, const char *program, char *const argv[], char *const env[], int flags) {
+long md_guest_execat(const struct md_fs *fs, int base, const char *program, char *const argv[], char *const env[], int flags) {
     if (flags & ~(AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW)) return -EINVAL;
     char path[PATH_MAX], identity[PATH_MAX];
     long r = md_read_string(path, sizeof(path), program);
@@ -147,15 +147,15 @@ long md_guest_execat(int base, const char *program, char *const argv[], char *co
         }
     }
     struct md_program input;
-    r = !*path ? md_program_capture(&md_files, base, identity, &input)
-        : md_program_acquire(&md_files, base, path,
+    r = !*path ? md_program_capture(fs, base, identity, &input)
+        : md_program_acquire(fs, base, path,
             (flags & AT_SYMLINK_NOFOLLOW) ? O_NOFOLLOW : 0, &input);
     if (r < 0) return r;
     /* Relative-dirfd scripts need the caller's descriptor spelling, not a
      * canonical name which could reopen a replaced entry after exec. */
     const char *invocation = *path && (*path == '/' || base == AT_FDCWD) ? path : identity;
     struct md_command c;
-    r = md_command_prepare(&md_files, &c, invocation, argv, &input, inaccessible);
+    r = md_command_prepare(fs, &c, invocation, argv, &input, inaccessible);
     RAW1(close, input.fd);
     if (r < 0) return r;
     /* Pin both images across the real kernel exec. The new bootstrap validates
@@ -182,15 +182,15 @@ long md_guest_execat(int base, const char *program, char *const argv[], char *co
     next[n++] = "--execfn";
     next[n++] = (char *)invocation;
     if (md_hostname[0]) { next[n++]="--hostname"; next[n++]=md_hostname; }
-    const struct md_socket_routes *routes = md_files.connections;
+    const struct md_socket_routes *routes = fs->connections;
     for (unsigned i = 0; routes && i < routes->count; i++) {
         const struct md_socket_route *route = &routes->entries[i];
         next[n++] = route->abstract ? "--socket-abstract" : "--socket-path";
         next[n++] = (char *)route->source;
         next[n++] = (char *)route->destination;
     }
-    if(md_files.endpoint[0]) { next[n++]="--namespace"; next[n++]=md_files.endpoint; }
-    else next[n++]=md_files.root;
+    if(fs->endpoint[0]) { next[n++]="--namespace"; next[n++]=(char *)fs->endpoint; }
+    else next[n++]=(char *)fs->root;
     next[n++]=c.path;
     for (unsigned i = 0; i <= c.argc; ++i) next[n+i] = c.argv[i];
     r = RAW3(execve, md_bootstrap, next, env);

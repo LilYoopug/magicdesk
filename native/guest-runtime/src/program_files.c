@@ -67,11 +67,11 @@ long md_program_acquire(const struct md_fs *fs, int base, const char *path, int 
     char routed[PATH_MAX];
     if (fs->endpoint[0]) {
         long r = md_copy(routed, sizeof(routed), path);
-        if (!r) r = md_namespace_relative_mount(base, routed);
+        if (!r) r = md_namespace_relative_mount(fs, base, routed);
         if (r < 0) return r;
         path = routed;
     }
-    if (fs->endpoint[0] && !md_host_path(path)) {
+    if (fs->endpoint[0] && !md_fs_host_path(fs, path)) {
         struct md_fs_request q = {.operation = MD_FS_OPEN_IMAGE, .directory = {base, -1},
             .path = {path, NULL}, .flags = (unsigned)flags};
         struct md_fs_response out;

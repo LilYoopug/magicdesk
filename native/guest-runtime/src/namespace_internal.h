@@ -6,7 +6,7 @@
 /* Paths are adapter-owned; other syscall pointers are validated when used. */
 long md_namespace_request(const struct md_fs *, struct md_fs_request *, struct md_fs_response *);
 long md_namespace_creation_mode(unsigned);
-long md_namespace_relative_mount(int, char *);
+long md_namespace_relative_mount(const struct md_fs *, int, char *);
 long md_namespace_native_descriptor(int);
 long md_namespace_inspect(const struct md_fs *, int, const char *, int, unsigned, struct md_fs_response *);
 long md_namespace_native_statx(const struct md_fs *, const unsigned long *);

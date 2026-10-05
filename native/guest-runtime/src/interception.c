@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "bootstrap.h"
 #include "file_calls.h"
+#include "namespace.h"
 #include "socket_calls.h"
 #include "socket_ancillary.h"
 #include "raw.h"
@@ -52,7 +53,7 @@ extern void md_guest_store_groups(void), md_guest_stored_groups(void);
 extern char md_guest_copy_begin[], md_guest_copy_end[];
 extern char md_guest_watch_gate[], md_guest_watch_return[];
 extern char md_guest_ipc_wait[], md_guest_ipc_wait_result[];
-long md_guest_dispatch(long nr, unsigned long a0, unsigned long a1, unsigned long a2,
+static long dispatch_files(const struct md_fs *fs, long nr, unsigned long a0, unsigned long a1, unsigned long a2,
         unsigned long a3, unsigned long a4, unsigned long a5) {
     unsigned long args[] = {a0, a1, a2, a3, a4, a5};
     if (nr==SYS_uname) {
@@ -67,36 +68,51 @@ long md_guest_dispatch(long nr, unsigned long a0, unsigned long a1, unsigned lon
             || nr == SYS_msgget || nr == SYS_msgctl || nr == SYS_msgsnd || nr == SYS_msgrcv)
         return md_ipc_dispatch(nr,args);
     if (nr == SYS_read || nr == SYS_readv || nr == SYS_ioctl || nr == SYS_splice
-            || nr == SYS_tee || nr == SYS_sendfile) return md_watch_read_local(&md_files, nr, args);
+            || nr == SYS_tee || nr == SYS_sendfile) return md_watch_read_local(fs, nr, args);
     if (nr == SYS_inotify_init1 || nr == SYS_inotify_rm_watch
             || nr == SYS_dup || nr == SYS_dup3 || nr == SYS_fcntl)
-        return md_watch_call(&md_files, nr, args);
+        return md_watch_call(fs, nr, args);
     if (nr == SYS_recvmsg) {
-        long r = md_socket_call(&md_files, md_executable, nr, args);
-        if (r >= 0) { int error = md_watch_received(&md_files, (void *)a1); if (error) return error; }
+        long r = md_socket_call(fs, md_executable, nr, args);
+        if (r >= 0) { int error = md_watch_received(fs, (void *)a1); if (error) return error; }
         return r;
     }
     if (nr == SYS_recvmmsg) {
         /* Keep the kernel's batching, timeout and partial-delivery semantics;
          * each returned SCM_RIGHTS capability still needs watch activation. */
-        long r = md_socket_ancillary_batch(&md_files, args);
+        long r = md_socket_ancillary_batch(fs, args);
         for (long i = 0; i < r; ++i) {
-            int error = md_watch_received(&md_files, (struct mmsghdr *)a1 + i);
+            int error = md_watch_received(fs, (struct mmsghdr *)a1 + i);
             if (error) return error;
         }
         return r;
     }
     switch (nr) {
+        case SYS_chroot:
+            return md_namespace_call(fs, md_executable, nr, args);
 #define CALL(name) case SYS_##name:
         MD_FILE_CALLS(CALL)
-            return md_file_call(&md_files, md_executable, nr, args);
+            return md_file_call(fs, md_executable, nr, args);
         MD_SOCKET_CALLS(CALL)
-            return md_socket_call(&md_files, md_executable, nr, args);
+            return md_socket_call(fs, md_executable, nr, args);
 #undef CALL
-        case SYS_execve: return md_guest_exec((void *)a0, (void *)a1, (void *)a2);
-        case SYS_execveat: return md_guest_execat(a0, (void *)a1, (void *)a2, (void *)a3, a4);
+        case SYS_execve: return md_guest_exec(fs, (void *)a0, (void *)a1, (void *)a2);
+        case SYS_execveat: return md_guest_execat(fs, a0, (void *)a1, (void *)a2, (void *)a3, a4);
         default: return -ENOSYS;
     }
+}
+/* A syscall's filesystem selection is task-local even with CLONE_VM and
+ * independently unshared CLONE_FS. Ordinary launches do not copy md_fs. */
+__attribute__((noinline)) static long dispatch_scoped(long nr, unsigned long a0, unsigned long a1,
+        unsigned long a2, unsigned long a3, unsigned long a4, unsigned long a5) {
+    struct md_fs fs = md_files;
+    fs.scoped_root = 1;
+    return dispatch_files(&fs, nr, a0, a1, a2, a3, a4, a5);
+}
+long md_guest_dispatch(long nr, unsigned long a0, unsigned long a1, unsigned long a2,
+        unsigned long a3, unsigned long a4, unsigned long a5, unsigned scoped) {
+    return scoped ? dispatch_scoped(nr,a0,a1,a2,a3,a4,a5)
+        : dispatch_files(&md_files,nr,a0,a1,a2,a3,a4,a5);
 }
 static const struct md_interception_abi abi = {
     .ipc_wait = (uintptr_t)md_guest_ipc_wait,

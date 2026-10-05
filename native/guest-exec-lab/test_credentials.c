@@ -1,8 +1,9 @@
 #define _GNU_SOURCE
-#include "credential_registry.h"
+#include "task_registry.h"
 #include "inode_internal.h"
 #include "fs_operation.h"
 #include "fs_engine.h"
+#include "fs_mounts.h"
 #include "guest_accounts.h"
 #include "linux_abi.h"
 #include <assert.h>
@@ -31,17 +32,17 @@ static void identities(void) {
     assert(md_identity_setfsuid(&child, UINT32_MAX) == 1000);
     assert(md_identity_no_new_privs(&child, 0) == -EINVAL);
     assert(!md_identity_no_new_privs(&child, 1));
-    struct md_credentials *registry = md_credentials_create(); assert(registry);
-    assert(!md_credentials_publish(registry, 123, 120, &child));
+    struct md_task_registry *registry = md_task_registry_create(); assert(registry);
+    assert(!md_task_registry_publish(registry, 123, 120, &child, NULL));
     struct md_identity read;
-    assert(md_credentials_read(registry, 123, 119, &read) == -EPERM);
-    assert(!md_credentials_read(registry, 123, 120, &read));
+    assert(md_task_registry_read(registry, 123, 119, &read, NULL) == -EPERM);
+    assert(!md_task_registry_read(registry, 123, 120, &read, NULL));
     md_identity_release(&child);
     assert(read.uid.effective == 1000 && md_identity_group_count(&read) == 2);
     md_identity_release(&read);
-    md_credentials_forget(registry, 123);
-    assert(md_credentials_read(registry, 123, 120, &read) == -ESRCH);
-    md_credentials_destroy(registry); md_identity_release(&root);
+    md_task_registry_forget(registry, 123);
+    assert(md_task_registry_read(registry, 123, 120, &read, NULL) == -ESRCH);
+    md_task_registry_destroy(registry); md_identity_release(&root);
 }
 static int change(struct md_inode_store *s, int fd, unsigned op, unsigned mode, uint32_t uid, uint32_t gid) {
     struct md_fs_request q = {.operation=op,.directory={fd,-1},.mode=mode,.flags=MD_AT_EACCESS};
@@ -52,6 +53,68 @@ static int change(struct md_inode_store *s, int fd, unsigned op, unsigned mode, 
 static void account_file(struct md_inode_store *s, const char *path, const char *content) {
     int fd=md_inode_create(s,-1,path,0644); assert(fd>=0);
     size_t n=strlen(content); assert(write(fd,content,n)==(ssize_t)n); close(fd);
+}
+static struct md_fs_result root_call(struct md_filesystem *fs, pid_t task, unsigned op,
+        int fd, const char *path, unsigned flags, char *data, size_t capacity) {
+    struct md_fs_request q={.actor=task,.peer=120,.operation=op,.directory={fd,-1},
+        .path={path,NULL},.flags=flags,.capacity=(unsigned)capacity};
+    struct md_fs_result out;
+    struct md_fs_output output={.data=data,.capacity=capacity};
+    md_fs_execute(fs,&q,&out,&output); return out;
+}
+static void root_context(struct md_inode_store *s) {
+    assert(!md_inode_mkdir(s,-1,"/jail",0755));
+    assert(!md_inode_mkdir(s,-1,"/jail/sub",0755));
+    account_file(s,"/jail/value","inside");
+    assert(!md_inode_symlink(s,"/value",-1,"/jail/absolute"));
+    struct md_identity ids=md_identity_new(0,0);
+    struct md_guest_domain *parent=md_domain_new(); assert(parent);
+    struct md_guest_domain *shared=md_domain_fork(parent,1); assert(shared==parent);
+    struct md_guest_domain *sibling=md_domain_fork(parent,0); assert(sibling);
+    struct md_filesystem fs={.store=s,.tasks=md_task_registry_create()}; assert(fs.tasks);
+    assert(!md_task_registry_publish(fs.tasks,123,120,&ids,parent));
+    assert(!md_task_registry_publish(fs.tasks,124,120,&ids,shared));
+    assert(!md_task_registry_publish(fs.tasks,125,120,&ids,sibling));
+    struct md_fs_result out=root_call(&fs,123,MD_FS_CHROOT,-1,"/jail",0,NULL,0);
+    assert(!out.error && out.fd==-1);
+    for(pid_t task=123;task<=125;task++) {
+        out=root_call(&fs,task,MD_FS_OPEN,-1,"/absolute",O_RDONLY,NULL,0);
+        if(task==125) assert(out.error==-ENOENT);
+        else { assert(!out.error && out.fd>=0); close(out.fd); }
+    }
+    char id[33]; struct md_identity snap;
+    assert(md_task_registry_read(fs.tasks,123,119,&snap,id)==-EPERM);
+    assert(md_task_registry_set_root(fs.tasks,123,119,MDI_ROOT)==-EPERM);
+    assert(!md_task_registry_read(fs.tasks,123,120,&snap,id) && *id);
+    md_identity_release(&snap);
+    out=root_call(&fs,123,MD_FS_OPEN,-1,"/",O_RDONLY|O_DIRECTORY,NULL,0);
+    assert(!out.error); int root=out.fd;
+    struct stat st; assert(!md_inode_fstat(s,root,&st));
+    char bytes[4096];
+    out=root_call(&fs,123,MD_FS_GETDENTS,root,NULL,0,bytes,sizeof(bytes));
+    assert(!out.error); unsigned dots=0;
+    for(size_t p=0;p<out.size;) {
+        struct md_inode_dirent *entry=(void *)(bytes+p);
+        if(!strcmp(entry->name,".") || !strcmp(entry->name,"..")) {
+            assert(entry->inode==st.st_ino); dots++;
+        }
+        p+=entry->size;
+    }
+    assert(dots==2);
+    assert(!md_inode_rename(s,-1,"/jail",-1,"/moved-jail",0));
+    out=root_call(&fs,123,MD_FS_PATH,root,NULL,0,bytes,sizeof(bytes));
+    assert(!out.error && !strcmp(bytes,"/"));
+    out=root_call(&fs,124,MD_FS_OPEN,-1,"/sub/../../value",O_RDONLY,NULL,0);
+    assert(!out.error); close(out.fd);
+    struct md_guest_domain *split=md_domain_unshare_prepare(shared); assert(split && split!=shared);
+    assert(!md_task_registry_publish(fs.tasks,124,120,&ids,split));
+    md_domain_release(shared);
+    out=root_call(&fs,124,MD_FS_CHROOT,-1,"/sub",0,NULL,0); assert(!out.error);
+    out=root_call(&fs,123,MD_FS_OPEN,-1,"/value",O_RDONLY,NULL,0); assert(!out.error); close(out.fd);
+    out=root_call(&fs,124,MD_FS_OPEN,-1,"/value",O_RDONLY,NULL,0); assert(out.error==-ENOENT);
+    md_domain_release(parent); md_domain_release(split); md_domain_release(sibling);
+    md_task_registry_destroy(fs.tasks); md_fs_mounts_close(&fs);
+    md_identity_release(&ids); close(root);
 }
 static void accounts(struct md_inode_store *s) {
     struct md_filesystem fs={.store=s}; struct md_identity selected={0};
@@ -84,6 +147,7 @@ int main(int argc, char **argv) {
     int base=md_inode_open(s,-1,"/",O_PATH|O_DIRECTORY,0); assert(base>=0);
     assert(!change(s,base,MD_FS_CHMOD,0755,0,0));
     accounts(s);
+    root_context(s);
     assert(!md_inode_mkdir(s,-1,"/tmp",01777));
     int fd=md_inode_create(s,-1,"/tmp/owned",0640); assert(fd>=0);
     assert(write(fd,"data",4)==4);
