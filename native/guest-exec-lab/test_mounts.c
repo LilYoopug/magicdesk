@@ -14,6 +14,8 @@
 #include <sys/inotify.h>
 #include <unistd.h>
 
+void test_mount_copy(const char *base);
+
 static struct md_fs_result call(struct md_filesystem *fs, unsigned op, int fd, const char *path,
         unsigned flags, unsigned mode, void *data, size_t size) {
     struct md_fs_request q = {.actor=123,.operation=op,.directory={fd,-1},.path={path,NULL},.flags=flags,.mode=mode,.capacity=(unsigned)size};
@@ -83,10 +85,11 @@ static void nested_mounts(const char *base) {
         close(dir);
     }
     assert(ids[0]!=ids[1] && ids[1]!=ids[2] && ids[0]!=ids[2]);
+    uint64_t root_id; assert(!md_fs_base_mount(&fs,0,&root_id));
     struct md_fs_result r=call(&fs,MD_FS_MOUNT_TABLE,-1,NULL,1,0,NULL,0); assert(!r.error);
     ssize_t count=read(r.fd,bytes,sizeof(bytes)-1); assert(count>0); bytes[count]=0; close(r.fd);
     for (unsigned i=0; i<3; ++i) {
-        char line[80]; snprintf(line,sizeof(line),"%llu %llu ",ids[i],i ? ids[i-1] : (unsigned long long)MD_FS_ROOT_MOUNT);
+        char line[80]; snprintf(line,sizeof(line),"%llu %llu ",ids[i],i ? ids[i-1] : (unsigned long long)root_id);
         assert(strstr(bytes,line));
     }
     assert(!strstr(bytes,base));
@@ -361,5 +364,6 @@ int main(int argc, char **argv) {
     puts("PASS scoped roots, retained attachments and filtered mount tables");
     nested_mounts(argv[1]);
     task_mount_views(argv[1]);
+    test_mount_copy(argv[1]);
     return 0;
 }

@@ -108,7 +108,7 @@ if(MAGICDESK_GUEST_FIXTURES)
     target_sources(test_rpc PRIVATE ${src}/fs_client.c ${src}/fs_service.c ${namespace_engine} ${mounts}
         ${src}/image_catalogue.c ${src}/elf_admission.c ${src}/guest_identity.c ${src}/elf.c ${wire} ${raw})
     target_compile_definitions(test_rpc PRIVATE MD_FS_TESTING MD_NO_START MD_USE_LIBC)
-    target_sources(test_mounts PRIVATE ${namespace_engine} ${mounts} ${src}/image_catalogue.c
+    target_sources(test_mounts PRIVATE ../guest-exec-lab/test_mount_copy.c ${namespace_engine} ${mounts} ${src}/image_catalogue.c
         ${src}/elf_admission.c ${src}/guest_identity.c ${src}/elf.c ${src}/fs_client.c ${wire} ${raw})
     target_compile_definitions(test_mounts PRIVATE MD_NO_START MD_USE_LIBC)
     guest_executable(watch_guest ../guest-exec-lab/test_watch_guest.c)

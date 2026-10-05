@@ -9,13 +9,23 @@
 #include <sys/sysmacros.h>
 #include <unistd.h>
 
-struct md_mount_identity { uint64_t native[4096]; unsigned count; };
-int md_fs_native_mount(struct md_filesystem *fs, uint64_t native, uint64_t *guest) {
-    if (!native) return -EINVAL;
+struct md_mount_identity { uint64_t native[4096]; unsigned guest[4096], count; };
+static int ensure_view(struct md_filesystem *fs) {
     if (!fs->mounts) {
         fs->mounts=md_mount_namespace_new();
-        if (!fs->mounts) return -ENOMEM;
+        if (!fs->mounts) return -errno;
     }
+    return 0;
+}
+int md_fs_base_mount(struct md_filesystem *fs, int shared_memory, uint64_t *guest) {
+    int r=ensure_view(fs);
+    if (!r) *guest=shared_memory ? fs->mounts->shm_id : fs->mounts->root_id;
+    return r;
+}
+int md_fs_native_mount(struct md_filesystem *fs, uint64_t native, uint64_t *guest) {
+    if (!native) return -EINVAL;
+    int r=ensure_view(fs);
+    if (r) return r;
     if (!fs->mounts->native_ids) {
         fs->mounts->native_ids=calloc(1,sizeof(*fs->mounts->native_ids));
         if (!fs->mounts->native_ids) return -ENOMEM;
@@ -25,9 +35,11 @@ int md_fs_native_mount(struct md_filesystem *fs, uint64_t native, uint64_t *gues
     for (i=0; i<ids->count; ++i) if (ids->native[i]==native) break;
     if (i==ids->count) {
         if (i==sizeof(ids->native)/sizeof(ids->native[0])) return -ENOSPC;
+        r=md_mount_id_allocate(&ids->guest[i]);
+        if (r) return r;
         ids->native[ids->count++]=native;
     }
-    *guest=MD_FS_ATTACHMENT_MOUNT+MD_FS_MOUNTS_MAX+i;
+    *guest=ids->guest[i];
     return 0;
 }
 
@@ -35,8 +47,8 @@ static int below(const char *path, const char *root) {
     size_t n=strlen(root);
     return !strncmp(path,root,n) && (!path[n] || path[n]=='/');
 }
-/* Native mounts retain kernel IO and authority, but IDs share one launch-local
- * namespace with the logical root and attachments. statx uses this same map. */
+/* Native mounts retain kernel IO and authority, but IDs identify instances in
+ * the selected view, as for logical mounts. statx uses this same map. */
 static int native_entries(struct md_filesystem *fs, FILE *out, unsigned info, unsigned *dev_id) {
     FILE *in=fopen("/proc/self/mountinfo","re");
     if (!in) return -errno;
@@ -47,7 +59,7 @@ static int native_entries(struct md_filesystem *fs, FILE *out, unsigned info, un
         if (sscanf(line,"%llu %llu %n%63s %4095s %4095s %1023s",
                 &raw,&parent,&rest,device,root,path,options)!=6) { r=-EPROTO; break; }
         if ((!below(path,"/proc") && !below(path,"/dev")) || below(path,"/dev/shm")) continue;
-        uint64_t id, owner=MD_FS_ROOT_MOUNT;
+        uint64_t id, owner=fs->mounts->root_id;
         r=md_fs_native_mount(fs,raw,&id);
         if (!r && strcmp(path,"/dev") && strcmp(path,"/proc"))
             r=md_fs_native_mount(fs,parent,&owner);
@@ -82,23 +94,25 @@ static void entry(FILE *stream, unsigned info, unsigned id, unsigned parent, dev
 }
 int md_fs_mount_table(struct md_filesystem *fs, unsigned info) {
     if (info>1) return -EINVAL;
+    int r=ensure_view(fs);
+    if (r) return r;
     int fd=md_inode_temporary(fs->store);
     if (fd<0) return fd;
     FILE *stream=fdopen(fd,"w+");
     if (!stream) { int error=-errno; close(fd); return error; }
     struct stat root;
-    int r=fs->native_root ? (fstat(fs->native_root->fd,&root) ? -errno : 0)
+    r=fs->native_root ? (fstat(fs->native_root->fd,&root) ? -errno : 0)
         : md_inode_stat(fs->store,-1,"/",0,&root);
-    unsigned dev_id=MD_FS_ROOT_MOUNT;
+    unsigned dev_id=fs->mounts->root_id;
     if (!r) {
         if (fs->native_root) {
             const struct md_view_mount *m=fs->native_root->mount;
-            entry(stream,info,m->id,m->parent ? m->parent->id : MD_FS_ROOT_MOUNT,
+            entry(stream,info,m->id,m->parent ? m->parent->id : fs->mounts->root_id,
                 root.st_dev,"/","none","attachment",m->readonly);
-        } else entry(stream,info,MD_FS_ROOT_MOUNT,MD_FS_ROOT_MOUNT,root.st_dev,"/","guestfs","guest",fs->store->readonly);
+        } else entry(stream,info,fs->mounts->root_id,fs->mounts->root_id,root.st_dev,"/","guestfs","guest",fs->store->readonly);
         if (!fs->store->root_id && !fs->native_root) {
             r=native_entries(fs,stream,info,&dev_id);
-            if (!r) entry(stream,info,MD_FS_SHM_MOUNT,dev_id,root.st_dev,"/dev/shm","guestfs","guest",fs->store->readonly);
+            if (!r) entry(stream,info,fs->mounts->shm_id,dev_id,root.st_dev,"/dev/shm","guestfs","guest",fs->store->readonly);
         }
     }
     struct md_fs_mounts *tree=fs->mounts ? fs->mounts->tree : NULL;
@@ -106,7 +120,7 @@ int md_fs_mount_table(struct md_filesystem *fs, unsigned info) {
         const struct md_view_mount *m=&tree->mounts[i];
         char path[PATH_MAX]; r=md_view_path(fs,m->target,m->parent,path,sizeof(path));
         if (r == -ENOENT && (fs->store->root_id || fs->native_root)) { r=0; continue; }
-        if (!r) entry(stream,info,m->id,m->parent ? m->parent->id : MD_FS_ROOT_MOUNT,
+        if (!r) entry(stream,info,m->id,m->parent ? m->parent->id : fs->mounts->root_id,
             m->native.st_dev,path,"none","attachment",m->readonly);
     }
     if (!r && (fflush(stream) || ferror(stream))) r=-EIO;

@@ -40,8 +40,29 @@ as well as success. A root from another view is rejected as stale.
 An empty view allocates only its owner, not attachment arrays or object indexes;
 requests without attachments retain the direct inode-engine path. Ordinary
 requests acquire references without heap allocation, extra RPC or syscall stops.
-This ownership model does not implement guest CLONE_NEWNS or descriptor provenance
-across copied mount trees. Guest namespace creation still fails explicitly.
+`md_fs_mounts_copy` constructs an unpublished candidate on the filesystem worker.
+It copies source/covered O_PATH references, parent relationships and per-mount
+policy, then explicitly rebases the selected root. Inode roots retain their
+backend identity; native roots receive a location in the new tree. A location
+from the original native tree is stale in the copy. Neither registry publication
+nor the original context changes on failure, and partial candidates release all
+acquired descriptors.
+
+Mount IDs identify instances, not attachment indexes. Root, shared-memory,
+attachment and admitted native mounts use one allocator per owner process; IDs
+are not reused, and exhaustion fails explicitly. statx and mount-table publication
+use the same mapping. Copies have distinct IDs and independent lazy native-ID
+maps. The object cache is not copied: only the selected native root is registered,
+so copy cost depends on mount count, not the number of previously opened files.
+Only O_PATH references are retained; FIFO reader/writer counts and flock/OFD-lock
+lifetime remain with application descriptions.
+
+Candidate construction is not guest CLONE_NEWNS. Existing descriptors and cwd
+need their own origin contract before a candidate can replace a task's view.
+An old descriptor must not be reassigned by looking up its inode or current path
+in the new tree. Exact description comparison does not solve lifetime ownership:
+retaining a readable/writable comparison FD would keep FIFO peers and file locks
+alive. Guest namespace creation still fails explicitly.
 
 ## Guest Roots
 
@@ -131,6 +152,11 @@ nested readonly/writable attachments and retained covered-directory descriptors.
 They also alternate two task mount views on one worker, check independent readonly
 policy and mount-table output, retain snapshots past registry teardown, and check
 coherent identity/root/mount publication under concurrent readers and writers.
+`test_mount_copy` checks distinct IDs, explicit native/inode root rebasing,
+independent readonly policy, moved covered directories and source-view teardown.
+RLIMIT_NOFILE exhaustion at every descriptor-acquisition step checks rollback
+without leaks or changed outputs. A populated source cache does not grow copy
+cost; pipe EOF and flock/OFD-lock release remain observable with both views alive.
 `test_root_userspace.py` exercises stock Debian/Alpine chroot with each
 distribution's dynamic loader, shell and nested exec in disposable inode-backed
 and attached-native directories.

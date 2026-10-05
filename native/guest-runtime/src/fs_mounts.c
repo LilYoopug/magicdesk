@@ -159,7 +159,7 @@ void md_fs_mounts_close(struct md_filesystem *fs) {
 int md_fs_mounts_open(struct md_filesystem *fs, const struct md_fs_attachment *entries, unsigned count) {
     if (fs->mounts || count > MD_FS_MOUNTS_MAX) return -EINVAL;
     fs->mounts = md_mount_namespace_new();
-    if (!fs->mounts) return -ENOMEM;
+    if (!fs->mounts) return -errno;
     if (!count) return 0;
     struct md_fs_mounts *tree = calloc(1,sizeof(*tree));
     if (!tree) { md_fs_mounts_close(fs); return -ENOMEM; }
@@ -169,7 +169,8 @@ int md_fs_mounts_open(struct md_filesystem *fs, const struct md_fs_attachment *e
         const struct md_fs_attachment *entry = &entries[i];
         struct md_view_mount *m = &tree->mounts[tree->count];
         m->source = m->target = -1; m->readonly = entry->readonly;
-        m->id = MD_FS_ATTACHMENT_MOUNT + i;
+        r = md_mount_id_allocate(&m->id);
+        if (r) break;
         if (!entry->source || !entry->target || entry->source[0] != '/' || entry->target[0] != '/') { r = -EINVAL; break; }
         m->source = open(entry->source, O_PATH | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (m->source < 0) { r = -errno; break; }
@@ -203,5 +204,48 @@ int md_fs_mounts_open(struct md_filesystem *fs, const struct md_fs_attachment *e
         if (pending->target >= 0) close(pending->target);
     }
     if (r) md_fs_mounts_close(fs);
+    return r;
+}
+
+int md_fs_mounts_copy(struct md_filesystem *fs, const struct md_fs_location *root,
+        struct md_mount_namespace **out, struct md_fs_location *copied_root) {
+    if (!fs->mounts || !root || !out || !copied_root) return -EINVAL;
+    struct md_view_object *origin=NULL;
+    if (root->mount) {
+        origin=md_view_object(fs,root->object);
+        if (!origin || origin->mount->id!=root->mount) return -ESTALE;
+    }
+    struct md_mount_namespace *copy=md_mount_namespace_new();
+    if (!copy) return -errno;
+    struct md_fs_mounts *source=fs->mounts->tree;
+    int r=0;
+    if (source && source->count) {
+        copy->tree=calloc(1,sizeof(*copy->tree));
+        if (!copy->tree) r=-ENOMEM;
+    }
+    for (unsigned i=0; !r && source && i<source->count; ++i) {
+        const struct md_view_mount *a=&source->mounts[i];
+        struct md_view_mount *b=&copy->tree->mounts[i];
+        *b=*a; b->source=b->target=-1;
+        /* Count partially built entries so rollback closes every acquired FD. */
+        ++copy->tree->count;
+        b->parent=a->parent ? &copy->tree->mounts[a->parent-source->mounts] : NULL;
+        r=md_mount_id_allocate(&b->id);
+        if (!r && (b->source=fcntl(a->source,F_DUPFD_CLOEXEC,3))<0) r=-errno;
+        if (!r && (b->target=fcntl(a->target,F_DUPFD_CLOEXEC,3))<0) r=-errno;
+    }
+    struct md_fs_location selected=*root;
+    if (!r && origin) {
+        struct md_filesystem candidate={.store=fs->store,.mounts=copy};
+        struct md_view_mount *mount=&copy->tree->mounts[origin->mount-source->mounts];
+        struct md_view_object *object;
+        r=md_view_record(&candidate,origin->fd,mount,&object);
+        if (!r) {
+            selected.mount=mount->id;
+            memcpy(selected.object,object->id,sizeof(selected.object));
+        }
+    }
+    if (r) md_mount_namespace_release(copy);
+    else { *out=copy; *copied_root=selected; }
     return r;
 }

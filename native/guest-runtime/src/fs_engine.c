@@ -178,8 +178,8 @@ void md_fs_inode_execute(struct md_filesystem *fs,
         s->stat_path=previous;
         if (!r) md_fs_stat_info(&st, &out->info);
         if (!r && (q->mode & MD_FS_STAT_MOUNT) && *path)
-            out->info.mount_id=!strncmp(path,"/dev/shm",8) && (!path[8] || path[8]=='/')
-                ? MD_FS_SHM_MOUNT : MD_FS_ROOT_MOUNT;
+            r=md_fs_base_mount(fs,!strncmp(path,"/dev/shm",8) && (!path[8] || path[8]=='/'),
+                &out->info.mount_id);
         break;
     }
     case MD_FS_PATH:

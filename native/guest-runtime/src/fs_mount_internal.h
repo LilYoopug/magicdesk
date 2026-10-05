@@ -28,6 +28,7 @@ struct md_fs_mounts {
 };
 struct md_mount_namespace {
     atomic_uint refs;
+    unsigned root_id, shm_id;
     struct md_fs_mounts *tree;
     struct md_mount_identity *native_ids;
 };
@@ -46,4 +47,5 @@ int md_view_walk(struct md_filesystem *, int base, const char *path, int follow,
         uint64_t resolve, struct md_view_location *);
 void md_view_location_close(struct md_view_location *);
 int md_view_fdpath(int fd, char *, size_t);
+int md_mount_id_allocate(unsigned *);
 #endif
