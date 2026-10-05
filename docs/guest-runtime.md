@@ -457,15 +457,18 @@ is empty. `image run --user current` explicitly retains the Android identity.
 credential drops, virtual capability sets/securebits and no_new_privs. The supervisor tracks them per task across
 fork, threads and exec. Libc's process-wide set-ID coordination remains libc's
 responsibility. Auxv and admitted-image transitions use this same model.
-`task_registry` publishes identity and filesystem-root snapshots to the worker;
-both USER_NOTIF and RPC use them. RPC checks the actor TID against the kernel
+`task_registry` publishes coherent identity, filesystem-root and retained
+mount-view snapshots to the worker; both USER_NOTIF and RPC use them.
+RPC checks the actor TID against the kernel
 peer TGID. The registry lock protects snapshots only, not filesystem IO, and
-ordinary requests allocate no group arrays.
+ordinary requests allocate no group arrays or mount-tree copies. Mount views
+are task resources independent of CLONE_FS, retained across fork and exec.
 
 Guest `chroot` selects an inode-backed or explicitly attached native directory
-through the common filesystem walker, with search/CAP_SYS_CHROOT checks, CLONE_FS sharing, transactional
-unshare and exec inheritance. Absolute symlinks, root-clamped `..`, getcwd and
-mount-table paths use the selected root. Its identity includes the mount and
+through the common filesystem walker, with search/CAP_SYS_CHROOT checks,
+CLONE_FS sharing, transactional unshare and exec inheritance. Absolute symlinks,
+root-clamped `..`, getcwd and mount-table paths use the selected root.
+Its identity includes the mount and
 backend object, preserving native readonly policy. Existing cwd/descriptors remain
 usable, so chroot alone is not confinement. Arbitrary unattached native roots,
 mount mutation and Linux namespace creation remain unsupported. See the

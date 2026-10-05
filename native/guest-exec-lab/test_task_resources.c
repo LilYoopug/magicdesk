@@ -15,17 +15,21 @@ static int descriptors(void) {
 }
 static void contract(void) {
     struct md_task_resources parent, child, sibling;
-    assert(!md_resources_init(&parent));
+    struct md_mount_namespace *mounts=md_mount_namespace_new(); assert(mounts);
+    assert(!md_resources_init(&parent,mounts));
+    md_mount_namespace_release(mounts);
     assert(!md_resources_fork(&parent, CLONE_FS | CLONE_SYSVSEM, &child));
     assert(child.fs == parent.fs && child.sem_undo == parent.sem_undo);
+    assert(child.mounts==parent.mounts);
     assert(!md_resources_fork(&parent, 0, &sibling));
     assert(sibling.fs != parent.fs && sibling.sem_undo != parent.sem_undo);
+    assert(sibling.mounts==parent.mounts);
     struct md_resource_change change;
     assert(!md_resources_unshare_prepare(&child, CLONE_FS | CLONE_SYSVSEM, &change));
     assert(change.next.fs != child.fs && change.next.sem_undo != child.sem_undo);
     assert(!md_resources_unshare_finish(NULL, &child, &change, -EINVAL));
     assert(child.fs == parent.fs && child.sem_undo == parent.sem_undo);
-    assert(!change.next.fs && !change.next.sem_undo);
+    assert(!change.next.fs && !change.next.sem_undo && !change.next.mounts);
     assert(!md_resources_unshare_prepare(&child, CLONE_FILES, &change));
     assert(!change.next.fs && !change.next.sem_undo);
     assert(!md_resources_unshare_finish(NULL, &child, &change, 0));
@@ -33,6 +37,7 @@ static void contract(void) {
     assert(!md_resources_unshare_prepare(&child, CLONE_FS, &change));
     assert(!md_resources_unshare_finish(NULL, &child, &change, 0));
     assert(child.fs != parent.fs && child.sem_undo == parent.sem_undo);
+    assert(child.mounts==parent.mounts);
     assert(!md_resources_unshare_prepare(&child, CLONE_SYSVSEM, &change));
     assert(!md_resources_unshare_finish(NULL, &child, &change, 0));
     assert(child.sem_undo != parent.sem_undo);
@@ -57,7 +62,7 @@ static void contract(void) {
 int main(void) {
     unsigned long spaces[] = {CLONE_NEWUSER, CLONE_NEWNS, CLONE_NEWUTS,
         CLONE_NEWIPC, CLONE_NEWPID, CLONE_NEWNET, CLONE_NEWCGROUP};
-    struct md_task_resources r; assert(!md_resources_init(&r));
+    struct md_task_resources r; assert(!md_resources_init(&r,NULL));
     for (unsigned i = 0; i < sizeof(spaces)/sizeof(*spaces); i++) {
         struct md_resource_change change;
         assert(!md_resources_clone_supported(spaces[i]));

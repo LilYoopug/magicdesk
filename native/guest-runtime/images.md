@@ -224,9 +224,9 @@ immutable dependencies must not be modified through external tools during export
 ## Attached Directories
 
 `struct md_filesystem` is the namespace owner's explicit composition of its
-inode store, sealed executable catalogue and optional attachments. Both direct
-USER_NOTIF requests and task-affine RPC use `md_fs_execute`. The empty attachment
-case goes directly to the inode engine. No mount policy enters the inode database.
+inode store, sealed executable catalogue and the requesting task's mount view.
+Both direct USER_NOTIF requests and task-affine RPC use `md_fs_execute`. The empty
+attachment case goes directly to the inode engine. No mount policy enters the inode database.
 
 `--bind HOST GUEST` and `--bind-ro HOST GUEST` belong to one launch. Source and
 target must be existing directories. Guest targets `/`, `/dev`, `/proc` and
@@ -247,7 +247,10 @@ policy, and clips mount-table paths to that selected root.
 Overlapping native sources and covering an already attached subtree are rejected.
 An inode encountered through conflicting mounts also fails explicitly: general
 aliasing needs open-description provenance, not a guessed native inode match.
-The tree is launch-owned; guest-created mount namespaces are not implemented.
+The initial tree is built at launch and retained by task resources independently
+of CLONE_FS. Its objects and native mount-ID map follow that view's lifetime,
+not the worker's current request. Guest-created mount namespaces and copying
+mount trees are not implemented.
 
 Native metadata identity is retained across rename/unlink. Readonly policy also
 applies to descriptor-based metadata changes and writable reopens, not just
@@ -259,7 +262,8 @@ directory reads share the publish-before-cursor-commit contract. Watches use the
 existing native-event path rather than a second watcher system.
 
 The view allows at most 16 attachments and 65,536 retained native identities.
-References are released with the launch; capacity exhaustion is explicit.
+Final release closes the view after its worker, tasks, registry and requests
+have relinquished their references; capacity exhaustion is explicit.
 Pathname socket creation/address translation in an attached directory is not
 implemented. Existing guest-store sockets and explicit graphics routes remain
 separate supported paths. Native host hardlinks require the host's permission;

@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "task_registry.h"
+#include "task_resources.h"
 #include "inode_internal.h"
 #include "fs_operation.h"
 #include "fs_engine.h"
@@ -9,6 +10,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,15 +36,62 @@ static void identities(void) {
     assert(!md_identity_no_new_privs(&child, 1));
     struct md_task_registry *registry = md_task_registry_create(); assert(registry);
     assert(!md_task_registry_publish(registry, 123, 120, &child, NULL));
-    struct md_identity read;
-    assert(md_task_registry_read(registry, 123, 119, &read, NULL) == -EPERM);
-    assert(!md_task_registry_read(registry, 123, 120, &read, NULL));
+    struct md_task_snapshot read;
+    assert(md_task_registry_read(registry, 123, 119, &read) == -EPERM);
+    assert(!md_task_registry_read(registry, 123, 120, &read));
     md_identity_release(&child);
-    assert(read.uid.effective == 1000 && md_identity_group_count(&read) == 2);
-    md_identity_release(&read);
+    assert(read.identity.uid.effective == 1000 && md_identity_group_count(&read.identity) == 2);
+    md_task_snapshot_release(&read);
     md_task_registry_forget(registry, 123);
-    assert(md_task_registry_read(registry, 123, 120, &read, NULL) == -ESRCH);
+    assert(md_task_registry_read(registry, 123, 120, &read) == -ESRCH);
     md_task_registry_destroy(registry); md_identity_release(&root);
+}
+struct publications {
+    struct md_task_registry *registry;
+    struct md_task_resources resources[2];
+    struct md_identity identities[2];
+    pthread_barrier_t start;
+};
+static void *publish_snapshots(void *opaque) {
+    struct publications *p=opaque;
+    /* EVENT_WAIT: reader joins the publication race; the runner bounds failure. */
+    pthread_barrier_wait(&p->start);
+    for(unsigned i=0;i<10000;++i) {
+        unsigned k=i%2;
+        assert(!md_task_registry_publish(p->registry,123,120,&p->identities[k],&p->resources[k]));
+    }
+    return NULL;
+}
+static void concurrent_snapshots(void) {
+    struct publications p={.registry=md_task_registry_create()}; assert(p.registry);
+    for(unsigned i=0;i<2;++i) {
+        p.identities[i]=md_identity_new(i,i);
+        p.resources[i].fs=md_domain_new(); assert(p.resources[i].fs);
+        p.resources[i].mounts=md_mount_namespace_new(); assert(p.resources[i].mounts);
+        struct md_fs_location root={.mount=i+1,.object="a"}; root.object[0]+=(char)i;
+        assert(!md_domain_set_root(p.resources[i].fs,&root));
+    }
+    assert(!md_task_registry_publish(p.registry,123,120,&p.identities[0],&p.resources[0]));
+    assert(!pthread_barrier_init(&p.start,NULL,2));
+    pthread_t writer; assert(!pthread_create(&writer,NULL,publish_snapshots,&p));
+    /* EVENT_WAIT: both participants start before exercising concurrent publication;
+     * the fixture runner's deadline bounds a stuck barrier or join. */
+    pthread_barrier_wait(&p.start);
+    for(unsigned i=0;i<10000;++i) {
+        struct md_task_snapshot snapshot;
+        assert(!md_task_registry_read(p.registry,123,120,&snapshot));
+        unsigned k=snapshot.identity.uid.effective; assert(k<2);
+        assert(snapshot.mounts==p.resources[k].mounts && snapshot.root.mount==k+1
+            && snapshot.root.object[0]=='a'+(char)k);
+        md_task_snapshot_release(&snapshot);
+    }
+    assert(!pthread_join(writer,NULL));
+    pthread_barrier_destroy(&p.start); md_task_registry_destroy(p.registry);
+    for(unsigned i=0;i<2;++i) {
+        md_identity_release(&p.identities[i]); md_domain_release(p.resources[i].fs);
+        md_mount_namespace_release(p.resources[i].mounts);
+    }
+    puts("PASS concurrent identity/root/mount snapshots are coherent and retained");
 }
 static int change(struct md_inode_store *s, int fd, unsigned op, unsigned mode, uint32_t uid, uint32_t gid) {
     struct md_fs_request q = {.operation=op,.directory={fd,-1},.mode=mode,.flags=MD_AT_EACCESS};
@@ -72,9 +121,13 @@ static void root_context(struct md_inode_store *s) {
     struct md_guest_domain *shared=md_domain_fork(parent,1); assert(shared==parent);
     struct md_guest_domain *sibling=md_domain_fork(parent,0); assert(sibling);
     struct md_filesystem fs={.store=s,.tasks=md_task_registry_create()}; assert(fs.tasks);
-    assert(!md_task_registry_publish(fs.tasks,123,120,&ids,parent));
-    assert(!md_task_registry_publish(fs.tasks,124,120,&ids,shared));
-    assert(!md_task_registry_publish(fs.tasks,125,120,&ids,sibling));
+    assert(!md_fs_mounts_open(&fs,NULL,0));
+    struct md_task_resources resources={.fs=parent,.mounts=fs.mounts};
+    assert(!md_task_registry_publish(fs.tasks,123,120,&ids,&resources));
+    resources.fs=shared;
+    assert(!md_task_registry_publish(fs.tasks,124,120,&ids,&resources));
+    resources.fs=sibling;
+    assert(!md_task_registry_publish(fs.tasks,125,120,&ids,&resources));
     struct md_fs_result out=root_call(&fs,123,MD_FS_CHROOT,-1,"/jail",0,NULL,0);
     assert(!out.error && out.fd==-1);
     for(pid_t task=123;task<=125;task++) {
@@ -82,11 +135,11 @@ static void root_context(struct md_inode_store *s) {
         if(task==125) assert(out.error==-ENOENT);
         else { assert(!out.error && out.fd>=0); close(out.fd); }
     }
-    struct md_fs_location location={0}; struct md_identity snap;
-    assert(md_task_registry_read(fs.tasks,123,119,&snap,&location)==-EPERM);
+    struct md_fs_location location={0}; struct md_task_snapshot snap;
+    assert(md_task_registry_read(fs.tasks,123,119,&snap)==-EPERM);
     assert(md_task_registry_set_root(fs.tasks,123,119,&location)==-EPERM);
-    assert(!md_task_registry_read(fs.tasks,123,120,&snap,&location) && location.object[0]);
-    md_identity_release(&snap);
+    assert(!md_task_registry_read(fs.tasks,123,120,&snap) && snap.root.object[0]);
+    assert(snap.mounts==fs.mounts); md_task_snapshot_release(&snap);
     out=root_call(&fs,123,MD_FS_OPEN,-1,"/",O_RDONLY|O_DIRECTORY,NULL,0);
     assert(!out.error); int root=out.fd;
     struct stat st; assert(!md_inode_fstat(s,root,&st));
@@ -107,7 +160,8 @@ static void root_context(struct md_inode_store *s) {
     out=root_call(&fs,124,MD_FS_OPEN,-1,"/sub/../../value",O_RDONLY,NULL,0);
     assert(!out.error); close(out.fd);
     struct md_guest_domain *split=md_domain_unshare_prepare(shared); assert(split && split!=shared);
-    assert(!md_task_registry_publish(fs.tasks,124,120,&ids,split));
+    resources.fs=split;
+    assert(!md_task_registry_publish(fs.tasks,124,120,&ids,&resources));
     md_domain_release(shared);
     out=root_call(&fs,124,MD_FS_CHROOT,-1,"/sub",0,NULL,0); assert(!out.error);
     out=root_call(&fs,123,MD_FS_OPEN,-1,"/value",O_RDONLY,NULL,0); assert(!out.error); close(out.fd);
@@ -139,7 +193,7 @@ static void accounts(struct md_inode_store *s) {
     assert(md_guest_user_resolve(&fs,"1000:",&selected)==-EINVAL);
 }
 int main(int argc, char **argv) {
-    assert(argc == 2); identities(); umask(0);
+    assert(argc == 2); identities(); concurrent_snapshots(); umask(0);
     struct md_inode_store *s = NULL;
     assert(!md_inode_store_open(argv[1], 1, &s));
     struct md_identity root=md_identity_new(0,0), user=md_identity_new(1000,1000), other=md_identity_new(1001,1001);

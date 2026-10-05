@@ -6,6 +6,7 @@ struct md_fs_attachment;
 struct md_image_catalogue;
 struct md_fs_worker;
 struct md_task_registry;
+struct md_mount_namespace;
 struct md_fs_work {
     struct md_fs_work *next;
 };
@@ -14,6 +15,8 @@ struct md_fs_work {
 int md_fs_worker_start(const char *store, const char *endpoint, const char *admit, struct md_task_registry *,
         const struct md_fs_attachment *, unsigned attachment_count, int statistics, struct md_fs_worker **out);
 int md_fs_worker_fd(struct md_fs_worker *);
+/* Borrowed until worker_stop; initialized before startup acknowledges readiness. */
+struct md_mount_namespace *md_fs_worker_mounts(struct md_fs_worker *);
 void md_fs_worker_wake(struct md_fs_worker *);
 struct md_fs_work *md_fs_worker_completed(struct md_fs_worker *);
 void md_fs_worker_publish(struct md_fs_worker *, struct md_fs_work *);

@@ -14,7 +14,6 @@ int md_fs_root_select(struct md_filesystem *, const struct md_fs_location *);
 void md_fs_mounts_close(struct md_filesystem *);
 int md_fs_mount_table(struct md_filesystem *, unsigned mountinfo);
 int md_fs_native_mount(struct md_filesystem *, uint64_t native, uint64_t *guest);
-void md_fs_mount_identity_close(struct md_filesystem *);
 /* Dispatches the composed view; the ordinary inode engine remains the backend. */
 void md_fs_mounts_execute(struct md_filesystem *, const struct md_fs_request *,
         struct md_fs_result *, const struct md_fs_output *);

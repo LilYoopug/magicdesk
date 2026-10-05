@@ -19,7 +19,7 @@ set(wire ${src}/fs_wire.c ${src}/event_wait.c)
 set(mounts ${src}/fs_mounts.c ${src}/fs_mount_path.c ${src}/fs_mount_operations.c ${src}/fs_mount_table.c)
 set(inodes ${src}/inode_store.c ${src}/inode_db.c ${src}/inode_events.c ${src}/inode_watch.c ${src}/watch_queue.c ${src}/inode_path.c
     ${src}/inode_directory.c ${src}/inode_import.c ${src}/inode_socket.c ${src}/inode_backing.c ${src}/inode_snapshot.c ${src}/inode_fifo.c ${src}/file_open.c
-    ${src}/guest_identity.c ${src}/task_registry.c ${src}/guest_domain.c ${src}/inode_metadata.c ${src}/inode_capability.c ${src}/inode_acl.c ${src}/posix_acl.c)
+    ${src}/guest_identity.c ${src}/task_registry.c ${src}/guest_domain.c ${src}/mount_namespace.c ${src}/inode_metadata.c ${src}/inode_capability.c ${src}/inode_acl.c ${src}/posix_acl.c)
 set(namespace_engine ${src}/fs_engine.c ${src}/ipc_credentials.c)
 set(ipc ${src}/sysv_ipc.c ${src}/sysv_ipc_db.c ${src}/sysv_sem.c ${src}/sysv_msg.c ${src}/sysv_ipc_transport.c)
 
@@ -79,7 +79,7 @@ install(TARGETS bootstrap supervisor run service image RUNTIME DESTINATION lib)
 option(MAGICDESK_GUEST_FIXTURES "Build standalone native fixtures" OFF)
 if(MAGICDESK_GUEST_FIXTURES)
     guest_executable(test_task_resources ../guest-exec-lab/test_task_resources.c
-        ${src}/task_resources.c ${src}/guest_domain.c ${src}/guest_identity.c ${ipc}
+        ${src}/task_resources.c ${src}/guest_domain.c ${src}/mount_namespace.c ${src}/guest_identity.c ${ipc}
         ${src}/event_wait.c ${raw})
     target_compile_definitions(test_task_resources PRIVATE MD_NO_START MD_USE_LIBC)
     target_compile_options(test_task_resources PRIVATE -iquote ${src} -UNDEBUG)

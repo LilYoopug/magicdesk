@@ -23,6 +23,11 @@ umask, so default ACL inheritance and mode-only creation share one policy.
 There is no automatic identity change after a denied operation. Explicit guest
 users and sealed-image admission share the supervisor's per-task credential model
 without changing the real UID; see [interception](interception.md).
+The authenticated task snapshot retains its mount view together with identity
+and root. The worker borrows that view during dispatch; it cannot substitute its
+initial attachments when a task has no view. Task lifetime and sharing follow
+[process resources](process-resources.md#mount-views), independently of SQLite
+connection ownership.
 
 `namespace.c` is the freestanding syscall adapter. `namespace_proc.c` owns
 host/proc object selection, using the shared `proc_paths.c` classifier. Paths, FD stat, directory
@@ -54,8 +59,8 @@ seccomp filter and the real kernel cwd/descriptors.
   capture it with openat; getcwd reconstructs the current virtual parent path.
   Renaming the directory preserves cwd and inherited dirfd identity.
 - Guest `chroot` selects a directory within the inode store or an explicit native
-  attachment. The authenticated task snapshot supplies its root to this same
-  walker as a mount/object location. Absolute paths/symlinks, `..` and getcwd
+  attachment. The authenticated task snapshot supplies its mount view and root
+  to this same walker as a mount/object location. Absolute paths/symlinks, `..` and getcwd
   share that selection; existing cwd and descriptors are retained. See
   [process resources](process-resources.md#guest-roots) for inheritance and limits.
 - fstat/newfstatat/statx publish namespace link counts and logical owners/modes

@@ -1,7 +1,9 @@
 #define _GNU_SOURCE
 #include "fs_mounts.h"
 #include "inode_watch.h"
+#include "inode_internal.h"
 #include "task_registry.h"
+#include "task_resources.h"
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -108,7 +110,8 @@ static void nested_mounts(const char *base) {
     struct md_guest_domain *context=md_domain_new(); assert(context);
     struct md_identity identity=md_identity_new(0,0);
     fs.tasks=md_task_registry_create(); assert(fs.tasks);
-    assert(!md_task_registry_publish(fs.tasks,123,123,&identity,context));
+    struct md_task_resources resources={.fs=context,.mounts=fs.mounts};
+    assert(!md_task_registry_publish(fs.tasks,123,123,&identity,&resources));
     snprintf(path,sizeof(path),"%s/absolute",source[1]); assert(!symlink("/child/marker",path));
     r=call(&fs,MD_FS_CHROOT,-1,"/tree/renamed",0,0,NULL,0); assert(!r.error);
     alias=opened(&fs,"/../../marker",O_RDONLY); assert(read(alias,bytes,1)==1 && bytes[0]=='1'); close(alias);
@@ -147,6 +150,85 @@ static void nested_mounts(const char *base) {
     puts("PASS nested mount topology, independent readonly, parent IDs, retained covered FDs and rename");
     puts("PASS native roots, root-clamped traversal, absolute symlinks and nested mount visibility");
     puts("PASS failed mount-tree construction releases partial resources without descriptor leaks");
+}
+static void task_mount_views(const char *base) {
+    unsigned before=descriptors();
+    char store[PATH_MAX],host[PATH_MAX],path[PATH_MAX],bytes[8192];
+    snprintf(store,sizeof(store),"%s/task-store",base);
+    snprintf(host,sizeof(host),"%s/task-source",base); assert(!mkdir(host,0700));
+    snprintf(path,sizeof(path),"%s/value",host);
+    int fd=open(path,O_CREAT|O_WRONLY|O_CLOEXEC,0600); assert(fd>=0);
+    assert(write(fd,"native",6)==6); close(fd);
+    struct md_inode_store *s=NULL; assert(!md_inode_store_open(store,1,&s));
+    assert(!md_inode_mkdir(s,-1,"/left",0700) && !md_inode_mkdir(s,-1,"/right",0700));
+    struct md_filesystem views[2]={{.store=s},{.store=s}};
+    struct md_fs_attachment entries[]={{host,"/left",0},{host,"/right",1}};
+    struct md_task_registry *tasks=md_task_registry_create(); assert(tasks);
+    struct md_identity ids=md_identity_new(0,0);
+    struct md_guest_domain *domains[2];
+    for(unsigned i=0;i<2;++i) {
+        assert(!md_fs_mounts_open(&views[i],&entries[i],1));
+        domains[i]=md_domain_new(); assert(domains[i]);
+        struct md_task_resources resources={.fs=domains[i],.mounts=views[i].mounts};
+        assert(!md_task_registry_publish(tasks,123+i,120,&ids,&resources));
+    }
+    /* One worker dispatches alternating actors, never its own default view. */
+    struct md_filesystem fs={.store=s,.tasks=tasks,.mounts=views[0].mounts};
+    struct md_fs_request q={.actor=123,.peer=120,.operation=MD_FS_OPEN,
+        .directory={-1,-1},.flags=O_RDONLY};
+    struct md_fs_output output={.data=bytes,.capacity=sizeof(bytes)};
+    struct md_fs_result out;
+    for(unsigned round=0;round<20;++round) for(unsigned i=0;i<2;++i) {
+        q.actor=123+i; q.operation=MD_FS_OPEN; q.flags=O_RDONLY;
+        q.path[0]=i ? "/right/value" : "/left/value";
+        md_fs_execute(&fs,&q,&out,NULL);
+        assert(!out.error && read(out.fd,bytes,6)==6 && !memcmp(bytes,"native",6)); close(out.fd);
+        q.flags=O_RDWR; md_fs_execute(&fs,&q,&out,NULL);
+        if(i) assert(out.error==-EROFS); else { assert(!out.error); close(out.fd); }
+        q.flags=O_RDONLY; q.path[0]=i ? "/left/value" : "/right/value";
+        md_fs_execute(&fs,&q,&out,NULL); assert(out.error==-ENOENT);
+        q.operation=MD_FS_MOUNT_TABLE; q.flags=1;
+        md_fs_execute(&fs,&q,&out,NULL); assert(!out.error);
+        ssize_t size=read(out.fd,bytes,sizeof(bytes)-1); assert(size>0); bytes[size]=0; close(out.fd);
+        assert(strstr(bytes,i ? "/right ro" : "/left rw"));
+        assert(!strstr(bytes,i ? "/left " : "/right "));
+        assert(fs.mounts==views[0].mounts && !fs.native_root && !s->root_id);
+    }
+    q.actor=123; q.peer=121; q.operation=MD_FS_OPEN; q.path[0]="/left/value"; q.flags=O_RDONLY;
+    md_fs_execute(&fs,&q,&out,NULL); assert(out.error==-EPERM);
+    assert(!md_task_registry_publish(tasks,125,120,&ids,NULL));
+    q.actor=125; q.peer=120;
+    md_fs_execute(&fs,&q,&out,NULL); assert(out.error==-ENOTSUP);
+    struct md_task_snapshot snapshots[2];
+    for(unsigned i=0;i<2;++i) {
+        q.actor=123+i; q.operation=MD_FS_CHROOT; q.path[0]=entries[i].target; q.flags=0;
+        md_fs_execute(&fs,&q,&out,NULL); assert(!out.error);
+        assert(!md_task_registry_read(tasks,123+i,120,&snapshots[i]));
+        assert(snapshots[i].root.mount && snapshots[i].mounts==views[i].mounts);
+    }
+    /* A mismatched retained root must fail, not find the worker's other tree. */
+    struct md_task_resources mismatched={.fs=domains[0],.mounts=views[1].mounts};
+    assert(!md_task_registry_publish(tasks,123,120,&ids,&mismatched));
+    q.actor=123; q.operation=MD_FS_OPEN; q.path[0]="/value"; q.flags=O_RDONLY;
+    md_fs_execute(&fs,&q,&out,NULL); assert(out.error==-ESTALE);
+    assert(!fs.native_root && fs.mounts==views[0].mounts && !s->root_id);
+    for(unsigned i=0;i<2;++i) {
+        md_domain_release(domains[i]);
+        md_fs_mounts_close(&views[i]);
+    }
+    md_task_registry_destroy(tasks);
+    fs=(struct md_filesystem){.store=s};
+    for(unsigned i=0;i<2;++i) {
+        fs.mounts=snapshots[i].mounts;
+        assert(!md_fs_root_select(&fs,&snapshots[i].root));
+        q.operation=MD_FS_OPEN; q.path[0]="/value";
+        md_fs_execute(&fs,&q,&out,&output); assert(!out.error); close(out.fd);
+        fs.mounts=NULL; fs.native_root=NULL; s->root_id=NULL;
+        md_task_snapshot_release(&snapshots[i]);
+    }
+    md_identity_release(&ids); md_inode_store_close(s);
+    assert(descriptors()==before);
+    puts("PASS task-selected mount views, readonly policy, authenticated snapshots, stale roots and retained lifetime");
 }
 int main(int argc, char **argv) {
     assert(argc == 2 && argv[1][0] == '/'); assert(!mkdir(argv[1], 0700));
@@ -254,7 +336,8 @@ int main(int argc, char **argv) {
     struct md_guest_domain *context=md_domain_new(); assert(context);
     struct md_identity identity=md_identity_new(0,0);
     fs.tasks=md_task_registry_create(); assert(fs.tasks);
-    assert(!md_task_registry_publish(fs.tasks,123,123,&identity,context));
+    struct md_task_resources resources={.fs=context,.mounts=fs.mounts};
+    assert(!md_task_registry_publish(fs.tasks,123,123,&identity,&resources));
     int inode_root=md_inode_open(s,-1,"/",O_PATH|O_DIRECTORY,0); assert(inode_root>=0);
     result=call(&fs,MD_FS_CHROOT,-1,"/volume",0,0,NULL,0); assert(!result.error);
     result=call(&fs,MD_FS_OPEN,-1,"/renamed",O_RDONLY,0,NULL,0); assert(!result.error); close(result.fd);
@@ -277,5 +360,6 @@ int main(int argc, char **argv) {
     puts("PASS host-boundary symlinks, guest shared memory, resolution constraints and guest mount tables");
     puts("PASS scoped roots, retained attachments and filtered mount tables");
     nested_mounts(argv[1]);
+    task_mount_views(argv[1]);
     return 0;
 }

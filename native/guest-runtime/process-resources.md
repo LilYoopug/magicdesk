@@ -7,6 +7,7 @@ Android Activities, named environments or launcher configuration.
 | Resource | Clone sharing | Unshare | Exec |
 | --- | --- | --- | --- |
 | Filesystem context | `CLONE_FS` | `CLONE_FS` | Retained |
+| Mount view | Shared independently of `CLONE_FS` | Namespace creation unsupported | Retained |
 | Descriptor table | `CLONE_FILES` | `CLONE_FILES` | Kernel detaches it |
 | Semaphore undo | `CLONE_SYSVSEM` | `CLONE_SYSVSEM` | Retained |
 
@@ -14,9 +15,33 @@ The kernel owns cwd, umask, descriptor tables and open-file descriptions.
 The filesystem context owns guest root selection and the admitted proc-root
 restriction. `task_registry` pins that context alongside each task's identity;
 registry references do not count as CLONE_FS owners. Both filesystem request
-transports capture identity and root through the same registry snapshot.
+transports capture identity, root and the retained mount view in one authenticated
+registry snapshot. A missing task mount view fails explicitly; the worker's
+initial view is not a fallback for another task.
 See [namespace execution](namespace-execution.md) for the launch filesystem and
 [interception](interception.md) for restricted domains.
+
+## Mount Views
+
+`mount_namespace` owns the attachment tree, retained native objects and native
+mount-ID mapping. Tasks, registry entries and in-flight snapshots hold independent
+references. Fork and threads retain the same view, regardless of CLONE_FS;
+unsharing cwd/root or semaphore undo does not split it. Nonleader exec transfers
+the executing task's reference with its other resources. Final release closes
+retained descriptors outside the registry lock.
+
+The filesystem worker builds the initial view before acknowledging readiness,
+and remains the sole executor of path resolution and object registration. The
+supervisor only manages references; it never reads the mutable object cache.
+Registry snapshots stay valid after task replacement or removal. Dispatch selects
+that snapshot's mount view and restores its previous borrowed context on failure
+as well as success. A root from another view is rejected as stale.
+
+An empty view allocates only its owner, not attachment arrays or object indexes;
+requests without attachments retain the direct inode-engine path. Ordinary
+requests acquire references without heap allocation, extra RPC or syscall stops.
+This ownership model does not implement guest CLONE_NEWNS or descriptor provenance
+across copied mount trees. Guest namespace creation still fails explicitly.
 
 ## Guest Roots
 
@@ -103,6 +128,9 @@ unchanged inherited descriptors, failed-change rollback, CLONE_FS with and
 without CLONE_VM, unshare and exec in ordinary/nondumpable tasks. Model checks
 add root rename, enumeration, authenticated task snapshots, mount-table filtering,
 nested readonly/writable attachments and retained covered-directory descriptors.
+They also alternate two task mount views on one worker, check independent readonly
+policy and mount-table output, retain snapshots past registry teardown, and check
+coherent identity/root/mount publication under concurrent readers and writers.
 `test_root_userspace.py` exercises stock Debian/Alpine chroot with each
 distribution's dynamic loader, shell and nested exec in disposable inode-backed
 and attached-native directories.

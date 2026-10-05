@@ -2,6 +2,7 @@
 #define MD_FS_MOUNT_INTERNAL_H
 #include "fs_mounts.h"
 #include <limits.h>
+#include <stdatomic.h>
 
 enum { MD_VIEW_BUCKETS = 4096, MD_VIEW_OBJECT_LIMIT = 65536 };
 /* A mount owns its source and covered dentry. Its parent is a mount, not an
@@ -24,6 +25,11 @@ struct md_fs_mounts {
     struct md_view_mount mounts[MD_FS_MOUNTS_MAX];
     struct md_view_object *table[MD_VIEW_BUCKETS];
     struct md_view_object *by_id[MD_VIEW_BUCKETS];
+};
+struct md_mount_namespace {
+    atomic_uint refs;
+    struct md_fs_mounts *tree;
+    struct md_mount_identity *native_ids;
 };
 struct md_view_location {
     int parent, fd, boundary;

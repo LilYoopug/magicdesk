@@ -4,13 +4,15 @@
 #include <sched.h>
 #include <linux/sched.h>
 
-int md_resources_init(struct md_task_resources *r) {
-    *r = (struct md_task_resources){.fs=md_domain_new(), .sem_undo=md_ipc_undo_new()};
+int md_resources_init(struct md_task_resources *r, struct md_mount_namespace *mounts) {
+    *r = (struct md_task_resources){.fs=md_domain_new(), .sem_undo=md_ipc_undo_new(),
+        .mounts=md_mount_namespace_retain(mounts)};
     if (r->fs && r->sem_undo) return 0;
     md_resources_release(NULL, r); return -ENOMEM;
 }
 int md_resources_release(struct md_ipc *ipc, struct md_task_resources *r) {
     md_domain_release(r->fs);
+    md_mount_namespace_release(r->mounts);
     int error = md_ipc_undo_release(ipc, r->sem_undo);
     *r = (struct md_task_resources){0};
     return error;
@@ -20,7 +22,7 @@ int md_resources_fork(const struct md_task_resources *r, unsigned long flags,
     *out = (struct md_task_resources){.fs=md_domain_fork(r->fs, !!(flags & CLONE_FS))};
     if (!out->fs) return -ENOMEM;
     out->sem_undo = md_ipc_undo_fork(r->sem_undo, !!(flags & CLONE_SYSVSEM));
-    if (out->sem_undo) return 0;
+    if (out->sem_undo) { out->mounts=md_mount_namespace_retain(r->mounts); return 0; }
     md_domain_release(out->fs); out->fs = NULL; return -ENOMEM;
 }
 int md_resources_clone_supported(unsigned long flags) {

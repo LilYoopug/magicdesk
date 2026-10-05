@@ -12,11 +12,15 @@
 struct md_mount_identity { uint64_t native[4096]; unsigned count; };
 int md_fs_native_mount(struct md_filesystem *fs, uint64_t native, uint64_t *guest) {
     if (!native) return -EINVAL;
-    if (!fs->mount_identity) {
-        fs->mount_identity=calloc(1,sizeof(*fs->mount_identity));
-        if (!fs->mount_identity) return -ENOMEM;
+    if (!fs->mounts) {
+        fs->mounts=md_mount_namespace_new();
+        if (!fs->mounts) return -ENOMEM;
     }
-    struct md_mount_identity *ids=fs->mount_identity;
+    if (!fs->mounts->native_ids) {
+        fs->mounts->native_ids=calloc(1,sizeof(*fs->mounts->native_ids));
+        if (!fs->mounts->native_ids) return -ENOMEM;
+    }
+    struct md_mount_identity *ids=fs->mounts->native_ids;
     unsigned i;
     for (i=0; i<ids->count; ++i) if (ids->native[i]==native) break;
     if (i==ids->count) {
@@ -25,9 +29,6 @@ int md_fs_native_mount(struct md_filesystem *fs, uint64_t native, uint64_t *gues
     }
     *guest=MD_FS_ATTACHMENT_MOUNT+MD_FS_MOUNTS_MAX+i;
     return 0;
-}
-void md_fs_mount_identity_close(struct md_filesystem *fs) {
-    free(fs->mount_identity); fs->mount_identity=NULL;
 }
 
 static int below(const char *path, const char *root) {
@@ -100,8 +101,9 @@ int md_fs_mount_table(struct md_filesystem *fs, unsigned info) {
             if (!r) entry(stream,info,MD_FS_SHM_MOUNT,dev_id,root.st_dev,"/dev/shm","guestfs","guest",fs->store->readonly);
         }
     }
-    if (fs->mounts) for (unsigned i=0; !r && i<fs->mounts->count; ++i) {
-        const struct md_view_mount *m=&fs->mounts->mounts[i];
+    struct md_fs_mounts *tree=fs->mounts ? fs->mounts->tree : NULL;
+    if (tree) for (unsigned i=0; !r && i<tree->count; ++i) {
+        const struct md_view_mount *m=&tree->mounts[i];
         char path[PATH_MAX]; r=md_view_path(fs,m->target,m->parent,path,sizeof(path));
         if (r == -ENOENT && (fs->store->root_id || fs->native_root)) { r=0; continue; }
         if (!r) entry(stream,info,m->id,m->parent ? m->parent->id : MD_FS_ROOT_MOUNT,

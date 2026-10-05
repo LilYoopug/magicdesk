@@ -20,6 +20,7 @@ struct md_fs_worker {
     int wake, done, stop, ready, error, statistics;
     const char *store, *endpoint, *admit;
     struct md_task_registry *tasks;
+    struct md_mount_namespace *mounts;
     const struct md_fs_attachment *attachments;
     unsigned attachment_count;
     struct md_fs_work *completed, **completed_tail;
@@ -65,7 +66,9 @@ static void *run(void *context) {
     struct md_filesystem fs = {.store=store, .images=images, .tasks=w->tasks, .ipc_store=w->store};
     if (!error) error = md_fs_mounts_open(&fs, w->attachments, w->attachment_count);
     if (!error) { listener = md_fs_listen(w->endpoint); if (listener < 0) error = listener; }
-    pthread_mutex_lock(&w->lock); w->error = error; pthread_mutex_unlock(&w->lock);
+    pthread_mutex_lock(&w->lock);
+    w->mounts=md_mount_namespace_retain(fs.mounts); w->error=error;
+    pthread_mutex_unlock(&w->lock);
     wake(w->ready);
     struct md_inode_statistics stats = {0};
     struct md_fs_statistics rpc = {0};
@@ -136,6 +139,7 @@ failed:
     pthread_mutex_destroy(&w->lock); free(w); return error;
 }
 int md_fs_worker_fd(struct md_fs_worker *w) { return w ? w->done : -1; }
+struct md_mount_namespace *md_fs_worker_mounts(struct md_fs_worker *w) { return w ? w->mounts : NULL; }
 void md_fs_worker_wake(struct md_fs_worker *w) { if (w) wake(w->wake); }
 int md_fs_worker_error(struct md_fs_worker *w) {
     pthread_mutex_lock(&w->lock); int error = w->error; pthread_mutex_unlock(&w->lock);
@@ -177,6 +181,7 @@ int md_fs_worker_stop(struct md_fs_worker *w) {
     int error = pthread_join(w->thread, NULL);
     if (!error && w->error != -ESHUTDOWN) error = -w->error;
     close(w->wake); close(w->done); close(w->stop); close(w->ready);
+    md_mount_namespace_release(w->mounts);
     pthread_mutex_destroy(&w->lock); free(w);
     return -error;
 }

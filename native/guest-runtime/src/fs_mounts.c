@@ -35,8 +35,8 @@ static unsigned id_bucket(const char *id) {
     return hash % MD_VIEW_BUCKETS;
 }
 struct md_view_object *md_view_object(struct md_filesystem *fs, const char *id) {
-    if (!fs->mounts || !id) return NULL;
-    for (struct md_view_object *p=fs->mounts->by_id[id_bucket(id)]; p; p=p->id_next)
+    if (!md_mount_namespace_attached(fs->mounts) || !id) return NULL;
+    for (struct md_view_object *p=fs->mounts->tree->by_id[id_bucket(id)]; p; p=p->id_next)
         if (!strcmp(p->id,id)) return p;
     return NULL;
 }
@@ -48,7 +48,7 @@ static struct md_view_object *find(struct md_fs_mounts *m, const struct stat *st
 int md_view_record(struct md_filesystem *fs, int fd, struct md_view_mount *mount, struct md_view_object **out) {
     struct stat st;
     if (fstat(fd, &st)) return -errno;
-    struct md_fs_mounts *m = fs->mounts;
+    struct md_fs_mounts *m = fs->mounts->tree;
     struct md_view_object *p = find(m, &st);
     if (p) {
         /* One native object cannot silently acquire conflicting mount policy. */
@@ -76,20 +76,21 @@ int md_view_record(struct md_filesystem *fs, int fd, struct md_view_mount *mount
 }
 int md_view_identity(struct md_filesystem *fs, int fd, struct md_view_object **out) {
     *out = NULL;
-    if (fd < 0) return -EXDEV;
+    if (fd < 0 || !md_mount_namespace_attached(fs->mounts)) return -EXDEV;
     struct stat st;
     if (fstat(fd, &st)) return -errno;
-    struct md_view_object *p = find(fs->mounts, &st);
+    struct md_fs_mounts *m = fs->mounts->tree;
+    struct md_view_object *p = find(m, &st);
     if (p) { *out = p; return 0; }
     /* Admit inherited/native descriptors only when their current dentry is in
      * an explicitly attached tree. Registered identities survive unlink/rename. */
     char path[PATH_MAX], root[PATH_MAX];
     int r = md_view_fdpath(fd, path, sizeof(path));
     if (r) return r;
-    for (unsigned i = 0; i < fs->mounts->count; ++i) {
-        r = md_view_fdpath(fs->mounts->mounts[i].source, root, sizeof(root));
+    for (unsigned i = 0; i < m->count; ++i) {
+        r = md_view_fdpath(m->mounts[i].source, root, sizeof(root));
         if (r) return r;
-        if (beneath(path, root)) return md_view_record(fs, fd, &fs->mounts->mounts[i], out);
+        if (beneath(path, root)) return md_view_record(fs, fd, &m->mounts[i], out);
     }
     return -EXDEV;
 }
@@ -152,28 +153,21 @@ int md_fs_root_select(struct md_filesystem *fs, const struct md_fs_location *roo
     return 0;
 }
 void md_fs_mounts_close(struct md_filesystem *fs) {
-    md_fs_mount_identity_close(fs);
-    struct md_fs_mounts *m = fs->mounts;
-    if (!m) return;
-    for (unsigned i = 0; i < MD_VIEW_BUCKETS; ++i) {
-        struct md_view_object *p = m->table[i];
-        while (p) { struct md_view_object *next = p->next; close(p->fd); free(p); p = next; }
-    }
-    for (unsigned i = 0; i < m->count; ++i) {
-        if (m->mounts[i].source >= 0) close(m->mounts[i].source);
-        if (m->mounts[i].target >= 0) close(m->mounts[i].target);
-    }
-    free(m); fs->mounts = NULL; fs->native_root = NULL;
+    md_mount_namespace_release(fs->mounts);
+    fs->mounts = NULL; fs->native_root = NULL;
 }
 int md_fs_mounts_open(struct md_filesystem *fs, const struct md_fs_attachment *entries, unsigned count) {
     if (fs->mounts || count > MD_FS_MOUNTS_MAX) return -EINVAL;
-    if (!count) return 0;
-    fs->mounts = calloc(1, sizeof(*fs->mounts));
+    fs->mounts = md_mount_namespace_new();
     if (!fs->mounts) return -ENOMEM;
+    if (!count) return 0;
+    struct md_fs_mounts *tree = calloc(1,sizeof(*tree));
+    if (!tree) { md_fs_mounts_close(fs); return -ENOMEM; }
+    fs->mounts->tree = tree;
     int r = 0;
     for (unsigned i = 0; i < count && !r; ++i) {
         const struct md_fs_attachment *entry = &entries[i];
-        struct md_view_mount *m = &fs->mounts->mounts[fs->mounts->count];
+        struct md_view_mount *m = &tree->mounts[tree->count];
         m->source = m->target = -1; m->readonly = entry->readonly;
         m->id = MD_FS_ATTACHMENT_MOUNT + i;
         if (!entry->source || !entry->target || entry->source[0] != '/' || entry->target[0] != '/') { r = -EINVAL; break; }
@@ -193,18 +187,18 @@ int md_fs_mounts_open(struct md_filesystem *fs, const struct md_fs_attachment *e
         if (!r && (!strcmp(target, "/") || beneath(target, "/dev") || beneath(target, "/proc") || beneath(target, "/sys"))) r = -EINVAL;
         for (unsigned j = 0; j < i && !r; ++j) {
             char other[PATH_MAX];
-            r = md_view_fdpath(fs->mounts->mounts[j].source, other, sizeof(other));
+            r = md_view_fdpath(tree->mounts[j].source, other, sizeof(other));
             if (!r && (beneath(source, other) || beneath(other, source))) r = -EXDEV;
-            struct md_view_mount *prior = &fs->mounts->mounts[j];
+            struct md_view_mount *prior = &tree->mounts[j];
             if (!r) r = md_view_path(fs, prior->target, prior->parent, other, sizeof(other));
             /* Covering an existing subtree requires explicit mount-stack and
              * open-description ownership; never silently hide earlier entries. */
             if (!r && beneath(other, target)) r = -EBUSY;
         }
-        if (!r) ++fs->mounts->count;
+        if (!r) ++tree->count;
     }
     if (r) {
-        struct md_view_mount *pending = &fs->mounts->mounts[fs->mounts->count];
+        struct md_view_mount *pending = &tree->mounts[tree->count];
         if (pending->source >= 0) close(pending->source);
         if (pending->target >= 0) close(pending->target);
     }

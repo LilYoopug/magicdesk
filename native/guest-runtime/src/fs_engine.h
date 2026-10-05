@@ -2,16 +2,15 @@
 #define MD_FS_ENGINE_H
 #include "fs_operation.h"
 #include "inode_store.h"
+#include "mount_namespace.h"
 struct md_image_catalogue;
-struct md_fs_mounts;
-/* One launch view borrows its store and admitted images. Attachments belong to
- * the same worker, never to persisted image metadata or a global namespace. */
+/* The worker borrows its store/images and retains an initial mount view.
+ * Authenticated task requests borrow their own retained view for dispatch. */
 struct md_filesystem {
     struct md_inode_store *store;
     struct md_image_catalogue *images;
-    struct md_fs_mounts *mounts;
+    struct md_mount_namespace *mounts;
     struct md_view_object *native_root;
-    struct md_mount_identity *mount_identity;
     struct md_task_registry *tasks;
     struct md_ipc_credentials *ipc;
     const char *ipc_store;

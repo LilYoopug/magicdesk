@@ -591,14 +591,14 @@ static void image_request(struct thread *t, const struct seccomp_notif *q) {
                 reply.error = -EFAULT;
             if (!reply.error) {
                 reply.val = next->secure;
-                CHECK(!md_task_registry_publish(tasks, t->pid, t->tgid, &next->value, t->resources.fs));
+                CHECK(!md_task_registry_publish(tasks, t->pid, t->tgid, &next->value, &t->resources));
                 if (!ioctl(listener, SECCOMP_IOCTL_NOTIF_SEND, &reply)) {
                     t->identity = next->value; t->mapped_image = 0; t->entered = 1;
                     TRACE("PROBE entered-image pid=%d uid=%u euid=%u secure=%d\n", t->pid,
                         t->identity.uid.real, t->identity.uid.effective, next->secure);
                 } else {
                     CHECK(errno == ENOENT);
-                    CHECK(!md_task_registry_publish(tasks, t->pid, t->tgid, &t->identity, t->resources.fs));
+                    CHECK(!md_task_registry_publish(tasks, t->pid, t->tgid, &t->identity, &t->resources));
                 }
                 return;
             }
@@ -904,8 +904,10 @@ static void identity_copy_finish(struct thread *t, int error) {
         struct md_identity ids = md_identity_copy(&t->identity);
         if (pid && pid != t->pid) {
             md_identity_release(&ids);
-            error = r.regs[8] == SYS_capset ? -EPERM : md_task_registry_read(tasks, pid, 0, &ids, NULL);
-            if (error) ids = (struct md_identity){0};
+            struct md_task_snapshot snapshot={0};
+            error = r.regs[8] == SYS_capset ? -EPERM : md_task_registry_read(tasks, pid, 0, &snapshot);
+            ids=md_identity_copy(&snapshot.identity);
+            md_task_snapshot_release(&snapshot);
         }
         if (!error && r.regs[8] == SYS_capget && !r.regs[1]) {
             md_identity_release(&ids); t->identity_stage = COPY_CAP_DATA;
@@ -1169,7 +1171,7 @@ static int descriptor_call(struct thread *t, struct user_pt_regs *r, unsigned lo
 static void resume(pid_t pid, int sig) {
     struct thread *t = thread(pid);
     if (t->resume_lost) return;
-    CHECK(!md_task_registry_publish(tasks, t->pid, t->tgid, &t->identity, t->resources.fs));
+    CHECK(!md_task_registry_publish(tasks, t->pid, t->tgid, &t->identity, &t->resources));
     enum phase phase = t->phase;
     if (t->debug_options_dirty && debugger_options(pid,t->debug_options)) return;
     if (phase!=IDLE && t->debug_call_active) t->debug_adapter=1;
@@ -1436,6 +1438,11 @@ int main(int argc, char **argv) {
         int startup = md_fs_worker_start(store, endpoint, admitted_path, tasks, attachments, attachment_count, statistics != NULL, &filesystem);
         if (startup) errno = -startup;
         CHECK(!startup);
+        struct md_mount_namespace *mounts=md_fs_worker_mounts(filesystem);
+        struct md_task_resources owner_resources={.mounts=mounts};
+        CHECK(!md_task_registry_publish(tasks,getpid(),getpid(),&owner,&owner_resources));
+        CHECK(!md_resources_init(&thread(leader)->resources,mounts));
+        CHECK(!md_task_registry_publish(tasks,leader,leader,&thread(leader)->identity,&thread(leader)->resources));
         broker = md_broker_create(filesystem, statistics != NULL); CHECK(broker);
         const char *program = "", *cwd = "/";
         for (int i = argument+1; i+1 < argc; ++i) {
@@ -1769,7 +1776,7 @@ int main(int argc, char **argv) {
                 continue;
             }
             if (!t->ready && t->phase == IDLE && regs.regs[2] == MD_INTERCEPTION_MAGIC) {
-                if (!t->resources.fs) CHECK(!md_resources_init(&t->resources));
+                if (!t->resources.fs) CHECK(!md_resources_init(&t->resources,md_fs_worker_mounts(filesystem)));
                 struct md_interception_abi received;
                 struct iovec local = {&received, sizeof(received)}, remote = {(void *)regs.regs[3], sizeof(received)};
                 CHECK(process_vm_readv(pid, &local, 1, &remote, 1, 0) == sizeof(received));

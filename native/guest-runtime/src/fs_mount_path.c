@@ -28,8 +28,9 @@ int md_view_open_component(struct md_filesystem *fs, struct md_view_mount *mount
 static int enter(struct md_filesystem *fs, int *fd, struct md_view_mount **mount, uint64_t resolve) {
     struct stat st;
     if (fstat(*fd, &st)) return -errno;
-    for (unsigned i = 0; i < fs->mounts->count; ++i) {
-        struct md_view_mount *m = &fs->mounts->mounts[i];
+    struct md_fs_mounts *tree = fs->mounts->tree;
+    for (unsigned i = 0; i < tree->count; ++i) {
+        struct md_view_mount *m = &tree->mounts[i];
         if (m->parent != *mount || !md_view_same(&st, &m->guest)) continue;
         if (resolve & RESOLVE_NO_XDEV) return -EXDEV;
         int copy = duplicate(m->source);
