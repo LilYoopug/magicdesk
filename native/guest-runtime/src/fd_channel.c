@@ -72,22 +72,27 @@ int md_fd_channel_output_begin(struct md_fd_channel *c, struct md_resource_order
         struct md_resource_wakeup *wake) {
     return c ? md_resource_order_begin(&c->output,order,wake) : -EINVAL;
 }
-int md_fd_channel_output_send(struct md_fd_channel *c, int fd, uint64_t *request) {
-    if (!c || fd<0 || !request) return -EINVAL;
+int md_fd_channel_output_vector(struct md_fd_channel *c, const int *fds, unsigned count, uint64_t *request) {
+    if (!c || !fds || !count || count>253 || !request) return -EINVAL;
+    for (unsigned i=0;i<count;++i) if (fds[i]<0) return -EINVAL;
     if (c->sequence==UINT64_MAX) return -EOVERFLOW;
     uint64_t id=++c->sequence;
     struct iovec vector={&id,sizeof(id)};
-    union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(int))]; } control={0};
+    union { struct cmsghdr align; char bytes[CMSG_SPACE(253*sizeof(int))]; } control;
     struct msghdr message={.msg_iov=&vector,.msg_iovlen=1,
-        .msg_control=control.bytes,.msg_controllen=sizeof(control)};
+        .msg_control=control.bytes,.msg_controllen=CMSG_SPACE(count*sizeof(int))};
+    memset(&control,0,message.msg_controllen);
     struct cmsghdr *h=CMSG_FIRSTHDR(&message);
-    h->cmsg_level=SOL_SOCKET; h->cmsg_type=SCM_RIGHTS; h->cmsg_len=CMSG_LEN(sizeof(int));
-    memcpy(CMSG_DATA(h),&fd,sizeof(fd));
+    h->cmsg_level=SOL_SOCKET; h->cmsg_type=SCM_RIGHTS; h->cmsg_len=CMSG_LEN(count*sizeof(int));
+    memcpy(CMSG_DATA(h),fds,count*sizeof(int));
     ssize_t n;
     do n=sendmsg(c->receive,&message,MSG_NOSIGNAL|MSG_DONTWAIT); while (n<0 && errno==EINTR);
     if (n<0) return -errno;
     if (n!=sizeof(id)) return -EIO;
     *request=id; return 0;
+}
+int md_fd_channel_output_send(struct md_fd_channel *c, int fd, uint64_t *request) {
+    return md_fd_channel_output_vector(c,&fd,1,request);
 }
 int md_fd_channel_output_discard(struct md_fd_channel *c) {
     if (!c) return -EINVAL;
@@ -107,12 +112,17 @@ void md_fd_channel_input_close(struct md_fd_channel_input *message) {
     for (unsigned i=0;i<message->count;++i) close(message->fd[i]);
     message->count=0;
 }
-static int read_input(struct md_fd_channel *c, struct md_fd_channel_input *out) {
+struct input_vector { uint64_t request; pid_t peer; unsigned count; int fd[253]; };
+static void close_vector(struct input_vector *v) {
+    for (unsigned i=0;i<v->count;++i) close(v->fd[i]);
+    v->count=0;
+}
+static int read_input(struct md_fd_channel *c, struct input_vector *out) {
     if (!c || !out) return -EINVAL;
-    *out=(struct md_fd_channel_input){0};
+    *out=(struct input_vector){0};
     struct iovec vector={&out->request,sizeof(out->request)};
     union { struct cmsghdr align;
-        char bytes[CMSG_SPACE(2*sizeof(int))+CMSG_SPACE(sizeof(struct ucred))]; } control={0};
+        char bytes[CMSG_SPACE(253*sizeof(int))+CMSG_SPACE(sizeof(struct ucred))]; } control;
     struct msghdr message={.msg_iov=&vector,.msg_iovlen=1,
         .msg_control=control.bytes,.msg_controllen=sizeof(control)};
     ssize_t n;
@@ -127,7 +137,7 @@ static int read_input(struct md_fd_channel *c, struct md_fd_channel_input *out) 
             if (size%sizeof(int)) invalid=1;
             for (size_t i=0;i<size/sizeof(int);++i) {
                 int fd; memcpy(&fd,CMSG_DATA(h)+i*sizeof(fd),sizeof(fd));
-                if (out->count<2) out->fd[out->count++]=fd;
+                if (out->count<253) out->fd[out->count++]=fd;
                 else { close(fd); invalid=1; }
             }
         } else if (h->cmsg_type==SCM_CREDENTIALS && size==sizeof(struct ucred) && !out->peer) {
@@ -137,21 +147,23 @@ static int read_input(struct md_fd_channel *c, struct md_fd_channel_input *out) 
         } else invalid=1;
     }
     if (!out->peer || !out->count) invalid=1;
-    if (invalid) { md_fd_channel_input_close(out); return -EPROTO; }
+    if (invalid) { close_vector(out); return -EPROTO; }
     return 1;
 }
 static int dispatch_inputs(struct md_fd_channel *c) {
     for (;;) {
-        struct md_fd_channel_input input;
+        struct input_vector input;
         int result=read_input(c,&input);
         if (result==-EPROTO) continue;
         if (result<=0) return result;
         struct md_fd_channel_capture *r=c->inputs;
         while (r && r->request!=input.request) r=r->next;
         if (r && !r->input.count && r->peer==input.peer && r->expected==input.count) {
-            r->input=input; input.count=0;
+            r->input.request=input.request; r->input.peer=input.peer; r->input.count=input.count;
+            memcpy(r->vector ? r->vector : r->input.fd,input.fd,input.count*sizeof(int));
+            input.count=0;
         }
-        md_fd_channel_input_close(&input);
+        close_vector(&input);
     }
 }
 static void release_capture(struct md_fd_channel_capture *r) {
@@ -159,20 +171,31 @@ static void release_capture(struct md_fd_channel_capture *r) {
     struct md_fd_channel_capture **p=&c->inputs;
     while (*p && *p!=r) p=&(*p)->next;
     if (*p) *p=r->next;
-    md_fd_channel_input_close(&r->input);
+    for (unsigned i=0;i<r->input.count;++i) close((r->vector ? r->vector : r->input.fd)[i]);
     *r=(struct md_fd_channel_capture){0};
     md_fd_channel_release(c);
 }
-int md_fd_channel_capture_begin(struct md_fd_channel *c, pid_t peer, unsigned count,
-        struct md_fd_channel_capture *r) {
-    if (!c || !r || r->channel || peer<=0 || !count || count>2) return -EINVAL;
+int md_fd_channel_capture_vector_begin(struct md_fd_channel *c, pid_t peer, unsigned count,
+        int *vector, struct md_fd_channel_capture *r) {
+    if (!c || !r || r->channel || peer<=0 || !count || count>(vector ? 253U : 2U)) return -EINVAL;
     if (c->sequence==UINT64_MAX) return -EOVERFLOW;
     *r=(struct md_fd_channel_capture){.channel=md_fd_channel_retain(c),.request=++c->sequence,
-        .peer=peer,.expected=count,.next=c->inputs};
+        .peer=peer,.expected=count,.next=c->inputs,.vector=vector};
     c->inputs=r; return 0;
 }
+int md_fd_channel_capture_begin(struct md_fd_channel *c, pid_t peer, unsigned count,
+        struct md_fd_channel_capture *r) {
+    return md_fd_channel_capture_vector_begin(c,peer,count,NULL,r);
+}
+int md_fd_channel_capture_vector_finish(struct md_fd_channel_capture *r) {
+    if (!r || !r->channel || !r->vector) return -EINVAL;
+    int result=dispatch_inputs(r->channel);
+    if (!result && !r->input.count) result=-EPROTO;
+    if (!result) r->input.count=0;
+    release_capture(r); return result;
+}
 int md_fd_channel_capture_finish(struct md_fd_channel_capture *r, struct md_fd_channel_input *out) {
-    if (!r || !r->channel || !out) return -EINVAL;
+    if (!r || !r->channel || r->vector || !out) return -EINVAL;
     *out=(struct md_fd_channel_input){0};
     int result=dispatch_inputs(r->channel);
     if (!result && !r->input.count) result=-EPROTO;

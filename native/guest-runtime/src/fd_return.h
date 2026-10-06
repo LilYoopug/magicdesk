@@ -13,12 +13,18 @@ struct md_fd_return {
     struct md_fd_delivery delivery;
     struct md_fd_origin_update update;
     int source, endpoint, number, offered, admission, checking;
+    const int *vector;
+    unsigned count;
     uint64_t request;
 };
 enum { MD_FD_RETURN_WAIT, MD_FD_RETURN_READY, MD_FD_RETURN_ADMIT, MD_FD_RETURN_CHECK };
 struct md_fd_channel_observation;
 int md_fd_return_begin(struct md_fd_return *, struct md_fd_origins *, int source,
         struct md_fs_anchor *, unsigned flags, struct md_fd_receipt *, struct md_resource_wakeup *);
+/* Ancillary delivery goes directly into application control memory. The kernel
+ * owns partial-copy installation; cancellation only discards unreceived rights. */
+int md_fd_return_vector_begin(struct md_fd_return *, struct md_fd_origins *,
+        const int *, unsigned, struct md_resource_wakeup *);
 /* Owner-loop progress only. ADMIT requests one atomic channel installation;
  * READY means the packet is queued for a single nonblocking task-local receive. */
 int md_fd_return_progress(struct md_fd_return *, struct md_resource_wakeup *);

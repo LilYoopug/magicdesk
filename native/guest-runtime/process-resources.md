@@ -469,10 +469,15 @@ their own resource and authority contracts.
 
 Guest filesystem calls use mapped requests, not private per-call RPC sockets.
 The admitted table-owned export/return endpoints have explicit table lifetime;
-ordinary requests borrow them. Adapter custody is still incomplete for explicit
-credential-message tokens, unpublished application rights and direct-image
-fallback descriptors. Terminal cleanup cannot safely close remembered numbers
-after reuse, or assume a dying task can execute another syscall.
+ordinary requests borrow them. Sending credential capabilities stay in the
+worker and a private-table helper, whose reaping bounds their lifetime. Receiving
+uses a private table and supervisor-owned source descriptions until kernel
+publication directly into application control memory. Cancellation releases only
+unpublished resources; published rights belong to the application. Batch
+publication ordering and native quota differences remain explicit limits in
+[Unix IPC Credentials](ipc-credentials.md). Direct-image fallback descriptors
+still need terminal-custody coverage. Cleanup cannot safely close remembered
+numbers after reuse, or assume a dying task can execute another syscall.
 
 The service owns its accepted endpoint, receipt and retained request context.
 Closing the authenticated exchange signals a launch-owned eventfd, independently

@@ -292,8 +292,9 @@ static int socket_error(int socket) {
     assert(!getsockopt(socket,SOL_SOCKET,SO_ERROR,&error,&size) && size==sizeof(error));
     return error;
 }
-static void rights_socket_error(void) {
-    /* A kernel payload fault preserves socket error state independently of adapter publication. */
+static void rights_socket_error(unsigned fault) {
+    /* Observe socket-owned error state through independent aliases/consumers.
+     * Faults: payload, header outputs, source address, per-entry msg_len. */
     size_t page=(size_t)sysconf(_SC_PAGESIZE);
     void *unwritable=mmap(NULL,page,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
     assert(unwritable!=MAP_FAILED);
@@ -302,17 +303,36 @@ static void rights_socket_error(void) {
         assert(!socketpair(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK,0,sockets)
             && !pipe2(pipefd,O_NONBLOCK|O_CLOEXEC));
         int alias=dup(sockets[1]); assert(alias>=0);
+        if (fault==2) {
+            struct sockaddr_un address={.sun_family=AF_UNIX};
+            snprintf(address.sun_path+1,sizeof(address.sun_path)-1,"md-batch-error-%ld-%u",(long)getpid(),consumer);
+            assert(!bind(sockets[0],(void *)&address,offsetof(struct sockaddr_un,sun_path)
+                +1+strlen(address.sun_path+1)));
+        }
         for (unsigned i=0;i<3;++i) send_rights(sockets[0],pipefd[1],2);
         assert(!close(pipefd[1]));
         union control control[3]={0}; char bytes[3]={0};
-        struct iovec vectors[3]; struct mmsghdr messages[3]={0};
+        struct iovec vectors[3]; struct mmsghdr local[3]={0};
+        char *mapping=NULL; struct mmsghdr *messages=local;
+        if (fault==1 || fault==3) {
+            mapping=mmap(NULL,2*page,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+            assert(mapping!=MAP_FAILED);
+            messages=(void *)(mapping+page-sizeof(*messages)-(fault==3 ? offsetof(struct mmsghdr,msg_len) : 0));
+        }
         for (unsigned i=0;i<3;++i) {
-            vectors[i]=(struct iovec){i==1 ? unwritable : (void *)(bytes+i),1};
+            vectors[i]=(struct iovec){!fault && i==1 ? unwritable : (void *)(bytes+i),1};
             messages[i].msg_hdr=(struct msghdr){.msg_iov=vectors+i,.msg_iovlen=1,
                 .msg_control=control[i].bytes,.msg_controllen=sizeof(control[i])};
         }
+        if (fault==2) { messages[1].msg_hdr.msg_name=unwritable; messages[1].msg_hdr.msg_namelen=sizeof(struct sockaddr_un); }
+        if (mapping) assert(!mprotect(mapping+page,page,PROT_READ));
         assert(recvmmsg(sockets[1],messages,3,MSG_CMSG_CLOEXEC,NULL)==1);
-        close_descriptors(&messages[0].msg_hdr,1);
+        int payloads=(bytes[0]=='x')+(bytes[1]=='x')+(bytes[2]=='x');
+        for (unsigned i=0;i<3;++i) if (control[i].align.cmsg_len) {
+            struct msghdr published=messages[i].msg_hdr;
+            published.msg_controllen=CMSG_ALIGN(control[i].align.cmsg_len);
+            close_descriptors(&published,1);
+        }
         struct pollfd pollfd={.fd=alias,.events=0};
         assert(poll(&pollfd,1,0)>=0);
         int epoll=epoll_create1(EPOLL_CLOEXEC); assert(epoll>=0);
@@ -321,8 +341,8 @@ static void rights_socket_error(void) {
         int n=epoll_wait(epoll,&ready,1,0); assert(n>=0);
         int reported=0;
         if (consumer==0) reported=socket_error(alias);
-        else if (consumer==1) { errno=0; assert(read(alias,bytes,1)==-1); reported=errno; }
-        else if (consumer==2) { errno=0; assert(recv(alias,bytes,1,MSG_DONTWAIT)==-1); reported=errno; }
+        else if (consumer==1) { errno=0; ssize_t r=read(alias,bytes,1); assert(r==-1 || r==1); reported=r<0 ? errno : 0; }
+        else if (consumer==2) { errno=0; ssize_t r=recv(alias,bytes,1,MSG_DONTWAIT); assert(r==-1 || r==1); reported=r<0 ? errno : 0; }
         else {
             pid_t child=fork(); assert(child>=0);
             if (!child) _exit(socket_error(alias));
@@ -333,9 +353,11 @@ static void rights_socket_error(void) {
         unsigned queued=0;
         while (recv(alias,bytes,1,MSG_DONTWAIT)==1) ++queued;
         assert(errno==EAGAIN && read(pipefd[0],bytes,1)==0);
-        printf("OBS rights-socket-error consumer=%u pollerr=%d epollerr=%d error=%d remaining=%d queued=%u\n",
-            consumer,!!(pollfd.revents&POLLERR),n==1 && !!(ready.events&EPOLLERR),reported,remaining,queued);
+        printf("OBS rights-socket-error fault=%u consumer=%u payloads=%d pollerr=%d epollerr=%d error=%d remaining=%d queued=%u\n",
+            fault,consumer,payloads,
+            !!(pollfd.revents&POLLERR),n==1 && !!(ready.events&EPOLLERR),reported,remaining,queued);
         assert(!close(epoll) && !close(alias) && !close(pipefd[0]) && !close(sockets[0]) && !close(sockets[1]));
+        if (mapping) assert(!munmap(mapping,2*page));
     }
     assert(!munmap(unwritable,page));
 }
@@ -412,7 +434,8 @@ int md_test_ancillary_contract(const char *name) {
     else if (!strcmp(name,"rights-name")) rights_name();
     else if (!strcmp(name,"rights-timeout-fault")) rights_timeout_fault();
     else if (!strcmp(name,"rights-batch-fault")) rights_batch_fault();
-    else if (!strcmp(name,"rights-socket-error")) rights_socket_error();
+    else if (!strcmp(name,"rights-socket-error")) rights_socket_error(0);
+    else if (!strcmp(name,"rights-publication-error")) for (unsigned fault=1;fault<=3;++fault) rights_socket_error(fault);
     else if (!strcmp(name,"rights-watch-fault")) rights_watch_fault();
     else return 0;
     return 1;

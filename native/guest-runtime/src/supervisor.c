@@ -127,6 +127,16 @@ struct capture_owner {
     struct md_fs_buffer_request *request;
 };
 struct probe_owner { pid_t caller; struct user_pt_regs continuation; };
+struct send_owner { pid_t caller; struct md_fs_buffer_request *request; struct user_pt_regs continuation; };
+struct receive_owner {
+    pid_t caller;
+    int started, ready;
+    struct user_pt_regs continuation;
+    struct md_task_receive request;
+    struct md_fd_order files;
+    struct md_received_fds received;
+    int outgoing[253];
+};
 struct thread {
     struct thread *next;
     struct md_interception_memory *memory;
@@ -134,6 +144,8 @@ struct thread {
     struct md_fs_buffer_request *buffer_call;
     struct capture_owner *capture;
     struct probe_owner *probe;
+    struct send_owner *send;
+    struct receive_owner *receive;
     struct md_fs_buffer_open buffer_open;
     struct user_pt_regs buffer_registers;
     struct md_fd_install buffer_delivery, proc_delivery;
@@ -352,6 +364,10 @@ static void release_operation(struct thread *t) {
     op->waiting=op->checking=0;
 }
 static void adapter_discard(struct thread *t) {
+    if (t->send) {
+        t->send->caller=0; t->send->request=NULL; t->send=NULL;
+        CHECK(!md_task_helper_detach(helpers,t->pid));
+    }
     if (t->probe) {
         t->probe->caller=0; t->probe=NULL;
         CHECK(!md_task_helper_detach(helpers,t->pid));
@@ -360,12 +376,21 @@ static void adapter_discard(struct thread *t) {
         struct mapping_owner *owner=t->mapping;
         owner->caller=0; t->mapping=NULL;
         if (owner->started) CHECK(!md_task_helper_detach(helpers,t->pid));
-        else mapping_complete(owner,(struct md_task_helper_result){-ECANCELED,-1});
+        else mapping_complete(owner,(struct md_task_helper_result){.value=-ECANCELED,.descriptor=-1});
     }
     if (t->memory_order.queue && md_resource_order_cancel(&t->memory_order)==1)
         CHECK(!md_resource_order_complete(&t->memory_order));
     t->memory_action=0;
     CHECK(!md_fd_return_cancel(&t->buffer_return));
+    if (t->receive) {
+        struct receive_owner *owner=t->receive; t->receive=NULL; owner->caller=0;
+        if (owner->started && !owner->ready) CHECK(!md_task_helper_detach(helpers,t->pid));
+        else {
+            if (owner->files.table && md_fd_order_cancel(&owner->files)==1)
+                CHECK(!md_fd_order_complete(&owner->files));
+            md_received_fds_close(&owner->received); free(owner);
+        }
+    }
     t->buffer_return_waiting=0;
     CHECK(!md_fd_install_cancel(&t->buffer_delivery));
     CHECK(!md_fd_install_cancel(&t->proc_delivery));
@@ -1554,10 +1579,14 @@ static void fd_control(struct thread *t, struct user_pt_regs *r) {
     r->regs[0]=result; r->pc+=4;
     if (set_registers(t->pid,r)) resume(t->pid,0);
 }
-static void buffer_reply(struct thread *t, long result) {
+static void buffer_reply_signal(struct thread *t, long result, const siginfo_t *signal) {
     struct user_pt_regs r=t->buffer_registers;
     r.regs[0]=result; r.pc+=4;
-    if (set_registers(t->pid,&r)) resume(t->pid,0);
+    if (signal && !tracee_request(t,PTRACE_SETSIGINFO,NULL,(void *)signal,"helper-signal")) return;
+    if (set_registers(t->pid,&r)) resume(t->pid,signal ? signal->si_signo : 0);
+}
+static void buffer_reply(struct thread *t, long result) {
+    buffer_reply_signal(t,result,NULL);
 }
 static void probe_complete(void *context, struct md_task_helper_result result) {
     struct probe_owner *owner=context;
@@ -1591,6 +1620,99 @@ static void probe_begin(struct thread *t, const struct user_pt_regs *regs) {
     }
     if (error) { free(owner); buffer_reply(t,error); }
     else { t->probe=owner; t->kernel_stopped=0; }
+}
+static void send_captured(void *context) {
+    struct send_owner *owner=context;
+    if (!owner->request) return;
+    struct thread *t=find_thread(owner->caller);
+    CHECK(t && t->send==owner && t->buffer_call==owner->request);
+    CHECK(!md_fs_buffer_task_finish(&t->buffer_call,0));
+    owner->request=NULL;
+}
+static void send_complete(void *context, struct md_task_helper_result result) {
+    struct send_owner *owner=context;
+    struct thread *t=owner->caller ? find_thread(owner->caller) : NULL;
+    CHECK(result.descriptor<0);
+    if (t && t->send==owner) {
+        if (owner->request) md_fs_buffer_cancel(&t->buffer_call);
+        t->send=NULL; t->kernel_stopped=1; t->buffer_registers=owner->continuation;
+        buffer_reply_signal(t,result.value,result.signal.si_signo ? &result.signal : NULL);
+    }
+    free(owner);
+}
+static void send_begin(struct thread *t, const struct user_pt_regs *regs) {
+    struct md_buffer_span span;
+    int error=md_buffer_span(&t->buffer,&span);
+    struct send_owner *owner=NULL;
+    struct md_task_helper_request request={.kind=MD_TASK_HELPER_SEND,.captured=send_captured};
+    if (!error) {
+        struct md_fs_buffer_frame *frame=span.data;
+        memcpy(&request.send,frame->value,sizeof(request.send));
+        request.source=md_fs_buffer_task_send_source(t->buffer_call);
+        error=request.source<0 ? request.source : md_fs_buffer_task_start(t->buffer_call,request.send.socket);
+    }
+    if (!error) {
+        owner=calloc(1,sizeof(*owner));
+        if (!owner) error=-ENOMEM;
+    }
+    if (!error) {
+        *owner=(struct send_owner){t->pid,t->buffer_call,*regs};
+        t->terminal_observation=1; t->trace_options_dirty=1;
+        error=debugger_options(t->pid,t->debug_options);
+    }
+    if (!error) error=md_task_helper_begin(helpers,t->pid,t->tgid,regs,&abi,t->memory,&t->buffer,
+        &request,send_complete,owner);
+    if (error) {
+        md_fs_buffer_cancel(&t->buffer_call); free(owner); buffer_reply(t,error);
+    } else { t->send=owner; t->kernel_stopped=0; }
+}
+static void receive_captured(void *context) {
+    struct receive_owner *owner=context;
+    CHECK(!md_fd_order_complete(&owner->files));
+}
+static void receive_complete(void *context, struct md_task_helper_result result) {
+    struct receive_owner *owner=context;
+    struct thread *t=owner->caller ? find_thread(owner->caller) : NULL;
+    CHECK(result.descriptor<0);
+    if (owner->files.table && md_fd_order_cancel(&owner->files)==1)
+        CHECK(!md_fd_order_complete(&owner->files));
+    owner->ready=1; owner->received=result.received;
+    if (t && t->receive==owner) {
+        t->kernel_stopped=1; t->buffer_registers=owner->continuation;
+        buffer_reply(t,result.value);
+    } else { md_received_fds_close(&owner->received); free(owner); }
+}
+static void receive_start(struct thread *t) {
+    struct receive_owner *owner=t->receive;
+    if (!owner || owner->started || md_fd_order_state(&owner->files)!=MD_RESOURCE_ORDER_READY) return;
+    int error=md_fd_order_start(&owner->files);
+    if (!error) {
+        t->terminal_observation=1; t->trace_options_dirty=1;
+        error=debugger_options(t->pid,t->debug_options);
+    }
+    if (!error) {
+        struct md_task_helper_request request={.kind=MD_TASK_HELPER_RECEIVE,
+            .receive=owner->request,.captured=receive_captured};
+        error=md_task_helper_begin(helpers,t->pid,t->tgid,&owner->continuation,&abi,t->memory,&t->buffer,
+            &request,receive_complete,owner);
+    }
+    owner->started=1;
+    if (error) receive_complete(owner,(struct md_task_helper_result){.value=error,.descriptor=-1});
+    else t->kernel_stopped=0;
+}
+static void receive_begin(struct thread *t, const struct user_pt_regs *regs) {
+    struct md_buffer_span span;
+    int error=md_buffer_span(&t->buffer,&span);
+    struct receive_owner *owner=NULL;
+    if (!error) { owner=calloc(1,sizeof(*owner)); if (!owner) error=-ENOMEM; }
+    if (!error) {
+        *owner=(struct receive_owner){.caller=t->pid,.continuation=*regs,
+            .request=((struct md_task_receive_frame *)span.data)->input};
+        error=md_fd_order_begin(t->resources.files,&owner->files,fd_wakeup);
+        if (error>0) error=0;
+    }
+    if (error) { free(owner); buffer_reply(t,error); }
+    else { t->receive=owner; receive_start(t); }
 }
 static void capture_complete(void *context, struct md_task_helper_result result) {
     struct capture_owner *owner=context;
@@ -1669,6 +1791,7 @@ static void adapter_progress(void) {
             if (t->mapping && !t->mapping->started) mapping_start(t);
             if (t->phase==MEMORY_WAIT) memory_start(t);
             if (t->buffer_waiting) buffer_take(t);
+            receive_start(t);
             buffer_deliver(t);
             proc_deliver(t);
             buffer_return_progress(t);
@@ -1692,7 +1815,8 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
     if (t->buffer_call && r->regs[0]!=MD_FS_BUFFER_ACK && r->regs[0]!=MD_FS_BUFFER_SENT
             && r->regs[0]!=MD_FS_BUFFER_CHANNEL_OBSERVED
             && !(md_fs_buffer_task_pending(t->buffer_call)
-                && (r->regs[0]==MD_BUFFER_RELEASE || r->regs[0]==MD_FS_BUFFER_TASK_DONE))
+                && (r->regs[0]==MD_BUFFER_RELEASE || r->regs[0]==MD_FS_BUFFER_TASK_DONE
+                    || r->regs[0]==MD_FS_BUFFER_TASK_SEND))
             && !(snapshot && (r->regs[0]==MD_FS_BUFFER_SNAPSHOT_APPEND
                 || r->regs[0]==MD_FS_BUFFER_SNAPSHOT_FINISH || r->regs[0]==MD_BUFFER_RELEASE))) {
         buffer_reply(t,-EBUSY); return;
@@ -1702,6 +1826,58 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
         buffer_reply(t,-EBUSY); return;
     }
     switch (r->regs[0]) {
+    case MD_FS_BUFFER_TASK_RECEIVE:
+        if (t->phase!=DISPATCHING || t->receive || !t->buffer.pool || r->regs[1] || r->regs[2]
+                || (t->original.regs[8]!=SYS_recvmsg && t->original.regs[8]!=SYS_recvmmsg)) break;
+        /* EVENT_WAIT: private native receive, export and exact helper reaping.
+         * Source capture alone holds the table turn, never the blocking IO. */
+        receive_begin(t,r); return;
+    case MD_FS_BUFFER_RECEIVED_DROP:
+        if (!t->receive || !t->receive->ready || r->regs[1] || r->regs[2]) break;
+        md_received_fds_close(&t->receive->received); free(t->receive); t->receive=NULL;
+        result=0; break;
+    case MD_FS_BUFFER_RECEIVED_CALL: {
+        if (!t->receive || !t->receive->ready || !t->buffer.pool || r->regs[2]) break;
+        struct md_buffer_span span;
+        result=md_buffer_span(&t->buffer,&span);
+        if (result) break;
+        const struct md_fs_buffer_frame *frame=span.data;
+        int borrowed[2]={-1,-1};
+        for (unsigned i=0;i<2;++i) {
+            int index=frame->input.base[i];
+            if (index==-1) continue;
+            if (index<0 || (unsigned)index>=t->receive->received.count) { result=-EBADF; break; }
+            borrowed[i]=t->receive->received.fds[index];
+        }
+        if (result) break;
+        result=md_fs_buffer_received_begin(buffer_service,t->pid,t->resources.fs,(unsigned)r->regs[1],
+            &t->buffer,borrowed,&t->buffer_call);
+        if (!result) { adapter_progress(); return; }
+        break;
+    }
+    case MD_FS_BUFFER_RECEIVED_RIGHTS: {
+        if (!t->receive || !t->receive->ready || !t->buffer.pool || r->regs[1] || r->regs[2]) break;
+        struct md_buffer_span span;
+        result=md_buffer_span(&t->buffer,&span);
+        if (result) break;
+        const struct md_fs_buffer_frame *frame=span.data;
+        unsigned count=frame->rights.count;
+        if (!count || count>253) { result=-EINVAL; break; }
+        for (unsigned i=0;i<count;++i) {
+            int index=frame->rights.index[i];
+            if (index<1 || (unsigned)index>=t->receive->received.count) { result=-EBADF; break; }
+            t->receive->outgoing[i]=t->receive->received.fds[index];
+        }
+        if (result) break;
+        result=md_fd_return_vector_begin(&t->buffer_return,t->resources.files,t->receive->outgoing,count,fd_wakeup);
+        if (result) break;
+        t->buffer_return_waiting=1; buffer_return_progress(t); return;
+    }
+    case MD_FS_BUFFER_TASK_SEND:
+        if (t->phase!=DISPATCHING || t->send || !t->buffer.pool || r->regs[1] || r->regs[2]) break;
+        /* EVENT_WAIT: private-table send and exact helper reaping. Caller
+         * cancellation aborts that helper; no shared-table cleanup syscall. */
+        send_begin(t,r); return;
     case MD_BUFFER_PROBE:
         if (t->entered || t->phase!=IDLE || !t->buffer.pool || t->probe
                 || t->capture || t->mapping || r->regs[1] || r->regs[2]) break;
@@ -2065,7 +2241,7 @@ static void mapping_start(struct thread *t) {
             close(owner->request.source); owner->request.source=-1;
         }
     }
-    if (error) mapping_complete(owner,(struct md_task_helper_result){error,-1});
+    if (error) mapping_complete(owner,(struct md_task_helper_result){.value=error,.descriptor=-1});
 }
 static void mapping_begin(struct thread *t, struct user_pt_regs *regs) {
     long error=!shm_store ? -ENOTSUP : !shm ? md_shm_open(shm_store,&shm) : 0;

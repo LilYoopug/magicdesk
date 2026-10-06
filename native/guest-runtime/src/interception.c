@@ -73,6 +73,7 @@ extern char md_guest_anchor_return[];
 extern long md_guest_buffer_control(unsigned, unsigned long, unsigned long);
 extern char md_guest_task_control[], md_guest_task_call[], md_guest_task_return[];
 extern char md_guest_task_abort[], md_guest_task_abort_return[];
+extern char md_guest_task_collect[], md_guest_task_collected[];
 static long dispatch_files(const struct md_fs *fs, long nr, unsigned long a0, unsigned long a1, unsigned long a2,
         unsigned long a3, unsigned long a4, unsigned long a5) {
     unsigned long args[] = {a0, a1, a2, a3, a4, a5};
@@ -123,6 +124,7 @@ long md_guest_dispatch(long nr, unsigned long a0, unsigned long a1, unsigned lon
 static const struct md_interception_abi abi = {
     .task_control=(uintptr_t)md_guest_task_control, .task_call=(uintptr_t)md_guest_task_call,
     .task_return=(uintptr_t)md_guest_task_return, .task_abort=(uintptr_t)md_guest_task_abort,
+    .task_collect=(uintptr_t)md_guest_task_collect, .task_collected=(uintptr_t)md_guest_task_collected,
     .buffer_control=(uintptr_t)md_guest_buffer_control,
     .fd_control=(uintptr_t)md_guest_fd_control,
     .capture_gate=(uintptr_t)md_guest_anchor_return,

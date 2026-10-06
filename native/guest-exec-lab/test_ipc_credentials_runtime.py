@@ -55,7 +55,7 @@ def main():
         command(run + ['--', '/bin/mkdir', '-p', '/fixture'])
         if args.custody:
             failures = []
-            for receive in range(2):
+            for receive in range(4):
                 for protected in range(2):
                     for guest in (False, True):
                         name = f'custody receive={receive} protected={protected} guest={guest}'

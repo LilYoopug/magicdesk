@@ -88,6 +88,7 @@ long md_watch_arm(const struct md_fs *fs, int fd) {
     long r = watched(fs, fd);
     return r > 0 ? arm(fd) : r;
 }
+long md_watch_arm_number(int fd) { return fd<0 ? -EBADF : arm(fd); }
 static int local_copy(void *output, const void *data, size_t size) {
     return (int)md_write_memory(output, data, size);
 }

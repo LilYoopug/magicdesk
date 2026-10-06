@@ -53,6 +53,7 @@ struct md_interception_abi {
     uintptr_t capture_gate;
     uintptr_t buffer_control;
     uintptr_t task_control, task_call, task_return, task_abort;
+    uintptr_t task_collect, task_collected;
 };
 
 int md_interception_install(int inherited);

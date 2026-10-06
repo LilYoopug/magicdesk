@@ -35,6 +35,16 @@ int md_fd_return_begin(struct md_fd_return *r, struct md_fd_origins *files, int 
     }
     release(r); return error;
 }
+int md_fd_return_vector_begin(struct md_fd_return *r, struct md_fd_origins *files,
+        const int *sources, unsigned count, struct md_resource_wakeup *wake) {
+    if (!r || !files || !sources || !count || count>253) return -EINVAL;
+    if (r->files.table || r->delivery.capacity) return -EBUSY;
+    for (unsigned i=0;i<count;++i) if (sources[i]<0) return -EBADF;
+    r->vector=sources; r->count=count; r->endpoint=-1;
+    int error=md_fd_order_begin(files,&r->files,wake);
+    if (error>=0) return 0;
+    release(r); return error;
+}
 int md_fd_return_progress(struct md_fd_return *r, struct md_resource_wakeup *wake) {
     if (!r || !r->files.table) return -EINVAL;
     if (r->offered) return -EALREADY;
@@ -62,7 +72,8 @@ int md_fd_return_progress(struct md_fd_return *r, struct md_resource_wakeup *wak
     }
     if (md_resource_order_state(&r->channel_order)!=MD_RESOURCE_ORDER_READY) return MD_FD_RETURN_WAIT;
     error=md_resource_order_start(&r->channel_order);
-    if (!error) error=md_fd_channel_output_send(r->channel,r->source,&r->request);
+    if (!error) error=r->vector ? md_fd_channel_output_vector(r->channel,r->vector,r->count,&r->request)
+        : md_fd_channel_output_send(r->channel,r->source,&r->request);
     if (error) return error;
     r->offered=1; return MD_FD_RETURN_READY;
 }
@@ -83,7 +94,9 @@ int md_fd_return_install(struct md_fd_return *r, int listener, uint64_t notifica
 int md_fd_return_finish(struct md_fd_return *r, long received, uint64_t token) {
     if (!r || !r->files.table || received < -4095) return -EINVAL;
     int result=received<0 ? (int)received : -EPROTO;
-    if (r->offered) {
+    if (r->offered && r->vector) {
+        if (received==(long)sizeof(uint64_t) && token==r->request) result=0;
+    } else if (r->offered) {
         int count=md_fd_delivery_publish(&r->delivery);
         if (count<0) result=count;
         else if (count==1) {
@@ -99,7 +112,7 @@ int md_fd_return_finish(struct md_fd_return *r, long received, uint64_t token) {
 int md_fd_return_cancel(struct md_fd_return *r) {
     if (!r) return -EINVAL;
     int error=0;
-    if (r->offered) {
+    if (r->offered && !r->vector) {
         int count=md_fd_delivery_publish(&r->delivery);
         if (count<0) error=count;
     }

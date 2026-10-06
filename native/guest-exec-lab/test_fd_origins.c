@@ -8,6 +8,7 @@
 #include "fd_delivery.h"
 #include "fd_receipt.h"
 #include "fd_channel.h"
+#include "fd_return.h"
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -812,6 +813,64 @@ static void channel_captures(void) {
     assert(descriptors()==before);
     puts("PASS channel captures: independent owners, reverse/duplicate delivery, wrong peer/count/channel, cancellation, late tokens and exact EOF without allocation");
 }
+static void vector_custody(void) {
+    unsigned before=descriptors();
+    for (unsigned count=1;count<=253;count+=252) for (int cancel=0;cancel<2;++cancel) {
+        struct md_fd_channel *channel=NULL; assert(!md_fd_channel_new(&channel));
+        int pipefd[2]; assert(!pipe2(pipefd,O_NONBLOCK|O_CLOEXEC));
+        int output[253];
+        struct md_fd_channel_capture capture={0};
+        assert(!md_fd_channel_capture_vector_begin(channel,getpid(),count,output,&capture));
+        union { struct cmsghdr align; char bytes[CMSG_SPACE(253*sizeof(int))]; } control={0};
+        struct iovec vector={&capture.request,sizeof(capture.request)};
+        struct msghdr message={.msg_iov=&vector,.msg_iovlen=1,.msg_control=control.bytes,
+            .msg_controllen=CMSG_SPACE(count*sizeof(int))};
+        control.align=(struct cmsghdr){.cmsg_len=CMSG_LEN(count*sizeof(int)),.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_RIGHTS};
+        for (unsigned i=0;i<count;++i) memcpy(CMSG_DATA(&control.align)+i*sizeof(int),&pipefd[1],sizeof(int));
+        assert(sendmsg(md_fd_channel_endpoint(channel),&message,MSG_NOSIGNAL)==sizeof(uint64_t));
+        assert(!close(pipefd[1]));
+        if (cancel) md_fd_channel_capture_cancel(&capture);
+        else {
+            assert(!md_fd_channel_capture_vector_finish(&capture));
+            for (unsigned i=0;i<count;++i) assert(!close(output[i]));
+        }
+        char byte; assert(read(pipefd[0],&byte,1)==0);
+        close(pipefd[0]); md_fd_channel_release(channel);
+        assert(descriptors()==before);
+    }
+    for (int delivered=0;delivered<2;++delivered) {
+        struct md_fd_channel *channel=NULL; assert(!md_fd_channel_new(&channel));
+        struct md_fd_origins *files=md_fd_origins_new(); assert(files);
+        int endpoint=fcntl(md_fd_channel_endpoint(channel),F_DUPFD_CLOEXEC,0); assert(endpoint>=0);
+        struct md_fd_origin_update update;
+        assert(!md_fd_origins_prepare_channel(files,channel,FD_CLOEXEC,&update));
+        md_fd_origins_finish(&update,endpoint);
+        int pipefd[2]; assert(!pipe2(pipefd,O_NONBLOCK|O_CLOEXEC));
+        int sources[2]={pipefd[1],pipefd[1]};
+        struct md_fd_return handoff={0};
+        assert(!md_fd_return_vector_begin(&handoff,files,sources,2,NULL));
+        assert(md_fd_return_progress(&handoff,NULL)==MD_FD_RETURN_READY);
+        assert(!close(pipefd[1]));
+        int installed=-1;
+        if (delivered) {
+            uint64_t token=0; struct iovec vector={&token,sizeof(token)};
+            union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(int))]; } control={0};
+            struct msghdr message={.msg_iov=&vector,.msg_iovlen=1,.msg_control=control.bytes,
+                .msg_controllen=CMSG_LEN(sizeof(int))};
+            assert(recvmsg(endpoint,&message,MSG_CMSG_CLOEXEC)==sizeof(token) && token==handoff.request);
+            assert(message.msg_flags&MSG_CTRUNC);
+            memcpy(&installed,CMSG_DATA(&control.align),sizeof(installed));
+            assert(fcntl(installed,F_GETFD)==FD_CLOEXEC);
+        }
+        /* Terminal cancellation never rolls back the kernel-published prefix. */
+        assert(!md_fd_return_cancel(&handoff));
+        if (installed>=0) assert(fcntl(installed,F_GETFD)==FD_CLOEXEC && !close(installed));
+        char byte; assert(read(pipefd[0],&byte,1)==0);
+        close(pipefd[0]); close(endpoint); md_fd_origins_release(files); md_fd_channel_release(channel);
+        assert(descriptors()==before);
+    }
+    puts("PASS ancillary vector custody: 1/253 captures, cancelled queues, partial kernel publication and retained caller FDs");
+}
 static void infrastructure(void) {
     unsigned before=descriptors();
     struct md_fd_channel *channel=NULL;
@@ -906,6 +965,7 @@ void test_fd_origins(void) {
     infrastructure();
     channel_reconciliation();
     channel_captures();
+    vector_custody();
     unsigned before=descriptors();
     struct md_mount_namespace *first=md_mount_namespace_new(), *second=md_mount_namespace_new();
     assert(first && second);

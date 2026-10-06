@@ -2,10 +2,13 @@
 #define MD_TASK_HELPER_H
 #include "interception.h"
 #include "interception_memory.h"
+#include "task_send.h"
+#include "task_receive.h"
 #include <sys/user.h>
 #include <sys/types.h>
 #include <asm/ptrace.h>
 #include <linux/seccomp.h>
+#include <signal.h>
 
 struct md_task_helpers;
 struct md_task_mapping_request {
@@ -14,15 +17,20 @@ struct md_task_mapping_request {
     size_t size;
     uint64_t offset;
 };
-enum md_task_helper_kind { MD_TASK_HELPER_MAP, MD_TASK_HELPER_CAPTURE };
+enum md_task_helper_kind { MD_TASK_HELPER_MAP, MD_TASK_HELPER_CAPTURE, MD_TASK_HELPER_SEND, MD_TASK_HELPER_RECEIVE };
 struct md_task_helper_request {
     enum md_task_helper_kind kind;
     struct md_task_mapping_request mapping;
     /* Copied before acceptance. Resolved in the caller's captured FS context. */
     const char *path;
     int flags;
+    struct md_task_send send;
+    struct md_task_receive receive;
+    int source;
+    /* Exact CLONE_FILES separation, before any potentially blocking IO. */
+    void (*captured)(void *);
 };
-struct md_task_helper_result { long value; int descriptor; };
+struct md_task_helper_result { long value; int descriptor; siginfo_t signal; struct md_received_fds received; };
 /* Completion transfers descriptor ownership, including cancellation. */
 typedef void (*md_task_helper_complete)(void *, struct md_task_helper_result);
 struct md_task_helper_callbacks {

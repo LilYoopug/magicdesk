@@ -31,6 +31,7 @@ struct md_fd_channel_capture {
     pid_t peer;
     unsigned expected;
     struct md_fd_channel_input input;
+    int *vector;
 };
 int md_fd_channel_capture_begin(struct md_fd_channel *, pid_t peer, unsigned count,
         struct md_fd_channel_capture *);
@@ -38,6 +39,10 @@ int md_fd_channel_capture_begin(struct md_fd_channel *, pid_t peer, unsigned cou
  * both outcomes retire the lease. Cancel closes its queued/captured rights. */
 int md_fd_channel_capture_finish(struct md_fd_channel_capture *, struct md_fd_channel_input *);
 void md_fd_channel_capture_cancel(struct md_fd_channel_capture *);
+/* Optional caller-owned storage avoids enlarging every two-operand request. */
+int md_fd_channel_capture_vector_begin(struct md_fd_channel *, pid_t, unsigned,
+        int *, struct md_fd_channel_capture *);
+int md_fd_channel_capture_vector_finish(struct md_fd_channel_capture *);
 int md_fd_channel_new(struct md_fd_channel **);
 struct md_fd_channel *md_fd_channel_retain(struct md_fd_channel *);
 void md_fd_channel_release(struct md_fd_channel *);
@@ -52,5 +57,6 @@ void md_fd_channel_input_close(struct md_fd_channel_input *);
  * any unreceived rights before releasing the turn. Input export is independent. */
 int md_fd_channel_output_begin(struct md_fd_channel *, struct md_resource_order *, struct md_resource_wakeup *);
 int md_fd_channel_output_send(struct md_fd_channel *, int source, uint64_t *request);
+int md_fd_channel_output_vector(struct md_fd_channel *, const int *, unsigned, uint64_t *);
 int md_fd_channel_output_discard(struct md_fd_channel *);
 #endif

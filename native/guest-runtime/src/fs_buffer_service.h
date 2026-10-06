@@ -43,6 +43,10 @@ struct md_fs_buffer_service *md_fs_buffer_service_new(struct md_fs_worker *, str
 void md_fs_buffer_service_destroy(struct md_fs_buffer_service *);
 int md_fs_buffer_begin(struct md_fs_buffer_service *, pid_t, struct md_guest_domain *, unsigned operation,
         const struct md_interception_buffer *, struct md_fs_buffer_request **);
+/* Borrow exact retained inputs. Accepted requests duplicate them before return;
+ * cancellation of their source owner cannot retarget worker execution. */
+int md_fs_buffer_received_begin(struct md_fs_buffer_service *, pid_t, struct md_guest_domain *, unsigned,
+        const struct md_interception_buffer *, const int[2], struct md_fs_buffer_request **);
 /* Prepared executable descriptions stay outside the guest table until exec. */
 int md_fs_buffer_exec_begin(struct md_fs_buffer_service *, pid_t, struct md_guest_domain *,
         const struct md_interception_buffer *, struct md_fs_buffer_request **);
@@ -56,6 +60,7 @@ int md_fs_buffer_snapshot_advance(struct md_fs_buffer_request *, int finish);
  * descriptor may enter this continuation. A pre-entry denial can also finish. */
 int md_fs_buffer_task_pending(const struct md_fs_buffer_request *);
 int md_fs_buffer_task_start(struct md_fs_buffer_request *, int descriptor);
+int md_fs_buffer_task_send_source(const struct md_fs_buffer_request *);
 int md_fs_buffer_task_finish(struct md_fs_buffer_request **, long result);
 int md_fs_buffer_progress(struct md_fs_buffer_service *);
 /* Deferred opens are owned children, reaped by the supervisor's SIGCHLD loop.

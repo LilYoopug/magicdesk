@@ -102,6 +102,193 @@ static void receive_identity(int fd, pid_t pid, uid_t uid, int flags, int batch,
     }
     CHECK(seen==1 && descriptors==rights && !(m.msg_hdr.msg_flags&MSG_CTRUNC));
 }
+static volatile sig_atomic_t broken_count, broken_code, broken_pid;
+static void broken_pipe(int signal, siginfo_t *info, void *context) {
+    (void)context;
+    if (signal==SIGPIPE) { ++broken_count; broken_code=info->si_code; broken_pid=info->si_pid; }
+}
+static void send_signals(int mode) {
+    int pair[2]; CHECK(!socketpair(AF_UNIX,SOCK_STREAM,0,pair));
+    CHECK(!shutdown(pair[1],SHUT_WR));
+    struct sigaction action={.sa_sigaction=broken_pipe,.sa_flags=SA_SIGINFO};
+    sigemptyset(&action.sa_mask); CHECK(!sigaction(SIGPIPE,&action,NULL));
+    if (mode==2) {
+        sigset_t mask; sigemptyset(&mask); sigaddset(&mask,SIGPIPE);
+        CHECK(!sigprocmask(SIG_BLOCK,&mask,NULL));
+    }
+    char byte='s'; struct iovec io={&byte,1};
+    union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(struct ucred))]; } control={0};
+    struct msghdr m={.msg_iov=&io,.msg_iovlen=1,.msg_control=control.bytes,.msg_controllen=sizeof(control)};
+    control.align=(struct cmsghdr){.cmsg_len=CMSG_LEN(sizeof(struct ucred)),.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_CREDENTIALS};
+    struct ucred cred={getpid(),getuid(),getgid()}; memcpy(CMSG_DATA(&control.align),&cred,sizeof(cred));
+    if (mode==3) {
+        struct sock_filter code[]={
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_sendmsg,0,4),
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[0])),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(unsigned)pair[1],0,2),
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[1])),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)(uintptr_t)&m,0,1),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EPIPE)
+        };
+        struct sock_fprog program={sizeof(code)/sizeof(*code),code};
+        CHECK(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0) && !prctl(PR_SET_SECCOMP,SECCOMP_MODE_FILTER,&program));
+    }
+    CHECK(sendmsg(pair[1],&m,mode==1 ? MSG_NOSIGNAL : 0)==-1 && errno==EPIPE);
+    if (mode==2) {
+        sigset_t pending; CHECK(!sigpending(&pending));
+        CHECK(!broken_count && sigismember(&pending,SIGPIPE));
+        sigset_t mask; sigemptyset(&mask); sigaddset(&mask,SIGPIPE);
+        CHECK(!sigprocmask(SIG_UNBLOCK,&mask,NULL));
+    }
+    CHECK(broken_count==((mode==0 || mode==2) ? 1 : 0));
+    if (broken_count) CHECK(broken_pid==getpid() && broken_code==SI_USER);
+    close(pair[0]); close(pair[1]);
+    printf("PASS credential send SIGPIPE mode=%d\n",mode);
+}
+static void send_inputs(int protected, int full) {
+    int pair[2], one=1; CHECK(!socketpair(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0,pair));
+    CHECK(!setsockopt(pair[0],SOL_SOCKET,SO_PASSCRED,&one,sizeof(one)));
+    CHECK(!prctl(PR_SET_DUMPABLE,0)); peer(pair[1],getpid(),0,0);
+    CHECK(!prctl(PR_SET_DUMPABLE,!protected));
+    int held[256], count=0;
+    if (full) {
+        struct rlimit limits; CHECK(!getrlimit(RLIMIT_NOFILE,&limits));
+        limits.rlim_cur=128; CHECK(!setrlimit(RLIMIT_NOFILE,&limits));
+        int fd;
+        while ((fd=dup(pair[0]))>=0) { CHECK(count<256); held[count++]=fd; }
+        CHECK(errno==EMFILE);
+        send_identity(pair[1],0,pair[0],1);
+        for (int i=0;i<count;++i) close(held[i]);
+        receive_identity(pair[0],getpid(),0,MSG_CMSG_CLOEXEC,0,1);
+    } else {
+        /* A private token must not fill an invalid application input slot. */
+        close(0);
+        char byte='b'; struct iovec io={&byte,1};
+        union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(struct ucred))+CMSG_SPACE(sizeof(int))]; } control={0};
+        struct msghdr m={.msg_iov=&io,.msg_iovlen=1,.msg_control=control.bytes,.msg_controllen=sizeof(control)};
+        control.align=(struct cmsghdr){.cmsg_len=CMSG_LEN(sizeof(struct ucred)),.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_CREDENTIALS};
+        struct ucred cred={getpid(),0,0}; memcpy(CMSG_DATA(&control.align),&cred,sizeof(cred));
+        struct cmsghdr *h=(void *)(control.bytes+CMSG_SPACE(sizeof(cred)));
+        *h=(struct cmsghdr){.cmsg_len=CMSG_LEN(sizeof(int)),.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_RIGHTS};
+        int invalid=0; memcpy(CMSG_DATA(h),&invalid,sizeof(invalid));
+        CHECK(sendmsg(pair[1],&m,MSG_NOSIGNAL)==-1 && errno==EBADF);
+        CHECK(recv(pair[0],&byte,1,MSG_DONTWAIT)==-1 && errno==EAGAIN);
+        CHECK(fcntl(0,F_GETFD)==-1 && errno==EBADF);
+    }
+    close(pair[0]); close(pair[1]);
+    printf("PASS credential send inputs protected=%d full=%d\n",protected,full);
+}
+enum { SEND_LIFETIME_BYTES=1024*1024 };
+struct paused_send { int socket, right, protected; };
+static int paused_sender(void *opaque) {
+    struct paused_send *p=opaque;
+    CHECK(!prctl(PR_SET_PDEATHSIG,SIGKILL));
+    if (p->protected) CHECK(!prctl(PR_SET_DUMPABLE,0));
+    char *bytes=malloc(SEND_LIFETIME_BYTES); CHECK(bytes); memset(bytes,'m',SEND_LIFETIME_BYTES);
+    struct iovec io={bytes,SEND_LIFETIME_BYTES};
+    union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(struct ucred))+CMSG_SPACE(sizeof(int))]; } control={0};
+    struct msghdr m={.msg_iov=&io,.msg_iovlen=1,.msg_control=control.bytes,.msg_controllen=sizeof(control)};
+    control.align=(struct cmsghdr){.cmsg_len=CMSG_LEN(sizeof(struct ucred)),.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_CREDENTIALS};
+    struct ucred cred={getpid(),0,0}; memcpy(CMSG_DATA(&control.align),&cred,sizeof(cred));
+    struct cmsghdr *h=(void *)(control.bytes+CMSG_SPACE(sizeof(cred)));
+    *h=(struct cmsghdr){.cmsg_len=CMSG_LEN(sizeof(int)),.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_RIGHTS};
+    memcpy(CMSG_DATA(h),&p->right,sizeof(p->right));
+    CHECK(sendmsg(p->socket,&m,MSG_NOSIGNAL)==SEND_LIFETIME_BYTES);
+    free(bytes);
+    return 0;
+}
+static void send_lifetime(int protected, int cancel) {
+    int pair[2], right[2], unrelated[2], one=1, capacity=4096;
+    CHECK(!socketpair(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0,pair));
+    CHECK(!socketpair(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0,right));
+    CHECK(!pipe2(unrelated,O_CLOEXEC|O_NONBLOCK));
+    CHECK(!setsockopt(pair[0],SOL_SOCKET,SO_PASSCRED,&one,sizeof(one)));
+    CHECK(!setsockopt(pair[1],SOL_SOCKET,SO_SNDBUF,&capacity,sizeof(capacity)));
+    CHECK(!prctl(PR_SET_DUMPABLE,0)); peer(pair[0],getpid(),0,0); CHECK(!prctl(PR_SET_DUMPABLE,1));
+    size_t size=1024*1024; void *stack=malloc(size); CHECK(stack);
+    int before[256]; for (unsigned i=0;i<256;++i) before[i]=fcntl(i,F_GETFD);
+    struct paused_send context={pair[1],right[0],protected};
+    pid_t child=clone(paused_sender,(char *)stack+size,CLONE_FILES|SIGCHLD,&context); CHECK(child>0);
+    /* EVENT_WAIT: the first payload byte proves the helper entered sendmsg.
+     * Its bounded socket cannot accept the remaining megabyte until we drain it.
+     * The enclosing launch deadline bounds missing delivery/cleanup. */
+    receive_identity(pair[0],child,0,MSG_CMSG_CLOEXEC,0,1);
+    CHECK(!close(unrelated[1])); before[unrelated[1]]=-1;
+    char byte; CHECK(read(unrelated[0],&byte,1)==0);
+    /* Table turns must be released and only captured inputs retained while
+     * the syscall is blocked. Reusing the original slot cannot retarget it. */
+    CHECK(dup3(unrelated[0],pair[1],O_CLOEXEC)==pair[1]);
+    if (cancel) CHECK(!kill(child,SIGKILL));
+    size_t received=1;
+    char bytes[8192]; ssize_t n;
+    while ((n=read(pair[0],bytes,sizeof(bytes)))>0) {
+        received+=(size_t)n;
+        for (ssize_t i=0;i<n;++i) CHECK(bytes[i]=='m');
+    }
+    CHECK(!n && (cancel ? received<SEND_LIFETIME_BYTES : received==SEND_LIFETIME_BYTES));
+    int status; CHECK(waitpid(child,&status,0)==child);
+    CHECK(cancel ? WIFSIGNALED(status) && WTERMSIG(status)==SIGKILL : WIFEXITED(status) && !WEXITSTATUS(status));
+    for (unsigned i=0;i<256;++i) CHECK(fcntl(i,F_GETFD)==before[i]);
+    CHECK(!close(pair[0]) && !close(pair[1]) && !close(right[0]) && !close(right[1]));
+    CHECK(!close(unrelated[0])); free(stack);
+    printf("PASS credential send lifecycle protected=%d cancel=%d\n",protected,cancel);
+}
+static void send_contract(void) {
+    for (int mode=0;mode<4;++mode) {
+        pid_t child=fork(); CHECK(child>=0);
+        if (!child) { send_signals(mode); exit(0); }
+        done(child);
+    }
+    for (int protected=0;protected<2;++protected) for (int full=0;full<2;++full) {
+        pid_t child=fork(); CHECK(child>=0);
+        if (!child) { send_inputs(protected,full); exit(0); }
+        done(child);
+    }
+    for (int protected=0;protected<2;++protected) for (int cancel=0;cancel<2;++cancel) send_lifetime(protected,cancel);
+}
+struct paused_receive { int socket, protected; };
+static int paused_receiver(void *opaque) {
+    struct paused_receive *p=opaque;
+    CHECK(!prctl(PR_SET_PDEATHSIG,SIGKILL));
+    if (p->protected) CHECK(!prctl(PR_SET_DUMPABLE,0));
+    char *bytes=malloc(2*SEND_LIFETIME_BYTES); CHECK(bytes);
+    struct iovec io={bytes,2*SEND_LIFETIME_BYTES};
+    union { struct cmsghdr align; char bytes[128]; } control={0};
+    struct msghdr m={.msg_iov=&io,.msg_iovlen=1,.msg_control=control.bytes,.msg_controllen=sizeof(control)};
+    CHECK(recvmsg(p->socket,&m,MSG_WAITALL)==2*SEND_LIFETIME_BYTES);
+    CHECK(!m.msg_controllen);
+    for (unsigned i=0;i<2*SEND_LIFETIME_BYTES;++i) CHECK(bytes[i]=='r');
+    free(bytes); return 0;
+}
+static void receive_lifetime(int protected, int cancel) {
+    int pair[2], unrelated[2], capacity=4096;
+    CHECK(!socketpair(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0,pair));
+    CHECK(!pipe2(unrelated,O_CLOEXEC|O_NONBLOCK));
+    CHECK(!setsockopt(pair[1],SOL_SOCKET,SO_SNDBUF,&capacity,sizeof(capacity)));
+    CHECK(!prctl(PR_SET_DUMPABLE,0)); peer(pair[0],getpid(),0,0); CHECK(!prctl(PR_SET_DUMPABLE,1));
+    size_t size=1024*1024; void *stack=malloc(size); CHECK(stack);
+    int before[256]; for (unsigned i=0;i<256;++i) before[i]=fcntl(i,F_GETFD);
+    struct paused_receive context={pair[0],protected};
+    pid_t child=clone(paused_receiver,(char *)stack+size,CLONE_FILES|SIGCHLD,&context); CHECK(child>0);
+    char *bytes=malloc(SEND_LIFETIME_BYTES); CHECK(bytes); memset(bytes,'r',SEND_LIFETIME_BYTES);
+    /* EVENT_WAIT: a megabyte cannot fit in the bounded send buffer. Successful
+     * send proves the receiver entered MSG_WAITALL and drained its first half.
+     * Launch deadline bounds both the receive and exact cancellation/reaping. */
+    CHECK(send(pair[1],bytes,SEND_LIFETIME_BYTES,MSG_NOSIGNAL)==SEND_LIFETIME_BYTES);
+    CHECK(!close(unrelated[1])); before[unrelated[1]]=-1;
+    char byte; CHECK(read(unrelated[0],&byte,1)==0);
+    CHECK(dup3(unrelated[0],pair[0],O_CLOEXEC)==pair[0]);
+    if (cancel) CHECK(!kill(child,SIGKILL));
+    else CHECK(send(pair[1],bytes,SEND_LIFETIME_BYTES,MSG_NOSIGNAL)==SEND_LIFETIME_BYTES);
+    int status; CHECK(waitpid(child,&status,0)==child);
+    CHECK(cancel ? WIFSIGNALED(status) && WTERMSIG(status)==SIGKILL : WIFEXITED(status) && !WEXITSTATUS(status));
+    CHECK(send(pair[1],"x",1,MSG_NOSIGNAL)==-1 && errno==EPIPE);
+    for (unsigned i=0;i<256;++i) CHECK(fcntl(i,F_GETFD)==before[i]);
+    CHECK(!close(pair[0]) && !close(pair[1]) && !close(unrelated[0])); free(bytes); free(stack);
+    printf("PASS receive lifecycle protected=%d cancel=%d\n",protected,cancel);
+}
 static void messages(void) {
     int pair[2], transferred[2];
     CHECK(!socketpair(AF_UNIX,SOCK_STREAM,0,pair) && !socketpair(AF_UNIX,SOCK_STREAM,0,transferred));
@@ -231,7 +418,7 @@ static int custody_child(void *argument) {
     struct custody *c=argument;
     CHECK(!prctl(PR_SET_PDEATHSIG,SIGKILL));
     if (c->protected) CHECK(!prctl(PR_SET_DUMPABLE,0));
-    char byte='m'; struct iovec io={&byte,1};
+    char byte=c->receive ? 0 : 'm'; struct iovec io={&byte,1};
     union { struct cmsghdr align; char data[128]; } control={0};
     struct msghdr m={.msg_iov=&io,.msg_iovlen=1,.msg_control=control.data,
         .msg_controllen=c->receive ? sizeof(control.data) : CMSG_SPACE(sizeof(struct ucred))};
@@ -250,15 +437,21 @@ static int custody_child(void *argument) {
     };
     struct sock_filter receive_filter[]={
         BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
-        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_fstat,0,1),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,c->receive==1 ? SYS_fstat : SYS_sendmsg,0,1),
         BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_THREAD),
         BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
     };
     struct sock_fprog filter={.len=c->receive ? sizeof(receive_filter)/sizeof(*receive_filter)
         : sizeof(send_filter)/sizeof(*send_filter),.filter=c->receive ? receive_filter : send_filter};
     CHECK(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0) && !prctl(PR_SET_SECCOMP,SECCOMP_MODE_FILTER,&filter));
-    ssize_t n=c->receive ? recvmsg(c->socket,&m,MSG_CMSG_CLOEXEC) : sendmsg(c->socket,&m,0);
+    struct mmsghdr batch={.msg_hdr=m};
+    ssize_t n=c->receive==3 ? recvmmsg(c->socket,&batch,1,MSG_CMSG_CLOEXEC,NULL)
+        : c->receive ? recvmsg(c->socket,&m,MSG_CMSG_CLOEXEC) : sendmsg(c->socket,&m,0);
+    if (c->receive==3) m=batch.msg_hdr;
     CHECK(n==1 || (c->guest && n==-1 && errno==ECANCELED));
+    /* The export-kill cases must reach native receive, not merely reject the
+     * operation at entry. Its original payload is shared with the helper. */
+    if (c->receive>=2) CHECK(byte=='m' && (!c->guest || n==-1));
     if (c->receive && n==1) for (h=CMSG_FIRSTHDR(&m);h;h=CMSG_NXTHDR(&m,h))
         if (h->cmsg_level==SOL_SOCKET && h->cmsg_type==SCM_RIGHTS) {
             const int *fds=(const void *)CMSG_DATA(h);
@@ -301,6 +494,7 @@ static void custody(int guest, int receive, int protected) {
     printf("PASS IPC caller custody receive=%d protected=%d guest=%d\n",receive,protected,guest);
 }
 int main(int argc,char **argv) {
+    setvbuf(stdout,NULL,_IONBF,0);
     if (argc==4 && (!strcmp(argv[1],"--custody") || !strcmp(argv[1],"--custody-native"))) {
         alarm(20);
         custody(!strcmp(argv[1],"--custody"),atoi(argv[2]),atoi(argv[3])); return 0;
@@ -308,6 +502,9 @@ int main(int argc,char **argv) {
     CHECK(getuid()==0);
     if (argc==4 && !strcmp(argv[1],"--external")) { external(argv[2],(pid_t)atoi(argv[3])); return 0; }
     CHECK(argc==1);
+    send_contract();
+    for (int protected=0;protected<2;++protected) for (int cancel=0;cancel<2;++cancel)
+        receive_lifetime(protected,cancel);
     for (unsigned protected=0;protected<2;++protected) for (unsigned size=0;size<3;++size) {
         pid_t child=fork(); CHECK(child>=0);
         if (!child) { peer_full_table(protected,size==0 ? 0 : size==1 ? 3 : 65536); exit(0); }

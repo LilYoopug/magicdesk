@@ -10,10 +10,12 @@ enum md_fs_buffer_control { MD_FS_BUFFER_CALL=16, MD_FS_BUFFER_ACK, MD_FS_BUFFER
     MD_FS_BUFFER_EXEC_PREPARE, MD_FS_BUFFER_EXEC_CANCEL,
     MD_FS_BUFFER_SNAPSHOT_BEGIN, MD_FS_BUFFER_SNAPSHOT_APPEND, MD_FS_BUFFER_SNAPSHOT_FINISH,
     MD_FS_BUFFER_RIGHTS_BEGIN, MD_FS_BUFFER_RIGHTS_READY, MD_FS_BUFFER_RIGHTS_DONE,
-    MD_FS_BUFFER_CHANNEL_OBSERVED, MD_FS_BUFFER_PROC_LINK, MD_FS_BUFFER_TASK_DONE };
+    MD_FS_BUFFER_CHANNEL_OBSERVED, MD_FS_BUFFER_PROC_LINK, MD_FS_BUFFER_TASK_DONE,
+    MD_FS_BUFFER_TASK_SEND, MD_FS_BUFFER_TASK_RECEIVE, MD_FS_BUFFER_RECEIVED_CALL,
+    MD_FS_BUFFER_RECEIVED_RIGHTS, MD_FS_BUFFER_RECEIVED_DROP };
 enum { MD_FS_BUFFER_SOURCE=-2 };
 enum md_fs_buffer_transfer { MD_FS_BUFFER_NO_FD, MD_FS_BUFFER_ANCHOR, MD_FS_BUFFER_ADDFD, MD_FS_BUFFER_RIGHTS,
-    MD_FS_BUFFER_TASK_PATH };
+    MD_FS_BUFFER_TASK_PATH, MD_FS_BUFFER_TASK_DESCRIPTOR };
 enum { MD_FS_BUFFER_EXPORT=2, MD_FS_BUFFER_IMPORT=3, MD_FS_BUFFER_CHANNEL_CHECK=4 };
 /* Stateful inputs are captured according to md_fs_operation_data_inputs. */
 static inline int md_fs_buffer_operation(unsigned operation) {
@@ -62,6 +64,7 @@ struct md_fs_buffer_frame {
     struct { uint64_t request; unsigned mask; int number; } export;
     char source[96];
     struct { uint64_t token; int number; } receive;
+    struct { unsigned count; int index[253]; } rights;
     struct { int number; struct md_fd_channel_observation observation; } channel;
     _Alignas(struct md_fd_receipt) unsigned char receipt[offsetof(struct md_fd_receipt,control)+CMSG_SPACE(sizeof(int))];
     /* Faulted and copied only for explicit value operations, not ordinary IO. */
@@ -77,5 +80,11 @@ long md_fs_buffer_snapshot(unsigned flags, long (*produce)(void *, void *, size_
 long md_fs_buffer_proc_link(int process, void *out, size_t capacity);
 long md_fs_buffer_call(const struct md_fs_request *, struct md_fs_response *,
         int (*deliver)(void *, const void *, size_t), void *context);
+/* Consume a worker-held descriptor without publishing it into the caller. */
+long md_fs_buffer_use(const struct md_fs_request *, struct md_fs_response *,
+        long (*use)(void *, struct md_fs_buffer_frame *), void *);
+/* Directory operands are retained-receive indices, never guest FD numbers. */
+long md_fs_buffer_received(const struct md_fs_request *, struct md_fs_response *);
+long md_fs_buffer_publish(const int *, unsigned, void *, size_t, unsigned, int *, size_t *);
 #endif
 #endif

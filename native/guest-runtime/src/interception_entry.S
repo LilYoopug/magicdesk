@@ -7,6 +7,12 @@ md_guest_task_control:
     ret
 .size md_guest_task_control, .-md_guest_task_control
 .global md_guest_task_call
+.global md_guest_task_collect
+md_guest_task_collect:
+    bl md_socket_ancillary_collect
+.global md_guest_task_collected
+md_guest_task_collected:
+    brk #0
 md_guest_task_call:
     svc #0
 .global md_guest_task_return
