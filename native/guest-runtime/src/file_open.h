@@ -11,6 +11,8 @@ struct md_open_completion {
     int control;
 };
 int md_complete_open(int, int, struct md_open_completion);
+/* Reopen one retained native object; FIFO completion remains deferred. */
+int md_reopen_file(int fd, int flags, struct md_open_completion *);
 static inline int md_open_endpoint_flags(int flags) {
     return flags & ~(O_CREAT | O_EXCL | O_NOFOLLOW);
 }

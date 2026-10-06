@@ -279,6 +279,9 @@ int md_shm_abort(struct md_shm *s, struct md_shm_mapping **pending) {
     if (!r) r = finish(s,refs(s,s->owner,p->space->id,p->segment,-1));
     free(p); *pending = NULL; return r;
 }
+size_t md_shm_pending_size(const struct md_shm_mapping *pending) {
+    return pending ? pending->size : 0;
+}
 int md_shm_intersects(const struct md_shm_space *m, uintptr_t address, size_t size) {
     uintptr_t end = size > UINTPTR_MAX-address ? UINTPTR_MAX : address+size;
     for (const struct md_shm_mapping *p = m->maps; p; p = p->next)

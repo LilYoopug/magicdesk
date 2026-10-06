@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 void test_fd_origins(void);
+void test_ofd_order(void);
 static int descriptors(void) {
     DIR *dir = opendir("/proc/self/fd"); assert(dir);
     int count = 0;
@@ -78,6 +79,7 @@ int main(void) {
     for (unsigned i = 0; i < 100; i++) contract();
     assert(descriptors() == before);
     test_fd_origins();
+    test_ofd_order();
     puts("PASS resource ownership, transactional unshare, retained roots and descriptor lifetime");
     return 0;
 }

@@ -8,7 +8,7 @@
 #include <sys/socket.h>
 
 long md_namespace_socket_bind(const struct md_fs *fs, int socket, const char *path) {
-    long mode = md_namespace_creation_mode(0777);
+    long mode = md_namespace_creation_mode(fs,0777);
     if (mode < 0) return mode;
     struct md_fs_request q = {.operation = MD_FS_SOCKET_BIND, .directory = {AT_FDCWD, socket},
         .path = {path, NULL}, .mode = 0777, .attributes.creation_mask = 0777U ^ (unsigned)mode};

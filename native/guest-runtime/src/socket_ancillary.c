@@ -2,6 +2,7 @@
 #include "socket_ancillary.h"
 #include "socket_namespace.h"
 #include "ipc_credentials.h"
+#include "watch_calls.h"
 #include "fs_rpc.h"
 #include "raw.h"
 #include <errno.h>
@@ -107,12 +108,16 @@ static size_t append(void *out, size_t used, size_t capacity, int type, int leve
     size_t step = CMSG_SPACE(copied);
     return used + (step < room ? step : room);
 }
-static size_t publish_rights(void *out, size_t used, size_t capacity,
+static long publish_rights(const struct md_fs *fs, void *out, size_t used, size_t capacity,
         int *fds, size_t count, int *flags) {
     size_t room=used<capacity?capacity-used:0;
     size_t fit=room>CMSG_LEN(0)?(room-CMSG_LEN(0))/sizeof(int):0;
     size_t delivered=0;
     for (; delivered<count && delivered<fit; ++delivered) {
+        /* Prepare semantics before publishing the FD number, independently of
+         * any later header fault or batch timeout write. */
+        long error=md_watch_arm(fs,fds[delivered]);
+        if (error) return error;
         if (md_write_memory((char *)out+used+CMSG_LEN(0)+delivered*sizeof(int),
                 &fds[delivered],sizeof(int)) < 0) break;
         /* Published FD numbers are caller-owned even if a later control/header
@@ -161,8 +166,11 @@ static long publish(const struct md_fs *fs, int socket, const struct msghdr *ori
         if (h->cmsg_level==SOL_SOCKET && h->cmsg_type==SCM_RIGHTS) {
             int *fds=(void *)CMSG_DATA(h); size_t count=0;
             for (size_t i=0;i<n/sizeof(int);i++) if (fds[i]>=0) fds[count++]=fds[i];
+            for (size_t i=count;i<n/sizeof(int);i++) fds[i]=-1;
             if (!count) continue;
-            used=publish_rights(out,used,capacity,fds,count,&m.msg_flags);
+            long published=publish_rights(fs,out,used,capacity,fds,count,&m.msg_flags);
+            if (published<0) { close_rights(&m); return published; }
+            used=(size_t)published;
             continue;
         }
         used=append(out,used,capacity,h->cmsg_type,h->cmsg_level,data,n,&m.msg_flags);

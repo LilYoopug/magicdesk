@@ -26,6 +26,15 @@ static void value(struct md_inode_store *s, const char *path, const char *expect
     char data[32] = {0}; assert(read(fd, data, sizeof(data)-1) == (ssize_t)strlen(expected));
     assert(!strcmp(data, expected)); close(fd);
 }
+static void source_object(struct md_inode_store *s, int retained, const struct stat *expected) {
+    char source[96]; assert(!md_inode_descriptor_source(s,retained,source,sizeof(source)));
+    int flags=O_PATH|O_NOFOLLOW|O_CLOEXEC;
+    int reopened=open(source,flags); assert(reopened>=0);
+    struct stat actual; assert(!fstat(reopened,&actual));
+    assert(actual.st_dev==expected->st_dev && actual.st_ino==expected->st_ino
+        && actual.st_mode==expected->st_mode && fcntl(reopened,F_GETFL)==(flags&~O_CLOEXEC));
+    close(reopened);
+}
 int main(int argc, char **argv) {
     if (argc == 4 && !strcmp(argv[1], "--imported")) {
         struct md_inode_store *s = NULL, *other = NULL;
@@ -65,6 +74,7 @@ int main(int argc, char **argv) {
     struct stat first, shared, logical;
     assert(!fstat(lower, &first) && !fstat(image, &shared));
     assert(first.st_dev == shared.st_dev && first.st_ino == shared.st_ino);
+    source_object(a,lower,&first);
     assert(!md_inode_fstat(a, lower, &logical));
     int watch = md_inode_watch_create(a, IN_NONBLOCK);
     assert(watch >= 0);
@@ -99,6 +109,7 @@ int main(int argc, char **argv) {
     metadata = md_inode_reopen(a, lower, O_RDONLY | O_CLOEXEC, 0); assert(metadata >= 0);
     assert(pread(metadata, old, 5, 0) == 5 && !strcmp(old, "upper")); close(metadata);
     assert(!md_inode_fstat(a, lower, &stable) && stable.st_nlink == 0 && stable.st_ino == logical.st_ino);
+    source_object(a,lower,&first);
     int sibling = open_file(b, "/data/file", O_RDONLY);
     metadata = md_inode_xattr_open(b,sibling,"user.md-copy",W_OK); assert(metadata >= 0);
     char proc[64]; snprintf(proc,sizeof(proc),"/proc/self/fd/%d",metadata);
@@ -117,6 +128,7 @@ int main(int argc, char **argv) {
     value(b, "/data/alias", "mmaps"); value(base, "/data/file", "lower");
     close(watch); close(lower); close(image);
     md_inode_store_close(b); md_inode_store_close(a); md_inode_store_close(base);
+    puts("PASS backing-source lease retains the exact lower object across copy-up, rename and unlink");
     puts("PASS shared snapshots, copy-up, hardlinks, stable identity, retained FDs, file watches and native mmap");
     return 0;
 }

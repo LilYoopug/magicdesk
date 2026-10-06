@@ -526,7 +526,9 @@ debugger lifecycle checks and real GDB attach, LLDB, gdbserver, strace, gprof,
 Callgrind and perf-event checks. `--proot ubuntu` selects the same cases in an
 installed Termux PRoot distribution; `--case NAME` restricts a run. The
 `gdb-attach-threads` case checks all 41 target threads, backtraces, a memory write,
-detach and normal target exit. The prepared
+detach and normal target exit. `syscall-exec` checks image-entry ordering and
+paired syscall stops across exec; strace checks decoded arguments and fork
+events without stray-exec recovery. The prepared
 userspace needs GCC, Python 3, GDB, LLDB, gdbserver, binutils, strace and Valgrind.
 No package is installed by the test. `--diagnostics` enables supervisor diagnostics
 for Shroot only. A denied perf event is recorded as unavailable, never as working
@@ -548,6 +550,9 @@ rename confinement. The ancillary cases cover SCM_RIGHTS peek, truncation,
 pipe EOF checks descriptor cleanup. `rights-socket-error` covers a kernel
 payload-copy fault, poll/epoll readiness and shared one-shot error consumption
 through SO_ERROR/read/recv, duplicated FDs and a forked peer.
+`rights-watch-fault` checks received inotify descriptors after late message,
+control, source-address and timeout publication faults, with fresh receivers
+that cannot inherit an already installed watch filter.
 `rights-batch-fault` is an unresolved
 comparison: private recvmmsg headers allow later packets to be consumed before
 a user-header fault, without the kernel's deferred socket error. It remains a
@@ -573,6 +578,286 @@ installed app identity, separate timings and opt-in runtime counters. Fixtures
 are removed unless `--keep` is explicitly selected. Build `resource_guest` and
 `test_task_resources` with `MAGICDESK_GUEST_FIXTURES=ON`; run the latter directly
 for the resource-owner unit contract. See [process resources](../guest-runtime/process-resources.md).
+
+The same runner checks ordered FD-origin vectors and native `SCM_RIGHTS`
+handoffs of up to 253 descriptors: distinct mount origins for one inode,
+sender exit, repeated `MSG_PEEK`, truncated delivery and pipe EOF. Model checks
+cover allocation-failure rollback and atomic batch publication under concurrent
+readers. The controlled native fixture supplies the source/message association;
+it does not establish general application-message origin transfer.
+Retained receipt checks cover capacities 1-253, malformed input beside a guard
+page and vector publication after a CLONE_FILES receiver exits without an ACK.
+RPC and controlled native handoffs use the production `fd_delivery` owner. Its
+lifecycle checks cover failed preparation, empty-receive retry, malformed input,
+partial once-only publication, task-owner loss and disposal without closing
+installed application FDs. Publication is tested with allocation disabled.
+Receiver-local FD limits check exact prefix publication with zero or partially
+available slots, combined with peeks and control-buffer truncation. Select these
+native checks with `--case fd-handoff` without importing a store.
+The same fixture runs the production `fd_install` primitive against real seccomp
+notifications, covering protected receivers, zero/one free slot, both CLOEXEC
+choices, exact origin publication, queued cancellation and receiver death before
+atomic installation. No installed result is reclaimed by guessing a guest FD.
+
+`--case mapping-task` is an explicit kernel feasibility check, separate from the
+default runtime suite. It tests private-FD CLONE_VM helpers under UID 2000:
+60 lifetime/mapping combinations, caller-thread death, nondumpable memory and
+full inherited/helper tables. The tracer checks syscall and terminal observations against
+actual mapping contents. A fatal fixed-mmap filter can leave success-like address
+registers, including a misleading exit stop for a single-thread process. A
+separate filter control permits ordinary shared-FD threads but rejects the private
+helper. A helper-opened maps FD permits exact backing observation at terminal
+stops, including death after mmap before userspace acknowledgement; ordinary
+text reads pass while PROCMAP_QUERY returns EACCES on the tested shell policy.
+A helper-only abort gate checks cancellation with surviving peers and an
+exit-denying ERRNO filter. The reader is the production `mapping_observation`.
+The separate SysV runtime cases cover private-helper admission, full caller
+tables, fatal filters, competing mappings/fork, caller death and exec. Stock GDB
+and strace checks verify internal helper event exclusion; see
+[shared-memory ownership](../guest-runtime/shared-memory.md).
+
+The default suite also checks relative RPC with a retained cwd, including mixed
+explicit/cwd bases, two cwd bases and a protected caller. A real guest filter
+rejects the temporary O_PATH directory open, without preventing these operations.
+`--case fd-custody` checks production buffered O_PATH delivery with a surviving
+CLONE_FILES peer. KILL_THREAD filters on connect/recvmsg no longer interrupt that
+path; a filter on its internal result-delivery openat does kill the caller.
+All six guest cases leave the peer's FD baseline unchanged, including protected
+callers. Native controls never enter the internal delivery gate. These checks
+also run in the default suite and have a focused `resource-fd-custody-results.json`.
+
+`--case fd-custody-dirfd` selects explicit known dirfd input, including protected
+callers and death at native delivery; all six guest cases retain the original
+shared-table baseline and also run in the default/buffer suites.
+`--case fd-custody-nofollow` uses stable backing names for inode-owned objects;
+all six guest cases also pass and run in the default suite. The surviving peer
+checks its baseline after waitpid. Reports use
+`resource-fd-custody-dirfd-results.json` and `resource-fd-custody-nofollow-results.json`.
+Arbitrary native/anonymous nofollow sources are outside this coverage.
+
+`--case rpc` selects the filesystem transport fixture, including exchange
+retirement with a deliberately open client socket. Cancellation before/after
+reply publication must release service-owned endpoints, receipts and contexts
+without waiting for client EOF or peer expiry. Watch reservations preserve their
+copy-acknowledgement policy and final host FD counts match baseline. This is not
+reclamation of a private FD left in a surviving guest table.
+
+`--case fd-lifecycle` stages the separate native `fd_lifecycle` fixture. It
+checks live versus terminal ptrace cleanup, actual seccomp close denial and
+proc-based O_PATH delivery of deleted files, directories and symbolic links.
+The register request/reply prototype creates no private receiving FD, including
+in a nondumpable task with zero/one free slots and socket/connect/recvmsg forbidden.
+Protected-provider denial and independent reopened data offsets are explicit
+boundaries, not bypassed restrictions. The fixed-size prototype is not a runtime
+transport and does not establish exact O_NOFOLLOW flag semantics. Its exact report is
+`resource-fd-lifecycle-results.json`; it leaves default results untouched.
+Private-table helper controls cover terminal cleanup, inherited close/clone
+filters and the unwanted retention of unrelated pipe writers. The same fixture
+probes exact Unix socket peers through NETLINK_SOCK_DIAG, recording creation or
+query denials explicitly. These probes do not enable an alternate runtime path.
+
+The same fixture has 17 export-channel/queue cases: a table-owned send endpoint
+with a supervisor-owned rights queue, repeated protected sends, cancellation
+before send/before dequeue/after capture, late ADDFD_SEND admission, zero/one free
+slots, kernel sender credentials with forged-PID rejection, fork/unshare/exec,
+descriptor replacement and SCM_RIGHTS quota exhaustion. Actual shared offsets,
+flock conflicts and pipe EOF check open-description ownership. A retained receive
+endpoint can discard queued rights; peer close or shutdown cannot do so alone.
+Six reverse-direction controls cover protected receive, zero/one result slots,
+receiver death before/after receiving, queue discard and pipe EOF. These are
+kernel controls; the production registry and request-lifetime checks below test
+the runtime integration. The channel costs one infrastructure descriptor per
+admitted table and retains native in-flight limits. It is not a zero-extra-FD
+solution or a replacement for all RPC input/output paths.
+
+`--case fs-dispatch` connects scalar control and shared request buffers to the
+production filesystem worker and inode engine. Its 504 O_PATH cases check
+authenticated context retention, registry replacement, long pathname snapshots,
+deleted objects, protected receivers, FD-limit failure, ordered origin publication
+and caller death before/during/after execution. They cover a surviving CLONE_FILES
+peer and real exec with fresh mapping setup through ADDFD_SEND; the setup FD is
+closed before receiver entry. Terminal checks kill at openat entry/exit, through
+a real KILL_THREAD filter, and immediately after syscall resumption. Both ABI
+spellings of AT_FDCWD use the production result decoder and mutation publisher;
+the surviving peer checks descriptors without a receiver ACK. The race records
+its observed result, not all possible interleavings. Direct proc reopening of the memfd is recorded
+separately and is not required. Buffer unit tests check pinned lifetime, stale
+generations, bounded capacity, failed setup and allocation-free reuse. A 96-record
+failure test verifies typed completion dispatch and queued-work retirement.
+Production buffered service checks cover cwd, validated O_PATH input snapshots,
+malformed fields/lengths, ordered explicit-base capture, close/reuse before and
+after capture, unannotated kernel inputs, transferred result ownership, queued cancellation and submitted-open cancellation
+with an event-held worker. Removed task/resource owners cannot recycle pinned
+output or receive a late callback; cancelled results close and final FD counts
+match baseline. The report is `resource-fs-dispatch-results.json`.
+Watch cases use the production mapped reservation and worker acknowledgement:
+successful/rejected copies, invalid acknowledgements, and cancellation before or
+after offering the result. Cancelled requests retain their slots until worker
+completion; unconfirmed delivery is never replayed.
+The 504-case O_PATH control loop remains fixture-owned, without coverage of
+concurrent shared-table mutations, protected input-FD capture, exact O_NOFOLLOW
+flags or all operation payloads.
+
+`--case fs-buffer` selects the mapped-output checks also included in the default
+resource suite. They run native controls and the real bootstrap/syscall adapter.
+Known-cwd getcwd must succeed at EMFILE while real KILL_THREAD filters deny
+socket/connect/sendmsg/recvmsg, including nondumpable processes, fork, exec and
+48 simultaneous callers. Output-error checks require ERANGE/EFAULT without cwd
+changes. Memory-owner unit tests check CLONE_VM, fork's shared allocator, fresh
+exec mappings, mapping validation and worker pins outliving owners. O_PATH cases
+cover absolute/cwd long paths, files/directories/followed symlinks, protected
+receivers, zero/one free FD slot, exact status flags and caller-selected CLOEXEC,
+with all four RPC syscalls forbidden. Path/metadata cases cover mkdir, symlink,
+chmod, timestamps, stat, readlink, two-dirfd rename, unlink, open-unlinked metadata
+and output EFAULT at a full FD table, dumpable and protected. O_NOFOLLOW cases
+check inode/type/flags with the same zero/one-slot matrix for owned files,
+directories and symlinks. The custody cases also run here. The report is
+`resource-fs-buffer-results.json`.
+`--case fs-results` isolates native/guest mount-table and executable-image delivery, including
+read/seek, CLOEXEC on/off, protected callers, zero/one free FD slot and all four
+RPC syscalls forbidden. Unannotated SCM_RIGHTS dirfds and real socket/watch input
+descriptions also run with those syscalls forbidden after setup. Capturing a real
+description is distinct from authenticating arbitrary transferred mount origins.
+Directory seeks at a full FD table check shared dup offsets, independent opens
+and negative-offset rejection. The worker fixture separately replaces an input
+number after capture and verifies the original OFD's position, plus O_PATH rejection.
+Guest FIFO checks forbid socket/connect/sendmsg/recvmsg, require exact zero/one
+result-slot behavior and cancel protected CLONE_FILES openers without private FD
+retention. `--case open-job` separately checks supervisor-side deferred completion,
+ENXIO, EOF, cancellation before/after result queuing and exclusion of unrelated FDs.
+These checks also run in the default suite; mapped cases also run in the buffer suite.
+Group-exit cases race 24 groups of eight active peers against buffered calls,
+including nondumpable processes. Pipe acknowledgements precede exit_group;
+observed terminal recovery after ESRCH is diagnostic, not timing-based readiness.
+An outer deadline bounds supervisor cleanup, and the runner persists an error
+report even if console execution or closure fails.
+Parked-group cases require the explicit supervisor deadline error and exit 125;
+outer-timeout recovery is a failure, not a cleanup pass.
+
+`--case fs-export` runs native controls and the production protected-input
+transport. It forbids guest socket/connect/recvmsg, fills RLIMIT_NOFILE before
+and after channel admission, checks exact shared directory positions, kills
+sixteen CLONE_FILES senders with seccomp and verifies fork/unshare/exec/dup/close
+ownership without FD growth. Shared-table exec also checks prepared-image
+retirement in the surviving parent. Cold EMFILE is required, not concealed by
+raising limits. Restricted metadata checks require the same bounded channel,
+full-table fstat, one-slot proc directory results and shared-table sender death.
+Reports use `resource-fs-export-results.json`; these checks also
+run in the default and buffer suites. Infrastructure unit checks cover malformed
+and truncated rights, queue destruction and pipe EOF, not only descriptor counts.
+The production service also rejects wrong tokens, duplicate/wrong-sized vectors
+and wrong senders, and drains rights after cancellation or a reported send error.
+All eight cases require pipe EOF and matching descriptor counts.
+Channel reconciliation checks cover matching/replaced/closed sockets, CLOEXEC,
+malformed and denied observations, resumed export/return and cancellation before
+observation completion. The mapped export fixture uses a protected actor with
+a real getsockopt-denying filter and requires exact FD balance.
+Input-lease checks use independent consumers and channels with reverse delivery,
+duplicates, wrong senders/counts, retired tokens and cancellation. Allocations
+are disabled during admission/delivery/release; EOF checks verify actual release.
+
+`--case exec-custody` compares native and production shared-table exec. It checks
+ordinary and nondumpable callers killed by a pread filter, 64 failed execs per
+caller with an invalid environment, and successful exec with all filesystem-RPC
+socket calls forbidden. The surviving CLONE_FILES peer must retain exactly its
+original FD set. It also runs in the default resource and buffer suites.
+`--case proc-custody` checks ordinary/nondumpable CLONE_FILES callers with
+write/read kill filters, then large argv snapshots with forbidden RPC, zero/one
+free result slots, O_PATH/CLOEXEC, read-only access, seek and rejected copying.
+It also checks mount-table snapshots and retained snapshot metadata, path
+chmod/chown/utimens/statfs, regular-file/FIFO mknod, chdir and truncate without
+free FD slots, caller RLIMIT_FSIZE/SIGXFSZ, and proc reopening of unlinked
+files, directories and native devices with only the result slot available.
+Foreign executable readlink runs with a full FD table, read/RPC kill filters,
+ordinary/protected callers, short output, zero capacity and EFAULT.
+Current executable metadata, xattrs and watches also run with full FD tables,
+including protected callers. Worker object operands are checked after unlink,
+with modified input after admission and queued cancellation; all provider FDs
+must return to baseline. Native RPC checks the same identity-only contract.
+Imported cwd checks receive a directory via SCM_RIGHTS, fill the FD table and
+repeat fchdir/relative metadata for ordinary and protected tasks. The worker
+fixture checks ordered FS/file-table publication, rejected descriptors, native
+errors, pre-entry denials and cancellation before or after entry.
+Native nondumpable auxv EACCES is recorded as an unavailable comparison, not a
+guest exemption. The worker fixture cancels snapshot construction at every stage
+and checks its own descriptor count. Both suites include these checks by default.
+The result-FD suite checks watch registration with a full table after protected
+queue-transport admission, including symlink selection and unchanged FD counts.
+The buffer/default suites also check xattr with full FD tables, path and FD
+forms, ordinary/protected callers, nofollow, binary values and rejected copying.
+Guest path calls additionally set/get/remove a maximum-sized logical ACL with
+socket/connect/sendmsg/recvmsg forbidden. Protected FD calls first admit their
+table-owned export channel. Native RPC verifies the same maximum-sized value
+contract; mount checks require readonly rejection and no intermediate FD leaks.
+Buffer reuse tests require header-only clearing without bulk payload writes.
+ABI fixtures install with explicit logical root, then execute as their configured
+numeric guest account (2000:2000 by default); fixture ownership/modes and the
+required data file are part of the archive, independent of the build host's umask.
+
+`--case fs-return` checks native controls and production nofollow O_PATH opens
+on an explicit native attachment with protected callers and socket/connect
+forbidden. Cold admission needs the channel slot and a result slot; admitted
+channels preserve exact zero/one-result-slot limits. Twelve forked receivers
+each perform 32 opens through one inherited channel. Sixteen CLONE_FILES
+receivers die at recvmsg without leaking a private socket or retaining queued
+rights. Caller-selected CLOEXEC and exact FD counts are checked. These cases run
+in the buffer/default suites and write `resource-fs-return-results.json` when
+selected alone. The native handoff fixture additionally tests the production
+`fd_return`/mapped receipt in 16 cases with pipe/O_PATH, denied receive, terminal
+receipt publication, separate table/channel turns and real pipe EOF.
+
+`--case fs-directory` compares native and protected guest directory reads.
+Rejected user copying must preserve the shared position; an admitted channel
+works with zero free guest FDs and forbidden socket/connect. Four forked readers
+mix broker and protected adapter paths over the same OFD without duplicates or
+missing names. The worker fixture controls copy acknowledgement, queued alias
+seeks, independent opens and cancellation on either side. RPC uses the same
+copy/commit and OFD-ordering contract. `--case ofd-order` runs the ownership
+model separately, including number reuse and namespace-owner teardown. These
+mechanisms order active operations only, not every application FD or ordinary IO.
+
+`--case fs-capture` checks unknown native cwd and kernel-path operands through
+the private-table helper. Ordinary/protected full-table callers exercise native
+fchdir, proc metadata, watches and reopen with one result slot. A thread with
+private files/FS distinguishes `/proc/thread-self` from the group leader's
+`/proc/self`. Clone/close-range denials and fatal helper open/send filters leave
+the surviving shared table unchanged. Worker checks retain two-source capture
+through success, error and cancellation, including overwritten input frames.
+
+`--case pidfd-table` is an opt-in native feasibility check requiring
+`PIDFD_THREAD` (Linux 6.9+), not a production dependency or default-suite case.
+Sixteen combinations exercise same-group private FD tables, ordinary/protected
+callers, zero to three free result slots and normal/fatal-filter helper exit.
+Checks retain exact OFD offsets, O_PATH identity, CLOEXEC and pipe EOF. The parent
+pre-admits its pidfd infrastructure slot; the test does not establish zero-cost
+admission or production ancillary publication/cancellation. Its report is
+`resource-pidfd-table-results.json`. See
+[kernel compatibility](../guest-runtime/kernel-compatibility.md).
+
+`--case fd-parcel` separately measures a socket-carried FD-list candidate,
+including O_PATH, sender exit, peeks, read discard, queue closure, failed sends
+and Unix GC cycles. It records the measured extra receiving-slot requirement
+under RLIMIT_NOFILE as a limitation, not a resource-equivalence pass. A pidfd_getfd
+probe records provider/receiver dumpability boundaries without changing identity.
+The preconnected relay variant frees the envelope's receiving slot before
+delivery and checks the issued endpoint cookie, protected receivers, terminal
+receipts and pipe EOF. Direct controls deliver 253 queued rights at the same
+available-slot counts. Reverse relay exports can instead hit ETOOMANYREFS at low
+RLIMIT_NOFILE because queued rights count against the real UID's in-flight quota;
+reports keep these limitations separate from admitted-delivery checks. Channels
+and receipts are prepared before pressure, not claimed to be lazily available
+at a full descriptor table.
+The receiver-local variant parks the endpoint in a preallocated slot and needs
+no reverse export. It checks terminal phases, reused FD numbers, protected
+receivers and exact available prefixes through the retained receipts. A slot
+above a lowered FD limit is unusable; general private-slot ownership is not
+implemented. Sender-side controls separately compare direct and two-stage sends
+of 253 rights under low limits, including failed-export cleanup. An isolated
+io_uring capability probe records denial without making it a runtime prerequisite.
+This experiment is not enabled in the guest adapter or the default suite.
+Focused reports use `resource-fd-handoff-results.json` and
+`resource-fd-parcel-results.json`; they do not replace `resource-results.json`.
+Protocol and lifetime limits remain in the process-resources contract.
 
 Distribution and emulator workflows use the same runner and per-instance policy:
 
@@ -636,10 +921,19 @@ Reports retain every command and exact image/build.
 `test_ipc_credentials_runtime.py BUILD DEVICE_STORE` stages the native helpers
 and exercises connection/group snapshots, queued SCM_CREDENTIALS, credential
 drops, forgery rejection, MSG_PEEK, recvmmsg, truncation, FD passing and an external
-native endpoint. The selected prepared store supplies stock D-Bus and a root NSS
+native endpoint. Peer queries cover full ordinary/protected FD tables, empty
+and maximum 65536-group snapshots, short buffers and output-copy faults.
+The native RPC fixture separately checks large segmented replies, rejected
+delivery and malformed/missing continuation packets without leaking FDs.
+The selected prepared store supplies stock D-Bus and a root NSS
 entry. Independent root clients share its bus; a different guest user is rejected.
 `--installed` uses the APK's CLI/bundle instead of staging execution helpers;
 only the test programs are uploaded. `--gdbus` adds a stock GIO client.
+`--custody` adds strict native/guest comparisons for terminal adapter death with
+a surviving CLONE_FILES peer, both ordinary and nondumpable. Guest send/receive
+cases currently expose retained identity or unpublished message descriptors;
+native controls release them. This opt-in reproducer remains a failing ownership
+check, not a passing baseline or evidence of complete ancillary custody.
 For Debian's activation/FD workflow:
 
 ```sh
@@ -720,7 +1014,9 @@ The suite covers directory/name events, rename cookies, file-data events,
 read/readv/FIONREAD boundaries, concurrent readers, dup/fcntl, queued SCM_RIGHTS
 through recvmsg/recvmmsg, descriptor reuse, EINTR/SA_RESTART and 64 execs with
 constant filter count. The complete glibc/musl suite runs again with dumpability
-disabled. Churn checks 7,680 distinct duplicate targets without unbounded filter
+disabled. `receive-denied` rejects watch-filter installation and checks that the
+published FD prefix stays live while unpublished FDs are released, using pipe
+EOF and the receiver's descriptor count. Churn checks 7,680 distinct duplicate targets without unbounded filter
 growth. An aggregate interception counter detects accidental ordinary-read tracing
 in the unsaturated case. Two independent observers receive a third launch's
 mutations. Store controls verify rollback after SIGKILL, last-reader retirement

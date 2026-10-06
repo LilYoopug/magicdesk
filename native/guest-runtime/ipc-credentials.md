@@ -21,6 +21,13 @@ connect and socketpair capture effective guest UID/GID and supplementary groups.
 SO_PEERCRED and SO_PEERGROUPS read copied connection snapshots, not the peer's
 current credentials. A later credential drop, peer exit or FD transfer does not
 rewrite them. Native peer PID is checked before publishing a snapshot.
+The worker returns that snapshot through the existing mapped byte output,
+without installing an identity memfd in the application table. SO_PEERGROUPS
+supports all 65536 groups; SO_PEERCRED returns only the fixed identity header.
+Input capture retains the exact socket description. After channel admission,
+both work with a full ordinary or protected FD table. Short buffers, ERANGE and
+output-copy faults keep their syscall semantics. The unused mapped value pages
+are not cleared by ordinary filesystem requests.
 
 For a connection to a registered guest listener, an otherwise unnamed client
 gets a private abstract transport address. Accept resolves that exact connection
@@ -59,6 +66,10 @@ Partially inaccessible control buffers retain the delivered prefix and native
 MSG_CTRUNC semantics. Input-only message fields are not written back.
 The adapter publishes directly from its receive scratch buffer, without a second
 reconstruction buffer, per-FD allocation or extra data-description references.
+Received watch descriptors activate their existing FD-class selector before
+publication, through the same path for recvmsg and recvmmsg. Preparation failure
+returns an explicit error and releases only unpublished descriptors. The caller
+retains every already published number regardless of the eventual syscall result.
 
 For recvmmsg, each private msg_len records kernel completion even if the syscall
 then fails writing the remaining timeout. Such a failure does not suppress
@@ -71,6 +82,12 @@ Current limits are explicit:
   virtually authenticated; registered socketpairs are supported.
 - The private capability consumes one kernel descriptor slot per explicit
   credential message. It does not remove kernel ancillary/FD limits.
+- Terminal adapter death can leave the sending identity memfd or received,
+  unpublished rights in a surviving CLONE_FILES table. The opt-in `--custody`
+  fixture reproduces both with fatal application filters, with and without
+  dumpability; native controls remain clean. Normal close/error handling does
+  not establish terminal custody. This remains separate from descriptor-free
+  SO_PEERCRED/SO_PEERGROUPS snapshots.
 - Connection/message records remain until the last live owner exits. Long-lived
   workloads sending credentials continuously need lifecycle-aware reclamation;
   deleting records merely on receipt is unsafe with concurrent MSG_PEEK.
@@ -95,6 +112,7 @@ Session buses use ordinary credential authentication and service activation.
 The UID 2000 device suite covers Debian/glibc and Alpine/musl session buses,
 independent launches sharing a store, rejection of another guest user, connection
 snapshots after credential drops and peer exit, groups, short output buffers,
+full FD tables, maximum/empty group snapshots and inaccessible output memory,
 queued explicit messages, rejected credential forgery, MSG_PEEK, recvmmsg and
 ordinary descriptor transfer. A stock Debian bus activates a GDBus fixture,
 reports its caller as guest UID 0 and exchanges usable FDs in both directions.

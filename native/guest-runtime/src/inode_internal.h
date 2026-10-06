@@ -6,6 +6,7 @@
 #include "guest_identity.h"
 #include "posix_acl.h"
 struct md_fs_result;
+struct md_fs_output;
 struct md_inode_boundary { char *path; size_t capacity; const char *suffix; };
 
 #define MDI_ROOT "00000000000000000000000000000000"
@@ -84,7 +85,7 @@ int mdi_acl_store(struct md_inode_store *, const struct mdi_node *, unsigned, co
 int mdi_acl_permission(struct md_inode_store *, const struct mdi_node *, const struct md_identity *, unsigned);
 int mdi_acl_chmod(struct md_inode_store *, const struct mdi_node *, unsigned);
 int mdi_acl_inherit(struct md_inode_store *, const struct mdi_node *, const struct mdi_node *, unsigned);
-void md_inode_acl(struct md_inode_store *, const struct md_fs_request *, struct md_fs_result *);
+void md_inode_acl(struct md_inode_store *, const struct md_fs_request *, struct md_fs_result *, const struct md_fs_output *);
 int md_inode_attributes(struct md_inode_store *, int, void *, size_t);
 int mdi_walk(struct md_inode_store *, int, const char *, enum mdi_follow, int missing, struct mdi_location *);
 int mdi_host_boundary(struct md_inode_store *, const char *parent, const char *name, const char *tail, uint64_t resolve);

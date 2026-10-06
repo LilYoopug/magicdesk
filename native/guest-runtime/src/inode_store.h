@@ -72,6 +72,10 @@ int md_inode_temporary(struct md_inode_store *);
 /* Stable store-local identity. Retained objects outlive names and open FDs. */
 int md_inode_object_id(struct md_inode_store *, int fd, char out[33]);
 int md_inode_open_object(struct md_inode_store *, const char *id, int flags);
+/* Stable physical name of an already opened backing object. The store and its
+ * source leases must outlive use; guest unlink/rename/copy-up cannot retarget it.
+ * EXDEV means the descriptor has no leased backing name in this store. */
+int md_inode_descriptor_source(struct md_inode_store *, int, char *, size_t);
 /* Pathname socket identity belongs to the namespace; data, credentials, buffer
  * passing and listener lifetime remain kernel Unix-socket operations. */
 int md_inode_socket_bind(struct md_inode_store *, int dirfd, const char *path, mode_t, int socket);
@@ -87,6 +91,8 @@ ssize_t md_inode_getdents(struct md_inode_store *, int fd, void *, size_t);
  * the offset unchanged. The callback must not reenter the namespace owner. */
 ssize_t md_inode_getdents_deliver(struct md_inode_store *, int fd, void *, size_t,
         int (*deliver)(void *, const void *, size_t), void *);
+/* Caller orders this OFD through later copy/commit; next receives its cookie. */
+ssize_t md_inode_getdents_prepare(struct md_inode_store *, int fd, void *, size_t, int64_t *next);
 int64_t md_inode_seekdir(struct md_inode_store *, int fd, int64_t offset, int whence);
 
 struct md_inode_import_limits { uint64_t bytes, entries; int preserve_ownership; };

@@ -1,10 +1,11 @@
 #define _GNU_SOURCE
 #include "sysv_shm.h"
 #include "interception.h"
+#include "adapter_buffer.h"
 #include "raw.h"
 #include <errno.h>
+#include <limits.h>
 #include <sys/mman.h>
-#include <sys/stat.h>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
 
@@ -36,6 +37,7 @@ static long observe_mappings(void) {
 static long request(unsigned op, unsigned long a, unsigned long b, unsigned long c) {
     return RAW5(prctl,MD_GUEST_SHM,op,a,b,c);
 }
+extern long md_guest_task_control(void);
 long md_shm_dispatch(long nr, const unsigned long *a) {
     if (nr == SYS_shmget) return request(MD_SHM_GET,a[0],a[1],a[2]);
     if (nr == SYS_shmat) {
@@ -45,20 +47,11 @@ long md_shm_dispatch(long nr, const unsigned long *a) {
         if (address & (md_page_size-1)) return -EINVAL;
         long activated = observe_mappings();
         if (activated < 0) return activated;
-        long fd = request(MD_SHM_OPEN,a[0],flags,0);
-        if (fd < 0) return fd;
-        struct stat info;
-        long r = RAW2(fstat,fd,&info);
-        if (!r) r = RAW6(mmap,address,info.st_size,PROT_READ|((flags&SHM_RDONLY)?0:PROT_WRITE)
-            |((flags&SHM_EXEC)?PROT_EXEC:0),MAP_SHARED|(address?MAP_FIXED_NOREPLACE:0),fd,0);
-        RAW1(close,fd);
-        if (r < 0) { request(MD_SHM_ABORT,0,0,0); return r; }
-        if (address && (uintptr_t)r != address) {
-            RAW2(munmap,r,info.st_size); request(MD_SHM_ABORT,0,0,0); return -EINVAL;
-        }
-        long committed = request(MD_SHM_ATTACHED,(unsigned long)r,0,0);
-        if (committed < 0) { RAW2(munmap,r,info.st_size); request(MD_SHM_ABORT,0,0,0); return committed; }
-        return r;
+        long memory=md_adapter_buffer_take();
+        if (memory<0) return memory;
+        long mapped=md_guest_task_control();
+        long released=md_adapter_buffer_release();
+        return mapped<0 ? mapped : released<0 ? released : mapped;
     }
     if (nr == SYS_shmdt) {
         int removed = 0;
@@ -81,9 +74,10 @@ long md_shm_dispatch(long nr, const unsigned long *a) {
         return r < 0 ? r : request(MD_SHM_SET,a[0],info.shm_perm.uid|((uint64_t)info.shm_perm.gid<<32),info.shm_perm.mode);
     }
     if (command != IPC_STAT) return -ENOTSUP;
-    long fd = request(MD_SHM_STAT,a[0],0,0);
-    if (fd < 0) return fd;
-    long size = RAW3(read,fd,&info,sizeof(info));
-    RAW1(close,fd);
-    return size < 0 ? size : size != sizeof(info) ? -EIO : md_write_memory((void *)a[2],&info,sizeof(info));
+    long memory=md_adapter_buffer_take();
+    if (memory<0) return memory;
+    long result=md_guest_buffer_control(MD_BUFFER_SHM_STAT,a[0],0);
+    if (!result) result=md_write_memory((void *)a[2],(void *)memory,sizeof(info));
+    long released=md_adapter_buffer_release();
+    return result ? result : released;
 }

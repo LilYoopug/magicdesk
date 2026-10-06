@@ -7,20 +7,20 @@
 struct md_ipc;
 struct md_ipc_pending;
 struct md_ipc_undo;
-enum { MD_IPC_OPEN, MD_IPC_EXECUTE, MD_IPC_CLOSE };
+enum { MD_IPC_EXECUTE=1, MD_IPC_CLOSE };
+enum { MD_IPC_VALUE_MAX=65536 };
 struct md_ipc_packet {
     size_t length, input_size, timeout_offset, output_size;
     unsigned char data[];
 };
 struct md_ipc_request { long nr; unsigned long args[6]; };
 struct md_ipc_transport {
-    int fd;
     struct md_ipc_packet *packet;
     size_t length, capacity;
     struct md_ipc_request call;
 };
-int md_ipc_transport_open(struct md_ipc *, struct md_ipc_transport *,
-    const struct md_ipc_request *, int retry);
+int md_ipc_transport_prepare(struct md_ipc *, struct md_ipc_transport *,
+    const struct md_ipc_request *, int retry, void *memory, size_t capacity);
 void md_ipc_transport_close(struct md_ipc_transport *);
 
 int md_ipc_open(const char *, struct md_ipc **);

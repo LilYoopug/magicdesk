@@ -17,6 +17,8 @@ struct md_proc_path {
 int md_host_path(const char *);
 /* Classifies adapter-owned absolute strings, without resolving guest symlinks. */
 struct md_proc_path md_proc_path(const char *);
+/* Pin thread-self to the requesting task before delegating a kernel lookup. */
+int md_proc_task_path(const char *, char *, size_t);
 /* An image belongs to one address space, not to the syscall transport. */
 struct md_process_image {
     unsigned argc;

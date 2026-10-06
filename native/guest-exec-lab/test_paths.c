@@ -26,6 +26,11 @@ int main(int argc, char **argv) {
     assert(md_host_path("/dev/shmallow") && !md_host_path("/dev/shm"));
     assert(!md_host_path("//dev/./shm/file") && md_host_path("/proc/self"));
     assert(!md_host_path("/process") && !md_host_path("relative"));
+    assert(md_proc_path("/proc/self/fd/0").kind == MD_PROC_FD);
+    assert(md_proc_path("/proc/self/fd/00").kind == MD_PROC_NONE);
+    assert(md_proc_path("/proc/thread-self/fd/012").kind == MD_PROC_NONE);
+    assert(md_proc_path("/dev/fd/01").kind == MD_PROC_NONE);
+    assert(md_proc_path("/proc/01/cwd").kind == MD_PROC_NONE);
     assert(!mkdir("dev", 0700) && !mkdir("dev/shm", 0700));
     expect(&g, "/dev/shm/value", 1, "/dev/shm/value");
     assert(!mkdir("etc", 0700));

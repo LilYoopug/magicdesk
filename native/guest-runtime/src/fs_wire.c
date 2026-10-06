@@ -66,15 +66,17 @@ long md_fs_receive(int socket, void *data, size_t size, struct md_fs_rights *rig
     if (invalid) { md_fs_close_rights(rights); return -EPROTO; }
     return r;
 }
-long md_fs_receive_receipt(int socket, struct md_fd_receipt *receipt,
+long md_fs_receive_receipt(int socket, struct md_fd_receipt *receipt, unsigned capacity,
         struct md_fs_rights *rights, uint64_t exchange) {
     rights->count=0;
-    md_fd_receipt_reset(receipt);
+    if (!capacity || capacity>MD_FS_MAX_FDS) return -EINVAL;
+    int reset=md_fd_receipt_reset(receipt,capacity);
+    if (reset) return reset;
     long r=md_fd_control(MD_FD_RECEIVE,exchange,0,0);
     if (r<0) return r;
     r=RAW3(recvmsg,socket,&receipt->message,MSG_CMSG_CLOEXEC|MSG_DONTWAIT);
     long end=md_fd_control(MD_FD_RECEIVED,exchange,0,0);
-    int count=md_fd_receipt_read(receipt,rights->fd);
+    int count=md_fd_receipt_read(receipt,capacity,rights->fd);
     if (count>=0) rights->count=(unsigned)count;
     if (end<0 || count<0 || (r>=0 && (r!=1 || receipt->byte!=1
             || (receipt->message.msg_flags&(MSG_TRUNC|MSG_CTRUNC))))) {

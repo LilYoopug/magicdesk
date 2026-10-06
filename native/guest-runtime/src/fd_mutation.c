@@ -2,6 +2,7 @@
 #include "fd_mutation.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <linux/close_range.h>
 #include <sys/syscall.h>
 
@@ -15,9 +16,7 @@ int md_fd_mutation_prepare(struct md_fd_origins *files, long nr,
     if (!duplicate) return 0;
     unsigned flags=(nr==SYS_dup3 && (a[2]&O_CLOEXEC))
         || (nr==SYS_fcntl && command==F_DUPFD_CLOEXEC) ? FD_CLOEXEC : 0;
-    struct md_fs_anchor *source=md_fd_origins_get(files,(int)a[0],NULL);
-    int error=md_fd_origins_prepare(files,source,flags,&out->update);
-    md_fs_anchor_release(source); return error;
+    return md_fd_origins_prepare_copy(files,(int)a[0],flags,&out->update);
 }
 int md_fd_mutation_finish(struct md_fd_mutation *op, struct md_fd_origins *files, long result) {
     int error=0;
@@ -37,14 +36,22 @@ void md_fd_mutation_discard(struct md_fd_mutation *op) {
     md_fd_origins_finish(&op->update,-1);
     *op=(struct md_fd_mutation){0};
 }
+int md_fd_mutation_terminal_open(const struct md_fd_mutation *op, unsigned long value, long *result) {
+    if (!op || !result || op->nr!=SYS_openat || (int)op->args[0]!=AT_FDCWD
+            || !(op->args[2]&O_PATH) || !op->update.table) return 0;
+    if (value==(unsigned long)(unsigned)AT_FDCWD) *result=-ECANCELED;
+    else if (value<=INT_MAX || value>=(unsigned long)-4095L) *result=(long)value;
+    else return 0;
+    return 1;
+}
 int md_fd_mutation_abandon(struct md_fd_mutation *op, struct md_fd_origins *files) {
     int error=0;
     if (op->nr==SYS_close || (op->nr==SYS_fcntl && op->args[1]==F_SETFD)) {
         if ((int)op->args[0]>=0)
-            error=md_fd_origins_close_range(files,(unsigned)op->args[0],(unsigned)op->args[0],0);
+            error=md_fd_origins_abandon_range(files,(unsigned)op->args[0],(unsigned)op->args[0]);
     } else if (op->nr==SYS_dup3 && (int)op->args[1]>=0)
-        error=md_fd_origins_close_range(files,(unsigned)op->args[1],(unsigned)op->args[1],0);
+        error=md_fd_origins_abandon_range(files,(unsigned)op->args[1],(unsigned)op->args[1]);
     else if (op->nr==SYS_close_range && (unsigned)op->args[0]<=(unsigned)op->args[1])
-        error=md_fd_origins_close_range(files,(unsigned)op->args[0],(unsigned)op->args[1],0);
+        error=md_fd_origins_abandon_range(files,(unsigned)op->args[0],(unsigned)op->args[1]);
     md_fd_mutation_discard(op); return error;
 }

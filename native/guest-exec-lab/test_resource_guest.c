@@ -1,19 +1,33 @@
 #define _GNU_SOURCE
+#include <sys/mman.h>
+#include "fs_buffer.h"
+#include "posix_acl.h"
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/close_range.h>
+#include <linux/audit.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
 #include <sched.h>
+#include <pthread.h>
 #include <signal.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ipc.h>
+#include <sys/inotify.h>
+#include <sys/ioctl.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/sem.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/vfs.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
+#include <sys/xattr.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -365,8 +379,1551 @@ static void origins(const char *cwd, int protected) {
     assert(!close(fd) && !unlink("origin-file"));
     puts("PASS initial cwd and proc aliases retain native offsets and protected metadata access");
 }
+struct custody_context { pid_t parent; int protected, call, dirfd, flags; };
+static void rpc_cwd(int protected) {
+    int base=open(".",O_PATH|O_DIRECTORY|O_CLOEXEC); assert(base>=0);
+    if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
+    struct sock_filter code[]={
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,arch)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,AUDIT_ARCH_AARCH64,1,0),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_PROCESS),
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_openat,0,4),
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[2])),
+        BPF_STMT(BPF_ALU|BPF_AND|BPF_K,O_PATH|O_DIRECTORY),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,O_PATH|O_DIRECTORY,0,1),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EUCLEAN),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
+    };
+    struct sock_fprog program={sizeof(code)/sizeof(*code),code};
+    assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+    assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+    assert(open(".",O_PATH|O_DIRECTORY|O_CLOEXEC)==-1 && errno==EUCLEAN);
+    char path[4096]; assert(getcwd(path,sizeof(path)) && !strcmp(path,"/tmp"));
+    int fd=open("rpc-cwd-a",O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);
+    assert(fd>=0); put(fd); assert(!close(fd));
+    assert(!linkat(base,"rpc-cwd-a",AT_FDCWD,"rpc-cwd-b",0));
+    assert(!renameat(AT_FDCWD,"rpc-cwd-b",base,"rpc-cwd-c"));
+    assert(!rename("rpc-cwd-c","rpc-cwd-d"));
+    fd=open("rpc-cwd-d",O_PATH|O_CLOEXEC); assert(fd>=0 && !close(fd));
+    assert(!unlink("rpc-cwd-d") && !unlink("rpc-cwd-a") && !close(base));
+    puts("PASS RPC cwd without guest directory capture: getcwd, create, O_PATH, mixed bases and two-base mutations");
+}
+static int custody_child(void *argument) {
+    struct custody_context *c=argument;
+    assert(!prctl(PR_SET_PDEATHSIG,SIGKILL));
+    if (getppid()!=c->parent) _exit(1);
+    if (c->protected) assert(!prctl(PR_SET_DUMPABLE,0));
+    struct sock_filter code[]={
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,arch)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,AUDIT_ARCH_AARCH64,1,0),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_PROCESS),
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,c->call,0,1),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_THREAD),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
+    };
+    struct sock_fprog program={sizeof(code)/sizeof(*code),code};
+    struct sock_filter delivery[]={
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_openat,0,3),
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[4])),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(unsigned)MD_FS_BUFFER_SOURCE,0,1),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_THREAD),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
+    };
+    if (c->call==SYS_openat) program=(struct sock_fprog){sizeof(delivery)/sizeof(*delivery),delivery};
+    assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+    assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+    /* The fifth openat argument is ignored by the kernel; the internal anchor
+     * gate uses it to select a retained result. Kill only that delivery, not the
+     * original application open. Native controls never enter this gate. */
+    int fd=syscall(SYS_openat,c->dirfd,"custody-file",c->flags,0,0,0); assert(fd>=0);
+    assert(!close(fd)); return 0;
+}
+static unsigned terminal_custody(int guest, int protected, int call, int explicit_base, int nofollow) {
+    int fd=open("custody-file",O_RDWR|O_CREAT|O_TRUNC|O_CLOEXEC,0600);
+    assert(fd>=0 && fd<256 && !close(fd));
+    int base=explicit_base ? open(".",O_PATH|O_DIRECTORY|O_CLOEXEC) : AT_FDCWD;
+    assert(base==AT_FDCWD || base>=0);
+    unsigned char before[256];
+    for (unsigned i=0;i<sizeof(before);++i) before[i]=fcntl((int)i,F_GETFD)>=0;
+    void *stack=malloc(1024*1024); assert(stack);
+    struct custody_context context={getpid(),protected,call,base,O_PATH|O_CLOEXEC|(nofollow ? O_NOFOLLOW : 0)};
+    pid_t child=clone(custody_child,(char *)stack+1024*1024,SIGCHLD|CLONE_FILES,&context);
+    assert(child>0);
+    int status;
+    /* EVENT_WAIT: exact child termination precedes inspection of its surviving
+     * shared FD table. The fixture alarm is a failure bound, not a settling delay. */
+    assert(waitpid(child,&status,0)==child);
+    if (guest && call==SYS_openat)
+        assert(WIFSIGNALED(status) && WTERMSIG(status)==SIGSYS);
+    else assert(WIFEXITED(status) && !WEXITSTATUS(status));
+    unsigned leaked=0;
+    for (unsigned i=0;i<sizeof(before);++i) {
+        int flags=fcntl((int)i,F_GETFD);
+        if (before[i]) assert(flags>=0);
+        else if (flags>=0) {
+            int type=0; socklen_t size=sizeof(type);
+            int result=getsockopt((int)i,SOL_SOCKET,SO_TYPE,&type,&size);
+            int error=result<0 ? errno : 0;
+            printf("PROBE retained private fd=%u flags=%#x status=%#x socketType=%d socketErrno=%d\n",
+                i,flags,fcntl((int)i,F_GETFL),type,error);
+            ++leaked;
+            assert(!close((int)i));
+        }
+    }
+    if (base>=0) assert(!close(base));
+    free(stack); assert(!unlink("custody-file"));
+    printf("%s terminal RPC custody protected=%d call=%d explicitBase=%d nofollow=%d leaked=%u\n",
+        leaked ? "FAIL" : "PASS",protected,call,explicit_base,nofollow,leaked);
+    return leaked;
+}
+static void buffer_cwd_calls(const char *expected, int protected) {
+    if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
+    struct rlimit saved; assert(!getrlimit(RLIMIT_NOFILE,&saved));
+    struct rlimit limit=saved; limit.rlim_cur=64; assert(!setrlimit(RLIMIT_NOFILE,&limit));
+    int fds[64],n=0,fd;
+    while ((fd=fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,0))>=0) { assert(n<64); fds[n++]=fd; }
+    assert(errno==EMFILE);
+    struct sock_filter filter[]={
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_socket,4,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_connect,3,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_sendmsg,2,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_recvmsg,1,0),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_THREAD)
+    };
+    struct sock_fprog program={sizeof(filter)/sizeof(*filter),filter};
+    assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+    assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+    for (unsigned i=0;i<24;++i) {
+        char value[4096]; assert(getcwd(value,sizeof(value)) && !strcmp(value,expected));
+        assert(syscall(SYS_getcwd,value,1)==-1 && errno==ERANGE);
+        assert(syscall(SYS_getcwd,(void *)1,sizeof(value))==-1 && errno==EFAULT);
+    }
+    for (int i=0;i<n;++i) assert(!close(fds[i]));
+    assert(!setrlimit(RLIMIT_NOFILE,&saved));
+}
+static void buffer_cwd(void) {
+    char expected[4096]; assert(getcwd(expected,sizeof(expected)));
+    for (int exec=0;exec<2;++exec) for (int protected=0;protected<2;++protected) {
+        pid_t child=fork(); assert(child>=0);
+        if (!child) {
+            if (exec) execl(executable,executable,protected ? "buffer-exec-protected" : "buffer-exec",expected,(char *)NULL);
+            else { buffer_cwd_calls(expected,protected); _exit(0); }
+            _exit(99);
+        }
+        int status; assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
+    }
+    enum { children=48 };
+    pid_t pids[children]; int ready[2],go[2]; assert(!pipe(ready) && !pipe(go));
+    for (unsigned i=0;i<children;++i) {
+        pids[i]=fork(); assert(pids[i]>=0);
+        if (!pids[i]) {
+            close(ready[0]); close(go[1]); put(ready[1]); get(go[0]);
+            close(ready[1]); close(go[0]); buffer_cwd_calls(expected,i%2); _exit(0);
+        }
+    }
+    close(ready[1]); close(go[0]);
+    for (unsigned i=0;i<children;++i) get(ready[0]);
+    for (unsigned i=0;i<children;++i) put(go[1]);
+    close(ready[0]); close(go[1]);
+    for (unsigned i=0;i<children;++i) {
+        int status; assert(waitpid(pids[i],&status,0)==pids[i] && WIFEXITED(status) && !WEXITSTATUS(status));
+    }
+    assert(getcwd(expected,sizeof(expected)));
+    puts("PASS buffered cwd: fork/exec, protected tasks, zero free FDs, forbidden RPC, EFAULT/ERANGE and 48 concurrent callers");
+}
+static void buffer_open_calls(const char *path, int flags, int protected, int slots) {
+    if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
+    struct rlimit limit; assert(!getrlimit(RLIMIT_NOFILE,&limit));
+    limit.rlim_cur=64; assert(!setrlimit(RLIMIT_NOFILE,&limit));
+    int last=-1,fd;
+    while ((fd=fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,0))>=0) last=fd;
+    assert(errno==EMFILE && last>=0);
+    if (slots) assert(!close(last));
+    struct sock_filter filter[]={
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_socket,4,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_connect,3,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_sendmsg,2,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_recvmsg,1,0),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_THREAD)
+    };
+    struct sock_fprog program={sizeof(filter)/sizeof(*filter),filter};
+    assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+    assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+    for (unsigned i=0;i<8;++i) {
+        fd=open(path,flags);
+        if (!slots) { assert(fd==-1 && errno==EMFILE); continue; }
+        assert(fd==last && fcntl(fd,F_GETFD)==(flags&O_CLOEXEC ? FD_CLOEXEC : 0));
+        assert(fcntl(fd,F_GETFL)==(flags&(O_PATH|O_DIRECTORY|O_NOFOLLOW)) && !close(fd));
+    }
+}
+static void buffer_open(void) {
+    char path[202]; memset(path,'p',sizeof(path)-1); path[sizeof(path)-1]=0;
+    int fd=open(path,O_CREAT|O_EXCL|O_WRONLY|O_CLOEXEC,0600); assert(fd>=0);
+    put(fd); assert(!close(fd) && !mkdir("buffer-directory",0700) && !symlink(path,"buffer-link"));
+    const char *names[]={path,"buffer-directory","buffer-link","buffer-link",path,"buffer-directory"};
+    for (int protected=0;protected<2;++protected) for (unsigned kind=0;kind<6;++kind) {
+        int flags=O_PATH|O_CLOEXEC|((kind==1 || kind==5) ? O_DIRECTORY : 0)
+            |((kind==2 || kind>=4) ? O_NOFOLLOW : 0);
+        fd=open(names[kind],flags); assert(fd>=0);
+        struct stat named,opened;
+        assert(!(kind==3 ? stat(names[kind],&named) : lstat(names[kind],&named)) && !fstat(fd,&opened));
+        assert(named.st_dev==opened.st_dev && named.st_ino==opened.st_ino && named.st_mode==opened.st_mode);
+        assert(fcntl(fd,F_GETFL)==(flags&(O_PATH|O_DIRECTORY|O_NOFOLLOW)));
+        assert(!close(fd));
+        for (int absolute=0;absolute<2;++absolute) for (int slots=0;slots<2;++slots)
+            for (int cloexec=0;cloexec<2;++cloexec) {
+                char selected[4096];
+                if (absolute) {
+                    char cwd[4096]; assert(getcwd(cwd,sizeof(cwd)));
+                    assert(snprintf(selected,sizeof(selected),"%s/%s",cwd,names[kind])<(int)sizeof(selected));
+                } else strcpy(selected,names[kind]);
+                pid_t child=fork(); assert(child>=0);
+                if (!child) { buffer_open_calls(selected,cloexec ? flags : flags&~O_CLOEXEC,protected,slots); _exit(0); }
+                reap(child);
+            }
+    }
+    assert(!unlink("buffer-link") && !rmdir("buffer-directory") && !unlink(path));
+    puts("PASS buffered O_PATH: absolute/cwd, long names, file/directory/symlink, protected, exact 0/1 FD slots and forbidden RPC");
+}
+static int import_descriptor(int original) {
+    int pair[2]; assert(!socketpair(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC,0,pair));
+    char byte='x'; struct iovec data={&byte,1};
+    union { struct cmsghdr alignment; char bytes[CMSG_SPACE(sizeof(int))]; } control={0};
+    struct msghdr message={.msg_iov=&data,.msg_iovlen=1,
+        .msg_control=control.bytes,.msg_controllen=sizeof(control.bytes)};
+    struct cmsghdr *header=CMSG_FIRSTHDR(&message);
+    header->cmsg_level=SOL_SOCKET; header->cmsg_type=SCM_RIGHTS; header->cmsg_len=CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(header),&original,sizeof(original));
+    assert(sendmsg(pair[0],&message,0)==1);
+    memset(&control,0,sizeof(control));
+    assert(recvmsg(pair[1],&message,MSG_CMSG_CLOEXEC)==1 && message.msg_flags==MSG_CMSG_CLOEXEC);
+    header=CMSG_FIRSTHDR(&message);
+    assert(header && header->cmsg_level==SOL_SOCKET && header->cmsg_type==SCM_RIGHTS
+        && header->cmsg_len==CMSG_LEN(sizeof(int)));
+    int received; memcpy(&received,CMSG_DATA(header),sizeof(received));
+    assert(received>=0 && !close(pair[0]) && !close(pair[1]));
+    return received;
+}
+static void imported_cwd(void) {
+    assert(!mkdir("imported-cwd",0700));
+    int original=open("imported-cwd",O_PATH|O_DIRECTORY|O_CLOEXEC); assert(original>=0);
+    struct stat expected; assert(!fstat(original,&expected));
+    int imported=import_descriptor(original);
+    assert(!close(original));
+    for (unsigned protected=0;protected<2;++protected) {
+        pid_t child=fork(); assert(child>=0);
+        if (!child) {
+            if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
+            struct stat st;
+            /* Protected descriptor export admits its table-owned channel
+             * before the fixture deliberately exhausts descriptor slots. */
+            assert(!fstat(imported,&st));
+            struct rlimit limit; assert(!getrlimit(RLIMIT_NOFILE,&limit));
+            limit.rlim_cur=64; assert(!setrlimit(RLIMIT_NOFILE,&limit));
+            while (fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,0)>=0) { }
+            assert(errno==EMFILE);
+            for (unsigned i=0;i<16;++i) {
+                assert(!fchdir(imported));
+                assert(!stat(".",&st) && st.st_dev==expected.st_dev && st.st_ino==expected.st_ino);
+                assert(fchdir(STDERR_FILENO)==-1 && errno==ENOTDIR);
+                assert(!stat(".",&st) && st.st_ino==expected.st_ino);
+            }
+            for (int fd=0;fd<64;++fd) assert(fcntl(fd,F_GETFD)>=0);
+            _exit(0);
+        }
+        reap(child);
+    }
+    assert(!close(imported) && !rmdir("imported-cwd"));
+    puts("PASS imported cwd: protected input, zero free FD slots, exact directory and failed fchdir");
+}
+static void native_cwd(void) {
+    for (unsigned protected=0;protected<2;++protected) {
+        pid_t child=fork(); assert(child>=0);
+        if (!child) {
+            if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
+            assert(!chdir("/dev"));
+            int directory=open("/dev",O_PATH|O_DIRECTORY|O_CLOEXEC); assert(directory>=0);
+            struct rlimit limit; assert(!getrlimit(RLIMIT_NOFILE,&limit));
+            limit.rlim_cur=64; assert(!setrlimit(RLIMIT_NOFILE,&limit));
+            while (fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,0)>=0) { }
+            assert(errno==EMFILE);
+            for (unsigned i=0;i<24;++i) {
+                assert(!fchdir(directory));
+                char path[128]={0};
+                ssize_t size=readlink("/proc/thread-self/cwd",path,sizeof(path));
+                if (size!=4 || memcmp(path,"/dev",4))
+                    fprintf(stderr,"native cwd protected=%u size=%zd errno=%d value=%s\n",protected,size,errno,path);
+                assert(size==4 && !memcmp(path,"/dev",4));
+            }
+            for (int fd=0;fd<64;++fd) assert(fcntl(fd,F_GETFD)>=0);
+            _exit(0);
+        }
+        reap(child);
+    }
+    puts("PASS native cwd: unknown origin, protected caller, zero free FD slots and unchanged file table");
+}
+struct capture_context { int guest, protected, stage, directory; };
+static int capture_terminal_child(void *context) {
+    struct capture_context *c=context;
+    if (c->protected) assert(!prctl(PR_SET_DUMPABLE,0));
+    assert(!fchdir(c->directory));
+    unsigned calls[]={SYS_clone,SYS_close_range,SYS_openat,SYS_sendmsg};
+    unsigned action=c->stage<2 ? SECCOMP_RET_ERRNO|EACCES : SECCOMP_RET_KILL_THREAD;
+    struct sock_filter code[]={
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,calls[c->stage],0,1),
+        BPF_STMT(BPF_RET|BPF_K,action),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
+    };
+    struct sock_fprog program={sizeof(code)/sizeof(*code),code};
+    assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+    assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+    char text[128];
+    ssize_t result=readlink("/proc/thread-self/cwd",text,sizeof(text));
+    if (c->guest) assert(result==-1 && errno==(c->stage<2 ? EACCES : ECANCELED));
+    else assert(result==4 && !memcmp(text,"/dev",4));
+    return 0;
+}
+static void capture_terminal(int guest) {
+    int directory=open("/dev",O_PATH|O_DIRECTORY|O_CLOEXEC); assert(directory>=0);
+    struct rlimit saved; assert(!getrlimit(RLIMIT_NOFILE,&saved));
+    struct rlimit limit=saved; limit.rlim_cur=64; assert(!setrlimit(RLIMIT_NOFILE,&limit));
+    int held[64],count=0,fd;
+    while ((fd=fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,0))>=0) held[count++]=fd;
+    assert(errno==EMFILE);
+    void *stack=malloc(1024*1024); assert(stack);
+    for (int protected=0;protected<2;++protected) for (int stage=0;stage<4;++stage)
+        for (unsigned repeat=0;repeat<4;++repeat) {
+            struct capture_context context={guest,protected,stage,directory};
+            pid_t child=clone(capture_terminal_child,(char *)stack+1024*1024,SIGCHLD|CLONE_FILES,&context);
+            assert(child>0); reap(child);
+            for (int i=0;i<64;++i) assert(fcntl(i,F_GETFD)>=0);
+        }
+    free(stack);
+    for (int i=0;i<count;++i) assert(!close(held[i]));
+    assert(!setrlimit(RLIMIT_NOFILE,&saved) && !close(directory));
+    puts("PASS capture terminal ownership: private clone denial, clear/open/send failure, protected shared-table survivors and no free slots");
+}
+struct proc_context { int first, second; struct stat expected; char cwd[PATH_MAX]; };
+static void *proc_thread(void *argument) {
+    struct proc_context *c=argument;
+    assert(!unshare(CLONE_FILES|CLONE_FS));
+    assert(dup3(c->second,c->first,O_CLOEXEC)==c->first && !fchdir(c->second));
+    int watch=inotify_init1(IN_NONBLOCK|IN_CLOEXEC); assert(watch>=0);
+    int wd=inotify_add_watch(watch,".",IN_ATTRIB); assert(wd>=0 && !inotify_rm_watch(watch,wd));
+    struct rlimit saved; assert(!getrlimit(RLIMIT_NOFILE,&saved));
+    struct rlimit limit=saved; limit.rlim_cur=64; assert(!setrlimit(RLIMIT_NOFILE,&limit));
+    int held[64],count=0,fd;
+    while ((fd=fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,0))>=0) held[count++]=fd;
+    assert(errno==EMFILE && count);
+    char parent[96],nested[128],local[96];
+    snprintf(parent,sizeof(parent),"/proc/self/fd/%d",c->first);
+    snprintf(nested,sizeof(nested),"%s/item",parent);
+    snprintf(local,sizeof(local),"/proc/thread-self/fd/%d/item",c->first);
+    for (unsigned i=0;i<8;++i) {
+        struct stat st;
+        assert(!stat(parent,&st) && st.st_ino==c->expected.st_ino && st.st_dev==c->expected.st_dev);
+        assert(!stat(nested,&st) && st.st_size==1);
+        assert(!chmod(nested,0600|(i&1 ? 0100 : 0)));
+        assert(!stat(nested,&st) && (st.st_mode&0777)==(0600|(i&1 ? 0100 : 0)));
+        char name[PATH_MAX];
+        ssize_t size=readlink("/proc/self/cwd",name,sizeof(name));
+        assert(size==(ssize_t)strlen(c->cwd) && !memcmp(name,c->cwd,size));
+        wd=inotify_add_watch(watch,parent,IN_ATTRIB|IN_ONLYDIR);
+        assert(wd>=0 && !inotify_rm_watch(watch,wd));
+        for (int number=0;number<64;++number) assert(fcntl(number,F_GETFD)>=0);
+    }
+    int slot=held[--count]; assert(!close(slot));
+    for (unsigned i=0;i<8;++i) {
+        fd=open(nested,i&1 ? O_CLOEXEC : 0); assert(fd==slot);
+        char value=0; assert(read(fd,&value,1)==1 && value=='a');
+        assert(fcntl(fd,F_GETFD)==(i&1 ? FD_CLOEXEC : 0) && !close(fd));
+        fd=open(local,O_RDONLY|O_CLOEXEC); assert(fd==slot);
+        assert(read(fd,&value,1)==1 && value=='b' && !close(fd));
+        fd=open(parent,O_PATH|O_DIRECTORY|(i&1 ? O_CLOEXEC : 0)); assert(fd==slot);
+        assert(fcntl(fd,F_GETFD)==(i&1 ? FD_CLOEXEC : 0) && !close(fd));
+    }
+    for (int i=0;i<count;++i) assert(!close(held[i]));
+    assert(!setrlimit(RLIMIT_NOFILE,&saved) && !close(watch));
+    return NULL;
+}
+static void proc_thread_capture(void) {
+    assert(!mkdir("proc-parent",0700) && !mkdir("proc-thread",0700));
+    int a=open("proc-parent/item",O_RDWR|O_CREAT|O_EXCL|O_CLOEXEC,0600);
+    int b=open("proc-thread/item",O_RDWR|O_CREAT|O_EXCL|O_CLOEXEC,0600);
+    assert(a>=0 && b>=0 && write(a,"a",1)==1 && write(b,"b",1)==1 && !close(a) && !close(b));
+    struct proc_context context={.first=open("proc-parent",O_PATH|O_DIRECTORY|O_CLOEXEC),
+        .second=open("proc-thread",O_PATH|O_DIRECTORY|O_CLOEXEC)};
+    assert(context.first>=0 && context.second>=0 && !fstat(context.first,&context.expected));
+    assert(getcwd(context.cwd,sizeof(context.cwd)));
+    for (unsigned protected=0;protected<2;++protected) {
+        pid_t child=fork(); assert(child>=0);
+        if (!child) {
+            if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
+            pthread_t thread;
+            assert(!pthread_create(&thread,NULL,proc_thread,&context));
+            /* EVENT_WAIT: join the exact producer; the process alarm fails a
+             * missing completion, never substitutes a descriptor observation. */
+            assert(!pthread_join(thread,NULL));
+            struct stat st; assert(!fstat(context.first,&st) && st.st_ino==context.expected.st_ino);
+            _exit(0);
+        }
+        reap(child);
+    }
+    assert(!close(context.first) && !close(context.second));
+    assert(!unlink("proc-parent/item") && !unlink("proc-thread/item"));
+    assert(!rmdir("proc-parent") && !rmdir("proc-thread"));
+    puts("PASS proc task capture: unshared thread FS/files, leader aliases, protected metadata/watch/readlink, full table and one result slot");
+}
+static void buffer_import(void) {
+    int original=open(".",O_PATH|O_DIRECTORY|O_CLOEXEC); assert(original>=0);
+    int received=import_descriptor(original); assert(!close(original));
+    struct stat before; assert(!fstat(received,&before));
+    struct sock_filter filter[]={
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_socket,4,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_connect,3,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_sendmsg,2,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_recvmsg,1,0),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_THREAD)
+    };
+    struct sock_fprog program={sizeof(filter)/sizeof(*filter),filter};
+    assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+    assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+    for (unsigned i=0;i<16;++i) {
+        int fd=openat(received,".",O_PATH|O_DIRECTORY|O_CLOEXEC); assert(fd>=0);
+        struct stat after; assert(!fstat(fd,&after));
+        assert(before.st_dev==after.st_dev && before.st_ino==after.st_ino && !close(fd));
+    }
+    assert(!close(received));
+    puts("PASS buffered imported dirfd: actual kernel capture without guest RPC or fabricated origin");
+}
+static void buffer_data(void) {
+    int directory=open(".",O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+    int duplicate=directory<0 ? -1 : dup(directory);
+    int separate=open(".",O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+    assert(directory>=0 && duplicate>=0 && separate>=0);
+    struct sock_filter filter[]={
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_socket,4,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_connect,3,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_sendmsg,2,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_recvmsg,1,0),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_THREAD)
+    };
+    struct sock_fprog program={sizeof(filter)/sizeof(*filter),filter};
+    assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+    assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+    for (unsigned i=0;i<16;++i) {
+        int pair[2]; assert(!socketpair(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0,pair));
+        struct ucred peer={0}; socklen_t length=sizeof(peer);
+        assert(!getsockopt(pair[0],SOL_SOCKET,SO_PEERCRED,&peer,&length)
+            && length==sizeof(peer) && peer.pid==getpid() && peer.uid==geteuid() && peer.gid==getegid());
+        put(pair[0]); get(pair[1]);
+        assert(!close(pair[0]) && !close(pair[1]));
+        int fd=inotify_init1(IN_CLOEXEC|IN_NONBLOCK); assert(fd>=0);
+        int wd=inotify_add_watch(fd,".",IN_CREATE); assert(wd>=0);
+        assert(!inotify_rm_watch(fd,wd));
+        int bytes=0; assert(!ioctl(fd,FIONREAD,&bytes) && bytes==(int)sizeof(struct inotify_event));
+        struct inotify_event event;
+        assert(read(fd,&event,sizeof(event))==sizeof(event)
+            && event.wd==wd && event.mask==IN_IGNORED && !event.len);
+        assert(read(fd,&event,sizeof(event))==-1 && errno==EAGAIN && !close(fd));
+    }
+    struct rlimit saved,limit; assert(!getrlimit(RLIMIT_NOFILE,&saved)); limit=saved;
+    limit.rlim_cur=64; assert(!setrlimit(RLIMIT_NOFILE,&limit));
+    int filled[64],count=0,fd;
+    while ((fd=fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,0))>=0) filled[count++]=fd;
+    assert(errno==EMFILE);
+    for (unsigned i=0;i<16;++i) {
+        assert(lseek(directory,5,SEEK_SET)==5 && lseek(duplicate,0,SEEK_CUR)==5);
+        assert(lseek(duplicate,-3,SEEK_CUR)==2 && lseek(directory,0,SEEK_CUR)==2);
+        assert(lseek(separate,0,SEEK_CUR)==0);
+        assert(lseek(directory,-1,SEEK_SET)==-1 && errno==EINVAL);
+        assert(lseek(duplicate,0,SEEK_CUR)==2);
+    }
+    for (int i=0;i<count;++i) assert(!close(filled[i]));
+    assert(!setrlimit(RLIMIT_NOFILE,&saved));
+    assert(!close(directory) && !close(duplicate) && !close(separate));
+    puts("PASS buffered data inputs: socket identities, watch registration and shared directory seeks without guest RPC or free FD slots");
+}
+static void buffer_directory(void) {
+    assert(!mkdir("cursor",0700) && !chdir("cursor"));
+    for (unsigned i=0;i<32;++i) {
+        char path[16]; snprintf(path,sizeof(path),"n%02u",i);
+        int file=open(path,O_CREAT|O_WRONLY|O_CLOEXEC,0600); assert(file>=0 && !close(file));
+    }
+    int directory=open(".",O_RDONLY|O_DIRECTORY|O_CLOEXEC), alias=dup(directory);
+    assert(directory>=0 && alias>=0 && !prctl(PR_SET_DUMPABLE,0));
+    assert(lseek(directory,0,SEEK_SET)==0);
+    char bytes[4096];
+    errno=0;
+    long n=syscall(SYS_getdents64,directory,(void *)1,sizeof(bytes));
+    assert(n==-1 && errno==EFAULT);
+    off_t position=lseek(alias,0,SEEK_CUR);
+    if (position) fprintf(stderr,"FAIL rejected directory copy advanced cursor to %lld\n",(long long)position);
+    assert(position==0);
+    struct sock_filter filter[]={
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_socket,2,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_connect,1,0),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_THREAD)
+    };
+    struct sock_fprog program={sizeof(filter)/sizeof(*filter),filter};
+    assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+    assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+    struct rlimit saved,limit; assert(!getrlimit(RLIMIT_NOFILE,&saved)); limit=saved;
+    limit.rlim_cur=64; assert(!setrlimit(RLIMIT_NOFILE,&limit));
+    int filled[64],count=0,fd;
+    while ((fd=fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,0))>=0) filled[count++]=fd;
+    assert(errno==EMFILE);
+    for (unsigned i=0;i<32;++i) {
+        assert(lseek(alias,0,SEEK_SET)==0);
+        n=syscall(SYS_getdents64,directory,bytes,sizeof(bytes)); assert(n>0);
+        assert(lseek(alias,0,SEEK_CUR)>0);
+        assert(!strcmp(bytes+19,"."));
+        assert(lseek(directory,0,SEEK_SET)==0);
+        assert(syscall(SYS_getdents64,alias,(void *)1,sizeof(bytes))==-1 && errno==EFAULT);
+        assert(lseek(directory,0,SEEK_CUR)==0);
+    }
+    for (int i=0;i<count;++i) assert(!close(filled[i]));
+    assert(!setrlimit(RLIMIT_NOFILE,&saved) && lseek(alias,0,SEEK_SET)==0);
+    int result[2]; assert(!pipe(result)); pid_t children[4];
+    for (unsigned i=0;i<4;++i) {
+        children[i]=fork(); assert(children[i]>=0);
+        if (!children[i]) {
+            assert(!close(result[0]) && !prctl(PR_SET_DUMPABLE,i&1));
+            uint64_t mask=0;
+            for (;;) {
+                long count=syscall(SYS_getdents64,i&1 ? directory : alias,bytes,24);
+                assert(count>=0); if (!count) break;
+                assert(count==24); unsigned index;
+                if (!strcmp(bytes+19,".")) index=32;
+                else if (!strcmp(bytes+19,"..")) index=33;
+                else assert(sscanf(bytes+19,"n%u",&index)==1 && index<32);
+                assert(!(mask&(1ULL<<index))); mask|=1ULL<<index;
+            }
+            assert(write(result[1],&mask,sizeof(mask))==sizeof(mask)); _exit(0);
+        }
+    }
+    assert(!close(result[1])); uint64_t combined=0;
+    for (unsigned i=0;i<4;++i) {
+        uint64_t part; assert(read(result[0],&part,sizeof(part))==sizeof(part) && !(part&combined));
+        combined|=part;
+    }
+    for (unsigned i=0;i<4;++i) reap(children[i]);
+    assert(combined==(1ULL<<34)-1 && !close(result[0]) && !close(alias) && !close(directory));
+    for (unsigned i=0;i<32;++i) {
+        char path[16]; snprintf(path,sizeof(path),"n%02u",i); assert(!unlink(path));
+    }
+    assert(!chdir("..") && !rmdir("cursor"));
+    puts("PASS protected directory copy: EFAULT, zero free FD slots, forbidden RPC, mixed broker/adapter fork readers without duplicates");
+}
+static unsigned export_fds(unsigned char *snapshot) {
+    unsigned count=0;
+    for (unsigned i=0;i<256;++i) {
+        int present=fcntl((int)i,F_GETFD)>=0;
+        if (snapshot) snapshot[i]=(unsigned char)present;
+        count+=(unsigned)present;
+    }
+    return count;
+}
+struct export_context { int directory, channel, mode; };
+static int export_child(void *argument) {
+    struct export_context *c=argument;
+    if (c->mode==0) {
+        struct sock_filter code[]={
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_sendmsg,0,1),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_THREAD),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
+        };
+        struct sock_fprog program={sizeof(code)/sizeof(*code),code};
+        assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+        assert(lseek(c->directory,3,SEEK_SET)==3);
+    } else if (c->mode==3) {
+        char number[24]; snprintf(number,sizeof(number),"%d",c->channel);
+        execl(executable,executable,"export-exec",number,(char *)NULL); return 99;
+    } else {
+        if (c->mode==2) assert(!syscall(SYS_close_range,c->channel,c->channel,CLOSE_RANGE_UNSHARE));
+        else assert(!close(c->channel));
+        assert(lseek(c->directory,7,SEEK_SET)==7);
+    }
+    return 0;
+}
+static void buffer_export(int guest) {
+    int directory=open(".",O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+    int alias=directory<0 ? -1 : dup(directory);
+    int separate=open(".",O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+    assert(directory>=0 && alias>=0 && separate>=0);
+    assert(!prctl(PR_SET_DUMPABLE,0) && !prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+    struct sock_filter code[]={
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_socket,3,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_connect,2,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_recvmsg,1,0),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_THREAD)
+    };
+    struct sock_fprog program={sizeof(code)/sizeof(*code),code};
+    assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+    struct rlimit saved,limit; assert(!getrlimit(RLIMIT_NOFILE,&saved));
+    limit=saved; limit.rlim_cur=64; assert(!setrlimit(RLIMIT_NOFILE,&limit));
+    int filled[64],count=0,fd;
+    while ((fd=fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,0))>=0) { assert(count<64); filled[count++]=fd; }
+    assert(errno==EMFILE);
+    off_t position=lseek(directory,5,SEEK_SET);
+    if (guest) assert(position==-1 && errno==EMFILE);
+    else assert(position==5);
+    for (int i=0;i<count;++i) assert(!close(filled[i]));
+    assert(!setrlimit(RLIMIT_NOFILE,&saved));
+    unsigned char before[256]; unsigned baseline=export_fds(before);
+    assert(lseek(directory,0,SEEK_SET)==0 && export_fds(NULL)==baseline+(unsigned)guest);
+    int channel=-1;
+    if (guest) for (unsigned i=0;i<sizeof(before);++i)
+        if (!before[i] && fcntl((int)i,F_GETFD)>=0) { assert(channel<0); channel=(int)i; }
+    assert(!guest || (channel>=0 && fcntl(channel,F_GETFD)==FD_CLOEXEC));
+    assert(!setrlimit(RLIMIT_NOFILE,&limit)); count=0;
+    while ((fd=fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,0))>=0) { assert(count<64); filled[count++]=fd; }
+    assert(errno==EMFILE);
+    for (int i=0;i<32;++i) {
+        assert(lseek(directory,5,SEEK_SET)==5 && lseek(alias,-3,SEEK_CUR)==2);
+        assert(lseek(directory,0,SEEK_CUR)==2 && lseek(separate,0,SEEK_CUR)==0);
+    }
+    for (int i=0;i<count;++i) assert(!close(filled[i]));
+    assert(!setrlimit(RLIMIT_NOFILE,&saved));
+    assert(export_fds(NULL)==baseline+(unsigned)guest);
+    void *stack=malloc(1024*1024); assert(stack);
+    for (int i=0;i<16;++i) {
+        struct export_context c={directory,channel,0};
+        pid_t child=clone(export_child,(char *)stack+1024*1024,CLONE_FILES|SIGCHLD,&c); assert(child>0);
+        /* EVENT_WAIT: exact child exit; the fixture alarm bounds a stuck export. */
+        int status; assert(waitpid(child,&status,0)==child);
+        if (guest) assert(WIFSIGNALED(status) && WTERMSIG(status)==SIGSYS);
+        else assert(WIFEXITED(status) && !WEXITSTATUS(status));
+        assert(lseek(directory,2,SEEK_SET)==2 && export_fds(NULL)==baseline+(unsigned)guest);
+    }
+    if (guest) {
+        for (int mode=1;mode<=3;++mode) {
+            struct export_context c={directory,channel,mode};
+            pid_t child=clone(export_child,(char *)stack+1024*1024,
+                SIGCHLD|(mode==1 ? 0 : CLONE_FILES),&c); assert(child>0); reap(child);
+            off_t restored=lseek(directory,2,SEEK_SET);
+            unsigned remaining=export_fds(NULL);
+            if (restored!=2 || remaining!=baseline+1) {
+                fprintf(stderr,"export lifecycle mode=%d seek=%lld errno=%d fds=%u expected=%u channel=%d\n",
+                    mode,(long long)restored,errno,remaining,baseline+1,channel);
+                for (unsigned i=0;i<sizeof(before);++i)
+                    if (!before[i] && fcntl((int)i,F_GETFD)>=0)
+                        fprintf(stderr,"export lifecycle extra fd=%u flags=%d\n",i,fcntl((int)i,F_GETFD));
+            }
+            assert(restored==2 && remaining==baseline+1);
+        }
+        int copy=fcntl(channel,F_DUPFD_CLOEXEC,0); assert(copy>=0 && !close(channel));
+        int replacement=open("/dev/null",O_RDONLY|O_CLOEXEC); assert(replacement>=0);
+        assert(lseek(directory,4,SEEK_SET)==4);
+        assert(!syscall(SYS_close_range,copy,copy,0));
+        assert(lseek(directory,6,SEEK_SET)==6);
+        struct stat st; assert(!fstat(replacement,&st) && S_ISCHR(st.st_mode));
+        assert(!close(replacement) && export_fds(NULL)==baseline+1);
+        for (unsigned i=0;i<sizeof(before);++i)
+            if (!before[i] && fcntl((int)i,F_GETFD)>=0) assert(!close((int)i));
+    }
+    free(stack); assert(export_fds(NULL)==baseline);
+    assert(!close(directory) && !close(alias) && !close(separate));
+    puts("PASS protected export: exact shared cursor, cold EMFILE, bounded infrastructure, full table reuse, terminal cancellation and table lifecycle");
+}
+static int metadata_export_child(void *argument) {
+    int file=*(int *)argument;
+    struct sock_filter code[]={
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_sendmsg,0,1),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_THREAD),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
+    };
+    struct sock_fprog program={sizeof(code)/sizeof(*code),code};
+    assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+    struct stat st; assert(!fstat(file,&st)); return 0;
+}
+static void metadata_export(int guest) {
+    int file=open("metadata-export",O_RDWR|O_CREAT|O_CLOEXEC,0600);
+    int proc=open("/proc",O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+    assert(file>=0 && proc>=0);
+    put(file);
+    struct rlimit saved,limit;
+    assert(!getrlimit(RLIMIT_NOFILE,&saved)); limit=saved; limit.rlim_cur=64;
+    assert(!setrlimit(RLIMIT_NOFILE,&limit));
+    if (guest) assert(!chroot("/proc/self/fdinfo"));
+    assert(!prctl(PR_SET_DUMPABLE,0) && !prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+    int filled[64],count=0,fd;
+    while ((fd=fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,0))>=0) filled[count++]=fd;
+    assert(errno==EMFILE);
+    struct stat st;
+    int result=fstat(file,&st);
+    if (guest) assert(result==-1 && errno==EMFILE);
+    else assert(!result);
+    for (int i=0;i<count;++i) assert(!close(filled[i]));
+    unsigned char before[256]; unsigned baseline=export_fds(before);
+    assert(!fstat(file,&st) && st.st_size==1);
+    assert(export_fds(NULL)==baseline+(unsigned)guest);
+    /* Admission consumes one infrastructure slot; all subsequent metadata
+     * calls and proc directory opens use only their actual result slots. */
+    count=0;
+    while ((fd=fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,0))>=0) filled[count++]=fd;
+    assert(errno==EMFILE && count);
+    for (unsigned i=0;i<16;++i) assert(!fstat(file,&st) && st.st_size==1);
+    assert(!close(filled[--count]));
+    for (unsigned i=0;i<16;++i) {
+        fd=openat(proc,"self/fd/",O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(fd>=0);
+        char name[32]; snprintf(name,sizeof(name),"%d",file);
+        assert(!fstatat(fd,name,&st,0) && st.st_size==1);
+        assert(!close(fd));
+    }
+    for (int i=0;i<count;++i) assert(!close(filled[i]));
+    void *stack=malloc(1024*1024); assert(stack);
+    for (unsigned i=0;i<16;++i) {
+        pid_t pid=clone(metadata_export_child,(char *)stack+1024*1024,CLONE_FILES|SIGCHLD,&file);
+        assert(pid>0);
+        /* EVENT_WAIT: exporter terminal event; alarm bounds a missing exit. */
+        int status; assert(waitpid(pid,&status,0)==pid);
+        if (guest) assert(WIFSIGNALED(status) && WTERMSIG(status)==SIGSYS);
+        else assert(WIFEXITED(status) && !WEXITSTATUS(status));
+        assert(export_fds(NULL)==baseline+(unsigned)guest);
+        assert(!fstat(file,&st) && st.st_size==1);
+    }
+    free(stack);
+    for (unsigned i=0;i<sizeof(before);++i)
+        if (!before[i] && fcntl((int)i,F_GETFD)>=0) assert(!close((int)i));
+    assert(export_fds(NULL)==baseline);
+    assert(!close(proc) && !close(file));
+    puts("PASS metadata export custody: cold EMFILE, admitted full table, proc open result only, shared-table sender death and bounded infrastructure");
+}
+static const char *return_paths[2];
+static int return_child(void *unused) {
+    (void)unused;
+    struct sock_filter code[]={
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_recvmsg,0,1),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_THREAD),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
+    };
+    struct sock_fprog program={sizeof(code)/sizeof(*code),code};
+    assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+    int fd=open(return_paths[0],O_PATH|O_NOFOLLOW|O_CLOEXEC);
+    assert(fd>=0 && !close(fd)); return 0;
+}
+static void buffer_return(int guest) {
+    return_paths[0]=guest ? "/attached/null" : "/dev/null";
+    return_paths[1]=guest ? "/attached/zero" : "/dev/zero";
+    int directory=open(".",O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(directory>=0);
+    assert(!prctl(PR_SET_DUMPABLE,0) && !prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+    struct sock_filter code[]={
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_socket,2,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_connect,1,0),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_THREAD)
+    };
+    struct sock_fprog program={sizeof(code)/sizeof(*code),code};
+    assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+    unsigned baseline=export_fds(NULL);
+    for (int slots=0;slots<2;++slots) {
+        pid_t child=fork(); assert(child>=0);
+        if (!child) {
+            struct rlimit limit; assert(!getrlimit(RLIMIT_NOFILE,&limit));
+            limit.rlim_cur=64; assert(!setrlimit(RLIMIT_NOFILE,&limit));
+            int fd,last=-1;
+            while ((fd=fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,0))>=0) last=fd;
+            assert(errno==EMFILE && last>=0);
+            if (slots) assert(!close(last));
+            fd=open(return_paths[0],O_PATH|O_NOFOLLOW|O_CLOEXEC);
+            if (guest || !slots) assert(fd==-1 && errno==EMFILE);
+            else assert(fd==last && !close(fd));
+            _exit(0);
+        }
+        reap(child); assert(export_fds(NULL)==baseline);
+    }
+    int fd=open(return_paths[0],O_PATH|O_NOFOLLOW|O_CLOEXEC);
+    assert(fd>=0 && fcntl(fd,F_GETFL)==(O_PATH|O_NOFOLLOW));
+    assert(export_fds(NULL)==baseline+1+(unsigned)guest && !close(fd));
+    baseline+=(unsigned)guest;
+    struct rlimit saved,limit; assert(!getrlimit(RLIMIT_NOFILE,&saved));
+    limit=saved; limit.rlim_cur=64;
+    for (int slots=0;slots<2;++slots) for (int cloexec=0;cloexec<2;++cloexec) {
+        assert(!setrlimit(RLIMIT_NOFILE,&limit));
+        int filled[64],count=0;
+        while ((fd=fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,0))>=0) { assert(count<64); filled[count++]=fd; }
+        assert(errno==EMFILE && count);
+        int expected=filled[count-1];
+        if (slots) assert(!close(filled[--count]));
+        for (int i=0;i<16;++i) {
+            fd=open(return_paths[0],O_PATH|O_NOFOLLOW|(cloexec ? O_CLOEXEC : 0));
+            if (!slots) { assert(fd==-1 && errno==EMFILE); continue; }
+            assert(fd==expected && fcntl(fd,F_GETFD)==(cloexec ? FD_CLOEXEC : 0));
+            assert(fcntl(fd,F_GETFL)==(O_PATH|O_NOFOLLOW) && !close(fd));
+        }
+        for (int i=0;i<count;++i) assert(!close(filled[i]));
+        assert(!setrlimit(RLIMIT_NOFILE,&saved) && export_fds(NULL)==baseline);
+    }
+    pid_t children[12];
+    for (unsigned i=0;i<12;++i) {
+        children[i]=fork(); assert(children[i]>=0);
+        if (!children[i]) {
+            for (unsigned j=0;j<32;++j) {
+                assert(lseek(directory,0,SEEK_SET)==0);
+                int fd=open(return_paths[i%2],O_PATH|O_NOFOLLOW|O_CLOEXEC);
+                struct stat st;
+                assert(fd>=0 && !fstat(fd,&st) && S_ISCHR(st.st_mode));
+                assert(st.st_rdev==(i%2 ? 261U : 259U) && !close(fd));
+            }
+            assert(export_fds(NULL)==baseline); _exit(0);
+        }
+    }
+    for (unsigned i=0;i<12;++i) reap(children[i]);
+    void *stack=malloc(1024*1024); assert(stack);
+    for (int i=0;i<16;++i) {
+        pid_t child=clone(return_child,(char *)stack+1024*1024,CLONE_FILES|SIGCHLD,NULL);
+        assert(child>0);
+        /* EVENT_WAIT: receiver death while a result is queued; alarm bounds a
+         * stuck table/channel turn. The surviving peer must receive next. */
+        int status; assert(waitpid(child,&status,0)==child);
+        if (guest) assert(WIFSIGNALED(status) && WTERMSIG(status)==SIGSYS);
+        else assert(WIFEXITED(status) && !WEXITSTATUS(status));
+        fd=open(return_paths[1],O_PATH|O_NOFOLLOW|O_CLOEXEC);
+        assert(fd>=0 && !close(fd) && export_fds(NULL)==baseline);
+    }
+    free(stack); assert(!close(directory));
+    puts("PASS protected return: O_PATH nofollow, forbidden RPC, exact 0/1 result slots, fork channel ordering and terminal receiver cleanup");
+}
+static void buffer_descriptors(void) {
+    for (int protected=0;protected<2;++protected) for (int slots=0;slots<2;++slots)
+        for (int cloexec=0;cloexec<2;++cloexec) {
+            pid_t child=fork(); assert(child>=0);
+            if (!child) {
+                if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
+                struct rlimit limit; assert(!getrlimit(RLIMIT_NOFILE,&limit));
+                limit.rlim_cur=64; assert(!setrlimit(RLIMIT_NOFILE,&limit));
+                int last=-1,fd;
+                while ((fd=fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,0))>=0) last=fd;
+                assert(errno==EMFILE && last>=0);
+                if (slots) assert(!close(last));
+                struct sock_filter filter[]={
+                    BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+                    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_socket,4,0),
+                    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_connect,3,0),
+                    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_sendmsg,2,0),
+                    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_recvmsg,1,0),
+                    BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
+                    BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_THREAD)
+                };
+                struct sock_fprog program={sizeof(filter)/sizeof(*filter),filter};
+                assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+                assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+                for (unsigned i=0;i<24;++i) {
+                    const char *path=i%3==2 ? "/proc/self/exe" : i%3 ? "/proc/self/mounts" : "/proc/self/mountinfo";
+                    fd=open(path,
+                        O_RDONLY|(cloexec ? O_CLOEXEC : 0));
+                    if (!slots) { assert(fd==-1 && errno==EMFILE); continue; }
+                    assert(fd==last && fcntl(fd,F_GETFD)==(cloexec ? FD_CLOEXEC : 0));
+                    assert((fcntl(fd,F_GETFL)&O_ACCMODE)==O_RDONLY);
+                    char first[32],again[32];
+                    assert(read(fd,first,sizeof(first))==sizeof(first));
+                    assert(lseek(fd,0,SEEK_SET)==0 && read(fd,again,sizeof(again))==sizeof(again));
+                    assert(!memcmp(first,again,sizeof(first)) && !close(fd));
+                }
+                _exit(0);
+            }
+            reap(child);
+        }
+    puts("PASS buffered descriptors: protected receivers, executable images, exact 0/1 FD slots, flags, data and seek without RPC");
+}
+static void forbid_rpc(void);
+struct exec_custody_case { int protected, scenario; };
+static int exec_custody_child(void *argument) {
+    const struct exec_custody_case *test=argument;
+    if (test->protected) assert(!prctl(PR_SET_DUMPABLE,0));
+    if (test->scenario>=3) {
+        struct sock_filter filter[]={
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,test->scenario==5 ? SYS_read : SYS_write,0,1),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_THREAD),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
+        };
+        struct sock_fprog program={sizeof(filter)/sizeof(*filter),filter};
+        assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+        assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+        int fd=test->scenario==5 ? open("umask-custody",O_CREAT|O_EXCL|O_RDONLY|O_CLOEXEC,0644)
+            : open(test->scenario==3 ? "/proc/self/cmdline" : "/proc/self/auxv",O_RDONLY|O_CLOEXEC);
+        if (fd<0) _exit(errno);
+        assert(!close(fd));
+        if (test->scenario==5) assert(!unlink("umask-custody"));
+        return 0;
+    }
+    if (test->scenario==1) {
+        char *args[]={(char *)executable,"exec-custody-target",NULL};
+        for (unsigned i=0;i<64;++i)
+            assert(syscall(SYS_execve,executable,args,(char *const *)1)==-1 && errno==EFAULT);
+        return 0;
+    }
+    if (test->scenario==2) {
+        forbid_rpc();
+        execl(executable,executable,"exec-custody-target",(char *)NULL);
+        _exit(77);
+    }
+    struct sock_filter filter[]={
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_pread64,0,1),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_THREAD),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
+    };
+    struct sock_fprog program={sizeof(filter)/sizeof(*filter),filter};
+    assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+    assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+    execl(executable,executable,"exec-custody-target",(char *)NULL);
+    _exit(77);
+}
+static int exec_custody(int guest, int proc) {
+    void *stack=malloc(1024*1024); assert(stack);
+    unsigned leaked=0;
+    for (int scenario=proc==2 ? 5 : proc ? 3 : 0;scenario<(proc==2 ? 6 : proc ? 5 : 3);++scenario)
+        for (int protected=0;protected<2;++protected) {
+        unsigned char before[256]; export_fds(before);
+        struct exec_custody_case test={protected,scenario};
+        pid_t child=clone(exec_custody_child,(char *)stack+1024*1024,CLONE_FILES|SIGCHLD,&test); assert(child>=0);
+        int status;
+        /* EVENT_WAIT: exact exec caller death/completion before inspecting its
+         * surviving CLONE_FILES peer; alarm fails a missing terminal event. */
+        assert(waitpid(child,&status,0)==child);
+        if (proc && (!WIFEXITED(status) || WEXITSTATUS(status)))
+            printf("OBS proc custody scenario=%d protected=%d guest=%d status=%#x\n",scenario,protected,guest,status);
+        int native_denied=!guest && scenario==4 && protected && WIFEXITED(status) && WEXITSTATUS(status)==EACCES;
+        if (native_denied) puts("UNAVAILABLE native nondumpable auxv open: EACCES; guest coverage remains required");
+        else if (guest && (!scenario || proc)) assert((WIFSIGNALED(status) && WTERMSIG(status)==SIGSYS)
+            || (WIFEXITED(status) && !WEXITSTATUS(status)));
+        else assert(WIFEXITED(status) && !WEXITSTATUS(status));
+        for (unsigned i=0;i<sizeof(before);++i) {
+            int present=fcntl((int)i,F_GETFD)>=0;
+            if (before[i]) assert(present);
+            else if (present) {
+                printf("FAIL adapter private fd=%u protected=%d scenario=%d flags=%#x\n",
+                    i,protected,scenario,fcntl((int)i,F_GETFL));
+                ++leaked; assert(!close((int)i));
+            }
+        }
+    }
+    free(stack);
+    printf("%s %s custody leaked=%u\n",leaked ? "FAIL" : "PASS",
+        proc==2 ? "umask" : proc ? "proc snapshot" : "exec preparation",leaked);
+    return !!leaked;
+}
+static void forbid_rpc(void) {
+    struct sock_filter filter[]={
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_socket,4,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_connect,3,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_sendmsg,2,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_recvmsg,1,0),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_THREAD)
+    };
+    struct sock_fprog program={sizeof(filter)/sizeof(*filter),filter};
+    assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+    assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+}
+static void proc_snapshot(int argc, char **argv) {
+    if (argc==3) {
+        char argument[32769];
+        for (unsigned i=0;i<sizeof(argument)-1;++i) argument[i]=(char)('a'+i%26);
+        argument[sizeof(argument)-1]=0;
+        execl(argv[0],argv[0],"proc-snapshot",argv[2],argument,(char *)NULL);
+        assert(0);
+    }
+    assert(argc==4);
+    char expected[40000],actual[40000]; size_t size=0;
+    for (int i=0;i<argc;++i) {
+        size_t n=strlen(argv[i])+1; assert(size+n<sizeof(expected));
+        memcpy(expected+size,argv[i],n); size+=n;
+    }
+    unsigned baseline=export_fds(NULL);
+    for (int protected=0;protected<2;++protected) for (int slots=0;slots<2;++slots)
+        for (int cloexec=0;cloexec<2;++cloexec) for (int path=0;path<2;++path) {
+            pid_t child=fork(); assert(child>=0);
+            if (!child) {
+                if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
+                forbid_rpc();
+                struct rlimit limit; assert(!getrlimit(RLIMIT_NOFILE,&limit));
+                limit.rlim_cur=64; assert(!setrlimit(RLIMIT_NOFILE,&limit));
+                int last=-1,fd;
+                while ((fd=fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,0))>=0) last=fd;
+                assert(last>=0 && errno==EMFILE);
+                if (slots) assert(!close(last));
+                for (unsigned i=0;i<8;++i) {
+                    fd=open("/proc/self/cmdline",(path ? O_PATH : O_RDONLY)|(cloexec ? O_CLOEXEC : 0));
+                    if (!slots) { assert(fd==-1 && errno==EMFILE); continue; }
+                    assert(fd==last && fcntl(fd,F_GETFD)==(cloexec ? FD_CLOEXEC : 0));
+                    struct stat snapshot;
+                    assert(!fstat(fd,&snapshot) && S_ISREG(snapshot.st_mode) && snapshot.st_size==(off_t)size);
+                    if (path) assert(fcntl(fd,F_GETFL)&O_PATH);
+                    else {
+                        assert(read(fd,actual,sizeof(actual))==(ssize_t)size && !memcmp(actual,expected,size));
+                        assert(lseek(fd,0,SEEK_SET)==0);
+                        assert(read(fd,actual,sizeof(actual))==(ssize_t)size && !memcmp(actual,expected,size));
+                        assert(write(fd,"x",1)==-1 && errno==EBADF);
+                    }
+                    assert(!close(fd));
+                }
+                _exit(0);
+            }
+            reap(child); assert(export_fds(NULL)==baseline);
+        }
+    size_t page=(size_t)sysconf(_SC_PAGESIZE);
+    void *unreadable=(void *)(((uintptr_t)argv[3]+2*page)&~(page-1));
+    for (unsigned i=0;i<8;++i) {
+        assert(!mprotect(unreadable,page,PROT_NONE));
+        int fd=open("/proc/self/cmdline",O_RDONLY);
+        int error=errno;
+        assert(!mprotect(unreadable,page,PROT_READ|PROT_WRITE));
+        assert(fd==-1 && error==EFAULT && export_fds(NULL)==baseline);
+    }
+    int fd=open("/proc/self/cmdline",O_RDONLY);
+    assert(fd>=0 && read(fd,actual,sizeof(actual))==(ssize_t)size && !memcmp(actual,expected,size));
+    assert(!close(fd) && export_fds(NULL)==baseline);
+    puts("PASS proc snapshots: large argv, protected callers, exact 0/1 result slots, read-only/O_PATH, CLOEXEC, seek and rejected copying");
+}
+static void proc_link_slots(void) {
+    char expected[PATH_MAX],path[64],actual[PATH_MAX];
+    ssize_t size=readlink("/proc/self/exe",expected,sizeof(expected));
+    assert(size>1 && size<(ssize_t)sizeof(expected));
+    int ready[2],done[2]; assert(!pipe2(ready,O_CLOEXEC) && !pipe2(done,O_CLOEXEC));
+    pid_t target=fork(); assert(target>=0);
+    if (!target) { put(ready[1]); get(done[0]); _exit(0); }
+    get(ready[0]);
+    snprintf(path,sizeof(path),"/proc/%d/exe",target);
+    unsigned baseline=export_fds(NULL);
+    for (int protected=0;protected<2;++protected) {
+        pid_t reader=fork(); assert(reader>=0);
+        if (!reader) {
+            if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
+            forbid_rpc();
+            struct rlimit limit; assert(!getrlimit(RLIMIT_NOFILE,&limit));
+            limit.rlim_cur=64; assert(!setrlimit(RLIMIT_NOFILE,&limit));
+            while (fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,0)>=0) { }
+            assert(errno==EMFILE);
+            struct sock_filter filter[]={
+                BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+                BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_read,0,1),
+                BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_THREAD),
+                BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
+            };
+            struct sock_fprog program={sizeof(filter)/sizeof(*filter),filter};
+            assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+            for (unsigned i=0;i<16;++i) {
+                size_t capacity=i%2 ? 1 : sizeof(actual);
+                ssize_t n=readlink(path,actual,capacity);
+                assert(n==(i%2 ? 1 : size) && !memcmp(actual,expected,(size_t)n));
+            }
+            assert(syscall(SYS_readlinkat,AT_FDCWD,path,actual,0)==-1 && errno==EINVAL);
+            assert(syscall(SYS_readlinkat,AT_FDCWD,path,(void *)1,sizeof(actual))==-1 && errno==EFAULT);
+            _exit(0);
+        }
+        reap(reader); assert(export_fds(NULL)==baseline);
+    }
+    put(done[1]); reap(target);
+    assert(!close(ready[0]) && !close(ready[1]) && !close(done[0]) && !close(done[1]));
+    puts("PASS foreign proc link: protected caller, full FD table, forbidden read/RPC, truncation and rejected copying");
+}
+static void proc_open_slots(void) {
+    const char *names[]={"cmdline","auxv","exe"};
+    int ready[2], done[2]; assert(!pipe2(ready,O_CLOEXEC) && !pipe2(done,O_CLOEXEC));
+    pid_t target=fork(); assert(target>=0);
+    if (!target) { put(ready[1]); get(done[0]); _exit(0); }
+    get(ready[0]);
+    unsigned baseline=export_fds(NULL);
+    for (unsigned kind=0;kind<3;++kind) {
+        char path[64], expected[4096];
+        snprintf(path,sizeof(path),"/proc/self/%s",names[kind]);
+        int source=open(path,O_RDONLY|O_CLOEXEC); assert(source>=0);
+        ssize_t size=read(source,expected,sizeof(expected)); assert(size>0 && !close(source));
+        snprintf(path,sizeof(path),"/proc/%d/%s",target,names[kind]);
+        for (int protected=0;protected<2;++protected) for (int cloexec=0;cloexec<2;++cloexec) {
+            pid_t child=fork(); assert(child>=0);
+            if (!child) {
+                if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
+                forbid_rpc();
+                struct rlimit limit; assert(!getrlimit(RLIMIT_NOFILE,&limit));
+                limit.rlim_cur=64; assert(!setrlimit(RLIMIT_NOFILE,&limit));
+                int fd, last=-1;
+                while ((fd=fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,0))>=0) last=fd;
+                assert(errno==EMFILE && last>=0);
+                assert(open(path,O_RDONLY)==-1 && errno==EMFILE);
+                assert(!close(last));
+                for (unsigned i=0;i<16;++i) {
+                    fd=open(path,O_RDONLY|(cloexec ? O_CLOEXEC : 0));
+                    assert(fd==last && fcntl(fd,F_GETFD)==(cloexec ? FD_CLOEXEC : 0));
+                    char actual[4096];
+                    assert(read(fd,actual,sizeof(actual))==size && !memcmp(actual,expected,(size_t)size));
+                    assert(lseek(fd,0,SEEK_SET)==0);
+                    assert(read(fd,actual,sizeof(actual))==size && !memcmp(actual,expected,(size_t)size));
+                    assert(!close(fd));
+                }
+                _exit(0);
+            }
+            reap(child); assert(export_fds(NULL)==baseline);
+        }
+    }
+    put(done[1]); reap(target);
+    assert(!close(ready[0]) && !close(ready[1]) && !close(done[0]) && !close(done[1]));
+    puts("PASS foreign proc open: protected callers, exact 0/1 slots, CLOEXEC, contents and repeated delivery");
+}
+static void proc_reopen_slots(void) {
+    int sources[]={open("proc-reopen-slots",O_RDWR|O_CREAT|O_EXCL|O_CLOEXEC,0600),
+        open(".",O_RDONLY|O_DIRECTORY|O_CLOEXEC),open("/dev/null",O_RDONLY|O_CLOEXEC)};
+    for (unsigned i=0;i<3;++i) assert(sources[i]>=0);
+    assert(write(sources[0],"payload",7)==7 && !unlink("proc-reopen-slots"));
+    for (unsigned source=0;source<3;++source) for (int protected=0;protected<2;++protected) {
+        pid_t child=fork(); assert(child>=0);
+        if (!child) {
+            if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
+            char path[64]; snprintf(path,sizeof(path),"/proc/thread-self/fd/%d",sources[source]);
+            int warm=open(path,O_RDONLY|O_CLOEXEC); assert(warm>=0 && !close(warm));
+            struct rlimit limit; assert(!getrlimit(RLIMIT_NOFILE,&limit));
+            limit.rlim_cur=64; assert(!setrlimit(RLIMIT_NOFILE,&limit));
+            int fd,last=-1;
+            while ((fd=fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,0))>=0) last=fd;
+            assert(last>=0 && errno==EMFILE && !close(last));
+            for (unsigned i=0;i<16;++i) {
+                int flags=(i&1 ? O_PATH : O_RDONLY)|(i&2 ? O_CLOEXEC : 0);
+                fd=open(path,flags);
+                assert(fd==last && fcntl(fd,F_GETFD)==(i&2 ? FD_CLOEXEC : 0));
+                struct stat original,copy;
+                assert(!fstat(sources[source],&original) && !fstat(fd,&copy));
+                assert(original.st_dev==copy.st_dev && original.st_ino==copy.st_ino);
+                if (!source && !(flags&O_PATH)) {
+                    char text[8]; assert(read(fd,text,sizeof(text))==7 && !memcmp(text,"payload",7));
+                    assert(lseek(sources[source],0,SEEK_CUR)==7);
+                }
+                assert(!close(fd));
+            }
+            _exit(0);
+        }
+        reap(child);
+    }
+    for (unsigned i=0;i<3;++i) assert(!close(sources[i]));
+    puts("PASS proc reopen with one slot: unlinked file, directory, native device, protected caller, flags and independent offsets");
+}
+static void watch_slots(void) {
+    int file=open("watch-slots",O_RDWR|O_CREAT|O_EXCL|O_CLOEXEC,0600); assert(file>=0);
+    char alias[80]; snprintf(alias,sizeof(alias),"/proc/thread-self/fd/%d",file);
+    assert(!symlink("watch-slots","watch-link"));
+    for (int protected=0;protected<2;++protected) {
+        pid_t child=fork(); assert(child>=0);
+        if (!child) {
+            if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
+            int watch=inotify_init1(IN_NONBLOCK|IN_CLOEXEC); assert(watch>=0);
+            int wd=inotify_add_watch(watch,".",IN_ATTRIB); assert(wd>=0);
+            assert(!inotify_rm_watch(watch,wd));
+            struct rlimit limit; assert(!getrlimit(RLIMIT_NOFILE,&limit));
+            limit.rlim_cur=64; assert(!setrlimit(RLIMIT_NOFILE,&limit));
+            while (fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,0)>=0) {}
+            assert(errno==EMFILE);
+            unsigned before=export_fds(NULL);
+            for (unsigned i=0;i<16;++i) {
+                wd=inotify_add_watch(watch,"watch-link",IN_ATTRIB|(i&1 ? IN_DONT_FOLLOW : 0));
+                assert(wd>=0 && !inotify_rm_watch(watch,wd));
+                wd=inotify_add_watch(watch,alias,IN_ATTRIB);
+                assert(wd>=0 && !inotify_rm_watch(watch,wd));
+                wd=inotify_add_watch(watch,"/proc/thread-self/status",IN_ATTRIB);
+                assert(wd>=0 && !inotify_rm_watch(watch,wd));
+                assert(inotify_add_watch(watch,"watch-slots",IN_ATTRIB|IN_ONLYDIR)==-1 && errno==ENOTDIR);
+                assert(inotify_add_watch(watch,"watch-missing",IN_ATTRIB)==-1 && errno==ENOENT);
+                assert(export_fds(NULL)==before);
+            }
+            assert(!close(watch));
+            _exit(0);
+        }
+        reap(child);
+    }
+    assert(!close(file) && !unlink("watch-link") && !unlink("watch-slots"));
+    puts("PASS watch paths without private FDs: protected callers, admitted transport, full table and symlink selection");
+}
+static volatile sig_atomic_t size_signals;
+static void xattr_slots(int guest) {
+    int fd=open("xattr-slots",O_CREAT|O_EXCL|O_RDWR|O_CLOEXEC,0600); assert(fd>=0);
+    char alias[80]; snprintf(alias,sizeof(alias),"/proc/thread-self/fd/%d",fd);
+    assert(!mkdir("xattr-directory",0700) && !symlink("xattr-slots","xattr-link"));
+    const char *name="user.magicdesk.slots";
+    unsigned char value[64]; char received[256];
+    for (unsigned i=0;i<sizeof(value);++i) value[i]=(unsigned char)i;
+    assert(!setxattr("xattr-slots",name,value,sizeof(value),XATTR_CREATE));
+    struct md_acl *acl=malloc(MD_ACL_MAX); assert(acl);
+    acl->version=2;
+    const unsigned count=(MD_ACL_MAX-4)/sizeof(struct md_acl_entry);
+    acl->entries[0]=(struct md_acl_entry){MD_ACL_USER_OBJ,7,UINT32_MAX};
+    for (unsigned i=1;i<count-3;++i) acl->entries[i]=(struct md_acl_entry){MD_ACL_USER,4,i-1};
+    acl->entries[count-3]=(struct md_acl_entry){MD_ACL_GROUP_OBJ,4,UINT32_MAX};
+    acl->entries[count-2]=(struct md_acl_entry){MD_ACL_MASK,4,UINT32_MAX};
+    acl->entries[count-1]=(struct md_acl_entry){MD_ACL_OTHER,0,UINT32_MAX};
+    void *large=malloc(MD_ACL_MAX); assert(large);
+    for (int protected=0;protected<2;++protected) for (int descriptor=0;descriptor<2;++descriptor) {
+        pid_t child=fork(); assert(child>=0);
+        if (!child) {
+            if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
+            if (descriptor) assert(fgetxattr(fd,name,NULL,0)==sizeof(value));
+            else forbid_rpc();
+            struct rlimit limit; assert(!getrlimit(RLIMIT_NOFILE,&limit));
+            limit.rlim_cur=64; assert(!setrlimit(RLIMIT_NOFILE,&limit));
+            while (fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,0)>=0) {}
+            assert(errno==EMFILE);
+            unsigned before=export_fds(NULL);
+            for (unsigned i=0;i<16;++i) {
+                value[0]=(unsigned char)i;
+                const char *target=i&1 ? "xattr-link" : alias;
+                assert(!(descriptor ? fsetxattr(fd,name,value,sizeof(value),XATTR_REPLACE)
+                    : setxattr(target,name,value,sizeof(value),XATTR_REPLACE)));
+                assert((descriptor ? fgetxattr(fd,name,NULL,0) : getxattr(target,name,NULL,0))==sizeof(value));
+                assert((descriptor ? fgetxattr(fd,name,received,sizeof(received))
+                    : getxattr(target,name,received,sizeof(received)))==sizeof(value));
+                assert(!memcmp(received,value,sizeof(value)));
+                assert((descriptor ? fgetxattr(fd,name,received,1) : getxattr(target,name,received,1))==-1 && errno==ERANGE);
+                assert((descriptor ? fgetxattr(fd,name,(void *)1,sizeof(value))
+                    : getxattr(target,name,(void *)1,sizeof(value)))==-1 && errno==EFAULT);
+                assert((descriptor ? fsetxattr(fd,name,(void *)1,sizeof(value),0)
+                    : setxattr(target,name,(void *)1,sizeof(value),0))==-1 && errno==EFAULT);
+                ssize_t n=descriptor ? flistxattr(fd,NULL,0) : listxattr(target,NULL,0);
+                assert(n>=(ssize_t)strlen(name)+1 && (size_t)n<sizeof(received));
+                assert((descriptor ? flistxattr(fd,received,n) : listxattr(target,received,n))==n);
+                int found=0;
+                for (size_t at=0;at<(size_t)n;at+=strlen((char *)received+at)+1)
+                    found|=!strcmp((char *)received+at,name);
+                assert(found);
+                assert((descriptor ? flistxattr(fd,received,1) : listxattr(target,received,1))==-1 && errno==ERANGE);
+                assert(lgetxattr("xattr-link",name,received,sizeof(received))==-1 && errno==ENODATA);
+                assert(!(descriptor ? fremovexattr(fd,name) : removexattr(target,name)));
+                assert((descriptor ? fgetxattr(fd,name,NULL,0) : getxattr(target,name,NULL,0))==-1 && errno==ENODATA);
+                assert(!(descriptor ? fsetxattr(fd,name,value,sizeof(value),XATTR_CREATE)
+                    : setxattr(target,name,value,sizeof(value),XATTR_CREATE)));
+                assert(export_fds(NULL)==before);
+            }
+            if (guest && !descriptor) {
+                assert(!setxattr("xattr-directory",MD_ACL_DEFAULT_NAME,acl,MD_ACL_MAX,0));
+                assert(getxattr("xattr-directory",MD_ACL_DEFAULT_NAME,NULL,0)==MD_ACL_MAX);
+                assert(getxattr("xattr-directory",MD_ACL_DEFAULT_NAME,large,MD_ACL_MAX)==MD_ACL_MAX);
+                assert(!memcmp(acl,large,MD_ACL_MAX));
+                assert(getxattr("xattr-directory",MD_ACL_DEFAULT_NAME,large,MD_ACL_MAX-1)==-1 && errno==ERANGE);
+                assert(!removexattr("xattr-directory",MD_ACL_DEFAULT_NAME));
+                assert(getxattr("xattr-directory",MD_ACL_DEFAULT_NAME,NULL,0)==-1 && errno==ENODATA);
+                assert(export_fds(NULL)==before);
+            }
+            _exit(0);
+        }
+        reap(child);
+    }
+    assert(!close(fd) && !unlink("xattr-link") && !unlink("xattr-slots") && !rmdir("xattr-directory"));
+    free(acl); free(large);
+    puts("PASS xattr without private FDs: path and descriptor, protected full table, native values, maximum ACL, EFAULT, ERANGE and nofollow");
+}
+static void size_signal(int signal) { assert(signal==SIGXFSZ); ++size_signals; }
+static void metadata_slots(int guest) {
+    int file=open("metadata-slots",O_RDWR|O_CREAT|O_EXCL|O_CLOEXEC,0600);
+    assert(file>=0);
+    assert(!mkdir("metadata-directory",0700));
+    int directory=open("metadata-directory",O_PATH|O_DIRECTORY|O_CLOEXEC); assert(directory>=0);
+    int parent=open(".",O_PATH|O_DIRECTORY|O_CLOEXEC); assert(parent>=0);
+    char directory_alias[80],file_alias[80],nested_alias[100];
+    snprintf(directory_alias,sizeof(directory_alias),"/proc/thread-self/fd/%d",directory);
+    snprintf(file_alias,sizeof(file_alias),"/proc/thread-self/fd/%d",file);
+    snprintf(nested_alias,sizeof(nested_alias),"/proc/thread-self/fd/%d/metadata-slots",parent);
+    assert(!symlink("metadata-slots","metadata-link"));
+    struct stat initial; assert(!fstat(file,&initial));
+    for (int protected=0;protected<2;++protected) {
+        pid_t child=fork(); assert(child>=0);
+        if (!child) {
+            if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
+            forbid_rpc();
+            struct sigaction action={.sa_handler=size_signal}; sigemptyset(&action.sa_mask);
+            assert(!sigaction(SIGXFSZ,&action,NULL));
+            struct rlimit size_limit; assert(!getrlimit(RLIMIT_FSIZE,&size_limit));
+            size_limit.rlim_cur=8; assert(!setrlimit(RLIMIT_FSIZE,&size_limit));
+            struct rlimit limit; assert(!getrlimit(RLIMIT_NOFILE,&limit));
+            limit.rlim_cur=64; assert(!setrlimit(RLIMIT_NOFILE,&limit));
+            while (fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,0)>=0) {}
+            assert(errno==EMFILE);
+            for (unsigned i=0;i<16;++i) {
+                assert(!chdir("metadata-directory") && !chdir(".."));
+                assert(!chdir(directory_alias) && !chdir(".."));
+                assert(chdir("metadata-slots")==-1 && errno==ENOTDIR);
+                assert(!truncate("metadata-link",(off_t)(i%8)));
+                assert(!truncate(file_alias,(off_t)(i%8)));
+                struct stat sized; assert(!stat("metadata-slots",&sized) && sized.st_size==(off_t)(i%8));
+                assert(truncate("metadata-slots",9)==-1 && errno==EFBIG && size_signals==(sig_atomic_t)i+1);
+                assert(truncate("metadata-directory",0)==-1 && errno==EISDIR);
+                mode_t mask=umask(0027);
+                assert(!mknodat(AT_FDCWD,"metadata-node",(i%2 ? S_IFREG : 0)|0666,0));
+                struct stat node;
+                assert(!lstat("metadata-node",&node) && S_ISREG(node.st_mode) && (node.st_mode&0777)==0640);
+                assert(mknodat(AT_FDCWD,"metadata-node",S_IFREG|0600,0)==-1 && errno==EEXIST);
+                assert(!unlink("metadata-node"));
+                int created=mknodat(AT_FDCWD,"metadata-node",S_IFIFO|0666,0);
+                if (!guest && created<0 && (errno==EACCES || errno==EPERM)) {
+                    if (!i) printf("UNAVAILABLE native FIFO creation errno=%d; guest check remains required\n",errno);
+                } else {
+                    assert(!created);
+                    assert(!lstat("metadata-node",&node) && S_ISFIFO(node.st_mode) && (node.st_mode&0777)==0640);
+                    assert(!unlink("metadata-node"));
+                }
+                umask(mask);
+                mode_t mode=0600|(i&1 ? 0100 : 0);
+                const char *paths[]={"metadata-link",file_alias,nested_alias,"/proc/thread-self/cwd/metadata-slots"};
+                const char *metadata=paths[i%4];
+                char link[PATH_MAX];
+                assert(readlink(file_alias,link,sizeof(link))>0);
+                assert(readlink("/proc/thread-self/cwd",link,sizeof(link))>0);
+                struct stat root,current,alias;
+                assert(!stat("/",&root) && !stat("/proc/thread-self/root",&alias));
+                assert(root.st_ino==alias.st_ino && root.st_dev==alias.st_dev);
+                assert(!stat(".",&current) && !stat("/proc/thread-self/cwd",&alias));
+                assert(current.st_ino==alias.st_ino && current.st_dev==alias.st_dev);
+                assert(!chmod(metadata,mode));
+                assert(!fchownat(AT_FDCWD,metadata,initial.st_uid,initial.st_gid,0));
+                const struct timespec times[2]={{123456789,0},{123456790+i,42}};
+                assert(!utimensat(AT_FDCWD,metadata,times,0));
+                struct stat st; assert(!stat(metadata,&st));
+                assert(!faccessat(AT_FDCWD,metadata,R_OK|W_OK,0));
+                assert((st.st_mode&0777)==mode && st.st_mtim.tv_sec==times[1].tv_sec
+                    && st.st_mtim.tv_nsec==42);
+                assert(!fchownat(AT_FDCWD,"metadata-link",initial.st_uid,initial.st_gid,AT_SYMLINK_NOFOLLOW));
+                assert(!utimensat(AT_FDCWD,"metadata-link",times,AT_SYMLINK_NOFOLLOW));
+                assert(!lstat("metadata-link",&st) && S_ISLNK(st.st_mode) && st.st_mtim.tv_nsec==42);
+                struct statfs by_path,by_fd;
+                assert(!statfs(metadata,&by_path) && !fstatfs(file,&by_fd));
+                assert(by_path.f_type==by_fd.f_type && by_path.f_bsize==by_fd.f_bsize
+                    && !memcmp(&by_path.f_fsid,&by_fd.f_fsid,sizeof(by_path.f_fsid)));
+                assert(chmod("metadata-absent",0600)==-1 && errno==ENOENT);
+            }
+            _exit(0);
+        }
+        reap(child);
+    }
+    assert(!close(parent) && !close(directory) && !close(file) && !unlink("metadata-link")
+        && !unlink("metadata-slots") && !rmdir("metadata-directory"));
+    puts("PASS metadata without private FDs: protected callers, no free slots, mknod, cwd, RLIMIT_FSIZE/SIGXFSZ, modes, owners, timestamps, statfs and symlinks");
+}
+static void proc_exe_slots(void) {
+    struct stat initial; assert(!stat("/proc/self/exe",&initial));
+    for (int protected=0;protected<2;++protected) for (int watched=0;watched<2;++watched) {
+        pid_t child=fork(); assert(child>=0);
+        if (!child) {
+            if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
+            int watch=-1;
+            if (!watched) forbid_rpc();
+            else {
+                watch=inotify_init1(IN_CLOEXEC|IN_NONBLOCK); assert(watch>=0);
+                int wd=inotify_add_watch(watch,"/proc/self/exe",IN_ATTRIB); assert(wd>=0);
+                assert(!inotify_rm_watch(watch,wd));
+            }
+            struct rlimit limit; assert(!getrlimit(RLIMIT_NOFILE,&limit));
+            limit.rlim_cur=64; assert(!setrlimit(RLIMIT_NOFILE,&limit));
+            while (fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,0)>=0) {}
+            assert(errno==EMFILE);
+            for (unsigned i=0;i<16;++i) {
+                const char *path=i&1 ? "/proc/thread-self/exe" : "/proc/self/exe";
+                struct stat st; assert(!stat(path,&st));
+                assert(st.st_ino==initial.st_ino && st.st_dev==initial.st_dev && st.st_size==initial.st_size);
+                assert(!faccessat(AT_FDCWD,path,R_OK|X_OK,0));
+                assert(!chmod(path,initial.st_mode&07777));
+                struct statfs info; assert(!statfs(path,&info) && info.f_bsize>0);
+                assert(getxattr(path,"user.shroot-missing",NULL,0)==-1 && errno==ENODATA);
+                assert(listxattr(path,NULL,0)>=0);
+                if (watched) {
+                    int wd=inotify_add_watch(watch,path,IN_ATTRIB); assert(wd>=0);
+                    assert(!inotify_rm_watch(watch,wd));
+                }
+                assert(stat("/proc/self/exe/not-a-directory",&st)==-1 && errno==ENOTDIR);
+                assert(chdir(path)==-1 && errno==ENOTDIR);
+                for (int fd=0;fd<64;++fd) assert(fcntl(fd,F_GETFD)>=0);
+            }
+            _exit(0);
+        }
+        reap(child);
+    }
+    puts("PASS executable metadata: protected full tables, retained identity, attributes, watch and directory errors without guest anchors");
+}
+static void proc_mount_paths(void) {
+    for (int protected=0;protected<2;++protected) for (int slots=0;slots<2;++slots)
+        for (int cloexec=0;cloexec<2;++cloexec) {
+            pid_t child=fork(); assert(child>=0);
+            if (!child) {
+                if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
+                forbid_rpc();
+                struct rlimit limit; assert(!getrlimit(RLIMIT_NOFILE,&limit));
+                limit.rlim_cur=64; assert(!setrlimit(RLIMIT_NOFILE,&limit));
+                int last=-1,fd;
+                while ((fd=fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,0))>=0) last=fd;
+                assert(last>=0 && errno==EMFILE);
+                if (slots) assert(!close(last));
+                for (unsigned i=0;i<16;++i) {
+                    fd=open(i%2 ? "/proc/self/mountinfo" : "/proc/self/mounts",
+                        O_PATH|(cloexec ? O_CLOEXEC : 0));
+                    if (!slots) { assert(fd==-1 && errno==EMFILE); continue; }
+                    assert(fd==last && fcntl(fd,F_GETFD)==(cloexec ? FD_CLOEXEC : 0));
+                    assert(fcntl(fd,F_GETFL)&O_PATH);
+                    struct stat st; assert(!fstat(fd,&st) && S_ISREG(st.st_mode));
+                    assert(!close(fd));
+                }
+                _exit(0);
+            }
+            reap(child);
+        }
+    puts("PASS mount snapshot O_PATH: protected callers, exact 0/1 result slots, CLOEXEC and forbidden RPC");
+}
+static int fifo_park(void *argument) {
+    int ready=*(int *)argument;
+    assert(!prctl(PR_SET_DUMPABLE,0));
+    forbid_rpc(); put(ready);
+    int fd=open("buffer-fifo",O_RDONLY|O_CLOEXEC);
+    if (fd>=0) close(fd);
+    _exit(77);
+}
+static void buffer_fifo(void) {
+    assert(!mkfifo("buffer-fifo",0600));
+    for (unsigned protected=0;protected<2;++protected) for (unsigned slots=0;slots<2;++slots) {
+        pid_t child=fork(); assert(child>=0);
+        if (!child) {
+            if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
+            struct rlimit limit; assert(!getrlimit(RLIMIT_NOFILE,&limit));
+            limit.rlim_cur=64; assert(!setrlimit(RLIMIT_NOFILE,&limit));
+            int fd,last=-1;
+            while ((fd=fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,0))>=0) last=fd;
+            assert(errno==EMFILE && last>=0);
+            if (slots) assert(!close(last));
+            forbid_rpc();
+            for (unsigned i=0;i<16;++i) {
+                fd=open("buffer-fifo",O_RDWR|(i%2 ? O_CLOEXEC : 0));
+                if (!slots) assert(fd==-1 && errno==EMFILE);
+                else {
+                    assert(fd==last && fcntl(fd,F_GETFD)==(i%2 ? FD_CLOEXEC : 0));
+                    put(fd); get(fd); assert(!close(fd));
+                }
+            }
+            _exit(0);
+        }
+        reap(child);
+    }
+    int ready[2]; assert(!pipe2(ready,O_CLOEXEC));
+    void *stack=malloc(1024*1024); assert(stack);
+    unsigned baseline=export_fds(NULL);
+    for (unsigned i=0;i<32;++i) {
+        pid_t child=clone(fifo_park,(char *)stack+1024*1024,CLONE_FILES|SIGCHLD,&ready[1]); assert(child>=0);
+        /* EVENT_WAIT: child is entering the FIFO call. Death races preparation
+         * and peer wait; an unpaired read can never publish an application FD. */
+        get(ready[0]); assert(!kill(child,SIGKILL));
+        int status; assert(waitpid(child,&status,0)==child && WIFSIGNALED(status) && WTERMSIG(status)==SIGKILL);
+        assert(export_fds(NULL)==baseline);
+    }
+    free(stack); assert(!close(ready[0]) && !close(ready[1]));
+    assert(!unlink("buffer-fifo"));
+    puts("PASS mapped FIFO: protected calls, forbidden RPC, exact result slots, data and shared-table cancellation without private descriptors");
+}
+static void buffer_paths(int protected) {
+    int base=open(".",O_PATH|O_DIRECTORY|O_CLOEXEC); assert(base>=0);
+    int fd=open("buffer-path-file",O_RDWR|O_CREAT|O_EXCL|O_CLOEXEC,0600);
+    assert(fd>=0); put(fd);
+    if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
+    struct sock_filter filter[]={
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_socket,4,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_connect,3,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_sendmsg,2,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_recvmsg,1,0),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_THREAD)
+    };
+    struct sock_fprog program={sizeof(filter)/sizeof(*filter),filter};
+    assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+    assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+    assert(!mkdirat(base,"buffer-path-dir",0700));
+    assert(!symlinkat("buffer-path-file",base,"buffer-path-link"));
+    struct timespec times[2]={{1234567890,12345},{1234567891,23456}};
+    assert(!fchmod(fd,0640) && !futimens(fd,times));
+    struct rlimit limit; assert(!getrlimit(RLIMIT_NOFILE,&limit));
+    limit.rlim_cur=64; assert(!setrlimit(RLIMIT_NOFILE,&limit));
+    while (fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,0)>=0) { }
+    assert(errno==EMFILE);
+    struct stat opened,named; char link[64];
+    assert(!fstat(fd,&opened) && opened.st_size==1 && (opened.st_mode&0777)==0640
+        && opened.st_mtim.tv_sec==times[1].tv_sec && opened.st_mtim.tv_nsec==times[1].tv_nsec);
+    assert(!fstatat(base,"buffer-path-file",&named,0) && named.st_ino==opened.st_ino);
+    assert(readlinkat(base,"buffer-path-link",link,sizeof(link))==16 && !memcmp(link,"buffer-path-file",16));
+    assert(syscall(SYS_readlinkat,base,"buffer-path-link",(void *)1,sizeof(link))==-1 && errno==EFAULT);
+    assert(!renameat(base,"buffer-path-file",base,"buffer-path-renamed"));
+    assert(!fstat(fd,&named) && named.st_ino==opened.st_ino);
+    assert(fstatat(base,"buffer-path-file",&named,0)==-1 && errno==ENOENT);
+    assert(!unlinkat(base,"buffer-path-renamed",0) && !unlinkat(base,"buffer-path-link",0)
+        && !unlinkat(base,"buffer-path-dir",AT_REMOVEDIR));
+    assert(!fstat(fd,&named) && named.st_nlink==0 && !close(fd) && !close(base));
+    puts("PASS buffered paths: two paths, attributes, protected inputs, zero FD slots, output fault and forbidden RPC");
+}
+struct buffer_exit_peer { int ready, parked; };
+static int buffer_exit_busy(void *argument) {
+    const struct buffer_exit_peer *c=argument;
+    int fd=open(".",O_PATH|O_DIRECTORY|O_CLOEXEC); assert(fd>=0 && !close(fd));
+    put(c->ready);
+    if (c->parked>=0) { get(c->parked); return 1; }
+    for (;;) {
+        char cwd[4096]; assert(getcwd(cwd,sizeof(cwd)));
+        fd=open(".",O_PATH|O_DIRECTORY|O_CLOEXEC); assert(fd>=0 && !close(fd));
+    }
+}
+static void buffer_exit(void) {
+    enum { peers=8, rounds=24 };
+    for (unsigned round=0;round<rounds;++round) {
+        pid_t child=fork(); assert(child>=0);
+        if (!child) {
+            int ready[2]; assert(!pipe(ready));
+            struct buffer_exit_peer context={ready[1],-1};
+            if (round%2) assert(!prctl(PR_SET_DUMPABLE,0));
+            for (unsigned i=0;i<peers;++i) {
+                void *stack=malloc(1024*1024); assert(stack);
+                assert(clone(buffer_exit_busy,(char *)stack+1024*1024,
+                    CLONE_VM|CLONE_FILES|CLONE_FS|CLONE_SIGHAND|CLONE_THREAD,&context)>0);
+            }
+            /* EVENT_WAIT: every peer has completed an O_PATH call; exit_group
+             * races their subsequent adapter work. The outer alarm bounds it. */
+            for (unsigned i=0;i<peers;++i) get(ready[0]);
+            _exit(0);
+        }
+        reap(child);
+    }
+    puts("PASS buffered group exit: 24 groups, 8 active peers, ordinary/protected callers");
+}
+static void buffer_park(int protected) {
+    int ready[2],parked[2]; assert(!pipe(ready) && !pipe(parked));
+    struct buffer_exit_peer context={ready[1],parked[0]};
+    if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
+    for (unsigned i=0;i<8;++i) {
+        void *stack=malloc(1024*1024); assert(stack);
+        assert(clone(buffer_exit_busy,(char *)stack+1024*1024,
+            CLONE_VM|CLONE_FILES|CLONE_FS|CLONE_SIGHAND|CLONE_THREAD,&context)>0);
+    }
+    for (unsigned i=0;i<8;++i) get(ready[0]);
+    puts("READY buffered parked group");
+    /* EVENT_WAIT: deliberately no writer; the supervisor deadline must fail
+     * and reap every TRACEEXIT-observed peer without outer-timeout recovery. */
+    get(parked[0]); abort();
+}
 int main(int argc, char **argv) {
     setbuf(stdout, NULL); alarm(40);
+    if (argc==2 && !strcmp(argv[1],"exec-custody-target")) return 0;
     if (argc == 5 && !strcmp(argv[1], "exec-undo")) {
         struct sembuf op = {.sem_num=0, .sem_op=-1, .sem_flg=SEM_UNDO};
         assert(!syscall(SYS_semop, atoi(argv[2]), &op, 1));
@@ -378,14 +1935,83 @@ int main(int argc, char **argv) {
         assert(!fcntl(fd, F_SETFD, FD_CLOEXEC) && lseek(fd, 9, SEEK_SET) == 9);
         put(atoi(argv[2])); get(atoi(argv[3])); return 0;
     }
+    if (argc>=3 && !strcmp(argv[1],"proc-snapshot")) { proc_snapshot(argc,argv); return 0; }
     assert(argc == 3); executable = argv[0];
+    if (!strcmp(argv[1],"export-exec")) {
+        assert(fcntl(atoi(argv[2]),F_GETFD)==-1 && errno==EBADF); return 0;
+    }
+    if (!strcmp(argv[1],"buffer-exec") || !strcmp(argv[1],"buffer-exec-protected")) {
+        buffer_cwd_calls(argv[2],!strcmp(argv[1],"buffer-exec-protected")); return 0;
+    }
     if (!strcmp(argv[1],"origins") || !strcmp(argv[1],"origins-protected")) {
         origins(argv[2],!strcmp(argv[1],"origins-protected")); return 0;
     }
     assert(!chdir(argv[2]));
+    if (!strcmp(argv[1],"exec-custody") || !strcmp(argv[1],"exec-custody-native"))
+        return exec_custody(!strcmp(argv[1],"exec-custody"),0);
+    if (!strcmp(argv[1],"proc-custody") || !strcmp(argv[1],"proc-custody-native"))
+        return exec_custody(!strcmp(argv[1],"proc-custody"),1);
+    if (!strcmp(argv[1],"umask-custody") || !strcmp(argv[1],"umask-custody-native"))
+        return exec_custody(!strcmp(argv[1],"umask-custody"),2);
+    if (!strcmp(argv[1],"proc-mount-paths")) { proc_mount_paths(); return 0; }
+    if (!strcmp(argv[1],"proc-exe-slots")) { proc_exe_slots(); return 0; }
+    if (!strcmp(argv[1],"proc-link-slots")) { proc_link_slots(); return 0; }
+    if (!strcmp(argv[1],"proc-open-slots")) { proc_open_slots(); return 0; }
+    if (!strcmp(argv[1],"metadata-slots")) { metadata_slots(1); return 0; }
+    if (!strcmp(argv[1],"metadata-slots-native")) { metadata_slots(0); return 0; }
+    if (!strcmp(argv[1],"xattr-slots")) { xattr_slots(1); return 0; }
+    if (!strcmp(argv[1],"xattr-slots-native")) { xattr_slots(0); return 0; }
+    if (!strcmp(argv[1],"watch-slots")) { watch_slots(); return 0; }
+    if (!strcmp(argv[1],"proc-reopen-slots")) { proc_reopen_slots(); return 0; }
+    if (!strcmp(argv[1],"buffer-cwd")) { buffer_cwd(); return 0; }
+    if (!strcmp(argv[1],"imported-cwd")) { imported_cwd(); return 0; }
+    if (!strcmp(argv[1],"native-cwd")) { native_cwd(); return 0; }
+    if (!strcmp(argv[1],"proc-thread-capture")) { proc_thread_capture(); return 0; }
+    if (!strcmp(argv[1],"capture-terminal") || !strcmp(argv[1],"capture-terminal-native")) {
+        capture_terminal(!strcmp(argv[1],"capture-terminal")); return 0;
+    }
+    if (!strcmp(argv[1],"buffer-open")) { buffer_open(); return 0; }
+    if (!strcmp(argv[1],"buffer-import")) { buffer_import(); return 0; }
+    if (!strcmp(argv[1],"buffer-data")) { buffer_data(); return 0; }
+    if (!strcmp(argv[1],"buffer-directory")) { buffer_directory(); return 0; }
+    if (!strcmp(argv[1],"buffer-fifo")) { buffer_fifo(); return 0; }
+    if (!strcmp(argv[1],"buffer-export") || !strcmp(argv[1],"buffer-export-native")) {
+        buffer_export(!strcmp(argv[1],"buffer-export")); return 0;
+    }
+    if (!strcmp(argv[1],"metadata-export") || !strcmp(argv[1],"metadata-export-native")) {
+        metadata_export(!strcmp(argv[1],"metadata-export")); return 0;
+    }
+    if (!strcmp(argv[1],"buffer-return") || !strcmp(argv[1],"buffer-return-native")) {
+        buffer_return(!strcmp(argv[1],"buffer-return")); return 0;
+    }
+    if (!strcmp(argv[1],"buffer-descriptors")) { buffer_descriptors(); return 0; }
+    if (!strcmp(argv[1],"buffer-paths") || !strcmp(argv[1],"buffer-paths-protected")) {
+        buffer_paths(!strcmp(argv[1],"buffer-paths-protected")); return 0;
+    }
+    if (!strcmp(argv[1],"buffer-exit")) { buffer_exit(); return 0; }
+    if (!strcmp(argv[1],"buffer-park") || !strcmp(argv[1],"buffer-park-protected")) {
+        buffer_park(!strcmp(argv[1],"buffer-park-protected")); return 1;
+    }
     if (!strcmp(argv[1], "noop")) return 0;
     if (!strcmp(argv[1], "metadata") || !strcmp(argv[1], "spawn")) { workload(argv[1]); return 0; }
     if (!strcmp(argv[1], "probe")) { probe(); return 0; }
+    if (!strcmp(argv[1],"rpc-cwd") || !strcmp(argv[1],"rpc-cwd-protected")) {
+        rpc_cwd(!strcmp(argv[1],"rpc-cwd-protected")); return 0;
+    }
+    if (!strcmp(argv[1],"custody") || !strcmp(argv[1],"custody-native")
+            || !strcmp(argv[1],"custody-dirfd") || !strcmp(argv[1],"custody-nofollow")
+            || !strcmp(argv[1],"custody-native-dirfd") || !strcmp(argv[1],"custody-native-nofollow")) {
+        int guest=strncmp(argv[1],"custody-native",14)!=0;
+        int explicit_base=!strcmp(argv[1],"custody-dirfd") || !strcmp(argv[1],"custody-native-dirfd");
+        int nofollow=!strcmp(argv[1],"custody-nofollow") || !strcmp(argv[1],"custody-native-nofollow");
+        unsigned leaked=0;
+        for (int protected=0;protected<2;++protected) {
+            leaked+=terminal_custody(guest,protected,SYS_connect,explicit_base,nofollow);
+            leaked+=terminal_custody(guest,protected,SYS_recvmsg,explicit_base,nofollow);
+            leaked+=terminal_custody(guest,protected,SYS_openat,explicit_base,nofollow);
+        }
+        return leaked ? 1 : 0;
+    }
     int guest = !strcmp(argv[1], "guest");
     assert(guest || !strcmp(argv[1], "native"));
     if (guest) restricted_descriptors();

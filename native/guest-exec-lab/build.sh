@@ -20,14 +20,18 @@ inode_compile() {
         "$runtime/inode_watch.c" "$runtime/watch_queue.c" "$runtime/inode_path.c" \
         "$runtime/inode_directory.c" "$runtime/inode_import.c" "$runtime/inode_socket.c" \
         "$runtime/inode_backing.c" "$runtime/inode_snapshot.c" "$runtime/inode_fifo.c" "$runtime/file_open.c" "$runtime/guest_identity.c" \
-        "$runtime/task_registry.c" "$runtime/guest_domain.c" "$runtime/mount_namespace.c" "$runtime/fs_anchor.c" "$runtime/resource_order.c" "$runtime/fd_origins.c" "$runtime/fd_exchange.c" "$runtime/inode_metadata.c" \
+        "$runtime/task_registry.c" "$runtime/guest_domain.c" "$runtime/mount_namespace.c" "$runtime/fs_anchor.c" "$runtime/resource_order.c" "$runtime/ofd_order.c" "$runtime/fd_origins.c" "$runtime/fd_channel.c" "$runtime/fd_delivery.c" "$runtime/fd_exchange.c" "$runtime/inode_metadata.c" \
         "$runtime/inode_capability.c" "$runtime/inode_acl.c" "$runtime/posix_acl.c" "$@"
 }
 node "$src/test_signature.mjs" "$work"
 mkdir -p "$work/bundle/rootfs" "$work/path-test"
-"$cc" -iquote "$runtime" -std=c17 -O2 -Wall -Wextra -Werror -UNDEBUG \
-    "$src/test_interception_stacks.c" "$runtime/interception_stacks.c" -o "$work/test-interception-stacks"
-"$work/test-interception-stacks"
+(
+    set --
+    case "$($cc -dumpmachine)" in *android*) set -- --target=aarch64-linux-android34 -L/system/lib64 ;; esac
+    "$cc" "$@" -iquote "$runtime" -std=c17 -O2 -Wall -Wextra -Werror -UNDEBUG \
+        "$src/test_interception_memory.c" "$runtime/interception_memory.c" "$runtime/interception_buffers.c" "$runtime/resource_order.c" -o "$work/test-interception-memory"
+)
+"$work/test-interception-memory"
 "$cc" -iquote "$runtime" -std=c17 -O2 -Wall -Wextra -Werror -UNDEBUG -fno-builtin -DMD_NO_START \
     "$src/test_socket_routes.c" "$runtime/socket_routes.c" "$runtime/raw.c" "$runtime/memory.c" "$runtime/raw.S" -o "$work/test-socket-routes"
 "$work/test-socket-routes"
@@ -54,7 +58,7 @@ importroot=$(mktemp -d "$work/path-test/import.XXXXXX")
 timeout 45 "$work/test-import" "$importroot/tests"
 "$cc" -iquote "$runtime" -std=c17 -O2 -Wall -Wextra -Werror -Wframe-larger-than=16384 \
     -ffreestanding -fno-builtin -fno-stack-protector -DMD_NO_START -nostdlib -r \
-    "$runtime/fs_client.c" "$runtime/fs_wire.c" "$runtime/fd_client.c" "$runtime/interception_entry.S" \
+    "$runtime/fs_client.c" "$runtime/fs_buffer_client.c" "$runtime/adapter_buffer.c" "$runtime/fs_wire.c" "$runtime/fd_client.c" "$runtime/interception_entry.S" \
     "$runtime/event_wait.c" "$runtime/raw.c" "$runtime/raw.S" \
     -o "$work/fs-client-freestanding.o"
 if [ -n "$(llvm-nm -u "$work/fs-client-freestanding.o")" ]; then
@@ -66,7 +70,7 @@ inode_compile "$cc" -iquote "$runtime" -std=c17 -O2 -g -Wall -Wextra -Werror -fn
     -DMD_INODE_TESTING -DMD_FS_TESTING -DMD_USE_LIBC "$src/test_rpc.c" "$runtime/fs_client.c" \
     "$runtime/image_catalogue.c" "$runtime/elf_admission.c" "$runtime/elf.c" \
     "$runtime/fs_mounts.c" "$runtime/fs_mount_path.c" "$runtime/fs_mount_operations.c" "$runtime/fs_mount_table.c" \
-    "$runtime/fs_wire.c" "$runtime/event_wait.c" "$runtime/fs_service.c" "$runtime/fs_engine.c" "$runtime/ipc_credentials.c" \
+    "$runtime/fs_wire.c" "$runtime/event_wait.c" "$runtime/fs_service.c" "$runtime/fs_engine.c" "$runtime/fs_xattr.c" "$runtime/fs_operation.c" "$runtime/task_status.c" "$runtime/ipc_credentials.c" \
     "$runtime/raw.c" "$runtime/memory.c" "$runtime/raw.S" -lsqlite3 -o "$work/test-rpc"
 rpcroot=$(mktemp -d "$work/path-test/rpc.XXXXXX")
 timeout 60 "$work/test-rpc" "$rpcroot/store"
@@ -83,11 +87,11 @@ adapter_fixture() {
 "$cc" -iquote "$runtime" -std=c17 -O2 -g -Wall -Wextra -Werror -UNDEBUG -fno-builtin -DMD_NO_START -DMD_USE_LIBC "$@" \
     "$runtime/socket_calls.c" "$runtime/socket_namespace.c" "$runtime/socket_identity.c" "$runtime/socket_ancillary.c" "$runtime/socket_routes.c" "$runtime/file_calls.c" "$runtime/fs.c" "$runtime/proc_paths.c" \
     "$runtime/namespace.c" "$runtime/namespace_proc.c" "$runtime/proc_image.c" "$runtime/fd_metadata.c" "$runtime/fd_client.c" "$runtime/fs_client.c" "$runtime/fs_wire.c" "$runtime/file_open.c" \
-    "$runtime/event_wait.c" "$runtime/raw.c" "$runtime/memory.c" "$runtime/raw.S"
+    "$runtime/event_wait.c" "$runtime/task_status.c" "$runtime/watch_calls.c" "$runtime/raw.c" "$runtime/memory.c" "$runtime/raw.S"
 }
 adapter_fixture -DMD_SOCKET_DRIVER "$src/test_sockets.c" -o "$work/bundle/md-sockets-test"
 adapter_fixture --target=aarch64-linux-android34 -fno-termux-rpath -static -DMD_USE_LIBC \
-    "$src/test_command.c" "$runtime/exec.c" "$runtime/elf.c" "$runtime/program_files.c" -o "$work/bundle/md-command-test"
+    "$src/test_command.c" "$runtime/command.c" "$runtime/command_image.c" "$runtime/elf.c" "$runtime/program_files.c" -o "$work/bundle/md-command-test"
 socketroot=$(mktemp -d "$work/path-test/sockets.XXXXXX")
 timeout 45 "$work/bundle/md-sockets-test" native "$socketroot"
 timeout 45 "$work/bundle/md-sockets-test" adapter "$socketroot"
@@ -161,7 +165,7 @@ inode_compile guest_cc -pie -DMD_INODE_TESTING "$sysroot/usr/lib/aarch64-linux-g
     -o "$work/md-import-fixture"
 inode_compile guest_cc -pie -fno-builtin -DMD_NO_START -DMD_USE_LIBC -DMD_INODE_TESTING -DMD_FS_TESTING \
     "$sysroot/usr/lib/aarch64-linux-gnu/Scrt1.o" "$sysroot/usr/lib/aarch64-linux-gnu/crti.o" \
-    "$src/test_rpc.c" "$runtime/fs_client.c" "$runtime/fs_wire.c" "$runtime/event_wait.c" "$runtime/fs_service.c" "$runtime/fs_engine.c" "$runtime/ipc_credentials.c" \
+    "$src/test_rpc.c" "$runtime/fs_client.c" "$runtime/fs_wire.c" "$runtime/event_wait.c" "$runtime/fs_service.c" "$runtime/fs_engine.c" "$runtime/fs_xattr.c" "$runtime/fs_operation.c" "$runtime/task_status.c" "$runtime/ipc_credentials.c" \
     "$runtime/image_catalogue.c" "$runtime/elf_admission.c" "$runtime/elf.c" \
     "$runtime/fs_mounts.c" "$runtime/fs_mount_path.c" "$runtime/fs_mount_operations.c" "$runtime/fs_mount_table.c" \
     "$runtime/raw.c" "$runtime/memory.c" "$runtime/raw.S" \

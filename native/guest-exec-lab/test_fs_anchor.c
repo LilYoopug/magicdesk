@@ -71,12 +71,60 @@ static void capture_failure(struct md_filesystem *fs) {
     assert(!setrlimit(RLIMIT_NOFILE,&original));
     assert(descriptors()==before);
 }
+static void backing_sources(struct md_inode_store *s) {
+    unsigned before=descriptors();
+    int created=md_inode_create(s,-1,"/source-file",0600); assert(created>=0); close(created);
+    assert(!md_inode_mkdir(s,-1,"/source-dir",0700));
+    assert(!md_inode_symlink(s,"missing-target",-1,"/source-link"));
+    const char *names[]={"/source-file","/source-dir","/source-link"};
+    for (unsigned i=0;i<3;++i) {
+        int flags=O_PATH|O_NOFOLLOW|O_CLOEXEC|(i==1 ? O_DIRECTORY : 0);
+        int fd=md_inode_open(s,-1,names[i],flags,0); assert(fd>=0);
+        struct stat original; assert(!fstat(fd,&original));
+        char source[96];
+        assert(md_inode_descriptor_source(s,fd,source,1)==-ERANGE);
+        assert(!md_inode_descriptor_source(s,fd,source,sizeof(source)));
+        assert(!md_inode_rename(s,-1,names[i],-1,"/source-moved",0));
+        assert(!md_inode_unlink(s,-1,"/source-moved",i==1 ? AT_REMOVEDIR : 0));
+        int opened=open(source,flags); assert(opened>=0);
+        struct stat actual; assert(!fstat(opened,&actual));
+        assert(actual.st_dev==original.st_dev && actual.st_ino==original.st_ino
+            && actual.st_mode==original.st_mode);
+        assert(fcntl(opened,F_GETFL)==(flags&~O_CLOEXEC));
+        close(opened); close(fd);
+    }
+    int native=open("/dev/null",O_PATH|O_NOFOLLOW|O_CLOEXEC); assert(native>=0);
+    char source[96]; assert(md_inode_descriptor_source(s,native,source,sizeof(source))==-EXDEV);
+    close(native); assert(descriptors()==before);
+    puts("PASS backing-source lease preserves object/type/status after guest rename and unlink, without descriptor allocation");
+}
 static void empty_views(struct md_inode_store *s) {
     struct md_filesystem fs={.store=s}, copy={.store=s};
     struct md_fs_location root={0}, selected;
     assert(!md_fs_mounts_open(&fs,NULL,0));
     assert(!md_fs_mounts_copy(&fs,&root,&copy.mounts,&selected));
     struct md_fs_anchor *base=anchor(&fs,"/"), *fifo=NULL, *second=NULL;
+    struct md_inode_statistics costs[2]={0};
+    for (unsigned annotated=0; annotated<2; ++annotated) {
+        md_inode_measure(s,&costs[annotated]);
+        struct md_fs_result opened=request(&fs,annotated ? base : NULL,md_fs_anchor_fd(base),
+            MD_FS_OPEN,"mnt",O_PATH|O_DIRECTORY,0,NULL);
+        assert(!opened.error && opened.fd>=0); close(opened.fd);
+        md_inode_measure(s,NULL);
+    }
+    assert(costs[0].step.calls==costs[1].step.calls
+        && costs[0].transaction.calls==costs[1].transaction.calls);
+    int wrong=md_inode_open(s,-1,"/jail",O_PATH|O_DIRECTORY,0); assert(wrong>=0);
+    struct md_fs_result stale=request(&fs,base,wrong,MD_FS_OPEN,"mnt",O_PATH,0,NULL);
+    assert(stale.error==-ESTALE);
+    stale=request(&fs,base,wrong,MD_FS_OPEN,"/mnt",O_PATH,0,NULL);
+    assert(!stale.error && stale.fd>=0); close(stale.fd);
+    stale=request(&fs,base,wrong,MD_FS_OPEN,"/mnt",O_PATH,RESOLVE_IN_ROOT,NULL);
+    assert(stale.error==-ESTALE);
+    stale=request(&fs,base,wrong,MD_FS_OPEN,"/mnt",O_PATH,RESOLVE_BENEATH,NULL);
+    assert(stale.error==-EXDEV); close(wrong);
+    stale=request(&fs,base,MD_INODE_ROOT,MD_FS_OPEN,"mnt",O_PATH,0,NULL);
+    assert(!stale.error && stale.fd>=0); close(stale.fd);
     assert(!md_inode_mkfifo(s,-1,"/stream",0600));
     int flags=O_RDONLY|O_NONBLOCK|O_CLOEXEC;
     struct md_fs_result r=relative(&copy,base,"stream",flags,0,&fifo);
@@ -198,10 +246,11 @@ void test_fs_anchor(const char *base) {
     assert(md_view_anchor_check(&foreign,md_fs_anchor_fd(shared),shared)==-ESTALE);
     md_fs_anchor_release(shared); md_fs_anchor_release(old_child); md_fs_anchor_release(old_root); md_fs_anchor_release(new);
     md_fs_anchor_release(file); md_fs_mounts_close(&current);
-    empty_views(s); md_inode_store_close(s);
+    empty_views(s); backing_sources(s); md_inode_store_close(s);
     assert(descriptors()==before);
     puts("PASS explicit path origins across copied views, readonly policy, nested mounts and absolute/relative links");
     puts("PASS origin-aware openat2, cross-view link/rename rejection and root-context restoration");
     puts("PASS captured FD identity, reopen, reused-number rejection, flock/OFD release and source-view lifetime");
     puts("PASS empty-view inode origins, completed FIFO identity/EOF and failed capture descriptor cleanup");
+    puts("PASS same-view inode origins retain one path walk, stale-base checks and absolute/scoped path rules");
 }

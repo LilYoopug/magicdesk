@@ -17,6 +17,9 @@ are not presented as application breakpoints. The image-entry event publishes th
 guest ELF entry, stack and process-image snapshot before debugger notification.
 `process_image_view` supplies another guest's executable, initial argv and auxv
 through the same authority check; arbitrary foreign proc paths are not exposed.
+Executable readlink returns bounded bytes in the existing mapped response slot,
+not a temporary guest file. Full descriptor tables and protected callers retain
+the same output truncation and rejected-copy behavior.
 
 Supported requests include register sets, memory peek/poke, signal information
 and masks, continue, single step, syscall entry/exit information, interrupt,
@@ -31,6 +34,9 @@ launches do not acquire extra stops or periodic checks.
 The wait status and siginfo describe the same event; internal bootstrap execs
 are not separate guest exec events. Non-leader inferior exec retains its former
 TID in the exec event while transferring the relationship to the surviving PID.
+Descriptor-operation completion during ELF bootstrap remains internal. A traced
+guest exec publishes its image-entry event before its syscall-exit stop; loader
+FD operations cannot complete that pending guest call.
 
 Guest wait4 and waitid deliver queued trace stops in event order, with rusage
 and waitid WNOWAIT support. Mixed traced/untraced waits first check the native
@@ -47,11 +53,23 @@ the inferior's logical UID and distinguishes normal, killed and core-dumped exit
 PTRACE_GET_SYSCALL_INFO exposes entry/exit records only with TRACESYSGOOD; short
 buffers retain the kernel's full-size return convention.
 
-The kernel TRACEEXIT option is enabled only for inferiors requesting it. Syscall
-stepping observes only explicit syscall-traced inferiors and active debugger
-owners (including their native waitid calls). Ordinary launches do not acquire
-per-syscall stepping, additional stop events, rusage snapshots, polling or
-debugger wait records. Aggregate `--statistics` counters can verify that boundary.
+The kernel TRACEEXIT option serves two independent owners: requested inferior
+events and runtime terminal descriptor publication. A task's first internal
+O_PATH capture enables the latter once for its lifetime; debugger detach cannot
+revoke it. Only requested events enter the guest debugger queue. Syscall stepping
+observes only explicit syscall-traced inferiors and active debugger owners
+(including their native waitid calls). Ordinary launches do not acquire debugger
+per-syscall stepping, rusage snapshots, polling or wait records. Their internal
+terminal observation is described in [interception](interception.md).
+Aggregate `--statistics` counters can verify these boundaries.
+
+ESRCH during a ptrace request invalidates that stop, not a subsequent kernel
+exit event. A confirmed terminal stop permits final descriptor publication and
+detaches buffered work, then resumes only toward reaping. It cannot reenter an
+adapter, syscall step or guest breakpoint. Pending worker storage remains pinned
+until completion; task ownership ends at the actual exit/exec event. Fatal
+supervisor cleanup also continues owned terminal stops after SIGKILL, rather
+than waiting indefinitely for an exit that still needs ptrace continuation.
 
 This is a bounded nested-debugging implementation, not complete ptrace emulation.
 Attach cannot cross supervised launches or target Android processes. TRACESECCOMP,
@@ -72,6 +90,9 @@ non-leader inferior-exec checks. Real-tool scenarios verify GDB sibling attach
 with a memory write and detach, including a 41-thread target, LLDB source stepping,
 GDB through gdbserver, strace following a child, gprof function output and
 Callgrind instruction counts.
+The `syscall-exec` case requires paired entry/exit stops with the exec event
+between them and a successful exec result. The strace workflow checks decoded
+open arguments and child creation, and rejects stray exec-event recovery.
 The perf capability check opens a task-clock event and requires a positive
 counter; a kernel permission denial is recorded as unavailable, not a successful
 profile or a runtime workaround.
@@ -85,6 +106,15 @@ Unavailable native hardlink creation is reported separately; the guest must
 execute that subcheck, not silently omit it. ELF fixtures independently check
 malformed layouts, 4/16 KiB preflight and mapped BSS zeroing. Synthetic 16 KiB
 preflight is not device coverage.
+
+The resource suite also races exit_group against buffered O_PATH/getcwd in
+24 groups of eight peers, including nondumpable callers. Pipe acknowledgements
+establish that each peer entered the runtime before group exit; there are no
+timed settling delays. Terminal-stop diagnostics distinguish recovery from a
+lost stop, without treating that scheduling-dependent race as exhaustive coverage.
+Separate parked-group cases require the supervisor's deadline failure and
+completed cleanup for both ordinary and protected callers. The outer timeout
+must not fire; a fixture timeout is not accepted as successful reaping.
 
 On the tested NX809J/API 36 kernel 6.12, Shroot under UID 2000 passes these
 workflows with Ubuntu GDB 15.1, LLDB 18.1.3, strace 6.8 and Valgrind 3.22.

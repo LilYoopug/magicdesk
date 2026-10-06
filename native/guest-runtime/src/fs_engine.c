@@ -7,11 +7,21 @@
 #include "ipc_credentials.h"
 #include "inode_internal.h"
 #include "linux_abi.h"
+#include "task_status.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
+#include <sys/inotify.h>
+#include <sys/syscall.h>
+#include <sys/vfs.h>
 #include <unistd.h>
 
+void md_fs_view_execute(struct md_filesystem *fs, const struct md_fs_request *q,
+        struct md_fs_result *out, const struct md_fs_output *output) {
+    if (md_mount_namespace_attached(fs->mounts) || q->origin[0] || q->origin[1])
+        md_fs_mounts_execute(fs,q,out,output);
+    else md_fs_inode_execute(fs,q,out,output);
+}
 static void change_root(struct md_filesystem *fs, struct md_guest_domain *context,
         const struct md_fs_request *q, struct md_fs_result *out) {
     *out = (struct md_fs_result){.fd = -1};
@@ -23,14 +33,60 @@ static void change_root(struct md_filesystem *fs, struct md_guest_domain *contex
     open.operation = MD_FS_OPEN; open.flags = O_PATH | O_DIRECTORY | O_CLOEXEC;
     struct md_fs_anchor *origin=NULL;
     struct md_fs_output output={.origin=&origin};
-    if (md_mount_namespace_attached(fs->mounts) || open.origin[0]) md_fs_mounts_execute(fs, &open, out, &output);
-    else md_fs_inode_execute(fs, &open, out, &output);
+    md_fs_view_execute(fs,&open,out,&output);
     if (out->error) return;
     int fd = out->fd; out->fd = -1;
     struct md_fs_location root;
     int error = md_fs_root_capture(fs,fd,origin,&root);
     if (!error) error = md_domain_set_root(context, &root);
     md_fs_anchor_release(origin); close(fd); out->error = error == -EXDEV ? -ENOTSUP : error;
+}
+static void watch_path(struct md_filesystem *fs, const struct md_fs_request *q,
+        struct md_fs_result *out, const struct md_fs_output *output) {
+    struct md_fs_request open=*q;
+    open.operation=MD_FS_OPEN; open.flags=O_PATH|O_CLOEXEC|(q->flags&IN_DONT_FOLLOW ? O_NOFOLLOW : 0);
+    open.directory[1]=-1; open.origin[1]=NULL;
+    md_fs_view_execute(fs,&open,out,output);
+    if (out->error) return;
+    int fd=out->fd; out->fd=-1;
+    int wd=md_inode_watch_add(fs->store,q->directory[1],fd,q->flags);
+    close(fd);
+    if (wd<0) out->error=wd; else out->position=wd;
+}
+static void task_path(struct md_filesystem *fs, const struct md_fs_request *q,
+        struct md_fs_result *out, const struct md_fs_output *output) {
+    int directory=q->mode==MD_FS_TASK_CHDIR || q->mode==MD_FS_TASK_FCHDIR;
+    struct md_fs_request open=*q;
+    open.operation=MD_FS_OPEN; open.mode=0; open.offset=0;
+    open.flags=O_PATH|O_CLOEXEC|(directory ? O_DIRECTORY : 0);
+    if (!q->path[0] || !*q->path[0]) {
+        open.operation=MD_FS_REOPEN; open.mode=MD_FS_REOPEN_NATIVE;
+    }
+    struct md_fs_anchor *origin=NULL;
+    struct md_fs_output capture=output ? *output : (struct md_fs_output){0};
+    capture.origin=fs->mounts || (output && output->origin) ? &origin : NULL;
+    md_fs_view_execute(fs,&open,out,&capture);
+    if (out->error) return;
+    int fd=out->fd; out->fd=-1;
+    struct md_fs_request selected={.operation=MD_FS_ACCESS,.directory={fd,-1},
+        .origin={origin,NULL},.mode=directory ? X_OK : W_OK,.flags=MD_AT_EACCESS};
+    md_fs_view_execute(fs,&selected,out,NULL);
+    if (out->error==-EXDEV)
+        out->error=syscall(SYS_faccessat2,fd,"",selected.mode,AT_EMPTY_PATH|MD_AT_EACCESS) ? -errno : 0;
+    if (!out->error && !directory) {
+        struct stat st;
+        if (fstat(fd,&st)) out->error=-errno;
+        else if (!S_ISREG(st.st_mode)) out->error=S_ISDIR(st.st_mode) ? -EISDIR : -EINVAL;
+        if (!out->error) {
+            selected.operation=MD_FS_REOPEN; selected.mode=MD_FS_REOPEN_NATIVE; selected.flags=O_WRONLY|O_CLOEXEC;
+            md_fs_view_execute(fs,&selected,out,output);
+        }
+    } else if (!out->error) {
+        out->fd=fd; fd=-1;
+        if (output && output->origin) { *output->origin=origin; origin=NULL; }
+    }
+    if (fd>=0) close(fd);
+    md_fs_anchor_release(origin);
 }
 
 void md_fs_stat_info(const struct stat *s, struct md_fs_info *out) {
@@ -40,6 +96,20 @@ void md_fs_stat_info(const struct stat *s, struct md_fs_info *out) {
         .access_seconds = s->st_atim.tv_sec, .modify_seconds = s->st_mtim.tv_sec,
         .change_seconds = s->st_ctim.tv_sec, .access_nanos = (uint32_t)s->st_atim.tv_nsec,
         .modify_nanos = (uint32_t)s->st_mtim.tv_nsec, .change_nanos = (uint32_t)s->st_ctim.tv_nsec};
+}
+void md_fs_statfs_result(int fd, struct md_fs_result *out, const struct md_fs_output *output) {
+    if (!output || !output->data || output->capacity<sizeof(struct md_fs_statfs)) {
+        out->error=-ERANGE; return;
+    }
+    struct statfs native;
+    if (fstatfs(fd,&native)) { out->error=-errno; return; }
+    struct md_fs_statfs value={.type=native.f_type,.block_size=native.f_bsize,
+        .blocks=native.f_blocks,.free_blocks=native.f_bfree,.available_blocks=native.f_bavail,
+        .files=native.f_files,.free_files=native.f_ffree,.name_length=native.f_namelen,
+        .fragment_size=native.f_frsize,.flags=native.f_flags};
+    _Static_assert(sizeof(value.fsid)==sizeof(native.f_fsid),"statfs filesystem identity");
+    memcpy(value.fsid,&native.f_fsid,sizeof(value.fsid));
+    memcpy(output->data,&value,sizeof(value)); out->size=sizeof(value);
 }
 int md_fs_context_begin(struct md_filesystem *fs, int actor, int peer, struct md_fs_context *context) {
     *context=(struct md_fs_context){0};
@@ -59,6 +129,12 @@ void md_fs_context_end(struct md_fs_context *context) {
     md_task_snapshot_release(&context->task);
     *context=(struct md_fs_context){0};
 }
+void md_fs_context_capture_result(struct md_fs_context *context, struct md_fs_result *result,
+        struct md_fs_anchor **origin) {
+    struct md_fs_output output={.origin=origin};
+    md_view_capture(context->filesystem,context->authenticated ? context->task.mounts
+        : context->filesystem->mounts,NULL,result,&output);
+}
 void md_fs_execute(struct md_filesystem *fs,
         const struct md_fs_request *q, struct md_fs_result *out, const struct md_fs_output *output) {
     struct md_fs_context context;
@@ -70,7 +146,7 @@ void md_fs_execute(struct md_filesystem *fs,
     md_fs_context_execute(&context,q,out,output);
     md_fs_context_end(&context);
 }
-void md_fs_context_execute(struct md_fs_context *context,
+static void context_execute(struct md_fs_context *context,
         const struct md_fs_request *q, struct md_fs_result *out, const struct md_fs_output *output) {
     struct md_filesystem *fs=context->filesystem;
     if (output && output->origin) *output->origin=NULL;
@@ -82,10 +158,16 @@ void md_fs_context_execute(struct md_fs_context *context,
             *out=(struct md_fs_result){.fd=-1,.error=-EINVAL}; return;
         }
     }
+    if (q->operation==MD_FS_UMASK) {
+        long mask=md_task_umask(context->actor);
+        *out=(struct md_fs_result){.fd=-1,.error=mask<0 ? (int)mask : 0,
+            .position=mask<0 ? 0 : mask};
+        return;
+    }
     const struct md_task_snapshot *task=&context->task;
     struct md_identity identity=task->identity;
     const struct md_identity *previous = fs->store->identity;
-    if (q->operation == MD_FS_IPC) {
+    if (q->operation == MD_FS_IPC || q->operation==MD_FS_IPC_PEER) {
         if (!fs->ipc && fs->ipc_store) {
             int error = md_ipc_credentials_open(fs->ipc_store, &fs->ipc);
             if (error) {
@@ -117,8 +199,10 @@ void md_fs_context_execute(struct md_fs_context *context,
     fs->store->creation_mask=q->attributes.creation_mask;
     if (root_error) *out=(struct md_fs_result){.fd=-1,.error=root_error};
     else if (q->operation == MD_FS_CHROOT) change_root(fs, task->fs, q, out);
-    else if (md_mount_namespace_attached(fs->mounts) || q->origin[0] || q->origin[1]) md_fs_mounts_execute(fs, q, out, output);
-    else md_fs_inode_execute(fs, q, out, output);
+    else if (q->operation == MD_FS_WATCH_PATH) watch_path(fs,q,out,output);
+    else if (q->operation == MD_FS_TASK_PATH) task_path(fs,q,out,output);
+    else if (q->operation==MD_FS_XATTR || q->operation==MD_FS_FXATTR) md_fs_xattr(fs,q,out,output);
+    else md_fs_view_execute(fs,q,out,output);
     fs->store->boundary=previous_boundary;
     if (out->error==-EREMOTE) {
         if (q->operation==MD_FS_CHROOT) out->error=-ENOTSUP;
@@ -133,6 +217,47 @@ void md_fs_context_execute(struct md_fs_context *context,
     if (context->authenticated) fs->mounts=previous_mounts;
     fs->store->identity = previous;
 }
+static void object_execute(struct md_fs_context *context, const struct md_fs_request *q,
+        struct md_fs_result *out, const struct md_fs_output *output) {
+    struct md_fs_request captured=*q;
+    struct md_fs_anchor *origins[2]={NULL,NULL};
+    int descriptors[2]={-1,-1};
+    int error=context->filesystem ? md_fs_request_validate(q) : -EINVAL;
+    for (unsigned i=0;i<2 && !error;++i) if (q->object[i]) {
+        struct md_fs_request open={.actor=q->actor,.peer=q->peer,.operation=MD_FS_OPEN_OBJECT,
+            .directory={-1,-1},.path={q->object[i],NULL},.flags=O_PATH|O_CLOEXEC};
+        struct md_fs_output source={.origin=(context->authenticated ? context->task.mounts
+            : context->filesystem->mounts) ? &origins[i] : NULL};
+        struct md_fs_result result;
+        context_execute(context,&open,&result,&source);
+        descriptors[i]=result.fd;
+        error=result.error;
+        if (!error && (result.fd<0 || result.open_completion.kind || result.host_path)) error=-EPROTO;
+        captured.directory[i]=result.fd; captured.origin[i]=origins[i]; captured.object[i]=NULL;
+    }
+    if (!error) context_execute(context,&captured,out,output);
+    else {
+        if (output && output->origin) *output->origin=NULL;
+        *out=(struct md_fs_result){.fd=-1,.error=error};
+    }
+    for (unsigned i=0;i<2;++i) {
+        md_fs_anchor_release(origins[i]);
+        if (descriptors[i]>=0) close(descriptors[i]);
+    }
+}
+void md_fs_context_execute(struct md_fs_context *context,
+        const struct md_fs_request *q, struct md_fs_result *out, const struct md_fs_output *output) {
+    if (q->capture[0].path || q->capture[1].path) {
+        *out=(struct md_fs_result){.fd=-1,.error=-EINVAL}; return;
+    }
+    struct md_filesystem *fs=context->filesystem;
+    struct md_cost *cost=fs && fs->statistics && q->operation<=MD_FS_LAST
+        ? &fs->statistics->operation[q->operation] : NULL;
+    int64_t begin=md_cost_begin(cost);
+    if (q->object[0] || q->object[1]) object_execute(context,q,out,output);
+    else context_execute(context,q,out,output);
+    md_cost_end(cost,begin);
+}
 void md_fs_inode_execute(struct md_filesystem *fs,
         const struct md_fs_request *q, struct md_fs_result *out, const struct md_fs_output *output) {
     struct md_inode_store *s = fs->store;
@@ -145,7 +270,7 @@ void md_fs_inode_execute(struct md_filesystem *fs,
     int r = -ENOTSUP; struct stat st;
     switch (q->operation) {
     case MD_FS_GETACL: case MD_FS_SETACL: case MD_FS_REMOVEACL:
-        md_inode_acl(s,q,out); return;
+        md_inode_acl(s,q,out,output); return;
     case MD_FS_LISTATTR:
         r=md_inode_attributes(s,first,data,capacity);
         if(r>=0) { out->size=(size_t)r; r=0; }
@@ -157,7 +282,11 @@ void md_fs_inode_execute(struct md_filesystem *fs,
     case MD_FS_CHMOD: case MD_FS_CHOWN: case MD_FS_ACCESS: case MD_FS_UTIMENS:
         r = md_inode_metadata(s, q); break;
     case MD_FS_XATTR_OPEN: r = md_inode_xattr_open(s, first, a, (int)q->mode); goto opened;
-    case MD_FS_REOPEN: r = md_catalogue_reopen(images, s, first, (int)q->flags, (int)q->mode, &out->open_completion); goto opened;
+    case MD_FS_REOPEN:
+        r=md_catalogue_reopen(images,s,first,(int)q->flags,!!(q->mode&MD_FS_REOPEN_MUTABLE),&out->open_completion);
+        if (r==-EXDEV && (q->mode&MD_FS_REOPEN_NATIVE))
+            r=md_reopen_file(first,(int)q->flags,&out->open_completion);
+        goto opened;
     case MD_FS_WATCH_CREATE: r = md_inode_watch_create(s, (int)q->flags); goto opened;
     case MD_FS_WATCH_ADD:
         r = md_inode_watch_add(s, first, second, q->flags);
@@ -171,8 +300,10 @@ void md_fs_inode_execute(struct md_filesystem *fs,
         if (r >= 0) { out->position = r; r = 0; }
         break;
     case MD_FS_WATCH_READ:
-        r = (int)md_inode_watch_read(s, first, data, q->capacity < capacity ? q->capacity : capacity,
-            output ? output->deliver : NULL, output ? output->context : NULL);
+        r = output && output->reserve_watch
+            ? (int)md_inode_watch_reserve(s, first, data, q->capacity < capacity ? q->capacity : capacity)
+            : (int)md_inode_watch_read(s, first, data, q->capacity < capacity ? q->capacity : capacity,
+                output ? output->deliver : NULL, output ? output->context : NULL);
         if (r >= 0) { out->size = (size_t)r; r = 0; }
         break;
     case MD_FS_OPEN_IMAGE: {
@@ -198,7 +329,13 @@ void md_fs_inode_execute(struct md_filesystem *fs,
     case MD_FS_CREATE: r = md_inode_create(s, first, a, q->mode); goto opened;
     case MD_FS_OPEN: r = md_catalogue_open(images, s, first, a, (int)q->flags, q->mode, q->resolve, &out->open_completion); goto opened;
     case MD_FS_MKDIR: r = md_inode_mkdir(s, first, a, q->mode); break;
-    case MD_FS_MKFIFO: r = md_inode_mkfifo(s, first, a, q->mode); break;
+    case MD_FS_MKNOD:
+        if ((q->mode&S_IFMT)==S_IFIFO) r=md_inode_mkfifo(s,first,a,q->mode&07777);
+        else {
+            r=md_inode_create(s,first,a,q->mode&07777);
+            if (r>=0) { close(r); r=0; }
+        }
+        break;
     case MD_FS_SYMLINK: r = md_inode_symlink(s, b, first, a); break;
     case MD_FS_LINK: r = md_inode_link(s, first, a, second, b, (int)q->flags); break;
     case MD_FS_UNLINK: r = md_inode_unlink(s, first, a, (int)q->flags); break;
@@ -217,6 +354,12 @@ void md_fs_inode_execute(struct md_filesystem *fs,
                 &out->info.mount_id);
         break;
     }
+    case MD_FS_STATFS: {
+        int fd=*a ? md_inode_open(s,first,a,O_PATH|O_CLOEXEC,0) : first;
+        if (fd<0) out->error=fd;
+        else { md_fs_statfs_result(fd,out,output); if (*a) close(fd); }
+        return;
+    }
     case MD_FS_PATH:
         r = md_catalogue_path(images, s, first, data, capacity);
         if (!r) out->size = strlen(data) + 1;
@@ -226,7 +369,7 @@ void md_fs_inode_execute(struct md_filesystem *fs,
         if (!r) out->size = strlen(data) + 1;
         break;
     case MD_FS_TEMPORARY: r = md_inode_temporary(s); goto opened;
-    case MD_FS_MOUNT_TABLE: r = md_fs_mount_table(fs,q->flags); goto opened;
+    case MD_FS_MOUNT_TABLE: r = md_fs_mount_table(fs,q->mode,q->flags); goto opened;
     case MD_FS_NATIVE_MOUNT:
         r=md_fs_native_mount(fs,(uint64_t)q->offset,&out->info.mount_id); break;
     case MD_FS_READLINK:
@@ -234,7 +377,9 @@ void md_fs_inode_execute(struct md_filesystem *fs,
         if (r >= 0) { out->size = (size_t)r; r = 0; }
         break;
     case MD_FS_GETDENTS:
-        r = (int)md_inode_getdents_deliver(s, first, data, q->capacity < capacity ? q->capacity : capacity,
+        r = output && output->directory_position
+            ? (int)md_inode_getdents_prepare(s,first,data,q->capacity < capacity ? q->capacity : capacity,output->directory_position)
+            : (int)md_inode_getdents_deliver(s, first, data, q->capacity < capacity ? q->capacity : capacity,
             output ? output->deliver : NULL, output ? output->context : NULL);
         if (r >= 0) { out->size = (size_t)r; r = 0; }
         break;

@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <sys/ioctl.h>
 #include <sys/resource.h>
+#include <sys/shm.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
@@ -125,6 +126,42 @@ static void mixed_test(void) {
     int status; assert(waitpid(-1, &status, 0) == plain);
     assert(WIFEXITED(status) && WEXITSTATUS(status) == 4);
     assert(write(release[1], "x", 1) == 1); close(release[1]); exited(traced, 3);
+}
+static void syscall_exec_test(void) {
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        assert(!ptrace(PTRACE_TRACEME,0,0,0)); raise(SIGSTOP);
+        char *args[]={"/bin/true",NULL};
+        syscall(SYS_execve,args[0],args,environ); _exit(99);
+    }
+    stop(child);
+    assert(!ptrace(PTRACE_SETOPTIONS,child,0,PTRACE_O_TRACESYSGOOD|PTRACE_O_TRACEEXEC));
+    int active=0, execs=0, entries=0, exits=0;
+    uint64_t nr=0;
+    for (;;) {
+        assert(!ptrace(PTRACE_SYSCALL,child,0,0));
+        int status;
+        /* EVENT_WAIT: matching syscall/exec/exit event; fixture alarm bounds failure. */
+        assert(waitpid(child,&status,__WALL)==child);
+        if (WIFEXITED(status)) { assert(!WEXITSTATUS(status)); break; }
+        assert(WIFSTOPPED(status));
+        if ((unsigned)status>>16==PTRACE_EVENT_EXEC) {
+            assert(active && nr==SYS_execve && !execs);
+            unsigned long former; assert(!ptrace(PTRACE_GETEVENTMSG,child,0,&former));
+            assert(former==(unsigned long)child); ++execs; continue;
+        }
+        assert(WSTOPSIG(status)==(SIGTRAP|0x80));
+        struct ptrace_syscall_info info={0};
+        assert(ptrace(PTRACE_GET_SYSCALL_INFO,child,sizeof(info),&info)>0);
+        if (info.op==PTRACE_SYSCALL_INFO_ENTRY) {
+            assert(!active); active=1; ++entries; nr=info.entry.nr;
+        } else {
+            assert(info.op==PTRACE_SYSCALL_INFO_EXIT && active);
+            if (nr==SYS_execve) assert(execs==1 && !info.exit.rval && !info.exit.is_error);
+            active=0; ++exits;
+        }
+    }
+    assert(execs==1 && active && nr==SYS_exit_group && entries==exits+1);
 }
 static void child_signal(int signal) { (void)signal; syscall(SYS_getpid); }
 static void kill_stopped_test(void) {
@@ -238,12 +275,26 @@ static void gdb_target(int threaded) {
         assert(!pthread_barrier_destroy(&ready_barrier));
     }
 }
+__attribute__((noinline)) static void shm_marker(char *address) {
+    assert(*address=='S');
+}
+static void shm_target(void) {
+    int id=shmget(IPC_PRIVATE,4096,0600); assert(id>=0);
+    for (unsigned n=0;n<4;++n) {
+        char *address=shmat(id,NULL,0); assert(address!=(void *)-1);
+        *address='S'; shm_marker(address);
+        assert(!shmdt(address));
+    }
+    struct shmid_ds info;
+    assert(!shmctl(id,IPC_STAT,&info) && !info.shm_nattch && !shmctl(id,IPC_RMID,NULL));
+}
 int main(int argc, char **argv) {
     assert(argc == 2); alarm(20);
     if (!strcmp(argv[1], "attach")) attach_test(0, 0);
     else if (!strcmp(argv[1], "seize")) attach_test(1, 0);
     else if (!strcmp(argv[1], "trace-exit")) attach_test(1, 1);
     else if (!strcmp(argv[1], "syscall")) syscall_test();
+    else if (!strcmp(argv[1], "syscall-exec")) syscall_exec_test();
     else if (!strcmp(argv[1], "mixed")) mixed_test();
     else if (!strcmp(argv[1], "kill-stopped")) kill_stopped_test();
     else if (!strcmp(argv[1], "owner-exit")) owner_test(0);
@@ -252,6 +303,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "perf-event")) { if (!perf_test()) return 0; }
     else if (!strcmp(argv[1], "gdb-target")) gdb_target(0);
     else if (!strcmp(argv[1], "gdb-thread-target")) gdb_target(1);
+    else if (!strcmp(argv[1], "shm-target")) shm_target();
     else return 2;
     printf("PASS %s\n", argv[1]); return 0;
 }

@@ -69,7 +69,8 @@ int mdi_acl_inherit(struct md_inode_store *s,const struct mdi_node *parent,const
     }
     free(acl); return r;
 }
-void md_inode_acl(struct md_inode_store *s,const struct md_fs_request *request,struct md_fs_result *out) {
+void md_inode_acl(struct md_inode_store *s,const struct md_fs_request *request,struct md_fs_result *out,
+        const struct md_fs_output *output) {
     int write=request->operation!=MD_FS_GETACL;
     int r=mdi_begin(s,write);
     if(r) { out->error=r; return; }
@@ -83,20 +84,23 @@ void md_inode_acl(struct md_inode_store *s,const struct md_fs_request *request,s
     if(!r && request->operation==MD_FS_GETACL) {
         if(!present) r=-ENODATA;
         if(!r) r=copy_acl(s,&node,request->mode,&acl,&size);
-        int fd=r ? -1 : md_inode_temporary(s);
-        if(!r && fd<0) r=fd;
-        if(!r && pwrite(fd,acl,size,0)!=(ssize_t)size) r=-EIO;
-        if(r && fd>=0) close(fd);
-        else if(!r) { out->fd=fd; out->position=size; }
+        if(!r && request->capacity && (request->capacity<size || !output || !output->data || output->capacity<size)) r=-ERANGE;
+        if(!r) {
+            out->position=size;
+            if(request->capacity) { memcpy(output->data,acl,size); out->size=size; }
+        }
     } else if(!r) {
         /* Linux do_set_acl bypasses ordinary xattr CREATE/REPLACE semantics;
          * zero-sized values and repeated removal both clear the ACL. */
         if(!r && request->operation==MD_FS_SETACL && size) {
             if(size<4 || size>MD_ACL_MAX) r=-EINVAL;
             else if(!(acl=malloc(size))) r=-ENOMEM;
-            else if(pread(request->directory[1],acl,size,0)!=(ssize_t)size) r=-EINVAL;
-            else if(acl->version!=2) r=-EOPNOTSUPP;
-            else if(!md_acl_valid(acl,size)) r=-EINVAL;
+            else if(request->value_size!=size || !request->value) r=-EINVAL;
+            else {
+                memcpy(acl,request->value,size);
+                if(acl->version!=2) r=-EOPNOTSUPP;
+                else if(!md_acl_valid(acl,size)) r=-EINVAL;
+            }
         }
         if(!r) r=mdi_copy_up(s,&node);
         if(!r) r=mdi_acl_store(s,&node,request->mode,acl,size);
@@ -109,7 +113,7 @@ void md_inode_acl(struct md_inode_store *s,const struct md_fs_request *request,s
     }
     free(acl);
     r=mdi_commit(s,r);
-    if(r && out->fd>=0) { close(out->fd); out->fd=-1; out->position=0; }
+    if(r) out->size=out->position=0;
     out->error=r;
 }
 int md_inode_attributes(struct md_inode_store *s,int fd,void *data,size_t capacity) {

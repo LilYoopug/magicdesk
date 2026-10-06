@@ -134,7 +134,7 @@ int md_inode_metadata(struct md_inode_store *s, const struct md_fs_request *q) {
     if (r) return r;
     struct mdi_node node;
     struct stat st = {0};
-    if (q->operation == MD_FS_ACCESS && q->path[0] && *q->path[0]) {
+    if (q->path[0] && *q->path[0]) {
         struct mdi_location loc;
         r = mdi_walk(s, q->directory[0], q->path[0], q->flags & AT_SYMLINK_NOFOLLOW ? MDI_NOFOLLOW : MDI_FOLLOW, 0, &loc);
         if (!r) node = loc.node;

@@ -10,7 +10,6 @@
 #include <linux/seccomp.h>
 #include <sys/inotify.h>
 #include <sys/ioctl.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/uio.h>
 #include <limits.h>
@@ -31,6 +30,11 @@ static long watched(const struct md_fs *fs, int fd) {
     return r ? r : (long)out.result.position;
 }
 static long arm(int fd) {
+#ifdef MD_USE_LIBC
+    /* Native adapter clients have no supervised guest syscall gates. */
+    (void)fd;
+    return -ENOTSUP;
+#else
     long r = RAW3(prctl, MD_GUEST_WATCH_FILTER, fd, 0);
     if (r) return r < 0 ? r : 0;
     uintptr_t gate = (uintptr_t)md_raw_return;
@@ -78,6 +82,7 @@ static long arm(int fd) {
     if (r > 0) return -ENOTSUP;
     if (!r) r = RAW3(prctl, MD_GUEST_WATCH_FILTER, fd, 1);
     return r;
+#endif
 }
 long md_watch_arm(const struct md_fs *fs, int fd) {
     long r = watched(fs, fd);
@@ -164,26 +169,4 @@ long md_watch_call(const struct md_fs *fs, long nr, const unsigned long *a) {
     long activation = md_watch_arm(fs, (int)r);
     if (activation) { RAW1(close, r); return activation; }
     return r;
-}
-int md_watch_received(const struct md_fs *fs, const void *address) {
-    if (!*fs->endpoint) return 0;
-    struct msghdr message;
-    long r = md_read_memory(&message, address, sizeof(message));
-    if (r) return (int)r;
-    for (size_t pos = 0; pos + sizeof(struct cmsghdr) <= message.msg_controllen;) {
-        struct cmsghdr header;
-        r = md_read_memory(&header, (const char *)message.msg_control + pos, sizeof(header));
-        if (r) return (int)r;
-        if (header.cmsg_len < CMSG_LEN(0) || header.cmsg_len > message.msg_controllen - pos) return -EINVAL;
-        if (header.cmsg_level == SOL_SOCKET && header.cmsg_type == SCM_RIGHTS) {
-            for (size_t at = CMSG_LEN(0); at + sizeof(int) <= header.cmsg_len; at += sizeof(int)) {
-                int fd;
-                r = md_read_memory(&fd, (const char *)message.msg_control + pos + at, sizeof(fd));
-                if (!r) r = md_watch_arm(fs, fd);
-                if (r) return (int)r;
-            }
-        }
-        pos += CMSG_ALIGN(header.cmsg_len);
-    }
-    return 0;
 }

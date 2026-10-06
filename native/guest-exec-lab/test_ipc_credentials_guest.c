@@ -2,11 +2,20 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <sched.h>
+#include <signal.h>
+#include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/mman.h>
+#include <sys/prctl.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -173,10 +182,137 @@ static void external(const char *name,pid_t server) {
     CHECK(!setgid(2000)); send_identity(fd,2000,-1,1);
     close(fd);
 }
+static void peer_full_table(int protected, unsigned count) {
+    gid_t *groups=malloc(65536*sizeof(*groups)), *actual=malloc(65536*sizeof(*actual));
+    CHECK(groups && actual);
+    for (unsigned i=0;i<count;++i) groups[i]=2*i+1;
+    CHECK(!setgroups(count,groups));
+    int p[2]; CHECK(!socketpair(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0,p));
+    CHECK(!setgroups(0,NULL));
+    if (protected) CHECK(!prctl(PR_SET_DUMPABLE,0));
+    /* Admit the table-owned input channel before exhausting application slots. */
+    peer(p[0],getpid(),0,0);
+    struct rlimit old, limit; CHECK(!getrlimit(RLIMIT_NOFILE,&old));
+    limit=old; limit.rlim_cur=64; CHECK(!setrlimit(RLIMIT_NOFILE,&limit));
+    int owned[64], used=0, fd;
+    while ((fd=fcntl(p[0],F_DUPFD_CLOEXEC,0))>=0) { CHECK(used<64); owned[used++]=fd; }
+    CHECK(errno==EMFILE);
+    long page=sysconf(_SC_PAGESIZE);
+    void *bad=mmap(NULL,page,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0); CHECK(bad!=MAP_FAILED);
+    for (unsigned repeat=0;repeat<12;++repeat) {
+        peer(p[0],getpid(),0,0);
+        socklen_t n=count*sizeof(*groups);
+        CHECK(!getsockopt(p[0],SOL_SOCKET,SO_PEERGROUPS,actual,&n));
+        CHECK(n==count*sizeof(*groups) && !memcmp(actual,groups,n));
+        n=0;
+        int r=getsockopt(p[0],SOL_SOCKET,SO_PEERGROUPS,bad,&n);
+        CHECK(count ? r==-1 && errno==ERANGE && n==count*sizeof(*groups) : !r && !n);
+        n=sizeof(struct ucred);
+        CHECK(getsockopt(p[0],SOL_SOCKET,SO_PEERCRED,bad,&n)==-1 && errno==EFAULT);
+        CHECK(getsockopt(p[0],SOL_SOCKET,SO_PEERCRED,actual,bad)==-1 && errno==EFAULT);
+        n=(socklen_t)-1;
+        CHECK(getsockopt(p[0],SOL_SOCKET,SO_PEERCRED,actual,&n)==-1 && errno==EINVAL);
+        n=0; CHECK(!getsockopt(p[0],SOL_SOCKET,SO_PEERCRED,bad,&n) && !n);
+        if (count) {
+            n=count*sizeof(*groups);
+            CHECK(getsockopt(p[0],SOL_SOCKET,SO_PEERGROUPS,bad,&n)==-1 && errno==EFAULT);
+        }
+        for (int i=0;i<used;++i) CHECK(fcntl(owned[i],F_GETFD)==FD_CLOEXEC);
+        CHECK(fcntl(p[0],F_DUPFD_CLOEXEC,0)==-1 && errno==EMFILE);
+    }
+    CHECK(!munmap(bad,page));
+    for (int i=0;i<used;++i) CHECK(!close(owned[i]));
+    CHECK(!setrlimit(RLIMIT_NOFILE,&old));
+    close(p[0]); close(p[1]); free(groups); free(actual);
+    printf("PASS peer identity full-table: protected=%d groups=%u, snapshot and output faults\n",protected,count);
+}
+struct custody { int socket, receive, protected, guest; };
+static int custody_child(void *argument) {
+    struct custody *c=argument;
+    CHECK(!prctl(PR_SET_PDEATHSIG,SIGKILL));
+    if (c->protected) CHECK(!prctl(PR_SET_DUMPABLE,0));
+    char byte='m'; struct iovec io={&byte,1};
+    union { struct cmsghdr align; char data[128]; } control={0};
+    struct msghdr m={.msg_iov=&io,.msg_iovlen=1,.msg_control=control.data,
+        .msg_controllen=c->receive ? sizeof(control.data) : CMSG_SPACE(sizeof(struct ucred))};
+    struct cmsghdr *h=CMSG_FIRSTHDR(&m);
+    *h=(struct cmsghdr){.cmsg_len=CMSG_LEN(sizeof(struct ucred)),.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_CREDENTIALS};
+    struct ucred cred={getpid(),getuid(),getgid()}; memcpy(CMSG_DATA(h),&cred,sizeof(cred));
+    struct sock_filter send_filter[]={
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_sendmsg,0,4),
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[0])),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(unsigned)c->socket,0,2),
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[1])),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)(uintptr_t)&m,0,1),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_THREAD)
+    };
+    struct sock_filter receive_filter[]={
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_fstat,0,1),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_THREAD),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
+    };
+    struct sock_fprog filter={.len=c->receive ? sizeof(receive_filter)/sizeof(*receive_filter)
+        : sizeof(send_filter)/sizeof(*send_filter),.filter=c->receive ? receive_filter : send_filter};
+    CHECK(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0) && !prctl(PR_SET_SECCOMP,SECCOMP_MODE_FILTER,&filter));
+    ssize_t n=c->receive ? recvmsg(c->socket,&m,MSG_CMSG_CLOEXEC) : sendmsg(c->socket,&m,0);
+    CHECK(n==1 || (c->guest && n==-1 && errno==ECANCELED));
+    if (c->receive && n==1) for (h=CMSG_FIRSTHDR(&m);h;h=CMSG_NXTHDR(&m,h))
+        if (h->cmsg_level==SOL_SOCKET && h->cmsg_type==SCM_RIGHTS) {
+            const int *fds=(const void *)CMSG_DATA(h);
+            for (unsigned i=0;i<(h->cmsg_len-CMSG_LEN(0))/sizeof(int);++i) CHECK(!close(fds[i]));
+        }
+    return 0;
+}
+static void custody(int guest, int receive, int protected) {
+    int pair[2], transferred[2], one=1;
+    CHECK(!socketpair(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0,pair));
+    CHECK(!socketpair(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0,transferred));
+    CHECK(!setsockopt(pair[0],SOL_SOCKET,SO_PASSCRED,&one,sizeof(one)));
+    if (guest) {
+        int dumpable=prctl(PR_GET_DUMPABLE);
+        CHECK(dumpable>=0 && !prctl(PR_SET_DUMPABLE,0));
+        peer(pair[0],getpid(),getuid(),getgid());
+        CHECK(!prctl(PR_SET_DUMPABLE,dumpable));
+    }
+    if (receive) send_identity(pair[1],getuid(),transferred[0],1);
+    int before[256];
+    for (unsigned i=0;i<256;++i) before[i]=fcntl(i,F_GETFD);
+    struct custody c={receive ? pair[0] : pair[1],receive,protected,guest};
+    size_t size=1024*1024; void *stack=malloc(size); CHECK(stack);
+    pid_t child=clone(custody_child,(char *)stack+size,CLONE_FILES|SIGCHLD,&c); CHECK(child>0);
+    int status;
+    /* EVENT_WAIT: exact caller exit; the launch deadline bounds missing cleanup. */
+    CHECK(waitpid(child,&status,0)==child);
+    CHECK((WIFEXITED(status) && !WEXITSTATUS(status)) || (guest && WIFSIGNALED(status) && WTERMSIG(status)==SIGSYS));
+    unsigned changed=0;
+    for (unsigned i=0;i<256;++i) {
+        int flags=fcntl(i,F_GETFD);
+        if (flags==before[i]) continue;
+        char path[64], target[256]; snprintf(path,sizeof(path),"/proc/self/fd/%u",i);
+        ssize_t n=readlink(path,target,sizeof(target)-1); target[n<0 ? 0 : n]=0;
+        fprintf(stderr,"custody receive=%d protected=%d fd=%u before=%d after=%d target=%s\n",
+            receive,protected,i,before[i],flags,target); ++changed;
+    }
+    CHECK(!changed);
+    free(stack); close(pair[0]); close(pair[1]); close(transferred[0]); close(transferred[1]);
+    printf("PASS IPC caller custody receive=%d protected=%d guest=%d\n",receive,protected,guest);
+}
 int main(int argc,char **argv) {
+    if (argc==4 && (!strcmp(argv[1],"--custody") || !strcmp(argv[1],"--custody-native"))) {
+        alarm(20);
+        custody(!strcmp(argv[1],"--custody"),atoi(argv[2]),atoi(argv[3])); return 0;
+    }
     CHECK(getuid()==0);
     if (argc==4 && !strcmp(argv[1],"--external")) { external(argv[2],(pid_t)atoi(argv[3])); return 0; }
     CHECK(argc==1);
+    for (unsigned protected=0;protected<2;++protected) for (unsigned size=0;size<3;++size) {
+        pid_t child=fork(); CHECK(child>=0);
+        if (!child) { peer_full_table(protected,size==0 ? 0 : size==1 ? 3 : 65536); exit(0); }
+        done(child);
+    }
     gid_t groups[]={7,11,19}; CHECK(!setgroups(3,groups));
     int p[2]; CHECK(!socketpair(AF_UNIX,SOCK_STREAM,0,p));
     peer(p[0],getpid(),0,0); peer(p[1],getpid(),0,0);

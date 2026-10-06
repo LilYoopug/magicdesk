@@ -8,6 +8,7 @@
 struct md_task_registry;
 struct md_task_resources;
 struct md_task_snapshot {
+    pid_t tgid;
     struct md_identity identity;
     struct md_guest_domain *fs;
     struct md_fs_location root;

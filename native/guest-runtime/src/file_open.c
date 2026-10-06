@@ -8,6 +8,7 @@
 #include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #if __STDC_HOSTED__
 static long call(long nr, long a, long b, long c, long d, long e, long f) {
@@ -28,6 +29,28 @@ static void descriptor_path(char path[64], int fd) {
     do { reversed[digits++] = (char)('0' + n % 10); n /= 10; } while (n);
     while (digits) path[at++] = reversed[--digits];
     path[at] = 0;
+}
+int md_reopen_file(int fd, int flags, struct md_open_completion *completion) {
+    *completion=(struct md_open_completion){0};
+    if (flags & ~(O_PATH|O_CLOEXEC|O_NONBLOCK|O_DIRECTORY|O_LARGEFILE|O_ACCMODE
+            |O_APPEND|O_TRUNC|O_NOFOLLOW|O_SYNC|O_DSYNC|O_DIRECT|O_NOCTTY|O_NOATIME)) return -EINVAL;
+    if ((flags&O_ACCMODE)==O_ACCMODE || ((flags&O_TRUNC) && !(flags&O_ACCMODE))) return -EINVAL;
+    if (flags&O_PATH) flags&=O_PATH|O_CLOEXEC|O_DIRECTORY|O_NOFOLLOW;
+    struct stat st;
+    long error=C(fstat,fd,&st,0,0,0,0);
+    if (error) return (int)error;
+    if ((flags&O_DIRECTORY) && !S_ISDIR(st.st_mode)) return -ENOTDIR;
+    if (S_ISFIFO(st.st_mode) && !(flags&O_PATH)) {
+        long pin=C(fcntl,fd,F_DUPFD_CLOEXEC,3,0,0,0);
+        if (pin>=0) completion->kind=MD_OPEN_FIFO;
+        return (int)pin;
+    }
+    if (S_ISLNK(st.st_mode)) {
+        if (!(flags&O_PATH) || !(flags&O_NOFOLLOW)) return -ELOOP;
+        return (int)C(fcntl,fd,F_DUPFD_CLOEXEC,3,0,0,0);
+    }
+    char path[64]; descriptor_path(path,fd);
+    return (int)C(openat,AT_FDCWD,path,(flags&~O_NOFOLLOW)|O_CLOEXEC,0,0,0);
 }
 int md_complete_open(int pin, int flags, struct md_open_completion completion) {
     if (pin < 0 || completion.kind == MD_OPEN_READY) return pin;

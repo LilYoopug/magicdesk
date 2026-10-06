@@ -7,125 +7,52 @@
 #include "linux_abi.h"
 #include "raw.h"
 #include "socket_routes.h"
+#include "fs_buffer.h"
+#include "command_image.h"
+#include "exec_prepare.h"
+#include "namespace_internal.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
-int md_command_prepare(const struct md_fs *fs, struct md_command *c, const char *program, char *const argv[],
-        const struct md_program *input, int inaccessible) {
-    c->fd = c->interpreter_fd = -1;
-    long r = md_read_string(c->path, sizeof(c->path), program);
-    if (r < 0) return (int)r;
-    c->argc = 0;
-    for (; c->argc < MD_ARG_MAX; ++c->argc) {
-        if (!argv) break;
-        r = md_read_memory(&c->argv[c->argc], argv + c->argc, sizeof(char *));
-        if (r < 0) return (int)r;
-        if (!c->argv[c->argc]) break;
-    }
-    if (!c->argc) c->argv[c->argc++] = "";
-    c->argv[c->argc] = NULL;
-    if (c->argc == MD_ARG_MAX) return -E2BIG;
-    for (unsigned depth = 0;; ++depth) {
-        long fd;
-        struct md_program opened;
-        const struct md_image_identity *identity;
-        if (!depth && input) {
-            int input_fd = input->fd;
-            identity = &input->identity;
-            struct stat st;
-            r = RAW2(fstat, input_fd, &st);
-            if (r < 0) return (int)r;
-            if (S_ISLNK(st.st_mode)) return -ELOOP;
-            long access = RAW2(fcntl, input_fd, F_GETFL);
-            if (access < 0) return (int)access;
-            /* ELF inspection uses positional IO. Retain a readable capability
-             * directly: reopening via proc can be denied for a sealed memfd. */
-            if (!(access & O_PATH) && (access & O_ACCMODE) != O_WRONLY)
-                fd = RAW3(fcntl, input_fd, F_DUPFD_CLOEXEC, 0);
-            else {
-                char reference[64] = "/proc/thread-self/fd/";
-                md_decimal(reference + md_length(reference), (unsigned)input_fd);
-                fd = RAW4(openat, AT_FDCWD, reference, O_RDONLY | O_CLOEXEC, 0);
-            }
-            if (fd >= 0) {
-                r = RAW4(faccessat2, fd, "", X_OK, AT_EMPTY_PATH | MD_AT_EACCESS);
-                if (r < 0) { RAW1(close, fd); return (int)r; }
-            }
-        } else {
-            r = md_program_acquire(fs, AT_FDCWD, c->path, 0, &opened);
-            if (r < 0) return (int)r;
-            fd = opened.fd;
-            identity = &opened.identity;
-            r = RAW4(faccessat2, fd, "", X_OK, AT_EMPTY_PATH | MD_AT_EACCESS);
-            if (r < 0) { RAW1(close, fd); return (int)r; }
-        }
-        if (fd < 0) return (int)fd;
-        struct stat st;
-        r = RAW2(fstat, fd, &st);
-        if (!r && (!S_ISREG(st.st_mode) || (st.st_mode & (S_ISUID | S_ISGID)))) r = -EACCES;
-        char header[256] = {0};
-        if (!r) r = RAW4(pread64, fd, header, sizeof(header), 0);
-        if (r < 0) { RAW1(close, fd); return (int)r; }
-        if (r < 2 || header[0] != '#' || header[1] != '!') {
-            r = md_elf_interpreter((int)fd, c->interpreter);
-            if (!r && c->interpreter[0]) {
-                long loader = md_program_open(fs, c->interpreter, 1);
-                if (loader < 0) r = loader;
-                else {
-                    r = md_elf_validate((int)loader, 1);
-                    if (r < 0) RAW1(close, loader);
-                    else c->interpreter_fd = (int)loader;
-                }
-            }
-            c->fd = (int)fd;
-            if (!r) r = md_copy(c->path, sizeof(c->path), identity->path);
-            if (!r) memcpy(c->object, identity->object, sizeof(c->object));
-            if (r < 0) md_command_close(c);
-            return (int)r;
-        }
-        RAW1(close, fd);
-        if (!depth && inaccessible) return -ENOENT;
-        if (depth == 4) return -ELOOP;
-        md_copy(c->scripts[depth], PATH_MAX, c->path);
-        memcpy(c->lines[depth], header, sizeof(header));
-        char *line = c->lines[depth] + 2;
-        char *limit = c->lines[depth] + sizeof(header), *end = line;
-        while (end < limit && *end != '\n') ++end;
-        if (end == limit) {
-            // Linux permits a missing newline and a truncated option, never a
-            // truncated interpreter name. A short read supplies a NUL terminator.
-            char *name = line;
-            while (name < limit && (*name == ' ' || *name == '\t')) ++name;
-            while (name < limit && *name && *name != ' ' && *name != '\t') ++name;
-            if (name == limit) return -ENOEXEC;
-            end = limit - 1;
-        }
-        *end = 0;
-        while (end > line && (end[-1] == ' ' || end[-1] == '\t')) *--end = 0;
-        while (*line == ' ' || *line == '\t') ++line;
-        char *option = line;
-        while (*option && *option != ' ' && *option != '\t') ++option;
-        if (*option) *option++ = 0;
-        while (*option == ' ' || *option == '\t') ++option;
-        if (!*line) return -ENOEXEC;
-        unsigned shift = *option ? 2 : 1;
-        memmove(c->argv + 1 + shift, c->argv + 1, c->argc * sizeof(char *));
-        c->argv[0] = line;
-        if (*option) c->argv[1] = option;
-        c->argv[shift] = c->scripts[depth];
-        c->argc += shift;
-        md_copy(c->path, sizeof(c->path), line);
-    }
-}
-void md_command_close(struct md_command *c) {
-    if (c->fd >= 0) RAW1(close, c->fd);
-    if (c->interpreter_fd >= 0) RAW1(close, c->interpreter_fd);
-    c->fd = c->interpreter_fd = -1;
-}
 long md_guest_exec(const struct md_fs *fs, const char *program, char *const argv[], char *const env[]) {
     return md_guest_execat(fs, AT_FDCWD, program, argv, env, 0);
+}
+static long prepare_retained(const struct md_fs *fs, int base, const char *path, int flags,
+        int inaccessible, struct md_command_recipe *recipe) {
+    char routed[PATH_MAX];
+    long error=md_copy(routed,sizeof(routed),path);
+    if (!error) error=md_namespace_relative_mount(fs,base,routed);
+    if (error) return error;
+    struct md_fs_request q={.operation=MD_FS_OPEN_IMAGE,.directory={base,-1},.path={routed,NULL},
+        .flags=flags&AT_SYMLINK_NOFOLLOW ? O_NOFOLLOW : 0,
+        .mode=inaccessible ? MD_EXEC_INACCESSIBLE : 0,.offset=base>=0 ? base : 0};
+    struct md_proc_path ref=md_proc_path(routed);
+    if (ref.kind && !*ref.tail && (flags&AT_SYMLINK_NOFOLLOW)) return -ELOOP;
+    if (ref.kind==MD_PROC_EXE && !*ref.tail && fs->image) {
+        if (*fs->image->executable_object) {
+            q.path[1]=fs->image->executable_object;
+            q.mode|=MD_EXEC_OBJECT;
+        }
+        error=md_copy(routed,sizeof(routed),fs->image->executable_path);
+    } else if (ref.kind==MD_PROC_FD && ref.process==(int)RAW0(gettid)) {
+        const char *tail=ref.tail;
+        while (*tail=='/') ++tail;
+        /* Preserve a trailing slash as a directory lookup, not descriptor exec. */
+        if (!*tail && *ref.tail) tail=".";
+        memmove(routed,tail,md_length(tail)+1);
+        q.directory[0]=ref.descriptor; q.offset=ref.descriptor;
+    } else if (ref.kind==MD_PROC_ROOT || (ref.kind==MD_PROC_CWD && ref.process==(int)RAW0(gettid))) {
+        if (!*ref.tail) return -EACCES;
+        const char *tail=ref.tail;
+        if (ref.kind==MD_PROC_CWD) while (*tail=='/') ++tail;
+        memmove(routed,*tail ? tail : ".",md_length(*tail ? tail : ".")+1);
+        q.directory[0]=AT_FDCWD;
+    }
+    if (error) return error;
+    if (*routed=='/') q.directory[0]=-1;
+    return md_fs_buffer_exec_prepare(&q,recipe);
 }
 long md_guest_execat(const struct md_fs *fs, int base, const char *program, char *const argv[], char *const env[], int flags) {
     if (flags & ~(AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW)) return -EINVAL;
@@ -146,22 +73,30 @@ long md_guest_execat(const struct md_fs *fs, int base, const char *program, char
             if (r < 0) return r;
         }
     }
-    struct md_program input;
-    r = !*path ? md_program_capture(fs, base, identity, &input)
-        : md_program_acquire(fs, base, path,
-            (flags & AT_SYMLINK_NOFOLLOW) ? O_NOFOLLOW : 0, &input);
-    if (r < 0) return r;
     /* Relative-dirfd scripts need the caller's descriptor spelling, not a
      * canonical name which could reopen a replaced entry after exec. */
     const char *invocation = *path && (*path == '/' || base == AT_FDCWD) ? path : identity;
     struct md_command c;
-    r = md_command_prepare(fs, &c, invocation, argv, &input, inaccessible);
-    RAW1(close, input.fd);
-    if (r < 0) return r;
-    /* Pin both images across the real kernel exec. The new bootstrap validates
-     * and maps these exact capabilities, never reopening their mutable names. */
-    r = RAW3(fcntl, c.fd, F_SETFD, 0);
-    if (!r && c.interpreter_fd >= 0) r = RAW3(fcntl, c.interpreter_fd, F_SETFD, 0);
+    int retained=!!fs->endpoint[0], loader=0;
+    if (retained) {
+        r=md_command_arguments(&c,invocation,argv);
+        if (r<0) return r;
+        struct md_command_recipe recipe;
+        r=prepare_retained(fs,base,path,flags,inaccessible,&recipe);
+        if (!r) { loader=recipe.loader; r=md_command_apply_recipe(&c,&recipe); }
+        if (r<0) { md_fs_buffer_exec_cancel(); return r; }
+    } else {
+        struct md_program input;
+        r=!*path ? md_program_capture(fs,base,identity,&input)
+            : md_program_acquire(fs,base,path,(flags&AT_SYMLINK_NOFOLLOW) ? O_NOFOLLOW : 0,&input);
+        if (r<0) return r;
+        r=md_command_prepare(fs,&c,invocation,argv,&input,inaccessible);
+        RAW1(close,input.fd);
+        if (r<0) return r;
+        loader=c.interpreter_fd>=0;
+        r = RAW3(fcntl, c.fd, F_SETFD, 0);
+        if (!r && loader) r = RAW3(fcntl, c.interpreter_fd, F_SETFD, 0);
+    }
     if (r < 0) { md_command_close(&c); return r; }
     char number[24]; md_decimal(number, (unsigned)c.fd);
     char interpreter_number[24];
@@ -169,13 +104,16 @@ long md_guest_execat(const struct md_fs *fs, int base, const char *program, char
     next[0] = md_bootstrap;
     next[1] = "--resume";
     unsigned n=2;
-    next[n++] = "--program-fd";
-    next[n++] = number;
+    if (retained) next[n++]="--retained-images";
+    else { next[n++] = "--program-fd"; next[n++] = number; }
     if (c.object[0]) { next[n++] = "--program-object"; next[n++] = c.object; }
-    if (c.interpreter_fd >= 0) {
-        md_decimal(interpreter_number, (unsigned)c.interpreter_fd);
-        next[n++] = "--interpreter-fd";
-        next[n++] = interpreter_number;
+    if (loader) {
+        if (retained) next[n++]="--retained-loader";
+        else {
+            md_decimal(interpreter_number, (unsigned)c.interpreter_fd);
+            next[n++] = "--interpreter-fd";
+            next[n++] = interpreter_number;
+        }
     }
     // AT_EXECFN is the caller's spelling, not the canonical executable or the
     // final shebang interpreter. Linux uses /dev/fd/N for descriptor exec.
@@ -194,6 +132,7 @@ long md_guest_execat(const struct md_fs *fs, int base, const char *program, char
     next[n++]=c.path;
     for (unsigned i = 0; i <= c.argc; ++i) next[n+i] = c.argv[i];
     r = RAW3(execve, md_bootstrap, next, env);
+    if (retained) md_fs_buffer_exec_cancel();
     md_command_close(&c);
     return r;
 }

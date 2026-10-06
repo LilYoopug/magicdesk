@@ -22,11 +22,15 @@ under a negative bound and MSG_EXCEPT. MSG_NOERROR permits truncation. E2BIG
 retains a message; as in Linux, a selected message is consumed before copying
 it to user memory, so EFAULT does not restore it to the queue.
 
-`ipc_calls.c` copies arguments and results in the calling task through a bounded
-memfd packet. The authority receives offsets into that packet, never unrestricted
-guest pointers. Copy faults return EFAULT; PR_SET_DUMPABLE(0) remains unchanged.
-The channel is per operation and closes on completion, failure or task death.
-No database transaction spans guest copying or execution.
+`ipc_calls.c` copies arguments and results in the calling task through a leased
+slot in the common bootstrap-mapped adapter buffer. `adapter_buffer` owns its
+lifecycle; `sysv_ipc_transport` bounds the typed packet and publishes offsets,
+never unrestricted guest pointers. Copy faults return EFAULT;
+PR_SET_DUMPABLE(0) remains unchanged. Calls need no temporary guest FD or mapping,
+including with a full descriptor table. Completion, failure and task death
+release the slot. A blocked request retains its captured inputs in the authority
+and releases the slot before waiting. No database transaction spans guest copying
+or execution.
 
 ## Waiting And Lifetime
 
@@ -39,8 +43,12 @@ boot ID expires them. This is not a kernel IPC namespace or security boundary.
 
 Blocked calls subscribe to inotify and recheck after subscription. Committed
 mutations and closed owner leases wake them; no heartbeat or state-polling
-interval is used. ppoll runs in the guest task with its original signal mask,
-not in a blocked supervisor. semtimedop retains its absolute deadline across
+interval is used. The supervisor owns the watcher and an epoll registration with
+an exact request-generation token. An empty ppoll runs in the guest task with its
+original signal mask, without inserting the watcher into its file table. Watcher
+readiness interrupts that exact wait through ptrace; it does not inject an
+application signal. Cancellation removes the registration before closing the
+watcher. semtimedop retains its absolute deadline across
 readiness retries. Expiry returns EAGAIN; interruption returns EINTR, including
 with SA_RESTART. Applications must handle interrupted waits explicitly.
 
@@ -62,6 +70,11 @@ timeouts, zero waiters, fork/exec/thread undo, SIGKILL, SETVAL clearing undo,
 message ordering/truncation/copy errors, queue capacity, permissions, nondumpable
 callers, independent launches and supervisor-death recovery. The process-group
 case verifies that a headless guest's group signal does not cancel its guardian.
+Full-table checks cover the maximum semaphore array, 8 KiB messages, shmctl
+metadata and blocked waits. Sixteen killed CLONE_FILES waiters leave the survivor's
+FD baseline intact. Forty simultaneous waiters exceed the shared slot capacity
+without starving the producer; a seccomp-denied ppoll returns its error and
+removes the waiter.
 
 `test_sysv_apps.py` exercises stock fakeroot-sysv, Symfony SemaphoreStore,
 PHP SysV message queues and Apache prefork with `Mutex sysvsem default` and two

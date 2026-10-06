@@ -92,8 +92,8 @@ static void entry(FILE *stream, unsigned info, unsigned id, unsigned parent, dev
         fprintf(stream,"%s ",source); escaped(stream,path); fprintf(stream," %s %s 0 0\n",type,options);
     }
 }
-int md_fs_mount_table(struct md_filesystem *fs, unsigned info) {
-    if (info>1) return -EINVAL;
+int md_fs_mount_table(struct md_filesystem *fs, unsigned info, unsigned flags) {
+    if (info>1 || (flags&~(O_PATH|O_CLOEXEC))) return -EINVAL;
     int r=ensure_view(fs);
     if (r) return r;
     int fd=md_inode_temporary(fs->store);
@@ -127,7 +127,7 @@ int md_fs_mount_table(struct md_filesystem *fs, unsigned info) {
     int readable=-1;
     if (!r) {
         char path[64]; snprintf(path,sizeof(path),"/proc/self/fd/%d",fd);
-        readable=open(path,O_RDONLY|O_CLOEXEC);
+        readable=open(path,(int)flags|O_CLOEXEC);
         if (readable<0) r=-errno;
     }
     if (fclose(stream) && !r) r=-errno;

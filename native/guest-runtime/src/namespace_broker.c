@@ -3,6 +3,8 @@
 #include "fs_engine.h"
 #include "proc_paths.h"
 #include "watch_broker.h"
+#include "task_descriptor.h"
+#include "ofd_order.h"
 #include <errno.h>
 #include <fcntl.h>
 #include "linux_abi.h"
@@ -18,6 +20,7 @@
 
 struct operation {
     struct md_fs_work work;
+    struct md_namespace_broker *owner;
     struct operation *all, *free;
     struct operation *waiting;
     struct task *task;
@@ -25,6 +28,7 @@ struct operation {
     struct md_fs_context context;
     struct md_fd_order order;
     struct md_fs_order fs_order;
+    struct md_ofd_order cursor;
     struct md_fd_origin_update update;
     struct md_fs_anchor *input_origin, *output_origin;
     struct md_fs_request request;
@@ -34,6 +38,7 @@ struct operation {
 };
 struct md_namespace_broker {
     struct md_fs_worker *worker;
+    void (*delegate)(const struct seccomp_notif *);
     struct md_resource_wakeup *wakeup;
     struct operation *all, *free;
     struct operation *waiting;
@@ -58,13 +63,7 @@ static int valid(struct operation *op) {
 static int duplicate(struct task *task, pid_t pid, int number) {
     /* Worker borrows this identity until preparation ends. Retirement cannot
      * close or reuse it meanwhile; file numbers themselves are never cached. */
-    if (task->process < 0) {
-        task->process = syscall(SYS_pidfd_open, pid, MD_PIDFD_THREAD);
-        if (task->process < 0 && errno == EINVAL) task->process = syscall(SYS_pidfd_open, pid, 0);
-        if (task->process < 0) return -errno;
-    }
-    int fd = syscall(SYS_pidfd_getfd, task->process, number, 0);
-    return fd < 0 ? -errno : fd;
+    return md_task_descriptor_copy(pid,number,&task->process);
 }
 static int pathname(pid_t pid, uintptr_t address, char *out, size_t capacity) {
     size_t page = (size_t)sysconf(_SC_PAGESIZE), copied = 0;
@@ -108,10 +107,11 @@ static void execute(struct operation *op,
         }
     }
 }
-struct md_namespace_broker *md_broker_create(struct md_fs_worker *worker, int statistics) {
+struct md_namespace_broker *md_broker_create(struct md_fs_worker *worker, int statistics,
+        void (*delegate)(const struct seccomp_notif *)) {
     struct md_namespace_broker *b = calloc(1, sizeof(*b));
     if (b) {
-        b->worker = worker; b->listener = -1;
+        b->worker = worker; b->listener = -1; b->delegate=delegate;
         if (pthread_mutex_init(&b->lock, NULL)) { free(b); return NULL; }
         if (md_resource_wakeup_create(md_fs_worker_wake_fd(worker),&b->wakeup)) {
             pthread_mutex_destroy(&b->lock); free(b); return NULL;
@@ -133,6 +133,10 @@ static int recycle(struct md_namespace_broker *b, struct operation *op) {
     md_fs_anchor_release(op->input_origin); op->input_origin=NULL;
     md_fs_anchor_release(op->output_origin); op->output_origin=NULL;
     int error=0;
+    if (op->cursor.owner) {
+        error=md_ofd_order_cancel(&op->cursor);
+        if (error==1) error=md_ofd_order_complete(&op->cursor);
+    }
     if (op->fs_order.fs) {
         error=md_fs_order_cancel(&op->fs_order);
         if (error==1) error=md_fs_order_complete(&op->fs_order);
@@ -184,11 +188,13 @@ static int capture(struct operation *op) {
     const struct seccomp_notif *q=&op->notification;
     if (*op->path != '/') {
         if ((int)q->data.args[0] == AT_FDCWD && op->request.path[0]) {
-            char cwd[64]; snprintf(cwd, sizeof(cwd), "/proc/%u/cwd", q->pid);
-            op->directory = open(cwd, O_PATH | O_DIRECTORY | O_CLOEXEC);
-            if (op->directory>=0) {
-                struct md_fs_location root;
-                md_domain_paths(op->fs_order.fs,&root,&op->input_origin);
+            struct md_fs_location root;
+            md_domain_paths(op->fs_order.fs,&root,&op->input_origin);
+            if (op->input_origin)
+                op->directory=fcntl(md_fs_anchor_fd(op->input_origin),F_DUPFD_CLOEXEC,0);
+            else {
+                char cwd[64]; snprintf(cwd, sizeof(cwd), "/proc/%u/cwd", q->pid);
+                op->directory = open(cwd, O_PATH | O_DIRECTORY | O_CLOEXEC);
             }
         } else {
             op->directory = duplicate(op->task, q->pid, (int)q->data.args[0]);
@@ -269,7 +275,7 @@ void md_broker_forget(struct md_namespace_broker *b, int pid) {
 static int perform(struct md_namespace_broker *b, struct operation *op, int prepared) {
     struct counters *count=b->counts && (unsigned)op->notification.data.nr<512
         ? &b->counts[op->notification.data.nr] : NULL;
-    if (prepared>0) {
+    if (prepared>0 && !op->cursor.owner) {
         if (md_fd_order_state(&op->order)==MD_RESOURCE_ORDER_READY) {
             int error=md_fd_order_start(&op->order);
             if (error) return error;
@@ -293,6 +299,19 @@ static int perform(struct md_namespace_broker *b, struct operation *op, int prep
             int error=md_fs_order_complete(&op->fs_order);
             if (error) return error;
         }
+        if (prepared>0 && op->request.operation==MD_FS_GETDENTS) {
+            int ready=md_ofd_order_begin(md_fs_worker_cursors(b->worker),op->directory,0,&op->cursor,b->wakeup);
+            if (ready<0) prepared=ready;
+            else if (!ready) {
+                /* EVENT_WAIT: copied bytes are acknowledged by the current
+                 * OFD owner; notification cancellation retires this reader. */
+                op->waiting=b->waiting; b->waiting=op; return 0;
+            }
+        }
+    }
+    if (prepared>0 && op->cursor.owner) {
+        int error=md_ofd_order_start(&op->cursor);
+        if (error) return error;
     }
     if (prepared) {
         if (prepared>0) execute(op,b->output,sizeof(b->output));
@@ -307,6 +326,10 @@ static int perform(struct md_namespace_broker *b, struct operation *op, int prep
         int error=md_fd_order_complete(&op->order);
         if (error) return error;
     }
+    if (op->cursor.owner) {
+        int error=md_ofd_order_complete(&op->cursor);
+        if (error) return error;
+    }
     /* Delegation has not committed guest-visible IO; authenticate the later
      * task-affine request independently, without holding this table's turn. */
     md_fs_context_end(&op->context);
@@ -319,13 +342,21 @@ static int progress(struct md_namespace_broker *b) {
     while (*at) {
         struct operation *op=*at;
         int alive=valid(op);
-        if (alive && md_fd_order_state(&op->order)!=MD_RESOURCE_ORDER_READY
-                && md_fs_order_state(&op->fs_order)!=MD_RESOURCE_ORDER_READY) { at=&op->waiting; continue; }
+        if (alive && (op->cursor.owner
+                ? md_ofd_order_state(&op->cursor)!=MD_RESOURCE_ORDER_READY
+                : md_fd_order_state(&op->order)!=MD_RESOURCE_ORDER_READY
+                    && md_fs_order_state(&op->fs_order)!=MD_RESOURCE_ORDER_READY)) { at=&op->waiting; continue; }
         *at=op->waiting; op->waiting=NULL;
         int error=alive ? perform(b,op,1) : recycle(b,op);
         if (error) return error;
     }
     return 0;
+}
+static int complete(struct md_fs_work *work) {
+    struct operation *op=(struct operation *)work;
+    struct md_namespace_broker *b=op->owner;
+    if (valid(op)) b->delegate(&op->notification);
+    return recycle(b,op);
 }
 static int receive(void *context, struct md_filesystem *fs, short events) {
     struct md_inode_store *s = fs->store;
@@ -378,6 +409,7 @@ static int receive(void *context, struct md_filesystem *fs, short events) {
         op->all = b->all; b->all = op;
     }
     op->notification = q; op->listener = b->listener; op->directory = -1; op->undelivered = 0;
+    op->owner=b; op->work.complete=complete;
     op->task=task;
     op->result = (struct md_fs_result){.fd = -1};
     int prepared = eligible ? prepare(fs, op, sizeof(b->output)) : 0;
@@ -399,18 +431,6 @@ void md_broker_listen(struct md_namespace_broker *b, int listener) {
 #endif
     md_fs_worker_notifications(b->worker, listener, b, receive);
 }
-int md_broker_complete(struct md_namespace_broker *b, void (*delegate)(const struct seccomp_notif *)) {
-    struct md_fs_work *work = md_fs_worker_completed(b->worker);
-    int error=0;
-    while (work) {
-        struct operation *op = (struct operation *)work;
-        work = work->next;
-        if (valid(op)) delegate(&op->notification);
-        int retired=recycle(b,op);
-        if (!error) error=retired;
-    }
-    return error ? error : md_fs_worker_error(b->worker);
-}
 void md_broker_destroy(struct md_namespace_broker *b) {
     if (!b) return;
     md_watch_broker_destroy(b->watches);
@@ -430,6 +450,9 @@ void md_broker_destroy(struct md_namespace_broker *b) {
         if (op->result.open_completion.kind == MD_OPEN_PIPE) close(op->result.open_completion.control);
         md_fd_origins_finish(&op->update,-1);
         md_fs_anchor_release(op->input_origin); md_fs_anchor_release(op->output_origin);
+        if (op->cursor.owner) {
+            if (md_ofd_order_cancel(&op->cursor)==1) md_ofd_order_complete(&op->cursor);
+        }
         if (op->fs_order.fs) {
             if (md_fs_order_cancel(&op->fs_order)==1) md_fs_order_complete(&op->fs_order);
         }

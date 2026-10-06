@@ -8,7 +8,7 @@
 
 long md_socket_identity_call(const struct md_fs *fs, unsigned operation, int fd, int second,
         long result, const struct sockaddr_un *name, unsigned length) {
-    if (!fs->endpoint[0]) return operation == MD_IPC_PEER ? -ENODATA : 0;
+    if (!fs->endpoint[0]) return 0;
     char encoded[2 * sizeof(name->sun_path) + 1] = {0};
     if (name) {
         if (length < offsetof(struct sockaddr_un, sun_path) || length > sizeof(*name)) return -EINVAL;
@@ -23,27 +23,22 @@ long md_socket_identity_call(const struct md_fs *fs, unsigned operation, int fd,
     struct md_fs_response out;
     long r = md_fs_call(fs->endpoint, 5000, &q, &out);
     if (!r) r = out.result.error;
-    if (r == -ENOTSUP) return operation == MD_IPC_PEER ? -ENODATA : 0;
+    if (r == -ENOTSUP) return 0;
     if (r < 0) return r;
-    return operation == MD_IPC_PEER ? out.result.fd : out.result.position;
+    return out.result.position;
 }
 long md_socket_identity_hidden(const struct md_fs *fs, int fd, const struct sockaddr_un *a, unsigned n) {
     if (n < offsetof(struct sockaddr_un, sun_path)+15 || a->sun_path[0]) return 0;
     for (unsigned i = 0; i < 14; i++) if (a->sun_path[i+1] != "md-guest-peer-"[i]) return 0;
     return md_socket_identity_call(fs, MD_IPC_NAME, fd, -1, 0, a, n);
 }
-long md_socket_identity_option(const struct md_fs *fs, const unsigned long *a) {
-    if ((int)a[1] != SOL_SOCKET || ((int)a[2] != SO_PEERCRED && (int)a[2] != SO_PEERGROUPS))
-        return md_raw(SYS_getsockopt, a[0], a[1], a[2], a[3], a[4], 0);
-    long fd = md_socket_identity_call(fs, MD_IPC_PEER, (int)a[0], -1, 0, NULL, 0);
-    if (fd == -ENODATA || fd == -EAFNOSUPPORT || fd == -EPROTOTYPE)
-        return md_raw(SYS_getsockopt, a[0], a[1], a[2], a[3], a[4], 0);
-    if (fd < 0) return fd;
+static int peer_deliver(void *context, const void *data, size_t size) {
+    const unsigned long *a=context;
     struct md_ipc_identity id;
-    long r = RAW4(pread64, fd, &id, sizeof(id), 0);
+    if (size<sizeof(id)) return -EPROTO;
+    memcpy(&id,data,sizeof(id));
     unsigned capacity = 0;
-    if (r == sizeof(id)) r = md_read_memory(&capacity, (void *)a[4], sizeof(capacity));
-    else r = r < 0 ? r : -EPROTO;
+    long r=md_read_memory(&capacity,(void *)a[4],sizeof(capacity));
     if (!r && (int)capacity < 0) r = -EINVAL;
     if (!r && (int)a[2] == SO_PEERCRED) {
         struct ucred cred = {.pid=id.pid, .uid=id.uid, .gid=id.gid};
@@ -52,20 +47,26 @@ long md_socket_identity_option(const struct md_fs *fs, const unsigned long *a) {
         if (!r) r = md_write_memory((void *)a[4], &n, sizeof(n));
     } else if (!r) {
         unsigned n = id.group_count * sizeof(uint32_t);
-        if (id.group_count > MD_IDENTITY_GROUPS_MAX) r = -EPROTO;
+        if (id.group_count > MD_IDENTITY_GROUPS_MAX || size!=sizeof(id)+n) r = -EPROTO;
         else if (capacity < n) {
             r = md_write_memory((void *)a[4], &n, sizeof(n));
             if (!r) r = -ERANGE;
         } else {
-            char buffer[512];
-            for (unsigned pos = 0; !r && pos < n;) {
-                unsigned chunk = n - pos < sizeof(buffer) ? n - pos : sizeof(buffer);
-                long got = RAW4(pread64, fd, buffer, chunk, sizeof(id)+pos);
-                r = got == chunk ? md_write_memory((void *)(a[3]+pos), buffer, chunk) : -EIO;
-                pos += chunk;
-            }
+            r=md_write_memory((void *)a[3],(const char *)data+sizeof(id),n);
             if (!r) r = md_write_memory((void *)a[4], &n, sizeof(n));
         }
     }
-    RAW1(close, fd); return r;
+    return (int)r;
+}
+long md_socket_identity_option(const struct md_fs *fs, const unsigned long *a) {
+    if (!fs->endpoint[0] || (int)a[1] != SOL_SOCKET || ((int)a[2] != SO_PEERCRED && (int)a[2] != SO_PEERGROUPS))
+        return md_raw(SYS_getsockopt, a[0], a[1], a[2], a[3], a[4], 0);
+    struct md_fs_request q={.operation=MD_FS_IPC_PEER,.mode=(int)a[2]==SO_PEERGROUPS,
+        .directory={(int)a[0],-1}};
+    struct md_fs_response out;
+    long r=md_fs_call_deliver(fs->endpoint,5000,&q,&out,peer_deliver,(void *)a);
+    if (!r) r=out.result.error;
+    if (r==-ENODATA || r==-ENOTSUP || r==-EAFNOSUPPORT || r==-EPROTOTYPE)
+        return md_raw(SYS_getsockopt, a[0], a[1], a[2], a[3], a[4], 0);
+    return r;
 }

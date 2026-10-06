@@ -89,6 +89,7 @@ int md_task_registry_read(struct md_task_registry *r, pid_t tid, pid_t peer,
     while (e && e->tid != tid) e = e->next;
     int error = !e ? -ESRCH : peer && peer != r->owner && peer != e->tgid ? -EPERM : 0;
     if (!error) {
+        out->tgid=e->tgid;
         out->identity=md_identity_copy(&e->value);
         out->fs=e->fs; md_domain_pin(out->fs);
         md_domain_paths(e->fs,&out->root,&out->cwd);

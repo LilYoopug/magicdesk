@@ -25,6 +25,7 @@ int md_host_path(const char *p) {
 static long number(const char **p) {
     const char *s = component(*p);
     if (*s < '0' || *s > '9') return -1;
+    if (*s == '0' && s[1] >= '0' && s[1] <= '9') return -1;
     unsigned long n = 0;
     while (*s >= '0' && *s <= '9') {
         n = n * 10 + (unsigned)(*s++ - '0');
@@ -62,6 +63,8 @@ struct md_proc_path md_proc_path(const char *path) {
             out.process = (int)pid;
         }
         if (word(&p, "task")) {
+            /* Only the group leader's proc directory contains task/. */
+            if (out.process == RAW0(gettid) && out.process != RAW0(getpid)) return out;
             long tid = number(&p);
             if (tid < 0) return out;
             foreign |= tid != RAW0(gettid);
@@ -84,4 +87,13 @@ struct md_proc_path md_proc_path(const char *path) {
     out.anchor_length = (size_t)(p - path);
     out.tail = p;
     return out;
+}
+int md_proc_task_path(const char *path, char *out, size_t capacity) {
+    const char *p=path;
+    if (*p!='/' || !word(&p,"proc") || !word(&p,"thread-self"))
+        return md_copy(out,capacity,path);
+    char prefix[64]="/proc/";
+    md_decimal(prefix+md_length(prefix),(unsigned)RAW0(gettid));
+    int error=md_copy(out,capacity,prefix);
+    return error ? error : md_append(out,capacity,p);
 }

@@ -6,32 +6,38 @@
 #include <sys/un.h>
 
 #define MD_FS_MAGIC 0x4d444653U
-#define MD_FS_VERSION 14U
+#define MD_FS_VERSION 18U
 #define MD_FS_MAX_FDS 2
+enum { MD_FS_REPLY_CHUNK=65536 };
 struct md_fs_packet {
-    /* descriptors is a bitmask of the two base-FD slots, in slot order. */
+    /* Base-slot masks: cwd slots use the authenticated exchange's captured
+     * directory. Other descriptor slots travel as SCM_RIGHTS, in slot order. */
     uint32_t magic, version, operation, flags, mode, descriptors, length[2];
-    uint32_t capacity, reserved;
+    uint32_t capacity, cwd;
     int32_t actor;
-    uint32_t padding;
+    uint32_t value_size;
     int64_t offset;
     uint64_t resolve;
     uint64_t exchange;
     struct md_fs_attributes attributes;
-    char data[2 * PATH_MAX];
+    char object[2][33];
+    char data[2 * PATH_MAX + MD_FS_VALUE_MAX];
 };
 struct md_fs_reply {
+    /* size is the complete output. The first packet includes at most one chunk;
+     * descriptor-free continuation packets carry the remaining bounded bytes. */
     uint32_t magic, version;
     int32_t error;
     uint32_t descriptors, size, host_path, open_completion, receipt; /* descriptor count, not request slot mask */
     int64_t position;
     struct md_fs_info info;
-    char data[sizeof(struct md_image_identity)];
+    char data[MD_FS_OUTPUT_MAX];
 };
 struct md_fs_rights { unsigned count; int fd[MD_FS_MAX_FDS]; };
 long md_fs_send(int socket, const void *, size_t, const struct md_fs_rights *);
 long md_fs_receive(int socket, void *, size_t, struct md_fs_rights *);
-long md_fs_receive_receipt(int socket, struct md_fd_receipt *, struct md_fs_rights *, uint64_t exchange);
+long md_fs_receive_receipt(int socket, struct md_fd_receipt *, unsigned capacity,
+        struct md_fs_rights *, uint64_t exchange);
 void md_fs_close_rights(struct md_fs_rights *);
 long md_fs_address(const char *, struct sockaddr_un *);
 long md_fs_peer(int socket);

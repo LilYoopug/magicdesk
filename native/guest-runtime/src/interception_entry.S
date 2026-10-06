@@ -1,5 +1,37 @@
 #include <asm/unistd.h>
 .text
+.global md_guest_task_control
+.type md_guest_task_control, %function
+md_guest_task_control:
+    brk #0x5bd
+    ret
+.size md_guest_task_control, .-md_guest_task_control
+.global md_guest_task_call
+md_guest_task_call:
+    svc #0
+.global md_guest_task_return
+md_guest_task_return:
+    brk #0x5be
+.global md_guest_task_abort
+md_guest_task_abort:
+    mov x0, #0
+    mov x8, #__NR_exit
+    svc #0
+.global md_guest_task_abort_return
+md_guest_task_abort_return:
+    brk #0x5bf
+.global md_guest_export_control
+.type md_guest_export_control, %function
+md_guest_export_control:
+    brk #0x5bc
+    ret
+.size md_guest_export_control, .-md_guest_export_control
+.global md_guest_buffer_control
+.type md_guest_buffer_control, %function
+md_guest_buffer_control:
+    brk #0x5bb
+    ret
+.size md_guest_buffer_control, .-md_guest_buffer_control
 .global md_guest_open_anchor
 .type md_guest_open_anchor, %function
 md_guest_open_anchor:
@@ -19,22 +51,17 @@ md_guest_fd_control:
 .size md_guest_fd_control, .-md_guest_fd_control
 .global md_guest_ipc_wait
 md_guest_ipc_wait:
-    sub sp, sp, #32
-    str x0, [sp]
-    stp x1, x2, [sp, #16]
-    add x2, sp, #16
+    sub sp, sp, #16
+    stp x1, x2, [sp]
+    mov x2, sp
     cmp x3, #0
     csel x2, x2, xzr, ne
-    mov x0, sp
-    mov x1, #1
+    mov x0, xzr
+    mov x1, xzr
     mov x3, xzr
     mov x4, #8
     mov x8, #__NR_ppoll
     b md_raw_return - 4
-.global md_guest_ipc_wait_result
-md_guest_ipc_wait_result:
-    ldrh w1, [sp, #6]
-    b md_guest_done
 .balign 4
 .global md_guest_watch_gate
 md_guest_watch_gate:

@@ -397,7 +397,9 @@ X11 and Wayland services. `magicdesk-guest` installs and manages independent
 environments, shared image data and explicit directory attachments. Shroot is not
 a container security boundary or Docker Engine; guest programs retain the selected
 executor's authority. Required kernel capabilities are checked at launch, without
-affecting ordinary MagicDesk tools on unsupported kernels.
+affecting ordinary MagicDesk tools on unsupported kernels. Its minimum supported
+kernel is **Linux 5.15**; [kernel-specific requirements and coverage](native/guest-runtime/kernel-compatibility.md)
+are separate from MagicDesk's Android minimum.
 
 To install Linux, open a MagicDesk **Shell** console and run:
 
@@ -669,7 +671,7 @@ and the [API-level contract](docs/runtime-api-levels.md).
 | Display inventory and interactive app launches | Ordinary app access; Android must allow the selected app on that display |
 | Files, Android shell, privileged capture and device actions | An authorized privileged service and the operation's actual capabilities |
 | Termux terminals | Termux, external commands enabled, MagicDesk's `RUN_COMMAND` permission |
-| Shroot Linux environments and OCI images | Authorized shell/root service, supported kernel capabilities, ARM64 Linux image and executable storage; no Termux or Android root required |
+| Shroot Linux environments and OCI images | Authorized shell/root service, Linux 5.15+ with required kernel capabilities, ARM64 Linux image and executable storage; no Termux or Android root required |
 | Linux graphical applications and desktops | A configured Shroot, Termux/proot or root/chroot environment with XKB data; no standalone Termux:X11 APK |
 | Owned virtual displays | An authorized privileged service and working framework display APIs |
 | Managed Desktop | Android 15+, an authorized privileged service, Desktop setup, working framework windowing |

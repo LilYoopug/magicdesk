@@ -13,6 +13,11 @@ int md_fd_mutation_prepare(struct md_fd_origins *, long nr,
         const unsigned long args[6], struct md_fd_mutation *);
 int md_fd_mutation_finish(struct md_fd_mutation *, struct md_fd_origins *, long result);
 void md_fd_mutation_discard(struct md_fd_mutation *);
+/* Decode only the terminal register at an observed openat return gate. The
+ * caller must establish that PC/syscall identity and retain the file-table
+ * turn. A killed syscall may leave either ABI representation of AT_FDCWD.
+ * Returns 1 with a publication result, or 0 without changing output. */
+int md_fd_mutation_terminal_open(const struct md_fd_mutation *, unsigned long value, long *result);
 /* Terminal task death without a syscall result is not rollback. Forget only
  * possibly changed slots; never retain a potentially wrong mount origin. */
 int md_fd_mutation_abandon(struct md_fd_mutation *, struct md_fd_origins *);

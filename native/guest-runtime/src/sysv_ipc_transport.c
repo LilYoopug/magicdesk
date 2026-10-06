@@ -2,16 +2,20 @@
 #include "sysv_ipc_internal.h"
 #include <errno.h>
 #include <string.h>
-#include <sys/mman.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
 /* Only bounded argument/result buffers cross this channel. The calling task
  * copies its own memory, including after PR_SET_DUMPABLE(0). No SQLite lock
  * survives a guest copy or wait. Addresses in the authority are packet offsets. */
-int md_ipc_transport_open(struct md_ipc *s, struct md_ipc_transport *t,
-        const struct md_ipc_request *call, int retry) {
-    *t=(struct md_ipc_transport){.fd=-1,.call=*call};
+int md_ipc_transport_prepare(struct md_ipc *s, struct md_ipc_transport *t,
+        const struct md_ipc_request *call, int retry, void *memory, size_t capacity) {
+    if (!memory || !t || !call) return -EINVAL;
+    if (t->packet) return -EBUSY;
+    *t=(struct md_ipc_transport){.call=*call};
+    _Static_assert(SEMMSL*sizeof(unsigned short)<=MD_IPC_VALUE_MAX,"semaphore array capacity");
+    _Static_assert(SEMOPM*sizeof(struct sembuf)+sizeof(struct timespec)<=MD_IPC_VALUE_MAX,"semaphore operation capacity");
+    _Static_assert(MD_MSGMAX+sizeof(long)<=MD_IPC_VALUE_MAX,"message capacity");
     long nr=call->nr;
     const unsigned long *a=call->args;
     size_t input=0, output=0, timeout=0, base=offsetof(struct md_ipc_packet,data);
@@ -49,20 +53,12 @@ int md_ipc_transport_open(struct md_ipc *s, struct md_ipc_transport *t,
         output=sizeof(long)+(a[2]>MD_MSGMAX ? MD_MSGMAX : a[2]); t->call.args[1]=base;
     } else if (nr!=SYS_semget && nr!=SYS_msgget) return -EINVAL;
     t->capacity=input>output ? input : output; t->length=base+t->capacity;
-    t->fd=memfd_create("guest-ipc",MFD_CLOEXEC);
-    if (t->fd<0) return -errno;
-    int r=ftruncate(t->fd,t->length) ? -errno : 0;
-    if (!r) {
-        void *memory=mmap(NULL,t->length,PROT_READ|PROT_WRITE,MAP_SHARED,t->fd,0);
-        if (memory==MAP_FAILED) r=-errno; else t->packet=memory;
-    }
-    if (!r) *t->packet=(struct md_ipc_packet){.length=t->length,.input_size=retry ? 0 : input,
+    if (t->capacity>MD_IPC_VALUE_MAX || t->length>capacity) return -E2BIG;
+    t->packet=memory;
+    *t->packet=(struct md_ipc_packet){.length=t->length,.input_size=retry ? 0 : input,
         .timeout_offset=retry ? 0 : timeout};
-    else md_ipc_transport_close(t);
-    return r;
+    return 0;
 }
 void md_ipc_transport_close(struct md_ipc_transport *t) {
-    if (t->packet) munmap(t->packet,t->length);
-    if (t->fd>=0) close(t->fd);
-    *t=(struct md_ipc_transport){.fd=-1};
+    *t=(struct md_ipc_transport){0};
 }

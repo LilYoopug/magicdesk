@@ -49,6 +49,11 @@ distribution-management UI belong to the existing application services.
 
 ## Execution Policy
 
+The minimum supported kernel is Linux 5.15. Newer optional interfaces, native
+passthrough limits and actual device coverage are tracked separately in
+[kernel compatibility](kernel-compatibility.md). This is not a minimum kernel
+for other MagicDesk services.
+
 The selected executor must be allowed to execute the bootstrap and map guest
 code. The mapper uses private RW mappings followed by final segment protections,
 never simultaneous RWX. Hardened policies forbidding RW-to-RX transitions can

@@ -70,6 +70,8 @@ def main():
         command("timeout 60 " + directory + "/libmagicdesk_guest_run.so --store "
                 + directory + "/store -- /bin/watch protected-all /tmp/protected-all")
         command("timeout 60 " + directory + "/libmagicdesk_guest_run.so --store "
+                + directory + "/store -- /bin/watch receive-denied")
+        command("timeout 60 " + directory + "/libmagicdesk_guest_run.so --store "
                 + directory + "/store -- /bin/watch churn")
         command("timeout 60 " + directory + "/libmagicdesk_guest_watch_launch.so "
                 + directory + "/libmagicdesk_guest_run.so " + directory + "/store")
@@ -85,7 +87,8 @@ def main():
             output = command("timeout 30 env PATH=/usr/bin:/bin " + directory + "/libmagicdesk_guest_run.so --statistics --store "
                     + directory + "/store --home /tmp --cwd / -- /usr/bin/dbus-run-session -- "
                     + "/usr/bin/dbus-send --session --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.ListNames")
-            assert "org.freedesktop.DBus" in output and re.search(r"MD_FS operation=23 calls=[1-9]", output)
+            # MD_FS_WATCH_PATH resolves and registers on the namespace worker.
+            assert "org.freedesktop.DBus" in output and re.search(r"MD_FS operation=48 calls=[1-9]", output)
             assert "Unable to" not in output and "Failed to" not in output, output
         report["passed"] = True
     except Exception as error:

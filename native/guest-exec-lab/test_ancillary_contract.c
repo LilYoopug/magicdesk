@@ -9,6 +9,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/epoll.h>
+#include <sys/inotify.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -338,6 +339,68 @@ static void rights_socket_error(void) {
     }
     assert(!munmap(unwritable,page));
 }
+static void watch_receive_fault(unsigned mode) {
+    int sockets[2]; assert(!socketpair(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC,0,sockets));
+    char name[32]; snprintf(name,sizeof(name),"received-watch-%u",mode);
+    pid_t sender=fork(); assert(sender>=0);
+    if (!sender) {
+        assert(!close(sockets[1]));
+        int watch=inotify_init1(IN_NONBLOCK|IN_CLOEXEC); assert(watch>=0);
+        assert(inotify_add_watch(watch,".",IN_CREATE)>=0);
+        int file=open(name,O_CREAT|O_EXCL|O_WRONLY,0600); assert(file>=0 && !close(file));
+        if (mode==2) {
+            struct sockaddr_un address={.sun_family=AF_UNIX};
+            snprintf(address.sun_path+1,sizeof(address.sun_path)-1,"md-watch-%ld",(long)getpid());
+            assert(!bind(sockets[0],(void *)&address,offsetof(struct sockaddr_un,sun_path)
+                +1+strlen(address.sun_path+1)));
+        }
+        send_rights(sockets[0],watch,1);
+        assert(!close(watch) && !close(sockets[0])); _exit(0);
+    }
+    assert(!close(sockets[0]));
+    size_t page=(size_t)sysconf(_SC_PAGESIZE);
+    char *memory=mmap(NULL,2*page,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    assert(memory!=MAP_FAILED);
+    union control control={0}; void *output=mode==1 ? memory+page-CMSG_LEN(0) : control.bytes;
+    int missing=-1; memcpy((char *)output+CMSG_LEN(0),&missing,sizeof(missing));
+    char byte=0; struct iovec vector={&byte,1};
+    struct mmsghdr message={.msg_hdr={.msg_iov=&vector,.msg_iovlen=1,
+        .msg_control=output,.msg_controllen=CMSG_SPACE(sizeof(int))}};
+    struct mmsghdr *target=&message;
+    struct timespec *timeout=NULL;
+    if (mode==0 || mode==4) { target=(void *)memory; *target=message; }
+    if (mode==2) { message.msg_hdr.msg_name=memory; message.msg_hdr.msg_namelen=sizeof(struct sockaddr_un); }
+    if (mode==3) { timeout=(void *)memory; *timeout=(struct timespec){.tv_sec=1}; }
+    assert(!mprotect(memory,page,PROT_READ));
+    errno=0;
+    long result=mode==3 || mode==4
+        ? recvmmsg(sockets[1],target,1,MSG_CMSG_CLOEXEC,timeout)
+        : recvmsg(sockets[1],&target->msg_hdr,MSG_CMSG_CLOEXEC);
+    int error=result<0 ? errno : 0;
+    assert(result==(mode==1 || mode==5 ? 1 : -1) && (result>=0 || error==EFAULT) && byte=='x');
+    int received; memcpy(&received,(char *)output+CMSG_LEN(0),sizeof(received));
+    assert(received>=0 && fcntl(received,F_GETFD)==FD_CLOEXEC);
+    struct pollfd wait={.fd=received,.events=POLLIN};
+    /* EVENT_WAIT: queued inotify event; expiry fails the fixture. */
+    assert(poll(&wait,1,5000)==1 && (wait.revents&POLLIN));
+    union { struct inotify_event align; char bytes[128]; } event={0};
+    ssize_t n=read(received,event.bytes,sizeof(event.bytes));
+    assert(n>=(ssize_t)sizeof(struct inotify_event) && n==(ssize_t)(sizeof(event.align)+event.align.len));
+    assert(event.align.mask==IN_CREATE && event.align.len && !strcmp(event.align.name,name));
+    assert(read(received,event.bytes,sizeof(event.bytes))==-1 && errno==EAGAIN);
+    int status; assert(waitpid(sender,&status,0)==sender && WIFEXITED(status) && !WEXITSTATUS(status));
+    assert(!close(received) && !close(sockets[1]) && !munmap(memory,2*page) && !unlink(name));
+    printf("OBS rights-watch-fault mode=%u result=%ld errno=%d event=IN_CREATE cloexec=1\n",mode,result,error);
+}
+static void rights_watch_fault(void) {
+    /* Each receiver starts without an inotify filter. The sender creates the
+     * watch only after fork, so inherited filters cannot hide missing activation. */
+    for (unsigned mode=0;mode<6;++mode) {
+        pid_t receiver=fork(); assert(receiver>=0);
+        if (!receiver) { watch_receive_fault(mode); _exit(0); }
+        int status; assert(waitpid(receiver,&status,0)==receiver && WIFEXITED(status) && !WEXITSTATUS(status));
+    }
+}
 int md_test_ancillary_contract(const char *name) {
     if (!strcmp(name,"rights-peek")) rights_peek();
     else if (!strcmp(name,"rights-truncate")) rights_truncate();
@@ -350,6 +413,7 @@ int md_test_ancillary_contract(const char *name) {
     else if (!strcmp(name,"rights-timeout-fault")) rights_timeout_fault();
     else if (!strcmp(name,"rights-batch-fault")) rights_batch_fault();
     else if (!strcmp(name,"rights-socket-error")) rights_socket_error();
+    else if (!strcmp(name,"rights-watch-fault")) rights_watch_fault();
     else return 0;
     return 1;
 }

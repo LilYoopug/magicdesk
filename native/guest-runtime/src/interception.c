@@ -9,6 +9,8 @@
 #include "guest_domain.h"
 #include "watch_calls.h"
 #include "fd_client.h"
+#include "fs_buffer.h"
+#include "adapter_buffer.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/audit.h>
@@ -19,29 +21,41 @@
 #include <sys/socket.h>
 #include <sys/utsname.h>
 
-long md_guest_export(int channel, int descriptor) {
+extern struct md_export_reply md_guest_export_control(unsigned, uint64_t, unsigned, unsigned, int);
+long md_guest_export(int descriptor) {
+    struct md_export_reply reply=md_guest_export_control(MD_EXPORT_BEGIN,0,0,0,0);
+    /* EVENT_WAIT: observe each uncertain channel slot selected under the table
+     * turn. Task death cancels the capture without closing any guest slot. */
+    while (reply.endpoint>=0 && !reply.token) {
+        uint64_t cookie=0; socklen_t length=sizeof(cookie);
+        long flags=RAW3(fcntl,reply.endpoint,F_GETFD,0);
+        long error=flags<0 ? flags : RAW5(getsockopt,reply.endpoint,SOL_SOCKET,SO_COOKIE,&cookie,&length);
+        reply=md_guest_export_control(MD_EXPORT_OBSERVED,cookie,flags<0 ? 0 : flags,length,error);
+    }
+    if (reply.endpoint==MD_EXPORT_ADMIT) {
+        long installed=RAW1(prctl,MD_GUEST_FD_CHANNEL);
+        if (installed<0) return installed;
+        /* Cold admission must not turn an invalid application source into the
+         * infrastructure endpoint which just occupied that number. */
+        if (installed==descriptor) descriptor=-1;
+        reply=md_guest_export_control(MD_EXPORT_READY,0,0,0,0);
+    }
+    if (reply.endpoint<0) return reply.endpoint;
+    if (!reply.token) return -EPROTO;
     union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(int))]; } control = {0};
-    char byte = 'F';
-    struct iovec vector = {&byte, 1};
+    struct iovec vector = {&reply.token, sizeof(reply.token)};
     struct msghdr message = {.msg_iov = &vector, .msg_iovlen = 1,
         .msg_control = control.bytes, .msg_controllen = sizeof(control)};
     struct cmsghdr *header = CMSG_FIRSTHDR(&message);
     header->cmsg_level = SOL_SOCKET; header->cmsg_type = SCM_RIGHTS;
     header->cmsg_len = CMSG_LEN(sizeof(int));
     memcpy(CMSG_DATA(header), &descriptor, sizeof(descriptor));
-    long result = RAW3(sendmsg, channel, &message, MSG_NOSIGNAL | MSG_DONTWAIT);
-    RAW1(close, channel);
+    long result = RAW3(sendmsg, reply.endpoint, &message, MSG_NOSIGNAL | MSG_DONTWAIT);
     return result;
 }
-/* Task-affine procfs lookup. No caller pathname is consumed here; the broker
- * passes a retained proc-root descriptor and checks the resulting capability. */
-long md_guest_export_proc_fds(int channel, int directory) {
-    long fd = RAW4(openat, directory, "self/fd/", O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
-    RAW1(close, directory);
-    if (fd < 0) { RAW1(close, channel); return fd; }
-    long result = md_guest_export(channel, (int)fd);
-    RAW1(close, fd);
-    return result;
+static const char proc_fds_path[]="self/fd/";
+static long md_guest_open_proc_fds(int directory) {
+    return RAW4(openat,directory,proc_fds_path,O_RDONLY|O_DIRECTORY|O_CLOEXEC,0);
 }
 
 extern void md_guest_ready(int, const char *, uint64_t, const struct md_interception_abi *);
@@ -53,9 +67,12 @@ extern void md_guest_load_groups(void), md_guest_loaded_groups(void);
 extern void md_guest_store_groups(void), md_guest_stored_groups(void);
 extern char md_guest_copy_begin[], md_guest_copy_end[];
 extern char md_guest_watch_gate[], md_guest_watch_return[];
-extern char md_guest_ipc_wait[], md_guest_ipc_wait_result[];
+extern char md_guest_ipc_wait[];
 extern long md_guest_fd_control(unsigned, uint64_t, long, long);
 extern char md_guest_anchor_return[];
+extern long md_guest_buffer_control(unsigned, unsigned long, unsigned long);
+extern char md_guest_task_control[], md_guest_task_call[], md_guest_task_return[];
+extern char md_guest_task_abort[], md_guest_task_abort_return[];
 static long dispatch_files(const struct md_fs *fs, long nr, unsigned long a0, unsigned long a1, unsigned long a2,
         unsigned long a3, unsigned long a4, unsigned long a5) {
     unsigned long args[] = {a0, a1, a2, a3, a4, a5};
@@ -75,21 +92,7 @@ static long dispatch_files(const struct md_fs *fs, long nr, unsigned long a0, un
     if (nr == SYS_inotify_init1 || nr == SYS_inotify_rm_watch
             || nr == SYS_dup || nr == SYS_dup3 || nr == SYS_fcntl)
         return md_watch_call(fs, nr, args);
-    if (nr == SYS_recvmsg) {
-        long r = md_socket_call(fs, md_executable, nr, args);
-        if (r >= 0) { int error = md_watch_received(fs, (void *)a1); if (error) return error; }
-        return r;
-    }
-    if (nr == SYS_recvmmsg) {
-        /* Keep the kernel's batching, timeout and partial-delivery semantics;
-         * each returned SCM_RIGHTS capability still needs watch activation. */
-        long r = md_socket_ancillary_batch(fs, args);
-        for (long i = 0; i < r; ++i) {
-            int error = md_watch_received(fs, (struct mmsghdr *)a1 + i);
-            if (error) return error;
-        }
-        return r;
-    }
+    if (nr == SYS_recvmmsg) return md_socket_ancillary_batch(fs, args);
     switch (nr) {
         case SYS_chroot:
             return md_namespace_call(fs, md_executable, nr, args);
@@ -118,15 +121,18 @@ long md_guest_dispatch(long nr, unsigned long a0, unsigned long a1, unsigned lon
         : dispatch_files(&md_files,nr,a0,a1,a2,a3,a4,a5);
 }
 static const struct md_interception_abi abi = {
+    .task_control=(uintptr_t)md_guest_task_control, .task_call=(uintptr_t)md_guest_task_call,
+    .task_return=(uintptr_t)md_guest_task_return, .task_abort=(uintptr_t)md_guest_task_abort,
+    .buffer_control=(uintptr_t)md_guest_buffer_control,
     .fd_control=(uintptr_t)md_guest_fd_control,
     .capture_gate=(uintptr_t)md_guest_anchor_return,
     .ipc_wait = (uintptr_t)md_guest_ipc_wait,
-    .ipc_wait_result = (uintptr_t)md_guest_ipc_wait_result,
     .magic = MD_INTERCEPTION_MAGIC, .size = sizeof(struct md_interception_abi),
     .ready = (uintptr_t)md_guest_ready, .done = (uintptr_t)md_guest_done,
     .allocate = (uintptr_t)md_guest_allocate, .allocated = (uintptr_t)md_guest_allocated,
     .dispatch = (uintptr_t)md_guest_dispatch, .export_fd = (uintptr_t)md_guest_export,
-    .exported = (uintptr_t)md_guest_exported, .proc_export = (uintptr_t)md_guest_export_proc_fds,
+    .exported = (uintptr_t)md_guest_exported, .export_control = (uintptr_t)md_guest_export_control,
+    .proc_open=(uintptr_t)md_guest_open_proc_fds, .proc_open_path=(uintptr_t)proc_fds_path,
     .store = (uintptr_t)md_guest_store, .stored = (uintptr_t)md_guest_stored,
     .load_byte = (uintptr_t)md_guest_load_byte, .loaded_byte = (uintptr_t)md_guest_loaded_byte,
     .store_ids = (uintptr_t)md_guest_store_ids, .stored_ids = (uintptr_t)md_guest_stored_ids,
@@ -155,6 +161,7 @@ int md_interception_install(int inherited) {
         uintptr_t gate = (uintptr_t)md_raw_return;
         uintptr_t watch = (uintptr_t)md_guest_watch_return;
         uintptr_t capture = (uintptr_t)md_guest_anchor_return;
+        uintptr_t task=(uintptr_t)md_guest_task_return, abort_task=(uintptr_t)md_guest_task_abort_return;
 #define COUNT(name) + 1
         enum { transport_instructions = 2 * (1 MD_GATE_TRANSPORT_CALLS(COUNT)) };
 #undef COUNT
@@ -170,6 +177,22 @@ int md_interception_install(int inherited) {
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_AARCH64, 1, 0),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
+            /* Exact private-helper termination site. Application KILL_PROCESS
+             * still has precedence; ERRNO on ordinary exit cannot strand its
+             * private file table. Ordinary guest exits never use this site. */
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)+4),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)(abort_task>>32),0,3),
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)abort_task,0,1),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_THREAD),
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)+4),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)(task>>32),0,6),
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)task,0,4),
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_prctl,0,1),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_USER_NOTIF),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_TASK),
             /* Declared on the original listener; a later listenerless filter
              * cannot acquire or inherit USER_NOTIF delivery. */
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, instruction_pointer) + 4),
@@ -187,8 +210,10 @@ int md_interception_install(int inherited) {
             /* Descriptor metadata must remain serviceable after an application
              * installs a higher-precedence filter or becomes nondumpable. */
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_prctl, 0, 8),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_prctl, 0, 10),
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_FD_CHANNEL, 6, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_BUFFER, 5, 0),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_PROC_IMAGE, 4, 0),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_SHM, 3, 0),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_IPC, 2, 0),
@@ -303,5 +328,6 @@ int md_interception_install(int inherited) {
     if (!result) md_guest_ready(listener, md_files.endpoint, MD_INTERCEPTION_MAGIC, &abi);
     if (!result) md_fd_client_enable();
     if (listener >= 0) RAW1(close, listener);
+    if (!result && md_files.endpoint[0]) result=md_adapter_buffer_install();
     return result;
 }

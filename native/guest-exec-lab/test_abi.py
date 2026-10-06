@@ -18,7 +18,12 @@ def main():
     parser.add_argument("--libc", choices=["glibc", "musl"], required=True)
     parser.add_argument("--store", required=True)
     parser.add_argument("--runtime", required=True)
+    parser.add_argument("--user", default="2000:2000", help="Logical guest account for ABI execution")
     args = parser.parse_args()
+    try:
+        fixture_uid, fixture_gid = map(int, args.user.split(":"))
+    except ValueError:
+        parser.error("--user requires numeric UID:GID")
     repo = Path(__file__).resolve().parents[2]
     spec = importlib.util.spec_from_file_location("transport", repo / "scripts/mcp-client.py")
     transport = importlib.util.module_from_spec(spec)
@@ -33,11 +38,20 @@ def main():
     files += [args.static_build / ("md-static-" + name) for name in ["exec", "pie", "exec-2m", "pie-2m"]]
     files += [args.build / "md-freestanding-fixture"]
     archive = args.build / ("abi-" + args.libc + "-" + tag + ".tar")
+    def fixture_metadata(info):
+        info.uid, info.gid = fixture_uid, fixture_gid
+        info.uname = info.gname = ""
+        info.mode = 0o755 if info.name.startswith("usr/bin/") else 0o644
+        return info
+
     with tarfile.open(archive, "w") as output:
         for path in files:
-            output.add(path, arcname=path.name, recursive=False)
+            output.add(path, arcname="usr/bin/" + path.name, recursive=False, filter=fixture_metadata)
+        output.add(Path(__file__).with_name("fixtures") / "md-guest-fixture",
+                   arcname="etc/md-guest-fixture", recursive=False, filter=fixture_metadata)
     result = {"id": tag, "libc": args.libc, "store": args.store,
-              "runtime": args.runtime, "app": state["app"], "checks": [], "passed": False}
+              "runtime": args.runtime, "user": args.user, "hostUid": state["shell"]["uid"],
+              "app": state["app"], "checks": [], "passed": False}
     console = client.call("console.open", {"directory": "/data/local/tmp"})["sessionId"]
 
     def command(value):
@@ -45,13 +59,16 @@ def main():
         assert response["exitCode"] == 0, response
         return response["output"]
 
-    runner = shlex.join([args.runtime + "/libmagicdesk_guest_run.so", "--store", args.store, "--"])
+    runner = shlex.join([args.runtime + "/libmagicdesk_guest_run.so", "--store", args.store,
+                        "--user", args.user, "--"])
+    installer = shlex.join([args.runtime + "/libmagicdesk_guest_run.so", "--store", args.store,
+                           "--user", "0:0", "--"])
     try:
         command("mkdir " + shlex.quote(directory))
         result["bundle"] = transport.upload(client, str(archive), directory + "/fixtures.tar")
         result["runtimeHashes"] = command("sha256sum " + shlex.join(
             [args.runtime + "/libmagicdesk_guest_" + name + ".so" for name in ["run", "supervisor", "bootstrap", "service"]]))
-        command("cat " + shlex.quote(directory + "/fixtures.tar") + " | " + runner + " /bin/tar -xf - -C /usr/bin")
+        command("cat " + shlex.quote(directory + "/fixtures.tar") + " | " + installer + " /bin/tar -xf - -C /")
         for path in files:
             # EVENT_WAIT: console command completion; timeout terminates a hung fixture tree.
             arguments = ["/usr/bin/" + path.name]

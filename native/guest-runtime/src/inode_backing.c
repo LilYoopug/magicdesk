@@ -15,6 +15,30 @@ int mdi_backing_directory(struct md_inode_store *s, const struct mdi_node *node)
     int fd = node->source ? s->sources[node->source] : s->objects;
     return fd < 0 ? -ESTALE : fd;
 }
+int md_inode_descriptor_source(struct md_inode_store *s, int fd, char *out, size_t capacity) {
+    struct stat opened, named;
+    if (fstat(fd,&opened)) return -errno;
+    char proc[64], path[PATH_MAX];
+    snprintf(proc,sizeof(proc),"/proc/self/fd/%d",fd);
+    ssize_t n=readlink(proc,path,sizeof(path)-1);
+    if (n<0) return -errno;
+    if ((size_t)n==sizeof(path)-1) return -ENAMETOOLONG;
+    path[n]=0;
+    const char *name=strrchr(path,'/');
+    if (!name || strlen(++name)!=32 || strspn(name,"0123456789abcdef")!=32) return -EXDEV;
+    for (unsigned i=0;i<MDI_SOURCES;++i) {
+        int directory=i ? s->sources[i] : s->objects;
+        if (directory<0) continue;
+        if (fstatat(directory,name,&named,AT_SYMLINK_NOFOLLOW)) {
+            if (errno==ENOENT) continue;
+            return -errno;
+        }
+        if (named.st_dev!=opened.st_dev || named.st_ino!=opened.st_ino) continue;
+        int length=snprintf(out,capacity,"/proc/%d/fd/%d/%s",getpid(),directory,name);
+        return length<0 ? -EIO : (size_t)length>=capacity ? -ERANGE : 0;
+    }
+    return -EXDEV;
+}
 int mdi_sources_open(struct md_inode_store *s) {
     sqlite3_stmt *q = NULL;
     int r = mdi_prepare(s, "SELECT id,path,device,inode FROM sources", &q);

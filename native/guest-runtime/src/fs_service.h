@@ -4,12 +4,11 @@
 #include "fs_engine.h"
 #include "fs_wire.h"
 struct md_image_catalogue;
-struct md_fs_statistics { struct md_cost operation[MD_FS_LAST + 1]; };
 int md_fs_listen(const char *abstract_name);
 struct md_fs_work_source {
     int fd;
     void *context;
-    void (*ready)(void *);
+    void (*ready)(void *, struct md_filesystem *);
     int (*notification_fd)(void *);
     int (*notification)(void *, struct md_filesystem *, short);
 };

@@ -61,13 +61,32 @@ assert 'input = 41' in result.stdout and 'result = 42' in result.stdout
 assert 'exited with status = 0' in result.stdout
 print('PASS lldb')
 '''
+GDB_SHM = r'''
+import subprocess
+commands = ['gdb', '--batch', '-nx', '/tmp/md-debugger-tests',
+    '-ex', 'set debuginfod enabled off', '-ex', 'set args shm-target',
+    '-ex', 'break shm_marker', '-ex', 'run']
+for _ in range(4):
+    commands += ['-ex', 'python assert len(gdb.selected_inferior().threads()) == 1',
+                 '-ex', 'python assert int(gdb.parse_and_eval("*address")) == ord("S")',
+                 '-ex', 'echo MD_SHM_BREAK\\n', '-ex', 'continue']
+# EVENT_WAIT: four breakpoints and inferior completion; expiry is a failure.
+result = subprocess.run(commands, capture_output=True, text=True, timeout=25)
+print(result.stdout, result.stderr)
+assert result.returncode == 0 and result.stdout.count('MD_SHM_BREAK') == 4
+assert 'PASS shm-target' in result.stdout and 'exited normally' in result.stdout
+assert 'Error while executing Python code' not in result.stderr
+assert '[New ' not in result.stdout
+print('PASS gdb-shm')
+'''
 
 
 def commands():
-    cases = [(name, [TARGET, name]) for name in ('attach', 'seize', 'trace-exit', 'syscall', 'mixed',
+    cases = [(name, [TARGET, name]) for name in ('attach', 'seize', 'trace-exit', 'syscall', 'syscall-exec', 'mixed',
                                                'kill-stopped', 'owner-exit', 'exitkill', 'thread-exec', 'perf-event')]
     cases.append(('gdb-attach', ['python3', '-c', GDB_ATTACH]))
     cases.append(('gdb-attach-threads', ['python3', '-c', GDB_ATTACH, 'gdb-thread-target']))
+    cases.append(('gdb-shm', ['python3', '-c', GDB_SHM]))
     cases.append(('lldb', ['python3', '-c', LLDB]))
     cases.append(('gdbserver', ['gdb', '--batch', '-nx', '-x', '/tmp/md-gdbserver.commands']))
     cases.append(('gprof', ['/bin/sh', '-ec',
@@ -79,10 +98,19 @@ def commands():
         'grep "fn=.*answer" /tmp/md-callgrind.out\n'
         'grep -E "summary: [1-9]" /tmp/md-callgrind.out\necho PASS callgrind']))
     cases.append(('strace', ['/bin/sh', '-ec',
-        "strace -f -qq -o /tmp/md-debugger-strace.log /bin/sh -c 'cat /etc/passwd >/dev/null'\n"
-        "grep '/etc/passwd' /tmp/md-debugger-strace.log\n"
+        "strace -f -qq -o /tmp/md-debugger-strace.log /bin/sh -c 'cat /etc/passwd >/dev/null' 2>/tmp/md-debugger-strace.err\n"
+        "cat /tmp/md-debugger-strace.err\n"
+        "! grep -q 'Stray PTRACE_EVENT' /tmp/md-debugger-strace.err\n"
+        "grep -F 'openat(AT_FDCWD, \"/etc/passwd\", O_RDONLY)' /tmp/md-debugger-strace.log\n"
         "grep 'execve(' /tmp/md-debugger-strace.log\n"
         "grep -E 'clone3?\\(' /tmp/md-debugger-strace.log\necho PASS strace"]))
+    cases.append(('strace-shm', ['/bin/sh', '-ec',
+        "strace -f -qq -o /tmp/md-debugger-shm.log /tmp/md-debugger-tests shm-target 2>/tmp/md-debugger-shm.err\n"
+        "cat /tmp/md-debugger-shm.err\n"
+        "! grep -q 'Stray PTRACE_EVENT' /tmp/md-debugger-shm.err\n"
+        "test \"$(grep -c '^.*shmat(' /tmp/md-debugger-shm.log)\" = 4\n"
+        "test \"$(grep -c '^.*shmdt(' /tmp/md-debugger-shm.log)\" = 4\n"
+        "! grep -E 'clone3?\\(|close_range\\(0,' /tmp/md-debugger-shm.log\necho PASS strace-shm"]))
     return cases
 
 

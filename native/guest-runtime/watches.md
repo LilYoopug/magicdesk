@@ -48,7 +48,12 @@ Its reader supplies native poll/epoll and last-reader lifetime, including dup,
 fork, exec and queued SCM_RIGHTS. The owner retains no permanent read alias.
 
 `watch_calls.c` activates FD-class seccomp selectors before returning a watch or
-ordinary duplicate/received alias. `watch_activation.c` tracks installed filters
+ordinary duplicate. The shared ancillary publisher prepares each received alias
+before copying its FD number to the caller, even when a later header, address
+or timeout write fails. It does not reparse caller-controlled output or use the
+syscall return value as proof of descriptor delivery. Failed activation releases
+unpublished descriptors without closing an already published prefix.
+`watch_activation.c` tracks installed filters
 by thread group: pthreads share that metadata, fork copies it and exec retains it.
 Selectors use the low nine descriptor bits, bounding activation to 512 filters
 per retained chain even across arbitrary descriptor-number churn. Reusing a
@@ -80,8 +85,14 @@ records; successful delivery consumes them before sending confirmation. Appends
 remain possible but cannot coalesce into leased records. No store/SQLite lock is
 held across delivery. A missing acknowledgement consumes possibly delivered
 records rather than duplicating them; the caller reports unconfirmed transport
-failure and must not retry automatically. A bounded peer deadline releases the
-reservation even if the client disappears.
+failure and must not retry automatically. RPC has a bounded peer deadline for a
+missing client. When actual descriptor capture is available, the task-affine
+adapter uses mapped payloads and register control instead: the worker retains the
+request through an explicit copy acknowledgement. Cancellation before the reply
+is offered restores the records; cancellation afterward retires possible delivery.
+The worker remains the reservation owner, without a guest service socket or a
+lock held across the task-local copy. Kernel descriptor-inspection denial retains
+RPC; it is not bypassed by changing dumpability.
 
 Protected empty blocking reads wait through native `recvfrom(MSG_PEEK)` on the
 readiness socket, with their original signal mask restored. This does not consume
@@ -99,10 +110,18 @@ events, dup/fcntl, fork, 64 execs without filter growth, SCM_RIGHTS receive and
 batch receive, concurrent readers, EINTR/SA_RESTART, readv, short/faulted output,
 descriptor reuse and unrelated native reads. Separate store tests kill a writer
 before commit, retire the final reader and inject a journal gap.
+The native/guest `rights-watch-fault` comparison starts each receiver without
+inherited watch filters and checks delivery despite readonly message headers,
+control headers, source addresses and timeout output. A separate guest check
+denies filter installation and verifies explicit failure, the usable published
+prefix, pipe EOF and absence of leaked descriptors.
 The same glibc/musl suite also runs with dumpability disabled, including faulted
 buffers, concurrent readers and signal restart. Descriptor churn covers 7,680
 distinct dup/fcntl targets with bounded filter count. RPC controls reject a copy
 while another request appends, withhold acknowledgement and kill the service.
+The production mapped-service fixture checks acknowledgement, rejected-copy
+rollback, invalid acknowledgements and cancellation on either side of offering
+the reply, including buffer and descriptor lifetime through worker completion.
 
 Stock Debian GIO's `GInotifyFileMonitor` receives create/rename/delete from an
 independent launch; the fixture rejects a polling backend. Stock D-Bus registers

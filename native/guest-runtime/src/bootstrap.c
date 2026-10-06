@@ -75,8 +75,12 @@ void md_boot(uintptr_t *kernel_stack) {
     int inherited = argc > 1 && md_equal(argv[1], "--resume");
     unsigned root_arg = inherited ? 2 : 1;
     int program_fd = -1, interpreter_fd = -1;
+    int retained=0, retained_loader=0;
     const char *execfn = NULL;
     const char *object = "";
+    if (inherited && root_arg<argc && md_equal(argv[root_arg],"--retained-images")) {
+        retained=1; ++root_arg;
+    }
     if (inherited && root_arg + 1 < argc && md_equal(argv[root_arg], "--program-fd")) {
         program_fd = descriptor_number(argv[root_arg + 1]);
         root_arg += 2;
@@ -92,6 +96,9 @@ void md_boot(uintptr_t *kernel_stack) {
     if (inherited && root_arg + 1 < argc && md_equal(argv[root_arg], "--interpreter-fd")) {
         interpreter_fd = descriptor_number(argv[root_arg + 1]);
         root_arg += 2;
+    }
+    if (retained && root_arg<argc && md_equal(argv[root_arg],"--retained-loader")) {
+        retained_loader=1; ++root_arg;
     }
     if (inherited && root_arg + 1 < argc && md_equal(argv[root_arg], "--execfn")) {
         execfn = argv[root_arg + 1];
@@ -146,6 +153,16 @@ void md_boot(uintptr_t *kernel_stack) {
     struct md_command command;
     if (!execfn) execfn = argv[root_arg + 1];
     if (inherited) {
+        if (retained) {
+            long fd=RAW3(prctl,MD_GUEST_MAP_IMAGE,0,MD_IMAGE_TAKE_PROGRAM);
+            if (fd<0) md_die("receive prepared program",fd);
+            program_fd=(int)fd;
+            if (retained_loader) {
+                fd=RAW3(prctl,MD_GUEST_MAP_IMAGE,0,MD_IMAGE_TAKE_LOADER);
+                if (fd<0) md_die("receive prepared loader",fd);
+                interpreter_fd=(int)fd;
+            }
+        }
         if (program_fd < 0 || program_fd == interpreter_fd) md_die("invalid prepared images", -EINVAL);
         if (!!namespace != !!*object) md_die("missing prepared object identity", -EINVAL);
         memset(command.object, 0, sizeof(command.object));

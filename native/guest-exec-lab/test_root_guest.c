@@ -2,6 +2,9 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <stddef.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdio.h>
@@ -9,6 +12,7 @@
 #include <string.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -102,6 +106,18 @@ static void write_file(const char *path, const char *value) {
     int fd=open(path,O_CREAT|O_TRUNC|O_WRONLY,0644); assert(fd>=0);
     assert(write(fd,value,strlen(value))==(ssize_t)strlen(value)); close(fd);
 }
+static void forbid_rpc(void) {
+    struct sock_filter filter[]={
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_socket,2,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_connect,1,0),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_THREAD)
+    };
+    struct sock_fprog program={sizeof(filter)/sizeof(*filter),filter};
+    assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+    assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+}
 int main(int argc,char **argv) {
     assert(argc==2); alarm(45); setbuf(stdout,NULL);
     if (!strcmp(argv[1],"exec")) { inside(); puts("PASS root survives exec"); return 0; }
@@ -120,6 +136,7 @@ int main(int argc,char **argv) {
     for (int i=0;i<8;i++) {
         pid_t pid=fork(); assert(pid>=0);
         if (!pid) {
+            forbid_rpc();
             if(i<2) basic(i);
             else if(i<6) shared((i-2)&1,(i-2)/2);
             else if(i==6) failure(); else nested();

@@ -19,8 +19,20 @@ its supervised launch ends. Dead leases are ignored. Clean closure removes its
 routes. No live descriptor number is meaningful across a runtime restart.
 
 Opening returns an authorized pin and a separate rendezvous descriptor through
-the typed filesystem result. `file_open` completes it in the calling task after
-the namespace transaction and RPC end. Blocking reader/writer opens wait on
+the typed filesystem result. The mapped transport retains both in the supervisor;
+`file_open_job` completes the open in a short-lived child with its own kernel file
+table. Only those inputs and its private result channel survive initial descriptor
+cleanup. This channel is never installed in the guest. The existing SIGCHLD loop
+reaps completion, then atomic ADDFD_SEND publishes the single application endpoint.
+Cancellation kills the exact child; its kernel table and queued results are released
+even when the guest shared CLONE_FILES with a surviving peer. Parent death also
+terminates the helper. `close_range` cleanup falls back to native proc enumeration
+when that syscall is unavailable; it is not a new kernel startup requirement.
+
+No filesystem worker, SQLite transaction, table or channel turn spans the wait.
+Ordinary file opens create no helper. Native host-side engine/RPC callers retain
+the synchronous `file_open` completion contract in their own table.
+Blocking reader/writer opens wait on
 shared futex generation changes; signals can interrupt this wait. A nonblocking
 writer without readers receives ENXIO; O_RDWR does not wait for another endpoint.
 Ordinary files do not allocate this state or acquire rendezvous locks. Internal
@@ -45,6 +57,11 @@ guest launches is not a supported pin-lifetime contract.
 readiness, EOF, blocking peer rendezvous, O_RDWR, hardlinks, rename, unlink/reopen
 and name reuse under actual shell UID 2000. `test_fifo_runtime.py` exchanges data
 between independent launches and repeats after both owners exit.
+`test_open_job` checks endpoint exchange, ENXIO/EOF, cancellation before and after
+result queuing, descriptor counts and exclusion of unrelated inherited FDs.
+Production resource checks forbid guest RPC syscalls, fill the guest descriptor
+table, check exact result-slot use and kill protected CLONE_FILES callers during
+unpaired opens without leaving private guest descriptors.
 `test_import.c` checks prepared-tree FIFO import on hosts that permit source FIFO
 creation; shell denial is reported explicitly. OCI checks cover FIFO metadata,
 hardlinks and independent instance backing. Stock VS Code C/C++ debugging also

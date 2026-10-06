@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/inotify.h>
+#include <sys/vfs.h>
 #include <unistd.h>
 
 void test_mount_copy(const char *base);
@@ -88,7 +89,7 @@ static void nested_mounts(const char *base) {
     }
     assert(ids[0]!=ids[1] && ids[1]!=ids[2] && ids[0]!=ids[2]);
     uint64_t root_id; assert(!md_fs_base_mount(&fs,0,&root_id));
-    struct md_fs_result r=call(&fs,MD_FS_MOUNT_TABLE,-1,NULL,1,0,NULL,0); assert(!r.error);
+    struct md_fs_result r=call(&fs,MD_FS_MOUNT_TABLE,-1,NULL,O_RDONLY,1,NULL,0); assert(!r.error);
     ssize_t count=read(r.fd,bytes,sizeof(bytes)-1); assert(count>0); bytes[count]=0; close(r.fd);
     for (unsigned i=0; i<3; ++i) {
         char line[80]; snprintf(line,sizeof(line),"%llu %llu ",ids[i],i ? ids[i-1] : (unsigned long long)root_id);
@@ -126,7 +127,7 @@ static void nested_mounts(const char *base) {
     r=call(&fs,MD_FS_PATH,leaf,NULL,0,0,bytes,sizeof(bytes)); assert(!r.error && !strcmp(bytes,"/child"));
     r=call(&fs,MD_FS_PATH,covered,NULL,0,0,bytes,sizeof(bytes)); assert(r.error==-ENOENT);
     r=call(&fs,MD_FS_OPEN,-1,"/proc/self/status",O_RDONLY,0,bytes,sizeof(bytes)); assert(r.error==-ENOENT && !r.host_path);
-    r=call(&fs,MD_FS_MOUNT_TABLE,-1,NULL,1,0,NULL,0); assert(!r.error);
+    r=call(&fs,MD_FS_MOUNT_TABLE,-1,NULL,O_RDONLY,1,NULL,0); assert(!r.error);
     count=read(r.fd,bytes,sizeof(bytes)-1); assert(count>0); bytes[count]=0; close(r.fd);
     assert(strstr(bytes," / ro - none attachment ro") && strstr(bytes," /child rw - none attachment rw"));
     assert(!strstr(bytes,"/tree") && !strstr(bytes,"/proc") && !strstr(bytes,base));
@@ -184,7 +185,7 @@ static void task_mount_views(const char *base) {
     struct md_fs_output output={.data=bytes,.capacity=sizeof(bytes)};
     struct md_fs_result out;
     for(unsigned round=0;round<20;++round) for(unsigned i=0;i<2;++i) {
-        q.actor=123+i; q.operation=MD_FS_OPEN; q.flags=O_RDONLY;
+        q.actor=123+i; q.operation=MD_FS_OPEN; q.flags=O_RDONLY; q.mode=0;
         q.path[0]=i ? "/right/value" : "/left/value";
         md_fs_execute(&fs,&q,&out,NULL);
         assert(!out.error && read(out.fd,bytes,6)==6 && !memcmp(bytes,"native",6)); close(out.fd);
@@ -192,14 +193,14 @@ static void task_mount_views(const char *base) {
         if(i) assert(out.error==-EROFS); else { assert(!out.error); close(out.fd); }
         q.flags=O_RDONLY; q.path[0]=i ? "/left/value" : "/right/value";
         md_fs_execute(&fs,&q,&out,NULL); assert(out.error==-ENOENT);
-        q.operation=MD_FS_MOUNT_TABLE; q.flags=1;
+        q.operation=MD_FS_MOUNT_TABLE; q.flags=O_RDONLY; q.mode=1;
         md_fs_execute(&fs,&q,&out,NULL); assert(!out.error);
         ssize_t size=read(out.fd,bytes,sizeof(bytes)-1); assert(size>0); bytes[size]=0; close(out.fd);
         assert(strstr(bytes,i ? "/right ro" : "/left rw"));
         assert(!strstr(bytes,i ? "/left " : "/right "));
         assert(fs.mounts==views[0].mounts && !fs.native_root && !s->root_id);
     }
-    q.actor=123; q.peer=121; q.operation=MD_FS_OPEN; q.path[0]="/left/value"; q.flags=O_RDONLY;
+    q.actor=123; q.peer=121; q.operation=MD_FS_OPEN; q.path[0]="/left/value"; q.flags=O_RDONLY; q.mode=0;
     md_fs_execute(&fs,&q,&out,NULL); assert(out.error==-EPERM);
     assert(!md_task_registry_publish(tasks,125,120,&ids,NULL));
     q.actor=125; q.peer=120;
@@ -296,8 +297,65 @@ int main(int argc, char **argv) {
     snprintf(path, sizeof(path), "%s/file", readonly);
     int external = open(path, O_CREAT | O_WRONLY | O_CLOEXEC, 0600); assert(external >= 0); close(external);
     int ro = opened(&fs, "/readonly/file", O_RDONLY);
+    /* Establish the mount object's ordinary cache entry before lease counts. */
+    int ro_directory=opened(&fs,"/readonly",O_PATH|O_DIRECTORY); close(ro_directory);
+    unsigned metadata_ops[]={MD_FS_CHMOD,MD_FS_CHOWN,MD_FS_UTIMENS};
+    unsigned before_metadata=descriptors();
+    for (unsigned i=0;i<sizeof(metadata_ops)/sizeof(*metadata_ops);++i) {
+        struct md_fs_request metadata={.operation=metadata_ops[i],.directory={-1,-1},
+            .path={"/volume/file",NULL},.mode=0640,
+            .attributes={.uid=getuid(),.gid=getgid(),.seconds={123456789,123456790},.nanos={0,42}}};
+        md_fs_execute(&fs,&metadata,&result,NULL); assert(!result.error && result.fd==-1);
+        metadata.path[0]="/readonly/file";
+        md_fs_execute(&fs,&metadata,&result,NULL); assert(result.error==-EROFS && result.fd==-1);
+        assert(descriptors()==before_metadata);
+    }
+    assert(!fstat(fd,&st) && (st.st_mode&0777)==0640 && st.st_mtim.tv_nsec==42);
+    struct md_fs_statfs by_path;
+    struct statfs by_fd;
+    result=call(&fs,MD_FS_STATFS,-1,"/readonly/file",0,0,&by_path,sizeof(by_path));
+    assert(!result.error && result.fd==-1 && result.size==sizeof(by_path) && !fstatfs(ro,&by_fd));
+    assert(by_path.type==(uint64_t)by_fd.f_type && by_path.block_size==(uint64_t)by_fd.f_bsize);
+    assert(descriptors()==before_metadata);
+    for (unsigned iteration=0;iteration<16;++iteration)
+      for (unsigned kind=MD_FS_TASK_CHDIR;kind<=MD_FS_TASK_TRUNCATE;++kind) {
+        for (unsigned ro_target=0;ro_target<2;++ro_target) {
+            const char *target=kind==MD_FS_TASK_CHDIR ? (ro_target ? "/readonly" : "/volume")
+                : ro_target ? "/readonly/file" : "/volume/file";
+            struct md_fs_anchor *origin=NULL;
+            struct md_fs_output output={.origin=&origin};
+            struct md_fs_request prepare={.operation=MD_FS_TASK_PATH,.directory={-1,-1},
+                .path={target,NULL},.mode=kind};
+            md_fs_execute(&fs,&prepare,&result,&output);
+            if (kind==MD_FS_TASK_TRUNCATE && ro_target)
+                assert(result.error==-EROFS && result.fd==-1 && !origin);
+            else {
+                assert(!result.error && result.fd>=0 && origin);
+                assert(!fstat(result.fd,&st) && (kind==MD_FS_TASK_CHDIR ? S_ISDIR(st.st_mode) : S_ISREG(st.st_mode)));
+                assert(!close(result.fd)); md_fs_anchor_release(origin);
+            }
+            assert(descriptors()==before_metadata);
+        }
+    }
     result = call(&fs, MD_FS_XATTR_OPEN, ro, "user.test", 0, W_OK, NULL, 0); assert(result.error == -EROFS);
     result = call(&fs, MD_FS_XATTR_OPEN, ro, "", 0, F_OK, NULL, 0); assert(result.error == -EXDEV);
+    for (unsigned descriptor=0;descriptor<2;++descriptor) {
+        struct md_fs_request attr={.operation=descriptor ? MD_FS_FXATTR : MD_FS_XATTR,
+            .directory={descriptor ? fd : -1,-1},.path={descriptor ? NULL : "/volume/file","user.md-worker"},
+            .mode=MD_FS_XATTR_SET,.capacity=5,.value="value",.value_size=5};
+        char value[32]; struct md_fs_output output={.data=value,.capacity=sizeof(value)};
+        md_fs_execute(&fs,&attr,&result,&output); assert(!result.error && result.fd==-1);
+        attr.mode=MD_FS_XATTR_GET; attr.value=NULL; attr.value_size=0; attr.capacity=sizeof(value);
+        md_fs_execute(&fs,&attr,&result,&output);
+        assert(!result.error && result.size==5 && result.position==5 && !memcmp(value,"value",5));
+        attr.mode=MD_FS_XATTR_REMOVE; attr.capacity=0;
+        md_fs_execute(&fs,&attr,&result,&output); assert(!result.error);
+        attr.directory[0]=descriptor ? ro : -1; attr.path[0]=descriptor ? NULL : "/readonly/file";
+        md_fs_execute(&fs,&attr,&result,&output); assert(result.error==-EROFS && result.fd==-1);
+        attr.mode=MD_FS_XATTR_SET; attr.capacity=attr.value_size=5; attr.value="value";
+        md_fs_execute(&fs,&attr,&result,&output); assert(result.error==-EROFS && result.fd==-1);
+        assert(descriptors()==before_metadata);
+    }
     result = call(&fs, MD_FS_REOPEN, ro, NULL, O_PATH | O_CLOEXEC, 1, NULL, 0); assert(result.error == -EROFS);
     assert(!unlink(path));
     result = call(&fs, MD_FS_REOPEN, ro, NULL, O_RDWR, 0, NULL, 0); assert(result.error == -EROFS); close(ro);
@@ -339,7 +397,7 @@ int main(int argc, char **argv) {
         q.resolve=RESOLVE_NO_SYMLINKS;
         md_fs_execute(view,&q,&result,&output); assert(result.error==-ELOOP);
         for (unsigned info=0; info<2; ++info) {
-            result=call(view,MD_FS_MOUNT_TABLE,-1,NULL,info,0,bytes,sizeof(bytes));
+            result=call(view,MD_FS_MOUNT_TABLE,-1,NULL,O_RDONLY,info,bytes,sizeof(bytes));
             assert(!result.error && result.fd>=0);
             ssize_t count=read(result.fd,bytes,sizeof(bytes)-1); assert(count>0);
             bytes[count]=0; assert(strstr(bytes,"guestfs") && strstr(bytes,"/proc") && strstr(bytes,"/dev/shm"));
@@ -365,7 +423,7 @@ int main(int argc, char **argv) {
     result=call(&fs,MD_FS_OPEN,-1,"/guest",O_RDONLY,0,NULL,0); assert(result.error==-ENOENT);
     result=call(&fs,MD_FS_OPEN,directory,"renamed",O_RDONLY,0,NULL,0);
     assert(!result.error); close(result.fd);
-    result=call(&fs,MD_FS_MOUNT_TABLE,-1,NULL,1,0,NULL,0); assert(!result.error);
+    result=call(&fs,MD_FS_MOUNT_TABLE,-1,NULL,O_RDONLY,1,NULL,0); assert(!result.error);
     ssize_t count=read(result.fd,bytes,sizeof(bytes)-1); assert(count>0); bytes[count]=0;
     assert(strstr(bytes,"guestfs") && !strstr(bytes,"/proc") && !strstr(bytes,"/volume") && !strstr(bytes,"/readonly"));
     close(result.fd);

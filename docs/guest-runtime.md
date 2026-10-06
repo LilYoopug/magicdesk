@@ -27,14 +27,140 @@ or transaction replay; data IO through opened descriptors stays native. An
 external database writer that bypasses this gate still produces an explicit error.
 The supervisor handles regular-file seeks through retained kernel descriptors
 without namespace RPC; directory cursors remain namespace-owned. Filesystem
-replies retain their connection until client release, with event-driven progress
-and a bounded peer lifetime.
+RPC replies retain their connection until exchange completion, task cancellation
+or client release, with event-driven progress and a bounded peer lifetime.
 Ordinary open/stat and directory-read requests are handled directly by that worker through seccomp
 notifications, without invoking a guest-side RPC. Protected accesses, O_PATH,
-namespace mutations and directory seeks retain the task-affine adapter. Directory
-reads publish their bytes before advancing the shared cursor; failed or partial
+namespace mutations and directory seeks retain the task-affine adapter. Direct
+broker directory reads publish their bytes before advancing the shared cursor; failed or partial
 output cannot cause an automatic replay of a committed read.
-Both paths use the same namespace engine and sealed-image catalogue.
+Path and metadata requests with captured cwd/dirfd inputs use bootstrap-mapped
+shared input/output and register control, without a temporary guest descriptor
+or service socket per call. The file-table and filesystem turns capture retained
+input origins before worker execution; later close/reuse cannot retarget the
+accepted request. Unknown explicit dirfds and stateful inputs use actual kernel
+description capture, never pathname reopening or fabricated origins. When kernel
+inspection is denied, a lazy table-owned send endpoint exports the exact inputs
+to a supervisor-owned queue. Admission consumes one CLOEXEC infrastructure FD;
+a full table returns EMFILE before execution. Subsequent exports need no free
+guest slot. The endpoint follows dup, close, fork, unshare and exec ownership;
+application descriptions are retained only for their accepted request.
+After an ambiguous terminal mutation, channel reuse checks the actual socket
+cookie and descriptor flags under the same table turn. A replaced/closed slot
+loses only its annotation, never the application's replacement FD. Denied or
+cancelled observation retains uncertainty rather than admitting another channel.
+Both transports share request and result validation.
+Protected metadata and restricted proc lookups use the same table-owned channel
+through register-only control, without acquiring a mapped filesystem slot.
+The file-table turn retains their borrowed input through original-site admission
+and output publication. A verified proc-FD directory open uses a fixed task-local
+path and returns its FD directly to the application; no scratch proc-root/result
+descriptor or per-request socket is inserted into the shared guest table.
+File opens, reopens and executable-object access use the same transport.
+For `O_PATH`, the worker retains the open result
+until the caller reopens it through the provider's proc FD; the existing
+file-table publication gate observes completion, including caller death.
+`O_DIRECTORY`, `O_CLOEXEC` and `O_NOFOLLOW` are preserved. Nofollow delivery uses
+the stable physical backing name under the store/source lease, or `/.` for a
+retained native directory. Backing identity is checked independently of logical
+metadata, including retained lower objects after copy-up and unlink. A pure
+O_PATH lookup without such a source uses the same table-owned channel to return
+the retained result through SCM_RIGHTS, without repeating the lookup or opening
+a private RPC socket. Output turns span fork-copied tables sharing that channel.
+A kernel-written receipt in the existing shared mapping publishes installed
+origins even when the receiver dies before acknowledgement. The supervisor owns
+the receive queue and drains unreceived rights on cancellation, without closing
+an installed application FD. Cold admission needs the infrastructure slot plus
+the result slot; admitted channels need only the result slot. Native quota and
+application filter denials remain errors.
+Temporary-file and mount-table results use atomic ADDFD_SEND under the
+destination table turn, without a guest service FD.
+Deferred FIFO opens retain their pin and rendezvous resources outside the guest
+table. A short-lived supervisor child completes the blocking open without holding
+the filesystem worker or table turns. It closes unrelated inherited descriptors,
+returns one endpoint and is reaped through the existing SIGCHLD loop. Cancellation
+kills the exact child and releases queued results; ordinary files create no child.
+Guest-root changes retain the CLONE_FS turn through worker publication.
+The guest adapter has no filesystem RPC client; native host clients retain RPC
+for their own engine access. Other temporary adapter descriptors still require
+terminal-lifetime coverage.
+Namespace exec prepares the ELF, script-interpreter chain and loader on the
+filesystem worker under the captured task context. The worker owns every image
+descriptor from acquisition; only a pointer-free argument recipe returns to the
+guest before kernel exec. The new bootstrap receives the retained images after
+the kernel has separated its file table. Death during preparation, failed exec
+and task teardown release the leases without leaving temporary image descriptors
+in a surviving CLONE_FILES peer. Initial loading and worker preparation share
+the same ELF and shebang parser.
+Proc-image snapshots use the same mapped request lifecycle. The worker owns the
+writable construction file, accepts captured chunks, and delivers only the final
+read-only/O_PATH result. Task death or rejected copying releases construction
+resources without changing a surviving shared guest table. Reading the kernel
+umask likewise opens status only on the worker, without caching or modifying it.
+Mount-table opens deliver read-only/O_PATH results directly, with retained
+provenance for subsequent metadata calls. Proc-image snapshots retain the same
+provenance. Path-based chmod/chown/utimens and statfs execute in the selected view
+without temporary guest FDs. Inotify registration similarly resolves the watched
+path on the worker while capturing the actual queue description; native proc
+aliases retain task-affine lookup. Current-thread proc-FD reopening captures the
+original descriptor once and delivers only the final open result. Native and
+attached objects share the retained-object reopening primitive, preserving
+independent offsets, deferred FIFO completion and readonly mount policy.
+Regular-file/FIFO creation keeps its intermediate descriptors on the worker.
+Path chdir and truncate retain the selected object there; the caller executes
+the final syscall through its leased proc path. This preserves CLONE_FS state,
+RLIMIT_FSIZE and SIGXFSZ without a private guest FD, including current-thread
+proc-FD aliases. Completion or task death releases the exact lease.
+Descriptor-based fchdir retains the original file-table and CLONE_FS turns from
+input capture through task-local execution and adapter acknowledgement. Its
+worker-owned origin publishes only after confirmed success; native rejection
+preserves cwd and terminal loss leaves it unknown. Received, unannotated directory
+FDs therefore need no temporary guest slot to establish the new cwd.
+Current-thread proc-FD metadata, readlink and suffix traversal borrow the original
+input instead of installing a temporary anchor. Cwd suffixes use the captured
+filesystem context; proc-root paths use the selected guest root. Another guest's
+executable readlink returns bounded mapped bytes after the existing process-access
+check, without a guest file or a read syscall.
+Current executable metadata and watches use a captured store-object identity;
+the worker opens and releases its own target even after unlink. Mapped and native
+RPC requests share this operand contract. Stateful operations still require the
+actual open file description, not an inode or pathname substitute.
+Xattr and POSIX ACL requests use bounded byte values in the shared mapping,
+not guest memfds or returned data FDs. The worker captures input bytes before
+execution and owns target selection, permission checks and copy-up. Descriptor
+variants capture the actual input description and reject O_PATH. Both mapped
+and native RPC transports support values up to 64 KiB and explicit output-copy
+failure. Ordinary requests clear only their header, not unused value pages.
+Protected regular-file seeks also stay native; table ordering prevents close/dup
+from replacing the description between its type check and seek.
+Socket identity, watch registration and watch delivery use the mapped transport
+when their actual input descriptions can be captured. Watch reads reserve records
+until task-local copying is acknowledged. Rejected copying restores readiness;
+loss after offering the reply retires possibly delivered records without replay.
+The worker owns completion, with no resource turn held across client delivery.
+Peer credentials and all supplementary groups return as mapped bytes, without
+a temporary identity FD. Full-table ordinary/protected callers retain short-buffer
+and output-fault semantics; external endpoints retain native credentials.
+Directory seeks use the same captured-description path, retaining the shared
+kernel position across dup and descriptor-number replacement without a guest
+RPC socket or a free guest FD slot. Task-affine directory enumeration uses mapped
+output with copy acknowledgement before cursor commit. Active operations retain
+the exact OFD; dup/fork aliases share its turn while independent opens remain
+independent. Native self-kcmp identifies descriptions, not file names or inode
+numbers. The ordinary worker path allocates no cursor entry when no asynchronous
+read is active. Rejected copying preserves position; cancellation after offering
+retires possibly delivered records without replay. Filesystem RPC joins the same
+ordering and acknowledgement contract. Neither file-table turns nor SQLite
+transactions span user copying.
+Fork shares the buffer allocator for inherited mappings; exec prepares a new
+mapping. Task and worker leases independently retain each request's storage
+through cancellation. Unknown cwd and kernel-path operands use a short-lived
+same-TGID helper with a private file table and copied FS context. It returns
+captured O_PATH descriptions directly to the supervisor; no temporary guest
+slot or retry of the filesystem operation is needed. FS/table turns remain held
+through capture and exact helper reaping. Application filters remain effective.
+Native fchdir stays in the caller with the ordinary cwd-completion observer.
+These paths use the same namespace engine and sealed-image catalogue.
 Operation results and caller-owned output are independent of RPC framing; direct
 directory reads use one reusable 64 KiB worker buffer rather than an RPC-sized batch.
 The namespace owner reuses compiled queries and transaction programs, never cached
@@ -592,8 +718,8 @@ are tested. Unlinking a name does not invalidate existing connections. Different
 stores have independent names; explicitly abstract sockets retain the host's
 shared abstract namespace and are not isolated.
 Named pipes use the same namespace and kernel pipe payloads, without requiring
-native FIFO creation under Android shell policy. Peer-open rendezvous is
-task-affine, outside namespace transactions. See the [FIFO contract](../native/guest-runtime/fifos.md)
+native FIFO creation under Android shell policy. Peer-open rendezvous belongs to
+a cancellable supervisor operation outside namespace transactions. See the [FIFO contract](../native/guest-runtime/fifos.md)
 for readiness and watch limitations.
 Unix `sendmmsg` reuses address and ancillary adapters without copying payloads.
 Credential-free sends need no per-message buffers. Tests cover partial batches, short stream writes, failed
@@ -605,12 +731,20 @@ and guest-root ownership when absent; it does not overwrite existing metadata
 or change the sealed image. POSIX shared memory, mmap, descriptor passing and unlinked
 data work across independent launches. Store-scoped System V shared memory uses
 native mapped backing files and a separate lazy IPC authority; it does not require
-kernel SysV IPC support. See [shared memory](../native/guest-runtime/shared-memory.md)
+kernel SysV IPC support. A task-affine helper shares the address space but has a
+private file table, so backing/transport descriptors never occupy application
+slots. Mapping publication, detach and fork share an address-space turn; caller
+death and exec retain helper ownership until kernel reaping. Application filter
+denials remain errors. See [shared memory](../native/guest-runtime/shared-memory.md)
 for supported operations and lifecycle limits.
 Store-scoped [SysV semaphores and message queues](../native/guest-runtime/sysv-ipc.md)
 support atomic vectors, SEM_UNDO, typed messages and signal-interruptible waits.
 Argument/result copying is task-affine, including nondumpable programs; IPC
-transactions do not span guest waits. No native SysV kernel support is required.
+transactions do not span guest waits. Filesystem and SysV adapters share the
+bootstrap-mapped buffer allocator, with typed protocol views and no per-call
+packet FD. Blocked IPC calls release their buffer before waiting; the supervisor
+owns the watcher and wakes the exact guest wait without inserting a guest FD.
+No native SysV kernel support is required.
 Inotify combines native backing-inode
 data events with transactionally committed directory/name events. Independent
 watchers sharing a store receive create/link/unlink/rename events without polling.
@@ -623,6 +757,12 @@ protected-copy and kernel limits. The current store format is 12;
 older stores are rejected, not migrated or deleted.
 
 ## Optional Kernel Support
+
+Shroot's minimum supported Linux kernel is 5.15. Interfaces newer than that
+baseline, their fallbacks and verification limits are recorded in
+[kernel compatibility](../native/guest-runtime/kernel-compatibility.md).
+Actual 5.15 device coverage is not yet established; the version alone does not
+prove the selected executor's capabilities or firmware permissions.
 
 Guest executables are never loaded into the app or shell service with
 `System.loadLibrary`. `magicdesk-guest` stages a content-addressed immutable
@@ -860,8 +1000,9 @@ Wayland publishes a logical monitor before client
 startup and replaces it when an Android host attaches; GTK's initial
 monitor-scale warnings are absent in these checks. The kernel process name identifies the guest executable after
 each exec. Current-process/thread `cmdline` and `auxv` opens produce guest-image
-snapshots with native read/seek afterwards; they allocate an unlinked temporary
-file only on those explicit opens, not on ordinary IO. Namespace `/proc/self/exe`
+snapshots with native read/seek afterwards; the worker allocates an unlinked
+construction file only on those explicit opens, not on ordinary IO. The caller
+needs only the final result slot, including when nondumpable. Namespace `/proc/self/exe`
 open/stat retains executable inode identity after unlink, path reuse and close_range,
 without a permanent hidden FD. Foreign-process aliases, snapshot stat metadata and
 descriptor-exec readlink's original dentry identity remain incomplete. The direct

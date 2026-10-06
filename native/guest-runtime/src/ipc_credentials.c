@@ -104,15 +104,21 @@ static struct snapshot *snapshot(const struct md_identity *id, pid_t pid, size_t
     if (n) memcpy(p->groups, md_identity_group_data(id), n * sizeof(uint32_t));
     return p;
 }
-static int blob_copy(sqlite3_stmt *q, int column, void **out, size_t *bytes) {
+static int blob_view(sqlite3_stmt *q, int column, const void **out, size_t *bytes) {
     int n = sqlite3_column_bytes(q, column);
     const void *p = sqlite3_column_blob(q, column);
     if (!p || n < (int)sizeof(struct md_ipc_identity)) return -EPROTO;
     const struct md_ipc_identity *id = p;
     if (id->group_count > MD_IDENTITY_GROUPS_MAX || (size_t)n != sizeof(*id) + id->group_count * sizeof(uint32_t)) return -EPROTO;
-    *out = malloc((size_t)n);
+    *out=p; *bytes=(size_t)n; return 0;
+}
+static int blob_copy(sqlite3_stmt *q, int column, void **out, size_t *bytes) {
+    const void *p;
+    int error=blob_view(q,column,&p,bytes);
+    if (error) return error;
+    *out = malloc(*bytes);
     if (!*out) return -ENOMEM;
-    memcpy(*out, p, (size_t)n); *bytes = (size_t)n; return 0;
+    memcpy(*out, p, *bytes); return 0;
 }
 static int save_connection(struct md_ipc_credentials *s, uint64_t key, const struct sockaddr_un *name, int size,
         const void *self, size_t self_size, const void *peer, size_t peer_size,
@@ -253,29 +259,28 @@ static int accept_peer(struct md_ipc_credentials *s, int fd, uint64_t key) {
     if (!r && id) r = save_connection(s, key, NULL, 0, NULL, 0, id, bytes, NULL, 0, 0, 0, 1, link);
     free(id); return r;
 }
-static int peer_snapshot(struct md_ipc_credentials *s, int fd, uint64_t key, struct md_fs_result *result) {
+static int peer_snapshot(struct md_ipc_credentials *s, const struct md_fs_request *req,
+        uint64_t key, struct md_fs_result *result, const struct md_fs_output *output) {
     sqlite3_stmt *q = NULL;
     int r = statement(s, "SELECT peer,valid FROM connections WHERE cookie=?1", &q);
-    void *id = NULL; size_t bytes = 0;
+    const void *id = NULL; size_t bytes = 0;
     if (!r) {
         sqlite3_bind_int64(q, 1, (sqlite3_int64)key);
         int step = sqlite3_step(q);
         if (step == SQLITE_ROW) {
             if (sqlite3_column_int(q, 1) < 0) r = -ENODATA;
             else if (sqlite3_column_int(q, 1) != 1) r = -ESTALE;
-            else r = blob_copy(q, 0, &id, &bytes);
+            else r = blob_view(q, 0, &id, &bytes);
         } else r = step == SQLITE_DONE ? -ENODATA : -EIO;
     }
-    sqlite3_finalize(q);
     struct ucred actual; socklen_t size = sizeof(actual);
-    if (!r && getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &actual, &size)) r = -errno;
+    if (!r && getsockopt(req->directory[0], SOL_SOCKET, SO_PEERCRED, &actual, &size)) r = -errno;
     if (!r && actual.pid != ((struct md_ipc_identity *)id)->pid) r = -ESTALE;
-    int copy = -1;
-    if (!r && (copy = (int)syscall(SYS_memfd_create, "guest-ipc-identity", MFD_CLOEXEC | MFD_ALLOW_SEALING)) < 0) r = -errno;
-    if (!r && write(copy, id, bytes) != (ssize_t)bytes) r = -EIO;
-    if (!r && fcntl(copy, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)) r = -errno;
-    if (!r) result->fd = copy; else if (copy >= 0) close(copy);
-    free(id); return r;
+    if (!req->mode) bytes=sizeof(struct md_ipc_identity);
+    if (!r && (!output || !output->data)) r=-EFAULT;
+    if (!r && output->capacity<bytes) r=-EOVERFLOW;
+    if (!r) { memcpy(output->data,id,bytes); result->size=bytes; }
+    sqlite3_finalize(q); return r;
 }
 struct message_token { uint64_t magic; unsigned char nonce[16]; };
 #define MESSAGE_MAGIC UINT64_C(0x4d44495043494431)
@@ -342,6 +347,10 @@ void md_ipc_credentials_execute(struct md_ipc_credentials *s, const struct md_id
     int r = socket_key(q->directory[0], &key);
     if (!r && flock(s->gate, LOCK_EX)) r = -errno;
     if (r) { out->error = r; return; }
+    if (q->operation==MD_FS_IPC_PEER) {
+        out->error=peer_snapshot(s,q,key,out,output);
+        flock(s->gate,LOCK_UN); return;
+    }
     size_t bytes = 0;
     struct snapshot *self = NULL;
     if (q->flags == MD_IPC_LISTEN_BEGIN || q->flags == MD_IPC_CONNECT_BEGIN || q->flags == MD_IPC_PAIR) {
@@ -362,7 +371,6 @@ void md_ipc_credentials_execute(struct md_ipc_credentials *s, const struct md_id
         if (!r) r = save_connection(s, other, NULL, 0, self, bytes, self, bytes, NULL, 0, 0, 0, 1, link);
         break;
     }
-    case MD_IPC_PEER: r = peer_snapshot(s, q->directory[0], key, out); break;
     case MD_IPC_MESSAGE_CREATE: case MD_IPC_MESSAGE_READ: r = message_identity(s, identity, q, key, out); break;
     case MD_IPC_NAME: {
         struct sockaddr_un name; int n;
@@ -379,6 +387,5 @@ void md_ipc_credentials_execute(struct md_ipc_credentials *s, const struct md_id
     }
     default: r = -EINVAL; break;
     }
-    (void)output;
     free(self); flock(s->gate, LOCK_UN); out->error = r;
 }

@@ -5,7 +5,8 @@ from pathlib import Path
 import uuid
 from test_oci_services import Suite, Server, write_script
 
-CASES = ('atomic', 'sem-wake', 'sem-signal', 'sem-remove', 'timed', 'undo-fork-exec',
+CASES = ('atomic', 'buffer-slots', 'shm-slots', 'shm-denied', 'shm-terminal', 'shm-concurrent', 'shm-owner-death', 'shm-exec', 'wait-slots', 'wait-capacity', 'wait-denied', 'wait-stopped',
+         'sem-wake', 'sem-signal', 'sem-remove', 'timed', 'undo-fork-exec',
          'undo-thread', 'undo-kill', 'undo-clear', 'zero-wait', 'messages', 'message-wait',
          'permissions', 'protected', 'group-signal', 'cross-launch', 'owner-death')
 

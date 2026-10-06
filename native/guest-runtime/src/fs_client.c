@@ -5,6 +5,7 @@
 #include "ipc_credentials.h"
 #include "raw.h"
 #include "fd_client.h"
+#include "fs_buffer.h"
 #include <errno.h>
 #include <poll.h>
 #include <sys/socket.h>
@@ -28,8 +29,77 @@ static int valid_entries(const char *data, size_t size) {
     }
     return 1;
 }
+int md_fs_result_valid(const struct md_fs_request *request, const struct md_fs_result *reply,
+        const char *data, size_t capacity, unsigned descriptors) {
+    uint32_t operation=request->operation;
+    int opens = operation == MD_FS_MOUNT_TABLE || operation == MD_FS_OPEN || operation == MD_FS_CREATE || operation == MD_FS_TEMPORARY
+        || operation == MD_FS_OPEN_OBJECT || operation == MD_FS_OPEN_IMAGE || operation == MD_FS_WATCH_CREATE
+        || operation == MD_FS_XATTR_OPEN || operation == MD_FS_REOPEN
+        || operation == MD_FS_TASK_PATH || (operation == MD_FS_IPC && request->flags == MD_IPC_MESSAGE_CREATE);
+    if (reply->error > 0 || reply->error < -4095 || reply->host_path>1
+            || reply->open_completion.kind > MD_OPEN_PIPE || reply->open_completion.kind < MD_OPEN_READY
+            || (reply->open_completion.kind && (reply->error || reply->host_path || reply->size
+                || (operation != MD_FS_OPEN && operation != MD_FS_REOPEN && operation != MD_FS_OPEN_OBJECT)
+                || (request->flags & O_PATH)))
+            || reply->size > capacity
+            || descriptors != (unsigned)(opens && !reply->error && !reply->host_path)
+                + (reply->open_completion.kind == MD_OPEN_PIPE)
+            || (reply->error && reply->size)
+            || (reply->size && !reply->host_path && operation != MD_FS_READLINK && operation != MD_FS_PATH && operation != MD_FS_GETDENTS
+                && operation != MD_FS_SOCKET_ADDRESS && operation != MD_FS_SOCKET_NAME && operation != MD_FS_REALPATH
+                && operation != MD_FS_OBJECT_ID && operation != MD_FS_OPEN_IMAGE && operation != MD_FS_WATCH_READ
+                && operation != MD_FS_GETCAP && operation != MD_FS_LISTATTR && operation != MD_FS_STATFS
+                && !md_fs_operation_value(operation))
+            || (!reply->error && !reply->host_path && operation==MD_FS_STATFS
+                && reply->size!=sizeof(struct md_fs_statfs))
+            || (!reply->error && operation == MD_FS_GETCAP && !md_file_capability_valid(data,reply->size))
+            || (operation != MD_FS_OPEN_IMAGE && !md_fs_operation_value(operation) && reply->size > PATH_MAX)
+            || (!reply->error && operation == MD_FS_OBJECT_ID && (reply->size != 33 || data[32]))
+            || (reply->position && ((operation != MD_FS_SEEKDIR && operation != MD_FS_WATCH_ADD && operation != MD_FS_WATCH_PATH
+                && operation != MD_FS_WATCH_BYTES && operation != MD_FS_WATCH_CONTAINS && operation != MD_FS_IPC
+                && operation != MD_FS_GETACL && operation != MD_FS_UMASK
+                && operation != MD_FS_XATTR && operation != MD_FS_FXATTR) || reply->error)) || reply->position < 0
+            || (operation==MD_FS_UMASK && reply->position>0777)
+            || (operation == MD_FS_GETDENTS && (reply->size > request->capacity || !valid_entries(data, reply->size)))
+            || (operation == MD_FS_WATCH_READ && reply->size > request->capacity)) return 0;
+    if (operation==MD_FS_IPC_PEER) {
+        if (reply->host_path) return 0;
+        if (!reply->error) {
+            if (reply->size<sizeof(struct md_ipc_identity)) return 0;
+            struct md_ipc_identity id;
+            memcpy(&id,data,sizeof(id));
+            if (id.group_count>MD_IDENTITY_GROUPS_MAX || reply->size!=sizeof(id)
+                    +(request->mode ? id.group_count*sizeof(uint32_t) : 0)) return 0;
+        }
+    } else if (!reply->error && !reply->host_path && md_fs_operation_value(operation)) {
+        int read=operation==MD_FS_GETACL || ((operation==MD_FS_XATTR || operation==MD_FS_FXATTR)
+            && (request->mode==MD_FS_XATTR_GET || request->mode==MD_FS_XATTR_LIST));
+        if (reply->position>MD_FS_VALUE_MAX || (read ? reply->size!=(request->capacity ? (uint64_t)reply->position : 0)
+            || reply->size>request->capacity : reply->size || reply->position)) return 0;
+    }
+    int path=operation==MD_FS_PATH || operation==MD_FS_SOCKET_ADDRESS || operation==MD_FS_SOCKET_NAME
+        || operation==MD_FS_REALPATH;
+    if (reply->host_path && (reply->error || reply->position || !reply->size || reply->size>PATH_MAX || data[0]!='/')) return 0;
+    if (!reply->error && (path || reply->host_path)
+            && (!reply->size || data[reply->size-1] || md_length(data)!=reply->size-1)) return 0;
+    if (!reply->error && !reply->host_path && operation == MD_FS_OPEN_IMAGE) {
+        const struct md_image_identity *image = (const void *)data;
+        int valid = reply->size > offsetof(struct md_image_identity, path) + 1
+            && image->object[32] == 0 && image->path[0] == '/'
+            && data[reply->size-1] == 0;
+        for (unsigned i = 0; valid && i < 32; i++)
+            valid = (image->object[i] >= '0' && image->object[i] <= '9')
+                || (image->object[i] >= 'a' && image->object[i] <= 'f');
+        for (size_t i = offsetof(struct md_image_identity, path); valid && i + 1 < reply->size; i++)
+            valid = data[i] != 0;
+        if (!valid) return 0;
+    }
+    return 1;
+}
+#ifdef MD_USE_LIBC
 static long receive_reply(int socket, int64_t deadline, const struct md_fs_request *request, struct md_fs_response *out,
-                          struct md_fs_reply *reply, uint64_t exchange) {
+                          struct md_fs_reply *reply, uint64_t exchange,
+                          int (*deliver)(void *, const void *, size_t), void *context) {
     struct md_fs_rights rights = {0};
     long r;
     for (;;) {
@@ -38,85 +108,72 @@ static long receive_reply(int socket, int64_t deadline, const struct md_fs_reque
         r = md_event_wait_fd(socket, POLLIN, deadline); if (r < 0) return r;
     }
     if (r < 0) return r;
+    if (r<(long)offsetof(struct md_fs_reply,data)) { md_fs_close_rights(&rights); return -EPROTO; }
     if (r>=(long)offsetof(struct md_fs_reply,data) && reply->receipt) {
         if (reply->magic!=MD_FS_MAGIC || reply->version!=MD_FS_VERSION || reply->receipt!=1
                 || !exchange || reply->error || rights.count!=1 || !reply->descriptors
                 || reply->descriptors>MD_FS_MAX_FDS) {
             md_fs_close_rights(&rights); return -EPROTO;
         }
-        long memory=RAW6(mmap,NULL,sizeof(struct md_fd_receipt),PROT_READ|PROT_WRITE,MAP_SHARED,rights.fd[0],0);
+        size_t size=md_fd_receipt_size(reply->descriptors);
+        long memory=RAW6(mmap,NULL,size,PROT_READ|PROT_WRITE,MAP_SHARED,rights.fd[0],0);
         md_fs_close_rights(&rights);
         if (memory<0 && memory>=-4095) return memory;
         long received;
         for (;;) {
-            received=md_fs_receive_receipt(socket,(void *)memory,&rights,exchange);
+            received=md_fs_receive_receipt(socket,(void *)memory,reply->descriptors,&rights,exchange);
             if (received!=-EAGAIN && received!=-EINTR) break;
             received=md_event_wait_fd(socket,POLLIN,deadline);
             if (received<0) break;
         }
-        RAW2(munmap,memory,sizeof(struct md_fd_receipt));
+        RAW2(munmap,memory,size);
         if (received<0) return received;
     } else if (exchange && rights.count) {
         md_fs_close_rights(&rights); return -EPROTO;
     }
-    uint32_t operation = request->operation;
-    int opens = operation == MD_FS_MOUNT_TABLE || operation == MD_FS_OPEN || operation == MD_FS_CREATE || operation == MD_FS_TEMPORARY
-        || operation == MD_FS_OPEN_OBJECT || operation == MD_FS_OPEN_IMAGE || operation == MD_FS_WATCH_CREATE
-        || operation == MD_FS_GETACL || operation == MD_FS_XATTR_OPEN || operation == MD_FS_REOPEN || (operation == MD_FS_IPC && (request->flags == MD_IPC_PEER || request->flags == MD_IPC_MESSAGE_CREATE));
     if (r < (long)offsetof(struct md_fs_reply, data)
             || reply->magic != MD_FS_MAGIC || reply->version != MD_FS_VERSION
-            || reply->error > 0 || reply->error < -4095 || reply->host_path>1 || reply->receipt>1
-            || reply->open_completion > MD_OPEN_PIPE
-            || (reply->open_completion && (reply->error || reply->host_path || reply->size
-                || (operation != MD_FS_OPEN && operation != MD_FS_REOPEN && operation != MD_FS_OPEN_OBJECT)
-                || (request->flags & O_PATH)))
-            || reply->size > sizeof(reply->data) || (size_t)r != offsetof(struct md_fs_reply, data) + reply->size
-            || reply->descriptors != rights.count || rights.count != (unsigned)(opens && !reply->error && !reply->host_path)
-                + (reply->open_completion == MD_OPEN_PIPE)
-            || (reply->error && reply->size)
-            || (reply->size && !reply->host_path && operation != MD_FS_READLINK && operation != MD_FS_PATH && operation != MD_FS_GETDENTS
-                && operation != MD_FS_SOCKET_ADDRESS && operation != MD_FS_SOCKET_NAME && operation != MD_FS_REALPATH
-                && operation != MD_FS_OBJECT_ID && operation != MD_FS_OPEN_IMAGE && operation != MD_FS_WATCH_READ
-                && operation != MD_FS_GETCAP && operation != MD_FS_LISTATTR)
-            || (!reply->error && operation == MD_FS_GETCAP && !md_file_capability_valid(reply->data,reply->size))
-            || (operation != MD_FS_OPEN_IMAGE && reply->size > PATH_MAX)
-            || (!reply->error && operation == MD_FS_OBJECT_ID && (reply->size != 33 || reply->data[32]))
-            || (reply->position && ((operation != MD_FS_SEEKDIR && operation != MD_FS_WATCH_ADD
-                && operation != MD_FS_WATCH_BYTES && operation != MD_FS_WATCH_CONTAINS && operation != MD_FS_IPC
-                && operation != MD_FS_GETACL) || reply->error)) || reply->position < 0
-            || (operation == MD_FS_GETDENTS && (reply->size > request->capacity || !valid_entries(reply->data, reply->size)))
-            || (operation == MD_FS_WATCH_READ && reply->size > request->capacity)
-            || (!reply->error && (operation == MD_FS_PATH || operation == MD_FS_SOCKET_ADDRESS || operation == MD_FS_SOCKET_NAME || operation == MD_FS_REALPATH)
-                && (!reply->size || reply->data[reply->size-1]))) {
+            || reply->receipt>1
+            || reply->size > sizeof(reply->data)
+            || (size_t)r != offsetof(struct md_fs_reply, data)
+                + (reply->size<MD_FS_REPLY_CHUNK ? reply->size : MD_FS_REPLY_CHUNK)
+            || (reply->size>MD_FS_REPLY_CHUNK && (reply->receipt || reply->descriptors))
+            || reply->descriptors != rights.count) {
         md_fs_close_rights(&rights); return -EPROTO;
     }
-    if (reply->host_path && (reply->error || reply->position || !reply->size || reply->size>PATH_MAX
-            || reply->data[0]!='/' || reply->data[reply->size-1]
-            || md_length(reply->data)!=reply->size-1)) {
+    size_t received=(size_t)r - offsetof(struct md_fs_reply,data);
+    while (received<reply->size) {
+        size_t left=reply->size-received, size=left<MD_FS_REPLY_CHUNK ? left : MD_FS_REPLY_CHUNK;
+        struct md_fs_rights extra={0};
+        /* EVENT_WAIT: the same accepted reply's next chunk; the original call
+         * deadline bounds missing bytes without replaying the request. */
+        for (;;) {
+            r=md_fs_receive(socket,reply->data+received,size,&extra);
+            if (r!=-EAGAIN && r!=-EINTR) break;
+            r=md_event_wait_fd(socket,POLLIN,deadline);
+            if (r<0) break;
+        }
+        unsigned unexpected=extra.count; md_fs_close_rights(&extra);
+        if (r!=(long)size || unexpected) {
+            md_fs_close_rights(&rights); return r<0 ? r : -EPROTO;
+        }
+        received+=size;
+    }
+    struct md_fs_result result={.error=reply->error,.fd=rights.count ? rights.fd[0] : -1,
+        .info=reply->info,.size=reply->size,.position=reply->position,.host_path=reply->host_path,
+        .open_completion={.kind=(enum md_open_kind)reply->open_completion,.control=rights.count>1 ? rights.fd[1] : -1}};
+    if (!md_fs_result_valid(request,&result,reply->data,sizeof(reply->data),rights.count)) {
         md_fs_close_rights(&rights); return -EPROTO;
     }
-    if (!reply->error && !reply->host_path && operation == MD_FS_OPEN_IMAGE) {
-        const struct md_image_identity *image = (const void *)reply->data;
-        int valid = reply->size > offsetof(struct md_image_identity, path) + 1
-            && image->object[32] == 0 && image->path[0] == '/'
-            && reply->data[reply->size-1] == 0;
-        for (unsigned i = 0; valid && i < 32; i++)
-            valid = (image->object[i] >= '0' && image->object[i] <= '9')
-                || (image->object[i] >= 'a' && image->object[i] <= 'f');
-        for (size_t i = offsetof(struct md_image_identity, path); valid && i + 1 < reply->size; i++)
-            valid = reply->data[i] != 0;
-        if (!valid) { md_fs_close_rights(&rights); return -EPROTO; }
+    out->delivery = MD_FS_REPLIED; out->result=result;
+    if (reply->size<=sizeof(out->data)) memcpy(out->data, reply->data, reply->size);
+    if (!result.error && !result.host_path && md_fs_operation_value(request->operation)) {
+        if (deliver) return deliver(context,reply->data,reply->size);
+        if (reply->size>sizeof(out->data)) return -EOVERFLOW;
     }
-    out->delivery = MD_FS_REPLIED; out->result.error = reply->error;
-    out->result.fd = rights.count ? rights.fd[0] : -1;
-    out->result.info = reply->info; out->result.size = reply->size;
-    out->result.position = reply->position;
-    out->result.host_path=reply->host_path;
-    out->result.open_completion.kind=(enum md_open_kind)reply->open_completion;
-    out->result.open_completion.control=rights.count > 1 ? rights.fd[1] : -1;
-    memcpy(out->data, reply->data, reply->size);
     return 0;
 }
+#endif
 long md_fs_call_deliver(const char *name, unsigned timeout_ms,
         const struct md_fs_request *request, struct md_fs_response *out,
         int (*deliver)(void *, const void *, size_t), void *context) {
@@ -124,23 +181,47 @@ long md_fs_call_deliver(const char *name, unsigned timeout_ms,
     memset(out, 0, sizeof(*out)); out->result.fd = -1;
     if (!request) return -EFAULT;
     if (!timeout_ms || timeout_ms > 60000) return -EINVAL;
+#ifndef MD_USE_LIBC
+    (void)name;
+    if (deliver && request->operation!=MD_FS_WATCH_READ && request->operation!=MD_FS_GETDENTS
+            && !md_fs_operation_value(request->operation)) return -EINVAL;
+    /* Guest calls have one transport. Task-affine inputs are captured before
+     * worker execution, without retrying an accepted filesystem operation. */
+    return md_fs_buffer_call(request,out,deliver,context);
+#else
+    if (request->capture[0].path || request->capture[1].path
+            || request->capture[0].flags || request->capture[1].flags) return -ENOTSUP;
     /* The request is no longer needed after send: reuse its storage for the reply. */
-    union { struct md_fs_packet packet; struct md_fs_reply reply; } wire = {.packet = {.magic = MD_FS_MAGIC, .version = MD_FS_VERSION,
-        .operation = request->operation, .flags = request->flags, .mode = request->mode,
-        .capacity = request->capacity, .offset = request->offset, .resolve = request->resolve,
-        .actor = request->actor ? request->actor : (int)RAW0(gettid), .attributes = request->attributes}};
+    union { struct md_fs_packet packet; struct md_fs_reply reply; } wire;
+    memset(&wire.packet,0,offsetof(struct md_fs_packet,data));
+    wire.packet.magic=MD_FS_MAGIC; wire.packet.version=MD_FS_VERSION;
+    wire.packet.operation=request->operation; wire.packet.flags=request->flags; wire.packet.mode=request->mode;
+    wire.packet.capacity=request->capacity; wire.packet.offset=request->offset; wire.packet.resolve=request->resolve;
+    wire.packet.actor=request->actor ? request->actor : (int)RAW0(gettid); wire.packet.attributes=request->attributes;
+    if (request->value_size>MD_FS_VALUE_MAX || (request->value_size && !request->value)) return -EINVAL;
+    wire.packet.value_size=request->value_size;
     struct md_fs_rights rights = {0};
     size_t length = 0;
     for (unsigned i = 0; i < 2; ++i) {
+        if (request->object[i]) {
+            if (request->directory[i]!=-1 || !md_fs_object_id_valid(request->object[i])) return -EINVAL;
+            memcpy(wire.packet.object[i],request->object[i],33);
+        }
         const char *path = request->path[i] ? request->path[i] : "";
         size_t n = 0;
         while (path[n]) { if (n == PATH_MAX-1) return -ENAMETOOLONG; ++n; }
         memcpy(wire.packet.data + length, path, n+1); wire.packet.length[i] = n+1; length += n+1;
-        if (request->directory[i] < -1) return -EBADF;
-        if (request->directory[i] >= 0) {
+        if (request->directory[i]==AT_FDCWD) {
+            wire.packet.descriptors|=1U<<i;
+            wire.packet.cwd|=1U<<i;
+        } else if (request->directory[i] < -1) return -EBADF;
+        else if (request->directory[i] >= 0) {
             wire.packet.descriptors |= 1U << i;
             rights.fd[rights.count++] = request->directory[i];
         }
+    }
+    if (request->value_size) {
+        memcpy(wire.packet.data+length,request->value,request->value_size); length+=request->value_size;
     }
     struct sockaddr_un address;
     long size = md_fs_address(name, &address); if (size < 0) return size;
@@ -163,6 +244,7 @@ long md_fs_call_deliver(const char *name, unsigned timeout_ms,
     while (!r) {
         long begin=md_fd_control(MD_FD_INPUT,0,request->directory[0],request->directory[1]);
         if (begin<0) { r=begin; break; }
+        if (!begin && wire.packet.cwd) { r=-ENODATA; break; }
         exchange=(uint64_t)begin; wire.packet.exchange=exchange;
         r = md_fs_send((int)socket, &wire.packet, length, &rights);
         if (r>=0) out->delivery=MD_FS_UNCONFIRMED;
@@ -179,11 +261,11 @@ long md_fs_call_deliver(const char *name, unsigned timeout_ms,
             r = md_event_wait_fd((int)socket, POLLOUT, deadline); continue;
         }
         if (r >= 0) {
-            r = (size_t)r == length ? receive_reply((int)socket, deadline, request, out, &wire.reply, exchange) : -EIO;
+            r = (size_t)r == length ? receive_reply((int)socket, deadline, request, out, &wire.reply, exchange,deliver,context) : -EIO;
         }
         break;
     }
-    if (!r && !out->result.error && request->operation == MD_FS_WATCH_READ) {
+    if (!r && !out->result.error && (request->operation == MD_FS_WATCH_READ || request->operation==MD_FS_GETDENTS)) {
         int copied = deliver ? deliver(context, out->data, out->result.size) : 0;
         struct md_fs_rights none = {0};
         long sent;
@@ -224,8 +306,18 @@ long md_fs_call_deliver(const char *name, unsigned timeout_ms,
     }
     RAW1(close, socket);
     return r;
+#endif
 }
 long md_fs_call(const char *name, unsigned timeout_ms,
         const struct md_fs_request *request, struct md_fs_response *out) {
-    return md_fs_call_deliver(name, timeout_ms, request, out, NULL, NULL);
+    long r=md_fs_call_deliver(name, timeout_ms, request, out, NULL, NULL);
+#ifdef MD_USE_LIBC
+    if (!r && !out->result.error && !out->result.host_path && request->operation==MD_FS_TASK_PATH) {
+        int fd=out->result.fd; out->result.fd=-1;
+        out->result.error=(int)(request->mode==MD_FS_TASK_CHDIR ? RAW1(fchdir,fd)
+            : RAW2(ftruncate,fd,request->offset));
+        RAW1(close,fd);
+    }
+#endif
+    return r;
 }

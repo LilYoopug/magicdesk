@@ -4,10 +4,12 @@
 #include "fd_metadata.h"
 #include "interception.h"
 #include "fd_client.h"
+#include "fs_buffer.h"
 #include "raw.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/inotify.h>
 #include <linux/stat.h>
 #ifndef STATX_MNT_ID_UNIQUE
 #define STATX_MNT_ID_UNIQUE 0x4000U
@@ -80,20 +82,12 @@ static int link_operation(long nr, const unsigned long *a) {
     case SYS_statx: return a[2] & AT_SYMLINK_NOFOLLOW;
     case SYS_fchownat: return a[4] & AT_SYMLINK_NOFOLLOW;
     case SYS_utimensat: return a[3] & AT_SYMLINK_NOFOLLOW;
+    case SYS_inotify_add_watch: return a[2] & IN_DONT_FOLLOW;
     case SYS_lsetxattr: case SYS_lgetxattr: case SYS_llistxattr: case SYS_lremovexattr:
     case SYS_mkdirat: case SYS_unlinkat: case SYS_mknodat: case SYS_symlinkat:
         return 1;
     default: return 0;
     }
-}
-static long capture(const struct md_proc_path *ref, const char *path, int directory) {
-    /* /proc/self addresses the group leader, whose FS/files can have been
-     * unshared from this thread. Preserve that native lookup as unknown. */
-    if (ref->process==(int)RAW0(gettid)) {
-        if (ref->kind==MD_PROC_FD) return md_fd_capture_path(path,ref->descriptor,directory);
-        if (ref->kind==MD_PROC_CWD) return md_fd_capture_path(path,AT_FDCWD,directory);
-    }
-    return RAW4(openat,AT_FDCWD,path,O_PATH|O_CLOEXEC|(directory ? O_DIRECTORY : 0),0);
 }
 static long host_readlink(const struct md_fs *fs, const struct md_proc_path *ref,
         const char *path, const unsigned long *a) {
@@ -102,16 +96,61 @@ static long host_readlink(const struct md_fs *fs, const struct md_proc_path *ref
     long n = RAW4(readlinkat, AT_FDCWD, path, text, sizeof(text) - 1);
     if (n < 0) return n;
     text[n] = 0;
-    long fd = capture(ref,path,0);
-    if (fd >= 0) {
-        struct md_fs_request q = {.operation = MD_FS_PATH, .directory = {(int)fd, -1}};
-        struct md_fs_response out;
-        long r = md_namespace_request(fs, &q, &out);
-        if (!r) r = md_copy(text, sizeof(text), out.data);
-        RAW1(close, fd);
-        if (r < 0 && r != -EXDEV) return r;
-    }
+    int borrowed=ref->process==(int)RAW0(gettid) && (ref->kind==MD_PROC_FD || ref->kind==MD_PROC_CWD);
+    int fd = borrowed ? (ref->kind==MD_PROC_FD ? ref->descriptor : AT_FDCWD) : -1;
+    char selected[PATH_MAX];
+    if (!borrowed && (n=md_proc_task_path(path,selected,sizeof(selected)))<0) return n;
+    struct md_fs_request q = {.operation = MD_FS_PATH, .directory = {fd, -1},
+        .capture={{borrowed ? NULL : selected,borrowed ? 0 : O_PATH}}};
+    struct md_fs_response out;
+    long r = md_namespace_request(fs, &q, &out);
+    if (!r) r = md_copy(text, sizeof(text), out.data);
+    if (r < 0 && r != -EXDEV && (borrowed || out.delivery!=MD_FS_NOT_SENT)) return r;
     return link_result(text, a);
+}
+static long target_call(const struct md_fs *fs, long nr, const unsigned long *a, struct md_namespace_operand operand) {
+    int fd=operand.descriptor;
+    unsigned long args[6]; memcpy(args,a,sizeof(args));
+    switch (nr) {
+    case SYS_newfstatat: case SYS_statx:
+        args[0]=(unsigned long)fd; args[1]=(unsigned long)"";
+        args[nr==SYS_statx ? 2 : 3]|=AT_EMPTY_PATH;
+        return md_namespace_path_call(fs,nr,args,operand,"");
+    case SYS_chdir: case SYS_truncate: case SYS_statfs:
+        return md_namespace_path_call(fs,nr,args,operand,"");
+    case SYS_faccessat: case SYS_faccessat2:
+    case SYS_fchmodat: case SYS_fchmodat2:
+    case SYS_fchownat: case SYS_utimensat: {
+        long operation=nr==SYS_faccessat ? SYS_faccessat2 : nr==SYS_fchmodat ? SYS_fchmodat2 : nr;
+        unsigned flags_index=nr==SYS_fchownat ? 4 : 3;
+        args[0]=(unsigned long)fd; args[1]=(unsigned long)"";
+        args[flags_index]=(nr==SYS_faccessat || nr==SYS_fchmodat ? 0 : args[flags_index])|AT_EMPTY_PATH;
+        return md_namespace_path_call(fs,operation,args,operand,"");
+    }
+    case SYS_setxattr: case SYS_getxattr: case SYS_listxattr: case SYS_removexattr:
+        return md_namespace_xattr(fs,nr,operand,"",args);
+    case SYS_inotify_add_watch: {
+        struct md_fs_request q={.operation=MD_FS_WATCH_ADD,.directory={(int)a[0],fd},.capture={[1]=operand.capture},.flags=(unsigned)a[2]};
+        struct md_fs_response out;
+        long result=md_namespace_request(fs,&q,&out);
+        return result<0 ? result : out.result.position;
+    }
+    default: return -ENOTSUP;
+    }
+}
+static long native_call(const struct md_fs *fs, long nr, const unsigned long *a) {
+    if (nr==SYS_inotify_add_watch) {
+        char selected[PATH_MAX];
+        long result=md_proc_task_path((const char *)a[1],selected,sizeof(selected));
+        if (result<0) return result;
+        struct md_fs_request q={.operation=MD_FS_WATCH_ADD,.directory={(int)a[0],-1},.flags=(unsigned)a[2],
+            .capture={[1]={selected,O_PATH|(a[2]&IN_DONT_FOLLOW ? O_NOFOLLOW : 0)}}};
+        struct md_fs_response out;
+        result=md_namespace_request(fs,&q,&out);
+        return result<0 ? result : out.result.position;
+    }
+    return nr==SYS_statx ? md_namespace_native_statx(fs,a)
+        : md_raw(nr,a[0],a[1],a[2],a[3],a[4],a[5]);
 }
 long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, const unsigned long *a,
                             unsigned path_index, const char *path) {
@@ -124,20 +163,13 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
             if (flags&O_DIRECTORY) return -ENOTDIR;
             if (!(flags&O_PATH) && ((flags&O_ACCMODE)!=O_RDONLY || (flags&O_TRUNC))) return -EACCES;
             if ((flags&(O_CREAT|O_EXCL))==(O_CREAT|O_EXCL)) return -EEXIST;
-            struct md_fs_request q={.operation=MD_FS_MOUNT_TABLE,.directory={-1,-1},.flags=ref.kind==MD_PROC_MOUNTINFO};
+            struct md_fs_request q={.operation=MD_FS_MOUNT_TABLE,.directory={-1,-1},
+                .mode=ref.kind==MD_PROC_MOUNTINFO,.flags=(unsigned)flags&(O_PATH|O_CLOEXEC)};
             struct md_fs_response response;
             long error=md_fs_call(fs->endpoint,5000,&q,&response);
             if (!error) error=response.result.error;
             if (error) return error;
             int fd=response.result.fd;
-            if (flags&O_PATH) {
-                char descriptor[64]="/proc/thread-self/fd/";
-                md_decimal(descriptor+md_length(descriptor),(unsigned)fd);
-                long opened=RAW4(openat,AT_FDCWD,descriptor,O_PATH|O_CLOEXEC,0);
-                RAW1(close,fd);
-                if (opened<0) return opened;
-                fd=(int)opened;
-            }
             if (!(flags&O_CLOEXEC) && (error=RAW3(fcntl,fd,F_SETFD,0))<0) { RAW1(close,fd); return error; }
             return fd;
         }
@@ -150,10 +182,9 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
         if (nr!=SYS_openat && nr!=SYS_readlinkat) return -ENOTSUP;
         if (nr==SYS_readlinkat && ref.foreign_kind!=MD_PROC_EXE) return -ENOTSUP;
         if (nr==SYS_readlinkat && !a[3]) return -EINVAL;
-        long fd=RAW5(prctl,MD_GUEST_PROC_IMAGE,ref.process,ref.foreign_kind,
-            nr==SYS_openat ? a[2] : O_RDONLY|O_CLOEXEC|MD_PROC_IMAGE_LINK,0);
-        if (fd<0 || nr==SYS_openat) return fd;
-        long size=RAW3(read,fd,a[2],a[3]); RAW1(close,fd); return size;
+        if (nr==SYS_readlinkat)
+            return md_fs_buffer_proc_link(ref.process,(void *)a[2],a[3]);
+        return RAW5(prctl,MD_GUEST_PROC_IMAGE,ref.process,ref.foreign_kind,a[2],0);
     }
     if (ref.kind == MD_PROC_CMDLINE || ref.kind == MD_PROC_AUXV) {
         if (*ref.tail) return -ENOTDIR;
@@ -171,100 +202,59 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
         if (ref.ordinary_link) return RAW4(readlinkat, AT_FDCWD, path, a[2], a[3]);
         return host_readlink(fs, &ref, path, a);
     }
-    if (native)
-        return nr==SYS_statx ? md_namespace_native_statx(fs,args)
-            : md_raw(nr, args[0], args[1], args[2], args[3], args[4], args[5]);
+    if (native) return native_call(fs,nr,args);
+    if (ref.kind==MD_PROC_ROOT) {
+        char root[PATH_MAX]="/";
+        long error=tail ? md_copy(root,sizeof(root),ref.tail) : 0;
+        return error<0 ? error : md_namespace_path_call(fs,nr,args,md_namespace_descriptor(AT_FDCWD),root);
+    }
+    if (!tail && ref.kind==MD_PROC_FD && ref.process==(int)RAW0(gettid) && nr!=SYS_openat)
+        return target_call(fs,nr,args,md_namespace_descriptor(ref.descriptor));
     if (!tail && nr == SYS_openat) {
         if (ref.kind == MD_PROC_EXE) return md_proc_executable_open(fs, exe, (int)a[2]);
-        if (ref.kind == MD_PROC_ROOT)
-            return md_namespace_open(fs, AT_FDCWD, "/",
-                                     (int)a[2], (unsigned)a[3]);
-        long original = capture(&ref,path,0);
-        if (original < 0) return original;
+        int flags=(int)a[2];
+        if ((flags&O_CREAT) && (flags&O_DIRECTORY)) return -EINVAL;
+        if (ref.kind==MD_PROC_FD && ref.process==(int)RAW0(gettid))
+            return md_namespace_proc_reopen(fs,ref.descriptor,flags&~(O_CREAT|O_EXCL));
+        if (ref.kind==MD_PROC_CWD && ref.process==(int)RAW0(gettid))
+            return md_namespace_open(fs,AT_FDCWD,".",flags&~(O_CREAT|O_EXCL),0);
         /* The followed magic link already selected an existing object. Creation
          * and exclusive-link semantics were handled above, not by its backing. */
-        int flags = (int)a[2];
-        long reopened = (flags & O_CREAT) && (flags & O_DIRECTORY) ? -EINVAL
-            : md_namespace_reopen(fs, (int)original, flags & ~(O_CREAT | O_EXCL), 0);
-        RAW1(close, original);
-        return reopened == -EXDEV ? RAW4(openat, AT_FDCWD, path, a[2], a[3]) : reopened;
+        char selected[PATH_MAX];
+        long result=md_proc_task_path(path,selected,sizeof(selected));
+        if (result<0) return result;
+        struct md_fs_request q={.operation=MD_FS_REOPEN,.directory={-1,-1},
+            .capture={{selected,O_PATH}},.flags=flags&~(O_CREAT|O_EXCL),.mode=MD_FS_REOPEN_NATIVE};
+        struct md_fs_response out;
+        result=md_namespace_request(fs,&q,&out);
+        if (result<0) return result;
+        return md_namespace_open_result(&out.result,flags&~(O_CREAT|O_EXCL));
     }
-    char anchor[PATH_MAX];
+    char anchor[PATH_MAX],selected[PATH_MAX];
     size_t length = tail ? ref.anchor_length : md_length(path);
     memcpy(anchor, path, length); anchor[length] = 0;
-    long fd;
-    if (!native && ref.kind == MD_PROC_EXE)
-        fd = md_proc_executable_open(fs, exe, O_PATH | O_CLOEXEC | (tail ? O_DIRECTORY : 0));
-    else if (!native && ref.kind == MD_PROC_ROOT)
-        fd = md_namespace_open(fs, AT_FDCWD, "/",
-                               O_PATH | O_CLOEXEC | (tail ? O_DIRECTORY : 0), 0);
-    else
-        fd = capture(&ref,anchor,tail);
-    if (fd < 0) return fd;
-    long r;
+    struct md_namespace_operand operand=md_namespace_descriptor(-1);
+    int owned=-1;
+    int image=ref.kind==MD_PROC_EXE && fs->image && fs->image->executable_object[0];
+    if (image) operand.descriptor=MD_NAMESPACE_EXECUTABLE;
+    else if (!native && ref.kind == MD_PROC_EXE) {
+        long fd=md_proc_executable_open(fs,exe,O_PATH|O_CLOEXEC|(tail ? O_DIRECTORY : 0));
+        if (fd<0) return fd;
+        owned=operand.descriptor=(int)fd;
+    } else if (ref.process==(int)RAW0(gettid) && (ref.kind==MD_PROC_FD || ref.kind==MD_PROC_CWD))
+        operand.descriptor=ref.kind==MD_PROC_FD ? ref.descriptor : AT_FDCWD;
+    else {
+        long error=md_proc_task_path(anchor,selected,sizeof(selected));
+        if (error<0) return error;
+        operand.capture=(struct md_fs_task_capture){selected,O_PATH|(tail ? O_DIRECTORY : 0)};
+    }
+    long result;
     if (tail) {
-        const char *relative = ref.tail;
-        while (*relative == '/') ++relative;
-        if (!*relative) relative = ".";
-        struct md_fs_response out;
-        r = md_namespace_inspect(fs, (int)fd, NULL, 0, 0, &out);
-        if (!r) r = md_namespace_path_call(fs, nr, args, (int)fd, relative);
-        else if (r == -EXDEV) {
-            md_copy(anchor, sizeof(anchor), "/proc/thread-self/fd/");
-            md_decimal(anchor + md_length(anchor), (unsigned)fd);
-            r = md_append(anchor, sizeof(anchor), "/");
-            if (!r) r = md_append(anchor, sizeof(anchor), relative);
-            if (!r) {
-                args[path_index] = (unsigned long)anchor;
-                r = nr==SYS_statx ? md_namespace_native_statx(fs,args)
-                    : md_raw(nr, args[0], args[1], args[2], args[3], args[4], args[5]);
-            }
-        }
-    } else switch (nr) {
-    case SYS_newfstatat: case SYS_statx:
-        args[0] = (unsigned long)fd; args[1] = (unsigned long)"";
-        args[nr == SYS_statx ? 2 : 3] |= AT_EMPTY_PATH;
-        r = md_namespace_path_call(fs, nr, args, (int)fd, "");
-        break;
-    case SYS_chdir:
-        args[0] = (unsigned long)fd;
-        r = md_namespace_call(fs, exe, SYS_fchdir, args);
-        break;
-    case SYS_faccessat: case SYS_faccessat2:
-    case SYS_fchmodat: case SYS_fchmodat2:
-    case SYS_fchownat: case SYS_utimensat: {
-        /* A magic link selects an inode, not a second metadata authority.
-         * The ordinary empty-path operation owns permissions, ACLs and copy-up. */
-        long operation = nr == SYS_faccessat ? SYS_faccessat2 : nr == SYS_fchmodat ? SYS_fchmodat2 : nr;
-        unsigned flags_index = nr == SYS_fchownat ? 4 : 3;
-        args[0] = (unsigned long)fd; args[1] = (unsigned long)"";
-        args[flags_index] = (nr == SYS_faccessat || nr == SYS_fchmodat ? 0 : args[flags_index]) | AT_EMPTY_PATH;
-        r = md_namespace_path_call(fs, operation, args, (int)fd, "");
-        break;
-    }
-    case SYS_statfs: r = RAW2(fstatfs, fd, a[1]); break;
-    case SYS_setxattr: case SYS_getxattr: case SYS_listxattr: case SYS_removexattr: {
-        struct md_fs_response out;
-        r = md_namespace_inspect(fs, (int)fd, NULL, 0, 0, &out);
-        if (r == -EXDEV) r = md_raw(nr, args[0], args[1], args[2], args[3], args[4], 0);
-        else if (!r) {
-            md_copy(anchor, sizeof(anchor), "/proc/thread-self/fd/");
-            md_decimal(anchor + md_length(anchor), (unsigned)fd);
-            r = md_namespace_xattr(fs, nr, AT_FDCWD, anchor, args);
-        }
-        break;
-    }
-    case SYS_truncate: {
-        md_copy(anchor, sizeof(anchor), "/proc/thread-self/fd/");
-        md_decimal(anchor + md_length(anchor), (unsigned)fd);
-        long writefd = md_namespace_reopen(fs, (int)fd, O_WRONLY | O_CLOEXEC, 1);
-        if (writefd == -EXDEV) writefd = RAW4(openat, AT_FDCWD, anchor, O_WRONLY | O_CLOEXEC, 0);
-        r = writefd < 0 ? writefd : RAW2(ftruncate, writefd, a[1]);
-        if (writefd >= 0) RAW1(close, writefd);
-        break;
-    }
-    default: r = -ENOTSUP;
-    }
-    RAW1(close, fd);
-    return r;
+        const char *relative=ref.tail;
+        while (*relative=='/') ++relative;
+        result=md_namespace_path_call(fs,nr,args,operand,*relative ? relative : ".");
+    } else result=target_call(fs,nr,args,operand);
+    if (result==-EXDEV) result=native_call(fs,nr,args);
+    if (owned>=0) RAW1(close,owned);
+    return result;
 }

@@ -40,6 +40,14 @@ syscall adapter into ART or make its kernel capabilities a shared-startup
 requirement. Each launch retains its selected identity and environment;
 there is no global current distribution or implicit privilege switch.
 
+Shroot's minimum supported Linux kernel is 5.15, independently of the APK and
+Desktop Android API levels. Record every dependency newer than 5.15 (including
+flags, ioctl commands and required semantics) in
+`native/guest-runtime/kernel-compatibility.md`, with its owner, fallback or
+explicit failure, and coverage. Do not silently raise that minimum. Kernel
+version and available NDK headers do not prove capability or firmware permission;
+guest-only probes must leave other MagicDesk services independent.
+
 Embedded X11 and Wayland are shared services. An explicitly selected Termux or
 shell executor supplies programs; protocol runtimes own the X server or Wayland
 compositor, while `hosted-runtime` owns shared graphics and frame presentation.

@@ -16,6 +16,7 @@ def main():
     parser.add_argument('--gdbus', action='store_true')
     parser.add_argument('--activation', type=Path)
     parser.add_argument('--installed', action='store_true', help="Use the installed APK's guest bundle")
+    parser.add_argument('--custody', action='store_true', help='Compare terminal send/receive adapter custody with native shell')
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
     spec = importlib.util.spec_from_file_location('transport', repo / 'scripts/mcp-client.py')
@@ -52,6 +53,23 @@ def main():
                   if args.installed else base + '/libmagicdesk_guest_run.so')
         run = [runner, '--store', args.store, '--user', '0:0', '--deadline-seconds', '30']
         command(run + ['--', '/bin/mkdir', '-p', '/fixture'])
+        if args.custody:
+            failures = []
+            for receive in range(2):
+                for protected in range(2):
+                    for guest in (False, True):
+                        name = f'custody receive={receive} protected={protected} guest={guest}'
+                        fixture = '/fixture/libmagicdesk_guest_ipc_credentials_guest.so'
+                        argv = (run + ['--bind-ro', base + '/fixtures', '/fixture', '--', fixture, '--custody']
+                                if guest else [base + '/fixtures/libmagicdesk_guest_ipc_credentials_guest.so', '--custody-native'])
+                        try:
+                            command(argv + [str(receive), str(protected)])
+                        except AssertionError:
+                            failures.append(name)
+                            print('FAIL', name, flush=True)
+            report['passed'] = not failures
+            assert not failures, failures
+            return
         command(run + ['--bind-ro', base + '/fixtures', '/fixture', '--', '/fixture/libmagicdesk_guest_ipc_credentials_guest.so'])
         if args.activation:
             transport.upload(client, args.activation, base + '/fixtures/ipc-dbus')
