@@ -41,4 +41,7 @@ long md_fs_receive_receipt(int socket, struct md_fd_receipt *, unsigned capacity
 void md_fs_close_rights(struct md_fs_rights *);
 long md_fs_address(const char *, struct sockaddr_un *);
 long md_fs_peer(int socket);
+/* Private runtime transport only: connected Unix seqpacket, nonblocking,
+ * CLOEXEC, same real executor identity. Returns the kernel peer PID or error. */
+long md_fs_private_peer(int socket);
 #endif

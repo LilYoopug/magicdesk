@@ -19,7 +19,7 @@
 
 static const char default_config[] = "{\"architecture\":\"arm64\",\"os\":\"linux\",\"config\":{\"Cmd\":[\"/bin/sh\"],\"WorkingDir\":\"/\"}}";
 static int config_read(struct md_inode_store *s, char **out) {
-    int fd = openat(s->root, "image-config.json", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    int fd = openat(s->lifetime->root, "image-config.json", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) {
         if (errno != ENOENT) return -errno;
         *out = strdup(default_config); return *out ? 0 : -ENOMEM;
@@ -253,12 +253,12 @@ int md_image_archive_import(const char *archive, const char *destination, int ba
     if (!r) r = md_image_layers_finish(s, 1);
     if (!r && !guest_users) r = mdi_sql(s, "UPDATE properties SET value=0 WHERE key='image-users'");
     int out = -1;
-    if (!r && (out = openat(s->root, "image-config.json", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600)) < 0) r = -errno;
+    if (!r && (out = openat(s->lifetime->root, "image-config.json", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600)) < 0) r = -errno;
     if (!r) r = md_image_write(out, config, strlen(config));
     if (!r && fsync(out)) r = -errno;
     if (out >= 0) close(out);
     if (!r && !backup) r = md_inode_store_seal(s);
-    if (!r && fsync(s->root)) r = -errno;
+    if (!r && fsync(s->lifetime->root)) r = -errno;
     md_inode_store_close(s);
     if (!r) r = md_image_publish_commit(&p);
     if (snapshot >= 0) close(snapshot);

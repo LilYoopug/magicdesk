@@ -3,6 +3,7 @@
 #include "raw.h"
 #include "fd_client.h"
 #include <errno.h>
+#include <fcntl.h>
 #include <sys/socket.h>
 
 long md_fs_address(const char *name, struct sockaddr_un *out) {
@@ -20,6 +21,22 @@ long md_fs_peer(int socket) {
     long r = RAW5(getsockopt, socket, SOL_SOCKET, SO_PEERCRED, &cred, &size);
     if (r < 0) return r;
     return size == sizeof(cred) && cred.uid == (unsigned)RAW0(geteuid) ? 0 : -EACCES;
+}
+long md_fs_private_peer(int socket) {
+    int value; unsigned size=sizeof(value);
+    long r=RAW5(getsockopt,socket,SOL_SOCKET,SO_DOMAIN,&value,&size);
+    if (r<0) return r;
+    if (size!=sizeof(value) || value!=AF_UNIX) return -EAFNOSUPPORT;
+    size=sizeof(value); r=RAW5(getsockopt,socket,SOL_SOCKET,SO_TYPE,&value,&size);
+    if (r<0) return r;
+    if (size!=sizeof(value) || value!=SOCK_SEQPACKET) return -EPROTOTYPE;
+    long flags=RAW3(fcntl,socket,F_GETFL,0), descriptor=RAW3(fcntl,socket,F_GETFD,0);
+    if (flags<0 || descriptor<0) return flags<0 ? flags : descriptor;
+    if (!(flags&O_NONBLOCK) || !(descriptor&FD_CLOEXEC)) return -EINVAL;
+    struct ucred cred; size=sizeof(cred);
+    r=RAW5(getsockopt,socket,SOL_SOCKET,SO_PEERCRED,&cred,&size);
+    if (r<0) return r;
+    return size==sizeof(cred) && cred.uid==(unsigned)RAW0(geteuid) && cred.pid>0 ? cred.pid : -EACCES;
 }
 void md_fs_close_rights(struct md_fs_rights *rights) {
     for (unsigned i = 0; i < rights->count; ++i) RAW1(close, rights->fd[i]);

@@ -22,6 +22,9 @@ struct md_filesystem {
     const char *ipc_store;
     struct md_fs_statistics *statistics;
 };
+/* Worker-only lazy authority admission, shared by guest IPC and private peer
+ * setup. No connection/database ownership crosses into the supervisor. */
+int md_fs_ipc_authority(struct md_filesystem *, struct md_ipc_credentials **);
 /* Request-local authentication, independent of transport. Keep this context
  * until delivery/cancellation finishes; the borrowed filesystem outlives it.
  * No registry lookup is repeated at execution or publication. */

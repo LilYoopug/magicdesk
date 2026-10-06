@@ -17,7 +17,7 @@
 #include <unistd.h>
 
 static int config(struct md_inode_store *s, char **json) {
-    int fd = openat(s->root, "image-config.json", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    int fd = openat(s->lifetime->root, "image-config.json", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0) return -errno;
     int r = md_image_read(fd, 8*1024*1024, json);
     close(fd);
@@ -163,7 +163,7 @@ int md_image_launch(enum md_image_command kind, int argc, char **argv) {
     if (!r && s->readonly) r = -EROFS;
     char hostname[MD_HOSTNAME_SIZE];
     struct stat instance;
-    if (!r && fstat(s->root, &instance)) r = -errno;
+    if (!r && fstat(s->lifetime->root, &instance)) r = -errno;
     if (!r) snprintf(hostname, sizeof(hostname), "md-%llx-%llx",
         (unsigned long long)instance.st_dev, (unsigned long long)instance.st_ino);
     struct md_filesystem fs = {.store=s};

@@ -10,6 +10,7 @@
 #include "fd_channel.h"
 #include "fd_return.h"
 #include "received_fds.h"
+#include "fd_messages.h"
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -983,10 +984,195 @@ static void received_custody(void) {
     assert(!close(pipes[0]) && descriptors()==before);
     puts("PASS received FD custody: immutable shared vector, allocation-free pins, owner cancellation and last-reader EOF");
 }
+static struct md_fd_message *message_capture(struct md_fd_origins *source, unsigned count) {
+    int fds[MD_FD_RECEIPT_MAX];
+    for (unsigned i=0;i<count;++i) fds[i]=7+i%3;
+    struct md_fd_order turn={0};
+    assert(md_fd_order_begin(source,&turn,NULL)==1 && !md_fd_order_start(&turn));
+    struct md_fd_message *record=NULL;
+    allocation_budget=1;
+    assert(!md_fd_message_capture(source,fds,count,&record) && !allocation_budget);
+    allocation_budget=-1;
+    assert(!md_fd_order_complete(&turn));
+    return record;
+}
+static void message_vector(const struct md_fd_message *record, struct md_fs_anchor *a,
+        struct md_fs_anchor *b) {
+    assert(md_fd_message_count(record)==MD_FD_RECEIPT_MAX);
+    struct md_fs_anchor *const *origins=md_fd_message_origins(record);
+    for (unsigned i=0;i<MD_FD_RECEIPT_MAX;++i) assert(origins[i]==(i%3==0 ? a : i%3==1 ? b : NULL));
+}
+static void message_custody(struct md_fs_anchor *a, struct md_fs_anchor *b) {
+    unsigned before=descriptors();
+    struct md_fd_origins *source=md_fd_origins_new(); assert(source);
+    put(source,7,a,0); put(source,8,b,0);
+    struct md_fd_messages *messages=NULL;
+    struct md_fd_message *failed=NULL;
+    int number=7;
+    allocation_budget=0;
+    assert(md_fd_messages_new(&messages)==-ENOMEM && !messages);
+    assert(md_fd_message_capture(source,&number,1,&failed)==-ENOMEM && !failed);
+    assert(md_fd_message_capture(source,&number,0,&failed)==-EINVAL && !failed);
+    assert(md_fd_message_capture(source,&number,UINT_MAX,&failed)==-EINVAL && !failed);
+    allocation_budget=-1;
+    assert(!md_fd_messages_new(&messages) && md_fd_messages_fd(messages)==-1);
+    assert(!md_fd_messages_dispatch(messages) && !md_fd_messages_count(messages));
+    struct md_fd_message *record=message_capture(source,MD_FD_RECEIPT_MAX);
+    struct md_fd_message *duplicate=message_capture(source,MD_FD_RECEIPT_MAX);
+    struct md_fd_message *replacement=message_capture(source,MD_FD_RECEIPT_MAX);
+    put(source,7,b,0); md_fd_origins_release(source);
+    message_vector(record,a,b);
+    int carrier[2], pipefd[2];
+    assert(!socketpair(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC,0,carrier)
+        && !pipe2(pipefd,O_CLOEXEC|O_NONBLOCK));
+    struct md_ipc_connection connection={.link={1,2,3},.side=1}, wrong=connection;
+    assert(md_fd_messages_publish(messages,record,&connection,pipefd[0],pipefd[0])==-ENOTSOCK);
+    assert(md_fd_messages_publish(messages,record,&connection,carrier[0],pipefd[1])==-EINVAL);
+    assert(!fcntl(pipefd[0],F_SETFD,0));
+    assert(md_fd_messages_publish(messages,record,&connection,carrier[0],pipefd[0])==-EINVAL);
+    assert(!fcntl(pipefd[0],F_SETFD,FD_CLOEXEC));
+    assert(md_fd_messages_publish(messages,record,&connection,carrier[0],-1)==-EBADF);
+    assert(md_fd_messages_fd(messages)==-1 && !md_fd_messages_count(messages));
+    /* Cold admission cannot hide EMFILE or consume the caller's monitor. */
+    struct rlimit old, limited;
+    assert(!getrlimit(RLIMIT_NOFILE,&old)); limited=old;
+    if (limited.rlim_cur>64) limited.rlim_cur=64;
+    assert(!setrlimit(RLIMIT_NOFILE,&limited));
+    int fillers[64], n=0, fd;
+    while ((fd=fcntl(carrier[0],F_DUPFD_CLOEXEC,0))>=0) { assert(n<64); fillers[n++]=fd; }
+    assert(errno==EMFILE);
+    assert(md_fd_messages_publish(messages,record,&connection,carrier[0],pipefd[0])==-EMFILE);
+    assert(md_fd_messages_fd(messages)==-1 && !md_fd_messages_count(messages)
+        && fcntl(pipefd[0],F_GETFD)==FD_CLOEXEC);
+    assert(!setrlimit(RLIMIT_NOFILE,&old));
+    while (n) assert(!close(fillers[--n]));
+    allocation_budget=0;
+    assert(!md_fd_messages_publish(messages,record,&connection,carrier[0],pipefd[0]));
+    assert(md_fd_messages_publish(messages,duplicate,&connection,carrier[0],pipefd[0])==-EEXIST);
+    assert(md_fd_messages_publish(messages,record,&connection,carrier[0],pipefd[0])==-ESTALE);
+    struct md_fd_message *pin=NULL;
+    wrong.side=0;
+    assert(md_fd_messages_find(messages,&wrong,carrier[0],&pin)==-EXDEV && !pin);
+    wrong=connection; ++wrong.link[0];
+    assert(md_fd_messages_find(messages,&wrong,carrier[0],&pin)==-EXDEV && !pin);
+    assert(md_fd_messages_find(messages,&connection,carrier[1],&pin)==-ENODATA && !pin);
+    assert(!md_fd_messages_find(messages,&connection,carrier[0],&pin) && pin==record);
+    md_fd_message_release(record);
+    assert(!close(pipefd[1]) && md_fd_messages_dispatch(messages)==1);
+    assert(!md_fd_messages_count(messages) && !md_fd_messages_dispatch(messages));
+    assert(md_fd_messages_find(messages,&connection,carrier[0],&failed)==-ENODATA && !failed);
+    message_vector(pin,a,b);
+    assert(md_fd_messages_publish(messages,pin,&connection,carrier[0],-1)==-ESTALE);
+    md_fd_message_release(pin);
+    /* Queued readiness from a withdrawn record cannot expire its successor,
+     * even when the same carrier cookie is reused by the authority. */
+    assert(!pipe2(pipefd,O_CLOEXEC|O_NONBLOCK));
+    assert(!md_fd_messages_publish(messages,duplicate,&connection,carrier[0],pipefd[0]));
+    assert(!close(pipefd[1]) && !md_fd_messages_withdraw(messages,duplicate));
+    assert(md_fd_messages_withdraw(messages,duplicate)==-ENOENT);
+    md_fd_message_release(duplicate);
+    assert(!pipe2(pipefd,O_CLOEXEC|O_NONBLOCK));
+    assert(!md_fd_messages_publish(messages,replacement,&connection,carrier[0],pipefd[0]));
+    assert(!md_fd_messages_dispatch(messages) && md_fd_messages_count(messages)==1);
+    assert(write(pipefd[1],"x",1)==1 && md_fd_messages_dispatch(messages)==-EPROTO);
+    assert(md_fd_messages_count(messages)==1 && !md_fd_messages_dispatch(messages));
+    assert(!md_fd_messages_find(messages,&connection,carrier[0],&failed) && failed==replacement);
+    md_fd_message_release(failed);
+    assert(!close(pipefd[1]) && md_fd_messages_dispatch(messages)==1);
+    md_fd_messages_free(messages);
+    message_vector(replacement,a,b); md_fd_message_release(replacement);
+    assert(!close(carrier[0]) && !close(carrier[1]));
+    allocation_budget=-1;
+    assert(descriptors()==before);
+    puts("PASS message origins: exact-sized capture, allocation/EMFILE rollback, directional lookup, pinned EOF retirement, stale events and malformed monitor");
+}
+static void message_batches(struct md_fs_anchor *a) {
+    unsigned before=descriptors();
+    struct md_fd_origins *source=md_fd_origins_new(); assert(source);
+    put(source,7,a,0);
+    struct md_fd_messages *messages=NULL; assert(!md_fd_messages_new(&messages));
+    struct md_ipc_connection connection={.link={4},.side=0};
+    enum { RECORDS=80 };
+    int writers[RECORDS];
+    for (unsigned i=0;i<RECORDS;++i) {
+        struct md_fd_message *record=message_capture(source,1);
+        int carrier[2], pipefd[2];
+        assert(!socketpair(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC,0,carrier)
+            && !pipe2(pipefd,O_CLOEXEC|O_NONBLOCK));
+        assert(!md_fd_messages_publish(messages,record,&connection,carrier[0],pipefd[0]));
+        md_fd_message_release(record);
+        assert(!close(carrier[0]) && !close(carrier[1])); writers[i]=pipefd[1];
+    }
+    assert(md_fd_messages_count(messages)==RECORDS);
+    allocation_budget=0;
+    for (unsigned i=0;i<RECORDS;++i) assert(!close(writers[i]));
+    for (unsigned i=0;i<RECORDS/16;++i) assert(md_fd_messages_dispatch(messages)==16);
+    assert(!md_fd_messages_dispatch(messages) && !md_fd_messages_count(messages));
+    allocation_budget=-1;
+    struct md_fd_message *record=message_capture(source,1);
+    md_fd_origins_release(source);
+    int carrier[2], pipefd[2];
+    assert(!socketpair(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC,0,carrier)
+        && !pipe2(pipefd,O_CLOEXEC|O_NONBLOCK));
+    assert(!md_fd_messages_publish(messages,record,&connection,carrier[0],pipefd[0]));
+    allocation_budget=0;
+    md_fd_messages_free(messages);
+    assert(md_fd_message_count(record)==1 && md_fd_message_origins(record)[0]==a);
+    assert(fcntl(pipefd[0],F_GETFD)==-1 && errno==EBADF);
+    assert(!close(carrier[0]) && !close(carrier[1]) && !close(pipefd[1]));
+    allocation_budget=-1;
+    messages=NULL;
+    assert(!md_fd_messages_new(&messages));
+    assert(md_fd_messages_publish(messages,record,&connection,-1,-1)==-ESTALE);
+    md_fd_messages_free(messages); md_fd_message_release(record);
+    assert(descriptors()==before);
+    puts("PASS message registry: bounded 16-event dispatch, colliding buckets, owner teardown with pinned worker vector, no carrier retention");
+}
+struct message_reader { struct md_fd_message *record; int ready; };
+static void *read_message(void *opaque) {
+    struct message_reader *reader=opaque;
+    /* EVENT_WAIT: owner cancellation precedes inspection; timeout fails the
+     * fixture, while the supervisor retains the pin through worker join. */
+    assert(!md_event_wait_fd(reader->ready,POLLIN,md_event_now()+5000000000LL));
+    uint64_t ready; assert(read(reader->ready,&ready,sizeof(ready))==sizeof(ready));
+    assert(md_fd_message_count(reader->record)==1);
+    struct md_fs_anchor *origin=md_fd_message_origins(reader->record)[0];
+    struct stat identity;
+    assert(origin && !fstat(md_fs_anchor_fd(origin),&identity) && S_ISDIR(identity.st_mode));
+    return NULL;
+}
+static void message_worker(void) {
+    unsigned before=descriptors();
+    struct md_mount_namespace *view=md_mount_namespace_new(); assert(view);
+    struct md_fs_anchor *origin=capture(view,open("/",O_PATH|O_CLOEXEC));
+    struct md_fd_origins *source=md_fd_origins_new(); assert(source);
+    put(source,7,origin,0);
+    struct md_fd_message *record=message_capture(source,1);
+    md_fd_origins_release(source); md_fs_anchor_release(origin); md_mount_namespace_release(view);
+    struct md_fd_messages *messages=NULL; assert(!md_fd_messages_new(&messages));
+    struct md_ipc_connection connection={.link={5},.side=1};
+    int carrier[2], pipefd[2];
+    assert(!socketpair(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC,0,carrier)
+        && !pipe2(pipefd,O_CLOEXEC|O_NONBLOCK));
+    assert(!md_fd_messages_publish(messages,record,&connection,carrier[0],pipefd[0]));
+    struct message_reader reader={.record=md_fd_message_retain(record),
+        .ready=eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK)};
+    assert(reader.ready>=0);
+    pthread_t worker; assert(!pthread_create(&worker,NULL,read_message,&reader));
+    md_fd_message_release(record); md_fd_messages_free(messages);
+    assert(!close(carrier[0]) && !close(carrier[1]) && !close(pipefd[1]));
+    uint64_t ready=1; assert(write(reader.ready,&ready,sizeof(ready))==sizeof(ready));
+    /* EVENT_WAIT: immutable inspection finishes; runner bounds a stuck join. */
+    assert(!pthread_join(worker,NULL));
+    md_fd_message_release(reader.record);
+    assert(!close(reader.ready) && descriptors()==before);
+    puts("PASS message worker: source table, mount owner and registry die before inspection; supervisor pin ends after join");
+}
 void test_fd_origins(void) {
     extern void test_task_receive(int *);
     test_task_receive(&allocation_budget);
     received_custody();
+    message_worker();
     export_messages();
     infrastructure();
     channel_reconciliation();
@@ -997,6 +1183,7 @@ void test_fd_origins(void) {
     assert(first && second);
     struct md_fs_anchor *a=capture(first,open("/",O_PATH|O_CLOEXEC));
     struct md_fs_anchor *b=capture(second,open("/",O_PATH|O_CLOEXEC));
+    message_custody(a,b); message_batches(a);
     filesystem_ordering(a);
     struct stat x,y; assert(!fstat(a->fd,&x) && !fstat(b->fd,&y));
     assert(x.st_dev==y.st_dev && x.st_ino==y.st_ino && a->view!=b->view);

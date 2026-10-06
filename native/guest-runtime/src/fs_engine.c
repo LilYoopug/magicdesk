@@ -146,6 +146,15 @@ void md_fs_execute(struct md_filesystem *fs,
     md_fs_context_execute(&context,q,out,output);
     md_fs_context_end(&context);
 }
+int md_fs_ipc_authority(struct md_filesystem *fs, struct md_ipc_credentials **out) {
+    if (!fs || !out) return -EINVAL;
+    if (!fs->ipc) {
+        if (!fs->ipc_store) return -ENOTSUP;
+        int error=md_ipc_credentials_open(fs->ipc_store,&fs->ipc);
+        if (error) return error;
+    }
+    *out=fs->ipc; return 0;
+}
 static void context_execute(struct md_fs_context *context,
         const struct md_fs_request *q, struct md_fs_result *out, const struct md_fs_output *output) {
     struct md_filesystem *fs=context->filesystem;
@@ -168,14 +177,10 @@ static void context_execute(struct md_fs_context *context,
     struct md_identity identity=task->identity;
     const struct md_identity *previous = fs->store->identity;
     if (q->operation == MD_FS_IPC || q->operation==MD_FS_IPC_PEER) {
-        if (!fs->ipc && fs->ipc_store) {
-            int error = md_ipc_credentials_open(fs->ipc_store, &fs->ipc);
-            if (error) {
-                *out = (struct md_fs_result){.fd=-1,.error=error};
-                return;
-            }
-        }
-        md_ipc_credentials_execute(fs->ipc, &identity, q, out, output);
+        struct md_ipc_credentials *ipc=NULL;
+        int error=md_fs_ipc_authority(fs,&ipc);
+        if (error) *out=(struct md_fs_result){.fd=-1,.error=error};
+        else md_ipc_credentials_execute(ipc, &identity, q, out, output);
         return;
     }
     if (context->authenticated && !task->mounts) {

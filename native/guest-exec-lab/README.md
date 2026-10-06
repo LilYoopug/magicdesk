@@ -448,6 +448,27 @@ claim of distribution or driver compatibility.
 
 ## OCI And Filesystem View Checks
 
+`test_resources.py BUILD --case ipc-peer` stages the private runtime peer
+agreement, launch-registry and filesystem-worker admission fixtures under the
+selected shell UID. Build `test_ipc_peer`, `test_launch_registry` and `fs_dispatch`
+with `MAGICDESK_GUEST_FIXTURES=ON`.
+Checks cover fresh-process discovery/negotiation, connection/epoch ownership, protocol
+rejection, saturated control queues, cancellation during metadata admission,
+allocation rollback and worker join with undelivered completions, without
+touching application payloads. Discovery checks reject foreign/replaced stores,
+dead owners, same-UID endpoint/caller impersonation and full queues; retained
+store directories survive rename. A fresh exec peer obtains its control channel
+through verified launch IDs, not an inherited socketpair.
+Message-route checks read a queued header without installing its 253 rights,
+including with a full FD table, and reject malformed headers, foreign stores,
+wrong connection sides and stale nonces after same-carrier replacement. A
+separate exec receiver discovers the live custodian from that header after the
+socket creator exits and the application socket changes processes. Source-side
+claims pin the exact local vector and its IPC epoch through SQLite/registry
+closure; final release checks maintenance admission and pipe EOF.
+This is not end-to-end application mount-origin
+transfer, custodian-supervisor death or Desktop coverage.
+
 Configure `native/guest-runtime` with `-DMAGICDESK_GUEST_FIXTURES=ON` and build
 `bootstrap supervisor run service image test_snapshot test_mounts`.
 The offline importer tests require Python and the `zstd` CLI:
@@ -455,6 +476,11 @@ The offline importer tests require Python and the `zstd` CLI:
 ```sh
 python native/guest-exec-lab/test_oci.py BUILD_DIRECTORY -v
 ```
+
+The importer must run in a native environment that permits its syscalls.
+Android app-domain seccomp can terminate it on `faccessat2`; Termux execution
+is not a substitute for the selected shell executor. Signals fail even negative
+import tests. On-device shell import and launch checks use the MCP runner below.
 
 `fetch_oci_fixture.py REPOSITORY REFERENCE NEW_DIRECTORY` downloads a public
 Docker Hub ARM64 image into a local OCI layout. It is a development fixture,

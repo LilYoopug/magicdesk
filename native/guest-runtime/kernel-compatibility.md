@@ -22,6 +22,15 @@ result. `CLOSE_RANGE_CLOEXEC` is available since 5.11. Both fit the 5.15 baselin
 See the [seccomp notification contract](https://man7.org/linux/man-pages/man2/seccomp_unotify.2.html)
 and [close_range flags](https://man7.org/linux/man-pages/man2/close_range.2.html).
 
+Private launch rendezvous reuses the registry's flags-zero pidfd, proc-descriptor
+identity and file locks, plus Unix seqpacket/SO_PEERCRED and nonblocking IO. It
+adds no newer-kernel primitive or shared-startup requirement. Discovery failure
+does not grant an alternative identity or enable application FD framing.
+Candidate message routing uses a fixed header, `SO_COOKIE`, descriptor-free
+`recvmsg(MSG_PEEK | MSG_DONTWAIT)` and a `getrandom` nonce. Scope retention shares
+existing flock leases. These operations also fit the baseline; no new pidfd
+flags, socket diagnostics or per-IO capability probe is required.
+
 ## Newer Interfaces
 
 Every owned dependency newer than 5.15 belongs here, including optional
@@ -88,3 +97,11 @@ a guest syscall is not the same as requiring the host implementation: worker-own
 chmod handles logical objects and native attachments without fchmodat2, whereas
 direct passthrough preserves the host error. It does not certify arbitrary guest
 libraries or replace execution on a real 5.15 device.
+
+`test_resources.py --case fd-messages` includes an optional exact Unix-socket
+diagnostic probe. The request and inode/cookie validation are already present in
+[Linux 5.15](https://github.com/torvalds/linux/blob/v5.15/net/unix/diag.c#L243-L305),
+but the tested shell policy returns EACCES. This probe is not a runtime dependency;
+denial remains unknown liveness, never permission to discard provenance. The
+separate queued-pipe lifetime candidate uses baseline pipe/socket and poll/epoll
+operations and does not depend on socket diagnostics.

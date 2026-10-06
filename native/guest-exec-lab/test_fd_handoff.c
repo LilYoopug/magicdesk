@@ -7,6 +7,8 @@
 #include "fd_install.h"
 #include "fd_channel.h"
 #include "fd_receipt.h"
+#include "ipc_credentials.h"
+#include "fd_messages.h"
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -14,7 +16,10 @@
 #include <linux/audit.h>
 #include <linux/filter.h>
 #include <linux/io_uring.h>
+#include <linux/netlink.h>
 #include <linux/seccomp.h>
+#include <linux/sock_diag.h>
+#include <linux/unix_diag.h>
 #include <limits.h>
 #include <poll.h>
 #include <pthread.h>
@@ -25,6 +30,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/epoll.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
@@ -535,6 +541,354 @@ static void parcel_lifetime(int fd, int ended) {
     int result=poll(&p,1,ended ? 1000 : 0);
     assert(ended ? result==1 && (p.revents&POLLHUP) : result==0);
 }
+/* Candidate transport using the runtime's message-origin owner. A second queued
+ * pipe writer owns liveness; socket shutdown does not imply final release. */
+static int origin_message_offer(struct md_fd_messages *messages, struct md_fd_message **record,
+        struct md_fd_origins *source,
+        const int *fds, unsigned count, struct md_ipc_credentials *authority, int sender) {
+    struct md_ipc_connection destination;
+    assert(!md_ipc_credentials_connection(authority,sender,&destination));
+    destination.side^=1;
+    int pair[2], lifetime[2];
+    assert(!socketpair(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC,0,pair)
+        && !pipe2(lifetime,O_CLOEXEC|O_NONBLOCK));
+    struct md_fd_order turn={0};
+    assert(md_fd_order_begin(source,&turn,NULL)==1 && !md_fd_order_start(&turn));
+    assert(!md_fd_message_capture(source,fds,count,record));
+    union { struct cmsghdr align; char bytes[CMSG_SPACE(MD_FD_RECEIPT_MAX*sizeof(int))]; } control={0};
+    control.align=(struct cmsghdr){.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_RIGHTS,
+        .cmsg_len=CMSG_LEN(count*sizeof(int))};
+    memcpy(CMSG_DATA(&control.align),fds,count*sizeof(int));
+    char byte='o'; struct iovec io={&byte,1};
+    struct msghdr packet={.msg_iov=&io,.msg_iovlen=1,.msg_control=control.bytes,
+        .msg_controllen=CMSG_SPACE(count*sizeof(int))};
+    assert(sendmsg(pair[0],&packet,MSG_DONTWAIT|MSG_NOSIGNAL)==1);
+    assert(!md_fd_order_complete(&turn));
+    /* A second packet leaves all 253 slots in the first packet for payload.
+     * Peeking payload never installs the lifetime writer in the recipient. */
+    send_message(pair[0],(struct message){.kind=ACK},lifetime[1]);
+    assert(!close(lifetime[1]) && !close(pair[0]));
+    assert(!md_fd_messages_publish(messages,*record,&destination,pair[1],lifetime[0]));
+    return pair[1];
+}
+static struct md_fd_message *origin_message_find(struct md_fd_messages *messages,
+        struct md_ipc_credentials *authority, int destination, int carrier, int *error) {
+    struct md_ipc_connection connection;
+    *error=md_ipc_credentials_connection(authority,destination,&connection);
+    struct md_fd_message *record=NULL;
+    if (!*error) *error=md_fd_messages_find(messages,&connection,carrier,&record);
+    return record;
+}
+static void origin_message_dispatch(struct md_fd_messages *messages, unsigned retired) {
+    unsigned before=md_fd_messages_count(messages);
+    struct pollfd event={.fd=md_fd_messages_fd(messages),.events=POLLIN};
+    /* EVENT_WAIT: lifetime EOF makes the aggregate readable; expiry fails the
+     * case, never authorizes retirement. Live-message assertions do not wait. */
+    assert(poll(&event,1,retired ? 1000 : 0)==(retired ? 1 : 0));
+    assert(md_fd_messages_dispatch(messages)==(int)retired);
+    assert(md_fd_messages_count(messages)==before-retired);
+}
+static int origin_message_receive(int route, int peek) {
+    struct message ignored;
+    struct iovec io={&ignored,sizeof(ignored)};
+    union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(int))]; } control={0};
+    struct msghdr packet={.msg_iov=&io,.msg_iovlen=1,.msg_control=control.bytes,.msg_controllen=sizeof(control)};
+    assert(recvmsg(route,&packet,MSG_DONTWAIT|MSG_CMSG_CLOEXEC|(peek ? MSG_PEEK : 0))==sizeof(ignored));
+    assert(!(packet.msg_flags&(MSG_CTRUNC|MSG_TRUNC)));
+    struct cmsghdr *header=CMSG_FIRSTHDR(&packet);
+    assert(header && header->cmsg_level==SOL_SOCKET && header->cmsg_type==SCM_RIGHTS
+        && header->cmsg_len==CMSG_LEN(sizeof(int)) && !CMSG_NXTHDR(&packet,header));
+    int fd; memcpy(&fd,CMSG_DATA(header),sizeof(fd)); return fd;
+}
+static void origin_message_publish(const struct md_fd_message *record, int carrier,
+        struct md_fd_origins *target, unsigned delivered, const off_t *positions) {
+    unsigned count=md_fd_message_count(record);
+    struct md_fs_anchor *const *origins=md_fd_message_origins(record);
+    struct md_fd_origin_update updates[MD_FD_RECEIPT_MAX]; int numbers[MD_FD_RECEIPT_MAX];
+    struct md_fd_delivery delivery={0};
+    assert(!md_fd_delivery_prepare(&delivery,target,origins,FD_CLOEXEC,count,updates,numbers));
+    struct md_fd_order turn={0}, next={0};
+    assert(md_fd_order_begin(target,&turn,NULL)==1 && !md_fd_order_start(&turn));
+    assert(!md_fd_order_begin(target,&next,NULL));
+    assert(!md_fd_receipt_reset(delivery.receipt,count));
+    delivery.receipt->message.msg_controllen=CMSG_LEN(delivered*sizeof(int));
+    assert(recvmsg(carrier,&delivery.receipt->message,MSG_DONTWAIT|MSG_PEEK|MSG_CMSG_CLOEXEC)==1);
+    assert(delivery.receipt->byte=='o');
+    assert(!!(delivery.receipt->message.msg_flags&MSG_CTRUNC)==(delivered<count));
+    assert(md_fd_delivery_publish(&delivery)==(int)delivered);
+    assert(md_fd_order_state(&next)==MD_RESOURCE_ORDER_QUEUED);
+    md_fd_delivery_dispose(&delivery);
+    assert(!md_fd_order_complete(&turn) && !md_fd_order_cancel(&next));
+    for (unsigned i=0;i<delivered;++i) {
+        origin_at(target,numbers[i],origins[i]);
+        assert(fcntl(numbers[i],F_GETFD)==FD_CLOEXEC);
+        if (positions) assert(lseek(numbers[i],0,SEEK_CUR)==positions[i]);
+        assert(!close(numbers[i]) && !md_fd_origins_close_range(target,numbers[i],numbers[i],0));
+    }
+}
+static void origin_message_register(struct md_ipc_credentials *authority, const int sockets[2]) {
+    struct md_identity identity=md_identity_new(0,0);
+    struct md_fs_request request={.operation=MD_FS_IPC,.flags=MD_IPC_PAIR,
+        .directory={sockets[0],sockets[1]},.peer=getpid()};
+    struct md_fs_result result;
+    md_ipc_credentials_execute(authority,&identity,&request,&result,NULL);
+    assert(!result.error && result.fd==-1); md_identity_release(&identity);
+}
+static void origin_message_association(const char *directory, struct md_ipc_credentials *authority, int type, int discard) {
+    unsigned before=descriptors();
+    char path[PATH_MAX]; snprintf(path,sizeof(path),"%s/message-origin",directory);
+    int a=create_file(path,11), b=open(path,O_RDWR|O_CLOEXEC), unknown=open(path,O_RDONLY|O_CLOEXEC);
+    assert(b>=0 && unknown>=0 && lseek(b,47,SEEK_SET)==47 && !unlink(path));
+    int pipefd[2], route[2], other[2];
+    assert(!pipe2(pipefd,O_CLOEXEC|O_NONBLOCK) && !socketpair(AF_UNIX,type|SOCK_CLOEXEC,0,route)
+        && !socketpair(AF_UNIX,type|SOCK_CLOEXEC,0,other));
+    origin_message_register(authority,route); origin_message_register(authority,other);
+    struct md_mount_namespace *views[]={md_mount_namespace_new(),md_mount_namespace_new()};
+    assert(views[0] && views[1]);
+    struct md_fs_anchor *known[]={capture(a,views[0]),capture(b,views[1]),capture(pipefd[1],views[0]),NULL};
+    struct md_fd_origins *source=md_fd_origins_new(), *target=md_fd_origins_new(); assert(source && target);
+    int handles[]={a,b,pipefd[1],unknown};
+    struct md_fd_origin_update initial[4];
+    assert(!md_fd_origins_prepare_batch(source,known,0,4,initial));
+    assert(!md_fd_origins_finish_batch(initial,4,handles,4));
+    struct md_fd_messages *messages=NULL;
+    assert(!md_fd_messages_new(&messages));
+    struct md_fd_message *records[3]={0}; int carriers[3];
+    const unsigned sizes[]={4,253,8}, order[]={2,0,1};
+    for (unsigned i=0;i<3;++i) {
+        int inputs[MD_FD_RECEIPT_MAX];
+        for (unsigned j=0;j<sizes[i];++j) inputs[j]=handles[(j+i)%4];
+        carriers[i]=origin_message_offer(messages,records+i,source,inputs,sizes[i],authority,route[0]);
+        for (unsigned j=0;j<sizes[i];++j) assert(md_fd_message_origins(records[i])[j]==known[(j+i)%4]);
+    }
+    /* Reusing the original number must change neither the carrier's kernel
+     * descriptions nor its retained mount vector. Both opens share one inode. */
+    struct md_fd_origin_update replacement={0};
+    assert(!md_fd_origins_prepare_copy(source,b,FD_CLOEXEC,&replacement));
+    assert(dup3(b,a,O_CLOEXEC)==a); md_fd_origins_finish(&replacement,a);
+    md_fd_origins_release(source);
+    int error;
+    assert(!origin_message_find(messages,authority,other[1],carriers[0],&error) && error==-EXDEV);
+    assert(!origin_message_find(messages,authority,route[0],carriers[0],&error) && error==-EXDEV);
+    assert(!origin_message_find(messages,authority,route[1],route[0],&error) && error==-ENODATA);
+    assert(!origin_message_find(messages,authority,route[1],unknown,&error) && error==-ENODATA);
+    assert(!origin_message_find(NULL,authority,route[1],carriers[0],&error) && error==-ENODATA);
+    pid_t parent=getpid(), child=fork(); assert(child>=0);
+    if (!child) {
+        assert(!prctl(PR_SET_PDEATHSIG,SIGKILL) && getppid()==parent);
+        for (unsigned i=0;i<3;++i)
+            send_message(route[0],(struct message){.kind=DONE,.number=123},carriers[order[i]]);
+        _exit(0);
+    }
+    for (unsigned i=0;i<3;++i) assert(!close(carriers[i]));
+    assert(!close(a) && !close(b) && !close(unknown) && !close(pipefd[1]) && !close(route[0]));
+    int status;
+    /* EVENT_WAIT: sender exit leaves only kernel queues and metadata anchors;
+     * the process alarm bounds a failed handoff. No resource turn spans IO. */
+    assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
+    for (unsigned i=0;i<3;++i) {
+        unsigned index=order[i];
+        if (discard) {
+            struct message bytes;
+            assert(read(route[1],&bytes,sizeof(bytes))==sizeof(bytes));
+        } else for (unsigned pass=0;pass<3;++pass) {
+            int carrier=origin_message_receive(route[1],pass<2);
+            struct md_fd_message *record=origin_message_find(messages,authority,route[1],carrier,&error);
+            assert(!error && record==records[index]);
+            unsigned delivered=pass==1 ? 1 : md_fd_message_count(record);
+            const off_t offsets[]={11,47,-1,0}; off_t positions[MD_FD_RECEIPT_MAX];
+            for (unsigned j=0;j<delivered;++j) positions[j]=offsets[(j+index)%4];
+            origin_message_publish(record,carrier,target,delivered,positions);
+            assert(!close(carrier));
+            md_fd_message_release(record);
+            if (pass<2) origin_message_dispatch(messages,0);
+        }
+        origin_message_dispatch(messages,1);
+        assert(md_fd_message_count(records[index])==sizes[index]);
+        char byte; ssize_t n=read(pipefd[0],&byte,1);
+        assert(i==2 ? n==0 : n==-1 && errno==EAGAIN);
+        md_fd_message_release(records[index]);
+    }
+    md_fd_messages_free(messages);
+    md_fd_origins_release(target);
+    for (unsigned i=0;i<4;++i) md_fs_anchor_release(known[i]);
+    md_mount_namespace_release(views[0]); md_mount_namespace_release(views[1]);
+    assert(!close(route[1]) && !close(other[0]) && !close(other[1]) && !close(pipefd[0]));
+    assert(descriptors()==before);
+    printf("PASS message-bound origins type=%d discard=%d: cookie lookup, reordered messages, same-inode mounts, source reuse/exit, peer rejection, peek, truncation and EOF\n",type,discard);
+}
+static int origin_message_live(unsigned inode, uint64_t cookie) {
+    int fd=socket(AF_NETLINK,SOCK_DGRAM|SOCK_CLOEXEC,NETLINK_SOCK_DIAG);
+    if (fd<0) return -errno;
+    struct { struct nlmsghdr header; struct unix_diag_req body; } request={
+        .header={.nlmsg_len=NLMSG_LENGTH(sizeof(struct unix_diag_req)),.nlmsg_type=SOCK_DIAG_BY_FAMILY,
+            .nlmsg_flags=NLM_F_REQUEST,.nlmsg_seq=1},
+        .body={.sdiag_family=AF_UNIX,.udiag_states=UINT_MAX,.udiag_ino=inode,
+            .udiag_cookie={(uint32_t)cookie,(uint32_t)(cookie>>32)}}};
+    struct sockaddr_nl address={.nl_family=AF_NETLINK};
+    int error=0;
+    if (sendto(fd,&request,request.header.nlmsg_len,MSG_DONTWAIT,(void *)&address,sizeof(address))
+            !=request.header.nlmsg_len) error=-errno;
+    if (!error) {
+        struct pollfd wait={.fd=fd,.events=POLLIN};
+        /* EVENT_WAIT: exact kernel diagnostic reply, not a retry loop.
+         * Timeout leaves liveness unknown and fails this observation. */
+        int ready=poll(&wait,1,1000);
+        if (ready<=0) error=ready<0 ? -errno : -ETIMEDOUT;
+    }
+    if (!error) {
+        union { struct nlmsghdr align; char bytes[4096]; } response;
+        struct iovec io={response.bytes,sizeof(response)};
+        struct msghdr packet={.msg_name=&address,.msg_namelen=sizeof(address),.msg_iov=&io,.msg_iovlen=1};
+        ssize_t size=recvmsg(fd,&packet,MSG_DONTWAIT);
+        if (size<0) error=-errno;
+        else if (packet.msg_flags&MSG_TRUNC || packet.msg_namelen!=sizeof(address) || address.nl_pid
+                || !NLMSG_OK(&response.align,size) || response.align.nlmsg_seq!=1) error=-EPROTO;
+        else if (response.align.nlmsg_type==NLMSG_ERROR) {
+            if (response.align.nlmsg_len<NLMSG_LENGTH(sizeof(struct nlmsgerr))) error=-EPROTO;
+            else error=((struct nlmsgerr *)NLMSG_DATA(&response.align))->error;
+            if (!error) error=-EPROTO;
+        } else if (response.align.nlmsg_type!=SOCK_DIAG_BY_FAMILY
+                || response.align.nlmsg_len<NLMSG_LENGTH(sizeof(struct unix_diag_msg))) error=-EPROTO;
+        else {
+            const struct unix_diag_msg *reply=NLMSG_DATA(&response.align);
+            if (reply->udiag_family!=AF_UNIX || reply->udiag_ino!=inode
+                    || reply->udiag_cookie[0]!=(uint32_t)cookie
+                    || reply->udiag_cookie[1]!=(uint32_t)(cookie>>32)) error=-EPROTO;
+        }
+    }
+    assert(!close(fd)); return error;
+}
+static void origin_message_shutdown(void) {
+    for (int how=SHUT_RD;how<=SHUT_RDWR;++how) {
+        unsigned before=descriptors(); int pair[2], pipefd[2];
+        assert(!socketpair(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC,0,pair)
+            && !pipe2(pipefd,O_NONBLOCK|O_CLOEXEC));
+        send_message(pair[0],(struct message){.kind=DONE},pipefd[1]);
+        struct stat identity; assert(!fstat(pair[1],&identity) && identity.st_ino<=UINT_MAX);
+        uint64_t cookie=socket_cookie(pair[1]);
+        int live=origin_message_live((unsigned)identity.st_ino,cookie);
+        if (live) {
+            assert(live==-EPERM || live==-EACCES || live==-EPROTONOSUPPORT || live==-EAFNOSUPPORT || live==-ENOENT);
+            printf("UNAVAILABLE exact Unix socket diagnostic errno=%d\n",-live);
+        } else assert(origin_message_live((unsigned)identity.st_ino,cookie^1)==-ESTALE);
+        int epoll=epoll_create1(EPOLL_CLOEXEC); assert(epoll>=0);
+        struct epoll_event event={.events=EPOLLIN|EPOLLHUP|EPOLLET};
+        assert(!epoll_ctl(epoll,EPOLL_CTL_ADD,pair[0],&event));
+        assert(!close(pipefd[1]) && !shutdown(pair[1],how));
+        struct pollfd observed={.fd=pair[0],.events=POLLIN|POLLHUP};
+        assert(poll(&observed,1,0)>=0);
+        int pending=!!(observed.revents&POLLHUP), fd=-1;
+        if (!live) assert(!origin_message_live((unsigned)identity.st_ino,cookie));
+        int shutdown_event=epoll_wait(epoll,&event,1,0);
+        assert(shutdown_event>=0);
+        struct message payload=receive_message(pair[1],&fd);
+        assert(payload.kind==DONE && fd>=0 && !close(fd));
+        char byte; assert(read(pipefd[0],&byte,1)==0);
+        assert(!close(pair[1]));
+        /* EVENT_WAIT: final close after an already-observed shutdown. Missing
+         * notification is an explicit limitation, never evidence of closure. */
+        int close_event=epoll_wait(epoll,&event,1,1000);
+        assert(close_event>=0);
+        if (!live) assert(origin_message_live((unsigned)identity.st_ino,cookie)==-ENOENT);
+        assert(!close(epoll) && !close(pair[0]) && !close(pipefd[0]) && descriptors()==before);
+        printf("OBS carrier shutdown=%d hup=%d queued-rights-readable=1\n",how,pending);
+        printf("OBS carrier liveness diagnostic=%d shutdown-event=%d close-event=%d\n",!live,shutdown_event,close_event);
+        if (pending) puts("LIMIT carrier HUP alone is not proof of final closure: shutdown retains readable queued rights");
+        if (!close_event) puts("LIMIT final carrier close has no fresh epoll event after shutdown");
+    }
+}
+static void origin_message_custody(struct md_ipc_credentials *authority, int how, int consume) {
+    unsigned before=descriptors();
+    int pipefd[2], route[2];
+    assert(!pipe2(pipefd,O_NONBLOCK|O_CLOEXEC) && !socketpair(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0,route));
+    origin_message_register(authority,route);
+    struct md_fd_origins *source=md_fd_origins_new(), *target=md_fd_origins_new(); assert(source && target);
+    struct md_fd_messages *messages=NULL; struct md_fd_message *record=NULL;
+    assert(!md_fd_messages_new(&messages));
+    int carrier=origin_message_offer(messages,&record,source,&pipefd[1],1,authority,route[0]);
+    md_fd_origins_release(source);
+    assert(!close(pipefd[1]));
+    int alias=fcntl(carrier,F_DUPFD_CLOEXEC,0); assert(alias>=0);
+    assert(!shutdown(carrier,how));
+    origin_message_dispatch(messages,0);
+    int error;
+    struct md_fd_message *pin=origin_message_find(messages,authority,route[1],alias,&error);
+    assert(pin==record && !error);
+    origin_message_publish(pin,alias,target,1,NULL);
+    if (consume) {
+        char byte; struct iovec io={&byte,1};
+        union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(int))]; } control;
+        struct msghdr packet={.msg_iov=&io,.msg_iovlen=1,.msg_control=control.bytes,.msg_controllen=sizeof(control)};
+        assert(recvmsg(alias,&packet,MSG_DONTWAIT|MSG_CMSG_CLOEXEC)==1 && byte=='o');
+        struct cmsghdr *header=CMSG_FIRSTHDR(&packet);
+        assert(header && header->cmsg_level==SOL_SOCKET && header->cmsg_type==SCM_RIGHTS
+            && header->cmsg_len==CMSG_LEN(sizeof(int)));
+        int fd; memcpy(&fd,CMSG_DATA(header),sizeof(fd)); assert(!close(fd));
+    }
+    origin_message_dispatch(messages,0);
+    char byte; ssize_t n=read(pipefd[0],&byte,1);
+    assert(consume ? n==0 : n==-1 && errno==EAGAIN);
+    assert(!close(carrier)); origin_message_dispatch(messages,0);
+    assert(!close(alias)); origin_message_dispatch(messages,1);
+    assert(read(pipefd[0],&byte,1)==0);
+    md_fd_messages_free(messages); md_fd_message_release(record);
+    assert(md_fd_message_count(pin)==1 && !md_fd_message_origins(pin)[0]);
+    md_fd_message_release(pin); md_fd_origins_release(target);
+    assert(!close(pipefd[0]) && !close(route[0]) && !close(route[1]) && descriptors()==before);
+    printf("PASS pipe-owned origin custody shutdown=%d consume=%d: readable rights after shutdown, aliases, last-reference EOF and exact FD balance\n",how,consume);
+}
+static void origin_message_cycle(struct md_ipc_credentials *authority, int type) {
+    unsigned before=descriptors();
+    int route[2], pipefd[2];
+    assert(!socketpair(AF_UNIX,type|SOCK_CLOEXEC,0,route) && !pipe2(pipefd,O_CLOEXEC|O_NONBLOCK));
+    origin_message_register(authority,route);
+    struct md_fd_origins *files=md_fd_origins_new(); assert(files);
+    int inputs[]={route[1],pipefd[1]};
+    struct md_fd_messages *messages=NULL; struct md_fd_message *record=NULL;
+    assert(!md_fd_messages_new(&messages));
+    int carrier=origin_message_offer(messages,&record,files,inputs,2,authority,route[0]);
+    md_fd_origins_release(files);
+    send_message(route[0],(struct message){.kind=DONE},carrier);
+    assert(!close(carrier) && !close(route[1]) && !close(pipefd[1]));
+    struct pollfd ended={.fd=md_fd_messages_fd(messages),.events=POLLIN};
+    /* EVENT_WAIT: Unix GC releases the queue-owned lifetime writer. Expiry is
+     * unobserved collection, not permission to retire metadata. */
+    int observed=poll(&ended,1,3000); assert(observed>=0);
+    if (observed) {
+        char byte;
+        assert((ended.revents&POLLIN) && md_fd_messages_dispatch(messages)==1
+            && !md_fd_messages_count(messages) && read(pipefd[0],&byte,1)==0);
+    }
+    md_fd_messages_free(messages); md_fd_message_release(record);
+    assert(!close(route[0]) && !close(pipefd[0]) && descriptors()==before);
+    printf("%s pipe-owned origin cycle type=%d: kernel GC releases data and metadata lifetime together\n",
+        observed ? "PASS" : "UNOBSERVED",type);
+}
+static void parcel_source_quota(rlim_t, int);
+void test_ipc_connections(const char *);
+void test_ipc_store_cleanup(const char *);
+static void origin_message_experiment(const char *directory) {
+    unsigned before=descriptors();
+    test_ipc_connections(directory);
+    assert(descriptors()==before);
+    struct md_ipc_credentials *authority=NULL;
+    assert(!md_ipc_credentials_open(directory,&authority));
+    const int types[]={SOCK_STREAM,SOCK_DGRAM,SOCK_SEQPACKET};
+    for (unsigned i=0;i<3;++i) for (int discard=0;discard<2;++discard)
+        origin_message_association(directory,authority,types[i],discard);
+    origin_message_shutdown();
+    for (int how=SHUT_RD;how<=SHUT_RDWR;++how) for (int consume=0;consume<2;++consume)
+        origin_message_custody(authority,how,consume);
+    for (unsigned i=0;i<3;++i) origin_message_cycle(authority,types[i]);
+    md_ipc_credentials_close(authority);
+    test_ipc_store_cleanup(directory);
+    const rlim_t limits[]={64,252,253,254,255};
+    for (unsigned i=0;i<sizeof(limits)/sizeof(*limits);++i) parcel_source_quota(limits[i],1);
+    puts("OBS origin custody uses a queued pipe writer, not socket HUP or privileged diagnostics");
+    puts("LIMIT connection identity is not transport negotiation: native peers, cross-launch origins and FD quotas remain outside this candidate");
+    puts("PASS message-origin association experiment");
+}
 enum parcel_action { PARCEL_DELIVER, PARCEL_TRUNCATE, PARCEL_READ, PARCEL_CLOSE,
     PARCEL_PEEK, PARCEL_PEEK_DISCARD, PARCEL_PARTIAL_READ, PARCEL_SEND_FAIL };
 /* Native transport experiment, not an application adapter. The fixture knows
@@ -962,7 +1316,7 @@ static void local_ring_probe(void) {
     else assert(WIFEXITED(status) && !WEXITSTATUS(status));
     assert(descriptors()==before);
 }
-static void parcel_source_quota(rlim_t limit) {
+static void parcel_source_quota(rlim_t limit, int lifetime_marker) {
     unsigned before=descriptors();
     pid_t parent=getpid(), child=fork(); assert(child>=0);
     if (!child) {
@@ -991,14 +1345,22 @@ static void parcel_source_quota(rlim_t limit) {
         ssize_t inner=sendmsg(parcel[0],&message,MSG_NOSIGNAL|MSG_DONTWAIT);
         int inner_error=inner<0 ? errno : 0;
         assert(inner==1 || inner_error==ETOOMANYREFS);
-        ssize_t outer=-1; int outer_error=0;
+        ssize_t outer=-1; int outer_error=0, marker_error=0;
         if (inner==1) {
             control.align.cmsg_len=CMSG_LEN(sizeof(int));
-            memcpy(CMSG_DATA(&control.align),&parcel[1],sizeof(int));
             message.msg_controllen=CMSG_SPACE(sizeof(int));
-            outer=sendmsg(route[0],&message,MSG_NOSIGNAL|MSG_DONTWAIT);
-            outer_error=outer<0 ? errno : 0;
-            assert(outer==1 || outer_error==ETOOMANYREFS);
+            if (lifetime_marker) {
+                memcpy(CMSG_DATA(&control.align),&pipefd[1],sizeof(int));
+                ssize_t marker=sendmsg(parcel[0],&message,MSG_NOSIGNAL|MSG_DONTWAIT);
+                marker_error=marker<0 ? errno : 0;
+                assert(marker==1 || marker_error==ETOOMANYREFS);
+            }
+            if (!marker_error) {
+                memcpy(CMSG_DATA(&control.align),&parcel[1],sizeof(int));
+                outer=sendmsg(route[0],&message,MSG_NOSIGNAL|MSG_DONTWAIT);
+                outer_error=outer<0 ? errno : 0;
+                assert(outer==1 || outer_error==ETOOMANYREFS);
+            }
         }
         assert(!close(pipefd[1]) && !close(parcel[1]));
         if (outer==1) {
@@ -1007,9 +1369,9 @@ static void parcel_source_quota(rlim_t limit) {
         }
         assert(read(pipefd[0],&byte,1)==0);
         parcel_lifetime(parcel[0],1);
-        printf("%s source quota limit=%llu directErrno=%d innerErrno=%d outerErrno=%d\n",
+        printf("%s source quota limit=%llu lifetimeMarker=%d directErrno=%d innerErrno=%d markerErrno=%d outerErrno=%d\n",
             direct==1 && inner==1 ? outer==1 ? "PASS" : "LIMIT" : "UNOBSERVED",
-            (unsigned long long)limit,direct_error,inner_error,outer_error);
+            (unsigned long long)limit,lifetime_marker,direct_error,inner_error,marker_error,outer_error);
         assert(!close(route[0]) && !close(route[1]) && !close(parcel[0]) && !close(pipefd[0]));
         _exit(0);
     }
@@ -1157,7 +1519,7 @@ static void parcel_experiment(const char *directory) {
     local_ring_probe();
     const rlim_t source_limits[]={64,252,253,254};
     for (unsigned i=0;i<sizeof(source_limits)/sizeof(*source_limits);++i)
-        parcel_source_quota(source_limits[i]);
+        parcel_source_quota(source_limits[i],0);
     for (int provider=0;provider<2;++provider)
         for (int receiver=0;receiver<2;++receiver) pidfd_pull(directory,provider,receiver);
     for (unsigned type=0;type<3;++type)
@@ -1391,14 +1753,17 @@ static void atomic_install(const char *directory, int available, int protected, 
 }
 int main(int argc, char **argv) {
     setvbuf(stdout,NULL,_IOLBF,0);
-    assert(argc==2 || (argc==3 && !strcmp(argv[2],"--kernel-parcel")));
+    assert(argc==2 || (argc==3 && (!strcmp(argv[2],"--kernel-parcel") || !strcmp(argv[2],"--origin-messages"))));
     assert(!mkdir(argv[1],0700));
     alarm(30);
     if (argc==3) {
-        parcel_experiment(argv[1]);
+        if (!strcmp(argv[2],"--origin-messages")) origin_message_experiment(argv[1]);
+        else parcel_experiment(argv[1]);
         assert(!rmdir(argv[1]));
         return 0;
     }
+    unsigned before=descriptors();
+    test_ipc_connections(argv[1]); assert(descriptors()==before);
     scenario(SPLIT,argv[1]);
     puts("PASS split ADDFD: CLONE_FILES peer replaces same-inode description before reply");
     scenario(ATOMIC,argv[1]);

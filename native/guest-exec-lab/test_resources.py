@@ -17,7 +17,7 @@ def main():
     parser.add_argument("--config", type=Path, default=Path.home() / ".codex/config.toml")
     parser.add_argument("--server", default="magicdesk")
     parser.add_argument("--keep", action="store_true")
-    parser.add_argument("--case", choices=("all", "kernel-baseline", "mapping-task", "pidfd-table", "proc-custody", "exec-custody", "open-job", "ofd-order", "fd-handoff", "fd-parcel", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fd-lifecycle", "fs-dispatch", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture", "rpc"), default="all",
+    parser.add_argument("--case", choices=("all", "kernel-baseline", "mapping-task", "pidfd-table", "proc-custody", "exec-custody", "open-job", "ofd-order", "fd-handoff", "fd-parcel", "fd-messages", "ipc-peer", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fd-lifecycle", "fs-dispatch", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture", "rpc", "stores"), default="all",
                         help="Run resource regressions, FD handoff/parcel, terminal RPC custody, native FD lifecycle, or worker transport")
     parser.add_argument("--compare-installed", action="store_true",
                         help="Compare identical metadata/spawn fixtures with the installed runtime")
@@ -221,15 +221,15 @@ def main():
 
     try:
         check("isolated staging", "mkdir -m 700 " + root)
-        names = ("fd_handoff",) if args.case in ("fd-handoff", "fd-parcel") else (
+        names = ("fd_handoff",) if args.case in ("fd-handoff", "fd-parcel", "fd-messages") else (
             "bootstrap", "supervisor", "run", "service", "resource_guest", "root_guest",
-            "test_task_resources", "test_inodes", "test_mounts", "test_credentials", "test_rpc", "test_snapshot", "fd_handoff")
+            "test_task_resources", "test_inodes", "test_mounts", "test_credentials", "test_rpc", "test_snapshot", "fd_handoff", "test_ipc_peer")
         if args.case in ("proc-custody", "exec-custody", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture"):
             names = ("bootstrap", "supervisor", "run", "service", "resource_guest")
         if args.case in ("all", "fs-buffer"):
             names += ("test_interception_buffers",)
         if args.case == "all":
-            names += ("test_open_job",)
+            names += ("test_open_job", "fs_dispatch", "test_launch_registry")
         if args.case in ("all", "kernel-baseline"):
             names += ("kernel_baseline", "capabilities")
         if args.case == "open-job":
@@ -242,6 +242,10 @@ def main():
             names = ("fs_dispatch", "test_interception_buffers")
         if args.case == "rpc":
             names = ("test_rpc",)
+        if args.case == "stores":
+            names = ("test_mounts", "test_inodes", "test_snapshot")
+        if args.case == "ipc-peer":
+            names = ("test_ipc_peer", "fs_dispatch", "test_launch_registry")
         if args.case == "ofd-order":
             names = ("test_task_resources",)
         if args.case == "pidfd-table":
@@ -250,6 +254,19 @@ def main():
             file = "libmagicdesk_guest_" + name + ".so"
             transport.upload(client, args.build / file, root + "/" + file)
         check("prepare fixtures", "chmod 700 " + root + "/*.so")
+        if args.case in ("all", "ipc-peer"):
+            check("launch registry lifetime", root + "/libmagicdesk_guest_test_launch_registry.so",
+                  "PASS launch ownership")
+            check("private IPC peer negotiation", root + "/libmagicdesk_guest_test_ipc_peer.so " + root + "/peer",
+                  "PASS private IPC peer negotiation")
+            check("asynchronous IPC peer admission", root + "/libmagicdesk_guest_fs_dispatch.so --ipc-peer " + root + "/peer-store",
+                  "PASS asynchronous IPC peer admission")
+            if args.case == "ipc-peer":
+                return
+        if args.case == "stores":
+            for name in ("mounts", "inodes", "snapshot"):
+                check(name + " model", root + "/libmagicdesk_guest_test_" + name + ".so " + root + "/model-" + name)
+            return
         if args.case in ("all", "kernel-baseline"):
             check("mandatory capability admission", root + "/libmagicdesk_guest_capabilities.so "
                   + root + "/libmagicdesk_guest_supervisor.so " + root + "/libmagicdesk_guest_bootstrap.so",
@@ -301,6 +318,19 @@ def main():
                           + root + "/lifecycle", "PASS native private-FD lifecycle experiment")
             result["experiment"]["limitations"] = [line.removeprefix("LIMIT ")
                 for line in value["output"].splitlines() if line.startswith("LIMIT ")]
+            return
+        if args.case == "fd-messages":
+            result["experiment"] = {"productionAdapter": False, "adoptionBlocked": True,
+                                    "runtimeMessageOwner": True}
+            value = check("message-bound descriptor origins", root + "/libmagicdesk_guest_fd_handoff.so "
+                          + root + "/messages --origin-messages", "PASS message-origin association experiment")
+            result["experiment"]["limitations"] = [line.removeprefix("LIMIT ") for line in value["output"].splitlines()
+                                                     if line.startswith("LIMIT ")]
+            result["experiment"]["observations"] = [line for line in value["output"].splitlines() if line.startswith("OBS ")]
+            result["experiment"]["unavailable"] = [line.removeprefix("UNAVAILABLE ") for line in value["output"].splitlines()
+                                                    if line.startswith("UNAVAILABLE ")]
+            result["experiment"]["unobserved"] = [line.removeprefix("UNOBSERVED ") for line in value["output"].splitlines()
+                                                   if line.startswith("UNOBSERVED ")]
             return
         if args.case == "fd-parcel":
             result["experiment"] = {"productionAdapter": False, "adoptionBlocked": True}

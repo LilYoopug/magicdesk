@@ -16,12 +16,12 @@ target_compile_options(guest-sqlite PRIVATE -O2 -fno-pie)
 set(src ${CMAKE_CURRENT_SOURCE_DIR}/src)
 set(raw ${src}/raw.c ${src}/memory.c ${src}/raw.S)
 set(wire ${src}/fs_wire.c ${src}/event_wait.c)
-set(origins ${src}/fs_anchor.c ${src}/resource_order.c ${src}/ofd_order.c ${src}/fd_origins.c ${src}/fd_channel.c ${src}/fd_mutation.c ${src}/fd_delivery.c ${src}/fd_return.c ${src}/fd_exchange.c ${src}/received_fds.c ${src}/task_descriptor.c ${src}/task_lifetime.c)
+set(origins ${src}/fs_anchor.c ${src}/inode_lifetime.c ${src}/ipc_scope.c ${src}/resource_order.c ${src}/ofd_order.c ${src}/fd_origins.c ${src}/fd_channel.c ${src}/fd_mutation.c ${src}/fd_delivery.c ${src}/fd_return.c ${src}/fd_exchange.c ${src}/received_fds.c ${src}/fd_messages.c ${src}/task_descriptor.c ${src}/task_lifetime.c)
 set(mounts ${src}/fs_mounts.c ${src}/fs_mount_path.c ${src}/fs_mount_operations.c ${src}/fs_mount_table.c)
 set(inodes ${src}/inode_store.c ${src}/inode_db.c ${src}/inode_events.c ${src}/inode_watch.c ${src}/watch_queue.c ${src}/inode_path.c
     ${src}/inode_directory.c ${src}/inode_import.c ${src}/inode_socket.c ${src}/inode_backing.c ${src}/inode_snapshot.c ${src}/inode_fifo.c ${src}/file_open.c
     ${src}/guest_identity.c ${src}/task_registry.c ${src}/guest_domain.c ${src}/mount_namespace.c ${origins} ${src}/inode_metadata.c ${src}/inode_capability.c ${src}/inode_acl.c ${src}/posix_acl.c)
-set(namespace_engine ${src}/fs_engine.c ${src}/fs_xattr.c ${src}/fs_operation.c ${src}/task_status.c ${src}/ipc_credentials.c)
+set(namespace_engine ${src}/fs_engine.c ${src}/fs_xattr.c ${src}/fs_operation.c ${src}/task_status.c ${src}/ipc_credentials.c ${src}/ipc_peer.c)
 set(ipc ${src}/sysv_ipc.c ${src}/sysv_ipc_db.c ${src}/sysv_sem.c ${src}/sysv_msg.c ${src}/sysv_ipc_transport.c)
 
 function(guest_executable name)
@@ -46,12 +46,12 @@ guest_freestanding(bootstrap)
 target_compile_options(bootstrap PRIVATE -mgeneral-regs-only)
 target_link_options(bootstrap PRIVATE -Wl,--image-base=0x2000000000)
 
-guest_executable(supervisor ${src}/supervisor.c ${src}/task_resources.c ${src}/command_access.c ../command-client/wire.c ${src}/launch_registry.c ${src}/process_owner.c ${src}/interception_memory.c ${src}/interception_buffers.c ${src}/guest_domain.c
+guest_executable(supervisor ${src}/supervisor.c ${src}/task_resources.c ${src}/command_access.c ../command-client/wire.c ${src}/launch_registry.c ${src}/launch_peer.c ${src}/process_owner.c ${src}/interception_memory.c ${src}/interception_buffers.c ${src}/guest_domain.c
     ${src}/watch_activation.c ${src}/sysv_shm.c ${src}/guest_debugger.c ${src}/process_image_view.c ${src}/fd_install.c
     ${src}/task_helper.c ${src}/mapping_observation.c
     ${ipc}
     ${src}/guest_identity.c ${src}/guest_accounts.c ${src}/elf_admission.c ${src}/elf.c ${src}/fs_client.c ${wire} ${raw}
-    ${src}/fs_worker.c ${src}/fs_service.c ${src}/fs_buffer_service.c ${src}/file_open_job.c ${src}/file_snapshot.c ${src}/command_image.c ${src}/exec_prepare.c ${namespace_engine} ${src}/image_catalogue.c ${inodes} ${mounts}
+    ${src}/fs_worker.c ${src}/fs_service.c ${src}/ipc_peer_service.c ${src}/fs_buffer_service.c ${src}/file_open_job.c ${src}/file_snapshot.c ${src}/command_image.c ${src}/exec_prepare.c ${namespace_engine} ${src}/image_catalogue.c ${inodes} ${mounts}
     ${src}/namespace_broker.c ${src}/watch_broker.c ${src}/proc_paths.c)
 target_compile_definitions(supervisor PRIVATE MD_NO_START MD_USE_LIBC)
 target_link_libraries(supervisor PRIVATE guest-sqlite m)
@@ -105,15 +105,26 @@ if(MAGICDESK_GUEST_FIXTURES)
     guest_executable(test_interception_buffers ../guest-exec-lab/test_interception_buffers.c ${src}/interception_buffers.c ${src}/interception_memory.c ${src}/resource_order.c)
     target_compile_options(test_interception_buffers PRIVATE -iquote ${src} -UNDEBUG)
     target_link_options(test_interception_buffers PRIVATE -Wl,--wrap=calloc -Wl,--wrap=malloc)
-    guest_executable(fs_dispatch ../guest-exec-lab/test_fs_dispatch.c ../guest-exec-lab/test_fd_lifecycle.S
+    guest_executable(fs_dispatch ../guest-exec-lab/test_fs_dispatch.c ../guest-exec-lab/test_ipc_peer_worker.c ../guest-exec-lab/test_fd_lifecycle.S
         ${src}/interception_buffers.c ${src}/fs_buffer_service.c ${src}/file_open_job.c ${src}/file_snapshot.c ${src}/command_image.c ${src}/exec_prepare.c ${src}/proc_paths.c
-        ${src}/fs_worker.c ${src}/fs_service.c ${namespace_engine} ${mounts} ${inodes}
+        ${src}/fs_worker.c ${src}/fs_service.c ${src}/ipc_peer_service.c ${namespace_engine} ${mounts} ${inodes}
         ${src}/image_catalogue.c ${src}/elf_admission.c ${src}/elf.c ${src}/fs_client.c ${wire} ${raw})
     target_compile_definitions(fs_dispatch PRIVATE MD_NO_START MD_USE_LIBC)
     target_compile_options(fs_dispatch PRIVATE -iquote ${src} -UNDEBUG)
     target_link_libraries(fs_dispatch PRIVATE guest-sqlite m)
-    guest_executable(fd_handoff ../guest-exec-lab/test_fd_handoff.c ${origins} ${src}/fd_install.c ${src}/mount_namespace.c)
+    target_link_options(fs_dispatch PRIVATE -Wl,--wrap=calloc -Wl,--wrap=flock)
+    guest_executable(fd_handoff ../guest-exec-lab/test_fd_handoff.c ../guest-exec-lab/test_ipc_connections.c
+        ${origins} ${src}/fd_install.c ${src}/mount_namespace.c ${src}/ipc_credentials.c ${src}/guest_identity.c)
     target_compile_options(fd_handoff PRIVATE -iquote ${src} -UNDEBUG)
+    target_link_libraries(fd_handoff PRIVATE guest-sqlite m)
+    guest_executable(test_ipc_peer ../guest-exec-lab/test_ipc_peer.c ../guest-exec-lab/test_launch_peer.c
+        ../guest-exec-lab/test_message_route.c ${origins} ${src}/mount_namespace.c
+        ${src}/launch_registry.c ${src}/launch_peer.c ${src}/event_wait.c ${src}/ipc_peer.c ${src}/ipc_credentials.c
+        ${src}/guest_identity.c ${wire} ${raw})
+    target_compile_definitions(test_ipc_peer PRIVATE MD_NO_START MD_USE_LIBC)
+    target_compile_options(test_ipc_peer PRIVATE -iquote ${src} -UNDEBUG)
+    target_link_libraries(test_ipc_peer PRIVATE guest-sqlite m)
+    target_link_options(test_ipc_peer PRIVATE -Wl,--wrap=calloc)
     guest_executable(root_guest ../guest-exec-lab/test_root_guest.c)
     target_compile_options(root_guest PRIVATE -UNDEBUG)
     guest_executable(kernel_contract ../guest-exec-lab/test_kernel_contract.c

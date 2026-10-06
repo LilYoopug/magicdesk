@@ -1544,7 +1544,9 @@ static void buffer_export_lifetime(const char *store) {
         printf("PASS production protected export scenario=%u: authenticated request, exact capture, terminal cancellation and pipe EOF\n",scenario);
     }
 }
+void md_test_ipc_peer_worker(const char *);
 int main(int argc, char **argv) {
+    if (argc==3 && !strcmp(argv[1],"--ipc-peer")) { md_test_ipc_peer_worker(argv[2]); return 0; }
     if (argc==9 && !strcmp(argv[1],"--receiver")) { map_receiver(argv); return 99; }
     assert(argc==2 && !mkdir(argv[1],0700));
     setbuf(stdout,NULL); alarm(60);

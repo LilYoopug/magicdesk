@@ -117,10 +117,9 @@ class Images(unittest.TestCase):
         return Layout(self.root / 'layout', layers or [[('hello', 'file', b'world')]], **kwargs)
 
     def run_import(self, layout, success=True, args=(), preserve=False):
-        result = subprocess.run([BINARY, 'import', str(layout.path), str(self.destination),
-                                 '--preserve-ownership' if preserve else '--map-current-user', *args],
-                                capture_output=True, text=True, timeout=60)
-        self.assertEqual(result.returncode == 0, success, result.stdout + result.stderr)
+        result = self.command('import', layout.path, self.destination,
+                              '--preserve-ownership' if preserve else '--map-current-user', *args,
+                              success=success)
         self.assertFalse(list(self.root.glob('.md-image-*')))
         if not success:
             self.assertFalse(self.destination.exists(), result.stderr)
@@ -632,7 +631,9 @@ sys.stdin.read()
 
     def command(self, *args, success=True):
         result = subprocess.run([BINARY, *map(str, args)], capture_output=True, text=True, timeout=60)
-        self.assertEqual(result.returncode == 0, success, result.stdout + result.stderr)
+        diagnostic = f'exit={result.returncode}\n{result.stdout}{result.stderr}'
+        self.assertGreaterEqual(result.returncode, 0, diagnostic)
+        self.assertEqual(result.returncode == 0, success, diagnostic)
         return result
 
     def test_resolver_preserves_existing_and_requires_idle_instance(self):

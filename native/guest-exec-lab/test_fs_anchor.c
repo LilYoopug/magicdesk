@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "fs_mount_internal.h"
 #include "inode_internal.h"
+#include "fd_messages.h"
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -10,6 +11,8 @@
 #include <string.h>
 #include <sys/file.h>
 #include <sys/resource.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static unsigned descriptors(void) {
@@ -142,7 +145,88 @@ static void empty_views(struct md_inode_store *s) {
     capture_failure(&fs);
     md_fs_anchor_release(base); md_fs_mounts_close(&copy); md_fs_mounts_close(&fs);
 }
+static void store_custody(const char *base) {
+    unsigned before=descriptors();
+    char lower[PATH_MAX], upper[PATH_MAX], moved[PATH_MAX], host[PATH_MAX], file[PATH_MAX];
+    snprintf(lower,sizeof(lower),"%s/custody-lower",base);
+    snprintf(upper,sizeof(upper),"%s/custody-upper",base);
+    snprintf(moved,sizeof(moved),"%s/custody-moved",base);
+    snprintf(host,sizeof(host),"%s/custody-host",base); assert(!mkdir(host,0700));
+    snprintf(file,sizeof(file),"%s/value",host); contents(file);
+    struct md_inode_store *image=NULL, *store=NULL, *probe=NULL;
+    assert(!md_inode_store_open(lower,1,&image) && !md_inode_store_open(upper,1,&store));
+    assert(!md_inode_mkdir(image,-1,"/native",0700));
+    int fd=md_inode_create(image,-1,"/value",0600); assert(fd>=0);
+    assert(write(fd,"lower",5)==5 && !close(fd));
+    assert(!md_inode_store_seal(image) && !md_inode_snapshot(image,store));
+    struct md_filesystem fs={.store=store};
+    struct md_fs_attachment entry={host,"/native",1};
+    assert(!md_fs_mounts_open(&fs,&entry,1));
+    struct md_fs_anchor *pins[]={anchor(&fs,"/"),anchor(&fs,"/value"),anchor(&fs,"/native")};
+    struct md_fd_origins *source=md_fd_origins_new(); assert(source);
+    int fds[3]; struct md_fd_origin_update updates[3];
+    assert(!md_fd_origins_prepare_batch(source,pins,0,3,updates));
+    for (unsigned i=0;i<3;++i) fds[i]=md_fs_anchor_fd(pins[i]);
+    assert(!md_fd_origins_finish_batch(updates,3,fds,3));
+    struct md_fd_order turn={0};
+    assert(md_fd_order_begin(source,&turn,NULL)==1 && !md_fd_order_start(&turn));
+    struct md_fd_message *message=NULL;
+    unsigned captured=descriptors();
+    assert(!md_fd_message_capture(source,fds,3,&message) && descriptors()==captured);
+    assert(!md_fd_order_complete(&turn));
+    md_fd_origins_release(source);
+    for (unsigned i=0;i<3;++i) md_fs_anchor_release(pins[i]);
+    md_fs_mounts_close(&fs); md_inode_store_close(store); md_inode_store_close(image);
+    /* No SQLite connection or data FD remains, only message-origin pins. */
+    assert(md_inode_store_open_exclusive(upper,&probe)==-EBUSY && !probe);
+    assert(md_inode_store_open_exclusive(lower,&probe)==-EBUSY && !probe);
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        /* Do not mistake inherited copies of the parent's locks for evidence
+         * that its message-origin owner still excludes an independent process. */
+        assert(!syscall(SYS_close_range,3U,~0U,0));
+        assert(md_inode_store_open_exclusive(upper,&probe)==-EBUSY && !probe);
+        assert(md_inode_store_open_exclusive(lower,&probe)==-EBUSY && !probe);
+        _exit(0);
+    }
+    int status;
+    /* EVENT_WAIT: independent maintenance probe exits; runner bounds failure. */
+    assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
+    assert(!rename(upper,moved));
+    assert(!md_inode_store_open(moved,0,&store));
+    fs=(struct md_filesystem){.store=store}; assert(!md_fs_mounts_open(&fs,NULL,0));
+    struct md_fs_anchor *const *origins=md_fd_message_origins(message);
+    opens(&fs,origins[0],"value",O_RDONLY,0,0);
+    opens(&fs,origins[2],"value",O_RDWR,0,-EROFS);
+    struct md_fs_result r=request(&fs,origins[1],md_fs_anchor_fd(origins[1]),MD_FS_FSTAT,NULL,0,0,NULL);
+    assert(!r.error && r.info.size==5);
+    fd=md_inode_open(store,-1,"/value",O_RDWR,0); assert(fd>=0);
+    assert(pwrite(fd,"upper",5,0)==5 && !close(fd));
+    assert(!md_inode_unlink(store,-1,"/value",0));
+    r=request(&fs,origins[1],md_fs_anchor_fd(origins[1]),MD_FS_REOPEN,NULL,O_RDONLY,0,NULL);
+    char bytes[5]; assert(!r.error && read(r.fd,bytes,5)==5 && !memcmp(bytes,"upper",5)); close(r.fd);
+    /* Same backing inode in another store is not the same logical namespace. */
+    assert(!md_inode_store_open(lower,0,&image));
+    struct md_filesystem foreign={.store=image}; assert(!md_fs_mounts_open(&foreign,NULL,0));
+    r=request(&foreign,origins[1],md_fs_anchor_fd(origins[1]),MD_FS_FSTAT,NULL,0,0,NULL);
+    assert(r.error==-ESTALE);
+    md_fs_mounts_close(&foreign); md_inode_store_close(image);
+    assert(!md_inode_store_open(upper,1,&image));
+    foreign=(struct md_filesystem){.store=image}; assert(!md_fs_mounts_open(&foreign,NULL,0));
+    opens(&foreign,origins[0],"value",O_RDONLY,0,-ESTALE);
+    md_fs_mounts_close(&foreign); md_inode_store_close(image);
+    md_fs_mounts_close(&fs); md_inode_store_close(store);
+    assert(md_inode_store_open_exclusive(moved,&probe)==-EBUSY && !probe);
+    assert(md_inode_store_open_exclusive(lower,&probe)==-EBUSY && !probe);
+    md_fd_message_release(message);
+    /* Dropping the final message origin releases existing locks, not a timeout. */
+    assert(!md_inode_store_open_exclusive(moved,&probe)); md_inode_store_close(probe); probe=NULL;
+    assert(!md_inode_store_open_exclusive(lower,&probe)); md_inode_store_close(probe);
+    assert(descriptors()==before);
+    puts("PASS message backing custody: source connection exit, layer locks, no extra descriptors for pins, reopen after rename, readonly origins, copy-up/unlink and foreign-store rejection");
+}
 void test_fs_anchor(const char *base) {
+    store_custody(base);
     unsigned before=descriptors();
     char store[PATH_MAX],host[2][PATH_MAX],path[PATH_MAX],next[PATH_MAX];
     snprintf(store,sizeof(store),"%s/anchor-store",base);
@@ -241,7 +325,7 @@ void test_fs_anchor(const char *base) {
     char bytes[128]; struct md_fs_output output={.data=bytes,.capacity=sizeof(bytes)};
     struct md_fs_request cwd={.operation=MD_FS_PATH,.directory={md_fs_anchor_fd(shared),-1},.origin={shared,NULL}};
     md_fs_execute(&current,&cwd,&r,&output); assert(r.error==-ENOENT);
-    /* Foreign store pointers are rejected without touching that store. */
+    /* Foreign store identities are rejected without touching that store. */
     struct md_filesystem foreign=current; foreign.store=NULL;
     assert(md_view_anchor_check(&foreign,md_fs_anchor_fd(shared),shared)==-ESTALE);
     md_fs_anchor_release(shared); md_fs_anchor_release(old_child); md_fs_anchor_release(old_root); md_fs_anchor_release(new);

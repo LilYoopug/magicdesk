@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "fs_mount_internal.h"
+#include "inode_lifetime.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -12,11 +13,12 @@ struct md_fs_anchor *md_fs_anchor_retain(struct md_fs_anchor *p) {
 }
 void md_fs_anchor_release(struct md_fs_anchor *p) {
     if (!p || atomic_fetch_sub_explicit(&p->refs,1,memory_order_acq_rel)!=1) return;
-    close(p->fd); md_mount_namespace_release(p->view); free(p);
+    close(p->fd); md_mount_namespace_release(p->view);
+    md_inode_lifetime_release(p->lifetime); free(p);
 }
 int md_fs_anchor_fd(const struct md_fs_anchor *p) { return p ? p->fd : -1; }
 int md_view_anchor_check(struct md_filesystem *fs, int fd, const struct md_fs_anchor *p) {
-    if (fs->store!=p->store) return -ESTALE;
+    if (!md_inode_lifetime_same(md_inode_store_lifetime(fs->store),p->lifetime)) return -ESTALE;
     struct stat st;
     if (fstat(fd,&st)) return -errno;
     return st.st_dev==p->device && st.st_ino==p->inode ? 0 : -ESTALE;
@@ -42,7 +44,8 @@ void md_view_capture(struct md_filesystem *fs, struct md_mount_namespace *view,
         return;
     }
     atomic_init(&p->refs,1);
-    p->store=fs->store; p->view=md_mount_namespace_retain(view); p->mount=mount;
+    p->lifetime=md_inode_lifetime_retain(md_inode_store_lifetime(fs->store));
+    p->view=md_mount_namespace_retain(view); p->mount=mount;
     p->device=st.st_dev; p->inode=st.st_ino;
     *output->origin=p;
 }

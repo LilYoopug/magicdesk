@@ -425,9 +425,13 @@ static int store_open(const char *directory, int create, int exclusive, struct m
     int r = create && mkdirat(root, "objects", 0700) ? -errno : 0;
     struct md_inode_store *s = calloc(1, sizeof(*s));
     if (!s) { close(root); return -ENOMEM; }
+    s->lifetime = calloc(1, sizeof(*s->lifetime));
+    if (!s->lifetime) { close(root); free(s); return -ENOMEM; }
+    atomic_init(&s->lifetime->refs, 1);
+    s->lifetime->root = root;
+    s->lifetime->device = opened.st_dev; s->lifetime->inode = opened.st_ino;
     s->objects = s->watch_presence = -1;
-    for (unsigned i = 0; i < MDI_SOURCES; ++i) s->sources[i] = s->source_leases[i] = -1;
-    s->root = root;
+    for (unsigned i = 0; i < MDI_SOURCES; ++i) s->lifetime->sources[i] = s->lifetime->source_leases[i] = -1;
     if (!r && (s->objects = openat(root, "objects", O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)) < 0) r = -errno;
     if (!r) r = store_lock(s);
     if (!r) r = mdi_sql_error(sqlite3_open_v2(file, &s->db,
@@ -550,11 +554,7 @@ void md_inode_store_close(struct md_inode_store *s) {
     if (s->db) sqlite3_close(s->db);
     if (s->objects >= 0) close(s->objects);
     if (s->watch_presence >= 0) close(s->watch_presence);
-    if (s->root >= 0) close(s->root);
-    for (unsigned i = 1; i < MDI_SOURCES; ++i) {
-        if (s->sources[i] >= 0) close(s->sources[i]);
-        if (s->source_leases[i] >= 0) close(s->source_leases[i]);
-    }
+    md_inode_lifetime_release(s->lifetime);
     free(s);
 }
 #ifdef MD_INODE_TESTING

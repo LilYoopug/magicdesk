@@ -190,7 +190,7 @@ static int entry_file(struct md_inode_store *s, struct archive *ar, struct archi
         if (shared) {
             char backing[33]; md_image_pool_name(index, backing);
             struct stat st;
-            if (fstatat(s->sources[source], backing, &st, AT_SYMLINK_NOFOLLOW)) r = -errno;
+            if (fstatat(s->lifetime->sources[source], backing, &st, AT_SYMLINK_NOFOLLOW)) r = -errno;
             else if (!S_ISREG(st.st_mode) || st.st_size != archive_entry_size(entry)
                     || (st.st_mode & 07777) != (0600 | ((archive_entry_perm(entry) & 0111) ? 0100 : 0))
                     || st.st_mtim.tv_sec != archive_entry_mtime(entry)

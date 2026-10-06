@@ -82,10 +82,10 @@ static int import(const char *source, const char *destination, const char *refer
     sqlite3_finalize(q);
     if (!r && layers != diff_count) r = -EINVAL;
     if (!r) r = md_image_layers_finish(store, preserve);
-    if (!r) r = save(store->root, "image-config.json", oci.config);
-    if (!r) r = save(store->root, "image-manifest.json", oci.manifest);
+    if (!r) r = save(store->lifetime->root, "image-config.json", oci.config);
+    if (!r) r = save(store->lifetime->root, "image-manifest.json", oci.manifest);
     if (!r) r = md_inode_store_seal(store);
-    if (!r && fsync(store->root)) r = -errno;
+    if (!r && fsync(store->lifetime->root)) r = -errno;
     md_inode_store_close(store);
     if (json) sqlite3_close(json);
     if (!r) r = md_image_publish_commit(&publish);
@@ -106,14 +106,14 @@ static int create(const char *source, const char *destination) {
     if (!r) r = md_inode_snapshot(image, instance);
     const char *files[] = {"image-config.json", "image-manifest.json"};
     for (unsigned i = 0; !r && i < sizeof(files)/sizeof(*files); ++i) {
-        int fd = openat(image->root, files[i], O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        int fd = openat(image->lifetime->root, files[i], O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
         if (fd < 0) { if (i && errno == ENOENT) continue; r = -errno; break; }
         char *json = NULL;
         r = md_image_read(fd, 8*1024*1024, &json);
-        if (!r) r = save(instance->root, files[i], json);
+        if (!r) r = save(instance->lifetime->root, files[i], json);
         free(json); close(fd);
     }
-    if (!r && fsync(instance->root)) r = -errno;
+    if (!r && fsync(instance->lifetime->root)) r = -errno;
     md_inode_store_close(instance); md_inode_store_close(image);
     if (!r) r = md_image_publish_commit(&publish);
     md_image_publish_close(&publish);

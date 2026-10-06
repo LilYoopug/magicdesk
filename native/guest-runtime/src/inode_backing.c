@@ -12,7 +12,7 @@
 #include <unistd.h>
 
 int mdi_backing_directory(struct md_inode_store *s, const struct mdi_node *node) {
-    int fd = node->source ? s->sources[node->source] : s->objects;
+    int fd = node->source ? s->lifetime->sources[node->source] : s->objects;
     return fd < 0 ? -ESTALE : fd;
 }
 int md_inode_descriptor_source(struct md_inode_store *s, int fd, char *out, size_t capacity) {
@@ -27,7 +27,7 @@ int md_inode_descriptor_source(struct md_inode_store *s, int fd, char *out, size
     const char *name=strrchr(path,'/');
     if (!name || strlen(++name)!=32 || strspn(name,"0123456789abcdef")!=32) return -EXDEV;
     for (unsigned i=0;i<MDI_SOURCES;++i) {
-        int directory=i ? s->sources[i] : s->objects;
+        int directory=i ? s->lifetime->sources[i] : s->objects;
         if (directory<0) continue;
         if (fstatat(directory,name,&named,AT_SYMLINK_NOFOLLOW)) {
             if (errno==ENOENT) continue;
@@ -49,7 +49,7 @@ int mdi_sources_open(struct md_inode_store *s) {
         int id = sqlite3_column_int(q, 0);
         const char *path = (const char *)sqlite3_column_text(q, 1);
         if (id <= 0 || id >= MDI_SOURCES || !path || path[0] != '/') { r = -EIO; break; }
-        if (s->sources[id] >= 0) continue;
+        if (s->lifetime->sources[id] >= 0) continue;
         int fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         if (fd < 0) { r = -errno; break; }
         int lease = openat(fd, "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -63,7 +63,7 @@ int mdi_sources_open(struct md_inode_store *s) {
         if (!r && (fstatat(lease, "objects", &named, AT_SYMLINK_NOFOLLOW)
                 || !st.st_nlink || named.st_dev != st.st_dev || named.st_ino != st.st_ino)) r = -ESTALE;
         if (r) { close(fd); if (lease >= 0) close(lease); }
-        else { s->sources[id] = fd; s->source_leases[id] = lease; }
+        else { s->lifetime->sources[id] = fd; s->lifetime->source_leases[id] = lease; }
     }
     sqlite3_finalize(q); return r;
 }
@@ -89,10 +89,10 @@ int mdi_source_register(struct md_inode_store *s, int objects, int *id) {
 }
 
 int mdi_import_shared(struct md_inode_store *s, int source, const char *backing, struct mdi_node *node) {
-    if (source <= 0 || source >= MDI_SOURCES || s->sources[source] < 0
+    if (source <= 0 || source >= MDI_SOURCES || s->lifetime->sources[source] < 0
             || strlen(backing) != 32 || strspn(backing, "0123456789abcdef") != 32) return -EINVAL;
     struct stat st;
-    if (fstatat(s->sources[source], backing, &st, AT_SYMLINK_NOFOLLOW)) return -errno;
+    if (fstatat(s->lifetime->sources[source], backing, &st, AT_SYMLINK_NOFOLLOW)) return -errno;
     if (!S_ISREG(st.st_mode)) return -EINVAL;
     char id[33];
     int r = mdi_random_id(id);
@@ -174,7 +174,7 @@ int mdi_copy_up(struct md_inode_store *s, struct mdi_node *node) {
     if (!r) snprintf(temporary, sizeof(temporary), ".copy-%s", backing);
     /* Prepare outside the watched backing directory, including the final close.
      * Publication exposes only future application IO to namespace observers. */
-    if (!r && (destination = openat(s->root, temporary, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600)) < 0)
+    if (!r && (destination = openat(s->lifetime->root, temporary, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600)) < 0)
         r = -errno;
     if (!r) r = copy_bytes(s, source, destination, before.st_size);
     if (!r) r = attributes(source, destination);
@@ -182,9 +182,9 @@ int mdi_copy_up(struct md_inode_store *s, struct mdi_node *node) {
     if (!r && (fchmod(destination, before.st_mode & 01777) || futimens(destination, times)
             || fsync(destination) || fstat(destination, &after))) r = -errno;
     if (destination >= 0) { if (close(destination) && !r) r = -errno; destination = -1; }
-    if (!r && renameat(s->root, temporary, s->objects, backing)) r = -errno;
-    if (!r && (fsync(s->objects) || fsync(s->root))) r = -errno;
-    if (r && *temporary) unlinkat(s->root, temporary, 0);
+    if (!r && renameat(s->lifetime->root, temporary, s->objects, backing)) r = -errno;
+    if (!r && (fsync(s->objects) || fsync(s->lifetime->root))) r = -errno;
+    if (r && *temporary) unlinkat(s->lifetime->root, temporary, 0);
     sqlite3_stmt *q = NULL;
     if (!r) r = mdi_prepare(s, "UPDATE objects SET backing=?1,device=?2,inode=?3,shared=0,source=0 WHERE object=?4", &q);
     if (!r) r = mdi_bind_id(q, 1, backing);

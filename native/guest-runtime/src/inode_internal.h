@@ -5,26 +5,34 @@
 #include <sqlite3.h>
 #include "guest_identity.h"
 #include "posix_acl.h"
+#include "inode_lifetime.h"
+#include <stdatomic.h>
 struct md_fs_result;
 struct md_fs_output;
 struct md_inode_boundary { char *path; size_t capacity; const char *suffix; };
 
 #define MDI_ROOT "00000000000000000000000000000000"
 #define MDI_SOURCES 256
+struct md_inode_lifetime {
+    atomic_uint refs;
+    int root;
+    dev_t device;
+    ino_t inode;
+    int sources[MDI_SOURCES], source_leases[MDI_SOURCES];
+};
 enum mdi_query { MDI_NODE, MDI_FD, MDI_LOOKUP, MDI_DIRECTORY_NAME, MDI_READDIR,
     MDI_BEGIN, MDI_BEGIN_WRITE, MDI_COMMIT, MDI_ROLLBACK, MDI_EVENT, MDI_EVENT_TRIM,
     MDI_EVENT_END, MDI_EVENT_SCAN, MDI_EVENT_NAMES, MDI_BACKING_OBJECT, MDI_FILE_PATH, MDI_ACL,
     MDI_QUERY_COUNT };
 struct md_inode_store {
     sqlite3 *db;
-    int objects, root, watch_presence, locked, recording, readonly, reflink_unavailable;
+    int objects, watch_presence, locked, recording, readonly, reflink_unavailable;
+    struct md_inode_lifetime *lifetime;
     const struct md_identity *identity;
     const char *root_id;
     unsigned creation_mask;
     struct md_inode_boundary *boundary;
     char *stat_path;
-    int sources[MDI_SOURCES];
-    int source_leases[MDI_SOURCES];
     struct md_inode_watches *watches;
     struct mdi_fifo_owner *fifos;
     struct md_inode_statistics *statistics;

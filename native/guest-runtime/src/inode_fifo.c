@@ -18,10 +18,10 @@ static int owner(struct md_inode_store *s) {
     o->lease = -1;
     int r = mdi_random_id(o->id);
     char name[48]; snprintf(name, sizeof(name), "fifo-%s", o->id);
-    if (!r && (o->lease = openat(s->root, name, O_CREAT | O_EXCL | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0600)) < 0)
+    if (!r && (o->lease = openat(s->lifetime->root, name, O_CREAT | O_EXCL | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0600)) < 0)
         r = -errno;
     if (!r && flock(o->lease, LOCK_EX | LOCK_NB)) r = -errno;
-    if (r) { if (o->lease >= 0) { close(o->lease); unlinkat(s->root, name, 0); } free(o); }
+    if (r) { if (o->lease >= 0) { close(o->lease); unlinkat(s->lifetime->root, name, 0); } free(o); }
     else s->fifos = o;
     return r;
 }
@@ -30,7 +30,7 @@ static int live(struct md_inode_store *s, const char *id) {
     if (!id || strlen(id) != 32 || strspn(id, "0123456789abcdef") != 32) return -EIO;
     if (s->fifos && !strcmp(id, s->fifos->id)) return 1;
     char name[48]; snprintf(name, sizeof(name), "fifo-%s", id);
-    int fd = openat(s->root, name, O_RDWR | O_NOFOLLOW | O_CLOEXEC);
+    int fd = openat(s->lifetime->root, name, O_RDWR | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0) return errno == ENOENT ? 0 : -errno;
     int r = flock(fd, LOCK_EX | LOCK_NB) ? (errno == EWOULDBLOCK ? 1 : -errno) : 0;
     close(fd); return r;
@@ -118,7 +118,7 @@ int mdi_fifo_prepare(struct md_inode_store *s, int original, struct md_open_comp
     char state[48]; snprintf(state, sizeof(state), "fifo-state-%s", r ? "" : node.id);
     /* Rendezvous bookkeeping is outside watched backing objects. It must not
      * masquerade as guest data writes/open/close notifications. */
-    if (!r && (control = openat(s->root, state, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600)) < 0) r = -errno;
+    if (!r && (control = openat(s->lifetime->root, state, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600)) < 0) r = -errno;
     struct stat st;
     if (!r && fstat(control, &st)) r = -errno;
     if (!r && !st.st_size && ftruncate(control, 8)) r = -errno;
@@ -143,6 +143,6 @@ void mdi_fifo_close(struct md_inode_store *s) {
     }
     while (o->pins) { struct fifo_pin *p = o->pins; o->pins = p->next; close(p->fd); free(p); }
     char name[48]; snprintf(name, sizeof(name), "fifo-%s", o->id);
-    unlinkat(s->root, name, 0); close(o->lease);
+    unlinkat(s->lifetime->root, name, 0); close(o->lease);
     free(o); s->fifos = NULL;
 }

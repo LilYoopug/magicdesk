@@ -1,10 +1,12 @@
 #define _GNU_SOURCE
 #include "ipc_credentials.h"
+#include "ipc_scope.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/memfd.h>
 #include <limits.h>
 #include <sqlite3.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,7 +18,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
-struct md_ipc_credentials { sqlite3 *db; int lease, gate; };
+struct md_ipc_credentials { sqlite3 *db; struct md_ipc_scope *scope; int gate; };
 struct snapshot { struct md_ipc_identity ids; uint32_t groups[]; };
 static int sql(int rc) { return rc == SQLITE_OK || rc == SQLITE_DONE || rc == SQLITE_ROW ? 0 : -EIO; }
 static int statement(struct md_ipc_credentials *s, const char *text, sqlite3_stmt **q) {
@@ -29,21 +31,32 @@ void md_ipc_credentials_close(struct md_ipc_credentials *s) {
     if (!s) return;
     if (s->db) sqlite3_close(s->db);
     if (s->gate >= 0) close(s->gate);
-    if (s->lease >= 0) close(s->lease);
+    md_ipc_scope_release(s->scope);
     free(s);
 }
 int md_ipc_credentials_open(const char *store, struct md_ipc_credentials **out) {
     struct md_ipc_credentials *s = calloc(1, sizeof(*s));
     if (!s) return -ENOMEM;
-    s->lease = s->gate = -1;
+    s->gate = -1;
+    s->scope=calloc(1,sizeof(*s->scope));
+    if (!s->scope) { free(s); return -ENOMEM; }
+    atomic_init(&s->scope->refs,1); s->scope->lease=s->scope->root=-1;
     int root = open(store, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW), dir = -1;
     int r = root < 0 ? -errno : 0;
+    s->scope->root=root;
+    if (!r && flock(root,LOCK_SH|LOCK_NB)) r=errno==EWOULDBLOCK ? -EBUSY : -errno;
+    struct stat opened, named;
+    if (!r && (fstat(root,&opened) || lstat(store,&named) || !opened.st_nlink
+            || opened.st_dev!=named.st_dev || opened.st_ino!=named.st_ino)) r=-ESTALE;
+    if (!r) { s->scope->device=opened.st_dev; s->scope->inode=opened.st_ino; }
     if (!r && mkdirat(root, "ipc", 0700) && errno != EEXIST) r = -errno;
     if (!r && (dir = openat(root, "ipc", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)) < 0) r = -errno;
     if (!r && (s->gate = openat(dir, "gate", O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600)) < 0) r = -errno;
+    /* EVENT_WAIT: current metadata transaction releases its gate; syscall
+     * interruption fails admission before any snapshot is published. */
     if (!r && flock(s->gate, LOCK_EX)) r = -errno;
-    if (!r && (s->lease = openat(dir, "live", O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600)) < 0) r = -errno;
-    int first = !r && !flock(s->lease, LOCK_EX | LOCK_NB);
+    if (!r && (s->scope->lease = openat(dir, "live", O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600)) < 0) r = -errno;
+    int first = !r && !flock(s->scope->lease, LOCK_EX | LOCK_NB);
     if (!r && !first && errno != EWOULDBLOCK) r = -errno;
     char link[64], path[PATH_MAX];
     snprintf(link, sizeof(link), "/proc/self/fd/%d", dir);
@@ -54,15 +67,15 @@ int md_ipc_credentials_open(const char *store, struct md_ipc_credentials **out) 
     if (!r && first) r = execute(s, "DROP TABLE IF EXISTS endpoints;DROP TABLE IF EXISTS connections;DROP TABLE IF EXISTS messages;");
     if (!r) r = execute(s, "PRAGMA journal_mode=WAL;PRAGMA synchronous=NORMAL;"
         "CREATE TABLE IF NOT EXISTS endpoints(name BLOB PRIMARY KEY,cookie INTEGER,revision INTEGER,identity BLOB,ready INTEGER);"
-        "CREATE TABLE IF NOT EXISTS connections(cookie INTEGER PRIMARY KEY,name BLOB,identity BLOB,peer BLOB,endpoint BLOB,revision INTEGER,hidden INTEGER,valid INTEGER,link BLOB);"
+        "CREATE TABLE IF NOT EXISTS connections(cookie INTEGER PRIMARY KEY,name BLOB,identity BLOB,peer BLOB,endpoint BLOB,revision INTEGER,hidden INTEGER,valid INTEGER,link BLOB,side INTEGER);"
         "CREATE INDEX IF NOT EXISTS connection_name ON connections(name);"
-        "CREATE TABLE IF NOT EXISTS messages(nonce BLOB PRIMARY KEY,link BLOB,device INTEGER,inode INTEGER,pid INTEGER,uid INTEGER,gid INTEGER);");
+        "CREATE INDEX IF NOT EXISTS connection_link ON connections(link,side);"
+        "CREATE TABLE IF NOT EXISTS messages(nonce BLOB PRIMARY KEY,link BLOB,device INTEGER,inode INTEGER,pid INTEGER,uid INTEGER,gid INTEGER,side INTEGER);");
     /* The first live owner discards stale metadata, including cookies from an
      * earlier boot. This directory is not part of OCI/image inode metadata. */
-    if (!r && flock(s->lease, LOCK_SH)) r = -errno;
+    if (!r && flock(s->scope->lease, LOCK_SH)) r = -errno;
     if (s->gate >= 0) flock(s->gate, LOCK_UN);
     if (dir >= 0) close(dir);
-    if (root >= 0) close(root);
     if (r) md_ipc_credentials_close(s); else *out = s;
     return r;
 }
@@ -122,13 +135,17 @@ static int blob_copy(sqlite3_stmt *q, int column, void **out, size_t *bytes) {
 }
 static int save_connection(struct md_ipc_credentials *s, uint64_t key, const struct sockaddr_un *name, int size,
         const void *self, size_t self_size, const void *peer, size_t peer_size,
-        const struct sockaddr_un *endpoint, int endpoint_size, int64_t revision, int hidden, int valid, const unsigned char link[16]) {
+        const struct sockaddr_un *endpoint, int endpoint_size, int64_t revision, int hidden, int valid,
+        const struct md_ipc_connection *connection) {
     sqlite3_stmt *q = NULL;
     int r = execute(s, "BEGIN IMMEDIATE");
     if (!r && size) {
-        /* A kernel-bound address cannot be reused while its socket is alive.
-         * Keep old peer snapshots, but retire its name-to-connection mapping. */
-        r = statement(s, "UPDATE connections SET name=NULL WHERE name=?1 AND cookie<>?2", &q);
+        /* close can release a bound name before accept. Keep unresolved
+         * candidates: selecting the newest would misidentify queued peers.
+         * Accepted endpoints already have their own cookie-bound snapshot. */
+        r = statement(s, "UPDATE connections AS old SET name=NULL WHERE name=?1 AND cookie<>?2 "
+            "AND (valid<0 OR EXISTS(SELECT 1 FROM connections AS accepted "
+            "WHERE accepted.link=old.link AND accepted.side=1))", &q);
         if (!r) {
             sqlite3_bind_blob(q, 1, name->sun_path, size, SQLITE_STATIC);
             sqlite3_bind_int64(q, 2, (sqlite3_int64)key);
@@ -136,7 +153,7 @@ static int save_connection(struct md_ipc_credentials *s, uint64_t key, const str
         }
         sqlite3_finalize(q); q = NULL;
     }
-    if (!r) r = statement(s, "INSERT OR REPLACE INTO connections VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)", &q);
+    if (!r) r = statement(s, "INSERT OR REPLACE INTO connections VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", &q);
     if (!r) {
         sqlite3_bind_int64(q, 1, (sqlite3_int64)key);
         sqlite3_bind_blob(q, 2, name ? name->sun_path : NULL, size, SQLITE_STATIC);
@@ -144,7 +161,8 @@ static int save_connection(struct md_ipc_credentials *s, uint64_t key, const str
         sqlite3_bind_blob(q, 4, peer, (int)peer_size, SQLITE_STATIC);
         sqlite3_bind_blob(q, 5, endpoint ? endpoint->sun_path : NULL, endpoint_size, SQLITE_STATIC);
         sqlite3_bind_int64(q, 6, revision); sqlite3_bind_int(q, 7, hidden); sqlite3_bind_int(q, 8, valid);
-        sqlite3_bind_blob(q, 9, link, 16, SQLITE_STATIC);
+        sqlite3_bind_blob(q, 9, connection->link, sizeof(connection->link), SQLITE_STATIC);
+        sqlite3_bind_int(q, 10, (int)connection->side);
         r = sql(sqlite3_step(q));
     }
     sqlite3_finalize(q);
@@ -219,15 +237,35 @@ static int connect_begin(struct md_ipc_credentials *s, const struct md_fs_reques
             else hidden = 1;
         }
     }
-    unsigned char link[16];
-    if (!r && getrandom(link, sizeof(link), 0) != sizeof(link)) r = -EIO;
+    struct md_ipc_connection connection={0};
+    if (!r && getrandom(connection.link, sizeof(connection.link), 0) != sizeof(connection.link)) r = -EIO;
     if (!r) r = save_connection(s, key, &local, local_size, self, bytes, peer, peer_size,
-        &endpoint, size, revision, hidden, 2, link);
+        &endpoint, size, revision, hidden, 2, &connection);
     if (!r) result->position = 1;
     free(peer); return r;
 }
+static int peer_matches(int fd, const struct md_ipc_identity *expected) {
+    struct ucred actual; socklen_t size=sizeof(actual);
+    if (getsockopt(fd,SOL_SOCKET,SO_PEERCRED,&actual,&size)) return -errno;
+    return size==sizeof(actual) && actual.pid==expected->pid ? 0 : -ESTALE;
+}
 static int connect_end(struct md_ipc_credentials *s, const struct md_fs_request *req, uint64_t key) {
     sqlite3_stmt *q = NULL;
+    if (!req->offset) {
+        int r=statement(s,"SELECT peer FROM connections WHERE cookie=?1",&q);
+        if (!r) {
+            sqlite3_bind_int64(q,1,(sqlite3_int64)key);
+            int step=sqlite3_step(q);
+            if (step!=SQLITE_ROW) r=step==SQLITE_DONE ? -ENODATA : -EIO;
+            else {
+                const void *peer; size_t bytes;
+                r=blob_view(q,0,&peer,&bytes);
+                if (!r) r=peer_matches(req->directory[0],peer);
+            }
+        }
+        sqlite3_finalize(q); q=NULL;
+        if (r) return r; // A reused native listen address cannot confirm this connection.
+    }
     int r = statement(s, "UPDATE connections SET valid=CASE WHEN ?2=0 AND EXISTS(SELECT 1 FROM endpoints "
         "WHERE endpoints.name=connections.endpoint AND endpoints.revision=connections.revision AND ready=1) "
         "THEN 1 ELSE CASE WHEN ?2=0 THEN 0 ELSE -1 END END WHERE cookie=?1", &q);
@@ -238,25 +276,38 @@ static int connect_end(struct md_ipc_credentials *s, const struct md_fs_request 
     sqlite3_finalize(q); return r;
 }
 static int accept_peer(struct md_ipc_credentials *s, int fd, uint64_t key) {
-    struct sockaddr_un peer; int size;
+    struct sockaddr_un peer, local; int size, local_size;
     int r = address(fd, 1, &peer, &size);
     if (r || !size) return r;
+    r=address(fd,0,&local,&local_size);
+    struct ucred actual; socklen_t actual_size=sizeof(actual);
+    if (!r && getsockopt(fd,SOL_SOCKET,SO_PEERCRED,&actual,&actual_size)) r=-errno;
+    if (r) return r;
     sqlite3_stmt *q = NULL;
-    r = statement(s, "SELECT identity,link FROM connections WHERE name=?1", &q);
+    r = statement(s, "SELECT identity,link,side,valid FROM connections WHERE name=?1 AND endpoint=?2 AND valid>=0", &q);
     void *id = NULL; size_t bytes = 0;
-    unsigned char link[16];
+    struct md_ipc_connection connection={.side=1};
     if (!r) {
         sqlite3_bind_blob(q, 1, peer.sun_path, size, SQLITE_STATIC);
-        int step = sqlite3_step(q);
-        if (step == SQLITE_ROW) {
-            r = blob_copy(q, 0, &id, &bytes);
-            if (!r && sqlite3_column_bytes(q, 1) != sizeof(link)) r = -EPROTO;
-            if (!r) memcpy(link, sqlite3_column_blob(q, 1), sizeof(link));
+        sqlite3_bind_blob(q, 2, local.sun_path, local_size, SQLITE_STATIC);
+        int step;
+        while (!r && (step=sqlite3_step(q))==SQLITE_ROW) {
+            const void *candidate; size_t candidate_bytes;
+            r=blob_view(q,0,&candidate,&candidate_bytes);
+            if (r) break;
+            if (((const struct md_ipc_identity *)candidate)->pid!=actual.pid) continue;
+            if (id) { r=-ESTALE; break; }
+            if (sqlite3_column_int(q,3)!=1 && sqlite3_column_int(q,3)!=2) { r=-ESTALE; break; }
+            if (sqlite3_column_bytes(q, 1) != sizeof(connection.link)
+                    || sqlite3_column_type(q, 2)!=SQLITE_INTEGER
+                    || sqlite3_column_int(q, 2)!=0) { r=-EPROTO; break; }
+            r=blob_copy(q,0,&id,&bytes);
+            if (!r) memcpy(connection.link,sqlite3_column_blob(q,1),sizeof(connection.link));
         }
-        else r = step == SQLITE_DONE ? 0 : -EIO;
+        if (!r && step!=SQLITE_DONE) r=-EIO;
     }
     sqlite3_finalize(q);
-    if (!r && id) r = save_connection(s, key, NULL, 0, NULL, 0, id, bytes, NULL, 0, 0, 0, 1, link);
+    if (!r && id) r = save_connection(s, key, NULL, 0, NULL, 0, id, bytes, NULL, 0, 0, 0, 1, &connection);
     free(id); return r;
 }
 static int peer_snapshot(struct md_ipc_credentials *s, const struct md_fs_request *req,
@@ -273,31 +324,65 @@ static int peer_snapshot(struct md_ipc_credentials *s, const struct md_fs_reques
             else r = blob_view(q, 0, &id, &bytes);
         } else r = step == SQLITE_DONE ? -ENODATA : -EIO;
     }
-    struct ucred actual; socklen_t size = sizeof(actual);
-    if (!r && getsockopt(req->directory[0], SOL_SOCKET, SO_PEERCRED, &actual, &size)) r = -errno;
-    if (!r && actual.pid != ((struct md_ipc_identity *)id)->pid) r = -ESTALE;
+    if (!r) r=peer_matches(req->directory[0],id);
     if (!req->mode) bytes=sizeof(struct md_ipc_identity);
     if (!r && (!output || !output->data)) r=-EFAULT;
     if (!r && output->capacity<bytes) r=-EOVERFLOW;
     if (!r) { memcpy(output->data,id,bytes); result->size=bytes; }
     sqlite3_finalize(q); return r;
 }
-struct message_token { uint64_t magic; unsigned char nonce[16]; };
-#define MESSAGE_MAGIC UINT64_C(0x4d44495043494431)
-static int message_identity(struct md_ipc_credentials *s, const struct md_identity *id,
-        const struct md_fs_request *req, uint64_t key, struct md_fs_result *out) {
+static int connection_key(struct md_ipc_credentials *s, uint64_t key, struct md_ipc_connection *out) {
     sqlite3_stmt *q = NULL;
-    unsigned char link[16];
-    int r = statement(s, "SELECT link,valid FROM connections WHERE cookie=?1", &q);
+    struct md_ipc_connection connection={0};
+    int r = statement(s, "SELECT link,valid,side FROM connections WHERE cookie=?1", &q);
     if (!r) {
         sqlite3_bind_int64(q, 1, (sqlite3_int64)key);
         int step = sqlite3_step(q);
         if (step != SQLITE_ROW) r = step == SQLITE_DONE ? -ENODATA : -EIO;
-        else if (sqlite3_column_int(q, 1) != 1 || sqlite3_column_bytes(q, 0) != sizeof(link)) r = -ESTALE;
-        else memcpy(link, sqlite3_column_blob(q, 0), sizeof(link));
+        else if (sqlite3_column_int(q, 1) != 1) r = -ESTALE;
+        else if (sqlite3_column_bytes(q, 0) != sizeof(connection.link)
+                || sqlite3_column_type(q, 2)!=SQLITE_INTEGER
+                || (unsigned)sqlite3_column_int(q, 2)>1) r = -EPROTO;
+        else {
+            memcpy(connection.link, sqlite3_column_blob(q, 0), sizeof(connection.link));
+            connection.side=(unsigned)sqlite3_column_int(q, 2);
+        }
     }
-    sqlite3_finalize(q); q = NULL;
+    sqlite3_finalize(q);
+    if (!r) *out=connection;
+    return r;
+}
+int md_ipc_credentials_connection(struct md_ipc_credentials *s, int fd, struct md_ipc_connection *out) {
+    if (!s) return -ENOTSUP;
+    if (!out) return -EINVAL;
+    uint64_t key;
+    int r=socket_key(fd,&key);
+    /* EVENT_WAIT: metadata gate release; interruption returns an error without
+     * publishing a connection or running any application IO. */
+    if (!r && flock(s->gate,LOCK_EX)) r=-errno;
     if (r) return r;
+    r=connection_key(s,key,out);
+    flock(s->gate,LOCK_UN);
+    return r;
+}
+int md_ipc_credentials_bind(struct md_ipc_credentials *s, int fd, struct md_ipc_binding *out) {
+    if (!out || out->scope) return -EINVAL;
+    struct md_ipc_connection connection;
+    int r=md_ipc_credentials_connection(s,fd,&connection);
+    if (!r) {
+        atomic_fetch_add_explicit(&s->scope->refs,1,memory_order_relaxed);
+        *out=(struct md_ipc_binding){.connection=connection,.scope=s->scope};
+    }
+    return r;
+}
+struct message_token { uint64_t magic; unsigned char nonce[16]; };
+#define MESSAGE_MAGIC UINT64_C(0x4d44495043494431)
+static int message_identity(struct md_ipc_credentials *s, const struct md_identity *id,
+        const struct md_fs_request *req, uint64_t key, struct md_fs_result *out) {
+    struct md_ipc_connection connection;
+    int r=connection_key(s,key,&connection);
+    if (r) return r;
+    sqlite3_stmt *q=NULL;
     struct message_token token = {.magic=MESSAGE_MAGIC};
     struct stat st;
     int fd = -1;
@@ -313,12 +398,13 @@ static int message_identity(struct md_ipc_credentials *s, const struct md_identi
         if (write(fd, &token, sizeof(token)) != sizeof(token)) r = -EIO;
         if (!r && fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)) r = -errno;
         if (!r && fstat(fd, &st)) r = -errno;
-        if (!r) r = statement(s, "INSERT INTO messages VALUES(?1,?2,?3,?4,?5,?6,?7)", &q);
+        if (!r) r = statement(s, "INSERT INTO messages VALUES(?1,?2,?3,?4,?5,?6,?7,?8)", &q);
         if (!r) {
             sqlite3_bind_blob(q, 1, token.nonce, sizeof(token.nonce), SQLITE_STATIC);
-            sqlite3_bind_blob(q, 2, link, sizeof(link), SQLITE_STATIC);
+            sqlite3_bind_blob(q, 2, connection.link, sizeof(connection.link), SQLITE_STATIC);
             sqlite3_bind_int64(q, 3, st.st_dev); sqlite3_bind_int64(q, 4, st.st_ino);
             sqlite3_bind_int(q, 5, req->peer); sqlite3_bind_int64(q, 6, req->attributes.uid); sqlite3_bind_int64(q, 7, req->attributes.gid);
+            sqlite3_bind_int(q, 8, (int)connection.side);
             r = sql(sqlite3_step(q));
         }
         if (!r) out->fd = fd; else close(fd);
@@ -327,11 +413,12 @@ static int message_identity(struct md_ipc_credentials *s, const struct md_identi
         int seals = fcntl(fd, F_GET_SEALS), required = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
         if (seals < 0 || (seals & required) != required || fstat(fd, &st) || st.st_size != sizeof(token)
                 || pread(fd, &token, sizeof(token), 0) != sizeof(token) || token.magic != MESSAGE_MAGIC) return -ENODATA;
-        r = statement(s, "SELECT pid,uid,gid FROM messages WHERE nonce=?1 AND link=?2 AND device=?3 AND inode=?4", &q);
+        r = statement(s, "SELECT pid,uid,gid FROM messages WHERE nonce=?1 AND link=?2 AND device=?3 AND inode=?4 AND side=?5", &q);
         if (!r) {
             sqlite3_bind_blob(q, 1, token.nonce, sizeof(token.nonce), SQLITE_STATIC);
-            sqlite3_bind_blob(q, 2, link, sizeof(link), SQLITE_STATIC);
+            sqlite3_bind_blob(q, 2, connection.link, sizeof(connection.link), SQLITE_STATIC);
             sqlite3_bind_int64(q, 3, st.st_dev); sqlite3_bind_int64(q, 4, st.st_ino);
+            sqlite3_bind_int(q, 5, (int)(connection.side^1));
             int step = sqlite3_step(q);
             if (step != SQLITE_ROW) r = step == SQLITE_DONE ? -ENODATA : -EIO;
             else { out->position = sqlite3_column_int(q, 0); out->info.uid = (uint32_t)sqlite3_column_int64(q, 1); out->info.gid = (uint32_t)sqlite3_column_int64(q, 2); }
@@ -364,11 +451,12 @@ void md_ipc_credentials_execute(struct md_ipc_credentials *s, const struct md_id
     case MD_IPC_ACCEPT: r = accept_peer(s, q->directory[0], key); break;
     case MD_IPC_PAIR: {
         uint64_t other;
-        unsigned char link[16];
+        struct md_ipc_connection connection={0};
         r = socket_key(q->directory[1], &other);
-        if (!r && getrandom(link, sizeof(link), 0) != sizeof(link)) r = -EIO;
-        if (!r) r = save_connection(s, key, NULL, 0, self, bytes, self, bytes, NULL, 0, 0, 0, 1, link);
-        if (!r) r = save_connection(s, other, NULL, 0, self, bytes, self, bytes, NULL, 0, 0, 0, 1, link);
+        if (!r && getrandom(connection.link, sizeof(connection.link), 0) != sizeof(connection.link)) r = -EIO;
+        if (!r) r = save_connection(s, key, NULL, 0, self, bytes, self, bytes, NULL, 0, 0, 0, 1, &connection);
+        connection.side=1;
+        if (!r) r = save_connection(s, other, NULL, 0, self, bytes, self, bytes, NULL, 0, 0, 0, 1, &connection);
         break;
     }
     case MD_IPC_MESSAGE_CREATE: case MD_IPC_MESSAGE_READ: r = message_identity(s, identity, q, key, out); break;

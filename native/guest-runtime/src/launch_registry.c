@@ -96,6 +96,10 @@ static int acquire(int dir, const char *id, struct md_launch_info *info) {
     if (r && process >= 0) close(process);
     return r ? r : process;
 }
+int md_launch_acquire(const struct md_launch_registration *local, const char *id, struct md_launch_info *info) {
+    if (!local || local->directory<0 || !valid(id) || !info) return -EINVAL;
+    return acquire(local->directory,id,info);
+}
 int md_launch_list(const char *store, md_launch_visitor visit, void *context) {
     int fd = directory(store, 0);
     if (fd == -ENOENT) return 0;

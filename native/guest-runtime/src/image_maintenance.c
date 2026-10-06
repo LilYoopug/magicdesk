@@ -28,7 +28,7 @@ int md_image_remove(const char *directory, int layer) {
     const char *selected = resumed ? tomb_path : directory;
     int root = -1, r = 0;
     struct md_inode_store *s = NULL;
-    if (!layer && !resumed) { r = md_inode_store_open_exclusive(directory, &s); if (!r) root = s->root; }
+    if (!layer && !resumed) { r = md_inode_store_open_exclusive(directory, &s); if (!r) root = s->lifetime->root; }
     else {
         root = open(selected, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         if (root < 0) r = -errno;

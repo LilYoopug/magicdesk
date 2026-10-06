@@ -145,8 +145,19 @@ Guest namespace creation still fails explicitly.
 ## Path Origins
 
 The filesystem engine accepts optional `md_fs_anchor` origins for its captured
-base descriptors. Each anchor retains the exact mount view, mount and an O_PATH
-reference. It borrows the worker's backing store, which must outlive the anchor.
+base descriptors. Each anchor retains the exact mount view, mount, an O_PATH
+reference and the backing store's `inode_lifetime`. This owner keeps the existing
+store/source directory descriptors and maintenance leases after the originating
+worker closes its SQLite connection. Capturing or retaining origins duplicates
+none of those descriptors. The SQLite connection, prepared queries, transaction
+lock descriptor and watches remain worker-owned and close independently.
+The retained root's device/inode identifies the store, not its pathname or a
+connection's address. A sequential worker can reopen that same store, including
+after rename, and use the origin; a different store or replacement at the old
+path is rejected. Retained lower-source leases protect backing names through
+copy-up and unlink. Releasing the last origin releases those leases immediately.
+The worker alone mutates its mount view and source catalogue: reference counting
+does not authorize concurrent workers or serialize a live view across processes.
 Successful open/reopen operations can return an owned anchor when explicitly
 requested. Other calls allocate no anchor; RPC clients cannot serialize pointers
 or claim a view. The transport must obtain provenance from trusted task resources.
@@ -1030,6 +1041,110 @@ changes application bytes, socket queues or limits in the shipped adapter.
 The experiment is outside the default regression suite, and its report lists
 limitations separately from successful assertions.
 
+### Message-Origin Association Candidate
+
+`test_resources.py --case fd-messages` tests a kernel-carried origin association,
+separately from the application adapter. The native `fd_messages` owner captures an
+ordered origin vector under the sender's table turn and queues the actual rights
+inside a private seqpacket socket. Its kernel cookie selects the retained vector;
+the outer message's bytes, delivery order and reused source FD numbers do not.
+Lookup also checks the opposite side of the sender's connection key from the
+production IPC authority. Sender and receiver resolve that key from their own
+captured kernel sockets, not a fixture-supplied destination FD. An unknown
+carrier, the sending side or a different connection cannot claim those origins.
+
+A routed vector also retains its sending binding and registered custodian ID.
+Its private header binds that ID to the actual cookie, connection, vector length
+and fresh nonce. Reading the header installs no rights and consumes no packet;
+the ID selects a verified private rendezvous, not the socket creator's PID.
+The source-side claim verifies the actual carrier, destination store/binding and
+complete issued header before pinning its local vector. The binding shares its
+epoch/store lease without retaining SQLite or a socket. It survives registry
+retirement until the last operation releases the vector. See the
+[message routing contract](ipc-credentials.md#message-custodian-routing) for
+validation, ownership and independent-process coverage.
+
+The candidate's metadata lifetime uses a pipe writer in a second packet of the
+private socket. The first packet can still hold 253 application rights; peeking
+it installs no lifetime writer in the receiver. The authority retains only the
+pipe reader and O_PATH origins, not writable payload descriptions or the carrier.
+EOF is an event-driven retirement boundary after the last queued/duplicated
+writer disappears. Each operation pins the immutable vector independently of
+the registry: retirement removes lookup visibility and closes the monitor, but
+the last operation releases its origins only after completion or worker join.
+Reference changes belong to the supervisor loop; workers only borrow the vector.
+
+The registry allocates no descriptors until first admission, then exposes one
+epoll descriptor to its owner's event loop. Dispatch handles at most 16 ready
+monitors per call without a periodic scan. It checks actual pipe EOF, not merely
+the event bit or a raw record pointer. Stale readiness cannot retire a replacement
+record. Unexpected monitor data is EPROTO and retains custody, not proof of
+expiry. Failed admission leaves the pipe reader with its caller; successful
+admission transfers it once. Explicit withdrawal requires proof that the message
+did not escape. Ambiguous sends retain their record until EOF or whole-authority
+teardown. Capture uses one allocation sized to the actual vector; lookup, pins
+and retirement allocate and duplicate no descriptors.
+
+A socket-only HUP is insufficient: native shutdown of both directions reports
+HUP while queued rights remain readable. The fixture checks this explicitly.
+The queued pipe writer instead survives RD/WR/RDWR shutdown, partial consumption
+and carrier aliases, then reaches EOF on final release. Native Unix GC cases
+check data-pipe EOF and metadata-pipe EOF for cycles over all three outer socket
+types; timeout reports unobserved collection, not successful cleanup.
+
+The comparisons cover reordered messages, two opens of one inode from different
+mount views, unknown origins, sender exit, source-slot replacement, repeated peek,
+control truncation, raw-read discard and exact descriptor balance. Publication
+uses the existing `fd_delivery` and destination-table ordering, not another
+annotation model. The fixture uses the runtime registry, not a second lifetime
+implementation. The private `ipc_peer` agreement component separately checks
+version, directional connection and features without touching application queues;
+its binding retains the live IPC epoch beyond SQLite closure. Its contract and
+independent-process checks are in [Unix IPC credentials](ipc-credentials.md#private-peer-agreement).
+`ipc_peer_service` admits captured socket/control pairs asynchronously through
+the existing filesystem worker and returns an owned peer on the supervisor's
+completion dispatch. Cancellation and worker join retain pending inputs until
+their last user finishes; there is no additional poll loop or database owner.
+Private launch discovery and candidate message routing have native component
+coverage. Production transport selection and cross-launch mount-origin custody,
+including custodian-supervisor exit, are not implemented; application SCM_RIGHTS
+does not use this peer protocol yet.
+Connection association
+reuses `ipc_credentials`, including its store boundary and live-owner lease;
+it is not a declaration that a native peer can consume a private carrier.
+
+`test_task_resources` checks allocation/EMFILE rollback, wrong connection sides,
+duplicate cookies, stale events, malformed monitors, bounded batch retirement
+and pinned vectors after owner teardown. A real worker inspects retained origins
+after the source table, mount owner and registry have been released. Exact FD
+balance is checked after join. These ownership tests belong to the regular model
+suite, independently of the opt-in carrier experiment.
+
+The same fixture checks the production connection contract through independent
+worker processes, send-before-accept and accept-before-connect-publication,
+sender exit, socket aliases, native endpoints, failed connect, listener revision
+changes and last-owner retirement. Credential tokens in both directions validate
+only on the opposite side; repeated inspection does not consume them. Workers
+sharing a store agree on the link, but not on in-memory mount-anchor pointers.
+Queued reuse of a user-bound name with the same destination and kernel PID is
+explicitly ambiguous, not a latest-record lookup. Distinct destinations remain
+distinguishable; a native listener replacement cannot confirm a captured peer.
+
+This adds a real queued FD and send for the lifetime marker. With 253 payload
+rights, native direct sending succeeds at tested source limits 64/252/253 where
+the candidate's marker or outer export fails with ETOOMANYREFS. Limits 254/255
+admit the candidate on this device. Failure cleanup releases all queued writers;
+no quota or identity is changed. Receiver admission and reverse-export costs of
+the other parcel experiments remain relevant. These differences block treating
+the candidate as transparent native SCM_RIGHTS support.
+
+An alternative exact `NETLINK_SOCK_DIAG` lookup checks inode and kernel cookie
+without a socket-table dump, but gets EACCES under the tested UID 2000. This is
+recorded as unavailable, not absence of the queried socket. The pipe-lifetime
+candidate needs neither that API nor periodic diagnostics.
+
+### Root And Filesystem Checks
+
 `root_guest` runs the same checks with inode-backed and attached-native roots:
 nested roots, absolute symlinks, root-clamped traversal,
 unchanged inherited descriptors, failed-change rollback, CLONE_FS with and
@@ -1057,6 +1172,11 @@ link/rename rejection and root restoration. It also checks inode/native mount ID
 reopen, FD-number reuse with another inode, rename, source-view teardown, completed
 FIFO identity/EOF, flock/OFD-lock release and EMFILE capture cleanup. These are
 engine checks, not guest namespace-creation tests.
+Message-origin checks close every source connection and retain only the message
+pins, with no additional descriptors for capture. Independent maintenance probes
+must remain busy for the store and its lower layer. A sequential reopened worker
+checks readonly attachments, rename, copy-up/unlink and foreign/replaced-store
+rejection; releasing the message permits maintenance and restores the FD count.
 `test_mount_alias` constructs a candidate view with one source at writable and
 readonly targets. It checks both opening orders, distinct stable object IDs,
 image identity, retained opens after unlink, ambiguous unannotated descriptors,

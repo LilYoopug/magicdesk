@@ -108,17 +108,17 @@ static int start(struct md_inode_store *s) {
     s->watches = w;
     int r = mdi_begin(s, 0);
     if (r) { md_inode_watch_close(s); return r; }
-    w->presence = openat(s->root, "watch.lock", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    w->presence = openat(s->lifetime->root, "watch.lock", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (w->presence < 0) r = -errno;
     if (!r && flock(w->presence, LOCK_SH | LOCK_NB)) r = -errno;
     if (!r && (w->native = inotify_init1(IN_NONBLOCK | IN_CLOEXEC)) < 0) r = -errno;
     if (!r && (w->epoll = epoll_create1(EPOLL_CLOEXEC)) < 0) r = -errno;
     if (!r) r = epoll_add(w->epoll, w->native, EPOLLIN);
-    if (!r && (w->database = watch_path(w->native, s->root, "/namespace.db", IN_MODIFY)) < 0) r = w->database;
+    if (!r && (w->database = watch_path(w->native, s->lifetime->root, "/namespace.db", IN_MODIFY)) < 0) r = w->database;
     if (!r && (w->objects = watch_path(w->native, s->objects, "", DATA_EVENTS)) < 0) r = w->objects;
     w->sources[0] = w->objects;
-    for (unsigned i = 1; !r && i < MDI_SOURCES; ++i) if (s->sources[i] >= 0) {
-        w->sources[i] = watch_path(w->native, s->sources[i], "", DATA_EVENTS);
+    for (unsigned i = 1; !r && i < MDI_SOURCES; ++i) if (s->lifetime->sources[i] >= 0) {
+        w->sources[i] = watch_path(w->native, s->lifetime->sources[i], "", DATA_EVENTS);
         if (w->sources[i] < 0) r = w->sources[i];
     }
     if (!r) r = journal_end(s, &w->cursor);

@@ -51,7 +51,7 @@ int md_inode_snapshot(struct md_inode_store *source, struct md_inode_store *targ
     if (!source || !target || source == target) return -EINVAL;
     if (!source->readonly || target->readonly) return -EINVAL;
     struct stat a, b;
-    if (fstat(source->root, &a) || fstat(target->root, &b)) return -errno;
+    if (fstat(source->lifetime->root, &a) || fstat(target->lifetime->root, &b)) return -errno;
     if (a.st_dev == b.st_dev && a.st_ino == b.st_ino) return -EINVAL;
     /* The destination is unpublished. Shared bodies retain an explicit source
      * directory identity; no host hardlinks or implicit source copying. */

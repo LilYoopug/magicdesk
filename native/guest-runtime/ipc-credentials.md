@@ -13,7 +13,12 @@ namespace worker. Workers sharing a store serialize metadata operations with a
 kernel file lock. They never hold this lock across guest connect, accept or IO.
 `<store>/ipc` is transient state, separate from image/inode metadata. A shared
 live-owner lease makes the first owner discard stale records, including socket
-cookies retained across a device reboot. No service or kernel probe is added to
+cookies retained across a device reboot. Connection bindings can retain this
+epoch after the worker closes SQLite. They share its scope by reference without
+duplicating descriptors; the scope retains the epoch lease and the store's
+shared maintenance lock. Database/gate resources close independently. The last
+scope owner releases both leases; a new owner can then retire old associations.
+No service or kernel probe is added to
 MagicDesk startup, and ordinary filesystem calls do not open this database.
 
 Kernel `SO_COOKIE` identifies a socket across dup, fork and SCM_RIGHTS. Listen,
@@ -21,6 +26,24 @@ connect and socketpair capture effective guest UID/GID and supplementary groups.
 SO_PEERCRED and SO_PEERGROUPS read copied connection snapshots, not the peer's
 current credentials. A later credential drop, peer exit or FD transfer does not
 rewrite them. Native peer PID is checked before publishing a snapshot.
+The shared connection key contains a random link identity and its side, resolved
+from the captured socket's kernel cookie. Socketpair records both sides;
+connect/accept publish opposite sides independently. A client may queue a
+message and exit before accept, and accept may complete before the client's
+connect result is published. Pending, invalid and unregistered keys are not
+invented from PID, payload or FD number. The key has meaning only within the
+live store authority; its last-owner retirement invalidates old associations.
+It is not proof of peer liveness, transport capabilities or a cross-launch
+mount-view ownership contract.
+
+The native `fd_messages` owner uses this directional key with a captured carrier
+cookie for message-origin lookup. It retains O_PATH provenance and a pipe-lifetime
+monitor, never application data descriptions or the carrier. Its registry and
+worker pins have independent lifetimes. This component is covered by model and
+carrier-fixture checks; the application ancillary adapter does not use this
+transport yet. It also does not reclaim the credential-token records described
+below or transfer in-memory mount anchors between supervisors.
+
 The worker returns that snapshot through the existing mapped byte output,
 without installing an identity memfd in the application table. SO_PEERGROUPS
 supports all 65536 groups; SO_PEERCRED returns only the fixed identity header.
@@ -33,12 +56,155 @@ For a connection to a registered guest listener, an otherwise unnamed client
 gets a private abstract transport address. Accept resolves that exact connection
 without netlink permissions or guessing by PID. The address adapter hides this
 implementation name. Existing user-bound names are preserved. Connect preparation
-and completion validate the listener revision; an ambiguous snapshot fails with
-ESTALE, without replaying a successful connection or inventing an identity.
+and completion validate the listener revision and actual peer PID. Accept selects
+by the peer name, destination address and kernel peer PID. Unresolved candidates
+survive name reuse; two indistinguishable queued connections fail with ESTALE
+instead of selecting the newest record. Already accepted connections retain
+their cookie-bound snapshots. Link indexing bounds registration lookups without
+adding work to ordinary data IO. An ambiguous snapshot does not replay a
+successful connection or invent an identity.
 
 Unregistered/external endpoints keep kernel credentials. Abstract socket names
 remain in the host's shared namespace. These mappings do not provide network
 isolation or protect mutually hostile processes sharing the real executor UID.
+
+## Private Peer Agreement
+
+`ipc_peer` agrees protocol features over an explicitly supplied private Unix
+seqpacket control channel. It never sends negotiation bytes or descriptors to an
+application socket. Worker-side admission resolves the captured application's
+directional connection binding, rejects registered application sockets as control
+channels, and checks the control socket's type, flags and real peer UID. The
+database gate is released before control IO; the application socket is not kept.
+The runtime owner supplies a verified private channel; a matching executor UID
+alone does not establish its launch or application-connection identity.
+
+Each side offers a fixed version, connection side, supported/required feature
+bits and a fresh challenge. Confirmation binds both challenges and the exact
+feature intersection. Opposite connection sides must match; incompatible required
+features, wrong versions, reflected/stale confirmations and malformed packets
+fail explicitly. Agreement with no common optional feature selects none; it
+does not authorize a carrier. Confirmation is not a continued-liveness promise.
+Control-channel failure cannot silently downgrade a message already framed.
+
+One nonblocking step performs at most four packet operations using the existing
+bounded `fs_wire` sender/parser. It does no SQLite work or allocation. The owner
+waits for the returned POLLIN/POLLOUT interest and owns cancellation/deadlines;
+timeout is failure, never implicit agreement. Errors close the private channel,
+release its binding and remain terminal. Unexpected/truncated ancillary rights
+are closed through the common parser. After agreement, further control packets
+belong to the caller's next protocol phase and are not consumed by negotiation.
+
+`ipc_peer_service` bridges supervisor-owned requests to the existing filesystem
+worker queue. Both ordinary guest IPC and private admission obtain their lazy
+authority through `md_fs_ipc_authority`. The supervisor does no SQLite work and
+does not wait for the metadata gate. Successful submission transfers an already
+captured application socket and the private control descriptor without duplicating
+either. The worker releases the application socket immediately after checking
+its binding; it performs no control-channel IO. Completion returns the prepared
+peer to the event-loop owner, which drives negotiation separately. Admission is
+not agreement or permission to frame application messages.
+
+Cancellation clears the caller's handle without waiting. Pending work retains
+its record until completion or worker join; a cancelled callback is never
+delivered. A cancellation concurrent with metadata admission cannot free the
+worker's input. A rejected submission retains caller ownership of both FDs.
+Successful take transfers the peer independently of the request/service/worker;
+terminal cleanup joins the worker before releasing undelivered records. The
+service has no additional thread, socket, timer or event source. Neither ordinary
+filesystem calls nor ordinary data IO create peer-admission requests. Request
+unlinking is constant-time, including cancellation in a large admission batch.
+
+### Launch Rendezvous
+
+`launch_peer` resolves an explicit launch ID through `launch_registry`, using
+the same locked record, retained owner descriptor and pidfd checks as launch
+enumeration/cancellation. Lookups are relative to the registration's retained
+directory, not a reopened store pathname. Renaming the store does not retarget
+discovery; another store, even at the former path, cannot resolve its launches.
+
+The owner lazily opens a nonblocking CLOEXEC Unix seqpacket listener under its
+random launch ID. Closing it removes the abstract name; the registration outlives
+listener and admission work. No discovery daemon, periodic scan, additional
+thread or per-data-call work is introduced. The connecting side verifies the
+kernel server PID against the pinned live registration before sending one fixed
+launch-ID packet. The accepting side reads only that packet and verifies the
+client ID against its kernel peer PID and the same registry. An inherited record
+does not authorize another process to impersonate its owner. Failed admission
+retains caller ownership of the accepted socket; a failed connect releases all
+resources of that attempt. Full queues/backlogs and kernel denial remain explicit
+errors, without blocking or automatic replay.
+
+Registry IO belongs on the filesystem worker. Receiving the discovery packet is
+nonblocking and separate from that lookup, so readiness/cancellation stays with
+the event-loop owner. Private transport validation and ancillary cleanup reuse
+`fs_wire`; malformed packets cannot leak received rights or consume a subsequent
+`ipc_peer` offer. Both discovery and connection-feature agreement must complete
+before a caller selects any application transport. Neither protects mutually
+hostile processes sharing the executor UID, nor guarantees continued peer life.
+
+The component establishes a private channel to a known launch. The message-route
+contract below supplies that ID for an already selected candidate carrier.
+The socket creator's PID cannot substitute for its current custodian after
+inheritance or SCM_RIGHTS transfer. No production application path opens these
+listeners or opts into the candidate FD carrier yet.
+
+### Message Custodian Routing
+
+An unpublished `fd_messages` vector may bind the captured sending connection and
+its supervisor's registered launch ID. This retains the IPC epoch/store scope
+independently of SQLite, the application socket and the source descriptor table.
+Reference copies allocate nothing and duplicate no descriptors. Comparing two
+retained scopes uses their physical store-root identities; overlapping epoch
+leases prevent association retirement while either binding remains live.
+
+The carrier's first packet contains a fixed 88-byte `fd_message_route` beside
+the actual application rights. It identifies the version, vector length, kernel
+carrier cookie, receiving connection side/link, source launch and a fresh
+per-message nonce. The header stays inside the private carrier and contains no
+in-memory origin pointers; application bytes are unchanged. A non-consuming
+`MSG_PEEK` without ancillary storage reads it without
+installing rights, including with no free FD slots. Type, length, version,
+count, cookie and destination mismatches fail without consuming the packet or
+changing output. This read is only for a carrier selected by an agreed transport;
+it is not a probe of arbitrary received application FDs.
+
+The launch ID is a routing hint, not authentication. After private launch
+verification, the source owner checks the actual carrier and destination binding
+against its registry and retained store scope. The entire offered header must
+match its issued record. A reused carrier cannot select a replacement vector
+with an earlier nonce. Successful claim pins the immutable local vector without
+SQL, allocation or descriptor duplication. Registry retirement removes lookup
+visibility, while the final operation pin releases both origins and IPC scope.
+
+The independent-process fixture creates and registers an application socket in
+one process, transfers it and reaps its creator before another exec'd receiver
+handles the message. The receiver learns the custodian ID only from the queued
+header, verifies the private channel and presents the real socket/carrier for
+source-side validation. Its reply confirms the local claim, not a transferred
+mount view. This covers creator exit while the custodian supervisor remains
+alive; custody after that supervisor exits remains unresolved.
+
+`test_resources.py --case ipc-peer` covers an independent exec peer, both SQLite
+connections closing before agreement, epoch/maintenance lifetime, allocation
+rollback, native/foreign-side rejection, malformed/truncated packets, backpressure,
+incompatible requirements, unchanged application payload/rights and exact FD
+balance. Its real-worker fixture also covers independent worker admission,
+event-loop callbacks, cancellation before/during/after preparation, allocation
+failure, 96 admissions with mixed cancellation/take order, rejected submission
+and join with undelivered completions. Launch checks cover exact cancellation,
+stale records, store rename/replacement, same-UID endpoint/caller impersonation,
+owner exit before admission, full backlog/FD table and rejected ancillary rights.
+The independent exec check discovers and verifies its channel through launch
+registration before negotiating the application binding; it does not inherit a
+control socket. These checks are part of the default resource model suite.
+Message-route checks additionally cover 253 rights, repeated descriptor-free
+peek with a full FD table, wrong stores/sides, stale nonces, malformed headers,
+last-pin epoch/maintenance lifetime and exact payload EOF. The source registry
+and both SQLite owners may close before the last pin releases its scope.
+The components do not select production application transports,
+transfer mount views or enable application FD framing;
+cross-launch origin custody and native in-flight quotas remain separate gates.
 
 ## Explicit Credential Messages
 
@@ -46,9 +212,11 @@ SCM_CREDENTIALS validates the claimed guest IDs against the sending task. PID
 must identify that task's process; virtual root may select guest UID/GID, while
 other users may select only their real/effective/saved IDs. The kernel receives
 the actual Android credentials, plus a sealed memfd capability as one extra
-SCM_RIGHTS descriptor. Its random nonce, connection identity and kernel file
-identity are recorded by the metadata authority. The receiving adapter removes
-that descriptor and publishes the validated guest credentials instead.
+SCM_RIGHTS descriptor. Its random nonce, connection identity, kernel file identity
+and sending side are recorded by the metadata authority. Only the
+opposite side of the same connection can validate it; replay toward the sender,
+another connection or another store does not translate the token. The receiving
+adapter removes that descriptor and publishes the validated guest credentials instead.
 
 The namespace worker retains the sending capability; it never installs that FD
 in the application's shared table. A same-process helper captures a private
@@ -180,6 +348,16 @@ cache, or only intercepting the next receive, does not satisfy this contract.
 An unmodified distribution supplies dbus-daemon, dbus-run-session, policy and
 NSS entries for the selected guest user. No daemon is shipped in the APK.
 Session buses use ordinary credential authentication and service activation.
+
+The `fd-messages` fixture exercises the shared connection key with independent
+workers, both connect/accept publication orders, sender exit, aliases and a
+separate store. It verifies token direction, failed/pending connections,
+listener revision changes and invalidation after the last authority owner exits.
+Bound-name checks distinguish separate destinations, reject ambiguous queued
+accepts and preserve already accepted snapshots. A native listener replacing a
+registered address cannot confirm the earlier connection snapshot.
+These production metadata checks do not enable the fixture's private FD carrier
+for application traffic.
 
 The UID 2000 device suite covers Debian/glibc and Alpine/musl session buses,
 independent launches sharing a store, rejection of another guest user, connection

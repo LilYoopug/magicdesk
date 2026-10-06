@@ -38,7 +38,12 @@ Path and metadata requests with captured cwd/dirfd inputs use bootstrap-mapped
 shared input/output and register control, without a temporary guest descriptor
 or service socket per call. The file-table and filesystem turns capture retained
 input origins before worker execution; later close/reuse cannot retarget the
-accepted request. Unknown explicit dirfds and stateful inputs use actual kernel
+accepted request. Origins retain backing-store and lower-layer maintenance
+leases independently of the worker's SQLite connection, without duplicating
+their directory descriptors or retaining data open descriptions. Store identity
+uses the retained root, not its path or connection address; a sequential worker
+may reopen the same store without accepting origins from another store.
+Unknown explicit dirfds and stateful inputs use actual kernel
 description capture, never pathname reopening or fabricated origins. When kernel
 inspection is denied, a lazy table-owned send endpoint exports the exact inputs
 to a supervisor-owned queue. Admission consumes one CLOEXEC infrastructure FD;

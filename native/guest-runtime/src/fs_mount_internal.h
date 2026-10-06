@@ -41,7 +41,7 @@ struct md_view_location {
 };
 struct md_fs_anchor {
     atomic_uint refs;
-    struct md_inode_store *store;
+    struct md_inode_lifetime *lifetime;
     struct md_mount_namespace *view;
     struct md_view_mount *mount;
     int fd;
