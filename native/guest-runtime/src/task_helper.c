@@ -263,12 +263,11 @@ static int advance(struct helper *m, long value) {
         case RECEIVE: {
             struct md_task_receive_frame *p=receive_frame(m);
             if (!p) return -EPROTO;
-            p->result=value; p->cursor=0; p->total=1;
+            p->result=value; p->cursor=0; p->offset=0; p->total=0;
             if (value<0 && !p->input.batch) {
                 m->result=0; m->observed=1; return abort_child(m);
             }
-            p->count=1; p->descriptors[0]=p->input.socket;
-            return receive_export(m);
+            return receive_collect(m);
         }
         case RECEIVE_EXPORT: {
             if (value!=sizeof(uint64_t)) return -EPROTO;

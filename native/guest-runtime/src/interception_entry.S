@@ -9,7 +9,7 @@ md_guest_task_control:
 .global md_guest_task_call
 .global md_guest_task_collect
 md_guest_task_collect:
-    bl md_socket_ancillary_collect
+    bl md_task_receive_collect
 .global md_guest_task_collected
 md_guest_task_collected:
     brk #0

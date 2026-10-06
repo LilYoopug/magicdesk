@@ -23,36 +23,6 @@ static struct cmsghdr *next_header(const struct msghdr *m, const struct cmsghdr 
     if (step > m->msg_controllen-offset || m->msg_controllen-offset-step < sizeof(*h)) return NULL;
     return (void *)((char *)m->msg_control+offset+step);
 }
-/* Runs in the short-lived private-table helper. These are our writable native
- * headers, never application msghdrs. No syscall, allocation or caller FD. */
-long md_socket_ancillary_collect(struct md_task_receive_frame *frame) {
-    frame->count=0;
-    while (frame->cursor<frame->input.count) {
-        struct msghdr *m;
-        if (frame->input.batch) {
-            struct mmsghdr *batch=(void *)frame->input.messages;
-            if (batch[frame->cursor].msg_len==UINT_MAX) return 0;
-            m=&batch[frame->cursor++].msg_hdr;
-        } else {
-            if (frame->result<0) return 0;
-            m=(void *)frame->input.messages; ++frame->cursor;
-        }
-        for (struct cmsghdr *h=CMSG_FIRSTHDR(m);h;h=next_header(m,h)) {
-            if (h->cmsg_len<CMSG_LEN(0)) return -EPROTO;
-            if (h->cmsg_level!=SOL_SOCKET || h->cmsg_type!=SCM_RIGHTS) continue;
-            size_t n=(h->cmsg_len-CMSG_LEN(0))/sizeof(int);
-            if (n>253-frame->count) return -EPROTO;
-            int *fds=(void *)CMSG_DATA(h);
-            for (unsigned i=0;i<n;++i) {
-                frame->descriptors[frame->count++]=fds[i];
-                fds[i]=(int)frame->total++;
-            }
-        }
-        if (frame->count) return 1;
-    }
-    return 0;
-}
-
 /* The kernel still transports data and SCM_RIGHTS. An explicit guest credential
  * message adds one sealed, connection-scoped identity capability; the receiving
  * adapter removes it before publishing ancillary data. No stream framing. */

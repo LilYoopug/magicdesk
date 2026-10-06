@@ -961,6 +961,8 @@ static void channel_reconciliation(void) {
     puts("PASS channel reconciliation: same/closed/replaced slot, CLOEXEC, denied observation, malformed reply, no allocation or guest close");
 }
 void test_fd_origins(void) {
+    extern void test_task_receive(int *);
+    test_task_receive(&allocation_budget);
     export_messages();
     infrastructure();
     channel_reconciliation();

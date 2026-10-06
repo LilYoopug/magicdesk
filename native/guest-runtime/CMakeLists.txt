@@ -41,7 +41,7 @@ guest_executable(bootstrap ${src}/bootstrap.c ${src}/elf.c ${src}/exec.c ${src}/
     ${src}/interception.c ${src}/interception_entry.S ${src}/fd_client.c ${src}/watch_calls.c ${src}/shm_calls.c ${src}/ipc_calls.c
     ${src}/file_calls.c ${src}/fs.c ${src}/proc_paths.c ${src}/proc_image.c ${src}/program_files.c ${src}/task_status.c
     ${src}/namespace.c ${src}/namespace_proc.c ${src}/socket_calls.c ${src}/socket_namespace.c ${src}/socket_identity.c ${src}/socket_ancillary.c ${src}/socket_routes.c ${src}/fd_metadata.c
-    ${src}/fs_client.c ${src}/fs_buffer_client.c ${src}/adapter_buffer.c ${src}/file_open.c ${wire} ${src}/raw.c ${src}/raw.S)
+    ${src}/task_receive.c ${src}/fs_client.c ${src}/fs_buffer_client.c ${src}/adapter_buffer.c ${src}/file_open.c ${wire} ${src}/raw.c ${src}/raw.S)
 guest_freestanding(bootstrap)
 target_compile_options(bootstrap PRIVATE -mgeneral-regs-only)
 target_link_options(bootstrap PRIVATE -Wl,--image-base=0x2000000000)
@@ -84,9 +84,9 @@ if(MAGICDESK_GUEST_FIXTURES)
     target_compile_options(capabilities PRIVATE -iquote ${src} -UNDEBUG)
     guest_executable(kernel_baseline ../guest-exec-lab/test_kernel_baseline.c ${src}/task_descriptor.c ${src}/task_lifetime.c)
     target_compile_options(kernel_baseline PRIVATE -iquote ${src} -UNDEBUG)
-    guest_executable(test_task_resources ../guest-exec-lab/test_task_resources.c ../guest-exec-lab/test_fd_origins.c ../guest-exec-lab/test_ofd_order.c ${src}/task_registry.c
+    guest_executable(test_task_resources ../guest-exec-lab/test_task_resources.c ../guest-exec-lab/test_fd_origins.c ../guest-exec-lab/test_task_receive.c ../guest-exec-lab/test_ofd_order.c ${src}/task_registry.c
         ${src}/task_resources.c ${src}/guest_domain.c ${src}/mount_namespace.c ${origins} ${src}/guest_identity.c ${ipc}
-        ${src}/event_wait.c ${raw})
+        ${src}/task_receive.c ${src}/event_wait.c ${raw})
     target_compile_definitions(test_task_resources PRIVATE MD_NO_START MD_USE_LIBC)
     target_compile_options(test_task_resources PRIVATE -iquote ${src} -UNDEBUG)
     target_link_libraries(test_task_resources PRIVATE guest-sqlite m)

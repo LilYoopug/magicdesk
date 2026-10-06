@@ -11,7 +11,8 @@ CASES = ('waitid-peek', 'wait-errors', 'traceme-late-wait4', 'traceme-late-waiti
          'signal-delivery', 'file-lifetime', 'resolution', 'resolution-race', 'proc-owners',
          'rights-peek', 'rights-truncate', 'rights-limit', 'rights-batch', 'rights-fault',
          'rights-control-fault', 'rights-header-outputs', 'rights-name', 'rights-timeout-fault',
-         'rights-batch-fault', 'rights-socket-error', 'rights-publication-error', 'rights-watch-fault')
+         'rights-batch-fault', 'rights-socket-error', 'rights-publication-error',
+         'rights-error-consumers', 'rights-publication-consumers', 'rights-watch-fault')
 
 
 def observations(name, output):

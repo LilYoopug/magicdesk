@@ -75,8 +75,11 @@ Native receive runs in a same-process private-table helper. Its socket is captur
 under the destination table turn; the turn ends at clone, before blocking IO.
 Unrelated inherited descriptors are closed before receiving. The helper exports
 the actual socket and received rights through an owned channel and is reaped
-before the adapter resumes. Bounded vectors retain the source descriptions in the
-supervisor; the worker borrows exact inputs for token authentication and watch
+before the adapter resumes. An allocation-free cursor packs the socket and rights
+across message/control boundaries into vectors of at most 253 descriptors. A full
+vector resumes at the exact next descriptor, without visiting uncompleted native
+messages. Source indices remain stable through vector splitting. The supervisor
+retains those descriptions; the worker borrows exact inputs for token authentication and watch
 inspection, without installing temporary descriptors in the application table.
 Caller death, fatal helper filters and export failure release the private table,
 queued rights and retained sources. Later reuse of the original socket number
@@ -147,6 +150,24 @@ Stopping a userspace loop alone does not preserve SO_ERROR, read/recv, poll/epol
 or native timeout behavior. Writable-memory preflights cannot replace the actual
 publication event, and replay cannot restore consumed messages.
 
+The error contract includes send/write, not just receive. Comparative checks on
+stream/datagram/seqpacket sockets establish these additional boundaries:
+
+- A stream receive may deliver queued data before consuming its pending error;
+  datagram and seqpacket receive report the error first.
+- A zero-byte read retains the error; a zero-entry recvmmsg consumes it.
+- SO_ERROR consumes the error before copying its value, but not before reading
+  the caller's length. Faults in those two pointers have different effects.
+- An epoll registration with no requested events, established before the failed
+  batch, is not notified merely by setting the error. A fresh poll or epoll MOD
+  observes it. An unconditional companion-eventfd notification is not equivalent.
+
+`rights-error-consumers` verifies native kernel errors through all these paths;
+`rights-publication-consumers` exposes the missing adapted publication error.
+Ordinary read/write and poll/epoll remain native. Fixing the publication boundary
+must not impose unconditional mediation on those hot paths. A per-task errno
+cache, or only intercepting the next receive, does not satisfy this contract.
+
 ## D-Bus And Coverage
 
 An unmodified distribution supplies dbus-daemon, dbus-run-session, policy and
@@ -169,7 +190,11 @@ The opt-in `--custody` fixture compares native and guest ordinary/protected call
 with fatal fstat and post-receive export filters, including recvmmsg. Payload
 delivery proves the export-kill case passed native receive before cancellation.
 Channel tests cover 1/253-FD capture, cancelled queues and a partially published
-prefix retained after terminal cancellation. A stock Debian bus activates a GDBus fixture,
+prefix retained after terminal cancellation. Allocation-denied collector checks
+cover empty/completed prefixes, multiple controls, vector splits and 1024-message
+batches. They assert exact source indices and the minimum export-vector count;
+1024 messages carrying two rights require nine exports including the socket.
+A stock Debian bus activates a GDBus fixture,
 reports its caller as guest UID 0 and exchanges usable FDs in both directions.
 An external native endpoint still receives UID 2000 and rejects a root claim.
 The same static ancillary fixture runs natively under shell and inside Shroot,
