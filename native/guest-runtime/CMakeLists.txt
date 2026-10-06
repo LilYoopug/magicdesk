@@ -16,7 +16,7 @@ target_compile_options(guest-sqlite PRIVATE -O2 -fno-pie)
 set(src ${CMAKE_CURRENT_SOURCE_DIR}/src)
 set(raw ${src}/raw.c ${src}/memory.c ${src}/raw.S)
 set(wire ${src}/fs_wire.c ${src}/event_wait.c)
-set(origins ${src}/fs_anchor.c ${src}/resource_order.c ${src}/ofd_order.c ${src}/fd_origins.c ${src}/fd_channel.c ${src}/fd_mutation.c ${src}/fd_delivery.c ${src}/fd_return.c ${src}/fd_exchange.c ${src}/task_descriptor.c ${src}/task_lifetime.c)
+set(origins ${src}/fs_anchor.c ${src}/resource_order.c ${src}/ofd_order.c ${src}/fd_origins.c ${src}/fd_channel.c ${src}/fd_mutation.c ${src}/fd_delivery.c ${src}/fd_return.c ${src}/fd_exchange.c ${src}/received_fds.c ${src}/task_descriptor.c ${src}/task_lifetime.c)
 set(mounts ${src}/fs_mounts.c ${src}/fs_mount_path.c ${src}/fs_mount_operations.c ${src}/fs_mount_table.c)
 set(inodes ${src}/inode_store.c ${src}/inode_db.c ${src}/inode_events.c ${src}/inode_watch.c ${src}/watch_queue.c ${src}/inode_path.c
     ${src}/inode_directory.c ${src}/inode_import.c ${src}/inode_socket.c ${src}/inode_backing.c ${src}/inode_snapshot.c ${src}/inode_fifo.c ${src}/file_open.c

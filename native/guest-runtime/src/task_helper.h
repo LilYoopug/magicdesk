@@ -30,7 +30,8 @@ struct md_task_helper_request {
     /* Exact CLONE_FILES separation, before any potentially blocking IO. */
     void (*captured)(void *);
 };
-struct md_task_helper_result { long value; int descriptor; siginfo_t signal; struct md_received_fds received; };
+struct md_received_fds;
+struct md_task_helper_result { long value; int descriptor; siginfo_t signal; struct md_received_fds *received; };
 /* Completion transfers descriptor ownership, including cancellation. */
 typedef void (*md_task_helper_complete)(void *, struct md_task_helper_result);
 struct md_task_helper_callbacks {

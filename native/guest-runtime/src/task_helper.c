@@ -2,6 +2,7 @@
 #include "task_helper.h"
 #include "mapping_observation.h"
 #include "fd_channel.h"
+#include "received_fds.h"
 #include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -42,7 +43,7 @@ struct helper {
     enum md_task_helper_kind kind;
     int flags;
     struct md_task_send send;
-    struct md_received_fds received;
+    struct md_received_fds *received;
     int export_fds[253], endpoint;
     unsigned keep_index, clear_from;
     siginfo_t signal;
@@ -54,10 +55,6 @@ struct helper {
     int backing, maps;
     void *completion;
 };
-void md_received_fds_close(struct md_received_fds *r) {
-    for (unsigned i=0;i<r->count;++i) close(r->fds[i]);
-    free(r->fds); *r=(struct md_received_fds){0};
-}
 static int io_helper(const struct helper *m) {
     return m->kind==MD_TASK_HELPER_SEND || m->kind==MD_TASK_HELPER_RECEIVE;
 }
@@ -96,7 +93,7 @@ static void dispose(struct helper *m) {
     while (*p && *p!=m) p=&(*p)->next;
     if (*p) { *p=m->next; --manager->count; }
     md_fd_channel_capture_cancel(&m->capture);
-    md_received_fds_close(&m->received);
+    md_received_fds_release(m->received);
     md_fd_channel_release(m->channel);
     if (m->maps>=0) close(m->maps);
     if (m->backing>=0) close(m->backing);
@@ -112,7 +109,7 @@ static void complete(struct helper *m) {
         result.descriptor=m->maps; m->maps=-1;
     } else if (m->kind==MD_TASK_HELPER_CAPTURE && m->cancelled) result.value=-ECANCELED;
     if (m->kind==MD_TASK_HELPER_RECEIVE && !m->result && !m->cancelled) {
-        result.received=m->received; m->received=(struct md_received_fds){0};
+        result.received=m->received; m->received=NULL;
     }
     md_task_helper_complete callback=m->complete;
     dispose(m);
@@ -155,15 +152,11 @@ static int clear_next(struct helper *m) {
 static int receive_export(struct helper *m) {
     struct md_task_receive_frame *p=receive_frame(m);
     if (!p || !p->count || p->count>253) return -EPROTO;
-    unsigned needed=m->received.count+p->count;
+    unsigned needed=(m->received ? m->received->count : 0)+p->count;
     if (needed>253U*1024+1) return -EOVERFLOW;
-    if (needed>m->received.capacity) {
-        unsigned capacity=needed*2;
-        int *fds=realloc(m->received.fds,capacity*sizeof(int));
-        if (!fds) { m->result=-ENOMEM; return abort_child(m); }
-        m->received.fds=fds; m->received.capacity=capacity;
-    }
-    int error=md_fd_channel_capture_vector_begin(m->channel,m->group,p->count,m->export_fds,&m->capture);
+    int error=md_received_fds_reserve(&m->received,needed);
+    if (error) { m->result=error; return abort_child(m); }
+    error=md_fd_channel_capture_vector_begin(m->channel,m->group,p->count,m->export_fds,&m->capture);
     if (error) { m->result=error; return abort_child(m); }
     p->token=m->capture.request;
     p->vector=(struct iovec){(void *)(m->parcel+offsetof(struct md_task_receive_frame,token)),sizeof(p->token)};
@@ -275,8 +268,8 @@ static int advance(struct helper *m, long value) {
             if (!p) return -EPROTO;
             int error=md_fd_channel_capture_vector_finish(&m->capture);
             if (error) { m->result=error; return abort_child(m); }
-            memcpy(m->received.fds+m->received.count,m->export_fds,p->count*sizeof(int));
-            m->received.count+=p->count;
+            memcpy(m->received->fds+m->received->count,m->export_fds,p->count*sizeof(int));
+            m->received->count+=p->count;
             return receive_collect(m);
         }
         case RECEIVE_COLLECT:

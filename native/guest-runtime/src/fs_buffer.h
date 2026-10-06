@@ -4,6 +4,7 @@
 #include "fd_receipt.h"
 #include "command_image.h"
 #include "fd_channel.h"
+#include "received_info.h"
 #include <fcntl.h>
 
 enum md_fs_buffer_control { MD_FS_BUFFER_CALL=16, MD_FS_BUFFER_ACK, MD_FS_BUFFER_SENT,
@@ -11,7 +12,7 @@ enum md_fs_buffer_control { MD_FS_BUFFER_CALL=16, MD_FS_BUFFER_ACK, MD_FS_BUFFER
     MD_FS_BUFFER_SNAPSHOT_BEGIN, MD_FS_BUFFER_SNAPSHOT_APPEND, MD_FS_BUFFER_SNAPSHOT_FINISH,
     MD_FS_BUFFER_RIGHTS_BEGIN, MD_FS_BUFFER_RIGHTS_READY, MD_FS_BUFFER_RIGHTS_DONE,
     MD_FS_BUFFER_CHANNEL_OBSERVED, MD_FS_BUFFER_PROC_LINK, MD_FS_BUFFER_TASK_DONE,
-    MD_FS_BUFFER_TASK_SEND, MD_FS_BUFFER_TASK_RECEIVE, MD_FS_BUFFER_RECEIVED_CALL,
+    MD_FS_BUFFER_TASK_SEND, MD_FS_BUFFER_TASK_RECEIVE, MD_FS_BUFFER_RECEIVED_INSPECT,
     MD_FS_BUFFER_RECEIVED_RIGHTS, MD_FS_BUFFER_RECEIVED_DROP };
 enum { MD_FS_BUFFER_SOURCE=-2 };
 enum md_fs_buffer_transfer { MD_FS_BUFFER_NO_FD, MD_FS_BUFFER_ANCHOR, MD_FS_BUFFER_ADDFD, MD_FS_BUFFER_RIGHTS,
@@ -68,7 +69,10 @@ struct md_fs_buffer_frame {
     struct { int number; struct md_fd_channel_observation observation; } channel;
     _Alignas(struct md_fd_receipt) unsigned char receipt[offsetof(struct md_fd_receipt,control)+CMSG_SPACE(sizeof(int))];
     /* Faulted and copied only for explicit value operations, not ordinary IO. */
-    unsigned char value[MD_FS_OUTPUT_MAX];
+    union {
+        unsigned char value[MD_FS_OUTPUT_MAX];
+        struct md_received_info received_info[253];
+    };
 };
 /* Bootstrap-only FD setup; ordinary calls exchange registers and mapped bytes. */
 #ifndef MD_USE_LIBC
@@ -83,8 +87,7 @@ long md_fs_buffer_call(const struct md_fs_request *, struct md_fs_response *,
 /* Consume a worker-held descriptor without publishing it into the caller. */
 long md_fs_buffer_use(const struct md_fs_request *, struct md_fs_response *,
         long (*use)(void *, struct md_fs_buffer_frame *), void *);
-/* Directory operands are retained-receive indices, never guest FD numbers. */
-long md_fs_buffer_received(const struct md_fs_request *, struct md_fs_response *);
-long md_fs_buffer_publish(const int *, unsigned, void *, size_t, unsigned, int *, size_t *);
+long md_fs_buffer_inspect(const int *, unsigned, struct md_received_info *);
+long md_fs_buffer_publish(const int *, const unsigned char *, unsigned, void *, size_t, unsigned, int *, size_t *);
 #endif
 #endif

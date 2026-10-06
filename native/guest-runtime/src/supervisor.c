@@ -16,6 +16,7 @@
 #include "interception.h"
 #include "interception_memory.h"
 #include "task_helper.h"
+#include "received_fds.h"
 #include "fs_buffer.h"
 #include "adapter_frame.h"
 #include "fs_buffer_service.h"
@@ -134,7 +135,7 @@ struct receive_owner {
     struct user_pt_regs continuation;
     struct md_task_receive request;
     struct md_fd_order files;
-    struct md_received_fds received;
+    struct md_received_fds *received;
     int outgoing[253];
 };
 struct thread {
@@ -388,7 +389,7 @@ static void adapter_discard(struct thread *t) {
         else {
             if (owner->files.table && md_fd_order_cancel(&owner->files)==1)
                 CHECK(!md_fd_order_complete(&owner->files));
-            md_received_fds_close(&owner->received); free(owner);
+            md_received_fds_release(owner->received); free(owner);
         }
     }
     t->buffer_return_waiting=0;
@@ -1680,7 +1681,7 @@ static void receive_complete(void *context, struct md_task_helper_result result)
     if (t && t->receive==owner) {
         t->kernel_stopped=1; t->buffer_registers=owner->continuation;
         buffer_reply(t,result.value);
-    } else { md_received_fds_close(&owner->received); free(owner); }
+    } else { md_received_fds_release(owner->received); free(owner); }
 }
 static void receive_start(struct thread *t) {
     struct receive_owner *owner=t->receive;
@@ -1834,29 +1835,20 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
         receive_begin(t,r); return;
     case MD_FS_BUFFER_RECEIVED_DROP:
         if (!t->receive || !t->receive->ready || r->regs[1] || r->regs[2]) break;
-        md_received_fds_close(&t->receive->received); free(t->receive); t->receive=NULL;
+        md_received_fds_release(t->receive->received); free(t->receive); t->receive=NULL;
         result=0; break;
-    case MD_FS_BUFFER_RECEIVED_CALL: {
-        if (!t->receive || !t->receive->ready || !t->buffer.pool || r->regs[2]) break;
-        struct md_buffer_span span;
-        result=md_buffer_span(&t->buffer,&span);
-        if (result) break;
-        const struct md_fs_buffer_frame *frame=span.data;
-        int borrowed[2]={-1,-1};
-        for (unsigned i=0;i<2;++i) {
-            int index=frame->input.base[i];
-            if (index==-1) continue;
-            if (index<0 || (unsigned)index>=t->receive->received.count) { result=-EBADF; break; }
-            borrowed[i]=t->receive->received.fds[index];
-        }
-        if (result) break;
-        result=md_fs_buffer_received_begin(buffer_service,t->pid,t->resources.fs,(unsigned)r->regs[1],
-            &t->buffer,borrowed,&t->buffer_call);
-        if (!result) { adapter_progress(); return; }
+    case MD_FS_BUFFER_RECEIVED_INSPECT: {
+        if (!t->receive || !t->receive->ready || !t->buffer.pool || r->regs[1] || r->regs[2]) break;
+        /* EVENT_WAIT: worker classifies the retained vector. Task death cancels
+         * publication; its independent custody pin survives until completion. */
+        result=md_fs_buffer_inspect_begin(buffer_service,t->pid,t->resources.fs,
+            &t->buffer,t->receive->received,&t->buffer_call);
+        if (!result) return;
         break;
     }
     case MD_FS_BUFFER_RECEIVED_RIGHTS: {
-        if (!t->receive || !t->receive->ready || !t->buffer.pool || r->regs[1] || r->regs[2]) break;
+        if (!t->receive || !t->receive->ready || !t->receive->received
+                || !t->buffer.pool || r->regs[1] || r->regs[2]) break;
         struct md_buffer_span span;
         result=md_buffer_span(&t->buffer,&span);
         if (result) break;
@@ -1865,8 +1857,8 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
         if (!count || count>253) { result=-EINVAL; break; }
         for (unsigned i=0;i<count;++i) {
             int index=frame->rights.index[i];
-            if (index<1 || (unsigned)index>=t->receive->received.count) { result=-EBADF; break; }
-            t->receive->outgoing[i]=t->receive->received.fds[index];
+            if (index<1 || (unsigned)index>=t->receive->received->count) { result=-EBADF; break; }
+            t->receive->outgoing[i]=t->receive->received->fds[index];
         }
         if (result) break;
         result=md_fd_return_vector_begin(&t->buffer_return,t->resources.files,t->receive->outgoing,count,fd_wakeup);

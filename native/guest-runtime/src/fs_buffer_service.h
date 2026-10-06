@@ -43,10 +43,11 @@ struct md_fs_buffer_service *md_fs_buffer_service_new(struct md_fs_worker *, str
 void md_fs_buffer_service_destroy(struct md_fs_buffer_service *);
 int md_fs_buffer_begin(struct md_fs_buffer_service *, pid_t, struct md_guest_domain *, unsigned operation,
         const struct md_interception_buffer *, struct md_fs_buffer_request **);
-/* Borrow exact retained inputs. Accepted requests duplicate them before return;
- * cancellation of their source owner cannot retarget worker execution. */
-int md_fs_buffer_received_begin(struct md_fs_buffer_service *, pid_t, struct md_guest_domain *, unsigned,
-        const struct md_interception_buffer *, const int[2], struct md_fs_buffer_request **);
+/* Inspect one captured rights vector using a shared custody reference. No
+ * application table/FS turn or per-descriptor duplication is needed. */
+struct md_received_fds;
+int md_fs_buffer_inspect_begin(struct md_fs_buffer_service *, pid_t, struct md_guest_domain *,
+        const struct md_interception_buffer *, struct md_received_fds *, struct md_fs_buffer_request **);
 /* Prepared executable descriptions stay outside the guest table until exec. */
 int md_fs_buffer_exec_begin(struct md_fs_buffer_service *, pid_t, struct md_guest_domain *,
         const struct md_interception_buffer *, struct md_fs_buffer_request **);

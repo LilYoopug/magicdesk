@@ -79,11 +79,18 @@ before the adapter resumes. An allocation-free cursor packs the socket and right
 across message/control boundaries into vectors of at most 253 descriptors. A full
 vector resumes at the exact next descriptor, without visiting uncompleted native
 messages. Source indices remain stable through vector splitting. The supervisor
-retains those descriptions; the worker borrows exact inputs for token authentication and watch
-inspection, without installing temporary descriptors in the application table.
+retains those descriptions in one reference-counted vector. A single mapped
+inspection per completed message classifies credential capabilities and watch
+descriptors under one captured task context. It pins the immutable source vector
+without duplicating its FDs or entering file-table/FS turns: its inputs are
+retained descriptions, not application descriptor numbers. Reference changes
+belong to the supervisor; the worker's pin ends only after completion or join.
+Ordered typed results reuse the mapped value area without increasing ordinary
+request clearing. The adapter keeps no per-descriptor filesystem query path.
 Caller death, fatal helper filters and export failure release the private table,
 queued rights and retained sources. Later reuse of the original socket number
-cannot retarget the accepted receive.
+cannot retarget the accepted receive. Classification does not authenticate an
+arbitrary message's mount-origin association.
 
 Receive publication has one owner for ancillary data, translated source address
 and output header fields. Application rights use the existing table-owned return
@@ -194,6 +201,12 @@ prefix retained after terminal cancellation. Allocation-denied collector checks
 cover empty/completed prefixes, multiple controls, vector splits and 1024-message
 batches. They assert exact source indices and the minimum export-vector count;
 1024 messages carrying two rights require nine exports including the socket.
+Worker inspection checks cover 253 ordered/repeated inputs, invalid indices,
+request-memory mutation after admission and captured context after task removal.
+They hold both resource turns to verify independent progress and require no
+descriptor duplication. Cancellation pins the mapped buffer and source vector
+until worker completion; pipe EOF and final descriptor balance verify release.
+Reference retention itself is checked with allocation denied.
 A stock Debian bus activates a GDBus fixture,
 reports its caller as guest UID 0 and exchanges usable FDs in both directions.
 An external native endpoint still receives UID 2000 and rejects a root claim.

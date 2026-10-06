@@ -21,8 +21,6 @@ struct md_task_receive_frame {
     struct msghdr message;
     union { struct cmsghdr align; char bytes[CMSG_SPACE(253*sizeof(int))]; } control;
 };
-struct md_received_fds { int *fds; unsigned count, capacity; };
-void md_received_fds_close(struct md_received_fds *);
 /* Allocation-free private-header traversal. 1 exposes the next export vector,
  * 0 means complete; only confirmed native messages are visited. */
 long md_task_receive_collect(struct md_task_receive_frame *);

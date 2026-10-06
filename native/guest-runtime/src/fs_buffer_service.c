@@ -12,6 +12,7 @@
 #include "exec_prepare.h"
 #include "file_snapshot.h"
 #include "ipc_credentials.h"
+#include "received_fds.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -50,7 +51,8 @@ struct md_fs_buffer_request {
     size_t snapshot_size;
     struct md_fs_anchor *input[2];
     int captured[2];
-    unsigned borrowed;
+    struct md_received_fds *received;
+    unsigned received_count;
     struct md_fd_channel *export;
     int channel_checking;
     struct md_fd_channel_capture export_capture;
@@ -98,6 +100,7 @@ static void dispose(struct md_fs_buffer_request *r) {
         if (r->captured[i]>=0) close(r->captured[i]);
     }
     md_fs_context_end(&r->context);
+    md_received_fds_release(r->received);
     md_fd_channel_release(r->export);
     md_fs_buffer_open_release(&r->opened);
     md_command_images_close(&r->images);
@@ -354,6 +357,31 @@ int md_fs_buffer_channel_observed(struct md_fs_buffer_request *r) {
     if (error) submit(r,error);
     return 0;
 }
+static int inspect_received(struct md_fs_buffer_request *r) {
+    for (unsigned i=0;i<r->received_count;++i) {
+        int index;
+        memcpy(&index,r->path+i*sizeof(index),sizeof(index));
+        struct md_received_info info={0};
+        struct md_fs_request q={.actor=r->actor,.peer=r->context.peer,.operation=MD_FS_IPC,
+            .flags=MD_IPC_MESSAGE_READ,.directory={r->received->fds[0],r->received->fds[index]}};
+        struct md_fs_result result;
+        md_fs_context_execute(&r->context,&q,&result,NULL);
+        if (!result.error) {
+            info.flags=MD_RECEIVED_CREDENTIALS;
+            info.credentials=(struct ucred){(pid_t)result.position,result.info.uid,result.info.gid};
+        } else {
+            if (result.error!=-ENODATA && result.error!=-ENOTSUP
+                    && result.error!=-EAFNOSUPPORT && result.error!=-EPROTOTYPE) return result.error;
+            q=(struct md_fs_request){.actor=r->actor,.peer=r->context.peer,
+                .operation=MD_FS_WATCH_CONTAINS,.directory={r->received->fds[index],-1}};
+            md_fs_context_execute(&r->context,&q,&result,NULL);
+            if (result.error) return result.error;
+            if (result.position) info.flags=MD_RECEIVED_WATCH;
+        }
+        r->output->received_info[i]=info;
+    }
+    return 0;
+}
 static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
     struct md_fs_buffer_request *r=(void *)work;
     r->error=error;
@@ -367,6 +395,7 @@ static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
         return;
     }
     r->context.filesystem=fs;
+    if (r->received) { r->error=inspect_received(r); return; }
     if (r->executable) {
         r->error=md_fs_command_prepare(&r->context,&r->request,&r->output->command,&r->images);
         return;
@@ -461,7 +490,7 @@ void md_fs_buffer_service_destroy(struct md_fs_buffer_service *s) {
 }
 static int begin(struct md_fs_buffer_service *s, pid_t actor, struct md_guest_domain *fs, unsigned operation,
         const struct md_interception_buffer *buffer, struct md_fs_buffer_request **out, int executable,
-        int snapshot, unsigned snapshot_flags, const int *borrowed) {
+        int snapshot, unsigned snapshot_flags) {
     if (!s || !out || *out) return -EINVAL;
     struct md_buffer_span span;
     int error=md_buffer_span(buffer,&span);
@@ -508,9 +537,6 @@ static int begin(struct md_fs_buffer_service *s, pid_t actor, struct md_guest_do
         if ((md_fs_operation_data_inputs(operation)&(1U<<i)) && q.directory[i]==AT_FDCWD)
             return -EBADF;
     if (q.value_size>MD_FS_VALUE_MAX || (q.value_size && !md_fs_operation_value(operation))) return -EINVAL;
-    if (borrowed && (snapshot || executable || capture_bytes || object_bytes || lengths[0] || lengths[1]
-            || !((operation==MD_FS_IPC && q.flags==MD_IPC_MESSAGE_READ)
-                || operation==MD_FS_WATCH_CONTAINS))) return -EINVAL;
     struct md_fs_buffer_request *r=calloc(1,sizeof(*r)+lengths[0]+lengths[1]+q.value_size+object_bytes+capture_bytes
         +(snapshot ? sizeof(input->snapshot.data) : 0));
     if (!r) return -ENOMEM;
@@ -555,11 +581,6 @@ static int begin(struct md_fs_buffer_service *s, pid_t actor, struct md_guest_do
         if (!error) error=md_task_registry_read(s->tasks,actor,0,&r->context.task);
         if (!error) r->request.peer=r->context.peer=r->context.task.tgid;
         if (!error && r->context.task.fs!=fs) error=-ESTALE;
-        if (!error && borrowed) for (unsigned i=0;i<2 && !error;++i) if (q.directory[i]>=0) {
-            int fd=fcntl(borrowed[i],F_DUPFD_CLOEXEC,0);
-            if (fd<0) error=-errno;
-            else { r->request.directory[i]=r->captured[i]=fd; r->borrowed|=1U<<i; }
-        }
         if (!error) {
             error=md_fd_order_begin(r->context.task.files,&r->files,s->wake);
             if (error>0) error=0;
@@ -572,21 +593,49 @@ static int begin(struct md_fs_buffer_service *s, pid_t actor, struct md_guest_do
 }
 int md_fs_buffer_begin(struct md_fs_buffer_service *s, pid_t actor, struct md_guest_domain *fs, unsigned operation,
         const struct md_interception_buffer *buffer, struct md_fs_buffer_request **out) {
-    return begin(s,actor,fs,operation,buffer,out,0,0,0,NULL);
+    return begin(s,actor,fs,operation,buffer,out,0,0,0);
 }
-int md_fs_buffer_received_begin(struct md_fs_buffer_service *s, pid_t actor, struct md_guest_domain *fs,
-        unsigned operation, const struct md_interception_buffer *buffer, const int borrowed[2],
+int md_fs_buffer_inspect_begin(struct md_fs_buffer_service *s, pid_t actor, struct md_guest_domain *fs,
+        const struct md_interception_buffer *buffer, struct md_received_fds *sources,
         struct md_fs_buffer_request **out) {
-    if (!borrowed) return -EINVAL;
-    return begin(s,actor,fs,operation,buffer,out,0,0,0,borrowed);
+    if (!s || !out || *out || !sources || !sources->count) return -EINVAL;
+    struct md_buffer_span span;
+    int error=md_buffer_span(buffer,&span);
+    if (error) return error;
+    if (span.size<sizeof(struct md_fs_buffer_frame)) return -EINVAL;
+    struct md_fs_buffer_frame *frame=span.data;
+    unsigned count=frame->rights.count;
+    if (!count || count>253) return -EINVAL;
+    struct md_fs_buffer_request *r=calloc(1,sizeof(*r)+count*sizeof(int));
+    if (!r) return -ENOMEM;
+    r->service=s; r->actor=actor; r->output=frame; r->opened.fd=-1;
+    r->images=(struct md_command_images){-1,-1};
+    r->snapshot.fd=-1; r->captured[0]=r->captured[1]=-1;
+    r->received=md_received_fds_retain(sources); r->received_count=count;
+    memcpy(r->path,frame->rights.index,count*sizeof(int));
+    for (unsigned i=0;i<count && !error;++i) {
+        int index; memcpy(&index,r->path+i*sizeof(index),sizeof(index));
+        if (index<1 || (unsigned)index>=sources->count) error=-EBADF;
+    }
+    if (!error) error=md_buffer_pin(buffer,&r->buffer);
+    if (!error) error=md_task_registry_read(s->tasks,actor,0,&r->context.task);
+    if (!error && r->context.task.fs!=fs) error=-ESTALE;
+    if (error) { dispose(r); return error; }
+    r->context.actor=actor; r->context.peer=r->context.task.tgid;
+    r->context.authenticated=r->context.has_identity=1;
+    r->work=(struct md_fs_work){.run=run,.complete=complete};
+    r->next=s->requests; s->requests=r;
+    error=md_fs_worker_submit(s->worker,&r->work);
+    if (error) { dispose(r); return error; }
+    r->submitted=1; *out=r; return 0;
 }
 int md_fs_buffer_exec_begin(struct md_fs_buffer_service *s, pid_t actor, struct md_guest_domain *fs,
         const struct md_interception_buffer *buffer, struct md_fs_buffer_request **out) {
-    return begin(s,actor,fs,MD_FS_OPEN_IMAGE,buffer,out,1,0,0,NULL);
+    return begin(s,actor,fs,MD_FS_OPEN_IMAGE,buffer,out,1,0,0);
 }
 int md_fs_buffer_snapshot_begin(struct md_fs_buffer_service *s, pid_t actor, struct md_guest_domain *fs,
         const struct md_interception_buffer *buffer, unsigned flags, struct md_fs_buffer_request **out) {
-    return begin(s,actor,fs,MD_FS_TEMPORARY,buffer,out,0,1,flags,NULL);
+    return begin(s,actor,fs,MD_FS_TEMPORARY,buffer,out,0,1,flags);
 }
 int md_fs_buffer_exec_take(struct md_fs_buffer_request *r, int out[2]) {
     if (!r || !out) return -EINVAL;
@@ -629,7 +678,6 @@ int md_fs_buffer_progress(struct md_fs_buffer_service *s) {
         unsigned data=md_fs_operation_data_inputs(r->request.operation);
         if (r->executable && !*r->request.path[0]) data=1;
         for (unsigned i=0;i<2 && !error;++i) {
-            if (r->borrowed&(1U<<i)) continue;
             int base=r->request.directory[i];
             if (base==AT_FDCWD) r->input[i]=md_fs_anchor_retain(r->context.task.cwd);
             else if (base>=0) r->input[i]=md_fd_origins_get(r->files.table,base,NULL);

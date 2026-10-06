@@ -205,21 +205,22 @@ long md_fs_buffer_call(const struct md_fs_request *q, struct md_fs_response *out
     if (!md_fs_buffer_accepts(q)) return -EINVAL;
     return exchange(q,out,deliver,context,MD_FS_BUFFER_CALL,NULL,NULL);
 }
-long md_fs_buffer_received(const struct md_fs_request *q, struct md_fs_response *out) {
-    return exchange(q,out,NULL,NULL,MD_FS_BUFFER_RECEIVED_CALL,NULL,NULL);
+long md_fs_buffer_inspect(const int *indices, unsigned count, struct md_received_info *out) {
+    if (!count || count>253) return -EINVAL;
+    long address=md_adapter_buffer_take();
+    if (address<0) return address;
+    struct md_fs_buffer_frame *frame=(void *)address;
+    frame->rights.count=count; memcpy(frame->rights.index,indices,count*sizeof(int));
+    long result=md_guest_buffer_control(MD_FS_BUFFER_RECEIVED_INSPECT,0,0);
+    if (!result) memcpy(out,frame->received_info,count*sizeof(*out));
+    long released=md_adapter_buffer_release();
+    return result ? result : released;
 }
-long md_fs_buffer_publish(const int *indices, unsigned count, void *control, size_t capacity,
+long md_fs_buffer_publish(const int *indices, const unsigned char *watched, unsigned count, void *control, size_t capacity,
         unsigned flags, int *out_flags, size_t *used) {
     if (!count || count>253) return -EINVAL;
-    unsigned char watched[253]; int has_watch=0;
-    for (unsigned i=0;i<count;++i) {
-        struct md_fs_request q={.operation=MD_FS_WATCH_CONTAINS,.directory={indices[i],-1}};
-        struct md_fs_response reply={0};
-        long error=md_fs_buffer_received(&q,&reply);
-        if (!error) error=reply.result.error;
-        if (error) return error;
-        watched[i]=reply.result.position!=0; has_watch|=watched[i];
-    }
+    int has_watch=0;
+    for (unsigned i=0;i<count;++i) has_watch|=watched[i];
     long address=md_adapter_buffer_take();
     if (address<0) return address;
     struct md_fs_buffer_frame *frame=(void *)address;

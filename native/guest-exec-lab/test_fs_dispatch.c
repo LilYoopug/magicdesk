@@ -9,6 +9,8 @@
 #include "fs_buffer_service.h"
 #include "fd_mutation.h"
 #include "fd_channel.h"
+#include "received_fds.h"
+#include "ipc_credentials.h"
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -1174,6 +1176,87 @@ static void buffer_watch_delivery(struct md_fs_buffer_service *service,
     assert(!close(watch));
     puts("PASS mapped watch delivery: acknowledgement, rejected copy, cancellation before and after offering records");
 }
+static void buffer_received_inspection(struct md_fs_buffer_service *service,
+        struct md_fs_worker *worker, struct md_task_registry *tasks,
+        const struct md_task_resources *resources, const struct md_identity *identity,
+        struct md_interception_buffers *pool, struct md_interception_buffer *buffer,
+        struct md_fs_buffer_frame *frame) {
+    int sockets[2]; assert(!socketpair(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0,sockets));
+    *frame=(struct md_fs_buffer_frame){.input={.base={sockets[0],sockets[1]},.flags=MD_IPC_PAIR}};
+    assert(!buffer_request(service,worker,resources->fs,buffer,MD_FS_IPC));
+    assert(!frame->reply.result.error);
+    *frame=(struct md_fs_buffer_frame){.input={.base={-1,-1},.flags=IN_CLOEXEC|IN_NONBLOCK}};
+    assert(!buffer_request(service,worker,resources->fs,buffer,MD_FS_WATCH_CREATE));
+    assert(!frame->reply.result.error && buffered_open.fd>=0);
+    int watch=buffered_open.fd; buffered_open.fd=-1; md_fs_buffer_open_release(&buffered_open);
+    for (unsigned cancelled=0;cancelled<2;++cancelled) {
+        int pipefd[2]; assert(!pipe2(pipefd,O_NONBLOCK|O_CLOEXEC));
+        struct md_received_fds *sources=NULL; assert(!md_received_fds_reserve(&sources,4));
+        sources->fds[0]=dup(sockets[1]); sources->fds[1]=dup(watch);
+        sources->fds[2]=pipefd[1]; sources->fds[3]=open("/dev/null",O_RDONLY|O_CLOEXEC);
+        assert(sources->fds[0]>=0 && sources->fds[1]>=0 && sources->fds[3]>=0); sources->count=4;
+        struct md_fs_buffer_request *request=NULL;
+        *frame=(struct md_fs_buffer_frame){0};
+        assert(md_fs_buffer_inspect_begin(service,getpid(),resources->fs,buffer,sources,&request)==-EINVAL);
+        frame->rights.count=254;
+        assert(md_fs_buffer_inspect_begin(service,getpid(),resources->fs,buffer,sources,&request)==-EINVAL);
+        frame->rights.count=1;
+        const int invalid[]={0,-1,4,INT_MAX};
+        for (unsigned i=0;i<sizeof(invalid)/sizeof(*invalid);++i) {
+            frame->rights.index[0]=invalid[i];
+            assert(md_fs_buffer_inspect_begin(service,getpid(),resources->fs,buffer,sources,&request)==-EBADF);
+            assert(!request && sources->references==1);
+        }
+        int gate=eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK),started=eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK);
+        assert(gate>=0 && started>=0);
+        struct queued blocked={.work={.run=queued_run,.complete=queued_complete},.gate=gate,.started=started};
+        assert(!md_fs_worker_submit(worker,&blocked.work));
+        /* EVENT_WAIT: hold the worker until captured indices and ownership are
+         * deliberately changed; timeout fails the fixture. */
+        assert(md_event_wait_fd(started,POLLIN,md_event_now()+5000000000LL)>=0);
+        frame->rights.count=253;
+        for (unsigned i=0;i<253;++i) frame->rights.index[i]=1+i%3;
+        int callbacks=buffer_callbacks;
+        unsigned before=all_fds();
+        struct md_fd_order files={0}; struct md_fs_order fs={0};
+        assert(md_fd_order_begin(resources->files,&files,NULL)==1 && !md_fd_order_start(&files));
+        assert(md_fs_order_begin(resources->fs,&fs,NULL)==1 && !md_fs_order_start(&fs));
+        assert(!md_fs_buffer_inspect_begin(service,getpid(),resources->fs,buffer,sources,&request));
+        assert(sources->references==2 && all_fds()==before);
+        memset(frame->rights.index,0,sizeof(frame->rights.index)); frame->rights.count=0;
+        md_received_fds_release(sources);
+        md_task_registry_forget(tasks,getpid());
+        if (cancelled) md_fs_buffer_cancel(&request);
+        assert(!md_buffer_release(buffer));
+        struct md_interception_buffer next={0};
+        assert(md_buffers_take(pool,&next)==-EAGAIN);
+        char byte; assert(read(pipefd[0],&byte,1)==-1 && errno==EAGAIN);
+        uint64_t one=1; assert(write(gate,&one,sizeof(one))==sizeof(one));
+        int inspected=0;
+        for (;;) {
+            worker_event(worker);
+            if (!cancelled && buffer_callbacks==callbacks+1) {
+                assert(!buffer_error && !buffer_pending && buffered_open.fd==-1);
+                for (unsigned i=0;i<253;++i)
+                    assert(frame->received_info[i].flags==(i%3==0 ? MD_RECEIVED_WATCH : 0));
+                inspected=1;
+            }
+            int error=md_buffers_take(pool,buffer);
+            if (!error) break;
+            assert(error==-EAGAIN);
+        }
+        assert(blocked.completed && read(pipefd[0],&byte,1)==0);
+        assert(buffer_callbacks==callbacks+(cancelled ? 0 : 1));
+        assert(cancelled || inspected);
+        assert(md_fd_order_state(&files)==MD_RESOURCE_ORDER_RUNNING
+            && md_fs_order_state(&fs)==MD_RESOURCE_ORDER_RUNNING);
+        assert(!md_fs_order_complete(&fs) && !md_fd_order_complete(&files));
+        assert(!md_task_registry_publish(tasks,getpid(),getpid(),identity,resources));
+        assert(!close(gate) && !close(started) && !close(pipefd[0]));
+    }
+    assert(!close(watch) && !close(sockets[0]) && !close(sockets[1]));
+    puts("PASS received vector inspection: 253 ordered/repeated inputs, no FD duplication or table turns, captured context, rejected indices and cancellation EOF");
+}
 static void buffer_service_lifetime(const char *store, unsigned cancelled_operation) {
     unsigned before=all_fds();
     struct md_task_registry *tasks=md_task_registry_create(); assert(tasks);
@@ -1307,6 +1390,7 @@ static void buffer_service_lifetime(const char *store, unsigned cancelled_operat
     /* Watch queue destruction is event-driven after the last reader closes;
      * keep that unrelated retirement outside the channel's exact FD baseline. */
     buffer_channel_check(service,worker,tasks,&resources,&identity,&task,frame);
+    buffer_received_inspection(service,worker,tasks,&resources,&identity,pool,&task,frame);
     buffer_watch_delivery(service,worker,resources.fs,pool,&task,frame,md_fs_anchor_fd(base));
     md_fs_anchor_release(base);
     const unsigned operations[]={MD_FS_TEMPORARY,MD_FS_MOUNT_TABLE};

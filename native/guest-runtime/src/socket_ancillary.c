@@ -26,19 +26,6 @@ static struct cmsghdr *next_header(const struct msghdr *m, const struct cmsghdr 
 /* The kernel still transports data and SCM_RIGHTS. An explicit guest credential
  * message adds one sealed, connection-scoped identity capability; the receiving
  * adapter removes it before publishing ancillary data. No stream framing. */
-static long message_rpc(const struct md_fs *fs, int socket, int token, struct ucred *out) {
-    if (!fs->endpoint[0]) return -ENODATA;
-    struct md_fs_request q = {.operation=MD_FS_IPC,
-        .flags=MD_IPC_MESSAGE_READ,
-        .directory={socket,token}};
-    struct md_fs_response reply;
-    long r = md_fs_buffer_received(&q, &reply);
-    if (!r) r = reply.result.error;
-    if (r == -ENOTSUP || r == -EAFNOSUPPORT || r == -EPROTOTYPE) r = -ENODATA;
-    if (r) return r;
-    *out = (struct ucred){(pid_t)reply.result.position,reply.result.info.uid,reply.result.info.gid};
-    return 0;
-}
 static void *buffer(size_t size, void *local, size_t capacity) {
     if (size <= capacity) return local;
     if (size > 16*1024*1024) return NULL;
@@ -150,40 +137,54 @@ static size_t append(void *out, size_t used, size_t capacity, int type, int leve
     return used + (step < room ? step : room);
 }
 static long publish_rights(void *out, size_t used, size_t capacity,
-        int *fds, size_t count, int *flags, unsigned receive_flags) {
+        int *fds, const unsigned char *watched, size_t count, int *flags, unsigned receive_flags) {
     size_t room=used<capacity?capacity-used:0;
     if (room<CMSG_LEN(sizeof(int))) { *flags|=MSG_CTRUNC; return used; }
     size_t delivered=0;
-    long error=md_fs_buffer_publish(fds,(unsigned)count,(char *)out+used,room,receive_flags,flags,&delivered);
+    long error=md_fs_buffer_publish(fds,watched,(unsigned)count,(char *)out+used,room,receive_flags,flags,&delivered);
     return error ? error : (long)(used+delivered);
 }
 static long publish(const struct md_fs *fs, int socket, const struct msghdr *original,
         struct msghdr m, void *destination, unsigned receive_flags) {
     size_t capacity=original->msg_control?original->msg_controllen:0;
     struct ucred claimed={0}; int have_claim=0;
+    int indices[253]; struct md_received_info info[253]; unsigned entries=0;
+    for (struct cmsghdr *h=CMSG_FIRSTHDR(&m);h;h=next_header(&m,h)) {
+        if (h->cmsg_level!=SOL_SOCKET || h->cmsg_type!=SCM_RIGHTS) continue;
+        size_t count=(h->cmsg_len-CMSG_LEN(0))/sizeof(int);
+        if (count>253-entries) return -EPROTO;
+        memcpy(indices+entries,CMSG_DATA(h),count*sizeof(int)); entries+=count;
+    }
+    if (entries) {
+        long error=md_fs_buffer_inspect(indices,entries,info);
+        if (error) return error;
+    }
     /* Identify capabilities before rebuilding headers: the kernel can coalesce
      * ordinary descriptors and the identity descriptor into one SCM_RIGHTS. */
+    unsigned entry=0;
     for (struct cmsghdr *h=CMSG_FIRSTHDR(&m); h; h=next_header(&m,h)) {
         if (h->cmsg_level!=SOL_SOCKET || h->cmsg_type!=SCM_RIGHTS) continue;
         size_t count=(h->cmsg_len-CMSG_LEN(0))/sizeof(int);
         int *fds=(void *)CMSG_DATA(h);
-        for (size_t i=0;i<count;i++) {
-            struct ucred value;
-            long status=message_rpc(fs,0,fds[i],&value);
-            if (!status) { claimed=value; have_claim=1; fds[i]=-1; }
-            else if (status != -ENODATA) return status;
-        }
+        for (size_t i=0;i<count;i++,entry++)
+            if (info[entry].flags&MD_RECEIVED_CREDENTIALS) {
+                claimed=info[entry].credentials; have_claim=1; fds[i]=-1;
+            }
     }
+    entry=0;
     void *out=original->msg_control; size_t used=0;
     for (struct cmsghdr *h=CMSG_FIRSTHDR(&m); h; h=next_header(&m,h)) {
         const void *data=CMSG_DATA(h); size_t n=h->cmsg_len-CMSG_LEN(0);
         if (h->cmsg_level==SOL_SOCKET && h->cmsg_type==SCM_CREDENTIALS && n==sizeof(claimed) && have_claim) data=&claimed;
         if (h->cmsg_level==SOL_SOCKET && h->cmsg_type==SCM_RIGHTS) {
-            int *fds=(void *)CMSG_DATA(h); size_t count=0;
-            for (size_t i=0;i<n/sizeof(int);i++) if (fds[i]>=0) fds[count++]=fds[i];
+            int *fds=(void *)CMSG_DATA(h); size_t count=0; unsigned char watched[253];
+            for (size_t i=0;i<n/sizeof(int);i++,entry++) if (fds[i]>=0) {
+                watched[count]=!!(info[entry].flags&MD_RECEIVED_WATCH);
+                fds[count++]=fds[i];
+            }
             for (size_t i=count;i<n/sizeof(int);i++) fds[i]=-1;
             if (!count) continue;
-            long published=publish_rights(out,used,capacity,fds,count,&m.msg_flags,receive_flags);
+            long published=publish_rights(out,used,capacity,fds,watched,count,&m.msg_flags,receive_flags);
             if (published<0) return published;
             used=(size_t)published;
             continue;

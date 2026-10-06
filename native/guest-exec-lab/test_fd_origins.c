@@ -9,6 +9,7 @@
 #include "fd_receipt.h"
 #include "fd_channel.h"
 #include "fd_return.h"
+#include "received_fds.h"
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -960,9 +961,32 @@ static void channel_reconciliation(void) {
     }
     puts("PASS channel reconciliation: same/closed/replaced slot, CLOEXEC, denied observation, malformed reply, no allocation or guest close");
 }
+static void received_custody(void) {
+    unsigned before=descriptors();
+    int pipes[2]; assert(!pipe2(pipes,O_CLOEXEC|O_NONBLOCK));
+    struct md_received_fds *sources=NULL;
+    assert(md_received_fds_reserve(&sources,0)==-EINVAL && !sources);
+    assert(md_received_fds_reserve(&sources,UINT_MAX)==-EINVAL && !sources);
+    assert(!md_received_fds_reserve(&sources,1));
+    sources->fds[sources->count++]=pipes[1];
+    assert(!md_received_fds_reserve(&sources,254) && sources->count==1 && sources->fds[0]==pipes[1]);
+    allocation_budget=0;
+    struct md_received_fds *inspection=md_received_fds_retain(sources);
+    assert(inspection==sources && sources->references==2);
+    assert(md_received_fds_reserve(&sources,1024)==-EBUSY);
+    md_received_fds_release(sources);
+    char byte; assert(read(pipes[0],&byte,1)==-1 && errno==EAGAIN);
+    assert(inspection->references==1 && fcntl(inspection->fds[0],F_GETFD)>=0);
+    md_received_fds_release(inspection);
+    assert(read(pipes[0],&byte,1)==0);
+    allocation_budget=-1;
+    assert(!close(pipes[0]) && descriptors()==before);
+    puts("PASS received FD custody: immutable shared vector, allocation-free pins, owner cancellation and last-reader EOF");
+}
 void test_fd_origins(void) {
     extern void test_task_receive(int *);
     test_task_receive(&allocation_budget);
+    received_custody();
     export_messages();
     infrastructure();
     channel_reconciliation();

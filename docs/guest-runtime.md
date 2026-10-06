@@ -724,6 +724,13 @@ for readiness and watch limitations.
 Unix `sendmmsg` reuses address and ancillary adapters without copying payloads.
 Credential-free sends need no per-message buffers. Tests cover partial batches, short stream writes, failed
 result writes and SCM_RIGHTS. Unadapted socket operations are not thereby certified.
+Received rights have one supervisor-owned vector shared with worker inspection.
+One typed request per message classifies identity tokens and managed watches,
+without FD duplication or file-table/FS turns. Cancellation retains its sources
+and mapped output until worker completion; publication installs only application
+rights. This does not establish arbitrary-message mount-origin tracking. See
+[Unix IPC credentials](../native/guest-runtime/ipc-credentials.md) for custody,
+resource-limit and batch-publication contracts.
 
 `/dev/shm` belongs to the guest store, including access relative to a `/dev`
 descriptor or cwd. Execution preparation creates this directory with mode 01777
