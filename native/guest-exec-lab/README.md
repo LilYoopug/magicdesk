@@ -579,6 +579,14 @@ are removed unless `--keep` is explicitly selected. Build `resource_guest` and
 `test_task_resources` with `MAGICDESK_GUEST_FIXTURES=ON`; run the latter directly
 for the resource-owner unit contract. See [process resources](../guest-runtime/process-resources.md).
 
+`--case kernel-baseline` runs exact-task descriptor/lifetime checks with
+`PIDFD_THREAD` disabled, the resource model under that same restriction, and
+production private-thread proc capture plus mapped descriptor/data/import cases.
+It also exercises launch admission with missing mandatory operations and ADDFD
+permission/ABI errors; independent shell execution must remain available.
+This subset is included in the default resource suite. Kernel dependencies and
+coverage are recorded in [kernel compatibility](../guest-runtime/kernel-compatibility.md).
+
 The same runner checks ordered FD-origin vectors and native `SCM_RIGHTS`
 handoffs of up to 253 descriptors: distinct mount origins for one inode,
 sender exit, repeated `MSG_PEEK`, truncated delivery and pipe EOF. Model checks

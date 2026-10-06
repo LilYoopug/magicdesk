@@ -611,7 +611,7 @@ int md_fs_buffer_progress(struct md_fs_buffer_service *s) {
                 } else if (base>=0) {
                     int fd=md_task_descriptor_copy(r->actor,base,&process);
                     if (fd>=0) r->request.directory[i]=r->captured[i]=fd;
-                    else if (fd==-EPERM || fd==-EACCES || fd==-ENOSYS)
+                    else if (md_task_descriptor_needs_export(fd))
                         r->export_mask|=1U<<i;
                     else error=fd;
                 } else {

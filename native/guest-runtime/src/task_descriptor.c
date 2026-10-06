@@ -6,6 +6,20 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+int md_task_pidfd_open(pid_t actor, int *thread_handle) {
+    if (actor<=0) return -EINVAL;
+    int fd=(int)syscall(SYS_pidfd_open,actor,MD_PIDFD_THREAD);
+    int exact=fd>=0;
+    if (fd<0 && errno==EINVAL) {
+        fd=(int)syscall(SYS_pidfd_open,actor,0);
+        if (fd<0 && errno==EINVAL) return -ENOTSUP;
+    }
+    if (fd>=0 && thread_handle) *thread_handle=exact;
+    return fd<0 ? -errno : fd;
+}
+int md_task_descriptor_needs_export(int error) {
+    return error==-ENOTSUP || error==-ENOSYS || error==-EPERM || error==-EACCES;
+}
 int md_task_descriptor_copy(pid_t actor, int number, int *process) {
     if (actor<=0 || !process) return -EINVAL;
     if (number<0) return -EBADF;
@@ -14,9 +28,8 @@ int md_task_descriptor_copy(pid_t actor, int number, int *process) {
         return fd<0 ? -errno : fd;
     }
     if (*process<0) {
-        *process=(int)syscall(SYS_pidfd_open,actor,MD_PIDFD_THREAD);
-        if (*process<0 && errno==EINVAL) *process=(int)syscall(SYS_pidfd_open,actor,0);
-        if (*process<0) return -errno;
+        *process=md_task_pidfd_open(actor,NULL);
+        if (*process<0) return *process;
     }
     int fd=(int)syscall(SYS_pidfd_getfd,*process,number,0);
     return fd<0 ? -errno : fd;

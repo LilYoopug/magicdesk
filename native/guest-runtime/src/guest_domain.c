@@ -5,9 +5,8 @@
 #include <linux/magic.h>
 #include <linux/netlink.h>
 #include <linux/openat2.h>
-#include "linux_abi.h"
+#include "task_lifetime.h"
 #include <limits.h>
-#include <poll.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -29,13 +28,15 @@ struct md_guest_domain {
     atomic_int path_state;
     struct md_fs_location guest_root;
     struct md_fs_anchor *cwd_origin;
-    int root, cwd, root_process;
+    int root, cwd;
+    struct md_task_lifetime root_task;
 };
 struct md_guest_domain *md_domain_new(void) {
     struct md_guest_domain *d = calloc(1, sizeof(*d));
     if (d) {
         atomic_init(&d->refs, 1); atomic_init(&d->path_state, 0);
-        d->owners = 1; d->root = d->cwd = d->root_process = -1;
+        d->owners = 1; d->root = d->cwd = -1;
+        d->root_task.fd=-1;
         if (pthread_mutex_init(&d->lock, NULL)) { free(d); return NULL; }
         if (md_resource_queue_init(&d->order)) { pthread_mutex_destroy(&d->lock); free(d); return NULL; }
     }
@@ -52,9 +53,9 @@ struct md_guest_domain *md_domain_fork(struct md_guest_domain *d, int shared) {
     atomic_store(&copy->path_state, atomic_load(&d->path_state));
     if (copy && d->root >= 0) {
         copy->root = fcntl(d->root, F_DUPFD_CLOEXEC, 0);
-        copy->root_process = fcntl(d->root_process, F_DUPFD_CLOEXEC, 0);
+        int lifetime=md_task_lifetime_copy(&copy->root_task,&d->root_task);
         if (d->cwd >= 0) copy->cwd = fcntl(d->cwd, F_DUPFD_CLOEXEC, 0);
-        if (copy->root < 0 || copy->root_process < 0 || (d->cwd >= 0 && copy->cwd < 0)) {
+        if (copy->root < 0 || lifetime || (d->cwd >= 0 && copy->cwd < 0)) {
             pthread_mutex_unlock(&d->lock); md_domain_release(copy); return NULL;
         }
     }
@@ -72,7 +73,7 @@ void md_domain_unpin(struct md_guest_domain *d) {
     if (!d || atomic_fetch_sub_explicit(&d->refs, 1, memory_order_acq_rel) != 1) return;
     if (d->root >= 0) close(d->root);
     if (d->cwd >= 0) close(d->cwd);
-    if (d->root_process >= 0) close(d->root_process);
+    md_task_lifetime_close(&d->root_task);
     md_fs_anchor_release(d->cwd_origin);
     md_resource_queue_destroy(&d->order);
     pthread_mutex_destroy(&d->lock); free(d);
@@ -153,23 +154,19 @@ int md_domain_restrict(struct md_guest_domain *d, pid_t pid, const char *path) {
     if (fd < 0) return -errno;
     struct statfs fs;
     int error = fstatfs(fd, &fs) ? -errno : fs.f_type != PROC_SUPER_MAGIC ? -EXDEV : 0;
-    int process = error ? -1 : syscall(SYS_pidfd_open, pid, MD_PIDFD_THREAD);
-    if (!error && process < 0 && errno == EINVAL) process = syscall(SYS_pidfd_open, pid, 0);
-    if (!error && process < 0) error = -errno;
+    struct md_task_lifetime task={.fd=-1};
+    if (!error) error=md_task_lifetime_open(&task,pid);
     if (!error) {
         pthread_mutex_lock(&d->lock);
         if (d->root >= 0 || md_domain_scoped(d)) error = -EPERM;
-        else { d->root = fd; d->root_process = process; }
+        else { d->root = fd; d->root_task = task; }
         pthread_mutex_unlock(&d->lock);
     }
-    if (error) { close(fd); if (process >= 0) close(process); }
+    if (error) { close(fd); md_task_lifetime_close(&task); }
     return error;
 }
 static int root_alive(const struct md_guest_domain *d) {
-    struct pollfd event = {.fd = d->root_process, .events = POLLIN};
-    int result;
-    do { result = poll(&event, 1, 0); } while (result < 0 && errno == EINTR);
-    return result < 0 ? -errno : result ? -ENOENT : 0;
+    return md_task_lifetime_alive(&d->root_task);
 }
 int md_domain_chdir_root(struct md_guest_domain *d) {
     if (!md_domain_restricted(d)) return -EINVAL;

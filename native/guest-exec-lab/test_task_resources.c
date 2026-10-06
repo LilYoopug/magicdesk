@@ -4,7 +4,10 @@
 #include <dirent.h>
 #include <errno.h>
 #include <sched.h>
+#include <pthread.h>
 #include <stdio.h>
+#include <sys/prctl.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 void test_fd_origins(void);
@@ -14,6 +17,50 @@ static int descriptors(void) {
     int count = 0;
     while (readdir(dir)) count++;
     closedir(dir); return count;
+}
+struct root_thread {
+    pthread_mutex_t mutex;
+    pthread_cond_t condition;
+    pid_t tid;
+    int release;
+};
+static void *hold_thread(void *argument) {
+    struct root_thread *state=argument;
+    assert(!pthread_mutex_lock(&state->mutex));
+    state->tid=(pid_t)syscall(SYS_gettid);
+    assert(!pthread_cond_signal(&state->condition));
+    /* EVENT_WAIT: the fixture releases the owner after root/copy validation;
+     * the fixture alarm bounds missing progress. */
+    while (!state->release) assert(!pthread_cond_wait(&state->condition,&state->mutex));
+    assert(!pthread_mutex_unlock(&state->mutex));
+    return NULL;
+}
+static void nonleader_root(void) {
+    int dumpable=prctl(PR_GET_DUMPABLE); assert(dumpable>=0);
+    for (int protected=0;protected<2;++protected) {
+        assert(!prctl(PR_SET_DUMPABLE,!protected));
+        struct root_thread state={.mutex=PTHREAD_MUTEX_INITIALIZER,.condition=PTHREAD_COND_INITIALIZER};
+        pthread_t thread; assert(!pthread_create(&thread,NULL,hold_thread,&state));
+        assert(!pthread_mutex_lock(&state.mutex));
+        /* EVENT_WAIT: the exact non-leader publishes its identity while alive. */
+        while (!state.tid) assert(!pthread_cond_wait(&state.condition,&state.mutex));
+        assert(state.tid!=getpid());
+        struct md_guest_domain *root=md_domain_new(); assert(root);
+        assert(!md_domain_restrict(root,state.tid,"/proc/self/fdinfo"));
+        assert(!md_domain_chdir_root(root));
+        struct md_guest_domain *copy=md_domain_fork(root,0); assert(copy);
+        md_domain_release(root);
+        assert(!md_domain_chdir_root(copy));
+        assert(md_domain_path_error(copy)==-EACCES);
+        md_domain_release(copy);
+        state.release=1; assert(!pthread_cond_signal(&state.condition));
+        assert(!pthread_mutex_unlock(&state.mutex));
+        /* EVENT_WAIT: exact thread completion before destroying shared state. */
+        assert(!pthread_join(thread,NULL));
+        assert(!pthread_cond_destroy(&state.condition));
+        assert(!pthread_mutex_destroy(&state.mutex));
+    }
+    assert(!prctl(PR_SET_DUMPABLE,dumpable));
 }
 static void contract(void) {
     struct md_task_resources parent, child, sibling;
@@ -63,6 +110,7 @@ static void contract(void) {
     assert(!md_resources_release(NULL, &parent));
 }
 int main(void) {
+    alarm(60);
     unsigned long spaces[] = {CLONE_NEWUSER, CLONE_NEWNS, CLONE_NEWUTS,
         CLONE_NEWIPC, CLONE_NEWPID, CLONE_NEWNET, CLONE_NEWCGROUP};
     struct md_task_resources r; assert(!md_resources_init(&r,NULL));
@@ -77,9 +125,11 @@ int main(void) {
     assert(!md_resources_release(NULL, &r));
     int before = descriptors();
     for (unsigned i = 0; i < 100; i++) contract();
+    nonleader_root();
     assert(descriptors() == before);
     test_fd_origins();
     test_ofd_order();
     puts("PASS resource ownership, transactional unshare, retained roots and descriptor lifetime");
+    alarm(0);
     return 0;
 }

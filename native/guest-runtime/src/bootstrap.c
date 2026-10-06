@@ -8,6 +8,7 @@
 #include "linux_abi.h"
 #include "proc_paths.h"
 #include "interception.h"
+#include "adapter_buffer.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -68,6 +69,14 @@ void md_boot(uintptr_t *kernel_stack) {
         register long output __asm__("x1") = 0;
         __asm__ volatile("svc #0" : "+r"(result) : "r"(number), "r"(output) : "memory", "cc");
         if (result != -EBADF) md_die("probe external syscall dispatch", -EIO);
+        check=md_adapter_buffer_install();
+        if (check<0) md_die("probe atomic descriptor publication",check);
+        check=md_adapter_buffer_take();
+        if (check<0) md_die("probe mapped request lease",check);
+        check=md_guest_buffer_control(MD_BUFFER_PROBE,0,0);
+        long released=md_adapter_buffer_release();
+        if (check<0) md_die("probe private-table helper",check);
+        if (released<0) md_die("probe mapped request release",released);
         const char message[] = "guest-runtime: aarch64 shell syscall adapter ready\n";
         RAW3(write, 1, message, sizeof(message) - 1);
         RAW1(exit_group, 0);

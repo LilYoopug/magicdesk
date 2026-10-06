@@ -761,13 +761,15 @@ older stores are rejected, not migrated or deleted.
 Shroot's minimum supported Linux kernel is 5.15. Interfaces newer than that
 baseline, their fallbacks and verification limits are recorded in
 [kernel compatibility](../native/guest-runtime/kernel-compatibility.md).
-Actual 5.15 device coverage is not yet established; the version alone does not
-prove the selected executor's capabilities or firmware permissions.
+The version alone does not prove the selected executor's capabilities or firmware
+permissions.
 
 Guest executables are never loaded into the app or shell service with
 `System.loadLibrary`. `magicdesk-guest` stages a content-addressed immutable
 version only when invoked. A launch first probes pidfds, subreapers, faccessat2,
-executable mappings, selective ptrace and seccomp notifications in a child process. Probe failure reports
+executable mappings, selective ptrace and seccomp notifications in a child process.
+It also exercises atomic descriptor publication and a private-table helper through
+complete teardown before reporting readiness. Probe failure reports
 the failed operation and errno. Other tools, Desktop, Termux and prepared chroot
 remain independent; the APK and Desktop SDK floors remain API 34 and API 35.
 

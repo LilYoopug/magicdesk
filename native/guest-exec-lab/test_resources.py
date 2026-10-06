@@ -17,7 +17,7 @@ def main():
     parser.add_argument("--config", type=Path, default=Path.home() / ".codex/config.toml")
     parser.add_argument("--server", default="magicdesk")
     parser.add_argument("--keep", action="store_true")
-    parser.add_argument("--case", choices=("all", "mapping-task", "pidfd-table", "proc-custody", "exec-custody", "open-job", "ofd-order", "fd-handoff", "fd-parcel", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fd-lifecycle", "fs-dispatch", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture", "rpc"), default="all",
+    parser.add_argument("--case", choices=("all", "kernel-baseline", "mapping-task", "pidfd-table", "proc-custody", "exec-custody", "open-job", "ofd-order", "fd-handoff", "fd-parcel", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fd-lifecycle", "fs-dispatch", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture", "rpc"), default="all",
                         help="Run resource regressions, FD handoff/parcel, terminal RPC custody, native FD lifecycle, or worker transport")
     parser.add_argument("--compare-installed", action="store_true",
                         help="Compare identical metadata/spawn fixtures with the installed runtime")
@@ -54,6 +54,14 @@ def main():
         if not passed:
             raise RuntimeError(name)
         return value
+
+    def check_kernel_workflows():
+        runner = root + "/libmagicdesk_guest_kernel_baseline.so " + root + "/libmagicdesk_guest_run.so --store " + root + "/store --deadline-seconds 90 -- /bin/test "
+        for case, message in (("proc-thread-capture", "PASS proc task capture"),
+                              ("buffer-descriptors", "PASS buffered descriptors"),
+                              ("buffer-data", "PASS buffered data inputs"),
+                              ("buffer-import", "PASS buffered imported dirfd")):
+            check("guest without thread pidfds " + case, runner + case + " /tmp", message)
 
     def check_buffer_descriptors():
         check("native xattr with full table", root + "/libmagicdesk_guest_resource_guest.so xattr-slots-native "
@@ -222,6 +230,8 @@ def main():
             names += ("test_interception_buffers",)
         if args.case == "all":
             names += ("test_open_job",)
+        if args.case in ("all", "kernel-baseline"):
+            names += ("kernel_baseline", "capabilities")
         if args.case == "open-job":
             names = ("test_open_job",)
         if args.case == "fd-lifecycle":
@@ -240,6 +250,20 @@ def main():
             file = "libmagicdesk_guest_" + name + ".so"
             transport.upload(client, args.build / file, root + "/" + file)
         check("prepare fixtures", "chmod 700 " + root + "/*.so")
+        if args.case in ("all", "kernel-baseline"):
+            check("mandatory capability admission", root + "/libmagicdesk_guest_capabilities.so "
+                  + root + "/libmagicdesk_guest_supervisor.so " + root + "/libmagicdesk_guest_bootstrap.so",
+                  "PASS capability isolation")
+            check("exact task kernel baseline", root + "/libmagicdesk_guest_kernel_baseline.so",
+                  "PASS exact task kernel baseline")
+            check("resource model without thread pidfds", root + "/libmagicdesk_guest_kernel_baseline.so "
+                  + root + "/libmagicdesk_guest_test_task_resources.so", "PASS resource ownership")
+        if args.case == "kernel-baseline":
+            check("fixture directories", "mkdir -p " + root + "/source/tmp " + root + "/source/bin")
+            check("stage guest image", "cp " + root + "/libmagicdesk_guest_resource_guest.so " + root + "/source/bin/test")
+            check("import fixture", root + "/libmagicdesk_guest_service.so --import " + root + "/source " + root + "/store")
+            check_kernel_workflows()
+            return
         if args.case == "pidfd-table":
             result["experiment"] = {"productionAdapter": False, "requiresThreadPidfd": True}
             check("same-group private-table pidfd", root + "/libmagicdesk_guest_pidfd_table.so "
@@ -343,6 +367,7 @@ def main():
         check("stage guest image", "cp " + root + "/libmagicdesk_guest_resource_guest.so " + root + "/source/bin/test")
         check("stage root fixture", "cp " + root + "/libmagicdesk_guest_root_guest.so " + root + "/source/bin/root-test")
         check("import fixture", root + "/libmagicdesk_guest_service.so --import " + root + "/source " + root + "/store")
+        check_kernel_workflows()
         check_buffers()
         check("native kernel namespace capabilities", root + "/libmagicdesk_guest_resource_guest.so probe " + root + "/native")
         check("native resource semantics", root + "/libmagicdesk_guest_resource_guest.so native " + root + "/native",

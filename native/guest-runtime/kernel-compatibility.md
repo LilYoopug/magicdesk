@@ -30,7 +30,7 @@ retain native errors; arbitrary new guest syscalls are not runtime requirements.
 
 | Interface | First upstream kernel | Owner and purpose | Behavior without it |
 | --- | --- | --- | --- |
-| `PIDFD_THREAD` | 6.9 | `task_descriptor.c`, supervisor metadata capture and `guest_domain.c`: refer to the exact task, not a substituted group leader. | Try a flags-zero pidfd for that same numeric task. Non-leader tasks can be unavailable; task-affine SCM_RIGHTS is the descriptor-export alternative. Do not redirect to the leader's potentially different file table. Mapped-input fallback still needs the non-leader EINVAL case covered; see validation limits below. |
+| `PIDFD_THREAD` | 6.9 | `task_descriptor.c` owns descriptor capture; `task_lifetime.c` owns exact-thread liveness for restricted proc roots. | Try flags zero for the same task. A non-leader rejected with EINVAL is reported as ENOTSUP and uses task-affine SCM_RIGHTS export. Liveness retains `/proc/<tid>/stat` instead: a flags-zero pidfd observes group death, not exact-thread death. Never substitute the leader's file table. |
 | `SECCOMP_IOCTL_NOTIF_SET_FLAGS` / `SECCOMP_USER_NOTIF_FD_SYNC_WAKE_UP` | 6.6 | `namespace_broker.c`: optional notification scheduling hint. | Failed ioctl leaves normal notification wakeups enabled; no permission or affinity change. |
 | `fchmodat2` | 6.5; `AT_EMPTY_PATH` in 6.6 | `namespace.c` translates store metadata through the worker. `file_calls.c` also has a native direct-backend path. | Logical store metadata does not require this host syscall. Native passthrough retains ENOSYS/flag errors; no fake success or unconditional startup requirement. |
 | `STATX_MNT_ID_UNIQUE` | 6.8 | `namespace_proc.c`: distinguishes globally unique mount IDs from the runtime's ordinary mount-ID namespace. | The adapter strips the UNIQUE request and asks for `STATX_MNT_ID` (5.8); returned masks do not claim UNIQUE support. |
@@ -53,10 +53,26 @@ Device coverage is actual UID 2000 on RM11/NX809J, Linux 6.12.23, API 36,
 Missing-operation injection on a newer kernel tests explicit failure/fallback,
 not the scheduling, ABI or security policy of an older kernel.
 
-The launch probe currently covers pidfds, subreaper, faccessat2, executable
-mappings, ptrace and seccomp notification dispatch. It does not yet exercise
-atomic ADDFD or private-helper teardown; those have separate resource fixtures.
-Probe success alone is not certification of the full execution path.
+The launch probe covers pidfds, subreaper, faccessat2, executable mappings,
+ptrace, seccomp notification dispatch and atomic ADDFD through the production
+mapped-buffer installation. It acquires a mapped lease and completes a production
+private-table helper: clone, inherited-FD removal, channel publication, exact-task
+proc capture, descriptor export and full helper reaping. Only then does the probe
+release its lease and report readiness. These guest-only checks do not initialize
+the filesystem worker or affect independent shell services.
+
+`test_resources.py --case kernel-baseline` masks PIDFD_THREAD with EINVAL and
+executes the resource model plus production private-thread proc capture and
+mapped descriptor/data/import workflows. Exact-task handle cases include
+ordinary/nondumpable tasks, independent non-leader file tables, retained handle
+copies and dead-task observation after reaping. The resource model checks
+restricted proc roots belonging to live non-leaders and copies of those roots.
+Fallback proc handles are opened once and inspected on demand, not periodically.
+
+The same suite injects missing pidfd, faccessat2, seccomp, close_range, private
+clone and ADDFD operations. ADDFD also covers EINVAL and EACCES. Each rejected
+guest probe must leave an independent shell usable. Probe success alone is not
+certification of the full execution path.
 
 `test_resources.py --case pidfd-table` is a separate 6.9+ feasibility check,
 not part of the baseline suite or production adapter. Sixteen cases cover
@@ -65,12 +81,6 @@ available result slots, shared file offset, O_PATH, helper filter death and
 pipe EOF. Its fixture-owned pidfd consumes an infrastructure slot. This does
 not establish descriptor publication, interruption or cancellation semantics
 for production ancillary IO.
-
-The mapped-input path currently falls back on EPERM/EACCES/ENOSYS but not
-EINVAL from a non-leader pidfd on an older kernel. That is a compatibility gap,
-not permission to raise the minimum to 6.9. Restricted proc-root ownership also
-needs non-leader coverage without thread pidfds. Track corrective work in the
-local backlog and retain the exact source-table identity throughout fallback.
 
 The audit covers owned runtime syscall dispatch, raw/assembly calls, pidfd and
 ptrace flags, seccomp ioctls, proc observation and metadata operations. Recognizing

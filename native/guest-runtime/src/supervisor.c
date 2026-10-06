@@ -37,6 +37,7 @@
 #include <linux/filter.h>
 #include <linux/close_range.h>
 #include "linux_abi.h"
+#include "task_descriptor.h"
 #include <linux/seccomp.h>
 #include <signal.h>
 #include <sched.h>
@@ -125,12 +126,14 @@ struct capture_owner {
     pid_t caller;
     struct md_fs_buffer_request *request;
 };
+struct probe_owner { pid_t caller; struct user_pt_regs continuation; };
 struct thread {
     struct thread *next;
     struct md_interception_memory *memory;
     struct md_interception_buffer buffer;
     struct md_fs_buffer_request *buffer_call;
     struct capture_owner *capture;
+    struct probe_owner *probe;
     struct md_fs_buffer_open buffer_open;
     struct user_pt_regs buffer_registers;
     struct md_fd_install buffer_delivery, proc_delivery;
@@ -349,6 +352,10 @@ static void release_operation(struct thread *t) {
     op->waiting=op->checking=0;
 }
 static void adapter_discard(struct thread *t) {
+    if (t->probe) {
+        t->probe->caller=0; t->probe=NULL;
+        CHECK(!md_task_helper_detach(helpers,t->pid));
+    }
     if (t->mapping) {
         struct mapping_owner *owner=t->mapping;
         owner->caller=0; t->mapping=NULL;
@@ -433,14 +440,10 @@ static int duplicate_fd(pid_t pid, int descriptor) {
     /* Never substitute a group's leader for another thread's descriptor table.
      * Older kernels can duplicate a leader's descriptors; other threads use
      * their task-affine SCM_RIGHTS continuation instead. */
-    int process = syscall(SYS_pidfd_open, pid, MD_PIDFD_THREAD);
-    if (process < 0 && errno == EINVAL)
-        process = syscall(SYS_pidfd_open, pid, 0);
-    if (process < 0) return -errno;
-    int fd = syscall(SYS_pidfd_getfd, process, descriptor, 0);
-    int error = errno;
-    close(process);
-    return fd < 0 ? -error : fd;
+    int process=-1;
+    int fd=md_task_descriptor_copy(pid,descriptor,&process);
+    if (process>=0) close(process);
+    return fd;
 }
 static int read_string(pid_t pid, uintptr_t address, char *text, size_t capacity) {
     for (size_t i = 0; i < capacity; i++) {
@@ -864,7 +867,7 @@ static void buffer_setup(struct thread *t, const struct seccomp_notif *q) {
     size_t page=(size_t)getpagesize();
     size_t size=(sizeof(union md_adapter_frame)+page-1)/page*page*MD_ADAPTER_BUFFER_SLOTS;
     struct seccomp_notif_resp reply={.id=q->id};
-    if (!t->ready || t->entered || !t->endpoint[0] || t->phase!=IDLE
+    if (!t->ready || t->entered || t->phase!=IDLE
             || q->data.instruction_pointer!=RAW_GATE || q->data.args[1]!=size
             || q->data.args[2] || q->data.args[3] || q->data.args[4] || q->data.args[5]) reply.error=-EPERM;
     else reply.error=md_memory_buffers_prepare(t->memory,MD_ADAPTER_BUFFER_SLOTS,sizeof(union md_adapter_frame),
@@ -1010,7 +1013,7 @@ static void handle_notification(const struct seccomp_notif *request) {
         export_begin(t, &q); return;
     }
     int fd = duplicate_fd(q.pid, (int)q.data.args[0]);
-    if (fd == -EPERM || fd == -EACCES || fd == -EINVAL || fd == -ENOSYS || fd == -ESRCH) {
+    if (md_task_descriptor_needs_export(fd) || fd == -ESRCH) {
         if (t->phase == IDLE && !md_domain_restricted(t->resources.fs)) {
             delegate_begin(t, &q); return;
         }
@@ -1556,6 +1559,39 @@ static void buffer_reply(struct thread *t, long result) {
     r.regs[0]=result; r.pc+=4;
     if (set_registers(t->pid,&r)) resume(t->pid,0);
 }
+static void probe_complete(void *context, struct md_task_helper_result result) {
+    struct probe_owner *owner=context;
+    struct thread *t=owner->caller ? find_thread(owner->caller) : NULL;
+    struct stat st;
+    long error=result.value;
+    if (!error && result.descriptor<0) error=-EPROTO;
+    if (!error && fstat(result.descriptor,&st)) error=-errno;
+    if (!error && !S_ISDIR(st.st_mode)) error=-ENOTDIR;
+    if (result.descriptor>=0) close(result.descriptor);
+    if (t && t->probe==owner) {
+        t->probe=NULL; t->kernel_stopped=1;
+        t->buffer_registers=owner->continuation;
+        buffer_reply(t,error);
+    }
+    free(owner);
+}
+static void probe_begin(struct thread *t, const struct user_pt_regs *regs) {
+    struct probe_owner *owner=calloc(1,sizeof(*owner));
+    int error=owner ? 0 : -ENOMEM;
+    if (!error) {
+        *owner=(struct probe_owner){t->pid,*regs};
+        t->terminal_observation=1; t->trace_options_dirty=1;
+        error=debugger_options(t->pid,t->debug_options);
+    }
+    if (!error) {
+        struct md_task_helper_request request={.kind=MD_TASK_HELPER_CAPTURE,
+            .path="/proc/thread-self",.flags=O_PATH|O_DIRECTORY};
+        error=md_task_helper_begin(helpers,t->pid,t->tgid,regs,&abi,t->memory,&t->buffer,
+            &request,probe_complete,owner);
+    }
+    if (error) { free(owner); buffer_reply(t,error); }
+    else { t->probe=owner; t->kernel_stopped=0; }
+}
 static void capture_complete(void *context, struct md_task_helper_result result) {
     struct capture_owner *owner=context;
     struct thread *t=owner->caller ? find_thread(owner->caller) : NULL;
@@ -1645,6 +1681,10 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
             && !md_fs_buffer_snapshot_pending(t->buffer_call)
             && !md_fs_buffer_task_pending(t->buffer_call))) { CHECK(0); }
     t->buffer_registers=*r;
+    if (!buffer_service && r->regs[0]!=MD_BUFFER_MAPPED && r->regs[0]!=MD_BUFFER_TAKE
+            && r->regs[0]!=MD_BUFFER_RELEASE && r->regs[0]!=MD_BUFFER_PROBE) {
+        buffer_reply(t,-ENOTSUP); return;
+    }
     if (t->ipc_transport.packet && r->regs[0]!=MD_BUFFER_RELEASE) {
         buffer_reply(t,-EBUSY); return;
     }
@@ -1662,6 +1702,12 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
         buffer_reply(t,-EBUSY); return;
     }
     switch (r->regs[0]) {
+    case MD_BUFFER_PROBE:
+        if (t->entered || t->phase!=IDLE || !t->buffer.pool || t->probe
+                || t->capture || t->mapping || r->regs[1] || r->regs[2]) break;
+        /* EVENT_WAIT: the production helper's private table is fully reaped
+         * before readiness; the launch deadline bounds missing completion. */
+        probe_begin(t,r); return;
     case MD_BUFFER_MAPPED:
         if (t->entered || t->phase!=IDLE) break;
         result=md_memory_buffers_mapped(t->memory,r->regs[1],r->regs[2]);
@@ -2730,7 +2776,7 @@ int main(int argc, char **argv) {
             if (abi.fd_control && regs.pc==abi.fd_control && t->ready) {
                 fd_control(t,&regs); continue;
             }
-            if (abi.buffer_control && regs.pc==abi.buffer_control && t->ready && buffer_service) {
+            if (abi.buffer_control && regs.pc==abi.buffer_control && t->ready && (buffer_service || !t->entered)) {
                 buffer_control(t,&regs); continue;
             }
             if (abi.task_control && regs.pc==abi.task_control && t->ready) {
