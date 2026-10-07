@@ -127,14 +127,14 @@ static void send_signals(int mode, int credentials) {
     if (credentials) {
         struct ucred cred={getpid(),getuid(),getgid()}; memcpy(CMSG_DATA(&control.align),&cred,sizeof(cred));
     } else memcpy(CMSG_DATA(&control.align),&pair[0],sizeof(pair[0]));
-    if (mode==3) {
+    if (mode==3 || mode==4) {
         struct sock_filter code[]={
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
             BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_sendmsg,0,4),
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[0])),
             BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(unsigned)pair[1],0,2),
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[1])),
-            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)(uintptr_t)&m,0,1),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)(uintptr_t)&m,mode==3 ? 1 : 0,1),
             BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
             BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EPIPE)
         };
@@ -148,7 +148,9 @@ static void send_signals(int mode, int credentials) {
         sigset_t mask; sigemptyset(&mask); sigaddset(&mask,SIGPIPE);
         CHECK(!sigprocmask(SIG_UNBLOCK,&mask,NULL));
     }
-    CHECK(broken_count==((mode==0 || mode==2) ? 1 : 0));
+    /* Mode 3 rejects the original call. Mode 4 accepts it but rejects a helper's
+     * replacement header; the captured host send now reaches the real EPIPE. */
+    CHECK(broken_count==((mode==0 || mode==2 || mode==4) ? 1 : 0));
     if (broken_count) CHECK(broken_pid==getpid() && broken_code==SI_USER);
     close(pair[0]); close(pair[1]);
     printf("PASS %s send SIGPIPE mode=%d\n",credentials ? "credential" : "captured",mode);
@@ -300,7 +302,7 @@ static void nonunix_rights(void) {
 }
 static void send_contract(void) {
     nonunix_rights();
-    for (int credentials=0;credentials<2;++credentials) for (int mode=0;mode<(credentials ? 4 : 3);++mode) {
+    for (int credentials=0;credentials<2;++credentials) for (int mode=0;mode<(credentials ? 5 : 3);++mode) {
         pid_t child=fork(); CHECK(child>=0);
         if (!child) { send_signals(mode,credentials); exit(0); }
         done(child);
@@ -1023,8 +1025,10 @@ static void boundary_fixture(const char *runner, const char *store) {
         CHECK(!read(control[0],&byte,1) && !close(control[0]));
     }
 }
+#include "test_ipc_io_guest.c"
 int main(int argc,char **argv) {
     setvbuf(stdout,NULL,_IONBF,0);
+    if (argc==3 && !strcmp(argv[1],"--io")) { io_contract((unsigned)atoi(argv[2])); return 0; }
     if (argc==2 && !strcmp(argv[1],"--nonunix-rights")) { alarm(20); nonunix_rights(); return 0; }
     if (argc==4 && !strcmp(argv[1],"--boundary-fixture")) { boundary_fixture(argv[2],argv[3]); return 0; }
     if (argc==5 && !strcmp(argv[1],"--address-fixture")) { addressed_fixture(argv[2],argv[3],argv[4]); return 0; }

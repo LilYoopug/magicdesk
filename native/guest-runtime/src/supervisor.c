@@ -98,6 +98,7 @@ enum phase { IDLE, ALLOCATING, DISPATCHING, EXECUTING, OBSERVING,
     EXPORT_CANCEL, EXPORTING, EXPORT_ENTRY, EXPORT_NOTIFY, EXPORT_RETURN, STORING,
     DELEGATE_CANCEL, LOADING_PATH, PROC_CANCEL, PROC_OPENING, STORING_IDS, DOMAIN_PATH,
     WATCH_CANCEL, WATCH_ENTRY, WATCH_READ, IPC_WAIT_ENTRY, IPC_WAITING,
+    SOCKET_WAIT_ENTRY, SOCKET_WAITING, SOCKET_RESTART_ENTRY, SOCKET_RESTART_EXIT,
     IDENTITY_COPY, DEBUG_WAIT_ENTRY, DEBUG_WAIT_EXIT, MEMORY_WAIT };
 enum memory_action { MEMORY_NONE, MEMORY_KERNEL, MEMORY_DETACH, MEMORY_FORK };
 struct metadata_operation {
@@ -148,6 +149,7 @@ struct outgoing_owner {
     struct md_received_fds *prepared;
     struct md_fd_capture capture;
     int brokered, io_waiting;
+    struct md_ipc_io io;
 };
 /* Cold, authenticated-origin delivery only. The receive owner retains this
  * storage until the shared kernel receipt completes origin publication. */
@@ -168,6 +170,7 @@ struct receive_owner {
     int outgoing[253];
     struct md_fd_capture capture;
     int brokered, io_waiting;
+    struct md_ipc_io io;
 };
 struct thread {
     struct thread *next;
@@ -196,6 +199,8 @@ struct thread {
     char endpoint[108];
     int filter_length;
     int application_filter;
+    int socket_waking;
+    int socket_sigpipe;
     struct metadata_operation metadata;
     struct md_task_resources resources;
     struct md_resource_change resource_change;
@@ -287,6 +292,7 @@ static int debugger_allowed(pid_t, pid_t);
 static void ipc_unwatch(struct thread *);
 static void ipc_capture_step(struct thread *, unsigned, long);
 static void socket_io_progress(struct thread *);
+static int restore_mask(struct thread *);
 static const unsigned long trace_options = PTRACE_O_TRACESECCOMP | PTRACE_O_TRACEEXEC
     | PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK | PTRACE_O_TRACEVFORKDONE | PTRACE_O_TRACECLONE
     | PTRACE_O_EXITKILL | PTRACE_O_TRACESYSGOOD;
@@ -406,7 +412,8 @@ static void release_operation(struct thread *t) {
 static void receive_release(struct receive_owner *owner) {
     if (!owner) return;
     if (owner->io_waiting && owner->received)
-        epoll_ctl(socket_events,EPOLL_CTL_DEL,owner->received->fds[0],NULL);
+        epoll_ctl(socket_events,EPOLL_CTL_DEL,md_ipc_io_event(&owner->io,owner->received->fds[0]),NULL);
+    md_ipc_io_release(&owner->io);
     md_fd_capture_cancel(&owner->capture);
     if (owner->files.table && md_fd_order_cancel(&owner->files)==1)
         CHECK(!md_fd_order_complete(&owner->files));
@@ -418,6 +425,7 @@ static void outgoing_release(struct outgoing_owner *owner) {
     if (!owner) return;
     if (owner->io_waiting && owner->prepared)
         epoll_ctl(socket_events,EPOLL_CTL_DEL,owner->prepared->fds[0],NULL);
+    md_ipc_io_release(&owner->io);
     md_fd_capture_cancel(&owner->capture);
     if (owner->files.table && md_fd_order_cancel(&owner->files)==1)
         CHECK(!md_fd_order_complete(&owner->files));
@@ -1874,35 +1882,65 @@ static void ipc_capture_step(struct thread *t, unsigned command, long value) {
     else if (error) receive_complete(in,(struct md_task_helper_result){.value=error,.descriptor=-1});
     else { in->received=received; buffer_reply(t,MD_IPC_TASK_IO); }
 }
+static struct md_ipc_io *socket_operation(struct thread *t) {
+    return t->outgoing ? &t->outgoing->io : &t->receive->io;
+}
+static void socket_unwatch(struct thread *t) {
+    int *watch=t->outgoing ? &t->outgoing->io_waiting : &t->receive->io_waiting;
+    int fd=t->outgoing ? t->outgoing->prepared->fds[0] : t->receive->received->fds[0];
+    if (*watch) { CHECK(!epoll_ctl(socket_events,EPOLL_CTL_DEL,md_ipc_io_event(socket_operation(t),fd),NULL)); *watch=0; }
+}
+static void socket_complete(struct thread *t, long result) {
+    CHECK(!socket_operation(t)->job.started);
+    socket_unwatch(t);
+    t->phase=DISPATCHING;
+    if (t->outgoing) {
+        if (result==-EPIPE && !(t->outgoing->input.flags&MSG_NOSIGNAL)) t->socket_sigpipe=1;
+        outgoing_complete(t->outgoing,(struct md_task_helper_result){.value=result,.descriptor=-1});
+    } else receive_complete(t->receive,(struct md_task_helper_result){.value=result,.descriptor=-1,.received=t->receive->received});
+}
+static int socket_watch(struct thread *t) {
+    int *watch=t->outgoing ? &t->outgoing->io_waiting : &t->receive->io_waiting;
+    if (*watch) return 0;
+    if (socket_events<0) socket_events=epoll_create1(EPOLL_CLOEXEC);
+    if (socket_events<0) return -errno;
+    int fd=t->outgoing ? t->outgoing->prepared->fds[0] : t->receive->received->fds[0];
+    fd=md_ipc_io_event(socket_operation(t),fd);
+    struct epoll_event event={.events=(t->outgoing ? EPOLLOUT : EPOLLIN)|EPOLLONESHOT,.data.u32=(unsigned)t->pid};
+    if (epoll_ctl(socket_events,EPOLL_CTL_ADD,fd,&event)) return -errno;
+    if (t->outgoing) t->outgoing->io_waiting=1;
+    else t->receive->io_waiting=1;
+    return 0;
+}
 static void socket_io_progress(struct thread *t) {
     struct outgoing_owner *out=t->outgoing;
     struct receive_owner *in=t->receive;
-    int *watch=out ? &out->io_waiting : &in->io_waiting;
-    int fd=out ? out->prepared->fds[0] : in->received->fds[0];
-    if (*watch) { CHECK(!epoll_ctl(socket_events,EPOLL_CTL_DEL,fd,NULL)); *watch=0; }
+    socket_unwatch(t);
     struct md_buffer_span span;
     long result=md_buffer_span(&t->buffer,&span);
     int waiting=0;
     if (!result) {
         struct md_ipc_io_message *io=out ? &((struct md_task_outgoing_frame *)span.data)->scratch.capture.io
             : &((struct md_task_receive_frame *)span.data)->io;
-        waiting=out ? md_ipc_io_send(out->prepared,io,out->input.flags,&result)
-            : md_ipc_io_receive(&in->received,io,in->request.flags,&result);
+        waiting=out ? md_ipc_io_send(&out->io,out->prepared,io,out->input.flags,&result)
+            : md_ipc_io_receive(&in->io,&in->received,io,in->request.flags,&result);
     }
     if (waiting) {
-        if (socket_events<0) socket_events=epoll_create1(EPOLL_CLOEXEC);
-        struct epoll_event event={.events=(out ? EPOLLOUT : EPOLLIN)|EPOLLONESHOT,.data.u32=(unsigned)t->pid};
-        if (socket_events>=0 && !epoll_ctl(socket_events,EPOLL_CTL_ADD,fd,&event)) {
-            /* EVENT_WAIT: the captured socket's readiness; task cancellation
-             * releases its watcher and custody, without replaying committed IO. */
-            *watch=1; return;
-        }
-        result=-errno;
+        int64_t deadline=socket_operation(t)->job.started ? INT64_MAX : socket_operation(t)->deadline;
+        int64_t remaining=deadline==INT64_MAX ? 0 : deadline-md_event_now();
+        if (remaining<0) remaining=0;
+        struct user_pt_regs regs=out ? out->continuation : in->continuation;
+        /* The adapter is suspended mid-call. Its live stack is not the reusable
+         * stack top used by completed SysV dispatches. */
+        regs.pc=abi.ipc_wait;
+        regs.regs[1]=remaining/1000000000LL; regs.regs[2]=remaining%1000000000LL;
+        regs.regs[3]=deadline!=INT64_MAX;
+        if (set_registers(t->pid,&regs)) { t->phase=SOCKET_WAIT_ENTRY; resume(t->pid,0); }
+        return;
     }
     TRACE("PROBE socket-io pid=%d operation=%s result=%ld rights=%u\n",t->pid,out ? "send" : "receive",result,
         out ? out->prepared->count-1 : in->received->count-1);
-    if (out) outgoing_complete(out,(struct md_task_helper_result){.value=result,.descriptor=-1});
-    else receive_complete(in,(struct md_task_helper_result){.value=result,.descriptor=-1,.received=in->received});
+    socket_complete(t,result);
 }
 static void socket_events_ready(void) {
     struct epoll_event events[32];
@@ -1910,8 +1948,15 @@ static void socket_events_ready(void) {
     CHECK(count>=0 || errno==EINTR);
     for (int i=0;i<count;++i) {
         struct thread *t=find_thread((pid_t)events[i].data.u32);
-        if (t && ((t->outgoing && t->outgoing->io_waiting) || (t->receive && t->receive->io_waiting)))
-            socket_io_progress(t);
+        if (t && ((t->outgoing && t->outgoing->io_waiting) || (t->receive && t->receive->io_waiting))) {
+            CHECK(t->phase==SOCKET_WAITING || t->phase==SOCKET_WAIT_ENTRY);
+            socket_unwatch(t);
+            int waking=t->socket_waking; t->socket_waking=1;
+            /* EVENT_WAIT: readiness cancels the caller's interruptible ppoll.
+             * Socket timeout or signal completes the operation without replay. */
+            if (!waking && t->phase==SOCKET_WAITING && !t->listening)
+                tracee_request(t,PTRACE_INTERRUPT,NULL,NULL,"socket-ready");
+        }
     }
 }
 static void receive_start(struct thread *t) {
@@ -2100,6 +2145,7 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
         buffer_reply(t,-EBUSY); return;
     }
     if (t->outgoing && r->regs[0]!=MD_FS_BUFFER_SEND_COMMIT && r->regs[0]!=MD_BUFFER_RELEASE
+            && r->regs[0]!=MD_FS_BUFFER_IPC_IO_PREPARE && r->regs[0]!=MD_FS_BUFFER_IPC_IO_COPY
             && r->regs[0]!=MD_FS_BUFFER_IPC_CAPTURE_READY && r->regs[0]!=MD_FS_BUFFER_IPC_CAPTURE_SENT
             && r->regs[0]!=MD_FS_BUFFER_IPC_CAPTURE_OBSERVED) {
         buffer_reply(t,-EBUSY); return;
@@ -2118,6 +2164,29 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
         buffer_reply(t,-EBUSY); return;
     }
     switch (r->regs[0]) {
+    case MD_FS_BUFFER_IPC_IO_PREPARE:
+    case MD_FS_BUFFER_IPC_IO_COPY:
+    case MD_FS_BUFFER_IPC_IO_SELECT: {
+        if (t->phase!=DISPATCHING || r->regs[1] || r->regs[2]
+                || !((t->outgoing && t->outgoing->brokered && t->outgoing->stage==OUTGOING_READY)
+                    || (t->receive && t->receive->brokered && t->receive->received))) break;
+        struct md_buffer_span span;
+        result=md_buffer_span(&t->buffer,&span);
+        if (result) break;
+        struct md_ipc_io_message *io=t->outgoing ? &((struct md_task_outgoing_frame *)span.data)->scratch.capture.io
+            : &((struct md_task_receive_frame *)span.data)->io;
+        struct md_ipc_io *op=socket_operation(t);
+        if (r->regs[0]==MD_FS_BUFFER_IPC_IO_PREPARE) {
+            int fd=t->outgoing ? t->outgoing->prepared->fds[0] : t->receive->received->fds[0];
+            int flags=t->outgoing ? t->outgoing->input.flags : t->receive->request.flags;
+            result=md_ipc_io_prepare(op,io,fd,flags,t->outgoing!=NULL);
+        } else if (r->regs[0]==MD_FS_BUFFER_IPC_IO_SELECT)
+            result=md_ipc_io_select(op,io,io->batch_index);
+        else if (io->transfer&~(MD_IPC_IO_CONTROL_BYTES|MD_IPC_IO_READ_BYTES)) result=-EINVAL;
+        else result=md_ipc_io_copy(op,io,io->offset,io->length,
+            !!(io->transfer&MD_IPC_IO_CONTROL_BYTES),!!(io->transfer&MD_IPC_IO_READ_BYTES));
+        break;
+    }
     case MD_FS_BUFFER_IPC_CAPTURE_READY:
     case MD_FS_BUFFER_IPC_CAPTURE_SENT:
     case MD_FS_BUFFER_IPC_CAPTURE_OBSERVED:
@@ -2473,7 +2542,8 @@ static void resume(pid_t pid, int sig) {
     if (!native_trace(t->fd_running || phase == OBSERVING || phase == EXPORT_ENTRY || phase == EXPORT_NOTIFY
             || phase == EXPORT_RETURN || phase == EXECUTING || phase == WATCH_CANCEL
             || phase == WATCH_ENTRY || phase == WATCH_READ || phase==DEBUG_WAIT_ENTRY || phase==DEBUG_WAIT_EXIT
-            || phase==IPC_WAIT_ENTRY || phase==IPC_WAITING
+            || phase==IPC_WAIT_ENTRY || phase==IPC_WAITING || phase==SOCKET_WAIT_ENTRY || phase==SOCKET_WAITING
+            || phase==SOCKET_RESTART_ENTRY || phase==SOCKET_RESTART_EXIT
             || (phase==IDLE && t->entered && t->process_image
                 && (md_debugger_syscall_mode(debugger,pid) || md_debugger_observing(debugger,pid))) ? PTRACE_SYSCALL
                 : phase==IDLE && t->entered && md_debugger_step(debugger,pid) ? PTRACE_SINGLESTEP : PTRACE_CONT,
@@ -2640,6 +2710,29 @@ static void ipc_wait_complete(struct thread *t) {
     t->ipc_waking=0;
     dispatch_with_stack(t);
 }
+static void socket_wait_complete(struct thread *t) {
+    struct user_pt_regs regs;
+    if (!registers(t->pid,&regs) || !shield(t)) return;
+    socket_unwatch(t);
+    long value=(long)regs.regs[0];
+    TRACE("PROBE socket-wait pid=%d value=%ld waking=%d\n",t->pid,value,t->socket_waking);
+    int restart=value<=-512 && value>=-516;
+    int waking=t->socket_waking; t->socket_waking=0;
+    if (waking && (restart || value==0)) { socket_io_progress(t); return; }
+    struct md_ipc_io *op=socket_operation(t);
+    if (op->job.started) {
+        md_ipc_io_interrupt(op);
+        if (op->native_result==-EINTR) {
+            if (restart && op->deadline==INT64_MAX) op->native_result=MD_IPC_IO_RESTART;
+            else if (!restart && value<0) op->native_result=value;
+        }
+        socket_io_progress(t); return;
+    }
+    if (op->done) value=(long)op->done;
+    else if (restart) value=op->deadline==INT64_MAX ? MD_IPC_IO_RESTART : -EINTR;
+    else if (!value) value=-EAGAIN;
+    socket_complete(t,value);
+}
 static int interrupted_operation(struct thread *t) {
     if (t->phase==MEMORY_WAIT || t->mapping) return 1;
     /* EVENT_WAIT: INTERRUPT cancels the exact notification. Under SYSCALL the
@@ -2647,6 +2740,7 @@ static int interrupted_operation(struct thread *t) {
     if (t->phase==EXPORT_CANCEL) { export_start(t); return 1; }
     if (t->phase==PROC_CANCEL) { proc_query_start(t); return 1; }
     if (t->phase==IPC_WAITING && t->ipc_waking) { ipc_wait_complete(t); return 1; }
+    if (t->phase==SOCKET_WAITING && t->socket_waking) { socket_wait_complete(t); return 1; }
     if (t->phase!=DELEGATE_CANCEL) return 0;
     const struct seccomp_notif *q=&t->metadata.request;
     CHECK(ioctl(listener,SECCOMP_IOCTL_NOTIF_ID_VALID,&q->id)==-1 && errno==ENOENT);
@@ -3193,6 +3287,44 @@ int main(int argc, char **argv) {
                 if (!restore_mask(t)) continue;
                 t->phase = WATCH_READ; resume(pid, 0); continue;
             }
+            if (t->phase==SOCKET_RESTART_ENTRY) {
+                TRACE("PROBE socket-restart-entry pid=%d\n",pid);
+                if (!skip(pid)) continue;
+                t->phase=SOCKET_RESTART_EXIT; resume(pid,0); continue;
+            }
+            if (t->phase==SOCKET_RESTART_EXIT) {
+                TRACE("PROBE socket-restart-exit pid=%d nr=%llu\n",pid,t->original.regs[8]);
+                /* Give signal delivery the original syscall context, including
+                 * the kernel's orig_x0. Kernel SA_RESTART handling, not a guessed
+                 * userspace action table, decides whether to restart it. */
+                struct user_pt_regs regs=t->original; regs.regs[0]=(uint64_t)-512;
+                int nr=(int)t->original.regs[8]; struct iovec number={&nr,sizeof(nr)};
+                if (!tracee_request(t,PTRACE_SETREGSET,(void *)NT_ARM_SYSTEM_CALL,&number,"socket-restart-syscall")
+                        || !set_registers(pid,&regs) || !restore_mask(t)) continue;
+                md_memory_stack_return(t->memory,t->stack); t->stack=0;
+                t->phase=IDLE; resume(pid,0); continue;
+            }
+            if (t->phase==SOCKET_WAIT_ENTRY) {
+                if (t->socket_waking) {
+                    t->socket_waking=0;
+                    if (skip(pid)) socket_io_progress(t);
+                    continue;
+                }
+                int error=socket_watch(t);
+                if (error) {
+                    if (!skip(pid)) continue;
+                    struct md_ipc_io *op=socket_operation(t);
+                    if (op->job.started) {
+                        md_ipc_io_interrupt(op);
+                        if (op->native_result==-EINTR) op->native_result=error;
+                        socket_io_progress(t);
+                    } else socket_complete(t,error);
+                    continue;
+                }
+                if (!restore_mask(t)) continue;
+                t->phase=SOCKET_WAITING; resume(pid,0); continue;
+            }
+            if (t->phase==SOCKET_WAITING) { socket_wait_complete(t); continue; }
             if (t->phase==IPC_WAIT_ENTRY) {
                 int error=ipc_watch(t);
                 if (error) {
@@ -3351,6 +3483,11 @@ int main(int argc, char **argv) {
                 t->stack = regs.regs[0]; CHECK(!md_memory_stack_add(t->memory, t->stack)); dispatch(t);
             } else if (regs.pc == DONE && t->phase == DISPATCHING) {
                 long value = regs.regs[0];
+                if (value==MD_IPC_IO_RESTART) {
+                    regs=t->original; regs.pc=RAW_GATE-4; regs.regs[8]=SYS_gettid;
+                    if (!set_registers(pid,&regs)) continue;
+                    t->phase=SOCKET_RESTART_ENTRY; resume(pid,0); continue;
+                }
                 if (t->memory_action==MEMORY_DETACH) {
                     CHECK(!md_resource_order_complete(&t->memory_order)); t->memory_action=0;
                 }
@@ -3392,7 +3529,16 @@ int main(int argc, char **argv) {
                 regs = t->original; regs.regs[0] = value;
                 if (!set_registers(pid, &regs) || !restore_mask(t)) continue;
                 md_memory_stack_return(t->memory, t->stack); t->stack = 0;
-                t->phase = IDLE; resume(pid, 0);
+                int deliver=t->socket_sigpipe ? SIGPIPE : 0;
+                if (deliver) {
+                    /* DONE is a signal-delivery stop, unlike a ppoll exit. Inject
+                     * there so blocked SIGPIPE retains native siginfo even when
+                     * consumed by sigwaitinfo rather than a signal handler. */
+                    siginfo_t info={.si_signo=SIGPIPE,.si_code=SI_USER,.si_pid=t->tgid,.si_uid=getuid()};
+                    if (!tracee_request(t,PTRACE_SETSIGINFO,NULL,&info,"socket-sigpipe")) continue;
+                    t->socket_sigpipe=0;
+                }
+                t->phase = IDLE; resume(pid, deliver);
             } else {
                 siginfo_t info;
                 if (t->phase==IDLE && !native_trace(PTRACE_GETSIGINFO,pid,NULL,&info)

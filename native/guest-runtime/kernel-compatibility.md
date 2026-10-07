@@ -126,6 +126,12 @@ SCM_RIGHTS, including O_PATH, without proc-table capture or ADDFD_SETFD. Filtere
 input capture reuses table-owned channels and atomic ADDFD_SEND only for channel
 admission. The exact gettid notification gate still evaluates application
 filters. None of these operations adds a post-5.15 dependency.
+Filtered socket waits use ppoll, epoll and the existing ptrace signal-mask and
+syscall-register interfaces. Native WAITALL/batch jobs use pthreads, eventfd and
+a supervisor-local signal with an ARM64 syscall-entry cancellation gate. These
+are baseline interfaces; no newer pidfd, io_uring or kernel page-fault mediation
+is required. `--case ipc-ancillary` compares signal restart, socket timeouts,
+SIGPIPE, Unix/TCP peeks, large messages and batch completion under UID 2000.
 Explicit source-vector export uses the same private-table clone, close_range,
 atomic ADDFD_SEND and authenticated SCM_RIGHTS channel, without pidfd_getfd or
 new proc operations. Its 254-input bound allows a socket plus 253 data rights;

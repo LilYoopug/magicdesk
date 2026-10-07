@@ -17,6 +17,7 @@ def main():
     parser.add_argument("--config", type=Path, default=Path.home() / ".codex/config.toml")
     parser.add_argument("--server", default="magicdesk")
     parser.add_argument("--keep", action="store_true")
+    parser.add_argument("--diagnostics", action="store_true")
     parser.add_argument("--case", choices=("all", "kernel-baseline", "mapping-task", "pidfd-table", "fd-observation", "proc-custody", "exec-custody", "open-job", "ofd-order", "fd-handoff", "fd-parcel", "fd-messages", "ipc-peer", "ipc-origins", "ipc-ancillary", "mount-policy", "mount-graph", "inode-custody", "origin-transfer", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fd-lifecycle", "fs-dispatch", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture", "rpc", "stores"), default="all",
                         help="Run resource regressions, FD handoff/parcel, terminal RPC custody, native FD lifecycle, or worker transport")
     parser.add_argument("--compare-installed", action="store_true",
@@ -230,6 +231,13 @@ def main():
               + root + "/ipc-source " + root + "/ipc-store --preserve-ownership")
         run = [root + "/libmagicdesk_guest_run.so", "--store", root + "/ipc-store",
                "--user", "0:0", "--deadline-seconds", "90", "--", "/bin/test"]
+        if args.diagnostics:
+            run.insert(1, "--diagnostics")
+        for mode in range(29):
+            for guest in (False, True):
+                check(f"filtered socket IO {mode} guest={guest}",
+                      shlex.join((run if guest else [fixture]) + ["--io", str(mode)]),
+                      f"PASS filtered socket IO mode={mode}")
         check("guest ancillary semantics", shlex.join(run), "PASS connection snapshots:")
         check("native consumer boundary", shlex.join([fixture, "--boundary-fixture",
               root + "/libmagicdesk_guest_run.so", root + "/ipc-store"]),
@@ -257,11 +265,11 @@ def main():
         if args.case in ("all", "fs-buffer"):
             names += ("test_interception_buffers",)
         if args.case == "all":
-            names += ("test_open_job", "fs_dispatch", "test_launch_registry", "ipc_credentials_guest", "fd_observation", "task_helper_fd")
+            names += ("test_open_job", "fs_dispatch", "test_launch_registry", "ipc_credentials_guest", "ipc_io_job", "fd_observation", "task_helper_fd")
         if args.case == "fd-observation":
             names = ("fd_observation", "task_helper_fd")
         if args.case == "ipc-ancillary":
-            names = ("bootstrap", "supervisor", "run", "service", "ipc_credentials_guest", "fs_dispatch")
+            names = ("bootstrap", "supervisor", "run", "service", "ipc_credentials_guest", "ipc_io_job", "fs_dispatch")
         if args.case in ("all", "kernel-baseline"):
             names += ("kernel_baseline", "capabilities")
         if args.case == "open-job":
@@ -298,6 +306,8 @@ def main():
             if args.case == "fd-observation":
                 return
         if args.case in ("all", "ipc-ancillary"):
+            check("native IO interruption and custody", root + "/libmagicdesk_guest_ipc_io_job.so",
+                  "PASS native IO interruption, completion race and FD custody")
             check_ancillary()
             if args.case == "ipc-ancillary":
                 return

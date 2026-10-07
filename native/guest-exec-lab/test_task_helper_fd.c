@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "task_helper.h"
+#include "adapter_frame.h"
 #include "fd_table_observation.h"
 #include "received_fds.h"
 #include "fd_messages.h"
@@ -275,7 +276,7 @@ static void exercise(int protected, enum scenario scenario, unsigned exported, i
         if (scenario==INVALID_INPUT) inputs[exported-1]=127;
     }
     struct md_interception_memory *memory=md_memory_new(); assert(memory);
-    assert(!md_memory_buffers_prepare(memory,1,65536,0));
+    assert(!md_memory_buffers_prepare(memory,1,sizeof(union md_adapter_frame),0));
     struct md_interception_buffers *pool=md_memory_buffers(memory);
     size_t size=md_buffers_size(pool);
     void *mapping=mmap(NULL,size,PROT_READ|PROT_WRITE,MAP_SHARED,md_buffers_fd(pool),0);

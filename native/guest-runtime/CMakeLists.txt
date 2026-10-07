@@ -49,7 +49,7 @@ target_link_options(bootstrap PRIVATE -Wl,--image-base=0x2000000000)
 
 guest_executable(supervisor ${src}/supervisor.c ${src}/task_resources.c ${src}/command_access.c ../command-client/wire.c ${src}/launch_registry.c ${src}/launch_peer.c ${src}/process_owner.c ${src}/interception_memory.c ${src}/interception_buffers.c ${src}/guest_domain.c
     ${src}/watch_activation.c ${src}/sysv_shm.c ${src}/guest_debugger.c ${src}/process_image_view.c ${src}/fd_install.c
-    ${src}/task_helper.c ${src}/mapping_observation.c ${src}/fd_capture.c ${src}/ipc_io_host.c
+    ${src}/task_helper.c ${src}/mapping_observation.c ${src}/fd_capture.c ${src}/ipc_io_host.c ${src}/ipc_io_job.c ${src}/ipc_io_entry.S
     ${ipc}
     ${src}/guest_identity.c ${src}/guest_accounts.c ${src}/elf_admission.c ${src}/elf.c ${src}/fs_client.c ${wire} ${raw}
     ${src}/fs_worker.c ${src}/fs_service.c ${src}/ipc_peer_service.c ${src}/ipc_origins.c ${src}/fs_buffer_service.c ${src}/file_open_job.c ${src}/file_snapshot.c ${src}/command_image.c ${src}/exec_prepare.c ${namespace_engine} ${src}/image_catalogue.c ${inodes} ${mounts}
@@ -171,6 +171,9 @@ if(MAGICDESK_GUEST_FIXTURES)
     guest_executable(service_runtime ../guest-exec-lab/test_service_runtime.c)
     target_compile_options(service_runtime PRIVATE -UNDEBUG)
     guest_executable(ipc_credentials_guest ../guest-exec-lab/test_ipc_credentials_guest.c)
+    guest_executable(ipc_io_job ../guest-exec-lab/test_ipc_io_job.c ${src}/ipc_io_job.c ${src}/ipc_io_entry.S ${src}/event_wait.c ${raw})
+    target_compile_options(ipc_io_job PRIVATE -iquote ${src} -UNDEBUG)
+    target_compile_definitions(ipc_io_job PRIVATE MD_NO_START MD_USE_LIBC)
     guest_executable(ipc_credentials_launch ../guest-exec-lab/test_ipc_credentials_launch.c)
     target_compile_options(watch_guest PRIVATE -UNDEBUG)
     guest_executable(watch_launch ../guest-exec-lab/test_watch_launch.c)

@@ -71,34 +71,77 @@ static long capture_inputs(long state, struct md_fd_capture_frame *f, const int 
     }
     return state;
 }
+static long io_transfer(struct md_ipc_io_message *io, void *memory, size_t size,
+        size_t offset, int control, int reading, int large) {
+    char *small=control ? io->control : io->data;
+    size_t capacity=control ? sizeof(io->control) : sizeof(io->data);
+    while (size) {
+        size_t n=size<capacity ? size : capacity;
+        if (!large && (offset>capacity || n>capacity-offset)) return -EINVAL;
+        void *part=small+(large ? 0 : offset);
+        io->offset=offset; io->length=n;
+        io->transfer=(control ? MD_IPC_IO_CONTROL_BYTES : 0)|(reading ? MD_IPC_IO_READ_BYTES : 0);
+        long error=reading && large ? md_guest_buffer_control(MD_FS_BUFFER_IPC_IO_COPY,0,0) : 0;
+        if (!error) error=reading ? md_write_memory(memory,part,n) : md_read_memory(part,memory,n);
+        if (!error && !reading && large) error=md_guest_buffer_control(MD_FS_BUFFER_IPC_IO_COPY,0,0);
+        if (error) return error;
+        memory=(char *)memory+n; size-=n; offset+=n;
+    }
+    return 0;
+}
+struct io_vectors { struct iovec local[8], *items; size_t bytes; };
+static long io_vectors_open(struct io_vectors *vectors, struct msghdr *m) {
+    if (m->msg_iovlen>1024) return -EMSGSIZE;
+    vectors->bytes=m->msg_iovlen*sizeof(struct iovec);
+    vectors->items=buffer(vectors->bytes,vectors->local,sizeof(vectors->local));
+    if (!vectors->items) return -ENOMEM;
+    long error=md_read_memory(vectors->items,m->msg_iov,vectors->bytes);
+    if (error) release(vectors->items,vectors->local,vectors->bytes);
+    else m->msg_iov=vectors->items;
+    return error;
+}
+static void io_vectors_close(struct io_vectors *vectors) {
+    release(vectors->items,vectors->local,vectors->bytes);
+}
 static long io_prepare(struct md_ipc_io_message *io, const struct msghdr *m, int sending) {
-    if (m->msg_iovlen>1024 || m->msg_controllen>sizeof(io->control)
-            || m->msg_namelen>sizeof(io->address)) return -EMSGSIZE;
+    if (m->msg_iovlen>1024) return -EMSGSIZE;
+    if (m->msg_namelen>sizeof(io->address)) return -EINVAL;
     io->size=0; io->control_size=m->msg_controllen;
     io->address_size=m->msg_name ? m->msg_namelen : 0; io->flags=0;
     for (size_t i=0;i<m->msg_iovlen;++i) {
-        struct iovec v;
-        if (md_read_memory(&v,m->msg_iov+i,sizeof(v))) return -EFAULT;
-        if (v.iov_len>sizeof(io->data)-io->size) return -EMSGSIZE;
-        if (sending && md_read_memory(io->data+io->size,v.iov_base,v.iov_len)) return -EFAULT;
+        struct iovec v=m->msg_iov[i];
+        if (v.iov_len>INT_MAX-io->size) return -EMSGSIZE;
         io->size+=v.iov_len;
     }
-    if (sending && (md_read_memory(io->control,m->msg_control,io->control_size)
-            || md_read_memory(&io->address,m->msg_name,io->address_size))) return -EFAULT;
+    long error=md_guest_buffer_control(MD_FS_BUFFER_IPC_IO_PREPARE,0,0);
+    if (error) return error;
+    if (!sending) return 0;
+    size_t offset=0;
+    for (size_t i=0;i<m->msg_iovlen;++i) {
+        struct iovec v=m->msg_iov[i];
+        if (v.iov_len>io->size-offset) return -EINVAL;
+        error=io_transfer(io,v.iov_base,v.iov_len,offset,0,0,io->size>sizeof(io->data));
+        if (error) return error;
+        offset+=v.iov_len;
+    }
+    error=io_transfer(io,m->msg_control,io->control_size,0,1,0,io->control_size>sizeof(io->control));
+    if (error) return error;
+    if (md_read_memory(&io->address,m->msg_name,io->address_size)) return -EFAULT;
     return 0;
 }
-static long io_scatter(struct md_ipc_io_message *io, struct msghdr *m, long result) {
+static long io_scatter(struct md_ipc_io_message *io, struct msghdr *m, long result, int batch) {
     if (result<0) return result;
     size_t copied=0, remaining=(size_t)result<io->size ? (size_t)result : io->size;
     for (size_t i=0;remaining && i<m->msg_iovlen;++i) {
-        struct iovec v;
-        if (md_read_memory(&v,m->msg_iov+i,sizeof(v))) return -EFAULT;
+        struct iovec v=m->msg_iov[i];
         size_t n=v.iov_len<remaining ? v.iov_len : remaining;
-        if (md_write_memory(v.iov_base,io->data+copied,n)) return -EFAULT;
+        long error=io_transfer(io,v.iov_base,n,copied,0,1,batch || io->size>sizeof(io->data));
+        if (error) return error;
         copied+=n; remaining-=n;
     }
     if (io->control_size>m->msg_controllen || io->address_size>sizeof(io->address)) return -EPROTO;
-    if (md_write_memory(m->msg_control,io->control,io->control_size)) return -EFAULT;
+    long error=io_transfer(io,m->msg_control,io->control_size,0,1,1,batch || m->msg_controllen>sizeof(io->control));
+    if (error) return error;
     if (m->msg_name && md_write_memory(m->msg_name,&io->address,
             m->msg_namelen<io->address_size ? m->msg_namelen : io->address_size)) return -EFAULT;
     m->msg_controllen=io->control_size; m->msg_namelen=io->address_size; m->msg_flags=io->flags;
@@ -174,7 +217,16 @@ static long send_captured(const struct msghdr *original, const unsigned long *a,
                 frame->message.msg_name=&frame->destination.address;
                 frame->message.msg_namelen=frame->destination.length;
             }
-            if (frame->brokered) result=io_prepare(&frame->scratch.capture.io,&frame->message,1);
+            if (frame->brokered) {
+                struct io_vectors vectors;
+                struct msghdr view=frame->message;
+                frame->scratch.capture.io.batch_count=0;
+                result=io_vectors_open(&vectors,&view);
+                if (!result) {
+                    result=io_prepare(&frame->scratch.capture.io,&view,1);
+                    io_vectors_close(&vectors);
+                }
+            }
             if (!result) result=md_guest_buffer_control(MD_FS_BUFFER_SEND_COMMIT,0,0);
         }
     }
@@ -297,6 +349,54 @@ static size_t native_capacity(size_t capacity) {
     size_t extra=CMSG_SPACE(sizeof(int))+CMSG_SPACE(sizeof(struct ucred));
     return capacity > 16*1024*1024-extra ? 0 : CMSG_ALIGN(capacity+extra);
 }
+static long receive_batch_owned(struct md_task_receive_frame *frame, int *accepted) {
+    struct md_task_receive *input=&frame->input;
+    struct mmsghdr *messages=(void *)input->messages;
+    struct entry { struct io_vectors vectors; struct msghdr view; int opened; };
+    struct entry local[4];
+    size_t size=input->count*sizeof(struct entry);
+    struct entry *entries=buffer(size,local,sizeof(local));
+    if (!entries) return -ENOMEM;
+    struct md_ipc_io_message *io=&frame->io;
+    io->timed=input->timeout!=0; io->timeout=(struct timespec){0};
+    long result=input->timeout ? md_read_memory(&io->timeout,(void *)input->timeout,sizeof(io->timeout)) : 0;
+    unsigned prepared=0;
+    while (!result && prepared<input->count) {
+        struct entry *entry=&entries[prepared];
+        *entry=(struct entry){0};
+        entry->view=messages[prepared].msg_hdr;
+        result=(int)entry->view.msg_namelen<0 ? -EINVAL : io_vectors_open(&entry->vectors,&entry->view);
+        io->batch_count=input->count; io->batch_index=prepared;
+        io->vector_error=(int)result;
+        if (result==-EFAULT || result==-EMSGSIZE || result==-EINVAL) {
+            io->size=io->control_size=io->address_size=0;
+            result=md_guest_buffer_control(MD_FS_BUFFER_IPC_IO_PREPARE,0,0);
+            ++prepared; break;
+        }
+        if (result) break;
+        entry->opened=1; ++prepared;
+        result=io_prepare(io,&entry->view,0);
+    }
+    if (!result) {
+        result=md_guest_buffer_control(MD_FS_BUFFER_IPC_RECEIVE,0,0); *accepted=1;
+        unsigned completed=io->batch_count;
+        if (completed>input->count) result=-EPROTO;
+        else for (unsigned i=0;i<completed;++i) {
+            io->batch_index=i;
+            long length=md_guest_buffer_control(MD_FS_BUFFER_IPC_IO_SELECT,0,0);
+            if (length>=0) length=io_scatter(io,&entries[i].view,length,1);
+            if (length<0) { result=i ? (long)i : length; break; }
+            messages[i].msg_hdr.msg_namelen=entries[i].view.msg_namelen;
+            messages[i].msg_hdr.msg_controllen=entries[i].view.msg_controllen;
+            messages[i].msg_hdr.msg_flags=entries[i].view.msg_flags;
+            messages[i].msg_len=(unsigned)length;
+        }
+        if (input->timeout && result>=0 && md_write_memory((void *)input->timeout,&io->timeout,sizeof(io->timeout)))
+            result=-EFAULT;
+    }
+    for (unsigned i=0;i<prepared;++i) if (entries[i].opened) io_vectors_close(&entries[i].vectors);
+    release(entries,local,size); return result;
+}
 static long receive_owned(struct md_task_receive input, int *accepted) {
     *accepted=0;
     long address=md_adapter_buffer_take();
@@ -306,14 +406,22 @@ static long receive_owned(struct md_task_receive input, int *accepted) {
     long result=capture_inputs(md_guest_buffer_control(MD_FS_BUFFER_TASK_RECEIVE,0,0),
         &frame->capture,&frame->input.socket,1);
     if (result==MD_IPC_TASK_IO) {
-        if (input.batch) result=-EOPNOTSUPP;
+        if (input.batch) result=receive_batch_owned(frame,accepted);
         else {
             struct msghdr *m=(void *)input.messages;
-            result=io_prepare(&frame->io,m,0);
+            struct msghdr view=*m;
+            struct io_vectors vectors;
+            frame->io.batch_count=0;
+            result=io_vectors_open(&vectors,&view);
             if (!result) {
-                result=md_guest_buffer_control(MD_FS_BUFFER_IPC_RECEIVE,0,0);
-                *accepted=1;
-                result=io_scatter(&frame->io,m,result);
+                result=io_prepare(&frame->io,&view,0);
+                if (!result) {
+                    result=md_guest_buffer_control(MD_FS_BUFFER_IPC_RECEIVE,0,0);
+                    *accepted=1;
+                    result=io_scatter(&frame->io,&view,result,0);
+                    m->msg_namelen=view.msg_namelen; m->msg_controllen=view.msg_controllen; m->msg_flags=view.msg_flags;
+                }
+                io_vectors_close(&vectors);
             }
         }
     } else if (!result) { *accepted=1; result=frame->result; }
@@ -363,11 +471,16 @@ long md_socket_ancillary_batch(const struct md_fs *fs, const unsigned long *a) {
     long error=0; unsigned prepared=0;
     for (; prepared<count; prepared++) {
         struct item *item=&items[prepared];
-        error=md_read_memory(&messages[prepared].msg_hdr,(void *)(a[1]+prepared*sizeof(*messages)),sizeof(struct msghdr));
-        if (error < 0) break;
         messages[prepared].msg_len=UINT_MAX;
+        error=md_read_memory(&messages[prepared].msg_hdr,(void *)(a[1]+prepared*sizeof(*messages)),sizeof(struct msghdr));
+        if (error < 0) {
+            /* Keep failed input validation inside the native batch, after its
+             * successful prefix and before consuming the faulting message. */
+            messages[prepared++].msg_hdr=(struct msghdr){.msg_iov=NULL,.msg_iovlen=1};
+            break;
+        }
         item->original=messages[prepared].msg_hdr;
-        if ((int)item->original.msg_namelen<0) { error=-EINVAL; break; }
+        if ((int)item->original.msg_namelen<0) { ++prepared; break; }
         size_t capacity=item->original.msg_control?item->original.msg_controllen:0;
         item->size=native_capacity(capacity);
         if (!item->size) { error=-ENOBUFS; break; }

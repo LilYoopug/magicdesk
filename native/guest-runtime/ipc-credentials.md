@@ -361,7 +361,7 @@ This keeps payload bytes, blocking/readiness, FD transfer, partial sends and
 message ordering in the kernel. Ordinary read/write and native-format
 credential-free sends do not create identity capabilities. Common ancillary
 buffers use stack scratch; larger buffers use bounded temporary mappings.
-Unfiltered recvmmsg uses one native batch so its
+Recvmmsg uses one native batch so its
 timeout and partial completion are not replaced by a userspace receive loop.
 MSG_PEEK does not consume identity metadata; truncation closes unpublished FDs.
 
@@ -394,6 +394,34 @@ For authenticated peers, supervisor IO carries a validated sender token so its
 own native PID/UID does not become the peer's virtual identity. Native peers
 retain task-affine sending. Both paths share origin preparation and custody.
 
+The filtered IO owner uses the mapped 64 KiB data and 4 KiB control buffers
+inline, not as message-size ceilings. Larger single messages allocate temporary
+host storage and copy through bounded chunks; one datagram remains one native
+send. Iovec inputs are captured once. Ordinary small single-message IO adds no
+payload/control allocation. A batch has one metadata allocation and one aggregate
+payload/control arena, owned until completion or cancellation. Nonblocking batches
+and an immediately available MSG_WAITFORONE batch create no IO thread. Unreceived
+entries are never replayed. Existing vector,
+ancillary-parser, integer-size and native quota limits remain explicit.
+
+Ordinary blocking IO first uses a nonblocking kernel attempt and event-driven
+readiness. The caller waits in its interruptible ppoll trampoline with its actual
+signal mask. No file-table turn spans that wait. Socket timeout and partial
+progress determine the result; SA_RESTART is decided by the kernel against the
+original syscall context. SIGPIPE is delivered only for an actual native EPIPE
+without MSG_NOSIGNAL, including blocked delivery through sigwaitinfo.
+
+Blocking stream MSG_WAITALL, SO_RCVLOWAT and filtered recvmmsg use a host-owned
+native IO job. One syscall retains native stream credential/rights boundaries,
+peek behavior, MSG_WAITFORONE, socket timeouts and remaining batch timeout.
+Its eventfd joins the existing supervisor event loop. Cancellation interrupts
+that exact host thread; an ARM64 entry gate closes the signal-before-SVC race,
+while cancellation after SVC preserves its actual result and installed rights.
+Join precedes releasing custody or buffers. No application thread is created and
+application filters are neither disabled nor modified by this job. Unreadable
+input headers/iovecs, excessive vector counts and negative source-address lengths
+retain the batch's kernel-owned SO_ERROR and poll behavior after a successful prefix.
+
 Receive publication has one owner for ancillary data, translated source address
 and output header fields. Application rights use the existing table-owned return
 channel. Annotated rights are installed by kernel recvmsg into a mapped receipt;
@@ -415,11 +443,11 @@ publication of the completed messages or leak their descriptors.
 
 Current limits are explicit:
 
-- Filtered supervisor IO has a 64 KiB payload and 4 KiB control bound; larger
-  requests fail explicitly. Filtered recvmmsg is not implemented. Blocking
-  readiness is event-driven, but socket timeouts, signal interruption, SIGPIPE
-  and complete MSG_WAITALL semantics still need their own completion contract.
-  Success of the Chromium workflows does not establish those general semantics.
+- Filtered payloads and headers are copied through owned host storage. Output
+  faults discovered during application copying occur after the kernel receive;
+  they do not have native per-word copy/consumption timing. This includes payload
+  faults, not only the batch-header publication boundary below. No memory
+  preflight is presented as equivalent to actual kernel publication.
 - Kernel-generated SO_PASSCRED messages without an explicit SCM_CREDENTIALS
   send retain native credentials. Unconnected datagram addressing is not
   virtually authenticated; registered socketpairs are supported.
@@ -483,6 +511,13 @@ stream/datagram/seqpacket sockets establish these additional boundaries:
 Ordinary read/write and poll/epoll remain native. Fixing the publication boundary
 must not impose unconditional mediation on those hot paths. A per-task errno
 cache, or only intercepting the next receive, does not satisfy this contract.
+
+The filtered IO suite compares native and guest signal interruption/restart,
+blocked SIGPIPE, socket timeouts (including SA_RESTART), SO_RCVLOWAT, stream fragmentation, matching credentials,
+Unix/TCP peek behavior, a 96 KiB datagram, a 1 MiB vectored stream send and batch
+partial completion/input faults. A separate native-job test exercises 256
+cancellation/completion races and verifies that no received pipe writer survives
+cleanup. These checks do not certify the output-fault timing limitation above.
 
 ## D-Bus And Coverage
 

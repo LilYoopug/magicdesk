@@ -30,8 +30,10 @@ def main():
     parser.add_argument('--instance', required=True, help='Disposable prepared store')
     parser.add_argument('--build', type=Path)
     parser.add_argument('--case', action='append', choices=CASES)
+    parser.add_argument('--filtered', action='store_true', help='Deny private guest threads and use protected callers')
     args = parser.parse_args()
     suite = Suite(args.output, args.build)
+    suite.report['filtered'] = args.filtered
     try:
         with args.fixture.open('rb') as source:
             digest = hashlib.file_digest(source, 'sha256').hexdigest()
@@ -57,6 +59,8 @@ def main():
                                    'exec "$@"', 'fixture', '/fixtures/kernel-contract', name, guest_dir),
             }
             for backend, command in commands.items():
+                if args.filtered:
+                    command += ['--filtered']
                 try:
                     output = suite.command(command, timeout=30)
                     unavailable = [line for line in output.splitlines() if line.startswith('UNAVAILABLE ')]

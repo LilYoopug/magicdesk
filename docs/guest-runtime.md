@@ -733,9 +733,13 @@ peers use authenticated origin capsules; sockets inherited from or passed to
 unadapted consumers retain native format. Exporting an already adapted socket to
 a native peer fails explicitly rather than exposing its private protocol.
 Unfiltered IO uses private-table helpers; application-filtered IO captures exact
-inputs through the table-owned channel and uses bounded supervisor IO, without
-requiring another guest thread. This path copies payloads through the shared
-mapping and retains its explicit size, batch and blocking-semantic limits.
+inputs through the table-owned channel, without requiring another guest thread.
+Small messages use inline mapped storage; larger messages use owner-scoped host
+buffers and bounded copy chunks, without splitting a datagram. Interruptible
+readiness waits retain no FD-table turn. Stream WAITALL/low-water receives and
+filtered recvmmsg use one native syscall on a cancellable host IO job, preserving
+kernel batch completion, socket timeouts and credential boundaries. Publication
+into application memory remains separate and has the limitations below.
 Received rights have one supervisor-owned vector shared with worker inspection.
 One typed request per message classifies identity tokens and managed watches,
 without FD duplication or file-table/FS turns. Cancellation retains its sources

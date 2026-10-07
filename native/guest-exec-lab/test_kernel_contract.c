@@ -4,6 +4,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/openat2.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
@@ -350,7 +352,19 @@ static void proc_owners(void) {
     puts("OBS proc-self-and-thread-self independent-fs=1 independent-files=1");
 }
 int main(int argc, char **argv) {
-    assert(argc == 3 && !chdir(argv[2])); setbuf(stdout, NULL);
+    assert((argc==3 || (argc==4 && !strcmp(argv[3],"--filtered"))) && !chdir(argv[2])); setbuf(stdout, NULL);
+    if (argc==4) {
+        struct sock_filter instructions[]={
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_clone,0,3),
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[0])),
+            BPF_JUMP(BPF_JMP|BPF_JSET|BPF_K,CLONE_THREAD,0,1),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EPERM),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)};
+        struct sock_fprog program={sizeof(instructions)/sizeof(*instructions),instructions};
+        assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0) && !prctl(PR_SET_SECCOMP,SECCOMP_MODE_FILTER,&program));
+        assert(!prctl(PR_SET_DUMPABLE,0));
+    }
     // EVENT_WAIT: ptrace stops, pipes and barriers; alarm fails a stuck fixture.
     alarm(20);
     if (!strcmp(argv[1], "waitid-peek")) waitid_peek();
