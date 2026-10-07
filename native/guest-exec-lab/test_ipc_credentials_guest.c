@@ -4,6 +4,8 @@
 #include <grp.h>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
+#include <netinet/in.h>
+#include <poll.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdint.h>
@@ -107,7 +109,7 @@ static void broken_pipe(int signal, siginfo_t *info, void *context) {
     (void)context;
     if (signal==SIGPIPE) { ++broken_count; broken_code=info->si_code; broken_pid=info->si_pid; }
 }
-static void send_signals(int mode) {
+static void send_signals(int mode, int credentials) {
     int pair[2]; CHECK(!socketpair(AF_UNIX,SOCK_STREAM,0,pair));
     CHECK(!shutdown(pair[1],SHUT_WR));
     struct sigaction action={.sa_sigaction=broken_pipe,.sa_flags=SA_SIGINFO};
@@ -118,9 +120,13 @@ static void send_signals(int mode) {
     }
     char byte='s'; struct iovec io={&byte,1};
     union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(struct ucred))]; } control={0};
-    struct msghdr m={.msg_iov=&io,.msg_iovlen=1,.msg_control=control.bytes,.msg_controllen=sizeof(control)};
-    control.align=(struct cmsghdr){.cmsg_len=CMSG_LEN(sizeof(struct ucred)),.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_CREDENTIALS};
-    struct ucred cred={getpid(),getuid(),getgid()}; memcpy(CMSG_DATA(&control.align),&cred,sizeof(cred));
+    struct msghdr m={.msg_iov=&io,.msg_iovlen=1,.msg_control=control.bytes,
+        .msg_controllen=credentials ? CMSG_SPACE(sizeof(struct ucred)) : CMSG_SPACE(sizeof(int))};
+    control.align=(struct cmsghdr){.cmsg_len=credentials ? CMSG_LEN(sizeof(struct ucred)) : CMSG_LEN(sizeof(int)),
+        .cmsg_level=SOL_SOCKET,.cmsg_type=credentials ? SCM_CREDENTIALS : SCM_RIGHTS};
+    if (credentials) {
+        struct ucred cred={getpid(),getuid(),getgid()}; memcpy(CMSG_DATA(&control.align),&cred,sizeof(cred));
+    } else memcpy(CMSG_DATA(&control.align),&pair[0],sizeof(pair[0]));
     if (mode==3) {
         struct sock_filter code[]={
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
@@ -145,7 +151,7 @@ static void send_signals(int mode) {
     CHECK(broken_count==((mode==0 || mode==2) ? 1 : 0));
     if (broken_count) CHECK(broken_pid==getpid() && broken_code==SI_USER);
     close(pair[0]); close(pair[1]);
-    printf("PASS credential send SIGPIPE mode=%d\n",mode);
+    printf("PASS %s send SIGPIPE mode=%d\n",credentials ? "credential" : "captured",mode);
 }
 static void send_inputs(int protected, int full) {
     int pair[2], one=1; CHECK(!socketpair(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0,pair));
@@ -181,7 +187,7 @@ static void send_inputs(int protected, int full) {
     printf("PASS credential send inputs protected=%d full=%d\n",protected,full);
 }
 enum { SEND_LIFETIME_BYTES=1024*1024 };
-struct paused_send { int socket, right, protected; };
+struct paused_send { int socket, right, protected, credentials; };
 static int paused_sender(void *opaque) {
     struct paused_send *p=opaque;
     CHECK(!prctl(PR_SET_PDEATHSIG,SIGKILL));
@@ -189,32 +195,49 @@ static int paused_sender(void *opaque) {
     char *bytes=malloc(SEND_LIFETIME_BYTES); CHECK(bytes); memset(bytes,'m',SEND_LIFETIME_BYTES);
     struct iovec io={bytes,SEND_LIFETIME_BYTES};
     union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(struct ucred))+CMSG_SPACE(sizeof(int))]; } control={0};
-    struct msghdr m={.msg_iov=&io,.msg_iovlen=1,.msg_control=control.bytes,.msg_controllen=sizeof(control)};
-    control.align=(struct cmsghdr){.cmsg_len=CMSG_LEN(sizeof(struct ucred)),.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_CREDENTIALS};
-    struct ucred cred={getpid(),0,0}; memcpy(CMSG_DATA(&control.align),&cred,sizeof(cred));
-    struct cmsghdr *h=(void *)(control.bytes+CMSG_SPACE(sizeof(cred)));
+    struct msghdr m={.msg_iov=&io,.msg_iovlen=1,.msg_control=control.bytes,
+        .msg_controllen=CMSG_SPACE(sizeof(int))+(p->credentials ? CMSG_SPACE(sizeof(struct ucred)) : 0)};
+    struct cmsghdr *h=&control.align;
+    if (p->credentials) {
+        *h=(struct cmsghdr){.cmsg_len=CMSG_LEN(sizeof(struct ucred)),.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_CREDENTIALS};
+        struct ucred cred={getpid(),0,0}; memcpy(CMSG_DATA(h),&cred,sizeof(cred));
+        h=(void *)(control.bytes+CMSG_SPACE(sizeof(cred)));
+    }
     *h=(struct cmsghdr){.cmsg_len=CMSG_LEN(sizeof(int)),.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_RIGHTS};
     memcpy(CMSG_DATA(h),&p->right,sizeof(p->right));
     CHECK(sendmsg(p->socket,&m,MSG_NOSIGNAL)==SEND_LIFETIME_BYTES);
     free(bytes);
     return 0;
 }
-static void send_lifetime(int protected, int cancel) {
+static void receive_right(int fd) {
+    char byte; struct iovec io={&byte,1};
+    union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(int))]; } control;
+    struct msghdr m={.msg_iov=&io,.msg_iovlen=1,.msg_control=control.bytes,.msg_controllen=sizeof(control)};
+    CHECK(recvmsg(fd,&m,MSG_CMSG_CLOEXEC)==1 && byte=='m' && !(m.msg_flags&MSG_CTRUNC));
+    struct cmsghdr *h=CMSG_FIRSTHDR(&m);
+    CHECK(h && h->cmsg_level==SOL_SOCKET && h->cmsg_type==SCM_RIGHTS
+        && h->cmsg_len==CMSG_LEN(sizeof(int)) && !CMSG_NXTHDR(&m,h));
+    int right; memcpy(&right,CMSG_DATA(h),sizeof(right));
+    CHECK(fcntl(right,F_GETFD)==FD_CLOEXEC);
+    peer(right,getpid(),0,0); CHECK(!close(right));
+}
+static void send_lifetime(int protected, int cancel, int credentials) {
     int pair[2], right[2], unrelated[2], one=1, capacity=4096;
     CHECK(!socketpair(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0,pair));
     CHECK(!socketpair(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0,right));
     CHECK(!pipe2(unrelated,O_CLOEXEC|O_NONBLOCK));
-    CHECK(!setsockopt(pair[0],SOL_SOCKET,SO_PASSCRED,&one,sizeof(one)));
+    if (credentials) CHECK(!setsockopt(pair[0],SOL_SOCKET,SO_PASSCRED,&one,sizeof(one)));
     CHECK(!setsockopt(pair[1],SOL_SOCKET,SO_SNDBUF,&capacity,sizeof(capacity)));
     CHECK(!prctl(PR_SET_DUMPABLE,0)); peer(pair[0],getpid(),0,0); CHECK(!prctl(PR_SET_DUMPABLE,1));
     size_t size=1024*1024; void *stack=malloc(size); CHECK(stack);
     int before[256]; for (unsigned i=0;i<256;++i) before[i]=fcntl(i,F_GETFD);
-    struct paused_send context={pair[1],right[0],protected};
+    struct paused_send context={pair[1],right[0],protected,credentials};
     pid_t child=clone(paused_sender,(char *)stack+size,CLONE_FILES|SIGCHLD,&context); CHECK(child>0);
     /* EVENT_WAIT: the first payload byte proves the helper entered sendmsg.
      * Its bounded socket cannot accept the remaining megabyte until we drain it.
      * The enclosing launch deadline bounds missing delivery/cleanup. */
-    receive_identity(pair[0],child,0,MSG_CMSG_CLOEXEC,0,1);
+    if (credentials) receive_identity(pair[0],child,0,MSG_CMSG_CLOEXEC,0,1);
+    else receive_right(pair[0]);
     CHECK(!close(unrelated[1])); before[unrelated[1]]=-1;
     char byte; CHECK(read(unrelated[0],&byte,1)==0);
     /* Table turns must be released and only captured inputs retained while
@@ -233,12 +256,53 @@ static void send_lifetime(int protected, int cancel) {
     for (unsigned i=0;i<256;++i) CHECK(fcntl(i,F_GETFD)==before[i]);
     CHECK(!close(pair[0]) && !close(pair[1]) && !close(right[0]) && !close(right[1]));
     CHECK(!close(unrelated[0])); free(stack);
-    printf("PASS credential send lifecycle protected=%d cancel=%d\n",protected,cancel);
+    printf("PASS %s send lifecycle protected=%d cancel=%d\n",credentials ? "credential" : "captured",protected,cancel);
+}
+static void nonunix_rights(void) {
+    int fd=socket(AF_INET,SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK,0); CHECK(fd>=0);
+    struct sockaddr_in address={.sin_family=AF_INET,.sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
+    CHECK(!bind(fd,(void *)&address,sizeof(address)));
+    socklen_t length=sizeof(address); CHECK(!getsockname(fd,(void *)&address,&length));
+    CHECK(!connect(fd,(void *)&address,length));
+    char byte='n'; struct iovec io={&byte,1};
+    union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(int))]; } control={0};
+    struct msghdr message={.msg_iov=&io,.msg_iovlen=1,.msg_control=control.bytes,.msg_controllen=sizeof(control)};
+    control.align=(struct cmsghdr){.cmsg_len=CMSG_LEN(sizeof(int)),.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_RIGHTS};
+    memcpy(CMSG_DATA(&control.align),&fd,sizeof(fd));
+    int before[256]; for (unsigned i=0;i<256;++i) before[i]=fcntl(i,F_GETFD);
+    errno=0; ssize_t sent=sendmsg(fd,&message,MSG_NOSIGNAL);
+    if (sent!=1) fprintf(stderr,"non-Unix send result=%zd errno=%d\n",sent,errno);
+    CHECK(sent==1);
+    byte=0; CHECK(recvmsg(fd,&message,MSG_DONTWAIT)==1 && byte=='n' && !message.msg_controllen);
+    CHECK(recv(fd,&byte,1,MSG_DONTWAIT)==-1 && errno==EAGAIN);
+    pid_t child=fork(); CHECK(child>=0);
+    if (!child) {
+        struct sock_filter code[]={
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_clone,1,0),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_getsockopt,0,1),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EACCES),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)};
+        struct sock_fprog program={sizeof(code)/sizeof(*code),code};
+        CHECK(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0) && !prctl(PR_SET_SECCOMP,SECCOMP_MODE_FILTER,&program));
+        message.msg_name=&address; message.msg_namelen=length; message.msg_control=NULL;
+        CHECK(sendmsg(fd,&message,MSG_NOSIGNAL)==1);
+        struct mmsghdr batch[2]={{.msg_hdr=message},{.msg_hdr=message}};
+        CHECK(sendmmsg(fd,batch,2,MSG_NOSIGNAL)==2 && batch[0].msg_len==1 && batch[1].msg_len==1);
+        CHECK(sendto(fd,&byte,1,MSG_NOSIGNAL,(void *)&address,length)==1);
+        _exit(0);
+    }
+    done(child);
+    for (unsigned i=0;i<4;++i) CHECK(recv(fd,&byte,1,MSG_DONTWAIT)==1 && byte=='n');
+    CHECK(recv(fd,&byte,1,MSG_DONTWAIT)==-1 && errno==EAGAIN);
+    for (unsigned i=0;i<256;++i) CHECK(fcntl(i,F_GETFD)==before[i]);
+    CHECK(!close(fd)); puts("PASS non-Unix ancillary send: native payload, no rights and unchanged caller table");
 }
 static void send_contract(void) {
-    for (int mode=0;mode<4;++mode) {
+    nonunix_rights();
+    for (int credentials=0;credentials<2;++credentials) for (int mode=0;mode<(credentials ? 4 : 3);++mode) {
         pid_t child=fork(); CHECK(child>=0);
-        if (!child) { send_signals(mode); exit(0); }
+        if (!child) { send_signals(mode,credentials); exit(0); }
         done(child);
     }
     for (int protected=0;protected<2;++protected) for (int full=0;full<2;++full) {
@@ -246,7 +310,9 @@ static void send_contract(void) {
         if (!child) { send_inputs(protected,full); exit(0); }
         done(child);
     }
-    for (int protected=0;protected<2;++protected) for (int cancel=0;cancel<2;++cancel) send_lifetime(protected,cancel);
+    for (int credentials=0;credentials<2;++credentials)
+        for (int protected=0;protected<2;++protected) for (int cancel=0;cancel<2;++cancel)
+            send_lifetime(protected,cancel,credentials);
 }
 struct paused_receive { int socket, protected; };
 static int paused_receiver(void *opaque) {
@@ -493,13 +559,342 @@ static void custody(int guest, int receive, int protected) {
     free(stack); close(pair[0]); close(pair[1]); close(transferred[0]); close(transferred[1]);
     printf("PASS IPC caller custody receive=%d protected=%d guest=%d\n",receive,protected,guest);
 }
+static void origin_descriptors(const int *fds, unsigned expected, int flags) {
+    for (unsigned i=0;i<expected;++i) {
+        CHECK(fcntl(fds[i],F_GETFD)==(flags&MSG_CMSG_CLOEXEC ? FD_CLOEXEC : 0));
+        if (i==252) { struct stat st; CHECK(!fstat(fds[i],&st) && S_ISFIFO(st.st_mode)); }
+        else if (i%70) CHECK((fcntl(fds[i],F_GETFL)&O_PATH)==O_PATH);
+        else {
+            char text[7]; CHECK(pread(fds[i],text,sizeof(text),0)==sizeof(text) && !memcmp(text,"payload",7));
+            CHECK(lseek(fds[i],0,SEEK_CUR)==2);
+        }
+    }
+    if (expected>1) {
+        /* A bare native directory has backing names, not the guest path. This
+         * lookup requires the imported view and published descriptor origin. */
+        int fd=openat(fds[1],"origin-payload",O_RDONLY); CHECK(fd>=0);
+        char text[7]; CHECK(read(fd,text,sizeof(text))==sizeof(text) && !memcmp(text,"payload",7));
+        CHECK(!close(fd));
+    }
+    for (unsigned i=0;i<expected;++i) CHECK(!close(fds[i]));
+}
+static void origin_rights(struct msghdr *m, unsigned expected, int flags, unsigned mode) {
+    struct cmsghdr *rights=NULL; unsigned credentials=0;
+    for (struct cmsghdr *h=CMSG_FIRSTHDR(m);h;h=CMSG_NXTHDR(m,h)) {
+        CHECK(h->cmsg_level==SOL_SOCKET);
+        if (h->cmsg_type==SCM_CREDENTIALS) {
+            struct ucred c; CHECK(h->cmsg_len==CMSG_LEN(sizeof(c)));
+            memcpy(&c,CMSG_DATA(h),sizeof(c));
+            CHECK(c.pid>0 && c.uid==1234 && c.gid==2345); ++credentials;
+        } else { CHECK(h->cmsg_type==SCM_RIGHTS && !rights); rights=h; }
+    }
+    CHECK(credentials==(mode==10 || mode==11 ? 1U : 0U));
+    if (mode==13) {
+        CHECK(rights && rights->cmsg_len==CMSG_LEN(sizeof(int)) && !(m->msg_flags&MSG_CTRUNC));
+        int fd; memcpy(&fd,CMSG_DATA(rights),sizeof(fd));
+        int type=0; socklen_t size=sizeof(type);
+        CHECK(!getsockopt(fd,SOL_SOCKET,SO_TYPE,&type,&size) && type==SOCK_SEQPACKET);
+        CHECK(!close(fd)); return;
+    }
+    CHECK(!!(m->msg_flags&MSG_CTRUNC)==(expected<253));
+    if (!expected) { CHECK(!rights); return; }
+    CHECK(rights && rights->cmsg_len==CMSG_LEN(expected*sizeof(int)));
+    int fds[253]; memcpy(fds,CMSG_DATA(rights),expected*sizeof(int));
+    origin_descriptors(fds,expected,flags);
+}
+static void origin_send(unsigned mode, int protected) {
+    CHECK(mode<15);
+    int file=open("/tmp/outgoing-file",O_CREAT|O_RDWR|O_TRUNC|O_CLOEXEC,0600);
+    CHECK(file>=0 && write(file,"send",4)==4 && lseek(file,1,SEEK_SET)==1);
+    int directory=open("/tmp",O_PATH|O_DIRECTORY|O_CLOEXEC); CHECK(directory>=0);
+    if (protected) CHECK(!prctl(PR_SET_DUMPABLE,0));
+    unsigned count=mode==10 ? 0 : mode ? 253 : 1;
+    union { struct cmsghdr align; char bytes[CMSG_SPACE(253*sizeof(int))+CMSG_SPACE(sizeof(int))+CMSG_SPACE(sizeof(struct ucred))]; } control={0};
+    unsigned prefix=mode==3 ? 100 : count;
+    control.align=(struct cmsghdr){.cmsg_len=CMSG_LEN(prefix*sizeof(int)),.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_RIGHTS};
+    for (unsigned i=0;i<count;++i) {
+        int fd=mode==4 && i==count-1 ? -1 : i%2 ? directory : file;
+        size_t offset=i<prefix ? CMSG_LEN(0)+i*sizeof(int)
+            : CMSG_SPACE(prefix*sizeof(int))+CMSG_LEN(0)+(i-prefix)*sizeof(int);
+        memcpy(control.bytes+offset,&fd,sizeof(fd));
+    }
+    if (mode==3) *(struct cmsghdr *)(control.bytes+CMSG_SPACE(prefix*sizeof(int)))=
+        (struct cmsghdr){.cmsg_len=CMSG_LEN((count-prefix)*sizeof(int)),.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_RIGHTS};
+    char byte='s'; struct iovec io={mode==7 ? (void *)1 : &byte,1};
+    struct mmsghdr messages[2]={0};
+    messages[0].msg_hdr=(struct msghdr){.msg_iov=&io,.msg_iovlen=1,.msg_control=control.bytes,
+        .msg_controllen=mode==3 ? CMSG_SPACE(prefix*sizeof(int))+CMSG_SPACE((count-prefix)*sizeof(int)) : CMSG_SPACE(count*sizeof(int))};
+    if (mode==9 || mode==10 || mode==14) {
+        if (!count) messages[0].msg_hdr.msg_controllen=0;
+        struct cmsghdr *h=(void *)(control.bytes+messages[0].msg_hdr.msg_controllen);
+        *h=(struct cmsghdr){.cmsg_len=CMSG_LEN(sizeof(struct ucred)),.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_CREDENTIALS};
+        struct ucred cred={getpid()+(mode==14),1234,2345}; memcpy(CMSG_DATA(h),&cred,sizeof(cred));
+        messages[0].msg_hdr.msg_controllen+=CMSG_SPACE(sizeof(cred));
+    } else if (mode==11 || mode==12) {
+        struct cmsghdr *h=(void *)(control.bytes+messages[0].msg_hdr.msg_controllen);
+        *h=(struct cmsghdr){.cmsg_len=CMSG_LEN(sizeof(int)),.cmsg_level=mode==11 ? SOL_SOCKET : IPPROTO_IP,
+            .cmsg_type=mode==11 ? 0x7fffffff : IP_TTL};
+        int ttl=32; memcpy(CMSG_DATA(h),&ttl,sizeof(ttl));
+        messages[0].msg_hdr.msg_controllen+=CMSG_SPACE(sizeof(ttl));
+    }
+    messages[1]=messages[0];
+    int held[1024]; unsigned held_count=0; struct rlimit limit;
+    if (mode==2) {
+        CHECK(!getrlimit(RLIMIT_NOFILE,&limit)); struct rlimit next=limit; next.rlim_cur=1024;
+        CHECK(!setrlimit(RLIMIT_NOFILE,&next));
+        int fd; while ((fd=dup(STDIN_FILENO))>=0) { CHECK(held_count<1024); held[held_count++]=fd; }
+        CHECK(errno==EMFILE);
+    }
+    if (mode==5) {
+        struct sock_filter code[]={
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_sendmsg,0,3),
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[0])),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,STDIN_FILENO,0,1),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EACCES),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)};
+        struct sock_fprog filter={sizeof(code)/sizeof(*code),code};
+        CHECK(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0) && !prctl(PR_SET_SECCOMP,SECCOMP_MODE_FILTER,&filter));
+    }
+    if (mode==8 || mode==13) {
+        struct sock_filter code[]={
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_getsockopt,0,3),
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[2])),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SO_DOMAIN,0,1),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EACCES),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)};
+        struct sock_fprog filter={sizeof(code)/sizeof(*code),code};
+        CHECK(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0) && !prctl(PR_SET_SECCOMP,SECCOMP_MODE_FILTER,&filter));
+        int domain; socklen_t length=sizeof(domain);
+        CHECK(getsockopt(STDIN_FILENO,SOL_SOCKET,SO_DOMAIN,&domain,&length)==-1 && errno==EACCES);
+    }
+    int before[1024]; for (unsigned i=0;i<1024;++i) before[i]=fcntl((int)i,F_GETFD);
+    int batch=mode==6 || mode==13;
+    int result=batch ? sendmmsg(STDIN_FILENO,messages,2,MSG_NOSIGNAL)
+        : (int)sendmsg(STDIN_FILENO,&messages[0].msg_hdr,MSG_NOSIGNAL);
+    int expected=mode==4 ? EBADF : mode==5 ? EACCES : mode==7 ? EFAULT : mode==11 ? EINVAL : mode==14 ? EPERM : 0;
+    if (expected) CHECK(result==-1 && errno==expected);
+    else CHECK(result==(batch ? 2 : 1));
+    for (unsigned i=0;i<1024;++i) CHECK(before[i]==fcntl((int)i,F_GETFD));
+    if (mode==2) CHECK(!setrlimit(RLIMIT_NOFILE,&limit));
+    while (held_count) CHECK(!close(held[--held_count]));
+    CHECK(!close(directory) && !close(file));
+    printf("PASS capsule guest sender mode=%u protected=%d\n",mode,protected);
+}
+static void origin_receive(unsigned mode, int protected) {
+    CHECK(mode<14); if (protected) CHECK(!prctl(PR_SET_DUMPABLE,0));
+    for (unsigned pass=0;pass<(!mode || mode>=4 ? 2U : 1U);++pass) {
+        union { struct cmsghdr align; char bytes[CMSG_SPACE(253*sizeof(int))+CMSG_SPACE(sizeof(struct ucred))]; } control[2]={0};
+        char bytes[2]={0}; struct iovec io[2]; struct mmsghdr m[2]={0};
+        int peek=(!mode || mode>=4) && !pass;
+        unsigned count=mode==3 ? 2 : 1, expected=mode==1 ? 3 : mode==2 ? 0 : 253;
+        for (unsigned i=0;i<count;++i) {
+            io[i]=(struct iovec){&bytes[i],1};
+            m[i].msg_hdr=(struct msghdr){.msg_iov=&io[i],.msg_iovlen=1,
+                .msg_control=expected ? control[i].bytes : NULL,
+                .msg_controllen=expected==253 ? sizeof(control[i]) : expected ? CMSG_LEN(expected*sizeof(int)) : 0};
+        }
+        int flags=MSG_DONTWAIT|(peek ? MSG_PEEK : 0)|(protected ? MSG_CMSG_CLOEXEC : 0);
+        size_t page=(size_t)sysconf(_SC_PAGESIZE);
+        char *memory=NULL; struct msghdr *target=&m[0].msg_hdr;
+        int before[1024];
+        int held[1024]; unsigned held_count=0;
+        struct rlimit limit={0};
+        if (!peek && mode>=4 && mode<10) {
+            for (unsigned i=0;i<1024;++i) before[i]=fcntl((int)i,F_GETFD);
+            if (mode<7) {
+                memory=mmap(NULL,3*page,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+                CHECK(memory!=MAP_FAILED);
+                if (mode==4) {
+                    target->msg_control=memory+page-CMSG_LEN(3*sizeof(int));
+                    CHECK(!mprotect(memory+page,page,PROT_NONE)); expected=3;
+                } else if (mode==5) {
+                    target->msg_control=memory+page-CMSG_LEN(0);
+                    CHECK(!mprotect(memory,page,PROT_READ));
+                } else {
+                    target=(void *)(memory+2*page); *target=m[0].msg_hdr;
+                    CHECK(!mprotect(target,page,PROT_READ));
+                }
+            } else if (mode<9) {
+                /* Saturate table slots independently of the per-UID Unix
+                 * in-flight-right quota exercised by mode 9. */
+                CHECK(!getrlimit(RLIMIT_NOFILE,&limit) && limit.rlim_cur>=1024);
+                struct rlimit next=limit; next.rlim_cur=1024;
+                CHECK(!setrlimit(RLIMIT_NOFILE,&next));
+                int fd;
+                while ((fd=dup(STDIN_FILENO))>=0) { CHECK(held_count<1024); held[held_count++]=fd; }
+                CHECK(errno==EMFILE);
+                expected=mode==7 ? 3 : 0;
+                for (unsigned i=0;i<expected;++i) CHECK(!close(held[--held_count]));
+            } else {
+                CHECK(!getrlimit(RLIMIT_NOFILE,&limit));
+                unsigned left=3;
+                for (unsigned i=0;i<1024;++i) if (before[i]<0) {
+                    if (left) { --left; continue; }
+                    struct rlimit next=limit; next.rlim_cur=i;
+                    CHECK(!setrlimit(RLIMIT_NOFILE,&next)); break;
+                }
+            }
+        }
+        int result=mode==3 ? recvmmsg(STDIN_FILENO,m,count,flags,NULL) : (int)recvmsg(STDIN_FILENO,target,flags);
+        CHECK(!peek && (mode==6 || mode==9) ? result==-1 && errno==(mode==6 ? EFAULT : ETOOMANYREFS)
+            : result==(int)count);
+        if (mode>=7 && mode<10 && !peek) CHECK(!setrlimit(RLIMIT_NOFILE,&limit));
+        while (held_count) CHECK(!close(held[--held_count]));
+        if (mode==9 && !peek) {
+            for (unsigned i=0;i<1024;++i) CHECK(fcntl((int)i,F_GETFD)==before[i]);
+            continue;
+        }
+        for (unsigned i=0;i<count;++i) {
+            CHECK(bytes[i]=='s' && (mode!=3 || m[i].msg_len==1));
+            if (!peek && (mode==5 || mode==6)) {
+                int installed[253]; unsigned n=0;
+                for (unsigned fd=0;fd<1024;++fd) if (before[fd]<0 && fcntl((int)fd,F_GETFD)>=0) {
+                    CHECK(n<253); installed[n++]=(int)fd;
+                }
+                CHECK(n==expected); origin_descriptors(installed,n,flags);
+            } else origin_rights(&m[i].msg_hdr,expected,flags,mode);
+        }
+        if (memory) CHECK(!munmap(memory,3*page));
+    }
+    printf("PASS capsule guest receiver mode=%u protected=%d\n",mode,protected);
+}
+static void addressed_receive(int socket, unsigned mode) {
+    /* EVENT_WAIT: one test datagram; expiry is a failed delivery, not readiness. */
+    struct pollfd ready={.fd=socket,.events=POLLIN}; CHECK(poll(&ready,1,15000)==1);
+    char data=0; struct iovec io={&data,1};
+    union { struct cmsghdr align; char bytes[CMSG_SPACE(253*sizeof(int))+CMSG_SPACE(sizeof(struct ucred))]; } control;
+    struct msghdr m={.msg_iov=&io,.msg_iovlen=1,.msg_control=&control,.msg_controllen=sizeof(control)};
+    CHECK(recvmsg(socket,&m,MSG_CMSG_CLOEXEC)==(mode==7 ? 0 : 1));
+    CHECK((mode==7 || data=='a') && !(m.msg_flags&(MSG_CTRUNC|MSG_TRUNC)));
+    unsigned count=0;
+    for (struct cmsghdr *h=CMSG_FIRSTHDR(&m);h;h=CMSG_NXTHDR(&m,h)) {
+        if (h->cmsg_level!=SOL_SOCKET || h->cmsg_type!=SCM_RIGHTS) continue;
+        unsigned n=(h->cmsg_len-CMSG_LEN(0))/sizeof(int);
+        for (unsigned i=0;i<n;++i) {
+            int fd; memcpy(&fd,(char *)CMSG_DATA(h)+i*sizeof(fd),sizeof(fd));
+            struct stat st; CHECK(!fstat(fd,&st));
+            CHECK(i%2 ? S_ISDIR(st.st_mode) && (fcntl(fd,F_GETFL)&O_PATH) : S_ISCHR(st.st_mode));
+            CHECK(fcntl(fd,F_GETFD)&FD_CLOEXEC); CHECK(!close(fd));
+        }
+        count+=n;
+    }
+    CHECK(count==(mode==0 || mode==4 ? 0 : mode==2 ? 253 : 1));
+}
+static void addressed_send(const char *path, unsigned protected, unsigned full, int local, uid_t uid, gid_t gid) {
+    if (!strcmp(path,"addressed")) CHECK(!chdir("/attached"));
+    struct sockaddr_un a={.sun_family=AF_UNIX};
+    CHECK(strlen(path)<sizeof(a.sun_path)); strcpy(a.sun_path,path);
+    socklen_t length=offsetof(struct sockaddr_un,sun_path)+strlen(path)+1;
+    if (*path=='@') { a.sun_path[0]=0; a.sun_path[strlen(path)+1]='z'; length+=2; }
+    int server=-1;
+    if (local>0) { server=socket(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC,0); CHECK(server>=0 && !bind(server,(void *)&a,length)); }
+    int socket_fd=socket(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC,0), file=open("/dev/null",O_RDONLY|O_CLOEXEC);
+    int directory=open("/dev",O_PATH|O_DIRECTORY|O_CLOEXEC); CHECK(socket_fd>=0 && file>=0 && directory>=0);
+    if (protected) CHECK(!prctl(PR_SET_DUMPABLE,0));
+    /* SO_DOMAIN is unavailable to the guest; custody, not a preflight guess,
+     * must select the address path and ancillary transport. */
+    struct sock_filter code[]={BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_getsockopt,0,3),
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[2])),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SO_DOMAIN,0,1),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EACCES),BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)};
+    struct sock_fprog filter={sizeof(code)/sizeof(*code),code};
+    CHECK(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0) && !prctl(PR_SET_SECCOMP,SECCOMP_MODE_FILTER,&filter));
+    int held[1024]; unsigned held_count=0; struct rlimit previous;
+    if (full) {
+        CHECK(!getrlimit(RLIMIT_NOFILE,&previous)); struct rlimit limit=previous; limit.rlim_cur=1024;
+        CHECK(!setrlimit(RLIMIT_NOFILE,&limit));
+        int fd; while ((fd=dup(file))>=0) { CHECK(held_count<1024); held[held_count++]=fd; }
+        CHECK(errno==EMFILE);
+    }
+    for (unsigned mode=0;mode<9;++mode) {
+        char byte='a'; struct iovec io={mode==6 ? (void *)1 : &byte,mode==7 ? 0 : 1};
+        union { struct cmsghdr align; char bytes[CMSG_SPACE(253*sizeof(int))+CMSG_SPACE(sizeof(struct ucred))]; } control={0};
+        unsigned rights=mode==0 || mode==4 ? 0 : mode==2 ? 253 : 1;
+        size_t size=rights ? CMSG_SPACE(rights*sizeof(int)) : 0;
+        control.align=(struct cmsghdr){.cmsg_len=CMSG_LEN(rights*sizeof(int)),.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_RIGHTS};
+        for (unsigned i=0;i<rights;++i) { int fd=i%2 ? directory : file; memcpy(control.bytes+CMSG_LEN(0)+i*sizeof(int),&fd,sizeof(fd)); }
+        if (mode==2 || mode==5 || mode==8) {
+            struct cmsghdr *h=(void *)(control.bytes+size);
+            *h=(struct cmsghdr){.cmsg_level=mode==8 ? IPPROTO_IP : SOL_SOCKET,
+                .cmsg_type=mode==2 ? SCM_CREDENTIALS : mode==8 ? IP_TTL : 0x7fffffff,
+                .cmsg_len=CMSG_LEN(mode==2 ? sizeof(struct ucred) : sizeof(int))};
+            struct ucred cred={getpid(),uid,gid}; memcpy(CMSG_DATA(h),&cred,mode==2 ? sizeof(cred) : sizeof(int));
+            size+=CMSG_SPACE(mode==2 ? sizeof(cred) : sizeof(int));
+        }
+        struct mmsghdr messages[2]={{.msg_hdr={.msg_name=&a,.msg_namelen=length,.msg_iov=&io,.msg_iovlen=1,
+            .msg_control=size ? &control : NULL,.msg_controllen=size}}}; messages[1]=messages[0];
+        int before[1024]; for (unsigned i=0;i<1024;++i) before[i]=fcntl(i,F_GETFD);
+        long result=mode==3 ? sendmmsg(socket_fd,messages,2,MSG_NOSIGNAL) : mode==4
+            ? sendto(socket_fd,&byte,1,MSG_NOSIGNAL,(void *)&a,length) : sendmsg(socket_fd,&messages[0].msg_hdr,MSG_NOSIGNAL);
+        if (mode==5 || mode==6) CHECK(result==-1 && errno==(mode==5 ? EINVAL : EFAULT));
+        else if (local<0) CHECK(result==-1 && errno==ECONNREFUSED);
+        else CHECK(result==(mode==3 ? 2 : mode==7 ? 0 : 1));
+        for (unsigned i=0;i<1024;++i) CHECK(before[i]==fcntl(i,F_GETFD));
+        if (local>0 && mode!=5 && mode!=6) {
+            while (held_count) CHECK(!close(held[--held_count]));
+            for (unsigned i=0;i<(mode==3 ? 2U : 1U);++i) addressed_receive(server,mode);
+            if (full) {
+                int fd; while ((fd=dup(file))>=0) { CHECK(held_count<1024); held[held_count++]=fd; }
+                CHECK(errno==EMFILE);
+            }
+        }
+    }
+    if (full) CHECK(!setrlimit(RLIMIT_NOFILE,&previous));
+    while (held_count) CHECK(!close(held[--held_count]));
+    CHECK(!close(socket_fd) && !close(file) && !close(directory));
+    if (local>0) { CHECK(!close(server)); if (*path!='@') CHECK(!unlink(path)); }
+    printf("PASS addressed sender protected=%u full=%u local=%d\n",protected,full,local);
+}
+static void addressed_fixture(const char *runner, const char *store, const char *directory) {
+    alarm(180);
+    for (unsigned type=0;type<4;++type) for (unsigned protected=0;protected<2;++protected)
+            for (unsigned full=0;full<2;++full) {
+        int local=type>=2, server=-1; char path[108];
+        snprintf(path,sizeof(path),"%s/addressed",directory);
+        if (!local) {
+            struct sockaddr_un a={.sun_family=AF_UNIX}; strcpy(a.sun_path,path);
+            server=socket(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC,0);
+            CHECK(server>=0);
+            if (bind(server,(void *)&a,offsetof(struct sockaddr_un,sun_path)+strlen(path)+1)) {
+                CHECK(errno==EACCES); CHECK(!close(server));
+                puts("LIMIT native socket-file creation; checking retained native path rejection instead");
+                int file=open(path,O_CREAT|O_EXCL|O_RDWR|O_CLOEXEC,0600); CHECK(file>=0 && !close(file));
+                server=-1; local=-1;
+            }
+        }
+        pid_t child=fork(); CHECK(child>=0);
+        if (!child) {
+            char p[8],f[8],l[8],u[16],g[16]; snprintf(p,sizeof(p),"%u",protected); snprintf(f,sizeof(f),"%u",full);
+            snprintf(l,sizeof(l),"%d",local); snprintf(u,sizeof(u),"%u",getuid()); snprintf(g,sizeof(g),"%u",getgid());
+            execl(runner,runner,"--store",store,"--user","0:0","--bind",directory,"/attached","--deadline-seconds","20",
+                "--","/bin/test","--address-send",type==0 ? "/attached/addressed" : type==1 ? "addressed"
+                    : type==2 ? "/tmp/addressed" : "@md-binary-address",p,f,l,u,g,(char *)NULL);
+            _exit(90);
+        }
+        if (!local) for (unsigned mode=0;mode<9;++mode) if (mode!=5 && mode!=6)
+            for (unsigned i=0;i<(mode==3 ? 2U : 1U);++i) addressed_receive(server,mode);
+        done(child);
+        if (local<=0) { if (server>=0) CHECK(!close(server)); CHECK(!unlink(path)); }
+    }
+    puts("PASS addressed send custody: absolute/relative anchors, inode and binary abstract destinations");
+}
 int main(int argc,char **argv) {
     setvbuf(stdout,NULL,_IONBF,0);
+    if (argc==2 && !strcmp(argv[1],"--nonunix-rights")) { alarm(20); nonunix_rights(); return 0; }
+    if (argc==5 && !strcmp(argv[1],"--address-fixture")) { addressed_fixture(argv[2],argv[3],argv[4]); return 0; }
+    if (argc==8 && !strcmp(argv[1],"--address-send")) {
+        addressed_send(argv[2],atoi(argv[3]),atoi(argv[4]),atoi(argv[5]),atoi(argv[6]),atoi(argv[7])); return 0;
+    }
     if (argc==4 && (!strcmp(argv[1],"--custody") || !strcmp(argv[1],"--custody-native"))) {
         alarm(20);
         custody(!strcmp(argv[1],"--custody"),atoi(argv[2]),atoi(argv[3])); return 0;
     }
     CHECK(getuid()==0);
+    if (argc==4 && !strcmp(argv[1],"--origin-receive")) { origin_receive((unsigned)atoi(argv[2]),atoi(argv[3])); return 0; }
+    if (argc==4 && !strcmp(argv[1],"--origin-send")) { origin_send((unsigned)atoi(argv[2]),atoi(argv[3])); return 0; }
     if (argc==4 && !strcmp(argv[1],"--external")) { external(argv[2],(pid_t)atoi(argv[3])); return 0; }
     CHECK(argc==1);
     send_contract();

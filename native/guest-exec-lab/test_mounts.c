@@ -18,6 +18,14 @@
 void test_mount_copy(const char *base);
 void test_fs_anchor(const char *base);
 void test_mount_alias(const char *base);
+void test_mount_policy(const char *base);
+int test_mount_policy_child(int argc, char **argv);
+void test_mount_graph(const char *base);
+int test_mount_graph_child(int argc, char **argv);
+void test_inode_custody(const char *base);
+int test_inode_custody_child(int argc, char **argv);
+void test_origin_transfer(const char *base);
+int test_origin_transfer_child(int argc, char **argv);
 
 static struct md_fs_result call(struct md_filesystem *fs, unsigned op, int fd, const char *path,
         unsigned flags, unsigned mode, void *data, size_t size) {
@@ -249,6 +257,27 @@ static void task_mount_views(const char *base) {
     puts("PASS task-selected mount views, readonly policy, authenticated snapshots, stale roots and retained lifetime");
 }
 int main(int argc, char **argv) {
+    setvbuf(stdout,NULL,_IONBF,0);
+    int child=test_mount_policy_child(argc,argv);
+    if (child>=0) return child;
+    child=test_mount_graph_child(argc,argv);
+    if (child>=0) return child;
+    child=test_inode_custody_child(argc,argv);
+    if (child>=0) return child;
+    child=test_origin_transfer_child(argc,argv);
+    if (child>=0) return child;
+    if (argc==3 && !strcmp(argv[1],"--origin-transfer")) {
+        assert(!mkdir(argv[2],0700)); test_origin_transfer(argv[2]); return 0;
+    }
+    if (argc==3 && !strcmp(argv[1],"--inode-custody")) {
+        assert(!mkdir(argv[2],0700)); test_inode_custody(argv[2]); return 0;
+    }
+    if (argc==3 && !strcmp(argv[1],"--mount-graph")) {
+        assert(!mkdir(argv[2],0700)); test_mount_graph(argv[2]); return 0;
+    }
+    if (argc==3 && !strcmp(argv[1],"--mount-policy")) {
+        assert(!mkdir(argv[2],0700)); test_mount_policy(argv[2]); return 0;
+    }
     assert(argc == 2 && argv[1][0] == '/'); assert(!mkdir(argv[1], 0700));
     char path[4096], host[4096], readonly[4096], store[4096];
     assert(snprintf(host, sizeof(host), "%s/host", argv[1]) < (int)sizeof(host));
@@ -439,5 +468,9 @@ int main(int argc, char **argv) {
     test_mount_copy(argv[1]);
     test_fs_anchor(argv[1]);
     test_mount_alias(argv[1]);
+    test_mount_policy(argv[1]);
+    test_mount_graph(argv[1]);
+    test_inode_custody(argv[1]);
+    test_origin_transfer(argv[1]);
     return 0;
 }

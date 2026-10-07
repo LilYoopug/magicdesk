@@ -20,6 +20,8 @@ struct md_inode_lifetime {
     ino_t inode;
     int sources[MDI_SOURCES], source_leases[MDI_SOURCES];
 };
+/* Consumes the validated root/lease FD only on success. */
+struct md_inode_lifetime *mdi_lifetime_new(int root, const struct stat *);
 enum mdi_query { MDI_NODE, MDI_FD, MDI_LOOKUP, MDI_DIRECTORY_NAME, MDI_READDIR,
     MDI_BEGIN, MDI_BEGIN_WRITE, MDI_COMMIT, MDI_ROLLBACK, MDI_EVENT, MDI_EVENT_TRIM,
     MDI_EVENT_END, MDI_EVENT_SCAN, MDI_EVENT_NAMES, MDI_BACKING_OBJECT, MDI_FILE_PATH, MDI_ACL,

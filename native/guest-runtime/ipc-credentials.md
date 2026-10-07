@@ -68,6 +68,52 @@ Unregistered/external endpoints keep kernel credentials. Abstract socket names
 remain in the host's shared namespace. These mappings do not provide network
 isolation or protect mutually hostile processes sharing the real executor UID.
 
+## Application Ancillary Transport
+
+An IPC authority has one immutable runtime-owner offer: `NATIVE` or
+`ORIGINS_V1`. This is not an application request or a feature inferred from
+received descriptors. Listen publication records the offer alongside its
+revision; connect preparation selects `ORIGINS_V1` only when both declarations
+match. Otherwise it selects `NATIVE`. The selection becomes usable with the
+confirmed connection, before the client can send its first message. Socketpair
+publishes both sides with one selection in one transaction. A conflicting
+second insertion rolls back the first instead of leaving a half-pair.
+
+Accept inherits the candidate's selection, including when it runs before the
+client publishes connect completion or after the client exits. A pending
+candidate requires the original ready listener revision. A completed connection,
+including one already confirmed by accept, retains its selection through later
+listener changes. Re-registration cannot rewrite it. Dup, inherited descriptors
+and SCM_RIGHTS aliases resolve the same cookie-bound record; opening another
+authority with a different offer does not upgrade existing sockets.
+
+`md_ipc_binding` captures this selection with the directional identity under the
+same metadata gate and retains it after SQLite closes. Unregistered, pending,
+invalid and malformed associations remain explicit errors, not an invented
+`NATIVE` agreement. No negotiation bytes enter application queues, and neither
+ordinary read/write nor resource probes acquire a new per-data operation.
+
+Application format and private control agreement are separate contracts.
+Carrier publication, route reading and origin service admission require a
+creation-time `ORIGINS_V1` binding. A successful private ORIGINS agreement alone
+cannot upgrade a `NATIVE` connection. Native-binding rejection occurs before
+peeking at a candidate carrier or transferring ownership of caller descriptors.
+Self-contained capsules authenticate an immutable kernel queue with the store
+epoch key and exact directional connection, without a live source owner.
+
+Production filesystem owners declare `NATIVE`. Outgoing ancillary messages
+and the receive adapter handle explicitly bound `ORIGINS_V1` connections
+through the shared buffered worker. Selected-format
+tests declare that transport before passing a socket into the guest, without
+changing production offers. Connection transfer to an unadapted consumer still
+needs a policy; selection alone does not solve that contract. Sender-independent capsule
+coverage is described in [process resources](process-resources.md#self-contained-origin-custody).
+`--case fd-messages` covers 29 transport scenarios across stream,
+seqpacket and paired datagram sockets: mixed offers, both publication orders,
+independent sender exit, listener revisions, aliases and transaction rollback.
+`--case ipc-peer` checks carrier rejection on native bindings, including a valid
+private agreement, unchanged application data and exact descriptor balance.
+
 ## Private Peer Agreement
 
 `ipc_peer` agrees protocol features over an explicitly supplied private Unix
@@ -140,7 +186,7 @@ nonblocking and separate from that lookup, so readiness/cancellation stays with
 the event-loop owner. Private transport validation and ancillary cleanup reuse
 `fs_wire`; malformed packets cannot leak received rights or consume a subsequent
 `ipc_peer` offer. Both discovery and connection-feature agreement must complete
-before a caller selects any application transport. Neither protects mutually
+before a caller uses the already selected application transport. Neither protects mutually
 hostile processes sharing the executor UID, nor guarantees continued peer life.
 
 The component establishes a private channel to a known launch. The message-route
@@ -202,9 +248,86 @@ Message-route checks additionally cover 253 rights, repeated descriptor-free
 peek with a full FD table, wrong stores/sides, stale nonces, malformed headers,
 last-pin epoch/maintenance lifetime and exact payload EOF. The source registry
 and both SQLite owners may close before the last pin releases its scope.
-The components do not select production application transports,
-transfer mount views or enable application FD framing;
-cross-launch origin custody and native in-flight quotas remain separate gates.
+The source helper can export the application socket and 253 rights at one
+private-table clone, releasing its source-table turn before export. Its caller
+retains the matching origin snapshot. `ipc_origins` retains that capture on the
+event loop and schedules capsule preparation on the filesystem worker. The
+worker resolves the actual captured socket's binding. ORIGINS_V1 validates
+backing identities and returns the same socket description plus its self-contained
+capsule; NATIVE or unregistered peers return the original vector without duplicating
+FDs or serializing origins. Completion reports the format explicitly. The
+captured-send helper accepts either result without looking up original guest FD
+numbers. Its private SCM_RIGHTS import supports O_PATH and up to 253 rights;
+partial import is an error before any application send.
+
+Guest ancillary sends and addressed Unix sends use one outgoing owner for
+this complete path. Source metadata and actual descriptors are captured under
+the same file-table turn, which ends at helper clone rather than after IO.
+Preparation follows export reaping; final send uses only retained descriptions.
+Format selection runs on that captured socket; a guest filter denying SO_DOMAIN
+cannot silently downgrade an agreed format. Non-Unix sockets retain native
+selection and kernel ancillary validation.
+The mapped adapter validates the selected native/capsule format and normalizes
+split rights headers. Its buffer release cancels any prepared but unused result.
+Cancellation during helper execution waits for exact reaping before freeing
+custody. Explicit credentials are validated against the captured task identity;
+their sealed capability joins the same prepared vector. Non-right headers retain
+their bytes and relative order, including kernel rejection of unsupported headers.
+
+Address resolution uses the captured cwd/root and mount view on the worker.
+Virtual socket paths become their exact abstract transport name. Native paths
+return an owned O_PATH anchor, imported separately into the private helper and
+addressed through its `/proc/thread-self/fd` alias. This anchor never appears in
+application SCM_RIGHTS or in the caller's table. It remains held through final
+send and exact helper reaping, including failure and cancellation. `sendto`
+retains its syscall and arguments; `sendmmsg` retains partial batch completion.
+An addressed datagram overriding a connection's peer cannot use that connection's
+capsule or identity capability. Unassociated datagrams keep native ancillary
+semantics rather than guessing an identity from the destination pathname.
+Peer comparison follows virtual-path resolution. An explicitly framed datagram
+connection cannot authenticate a native pathname anchor as its peer and rejects
+that combination with EOPNOTSUPP rather than silently changing wire format.
+Payload-only non-Unix sends retain native execution without a helper or worker.
+
+Receive accepts captured socket/carrier custody, authenticates the capsule and
+returns actual data rights with imported origins. No source registry, launch
+lookup or live source process is involved. Cancellation and worker join own all
+pending inputs/results; repeated receive preserves the kernel queues and data
+offsets. Independent exec checks receive after sender exit and reclaim untaken
+results after receiver death. Source-slot reuse, bounded concurrent requests,
+allocation/quota failures and protected partial publication also run under shell.
+See [authenticated origin transfer](process-resources.md#authenticated-origin-transfer).
+
+The guest receive adapter uses `ipc_received` to resolve that captured binding,
+separate identity capabilities and expand one carrier into annotated custody.
+Its index plan preserves coalesced SCM_RIGHTS ordering and does not expose the
+carrier to adapted consumers. Native connections retain their original rights,
+including a capsule deliberately sent as ordinary application data.
+The receive owner retains raw batch custody and replaces only the expanded
+per-message vector after publication. Cancellation and worker join release
+untaken results. Known origins use the existing task-local FD-table observation
+and direct kernel publication into application control memory.
+
+The `ipc-ancillary` case covers actual guest sends and receives, including
+protected/full-table callers, 253 rights, split headers, send/receive batches,
+peek, partial memory faults, credentials and quota errors. Send checks import
+only after the sender exits. Blocked native sends additionally check caller
+death, source-slot replacement and unrelated pipe EOF. Signal checks retain
+SIGPIPE delivery, masking and MSG_NOSIGNAL. Native/guest UDP controls check
+payload delivery without rights; denied guest SO_DOMAIN cannot change selected framing. Native
+in-flight-right limits may reject helper export with ETOOMANYREFS even when
+table slots are free; the runtime does not raise quotas or replay consumption.
+Address checks cover binary abstract names, virtual paths, absolute/relative
+native anchors, zero-right/payload messages, mixed headers, all three sending
+syscalls and full/protected callers. On a shell policy denying native socket-file
+creation, the native-anchor fixture verifies final kernel rejection and release;
+successful delivery to a fixture-created native path is explicitly unavailable.
+The same captured-send helper also has a native pathname delivery fixture
+(`libmagicdesk_guest_task_helper_fd.so DIRECTORY --native-anchor`): under the
+Termux app UID it delivers 253 mixed/O_PATH rights from ordinary and protected
+callers with exact FD cleanup. This verifies the mechanism, not shell permission.
+The policy for unadapted consumers remains open. These checks do not enable a global
+ORIGINS_V1 offer.
 
 ## Explicit Credential Messages
 
@@ -219,10 +342,10 @@ another connection or another store does not translate the token. The receiving
 adapter removes that descriptor and publishes the validated guest credentials instead.
 
 The namespace worker retains the sending capability; it never installs that FD
-in the application's shared table. A same-process helper captures a private
-table under the existing file-table/FS turns. Those turns end at the exact clone
-event, before IO. The helper closes unrelated descriptors, validates the retained
-socket and application rights, and receives the capability with atomic ADDFD_SEND.
+in the application's shared table. The common outgoing owner captures source
+descriptions and task identity, releases ordering turns before IO and imports
+the prepared rights/capability into a private helper table. The application socket
+keeps its original number there so FD-specific application filters still apply.
 It performs the native send and is reaped before completion. Helper/caller death
 therefore releases temporary descriptors without closing remembered numbers in a
 surviving CLONE_FILES peer. A concurrent close/reuse cannot retarget the send,
@@ -233,9 +356,10 @@ Application filters still apply to private-helper setup and IO; rejection is an
 error, not permission to bypass those filters or replay a send.
 
 This keeps payload bytes, blocking/readiness, FD transfer, partial sends and
-message ordering in the kernel. Ordinary read/write and credential-free sends
-do not create capabilities. Common ancillary buffers use stack scratch; larger
-buffers use bounded temporary mappings. Recvmmsg uses one native batch so its
+message ordering in the kernel. Ordinary read/write and native-format
+credential-free sends do not create identity capabilities. Common ancillary
+buffers use stack scratch; larger buffers use bounded temporary mappings.
+Recvmmsg uses one native batch so its
 timeout and partial completion are not replaced by a userspace receive loop.
 MSG_PEEK does not consume identity metadata; truncation closes unpublished FDs.
 

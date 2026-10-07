@@ -448,8 +448,177 @@ claim of distribution or driver compatibility.
 
 ## OCI And Filesystem View Checks
 
+`test_resources.py BUILD --case mount-policy` checks the attachment-policy owner
+without running Desktop or replacing the APK. Local policy creates no descriptor;
+explicit publication shares live flags through a size/write-restricted memfd.
+Checks cover malformed imports, writer/observer permissions, failure rollback,
+full-FD-table reads/updates, independent exec receivers using the filesystem
+engine, source teardown, and queued state received after writer exit. These
+checks also run with the regular mount models; namespace copies retain
+independent policy. This does not transfer a complete mount topology or authorize
+an imported state as an application's mount origin.
+
+`test_resources.py BUILD --case mount-graph` checks sealed attachment-graph
+publication and consuming import. It covers empty/maximum graphs, nested mounts,
+native aliases with distinct policies, receiver-local IDs, repeated import into
+the same view, forwarding, copied-view rejection and retained dirfd traversal.
+Faults cover malformed manifests/rights, allocation/mapping failure and FD
+exhaustion including partial export. Independent exec peers exercise actual
+SCM_RIGHTS transfer, source-path replacement, live readonly changes, sender
+teardown and queued rights received after publisher exit, with exact FD balance.
+It also runs in the regular mount models. The fixture explicitly supplies the
+same store: it does not implement cross-launch store/layer lease transfer,
+application-origin authentication or production message framing.
+
+`test_resources.py BUILD --case inode-custody` checks portable store/lower leases
+without SQLite or application data descriptions in the parcel. Real layered
+stores cover source connection closure, queued rights after sender exit,
+forwarding, root/lower rename and replacement, COW/unlink, receiver death and
+discarded or partially received parcels. Import rejects malformed manifests,
+wrong store/FD identities, descriptor types and missing seals. Allocation and
+partial-FD-exhaustion failures retain original locks and exact descriptor counts.
+Empty, sparse and maximum 255-source catalogues include a 512-right transfer to
+an independent exec receiver, with every lease held until final release. The
+maximum catalogue uses distinct real directory/lock pairs, not downloaded OCI
+images. An exclusive source lease remains exclusive after import; 10,000 local
+pins allocate no descriptors. These checks also run in the regular mount models.
+They verify custody independently, not its integration with application-origin
+authentication or production cross-launch framing. The harness rejects child
+assertions even if another process subsequently prints a success marker.
+
+`test_resources.py BUILD --case origin-transfer` checks their composition into
+message-origin parcels. A 253-entry vector includes unknown/repeated origins,
+lower objects, nested/aliased native attachments and copied views with distinct
+readonly policies. Checks cover live updates, interned IDs, ordinary FD-table
+batch/fork/exec publication, forwarding after sender/SQLite/cache teardown,
+COW/unlink and final maintenance admission. Malformed manifests/rights, foreign
+stores, stale routes, every import allocation boundary and partial export FD
+exhaustion must leave no partial destination or leaked resources. An independent
+exec sender exits before receipt; actual queued SCM_RIGHTS preserve usable
+origins even after replacing an attachment's old source pathname. An all-unknown
+vector has one manifest and invents no mount/store owner. The fixture supplies
+the expected route out of band; it does not substitute that for production peer
+authentication, application framing or actual guest ancillary publication.
+This suite also runs with the regular mount models.
+
+The same `origin-transfer` case checks self-contained authenticated capsules:
+an independent exec publisher exits before a fresh receiving authority opens;
+the queued carrier retains its IPC epoch and exact data/metadata rights.
+Checks cover 253 mixed/all-unknown origins, copied readonly views, repeated and
+concurrent peeks, shared offsets, native/wrong-binding rejection, copied and
+cookie-tampered headers, allocation rollback and five partial FD limits.
+Discard without import must release both data pipe writers and maintenance
+leases. Interrupted key construction and last-owner key retirement are checked.
+The immutable queue-tree fixture separately covers 253/600 rights, malformed
+shape and partial construction cleanup. No ordinary guest framing is enabled.
+
+`test_resources.py BUILD --case ipc-origins` exercises the asynchronous capsule
+service on real filesystem workers. Source capture contains the actual socket
+and 253 data rights with mixed/repeated/unknown origins. Replacing its original
+socket number before worker execution must not retarget the prepared send.
+The test sends the capsule over the captured socket with unchanged application
+bytes, closes the source worker, and checks repeated receiving custody and shared
+offsets. Inputs may be released immediately after asynchronous admission.
+
+Eight cancellation cases cover prepare/receive while queued, running at the
+metadata gate, computed but undispatched, and completed. Two join cases reclaim
+undispatched results without callbacks. Seven failures cover worker/admission
+allocation, injected in-flight quota failure, annotation allocation, wrong side,
+native binding and an unregistered socket. A blocked-worker burst verifies the
+16-request limit, mixed cancellation and independent successful results with
+exact FD balance.
+
+The actual rights then use `received_fds` and production annotated `fd_return`
+after source workers and importers close. Nine protected CLONE_FILES
+receiver cases exit without acknowledgement. Retained kernel output publishes
+full, truncated and peeked vectors while a competing table mutation stays
+queued; zero delivery releases all preparation. Checks include regular-file
+offsets, O_PATH/flags, reordered/repeated/unknown entries, final maintenance
+admission, receiver-local zero/three-slot limits, pipe EOF and exact FD balance.
+
+Independent exec publication exits before the receiver worker is created.
+A second exec receiver exits with an untaken result and live worker: all data
+writers and maintenance leases must be released by process/queue ownership.
+The setup channel transfers custody, not authentication; the capsule's store
+epoch key and actual directional socket binding remain authoritative.
+These are production-component checks, not enabled guest ancillary framing.
+
+`test_resources.py BUILD --case ipc-ancillary` also runs 28 actual guest capsule
+receive cases. A fixture declares the connection format, queues the capsule,
+closes its workers and passes the socket through the runner's stdin; production
+authorities retain their NATIVE offer. Protected/unprotected receivers check
+253 mixed/repeated rights, logical openat using imported origins, offsets,
+peek, recvmmsg, truncation, partially writable control data, unwritable headers
+and zero/three free table slots. Credentials before/after the carrier are
+checked with SO_PASSCRED enabled/disabled. A native-format socket leaves a
+capsule opaque. A reduced in-flight limit must fail explicitly with
+ETOOMANYREFS, not leak caller FDs or retry the message. Final EOF, FD balance
+and maintenance admission verify complete release.
+Seven additional `ipc-origins` cases exercise the buffered decoder's result
+take, untaken completion, queued/computed cancellation, worker join, wrong
+direction and partial allocation failure independently of a guest launch.
+No Desktop or APK installation is needed.
+
+`test_resources.py BUILD --case ipc-ancillary` runs the existing credential and
+ancillary fixtures in an isolated minimal store with Linux root/tmp permissions.
+It covers the actual adapter's native/protected send and receive lifecycle,
+credentials after UID changes, peek, batching, truncation and descriptor custody
+after fatal filters, with native-shell controls. It needs no installed Linux
+distribution; staging and the store are removed by the common harness. These
+checks also run in the default resource suite.
+
+`test_resources.py BUILD --case fd-observation` checks native direct-to-user
+control output through the common annotated return owner. A same-TGID helper
+with a private file table captures `/proc/<receiver tid>/fd` without a caller
+scratch descriptor. The supervisor observes actual installations at the
+receiver's ptrace exit stop, including unwriteable control/message headers,
+partially writable FD words, zero control capacity, RLIMIT_NOFILE, peek and
+SIGKILL before/after receive. The 96-case matrix combines 253-FD vectors,
+protected/unprotected receivers, shared/private tables and both CLOEXEC modes.
+It verifies origin ordering, queued mutations, exact FD balance, pipe EOF,
+non-prefix rejection, invalid acknowledgement, preserved native output errors
+and explicit failure after reaping. The ordinary resource
+model additionally checks allocation-free observation/publication and queued
+cancellation before admission. A second fixture uses the production task-helper
+manager and its real ptrace/notification lifecycle. Twelve cases cover protected
+callers, quota exhaustion, repeated capture, open rejection, fatal filters and
+cancellation before/after directory export. It checks unchanged caller tables,
+once-only completion, returned stack leases, final pipe EOF and FD balance.
+These are component checks, not enabled guest message framing. No Desktop, APK
+install or distribution is required.
+
+Twenty-six captured-send cases use socket/right custody created after the caller
+forks, unavailable by its original FD numbers. Admission retains that owner even
+after the caller releases it. The production helper clears its private table,
+installs both descriptions, patches its control slot and sends unchanged bytes.
+Protected/unprotected callers cover full tables, zero/one helper slot, clone/send
+rejection, fatal filters, native peer closure and actual versus filter-generated
+SIGPIPE. Cancellation is injected before/between installations and after native
+send; committed bytes remain committed. Exact reaping must restore stack leases,
+close every private descriptor and leave the caller's table unchanged.
+
+The same production-helper fixture adds 24 explicit source-export cases with
+1/254 entries, repeated/reordered descriptors, ordinary/protected callers, full
+caller tables, unavailable helper slots, clone/send rejection, fatal filters and
+cancellation before or during either packet. Origin snapshots and actual FD
+capture share a source-table turn, released at clone before export. A real
+CLONE_FILES sibling then replaces a descriptor with another open of the same
+inode; exported rights retain the original offset and snapshot after source
+metadata teardown. It checks copied input arrays, O_PATH/access flags, exact
+descriptor counts, stack-lease return and pipe EOF. The fixture creates its
+temporary source in the harness-owned staging directory and unlinks it before
+capture. These are source-capture checks, not transport selection or framing.
+
+`test_resources.py BUILD --case fd-messages` includes 29 creation-time ancillary
+transport cases: mixed runtime-owner declarations, stream/seqpacket connect and
+accept in either order, socketpairs including datagrams, listener replacement,
+independent sender exit, immutable dup/SCM aliases and atomic pair rollback.
+Connection identity and transport selection are read from the same authority;
+ordinary payload and FD transfer remain unchanged. These fixtures opt into the
+candidate format explicitly; production owners still declare native traffic.
+
 `test_resources.py BUILD --case ipc-peer` stages the private runtime peer
-agreement, launch-registry and filesystem-worker admission fixtures under the
+agreement, launch-registry, origin-transfer and worker admission fixtures under the
 selected shell UID. Build `test_ipc_peer`, `test_launch_registry` and `fs_dispatch`
 with `MAGICDESK_GUEST_FIXTURES=ON`.
 Checks cover fresh-process discovery/negotiation, connection/epoch ownership, protocol
@@ -466,6 +635,10 @@ separate exec receiver discovers the live custodian from that header after the
 socket creator exits and the application socket changes processes. Source-side
 claims pin the exact local vector and its IPC epoch through SQLite/registry
 closure; final release checks maintenance admission and pipe EOF.
+Native-format connections reject carrier reading, binding and claim before
+touching application packets. Origin-service checks also reject publication and
+admission after a successful private ORIGINS agreement on such a connection:
+control negotiation cannot change its application format.
 This is not end-to-end application mount-origin
 transfer, custodian-supervisor death or Desktop coverage.
 

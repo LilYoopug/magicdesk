@@ -31,7 +31,8 @@ static void ready(int fd) {
     assert(!md_event_wait_fd(fd,POLLIN,md_event_now()+5000000000LL));
 }
 static struct md_ipc_credentials *authority(const char *path) {
-    struct md_ipc_credentials *s=NULL; assert(!md_ipc_credentials_open(path,&s)); return s;
+    struct md_ipc_credentials *s=NULL;
+    assert(!md_ipc_credentials_open(path,MD_IPC_TRANSPORT_ORIGINS_V1,&s)); return s;
 }
 static void pair(struct md_ipc_credentials *s, int fd[2]) {
     assert(!socketpair(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC|SOCK_NONBLOCK,0,fd));
@@ -299,4 +300,39 @@ static void independent(const char *path) {
     assert(descriptors()==before);
     puts("PASS independent exec routing: dead socket creator, transferred application socket, header-selected live custodian, exact vector and payload EOF");
 }
-void test_message_routes(const char *path) { retained(path); replacement(path); malformed(path); independent(path); }
+static void native_transport(const char *path) {
+    unsigned before=descriptors(); struct md_ipc_credentials *native=NULL;
+    assert(!md_ipc_credentials_open(path,MD_IPC_TRANSPORT_NATIVE,&native));
+    int app[2], carrier[2], payload[2]; pair(native,app);
+    struct md_ipc_credentials *upgraded=authority(path);
+    struct md_ipc_binding source=binding(upgraded,app[0]), destination=binding(upgraded,app[1]);
+    assert(source.transport==MD_IPC_TRANSPORT_NATIVE && destination.transport==MD_IPC_TRANSPORT_NATIVE);
+    md_ipc_credentials_close(native); md_ipc_credentials_close(upgraded);
+    struct md_fd_message *message=capture(1), *claim=NULL;
+    assert(md_fd_message_bind(message,&source,"0123456789abcdef0123456789abcdef")==-ENOTSUP);
+    assert(!socketpair(AF_UNIX,SOCK_SEQPACKET|SOCK_NONBLOCK|SOCK_CLOEXEC,0,carrier)
+        && !pipe2(payload,O_NONBLOCK|O_CLOEXEC));
+    struct md_fd_message_route route={.magic=MD_FD_ROUTE_MAGIC,.version=MD_FD_ROUTE_VERSION,
+        .side=destination.connection.side,.count=1}, out, unchanged;
+    socklen_t size=sizeof(route.cookie); assert(!getsockopt(carrier[1],SOL_SOCKET,SO_COOKIE,&route.cookie,&size));
+    memcpy(route.link,destination.connection.link,sizeof(route.link)); memset(route.launch,'a',sizeof(route.launch));
+    send_route(carrier[0],&route,payload[1],1); close(payload[1]);
+    memset(&unchanged,0xab,sizeof(unchanged)); out=unchanged;
+    assert(md_fd_message_route_read(carrier[1],&destination,&out)==-ENOTSUP
+        && !memcmp(&out,&unchanged,sizeof(out)));
+    assert(md_fd_message_route_read(-1,&destination,&out)==-ENOTSUP);
+    struct md_fd_messages *messages=NULL; assert(!md_fd_messages_new(&messages));
+    assert(md_fd_messages_claim(messages,&destination,carrier[1],&route,&claim)==-ENOTSUP && !claim);
+    int actual=-1; unsigned count=0;
+    assert(md_fs_receive_fds(carrier[1],&out,sizeof(out),&actual,1,&count)==sizeof(out)
+        && count==1 && !memcmp(&out,&route,sizeof(out)) && actual>=0);
+    close(actual); char byte; assert(!read(payload[0],&byte,1));
+    close(payload[0]); close(carrier[0]); close(carrier[1]); close(app[0]); close(app[1]);
+    md_fd_messages_free(messages); md_fd_message_release(message);
+    md_ipc_binding_release(&source); md_ipc_binding_release(&destination);
+    assert(descriptors()==before);
+    puts("PASS native transport: no upgrade, carrier sniffing, publication or claim; application packet and FD intact");
+}
+void test_message_routes(const char *path) {
+    retained(path); replacement(path); malformed(path); independent(path); native_transport(path);
+}

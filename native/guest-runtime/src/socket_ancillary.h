@@ -5,6 +5,5 @@ long md_socket_ancillary_send(const struct md_fs *, const char *, const unsigned
 long md_socket_ancillary_receive(const struct md_fs *, const char *, const unsigned long *);
 long md_socket_ancillary_batch(const struct md_fs *, const unsigned long *);
 long md_socket_address_call(const struct md_fs *, const char *, long, const unsigned long *);
-long md_socket_address_send(const struct md_fs *, const char *, const unsigned long *,
-        long (*send)(void *, const unsigned long *, int), void *);
+long md_socket_ancillary_sendto(const struct md_fs *, const char *, const unsigned long *);
 #endif

@@ -15,7 +15,7 @@ static int writable(unsigned flags) {
 }
 static int reopen(struct md_view_object *p, int flags, int mutable,
         struct md_open_completion *completion) {
-    if (p->mount->readonly && (mutable || writable(flags))) return -EROFS;
+    if (md_view_readonly(p->mount) && (mutable || writable(flags))) return -EROFS;
     return md_reopen_file(p->fd,flags,completion);
 }
 static void result_stat(struct md_fs_result *out, int fd, const struct md_view_mount *mount) {
@@ -55,15 +55,15 @@ static int descriptor(struct md_filesystem *fs, const struct md_fs_request *q,
     case MD_FS_SETCAP: case MD_FS_REMOVECAP: case MD_FS_SETACL: case MD_FS_REMOVEACL:
         /* Real directory attachments retain host ownership and kernel checks.
          * The adapter handles EXDEV through the same readonly-aware reopen. */
-        r = p->mount->readonly ? -EROFS : -EXDEV; break;
+        r = md_view_readonly(p->mount) ? -EROFS : -EXDEV; break;
     case MD_FS_GETCAP: case MD_FS_GETACL: case MD_FS_LISTATTR: r = -EXDEV; break;
     case MD_FS_ACCESS:
         if (q->flags&~MD_AT_EACCESS || q->mode&~(R_OK|W_OK|X_OK)) r=-EINVAL;
-        else if (p->mount->readonly && (q->mode&W_OK)) r=-EROFS;
+        else if (md_view_readonly(p->mount) && (q->mode&W_OK)) r=-EROFS;
         else if (syscall(SYS_faccessat2,p->fd,"",q->mode,AT_EMPTY_PATH|q->flags)) r=-errno;
         break;
     case MD_FS_XATTR_OPEN:
-        r = p->mount->readonly && (q->mode & W_OK) ? -EROFS : -EXDEV; break;
+        r = md_view_readonly(p->mount) && (q->mode & W_OK) ? -EROFS : -EXDEV; break;
     case MD_FS_FSTAT: result_stat(out, q->directory[0], p->mount); break;
     case MD_FS_STATFS: md_fs_statfs_result(q->directory[0],out,output); break;
     case MD_FS_READLINK: {
@@ -184,6 +184,13 @@ static void native(struct md_filesystem *fs, const struct md_fs_request *q,
     void *data = output ? output->data : NULL;
     size_t capacity = output ? output->capacity : 0;
     switch (q->operation) {
+    case MD_FS_SOCKET_ADDRESS: {
+        if (!(q->flags&MD_FS_SOCKET_PIN)) { r=-EOPNOTSUPP; break; }
+        int fd=fcntl(a->fd,F_DUPFD_CLOEXEC,0);
+        if (fd<0) r=-errno;
+        else out->fd=fd;
+        break;
+    }
     case MD_FS_CHMOD: {
         struct stat st;
         if (fstat(a->fd,&st)) r=-errno;
@@ -205,7 +212,7 @@ static void native(struct md_filesystem *fs, const struct md_fs_request *q,
     }
     case MD_FS_ACCESS:
         if (q->flags & ~(AT_SYMLINK_NOFOLLOW | MD_AT_EACCESS) || q->mode & ~(R_OK | W_OK | X_OK)) r = -EINVAL;
-        else if ((q->mode & W_OK) && a->mount->readonly) r = -EROFS;
+        else if ((q->mode & W_OK) && md_view_readonly(a->mount)) r = -EROFS;
         else if (syscall(SYS_faccessat2, a->fd, "", q->mode, AT_EMPTY_PATH | q->flags)) r = -errno;
         break;
     case MD_FS_CREATE: case MD_FS_OPEN: case MD_FS_OPEN_IMAGE: {
@@ -342,7 +349,7 @@ void md_fs_mounts_execute(struct md_filesystem *fs, const struct md_fs_request *
     int pair = q->operation == MD_FS_LINK || q->operation == MD_FS_RENAME;
     if (!r && pair) r = md_view_walk(fs, q->directory[1], q->origin[1], q->path[1], -1, 1, 0, &b);
     if (!r && pair && (a.view != b.view || a.mount != b.mount)) r = -EXDEV;
-    if (!r && mutates(q) && a.mount && a.mount->readonly) r = -EROFS;
+    if (!r && mutates(q) && a.mount && md_view_readonly(a.mount)) r = -EROFS;
     if (!r && (q->operation == MD_FS_UNLINK || q->operation == MD_FS_RENAME)
             && (mounted_root(&a) || (pair && mounted_root(&b)))) r = -EBUSY;
     if (!r && a.mount) native(fs, q, &a, &b, out, output);

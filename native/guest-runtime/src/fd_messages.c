@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "fd_messages.h"
 #include "fd_receipt.h"
+#include "ipc_scope.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
@@ -58,6 +59,7 @@ int md_fd_message_bind(struct md_fd_message *p, const struct md_ipc_binding *sou
     if (!p || !source || !source->scope || source->connection.side>1
             || !id || strlen(id)!=32 || strspn(id,"0123456789abcdef")!=32) return -EINVAL;
     if (p->published || p->source.scope) return -ESTALE;
+    if (source->transport!=MD_IPC_TRANSPORT_ORIGINS_V1) return -ENOTSUP;
     struct md_fd_message_route route={.magic=MD_FD_ROUTE_MAGIC,.version=MD_FD_ROUTE_VERSION,
         .count=p->count,.side=source->connection.side^1};
     memcpy(route.link,source->connection.link,sizeof(route.link));
@@ -72,6 +74,9 @@ int md_fd_message_route(const struct md_fd_message *p, struct md_fd_message_rout
     if (!p || !out) return -EINVAL;
     if (!p->source.scope || !p->published) return -ENODATA;
     *out=p->route; return 0;
+}
+int md_fd_message_store_root(const struct md_fd_message *p) {
+    return p && p->source.scope ? p->source.scope->root : -1;
 }
 int md_fd_messages_fd(const struct md_fd_messages *s) { return s ? s->events : -1; }
 unsigned md_fd_messages_count(const struct md_fd_messages *s) { return s ? s->count : 0; }
@@ -90,6 +95,14 @@ static int carrier_cookie(int fd, uint64_t *cookie) {
     size=sizeof(*cookie);
     if (getsockopt(fd,SOL_SOCKET,SO_COOKIE,cookie,&size)) return -errno;
     return size==sizeof(*cookie) && *cookie ? 0 : -EPROTO;
+}
+int md_fd_message_issue(struct md_fd_message *p, int carrier) {
+    if (!p || !p->source.scope) return -EINVAL;
+    if (p->published) return -ESTALE;
+    uint64_t cookie;
+    int error=carrier_cookie(carrier,&cookie);
+    if (!error) { p->route.cookie=cookie; p->published=1; }
+    return error;
 }
 int md_fd_messages_publish(struct md_fd_messages *s, struct md_fd_message *p,
         const struct md_ipc_connection *destination, int carrier, int reader) {
@@ -157,6 +170,7 @@ int md_fd_messages_find(struct md_fd_messages *s, const struct md_ipc_connection
 int md_fd_message_route_read(int carrier, const struct md_ipc_binding *destination,
         struct md_fd_message_route *out) {
     if (!destination || !destination->scope || destination->connection.side>1 || !out) return -EINVAL;
+    if (destination->transport!=MD_IPC_TRANSPORT_ORIGINS_V1) return -ENOTSUP;
     uint64_t cookie;
     int r=carrier_cookie(carrier,&cookie);
     if (r) return r;
@@ -178,6 +192,7 @@ int md_fd_message_route_read(int carrier, const struct md_ipc_binding *destinati
 int md_fd_messages_claim(struct md_fd_messages *s, const struct md_ipc_binding *destination,
         int carrier, const struct md_fd_message_route *route, struct md_fd_message **out) {
     if (!destination || !destination->scope || !route || !out || *out) return -EINVAL;
+    if (destination->transport!=MD_IPC_TRANSPORT_ORIGINS_V1) return -ENOTSUP;
     struct md_fd_message *p=NULL;
     int r=md_fd_messages_find(s,&destination->connection,carrier,&p);
     if (r) return r;

@@ -18,7 +18,12 @@
 #include <sys/un.h>
 #include <unistd.h>
 
-struct md_ipc_credentials { sqlite3 *db; struct md_ipc_scope *scope; int gate; };
+struct md_ipc_credentials {
+    sqlite3 *db;
+    struct md_ipc_scope *scope;
+    int gate;
+    enum md_ipc_ancillary_transport offer;
+};
 struct snapshot { struct md_ipc_identity ids; uint32_t groups[]; };
 static int sql(int rc) { return rc == SQLITE_OK || rc == SQLITE_DONE || rc == SQLITE_ROW ? 0 : -EIO; }
 static int statement(struct md_ipc_credentials *s, const char *text, sqlite3_stmt **q) {
@@ -34,10 +39,14 @@ void md_ipc_credentials_close(struct md_ipc_credentials *s) {
     md_ipc_scope_release(s->scope);
     free(s);
 }
-int md_ipc_credentials_open(const char *store, struct md_ipc_credentials **out) {
+int md_ipc_credentials_open(const char *store, enum md_ipc_ancillary_transport offer,
+        struct md_ipc_credentials **out) {
+    if (!store || !out || (offer!=MD_IPC_TRANSPORT_NATIVE && offer!=MD_IPC_TRANSPORT_ORIGINS_V1))
+        return -EINVAL;
     struct md_ipc_credentials *s = calloc(1, sizeof(*s));
     if (!s) return -ENOMEM;
     s->gate = -1;
+    s->offer = offer;
     s->scope=calloc(1,sizeof(*s->scope));
     if (!s->scope) { free(s); return -ENOMEM; }
     atomic_init(&s->scope->refs,1); s->scope->lease=s->scope->root=-1;
@@ -65,9 +74,11 @@ int md_ipc_credentials_open(const char *store, struct md_ipc_credentials **out) 
     if (!r) memcpy(path+length, "/credentials.db", sizeof("/credentials.db"));
     if (!r) r = sql(sqlite3_open_v2(path, &s->db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOFOLLOW, NULL));
     if (!r && first) r = execute(s, "DROP TABLE IF EXISTS endpoints;DROP TABLE IF EXISTS connections;DROP TABLE IF EXISTS messages;");
+    if (!r && first && unlinkat(dir,"auth",0) && errno!=ENOENT) r=-errno;
+    if (!r && first && unlinkat(dir,"auth.pending",0) && errno!=ENOENT) r=-errno;
     if (!r) r = execute(s, "PRAGMA journal_mode=WAL;PRAGMA synchronous=NORMAL;"
-        "CREATE TABLE IF NOT EXISTS endpoints(name BLOB PRIMARY KEY,cookie INTEGER,revision INTEGER,identity BLOB,ready INTEGER);"
-        "CREATE TABLE IF NOT EXISTS connections(cookie INTEGER PRIMARY KEY,name BLOB,identity BLOB,peer BLOB,endpoint BLOB,revision INTEGER,hidden INTEGER,valid INTEGER,link BLOB,side INTEGER);"
+        "CREATE TABLE IF NOT EXISTS endpoints(name BLOB PRIMARY KEY,cookie INTEGER,revision INTEGER,identity BLOB,ready INTEGER,transport INTEGER NOT NULL);"
+        "CREATE TABLE IF NOT EXISTS connections(cookie INTEGER PRIMARY KEY,name BLOB,identity BLOB,peer BLOB,endpoint BLOB,revision INTEGER,hidden INTEGER,valid INTEGER,link BLOB,side INTEGER,transport INTEGER NOT NULL);"
         "CREATE INDEX IF NOT EXISTS connection_name ON connections(name);"
         "CREATE INDEX IF NOT EXISTS connection_link ON connections(link,side);"
         "CREATE TABLE IF NOT EXISTS messages(nonce BLOB PRIMARY KEY,link BLOB,device INTEGER,inode INTEGER,pid INTEGER,uid INTEGER,gid INTEGER,side INTEGER);");
@@ -133,12 +144,14 @@ static int blob_copy(sqlite3_stmt *q, int column, void **out, size_t *bytes) {
     if (!*out) return -ENOMEM;
     memcpy(*out, p, *bytes); return 0;
 }
+/* Caller owns the metadata gate and transaction. In particular both ends of a
+ * socketpair must commit together; a failed second insertion rolls back both. */
 static int save_connection(struct md_ipc_credentials *s, uint64_t key, const struct sockaddr_un *name, int size,
         const void *self, size_t self_size, const void *peer, size_t peer_size,
         const struct sockaddr_un *endpoint, int endpoint_size, int64_t revision, int hidden, int valid,
-        const struct md_ipc_connection *connection) {
+        const struct md_ipc_connection *connection, enum md_ipc_ancillary_transport transport) {
     sqlite3_stmt *q = NULL;
-    int r = execute(s, "BEGIN IMMEDIATE");
+    int r = 0;
     if (!r && size) {
         /* close can release a bound name before accept. Keep unresolved
          * candidates: selecting the newest would misidentify queued peers.
@@ -153,7 +166,10 @@ static int save_connection(struct md_ipc_credentials *s, uint64_t key, const str
         }
         sqlite3_finalize(q); q = NULL;
     }
-    if (!r) r = statement(s, "INSERT OR REPLACE INTO connections VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", &q);
+    if (!r) r = statement(s, "INSERT INTO connections VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) "
+        "ON CONFLICT(cookie) DO UPDATE SET name=excluded.name,identity=excluded.identity,peer=excluded.peer,"
+        "endpoint=excluded.endpoint,revision=excluded.revision,hidden=excluded.hidden,valid=excluded.valid,"
+        "link=excluded.link,side=excluded.side,transport=excluded.transport WHERE connections.valid<>1", &q);
     if (!r) {
         sqlite3_bind_int64(q, 1, (sqlite3_int64)key);
         sqlite3_bind_blob(q, 2, name ? name->sun_path : NULL, size, SQLITE_STATIC);
@@ -163,11 +179,11 @@ static int save_connection(struct md_ipc_credentials *s, uint64_t key, const str
         sqlite3_bind_int64(q, 6, revision); sqlite3_bind_int(q, 7, hidden); sqlite3_bind_int(q, 8, valid);
         sqlite3_bind_blob(q, 9, connection->link, sizeof(connection->link), SQLITE_STATIC);
         sqlite3_bind_int(q, 10, (int)connection->side);
+        sqlite3_bind_int(q, 11, transport);
         r = sql(sqlite3_step(q));
+        if (!r && !sqlite3_changes(s->db)) r=-EALREADY;
     }
     sqlite3_finalize(q);
-    if (!r) r = execute(s, "COMMIT");
-    if (r) execute(s, "ROLLBACK");
     return r;
 }
 static int listen_update(struct md_ipc_credentials *s, const struct md_fs_request *req,
@@ -177,14 +193,17 @@ static int listen_update(struct md_ipc_credentials *s, const struct md_fs_reques
     if (r || !n) return r ? r : -EINVAL;
     sqlite3_stmt *q = NULL;
     if (req->flags == MD_IPC_LISTEN_BEGIN) {
-        r = statement(s, "INSERT INTO endpoints VALUES(?1,?2,1,?3,0) ON CONFLICT(name) DO UPDATE SET "
-            "cookie=excluded.cookie,revision=revision+1,identity=excluded.identity,ready=0", &q);
+        r = statement(s, "INSERT INTO endpoints VALUES(?1,?2,1,?3,0,?4) ON CONFLICT(name) DO UPDATE SET "
+            "cookie=excluded.cookie,revision=revision+1,identity=excluded.identity,ready=0,transport=excluded.transport", &q);
     } else {
         r = statement(s, "UPDATE endpoints SET ready=?3 WHERE name=?1 AND cookie=?2", &q);
     }
     if (!r) {
         sqlite3_bind_blob(q, 1, name.sun_path, n, SQLITE_STATIC); sqlite3_bind_int64(q, 2, (sqlite3_int64)key);
-        if (req->flags == MD_IPC_LISTEN_BEGIN) sqlite3_bind_blob(q, 3, self, (int)bytes, SQLITE_STATIC);
+        if (req->flags == MD_IPC_LISTEN_BEGIN) {
+            sqlite3_bind_blob(q, 3, self, (int)bytes, SQLITE_STATIC);
+            sqlite3_bind_int(q, 4, s->offer);
+        }
         else sqlite3_bind_int(q, 3, req->offset == 0);
         r = sql(sqlite3_step(q));
     }
@@ -199,15 +218,22 @@ static int connect_begin(struct md_ipc_credentials *s, const struct md_fs_reques
     if (!address(req->directory[0], 1, &endpoint, &size)) return 0;
     int r = decode_name(req->path[0], &endpoint, &size);
     sqlite3_stmt *q = NULL;
-    if (!r) r = statement(s, "SELECT identity,revision,ready FROM endpoints WHERE name=?1", &q);
+    if (!r) r = statement(s, "SELECT identity,revision,ready,transport FROM endpoints WHERE name=?1", &q);
     void *peer = NULL; size_t peer_size = 0; int64_t revision = 0;
+    enum md_ipc_ancillary_transport transport=MD_IPC_TRANSPORT_NATIVE;
     if (!r) {
         sqlite3_bind_blob(q, 1, endpoint.sun_path, size, SQLITE_STATIC);
         int step = sqlite3_step(q);
         if (step == SQLITE_DONE) { sqlite3_finalize(q); return 0; } // External endpoint.
         if (step != SQLITE_ROW) r = -EIO;
         else if (!sqlite3_column_int(q, 2)) r = -EAGAIN;
-        else { r = blob_copy(q, 0, &peer, &peer_size); revision = sqlite3_column_int64(q, 1); }
+        else {
+            r = blob_copy(q, 0, &peer, &peer_size); revision = sqlite3_column_int64(q, 1);
+            int offered=sqlite3_column_int(q,3);
+            if (sqlite3_column_type(q,3)!=SQLITE_INTEGER || offered<0 || offered>MD_IPC_TRANSPORT_ORIGINS_V1)
+                r=-EPROTONOSUPPORT;
+            else if ((unsigned)offered==s->offer) transport=s->offer;
+        }
     }
     sqlite3_finalize(q);
     int hidden = 0;
@@ -240,7 +266,7 @@ static int connect_begin(struct md_ipc_credentials *s, const struct md_fs_reques
     struct md_ipc_connection connection={0};
     if (!r && getrandom(connection.link, sizeof(connection.link), 0) != sizeof(connection.link)) r = -EIO;
     if (!r) r = save_connection(s, key, &local, local_size, self, bytes, peer, peer_size,
-        &endpoint, size, revision, hidden, 2, &connection);
+        &endpoint, size, revision, hidden, 2, &connection, transport);
     if (!r) result->position = 1;
     free(peer); return r;
 }
@@ -266,9 +292,11 @@ static int connect_end(struct md_ipc_credentials *s, const struct md_fs_request 
         sqlite3_finalize(q); q=NULL;
         if (r) return r; // A reused native listen address cannot confirm this connection.
     }
-    int r = statement(s, "UPDATE connections SET valid=CASE WHEN ?2=0 AND EXISTS(SELECT 1 FROM endpoints "
+    int r = statement(s, "UPDATE connections SET valid=CASE WHEN ?2=0 AND (EXISTS(SELECT 1 FROM endpoints "
         "WHERE endpoints.name=connections.endpoint AND endpoints.revision=connections.revision AND ready=1) "
-        "THEN 1 ELSE CASE WHEN ?2=0 THEN 0 ELSE -1 END END WHERE cookie=?1", &q);
+        "OR EXISTS(SELECT 1 FROM connections AS accepted WHERE accepted.link=connections.link "
+        "AND accepted.side=1 AND accepted.valid=1)) "
+        "THEN 1 ELSE CASE WHEN ?2=0 THEN 0 ELSE -1 END END WHERE cookie=?1 AND valid<>1", &q);
     if (!r) {
         sqlite3_bind_int64(q, 1, (sqlite3_int64)key); sqlite3_bind_int64(q, 2, req->offset);
         r = sql(sqlite3_step(q));
@@ -284,9 +312,12 @@ static int accept_peer(struct md_ipc_credentials *s, int fd, uint64_t key) {
     if (!r && getsockopt(fd,SOL_SOCKET,SO_PEERCRED,&actual,&actual_size)) r=-errno;
     if (r) return r;
     sqlite3_stmt *q = NULL;
-    r = statement(s, "SELECT identity,link,side,valid FROM connections WHERE name=?1 AND endpoint=?2 AND valid>=0", &q);
+    r = statement(s, "SELECT identity,link,side,valid,transport,EXISTS(SELECT 1 FROM endpoints "
+        "WHERE endpoints.name=connections.endpoint AND endpoints.revision=connections.revision AND ready=1) "
+        "FROM connections WHERE name=?1 AND endpoint=?2 AND valid>=0", &q);
     void *id = NULL; size_t bytes = 0;
     struct md_ipc_connection connection={.side=1};
+    enum md_ipc_ancillary_transport transport=MD_IPC_TRANSPORT_NATIVE;
     if (!r) {
         sqlite3_bind_blob(q, 1, peer.sun_path, size, SQLITE_STATIC);
         sqlite3_bind_blob(q, 2, local.sun_path, local_size, SQLITE_STATIC);
@@ -298,16 +329,22 @@ static int accept_peer(struct md_ipc_credentials *s, int fd, uint64_t key) {
             if (((const struct md_ipc_identity *)candidate)->pid!=actual.pid) continue;
             if (id) { r=-ESTALE; break; }
             if (sqlite3_column_int(q,3)!=1 && sqlite3_column_int(q,3)!=2) { r=-ESTALE; break; }
+            if (sqlite3_column_int(q,3)==2 && !sqlite3_column_int(q,5)) { r=-ESTALE; break; }
             if (sqlite3_column_bytes(q, 1) != sizeof(connection.link)
                     || sqlite3_column_type(q, 2)!=SQLITE_INTEGER
-                    || sqlite3_column_int(q, 2)!=0) { r=-EPROTO; break; }
+                    || sqlite3_column_int(q, 2)!=0
+                    || sqlite3_column_type(q,4)!=SQLITE_INTEGER
+                    || (unsigned)sqlite3_column_int(q,4)>MD_IPC_TRANSPORT_ORIGINS_V1) { r=-EPROTO; break; }
             r=blob_copy(q,0,&id,&bytes);
-            if (!r) memcpy(connection.link,sqlite3_column_blob(q,1),sizeof(connection.link));
+            if (!r) {
+                memcpy(connection.link,sqlite3_column_blob(q,1),sizeof(connection.link));
+                transport=(enum md_ipc_ancillary_transport)sqlite3_column_int(q,4);
+            }
         }
         if (!r && step!=SQLITE_DONE) r=-EIO;
     }
     sqlite3_finalize(q);
-    if (!r && id) r = save_connection(s, key, NULL, 0, NULL, 0, id, bytes, NULL, 0, 0, 0, 1, &connection);
+    if (!r && id) r = save_connection(s, key, NULL, 0, NULL, 0, id, bytes, NULL, 0, 0, 0, 1, &connection, transport);
     free(id); return r;
 }
 static int peer_snapshot(struct md_ipc_credentials *s, const struct md_fs_request *req,
@@ -331,10 +368,12 @@ static int peer_snapshot(struct md_ipc_credentials *s, const struct md_fs_reques
     if (!r) { memcpy(output->data,id,bytes); result->size=bytes; }
     sqlite3_finalize(q); return r;
 }
-static int connection_key(struct md_ipc_credentials *s, uint64_t key, struct md_ipc_connection *out) {
+static int connection_key(struct md_ipc_credentials *s, uint64_t key, struct md_ipc_connection *out,
+        enum md_ipc_ancillary_transport *transport) {
     sqlite3_stmt *q = NULL;
     struct md_ipc_connection connection={0};
-    int r = statement(s, "SELECT link,valid,side FROM connections WHERE cookie=?1", &q);
+    int r = statement(s, "SELECT link,valid,side,transport FROM connections WHERE cookie=?1", &q);
+    enum md_ipc_ancillary_transport selected=MD_IPC_TRANSPORT_NATIVE;
     if (!r) {
         sqlite3_bind_int64(q, 1, (sqlite3_int64)key);
         int step = sqlite3_step(q);
@@ -342,17 +381,21 @@ static int connection_key(struct md_ipc_credentials *s, uint64_t key, struct md_
         else if (sqlite3_column_int(q, 1) != 1) r = -ESTALE;
         else if (sqlite3_column_bytes(q, 0) != sizeof(connection.link)
                 || sqlite3_column_type(q, 2)!=SQLITE_INTEGER
-                || (unsigned)sqlite3_column_int(q, 2)>1) r = -EPROTO;
+                || (unsigned)sqlite3_column_int(q, 2)>1
+                || sqlite3_column_type(q,3)!=SQLITE_INTEGER
+                || (unsigned)sqlite3_column_int(q,3)>MD_IPC_TRANSPORT_ORIGINS_V1) r = -EPROTO;
         else {
             memcpy(connection.link, sqlite3_column_blob(q, 0), sizeof(connection.link));
             connection.side=(unsigned)sqlite3_column_int(q, 2);
+            selected=(enum md_ipc_ancillary_transport)sqlite3_column_int(q,3);
         }
     }
     sqlite3_finalize(q);
-    if (!r) *out=connection;
+    if (!r) { *out=connection; if (transport) *transport=selected; }
     return r;
 }
-int md_ipc_credentials_connection(struct md_ipc_credentials *s, int fd, struct md_ipc_connection *out) {
+static int connection_snapshot(struct md_ipc_credentials *s, int fd, struct md_ipc_connection *out,
+        enum md_ipc_ancillary_transport *transport) {
     if (!s) return -ENOTSUP;
     if (!out) return -EINVAL;
     uint64_t key;
@@ -361,17 +404,21 @@ int md_ipc_credentials_connection(struct md_ipc_credentials *s, int fd, struct m
      * publishing a connection or running any application IO. */
     if (!r && flock(s->gate,LOCK_EX)) r=-errno;
     if (r) return r;
-    r=connection_key(s,key,out);
+    r=connection_key(s,key,out,transport);
     flock(s->gate,LOCK_UN);
     return r;
+}
+int md_ipc_credentials_connection(struct md_ipc_credentials *s, int fd, struct md_ipc_connection *out) {
+    return connection_snapshot(s,fd,out,NULL);
 }
 int md_ipc_credentials_bind(struct md_ipc_credentials *s, int fd, struct md_ipc_binding *out) {
     if (!out || out->scope) return -EINVAL;
     struct md_ipc_connection connection;
-    int r=md_ipc_credentials_connection(s,fd,&connection);
+    enum md_ipc_ancillary_transport transport;
+    int r=connection_snapshot(s,fd,&connection,&transport);
     if (!r) {
         atomic_fetch_add_explicit(&s->scope->refs,1,memory_order_relaxed);
-        *out=(struct md_ipc_binding){.connection=connection,.scope=s->scope};
+        *out=(struct md_ipc_binding){.connection=connection,.scope=s->scope,.transport=transport};
     }
     return r;
 }
@@ -380,7 +427,7 @@ struct message_token { uint64_t magic; unsigned char nonce[16]; };
 static int message_identity(struct md_ipc_credentials *s, const struct md_identity *id,
         const struct md_fs_request *req, uint64_t key, struct md_fs_result *out) {
     struct md_ipc_connection connection;
-    int r=connection_key(s,key,&connection);
+    int r=connection_key(s,key,&connection,NULL);
     if (r) return r;
     sqlite3_stmt *q=NULL;
     struct message_token token = {.magic=MESSAGE_MAGIC};
@@ -444,6 +491,8 @@ void md_ipc_credentials_execute(struct md_ipc_credentials *s, const struct md_id
         self = snapshot(identity, q->peer, &bytes);
         if (!self) r = -ENOMEM;
     }
+    int transaction=q->flags==MD_IPC_CONNECT_BEGIN || q->flags==MD_IPC_ACCEPT || q->flags==MD_IPC_PAIR;
+    if (!r && transaction) r=execute(s,"BEGIN IMMEDIATE");
     if (!r) switch (q->flags) {
     case MD_IPC_LISTEN_BEGIN: case MD_IPC_LISTEN_END: r = listen_update(s, q, key, self, bytes); break;
     case MD_IPC_CONNECT_BEGIN: r = connect_begin(s, q, key, self, bytes, out); break;
@@ -454,9 +503,9 @@ void md_ipc_credentials_execute(struct md_ipc_credentials *s, const struct md_id
         struct md_ipc_connection connection={0};
         r = socket_key(q->directory[1], &other);
         if (!r && getrandom(connection.link, sizeof(connection.link), 0) != sizeof(connection.link)) r = -EIO;
-        if (!r) r = save_connection(s, key, NULL, 0, self, bytes, self, bytes, NULL, 0, 0, 0, 1, &connection);
+        if (!r) r = save_connection(s, key, NULL, 0, self, bytes, self, bytes, NULL, 0, 0, 0, 1, &connection,s->offer);
         connection.side=1;
-        if (!r) r = save_connection(s, other, NULL, 0, self, bytes, self, bytes, NULL, 0, 0, 0, 1, &connection);
+        if (!r) r = save_connection(s, other, NULL, 0, self, bytes, self, bytes, NULL, 0, 0, 0, 1, &connection,s->offer);
         break;
     }
     case MD_IPC_MESSAGE_CREATE: case MD_IPC_MESSAGE_READ: r = message_identity(s, identity, q, key, out); break;
@@ -474,6 +523,10 @@ void md_ipc_credentials_execute(struct md_ipc_credentials *s, const struct md_id
         sqlite3_finalize(query); break;
     }
     default: r = -EINVAL; break;
+    }
+    if (transaction) {
+        if (!r) r=execute(s,"COMMIT");
+        if (r) execute(s,"ROLLBACK");
     }
     free(self); flock(s->gate, LOCK_UN); out->error = r;
 }

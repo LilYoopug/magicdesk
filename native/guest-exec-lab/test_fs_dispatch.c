@@ -1237,8 +1237,10 @@ static void buffer_received_inspection(struct md_fs_buffer_service *service,
             worker_event(worker);
             if (!cancelled && buffer_callbacks==callbacks+1) {
                 assert(!buffer_error && !buffer_pending && buffered_open.fd==-1);
+                assert(frame->received_message.count==253 && frame->received_message.first[253]==253);
                 for (unsigned i=0;i<253;++i)
-                    assert(frame->received_info[i].flags==(i%3==0 ? MD_RECEIVED_WATCH : 0));
+                    assert(frame->received_message.first[i]==i && frame->received_message.entries[i].index==1+(int)(i%3)
+                        && frame->received_message.entries[i].flags==(i%3==0 ? MD_RECEIVED_WATCH : 0));
                 inspected=1;
             }
             int error=md_buffers_take(pool,buffer);
@@ -1545,8 +1547,14 @@ static void buffer_export_lifetime(const char *store) {
     }
 }
 void md_test_ipc_peer_worker(const char *);
+void md_test_ipc_origins(const char *);
+void md_test_ipc_origin_child(const char *,int,unsigned);
+void md_test_ipc_origin_guest(const char *,const char *);
 int main(int argc, char **argv) {
     if (argc==3 && !strcmp(argv[1],"--ipc-peer")) { md_test_ipc_peer_worker(argv[2]); return 0; }
+    if (argc==3 && !strcmp(argv[1],"--ipc-origins")) { md_test_ipc_origins(argv[2]); return 0; }
+    if (argc==5 && !strcmp(argv[1],"--ipc-origin-child")) { md_test_ipc_origin_child(argv[2],atoi(argv[3]),(unsigned)atoi(argv[4])); return 0; }
+    if (argc==4 && !strcmp(argv[1],"--ipc-origin-guest")) { md_test_ipc_origin_guest(argv[2],argv[3]); return 0; }
     if (argc==9 && !strcmp(argv[1],"--receiver")) { map_receiver(argv); return 99; }
     assert(argc==2 && !mkdir(argv[1],0700));
     setbuf(stdout,NULL); alarm(60);

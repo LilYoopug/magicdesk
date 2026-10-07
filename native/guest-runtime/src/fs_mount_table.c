@@ -108,7 +108,7 @@ int md_fs_mount_table(struct md_filesystem *fs, unsigned info, unsigned flags) {
         if (fs->native_root) {
             const struct md_view_mount *m=fs->native_root->mount;
             entry(stream,info,m->id,m->parent ? m->parent->id : fs->mounts->root_id,
-                root.st_dev,"/","none","attachment",m->readonly);
+                root.st_dev,"/","none","attachment",md_view_readonly(m));
         } else entry(stream,info,fs->mounts->root_id,fs->mounts->root_id,root.st_dev,"/","guestfs","guest",fs->store->readonly);
         if (!fs->store->root_id && !fs->native_root) {
             r=native_entries(fs,stream,info,&dev_id);
@@ -121,7 +121,7 @@ int md_fs_mount_table(struct md_filesystem *fs, unsigned info, unsigned flags) {
         char path[PATH_MAX]; r=md_view_path(fs,m->target,m->parent,path,sizeof(path));
         if (r == -ENOENT && (fs->store->root_id || fs->native_root)) { r=0; continue; }
         if (!r) entry(stream,info,m->id,m->parent ? m->parent->id : fs->mounts->root_id,
-            m->native.st_dev,path,"none","attachment",m->readonly);
+            m->native.st_dev,path,"none","attachment",md_view_readonly(m));
     }
     if (!r && (fflush(stream) || ferror(stream))) r=-EIO;
     int readable=-1;

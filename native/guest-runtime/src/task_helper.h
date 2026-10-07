@@ -17,16 +17,37 @@ struct md_task_mapping_request {
     size_t size;
     uint64_t offset;
 };
-enum md_task_helper_kind { MD_TASK_HELPER_MAP, MD_TASK_HELPER_CAPTURE, MD_TASK_HELPER_SEND, MD_TASK_HELPER_RECEIVE };
+enum md_task_helper_kind { MD_TASK_HELPER_MAP, MD_TASK_HELPER_CAPTURE,
+    MD_TASK_HELPER_RECEIVE, MD_TASK_HELPER_FD_TABLE, MD_TASK_HELPER_EXPORT, MD_TASK_HELPER_SEND_CAPTURED };
 struct md_task_helper_request {
     enum md_task_helper_kind kind;
     struct md_task_mapping_request mapping;
-    /* Copied before acceptance. Resolved in the caller's captured FS context. */
+    /* CAPTURE only: copied before acceptance, resolved in captured FS context.
+     * FD_TABLE takes no path/flags: it opens /proc/<exact owner tid>/fd read-only
+     * in the private table and exports only that directory, never a caller FD. */
     const char *path;
     int flags;
     struct md_task_send send;
+    /* SEND_CAPTURED only: immutable owned [socket, 0..253 rights] retained on
+     * admission. send supplies message, contiguous rights token_slot and flags;
+     * no guest FD is captured. All installs belong to the private helper table.
+     * send_import occupies the retained mapping. The contiguous SCM_RIGHTS
+     * block may be in caller-owned control memory; recvmsg writes it directly.
+     * Scratch must be disjoint from headers, vectors, control and payload. */
+    struct md_received_fds *send_inputs;
+    uintptr_t send_import;
+    /* Optional worker-owned pathname anchor. Imported separately from rights;
+     * send_address and send.message must then live in the retained mapping. */
+    uintptr_t send_address;
+    int send_anchor;
     struct md_task_receive receive;
-    int source;
+    /* EXPORT only: copies 1..254 ordered numbers before acceptance. The private
+     * table captures them together at clone; repeated entries retain their OFD.
+     * Result.received owns that exact vector after helper reaping. No origin
+     * is inferred: caller snapshots metadata under the same source-table turn,
+     * ending it at captured(), never before clone or after blocking IO. */
+    const int *descriptors;
+    unsigned descriptor_count;
     /* Exact CLONE_FILES separation, before any potentially blocking IO. */
     void (*captured)(void *);
 };

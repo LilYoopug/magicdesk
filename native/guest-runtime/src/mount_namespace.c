@@ -1,4 +1,5 @@
 #include "fs_mount_internal.h"
+#include "mount_graph.h"
 #include <errno.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -37,11 +38,13 @@ void md_mount_namespace_release(struct md_mount_namespace *n) {
             while (p) { struct md_view_object *next=p->next; close(p->fd); free(p); p=next; }
         }
         for (unsigned i=0;i<m->count;++i) {
+            md_mount_policy_close(&m->mounts[i].policy);
             if (m->mounts[i].source>=0) close(m->mounts[i].source);
             if (m->mounts[i].target>=0) close(m->mounts[i].target);
         }
         free(m);
     }
+    md_mount_graph_close(n->graph);
     free(n->native_ids); free(n);
 }
 int md_mount_namespace_attached(const struct md_mount_namespace *n) {

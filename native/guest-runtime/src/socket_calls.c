@@ -24,10 +24,6 @@ static long domain(int fd) {
 static long invoke(long nr, const unsigned long *a) {
     return md_raw(nr, a[0], a[1], a[2], a[3], a[4], a[5]);
 }
-static long addressed(long nr, const unsigned long *a,
-        long (*send)(void *, const unsigned long *, int), void *context, int anchor) {
-    return nr==SYS_sendmsg && send ? send(context,a,anchor) : invoke(nr,a);
-}
 static long connect_socket(const struct md_fs *fs, int fd, const struct sockaddr_un *name, unsigned length) {
     long tracked = md_socket_identity_call(fs, MD_IPC_CONNECT_BEGIN, fd, -1, 0, name, length);
     if (tracked < 0) return tracked;
@@ -85,8 +81,7 @@ static long send_batch(const struct md_fs *fs, const char *exe, const unsigned l
     }
     return count;
 }
-static long address_call(const struct md_fs *fs, const char *exe, long nr, const unsigned long *a,
-        long (*send)(void *, const unsigned long *, int), void *context) {
+long md_socket_address_call(const struct md_fs *fs, const char *exe, long nr, const unsigned long *a) {
     /* recvmsg's ancillary adapter owns the complete receive/publication order,
      * including names. Its native fallback must not add a getsockopt syscall. */
     if (nr == SYS_recvmsg) return invoke(nr,a);
@@ -118,9 +113,7 @@ static long address_call(const struct md_fs *fs, const char *exe, long nr, const
         return fs->endpoint[0] && family == AF_UNIX ? md_namespace_socket_output(fs, nr, a) : invoke(nr, a);
     }
     if (nr == SYS_sendmmsg) {
-        long family = domain((int)a[0]);
-        if (family < 0) return family;
-        return family == AF_UNIX ? send_batch(fs, exe, a) : invoke(nr, a);
+        return fs->endpoint[0] ? send_batch(fs, exe, a) : invoke(nr, a);
     }
     unsigned address_index = nr == SYS_sendto ? 4 : 1;
     unsigned length_index = address_index + 1;
@@ -134,11 +127,11 @@ static long address_call(const struct md_fs *fs, const char *exe, long nr, const
         length = message.msg_namelen;
     }
     if (!pointer || length < sizeof(sa_family_t) || length > sizeof(struct sockaddr_storage))
-        return addressed(nr,a,send,context,-1);
+        return invoke(nr,a);
     sa_family_t family;
     long r = md_read_memory(&family, pointer, sizeof(family));
     if (r < 0) return r;
-    if (family != AF_UNIX) return addressed(nr,a,send,context,-1);
+    if (family != AF_UNIX) return invoke(nr,a);
     if (length > sizeof(struct sockaddr_un)) return -EINVAL;
     struct sockaddr_un address;
     r = md_read_memory(&address, pointer, length);
@@ -152,10 +145,10 @@ static long address_call(const struct md_fs *fs, const char *exe, long nr, const
     /* Abstract addresses are binary names, including every supplied zero byte.
      * Family-only bind is the kernel's autobind request. Neither is a pathname. */
     if (length == offsetof(struct sockaddr_un, sun_path) || !address.sun_path[0])
-        return nr == SYS_connect ? connect_socket(fs, (int)a[0], &address, length) : addressed(nr,a,send,context,-1);
+        return nr == SYS_connect ? connect_socket(fs, (int)a[0], &address, length) : invoke(nr,a);
     r = domain((int)a[0]);
     if (r < 0) return r;
-    if (r != AF_UNIX) return addressed(nr,a,send,context,-1);
+    if (r != AF_UNIX) return invoke(nr,a);
     char path[sizeof(address.sun_path) + 1];
     size_t size = length - offsetof(struct sockaddr_un, sun_path);
     memcpy(path, address.sun_path, size);
@@ -187,19 +180,13 @@ static long address_call(const struct md_fs *fs, const char *exe, long nr, const
         args[address_index] = (unsigned long)&address;
         args[length_index] = length;
     }
-    r = nr == SYS_connect && fd < 0 ? connect_socket(fs, (int)a[0], &address, length) : addressed(nr,args,send,context,(int)fd);
+    r = nr == SYS_connect && fd < 0 ? connect_socket(fs, (int)a[0], &address, length) : invoke(nr,args);
     if (fd >= 0) RAW1(close, fd);
     return r;
 }
-long md_socket_address_call(const struct md_fs *fs, const char *exe, long nr, const unsigned long *a) {
-    return address_call(fs,exe,nr,a,NULL,NULL);
-}
-long md_socket_address_send(const struct md_fs *fs, const char *exe, const unsigned long *a,
-        long (*send)(void *, const unsigned long *, int), void *context) {
-    return address_call(fs,exe,SYS_sendmsg,a,send,context);
-}
 long md_socket_call(const struct md_fs *fs, const char *exe, long nr, const unsigned long *a) {
     long r = nr == SYS_sendmsg ? md_socket_ancillary_send(fs, exe, a)
+        : nr == SYS_sendto ? md_socket_ancillary_sendto(fs,exe,a)
         : nr == SYS_recvmsg ? md_socket_ancillary_receive(fs, exe, a)
         : md_socket_address_call(fs, exe, nr, a);
     if (r >= 0 && (nr == SYS_accept || nr == SYS_accept4) && fs->endpoint[0]) {

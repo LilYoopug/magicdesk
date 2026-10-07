@@ -23,7 +23,9 @@ int md_ipc_peer_step(struct md_ipc_peer *); /* 1 agreed, 0 pending, negative err
 /* Success after sending our confirmation and receiving the peer's; this is
  * not proof of continued peer liveness. The binding stays borrowed until
  * peer close, and retains the IPC epoch without retaining SQLite. Application
- * operations must still capture their actual socket/table resources. */
+ * operations must still capture their actual socket/table resources. Features
+ * do not change binding->transport: an ordinary application connection cannot
+ * be upgraded by negotiating a private control exchange. */
 int md_ipc_peer_agreement(const struct md_ipc_peer *, const struct md_ipc_binding **,
     uint64_t *features);
 #endif

@@ -142,6 +142,339 @@ Candidate construction is not guest CLONE_NEWNS. Publishing a replacement view
 requires task descriptor/cwd provenance through every kernel lifetime transition.
 Guest namespace creation still fails explicitly.
 
+### Shared Mount Policy
+
+Each native attachment owns a `mount_policy`. Local views keep its flags inline,
+without a descriptor, mapping or extra allocation. Open/reopen, access checks,
+metadata/xattr admission and mount-table output read the same policy. Namespace
+copying captures the current flags into an independent local owner, not a shared
+writable alias. Anchors retain the policy with their exact mount view.
+
+Explicit private publication lazily creates one memfd/mapping per exported mount.
+Its bounded header contains the format and a lock-free atomic flag word. Size
+seals prevent resize; `F_SEAL_FUTURE_WRITE` leaves the publisher's existing mapping
+writable while blocking FD writes and new writable shared mappings. Received
+observers validate the layout, seals and CLOEXEC descriptor before taking ownership
+and mapping it read-only. Failed import leaves the descriptor with its caller;
+failed publication releases its temporary resources and preserves the local owner.
+An observer can forward the descriptor but cannot promote itself to a writer.
+
+Readers see the writer's atomic updates without RPC, polling, descriptor
+duplication or SQLite. Once shared, repeated publication borrows the same FD and
+flag reads/writes need no free FD slot. Queued rights and received mappings retain
+the last state after publisher teardown or exit. This is kernel-owned state
+lifetime, not a background custodian process. Ordinary data IO is unchanged.
+
+This component transfers policy; the graph parcel below associates that policy
+with source/covered O_PATH references. The verified private transport must bind
+the parcel to its store and message. Atomic flag visibility does not provide
+mount/remount transaction ordering against in-flight namespace operations, and
+does not enable guest namespace creation. Production launch views remain local;
+full cross-launch origin transfer and mutation ownership are separate work.
+
+### Portable Attachment Graph
+
+`mount_graph` explicitly publishes an immutable attachment graph into a sealed
+memfd. Its bounded, pointer-free manifest records parent indices and the kernel
+identities of each source directory, covered directory and policy descriptor.
+The parcel retains those actual O_PATH references and policy FDs, not paths or
+application data descriptions. Native aliases remain separate mount entries;
+nested mounts retain their exact covered dentry and parent. Replacement of an
+old source pathname cannot redirect the imported graph.
+
+The sealed manifest's retained device/inode identifies the graph across private
+transfers and forwarding, independently of the publisher's process lifetime.
+Mount IDs remain receiver-local and are allocated from its existing owner.
+Import into an already known view verifies that identity and every descriptor,
+then reuses its IDs and object cache. It does not reconstruct the cache or infer
+identity from equal directory trees. A namespace copy has independent policy
+and a new graph identity on publication. The origin-transfer owner below interns
+imported views within one filesystem worker; concurrent workers cannot share one
+mutable object cache.
+
+Export returns an owned bounded parcel. Import always consumes it and publishes
+a destination only after complete validation. Invalid seals, graph structure,
+FD count/type/identity and allocation/mapping failures close partial resources
+without replacing an existing destination. Empty views transfer only a manifest;
+full views have at most 49 descriptors. Cold publication is lazy. Ordinary
+unexported views create no manifest and ordinary data IO takes no new path.
+Failed export can retain successfully materialized publication state in its
+source view, but leaves no partial output parcel or changed mount policy.
+
+The graph is immutable after publication; exporting a mutated tree fails ESTALE
+rather than silently substituting a snapshot under its previous identity.
+Readonly updates use the live policy mappings. This is not shared mutable
+namespace topology, a selected task root/cwd, native mount-ID-map transfer or
+a complete application-origin vector. `fs_origin_transfer` composes graphs with
+backing custody and a message route. A valid graph alone does not authorize
+access to another store or enable guest mount/unshare calls.
+
+### Portable Backing Custody
+
+`inode_custody` captures the existing root maintenance lease and every currently
+loaded lower's objects directory and maintenance lease. Its sealed, pointer-free
+manifest records the root identity and ordered source IDs with each directory's
+device/inode. It shares the bounded sealed-manifest primitive with attachment
+graphs. Publication duplicates the original open descriptions: it never reopens
+paths, changes flock state, queries SQLite or retains application data OFDs.
+
+Import validates every descriptor, source/lease relationship and manifest field
+before publishing an `inode_lifetime`. The root must match a retained directory
+from the receiver's authenticated store scope; an equal pathname or a replacement
+store cannot authorize it. Import always consumes the parcel, including on
+failure. Partial export and failed import close all temporary rights without
+changing the source's locks or publishing a partial owner. The private peer must
+provide the actual locked descriptions: inode equality alone is not proof of
+flock ownership, and import must not acquire or convert locks on those descriptions.
+
+Imported custody uses the same lifetime constructor and allocation-free local
+retain/release as a SQLite-backed store. The root and lower leases survive source
+SQLite closure, sender exit, pathname replacement and forwarding. Queued rights
+also retain the leases; discarding a queue, killing a receiver or releasing the
+last owner lets the kernel release them. This needs no custodian process or new
+descriptor per local reference. Ordinary data IO and unexported stores do not
+enter the publication path.
+
+A parcel contains two descriptors plus two per loaded lower, at most 512. The
+transport must chunk that bounded vector and own partial receives; it must not
+raise FD or in-flight limits. This is a snapshot of loaded sources, not a live
+catalogue replica, a relocated SQLite catalogue or an authenticated origin
+vector. Composition with attachment graphs and the message authority belongs to
+the origin-transfer owner, not this backing component.
+
+### Portable Message Origins
+
+`fs_origin_transfer` exports a pinned, bound source message into one owned
+control-plane parcel. Its compact sealed manifest contains only used records:
+the exact message route, physical store identity, vector indices, unique O_PATH
+anchors, mount slots and spans identifying the graph/custody manifests. Repeated
+anchors and shared owners are emitted once; unknown entries remain unknown.
+No mount pointer, SQLite connection or application data OFD crosses this boundary.
+Publication is worker-only because graphs and loaded source catalogues are
+worker-owned. The event loop retains the immutable message through completion.
+
+A store-scoped import owner opens its O_PATH root relative to the retained store
+directory, not by reopening its pathname or duplicating its maintenance lease.
+Import checks the expected route, store, canonical indices, all rights and their
+manifest identities before making origins usable. It always consumes the parcel.
+New views and origins remain staged until the entire vector succeeds; failure
+releases partial custody without changing an existing cache or destination.
+Allocation and descriptor exhaustion return errors, not partial vectors or
+automatic replay.
+
+The import owner interns graphs by their sealed kernel identity. Repeated and
+forwarded imports reuse receiver-local mount IDs and object caches while any
+anchor retains that graph. Each worker owns its own cache; copying a namespace
+still makes a distinct graph. Cache-only views are collected after successful
+imports, by explicit collection, or on owner teardown, without periodic scans.
+They retain no store/lower maintenance locks. Backing custody belongs to the
+anchors and releases at their last reference. Anchors survive cache teardown.
+Different transfers retain independent snapshots of loaded backing sources.
+
+Imported origins use the same anchor constructor, filesystem engine and FD-table
+batch publication as local origins. Local retains, ordinary data IO and unrelated
+launches perform no serialization or cache lookup. All control rights are subject
+to native descriptor/in-flight quotas; transport must own bounded chunking and
+partial receive cancellation.
+
+Matching a route or sealed bytes is not peer authentication. The surrounding
+protocol must authenticate the issuing authority, exact message and receiving
+connection, and supply that independently verified route to import. The serializer does not
+select application framing, publish actual received application FDs, transfer
+native mount-ID maps or order mutable topology/remount transactions. Those
+production integration boundaries remain separate from the tested transfer.
+
+### Self-Contained Origin Custody
+
+`ipc_capsule` packages the same captured origins and actual data descriptions
+into an immutable kernel-owned carrier. It requires a creation-time ORIGINS_V1
+binding. The filesystem worker validates captured backing identities, issues
+the directional route and serializes with `fs_origin_transfer`. No source
+registry, live launch, RPC exchange or per-message persistent record is needed
+to receive a published capsule.
+
+`fd_bundle` stores each node as one seqpacket with its writer closed before
+publication. A leaf holds up to 253 rights; larger metadata vectors use bounded
+trees of those queues. Every traversal peeks at the only packet, without a
+shared read cursor. Application data and metadata have separate bundles. The
+outer queue owns both plus the original IPC epoch and store-maintenance leases.
+Their queued references survive the last supervisor's exit, including messages
+with no known origins. Discarding the carrier releases the complete tree.
+Origin metadata never retains application data descriptions after queue disposal.
+
+One lazy 32-byte key belongs to the live store IPC epoch. Creation uses its
+existing metadata gate and atomic rename; an interrupted unpublished creation
+is replaced by the next creator. The first owner of a new epoch removes stale
+key state. Publishers authenticate the complete capsule header, including the
+actual kernel carrier cookie, exact connection side/link and message nonce,
+with HMAC-SHA256 from the existing pinned Mbed TLS dependency. The key is cached
+by each worker owner, not looked up for every message. Native connections do
+not create this owner or key.
+
+The receiver performs a descriptor-free peek and verifies authentication before
+installing any control rights. A copied header on another socket fails cookie
+validation; replacing its cookie invalidates the tag. It then imports through
+the common bounded metadata parser and annotates the actual data bundle's FDs.
+The result is one `received_fds` owner with native flags and shared offsets,
+usable after both the capsule and importer close. Unknown origins stay unknown.
+Repeated/concurrent peeks leave the queues intact. Partial allocation or FD
+installation closes only owned results; it cannot authorize application replay.
+
+This authentication assumes trusted runtime custody of the store's private IPC
+directory. It is not isolation from a hostile process with the same real UID
+that can read or alter that directory. Native FD, in-flight and Unix queue-graph
+limits remain explicit errors; the runtime does not raise them or substitute
+unannotated delivery. Ordinary guest traffic uses NATIVE. Ancillary sends and
+the receive adapter handle explicitly bound ORIGINS_V1 connections, including
+mixed credentials. Addressed datagrams retain native semantics unless their
+actual peer matches the binding. Unadapted consumers need a separate policy.
+
+`--case origin-transfer` checks an independent exec sender exiting before a
+fresh receiver exists, 253 mixed and all-unknown data rights, readonly/copied
+views, repeated and concurrent peeks, shared offsets, copied/tampered headers,
+native/wrong-direction bindings, allocation failures, five partial-FD limits,
+interrupted key construction, key retirement and exact final FD/lease release.
+Discard-without-import checks data pipe EOF. Separate bundle checks cover 253
+and 600 rights, invalid shape and partial construction failure.
+
+### Authenticated Origin Transfer
+
+`ipc_origins` owns asynchronous capsule preparation and import on the existing
+filesystem worker. Its event-loop owner admits at most 16 requests. It creates
+no listener, control exchange, timer or additional thread. Its copied launch ID
+is diagnostic metadata, not authentication; the capsule's epoch key and actual
+socket binding authenticate the transfer.
+
+Preparation retains one immutable capture containing the actual application
+socket followed by up to 253 data descriptions, plus the matching origin
+snapshot. Both must come from the same source-table turn. The worker resolves
+the binding from that captured socket. ORIGINS_V1 lazily creates its capsule
+owner, checks backing identities and returns an owned two-FD vector: the same
+socket description and the completed capsule. NATIVE and unregistered peers
+return the original captured owner on event-loop completion, without duplicating
+descriptions or serializing origins. Completion exposes the selected format;
+malformed or stale bindings remain errors rather than a native fallback.
+Closing or reusing a guest socket number after capture cannot retarget the
+prepared send. Preparation neither sends application bytes nor changes a
+connection's creation-time format agreement.
+
+Receive retains the actual socket and carrier in another immutable two-FD
+capture. After validating the creation-time binding, the worker authenticates,
+imports and peeks through `ipc_capsule`. It returns one annotated
+`received_fds` owner, not metadata for caller-selected descriptors. Repeated
+receives share native data offsets; known origins retain their backing leases
+after the importer closes. Unknown-only vectors allocate no annotation array.
+Neither operation looks up or contacts the source process.
+
+Shared input reference counts change only on the event loop; the worker borrows
+them through completion. Callers may release their handles immediately after
+admission. Cancellation clears its handle and suppresses callbacks without
+freeing running inputs. Pending/computed results retire on completion dispatch
+or after worker stop/join. Allocation, native quota and authentication failures
+return no partial custody and close only owned resources. No guest FD number is
+guessed or closed, and no operation is replayed.
+
+The source helper can export socket plus rights at one private-table clone.
+A separate captured-send operation accepts a retained socket plus 0..253 rights,
+covering both a capsule and an ordinary native vector. It clears inherited helper
+FDs and installs a private import channel with atomic ADDFD_SEND. The kernel
+receives all rights, including O_PATH, directly into an outgoing control block
+in caller-owned control memory. It closes that channel before installing the
+captured application socket at its original number. There is no per-right ADDFD, application
+slot or lookup of original guest FD numbers. Import scratch and control ranges
+are bounded, aligned and disjoint; partial import fails before application send.
+The kernel reports both quota and control-copy failures as MSG_CTRUNC; the
+helper returns EMFILE for incomplete private import and releases its whole table.
+The queue remains supervisor-owned through exact reaping, so cancellation drops
+both unreceived and installed private rights. Native filters, quota errors and
+SIGPIPE remain observable; cancellation after committed send preserves its
+byte count. The existing task-local send owns final execution.
+
+The guest adapter uses this pipeline for ancillary and addressed Unix sends.
+One outgoing owner spans the source-table turn, task/metadata snapshot,
+private-table export, worker preparation and final task-local send. Export
+releases the table turn at clone, before IO; its scratch can be reused for import
+only after exact helper reaping. The adapter checks the selected format and
+normalizes split rights headers into one bounded control block. No source FD
+number is looked up again after capture. Cancellation before commit releases
+prepared custody; cancellation during capture or send retains it through exact
+helper reaping. Format selection inspects only the captured socket on the worker,
+not a preliminary guest SO_DOMAIN call or a reusable source number. Non-Unix
+sockets retain native selection and kernel ancillary validation. Releasing the
+mapped buffer drops any unused prepared result.
+Explicit credentials join the prepared vector after captured-identity validation.
+An optional native pathname anchor has separate custody and a private import;
+it cannot consume the 253-right message budget or become an application right.
+Its extra private slot and native in-flight quota remain real limits. Empty
+rights need no rights-import channel unless a pathname anchor is present.
+Native socket placement also requires its original number below RLIMIT_NOFILE;
+a limit lowered beneath an existing socket number is an explicit capacity error.
+
+`--case ipc-origins` checks source socket-number reuse, 253 mixed/repeated/unknown
+origins, source worker shutdown, repeated receive and shared offsets. Eight
+cancellation cases cover preparation/import before execution, during metadata
+admission, after computation and after callback. Both worker-join cases reclaim
+undispatched results. Failure injection and bounded concurrent admission verify
+unchanged caller custody and exact cleanup. Independent exec tests receive only
+after the sender exits; another receiver exits with an untaken result and live
+worker, requiring kernel-only release of all data/maintenance references.
+Native selection checks registered and external stream/datagram sockets, exact
+owner/FD identity, pending/computed/callback cancellation, worker join and invalid
+socket rejection. `--case fd-observation` checks both one-right and 253-right
+captured sends, including protected/full caller tables, exact 254-slot helper
+capacity, partial import, receive/close/send filter denial, SIGPIPE and terminal
+cleanup. O_PATH, repeated descriptions and shared offsets survive the transfer.
+
+`ipc_received` is the worker-owned message decoder used by `fs_buffer_service`.
+It reads the transport binding from the captured socket, separates credential
+tokens and expands an authenticated carrier into a distinct annotated data
+vector. A compact index plan maps each native right to its output entries;
+these indices are never guest FD numbers. Native messages borrow the original
+custody without duplicating its descriptors or allocating an expanded vector.
+The decoder never sniffs capsules on NATIVE or unregistered connections.
+
+The receive owner keeps the original batch immutable and owns one expanded
+vector per inspected message. Successful worker completion transfers that
+vector before releasing the request. Cancelled and untaken results retire on
+completion or worker join. Publication selects this same custody through
+ordinary annotated `fd_return`, including partial output faults and terminal
+observation; it does not receive FD numbers into a temporary application buffer
+and copy them afterward. Subsequent batch messages replace expanded custody
+only after the preceding message's publication has finished.
+
+`--case ipc-ancillary` runs 18 actual guest send cases with an explicitly bound
+socket inherited through the runner. Protected/unprotected cases cover one and
+253 file/O_PATH rights, full caller tables, split headers, invalid FD, rejected
+send, sendmmsg, payload EFAULT and a sandbox denying SO_DOMAIN. Import starts
+only after the guest sender and its worker exit; exact origins, offsets, FD balance, payload EOF and final
+maintenance admission must still hold. Four native-format blocked-send cases
+cover protected/shared tables, caller death and source-slot replacement, with
+no unrelated pipe writer or resource turn retained during IO. Signal checks
+cover SIGPIPE delivery, masking and MSG_NOSIGNAL. A native/guest UDP control
+checks payload delivery with ignored rights and unchanged descriptors.
+
+The same case runs 28 actual guest receive cases with a prepared,
+explicitly bound socket inherited through the runner. No sender worker remains
+at receive time. Protected/unprotected cases check 253 mixed rights, shared
+offsets, logical openat through imported directory origins, repeated peek,
+recvmmsg, control truncation, control/header EFAULT and zero/three free table
+slots. Explicit credentials are tested on either side of the coalesced capsule,
+with SO_PASSCRED enabled and disabled; NATIVE delivery leaves a capsule opaque.
+Every case requires payload EOF, exact descriptor balance and final store
+maintenance admission. Seven `--case ipc-origins` worker cases check decoder
+result ownership, cancellation before/after execution, join before callback,
+untaken completion, wrong direction and partial annotation allocation failure.
+
+Capsule queues consume native per-UID in-flight rights independently of free
+table slots. A sufficiently reduced RLIMIT_NOFILE can make the private helper's
+export fail with ETOOMANYREFS even with free slots. The guest fixture verifies
+this explicit failure and unchanged caller descriptors; the runtime neither
+raises the limit nor retries a potentially consumed message.
+
+Production authorities still offer NATIVE. Source handling of explicit
+credentials and addressed/mixed ancillary sends, unadapted consumers, native
+mount-ID maps and mutable topology/transaction ordering remain separate contracts.
+
 ## Path Origins
 
 The filesystem engine accepts optional `md_fs_anchor` origins for its captured
@@ -227,6 +560,27 @@ neither the source table nor data open-file descriptions. Source replacement or
 owner exit does not change the captured vector. The source table turn must still
 cover actual kernel descriptor capture; a metadata snapshot alone is not that
 capture or a message-to-origin association.
+
+`MD_TASK_HELPER_EXPORT` captures an explicit ordered vector of 1..254 descriptor
+numbers in the existing private-table helper. It copies the vector before
+acceptance, preserving duplicates; only the inherited keep-set is sorted and
+deduplicated. The caller holds its source-table turn while taking the origin
+snapshot and until the helper's exact clone callback. That callback releases
+the turn before descriptor export, so later shared-table close/dup cannot
+retarget the captured inputs. A failure before clone leaves that turn with its
+caller until completion/cancellation.
+
+The helper clears unrelated inherited descriptions, then uses the existing
+authenticated FD channel and bounded 253-right packets. The result vector is
+reserved once before helper creation; partial export stays private until full
+completion and reaping. Cancellation or a rejected syscall releases partial
+custody through the same owner as receive. No endpoint enters the caller's
+table, and application filters and native quotas remain effective. Full caller
+tables can succeed after unrelated helper slots are cleared; no available helper
+slot returns EMFILE. Results preserve kernel OFDs, access flags, O_PATH, ordering
+and shared offsets. Origins come from the ordered snapshot, not inode matching.
+The helper does not negotiate a transport, send application bytes or enable
+guest framing; those are the enclosing operation's responsibilities.
 
 Batch preparation reserves the destination annotations before delivery and rolls
 back every prepared entry on allocation failure. One retained source vector may
@@ -400,8 +754,9 @@ foreign pointer fields, bounds all lengths and validates every descriptor before
 copying any output. Invalid or duplicate numbers leave the output unchanged.
 The shared mapping is a lifetime mechanism, not protection against a malicious
 guest modifying its own memory. `fd_delivery` does not authenticate source/message
-association or allow origins to outlive their backing worker. General application
-SCM_RIGHTS is not covered.
+association; that belongs to the transport, while retained anchors own backing
+custody. General application SCM_RIGHTS provenance is not yet connected to the
+guest adapter.
 See the kernel's [userspace notification contract](https://www.kernel.org/doc/html/latest/userspace-api/seccomp_filter.html#userspace-notification).
 
 ## Guest Roots
@@ -694,6 +1049,87 @@ The retained mapping supplies exact kernel output after normal completion or
 terminal task loss. Installed descriptors belong to the caller; cancellation
 drains only unreceived rights through the supervisor's retained receive endpoint.
 It needs no close syscall from the dead task or a surviving peer.
+
+The same owner accepts annotated vectors with caller-owned scratch arrays and
+either a retained mapped receipt or exact-task FD-table observation. It prepares
+the complete selected origin vector before
+kernel delivery, then publishes only the installed prefix under the destination
+turn. Completion and cancellation use the same receipt; a failed acknowledgement
+cannot erase installed FD provenance. Queued cancellation discards preparation
+without admitting a channel. Source descriptions need remain open only until the
+packet is accepted by the kernel; publication retains origins, not data OFDs.
+The receipt must be the kernel's actual output, never an acknowledgement copy.
+For direct application-control output, `fd_table_observation` borrows an open
+`/proc/<exact tid>/fd` directory captured in the task's context. Under the same
+table turn, after channel admission, it records at most 253 lowest free slots.
+After native receive it observes the installed prefix without reading application
+memory. A failed control/header copy can install descriptors even when `recvmsg`
+returns EFAULT; those installations still receive their exact origins. The read
+must precede task reaping: `PTRACE_EVENT_EXIT` is the terminal observation point.
+Vector completion preserves the native output error after publishing installed
+origins; successful completion returns zero, not the number of installed rights.
+An invalid acknowledgement remains EPROTO without erasing those origins.
+An unavailable directory or non-prefix change is an error, never evidence of
+zero delivery. No close/dup/exec or other installation may interleave between the
+two observations. This is bounded storage and two event-bound observations, not
+periodic polling, a retained copy of the file table or additional data OFDs.
+The ordinary receipt path acquires no observation directory.
+
+`--case fd-observation` exercises this production publication owner under UID
+2000 with task-local private-table capture, protected/unprotected receivers,
+separate/shared tables and both CLOEXEC modes. Cases include full 253-FD output,
+unwritable control/message headers, partially writable FD words, zero control
+space, zero/three free slots, peek, no receive and SIGKILL before/after receive.
+Publication precedes queued table mutation; pipe EOF and exact FD balance verify
+release. The 96-case matrix also covers invalid acknowledgement after delivery.
+Reaped-task and non-prefix observations fail explicitly. Model checks
+disable allocations during observation and publication and cover preparation
+rollback and cancellation before admission.
+
+The guest receive consumer selects the exact retained origin vector before
+publication. A known-origin selection lazily allocates its scratch storage and
+requests `MD_TASK_HELPER_FD_TABLE` from the existing private-table helper. This
+typed request accepts no caller path or flags and exports only the read-only
+directory for the exact receiver TID. The receive owner retains it across
+subsequent rights groups until receive completion. Cancellation detaches a live
+capture helper; its final callback releases custody only after reaping.
+Destination publication finishes before that directory is released, including
+the caller's terminal stop. Unknown-only selections create neither the scratch
+storage nor the capture helper. CLOEXEC policy comes from the captured receive
+request, not a later mutable output frame.
+
+The same case runs 12 checks of the production helper, including protected
+callers, full caller tables, repeated capture, rejected open, fatal helper
+filters and cancellation during channel admission or after export. Completion
+returns the stack lease once, installs no caller FD and leaves pipe EOF and
+descriptor counts unchanged. Caller-supplied directory paths/flags are rejected.
+
+Its source-export matrix adds 24 cases: ordinary/protected callers, 1/254 rights,
+repeated capture, full caller tables, unavailable helper slots, invalid inputs,
+clone/send filter rejection, fatal filters and cancellation before or during
+either export packet. A real CLONE_FILES sibling replaces a source with a new
+open of the same inode immediately after helper clone. Export retains the old
+offset and captured origins after the original annotation table is released.
+Borrowed input arrays may change after admission without changing the export.
+Final checks cover exact descriptor balance, returned stack leases, source
+teardown and pipe EOF. These checks compose real helper capture with the common
+origin snapshot and received-FD custody; they do not enable application framing.
+
+The guest receive adapter binds authenticated origins to actual custody on
+explicitly selected ORIGINS_V1 connections. Ordinary production connections
+still select NATIVE. Direct application-control output remains native:
+receive-to-scratch followed by copying would change partial-copy installation
+semantics. Actual adapter coverage is described under
+[authenticated origin transfer](#authenticated-origin-transfer).
+
+`--case ipc-origins` composes authenticated import, immutable source custody and
+this vector publication after source workers/registries/importers have closed.
+A protected CLONE_FILES receiver exits without acknowledgement; the survivor
+publishes 253 rights, a truncated prefix, a peek or no delivery from kernel
+output. A queued table mutation cannot overtake publication. FD flags, O_PATH
+identity, repeated/unknown origins, final maintenance leases and descriptor
+balance are checked, including receiver-local limits of zero and three free FD
+slots. These component checks do not select guest framing.
 
 Six native receive controls cover zero/one result slots and receiver death
 before/after recvmsg. Sixteen production `fd_return` checks combine protected
@@ -1105,13 +1541,21 @@ independent-process checks are in [Unix IPC credentials](ipc-credentials.md#priv
 the existing filesystem worker and returns an owned peer on the supervisor's
 completion dispatch. Cancellation and worker join retain pending inputs until
 their last user finishes; there is no additional poll loop or database owner.
-Private launch discovery and candidate message routing have native component
-coverage. Production transport selection and cross-launch mount-origin custody,
-including custodian-supervisor exit, are not implemented; application SCM_RIGHTS
-does not use this peer protocol yet.
+`ipc_origins` prepares and receives self-contained authenticated capsules on the
+filesystem worker. Captured socket/data inputs and annotated outputs share the
+same cancellation and join ownership. Independent-process checks cover custody
+after source exit. Ancillary and addressed sends use the source capture and
+preparation pipeline; the receive adapter expands selected ORIGINS_V1 messages
+through the shared buffered worker and annotated publication contract.
 Connection association
 reuses `ipc_credentials`, including its store boundary and live-owner lease;
 it is not a declaration that a native peer can consume a private carrier.
+The authority's separate creation-time ancillary-format declaration is captured
+in `md_ipc_binding`. It is immutable across aliases and owner changes; accept
+inherits the selected format instead of changing an existing queue's meaning.
+Carrier operations require both an `ORIGINS_V1` binding and a verified private
+peer agreement. A native connection cannot be upgraded by control negotiation.
+Production owners declare `NATIVE` until application adapters own that format.
 
 `test_task_resources` checks allocation/EMFILE rollback, wrong connection sides,
 duplicate cookies, stale events, malformed monitors, bounded batch retirement

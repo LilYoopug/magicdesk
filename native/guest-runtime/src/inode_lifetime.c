@@ -2,6 +2,14 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+struct md_inode_lifetime *mdi_lifetime_new(int root, const struct stat *st) {
+    struct md_inode_lifetime *p=calloc(1,sizeof(*p));
+    if (!p) return NULL;
+    atomic_init(&p->refs,1);
+    p->root=root; p->device=st->st_dev; p->inode=st->st_ino;
+    for (unsigned i=0;i<MDI_SOURCES;++i) p->sources[i]=p->source_leases[i]=-1;
+    return p;
+}
 struct md_inode_lifetime *md_inode_store_lifetime(const struct md_inode_store *s) {
     return s ? s->lifetime : NULL;
 }

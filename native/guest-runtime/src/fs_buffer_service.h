@@ -48,6 +48,9 @@ int md_fs_buffer_begin(struct md_fs_buffer_service *, pid_t, struct md_guest_dom
 struct md_received_fds;
 int md_fs_buffer_inspect_begin(struct md_fs_buffer_service *, pid_t, struct md_guest_domain *,
         const struct md_interception_buffer *, struct md_received_fds *, struct md_fs_buffer_request **);
+/* In the completion callback only: 1 means a successfully inspected message
+ * (possibly native, with NULL expanded custody); 0 means another operation. */
+int md_fs_buffer_inspect_take(struct md_fs_buffer_request *, struct md_received_fds **);
 /* Prepared executable descriptions stay outside the guest table until exec. */
 int md_fs_buffer_exec_begin(struct md_fs_buffer_service *, pid_t, struct md_guest_domain *,
         const struct md_interception_buffer *, struct md_fs_buffer_request **);
@@ -61,7 +64,6 @@ int md_fs_buffer_snapshot_advance(struct md_fs_buffer_request *, int finish);
  * descriptor may enter this continuation. A pre-entry denial can also finish. */
 int md_fs_buffer_task_pending(const struct md_fs_buffer_request *);
 int md_fs_buffer_task_start(struct md_fs_buffer_request *, int descriptor);
-int md_fs_buffer_task_send_source(const struct md_fs_buffer_request *);
 int md_fs_buffer_task_finish(struct md_fs_buffer_request **, long result);
 int md_fs_buffer_progress(struct md_fs_buffer_service *);
 /* Deferred opens are owned children, reaped by the supervisor's SIGCHLD loop.

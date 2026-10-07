@@ -1,5 +1,6 @@
 #ifndef MD_FS_OPERATION_H
 #define MD_FS_OPERATION_H
+enum { MD_FS_SOCKET_PIN=1 };
 #include <stddef.h>
 #include <stdint.h>
 #include "file_capability.h"

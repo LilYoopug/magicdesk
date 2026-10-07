@@ -28,16 +28,23 @@ void md_fd_message_release(struct md_fd_message *);
 unsigned md_fd_message_count(const struct md_fd_message *);
 struct md_fs_anchor *const *md_fd_message_origins(const struct md_fd_message *);
 
-/* Bind an unpublished vector to its captured sending connection. The trusted
+/* Bind an unpublished vector to its captured ORIGINS_V1 sending connection. The trusted
  * owner supplies its registered launch ID, not an application-supplied label.
  * Pins epoch/store, not socket/SQLite; one random nonce per message, no allocation.
  * Failure leaves the vector unchanged. May only bind once. */
 int md_fd_message_bind(struct md_fd_message *, const struct md_ipc_binding *, const char *launch_id);
+/* Freeze a bound message for self-contained kernel custody. No registry entry,
+ * lifetime monitor or retained carrier. Serialization uses the same route. */
+int md_fd_message_issue(struct md_fd_message *, int carrier);
 /* Published route hint; no in-memory origin pointer crosses a process boundary. */
 int md_fd_message_route(const struct md_fd_message *, struct md_fd_message_route *);
+/* Borrowed retained store directory from the bound source authority, or -1.
+ * Worker serialization may inspect it while the immutable message is pinned. */
+int md_fd_message_store_root(const struct md_fd_message *);
 /* Only for a carrier selected by an agreed transport, never arbitrary received
  * application FDs. Non-consuming peek installs no rights. Checks actual kernel
- * cookie and captured receiving connection; launch is still an untrusted hint. */
+ * cookie and captured receiving connection; launch is still an untrusted hint.
+ * NATIVE bindings fail before accessing the supplied carrier. */
 int md_fd_message_route_read(int carrier, const struct md_ipc_binding *, struct md_fd_message_route *);
 /* On the verified source owner: actual carrier, actual destination binding and
  * the offered hint must all match this registry. Pins the existing vector, with

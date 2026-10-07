@@ -30,6 +30,104 @@ Candidate message routing uses a fixed header, `SO_COOKIE`, descriptor-free
 `recvmsg(MSG_PEEK | MSG_DONTWAIT)` and a `getrandom` nonce. Scope retention shares
 existing flock leases. These operations also fit the baseline; no new pidfd
 flags, socket diagnostics or per-IO capability probe is required.
+Creation-time ancillary-format selection uses the existing IPC metadata gate,
+SQLite transaction and cookie binding. It adds no kernel primitive or probe;
+ordinary read/write remain kernel-owned.
+
+Shared mount policy uses memfd size seals plus `F_SEAL_FUTURE_WRITE`, present in
+the [Linux 5.15 seal ABI](https://github.com/torvalds/linux/blob/v5.15/include/uapi/linux/fcntl.h#L29-L41),
+and lock-free ARM64 shared-memory flag loads/stores. Publication is lazy and
+explicit: unavailable memfd/sealing returns an error while retaining local
+policy. It adds no shared-startup requirement and never substitutes a stale copy
+for the requested live policy. `--case mount-policy` checks rejected memfd,
+mapping and sealing operations, including a native seccomp-injected seal denial.
+Portable attachment graphs use the same baseline memfd interface with immutable
+`F_SEAL_WRITE` manifests, O_PATH directory rights and CLOEXEC duplication. They
+add no newer-kernel requirement or startup probe. Graph publication/import fails
+explicitly if those operations are unavailable; no pathname-reopening fallback
+substitutes for retained directory identity.
+Portable backing custody uses the same sealed-manifest primitive and transfers
+existing root/lower directory descriptions through SCM_RIGHTS. CLOEXEC duplication
+and queued rights preserve their existing flock leases; import never relocks
+them. These semantics fit the 5.15 baseline and add no startup requirement.
+`--case inode-custody` covers malformed/partial imports, allocation/FD exhaustion,
+sender exit, receiver death, queued-right discard, exclusive-lock preservation
+and bounded transfer of all 512 rights. Native FD/in-flight quotas remain errors.
+Message-origin parcels compose these same descriptors and seals with the existing
+message-route contract. Per-worker graph interning and FD-table publication add
+no kernel primitive. `--case origin-transfer` checks mixed/copy/alias views,
+route/store rejection, allocation rollback, exact descriptor balance and queued
+transfer after an independent exec sender exits.
+Self-contained `ipc_capsule` custody uses those same baseline primitives plus
+SO_COOKIE, getrandom, flock and renameat. Its HMAC is userspace Mbed TLS, not a
+kernel crypto API. Single-packet queue trees use MSG_PEEK without SO_PEEK_OFF;
+native descriptor, in-flight and Unix graph-depth limits remain errors.
+`--case origin-transfer` covers independent sender exit, fresh receiving owner,
+repeated/concurrent peeks, authentication rejection, partial FD limits and final
+queue/epoch/backing release. It adds no post-5.15 dependency.
+
+The `ipc_origins` service uses the same capsule primitives and existing eventfd
+worker queue. It adds no kernel interface, private listener or live-source RPC.
+`--case ipc-origins` covers exact captured sockets after slot reuse, worker
+cancellation/join, bounded admission, allocation/in-flight quota failures,
+source exit before receiver creation and receiver exit with untaken custody.
+Actual data capture uses baseline `recvmsg(MSG_PEEK | MSG_CMSG_CLOEXEC)`
+and `fstat` through the shared bounded ancillary parser; incomplete custody
+never becomes success.
+
+Captured-send helpers use existing atomic ADDFD_SEND (Linux 5.14) only for their
+private import channel and application socket. The same bounded SCM_RIGHTS
+queue imports 0..253 rights, including O_PATH, which ADDFD rejects with EBADF.
+Closing the import channel before socket admission preserves the 254-slot bound
+for 253 outgoing rights. No pidfd-getfd or post-5.15 primitive is needed.
+`--case fd-observation` covers protected/full callers, zero/one helper slot,
+exact/partial import capacity, receive/close/send filters, SIGPIPE, clone
+rejection and cancellation before/after import and native send.
+The native control-memory fault check confirms MSG_CTRUNC rather than EFAULT;
+incomplete private import fails before send and reaping closes the imported prefix.
+The outgoing guest sender composes these helpers with worker preparation
+and the same mapped-buffer controls. `--case ipc-ancillary` checks actual guest
+sendmsg/sendmmsg/sendto, explicit credentials, mixed headers, captured pathname
+anchors, binary abstract addresses, protected/full tables, 253 rights, source exit
+before import, blocked-send cancellation and shared-table slot replacement. It adds no
+kernel interface or capability requirement beyond the existing helper path.
+Native anchors use O_PATH, SCM_RIGHTS and task-local proc FD aliases; they require
+one extra private slot, never an extra application right. The import channel
+occupies the original application socket number so final ADDFD_SETFD preserves
+FD-specific filters without overwriting imported rights. A shell SELinux policy
+may forbid fixture socket-file creation; retained native-path rejection and
+cleanup are checked separately from successful virtual/abstract delivery.
+The optional `--native-anchor` helper fixture verifies successful native-path
+delivery under the Termux app UID, including protected callers and 253 O_PATH/mixed
+rights; it does not bypass the production executor or prove shell permission.
+Imported origin custody and annotated-vector return reuse the existing shared
+kernel receipt, SCM_RIGHTS and destination-table ordering. They require no new
+syscall, flag or startup capability. Protected terminal-receiver, truncation and
+peek checks run in `--case ipc-origins`; `--case ipc-ancillary` exercises the
+native application-control-memory publication with the actual guest adapter,
+including imported capsule origins. Message expansion adds no kernel primitive.
+Capsule queues count against native per-UID in-flight rights; an export helper
+with a reduced RLIMIT_NOFILE can fail with ETOOMANYREFS despite free slots.
+The actual guest checks keep this explicit, without raising limits or replay.
+`fd_table_observation` uses task-captured proc-FD directory iteration, `lseek`,
+`getdents64` and the existing `PTRACE_EVENT_EXIT` stop. It observes the table before
+`exit_files`, not after reaping. These interfaces and ordering are present in
+5.15 ([proc iteration](https://github.com/torvalds/linux/blob/v5.15/fs/proc/fd.c),
+[exit ordering](https://github.com/torvalds/linux/blob/v5.15/kernel/exit.c)).
+Denied capture/iteration remains an explicit guest-operation failure, not an
+empty receipt or a shared-service prerequisite. `--case fd-observation` covers
+the device policy, production private-table capture and cancellation, partial
+control faults, protected/shared-table receivers, quotas and fatal exit. The
+typed capture request reuses the same helper lifecycle, clone flags, private
+channel and atomic ADDFD_SEND; it adds no kernel primitive or startup probe.
+Guest receive uses it only for an annotated selection. Transport binding of
+authenticated annotations into real guest traffic remains separate.
+Explicit source-vector export uses the same private-table clone, close_range,
+atomic ADDFD_SEND and authenticated SCM_RIGHTS channel, without pidfd_getfd or
+new proc operations. Its 254-input bound allows a socket plus 253 data rights;
+export splits into existing 253-right packets. `--case fd-observation` checks
+protected callers, source-table replacement, quotas, filter denial and partial
+export cancellation. It adds no post-5.15 requirement or startup probe.
 
 ## Newer Interfaces
 

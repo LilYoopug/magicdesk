@@ -36,12 +36,25 @@ int md_fd_return_begin(struct md_fd_return *r, struct md_fd_origins *files, int 
     release(r); return error;
 }
 int md_fd_return_vector_begin(struct md_fd_return *r, struct md_fd_origins *files,
-        const int *sources, unsigned count, struct md_resource_wakeup *wake) {
+        const int *sources, unsigned count, const struct md_fd_return_publication *publication,
+        struct md_resource_wakeup *wake) {
     if (!r || !files || !sources || !count || count>253) return -EINVAL;
     if (r->files.table || r->delivery.capacity) return -EBUSY;
     for (unsigned i=0;i<count;++i) if (sources[i]<0) return -EBADF;
+    int error=0;
+    if (publication) {
+        if (!!publication->memory==!!publication->observation) return -EINVAL;
+        if (publication->observation) {
+            if (publication->directory<0 || publication->observation->capacity) return -EINVAL;
+            error=md_fd_delivery_prepare_observed(&r->delivery,files,publication->origins,
+                publication->flags,count,publication->updates,publication->numbers,publication->observation);
+        } else error=md_fd_delivery_prepare_mapped(&r->delivery,files,publication->origins,
+            publication->flags,count,publication->updates,publication->numbers,publication->memory);
+    }
+    if (error) return error;
     r->vector=sources; r->count=count; r->endpoint=-1;
-    int error=md_fd_order_begin(files,&r->files,wake);
+    if (publication) { r->observation=publication->observation; r->observation_directory=publication->directory; }
+    error=md_fd_order_begin(files,&r->files,wake);
     if (error>=0) return 0;
     release(r); return error;
 }
@@ -72,6 +85,7 @@ int md_fd_return_progress(struct md_fd_return *r, struct md_resource_wakeup *wak
     }
     if (md_resource_order_state(&r->channel_order)!=MD_RESOURCE_ORDER_READY) return MD_FD_RETURN_WAIT;
     error=md_resource_order_start(&r->channel_order);
+    if (!error && r->observation) error=md_fd_table_observation_begin(r->observation,r->observation_directory,r->count);
     if (!error) error=r->vector ? md_fd_channel_output_vector(r->channel,r->vector,r->count,&r->request)
         : md_fd_channel_output_send(r->channel,r->source,&r->request);
     if (error) return error;
@@ -94,17 +108,19 @@ int md_fd_return_install(struct md_fd_return *r, int listener, uint64_t notifica
 int md_fd_return_finish(struct md_fd_return *r, long received, uint64_t token) {
     if (!r || !r->files.table || received < -4095) return -EINVAL;
     int result=received<0 ? (int)received : -EPROTO;
-    if (r->offered && r->vector) {
-        if (received==(long)sizeof(uint64_t) && token==r->request) result=0;
-    } else if (r->offered) {
+    if (r->offered && r->delivery.capacity) {
         int count=md_fd_delivery_publish(&r->delivery);
         if (count<0) result=count;
-        else if (count==1) {
+        else if (count) {
             /* Never lose an installed caller-owned FD because a later guest
-             * acknowledgement failed. The exact receipt owns publication. */
-            result=r->number;
+             * acknowledgement failed. Publication does not turn a vector's
+             * native output error into success; scalar opens return that FD. */
+            if (!r->vector) result=r->number;
+            else if (received==(long)sizeof(uint64_t) && token==r->request) result=0;
         } else if (received==(long)sizeof(uint64_t) && token==r->request
-                && (r->delivery.receipt->message.msg_flags&MSG_CTRUNC)) result=-EMFILE;
+                && (r->vector || (r->delivery.receipt->message.msg_flags&MSG_CTRUNC))) result=r->vector ? 0 : -EMFILE;
+    } else if (r->offered && r->vector) {
+        if (received==(long)sizeof(uint64_t) && token==r->request) result=0;
     }
     int error=release(r);
     return result<0 && error ? error : result;
@@ -112,7 +128,7 @@ int md_fd_return_finish(struct md_fd_return *r, long received, uint64_t token) {
 int md_fd_return_cancel(struct md_fd_return *r) {
     if (!r) return -EINVAL;
     int error=0;
-    if (r->offered && !r->vector) {
+    if (r->offered && r->delivery.capacity) {
         int count=md_fd_delivery_publish(&r->delivery);
         if (count<0) error=count;
     }

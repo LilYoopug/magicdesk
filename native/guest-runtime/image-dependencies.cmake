@@ -53,10 +53,13 @@ FetchContent_Declare(guest_digest
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
 FetchContent_MakeAvailable(guest_digest)
 add_library(guest-sha256 STATIC ${guest_digest_SOURCE_DIR}/library/sha256.c
+    ${guest_digest_SOURCE_DIR}/library/md.c
+    ${guest_digest_SOURCE_DIR}/library/constant_time.c
     ${guest_digest_SOURCE_DIR}/library/platform_util.c)
 target_include_directories(guest-sha256 PUBLIC ${guest_digest_SOURCE_DIR}/include
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(guest-sha256 PUBLIC MBEDTLS_CONFIG_FILE="image_digest_config.h")
+target_compile_options(guest-sha256 INTERFACE -iquote ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 configure_file(${guest_zlib_SOURCE_DIR}/LICENSE ${CMAKE_CURRENT_BINARY_DIR}/licenses/zlib.txt COPYONLY)
 configure_file(${guest_zstd_SOURCE_DIR}/LICENSE ${CMAKE_CURRENT_BINARY_DIR}/licenses/zstd.txt COPYONLY)

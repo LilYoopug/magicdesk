@@ -36,6 +36,13 @@ struct md_fs_reply {
 struct md_fs_rights { unsigned count; int fd[MD_FS_MAX_FDS]; };
 long md_fs_send(int socket, const void *, size_t, const struct md_fs_rights *);
 long md_fs_receive(int socket, void *, size_t, struct md_fs_rights *);
+/* Bounded private seqpacket vectors. Receive closes every installed right on
+ * truncation/malformed control and publishes count only on success. */
+long md_fs_send_fds(int socket, const void *, size_t, const int *, unsigned count);
+long md_fs_receive_fds(int socket, void *, size_t, int *, unsigned capacity, unsigned *count);
+/* Same bounded parser and ownership as receive; leaves the packet queued.
+ * Only for a selected private transport, never arbitrary application FDs. */
+long md_fs_peek_fds(int socket, void *, size_t, int *, unsigned capacity, unsigned *count);
 long md_fs_receive_receipt(int socket, struct md_fd_receipt *, unsigned capacity,
         struct md_fs_rights *, uint64_t exchange);
 void md_fs_close_rights(struct md_fs_rights *);

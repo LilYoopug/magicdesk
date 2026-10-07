@@ -17,7 +17,7 @@ def main():
     parser.add_argument("--config", type=Path, default=Path.home() / ".codex/config.toml")
     parser.add_argument("--server", default="magicdesk")
     parser.add_argument("--keep", action="store_true")
-    parser.add_argument("--case", choices=("all", "kernel-baseline", "mapping-task", "pidfd-table", "proc-custody", "exec-custody", "open-job", "ofd-order", "fd-handoff", "fd-parcel", "fd-messages", "ipc-peer", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fd-lifecycle", "fs-dispatch", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture", "rpc", "stores"), default="all",
+    parser.add_argument("--case", choices=("all", "kernel-baseline", "mapping-task", "pidfd-table", "fd-observation", "proc-custody", "exec-custody", "open-job", "ofd-order", "fd-handoff", "fd-parcel", "fd-messages", "ipc-peer", "ipc-origins", "ipc-ancillary", "mount-policy", "mount-graph", "inode-custody", "origin-transfer", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fd-lifecycle", "fs-dispatch", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture", "rpc", "stores"), default="all",
                         help="Run resource regressions, FD handoff/parcel, terminal RPC custody, native FD lifecycle, or worker transport")
     parser.add_argument("--compare-installed", action="store_true",
                         help="Compare identical metadata/spawn fixtures with the installed runtime")
@@ -219,6 +219,31 @@ def main():
         check("guest directory copy", root + "/libmagicdesk_guest_run.so --diagnostics --store " + root
               + "/store --deadline-seconds 90 -- /bin/test buffer-directory /tmp", "PASS protected directory copy")
 
+    def check_ancillary():
+        fixture = root + "/libmagicdesk_guest_ipc_credentials_guest.so"
+        check("native non-Unix ancillary control", fixture + " --nonunix-rights", "PASS non-Unix ancillary send")
+        check("ancillary directories", "mkdir -p " + root + "/ipc-source/bin " + root + "/ipc-source/tmp " + root + "/ipc-source/attached")
+        check("ancillary root permissions", "chmod 755 " + root + "/ipc-source " + root + "/ipc-source/bin")
+        check("ancillary tmp permissions", "chmod 1777 " + root + "/ipc-source/tmp")
+        check("ancillary image", "cp " + fixture + " " + root + "/ipc-source/bin/test")
+        check("ancillary import", root + "/libmagicdesk_guest_service.so --import "
+              + root + "/ipc-source " + root + "/ipc-store --preserve-ownership")
+        run = [root + "/libmagicdesk_guest_run.so", "--store", root + "/ipc-store",
+               "--user", "0:0", "--deadline-seconds", "90", "--", "/bin/test"]
+        check("guest ancillary semantics", shlex.join(run), "PASS connection snapshots:")
+        check("addressed destinations", "mkdir -p " + root + "/addressed")
+        check("guest addressed sends", shlex.join([fixture, "--address-fixture", root + "/libmagicdesk_guest_run.so",
+              root + "/ipc-store", root + "/addressed"]), "PASS addressed send custody:")
+        check("guest capsule send and receive", shlex.join([root + "/libmagicdesk_guest_fs_dispatch.so",
+              "--ipc-origin-guest", root + "/ipc-store", root + "/libmagicdesk_guest_run.so"]),
+              "PASS guest capsule receive mode=13 protected=1")
+        for receive in range(4):
+            for protected in range(2):
+                for guest in (False, True):
+                    argv = run + ["--custody"] if guest else [fixture, "--custody-native"]
+                    check(f"ancillary custody receive={receive} protected={protected} guest={guest}",
+                          shlex.join(argv + [str(receive), str(protected)]), "PASS IPC caller custody")
+
     try:
         check("isolated staging", "mkdir -m 700 " + root)
         names = ("fd_handoff",) if args.case in ("fd-handoff", "fd-parcel", "fd-messages") else (
@@ -229,7 +254,11 @@ def main():
         if args.case in ("all", "fs-buffer"):
             names += ("test_interception_buffers",)
         if args.case == "all":
-            names += ("test_open_job", "fs_dispatch", "test_launch_registry")
+            names += ("test_open_job", "fs_dispatch", "test_launch_registry", "ipc_credentials_guest", "fd_observation", "task_helper_fd")
+        if args.case == "fd-observation":
+            names = ("fd_observation", "task_helper_fd")
+        if args.case == "ipc-ancillary":
+            names = ("bootstrap", "supervisor", "run", "service", "ipc_credentials_guest", "fs_dispatch")
         if args.case in ("all", "kernel-baseline"):
             names += ("kernel_baseline", "capabilities")
         if args.case == "open-job":
@@ -244,8 +273,12 @@ def main():
             names = ("test_rpc",)
         if args.case == "stores":
             names = ("test_mounts", "test_inodes", "test_snapshot")
+        if args.case in ("mount-policy", "mount-graph", "inode-custody", "origin-transfer"):
+            names = ("test_mounts",)
         if args.case == "ipc-peer":
             names = ("test_ipc_peer", "fs_dispatch", "test_launch_registry")
+        if args.case == "ipc-origins":
+            names = ("fs_dispatch",)
         if args.case == "ofd-order":
             names = ("test_task_resources",)
         if args.case == "pidfd-table":
@@ -254,6 +287,41 @@ def main():
             file = "libmagicdesk_guest_" + name + ".so"
             transport.upload(client, args.build / file, root + "/" + file)
         check("prepare fixtures", "chmod 700 " + root + "/*.so")
+        if args.case in ("all", "fd-observation"):
+            check("native FD table observation", root + "/libmagicdesk_guest_fd_observation.so",
+                  "PASS native FD table observation and terminal custody")
+            check("production FD table helper", root + "/libmagicdesk_guest_task_helper_fd.so " + shlex.quote(root),
+                  "PASS production FD table helper custody and cancellation")
+            if args.case == "fd-observation":
+                return
+        if args.case in ("all", "ipc-ancillary"):
+            check_ancillary()
+            if args.case == "ipc-ancillary":
+                return
+        if args.case == "mount-policy":
+            check("shared mount policy", root + "/libmagicdesk_guest_test_mounts.so --mount-policy " + root + "/policy",
+                  "PASS mount policy exec peers", absent_patterns=(r"assertion .* failed",))
+            return
+        if args.case == "mount-graph":
+            check("portable mount graph", root + "/libmagicdesk_guest_test_mounts.so --mount-graph " + root + "/graph",
+                  "PASS mount graph exec peers", absent_patterns=(r"assertion .* failed",))
+            return
+        if args.case == "inode-custody":
+            check("portable inode custody", root + "/libmagicdesk_guest_test_mounts.so --inode-custody " + root + "/custody",
+                  "PASS portable inode custody", absent_patterns=(r"assertion .* failed",))
+            return
+        if args.case == "origin-transfer":
+            check("portable message origins", root + "/libmagicdesk_guest_test_mounts.so --origin-transfer " + root + "/origins",
+                  "PASS portable message origins",
+                  patterns=(r"PASS immutable FD bundles:", r"PASS authenticated capsule:",
+                            r"PASS unknown capsule:", r"PASS discarded capsule:", r"PASS capsule rollback:"),
+                  absent_patterns=(r"assertion .* failed",))
+            return
+        if args.case in ("all", "ipc-peer", "ipc-origins"):
+            check("asynchronous IPC origin transfer", root + "/libmagicdesk_guest_fs_dispatch.so --ipc-origins " + root + "/origin-store",
+                  "PASS asynchronous IPC origin transfer", absent_patterns=(r"assertion .* failed",))
+            if args.case == "ipc-origins":
+                return
         if args.case in ("all", "ipc-peer"):
             check("launch registry lifetime", root + "/libmagicdesk_guest_test_launch_registry.so",
                   "PASS launch ownership")
@@ -265,7 +333,8 @@ def main():
                 return
         if args.case == "stores":
             for name in ("mounts", "inodes", "snapshot"):
-                check(name + " model", root + "/libmagicdesk_guest_test_" + name + ".so " + root + "/model-" + name)
+                check(name + " model", root + "/libmagicdesk_guest_test_" + name + ".so " + root + "/model-" + name,
+                      absent_patterns=(r"assertion .* failed",))
             return
         if args.case in ("all", "kernel-baseline"):
             check("mandatory capability admission", root + "/libmagicdesk_guest_capabilities.so "
@@ -391,7 +460,7 @@ def main():
             return
         for name in ("inodes", "mounts", "credentials", "rpc", "snapshot"):
             check("filesystem model " + name, root + "/libmagicdesk_guest_test_" + name + ".so "
-                  + root + "/model-" + name)
+                  + root + "/model-" + name, absent_patterns=(r"assertion .* failed",))
         check("fixture directories", "mkdir -p " + root + "/native " + root + "/source/tmp "
               + root + "/source/bin " + root + "/source/attached")
         check("stage guest image", "cp " + root + "/libmagicdesk_guest_resource_guest.so " + root + "/source/bin/test")

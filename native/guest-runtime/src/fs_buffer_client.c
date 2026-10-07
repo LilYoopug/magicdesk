@@ -44,8 +44,7 @@ static long receive_rights(struct md_fs_buffer_frame *frame, unsigned flags) {
     return md_guest_buffer_control(MD_FS_BUFFER_RIGHTS_DONE,(unsigned long)result,0);
 }
 static long receive_result(struct md_fs_buffer_frame *frame, const struct md_fs_request *q,
-        struct md_fs_response *out, int (*deliver)(void *, const void *, size_t), void *context,
-        long (*use)(void *, struct md_fs_buffer_frame *)) {
+        struct md_fs_response *out, int (*deliver)(void *, const void *, size_t), void *context) {
     long result=0;
     out->delivery=frame->reply.delivery;
     out->result=frame->reply.result;
@@ -56,9 +55,8 @@ static long receive_result(struct md_fs_buffer_frame *frame, const struct md_fs_
     unsigned transfer=frame->transfer;
     unsigned descriptors=transfer!=MD_FS_BUFFER_NO_FD;
     if (out->delivery!=MD_FS_REPLIED || out->result.fd!=-1 || out->result.open_completion.kind
-            || transfer>MD_FS_BUFFER_TASK_DESCRIPTOR
+            || transfer>MD_FS_BUFFER_TASK_PATH
             || !md_fs_result_valid(q,&out->result,data,capacity,descriptors)) result=-EPROTO;
-    else if (transfer==MD_FS_BUFFER_TASK_DESCRIPTOR) result=use ? use(context,frame) : -ENOTSUP;
     else if (transfer==MD_FS_BUFFER_TASK_PATH) {
         if (q->operation!=MD_FS_TASK_PATH || frame->source[sizeof(frame->source)-1]
                 || !md_prefix(frame->source,"/proc/")) result=-EPROTO;
@@ -102,7 +100,7 @@ static long receive_result(struct md_fs_buffer_frame *frame, const struct md_fs_
 }
 static long exchange(const struct md_fs_request *q, struct md_fs_response *out,
         int (*deliver)(void *, const void *, size_t), void *context, unsigned command,
-        struct md_command_recipe *recipe, long (*use)(void *, struct md_fs_buffer_frame *)) {
+        struct md_command_recipe *recipe) {
     long address=md_adapter_buffer_take();
     if (address<0) return address;
     struct md_fs_buffer_frame *frame=(void *)address;
@@ -155,7 +153,7 @@ static long exchange(const struct md_fs_request *q, struct md_fs_response *out,
         result=md_guest_buffer_control(MD_FS_BUFFER_SENT,(unsigned long)sent,0);
     }
     if (!result && recipe) memcpy(recipe,&frame->command,sizeof(*recipe));
-    if (!result && out) result=receive_result(frame,q,out,deliver,context,use);
+    if (!result && out) result=receive_result(frame,q,out,deliver,context);
     long released=md_adapter_buffer_release();
     return result ? result : released;
 }
@@ -194,7 +192,7 @@ long md_fs_buffer_snapshot(unsigned flags, long (*produce)(void *, void *, size_
     if (!result) result=md_guest_buffer_control(MD_FS_BUFFER_SNAPSHOT_FINISH,0,0);
     if (!result) {
         struct md_fs_request q={.operation=MD_FS_TEMPORARY,.directory={-1,-1},.flags=flags};
-        result=receive_result(frame,&q,&out,NULL,NULL,NULL);
+        result=receive_result(frame,&q,&out,NULL,NULL);
         if (!result) result=out.result.error;
     }
     long released=md_adapter_buffer_release();
@@ -203,16 +201,16 @@ long md_fs_buffer_snapshot(unsigned flags, long (*produce)(void *, void *, size_
 long md_fs_buffer_call(const struct md_fs_request *q, struct md_fs_response *out,
         int (*deliver)(void *, const void *, size_t), void *context) {
     if (!md_fs_buffer_accepts(q)) return -EINVAL;
-    return exchange(q,out,deliver,context,MD_FS_BUFFER_CALL,NULL,NULL);
+    return exchange(q,out,deliver,context,MD_FS_BUFFER_CALL,NULL);
 }
-long md_fs_buffer_inspect(const int *indices, unsigned count, struct md_received_info *out) {
+long md_fs_buffer_inspect(const int *indices, unsigned count, struct md_received_message *out) {
     if (!count || count>253) return -EINVAL;
     long address=md_adapter_buffer_take();
     if (address<0) return address;
     struct md_fs_buffer_frame *frame=(void *)address;
     frame->rights.count=count; memcpy(frame->rights.index,indices,count*sizeof(int));
     long result=md_guest_buffer_control(MD_FS_BUFFER_RECEIVED_INSPECT,0,0);
-    if (!result) memcpy(out,frame->received_info,count*sizeof(*out));
+    if (!result) memcpy(out,&frame->received_message,sizeof(*out));
     long released=md_adapter_buffer_release();
     return result ? result : released;
 }
@@ -255,13 +253,8 @@ long md_fs_buffer_publish(const int *indices, const unsigned char *watched, unsi
     long released=md_adapter_buffer_release();
     return finished ? finished : released;
 }
-long md_fs_buffer_use(const struct md_fs_request *q, struct md_fs_response *out,
-        long (*use)(void *, struct md_fs_buffer_frame *), void *context) {
-    if (!md_fs_buffer_accepts(q) || !use) return -EINVAL;
-    return exchange(q,out,NULL,context,MD_FS_BUFFER_CALL,NULL,use);
-}
 long md_fs_buffer_exec_prepare(const struct md_fs_request *q, struct md_command_recipe *recipe) {
-    return exchange(q,NULL,NULL,NULL,MD_FS_BUFFER_EXEC_PREPARE,recipe,NULL);
+    return exchange(q,NULL,NULL,NULL,MD_FS_BUFFER_EXEC_PREPARE,recipe);
 }
 void md_fs_buffer_exec_cancel(void) {
     md_guest_buffer_control(MD_FS_BUFFER_EXEC_CANCEL,0,0);

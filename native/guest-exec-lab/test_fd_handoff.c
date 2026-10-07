@@ -873,7 +873,7 @@ static void origin_message_experiment(const char *directory) {
     test_ipc_connections(directory);
     assert(descriptors()==before);
     struct md_ipc_credentials *authority=NULL;
-    assert(!md_ipc_credentials_open(directory,&authority));
+    assert(!md_ipc_credentials_open(directory,MD_IPC_TRANSPORT_NATIVE,&authority));
     const int types[]={SOCK_STREAM,SOCK_DGRAM,SOCK_SEQPACKET};
     for (unsigned i=0;i<3;++i) for (int discard=0;discard<2;++discard)
         origin_message_association(directory,authority,types[i],discard);

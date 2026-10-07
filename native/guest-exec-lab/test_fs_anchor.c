@@ -245,8 +245,8 @@ void test_fs_anchor(const char *base) {
     assert(!md_fs_mounts_open(&original,entries,2));
     struct md_fs_location root={0},rebased;
     assert(!md_fs_mounts_copy(&original,&root,&current.mounts,&rebased));
-    current.mounts->tree->mounts[0].readonly=1;
-    current.mounts->tree->mounts[1].readonly=0;
+    assert(!md_mount_policy_set(&current.mounts->tree->mounts[0].policy,MD_MOUNT_READONLY));
+    assert(!md_mount_policy_set(&current.mounts->tree->mounts[1].policy,0));
     struct md_fs_anchor *old_root=anchor(&original,"/"), *old=anchor(&original,"/mnt");
     struct md_fs_anchor *old_child=anchor(&original,"/mnt/child"), *new=anchor(&current,"/mnt");
     opens(&current,old,"value",O_RDWR,0,0);

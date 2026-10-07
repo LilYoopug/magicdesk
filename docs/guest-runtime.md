@@ -726,8 +726,10 @@ Named pipes use the same namespace and kernel pipe payloads, without requiring
 native FIFO creation under Android shell policy. Peer-open rendezvous belongs to
 a cancellable supervisor operation outside namespace transactions. See the [FIFO contract](../native/guest-runtime/fifos.md)
 for readiness and watch limitations.
-Unix `sendmmsg` reuses address and ancillary adapters without copying payloads.
-Credential-free sends need no per-message buffers. Tests cover partial batches, short stream writes, failed
+Unix `sendmsg`, `sendmmsg` and addressed `sendto` share captured outgoing custody,
+without copying payloads. Ordinary connected payload-only sends remain native.
+The worker owns address resolution and explicit-credential validation; private
+helpers own temporary FD installs until exact reaping. Tests cover partial batches, short stream writes, failed
 result writes and SCM_RIGHTS. Unadapted socket operations are not thereby certified.
 Received rights have one supervisor-owned vector shared with worker inspection.
 One typed request per message classifies identity tokens and managed watches,

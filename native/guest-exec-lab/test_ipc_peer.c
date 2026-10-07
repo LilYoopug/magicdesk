@@ -38,7 +38,8 @@ static unsigned descriptors(void) {
     assert(!closedir(dir)); return n;
 }
 static struct md_ipc_credentials *authority(const char *path) {
-    struct md_ipc_credentials *s=NULL; assert(!md_ipc_credentials_open(path,&s)); return s;
+    struct md_ipc_credentials *s=NULL;
+    assert(!md_ipc_credentials_open(path,MD_IPC_TRANSPORT_ORIGINS_V1,&s)); return s;
 }
 static void pair(struct md_ipc_credentials *s, int type, int fd[2]) {
     assert(!socketpair(AF_UNIX,type|SOCK_CLOEXEC,0,fd));
@@ -266,7 +267,7 @@ static void epoch(const char *path) {
     md_ipc_peer_close(b);
     assert(!flock(maintenance,LOCK_EX|LOCK_NB));
     struct md_ipc_credentials *denied=NULL;
-    assert(md_ipc_credentials_open(path,&denied)==-EBUSY && !denied);
+    assert(md_ipc_credentials_open(path,MD_IPC_TRANSPORT_ORIGINS_V1,&denied)==-EBUSY && !denied);
     assert(!close(maintenance));
     s=authority(path); assert(md_ipc_credentials_connection(s,app[0],&current)==-ENODATA);
     md_ipc_credentials_close(s); close(app[0]); close(app[1]); assert(descriptors()==before);
@@ -332,7 +333,7 @@ int main(int argc, char **argv) {
     test_message_routes(argv[1]);
     for (int allocation=0;allocation<2;++allocation) {
         struct md_ipc_credentials *failed=NULL; fail_calloc=allocation;
-        assert(md_ipc_credentials_open(argv[1],&failed)==-ENOMEM && !failed && fail_calloc==-1);
+        assert(md_ipc_credentials_open(argv[1],MD_IPC_TRANSPORT_ORIGINS_V1,&failed)==-ENOMEM && !failed && fail_calloc==-1);
         assert(descriptors()==before);
     }
     struct md_ipc_credentials *s=authority(argv[1]);

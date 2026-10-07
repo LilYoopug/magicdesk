@@ -1,0 +1,583 @@
+#define _GNU_SOURCE
+#include "fs_origin_transfer.h"
+#include "fs_mount_internal.h"
+#include "inode_internal.h"
+#include "sealed_manifest.h"
+#include "fs_wire.h"
+#include "event_wait.h"
+#include "ipc_capsule.h"
+#include "fd_bundle.h"
+#include <assert.h>
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/file.h>
+#include <sys/mman.h>
+#include <sys/prctl.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+void test_mount_allocation_failure_after(int);
+struct source {
+    struct md_filesystem fs, copy;
+    struct md_fs_anchor *anchor[6];
+    struct md_fd_message *message;
+    struct md_fd_messages *messages;
+    struct md_fd_message_route route;
+    int carrier[2], writer;
+};
+static unsigned descriptors(void) {
+    DIR *d=opendir("/proc/self/fd"); assert(d); unsigned n=0; struct dirent *e;
+    while ((e=readdir(d))) if (e->d_name[0]!='.') ++n;
+    assert(!closedir(d)); return n;
+}
+static void path(char *out, const char *base, const char *name) {
+    assert(snprintf(out,PATH_MAX,"%s/%s",base,name)<PATH_MAX);
+}
+static void file(const char *name, const char *text) {
+    int fd=open(name,O_WRONLY|O_CREAT|O_CLOEXEC,0600); assert(fd>=0);
+    assert(write(fd,text,strlen(text))==(ssize_t)strlen(text)); close(fd);
+}
+static struct md_fs_result request(struct md_filesystem *fs, struct md_fs_anchor *a,
+        unsigned op, const char *name, unsigned flags, struct md_fs_anchor **out) {
+    struct md_fs_request q={.operation=op,.path={name,NULL},.flags=flags,.origin={a,NULL},
+        .directory={a ? md_fs_anchor_fd(a) : -1,-1},.mode=op==MD_FS_FSTAT ? MD_FS_STAT_MOUNT : 0};
+    struct md_fs_result r; md_fs_execute(fs,&q,&r,&(struct md_fs_output){.origin=out}); return r;
+}
+static struct md_fs_anchor *anchor(struct md_filesystem *fs, const char *name) {
+    struct md_fs_anchor *a=NULL; struct md_fs_result r=request(fs,NULL,MD_FS_OPEN,name,O_PATH,&a);
+    assert(!r.error && r.fd>=0 && a); close(r.fd); return a;
+}
+static void pair(int fd[2]) {
+    assert(!socketpair(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC|SOCK_NONBLOCK,0,fd));
+}
+static struct md_fd_message *capture(struct md_fs_anchor *const *entries, unsigned count) {
+    struct md_fd_origins *table=md_fd_origins_new(); assert(table);
+    int numbers[253]; struct md_fd_origin_update updates[253];
+    for (unsigned i=0;i<count;++i) numbers[i]=(int)i+10;
+    assert(!md_fd_origins_prepare_batch(table,entries,0,count,updates));
+    assert(!md_fd_origins_finish_batch(updates,count,numbers,count));
+    struct md_fd_order turn={0};
+    assert(md_fd_order_begin(table,&turn,NULL)==1 && !md_fd_order_start(&turn));
+    struct md_fd_message *message=NULL;
+    assert(!md_fd_message_capture(table,numbers,count,&message));
+    assert(!md_fd_order_complete(&turn)); md_fd_origins_release(table);
+    return message;
+}
+static void publish(struct source *s, const char *store, struct md_fs_anchor *const *entries, unsigned count) {
+    s->message=capture(entries,count);
+    struct md_ipc_credentials *authority=NULL;
+    assert(!md_ipc_credentials_open(store,MD_IPC_TRANSPORT_ORIGINS_V1,&authority));
+    int app[2]; pair(app); struct md_identity id=md_identity_new(0,0);
+    struct md_fs_request q={.operation=MD_FS_IPC,.flags=MD_IPC_PAIR,.directory={app[0],app[1]},.peer=getpid()};
+    struct md_fs_result r; md_ipc_credentials_execute(authority,&id,&q,&r,NULL);
+    assert(!r.error); md_identity_release(&id);
+    struct md_ipc_binding sender={0}, receiver={0};
+    assert(!md_ipc_credentials_bind(authority,app[0],&sender));
+    assert(!md_ipc_credentials_bind(authority,app[1],&receiver));
+    assert(!md_fd_message_bind(s->message,&sender,"0123456789abcdef0123456789abcdef"));
+    int life[2]; assert(!pipe2(life,O_NONBLOCK|O_CLOEXEC)); s->writer=life[1]; pair(s->carrier);
+    assert(!md_fd_messages_new(&s->messages));
+    assert(!md_fd_messages_publish(s->messages,s->message,&receiver.connection,s->carrier[1],life[0]));
+    assert(!md_fd_message_route(s->message,&s->route));
+    struct md_fd_message *claim=NULL;
+    assert(!md_fd_messages_claim(s->messages,&receiver,s->carrier[1],&s->route,&claim));
+    md_fd_message_release(s->message); s->message=claim;
+    md_ipc_binding_release(&sender); md_ipc_binding_release(&receiver);
+    close(app[0]); close(app[1]); md_ipc_credentials_close(authority);
+}
+static struct source source(const char *base, unsigned count) {
+    struct source s={0}; char lower[PATH_MAX], store[PATH_MAX], host[3][PATH_MAX], name[PATH_MAX];
+    path(lower,base,"lower"); path(store,base,"store"); struct md_inode_store *image=NULL;
+    assert(!md_inode_store_open(lower,1,&image) && !md_inode_store_open(store,1,&s.fs.store));
+    assert(!md_inode_mkdir(image,-1,"/outer",0700) && !md_inode_mkdir(image,-1,"/alias",0700));
+    int fd=md_inode_open(image,-1,"/value",O_WRONLY|O_CREAT,0600); assert(fd>=0);
+    assert(write(fd,"lower",5)==5); close(fd);
+    assert(!md_inode_store_seal(image) && !md_inode_snapshot(image,s.fs.store)); md_inode_store_close(image);
+    for (unsigned i=0;i<3;++i) {
+        char leaf[16]; snprintf(leaf,sizeof(leaf),"host%u",i); path(host[i],base,leaf); assert(!mkdir(host[i],0700));
+    }
+    path(name,host[0],"nested"); assert(!mkdir(name,0700));
+    path(name,host[0],"value"); file(name,"outer"); path(name,host[1],"value"); file(name,"inner");
+    struct md_fs_attachment attachment[]={{host[0],"/outer",0},{host[1],"/outer/nested",1},{host[2],"/alias",0}};
+    assert(!md_fs_mounts_open(&s.fs,attachment,3));
+    struct md_view_mount *a=&s.fs.mounts->tree->mounts[1], *b=&s.fs.mounts->tree->mounts[2];
+    close(b->source); b->source=fcntl(a->source,F_DUPFD_CLOEXEC,3); assert(b->source>=0); b->native=a->native;
+    s.copy.store=s.fs.store; struct md_fs_location root={0}, rebased;
+    assert(!md_fs_mounts_copy(&s.fs,&root,&s.copy.mounts,&rebased));
+    assert(!md_mount_policy_set(&s.copy.mounts->tree->mounts[0].policy,MD_MOUNT_READONLY));
+    const char *names[]={"/","/outer","/alias","/outer/nested","/outer","/value"};
+    for (unsigned i=0;i<6;++i) s.anchor[i]=anchor(i==4 ? &s.copy : &s.fs,names[i]);
+    struct md_fs_anchor *entries[253];
+    for (unsigned i=0;i<count;++i) entries[i]=i%8==7 ? NULL : s.anchor[i%8==6 ? 0 : i%8];
+    publish(&s,store,entries,count); return s;
+}
+static void message_close(struct source *s) {
+    md_fd_messages_free(s->messages); md_fd_message_release(s->message);
+    close(s->carrier[0]); close(s->carrier[1]); close(s->writer);
+}
+static void source_close(struct source *s) {
+    message_close(s);
+    for (unsigned i=0;i<6;++i) md_fs_anchor_release(s->anchor[i]);
+    md_fs_mounts_close(&s->copy); md_fs_mounts_close(&s->fs); md_inode_store_close(s->fs.store);
+    *s=(struct source){0};
+}
+static struct md_fs_origin_imports *imports(const char *base) {
+    char name[PATH_MAX]; path(name,base,"store"); int fd=open(name,O_PATH|O_DIRECTORY|O_CLOEXEC); assert(fd>=0);
+    struct md_fs_origin_imports *p=NULL; assert(!md_fs_origin_imports_new(fd,&p)); close(fd); return p;
+}
+static void maintenance(const char *base, int blocked) {
+    const char *names[]={"store","lower"};
+    for (unsigned i=0;i<2;++i) {
+        char name[PATH_MAX]; path(name,base,names[i]); int fd=open(name,O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(fd>=0);
+        int r=flock(fd,LOCK_EX|LOCK_NB);
+        if (blocked) assert(r<0 && errno==EWOULDBLOCK); else assert(!r);
+        close(fd);
+    }
+}
+static void contents(struct md_filesystem *fs, struct md_fs_anchor *a, const char *name, const char *expected) {
+    struct md_fs_result r=request(fs,a,MD_FS_OPEN,name,O_RDONLY,NULL);
+    assert(!r.error && r.fd>=0); char bytes[16]={0};
+    assert(read(r.fd,bytes,sizeof(bytes))==(ssize_t)strlen(expected) && !strcmp(bytes,expected)); close(r.fd);
+}
+static void engine_entries(const char *base, struct md_fs_anchor *const *a, int changed) {
+    for (unsigned i=0;i<253;++i) assert(a[i]==a[i%8]);
+    assert(a[0]==a[6] && !a[7] && a[1]->view==a[2]->view && a[1]->view!=a[4]->view);
+    assert(a[2]->device==a[3]->device && a[2]->inode==a[3]->inode && a[2]->mount!=a[3]->mount);
+    char store[PATH_MAX]; path(store,base,"store"); struct md_filesystem fs={0};
+    assert(!md_inode_store_open(store,0,&fs.store) && !md_fs_mounts_open(&fs,NULL,0));
+    contents(&fs,a[0],"value","lower"); contents(&fs,a[1],"value","outer");
+    contents(&fs,a[3],"value","inner"); contents(&fs,a[3],"../value","outer");
+    for (unsigned i=1;i<=4;++i) {
+        struct md_fs_result r=request(&fs,a[i],MD_FS_OPEN,"value",O_RDWR,NULL);
+        int readonly=i>=3 || (i==1 && changed);
+        if (readonly) assert(r.error==-EROFS && r.fd<0);
+        else { assert(!r.error); close(r.fd); }
+    }
+    struct md_fs_result r=request(&fs,a[3],MD_FS_FSTAT,NULL,0,NULL);
+    assert(!r.error && r.info.mount_id==a[3]->mount->id);
+    md_fs_mounts_close(&fs); md_inode_store_close(fs.store);
+}
+static void engine(const char *base, struct md_fs_origin_vector *v, int changed) {
+    assert(md_fs_origin_vector_count(v)==253);
+    engine_entries(base,md_fs_origin_vector_entries(v),changed);
+}
+static void copy_unlink(const char *base, struct md_fs_anchor *origin) {
+    char store[PATH_MAX]; path(store,base,"store"); struct md_filesystem fs={0};
+    assert(!md_inode_store_open(store,0,&fs.store) && !md_fs_mounts_open(&fs,NULL,0));
+    struct md_fs_result old=request(&fs,origin,MD_FS_REOPEN,NULL,O_RDONLY,NULL);
+    assert(!old.error && old.fd>=0);
+    int fd=md_inode_open(fs.store,-1,"/value",O_RDWR,0); assert(fd>=0);
+    assert(write(fd,"upper",5)==5); close(fd); assert(!md_inode_unlink(fs.store,-1,"/value",0));
+    struct md_fs_result current=request(&fs,origin,MD_FS_REOPEN,NULL,O_RDONLY,NULL);
+    assert(!current.error && current.fd>=0); char bytes[5];
+    assert(read(current.fd,bytes,5)==5 && !memcmp(bytes,"upper",5)); close(current.fd);
+    assert(read(old.fd,bytes,5)==5 && !memcmp(bytes,"lower",5)); close(old.fd);
+    md_fs_mounts_close(&fs); md_inode_store_close(fs.store);
+}
+static struct md_fs_origin_vector *receive(struct source *s, struct md_fs_origin_imports *i) {
+    struct md_fs_origin_parcel p={0}; assert(!md_fs_origin_export(s->message,&p) && p.count==31);
+    struct md_fs_origin_vector *v=NULL; assert(!md_fs_origin_import(i,&s->route,&p,&v) && !p.count && !p.fd);
+    return v;
+}
+static void local(const char *base) {
+    unsigned before=descriptors(); struct source s=source(base,253); struct md_fs_origin_imports *i=imports(base);
+    struct md_fs_origin_vector *a=receive(&s,i), *b=receive(&s,i); engine(base,a,0); engine(base,b,0);
+    struct md_fs_anchor *const *aa=md_fs_origin_vector_entries(a), *const *bb=md_fs_origin_vector_entries(b);
+    assert(aa[1]->view==bb[1]->view && aa[1]->mount==bb[1]->mount);
+    assert(!md_mount_policy_set(&s.fs.mounts->tree->mounts[0].policy,MD_MOUNT_READONLY)); engine(base,b,1);
+    /* Imported origins use the ordinary table publication, fork and exec paths. */
+    struct md_fd_origins *table=md_fd_origins_new(); assert(table); struct md_fd_origin_update updates[253];
+    int numbers[253]; for (unsigned n=0;n<253;++n) numbers[n]=1000+(int)n;
+    assert(!md_fd_origins_prepare_batch(table,aa,FD_CLOEXEC,253,updates));
+    assert(!md_fd_origins_finish_batch(updates,253,numbers,253));
+    struct md_fd_origins *copy=md_fd_origins_fork(table,0); assert(copy);
+    md_fd_origins_release(table); md_fd_origins_exec(copy); md_fd_origins_release(copy);
+    md_fs_origin_vector_free(a); source_close(&s); maintenance(base,1);
+    md_fs_origin_imports_free(i); engine(base,b,1); maintenance(base,1);
+    char store[PATH_MAX]; path(store,base,"store"); struct source forward={0};
+    publish(&forward,store,bb,253); i=imports(base);
+    struct md_fs_origin_vector *c=receive(&forward,i);
+    message_close(&forward); md_fs_origin_vector_free(b); engine(base,c,1); maintenance(base,1);
+    copy_unlink(base,md_fs_origin_vector_entries(c)[5]);
+    md_fs_origin_vector_free(c); maintenance(base,0); md_fs_origin_imports_collect(i);
+    md_fs_origin_imports_free(i); assert(descriptors()==before);
+    puts("PASS origin transfer: 253 entries, repeated/unknown origins, mixed graphs, live policy, interned IDs and ordinary table publication");
+    puts("PASS origin forwarding after sender/SQLite/cache teardown retains graph policy, COW/unlinked identity and backing locks");
+}
+static void mutate(struct md_fs_origin_parcel *p, unsigned word, uint32_t value, int seals) {
+    uint32_t bytes[6000]; ssize_t n=pread(p->fd[0],bytes,sizeof(bytes),0); assert(n>0 && word<(unsigned)n/4);
+    bytes[word]=value; int fd=memfd_create("bad-origins",MFD_CLOEXEC|MFD_ALLOW_SEALING); assert(fd>=0);
+    assert(write(fd,bytes,(size_t)n)==n && !fcntl(fd,F_ADD_SEALS,seals)); close(p->fd[0]); p->fd[0]=fd;
+}
+static void failures(const char *base) {
+    unsigned before=descriptors(); struct source s=source(base,253); struct md_fs_origin_imports *i=imports(base);
+    struct md_fs_origin_vector *good=receive(&s,i); engine(base,good,0); unsigned live=descriptors();
+    for (unsigned n=0;n<14;++n) {
+        struct md_fs_origin_parcel p={0}; assert(!md_fs_origin_export(s.message,&p));
+        struct md_fd_message_route expected=s.route;
+        int seals=F_SEAL_WRITE|F_SEAL_SEAL|F_SEAL_SHRINK|F_SEAL_GROW;
+        switch (n) {
+        case 0: mutate(&p,0,0,seals); break;
+        case 1: mutate(&p,1,2,seals); break;
+        case 2: mutate(&p,2,254,seals); break;
+        case 3: mutate(&p,3,254,seals); break;
+        case 4: mutate(&p,7,1,seals); break;
+        case 5: mutate(&p,34,2,seals); break; /* First vector index must be 1. */
+        case 6: mutate(&p,30,0,seals); break; /* Store device identity. */
+        case 7: mutate(&p,0,0x4d444f56U,seals&~F_SEAL_WRITE); break;
+        case 8: { int fd=p.fd[5]; p.fd[5]=p.fd[15]; p.fd[15]=fd; break; }
+        case 9: { int fd=p.fd[25]; p.fd[25]=p.fd[26]; p.fd[26]=fd; break; }
+        case 10: close(p.fd[26]); p.fd[26]=p.fd[25]; break;
+        case 11: close(p.fd[--p.count]); break;
+        case 12: expected.nonce[0]^=1; break;
+        case 13: mutate(&p,34+253+2,UINT_MAX,seals); break; /* First origin mount slot. */
+        }
+        struct md_fs_origin_vector *v=NULL; assert(md_fs_origin_import(i,&expected,&p,&v)<0 && !p.fd && !v);
+        assert(descriptors()==live); engine(base,good,0);
+    }
+    char foreign[PATH_MAX]; path(foreign,base,"foreign"); assert(!mkdir(foreign,0700));
+    int scope=open(foreign,O_PATH|O_DIRECTORY|O_CLOEXEC); assert(scope>=0);
+    struct md_fs_origin_imports *other=NULL; assert(!md_fs_origin_imports_new(scope,&other)); close(scope);
+    struct md_fs_origin_parcel rejected={0}; assert(!md_fs_origin_export(s.message,&rejected));
+    struct md_fs_origin_vector *wrong=NULL;
+    assert(md_fs_origin_import(other,&s.route,&rejected,&wrong)==-EXDEV && !wrong && !rejected.fd);
+    md_fs_origin_imports_free(other); assert(descriptors()==live);
+    assert(!md_fs_origin_export(s.message,&rejected)); wrong=good;
+    assert(md_fs_origin_import(i,&s.route,&rejected,&wrong)==-EINVAL && wrong==good && !rejected.fd);
+    assert(descriptors()==live);
+    md_fs_origin_vector_free(good); md_fs_origin_imports_collect(i); live=descriptors();
+    int reached=0;
+    for (int n=0;n<32;++n) {
+        struct md_fs_origin_parcel p={0}; assert(!md_fs_origin_export(s.message,&p));
+        struct md_fs_origin_vector *v=NULL; test_mount_allocation_failure_after(n);
+        int r=md_fs_origin_import(i,&s.route,&p,&v); test_mount_allocation_failure_after(-1);
+        assert(!p.fd);
+        if (!r) { assert(v); md_fs_origin_vector_free(v); md_fs_origin_imports_collect(i); reached=1; }
+        else assert(r==-ENOMEM && !v);
+        assert(descriptors()==live);
+        if (reached) break;
+    }
+    assert(reached);
+    /* Export failure halfway through its duplicated rights must not publish. */
+    struct rlimit old, limit; assert(!getrlimit(RLIMIT_NOFILE,&old)); limit=old;
+    if (limit.rlim_cur>256) limit.rlim_cur=256;
+    assert(!setrlimit(RLIMIT_NOFILE,&limit)); int fds[256], fd; unsigned count=0;
+    while ((fd=fcntl(md_fs_anchor_fd(s.anchor[0]),F_DUPFD_CLOEXEC,3))>=0) { assert(count<256); fds[count++]=fd; }
+    assert(errno==EMFILE && count>=6); for (unsigned n=0;n<6;++n) close(fds[--count]);
+    struct md_fs_origin_parcel p={0}; int r=md_fs_origin_export(s.message,&p);
+    assert(!setrlimit(RLIMIT_NOFILE,&old)); while (count) close(fds[--count]);
+    assert(r==-EMFILE && !p.fd && descriptors()==live);
+    md_fs_origin_imports_free(i); source_close(&s); maintenance(base,0); assert(descriptors()==before);
+    puts("PASS origin transfer rollback: malformed/seal/route/store/rights rejection, every allocation boundary and partial FD exhaustion");
+}
+static void ready(int fd, short events) {
+    /* EVENT_WAIT: bounded fixture channel progress; expiry fails the test. */
+    assert(!md_event_wait_fd(fd,events,md_event_now()+5000000000LL));
+}
+static void packet(int fd, const void *bytes, size_t n, struct md_fs_rights *rights) {
+    long r; while ((r=md_fs_send(fd,bytes,n,rights))==-EAGAIN) ready(fd,POLLOUT);
+    assert(r==(long)n);
+}
+static void send_parcel(int fd, struct md_fs_origin_parcel *p) {
+    packet(fd,&p->count,sizeof(p->count),&(struct md_fs_rights){0});
+    for (unsigned n=0;n<p->count;) {
+        struct md_fs_rights rights={0};
+        while (rights.count<MD_FS_MAX_FDS && n<p->count) rights.fd[rights.count++]=p->fd[n++];
+        packet(fd,"o",1,&rights);
+    }
+    md_fs_origin_parcel_close(p);
+}
+static struct md_fs_origin_parcel receive_parcel(int fd) {
+    ready(fd,POLLIN); struct md_fs_rights rights={0}; struct md_fs_origin_parcel p={0};
+    assert(md_fs_receive(fd,&p.count,sizeof(p.count),&rights)==sizeof(p.count) && !rights.count && p.count==31);
+    p.fd=calloc(p.count,sizeof(int)); assert(p.fd);
+    for (unsigned n=0;n<p.count;) {
+        ready(fd,POLLIN); char value;
+        assert(md_fs_receive(fd,&value,1,&rights)==1 && value=='o' && rights.count && rights.count<=p.count-n);
+        for (unsigned j=0;j<rights.count;++j) p.fd[n++]=rights.fd[j];
+    }
+    return p;
+}
+static void reap(pid_t child, int killed) {
+    /* EVENT_WAIT: exact fixture process; outer alarm bounds a stuck child. */
+    int status; assert(waitpid(child,&status,0)==child);
+    if (killed) assert(WIFSIGNALED(status) && WTERMSIG(status)==SIGKILL);
+    else assert(WIFEXITED(status) && !WEXITSTATUS(status));
+}
+static void capsule_publish_failures(struct md_ipc_capsules *owner, const struct md_ipc_binding *binding,
+        struct md_fs_anchor *const *entries, const int *fds) {
+    unsigned before=descriptors(); int reached=0;
+    for (int i=0;i<64;++i) {
+        struct md_fd_message *message=capture(entries,253); int carrier=-1;
+        test_mount_allocation_failure_after(i);
+        int error=md_ipc_capsules_publish(owner,binding,"0123456789abcdef0123456789abcdef",
+            message,fds,253,&carrier);
+        test_mount_allocation_failure_after(-1);
+        if (!error) { assert(carrier>=0); close(carrier); reached=1; }
+        else assert(error==-ENOMEM && carrier==-1);
+        md_fd_message_release(message); assert(descriptors()==before);
+        for (unsigned n=0;n<253;++n) assert(fcntl(fds[n],F_GETFD)>=0);
+        if (reached) break;
+    }
+    assert(reached);
+    for (unsigned slots=0;slots<=16;slots+=8) {
+        struct md_fd_message *message=capture(entries,253); int carrier=-1;
+        struct rlimit old, limit; assert(!getrlimit(RLIMIT_NOFILE,&old)); limit=old;
+        if (limit.rlim_cur>256) limit.rlim_cur=256;
+        assert(!setrlimit(RLIMIT_NOFILE,&limit)); int extra[256], fd; unsigned count=0;
+        while ((fd=fcntl(fds[0],F_DUPFD_CLOEXEC,3))>=0) { assert(count<256); extra[count++]=fd; }
+        assert(errno==EMFILE && count>=slots);
+        for (unsigned n=0;n<slots;++n) close(extra[--count]);
+        int error=md_ipc_capsules_publish(owner,binding,"0123456789abcdef0123456789abcdef",
+            message,fds,253,&carrier);
+        assert(!setrlimit(RLIMIT_NOFILE,&old)); while (count) close(extra[--count]);
+        assert(error==-EMFILE && carrier==-1);
+        md_fd_message_release(message); assert(descriptors()==before);
+    }
+    puts("PASS capsule publication: allocation/partial-FD failures retain caller data and release incomplete queues");
+}
+static void capsule_sender(int channel, const char *base, int unknown) {
+    unsigned before=descriptors(); struct source s=source(base,253);
+    char store[PATH_MAX]; path(store,base,"store");
+    struct md_ipc_credentials *authority=NULL;
+    assert(!md_ipc_credentials_open(store,MD_IPC_TRANSPORT_ORIGINS_V1,&authority));
+    int app[2]; pair(app); struct md_identity id=md_identity_new(0,0);
+    struct md_fs_request q={.operation=MD_FS_IPC,.flags=MD_IPC_PAIR,.directory={app[0],app[1]},.peer=getpid()};
+    struct md_fs_result r; md_ipc_credentials_execute(authority,&id,&q,&r,NULL);
+    assert(!r.error); md_identity_release(&id);
+    struct md_ipc_binding sender={0}; assert(!md_ipc_credentials_bind(authority,app[0],&sender));
+    char pending[PATH_MAX]; path(pending,store,"ipc/auth.pending"); file(pending,"partial");
+    struct md_ipc_capsules *owner=NULL; assert(!md_ipc_capsules_new(&sender,&owner));
+    assert(access(pending,F_OK)<0 && errno==ENOENT);
+    struct md_fs_anchor *entries[253]; int fds[253];
+    int lifetime[2]; assert(!pipe2(lifetime,O_NONBLOCK|O_CLOEXEC)); int plain=lifetime[1];
+    r=request(&s.fs,s.anchor[5],MD_FS_REOPEN,NULL,O_RDONLY,NULL); assert(!r.error && r.fd>=0);
+    for (unsigned i=0;i<253;++i) {
+        entries[i]=unknown || i%8==7 ? NULL : s.anchor[i%8==6 ? 0 : i%8];
+        fds[i]=!entries[i] ? plain : i%8==5 ? r.fd : md_fs_anchor_fd(entries[i]);
+    }
+    struct md_fd_message *message=capture(entries,253); int carrier=-1;
+    assert(!md_ipc_capsules_publish(owner,&sender,"0123456789abcdef0123456789abcdef",message,fds,253,&carrier));
+    if (!unknown) capsule_publish_failures(owner,&sender,entries,fds);
+    packet(channel,"C",1,&(struct md_fs_rights){.count=2,.fd={carrier,app[1]}});
+    packet(channel,"R",1,&(struct md_fs_rights){.count=1,.fd={lifetime[0]}});
+    md_fd_message_release(message); close(carrier); close(plain); close(r.fd);
+    md_ipc_capsules_free(owner); md_ipc_binding_release(&sender); md_ipc_credentials_close(authority);
+    close(app[0]); close(app[1]); close(lifetime[0]); source_close(&s); assert(descriptors()==before);
+}
+int test_origin_transfer_child(int argc, char **argv) {
+    if (argc!=4 || (strcmp(argv[1],"--origin-sender") && strcmp(argv[1],"--capsule-sender")
+            && strcmp(argv[1],"--unknown-capsule-sender"))) return -1;
+    alarm(60); int fd=atoi(argv[2]); assert(!fcntl(fd,F_SETFD,FD_CLOEXEC)); unsigned before=descriptors();
+    if (strcmp(argv[1],"--origin-sender")) {
+        capsule_sender(fd,argv[3],!strcmp(argv[1],"--unknown-capsule-sender")); close(fd); return 0;
+    }
+    struct source s=source(argv[3],253); struct md_fs_origin_parcel p={0};
+    assert(!md_fs_origin_export(s.message,&p)); packet(fd,&s.route,sizeof(s.route),&(struct md_fs_rights){0});
+    send_parcel(fd,&p); source_close(&s); assert(descriptors()==before); close(fd); return 0;
+}
+static void processes(const char *base) {
+    unsigned before=descriptors(); int fd[2]; pair(fd);
+    pid_t parent=getpid(), child=fork(); assert(child>=0);
+    if (!child) {
+        assert(!prctl(PR_SET_PDEATHSIG,SIGKILL) && getppid()==parent);
+        assert(!fcntl(fd[1],F_SETFD,0)); char number[16]; snprintf(number,sizeof(number),"%d",fd[1]);
+        execl("/proc/self/exe","origin-transfer","--origin-sender",number,base,(char *)NULL); _exit(90);
+    }
+    close(fd[1]); ready(fd[0],POLLIN); struct md_fd_message_route expected; struct md_fs_rights rights={0};
+    assert(md_fs_receive(fd[0],&expected,sizeof(expected),&rights)==sizeof(expected) && !rights.count);
+    reap(child,0); maintenance(base,1);
+    char old[PATH_MAX], moved[PATH_MAX], name[PATH_MAX]; path(old,base,"host0"); path(moved,base,"moved-host0");
+    assert(!rename(old,moved) && !mkdir(old,0700)); path(name,old,"value"); file(name,"wrong");
+    struct md_fs_origin_imports *i=imports(base); struct md_fs_origin_parcel p=receive_parcel(fd[0]); close(fd[0]);
+    struct md_fs_origin_vector *v=NULL; assert(!md_fs_origin_import(i,&expected,&p,&v)); engine(base,v,0);
+    md_fs_origin_vector_free(v); maintenance(base,0); md_fs_origin_imports_collect(i);
+    md_fs_origin_imports_free(i); assert(descriptors()==before);
+    puts("PASS origin transfer exec: queued SCM_RIGHTS after sender exit, replaced source path, working mixed-view origins and final lease/FD release");
+}
+static void capsule_failures(struct md_ipc_capsules *owner, const struct md_ipc_binding *binding, int carrier) {
+    struct md_received_fds *result=NULL; struct md_ipc_binding wrong=*binding;
+    unsigned before=descriptors();
+    wrong.transport=MD_IPC_TRANSPORT_NATIVE;
+    assert(md_ipc_capsules_receive(owner,&wrong,-1,&result)==-ENOTSUP && !result);
+    wrong=*binding; wrong.connection.side^=1;
+    assert(md_ipc_capsules_receive(owner,&wrong,carrier,&result)==-EXDEV && !result);
+    wrong=*binding; wrong.connection.link[0]^=1;
+    assert(md_ipc_capsules_receive(owner,&wrong,carrier,&result)==-EXDEV && !result);
+    /* Independent construction cannot reuse the authenticated kernel identity,
+     * nor fix its cookie without invalidating the authentication tag. */
+    struct {
+        uint32_t magic, version, metadata, reserved;
+        struct md_fd_message_route route;
+        unsigned char tag[32];
+    } wire;
+    assert(recv(carrier,&wire,sizeof(wire),MSG_PEEK|MSG_DONTWAIT)==sizeof(wire));
+    for (unsigned i=0;i<2;++i) {
+        int fake[2]; pair(fake);
+        if (i) {
+            socklen_t size=sizeof(wire.route.cookie);
+            assert(!getsockopt(fake[1],SOL_SOCKET,SO_COOKIE,&wire.route.cookie,&size));
+        }
+        assert(send(fake[0],&wire,sizeof(wire),MSG_NOSIGNAL)==sizeof(wire));
+        assert(md_ipc_capsules_receive(owner,binding,fake[1],&result)==(i ? -EACCES : -EXDEV) && !result);
+        close(fake[0]); close(fake[1]);
+    }
+    assert(descriptors()==before);
+}
+static void capsule_rollback(const struct md_ipc_binding *binding, int carrier) {
+    unsigned before=descriptors(); int reached=0;
+    for (int i=0;i<64;++i) {
+        struct md_ipc_capsules *owner=NULL; struct md_received_fds *received=NULL;
+        assert(!md_ipc_capsules_new(binding,&owner));
+        test_mount_allocation_failure_after(i);
+        int error=md_ipc_capsules_receive(owner,binding,carrier,&received);
+        test_mount_allocation_failure_after(-1);
+        if (!error) { assert(received && received->count==253); reached=1; }
+        else assert(error==-ENOMEM && !received);
+        md_received_fds_release(received); md_ipc_capsules_free(owner);
+        assert(descriptors()==before);
+        if (reached) break;
+    }
+    assert(reached);
+    const unsigned free_slots[]={0,1,4,16,96};
+    for (unsigned i=0;i<sizeof(free_slots)/sizeof(*free_slots);++i) {
+        struct md_ipc_capsules *owner=NULL; struct md_received_fds *received=NULL;
+        assert(!md_ipc_capsules_new(binding,&owner));
+        struct rlimit old, limit; assert(!getrlimit(RLIMIT_NOFILE,&old)); limit=old;
+        if (limit.rlim_cur>256) limit.rlim_cur=256;
+        assert(!setrlimit(RLIMIT_NOFILE,&limit)); int fds[256], fd; unsigned count=0;
+        while ((fd=fcntl(carrier,F_DUPFD_CLOEXEC,3))>=0) { assert(count<256); fds[count++]=fd; }
+        assert(errno==EMFILE && count>=free_slots[i]);
+        for (unsigned j=0;j<free_slots[i];++j) close(fds[--count]);
+        int error=md_ipc_capsules_receive(owner,binding,carrier,&received);
+        assert(!setrlimit(RLIMIT_NOFILE,&old));
+        while (count) close(fds[--count]);
+        assert((error==-EMFILE || error==-EPROTO) && !received);
+        md_ipc_capsules_free(owner); assert(descriptors()==before);
+    }
+    puts("PASS capsule rollback: allocation boundaries and five partial-installation FD limits preserve queue and descriptor balance");
+}
+static void capsule_concurrent(struct md_ipc_capsules *owner, const struct md_ipc_binding *binding, int carrier) {
+    int start[2]; assert(!pipe2(start,O_CLOEXEC)); pid_t children[2], parent=getpid();
+    for (unsigned i=0;i<2;++i) {
+        children[i]=fork(); assert(children[i]>=0);
+        if (!children[i]) {
+            assert(!prctl(PR_SET_PDEATHSIG,SIGKILL) && getppid()==parent); close(start[1]);
+            /* EVENT_WAIT: parent releases both readers; the fixture alarm bounds failure. */
+            char c; assert(read(start[0],&c,1)==1); close(start[0]);
+            for (unsigned j=0;j<4;++j) {
+                struct md_received_fds *received=NULL;
+                assert(!md_ipc_capsules_receive(owner,binding,carrier,&received) && received->count==253);
+                md_received_fds_release(received);
+            }
+            _exit(0);
+        }
+    }
+    close(start[0]); assert(write(start[1],"PP",2)==2); close(start[1]);
+    reap(children[0],0); reap(children[1],0);
+}
+static void capsules(const char *base, int mode) {
+    int unknown=mode==1;
+    unsigned before=descriptors(); int fd[2]; pair(fd);
+    pid_t parent=getpid(), child=fork(); assert(child>=0);
+    if (!child) {
+        assert(!prctl(PR_SET_PDEATHSIG,SIGKILL) && getppid()==parent);
+        assert(!fcntl(fd[1],F_SETFD,0)); char number[16]; snprintf(number,sizeof(number),"%d",fd[1]);
+        execl("/proc/self/exe","origin-transfer",unknown ? "--unknown-capsule-sender" : "--capsule-sender",
+            number,base,(char *)NULL); _exit(90);
+    }
+    close(fd[1]); ready(fd[0],POLLIN); reap(child,0);
+    if (!unknown) maintenance(base,1);
+    char store[PATH_MAX]; path(store,base,"store");
+    int root=open(store,O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(root>=0);
+    assert(flock(root,LOCK_EX|LOCK_NB)<0 && errno==EWOULDBLOCK); close(root);
+    /* Nothing from the issuer exists in this process. The queued carrier alone
+     * keeps the authority epoch alive until this fresh owner opens the store. */
+    struct md_ipc_credentials *authority=NULL;
+    assert(!md_ipc_credentials_open(store,MD_IPC_TRANSPORT_ORIGINS_V1,&authority));
+    struct md_fs_rights rights={0}; char c;
+    assert(md_fs_receive(fd[0],&c,1,&rights)==1 && c=='C' && rights.count==2);
+    int carrier=rights.fd[0], app=rights.fd[1]; struct md_ipc_binding receiver={0};
+    assert(md_fs_receive(fd[0],&c,1,&rights)==1 && c=='R' && rights.count==1); close(fd[0]);
+    int lifetime=rights.fd[0]; assert(read(lifetime,&c,1)<0 && errno==EAGAIN);
+    if (mode==2) {
+        close(carrier); close(app); md_ipc_credentials_close(authority);
+        ready(lifetime,POLLIN); assert(!read(lifetime,&c,1)); close(lifetime);
+        maintenance(base,0); assert(descriptors()==before);
+        puts("PASS discarded capsule: no receiver/importer, exact data EOF and maintenance release after sender exit"); return;
+    }
+    assert(!md_ipc_credentials_bind(authority,app,&receiver)); close(app);
+    struct md_ipc_capsules *owner=NULL; assert(!md_ipc_capsules_new(&receiver,&owner));
+    capsule_failures(owner,&receiver,carrier);
+    if (!unknown) { capsule_rollback(&receiver,carrier); capsule_concurrent(owner,&receiver,carrier); }
+    struct md_received_fds *a=NULL, *b=NULL;
+    assert(!md_ipc_capsules_receive(owner,&receiver,carrier,&a));
+    assert(!md_ipc_capsules_receive(owner,&receiver,carrier,&b));
+    assert(a->count==253 && b->count==253);
+    for (unsigned i=0;i<253;++i) assert(fcntl(a->fds[i],F_GETFD)&FD_CLOEXEC);
+    if (unknown) assert(!a->origins && !b->origins);
+    else {
+        engine_entries(base,a->origins,0); engine_entries(base,b->origins,0);
+        assert(a->origins[1]->view==b->origins[1]->view);
+        char bytes[2]; assert(read(a->fds[5],bytes,1)==1 && bytes[0]=='l');
+        assert(read(b->fds[5],bytes+1,1)==1 && bytes[1]=='o');
+    }
+    md_received_fds_release(a); close(carrier);
+    md_ipc_capsules_free(owner); md_ipc_binding_release(&receiver); md_ipc_credentials_close(authority);
+    if (!unknown) { maintenance(base,1); engine_entries(base,b->origins,0); }
+    md_received_fds_release(b); maintenance(base,0);
+    ready(lifetime,POLLIN); assert(!read(lifetime,&c,1)); close(lifetime); assert(descriptors()==before);
+    assert(!md_ipc_credentials_open(store,MD_IPC_TRANSPORT_ORIGINS_V1,&authority));
+    char key[PATH_MAX]; path(key,store,"ipc/auth");
+    assert(access(key,F_OK)<0 && errno==ENOENT); md_ipc_credentials_close(authority);
+    assert(descriptors()==before);
+    puts(unknown ? "PASS unknown capsule: epoch survives sender exit without origin leases; fresh epoch retires key"
+        : "PASS authenticated capsule: exec sender exit, 253 rights, repeated peek, shared OFD, imported views, authentication rejection and final cleanup");
+}
+static void bundles(void) {
+    unsigned before=descriptors(); int fd=open("/dev/null",O_RDONLY|O_CLOEXEC); assert(fd>=0);
+    int source[600], received[600]; for (unsigned i=0;i<600;++i) source[i]=fd;
+    for (unsigned count=253;count<=600;count+=347) {
+        int bundle=-1; assert(!md_fd_bundle_pack(source,count,&bundle));
+        for (unsigned n=0;n<2;++n) {
+            assert(!md_fd_bundle_peek(bundle,count,received));
+            for (unsigned i=0;i<count;++i) { assert(fcntl(received[i],F_GETFD)&FD_CLOEXEC); close(received[i]); }
+        }
+        assert(md_fd_bundle_peek(bundle,count-1,received)<0);
+        for (unsigned i=0;i<count-1;++i) assert(received[i]==-1);
+        close(bundle);
+    }
+    source[599]=-1; int bundle=-1;
+    assert(md_fd_bundle_pack(source,600,&bundle)==-EBADF && bundle==-1);
+    close(fd); assert(descriptors()==before);
+    puts("PASS immutable FD bundles: 253/600 rights, repeated peek, malformed size and partial construction cleanup");
+}
+static void unknown(const char *base) {
+    unsigned before=descriptors(); char store[PATH_MAX]; path(store,base,"store");
+    struct md_inode_store *inode=NULL; assert(!md_inode_store_open(store,1,&inode));
+    md_inode_store_close(inode); struct source s={0}; struct md_fs_anchor *entries[253]={0};
+    publish(&s,store,entries,253); struct md_fs_origin_parcel p={0};
+    assert(!md_fs_origin_export(s.message,&p) && p.count==1);
+    struct md_fs_origin_imports *i=imports(base); struct md_fs_origin_vector *v=NULL;
+    assert(!md_fs_origin_import(i,&s.route,&p,&v) && md_fs_origin_vector_count(v)==253);
+    for (unsigned n=0;n<253;++n) assert(!md_fs_origin_vector_entries(v)[n]);
+    md_fs_origin_vector_free(v); md_fs_origin_imports_free(i); message_close(&s);
+    assert(descriptors()==before); puts("PASS unknown origin vector: one manifest, no invented mount or backing owner");
+}
+void test_origin_transfer(const char *base) {
+    alarm(120); bundles();
+    const char *names[]={"origin-local","origin-faults","origin-processes","origin-unknown",
+        "origin-capsules","origin-capsules-unknown","origin-capsules-discard"}; char name[PATH_MAX];
+    for (unsigned n=0;n<7;++n) {
+        path(name,base,names[n]); assert(!mkdir(name,0700));
+        if (!n) local(name); else if (n==1) failures(name); else if (n==2) processes(name);
+        else if (n==3) unknown(name); else capsules(name,(int)n-4);
+    }
+    alarm(0); puts("PASS portable message origins");
+}

@@ -1,6 +1,7 @@
 #ifndef MD_FS_MOUNT_INTERNAL_H
 #define MD_FS_MOUNT_INTERNAL_H
 #include "fs_mounts.h"
+#include "mount_policy.h"
 #include <limits.h>
 #include <stdatomic.h>
 
@@ -8,11 +9,15 @@ enum { MD_VIEW_BUCKETS = 4096, MD_VIEW_OBJECT_LIMIT = 65536 };
 /* A mount owns its source and covered dentry. Its parent is a mount, not an
  * inode: walking out of a mounted root must return to that particular view. */
 struct md_view_mount {
-    int source, target, readonly;
+    int source, target;
+    struct md_mount_policy policy;
     unsigned id;
     struct md_view_mount *parent;
     struct stat native, guest;
 };
+static inline int md_view_readonly(const struct md_view_mount *m) {
+    return !!(md_mount_policy_flags(&m->policy)&MD_MOUNT_READONLY);
+}
 struct md_view_object {
     struct md_view_object *next, *id_next;
     struct stat identity;
@@ -32,6 +37,7 @@ struct md_mount_namespace {
     unsigned root_id, shm_id;
     struct md_fs_mounts *tree;
     struct md_mount_identity *native_ids;
+    struct md_mount_graph *graph;
 };
 struct md_view_location {
     int parent, fd, boundary;
@@ -59,6 +65,9 @@ void md_view_location_close(struct md_view_location *);
 int md_view_fdpath(int fd, char *, size_t);
 int md_mount_id_allocate(unsigned *);
 int md_view_anchor_check(struct md_filesystem *, int fd, const struct md_fs_anchor *);
+/* Consumes a validated O_PATH descriptor only on success; retains the owners. */
+struct md_fs_anchor *md_view_anchor_new(struct md_inode_lifetime *, struct md_mount_namespace *,
+        struct md_view_mount *, int fd, dev_t, ino_t);
 void md_view_capture(struct md_filesystem *, struct md_mount_namespace *, struct md_view_mount *,
         struct md_fs_result *, const struct md_fs_output *);
 #endif

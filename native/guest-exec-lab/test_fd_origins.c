@@ -850,7 +850,7 @@ static void vector_custody(void) {
         int pipefd[2]; assert(!pipe2(pipefd,O_NONBLOCK|O_CLOEXEC));
         int sources[2]={pipefd[1],pipefd[1]};
         struct md_fd_return handoff={0};
-        assert(!md_fd_return_vector_begin(&handoff,files,sources,2,NULL));
+        assert(!md_fd_return_vector_begin(&handoff,files,sources,2,NULL,NULL));
         assert(md_fd_return_progress(&handoff,NULL)==MD_FD_RETURN_READY);
         assert(!close(pipefd[1]));
         int installed=-1;
@@ -983,6 +983,137 @@ static void received_custody(void) {
     allocation_budget=-1;
     assert(!close(pipes[0]) && descriptors()==before);
     puts("PASS received FD custody: immutable shared vector, allocation-free pins, owner cancellation and last-reader EOF");
+}
+static void received_origins(struct md_fs_anchor *a, struct md_fs_anchor *b) {
+    unsigned before=descriptors();
+    struct md_received_fds *sources=NULL;
+    assert(!md_received_fds_reserve(&sources,4));
+    for (unsigned i=0;i<4;++i) {
+        int fd=open("/dev/null",O_RDONLY|O_CLOEXEC); assert(fd>=0);
+        sources->fds[sources->count++]=fd;
+    }
+    struct md_fs_anchor *origins[]={a,NULL,b,a}, *unknown[4]={0}, *selected[4];
+    assert(md_received_fds_annotate(sources,origins,3)==-EINVAL);
+    allocation_budget=0;
+    assert(!md_received_fds_annotate(sources,unknown,4) && !sources->origins);
+    assert(md_received_fds_annotate(sources,origins,4)==-ENOMEM && !sources->origins);
+    allocation_budget=1;
+    assert(!md_received_fds_annotate(sources,origins,4) && !allocation_budget);
+    allocation_budget=0;
+    assert(md_received_fds_annotate(sources,unknown,4)==-EBUSY);
+    assert(md_received_fds_reserve(&sources,4)==-EBUSY);
+    int indices[]={3,2,1,3}, output[]={-1,-1,-1,-1};
+    assert(md_received_fds_select(sources,indices,4,output,NULL)==-EOPNOTSUPP && output[0]==-1);
+    indices[3]=4;
+    assert(md_received_fds_select(sources,indices,4,output,selected)==-EINVAL && output[0]==-1);
+    indices[3]=3;
+    assert(!md_received_fds_select(sources,indices,4,output,selected));
+    assert(selected[0]==a && selected[1]==b && !selected[2] && selected[3]==a);
+    for (unsigned i=0;i<4;++i) assert(output[i]==sources->fds[indices[i]]);
+    struct md_received_fds *retained=md_received_fds_retain(sources);
+    assert(md_received_fds_annotate(sources,origins,4)==-EBUSY);
+    md_received_fds_release(sources);
+    assert(!md_received_fds_select(retained,indices,4,output,selected));
+    md_received_fds_release(retained);
+    allocation_budget=-1;
+    assert(descriptors()==before);
+    puts("PASS received origins: one lazy allocation, unknown/repeated/reordered selections, immutable custody, fail-closed unannotated consumers and rollback");
+}
+static void vector_preparation(struct md_fs_anchor *a, struct md_fs_anchor *b, int observed) {
+    unsigned before=descriptors();
+    struct md_fd_origins *files=md_fd_origins_new(); assert(files);
+    struct md_fs_anchor *origins[]={a,b,NULL};
+    struct md_fd_origin_update updates[3]; int numbers[3], source=open("/dev/null",O_RDONLY|O_CLOEXEC);
+    assert(source>=0); int sources[]={source,source,source};
+    union { struct cmsghdr align; char bytes[512]; } storage={0};
+    struct md_fd_receipt *memory=(void *)storage.bytes;
+    assert(md_fd_receipt_size(3)<=sizeof(storage) && !md_fd_receipt_reset(memory,3));
+    struct md_fd_table_observation observation={0};
+    struct md_fd_return_publication receipt={.origins=origins,.updates=updates,.numbers=numbers,
+        .memory=observed ? NULL : memory,.observation=observed ? &observation : NULL,
+        .directory=source,.flags=FD_CLOEXEC};
+    /* One bucket array, one entry per known origin, no entry for unknowns. */
+    for (int budget=0;budget<3;++budget) {
+        struct md_fd_origins *candidate=md_fd_origins_new(); assert(candidate);
+        struct md_fd_return operation={0}; allocation_budget=budget;
+        assert(md_fd_return_vector_begin(&operation,candidate,sources,3,&receipt,NULL)==-ENOMEM);
+        allocation_budget=-1;
+        assert(!operation.files.table && !operation.delivery.capacity && !operation.vector);
+        assert(!md_fd_return_cancel(&operation));
+        struct md_fd_order turn={0}; assert(md_fd_order_begin(candidate,&turn,NULL)==1);
+        assert(!md_fd_order_cancel(&turn));
+        md_fd_origins_release(candidate);
+    }
+    struct md_fd_order blocking={0}; assert(md_fd_order_begin(files,&blocking,NULL)==1);
+    assert(!md_fd_order_start(&blocking));
+    struct md_fd_return operation={0};
+    assert(!md_fd_return_vector_begin(&operation,files,sources,3,&receipt,NULL));
+    assert(md_fd_return_progress(&operation,NULL)==MD_FD_RETURN_WAIT);
+    allocation_budget=0;
+    assert(!md_fd_return_cancel(&operation) && !md_fd_order_complete(&blocking));
+    assert(!observation.capacity);
+    allocation_budget=-1;
+    md_fd_origins_release(files); close(source); assert(descriptors()==before);
+    printf("PASS annotated return preparation observed=%d: allocation rollback, queued cancellation and no admission/observation before the destination turn\n",observed);
+}
+static void observed_delivery(struct md_fs_anchor *a, struct md_fs_anchor *b) {
+    unsigned before=descriptors();
+    int directory=open("/proc/self/fd",O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(directory>=0);
+    struct md_fd_origins *files=md_fd_origins_new(); assert(files);
+    struct md_fs_anchor *origins[]={a,b,NULL};
+    struct md_fd_origin_update updates[3]; int numbers[3];
+    struct md_fd_table_observation observation={0};
+    struct md_fd_delivery delivery={0};
+    assert(!md_fd_delivery_prepare_observed(&delivery,files,origins,FD_CLOEXEC,3,updates,numbers,&observation));
+    allocation_budget=0;
+    assert(md_fd_delivery_publish(&delivery)==-EINVAL);
+    assert(!md_fd_table_observation_begin(&observation,directory,3));
+    assert(!md_fd_delivery_publish(&delivery));
+    for (unsigned i=0;i<2;++i) assert(dup3(directory,observation.candidates[i],O_CLOEXEC)==observation.candidates[i]);
+    assert(md_fd_delivery_publish(&delivery)==2);
+    assert(md_fd_delivery_publish(&delivery)==-EALREADY);
+    for (unsigned i=0;i<2;++i) {
+        assert(numbers[i]==observation.candidates[i]);
+        unsigned flags=0; struct md_fs_anchor *actual=md_fd_origins_get(files,numbers[i],&flags);
+        assert(actual==origins[i] && flags==FD_CLOEXEC); md_fs_anchor_release(actual);
+        assert(!close(numbers[i]));
+    }
+    md_fd_delivery_dispose(&delivery); md_fd_origins_release(files); close(directory);
+    allocation_budget=-1;
+    assert(descriptors()==before);
+    puts("PASS observed delivery: allocation-free capture, empty retry, partial publication and once-only ownership");
+}
+static void observed_return_failure(struct md_fs_anchor *a) {
+    unsigned before=descriptors();
+    struct md_fd_channel *channel=NULL; assert(!md_fd_channel_new(&channel));
+    struct md_fd_origins *files=md_fd_origins_new(); assert(files);
+    int endpoint=fcntl(md_fd_channel_endpoint(channel),F_DUPFD_CLOEXEC,0); assert(endpoint>=0);
+    struct md_fd_origin_update update;
+    assert(!md_fd_origins_prepare_channel(files,channel,FD_CLOEXEC,&update));
+    md_fd_origins_finish(&update,endpoint);
+    int source=open("/dev/null",O_RDONLY|O_CLOEXEC); assert(source>=0);
+    for (unsigned offered=0;offered<2;++offered) {
+        int directory=offered ? open("/proc/self/fd",O_RDONLY|O_DIRECTORY|O_CLOEXEC) : source;
+        assert(directory>=0);
+        struct md_fd_table_observation observation={0};
+        int number=-19;
+        struct md_fd_return_publication publication={.origins=&a,.updates=&update,.numbers=&number,
+            .observation=&observation,.directory=directory,.flags=FD_CLOEXEC};
+        struct md_fd_return operation={0};
+        assert(!md_fd_return_vector_begin(&operation,files,&source,1,&publication,NULL));
+        assert(md_fd_return_progress(&operation,NULL)==(offered ? MD_FD_RETURN_READY : -ENOTDIR));
+        struct md_fd_order next={0}; assert(!md_fd_order_begin(files,&next,NULL));
+        if (offered) assert(!close(directory));
+        allocation_budget=0;
+        assert(md_fd_return_cancel(&operation)==(offered ? -EBADF : 0));
+        assert(!operation.files.table && !operation.channel && !operation.delivery.capacity && number==-19);
+        assert(md_fd_order_state(&next)==MD_RESOURCE_ORDER_READY && !md_fd_order_cancel(&next));
+        assert(!md_fd_channel_output_discard(channel));
+        allocation_budget=-1;
+    }
+    close(source); close(endpoint); md_fd_origins_release(files); md_fd_channel_release(channel);
+    assert(descriptors()==before);
+    puts("PASS observed return failure: failed arming/lost directory preserve explicit errors, drain queued rights and release table/channel turns");
 }
 static struct md_fd_message *message_capture(struct md_fd_origins *source, unsigned count) {
     int fds[MD_FD_RECEIPT_MAX];
@@ -1183,6 +1314,8 @@ void test_fd_origins(void) {
     assert(first && second);
     struct md_fs_anchor *a=capture(first,open("/",O_PATH|O_CLOEXEC));
     struct md_fs_anchor *b=capture(second,open("/",O_PATH|O_CLOEXEC));
+    received_origins(a,b); vector_preparation(a,b,0); vector_preparation(a,b,1);
+    observed_delivery(a,b); observed_return_failure(a);
     message_custody(a,b); message_batches(a);
     filesystem_ordering(a);
     struct stat x,y; assert(!fstat(a->fd,&x) && !fstat(b->fd,&y));

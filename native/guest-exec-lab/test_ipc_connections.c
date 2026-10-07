@@ -27,6 +27,13 @@ static struct md_ipc_connection connection(struct md_ipc_credentials *owner, int
     struct md_ipc_connection out;
     assert(!md_ipc_credentials_connection(owner,fd,&out)); return out;
 }
+static void selected(struct md_ipc_credentials *owner, int fd, enum md_ipc_ancillary_transport expected) {
+    struct md_ipc_binding binding={0}, retained={0};
+    assert(!md_ipc_credentials_bind(owner,fd,&binding) && binding.transport==expected);
+    assert(!md_ipc_binding_copy(&retained,&binding));
+    md_ipc_binding_release(&binding);
+    assert(retained.transport==expected); md_ipc_binding_release(&retained);
+}
 static void same(struct md_ipc_connection a, struct md_ipc_connection b, unsigned opposite) {
     assert(a.side==(b.side^opposite) && !memcmp(a.link,b.link,sizeof(a.link)));
 }
@@ -115,7 +122,8 @@ static void listening(struct md_ipc_credentials *owner, int fd) {
     assert(!request(owner,MD_IPC_LISTEN_END,fd,-1,NULL,0).error);
 }
 static void independent(const char *store, struct md_ipc_credentials *first,
-        struct md_ipc_credentials *second, int type, unsigned number) {
+        struct md_ipc_credentials *second, int type, unsigned number,
+        enum md_ipc_ancillary_transport offer, enum md_ipc_ancillary_transport expected) {
     struct sockaddr_un address; socklen_t size; char name[217];
     int fd=listener(type,number,&address,name,&size), control[2];
     listening(first,fd);
@@ -125,13 +133,15 @@ static void independent(const char *store, struct md_ipc_credentials *first,
         assert(!prctl(PR_SET_PDEATHSIG,SIGKILL) && getppid()==parent);
         assert(!close(fd) && !close(control[0]));
         md_ipc_credentials_close(first); md_ipc_credentials_close(second);
-        struct md_ipc_credentials *owner=NULL; assert(!md_ipc_credentials_open(store,&owner));
+        struct md_ipc_credentials *owner=NULL;
+        assert(!md_ipc_credentials_open(store,offer,&owner));
         int client=socket(AF_UNIX,type|SOCK_CLOEXEC,0); assert(client>=0);
         struct md_fs_result begun=request(owner,MD_IPC_CONNECT_BEGIN,client,-1,name,0);
         assert(!begun.error && begun.position==1); unavailable(owner,client,-ESTALE);
         assert(!connect(client,(void *)&address,size));
         assert(!request(owner,MD_IPC_CONNECT_END,client,-1,NULL,0).error);
         struct md_ipc_connection key=connection(owner,client);
+        selected(owner,client,expected);
         int value=token(owner,client); send_token(client,value); assert(!close(value));
         assert(send(control[1],&key,sizeof(key),MSG_NOSIGNAL)==sizeof(key));
         assert(!close(client) && !close(control[1]));
@@ -147,9 +157,10 @@ static void independent(const char *store, struct md_ipc_credentials *first,
     unavailable(second,peer,-ENODATA);
     assert(!request(second,MD_IPC_ACCEPT,peer,-1,NULL,0).error);
     same(offered,connection(first,peer),1);
+    selected(second,peer,expected);
     int value=receive_token(peer); token_check(first,peer,value,child,0);
     assert(!close(value) && !close(peer) && !close(fd) && !close(control[0]));
-    printf("PASS IPC independent worker type=%d: send before accept, sender exit, shared association and queued credentials\n",type);
+    printf("PASS IPC independent worker type=%d transport=%u: send before accept, sender exit, shared association and queued credentials\n",type,expected);
 }
 static void admission(struct md_ipc_credentials *owner, unsigned number, int tracked, int replaced) {
     struct sockaddr_un address; socklen_t size; char name[217];
@@ -254,21 +265,118 @@ static void accepted_early(struct md_ipc_credentials *owner, struct md_ipc_crede
     unavailable(other,client,-ESTALE); assert(!close(client));
     puts("PASS IPC connection ordering: accept before connect publication, server-first credentials and failed connect");
 }
+static void transport_connection(struct md_ipc_credentials *server, struct md_ipc_credentials *client_owner,
+        struct md_ipc_credentials *accept_owner, int type, unsigned number, int early,
+        enum md_ipc_ancillary_transport expected) {
+    struct sockaddr_un address; socklen_t size; char name[217];
+    int fd=listener(type,number,&address,name,&size); listening(server,fd);
+    int client=socket(AF_UNIX,type|SOCK_CLOEXEC,0); assert(client>=0);
+    struct md_fs_result begun=request(client_owner,MD_IPC_CONNECT_BEGIN,client,-1,name,0);
+    assert(!begun.error && begun.position==1);
+    struct md_ipc_binding absent={0};
+    assert(md_ipc_credentials_bind(client_owner,client,&absent)==-ESTALE && !absent.scope);
+    assert(!connect(client,(void *)&address,size));
+    if (!early) {
+        assert(!request(client_owner,MD_IPC_CONNECT_END,client,-1,NULL,0).error);
+        selected(client_owner,client,expected);
+    }
+    int peer=accept4(fd,NULL,NULL,SOCK_CLOEXEC); assert(peer>=0);
+    assert(!request(accept_owner,MD_IPC_ACCEPT,peer,-1,NULL,0).error);
+    selected(accept_owner,peer,expected);
+    if (early) assert(!request(client_owner,MD_IPC_CONNECT_END,client,-1,NULL,0).error);
+    selected(client_owner,client,expected);
+    same(connection(server,client),connection(client_owner,peer),1);
+    int pipefd[2]; assert(!pipe2(pipefd,O_CLOEXEC|O_NONBLOCK));
+    send_token(client,pipefd[1]); assert(!close(pipefd[1]));
+    int value=receive_token(peer); assert(write(value,"r",1)==1 && !close(value));
+    char byte; assert(read(pipefd[0],&byte,1)==1 && byte=='r' && !read(pipefd[0],&byte,1));
+    assert(!close(pipefd[0]) && !close(client) && !close(peer) && !close(fd));
+    printf("PASS IPC transport connection type=%d early=%d selected=%u: creation-time agreement, unchanged payload and rights\n",
+        type,early,expected);
+}
+static void transport_pair(struct md_ipc_credentials *owner, struct md_ipc_credentials *other,
+        int type, enum md_ipc_ancillary_transport expected) {
+    int app[2], channel[2];
+    assert(!socketpair(AF_UNIX,type|SOCK_CLOEXEC,0,app)
+        && !socketpair(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC,0,channel));
+    assert(!request(owner,MD_IPC_PAIR,app[0],app[1],NULL,0).error);
+    struct md_ipc_connection before=connection(owner,app[0]);
+    for (unsigned i=0;i<2;++i) selected(other,app[i],expected);
+    assert(request(other,MD_IPC_PAIR,app[0],app[1],NULL,0).error==-EALREADY);
+    same(before,connection(other,app[0]),0); selected(other,app[0],expected);
+    /* The first row is new, but the second conflicts. Neither row may change. */
+    assert(request(other,MD_IPC_PAIR,channel[0],app[1],NULL,0).error==-EALREADY);
+    unavailable(owner,channel[0],-ENODATA);
+    same(before,connection(other,app[1]),1); selected(other,app[1],expected);
+    int alias=fcntl(app[1],F_DUPFD_CLOEXEC,0); assert(alias>=0);
+    send_token(channel[0],alias); assert(!close(alias) && !close(app[1]));
+    int imported=receive_token(channel[1]); selected(other,imported,expected);
+    same(before,connection(other,imported),1);
+    assert(!close(imported) && !close(app[0]) && !close(channel[0]) && !close(channel[1]));
+    printf("PASS IPC transport pair type=%d selected=%u: immutable aliases, SCM transfer and atomic rollback\n",type,expected);
+}
+static void transport_revision(struct md_ipc_credentials *origins, struct md_ipc_credentials *native, int stage) {
+    struct sockaddr_un address; socklen_t size; char name[217];
+    int fd=listener(SOCK_STREAM,130+(unsigned)stage,&address,name,&size); listening(origins,fd);
+    int client=socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0); assert(client>=0);
+    assert(!request(origins,MD_IPC_CONNECT_BEGIN,client,-1,name,0).error);
+    if (!stage) listening(native,fd);
+    assert(!connect(client,(void *)&address,size));
+    if (stage==2) {
+        assert(!request(origins,MD_IPC_CONNECT_END,client,-1,NULL,0).error);
+        listening(native,fd);
+    }
+    int peer=accept4(fd,NULL,NULL,SOCK_CLOEXEC); assert(peer>=0);
+    assert(request(native,MD_IPC_ACCEPT,peer,-1,NULL,0).error==(stage ? 0 : -ESTALE));
+    if (stage==1) listening(native,fd);
+    assert(!request(origins,MD_IPC_CONNECT_END,client,-1,NULL,0).error);
+    if (stage) {
+        selected(native,client,MD_IPC_TRANSPORT_ORIGINS_V1);
+        selected(native,peer,MD_IPC_TRANSPORT_ORIGINS_V1);
+    } else {
+        unavailable(native,client,-ESTALE); unavailable(native,peer,-ENODATA);
+    }
+    assert(!close(client) && !close(peer) && !close(fd));
+    printf("PASS IPC transport listener revision stage=%d: pending offers rejected, completed agreement retained\n",stage);
+}
+static void transports(const char *store, struct md_ipc_credentials *native) {
+    struct md_ipc_credentials *origins=NULL;
+    assert(md_ipc_credentials_open(store,(enum md_ipc_ancillary_transport)2,&origins)==-EINVAL && !origins);
+    assert(!md_ipc_credentials_open(store,MD_IPC_TRANSPORT_ORIGINS_V1,&origins));
+    struct md_ipc_credentials *owners[]={native,origins};
+    const int types[]={SOCK_STREAM,SOCK_SEQPACKET,SOCK_DGRAM};
+    unsigned number=100;
+    for (unsigned type=0;type<2;++type) for (unsigned early=0;early<2;++early)
+        for (unsigned server=0;server<2;++server) for (unsigned client=0;client<2;++client)
+            transport_connection(owners[server],owners[client],owners[server^1],types[type],number++,(int)early,
+                server && client ? MD_IPC_TRANSPORT_ORIGINS_V1 : MD_IPC_TRANSPORT_NATIVE);
+    for (unsigned type=0;type<3;++type) for (unsigned owner=0;owner<2;++owner)
+        transport_pair(owners[owner],owners[owner^1],types[type],
+            owner ? MD_IPC_TRANSPORT_ORIGINS_V1 : MD_IPC_TRANSPORT_NATIVE);
+    for (int stage=0;stage<3;++stage) transport_revision(origins,native,stage);
+    for (unsigned type=0;type<2;++type) {
+        independent(store,origins,native,types[type],140+type,MD_IPC_TRANSPORT_ORIGINS_V1,MD_IPC_TRANSPORT_ORIGINS_V1);
+        independent(store,origins,native,types[type],150+type,MD_IPC_TRANSPORT_NATIVE,MD_IPC_TRANSPORT_NATIVE);
+    }
+    md_ipc_credentials_close(origins);
+}
 void test_ipc_connections(const char *directory) {
     char foreign_path[PATH_MAX];
     assert(snprintf(foreign_path,sizeof(foreign_path),"%s/foreign",directory)<(int)sizeof(foreign_path)
         && !mkdir(foreign_path,0700));
     struct md_ipc_credentials *first=NULL, *second=NULL, *foreign=NULL;
-    assert(!md_ipc_credentials_open(directory,&first) && !md_ipc_credentials_open(directory,&second)
-        && !md_ipc_credentials_open(foreign_path,&foreign));
+    assert(!md_ipc_credentials_open(directory,MD_IPC_TRANSPORT_NATIVE,&first)
+        && !md_ipc_credentials_open(directory,MD_IPC_TRANSPORT_NATIVE,&second)
+        && !md_ipc_credentials_open(foreign_path,MD_IPC_TRANSPORT_NATIVE,&foreign));
     const int types[]={SOCK_STREAM,SOCK_DGRAM,SOCK_SEQPACKET};
     for (unsigned i=0;i<3;++i) paired(first,second,foreign,types[i]);
-    independent(directory,first,second,SOCK_STREAM,1);
-    independent(directory,first,second,SOCK_SEQPACKET,2);
+    independent(directory,first,second,SOCK_STREAM,1,MD_IPC_TRANSPORT_NATIVE,MD_IPC_TRANSPORT_NATIVE);
+    independent(directory,first,second,SOCK_SEQPACKET,2,MD_IPC_TRANSPORT_NATIVE,MD_IPC_TRANSPORT_NATIVE);
     admission(first,3,0,0); admission(first,4,1,1);
     accepted_early(first,second);
     native_listener_reuse(first);
     queued_name_reuse(first,0); queued_name_reuse(first,1);
+    transports(directory,first);
     int sockets[2]; assert(!socketpair(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0,sockets));
     assert(!request(first,MD_IPC_PAIR,sockets[0],sockets[1],NULL,0).error);
     struct md_ipc_connection before=connection(first,sockets[0]);
@@ -276,7 +384,7 @@ void test_ipc_connections(const char *directory) {
     md_ipc_credentials_close(first);
     same(before,connection(second,sockets[0]),0);
     md_ipc_credentials_close(second);
-    assert(!md_ipc_credentials_open(directory,&first));
+    assert(!md_ipc_credentials_open(directory,MD_IPC_TRANSPORT_NATIVE,&first));
     unavailable(first,sockets[0],-ENODATA);
     assert(!request(first,MD_IPC_PAIR,sockets[0],sockets[1],NULL,0).error);
     struct md_ipc_connection after=connection(first,sockets[0]);

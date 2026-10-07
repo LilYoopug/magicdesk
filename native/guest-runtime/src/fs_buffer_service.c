@@ -13,6 +13,8 @@
 #include "file_snapshot.h"
 #include "ipc_credentials.h"
 #include "received_fds.h"
+#include "ipc_received.h"
+#include "ipc_capsule.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -27,6 +29,7 @@ struct md_fs_buffer_service {
     struct md_task_registry *tasks;
     struct md_resource_wakeup *wake;
     struct md_fs_buffer_request *requests;
+    struct md_ipc_capsules *capsules; /* filesystem worker until stop/join */
     void (*complete)(struct md_fs_buffer_request *, pid_t, int);
 };
 struct md_fs_buffer_request {
@@ -52,6 +55,7 @@ struct md_fs_buffer_request {
     struct md_fs_anchor *input[2];
     int captured[2];
     struct md_received_fds *received;
+    struct md_received_fds *expanded;
     unsigned received_count;
     struct md_fd_channel *export;
     int channel_checking;
@@ -67,12 +71,9 @@ struct md_fs_buffer_request {
     int task_pending, task_started, task_descriptor;
     char path[];
 };
-static int credential_send(const struct md_fs_buffer_request *r) {
-    return r->request.operation==MD_FS_IPC && r->request.flags==MD_IPC_MESSAGE_CREATE;
-}
 static int retains_context(const struct md_fs_buffer_request *r) {
     return r->request.operation==MD_FS_CHROOT || (r->request.operation==MD_FS_TASK_PATH
-        && r->request.mode==MD_FS_TASK_FCHDIR) || credential_send(r);
+        && r->request.mode==MD_FS_TASK_FCHDIR);
 }
 void md_fs_buffer_open_release(struct md_fs_buffer_open *o) {
     if (o->fd>=0) close(o->fd);
@@ -90,7 +91,7 @@ static void dispose(struct md_fs_buffer_request *r) {
     struct md_fs_buffer_request **p=&r->service->requests;
     while (*p && *p!=r) p=&(*p)->next;
     if (*p) *p=r->next;
-    if (r->task_started && !credential_send(r)) md_domain_set_cwd(r->context.task.fs,NULL);
+    if (r->task_started) md_domain_set_cwd(r->context.task.fs,NULL);
     md_fd_channel_capture_cancel(&r->export_capture);
     if (r->order.fs && md_fs_order_cancel(&r->order)==1) md_fs_order_complete(&r->order);
     if (r->files.table && md_fd_order_cancel(&r->files)==1) md_fd_order_complete(&r->files);
@@ -101,6 +102,7 @@ static void dispose(struct md_fs_buffer_request *r) {
     }
     md_fs_context_end(&r->context);
     md_received_fds_release(r->received);
+    md_received_fds_release(r->expanded);
     md_fd_channel_release(r->export);
     md_fs_buffer_open_release(&r->opened);
     md_command_images_close(&r->images);
@@ -117,14 +119,11 @@ int md_fs_buffer_task_start(struct md_fs_buffer_request *r, int descriptor) {
             || md_fs_order_state(&r->order)!=MD_RESOURCE_ORDER_RUNNING) return -EINVAL;
     r->task_started=1; return 0;
 }
-int md_fs_buffer_task_send_source(const struct md_fs_buffer_request *r) {
-    return md_fs_buffer_task_pending(r) && credential_send(r) ? r->opened.fd : -EINVAL;
-}
 int md_fs_buffer_task_finish(struct md_fs_buffer_request **owner, long result) {
     struct md_fs_buffer_request *r=owner ? *owner : NULL;
     if (!md_fs_buffer_task_pending(r) || result>0 || result < -4095
             || (!r->task_started && !result)) return -EINVAL;
-    int error=result || credential_send(r) ? 0 : md_domain_set_cwd(r->context.task.fs,
+    int error=result ? 0 : md_domain_set_cwd(r->context.task.fs,
         md_domain_restricted(r->context.task.fs) ? NULL : r->opened.origin);
     r->task_started=0; *owner=NULL; dispose(r); return error;
 }
@@ -180,10 +179,8 @@ static int complete(struct md_fs_work *work) {
         }
     }
     if (!r->cancelled && !r->error && r->opened.fd>=0 &&
-            ((r->request.operation==MD_FS_TASK_PATH && r->request.mode==MD_FS_TASK_FCHDIR)
-                || credential_send(r))) {
-        /* EVENT_WAIT: fchdir completion or private-table capture. Cancellation
-         * releases exact owners; no resource turn spans a blocking send. */
+            r->request.operation==MD_FS_TASK_PATH && r->request.mode==MD_FS_TASK_FCHDIR) {
+        /* EVENT_WAIT: fchdir completion; cancellation releases exact owners. */
         r->task_pending=1;
         r->service->complete(r,r->actor,0);
         return 0;
@@ -358,29 +355,15 @@ int md_fs_buffer_channel_observed(struct md_fs_buffer_request *r) {
     return 0;
 }
 static int inspect_received(struct md_fs_buffer_request *r) {
-    for (unsigned i=0;i<r->received_count;++i) {
-        int index;
-        memcpy(&index,r->path+i*sizeof(index),sizeof(index));
-        struct md_received_info info={0};
-        struct md_fs_request q={.actor=r->actor,.peer=r->context.peer,.operation=MD_FS_IPC,
-            .flags=MD_IPC_MESSAGE_READ,.directory={r->received->fds[0],r->received->fds[index]}};
-        struct md_fs_result result;
-        md_fs_context_execute(&r->context,&q,&result,NULL);
-        if (!result.error) {
-            info.flags=MD_RECEIVED_CREDENTIALS;
-            info.credentials=(struct ucred){(pid_t)result.position,result.info.uid,result.info.gid};
-        } else {
-            if (result.error!=-ENODATA && result.error!=-ENOTSUP
-                    && result.error!=-EAFNOSUPPORT && result.error!=-EPROTOTYPE) return result.error;
-            q=(struct md_fs_request){.actor=r->actor,.peer=r->context.peer,
-                .operation=MD_FS_WATCH_CONTAINS,.directory={r->received->fds[index],-1}};
-            md_fs_context_execute(&r->context,&q,&result,NULL);
-            if (result.error) return result.error;
-            if (result.position) info.flags=MD_RECEIVED_WATCH;
-        }
-        r->output->received_info[i]=info;
-    }
-    return 0;
+    int indices[253]; memcpy(indices,r->path,r->received_count*sizeof(*indices));
+    return md_ipc_received_message(&r->service->capsules,&r->context,r->received,
+        indices,r->received_count,&r->output->received_message,&r->expanded);
+}
+int md_fs_buffer_inspect_take(struct md_fs_buffer_request *r, struct md_received_fds **out) {
+    if (!r || !out || *out) return -EINVAL;
+    if (!r->received) return 0;
+    if (r->submitted || r->error) return -EINVAL;
+    *out=r->expanded; r->expanded=NULL; return 1;
 }
 static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
     struct md_fs_buffer_request *r=(void *)work;
@@ -431,11 +414,6 @@ static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
     r->opened.completion=reply->result.open_completion;
     reply->result.open_completion=(struct md_open_completion){0};
     if (r->opened.fd>=0) {
-        if (credential_send(r)) {
-            r->output->transfer=MD_FS_BUFFER_TASK_DESCRIPTOR;
-            reply->delivery=MD_FS_REPLIED;
-            return;
-        }
         if (r->request.operation==MD_FS_TASK_PATH) {
             if (r->opened.completion.kind) { r->error=-EPROTO; return; }
             r->opened.task_path=r->request.mode;
@@ -486,6 +464,7 @@ struct md_fs_buffer_service *md_fs_buffer_service_new(struct md_fs_worker *worke
 void md_fs_buffer_service_destroy(struct md_fs_buffer_service *s) {
     if (!s) return;
     while (s->requests) dispose(s->requests);
+    md_ipc_capsules_free(s->capsules);
     free(s);
 }
 static int begin(struct md_fs_buffer_service *s, pid_t actor, struct md_guest_domain *fs, unsigned operation,

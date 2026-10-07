@@ -108,7 +108,7 @@ static void root_aliases(struct md_filesystem *fs) {
         assert(md_fs_root_capture(&next,md_fs_anchor_fd(origins[i]),origins[i],&invalid)==-ESTALE);
         assert(!md_fs_root_select(&next,&copied));
         assert(next.native_root->mount==&copy->tree->mounts[i]);
-        assert(next.native_root->mount->readonly==(int)i);
+        assert(md_view_readonly(next.native_root->mount)==(int)i);
         md_fs_mounts_close(&next); fs->store->root_id=NULL;
         md_task_snapshot_release(&selected);
         r=call(fs,MD_FS_OPEN,"/created",-1,NULL,O_WRONLY|O_CREAT,NULL,0,NULL);

@@ -184,8 +184,9 @@ int md_fs_mounts_open(struct md_filesystem *fs, const struct md_fs_attachment *e
     for (unsigned i = 0; i < count && !r; ++i) {
         const struct md_fs_attachment *entry = &entries[i];
         struct md_view_mount *m = &tree->mounts[tree->count];
-        m->source = m->target = -1; m->readonly = entry->readonly;
-        r = md_mount_id_allocate(&m->id);
+        m->source = m->target = -1;
+        r = md_mount_policy_set(&m->policy,entry->readonly ? MD_MOUNT_READONLY : 0);
+        if (!r) r = md_mount_id_allocate(&m->id);
         if (r) break;
         if (!entry->source || !entry->target || entry->source[0] != '/' || entry->target[0] != '/') { r = -EINVAL; break; }
         m->source = open(entry->source, O_PATH | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
@@ -242,10 +243,12 @@ int md_fs_mounts_copy(struct md_filesystem *fs, const struct md_fs_location *roo
     for (unsigned i=0; !r && source && i<source->count; ++i) {
         const struct md_view_mount *a=&source->mounts[i];
         struct md_view_mount *b=&copy->tree->mounts[i];
-        *b=*a; b->source=b->target=-1;
+        /* Namespace copies get independent policy, even from a shared view. */
+        *b=(struct md_view_mount){.source=-1,.target=-1,
+            .policy={.local=md_mount_policy_flags(&a->policy)},.native=a->native,.guest=a->guest,
+            .parent=a->parent ? &copy->tree->mounts[a->parent-source->mounts] : NULL};
         /* Count partially built entries so rollback closes every acquired FD. */
         ++copy->tree->count;
-        b->parent=a->parent ? &copy->tree->mounts[a->parent-source->mounts] : NULL;
         r=md_mount_id_allocate(&b->id);
         if (!r && (b->source=fcntl(a->source,F_DUPFD_CLOEXEC,3))<0) r=-errno;
         if (!r && (b->target=fcntl(a->target,F_DUPFD_CLOEXEC,3))<0) r=-errno;

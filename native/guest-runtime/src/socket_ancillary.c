@@ -8,6 +8,7 @@
 #include "adapter_buffer.h"
 #include "task_send.h"
 #include "task_receive.h"
+#include "task_outgoing.h"
 #include "raw.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -34,93 +35,102 @@ static void *buffer(size_t size, void *local, size_t capacity) {
 }
 static void release(void *p, void *local, size_t size) { if (p && p != local) RAW2(munmap,p,size); }
 extern long md_guest_buffer_control(unsigned, unsigned long, unsigned long);
-struct outgoing {
-    struct ucred claimed;
-    struct md_task_send send;
-    int used;
-};
-static long use_token(void *context, struct md_fs_buffer_frame *frame) {
-    struct outgoing *out=context;
-    out->used=1;
-    memcpy(frame->value,&out->send,sizeof(out->send));
-    return md_guest_buffer_control(MD_FS_BUFFER_TASK_SEND,0,0);
-}
-static long send_owned(void *context, const unsigned long *a, int anchor) {
-    struct outgoing *out=context;
-    if (anchor>=0) {
-        if (out->send.count==MD_TASK_SEND_INPUTS) return -EINVAL;
-        out->send.keep[out->send.count++]=anchor;
+static long send_captured(const struct msghdr *original, const unsigned long *a,
+        void *control, size_t capacity, const struct iovec *sendto) {
+    long address=md_adapter_buffer_take();
+    if (address<0) return address;
+    struct md_task_outgoing_frame *frame=(void *)address;
+    frame->message=*original;
+    frame->options=(struct md_ipc_send_options){.addressed=original->msg_name!=NULL,
+        .length=original->msg_name ? original->msg_namelen : 0};
+    frame->input=(struct md_task_send){.message=(uintptr_t)&frame->message,
+        .token_slot=(uintptr_t)control+CMSG_LEN(0),
+        .socket=(int)a[0],.flags=(int)a[2],.count=1,.keep={(int)a[0]}};
+    if (sendto) { frame->input.sendto=1; frame->input.payload=*sendto; }
+    long result=frame->options.length>sizeof(frame->options.address) ? -EINVAL :
+        md_read_memory(&frame->options.address,original->msg_name,frame->options.length);
+    size_t misc=0, credential_offset=0;
+    /* Copy and normalize once. All non-right headers retain their bytes and
+     * order; the kernel remains responsible for their protocol validation. */
+    for (size_t pos=0;!result && original->msg_controllen-pos>=sizeof(struct cmsghdr);) {
+        struct cmsghdr h;
+        if (md_read_memory(&h,(char *)original->msg_control+pos,sizeof(h))<0) { result=-EFAULT; break; }
+        if (h.cmsg_len<CMSG_LEN(0) || h.cmsg_len>original->msg_controllen-pos) { result=-EINVAL; break; }
+        if (h.cmsg_level==SOL_SOCKET && h.cmsg_type==SCM_RIGHTS) {
+            size_t count=(h.cmsg_len-CMSG_LEN(0))/sizeof(int);
+            if (count>MD_TASK_SEND_INPUTS-frame->input.count) { result=-EINVAL; break; }
+            result=md_read_memory(frame->input.keep+frame->input.count,
+                (char *)original->msg_control+pos+CMSG_LEN(0),count*sizeof(int));
+            frame->input.count+=count;
+        } else {
+            size_t step=CMSG_ALIGN(h.cmsg_len);
+            if (step>capacity-misc) { result=-EINVAL; break; }
+            result=md_read_memory((char *)control+misc,(char *)original->msg_control+pos,h.cmsg_len);
+            if (result) break;
+            memset((char *)control+misc+h.cmsg_len,0,step-h.cmsg_len);
+            if (h.cmsg_level==SOL_SOCKET && h.cmsg_type==SCM_CREDENTIALS) {
+                if (frame->options.credentials || h.cmsg_len!=CMSG_LEN(sizeof(struct ucred))) { result=-EINVAL; break; }
+                frame->options.credentials=1; credential_offset=misc+CMSG_LEN(0);
+                memcpy(&frame->options.claimed,(char *)control+credential_offset,sizeof(struct ucred));
+            }
+            misc+=step;
+        }
+        if (CMSG_ALIGN(h.cmsg_len)>original->msg_controllen-pos) break;
+        pos+=CMSG_ALIGN(h.cmsg_len);
     }
-    out->send.message=a[1]; out->send.socket=(int)a[0]; out->send.flags=(int)a[2];
-    struct md_fs_request q={.operation=MD_FS_IPC,.flags=MD_IPC_MESSAGE_CREATE,
-        .directory={(int)a[0],-1},.offset=out->claimed.pid,
-        .attributes={.uid=out->claimed.uid,.gid=out->claimed.gid}};
-    struct md_fs_response reply={0};
-    long r=md_fs_buffer_use(&q,&reply,use_token,out);
-    if (out->used) return r;
-    if (!r) r=reply.result.error;
-    if (r==-ENOTSUP || r==-EAFNOSUPPORT || r==-EPROTOTYPE) r=-ENODATA;
-    return r;
+    if (!result) result=md_guest_buffer_control(MD_FS_BUFFER_SEND_PREPARE,0,0);
+    if (!result) {
+        unsigned data=frame->input.count-1;
+        unsigned expected=(frame->transport==MD_IPC_TRANSPORT_ORIGINS_V1 && data ? 1 : data)
+            +frame->destination.credentials;
+        size_t rights=frame->rights ? CMSG_SPACE(frame->rights*sizeof(int)) : 0;
+        if (frame->rights>253 || frame->rights!=expected || rights>capacity-misc) result=-EPROTO;
+        else {
+            if (frame->destination.credentials) {
+                struct ucred native={(pid_t)RAW0(getpid),(uid_t)RAW0(getuid),(gid_t)RAW0(getgid)};
+                memcpy((char *)control+credential_offset,&native,sizeof(native));
+            }
+            if (misc) memmove((char *)control+rights,control,misc);
+            /* recvmsg in the private helper fills the initial rights block. */
+            frame->message.msg_control=rights+misc ? control : NULL;
+            frame->message.msg_controllen=rights+misc;
+            if (frame->options.addressed) {
+                frame->message.msg_name=&frame->destination.address;
+                frame->message.msg_namelen=frame->destination.length;
+            }
+            result=md_guest_buffer_control(MD_FS_BUFFER_SEND_COMMIT,0,0);
+        }
+    }
+    long released=md_adapter_buffer_release();
+    return result<0 ? result : released ? released : result;
 }
 long md_socket_ancillary_send(const struct md_fs *fs, const char *exe, const unsigned long *a) {
     struct msghdr m;
     long r = md_read_memory(&m, (void *)a[1], sizeof(m));
-    if (r < 0 || !fs->endpoint[0] || !m.msg_control || !m.msg_controllen)
+    if (r < 0 || !fs->endpoint[0] || ((!m.msg_control || !m.msg_controllen) && !m.msg_name))
         return md_socket_address_call(fs, exe, SYS_sendmsg, a);
-    size_t credential_offset = 0; int found = 0;
-    struct ucred claimed;
-    for (size_t pos = 0; pos <= m.msg_controllen && m.msg_controllen-pos >= sizeof(struct cmsghdr);) {
-        struct cmsghdr h;
-        if (md_read_memory(&h, (char *)m.msg_control+pos, sizeof(h)) < 0) return -EFAULT;
-        if (h.cmsg_len < CMSG_LEN(0) || h.cmsg_len > m.msg_controllen-pos) return -EINVAL;
-        if (h.cmsg_level == SOL_SOCKET && h.cmsg_type == SCM_CREDENTIALS) {
-            if (found || h.cmsg_len != CMSG_LEN(sizeof(claimed))) return -EINVAL;
-            found = 1; credential_offset = pos + CMSG_LEN(0);
-            if (md_read_memory(&claimed, (char *)m.msg_control+credential_offset, sizeof(claimed)) < 0) return -EFAULT;
-        }
-        if (CMSG_ALIGN(h.cmsg_len) > m.msg_controllen-pos) break;
-        pos += CMSG_ALIGN(h.cmsg_len);
+    if (!m.msg_control || !m.msg_controllen) {
+        sa_family_t family;
+        if (m.msg_namelen<sizeof(family) || m.msg_namelen>sizeof(struct sockaddr_storage)
+                || md_read_memory(&family,m.msg_name,sizeof(family)) || family!=AF_UNIX)
+            return md_socket_address_call(fs,exe,SYS_sendmsg,a);
     }
-    if (!found) return md_socket_address_call(fs, exe, SYS_sendmsg, a);
-    size_t offset = CMSG_ALIGN(m.msg_controllen), size = offset+CMSG_SPACE(sizeof(int));
-    _Alignas(struct cmsghdr) char local[1024];
+    size_t size=CMSG_ALIGN(m.msg_controllen)+CMSG_SPACE(253*sizeof(int));
+    _Alignas(struct cmsghdr) char local[4096];
     void *storage = size < m.msg_controllen ? NULL : buffer(size,local,sizeof(local));
     if (!storage) return -ENOMEM;
-    memset(storage,0,size);
-    r = md_read_memory(storage,m.msg_control,m.msg_controllen);
-    if (!r) {
-        struct outgoing out={.send={.count=1,.keep={(int)a[0]}}};
-        found=0;
-        for (size_t pos=0;m.msg_controllen-pos>=sizeof(struct cmsghdr);) {
-            struct cmsghdr *h=(void *)((char *)storage+pos);
-            if (h->cmsg_len<CMSG_LEN(0) || h->cmsg_len>m.msg_controllen-pos) { r=-EINVAL; break; }
-            if (h->cmsg_level==SOL_SOCKET && h->cmsg_type==SCM_CREDENTIALS) {
-                if (found || h->cmsg_len!=CMSG_LEN(sizeof(claimed))) { r=-EINVAL; break; }
-                found=1; credential_offset=pos+CMSG_LEN(0);
-                memcpy(&out.claimed,CMSG_DATA(h),sizeof(out.claimed));
-            } else if (h->cmsg_level==SOL_SOCKET && h->cmsg_type==SCM_RIGHTS) {
-                size_t count=(h->cmsg_len-CMSG_LEN(0))/sizeof(int);
-                if (count>MD_TASK_SEND_INPUTS-out.send.count) { r=-EINVAL; break; }
-                memcpy(out.send.keep+out.send.count,CMSG_DATA(h),count*sizeof(int));
-                out.send.count+=count;
-            }
-            if (CMSG_ALIGN(h->cmsg_len)>m.msg_controllen-pos) break;
-            pos+=CMSG_ALIGN(h->cmsg_len);
-        }
-        if (!found) r=-EINVAL;
-        if (r) { release(storage,local,size); return r; }
-        struct ucred native = {(pid_t)RAW0(getpid),(uid_t)RAW0(getuid),(gid_t)RAW0(getgid)};
-        memcpy((char *)storage+credential_offset,&native,sizeof(native));
-        struct cmsghdr *h = (void *)((char *)storage+offset);
-        *h = (struct cmsghdr){.cmsg_len=CMSG_LEN(sizeof(int)),.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_RIGHTS};
-        int fd=-1; memcpy(CMSG_DATA(h),&fd,sizeof(fd));
-        out.send.token_slot=(uintptr_t)CMSG_DATA(h);
-        m.msg_control=storage; m.msg_controllen=size;
-        unsigned long args[6]; memcpy(args,a,sizeof(args)); args[1]=(unsigned long)&m;
-        r = md_socket_address_send(fs,exe,args,send_owned,&out);
-        if (!out.used && r==-ENODATA) r=md_socket_address_call(fs,exe,SYS_sendmsg,a);
-    }
+    r=send_captured(&m,a,storage,size,NULL);
     release(storage,local,size); return r;
+}
+long md_socket_ancillary_sendto(const struct md_fs *fs, const char *exe, const unsigned long *a) {
+    sa_family_t family;
+    if (!fs->endpoint[0] || !a[4] || a[5]<sizeof(family) || a[5]>sizeof(struct sockaddr_storage)
+            || md_read_memory(&family,(void *)a[4],sizeof(family)) || family!=AF_UNIX)
+        return md_socket_address_call(fs,exe,SYS_sendto,a);
+    struct iovec payload={(void *)a[1],a[2]};
+    struct msghdr message={.msg_name=(void *)a[4],.msg_namelen=(unsigned)a[5],.msg_iov=&payload,.msg_iovlen=1};
+    unsigned long args[6]={a[0],(uintptr_t)&message,a[3]};
+    return send_captured(&message,args,NULL,0,&payload);
 }
 static size_t append(void *out, size_t used, size_t capacity, int type, int level,
         const void *data, size_t size, int *flags) {
@@ -148,7 +158,8 @@ static long publish(const struct md_fs *fs, int socket, const struct msghdr *ori
         struct msghdr m, void *destination, unsigned receive_flags) {
     size_t capacity=original->msg_control?original->msg_controllen:0;
     struct ucred claimed={0}; int have_claim=0;
-    int indices[253]; struct md_received_info info[253]; unsigned entries=0;
+    int indices[253]; struct md_received_message plan; unsigned entries=0;
+    plan.count=0;
     for (struct cmsghdr *h=CMSG_FIRSTHDR(&m);h;h=next_header(&m,h)) {
         if (h->cmsg_level!=SOL_SOCKET || h->cmsg_type!=SCM_RIGHTS) continue;
         size_t count=(h->cmsg_len-CMSG_LEN(0))/sizeof(int);
@@ -156,35 +167,35 @@ static long publish(const struct md_fs *fs, int socket, const struct msghdr *ori
         memcpy(indices+entries,CMSG_DATA(h),count*sizeof(int)); entries+=count;
     }
     if (entries) {
-        long error=md_fs_buffer_inspect(indices,entries,info);
+        long error=md_fs_buffer_inspect(indices,entries,&plan);
         if (error) return error;
+        if (plan.count>254 || plan.first[0] || plan.first[entries]!=plan.count) return -EPROTO;
+        for (unsigned i=0;i<entries;++i)
+            if (plan.first[i]>plan.first[i+1] || plan.first[i+1]>plan.count) return -EPROTO;
     }
     /* Identify capabilities before rebuilding headers: the kernel can coalesce
      * ordinary descriptors and the identity descriptor into one SCM_RIGHTS. */
-    unsigned entry=0;
-    for (struct cmsghdr *h=CMSG_FIRSTHDR(&m); h; h=next_header(&m,h)) {
-        if (h->cmsg_level!=SOL_SOCKET || h->cmsg_type!=SCM_RIGHTS) continue;
-        size_t count=(h->cmsg_len-CMSG_LEN(0))/sizeof(int);
-        int *fds=(void *)CMSG_DATA(h);
-        for (size_t i=0;i<count;i++,entry++)
-            if (info[entry].flags&MD_RECEIVED_CREDENTIALS) {
-                claimed=info[entry].credentials; have_claim=1; fds[i]=-1;
-            }
+    for (unsigned i=0;i<plan.count;++i) if (plan.entries[i].flags&MD_RECEIVED_CREDENTIALS) {
+        claimed=plan.entries[i].credentials; have_claim=1;
     }
-    entry=0;
+    unsigned entry=0;
     void *out=original->msg_control; size_t used=0;
     for (struct cmsghdr *h=CMSG_FIRSTHDR(&m); h; h=next_header(&m,h)) {
         const void *data=CMSG_DATA(h); size_t n=h->cmsg_len-CMSG_LEN(0);
         if (h->cmsg_level==SOL_SOCKET && h->cmsg_type==SCM_CREDENTIALS && n==sizeof(claimed) && have_claim) data=&claimed;
         if (h->cmsg_level==SOL_SOCKET && h->cmsg_type==SCM_RIGHTS) {
-            int *fds=(void *)CMSG_DATA(h); size_t count=0; unsigned char watched[253];
-            for (size_t i=0;i<n/sizeof(int);i++,entry++) if (fds[i]>=0) {
-                watched[count]=!!(info[entry].flags&MD_RECEIVED_WATCH);
-                fds[count++]=fds[i];
+            size_t count=0; unsigned char watched[253];
+            for (size_t i=0;i<n/sizeof(int);i++,entry++) {
+                for (unsigned j=plan.first[entry];j<plan.first[entry+1];++j) {
+                    const struct md_received_info *info=&plan.entries[j];
+                    if (info->flags&MD_RECEIVED_CREDENTIALS) continue;
+                    if (count==253 || info->index<0) return -EPROTO;
+                    watched[count]=!!(info->flags&MD_RECEIVED_WATCH);
+                    indices[count++]=info->index;
+                }
             }
-            for (size_t i=count;i<n/sizeof(int);i++) fds[i]=-1;
             if (!count) continue;
-            long published=publish_rights(out,used,capacity,fds,watched,count,&m.msg_flags,receive_flags);
+            long published=publish_rights(out,used,capacity,indices,watched,count,&m.msg_flags,receive_flags);
             if (published<0) return published;
             used=(size_t)published;
             continue;

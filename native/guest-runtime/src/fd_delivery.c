@@ -16,37 +16,49 @@ void md_fd_delivery_dispose(struct md_fd_delivery *d) {
     }
     *d=(struct md_fd_delivery){0};
 }
-int md_fd_delivery_prepare_mapped(struct md_fd_delivery *d, struct md_fd_origins *files,
+static int prepare(struct md_fd_delivery *d, struct md_fd_origins *files,
         struct md_fs_anchor *const *origins, unsigned flags, unsigned capacity,
-        struct md_fd_origin_update *updates, int *numbers, struct md_fd_receipt *receipt) {
-    if (!d || !files || !origins || !updates || !numbers || !receipt
+        struct md_fd_origin_update *updates, int *numbers) {
+    if (!d || !files || !origins || !updates || !numbers
             || !md_fd_receipt_size(capacity) || (flags&~FD_CLOEXEC)) return -EINVAL;
     if (d->capacity) return -EBUSY;
     int error=md_fd_origins_prepare_batch(files,origins,flags,capacity,updates);
     if (!error) *d=(struct md_fd_delivery){.capacity=capacity,.updates=updates,.numbers=numbers,
-        .receipt=receipt,.receipt_fd=-1};
+        .receipt_fd=-1};
+    return error;
+}
+int md_fd_delivery_prepare_mapped(struct md_fd_delivery *d, struct md_fd_origins *files,
+        struct md_fs_anchor *const *origins, unsigned flags, unsigned capacity,
+        struct md_fd_origin_update *updates, int *numbers, struct md_fd_receipt *receipt) {
+    if (!receipt) return -EINVAL;
+    int error=prepare(d,files,origins,flags,capacity,updates,numbers);
+    if (!error) d->receipt=receipt;
+    return error;
+}
+int md_fd_delivery_prepare_observed(struct md_fd_delivery *d, struct md_fd_origins *files,
+        struct md_fs_anchor *const *origins, unsigned flags, unsigned capacity,
+        struct md_fd_origin_update *updates, int *numbers, const struct md_fd_table_observation *observation) {
+    if (!observation) return -EINVAL;
+    int error=prepare(d,files,origins,flags,capacity,updates,numbers);
+    if (!error) d->observation=observation;
     return error;
 }
 int md_fd_delivery_prepare(struct md_fd_delivery *d, struct md_fd_origins *files,
         struct md_fs_anchor *const *origins, unsigned flags, unsigned capacity,
         struct md_fd_origin_update *updates, int *numbers) {
     size_t size=md_fd_receipt_size(capacity);
-    if (!d || !files || !origins || !updates || !numbers || !size || (flags&~FD_CLOEXEC)) return -EINVAL;
-    if (d->capacity) return -EBUSY;
-    int error=md_fd_origins_prepare_batch(files,origins,flags,capacity,updates);
+    int error=prepare(d,files,origins,flags,capacity,updates,numbers);
     if (error) return error;
-    struct md_fd_delivery next={.capacity=capacity,.updates=updates,.numbers=numbers,.receipt_fd=-1};
-    next.receipt_fd=memfd_create("guest-fd-receipt",MFD_CLOEXEC|MFD_ALLOW_SEALING);
-    if (next.receipt_fd<0) error=-errno;
-    else if (ftruncate(next.receipt_fd,size)
-            || fcntl(next.receipt_fd,F_ADD_SEALS,F_SEAL_SHRINK|F_SEAL_GROW|F_SEAL_SEAL)) error=-errno;
+    d->receipt_fd=memfd_create("guest-fd-receipt",MFD_CLOEXEC|MFD_ALLOW_SEALING);
+    if (d->receipt_fd<0) error=-errno;
+    else if (ftruncate(d->receipt_fd,size)
+            || fcntl(d->receipt_fd,F_ADD_SEALS,F_SEAL_SHRINK|F_SEAL_GROW|F_SEAL_SEAL)) error=-errno;
     else {
-        void *memory=mmap(NULL,size,PROT_READ|PROT_WRITE,MAP_SHARED,next.receipt_fd,0);
+        void *memory=mmap(NULL,size,PROT_READ|PROT_WRITE,MAP_SHARED,d->receipt_fd,0);
         if (memory==MAP_FAILED) error=-errno;
-        else next.receipt=memory;
+        else d->receipt=memory;
     }
-    if (error) md_fd_delivery_dispose(&next);
-    else *d=next;
+    if (error) md_fd_delivery_dispose(d);
     return error;
 }
 int md_fd_delivery_receipt(const struct md_fd_delivery *d) {
@@ -55,7 +67,9 @@ int md_fd_delivery_receipt(const struct md_fd_delivery *d) {
 int md_fd_delivery_publish(struct md_fd_delivery *d) {
     if (!d || !d->capacity) return -EINVAL;
     if (d->published) return -EALREADY;
-    int count=md_fd_receipt_read(d->receipt,d->capacity,d->numbers);
+    if (d->observation && d->observation->capacity!=d->capacity) return -EINVAL;
+    int count=d->observation ? md_fd_table_observation_read(d->observation,d->numbers)
+        : md_fd_receipt_read(d->receipt,d->capacity,d->numbers);
     if (count<=0) return count;
     int error=md_fd_origins_finish_batch(d->updates,d->capacity,d->numbers,(unsigned)count);
     if (error) return error;

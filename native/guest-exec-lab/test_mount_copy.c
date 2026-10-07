@@ -84,6 +84,7 @@ void test_mount_copy(const char *base) {
     assert(original_objects>=33);
     struct md_fs_location copied_root;
     struct md_filesystem copy={.store=store_owner};
+    assert(md_mount_policy_share(&fs.mounts->tree->mounts[1].policy)>=0);
     unsigned prior=descriptors();
     assert(!md_fs_mounts_copy(&fs,&root,&copy.mounts,&copied_root));
     assert(descriptors()==prior+5 && copy.mounts->tree->objects==1);
@@ -92,7 +93,8 @@ void test_mount_copy(const char *base) {
     assert(md_fs_root_select(&fs,&copied_root)==-ESTALE);
     assert(fs.mounts->tree->objects==original_objects);
     assert(copy.mounts->tree->mounts[1].parent==&copy.mounts->tree->mounts[0]);
-    assert(copy.mounts->tree->mounts[0].readonly && !copy.mounts->tree->mounts[1].readonly);
+    assert(md_view_readonly(&copy.mounts->tree->mounts[0]) && !md_view_readonly(&copy.mounts->tree->mounts[1]));
+    assert(!copy.mounts->tree->mounts[1].policy.page);
     for (unsigned i=0; i<2; ++i) {
         struct md_view_mount *a=&fs.mounts->tree->mounts[i], *b=&copy.mounts->tree->mounts[i];
         assert(a->id!=b->id && a->source!=b->source && a->target!=b->target);
@@ -105,12 +107,12 @@ void test_mount_copy(const char *base) {
     assert(!md_fs_native_mount(&copy,1234,&again) && again==native_b);
     assert(!md_fs_native_mount(&fs,1234,&again) && again==native_a);
     /* Model a policy change in the candidate, not a guest remount syscall. */
-    copy.mounts->tree->mounts[1].readonly=1;
+    assert(!md_mount_policy_set(&copy.mounts->tree->mounts[1].policy,MD_MOUNT_READONLY));
     struct md_fs_request q={.operation=MD_FS_OPEN,.directory={-1,-1},
         .path={"/tree/scope/child/value",NULL},.flags=O_RDWR};
     struct md_fs_result r; md_fs_execute(&copy,&q,&r,NULL); assert(r.error==-EROFS);
     md_fs_execute(&fs,&q,&r,NULL); assert(!r.error); close(r.fd);
-    copy.mounts->tree->mounts[1].readonly=0;
+    assert(!md_mount_policy_set(&copy.mounts->tree->mounts[1].policy,0));
     struct md_fs_location bad=root; ++bad.mount;
     struct md_mount_namespace *failed=NULL;
     prior=descriptors();
