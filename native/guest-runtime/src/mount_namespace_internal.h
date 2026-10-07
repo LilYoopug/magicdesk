@@ -1,0 +1,20 @@
+#ifndef MD_MOUNT_NAMESPACE_INTERNAL_H
+#define MD_MOUNT_NAMESPACE_INTERNAL_H
+#include "mount_namespace.h"
+#include "mount_policy.h"
+#include <pthread.h>
+#include <stdatomic.h>
+
+struct md_mount_namespace {
+    atomic_uint refs;
+    unsigned root_id, shm_id;
+    struct md_mount_policy root_policy;
+    struct md_fs_mounts *tree;
+    struct md_mount_identity *native_ids;
+    struct md_mount_graph *graph;
+    /* Weak membership: each FS context retains the view, not vice versa.
+     * Fork publication and root relocation share this short lifecycle lock. */
+    pthread_mutex_t domains_lock;
+    struct md_guest_domain *domains;
+};
+#endif

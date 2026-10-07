@@ -41,6 +41,7 @@ static inline int md_fs_buffer_operation(unsigned operation) {
     case MD_FS_SOCKET_ADDRESS: case MD_FS_SOCKET_NAME: case MD_FS_NATIVE_MOUNT:
     case MD_FS_CHROOT: case MD_FS_UMASK: case MD_FS_STATFS: case MD_FS_WATCH_PATH: case MD_FS_TASK_PATH:
     case MD_FS_XATTR: case MD_FS_FXATTR:
+    case MD_FS_MOUNT:
         return 1;
     default: return 0;
     }

@@ -10,6 +10,7 @@ struct md_fs_anchor *md_fs_anchor_retain(struct md_fs_anchor *);
 void md_fs_anchor_release(struct md_fs_anchor *);
 /* Borrowed O_PATH descriptor, suitable for cwd/path traversal, not data IO. */
 int md_fs_anchor_fd(const struct md_fs_anchor *);
+int md_fs_anchor_same(const struct md_fs_anchor *, const struct md_fs_anchor *);
 /* Object identity only, not authority to associate an arbitrary FD with a view.
  * Callers establish that association before checking the actual kernel object. */
 int md_fs_anchor_check_fd(const struct md_fs_anchor *, int);

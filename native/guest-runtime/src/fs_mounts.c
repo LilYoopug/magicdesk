@@ -2,6 +2,8 @@
 #include "fs_mount_internal.h"
 #include "inode_internal.h"
 #include "linux_abi.h"
+#include "mount_topology.h"
+#include "fs_storage.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -57,6 +59,12 @@ int md_view_record(struct md_filesystem *fs, int fd, struct md_view_mount *mount
     char proc[64]; snprintf(proc, sizeof(proc), "/proc/self/fd/%d", fd);
     p->fd = open(proc, O_PATH | O_CLOEXEC);
     if (p->fd < 0) { int r = -errno; free(p); return r; }
+    if (md_view_inode(mount)) {
+        struct md_inode_store *store;
+        int r=md_fs_storage_get(fs,mount,&store);
+        if (!r) r=md_inode_object_id(store,fd,p->inode);
+        if (r) { close(p->fd); free(p); return r; }
+    }
     unsigned char bytes[16];
     if (getrandom(bytes, sizeof(bytes), 0) != sizeof(bytes)) {
         int r = errno ? -errno : -EIO; close(p->fd); free(p); return r;
@@ -92,6 +100,7 @@ int md_view_identity(struct md_filesystem *fs, int fd, struct md_view_object **o
     if (r) return r;
     struct md_view_mount *mount=NULL;
     for (unsigned i = 0; i < m->count; ++i) {
+        if (m->mounts[i].backing!=MD_MOUNT_NATIVE || m->mounts[i].detached) continue;
         r = md_view_fdpath(m->mounts[i].source, root, sizeof(root));
         if (r) return r;
         if (!beneath(path, root)) continue;
@@ -100,33 +109,56 @@ int md_view_identity(struct md_filesystem *fs, int fd, struct md_view_object **o
     }
     return mount ? md_view_record(fs,fd,mount,out) : -EXDEV;
 }
+int md_view_backing_path(struct md_filesystem *fs, int fd, const struct md_view_mount *mount,
+        char *out, size_t size) {
+    if (!md_view_inode(mount)) return md_view_fdpath(fd,out,size);
+    struct md_fs_storage_scope scope;
+    int r=md_fs_storage_enter(fs,mount,&scope);
+    if (r) return r;
+    scope.store->root_id=NULL;
+    r=md_inode_path(scope.store,fd,out,size);
+    md_fs_storage_leave(&scope); return r;
+}
 static int location_path(struct md_filesystem *fs, int fd, struct md_view_mount *m, char *out, size_t size) {
-    if (!m) return md_inode_path(fs->store, fd, out, size);
+    if (!m) return md_view_backing_path(fs,fd,NULL,out,size);
+    if (m->detached) return -ENOENT;
     char root[PATH_MAX], path[PATH_MAX], target[PATH_MAX];
     struct stat st;
     if (fstat(fd, &st)) return -errno;
     if (!st.st_nlink) return -ENOENT;
-    int r = md_view_fdpath(m->source, root, sizeof(root));
-    if (!r) r = md_view_fdpath(fd, path, sizeof(path));
+    int r=md_view_backing_path(fs,m->source,m,root,sizeof(root));
+    if (!r) r=md_view_backing_path(fs,fd,m,path,sizeof(path));
     if (!r && !beneath(path, root)) r = -EXDEV;
     if (!r) r = location_path(fs, m->target, m->parent, target, sizeof(target));
     if (!r) {
         const char *suffix = !strcmp(path,root) ? "" : path + (strlen(root) == 1 ? 0 : strlen(root));
+        if (!strcmp(target,"/") && *suffix=='/') ++suffix;
         if (snprintf(out, size, "%s%s", target, suffix) >= (int)size) r = -ERANGE;
     }
     return r;
 }
 int md_view_path(struct md_filesystem *fs, int fd, struct md_view_mount *m, char *out, size_t size) {
-    if (!fs->native_root) return location_path(fs,fd,m,out,size);
-    struct md_view_mount *ancestor=m;
-    while (ancestor && ancestor!=fs->native_root->mount) ancestor=ancestor->parent;
-    if (!ancestor) return -ENOENT;
+    if (!fs->native_root && !fs->store->root_id) return location_path(fs,fd,m,out,size);
+    if (fs->native_root) {
+        struct md_view_mount *ancestor=m;
+        while (ancestor && ancestor!=fs->native_root->mount) ancestor=ancestor->parent;
+        if (!ancestor) return -ENOENT;
+    }
+    int root_fd=fs->native_root ? fs->native_root->fd
+        : md_inode_open(fs->store,MD_INODE_ROOT,"/",O_PATH|O_DIRECTORY|O_CLOEXEC,0);
+    if (root_fd<0) return root_fd;
+    const char *selected=fs->store->root_id;
+    /* Source and covered dentries belong to their backing filesystem. Apply
+     * the process root only after composing the complete mount-tree path. */
+    fs->store->root_id=NULL;
     char root[PATH_MAX], path[PATH_MAX];
-    int r = location_path(fs,fs->native_root->fd,fs->native_root->mount,root,sizeof(root));
+    int r = location_path(fs,root_fd,fs->native_root ? fs->native_root->mount : NULL,root,sizeof(root));
     if (!r) r = location_path(fs,fd,m,path,sizeof(path));
+    fs->store->root_id=selected;
+    if (!fs->native_root) close(root_fd);
     if (!r && !beneath(path,root)) r = -ENOENT;
     if (!r) {
-        const char *relative = !strcmp(path,root) ? "/" : path+strlen(root);
+        const char *relative = !strcmp(path,root) ? "/" : path+(strlen(root)==1 ? 0 : strlen(root));
         if (strlen(relative)>=size) r=-ERANGE;
         else strcpy(out,relative);
     }
@@ -147,7 +179,13 @@ int md_fs_root_capture(struct md_filesystem *fs, int fd, const struct md_fs_anch
     int r = origin ? (origin->mount ? md_view_record(fs,fd,origin->mount,&p) : -EXDEV)
         : fs->mounts ? md_view_identity(fs,fd,&p) : -EXDEV;
     if (!r) {
-        if (syscall(SYS_faccessat2,fd,"",X_OK,AT_EMPTY_PATH|MD_AT_EACCESS)) return -errno;
+        if (md_view_inode(p->mount)) {
+            struct md_fs_request access={.operation=MD_FS_ACCESS,.directory={fd,-1},.mode=X_OK,.flags=MD_AT_EACCESS};
+            struct md_fs_storage_scope scope;
+            r=md_fs_storage_enter(fs,p->mount,&scope);
+            if (!r) { r=md_inode_metadata(scope.store,&access); md_fs_storage_leave(&scope); }
+            if (r) return r;
+        } else if (syscall(SYS_faccessat2,fd,"",X_OK,AT_EMPTY_PATH|MD_AT_EACCESS)) return -errno;
         out->mount=p->mount->id; memcpy(out->object,p->id,sizeof(out->object));
         return 0;
     }
@@ -166,6 +204,12 @@ int md_fs_root_select(struct md_filesystem *fs, const struct md_fs_location *roo
         fs->native_root=p;
     }
     fs->store->root_id=root->mount || !root->object[0] ? NULL : root->object;
+    if (fs->native_root && md_view_inode(fs->native_root->mount)) {
+        struct md_inode_store *store;
+        int r=md_fs_storage_get(fs,fs->native_root->mount,&store);
+        if (r) return r;
+        if (store==fs->store) fs->store->root_id=fs->native_root->inode;
+    }
     return 0;
 }
 void md_fs_mounts_close(struct md_filesystem *fs) {
@@ -224,9 +268,31 @@ int md_fs_mounts_open(struct md_filesystem *fs, const struct md_fs_attachment *e
     return r;
 }
 
+int md_fs_mounts_copy_cwd(struct md_mount_namespace *source, struct md_mount_namespace *copy,
+        const struct md_fs_anchor *cwd, struct md_fs_anchor **out) {
+    if (!source || !copy || !out || *out) return -EINVAL;
+    if (!cwd || cwd->view!=source) {
+        *out=md_fs_anchor_retain((struct md_fs_anchor *)cwd); return 0;
+    }
+    struct md_view_mount *mount=NULL;
+    if (cwd->mount) {
+        unsigned i=0;
+        while (source->tree && i<source->tree->count && cwd->mount!=&source->tree->mounts[i]) ++i;
+        if (!source->tree || i==source->tree->count || !copy->tree || i>=copy->tree->count) return -ESTALE;
+        mount=&copy->tree->mounts[i];
+    }
+    int fd=fcntl(cwd->fd,F_DUPFD_CLOEXEC,3);
+    if (fd<0) return -errno;
+    struct md_fs_anchor *p=md_view_anchor_new(cwd->lifetime,copy,mount,fd,cwd->device,cwd->inode);
+    if (!p) { close(fd); return -ENOMEM; }
+    *out=p; return 0;
+}
 int md_fs_mounts_copy(struct md_filesystem *fs, const struct md_fs_location *root,
         struct md_mount_namespace **out, struct md_fs_location *copied_root) {
     if (!fs->mounts || !root || !out || !copied_root) return -EINVAL;
+    unsigned order[MD_FS_MOUNTS_MAX];
+    int valid=md_view_topology_order(fs->mounts->tree,order);
+    if (valid) return valid;
     struct md_view_object *origin=NULL;
     if (root->mount) {
         origin=md_view_object(fs,root->object);
@@ -234,6 +300,7 @@ int md_fs_mounts_copy(struct md_filesystem *fs, const struct md_fs_location *roo
     }
     struct md_mount_namespace *copy=md_mount_namespace_new();
     if (!copy) return -errno;
+    copy->root_policy.local=md_mount_policy_flags(&fs->mounts->root_policy);
     struct md_fs_mounts *source=fs->mounts->tree;
     int r=0;
     if (source && source->count) {
@@ -245,6 +312,8 @@ int md_fs_mounts_copy(struct md_filesystem *fs, const struct md_fs_location *roo
         struct md_view_mount *b=&copy->tree->mounts[i];
         /* Namespace copies get independent policy, even from a shared view. */
         *b=(struct md_view_mount){.source=-1,.target=-1,
+            .backing=a->backing,.detached=a->detached,
+            .storage=md_inode_lifetime_retain(a->storage),
             .policy={.local=md_mount_policy_flags(&a->policy)},.native=a->native,.guest=a->guest,
             .parent=a->parent ? &copy->tree->mounts[a->parent-source->mounts] : NULL};
         /* Count partially built entries so rollback closes every acquired FD. */
@@ -255,7 +324,7 @@ int md_fs_mounts_copy(struct md_filesystem *fs, const struct md_fs_location *roo
     }
     struct md_fs_location selected=*root;
     if (!r && origin) {
-        struct md_filesystem candidate={.store=fs->store,.mounts=copy};
+        struct md_filesystem candidate={.store=fs->store,.storage=fs->storage,.mounts=copy};
         struct md_view_mount *mount=&copy->tree->mounts[origin->mount-source->mounts];
         struct md_view_object *object;
         r=md_view_record(&candidate,origin->fd,mount,&object);

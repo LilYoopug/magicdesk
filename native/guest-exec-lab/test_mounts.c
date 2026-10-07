@@ -16,6 +16,7 @@
 #include <unistd.h>
 
 void test_mount_copy(const char *base);
+void test_mount_storage(const char *base);
 void test_fs_anchor(const char *base);
 void test_mount_alias(const char *base);
 void test_mount_policy(const char *base);
@@ -257,6 +258,9 @@ static void task_mount_views(const char *base) {
     puts("PASS task-selected mount views, readonly policy, authenticated snapshots, stale roots and retained lifetime");
 }
 int main(int argc, char **argv) {
+    if (argc==3 && !strcmp(argv[1],"--mount-storage")) {
+        assert(!mkdir(argv[2],0700)); test_mount_storage(argv[2]); return 0;
+    }
     setvbuf(stdout,NULL,_IONBF,0);
     int child=test_mount_policy_child(argc,argv);
     if (child>=0) return child;
@@ -466,6 +470,7 @@ int main(int argc, char **argv) {
     nested_mounts(argv[1]);
     task_mount_views(argv[1]);
     test_mount_copy(argv[1]);
+    test_mount_storage(argv[1]);
     test_fs_anchor(argv[1]);
     test_mount_alias(argv[1]);
     test_mount_policy(argv[1]);

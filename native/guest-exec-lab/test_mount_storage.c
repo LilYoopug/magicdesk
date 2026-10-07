@@ -1,0 +1,196 @@
+#define _GNU_SOURCE
+#include "fs_mount_internal.h"
+#include "fs_storage.h"
+#include "inode_internal.h"
+#include "mount_graph.h"
+#include <assert.h>
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/mount.h>
+#include <unistd.h>
+
+void test_mount_allocation_failure_after(int);
+static unsigned descriptors(void) {
+    DIR *directory=opendir("/proc/self/fd"); assert(directory);
+    unsigned n=0; struct dirent *entry;
+    while ((entry=readdir(directory))) if (entry->d_name[0]!='.') ++n;
+    assert(!closedir(directory)); return n;
+}
+static void put(struct md_inode_store *s, const char *path, const char *text) {
+    int fd=md_inode_open(s,-1,path,O_CREAT|O_WRONLY|O_TRUNC,0644); assert(fd>=0);
+    assert(write(fd,text,strlen(text))==(ssize_t)strlen(text)); close(fd);
+}
+static struct md_fs_result call(struct md_filesystem *fs, struct md_fs_request q,
+        const struct md_fs_output *output) {
+    struct md_fs_result r; md_fs_execute(fs,&q,&r,output); return r;
+}
+static int opened(struct md_filesystem *fs, const char *path, unsigned flags,
+        struct md_fs_anchor *base, struct md_fs_anchor **origin) {
+    struct md_fs_result r=call(fs,(struct md_fs_request){.operation=MD_FS_OPEN,
+        .directory={base ? md_fs_anchor_fd(base) : -1,-1},.origin={base,NULL},
+        .path={path,NULL},.flags=flags},&(struct md_fs_output){.origin=origin});
+    if (r.error) fprintf(stderr,"storage open %s: %d\n",path,r.error);
+    assert(!r.error); return r.fd;
+}
+static void contents(struct md_filesystem *fs, const char *path,
+        struct md_fs_anchor *base, const char *text) {
+    int fd=opened(fs,path,O_RDONLY,base,NULL); char data[64]={0};
+    assert(read(fd,data,sizeof(data))==(ssize_t)strlen(text) && !memcmp(data,text,strlen(text)));
+    close(fd);
+}
+static void mount_call(struct md_filesystem *fs, unsigned mode, unsigned flags,
+        const char *target, const char *source) {
+    struct md_fs_result r=call(fs,(struct md_fs_request){.operation=MD_FS_MOUNT,
+        .mode=mode,.flags=flags,.directory={-1,-1},.path={target,source}},NULL);
+    if (r.error) fprintf(stderr,"storage mount %s: %d\n",target,r.error);
+    assert(!r.error);
+}
+void test_mount_storage(const char *base) {
+    unsigned before=descriptors();
+    char path[PATH_MAX], extra[PATH_MAX], moved[PATH_MAX];
+    assert(snprintf(path,sizeof(path),"%s/storage-main",base)<PATH_MAX);
+    assert(snprintf(extra,sizeof(extra),"%s/storage-extra",base)<PATH_MAX);
+    assert(snprintf(moved,sizeof(moved),"%s/storage-renamed",base)<PATH_MAX);
+    struct md_inode_store *main=NULL, *second=NULL;
+    assert(!md_inode_store_open(path,1,&main) && !md_inode_store_open(extra,1,&second));
+    assert(!md_inode_mkdir(main,-1,"/volume",0755) && !md_inode_mkdir(main,-1,"/alias",0755));
+    assert(!md_inode_mkdir(second,-1,"/dir",0755) && !md_inode_mkdir(second,-1,"/dev",0755));
+    put(main,"/value","main"); put(second,"/value","second"); put(second,"/dev/plain","ordinary");
+    int value=md_inode_open(second,-1,"/value",O_PATH,0); assert(value>=0);
+    assert(!md_inode_import_metadata(second,value,1001,1002,0640)); close(value);
+    assert(!md_inode_symlink(second,"/value",-1,"/absolute"));
+    assert(!md_inode_symlink(second,"../value",-1,"/dir/up"));
+    struct md_identity root=md_identity_new(0,0); main->identity=&root;
+    struct md_fs_storage_cache storage={0};
+    struct md_filesystem fs={.store=main,.storage=&storage};
+    assert(!md_fs_mounts_open(&fs,NULL,0));
+    struct md_view_location target;
+    assert(!md_view_walk(&fs,-1,NULL,"/volume",1,0,0,&target));
+    int fd=md_inode_open(second,-1,"/",O_PATH|O_DIRECTORY,0); assert(fd>=0);
+    assert(!md_view_attach_storage(&fs,second,fd,&target,0));
+    close(fd); md_view_location_close(&target);
+    md_inode_store_close(second); second=NULL;
+    /* A cold connection must use retained custody, not the original pathname. */
+    assert(!rename(extra,moved));
+    contents(&fs,"/volume/value",NULL,"second"); contents(&fs,"/value",NULL,"main");
+    contents(&fs,"/volume/dev/plain",NULL,"ordinary");
+    contents(&fs,"/volume/dir/up",NULL,"second"); contents(&fs,"/volume/absolute",NULL,"main");
+    contents(&fs,"/volume/../value",NULL,"main");
+    assert(!rename(moved,extra));
+    mount_call(&fs,MD_FS_MOUNT_BIND,MS_BIND,"/alias","/volume");
+    assert(fs.mounts->tree->mounts[0].storage==fs.mounts->tree->mounts[1].storage);
+    struct md_fs_anchor *held=NULL;
+    fd=opened(&fs,"/alias/dir",O_PATH|O_DIRECTORY,NULL,&held); close(fd);
+    char actual[PATH_MAX];
+    struct md_fs_result r=call(&fs,(struct md_fs_request){.operation=MD_FS_PATH,
+        .directory={md_fs_anchor_fd(held),-1},.origin={held,NULL}},
+        &(struct md_fs_output){.data=actual,.capacity=sizeof(actual)});
+    assert(!r.error && !strcmp(actual,"/alias/dir"));
+    struct md_fs_storage_cache other={0};
+    struct md_filesystem copy={.store=main,.storage=&other};
+    struct md_fs_location copied_root;
+    assert(!md_fs_mounts_copy(&fs,&(struct md_fs_location){0},&copy.mounts,&copied_root));
+    assert(copy.mounts->tree->mounts[0].storage==fs.mounts->tree->mounts[0].storage);
+    assert(copy.mounts->tree->mounts[0].id!=fs.mounts->tree->mounts[0].id);
+    fd=opened(&copy,"/volume/value",O_WRONLY|O_TRUNC,NULL,NULL);
+    assert(write(fd,"shared",6)==6); close(fd); contents(&fs,"/alias/value",NULL,"shared");
+    mount_call(&copy,MD_FS_MOUNT_REMOUNT,MS_REMOUNT|MS_BIND|MS_RDONLY,"/volume",NULL);
+    r=call(&copy,(struct md_fs_request){.operation=MD_FS_OPEN,.directory={-1,-1},
+        .path={"/volume/value",NULL},.flags=O_WRONLY},NULL);
+    assert(r.error==-EROFS);
+    fd=opened(&copy,"/alias/value",O_WRONLY,NULL,NULL); close(fd);
+    fd=opened(&fs,"/volume/value",O_WRONLY,NULL,NULL); close(fd);
+    /* Object identities keep mount policy instead of escaping to the base DB. */
+    struct md_fs_anchor *file=NULL;
+    fd=opened(&copy,"/volume/value",O_PATH,NULL,&file); close(fd);
+    char object[33];
+    r=call(&copy,(struct md_fs_request){.operation=MD_FS_OBJECT_ID,
+        .directory={md_fs_anchor_fd(file),-1},.origin={file,NULL}},
+        &(struct md_fs_output){.data=object,.capacity=sizeof(object)});
+    assert(!r.error);
+    r=call(&copy,(struct md_fs_request){.operation=MD_FS_FSTAT,
+        .directory={md_fs_anchor_fd(file),-1},.mode=MD_FS_STAT_MOUNT},NULL);
+    assert(!r.error && r.info.uid==1001 && r.info.gid==1002
+        && r.info.mount_id==copy.mounts->tree->mounts[0].id);
+    r=call(&copy,(struct md_fs_request){.operation=MD_FS_OPEN_OBJECT,.directory={-1,-1},
+        .path={object,NULL},.flags=O_RDONLY},NULL);
+    assert(!r.error); close(r.fd); md_fs_anchor_release(file);
+    struct md_mount_graph_parcel parcel={0};
+    assert(!md_mount_graph_export(copy.mounts,&parcel) && parcel.count==2+3*2+2);
+    struct md_fs_storage_cache received_storage={0};
+    struct md_filesystem received={.store=main,.storage=&received_storage};
+    assert(!md_mount_graph_import(&parcel,&received.mounts));
+    assert(received.mounts->tree->mounts[0].storage==received.mounts->tree->mounts[1].storage);
+    contents(&received,"/alias/value",NULL,"shared");
+    unsigned live=descriptors();
+    for (unsigned i=0;i<3;++i) {
+        assert(!md_mount_graph_export(copy.mounts,&parcel));
+        assert(!md_mount_graph_import(&parcel,&received.mounts));
+        assert(descriptors()==live);
+    }
+    /* Even an interned graph validates its complete custody, not only IDs. */
+    assert(!md_mount_graph_export(copy.mounts,&parcel));
+    close(parcel.fd[parcel.count-1]);
+    parcel.fd[parcel.count-1]=fcntl(main->lifetime->root,F_DUPFD_CLOEXEC,3);
+    assert(parcel.fd[parcel.count-1]>=0);
+    assert(md_mount_graph_import(&parcel,&received.mounts)==-EPROTO);
+    assert(descriptors()==live);
+    int reached=0;
+    for (int n=0;n<16 && !reached;++n) {
+        assert(!md_mount_graph_export(copy.mounts,&parcel));
+        struct md_mount_namespace *candidate=NULL;
+        test_mount_allocation_failure_after(n);
+        int error=md_mount_graph_import(&parcel,&candidate);
+        test_mount_allocation_failure_after(-1);
+        if (!error) { assert(candidate); md_mount_namespace_release(candidate); reached=1; }
+        else assert(error==-ENOMEM && !candidate);
+        assert(!parcel.fd && !parcel.count && descriptors()==live);
+    }
+    assert(reached);
+    mount_call(&fs,MD_FS_MOUNT_UMOUNT,MNT_DETACH,"/alias",NULL);
+    contents(&fs,"../value",held,"shared");
+    md_fs_mounts_close(&fs); md_fs_storage_close(&storage);
+    contents(&copy,"../value",held,"shared");
+    contents(&copy,"/volume/value",NULL,"shared");
+    fd=opened(&copy,"/volume",O_PATH|O_DIRECTORY,NULL,&file);
+    struct md_fs_location root_location;
+    assert(!md_fs_root_capture(&copy,fd,file,&root_location)); close(fd);
+    assert(!md_fs_root_select(&copy,&root_location));
+    contents(&copy,"/../../value",NULL,"shared");
+    contents(&copy,"/absolute",NULL,"shared");
+    md_fs_anchor_release(file); md_fs_anchor_release(held);
+    md_fs_mounts_close(&copy); md_fs_storage_close(&other);
+    /* The receiving view is now the only owner of the extra filesystem. */
+    md_fs_storage_close(&received_storage);
+    assert(!rename(extra,moved));
+    contents(&received,"/volume/value",NULL,"shared");
+    r=call(&received,(struct md_fs_request){.operation=MD_FS_OPEN,.directory={-1,-1},
+        .path={"/volume/value",NULL},.flags=O_WRONLY},NULL);
+    assert(r.error==-EROFS);
+    fd=opened(&received,"/alias/value",O_WRONLY,NULL,NULL); close(fd);
+    assert(!md_mount_graph_export(received.mounts,&parcel));
+    struct md_filesystem forwarded={.store=main,.storage=&other};
+    assert(!md_mount_graph_import(&parcel,&forwarded.mounts));
+    md_fs_mounts_close(&received); md_fs_storage_close(&received_storage);
+    contents(&forwarded,"/alias/value",NULL,"shared");
+    md_fs_mounts_close(&forwarded); md_fs_storage_close(&other);
+    assert(!rename(moved,extra));
+    /* A retained parent directory must not admit a symlink replacing the DB. */
+    struct md_inode_store *check=NULL;
+    assert(!md_inode_store_open(extra,0,&check));
+    struct md_inode_lifetime *lease=md_inode_lifetime_retain(md_inode_store_lifetime(check));
+    md_inode_store_close(check); check=NULL;
+    assert(!renameat(lease->root,"namespace.db",lease->root,"saved.db"));
+    assert(!symlinkat("saved.db",lease->root,"namespace.db"));
+    assert(md_inode_store_reconnect(lease,&check)<0 && !check);
+    assert(!unlinkat(lease->root,"namespace.db",0));
+    assert(!renameat(lease->root,"saved.db",lease->root,"namespace.db"));
+    assert(!md_inode_store_reconnect(lease,&check));
+    md_inode_store_close(check); md_inode_lifetime_release(lease);
+    main->identity=NULL; md_identity_release(&root); md_inode_store_close(main);
+    assert(descriptors()==before);
+    puts("PASS mounted inode storage: identity, symlinks, bind/copy, policy, portable custody and old dirfd");
+}

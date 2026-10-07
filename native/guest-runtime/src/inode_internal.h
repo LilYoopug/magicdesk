@@ -67,6 +67,7 @@ struct mdi_location {
  * retains a final symlink except when a trailing slash requires traversal. */
 enum mdi_follow { MDI_FOLLOW, MDI_NOFOLLOW, MDI_ENTRY };
 int mdi_sql_error(int);
+int mdi_sqlite_reconnect(int root, sqlite3 **);
 int mdi_sql_failure(int);
 int mdi_sql(struct md_inode_store *, const char *);
 int mdi_begin(struct md_inode_store *, int write);

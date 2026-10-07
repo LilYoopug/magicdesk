@@ -53,7 +53,7 @@ static int mutate(void *argument) {
         assert(unshare(CLONE_FS | CLONE_VM) == -1 && errno == EINVAL);
     }
     if (c->unshare == -4) {
-        assert(unshare(CLONE_FS | CLONE_NEWNS) == -1 && errno == ENOTSUP);
+        assert(unshare(CLONE_FS | CLONE_NEWUTS) == -1 && errno == ENOTSUP);
     }
     if (c->unshare == -3) {
         char ready[24], done[24], file[24];
@@ -1921,8 +1921,10 @@ static void buffer_park(int protected) {
      * and reap every TRACEEXIT-observed peer without outer-timeout recovery. */
     get(parked[0]); abort();
 }
+void test_mount_namespace_guest(void);
 int main(int argc, char **argv) {
     setbuf(stdout, NULL); alarm(40);
+    if (argc==2 && !strcmp(argv[1],"mount-namespace")) { test_mount_namespace_guest(); return 0; }
     if (argc==2 && !strcmp(argv[1],"exec-custody-target")) return 0;
     if (argc == 5 && !strcmp(argv[1], "exec-undo")) {
         struct sembuf op = {.sem_num=0, .sem_op=-1, .sem_flg=SEM_UNDO};

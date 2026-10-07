@@ -125,15 +125,14 @@ int md_fs_origin_export(const struct md_fd_message *message, struct md_fs_origin
         if (o->mount==UINT_MAX) return -ESTALE;
         unsigned v=0; while (v<data.views && views[v]!=a->view) ++v;
         if (v==data.views) {
-            unsigned mounts=a->view->tree ? a->view->tree->count : 0;
-            if (mounts>MD_FS_MOUNTS_MAX) return -EINVAL;
-            views[data.views++]=a->view; rights+=1+3*mounts;
+            unsigned graph_rights=md_mount_graph_rights(a->view);
+            if (!graph_rights) return -EINVAL;
+            views[data.views++]=a->view; rights+=graph_rights;
         }
         o->view=v;
         unsigned s=0; while (s<data.owners && owners[s]!=a->lifetime) ++s;
         if (s==data.owners) {
-            owners[data.owners++]=a->lifetime; rights+=2;
-            for (unsigned j=1;j<MDI_SOURCES;++j) if (a->lifetime->sources[j]>=0) rights+=2;
+            owners[data.owners++]=a->lifetime; rights+=md_inode_custody_rights(a->lifetime);
         }
         o->owner=s;
     }
@@ -288,7 +287,9 @@ static int import(struct md_fs_origin_imports *s, const struct md_fd_message_rou
         r=md_inode_custody_import(&parcel,s->root,&owners[i]);
     }
     for (unsigned i=0;!r && i<m.views;++i) {
-        struct span *b=&m.view[i]; struct md_mount_graph_parcel parcel={.count=b->count};
+        struct span *b=&m.view[i];
+        struct md_mount_graph_parcel parcel={.count=b->count,.fd=calloc(b->count,sizeof(int))};
+        if (!parcel.fd) { r=-ENOMEM; break; }
         for (unsigned j=0;j<b->count;++j) parcel.fd[j]=take(p,b->start+j);
         struct cached_view *known=find(s->views,b->identity);
         if (!known) known=find(pending,b->identity);

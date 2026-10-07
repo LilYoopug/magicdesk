@@ -30,6 +30,10 @@ int md_inode_store_open(const char *directory, int create, struct md_inode_store
  * the store. Store close releases SQLite and transaction resources immediately;
  * retained origins keep the existing backing/source maintenance leases. */
 int md_inode_store_open_exclusive(const char *directory, struct md_inode_store **out);
+struct md_inode_lifetime;
+/* New worker-local connection to retained exact backing custody. Does not
+ * reopen the lease or resolve source paths that may have been renamed. */
+int md_inode_store_reconnect(struct md_inode_lifetime *, struct md_inode_store **out);
 void md_inode_store_close(struct md_inode_store *);
 int md_inode_store_seal(struct md_inode_store *);
 /* Prepare store-owned runtime resources before accepting guest operations.

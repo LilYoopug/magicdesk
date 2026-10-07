@@ -7,7 +7,7 @@
 int md_resources_init(struct md_task_resources *r, struct md_mount_namespace *mounts) {
     *r = (struct md_task_resources){.fs=md_domain_new(), .sem_undo=md_ipc_undo_new(),
         .mounts=md_mount_namespace_retain(mounts), .files=md_fd_origins_new()};
-    if (r->fs && r->sem_undo && r->files) return 0;
+    if (r->fs && r->sem_undo && r->files) { md_domain_bind_mounts(r->fs,mounts); return 0; }
     md_resources_release(NULL, r); return -ENOMEM;
 }
 int md_resources_release(struct md_ipc *ipc, struct md_task_resources *r) {
@@ -39,22 +39,24 @@ int md_resources_exec(struct md_task_resources *r) {
     return 0;
 }
 int md_resources_clone_supported(unsigned long flags) {
-    return !(flags & (CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET | CLONE_NEWNS
-        | CLONE_NEWIPC | CLONE_NEWUTS | CLONE_NEWCGROUP));
+    return !(flags & (CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET
+        | CLONE_NEWIPC | CLONE_NEWUTS | CLONE_NEWCGROUP))
+        && (flags & (CLONE_NEWNS | CLONE_FS)) != (CLONE_NEWNS | CLONE_FS);
 }
 int md_resources_unshare_prepare(const struct md_task_resources *r, unsigned long flags,
         struct md_resource_change *change) {
     /* VM/SIGHAND/THREAD checks remain kernel-owned, including the requirement
      * that the caller is alone. Namespace flags are not successful no-ops. */
-    unsigned long supported = CLONE_FS | CLONE_FILES | CLONE_SYSVSEM
+    unsigned long supported = CLONE_FS | CLONE_FILES | CLONE_SYSVSEM | CLONE_NEWNS
         | CLONE_VM | CLONE_SIGHAND | CLONE_THREAD;
     *change = (struct md_resource_change){0};
-    unsigned long namespaces = CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET | CLONE_NEWNS
+    unsigned long namespaces = CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET
         | CLONE_NEWIPC | CLONE_NEWUTS | CLONE_NEWCGROUP | CLONE_NEWTIME;
     if (flags & ~(supported | namespaces)) return -EINVAL;
     if (flags & namespaces) return -ENOTSUP;
+    if ((flags & CLONE_NEWNS) && !r->mounts) return -ENOTSUP;
     struct md_task_resources next = {0};
-    if (flags & CLONE_FS) {
+    if ((flags & CLONE_FS) && !(flags & CLONE_NEWNS)) {
         next.fs = md_domain_unshare_prepare(r->fs);
         if (!next.fs) return -ENOMEM;
     }
@@ -66,12 +68,17 @@ int md_resources_unshare_prepare(const struct md_task_resources *r, unsigned lon
         next.files=md_fd_origins_unshare_prepare(r->files);
         if (!next.files) { md_resources_release(NULL,&next); return -ENOMEM; }
     }
-    *change = (struct md_resource_change){.next=next};
+    *change = (struct md_resource_change){.next=next,.copy_mounts=!!(flags&CLONE_NEWNS)};
     return 0;
 }
 int md_resources_unshare_finish(struct md_ipc *ipc, struct md_task_resources *r,
         struct md_resource_change *change, long result) {
-    if (!result) {
+    int invalid=!result && change->copy_mounts && (!change->next.mounts || !change->next.fs);
+    if (!result && !invalid) {
+        if (change->next.mounts) {
+            struct md_mount_namespace *old=r->mounts;
+            r->mounts=change->next.mounts; change->next.mounts=old;
+        }
         if (change->next.fs) {
             struct md_guest_domain *old = r->fs;
             r->fs = change->next.fs; change->next.fs = old;
@@ -87,5 +94,5 @@ int md_resources_unshare_finish(struct md_ipc *ipc, struct md_task_resources *r,
     }
     int error = md_resources_release(ipc, &change->next);
     *change = (struct md_resource_change){0};
-    return error;
+    return invalid ? -EINVAL : error;
 }

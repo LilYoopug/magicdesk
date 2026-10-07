@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "guest_domain.h"
+#include "mount_namespace_internal.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/magic.h>
@@ -28,6 +29,8 @@ struct md_guest_domain {
     atomic_int path_state;
     struct md_fs_location guest_root;
     struct md_fs_anchor *cwd_origin;
+    struct md_mount_namespace *mounts;
+    struct md_guest_domain *previous, *next;
     int root, cwd;
     struct md_task_lifetime root_task;
 };
@@ -42,11 +45,37 @@ struct md_guest_domain *md_domain_new(void) {
     }
     return d;
 }
+static void attach(struct md_guest_domain *d, struct md_mount_namespace *view) {
+    d->mounts=md_mount_namespace_retain(view);
+    d->next=view->domains;
+    if (d->next) d->next->previous=d;
+    view->domains=d;
+}
+void md_domain_bind_mounts(struct md_guest_domain *d, struct md_mount_namespace *view) {
+    if (d->mounts==view) return;
+    struct md_mount_namespace *old=d->mounts;
+    if (old) {
+        pthread_mutex_lock(&old->domains_lock);
+        if (d->previous) d->previous->next=d->next;
+        else old->domains=d->next;
+        if (d->next) d->next->previous=d->previous;
+        d->mounts=NULL; d->previous=d->next=NULL;
+        pthread_mutex_unlock(&old->domains_lock);
+    }
+    if (view) {
+        pthread_mutex_lock(&view->domains_lock);
+        attach(d,view);
+        pthread_mutex_unlock(&view->domains_lock);
+    }
+    md_mount_namespace_release(old);
+}
 struct md_guest_domain *md_domain_fork(struct md_guest_domain *d, int shared) {
     if (!d) return NULL;
     if (shared) { d->owners++; md_domain_pin(d); return d; }
     struct md_guest_domain *copy = md_domain_new();
     if (!copy) return NULL;
+    struct md_mount_namespace *view=d->mounts;
+    if (view) pthread_mutex_lock(&view->domains_lock);
     pthread_mutex_lock(&d->lock);
     copy->guest_root = d->guest_root;
     copy->cwd_origin=md_fs_anchor_retain(d->cwd_origin);
@@ -56,10 +85,13 @@ struct md_guest_domain *md_domain_fork(struct md_guest_domain *d, int shared) {
         int lifetime=md_task_lifetime_copy(&copy->root_task,&d->root_task);
         if (d->cwd >= 0) copy->cwd = fcntl(d->cwd, F_DUPFD_CLOEXEC, 0);
         if (copy->root < 0 || lifetime || (d->cwd >= 0 && copy->cwd < 0)) {
-            pthread_mutex_unlock(&d->lock); md_domain_release(copy); return NULL;
+            pthread_mutex_unlock(&d->lock);
+            if (view) pthread_mutex_unlock(&view->domains_lock);
+            md_domain_release(copy); return NULL;
         }
     }
     pthread_mutex_unlock(&d->lock);
+    if (view) { attach(copy,view); pthread_mutex_unlock(&view->domains_lock); }
     return copy;
 }
 void md_domain_release(struct md_guest_domain *d) {
@@ -71,6 +103,7 @@ void md_domain_pin(struct md_guest_domain *d) {
 }
 void md_domain_unpin(struct md_guest_domain *d) {
     if (!d || atomic_fetch_sub_explicit(&d->refs, 1, memory_order_acq_rel) != 1) return;
+    md_domain_bind_mounts(d,NULL);
     if (d->root >= 0) close(d->root);
     if (d->cwd >= 0) close(d->cwd);
     md_task_lifetime_close(&d->root_task);
@@ -142,6 +175,46 @@ int md_domain_set_root(struct md_guest_domain *d, const struct md_fs_location *r
     pthread_mutex_unlock(&d->lock); return error;
 }
 int md_domain_restricted(const struct md_guest_domain *d) { return d && d->root >= 0; }
+void md_domain_relocate_root(struct md_guest_domain *d, const struct md_fs_location *old,
+        const struct md_fs_location *next, const struct md_fs_anchor *old_cwd,
+        struct md_fs_anchor *next_cwd) {
+    if (!d) return;
+    struct md_fs_anchor *retired=NULL;
+    pthread_mutex_lock(&d->lock);
+    if (d->root<0) {
+        int state=atomic_load_explicit(&d->path_state,memory_order_relaxed);
+        if (d->guest_root.mount==old->mount && !strcmp(d->guest_root.object,old->object)) {
+            d->guest_root=*next; state|=ROOT_SET;
+        }
+        if (md_fs_anchor_same(d->cwd_origin,old_cwd)) {
+            retired=d->cwd_origin; d->cwd_origin=md_fs_anchor_retain(next_cwd); state|=CWD_SET;
+        }
+        atomic_store_explicit(&d->path_state,state,memory_order_release);
+    }
+    pthread_mutex_unlock(&d->lock);
+    md_fs_anchor_release(retired);
+}
+void md_domain_relocate_roots(struct md_mount_namespace *view, const struct md_fs_location *old,
+        const struct md_fs_location *next, const struct md_fs_anchor *old_cwd,
+        struct md_fs_anchor *next_cwd) {
+    if (!view) return;
+    pthread_mutex_lock(&view->domains_lock);
+    for (struct md_guest_domain *d=view->domains;d;d=d->next)
+        md_domain_relocate_root(d,old,next,old_cwd,next_cwd);
+    pthread_mutex_unlock(&view->domains_lock);
+}
+int md_domain_mount_root_used(struct md_mount_namespace *view, unsigned mount) {
+    if (!view || !mount) return 0;
+    int used=0;
+    pthread_mutex_lock(&view->domains_lock);
+    for (struct md_guest_domain *d=view->domains;d && !used;d=d->next) {
+        pthread_mutex_lock(&d->lock);
+        used=d->root<0 && d->guest_root.mount==mount;
+        pthread_mutex_unlock(&d->lock);
+    }
+    pthread_mutex_unlock(&view->domains_lock);
+    return used;
+}
 int md_domain_restrict(struct md_guest_domain *d, pid_t pid, const char *path) {
     if (!d || d->root >= 0 || md_domain_scoped(d)) return -EPERM;
     /* The root contract admits a process-owned proc directory.

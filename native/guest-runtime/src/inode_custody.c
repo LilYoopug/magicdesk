@@ -20,6 +20,12 @@ _Static_assert(sizeof(struct entry)==40 && sizeof(struct manifest)==32+40*(MDI_S
 static size_t manifest_size(unsigned count) {
     return offsetof(struct manifest,entries)+count*sizeof(struct entry);
 }
+unsigned md_inode_custody_rights(const struct md_inode_lifetime *owner) {
+    unsigned count=2;
+    for (unsigned i=1;i<MDI_SOURCES;++i)
+        if (owner->sources[i]>=0 || owner->source_leases[i]>=0) count+=2;
+    return count;
+}
 void md_inode_custody_parcel_close(struct md_inode_custody_parcel *p) {
     if (!p) return;
     unsigned n=p->count>MD_INODE_CUSTODY_FDS ? MD_INODE_CUSTODY_FDS : p->count;

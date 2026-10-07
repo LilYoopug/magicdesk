@@ -6,6 +6,7 @@
 #include <sched.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -109,9 +110,40 @@ static void contract(void) {
     assert(!md_resources_release(NULL, &child));
     assert(!md_resources_release(NULL, &parent));
 }
+static void root_is(struct md_guest_domain *fs, const struct md_fs_location *expected) {
+    struct md_fs_location root; struct md_fs_anchor *cwd=NULL;
+    md_domain_paths(fs,&root,&cwd);
+    assert(root.mount==expected->mount && !strcmp(root.object,expected->object));
+    md_fs_anchor_release(cwd);
+}
+static void pending_root_relocation(void) {
+    struct md_mount_namespace *view=md_mount_namespace_new(), *other=md_mount_namespace_new();
+    assert(view && other);
+    struct md_task_resources parent, child;
+    assert(!md_resources_init(&parent,view));
+    const struct md_fs_location old={.mount=71,.object="11111111111111111111111111111111"};
+    const struct md_fs_location next={.mount=72,.object="22222222222222222222222222222222"};
+    assert(!md_domain_set_root(parent.fs,&old));
+    assert(!md_resources_fork(&parent,CLONE_FS,&child));
+    struct md_resource_change pending;
+    assert(!md_resources_unshare_prepare(&child,CLONE_FS,&pending));
+    assert(pending.next.fs && pending.next.fs!=parent.fs);
+    struct md_guest_domain *forked=md_domain_fork(parent.fs,0); assert(forked);
+    struct md_guest_domain *isolated=md_domain_fork(parent.fs,0); assert(isolated);
+    md_domain_bind_mounts(isolated,other);
+    /* Neither candidate has a task registry entry. Root relocation must cover
+     * copied-but-unpublished contexts, without touching another namespace. */
+    md_domain_relocate_roots(view,&old,&next,NULL,NULL);
+    root_is(parent.fs,&next); root_is(pending.next.fs,&next); root_is(forked,&next);
+    root_is(isolated,&old);
+    assert(!md_resources_unshare_finish(NULL,&child,&pending,0)); root_is(child.fs,&next);
+    md_domain_release(forked); md_domain_release(isolated);
+    assert(!md_resources_release(NULL,&child)); assert(!md_resources_release(NULL,&parent));
+    md_mount_namespace_release(view); md_mount_namespace_release(other);
+}
 int main(void) {
     alarm(60);
-    unsigned long spaces[] = {CLONE_NEWUSER, CLONE_NEWNS, CLONE_NEWUTS,
+    unsigned long spaces[] = {CLONE_NEWUSER, CLONE_NEWUTS,
         CLONE_NEWIPC, CLONE_NEWPID, CLONE_NEWNET, CLONE_NEWCGROUP};
     struct md_task_resources r; assert(!md_resources_init(&r,NULL));
     for (unsigned i = 0; i < sizeof(spaces)/sizeof(*spaces); i++) {
@@ -121,10 +153,18 @@ int main(void) {
         assert(!change.next.fs && !change.next.sem_undo);
     }
     struct md_resource_change change;
+    assert(md_resources_clone_supported(CLONE_NEWNS));
+    assert(!md_resources_clone_supported(CLONE_NEWNS|CLONE_FS));
+    assert(md_resources_unshare_prepare(&r,CLONE_NEWNS,&change)==-ENOTSUP);
+    r.mounts=md_mount_namespace_new(); assert(r.mounts);
+    assert(!md_resources_unshare_prepare(&r,CLONE_NEWNS,&change));
+    assert(change.copy_mounts && !change.next.fs && !change.next.mounts);
+    assert(md_resources_unshare_finish(NULL,&r,&change,0)==-EINVAL);
     assert(md_resources_unshare_prepare(&r, 1UL << 63, &change) == -EINVAL);
     assert(!md_resources_release(NULL, &r));
     int before = descriptors();
     for (unsigned i = 0; i < 100; i++) contract();
+    for (unsigned i = 0; i < 100; i++) pending_root_relocation();
     nonleader_root();
     assert(descriptors() == before);
     test_fd_origins();

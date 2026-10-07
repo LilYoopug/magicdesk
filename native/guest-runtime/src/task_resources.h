@@ -15,6 +15,7 @@ struct md_task_resources {
 };
 struct md_resource_change {
     struct md_task_resources next;
+    int copy_mounts;
 };
 
 int md_resources_init(struct md_task_resources *, struct md_mount_namespace *);

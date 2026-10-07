@@ -109,7 +109,8 @@ int md_fs_mount_table(struct md_filesystem *fs, unsigned info, unsigned flags) {
             const struct md_view_mount *m=fs->native_root->mount;
             entry(stream,info,m->id,m->parent ? m->parent->id : fs->mounts->root_id,
                 root.st_dev,"/","none","attachment",md_view_readonly(m));
-        } else entry(stream,info,fs->mounts->root_id,fs->mounts->root_id,root.st_dev,"/","guestfs","guest",fs->store->readonly);
+        } else entry(stream,info,fs->mounts->root_id,fs->mounts->root_id,root.st_dev,"/","guestfs","guest",
+            fs->store->readonly || (md_mount_policy_flags(&fs->mounts->root_policy)&MD_MOUNT_READONLY));
         if (!fs->store->root_id && !fs->native_root) {
             r=native_entries(fs,stream,info,&dev_id);
             if (!r) entry(stream,info,fs->mounts->shm_id,dev_id,root.st_dev,"/dev/shm","guestfs","guest",fs->store->readonly);
@@ -118,10 +119,12 @@ int md_fs_mount_table(struct md_filesystem *fs, unsigned info, unsigned flags) {
     struct md_fs_mounts *tree=fs->mounts ? fs->mounts->tree : NULL;
     if (tree) for (unsigned i=0; !r && i<tree->count; ++i) {
         const struct md_view_mount *m=&tree->mounts[i];
+        if (m->detached) continue;
         char path[PATH_MAX]; r=md_view_path(fs,m->target,m->parent,path,sizeof(path));
         if (r == -ENOENT && (fs->store->root_id || fs->native_root)) { r=0; continue; }
         if (!r) entry(stream,info,m->id,m->parent ? m->parent->id : fs->mounts->root_id,
-            m->native.st_dev,path,"none","attachment",md_view_readonly(m));
+            m->native.st_dev,path,md_view_inode(m) ? "guestfs" : "none",
+            md_view_inode(m) ? "guest" : "attachment",md_view_readonly(m));
     }
     if (!r && (fflush(stream) || ferror(stream))) r=-EIO;
     int readable=-1;

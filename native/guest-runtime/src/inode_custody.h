@@ -8,6 +8,7 @@ enum { MD_INODE_CUSTODY_FDS=512 };
  * SQLite handles or paths. Larger vectors need bounded transport chunks. */
 struct md_inode_custody_parcel { unsigned count; int fd[MD_INODE_CUSTODY_FDS]; };
 void md_inode_custody_parcel_close(struct md_inode_custody_parcel *);
+unsigned md_inode_custody_rights(const struct md_inode_lifetime *);
 /* Worker-only snapshot of currently loaded sources. Output must be empty.
  * Duplicates existing descriptions/locks; never reopens or changes flock state.
  * Local references and ordinary IO do not use this cold publication path. */

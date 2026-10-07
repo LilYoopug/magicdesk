@@ -2,6 +2,7 @@
 #include "event_wait.h"
 #include "fs_rpc.h"
 #include "fs_worker.h"
+#include "mount_copy_service.h"
 #include "fs_engine.h"
 #include "command_access.h"
 #include "fs_mounts.h"
@@ -204,6 +205,7 @@ struct thread {
     struct metadata_operation metadata;
     struct md_task_resources resources;
     struct md_resource_change resource_change;
+    struct md_mount_copy_request *mount_copy;
     struct md_fd_order fd_order;
     struct md_fs_order fs_order;
     struct md_fs_anchor *fd_origin;
@@ -262,6 +264,7 @@ static unsigned group_stops, group_wakes, raced_wakes;
 static const char *admitted_path;
 static struct md_fs_worker *filesystem;
 static struct md_fs_buffer_service *buffer_service;
+static struct md_mount_copy_service *mount_copy_service;
 static struct md_ipc_origins *origin_service;
 static struct md_shm *shm;
 static struct md_task_helpers *helpers;
@@ -382,6 +385,7 @@ static void cleanup(void) {
     if (socket_events>=0) close(socket_events);
     socket_events=-1;
     if (md_fs_worker_stop(filesystem)) _Exit(125);
+    md_mount_copy_service_destroy(mount_copy_service); mount_copy_service=NULL;
     md_fs_buffer_service_destroy(buffer_service); buffer_service=NULL;
     md_ipc_origins_destroy(origin_service); origin_service=NULL;
     filesystem = NULL;
@@ -1500,6 +1504,7 @@ static void domain_path_call(struct thread *t, struct user_pt_regs *r) {
     domain_path_load(t);
 }
 static void fd_discard(struct thread *t) {
+    md_mount_copy_cancel(&t->mount_copy);
     if (t->fd_task) {
         md_fs_buffer_cancel(&t->buffer_call);
         t->fd_task=t->fd_running=0;
@@ -1537,6 +1542,8 @@ static void fd_finish(struct thread *t, long result) {
     int exec=nr==SYS_execve || nr==SYS_execveat;
     if (exec || nr==SYS_unshare || (nr==SYS_close_range && (t->fd_registers.regs[2]&CLOSE_RANGE_UNSHARE)))
         CHECK(!md_resources_unshare_finish(ipc,&t->resources,&t->resource_change,result));
+    if (nr==SYS_clone && t->resource_change.copy_mounts)
+        CHECK(!md_resources_unshare_finish(ipc,&t->resources,&t->resource_change,-ECANCELED));
     if (exec && !result) md_fd_origins_exec(t->resources.files);
     if (t->fd_cwd && nr!=SYS_openat && !result)
         CHECK(!md_domain_set_cwd(t->fs_order.fs,md_domain_restricted(t->fs_order.fs) ? NULL : t->fd_origin));
@@ -1546,13 +1553,25 @@ static void fd_finish(struct thread *t, long result) {
     CHECK(!md_fd_order_complete(&t->fd_order));
     t->fd_running=0; t->fd_cwd=0; t->fd_capture=0;
 }
+static void fd_native_start(struct thread *t);
+static void mount_copy_complete(struct md_mount_copy_request *request, int actor, int error) {
+    struct thread *t=find_thread(actor);
+    if (!t || t->mount_copy!=request) return;
+    t->mount_copy=NULL;
+    if (!error) error=md_mount_copy_take(request,&t->resource_change.next.mounts,&t->resource_change.next.fs);
+    if (error) {
+        CHECK(!md_resources_unshare_finish(ipc,&t->resources,&t->resource_change,error));
+        fd_discard(t); return_value(t,&t->fd_registers,error); return;
+    }
+    fd_native_start(t);
+}
 static void fd_start(struct thread *t) {
     if (md_fd_order_state(&t->fd_order)==MD_RESOURCE_ORDER_READY)
         CHECK(!md_fd_order_start(&t->fd_order));
     struct user_pt_regs *r=&t->fd_registers;
     int needs_fs=t->fd_job==MD_FD_INPUT ? (int)r->regs[2]==AT_FDCWD || (int)r->regs[3]==AT_FDCWD
         : !t->fd_job && (t->fd_cwd || r->regs[8]==SYS_clone
-            || (r->regs[8]==SYS_unshare && (r->regs[0]&CLONE_FS)));
+            || (r->regs[8]==SYS_unshare && (r->regs[0]&(CLONE_FS|CLONE_NEWNS))));
     if (needs_fs) {
         if (!t->fs_order.fs) {
             int ready=md_fs_order_begin(t->resources.fs,&t->fs_order,fd_wakeup);
@@ -1584,13 +1603,30 @@ static void fd_start(struct thread *t) {
         if (set_registers(t->pid,r)) resume(t->pid,0);
         return;
     }
-    unsigned long args[6];
-    for (unsigned i=0;i<6;++i) args[i]=r->regs[i];
     int error=0;
     if (r->regs[8]==SYS_execve || r->regs[8]==SYS_execveat || r->regs[8]==SYS_unshare
             || (r->regs[8]==SYS_close_range && (r->regs[2]&CLOSE_RANGE_UNSHARE)))
         error=md_resources_unshare_prepare(&t->resources,r->regs[8]==SYS_unshare ? r->regs[0] : CLONE_FILES,
             &t->resource_change);
+    if (r->regs[8]==SYS_clone && (r->regs[0]&CLONE_NEWNS))
+        t->resource_change.copy_mounts=1;
+    if (!error && t->resource_change.copy_mounts) {
+        error=md_mount_copy_submit(mount_copy_service,t->pid,t->resources.mounts,t->resources.fs,&t->mount_copy);
+        /* EVENT_WAIT: worker publishes an independent mount/FS candidate;
+         * terminal cancellation retires it without changing the task's view. */
+        if (!error) return;
+    }
+    if (error) {
+        CHECK(!md_resources_unshare_finish(ipc,&t->resources,&t->resource_change,error));
+        fd_discard(t); return_value(t,r,error); return;
+    }
+    fd_native_start(t);
+}
+static void fd_native_start(struct thread *t) {
+    struct user_pt_regs *r=&t->fd_registers;
+    unsigned long args[6];
+    for (unsigned i=0;i<6;++i) args[i]=r->regs[i];
+    int error=0;
     if (!error) error=md_fd_mutation_prepare(t->resources.files,r->regs[8],args,&t->fd_mutation);
     if (!error && t->fd_cwd && r->regs[8]==SYS_fchdir)
         t->fd_origin=md_fd_origins_get(t->resources.files,(int)r->regs[0],NULL);
@@ -1613,6 +1649,12 @@ static void fd_start(struct thread *t) {
         fd_discard(t); return_value(t,r,error); return;
     }
     if (r->regs[8]==SYS_clone) { t->original=*r; t->phase=OBSERVING; }
+    if (t->resource_change.copy_mounts) {
+        struct user_pt_regs native=*r;
+        native.regs[0]&=~(uint64_t)CLONE_NEWNS;
+        if (r->regs[8]==SYS_unshare) native.regs[0]|=CLONE_FS;
+        if (!set_registers(t->pid,&native)) return;
+    }
     t->fd_running=1; resume(t->pid,0);
 }
 static void fd_begin(struct thread *t, const struct user_pt_regs *r, unsigned operation) {
@@ -2442,6 +2484,9 @@ static int domain_call(struct thread *t, struct user_pt_regs *r, unsigned long c
     }
     if (nr == SYS_unshare) {
         CHECK(t->phase == IDLE);
+        if ((r->regs[0]&CLONE_NEWNS) && !md_identity_capable(&t->identity,CAP_SYS_ADMIN)) {
+            return_value(t,r,-EPERM); return 1;
+        }
         fd_begin(t,r,0);
         return 1;
     }
@@ -2450,6 +2495,9 @@ static int domain_call(struct thread *t, struct user_pt_regs *r, unsigned long c
     if (nr == SYS_clone) {
         if (!md_resources_clone_supported(r->regs[0])) {
             return_value(t, r, -EINVAL); return 1;
+        }
+        if ((r->regs[0]&CLONE_NEWNS) && !md_identity_capable(&t->identity,CAP_SYS_ADMIN)) {
+            return_value(t,r,-EPERM); return 1;
         }
         t->cloning = r->regs[0]; return 0;
     }
@@ -2970,6 +3018,7 @@ int main(int argc, char **argv) {
         CHECK(!md_task_registry_publish(tasks,leader,leader,&thread(leader)->identity,&thread(leader)->resources));
         broker = md_broker_create(filesystem, statistics != NULL, delegated_notification); CHECK(broker);
         buffer_service=md_fs_buffer_service_new(filesystem,tasks,fd_wakeup,buffer_complete); CHECK(buffer_service);
+        CHECK(!md_mount_copy_service_create(filesystem,mount_copy_complete,&mount_copy_service));
         const char *program = "", *cwd = "/";
         for (int i = argument+1; i+1 < argc; ++i) {
             if (!strcmp(argv[i], "--cwd")) cwd = argv[++i];
@@ -3091,6 +3140,8 @@ int main(int argc, char **argv) {
             c->shm_space = md_shm_space_fork(shm,t->shm_space,!!(t->cloning & CLONE_VM)); CHECK(c->shm_space);
             CHECK(!md_resources_release(ipc, &c->resources));
             if (t->resources.fs) CHECK(!md_resources_fork(&t->resources, t->cloning, &c->resources));
+            if (t->resource_change.copy_mounts)
+                CHECK(!md_resources_unshare_finish(ipc,&c->resources,&t->resource_change,0));
             if (t->fd_running) fd_finish(t,(long)child);
             md_memory_release(c->memory);
             c->memory = md_memory_fork(t->memory, !!(t->cloning & CLONE_VM)); CHECK(c->memory);

@@ -36,7 +36,15 @@ int md_fs_request_validate(const struct md_fs_request *q) {
     if (q->resolve && q->operation != MD_FS_OPEN) return -EINVAL;
     if (q->value_size>MD_FS_VALUE_MAX || (q->value_size && !q->value)
             || (q->value_size && q->operation!=MD_FS_XATTR && q->operation!=MD_FS_FXATTR
-                && q->operation!=MD_FS_SETACL)) return -EINVAL;
+                && q->operation!=MD_FS_SETACL && q->operation!=MD_FS_MOUNT)) return -EINVAL;
+    if (q->operation==MD_FS_MOUNT) {
+        int pair=q->mode==MD_FS_MOUNT_BIND || q->mode==MD_FS_MOUNT_PIVOT || q->mode==MD_FS_MOUNT_MOVE;
+        if (!*a || q->mode<MD_FS_MOUNT_BIND || q->mode>MD_FS_MOUNT_MOVE
+                || q->capacity || q->offset || q->value_size>PATH_MAX
+                || (pair ? !*b : *b || (descriptors&2))
+                || (q->mode!=MD_FS_MOUNT_TMPFS && q->value_size)) return -EINVAL;
+        return q->value_size && strnlen(q->value,q->value_size)!=q->value_size-1 ? -EINVAL : 0;
+    }
     if (q->operation==MD_FS_XATTR || q->operation==MD_FS_FXATTR) {
         int descriptor=q->operation==MD_FS_FXATTR, set=q->mode==MD_FS_XATTR_SET;
         return (descriptors&2) || (descriptor ? descriptors!=1 || *a : !*a && descriptors!=1)

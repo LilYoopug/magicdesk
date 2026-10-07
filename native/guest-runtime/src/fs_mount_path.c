@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "fs_mount_internal.h"
 #include "inode_internal.h"
+#include "fs_storage.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/openat2.h>
@@ -22,11 +23,13 @@ static int root(struct md_filesystem *fs) {
 static int duplicate(int fd) { int copy = fcntl(fd, F_DUPFD_CLOEXEC, 3); return copy < 0 ? -errno : copy; }
 static int component(struct md_filesystem *fs, struct md_mount_namespace *view,
         struct md_view_mount *mount, int fd, const char *name) {
-    if (!mount) {
-        const char *root_id=fs->store->root_id;
-        if (view!=fs->mounts) fs->store->root_id=NULL;
-        int next=md_inode_open(fs->store,fd,name,O_PATH|O_NOFOLLOW|O_CLOEXEC,0);
-        fs->store->root_id=root_id;
+    if (md_view_inode(mount)) {
+        struct md_fs_storage_scope scope;
+        int r=md_fs_storage_enter(fs,mount,&scope);
+        if (r) return r;
+        if (view!=fs->mounts) scope.store->root_id=NULL;
+        int next=md_inode_open(scope.store,fd,name,O_PATH|O_NOFOLLOW|O_CLOEXEC,0);
+        md_fs_storage_leave(&scope);
         return next;
     }
     int next = openat(fd, name, O_PATH | O_NOFOLLOW | O_CLOEXEC);
@@ -39,13 +42,29 @@ static int enter(struct md_mount_namespace *view, int *fd, struct md_view_mount 
     if (fstat(*fd, &st)) return -errno;
     for (unsigned i = 0; i < tree->count; ++i) {
         struct md_view_mount *m = &tree->mounts[i];
-        if (m->parent != *mount || !md_view_same(&st, &m->guest)) continue;
+        if (m->detached || m->parent != *mount || !md_view_same(&st, &m->guest)) continue;
         if (resolve & RESOLVE_NO_XDEV) return -EXDEV;
         int copy = duplicate(m->source);
         if (copy < 0) return copy;
-        close(*fd); *fd = copy; *mount = m; break;
+        close(*fd); *fd = copy; *mount = m;
+        return enter(view,fd,mount,resolve);
     }
     return 0;
+}
+static int parent(struct md_filesystem *fs, struct md_mount_namespace *view,
+        struct md_view_mount **mount, int fd, uint64_t resolve) {
+    struct stat st;
+    if (fstat(fd,&st)) return -errno;
+    /* A stack can contain several mounted roots at the same dentry. Leave all
+     * of them before taking one directory step; never use a source's parent. */
+    while (*mount && md_view_same(&st,&(*mount)->native)) {
+        if (fs->native_root && view==fs->mounts && *mount==fs->native_root->mount
+                && md_view_same(&st,&fs->native_root->identity)) return duplicate(fd);
+        if ((*mount)->detached) return duplicate(fd);
+        if (resolve&RESOLVE_NO_XDEV) return -EXDEV;
+        fd=(*mount)->target; st=(*mount)->guest; *mount=(*mount)->parent;
+    }
+    return component(fs,view,*mount,fd,"..");
 }
 int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *origin,
         const char *path, int follow, int missing,
@@ -73,7 +92,7 @@ int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *
         if (!r) mount=object->mount;
         if (r == -EXDEV) r = 0;
     }
-    if (!r && from_root) r = enter(view, &fd, &mount, resolve);
+    if (!r && from_root && !fs->native_root) r = enter(view, &fd, &mount, resolve);
     int boundary_fd = !r ? duplicate(fd) : -1;
     struct md_view_mount *boundary_mount = mount;
     struct md_mount_namespace *boundary_view = view;
@@ -99,20 +118,18 @@ int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *
         if (!strcmp(name, "..") && (resolve & (RESOLVE_BENEATH | RESOLVE_IN_ROOT)) && view == boundary_view && mount == boundary_mount && md_view_same(&current, &boundary)) {
             if (resolve & RESOLVE_BENEATH) { r = -EXDEV; break; }
             next = duplicate(fd);
-        } else if (!strcmp(name,"..") && fs->native_root && mount==fs->native_root->mount
+        } else if (!strcmp(name,"..") && fs->native_root && view==fs->mounts && mount==fs->native_root->mount
                 && md_view_same(&current,&fs->native_root->identity)) {
             next = duplicate(fd);
         } else if (!strcmp(name, "..") && mount && md_view_same(&current, &mount->native)) {
-            if (resolve & RESOLVE_NO_XDEV) { r = -EXDEV; break; }
-            next = component(fs, view, mount->parent, mount->target, "..");
-            next_mount = mount->parent;
-        } else if (!mount) {
+            next = parent(fs,view,&next_mount,fd,resolve);
+        } else if (md_view_inode(mount)) {
             /* The component walker must retain the unconsumed suffix when a
              * logical path crosses into a task-owned host filesystem. */
             struct md_inode_boundary *boundary=fs->store->boundary;
             const char *previous_suffix=boundary ? boundary->suffix : NULL;
             if (boundary) boundary->suffix=todo;
-            next = component(fs, view, NULL, fd, name);
+            next = component(fs, view, mount, fd, name);
             if (boundary) boundary->suffix=previous_suffix;
             if (next==-EREMOTE && (resolve&(RESOLVE_NO_XDEV|RESOLVE_IN_ROOT|RESOLVE_BENEATH))) next=-EXDEV;
             if (next==-EREMOTE && (resolve&(RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS))) next=-ENOTSUP;
@@ -143,6 +160,7 @@ int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *
                 fd = resolve & RESOLVE_IN_ROOT ? duplicate(boundary_fd) : root(fs);
                 view=root_view; mount=root_mount;
                 if (fd < 0) r = fd;
+                else if (!(resolve&RESOLVE_IN_ROOT) && !fs->native_root) r=enter(view,&fd,&mount,resolve);
             }
             continue;
         }

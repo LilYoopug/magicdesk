@@ -403,34 +403,37 @@ int mdi_allocate(struct md_inode_store *s, mode_t kind, mode_t mode, int flags, 
     int r = mdi_random_id(id);
     return r ? r : make_object(s, id, kind, mode, flags, target, parent, node, fd);
 }
-static int store_open(const char *directory, int create, int exclusive, struct md_inode_store **out) {
+static int store_open(const char *directory, int create, int exclusive,
+        struct md_inode_lifetime *retained, struct md_inode_store **out) {
     if (!out) return -EFAULT;
     *out = NULL;
     if (!directory || directory[0] != '/') return -EINVAL;
     char file[PATH_MAX];
     if (snprintf(file, sizeof(file), "%s/namespace.db", directory) >= (int)sizeof(file)) return -ENAMETOOLONG;
     if (create && mkdir(directory, 0700)) return -errno;
-    int root = open(directory, O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int root = retained ? fcntl(retained->root,F_DUPFD_CLOEXEC,3)
+        : open(directory, O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (root < 0) return -errno;
     /* Lifetime admission is independent of the short objects-directory transaction lock. */
-    if (flock(root, (exclusive ? LOCK_EX : LOCK_SH) | LOCK_NB)) {
+    if (!retained && flock(root, (exclusive ? LOCK_EX : LOCK_SH) | LOCK_NB)) {
         int error = errno == EWOULDBLOCK ? -EBUSY : -errno;
         close(root); return error;
     }
     struct stat named, opened;
-    if (fstat(root, &opened) || lstat(directory, &named)
-            || !opened.st_nlink || named.st_dev != opened.st_dev || named.st_ino != opened.st_ino) {
+    if (fstat(root, &opened) || (!retained && (lstat(directory, &named)
+            || !opened.st_nlink || named.st_dev != opened.st_dev || named.st_ino != opened.st_ino))) {
         close(root); return -ESTALE;
     }
     int r = create && mkdirat(root, "objects", 0700) ? -errno : 0;
     struct md_inode_store *s = calloc(1, sizeof(*s));
     if (!s) { close(root); return -ENOMEM; }
-    s->lifetime = mdi_lifetime_new(root, &opened);
+    s->lifetime = retained ? md_inode_lifetime_retain(retained) : mdi_lifetime_new(root, &opened);
     if (!s->lifetime) { close(root); free(s); return -ENOMEM; }
+    if (retained) { close(root); root=retained->root; }
     s->objects = s->watch_presence = -1;
     if (!r && (s->objects = openat(root, "objects", O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)) < 0) r = -errno;
     if (!r) r = store_lock(s);
-    if (!r) r = mdi_sql_error(sqlite3_open_v2(file, &s->db,
+    if (!r) r = retained ? mdi_sqlite_reconnect(root,&s->db) : mdi_sql_error(sqlite3_open_v2(file, &s->db,
         SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_NOFOLLOW
             | (create ? SQLITE_OPEN_CREATE : 0), NULL));
     if (!r) r = mdi_sql_error(sqlite3_extended_result_codes(s->db, 1));
@@ -537,10 +540,16 @@ static int store_open(const char *directory, int create, int exclusive, struct m
     return r;
 }
 int md_inode_store_open(const char *directory, int create, struct md_inode_store **out) {
-    return store_open(directory, create, 0, out);
+    return store_open(directory, create, 0, NULL, out);
 }
 int md_inode_store_open_exclusive(const char *directory, struct md_inode_store **out) {
-    return store_open(directory, 0, 1, out);
+    return store_open(directory, 0, 1, NULL, out);
+}
+int md_inode_store_reconnect(struct md_inode_lifetime *owner, struct md_inode_store **out) {
+    if (!owner) return -EINVAL;
+    char directory[64];
+    snprintf(directory,sizeof(directory),"/proc/self/fd/%d/.",owner->root);
+    return store_open(directory,0,0,owner,out);
 }
 void md_inode_store_close(struct md_inode_store *s) {
     if (!s) return;

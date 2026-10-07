@@ -20,13 +20,17 @@ enum md_fs_operation {
     MD_FS_GETACL, MD_FS_SETACL, MD_FS_REMOVEACL, MD_FS_LISTATTR,
     MD_FS_XATTR_OPEN, MD_FS_MOUNT_TABLE, MD_FS_NATIVE_MOUNT, MD_FS_MKNOD,
     MD_FS_CHROOT, MD_FS_UMASK, MD_FS_STATFS, MD_FS_WATCH_PATH,
-    MD_FS_TASK_PATH, MD_FS_XATTR, MD_FS_FXATTR, MD_FS_IPC_PEER, MD_FS_LAST = MD_FS_IPC_PEER
+    MD_FS_TASK_PATH, MD_FS_XATTR, MD_FS_FXATTR, MD_FS_IPC_PEER, MD_FS_MOUNT, MD_FS_LAST = MD_FS_MOUNT
 };
+enum md_fs_mount_operation { MD_FS_MOUNT_BIND=1, MD_FS_MOUNT_REMOUNT,
+    MD_FS_MOUNT_PRIVATE, MD_FS_MOUNT_UMOUNT, MD_FS_MOUNT_TMPFS, MD_FS_MOUNT_PIVOT,
+    MD_FS_MOUNT_MOVE };
 enum { MD_FS_VALUE_MAX=65536, MD_FS_OUTPUT_MAX=MD_IPC_IDENTITY_MAX };
 enum md_fs_xattr { MD_FS_XATTR_GET=1, MD_FS_XATTR_SET, MD_FS_XATTR_LIST, MD_FS_XATTR_REMOVE };
 static inline int md_fs_operation_value(unsigned operation) {
     return operation==MD_FS_XATTR || operation==MD_FS_FXATTR
-        || operation==MD_FS_GETACL || operation==MD_FS_SETACL || operation==MD_FS_IPC_PEER;
+        || operation==MD_FS_GETACL || operation==MD_FS_SETACL || operation==MD_FS_IPC_PEER
+        || operation==MD_FS_MOUNT;
 }
 enum { MD_FS_STAT_MOUNT = 1 };
 enum { MD_FS_REOPEN_MUTABLE=1, MD_FS_REOPEN_NATIVE=2 };

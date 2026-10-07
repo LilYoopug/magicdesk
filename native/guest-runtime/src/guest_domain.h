@@ -29,6 +29,14 @@
 
 /* CLONE_FS-owned root context. Registry pins do not count as task owners. */
 struct md_guest_domain;
+struct md_mount_namespace;
+/* Bind only a private, unpublished context. Fork inherits this membership;
+ * namespace-copy preparation changes it before making the candidate live. */
+void md_domain_bind_mounts(struct md_guest_domain *, struct md_mount_namespace *);
+int md_domain_mount_root_used(struct md_mount_namespace *, unsigned mount);
+void md_domain_relocate_roots(struct md_mount_namespace *, const struct md_fs_location *old,
+        const struct md_fs_location *next, const struct md_fs_anchor *old_cwd,
+        struct md_fs_anchor *next_cwd);
 /* Independent of the CLONE_FILES queue. Operations needing both resources
  * always acquire files first, then filesystem context, and release in reverse. */
 struct md_fs_order {
@@ -51,6 +59,9 @@ int md_domain_scoped(const struct md_guest_domain *);
 void md_domain_paths(struct md_guest_domain *, struct md_fs_location *, struct md_fs_anchor **cwd);
 int md_domain_set_cwd(struct md_guest_domain *, struct md_fs_anchor *);
 int md_domain_set_root(struct md_guest_domain *, const struct md_fs_location *);
+void md_domain_relocate_root(struct md_guest_domain *, const struct md_fs_location *old,
+        const struct md_fs_location *next, const struct md_fs_anchor *old_cwd,
+        struct md_fs_anchor *next_cwd);
 int md_domain_restricted(const struct md_guest_domain *);
 int md_domain_restrict(struct md_guest_domain *, pid_t, const char *);
 int md_domain_chdir_root(struct md_guest_domain *);

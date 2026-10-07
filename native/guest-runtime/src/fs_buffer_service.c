@@ -72,7 +72,7 @@ struct md_fs_buffer_request {
     char path[];
 };
 static int retains_context(const struct md_fs_buffer_request *r) {
-    return r->request.operation==MD_FS_CHROOT || (r->request.operation==MD_FS_TASK_PATH
+    return r->request.operation==MD_FS_CHROOT || r->request.operation==MD_FS_MOUNT || (r->request.operation==MD_FS_TASK_PATH
         && r->request.mode==MD_FS_TASK_FCHDIR);
 }
 void md_fs_buffer_open_release(struct md_fs_buffer_open *o) {
@@ -168,7 +168,7 @@ static int complete(struct md_fs_work *work) {
         r->service->complete(r,r->actor,0);
         return 0;
     }
-    if (r->request.operation==MD_FS_CHROOT) {
+    if (r->request.operation==MD_FS_CHROOT || r->request.operation==MD_FS_MOUNT) {
         if (r->order.fs) {
             int error=md_fs_order_complete(&r->order);
             if (!r->error) r->error=error;

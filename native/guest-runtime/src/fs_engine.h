@@ -7,14 +7,18 @@
 struct md_image_catalogue;
 struct md_fd_exchanges;
 struct md_ofd_orders;
+struct md_fs_storage_cache;
 struct md_fs_statistics { struct md_cost operation[MD_FS_LAST + 1]; };
 /* The worker borrows its store/images and retains an initial mount view.
  * Authenticated task requests borrow their own retained view for dispatch. */
 struct md_filesystem {
     struct md_inode_store *store;
+    struct md_fs_storage_cache *storage;
+    struct md_inode_store *selected_store;
     struct md_image_catalogue *images;
     struct md_mount_namespace *mounts;
     struct md_view_object *native_root;
+    struct md_view_mount *inode_mount;
     struct md_task_registry *tasks;
     struct md_fd_exchanges *exchanges;
     struct md_ofd_orders *cursors;

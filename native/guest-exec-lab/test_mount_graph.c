@@ -3,6 +3,7 @@
 #include "fs_mount_internal.h"
 #include "fs_wire.h"
 #include "event_wait.h"
+#include "mount_topology.h"
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -57,7 +58,7 @@ static struct md_mount_graph_parcel receive_graph(int fd) {
     ready(fd); unsigned count; struct md_fs_rights rights={0};
     assert(md_fs_receive(fd,&count,sizeof(count),&rights)==sizeof(count) && !rights.count);
     assert(count && count<=MD_MOUNT_GRAPH_FDS);
-    struct md_mount_graph_parcel p={0};
+    struct md_mount_graph_parcel p={.fd=calloc(count,sizeof(int))}; assert(p.fd);
     while (p.count<count) {
         ready(fd); char byte;
         assert(md_fs_receive(fd,&byte,1,&rights)==1 && byte=='g' && rights.count
@@ -159,23 +160,24 @@ static void failures(struct md_filesystem *source) {
     struct md_mount_graph_parcel p={0};
     assert(!md_mount_graph_export(source->mounts,&p)); md_mount_graph_parcel_close(&p);
     unsigned before=descriptors();
-    for (unsigned i=0;i<13;++i) {
+    for (unsigned i=0;i<14;++i) {
         assert(!md_mount_graph_export(source->mounts,&p));
         int seals=F_SEAL_WRITE|F_SEAL_GROW|F_SEAL_SHRINK|F_SEAL_SEAL;
         switch (i) {
         case 0: duplicate_manifest(&p,0,0,seals,0); break;
-        case 1: duplicate_manifest(&p,1,2,seals,0); break;
+        case 1: duplicate_manifest(&p,1,UINT32_MAX,seals,0); break;
         case 2: duplicate_manifest(&p,2,MD_FS_MOUNTS_MAX+1,seals,0); break;
         case 3: duplicate_manifest(&p,3,1,seals,0); break;
-        case 4: duplicate_manifest(&p,4,1,seals,0); break;
-        case 5: duplicate_manifest(&p,5,1,seals,0); break;
-        case 6: duplicate_manifest(&p,1,1,seals,1); break;
-        case 7: duplicate_manifest(&p,1,1,seals&~F_SEAL_WRITE,0); break;
-        case 8: { int fd=p.fd[1]; p.fd[1]=p.fd[2]; p.fd[2]=fd; break; }
-        case 9: { int fd=p.fd[3]; p.fd[3]=p.fd[6]; p.fd[6]=fd; break; }
+        case 4: duplicate_manifest(&p,8,1,seals,0); break;
+        case 5: duplicate_manifest(&p,9,UINT32_MAX,seals,0); break;
+        case 6: duplicate_manifest(&p,1,3,seals,1); break;
+        case 7: duplicate_manifest(&p,1,3,seals&~F_SEAL_WRITE,0); break;
+        case 8: { int fd=p.fd[2]; p.fd[2]=p.fd[3]; p.fd[3]=fd; break; }
+        case 9: { int fd=p.fd[4]; p.fd[4]=p.fd[7]; p.fd[7]=fd; break; }
         case 10: close(p.fd[--p.count]); break;
         case 11: assert(!fcntl(p.fd[1],F_SETFD,0)); break;
         case 12: close(p.fd[2]); p.fd[2]=p.fd[1]; break;
+        case 13: duplicate_manifest(&p,8,2,seals,0); break;
         }
         struct md_mount_namespace *view=NULL;
         assert(md_mount_graph_import(&p,&view)<0 && !view && !p.count);
@@ -225,10 +227,33 @@ static void failures(struct md_filesystem *source) {
     alias->parent=NULL; assert(descriptors()==before);
     puts("PASS mount graph rollback: malformed graph/rights, allocation and FD exhaustion, frozen topology identity");
 }
+static void unordered(const char *base) {
+    char directory[PATH_MAX]; path(directory,base,"unordered"); assert(!mkdir(directory,0700));
+    unsigned before=descriptors(); struct md_filesystem fs=filesystem(directory,1);
+    struct md_view_mount *m=fs.mounts->tree->mounts, saved=m[0];
+    m[0]=m[1]; m[1]=saved; m[0].parent=&m[1];
+    unsigned order[MD_FS_MOUNTS_MAX];
+    assert(!md_view_topology_order(fs.mounts->tree,order));
+    assert(order[0]==1 && order[1]==2 && order[2]==0);
+    contents(&fs,"/outer/nested/value",NULL,"value");
+    struct md_mount_graph_parcel p={0}; assert(!md_mount_graph_export(fs.mounts,&p));
+    struct md_filesystem imported={.store=fs.store};
+    assert(!md_mount_graph_import(&p,&imported.mounts));
+    assert(imported.mounts->tree->mounts[0].parent==&imported.mounts->tree->mounts[1]);
+    contents(&imported,"/outer/nested/../parent",NULL,"native");
+    struct md_mount_namespace *copy=NULL; struct md_fs_location root;
+    assert(!md_fs_mounts_copy(&fs,&(struct md_fs_location){0},&copy,&root));
+    assert(copy->tree->mounts[0].parent==&copy->tree->mounts[1]);
+    copy->tree->mounts[1].parent=&copy->tree->mounts[0];
+    assert(md_mount_graph_export(copy,&p)==-ELOOP && !p.count);
+    md_mount_namespace_release(copy); md_fs_mounts_close(&imported); close_filesystem(&fs);
+    assert(descriptors()==before);
+    puts("PASS mount topology: child-before-parent placement, portable graph/copy and cycle rejection");
+}
 static void sizes(const char *base) {
     unsigned before=descriptors();
     struct md_mount_namespace *empty=md_mount_namespace_new(), *received=NULL; assert(empty);
-    struct md_mount_graph_parcel p={0}; assert(!md_mount_graph_export(empty,&p) && p.count==1);
+    struct md_mount_graph_parcel p={0}; assert(!md_mount_graph_export(empty,&p) && p.count==2);
     assert(!md_mount_graph_import(&p,&received) && !received->tree);
     md_mount_namespace_release(empty); md_mount_namespace_release(received);
     char store[PATH_MAX], host[MD_FS_MOUNTS_MAX][PATH_MAX], target[MD_FS_MOUNTS_MAX][32];
@@ -242,7 +267,7 @@ static void sizes(const char *base) {
         entries[i]=(struct md_fs_attachment){host[i],target[i],i&1};
     }
     assert(!md_fs_mounts_open(&fs,entries,MD_FS_MOUNTS_MAX));
-    assert(!md_mount_graph_export(fs.mounts,&p) && p.count==MD_MOUNT_GRAPH_FDS);
+    assert(!md_mount_graph_export(fs.mounts,&p) && p.count==MD_MOUNT_GRAPH_PLACEMENT_FDS);
     received=NULL; assert(!md_mount_graph_import(&p,&received));
     assert(received->tree->count==MD_FS_MOUNTS_MAX);
     for (unsigned i=0;i<MD_FS_MOUNTS_MAX;++i) {
@@ -341,5 +366,5 @@ void test_mount_graph(const char *base) {
     alarm(60); char model[PATH_MAX], peers[PATH_MAX];
     path(model,base,"graph-model"); path(peers,base,"graph-peers");
     assert(!mkdir(model,0700) && !mkdir(peers,0700));
-    models(model); sizes(base); processes(peers); alarm(0);
+    models(model); sizes(base); unordered(base); processes(peers); alarm(0);
 }

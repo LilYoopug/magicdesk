@@ -138,13 +138,49 @@ so copy cost depends on mount count, not the number of previously opened files.
 Only O_PATH references are retained; FIFO reader/writer counts and flock/OFD-lock
 lifetime remain with application descriptions.
 
-Candidate construction is not guest CLONE_NEWNS. Publishing a replacement view
-requires task descriptor/cwd provenance through every kernel lifetime transition.
-Guest namespace creation still fails explicitly.
+Guest clone/unshare with `CLONE_NEWNS` prepares the candidate asynchronously on
+the filesystem worker, under the caller's file-table and FS-context turns.
+The host clone/unshare omits that namespace flag; successful native completion
+publishes the prepared guest view before a child resumes. Unshare also separates
+CLONE_FS state. The copied cwd is rebased only when it belongs to the original
+view; existing descriptors keep their original provenance. Failure or caller
+death releases the candidate without replacing the task's owners. Virtual
+CAP_SYS_ADMIN controls admission; it grants no host capability.
+
+Local, unpublished views support directory/file bind mounts, recursive bind,
+readonly remount, private propagation, move and normal/lazy unmount. Placement
+uses stable slots and a validated acyclic parent graph, independently of slot
+allocation order. Recursive preparation acquires the complete subtree before
+publication. Move preserves mount IDs and open anchors. Lazy detach removes
+lookup visibility while retained descriptors still address the old objects.
+Normal unmount rejects retained anchors, child mounts or roots belonging to
+any FS context in the namespace, including prepared fork/unshare candidates.
+
+`pivot_root` accepts an attached selected root and an attached new root below it.
+The old root is moved to the resolved put_old directory. Root and cwd references
+exactly at the old root move to the new one; other cwd locations and open FDs
+remain unchanged. Namespace-owned weak FS-context membership includes prepared
+fork/unshare candidates, independently of task-registry publication. Each
+context retains its namespace; a short lifecycle lock orders membership and
+root relocation without holding a lock across guest execution. The initial
+unattached base root cannot be pivoted directly. Topology mutation of exported
+views, tmpfs and overlay backends are not yet supported.
+
+Mounted inode filesystems retain backing custody separately from their placement.
+Bind and namespace copies share that custody, not a SQLite connection or mount
+policy. A worker-local storage cache opens an additional connection only on first
+use; the initial-store path needs neither a cache lookup nor an allocation.
+Path traversal, roots, metadata, object IDs and reopen select the mounted store.
+Retained old-view dirfds remain usable after the original worker connection closes.
+The private retained-directory SQLite VFS preserves the lease FD as the directory
+anchor through rename; stock Unix VFS IO, journaling, locking and nofollow opens
+remain in use. Portable graphs retain each distinct mounted store's maintenance
+and loaded-source leases once, including aliases. Imports reconnect under the
+same custody after publisher exit, without trusting the original store path.
 
 ### Shared Mount Policy
 
-Each native attachment owns a `mount_policy`. Local views keep its flags inline,
+Each attachment and the base root own a `mount_policy`. Local views keep flags inline,
 without a descriptor, mapping or extra allocation. Open/reopen, access checks,
 metadata/xattr admission and mount-table output read the same policy. Namespace
 copying captures the current flags into an independent local owner, not a shared
@@ -168,19 +204,25 @@ lifetime, not a background custodian process. Ordinary data IO is unchanged.
 This component transfers policy; the graph parcel below associates that policy
 with source/covered O_PATH references. The verified private transport must bind
 the parcel to its store and message. Atomic flag visibility does not provide
-mount/remount transaction ordering against in-flight namespace operations, and
-does not enable guest namespace creation. Production launch views remain local;
-full cross-launch origin transfer and mutation ownership are separate work.
+mount/remount transaction ordering across workers. Local mutations run on the
+filesystem worker; cross-launch mutable topology needs a separate publication
+contract.
 
 ### Portable Attachment Graph
 
 `mount_graph` explicitly publishes an immutable attachment graph into a sealed
 memfd. Its bounded, pointer-free manifest records parent indices and the kernel
-identities of each source directory, covered directory and policy descriptor.
+identities of each source object, covered object and policy descriptor, including
+the base-root policy. Backing type, detached state and mounted-store identities
+are explicit. Parent
+indices need not precede children; cyclic or out-of-range relationships fail.
 The parcel retains those actual O_PATH references and policy FDs, not paths or
 application data descriptions. Native aliases remain separate mount entries;
 nested mounts retain their exact covered dentry and parent. Replacement of an
-old source pathname cannot redirect the imported graph.
+old source pathname cannot redirect the imported graph. Mounted inode stores
+append deduplicated `inode_custody` parcels; their exact spans and root identities
+belong to the sealed graph. Even a repeated import validates all backing rights
+before reusing a known view. Forwarding retains those original leases.
 
 The sealed manifest's retained device/inode identifies the graph across private
 transfers and forwarding, independently of the publisher's process lifetime.
@@ -195,8 +237,12 @@ mutable object cache.
 Export returns an owned bounded parcel. Import always consumes it and publishes
 a destination only after complete validation. Invalid seals, graph structure,
 FD count/type/identity and allocation/mapping failures close partial resources
-without replacing an existing destination. Empty views transfer only a manifest;
-full views have at most 49 descriptors. Cold publication is lazy. Ordinary
+without replacing an existing destination. Empty views transfer the manifest
+and root policy. Placement needs at most 50 descriptors; each distinct additional
+store adds 2..512 custody descriptors, up to 16 stores. The cold parcel allocates
+only its actual FD count and travels through the existing bounded FD bundles.
+Validation and duplicate-safe cleanup sort descriptor numbers rather than doing
+quadratic scans of expanded vectors. Cold publication is lazy. Ordinary
 unexported views create no manifest and ordinary data IO takes no new path.
 Failed export can retain successfully materialized publication state in its
 source view, but leaves no partial output parcel or changed mount policy.
@@ -207,7 +253,7 @@ Readonly updates use the live policy mappings. This is not shared mutable
 namespace topology, a selected task root/cwd, native mount-ID-map transfer or
 a complete application-origin vector. `fs_origin_transfer` composes graphs with
 backing custody and a message route. A valid graph alone does not authorize
-access to another store or enable guest mount/unshare calls.
+access to another store. Local guest namespace creation has independent admission.
 
 ### Portable Backing Custody
 
@@ -267,8 +313,9 @@ forwarded imports reuse receiver-local mount IDs and object caches while any
 anchor retains that graph. Each worker owns its own cache; copying a namespace
 still makes a distinct graph. Cache-only views are collected after successful
 imports, by explicit collection, or on owner teardown, without periodic scans.
-They retain no store/lower maintenance locks. Backing custody belongs to the
-anchors and releases at their last reference. Anchors survive cache teardown.
+Base-store backing custody belongs to the anchors. Mounted-store custody belongs
+to their graph, so cache collection also releases otherwise unused mounted-store
+leases. Anchors survive cache teardown and retain all required backing owners.
 Different transfers retain independent snapshots of loaded backing sources.
 
 Imported origins use the same anchor constructor, filesystem engine and FD-table
@@ -826,12 +873,13 @@ descriptor-flag calls use their actual results without emulating native data IO.
 
 ## Boundaries
 
-Concurrent named environments and launch-local attachments are not Linux
-namespaces. `CLONE_NEWNS`, `CLONE_NEWUSER`, `CLONE_NEWIPC`, `CLONE_NEWUTS`,
+Concurrent named environments and launch-local attachments are not kernel Linux
+namespaces. Guest `CLONE_NEWNS` has the mount-view contract above;
+`CLONE_NEWUSER`, `CLONE_NEWIPC`, `CLONE_NEWUTS`,
 `CLONE_NEWPID`, `CLONE_NEWNET`, cgroup/time namespaces and `setns` are not
-implemented. Their creation is not reported as successful. General guest
-mount mutation and user-namespace mappings require
-their own resource and authority contracts.
+implemented. Their creation is not reported as successful. Shared mutable mount
+publication, additional filesystem backends and user-namespace mappings remain
+separate contracts.
 
 Guest filesystem calls use mapped requests, not private per-call RPC sockets.
 The admitted table-owned export/return endpoints have explicit table lifetime;

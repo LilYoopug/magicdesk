@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "fs_mount_internal.h"
 #include "inode_internal.h"
+#include "fs_storage.h"
 #include "linux_abi.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -10,6 +11,8 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+static void inode(struct md_filesystem *, struct md_mount_namespace *, struct md_view_mount *,
+        const struct md_fs_request *, struct md_fs_result *, const struct md_fs_output *);
 static int writable(unsigned flags) {
     return !(flags & O_PATH) && (flags & (O_ACCMODE | O_TRUNC | O_CREAT));
 }
@@ -36,7 +39,8 @@ static int record(struct md_filesystem *fs, int fd, struct md_view_mount *mount,
 static int descriptor(struct md_filesystem *fs, const struct md_fs_request *q,
         struct md_fs_result *out, const struct md_fs_output *output) {
     const struct md_fs_anchor *origin=q->origin[0];
-    if (origin && !origin->mount) return 0;
+    if (origin && md_view_inode(origin->mount)
+            && !(origin->mount && q->operation==MD_FS_OBJECT_ID)) return 0;
     struct md_filesystem owner=*fs;
     if (origin) owner.mounts=origin->view;
     struct md_view_object *p = NULL;
@@ -48,6 +52,14 @@ static int descriptor(struct md_filesystem *fs, const struct md_fs_request *q,
     } else r=md_view_identity(fs,q->directory[0],&p);
     if (r == -EXDEV) return 0;
     if (r) { out->error = r; return 1; }
+    if (md_view_inode(p->mount) && q->operation!=MD_FS_OBJECT_ID) {
+        if (q->operation==MD_FS_PATH) {
+            out->error=!output || !output->data ? -EINVAL
+                : md_view_path(fs,q->directory[0],p->mount,output->data,output->capacity);
+            if (!out->error) out->size=strlen(output->data)+1;
+        } else inode(fs,owner.mounts,p->mount,q,out,output);
+        return 1;
+    }
     size_t capacity = output ? output->capacity : 0;
     void *data = output ? output->data : NULL;
     switch (q->operation) {
@@ -162,19 +174,71 @@ static int mounted_root(const struct md_view_location *p) {
     struct stat st;
     return !fstat(p->fd, &st) && md_view_same(&st, &p->mount->native);
 }
-static void inode(struct md_filesystem *fs, struct md_mount_namespace *view,
+static int selected_operation(unsigned operation) {
+    switch (operation) {
+    case MD_FS_CREATE: case MD_FS_OPEN: case MD_FS_OPEN_IMAGE: case MD_FS_STAT: case MD_FS_STATFS:
+    case MD_FS_ACCESS: case MD_FS_CHMOD: case MD_FS_CHOWN: case MD_FS_UTIMENS: case MD_FS_READLINK:
+        return 1;
+    default: return 0;
+    }
+}
+static void inode(struct md_filesystem *fs, struct md_mount_namespace *view, struct md_view_mount *mount,
         const struct md_fs_request *q, struct md_fs_result *out, const struct md_fs_output *output) {
     int foreign=view!=fs->mounts;
     if (foreign && (q->operation==MD_FS_PATH || q->operation==MD_FS_REALPATH || q->operation==MD_FS_OPEN_IMAGE)) {
         *out=(struct md_fs_result){.fd=-1,.error=-ENOENT}; return;
     }
-    struct md_filesystem owner=*fs; owner.mounts=view;
+    struct md_filesystem owner=*fs; owner.mounts=view; owner.inode_mount=mount;
     /* A root in another tree cannot clamp relative inode traversal. The worker
      * owns this borrowed context and restores it before handling another call. */
-    const char *root_id=fs->store->root_id;
-    if (foreign) fs->store->root_id=NULL;
+    struct md_fs_storage_scope scope;
+    int r=md_fs_storage_enter(fs,mount,&scope);
+    if (r) { *out=(struct md_fs_result){.fd=-1,.error=r}; return; }
+    owner.selected_store=scope.store;
+    if (foreign) scope.store->root_id=NULL;
     md_fs_inode_execute(&owner,q,out,output);
-    fs->store->root_id=root_id;
+    md_fs_storage_leave(&scope);
+}
+static void inode_selected(struct md_filesystem *fs, const struct md_fs_request *q,
+        const struct md_view_location *a, struct md_fs_result *out, const struct md_fs_output *output) {
+    struct md_fs_request local=*q;
+    local.directory[0]=a->fd; local.path[0]=NULL; local.origin[0]=NULL;
+    local.directory[1]=-1; local.path[1]=NULL; local.origin[1]=NULL; local.resolve=0;
+    if (q->operation==MD_FS_STAT) local.operation=MD_FS_FSTAT;
+    if (q->operation==MD_FS_OPEN || q->operation==MD_FS_CREATE || q->operation==MD_FS_OPEN_IMAGE) {
+        unsigned flags=q->operation==MD_FS_CREATE ? O_RDWR|O_CREAT|O_EXCL
+            : q->operation==MD_FS_OPEN_IMAGE ? O_RDONLY|O_CLOEXEC : q->flags;
+        if (!(flags&O_PATH) && (flags&(O_CREAT|O_EXCL))==(O_CREAT|O_EXCL)) {
+            out->error=-EEXIST; return;
+        }
+        struct stat st;
+        if (fstat(a->fd,&st)) { out->error=-errno; return; }
+        if (!(flags&O_PATH) && (flags&O_CREAT) && S_ISDIR(st.st_mode)) { out->error=-EISDIR; return; }
+        if (q->operation==MD_FS_OPEN_IMAGE) {
+            if (!output || !output->data || output->capacity<sizeof(struct md_image_identity)) {
+                out->error=-ERANGE; return;
+            }
+            if (!S_ISREG(st.st_mode)) { out->error=-EACCES; return; }
+            local.operation=MD_FS_ACCESS; local.flags=MD_AT_EACCESS; local.mode=X_OK;
+            inode(fs,a->view,a->mount,&local,out,NULL);
+            if (out->error) return;
+        }
+        local.operation=MD_FS_REOPEN; local.flags=flags&~(O_CREAT|O_EXCL); local.mode=0;
+    }
+    inode(fs,a->view,a->mount,&local,out,output);
+    if (out->error || q->operation!=MD_FS_OPEN_IMAGE) return;
+    struct md_image_identity *identity=output->data;
+    struct md_filesystem owner=*fs; owner.mounts=a->view;
+    struct md_view_object *object=NULL;
+    int r=a->view!=fs->mounts ? -ENOENT : md_view_record(&owner,a->fd,a->mount,&object);
+    if (!r) r=md_view_path(fs,a->fd,a->mount,identity->path,sizeof(identity->path));
+    if (!r) {
+        memcpy(identity->object,object->id,sizeof(identity->object));
+        out->size=offsetof(struct md_image_identity,path)+strlen(identity->path)+1;
+    } else {
+        close(out->fd); out->fd=-1; out->error=r;
+        if (output->origin) { md_fs_anchor_release(*output->origin); *output->origin=NULL; }
+    }
 }
 static void native(struct md_filesystem *fs, const struct md_fs_request *q,
         struct md_view_location *a, struct md_view_location *b,
@@ -233,9 +297,13 @@ static void native(struct md_filesystem *fs, const struct md_fs_request *q,
         if (fifo && (flags & O_CREAT) && (flags & O_EXCL)) { r = -EEXIST; break; }
         if (fifo && (flags & O_DIRECTORY)) { r = -ENOTDIR; break; }
         int deferred = fifo && !(flags & O_PATH);
-        int fd = deferred ? fcntl(a->fd, F_DUPFD_CLOEXEC, 3)
+        int selected=a->fd>=0 && !strcmp(a->name,".");
+        if (selected && !(flags&O_PATH) && (flags&(O_CREAT|O_EXCL))==(O_CREAT|O_EXCL)) { r=-EEXIST; break; }
+        if (selected && !(flags&O_PATH) && (flags&O_CREAT) && S_ISDIR(existing.st_mode)) { r=-EISDIR; break; }
+        int fd=selected ? md_reopen_file(a->fd,(flags&~(O_CREAT|O_EXCL))|O_CLOEXEC,&out->open_completion)
+            : deferred ? fcntl(a->fd, F_DUPFD_CLOEXEC, 3)
             : openat(a->parent, a->name, flags | O_NOFOLLOW | O_CLOEXEC, q->mode&~q->attributes.creation_mask);
-        r = record(&owner, fd, a->mount, out);
+        r=selected && fd<0 ? fd : record(&owner,fd,a->mount,out);
         if (!r && deferred) out->open_completion.kind = MD_OPEN_FIFO;
         if (!r && q->operation == MD_FS_OPEN_IMAGE) {
             struct stat st;
@@ -314,6 +382,10 @@ void md_fs_mounts_execute(struct md_filesystem *fs, const struct md_fs_request *
         struct md_view_object *p=md_view_object(fs,q->path[0]);
         if (p) {
             if (writable(q->flags)) { out->error = -EACCES; return; }
+            if (md_view_inode(p->mount)) {
+                struct md_fs_request local={.operation=MD_FS_REOPEN,.directory={p->fd,-1},.flags=q->flags};
+                inode(fs,fs->mounts,p->mount,&local,out,output); return;
+            }
             struct stat st;
             if (fstat(p->fd, &st)) { out->error = -errno; return; }
             if (!S_ISREG(st.st_mode)) { out->error = -EINVAL; return; }
@@ -340,8 +412,16 @@ void md_fs_mounts_execute(struct md_filesystem *fs, const struct md_fs_request *
         case MD_FS_SEEKDIR: case MD_FS_OBJECT_ID:
             if (descriptor(fs, q, out, output)) return;
         }
-        if (q->operation==MD_FS_PATH && fs->native_root) { out->error=-ENOENT; return; }
-        inode(fs,q->origin[0] ? q->origin[0]->view : fs->mounts,q,out,output);
+        if (q->operation==MD_FS_PATH && fs->native_root && !q->origin[0]) { out->error=-ENOENT; return; }
+        const struct md_fs_anchor *origin=q->origin[0];
+        if (origin && origin->mount && q->operation==MD_FS_PATH) {
+            *out=(struct md_fs_result){.fd=-1};
+            out->error=!output || !output->data ? -EINVAL
+                : md_view_path(fs,q->directory[0],origin->mount,output->data,output->capacity);
+            if (!out->error) out->size=strlen(output->data)+1;
+            return;
+        }
+        inode(fs,origin ? origin->view : fs->mounts,origin ? origin->mount : NULL,q,out,output);
         return;
     }
     struct md_view_location a = {.parent=-1,.fd=-1}, b = {.parent=-1,.fd=-1};
@@ -352,12 +432,19 @@ void md_fs_mounts_execute(struct md_filesystem *fs, const struct md_fs_request *
     if (!r && mutates(q) && a.mount && md_view_readonly(a.mount)) r = -EROFS;
     if (!r && (q->operation == MD_FS_UNLINK || q->operation == MD_FS_RENAME)
             && (mounted_root(&a) || (pair && mounted_root(&b)))) r = -EBUSY;
-    if (!r && a.mount) native(fs, q, &a, &b, out, output);
-    else if (!r) {
+    if (!r && q->operation==MD_FS_REALPATH) {
+        out->error=!output || !output->data ? -EINVAL
+            : a.view!=fs->mounts ? -ENOENT : md_view_path(fs,a.fd,a.mount,output->data,output->capacity);
+        if (!out->error) out->size=strlen(output->data)+1;
+    } else if (!r && !md_view_inode(a.mount)) native(fs, q, &a, &b, out, output);
+    else if (!r && ((q->operation==MD_FS_OPEN_IMAGE && a.mount)
+            || (a.fd>=0 && !strcmp(a.name,".") && selected_operation(q->operation)))) {
+        inode_selected(fs,q,&a,out,output);
+    } else if (!r) {
         struct md_fs_request local = *q;
         local.directory[0] = a.parent; local.path[0] = a.name; local.resolve = 0;
         if (pair) { local.directory[1] = b.parent; local.path[1] = b.name; }
-        inode(fs,a.view,&local,out,output);
+        inode(fs,a.view,a.mount,&local,out,output);
     } else out->error = r;
     md_view_location_close(&a); md_view_location_close(&b);
 }

@@ -2,6 +2,7 @@
 #include "fs_worker.h"
 #include "fs_service.h"
 #include "fs_mounts.h"
+#include "fs_storage.h"
 #include "image_catalogue.h"
 #include "event_wait.h"
 #include "ipc_credentials.h"
@@ -92,7 +93,8 @@ static void *run(void *context) {
     int listener = -1, error = md_inode_store_open(w->store, 0, &store);
     if (!error) error = md_inode_runtime_prepare(store);
     if (!error && w->admit) error = md_image_catalogue_open(store, w->admit, &images);
-    struct md_filesystem fs = {.store=store, .images=images, .tasks=w->tasks, .exchanges=w->exchanges,
+    struct md_fs_storage_cache storage={0};
+    struct md_filesystem fs = {.store=store, .storage=&storage, .images=images, .tasks=w->tasks, .exchanges=w->exchanges,
         .cursors=w->cursors,.ipc_store=w->store};
     if (!error) error = md_fs_mounts_open(&fs, w->attachments, w->attachment_count);
     if (!error && w->inherited && w->inherited->count) {
@@ -124,6 +126,7 @@ static void *run(void *context) {
     }
     if (listener >= 0) close(listener);
     md_fs_mounts_close(&fs);
+    md_fs_storage_close(&storage);
     md_ipc_credentials_close(fs.ipc);
     md_image_catalogue_close(images); md_inode_store_close(store);
     if (w->statistics) {

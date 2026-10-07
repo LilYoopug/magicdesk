@@ -13,10 +13,17 @@ struct md_fs_anchor *md_fs_anchor_retain(struct md_fs_anchor *p) {
 }
 void md_fs_anchor_release(struct md_fs_anchor *p) {
     if (!p || atomic_fetch_sub_explicit(&p->refs,1,memory_order_acq_rel)!=1) return;
-    close(p->fd); md_mount_namespace_release(p->view);
+    close(p->fd);
+    if (p->mount) atomic_fetch_sub_explicit(&p->mount->anchors,1,memory_order_relaxed);
+    md_mount_namespace_release(p->view);
     md_inode_lifetime_release(p->lifetime); free(p);
 }
 int md_fs_anchor_fd(const struct md_fs_anchor *p) { return p ? p->fd : -1; }
+int md_fs_anchor_same(const struct md_fs_anchor *a, const struct md_fs_anchor *b) {
+    return a && b && a->view==b->view && a->mount==b->mount
+        && a->device==b->device && a->inode==b->inode
+        && md_inode_lifetime_same(a->lifetime,b->lifetime);
+}
 int md_fs_anchor_check_fd(const struct md_fs_anchor *p, int fd) {
     if (!p || fd<0) return -EINVAL;
     struct stat st;
@@ -30,6 +37,7 @@ struct md_fs_anchor *md_view_anchor_new(struct md_inode_lifetime *lifetime,
     atomic_init(&p->refs,1);
     p->lifetime=md_inode_lifetime_retain(lifetime); p->view=md_mount_namespace_retain(view);
     p->mount=mount; p->fd=fd; p->device=device; p->inode=inode;
+    if (mount) atomic_fetch_add_explicit(&mount->anchors,1,memory_order_relaxed);
     return p;
 }
 int md_view_anchor_check(struct md_filesystem *fs, int fd, const struct md_fs_anchor *p) {

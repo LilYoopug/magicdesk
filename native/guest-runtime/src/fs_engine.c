@@ -204,6 +204,8 @@ static void context_execute(struct md_fs_context *context,
     fs->store->creation_mask=q->attributes.creation_mask;
     if (root_error) *out=(struct md_fs_result){.fd=-1,.error=root_error};
     else if (q->operation == MD_FS_CHROOT) change_root(fs, task->fs, q, out);
+    else if (q->operation==MD_FS_MOUNT)
+        *out=(struct md_fs_result){.fd=-1,.error=md_fs_mount_change(fs,task->fs,q)};
     else if (q->operation == MD_FS_WATCH_PATH) watch_path(fs,q,out,output);
     else if (q->operation == MD_FS_TASK_PATH) task_path(fs,q,out,output);
     else if (q->operation==MD_FS_XATTR || q->operation==MD_FS_FXATTR) md_fs_xattr(fs,q,out,output);
@@ -263,10 +265,10 @@ void md_fs_context_execute(struct md_fs_context *context,
     else context_execute(context,q,out,output);
     md_cost_end(cost,begin);
 }
-void md_fs_inode_execute(struct md_filesystem *fs,
+static void inode_execute(struct md_filesystem *fs,
         const struct md_fs_request *q, struct md_fs_result *out, const struct md_fs_output *output) {
-    struct md_inode_store *s = fs->store;
-    struct md_image_catalogue *images = fs->images;
+    struct md_inode_store *s = fs->selected_store ? fs->selected_store : fs->store;
+    struct md_image_catalogue *images = s==fs->store ? fs->images : NULL;
     *out = (struct md_fs_result){.fd = -1};
     void *data = output ? output->data : NULL;
     size_t capacity = output ? output->capacity : 0;
@@ -354,7 +356,9 @@ void md_fs_inode_execute(struct md_filesystem *fs,
             : md_catalogue_fstat(images, s, first, &st);
         s->stat_path=previous;
         if (!r) md_fs_stat_info(&st, &out->info);
-        if (!r && (q->mode & MD_FS_STAT_MOUNT) && *path)
+        if (!r && (q->mode & MD_FS_STAT_MOUNT) && fs->inode_mount)
+            out->info.mount_id=fs->inode_mount->id;
+        else if (!r && (q->mode & MD_FS_STAT_MOUNT) && *path)
             r=md_fs_base_mount(fs,!strncmp(path,"/dev/shm",8) && (!path[8] || path[8]=='/'),
                 &out->info.mount_id);
         break;
@@ -401,6 +405,15 @@ opened:
     if (r < 0) out->error = r;
     else {
         out->fd = r;
-        md_view_capture(fs,fs->mounts,NULL,out,output);
+        md_view_capture(fs,fs->mounts,fs->inode_mount,out,output);
     }
+}
+void md_fs_inode_execute(struct md_filesystem *fs, const struct md_fs_request *q,
+        struct md_fs_result *out, const struct md_fs_output *output) {
+    struct md_inode_store *store=fs->selected_store ? fs->selected_store : fs->store;
+    int readonly=store->readonly;
+    if (fs->mounts && (fs->inode_mount ? md_view_readonly(fs->inode_mount)
+            : (md_mount_policy_flags(&fs->mounts->root_policy)&MD_MOUNT_READONLY))) store->readonly=1;
+    inode_execute(fs,q,out,output);
+    store->readonly=readonly;
 }

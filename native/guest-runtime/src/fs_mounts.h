@@ -13,6 +13,10 @@ int md_fs_mounts_open(struct md_filesystem *, const struct md_fs_attachment *, u
  * success. Guest namespace publication additionally requires FD provenance. */
 int md_fs_mounts_copy(struct md_filesystem *, const struct md_fs_location *root,
         struct md_mount_namespace **copy, struct md_fs_location *copied_root);
+/* Rebase only a copied FS context's cwd, never existing open descriptors. The
+ * destination must be an unpublished copy with the same stable mount slots. */
+int md_fs_mounts_copy_cwd(struct md_mount_namespace *source, struct md_mount_namespace *copy,
+        const struct md_fs_anchor *, struct md_fs_anchor **);
 /* Preserve the resolved mount when capturing a freshly opened root. Without
  * provenance an ambiguous native object fails instead of choosing an alias. */
 int md_fs_root_capture(struct md_filesystem *, int fd, const struct md_fs_anchor *, struct md_fs_location *);
@@ -21,6 +25,7 @@ void md_fs_mounts_close(struct md_filesystem *);
 int md_fs_mount_table(struct md_filesystem *, unsigned mountinfo, unsigned flags);
 int md_fs_native_mount(struct md_filesystem *, uint64_t native, uint64_t *guest);
 int md_fs_base_mount(struct md_filesystem *, int shared_memory, uint64_t *guest);
+int md_fs_mount_change(struct md_filesystem *, struct md_guest_domain *, const struct md_fs_request *);
 /* Dispatches the composed view; the ordinary inode engine remains the backend. */
 void md_fs_mounts_execute(struct md_filesystem *, const struct md_fs_request *,
         struct md_fs_result *, const struct md_fs_output *);

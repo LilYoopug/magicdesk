@@ -379,7 +379,9 @@ The proc-root model handles the restricted self/fd or fdinfo roots used by the
 tested helper, with CLONE_FS ownership and irreversible narrowing. Ordinary
 inode-backed guest chroot uses the same resource owner and the filesystem engine;
 its limits are in [process resources](process-resources.md#guest-roots).
-Neither mechanism creates a mount namespace. Namespace creation is not fabricated.
+Neither chroot mechanism creates a mount namespace. Guest `CLONE_NEWNS` separately
+copies the worker-owned mount view and FS context before publication; it does
+not create a host kernel namespace or change the selected Android identity.
 
 Stock Debian Chromium passes three fresh-profile headless JavaScript/DOM runs
 and PNG production with its normal helper and no sandbox-disabling flags. Tests
