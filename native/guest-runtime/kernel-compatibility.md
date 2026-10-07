@@ -120,8 +120,12 @@ the device policy, production private-table capture and cancellation, partial
 control faults, protected/shared-table receivers, quotas and fatal exit. The
 typed capture request reuses the same helper lifecycle, clone flags, private
 channel and atomic ADDFD_SEND; it adds no kernel primitive or startup probe.
-Guest receive uses it only for an annotated selection. Transport binding of
-authenticated annotations into real guest traffic remains separate.
+This is an alternative observation fixture, not the guest annotated-return path.
+Production annotated return uses the existing mapped kernel receipt and
+SCM_RIGHTS, including O_PATH, without proc-table capture or ADDFD_SETFD. Filtered
+input capture reuses table-owned channels and atomic ADDFD_SEND only for channel
+admission. The exact gettid notification gate still evaluates application
+filters. None of these operations adds a post-5.15 dependency.
 Explicit source-vector export uses the same private-table clone, close_range,
 atomic ADDFD_SEND and authenticated SCM_RIGHTS channel, without pidfd_getfd or
 new proc operations. Its 254-input bound allows a socket plus 253 data rights;

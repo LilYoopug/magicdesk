@@ -726,16 +726,25 @@ Named pipes use the same namespace and kernel pipe payloads, without requiring
 native FIFO creation under Android shell policy. Peer-open rendezvous belongs to
 a cancellable supervisor operation outside namespace transactions. See the [FIFO contract](../native/guest-runtime/fifos.md)
 for readiness and watch limitations.
-Unix `sendmsg`, `sendmmsg` and addressed `sendto` share captured outgoing custody,
-without copying payloads. Ordinary connected payload-only sends remain native.
-The worker owns address resolution and explicit-credential validation; private
-helpers own temporary FD installs until exact reaping. Tests cover partial batches, short stream writes, failed
-result writes and SCM_RIGHTS. Unadapted socket operations are not thereby certified.
+Unix `sendmsg`, `sendmmsg` and addressed `sendto` share captured outgoing custody.
+Ordinary connected payload-only sends remain native. The worker owns address
+resolution, credential validation and creation-time ancillary format. Adapted
+peers use authenticated origin capsules; sockets inherited from or passed to
+unadapted consumers retain native format. Exporting an already adapted socket to
+a native peer fails explicitly rather than exposing its private protocol.
+Unfiltered IO uses private-table helpers; application-filtered IO captures exact
+inputs through the table-owned channel and uses bounded supervisor IO, without
+requiring another guest thread. This path copies payloads through the shared
+mapping and retains its explicit size, batch and blocking-semantic limits.
 Received rights have one supervisor-owned vector shared with worker inspection.
 One typed request per message classifies identity tokens and managed watches,
 without FD duplication or file-table/FS turns. Cancellation retains its sources
 and mapped output until worker completion; publication installs only application
-rights. This does not establish arbitrary-message mount-origin tracking. See
+rights. Annotated rights use the same kernel-written mapped receipt as file
+results, including O_PATH; neither manual FD-number selection nor a receiver's
+proc-FD directory is needed. Terminal cancellation publishes the installed
+prefix and drains only queued rights. Tests cover protected receivers, output
+faults, full tables and unchanged application filters. See
 [Unix IPC credentials](../native/guest-runtime/ipc-credentials.md) for custody,
 resource-limit and batch-publication contracts.
 

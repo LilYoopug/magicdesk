@@ -360,6 +360,73 @@ static void transports(const char *store, struct md_ipc_credentials *native) {
     }
     md_ipc_credentials_close(origins);
 }
+static void exposure(const char *store) {
+    struct md_ipc_credentials *owner=NULL,*other=NULL;
+    assert(!md_ipc_credentials_open(store,MD_IPC_TRANSPORT_ORIGINS_V1,&owner));
+    assert(!md_ipc_credentials_open(store,MD_IPC_TRANSPORT_ORIGINS_V1,&other));
+    const int types[]={SOCK_STREAM,SOCK_DGRAM,SOCK_SEQPACKET};
+    for (unsigned t=0;t<3;++t) {
+        int framed[2], raw[2], pipefd[2];
+        assert(!socketpair(AF_UNIX,types[t]|SOCK_CLOEXEC,0,framed));
+        assert(!socketpair(AF_UNIX,types[t]|SOCK_CLOEXEC,0,raw));
+        assert(!pipe2(pipefd,O_CLOEXEC));
+        assert(!request(owner,MD_IPC_PAIR,framed[0],framed[1],NULL,0).error);
+        int batch[]={raw[0],pipefd[0],framed[1]};
+        assert(md_ipc_credentials_native(other,batch,3)==-EXDEV);
+        /* Rejected batches publish no partial exposure. */
+        assert(!request(other,MD_IPC_PAIR,raw[0],raw[1],NULL,0).error);
+        selected(owner,raw[0],MD_IPC_TRANSPORT_ORIGINS_V1);
+        int alias=dup(framed[0]); assert(alias>=0);
+        assert(md_ipc_credentials_native(owner,&alias,1)==-EXDEV);
+        assert(write(framed[0],"q",1)==1);
+        char byte; assert(read(framed[1],&byte,1)==1 && byte=='q');
+        assert(!close(alias));
+        for (unsigned i=0;i<2;++i) assert(!close(framed[i]) && !close(raw[i]) && !close(pipefd[i]));
+
+        assert(!socketpair(AF_UNIX,types[t]|SOCK_CLOEXEC,0,raw));
+        alias=dup(raw[0]); assert(alias>=0);
+        assert(!md_ipc_credentials_native(other,&alias,1));
+        assert(!request(owner,MD_IPC_PAIR,raw[0],raw[1],NULL,0).error);
+        unavailable(owner,raw[0],-ENODATA); unavailable(other,raw[1],-ENODATA);
+        assert(!close(alias) && !close(raw[0]) && !close(raw[1]));
+    }
+    for (unsigned exported_listener=0;exported_listener<2;++exported_listener) {
+        struct sockaddr_un address; socklen_t size; char name[217];
+        int fd=listener(SOCK_STREAM,170+exported_listener,&address,name,&size);
+        int client=socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0); assert(client>=0);
+        int exported=exported_listener ? fd : client;
+        assert(!md_ipc_credentials_native(other,&exported,1));
+        listening(owner,fd);
+        struct md_fs_result begun=request(owner,MD_IPC_CONNECT_BEGIN,client,-1,name,0);
+        assert(!begun.error && !begun.position);
+        assert(!connect(client,(void *)&address,size));
+        int peer=accept4(fd,NULL,NULL,SOCK_CLOEXEC); assert(peer>=0);
+        assert(!request(owner,MD_IPC_ACCEPT,peer,-1,NULL,0).error);
+        unavailable(owner,client,-ENODATA); unavailable(other,peer,-ENODATA);
+        assert(!close(peer) && !close(client) && !close(fd));
+    }
+    struct sockaddr_un address; socklen_t size; char name[217];
+    int fd=listener(SOCK_STREAM,175,&address,name,&size); listening(owner,fd);
+    assert(md_ipc_credentials_native(other,&fd,1)==-EXDEV);
+    int client=socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0); assert(client>=0);
+    assert(!request(owner,MD_IPC_CONNECT_BEGIN,client,-1,name,0).error);
+    assert(md_ipc_credentials_native(other,&client,1)==-EXDEV);
+    assert(!connect(client,(void *)&address,size));
+    assert(!request(owner,MD_IPC_CONNECT_END,client,-1,NULL,0).error);
+    int peer=accept4(fd,NULL,NULL,SOCK_CLOEXEC); assert(peer>=0);
+    assert(!request(owner,MD_IPC_ACCEPT,peer,-1,NULL,0).error);
+    int raw=socket(AF_UNIX,SOCK_STREAM,0); assert(raw>=0);
+    assert(!fcntl(client,F_SETFD,0));
+    struct md_ipc_inherited inherited={0};
+    assert(!md_ipc_inherited_capture(&inherited) && inherited.count>=2);
+    assert(!md_ipc_credentials_inherit(other,&inherited));
+    md_ipc_inherited_release(&inherited);
+    selected(other,client,MD_IPC_TRANSPORT_ORIGINS_V1);
+    assert(!request(owner,MD_IPC_CONNECT_BEGIN,raw,-1,name,0).position);
+    assert(!close(raw) && !close(peer) && !close(client) && !close(fd));
+    md_ipc_credentials_close(other); md_ipc_credentials_close(owner);
+    puts("PASS IPC native boundary: atomic export rejection, aliases, native-only future connect/listen/pair, inheritance and adapted launch preservation");
+}
 void test_ipc_connections(const char *directory) {
     char foreign_path[PATH_MAX];
     assert(snprintf(foreign_path,sizeof(foreign_path),"%s/foreign",directory)<(int)sizeof(foreign_path)
@@ -377,6 +444,7 @@ void test_ipc_connections(const char *directory) {
     native_listener_reuse(first);
     queued_name_reuse(first,0); queued_name_reuse(first,1);
     transports(directory,first);
+    exposure(directory);
     int sockets[2]; assert(!socketpair(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0,sockets));
     assert(!request(first,MD_IPC_PAIR,sockets[0],sockets[1],NULL,0).error);
     struct md_ipc_connection before=connection(first,sockets[0]);

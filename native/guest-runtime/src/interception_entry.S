@@ -38,6 +38,20 @@ md_guest_buffer_control:
     brk #0x5bb
     ret
 .size md_guest_buffer_control, .-md_guest_buffer_control
+.global md_guest_buffer_admit
+.type md_guest_buffer_admit, %function
+md_guest_buffer_admit:
+    mov x1, xzr
+    mov x2, xzr
+    mov x3, xzr
+    mov x4, xzr
+    mov x5, xzr
+    mov x8, #__NR_gettid
+    svc #0
+.global md_guest_buffer_admitted
+md_guest_buffer_admitted:
+    ret
+.size md_guest_buffer_admit, .-md_guest_buffer_admit
 .global md_guest_open_anchor
 .type md_guest_open_anchor, %function
 md_guest_open_anchor:

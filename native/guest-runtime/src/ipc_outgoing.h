@@ -6,7 +6,7 @@
 struct md_ipc_send_options {
     struct sockaddr_storage address;
     socklen_t length;
-    unsigned addressed, credentials;
+    unsigned addressed, credentials, brokered;
     struct ucred claimed;
 };
 /* The optional pathname anchor is custody, never an application right. */
@@ -14,6 +14,6 @@ struct md_ipc_send_address {
     struct sockaddr_storage address;
     socklen_t length;
     int anchor;
-    unsigned credentials;
+    unsigned credentials, brokered;
 };
 #endif

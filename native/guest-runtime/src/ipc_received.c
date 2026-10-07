@@ -27,7 +27,13 @@ int md_ipc_received_message(struct md_ipc_capsules **cache, struct md_fs_context
     int error=md_fs_ipc_authority(context->filesystem,&authority);
     if (!error) error=md_ipc_credentials_bind(authority,source->fds[0],&binding);
     int framed=!error && binding.transport==MD_IPC_TRANSPORT_ORIGINS_V1;
+    int adapted=!error;
     if (unrecognized(error)) error=0;
+    if (!error && !adapted) {
+        int fds[253];
+        for (unsigned i=0;i<count;++i) fds[i]=source->fds[indices[i]];
+        error=md_ipc_credentials_native(authority,fds,count);
+    }
     struct md_received_message plan={0};
     struct md_received_fds *data=NULL;
     for (unsigned i=0;i<count && !error;++i) {

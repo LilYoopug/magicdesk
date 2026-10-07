@@ -216,6 +216,10 @@ int md_domain_native_call(long nr, const unsigned long a[6]) {
     default: return 0;
     }
 }
+int md_domain_ipc_call(long nr) {
+    return nr==SYS_sendmsg || nr==SYS_recvmsg || nr==SYS_sendmmsg
+        || nr==SYS_recvmmsg || nr==SYS_socketpair;
+}
 static int caller_group(pid_t caller) {
     char status[64], line[256]; int group = 0;
     snprintf(status, sizeof(status), "/proc/%d/status", caller);

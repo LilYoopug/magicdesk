@@ -80,6 +80,7 @@ static int address(struct md_ipc_origin_request *r) {
     if (o->length>sizeof(struct sockaddr_un)) return -EINVAL;
     const struct sockaddr_un *a=(const void *)&o->address;
     if (o->length==offsetof(struct sockaddr_un,sun_path) || !a->sun_path[0]) return 0;
+    if (md_domain_restricted(r->task.task.fs)) return md_domain_path_error(r->task.task.fs);
     int family=0; socklen_t size=sizeof(family);
     if (getsockopt(r->source->fds[0],SOL_SOCKET,SO_DOMAIN,&family,&size)) return -errno;
     if (family!=AF_UNIX) return 0;
@@ -161,8 +162,24 @@ static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
         }
     }
     r->transport=bound ? binding.transport : MD_IPC_TRANSPORT_NATIVE;
+    if (!error && r->kind==PREPARE && r->options.brokered && bound) {
+        /* Only authenticated receivers can recover the original sender from
+         * its capability. Native peers need task-affine kernel credentials. */
+        r->destination.brokered=1;
+        if (!r->options.credentials) {
+            r->options.credentials=1;
+            r->options.claimed=(struct ucred){.pid=r->task.peer,
+                .uid=r->task.task.identity.uid.effective,.gid=r->task.task.identity.gid.effective};
+        }
+    }
     int framed=r->transport==MD_IPC_TRANSPORT_ORIGINS_V1;
     if (!error && r->kind==RECEIVE && !framed) error=-ENOTSUP;
+    if (!error && r->kind==PREPARE && !bound && r->source->count>1) {
+        int family=0; socklen_t size=sizeof(family);
+        if (getsockopt(r->source->fds[0],SOL_SOCKET,SO_DOMAIN,&family,&size)) error=-errno;
+        else if (family==AF_UNIX) error=md_ipc_credentials_native(authority,
+            r->source->fds+1,r->source->count-1);
+    }
     if (!error && framed && !s->capsules) error=md_ipc_capsules_new(&binding,&s->capsules);
     if (!error && atomic_load_explicit(&r->cancelled,memory_order_relaxed)) error=-ECANCELED;
     if (!error && framed) {

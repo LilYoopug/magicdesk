@@ -1051,7 +1051,7 @@ drains only unreceived rights through the supervisor's retained receive endpoint
 It needs no close syscall from the dead task or a surviving peer.
 
 The same owner accepts annotated vectors with caller-owned scratch arrays and
-either a retained mapped receipt or exact-task FD-table observation. It prepares
+a retained mapped receipt. It prepares
 the complete selected origin vector before
 kernel delivery, then publishes only the installed prefix under the destination
 turn. Completion and cancellation use the same receipt; a failed acknowledgement
@@ -1059,7 +1059,7 @@ cannot erase installed FD provenance. Queued cancellation discards preparation
 without admitting a channel. Source descriptions need remain open only until the
 packet is accepted by the kernel; publication retains origins, not data OFDs.
 The receipt must be the kernel's actual output, never an acknowledgement copy.
-For direct application-control output, `fd_table_observation` borrows an open
+The alternative direct-output observation fixture, `fd_table_observation`, borrows an open
 `/proc/<exact tid>/fd` directory captured in the task's context. Under the same
 table turn, after channel admission, it records at most 253 lowest free slots.
 After native receive it observes the installed prefix without reading application
@@ -1087,16 +1087,20 @@ disable allocations during observation and publication and cover preparation
 rollback and cancellation before admission.
 
 The guest receive consumer selects the exact retained origin vector before
-publication. A known-origin selection lazily allocates its scratch storage and
-requests `MD_TASK_HELPER_FD_TABLE` from the existing private-table helper. This
-typed request accepts no caller path or flags and exports only the read-only
-directory for the exact receiver TID. The receive owner retains it across
-subsequent rights groups until receive completion. Cancellation detaches a live
-capture helper; its final callback releases custody only after reaping.
-Destination publication finishes before that directory is released, including
-the caller's terminal stop. Unknown-only selections create neither the scratch
-storage nor the capture helper. CLOEXEC policy comes from the captured receive
-request, not a later mutable output frame.
+publication. A known-origin selection lazily allocates its origin-update scratch
+storage; the existing adapter mapping already contains the kernel receipt for
+up to 253 rights. Scalar file results and annotated messages share `fd_return`
+and `fd_delivery`, independently of the caller's filters or dumpability. No
+receiver directory capture or manual destination-slot installation is involved.
+Static control-memory faults limit the received prefix before kernel delivery;
+the actual descriptor numbers are then copied from the receipt. A concurrent
+remap during that copy can leave installed caller-owned FDs without complete
+application output; the receipt still owns their provenance. It does not claim
+native per-word installation ordering against concurrent mprotect/munmap.
+Unknown-only selections retain direct native control output and allocate no
+origin scratch. CLOEXEC policy comes from the captured receive request, not a
+later mutable output frame. Ordinary FD creators need no extra ordering solely
+to predict the numbers of a received vector.
 
 The same case runs 12 checks of the production helper, including protected
 callers, full caller tables, repeated capture, rejected open, fatal helper

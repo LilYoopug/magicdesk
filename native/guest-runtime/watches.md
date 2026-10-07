@@ -51,8 +51,11 @@ fork, exec and queued SCM_RIGHTS. The owner retains no permanent read alias.
 ordinary duplicate. The shared ancillary publisher prepares each received alias
 before copying its FD number to the caller, even when a later header, address
 or timeout write fails. It does not reparse caller-controlled output or use the
-syscall return value as proof of descriptor delivery. Failed activation releases
-unpublished descriptors without closing an already published prefix.
+syscall return value as proof of descriptor delivery. Vector admission prepares
+selectors before receiving; activation failure installs no application FD and
+drains queued rights, retaining only the table-owned channel. Mapped publication
+also checks actual kernel-assigned numbers before copying them out. An error
+after kernel installation never closes an already installed prefix.
 `watch_activation.c` tracks installed filters
 by thread group: pthreads share that metadata, fork copies it and exec retains it.
 Selectors use the low nine descriptor bits, bounding activation to 512 filters

@@ -417,7 +417,7 @@ static void path_request(const char *store, unsigned kind, int protected, int sl
     struct md_task_registry *tasks=md_task_registry_create(); assert(tasks);
     struct md_fs_worker *worker=NULL;
     char endpoint[80]; snprintf(endpoint,sizeof(endpoint),"md-dispatch-%d-%d",parent,child);
-    assert(!md_fs_worker_start(store,endpoint,NULL,tasks,NULL,NULL,0,0,&worker));
+    assert(!md_fs_worker_start(store,endpoint,NULL,tasks,NULL,NULL,0,0,NULL,&worker));
     struct md_task_resources resources={.fs=md_domain_new(),.files=md_fd_origins_new(),
         .mounts=md_fs_worker_mounts(worker)};
     assert(resources.fs && resources.files);
@@ -555,7 +555,7 @@ static int fail_worker(void *context, struct md_filesystem *fs, short events) {
 static void queue_failure(const char *store) {
     char endpoint[80]; snprintf(endpoint,sizeof(endpoint),"md-dispatch-failure-%d",getpid());
     struct md_fs_worker *w=NULL;
-    assert(!md_fs_worker_start(store,endpoint,NULL,NULL,NULL,NULL,0,0,&w));
+    assert(!md_fs_worker_start(store,endpoint,NULL,NULL,NULL,NULL,0,0,NULL,&w));
     int gate=eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK),started=eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK);
     int failed=eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK);
     assert(gate>=0 && started>=0 && failed>=0);
@@ -1264,7 +1264,7 @@ static void buffer_service_lifetime(const char *store, unsigned cancelled_operat
     struct md_task_registry *tasks=md_task_registry_create(); assert(tasks);
     struct md_fs_worker *worker=NULL;
     char endpoint[80]; snprintf(endpoint,sizeof(endpoint),"md-buffer-service-%d",getpid());
-    assert(!md_fs_worker_start(store,endpoint,NULL,tasks,NULL,NULL,0,0,&worker));
+    assert(!md_fs_worker_start(store,endpoint,NULL,tasks,NULL,NULL,0,0,NULL,&worker));
     struct md_task_resources resources={.fs=md_domain_new(),.files=md_fd_origins_new(),
         .mounts=md_fs_worker_mounts(worker)};
     assert(resources.fs && resources.files);
@@ -1493,7 +1493,7 @@ static void buffer_export_lifetime(const char *store) {
         struct md_task_registry *tasks=md_task_registry_create(); assert(tasks);
         char endpoint[80]; snprintf(endpoint,sizeof(endpoint),"md-buffer-export-%d-%u",getpid(),scenario);
         struct md_fs_worker *worker=NULL;
-        assert(!md_fs_worker_start(store,endpoint,NULL,tasks,NULL,NULL,0,0,&worker));
+        assert(!md_fs_worker_start(store,endpoint,NULL,tasks,NULL,NULL,0,0,NULL,&worker));
         struct md_task_resources resources={.fs=md_domain_new(),.files=md_fd_origins_new(),
             .mounts=md_fs_worker_mounts(worker)};
         assert(resources.fs && resources.files);

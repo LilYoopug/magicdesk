@@ -58,6 +58,8 @@ int md_domain_path_error(const struct md_guest_domain *);
 /* Unsupported guest interfaces fail before entering an unrelated host service. */
 int md_domain_socket_error(int family, int protocol);
 int md_domain_native_call(long nr, const unsigned long args[6]);
+/* Application ancillary calls retain custody under a restricted filesystem. */
+int md_domain_ipc_call(long nr);
 /* Returns an owned descriptor or a negative errno. No pathname continuation in
  * the tracee: the copied request is resolved beneath the retained resource. */
 int md_domain_open_retained(int directory, pid_t caller, const char *path, int flags);

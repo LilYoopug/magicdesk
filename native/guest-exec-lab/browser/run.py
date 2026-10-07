@@ -82,7 +82,13 @@ def main():
                              *(["--user", args.user] if args.user else []),
                              *(["--admit-elf", args.admit_elf] if args.admit_elf else []),
                              "--store", args.store, "--"] + args.program)
-        result = command(launch, check=False)
+        log = remote + "/browser.log"
+        result = command(launch + " >" + shlex.quote(log) + " 2>&1", check=False)
+        local_log = args.build / ("browser-" + tag + ".log")
+        transport.download(client, log, local_log)
+        result["output"] = local_log.read_text(errors="replace")
+        report["commands"][-1]["output"] = result["output"]
+        report["log"] = str(local_log)
         report["exitCode"] = result["exitCode"]
         if not args.quiet:
             print(result["output"], end="", flush=True)

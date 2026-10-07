@@ -150,7 +150,7 @@ int md_fs_ipc_authority(struct md_filesystem *fs, struct md_ipc_credentials **ou
     if (!fs || !out) return -EINVAL;
     if (!fs->ipc) {
         if (!fs->ipc_store) return -ENOTSUP;
-        int error=md_ipc_credentials_open(fs->ipc_store,MD_IPC_TRANSPORT_NATIVE,&fs->ipc);
+        int error=md_ipc_credentials_open(fs->ipc_store,MD_IPC_TRANSPORT_ORIGINS_V1,&fs->ipc);
         if (error) return error;
     }
     *out=fs->ipc; return 0;

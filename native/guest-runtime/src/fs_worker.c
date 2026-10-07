@@ -26,6 +26,7 @@ struct md_fs_worker {
     struct md_ofd_orders *cursors;
     const struct md_fs_attachment *attachments;
     unsigned attachment_count;
+    const struct md_ipc_inherited *inherited;
     struct md_fs_work *completed, **completed_tail;
     struct md_fs_work *submitted, **submitted_tail;
     int stopping;
@@ -94,6 +95,12 @@ static void *run(void *context) {
     struct md_filesystem fs = {.store=store, .images=images, .tasks=w->tasks, .exchanges=w->exchanges,
         .cursors=w->cursors,.ipc_store=w->store};
     if (!error) error = md_fs_mounts_open(&fs, w->attachments, w->attachment_count);
+    if (!error && w->inherited && w->inherited->count) {
+        struct md_ipc_credentials *authority=NULL;
+        error=md_fs_ipc_authority(&fs,&authority);
+        if (!error) error=md_ipc_credentials_inherit(authority,w->inherited);
+    }
+    w->inherited=NULL;
     if (!error) { listener = md_fs_listen(w->endpoint); if (listener < 0) error = listener; }
     pthread_mutex_lock(&w->lock);
     w->mounts=md_mount_namespace_retain(fs.mounts); w->error=error;
@@ -144,7 +151,8 @@ static void *run(void *context) {
     return NULL;
 }
 int md_fs_worker_start(const char *store, const char *endpoint, const char *admit, struct md_task_registry *tasks, struct md_fd_exchanges *exchanges,
-        const struct md_fs_attachment *attachments, unsigned attachment_count, int statistics, struct md_fs_worker **out) {
+        const struct md_fs_attachment *attachments, unsigned attachment_count, int statistics,
+        const struct md_ipc_inherited *inherited, struct md_fs_worker **out) {
     struct md_fs_worker *w = calloc(1, sizeof(*w));
     if (!w) return -ENOMEM;
     w->wake = w->done = w->stop = w->ready = -1;
@@ -153,6 +161,7 @@ int md_fs_worker_start(const char *store, const char *endpoint, const char *admi
     w->tasks = tasks;
     w->exchanges=exchanges;
     w->attachments = attachments; w->attachment_count = attachment_count;
+    w->inherited=inherited;
     w->completed_tail = &w->completed;
     w->submitted_tail = &w->submitted;
     int *fds[] = {&w->wake, &w->done, &w->stop, &w->ready};

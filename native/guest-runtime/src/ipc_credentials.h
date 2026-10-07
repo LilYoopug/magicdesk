@@ -27,6 +27,17 @@ struct md_ipc_binding {
     enum md_ipc_ancillary_transport transport;
 };
 int md_ipc_credentials_bind(struct md_ipc_credentials *, int socket, struct md_ipc_binding *);
+/* Crossing an unadapted boundary latches actual UNIX socket cookies native-only.
+ * Already adapted connections/listeners fail EXDEV before any send. A failed
+ * or cancelled send cannot undo exposure. No descriptors are retained. */
+int md_ipc_credentials_native(struct md_ipc_credentials *, const int *fds, unsigned count);
+/* Capture before forking the initial guest. It retains these sockets until
+ * admission completes; known runtime agreements survive internal exec/launch.
+ * Unknown inherited sockets can never acquire an adapted protocol later. */
+struct md_ipc_inherited { uint64_t *cookies; unsigned count; };
+int md_ipc_inherited_capture(struct md_ipc_inherited *);
+int md_ipc_credentials_inherit(struct md_ipc_credentials *, const struct md_ipc_inherited *);
+void md_ipc_inherited_release(struct md_ipc_inherited *);
 /* No allocation, FD duplication or SQL. Both bindings pin the live epoch;
  * matching retained store identities therefore refer to that same epoch. */
 int md_ipc_binding_copy(struct md_ipc_binding *, const struct md_ipc_binding *);

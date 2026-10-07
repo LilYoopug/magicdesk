@@ -602,8 +602,9 @@ static void origin_rights(struct msghdr *m, unsigned expected, int flags, unsign
     int fds[253]; memcpy(fds,CMSG_DATA(rights),expected*sizeof(int));
     origin_descriptors(fds,expected,flags);
 }
+static void capture_channel_admission(int socket, int full);
 static void origin_send(unsigned mode, int protected) {
-    CHECK(mode<15);
+    CHECK(mode<16);
     int file=open("/tmp/outgoing-file",O_CREAT|O_RDWR|O_TRUNC|O_CLOEXEC,0600);
     CHECK(file>=0 && write(file,"send",4)==4 && lseek(file,1,SEEK_SET)==1);
     int directory=open("/tmp",O_PATH|O_DIRECTORY|O_CLOEXEC); CHECK(directory>=0);
@@ -668,14 +669,25 @@ static void origin_send(unsigned mode, int protected) {
         CHECK(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0) && !prctl(PR_SET_SECCOMP,SECCOMP_MODE_FILTER,&filter));
         int domain; socklen_t length=sizeof(domain);
         CHECK(getsockopt(STDIN_FILENO,SOL_SOCKET,SO_DOMAIN,&domain,&length)==-1 && errno==EACCES);
+        capture_channel_admission(STDIN_FILENO,0);
+    }
+    if (mode==15) {
+        struct sock_filter code[]={
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_gettid,0,1),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EACCES),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)};
+        struct sock_fprog filter={sizeof(code)/sizeof(*code),code};
+        CHECK(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0) && !prctl(PR_SET_SECCOMP,SECCOMP_MODE_FILTER,&filter));
     }
     int before[1024]; for (unsigned i=0;i<1024;++i) before[i]=fcntl((int)i,F_GETFD);
     int batch=mode==6 || mode==13;
     int result=batch ? sendmmsg(STDIN_FILENO,messages,2,MSG_NOSIGNAL)
         : (int)sendmsg(STDIN_FILENO,&messages[0].msg_hdr,MSG_NOSIGNAL);
-    int expected=mode==4 ? EBADF : mode==5 ? EACCES : mode==7 ? EFAULT : mode==11 ? EINVAL : mode==14 ? EPERM : 0;
+    int expected=mode==4 ? EBADF : mode==5 || mode==15 ? EACCES : mode==7 ? EFAULT : mode==11 ? EINVAL : mode==14 ? EPERM : 0;
     if (expected) CHECK(result==-1 && errno==expected);
     else CHECK(result==(batch ? 2 : 1));
+    if (mode==15) CHECK(sendmsg(STDIN_FILENO,&messages[0].msg_hdr,MSG_NOSIGNAL)==-1 && errno==EACCES);
     for (unsigned i=0;i<1024;++i) CHECK(before[i]==fcntl((int)i,F_GETFD));
     if (mode==2) CHECK(!setrlimit(RLIMIT_NOFILE,&limit));
     while (held_count) CHECK(!close(held[--held_count]));
@@ -683,7 +695,24 @@ static void origin_send(unsigned mode, int protected) {
     printf("PASS capsule guest sender mode=%u protected=%d\n",mode,protected);
 }
 static void origin_receive(unsigned mode, int protected) {
-    CHECK(mode<14); if (protected) CHECK(!prctl(PR_SET_DUMPABLE,0));
+    int filtered=protected&2; protected&=1;
+    CHECK(mode<15); if (protected) CHECK(!prctl(PR_SET_DUMPABLE,0));
+    if (filtered) {
+        struct sock_filter code[]={
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_clone,0,1),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EPERM),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_getsockopt,0,3),
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[2])),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SO_DOMAIN,0,1),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EACCES),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)};
+        struct sock_fprog filter={sizeof(code)/sizeof(*code),code};
+        CHECK(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0) && !prctl(PR_SET_SECCOMP,SECCOMP_MODE_FILTER,&filter));
+        CHECK(syscall(SYS_clone,0,0,0,0,0)==-1 && errno==EPERM);
+        int domain; socklen_t size=sizeof(domain);
+        CHECK(getsockopt(STDIN_FILENO,SOL_SOCKET,SO_DOMAIN,&domain,&size)==-1 && errno==EACCES);
+    }
     for (unsigned pass=0;pass<(!mode || mode>=4 ? 2U : 1U);++pass) {
         union { struct cmsghdr align; char bytes[CMSG_SPACE(253*sizeof(int))+CMSG_SPACE(sizeof(struct ucred))]; } control[2]={0};
         char bytes[2]={0}; struct iovec io[2]; struct mmsghdr m[2]={0};
@@ -701,6 +730,11 @@ static void origin_receive(unsigned mode, int protected) {
         int before[1024];
         int held[1024]; unsigned held_count=0;
         struct rlimit limit={0};
+        if (mode==14) {
+            memory=mmap(NULL,3*page,PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+            CHECK(memory!=MAP_FAILED);
+            target->msg_control=memory;
+        }
         if (!peek && mode>=4 && mode<10) {
             for (unsigned i=0;i<1024;++i) before[i]=fcntl((int)i,F_GETFD);
             if (mode<7) {
@@ -738,6 +772,10 @@ static void origin_receive(unsigned mode, int protected) {
             }
         }
         int result=mode==3 ? recvmmsg(STDIN_FILENO,m,count,flags,NULL) : (int)recvmsg(STDIN_FILENO,target,flags);
+        if (mode==14) CHECK(!mprotect(memory,3*page,PROT_READ|PROT_WRITE));
+        if (result!=(int)count)
+            fprintf(stderr,"origin receive mode=%u protected=%d filtered=%d pass=%u result=%d errno=%d\n",
+                mode,protected,!!filtered,pass,result,errno);
         CHECK(!peek && (mode==6 || mode==9) ? result==-1 && errno==(mode==6 ? EFAULT : ETOOMANYREFS)
             : result==(int)count);
         if (mode>=7 && mode<10 && !peek) CHECK(!setrlimit(RLIMIT_NOFILE,&limit));
@@ -745,6 +783,12 @@ static void origin_receive(unsigned mode, int protected) {
         if (mode==9 && !peek) {
             for (unsigned i=0;i<1024;++i) CHECK(fcntl((int)i,F_GETFD)==before[i]);
             continue;
+        }
+        if (!peek && (mode==7 || mode==8)) {
+            for (unsigned i=expected;i<253;++i) {
+                int untouched; memcpy(&untouched,control[0].bytes+CMSG_LEN(0)+i*sizeof(int),sizeof(untouched));
+                CHECK(!untouched);
+            }
         }
         for (unsigned i=0;i<count;++i) {
             CHECK(bytes[i]=='s' && (mode!=3 || m[i].msg_len==1));
@@ -758,7 +802,7 @@ static void origin_receive(unsigned mode, int protected) {
         }
         if (memory) CHECK(!munmap(memory,3*page));
     }
-    printf("PASS capsule guest receiver mode=%u protected=%d\n",mode,protected);
+    printf("PASS capsule guest receiver mode=%u protected=%d filtered=%d\n",mode,protected,!!filtered);
 }
 static void addressed_receive(int socket, unsigned mode) {
     /* EVENT_WAIT: one test datagram; expiry is a failed delivery, not readiness. */
@@ -766,7 +810,10 @@ static void addressed_receive(int socket, unsigned mode) {
     char data=0; struct iovec io={&data,1};
     union { struct cmsghdr align; char bytes[CMSG_SPACE(253*sizeof(int))+CMSG_SPACE(sizeof(struct ucred))]; } control;
     struct msghdr m={.msg_iov=&io,.msg_iovlen=1,.msg_control=&control,.msg_controllen=sizeof(control)};
-    CHECK(recvmsg(socket,&m,MSG_CMSG_CLOEXEC)==(mode==7 ? 0 : 1));
+    ssize_t received=recvmsg(socket,&m,MSG_CMSG_CLOEXEC);
+    if (received!=(mode==7 ? 0 : 1))
+        fprintf(stderr,"addressed receive mode=%u socket=%d result=%zd errno=%d\n",mode,socket,received,errno);
+    CHECK(received==(mode==7 ? 0 : 1));
     CHECK((mode==7 || data=='a') && !(m.msg_flags&(MSG_CTRUNC|MSG_TRUNC)));
     unsigned count=0;
     for (struct cmsghdr *h=CMSG_FIRSTHDR(&m);h;h=CMSG_NXTHDR(&m,h)) {
@@ -781,6 +828,23 @@ static void addressed_receive(int socket, unsigned mode) {
         count+=n;
     }
     CHECK(count==(mode==0 || mode==4 ? 0 : mode==2 ? 253 : 1));
+}
+static void capture_channel_admission(int socket, int full) {
+    int before[1024];
+    for (unsigned i=0;i<1024;++i) before[i]=fcntl(i,F_GETFD);
+    char byte; struct iovec io={&byte,1};
+    struct msghdr m={.msg_iov=&io,.msg_iovlen=1};
+    CHECK(recvmsg(socket,&m,MSG_DONTWAIT)==-1 && errno==(full ? EMFILE : EAGAIN));
+    unsigned admitted=0;
+    for (unsigned i=0;i<1024;++i) {
+        int after=fcntl(i,F_GETFD);
+        if (before[i]==after) continue;
+        CHECK(!full && before[i]<0 && after==FD_CLOEXEC);
+        int type=0; socklen_t size=sizeof(type);
+        CHECK(!getsockopt(i,SOL_SOCKET,SO_TYPE,&type,&size) && type==SOCK_SEQPACKET);
+        ++admitted;
+    }
+    CHECK(admitted==(full ? 0U : 1U));
 }
 static void addressed_send(const char *path, unsigned protected, unsigned full, int local, uid_t uid, gid_t gid) {
     if (!strcmp(path,"addressed")) CHECK(!chdir("/attached"));
@@ -808,7 +872,12 @@ static void addressed_send(const char *path, unsigned protected, unsigned full, 
         CHECK(!setrlimit(RLIMIT_NOFILE,&limit));
         int fd; while ((fd=dup(file))>=0) { CHECK(held_count<1024); held[held_count++]=fd; }
         CHECK(errno==EMFILE);
+        capture_channel_admission(socket_fd,1);
+        CHECK(held_count && !close(held[--held_count]));
     }
+    /* One table-owned infrastructure FD is admitted once. Every subsequent
+     * send must preserve this exact baseline, including a full application table. */
+    capture_channel_admission(socket_fd,0);
     for (unsigned mode=0;mode<9;++mode) {
         char byte='a'; struct iovec io={mode==6 ? (void *)1 : &byte,mode==7 ? 0 : 1};
         union { struct cmsghdr align; char bytes[CMSG_SPACE(253*sizeof(int))+CMSG_SPACE(sizeof(struct ucred))]; } control={0};
@@ -881,9 +950,83 @@ static void addressed_fixture(const char *runner, const char *store, const char 
     }
     puts("PASS addressed send custody: absolute/relative anchors, inode and binary abstract destinations");
 }
+static int boundary_send(int socket, int fd, int batch) {
+    char byte='n'; struct iovec io={&byte,1};
+    union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(int))]; } control={0};
+    control.align=(struct cmsghdr){.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_RIGHTS,.cmsg_len=CMSG_LEN(sizeof(int))};
+    memcpy(CMSG_DATA(&control.align),&fd,sizeof(fd));
+    struct mmsghdr m={.msg_hdr={.msg_iov=&io,.msg_iovlen=1,.msg_control=control.bytes,.msg_controllen=sizeof(control)}};
+    return batch ? sendmmsg(socket,&m,1,MSG_NOSIGNAL) : (int)sendmsg(socket,&m.msg_hdr,MSG_NOSIGNAL);
+}
+static int boundary_receive(int socket) {
+    char byte; struct iovec io={&byte,1};
+    union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(int))]; } control={0};
+    struct msghdr m={.msg_iov=&io,.msg_iovlen=1,.msg_control=control.bytes,.msg_controllen=sizeof(control)};
+    /* EVENT_WAIT: peer publishes one descriptor; launch/alarm expiry fails. */
+    CHECK(recvmsg(socket,&m,MSG_CMSG_CLOEXEC)==1 && byte=='n' && !(m.msg_flags&MSG_CTRUNC));
+    struct cmsghdr *h=CMSG_FIRSTHDR(&m);
+    CHECK(h && h->cmsg_level==SOL_SOCKET && h->cmsg_type==SCM_RIGHTS && h->cmsg_len==CMSG_LEN(sizeof(int)));
+    int fd; memcpy(&fd,CMSG_DATA(h),sizeof(fd)); return fd;
+}
+static void boundary_guest(int mode, int protected) {
+    if (protected) CHECK(!prctl(PR_SET_DUMPABLE,0));
+    int framed[2]; CHECK(!socketpair(AF_UNIX,SOCK_STREAM,0,framed));
+    int file=(int)syscall(SYS_memfd_create,"boundary",0); CHECK(file>=0 && write(file,"v",1)==1);
+    CHECK(boundary_send(framed[0],file,0)==1);
+    for (int batch=0;batch<2;++batch) {
+        CHECK(boundary_send(STDIN_FILENO,framed[1],batch)==-1 && errno==EXDEV);
+    }
+    int received=boundary_receive(framed[1]); char byte;
+    CHECK(pread(received,&byte,1,0)==1 && byte=='v' && !close(received));
+    CHECK(!close(framed[0]) && !close(framed[1]));
+    int raw=mode==1 ? 3 : mode==2 ? boundary_receive(STDIN_FILENO) : socket(AF_UNIX,SOCK_STREAM,0);
+    CHECK(raw>=0);
+    if (!mode) CHECK(boundary_send(STDIN_FILENO,raw,protected)==1);
+    int server=socket(AF_UNIX,SOCK_STREAM,0); CHECK(server>=0);
+    struct sockaddr_un a={.sun_family=AF_UNIX};
+    snprintf(a.sun_path+1,sizeof(a.sun_path)-1,"md-boundary-%d",getpid());
+    socklen_t size=offsetof(struct sockaddr_un,sun_path)+1+strlen(a.sun_path+1);
+    CHECK(!bind(server,(void *)&a,size) && !listen(server,1) && !connect(raw,(void *)&a,size));
+    int accepted=accept(server,NULL,NULL); CHECK(accepted>=0);
+    CHECK(write(STDIN_FILENO,"r",1)==1);
+    CHECK(boundary_send(accepted,file,protected)==1);
+    CHECK(read(accepted,&byte,1)==1 && byte=='k');
+    CHECK(!close(accepted) && !close(server) && !close(raw) && !close(file));
+    printf("PASS guest native boundary mode=%d protected=%d: rejected sendmsg/sendmmsg preserves queued capsule, native peer receives real FD\n",mode,protected);
+}
+static void boundary_fixture(const char *runner, const char *store) {
+    alarm(120);
+    for (int mode=0;mode<3;++mode) for (int protected=0;protected<2;++protected) {
+        int control[2]; CHECK(!socketpair(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0,control));
+        int raw=mode ? socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0) : -1;
+        CHECK(!mode || raw>=0);
+        pid_t child=fork(); CHECK(child>=0);
+        if (!child) {
+            CHECK(!prctl(PR_SET_PDEATHSIG,SIGKILL));
+            CHECK(dup2(control[1],STDIN_FILENO)==STDIN_FILENO);
+            if (mode==1) CHECK(dup2(raw,3)==3 && !fcntl(3,F_SETFD,0));
+            char m[4], p[4]; snprintf(m,sizeof(m),"%d",mode); snprintf(p,sizeof(p),"%d",protected);
+            execl(runner,runner,"--store",store,"--user","0:0","--deadline-seconds","20",
+                "--","/bin/test","--boundary",m,p,(char *)NULL); _exit(90);
+        }
+        CHECK(!close(control[1]));
+        if (!mode) raw=boundary_receive(control[0]);
+        if (mode==2) CHECK(boundary_send(control[0],raw,0)==1);
+        char ready;
+        CHECK(read(control[0],&ready,1)==1 && ready=='r');
+        /* EVENT_WAIT: guest connect and accepted-side publication; alarm fails. */
+        struct pollfd pollfd={raw,POLLIN,0};
+        CHECK(poll(&pollfd,1,20000)==1 && (pollfd.revents&POLLIN));
+        int file=boundary_receive(raw); char byte;
+        CHECK(pread(file,&byte,1,0)==1 && byte=='v' && write(raw,"k",1)==1 && !close(file));
+        done(child); CHECK(!close(raw));
+        CHECK(!read(control[0],&byte,1) && !close(control[0]));
+    }
+}
 int main(int argc,char **argv) {
     setvbuf(stdout,NULL,_IONBF,0);
     if (argc==2 && !strcmp(argv[1],"--nonunix-rights")) { alarm(20); nonunix_rights(); return 0; }
+    if (argc==4 && !strcmp(argv[1],"--boundary-fixture")) { boundary_fixture(argv[2],argv[3]); return 0; }
     if (argc==5 && !strcmp(argv[1],"--address-fixture")) { addressed_fixture(argv[2],argv[3],argv[4]); return 0; }
     if (argc==8 && !strcmp(argv[1],"--address-send")) {
         addressed_send(argv[2],atoi(argv[3]),atoi(argv[4]),atoi(argv[5]),atoi(argv[6]),atoi(argv[7])); return 0;
@@ -893,6 +1036,7 @@ int main(int argc,char **argv) {
         custody(!strcmp(argv[1],"--custody"),atoi(argv[2]),atoi(argv[3])); return 0;
     }
     CHECK(getuid()==0);
+    if (argc==4 && !strcmp(argv[1],"--boundary")) { boundary_guest(atoi(argv[2]),atoi(argv[3])); return 0; }
     if (argc==4 && !strcmp(argv[1],"--origin-receive")) { origin_receive((unsigned)atoi(argv[2]),atoi(argv[3])); return 0; }
     if (argc==4 && !strcmp(argv[1],"--origin-send")) { origin_send((unsigned)atoi(argv[2]),atoi(argv[3])); return 0; }
     if (argc==4 && !strcmp(argv[1],"--external")) { external(argv[2],(pid_t)atoi(argv[3])); return 0; }

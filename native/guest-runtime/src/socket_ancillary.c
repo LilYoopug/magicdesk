@@ -9,6 +9,7 @@
 #include "task_send.h"
 #include "task_receive.h"
 #include "task_outgoing.h"
+#include "interception.h"
 #include "raw.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -35,6 +36,74 @@ static void *buffer(size_t size, void *local, size_t capacity) {
 }
 static void release(void *p, void *local, size_t size) { if (p && p != local) RAW2(munmap,p,size); }
 extern long md_guest_buffer_control(unsigned, unsigned long, unsigned long);
+static long capture_inputs(long state, struct md_fd_capture_frame *f, const int *numbers, unsigned count) {
+    while (state>0 && state!=MD_IPC_TASK_IO) {
+        if (state==MD_FD_CAPTURE_ADMIT) {
+            /* Admission must not turn an originally invalid source slot into
+             * the infrastructure endpoint. The source-table turn is held. */
+            for (unsigned i=0;i<count;++i) {
+                long valid=RAW2(fcntl,numbers[i],F_GETFD);
+                if (valid<0) return md_guest_buffer_control(MD_FS_BUFFER_IPC_CAPTURE_SENT,valid,0);
+            }
+            long fd=md_guest_buffer_admit(MD_FS_BUFFER_IPC_ADMIT);
+            if (fd<0) return md_guest_buffer_control(MD_FS_BUFFER_IPC_CAPTURE_SENT,fd,0);
+            state=md_guest_buffer_control(MD_FS_BUFFER_IPC_CAPTURE_READY,0,0);
+        } else if (state==MD_FD_CAPTURE_CHECK) {
+            struct md_fd_channel_observation *o=&f->observation;
+            *o=(struct md_fd_channel_observation){.length=sizeof(o->cookie)};
+            long flags=RAW2(fcntl,f->endpoint,F_GETFD);
+            o->error=flags<0 ? (int)flags : (int)RAW5(getsockopt,f->endpoint,SOL_SOCKET,SO_COOKIE,&o->cookie,&o->length);
+            if (flags>=0) o->flags=(unsigned)flags;
+            state=md_guest_buffer_control(MD_FS_BUFFER_IPC_CAPTURE_OBSERVED,0,0);
+        } else if (state==MD_FD_CAPTURE_SEND) {
+            if (!f->count || f->count>253 || f->offset>count || f->count>count-f->offset) return -EPROTO;
+            _Alignas(struct cmsghdr) char control[CMSG_SPACE(253*sizeof(int))];
+            struct iovec data={&f->token,sizeof(f->token)};
+            struct msghdr m={.msg_iov=&data,.msg_iovlen=1,.msg_control=control,
+                .msg_controllen=CMSG_SPACE(f->count*sizeof(int))};
+            memset(control,0,m.msg_controllen);
+            struct cmsghdr *h=CMSG_FIRSTHDR(&m);
+            *h=(struct cmsghdr){.cmsg_len=CMSG_LEN(f->count*sizeof(int)),.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_RIGHTS};
+            memcpy(CMSG_DATA(h),numbers+f->offset,f->count*sizeof(int));
+            long sent=RAW3(sendmsg,f->endpoint,&m,MSG_DONTWAIT|MSG_NOSIGNAL);
+            state=md_guest_buffer_control(MD_FS_BUFFER_IPC_CAPTURE_SENT,sent,0);
+        } else return -EPROTO;
+    }
+    return state;
+}
+static long io_prepare(struct md_ipc_io_message *io, const struct msghdr *m, int sending) {
+    if (m->msg_iovlen>1024 || m->msg_controllen>sizeof(io->control)
+            || m->msg_namelen>sizeof(io->address)) return -EMSGSIZE;
+    io->size=0; io->control_size=m->msg_controllen;
+    io->address_size=m->msg_name ? m->msg_namelen : 0; io->flags=0;
+    for (size_t i=0;i<m->msg_iovlen;++i) {
+        struct iovec v;
+        if (md_read_memory(&v,m->msg_iov+i,sizeof(v))) return -EFAULT;
+        if (v.iov_len>sizeof(io->data)-io->size) return -EMSGSIZE;
+        if (sending && md_read_memory(io->data+io->size,v.iov_base,v.iov_len)) return -EFAULT;
+        io->size+=v.iov_len;
+    }
+    if (sending && (md_read_memory(io->control,m->msg_control,io->control_size)
+            || md_read_memory(&io->address,m->msg_name,io->address_size))) return -EFAULT;
+    return 0;
+}
+static long io_scatter(struct md_ipc_io_message *io, struct msghdr *m, long result) {
+    if (result<0) return result;
+    size_t copied=0, remaining=(size_t)result<io->size ? (size_t)result : io->size;
+    for (size_t i=0;remaining && i<m->msg_iovlen;++i) {
+        struct iovec v;
+        if (md_read_memory(&v,m->msg_iov+i,sizeof(v))) return -EFAULT;
+        size_t n=v.iov_len<remaining ? v.iov_len : remaining;
+        if (md_write_memory(v.iov_base,io->data+copied,n)) return -EFAULT;
+        copied+=n; remaining-=n;
+    }
+    if (io->control_size>m->msg_controllen || io->address_size>sizeof(io->address)) return -EPROTO;
+    if (md_write_memory(m->msg_control,io->control,io->control_size)) return -EFAULT;
+    if (m->msg_name && md_write_memory(m->msg_name,&io->address,
+            m->msg_namelen<io->address_size ? m->msg_namelen : io->address_size)) return -EFAULT;
+    m->msg_controllen=io->control_size; m->msg_namelen=io->address_size; m->msg_flags=io->flags;
+    return result;
+}
 static long send_captured(const struct msghdr *original, const unsigned long *a,
         void *control, size_t capacity, const struct iovec *sendto) {
     long address=md_adapter_buffer_take();
@@ -78,7 +147,8 @@ static long send_captured(const struct msghdr *original, const unsigned long *a,
         if (CMSG_ALIGN(h.cmsg_len)>original->msg_controllen-pos) break;
         pos+=CMSG_ALIGN(h.cmsg_len);
     }
-    if (!result) result=md_guest_buffer_control(MD_FS_BUFFER_SEND_PREPARE,0,0);
+    if (!result) result=capture_inputs(md_guest_buffer_control(MD_FS_BUFFER_SEND_PREPARE,0,0),
+        &frame->scratch.capture.capture,frame->input.keep,frame->input.count);
     if (!result) {
         unsigned data=frame->input.count-1;
         unsigned expected=(frame->transport==MD_IPC_TRANSPORT_ORIGINS_V1 && data ? 1 : data)
@@ -86,7 +156,7 @@ static long send_captured(const struct msghdr *original, const unsigned long *a,
         size_t rights=frame->rights ? CMSG_SPACE(frame->rights*sizeof(int)) : 0;
         if (frame->rights>253 || frame->rights!=expected || rights>capacity-misc) result=-EPROTO;
         else {
-            if (frame->destination.credentials) {
+            if (frame->destination.credentials && frame->options.credentials) {
                 struct ucred native={(pid_t)RAW0(getpid),(uid_t)RAW0(getuid),(gid_t)RAW0(getgid)};
                 memcpy((char *)control+credential_offset,&native,sizeof(native));
             }
@@ -94,11 +164,18 @@ static long send_captured(const struct msghdr *original, const unsigned long *a,
             /* recvmsg in the private helper fills the initial rights block. */
             frame->message.msg_control=rights+misc ? control : NULL;
             frame->message.msg_controllen=rights+misc;
+            if (frame->brokered && rights) {
+                struct cmsghdr *h=control;
+                memset(control,0,rights);
+                *h=(struct cmsghdr){.cmsg_len=CMSG_LEN(frame->rights*sizeof(int)),
+                    .cmsg_level=SOL_SOCKET,.cmsg_type=SCM_RIGHTS};
+            }
             if (frame->options.addressed) {
                 frame->message.msg_name=&frame->destination.address;
                 frame->message.msg_namelen=frame->destination.length;
             }
-            result=md_guest_buffer_control(MD_FS_BUFFER_SEND_COMMIT,0,0);
+            if (frame->brokered) result=io_prepare(&frame->scratch.capture.io,&frame->message,1);
+            if (!result) result=md_guest_buffer_control(MD_FS_BUFFER_SEND_COMMIT,0,0);
         }
     }
     long released=md_adapter_buffer_release();
@@ -226,8 +303,20 @@ static long receive_owned(struct md_task_receive input, int *accepted) {
     if (address<0) return address;
     struct md_task_receive_frame *frame=(void *)address;
     frame->input=input;
-    long result=md_guest_buffer_control(MD_FS_BUFFER_TASK_RECEIVE,0,0);
-    if (!result) { *accepted=1; result=frame->result; }
+    long result=capture_inputs(md_guest_buffer_control(MD_FS_BUFFER_TASK_RECEIVE,0,0),
+        &frame->capture,&frame->input.socket,1);
+    if (result==MD_IPC_TASK_IO) {
+        if (input.batch) result=-EOPNOTSUPP;
+        else {
+            struct msghdr *m=(void *)input.messages;
+            result=io_prepare(&frame->io,m,0);
+            if (!result) {
+                result=md_guest_buffer_control(MD_FS_BUFFER_IPC_RECEIVE,0,0);
+                *accepted=1;
+                result=io_scatter(&frame->io,m,result);
+            }
+        }
+    } else if (!result) { *accepted=1; result=frame->result; }
     long released=md_adapter_buffer_release();
     return result<0 ? result : released ? released : result;
 }

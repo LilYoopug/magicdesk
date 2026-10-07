@@ -17,5 +17,6 @@ struct md_task_outgoing_frame {
     struct md_ipc_send_options options;
     struct md_ipc_send_address destination;
     unsigned rights, transport;
+    unsigned brokered;
 };
 #endif

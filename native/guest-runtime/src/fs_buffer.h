@@ -14,11 +14,13 @@ enum md_fs_buffer_control { MD_FS_BUFFER_CALL=16, MD_FS_BUFFER_ACK, MD_FS_BUFFER
     MD_FS_BUFFER_CHANNEL_OBSERVED, MD_FS_BUFFER_PROC_LINK, MD_FS_BUFFER_TASK_DONE,
     MD_FS_BUFFER_TASK_RECEIVE, MD_FS_BUFFER_RECEIVED_INSPECT,
     MD_FS_BUFFER_RECEIVED_RIGHTS, MD_FS_BUFFER_RECEIVED_DROP,
-    MD_FS_BUFFER_SEND_PREPARE, MD_FS_BUFFER_SEND_COMMIT };
+    MD_FS_BUFFER_SEND_PREPARE, MD_FS_BUFFER_SEND_COMMIT,
+    MD_FS_BUFFER_IPC_CAPTURE_READY, MD_FS_BUFFER_IPC_CAPTURE_SENT,
+    MD_FS_BUFFER_IPC_CAPTURE_OBSERVED, MD_FS_BUFFER_IPC_RECEIVE };
 enum { MD_FS_BUFFER_SOURCE=-2 };
 enum md_fs_buffer_transfer { MD_FS_BUFFER_NO_FD, MD_FS_BUFFER_ANCHOR, MD_FS_BUFFER_ADDFD, MD_FS_BUFFER_RIGHTS,
     MD_FS_BUFFER_TASK_PATH };
-enum { MD_FS_BUFFER_EXPORT=2, MD_FS_BUFFER_IMPORT=3, MD_FS_BUFFER_CHANNEL_CHECK=4 };
+enum { MD_FS_BUFFER_EXPORT=2, MD_FS_BUFFER_IMPORT=3, MD_FS_BUFFER_CHANNEL_CHECK=4, MD_FS_BUFFER_IPC_ADMIT=5 };
 /* Stateful inputs are captured according to md_fs_operation_data_inputs. */
 static inline int md_fs_buffer_operation(unsigned operation) {
     switch (operation) {
@@ -65,10 +67,11 @@ struct md_fs_buffer_frame {
     unsigned transfer;
     struct { uint64_t request; unsigned mask; int number; } export;
     char source[96];
-    struct { uint64_t token; int number; } receive;
+    struct { uint64_t token; int number; unsigned mapped; } receive;
     struct { unsigned count; int index[253]; } rights;
     struct { int number; struct md_fd_channel_observation observation; } channel;
-    _Alignas(struct md_fd_receipt) unsigned char receipt[offsetof(struct md_fd_receipt,control)+CMSG_SPACE(sizeof(int))];
+    _Alignas(struct md_fd_receipt) unsigned char receipt[
+        offsetof(struct md_fd_receipt,control)+CMSG_SPACE(MD_FD_RECEIPT_MAX*sizeof(int))];
     /* Faulted and copied only for explicit value operations, not ordinary IO. */
     union {
         unsigned char value[MD_FS_OUTPUT_MAX];

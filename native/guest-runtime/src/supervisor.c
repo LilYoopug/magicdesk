@@ -19,6 +19,7 @@
 #include "task_helper.h"
 #include "task_outgoing.h"
 #include "ipc_origins.h"
+#include "ipc_io_host.h"
 #include "received_fds.h"
 #include "fs_buffer.h"
 #include "adapter_frame.h"
@@ -145,16 +146,15 @@ struct outgoing_owner {
     struct md_fd_message *message;
     struct md_ipc_origin_request *preparation;
     struct md_received_fds *prepared;
+    struct md_fd_capture capture;
+    int brokered, io_waiting;
 };
 /* Cold, authenticated-origin delivery only. The receive owner retains this
- * storage and its task-local directory until helper reaping/return publication. */
+ * storage until the shared kernel receipt completes origin publication. */
 struct receive_publication {
-    struct md_fd_table_observation observation;
     struct md_fs_anchor *origins[253];
     struct md_fd_origin_update updates[253];
     int numbers[253];
-    unsigned count;
-    int directory, capturing;
 };
 struct receive_owner {
     pid_t caller;
@@ -166,6 +166,8 @@ struct receive_owner {
     struct md_received_fds *expanded;
     struct receive_publication *publication;
     int outgoing[253];
+    struct md_fd_capture capture;
+    int brokered, io_waiting;
 };
 struct thread {
     struct thread *next;
@@ -193,6 +195,7 @@ struct thread {
     unsigned calls;
     char endpoint[108];
     int filter_length;
+    int application_filter;
     struct metadata_operation metadata;
     struct md_task_resources resources;
     struct md_resource_change resource_change;
@@ -259,6 +262,7 @@ static struct md_shm *shm;
 static struct md_task_helpers *helpers;
 static struct md_ipc *ipc;
 static int ipc_events=-1;
+static int socket_events=-1;
 static uint64_t ipc_sequence;
 static const char *shm_store;
 static struct md_namespace_broker *broker;
@@ -281,6 +285,8 @@ static void dispatch(struct thread *t);
 static void report_statistics(void);
 static int debugger_allowed(pid_t, pid_t);
 static void ipc_unwatch(struct thread *);
+static void ipc_capture_step(struct thread *, unsigned, long);
+static void socket_io_progress(struct thread *);
 static const unsigned long trace_options = PTRACE_O_TRACESECCOMP | PTRACE_O_TRACEEXEC
     | PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK | PTRACE_O_TRACEVFORKDONE | PTRACE_O_TRACECLONE
     | PTRACE_O_EXITKILL | PTRACE_O_TRACESYSGOOD;
@@ -367,6 +373,8 @@ static void cleanup(void) {
     md_ipc_close(ipc); ipc = NULL;
     if (ipc_events>=0) close(ipc_events);
     ipc_events=-1;
+    if (socket_events>=0) close(socket_events);
+    socket_events=-1;
     if (md_fs_worker_stop(filesystem)) _Exit(125);
     md_fs_buffer_service_destroy(buffer_service); buffer_service=NULL;
     md_ipc_origins_destroy(origin_service); origin_service=NULL;
@@ -397,17 +405,20 @@ static void release_operation(struct thread *t) {
 }
 static void receive_release(struct receive_owner *owner) {
     if (!owner) return;
+    if (owner->io_waiting && owner->received)
+        epoll_ctl(socket_events,EPOLL_CTL_DEL,owner->received->fds[0],NULL);
+    md_fd_capture_cancel(&owner->capture);
     if (owner->files.table && md_fd_order_cancel(&owner->files)==1)
         CHECK(!md_fd_order_complete(&owner->files));
-    if (owner->publication) {
-        if (owner->publication->directory>=0) close(owner->publication->directory);
-        free(owner->publication);
-    }
+    free(owner->publication);
     md_received_fds_release(owner->expanded);
     md_received_fds_release(owner->received); free(owner);
 }
 static void outgoing_release(struct outgoing_owner *owner) {
     if (!owner) return;
+    if (owner->io_waiting && owner->prepared)
+        epoll_ctl(socket_events,EPOLL_CTL_DEL,owner->prepared->fds[0],NULL);
+    md_fd_capture_cancel(&owner->capture);
     if (owner->files.table && md_fd_order_cancel(&owner->files)==1)
         CHECK(!md_fd_order_complete(&owner->files));
     md_ipc_origins_cancel(&owner->preparation);
@@ -421,7 +432,7 @@ static void outgoing_release(struct outgoing_owner *owner) {
 static void adapter_discard(struct thread *t) {
     if (t->outgoing) {
         struct outgoing_owner *owner=t->outgoing; t->outgoing=NULL; owner->caller=0;
-        if (owner->stage==OUTGOING_CAPTURE || owner->stage==OUTGOING_SEND)
+        if (!owner->brokered && (owner->stage==OUTGOING_CAPTURE || owner->stage==OUTGOING_SEND))
             CHECK(!md_task_helper_detach(helpers,t->pid));
         else outgoing_release(owner);
     }
@@ -441,7 +452,7 @@ static void adapter_discard(struct thread *t) {
     CHECK(!md_fd_return_cancel(&t->buffer_return));
     if (t->receive) {
         struct receive_owner *owner=t->receive; t->receive=NULL; owner->caller=0;
-        if ((owner->started && !owner->ready) || (owner->publication && owner->publication->capturing))
+        if (!owner->brokered && owner->started && !owner->ready)
             CHECK(!md_task_helper_detach(helpers,t->pid));
         else receive_release(owner);
     }
@@ -1006,9 +1017,34 @@ static void handle_notification(const struct seccomp_notif *request) {
     if (mapped) return;
     struct seccomp_notif q = *request;
     CHECK(q.data.nr == SYS_fstat || q.data.nr == SYS_openat || q.data.nr == SYS_newfstatat
-        || q.data.nr == SYS_getdents64 || q.data.nr == SYS_prctl);
+        || q.data.nr == SYS_getdents64 || q.data.nr == SYS_prctl || q.data.nr == SYS_gettid);
     struct thread *t = find_thread((pid_t)q.pid);
     CHECK(t && t->born);
+    if (q.data.nr==SYS_gettid) {
+        int value=-EPERM;
+        if (t->ready && q.data.instruction_pointer==abi.buffer_admit
+                && !q.data.args[1] && !q.data.args[2] && !q.data.args[3]
+                && !q.data.args[4] && !q.data.args[5]) {
+            if (q.data.args[0]==MD_FS_BUFFER_IMPORT)
+                value=md_fd_return_install(&t->buffer_return,listener,q.id);
+            else if (q.data.args[0]==MD_FS_BUFFER_IPC_ADMIT) {
+                struct md_fd_capture *capture=NULL;
+                struct md_fd_order *order=NULL;
+                if (t->outgoing && t->outgoing->brokered && t->outgoing->stage==OUTGOING_CAPTURE) {
+                    capture=&t->outgoing->capture; order=&t->outgoing->files;
+                } else if (t->receive && t->receive->brokered && !t->receive->ready) {
+                    capture=&t->receive->capture; order=&t->receive->files;
+                }
+                if (order && md_fd_order_state(order)==MD_RESOURCE_ORDER_RUNNING)
+                    value=md_fd_capture_admit(capture,order->table,listener,q.id);
+            }
+        }
+        if (value<0) {
+            struct seccomp_notif_resp reply={.id=q.id,.error=value};
+            CHECK(!ioctl(listener,SECCOMP_IOCTL_NOTIF_SEND,&reply) || errno==ENOENT);
+        }
+        return;
+    }
     if (q.data.nr == SYS_prctl) {
         if (q.data.args[0] == MD_GUEST_PROC_IMAGE) {
             struct seccomp_notif_resp reply={.id=q.id};
@@ -1698,6 +1734,8 @@ static void outgoing_prepared(struct md_ipc_origin_request *request, int error, 
     struct md_task_outgoing_frame *frame=span.data;
     CHECK(owner->prepared->count>=1 && owner->prepared->count<=254);
     frame->rights=owner->prepared->count-1; frame->transport=transport;
+    owner->brokered=owner->destination.brokered;
+    frame->brokered=owner->brokered;
     frame->destination=owner->destination;
     frame->destination.anchor=-1; /* Host descriptor numbers never enter guest state. */
     owner->stage=OUTGOING_READY; t->buffer_registers=owner->continuation;
@@ -1748,6 +1786,7 @@ static void outgoing_start(struct thread *t) {
         error=debugger_options(t->pid,t->debug_options);
     }
     owner->stage=OUTGOING_CAPTURE;
+    if (!error && owner->brokered) { ipc_capture_step(t,MD_FS_BUFFER_IPC_CAPTURE_READY,0); return; }
     if (!error) {
         struct md_task_helper_request request={.kind=MD_TASK_HELPER_EXPORT,
             .descriptors=owner->input.keep,.descriptor_count=owner->input.count,.captured=outgoing_captured};
@@ -1771,7 +1810,9 @@ static void outgoing_begin(struct thread *t, const struct user_pt_regs *regs) {
     if (!error) { owner=calloc(1,sizeof(*owner)); if (!owner) error=-ENOMEM; }
     if (!error) {
         *owner=(struct outgoing_owner){.caller=t->pid,.continuation=*regs,.input=input,
+            .brokered=t->application_filter,
             .options=((struct md_task_outgoing_frame *)span.data)->options,.destination={.anchor=-1}};
+        owner->options.brokered=owner->brokered;
         error=md_fd_order_begin(t->resources.files,&owner->files,fd_wakeup);
         if (error>0) error=0;
     }
@@ -1782,6 +1823,7 @@ static void outgoing_send(struct thread *t, const struct user_pt_regs *regs) {
     struct outgoing_owner *owner=t->outgoing;
     uintptr_t address=md_memory_buffer_address(t->memory,&t->buffer);
     owner->continuation=*regs; owner->stage=OUTGOING_SEND;
+    if (owner->brokered) { socket_io_progress(t); return; }
     struct md_task_helper_request request={.kind=MD_TASK_HELPER_SEND_CAPTURED,
         .send_inputs=owner->prepared,.send_import=address+offsetof(struct md_task_outgoing_frame,scratch.import),
         .send_address=owner->destination.anchor>=0 ? address+offsetof(struct md_task_outgoing_frame,destination.address) : 0,
@@ -1810,10 +1852,75 @@ static void receive_complete(void *context, struct md_task_helper_result result)
         buffer_reply(t,result.value);
     } else receive_release(owner);
 }
+static void ipc_capture_step(struct thread *t, unsigned command, long value) {
+    struct outgoing_owner *out=t->outgoing;
+    struct receive_owner *in=t->receive;
+    struct md_fd_capture *capture=out ? &out->capture : &in->capture;
+    struct md_fd_order *order=out ? &out->files : &in->files;
+    struct md_buffer_span span;
+    int error=md_buffer_span(&t->buffer,&span);
+    struct md_fd_capture_frame *frame=error ? NULL : out
+        ? &((struct md_task_outgoing_frame *)span.data)->scratch.capture.capture
+        : &((struct md_task_receive_frame *)span.data)->capture;
+    if (!error && command==MD_FS_BUFFER_IPC_CAPTURE_SENT) error=md_fd_capture_sent(capture,value);
+    if (!error && command==MD_FS_BUFFER_IPC_CAPTURE_OBSERVED)
+        error=md_fd_capture_observed(capture,order->table,frame);
+    if (!error) error=md_fd_capture_progress(capture,order->table,t->tgid,out ? out->input.count : 1,frame);
+    if (error>0) { buffer_reply(t,error); return; }
+    struct md_received_fds *received=error ? NULL : md_fd_capture_take(capture);
+    if (!error && !received) error=-EPROTO;
+    if (!error) CHECK(!md_fd_order_complete(order));
+    if (out) outgoing_exported(out,(struct md_task_helper_result){.value=error,.descriptor=-1,.received=received});
+    else if (error) receive_complete(in,(struct md_task_helper_result){.value=error,.descriptor=-1});
+    else { in->received=received; buffer_reply(t,MD_IPC_TASK_IO); }
+}
+static void socket_io_progress(struct thread *t) {
+    struct outgoing_owner *out=t->outgoing;
+    struct receive_owner *in=t->receive;
+    int *watch=out ? &out->io_waiting : &in->io_waiting;
+    int fd=out ? out->prepared->fds[0] : in->received->fds[0];
+    if (*watch) { CHECK(!epoll_ctl(socket_events,EPOLL_CTL_DEL,fd,NULL)); *watch=0; }
+    struct md_buffer_span span;
+    long result=md_buffer_span(&t->buffer,&span);
+    int waiting=0;
+    if (!result) {
+        struct md_ipc_io_message *io=out ? &((struct md_task_outgoing_frame *)span.data)->scratch.capture.io
+            : &((struct md_task_receive_frame *)span.data)->io;
+        waiting=out ? md_ipc_io_send(out->prepared,io,out->input.flags,&result)
+            : md_ipc_io_receive(&in->received,io,in->request.flags,&result);
+    }
+    if (waiting) {
+        if (socket_events<0) socket_events=epoll_create1(EPOLL_CLOEXEC);
+        struct epoll_event event={.events=(out ? EPOLLOUT : EPOLLIN)|EPOLLONESHOT,.data.u32=(unsigned)t->pid};
+        if (socket_events>=0 && !epoll_ctl(socket_events,EPOLL_CTL_ADD,fd,&event)) {
+            /* EVENT_WAIT: the captured socket's readiness; task cancellation
+             * releases its watcher and custody, without replaying committed IO. */
+            *watch=1; return;
+        }
+        result=-errno;
+    }
+    TRACE("PROBE socket-io pid=%d operation=%s result=%ld rights=%u\n",t->pid,out ? "send" : "receive",result,
+        out ? out->prepared->count-1 : in->received->count-1);
+    if (out) outgoing_complete(out,(struct md_task_helper_result){.value=result,.descriptor=-1});
+    else receive_complete(in,(struct md_task_helper_result){.value=result,.descriptor=-1,.received=in->received});
+}
+static void socket_events_ready(void) {
+    struct epoll_event events[32];
+    int count=epoll_wait(socket_events,events,32,0);
+    CHECK(count>=0 || errno==EINTR);
+    for (int i=0;i<count;++i) {
+        struct thread *t=find_thread((pid_t)events[i].data.u32);
+        if (t && ((t->outgoing && t->outgoing->io_waiting) || (t->receive && t->receive->io_waiting)))
+            socket_io_progress(t);
+    }
+}
 static void receive_start(struct thread *t) {
     struct receive_owner *owner=t->receive;
     if (!owner || owner->started || md_fd_order_state(&owner->files)!=MD_RESOURCE_ORDER_READY) return;
     int error=md_fd_order_start(&owner->files);
+    if (!error && owner->brokered) {
+        owner->started=1; ipc_capture_step(t,MD_FS_BUFFER_IPC_CAPTURE_READY,0); return;
+    }
     if (!error) {
         t->terminal_observation=1; t->trace_options_dirty=1;
         error=debugger_options(t->pid,t->debug_options);
@@ -1835,6 +1942,7 @@ static void receive_begin(struct thread *t, const struct user_pt_regs *regs) {
     if (!error) { owner=calloc(1,sizeof(*owner)); if (!owner) error=-ENOMEM; }
     if (!error) {
         *owner=(struct receive_owner){.caller=t->pid,.continuation=*regs,
+            .brokered=t->application_filter,
             .request=((struct md_task_receive_frame *)span.data)->input};
         error=md_fd_order_begin(t->resources.files,&owner->files,fd_wakeup);
         if (error>0) error=0;
@@ -1915,7 +2023,11 @@ static void buffer_return_progress(struct thread *t) {
             frame->channel.number=t->buffer_return.endpoint;
             frame->channel.observation=(struct md_fd_channel_observation){0};
             result=MD_FS_BUFFER_CHANNEL_CHECK;
-        } else { frame->receive.number=t->buffer_return.endpoint; result=0; }
+        } else {
+            frame->receive.number=t->buffer_return.endpoint;
+            frame->receive.mapped=t->buffer_return.delivery.receipt!=NULL;
+            result=0;
+        }
     }
     t->buffer_return_waiting=0;
     buffer_reply(t,result);
@@ -1925,28 +2037,18 @@ static int receive_return_begin(struct thread *t, unsigned count, int annotated)
     struct receive_publication *p=annotated ? owner->publication : NULL;
     struct md_fd_return_publication publication={0};
     if (p) {
-        p->observation=(struct md_fd_table_observation){0};
+        struct md_buffer_span span;
+        int error=md_buffer_span(&t->buffer,&span);
+        if (error) return error;
+        struct md_fs_buffer_frame *frame=span.data;
         publication=(struct md_fd_return_publication){.origins=p->origins,.updates=p->updates,.numbers=p->numbers,
-            .observation=&p->observation,.directory=p->directory,
+            .memory=(void *)frame->receipt,
             .flags=owner->request.flags&MSG_CMSG_CLOEXEC ? FD_CLOEXEC : 0};
     }
     int result=md_fd_return_vector_begin(&t->buffer_return,t->resources.files,owner->outgoing,count,
         p ? &publication : NULL,fd_wakeup);
     if (!result) { t->buffer_return_waiting=1; buffer_return_progress(t); }
     return result;
-}
-static void receive_directory_complete(void *context, struct md_task_helper_result result) {
-    struct receive_owner *owner=context;
-    struct thread *t=owner->caller ? find_thread(owner->caller) : NULL;
-    struct receive_publication *p=owner->publication;
-    CHECK(p && p->capturing && !result.received);
-    p->capturing=0;
-    if (!result.value && result.descriptor>=0) p->directory=result.descriptor;
-    else if (result.descriptor>=0) close(result.descriptor);
-    if (!t || t->receive!=owner) { receive_release(owner); return; }
-    t->kernel_stopped=1; t->buffer_registers=owner->continuation;
-    int error=result.value ? (int)result.value : p->directory<0 ? -EPROTO : receive_return_begin(t,p->count,1);
-    if (error) buffer_reply(t,error);
 }
 static int receive_return(struct thread *t, const int *indices, unsigned count) {
     struct receive_owner *owner=t->receive;
@@ -1964,21 +2066,10 @@ static int receive_return(struct thread *t, const int *indices, unsigned count) 
     if (!owner->publication) {
         owner->publication=calloc(1,sizeof(*owner->publication));
         if (!owner->publication) return -ENOMEM;
-        owner->publication->directory=-1;
     }
     struct receive_publication *p=owner->publication;
-    memcpy(p->origins,origins,count*sizeof(*origins)); p->count=count;
-    if (p->directory>=0) return receive_return_begin(t,count,1);
-    owner->continuation=t->buffer_registers;
-    struct md_task_helper_request request={.kind=MD_TASK_HELPER_FD_TABLE};
-    /* EVENT_WAIT: exact private-helper export and reap. The receiver remains
-     * stopped; cancellation retains custody until the helper's final callback. */
-    p->capturing=1;
-    error=md_task_helper_begin(helpers,t->pid,t->tgid,&owner->continuation,&abi,t->memory,&t->buffer,
-        &request,receive_directory_complete,owner);
-    if (error) p->capturing=0;
-    else t->kernel_stopped=0;
-    return error;
+    memcpy(p->origins,origins,count*sizeof(*origins));
+    return receive_return_begin(t,count,1);
 }
 static void adapter_progress(void) {
     CHECK(!md_fs_buffer_progress(buffer_service));
@@ -2008,7 +2099,9 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
     if (t->ipc_transport.packet && r->regs[0]!=MD_BUFFER_RELEASE) {
         buffer_reply(t,-EBUSY); return;
     }
-    if (t->outgoing && r->regs[0]!=MD_FS_BUFFER_SEND_COMMIT && r->regs[0]!=MD_BUFFER_RELEASE) {
+    if (t->outgoing && r->regs[0]!=MD_FS_BUFFER_SEND_COMMIT && r->regs[0]!=MD_BUFFER_RELEASE
+            && r->regs[0]!=MD_FS_BUFFER_IPC_CAPTURE_READY && r->regs[0]!=MD_FS_BUFFER_IPC_CAPTURE_SENT
+            && r->regs[0]!=MD_FS_BUFFER_IPC_CAPTURE_OBSERVED) {
         buffer_reply(t,-EBUSY); return;
     }
     int snapshot=md_fs_buffer_snapshot_pending(t->buffer_call);
@@ -2025,6 +2118,19 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
         buffer_reply(t,-EBUSY); return;
     }
     switch (r->regs[0]) {
+    case MD_FS_BUFFER_IPC_CAPTURE_READY:
+    case MD_FS_BUFFER_IPC_CAPTURE_SENT:
+    case MD_FS_BUFFER_IPC_CAPTURE_OBSERVED:
+        if (r->regs[2] || t->phase!=DISPATCHING
+                || !((t->outgoing && t->outgoing->brokered && t->outgoing->stage==OUTGOING_CAPTURE)
+                    || (t->receive && t->receive->brokered && !t->receive->ready && t->receive->capture.channel))) break;
+        if (t->outgoing) t->outgoing->continuation=*r;
+        else t->receive->continuation=*r;
+        ipc_capture_step(t,(unsigned)r->regs[0],(long)r->regs[1]); return;
+    case MD_FS_BUFFER_IPC_RECEIVE:
+        if (r->regs[1] || r->regs[2] || !t->receive || !t->receive->brokered
+                || t->receive->ready || !t->receive->received) break;
+        t->receive->continuation=*r; socket_io_progress(t); return;
     case MD_FS_BUFFER_SEND_PREPARE:
         if (t->phase!=DISPATCHING || t->outgoing || !t->buffer.pool || r->regs[1] || r->regs[2]
                 || (t->original.regs[8]!=SYS_sendmsg && t->original.regs[8]!=SYS_sendmmsg
@@ -2044,7 +2150,8 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
          * Source capture alone holds the table turn, never the blocking IO. */
         receive_begin(t,r); return;
     case MD_FS_BUFFER_RECEIVED_DROP:
-        if (!t->receive || !t->receive->ready || r->regs[1] || r->regs[2]) break;
+        if (!t->receive || (!t->receive->ready && !t->receive->brokered)
+                || t->receive->io_waiting || r->regs[1] || r->regs[2]) break;
         receive_release(t->receive); t->receive=NULL;
         result=0; break;
     case MD_FS_BUFFER_RECEIVED_INSPECT: {
@@ -2143,7 +2250,10 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
     case MD_BUFFER_RELEASE:
         if (r->regs[1] || r->regs[2]) break;
         if (t->outgoing) {
-            if (t->outgoing->stage!=OUTGOING_READY) { result=-EBUSY; break; }
+            if (t->outgoing->stage!=OUTGOING_READY
+                    && !(t->outgoing->brokered && t->outgoing->stage==OUTGOING_CAPTURE)) {
+                result=-EBUSY; break;
+            }
             outgoing_release(t->outgoing); t->outgoing=NULL;
         }
         md_fs_buffer_cancel(&t->buffer_call);
@@ -2288,6 +2398,7 @@ static int domain_call(struct thread *t, struct user_pt_regs *r, unsigned long c
     }
     /* Read-only launch identity is independent of the restricted filesystem. */
     if (nr == SYS_uname && cookie == MD_INTERCEPT_DISPATCH) return 0;
+    if (cookie==MD_INTERCEPT_DISPATCH && md_domain_ipc_call(nr)) return 0;
     if (nr == SYS_kill || nr == SYS_tgkill || nr == SYS_tkill) {
         long target = (long)r->regs[nr == SYS_tgkill ? 1 : 0];
         struct thread *destination = target > 0 ? find_thread(target) : NULL;
@@ -2573,9 +2684,10 @@ static pid_t wait_event(int *status, struct rusage *usage, int64_t deadline) {
         /* EVENT_WAIT: ptrace stop/exit or cancellation via signalfd; expiry
          * fails and cancels the owned tree, never counts as readiness. */
         struct pollfd events[] = {{signal_fd, POLLIN, 0}, {broker ? -1 : listener, POLLIN, 0},
-            {md_fs_worker_fd(filesystem), POLLIN, 0}, {fd_ready,POLLIN,0}, {ipc_events,POLLIN,0}};
+            {md_fs_worker_fd(filesystem), POLLIN, 0}, {fd_ready,POLLIN,0}, {ipc_events,POLLIN,0},
+            {socket_events,POLLIN,0}};
         int64_t bound = cancelling ? cancellation_deadline : deadline;
-        long outcome = md_event_wait(events, 5, bound);
+        long outcome = md_event_wait(events, 6, bound);
         if (outcome == -ETIMEDOUT && cancelling == 1) {
             /* EVENT_WAIT: graceful cancellation expired; drain killed children
              * for at most ten seconds before reporting incomplete cleanup. */
@@ -2597,6 +2709,7 @@ static pid_t wait_event(int *status, struct rusage *usage, int64_t deadline) {
         if (events[2].revents) { CHECK(!md_fs_worker_dispatch(filesystem)); adapter_progress(); }
         if (events[3].revents) fd_progress();
         if (events[4].revents) ipc_events_ready();
+        if (events[5].revents) socket_events_ready();
         if (events[1].revents & POLLIN) external_stat();
         if (events[1].revents & POLLHUP) { close(listener); listener = -1; }
     }
@@ -2719,6 +2832,8 @@ int main(int argc, char **argv) {
     int headless = tty < 0;
     if (tty >= 0) close(tty);
     pid_t parent = getpid();
+    struct md_ipc_inherited inherited_ipc={0};
+    if (store) CHECK(!md_ipc_inherited_capture(&inherited_ipc));
     leader = fork(); CHECK(leader >= 0);
     if (!leader) {
         if (command_owner >= 0) close(command_owner);
@@ -2750,7 +2865,8 @@ int main(int argc, char **argv) {
          * uses zero; creation requests already contain the guest's masked mode. */
         umask(0);
         CHECK(!md_task_registry_publish(tasks, leader, leader, &thread(leader)->identity, NULL));
-        int startup = md_fs_worker_start(store, endpoint, admitted_path, tasks, fd_exchanges, attachments, attachment_count, statistics != NULL, &filesystem);
+        int startup = md_fs_worker_start(store, endpoint, admitted_path, tasks, fd_exchanges, attachments, attachment_count, statistics != NULL, &inherited_ipc, &filesystem);
+        md_ipc_inherited_release(&inherited_ipc);
         if (startup) errno = -startup;
         CHECK(!startup);
         struct md_mount_namespace *mounts=md_fs_worker_mounts(filesystem);
@@ -2873,6 +2989,7 @@ int main(int argc, char **argv) {
             c->debug_options=t->debug_options;
             c->terminal_observation=t->terminal_observation;
             c->shm_filter = t->shm_filter;
+            c->application_filter=t->application_filter;
             md_identity_release(&c->identity);
             c->identity = md_identity_copy(&t->identity);
             c->tgid = t->cloning & CLONE_THREAD ? t->tgid : c->pid;
@@ -3131,8 +3248,13 @@ int main(int argc, char **argv) {
                     pid, t->original.regs[8], t->original.regs[0], t->original.regs[1], (long long)regs.regs[0]);
                 if (!regs.regs[0] && ((t->original.regs[8] == SYS_seccomp
                             && t->original.regs[0] == SECCOMP_SET_MODE_FILTER)
-                        || (t->original.regs[8] == SYS_prctl && t->original.regs[0] == PR_SET_SECCOMP)))
+                        || (t->original.regs[8] == SYS_prctl && t->original.regs[0] == PR_SET_SECCOMP))) {
+                    t->application_filter=1;
+                    if (t->original.regs[8]==SYS_seccomp && (t->original.regs[1]&SECCOMP_FILTER_FLAG_TSYNC))
+                        for (struct thread *peer=threads;peer;peer=peer->next)
+                            if (peer->pid && peer->tgid==t->tgid) peer->application_filter=1;
                     TRACE("PROBE installed-filter pid=%d instructions=%d\n", pid, t->filter_length);
+                }
                 if (t->memory_action==MEMORY_KERNEL) {
                     CHECK(!md_resource_order_complete(&t->memory_order)); t->memory_action=0;
                 }

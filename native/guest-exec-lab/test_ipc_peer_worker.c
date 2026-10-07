@@ -77,7 +77,7 @@ enum operation { MARK, PAIR, STALL, ALLOCATION, ANNOTATION, LOCK_NOTICE, ORIGINS
 struct work {
     struct md_fs_work work;
     enum operation operation;
-    int done, fds[2];
+    int done, fds[2], sender_identity;
     const char *name;
     struct md_fs_anchor *anchors[70];
 };
@@ -112,7 +112,8 @@ static void run(struct md_fs_work *base, struct md_filesystem *fs, int error) {
         md_ipc_credentials_execute(ipc,&identity,&q,&result,NULL);
         md_identity_release(&identity); assert(!result.error);
         if (w->operation==MESSAGE) { assert(result.fd>=0); w->fds[1]=result.fd; }
-        else assert(result.position>0 && result.info.uid==1234 && result.info.gid==2345);
+        else assert(result.position>0 && result.info.uid==(w->sender_identity ? 0U : 1234U)
+            && result.info.gid==(w->sender_identity ? 0U : 2345U));
     } else if (w->operation==STALL) {
         pulse(w->fds[0]); await(w->fds[1]); uint64_t value;
         assert(read(w->fds[1],&value,sizeof(value))==sizeof(value));
@@ -153,7 +154,7 @@ static struct owner owner_new(const char *store) {
     static unsigned serial;
     char endpoint[80]; snprintf(endpoint,sizeof(endpoint),"md-peer-worker-%d-%u",getpid(),++serial);
     struct owner o={0};
-    assert(!md_fs_worker_start(store,endpoint,NULL,NULL,NULL,NULL,0,0,&o.worker));
+    assert(!md_fs_worker_start(store,endpoint,NULL,NULL,NULL,NULL,0,0,NULL,&o.worker));
     /* Service-loop wakeup ownership is established after startup publication. */
     struct work mark={.operation=DECLARE}; submit(&o,&mark); finish(&o,&mark);
     unsigned before=descriptors();
@@ -984,13 +985,15 @@ static void transfer_guest_send(const char *path, const char *runner, unsigned m
     }
     close(application[0]); reap_child(child);
     struct md_ipc_origins *service=NULL; assert(!md_ipc_origins_new(o.worker,launch_id,&service));
-    unsigned messages=mode==4 || mode==5 || mode==7 || mode==11 || mode==14 ? 0 : mode==6 || mode==13 ? 2 : 1;
+    unsigned messages=mode==4 || mode==5 || mode==7 || mode==11 || mode==14 || mode==15 ? 0 : mode==6 || mode==13 ? 2 : 1;
     for (unsigned n=0;n<messages;++n) {
         char byte; struct md_fs_rights rights={0};
-        unsigned tokens=mode==9 || mode==10, data=mode!=10;
+        unsigned sender=mode==8 || mode==13;
+        unsigned tokens=mode==9 || mode==10 || sender, data=mode!=10;
         assert(md_fs_receive(application[1],&byte,1,&rights)==1 && byte=='s' && rights.count==data+tokens);
         if (tokens) {
-            struct work read={.operation=READ_MESSAGE,.fds={application[1],rights.fd[rights.count-1]}};
+            struct work read={.operation=READ_MESSAGE,.sender_identity=sender,
+                .fds={application[1],rights.fd[rights.count-1]}};
             submit(&o,&read); finish(&o,&read);
         }
         if (!data) { md_fs_close_rights(&rights); continue; }
@@ -1020,8 +1023,11 @@ void md_test_ipc_origin_guest(const char *path, const char *runner) {
     /* EVENT_WAIT: runner exit and final pipe EOF; the alarm bounds the fixture. */
     alarm(180); setbuf(stdout,NULL);
     for (unsigned protected=0;protected<2;++protected)
-        for (unsigned mode=0;mode<15;++mode) transfer_guest_send(path,runner,mode,protected);
-    for (unsigned protected=0;protected<2;++protected) for (unsigned mode=0;mode<14;++mode) {
+        for (unsigned mode=0;mode<16;++mode) transfer_guest_send(path,runner,mode,protected);
+    for (unsigned protected=0;protected<4;++protected) for (unsigned mode=0;mode<15;++mode) {
+        /* Batch broker IO and helper-specific in-flight quotas have their own
+         * contracts. This matrix covers scalar receipt publication. */
+        if ((protected&2) && (mode==3 || mode==9)) continue;
         unsigned before=descriptors(); struct transfer_fixture f;
         transfer_new(&f,path); transfer_prepare(&f);
         int rights[2]={f.result[0].received->fds[1],-1}, token=-1;

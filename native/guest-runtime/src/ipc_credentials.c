@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "ipc_credentials.h"
 #include "ipc_scope.h"
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/memfd.h>
@@ -73,7 +74,7 @@ int md_ipc_credentials_open(const char *store, enum md_ipc_ancillary_transport o
     if (!r && length < 0) r = -errno;
     if (!r) memcpy(path+length, "/credentials.db", sizeof("/credentials.db"));
     if (!r) r = sql(sqlite3_open_v2(path, &s->db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOFOLLOW, NULL));
-    if (!r && first) r = execute(s, "DROP TABLE IF EXISTS endpoints;DROP TABLE IF EXISTS connections;DROP TABLE IF EXISTS messages;");
+    if (!r && first) r = execute(s, "DROP TABLE IF EXISTS endpoints;DROP TABLE IF EXISTS connections;DROP TABLE IF EXISTS messages;DROP TABLE IF EXISTS native_sockets;");
     if (!r && first && unlinkat(dir,"auth",0) && errno!=ENOENT) r=-errno;
     if (!r && first && unlinkat(dir,"auth.pending",0) && errno!=ENOENT) r=-errno;
     if (!r) r = execute(s, "PRAGMA journal_mode=WAL;PRAGMA synchronous=NORMAL;"
@@ -81,6 +82,8 @@ int md_ipc_credentials_open(const char *store, enum md_ipc_ancillary_transport o
         "CREATE TABLE IF NOT EXISTS connections(cookie INTEGER PRIMARY KEY,name BLOB,identity BLOB,peer BLOB,endpoint BLOB,revision INTEGER,hidden INTEGER,valid INTEGER,link BLOB,side INTEGER,transport INTEGER NOT NULL);"
         "CREATE INDEX IF NOT EXISTS connection_name ON connections(name);"
         "CREATE INDEX IF NOT EXISTS connection_link ON connections(link,side);"
+        "CREATE INDEX IF NOT EXISTS endpoint_cookie ON endpoints(cookie);"
+        "CREATE TABLE IF NOT EXISTS native_sockets(cookie INTEGER PRIMARY KEY);"
         "CREATE TABLE IF NOT EXISTS messages(nonce BLOB PRIMARY KEY,link BLOB,device INTEGER,inode INTEGER,pid INTEGER,uid INTEGER,gid INTEGER,side INTEGER);");
     /* The first live owner discards stale metadata, including cookies from an
      * earlier boot. This directory is not part of OCI/image inode metadata. */
@@ -100,6 +103,94 @@ static int socket_key(int fd, uint64_t *cookie) {
     if (type != SOCK_STREAM && type != SOCK_SEQPACKET && type != SOCK_DGRAM) return -EPROTOTYPE;
     n = sizeof(*cookie);
     return getsockopt(fd, SOL_SOCKET, SO_COOKIE, cookie, &n) ? -errno : 0;
+}
+static int optional_socket_key(int fd, uint64_t *cookie) {
+    struct stat st;
+    if (fstat(fd,&st)) return -errno;
+    if (!S_ISSOCK(st.st_mode)) return 0;
+    int flags=fcntl(fd,F_GETFL);
+    if (flags<0) return -errno;
+    if (flags&O_PATH) return 0;
+    int r=socket_key(fd,cookie);
+    return r==-EAFNOSUPPORT || r==-EPROTOTYPE ? 0 : r ? r : 1;
+}
+static int native_socket(struct md_ipc_credentials *s, uint64_t cookie) {
+    sqlite3_stmt *q=NULL;
+    int r=statement(s,"SELECT 1 FROM native_sockets WHERE cookie=?1",&q);
+    if (!r) {
+        sqlite3_bind_int64(q,1,(sqlite3_int64)cookie);
+        int step=sqlite3_step(q);
+        r=step==SQLITE_ROW ? 1 : step==SQLITE_DONE ? 0 : -EIO;
+    }
+    sqlite3_finalize(q); return r;
+}
+static int expose(struct md_ipc_credentials *s, const uint64_t *keys, unsigned count, int inherited) {
+    if (!count) return 0;
+    /* EVENT_WAIT: connection/exposure transaction releases the metadata gate;
+     * interruption fails admission without performing application IO. */
+    if (flock(s->gate,LOCK_EX)) return -errno;
+    int r=execute(s,"BEGIN IMMEDIATE");
+    sqlite3_stmt *known=NULL,*mark=NULL;
+    if (!r) r=statement(s,"SELECT 1 FROM connections WHERE cookie=?1 AND valid>=0 "
+        "UNION ALL SELECT 1 FROM endpoints WHERE cookie=?1 LIMIT 1",&known);
+    if (!r) r=statement(s,"INSERT OR IGNORE INTO native_sockets VALUES(?1)",&mark);
+    for (unsigned i=0;!r && i<count;++i) {
+        sqlite3_bind_int64(known,1,(sqlite3_int64)keys[i]);
+        int step=sqlite3_step(known);
+        if (step==SQLITE_ROW) { if (!inherited) r=-EXDEV; }
+        else if (step!=SQLITE_DONE) r=-EIO;
+        else {
+            sqlite3_bind_int64(mark,1,(sqlite3_int64)keys[i]);
+            r=sql(sqlite3_step(mark)); sqlite3_reset(mark);
+        }
+        sqlite3_reset(known);
+    }
+    sqlite3_finalize(known); sqlite3_finalize(mark);
+    if (!r) r=execute(s,"COMMIT");
+    if (r) execute(s,"ROLLBACK");
+    flock(s->gate,LOCK_UN); return r;
+}
+int md_ipc_credentials_native(struct md_ipc_credentials *s, const int *fds, unsigned count) {
+    if (!s || (count && !fds) || count>253) return -EINVAL;
+    uint64_t keys[253]; unsigned n=0;
+    for (unsigned i=0;i<count;++i) {
+        int r=optional_socket_key(fds[i],&keys[n]);
+        if (r<0) return r;
+        n+=(unsigned)r;
+    }
+    return expose(s,keys,n,0);
+}
+int md_ipc_inherited_capture(struct md_ipc_inherited *out) {
+    if (!out || out->cookies || out->count) return -EINVAL;
+    DIR *dir=opendir("/proc/self/fd");
+    if (!dir) return -errno;
+    struct md_ipc_inherited found={0}; int r=0;
+    for (;;) {
+        errno=0; struct dirent *entry=readdir(dir);
+        if (!entry) { if (errno) r=-errno; break; }
+        char *end; long fd=strtol(entry->d_name,&end,10);
+        if (*end || fd<0 || fd>INT_MAX || fd==dirfd(dir)) continue;
+        int flags=fcntl((int)fd,F_GETFD);
+        if (flags<0) { r=-errno; break; }
+        if (flags&FD_CLOEXEC) continue;
+        uint64_t cookie;
+        r=optional_socket_key((int)fd,&cookie);
+        if (r<0) break;
+        if (!r) continue;
+        uint64_t *more=realloc(found.cookies,(found.count+1)*sizeof(*more));
+        if (!more) { r=-ENOMEM; break; }
+        found.cookies=more; found.cookies[found.count++]=cookie; r=0;
+    }
+    closedir(dir);
+    if (r) free(found.cookies); else *out=found;
+    return r;
+}
+int md_ipc_credentials_inherit(struct md_ipc_credentials *s, const struct md_ipc_inherited *inherited) {
+    if (!s || !inherited) return -EINVAL;
+    return expose(s,inherited->cookies,inherited->count,1);
+}
+void md_ipc_inherited_release(struct md_ipc_inherited *inherited) {
+    free(inherited->cookies); *inherited=(struct md_ipc_inherited){0};
 }
 static int address(int fd, int peer, struct sockaddr_un *out, int *size) {
     socklen_t n = sizeof(*out);
@@ -188,10 +279,20 @@ static int save_connection(struct md_ipc_credentials *s, uint64_t key, const str
 }
 static int listen_update(struct md_ipc_credentials *s, const struct md_fs_request *req,
         uint64_t key, const void *self, size_t bytes) {
+    int native=native_socket(s,key);
+    if (native<0) return native;
     struct sockaddr_un name; int n;
     int r = address(req->directory[0], 0, &name, &n);
     if (r || !n) return r ? r : -EINVAL;
     sqlite3_stmt *q = NULL;
+    if (native) {
+        r=statement(s,"DELETE FROM endpoints WHERE name=?1",&q);
+        if (!r) {
+            sqlite3_bind_blob(q,1,name.sun_path,n,SQLITE_STATIC);
+            r=sql(sqlite3_step(q));
+        }
+        sqlite3_finalize(q); return r;
+    }
     if (req->flags == MD_IPC_LISTEN_BEGIN) {
         r = statement(s, "INSERT INTO endpoints VALUES(?1,?2,1,?3,0,?4) ON CONFLICT(name) DO UPDATE SET "
             "cookie=excluded.cookie,revision=revision+1,identity=excluded.identity,ready=0,transport=excluded.transport", &q);
@@ -211,6 +312,8 @@ static int listen_update(struct md_ipc_credentials *s, const struct md_fs_reques
 }
 static int connect_begin(struct md_ipc_credentials *s, const struct md_fs_request *req,
         uint64_t key, const void *self, size_t bytes, struct md_fs_result *result) {
+    int native=native_socket(s,key);
+    if (native) return native<0 ? native : 0;
     struct sockaddr_un endpoint, local; int size, local_size;
     int type; socklen_t type_size = sizeof(type);
     if (getsockopt(req->directory[0], SOL_SOCKET, SO_TYPE, &type, &type_size)) return -errno;
@@ -502,6 +605,11 @@ void md_ipc_credentials_execute(struct md_ipc_credentials *s, const struct md_id
         uint64_t other;
         struct md_ipc_connection connection={0};
         r = socket_key(q->directory[1], &other);
+        if (!r) {
+            int native=native_socket(s,key);
+            if (!native) native=native_socket(s,other);
+            if (native) { r=native<0 ? native : 0; break; }
+        }
         if (!r && getrandom(connection.link, sizeof(connection.link), 0) != sizeof(connection.link)) r = -EIO;
         if (!r) r = save_connection(s, key, NULL, 0, self, bytes, self, bytes, NULL, 0, 0, 0, 1, &connection,s->offer);
         connection.side=1;

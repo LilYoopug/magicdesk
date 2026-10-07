@@ -54,7 +54,9 @@ struct md_interception_abi {
     uintptr_t buffer_control;
     uintptr_t task_control, task_call, task_return, task_abort;
     uintptr_t task_collect, task_collected;
+    uintptr_t buffer_admit;
 };
+long md_guest_buffer_admit(unsigned purpose);
 
 int md_interception_install(int inherited);
 long md_shm_dispatch(long, const unsigned long *);

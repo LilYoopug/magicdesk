@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
+#include "fd_capture.h"
+#include "ipc_io.h"
 
 struct md_task_receive {
     uintptr_t messages, timeout;
@@ -20,6 +22,8 @@ struct md_task_receive_frame {
     struct iovec vector;
     struct msghdr message;
     union { struct cmsghdr align; char bytes[CMSG_SPACE(253*sizeof(int))]; } control;
+    struct md_fd_capture_frame capture;
+    struct md_ipc_io_message io;
 };
 /* Allocation-free private-header traversal. 1 exposes the next export vector,
  * 0 means complete; only confirmed native messages are visited. */

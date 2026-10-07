@@ -231,6 +231,9 @@ def main():
         run = [root + "/libmagicdesk_guest_run.so", "--store", root + "/ipc-store",
                "--user", "0:0", "--deadline-seconds", "90", "--", "/bin/test"]
         check("guest ancillary semantics", shlex.join(run), "PASS connection snapshots:")
+        check("native consumer boundary", shlex.join([fixture, "--boundary-fixture",
+              root + "/libmagicdesk_guest_run.so", root + "/ipc-store"]),
+              "PASS guest native boundary mode=2 protected=1")
         check("addressed destinations", "mkdir -p " + root + "/addressed")
         check("guest addressed sends", shlex.join([fixture, "--address-fixture", root + "/libmagicdesk_guest_run.so",
               root + "/ipc-store", root + "/addressed"]), "PASS addressed send custody:")

@@ -139,14 +139,25 @@ static int receive_denied(void) {
     int fds[]={-1,-1,-1}; memcpy(CMSG_DATA(&control.align),fds,sizeof(fds));
     char byte=0; struct iovec vector={&byte,1};
     struct msghdr message={.msg_iov=&vector,.msg_iovlen=1,.msg_control=control.bytes,.msg_controllen=sizeof(control)};
+    int previous[1024];
+    for (unsigned i=0;i<1024;++i) previous[i]=fcntl((int)i,F_GETFD);
     errno=0; CHECK(recvmsg(sockets[1],&message,MSG_CMSG_CLOEXEC)==-1 && errno==EPERM && byte==1);
     memcpy(fds,CMSG_DATA(&control.align),sizeof(fds));
-    CHECK(fds[0]>=0 && fcntl(fds[0],F_GETFD)==FD_CLOEXEC && fds[1]==-1 && fds[2]==-1);
-    CHECK(!close(fds[0]) && !close(sockets[1]));
+    CHECK(fds[0]==-1 && fds[1]==-1 && fds[2]==-1);
+    unsigned channels=0;
+    for (unsigned i=0;i<1024;++i) {
+        int flags=fcntl((int)i,F_GETFD);
+        if (flags==previous[i]) continue;
+        CHECK(previous[i]<0 && flags==FD_CLOEXEC);
+        int type=0; socklen_t size=sizeof(type);
+        CHECK(!getsockopt((int)i,SOL_SOCKET,SO_TYPE,&type,&size) && type==SOCK_SEQPACKET);
+        ++channels;
+    }
+    CHECK(channels==1 && !close(sockets[1]));
     int status; CHECK(waitpid(sender,&status,0)==sender && WIFEXITED(status) && !WEXITSTATUS(status));
     CHECK(read(pipefd[0],&byte,1)==0 && !close(pipefd[0]));
-    CHECK(descriptor_count()==before);
-    puts("PASS denied receive activation: published prefix retained, unpublished descriptors released");
+    CHECK(descriptor_count()==before+channels);
+    puts("PASS denied receive activation: no application FD installed, one owned channel, queued rights released");
     return 0;
 }
 static int shared(const char *mode, const char *directory) {

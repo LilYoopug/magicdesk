@@ -101,12 +101,12 @@ peeking at a candidate carrier or transferring ownership of caller descriptors.
 Self-contained capsules authenticate an immutable kernel queue with the store
 epoch key and exact directional connection, without a live source owner.
 
-Production filesystem owners declare `NATIVE`. Outgoing ancillary messages
-and the receive adapter handle explicitly bound `ORIGINS_V1` connections
-through the shared buffered worker. Selected-format
-tests declare that transport before passing a socket into the guest, without
-changing production offers. Connection transfer to an unadapted consumer still
-needs a policy; selection alone does not solve that contract. Sender-independent capsule
+Production filesystem owners declare `ORIGINS_V1`. Outgoing ancillary messages
+and the receive adapter handle creation-time bindings through the shared buffered
+worker. Inherited native sockets and sockets exported through a native connection
+are latched native-only by cookie. Exporting an already adapted socket to such a
+consumer fails with EXDEV before sending. This prevents an unadapted process from
+receiving private capsule framing. Sender-independent capsule
 coverage is described in [process resources](process-resources.md#self-contained-origin-custody).
 `--case fd-messages` covers 29 transport scenarios across stream,
 seqpacket and paired datagram sockets: mixed offers, both publication orders,
@@ -305,8 +305,9 @@ carrier to adapted consumers. Native connections retain their original rights,
 including a capsule deliberately sent as ordinary application data.
 The receive owner retains raw batch custody and replaces only the expanded
 per-message vector after publication. Cancellation and worker join release
-untaken results. Known origins use the existing task-local FD-table observation
-and direct kernel publication into application control memory.
+untaken results. Known origins use the shared kernel-written receipt and the
+same publication owner as scalar file results. This works with O_PATH and
+application filters that forbid private helper creation.
 
 The `ipc-ancillary` case covers actual guest sends and receives, including
 protected/full-table callers, 253 rights, split headers, send/receive batches,
@@ -326,8 +327,9 @@ The same captured-send helper also has a native pathname delivery fixture
 (`libmagicdesk_guest_task_helper_fd.so DIRECTORY --native-anchor`): under the
 Termux app UID it delivers 253 mixed/O_PATH rights from ordinary and protected
 callers with exact FD cleanup. This verifies the mechanism, not shell permission.
-The policy for unadapted consumers remains open. These checks do not enable a global
-ORIGINS_V1 offer.
+The native-consumer cases exercise inherited/exported sockets, rejected adapted
+socket export and exact descriptor balance. The receive matrix additionally
+forbids clone and SO_DOMAIN in both ordinary and nondumpable processes.
 
 ## Explicit Credential Messages
 
@@ -359,11 +361,11 @@ This keeps payload bytes, blocking/readiness, FD transfer, partial sends and
 message ordering in the kernel. Ordinary read/write and native-format
 credential-free sends do not create identity capabilities. Common ancillary
 buffers use stack scratch; larger buffers use bounded temporary mappings.
-Recvmmsg uses one native batch so its
+Unfiltered recvmmsg uses one native batch so its
 timeout and partial completion are not replaced by a userspace receive loop.
 MSG_PEEK does not consume identity metadata; truncation closes unpublished FDs.
 
-Native receive runs in a same-process private-table helper. Its socket is captured
+Unfiltered receive runs in a same-process private-table helper. Its socket is captured
 under the destination table turn; the turn ends at clone, before blocking IO.
 Unrelated inherited descriptors are closed before receiving. The helper exports
 the actual socket and received rights through an owned channel and is reaped
@@ -384,15 +386,25 @@ queued rights and retained sources. Later reuse of the original socket number
 cannot retarget the accepted receive. Classification does not authenticate an
 arbitrary message's mount-origin association.
 
+Application-filtered operations export the captured socket and source rights
+through the existing table-owned channel. Admission uses an exact gettid gate,
+still subject to all installed application filters. A denial retires capture
+and releases its ordering turn; there is no filter rewrite or retry of the send.
+For authenticated peers, supervisor IO carries a validated sender token so its
+own native PID/UID does not become the peer's virtual identity. Native peers
+retain task-affine sending. Both paths share origin preparation and custody.
+
 Receive publication has one owner for ancillary data, translated source address
 and output header fields. Application rights use the existing table-owned return
-channel. The final kernel recvmsg writes FD numbers directly to application
-control memory, not a private receipt followed by a userspace copy. A later
-control-header, source-address or message-header fault therefore cannot authorize
-closing a kernel-published descriptor. Cancellation drains only queued rights and
-releases retained sources; there is no cleanup by guessed application FD number.
-Partially inaccessible control buffers retain the delivered prefix and native
-MSG_CTRUNC semantics. Input-only message fields are not written back.
+channel. Annotated rights are installed by kernel recvmsg into a mapped receipt;
+unannotated rights retain direct application-control output. A later copy fault
+cannot authorize closing a kernel-published descriptor. Cancellation drains only
+queued rights and releases retained sources; there is no cleanup by guessed FD
+number. Static partial-control faults limit the mapped receipt's capacity and
+retain MSG_CTRUNC semantics. Concurrent remapping between validation and copying
+does not have native per-word installation ordering; provenance remains tied to
+the kernel receipt even when application output fails. Input-only message fields
+are not written back.
 Received watch descriptors activate their FD-class selectors for available
 destination slots under the same table turn, before kernel publication. Failure
 releases only unpublished resources. Ordinary read/write does not use this path.
@@ -403,6 +415,11 @@ publication of the completed messages or leak their descriptors.
 
 Current limits are explicit:
 
+- Filtered supervisor IO has a 64 KiB payload and 4 KiB control bound; larger
+  requests fail explicitly. Filtered recvmmsg is not implemented. Blocking
+  readiness is event-driven, but socket timeouts, signal interruption, SIGPIPE
+  and complete MSG_WAITALL semantics still need their own completion contract.
+  Success of the Chromium workflows does not establish those general semantics.
 - Kernel-generated SO_PASSCRED messages without an explicit SCM_CREDENTIALS
   send retain native credentials. Unconnected datagram addressing is not
   virtually authenticated; registered socketpairs are supported.
