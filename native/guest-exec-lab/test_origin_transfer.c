@@ -19,14 +19,15 @@
 #include <string.h>
 #include <sys/file.h>
 #include <sys/mman.h>
+#include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 void test_mount_allocation_failure_after(int);
-/* Manifest, six distinct anchors, root/lower custody and two three-mount views. */
-enum { TEST_RIGHTS=1+6+4+2*(2+3*3) };
+/* Manifest, six distinct anchors with pins, root/lower custody and two views. */
+enum { TEST_RIGHTS=1+2*6+4+2*(4+3*3) };
 struct source {
     struct md_filesystem fs, copy;
     struct md_fs_anchor *anchor[6];
@@ -228,7 +229,7 @@ static void failures(const char *base) {
         int seals=F_SEAL_WRITE|F_SEAL_SEAL|F_SEAL_SHRINK|F_SEAL_GROW;
         switch (n) {
         case 0: mutate(&p,0,0,seals); break;
-        case 1: mutate(&p,1,2,seals); break;
+        case 1: mutate(&p,1,5,seals); break;
         case 2: mutate(&p,2,254,seals); break;
         case 3: mutate(&p,3,254,seals); break;
         case 4: mutate(&p,7,1,seals); break;
@@ -395,7 +396,7 @@ static void storage_sender(int channel, const char *base) {
     }
     md_inode_store_close(extra);
     publish(&s,store,s.anchor,2); struct md_fs_origin_parcel p={0};
-    assert(!md_fs_origin_export(s.message,&p) && p.count==15);
+    assert(!md_fs_origin_export(s.message,&p) && p.count==19);
     packet(channel,&s.route,sizeof(s.route),&(struct md_fs_rights){0}); send_parcel(channel,&p);
     md_fs_storage_close(&cache); source_close(&s); assert(descriptors()==before);
 }
@@ -449,7 +450,7 @@ static void storage_process(const char *base) {
     int lease=open(moved,O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(lease>=0);
     assert(flock(lease,LOCK_EX|LOCK_NB)<0 && errno==EWOULDBLOCK);
     struct md_fs_origin_imports *i=imports(base); struct md_fs_origin_parcel p=receive_parcel(fd[0]); close(fd[0]);
-    assert(p.count==15);
+    assert(p.count==19);
     struct md_fs_origin_vector *v=NULL; assert(!md_fs_origin_import(i,&expected,&p,&v));
     assert(md_fs_origin_vector_count(v)==2); struct md_fs_anchor *const *a=md_fs_origin_vector_entries(v);
     assert(a[0]->mount->storage==a[1]->mount->storage && a[0]->mount!=a[1]->mount);
@@ -632,14 +633,46 @@ static void unknown(const char *base) {
     md_fs_origin_vector_free(v); md_fs_origin_imports_free(i); message_close(&s);
     assert(descriptors()==before); puts("PASS unknown origin vector: one manifest, no invented mount or backing owner");
 }
+static int unmount_alias(struct md_filesystem *fs) {
+    struct md_identity identity=md_identity_new(0,0);
+    fs->store->identity=&identity;
+    struct md_fs_request q={.operation=MD_FS_MOUNT,.mode=MD_FS_MOUNT_UMOUNT,
+        .directory={MD_INODE_ROOT,MD_INODE_ROOT},.path={"/alias",NULL}};
+    struct md_fs_result r; md_fs_execute(fs,&q,&r,NULL);
+    fs->store->identity=NULL; md_identity_release(&identity); return r.error;
+}
+static void mount_pins(const char *base) {
+    unsigned before=descriptors(); struct source s=source(base,3);
+    struct md_fs_origin_parcel p={0}; assert(!md_fs_origin_export(s.message,&p));
+    int channel[2]; pair(channel); send_parcel(channel[0],&p);
+    message_close(&s);
+    for (unsigned n=0;n<6;++n) { md_fs_anchor_release(s.anchor[n]); s.anchor[n]=NULL; }
+    assert(!atomic_load(&s.fs.mounts->tree->mounts[2].anchors));
+    assert(unmount_alias(&s.fs)==-EBUSY);
+    p=receive_parcel(channel[1]); close(channel[0]); close(channel[1]);
+    struct md_fs_origin_imports *i=imports(base); struct md_fs_origin_vector *v=NULL;
+    assert(!md_fs_origin_import(i,&s.route,&p,&v));
+    assert(unmount_alias(&s.fs)==-EBUSY);
+    struct md_fs_anchor *a=md_fs_origin_vector_entries(v)[2], *derived=NULL;
+    struct md_fs_result r=request(&s.fs,a,MD_FS_OPEN,"value",O_PATH,&derived);
+    assert(!r.error && derived); close(r.fd);
+    md_fs_origin_vector_free(v); md_fs_origin_imports_free(i);
+    assert(unmount_alias(&s.fs)==-EBUSY);
+    md_fs_anchor_release(derived);
+    assert(!unmount_alias(&s.fs));
+    md_fs_mounts_close(&s.copy); md_fs_mounts_close(&s.fs); md_inode_store_close(s.fs.store);
+    assert(descriptors()==before);
+    puts("PASS mount busy lifetime: queued rights, imported and derived origins, final close and exact cleanup");
+}
 void test_origin_transfer(const char *base) {
     alarm(120); bundles();
     const char *names[]={"origin-local","origin-faults","origin-processes","origin-unknown",
-        "origin-capsules","origin-capsules-unknown","origin-capsules-discard","origin-storage"}; char name[PATH_MAX];
-    for (unsigned n=0;n<8;++n) {
+        "origin-capsules","origin-capsules-unknown","origin-capsules-discard","origin-storage","origin-mount-pins"}; char name[PATH_MAX];
+    for (unsigned n=0;n<9;++n) {
         path(name,base,names[n]); assert(!mkdir(name,0700));
         if (!n) local(name); else if (n==1) failures(name); else if (n==2) processes(name);
-        else if (n==3) unknown(name); else if (n==7) storage_process(name); else capsules(name,(int)n-4);
+        else if (n==3) unknown(name); else if (n==7) storage_process(name);
+        else if (n==8) mount_pins(name); else capsules(name,(int)n-4);
     }
     alarm(0); puts("PASS portable message origins");
 }

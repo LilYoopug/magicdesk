@@ -209,7 +209,8 @@ int md_domain_mount_root_used(struct md_mount_namespace *view, unsigned mount) {
     pthread_mutex_lock(&view->domains_lock);
     for (struct md_guest_domain *d=view->domains;d && !used;d=d->next) {
         pthread_mutex_lock(&d->lock);
-        used=d->root<0 && d->guest_root.mount==mount;
+        used=d->root<0 && (d->guest_root.mount==mount || (mount==view->base.id
+            && !d->guest_root.mount && d->guest_root.object[0]));
         pthread_mutex_unlock(&d->lock);
     }
     pthread_mutex_unlock(&view->domains_lock);

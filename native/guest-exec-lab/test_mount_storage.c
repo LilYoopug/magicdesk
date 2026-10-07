@@ -3,6 +3,7 @@
 #include "fs_storage.h"
 #include "inode_internal.h"
 #include "mount_graph.h"
+#include "inode_watch.h"
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -10,6 +11,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/mount.h>
+#include <sys/inotify.h>
 #include <unistd.h>
 
 void test_mount_allocation_failure_after(int);
@@ -48,6 +50,87 @@ static void mount_call(struct md_filesystem *fs, unsigned mode, unsigned flags,
     if (r.error) fprintf(stderr,"storage mount %s: %d\n",target,r.error);
     assert(!r.error);
 }
+static int subscribe(struct md_filesystem *fs, int reader, const char *path) {
+    struct md_fs_result r=call(fs,(struct md_fs_request){.operation=MD_FS_WATCH_PATH,
+        .flags=IN_CREATE|IN_MOVED_FROM|IN_MOVED_TO|IN_DELETE,.directory={-1,reader},
+        .path={path,NULL}},NULL);
+    assert(!r.error); return (int)r.position;
+}
+static void watches(struct md_filesystem *fs, const char *extra) {
+    unsigned before=descriptors();
+    int reader=md_inode_watch_create(fs->store,IN_CLOEXEC|IN_NONBLOCK); assert(reader>=0);
+    int base=subscribe(fs,reader,"/"), mounted=subscribe(fs,reader,"/volume");
+    assert(base!=mounted && subscribe(fs,reader,"/alias")==mounted);
+    struct md_inode_store *writer=NULL;
+    assert(!md_inode_store_open(extra,0,&writer));
+    put(writer,"/watch-new","hello");
+    assert(!md_inode_rename(writer,-1,"/watch-new",-1,"/watch-moved",0));
+    assert(!md_inode_unlink(writer,-1,"/watch-moved",0));
+    md_inode_store_close(writer);
+    put(fs->store,"/watch-base","base");
+    union { struct inotify_event align; char bytes[4096]; } events;
+    ssize_t n=md_inode_watch_read(fs->store,reader,events.bytes,sizeof(events.bytes),NULL,NULL);
+    assert(n>0);
+    unsigned seen=0, cookie=0;
+    for (size_t at=0;at<(size_t)n;) {
+        struct inotify_event *e=(void *)(events.bytes+at);
+        assert(e->len && e->wd>0);
+        if (e->wd==base) { assert(e->mask==IN_CREATE && !strcmp(e->name,"watch-base")); seen|=1; }
+        else {
+            assert(e->wd==mounted);
+            if (e->mask==IN_CREATE) { assert(!strcmp(e->name,"watch-new")); seen|=2; }
+            else if (e->mask==IN_MOVED_FROM) { cookie=e->cookie; assert(cookie); seen|=4; }
+            else if (e->mask==IN_MOVED_TO) { assert(e->cookie==cookie); seen|=8; }
+            else { assert(e->mask==IN_DELETE && !strcmp(e->name,"watch-moved")); seen|=16; }
+        }
+        at+=sizeof(*e)+e->len;
+    }
+    assert(seen==31);
+    close(reader); assert(!md_inode_watch_pump(fs->store));
+    assert(descriptors()==before);
+    puts("PASS mounted-store watches: one instance, independent sources, alias deduplication, external writer and cleanup");
+}
+static void storage_cache(struct md_inode_store *main, const char *base) {
+    enum { COUNT=MD_FS_STORAGE_CACHE_LIMIT+3 };
+    unsigned before=descriptors();
+    struct md_inode_lifetime *leases[COUNT];
+    struct md_fs_storage_cache cache={0};
+    struct md_filesystem fs={.store=main,.storage=&cache};
+    struct md_fs_storage_scope held={0};
+    char path[PATH_MAX];
+    for (unsigned i=0;i<COUNT;++i) {
+        assert(snprintf(path,sizeof(path),"%s/cache-%u",base,i)<PATH_MAX);
+        struct md_inode_store *created=NULL;
+        assert(!md_inode_store_open(path,1,&created));
+        put(created,"/value","cache");
+        leases[i]=md_inode_lifetime_retain(md_inode_store_lifetime(created));
+        md_inode_store_close(created);
+        struct md_view_mount mount={.backing=MD_MOUNT_INODE,.storage=leases[i]};
+        struct md_fs_storage_scope scope;
+        assert(!md_fs_storage_enter(&fs,&mount,&scope));
+        if (!i) held=scope; else md_fs_storage_leave(&scope);
+        assert(cache.count==(i+1<MD_FS_STORAGE_CACHE_LIMIT ? i+1 : MD_FS_STORAGE_CACHE_LIMIT));
+    }
+    /* The LRU cannot evict an active connection. Evicted stores remain usable
+     * through independent custody and can open a new worker connection. */
+    int fd=md_inode_open(held.store,-1,"/value",O_RDONLY,0); assert(fd>=0); close(fd);
+    struct md_view_mount mount={.backing=MD_MOUNT_INODE,.storage=leases[1]};
+    struct md_inode_store *again=NULL;
+    assert(!md_fs_storage_get(&fs,&mount,&again));
+    fd=md_inode_open(again,-1,"/value",O_RDONLY,0); assert(fd>=0); close(fd);
+    for (unsigned i=0;i<COUNT;++i) md_inode_lifetime_release(leases[i]);
+    md_fs_storage_prune(&cache); assert(cache.count==1);
+    md_fs_storage_leave(&held); md_fs_storage_prune(&cache);
+    assert(!cache.count && !cache.connections);
+    for (unsigned i=0;i<COUNT;++i) {
+        assert(snprintf(path,sizeof(path),"%s/cache-%u",base,i)<PATH_MAX);
+        struct md_inode_store *exclusive=NULL;
+        assert(!md_inode_store_open_exclusive(path,&exclusive));
+        md_inode_store_close(exclusive);
+    }
+    assert(descriptors()==before);
+    puts("PASS mounted-store cache: bounded LRU, active scopes, reconnect and maintenance-lease release");
+}
 void test_mount_storage(const char *base) {
     unsigned before=descriptors();
     char path[PATH_MAX], extra[PATH_MAX], moved[PATH_MAX];
@@ -84,6 +167,7 @@ void test_mount_storage(const char *base) {
     assert(fs.mounts->tree->mounts[0].storage==fs.mounts->tree->mounts[1].storage);
     struct md_fs_anchor *held=NULL;
     fd=opened(&fs,"/alias/dir",O_PATH|O_DIRECTORY,NULL,&held); close(fd);
+    watches(&fs,extra);
     char actual[PATH_MAX];
     struct md_fs_result r=call(&fs,(struct md_fs_request){.operation=MD_FS_PATH,
         .directory={md_fs_anchor_fd(held),-1},.origin={held,NULL}},
@@ -119,7 +203,7 @@ void test_mount_storage(const char *base) {
         .path={object,NULL},.flags=O_RDONLY},NULL);
     assert(!r.error); close(r.fd); md_fs_anchor_release(file);
     struct md_mount_graph_parcel parcel={0};
-    assert(!md_mount_graph_export(copy.mounts,&parcel) && parcel.count==2+3*2+2);
+    assert(!md_mount_graph_export(copy.mounts,copy.store->lifetime->root,&parcel) && parcel.count==4+3*2+2);
     struct md_fs_storage_cache received_storage={0};
     struct md_filesystem received={.store=main,.storage=&received_storage};
     assert(!md_mount_graph_import(&parcel,&received.mounts));
@@ -127,20 +211,20 @@ void test_mount_storage(const char *base) {
     contents(&received,"/alias/value",NULL,"shared");
     unsigned live=descriptors();
     for (unsigned i=0;i<3;++i) {
-        assert(!md_mount_graph_export(copy.mounts,&parcel));
+        assert(!md_mount_graph_export(copy.mounts,copy.store->lifetime->root,&parcel));
         assert(!md_mount_graph_import(&parcel,&received.mounts));
         assert(descriptors()==live);
     }
     /* Even an interned graph validates its complete custody, not only IDs. */
-    assert(!md_mount_graph_export(copy.mounts,&parcel));
-    close(parcel.fd[parcel.count-1]);
-    parcel.fd[parcel.count-1]=fcntl(main->lifetime->root,F_DUPFD_CLOEXEC,3);
-    assert(parcel.fd[parcel.count-1]>=0);
+    assert(!md_mount_graph_export(copy.mounts,copy.store->lifetime->root,&parcel));
+    close(parcel.fd[parcel.count-2]);
+    parcel.fd[parcel.count-2]=fcntl(main->lifetime->root,F_DUPFD_CLOEXEC,3);
+    assert(parcel.fd[parcel.count-2]>=0);
     assert(md_mount_graph_import(&parcel,&received.mounts)==-EPROTO);
     assert(descriptors()==live);
     int reached=0;
     for (int n=0;n<16 && !reached;++n) {
-        assert(!md_mount_graph_export(copy.mounts,&parcel));
+        assert(!md_mount_graph_export(copy.mounts,copy.store->lifetime->root,&parcel));
         struct md_mount_namespace *candidate=NULL;
         test_mount_allocation_failure_after(n);
         int error=md_mount_graph_import(&parcel,&candidate);
@@ -171,7 +255,7 @@ void test_mount_storage(const char *base) {
         .path={"/volume/value",NULL},.flags=O_WRONLY},NULL);
     assert(r.error==-EROFS);
     fd=opened(&received,"/alias/value",O_WRONLY,NULL,NULL); close(fd);
-    assert(!md_mount_graph_export(received.mounts,&parcel));
+    assert(!md_mount_graph_export(received.mounts,received.store->lifetime->root,&parcel));
     struct md_filesystem forwarded={.store=main,.storage=&other};
     assert(!md_mount_graph_import(&parcel,&forwarded.mounts));
     md_fs_mounts_close(&received); md_fs_storage_close(&received_storage);
@@ -190,6 +274,7 @@ void test_mount_storage(const char *base) {
     assert(!renameat(lease->root,"saved.db",lease->root,"namespace.db"));
     assert(!md_inode_store_reconnect(lease,&check));
     md_inode_store_close(check); md_inode_lifetime_release(lease);
+    storage_cache(main,base);
     main->identity=NULL; md_identity_release(&root); md_inode_store_close(main);
     assert(descriptors()==before);
     puts("PASS mounted inode storage: identity, symlinks, bind/copy, policy, portable custody and old dirfd");

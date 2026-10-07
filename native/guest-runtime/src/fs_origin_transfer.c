@@ -12,9 +12,9 @@
 #include <string.h>
 #include <unistd.h>
 
-enum { MAGIC=0x4d444f56U, VERSION=1, MAX=MD_FD_RECEIPT_MAX };
+enum { MAGIC=0x4d444f56U, VERSION=4, MAX=MD_FD_RECEIPT_MAX };
 struct span { uint32_t start, count; struct md_fd_identity identity; };
-struct origin { uint32_t view, owner, mount, descriptor; struct md_fd_identity identity; };
+struct origin { uint32_t view, owner, mount, descriptor; struct md_fd_identity identity; uint64_t generation; };
 struct manifest {
     uint32_t magic, version, count, origins, views, owners, rights, reserved;
     struct md_fd_message_route route;
@@ -23,7 +23,7 @@ struct manifest {
     struct origin origin[MAX];
     struct span view[MAX], owner[MAX];
 };
-_Static_assert(sizeof(struct span)==24 && sizeof(struct origin)==32, "origin wire records");
+_Static_assert(sizeof(struct span)==24 && sizeof(struct origin)==40, "origin wire records");
 _Static_assert(offsetof(struct manifest,index)==136, "origin wire header");
 struct cached_view {
     struct cached_view *next;
@@ -86,7 +86,7 @@ static int path_identity(int fd, struct md_fd_identity *out) {
     return identity(fd,out);
 }
 static unsigned view_slot(const struct md_fs_anchor *a) {
-    if (!a->mount) return 0;
+    if (md_view_base(a->view,a->mount)) return 0;
     if (a->view->tree) for (unsigned i=0;i<a->view->tree->count;++i)
         if (a->mount==&a->view->tree->mounts[i]) return i+1;
     return UINT_MAX;
@@ -119,9 +119,10 @@ int md_fs_origin_export(const struct md_fd_message *message, struct md_fs_origin
         if (n<data.origins) continue;
         if (!a->view || !a->lifetime || a->lifetime->device!=data.store.device
                 || a->lifetime->inode!=data.store.inode) return -EXDEV;
-        anchors[data.origins++]=a; ++rights;
+        anchors[data.origins++]=a; rights+=2;
         struct origin *o=&data.origin[n];
         o->identity=(struct md_fd_identity){a->device,a->inode}; o->mount=view_slot(a);
+        o->generation=a->mount->generation;
         if (o->mount==UINT_MAX) return -ESTALE;
         unsigned v=0; while (v<data.views && views[v]!=a->view) ++v;
         if (v==data.views) {
@@ -149,9 +150,12 @@ int md_fs_origin_export(const struct md_fd_message *message, struct md_fs_origin
     }
     for (unsigned i=0;!r && i<data.views;++i) {
         struct md_mount_graph_parcel p={0};
-        r=md_mount_graph_export(views[i],&p);
+        r=md_mount_graph_export(views[i],md_fd_message_store_root(message),&p);
         if (!r && p.count>rights-candidate.count) r=-EOVERFLOW;
+        struct md_fd_identity stream;
+        if (!r) r=identity(p.fd[p.count-1],&stream);
         if (!r) r=add_span(&data.view[i],&candidate,p.fd,p.count);
+        if (!r) data.view[i].identity=stream;
         if (!r) p.count=0;
         md_mount_graph_parcel_close(&p);
     }
@@ -163,6 +167,10 @@ int md_fs_origin_export(const struct md_fd_message *message, struct md_fs_origin
         int fd=r ? -1 : fcntl(anchors[i]->fd,F_DUPFD_CLOEXEC,3);
         if (!r && fd<0) r=-errno;
         if (!r) { data.origin[i].descriptor=candidate.count; candidate.fd[candidate.count++]=fd; }
+        if (!r) {
+            int pin=md_mount_graph_acquire_pin(anchors[i]->view,anchors[i]->mount);
+            if (pin<0) r=pin; else candidate.fd[candidate.count++]=pin;
+        }
     }
     data.rights=candidate.count;
     if (!r && candidate.count!=rights) r=-ESTALE;
@@ -216,10 +224,10 @@ static struct cached_view *find(struct cached_view *p, struct md_fd_identity id)
     for (;p;p=p->next) if (md_fd_identity_same(p->identity,id)) return p;
     return NULL;
 }
-static int check_span(const struct span *s, unsigned max, unsigned *next, struct md_fs_origin_parcel *p) {
+static int check_span(const struct span *s, unsigned max, unsigned *next, struct md_fs_origin_parcel *p, int graph) {
     if (s->start!=*next || !s->count || s->count>max || s->count>p->count-*next) return -EPROTO;
     struct md_fd_identity actual;
-    int r=identity(p->fd[*next],&actual);
+    int r=identity(p->fd[*next+(graph ? s->count-1 : 0)],&actual);
     if (!r && !md_fd_identity_same(actual,s->identity)) r=-EPROTO;
     *next+=s->count; return r;
 }
@@ -243,13 +251,16 @@ static int validate(struct md_fs_origin_imports *s, const struct md_fd_message_r
     if (memcmp(route,&m->route,sizeof(*route))) return -ESTALE;
     if (!md_fd_identity_same(m->store,s->store)) return -EXDEV;
     unsigned next=1;
-    for (unsigned i=0;!r && i<m->owners;++i) r=check_span(&m->owner[i],MD_INODE_CUSTODY_FDS,&next,p);
-    for (unsigned i=0;!r && i<m->views;++i) r=check_span(&m->view[i],MD_MOUNT_GRAPH_FDS,&next,p);
+    for (unsigned i=0;!r && i<m->owners;++i) r=check_span(&m->owner[i],MD_INODE_CUSTODY_FDS,&next,p,0);
+    for (unsigned i=0;!r && i<m->views;++i) r=check_span(&m->view[i],MD_MOUNT_GRAPH_FDS,&next,p,1);
     for (unsigned i=0;!r && i<m->origins;++i) {
         struct origin *o=&m->origin[i]; struct md_fd_identity actual;
         if (o->view>=m->views || o->owner>=m->owners || o->descriptor!=next || next>=p->count) return -EPROTO;
         r=path_identity(p->fd[next++],&actual);
         if (!r && !md_fd_identity_same(actual,o->identity)) r=-EPROTO;
+        if (!r) {
+            if (next>=p->count) r=-EPROTO; else ++next;
+        }
     }
     if (!r && next!=p->count) r=-EPROTO;
     /* Canonical first-use indices forbid unused owner records and gaps. Zero
@@ -305,11 +316,16 @@ static int import(struct md_fs_origin_imports *s, const struct md_fd_message_rou
     for (unsigned i=0;!r && i<m.origins;++i) {
         struct origin *o=&m.origin[i]; struct md_mount_namespace *view=views[o->view];
         if (o->mount && (!view->tree || o->mount>view->tree->count)) { r=-EPROTO; break; }
-        struct md_fs_anchor *a=md_view_anchor_new(owners[o->owner],view,
-            o->mount ? &view->tree->mounts[o->mount-1] : NULL,p->fd[o->descriptor],
+        struct md_view_mount *mount=o->mount ? &view->tree->mounts[o->mount-1] : &view->base;
+        if (!mount->id || o->generation!=mount->generation) {
+            r=-ESTALE; break;
+        }
+        struct md_fs_anchor *a=md_view_anchor_import(owners[o->owner],view,
+            mount,p->fd[o->descriptor],p->fd[o->descriptor+1],
             o->identity.device,o->identity.inode);
-        if (!a) { r=-ENOMEM; break; }
+        if (!a) { r=-errno; break; }
         take(p,o->descriptor);
+        take(p,o->descriptor+1);
         anchors[i]=a;
     }
     if (!r) {

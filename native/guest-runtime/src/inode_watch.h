@@ -7,6 +7,8 @@ struct md_inode_store;
  * the retained kernel object, never a guest descriptor number. */
 int md_inode_watch_create(struct md_inode_store *, int flags);
 int md_inode_watch_add(struct md_inode_store *, int instance, int object, unsigned mask);
+int md_inode_watch_add_from(struct md_inode_store *owner, struct md_inode_store *source,
+        int instance, int object, unsigned mask);
 int md_inode_watch_remove(struct md_inode_store *, int instance, int wd);
 int md_inode_watch_contains(struct md_inode_store *, int instance);
 ssize_t md_inode_watch_bytes(struct md_inode_store *, int instance);

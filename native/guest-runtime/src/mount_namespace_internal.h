@@ -1,14 +1,15 @@
 #ifndef MD_MOUNT_NAMESPACE_INTERNAL_H
 #define MD_MOUNT_NAMESPACE_INTERNAL_H
 #include "mount_namespace.h"
-#include "mount_policy.h"
+#include "mount_instance.h"
 #include <pthread.h>
 #include <stdatomic.h>
 
 struct md_mount_namespace {
     atomic_uint refs;
-    unsigned root_id, shm_id;
-    struct md_mount_policy root_policy;
+    unsigned shm_id;
+    struct md_view_mount base;
+    struct md_view_mount *root;
     struct md_fs_mounts *tree;
     struct md_mount_identity *native_ids;
     struct md_mount_graph *graph;

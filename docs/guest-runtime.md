@@ -602,8 +602,8 @@ root-clamped `..`, getcwd and mount-table paths use the selected root.
 Its identity includes the mount and
 backend object, preserving native readonly policy. Existing cwd/descriptors remain
 usable, so chroot alone is not confinement. Guest mount views support local
-bind/move/remount, unmount and attached-root pivot operations; arbitrary
-unattached native roots, mutable exported views and other Linux namespace
+bind/move/remount, unmount and initial/attached-root pivot operations; arbitrary
+unattached native roots and other Linux namespace
 types remain unsupported. See the
 [process resource contract](../native/guest-runtime/process-resources.md).
 
@@ -691,12 +691,18 @@ O_PATH capture; aliases of another thread's resources remain unknown instead of
 borrowing the caller's metadata. Inherited/native descriptors and general
 application SCM_RIGHTS tracking remain incomplete. Guest `CLONE_NEWNS` copies
 the mount view and rebases root/cwd without retargeting existing descriptors.
-Local bind, recursive bind, move, readonly remount, detach and attached-root
+Bind, recursive bind, move, readonly remount, detach and initial/attached-root
 `pivot_root` use the same worker-owned graph. Normal unmount accounts for open
-origins and other process roots. Independent mounted inode stores retain their
+origins, queued/imported message references and other process roots. Exported
+views publish immutable revisions through a retained single-writer stream;
+receivers preserve their local object identities while applying topology updates.
+Detached entries are reclaimed on subsequent mount admission only after their
+origins, roots and children are released. Reused slots carry a new generation.
+Independent mounted inode stores retain their
 backing leases across namespace copies and authenticated FD transfer, including
-publisher exit and backing-directory rename. Mutable cross-worker publication,
-tmpfs and overlay backends remain unsupported. See the
+publisher exit and backing-directory rename. A watch instance can observe multiple
+mounted stores through independently retained observation sources. Tmpfs and
+overlay backends remain unsupported. See the
 [resource contract](../native/guest-runtime/process-resources.md).
 
 Static PIE and fixed-address ET_EXEC use the same loader. ELF load alignment is

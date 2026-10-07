@@ -7,24 +7,9 @@
 #include <stdatomic.h>
 
 enum { MD_VIEW_BUCKETS = 4096, MD_VIEW_OBJECT_LIMIT = 65536 };
-/* Placement and lifetime belong to the tree, independently of the filesystem
- * supplying objects. A layered backend shares this same topology contract. */
-enum md_mount_backing { MD_MOUNT_NATIVE, MD_MOUNT_INODE };
-/* A mount owns its source and covered dentry. Its parent is a mount, not an
- * inode: walking out of a mounted root must return to that particular view. */
-struct md_view_mount {
-    int source, target;
-    struct md_mount_policy policy;
-    unsigned id;
-    enum md_mount_backing backing;
-    /* NULL uses the worker's initial inode store. Additional filesystems retain
-     * backing custody, never a worker-owned SQLite connection. */
-    struct md_inode_lifetime *storage;
-    int detached;
-    atomic_uint anchors;
-    struct md_view_mount *parent;
-    struct stat native, guest;
-};
+static inline int md_view_base(const struct md_mount_namespace *view, const struct md_view_mount *m) {
+    return !m || (view && m==&view->base);
+}
 static inline int md_view_inode(const struct md_view_mount *m) {
     return !m || m->backing==MD_MOUNT_INODE;
 }
@@ -45,6 +30,12 @@ struct md_fs_mounts {
     struct md_view_object *table[MD_VIEW_BUCKETS];
     struct md_view_object *by_id[MD_VIEW_BUCKETS];
 };
+static inline struct md_view_mount *md_view_mount_node(struct md_mount_namespace *view, unsigned node) {
+    return node ? &view->tree->mounts[node-1] : &view->base;
+}
+/* Worker-only retirement. The caller excludes origins, selected roots and
+ * child placements before discarding this slot and its object-cache entries. */
+void md_view_mount_forget(struct md_fs_mounts *, struct md_view_mount *);
 struct md_view_location {
     int parent, fd, boundary;
     struct md_mount_namespace *view;
@@ -56,11 +47,13 @@ struct md_fs_anchor {
     struct md_inode_lifetime *lifetime;
     struct md_mount_namespace *view;
     struct md_view_mount *mount;
-    int fd;
+    int fd, mount_pin;
     dev_t device;
     ino_t inode;
 };
 int md_view_same(const struct stat *, const struct stat *);
+struct md_view_mount *md_view_root_mount(struct md_filesystem *);
+int md_view_root_fd(struct md_filesystem *);
 int md_view_record(struct md_filesystem *, int fd, struct md_view_mount *, struct md_view_object **);
 int md_view_identity(struct md_filesystem *, int fd, struct md_view_object **);
 int md_view_path(struct md_filesystem *, int fd, struct md_view_mount *, char *, size_t);
@@ -79,6 +72,8 @@ int md_view_anchor_check(struct md_filesystem *, int fd, const struct md_fs_anch
 /* Consumes a validated O_PATH descriptor only on success; retains the owners. */
 struct md_fs_anchor *md_view_anchor_new(struct md_inode_lifetime *, struct md_mount_namespace *,
         struct md_view_mount *, int fd, dev_t, ino_t);
+struct md_fs_anchor *md_view_anchor_import(struct md_inode_lifetime *, struct md_mount_namespace *,
+        struct md_view_mount *, int fd, int pin, dev_t, ino_t);
 void md_view_capture(struct md_filesystem *, struct md_mount_namespace *, struct md_view_mount *,
         struct md_fs_result *, const struct md_fs_output *);
 #endif

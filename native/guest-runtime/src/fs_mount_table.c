@@ -19,7 +19,7 @@ static int ensure_view(struct md_filesystem *fs) {
 }
 int md_fs_base_mount(struct md_filesystem *fs, int shared_memory, uint64_t *guest) {
     int r=ensure_view(fs);
-    if (!r) *guest=shared_memory ? fs->mounts->shm_id : fs->mounts->root_id;
+    if (!r) *guest=shared_memory ? fs->mounts->shm_id : fs->mounts->base.id;
     return r;
 }
 int md_fs_native_mount(struct md_filesystem *fs, uint64_t native, uint64_t *guest) {
@@ -59,7 +59,7 @@ static int native_entries(struct md_filesystem *fs, FILE *out, unsigned info, un
         if (sscanf(line,"%llu %llu %n%63s %4095s %4095s %1023s",
                 &raw,&parent,&rest,device,root,path,options)!=6) { r=-EPROTO; break; }
         if ((!below(path,"/proc") && !below(path,"/dev")) || below(path,"/dev/shm")) continue;
-        uint64_t id, owner=fs->mounts->root_id;
+        uint64_t id, owner=fs->mounts->base.id;
         r=md_fs_native_mount(fs,raw,&id);
         if (!r && strcmp(path,"/dev") && strcmp(path,"/proc"))
             r=md_fs_native_mount(fs,parent,&owner);
@@ -101,28 +101,31 @@ int md_fs_mount_table(struct md_filesystem *fs, unsigned info, unsigned flags) {
     FILE *stream=fdopen(fd,"w+");
     if (!stream) { int error=-errno; close(fd); return error; }
     struct stat root;
-    r=fs->native_root ? (fstat(fs->native_root->fd,&root) ? -errno : 0)
-        : md_inode_stat(fs->store,-1,"/",0,&root);
-    unsigned dev_id=fs->mounts->root_id;
+    int root_fd=md_view_root_fd(fs);
+    r=root_fd<0 ? root_fd : fstat(root_fd,&root) ? -errno : 0;
+    if (root_fd>=0) close(root_fd);
+    const struct md_view_mount *selected=md_view_root_mount(fs);
+    unsigned dev_id=fs->mounts->base.id;
     if (!r) {
-        if (fs->native_root) {
-            const struct md_view_mount *m=fs->native_root->mount;
-            entry(stream,info,m->id,m->parent ? m->parent->id : fs->mounts->root_id,
-                root.st_dev,"/","none","attachment",md_view_readonly(m));
-        } else entry(stream,info,fs->mounts->root_id,fs->mounts->root_id,root.st_dev,"/","guestfs","guest",
-            fs->store->readonly || (md_mount_policy_flags(&fs->mounts->root_policy)&MD_MOUNT_READONLY));
-        if (!fs->store->root_id && !fs->native_root) {
+        if (!md_view_base(fs->mounts,selected)) {
+            const struct md_view_mount *m=selected;
+            entry(stream,info,m->id,m->parent ? m->parent->id : m->id,
+                root.st_dev,"/",md_view_inode(m) ? "guestfs" : "none",
+                md_view_inode(m) ? "guest" : "attachment",md_view_readonly(m));
+        } else entry(stream,info,fs->mounts->base.id,fs->mounts->base.id,root.st_dev,"/","guestfs","guest",
+            fs->store->readonly || (md_mount_policy_flags(&fs->mounts->base.policy)&MD_MOUNT_READONLY));
+        if (!fs->store->root_id && !fs->native_root && selected==&fs->mounts->base) {
             r=native_entries(fs,stream,info,&dev_id);
             if (!r) entry(stream,info,fs->mounts->shm_id,dev_id,root.st_dev,"/dev/shm","guestfs","guest",fs->store->readonly);
         }
     }
     struct md_fs_mounts *tree=fs->mounts ? fs->mounts->tree : NULL;
-    if (tree) for (unsigned i=0; !r && i<tree->count; ++i) {
-        const struct md_view_mount *m=&tree->mounts[i];
-        if (m->detached) continue;
+    if (tree) for (unsigned i=0; !r && i<=tree->count; ++i) {
+        const struct md_view_mount *m=i ? &tree->mounts[i-1] : &fs->mounts->base;
+        if (m->detached || m==selected || !m->parent) continue;
         char path[PATH_MAX]; r=md_view_path(fs,m->target,m->parent,path,sizeof(path));
         if (r == -ENOENT && (fs->store->root_id || fs->native_root)) { r=0; continue; }
-        if (!r) entry(stream,info,m->id,m->parent ? m->parent->id : fs->mounts->root_id,
+        if (!r) entry(stream,info,m->id,m->parent ? m->parent->id : fs->mounts->base.id,
             m->native.st_dev,path,md_view_inode(m) ? "guestfs" : "none",
             md_view_inode(m) ? "guest" : "attachment",md_view_readonly(m));
     }

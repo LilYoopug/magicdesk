@@ -46,6 +46,16 @@ Portable attachment graphs use the same baseline memfd interface with immutable
 add no newer-kernel requirement or startup probe. Graph publication/import fails
 explicitly if those operations are unavailable; no pathname-reopening fallback
 substitutes for retained directory identity.
+Live graph publication adds nonblocking Unix seqpacket queues and the existing
+bounded SCM_RIGHTS bundles. Mounted-origin lifetime uses one `O_TMPFILE` carrier
+per exported graph and independent `F_OFD_SETLK` byte-range leases, all available
+within the 5.15 baseline. Retirement and normal unmount acquire exclusive leases
+without waiting; imported origins refresh their generation under a shared lease.
+These operations run only on explicit graph publication/transfer or mount changes.
+Failure does not change the selected identity or require them for other services.
+Base-root relocation uses that same userspace graph, O_PATH custody and origin
+leases. Guest pivot_root does not issue a privileged host mount/pivot syscall or
+add a kernel capability requirement.
 Portable backing custody uses the same sealed-manifest primitive and transfers
 existing root/lower directory descriptions through SCM_RIGHTS. CLOEXEC duplication
 and queued rights preserve their existing flock leases; import never relocks

@@ -7,7 +7,7 @@ Android Activities, named environments or launcher configuration.
 | Resource | Clone sharing | Unshare | Exec |
 | --- | --- | --- | --- |
 | Filesystem context | `CLONE_FS` | `CLONE_FS` | Retained |
-| Mount view | Shared independently of `CLONE_FS` | Namespace creation unsupported | Retained |
+| Mount view | Shared independently of `CLONE_FS`; `CLONE_NEWNS` copies | `CLONE_NEWNS` copies and separates FS context | Retained |
 | Descriptor-origin annotations | `CLONE_FILES` | `CLONE_FILES`, `CLOSE_RANGE_UNSHARE` | Detach; remove close-on-exec entries |
 | Semaphore undo | `CLONE_SYSVSEM` | `CLONE_SYSVSEM` | Retained |
 
@@ -147,7 +147,7 @@ view; existing descriptors keep their original provenance. Failure or caller
 death releases the candidate without replacing the task's owners. Virtual
 CAP_SYS_ADMIN controls admission; it grants no host capability.
 
-Local, unpublished views support directory/file bind mounts, recursive bind,
+Mount views support directory/file bind mounts, recursive bind,
 readonly remount, private propagation, move and normal/lazy unmount. Placement
 uses stable slots and a validated acyclic parent graph, independently of slot
 allocation order. Recursive preparation acquires the complete subtree before
@@ -155,21 +155,41 @@ publication. Move preserves mount IDs and open anchors. Lazy detach removes
 lookup visibility while retained descriptors still address the old objects.
 Normal unmount rejects retained anchors, child mounts or roots belonging to
 any FS context in the namespace, including prepared fork/unshare candidates.
+Exported origins hold shared OFD range locks through queued rights, import and
+forwarding. A normal unmount retains an exclusive nonblocking range lease through
+publication, excluding a concurrent foreign-origin acquisition. Conflicts return
+EBUSY without a wait, root escalation or a helper process. Lazy detach permits
+existing references. Detached entries are collected during later mount admission
+when no origin, selected root or child placement retains them. Collection drops
+their object-cache records, policies and backing custody before slot reuse.
+A slot generation prevents stale snapshots from referring to its replacement.
 
-`pivot_root` accepts an attached selected root and an attached new root below it.
+`pivot_root` accepts the initial base root or an attached selected root and an
+attached new root below it. The base is a stable mount instance, not a missing
+origin. Its physical root descriptors are acquired only when its placement changes.
 The old root is moved to the resolved put_old directory. Root and cwd references
 exactly at the old root move to the new one; other cwd locations and open FDs
 remain unchanged. Namespace-owned weak FS-context membership includes prepared
 fork/unshare candidates, independently of task-registry publication. Each
 context retains its namespace; a short lifecycle lock orders membership and
-root relocation without holding a lock across guest execution. The initial
-unattached base root cannot be pivoted directly. Topology mutation of exported
-views, tmpfs and overlay backends are not yet supported.
+root relocation without holding a lock across guest execution. Root placement
+is part of the same validated revision as attachment placement; prepared roots
+and covered dentries are released on failed publication. Namespace copies retain
+the relocated base and remap its parents. Recursive bind, child-busy checks and
+retirement traverse the base and attachments in one topological order. Returning
+to the base preserves its explicit root identity for subsequent pivots; mountinfo
+publishes the selected root once and the relocated base at its covered path.
+Tmpfs and overlay backends are not yet
+supported.
 
 Mounted inode filesystems retain backing custody separately from their placement.
 Bind and namespace copies share that custody, not a SQLite connection or mount
 policy. A worker-local storage cache opens an additional connection only on first
 use; the initial-store path needs neither a cache lookup nor an allocation.
+The cache retains at most 16 connections in LRU order. Scoped users exclude
+eviction; cold admission and mount retirement release connections whose backing
+custody has no other owner. Watches own independent connections and can outlive
+cache eviction. No cache sweep or filesystem probe is added to ordinary data IO.
 Path traversal, roots, metadata, object IDs and reopen select the mounted store.
 Retained old-view dirfds remain usable after the original worker connection closes.
 The private retained-directory SQLite VFS preserves the lease FD as the directory
@@ -177,6 +197,11 @@ anchor through rename; stock Unix VFS IO, journaling, locking and nofollow opens
 remain in use. Portable graphs retain each distinct mounted store's maintenance
 and loaded-source leases once, including aliases. Imports reconnect under the
 same custody after publisher exit, without trusting the original store path.
+Watch instances own one queue and independent sources for each selected store.
+Aliases share a source by store identity; additional sources retain their own
+custody and connection rather than borrowing the filesystem worker's cache.
+Watch descriptors are unique across the instance. Empty sources release their
+observation resources; transactions and waits never span two stores.
 
 ### Shared Mount Policy
 
@@ -205,15 +230,16 @@ This component transfers policy; the graph parcel below associates that policy
 with source/covered O_PATH references. The verified private transport must bind
 the parcel to its store and message. Atomic flag visibility does not provide
 mount/remount transaction ordering across workers. Local mutations run on the
-filesystem worker; cross-launch mutable topology needs a separate publication
-contract.
+filesystem worker; mutable topology uses the revision contract below.
 
 ### Portable Attachment Graph
 
-`mount_graph` explicitly publishes an immutable attachment graph into a sealed
-memfd. Its bounded, pointer-free manifest records parent indices and the kernel
+`mount_graph` publishes immutable revisions of an attachment graph into sealed
+memfds. Each bounded, pointer-free manifest records parent indices, slot
+generations and the kernel
 identities of each source object, covered object and policy descriptor, including
-the base-root policy. Backing type, detached state and mounted-store identities
+the base-root policy and its optional relocated placement. The selected graph
+root is explicit. Backing type, detached state and mounted-store identities
 are explicit. Parent
 indices need not precede children; cyclic or out-of-range relationships fail.
 The parcel retains those actual O_PATH references and policy FDs, not paths or
@@ -224,7 +250,7 @@ append deduplicated `inode_custody` parcels; their exact spans and root identiti
 belong to the sealed graph. Even a repeated import validates all backing rights
 before reusing a known view. Forwarding retains those original leases.
 
-The sealed manifest's retained device/inode identifies the graph across private
+The retained topology stream's device/inode identifies the graph across private
 transfers and forwarding, independently of the publisher's process lifetime.
 Mount IDs remain receiver-local and are allocated from its existing owner.
 Import into an already known view verifies that identity and every descriptor,
@@ -237,8 +263,9 @@ mutable object cache.
 Export returns an owned bounded parcel. Import always consumes it and publishes
 a destination only after complete validation. Invalid seals, graph structure,
 FD count/type/identity and allocation/mapping failures close partial resources
-without replacing an existing destination. Empty views transfer the manifest
-and root policy. Placement needs at most 50 descriptors; each distinct additional
+without replacing an existing destination. Empty views transfer the manifest,
+root policy, anonymous pin carrier and stream. Placement needs at most 54
+descriptors; each distinct additional
 store adds 2..512 custody descriptors, up to 16 stores. The cold parcel allocates
 only its actual FD count and travels through the existing bounded FD bundles.
 Validation and duplicate-safe cleanup sort descriptor numbers rather than doing
@@ -247,13 +274,30 @@ unexported views create no manifest and ordinary data IO takes no new path.
 Failed export can retain successfully materialized publication state in its
 source view, but leaves no partial output parcel or changed mount policy.
 
-The graph is immutable after publication; exporting a mutated tree fails ESTALE
-rather than silently substituting a snapshot under its previous identity.
-Readonly updates use the live policy mappings. This is not shared mutable
-namespace topology, a selected task root/cwd, native mount-ID-map transfer or
-a complete application-origin vector. `fs_origin_transfer` composes graphs with
+The owner prepares a complete new revision, queues its immutable FD bundle and
+then consumes the old head to expose the new one atomically. The bundle never
+contains its own topology stream, avoiding SCM_RIGHTS reference cycles. Death
+before commit preserves the old head; after writer exit readers retain the last
+committed revision. Only that owner may publish. A foreign worker checks the
+revision at operation admission; unchanged revisions require no allocation or
+FD slot. Changed revisions are fully validated before merging into its local
+tree. Old snapshots cannot roll back a newer view. Retired entries carry no
+placement descriptors; replacement invalidates only that slot's old object cache.
+Unpublished local mutation still fails ESTALE on export. Readonly updates use
+the live policy mappings. Selected task root/cwd, native mount-ID-map transfer
+and a complete application-origin vector are separate from graph publication.
+`fs_origin_transfer` composes graphs with
 backing custody and a message route. A valid graph alone does not authorize
 access to another store. Local guest namespace creation has independent admission.
+
+One empty anonymous regular file per exported graph carries independent byte-range
+leases for its slots. Local origins need no extra descriptor. Exported and foreign
+origins own readonly descriptions with shared OFD locks; kernel SCM_RIGHTS queues
+retain them until receipt or discard. The writer temporarily takes an independent
+exclusive lease for normal unmount or retirement. A receiver refreshes the graph
+under its new shared lease and rejects stale generation/detach state before
+publishing an anchor. Final close releases the lock without a counter protocol.
+This carrier has no directory entry, payload data or per-request file creation.
 
 ### Portable Backing Custody
 
@@ -293,8 +337,11 @@ the origin-transfer owner, not this backing component.
 `fs_origin_transfer` exports a pinned, bound source message into one owned
 control-plane parcel. Its compact sealed manifest contains only used records:
 the exact message route, physical store identity, vector indices, unique O_PATH
-anchors, mount slots and spans identifying the graph/custody manifests. Repeated
+anchors, mount slots/generations and spans identifying the graph/custody manifests. Repeated
 anchors and shared owners are emitted once; unknown entries remain unknown.
+Every known anchor carries a mount pin, including base-root origins created
+before a subsequent pivot. They retain the old mount rather than following the
+namespace's new root.
 No mount pointer, SQLite connection or application data OFD crosses this boundary.
 Publication is worker-only because graphs and loaded source catalogues are
 worker-owned. The event loop retains the immutable message through completion.
@@ -308,7 +355,7 @@ releases partial custody without changing an existing cache or destination.
 Allocation and descriptor exhaustion return errors, not partial vectors or
 automatic replay.
 
-The import owner interns graphs by their sealed kernel identity. Repeated and
+The import owner interns graphs by their retained stream identity. Repeated and
 forwarded imports reuse receiver-local mount IDs and object caches while any
 anchor retains that graph. Each worker owns its own cache; copying a namespace
 still makes a distinct graph. Cache-only views are collected after successful

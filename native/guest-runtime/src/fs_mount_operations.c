@@ -40,7 +40,7 @@ static int descriptor(struct md_filesystem *fs, const struct md_fs_request *q,
         struct md_fs_result *out, const struct md_fs_output *output) {
     const struct md_fs_anchor *origin=q->origin[0];
     if (origin && md_view_inode(origin->mount)
-            && !(origin->mount && q->operation==MD_FS_OBJECT_ID)) return 0;
+            && !(!md_view_base(origin->view,origin->mount) && q->operation==MD_FS_OBJECT_ID)) return 0;
     struct md_filesystem owner=*fs;
     if (origin) owner.mounts=origin->view;
     struct md_view_object *p = NULL;
@@ -356,7 +356,7 @@ static int local_inode_view(struct md_filesystem *fs, const struct md_fs_request
     if (md_mount_namespace_attached(fs->mounts) || fs->native_root || q->resolve) return 0;
     for (unsigned i=0;i<2;++i) {
         const struct md_fs_anchor *p=q->origin[i];
-        if (p && (p->view!=fs->mounts || p->mount)) return 0;
+        if (p && (p->view!=fs->mounts || !md_view_base(p->view,p->mount))) return 0;
     }
     for (unsigned i=0;i<2;++i) {
         const struct md_fs_anchor *p=q->origin[i];
@@ -437,7 +437,7 @@ void md_fs_mounts_execute(struct md_filesystem *fs, const struct md_fs_request *
             : a.view!=fs->mounts ? -ENOENT : md_view_path(fs,a.fd,a.mount,output->data,output->capacity);
         if (!out->error) out->size=strlen(output->data)+1;
     } else if (!r && !md_view_inode(a.mount)) native(fs, q, &a, &b, out, output);
-    else if (!r && ((q->operation==MD_FS_OPEN_IMAGE && a.mount)
+    else if (!r && ((q->operation==MD_FS_OPEN_IMAGE && !md_view_base(a.view,a.mount))
             || (a.fd>=0 && !strcmp(a.name,".") && selected_operation(q->operation)))) {
         inode_selected(fs,q,&a,out,output);
     } else if (!r) {

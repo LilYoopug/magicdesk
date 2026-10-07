@@ -134,7 +134,7 @@ static void empty_views(struct md_inode_store *s) {
     assert(!r.error && fifo && r.open_completion.kind==MD_OPEN_PIPE);
     int reader=md_complete_open(r.fd,flags,r.open_completion); assert(reader>=0);
     r=request(&copy,fifo,reader,MD_FS_FSTAT,NULL,0,0,NULL);
-    assert(!r.error && S_ISFIFO(r.info.mode) && r.info.mount_id==fs.mounts->root_id);
+    assert(!r.error && S_ISFIFO(r.info.mode) && r.info.mount_id==fs.mounts->base.id);
     flags=O_WRONLY|O_NONBLOCK|O_CLOEXEC;
     r=request(&copy,fifo,reader,MD_FS_REOPEN,NULL,flags,0,&second);
     assert(!r.error && second && r.open_completion.kind==MD_OPEN_PIPE);
@@ -311,7 +311,7 @@ void test_fs_anchor(const char *base) {
     opens(&current,old_root,"jail/../mnt/value",O_RDWR,0,0);
     opens(&current,old,"absolute",O_RDONLY,0,-ENOENT);
     r=request(&current,old_root,md_fs_anchor_fd(old_root),MD_FS_FSTAT,NULL,0,0,NULL);
-    assert(!r.error && r.info.mount_id==original.mounts->root_id);
+    assert(!r.error && r.info.mount_id==original.mounts->base.id);
     assert(!strcmp(s->root_id,root.object));
     assert(!md_fs_root_select(&current,&(struct md_fs_location){0}));
     snprintf(path,sizeof(path),"%s/child",host[0]);

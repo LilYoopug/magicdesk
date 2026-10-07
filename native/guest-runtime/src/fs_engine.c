@@ -3,6 +3,8 @@
 #include "image_catalogue.h"
 #include "inode_watch.h"
 #include "fs_mount_internal.h"
+#include "mount_graph.h"
+#include "fs_storage.h"
 #include "task_registry.h"
 #include "ipc_credentials.h"
 #include "inode_internal.h"
@@ -41,16 +43,41 @@ static void change_root(struct md_filesystem *fs, struct md_guest_domain *contex
     if (!error) error = md_domain_set_root(context, &root);
     md_fs_anchor_release(origin); close(fd); out->error = error == -EXDEV ? -ENOTSUP : error;
 }
+static int watch_add(struct md_filesystem *fs, int instance, int object,
+        const struct md_fs_anchor *origin, unsigned flags) {
+    struct md_view_mount *mount=origin ? origin->mount : NULL;
+    if (origin) {
+        int r=md_view_anchor_check(fs,object,origin);
+        if (r) return r;
+    } else {
+        struct md_view_object *entry=NULL;
+        int r=md_view_identity(fs,object,&entry);
+        if (r && r!=-EXDEV) return r;
+        if (!r) mount=entry->mount;
+    }
+    if (!md_view_inode(mount)) return md_inode_watch_add(fs->store,instance,object,flags);
+    struct md_fs_storage_scope scope;
+    int r=md_fs_storage_enter(fs,mount,&scope);
+    if (!r) {
+        r=md_inode_watch_add_from(fs->store,scope.store,instance,object,flags);
+        md_fs_storage_leave(&scope);
+    }
+    return r;
+}
 static void watch_path(struct md_filesystem *fs, const struct md_fs_request *q,
         struct md_fs_result *out, const struct md_fs_output *output) {
     struct md_fs_request open=*q;
     open.operation=MD_FS_OPEN; open.flags=O_PATH|O_CLOEXEC|(q->flags&IN_DONT_FOLLOW ? O_NOFOLLOW : 0);
     open.directory[1]=-1; open.origin[1]=NULL;
-    md_fs_view_execute(fs,&open,out,output);
-    if (out->error) return;
+    struct md_fs_anchor *origin=NULL;
+    struct md_fs_output capture=output ? *output : (struct md_fs_output){0};
+    capture.origin=fs->mounts ? &origin : NULL;
+    md_fs_view_execute(fs,&open,out,&capture);
+    if (out->error) { md_fs_anchor_release(origin); return; }
     int fd=out->fd; out->fd=-1;
-    int wd=md_inode_watch_add(fs->store,q->directory[1],fd,q->flags);
+    int wd=watch_add(fs,q->directory[1],fd,origin,q->flags);
     close(fd);
+    md_fs_anchor_release(origin);
     if (wd<0) out->error=wd; else out->position=wd;
 }
 static void task_path(struct md_filesystem *fs, const struct md_fs_request *q,
@@ -197,7 +224,11 @@ static void context_execute(struct md_fs_context *context,
     struct md_view_object *previous_native_root=fs->native_root;
     struct md_mount_namespace *previous_mounts=fs->mounts;
     if (context->authenticated) fs->mounts=task->mounts;
-    int root_error=context->authenticated ? md_fs_root_select(fs,&task->root) : 0;
+    int root_error=md_mount_graph_sync(fs->mounts);
+    for (unsigned i=0;!root_error && i<2;++i)
+        if (q->origin[i] && q->origin[i]->view!=fs->mounts)
+            root_error=md_mount_graph_sync(q->origin[i]->view);
+    if (!root_error && context->authenticated) root_error=md_fs_root_select(fs,&task->root);
     struct md_inode_boundary boundary={.path=output ? output->data : NULL,.capacity=output ? output->capacity : 0};
     struct md_inode_boundary *previous_boundary=fs->store->boundary;
     fs->store->boundary=&boundary;
@@ -207,6 +238,10 @@ static void context_execute(struct md_fs_context *context,
     else if (q->operation==MD_FS_MOUNT)
         *out=(struct md_fs_result){.fd=-1,.error=md_fs_mount_change(fs,task->fs,q)};
     else if (q->operation == MD_FS_WATCH_PATH) watch_path(fs,q,out,output);
+    else if (q->operation == MD_FS_WATCH_ADD) {
+        int wd=watch_add(fs,q->directory[0],q->directory[1],q->origin[1],q->flags);
+        *out=(struct md_fs_result){.fd=-1,.error=wd<0 ? wd : 0,.position=wd<0 ? 0 : wd};
+    }
     else if (q->operation == MD_FS_TASK_PATH) task_path(fs,q,out,output);
     else if (q->operation==MD_FS_XATTR || q->operation==MD_FS_FXATTR) md_fs_xattr(fs,q,out,output);
     else md_fs_view_execute(fs,q,out,output);
@@ -413,7 +448,7 @@ void md_fs_inode_execute(struct md_filesystem *fs, const struct md_fs_request *q
     struct md_inode_store *store=fs->selected_store ? fs->selected_store : fs->store;
     int readonly=store->readonly;
     if (fs->mounts && (fs->inode_mount ? md_view_readonly(fs->inode_mount)
-            : (md_mount_policy_flags(&fs->mounts->root_policy)&MD_MOUNT_READONLY))) store->readonly=1;
+            : (md_mount_policy_flags(&fs->mounts->base.policy)&MD_MOUNT_READONLY))) store->readonly=1;
     inode_execute(fs,q,out,output);
     store->readonly=readonly;
 }

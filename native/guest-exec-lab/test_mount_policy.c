@@ -219,6 +219,7 @@ int test_mount_policy_child(int argc, char **argv) {
     struct md_fs_anchor *origin=NULL;
     struct md_fs_request q={.operation=MD_FS_OPEN,.directory={-1,-1},.path={"/volume/value",NULL},.flags=O_PATH};
     struct md_fs_result r; md_fs_execute(&fs,&q,&r,&(struct md_fs_output){.origin=&origin});
+    if (r.error) fprintf(stderr,"policy reader capture: %d\n",r.error);
     assert(!r.error && origin); close(r.fd);
     engine_checks(&fs,origin,0); send_byte(fd,'0');
     const char expected[]={'1','0','e'};

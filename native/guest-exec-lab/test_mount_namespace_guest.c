@@ -60,7 +60,9 @@ static void binding(void) {
 }
 static void root_busy(void) {
     assert(!mkdir("/tmp/root-use",0755));
+    assert(!mkdir("/tmp/root-replacement",0755));
     assert(!mount("/tmp/root-use","/tmp/root-use",NULL,MS_BIND,NULL));
+    uint64_t mounted=id(AT_FDCWD,"/tmp/root-use");
     int commands[2], replies[2]; assert(!pipe(commands) && !pipe(replies));
     pid_t child=fork(); assert(child>=0);
     if (!child) {
@@ -68,18 +70,35 @@ static void root_busy(void) {
         /* No cwd or descriptor inside the mount: only this FS root pins it. */
         assert(!chroot("/tmp/root-use"));
         assert(write(replies[1],"r",1)==1);
-        char byte; assert(read(commands[0],&byte,1)==1); _exit(0);
+        char byte; assert(read(commands[0],&byte,1)==1);
+        assert(id(AT_FDCWD,"/")==mounted); _exit(0);
     }
     close(commands[0]); close(replies[1]);
     /* EVENT_WAIT: child publishes its root before unmount; the executable's
      * alarm fails missing acknowledgement or child completion. */
     char byte; assert(read(replies[0],&byte,1)==1);
     assert(umount2("/tmp/root-use",0)<0 && errno==EBUSY);
+    assert(!umount2("/tmp/root-use",MNT_DETACH));
+    assert(!mount("/tmp/root-replacement","/tmp/root-use",NULL,MS_BIND,NULL));
+    assert(id(AT_FDCWD,"/tmp/root-use")!=mounted);
     assert(write(commands[1],"q",1)==1);
     int status; assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
     close(commands[1]); close(replies[0]);
     assert(!umount2("/tmp/root-use",0));
-    puts("PASS normal unmount: another FS root pins mount until its last owner exits");
+    puts("PASS mount root lifetime: busy unmount, lazy detach and replacement preserve another FS root");
+}
+static void churn(void) {
+    assert(!mkdir("/tmp/churn",0755));
+    uint64_t previous=0;
+    for (unsigned i=0;i<64;++i) {
+        assert(!mount("/tmp/source","/tmp/churn",NULL,MS_BIND,NULL));
+        uint64_t current=id(AT_FDCWD,"/tmp/churn"); assert(current!=previous); previous=current;
+        int held=open("/tmp/churn",O_PATH|O_DIRECTORY); assert(held>=0);
+        assert(!umount2("/tmp/churn",MNT_DETACH));
+        assert(id(held,"")==current);
+        int fd=openat(held,"value",O_RDONLY); assert(fd>=0); close(fd); close(held);
+    }
+    puts("PASS guest mount retirement: 64 reused slots, distinct mount IDs and retained detached dirfds");
 }
 static void stacks(void) {
     assert(!mkdir("/tmp/outer",0755)); assert(!mkdir("/tmp/other",0755));
@@ -173,49 +192,73 @@ static void moving(void) {
     assert(!umount2("/tmp/move-parent",MNT_DETACH));
     puts("PASS mount move: stable IDs/FDs, cwd/parent relocation, cycle rollback and recursive copy");
 }
-static int pivoting(void *unused) {
-    (void)unused;
-    assert(!mkdir("/tmp/pivot",0755)); assert(!mkdir("/tmp/pivot/new",0755));
-    assert(!mkdir("/tmp/pivot/new/old",0755)); assert(!mkdir("/tmp/pivot/stay",0755));
-    assert(!mount("/tmp/pivot","/tmp/pivot",NULL,MS_BIND,NULL));
-    assert(!chroot("/tmp/pivot") && !chdir("/"));
-    assert(!mount("/new","/new",NULL,MS_BIND,NULL));
+static int pivoting(void *argument) {
+    int initial=argument!=NULL;
+    if (!initial) {
+        assert(!mkdir("/tmp/pivot",0755)); assert(!mkdir("/tmp/pivot/new",0755));
+        assert(!mkdir("/tmp/pivot/new/old",0755)); assert(!mkdir("/tmp/pivot/stay",0755));
+        assert(!mount("/tmp/pivot","/tmp/pivot",NULL,MS_BIND,NULL));
+        assert(!chroot("/tmp/pivot"));
+    } else {
+        assert(!mkdir("/base-new",0755) && !mkdir("/base-new/old",0755));
+        assert(!mkdir("/base-stay",0755));
+    }
+    assert(!chdir("/"));
+    const char *next_path=initial ? "/base-new" : "/new";
+    const char *put_path=initial ? "/base-new/old" : "/new/old";
+    const char *stay=initial ? "/base-stay" : "/stay";
+    assert(!mount(next_path,next_path,NULL,MS_BIND,NULL));
     int held=open("/",O_PATH|O_DIRECTORY); assert(held>=0);
-    uint64_t previous=id(held,""), next=id(AT_FDCWD,"/new");
+    uint64_t previous=id(held,""), next=id(AT_FDCWD,next_path);
     assert(previous!=next);
-    assert(syscall(SYS_pivot_root,"/new","/stay")<0 && errno==EBUSY);
+    assert(syscall(SYS_pivot_root,next_path,stay)<0 && errno==EBUSY);
     assert(id(AT_FDCWD,"/")==previous);
     int commands[2], replies[2]; assert(!pipe(commands) && !pipe(replies));
     pid_t peer=fork(); assert(peer>=0);
     if (!peer) {
-        assert(!chdir("/stay"));
+        assert(!chdir(stay));
         assert(write(replies[1],"r",1)==1);
         char byte; assert(read(commands[0],&byte,1)==1);
         assert(id(AT_FDCWD,"/")==next);
-        char cwd[128]; assert(getcwd(cwd,sizeof(cwd)) && !strcmp(cwd,"/old/stay"));
+        char cwd[128]; assert(getcwd(cwd,sizeof(cwd)) && !strcmp(cwd,initial ? "/old/base-stay" : "/old/stay"));
         assert(!chdir("/") && id(AT_FDCWD,".")==next);
         assert(write(replies[1],"r",1)==1); _exit(0);
     }
     /* EVENT_WAIT: peer has captured its own cwd before the atomic root change;
      * the executable's alarm bounds a missing pipe acknowledgement. */
     char byte; assert(read(replies[0],&byte,1)==1);
-    assert(!syscall(SYS_pivot_root,"/new","/new/old"));
+    assert(!syscall(SYS_pivot_root,next_path,put_path));
     assert(id(AT_FDCWD,"/")==next && id(AT_FDCWD,".")==next);
     assert(id(held,"")==previous && id(AT_FDCWD,"/old")==previous);
     char cwd[128]; assert(getcwd(cwd,sizeof(cwd)) && !strcmp(cwd,"/"));
     assert(id(AT_FDCWD,"/..")==next);
+    if (initial) assert(umount2("/",MNT_DETACH)<0 && errno==EBUSY);
     assert(write(commands[1],"p",1)==1 && read(replies[0],&byte,1)==1);
     int status; assert(waitpid(peer,&status,0)==peer && WIFEXITED(status) && !WEXITSTATUS(status));
     close(commands[0]); close(commands[1]); close(replies[0]); close(replies[1]);
+    if (initial) {
+        assert(!mkdir("/clone",0755));
+        assert(!mount("/","/clone",NULL,MS_BIND|MS_REC,NULL));
+        int child=open("/clone/old/base-stay",O_PATH|O_DIRECTORY); assert(child>=0); close(child);
+        assert(id(AT_FDCWD,"/clone/old")!=previous);
+        assert(!umount2("/clone",MNT_DETACH));
+        assert(!mkdir("/old/base-return",0755));
+        assert(!syscall(SYS_pivot_root,"/old","/old/base-return"));
+        assert(id(AT_FDCWD,"/")==previous && id(AT_FDCWD,".")==previous);
+        assert(id(AT_FDCWD,"/base-return")==next && id(held,"")==previous);
+        assert(!syscall(SYS_pivot_root,"/base-return","/base-return/old"));
+        assert(id(AT_FDCWD,"/")==next && id(AT_FDCWD,"/old")==previous);
+    }
     assert(!umount2("/old",MNT_DETACH));
     assert(id(held,"")==previous);
-    int retained=openat(held,"stay",O_PATH|O_DIRECTORY); assert(retained>=0); close(retained);
+    int retained=openat(held,stay+1,O_PATH|O_DIRECTORY); assert(retained>=0); close(retained);
     close(held);
     uint64_t before_copy=id(AT_FDCWD,"/");
     assert(!unshare(CLONE_NEWNS));
     assert(id(AT_FDCWD,"/")!=before_copy && id(AT_FDCWD,".")==id(AT_FDCWD,"/"));
     assert(getcwd(cwd,sizeof(cwd)) && !strcmp(cwd,"/"));
-    puts("PASS pivot root: peer roots, selective cwd relocation, old dirfd and detached old root");
+    puts(initial ? "PASS initial pivot root: peer roots, cwd, retained base, recursive copy, reverse pivot, detach and namespace copy"
+        : "PASS pivot root: peer roots, selective cwd relocation, old dirfd and detached old root");
     return 0;
 }
 void test_mount_namespace_guest(void) {
@@ -237,13 +280,16 @@ void test_mount_namespace_guest(void) {
     assert(clone(copied,(char *)stack+1024*1024,SIGCHLD|CLONE_FS|CLONE_NEWNS,&c)<0 && errno==EINVAL);
     root_busy();
     binding();
+    churn();
     stacks();
     files();
     recursive();
     moving();
-    pid_t pivot=clone(pivoting,(char *)stack+1024*1024,SIGCHLD|CLONE_NEWNS,NULL);
-    assert(pivot>0);
-    int status; assert(waitpid(pivot,&status,0)==pivot && WIFEXITED(status) && !WEXITSTATUS(status));
+    for (uintptr_t initial=0;initial<2;++initial) {
+        pid_t pivot=clone(pivoting,(char *)stack+1024*1024,SIGCHLD|CLONE_NEWNS,(void *)initial);
+        assert(pivot>0);
+        int status; assert(waitpid(pivot,&status,0)==pivot && WIFEXITED(status) && !WEXITSTATUS(status));
+    }
     assert(id(AT_FDCWD,"/")==c.original);
     assert(!setresuid(1000,1000,1000));
     assert(unshare(CLONE_NEWNS)<0 && errno==EPERM);

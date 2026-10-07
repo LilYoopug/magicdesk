@@ -13,13 +13,6 @@ void md_view_location_close(struct md_view_location *p) {
     if (p->fd >= 0) close(p->fd);
     p->parent = p->fd = -1;
 }
-static int root(struct md_filesystem *fs) {
-    if (fs->native_root) {
-        int fd=fcntl(fs->native_root->fd,F_DUPFD_CLOEXEC,3);
-        return fd<0 ? -errno : fd;
-    }
-    return md_inode_open(fs->store, MD_INODE_ROOT, "/", O_PATH | O_DIRECTORY | O_CLOEXEC, 0);
-}
 static int duplicate(int fd) { int copy = fcntl(fd, F_DUPFD_CLOEXEC, 3); return copy < 0 ? -errno : copy; }
 static int component(struct md_filesystem *fs, struct md_mount_namespace *view,
         struct md_view_mount *mount, int fd, const char *name) {
@@ -40,8 +33,9 @@ static int enter(struct md_mount_namespace *view, int *fd, struct md_view_mount 
     if (!tree) return 0;
     struct stat st;
     if (fstat(*fd, &st)) return -errno;
-    for (unsigned i = 0; i < tree->count; ++i) {
-        struct md_view_mount *m = &tree->mounts[i];
+    for (unsigned i = 0; i <= tree->count; ++i) {
+        struct md_view_mount *m = i ? &tree->mounts[i-1] : &view->base;
+        if (m->source<0) continue;
         if (m->detached || m->parent != *mount || !md_view_same(&st, &m->guest)) continue;
         if (resolve & RESOLVE_NO_XDEV) return -EXDEV;
         int copy = duplicate(m->source);
@@ -58,6 +52,7 @@ static int parent(struct md_filesystem *fs, struct md_mount_namespace *view,
     /* A stack can contain several mounted roots at the same dentry. Leave all
      * of them before taking one directory step; never use a source's parent. */
     while (*mount && md_view_same(&st,&(*mount)->native)) {
+        if (view && *mount==view->root) return duplicate(fd);
         if (fs->native_root && view==fs->mounts && *mount==fs->native_root->mount
                 && md_view_same(&st,&fs->native_root->identity)) return duplicate(fd);
         if ((*mount)->detached) return duplicate(fd);
@@ -80,11 +75,11 @@ int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *
     int from_root = base == MD_INODE_ROOT || (path[0] == '/' && !(resolve & RESOLVE_IN_ROOT));
     int r = !from_root && origin ? md_view_anchor_check(fs,base,origin) : 0;
     if (r) return r;
-    int fd = from_root ? root(fs) : duplicate(base);
+    int fd = from_root ? md_view_root_fd(fs) : duplicate(base);
     if (fd < 0) return fd;
     struct md_mount_namespace *view = !from_root && origin ? origin->view : fs->mounts;
-    struct md_view_mount *mount = NULL;
-    if (from_root) mount = fs->native_root ? fs->native_root->mount : NULL;
+    struct md_view_mount *mount = view ? &view->base : NULL;
+    if (from_root) mount=md_view_root_mount(fs);
     else if (origin) mount=origin->mount;
     else {
         struct md_view_object *object = NULL;
@@ -154,10 +149,10 @@ int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *
                 if (resolve & RESOLVE_BENEATH) { r = -EXDEV; break; }
                 struct md_mount_namespace *root_view = resolve & RESOLVE_IN_ROOT ? boundary_view : fs->mounts;
                 struct md_view_mount *root_mount = resolve & RESOLVE_IN_ROOT ? boundary_mount
-                    : fs->native_root ? fs->native_root->mount : NULL;
+                    : md_view_root_mount(fs);
                 if ((resolve & RESOLVE_NO_XDEV) && (view!=root_view || mount!=root_mount)) { r=-EXDEV; break; }
                 close(fd);
-                fd = resolve & RESOLVE_IN_ROOT ? duplicate(boundary_fd) : root(fs);
+                fd = resolve & RESOLVE_IN_ROOT ? duplicate(boundary_fd) : md_view_root_fd(fs);
                 view=root_view; mount=root_mount;
                 if (fd < 0) r = fd;
                 else if (!(resolve&RESOLVE_IN_ROOT) && !fs->native_root) r=enter(view,&fd,&mount,resolve);

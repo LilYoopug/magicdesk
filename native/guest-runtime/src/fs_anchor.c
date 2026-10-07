@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "fs_mount_internal.h"
 #include "inode_lifetime.h"
+#include "mount_graph.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -14,6 +15,7 @@ struct md_fs_anchor *md_fs_anchor_retain(struct md_fs_anchor *p) {
 void md_fs_anchor_release(struct md_fs_anchor *p) {
     if (!p || atomic_fetch_sub_explicit(&p->refs,1,memory_order_acq_rel)!=1) return;
     close(p->fd);
+    if (p->mount_pin>=0) close(p->mount_pin);
     if (p->mount) atomic_fetch_sub_explicit(&p->mount->anchors,1,memory_order_relaxed);
     md_mount_namespace_release(p->view);
     md_inode_lifetime_release(p->lifetime); free(p);
@@ -30,15 +32,35 @@ int md_fs_anchor_check_fd(const struct md_fs_anchor *p, int fd) {
     if (fstat(fd,&st)) return -errno;
     return st.st_dev==p->device && st.st_ino==p->inode ? 0 : -ESTALE;
 }
-struct md_fs_anchor *md_view_anchor_new(struct md_inode_lifetime *lifetime,
-        struct md_mount_namespace *view, struct md_view_mount *mount, int fd, dev_t device, ino_t inode) {
+static struct md_fs_anchor *create(struct md_inode_lifetime *lifetime,
+        struct md_mount_namespace *view, struct md_view_mount *mount, int fd, int pin, dev_t device, ino_t inode) {
+    if (!mount && view) mount=&view->base;
     struct md_fs_anchor *p=calloc(1,sizeof(*p));
     if (!p) return NULL;
     atomic_init(&p->refs,1);
     p->lifetime=md_inode_lifetime_retain(lifetime); p->view=md_mount_namespace_retain(view);
-    p->mount=mount; p->fd=fd; p->device=device; p->inode=inode;
+    p->mount=mount; p->fd=fd; p->mount_pin=pin; p->device=device; p->inode=inode;
     if (mount) atomic_fetch_add_explicit(&mount->anchors,1,memory_order_relaxed);
     return p;
+}
+struct md_fs_anchor *md_view_anchor_new(struct md_inode_lifetime *lifetime,
+        struct md_mount_namespace *view, struct md_view_mount *mount, int fd, dev_t device, ino_t inode) {
+    if (!mount && view) mount=&view->base;
+    int pin=-1;
+    if (mount && md_mount_graph_foreign(view)) {
+        pin=md_mount_graph_acquire_pin(view,mount);
+        if (pin<0) { errno=-pin; return NULL; }
+    }
+    struct md_fs_anchor *p=create(lifetime,view,mount,fd,pin,device,inode);
+    if (!p && pin>=0) { int error=errno; close(pin); errno=error; }
+    return p;
+}
+struct md_fs_anchor *md_view_anchor_import(struct md_inode_lifetime *lifetime,
+        struct md_mount_namespace *view, struct md_view_mount *mount, int fd, int pin,
+        dev_t device, ino_t inode) {
+    int r=md_mount_graph_check_pin(view,pin);
+    if (r) { errno=-r; return NULL; }
+    return create(lifetime,view,mount,fd,pin,device,inode);
 }
 int md_view_anchor_check(struct md_filesystem *fs, int fd, const struct md_fs_anchor *p) {
     if (!md_inode_lifetime_same(md_inode_store_lifetime(fs->store),p->lifetime)) return -ESTALE;
@@ -59,7 +81,7 @@ void md_view_capture(struct md_filesystem *fs, struct md_mount_namespace *view,
     }
     struct md_fs_anchor *p=r ? NULL : md_view_anchor_new(md_inode_store_lifetime(fs->store),
         view,mount,fd,st.st_dev,st.st_ino);
-    if (!r && !p) r=-ENOMEM;
+    if (!r && !p) r=-errno;
     if (r) {
         if (fd>=0) close(fd);
         close(out->fd); out->fd=-1; out->error=r;

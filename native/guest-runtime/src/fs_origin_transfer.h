@@ -5,7 +5,7 @@
 #include "mount_graph.h"
 #include "fd_receipt.h"
 
-enum { MD_FS_ORIGIN_MAX_RIGHTS=1+MD_FD_RECEIPT_MAX*(MD_INODE_CUSTODY_FDS+MD_MOUNT_GRAPH_FDS+1) };
+enum { MD_FS_ORIGIN_MAX_RIGHTS=1+MD_FD_RECEIPT_MAX*(MD_INODE_CUSTODY_FDS+MD_MOUNT_GRAPH_FDS+2) };
 
 /* Private control-plane rights, never application data. The sender exports a
  * pinned, bound message only after claim. Transport authenticates the peer and
