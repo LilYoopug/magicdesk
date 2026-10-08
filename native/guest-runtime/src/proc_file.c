@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/syscall.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 struct md_proc_file {
@@ -23,7 +24,7 @@ struct md_proc_file {
     pid_t tracer;
     int process_state;
     enum md_proc_file_kind kind;
-    int flags;
+    atomic_int flags;
     int64_t position;
     struct md_resource_queue operations;
     struct md_proc_file_node node;
@@ -76,13 +77,14 @@ struct md_proc_file *md_proc_file_open(struct md_user_namespace *target,
     md_fd_object_init(&f->object,&type);
     f->target=md_proc_file_sysctl(kind) || md_proc_file_namespace(kind) || directory || md_proc_file_process(kind)
         ? NULL : md_user_namespace_retain(target);
-    f->opener=md_identity_copy(opener); f->kind=kind; f->flags=flags;
+    f->opener=md_identity_copy(opener); f->kind=kind; atomic_init(&f->flags,flags);
     return f;
 }
 struct md_proc_file *md_proc_file_open_control(const struct md_control_file_ops *ops,void *context,
         const struct md_identity *id,int flags) {
     int mode=(flags&O_PATH) ? 0 : (flags&O_ACCMODE)==O_RDWR ? R_OK|W_OK
         : (flags&O_ACCMODE)==O_WRONLY ? W_OK : R_OK;
+    if (!(flags&O_PATH) && (flags&O_TRUNC)) mode|=W_OK;
     int error=!ops || !context ? -EINVAL : ops->access(context,id,(unsigned)mode);
     if (error) { errno=-error; return NULL; }
     struct md_proc_file *f=md_proc_file_open(NULL,MD_PROC_FILE_CONTROL,id,flags);
@@ -95,8 +97,32 @@ int md_proc_file_control_access(const struct md_proc_file *f,const struct md_ide
 int md_proc_file_control_stat(const struct md_proc_file *f,struct stat *st) {
     return f && f->control ? f->control->stat(f->control_context,st) : -EINVAL;
 }
+struct md_control_file md_proc_file_control(const struct md_proc_file *f) {
+    return f ? (struct md_control_file){f->control,f->control_context} : (struct md_control_file){0};
+}
 unsigned long md_proc_file_filesystem(const struct md_proc_file *f) {
     return f && f->control ? f->control->filesystem : 0;
+}
+int md_proc_file_mapping(const struct md_proc_file *f,unsigned protection,unsigned flags) {
+    if (!f || !f->control || !f->control->mappable) return -ENODEV;
+    if (f->flags&O_PATH) return -EBADF;
+    return (flags&MAP_SHARED) && (protection&PROT_WRITE) ? -EACCES : 0;
+}
+int md_proc_file_fcntl(struct md_proc_file *f,int command,unsigned long argument,long *out) {
+    if (!f || !f->control || !f->control->descriptor) return 0;
+    int flags=atomic_load_explicit(&f->flags,memory_order_relaxed);
+    if (command==F_GETFL) *out=flags&~(O_CLOEXEC|O_CREAT|O_EXCL|O_TRUNC);
+    else if (flags&O_PATH) *out=-EBADF;
+    else if (command==F_GET_SEALS) *out=f->control->seals ? f->control->seals(f->control_context) : -EINVAL;
+    else if (command==F_SETFL) {
+        unsigned mutable=O_APPEND|O_NONBLOCK|O_NOATIME;
+        if (argument&(O_DIRECT|O_ASYNC)) *out=-EOPNOTSUPP;
+        else {
+            atomic_store_explicit(&f->flags,(flags&~mutable)|(argument&mutable),memory_order_relaxed);
+            *out=0;
+        }
+    } else return 0;
+    return 1;
 }
 struct md_proc_file *md_proc_file_open_namespace(const struct md_namespace_reference *ref,
         const struct md_identity *opener, int flags) {
@@ -143,6 +169,7 @@ struct md_proc_file *md_proc_file_reopen(const struct md_proc_file *f,
 }
 int md_proc_file_descriptor(const struct md_proc_file *f) {
     if (!f) return -EINVAL;
+    if (f->control && f->control->descriptor) return f->control->descriptor(f->control_context,f->flags);
     if (md_proc_file_directory(f->kind)) {
         char path[64]; snprintf(path,sizeof(path),"/proc/%d%s",f->node.process,
             f->kind==MD_PROC_FILE_NS_DIRECTORY ? "/ns" : "");
@@ -163,6 +190,7 @@ int md_proc_file_access(const struct md_proc_file *f, enum md_proc_file_operatio
     if (operation==MD_PROC_FILE_GETDENTS) return md_proc_file_directory(f->kind) ? 0 : -ENOTDIR;
     if (md_proc_file_directory(f->kind) && operation!=MD_PROC_FILE_SEEK) return -EISDIR;
     if (md_proc_file_namespace(f->kind)) return operation==MD_PROC_FILE_SEEK ? -ESPIPE : -EINVAL;
+    if (operation==MD_PROC_FILE_SEEK && f->control && f->control->nonseekable) return -ESPIPE;
     int mode=f->flags&O_ACCMODE;
     return (operation==MD_PROC_FILE_READ && mode==O_WRONLY)
         || (operation==MD_PROC_FILE_WRITE && mode==O_RDONLY) ? -EBADF : 0;
@@ -507,9 +535,17 @@ long md_proc_file_io_execute(struct md_proc_file_io *io, const struct md_identit
     struct md_proc_file *f=io->file;
     error=md_proc_file_access(f,io->operation);
     if (error) return io->result=error;
+    if (io->positional && f->control && f->control->nonseekable) return io->result=-ESPIPE;
     if (io->operation==MD_PROC_FILE_SEEK) {
         int64_t offset=io->offset;
         if (f->flags&O_PATH) return io->result=-EBADF;
+        if (io->whence==SEEK_END && f->control && f->control->descriptor) {
+            struct stat st;
+            int error=f->control->stat(f->control_context,&st);
+            if (error) return io->result=error;
+            if (__builtin_add_overflow(offset,st.st_size,&offset) || offset<0) return io->result=-EINVAL;
+            f->position=offset; return io->result=offset;
+        }
         if ((io->whence!=SEEK_SET && io->whence!=SEEK_CUR)
                 || (io->whence==SEEK_CUR && __builtin_add_overflow(offset,f->position,&offset))
                 || offset<0) return io->result=-EINVAL;

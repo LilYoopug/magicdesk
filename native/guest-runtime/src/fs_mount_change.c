@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
+#include <linux/mount.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
 
@@ -19,7 +20,8 @@ static int is_root(const struct md_view_location *p) {
 static int operand(struct md_filesystem *fs, const struct md_fs_request *q, unsigned index,
         struct md_view_location *out) {
     int r=*q->path[index]
-        ? md_view_walk(fs,q->directory[index],q->origin[index],q->path[index],1,0,
+        ? md_view_walk(fs,q->directory[index],q->origin[index],q->path[index],
+            q->mode!=MD_FS_MOUNT_MOVE_FD || (q->flags&(index ? MOVE_MOUNT_F_SYMLINKS : MOVE_MOUNT_T_SYMLINKS)),0,
             MD_VIEW_TASK_PATH|(index==1 && q->mode==MD_FS_MOUNT_BIND ? MD_VIEW_PROVIDER_SOURCE : 0),out)
         : md_view_descriptor(fs,q->directory[index],q->origin[index],out);
     if (r==-EREMOTE && fs->store->boundary) fs->store->boundary->operand=index;
@@ -67,7 +69,7 @@ static int publish(struct md_filesystem *fs, unsigned first,
     layout.entries=candidate; layout.count=size;
     return md_mount_graph_update(fs->mounts,&layout);
 }
-static int collect(struct md_filesystem *fs) {
+int md_view_mount_collect(struct md_filesystem *fs) {
     struct md_fs_mounts *tree=fs->mounts->tree;
     if (!tree) return 0;
     if (md_mount_graph_foreign(fs->mounts)) return -EPERM;
@@ -136,7 +138,7 @@ static int bind(struct md_filesystem *fs, const struct md_fs_request *q,
         struct md_view_location *target) {
     if (q->flags&~(MS_BIND|MS_REC)) return -ENOTSUP;
     struct md_view_location source={.fd=-1,.parent=-1};
-    int r=collect(fs);
+    int r=md_view_mount_collect(fs);
     int native_source=0;
     unsigned policy=0;
     if (!r && q->path[1] && !*q->path[1] && (!q->origin[1] || !q->origin[1]->view)) {
@@ -235,15 +237,16 @@ static int bind(struct md_filesystem *fs, const struct md_fs_request *q,
     } else for (unsigned i=0;i<prepared;++i) discard(&pending[slots[i]]);
     md_view_location_close(&source); return r;
 }
-int md_view_attach_storage(struct md_filesystem *fs, struct md_inode_store *store, int source,
-        const struct md_view_location *target, unsigned policy) {
-    if (!fs || !fs->mounts || !fs->storage || !store || !target || target->view!=fs->mounts)
+int md_view_attach_source(struct md_filesystem *fs, const struct md_mount_source *source,
+        const struct md_view_location *target, struct md_view_mount **out) {
+    if (!fs || !fs->mounts || !fs->storage || !source || source->fd<0
+            || (target && target->view!=fs->mounts))
         return -EINVAL;
     struct stat st;
-    int r=collect(fs);
-    if (!r) r=md_inode_fstat(store,source,&st);
+    int r=md_view_mount_collect(fs);
+    if (!r && fstat(source->fd,&st)) r=-errno;
     if (!r && !S_ISDIR(st.st_mode)) r=-ENOTDIR;
-    if (!r && fstat(target->fd,&st)) r=-errno;
+    if (!r && target && fstat(target->fd,&st)) r=-errno;
     if (!r && !S_ISDIR(st.st_mode)) r=-ENOTDIR;
     if (r) return r;
     if (!r && !fs->mounts->tree) {
@@ -257,62 +260,22 @@ int md_view_attach_storage(struct md_filesystem *fs, struct md_inode_store *stor
     memcpy(pending,tree->mounts,count*sizeof(*pending));
     int slot=vacant(pending,&count);
     if (slot<0) return slot;
-    r=prepare(&pending[slot],source,target->fd,target->mount,MD_MOUNT_INODE,
-        md_inode_store_lifetime(store),policy);
+    r=prepare(&pending[slot],source->fd,target ? target->fd : source->fd,
+        target ? target->mount : NULL,source->backing,source->storage,source->policy);
+    if (!r) {
+        pending[slot].detached=!target;
+        pending[slot].pid_namespace=md_pid_namespace_retain(source->pid);
+        pending[slot].devpts=md_devpts_retain(source->devpts);
+        pending[slot].cgroup=md_cgroup_retain(source->cgroup);
+    }
     if (!r) r=publish(fs,0,pending,count);
-    if (!r) { tree->mounts[slot]=pending[slot]; tree->count=count; }
+    if (!r) {
+        tree->mounts[slot]=pending[slot]; tree->count=count;
+        if (out) *out=&tree->mounts[slot];
+        atomic_store_explicit(&fs->mounts->managed_paths,1,memory_order_release);
+    }
     else discard(&pending[slot]);
     return r;
-}
-static int provider_mount(struct md_filesystem *fs,const struct md_fs_request *q,
-        const struct md_view_location *target) {
-    int devpts=q->mode==MD_FS_MOUNT_DEVPTS;
-    int cgroup=q->mode==MD_FS_MOUNT_CGROUP || q->mode==MD_FS_MOUNT_CGROUP2;
-    if (q->flags&~(MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC|MS_RELATIME|MS_NODIRATIME|MS_NOATIME)) return -ENOTSUP;
-    if (q->mode==MD_FS_MOUNT_CGROUP) {
-        if (!q->value_size || strcmp(q->value,"devices")) return -ENOTSUP;
-    } else if (!devpts && q->value_size && (q->value_size!=1 || *(const char *)q->value)) return -ENOTSUP;
-    struct stat st;
-    if (fstat(target->fd,&st)) return -errno;
-    if (!S_ISDIR(st.st_mode)) return -ENOTDIR;
-    struct md_pid_namespace *pid=fs->actor ? md_pid_identity_namespace(fs->actor->pid) : NULL;
-    if (!devpts && !cgroup && !md_identity_capable_in(fs->store->identity,md_pid_namespace_owner(pid),CAP_SYS_ADMIN)) return -EPERM;
-    struct md_devpts *private_pts=NULL;
-    struct md_cgroup_view *groups=NULL;
-    if (cgroup && (!fs->actor || !fs->actor->cgroup)) return -EOPNOTSUPP;
-    if (devpts || cgroup) {
-        int parent=md_fs_private_mounts_parent(fs->store);
-        if (parent<0) return parent;
-        if (devpts) private_pts=md_devpts_new(parent,q->value_size ? q->value : NULL,fs->store->identity);
-        else groups=md_cgroup_mount(fs->actor->cgroup,parent,q->mode==MD_FS_MOUNT_CGROUP,fs->store->identity);
-        int error=errno; close(parent); errno=error;
-    }
-    if ((devpts && !private_pts) || (cgroup && !groups)) return -errno;
-    int source=devpts ? openat(md_devpts_root(private_pts),".",O_PATH|O_DIRECTORY|O_CLOEXEC)
-        : cgroup ? openat(md_cgroup_root(groups),".",O_PATH|O_DIRECTORY|O_CLOEXEC)
-        : open("/proc",O_PATH|O_DIRECTORY|O_CLOEXEC);
-    if (source<0) { int error=-errno; md_devpts_release(private_pts); md_cgroup_release(groups); return error; }
-    if (!fs->mounts->tree) fs->mounts->tree=calloc(1,sizeof(*fs->mounts->tree));
-    if (!fs->mounts->tree) { close(source); md_devpts_release(private_pts); md_cgroup_release(groups); return -ENOMEM; }
-    struct md_fs_mounts *tree=fs->mounts->tree;
-    struct md_view_mount pending[MD_FS_MOUNTS_MAX];
-    unsigned count=tree->count;
-    memcpy(pending,tree->mounts,count*sizeof(*pending));
-    int slot=vacant(pending,&count), error=slot<0 ? slot : 0;
-    if (!error) {
-        error=prepare(&pending[slot],source,target->fd,target->mount,
-            devpts ? MD_MOUNT_DEVPTS : cgroup ? MD_MOUNT_CGROUP : MD_MOUNT_PROC,NULL,
-            md_fs_mount_flags(q->flags)|MD_MOUNT_NOSUID|MD_MOUNT_NOEXEC|(devpts ? 0 : MD_MOUNT_NODEV));
-        if (!error) {
-            if (devpts) pending[slot].devpts=md_devpts_retain(private_pts);
-            else if (cgroup) pending[slot].cgroup=md_cgroup_retain(groups);
-            else pending[slot].pid_namespace=md_pid_namespace_retain(pid);
-        }
-        if (!error) error=publish(fs,0,pending,count);
-        if (!error) { tree->mounts[slot]=pending[slot]; tree->count=count; }
-        else discard(&pending[slot]);
-    }
-    close(source); md_devpts_release(private_pts); md_cgroup_release(groups); return error;
 }
 static int unmount(struct md_filesystem *fs, const struct md_fs_request *q,
         const struct md_view_location *target) {
@@ -348,10 +311,18 @@ static int unmount(struct md_filesystem *fs, const struct md_fs_request *q,
 }
 static int move(struct md_filesystem *fs, const struct md_fs_request *q,
         const struct md_view_location *target) {
-    if (q->flags!=MS_MOVE) return -ENOTSUP;
+    int by_fd=q->mode==MD_FS_MOUNT_MOVE_FD;
+    if (!by_fd && q->flags!=MS_MOVE) return -ENOTSUP;
+    if (by_fd && (q->flags&~(MOVE_MOUNT_F_EMPTY_PATH|MOVE_MOUNT_T_EMPTY_PATH
+            |MOVE_MOUNT_F_SYMLINKS|MOVE_MOUNT_T_SYMLINKS))) return -EOPNOTSUPP;
     struct md_view_location source={.fd=-1,.parent=-1};
     int r=operand(fs,q,1,&source);
-    if (!r && (source.view!=fs->mounts || !is_root(&source) || source.mount->detached)) r=-EINVAL;
+    if (!r && (source.view!=fs->mounts || !is_root(&source))) r=-EINVAL;
+    /* Only an unplaced mount-FD root may be attached. An already unmounted
+     * tree is not an anonymous mount namespace and cannot be resurrected. */
+    if (!r && source.mount->detached && (!by_fd || source.mount->parent)) r=-EINVAL;
+    for (const struct md_view_mount *m=target->mount;!r && m;m=m->parent)
+        if (m->detached) r=-EINVAL;
     if (!r && source.mount->locked) r=-EINVAL;
     if (!r && source.mount==fs->mounts->root) r=-EBUSY;
     if (!r && descendant(target->mount,source.mount)) r=-EINVAL;
@@ -363,7 +334,7 @@ static int move(struct md_filesystem *fs, const struct md_fs_request *q,
     if (!r) {
         struct md_view_mount *m=source.mount;
         struct md_view_mount next=*m;
-        next.target=covered; next.guest=st; next.parent=target->mount;
+        next.target=covered; next.guest=st; next.parent=target->mount; next.detached=0;
         if (m==&fs->mounts->base) {
             struct md_mount_layout l={.base=&next,.root=fs->mounts->root,
                 .entries=fs->mounts->tree->mounts,.count=fs->mounts->tree->count};
@@ -373,7 +344,7 @@ static int move(struct md_filesystem *fs, const struct md_fs_request *q,
     if (!r) {
         struct md_view_mount *m=source.mount;
         int old=m->target;
-        m->target=covered; m->guest=st; m->parent=target->mount;
+        m->target=covered; m->guest=st; m->parent=target->mount; m->detached=0;
         close(old);
     } else if (covered>=0) close(covered);
     md_view_location_close(&source); return r;
@@ -486,7 +457,7 @@ int md_fs_mount_change(struct md_filesystem *fs, struct md_guest_domain *context
     int r=(q->mode==MD_FS_MOUNT_BIND || q->mode==MD_FS_MOUNT_TMPFS || q->mode==MD_FS_MOUNT_OVERLAY
             || q->mode==MD_FS_MOUNT_PROC || q->mode==MD_FS_MOUNT_DEVPTS
             || q->mode==MD_FS_MOUNT_CGROUP || q->mode==MD_FS_MOUNT_CGROUP2)
-        ? collect(fs) : 0;
+        ? md_view_mount_collect(fs) : 0;
     struct md_view_location target={.fd=-1,.parent=-1};
     if (!r) r=operand(fs,q,0,&target);
     if (!r && target.view!=fs->mounts) r=-EINVAL;
@@ -495,7 +466,7 @@ int md_fs_mount_change(struct md_filesystem *fs, struct md_guest_domain *context
         r=bind(fs,q,&target); break;
     case MD_FS_MOUNT_UMOUNT:
         r=unmount(fs,q,&target); break;
-    case MD_FS_MOUNT_MOVE:
+    case MD_FS_MOUNT_MOVE: case MD_FS_MOUNT_MOVE_FD:
         r=move(fs,q,&target); break;
     case MD_FS_MOUNT_PIVOT:
         r=pivot(fs,context,q,&target); break;
@@ -525,12 +496,15 @@ int md_fs_mount_change(struct md_filesystem *fs, struct md_guest_domain *context
         else if (kind!=MS_PRIVATE && kind!=MS_SLAVE) r=-ENOTSUP;
         break;
     }
-    case MD_FS_MOUNT_TMPFS:
-        r=md_fs_mount_temporary(fs,q,&target); break;
-    case MD_FS_MOUNT_OVERLAY:
-        r=md_fs_mount_overlay(fs,q,&target); break;
-    case MD_FS_MOUNT_PROC: case MD_FS_MOUNT_DEVPTS: case MD_FS_MOUNT_CGROUP: case MD_FS_MOUNT_CGROUP2:
-        r=provider_mount(fs,q,&target); break;
+    case MD_FS_MOUNT_TMPFS: case MD_FS_MOUNT_OVERLAY:
+    case MD_FS_MOUNT_PROC: case MD_FS_MOUNT_DEVPTS: case MD_FS_MOUNT_CGROUP: case MD_FS_MOUNT_CGROUP2: {
+        struct stat st;
+        r=fstat(target.fd,&st) ? -errno : !S_ISDIR(st.st_mode) ? -ENOTDIR : 0;
+        struct md_mount_source source={.fd=-1};
+        if (!r) r=md_mount_source_create(fs,q,&source);
+        if (!r) r=md_view_attach_source(fs,&source,&target,NULL);
+        md_mount_source_close(&source); break;
+    }
     default: r=-ENOTSUP; break;
     }
     if (!r) atomic_store_explicit(&fs->mounts->managed_paths,1,memory_order_release);

@@ -153,7 +153,8 @@ void test_mount_storage(const char *base) {
     struct md_view_location target;
     assert(!md_view_walk(&fs,-1,NULL,"/volume",1,0,0,&target));
     int fd=md_inode_open(second,-1,"/",O_PATH|O_DIRECTORY,0); assert(fd>=0);
-    assert(!md_view_attach_storage(&fs,second,fd,&target,0));
+    struct md_mount_source source={.fd=fd,.backing=MD_MOUNT_INODE,.storage=md_inode_store_lifetime(second)};
+    assert(!md_view_attach_source(&fs,&source,&target,NULL));
     close(fd); md_view_location_close(&target);
     md_inode_store_close(second); second=NULL;
     /* A cold connection must use retained custody, not the original pathname. */

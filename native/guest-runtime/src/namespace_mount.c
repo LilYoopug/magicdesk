@@ -53,11 +53,14 @@ long md_namespace_mount(const struct md_fs *fs, long nr, const unsigned long *a)
     if ((q.mode==MD_FS_MOUNT_BIND || q.mode==MD_FS_MOUNT_MOVE || q.mode==MD_FS_MOUNT_PIVOT)
             && !*source) return -ENOENT;
     if (*source) { q.directory[1]=AT_FDCWD; q.path[1]=source; }
+    return md_namespace_mount_request(fs,&q);
+}
+long md_namespace_mount_request(const struct md_fs *fs,struct md_fs_request *q) {
     struct md_fs_response out;
     char selected[2][PATH_MAX], relative[2][PATH_MAX];
     unsigned captured=0;
     for (;;) {
-        r=md_namespace_request(fs,&q,&out);
+        long r=md_namespace_request(fs,q,&out);
         if (r!=-EREMOTE) return r;
         unsigned index=out.result.host_path-1;
         if (index>1 || (captured&(1U<<index))) return -ELOOP;
@@ -80,16 +83,16 @@ long md_namespace_mount(const struct md_fs *fs, long nr, const unsigned long *a)
             while (*tail=='/') ++tail;
             r=md_copy(relative[index],sizeof(relative[index]),*tail ? tail : trailing ? "." : "");
             if (r<0) return r;
-            q.directory[index]=fd; q.path[index]=relative[index];
+            q->directory[index]=fd; q->path[index]=relative[index];
         } else if (ref.kind==MD_PROC_ROOT && ref.process==(int)RAW0(gettid)) {
             r=md_copy(relative[index],sizeof(relative[index]),*ref.tail ? ref.tail : "/");
             if (r<0) return r;
-            q.directory[index]=AT_FDCWD; q.path[index]=relative[index];
+            q->directory[index]=AT_FDCWD; q->path[index]=relative[index];
         } else {
             r=md_proc_task_path(out.data,selected[index],sizeof(selected[index]));
             if (r<0) return r;
-            q.directory[index]=-1; q.path[index]="";
-            q.capture[index]=(struct md_fs_task_capture){selected[index],O_PATH};
+            q->directory[index]=-1; q->path[index]="";
+            q->capture[index]=(struct md_fs_task_capture){selected[index],O_PATH};
         }
     }
 }

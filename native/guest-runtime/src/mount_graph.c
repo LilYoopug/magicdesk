@@ -13,8 +13,8 @@
 #include <string.h>
 #include <unistd.h>
 
-enum { MAGIC=0x4d444d47U, VERSION=9, HEADER=128 };
-enum { INODE=1, DETACHED=2, RETIRED=4, LOCKED=8, PROC=16 };
+enum { MAGIC=0x4d444d47U, VERSION=10, HEADER=128 };
+enum { INODE=1, DETACHED=2, RETIRED=4, LOCKED=8, PROC=16, PARENTLESS=32 };
 struct entry { uint32_t parent, flags; struct md_fd_identity source, target, policy;
     uint32_t storage, descriptor; uint64_t generation, proc_namespace; };
 struct storage { struct md_fd_identity root; uint32_t start, count; };
@@ -162,7 +162,8 @@ static int topology(const struct manifest *m) {
     parents[0]=m->root ? m->base_parent+1 : 0;
     for (unsigned i=0;i<m->count;++i) {
         const struct entry *e=&m->entries[i];
-        parents[i+1]=(e->flags&RETIRED) || m->root==i+1 ? 0 : e->parent+1;
+        if ((e->flags&PARENTLESS) && (e->parent || !(e->flags&DETACHED) || m->root==i+1)) return -EPROTO;
+        parents[i+1]=(e->flags&(RETIRED|PARENTLESS)) || m->root==i+1 ? 0 : e->parent+1;
     }
     return md_mount_topology_order(m->count+1,parents,order);
 }
@@ -185,7 +186,7 @@ static int read_manifest(int fd, struct manifest *out, struct md_fd_identity *id
             || out->base_target.inode) return -EPROTO;
     for (unsigned i=0;i<out->count;++i) {
         const struct entry *e=&out->entries[i];
-        if (!e->generation || e->flags&~(INODE|DETACHED|RETIRED|LOCKED|PROC) || e->storage>out->storages
+        if (!e->generation || e->flags&~(INODE|DETACHED|RETIRED|LOCKED|PROC|PARENTLESS) || e->storage>out->storages
                 || e->storage>owners+1 || (e->storage && !(e->flags&INODE))) return -EPROTO;
         if (!!(e->flags&PROC)!=!!e->proc_namespace || (e->flags&(INODE|PROC))==(INODE|PROC)) return -EPROTO;
         if (e->flags&RETIRED) {
@@ -272,6 +273,7 @@ static int describe(struct md_mount_namespace *view, const struct md_mount_layou
             e->storage=j+1;
         }
         e->flags=(md_view_inode(m) ? INODE : 0) | (m->detached ? DETACHED : 0) | (m->locked ? LOCKED : 0);
+        if (!m->parent && l->root!=&view->tree->mounts[i]) e->flags|=PARENTLESS;
         if (m->backing==MD_MOUNT_PROC) {
             e->flags|=PROC; e->proc_namespace=md_pid_namespace_inode(m->pid_namespace);
         }
@@ -445,7 +447,8 @@ static int merge(struct md_mount_namespace *view, struct md_mount_namespace *nex
             a->guest=b->guest; a->detached=b->detached;
             a->locked=b->locked;
         }
-        a->parent=a->id && after.root!=i+1 ? (parent ? &view->tree->mounts[parent-1] : &view->base) : NULL;
+        a->parent=a->id && after.root!=i+1 && !(after.entries[i].flags&PARENTLESS)
+            ? (parent ? &view->tree->mounts[parent-1] : &view->base) : NULL;
     }
     if (view->base.source>=0) close(view->base.source);
     if (view->base.target>=0) close(view->base.target);
@@ -549,7 +552,8 @@ static int import(struct md_mount_graph_parcel *p, struct md_mount_namespace **o
         if (fstat(m->source,&m->native) || fstat(m->target,&m->guest)) r=-errno;
         if (!r) r=md_mount_policy_import(&m->policy,p->fd[e->descriptor+2]);
         if (!r) { take(p,e->descriptor+2); r=md_mount_id_allocate(&m->id); }
-        m->parent=data.root==i+1 ? NULL : e->parent ? &view->tree->mounts[e->parent-1] : &view->base;
+        m->parent=data.root==i+1 || (e->flags&PARENTLESS) ? NULL
+            : e->parent ? &view->tree->mounts[e->parent-1] : &view->base;
     }
     if (!r && data.base_descriptor) {
         view->base.source=take(p,3); view->base.target=take(p,4);

@@ -408,7 +408,9 @@ static void storage_sender(int channel, const char *base) {
         struct md_view_location target;
         assert(!md_view_walk(&s.fs,-1,NULL,targets[i],1,0,0,&target));
         fd=md_inode_open(extra,-1,"/",O_PATH|O_DIRECTORY,0); assert(fd>=0);
-        assert(!md_view_attach_storage(&s.fs,extra,fd,&target,i ? MD_MOUNT_READONLY : 0));
+        struct md_mount_source source={.fd=fd,.backing=MD_MOUNT_INODE,
+            .storage=md_inode_store_lifetime(extra),.policy=i ? MD_MOUNT_READONLY : 0};
+        assert(!md_view_attach_source(&s.fs,&source,&target,NULL));
         close(fd); md_view_location_close(&target); s.anchor[i]=anchor(&s.fs,targets[i]);
     }
     md_inode_store_close(extra);

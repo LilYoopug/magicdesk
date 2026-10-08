@@ -23,7 +23,7 @@ target_compile_options(guest-parcels PRIVATE -O2 -Wall -Wextra -Werror -fno-pie)
 set(origins ${src}/fs_anchor.c ${src}/fs_origin_transfer.c ${src}/inode_lifetime.c ${src}/inode_custody.c ${src}/sealed_manifest.c ${src}/ipc_scope.c ${src}/mount_policy.c ${src}/mount_graph.c ${src}/resource_order.c ${src}/ofd_order.c ${src}/fd_origins.c ${src}/fd_channel.c ${src}/fd_mutation.c ${src}/fd_delivery.c ${src}/fd_table_observation.c ${src}/fd_return.c ${src}/fd_exchange.c ${src}/received_fds.c ${src}/fd_messages.c ${src}/task_descriptor.c ${src}/task_lifetime.c)
 list(APPEND origins ${src}/devpts_view.c ${src}/cgroup.c)
 set(mounts ${src}/fs_mounts.c ${src}/fs_mount_path.c ${src}/fs_mount_operations.c ${src}/fs_mount_table.c ${src}/fs_mount_change.c ${src}/fs_temporary.c ${src}/fs_overlay.c ${src}/fs_storage.c)
-list(APPEND mounts ${src}/procfs_view.c ${src}/fs_cgroup.c)
+list(APPEND mounts ${src}/procfs_view.c ${src}/fs_cgroup.c ${src}/mount_source.c ${src}/fs_context.c)
 set(inodes ${src}/inode_store.c ${src}/inode_db.c ${src}/inode_sqlite.c ${src}/inode_events.c ${src}/inode_watch.c ${src}/watch_queue.c ${src}/inode_path.c
     ${src}/inode_directory.c ${src}/inode_import.c ${src}/inode_socket.c ${src}/inode_backing.c ${src}/inode_snapshot.c ${src}/inode_view.c ${src}/inode_maintenance.c ${src}/inode_fifo.c ${src}/inode_channel.c ${src}/file_open.c
     ${identity} ${src}/task_registry.c ${src}/guest_domain.c ${src}/mount_namespace.c ${origins} ${src}/inode_metadata.c ${src}/inode_xattr.c ${src}/inode_capability.c ${src}/inode_acl.c ${src}/posix_acl.c)
@@ -54,7 +54,7 @@ endfunction()
 guest_executable(bootstrap ${src}/bootstrap.c ${src}/elf.c ${src}/exec.c ${src}/command.c ${src}/command_image.c
     ${src}/interception.c ${src}/interception_entry.S ${src}/fd_client.c ${src}/watch_calls.c ${src}/fd_filter.c ${src}/shm_calls.c ${src}/ipc_calls.c ${src}/pid_filter.c ${src}/pid_calls.c
     ${src}/file_calls.c ${src}/fs.c ${src}/proc_paths.c ${src}/proc_image.c ${src}/proc_control.c ${src}/program_files.c ${src}/task_status.c
-    ${src}/namespace.c ${src}/namespace_proc.c ${src}/namespace_mount.c ${src}/socket_calls.c ${src}/socket_namespace.c ${src}/socket_identity.c ${src}/socket_ancillary.c ${src}/socket_routes.c ${src}/fd_metadata.c
+    ${src}/namespace.c ${src}/namespace_proc.c ${src}/namespace_mount.c ${src}/namespace_mount_fd.c ${src}/socket_calls.c ${src}/socket_namespace.c ${src}/socket_identity.c ${src}/socket_ancillary.c ${src}/socket_routes.c ${src}/fd_metadata.c
     ${src}/task_receive.c ${src}/fs_client.c ${src}/fs_buffer_client.c ${src}/adapter_buffer.c ${src}/file_open.c ${wire} ${src}/raw.c ${src}/raw.S)
 target_sources(bootstrap PRIVATE ${src}/descriptor_calls.c)
 guest_freestanding(bootstrap)
@@ -190,7 +190,7 @@ if(MAGICDESK_GUEST_FIXTURES)
     target_sources(test_mounts PRIVATE ../guest-exec-lab/test_mount_copy.c ../guest-exec-lab/test_fs_anchor.c ../guest-exec-lab/test_user_namespace_fs.c ../guest-exec-lab/test_mount_alias.c ../guest-exec-lab/test_mount_policy.c ../guest-exec-lab/test_mount_graph.c ../guest-exec-lab/test_inode_custody.c ../guest-exec-lab/test_origin_transfer.c ${namespace_engine} ${mounts} ${src}/image_catalogue.c
         ${src}/elf_admission.c ${identity} ${src}/elf.c ${src}/fs_client.c ${wire} ${raw})
     target_compile_definitions(test_mounts PRIVATE MD_NO_START MD_USE_LIBC)
-    target_sources(test_mounts PRIVATE ../guest-exec-lab/test_mount_storage.c ../guest-exec-lab/test_transient_store.c ../guest-exec-lab/test_inode_view.c)
+    target_sources(test_mounts PRIVATE ../guest-exec-lab/test_mount_storage.c ../guest-exec-lab/test_transient_store.c ../guest-exec-lab/test_inode_view.c ../guest-exec-lab/test_fs_context.c)
     target_sources(test_mounts PRIVATE ${capsules})
     target_link_libraries(test_mounts PRIVATE guest-sha256)
     target_link_options(test_mounts PRIVATE -Wl,--wrap=memfd_create -Wl,--wrap=mmap -Wl,--wrap=calloc)

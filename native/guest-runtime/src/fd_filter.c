@@ -75,6 +75,17 @@ long md_fd_filter_arm(enum md_fd_selector_kind kind, int fd) {
         CONTROL(preadv,0) CONTROL(pwritev,0) CONTROL(preadv2,0) CONTROL(pwritev2,0)
         CONTROL(lseek,0) CONTROL(ioctl,0) CONTROL(mmap,4) CONTROL(getdents64,0)
         CONTROL(fstatfs,0)
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_fcntl,0,9),
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[1])),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,F_GETFL,2,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,F_SETFL,1,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,F_GET_SEALS,0,5),
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[0])),
+        BPF_STMT(BPF_ALU|BPF_AND|BPF_K,MD_FD_SELECTOR_MASK),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(unsigned)fd&MD_FD_SELECTOR_MASK,0,1),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_PROC),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
         CONTROL(ftruncate,0) CONTROL(fsync,0) CONTROL(fdatasync,0)
         CONTROL(sendfile,0) CONTROL(sendfile,1) CONTROL(splice,0) CONTROL(splice,2)
         CONTROL(tee,0) CONTROL(tee,1) CONTROL(copy_file_range,0) CONTROL(copy_file_range,2)

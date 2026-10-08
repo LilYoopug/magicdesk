@@ -6,6 +6,7 @@
 #include "pid_namespace.h"
 #include "devpts_view.h"
 #include "cgroup.h"
+#include "mount_source.h"
 #include <limits.h>
 #include <stdatomic.h>
 #include <sys/mount.h>
@@ -20,8 +21,8 @@ struct md_view_location;
 int md_fs_cgroup_operation(struct md_filesystem *,struct md_mount_namespace *,
     struct md_view_mount *,int fd,int parent,const char *name,const struct md_fs_request *,
     struct md_fs_result *,const struct md_fs_output *);
-int md_fs_mount_temporary(struct md_filesystem *, const struct md_fs_request *, const struct md_view_location *);
-int md_fs_mount_overlay(struct md_filesystem *, const struct md_fs_request *, const struct md_view_location *);
+int md_fs_mount_temporary(struct md_filesystem *, const struct md_fs_request *, struct md_mount_source *);
+int md_fs_mount_overlay(struct md_filesystem *, const struct md_fs_request *, struct md_mount_source *);
 int md_fs_private_mounts_parent(struct md_inode_store *);
 
 enum { MD_VIEW_BUCKETS = 4096, MD_VIEW_OBJECT_LIMIT = 65536 };
@@ -80,8 +81,9 @@ int md_view_path(struct md_filesystem *, int fd, struct md_view_mount *, char *,
 int md_view_backing_path(struct md_filesystem *, int fd, const struct md_view_mount *, char *, size_t);
 /* Worker-only publication of an already prepared filesystem. The caller owns
  * mount authorization; failure keeps the source and destination unchanged. */
-int md_view_attach_storage(struct md_filesystem *, struct md_inode_store *, int source,
-        const struct md_view_location *target, unsigned policy);
+int md_view_attach_source(struct md_filesystem *, const struct md_mount_source *,
+        const struct md_view_location *target, struct md_view_mount **);
+int md_view_mount_collect(struct md_filesystem *);
 struct md_view_object *md_view_object(struct md_filesystem *, const char *id);
 /* Internal lookup opt-in: report task-owned proc traversal to the adapter
  * before executing an operation. Never admitted as an openat2 resolve flag. */

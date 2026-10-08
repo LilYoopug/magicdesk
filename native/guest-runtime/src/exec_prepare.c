@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static long acquire_at(struct md_fs_context *context, int base, const struct md_fs_anchor *origin,
@@ -80,6 +81,20 @@ int md_fs_command_prepare(struct md_fs_context *context, const struct md_fs_requ
         struct md_fs_output out={.data=first.identity.object,.capacity=sizeof(first.identity.object)};
         md_fs_context_execute(context,&object,&result,&out);
         error=result.error;
+        if (error==-EXDEV && !q->origin[0]) {
+            struct stat st;
+            /* An anonymous kernel image has no inode-store key. Retain the
+             * actual description; normal ELF, execute and noexec checks still
+             * apply. Never reinterpret a failed managed-object lookup. */
+            if (!fstat(first.fd,&st) && S_ISREG(st.st_mode) && !st.st_nlink
+                    && fcntl(first.fd,F_GET_SEALS)>=0) {
+                char link[64];
+                snprintf(link,sizeof(link),"/proc/self/fd/%d",first.fd);
+                ssize_t n=readlink(link,first.identity.path,sizeof(first.identity.path)-1);
+                if (n<0) error=-errno;
+                else { first.identity.path[n]=0; error=0; }
+            }
+        }
     } else error=(int)acquire_at(context,q->directory[0],q->origin[0],q->path[0],q->flags,
         q->mode&MD_EXEC_OBJECT ? q->path[1] : NULL,&first);
     if (!error) error=md_command_images_prepare(recipe,images,&first,

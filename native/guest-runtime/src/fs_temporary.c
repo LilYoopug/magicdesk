@@ -55,11 +55,8 @@ int md_fs_private_mounts_parent(struct md_inode_store *s) {
     return r ? r : fd;
 }
 int md_fs_mount_temporary(struct md_filesystem *fs, const struct md_fs_request *q,
-        const struct md_view_location *target) {
+        struct md_mount_source *out) {
     if (q->flags&~(MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC)) return -EOPNOTSUPP;
-    struct stat st;
-    if (fstat(target->fd,&st)) return -errno;
-    if (!S_ISDIR(st.st_mode)) return -ENOTDIR;
     const struct md_identity *id=fs->store->identity;
     if (!id) return -EPERM;
     struct options options;
@@ -77,7 +74,11 @@ int md_fs_mount_temporary(struct md_filesystem *fs, const struct md_fs_request *
         if (root<0) r=root;
     }
     if (!r) r=md_inode_import_metadata(store,root,options.uid,options.gid,options.mode);
-    if (!r) r=md_view_attach_storage(fs,store,root,target,md_fs_mount_flags(q->flags));
+    if (!r) {
+        *out=(struct md_mount_source){.fd=root,.backing=MD_MOUNT_INODE,
+            .storage=md_inode_lifetime_retain(store->lifetime),.policy=md_fs_mount_flags(q->flags)};
+        root=-1;
+    }
     if (root>=0) close(root);
     md_inode_store_close(store);
     return r;

@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/limits.h>
+#include <linux/mount.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -36,10 +37,28 @@ int md_fs_request_validate(const struct md_fs_request *q) {
     if (q->resolve && q->operation != MD_FS_OPEN) return -EINVAL;
     if (q->value_size>MD_FS_VALUE_MAX || (q->value_size && !q->value)
             || (q->value_size && q->operation!=MD_FS_XATTR && q->operation!=MD_FS_FXATTR && q->operation!=MD_FS_XATTR_OBJECT
-                && q->operation!=MD_FS_SETACL && q->operation!=MD_FS_MOUNT)) return -EINVAL;
+                && q->operation!=MD_FS_SETACL && q->operation!=MD_FS_MOUNT
+                && q->operation!=MD_FS_FSCONFIG)) return -EINVAL;
+    if (q->operation==MD_FS_FSOPEN)
+        return descriptors || !*a || *b || (q->flags&~(O_RDWR|O_CLOEXEC))
+            || q->mode || q->capacity || q->offset ? -EINVAL : 0;
+    if (q->operation==MD_FS_FSMOUNT)
+        return descriptors!=1 || q->directory[0]<0 || *a || *b || (q->flags&~(O_PATH|O_CLOEXEC))
+            || q->capacity || q->offset ? -EINVAL : 0;
+    if (q->operation==MD_FS_FSCONFIG) {
+        if (descriptors!=1 || q->directory[0]<0 || *b || q->flags || q->capacity || q->offset
+                || q->value_size>PATH_MAX) return -EINVAL;
+        if (q->mode==FSCONFIG_SET_FLAG) return !*a || q->value_size ? -EINVAL : 0;
+        if (q->mode==FSCONFIG_SET_STRING) return !*a || !q->value_size
+            || strnlen(q->value,q->value_size)!=q->value_size-1 ? -EINVAL : 0;
+        if (q->mode==FSCONFIG_CMD_CREATE || q->mode==FSCONFIG_CMD_RECONFIGURE)
+            return *a || q->value_size ? -EINVAL : 0;
+        return -EOPNOTSUPP;
+    }
     if (q->operation==MD_FS_MOUNT) {
-        int pair=q->mode==MD_FS_MOUNT_BIND || q->mode==MD_FS_MOUNT_PIVOT || q->mode==MD_FS_MOUNT_MOVE;
-        if ((!*a && !(descriptors&1)) || q->mode<MD_FS_MOUNT_BIND || q->mode>MD_FS_MOUNT_CGROUP2
+        int pair=q->mode==MD_FS_MOUNT_BIND || q->mode==MD_FS_MOUNT_PIVOT || q->mode==MD_FS_MOUNT_MOVE
+            || q->mode==MD_FS_MOUNT_MOVE_FD;
+        if ((!*a && !(descriptors&1)) || q->mode<MD_FS_MOUNT_BIND || q->mode>MD_FS_MOUNT_MOVE_FD
                 || q->capacity || q->offset || q->value_size>PATH_MAX
                 || (pair ? (!*b && !(descriptors&2)) : *b || (descriptors&2))
                 || (q->mode!=MD_FS_MOUNT_TMPFS && q->mode!=MD_FS_MOUNT_OVERLAY && q->mode!=MD_FS_MOUNT_PROC

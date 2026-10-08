@@ -97,6 +97,13 @@ the kernel has separated its file table. Death during preparation, failed exec
 and task teardown release the leases without leaving temporary image descriptors
 in a surviving CLONE_FILES peer. Initial loading and worker preparation share
 the same ELF and shebang parser.
+Anonymous memfd ELF images retain their actual readable description through
+exec, fork and process teardown. Their `/proc/.../exe` views use the common
+typed control-file provider, preserving inode identity, seals, independent open
+positions, shared dup positions and readonly/private mappings without reopening
+the memfd through a host proc path. Image replacement publishes only after
+confirmed exec; failed preparation releases its candidate. Ordinary store-backed
+exec does not acquire this extra owner.
 Proc-image snapshots use the same mapped request lifecycle. The worker owns the
 writable construction file, accepts captured chunks, and delivers only the final
 read-only/O_PATH result. Task death or rejected copying releases construction
@@ -126,6 +133,10 @@ input instead of installing a temporary anchor. Cwd suffixes use the captured
 filesystem context; proc-root paths use the selected guest root. Another guest's
 executable readlink returns bounded mapped bytes after the existing process-access
 check, without a guest file or a read syscall.
+Proc-FD paths naming another thread retain logical mount provenance only when
+the captured target shares the exact held file table. Kernel proc access and
+backing identity validation still apply. Foreign pipe readlinks retain their
+native pipe identity instead of requiring a filesystem path.
 Current executable metadata and watches use a captured store-object identity;
 the worker opens and releases its own target even after unlink. Mapped and native
 RPC requests share this operand contract. Stateful operations still require the
@@ -724,6 +735,16 @@ views publish immutable revisions through a retained single-writer stream;
 receivers preserve their local object identities while applying topology updates.
 Detached entries are reclaimed on subsequent mount admission only after their
 origins, roots and children are released. Reused slots carry a new generation.
+`fsopen`/`fsconfig`/`fsmount`/`move_mount` use those same filesystem providers
+and mount graph. A typed context retains opening credentials and provider
+namespace ownership; CREATE prepares the filesystem before placement. The
+returned O_PATH mount descriptor can access its detached root and attach it in
+the creating mount view. Dup, fork and local SCM_RIGHTS retain these owners.
+Supported flag/string parameters cover the admitted tmpfs, overlay, proc,
+devpts and cgroup providers. Reconfiguration, binary/path/FD parameters and
+unsupported mount attributes fail explicitly; contexts cannot be transferred
+between independent supervisors. Closing a context releases its unpublished
+filesystem; detached mount storage follows the ordinary origin/graph lifetime.
 Independent mounted inode stores retain their
 backing leases across namespace copies and authenticated FD transfer, including
 publisher exit and backing-directory rename. A watch instance can observe multiple

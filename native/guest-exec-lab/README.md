@@ -988,6 +988,13 @@ ordinary and nondumpable callers killed by a pread filter, 64 failed execs per
 caller with an invalid environment, and successful exec with all filesystem-RPC
 socket calls forbidden. The surviving CLONE_FILES peer must retain exactly its
 original FD set. It also runs in the default resource and buffer suites.
+
+`python native/guest-exec-lab/test_anonymous_exec.py BUILD STORE` uses a disposable
+Debian store with Python. It executes ordinary and sealed memfd ELF images,
+including a nonleader exec, closes inherited descriptors and checks executable
+identity, seals, independent open/shared dup positions, readonly and private
+mappings, rejected writes, foreign child inspection and nested self re-exec.
+
 `--case proc-custody` checks ordinary/nondumpable CLONE_FILES callers with
 write/read kill filters, then large argv snapshots with forbidden RPC, zero/one
 free result slots, O_PATH/CLOEXEC, read-only access, seek and rejected copying.

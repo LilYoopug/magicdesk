@@ -18,6 +18,7 @@
 void test_mount_copy(const char *base);
 void test_mount_storage(const char *base);
 void test_transient_store(const char *base);
+void test_fs_context(const char *base);
 void test_inode_view(const char *base);
 int test_transient_store_child(int argc, char **argv);
 void test_fs_anchor(const char *base);
@@ -265,7 +266,7 @@ int main(int argc, char **argv) {
     int transient=test_transient_store_child(argc,argv);
     if (transient>=0) return transient;
     if (argc==3 && !strcmp(argv[1],"--transient-store")) {
-        assert(!mkdir(argv[2],0700)); test_transient_store(argv[2]); test_inode_view(argv[2]); return 0;
+        assert(!mkdir(argv[2],0700)); test_transient_store(argv[2]); test_inode_view(argv[2]); test_fs_context(argv[2]); return 0;
     }
     if (argc==3 && !strcmp(argv[1],"--mount-storage")) {
         assert(!mkdir(argv[2],0700)); test_mount_storage(argv[2]); return 0;
@@ -484,6 +485,7 @@ int main(int argc, char **argv) {
     test_mount_copy(argv[1]);
     test_mount_storage(argv[1]);
     test_transient_store(argv[1]);
+    test_fs_context(argv[1]);
     test_inode_view(argv[1]);
     test_fs_anchor(argv[1]);
     test_user_namespace_fs(argv[1]);

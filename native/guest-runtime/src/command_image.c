@@ -85,6 +85,7 @@ int md_command_images_prepare(struct md_command_recipe *recipe, struct md_comman
                 memcpy(recipe->image.object,current.identity.object,sizeof(recipe->image.object));
                 recipe->loader=images->loader>=0;
                 images->mount_flags=current.mount_flags;
+                images->anonymous=!current.identity.object[0];
                 return 0;
             }
             break;

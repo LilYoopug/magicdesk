@@ -33,7 +33,7 @@ int md_view_topology_order(const struct md_mount_namespace *view, unsigned *orde
     for (unsigned i=0;i<=count;++i) {
         const struct md_view_mount *m=i ? &tree->mounts[i-1] : &view->base;
         if (!m->id) continue;
-        if (!m->parent) { if (m!=view->root) return -EINVAL; continue; }
+        if (!m->parent) { if (m!=view->root && !m->detached) return -EINVAL; continue; }
         if (m==view->root) return -EINVAL;
         if (m->parent==&view->base) { parents[i]=1; continue; }
         unsigned j=0;

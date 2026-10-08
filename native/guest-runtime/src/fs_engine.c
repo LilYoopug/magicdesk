@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "fs_engine.h"
+#include "fs_context.h"
 #include "image_catalogue.h"
 #include "inode_watch.h"
 #include "fs_mount_internal.h"
@@ -265,6 +266,8 @@ static void context_execute(struct md_fs_context *context,
     else if (q->operation == MD_FS_CHROOT) change_root(fs, task->fs, q, out);
     else if (q->operation==MD_FS_MOUNT)
         *out=(struct md_fs_result){.fd=-1,.error=md_fs_mount_change(fs,task->fs,q)};
+    else if (q->operation==MD_FS_FSOPEN || q->operation==MD_FS_FSCONFIG || q->operation==MD_FS_FSMOUNT)
+        md_fs_context_mount(fs,q,out,output);
     else if (q->operation == MD_FS_WATCH_PATH) watch_path(fs,q,out,output);
     else if (q->operation == MD_FS_WATCH_ADD) {
         int wd=watch_add(fs,q->directory[0],q->directory[1],q->origin[1],q->flags);

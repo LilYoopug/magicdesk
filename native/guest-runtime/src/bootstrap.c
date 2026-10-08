@@ -167,7 +167,8 @@ void md_boot(uintptr_t *kernel_stack) {
             }
         }
         if (program_fd < 0 || program_fd == interpreter_fd) md_die("invalid prepared images", -EINVAL);
-        if (!!namespace != !!*object) md_die("missing prepared object identity", -EINVAL);
+        if ((!namespace && *object) || (namespace && !*object && !retained))
+            md_die("missing prepared object identity", -EINVAL);
         memset(command.object, 0, sizeof(command.object));
         md_copy(command.object, sizeof(command.object), object);
         command.fd = program_fd; command.interpreter_fd = interpreter_fd;

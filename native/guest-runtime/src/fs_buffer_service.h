@@ -46,6 +46,8 @@ struct md_fs_buffer_service *md_fs_buffer_service_new(struct md_fs_worker *, str
  * implementation; filesystem providers only supply control-file semantics. */
 typedef struct md_fd_object *(*md_control_factory)(const struct md_control_file_ops *,void *,const struct md_identity *,int);
 void md_fs_buffer_control_factory(struct md_fs_buffer_service *,md_control_factory);
+typedef struct md_control_file (*md_control_query)(struct md_fd_object *);
+void md_fs_buffer_control_query(struct md_fs_buffer_service *,md_control_query);
 /* Cancel requests and reap owned children, then stop/join the worker before
  * destroy. Records retain buffers independently of a dead/replaced task. */
 void md_fs_buffer_service_destroy(struct md_fs_buffer_service *);
@@ -62,7 +64,7 @@ int md_fs_buffer_inspect_take(struct md_fs_buffer_request *, struct md_received_
 /* Prepared executable descriptions stay outside the guest table until exec. */
 int md_fs_buffer_exec_begin(struct md_fs_buffer_service *, pid_t, struct md_guest_domain *,
         const struct md_interception_buffer *, struct md_fs_buffer_request **);
-int md_fs_buffer_exec_take(struct md_fs_buffer_request *, int descriptors[2], unsigned *mount_flags);
+int md_fs_buffer_exec_take(struct md_fs_buffer_request *, int descriptors[2], unsigned *mount_flags, int *anonymous);
 int md_fs_buffer_snapshot_begin(struct md_fs_buffer_service *, pid_t, struct md_guest_domain *,
         const struct md_interception_buffer *, unsigned flags, struct md_fs_buffer_request **);
 int md_fs_buffer_snapshot_pending(const struct md_fs_buffer_request *);

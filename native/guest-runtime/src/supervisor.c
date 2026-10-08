@@ -234,6 +234,7 @@ struct thread {
     struct md_identity identity;
     struct md_exec_identity pending_identity;
     int exec_images[2];
+    struct md_process_executable *executable, *prepared_executable;
     int exec_images_ready;
     unsigned exec_mount_flags;
     int mapped_image, entered;
@@ -330,6 +331,7 @@ static const unsigned long trace_options = PTRACE_O_TRACESECCOMP | PTRACE_O_TRAC
     | PTRACE_O_EXITKILL | PTRACE_O_TRACESYSGOOD;
 static void release_operation(struct thread *t);
 static void exec_images_release(struct thread *t) {
+    md_process_executable_release(t->prepared_executable); t->prepared_executable=NULL;
     for (unsigned i=0;i<2;++i) {
         if (t->exec_images[i]>=0) close(t->exec_images[i]);
         t->exec_images[i]=-1;
@@ -392,6 +394,7 @@ static void cleanup(void) {
     while (threads) {
         struct thread *next = threads->next;
         exec_images_release(threads);
+        md_process_executable_release(threads->executable);
         fd_discard(threads);
         adapter_discard(threads);
         md_memory_release(threads->memory);
@@ -554,6 +557,7 @@ static void release_thread(struct thread *t) {
     fd_discard(t);
     adapter_discard(t);
     exec_images_release(t);
+    md_process_executable_release(t->executable); t->executable=NULL;
     md_task_registry_forget(tasks, t->pid);
     md_identity_release(&t->identity);
     CHECK(!md_shm_space_release(t->shm_space)); t->shm_space = NULL;
@@ -1198,6 +1202,10 @@ static struct md_fd_object *control_file_create(const struct md_control_file_ops
         const struct md_identity *id,int flags) {
     return md_proc_file_object(md_proc_file_open_control(ops,context,id,flags));
 }
+static struct md_control_file control_file_query(struct md_fd_object *object) {
+    struct md_proc_file *file=md_proc_file_from_object(object);
+    return file && !(md_proc_file_flags(file)&O_PATH) ? md_proc_file_control(file) : (struct md_control_file){0};
+}
 static void proc_file_request(struct thread *t, const struct seccomp_notif *q) {
     struct seccomp_notif_resp reply={.id=q->id};
     unsigned operation=(unsigned)q->data.args[1];
@@ -1235,6 +1243,28 @@ static void proc_file_request(struct thread *t, const struct seccomp_notif *q) {
             if (!reply.error) return;
         }
         else reply.error=-ENOTTY;
+    } else if (operation==MD_PROC_FILE_OPEN && q->data.args[3]==MD_PROC_EXE) {
+        struct thread *target=find_thread((pid_t)q->data.args[2]);
+        int flags=(int)q->data.args[4];
+        struct md_proc_file *file=NULL;
+        if (!target || (target!=t && !debugger_allowed(t->pid,target->pid))) reply.error=-EACCES;
+        else if (t->proc_image_fd>=0 || q->data.args[5]) reply.error=-EINVAL;
+        else if (!target->executable) reply.error=-EXDEV;
+        else {
+            struct md_control_file view=md_process_executable_view(target->executable);
+            file=md_proc_file_open_control(view.ops,view.context,&t->identity,flags);
+            if (!file) reply.error=-errno;
+            else if (flags&O_PATH) {
+                int fd=md_proc_file_descriptor(file);
+                if (fd<0) reply.error=fd;
+                else if (!t->buffer.pool || t->proc_file) { close(fd); reply.error=-EPERM; }
+                else { t->proc_file=md_proc_file_retain(file); t->proc_image_fd=fd; }
+            } else {
+                reply.error=proc_file_publish(t,q,file);
+                if (!reply.error) { md_proc_file_release(file); return; }
+            }
+        }
+        md_proc_file_release(file);
     } else if (operation==MD_PROC_FILE_OPEN || operation==MD_PROC_FILE_REOPEN) {
         struct thread *target=find_thread((pid_t)q->data.args[2]);
         struct proc_owner selected=proc_owner((pid_t)q->data.args[2]);
@@ -2521,7 +2551,13 @@ static void buffer_complete(struct md_fs_buffer_request *request, pid_t pid, int
             md_received_fds_release(t->receive->expanded);
             t->receive->expanded=expanded;
         }
-        CHECK(md_fs_buffer_exec_take(request,t->exec_images,&t->exec_mount_flags)>=0);
+        int anonymous=0;
+        CHECK(md_fs_buffer_exec_take(request,t->exec_images,&t->exec_mount_flags,&anonymous)>=0);
+        if (anonymous) {
+            CHECK(!t->prepared_executable);
+            t->prepared_executable=md_process_executable_new(t->exec_images[0]);
+            if (!t->prepared_executable) { error=-errno; exec_images_release(t); }
+        }
         if (!md_fs_buffer_task_pending(request)) CHECK(md_fs_buffer_open_take(request,&t->buffer_open)>=0);
     }
     TRACE("PROBE buffer-call pid=%d operation=%llu error=%d descriptor=%d\n",pid,t->buffer_registers.regs[1],error,t->buffer_open.fd>=0);
@@ -3533,7 +3569,10 @@ static void memory_start(struct thread *t) {
             if (!error) {
                 CHECK(!md_fd_order_start(&t->memory_files));
                 struct md_proc_file *control=proc_file_capture(t,(int)regs.regs[4]);
-                if (control) { error=-ENODEV; md_proc_file_release(control); }
+                if (control) {
+                    error=md_proc_file_mapping(control,(unsigned)regs.regs[2],(unsigned)regs.regs[3]);
+                    md_proc_file_release(control);
+                }
                 struct md_fs_anchor *origin=md_fd_origins_get(t->resources.files,(int)regs.regs[4],NULL);
                 noexec=!!(md_fs_anchor_policy(origin)&MD_MOUNT_NOEXEC);
                 md_fs_anchor_release(origin);
@@ -3855,6 +3894,7 @@ int main(int argc, char **argv) {
         broker = md_broker_create(filesystem, statistics != NULL, delegated_notification); CHECK(broker);
         buffer_service=md_fs_buffer_service_new(filesystem,tasks,fd_wakeup,buffer_complete); CHECK(buffer_service);
         md_fs_buffer_control_factory(buffer_service,control_file_create);
+        md_fs_buffer_control_query(buffer_service,control_file_query);
         CHECK(!md_mount_copy_service_create(filesystem,mount_copy_complete,&mount_copy_service));
         const char *program = "", *cwd = "/";
         for (int i = argument+1; i+1 < argc; ++i) {
@@ -3957,6 +3997,7 @@ int main(int argc, char **argv) {
                     t->resources.pid=md_pid_identity_retain(t->resources.pid_group);
                     exec_images_release(t);
                     memcpy(t->exec_images,former->exec_images,sizeof(t->exec_images));
+                    t->prepared_executable=former->prepared_executable; former->prepared_executable=NULL;
                     t->exec_mount_flags=former->exec_mount_flags;
                     former->exec_images[0]=former->exec_images[1]=-1;
                     md_identity_release(&t->identity);
@@ -3970,6 +4011,8 @@ int main(int argc, char **argv) {
             fd_discard(t);
             adapter_discard(t);
             t->exec_images_ready=t->exec_images[0]>=0;
+            md_process_executable_release(t->executable);
+            t->executable=t->prepared_executable; t->prepared_executable=NULL;
             md_memory_stack_return(t->memory, t->stack);
             CHECK(!md_shm_space_release(t->shm_space));
             t->shm_space = md_shm_space_new(); CHECK(t->shm_space);
@@ -3989,6 +4032,7 @@ int main(int argc, char **argv) {
             c->born = 1; c->ready = t->ready;
             c->parent=t->cloning&(CLONE_PARENT|CLONE_THREAD) ? t->parent : t->tgid; c->entered=t->entered;
             c->process_image=t->process_image;
+            c->executable=md_process_executable_retain(t->executable);
             /* A newborn has no syscall entry of its own. Adapter setup must
              * not publish the parent's pending clone exit as a child stop. */
             c->debug_call_active=0;
@@ -4175,6 +4219,18 @@ int main(int argc, char **argv) {
                 if (file) {
                     unsigned long args[6];
                     for (unsigned i=0;i<6;++i) args[i]=regs.regs[i];
+                    if (nr==SYS_fcntl) {
+                        long result=0;
+                        int handled=md_proc_file_fcntl(file,(int)args[1],args[2],&result);
+                        md_proc_file_release(file);
+                        if (handled) return_value(t,&regs,result); else resume(pid,0);
+                        continue;
+                    }
+                    if (nr==SYS_mmap) {
+                        md_proc_file_release(file);
+                        memory_begin(t,&regs,MEMORY_KERNEL);
+                        continue;
+                    }
                     struct md_proc_io_spec spec;
                     int namespace_ioctl=nr==SYS_ioctl && md_proc_file_namespace(md_proc_file_kind(file));
                     int error=nr==SYS_fstatfs || namespace_ioctl ? 0 : md_proc_io_decode(nr,args,&spec);

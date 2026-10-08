@@ -332,8 +332,10 @@ static long control_write(void *ctx,const struct md_control_actor *actor,const v
     pthread_mutex_unlock(&v->world->lock); return r ? r : (long)size;
 }
 static const struct md_control_file_ops ops[2]={
-    {opened_retain,opened_release,opened_stat,control_read,control_write,CGROUP2_SUPER_MAGIC,opened_access},
-    {opened_retain,opened_release,opened_stat,control_read,control_write,CGROUP_SUPER_MAGIC,opened_access}
+    {.retain=opened_retain,.release=opened_release,.stat=opened_stat,.read=control_read,
+        .write=control_write,.filesystem=CGROUP2_SUPER_MAGIC,.access=opened_access},
+    {.retain=opened_retain,.release=opened_release,.stat=opened_stat,.read=control_read,
+        .write=control_write,.filesystem=CGROUP_SUPER_MAGIC,.access=opened_access}
 };
 int md_cgroup_open(struct md_cgroup_view *v,int fd,int flags,const struct md_identity *id,struct md_fs_anchor *origin,
         const struct md_control_file_ops **out,void **context) {

@@ -35,7 +35,7 @@ static long number(const char **p) {
     *p = s;
     return (long)n;
 }
-struct md_proc_path md_proc_path(const char *path) {
+struct md_proc_path md_proc_path_for(const char *path,int tid,int tgid) {
     struct md_proc_path out = {.descriptor=-1};
     if (*path != '/') return out;
     const char *p = path;
@@ -48,11 +48,11 @@ struct md_proc_path md_proc_path(const char *path) {
         else if (word(&p, "stdout")) { out.ordinary_link=1; out.descriptor=1; }
         else if (word(&p, "stderr")) { out.ordinary_link=1; out.descriptor=2; }
         else return out;
-        out.process=(int)RAW0(getpid);
+        out.process=tgid;
         out.kind = MD_PROC_FD;
     } else if (word(&p, "proc")) {
         if (word(&p,"cgroups")) {
-            out.kind=MD_PROC_CGROUPS; out.process=(int)RAW0(gettid);
+            out.kind=MD_PROC_CGROUPS; out.process=tid;
             out.tail=p; out.anchor_length=(size_t)(p-path); return out;
         }
         if (word(&p,"mounts")) {
@@ -68,24 +68,24 @@ struct md_proc_path md_proc_path(const char *path) {
             else if (word(&p,"overflowuid")) out.kind=MD_PROC_OVERFLOWUID;
             else if (word(&p,"overflowgid")) out.kind=MD_PROC_OVERFLOWGID;
             else return out;
-            out.process=(int)RAW0(gettid);
+            out.process=tid;
             out.tail=p; out.anchor_length=(size_t)(p-path); return out;
         }
-        if (word(&p,"self")) out.process=(int)RAW0(getpid);
-        else if (word(&p,"thread-self")) out.process=(int)RAW0(gettid);
+        if (word(&p,"self")) out.process=tgid;
+        else if (word(&p,"thread-self")) out.process=tid;
         else {
             long pid = number(&p);
             if (pid < 0) return out;
-            foreign = pid != RAW0(getpid) && pid != RAW0(gettid);
+            foreign = pid != tgid && pid != tid;
             out.process = (int)pid;
         }
         if (word(&p, "task")) {
             /* Only the group leader's proc directory contains task/. */
-            if (out.process == RAW0(gettid) && out.process != RAW0(getpid)) return out;
-            long tid = number(&p);
-            if (tid < 0) return out;
-            foreign |= tid != RAW0(gettid);
-            out.process = (int)tid;
+            if (out.process == tid && out.process != tgid) return out;
+            long selected = number(&p);
+            if (selected < 0) return out;
+            foreign |= selected != tid;
+            out.process = (int)selected;
         }
         if (!*component(p)) { out.kind=MD_PROC_PROCESS_DIRECTORY; p=component(p); }
         else if (word(&p, "fd")) {
@@ -122,6 +122,9 @@ struct md_proc_path md_proc_path(const char *path) {
     out.anchor_length = (size_t)(p - path);
     out.tail = p;
     return out;
+}
+struct md_proc_path md_proc_path(const char *path) {
+    return md_proc_path_for(path,(int)RAW0(gettid),(int)RAW0(getpid));
 }
 int md_proc_task_path(const char *path, char *out, size_t capacity) {
     const char *p=path;

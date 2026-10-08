@@ -82,6 +82,10 @@ CLONE_VM ownership, not MFD_NOEXEC_SEAL or a host mount. MREMAP_DONTUNMAP is
 within the baseline (5.7); rejected native mappings keep their kernel errors.
 Focused tests cover execution admission, mmap/mprotect, remap, fork and failed
 metadata allocation. This adds no requirement for newer memfd execution flags.
+Anonymous ELF custody uses baseline `F_GET_SEALS`, CLOEXEC duplication, pread
+and backed mappings. It does not require `MFD_EXEC` or `MFD_NOEXEC_SEAL`.
+`test_anonymous_exec.py` checks ordinary/sealed images and process-image lifetime;
+firmware execution-policy rejection remains an error, not an implicit elevation.
 Portable backing custody uses the same sealed-manifest primitive and transfers
 existing root/lower directory descriptions through SCM_RIGHTS. CLOEXEC duplication
 and queued rights preserve their existing flock leases; import never relocks
@@ -191,6 +195,14 @@ baseline; no reader/writer endpoint is retained. `--case mount-namespace`,
 Chromium and `test_glycin_runtime.py` cover these paths under shell identity.
 Native statx may return mount ID zero for anonymous objects; the adapter retains
 that result instead of treating it as a failed mount lookup.
+
+The descriptor mount API (`fsopen`, `fsconfig`, `fsmount`, `move_mount`) follows
+the Linux 5.15 userspace contract through `fs_context`, `mount_source` and the
+existing mount graph. It does not issue these privileged syscalls on the host.
+Context carriers use sealed memfds; mount FDs use O_PATH and the common retained
+origin/ADDFD/SCM_RIGHTS delivery mechanisms. No newer kernel interface is needed.
+`test_mount_api.py` covers stock util-linux callers under UID 2000, and the
+transient-store fixture covers detached graph custody and exact FD retirement.
 
 ## Newer Interfaces
 

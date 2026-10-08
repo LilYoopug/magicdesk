@@ -2,14 +2,69 @@
 #include "process_image_view.h"
 #include "proc_paths.h"
 #include "fs_rpc.h"
+#include "control_file.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/uio.h>
+#include <linux/magic.h>
+#include <stdatomic.h>
 #include <unistd.h>
 
+struct md_process_executable { atomic_uint references; int fd; };
+struct md_process_executable *md_process_executable_new(int fd) {
+    struct md_process_executable *image=malloc(sizeof(*image));
+    if (!image) return NULL;
+    int retained=fcntl(fd,F_DUPFD_CLOEXEC,0);
+    if (retained<0) { int error=errno; free(image); errno=error; return NULL; }
+    atomic_init(&image->references,1); image->fd=retained; return image;
+}
+struct md_process_executable *md_process_executable_retain(struct md_process_executable *image) {
+    if (image) atomic_fetch_add_explicit(&image->references,1,memory_order_relaxed);
+    return image;
+}
+void md_process_executable_release(struct md_process_executable *image) {
+    if (!image || atomic_fetch_sub_explicit(&image->references,1,memory_order_acq_rel)!=1) return;
+    close(image->fd); free(image);
+}
+static void *image_retain(void *image) { return md_process_executable_retain(image); }
+static void image_release(void *image) { md_process_executable_release(image); }
+static int image_stat(void *context,struct stat *st) {
+    struct md_process_executable *image=context;
+    return fstat(image->fd,st) ? -errno : 0;
+}
+static long image_read(void *context,const struct md_control_actor *actor,void *out,size_t size,int64_t offset) {
+    (void)actor;
+    struct md_process_executable *image=context;
+    ssize_t result=pread(image->fd,out,size,offset);
+    return result<0 ? -errno : result;
+}
+static int image_access(void *context,const struct md_identity *identity,unsigned mode) {
+    (void)context; (void)identity;
+    return mode&W_OK ? -ETXTBSY : 0;
+}
+static int image_descriptor(void *context,int flags) {
+    struct md_process_executable *image=context;
+    int fd;
+    if (flags&O_PATH) {
+        char path[64]; snprintf(path,sizeof(path),"/proc/self/fd/%d",image->fd);
+        fd=open(path,O_PATH|O_CLOEXEC);
+    } else fd=fcntl(image->fd,F_DUPFD_CLOEXEC,0);
+    return fd<0 ? -errno : fd;
+}
+static int image_seals(void *context) {
+    struct md_process_executable *image=context;
+    int seals=fcntl(image->fd,F_GET_SEALS);
+    return seals<0 ? -errno : seals;
+}
+static const struct md_control_file_ops image_ops={.retain=image_retain,.release=image_release,
+    .stat=image_stat,.read=image_read,.access=image_access,.filesystem=TMPFS_MAGIC,
+    .descriptor=image_descriptor,.seals=image_seals,.mappable=1};
+struct md_control_file md_process_executable_view(struct md_process_executable *image) {
+    return (struct md_control_file){image ? &image_ops : NULL,image};
+}
 static int copy(pid_t pid, uintptr_t address, void *data, size_t size) {
     if (address>UINTPTR_MAX-size) return -EFAULT;
     struct iovec local={data,size}, remote={(void *)address,size};

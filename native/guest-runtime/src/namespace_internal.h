@@ -20,6 +20,8 @@ long md_namespace_inspect(const struct md_fs *, struct md_namespace_operand, con
 long md_namespace_native_statx(const struct md_fs *, const unsigned long *);
 int md_namespace_proc_borrow(const struct md_proc_path *, int *);
 long md_namespace_mount(const struct md_fs *, long, const unsigned long *);
+long md_namespace_mount_fd(const struct md_fs *, long, const unsigned long *);
+long md_namespace_mount_request(const struct md_fs *,struct md_fs_request *);
 long md_namespace_xattr(const struct md_fs *, long, struct md_namespace_operand, const char *, const unsigned long *);
 long md_namespace_proc_reopen(const struct md_fs *, int, int flags);
 long md_namespace_path_call(const struct md_fs *, long, const unsigned long *, struct md_namespace_operand, const char *);

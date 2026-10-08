@@ -185,6 +185,33 @@ to the base preserves its explicit root identity for subsequent pivots; mountinf
 publishes the selected root once and the relocated base at its covered path.
 Ephemeral and layered mounts use the filesystem backends described below.
 
+The descriptor mount API separates three owners: a `fs_context` configuration,
+a `mount_source` prepared filesystem, and a graph placement. Legacy mount uses
+the same source factory and attachment transaction. Typed control input is
+retained under the descriptor-table turn before worker submission, so close or
+FD reuse cannot retarget a configuration operation. CREATE captures provider
+resources using the opener's credentials and PID/cgroup ownership. Parameters,
+created, mounted and failed phases reject invalid ordering. Ordinary filesystem
+requests acquire no new owner or probe.
+
+`fsmount` publishes a detached, parentless graph root and returns its existing
+O_PATH origin through the shared FD delivery path. `move_mount` attaches that
+same instance in its creating mount view without changing its mount ID or
+retargeting earlier descriptors. Detached roots are included in namespace
+copies and graph custody; graph validation distinguishes a parentless root
+from an attachment under the namespace base. Closing the final origin permits
+normal collection. Context FD close releases prepared source custody directly;
+failed delivery/cancellation uses the existing result owner. Native `fsopen`
+and host mount privilege are not used. Filesystem contexts use nonseekable
+control-file IO, while cgroup controls retain their existing cursor semantics.
+Reconfiguration, typed binary/path/FD parameters, cross-view placement and
+unimplemented attributes are not silently accepted.
+
+`test_mount_api.py` exercises syscall state/order, descriptor flags, dup/fork,
+SCM_RIGHTS, detached-root IO, readonly attachment, source cancellation and stock
+Debian util-linux mounts. The native transient-store suite additionally checks
+namespace copy, detached graph import/export and exact final FD counts.
+
 Mounted inode filesystems retain backing custody separately from their placement.
 Bind and namespace copies share that custody, not a SQLite connection or mount
 policy. A worker-local storage cache opens an additional connection only on first
@@ -1433,6 +1460,17 @@ failed exec with an invalid environment, and executes with socket/connect/sendms
 recvmsg forbidden. Ordinary and nondumpable CLONE_FILES callers leave their
 surviving peer's exact FD set unchanged. Unit checks additionally discard malformed/truncated packets and queued
 rights, checking real pipe EOF as well as allocation rollback and FD counts.
+Anonymous ELF admission requires an actual regular, unlinked, seal-capable
+kernel image, not a failed managed-object lookup. The supervisor retains its
+readable description before exec and publishes that owner only on confirmed
+image replacement. Fork shares the owner; failed exec and terminal cleanup
+release candidates. A typed control-file view serves self/foreign executable
+opens after the existing process-access check. It preserves native inode/seals,
+per-open cursors, dup sharing and backed readonly/private mappings. Writable
+opens and shared writable mappings fail explicitly. No new proc reopen or copy
+of the image is needed, and store-backed executables retain their existing path.
+`test_anonymous_exec.py` checks ordinary/sealed memfds, nonleader exec,
+close-range, foreign executable/pipe inspection, nested fork and self re-exec.
 Eight production service cases also verify wrong tokens, duplicate/wrong-sized
 vectors, wrong senders, cancellation before/after queueing and a send error after
 queueing. Each checks exact FD counts and pipe EOF after owner retirement.
@@ -1744,6 +1782,11 @@ Foreign executable readlink uses mapped bytes after the supervisor's existing
 process/identity/domain check. It creates no guest file, needs no free FD slot,
 and copies only the caller-requested prefix. Readlink never uses a temporary
 readable descriptor to transport text.
+Proc-FD capture retains logical provenance across a thread alias only when the
+target snapshot names the exact file table held by the request. Kernel lookup
+and backing identity checks remain authoritative; foreign tables do not borrow
+annotations by descriptor number. Mount checks exercise `/proc/self/fd` in a
+worker thread as well as the group leader.
 
 Xattr operations capture the path or actual input description once, then perform
 logical ACL/capability or native backing work under the selected worker context.

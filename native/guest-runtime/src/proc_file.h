@@ -26,7 +26,10 @@ int md_proc_file_control_access(const struct md_proc_file *,const struct md_iden
 struct md_proc_file *md_proc_file_open_control(const struct md_control_file_ops *,void *,
     const struct md_identity *,int flags);
 int md_proc_file_control_stat(const struct md_proc_file *,struct stat *);
+struct md_control_file md_proc_file_control(const struct md_proc_file *);
 unsigned long md_proc_file_filesystem(const struct md_proc_file *);
+int md_proc_file_mapping(const struct md_proc_file *,unsigned protection,unsigned flags);
+int md_proc_file_fcntl(struct md_proc_file *,int command,unsigned long argument,long *result);
 static inline int md_proc_file_process(enum md_proc_file_kind kind) {
     return kind==MD_PROC_FILE_STATUS || kind==MD_PROC_FILE_STAT;
 }

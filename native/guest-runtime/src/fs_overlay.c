@@ -57,12 +57,9 @@ static int disjoint(struct md_inode_store *source,int lower,struct md_inode_stor
     return mdi_finish(source,r);
 }
 int md_fs_mount_overlay(struct md_filesystem *fs, const struct md_fs_request *q,
-        const struct md_view_location *target) {
+        struct md_mount_source *out) {
     if (q->flags&~(MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC)) return -EOPNOTSUPP;
     if (!q->value || !q->value_size) return -EINVAL;
-    struct stat st;
-    if (fstat(target->fd,&st)) return -errno;
-    if (!S_ISDIR(st.st_mode)) return -ENOTDIR;
     char *data=strdup(q->value);
     if (!data) return -ENOMEM;
     struct options options;
@@ -112,8 +109,12 @@ int md_fs_mount_overlay(struct md_filesystem *fs, const struct md_fs_request *q,
         root=md_inode_open(index,-1,"/",O_PATH|O_DIRECTORY|O_CLOEXEC,0);
         if (root<0) r=root;
     }
-    if (!r) r=md_view_attach_storage(fs,index,root,target,
-        md_fs_mount_flags(q->flags|(options.upper ? 0 : MS_RDONLY)));
+    if (!r) {
+        *out=(struct md_mount_source){.fd=root,.backing=MD_MOUNT_INODE,
+            .storage=md_inode_lifetime_retain(index->lifetime),
+            .policy=md_fs_mount_flags(q->flags|(options.upper ? 0 : MS_RDONLY))};
+        root=-1;
+    }
     if (root>=0) close(root);
     md_inode_store_close(index);
     md_fs_storage_leave(&writable); md_view_location_close(&upper); md_view_location_close(&work);

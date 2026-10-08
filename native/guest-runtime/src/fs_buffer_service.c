@@ -16,6 +16,7 @@
 #include "ipc_received.h"
 #include "ipc_capsule.h"
 #include "descriptor_inode.h"
+#include "proc_paths.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -32,6 +33,7 @@ struct md_fs_buffer_service {
     struct md_fs_buffer_request *requests;
     struct md_ipc_capsules *capsules; /* filesystem worker until stop/join */
     md_control_factory control;
+    md_control_query control_query;
     void (*complete)(struct md_fs_buffer_request *, pid_t, int);
 };
 struct md_fs_buffer_request {
@@ -56,6 +58,7 @@ struct md_fs_buffer_request {
     size_t snapshot_size;
     struct md_fs_anchor *input[2];
     struct md_fd_object *reopened;
+    struct md_fd_object *control_input;
     int captured[2];
     struct md_received_fds *received;
     struct md_received_fds *expanded;
@@ -109,6 +112,7 @@ static void dispose(struct md_fs_buffer_request *r) {
     }
     md_fs_context_end(&r->context);
     md_fd_object_release(r->reopened);
+    md_fd_object_release(r->control_input);
     md_received_fds_release(r->received);
     md_received_fds_release(r->expanded);
     md_fd_channel_release(r->export);
@@ -384,6 +388,9 @@ static int control_open(void *context,const struct md_control_file_ops *ops,void
 void md_fs_buffer_control_factory(struct md_fs_buffer_service *s,md_control_factory factory) {
     s->control=factory;
 }
+void md_fs_buffer_control_query(struct md_fs_buffer_service *s,md_control_query query) {
+    s->control_query=query;
+}
 static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
     struct md_fs_buffer_request *r=(void *)work;
     r->error=error;
@@ -469,7 +476,8 @@ static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
         }
         int flags=fcntl(r->opened.fd,F_GETFL);
         if (flags<0) { r->error=-errno; return; }
-        r->opened.flags=(flags&O_PATH) || r->snapshot_phase ? r->request.flags : O_CLOEXEC;
+        r->opened.flags=(flags&O_PATH) || r->snapshot_phase || r->request.operation==MD_FS_FSOPEN
+            ? r->request.flags : O_CLOEXEC;
         r->output->transfer=(flags&O_PATH) ? MD_FS_BUFFER_ANCHOR : MD_FS_BUFFER_ADDFD;
         if (!(flags&O_PATH)) {
             reply->delivery=MD_FS_REPLIED;
@@ -655,13 +663,30 @@ int md_fs_buffer_snapshot_begin(struct md_fs_buffer_service *s, pid_t actor, str
         const struct md_interception_buffer *buffer, unsigned flags, struct md_fs_buffer_request **out) {
     return begin(s,actor,fs,MD_FS_TEMPORARY,buffer,out,0,1,flags);
 }
-int md_fs_buffer_exec_take(struct md_fs_buffer_request *r, int out[2], unsigned *mount_flags) {
-    if (!r || !out || !mount_flags) return -EINVAL;
+int md_fs_buffer_exec_take(struct md_fs_buffer_request *r, int out[2], unsigned *mount_flags, int *anonymous) {
+    if (!r || !out || !mount_flags || !anonymous) return -EINVAL;
     if (!r->executable) return 0;
     if (r->error || r->images.program<0 || out[0]>=0 || out[1]>=0) return -EINVAL;
     out[0]=r->images.program; out[1]=r->images.loader;
     *mount_flags=r->images.mount_flags;
+    *anonymous=r->images.anonymous;
     r->images=(struct md_command_images){.program=-1,.loader=-1}; return 1;
+}
+static struct md_fs_anchor *capture_origin(struct md_fs_buffer_request *r,unsigned index) {
+    const struct md_fs_task_capture *capture=&r->request.capture[index];
+    if (!capture->path || (capture->flags&O_NOFOLLOW)) return NULL;
+    struct md_proc_path path=md_proc_path_for(capture->path,r->context.task.tid,r->context.task.tgid);
+    enum md_proc_kind kind=path.kind==MD_PROC_FOREIGN ? path.foreign_kind : path.kind;
+    if (kind!=MD_PROC_FD || !path.tail || *path.tail) return NULL;
+    struct md_task_snapshot target={0};
+    if (md_task_registry_read(r->service->tasks,path.process,r->context.task.tgid,&target)) return NULL;
+    /* The held table turn also orders a sharing peer's close/unshare. Keep
+     * provenance only for that exact owner; the captured FD is checked again
+     * by the filesystem, and kernel proc lookup still enforces access. */
+    struct md_fs_anchor *origin=target.files==r->files.table
+        ? md_fd_origins_get(r->files.table,path.descriptor,NULL) : NULL;
+    md_task_snapshot_release(&target);
+    return origin;
 }
 int md_fs_buffer_progress(struct md_fs_buffer_service *s) {
     if (!s) return 0;
@@ -698,6 +723,16 @@ int md_fs_buffer_progress(struct md_fs_buffer_service *s) {
         if (r->executable && !*r->request.path[0]) data=1;
         for (unsigned i=0;i<2 && !error;++i) {
             int base=r->request.directory[i];
+            if (r->capture_mask&(1U<<i)) {
+                r->input[i]=capture_origin(r,i);
+                r->request.origin[i]=r->input[i];
+            }
+            if (!i && base>=0 && (r->request.operation==MD_FS_FSCONFIG || r->request.operation==MD_FS_FSMOUNT)
+                    && s->control_query) {
+                r->control_input=md_fd_origins_object(r->files.table,base,NULL);
+                r->request.control=s->control_query(r->control_input);
+                if (r->request.control.ops) continue;
+            }
             if (base==AT_FDCWD) r->input[i]=md_fs_anchor_retain(r->context.task.cwd);
             else if (base>=0) r->input[i]=md_fd_origins_get(r->files.table,base,NULL);
             if (!i && base>=0 && r->request.operation==MD_FS_REOPEN) {

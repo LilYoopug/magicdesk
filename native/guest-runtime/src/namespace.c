@@ -23,7 +23,7 @@ static long namespace_request_deliver(const struct md_fs *fs, struct md_fs_reque
     }
     unsigned bases = q->operation == MD_FS_LINK || q->operation == MD_FS_RENAME
         || (q->operation==MD_FS_MOUNT && (q->mode==MD_FS_MOUNT_BIND
-            || q->mode==MD_FS_MOUNT_PIVOT || q->mode==MD_FS_MOUNT_MOVE)) ? 2 : 1;
+            || q->mode==MD_FS_MOUNT_PIVOT || q->mode==MD_FS_MOUNT_MOVE || q->mode==MD_FS_MOUNT_MOVE_FD)) ? 2 : 1;
     for (unsigned i = 0; i < bases; ++i) {
         if (q->path[i] && q->path[i][0] == '/' && !(q->resolve & RESOLVE_IN_ROOT)) {
             q->directory[i] = -1; q->object[i]=NULL;
@@ -287,6 +287,8 @@ long md_namespace_call(const struct md_fs *fs, const char *exe, long nr, const u
         return md_raw(nr,a[0],a[1],a[2],a[3],a[4],a[5]);
     }
     if (nr==SYS_mount || nr==SYS_umount2 || nr==SYS_pivot_root) return md_namespace_mount(fs,nr,a);
+    if (nr==SYS_fsopen || nr==SYS_fsconfig || nr==SYS_fsmount || nr==SYS_move_mount)
+        return md_namespace_mount_fd(fs,nr,a);
     if (nr == SYS_getcwd) {
         struct md_fs_request q = {.operation = MD_FS_PATH, .directory = {AT_FDCWD, -1}};
         struct md_fs_response out;
