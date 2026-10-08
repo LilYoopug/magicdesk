@@ -1937,6 +1937,10 @@ int main(int argc, char **argv) {
     if (argc==2 && !strcmp(argv[1],"setns")) { test_setns_guest(); return 0; }
     if (argc>=2 && !strcmp(argv[1],"mount-flags")) return test_mount_flags_guest(argc,argv);
     if (argc>=2 && !strcmp(argv[1],"uts-namespace")) return test_uts_namespace_guest(argc,argv);
+    if (argc>=2 && !strcmp(argv[1],"pid-namespace")) {
+        extern int test_pid_namespace_guest(int, char **);
+        return test_pid_namespace_guest(argc,argv);
+    }
     if (argc>=2 && !strcmp(argv[1],"user-proc")) return test_user_namespace_guest(argc,argv);
     if (argc>=2 && !strcmp(argv[1],"user-namespace")) return test_user_namespace_lifecycle();
     if (argc>=2 && !strcmp(argv[1],"namespace-handles")) return test_namespace_handles_guest();

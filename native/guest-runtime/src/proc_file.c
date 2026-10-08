@@ -2,6 +2,7 @@
 #include "proc_file.h"
 #include "proc_sysctl.h"
 #include "proc_namespace.h"
+#include "pid_namespace.h"
 #include "fd_selector.h"
 #include <dirent.h>
 #include <errno.h>
@@ -17,6 +18,9 @@ struct md_proc_file {
     struct md_fd_object object;
     struct md_user_namespace *target;
     struct md_identity opener;
+    struct md_identity process_identity;
+    pid_t tracer;
+    int process_state;
     enum md_proc_file_kind kind;
     int flags;
     int64_t position;
@@ -25,11 +29,16 @@ struct md_proc_file {
     struct md_namespace_reference namespace;
     void *directory;
     size_t directory_size, directory_capacity;
+    struct md_pid_namespace *pid_view;
+    char *content;
+    size_t content_size;
 };
 static void destroy(struct md_fd_object *object) {
     struct md_proc_file *f=(void *)object;
     md_resource_queue_destroy(&f->operations);
     if (md_proc_file_namespace(f->kind)) md_namespace_reference_release(&f->namespace);
+    md_pid_namespace_release(f->pid_view); free(f->content);
+    if (f->process_state) md_identity_release(&f->process_identity);
     md_user_namespace_release(f->target); md_identity_release(&f->opener); free(f->directory); free(f);
 }
 static const struct md_fd_object_type type={.destroy=destroy,.selectors=1U<<MD_FD_SELECTOR_PROC};
@@ -41,13 +50,13 @@ struct md_proc_file *md_proc_file_from_object(struct md_fd_object *o) {
 }
 struct md_proc_file *md_proc_file_open(struct md_user_namespace *target,
         enum md_proc_file_kind kind, const struct md_identity *opener, int flags) {
-    int error=!opener || kind<MD_PROC_FILE_UID_MAP || kind>MD_PROC_FILE_PROCESS_DIRECTORY ? EINVAL : 0;
+    int error=!opener || kind<MD_PROC_FILE_UID_MAP || kind>MD_PROC_FILE_STAT ? EINVAL : 0;
     int directory=md_proc_file_directory(kind);
     if (!error && (flags&O_DIRECTORY) && !directory) error=ENOTDIR;
     if (!error && directory && !(flags&O_PATH) && ((flags&O_ACCMODE)!=O_RDONLY || (flags&O_TRUNC))) error=EISDIR;
     if (!error && (flags&(O_CREAT|O_EXCL))==(O_CREAT|O_EXCL)) error=EEXIST;
     if (!error && !(flags&O_PATH) && (flags&O_ACCMODE)==O_ACCMODE) error=EINVAL;
-    if (!error && !(flags&O_PATH) && md_proc_file_namespace(kind)
+    if (!error && !(flags&O_PATH) && (md_proc_file_namespace(kind) || md_proc_file_process(kind))
             && ((flags&O_ACCMODE)!=O_RDONLY || (flags&O_TRUNC))) error=EACCES;
     if (!error && !(flags&O_PATH) && (flags&O_ACCMODE)!=O_RDONLY && kind==MD_PROC_FILE_SETGROUPS
             && !md_identity_capable_in(opener,target,CAP_SYS_ADMIN)) error=EACCES;
@@ -59,7 +68,7 @@ struct md_proc_file *md_proc_file_open(struct md_user_namespace *target,
     error=md_resource_queue_init(&f->operations);
     if (error) { free(f); errno=-error; return NULL; }
     md_fd_object_init(&f->object,&type);
-    f->target=md_proc_file_sysctl(kind) || md_proc_file_namespace(kind) || directory
+    f->target=md_proc_file_sysctl(kind) || md_proc_file_namespace(kind) || directory || md_proc_file_process(kind)
         ? NULL : md_user_namespace_retain(target);
     f->opener=md_identity_copy(opener); f->kind=kind; f->flags=flags;
     return f;
@@ -83,6 +92,15 @@ void md_proc_file_release(struct md_proc_file *f) {
 }
 int md_proc_file_flags(const struct md_proc_file *f) { return f->flags; }
 void md_proc_file_node(struct md_proc_file *f, struct md_proc_file_node node) { f->node=node; }
+void md_proc_file_pid_view(struct md_proc_file *f, struct md_pid_namespace *view) {
+    struct md_pid_namespace *old=f->pid_view;
+    f->pid_view=md_pid_namespace_retain(view); md_pid_namespace_release(old);
+}
+void md_proc_file_process_state(struct md_proc_file *f,const struct md_identity *identity,pid_t tracer) {
+    if (!md_proc_file_process(f->kind) || f->content) return;
+    if (f->process_state) md_identity_release(&f->process_identity);
+    f->process_identity=md_identity_copy(identity); f->process_state=1; f->tracer=tracer;
+}
 struct md_proc_file_node md_proc_file_get_node(const struct md_proc_file *f) { return f->node; }
 enum md_proc_file_kind md_proc_file_kind(const struct md_proc_file *f) { return f->kind; }
 struct md_proc_file *md_proc_file_reopen(const struct md_proc_file *f,
@@ -90,7 +108,7 @@ struct md_proc_file *md_proc_file_reopen(const struct md_proc_file *f,
     struct md_proc_file *next=md_proc_file_namespace(f->kind)
         ? md_proc_file_open_namespace(&f->namespace,opener,flags)
         : md_proc_file_open(f->target,f->kind,opener,flags);
-    if (next) next->node=f->node;
+    if (next) { next->node=f->node; md_proc_file_pid_view(next,f->pid_view); }
     return next;
 }
 int md_proc_file_descriptor(const struct md_proc_file *f) {
@@ -126,12 +144,137 @@ static size_t slice(void *out, size_t capacity, uint64_t offset, const void *dat
     if (size) memcpy(out,(const char *)data+offset,size);
     return size;
 }
-long md_proc_file_read_at(const struct md_proc_file *f, const struct md_uts_namespace *uts,
+static pid_t process_number(struct md_pid_namespace *view, long native) {
+    if (native<=0 || !view) return (pid_t)native;
+    struct md_pid_identity *id=md_pid_namespace_find(view,(pid_t)native);
+    pid_t number=md_pid_identity_number(id,view);
+    md_pid_identity_release(id); return number;
+}
+static void process_status_line(struct md_proc_file *f, FILE *out, const char *line) {
+    if (f->process_state) {
+        if (!strncmp(line,"TracerPid:",10)) {
+            fprintf(out,"TracerPid:\t%d\n",process_number(f->pid_view,f->tracer)); return;
+        }
+        int group=!strncmp(line,"Gid:",4);
+        if (group || !strncmp(line,"Uid:",4)) {
+            const struct md_identity_ids *ids=group ? &f->process_identity.gid : &f->process_identity.uid;
+            fprintf(out,"%s\t%u\t%u\t%u\t%u\n",group ? "Gid:" : "Uid:",
+                md_identity_visible_id(&f->opener,group,ids->real),
+                md_identity_visible_id(&f->opener,group,ids->effective),
+                md_identity_visible_id(&f->opener,group,ids->saved),
+                md_identity_visible_id(&f->opener,group,ids->fs)); return;
+        }
+        if (!strncmp(line,"Groups:",7)) {
+            fputs("Groups:\t",out);
+            const uint32_t *groups=md_identity_group_data(&f->process_identity);
+            for (unsigned i=0;i<md_identity_group_count(&f->process_identity);++i)
+                fprintf(out,"%u ",md_identity_visible_id(&f->opener,1,groups[i]));
+            fputc('\n',out); return;
+        }
+        static const char *const names[]={"CapInh:","CapPrm:","CapEff:","CapBnd:","CapAmb:"};
+        const struct md_capabilities *caps=&f->process_identity.caps;
+        const uint64_t values[]={caps->inheritable,caps->permitted,caps->effective,caps->bounding,caps->ambient};
+        for (unsigned i=0;i<5;++i) if (!strncmp(line,names[i],7)) {
+            fprintf(out,"%s\t%016llx\n",names[i],(unsigned long long)values[i]); return;
+        }
+    }
+    static const char *const ids[]={"Tgid:","Pid:","PPid:","TracerPid:"};
+    static const char *const lists[]={"NStgid:","NSpid:","NSpgid:","NSsid:"};
+    for (unsigned i=0;i<sizeof(ids)/sizeof(*ids);++i) {
+        size_t n=strlen(ids[i]);
+        if (!strncmp(line,ids[i],n)) {
+            fprintf(out,"%s\t%d\n",ids[i],process_number(f->pid_view,strtol(line+n,NULL,10))); return;
+        }
+    }
+    for (unsigned i=0;i<sizeof(lists)/sizeof(*lists);++i) {
+        size_t n=strlen(lists[i]);
+        if (strncmp(line,lists[i],n)) continue;
+        pid_t native=(pid_t)strtol(line+n,NULL,10);
+        struct md_pid_identity *id=md_pid_namespace_find(f->pid_view,native);
+        struct md_pid_namespace *views[33], *view=md_pid_identity_namespace(id);
+        unsigned count=0;
+        while (view && view!=f->pid_view && count<32) {
+            views[count++]=view; view=md_pid_namespace_parent(view);
+        }
+        fprintf(out,"%s\t%d",lists[i],process_number(f->pid_view,native));
+        while (count) fprintf(out,"\t%d",md_pid_identity_number(id,views[--count]));
+        fputc('\n',out); md_pid_identity_release(id); return;
+    }
+    fputs(line,out);
+}
+static int process_content(struct md_proc_file *f) {
+    char path[64];
+    snprintf(path,sizeof(path),"/proc/%d/%s",f->node.process,f->kind==MD_PROC_FILE_STAT ? "stat" : "status");
+    int fd=open(path,O_RDONLY|O_CLOEXEC);
+    if (fd<0) return -errno;
+    struct stat st;
+    int error=fstat(fd,&st) ? -errno : st.st_dev!=f->node.device || st.st_ino!=f->node.inode ? -ESRCH : 0;
+    char source[16384]; size_t size=0;
+    while (!error) {
+        ssize_t n=read(fd,source+size,sizeof(source)-1-size);
+        if (n<0) { if (errno==EINTR) continue; error=-errno; break; }
+        if (!n) break;
+        size+=(size_t)n;
+        if (size==sizeof(source)-1) error=-EOVERFLOW;
+    }
+    close(fd);
+    if (error) return error;
+    source[size]=0;
+    char *data=NULL; size_t length=0;
+    FILE *out=open_memstream(&data,&length);
+    if (!out) return -errno;
+    if (f->kind==MD_PROC_FILE_STATUS) {
+        int have_namespace_fields=strstr(source,"\nNSpid:")!=NULL;
+        char *tgid_line=strstr(source,"\nTgid:");
+        pid_t tgid=tgid_line ? (pid_t)strtol(tgid_line+6,NULL,10) : f->node.process;
+        char *line=source;
+        while (*line) {
+            char *end=strchr(line,'\n');
+            if (!end) { error=-EIO; break; }
+            char saved=end[1]; end[1]=0; process_status_line(f,out,line); end[1]=saved; line=end+1;
+        }
+        /* CONFIG_PID_NS is optional on the host. The mounted guest proc view
+         * still publishes its own namespace identity fields. */
+        if (!have_namespace_fields) {
+            static const char *const names[]={"NStgid:","NSpid:","NSpgid:","NSsid:"};
+            pid_t ids[]={tgid,f->node.process,getpgid(tgid),getsid(tgid)};
+            for (unsigned i=0;i<4;++i) {
+                char value[64]; snprintf(value,sizeof(value),"%s\t%d\n",names[i],ids[i]<0 ? 0 : ids[i]);
+                process_status_line(f,out,value);
+            }
+        }
+    } else {
+        /* comm may contain spaces and parentheses. Only the final ')' bounds
+         * it; the remaining fields have the kernel's stable numeric grammar. */
+        char *start=strchr(source,'('), *end=strrchr(source,')');
+        if (!start || !end || end<start || end[1]!=' ') error=-EIO;
+        else {
+            fprintf(out,"%d %.*s",process_number(f->pid_view,f->node.process),(int)(end-start+1),start);
+            char *save=NULL; unsigned field=3;
+            for (char *value=strtok_r(end+2," \n",&save);value;value=strtok_r(NULL," \n",&save),++field) {
+                if (field==4 || field==5 || field==6 || field==8)
+                    fprintf(out," %d",process_number(f->pid_view,strtol(value,NULL,10)));
+                else fprintf(out," %s",value);
+            }
+            fputc('\n',out);
+        }
+    }
+    if (ferror(out)) error=-EIO;
+    if (fclose(out) && !error) error=-errno;
+    if (error) free(data); else { f->content=data; f->content_size=length; }
+    return error;
+}
+long md_proc_file_read_at(struct md_proc_file *f, const struct md_uts_namespace *uts,
         void *out, size_t capacity, int64_t offset) {
     if (!f || (f->flags&O_PATH) || (f->flags&O_ACCMODE)==O_WRONLY) return -EBADF;
     if (offset<0) return -EINVAL;
     if (md_proc_file_directory(f->kind)) return -EISDIR;
     if (md_proc_file_namespace(f->kind)) return -EINVAL;
+    if (md_proc_file_process(f->kind)) {
+        if (!capacity) return 0;
+        int error=f->content ? 0 : process_content(f);
+        return error ? error : (long)slice(out,capacity,(uint64_t)offset,f->content,f->content_size);
+    }
     if (md_proc_file_sysctl(f->kind)) return md_proc_sysctl_read(uts,f->kind,out,capacity,offset);
     if (f->kind==MD_PROC_FILE_SETGROUPS) {
         const char *s=md_user_namespace_groups_allowed(f->target) ? "allow\n" : "deny\n";
@@ -278,7 +421,7 @@ static int process_directory(struct md_proc_file *f,const char *path) {
     return r;
 }
 static long directory_entries(struct md_proc_file_io *io, void *bytes, size_t capacity) {
-    static const char *const names[]={".","..","user","mnt","uts","ipc"};
+    static const char *const names[]={".","..","user","mnt","uts","ipc","pid","pid_for_children"};
     struct md_proc_file *f=io->file;
     char path[64]; snprintf(path,sizeof(path),"/proc/%d%s",f->node.process,
         f->kind==MD_PROC_FILE_NS_DIRECTORY ? "/ns" : "");
@@ -334,6 +477,7 @@ long md_proc_file_io_execute(struct md_proc_file_io *io, const struct md_identit
         if ((io->whence!=SEEK_SET && io->whence!=SEEK_CUR)
                 || (io->whence==SEEK_CUR && __builtin_add_overflow(offset,f->position,&offset))
                 || offset<0) return io->result=-EINVAL;
+        if (!offset && md_proc_file_process(f->kind)) { free(f->content); f->content=NULL; f->content_size=0; }
         f->position=offset; return io->result=offset;
     }
     if (!io->positional) io->offset=f->position;

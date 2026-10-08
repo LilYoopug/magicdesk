@@ -63,7 +63,7 @@ long md_namespace_relative_mount(const struct md_fs *fs, int base, char *path) {
     /* A retained directory remains usable after chroot/pivot. In a scoped
      * root its absolute kernel name is not a guest pathname: keep the dirfd
      * operand so the namespace owner resolves its provenance instead. */
-    if (fs->scoped_root) return 0;
+    if (fs->managed_paths) return 0;
     struct stat info;
     n = base == AT_FDCWD ? RAW4(newfstatat, base, ".", &info, 0) : RAW2(fstat, base, &info);
     if (n < 0) return n;
@@ -165,14 +165,17 @@ static long native_call(const struct md_fs *fs, long nr, const unsigned long *a)
         : md_raw(nr,a[0],a[1],a[2],a[3],a[4],a[5]);
 }
 long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, const unsigned long *a,
-                            unsigned path_index, const char *path) {
+                            unsigned path_index, const char *path, uint64_t proc_namespace) {
     if (nr == SYS_renameat || nr == SYS_renameat2 || nr == SYS_linkat) return -ENOTSUP;
     struct md_proc_path ref = md_proc_path(path);
     enum md_proc_kind control=ref.kind==MD_PROC_FOREIGN ? ref.foreign_kind : ref.kind;
+    if (!proc_namespace && (control==MD_PROC_STATUS || control==MD_PROC_STAT)) {
+        ref.kind=control=MD_PROC_NONE;
+    }
     if (md_proc_control_kind(control)) {
         if (control==MD_PROC_NS_UNSUPPORTED) return -ENOENT;
         if (*ref.tail) return -ENOTDIR;
-        long result=nr==SYS_openat ? md_proc_control_open(ref.process,control,(int)a[2])
+        long result=nr==SYS_openat ? md_proc_control_open_view(ref.process,control,(int)a[2],proc_namespace)
             : md_proc_control_metadata(ref.process,control,-1,nr,a);
         if (result!=-EXDEV || control!=MD_PROC_PROCESS_DIRECTORY) return result;
         ref.kind=MD_PROC_NONE;

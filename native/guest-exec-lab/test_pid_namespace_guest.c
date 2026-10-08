@@ -1,0 +1,332 @@
+#define _GNU_SOURCE
+#include <assert.h>
+#include <errno.h>
+#include <dirent.h>
+#include <fcntl.h>
+#include <sched.h>
+#include <pthread.h>
+#include <poll.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mount.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sys/prctl.h>
+#include <sys/ptrace.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+static void reap(pid_t child) {
+    int status=0;
+    pid_t result=waitpid(child,&status,0);
+    if (result!=child || status) fprintf(stderr,"pid wait expected=%d got=%d status=%x errno=%d\n",child,result,status,errno);
+    assert(result==child && status==0);
+}
+static void *worker(void *unused) {
+    (void)unused;
+    assert(getpid()==1 && syscall(SYS_gettid)>1 && getppid()==0);
+    return (void *)42;
+}
+static void link_is(const char *path,const char *expected) {
+    char value[128]={0};
+    ssize_t n=readlink(path,value,sizeof(value)-1);
+    if (n<0 || strcmp(value,expected)) fprintf(stderr,"proc link %s = %s (n=%zd errno=%d), expected %s\n",path,value,n,errno,expected);
+    assert(n>0 && !strcmp(value,expected));
+}
+static void proc_cases(void) {
+    assert(!unshare(CLONE_NEWNS));
+    assert(!mkdir("/tmp/pid-proc",0700));
+    assert(!mount("proc","/tmp/pid-proc","proc",MS_NOSUID|MS_NODEV|MS_NOEXEC,NULL));
+    assert(!syscall(SYS_faccessat2,AT_FDCWD,"/tmp/pid-proc/1/status",R_OK,0x200));
+    errno=0;
+    assert(syscall(SYS_faccessat2,AT_FDCWD,"/tmp/pid-proc/1/status",W_OK,0x200)==-1 && errno==EACCES);
+    link_is("/tmp/pid-proc/self","1");
+    link_is("/tmp/pid-proc/thread-self","1/task/1");
+    DIR *dir=opendir("/tmp/pid-proc"); assert(dir);
+    struct dirent *entry; unsigned processes=0;
+    while ((entry=readdir(dir))) if (entry->d_name[0]>='0' && entry->d_name[0]<='9') {
+        assert(!strcmp(entry->d_name,"1")); ++processes;
+    }
+    assert(processes==1);
+    int fd=openat(dirfd(dir),"1/ns/pid",O_RDONLY|O_CLOEXEC); assert(fd>=0); close(fd);
+    fd=openat(dirfd(dir),"self/status",O_RDONLY|O_CLOEXEC); assert(fd>=0);
+    struct stat st; assert(!fstat(fd,&st) && (st.st_mode&0777)==0444);
+    char text[8192]={0}; ssize_t n=read(fd,text,sizeof(text)-1); assert(n>0);
+    assert(strstr(text,"\nPid:\t1\n") && strstr(text,"\nPPid:\t0\n"));
+    assert(strstr(text,"\nNSpid:\t1\n"));
+    assert(strstr(text,"\nUid:\t0\t0\t0\t0\n") && strstr(text,"\nTracerPid:\t0\n"));
+    assert(lseek(fd,0,SEEK_SET)==0); assert(read(fd,text,1)==1); close(fd);
+    fd=openat(dirfd(dir),"1/task/1/stat",O_RDONLY|O_CLOEXEC); assert(fd>=0);
+    n=read(fd,text,sizeof(text)-1); assert(n>0); text[n]=0;
+    assert(text[0]=='1' && text[1]==' '); close(fd);
+    closedir(dir);
+    puts("PASS mounted proc namespace: self, thread-self, enumeration and relative namespace handles");
+}
+static void wait_cases(void) {
+    pid_t child=fork(); assert(child>0 || !child);
+    if (!child) _exit(17);
+    siginfo_t info={0};
+    assert(!waitid(P_PID,child,&info,WEXITED|WNOWAIT));
+    assert(info.si_pid==child && info.si_uid==getuid() && info.si_code==CLD_EXITED && info.si_status==17);
+    char path[128],text[8192],expected[64];
+    snprintf(path,sizeof(path),"/tmp/pid-proc/%d/status",child);
+    int zombie=open(path,O_RDONLY|O_CLOEXEC); assert(zombie>=0);
+    ssize_t n=read(zombie,text,sizeof(text)-1); assert(n>0); text[n]=0;
+    snprintf(expected,sizeof(expected),"\nPid:\t%d\n",child);
+    assert(strstr(text,expected) && strstr(text,"State:\tZ"));
+    assert(strstr(text,"\nUid:\t0\t0\t0\t0\n")); close(zombie);
+    info=(siginfo_t){0};
+    assert(!waitid(P_PID,child,&info,WEXITED));
+    assert(info.si_pid==child && info.si_status==17);
+    errno=0; assert(waitpid(child,NULL,WNOHANG)==-1 && errno==ECHILD);
+    errno=0; assert(open(path,O_RDONLY)==-1 && errno==ENOENT);
+    int barrier[2]; assert(!pipe(barrier));
+    child=fork(); assert(child>=0);
+    if (!child) { close(barrier[1]); char byte; assert(read(barrier[0],&byte,1)==0); _exit(19); }
+    close(barrier[0]);
+    int fd=syscall(SYS_pidfd_open,child,0); assert(fd>=0);
+    assert(!syscall(SYS_pidfd_send_signal,fd,0,NULL,0));
+    close(barrier[1]);
+    assert(!prctl(PR_SET_DUMPABLE,0));
+    info=(siginfo_t){0};
+    assert(!syscall(SYS_waitid,3,fd,&info,WEXITED,NULL));
+    assert(info.si_pid==child && info.si_uid==getuid() && info.si_status==19);
+    assert(!prctl(PR_SET_DUMPABLE,1));
+    errno=0; assert(syscall(SYS_pidfd_send_signal,fd,0,NULL,0)==-1 && errno==ESRCH);
+    snprintf(path,sizeof(path),"/tmp/pid-proc/%d/status",child);
+    errno=0; assert(open(path,O_RDONLY)==-1 && errno==ENOENT);
+    close(fd);
+    pthread_t thread; void *value=NULL;
+    assert(!pthread_create(&thread,NULL,worker,NULL));
+    assert(!pthread_join(thread,&value) && value==(void *)42);
+    puts("PASS PID waitid WNOWAIT, pidfd wait, protected output and thread join");
+}
+static void orphan_cases(void) {
+    int value=-1;
+    assert(!prctl(PR_GET_CHILD_SUBREAPER,&value) && value==0);
+    assert(!prctl(PR_SET_CHILD_SUBREAPER,0));
+    errno=0; assert(prctl(PR_GET_CHILD_SUBREAPER,(void *)1)==-1 && errno==EFAULT);
+    int identity[2], gate[2]; assert(!pipe(identity) && !pipe(gate));
+    pid_t parent=fork(); assert(parent>=0);
+    if (!parent) {
+        close(identity[0]); close(gate[1]);
+        pid_t orphan=fork(); assert(orphan>=0);
+        if (!orphan) {
+            pid_t number=getpid(); assert(write(identity[1],&number,sizeof(number))==sizeof(number));
+            close(identity[1]); char byte;
+            assert(read(gate[0],&byte,1)==0);
+            assert(getppid()==1); _exit(23);
+        }
+        _exit(0);
+    }
+    close(identity[1]); close(gate[0]);
+    pid_t orphan=0; assert(read(identity[0],&orphan,sizeof(orphan))==sizeof(orphan)); close(identity[0]);
+    reap(parent); close(gate[1]);
+    int status=0; assert(waitpid(orphan,&status,0)==orphan && WIFEXITED(status) && WEXITSTATUS(status)==23);
+    puts("PASS PID init adopts and reaps orphan with native wait semantics");
+}
+static void autoreap_case(void) {
+    struct sigaction ignored={.sa_handler=SIG_IGN},saved;
+    sigemptyset(&ignored.sa_mask); assert(!sigaction(SIGCHLD,&ignored,&saved));
+    int gate[2]; assert(!pipe(gate));
+    pid_t child=fork(); assert(child>=0);
+    if (!child) { close(gate[1]); char byte; assert(read(gate[0],&byte,1)==0); _exit(0); }
+    close(gate[0]);
+    int fd=syscall(SYS_pidfd_open,child,0); assert(fd>=0);
+    close(gate[1]);
+    struct pollfd event={.fd=fd,.events=POLLIN};
+    /* EVENT_WAIT: pidfd terminal readiness; timeout fails the fixture. */
+    assert(poll(&event,1,5000)==1 && (event.revents&POLLIN));
+    errno=0; assert(waitpid(child,NULL,0)==-1 && errno==ECHILD);
+    errno=0; assert(syscall(SYS_pidfd_send_signal,fd,0,NULL,0)==-1 && errno==ESRCH);
+    close(fd);
+    assert(!sigaction(SIGCHLD,&saved,NULL));
+    puts("PASS ignored SIGCHLD retains native autoreaping and pidfd terminal state");
+}
+static volatile sig_atomic_t delivered_sender;
+static void signal_sender(int signal,siginfo_t *info,void *context) {
+    (void)signal; (void)context; delivered_sender=info->si_pid;
+}
+static void signal_cases(void) {
+    struct sigaction action={.sa_sigaction=signal_sender,.sa_flags=SA_SIGINFO};
+    sigemptyset(&action.sa_mask); assert(!sigaction(SIGUSR1,&action,NULL));
+    sigset_t blocked,saved; sigemptyset(&blocked); sigaddset(&blocked,SIGUSR2);
+    assert(!sigprocmask(SIG_BLOCK,&blocked,&saved));
+    int ready[2],gate[2]; assert(!pipe(ready) && !pipe(gate));
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        close(ready[0]); close(gate[1]);
+        assert(write(ready[1],"r",1)==1); close(ready[1]);
+        siginfo_t info={0}; struct timespec timeout={5,0};
+        assert(sigtimedwait(&blocked,&info,&timeout)==SIGUSR2);
+        assert(info.si_pid==1 && info.si_uid==getuid() && info.si_code==SI_USER);
+        char byte;
+        while (read(gate[0],&byte,1)<0) assert(errno==EINTR);
+        assert(delivered_sender==1); _exit(0);
+    }
+    close(ready[1]); close(gate[0]); char byte;
+    assert(read(ready[0],&byte,1)==1); close(ready[0]);
+    assert(!kill(child,SIGUSR2));
+    assert(!kill(0,SIGUSR1));
+    assert(delivered_sender==1); close(gate[1]); reap(child);
+    siginfo_t queued={.si_signo=SIGUSR2,.si_code=SI_QUEUE,.si_pid=64321,.si_uid=getuid()};
+    assert(!syscall(SYS_rt_sigqueueinfo,1,SIGUSR2,&queued));
+    struct timespec timeout={5,0};
+    assert(sigtimedwait(&blocked,&queued,&timeout)==SIGUSR2 && queued.si_pid==64321);
+    assert(!sigprocmask(SIG_SETMASK,&saved,NULL));
+    puts("PASS PID signals: group sender, blocked siginfo and queued payload");
+}
+static void pidfd_transfer(void) {
+    int channel[2]; assert(!socketpair(AF_UNIX,SOCK_SEQPACKET,0,channel));
+    int fd=syscall(SYS_pidfd_open,1,0); assert(fd>=0);
+    pid_t child=fork(); assert(child>=0);
+    char byte='p',control[CMSG_SPACE(sizeof(int))]={0};
+    struct iovec data={&byte,1};
+    struct msghdr message={.msg_iov=&data,.msg_iovlen=1,.msg_control=control,.msg_controllen=sizeof(control)};
+    if (!child) {
+        close(channel[0]); close(fd);
+        assert(recvmsg(channel[1],&message,MSG_CMSG_CLOEXEC)==1);
+        struct cmsghdr *cmsg=CMSG_FIRSTHDR(&message);
+        assert(cmsg && cmsg->cmsg_level==SOL_SOCKET && cmsg->cmsg_type==SCM_RIGHTS);
+        memcpy(&fd,CMSG_DATA(cmsg),sizeof(fd));
+        assert(fcntl(fd,F_GETFD)&FD_CLOEXEC);
+        assert(!prctl(PR_SET_DUMPABLE,0));
+        assert(!syscall(SYS_pidfd_send_signal,fd,SIGKILL,NULL,0));
+        assert(!syscall(SYS_pidfd_send_signal,fd,SIGSTOP,NULL,0));
+        close(fd); close(channel[1]); _exit(0);
+    }
+    close(channel[1]);
+    struct cmsghdr *cmsg=CMSG_FIRSTHDR(&message);
+    cmsg->cmsg_level=SOL_SOCKET; cmsg->cmsg_type=SCM_RIGHTS; cmsg->cmsg_len=CMSG_LEN(sizeof(fd));
+    memcpy(CMSG_DATA(cmsg),&fd,sizeof(fd));
+    assert(sendmsg(channel[0],&message,0)==1);
+    close(fd); close(channel[0]); reap(child);
+    puts("PASS transferred pidfd retains PID1 policy in protected receiver");
+}
+static void *debug_exec_worker(void *unused) {
+    (void)unused;
+    execl("/bin/test","/bin/test","pid-namespace","debug-exec",NULL);
+    _exit(91);
+}
+static void debugger_exec(void) {
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        assert(!ptrace(PTRACE_TRACEME,0,NULL,NULL));
+        raise(SIGSTOP);
+        pthread_t thread; assert(!pthread_create(&thread,NULL,debug_exec_worker,NULL));
+        pthread_exit(NULL);
+    }
+    int status; assert(waitpid(child,&status,0)==child && WIFSTOPPED(status));
+    assert(!ptrace(PTRACE_SETOPTIONS,child,NULL,(void *)(PTRACE_O_TRACECLONE|PTRACE_O_TRACEEXEC)));
+    assert(!ptrace(PTRACE_CONT,child,NULL,NULL));
+    pid_t former=0; int exec_seen=0;
+    for (;;) {
+        pid_t pid=waitpid(-1,&status,__WALL); assert(pid>0);
+        if (WIFEXITED(status)) {
+            assert(!WEXITSTATUS(status));
+            if (pid==child && exec_seen) break;
+            continue;
+        }
+        assert(WIFSTOPPED(status));
+        unsigned event=(unsigned)status>>16;
+        if (event==PTRACE_EVENT_CLONE || event==PTRACE_EVENT_EXEC) {
+            unsigned long message=0;
+            assert(!ptrace(PTRACE_GETEVENTMSG,pid,NULL,&message));
+            if (event==PTRACE_EVENT_CLONE) { former=(pid_t)message; assert(former>child); }
+            else { assert(pid==child && former && message==(unsigned long)former); exec_seen=1; }
+        }
+        assert(!ptrace(PTRACE_CONT,pid,NULL,NULL));
+    }
+    assert(exec_seen);
+    puts("PASS debugger nonleader exec reports namespace-visible former TID");
+}
+static int init(void *unused) {
+    (void)unused;
+    printf("pid init self=%d tid=%ld parent=%d\n",getpid(),syscall(SYS_gettid),getppid());
+    assert(getpid()==1 && syscall(SYS_gettid)==1 && getppid()==0);
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        assert(getpid()==2 && syscall(SYS_gettid)==2 && getppid()==1);
+        assert(!kill(1,0));
+        errno=0; assert(syscall(SYS_tgkill,2,1,SIGKILL)==-1 && errno==ESRCH);
+        assert(!kill(1,SIGKILL) && !kill(1,SIGSTOP) && !kill(1,SIGTERM));
+        int handle=syscall(SYS_pidfd_open,1,0); assert(handle>=0);
+        int copy=dup(handle); assert(copy>=0); close(handle);
+        assert(!prctl(PR_SET_DUMPABLE,0));
+        assert(!syscall(SYS_pidfd_send_signal,copy,SIGKILL,NULL,0));
+        assert(!syscall(SYS_pidfd_send_signal,copy,SIGSTOP,NULL,0));
+        assert(!prctl(PR_SET_DUMPABLE,1)); close(copy);
+        _exit(0);
+    }
+    assert(child==2); reap(child);
+    proc_cases();
+    wait_cases();
+    orphan_cases();
+    autoreap_case();
+    signal_cases();
+    pidfd_transfer();
+    debugger_exec();
+    assert(!unshare(CLONE_NEWPID));
+    assert(getpid()==1 && getppid()==0);
+    char path[64];
+    errno=0;
+    assert(readlink("/tmp/pid-proc/self/ns/pid_for_children",path,sizeof(path))==-1 && errno==ENOENT);
+    child=fork(); assert(child>=0);
+    if (!child) { assert(getpid()==1 && getppid()==0); _exit(0); }
+    assert(child>3); reap(child);
+    return 0;
+}
+static void *exec_worker(void *unused) {
+    (void)unused;
+    assert(getpid()==1 && syscall(SYS_gettid)>1);
+    /* Bounded state observation: leader termination precedes exec. The outer
+     * fixture alarm bounds a missing lifecycle event. */
+    char text[4096];
+    for (;;) {
+        int fd=open("/proc/self/status",O_RDONLY); assert(fd>=0);
+        ssize_t n=read(fd,text,sizeof(text)-1); close(fd); assert(n>0); text[n]=0;
+        if (strstr(text,"State:\tZ")) break;
+        sched_yield();
+    }
+    char *args[]={"/bin/test","pid-namespace","exec",NULL};
+    execv(args[0],args); perror("PID init nonleader exec"); _exit(90);
+}
+static int threaded_init(void *unused) {
+    (void)unused;
+    pthread_t thread; assert(!pthread_create(&thread,NULL,exec_worker,NULL));
+    pthread_exit(NULL);
+}
+int test_pid_namespace_guest(int argc,char **argv) {
+    setbuf(stdout,NULL); alarm(30);
+    if (argc==3 && !strcmp(argv[2],"debug-exec")) {
+        assert(getpid()>1 && syscall(SYS_gettid)==getpid());
+        return 0;
+    }
+    if (argc==3 && !strcmp(argv[2],"exec")) {
+        assert(getpid()==1 && syscall(SYS_gettid)==1);
+        pid_t child=fork(); assert(child>=0);
+        if (!child) _exit(0);
+        reap(child);
+        puts("PASS PID init nonleader exec preserves namespace admission");
+        return 0;
+    }
+    void *stack=malloc(1024*1024); assert(stack);
+    pid_t original=getpid();
+    pid_t child=clone(init,(char *)stack+1024*1024,CLONE_NEWPID|SIGCHLD,NULL);
+    if (child<0) perror("clone PID namespace");
+    assert(child>0); reap(child);
+    child=clone(threaded_init,(char *)stack+1024*1024,CLONE_NEWPID|SIGCHLD,NULL);
+    assert(child>0); reap(child);
+    assert(getpid()==original);
+    assert(!unshare(CLONE_NEWPID));
+    child=fork(); assert(child>=0);
+    if (!child) _exit(0);
+    reap(child);
+    errno=0; assert(fork()==-1 && errno==ENOMEM);
+    free(stack);
+    puts("PASS guest PID namespaces: init, parent, fork, wait and nested admission");
+    return 0;
+}

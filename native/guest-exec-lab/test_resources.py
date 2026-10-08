@@ -57,6 +57,8 @@ def main():
         return value
 
     def check_namespaces():
+        check("guest PID namespace lifecycle", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
+              + root + "/store --deadline-seconds 90 -- /bin/test pid-namespace", "PASS guest PID namespaces:")
         check("guest namespace entry", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
               + root + "/store --deadline-seconds 90 -- /bin/test setns", "PASS guest setns:")
         check("guest overlay filesystems", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "

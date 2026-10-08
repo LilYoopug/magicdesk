@@ -62,6 +62,7 @@ struct md_mount_namespace *md_mount_namespace_new(void) {
         if (!r) r=-pthread_mutex_init(&n->domains_lock,NULL);
         if (r) { free(n); errno=-r; return NULL; }
         atomic_init(&n->refs,1);
+        atomic_init(&n->managed_paths,0);
     }
     return n;
 }
@@ -103,6 +104,7 @@ void md_view_mount_forget(struct md_fs_mounts *tree, struct md_view_mount *mount
     }
     md_mount_policy_close(&mount->policy);
     md_inode_lifetime_release(mount->storage);
+    md_pid_namespace_release(mount->pid_namespace);
     if (mount->source>=0) close(mount->source);
     if (mount->target>=0) close(mount->target);
     *mount=(struct md_view_mount){.source=-1,.target=-1,.detached=1,.generation=mount->generation};
@@ -118,6 +120,7 @@ void md_mount_namespace_release(struct md_mount_namespace *n) {
         for (unsigned i=0;i<m->count;++i) {
             md_mount_policy_close(&m->mounts[i].policy);
             md_inode_lifetime_release(m->mounts[i].storage);
+            md_pid_namespace_release(m->mounts[i].pid_namespace);
             if (m->mounts[i].source>=0) close(m->mounts[i].source);
             if (m->mounts[i].target>=0) close(m->mounts[i].target);
         }
@@ -133,4 +136,7 @@ void md_mount_namespace_release(struct md_mount_namespace *n) {
 }
 int md_mount_namespace_attached(const struct md_mount_namespace *n) {
     return n && n->tree && n->tree->count;
+}
+int md_mount_namespace_managed_paths(const struct md_mount_namespace *n) {
+    return n && atomic_load_explicit(&n->managed_paths,memory_order_acquire);
 }

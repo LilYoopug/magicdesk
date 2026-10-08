@@ -8,13 +8,14 @@
 struct md_task_registry;
 struct md_task_resources;
 struct md_task_snapshot {
-    pid_t tgid;
+    pid_t tid, tgid;
     struct md_identity identity;
     struct md_guest_domain *fs;
     struct md_fs_location root;
     struct md_mount_namespace *mounts;
     struct md_fd_origins *files;
     struct md_fs_anchor *cwd;
+    struct md_pid_identity *pid;
 };
 struct md_task_registry *md_task_registry_create(void);
 void md_task_registry_destroy(struct md_task_registry *);

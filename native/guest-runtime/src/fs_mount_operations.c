@@ -3,6 +3,7 @@
 #include "inode_internal.h"
 #include "fs_storage.h"
 #include "linux_abi.h"
+#include "procfs_view.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/openat2.h>
@@ -102,8 +103,10 @@ static int descriptor(struct md_filesystem *fs, const struct md_fs_request *q,
     case MD_FS_STATFS: md_fs_statfs_result(q->directory[0],md_mount_policy_flags(&p->mount->policy),NULL,out,output); break;
     case MD_FS_READLINK: {
         if (!data || !capacity) { r=-EINVAL; break; }
-        ssize_t n=readlinkat(q->directory[0],"",data,capacity);
-        if (n<0) r=-errno; else out->size=(size_t)n;
+        ssize_t n=p->mount->backing==MD_MOUNT_PROC
+            ? md_procfs_readlink(fs,p->mount,q->directory[0],data,capacity)
+            : readlinkat(q->directory[0],"",data,capacity);
+        if (n<0) r=p->mount->backing==MD_MOUNT_PROC ? (int)n : -errno; else out->size=(size_t)n;
         break;
     }
     case MD_FS_REOPEN:
@@ -133,8 +136,9 @@ static int descriptor(struct md_filesystem *fs, const struct md_fs_request *q,
         off_t before = lseek(fd, 0, SEEK_CUR);
         if (before < 0) { r = -errno; break; }
         size_t count = q->capacity < capacity ? q->capacity : capacity;
-        ssize_t n = syscall(SYS_getdents64, fd, data, count);
-        if (n < 0) { r = -errno; break; }
+        ssize_t n = p->mount->backing==MD_MOUNT_PROC ? md_procfs_getdents(p->mount,fd,data,count)
+            : syscall(SYS_getdents64, fd, data, count);
+        if (n < 0) { r=p->mount->backing==MD_MOUNT_PROC ? (int)n : -errno; break; }
         /* Native and inode directories share the same publish-before-commit
          * contract. Restore on rejected output; never redispatch the read. */
         if (output->directory_position) {
@@ -356,8 +360,10 @@ static void native(struct md_filesystem *fs, const struct md_fs_request *q,
         else { r = md_view_path(fs, a->fd, a->mount, data, capacity); if (!r) out->size = strlen(data)+1; }
         break;
     case MD_FS_READLINK: {
-        ssize_t n = data && capacity ? readlinkat(a->fd, "", data, capacity) : -1;
-        if (n < 0) r = data && capacity ? -errno : -EINVAL; else out->size = (size_t)n;
+        if (!data || !capacity) { r=-EINVAL; break; }
+        ssize_t n = a->mount->backing==MD_MOUNT_PROC ? md_procfs_readlink(fs,a->mount,a->fd,data,capacity)
+            : readlinkat(a->fd, "", data, capacity);
+        if (n < 0) r=a->mount->backing==MD_MOUNT_PROC ? (int)n : -errno; else out->size = (size_t)n;
         break;
     }
     case MD_FS_MKDIR: if (mkdirat(a->parent, a->name, q->mode&~q->attributes.creation_mask)) r = -errno; break;
@@ -437,7 +443,14 @@ void md_fs_mounts_execute(struct md_filesystem *fs, const struct md_fs_request *
         case MD_FS_SEEKDIR: case MD_FS_OBJECT_ID:
             if (descriptor(fs, q, out, output)) return;
         }
-        if (q->operation==MD_FS_PATH && fs->native_root && !q->origin[0]) { out->error=-ENOENT; return; }
+        if (q->operation==MD_FS_PATH && fs->native_root && !q->origin[0]) {
+            char inode[33];
+            int known=md_inode_object_id(fs->store,q->directory[0],inode);
+            /* An unannotated inode cannot choose a bind alias. A native
+             * provider FD remains task-owned across pivot_root, however. */
+            out->error=known==-EXDEV ? -EXDEV : known ? known : -ENOENT;
+            return;
+        }
         const struct md_fs_anchor *origin=q->origin[0];
         if (origin && origin->mount && q->operation==MD_FS_PATH) {
             *out=(struct md_fs_result){.fd=-1};

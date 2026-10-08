@@ -12,6 +12,8 @@ Android Activities, named environments or launcher configuration.
 | Semaphore undo | `CLONE_SYSVSEM` | `CLONE_SYSVSEM` | Retained |
 | UTS names | Shared; `CLONE_NEWUTS` copies | `CLONE_NEWUTS` copies | Retained |
 | SysV IPC namespace | Shared; `CLONE_NEWIPC` creates an empty namespace | `CLONE_NEWIPC` creates an empty namespace and separates semaphore undo | Retained |
+| User namespace | `CLONE_NEWUSER` creates a nested owner | Nested owner with immutable ID maps | Retained |
+| PID identities and child namespace | New TID, shared TGID for threads; `CLONE_NEWPID` selects a new child namespace | Changes only future child admission | Retain TGID; retire former TID on nonleader exec |
 
 The kernel owns cwd, umask, descriptor tables and open-file descriptions.
 The filesystem context owns guest root selection, optional cwd provenance and the admitted proc-root
@@ -969,14 +971,14 @@ observation. Cross-supervisor control-file transfer returns EXDEV, and an
 unframed native peer is rejected before transfer. Ordinary filesystem origins
 continue to use portable capsules that survive their publishing supervisor.
 
-User, mount, UTS and IPC namespace descriptors retain typed resource ownership,
+User, mount, PID, UTS and IPC namespace descriptors retain typed resource ownership,
 not a process number or an Android proc-directory handle. Stat/statfs, readlink,
 dup/reopen, `NS_GET_NSTYPE`, `NS_GET_OWNER_UID`, `NS_GET_USERNS` and `NS_GET_PARENT`
 use that identity. Related user namespaces must lie within the caller's user
 namespace; the initial user namespace has no parent. Related-FD publication
 uses the same ordered descriptor installation as ordinary proc control files.
 Local SCM_RIGHTS keeps namespace owners alive after the creating task exits.
-The namespace directory enumerates the implemented user/mount/UTS/IPC entries,
+The namespace directory enumerates the implemented user/mount/UTS/IPC/pid/pid_for_children entries,
 independently of the host's CONFIG_USER_NS. Directory positions belong to a
 retained open description; dup/fork share it and rejected output copying does
 not advance it. A directory whose process has exited returns ENOENT, while
@@ -987,7 +989,7 @@ Enumeration builds a bounded lazy snapshot on that open description; ordinary
 file IO and directory opens that are never enumerated do not allocate it.
 Unmanaged host-process directories retain native handling.
 
-`setns` enters these four namespace kinds under the caller's file-table and FS
+`setns` selects these namespace kinds under the caller's file-table and FS
 turns. User entry requires a single-threaded process with an unshared FS context;
 reentry cannot replenish capabilities. Namespace-scoped authority is checked
 before preparing a candidate. Mount entry resolves the selected namespace's
@@ -995,6 +997,68 @@ effective root and cwd on the filesystem worker, then publishes both with the
 selected view. Failure discards the candidate. Old dirfds retain their original
 view. IPC entry separates SEM_UNDO and releases adjustments against the old
 authority. Pidfd-based multi-namespace entry is not implemented.
+
+## PID and Proc Views
+
+`pid_namespace` owns nested number spaces and process/thread identities.
+The executor's native view is represented by NULL: ordinary launches allocate
+no PID identity or PID-specific syscall filter. First namespace use installs a
+thread-group filter through the existing adapter; inherited filters do not
+change an ancestor's native PID view.
+
+Clone reserves numbers before the kernel transition and publishes them at the
+confirmed birth event without allocating. Failed clone retires its reservation.
+Each task retains its TID identity, its TGID identity and the namespace selected
+for future children. Unshare/setns only changes the last of these; the caller
+does not move into its children's namespace. Entry is limited to the current
+namespace and descendants, with user-namespace authority checks.
+
+The kernel still owns process lifetime, process groups, sessions, signal queues
+and child wait events. ABI translation covers PID/TID/PPID, parent-TID output,
+wait4/waitid, signals, process groups, sessions, affinity/scheduling and selected
+process-addressed operations. PID 1 uses an owned native child-subreaper to adopt
+orphans. The guest-visible subreaper setting is independent of that requirement.
+Admission fails explicitly if the required native operation is denied. The last
+live thread of PID 1 closes the namespace and terminates its descendants;
+another child cannot silently recreate PID 1 in that namespace.
+
+Init signal policy preserves caught and blocked signals while ignoring ordinary
+default-action signals. Same-namespace SIGKILL/SIGSTOP cannot terminate init;
+an ancestor can. Group delivery runs in the actual sender, preserving kernel
+credentials and pending-signal behavior. Wait/signal output maps sender numbers
+and known guest UIDs; arbitrary SI_QUEUE payloads are not reinterpreted as host
+identities. Protected output uses the existing task-affine memory access.
+
+Exited identities retain credentials until the guest consumes the terminal wait
+event. Reaping removes their lookup visibility independently of open pidfds.
+Automatically reaped children are collected only when no pending native wait
+result still needs translation. Collection is lifecycle-triggered, not polling.
+Debugger notifications retain their own visible number and do not reap a child's
+real-parent result.
+Typed pidfds retain the process object through dup, fork and local SCM_RIGHTS;
+they add no duplicate host descriptor. Signal checks and execution share the
+file-table turn, so close/reuse cannot replace the checked target. Kernel
+pidfd wait/poll semantics remain native. Nonleader exec retains the TGID and
+publishes the former visible TID to the guest debugger before retiring it.
+
+A logical `proc` mount retains its selected PID namespace alongside mount
+identity and policy. The filesystem walker resolves numeric process/thread
+components, self and thread-self in that view. Enumeration filters native
+entries and repacks names without assuming equal numeric widths. Native
+directory cookies and the shared OFD turn retain seek and rejected-copy behavior.
+Status/stat use typed per-open snapshots with guest IDs, credentials and debugger
+relationships; seeking to zero refreshes the snapshot. A zombie remains visible
+until wait consumes it. Namespace handles retain their owners after task exit;
+opening pid_for_children before its first child returns ENOENT.
+
+Explicit mounts override the initial root's implicit proc/dev providers. Bind
+source resolution can retain those providers through old-root descriptors after
+pivot_root; unrelated directory aliases remain ordinary guest dentries. Nested
+Bubblewrap can therefore construct a new root with `--proc /proc` and
+`--dev-bind /dev /dev`, without borrowing host mount authority. `/dev` uses the
+selected native devices and their real permissions, not a private device manager.
+
+## Logical Filesystems
 
 Logical tmpfs uses a private transient inode store, not Android's kernel tmpfs.
 It supports mode/uid/gid, ordinary file operations, shared native mappings,
@@ -1060,14 +1124,21 @@ based on an assumed rollback. A fresh exec owns a fresh address space.
 ## Boundaries
 
 Concurrent named environments and launch-local attachments are not kernel Linux
-namespaces. Guest `CLONE_NEWNS`, `CLONE_NEWUSER`, `CLONE_NEWIPC` and
-`CLONE_NEWUTS` have the contracts above. `CLONE_NEWPID`, `CLONE_NEWNET`,
+namespaces. Guest `CLONE_NEWNS`, `CLONE_NEWUSER`, `CLONE_NEWIPC`,
+`CLONE_NEWUTS` and `CLONE_NEWPID` have the contracts above. `CLONE_NEWNET`,
 cgroup/time namespaces are not implemented. Their creation is not reported as
 successful. POSIX message-queue namespaces and UTS sysctl priority-change
 notification are not implemented. They must not be inferred from SysV separation
 or live sysctl reads. Tmpfs quotas remain open; unsupported
 options fail explicitly. Saved overlay credentials do not establish
 kernel-equivalent confinement for unadapted native access.
+
+Proc mounts are selected process views, not a complete virtual kernel procfs.
+Foreign `/proc/PID/mem`, signalfd sender translation, namespace-local Unix peer
+PID translation and a private devpts instance remain outside this contract.
+Inherited native proc descriptors retain their original view. Internal helper
+threads are filtered in a logical PID proc mount, not in Android's native procfs.
+Guest ptrace limitations are recorded in [debugging](debugging.md).
 
 Guest filesystem calls use mapped requests, not private per-call RPC sockets.
 The admitted table-owned export/return endpoints have explicit table lifetime;
@@ -1099,11 +1170,15 @@ successful browser execution is not proof of complete sandbox equivalence.
 `test_namespace_apps.py BUILD STORE` runs stock Bubblewrap in a disposable
 Debian userspace under actual UID 2000. Cases cover a basic command, a read-only
 root with writable tmpfs, mapped UID/GID and hostname, and nested user/mount/UTS/
-IPC owners with independent temporary filesystems. `--trace` repeats these
+IPC owners with independent temporary filesystems, PID namespaces with proc/dev
+preparation, and GDB start/continue/exit inside a PID namespace. `--trace` repeats these
 production paths through stock strace. Both the command exit and explicit output
 are checked; this is compatibility coverage, not kernel-equivalent isolation.
-The browser namespace-selection limitation remains separate in
+Chromium automatic user/PID and explicit set-ID routes are checked separately in
 [Shroot](../../docs/guest-runtime.md#application-filters-and-browsers).
+`test_resources.py BUILD --case mount-namespace` also checks PID reservations,
+nested admission, signal/wait output, zombie proc lifetime, pidfd transfer to a
+protected receiver, orphan adoption, init thread exit and nonleader debugger exec.
 
 The mount-flags fixture also transfers a noexec origin over SCM_RIGHTS to a
 nondumpable receiver with an installed application filter and an independent

@@ -10,7 +10,7 @@
 #include "filesystem_kind.h"
 struct md_fs_result;
 struct md_fs_output;
-struct md_inode_boundary { char *path; size_t capacity; const char *suffix; unsigned operand; };
+struct md_inode_boundary { char *path; size_t capacity; const char *suffix; unsigned operand; int mount_root, native_directory; uint64_t proc_namespace; };
 
 #define MDI_ROOT "00000000000000000000000000000000"
 #define MDI_SOURCES 256

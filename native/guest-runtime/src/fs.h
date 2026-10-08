@@ -9,10 +9,10 @@ struct md_fs {
     char endpoint[108];
     const struct md_process_image *image;
     const struct md_socket_routes *connections;
-    int scoped_root;
+    int managed_paths;
 };
 static inline int md_fs_host_path(const struct md_fs *fs, const char *path) {
-    return !fs->scoped_root && md_host_path(path);
+    return !fs->managed_paths && md_host_path(path);
 }
 enum md_path_follow { MD_PATH_NOFOLLOW, MD_PATH_FOLLOW, MD_PATH_ENTRY };
 int md_fs_guest(const struct md_fs *, const char *, char *);

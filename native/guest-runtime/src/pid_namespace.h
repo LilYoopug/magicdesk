@@ -1,0 +1,61 @@
+#ifndef MD_PID_NAMESPACE_H
+#define MD_PID_NAMESPACE_H
+#include "user_namespace.h"
+#include <sys/types.h>
+
+struct md_pid_namespace;
+struct md_pid_identity;
+struct md_identity;
+/* NULL is the executor's native PID namespace. Child namespaces and their
+ * identities are launch-owned; references never confer host signal authority. */
+struct md_pid_namespace *md_pid_namespace_new(struct md_pid_namespace *, struct md_user_namespace *);
+struct md_pid_namespace *md_pid_namespace_retain(struct md_pid_namespace *);
+void md_pid_namespace_release(struct md_pid_namespace *);
+struct md_pid_namespace *md_pid_namespace_parent(const struct md_pid_namespace *);
+const struct md_user_namespace *md_pid_namespace_owner(const struct md_pid_namespace *);
+uint64_t md_pid_namespace_inode(const struct md_pid_namespace *);
+unsigned md_pid_namespace_depth(const struct md_pid_namespace *);
+int md_pid_namespace_contains(const struct md_pid_namespace *, const struct md_pid_namespace *);
+int md_pid_namespace_dead(const struct md_pid_namespace *);
+int md_pid_namespace_initialized(struct md_pid_namespace *);
+/* Local owner lookup for a serialized mount reference. A foreign/dead owner
+ * is not replaced by the executor's namespace. */
+struct md_pid_namespace *md_pid_namespace_by_inode(uint64_t);
+
+/* Reserve before clone. Publication at the kernel birth event allocates
+ * nothing. Failed clones release the unpublished reservation. */
+int md_pid_identity_prepare(struct md_pid_namespace *, struct md_pid_identity **);
+int md_pid_identity_publish(struct md_pid_identity *, pid_t native, pid_t group);
+struct md_pid_identity *md_pid_identity_retain(struct md_pid_identity *);
+void md_pid_identity_release(struct md_pid_identity *);
+struct md_pid_namespace *md_pid_identity_namespace(const struct md_pid_identity *);
+pid_t md_pid_identity_native(const struct md_pid_identity *);
+pid_t md_pid_identity_group(const struct md_pid_identity *);
+pid_t md_pid_identity_number(const struct md_pid_identity *, const struct md_pid_namespace *);
+int md_pid_identity_live(const struct md_pid_identity *);
+int md_pid_identity_subreaper(const struct md_pid_identity *);
+void md_pid_identity_set_subreaper(struct md_pid_identity *, int);
+/* Supervisor-owned exit snapshot, retained without allocating at exit. */
+void md_pid_identity_exit_credentials(struct md_pid_identity *,const struct md_identity *);
+const struct md_identity *md_pid_identity_credentials(const struct md_pid_identity *);
+/* Retires the task. The last live thread in PID 1 closes namespace admission;
+ * the process owner then terminates descendants. */
+int md_pid_identity_exit(struct md_pid_identity *);
+/* Reaping removes lookup visibility, independently of retained pidfds. */
+void md_pid_identity_reap(struct md_pid_identity *);
+/* Nonleader exec retains the process number while retiring its former TID. */
+void md_pid_identity_exec(struct md_pid_identity *thread, struct md_pid_identity *group);
+/* A retained result remains valid through exit/reaping; callers separately
+ * check liveness before issuing a host operation against the native number. */
+struct md_pid_identity *md_pid_namespace_lookup(struct md_pid_namespace *, pid_t visible);
+struct md_pid_identity *md_pid_namespace_find(struct md_pid_namespace *, pid_t native);
+/* The supervisor owns exited identities until guest wait consumes them. This
+ * list uses storage reserved with the identity, not an allocation at exit. */
+struct md_pid_retired { struct md_pid_identity *head; };
+void md_pid_retired_take(struct md_pid_retired *, struct md_pid_identity *);
+struct md_pid_identity *md_pid_retired_find(const struct md_pid_retired *,pid_t);
+void md_pid_retired_reap(struct md_pid_retired *, pid_t native);
+/* Called only after all pending guest wait-result translations are complete. */
+void md_pid_retired_collect(struct md_pid_retired *, int (*gone)(pid_t));
+void md_pid_retired_release(struct md_pid_retired *);
+#endif

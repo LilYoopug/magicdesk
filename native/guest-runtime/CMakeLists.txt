@@ -14,7 +14,7 @@ target_compile_definitions(guest-sqlite PRIVATE SQLITE_THREADSAFE=0 SQLITE_OMIT_
 target_compile_options(guest-sqlite PRIVATE -O2 -fno-pie)
 
 set(src ${CMAKE_CURRENT_SOURCE_DIR}/src)
-set(identity ${src}/guest_identity.c ${src}/user_namespace.c ${src}/namespace_identity.c)
+set(identity ${src}/guest_identity.c ${src}/user_namespace.c ${src}/namespace_identity.c ${src}/pid_namespace.c)
 set(raw ${src}/raw.c ${src}/memory.c ${src}/raw.S)
 set(wire ${src}/fs_wire.c ${src}/event_wait.c)
 add_library(guest-parcels STATIC ${src}/fd_bundle.c ${src}/fs_wire.c ${src}/raw.S)
@@ -22,6 +22,7 @@ target_compile_definitions(guest-parcels PRIVATE MD_NO_START MD_USE_LIBC)
 target_compile_options(guest-parcels PRIVATE -O2 -Wall -Wextra -Werror -fno-pie)
 set(origins ${src}/fs_anchor.c ${src}/fs_origin_transfer.c ${src}/inode_lifetime.c ${src}/inode_custody.c ${src}/sealed_manifest.c ${src}/ipc_scope.c ${src}/mount_policy.c ${src}/mount_graph.c ${src}/resource_order.c ${src}/ofd_order.c ${src}/fd_origins.c ${src}/fd_channel.c ${src}/fd_mutation.c ${src}/fd_delivery.c ${src}/fd_table_observation.c ${src}/fd_return.c ${src}/fd_exchange.c ${src}/received_fds.c ${src}/fd_messages.c ${src}/task_descriptor.c ${src}/task_lifetime.c)
 set(mounts ${src}/fs_mounts.c ${src}/fs_mount_path.c ${src}/fs_mount_operations.c ${src}/fs_mount_table.c ${src}/fs_mount_change.c ${src}/fs_temporary.c ${src}/fs_overlay.c ${src}/fs_storage.c)
+list(APPEND mounts ${src}/procfs_view.c)
 set(inodes ${src}/inode_store.c ${src}/inode_db.c ${src}/inode_sqlite.c ${src}/inode_events.c ${src}/inode_watch.c ${src}/watch_queue.c ${src}/inode_path.c
     ${src}/inode_directory.c ${src}/inode_import.c ${src}/inode_socket.c ${src}/inode_backing.c ${src}/inode_snapshot.c ${src}/inode_view.c ${src}/inode_maintenance.c ${src}/inode_fifo.c ${src}/inode_channel.c ${src}/file_open.c
     ${identity} ${src}/task_registry.c ${src}/guest_domain.c ${src}/mount_namespace.c ${origins} ${src}/inode_metadata.c ${src}/inode_xattr.c ${src}/inode_capability.c ${src}/inode_acl.c ${src}/posix_acl.c)
@@ -50,7 +51,7 @@ function(guest_freestanding name)
 endfunction()
 
 guest_executable(bootstrap ${src}/bootstrap.c ${src}/elf.c ${src}/exec.c ${src}/command.c ${src}/command_image.c
-    ${src}/interception.c ${src}/interception_entry.S ${src}/fd_client.c ${src}/watch_calls.c ${src}/fd_filter.c ${src}/shm_calls.c ${src}/ipc_calls.c
+    ${src}/interception.c ${src}/interception_entry.S ${src}/fd_client.c ${src}/watch_calls.c ${src}/fd_filter.c ${src}/shm_calls.c ${src}/ipc_calls.c ${src}/pid_filter.c ${src}/pid_calls.c
     ${src}/file_calls.c ${src}/fs.c ${src}/proc_paths.c ${src}/proc_image.c ${src}/proc_control.c ${src}/program_files.c ${src}/task_status.c
     ${src}/namespace.c ${src}/namespace_proc.c ${src}/namespace_mount.c ${src}/socket_calls.c ${src}/socket_namespace.c ${src}/socket_identity.c ${src}/socket_ancillary.c ${src}/socket_routes.c ${src}/fd_metadata.c
     ${src}/task_receive.c ${src}/fs_client.c ${src}/fs_buffer_client.c ${src}/adapter_buffer.c ${src}/file_open.c ${wire} ${src}/raw.c ${src}/raw.S)
@@ -60,7 +61,7 @@ target_link_options(bootstrap PRIVATE -Wl,--image-base=0x2000000000)
 
 guest_executable(supervisor ${src}/supervisor.c ${src}/task_resources.c ${src}/command_access.c ../command-client/wire.c ${src}/launch_registry.c ${src}/launch_peer.c ${src}/process_owner.c ${src}/interception_memory.c ${src}/interception_buffers.c ${src}/guest_domain.c
     ${src}/mount_copy_service.c ${src}/uts_namespace.c ${src}/ipc_namespace.c ${src}/proc_file.c ${src}/proc_sysctl.c ${src}/proc_namespace.c
-    ${src}/fd_selector.c ${src}/sysv_shm.c ${src}/guest_debugger.c ${src}/process_image_view.c ${src}/fd_install.c
+    ${src}/fd_selector.c ${src}/sysv_shm.c ${src}/guest_debugger.c ${src}/process_image_view.c ${src}/fd_install.c ${src}/pid_descriptor.c
     ${src}/task_helper.c ${src}/mapping_observation.c ${src}/fd_capture.c ${src}/ipc_io_host.c ${src}/ipc_io_job.c ${src}/ipc_io_entry.S
     ${ipc}
     ${identity} ${src}/guest_accounts.c ${src}/elf_admission.c ${src}/elf.c ${src}/fs_client.c ${wire} ${raw}
@@ -94,6 +95,8 @@ install(TARGETS bootstrap supervisor run service image RUNTIME DESTINATION lib)
 
 option(MAGICDESK_GUEST_FIXTURES "Build standalone native fixtures" OFF)
 if(MAGICDESK_GUEST_FIXTURES)
+    guest_executable(test_pid_namespace ../guest-exec-lab/test_pid_namespace.c ${identity})
+    target_compile_options(test_pid_namespace PRIVATE -iquote ${src} -UNDEBUG)
     guest_executable(capabilities ../guest-exec-lab/test_capabilities.c)
     target_compile_options(capabilities PRIVATE -iquote ${src} -UNDEBUG)
     guest_executable(kernel_baseline ../guest-exec-lab/test_kernel_baseline.c ${src}/task_descriptor.c ${src}/task_lifetime.c)
@@ -110,6 +113,7 @@ if(MAGICDESK_GUEST_FIXTURES)
     target_compile_options(resource_guest PRIVATE -iquote ${src} -UNDEBUG)
     target_sources(resource_guest PRIVATE ../guest-exec-lab/test_tmpfs_guest.c ../guest-exec-lab/test_namespace_handles_guest.c ../guest-exec-lab/test_overlay_guest.c)
     target_sources(resource_guest PRIVATE ../guest-exec-lab/test_setns_guest.c)
+    target_sources(resource_guest PRIVATE ../guest-exec-lab/test_pid_namespace_guest.c)
     guest_executable(test_open_job ../guest-exec-lab/test_open_job.c ${src}/file_open_job.c ${src}/file_open.c ${wire} ${raw})
     target_compile_definitions(test_open_job PRIVATE MD_NO_START MD_USE_LIBC)
     target_compile_options(test_open_job PRIVATE -iquote ${src} -UNDEBUG)

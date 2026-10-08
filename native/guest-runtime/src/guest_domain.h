@@ -65,6 +65,7 @@ void md_domain_relocate_root(struct md_guest_domain *, const struct md_fs_locati
         const struct md_fs_location *next, const struct md_fs_anchor *old_cwd,
         struct md_fs_anchor *next_cwd);
 int md_domain_restricted(const struct md_guest_domain *);
+const char *md_domain_proc_root_name(const char *);
 int md_domain_restrict(struct md_guest_domain *, pid_t, const char *);
 int md_domain_chdir_root(struct md_guest_domain *);
 int md_domain_path_error(const struct md_guest_domain *);

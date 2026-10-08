@@ -217,14 +217,29 @@ int md_domain_mount_root_used(struct md_mount_namespace *view, unsigned mount) {
     pthread_mutex_unlock(&view->domains_lock);
     return used;
 }
+const char *md_domain_proc_root_name(const char *path) {
+    if (strncmp(path,"/proc/self/",11)) return NULL;
+    const char *name=path+11, *tail;
+    const char *result;
+    if (!strncmp(name,"fdinfo",6)) { tail=name+6; result="fdinfo"; }
+    else if (!strncmp(name,"fd",2)) { tail=name+2; result="fd"; }
+    else return NULL;
+    if (*tail && *tail!='/') return NULL;
+    for (;;) {
+        while (*tail=='/') ++tail;
+        if (*tail=='.' && (!tail[1] || tail[1]=='/')) ++tail;
+        else break;
+    }
+    return *tail ? NULL : result;
+}
 int md_domain_restrict(struct md_guest_domain *d, pid_t pid, const char *path) {
     if (!d || d->root >= 0 || md_domain_scoped(d)) return -EPERM;
     /* The root contract admits a process-owned proc directory.
      * Other roots fail; no fake success is used for unsupported guest chroot. */
-    if (strncmp(path, "/proc/self/", 11)) return -ENOTSUP;
-    if (strcmp(path + 11, "fdinfo") && strcmp(path + 11, "fd")) return -ENOTSUP;
+    const char *name=md_domain_proc_root_name(path);
+    if (!name) return -ENOTSUP;
     char native[96];
-    snprintf(native, sizeof(native), "/proc/%d/%s", pid, path + 11);
+    snprintf(native, sizeof(native), "/proc/%d/%s", pid, name);
     int fd = open(native, O_PATH | O_DIRECTORY | O_CLOEXEC);
     if (fd < 0) return -errno;
     struct statfs fs;

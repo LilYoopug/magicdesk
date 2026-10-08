@@ -101,7 +101,7 @@ static long open_operand(const struct md_fs *fs, struct md_namespace_operand ope
     long r = md_namespace_request(fs, &q, &out);
     if (r==-EREMOTE) {
         unsigned long args[6]={(unsigned long)AT_FDCWD,(unsigned long)out.data,(unsigned)flags,mode,0,0};
-        return md_namespace_host_call(fs,fs->image ? fs->image->executable_path : "",SYS_openat,args,1,out.data);
+        return md_namespace_host_call(fs,fs->image ? fs->image->executable_path : "",SYS_openat,args,1,out.data,out.result.proc_namespace);
     }
     if (r < 0)
         return r;
@@ -166,7 +166,7 @@ static long descriptor_call(const struct md_fs *fs, long nr, const unsigned long
     }
     long native = md_namespace_native_descriptor((int)a[0]);
     if (native < 0) return native;
-    if (native) return md_raw(nr, a[0], a[1], a[2], a[3], a[4], a[5]);
+    if (native && !fs->managed_paths) return md_raw(nr, a[0], a[1], a[2], a[3], a[4], a[5]);
     struct md_fs_response out;
     struct stat st;
     if (nr==SYS_fstatfs) {
@@ -230,7 +230,7 @@ long md_namespace_xattr(const struct md_fs *fs, long nr, struct md_namespace_ope
     void *target=list ? (void *)a[1] : (void *)a[2];
     long result=namespace_request_deliver(fs,&q,&out,set || remove ? NULL : copy_directory,target);
     if (result==-EREMOTE)
-        return md_namespace_host_call(fs,fs->image ? fs->image->executable_path : "",nr,a,0,out.data);
+        return md_namespace_host_call(fs,fs->image ? fs->image->executable_path : "",nr,a,0,out.data,out.result.proc_namespace);
     return result<0 ? result : out.result.position;
 }
 static long metadata_request(const struct md_fs *fs, long nr, struct md_namespace_operand operand, const char *path,
@@ -331,12 +331,13 @@ long md_namespace_call(const struct md_fs *fs, const char *exe, long nr, const u
     long r = md_read_string(first, sizeof(first), (const char *)pointer);
     if (r < 0)
         return r;
+    if (!*first && (nr==SYS_chdir || nr==SYS_chroot || nr==SYS_truncate)) return -ENOENT;
     r = md_namespace_relative_mount(fs, base, first);
     if (r < 0)
         return r;
     /* Direct and symlink-resolved host boundaries use the same task adapter. */
     if (md_fs_host_path(fs, first) && nr != SYS_inotify_add_watch && nr != SYS_chroot)
-        return md_namespace_host_call(fs, exe, nr, a, path_index, first);
+        return md_namespace_host_call(fs, exe, nr, a, path_index, first,0);
     return md_namespace_path_call(fs, nr, a, md_namespace_descriptor(base), first);
 }
 static long path_metadata(const struct md_fs *, long, const unsigned long *, struct md_namespace_operand, const char *);
@@ -366,7 +367,7 @@ long md_namespace_path_call(const struct md_fs *fs, long nr, const unsigned long
         struct md_fs_response out;
         long r=md_namespace_request(fs,&q,&out);
         if (r==-EREMOTE)
-            return md_namespace_host_call(fs,fs->image ? fs->image->executable_path : "",nr,a,1,out.data);
+            return md_namespace_host_call(fs,fs->image ? fs->image->executable_path : "",nr,a,1,out.data,out.result.proc_namespace);
         return r;
     }
     case SYS_chdir: case SYS_truncate: {
@@ -376,7 +377,7 @@ long md_namespace_path_call(const struct md_fs *fs, long nr, const unsigned long
         struct md_fs_response out;
         long r=md_namespace_request(fs,&q,&out);
         if (r==-EREMOTE)
-            return md_namespace_host_call(fs,fs->image ? fs->image->executable_path : "",nr,a,0,out.data);
+            return md_namespace_host_call(fs,fs->image ? fs->image->executable_path : "",nr,a,0,out.data,out.result.proc_namespace);
         return r;
     }
     default: return path_metadata(fs, nr, a, operand, first);
@@ -396,7 +397,7 @@ __attribute__((noinline)) static long path_metadata(const struct md_fs *fs, long
         r=md_namespace_request(fs,&q,&out);
         if (r!=-EREMOTE) return r<0 ? r : out.result.position;
         return md_namespace_host_call(fs,fs->image ? fs->image->executable_path : "",
-            nr,a,1,out.data);
+            nr,a,1,out.data,out.result.proc_namespace);
     }
     case SYS_newfstatat:
     case SYS_statx: {
@@ -415,7 +416,7 @@ __attribute__((noinline)) static long path_metadata(const struct md_fs *fs, long
                 : md_raw(nr,a[0],a[1],a[2],a[3],a[4],a[5]);
         }
         r = md_namespace_inspect(fs, operand, first, flags, nr==SYS_statx ? MD_FS_STAT_MOUNT : 0, &out);
-        if (r==-EREMOTE) return md_namespace_host_call(fs,fs->image ? fs->image->executable_path : "",nr,a,1,out.data);
+        if (r==-EREMOTE) return md_namespace_host_call(fs,fs->image ? fs->image->executable_path : "",nr,a,1,out.data,out.result.proc_namespace);
         if (r == -EXDEV && !operand.capture.path && !*first && (flags & AT_EMPTY_PATH))
             return nr==SYS_statx ? md_namespace_native_statx(fs,a)
                 : md_raw(nr, a[0], a[1], a[2], a[3], a[4], a[5]);
@@ -469,7 +470,7 @@ __attribute__((noinline)) static long path_metadata(const struct md_fs *fs, long
             return -EINVAL;
         q.operation = MD_FS_READLINK;
         r = md_namespace_request(fs, &q, &out);
-        if (r==-EREMOTE) return md_namespace_host_call(fs,fs->image ? fs->image->executable_path : "",nr,a,1,out.data);
+        if (r==-EREMOTE) return md_namespace_host_call(fs,fs->image ? fs->image->executable_path : "",nr,a,1,out.data,out.result.proc_namespace);
         if (r==-EXDEV && !operand.capture.path && !*first) return RAW4(readlinkat,base,first,a[2],a[3]);
         if (r < 0)
             return r;
@@ -532,7 +533,7 @@ __attribute__((noinline)) static long path_metadata(const struct md_fs *fs, long
         if (!*first && !(flags&AT_EMPTY_PATH)) return -ENOENT;
         r=metadata_request(fs,nr,operand,first,a[2],a[3],flags&~AT_EMPTY_PATH,&out);
         if (r==-EREMOTE) return md_namespace_host_call(fs,fs->image ? fs->image->executable_path : "",
-            nr,a,1,out.data);
+            nr,a,1,out.data,out.result.proc_namespace);
         if (r==-EXDEV && !operand.capture.path && !*first) return md_raw(nr,a[0],a[1],a[2],a[3],a[4],a[5]);
         return r;
     }
@@ -540,7 +541,7 @@ __attribute__((noinline)) static long path_metadata(const struct md_fs *fs, long
         q.operation=MD_FS_STATFS;
         r=md_namespace_request(fs,&q,&out);
         if (r==-EREMOTE) return md_namespace_host_call(fs,fs->image ? fs->image->executable_path : "",
-            nr,a,0,out.data);
+            nr,a,0,out.data,out.result.proc_namespace);
         return r<0 ? r : md_write_memory((void *)a[1],out.data,out.result.size);
     }
     default:
@@ -548,6 +549,6 @@ __attribute__((noinline)) static long path_metadata(const struct md_fs *fs, long
     }
     r=md_namespace_request(fs, &q, &out);
     if (r==-EREMOTE) return md_namespace_host_call(fs,fs->image ? fs->image->executable_path : "",
-        nr,a,nr==SYS_symlinkat ? 2 : 1,out.data);
+        nr,a,nr==SYS_symlinkat ? 2 : 1,out.data,out.result.proc_namespace);
     return r;
 }

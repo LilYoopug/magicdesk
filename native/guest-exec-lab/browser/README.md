@@ -31,16 +31,18 @@ user-managed builds, not an override of that sibling. See Chromium's
 The test explicitly admits that ELF with `--admit-elf`. Guest set-ID metadata
 does not turn its backing into a host set-ID executable or grant Android root.
 All four runs explicitly select the same guest user, `2000:2000`: three admit
-the helper and the negative control does not. The latter must fail before
-rendering or installing application filters, with the helper's proc-root change
-denied. Omitting both `--user` and `--admit-elf` would also omit the explicit
-guest-credential check and is not an equivalent admission control.
+the helper and the fourth does not. With the automatic user/PID route, all four
+must render; no helper is executed or elevated. With the explicit set-ID route,
+the fourth must reject the unadmitted helper before rendering, installing
+application filters or changing its proc root. Omitting both `--user` and
+`--admit-elf` would omit the explicit guest-credential check and is not an
+equivalent admission control.
 
 `--setuid-route` explicitly selects Chromium's set-ID sandbox using
 `--disable-namespace-sandbox`, while retaining its seccomp filters and helper
-admission checks. It does not use `--no-sandbox`. Automatic selection detects
-the guest user namespace and currently fails because its zygote requires a PID
-namespace. Report the selected route; an explicit set-ID pass is not an automatic
+admission checks. It does not use `--no-sandbox`. Automatic selection uses guest
+user/PID namespaces, including the zygote's PID 1 and nested child namespaces.
+Report the selected route; an explicit set-ID pass is not an automatic
 namespace-sandbox pass.
 
 The separate credential and retained-resource fixtures use an ordinary mode-0755
@@ -64,8 +66,9 @@ requires a successful exit and expectations. `sandboxSupportEstablished` and
 
 - `test_browser.py`: three stock Chromium launches with fresh profiles, computed
   JavaScript/DOM values, real installed filters, PNG output and zero exit. The
-  selected route is recorded independently of sandbox admission. A fourth run verifies rejection of the unadmitted
-  helper under the same guest identity. Child signal exits and diagnostics remain
+  selected route is recorded independently of sandbox admission. A fourth run
+  verifies helper-independent automatic startup or rejection of the unadmitted
+  set-ID helper under the same guest identity. Child signal exits and diagnostics remain
   in reports.
 - `test_credentials.py`: explicit sealed-image catalogue, first-entry and exec
   logical credentials, secure auxv/loader, irreversible drops, no_new_privs,

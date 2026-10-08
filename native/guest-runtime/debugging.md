@@ -52,6 +52,19 @@ Invalid wait flags are rejected before consuming an event. waitid siginfo includ
 the inferior's logical UID and distinguishes normal, killed and core-dumped exits.
 PTRACE_GET_SYSCALL_INFO exposes entry/exit records only with TRACESYSGOOD; short
 buffers retain the kernel's full-size return convention.
+NONE records still contain architecture, instruction and stack pointers.
+Newborn inferiors begin with their own first syscall entry, not a synthetic
+exit of the parent's clone. ARM64 regsets retain the kernel entry/exit marker
+in x7 while presenting the guest's registers.
+
+Debugger targets, wait results and fork/clone/exec event messages use the
+observer's PID namespace. Nonleader exec captures its former visible TID before
+retiring that identity. Native parent observation accounts for orphan adoption;
+it is not fixed at clone time. Terminal wait consumption releases retired PID
+lookup state without revoking an application's retained pidfd.
+Debugger exit notifications and real-parent reaping have separate ownership.
+The debugger retains its visible number until its own notification is consumed;
+consuming that notification does not remove the real parent's pending result.
 
 The kernel TRACEEXIT option serves two independent owners: requested inferior
 events and runtime terminal descriptor publication. A task's first internal
@@ -106,6 +119,10 @@ Unavailable native hardlink creation is reported separately; the guest must
 execute that subcheck, not silently omit it. ELF fixtures independently check
 malformed layouts, 4/16 KiB preflight and mapped BSS zeroing. Synthetic 16 KiB
 preflight is not device coverage.
+The PID resource fixture also checks nonleader exec event identity inside a
+child namespace. Stock Debian GDB 16.3 runs starti/continue/exit in Bubblewrap
+with a mounted logical proc view; a missing foreign proc mem path uses GDB's
+ptrace fallback, not a fabricated readable file.
 
 The resource suite also races exit_group against buffered O_PATH/getcwd in
 24 groups of eight peers, including nondumpable callers. Pipe acknowledgements

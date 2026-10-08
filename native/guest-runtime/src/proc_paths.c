@@ -93,6 +93,8 @@ struct md_proc_path md_proc_path(const char *path) {
         else if (word(&p, "exe")) out.kind = MD_PROC_EXE;
         else if (word(&p, "cmdline")) out.kind = MD_PROC_CMDLINE;
         else if (word(&p, "auxv")) out.kind = MD_PROC_AUXV;
+        else if (word(&p,"status")) out.kind=MD_PROC_STATUS;
+        else if (word(&p,"stat")) out.kind=MD_PROC_STAT;
         else if (word(&p, "mounts")) out.kind = MD_PROC_MOUNTS;
         else if (word(&p, "mountinfo")) out.kind = MD_PROC_MOUNTINFO;
         else if (word(&p, "uid_map")) out.kind = MD_PROC_UID_MAP;
@@ -103,6 +105,8 @@ struct md_proc_path md_proc_path(const char *path) {
             else if (word(&p,"mnt")) out.kind=MD_PROC_NS_MOUNT;
             else if (word(&p,"uts")) out.kind=MD_PROC_NS_UTS;
             else if (word(&p,"ipc")) out.kind=MD_PROC_NS_IPC;
+            else if (word(&p,"pid")) out.kind=MD_PROC_NS_PID;
+            else if (word(&p,"pid_for_children")) out.kind=MD_PROC_NS_PID_CHILDREN;
             else if (*component(p)) { out.kind=MD_PROC_NS_UNSUPPORTED; p+=md_length(p); }
             else { out.kind=MD_PROC_NS_DIRECTORY; p=component(p); }
         }

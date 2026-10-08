@@ -24,5 +24,5 @@ long md_namespace_xattr(const struct md_fs *, long, struct md_namespace_operand,
 long md_namespace_proc_reopen(const struct md_fs *, int, int flags);
 long md_namespace_path_call(const struct md_fs *, long, const unsigned long *, struct md_namespace_operand, const char *);
 long md_namespace_host_call(const struct md_fs *, const char *, long, const unsigned long *,
-                            unsigned, const char *);
+                            unsigned, const char *, uint64_t proc_namespace);
 #endif

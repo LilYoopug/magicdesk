@@ -78,7 +78,7 @@ void md_view_capture(struct md_filesystem *fs, struct md_mount_namespace *view,
         struct md_view_mount *mount, struct md_fs_result *out, const struct md_fs_output *output) {
     if (out->error || out->fd<0 || !output || !output->origin) return;
     int r=0;
-    if (!view) r=-ENOTSUP;
+    if (!view && mount) r=-EINVAL;
     struct stat st;
     if (!r && fstat(out->fd,&st)) r=-errno;
     int fd=-1;

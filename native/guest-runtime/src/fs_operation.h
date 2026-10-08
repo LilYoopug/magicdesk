@@ -24,7 +24,7 @@ enum md_fs_operation {
 };
 enum md_fs_mount_operation { MD_FS_MOUNT_BIND=1, MD_FS_MOUNT_REMOUNT,
     MD_FS_MOUNT_PROPAGATION, MD_FS_MOUNT_UMOUNT, MD_FS_MOUNT_TMPFS, MD_FS_MOUNT_OVERLAY, MD_FS_MOUNT_PIVOT,
-    MD_FS_MOUNT_MOVE };
+    MD_FS_MOUNT_MOVE, MD_FS_MOUNT_PROC };
 enum { MD_FS_VALUE_MAX=65536, MD_FS_OUTPUT_MAX=MD_IPC_IDENTITY_MAX };
 enum md_fs_xattr { MD_FS_XATTR_GET=1, MD_FS_XATTR_SET, MD_FS_XATTR_LIST, MD_FS_XATTR_REMOVE };
 static inline int md_fs_operation_value(unsigned operation) {
@@ -110,6 +110,7 @@ _Static_assert(sizeof(struct md_fs_statfs)==120,"ARM64 statfs layout");
 struct md_fs_result {
     int error, fd;
     unsigned host_path; /* Unexecuted native lookup: 1=first operand, 2=second. */
+    uint64_t proc_namespace; /* Mount-owned PID view, only with host_path. */
     struct md_open_completion open_completion;
     size_t size;
     int64_t position;

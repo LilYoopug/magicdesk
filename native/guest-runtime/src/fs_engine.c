@@ -12,6 +12,7 @@
 #include "task_status.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/openat2.h>
 #include <string.h>
 #include <sys/inotify.h>
 #include <sys/syscall.h>
@@ -20,15 +21,20 @@
 
 void md_fs_view_execute(struct md_filesystem *fs, const struct md_fs_request *q,
         struct md_fs_result *out, const struct md_fs_output *output) {
-    if (md_mount_namespace_attached(fs->mounts) || q->origin[0] || q->origin[1]
+    int native=q->origin[0] && !q->origin[0]->view
+        && (!q->path[0] || q->path[0][0]!='/' || (q->resolve&RESOLVE_IN_ROOT));
+    if (native) *out=(struct md_fs_result){.fd=-1,
+        .error=md_view_anchor_check(fs,q->directory[0],q->origin[0])};
+    if (native && !out->error) out->error=-EXDEV;
+    else if (!native && (md_mount_namespace_attached(fs->mounts) || q->origin[0] || q->origin[1]
             || (fs->mounts && q->operation==MD_FS_ACCESS && (q->mode&X_OK)
-                && (md_mount_policy_flags(&fs->mounts->base.policy)&MD_MOUNT_NOEXEC)))
+                && (md_mount_policy_flags(&fs->mounts->base.policy)&MD_MOUNT_NOEXEC))))
         md_fs_mounts_execute(fs,q,out,output);
-    else md_fs_inode_execute(fs,q,out,output);
+    else if (!native) md_fs_inode_execute(fs,q,out,output);
     /* An unannotated proc/dev dirfd can predate a root change. A rejected inode
      * lookup has performed no operation on that native object; hand its path
      * to the caller's proc provider, never resolve self on this worker. */
-    if (out->error==-EXDEV && !q->origin[0] && q->directory[0]>=0
+    if (out->error==-EXDEV && (!q->origin[0] || native) && q->directory[0]>=0
             && q->path[0] && *q->path[0] && q->path[0][0]!='/') {
         int error=md_view_task_path(fs,q->directory[0],q->path[0],"",q->resolve,1);
         if (error) out->error=error;
@@ -243,6 +249,8 @@ static void context_execute(struct md_fs_context *context,
     const char *previous_root=fs->store->root_id;
     struct md_view_object *previous_native_root=fs->native_root;
     struct md_mount_namespace *previous_mounts=fs->mounts;
+    const struct md_task_snapshot *previous_actor=fs->actor;
+    fs->actor=context->authenticated ? task : NULL;
     if (context->authenticated) fs->mounts=task->mounts;
     int root_error=md_mount_graph_sync(fs->mounts);
     for (unsigned i=0;!root_error && i<2;++i)
@@ -266,11 +274,31 @@ static void context_execute(struct md_fs_context *context,
     else if (q->operation==MD_FS_XATTR || q->operation==MD_FS_FXATTR) md_fs_xattr(fs,q,out,output);
     else md_fs_view_execute(fs,q,out,output);
     fs->store->boundary=previous_boundary;
+    if (out->error==-EREMOTE && boundary.native_directory && q->resolve) {
+        /* The logical walker admitted this native root. Resolve the remaining
+         * suffix under that root in one kernel operation, never discard the
+         * application's openat2 constraints in a plain-open fallback. Crossing
+         * back out of the native provider requires a logical walk, so fails. */
+        int root=open("/dev",O_PATH|O_DIRECTORY|O_CLOEXEC);
+        if (root<0) out->error=-errno;
+        else {
+            const char *relative=boundary.path+4;
+            while (*relative=='/') ++relative;
+            struct open_how how={.flags=q->flags|O_CLOEXEC,.mode=q->mode,
+                .resolve=(q->resolve&~RESOLVE_IN_ROOT)|RESOLVE_BENEATH};
+            int fd=q->operation!=MD_FS_OPEN ? -1
+                : (int)syscall(SYS_openat2,root,*relative ? relative : ".",&how,sizeof(how));
+            out->error=q->operation!=MD_FS_OPEN ? -ENOTSUP : fd<0 ? -errno : 0;
+            out->fd=fd; close(root);
+            if (!out->error) md_view_capture(fs,NULL,NULL,out,output);
+        }
+    }
     if (out->error==-EREMOTE) {
         if (q->operation==MD_FS_CHROOT) out->error=-ENOTSUP;
         else if (q->operation==MD_FS_LINK || q->operation==MD_FS_RENAME) out->error=-EXDEV;
         else if (boundary.path && boundary.capacity) {
             out->error=0; out->host_path=boundary.operand+1; out->size=strlen(boundary.path)+1;
+            out->proc_namespace=boundary.proc_namespace;
         }
     }
     fs->store->creation_mask=previous_mask;
@@ -278,6 +306,7 @@ static void context_execute(struct md_fs_context *context,
     fs->native_root=previous_native_root;
     if (context->authenticated) fs->mounts=previous_mounts;
     fs->store->identity = previous;
+    fs->actor=previous_actor;
 }
 static void object_execute(struct md_fs_context *context, const struct md_fs_request *q,
         struct md_fs_result *out, const struct md_fs_output *output) {

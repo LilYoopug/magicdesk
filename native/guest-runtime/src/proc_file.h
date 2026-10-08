@@ -11,7 +11,15 @@ enum md_proc_file_kind { MD_PROC_FILE_UID_MAP, MD_PROC_FILE_GID_MAP, MD_PROC_FIL
     MD_PROC_FILE_OSRELEASE, MD_PROC_FILE_VERSION,
     MD_PROC_FILE_OVERFLOWUID, MD_PROC_FILE_OVERFLOWGID,
     MD_PROC_FILE_NS_USER, MD_PROC_FILE_NS_MOUNT, MD_PROC_FILE_NS_UTS, MD_PROC_FILE_NS_IPC,
-    MD_PROC_FILE_NS_DIRECTORY, MD_PROC_FILE_PROCESS_DIRECTORY };
+    MD_PROC_FILE_NS_PID, MD_PROC_FILE_NS_PID_CHILDREN,
+    MD_PROC_FILE_NS_DIRECTORY, MD_PROC_FILE_PROCESS_DIRECTORY, MD_PROC_FILE_STATUS, MD_PROC_FILE_STAT };
+static inline int md_proc_file_process(enum md_proc_file_kind kind) {
+    return kind==MD_PROC_FILE_STATUS || kind==MD_PROC_FILE_STAT;
+}
+struct md_pid_namespace;
+struct md_proc_file;
+void md_proc_file_pid_view(struct md_proc_file *,struct md_pid_namespace *);
+void md_proc_file_process_state(struct md_proc_file *,const struct md_identity *,pid_t tracer);
 static inline int md_proc_file_directory(enum md_proc_file_kind kind) {
     return kind==MD_PROC_FILE_NS_DIRECTORY || kind==MD_PROC_FILE_PROCESS_DIRECTORY;
 }
@@ -22,7 +30,7 @@ static inline int md_proc_file_sysctl(enum md_proc_file_kind kind) {
 struct md_proc_file;
 struct md_namespace_reference;
 static inline int md_proc_file_namespace(enum md_proc_file_kind kind) {
-    return kind>=MD_PROC_FILE_NS_USER && kind<=MD_PROC_FILE_NS_IPC;
+    return kind>=MD_PROC_FILE_NS_USER && kind<=MD_PROC_FILE_NS_PID_CHILDREN;
 }
 static inline const char *md_proc_file_namespace_name(enum md_proc_file_kind kind) {
     switch (kind) {
@@ -30,6 +38,7 @@ static inline const char *md_proc_file_namespace_name(enum md_proc_file_kind kin
     case MD_PROC_FILE_NS_MOUNT: return "mnt";
     case MD_PROC_FILE_NS_UTS: return "uts";
     case MD_PROC_FILE_NS_IPC: return "ipc";
+    case MD_PROC_FILE_NS_PID: case MD_PROC_FILE_NS_PID_CHILDREN: return "pid";
     default: return NULL;
     }
 }
@@ -48,7 +57,7 @@ struct md_proc_file *md_proc_file_from_object(struct md_fd_object *);
 /* Map opens retain the target user namespace and opener credentials. Sysctl
  * operations select the caller's current namespace, including after unshare.
  * Path admission/DAC belong to the descriptor host.
- * The supervisor serializes writes; read_at has no side effects. */
+ * The supervisor serializes IO; process text retains a per-open read snapshot. */
 struct md_proc_file *md_proc_file_open(struct md_user_namespace *,
     enum md_proc_file_kind, const struct md_identity *opener, int flags);
 struct md_proc_file *md_proc_file_retain(struct md_proc_file *);
@@ -56,7 +65,7 @@ void md_proc_file_release(struct md_proc_file *);
 /* Inert kernel carrier; proc contents and operations are served by the owner. */
 int md_proc_file_descriptor(const struct md_proc_file *);
 int md_proc_file_flags(const struct md_proc_file *);
-long md_proc_file_read_at(const struct md_proc_file *, const struct md_uts_namespace *,
+long md_proc_file_read_at(struct md_proc_file *, const struct md_uts_namespace *,
     void *, size_t capacity, int64_t offset);
 long md_proc_file_write_at(struct md_proc_file *, const struct md_identity *writer,
     struct md_uts_namespace *,

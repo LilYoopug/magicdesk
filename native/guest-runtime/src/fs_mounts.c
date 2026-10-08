@@ -358,6 +358,7 @@ int md_fs_mounts_copy(struct md_filesystem *fs, const struct md_fs_location *roo
     struct md_mount_namespace *copy=md_mount_namespace_new();
     if (!copy) return -errno;
     md_mount_namespace_set_owner(copy,md_mount_namespace_owner(fs->mounts));
+    atomic_store_explicit(&copy->managed_paths,md_mount_namespace_managed_paths(fs->mounts),memory_order_relaxed);
     copy->base.policy.local=md_mount_policy_flags(&fs->mounts->base.policy);
     copy->base.locked=fs->mounts->base.locked;
     struct md_fs_mounts *source=fs->mounts->tree;
@@ -378,6 +379,7 @@ int md_fs_mounts_copy(struct md_filesystem *fs, const struct md_fs_location *roo
         *b=(struct md_view_mount){.source=-1,.target=-1,
             .backing=a->backing,.detached=a->detached,.locked=a->locked,.generation=a->generation,
             .storage=md_inode_lifetime_retain(a->storage),
+            .pid_namespace=md_pid_namespace_retain(a->pid_namespace),
             .policy={.local=md_mount_policy_flags(&a->policy)},.native=a->native,.guest=a->guest,
             .parent=!a->parent ? NULL : !md_view_base(fs->mounts,a->parent)
                 ? &copy->tree->mounts[a->parent-source->mounts] : &copy->base};

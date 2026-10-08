@@ -39,6 +39,7 @@ long md_namespace_mount(const struct md_fs *fs, long nr, const unsigned long *a)
             if (r<0) return r;
             if (md_equal(type,"tmpfs")) q.mode=MD_FS_MOUNT_TMPFS;
             else if (md_equal(type,"overlay")) q.mode=MD_FS_MOUNT_OVERLAY;
+            else if (md_equal(type,"proc")) q.mode=MD_FS_MOUNT_PROC;
             else return -ENODEV;
             if (a[4]) r=md_read_string(data,sizeof(data),(const char *)a[4]);
             if (r>=0 && a[4]) { q.value=data; q.value_size=(uint32_t)md_length(data)+1; }

@@ -38,6 +38,7 @@ int md_fs_result_valid(const struct md_fs_request *request, const struct md_fs_r
         || operation == MD_FS_TASK_PATH || (operation == MD_FS_IPC
             && (request->flags == MD_IPC_MESSAGE_CREATE || request->flags == MD_IPC_MESSAGE_SENDER));
     if (reply->error > 0 || reply->error < -4095 || reply->host_path>2
+            || (reply->proc_namespace && !reply->host_path)
             || (reply->host_path==2 && (operation!=MD_FS_MOUNT || (request->mode!=MD_FS_MOUNT_BIND
                 && request->mode!=MD_FS_MOUNT_PIVOT && request->mode!=MD_FS_MOUNT_MOVE)))
             || reply->open_completion.kind > MD_OPEN_PIPE || reply->open_completion.kind < MD_OPEN_READY
@@ -164,6 +165,7 @@ static long receive_reply(int socket, int64_t deadline, const struct md_fs_reque
     }
     struct md_fs_result result={.error=reply->error,.fd=rights.count ? rights.fd[0] : -1,
         .info=reply->info,.size=reply->size,.position=reply->position,.host_path=reply->host_path,
+        .proc_namespace=reply->proc_namespace,
         .open_completion={.kind=(enum md_open_kind)reply->open_completion,.control=rights.count>1 ? rights.fd[1] : -1}};
     if (!md_fs_result_valid(request,&result,reply->data,sizeof(reply->data),rights.count)) {
         md_fs_close_rights(&rights); return -EPROTO;

@@ -19,12 +19,14 @@
 
 struct inferior {
     struct inferior *next;
-    pid_t pid, owner, group;
+    /* The debugger and real parent consume separate exit events. Its admitted
+     * visible number remains valid after the parent has reaped native state. */
+    pid_t pid, owner, group, number, exec_former;
     uid_t uid;
     unsigned long options, message;
     uint64_t sequence;
     int stopped, status, step, terminal, real_child;
-    int seized, pending, syscall_mode;
+    int seized, pending, syscall_mode, syscall_stop;
     struct ptrace_syscall_info syscall;
     struct rusage usage;
     siginfo_t info;
@@ -73,21 +75,33 @@ static int add(struct md_debugger *d, pid_t pid, pid_t owner, unsigned long opti
     struct inferior *p=calloc(1,sizeof(*p));
     if (!p) return -ENOMEM;
     *p=(struct inferior){.next=d->inferiors,.pid=pid,.owner=owner,.options=options,
+        .number=d->host.visible_pid ? d->host.visible_pid(owner,pid) : pid,
         .real_child=d->host.group(d->host.parent(pid))==d->host.group(owner),.group=getpgid(pid)};
     d->inferiors=p;
     int error=d->host.observe(owner);
     if (error) { d->inferiors=p->next; free(p); }
     return error;
 }
-static int selected(pid_t owner, const struct user_pt_regs *r, const struct inferior *p) {
+static pid_t visible(struct md_debugger *d,pid_t observer,pid_t native) {
+    return d->host.visible_pid ? d->host.visible_pid(observer,native) : native;
+}
+static pid_t native(struct md_debugger *d,pid_t observer,pid_t number) {
+    return d->host.native_pid ? d->host.native_pid(observer,number) : number;
+}
+static uid_t visible_uid(struct md_debugger *d,pid_t observer,pid_t sender,uid_t fallback) {
+    return d->host.visible_uid ? d->host.visible_uid(observer,sender,fallback) : fallback;
+}
+static int selected(struct md_debugger *d,pid_t owner, const struct user_pt_regs *r, const struct inferior *p) {
+    pid_t pid=p->number, group=visible(d,owner,p->group);
+    if (!pid) return 0;
     if (r->regs[8]==SYS_waitid) {
         if (r->regs[0]==P_ALL) return 1;
-        if (r->regs[0]==P_PID) return r->regs[1]==(unsigned)p->pid;
-        return r->regs[0]==P_PGID && p->group==(r->regs[1] ? (pid_t)r->regs[1] : getpgid(owner));
+        if (r->regs[0]==P_PID) return r->regs[1]==(unsigned)pid;
+        return r->regs[0]==P_PGID && (r->regs[1] ? group==(pid_t)r->regs[1] : p->group==getpgid(owner));
     }
     pid_t wanted=(pid_t)r->regs[0];
-    return wanted==-1 || wanted==p->pid || (!wanted && p->group==getpgid(owner))
-        || (wanted < -1 && (int64_t)p->group==-(int64_t)wanted);
+    return wanted==-1 || wanted==pid || (!wanted && p->group==getpgid(owner))
+        || (wanted < -1 && (int64_t)group==-(int64_t)wanted);
 }
 static unsigned wait_options(const struct user_pt_regs *r) {
     return (unsigned)r->regs[r->regs[8]==SYS_waitid ? 3 : 2];
@@ -96,17 +110,18 @@ static int wait_result(struct md_debugger *d, pid_t owner, struct user_pt_regs *
     struct inferior *chosen=NULL;
     *children=0;
     for (struct inferior *p=d->inferiors; p; p=p->next) {
-        if (d->host.group(p->owner)!=d->host.group(owner) || !selected(owner,r,p)) continue;
+        if (d->host.group(p->owner)!=d->host.group(owner) || !selected(d,owner,r,p)) continue;
         *children=1;
         if (r->regs[8]==SYS_waitid && !(wait_options(r)&(p->terminal ? WEXITED : WSTOPPED))) continue;
         if (p->sequence && (!chosen || p->sequence<chosen->sequence)) chosen=p;
     }
     if (!chosen) return 0;
-    long value=chosen->pid;
+    long value=chosen->number;
     int error;
     uintptr_t usage;
     if (r->regs[8]==SYS_waitid) {
-        siginfo_t info={.si_signo=SIGCHLD,.si_pid=chosen->pid,.si_uid=chosen->uid};
+        siginfo_t info={.si_signo=SIGCHLD,.si_pid=(pid_t)value,
+            .si_uid=visible_uid(d,owner,chosen->pid,chosen->uid)};
         info.si_code=chosen->terminal ? (WIFEXITED(chosen->status) ? CLD_EXITED
             : WCOREDUMP(chosen->status) ? CLD_DUMPED : CLD_KILLED) : CLD_TRAPPED;
         info.si_status=chosen->terminal ? (WIFEXITED(chosen->status) ? WEXITSTATUS(chosen->status)
@@ -123,7 +138,9 @@ static int wait_result(struct md_debugger *d, pid_t owner, struct user_pt_regs *
         if (chosen->terminal) {
             struct inferior **at=&d->inferiors;
             while (*at!=chosen) at=&(*at)->next;
-            *at=chosen->next; free(chosen);
+            *at=chosen->next;
+            if (d->host.reaped) d->host.reaped(chosen->pid,0);
+            free(chosen);
         }
     }
     d->host.complete(owner,r,error ? error : value);
@@ -154,6 +171,7 @@ int md_debugger_stop(struct md_debugger *d, pid_t pid, int status, const siginfo
     p->uid=d->host.uid(pid);
     d->host.usage(pid,&p->usage);
     p->syscall.op=PTRACE_SYSCALL_INFO_NONE;
+    p->syscall_stop=0;
     p->info=info ? *info : (siginfo_t){.si_signo=WSTOPSIG(status),
         .si_code=(unsigned)status>>16 ? status>>8 : SI_KERNEL,.si_pid=pid};
     p->sequence=++d->sequence;
@@ -165,7 +183,9 @@ int md_debugger_exec(struct md_debugger *d, pid_t pid, pid_t former) {
     if (!p) return 0;
     unsigned event=p->options & PTRACE_O_TRACEEXEC ? PTRACE_EVENT_EXEC : 0;
     if (!event && p->seized) return 0;
-    return md_debugger_stop(d,pid,(SIGTRAP<<8)|0x7f|(event<<16),NULL,(unsigned long)former);
+    pid_t message=p->exec_former ? p->exec_former : visible(d,p->owner,former);
+    p->exec_former=0;
+    return md_debugger_stop(d,pid,(SIGTRAP<<8)|0x7f|(event<<16),NULL,(unsigned long)message);
 }
 int md_debugger_event(struct md_debugger *d, pid_t pid, unsigned event, unsigned long message) {
     struct inferior *p=find(d,pid);
@@ -187,6 +207,10 @@ int md_debugger_step(struct md_debugger *d, pid_t pid) {
 int md_debugger_traced(struct md_debugger *d, pid_t pid) {
     struct inferior *p=d ? find(d,pid) : NULL;
     return p && !p->terminal;
+}
+pid_t md_debugger_owner(struct md_debugger *d,pid_t pid) {
+    struct inferior *p=find(d,pid);
+    return p && !p->terminal ? p->owner : 0;
 }
 int md_debugger_owns(struct md_debugger *d, pid_t owner, pid_t pid) {
     struct inferior *p=find(d,pid);
@@ -217,6 +241,7 @@ int md_debugger_syscall(struct md_debugger *d, pid_t pid, const struct user_pt_r
     struct inferior *p=find(d,pid);
     if (!p || !p->syscall_mode) return 0;
     int stopped=md_debugger_stop(d,pid,((SIGTRAP|(p->options&PTRACE_O_TRACESYSGOOD ? 0x80 : 0))<<8)|0x7f,NULL,0);
+    p->syscall_stop=entry ? 1 : 2;
     p->syscall=(struct ptrace_syscall_info){.op=!(p->options&PTRACE_O_TRACESYSGOOD) ? PTRACE_SYSCALL_INFO_NONE
         : entry ? PTRACE_SYSCALL_INFO_ENTRY : PTRACE_SYSCALL_INFO_EXIT,
         .arch=AUDIT_ARCH_AARCH64,.instruction_pointer=r->pc,.stack_pointer=r->sp};
@@ -252,6 +277,7 @@ void md_debugger_exit(struct md_debugger *d, pid_t pid, int status) {
                 d->host.options(p->pid,0);
                 if (p->stopped) d->host.resume(p->pid,0);
             }
+            if (p->terminal && d->host.reaped) d->host.reaped(p->pid,0);
             free(p);
         } else at=&p->next;
     }
@@ -274,6 +300,8 @@ void md_debugger_rekey(struct md_debugger *d, pid_t old, pid_t pid) {
         struct inferior *p=*at;
         if (p->pid==pid && source && p!=source) { *at=p->next; free(p); continue; }
         if (p->pid==old) {
+            p->exec_former=visible(d,p->owner,old);
+            p->number=visible(d,p->owner,pid);
             p->pid=pid; p->real_child=d->host.group(d->host.parent(pid))==d->host.group(p->owner);
         }
         if (p->owner==old) p->owner=pid;
@@ -289,7 +317,7 @@ static unsigned long supported_options(void) {
     return PTRACE_O_TRACESYSGOOD|PTRACE_O_TRACEFORK|PTRACE_O_TRACEVFORK|PTRACE_O_TRACECLONE
         |PTRACE_O_TRACEEXEC|PTRACE_O_TRACEVFORKDONE|PTRACE_O_TRACEEXIT|PTRACE_O_EXITKILL;
 }
-static long regset(pid_t caller, pid_t pid, int op, uintptr_t note, uintptr_t address) {
+static long regset(pid_t caller, struct inferior *p, int op, uintptr_t note, uintptr_t address) {
     struct iovec guest;
     int r=transfer(caller,address,&guest,sizeof(guest),0);
     if (r) return r;
@@ -298,14 +326,28 @@ static long regset(pid_t caller, pid_t pid, int op, uintptr_t note, uintptr_t ad
     if (!bytes) return -ENOMEM;
     struct iovec local={bytes,guest.iov_len};
     if (op==PTRACE_SETREGSET) r=transfer(caller,(uintptr_t)guest.iov_base,bytes,guest.iov_len,0);
-    if (!r) r=(int)request(op,pid,note,&local);
+    size_t marker=offsetof(struct user_pt_regs,regs[7]);
+    int syscall_registers=note==NT_PRSTATUS && p->syscall_stop && local.iov_len>=marker+sizeof(uint64_t);
+    /* ARM64 reserves x7 at syscall stops. It is a direction marker, not a
+     * writable application register, even when our physical stop is a trap. */
+    if (!r && syscall_registers && op==PTRACE_SETREGSET) {
+        struct user_pt_regs current;
+        struct iovec saved={&current,sizeof(current)};
+        r=(int)request(PTRACE_GETREGSET,p->pid,NT_PRSTATUS,&saved);
+        if (!r) memcpy((char *)bytes+marker,&current.regs[7],sizeof(uint64_t));
+    }
+    if (!r) r=(int)request(op,p->pid,note,&local);
+    if (!r && syscall_registers && op==PTRACE_GETREGSET) {
+        uint64_t direction=p->syscall_stop-1;
+        memcpy((char *)bytes+marker,&direction,sizeof(direction));
+    }
     if (!r && op==PTRACE_GETREGSET) r=transfer(caller,(uintptr_t)guest.iov_base,bytes,local.iov_len,1);
     guest.iov_len=local.iov_len;
     if (!r) r=transfer(caller,address,&guest,sizeof(guest),1);
     free(bytes); return r;
 }
 static long control(struct md_debugger *d, pid_t caller, const struct user_pt_regs *r) {
-    int op=(int)r->regs[0]; pid_t pid=(pid_t)r->regs[1];
+    int op=(int)r->regs[0]; pid_t pid=native(d,caller,(pid_t)r->regs[1]);
     uintptr_t address=r->regs[2], data=r->regs[3];
     if (op==PTRACE_TRACEME) {
         pid_t parent=d->host.parent(caller);
@@ -347,21 +389,46 @@ static long control(struct md_debugger *d, pid_t caller, const struct user_pt_re
         if (!error) p->options=data;
         return error;
     }
-    case PTRACE_GETEVENTMSG: return transfer(caller,data,&p->message,sizeof(p->message),1);
-    case PTRACE_GETSIGINFO: return transfer(caller,data,&p->info,sizeof(p->info),1);
+    case PTRACE_GETEVENTMSG: {
+        unsigned event=(unsigned)p->status>>16;
+        unsigned long message=p->message;
+        if (event==PTRACE_EVENT_FORK || event==PTRACE_EVENT_VFORK || event==PTRACE_EVENT_CLONE
+                || event==PTRACE_EVENT_VFORK_DONE)
+            message=(unsigned long)visible(d,caller,(pid_t)message);
+        return transfer(caller,data,&message,sizeof(message),1);
+    }
+    case PTRACE_GETSIGINFO: {
+        siginfo_t info=p->info;
+        if (info.si_signo==SIGCHLD || info.si_code==SI_USER || info.si_code==SI_TKILL) {
+            info.si_uid=visible_uid(d,caller,info.si_pid,info.si_uid);
+            info.si_pid=visible(d,caller,info.si_pid);
+        }
+        return transfer(caller,data,&info,sizeof(info),1);
+    }
     case PTRACE_SETSIGINFO: {
         siginfo_t info;
         int error=transfer(caller,data,&info,sizeof(info),0);
+        if (!error && (info.si_signo==SIGCHLD || info.si_code==SI_USER || info.si_code==SI_TKILL))
+            info.si_pid=native(d,caller,info.si_pid);
         if (!error) error=(int)request(op,pid,0,&info);
         if (!error) p->info=info;
         return error;
     }
-    case PTRACE_GETREGSET: case PTRACE_SETREGSET: return regset(caller,pid,op,address,data);
+    case PTRACE_GETREGSET: case PTRACE_SETREGSET: return regset(caller,p,op,address,data);
     case PTRACE_GET_SYSCALL_INFO: {
+        struct ptrace_syscall_info info=p->syscall;
+        if (info.op==PTRACE_SYSCALL_INFO_NONE) {
+            struct user_pt_regs registers;
+            struct iovec io={&registers,sizeof(registers)};
+            int error=(int)request(PTRACE_GETREGSET,pid,NT_PRSTATUS,&io);
+            if (error) return error;
+            info.arch=AUDIT_ARCH_AARCH64;
+            info.instruction_pointer=registers.pc; info.stack_pointer=registers.sp;
+        }
         size_t size=offsetof(struct ptrace_syscall_info,entry);
-        if (p->syscall.op==PTRACE_SYSCALL_INFO_ENTRY) size+=sizeof(p->syscall.entry);
-        if (p->syscall.op==PTRACE_SYSCALL_INFO_EXIT) size=offsetof(struct ptrace_syscall_info,exit.is_error)+1;
-        int error=transfer(caller,data,&p->syscall,address<size ? address : size,1);
+        if (info.op==PTRACE_SYSCALL_INFO_ENTRY) size+=sizeof(info.entry);
+        if (info.op==PTRACE_SYSCALL_INFO_EXIT) size=offsetof(struct ptrace_syscall_info,exit.is_error)+1;
+        int error=transfer(caller,data,&info,address<size ? address : size,1);
         return error ? error : (long)size;
     }
     case PTRACE_GETSIGMASK: case PTRACE_SETSIGMASK: {
@@ -423,9 +490,29 @@ void md_debugger_wait_complete(struct md_debugger *d, pid_t pid, long value) {
     int children=0, id=w->registers.regs[8]==SYS_waitid, result=0;
     if (id && value==0 && w->registers.regs[2]) {
         siginfo_t info;
-        if (!transfer(pid,w->registers.regs[2],&info,sizeof(info),0)) result=info.si_pid!=0;
+        if (!transfer(pid,w->registers.regs[2],&info,sizeof(info),0)) {
+            result=info.si_pid!=0;
+            if (result) {
+                pid_t reaped=info.si_pid;
+                info.si_uid=visible_uid(d,pid,reaped,info.si_uid);
+                info.si_pid=visible(d,pid,reaped);
+                int error=transfer(pid,w->registers.regs[2],&info,sizeof(info),1);
+                if (error) value=error;
+                else if (!(wait_options(&w->registers)&WNOWAIT) && (info.si_code==CLD_EXITED
+                        || info.si_code==CLD_KILLED || info.si_code==CLD_DUMPED)
+                        && d->host.reaped) d->host.reaped(reaped,1);
+            }
+        }
     } else result=value>0;
     if (result || (value<0 && value!=-ECHILD)) {
+        if (!id && value>0) {
+            pid_t reaped=(pid_t)value;
+            value=visible(d,pid,reaped);
+            int status;
+            if (w->registers.regs[1] && !transfer(pid,w->registers.regs[1],&status,sizeof(status),0)
+                    && (WIFEXITED(status) || WIFSIGNALED(status)) && d->host.reaped)
+                d->host.reaped(reaped,1);
+        }
         d->host.complete(pid,&w->registers,value);
     } else if (wait_result(d,pid,&w->registers,&children)) {
         /* The queued trace event owns completion. */

@@ -4,6 +4,7 @@
 #include "fd_filter.h"
 #include "adapter_buffer.h"
 #include "interception.h"
+#include "linux_abi.h"
 #include "raw.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -23,7 +24,7 @@ long md_proc_control_known(int fd) {
     return RAW4(prctl,MD_GUEST_PROC_FILE,MD_PROC_FILE_KIND,fd,0);
 #endif
 }
-static long control_open(unsigned operation, int process, int selector, int flags) {
+static long control_open(unsigned operation, int process, int selector, int flags, uint64_t view) {
     long memory=0;
 #ifndef MD_USE_LIBC
     if (flags&O_PATH) {
@@ -31,7 +32,7 @@ static long control_open(unsigned operation, int process, int selector, int flag
         if (memory<0) return memory;
     }
 #endif
-    long fd=RAW5(prctl,MD_GUEST_PROC_FILE,operation,process,selector,flags);
+    long fd=RAW6(prctl,MD_GUEST_PROC_FILE,operation,process,selector,flags,view);
 #ifndef MD_USE_LIBC
     if (memory) {
         if (fd>=0) fd=md_adapter_receive_fd((void *)memory,(unsigned)flags,MD_BUFFER_PROC_RIGHTS);
@@ -47,10 +48,13 @@ static long control_open(unsigned operation, int process, int selector, int flag
     return fd;
 }
 long md_proc_control_open(int process, enum md_proc_kind kind, int flags) {
-    return control_open(MD_PROC_FILE_OPEN,process,kind,flags);
+    return control_open(MD_PROC_FILE_OPEN,process,kind,flags,0);
+}
+long md_proc_control_open_view(int process, enum md_proc_kind kind, int flags, uint64_t view) {
+    return control_open(MD_PROC_FILE_OPEN,process,kind,flags,view);
 }
 long md_proc_control_reopen(int process, int fd, int flags) {
-    return control_open(MD_PROC_FILE_REOPEN,process,fd,flags);
+    return control_open(MD_PROC_FILE_REOPEN,process,fd,flags,0);
 }
 long md_proc_control_metadata(int process, enum md_proc_kind kind, int fd, long nr, const unsigned long *a) {
 #ifdef MD_USE_LIBC
@@ -59,8 +63,8 @@ long md_proc_control_metadata(int process, enum md_proc_kind kind, int fd, long 
     struct md_proc_metadata_request query={.process=process,.descriptor=fd,.kind=kind,.effective=1};
     int access=nr==SYS_faccessat || nr==SYS_faccessat2;
     if (access) {
-        if (a[2]&~7UL || (nr==SYS_faccessat2 && a[3]&~(AT_EACCESS|AT_EMPTY_PATH|AT_SYMLINK_NOFOLLOW))) return -EINVAL;
-        query.access=(uint32_t)a[2]; query.effective=nr==SYS_faccessat2 && (a[3]&AT_EACCESS);
+        if ((unsigned)a[2]&~7U || (nr==SYS_faccessat2 && (unsigned)a[3]&~(MD_AT_EACCESS|AT_EMPTY_PATH|AT_SYMLINK_NOFOLLOW))) return -EINVAL;
+        query.access=(uint32_t)a[2]; query.effective=nr==SYS_faccessat2 && (a[3]&MD_AT_EACCESS);
     } else if (nr==SYS_statx) {
         if (a[2]&~(AT_EMPTY_PATH|AT_SYMLINK_NOFOLLOW|AT_NO_AUTOMOUNT|AT_STATX_SYNC_TYPE)
                 || (a[2]&AT_STATX_SYNC_TYPE)==AT_STATX_SYNC_TYPE || (a[3]&STATX__RESERVED)) return -EINVAL;

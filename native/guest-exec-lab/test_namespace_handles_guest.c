@@ -37,14 +37,14 @@ static void directory_handles(void) {
     for (struct dirent *e;(e=readdir(dir));) {
         ++count;
         if (!strcmp(e->d_name,".") || !strcmp(e->d_name,"..")) { assert(e->d_type==DT_DIR); continue; }
-        const char *names[]={"user","mnt","uts","ipc"};
+        const char *names[]={"user","mnt","uts","ipc","pid","pid_for_children"};
         unsigned bit=0;
-        for (unsigned i=0;i<4;++i) if (!strcmp(e->d_name,names[i])) bit=1U<<i;
+        for (unsigned i=0;i<6;++i) if (!strcmp(e->d_name,names[i])) bit=1U<<i;
         assert(bit && !(seen&bit) && e->d_type==DT_LNK); seen|=bit;
         int ns=openat(fd,e->d_name,O_RDONLY|O_CLOEXEC); assert(ns>=0);
         assert(ioctl(ns,NS_GET_NSTYPE)>0); close(ns);
     }
-    assert(count==6 && seen==15);
+    assert(count==8 && seen==63);
     rewinddir(dir); assert(readdir(dir)); closedir(dir);
     int saved=open(".",O_RDONLY|O_DIRECTORY); assert(saved>=0);
     assert(!chdir("/proc/self/ns"));
@@ -200,7 +200,7 @@ int test_namespace_handles_guest(void) {
         close(fds[i]);
     }
     assert(access("/proc/self/ns/net",F_OK)<0 && errno==ENOENT);
-    assert(access("/proc/self/ns/pid",F_OK)<0 && errno==ENOENT);
+    assert(!access("/proc/self/ns/pid",F_OK));
     puts("PASS guest namespace handles: stable identities, retained resources, metadata, links, ioctls and independent unshare");
     return 0;
 }

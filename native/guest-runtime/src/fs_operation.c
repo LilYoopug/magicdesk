@@ -39,10 +39,10 @@ int md_fs_request_validate(const struct md_fs_request *q) {
                 && q->operation!=MD_FS_SETACL && q->operation!=MD_FS_MOUNT)) return -EINVAL;
     if (q->operation==MD_FS_MOUNT) {
         int pair=q->mode==MD_FS_MOUNT_BIND || q->mode==MD_FS_MOUNT_PIVOT || q->mode==MD_FS_MOUNT_MOVE;
-        if ((!*a && !(descriptors&1)) || q->mode<MD_FS_MOUNT_BIND || q->mode>MD_FS_MOUNT_MOVE
+        if ((!*a && !(descriptors&1)) || q->mode<MD_FS_MOUNT_BIND || q->mode>MD_FS_MOUNT_PROC
                 || q->capacity || q->offset || q->value_size>PATH_MAX
                 || (pair ? (!*b && !(descriptors&2)) : *b || (descriptors&2))
-                || (q->mode!=MD_FS_MOUNT_TMPFS && q->mode!=MD_FS_MOUNT_OVERLAY && q->value_size)) return -EINVAL;
+                || (q->mode!=MD_FS_MOUNT_TMPFS && q->mode!=MD_FS_MOUNT_OVERLAY && q->mode!=MD_FS_MOUNT_PROC && q->value_size)) return -EINVAL;
         return q->value_size && strnlen(q->value,q->value_size)!=q->value_size-1 ? -EINVAL : 0;
     }
     if (q->operation==MD_FS_XATTR || q->operation==MD_FS_FXATTR || q->operation==MD_FS_XATTR_OBJECT) {

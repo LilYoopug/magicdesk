@@ -80,6 +80,7 @@ static int dispatch(struct md_fs_context *context, const struct md_fs_packet *q,
     md_fs_context_execute(context, &request, &result, &buffer);
     out->info = result.info; out->size = result.size; out->position = result.position;
     out->host_path=result.host_path;
+    out->proc_namespace=result.proc_namespace;
     out->open_completion=result.open_completion.kind;
     if (result.fd >= 0) output->fd[output->count++] = result.fd;
     if (result.open_completion.kind == MD_OPEN_PIPE) output->fd[output->count++] = result.open_completion.control;
@@ -184,6 +185,7 @@ static int service_request(struct md_filesystem *fs, int socket,
     if (reply->error) {
         md_fs_close_rights(&peer->output);
         reply->size=reply->host_path=reply->open_completion=0;
+        reply->proc_namespace=0;
         reply->position=0;
     }
     reply->descriptors = peer->output.count;

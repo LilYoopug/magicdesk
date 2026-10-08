@@ -8,6 +8,9 @@
 struct md_debugger;
 enum md_debugger_wait_action { MD_DEBUG_WAIT_PROBE, MD_DEBUG_WAIT_REPROBE, MD_DEBUG_WAIT_NATIVE };
 struct md_debugger_host {
+    pid_t (*visible_pid)(pid_t observer, pid_t native);
+    pid_t (*native_pid)(pid_t observer, pid_t visible);
+    uid_t (*visible_uid)(pid_t observer, pid_t sender, uid_t fallback);
     int (*parent)(pid_t);
     int (*group)(pid_t);
     uid_t (*uid)(pid_t);
@@ -21,6 +24,7 @@ struct md_debugger_host {
     void (*wait_probe)(pid_t, const struct user_pt_regs *, enum md_debugger_wait_action);
     void (*complete)(pid_t, struct user_pt_regs *, long);
     void (*resume)(pid_t, int);
+    void (*reaped)(pid_t, int native_wait);
 };
 /* Sole physical ptrace ownership stays in the supervisor. This owner represents
  * guest debugger relationships and wait events, not a second system tracer. */
@@ -34,6 +38,7 @@ int md_debugger_event(struct md_debugger *, pid_t, unsigned, unsigned long);
 void md_debugger_exit(struct md_debugger *, pid_t, int);
 int md_debugger_step(struct md_debugger *, pid_t);
 int md_debugger_traced(struct md_debugger *, pid_t);
+pid_t md_debugger_owner(struct md_debugger *, pid_t);
 int md_debugger_owns(struct md_debugger *, pid_t, pid_t);
 int md_debugger_active(struct md_debugger *);
 int md_debugger_boundary(struct md_debugger *, pid_t);

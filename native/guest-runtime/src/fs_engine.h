@@ -25,6 +25,7 @@ struct md_filesystem {
     struct md_ipc_credentials *ipc;
     const char *ipc_store;
     struct md_fs_statistics *statistics;
+    const struct md_task_snapshot *actor;
 };
 /* Worker-only lazy authority admission, shared by guest IPC and private peer
  * setup. No connection/database ownership crosses into the supervisor. */

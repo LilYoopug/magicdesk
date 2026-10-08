@@ -6,7 +6,7 @@
 #include <sys/stat.h>
 
 struct md_inode_lifetime;
-enum md_mount_backing { MD_MOUNT_NATIVE, MD_MOUNT_INODE };
+enum md_mount_backing { MD_MOUNT_NATIVE, MD_MOUNT_INODE, MD_MOUNT_PROC };
 /* Stable mount identity, independently of its placement or worker connection. */
 struct md_view_mount {
     int source, target;
@@ -15,6 +15,7 @@ struct md_view_mount {
     uint64_t generation;
     enum md_mount_backing backing;
     struct md_inode_lifetime *storage;
+    struct md_pid_namespace *pid_namespace;
     int detached, locked;
     atomic_uint anchors;
     struct md_view_mount *parent;

@@ -3,6 +3,7 @@
 #include "fs_mounts.h"
 #include "mount_policy.h"
 #include "mount_namespace_internal.h"
+#include "pid_namespace.h"
 #include <limits.h>
 #include <stdatomic.h>
 #include <sys/mount.h>
@@ -26,7 +27,7 @@ static inline int md_view_inode(const struct md_view_mount *m) {
     return !m || m->backing==MD_MOUNT_INODE;
 }
 static inline int md_view_readonly(const struct md_view_mount *m) {
-    return !!(md_mount_policy_flags(&m->policy)&MD_MOUNT_READONLY);
+    return m && !!(md_mount_policy_flags(&m->policy)&MD_MOUNT_READONLY);
 }
 struct md_view_object {
     struct md_view_object *next, *id_next;
@@ -57,6 +58,8 @@ struct md_view_location {
 struct md_fs_anchor {
     struct md_fd_object object;
     struct md_inode_lifetime *lifetime;
+    /* NULL view retains a native provider object with no logical mount policy.
+     * It is an exact path anchor, not a claim on a matching mounted inode. */
     struct md_mount_namespace *view;
     struct md_view_mount *mount;
     int fd, mount_pin;
@@ -78,6 +81,8 @@ struct md_view_object *md_view_object(struct md_filesystem *, const char *id);
 /* Internal lookup opt-in: report task-owned proc traversal to the adapter
  * before executing an operation. Never admitted as an openat2 resolve flag. */
 #define MD_VIEW_TASK_PATH (UINT64_C(1)<<63)
+/* Bind sources may capture an implicit provider from a retained old root. */
+#define MD_VIEW_PROVIDER_SOURCE (UINT64_C(1)<<62)
 int md_view_descriptor(struct md_filesystem *, int, const struct md_fs_anchor *, struct md_view_location *);
 /* Native device delegation is only for unannotated inherited descriptors.
  * Attached devices must complete in the mount engine, including nodev policy. */

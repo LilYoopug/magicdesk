@@ -96,6 +96,7 @@ static void entry(FILE *stream, unsigned info, unsigned id, unsigned parent, dev
     }
 }
 static const char *filesystem_type(const struct md_view_mount *mount) {
+    if (mount && mount->backing==MD_MOUNT_PROC) return "proc";
     return !md_view_inode(mount) ? "none" : md_filesystem_name(mount->storage ? mount->storage->filesystem_kind : MD_FILESYSTEM_INODE);
 }
 int md_fs_mount_table(struct md_filesystem *fs, unsigned info, unsigned flags) {

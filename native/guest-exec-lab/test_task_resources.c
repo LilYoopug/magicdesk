@@ -142,9 +142,39 @@ static void pending_root_relocation(void) {
     assert(!md_resources_release(&child)); assert(!md_resources_release(&parent));
     md_mount_namespace_release(view); md_mount_namespace_release(other);
 }
+static void pid_resource_transaction(void) {
+    struct md_task_resources owner, child;
+    struct md_identity identity=md_identity_new(0,0);
+    struct md_resource_change change;
+    assert(!md_resources_init(&owner,NULL));
+    assert(md_resources_clone_supported(CLONE_NEWPID));
+    assert(!md_resources_clone_supported(CLONE_NEWPID|CLONE_THREAD));
+    assert(!md_resources_clone_supported(CLONE_NEWPID|CLONE_PARENT));
+    assert(!md_resources_unshare_prepare(&owner,CLONE_NEWPID,&identity,&change));
+    assert(change.next.pid_children && !owner.pid_children && !owner.pid);
+    assert(!md_resources_unshare_finish(&owner,NULL,&change,-EINVAL));
+    assert(!owner.pid_children && !change.next.pid_children);
+    assert(!md_resources_unshare_prepare(&owner,CLONE_NEWPID,&identity,&change));
+    assert(!md_resources_unshare_finish(&owner,NULL,&change,0));
+    assert(owner.pid_children && !owner.pid);
+    assert(!md_resources_fork(&owner,0,&child));
+    assert(child.pid_children==owner.pid_children && !child.pid);
+    assert(md_resources_unshare_prepare(&owner,CLONE_NEWPID,&identity,&change)==-EINVAL);
+    assert(!md_pid_identity_prepare(child.pid_children,&child.pid));
+    assert(!md_pid_identity_publish(child.pid,20001,20001));
+    child.pid_group=md_pid_identity_retain(child.pid);
+    assert(!md_resources_unshare_prepare(&child,CLONE_NEWPID,&identity,&change));
+    assert(md_pid_namespace_parent(change.next.pid_children)==owner.pid_children);
+    assert(!md_resources_unshare_finish(&child,NULL,&change,0));
+    assert(child.pid_children!=owner.pid_children);
+    assert(!md_resources_release(&owner));
+    assert(md_pid_identity_number(child.pid,md_pid_identity_namespace(child.pid))==1);
+    assert(!md_resources_release(&child));
+    md_identity_release(&identity);
+}
 int main(void) {
     alarm(60);
-    unsigned long spaces[] = {CLONE_NEWPID, CLONE_NEWNET, CLONE_NEWCGROUP};
+    unsigned long spaces[] = {CLONE_NEWNET, CLONE_NEWCGROUP};
     struct md_identity identity=md_identity_new(0,0);
     struct md_task_resources r; assert(!md_resources_init(&r,NULL));
     for (unsigned i = 0; i < sizeof(spaces)/sizeof(*spaces); i++) {
@@ -183,6 +213,7 @@ int main(void) {
     for (unsigned i = 0; i < 100; i++) contract();
     for (unsigned i = 0; i < 100; i++) pending_root_relocation();
     nonleader_root();
+    pid_resource_transaction();
     assert(descriptors() == before);
     test_fd_origins();
     test_ofd_order();

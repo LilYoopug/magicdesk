@@ -66,6 +66,17 @@ post-5.15 dependency. Guest CLONE_NEWUSER and typed proc map writes follow the
 UTS sysctl files use the same lazy descriptor-selector mechanism as map files.
 Local typed SCM_RIGHTS custody adds a pipe EOF to the existing worker event loop;
 it needs no newer kernel API, polling loop or additional worker thread.
+Guest PID namespaces likewise use retained userspace identities, not native
+CLONE_NEWPID authority. `pid_namespace` and the supervisor use baseline clone,
+wait4/waitid, flags-zero pidfd_open/pidfd_send_signal, ptrace birth/exec/exit
+events and PR_SET_CHILD_SUBREAPER (since 3.4) for PID 1 orphan adoption. A denied
+subreaper admission fails that child namespace explicitly. Signal disposition
+observation reads native proc status on demand. Logical proc mounts reuse
+O_PATH/native directory cookies and typed snapshots; their creation does not
+issue a host mount. No PIDFD_THREAD, PIDFD_SIGNAL_THREAD or newer pidfd ioctl is
+required. `--case mount-namespace`, stock Bubblewrap/GDB and Chromium's automatic
+user/PID route cover these paths under actual UID 2000; the APK's other services
+do not acquire these prerequisites.
 Noexec mapping policy uses the existing seccomp/ptrace observation and
 CLONE_VM ownership, not MFD_NOEXEC_SEAL or a host mount. MREMAP_DONTUNMAP is
 within the baseline (5.7); rejected native mappings keep their kernel errors.

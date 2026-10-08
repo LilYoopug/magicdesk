@@ -13,10 +13,10 @@
 #include <string.h>
 #include <unistd.h>
 
-enum { MAGIC=0x4d444d47U, VERSION=8, HEADER=128 };
-enum { INODE=1, DETACHED=2, RETIRED=4, LOCKED=8 };
+enum { MAGIC=0x4d444d47U, VERSION=9, HEADER=128 };
+enum { INODE=1, DETACHED=2, RETIRED=4, LOCKED=8, PROC=16 };
 struct entry { uint32_t parent, flags; struct md_fd_identity source, target, policy;
-    uint32_t storage, descriptor; uint64_t generation; };
+    uint32_t storage, descriptor; uint64_t generation, proc_namespace; };
 struct storage { struct md_fd_identity root; uint32_t start, count; };
 struct manifest {
     uint32_t magic, version, count, storages;
@@ -33,8 +33,8 @@ struct md_mount_graph {
     uint64_t revision;
     struct md_fd_identity identity;
 };
-_Static_assert(sizeof(struct entry)==72 && sizeof(struct storage)==24,"mount graph entry layout");
-_Static_assert(sizeof(struct manifest)==HEADER+96*MD_FS_MOUNTS_MAX,"mount graph layout");
+_Static_assert(sizeof(struct entry)==80 && sizeof(struct storage)==24,"mount graph entry layout");
+_Static_assert(sizeof(struct manifest)==HEADER+104*MD_FS_MOUNTS_MAX,"mount graph layout");
 
 static struct md_mount_graph *create(void) {
     struct md_mount_graph *g=calloc(1,sizeof(*g));
@@ -185,8 +185,9 @@ static int read_manifest(int fd, struct manifest *out, struct md_fd_identity *id
             || out->base_target.inode) return -EPROTO;
     for (unsigned i=0;i<out->count;++i) {
         const struct entry *e=&out->entries[i];
-        if (!e->generation || e->flags&~(INODE|DETACHED|RETIRED|LOCKED) || e->storage>out->storages
+        if (!e->generation || e->flags&~(INODE|DETACHED|RETIRED|LOCKED|PROC) || e->storage>out->storages
                 || e->storage>owners+1 || (e->storage && !(e->flags&INODE))) return -EPROTO;
+        if (!!(e->flags&PROC)!=!!e->proc_namespace || (e->flags&(INODE|PROC))==(INODE|PROC)) return -EPROTO;
         if (e->flags&RETIRED) {
             struct entry empty={.flags=DETACHED|RETIRED,.generation=e->generation};
             if (memcmp(e,&empty,sizeof(empty))) return -EPROTO;
@@ -269,6 +270,9 @@ static int describe(struct md_mount_namespace *view, const struct md_mount_layou
             e->storage=j+1;
         }
         e->flags=(md_view_inode(m) ? INODE : 0) | (m->detached ? DETACHED : 0) | (m->locked ? LOCKED : 0);
+        if (m->backing==MD_MOUNT_PROC) {
+            e->flags|=PROC; e->proc_namespace=md_pid_namespace_inode(m->pid_namespace);
+        }
         if (!md_view_base(view,m->parent)) {
             unsigned j=0;
             while (j<count && m->parent!=&view->tree->mounts[j]) ++j;
@@ -400,7 +404,8 @@ static int same_objects(const struct manifest *old, const struct manifest *next)
         if (a->generation<b->generation) continue;
         if (b->flags&RETIRED) continue;
         if (a->flags&RETIRED) return -ESTALE;
-        if ((a->flags&INODE)!=(b->flags&INODE) || !md_fd_identity_same(a->source,b->source)
+        if ((a->flags&(INODE|PROC))!=(b->flags&(INODE|PROC)) || a->proc_namespace!=b->proc_namespace
+                || !md_fd_identity_same(a->source,b->source)
                 || !md_fd_identity_same(a->policy,b->policy)
                 || !!a->storage!=!!b->storage) return -ESTALE;
         if (a->storage && !md_fd_identity_same(old->storage[a->storage-1].root,
@@ -511,6 +516,7 @@ static int import(struct md_mount_graph_parcel *p, struct md_mount_namespace **o
     if (r) goto done;
     struct md_mount_namespace *view=md_mount_namespace_new();
     if (!view) { r=-errno; goto done; }
+    atomic_store_explicit(&view->managed_paths,1,memory_order_relaxed);
     view->graph=create();
     if (!view->graph) { md_mount_namespace_release(view); r=-ENOMEM; goto done; }
     view->graph->fd=take(p,0); view->graph->reader=take(p,rights);
@@ -528,7 +534,11 @@ static int import(struct md_mount_graph_parcel *p, struct md_mount_namespace **o
         m->source=m->target=-1; m->generation=e->generation;
         ++view->tree->count;
         if (e->flags&RETIRED) { m->detached=1; continue; }
-        m->backing=(e->flags&INODE) ? MD_MOUNT_INODE : MD_MOUNT_NATIVE;
+        m->backing=(e->flags&INODE) ? MD_MOUNT_INODE : e->flags&PROC ? MD_MOUNT_PROC : MD_MOUNT_NATIVE;
+        if ((e->flags&PROC) && e->proc_namespace!=md_pid_namespace_inode(NULL)) {
+            m->pid_namespace=md_pid_namespace_by_inode(e->proc_namespace);
+            if (!m->pid_namespace) { r=-EXDEV; break; }
+        }
         m->storage=e->storage ? md_inode_lifetime_retain(owners[e->storage-1]) : NULL;
         atomic_init(&m->anchors,0);
         m->detached=!!(e->flags&DETACHED);

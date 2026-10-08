@@ -80,6 +80,9 @@ extern char md_guest_buffer_admitted[];
 static long dispatch_files(const struct md_fs *fs, long nr, unsigned long a0, unsigned long a1, unsigned long a2,
         unsigned long a3, unsigned long a4, unsigned long a5) {
     unsigned long args[] = {a0, a1, a2, a3, a4, a5};
+    if (nr==SYS_unshare || nr==SYS_clone || nr==SYS_setns) return md_pid_filter_install();
+    if (nr==SYS_kill && (int)a0<=0) return md_pid_signal_group((int)a0,(int)a1);
+    if (nr==SYS_pidfd_send_signal) return md_pidfd_signal(args);
     if (nr==SYS_read || nr==SYS_write || nr==SYS_readv || nr==SYS_writev
             || nr==SYS_pread64 || nr==SYS_pwrite64 || nr==SYS_preadv || nr==SYS_pwritev
             || nr==SYS_preadv2 || nr==SYS_pwritev2 || nr==SYS_lseek || nr==SYS_ioctl) {
@@ -126,7 +129,7 @@ static long dispatch_files(const struct md_fs *fs, long nr, unsigned long a0, un
 __attribute__((noinline)) static long dispatch_scoped(long nr, unsigned long a0, unsigned long a1,
         unsigned long a2, unsigned long a3, unsigned long a4, unsigned long a5) {
     struct md_fs fs = md_files;
-    fs.scoped_root = 1;
+    fs.managed_paths = 1;
     return dispatch_files(&fs, nr, a0, a1, a2, a3, a4, a5);
 }
 long md_guest_dispatch(long nr, unsigned long a0, unsigned long a1, unsigned long a2,

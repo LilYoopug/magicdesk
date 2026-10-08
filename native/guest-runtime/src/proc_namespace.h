@@ -3,7 +3,8 @@
 #include "user_namespace.h"
 #include <sys/stat.h>
 
-enum md_namespace_kind { MD_NAMESPACE_USER, MD_NAMESPACE_MOUNT, MD_NAMESPACE_UTS, MD_NAMESPACE_IPC };
+enum md_namespace_kind { MD_NAMESPACE_USER, MD_NAMESPACE_MOUNT, MD_NAMESPACE_UTS, MD_NAMESPACE_IPC,
+    MD_NAMESPACE_PID, MD_NAMESPACE_PID_CHILDREN };
 struct md_task_resources;
 struct md_namespace_reference {
     enum md_namespace_kind kind;
@@ -12,6 +13,7 @@ struct md_namespace_reference {
         struct md_mount_namespace *mount;
         struct md_uts_namespace *uts;
         struct md_ipc_namespace *ipc;
+        struct md_pid_namespace *pid;
     } value;
 };
 /* References own resources, not a pid or a proc-directory carrier. */
@@ -25,5 +27,6 @@ const struct md_user_namespace *md_namespace_reference_owner(const struct md_nam
 /* Captures a related user namespace only when it is inside the caller's view.
  * The initial user namespace has no parent. Output owns its reference. */
 int md_namespace_reference_related(const struct md_namespace_reference *,
-    const struct md_user_namespace *caller, int parent, struct md_namespace_reference *);
+    const struct md_user_namespace *caller, const struct md_pid_namespace *,
+    int parent, struct md_namespace_reference *);
 #endif

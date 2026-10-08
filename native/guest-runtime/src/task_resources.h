@@ -7,6 +7,7 @@
 #include "uts_namespace.h"
 #include "ipc_namespace.h"
 #include "guest_identity.h"
+#include "pid_namespace.h"
 
 /* Linux owns the real FD table, cwd/umask and open descriptions. Optional path
  * annotations share their lifetimes without retaining data descriptions. */
@@ -17,11 +18,14 @@ struct md_task_resources {
     struct md_ipc_undo *sem_undo;
     struct md_uts_namespace *uts;
     struct md_ipc_namespace *ipc;
+    struct md_pid_identity *pid;
+    struct md_pid_identity *pid_group;
+    struct md_pid_namespace *pid_children;
 };
 struct md_resource_change {
     struct md_task_resources next;
     int copy_mounts;
-    int check_root, identity_pending;
+    int check_root, identity_pending, pid_children_pending;
     struct md_identity identity;
     unsigned long namespaces;
     struct md_mount_namespace *join_mounts;

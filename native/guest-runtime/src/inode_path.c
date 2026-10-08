@@ -14,8 +14,11 @@ int mdi_host_boundary(struct md_inode_store *s, const char *parent, const char *
     const char *suffix=s->boundary->suffix ? s->boundary->suffix : "";
     const char *next=*tail ? tail : suffix; while (*next=='/') ++next;
     if (!strcmp(name,"dev") && !strncmp(next,"shm",3) && (!next[3] || next[3]=='/')) return 0;
-    if (resolve&(RESOLVE_NO_XDEV|RESOLVE_IN_ROOT|RESOLVE_BENEATH)) return -EXDEV;
-    if (resolve&(RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS)) return -ENOTSUP;
+    s->boundary->mount_root=!*next;
+    s->boundary->native_directory=!strcmp(name,"dev");
+    if ((resolve&RESOLVE_NO_XDEV) || (*next && !s->boundary->native_directory
+            && (resolve&(RESOLVE_IN_ROOT|RESOLVE_BENEATH)))) return -EXDEV;
+    if (*next && !s->boundary->native_directory && (resolve&(RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS))) return -ENOTSUP;
     if (!s->boundary->path) return -EREMOTE;
     int n=snprintf(s->boundary->path,s->boundary->capacity,"/%s%s%s",name,tail,suffix);
     return n<0 || (size_t)n>=s->boundary->capacity ? -ENAMETOOLONG : -EREMOTE;

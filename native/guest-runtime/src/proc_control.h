@@ -36,6 +36,7 @@ static inline int md_proc_control_kind(enum md_proc_kind kind) {
     return kind>=MD_PROC_UID_MAP && kind<=MD_PROC_NS_UNSUPPORTED;
 }
 long md_proc_control_open(int process, enum md_proc_kind, int flags);
+long md_proc_control_open_view(int process, enum md_proc_kind, int flags, uint64_t view);
 long md_proc_control_known(int fd);
 long md_proc_control_reopen(int process, int fd, int flags);
 long md_proc_control_metadata(int process, enum md_proc_kind, int fd, long nr, const unsigned long *);

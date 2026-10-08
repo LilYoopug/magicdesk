@@ -14,7 +14,7 @@ def main():
     parser.add_argument('build', type=Path)
     parser.add_argument('store')
     parser.add_argument('--trace', action='store_true')
-    parser.add_argument('--case', choices=('all', 'basic', 'readonly', 'identity', 'nested'), default='all')
+    parser.add_argument('--case', choices=('all', 'basic', 'readonly', 'identity', 'nested', 'pid', 'pid-debugger'), default='all')
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
     spec = importlib.util.spec_from_file_location('transport', repo / 'scripts/mcp-client.py')
@@ -61,6 +61,19 @@ def main():
         # EVENT_WAIT: the runtime observes owned children; its deadline cancels
         # a stalled process tree rather than treating elapsed time as readiness.
         cases = {
+            'pid-debugger': (['--unshare-pid', '--ro-bind', '/', '/', '--proc', '/proc',
+                             '--dev-bind', '/dev', '/dev', '--tmpfs', '/tmp', '--',
+                             '/usr/bin/gdb', '-nx', '-batch',
+                             '-ex', 'set disable-randomization off', '-ex', 'starti',
+                             '-ex', 'info inferiors', '-ex', 'continue', '--args', '/usr/bin/true'],
+                            'exited normally'),
+            'pid': (['--unshare-pid', '--ro-bind', '/', '/', '--proc', '/proc', '--dev-bind', '/dev', '/dev',
+                     '--tmpfs', '/tmp', '--', '/bin/sh', '-exc',
+                     'test -r /proc/1/status; test -r /proc/$$/status; '
+                     'test "$(awk \'/^Pid:/{print $2}\' /proc/1/status)" = 1; '
+                     'test -c /dev/null; printf test >/dev/null; '
+                     'test "$(readlink /proc/1/ns/pid)" = "$(readlink /proc/self/ns/pid)"; '
+                     'echo MD-BWRAP-PID'], 'MD-BWRAP-PID'),
             'basic': (['--bind', '/', '/', '--', '/usr/bin/id'], 'uid=2000'),
             'readonly': (['--ro-bind', '/', '/', '--tmpfs', '/tmp', '--', '/bin/sh', '-ec',
                           'printf writable >/tmp/probe; test "$(cat /tmp/probe)" = writable; '
@@ -84,8 +97,9 @@ def main():
         for name, (arguments, marker) in cases.items():
             if args.case not in ('all', name):
                 continue
-            command(run + trace + ['/usr/bin/bwrap', '--unshare-user', '--unshare-uts',
-                                  '--unshare-ipc'] + arguments, marker, logged=True)
+            result = command(run + trace + ['/usr/bin/bwrap', '--unshare-user', '--unshare-uts',
+                                           '--unshare-ipc'] + arguments, marker, logged=True)
+            assert 'ptrace_syscall_info.op ==' not in result['output'], result['log']
         report['passed'] = True
     finally:
         client.call('console.close', {'sessionId': session})

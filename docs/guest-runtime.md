@@ -225,9 +225,9 @@ Terminal, XKB data, icons and a session D-Bus setup. `xfce` adds an X11 desktop;
 with X11 and Wayland desktop entries on Debian. `gnome` selects Fedora's
 development-kit shell, not a systemd/GDM login session. GUI recipes are package
 configurations, not a claim of complete desktop compatibility. Fedora 44 and
-rolling Arch use Glycin image loaders whose Bubblewrap startup currently fails
-on the tested shell runtime; GNOME also needs a system-bus arrangement. These
-limitations are not bypassed by silently disabling sandboxes.
+rolling Arch use Glycin image loaders whose complete launch contract still needs
+validation beyond the stock Bubblewrap namespace fixtures; GNOME also needs a
+system-bus arrangement. Missing operations are not bypassed by silently disabling sandboxes.
 
 Images and repository packages are trusted executable inputs, not sandboxed
 content. `--image REF` selects another OCI source of the same distribution and
@@ -603,8 +603,13 @@ Its identity includes the mount and
 backend object, preserving native readonly policy. Existing cwd/descriptors remain
 usable, so chroot alone is not confinement. Guest mount views support local
 bind/move/remount, unmount and initial/attached-root pivot operations, with
-user, mount, UTS and SysV IPC namespace owners. Arbitrary unattached native
-roots and PID/network namespaces remain unsupported. See the
+user, mount, PID, UTS and SysV IPC namespace owners. PID namespaces select
+process/thread IDs, child admission, wait/signal translation and mounted proc
+views through retained process resources. PID 1 adopts orphaned children and
+closes namespace admission when its last thread exits. Namespace-aware proc
+mounts and explicit native `/dev` binds can prepare a new root without host
+mount privileges. Arbitrary unattached native roots and network namespaces
+remain unsupported. See the
 [process resource contract](../native/guest-runtime/process-resources.md).
 
 `inode_metadata` enforces directory search, file access, ownership changes,
@@ -1037,11 +1042,11 @@ check stock Debian Chromium with its selected ordinary helper, three fresh profi
 calculated JavaScript/DOM results and PNG output. The explicit set-ID route
 (`--setuid-route` in the fixture, Chromium's `--disable-namespace-sandbox` selector)
 passes with real installed application filters, admitted helper credentials and
-process completion. It does not use `--no-sandbox`. Automatic selection currently
-chooses the implemented user-namespace path but fails at the zygote's required
-PID namespace. The automatic browser regression is therefore unresolved; passing
-the alternate set-ID route is not a substitute. Firefox has a separate headless
-screenshot workflow.
+process completion. Automatic selection uses the user/PID namespace route,
+including nested PID namespaces and a run without helper admission. Both routes
+retain Chromium's application filters and do not use `--no-sandbox`.
+The set-ID negative control rejects an unadmitted helper before rendering.
+Firefox has a separate headless screenshot workflow.
 
 These results establish application execution, not complete security isolation.
 The restricted proc-root policy and ordinary guest chroot do not establish

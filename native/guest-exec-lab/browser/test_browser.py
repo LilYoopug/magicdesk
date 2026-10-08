@@ -43,7 +43,8 @@ def main():
     report = {"completed": False, "sandboxSupportEstablished": False, "layerOneEstablished": False, "runs": []}
     try:
         for index in range(4):
-            rejected = index == 3
+            rejected = index == 3 and args.setuid_route
+            admitted = index != 3
             token = uuid.uuid4().hex
             expected = "MD-JS-" + str(sum(range(50000 + index)))
             page = ('<body style="background:white;color:black;font:28px sans-serif">'
@@ -65,7 +66,7 @@ def main():
                        "--user", "2000:2000", "--deadline-seconds", "60", "--quiet",
                        "--expect-output", "The setuid sandbox is not running as root."
                        if rejected else ">" + expected + "</h1>"]
-            if not rejected:
+            if admitted:
                 command += ["--admit-elf", args.helper]
             if index == 2:
                 command += ["--expect-artifact", artifact]
@@ -89,7 +90,7 @@ def main():
             if rejected:
                 assert result.returncode == run["exitCode"] == 134 and not run["workloadCompleted"]
                 assert run["admittedElf"] is None and run["expectedOutput"]["found"]
-                assert "Cannot chroot into /proc/ directory: Operation not permitted" in output
+                assert "Zygote process exited prematurely with exit code 1" in output
                 assert "PROBE proc-root domain=1 changes=0" in output
                 assert "PROBE identity admittedImages=0" in output
                 assert "PROBE installed-filter" not in output
@@ -98,7 +99,7 @@ def main():
                 print("PASS stock Chromium rejects unadmitted helper with the same guest identity", flush=True)
                 continue
             assert result.returncode == run["exitCode"] == 0 and run["workloadCompleted"]
-            assert run["admittedElf"] == args.helper
+            assert run["admittedElf"] == (args.helper if admitted else None)
             assert "The setuid sandbox is not running as root" not in output
             html = re.search(r"^<html>.*</html>$", output, re.MULTILINE)
             assert html, "no rendered DOM"
@@ -106,7 +107,11 @@ def main():
             rendered.feed(html[0])
             assert rendered.values == [expected], rendered.values
             assert re.search(r"PROBE proc-root domain=1 changes=[1-9]\d*", output)
-            assert re.search(r"PROBE identity admittedImages=[1-9]\d* changes=[1-9]\d* hostUid=2000", output)
+            if args.setuid_route:
+                assert re.search(r"PROBE identity admittedImages=[1-9]\d* changes=[1-9]\d* hostUid=2000", output)
+            else:
+                assert re.search(r"PROBE pid-namespace init=\d+ visible=1 depth=1", output)
+                assert re.search(r"PROBE identity admittedImages=0 changes=\d+ hostUid=2000", output)
             assert "PROBE installed-filter" in output
             entry.update(verified=True, rendered=expected,
                          filtersInstalled=len(re.findall(r"PROBE installed-filter", output)),

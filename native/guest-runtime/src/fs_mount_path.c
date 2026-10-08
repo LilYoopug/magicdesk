@@ -2,6 +2,7 @@
 #include "fs_mount_internal.h"
 #include "inode_internal.h"
 #include "fs_storage.h"
+#include "procfs_view.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/openat2.h>
@@ -56,11 +57,12 @@ int md_view_task_path(struct md_filesystem *fs, int fd, const char *name, const 
     return n<0 || (size_t)n>=boundary->capacity ? -ENAMETOOLONG : -EREMOTE;
 }
 static int component(struct md_filesystem *fs, struct md_mount_namespace *view,
-        struct md_view_mount *mount, int fd, const char *name) {
+        struct md_view_mount *mount, int fd, const char *name, int provider_source) {
     if (md_view_inode(mount)) {
         struct md_fs_storage_scope scope;
         int r=md_fs_storage_enter(fs,mount,&scope);
         if (r) return r;
+        if (provider_source && scope.store==fs->store) scope.store->boundary=scope.boundary;
         if (view!=fs->mounts) scope.store->root_id=NULL;
         int next=md_inode_open(scope.store,fd,name,O_PATH|O_NOFOLLOW|O_CLOEXEC,0);
         md_fs_storage_leave(&scope);
@@ -100,20 +102,27 @@ static int parent(struct md_filesystem *fs, struct md_mount_namespace *view,
         if (resolve&RESOLVE_NO_XDEV) return -EXDEV;
         fd=(*mount)->target; st=(*mount)->guest; *mount=(*mount)->parent;
     }
-    return component(fs,view,*mount,fd,"..");
+    return component(fs,view,*mount,fd,"..",0);
 }
 int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *origin,
         const char *path, int follow, int missing,
         uint64_t resolve, struct md_view_location *out) {
     *out = (struct md_view_location){.parent=-1,.fd=-1};
     if (!path || !*path) return -ENOENT;
-    if (resolve & ~(RESOLVE_BENEATH | RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV | RESOLVE_CACHED | MD_VIEW_TASK_PATH)) return -EINVAL;
+    if (resolve & ~(RESOLVE_BENEATH | RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV | RESOLVE_CACHED | MD_VIEW_TASK_PATH | MD_VIEW_PROVIDER_SOURCE)) return -EINVAL;
     if ((resolve & (RESOLVE_BENEATH | RESOLVE_IN_ROOT)) == (RESOLVE_BENEATH | RESOLVE_IN_ROOT)) return -EINVAL;
     if (resolve & RESOLVE_CACHED) return -EAGAIN;
     if (path[0] == '/' && (resolve & RESOLVE_BENEATH)) return -EXDEV;
     if (strlen(path) >= PATH_MAX) return -ENAMETOOLONG;
     char todo[PATH_MAX]; strcpy(todo, path);
     int from_root = base == MD_INODE_ROOT || (path[0] == '/' && !(resolve & RESOLVE_IN_ROOT));
+    /* A native proc descriptor predates or bypasses logical mounts. Its kernel
+     * inode cannot select one of several proc mounts with different PID views.
+     * Logical opens retain an origin; only those enter a mounted proc view. */
+    if (!from_root && !origin && (resolve&MD_VIEW_TASK_PATH)) {
+        int native=md_view_task_path(fs,base,path,"",resolve,0);
+        if (native) return native;
+    }
     int r = !from_root && origin ? md_view_anchor_check(fs,base,origin) : 0;
     if (r) return r;
     int fd = from_root ? md_view_root_fd(fs) : duplicate(base);
@@ -165,14 +174,38 @@ int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *
             struct md_inode_boundary *boundary=fs->store->boundary;
             const char *previous_suffix=boundary ? boundary->suffix : NULL;
             if (boundary) boundary->suffix=todo;
-            next = component(fs, view, mount, fd, name);
+            next = component(fs, view, mount, fd, name,!!(resolve&MD_VIEW_PROVIDER_SOURCE));
             if (boundary) boundary->suffix=previous_suffix;
-            if (next==-EREMOTE && (resolve&(RESOLVE_NO_XDEV|RESOLVE_IN_ROOT|RESOLVE_BENEATH))) next=-EXDEV;
-            if (next==-EREMOTE && (resolve&(RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS))) next=-ENOTSUP;
+            if (next==-EREMOTE && view && view->tree) {
+                /* An explicit mount covers the initial filesystem's implicit
+                 * proc/dev provider. Resolve only its covered dentry here;
+                 * an ordinary root bind must retain the provider fallback. */
+                fs->store->boundary=NULL;
+                int covered=component(fs,view,mount,fd,name,0);
+                fs->store->boundary=boundary;
+                if (covered>=0) {
+                    int entered=enter(view,&covered,&next_mount,resolve);
+                    if (entered) { close(covered); next=entered; }
+                    else if (next_mount!=mount) next=covered;
+                    else close(covered);
+                }
+            }
+            /* Entering an admitted native mount root is not an escape or a
+             * magic-link traversal. Delegating an unresolved suffix would be;
+             * retain the stricter failure until its walker owns that scope. */
+            if (next==-EREMOTE && ((resolve&RESOLVE_NO_XDEV)
+                    || ((!boundary || (!boundary->mount_root && !boundary->native_directory))
+                        && (resolve&(RESOLVE_IN_ROOT|RESOLVE_BENEATH))))) next=-EXDEV;
+            if (next==-EREMOTE && (!boundary || (!boundary->mount_root && !boundary->native_directory))
+                    && (resolve&(RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS))) next=-ENOTSUP;
         }
         else {
-            next=(resolve&MD_VIEW_TASK_PATH) ? md_view_task_path(fs,fd,name,todo,resolve,0) : 0;
-            if (!next) next=component(fs,view,mount,fd,name);
+            if (mount && mount->backing==MD_MOUNT_PROC)
+                next=md_procfs_step(fs,mount,fd,name,todo,!last || follow>0 || (trailing && follow==0));
+            else {
+                next=(resolve&MD_VIEW_TASK_PATH) ? md_view_task_path(fs,fd,name,todo,resolve,0) : 0;
+                if (!next) next=component(fs,view,mount,fd,name,0);
+            }
         }
         if (next == -ENOENT && last && missing && (!trailing || missing > 1)) {
             out->parent = fd; fd = -1; out->view = view; out->mount = mount; strcpy(out->name, name); break;

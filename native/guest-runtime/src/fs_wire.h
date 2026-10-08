@@ -6,7 +6,7 @@
 #include <sys/un.h>
 
 #define MD_FS_MAGIC 0x4d444653U
-#define MD_FS_VERSION 20U
+#define MD_FS_VERSION 21U
 #define MD_FS_MAX_FDS 2
 enum { MD_FS_REPLY_CHUNK=65536 };
 struct md_fs_packet {
@@ -30,6 +30,7 @@ struct md_fs_reply {
     int32_t error;
     uint32_t descriptors, size, host_path, open_completion, receipt; /* descriptor count, not request slot mask */
     int64_t position;
+    uint64_t proc_namespace;
     struct md_fs_info info;
     char data[MD_FS_OUTPUT_MAX];
 };

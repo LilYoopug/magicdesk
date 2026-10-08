@@ -15,6 +15,9 @@ enum { MD_IMAGE_PROGRAM=0, MD_IMAGE_LOADER=1, MD_IMAGE_TAKE_PROGRAM=2, MD_IMAGE_
 #define MD_GUEST_FD_CHANNEL 0x4d440109
 #define MD_GUEST_TASK_HELPER 0x4d44010a
 #define MD_GUEST_PROC_FILE 0x4d44010b
+#define MD_GUEST_PID_FILTER 0x4d44010c
+#define MD_GUEST_PID_SIGNAL_GROUP 0x4d44010d
+#define MD_GUEST_PIDFD_SIGNAL 0x4d44010e
 enum md_export_control { MD_EXPORT_BEGIN=1, MD_EXPORT_READY, MD_EXPORT_OBSERVED };
 #define MD_EXPORT_ADMIT (-4096L)
 /* Register-only control works before/inside a mapped filesystem request too. */
@@ -36,7 +39,8 @@ enum md_interception_kind {
     MD_INTERCEPT_CWD = 49,
     MD_INTERCEPT_CAPTURE = 50,
     MD_INTERCEPT_TASK = 51,
-    MD_INTERCEPT_PROC = 52
+    MD_INTERCEPT_PROC = 52,
+    MD_INTERCEPT_PROCESS = 53
 };
 
 /* Bootstrap-owned entry points, published before entering guest code. The
@@ -63,6 +67,9 @@ long md_guest_buffer_admit(unsigned purpose);
 int md_interception_install(int inherited);
 long md_shm_dispatch(long, const unsigned long *);
 long md_ipc_dispatch(long, const unsigned long *);
+long md_pid_filter_install(void);
+long md_pid_signal_group(int selector,int signal);
+long md_pidfd_signal(const unsigned long *);
 int md_interception_map_image(int fd, int loader);
 int md_interception_enter_image(void *aux, unsigned count);
 #endif

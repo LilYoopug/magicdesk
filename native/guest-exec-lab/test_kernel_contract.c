@@ -1,8 +1,11 @@
 #define _GNU_SOURCE
 #include "test_ancillary_contract.h"
+#include <asm/ptrace.h>
 #include <assert.h>
+#include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/audit.h>
 #include <linux/openat2.h>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
@@ -20,6 +23,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -167,20 +171,64 @@ static void ptrace_options(void) {
     assert(!ptrace(PTRACE_DETACH, pid, 0, 0));
     assert(write(release[1], "x", 1) == 1); close(release[1]); exited(pid, 0);
 }
+static void syscall_birth(void) {
+    pid_t pid=child();
+    if (!pid) {
+        assert(!ptrace(PTRACE_TRACEME,0,0,0)); raise(SIGSTOP);
+        pid_t newborn=syscall(SYS_clone,SIGCHLD,0,0,0,0);
+        assert(newborn>=0);
+        if (!newborn) { syscall(SYS_getpid); _exit(0); }
+        exited(newborn,0); _exit(0);
+    }
+    stopped(pid);
+    assert(!ptrace(PTRACE_SETOPTIONS,pid,0,PTRACE_O_TRACEFORK|PTRACE_O_TRACESYSGOOD));
+    assert(!ptrace(PTRACE_SYSCALL,pid,0,0));
+    unsigned live=1, calls=0; int first=-1;
+    while (live) {
+        int status; pid_t task=waitpid(-1,&status,__WALL); assert(task>0);
+        if (WIFEXITED(status)) { assert(!WEXITSTATUS(status)); --live; continue; }
+        assert(WIFSTOPPED(status));
+        if ((unsigned)status>>16==PTRACE_EVENT_FORK) ++live;
+        if (task!=pid && WSTOPSIG(status)==(SIGTRAP|0x80)) {
+            struct ptrace_syscall_info info={0};
+            assert(ptrace(PTRACE_GET_SYSCALL_INFO,task,sizeof(info),&info)>=24);
+            if (!calls++) first=info.op;
+        }
+        assert(!ptrace(PTRACE_SYSCALL,task,0,0));
+    }
+    assert(first==PTRACE_SYSCALL_INFO_ENTRY && calls==3);
+    printf("OBS syscall-birth first=%d calls=%u\n",first,calls);
+}
 static void syscall_info(void) {
     pid_t pid = child();
     if (!pid) {
         assert(!ptrace(PTRACE_TRACEME, 0, 0, 0)); raise(SIGSTOP);
-        syscall(SYS_getpid); _exit(0);
+        errno=0;
+        assert(syscall(SYS_chdir,"")==-1 && errno==ENOENT);
+        _exit(0);
     }
     stopped(pid);
+    struct ptrace_syscall_info initial={0};
+    assert(ptrace(PTRACE_GET_SYSCALL_INFO,pid,sizeof(initial),&initial)>=24);
+    assert(initial.op==PTRACE_SYSCALL_INFO_NONE && initial.arch==AUDIT_ARCH_AARCH64
+        && initial.instruction_pointer && initial.stack_pointer);
+    puts("OBS signal-stop syscall-info common-fields=1");
     assert(!ptrace(PTRACE_SYSCALL, pid, 0, 0)); stopped(pid);
+    struct user_pt_regs registers;
+    struct iovec registers_io={&registers,sizeof(registers)};
+    assert(!ptrace(PTRACE_GETREGSET,pid,NT_PRSTATUS,&registers_io));
+    printf("OBS syscall-register entry=%llu\n",(unsigned long long)registers.regs[7]);
+    assert(registers.regs[7]==0);
     struct ptrace_syscall_info info = {0};
     long size = ptrace(PTRACE_GET_SYSCALL_INFO, pid, sizeof(info), &info);
     printf("OBS no-sysgood size=%ld op=%u\n", size, info.op);
     assert(!ptrace(PTRACE_SETOPTIONS, pid, 0, PTRACE_O_TRACESYSGOOD));
     assert(!ptrace(PTRACE_SYSCALL, pid, 0, 0));
     assert(WSTOPSIG(stopped(pid)) == (SIGTRAP | 0x80));
+    registers_io.iov_len=sizeof(registers);
+    assert(!ptrace(PTRACE_GETREGSET,pid,NT_PRSTATUS,&registers_io));
+    printf("OBS syscall-register exit=%llu\n",(unsigned long long)registers.regs[7]);
+    assert(registers.regs[7]==1);
     memset(&info, 0, sizeof(info));
     size = ptrace(PTRACE_GET_SYSCALL_INFO, pid, sizeof(info), &info);
     printf("OBS sysgood size=%ld op=%u\n", size, info.op);
@@ -190,6 +238,7 @@ static void syscall_info(void) {
     printf("OBS short size=%ld op=%u intact=%d\n", short_size, short_info[0], intact);
     printf("OBS zero size=%ld\n", ptrace(PTRACE_GET_SYSCALL_INFO, pid, 0, NULL));
     assert(!ptrace(PTRACE_CONT, pid, 0, 0)); exited(pid, 0);
+    syscall_birth();
 }
 static volatile sig_atomic_t usr1, usr2;
 static void signal_handler(int number) { if (number == SIGUSR1) usr1++; else usr2++; }
