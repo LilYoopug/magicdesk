@@ -198,16 +198,22 @@ static void network_resource_transaction(void) {
 }
 int main(void) {
     alarm(60);
-    unsigned long spaces[] = {CLONE_NEWCGROUP};
     struct md_identity identity=md_identity_new(0,0);
     struct md_task_resources r; assert(!md_resources_init(&r,NULL));
-    for (unsigned i = 0; i < sizeof(spaces)/sizeof(*spaces); i++) {
-        struct md_resource_change change;
-        assert(!md_resources_clone_supported(spaces[i]));
-        assert(md_resources_unshare_prepare(&r, spaces[i] | CLONE_FS,NULL,&change) == -ENOTSUP);
-        assert(!change.next.fs && !change.next.sem_undo);
-    }
     struct md_resource_change change;
+    assert(md_resources_unshare_prepare(&r,CLONE_NEWTIME|CLONE_FS,NULL,&change)==-ENOTSUP);
+    assert(!change.next.fs && !change.next.sem_undo);
+    assert(md_resources_clone_supported(CLONE_NEWCGROUP));
+    struct md_cgroup_namespace *initial=md_cgroup_namespace_retain(r.cgroup_namespace);
+    struct md_cgroup_member *member=r.cgroup;
+    assert(!md_resources_unshare_prepare(&r,CLONE_NEWCGROUP,&identity,&change));
+    assert(change.next.cgroup_namespace && change.next.cgroup_namespace!=initial);
+    assert(!md_resources_unshare_finish(&r,NULL,&change,-EINVAL) && r.cgroup_namespace==initial);
+    assert(!md_resources_unshare_prepare(&r,CLONE_NEWCGROUP,&identity,&change));
+    assert(!md_resources_unshare_finish(&r,NULL,&change,0));
+    assert(r.cgroup_namespace!=initial && r.cgroup==member);
+    assert(md_cgroup_namespace_inode(r.cgroup_namespace)!=md_cgroup_namespace_inode(initial));
+    md_cgroup_namespace_release(initial);
     assert(md_resources_clone_supported(CLONE_NEWUTS));
     assert(md_resources_clone_supported(CLONE_NEWIPC));
     assert(!md_resources_clone_supported(CLONE_NEWIPC|CLONE_SYSVSEM));

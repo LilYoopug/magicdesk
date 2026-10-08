@@ -17,6 +17,7 @@ struct entry {
     struct md_pid_identity *pid;
     struct md_pid_identity *pid_group;
     struct md_cgroup_member *cgroup;
+    struct md_cgroup_namespace *cgroup_namespace;
 };
 struct md_task_registry { pthread_mutex_t lock; pid_t owner; struct entry *entries[BUCKETS]; };
 struct md_task_registry *md_task_registry_create(void) {
@@ -32,7 +33,8 @@ void md_task_registry_destroy(struct md_task_registry *r) {
         md_identity_release(&e->value); md_domain_unpin(e->fs);
         md_mount_namespace_release(e->mounts); md_fd_origins_unpin(e->files);
         md_pid_identity_release(e->pid); md_pid_identity_release(e->pid_group);
-        md_cgroup_member_depart(e->cgroup,e->tid); md_cgroup_member_release(e->cgroup); free(e);
+        md_cgroup_member_depart(e->cgroup,e->tid); md_cgroup_member_release(e->cgroup);
+        md_cgroup_namespace_release(e->cgroup_namespace); free(e);
     }
     pthread_mutex_destroy(&r->lock); free(r);
 }
@@ -47,6 +49,7 @@ int md_task_registry_publish(struct md_task_registry *r, pid_t tid, pid_t tgid,
     struct md_pid_identity *pid=resources ? resources->pid : NULL, *old_pid=NULL;
     struct md_pid_identity *group=resources ? resources->pid_group : NULL, *old_group=NULL;
     struct md_cgroup_member *cgroup=resources ? resources->cgroup : NULL, *old_cgroup=NULL;
+    struct md_cgroup_namespace *cgroup_ns=resources ? resources->cgroup_namespace : NULL, *old_cgroup_ns=NULL;
     unsigned bucket = (unsigned)tid % BUCKETS;
     pthread_mutex_lock(&r->lock);
     struct entry *e = r->entries[bucket];
@@ -64,6 +67,9 @@ int md_task_registry_publish(struct md_task_registry *r, pid_t tid, pid_t tgid,
     if (e->pid!=pid) { old_pid=e->pid; e->pid=md_pid_identity_retain(pid); }
     if (e->pid_group!=group) { old_group=e->pid_group; e->pid_group=md_pid_identity_retain(group); }
     if (e->cgroup!=cgroup) { old_cgroup=e->cgroup; e->cgroup=md_cgroup_member_retain(cgroup); }
+    if (e->cgroup_namespace!=cgroup_ns) {
+        old_cgroup_ns=e->cgroup_namespace; e->cgroup_namespace=md_cgroup_namespace_retain(cgroup_ns);
+    }
     md_cgroup_member_publish(cgroup,tid,tgid,pid,group);
     if (e->tgid == tgid && !memcmp(&e->value.uid, &v->uid, sizeof(v->uid))
             && !memcmp(&e->value.gid, &v->gid, sizeof(v->gid))
@@ -81,6 +87,7 @@ published:
     md_pid_identity_release(old_pid);
     md_pid_identity_release(old_group);
     md_cgroup_member_depart(old_cgroup,tid); md_cgroup_member_release(old_cgroup);
+    md_cgroup_namespace_release(old_cgroup_ns);
     return 0;
 }
 void md_task_registry_forget(struct md_task_registry *r, pid_t tid) {
@@ -95,7 +102,8 @@ void md_task_registry_forget(struct md_task_registry *r, pid_t tid) {
         md_identity_release(&e->value); md_domain_unpin(e->fs);
         md_mount_namespace_release(e->mounts); md_fd_origins_unpin(e->files);
         md_pid_identity_release(e->pid); md_pid_identity_release(e->pid_group);
-        md_cgroup_member_depart(e->cgroup,e->tid); md_cgroup_member_release(e->cgroup); free(e);
+        md_cgroup_member_depart(e->cgroup,e->tid); md_cgroup_member_release(e->cgroup);
+        md_cgroup_namespace_release(e->cgroup_namespace); free(e);
     }
 }
 int md_task_registry_read(struct md_task_registry *r, pid_t tid, pid_t peer,
@@ -116,6 +124,7 @@ int md_task_registry_read(struct md_task_registry *r, pid_t tid, pid_t peer,
         out->pid=md_pid_identity_retain(e->pid);
         out->pid_group=md_pid_identity_retain(e->pid_group);
         out->cgroup=md_cgroup_member_retain(e->cgroup);
+        out->cgroup_namespace=md_cgroup_namespace_retain(e->cgroup_namespace);
     }
     pthread_mutex_unlock(&r->lock); return error;
 }
@@ -128,5 +137,6 @@ void md_task_snapshot_release(struct md_task_snapshot *snapshot) {
     md_pid_identity_release(snapshot->pid);
     md_pid_identity_release(snapshot->pid_group);
     md_cgroup_member_release(snapshot->cgroup);
+    md_cgroup_namespace_release(snapshot->cgroup_namespace);
     *snapshot=(struct md_task_snapshot){0};
 }

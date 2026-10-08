@@ -96,6 +96,7 @@ static void entry(FILE *stream, unsigned info, unsigned id, unsigned parent, dev
     }
 }
 static const char *filesystem_type(const struct md_view_mount *mount) {
+    if (mount && mount->file.ops && mount->file.ops->namespace_reference) return "nsfs";
     if (mount && mount->backing==MD_MOUNT_PROC) return "proc";
     if (mount && mount->backing==MD_MOUNT_DEVPTS) return "devpts";
     if (mount && mount->cgroup) return md_cgroup_devices(mount->cgroup) ? "cgroup" : "cgroup2";
@@ -137,8 +138,10 @@ int md_fs_mount_table(struct md_filesystem *fs, unsigned info, unsigned flags) {
         if (m->detached || m==selected || !m->parent) continue;
         char path[PATH_MAX]; r=md_view_path(fs,m->target,m->parent,path,sizeof(path));
         if (r == -ENOENT && (fs->store->root_id || fs->native_root)) { r=0; continue; }
+        struct stat st=m->native;
+        if (!r && m->file.ops) r=m->file.ops->stat(m->file.context,&st);
         if (!r) entry(stream,info,m->id,m->parent ? m->parent->id : fs->mounts->base.id,
-            m->native.st_dev,path,filesystem_type(m),
+            st.st_dev,path,filesystem_type(m),
             md_view_inode(m) ? "guest" : "attachment",md_mount_policy_flags(&m->policy),filesystem_options(m));
     }
     if (!r && (fflush(stream) || ferror(stream))) r=-EIO;

@@ -50,8 +50,8 @@ static int control(const char *path,const char *name) {
             || !strcmp(name,"setgroups") || !strcmp(name,"exe") || !strcmp(name,"cmdline")
             || !strcmp(name,"auxv") || !strcmp(name,"fd") || !strcmp(name,"fdinfo")
             || !strcmp(name,"root") || !strcmp(name,"cwd") || !strcmp(name,"mounts")
-            || !strcmp(name,"mountinfo");
-    return !strcmp(path,"/proc/sys/kernel");
+            || !strcmp(name,"mountinfo") || !strcmp(name,"cgroup");
+    return !strcmp(path,"/proc/sys/kernel") || (!strcmp(path,"/proc") && !strcmp(name,"cgroups"));
 }
 int md_procfs_step(struct md_filesystem *fs,struct md_view_mount *mount,int fd,
         const char *name,const char *tail,int follow) {

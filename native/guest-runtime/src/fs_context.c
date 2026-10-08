@@ -16,6 +16,7 @@ struct filesystem_context {
     struct md_identity opener;
     struct md_pid_identity *pid;
     struct md_cgroup_member *cgroup;
+    struct md_cgroup_namespace *cgroup_namespace;
     struct md_mount_source source;
     struct stat stat;
     unsigned type,flags;
@@ -32,7 +33,8 @@ static void release(void *data) {
     if (atomic_fetch_sub_explicit(&c->refs,1,memory_order_acq_rel)!=1) return;
     md_mount_source_close(&c->source);
     md_identity_release(&c->opener);
-    md_pid_identity_release(c->pid); md_cgroup_member_release(c->cgroup); free(c);
+    md_pid_identity_release(c->pid); md_cgroup_member_release(c->cgroup);
+    md_cgroup_namespace_release(c->cgroup_namespace); free(c);
 }
 static int stat_context(void *data,struct stat *st) {
     *st=((struct filesystem_context *)data)->stat; return 0;
@@ -72,6 +74,7 @@ static int open_context(struct md_filesystem *fs,const struct md_fs_request *q,
     c->opener=md_identity_copy(fs->store->identity);
     c->pid=md_pid_identity_retain(fs->actor ? fs->actor->pid : NULL);
     c->cgroup=md_cgroup_member_retain(fs->actor ? fs->actor->cgroup : NULL);
+    c->cgroup_namespace=md_cgroup_namespace_retain(fs->actor ? fs->actor->cgroup_namespace : NULL);
     int fd=memfd_create("fscontext",MFD_CLOEXEC|MFD_ALLOW_SEALING);
     int r=fd<0 ? -errno : fstat(fd,&c->stat) ? -errno : 0;
     if (!r && fcntl(fd,F_ADD_SEALS,F_SEAL_SEAL|F_SEAL_WRITE|F_SEAL_GROW|F_SEAL_SHRINK)) r=-errno;
@@ -92,7 +95,8 @@ static int parameter(struct filesystem_context *c,const struct md_fs_request *q)
     int known=0,expect_string=1;
     switch (c->type) {
     case MD_FS_MOUNT_TMPFS:
-        known=!strcmp(key,"mode") || !strcmp(key,"uid") || !strcmp(key,"gid"); break;
+        known=!strcmp(key,"mode") || !strcmp(key,"uid") || !strcmp(key,"gid")
+            || !strcmp(key,"size") || !strcmp(key,"nr_blocks") || !strcmp(key,"nr_inodes"); break;
     case MD_FS_MOUNT_OVERLAY:
         known=!strcmp(key,"lowerdir") || !strcmp(key,"upperdir") || !strcmp(key,"workdir") || !strcmp(key,"userxattr");
         expect_string=strcmp(key,"userxattr")!=0; break;
@@ -127,6 +131,7 @@ static int configure(struct md_filesystem *fs,struct filesystem_context *c,const
     const struct md_task_snapshot *actor=fs->actor;
     struct md_task_snapshot captured=actor ? *actor : (struct md_task_snapshot){0};
     captured.pid=c->pid; captured.cgroup=c->cgroup;
+    captured.cgroup_namespace=c->cgroup_namespace;
     fs->store->identity=&c->opener; fs->actor=&captured;
     struct md_fs_request create={.mode=c->type,.flags=c->flags,
         .value=c->options,.value_size=(unsigned)c->size+1};
@@ -139,7 +144,10 @@ static int mount_context(struct md_filesystem *fs,struct filesystem_context *c,c
         struct md_fs_result *result,const struct md_fs_output *out) {
     if (!capable(fs)) return -EPERM;
     unsigned attrs=q->mode;
-    if (attrs&~(MOUNT_ATTR_RDONLY|MOUNT_ATTR_NOSUID|MOUNT_ATTR_NODEV|MOUNT_ATTR_NOEXEC)) return -EOPNOTSUPP;
+    if (attrs&~(MOUNT_ATTR_RDONLY|MOUNT_ATTR_NOSUID|MOUNT_ATTR_NODEV|MOUNT_ATTR_NOEXEC
+            |MOUNT_ATTR__ATIME|MOUNT_ATTR_NODIRATIME)) return -EOPNOTSUPP;
+    if ((attrs&MOUNT_ATTR__ATIME)!=MOUNT_ATTR_RELATIME && (attrs&MOUNT_ATTR__ATIME)!=MOUNT_ATTR_NOATIME
+            && (attrs&MOUNT_ATTR__ATIME)!=MOUNT_ATTR_STRICTATIME) return -EINVAL;
     if (c->phase!=CREATED) return c->source.fd<0 ? -EINVAL : -EBUSY;
     if (!out || !out->origin) return -EOPNOTSUPP;
     struct md_mount_source source=c->source;

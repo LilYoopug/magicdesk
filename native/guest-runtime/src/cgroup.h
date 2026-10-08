@@ -5,6 +5,12 @@
 #include "fs_anchor.h"
 struct md_cgroup_member;
 struct md_cgroup_view;
+struct md_cgroup_namespace;
+struct md_cgroup_namespace *md_cgroup_namespace_new(struct md_cgroup_member *,struct md_user_namespace *);
+struct md_cgroup_namespace *md_cgroup_namespace_retain(struct md_cgroup_namespace *);
+void md_cgroup_namespace_release(struct md_cgroup_namespace *);
+uint64_t md_cgroup_namespace_inode(const struct md_cgroup_namespace *);
+const struct md_user_namespace *md_cgroup_namespace_owner(const struct md_cgroup_namespace *);
 struct md_cgroup_member *md_cgroup_member_new(void);
 struct md_cgroup_member *md_cgroup_member_fork(struct md_cgroup_member *);
 struct md_cgroup_member *md_cgroup_member_retain(struct md_cgroup_member *);
@@ -18,7 +24,8 @@ struct md_cgroup_view *md_cgroup_mount(struct md_cgroup_member *,int parent,int 
     const struct md_identity *);
 struct md_cgroup_view *md_cgroup_retain(struct md_cgroup_view *);
 void md_cgroup_release(struct md_cgroup_view *);
-int md_cgroup_root(struct md_cgroup_view *);
+/* Returns an owned O_PATH root, selected under the hierarchy lock. */
+int md_cgroup_open_root(struct md_cgroup_view *,const struct md_cgroup_namespace *);
 int md_cgroup_devices(const struct md_cgroup_view *);
 unsigned long md_cgroup_filesystem(struct md_cgroup_view *);
 int md_cgroup_stat(struct md_cgroup_view *,int,struct stat *);
@@ -26,6 +33,6 @@ int md_cgroup_mkdir(struct md_cgroup_view *,int,const char *,const struct md_ide
 int md_cgroup_rmdir(struct md_cgroup_view *,int,const char *,const struct md_identity *);
 int md_cgroup_open(struct md_cgroup_view *,int,int,const struct md_identity *,struct md_fs_anchor *,
     const struct md_control_file_ops **,void **);
-long md_cgroup_member_text(struct md_cgroup_member *,char *,size_t);
+long md_cgroup_member_text(struct md_cgroup_member *,const struct md_cgroup_namespace *,char *,size_t);
 long md_cgroup_controllers_text(struct md_cgroup_member *,char *,size_t);
 #endif

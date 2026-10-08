@@ -33,6 +33,7 @@ struct operation {
     struct md_fs_anchor *input_origin, *output_origin;
     struct md_fs_request request;
     struct md_fs_result result;
+    int64_t position;
     int listener, directory, undelivered;
     char path[PATH_MAX];
 };
@@ -94,7 +95,7 @@ static void execute(struct operation *op,
         void *data, size_t capacity) {
     op->result = (struct md_fs_result){.fd = -1, .error = -ECANCELED};
     struct md_fs_output output = {.data = data, .capacity = capacity,
-        .deliver = deliver_directory, .context = op,
+        .directory_position=op->request.operation==MD_FS_GETDENTS ? &op->position : NULL,
         .origin=op->request.operation==MD_FS_OPEN ? &op->output_origin : NULL};
     if (valid(op)) md_fs_context_execute(&op->context, &op->request, &op->result, &output);
     if (op->result.error == -EXDEV && op->request.operation == MD_FS_FSTAT) {
@@ -238,7 +239,9 @@ static int reply(struct operation *op, const void *data) {
         if (fd>=0) { md_fd_origins_finish(&op->update,fd); return 1; }
         response.error = -errno;
     } else if (!response.error && op->notification.data.nr == SYS_getdents64) {
-        response.val = op->result.size;
+        response.error=deliver_directory(op,data,op->result.size);
+        if (op->undelivered) return 0;
+        if (!response.error) response.val=op->result.size;
     } else if (!response.error) {
         if (!valid(op)) return 1;
         struct stat st;
@@ -250,7 +253,15 @@ static int reply(struct operation *op, const void *data) {
         if (n < 0 && (errno == EPERM || errno == EACCES)) return 0;
         if (n != sizeof(st)) response.error = -EFAULT;
     }
-    return !ioctl(op->listener, SECCOMP_IOCTL_NOTIF_SEND, &response) || errno == ENOENT ? 1 : -errno;
+    if (ioctl(op->listener, SECCOMP_IOCTL_NOTIF_SEND, &response))
+        return errno==ENOENT ? 1 : -errno;
+    /* A signal may cancel the notification after copying bytes. Commit only
+     * after kernel acceptance, retaining the table/OFD turn through this seek. */
+    if (!response.error && op->notification.data.nr==SYS_getdents64) {
+        off_t position=lseek(op->directory,op->position,SEEK_SET);
+        if (position!=op->position) return position<0 ? -errno : -EIO;
+    }
+    return 1;
 }
 int md_broker_task(struct md_namespace_broker *b, int pid, int eligible, uintptr_t raw_gate, uintptr_t watch_gate) {
     pthread_mutex_lock(&b->lock);

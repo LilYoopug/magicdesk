@@ -1,10 +1,11 @@
 #ifndef MD_PROC_NAMESPACE_H
 #define MD_PROC_NAMESPACE_H
 #include "user_namespace.h"
+#include "control_file.h"
 #include <sys/stat.h>
 
 enum md_namespace_kind { MD_NAMESPACE_USER, MD_NAMESPACE_MOUNT, MD_NAMESPACE_UTS, MD_NAMESPACE_IPC,
-    MD_NAMESPACE_PID, MD_NAMESPACE_PID_CHILDREN, MD_NAMESPACE_NETWORK };
+    MD_NAMESPACE_PID, MD_NAMESPACE_PID_CHILDREN, MD_NAMESPACE_NETWORK, MD_NAMESPACE_CGROUP };
 struct md_task_resources;
 struct md_namespace_reference {
     enum md_namespace_kind kind;
@@ -15,6 +16,7 @@ struct md_namespace_reference {
         struct md_ipc_namespace *ipc;
         struct md_pid_namespace *pid;
         struct md_network_namespace *network;
+        struct md_cgroup_namespace *cgroup;
     } value;
 };
 /* References own resources, not a pid or a proc-directory carrier. */
@@ -30,4 +32,6 @@ const struct md_user_namespace *md_namespace_reference_owner(const struct md_nam
 int md_namespace_reference_related(const struct md_namespace_reference *,
     const struct md_user_namespace *caller, const struct md_pid_namespace *,
     int parent, struct md_namespace_reference *);
+/* Owned, unplaced nsfs provider; at() binds an open to its mount origin. */
+struct md_control_file md_namespace_file_new(const struct md_namespace_reference *);
 #endif

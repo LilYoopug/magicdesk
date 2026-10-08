@@ -12,12 +12,13 @@ enum md_proc_file_kind { MD_PROC_FILE_UID_MAP, MD_PROC_FILE_GID_MAP, MD_PROC_FIL
     MD_PROC_FILE_OSRELEASE, MD_PROC_FILE_VERSION,
     MD_PROC_FILE_OVERFLOWUID, MD_PROC_FILE_OVERFLOWGID,
     MD_PROC_FILE_NS_USER, MD_PROC_FILE_NS_MOUNT, MD_PROC_FILE_NS_UTS, MD_PROC_FILE_NS_IPC,
-    MD_PROC_FILE_NS_PID, MD_PROC_FILE_NS_PID_CHILDREN, MD_PROC_FILE_NS_NETWORK,
+    MD_PROC_FILE_NS_PID, MD_PROC_FILE_NS_PID_CHILDREN, MD_PROC_FILE_NS_NETWORK, MD_PROC_FILE_NS_CGROUP,
     MD_PROC_FILE_NS_DIRECTORY, MD_PROC_FILE_PROCESS_DIRECTORY, MD_PROC_FILE_STATUS, MD_PROC_FILE_STAT,
     MD_PROC_FILE_CGROUP, MD_PROC_FILE_CGROUPS,
     MD_PROC_FILE_CONTROL };
 struct md_proc_file;
 struct md_cgroup_member;
+struct md_cgroup_namespace;
 void md_proc_file_cgroup(struct md_proc_file *,struct md_cgroup_member *);
 static inline int md_proc_file_cgroup_kind(enum md_proc_file_kind kind) {
     return kind==MD_PROC_FILE_CGROUP || kind==MD_PROC_FILE_CGROUPS;
@@ -47,7 +48,7 @@ static inline int md_proc_file_sysctl(enum md_proc_file_kind kind) {
 struct md_proc_file;
 struct md_namespace_reference;
 static inline int md_proc_file_namespace(enum md_proc_file_kind kind) {
-    return kind>=MD_PROC_FILE_NS_USER && kind<=MD_PROC_FILE_NS_NETWORK;
+    return kind>=MD_PROC_FILE_NS_USER && kind<=MD_PROC_FILE_NS_CGROUP;
 }
 static inline const char *md_proc_file_namespace_name(enum md_proc_file_kind kind) {
     switch (kind) {
@@ -57,6 +58,7 @@ static inline const char *md_proc_file_namespace_name(enum md_proc_file_kind kin
     case MD_PROC_FILE_NS_IPC: return "ipc";
     case MD_PROC_FILE_NS_PID: case MD_PROC_FILE_NS_PID_CHILDREN: return "pid";
     case MD_PROC_FILE_NS_NETWORK: return "net";
+    case MD_PROC_FILE_NS_CGROUP: return "cgroup";
     default: return NULL;
     }
 }
@@ -83,7 +85,7 @@ void md_proc_file_release(struct md_proc_file *);
 /* Inert kernel carrier; proc contents and operations are served by the owner. */
 int md_proc_file_descriptor(const struct md_proc_file *);
 int md_proc_file_flags(const struct md_proc_file *);
-long md_proc_file_read_at(struct md_proc_file *, const struct md_uts_namespace *,
+long md_proc_file_read_at(struct md_proc_file *, const struct md_uts_namespace *, const struct md_cgroup_namespace *,
     void *, size_t capacity, int64_t offset);
 long md_proc_file_write_at(struct md_proc_file *, const struct md_identity *writer,
     struct md_uts_namespace *,

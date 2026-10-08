@@ -34,6 +34,7 @@ struct md_fs_buffer_service {
     struct md_ipc_capsules *capsules; /* filesystem worker until stop/join */
     md_control_factory control;
     md_control_query control_query;
+    md_control_capture control_capture;
     void (*complete)(struct md_fs_buffer_request *, pid_t, int);
 };
 struct md_fs_buffer_request {
@@ -391,6 +392,9 @@ void md_fs_buffer_control_factory(struct md_fs_buffer_service *s,md_control_fact
 void md_fs_buffer_control_query(struct md_fs_buffer_service *s,md_control_query query) {
     s->control_query=query;
 }
+void md_fs_buffer_control_capture(struct md_fs_buffer_service *s,md_control_capture capture) {
+    s->control_capture=capture;
+}
 static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
     struct md_fs_buffer_request *r=(void *)work;
     r->error=error;
@@ -723,15 +727,30 @@ int md_fs_buffer_progress(struct md_fs_buffer_service *s) {
         if (r->executable && !*r->request.path[0]) data=1;
         for (unsigned i=0;i<2 && !error;++i) {
             int base=r->request.directory[i];
+            if (i==1 && (r->capture_mask&(1U<<i)) && r->request.operation==MD_FS_MOUNT
+                    && r->request.mode==MD_FS_MOUNT_BIND && s->control_capture && s->control_query) {
+                int found=s->control_capture(r->actor,r->request.capture[i].path,&r->control_input);
+                if (found<0) { error=found; break; }
+                if (found) {
+                    found=s->control_query(r->control_input,r->request.operation,&r->request.control);
+                    if (found<=0) { error=found ? found : -EOPNOTSUPP; break; }
+                    r->capture_mask&=~(1U<<i);
+                    r->request.capture[i]=(struct md_fs_task_capture){0};
+                    continue;
+                }
+            }
             if (r->capture_mask&(1U<<i)) {
                 r->input[i]=capture_origin(r,i);
                 r->request.origin[i]=r->input[i];
             }
-            if (!i && base>=0 && (r->request.operation==MD_FS_FSCONFIG || r->request.operation==MD_FS_FSMOUNT)
+            if (base>=0 && ((!i && (r->request.operation==MD_FS_FSCONFIG || r->request.operation==MD_FS_FSMOUNT))
+                    || (i==1 && r->request.operation==MD_FS_MOUNT && r->request.mode==MD_FS_MOUNT_BIND
+                        && r->request.path[i] && !*r->request.path[i]))
                     && s->control_query) {
                 r->control_input=md_fd_origins_object(r->files.table,base,NULL);
-                r->request.control=s->control_query(r->control_input);
-                if (r->request.control.ops) continue;
+                int found=s->control_query(r->control_input,r->request.operation,&r->request.control);
+                if (found<0) { error=found; break; }
+                if (found) continue;
             }
             if (base==AT_FDCWD) r->input[i]=md_fs_anchor_retain(r->context.task.cwd);
             else if (base>=0) r->input[i]=md_fd_origins_get(r->files.table,base,NULL);

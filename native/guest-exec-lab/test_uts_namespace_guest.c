@@ -132,7 +132,7 @@ int test_uts_namespace_guest(int argc, char **argv) {
     completed(child); names_are("parent","outer");
     assert(clone(isolated,(char *)stack+1024*1024,CLONE_NEWUTS|CLONE_SIGHAND|SIGCHLD,NULL)<0 && errno==EINVAL);
     free(stack); names_are("parent","outer");
-    assert(unshare(CLONE_NEWUTS|CLONE_NEWCGROUP)<0 && errno==ENOTSUP);
+    assert(unshare(CLONE_NEWUTS|CLONE_NEWTIME)<0 && errno==ENOTSUP);
     names_are("parent","outer");
     assert(!prctl(PR_SET_DUMPABLE,0));
     overflow_ids();

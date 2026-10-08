@@ -18,14 +18,18 @@ _Static_assert(sizeof(struct md_mount_policy_page)==16,"mount policy wire layout
 unsigned md_mount_policy_shared_flags(const struct md_mount_policy *p) {
     return atomic_load_explicit(&p->page->flags,memory_order_acquire);
 }
-int md_mount_policy_set(struct md_mount_policy *p, unsigned flags) {
+int md_mount_policy_check(const struct md_mount_policy *p, unsigned flags) {
     if (!p || flags&~MD_MOUNT_POLICY_MASK
             || ((flags>>MD_MOUNT_LOCK_SHIFT)&~flags)) return -EINVAL;
     unsigned previous=md_mount_policy_flags(p);
     if ((previous>>MD_MOUNT_LOCK_SHIFT)&~flags) return -EPERM;
-    flags|=previous&MD_MOUNT_LOCKS;
+    return p->page && !p->writer ? -EPERM : 0;
+}
+int md_mount_policy_set(struct md_mount_policy *p, unsigned flags) {
+    int r=md_mount_policy_check(p,flags);
+    if (r) return r;
+    flags|=md_mount_policy_flags(p)&MD_MOUNT_LOCKS;
     if (!p->page) p->local=flags;
-    else if (!p->writer) return -EPERM;
     else atomic_store_explicit(&p->page->flags,flags,memory_order_release);
     return 0;
 }

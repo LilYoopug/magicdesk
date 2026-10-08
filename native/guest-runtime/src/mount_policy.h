@@ -23,6 +23,8 @@ static inline unsigned md_mount_policy_flags(const struct md_mount_policy *p) {
     return p->page ? md_mount_policy_shared_flags(p) : p->local;
 }
 int md_mount_policy_set(struct md_mount_policy *, unsigned flags);
+/* Worker-only preflight; neither allocates nor changes policy. */
+int md_mount_policy_check(const struct md_mount_policy *, unsigned flags);
 int md_mount_policy_lock(struct md_mount_policy *);
 /* Worker-only, lazy publication. Returns a borrowed CLOEXEC FD, retained by
  * this policy until close. Send only over a verified private channel. Failure

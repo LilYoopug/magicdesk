@@ -53,6 +53,9 @@ the inferior's logical UID and distinguishes normal, killed and core-dumped exit
 PTRACE_GET_SYSCALL_INFO exposes entry/exit records only with TRACESYSGOOD; short
 buffers retain the kernel's full-size return convention.
 NONE records still contain architecture, instruction and stack pointers.
+The syscall fixture varies application x7 while inspecting native proc/dev and
+logical store paths, requiring stable metadata and unchanged missing-path errors.
+Unrelated application registers cannot select filesystem or network policy.
 Newborn inferiors begin with their own first syscall entry, not a synthetic
 exit of the parent's clone. ARM64 regsets retain the kernel entry/exit marker
 in x7 while presenting the guest's registers.

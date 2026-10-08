@@ -12,19 +12,8 @@
 
 static long open_extended(const struct md_fs *fs, const char *exe, const unsigned long *a) {
     struct open_how how;
-    if (a[3] < sizeof(how)) return -EINVAL;
-    if (a[3] > md_page_size) return -E2BIG;
-    long r = md_read_memory(&how, (void *)a[2], sizeof(how));
+    long r = md_read_struct(&how, sizeof(how), (void *)a[2], a[3]);
     if (r < 0) return r;
-    for (size_t i = sizeof(how); i < a[3];) {
-        unsigned char bytes[64];
-        size_t n = a[3] - i;
-        if (n > sizeof(bytes)) n = sizeof(bytes);
-        r = md_read_memory(bytes, (void *)(a[2] + i), n);
-        if (r < 0) return r;
-        for (size_t j = 0; j < n; ++j) if (bytes[j]) return -E2BIG;
-        i += n;
-    }
     const uint64_t allowed = O_ACCMODE | O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC | O_APPEND |
         O_NONBLOCK | O_DSYNC | O_ASYNC | O_DIRECT | O_LARGEFILE | O_DIRECTORY | O_NOFOLLOW |
         O_NOATIME | O_CLOEXEC | O_SYNC | O_PATH | O_TMPFILE;
@@ -60,7 +49,7 @@ static long open_extended(const struct md_fs *fs, const char *exe, const unsigne
         if (md_proc_control_kind(kind)) {
             if (*ref.tail) return -ENOTDIR;
             if (kind==MD_PROC_NS_UNSUPPORTED) return -ENOENT;
-            if (kind>=MD_PROC_NS_USER && kind<=MD_PROC_NS_NETWORK
+            if (kind>=MD_PROC_NS_USER && kind<=MD_PROC_NS_CGROUP
                     && (how.resolve&(RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS))) return -ELOOP;
             /* Validate the same parent walk, without requiring host userns
              * support or permission to access Android's unrelated sysctl. */

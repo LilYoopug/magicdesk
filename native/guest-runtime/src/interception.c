@@ -65,6 +65,7 @@ static long md_guest_open_proc_fds(int directory) {
 
 extern void md_guest_ready(int, const char *, uint64_t, const struct md_interception_abi *);
 extern void md_guest_done(void), md_guest_allocate(void), md_guest_allocated(void);
+extern void md_guest_dispatch_entry(void);
 extern void md_guest_exported(void), md_guest_store(void), md_guest_stored(void);
 extern void md_guest_load_byte(void), md_guest_loaded_byte(void);
 extern void md_guest_store_ids(void), md_guest_stored_ids(void);
@@ -172,7 +173,7 @@ static const struct md_interception_abi abi = {
     .magic = MD_INTERCEPTION_MAGIC, .size = sizeof(struct md_interception_abi),
     .ready = (uintptr_t)md_guest_ready, .done = (uintptr_t)md_guest_done,
     .allocate = (uintptr_t)md_guest_allocate, .allocated = (uintptr_t)md_guest_allocated,
-    .dispatch = (uintptr_t)md_guest_dispatch, .export_fd = (uintptr_t)md_guest_export,
+    .dispatch = (uintptr_t)md_guest_dispatch_entry, .export_fd = (uintptr_t)md_guest_export,
     .exported = (uintptr_t)md_guest_exported, .export_control = (uintptr_t)md_guest_export_control,
     .proc_open=(uintptr_t)md_guest_open_proc_fds, .proc_open_path=(uintptr_t)proc_fds_path,
     .store = (uintptr_t)md_guest_store, .stored = (uintptr_t)md_guest_stored,
@@ -335,6 +336,13 @@ int md_interception_install(int inherited) {
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
             MD_DOMAIN_KERNEL_ARGUMENTS(NATIVE_ARGUMENT)
 #undef NATIVE_ARGUMENT
+            /* No guest key service is installed. Report absence consistently,
+             * without entering Android's keyrings or fabricating successful
+             * isolation. Application ERRNO/TRAP/KILL filters still apply. */
+#define UNAVAILABLE(n) BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_##n,0,1), \
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|ENOSYS),
+            UNAVAILABLE(add_key) UNAVAILABLE(request_key) UNAVAILABLE(keyctl)
+#undef UNAVAILABLE
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, instruction_pointer) + 4),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)(gate >> 32), 0, 12 + transport_instructions),
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, instruction_pointer)),

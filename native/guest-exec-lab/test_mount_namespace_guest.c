@@ -30,7 +30,7 @@ static int copied(void *argument) {
     assert(id(AT_FDCWD,".")==id(AT_FDCWD,"/"));
     char cwd[64]; assert(getcwd(cwd,sizeof(cwd)) && !strcmp(cwd,"/tmp"));
     uint64_t before=id(AT_FDCWD,"/");
-    assert(unshare(CLONE_NEWNS|CLONE_NEWCGROUP)<0 && errno==ENOTSUP);
+    assert(unshare(CLONE_NEWNS|CLONE_NEWTIME)<0 && errno==ENOTSUP);
     assert(id(AT_FDCWD,"/")==before);
     assert(!chdir("/"));
     return 0;

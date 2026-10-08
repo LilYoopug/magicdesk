@@ -113,6 +113,7 @@ struct md_proc_path md_proc_path_for(const char *path,int tid,int tgid) {
             else if (word(&p,"pid")) out.kind=MD_PROC_NS_PID;
             else if (word(&p,"pid_for_children")) out.kind=MD_PROC_NS_PID_CHILDREN;
             else if (word(&p,"net")) out.kind=MD_PROC_NS_NETWORK;
+            else if (word(&p,"cgroup")) out.kind=MD_PROC_NS_CGROUP;
             else if (*component(p)) { out.kind=MD_PROC_NS_UNSUPPORTED; p+=md_length(p); }
             else { out.kind=MD_PROC_NS_DIRECTORY; p=component(p); }
         }

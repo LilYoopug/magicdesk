@@ -14,6 +14,7 @@
 #include <linux/rtnetlink.h>
 #include <linux/sockios.h>
 #include <net/if.h>
+#include <linux/if_arp.h>
 #include <netinet/in.h>
 
 struct md_network_namespace {
@@ -123,6 +124,65 @@ static int route_change(struct network_socket *s, const struct md_identity *iden
     }
     return -EOPNOTSUPP;
 }
+static unsigned loopback_flags(const struct md_network_namespace *space) {
+    return space->loopback_flags | ((space->loopback_flags&IFF_UP) ? IFF_RUNNING|IFF_LOWER_UP : 0);
+}
+static size_t attribute(void *out,unsigned type,const void *data,size_t size) {
+    struct rtattr *a=out;
+    a->rta_type=type; a->rta_len=RTA_LENGTH(size);
+    memcpy(RTA_DATA(a),data,size); return RTA_SPACE(size);
+}
+static int route_query(const struct network_socket *s,const struct nlmsghdr *h,size_t size,
+        void *out) {
+    if (size<NLMSG_LENGTH(sizeof(struct ifinfomsg))) return -EINVAL;
+    if (h->nlmsg_flags&~(NLM_F_REQUEST|NLM_F_ACK|NLM_F_DUMP)) return -EOPNOTSUPP;
+    const struct ifinfomsg *m=NLMSG_DATA(h);
+    if (m->ifi_family!=AF_UNSPEC && m->ifi_family!=AF_PACKET) return -EAFNOSUPPORT;
+    int dump=(h->nlmsg_flags&NLM_F_DUMP)==NLM_F_DUMP, named=0;
+    if (!dump && m->ifi_index && m->ifi_index!=1) return -ENODEV;
+    int remaining=(int)size-(int)NLMSG_LENGTH(sizeof(*m));
+    for (const struct rtattr *a=IFLA_RTA(m); RTA_OK(a,remaining); a=RTA_NEXT(a,remaining)) {
+        if (a->rta_type==IFLA_IFNAME) {
+            if (named || RTA_PAYLOAD(a)<1 || RTA_PAYLOAD(a)>IFNAMSIZ
+                    || ((const char *)RTA_DATA(a))[RTA_PAYLOAD(a)-1]) return -EINVAL;
+            if (RTA_PAYLOAD(a)!=3 || memcmp(RTA_DATA(a),"lo",3)) return -ENODEV;
+            named=1;
+        } else if (a->rta_type==IFLA_EXT_MASK) {
+            uint32_t mask;
+            if (RTA_PAYLOAD(a)!=sizeof(mask)) return -EINVAL;
+            memcpy(&mask,RTA_DATA(a),sizeof(mask));
+            if (mask&~(RTEXT_FILTER_VF|RTEXT_FILTER_SKIP_STATS)) return -EOPNOTSUPP;
+        } else return -EOPNOTSUPP;
+    }
+    if (remaining) return -EINVAL;
+    if (!dump && !named && !m->ifi_index) return -EINVAL;
+    struct nlmsghdr *reply=out;
+    *reply=(struct nlmsghdr){.nlmsg_len=NLMSG_LENGTH(sizeof(*m)),.nlmsg_type=RTM_NEWLINK,
+        .nlmsg_flags=dump ? NLM_F_MULTI : 0,.nlmsg_seq=h->nlmsg_seq,.nlmsg_pid=s->port};
+    struct ifinfomsg *link=NLMSG_DATA(reply);
+    *link=(struct ifinfomsg){.ifi_family=AF_UNSPEC,.ifi_type=ARPHRD_LOOPBACK,
+        .ifi_index=1,.ifi_flags=loopback_flags(s->space)};
+    char *at=(char *)out+reply->nlmsg_len;
+    at+=attribute(at,IFLA_IFNAME,"lo",3);
+    uint32_t mtu=65536; at+=attribute(at,IFLA_MTU,&mtu,sizeof(mtu));
+    unsigned char address[6]={0}; at+=attribute(at,IFLA_ADDRESS,address,sizeof(address));
+    unsigned char state=(s->space->loopback_flags&IFF_UP) ? IF_OPER_UNKNOWN : IF_OPER_DOWN;
+    at+=attribute(at,IFLA_OPERSTATE,&state,sizeof(state));
+    reply->nlmsg_len=(uint32_t)(at-(char *)out);
+    if (dump) {
+        struct nlmsghdr *done=(void *)at;
+        *done=(struct nlmsghdr){.nlmsg_len=NLMSG_LENGTH(sizeof(int)),.nlmsg_type=NLMSG_DONE,
+            .nlmsg_flags=NLM_F_MULTI,.nlmsg_seq=h->nlmsg_seq,.nlmsg_pid=s->port};
+        at+=NLMSG_ALIGN(done->nlmsg_len);
+    } else if (h->nlmsg_flags&NLM_F_ACK) {
+        struct nlmsghdr *ack=(void *)at;
+        *ack=(struct nlmsghdr){.nlmsg_len=NLMSG_LENGTH(sizeof(struct nlmsgerr)),.nlmsg_type=NLMSG_ERROR,
+            .nlmsg_seq=h->nlmsg_seq,.nlmsg_pid=s->port};
+        ((struct nlmsgerr *)NLMSG_DATA(ack))->msg=*h;
+        at+=NLMSG_ALIGN(ack->nlmsg_len);
+    }
+    return (int)(at-(char *)out);
+}
 long md_network_socket_call(struct md_fd_object *object, const struct md_identity *identity,
         long nr, const unsigned long *a, void *data, size_t capacity, size_t size, pid_t pid) {
     if (!md_network_socket_control(object)) return -EBADF;
@@ -136,7 +196,7 @@ long md_network_socket_call(struct md_fd_object *object, const struct md_identit
         }
         if (memcmp(r->ifr_name,"lo",3)) return -ENODEV;
         if (a[1]==SIOCGIFINDEX) r->ifr_ifindex=1;
-        else if (a[1]==SIOCGIFFLAGS) r->ifr_flags=(short)s->space->loopback_flags;
+        else if (a[1]==SIOCGIFFLAGS) r->ifr_flags=(short)loopback_flags(s->space);
         else if (a[1]==SIOCGIFMTU) r->ifr_mtu=65536;
         else return -EOPNOTSUPP;
         return 0;
@@ -176,10 +236,16 @@ long md_network_socket_call(struct md_fd_object *object, const struct md_identit
                 .nlmsg_seq=h->nlmsg_seq,.nlmsg_pid=s->port ? s->port : (uint32_t)pid},
             .error={.msg=*h}};
         unsigned flags=s->space->loopback_flags; uint32_t address=s->space->loopback_address;
-        reply.error.error=route_change(s,identity,h,size,&flags,&address);
+        union { struct nlmsghdr align; unsigned char bytes[256]; } query={0};
+        int queried=0;
+        if (h->nlmsg_type==RTM_GETLINK && (h->nlmsg_flags&NLM_F_REQUEST)) {
+            queried=route_query(s,h,size,query.bytes);
+            reply.error.error=queried<0 ? queried : 0;
+        } else reply.error.error=route_change(s,identity,h,size,&flags,&address);
         /* Kernel-backed response queue supplies poll/epoll readiness; no
          * request or interface mutation is submitted to Android netlink. */
-        ssize_t written=send(s->peer,&reply,sizeof(reply),MSG_DONTWAIT|MSG_NOSIGNAL);
+        ssize_t written=send(s->peer,queried>0 ? (void *)query.bytes : (void *)&reply,
+            queried>0 ? (size_t)queried : sizeof(reply),MSG_DONTWAIT|MSG_NOSIGNAL);
         if (written>=0 && !reply.error.error) {
             s->space->loopback_flags=flags; s->space->loopback_address=address;
         }

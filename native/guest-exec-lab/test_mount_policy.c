@@ -97,6 +97,7 @@ static void basics(void) {
     fail_map=1; assert(md_mount_policy_import(&observer,imported)==-ENOMEM); fail_map=0;
     assert(!observer.page && fcntl(imported,F_GETFD)>=0);
     assert(!md_mount_policy_import(&observer,imported));
+    assert(md_mount_policy_check(&observer,0)==-EPERM);
     assert(md_mount_policy_set(&observer,0)==-EPERM);
     assert(md_mount_policy_import(&observer,fd)==-EINVAL && fcntl(fd,F_GETFD)>=0);
     assert(md_mount_policy_share(&observer)==imported);
@@ -133,6 +134,9 @@ static void basics(void) {
         unsigned locked=flags|(flags<<MD_MOUNT_LOCK_SHIFT);
         assert(md_mount_policy_flags(&p)==locked);
         for (unsigned next=0;next<=MD_MOUNT_FLAGS;++next) {
+            unsigned previous=md_mount_policy_flags(&p);
+            assert(md_mount_policy_check(&p,next)==((flags&~next) ? -EPERM : 0));
+            assert(md_mount_policy_flags(&p)==previous);
             int result=md_mount_policy_set(&p,next);
             assert(result==((flags&~next) ? -EPERM : 0));
         }

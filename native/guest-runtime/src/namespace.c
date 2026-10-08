@@ -287,7 +287,7 @@ long md_namespace_call(const struct md_fs *fs, const char *exe, long nr, const u
         return md_raw(nr,a[0],a[1],a[2],a[3],a[4],a[5]);
     }
     if (nr==SYS_mount || nr==SYS_umount2 || nr==SYS_pivot_root) return md_namespace_mount(fs,nr,a);
-    if (nr==SYS_fsopen || nr==SYS_fsconfig || nr==SYS_fsmount || nr==SYS_move_mount)
+    if (nr==SYS_fsopen || nr==SYS_fsconfig || nr==SYS_fsmount || nr==SYS_move_mount || nr==SYS_mount_setattr)
         return md_namespace_mount_fd(fs,nr,a);
     if (nr == SYS_getcwd) {
         struct md_fs_request q = {.operation = MD_FS_PATH, .directory = {AT_FDCWD, -1}};

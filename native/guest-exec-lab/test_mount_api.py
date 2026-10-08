@@ -36,6 +36,29 @@ def guest():
         call(431, fd, 6, 0, 0, 0)
         return fd
 
+    def attributes(path='', fd=-100, flags=0, set_bits=0, clear_bits=0, propagation=0,
+                   userns=0, tail=None, error=None):
+        words = [set_bits, clear_bits, propagation, userns]
+        if tail is not None:
+            words.append(tail)
+        value = (ctypes.c_uint64 * len(words))(*words)
+        return call(442, fd, str(path), flags, ctypes.addressof(value), ctypes.sizeof(value), error=error)
+
+    def write_denied(path):
+        try:
+            Path(path).write_text('not allowed')
+            raise AssertionError('readonly mount accepted a write')
+        except OSError as error:
+            assert error.errno == errno.EROFS, error
+
+    # The launch enters a child user/mount namespace but retains its parent's
+    # cgroup namespace. fsopen must not acquire the authority of a later unshare.
+    old_context = call(430, 'cgroup2', 1)
+    call(97, 0x02000000)  # AArch64 unshare(CLONE_NEWCGROUP).
+    call(431, old_context, 6, 0, 0, 0, error=errno.EPERM)
+    os.close(old_context)
+    print('PASS cgroup fscontext retains namespace authority', flush=True)
+
     with tempfile.TemporaryDirectory(prefix='md-fsopen-') as directory:
         root = Path(directory)
         call(430, 'unknown', 0, error=errno.ENODEV)
@@ -55,18 +78,26 @@ def guest():
                 assert error.errno == expected, error
         call(432, fd, 1, 0, error=errno.EINVAL)
         call(431, fd, 0, 'unsupported', 0, 0, error=errno.EOPNOTSUPP)
+        call(431, fd, 0, 'size', 0, 0, error=errno.EINVAL)
         config(fd, 'mode', '0700')
+        config(fd, 'size', '1')
+        config(fd, 'nr_blocks', '1')
+        config(fd, 'nr_inodes', '1')
         duplicate = os.dup(fd)
         os.close(fd)
         call(431, duplicate, 6, 0, 0, 0)
         call(431, duplicate, 6, 0, 0, 0, error=errno.EBUSY)
-        mount = call(432, duplicate, 1, 0)
+        call(432, duplicate, 1, 0x30, error=errno.EINVAL)
+        mount = call(432, duplicate, 1, 0x20)  # MOUNT_ATTR_STRICTATIME is a backing hint.
         assert fcntl.fcntl(mount, fcntl.F_GETFD) & fcntl.FD_CLOEXEC
         assert fcntl.fcntl(mount, fcntl.F_GETFL) & os.O_PATH
         os.close(duplicate)
         assert os.fstat(mount).st_mode & 0o777 == 0o700
         nested = os.open('before-attach', os.O_CREAT | os.O_RDWR, 0o600, dir_fd=mount)
         os.write(nested, b'kept')
+        os.ftruncate(nested, 16384)
+        assert os.pwrite(nested, b'beyond', 8192) == 6
+        os.ftruncate(nested, 4)
         os.close(nested)
         assert not (root / 'before-attach').exists()
         call(429, mount, '', -100, str(root), 4)
@@ -116,7 +147,118 @@ def guest():
         call(39, str(root), 2)
         print('PASS inherited fscontext and shared mount publication', flush=True)
 
-        for kind, options in [('tmpfs', 'mode=0755'), ('cgroup2', None), ('cgroup', 'devices'),
+        # Zero attributes skip path lookup, but malformed structures never do.
+        zero = (ctypes.c_uint64 * 4)()
+        call(442, -1, 0, 0, ctypes.addressof(zero), 32)
+        call(442, -100, str(root), 0, 0, 31, error=errno.EINVAL)
+        call(442, -100, str(root), 0, 0, os.sysconf('SC_PAGE_SIZE') + 1, error=errno.E2BIG)
+        call(442, -100, str(root), 0, 1, 32, error=errno.EFAULT)
+        call(442, -100, str(root), 1, ctypes.addressof(zero), 32, error=errno.EINVAL)
+        attributes(root, tail=1, error=errno.E2BIG)
+        attributes(root, set_bits=1 << 63, error=errno.EINVAL)
+        attributes(root, set_bits=0x20, error=errno.EINVAL)
+        attributes(root, clear_bits=0x10, error=errno.EINVAL)
+        attributes(root, set_bits=0x30, clear_bits=0x70, error=errno.EINVAL)
+        attributes(root, set_bits=0x100000, error=errno.EOPNOTSUPP)  # IDMAP
+        attributes(root, set_bits=0x200000, error=errno.EOPNOTSUPP)  # NOSYMFOLLOW
+        attributes(root, propagation=(1 << 18) | (1 << 19), error=errno.EINVAL)
+        attributes(root, propagation=1 << 20, error=errno.EOPNOTSUPP)  # SHARED
+        context = create()
+        mount = call(432, context, 1, 0)
+        os.close(context)
+        attributes(fd=mount, set_bits=1, error=errno.ENOENT)
+        attributes(fd=mount, flags=0x1000, set_bits=1, tail=0)
+        try:
+            os.open('blocked', os.O_CREAT | os.O_WRONLY, 0o600, dir_fd=mount)
+            raise AssertionError('detached readonly mount accepted a write')
+        except OSError as error:
+            assert error.errno == errno.EROFS, error
+        attributes(fd=mount, flags=0x1000, clear_bits=1)
+        call(429, mount, '', -100, str(root), 4)
+        (root / 'child').mkdir()
+        (root / 'ordinary').mkdir()
+        attributes(root / 'ordinary', set_bits=1, error=errno.EINVAL)
+        context = create()
+        child_mount = call(432, context, 1, 0)
+        os.close(context)
+        call(429, child_mount, '', -100, str(root / 'child'), 4)
+        os.close(child_mount)
+        (root / 'child' / 'value').write_text('child')
+        (root / 'value').write_text('root')
+        alias = root / 'link'
+        alias.symlink_to(root / 'child', target_is_directory=True)
+        attributes(alias, flags=0x100, set_bits=1, error=errno.EINVAL)  # NOFOLLOW
+        attributes(alias, set_bits=1)
+        write_denied(root / 'child' / 'blocked')
+        attributes(root, set_bits=2)  # NOSUID on parent only.
+        assert os.statvfs(root).f_flag & os.ST_NOSUID
+        assert not os.statvfs(root / 'child').f_flag & os.ST_NOSUID
+        attributes(root, clear_bits=2)
+
+        child = os.fork()
+        if child == 0:
+            try:
+                assert libc.prctl(4, 0, 0, 0, 0) == 0  # PR_SET_DUMPABLE
+                attributes(root, set_bits=8)
+                assert os.statvfs(root).f_flag & os.ST_NOEXEC
+                attributes(root, clear_bits=8)
+                os.setresuid(1, 1, 1)
+                call(442, -1, 0, 0, ctypes.addressof(zero), 32, error=errno.EPERM)
+                os._exit(0)
+            except BaseException:
+                import traceback
+                traceback.print_exc()
+                os._exit(1)
+        # EVENT_WAIT: protected caller and authority check; outer deadline fails a hang.
+        assert os.waitpid(child, 0)[1] == 0
+
+        child = os.fork()
+        if child == 0:
+            try:
+                call(97, 0x10000000 | 0x20000)  # NEWUSER | NEWNS, locks inherited policy.
+                Path('/proc/self/uid_map').write_text('0 0 1\n')
+                Path('/proc/self/setgroups').write_text('deny\n')
+                Path('/proc/self/gid_map').write_text('0 0 1\n')
+                attributes(root, flags=0x8000, set_bits=2, clear_bits=1, error=errno.EPERM)
+                assert not os.statvfs(root).f_flag & os.ST_NOSUID
+                assert not os.statvfs(root / 'child').f_flag & os.ST_NOSUID
+                assert os.statvfs(root / 'child').f_flag & os.ST_RDONLY
+                (root / 'parent-still-writable').write_text('kept')
+                os._exit(0)
+            except BaseException:
+                import traceback
+                traceback.print_exc()
+                os._exit(1)
+        # EVENT_WAIT: namespace child completion; outer deadline fails a hang.
+        assert os.waitpid(child, 0)[1] == 0
+        attributes(root, flags=0x8000, set_bits=1 | 2 | 4 | 8)
+        write_denied(root / 'blocked')
+        write_denied(root / 'child' / 'blocked')
+        for path in (root, root / 'child'):
+            assert os.statvfs(path).f_flag & 15 == 15
+        attributes(root, flags=0x8000, set_bits=0x20, clear_bits=15 | 0x70, propagation=1 << 18)
+        (root / 'value').write_text('writable')
+        (root / 'child' / 'value').write_text('writable')
+        # Retained descriptors observe the same policy after attachment.
+        attributes(fd=mount, flags=0x1000, set_bits=1, clear_bits=1)
+        write_denied(root / 'blocked')
+        attributes(fd=mount, flags=0x1000, clear_bits=1)
+        call(39, str(root), 2)
+        attributes(fd=mount, flags=0x1000, set_bits=1, error=errno.EINVAL)
+        os.close(mount)
+        print('PASS mount_setattr: ABI, detached FD, recursive policy, locked rollback and retained origins', flush=True)
+
+        # openat2 shares the versioned-structure reader, not mount semantics.
+        how = (ctypes.c_uint64 * 4)(os.O_PATH, 0, 0, 0)
+        opened = call(437, -100, str(root), ctypes.addressof(how), ctypes.sizeof(how))
+        os.close(opened)
+        how[3] = 1
+        call(437, -100, str(root), ctypes.addressof(how), ctypes.sizeof(how), error=errno.E2BIG)
+        call(437, -100, str(root), ctypes.addressof(how), 23, error=errno.EINVAL)
+        call(437, -100, str(root), 1, 24, error=errno.EFAULT)
+        print('PASS shared structure reader: openat2 zero extension and invalid buffers', flush=True)
+
+        for kind, options in [('tmpfs', 'mode=0755,size=65536k,strictatime'), ('cgroup2', None), ('cgroup', 'devices'),
                               ('proc', None), ('devpts', 'newinstance,ptmxmode=0666,mode=0620')]:
             command = ['strace', '-e', 'trace=fsopen,fsconfig,fsmount,move_mount,mount_setattr',
                        'mount', '-t', kind]

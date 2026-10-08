@@ -57,6 +57,8 @@ def main():
         return value
 
     def check_namespaces():
+        check("guest keyring absence", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
+              + root + "/store --deadline-seconds 90 -- /bin/test keyring", "PASS guest keyring absence:")
         check("native memfd metadata", root + "/libmagicdesk_guest_resource_guest.so native-metadata", "PASS native metadata:")
         check("guest memfd metadata", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
               + root + "/store --deadline-seconds 90 -- /bin/test native-metadata", "PASS native metadata:")
@@ -64,6 +66,8 @@ def main():
               + root + "/store --deadline-seconds 90 -- /bin/test cgroup", "PASS guest cgroup:")
         check("guest PID-scoped cgroup", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
               + root + "/store --deadline-seconds 90 -- /bin/test cgroup-pid", "PASS guest cgroup: PID namespace")
+        check("guest cgroup namespace", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
+              + root + "/store --deadline-seconds 90 -- /bin/test cgroup-namespace", "PASS guest cgroup namespace:")
         check("guest private devpts", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
               + root + "/store --deadline-seconds 90 -- /bin/test devpts", "PASS guest devpts:")
         check("guest PID-scoped devpts", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
@@ -76,6 +80,8 @@ def main():
               + root + "/store --deadline-seconds 90 -- /bin/test overlay", "PASS guest overlay:")
         check("guest namespace handles", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
               + root + "/store --deadline-seconds 90 -- /bin/test namespace-handles", "PASS guest namespace handles:")
+        check("guest PID-scoped namespace mounts", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
+              + root + "/store --deadline-seconds 90 -- /bin/test namespace-mounts-pid", "PASS PID-scoped namespace mounts:")
         check("guest mount flags", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --admit-elf /bin/test --store "
               + root + "/store --bind /dev /attached --deadline-seconds 90 -- /bin/test mount-flags", "PASS guest mount flags")
         check("guest temporary filesystems", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
@@ -143,6 +149,7 @@ def main():
               + "/store --deadline-seconds 90 -- /bin/test watch-slots /tmp", "PASS watch paths without private FDs")
 
     def check_buffers():
+        check_mutation_signals()
         check_captures()
         check("adapter address-space ownership", root + "/libmagicdesk_guest_test_interception_buffers.so",
               "PASS shared request buffer ownership")
@@ -184,6 +191,18 @@ def main():
                   + "/store --deadline-seconds 1 -- /bin/test buffer-park" + suffix + " /tmp",
                   "READY buffered parked group",
                   patterns=(r"supervisor failure line=\d+ outcome >= 0 errno=110",), exit_code=125)
+
+    def check_mutation_signals():
+        for protected in range(2):
+            for restart in range(2):
+                for guest in (False, True):
+                    command = (root + "/libmagicdesk_guest_run.so --store " + root
+                               + "/store --deadline-seconds 90 -- /bin/test mutation-signal /tmp"
+                               if guest else root + "/libmagicdesk_guest_resource_guest.so mutation-signal " + root + "/native")
+                    # EVENT_WAIT: the launch deadline bounds signal stress and cleanup.
+                    check(f"mutation signals protected={protected} restart={restart} guest={guest}",
+                          "timeout -k 5 105 " + command + f" {protected} {restart}",
+                          "PASS mutation under signals:")
 
     def check_exec_custody():
         check("native exec preparation control", root + "/libmagicdesk_guest_resource_guest.so exec-custody-native "
@@ -297,6 +316,8 @@ def main():
             "test_task_resources", "test_inodes", "test_mounts", "test_credentials", "test_rpc", "test_snapshot", "fd_handoff", "test_ipc_peer")
         if args.case in ("mount-namespace", "proc-custody", "exec-custody", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture"):
             names = ("bootstrap", "supervisor", "run", "service", "resource_guest")
+        if args.case == "fs-directory":
+            names += ("fs_dispatch",)
         if args.case in ("all", "fs-buffer"):
             names += ("test_interception_buffers",)
         if args.case == "all":
@@ -333,6 +354,9 @@ def main():
             file = "libmagicdesk_guest_" + name + ".so"
             transport.upload(client, args.build / file, root + "/" + file)
         check("prepare fixtures", "chmod 700 " + root + "/*.so")
+        if args.case in ("all", "fs-dispatch", "fs-directory"):
+            check("broker directory notification ownership", root + "/libmagicdesk_guest_fs_dispatch.so --broker-directory "
+                  + root + "/broker-directory", "PASS broker directory notification ownership")
         if args.case == "mount-namespace":
             check("fixture directories", "mkdir -p " + root + "/source/tmp " + root + "/source/bin " + root + "/source/attached")
             check("stage guest image", "cp " + root + "/libmagicdesk_guest_resource_guest.so " + root + "/source/bin/test")

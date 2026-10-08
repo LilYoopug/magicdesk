@@ -31,7 +31,19 @@ static long output(void *target, void *length_address, const void *data, long si
     if (!error) { length=(unsigned)size; error=md_write_memory(length_address,&length,sizeof(length)); }
     return error;
 }
+static int queue_option(unsigned long level,unsigned long option) {
+    if (level!=SOL_SOCKET) return 0;
+    switch (option) {
+    case SO_SNDTIMEO: case SO_RCVTIMEO: case SO_SNDBUF: case SO_RCVBUF:
+        return 1;
+    default: return 0;
+    }
+}
 long md_network_call(long nr, const unsigned long *a) {
+    /* These options describe the real message queue, not a host interface or
+     * peer identity. Let the kernel own validation, dup sharing and timeouts. */
+    if ((nr==SYS_setsockopt || nr==SYS_getsockopt) && queue_option(a[1],a[2]))
+        return md_raw(nr,a[0],a[1],a[2],a[3],a[4],a[5]);
     if (nr==SYS_read || nr==SYS_readv || nr==SYS_recvfrom || nr==SYS_recvmsg || nr==SYS_recvmmsg) {
         if (nr==SYS_recvfrom && a[4]) {
             long result=RAW6(recvfrom,a[0],a[1],a[2],a[3],0,0);

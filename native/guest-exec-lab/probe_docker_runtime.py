@@ -17,11 +17,12 @@ import tempfile
 import threading
 
 
-PROFILES = ('default', 'rootless', 'rootless-no-firewall', 'rootless-no-network')
+ROOTLESS_PROFILES = ('rootless', 'rootless-no-firewall', 'rootless-no-network')
+PROFILES = ('default', 'no-network', *ROOTLESS_PROFILES)
 
 
 def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_runtime=False,
-          no_new_keyring=False):
+          no_new_keyring=False, trace_filesystem=False, create_count=0):
     os.environ['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
     preparation = []
     def mount(*args):
@@ -48,12 +49,12 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
     argv = ['dockerd', '--debug', '--host', endpoint,
             '--pidfile', str(base / 'docker.pid'), '--data-root', str(base / 'data'),
             '--exec-root', str(base / 'run')]
-    if profile != 'default':
+    if profile in ROOTLESS_PROFILES:
         argv += ['--rootless', '--group', '0']
-    if profile in ('rootless-no-firewall', 'rootless-no-network'):
+    if profile in ('no-network', 'rootless-no-firewall', 'rootless-no-network'):
         argv += ['--iptables=false', '--ip6tables=false', '--ip-forward=false',
                  '--ip-masq=false']
-    if profile == 'rootless-no-network':
+    if profile in ('no-network', 'rootless-no-network'):
         argv += ['--bridge=none', '--storage-driver=vfs']
     if trace_runtime or no_new_keyring:
         wrapper = base / 'runc-trace'
@@ -71,7 +72,10 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
                            + 'os.execv(command[0], command)\n')
         wrapper.chmod(0o700)
         argv += ['--add-runtime=mdtrace=' + str(wrapper), '--default-runtime=mdtrace']
-    if trace:
+    if trace_filesystem:
+        argv = ['strace', '-D', '-f', '-s', '256', '-e',
+                'trace=%file,getdents64,lseek', '-o', str(base / 'filesystem.log'), *argv]
+    elif trace:
         argv = ['strace', '-f', '-yy', '-s', '256', '-e', 'trace=fchown,fchownat', *argv]
     report = {'profile': profile, 'cgroup': cgroup, 'cgroupns': cgroupns, 'preparation': preparation,
               'newKeyringDisabled': no_new_keyring,
@@ -124,6 +128,13 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
             client('info', '--format', 'driver={{.Driver}} cgroup={{.CgroupDriver}} '
                    'memoryLimit={{.MemoryLimit}}')
             if report['apiReady'] and client('pull', image):
+                for number in range(create_count):
+                    name = 'md-copy-' + str(number)
+                    if not client('create', '--name', name, '--network', 'none', '--cgroupns',
+                                  cgroupns, image, '/bin/true'):
+                        break
+                    if not client('rm', name):
+                        break
                 for network in ('host', 'none'):
                     client('run', '--rm', '--network', network, '--cgroupns', cgroupns, image,
                            '/bin/sh', '-c', 'echo DOCKER_CONTAINER_EXECUTED; id')
@@ -154,6 +165,26 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
                 report['runtimeTraces'][path.name] = {
                     'lines': len(lines), 'tail': lines[-200:],
                     'errors': [line for line in lines if '= -1 ' in line][-100:]}
+        if trace_filesystem:
+            count, tail, conflicts = 0, collections.deque(maxlen=100), collections.deque(maxlen=60)
+            recent, cleanup = collections.deque(maxlen=160), collections.deque(maxlen=6)
+            following = 0
+            with (base / 'filesystem.log').open(errors='replace') as stream:
+                for line in stream:
+                    count += 1
+                    line = line.rstrip()
+                    tail.append(line)
+                    recent.append(line)
+                    if following:
+                        cleanup[-1]['lines'].append(line)
+                        following -= 1
+                    if 'EEXIST' in line:
+                        conflicts.append(line)
+                    if 'ENOTEMPTY' in line and not following:
+                        cleanup.append({'at': count, 'lines': list(recent)})
+                        following = 80
+            report['filesystemTrace'] = {'lines': count, 'tail': list(tail), 'conflicts': list(conflicts),
+                                         'cleanupFailures': list(cleanup)}
         print(json.dumps(report), flush=True)
         if reader.is_alive():
             os._exit(2)
@@ -165,8 +196,13 @@ def main():
     parser.add_argument('store')
     parser.add_argument('--profile', choices=PROFILES, default='rootless-no-network')
     parser.add_argument('--image', default='busybox:1.37.0')
-    parser.add_argument('--trace', action='store_true')
-    parser.add_argument('--trace-runtime', action='store_true')
+    tracing = parser.add_mutually_exclusive_group()
+    tracing.add_argument('--trace', action='store_true')
+    tracing.add_argument('--trace-runtime', action='store_true')
+    tracing.add_argument('--trace-filesystem', action='store_true',
+                        help='Record daemon file syscalls in the disposable guest directory')
+    parser.add_argument('--create-count', type=int, default=0, choices=range(21),
+                        help='Exercise repeated VFS layer creation/removal before starting containers')
     parser.add_argument('--no-new-keyring', action='store_true',
                         help='Diagnostic variant: runc inherits the session keyring instead of creating one')
     parser.add_argument('--cgroup', choices=('none', 'v2', 'devices'), default='none')
@@ -183,12 +219,17 @@ def main():
         runner = prefix + ['--bind-ro', suite.base, target, '--deadline-seconds', '420', '--']
         suite.report['packages'] = suite.command(runner + ['/usr/bin/dpkg-query', '-W',
                                                           'docker.io', 'docker-cli', 'containerd', 'runc'])
-        if args.profile != 'default':
+        if args.profile in ROOTLESS_PROFILES:
             runner += ['/usr/bin/unshare', '--user', '--map-users=0:0:65536',
                        '--map-groups=0:0:65536', '--mount']
+            # Mounting cgroups in a user namespace requires a cgroup namespace
+            # owned by that user namespace, independently of Docker's setting.
+            if args.cgroup != 'none':
+                runner += ['--cgroup']
         output = suite.command(runner + ['/usr/bin/python3', target + '/probe.py', '--guest',
                                         args.profile, args.image, str(int(args.trace)), args.cgroup,
-                                        args.cgroupns, str(int(args.trace_runtime)), str(int(args.no_new_keyring))], quiet=True, timeout=450)
+                                        args.cgroupns, str(int(args.trace_runtime)), str(int(args.no_new_keyring)),
+                                        str(int(args.trace_filesystem)), str(args.create_count)], quiet=True, timeout=450)
         suite.report['probeResult'] = json.loads(output)
         print(json.dumps({key: value for key, value in suite.report['probeResult'].items()
                           if key != 'log'}, indent=2), flush=True)
@@ -202,6 +243,6 @@ def main():
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == '--guest':
         guest(sys.argv[2], sys.argv[3], bool(int(sys.argv[4])), sys.argv[5], sys.argv[6],
-              bool(int(sys.argv[7])), bool(int(sys.argv[8])))
+              bool(int(sys.argv[7])), bool(int(sys.argv[8])), bool(int(sys.argv[9])), int(sys.argv[10]))
     else:
         main()

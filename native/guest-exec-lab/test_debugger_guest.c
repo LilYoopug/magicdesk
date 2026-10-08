@@ -15,6 +15,7 @@
 #include <sys/ioctl.h>
 #include <sys/resource.h>
 #include <sys/shm.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
@@ -72,6 +73,17 @@ static void attach_test(int seize, int trace_exit) {
     }
     close(release[1]); exited(child, 7);
 }
+static long stat_with_x7(const char *path, struct stat *st, unsigned long scratch) {
+    register long x0 __asm__("x0")=AT_FDCWD;
+    register const char *x1 __asm__("x1")=path;
+    register struct stat *x2 __asm__("x2")=st;
+    register long x3 __asm__("x3")=0;
+    register unsigned long x7 __asm__("x7")=scratch;
+    register long x8 __asm__("x8")=SYS_newfstatat;
+    __asm__ volatile("svc #0" : "+r"(x0), "+r"(x7)
+        : "r"(x1), "r"(x2), "r"(x3), "r"(x8) : "memory", "cc");
+    return x0;
+}
 static void syscall_test(void) {
     pid_t child = fork(); assert(child >= 0);
     if (!child) {
@@ -85,6 +97,21 @@ static void syscall_test(void) {
         int high=fcntl(copy,F_DUPFD_CLOEXEC,128); assert(high>=128);
         assert(!syscall(SYS_close_range,high,high,0));
         assert(!close(copy) && !close(fd));
+        /* An unrelated application register cannot select adapter policy,
+         * including after a notification is cancelled at a syscall-exit stop. */
+        const unsigned long scratch[]={0,1,2,4,8,15,~0UL};
+        const char *paths[]={"/proc","/dev/null","/etc/passwd"};
+        for (unsigned p=0;p<sizeof(paths)/sizeof(paths[0]);++p) {
+            struct stat expected; assert(!stat(paths[p],&expected));
+            for (unsigned i=0;i<sizeof(scratch)/sizeof(scratch[0]);++i) {
+                struct stat actual;
+                long value=stat_with_x7(paths[p],&actual,scratch[i]);
+                if (value) fprintf(stderr,"stat %s x7=%#lx result=%ld\n",paths[p],scratch[i],value);
+                assert(!value && actual.st_dev==expected.st_dev && actual.st_ino==expected.st_ino
+                    && actual.st_mode==expected.st_mode);
+                assert(stat_with_x7("/proc/md-absent-entry",&actual,scratch[i])==-ENOENT);
+            }
+        }
         _exit(9);
     }
     stop(child);

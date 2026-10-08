@@ -376,7 +376,12 @@ int md_fs_mounts_copy(struct md_filesystem *fs, const struct md_fs_location *roo
     for (unsigned i=0; !r && source && i<source->count; ++i) {
         const struct md_view_mount *a=&source->mounts[i];
         struct md_view_mount *b=&copy->tree->mounts[i];
-        if (!a->id) {
+        int skip=0;
+        for (const struct md_view_mount *p=a;p;p=p->parent)
+            if (md_view_file_namespace(p->file)) { skip=1; break; }
+        /* Mount-namespace files are not inherited by a namespace copy: doing
+         * so would reverse the acyclic ownership ordering enforced at bind. */
+        if (!a->id || skip) {
             *b=(struct md_view_mount){.source=-1,.target=-1,.detached=1,.generation=a->generation};
             ++copy->tree->count;
             continue;
@@ -388,6 +393,7 @@ int md_fs_mounts_copy(struct md_filesystem *fs, const struct md_fs_location *roo
             .pid_namespace=md_pid_namespace_retain(a->pid_namespace),
             .devpts=md_devpts_retain(a->devpts),
             .cgroup=md_cgroup_retain(a->cgroup),
+            .file=md_control_file_retain(a->file),
             .policy={.local=md_mount_policy_flags(&a->policy)},.native=a->native,.guest=a->guest,
             .parent=!a->parent ? NULL : !md_view_base(fs->mounts,a->parent)
                 ? &copy->tree->mounts[a->parent-source->mounts] : &copy->base};

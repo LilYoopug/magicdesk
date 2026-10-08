@@ -32,8 +32,10 @@ or client release, with event-driven progress and a bounded peer lifetime.
 Ordinary open/stat and directory-read requests are handled directly by that worker through seccomp
 notifications, without invoking a guest-side RPC. Protected accesses, O_PATH,
 namespace mutations and directory seeks retain the task-affine adapter. Direct
-broker directory reads publish their bytes before advancing the shared cursor; failed or partial
-output cannot cause an automatic replay of a committed read.
+broker directory reads prepare their bytes without advancing the shared cursor.
+The existing OFD turn spans copying and kernel reply acceptance; only an accepted
+successful reply commits the cursor. Cancellation after copying and failed or
+partial output leave the cursor unchanged, without replaying a committed read.
 Path and metadata requests with captured cwd/dirfd inputs use bootstrap-mapped
 shared input/output and register control, without a temporary guest descriptor
 or service socket per call. The file-table and filesystem turns capture retained
@@ -617,17 +619,21 @@ Its identity includes the mount and
 backend object, preserving native readonly policy. Existing cwd/descriptors remain
 usable, so chroot alone is not confinement. Guest mount views support local
 bind/move/remount, unmount and initial/attached-root pivot operations, with
-user, mount, PID, UTS, SysV IPC and offline network namespace owners. PID namespaces select
+user, mount, PID, UTS, SysV IPC, cgroup and offline network namespace owners. PID namespaces select
 process/thread IDs, child admission, wait/signal translation and mounted proc
 views through retained process resources. PID 1 adopts orphaned children and
 closes namespace admission when its last thread exits. Namespace-aware proc
 mounts and explicit native `/dev` binds can prepare a new root without host
-mount privileges. New network namespaces expose a logical loopback control plane,
+mount privileges. Typed namespace-file binds retain their setns/ioctl authority after the
+creating process exits. Mount-namespace copies prevent cyclic ownership.
+New network namespaces expose a logical loopback control plane,
 not Android interfaces or external connectivity. Anonymous Unix socketpairs and
 inherited descriptors retain their IO authority. Private devpts views expose only
 their allocated terminals, with native terminal IO and caller-owned controlling
 sessions. Launch-local cgroup2 membership and permissive cgroup v1 devices views
-do not enforce resource limits or modify Android cgroups. Arbitrary unattached
+do not enforce resource limits or modify Android cgroups. Cgroup namespaces
+retain roots independently of membership; proc paths and new mounts use that
+view, while existing mounts keep their roots. Arbitrary unattached
 native roots remain unsupported. See the
 [process resource contract](../native/guest-runtime/process-resources.md).
 
@@ -745,12 +751,20 @@ devpts and cgroup providers. Reconfiguration, binary/path/FD parameters and
 unsupported mount attributes fail explicitly; contexts cannot be transferred
 between independent supervisors. Closing a context releases its unpublished
 filesystem; detached mount storage follows the ordinary origin/graph lifetime.
+`mount_setattr` updates the same readonly/nosuid/nodev/noexec policy by path or
+mount FD, including recursively. All selected mounts are checked before any
+policy changes; inherited locked attributes cannot be removed. Atime options
+remain compatibility hints. ID-mapped mounts, nosymfollow and shared propagation
+are not implemented.
 Independent mounted inode stores retain their
 backing leases across namespace copies and authenticated FD transfer, including
 publisher exit and backing-directory rename. A watch instance can observe multiple
 mounted stores through independently retained observation sources. Logical tmpfs
-uses transient disk-backed inode storage; size quotas and kernel-memory accounting
-are not implemented. Overlay supports lower-only and writable upper/work mounts,
+uses transient disk-backed inode storage. Its `size`, `nr_blocks` and `nr_inodes`
+options are validated but permissive: they do not limit allocation, and statfs
+reports backing capacity. Logical mounts accept atime flags as compatibility
+hints while retaining backing timestamp behavior. Neither per-mount atime
+guarantees nor kernel-memory accounting are provided. Overlay supports lower-only and writable upper/work mounts,
 copy-up, whiteouts, opaque directories and retained descriptors. Publication of
 the merged and upper namespaces shares one transaction. See the
 [resource contract](../native/guest-runtime/process-resources.md).

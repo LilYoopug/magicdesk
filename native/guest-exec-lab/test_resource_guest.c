@@ -53,7 +53,7 @@ static int mutate(void *argument) {
         assert(unshare(CLONE_FS | CLONE_VM) == -1 && errno == EINVAL);
     }
     if (c->unshare == -4) {
-        assert(unshare(CLONE_FS | CLONE_NEWCGROUP) == -1 && errno == ENOTSUP);
+        assert(unshare(CLONE_FS | CLONE_NEWTIME) == -1 && errno == ENOTSUP);
     }
     if (c->unshare == -3) {
         char ready[24], done[24], file[24];
@@ -1931,10 +1931,17 @@ void test_ipc_namespace_guest(void);
 int test_user_namespace_guest(int, char **);
 int test_user_namespace_lifecycle(void);
 int test_namespace_handles_guest(void);
+int test_namespace_mounts_pid_guest(void);
 int test_devpts_guest(int);
 int test_cgroup_guest(int);
+int test_cgroup_namespace_guest(void);
+int test_keyring_guest(int, char **);
 int test_native_metadata_guest(void);
+int test_mutation_signal_guest(const char *, int, int);
 int main(int argc, char **argv) {
+    if (argc>=2 && !strcmp(argv[1],"keyring")) return test_keyring_guest(argc,argv);
+    if (argc==5 && !strcmp(argv[1],"mutation-signal"))
+        return test_mutation_signal_guest(argv[2],atoi(argv[3]),atoi(argv[4]));
     if (argc==2 && !strcmp(argv[1],"tmpfs")) { test_tmpfs_guest(); return 0; }
     if (argc==2 && !strcmp(argv[1],"overlay")) { test_overlay_guest(); return 0; }
     if (argc==2 && !strcmp(argv[1],"setns")) { test_setns_guest(); return 0; }
@@ -1947,10 +1954,12 @@ int main(int argc, char **argv) {
     if (argc>=2 && !strcmp(argv[1],"user-proc")) return test_user_namespace_guest(argc,argv);
     if (argc>=2 && !strcmp(argv[1],"user-namespace")) return test_user_namespace_lifecycle();
     if (argc>=2 && !strcmp(argv[1],"namespace-handles")) return test_namespace_handles_guest();
+    if (argc>=2 && !strcmp(argv[1],"namespace-mounts-pid")) return test_namespace_mounts_pid_guest();
     if (argc>=2 && !strcmp(argv[1],"devpts")) return test_devpts_guest(0);
     if (argc>=2 && !strcmp(argv[1],"devpts-pid")) return test_devpts_guest(1);
     if (argc==2 && !strcmp(argv[1],"cgroup")) return test_cgroup_guest(0);
     if (argc==2 && !strcmp(argv[1],"cgroup-pid")) return test_cgroup_guest(1);
+    if (argc==2 && !strcmp(argv[1],"cgroup-namespace")) return test_cgroup_namespace_guest();
     if (argc==2 && !strcmp(argv[1],"native-metadata")) return test_native_metadata_guest();
     if (argc==2 && !strcmp(argv[1],"ipc-namespace")) { test_ipc_namespace_guest(); return 0; }
     setbuf(stdout, NULL); alarm(40);

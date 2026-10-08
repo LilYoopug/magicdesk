@@ -3,11 +3,38 @@
 #include "inode_internal.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
 #include <unistd.h>
 
 struct options { mode_t mode; uint32_t uid, gid; };
+static int capacity(const char *text, size_t length, int percent) {
+    char value[64];
+    if (!length || length>=sizeof(value) || text[0]<'0' || text[0]>'9') return -EINVAL;
+    memcpy(value,text,length); value[length]=0;
+    char *end;
+    errno=0;
+    unsigned long long amount=strtoull(value,&end,0);
+    if (errno || end==value) return -EINVAL;
+    unsigned shift=0;
+    switch (*end) {
+    case 'k': case 'K': shift=10; break;
+    case 'm': case 'M': shift=20; break;
+    case 'g': case 'G': shift=30; break;
+    case 't': case 'T': shift=40; break;
+    case 'p': case 'P': shift=50; break;
+    case 'e': case 'E': shift=60; break;
+    }
+    if (shift) {
+        if (amount>(UINT64_MAX>>shift)) return -EINVAL;
+        ++end;
+    }
+    if (percent && *end=='%') ++end;
+    /* Permissive resource policy: validate requests without adding write/mmap
+     * accounting. statfs continues to report real backing capacity. */
+    return *end ? -EINVAL : 0;
+}
 static int number(const char *text, size_t length, unsigned base, uint32_t *value) {
     if (!length) return -EINVAL;
     uint32_t out=0;
@@ -24,7 +51,16 @@ static int parse(const char *text, const struct md_identity *id, struct options 
         const char *end=strchr(at,',');
         if (!end) end=at+strlen(at);
         size_t length=(size_t)(end-at);
+        unsigned limit=length>=5 && !memcmp(at,"size=",5) ? 5
+            : length>=10 && (!memcmp(at,"nr_blocks=",10) || !memcmp(at,"nr_inodes=",10)) ? 10 : 0;
         int group=-1, mode=0;
+        if (limit) {
+            int r=capacity(at+limit,length-limit,limit==5);
+            if (r) return r;
+            at=*end ? end+1 : end;
+            if (*end && !*at) return -EINVAL;
+            continue;
+        }
         if (length>=5 && !memcmp(at,"mode=",5)) mode=1;
         else if (length>=4 && !memcmp(at,"uid=",4)) group=0;
         else if (length>=4 && !memcmp(at,"gid=",4)) group=1;
@@ -56,7 +92,7 @@ int md_fs_private_mounts_parent(struct md_inode_store *s) {
 }
 int md_fs_mount_temporary(struct md_filesystem *fs, const struct md_fs_request *q,
         struct md_mount_source *out) {
-    if (q->flags&~(MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC)) return -EOPNOTSUPP;
+    if (q->flags&~MD_FS_MOUNT_FLAGS) return -EOPNOTSUPP;
     const struct md_identity *id=fs->store->identity;
     if (!id) return -EPERM;
     struct options options;

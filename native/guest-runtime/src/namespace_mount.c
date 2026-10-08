@@ -70,14 +70,12 @@ long md_namespace_mount_request(const struct md_fs *fs,struct md_fs_request *q) 
          * paths use the private-table capture helper, never worker-relative self. */
         struct md_proc_path ref=md_proc_path(out.data);
         enum md_proc_kind kind=ref.kind==MD_PROC_FOREIGN ? ref.foreign_kind : ref.kind;
-        /* A typed namespace/control handle is not its native carrier inode.
-         * Mounting that carrier would lose authority and report false success. */
-        if (md_proc_control_kind(kind)) return -EOPNOTSUPP;
+        if (md_proc_control_kind(kind) && (index!=1 || q->mode!=MD_FS_MOUNT_BIND)) return -EOPNOTSUPP;
         int fd=-1;
         if (md_namespace_proc_borrow(&ref,&fd)) {
             long control=md_proc_control_known(fd);
             if (control<0) return control;
-            if (control) return -EOPNOTSUPP;
+            if (control && (index!=1 || q->mode!=MD_FS_MOUNT_BIND)) return -EOPNOTSUPP;
             const char *tail=ref.tail;
             int trailing=*tail!=0;
             while (*tail=='/') ++tail;

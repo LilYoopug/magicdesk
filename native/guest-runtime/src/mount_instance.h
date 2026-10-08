@@ -1,6 +1,7 @@
 #ifndef MD_MOUNT_INSTANCE_H
 #define MD_MOUNT_INSTANCE_H
 #include "mount_policy.h"
+#include "control_file.h"
 #include <stdatomic.h>
 #include <stdint.h>
 #include <sys/stat.h>
@@ -18,6 +19,7 @@ struct md_view_mount {
     struct md_pid_namespace *pid_namespace;
     struct md_devpts *devpts;
     struct md_cgroup_view *cgroup;
+    struct md_control_file file;
     int detached, locked;
     atomic_uint anchors;
     struct md_view_mount *parent;

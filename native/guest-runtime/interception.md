@@ -12,6 +12,17 @@ The bootstrap publishes a private, size-checked ABI containing its gate addresse
 at an explicit readiness stop. The supervisor reads it before resuming the guest;
 exec republishes the same immutable bundle's ABI. No generated address header,
 Java class name or environment-variable switch selects an implementation.
+The dispatch gate receives policy in x9 and moves it to the C argument register
+in userspace. It does not rely on changing x7 at an ARM64 syscall stop: the
+[kernel restores that register](https://github.com/torvalds/linux/blob/v5.15/arch/arm64/kernel/ptrace.c#L1694-L1726)
+after the stop. Notification cancellation, ordinary
+seccomp entry and debugger syscall stepping share this entry contract.
+Before task-affine admission, a signal-delivery stop retires an unexecuted
+notification if it wins the race with the requested ptrace interruption.
+The kernel retains EINTR and SA_RESTART semantics; a restarted call is a fresh
+notification. The later interrupt cannot reuse the signal handler's registers
+to execute the retired request. Adapter-owned, already-shielded operations
+retain their existing completion and cancellation ownership.
 
 `command_image` owns ELF/shebang inspection and returns retained program/loader
 descriptors plus a pointer-free recipe. `command` assembles argv in its caller's
@@ -240,6 +251,10 @@ copy paths page by page, retain exact-task descriptors and validate notification
 IDs before execution and result publication. Successful opens use atomic ADDFD
 plus response. The optional kernel synchronous-wakeup hint changes scheduling
 only; unsupported kernels retain normal notification delivery.
+Directory reads use the engine's deferred-position contract. Their existing
+file-table/OFD turn spans output copying, notification reply and cursor commit.
+An invalid notification, rejected kernel reply or failed/partial copy cannot
+consume records; only a successful accepted reply advances the retained OFD.
 
 Pidfds are owned by task lifetime, borrowed during request preparation and retired
 on exit or exec. No file-number, cwd, path or metadata cache is involved. Published
@@ -337,6 +352,14 @@ Stock [shadow account tools](https://github.com/shadow-maint/shadow/blob/4.17.4/
 already accept an unavailable audit protocol. Software requiring audit must treat
 it as unsupported. Application seccomp ERRNO/TRAP/KILL still precedes runtime
 TRACE handling, including this interface rule.
+
+The guest has no key-management provider. `add_key`, `request_key` and `keyctl`
+return ENOSYS in the initial seccomp policy, including raw SVC, protected callers,
+fork/exec and nested namespaces. They never enter Android's key service or claim
+successful keyring creation. Applications may choose their existing no-key-service
+path; applications requiring keys receive an explicit unavailable interface.
+Later application ERRNO and higher-priority TRAP/KILL policies remain effective.
+There is no syscall-specific supervisor work or persistent keyring allocation.
 
 ## Protected Metadata
 

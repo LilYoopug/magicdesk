@@ -1,5 +1,13 @@
 #include <asm/unistd.h>
 .text
+.global md_guest_dispatch_entry
+.type md_guest_dispatch_entry, %function
+md_guest_dispatch_entry:
+    /* The kernel restores x7 after ARM64 syscall stops. Supervisor policy
+     * arrives in x9; only userspace turns it into the eighth C argument. */
+    mov x7, x9
+    b md_guest_dispatch
+.size md_guest_dispatch_entry, .-md_guest_dispatch_entry
 .global md_guest_task_control
 .type md_guest_task_control, %function
 md_guest_task_control:

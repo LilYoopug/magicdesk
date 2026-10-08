@@ -58,7 +58,7 @@ static int disjoint(struct md_inode_store *source,int lower,struct md_inode_stor
 }
 int md_fs_mount_overlay(struct md_filesystem *fs, const struct md_fs_request *q,
         struct md_mount_source *out) {
-    if (q->flags&~(MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC)) return -EOPNOTSUPP;
+    if (q->flags&~MD_FS_MOUNT_FLAGS) return -EOPNOTSUPP;
     if (!q->value || !q->value_size) return -EINVAL;
     char *data=strdup(q->value);
     if (!data) return -ENOMEM;

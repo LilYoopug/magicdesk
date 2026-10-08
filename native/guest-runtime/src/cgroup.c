@@ -4,6 +4,7 @@
 #include "temporary_directory.h"
 #include "file_permissions.h"
 #include "mount_policy.h"
+#include "namespace_identity.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/magic.h>
@@ -52,6 +53,15 @@ struct md_cgroup_member {
     pid_t tid,tgid;
     struct md_pid_identity *pid,*pid_group;
 };
+struct md_cgroup_namespace {
+    atomic_uint refs;
+    uint64_t inode;
+    struct md_user_namespace *owner;
+    struct world *world;
+    /* NULL captures the hierarchy root before its first mount, not the
+     * member's future position. Groups live as long as their world. */
+    struct group *roots[2];
+};
 struct opened {
     atomic_uint refs;
     struct md_cgroup_view *view;
@@ -69,6 +79,26 @@ static void release(struct world *w) {
     }
     pthread_mutex_destroy(&w->lock); free(w);
 }
+struct md_cgroup_namespace *md_cgroup_namespace_new(struct md_cgroup_member *m,struct md_user_namespace *owner) {
+    if (!m) { errno=EINVAL; return NULL; }
+    struct md_cgroup_namespace *ns=calloc(1,sizeof(*ns));
+    if (!ns) return NULL;
+    int r=md_namespace_identity_new(&ns->inode);
+    if (r) { free(ns); errno=-r; return NULL; }
+    atomic_init(&ns->refs,1); ns->owner=md_user_namespace_retain(owner); ns->world=retain(m->world);
+    pthread_mutex_lock(&m->world->lock);
+    memcpy(ns->roots,m->groups,sizeof(ns->roots));
+    pthread_mutex_unlock(&m->world->lock); return ns;
+}
+struct md_cgroup_namespace *md_cgroup_namespace_retain(struct md_cgroup_namespace *ns) {
+    if (ns) atomic_fetch_add(&ns->refs,1); return ns;
+}
+void md_cgroup_namespace_release(struct md_cgroup_namespace *ns) {
+    if (!ns || atomic_fetch_sub(&ns->refs,1)!=1) return;
+    md_user_namespace_release(ns->owner); release(ns->world); free(ns);
+}
+uint64_t md_cgroup_namespace_inode(const struct md_cgroup_namespace *ns) { return ns ? ns->inode : 0; }
+const struct md_user_namespace *md_cgroup_namespace_owner(const struct md_cgroup_namespace *ns) { return ns ? ns->owner : NULL; }
 struct md_cgroup_member *md_cgroup_member_new(void) {
     struct world *w=calloc(1,sizeof(*w)); if (!w) return NULL;
     atomic_init(&w->refs,1);
@@ -154,7 +184,15 @@ struct md_cgroup_view *md_cgroup_mount(struct md_cgroup_member *member,int paren
 }
 struct md_cgroup_view *md_cgroup_retain(struct md_cgroup_view *v) { if (v) retain(v->world); return v; }
 void md_cgroup_release(struct md_cgroup_view *v) { if (v) release(v->world); }
-int md_cgroup_root(struct md_cgroup_view *v) { return v->root->fd; }
+int md_cgroup_open_root(struct md_cgroup_view *v,const struct md_cgroup_namespace *ns) {
+    if (!ns || ns->world!=v->world) { errno=EXDEV; return -1; }
+    pthread_mutex_lock(&v->world->lock);
+    struct group *g=ns->roots[v->devices] ? ns->roots[v->devices] : v->root;
+    int fd;
+    if (g->removed) { errno=ENOENT; fd=-1; }
+    else fd=openat(g->fd,".",O_PATH|O_DIRECTORY|O_CLOEXEC);
+    int error=errno; pthread_mutex_unlock(&v->world->lock); errno=error; return fd;
+}
 int md_cgroup_devices(const struct md_cgroup_view *v) { return v->devices; }
 unsigned long md_cgroup_filesystem(struct md_cgroup_view *v) { return v->devices ? CGROUP_SUPER_MAGIC : CGROUP2_SUPER_MAGIC; }
 static struct group *lookup(struct md_cgroup_view *v,const struct stat *st,unsigned *file) {
@@ -363,27 +401,35 @@ int md_cgroup_open(struct md_cgroup_view *v,int fd,int flags,const struct md_ide
     }
     pthread_mutex_unlock(&v->world->lock); return r;
 }
-static int group_path(struct group *g,char *text,size_t size) {
-    size_t length=0;
-    for (struct group *at=g;at && at->parent;at=at->parent) {
+static int group_path(struct group *g,struct group *root,char *text,size_t size) {
+    struct group *common=root;
+    size_t up=0;
+    while (common && !below(g,common)) { common=common->parent; ++up; }
+    size_t length=up*3;
+    if (length>=size) return -ENAMETOOLONG;
+    for (struct group *at=g;at && at!=common;at=at->parent) {
+        if (!at->parent) break;
         size_t n=strlen(at->name)+1;
         if (n>=size || length>=size-n) return -ENAMETOOLONG;
         length+=n;
     }
     if (!length) { if (size<2) return -ENAMETOOLONG; memcpy(text,"/",2); return 1; }
     text[length]=0; size_t at=length;
-    for (;g && g->parent;g=g->parent) {
+    for (;g && g->parent && g!=common;g=g->parent) {
         size_t n=strlen(g->name); at-=n; memcpy(text+at,g->name,n); text[--at]='/';
     }
+    for (size_t i=0;i<up;++i) memcpy(text+i*3,"/..",3);
     return (int)length;
 }
-long md_cgroup_member_text(struct md_cgroup_member *m,char *text,size_t capacity) {
+long md_cgroup_member_text(struct md_cgroup_member *m,const struct md_cgroup_namespace *ns,char *text,size_t capacity) {
     if (!m) return -ESRCH;
+    if (!ns || ns->world!=m->world) return -EXDEV;
     if (!capacity || !text) return -EINVAL;
     pthread_mutex_lock(&m->world->lock); size_t length=0; int r=0;
     for (unsigned i=0;i<2 && !r;++i) {
         if (i && !m->world->views[i]) continue;
-        char path[4096]; r=group_path(m->groups[i],path,sizeof(path));
+        struct group *root=ns->roots[i] ? ns->roots[i] : m->world->views[i] ? m->world->views[i]->root : NULL;
+        char path[4096]; r=group_path(m->groups[i],root,path,sizeof(path));
         if (r<0) break;
         int n=snprintf(text+length,capacity-length,"%s%s\n",i ? "1:devices:" : "0::",path);
         r=n<0 || (size_t)n>=capacity-length ? -ERANGE : 0;

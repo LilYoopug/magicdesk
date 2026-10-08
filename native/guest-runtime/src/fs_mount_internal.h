@@ -7,9 +7,16 @@
 #include "devpts_view.h"
 #include "cgroup.h"
 #include "mount_source.h"
+#include "proc_namespace.h"
 #include <limits.h>
 #include <stdatomic.h>
 #include <sys/mount.h>
+
+/* Data IO retains the backing filesystem's timestamps. Atime requests are
+ * compatibility hints, not per-mount timestamp guarantees. */
+#define MD_FS_MOUNT_ATIME_HINTS (MS_NOATIME|MS_NODIRATIME|MS_RELATIME|MS_STRICTATIME|MS_LAZYTIME)
+#define MD_FS_MOUNT_POLICY_FLAGS (MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC)
+#define MD_FS_MOUNT_FLAGS (MD_FS_MOUNT_POLICY_FLAGS|MD_FS_MOUNT_ATIME_HINTS)
 
 static inline unsigned md_fs_mount_flags(unsigned flags) {
     return ((flags&MS_RDONLY) ? MD_MOUNT_READONLY : 0)
@@ -21,6 +28,19 @@ struct md_view_location;
 int md_fs_cgroup_operation(struct md_filesystem *,struct md_mount_namespace *,
     struct md_view_mount *,int fd,int parent,const char *name,const struct md_fs_request *,
     struct md_fs_result *,const struct md_fs_output *);
+int md_fs_mount_file_operation(struct md_filesystem *,struct md_mount_namespace *,
+    struct md_view_mount *,int,const struct md_fs_request *,struct md_fs_result *,const struct md_fs_output *);
+static inline const struct md_mount_namespace *md_view_file_namespace(struct md_control_file file) {
+    const struct md_namespace_reference *ref=file.ops && file.ops->namespace_reference
+        ? file.ops->namespace_reference(file.context) : NULL;
+    return ref && ref->kind==MD_NAMESPACE_MOUNT ? ref->value.mount : NULL;
+}
+static inline int md_view_file_cycle(struct md_control_file file,const struct md_mount_namespace *view) {
+    const struct md_mount_namespace *target=md_view_file_namespace(file);
+    /* The base ID is allocated at namespace birth and never replaced. Like
+     * Linux nsfs, only references to younger mount namespaces are admitted. */
+    return target && view->base.id>=target->base.id;
+}
 int md_fs_mount_temporary(struct md_filesystem *, const struct md_fs_request *, struct md_mount_source *);
 int md_fs_mount_overlay(struct md_filesystem *, const struct md_fs_request *, struct md_mount_source *);
 int md_fs_private_mounts_parent(struct md_inode_store *);

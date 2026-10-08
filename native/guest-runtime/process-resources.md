@@ -207,8 +207,20 @@ control-file IO, while cgroup controls retain their existing cursor semantics.
 Reconfiguration, typed binary/path/FD parameters, cross-view placement and
 unimplemented attributes are not silently accepted.
 
+`mount_setattr` resolves a mount root by path or retained descriptor, including
+a detached construction root. Readonly/nosuid/nodev/noexec changes use the same
+policy as legacy remount. Recursive changes preflight every selected mount's
+writer authority, locked attributes and backing writability before publication
+on the filesystem worker. Failure leaves all policies unchanged. Atime settings
+are validated compatibility hints, not timestamp enforcement. Private/slave
+propagation preserves the private graph; peer groups, ID mapping and nosymfollow
+are explicitly unsupported. The syscall adapter validates the versioned binary
+structure and zero extension before submitting typed bytes; ordinary IO gains
+no allocation, counter or observer.
+
 `test_mount_api.py` exercises syscall state/order, descriptor flags, dup/fork,
-SCM_RIGHTS, detached-root IO, readonly attachment, source cancellation and stock
+SCM_RIGHTS, detached-root IO, readonly attachment, recursive attributes, locked
+rollback, source cancellation and stock
 Debian util-linux mounts. The native transient-store suite additionally checks
 namespace copy, detached graph import/export and exact final FD counts.
 
@@ -998,18 +1010,29 @@ observation. Cross-supervisor control-file transfer returns EXDEV, and an
 unframed native peer is rejected before transfer. Ordinary filesystem origins
 continue to use portable capsules that survive their publishing supervisor.
 
-User, mount, PID, UTS and IPC namespace descriptors retain typed resource ownership,
+User, mount, PID, UTS, IPC, network and cgroup namespace descriptors retain typed resource ownership,
 not a process number or an Android proc-directory handle. Stat/statfs, readlink,
 dup/reopen, `NS_GET_NSTYPE`, `NS_GET_OWNER_UID`, `NS_GET_USERNS` and `NS_GET_PARENT`
 use that identity. Related user namespaces must lie within the caller's user
 namespace; the initial user namespace has no parent. Related-FD publication
 uses the same ordered descriptor installation as ordinary proc control files.
 Local SCM_RIGHTS keeps namespace owners alive after the creating task exits.
-The namespace directory enumerates the implemented user/mount/UTS/IPC/pid/pid_for_children entries,
+The namespace directory enumerates the implemented user/mount/UTS/IPC/pid/pid_for_children/net/cgroup entries,
 independently of the host's CONFIG_USER_NS. Directory positions belong to a
 retained open description; dup/fork share it and rejected output copying does
 not advance it. A directory whose process has exited returns ENOENT, while
 already opened namespace handles remain usable.
+Namespace files support path and descriptor bind mounts through the same mount
+engine. `control_file` supplies the typed namespace reference and placement;
+the supervisor captures proc sources without installing a temporary guest FD.
+Mounts retain unplaced providers, while opened files retain their exact mount
+origin. Stat/statfs, related-namespace ioctls, proc-FD reopening and `setns`
+preserve authority after owner exit, move or lazy detach. Recursive binds retain
+providers; ordinary unmount rejects live opens. A namespace copy omits mounted
+mount-namespace files and their descendants. Binding a reference to the same or
+an older mount namespace returns EINVAL, preventing reference cycles. Cross-
+supervisor graph export rejects these live providers rather than flattening them
+into native carrier files. Other control-file kinds are not implicitly mountable.
 Process directories retain native entries and add exactly one UID map, GID map
 and setgroups entry, with inode identities matching the corresponding proc files.
 Enumeration builds a bounded lazy snapshot on that open description; ordinary
@@ -1098,8 +1121,13 @@ selected native devices and their real permissions, not a private device manager
 Logical tmpfs uses a private transient inode store, not Android's kernel tmpfs.
 It supports mode/uid/gid, ordinary file operations, shared native mappings,
 namespace copies, bind policy and retained detached descriptors. Backing files
-consume the store's disk space; memory accounting, quotas and size options are
-not advertised. Nosuid, nodev and noexec are per-mount policies, independently retained
+consume the store's disk space. `size`, `nr_blocks` and `nr_inodes` accept validated
+numeric requests, including binary suffixes and percentages for size, under a
+permissive allocation policy. They do not impose quotas or alter statfs capacity.
+Writes, truncation and shared mappings retain native IO and backing-space errors.
+Atime flags in legacy and descriptor mount APIs are compatibility hints: timestamps
+follow the backing filesystem, not a new per-mount IO observer. Memory accounting
+and strict timestamp policy are not provided. Nosuid, nodev and noexec are per-mount policies, independently retained
 by aliases and frozen by less-privileged namespace copies.
 Existing-name creation errors precede readonly rejection: mkdir on an existing
 directory returns EEXIST, and a read-only O_CREAT open can select an existing
@@ -1168,12 +1196,17 @@ namespace annotations retained through descriptor-table operations.
 `network_calls` supplies bounded control requests through the existing mapped
 transport. New datagram control sockets and NETLINK_ROUTE expose only `lo`:
 interface index/name/flags/MTU queries and CAP_NET_ADMIN-authorized loopback
-address/up requests. Netlink replies use a native nonblocking queue for readiness;
+address/up requests. RTM_GETLINK selects the same loopback by name/index or
+enumerates it with a multipart completion; replies preserve sequence, identity
+and ACK semantics. No host interface is included. Netlink replies use a native nonblocking queue for readiness;
 no interface mutation reaches Android. A failed reply publication does not
 commit a loopback change. Namespace changes need no per-data-IO polling or new
-service thread.
+service thread. Socket queue buffer/timeout options use the actual carrier,
+including shared dup state, kernel argument validation and receive timeout.
+Interface/credential options remain denied. Reply publication stays nonblocking;
+queue exhaustion is an explicit error before any state change.
 
-New stream/addressed sockets, routes, interface dumps, multicast subscriptions,
+New stream/addressed sockets, routes, address dumps, multicast subscriptions,
 bridge/veth, external connectivity and port publication are not implemented.
 Unsupported requests return explicit errors. The control plane is not a TCP/IP
 stack: reporting loopback up does not provide loopback packet transport.
@@ -1207,8 +1240,19 @@ provenance. Cross-supervisor mount export fails explicitly for private devpts.
 `cgroup` owns a launch-local world with a cgroup2 hierarchy and a cgroup v1
 `devices` hierarchy. Tasks retain membership independently of mount views;
 fork inherits it, exec preserves it, exit removes live membership. Proc cgroup
-files and control-file PID lists use the caller's PID namespace. Mounting the
-same hierarchy again retains its existing state.
+paths use the reader's cgroup namespace; control-file PID lists use the caller's
+PID namespace. Mounting the same hierarchy again retains its existing state.
+
+`md_cgroup_namespace` separately retains a captured root for each hierarchy and
+its creating user namespace. `CLONE_NEWCGROUP` snapshots the caller's membership;
+`setns` changes the view without moving any member. Proc handles, namespace
+ioctls, dup/fork/reopen and owner permissions use the common typed namespace
+contract. A retained handle outlives its creating task. `/proc/PID/cgroup` paths
+are relative to the reader's current namespace, including `/..` for members
+outside its root. Existing mounts retain their roots; new mounts select the
+captured group. `fsopen` retains the opener's cgroup namespace through later
+configuration and descriptor transfer. Mounting requires CAP_SYS_ADMIN in that
+namespace's owning user namespace. Removed roots cannot be mounted again.
 
 `fs_cgroup` supplies directory operations and typed `control_file` objects.
 The shared proc-control transport owns descriptor identity, IO ordering,
@@ -1223,16 +1267,16 @@ logical state, but CPU/memory/IO limits and freezing are not enforced. The v1
 devices list is always `a *:* rwm`; all-device allowance is accepted, restrictive
 rules are rejected. Unsupported controller enabling, freezes and release agents
 return EOPNOTSUPP. This interface never accesses Android's cgroup hierarchy or
-claims that a resource/security limit was installed. Cgroup namespaces,
-delegation and independent-supervisor hierarchy transfer are not implemented.
+claims that a resource/security limit was installed. Controller delegation and
+independent-supervisor hierarchy transfer are not implemented.
 
 ## Boundaries
 
 Concurrent named environments and launch-local attachments are not kernel Linux
 namespaces. Guest `CLONE_NEWNS`, `CLONE_NEWUSER`, `CLONE_NEWIPC`,
-`CLONE_NEWUTS`, `CLONE_NEWPID` and `CLONE_NEWNET` have the contracts above.
-Cgroup/time namespaces are not implemented. Their creation is not reported as
-successful. POSIX message-queue namespaces and UTS sysctl priority-change
+`CLONE_NEWUTS`, `CLONE_NEWPID`, `CLONE_NEWNET` and `CLONE_NEWCGROUP` have the
+contracts above. Time namespaces are not implemented; their creation is not
+reported as successful. POSIX message-queue namespaces and UTS sysctl priority-change
 notification are not implemented. They must not be inferred from SysV separation
 or live sysctl reads. Tmpfs quotas remain open; unsupported
 options fail explicitly. Saved overlay credentials do not establish

@@ -27,6 +27,7 @@ void md_decimal(char *, unsigned long);
 void md_error(const char *, long);
 __attribute__((noreturn)) void md_die(const char *, long);
 long md_read_memory(void *, const void *, size_t);
+long md_read_struct(void *, size_t, const void *, size_t);
 long md_write_memory(void *, const void *, size_t);
 long md_read_string(char *, size_t, const char *);
 extern size_t md_page_size;

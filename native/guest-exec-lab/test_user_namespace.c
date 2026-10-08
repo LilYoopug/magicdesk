@@ -208,7 +208,7 @@ static void descriptor_lifetime(void) {
     assert(md_proc_file_write_at(file,&id,NULL,"0 2000 1",8,0,4096)==8);
     md_identity_release(&id);
     char text[34]={0};
-    assert(md_proc_file_read_at(file,NULL,text,sizeof(text),0)==33);
+    assert(md_proc_file_read_at(file,NULL,NULL,text,sizeof(text),0)==33);
     assert(!strcmp(text,"         0       2000          1\n"));
     struct md_fd_origins *receiver=md_fd_origins_new(); assert(receiver);
     struct md_fd_origin_update received[3];
@@ -219,7 +219,7 @@ static void descriptor_lifetime(void) {
     struct md_fd_object *pin=md_fd_origins_object(receiver,21,NULL);
     assert(pin && md_proc_file_from_object(pin)==file);
     md_fd_origins_release(receiver);
-    assert(md_proc_file_read_at(file,NULL,text,sizeof(text),0)==33);
+    assert(md_proc_file_read_at(file,NULL,NULL,text,sizeof(text),0)==33);
     md_fd_object_release(pin);
 }
 static void proc_files(void) {
@@ -231,7 +231,7 @@ static void proc_files(void) {
     struct md_proc_file *groups=md_proc_file_open(id.user_namespace,MD_PROC_FILE_SETGROUPS,&id,O_RDWR);
     assert(uid && gid && groups);
     char output[128]={0};
-    assert(md_proc_file_read_at(uid,NULL,output,sizeof(output),0)==0);
+    assert(md_proc_file_read_at(uid,NULL,NULL,output,sizeof(output),0)==0);
     assert(md_proc_file_write_at(uid,&id,NULL,"0 2000 1",8,1,4096)==-EINVAL);
     assert(md_proc_file_write_at(uid,&id,NULL,"0 2000 1",8,0,8)==-EINVAL);
     const char *bad[]={"", "0", "0 2000", "0 2000 0", "0 2000 1junk", "0 2000 1\n\n",
@@ -243,18 +243,18 @@ static void proc_files(void) {
     assert(md_proc_file_write_at(uid,&stripped,NULL,"0 2000 1\n",9,0,4096)==9);
     assert(md_proc_file_write_at(uid,&id,NULL,"0 2000 1\n",9,0,4096)==-EPERM);
     const char *expected="         0       2000          1\n";
-    assert(md_proc_file_read_at(uid,NULL,output,sizeof(output),0)==33);
+    assert(md_proc_file_read_at(uid,NULL,NULL,output,sizeof(output),0)==33);
     assert(!memcmp(output,expected,33));
-    assert(md_proc_file_read_at(uid,NULL,output,4,11)==4 && !memcmp(output,expected+11,4));
-    assert(md_proc_file_read_at(uid,NULL,output,sizeof(output),33)==0);
+    assert(md_proc_file_read_at(uid,NULL,NULL,output,4,11)==4 && !memcmp(output,expected+11,4));
+    assert(md_proc_file_read_at(uid,NULL,NULL,output,sizeof(output),33)==0);
     assert(md_proc_file_write_at(gid,&id,NULL,"0 2000 1\n",9,0,4096)==-EPERM);
     assert(md_proc_file_write_at(groups,&id,NULL,"deny\n",5,0,4096)==5);
-    assert(md_proc_file_read_at(groups,NULL,output,sizeof(output),0)==5 && !memcmp(output,"deny\n",5));
+    assert(md_proc_file_read_at(groups,NULL,NULL,output,sizeof(output),0)==5 && !memcmp(output,"deny\n",5));
     assert(md_proc_file_write_at(groups,&id,NULL,"allow\n",6,0,4096)==-EPERM);
     assert(md_proc_file_write_at(gid,&id,NULL,"0 2000 1\n",9,0,4096)==9);
     assert(md_identity_setgroups(&id,NULL,0)==-EPERM);
     md_identity_release(&id); md_identity_release(&stripped);
-    assert(md_proc_file_read_at(uid,NULL,output,sizeof(output),0)==33);
+    assert(md_proc_file_read_at(uid,NULL,NULL,output,sizeof(output),0)==33);
     md_proc_file_release(uid); md_proc_file_release(gid);
     md_proc_file_release(groups);
 
@@ -267,9 +267,9 @@ static void proc_files(void) {
     stripped=md_identity_copy(&parent); stripped.caps.effective=0;
     assert(md_proc_file_write_at(uid,&stripped,NULL,"0 0 1000",8,0,4096)==-EPERM);
     assert(md_proc_file_write_at(uid,&parent,NULL,"0 0 1000",8,0,4096)==8);
-    assert(md_proc_file_read_at(uid,NULL,output,sizeof(output),0)==-EBADF);
+    assert(md_proc_file_read_at(uid,NULL,NULL,output,sizeof(output),0)==-EBADF);
     assert(md_proc_file_write_at(groups,&parent,NULL,"deny",4,0,4096)==-EBADF);
-    assert(md_proc_file_read_at(groups,NULL,output,sizeof(output),0)==-EBADF);
+    assert(md_proc_file_read_at(groups,NULL,NULL,output,sizeof(output),0)==-EBADF);
     assert(md_proc_file_write_at(gid,&parent,NULL,"0 0 1000",8,0,4096)==8);
     assert(md_user_namespace_may_setgroups(child));
     md_proc_file_release(uid); md_proc_file_release(gid);

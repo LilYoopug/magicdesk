@@ -19,9 +19,11 @@ static int is_root(const struct md_view_location *p) {
 }
 static int operand(struct md_filesystem *fs, const struct md_fs_request *q, unsigned index,
         struct md_view_location *out) {
+    int follow=q->mode==MD_FS_MOUNT_SETATTR ? !(q->flags&AT_SYMLINK_NOFOLLOW)
+        : q->mode!=MD_FS_MOUNT_MOVE_FD || (q->flags&(index ? MOVE_MOUNT_F_SYMLINKS : MOVE_MOUNT_T_SYMLINKS));
     int r=*q->path[index]
         ? md_view_walk(fs,q->directory[index],q->origin[index],q->path[index],
-            q->mode!=MD_FS_MOUNT_MOVE_FD || (q->flags&(index ? MOVE_MOUNT_F_SYMLINKS : MOVE_MOUNT_T_SYMLINKS)),0,
+            follow,0,
             MD_VIEW_TASK_PATH|(index==1 && q->mode==MD_FS_MOUNT_BIND ? MD_VIEW_PROVIDER_SOURCE : 0),out)
         : md_view_descriptor(fs,q->directory[index],q->origin[index],out);
     if (r==-EREMOTE && fs->store->boundary) fs->store->boundary->operand=index;
@@ -29,6 +31,69 @@ static int operand(struct md_filesystem *fs, const struct md_fs_request *q, unsi
 }
 static int descendant(const struct md_view_mount *child, const struct md_view_mount *parent) {
     for (;child;child=child->parent) if (child==parent) return 1;
+    return 0;
+}
+static int policy_check(struct md_filesystem *fs, struct md_view_mount *mount, unsigned flags) {
+    int r=md_mount_policy_check(&mount->policy,flags);
+    if (!r && !(flags&MD_MOUNT_READONLY) && md_view_inode(mount)) {
+        struct md_inode_store *store=NULL;
+        r=md_fs_storage_get(fs,mount,&store);
+        if (!r && store->readonly) r=-EROFS;
+    }
+    return r;
+}
+static unsigned attribute_flags(uint64_t flags) {
+    return ((flags&MOUNT_ATTR_RDONLY) ? MD_MOUNT_READONLY : 0)
+        | ((flags&MOUNT_ATTR_NOSUID) ? MD_MOUNT_NOSUID : 0)
+        | ((flags&MOUNT_ATTR_NODEV) ? MD_MOUNT_NODEV : 0)
+        | ((flags&MOUNT_ATTR_NOEXEC) ? MD_MOUNT_NOEXEC : 0);
+}
+static int attribute_check(const struct mount_attr *a) {
+    uint64_t known=MOUNT_ATTR_RDONLY|MOUNT_ATTR_NOSUID|MOUNT_ATTR_NODEV|MOUNT_ATTR_NOEXEC
+        |MOUNT_ATTR__ATIME|MOUNT_ATTR_NODIRATIME|MOUNT_ATTR_IDMAP|MOUNT_ATTR_NOSYMFOLLOW;
+    uint64_t propagation=a->propagation;
+    if (((a->attr_set|a->attr_clr)&~known) || (a->attr_clr&MOUNT_ATTR_IDMAP)
+            || (propagation&~(uint64_t)(MS_PRIVATE|MS_SLAVE|MS_SHARED|MS_UNBINDABLE))
+            || (propagation && (propagation&(propagation-1)))) return -EINVAL;
+    unsigned atime=a->attr_set&MOUNT_ATTR__ATIME, clear=a->attr_clr&MOUNT_ATTR__ATIME;
+    if (clear ? clear!=MOUNT_ATTR__ATIME || (atime!=MOUNT_ATTR_RELATIME
+            && atime!=MOUNT_ATTR_NOATIME && atime!=MOUNT_ATTR_STRICTATIME) : atime!=0) return -EINVAL;
+    if (((a->attr_set|a->attr_clr)&(MOUNT_ATTR_IDMAP|MOUNT_ATTR_NOSYMFOLLOW))
+            || (propagation && propagation!=MS_PRIVATE && propagation!=MS_SLAVE)) return -EOPNOTSUPP;
+    return 0;
+}
+static int attributes(struct md_filesystem *fs, const struct md_fs_request *q,
+        const struct md_view_location *target, const struct mount_attr *a) {
+    struct md_view_mount *root=target->mount ? target->mount : &fs->mounts->base;
+    if (!is_root(target)) {
+        if (!md_view_base(fs->mounts,root) || root->source>=0) return -EINVAL;
+        char path[PATH_MAX];
+        int r=md_view_backing_path(fs,target->fd,root,path,sizeof(path));
+        if (r) return r;
+        if (strcmp(path,"/")) return -EINVAL;
+    }
+    /* A detached fsmount root has no parent. An unmounted old placement is not
+     * a detached construction tree and must not regain namespace authority. */
+    for (const struct md_view_mount *m=root;m;m=m->parent)
+        if (m->detached && m->parent) return -EINVAL;
+    struct md_view_mount *mounts[MD_FS_MOUNTS_MAX+1];
+    unsigned policies[MD_FS_MOUNTS_MAX+1], count=0;
+    unsigned nodes=fs->mounts->tree ? fs->mounts->tree->count+1 : 1;
+    unsigned set=attribute_flags(a->attr_set), clear=attribute_flags(a->attr_clr);
+    for (unsigned i=0;i<nodes;++i) {
+        struct md_view_mount *m=md_view_mount_node(fs->mounts,i);
+        if (!m->id || (m!=root && (!(q->flags&AT_RECURSIVE) || m->detached || !descendant(m,root)))) continue;
+        unsigned flags=(md_mount_policy_flags(&m->policy)&MD_MOUNT_FLAGS&~clear)|set;
+        int r=policy_check(fs,m,flags);
+        if (r) return r;
+        mounts[count]=m; policies[count++]=flags;
+    }
+    /* All fallible checks precede publication. The filesystem worker is the
+     * sole writer; policies and placements cannot change between these passes. */
+    for (unsigned i=0;i<count;++i) {
+        int r=md_mount_policy_set(&mounts[i]->policy,policies[i]);
+        if (r) return r;
+    }
     return 0;
 }
 static int beneath(struct md_filesystem *fs, int fd, const struct md_view_location *source) {
@@ -47,6 +112,7 @@ static void discard(struct md_view_mount *m) {
     md_pid_namespace_release(m->pid_namespace);
     md_devpts_release(m->devpts);
     md_cgroup_release(m->cgroup);
+    md_control_file_release(m->file);
 }
 static int publish(struct md_filesystem *fs, unsigned first,
         struct md_view_mount *entries, unsigned count) {
@@ -140,8 +206,24 @@ static int bind(struct md_filesystem *fs, const struct md_fs_request *q,
     struct md_view_location source={.fd=-1,.parent=-1};
     int r=md_view_mount_collect(fs);
     int native_source=0;
+    struct md_control_file file={0};
     unsigned policy=0;
-    if (!r && q->path[1] && !*q->path[1] && (!q->origin[1] || !q->origin[1]->view)) {
+    if (!r && q->control.ops) {
+        const struct md_control_file_ops *ops=q->control.ops;
+        if (!ops->namespace_reference || !ops->at || !ops->descriptor) r=-EOPNOTSUPP;
+        else if (md_view_file_cycle(q->control,fs->mounts)) r=-EINVAL;
+        else {
+            void *context=ops->at(q->control.context,NULL);
+            if (!context) r=-errno;
+            else {
+                file=(struct md_control_file){ops,context};
+                source.fd=ops->descriptor(context,O_PATH);
+                if (source.fd<0) r=source.fd;
+                else native_source=1;
+            }
+        }
+    }
+    if (!r && !native_source && q->path[1] && !*q->path[1] && (!q->origin[1] || !q->origin[1]->view)) {
         struct md_view_object *object=NULL;
         int found=q->origin[1] ? -EXDEV : md_view_identity(fs,q->directory[1],&object);
         if (q->origin[1]) r=md_view_anchor_check(fs,q->directory[1],q->origin[1]);
@@ -162,7 +244,9 @@ static int bind(struct md_filesystem *fs, const struct md_fs_request *q,
     if (!r && !native_source) {
         r=operand(fs,q,1,&source);
         if (!r) policy=md_mount_policy_flags(source.mount ? &source.mount->policy : &source.view->base.policy);
+        if (!r && source.mount) file=md_control_file_retain(source.mount->file);
     }
+    if (!r && md_view_file_cycle(file,fs->mounts)) r=-EINVAL;
     struct md_view_mount next={.source=-1,.target=-1};
     if (!r && (fstat(source.fd,&next.native) || fstat(target->fd,&next.guest))) r=-errno;
     if (!r && !!S_ISDIR(next.native.st_mode)!=!!S_ISDIR(next.guest.st_mode)) r=-ENOTDIR;
@@ -190,6 +274,7 @@ static int bind(struct md_filesystem *fs, const struct md_fs_request *q,
             pending[root_slot].devpts=md_devpts_retain(source.mount->devpts);
             pending[root_slot].cgroup=md_cgroup_retain(source.mount->cgroup);
         }
+        if (!r) pending[root_slot].file=md_control_file_retain(file);
     }
     struct md_fs_mounts *original=source.view ? source.view->tree : NULL;
     if (!(q->flags&MS_REC)) for (unsigned i=0;!r && original && i<original->count;++i) {
@@ -227,6 +312,8 @@ static int bind(struct md_filesystem *fs, const struct md_fs_request *q,
         if (!r) pending[slot].pid_namespace=md_pid_namespace_retain(m->pid_namespace);
         if (!r) pending[slot].devpts=md_devpts_retain(m->devpts);
         if (!r) pending[slot].cgroup=md_cgroup_retain(m->cgroup);
+        if (!r) pending[slot].file=md_control_file_retain(m->file);
+        if (!r && md_view_file_cycle(m->file,fs->mounts)) r=-EINVAL;
     }
     /* No tree entry is visible until the complete recursive copy owns all its
      * descriptors. Failed preparation retires only the unpublished candidates. */
@@ -235,7 +322,7 @@ static int bind(struct md_filesystem *fs, const struct md_fs_request *q,
         for (unsigned i=0;i<prepared;++i) tree->mounts[slots[i]]=pending[slots[i]];
         tree->count=count;
     } else for (unsigned i=0;i<prepared;++i) discard(&pending[slots[i]]);
-    md_view_location_close(&source); return r;
+    md_control_file_release(file); md_view_location_close(&source); return r;
 }
 int md_view_attach_source(struct md_filesystem *fs, const struct md_mount_source *source,
         const struct md_view_location *target, struct md_view_mount **out) {
@@ -451,6 +538,13 @@ int md_fs_mount_change(struct md_filesystem *fs, struct md_guest_domain *context
     if (!fs->mounts) return -ENOTSUP;
     if (!fs->store->identity || !md_identity_capable_in(fs->store->identity,
             md_mount_namespace_owner(fs->mounts),CAP_SYS_ADMIN)) return -EPERM;
+    struct mount_attr attr={0};
+    if (q->mode==MD_FS_MOUNT_SETATTR) {
+        memcpy(&attr,q->value,sizeof(attr));
+        if (!attr.attr_set && !attr.attr_clr && !attr.propagation) return 0;
+        int error=attribute_check(&attr);
+        if (error) return error;
+    }
     /* Release unused detached storage before a filesystem reserves shared
      * resources such as overlay upper/work directories. Live origins retain
      * their mount pins; collection never infers closure from a pathname. */
@@ -470,8 +564,10 @@ int md_fs_mount_change(struct md_filesystem *fs, struct md_guest_domain *context
         r=move(fs,q,&target); break;
     case MD_FS_MOUNT_PIVOT:
         r=pivot(fs,context,q,&target); break;
+    case MD_FS_MOUNT_SETATTR:
+        r=attributes(fs,q,&target,&attr); break;
     case MD_FS_MOUNT_REMOUNT:
-        if (q->flags&~(MS_REMOUNT|MS_BIND|MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC)) r=-ENOTSUP;
+        if (q->flags&~(MS_REMOUNT|MS_BIND|MD_FS_MOUNT_FLAGS)) r=-ENOTSUP;
         else {
             struct md_view_mount *mount=target.mount;
             if (!is_root(&target)) {
@@ -479,11 +575,7 @@ int md_fs_mount_change(struct md_filesystem *fs, struct md_guest_domain *context
                     mount=&fs->mounts->base;
                 else r=-EINVAL;
             }
-            if (!r && !(q->flags&MS_RDONLY) && md_view_inode(mount)) {
-                struct md_inode_store *store=NULL;
-                r=md_fs_storage_get(fs,mount,&store);
-                if (!r && store->readonly) r=-EROFS;
-            }
+            if (!r) r=policy_check(fs,mount,md_fs_mount_flags(q->flags));
             if (!r) r=md_mount_policy_set(&mount->policy,md_fs_mount_flags(q->flags));
         }
         break;

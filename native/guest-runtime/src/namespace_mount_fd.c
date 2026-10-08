@@ -9,6 +9,24 @@ long md_namespace_mount_fd(const struct md_fs *fs,long nr,const unsigned long *a
     struct md_fs_request q={.directory={-1,-1}};
     char key[PATH_MAX],value[PATH_MAX];
     long r=0;
+    if (nr==SYS_mount_setattr) {
+        unsigned flags=(unsigned)a[2];
+        if (flags&~(AT_EMPTY_PATH|AT_RECURSIVE|AT_SYMLINK_NOFOLLOW|AT_NO_AUTOMOUNT)) return -EINVAL;
+        struct mount_attr attr;
+        r=md_read_struct(&attr,sizeof(attr),(const void *)a[3],a[4]);
+        if (r<0) return r;
+        q.operation=MD_FS_MOUNT; q.mode=MD_FS_MOUNT_SETATTR; q.flags=flags;
+        q.value=&attr; q.value_size=sizeof(attr);
+        /* A no-op still checks namespace authority but does not look up a path. */
+        if (!attr.attr_set && !attr.attr_clr && !attr.propagation) q.path[0]="/";
+        else {
+            r=md_read_string(key,sizeof(key),(const char *)a[1]);
+            if (r<0) return r;
+            if (!*key && !(flags&AT_EMPTY_PATH)) return -ENOENT;
+            q.directory[0]=(int)a[0]; q.path[0]=key;
+        }
+        return md_namespace_mount_request(fs,&q);
+    }
     if (nr==SYS_move_mount) {
         unsigned flags=(unsigned)a[4];
         if (flags&~MOVE_MOUNT__MASK) return -EINVAL;

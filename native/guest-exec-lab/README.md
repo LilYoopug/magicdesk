@@ -9,7 +9,23 @@ that native component; this directory is not packaged into the APK.
 `test_resources.py BUILD --case mount-namespace` includes offline network
 namespace identity/authority, inherited IPC, private devpts membership and
 controlling terminals, logical cgroup membership/readonly policy and native
-anonymous-memfd statx. The remaining mount/user/PID/UTS/IPC cases run unchanged.
+anonymous-memfd statx. Cgroup namespace cases exercise captured roots for both
+hierarchies, relative paths through existing and mounted proc, clone/setns,
+retained namespace handles, removal, user-namespace authority and fsopen capture.
+Namespace-file binds cover path and O_PATH sources, nsfs metadata, setns and
+related ioctls, exited owners, recursive binds, independent namespace copies,
+mount-cycle rejection, readonly controls and repeated lazy-unmount retirement.
+The remaining mount/user/PID/UTS/IPC cases run in the same suite.
+Tmpfs cases cover permissive capacity requests, malformed options, native writes
+and shared mappings, aliases and detached ownership. Key-service absence checks
+cover protected callers, fork/exec, namespaces, chroot and application filters.
+
+`test_mount_api.py BUILD STORE` checks descriptor-based mounts with stock
+util-linux consumers. It covers filesystem-context lifetime and authority,
+SCM_RIGHTS, detached IO, recursive mount attributes and all-or-nothing rejection
+of locked policies. ABI checks include empty paths, nofollow, versioned
+structures, shared openat2 validation, protected callers and explicit errors
+for unsupported attributes. The prepared store needs Python and util-linux.
 
 `test_glycin_runtime.py BUILD STORE --library libglycin-2.so.0` invokes the real
 distribution loader with Bubblewrap and its original seccomp filter. It asserts
@@ -927,6 +943,11 @@ flags or all operation payloads.
 
 `--case fs-buffer` selects the mapped-output checks also included in the default
 resource suite. They run native controls and the real bootstrap/syscall adapter.
+Signal-stress cases create, write, stat and remove 2,000 exclusive files while
+also inspecting a native descriptor, with and without SA_RESTART and with both
+ordinary and nondumpable callers. Native controls use the same fixture. A
+cancelled notification must not execute after entering the signal handler or
+turn a restarted exclusive creation into EEXIST.
 Known-cwd getcwd must succeed at EMFILE while real KILL_THREAD filters deny
 socket/connect/sendmsg/recvmsg, including nondumpable processes, fork, exec and
 48 simultaneous callers. Output-error checks require ERANGE/EFAULT without cwd
@@ -1041,6 +1062,11 @@ selected alone. The native handoff fixture additionally tests the production
 receipt publication, separate table/channel turns and real pipe EOF.
 
 `--case fs-directory` compares native and protected guest directory reads.
+The production broker fixture uses real seccomp notifications and exact
+pidfd descriptor capture. A test-only write wrapper synchronizes a signal after
+copying and before kernel reply. Both inode and attached native directories
+must retain all 96 entries after cancellation, bad output and partial copies,
+with no duplicate names, delegated calls or leaked descriptors.
 Rejected user copying must preserve the shared position; an admitted channel
 works with zero free guest FDs and forbidden socket/connect. Four forked readers
 mix broker and protected adapter paths over the same OFD without duplicates or

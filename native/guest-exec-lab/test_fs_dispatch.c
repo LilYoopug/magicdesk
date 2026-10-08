@@ -1554,7 +1554,9 @@ void md_test_ipc_peer_worker(const char *);
 void md_test_ipc_origins(const char *);
 void md_test_ipc_origin_child(const char *,int,unsigned);
 void md_test_ipc_origin_guest(const char *,const char *);
+void md_test_namespace_broker(const char *);
 int main(int argc, char **argv) {
+    if (argc==3 && !strcmp(argv[1],"--broker-directory")) { md_test_namespace_broker(argv[2]); return 0; }
     if (argc==3 && !strcmp(argv[1],"--ipc-peer")) { md_test_ipc_peer_worker(argv[2]); return 0; }
     if (argc==3 && !strcmp(argv[1],"--ipc-origins")) { md_test_ipc_origins(argv[2]); return 0; }
     if (argc==5 && !strcmp(argv[1],"--ipc-origin-child")) { md_test_ipc_origin_child(argv[2],atoi(argv[3]),(unsigned)atoi(argv[4])); return 0; }

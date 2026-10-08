@@ -46,8 +46,14 @@ struct md_fs_buffer_service *md_fs_buffer_service_new(struct md_fs_worker *, str
  * implementation; filesystem providers only supply control-file semantics. */
 typedef struct md_fd_object *(*md_control_factory)(const struct md_control_file_ops *,void *,const struct md_identity *,int);
 void md_fs_buffer_control_factory(struct md_fs_buffer_service *,md_control_factory);
-typedef struct md_control_file (*md_control_query)(struct md_fd_object *);
+/* 1 selects a borrowed provider, 0 is an ordinary FD, negative denies a typed
+ * descriptor that cannot serve this operation. Never fall back to its carrier. */
+typedef int (*md_control_query)(struct md_fd_object *,unsigned operation,struct md_control_file *);
 void md_fs_buffer_control_query(struct md_fs_buffer_service *,md_control_query);
+/* Resolve a confirmed proc boundary under the supervisor's task ownership.
+ * Returns 1 with an owned typed object, 0 for a native path, or an error. */
+typedef int (*md_control_capture)(pid_t,const char *,struct md_fd_object **);
+void md_fs_buffer_control_capture(struct md_fs_buffer_service *,md_control_capture);
 /* Cancel requests and reap owned children, then stop/join the worker before
  * destroy. Records retain buffers independently of a dead/replaced task. */
 void md_fs_buffer_service_destroy(struct md_fs_buffer_service *);

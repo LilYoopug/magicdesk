@@ -196,13 +196,30 @@ Chromium and `test_glycin_runtime.py` cover these paths under shell identity.
 Native statx may return mount ID zero for anonymous objects; the adapter retains
 that result instead of treating it as a failed mount lookup.
 
-The descriptor mount API (`fsopen`, `fsconfig`, `fsmount`, `move_mount`) follows
+Namespace-handle bind mounts use retained typed providers, baseline sealed
+memfd carriers, O_PATH and descriptor duplication. They do not call host mount
+or setns and introduce no post-5.15 dependency. Carrier reads are never reopened
+through proc: the retained description supplies the descriptor, as for anonymous
+ELF images. `--case mount-namespace` covers path/FD aliases, owner exit, recursive
+bind, copy-cycle prevention, authority and repeated lazy retirement.
+
+Logical `CLONE_NEWCGROUP`, namespace handles/ioctls and `setns` use the same
+resource transactions and control-file carriers. Captured hierarchy roots and
+user-namespace authority follow the Linux 5.15 contract; no host cgroup namespace
+or newer syscall is required. `--case mount-namespace` covers relative proc paths,
+mounted proc, clone/unshare/setns, retained handles, removed roots, owner checks
+and `fsopen` capture under UID 2000.
+
+The descriptor mount API (`fsopen`, `fsconfig`, `fsmount`, `move_mount`,
+`mount_setattr`) follows
 the Linux 5.15 userspace contract through `fs_context`, `mount_source` and the
 existing mount graph. It does not issue these privileged syscalls on the host.
 Context carriers use sealed memfds; mount FDs use O_PATH and the common retained
 origin/ADDFD/SCM_RIGHTS delivery mechanisms. No newer kernel interface is needed.
 `test_mount_api.py` covers stock util-linux callers under UID 2000, and the
 transient-store fixture covers detached graph custody and exact FD retirement.
+Attribute changes use the existing single-writer policy, including recursive
+preflight and locked-policy rejection; no host mount_setattr call is required.
 
 ## Newer Interfaces
 

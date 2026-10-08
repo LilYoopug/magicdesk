@@ -49,6 +49,8 @@ enum md_interception_kind {
  * supervisor reads this descriptor at each image handshake, not linker symbols. */
 struct md_interception_abi {
     uint64_t magic, size;
+    /* dispatch: x0 syscall, x1..x6 arguments, x9 md_dispatch_policy.
+     * x7 is reserved by the kernel at ARM64 syscall stops. */
     uintptr_t ready, done, allocate, allocated, dispatch, export_fd, exported;
     uintptr_t export_control, store, stored, load_byte, loaded_byte;
     uintptr_t proc_open, proc_open_path;

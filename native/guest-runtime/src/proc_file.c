@@ -5,6 +5,7 @@
 #include "pid_namespace.h"
 #include "fd_selector.h"
 #include "cgroup.h"
+#include "task_resources.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -28,7 +29,6 @@ struct md_proc_file {
     int64_t position;
     struct md_resource_queue operations;
     struct md_proc_file_node node;
-    struct md_namespace_reference namespace;
     void *directory;
     size_t directory_size, directory_capacity;
     struct md_pid_namespace *pid_view;
@@ -43,7 +43,6 @@ static void destroy(struct md_fd_object *object) {
     if (f->control) f->control->release(f->control_context);
     md_cgroup_member_release(f->cgroup);
     md_resource_queue_destroy(&f->operations);
-    if (md_proc_file_namespace(f->kind)) md_namespace_reference_release(&f->namespace);
     md_pid_namespace_release(f->pid_view); free(f->content);
     if (f->process_state) md_identity_release(&f->process_identity);
     md_user_namespace_release(f->target); md_identity_release(&f->opener); free(f->directory); free(f);
@@ -87,7 +86,9 @@ struct md_proc_file *md_proc_file_open_control(const struct md_control_file_ops 
     if (!(flags&O_PATH) && (flags&O_TRUNC)) mode|=W_OK;
     int error=!ops || !context ? -EINVAL : ops->access(context,id,(unsigned)mode);
     if (error) { errno=-error; return NULL; }
-    struct md_proc_file *f=md_proc_file_open(NULL,MD_PROC_FILE_CONTROL,id,flags);
+    const struct md_namespace_reference *ref=ops->namespace_reference ? ops->namespace_reference(context) : NULL;
+    struct md_proc_file *f=md_proc_file_open(NULL,ref
+        ? (enum md_proc_file_kind)(MD_PROC_FILE_NS_USER+ref->kind) : MD_PROC_FILE_CONTROL,id,flags);
     if (f) { f->control=ops; f->control_context=ops->retain(context); }
     return f;
 }
@@ -126,13 +127,15 @@ int md_proc_file_fcntl(struct md_proc_file *f,int command,unsigned long argument
 }
 struct md_proc_file *md_proc_file_open_namespace(const struct md_namespace_reference *ref,
         const struct md_identity *opener, int flags) {
-    struct md_proc_file *f=md_proc_file_open(NULL,
-        (enum md_proc_file_kind)(MD_PROC_FILE_NS_USER+ref->kind),opener,flags);
-    if (f) f->namespace=md_namespace_reference_copy(ref);
+    struct md_control_file control=md_namespace_file_new(ref);
+    if (!control.ops) return NULL;
+    struct md_proc_file *f=md_proc_file_open_control(control.ops,control.context,opener,flags);
+    md_control_file_release(control);
     return f;
 }
 const struct md_namespace_reference *md_proc_file_namespace_reference(const struct md_proc_file *f) {
-    return f && md_proc_file_namespace(f->kind) ? &f->namespace : NULL;
+    return f && f->control && f->control->namespace_reference
+        ? f->control->namespace_reference(f->control_context) : NULL;
 }
 struct md_proc_file *md_proc_file_retain(struct md_proc_file *f) {
     md_fd_object_retain(md_proc_file_object(f));
@@ -161,8 +164,6 @@ enum md_proc_file_kind md_proc_file_kind(const struct md_proc_file *f) { return 
 struct md_proc_file *md_proc_file_reopen(const struct md_proc_file *f,
         const struct md_identity *opener, int flags) {
     struct md_proc_file *next=f->control ? md_proc_file_open_control(f->control,f->control_context,opener,flags)
-        : md_proc_file_namespace(f->kind)
-        ? md_proc_file_open_namespace(&f->namespace,opener,flags)
         : md_proc_file_open(f->target,f->kind,opener,flags);
     if (next) { next->node=f->node; md_proc_file_pid_view(next,f->pid_view); md_proc_file_cgroup(next,f->cgroup); }
     return next;
@@ -322,7 +323,7 @@ static int process_content(struct md_proc_file *f) {
     if (error) free(data); else { f->content=data; f->content_size=length; }
     return error;
 }
-long md_proc_file_read_at(struct md_proc_file *f, const struct md_uts_namespace *uts,
+long md_proc_file_read_at(struct md_proc_file *f, const struct md_uts_namespace *uts, const struct md_cgroup_namespace *cgroup,
         void *out, size_t capacity, int64_t offset) {
     if (!f || (f->flags&O_PATH) || (f->flags&O_ACCMODE)==O_WRONLY) return -EBADF;
     if (offset<0) return -EINVAL;
@@ -330,7 +331,7 @@ long md_proc_file_read_at(struct md_proc_file *f, const struct md_uts_namespace 
     if (md_proc_file_namespace(f->kind)) return -EINVAL;
     if (md_proc_file_cgroup_kind(f->kind)) {
         char text[8192];
-        long size=f->kind==MD_PROC_FILE_CGROUP ? md_cgroup_member_text(f->cgroup,text,sizeof(text))
+        long size=f->kind==MD_PROC_FILE_CGROUP ? md_cgroup_member_text(f->cgroup,cgroup,text,sizeof(text))
             : md_cgroup_controllers_text(f->cgroup,text,sizeof(text));
         return size<0 ? size : (long)slice(out,capacity,(uint64_t)offset,text,(size_t)size);
     }
@@ -485,7 +486,7 @@ static int process_directory(struct md_proc_file *f,const char *path) {
     return r;
 }
 static long directory_entries(struct md_proc_file_io *io, void *bytes, size_t capacity) {
-    static const char *const names[]={".","..","user","mnt","uts","ipc","pid","pid_for_children","net"};
+    static const char *const names[]={".","..","user","mnt","uts","ipc","pid","pid_for_children","net","cgroup"};
     struct md_proc_file *f=io->file;
     char path[64]; snprintf(path,sizeof(path),"/proc/%d%s",f->node.process,
         f->kind==MD_PROC_FILE_NS_DIRECTORY ? "/ns" : "");
@@ -580,7 +581,7 @@ long md_proc_file_io_execute(struct md_proc_file_io *io, const struct md_identit
         size_t length=io->length<capacity ? io->length : capacity;
         if (length && !bytes) return io->result=-EFAULT;
         io->result=f->control ? f->control->read(f->control_context,&io->actor,bytes,length,io->offset)
-            : md_proc_file_read_at(f,uts,bytes,length,io->offset);
+            : md_proc_file_read_at(f,uts,io->actor.resources ? io->actor.resources->cgroup_namespace : NULL,bytes,length,io->offset);
     }
     return io->result;
 }

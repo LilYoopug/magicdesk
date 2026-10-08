@@ -1004,6 +1004,19 @@ static void delegate_begin(struct thread *t, const struct seccomp_notif *q) {
     t->phase = DELEGATE_CANCEL;
     tracee_request(t, PTRACE_INTERRUPT, NULL, NULL, "interrupt-delegation");
 }
+static void notification_interrupted(struct thread *t) {
+    if (t->phase!=DELEGATE_CANCEL
+            && !(t->phase==EXPORT_CANCEL && t->metadata.previous==IDLE)) return;
+    /* A delivery stop can precede the requested INTERRUPT. Nothing has run:
+     * retire the request before the handler can replace its register context.
+     * The kernel retains EINTR/SA_RESTART and the pending interrupt is harmless
+     * in IDLE. Never execute the cancelled call in a signal handler's frame. */
+    CHECK(ioctl(listener,SECCOMP_IOCTL_NOTIF_ID_VALID,&t->metadata.request.id)==-1 && errno==ENOENT);
+    release_operation(t);
+    md_proc_file_release(t->proc_file); t->proc_file=NULL;
+    t->phase=IDLE;
+    TRACE("PROBE notification interrupted pid=%d\n",t->pid);
+}
 static void buffer_setup(struct thread *t, const struct seccomp_notif *q) {
     size_t page=(size_t)getpagesize();
     size_t size=(sizeof(union md_adapter_frame)+page-1)/page*page*MD_ADAPTER_BUFFER_SLOTS;
@@ -1202,9 +1215,46 @@ static struct md_fd_object *control_file_create(const struct md_control_file_ops
         const struct md_identity *id,int flags) {
     return md_proc_file_object(md_proc_file_open_control(ops,context,id,flags));
 }
-static struct md_control_file control_file_query(struct md_fd_object *object) {
+static int control_file_query(struct md_fd_object *object,unsigned operation,struct md_control_file *out) {
     struct md_proc_file *file=md_proc_file_from_object(object);
-    return file && !(md_proc_file_flags(file)&O_PATH) ? md_proc_file_control(file) : (struct md_control_file){0};
+    if (!file) return 0;
+    if (operation==MD_FS_MOUNT) {
+        if (!md_proc_file_namespace_reference(file)) return -EOPNOTSUPP;
+    } else if (md_proc_file_flags(file)&O_PATH) return -EBADF;
+    *out=md_proc_file_control(file);
+    return out->ops ? 1 : -EINVAL;
+}
+static int control_file_capture(pid_t actor,const char *path,struct md_fd_object **out) {
+    struct thread *t=find_thread(actor);
+    if (!t) return -ESRCH;
+    struct md_proc_path selected=md_proc_path_for(path,t->pid,t->tgid);
+    enum md_proc_kind kind=selected.kind==MD_PROC_FOREIGN ? selected.foreign_kind : selected.kind;
+    if (kind!=MD_PROC_FD && !md_proc_control_kind(kind)) return 0;
+    if (*selected.tail && kind!=MD_PROC_FD) return -ENOTDIR;
+    struct thread *target=find_thread(selected.process);
+    if (!target || !target->born) return kind==MD_PROC_FD ? 0 : -ENOENT;
+    struct md_proc_file *file=NULL;
+    if (kind==MD_PROC_FD) {
+        file=proc_file_capture(target,selected.descriptor);
+        if (!file) return 0;
+        if (target!=t && !debugger_allowed(t->pid,target->pid)) { md_proc_file_release(file); return -EACCES; }
+        if (*selected.tail) { md_proc_file_release(file); return -ENOTDIR; }
+    } else {
+        if (target!=t && !debugger_allowed(t->pid,target->pid)) return -EACCES;
+        enum md_proc_file_kind type=(enum md_proc_file_kind)(kind-MD_PROC_UID_MAP);
+        if (kind==MD_PROC_NS_UNSUPPORTED) return -ENOENT;
+        if (!md_proc_file_namespace(type)) return -EOPNOTSUPP;
+        struct md_proc_file_node node={0}; struct stat st;
+        int error=proc_node_stat(proc_owner(target->pid),type,&node,&st);
+        if (error) return error;
+        struct md_namespace_reference ref=md_namespace_reference_capture(
+            (enum md_namespace_kind)(type-MD_PROC_FILE_NS_USER),&target->resources,target->identity.user_namespace);
+        file=md_proc_file_open_namespace(&ref,&t->identity,O_PATH);
+        md_namespace_reference_release(&ref);
+        if (!file) return -errno;
+        md_proc_file_node(file,node);
+    }
+    *out=md_proc_file_object(file); return 1;
 }
 static void proc_file_request(struct thread *t, const struct seccomp_notif *q) {
     struct seccomp_notif_resp reply={.id=q->id};
@@ -2014,8 +2064,8 @@ static void fd_start(struct thread *t) {
             || (r->regs[8]==SYS_close_range && (r->regs[2]&CLOSE_RANGE_UNSHARE)))
         error=md_resources_unshare_prepare(&t->resources,r->regs[8]==SYS_unshare ? r->regs[0] : CLONE_FILES,
             &t->identity,&t->resource_change);
-    if (r->regs[8]==SYS_clone && (r->regs[0]&(CLONE_NEWNS|CLONE_NEWUTS|CLONE_NEWIPC|CLONE_NEWUSER|CLONE_NEWPID|CLONE_NEWNET)))
-        error=md_resources_unshare_prepare(&t->resources,r->regs[0]&(CLONE_NEWNS|CLONE_NEWUTS|CLONE_NEWIPC|CLONE_NEWUSER|CLONE_NEWPID|CLONE_NEWNET),
+    if (r->regs[8]==SYS_clone && md_resources_namespace_flags(r->regs[0]))
+        error=md_resources_unshare_prepare(&t->resources,md_resources_namespace_flags(r->regs[0]),
             &t->identity,&t->resource_change);
     if (!error && (t->resource_change.copy_mounts || t->resource_change.check_root)) {
         error=md_mount_copy_submit(mount_copy_service,t->pid,t->resources.mounts,t->resources.fs,
@@ -3266,7 +3316,7 @@ static int domain_call(struct thread *t, struct user_pt_regs *r, unsigned long c
     }
     if (nr == SYS_unshare) {
         CHECK(t->phase == IDLE);
-        if (!(r->regs[0]&CLONE_NEWUSER) && (r->regs[0]&(CLONE_NEWNS|CLONE_NEWUTS|CLONE_NEWIPC|CLONE_NEWPID|CLONE_NEWNET))
+        if (!(r->regs[0]&CLONE_NEWUSER) && md_resources_namespace_flags(r->regs[0])
                 && !md_identity_capable(&t->identity,CAP_SYS_ADMIN)) {
             return_value(t,r,-EPERM); return 1;
         }
@@ -3283,7 +3333,7 @@ static int domain_call(struct thread *t, struct user_pt_regs *r, unsigned long c
         if (!md_resources_clone_supported(r->regs[0])) {
             return_value(t, r, -EINVAL); return 1;
         }
-        if (!(r->regs[0]&CLONE_NEWUSER) && (r->regs[0]&(CLONE_NEWNS|CLONE_NEWUTS|CLONE_NEWIPC|CLONE_NEWPID|CLONE_NEWNET))
+        if (!(r->regs[0]&CLONE_NEWUSER) && md_resources_namespace_flags(r->regs[0])
                 && !md_identity_capable(&t->identity,CAP_SYS_ADMIN)) {
             return_value(t,r,-EPERM); return 1;
         }
@@ -3433,14 +3483,15 @@ static void dispatch(struct thread *t) {
     regs.pc = DISPATCH; regs.sp = t->stack; regs.regs[30] = DONE;
     regs.regs[0] = t->original.regs[8];
     for (unsigned i = 0; i < 6; i++) regs.regs[i + 1] = t->original.regs[i];
-    regs.regs[7] = md_domain_scoped(t->resources.fs) || md_mount_namespace_managed_paths(t->resources.mounts);
-    if (md_network_namespace_offline(t->resources.network)) regs.regs[7]|=MD_DISPATCH_OFFLINE;
+    unsigned policy = md_domain_scoped(t->resources.fs) || md_mount_namespace_managed_paths(t->resources.mounts);
+    if (md_network_namespace_offline(t->resources.network)) policy|=MD_DISPATCH_OFFLINE;
     if (network_descriptor_call(t->original.regs[8])) {
         struct md_fd_object *object=md_fd_origins_object(t->resources.files,(int)t->original.regs[0],NULL);
-        if (md_network_socket_offline(object)) regs.regs[7]|=MD_DISPATCH_OFFLINE_SOCKET;
-        if (md_network_socket_control(object)) regs.regs[7]|=MD_DISPATCH_NETWORK_CONTROL;
+        if (md_network_socket_offline(object)) policy|=MD_DISPATCH_OFFLINE_SOCKET;
+        if (md_network_socket_control(object)) policy|=MD_DISPATCH_NETWORK_CONTROL;
         md_fd_object_release(object);
     }
+    regs.regs[9] = policy;
     if (!set_registers(t->pid, &regs)) return;
     t->phase = DISPATCHING; resume(t->pid, 0);
 }
@@ -3895,6 +3946,7 @@ int main(int argc, char **argv) {
         buffer_service=md_fs_buffer_service_new(filesystem,tasks,fd_wakeup,buffer_complete); CHECK(buffer_service);
         md_fs_buffer_control_factory(buffer_service,control_file_create);
         md_fs_buffer_control_query(buffer_service,control_file_query);
+        md_fs_buffer_control_capture(buffer_service,control_file_capture);
         CHECK(!md_mount_copy_service_create(filesystem,mount_copy_complete,&mount_copy_service));
         const char *program = "", *cwd = "/";
         for (int i = argument+1; i+1 < argc; ++i) {
@@ -3947,6 +3999,7 @@ int main(int argc, char **argv) {
         unsigned event = (unsigned)status >> 16;
         CHECK(!t->resume_lost || event==PTRACE_EVENT_EXEC || event==PTRACE_EVENT_EXIT);
         int sig = WSTOPSIG(status);
+        if (!event && sig!=(SIGTRAP|0x80)) notification_interrupted(t);
         if (event==PTRACE_EVENT_EXIT) {
             /* ESRCH invalidates the preceding stop, not this newly observed
              * terminal stop. Registers may be inspected here, never fabricated. */
