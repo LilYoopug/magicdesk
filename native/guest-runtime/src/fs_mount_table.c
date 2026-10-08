@@ -83,14 +83,20 @@ static void escaped(FILE *stream, const char *text) {
     }
 }
 static void entry(FILE *stream, unsigned info, unsigned id, unsigned parent, dev_t device,
-        const char *path, const char *type, const char *source, int readonly) {
-    const char *options=readonly ? "ro" : "rw";
+        const char *path, const char *type, const char *source, unsigned policy) {
+    char options[32];
+    snprintf(options,sizeof(options),"%s%s%s%s",policy&MD_MOUNT_READONLY ? "ro" : "rw",
+        policy&MD_MOUNT_NOSUID ? ",nosuid" : "",policy&MD_MOUNT_NODEV ? ",nodev" : "",
+        policy&MD_MOUNT_NOEXEC ? ",noexec" : "");
     if (info) {
         fprintf(stream,"%u %u %u:%u / ",id,parent,major(device),minor(device)); escaped(stream,path);
         fprintf(stream," %s - %s %s %s\n",options,type,source,options);
     } else {
         fprintf(stream,"%s ",source); escaped(stream,path); fprintf(stream," %s %s 0 0\n",type,options);
     }
+}
+static const char *filesystem_type(const struct md_view_mount *mount) {
+    return !md_view_inode(mount) ? "none" : md_filesystem_name(mount->storage ? mount->storage->filesystem_kind : MD_FILESYSTEM_INODE);
 }
 int md_fs_mount_table(struct md_filesystem *fs, unsigned info, unsigned flags) {
     if (info>1 || (flags&~(O_PATH|O_CLOEXEC))) return -EINVAL;
@@ -110,10 +116,10 @@ int md_fs_mount_table(struct md_filesystem *fs, unsigned info, unsigned flags) {
         if (!md_view_base(fs->mounts,selected)) {
             const struct md_view_mount *m=selected;
             entry(stream,info,m->id,m->parent ? m->parent->id : m->id,
-                root.st_dev,"/",md_view_inode(m) ? "guestfs" : "none",
-                md_view_inode(m) ? "guest" : "attachment",md_view_readonly(m));
+                root.st_dev,"/",filesystem_type(m),
+                md_view_inode(m) ? "guest" : "attachment",md_mount_policy_flags(&m->policy));
         } else entry(stream,info,fs->mounts->base.id,fs->mounts->base.id,root.st_dev,"/","guestfs","guest",
-            fs->store->readonly || (md_mount_policy_flags(&fs->mounts->base.policy)&MD_MOUNT_READONLY));
+            md_mount_policy_flags(&fs->mounts->base.policy) | (fs->store->readonly ? MD_MOUNT_READONLY : 0));
         if (!fs->store->root_id && !fs->native_root && selected==&fs->mounts->base) {
             r=native_entries(fs,stream,info,&dev_id);
             if (!r) entry(stream,info,fs->mounts->shm_id,dev_id,root.st_dev,"/dev/shm","guestfs","guest",fs->store->readonly);
@@ -126,8 +132,8 @@ int md_fs_mount_table(struct md_filesystem *fs, unsigned info, unsigned flags) {
         char path[PATH_MAX]; r=md_view_path(fs,m->target,m->parent,path,sizeof(path));
         if (r == -ENOENT && (fs->store->root_id || fs->native_root)) { r=0; continue; }
         if (!r) entry(stream,info,m->id,m->parent ? m->parent->id : fs->mounts->base.id,
-            m->native.st_dev,path,md_view_inode(m) ? "guestfs" : "none",
-            md_view_inode(m) ? "guest" : "attachment",md_view_readonly(m));
+            m->native.st_dev,path,filesystem_type(m),
+            md_view_inode(m) ? "guest" : "attachment",md_mount_policy_flags(&m->policy));
     }
     if (!r && (fflush(stream) || ferror(stream))) r=-EIO;
     int readable=-1;

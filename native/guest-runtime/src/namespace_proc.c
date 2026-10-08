@@ -1,6 +1,8 @@
 #define _GNU_SOURCE
 #include "namespace_internal.h"
 #include "proc_paths.h"
+#include "proc_control.h"
+#include "proc_file.h"
 #include "fd_metadata.h"
 #include "interception.h"
 #include "fd_client.h"
@@ -58,7 +60,10 @@ long md_namespace_relative_mount(const struct md_fs *fs, int base, char *path) {
     long n=descriptor_path(base,host);
     if (n<0) return n;
     if (!md_host_path(host)) return 0;
-    if (fs->scoped_root) return -ENOTSUP;
+    /* A retained directory remains usable after chroot/pivot. In a scoped
+     * root its absolute kernel name is not a guest pathname: keep the dirfd
+     * operand so the namespace owner resolves its provenance instead. */
+    if (fs->scoped_root) return 0;
     struct stat info;
     n = base == AT_FDCWD ? RAW4(newfstatat, base, ".", &info, 0) : RAW2(fstat, base, &info);
     if (n < 0) return n;
@@ -89,6 +94,13 @@ static int link_operation(long nr, const unsigned long *a) {
     default: return 0;
     }
 }
+int md_namespace_proc_borrow(const struct md_proc_path *ref, int *fd) {
+    if (ref->process!=(int)RAW0(gettid)) return 0;
+    if (ref->kind==MD_PROC_FD) *fd=ref->descriptor;
+    else if (ref->kind==MD_PROC_CWD) *fd=AT_FDCWD;
+    else return 0;
+    return 1;
+}
 static long host_readlink(const struct md_fs *fs, const struct md_proc_path *ref,
         const char *path, const unsigned long *a) {
     if (!a[3]) return -EINVAL;
@@ -96,8 +108,8 @@ static long host_readlink(const struct md_fs *fs, const struct md_proc_path *ref
     long n = RAW4(readlinkat, AT_FDCWD, path, text, sizeof(text) - 1);
     if (n < 0) return n;
     text[n] = 0;
-    int borrowed=ref->process==(int)RAW0(gettid) && (ref->kind==MD_PROC_FD || ref->kind==MD_PROC_CWD);
-    int fd = borrowed ? (ref->kind==MD_PROC_FD ? ref->descriptor : AT_FDCWD) : -1;
+    int fd=-1;
+    int borrowed=md_namespace_proc_borrow(ref,&fd);
     char selected[PATH_MAX];
     if (!borrowed && (n=md_proc_task_path(path,selected,sizeof(selected)))<0) return n;
     struct md_fs_request q = {.operation = MD_FS_PATH, .directory = {fd, -1},
@@ -156,6 +168,15 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
                             unsigned path_index, const char *path) {
     if (nr == SYS_renameat || nr == SYS_renameat2 || nr == SYS_linkat) return -ENOTSUP;
     struct md_proc_path ref = md_proc_path(path);
+    enum md_proc_kind control=ref.kind==MD_PROC_FOREIGN ? ref.foreign_kind : ref.kind;
+    if (md_proc_control_kind(control)) {
+        if (control==MD_PROC_NS_UNSUPPORTED) return -ENOENT;
+        if (*ref.tail) return -ENOTDIR;
+        long result=nr==SYS_openat ? md_proc_control_open(ref.process,control,(int)a[2])
+            : md_proc_control_metadata(ref.process,control,-1,nr,a);
+        if (result!=-EXDEV || control!=MD_PROC_PROCESS_DIRECTORY) return result;
+        ref.kind=MD_PROC_NONE;
+    }
     if (ref.kind==MD_PROC_MOUNTS || ref.kind==MD_PROC_MOUNTINFO) {
         if (*ref.tail) return -ENOTDIR;
         if (nr==SYS_openat) {
@@ -196,6 +217,16 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
     args[path_index] = (unsigned long)path;
     int tail = ref.kind && *ref.tail;
     int native = !ref.kind || (!tail && link_operation(nr, a));
+    if (!native && ref.kind==MD_PROC_FD && ref.process==(int)RAW0(gettid)) {
+        long known=md_proc_control_known(ref.descriptor);
+        if (known<0) return known;
+        if (known) {
+            if (tail) return -ENOTDIR;
+            if (nr==SYS_openat) return md_proc_control_reopen(ref.process,ref.descriptor,(int)a[2]&~(O_CREAT|O_EXCL));
+            if (nr!=SYS_readlinkat || md_proc_file_namespace((enum md_proc_file_kind)(known-1)))
+                return md_proc_control_metadata(ref.process,MD_PROC_NONE,ref.descriptor,nr,a);
+        }
+    }
     if (nr == SYS_readlinkat && !tail) {
         if (ref.kind == MD_PROC_EXE) return link_result(exe, a);
         if (ref.kind == MD_PROC_ROOT) return link_result("/", a);
@@ -241,9 +272,7 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
         long fd=md_proc_executable_open(fs,exe,O_PATH|O_CLOEXEC|(tail ? O_DIRECTORY : 0));
         if (fd<0) return fd;
         owned=operand.descriptor=(int)fd;
-    } else if (ref.process==(int)RAW0(gettid) && (ref.kind==MD_PROC_FD || ref.kind==MD_PROC_CWD))
-        operand.descriptor=ref.kind==MD_PROC_FD ? ref.descriptor : AT_FDCWD;
-    else {
+    } else if (!md_namespace_proc_borrow(&ref,&operand.descriptor)) {
         long error=md_proc_task_path(anchor,selected,sizeof(selected));
         if (error<0) return error;
         operand.capture=(struct md_fs_task_capture){selected,O_PATH|(tail ? O_DIRECTORY : 0)};

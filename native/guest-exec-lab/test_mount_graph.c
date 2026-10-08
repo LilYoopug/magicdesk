@@ -256,9 +256,11 @@ static void sizes(const char *base) {
     unsigned before=descriptors();
     struct md_mount_namespace *empty=md_mount_namespace_new(), *received=NULL; assert(empty);
     int root_fd=open(base,O_PATH|O_DIRECTORY|O_CLOEXEC); assert(root_fd>=0);
+    assert(!md_mount_namespace_lock_inherited(empty));
     struct md_mount_graph_parcel p={0}; assert(!md_mount_graph_export(empty,root_fd,&p) && p.count==4);
     close(root_fd);
     assert(!md_mount_graph_import(&p,&received) && !received->tree);
+    assert(received->base.locked);
     md_mount_namespace_release(empty); md_mount_namespace_release(received);
     char store[PATH_MAX], host[MD_FS_MOUNTS_MAX][PATH_MAX], target[MD_FS_MOUNTS_MAX][32];
     path(store,base,"max-store"); struct md_filesystem fs={0};

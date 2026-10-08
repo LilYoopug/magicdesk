@@ -4,6 +4,9 @@
 #include "mount_namespace.h"
 #include "fd_origins.h"
 #include "sysv_ipc.h"
+#include "uts_namespace.h"
+#include "ipc_namespace.h"
+#include "guest_identity.h"
 
 /* Linux owns the real FD table, cwd/umask and open descriptions. Optional path
  * annotations share their lifetimes without retaining data descriptions. */
@@ -12,23 +15,34 @@ struct md_task_resources {
     struct md_mount_namespace *mounts;
     struct md_fd_origins *files;
     struct md_ipc_undo *sem_undo;
+    struct md_uts_namespace *uts;
+    struct md_ipc_namespace *ipc;
 };
 struct md_resource_change {
     struct md_task_resources next;
     int copy_mounts;
+    int check_root, identity_pending;
+    struct md_identity identity;
+    unsigned long namespaces;
+    struct md_mount_namespace *join_mounts;
 };
+struct md_namespace_reference;
+/* Called under the caller's file-table and FS-context turns. Thread-group
+ * membership is checked by the supervisor before USER admission. */
+int md_resources_setns_prepare(const struct md_task_resources *, const struct md_identity *,
+    const struct md_namespace_reference *, unsigned type, struct md_resource_change *);
 
 int md_resources_init(struct md_task_resources *, struct md_mount_namespace *);
 int md_resources_fork(const struct md_task_resources *, unsigned long flags,
         struct md_task_resources *);
-int md_resources_release(struct md_ipc *, struct md_task_resources *);
+int md_resources_release(struct md_task_resources *);
 /* Confirmed kernel exec only, after any nonleader task-resource transfer. */
 int md_resources_exec(struct md_task_resources *);
 /* Prepare before letting the kernel change ownership. Commit only on its
  * successful syscall-exit stop; failure/exit discards the unused candidate. */
 int md_resources_unshare_prepare(const struct md_task_resources *, unsigned long flags,
-        struct md_resource_change *);
-int md_resources_unshare_finish(struct md_ipc *, struct md_task_resources *,
-        struct md_resource_change *, long result);
+    const struct md_identity *, struct md_resource_change *);
+int md_resources_unshare_finish(struct md_task_resources *,
+        struct md_identity *, struct md_resource_change *, long result);
 int md_resources_clone_supported(unsigned long flags);
 #endif

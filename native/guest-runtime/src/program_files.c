@@ -49,7 +49,7 @@ static long object_identity(const struct md_fs *fs, struct md_program *program) 
     return r;
 }
 long md_program_capture(const struct md_fs *fs, int fd, const char *path, struct md_program *program) {
-    program->fd = -1;
+    *program=(struct md_program){.fd=-1};
     long r = md_copy(program->identity.path, sizeof(program->identity.path), path);
     if (r < 0) return r;
     r = RAW3(fcntl, fd, F_DUPFD_CLOEXEC, 0);
@@ -62,7 +62,7 @@ long md_program_capture(const struct md_fs *fs, int fd, const char *path, struct
 }
 long md_program_acquire(const struct md_fs *fs, int base, const char *path, int flags,
         struct md_program *program) {
-    program->fd = -1;
+    *program=(struct md_program){.fd=-1};
     memset(program->identity.object, 0, sizeof(program->identity.object));
     char routed[PATH_MAX];
     if (fs->endpoint[0]) {

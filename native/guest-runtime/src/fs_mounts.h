@@ -21,6 +21,11 @@ int md_fs_mounts_copy_cwd(struct md_mount_namespace *source, struct md_mount_nam
  * provenance an ambiguous native object fails instead of choosing an alias. */
 int md_fs_root_capture(struct md_filesystem *, int fd, const struct md_fs_anchor *, struct md_fs_location *);
 int md_fs_root_select(struct md_filesystem *, const struct md_fs_location *);
+/* Worker-only identity check, independent of cwd and textual path spelling. */
+int md_fs_root_is_mount_root(struct md_filesystem *, const struct md_fs_location *);
+/* Resolve the target namespace's effective root into an unpublished FS context.
+ * Existing dirfds keep their old mount provenance. Worker-only. */
+int md_fs_mounts_join_context(struct md_filesystem *, struct md_guest_domain *);
 void md_fs_mounts_close(struct md_filesystem *);
 int md_fs_mount_table(struct md_filesystem *, unsigned mountinfo, unsigned flags);
 int md_fs_native_mount(struct md_filesystem *, uint64_t native, uint64_t *guest);

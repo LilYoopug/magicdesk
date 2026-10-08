@@ -1,6 +1,8 @@
 #define _GNU_SOURCE
 #include "inode_store.h"
 #include "inode_watch.h"
+#include "inode_internal.h"
+#include "fs_operation.h"
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -111,16 +113,21 @@ int main(int argc, char **argv) {
     assert(!md_inode_fstat(a, lower, &stable) && stable.st_nlink == 0 && stable.st_ino == logical.st_ino);
     source_object(a,lower,&first);
     int sibling = open_file(b, "/data/file", O_RDONLY);
-    metadata = md_inode_xattr_open(b,sibling,"user.md-copy",W_OK); assert(metadata >= 0);
-    char proc[64]; snprintf(proc,sizeof(proc),"/proc/self/fd/%d",metadata);
-    assert(!setxattr(proc,"user.md-copy","own",3,0)); close(metadata);
-    metadata = md_inode_xattr_open(b,sibling,"",F_OK); assert(metadata >= 0);
-    snprintf(proc,sizeof(proc),"/proc/self/fd/%d",metadata);
-    char names[256]; ssize_t bytes = listxattr(proc,names,sizeof(names)); assert(bytes > 0);
+    struct md_fs_request attr={.operation=MD_FS_XATTR_OBJECT,.directory={sibling,-1},
+        .path={NULL,"user.md-copy"},.mode=MD_FS_XATTR_SET,.value="own",.value_size=3,.capacity=3};
+    struct md_fs_result reply={.fd=-1};
+    md_inode_xattr(b,&attr,&reply,NULL); assert(!reply.error && reply.fd<0);
+    char names[256]; struct md_fs_output output={.data=names,.capacity=sizeof(names)};
+    attr.mode=MD_FS_XATTR_LIST; attr.path[1]=NULL; attr.value=NULL; attr.value_size=0; attr.capacity=sizeof(names);
+    md_inode_xattr(b,&attr,&reply,&output); assert(!reply.error && reply.position>0);
+    ssize_t bytes=reply.position;
     int found = 0;
     for (ssize_t i=0;i<bytes;i+=strlen(names+i)+1) found |= !strcmp(names+i,"user.md-copy");
-    assert(found && getxattr(proc,"user.md-copy",old,sizeof(old))==3 && !memcmp(old,"own",3));
-    close(metadata); close(sibling);
+    attr.mode=MD_FS_XATTR_GET; attr.path[1]="user.md-copy"; attr.capacity=sizeof(old);
+    output=(struct md_fs_output){.data=old,.capacity=sizeof(old)};
+    md_inode_xattr(b,&attr,&reply,&output);
+    assert(found && !reply.error && reply.position==3 && !memcmp(old,"own",3));
+    close(sibling);
     errno=0; assert(fgetxattr(image,"user.md-copy",old,sizeof(old))==-1 && errno==ENODATA);
     fd = open_file(b, "/data/file", O_RDWR);
     void *map = mmap(NULL, 5, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0); assert(map != MAP_FAILED);

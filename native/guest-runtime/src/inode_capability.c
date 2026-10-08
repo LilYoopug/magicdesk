@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "inode_internal.h"
+#include "inode_overlay.h"
 #include "fs_operation.h"
 #include <errno.h>
 #include <string.h>
@@ -26,7 +27,8 @@ int md_inode_capability(struct md_inode_store *s, const struct md_fs_request *re
     if (r) return r;
     struct mdi_node node;
     r = mdi_fd(s, request->directory[0], &node);
-    if (!r && write && s->identity && !md_identity_capable(s->identity, CAP_SETFCAP)) r = -EPERM;
+    if (!r && write) r=mdi_setattr_permission(s,&node,request,s->identity);
+    if (!r && write) r=mdi_overlay_setattr(s,&node,request);
     sqlite3_stmt *q = NULL;
     if (!r) r = mdi_prepare(s, "SELECT value FROM file_capabilities WHERE object=?1", &q);
     if (!r) r = mdi_bind_id(q, 1, node.id);

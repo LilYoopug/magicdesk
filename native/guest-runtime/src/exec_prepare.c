@@ -17,8 +17,11 @@ static long acquire_at(struct md_fs_context *context, int base, const struct md_
         .directory={object ? -1 : base,-1},.origin={object ? NULL : origin,NULL},
         .path={object ? object : path,NULL},.flags=object ? O_RDONLY|O_CLOEXEC : flags};
     struct md_fs_result result;
-    struct md_fs_output output={.data=&program->identity,.capacity=sizeof(program->identity)};
+    struct md_fs_anchor *resolved=NULL;
+    struct md_fs_output output={.data=&program->identity,.capacity=sizeof(program->identity),.origin=&resolved};
     md_fs_context_execute(context,&q,&result,&output);
+    program->mount_flags=md_fs_anchor_policy(resolved);
+    md_fs_anchor_release(resolved);
     if (result.error) return result.error;
     if (result.host_path) {
         char native[PATH_MAX];
@@ -64,11 +67,12 @@ static long acquire(void *owner, const char *path, struct md_program *program) {
 }
 int md_fs_command_prepare(struct md_fs_context *context, const struct md_fs_request *q,
         struct md_command_recipe *recipe, struct md_command_images *images) {
-    *images=(struct md_command_images){-1,-1};
+    *images=(struct md_command_images){.program=-1,.loader=-1};
     struct md_program first={.fd=-1};
     int error;
     if (!*q->path[0]) {
         first.fd=q->directory[0];
+        first.mount_flags=md_fs_anchor_policy(q->origin[0]);
         snprintf(first.identity.path,sizeof(first.identity.path),"/dev/fd/%lld",(long long)q->offset);
         struct md_fs_request object={.actor=context->actor,.peer=context->peer,
             .operation=MD_FS_OBJECT_ID,.directory={first.fd,-1},.origin={q->origin[0],NULL}};

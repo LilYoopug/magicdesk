@@ -13,8 +13,8 @@
 #include <string.h>
 #include <unistd.h>
 
-enum { MAGIC=0x4d444d47U, VERSION=7, HEADER=128 };
-enum { INODE=1, DETACHED=2, RETIRED=4 };
+enum { MAGIC=0x4d444d47U, VERSION=8, HEADER=128 };
+enum { INODE=1, DETACHED=2, RETIRED=4, LOCKED=8 };
 struct entry { uint32_t parent, flags; struct md_fd_identity source, target, policy;
     uint32_t storage, descriptor; uint64_t generation; };
 struct storage { struct md_fd_identity root; uint32_t start, count; };
@@ -154,8 +154,8 @@ static int path_object(int fd, struct md_fd_identity expected, struct stat *st, 
     return md_fd_identity_same(md_fd_identity(st),expected) ? 0 : -EPROTO;
 }
 static int topology(const struct manifest *m) {
-    if (m->root>m->count || m->base_parent>m->count || (m->base_flags&~DETACHED)) return -EPROTO;
-    if (m->root ? (!m->base_descriptor || !m->base_parent) : (m->base_parent || m->base_flags)) return -EPROTO;
+    if (m->root>m->count || m->base_parent>m->count || (m->base_flags&~(DETACHED|LOCKED))) return -EPROTO;
+    if (m->root ? (!m->base_descriptor || !m->base_parent) : (m->base_parent || (m->base_flags&DETACHED))) return -EPROTO;
     if (m->base_parent && (m->entries[m->base_parent-1].flags&RETIRED)) return -EPROTO;
     if (m->root && (m->entries[m->root-1].parent || (m->entries[m->root-1].flags&(DETACHED|RETIRED)))) return -EPROTO;
     unsigned parents[MD_FS_MOUNTS_MAX+1]={0}, order[MD_FS_MOUNTS_MAX+1];
@@ -185,7 +185,7 @@ static int read_manifest(int fd, struct manifest *out, struct md_fd_identity *id
             || out->base_target.inode) return -EPROTO;
     for (unsigned i=0;i<out->count;++i) {
         const struct entry *e=&out->entries[i];
-        if (!e->generation || e->flags&~(INODE|DETACHED|RETIRED) || e->storage>out->storages
+        if (!e->generation || e->flags&~(INODE|DETACHED|RETIRED|LOCKED) || e->storage>out->storages
                 || e->storage>owners+1 || (e->storage && !(e->flags&INODE))) return -EPROTO;
         if (e->flags&RETIRED) {
             struct entry empty={.flags=DETACHED|RETIRED,.generation=e->generation};
@@ -204,7 +204,7 @@ static int read_manifest(int fd, struct manifest *out, struct md_fd_identity *id
     if (owners!=out->storages) return -EPROTO;
     for (unsigned i=0;i<owners;++i) {
         const struct storage *s=&out->storage[i];
-        if (s->start!=next || s->count<2 || s->count>MD_INODE_CUSTODY_FDS || s->count%2) return -EPROTO;
+        if (s->start!=next || s->count<2 || s->count>MD_INODE_CUSTODY_FDS) return -EPROTO;
         next+=s->count;
         for (unsigned j=0;j<i;++j)
             if (md_fd_identity_same(s->root,out->storage[j].root)) return -EPROTO;
@@ -238,7 +238,7 @@ static int describe(struct md_mount_namespace *view, const struct md_mount_layou
     int root_slot=mount_slot(view,l->root,count), base_parent=mount_slot(view,l->base->parent,count);
     if (root_slot<0 || base_parent<0) return -EINVAL;
     out->root=(unsigned)root_slot; out->base_parent=(unsigned)base_parent;
-    out->base_flags=l->base->detached ? DETACHED : 0;
+    out->base_flags=(l->base->detached ? DETACHED : 0) | (l->base->locked ? LOCKED : 0);
     if (l->base->source>=0) {
         int r=path_object(l->base->source,md_fd_identity(&l->base->native),&(struct stat){0},1);
         if (!r) r=path_object(l->base->target,md_fd_identity(&l->base->guest),&(struct stat){0},1);
@@ -268,7 +268,7 @@ static int describe(struct md_mount_namespace *view, const struct md_mount_layou
             if (j==out->storages) return -ESTALE;
             e->storage=j+1;
         }
-        e->flags=(md_view_inode(m) ? INODE : 0) | (m->detached ? DETACHED : 0);
+        e->flags=(md_view_inode(m) ? INODE : 0) | (m->detached ? DETACHED : 0) | (m->locked ? LOCKED : 0);
         if (!md_view_base(view,m->parent)) {
             unsigned j=0;
             while (j<count && m->parent!=&view->tree->mounts[j]) ++j;
@@ -436,6 +436,7 @@ static int merge(struct md_mount_namespace *view, struct md_mount_namespace *nex
         } else {
             close(a->target); a->target=b->target; b->target=-1;
             a->guest=b->guest; a->detached=b->detached;
+            a->locked=b->locked;
         }
         a->parent=a->id && after.root!=i+1 ? (parent ? &view->tree->mounts[parent-1] : &view->base) : NULL;
     }
@@ -445,6 +446,7 @@ static int merge(struct md_mount_namespace *view, struct md_mount_namespace *nex
     view->base.target=next->base.target; next->base.target=-1;
     view->base.native=next->base.native; view->base.guest=next->base.guest;
     view->base.detached=next->base.detached;
+    view->base.locked=next->base.locked;
     view->base.parent=after.base_parent ? &view->tree->mounts[after.base_parent-1] : NULL;
     view->root=after.root ? &view->tree->mounts[after.root-1] : &view->base;
     if (view->tree) view->tree->count=after.count;
@@ -530,6 +532,7 @@ static int import(struct md_mount_graph_parcel *p, struct md_mount_namespace **o
         m->storage=e->storage ? md_inode_lifetime_retain(owners[e->storage-1]) : NULL;
         atomic_init(&m->anchors,0);
         m->detached=!!(e->flags&DETACHED);
+        m->locked=!!(e->flags&LOCKED);
         m->source=take(p,e->descriptor); m->target=take(p,e->descriptor+1);
         if (fstat(m->source,&m->native) || fstat(m->target,&m->guest)) r=-errno;
         if (!r) r=md_mount_policy_import(&m->policy,p->fd[e->descriptor+2]);
@@ -543,6 +546,7 @@ static int import(struct md_mount_graph_parcel *p, struct md_mount_namespace **o
     if (!r) {
         view->base.parent=data.base_parent ? &view->tree->mounts[data.base_parent-1] : NULL;
         view->base.detached=!!(data.base_flags&DETACHED);
+        view->base.locked=!!(data.base_flags&LOCKED);
         view->root=data.root ? &view->tree->mounts[data.root-1] : &view->base;
     }
     if (!r && *out) r=merge(*out,view);

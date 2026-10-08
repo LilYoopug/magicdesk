@@ -36,6 +36,13 @@ rendering or installing application filters, with the helper's proc-root change
 denied. Omitting both `--user` and `--admit-elf` would also omit the explicit
 guest-credential check and is not an equivalent admission control.
 
+`--setuid-route` explicitly selects Chromium's set-ID sandbox using
+`--disable-namespace-sandbox`, while retaining its seccomp filters and helper
+admission checks. It does not use `--no-sandbox`. Automatic selection detects
+the guest user namespace and currently fails because its zygote requires a PID
+namespace. Report the selected route; an explicit set-ID pass is not an automatic
+namespace-sandbox pass.
+
 The separate credential and retained-resource fixtures use an ordinary mode-0755
 copy at `/tmp/md-chrome-helper-ordinary`, invoked directly for helper IPC and
 renderer controls. Full-browser helper selection and admission rejection belong
@@ -56,8 +63,8 @@ requires a successful exit and expectations. `sandboxSupportEstablished` and
 ## Regression Groups
 
 - `test_browser.py`: three stock Chromium launches with fresh profiles, computed
-  JavaScript/DOM values, real installed filters, PNG output and zero exit. No
-  sandbox-disabling flags. A fourth run verifies rejection of the unadmitted
+  JavaScript/DOM values, real installed filters, PNG output and zero exit. The
+  selected route is recorded independently of sandbox admission. A fourth run verifies rejection of the unadmitted
   helper under the same guest identity. Child signal exits and diagnostics remain
   in reports.
 - `test_credentials.py`: explicit sealed-image catalogue, first-entry and exec

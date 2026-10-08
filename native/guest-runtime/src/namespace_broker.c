@@ -198,8 +198,11 @@ static int capture(struct operation *op) {
             }
         } else {
             op->directory = duplicate(op->task, q->pid, (int)q->data.args[0]);
-            if (op->directory>=0)
-                op->input_origin=md_fd_origins_get(op->context.task.files,(int)q->data.args[0],NULL);
+            if (op->directory>=0) {
+                struct md_fd_object *object=md_fd_origins_object(op->context.task.files,(int)q->data.args[0],NULL);
+                op->input_origin=md_fs_anchor_from_object(object);
+                if (object && !op->input_origin) { md_fd_object_release(object); return 0; }
+            }
         }
         if (op->directory < 0) return 0;
         op->request.directory[0] = op->directory;

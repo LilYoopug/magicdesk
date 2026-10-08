@@ -50,7 +50,8 @@ void md_fs_context_capture_result(struct md_fs_context *, struct md_fs_result *,
 void md_fs_execute(struct md_filesystem *,
         const struct md_fs_request *, struct md_fs_result *, const struct md_fs_output *);
 void md_fs_stat_info(const struct stat *, struct md_fs_info *);
-void md_fs_statfs_result(int fd, struct md_fs_result *, const struct md_fs_output *);
+void md_fs_statfs_result(int fd, unsigned policy, const struct md_inode_lifetime *,
+        struct md_fs_result *, const struct md_fs_output *);
 /* Compound operations reuse the already selected worker identity and mount view. */
 void md_fs_view_execute(struct md_filesystem *, const struct md_fs_request *,
         struct md_fs_result *, const struct md_fs_output *);

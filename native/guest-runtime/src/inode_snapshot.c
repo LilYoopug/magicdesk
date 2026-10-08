@@ -25,7 +25,10 @@ static int clone_node(struct md_inode_store *source, struct md_inode_store *targ
         int fd = openat(target->objects, node->backing, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (fd < 0) return -errno;
         struct timespec times[2] = {st.st_atim, st.st_mtim};
-        if (fchmod(fd, st.st_mode & 01777) || futimens(fd, times) || fsync(fd)) r = -errno;
+        int from=openat(source->objects,node->backing,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
+        if (from<0) r=-errno;
+        else { r=mdi_replace_attributes(from,fd); close(from); }
+        if (!r && (fchmod(fd, st.st_mode & 01777) || futimens(fd, times) || fsync(fd))) r = -errno;
         close(fd);
         if (r) return r;
     } else if (node->kind == S_IFIFO) {
@@ -76,6 +79,7 @@ int md_inode_snapshot(struct md_inode_store *source, struct md_inode_store *targ
         r = mdi_begin(target, 1);
         if (!r) {
             r = mdi_sql(target, "DELETE FROM backings; DELETE FROM events; DELETE FROM sockets; DELETE FROM fifo_pins; "
+                "UPDATE inode_channels SET channel=lower(hex(randomblob(16))),source=0; "
                 "UPDATE properties SET value=0 WHERE key='sealed'");
             int origin = 0;
             sqlite3_stmt *local = NULL;
@@ -97,8 +101,10 @@ int md_inode_snapshot(struct md_inode_store *source, struct md_inode_store *targ
                 if (!r) r = clone_node(source, target, &node, origin);
             }
             sqlite3_finalize(q);
-            if (!r) r = mdi_sql(target, "INSERT INTO backings SELECT backing,object,device,inode,source FROM objects");
-            if (!r) r = mdi_sql(target, "DELETE FROM sources WHERE id NOT IN (SELECT source FROM objects WHERE source>0)");
+            if (!r) r = mdi_sql(target, "INSERT INTO backings SELECT backing,object,device,inode,source,scope FROM objects");
+            if (!r) r = mdi_sql(target, "DELETE FROM sources WHERE NOT EXISTS "
+                "(SELECT 1 FROM objects WHERE objects.source=sources.id AND objects.scope=sources.scope) "
+                "AND NOT EXISTS(SELECT 1 FROM inode_channels c WHERE c.source=sources.id AND c.scope=sources.scope)");
             if (!r && fsync(target->objects)) r = -errno;
             r = mdi_commit(target, r);
         }

@@ -5,8 +5,8 @@ Execution preparation creates missing `/dev` and `/dev/shm` directories in the
 writable instance, retaining existing permissions and sealed-image contents.
 Already-open descriptors, mmap and descriptor passing use native data IO.
 
-System V shared memory has a separate store-scoped authority in `sysv_shm.c`.
-The supervisor opens it lazily on the first request. `shm_calls.c` adapts the
+System V shared memory has a separate namespace authority in `sysv_shm.c`.
+The supervisor opens it lazily through `ipc_namespace` on the first request. `shm_calls.c` adapts the
 ARM64 Linux ABI in the calling task. `task_helper` owns a short-lived same-TGID
 helper with CLONE_VM but without CLONE_FILES. The helper closes its inherited
 descriptor copies, receives a backing FD in its private table and executes mmap
@@ -19,12 +19,17 @@ capabilities do not change, and the host kernel need not implement SysV IPC.
 
 ## Ownership
 
-`ipc/shm/segments.db` stores keys, IDs, permissions and attachment references.
+`ipc/v2/shm/segments.db` stores namespace-scoped keys, IDs, canonical owners and attachment references.
 Mapped files carry data. Transactions hold a native file lock only while
 updating metadata, not across guest execution or waits. Each supervisor holds
 an owner lease; abandoned references are reaped using nonblocking file locks,
 not PID reuse or periodic polling. Each address space owns its mapping records.
 CLONE_VM shares them; fork copies them; exec/exit release them.
+Each mapping retains its original authority even after CLONE_NEWIPC. Fork and
+address-space release batch their metadata changes per authority; they do not
+open a transaction for each mapping. An isolated namespace's last retained
+authority retires its objects without invalidating mappings retained by another
+address space.
 The interception-memory owner orders attachment publication, detach, destructive
 memory calls and non-CLONE_VM fork. Its resource queue does not hold a mutex
 across a guest wait. Accepted helpers pin that owner, their scratch stack and a
@@ -36,8 +41,8 @@ helper remains at PTRACE_EVENT_EXIT. A register resembling a successful fixed
 mmap is not a commit receipt. Uninspectable terminal state is a runtime failure,
 not inferred success. Normal returns do not scan maps.
 
-Independent launches using the same store can attach to keyed segments.
-Unremoved segments survive the last launch within the same boot. A kernel boot
+Independent launches using the same store's initial namespace can attach to keyed
+segments. Its unremoved segments survive the last launch within the same boot. A kernel boot
 ID change expires them. IDs are monotonic within the IPC database. IPC_RMID
 removes a key immediately and retains bytes until the last attachment disappears.
 Logical removal commits before deleting data; a garbage table permits replay of
@@ -72,7 +77,7 @@ exact KILL_THREAD gate, never a group-directed kill for ordinary completion.
 An application KILL_PROCESS filter still takes precedence. Nested debugger
 events exclude internal helper birth/exit and syscalls; kernel proc enumeration
 is not a virtualized thread list.
-Store-scoped [SysV semaphores and message queues](sysv-ipc.md) have their own
+Namespace-scoped [SysV semaphores and message queues](sysv-ipc.md) have their own
 authority and task-affine argument transport.
 
 ## Checks

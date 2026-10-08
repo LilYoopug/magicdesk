@@ -30,7 +30,7 @@ static int copied(void *argument) {
     assert(id(AT_FDCWD,".")==id(AT_FDCWD,"/"));
     char cwd[64]; assert(getcwd(cwd,sizeof(cwd)) && !strcmp(cwd,"/tmp"));
     uint64_t before=id(AT_FDCWD,"/");
-    assert(unshare(CLONE_NEWNS|CLONE_NEWUTS)<0 && errno==ENOTSUP);
+    assert(unshare(CLONE_NEWNS|CLONE_NEWNET)<0 && errno==ENOTSUP);
     assert(id(AT_FDCWD,"/")==before);
     assert(!chdir("/"));
     return 0;
@@ -57,6 +57,40 @@ static void binding(void) {
     value=open("/tmp/target/value",O_RDONLY); assert(value<0 && errno==ENOENT);
     close(dir);
     puts("PASS guest bind: distinct mount IDs, alias data, readonly policy, busy/detached lifetime");
+}
+static void descriptor_bind(void) {
+    assert(!mkdir("/tmp/fd-target",0755));
+    int source=open("/tmp/source",O_PATH|O_DIRECTORY), target=open("/tmp/fd-target",O_PATH|O_DIRECTORY);
+    assert(source>=0 && target>=0);
+    char from[96], to[96];
+    snprintf(from,sizeof(from),"/proc/self/fd/%d",source);
+    snprintf(to,sizeof(to),"/proc/self/fd/%d",target);
+    assert(!mount(from,to,NULL,MS_BIND,NULL));
+    assert(id(AT_FDCWD,"/tmp/fd-target")!=id(source,""));
+    assert(!mount(NULL,"/tmp/fd-target",NULL,MS_BIND|MS_REMOUNT|MS_RDONLY,NULL));
+    int readonly=open("/tmp/fd-target",O_PATH|O_DIRECTORY); assert(readonly>=0);
+    assert(!umount2("/tmp/fd-target",MNT_DETACH));
+    snprintf(from,sizeof(from),"/proc/thread-self/fd/%d",readonly);
+    assert(!mount(from,to,NULL,MS_BIND,NULL));
+    assert(open("/tmp/fd-target/value",O_RDWR)<0 && errno==EROFS);
+    assert(!umount2("/tmp/fd-target",MNT_DETACH));
+    close(readonly); close(source); close(target);
+    source=open("/tmp/source/value",O_PATH);
+    target=open("/tmp/fd-file",O_CREAT|O_RDWR,0644); assert(source>=0 && target>=0);
+    snprintf(from,sizeof(from),"/tmp/proc-copy/self/fd/%d",source);
+    snprintf(to,sizeof(to),"/tmp/proc-copy/thread-self/fd/%d",target);
+    assert(!mkdir("/tmp/proc-copy",0755));
+    assert(!mount("/proc","/tmp/proc-copy",NULL,MS_BIND,NULL));
+    assert(!mount(from,to,NULL,MS_BIND,NULL));
+    int value=open("/tmp/fd-file",O_RDONLY); assert(value>=0);
+    char data[4]; assert(read(value,data,4)==4 && !memcmp(data,"data",4)); close(value);
+    assert(!umount2("/tmp/fd-file",MNT_DETACH));
+    assert(!umount2("/tmp/proc-copy",MNT_DETACH));
+    close(source); close(target);
+    assert(!rmdir("/tmp/proc-copy"));
+    assert(mount("","/tmp/fd-target",NULL,MS_BIND,NULL)<0 && errno==ENOENT);
+    assert(mount("/tmp/source","",NULL,MS_BIND,NULL)<0 && errno==ENOENT);
+    puts("PASS mount proc descriptors: exact directory/file inputs, mounted proc aliases and detached readonly provenance");
 }
 static void root_busy(void) {
     assert(!mkdir("/tmp/root-use",0755));
@@ -263,6 +297,21 @@ static int pivoting(void *argument) {
 }
 void test_mount_namespace_guest(void) {
     assert(!chdir("/tmp"));
+    uint64_t root=id(AT_FDCWD,"/");
+    assert(!mount(NULL,"/",NULL,MS_SLAVE|MS_REC|MS_SILENT,NULL));
+    assert(!mount(NULL,"/",NULL,MS_PRIVATE,NULL));
+    assert(id(AT_FDCWD,"/")==root);
+    assert(mount(NULL,"/",NULL,MS_PRIVATE|MS_SLAVE,NULL)<0 && errno==EINVAL);
+    assert(mount(NULL,"/",NULL,MS_SHARED,NULL)<0 && errno==ENOTSUP);
+    assert(mount(NULL,"/",NULL,MS_UNBINDABLE,NULL)<0 && errno==ENOTSUP);
+    assert(mount(NULL,"/tmp",NULL,MS_SLAVE,NULL)<0 && errno==EINVAL);
+    assert(!mkdir("/tmp/proc-copy",0755));
+    assert(!mount("/proc","/tmp/proc-copy",NULL,MS_BIND|MS_REC|MS_MGC_VAL|MS_SILENT,NULL));
+    int native=open("/tmp/proc-copy/version",O_RDONLY); assert(native>=0);
+    char version[128]; assert(read(native,version,sizeof(version))>0); close(native);
+    assert(!umount2("/tmp/proc-copy",MNT_DETACH));
+    assert(open("/tmp/proc-copy/version",O_RDONLY)<0 && errno==ENOENT);
+    assert(!rmdir("/tmp/proc-copy"));
     struct context c={.original=id(AT_FDCWD,"/"),.dir=open(".",O_PATH|O_DIRECTORY)};
     assert(c.dir>=0);
     void *stack=malloc(1024*1024); assert(stack);
@@ -280,6 +329,7 @@ void test_mount_namespace_guest(void) {
     assert(clone(copied,(char *)stack+1024*1024,SIGCHLD|CLONE_FS|CLONE_NEWNS,&c)<0 && errno==EINVAL);
     root_busy();
     binding();
+    descriptor_bind();
     churn();
     stacks();
     files();

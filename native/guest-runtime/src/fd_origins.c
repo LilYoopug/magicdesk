@@ -10,7 +10,7 @@
 enum { BUCKETS=61 };
 struct md_fd_origin_entry {
     struct md_fd_origin_entry *next;
-    struct md_fs_anchor *origin;
+    struct md_fd_object *object;
     struct md_fd_channel *channel;
     int fd;
     unsigned flags;
@@ -26,7 +26,7 @@ struct md_fd_origins {
 static void dispose(struct md_fd_origin_entry *entry) {
     while (entry) {
         struct md_fd_origin_entry *next=entry->next;
-        md_fs_anchor_release(entry->origin); md_fd_channel_release(entry->channel); free(entry); entry=next;
+        md_fd_object_release(entry->object); md_fd_channel_release(entry->channel); free(entry); entry=next;
     }
 }
 struct md_fd_origins *md_fd_origins_new(void) {
@@ -61,7 +61,7 @@ struct md_fd_origins *md_fd_origins_fork(struct md_fd_origins *t, int shared) {
             if (!copy->buckets) copy->buckets=calloc(BUCKETS,sizeof(*copy->buckets));
             struct md_fd_origin_entry *entry=copy->buckets ? malloc(sizeof(*entry)) : NULL;
             if (!entry) { error=-ENOMEM; break; }
-            *entry=*p; entry->origin=md_fs_anchor_retain(p->origin);
+            *entry=*p; entry->object=md_fd_object_retain(p->object);
             entry->channel=md_fd_channel_retain(p->channel);
             entry->next=copy->buckets[i]; copy->buckets[i]=entry;
         }
@@ -78,14 +78,20 @@ static struct md_fd_origin_entry **slot(struct md_fd_origins *t, int fd) {
     while (*p && (*p)->fd!=fd) p=&(*p)->next;
     return p;
 }
-struct md_fs_anchor *md_fd_origins_get(struct md_fd_origins *t, int fd, unsigned *flags) {
+struct md_fd_object *md_fd_origins_object(struct md_fd_origins *t, int fd, unsigned *flags) {
     if (flags) *flags=0;
     if (!t || fd<0) return NULL;
     pthread_mutex_lock(&t->lock);
     struct md_fd_origin_entry *entry=t->buckets ? *slot(t,fd) : NULL;
-    struct md_fs_anchor *origin=entry ? md_fs_anchor_retain(entry->origin) : NULL;
+    struct md_fd_object *origin=entry ? md_fd_object_retain(entry->object) : NULL;
     if (entry && flags) *flags=entry->flags;
     pthread_mutex_unlock(&t->lock); return origin;
+}
+struct md_fs_anchor *md_fd_origins_get(struct md_fd_origins *t, int fd, unsigned *flags) {
+    struct md_fd_object *object=md_fd_origins_object(t,fd,flags);
+    struct md_fs_anchor *anchor=md_fs_anchor_from_object(object);
+    if (!anchor) md_fd_object_release(object);
+    return anchor;
 }
 int md_fd_origins_capture(struct md_fd_origins *t, const int *fds, unsigned count,
         struct md_fs_anchor **origins) {
@@ -94,11 +100,22 @@ int md_fd_origins_capture(struct md_fd_origins *t, const int *fds, unsigned coun
     pthread_mutex_lock(&t->lock);
     for (unsigned i=0;i<count;++i) {
         struct md_fd_origin_entry *e=t->buckets && fds[i]>=0 ? *slot(t,fds[i]) : NULL;
-        origins[i]=e ? md_fs_anchor_retain(e->origin) : NULL;
+        origins[i]=e ? md_fs_anchor_retain(md_fs_anchor_from_object(e->object)) : NULL;
     }
     pthread_mutex_unlock(&t->lock); return 0;
 }
-static int prepare(struct md_fd_origins *t, struct md_fs_anchor *origin, struct md_fd_channel *channel, unsigned flags,
+int md_fd_origins_capture_objects(struct md_fd_origins *t, const int *fds, unsigned count,
+        struct md_fd_object **objects) {
+    if (!t || (count && (!fds || !objects))) return -EINVAL;
+    for (unsigned i=0;i<count;++i) if (fds[i]<-1) return -EINVAL;
+    pthread_mutex_lock(&t->lock);
+    for (unsigned i=0;i<count;++i) {
+        struct md_fd_origin_entry *e=t->buckets && fds[i]>=0 ? *slot(t,fds[i]) : NULL;
+        objects[i]=e ? md_fd_object_retain(e->object) : NULL;
+    }
+    pthread_mutex_unlock(&t->lock); return 0;
+}
+static int prepare(struct md_fd_origins *t, struct md_fd_object *origin, struct md_fd_channel *channel, unsigned flags,
         struct md_fd_origin_update *out) {
     *out=(struct md_fd_origin_update){0};
     if (!t || (flags & ~FD_CLOEXEC)) return -EINVAL;
@@ -111,14 +128,18 @@ static int prepare(struct md_fd_origins *t, struct md_fs_anchor *origin, struct 
         int ready=!!t->buckets;
         pthread_mutex_unlock(&t->lock);
         if (!ready) { free(entry); return -ENOMEM; }
-        entry->origin=md_fs_anchor_retain(origin); entry->flags=flags;
+        entry->object=md_fd_object_retain(origin); entry->flags=flags;
         entry->channel=md_fd_channel_retain(channel);
     }
     out->table=md_fd_origins_pin(t); out->entry=entry; return 0;
 }
 int md_fd_origins_prepare(struct md_fd_origins *t, struct md_fs_anchor *origin, unsigned flags,
         struct md_fd_origin_update *out) {
-    return prepare(t,origin,NULL,flags,out);
+    return prepare(t,md_fs_anchor_object(origin),NULL,flags,out);
+}
+int md_fd_origins_prepare_object(struct md_fd_origins *t, struct md_fd_object *object, unsigned flags,
+        struct md_fd_origin_update *out) {
+    return prepare(t,object,NULL,flags,out);
 }
 int md_fd_origins_prepare_channel(struct md_fd_origins *t, struct md_fd_channel *channel, unsigned flags,
         struct md_fd_origin_update *out) {
@@ -130,13 +151,13 @@ int md_fd_origins_prepare_copy(struct md_fd_origins *t, int source, unsigned fla
     if (!t) { *out=(struct md_fd_origin_update){0}; return -EINVAL; }
     pthread_mutex_lock(&t->lock);
     struct md_fd_origin_entry *e=t->buckets && source>=0 ? *slot(t,source) : NULL;
-    struct md_fs_anchor *origin=md_fs_anchor_retain(e ? e->origin : NULL);
+    struct md_fd_object *origin=md_fd_object_retain(e ? e->object : NULL);
     struct md_fd_channel *channel=md_fd_channel_retain(e ? e->channel : NULL);
     int uncertain=e && e->uncertain;
     pthread_mutex_unlock(&t->lock);
     int error=prepare(t,origin,channel,flags,out);
     if (!error && out->entry) out->entry->uncertain=uncertain;
-    md_fs_anchor_release(origin); md_fd_channel_release(channel); return error;
+    md_fd_object_release(origin); md_fd_channel_release(channel); return error;
 }
 int md_fd_origins_channel(struct md_fd_origins *t, int *number, struct md_fd_channel **out) {
     if (!t || !number || !out || *out) return -EINVAL;
@@ -196,12 +217,12 @@ void md_fd_origins_finish(struct md_fd_origin_update *update, int result_fd) {
     *update=(struct md_fd_origin_update){0};
     dispose(retired); md_fd_origins_unpin(t);
 }
-int md_fd_origins_prepare_batch(struct md_fd_origins *t, struct md_fs_anchor *const *origins,
+int md_fd_origins_prepare_batch(struct md_fd_origins *t, struct md_fd_object *const *origins,
         unsigned flags, unsigned count, struct md_fd_origin_update *updates) {
     if (!t || (flags & ~FD_CLOEXEC) || (count && (!origins || !updates))) return -EINVAL;
     for (unsigned i=0;i<count;++i) updates[i]=(struct md_fd_origin_update){0};
     for (unsigned i=0;i<count;++i) {
-        int error=md_fd_origins_prepare(t,origins[i],flags,updates+i);
+        int error=md_fd_origins_prepare_object(t,origins[i],flags,updates+i);
         if (error) {
             for (unsigned j=0;j<i;++j) md_fd_origins_finish(updates+j,-1);
             return error;

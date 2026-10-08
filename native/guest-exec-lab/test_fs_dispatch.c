@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "fd_selector.h"
 #include "fs_worker.h"
 #include "fs_engine.h"
 #include "task_resources.h"
@@ -1240,7 +1241,8 @@ static void buffer_received_inspection(struct md_fs_buffer_service *service,
                 assert(frame->received_message.count==253 && frame->received_message.first[253]==253);
                 for (unsigned i=0;i<253;++i)
                     assert(frame->received_message.first[i]==i && frame->received_message.entries[i].index==1+(int)(i%3)
-                        && frame->received_message.entries[i].flags==(i%3==0 ? MD_RECEIVED_WATCH : 0));
+                        && !frame->received_message.entries[i].flags
+                        && frame->received_message.entries[i].selectors==(i%3==0 ? 1U<<MD_FD_SELECTOR_WATCH : 0));
                 inspected=1;
             }
             int error=md_buffers_take(pool,buffer);

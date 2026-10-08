@@ -520,7 +520,7 @@ static int begin(struct md_fs_buffer_service *s, pid_t actor, struct md_guest_do
         +(snapshot ? sizeof(input->snapshot.data) : 0));
     if (!r) return -ENOMEM;
     r->service=s; r->actor=actor; r->opened.fd=-1;
-    r->images=(struct md_command_images){-1,-1}; r->executable=executable;
+    r->images=(struct md_command_images){.program=-1,.loader=-1}; r->executable=executable;
     r->snapshot=(struct md_file_snapshot){.fd=-1,.flags=snapshot_flags};
     r->snapshot_phase=snapshot ? SNAPSHOT_BEGIN : SNAPSHOT_NONE;
     r->captured[0]=r->captured[1]=-1;
@@ -588,7 +588,7 @@ int md_fs_buffer_inspect_begin(struct md_fs_buffer_service *s, pid_t actor, stru
     struct md_fs_buffer_request *r=calloc(1,sizeof(*r)+count*sizeof(int));
     if (!r) return -ENOMEM;
     r->service=s; r->actor=actor; r->output=frame; r->opened.fd=-1;
-    r->images=(struct md_command_images){-1,-1};
+    r->images=(struct md_command_images){.program=-1,.loader=-1};
     r->snapshot.fd=-1; r->captured[0]=r->captured[1]=-1;
     r->received=md_received_fds_retain(sources); r->received_count=count;
     memcpy(r->path,frame->rights.index,count*sizeof(int));
@@ -616,12 +616,13 @@ int md_fs_buffer_snapshot_begin(struct md_fs_buffer_service *s, pid_t actor, str
         const struct md_interception_buffer *buffer, unsigned flags, struct md_fs_buffer_request **out) {
     return begin(s,actor,fs,MD_FS_TEMPORARY,buffer,out,0,1,flags);
 }
-int md_fs_buffer_exec_take(struct md_fs_buffer_request *r, int out[2]) {
-    if (!r || !out) return -EINVAL;
+int md_fs_buffer_exec_take(struct md_fs_buffer_request *r, int out[2], unsigned *mount_flags) {
+    if (!r || !out || !mount_flags) return -EINVAL;
     if (!r->executable) return 0;
     if (r->error || r->images.program<0 || out[0]>=0 || out[1]>=0) return -EINVAL;
     out[0]=r->images.program; out[1]=r->images.loader;
-    r->images=(struct md_command_images){-1,-1}; return 1;
+    *mount_flags=r->images.mount_flags;
+    r->images=(struct md_command_images){.program=-1,.loader=-1}; return 1;
 }
 int md_fs_buffer_progress(struct md_fs_buffer_service *s) {
     if (!s) return 0;

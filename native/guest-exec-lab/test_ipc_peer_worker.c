@@ -384,7 +384,9 @@ static struct md_fd_message *message_snapshot(struct md_fs_anchor *const *entrie
     struct md_fd_origins *table=md_fd_origins_new(); assert(table && count<=253);
     int numbers[253]; struct md_fd_origin_update updates[253];
     for (unsigned i=0;i<count;++i) numbers[i]=(int)i+10;
-    assert(!md_fd_origins_prepare_batch(table,entries,0,count,updates));
+    struct md_fd_object *objects[253];
+    for (unsigned i=0;i<count;++i) objects[i]=md_fs_anchor_object(entries[i]);
+    assert(!md_fd_origins_prepare_batch(table,objects,0,count,updates));
     assert(!md_fd_origins_finish_batch(updates,count,numbers,count));
     struct md_fd_order turn={0}; assert(md_fd_order_begin(table,&turn,NULL)==1 && !md_fd_order_start(&turn));
     struct md_fd_message *message=NULL;
@@ -739,7 +741,7 @@ static void transfer_publication(const char *path, unsigned mode) {
     int maintenance=open(path,O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(maintenance>=0);
     assert(flock(maintenance,LOCK_EX|LOCK_NB)<0 && errno==EWOULDBLOCK);
 
-    int indices[253], sources[253], numbers[253]; struct md_fs_anchor *origins[253];
+    int indices[253], sources[253], numbers[253]; struct md_fd_object *origins[253];
     struct md_fd_origin_update updates[253];
     for (unsigned i=0;i<count;++i) indices[i]=(i+252)%253;
     /* Unknown first, repeated views later: publication must preserve the chosen
@@ -792,7 +794,7 @@ static void transfer_publication(const char *path, unsigned mode) {
         assert(numbers[i]==installed[i]);
         unsigned fdflags=~0U;
         struct md_fs_anchor *origin=md_fd_origins_get(files,installed[i],&fdflags);
-        assert(origin==origins[i] && fdflags==(origin && flags ? FD_CLOEXEC : 0));
+        assert(md_fs_anchor_object(origin)==origins[i] && fdflags==(origin && flags ? FD_CLOEXEC : 0));
         if (origin) {
             struct stat actual, identity;
             assert(!fstat(installed[i],&actual) && !fstat(md_fs_anchor_fd(origin),&identity));
@@ -1007,7 +1009,7 @@ static void transfer_guest_send(const char *path, const char *runner, unsigned m
         assert(r.received->count==count && r.received->origins);
         for (unsigned i=0;i<count;++i) {
             int fd=r.received->fds[i]; struct stat st;
-            assert(r.received->origins[i] && !md_fs_anchor_check_fd(r.received->origins[i],fd) && !fstat(fd,&st));
+            assert(r.received->origins[i] && !md_fs_anchor_check_fd(md_fs_anchor_from_object(r.received->origins[i]),fd) && !fstat(fd,&st));
             if (i%2) assert(S_ISDIR(st.st_mode) && (fcntl(fd,F_GETFL)&O_PATH));
             else assert(S_ISREG(st.st_mode) && lseek(fd,0,SEEK_CUR)==1 && pread(fd,&byte,1,1)==1 && byte=='e');
         }

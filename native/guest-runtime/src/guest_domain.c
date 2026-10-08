@@ -114,6 +114,7 @@ void md_domain_unpin(struct md_guest_domain *d) {
 struct md_guest_domain *md_domain_unshare_prepare(struct md_guest_domain *d) {
     return md_domain_fork(d, d && d->owners == 1);
 }
+int md_domain_shared(const struct md_guest_domain *d) { return d && d->owners!=1; }
 int md_fs_order_begin(struct md_guest_domain *d, struct md_fs_order *op, struct md_resource_wakeup *wake) {
     if (!d || !op) return -EINVAL;
     if (op->fs) return -EBUSY;
@@ -278,6 +279,7 @@ int md_domain_native_call(long nr, const unsigned long a[6]) {
     MD_DOMAIN_FD_CALLS(NATIVE_CASE)
 #undef NATIVE_CASE
     case SYS_lseek: case SYS_getdents64: case SYS_socketpair:
+    case SYS_mmap: case SYS_munmap: case SYS_mremap: case SYS_mprotect:
     /* Keep the original wait4 stop for the guest-debugger adapter. Restricted
      * filesystem roots do not remove the caller's kernel child relationship. */
     case SYS_wait4:

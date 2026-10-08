@@ -16,11 +16,15 @@ static int fail_allocation;
 static unsigned allocations;
 void *__real_calloc(size_t,size_t);
 void *__real_malloc(size_t);
+void *__real_realloc(void *,size_t);
 void *__wrap_calloc(size_t n, size_t size) {
     ++allocations; return fail_allocation ? NULL : __real_calloc(n,size);
 }
 void *__wrap_malloc(size_t size) {
     ++allocations; return fail_allocation ? NULL : __real_malloc(size);
+}
+void *__wrap_realloc(void *p, size_t size) {
+    ++allocations; return fail_allocation ? NULL : __real_realloc(p,size);
 }
 static unsigned descriptors(void) {
     DIR *d=opendir("/proc/self/fd"); assert(d);
@@ -170,9 +174,54 @@ static void payload_reuse(void) {
     fail_allocation=0; md_buffers_release(pool);
     puts("PASS buffer payload reuse: only declared header cleared, no allocation or bulk overwrite");
 }
+static void mapping_policy(void) {
+    struct md_interception_memory *m=md_memory_new(); assert(m);
+    struct md_mapping_change c={0};
+    size_t p=(size_t)getpagesize(); uintptr_t base=0x10000000;
+    unsigned before=allocations;
+    fail_allocation=1;
+    assert(!md_memory_mapping_prepare(m,&c,MD_MAPPING_MAP,0,p,0,0,0));
+    md_memory_mapping_finish(m,&c,(long)base);
+    assert(!md_memory_has_policy(m) && !md_memory_exec_check(m,base,p));
+    assert(allocations==before);
+    assert(md_memory_mapping_prepare(m,&c,MD_MAPPING_MAP,0,3*p,0,0,1)==-ENOMEM && !c.prepared);
+    fail_allocation=0;
+    assert(!md_memory_mapping_prepare(m,&c,MD_MAPPING_MAP,0,3*p,0,0,1));
+    md_memory_mapping_finish(m,&c,-ENOMEM);
+    assert(!md_memory_has_policy(m));
+    assert(!md_memory_mapping_prepare(m,&c,MD_MAPPING_MAP,0,3*p,0,0,1));
+    md_memory_mapping_finish(m,&c,(long)base);
+    assert(md_memory_exec_check(m,base,p)==-EACCES);
+    struct md_interception_memory *copy=md_memory_fork(m,0); assert(copy);
+    before=allocations; fail_allocation=1;
+    assert(!md_memory_mapping_prepare(m,&c,MD_MAPPING_UNMAP,base+p,p,0,0,0));
+    md_memory_mapping_finish(m,&c,0);
+    assert(md_memory_exec_check(m,base,p)==-EACCES);
+    assert(!md_memory_exec_check(m,base+p,p));
+    assert(md_memory_exec_check(m,base+2*p,p)==-EACCES);
+    assert(md_memory_exec_check(copy,base+p,p)==-EACCES);
+    assert(!md_memory_mapping_prepare(m,&c,MD_MAPPING_REMAP,base,p,2*p,MREMAP_MAYMOVE|MREMAP_FIXED,0));
+    md_memory_mapping_finish(m,&c,(long)(base+10*p));
+    assert(!md_memory_exec_check(m,base,p));
+    assert(md_memory_exec_check(m,base+11*p,p)==-EACCES);
+    assert(!md_memory_mapping_prepare(m,&c,MD_MAPPING_REMAP,base+10*p,0,p,MREMAP_MAYMOVE,0));
+    md_memory_mapping_finish(m,&c,(long)(base+20*p));
+    assert(md_memory_exec_check(m,base+10*p,p)==-EACCES);
+    assert(md_memory_exec_check(m,base+20*p,p)==-EACCES);
+    assert(allocations==before);
+    fail_allocation=0;
+    assert(!md_memory_mapping_prepare(m,&c,MD_MAPPING_MAP,base,p,0,0,1));
+    md_memory_mapping_abandon(m,&c);
+    assert(md_memory_exec_check(m,base,p)==-EIO);
+    assert(md_memory_exec_check(copy,base,p)==-EACCES);
+    assert(md_memory_exec_check(copy,base+1,p)==-EINVAL);
+    assert(md_memory_exec_check(copy,base,SIZE_MAX)==-ENOMEM);
+    md_memory_release(m); md_memory_release(copy);
+    puts("PASS mapping policy: allocation-free ordinary IO, prepare rollback, split/move/clone, fork independence and unknown terminal result");
+}
 int main(void) {
     unsigned before=descriptors();
-    slots(); owner_lifetime(); failures(); address_spaces(); payload_reuse();
+    slots(); owner_lifetime(); failures(); address_spaces(); payload_reuse(); mapping_policy();
     assert(descriptors()==before);
     puts("PASS shared request buffer ownership");
     return 0;

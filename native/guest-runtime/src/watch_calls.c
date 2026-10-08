@@ -3,7 +3,8 @@
 #include "fs_rpc.h"
 #include "raw.h"
 #include "interception.h"
-#include "watch_activation.h"
+#include "fd_filter.h"
+#include "proc_control.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/filter.h>
@@ -29,66 +30,13 @@ static long watched(const struct md_fs *fs, int fd) {
     r = request(fs, MD_FS_WATCH_CONTAINS, fd, -1, 0, &out);
     return r ? r : (long)out.result.position;
 }
-static long arm(int fd) {
-#ifdef MD_USE_LIBC
-    /* Native adapter clients have no supervised guest syscall gates. */
-    (void)fd;
-    return -ENOTSUP;
-#else
-    long r = RAW3(prctl, MD_GUEST_WATCH_FILTER, fd, 0);
-    if (r) return r < 0 ? r : 0;
-    uintptr_t gate = (uintptr_t)md_raw_return;
-    extern char md_guest_watch_return[];
-    uintptr_t watch = (uintptr_t)md_guest_watch_return;
-#define ADAPT(n) BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_##n, 0, 1), \
-    BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRACE | MD_INTERCEPT_DISPATCH),
-    struct sock_filter code[] = {
-        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, instruction_pointer) + 4),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (unsigned)(gate >> 32), 0, 3),
-        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, instruction_pointer)),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (unsigned)gate, 0, 1),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, instruction_pointer) + 4),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (unsigned)(watch >> 32), 0, 3),
-        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, instruction_pointer)),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (unsigned)watch, 0, 1),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_read, 5, 0),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_readv, 4, 0),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_ioctl, 3, 0),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_splice, 2, 0),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_tee, 1, 0),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_sendfile, 2, 7),
-        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])),
-        BPF_STMT(BPF_JMP | BPF_JA, 1),
-        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[1])),
-        BPF_STMT(BPF_ALU | BPF_AND | BPF_K, MD_WATCH_SELECTOR_MASK),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (unsigned)fd & MD_WATCH_SELECTOR_MASK, 0, 1),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRACE | MD_INTERCEPT_WATCH),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-        ADAPT(dup) ADAPT(dup3)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_fcntl, 0, 4),
-        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[1])),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, F_DUPFD, 1, 0),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, F_DUPFD_CLOEXEC, 0, 1),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRACE | MD_INTERCEPT_DISPATCH),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW)
-    };
-#undef ADAPT
-    struct sock_fprog program = {sizeof(code) / sizeof(*code), code};
-    r = RAW3(seccomp, SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_TSYNC, &program);
-    /* A divergent sibling is not success. Never publish an unmediated reader. */
-    if (r > 0) return -ENOTSUP;
-    if (!r) r = RAW3(prctl, MD_GUEST_WATCH_FILTER, fd, 1);
-    return r;
-#endif
-}
+static long arm(int fd) { return md_fd_filter_arm(MD_FD_SELECTOR_WATCH,fd); }
 long md_watch_arm(const struct md_fs *fs, int fd) {
+    long control=md_proc_control_known(fd);
+    if (control) return control<0 ? control : md_fd_filter_arm(MD_FD_SELECTOR_PROC,fd);
     long r = watched(fs, fd);
     return r > 0 ? arm(fd) : r;
 }
-long md_watch_arm_number(int fd) { return fd<0 ? -EBADF : arm(fd); }
 static int local_copy(void *output, const void *data, size_t size) {
     return (int)md_write_memory(output, data, size);
 }
@@ -141,7 +89,8 @@ long md_watch_read_local(const struct md_fs *fs, long nr, const unsigned long *a
     return (long)copied;
 }
 long md_watch_call(const struct md_fs *fs, long nr, const unsigned long *a) {
-    if (!*fs->endpoint) return md_raw(nr, a[0], a[1], a[2], a[3], a[4], a[5]);
+    if (!*fs->endpoint && (nr==SYS_inotify_init1 || nr==SYS_inotify_rm_watch))
+        return md_raw(nr, a[0], a[1], a[2], a[3], a[4], a[5]);
     struct md_fs_response out;
     long r;
     if (nr == SYS_inotify_init1) {
@@ -157,6 +106,9 @@ long md_watch_call(const struct md_fs *fs, long nr, const unsigned long *a) {
         return request(fs, MD_FS_WATCH_REMOVE, (int)a[0], -1, (unsigned)a[1], &out);
     if (nr == SYS_dup3 && (int)a[1] >= 0 && (int)a[0] != (int)a[1]
             && !((unsigned)a[2] & ~O_CLOEXEC)) {
+        r=md_proc_control_known((int)a[0]);
+        if (r<0) return r;
+        if (r && (r=md_fd_filter_arm(MD_FD_SELECTOR_PROC,(int)a[1]))) return r;
         r = watched(fs, (int)a[0]);
         if (r < 0) return r;
         /* The destination is known before publication. Activation failure must

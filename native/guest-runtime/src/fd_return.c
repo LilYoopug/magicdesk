@@ -22,7 +22,7 @@ static int release(struct md_fd_return *r) {
     *r=(struct md_fd_return){0}; return error;
 }
 int md_fd_return_begin(struct md_fd_return *r, struct md_fd_origins *files, int source,
-        struct md_fs_anchor *origin, unsigned flags, struct md_fd_receipt *receipt,
+        struct md_fd_object *origin, unsigned flags, struct md_fd_receipt *receipt,
         struct md_resource_wakeup *wake) {
     if (!r || !files || source<0 || !receipt) return -EINVAL;
     if (r->files.table || r->delivery.capacity) return -EBUSY;

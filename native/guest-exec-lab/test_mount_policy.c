@@ -82,7 +82,7 @@ static void basics(void) {
         assert(!md_mount_policy_set(&p,i&1) && md_mount_policy_flags(&p)==(i&1));
     }
     assert(!p.page && descriptors()==before);
-    assert(md_mount_policy_set(&p,2)==-EINVAL && md_mount_policy_flags(&p)==MD_MOUNT_READONLY);
+    assert(md_mount_policy_set(&p,MD_MOUNT_FLAGS+1)==-EINVAL && md_mount_policy_flags(&p)==MD_MOUNT_READONLY);
     fail_memfd=1; assert(md_mount_policy_share(&p)==-ENOSYS); fail_memfd=0;
     assert(!p.page && md_mount_policy_flags(&p)==MD_MOUNT_READONLY && descriptors()==before);
     fail_map=1; assert(md_mount_policy_share(&p)==-ENOMEM); fail_map=0;
@@ -116,19 +116,46 @@ static void basics(void) {
     assert(md_mount_policy_flags(&observer)==MD_MOUNT_READONLY);
     md_mount_policy_close(&observer); md_mount_policy_close(&observer);
     assert(descriptors()==before);
+    assert(!md_mount_policy_set(&p,MD_MOUNT_READONLY) && !md_mount_policy_lock(&p));
+    assert(md_mount_policy_set(&p,0)==-EPERM);
+    fd=md_mount_policy_share(&p); assert(fd>=0);
+    imported=fcntl(fd,F_DUPFD_CLOEXEC,3); assert(imported>=0);
+    assert(!md_mount_policy_import(&observer,imported));
+    assert(!md_mount_policy_set(&p,MD_MOUNT_READONLY));
+    assert(md_mount_policy_flags(&observer)==(MD_MOUNT_READONLY|MD_MOUNT_LOCK_READONLY));
+    assert(md_mount_policy_set(&p,0)==-EPERM && md_mount_policy_set(&observer,0)==-EPERM);
+    md_mount_policy_close(&p); md_mount_policy_close(&observer);
+    assert(!md_mount_policy_lock(&p) && !md_mount_policy_flags(&p));
+    assert(!md_mount_policy_set(&p,MD_MOUNT_READONLY) && !md_mount_policy_set(&p,0));
+    md_mount_policy_close(&p); assert(descriptors()==before);
+    for (unsigned flags=0;flags<=MD_MOUNT_FLAGS;++flags) {
+        assert(!md_mount_policy_set(&p,flags) && !md_mount_policy_lock(&p));
+        unsigned locked=flags|(flags<<MD_MOUNT_LOCK_SHIFT);
+        assert(md_mount_policy_flags(&p)==locked);
+        for (unsigned next=0;next<=MD_MOUNT_FLAGS;++next) {
+            int result=md_mount_policy_set(&p,next);
+            assert(result==((flags&~next) ? -EPERM : 0));
+        }
+        assert(!md_mount_policy_set(&p,flags));
+        int shared=md_mount_policy_share(&p); assert(shared>=0);
+        int other=fcntl(shared,F_DUPFD_CLOEXEC,3); assert(other>=0);
+        assert(!md_mount_policy_import(&observer,other) && md_mount_policy_flags(&observer)==locked);
+        md_mount_policy_close(&p); md_mount_policy_close(&observer);
+        assert(descriptors()==before);
+    }
     puts("PASS mount policy: lazy FD, no-slot reads/updates, writer-only changes, independent observer lifetime and rollback");
 }
 static void malformed(void) {
     unsigned before=descriptors();
     for (unsigned i=0;i<8;++i) {
         int fd=memfd_create("bad-policy",MFD_CLOEXEC|MFD_ALLOW_SEALING); assert(fd>=0);
-        uint32_t header[5]={0x4d444d50U,1,0,0,0}; size_t bytes=16;
+        uint32_t header[5]={0x4d444d50U,4,0,0,0}; size_t bytes=16;
         int seals=F_SEAL_GROW|F_SEAL_SHRINK|F_SEAL_FUTURE_WRITE|F_SEAL_SEAL;
         switch (i) {
         case 0: ++header[0]; break;
         case 1: ++header[1]; break;
         case 2: ++header[2]; break;
-        case 3: header[3]=2; break;
+        case 3: header[3]=MD_MOUNT_FLAGS+1; break;
         case 4: bytes=12; break;
         case 5: bytes=20; break;
         case 6: seals&=~F_SEAL_FUTURE_WRITE; break;
@@ -191,7 +218,7 @@ static void descriptor_checks(struct md_filesystem *fs, struct md_fs_anchor *ori
     q=(struct md_fs_request){.operation=MD_FS_ACCESS,.directory={md_fs_anchor_fd(origin),-1},
         .origin={origin,NULL},.mode=W_OK};
     md_fs_execute(fs,&q,&r,NULL); assert(r.error==(readonly ? -EROFS : 0));
-    q.operation=MD_FS_XATTR_OPEN;
+    q.operation=MD_FS_XATTR_OBJECT; q.mode=MD_FS_XATTR_SET; q.path[1]="user.policy";
     md_fs_execute(fs,&q,&r,NULL); assert(r.error==(readonly ? -EROFS : -EXDEV));
 }
 static void engine_checks(struct md_filesystem *fs, struct md_fs_anchor *origin, unsigned readonly) {

@@ -35,18 +35,18 @@ int md_fs_request_validate(const struct md_fs_request *q) {
     if (q->attributes.creation_mask & ~0777U) return -EINVAL;
     if (q->resolve && q->operation != MD_FS_OPEN) return -EINVAL;
     if (q->value_size>MD_FS_VALUE_MAX || (q->value_size && !q->value)
-            || (q->value_size && q->operation!=MD_FS_XATTR && q->operation!=MD_FS_FXATTR
+            || (q->value_size && q->operation!=MD_FS_XATTR && q->operation!=MD_FS_FXATTR && q->operation!=MD_FS_XATTR_OBJECT
                 && q->operation!=MD_FS_SETACL && q->operation!=MD_FS_MOUNT)) return -EINVAL;
     if (q->operation==MD_FS_MOUNT) {
         int pair=q->mode==MD_FS_MOUNT_BIND || q->mode==MD_FS_MOUNT_PIVOT || q->mode==MD_FS_MOUNT_MOVE;
-        if (!*a || q->mode<MD_FS_MOUNT_BIND || q->mode>MD_FS_MOUNT_MOVE
+        if ((!*a && !(descriptors&1)) || q->mode<MD_FS_MOUNT_BIND || q->mode>MD_FS_MOUNT_MOVE
                 || q->capacity || q->offset || q->value_size>PATH_MAX
-                || (pair ? !*b : *b || (descriptors&2))
-                || (q->mode!=MD_FS_MOUNT_TMPFS && q->value_size)) return -EINVAL;
+                || (pair ? (!*b && !(descriptors&2)) : *b || (descriptors&2))
+                || (q->mode!=MD_FS_MOUNT_TMPFS && q->mode!=MD_FS_MOUNT_OVERLAY && q->value_size)) return -EINVAL;
         return q->value_size && strnlen(q->value,q->value_size)!=q->value_size-1 ? -EINVAL : 0;
     }
-    if (q->operation==MD_FS_XATTR || q->operation==MD_FS_FXATTR) {
-        int descriptor=q->operation==MD_FS_FXATTR, set=q->mode==MD_FS_XATTR_SET;
+    if (q->operation==MD_FS_XATTR || q->operation==MD_FS_FXATTR || q->operation==MD_FS_XATTR_OBJECT) {
+        int descriptor=q->operation!=MD_FS_XATTR, set=q->mode==MD_FS_XATTR_SET;
         return (descriptors&2) || (descriptor ? descriptors!=1 || *a : !*a && descriptors!=1)
             || q->mode<MD_FS_XATTR_GET || q->mode>MD_FS_XATTR_REMOVE
             || (q->mode==MD_FS_XATTR_LIST ? *b!=0 : !*b || strlen(b)>255)
@@ -75,12 +75,6 @@ int md_fs_request_validate(const struct md_fs_request *q) {
             || q->capacity || q->offset || q->resolve ? -EINVAL : 0;
     if (q->operation==MD_FS_NATIVE_MOUNT)
         return descriptors || *a || *b || q->flags || q->mode || q->capacity || q->offset<=0 || q->resolve ? -EINVAL : 0;
-    if (q->operation == MD_FS_XATTR_OPEN)
-        return descriptors != 1 || strlen(a) > 255 || *b || q->flags
-            || (q->mode != F_OK && q->mode != R_OK && q->mode != W_OK)
-            || (q->mode == F_OK ? *a != 0 : *a == 0) || q->capacity || q->offset || q->resolve ? -EINVAL : 0;
-    if (q->operation == MD_FS_LISTATTR)
-        return descriptors!=1 || *a || *b || q->mode || q->flags || q->capacity || q->offset ? -EINVAL : 0;
     if (q->operation>=MD_FS_GETACL && q->operation<=MD_FS_REMOVEACL) {
         int set=q->operation==MD_FS_SETACL;
         return descriptors!=1 || *a || *b || q->offset

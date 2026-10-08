@@ -20,9 +20,19 @@
 
 void md_fs_view_execute(struct md_filesystem *fs, const struct md_fs_request *q,
         struct md_fs_result *out, const struct md_fs_output *output) {
-    if (md_mount_namespace_attached(fs->mounts) || q->origin[0] || q->origin[1])
+    if (md_mount_namespace_attached(fs->mounts) || q->origin[0] || q->origin[1]
+            || (fs->mounts && q->operation==MD_FS_ACCESS && (q->mode&X_OK)
+                && (md_mount_policy_flags(&fs->mounts->base.policy)&MD_MOUNT_NOEXEC)))
         md_fs_mounts_execute(fs,q,out,output);
     else md_fs_inode_execute(fs,q,out,output);
+    /* An unannotated proc/dev dirfd can predate a root change. A rejected inode
+     * lookup has performed no operation on that native object; hand its path
+     * to the caller's proc provider, never resolve self on this worker. */
+    if (out->error==-EXDEV && !q->origin[0] && q->directory[0]>=0
+            && q->path[0] && *q->path[0] && q->path[0][0]!='/') {
+        int error=md_view_task_path(fs,q->directory[0],q->path[0],"",q->resolve,1);
+        if (error) out->error=error;
+    }
 }
 static void change_root(struct md_filesystem *fs, struct md_guest_domain *context,
         const struct md_fs_request *q, struct md_fs_result *out) {
@@ -124,7 +134,8 @@ void md_fs_stat_info(const struct stat *s, struct md_fs_info *out) {
         .change_seconds = s->st_ctim.tv_sec, .access_nanos = (uint32_t)s->st_atim.tv_nsec,
         .modify_nanos = (uint32_t)s->st_mtim.tv_nsec, .change_nanos = (uint32_t)s->st_ctim.tv_nsec};
 }
-void md_fs_statfs_result(int fd, struct md_fs_result *out, const struct md_fs_output *output) {
+void md_fs_statfs_result(int fd, unsigned policy, const struct md_inode_lifetime *storage,
+        struct md_fs_result *out, const struct md_fs_output *output) {
     if (!output || !output->data || output->capacity<sizeof(struct md_fs_statfs)) {
         out->error=-ERANGE; return;
     }
@@ -136,6 +147,15 @@ void md_fs_statfs_result(int fd, struct md_fs_result *out, const struct md_fs_ou
         .fragment_size=native.f_frsize,.flags=native.f_flags};
     _Static_assert(sizeof(value.fsid)==sizeof(native.f_fsid),"statfs filesystem identity");
     memcpy(value.fsid,&native.f_fsid,sizeof(value.fsid));
+    if (storage) value.flags&=~(uint64_t)(MS_RDONLY|MS_NOSUID|MS_NODEV);
+    value.flags|=((policy&MD_MOUNT_READONLY) ? MS_RDONLY : 0)
+        | ((policy&MD_MOUNT_NOSUID) ? MS_NOSUID : 0) | ((policy&MD_MOUNT_NODEV) ? MS_NODEV : 0)
+        | ((policy&MD_MOUNT_NOEXEC) ? MS_NOEXEC : 0);
+    if (storage && storage->filesystem_kind) {
+        value.type=md_filesystem_magic(storage->filesystem_kind);
+        uint64_t id=(uint64_t)storage->inode;
+        memcpy(value.fsid,&id,sizeof(value.fsid));
+    }
     memcpy(output->data,&value,sizeof(value)); out->size=sizeof(value);
 }
 int md_fs_context_begin(struct md_filesystem *fs, int actor, int peer, struct md_fs_context *context) {
@@ -216,7 +236,7 @@ static void context_execute(struct md_fs_context *context,
     }
     if (context->has_identity && q->operation == MD_FS_ACCESS && !(q->flags & MD_AT_EACCESS)) {
         identity.uid.fs = identity.uid.real; identity.gid.fs = identity.gid.real;
-        identity.caps.effective = identity.uid.real ? 0 : identity.caps.permitted;
+        identity.caps.effective = identity.uid.real==md_identity_root(&identity) ? identity.caps.permitted : 0;
     }
     fs->store->identity = context->has_identity ? &identity : NULL;
     unsigned previous_mask=fs->store->creation_mask;
@@ -250,7 +270,7 @@ static void context_execute(struct md_fs_context *context,
         if (q->operation==MD_FS_CHROOT) out->error=-ENOTSUP;
         else if (q->operation==MD_FS_LINK || q->operation==MD_FS_RENAME) out->error=-EXDEV;
         else if (boundary.path && boundary.capacity) {
-            out->error=0; out->host_path=1; out->size=strlen(boundary.path)+1;
+            out->error=0; out->host_path=boundary.operand+1; out->size=strlen(boundary.path)+1;
         }
     }
     fs->store->creation_mask=previous_mask;
@@ -296,8 +316,30 @@ void md_fs_context_execute(struct md_fs_context *context,
     struct md_cost *cost=fs && fs->statistics && q->operation<=MD_FS_LAST
         ? &fs->statistics->operation[q->operation] : NULL;
     int64_t begin=md_cost_begin(cost);
+    struct md_fs_request mapped;
+    const struct md_identity *id=context->has_identity ? &context->task.identity : NULL;
+    if (id && id->user_namespace && q->operation==MD_FS_CHOWN) {
+        mapped=*q;
+        if (q->attributes.uid!=UINT32_MAX)
+            mapped.attributes.uid=md_user_namespace_into(id->user_namespace,0,q->attributes.uid);
+        if (q->attributes.gid!=UINT32_MAX)
+            mapped.attributes.gid=md_user_namespace_into(id->user_namespace,1,q->attributes.gid);
+        if ((q->attributes.uid!=UINT32_MAX && mapped.attributes.uid==UINT32_MAX)
+                || (q->attributes.gid!=UINT32_MAX && mapped.attributes.gid==UINT32_MAX)) {
+            *out=(struct md_fs_result){.fd=-1,.error=-EINVAL};
+            md_cost_end(cost,begin); return;
+        }
+        q=&mapped;
+    }
     if (q->object[0] || q->object[1]) object_execute(context,q,out,output);
     else context_execute(context,q,out,output);
+    /* Internal opens and executable admission keep canonical owners. Only
+     * the caller-facing metadata result belongs to the current user namespace. */
+    if (!out->error && !out->host_path && id && id->user_namespace
+            && (q->operation==MD_FS_STAT || q->operation==MD_FS_FSTAT)) {
+        out->info.uid=md_identity_visible_id(id,0,out->info.uid);
+        out->info.gid=md_identity_visible_id(id,1,out->info.gid);
+    }
     md_cost_end(cost,begin);
 }
 static void inode_execute(struct md_filesystem *fs,
@@ -313,17 +355,14 @@ static void inode_execute(struct md_filesystem *fs,
     switch (q->operation) {
     case MD_FS_GETACL: case MD_FS_SETACL: case MD_FS_REMOVEACL:
         md_inode_acl(s,q,out,output); return;
-    case MD_FS_LISTATTR:
-        r=md_inode_attributes(s,first,data,capacity);
-        if(r>=0) { out->size=(size_t)r; r=0; }
-        break;
     case MD_FS_GETCAP: case MD_FS_SETCAP: case MD_FS_REMOVECAP:
         r = md_inode_capability(s, q, data, capacity);
         if (r >= 0) { out->size = (size_t)r; r = 0; }
         break;
     case MD_FS_CHMOD: case MD_FS_CHOWN: case MD_FS_ACCESS: case MD_FS_UTIMENS:
         r = md_inode_metadata(s, q); break;
-    case MD_FS_XATTR_OPEN: r = md_inode_xattr_open(s, first, a, (int)q->mode); goto opened;
+    case MD_FS_XATTR_OBJECT:
+        md_inode_xattr(s,q,out,output); return;
     case MD_FS_REOPEN:
         r=md_catalogue_reopen(images,s,first,(int)q->flags,!!(q->mode&MD_FS_REOPEN_MUTABLE),&out->open_completion);
         if (r==-EXDEV && (q->mode&MD_FS_REOPEN_NATIVE))
@@ -401,7 +440,14 @@ static void inode_execute(struct md_filesystem *fs,
     case MD_FS_STATFS: {
         int fd=*a ? md_inode_open(s,first,a,O_PATH|O_CLOEXEC,0) : first;
         if (fd<0) out->error=fd;
-        else { md_fs_statfs_result(fd,out,output); if (*a) close(fd); }
+        else {
+            const struct md_view_mount *mount=fs->inode_mount ? fs->inode_mount
+                : fs->mounts ? &fs->mounts->base : NULL;
+            unsigned policy=mount ? md_mount_policy_flags(&mount->policy) : 0;
+            if (s->readonly) policy|=MD_MOUNT_READONLY;
+            md_fs_statfs_result(fd,policy,s->lifetime,out,output);
+            if (*a) close(fd);
+        }
         return;
     }
     case MD_FS_PATH:

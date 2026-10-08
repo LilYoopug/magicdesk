@@ -18,7 +18,6 @@
 struct md_fs md_files;
 char md_bootstrap[PATH_MAX];
 char md_executable[PATH_MAX];
-char md_hostname[MD_HOSTNAME_SIZE];
 static struct md_process_image process_image;
 static struct md_socket_routes connections;
 
@@ -119,11 +118,6 @@ void md_boot(uintptr_t *kernel_stack) {
         cwd = argv[root_arg + 1];
         root_arg += 2;
         if (cwd[0] != '/') md_die("guest cwd must be absolute", -EINVAL);
-    }
-    if (root_arg+1 < argc && md_equal(argv[root_arg], "--hostname")) {
-        if (!md_hostname_valid(argv[root_arg+1])) md_die("invalid guest hostname",-EINVAL);
-        md_copy(md_hostname,sizeof(md_hostname),argv[root_arg+1]);
-        root_arg+=2;
     }
     while (root_arg < argc && (md_equal(argv[root_arg], "--socket-path") || md_equal(argv[root_arg], "--socket-abstract"))) {
         if (root_arg + 2 >= argc) md_die("missing socket route", -EINVAL);

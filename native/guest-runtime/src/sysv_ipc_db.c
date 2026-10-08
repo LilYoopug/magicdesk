@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "sysv_ipc_internal.h"
+#include "ipc_storage.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -30,22 +31,12 @@ int md_ipc_memory(struct md_ipc_pending *p, uintptr_t address, void *data, size_
     } else memcpy(data,buffer,size);
     return 0;
 }
-int md_ipc_permission(const struct md_identity *id, const struct ipc64_perm *p, unsigned mode) {
-    if (md_identity_capable(id,CAP_IPC_OWNER)) return 0;
-    unsigned shift = id->uid.effective == p->uid || id->uid.effective == p->cuid ? 6
-        : md_identity_in_group(id,p->gid) || md_identity_in_group(id,p->cgid) ? 3 : 0;
-    return ((p->mode >> shift)&mode) == mode ? 0 : -EACCES;
-}
-int md_ipc_owner(const struct md_identity *id, const struct ipc64_perm *p) {
-    return id->uid.effective == p->uid || id->uid.effective == p->cuid
-        || md_identity_capable(id,CAP_SYS_ADMIN) ? 0 : -EPERM;
-}
 int md_ipc_get(struct md_ipc *s, int kind, int key, int flags, int *id) {
     *id = 0;
     sqlite3_stmt *q = NULL;
-    int r = md_ipc_query(s,"SELECT id FROM objects WHERE kind=?1 AND key=?2 AND key!=0",&q);
+    int r = md_ipc_query(s,"SELECT id FROM objects WHERE kind=?1 AND key=?2 AND key!=0 AND namespace=?3",&q);
     if (!r) {
-        sqlite3_bind_int(q,1,kind); sqlite3_bind_int(q,2,key);
+        sqlite3_bind_int(q,1,kind); sqlite3_bind_int(q,2,key); sqlite3_bind_int64(q,3,s->namespace_id);
         int step=sqlite3_step(q);
         if (step==SQLITE_ROW) *id=sqlite3_column_int(q,0); else if (step!=SQLITE_DONE) r=-EIO;
     }
@@ -56,9 +47,10 @@ int md_ipc_get(struct md_ipc *s, int kind, int key, int flags, int *id) {
 }
 int md_ipc_load(struct md_ipc *s, int kind, int id, void *data, size_t size) {
     sqlite3_stmt *q = NULL;
-    int r=md_ipc_query(s,"SELECT info FROM objects WHERE id=?1 AND kind=?2",&q);
+    int r=md_ipc_query(s,"SELECT info FROM objects WHERE id=?1 AND kind=?2 AND namespace=?3",&q);
     if (!r) {
-        sqlite3_bind_int(q,1,id); sqlite3_bind_int(q,2,kind); int step=sqlite3_step(q);
+        sqlite3_bind_int(q,1,id); sqlite3_bind_int(q,2,kind); sqlite3_bind_int64(q,3,s->namespace_id);
+        int step=sqlite3_step(q);
         if (step==SQLITE_DONE) r=-EINVAL;
         else if (step!=SQLITE_ROW || sqlite3_column_bytes(q,0)!=(int)size) r=-EIO;
         else memcpy(data,sqlite3_column_blob(q,0),size);
@@ -73,9 +65,10 @@ int md_ipc_save(struct md_ipc *s, int id, const void *data, size_t size) {
 }
 int md_ipc_create(struct md_ipc *s, int kind, int key, const void *data, size_t size, int *id) {
     sqlite3_stmt *q = NULL;
-    int r=md_ipc_query(s,"INSERT INTO objects(kind,key,info) VALUES(?1,?2,?3)",&q);
+    int r=md_ipc_query(s,"INSERT INTO objects(kind,key,info,namespace) VALUES(?1,?2,?3,?4)",&q);
     if (!r) {
         sqlite3_bind_int(q,1,kind); sqlite3_bind_int(q,2,key); sqlite3_bind_blob(q,3,data,size,SQLITE_STATIC);
+        sqlite3_bind_int64(q,4,s->namespace_id);
         r=md_ipc_sql(sqlite3_step(q));
     }
     sqlite3_finalize(q);
@@ -98,7 +91,9 @@ static int remove_owner(struct md_ipc *s, int64_t owner) {
     sqlite3_stmt *q=NULL;
     if (!r) r=md_ipc_query(s,"DELETE FROM owners WHERE id=?1",&q);
     if (!r) { sqlite3_bind_int64(q,1,owner); r=md_ipc_sql(sqlite3_step(q)); }
-    sqlite3_finalize(q); return r;
+    sqlite3_finalize(q);
+    if (!r) r=md_ipc_exec(s,"DELETE FROM objects WHERE namespace!=0 AND namespace NOT IN (SELECT namespace FROM owners)");
+    return r;
 }
 static int reap(struct md_ipc *s) {
     sqlite3_stmt *q=NULL;
@@ -135,18 +130,14 @@ int md_ipc_finish(struct md_ipc *s, int error) {
     else if (s->changed && pwrite(s->events,"e",1,0)!=1) error=-EIO;
     flock(s->gate,LOCK_UN); return error;
 }
-int md_ipc_open(const char *store, struct md_ipc **out) {
+int md_ipc_open(const char *store, uint64_t namespace_id, struct md_user_namespace *owner, struct md_ipc **out) {
     *out=NULL;
     struct md_ipc *s=calloc(1,sizeof(*s)); if (!s) return -ENOMEM;
     s->dir=s->gate=s->lease=s->events=-1;
-    int root=open(store,O_DIRECTORY|O_RDONLY|O_CLOEXEC|O_NOFOLLOW), parent=-1;
-    int r=root<0 ? -errno : 0;
-    if (!r && mkdirat(root,"ipc",0700) && errno!=EEXIST) r=-errno;
-    if (!r && (parent=openat(root,"ipc",O_DIRECTORY|O_RDONLY|O_CLOEXEC|O_NOFOLLOW))<0) r=-errno;
-    if (!r && mkdirat(parent,"sysv",0700) && errno!=EEXIST) r=-errno;
-    if (!r && (s->dir=openat(parent,"sysv",O_DIRECTORY|O_RDONLY|O_CLOEXEC|O_NOFOLLOW))<0) r=-errno;
-    if (parent>=0) close(parent);
-    if (root>=0) close(root);
+    s->namespace_id=namespace_id;
+    s->user_namespace=md_user_namespace_retain(owner);
+    s->dir=md_ipc_storage_open(store,"sysv");
+    int r=s->dir<0 ? s->dir : 0;
     if (!r && (s->gate=openat(s->dir,"gate",O_CREAT|O_RDWR|O_CLOEXEC|O_NOFOLLOW,0600))<0) r=-errno;
     if (!r && (s->events=openat(s->dir,"events",O_CREAT|O_RDWR|O_CLOEXEC|O_NOFOLLOW,0600))<0) r=-errno;
     if (!r && getrandom(&s->owner,sizeof(s->owner),0)!=sizeof(s->owner)) r=-EIO;
@@ -163,12 +154,12 @@ int md_ipc_open(const char *store, struct md_ipc **out) {
     if (!r) memcpy(path+length,"/ipc.db",sizeof("/ipc.db"));
     if (!r) r=md_ipc_sql(sqlite3_open_v2(path,&s->db,SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE|SQLITE_OPEN_NOFOLLOW,NULL));
     if (!r) r=md_ipc_exec(s,"PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;"
-        "CREATE TABLE IF NOT EXISTS objects(id INTEGER PRIMARY KEY AUTOINCREMENT,kind INTEGER,key INTEGER,info BLOB);"
-        "CREATE UNIQUE INDEX IF NOT EXISTS object_key ON objects(kind,key) WHERE key!=0;"
+        "CREATE TABLE IF NOT EXISTS objects(id INTEGER PRIMARY KEY AUTOINCREMENT,kind INTEGER,key INTEGER,info BLOB,namespace INTEGER NOT NULL);"
+        "CREATE UNIQUE INDEX IF NOT EXISTS object_key ON objects(namespace,kind,key) WHERE key!=0;"
         "CREATE TABLE IF NOT EXISTS sems(object INTEGER REFERENCES objects ON DELETE CASCADE,n INTEGER,value INTEGER,pid INTEGER,PRIMARY KEY(object,n));"
         "CREATE TABLE IF NOT EXISTS messages(seq INTEGER PRIMARY KEY AUTOINCREMENT,object INTEGER REFERENCES objects ON DELETE CASCADE,type INTEGER,data BLOB);"
         "CREATE INDEX IF NOT EXISTS message_order ON messages(object,type,seq);"
-        "CREATE TABLE IF NOT EXISTS owners(id INTEGER PRIMARY KEY);"
+        "CREATE TABLE IF NOT EXISTS owners(id INTEGER PRIMARY KEY,namespace INTEGER NOT NULL);"
         "CREATE TABLE IF NOT EXISTS undo(owner INTEGER REFERENCES owners ON DELETE CASCADE,space INTEGER,object INTEGER REFERENCES objects ON DELETE CASCADE,n INTEGER,delta INTEGER,pid INTEGER,PRIMARY KEY(owner,space,object,n));"
         "CREATE TABLE IF NOT EXISTS waiters(owner INTEGER REFERENCES owners ON DELETE CASCADE,tid INTEGER,object INTEGER REFERENCES objects ON DELETE CASCADE,n INTEGER,zero INTEGER,PRIMARY KEY(owner,tid));"
         "CREATE TABLE IF NOT EXISTS metadata(name TEXT PRIMARY KEY,value TEXT);");
@@ -189,8 +180,11 @@ int md_ipc_open(const char *store, struct md_ipc **out) {
     if (!r) { sqlite3_bind_text(q,1,boot,-1,SQLITE_STATIC); r=md_ipc_sql(sqlite3_step(q)); }
     sqlite3_finalize(q); q=NULL;
     if (!r) r=reap(s);
-    if (!r) r=md_ipc_query(s,"INSERT INTO owners VALUES(?1)",&q);
-    if (!r) { sqlite3_bind_int64(q,1,s->owner); r=md_ipc_sql(sqlite3_step(q)); }
+    if (!r) r=md_ipc_query(s,"INSERT INTO owners VALUES(?1,?2)",&q);
+    if (!r) {
+        sqlite3_bind_int64(q,1,s->owner); sqlite3_bind_int64(q,2,s->namespace_id);
+        r=md_ipc_sql(sqlite3_step(q));
+    }
     sqlite3_finalize(q);
     if (!r) r=md_ipc_exec(s,"COMMIT");
     if (r && s->db) md_ipc_exec(s,"ROLLBACK");
@@ -206,5 +200,6 @@ void md_ipc_close(struct md_ipc *s) {
     if (s->events>=0) close(s->events);
     if (s->gate>=0) close(s->gate);
     if (s->dir>=0) close(s->dir);
+    md_user_namespace_release(s->user_namespace);
     free(s);
 }

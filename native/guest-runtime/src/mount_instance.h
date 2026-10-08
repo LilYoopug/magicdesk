@@ -15,7 +15,7 @@ struct md_view_mount {
     uint64_t generation;
     enum md_mount_backing backing;
     struct md_inode_lifetime *storage;
-    int detached;
+    int detached, locked;
     atomic_uint anchors;
     struct md_view_mount *parent;
     struct stat native, guest;

@@ -28,7 +28,7 @@ struct md_ipc_origin_request {
     struct md_received_fds *source, *result;
     void (*complete)(struct md_ipc_origin_request *, int, void *);
     void *context;
-    int kind, submitted, error;
+    int kind, submitted, error, implicit_credentials;
     enum md_ipc_ancillary_transport transport;
     struct md_fs_context task;
     struct md_ipc_send_options options;
@@ -108,7 +108,8 @@ static int address(struct md_ipc_origin_request *r) {
 }
 static int credentials(struct md_ipc_origin_request *r, struct md_ipc_credentials *authority) {
     if (!r->options.credentials) return 0;
-    struct md_fs_request q={.operation=MD_FS_IPC,.flags=MD_IPC_MESSAGE_CREATE,
+    struct md_fs_request q={.operation=MD_FS_IPC,
+        .flags=r->implicit_credentials ? MD_IPC_MESSAGE_SENDER : MD_IPC_MESSAGE_CREATE,
         .actor=r->task.actor,.peer=r->task.peer,.directory={r->source->fds[0],-1},
         .offset=r->options.claimed.pid,
         .attributes={.uid=r->options.claimed.uid,.gid=r->options.claimed.gid}};
@@ -168,11 +169,15 @@ static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
         r->destination.brokered=1;
         if (!r->options.credentials) {
             r->options.credentials=1;
-            r->options.claimed=(struct ucred){.pid=r->task.peer,
-                .uid=r->task.task.identity.uid.effective,.gid=r->task.task.identity.gid.effective};
+            r->implicit_credentials=1;
         }
     }
     int framed=r->transport==MD_IPC_TRANSPORT_ORIGINS_V1;
+    if (!error && !framed && r->kind==PREPARE && r->message) {
+        struct md_fd_object *const *objects=md_fd_message_origins(r->message);
+        for (unsigned i=0;i<md_fd_message_count(r->message);++i)
+            if (objects[i] && !md_fs_anchor_from_object(objects[i])) { error=-EOPNOTSUPP; break; }
+    }
     if (!error && r->kind==RECEIVE && !framed) error=-ENOTSUP;
     if (!error && r->kind==PREPARE && !bound && r->source->count>1) {
         int family=0; socklen_t size=sizeof(family);

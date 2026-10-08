@@ -54,6 +54,19 @@ struct md_proc_path md_proc_path(const char *path) {
         if (word(&p,"mounts")) {
             out.kind=MD_PROC_MOUNTS; out.tail=p; out.anchor_length=(size_t)(p-path); return out;
         }
+        if (word(&p,"sys")) {
+            if (!word(&p,"kernel")) return out;
+            if (word(&p,"hostname")) out.kind=MD_PROC_HOSTNAME;
+            else if (word(&p,"domainname")) out.kind=MD_PROC_DOMAINNAME;
+            else if (word(&p,"ostype")) out.kind=MD_PROC_OSTYPE;
+            else if (word(&p,"osrelease")) out.kind=MD_PROC_OSRELEASE;
+            else if (word(&p,"version")) out.kind=MD_PROC_VERSION;
+            else if (word(&p,"overflowuid")) out.kind=MD_PROC_OVERFLOWUID;
+            else if (word(&p,"overflowgid")) out.kind=MD_PROC_OVERFLOWGID;
+            else return out;
+            out.process=(int)RAW0(gettid);
+            out.tail=p; out.anchor_length=(size_t)(p-path); return out;
+        }
         if (word(&p,"self")) out.process=(int)RAW0(getpid);
         else if (word(&p,"thread-self")) out.process=(int)RAW0(gettid);
         else {
@@ -70,7 +83,8 @@ struct md_proc_path md_proc_path(const char *path) {
             foreign |= tid != RAW0(gettid);
             out.process = (int)tid;
         }
-        if (word(&p, "fd")) {
+        if (!*component(p)) { out.kind=MD_PROC_PROCESS_DIRECTORY; p=component(p); }
+        else if (word(&p, "fd")) {
             out.descriptor=(int)number(&p);
             if (out.descriptor < 0) return out;
             out.kind = MD_PROC_FD;
@@ -81,6 +95,17 @@ struct md_proc_path md_proc_path(const char *path) {
         else if (word(&p, "auxv")) out.kind = MD_PROC_AUXV;
         else if (word(&p, "mounts")) out.kind = MD_PROC_MOUNTS;
         else if (word(&p, "mountinfo")) out.kind = MD_PROC_MOUNTINFO;
+        else if (word(&p, "uid_map")) out.kind = MD_PROC_UID_MAP;
+        else if (word(&p, "gid_map")) out.kind = MD_PROC_GID_MAP;
+        else if (word(&p, "setgroups")) out.kind = MD_PROC_SETGROUPS;
+        else if (word(&p,"ns")) {
+            if (word(&p,"user")) out.kind=MD_PROC_NS_USER;
+            else if (word(&p,"mnt")) out.kind=MD_PROC_NS_MOUNT;
+            else if (word(&p,"uts")) out.kind=MD_PROC_NS_UTS;
+            else if (word(&p,"ipc")) out.kind=MD_PROC_NS_IPC;
+            else if (*component(p)) { out.kind=MD_PROC_NS_UNSUPPORTED; p+=md_length(p); }
+            else { out.kind=MD_PROC_NS_DIRECTORY; p=component(p); }
+        }
         else return out;
         if (foreign) { out.foreign_kind=out.kind; out.kind = MD_PROC_FOREIGN; }
     } else return out;

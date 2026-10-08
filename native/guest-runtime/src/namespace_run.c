@@ -121,6 +121,7 @@ void md_boot(uintptr_t *stack) {
         if (admit) { args[n++] = "--admit-elf"; args[n++] = (char *)admit; }
         if (user) { args[n++] = "--user"; args[n++] = (char *)user; }
         if (groups) { args[n++] = "--groups"; args[n++] = (char *)groups; }
+        if (hostname) { args[n++]="--hostname"; args[n++]=(char *)hostname; }
         for (unsigned i = 0; i < attachment_count; ++i) {
             args[n++] = attachments[i].readonly ? "--bind-ro" : "--bind";
             args[n++] = (char *)attachments[i].source; args[n++] = (char *)attachments[i].target;
@@ -129,7 +130,6 @@ void md_boot(uintptr_t *stack) {
         args[n++] = "--endpoint"; args[n++] = endpoint;
         args[n++] = bootstrap;
         args[n++] = "--cwd"; args[n++] = (char *)cwd;
-        if (hostname) { args[n++]="--hostname"; args[n++]=(char *)hostname; }
         for (unsigned i = 0; i < md_connections.count; i++) {
             struct md_socket_route *route = &md_connections.entries[i];
             args[n++] = route->abstract ? "--socket-abstract" : "--socket-path";

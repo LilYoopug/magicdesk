@@ -21,13 +21,13 @@ struct md_fd_return {
 enum { MD_FD_RETURN_WAIT, MD_FD_RETURN_READY, MD_FD_RETURN_ADMIT, MD_FD_RETURN_CHECK };
 struct md_fd_channel_observation;
 int md_fd_return_begin(struct md_fd_return *, struct md_fd_origins *, int source,
-        struct md_fs_anchor *, unsigned flags, struct md_fd_receipt *, struct md_resource_wakeup *);
+        struct md_fd_object *, unsigned flags, struct md_fd_receipt *, struct md_resource_wakeup *);
 /* Optional vector publication. All scratch storage remains caller-owned through
  * finish/cancel. Select exactly one: a kernel-written shared memory receipt, or
  * table observation for direct application-control output. The latter borrows
  * the task-captured directory and arms only after infrastructure admission. */
 struct md_fd_return_publication {
-    struct md_fs_anchor *const *origins;
+    struct md_fd_object *const *origins;
     struct md_fd_origin_update *updates;
     int *numbers;
     struct md_fd_receipt *memory;

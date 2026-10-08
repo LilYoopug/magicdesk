@@ -5,6 +5,7 @@
 #include "image_io.h"
 #include "image_json.h"
 #include "inode_internal.h"
+#include "inode_xattr.h"
 #include <archive.h>
 #include <archive_entry.h>
 #include <errno.h>
@@ -67,28 +68,24 @@ static int security(struct md_inode_store *s, const struct mdi_node *node, struc
     sqlite3_finalize(q); return r;
 }
 static int attributes(struct md_inode_store *s, const struct mdi_node *node, struct archive_entry *entry) {
-    char path[128];
-    int directory = mdi_backing_directory(s, node);
-    if (directory < 0) return directory;
-    snprintf(path, sizeof(path), "/proc/self/fd/%d/%s", directory, node->backing);
-    ssize_t size = llistxattr(path, NULL, 0);
-    if (size < 0) return -errno;
+    ssize_t size = mdi_xattr_names(s,node,NULL,0,1);
+    if (size < 0) return (int)size;
     if (size > 65536) return -E2BIG;
     char *names = malloc(size ? (size_t)size : 1);
     if (!names) return -ENOMEM;
-    int r = llistxattr(path, names, size) == size ? 0 : -ESTALE;
+    int r = mdi_xattr_names(s,node,names,size,1) == size ? 0 : -ESTALE;
     for (size_t at = 0; !r && at < (size_t)size;) {
         const char *name = names + at;
         size_t length = strnlen(name, (size_t)size-at);
         if (length == (size_t)size-at) { r = -EIO; break; }
         at += length+1;
         if (!strcmp(name, "security.selinux")) continue;
-        if (strncmp(name, "user.", 5)) { r = -ENOTSUP; break; }
-        ssize_t count = lgetxattr(path, name, NULL, 0);
-        if (count < 0 || count > 65536) { r = count < 0 ? -errno : -E2BIG; break; }
+        if (strncmp(name, "user.", 5) && !mdi_overlay_attribute(name)) { r = -ENOTSUP; break; }
+        ssize_t count = mdi_xattr_get(s,node,name,NULL,0);
+        if (count < 0 || count > 65536) { r = count < 0 ? (int)count : -E2BIG; break; }
         void *value = malloc(count ? (size_t)count : 1);
         if (!value) { r = -ENOMEM; break; }
-        if (lgetxattr(path, name, value, count) != count) r = -ESTALE;
+        if (mdi_xattr_get(s,node,name,value,count) != count) r = -ESTALE;
         if (!r) archive_entry_xattr_add_entry(entry, name, value, count);
         free(value);
     }

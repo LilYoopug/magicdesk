@@ -21,4 +21,21 @@ uintptr_t md_memory_buffer_address(struct md_interception_memory *, const struct
 /* Mapping commit and destructive memory calls share this address-space turn.
  * The caller retains the memory owner until completing/cancelling the turn. */
 int md_memory_order_begin(struct md_interception_memory *, struct md_resource_order *, struct md_resource_wakeup *);
+/* Only VM_MAYEXEC restrictions need metadata; unrestricted mappings stay
+ * kernel-owned. Prepare reserves storage before execution, finish allocates
+ * nothing. All calls below require the address-space turn. */
+enum md_mapping_operation { MD_MAPPING_MAP, MD_MAPPING_UNMAP, MD_MAPPING_REMAP };
+struct md_mapping_change {
+    enum md_mapping_operation operation;
+    uintptr_t address;
+    size_t length, new_length;
+    unsigned flags;
+    int noexec, prepared;
+};
+int md_memory_has_policy(const struct md_interception_memory *);
+int md_memory_exec_check(const struct md_interception_memory *, uintptr_t, size_t);
+int md_memory_mapping_prepare(struct md_interception_memory *, struct md_mapping_change *,
+    enum md_mapping_operation, uintptr_t, size_t, size_t new_length, unsigned flags, int noexec);
+void md_memory_mapping_finish(struct md_interception_memory *, struct md_mapping_change *, long result);
+void md_memory_mapping_abandon(struct md_interception_memory *, struct md_mapping_change *);
 #endif

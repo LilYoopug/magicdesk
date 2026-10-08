@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "inode_internal.h"
+#include "inode_overlay.h"
 #include "fs_operation.h"
 #include "linux_abi.h"
 #include <errno.h>
@@ -28,77 +29,126 @@ int md_inode_runtime_prepare(struct md_inode_store *s) {
     return mdi_commit(s,r);
 }
 
-int mdi_permission(struct md_inode_store *s, const struct mdi_node *node, int mode, int real) {
+int mdi_permission_as(struct md_inode_store *s, const struct mdi_node *node, int mode, const struct md_identity *identity) {
     if (mode & ~(R_OK | W_OK | X_OK)) return -EINVAL;
-    if (!s->identity) {
+    if (!identity) {
         int dir = mdi_backing_directory(s, node);
         return dir < 0 ? dir : syscall(SYS_faccessat2, dir, node->backing,
-            mode, real ? 0 : MD_AT_EACCESS) ? -errno : 0;
+            mode, MD_AT_EACCESS) ? -errno : 0;
     }
     struct stat st;
     int error = mdi_stat(s, node, &st);
     if (error || !mode) return error;
-    struct md_identity ids = *s->identity;
-    if (real) {
-        ids.uid.fs = ids.uid.real; ids.gid.fs = ids.gid.real;
-        ids.caps.effective = ids.uid.real ? 0 : ids.caps.permitted;
-    }
-    if (md_identity_capable(&ids, CAP_DAC_OVERRIDE))
+    struct md_identity ids = *identity;
+    if (md_identity_file_capable(&ids,st.st_uid,st.st_gid,CAP_DAC_OVERRIDE))
         return (mode & X_OK) && !S_ISDIR(st.st_mode) && !(st.st_mode & 0111) ? -EACCES : 0;
+    if (!(mode&W_OK) && (!(mode&X_OK) || S_ISDIR(st.st_mode))
+            && md_identity_file_capable(&ids,st.st_uid,st.st_gid,CAP_DAC_READ_SEARCH)) return 0;
     if (node->acl_mask&MD_ACL_ACCESS) return mdi_acl_permission(s,node,&ids,mode);
     unsigned shift = ids.uid.fs == st.st_uid ? 6 : md_identity_in_group(&ids, st.st_gid) ? 3 : 0;
     return (((unsigned)st.st_mode >> shift) & (unsigned)mode) == (unsigned)mode ? 0 : -EACCES;
+}
+int mdi_permission(struct md_inode_store *s, const struct mdi_node *node, int mode, int real) {
+    struct md_identity ids;
+    const struct md_identity *actor=s->identity;
+    if (real && actor) {
+        ids=*actor;
+        ids.uid.fs=ids.uid.real; ids.gid.fs=ids.gid.real;
+        ids.caps.effective=ids.uid.real==md_identity_root(&ids) ? ids.caps.permitted : 0;
+        actor=&ids;
+    }
+    int r;
+    if (real && !actor) {
+        int dir=mdi_backing_directory(s,node);
+        r=dir<0 ? dir : syscall(SYS_faccessat2,dir,node->backing,mode,0) ? -errno : 0;
+    } else r=mdi_permission_as(s,node,mode,actor);
+    return r ? r : mdi_overlay_permission(s,node,mode);
 }
 int mdi_open_permission(struct md_inode_store *s, const struct mdi_node *node, int flags) {
     if (flags & O_PATH) return 0;
     int r = mdi_permission(s, node,
         (flags & O_ACCMODE) == O_WRONLY ? W_OK : (flags & O_ACCMODE) == O_RDWR ? R_OK | W_OK : R_OK, 0);
-    if (!r && (flags & O_NOATIME) && s->identity && !md_identity_capable(s->identity, CAP_FOWNER)) {
+    if (!r && (flags & O_NOATIME) && s->identity) {
         struct stat st;
         r = mdi_stat(s, node, &st);
-        if (!r && st.st_uid != s->identity->uid.fs) r = -EPERM;
+        if (!r && st.st_uid != s->identity->uid.fs
+                && !md_identity_file_capable(s->identity,st.st_uid,st.st_gid,CAP_FOWNER)) r = -EPERM;
+    }
+    return r;
+}
+int mdi_sticky_as(struct md_inode_store *s, const struct mdi_location *loc, const struct md_identity *identity) {
+    if (!identity) return 0;
+    struct stat parent, child;
+    int r = mdi_stat(s, &loc->parent, &parent);
+    if (!r && (parent.st_mode & S_ISVTX) && parent.st_uid != identity->uid.fs) {
+        r = mdi_stat(s, &loc->node, &child);
+        if (!r && child.st_uid != identity->uid.fs
+                && !md_identity_file_capable(identity,child.st_uid,child.st_gid,CAP_FOWNER)) r = -EPERM;
     }
     return r;
 }
 int mdi_sticky(struct md_inode_store *s, const struct mdi_location *loc) {
-    if (!s->identity || md_identity_capable(s->identity, CAP_FOWNER)) return 0;
-    struct stat parent, child;
-    int r = mdi_stat(s, &loc->parent, &parent);
-    if (!r && (parent.st_mode & S_ISVTX) && parent.st_uid != s->identity->uid.fs) {
-        r = mdi_stat(s, &loc->node, &child);
-        if (!r && child.st_uid != s->identity->uid.fs) r = -EPERM;
-    }
-    return r;
+    return mdi_sticky_as(s,loc,s->identity);
 }
-int md_inode_xattr_open(struct md_inode_store *s, int original, const char *name, int access) {
+int mdi_xattr_permission_as(struct md_inode_store *s, const struct mdi_node *node,
+        const char *name, int access, const struct md_identity *ids) {
     if (!name || (access != F_OK && access != R_OK && access != W_OK)
             || (access == F_OK ? *name != 0 : *name == 0)) return -EINVAL;
     int write = access == W_OK;
-    int r = mdi_begin(s, write);
-    if (r) return r;
-    struct mdi_node node;
-    r = mdi_fd(s, original, &node);
-    const struct md_identity *ids = s->identity;
+    int r=0;
     /* Match the VFS namespace rules; LSM checks still run on the backing. */
     if (!r && !strncmp(name,"trusted.",8)) {
-        if (ids && !md_identity_capable(ids,CAP_SYS_ADMIN)) r = write ? -EPERM : -ENODATA;
+        if (ids && !md_identity_capable_in(ids,NULL,CAP_SYS_ADMIN)) r = write ? -EPERM : -ENODATA;
     } else if (!r && access != F_OK && strncmp(name,"security.",9) && strncmp(name,"system.",7)) {
         if (!strncmp(name,"user.",5)) {
             struct stat st;
-            r = mdi_stat(s,&node,&st);
+            r = mdi_stat(s,node,&st);
             if (!r && !S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode)) r = write ? -EPERM : -ENODATA;
             if (!r && write && S_ISDIR(st.st_mode) && (st.st_mode&S_ISVTX) && ids
-                    && ids->uid.fs != st.st_uid && !md_identity_capable(ids,CAP_FOWNER)) r = -EPERM;
+                    && ids->uid.fs != st.st_uid && !md_identity_file_capable(ids,st.st_uid,st.st_gid,CAP_FOWNER)) r = -EPERM;
         }
-        if (!r) r = mdi_permission(s,&node,access,0);
+        if (!r) r = mdi_permission_as(s,node,access,ids);
     }
-    if (!r && write) r = mdi_copy_up(s,&node);
-    int fd = -1, directory = r ? -1 : mdi_backing_directory(s,&node);
-    if (!r && directory < 0) r = directory;
-    if (!r && (fd = openat(directory,node.backing,O_PATH|O_NOFOLLOW|O_CLOEXEC)) < 0) r = -errno;
-    r = mdi_commit(s,r);
-    if (r && fd >= 0) close(fd);
-    return r ? r : fd;
+    return r;
+}
+int mdi_xattr_permission(struct md_inode_store *s, const struct mdi_node *node, const char *name, int access) {
+    int r=mdi_xattr_permission_as(s,node,name,access,s->identity);
+    return r ? r : mdi_overlay_xattr(s,node,name,access);
+}
+int mdi_setattr_permission(struct md_inode_store *s, const struct mdi_node *node,
+        const struct md_fs_request *q, const struct md_identity *ids) {
+    if (!ids) return 0;
+    struct stat st;
+    int r=mdi_stat(s,node,&st);
+    if (r) return r;
+    int owner=ids->uid.fs==st.st_uid;
+    int owner_cap=md_identity_file_capable(ids,st.st_uid,st.st_gid,CAP_FOWNER);
+    switch (q->operation) {
+    case MD_FS_CHMOD:
+    case MD_FS_SETACL:
+    case MD_FS_REMOVEACL:
+        return owner || owner_cap ? 0 : -EPERM;
+    case MD_FS_CHOWN: {
+        uint32_t uid=q->attributes.uid==UINT32_MAX ? st.st_uid : q->attributes.uid;
+        uint32_t gid=q->attributes.gid==UINT32_MAX ? st.st_gid : q->attributes.gid;
+        return md_identity_file_capable(ids,st.st_uid,st.st_gid,CAP_CHOWN)
+            || (owner && uid==st.st_uid && (gid==st.st_gid || md_identity_in_group(ids,gid))) ? 0 : -EPERM;
+    }
+    case MD_FS_SETCAP:
+    case MD_FS_REMOVECAP:
+        return md_identity_capable_in(ids,NULL,CAP_SETFCAP) ? 0 : -EPERM;
+    case MD_FS_UTIMENS: {
+        int now=1,omit=1;
+        for (unsigned i=0;i<2;++i) {
+            long ns=q->attributes.nanos[i];
+            if (ns!=UTIME_NOW && ns!=UTIME_OMIT && (ns<0 || ns>=1000000000)) return -EINVAL;
+            now&=ns==UTIME_NOW; omit&=ns==UTIME_OMIT;
+        }
+        if (omit || owner || owner_cap) return 0;
+        return now ? mdi_permission_as(s,node,W_OK,ids) : -EPERM;
+    }
+    default: return -EINVAL;
+    }
 }
 int mdi_metadata(struct md_inode_store *s, const struct mdi_node *node, uint32_t uid, uint32_t gid, mode_t mode) {
     if (uid == UINT32_MAX || gid == UINT32_MAX || (mode & ~07777)) return -EINVAL;
@@ -143,7 +193,10 @@ int md_inode_metadata(struct md_inode_store *s, const struct md_fs_request *q) {
     if (!r && q->operation == MD_FS_ACCESS)
         return mdi_finish(s, mdi_permission(s, &node, (int)q->mode, !(q->flags & MD_AT_EACCESS)));
     const struct md_identity *ids = s->identity;
-    int owner_cap = ids && md_identity_capable(ids, CAP_FOWNER), owner = ids && ids->uid.fs == st.st_uid;
+    if (!r) r=mdi_setattr_permission(s,&node,q,ids);
+    if (!r && q->operation==MD_FS_UTIMENS && q->attributes.nanos[0]==UTIME_OMIT
+            && q->attributes.nanos[1]==UTIME_OMIT) return mdi_finish(s,0);
+    if (!r) r=mdi_overlay_setattr(s,&node,q);
     uint32_t uid = st.st_uid, gid = st.st_gid;
     mode_t mode = st.st_mode & 07777;
     struct timespec times[2] = {{q->attributes.seconds[0], q->attributes.nanos[0]},
@@ -151,31 +204,18 @@ int md_inode_metadata(struct md_inode_store *s, const struct md_fs_request *q) {
     if (!r && ids) {
         switch (q->operation) {
         case MD_FS_CHMOD:
-            if (!owner_cap && !owner) r = -EPERM;
-            else if (node.kind == S_IFLNK) r = -EOPNOTSUPP;
+            if (node.kind == S_IFLNK) r = -EOPNOTSUPP;
             else {
                 mode = q->mode & 07777;
-                if (!md_identity_capable(ids, CAP_FSETID) && !md_identity_in_group(ids, gid)) mode &= ~S_ISGID;
+                if (!md_identity_file_capable(ids,st.st_uid,st.st_gid,CAP_FSETID) && !md_identity_in_group(ids, gid)) mode &= ~S_ISGID;
             }
             break;
         case MD_FS_CHOWN:
             if (q->attributes.uid != UINT32_MAX) uid = q->attributes.uid;
             if (q->attributes.gid != UINT32_MAX) gid = q->attributes.gid;
-            if (!md_identity_capable(ids, CAP_CHOWN) && (!owner || uid != st.st_uid
-                    || (gid != st.st_gid && !md_identity_in_group(ids, gid)))) r = -EPERM;
             if (node.kind != S_IFDIR) { mode &= ~S_ISUID; if (mode & S_IXGRP) mode &= ~S_ISGID; }
             break;
-        case MD_FS_UTIMENS: {
-            int now = 1, omit = 1;
-            for (unsigned i = 0; i < 2; i++) {
-                long ns = times[i].tv_nsec;
-                if (ns != UTIME_NOW && ns != UTIME_OMIT && (ns < 0 || ns >= 1000000000)) r = -EINVAL;
-                now &= ns == UTIME_NOW; omit &= ns == UTIME_OMIT;
-            }
-            if (omit) return mdi_finish(s, 0);
-            if (!r && !owner_cap && !owner) r = now ? mdi_permission(s, &node, W_OK, 0) : -EPERM;
-            break;
-        }
+        case MD_FS_UTIMENS: break;
         default: r = -EINVAL;
         }
     }

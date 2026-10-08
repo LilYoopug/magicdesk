@@ -1,8 +1,10 @@
 #define _GNU_SOURCE
+#include "host_identity.h"
 #include "event_wait.h"
 #include "fs_rpc.h"
 #include "fs_worker.h"
 #include "mount_copy_service.h"
+#include "mount_policy.h"
 #include "fs_engine.h"
 #include "command_access.h"
 #include "fs_mounts.h"
@@ -25,7 +27,12 @@
 #include "fs_buffer.h"
 #include "adapter_frame.h"
 #include "fs_buffer_service.h"
-#include "watch_activation.h"
+#include "fd_selector.h"
+#include "proc_file.h"
+#include "proc_namespace.h"
+#include <linux/nsfs.h>
+#include "proc_sysctl.h"
+#include "proc_control.h"
 #include "launch_identity.h"
 #include "sysv_shm.h"
 #include "sysv_ipc.h"
@@ -155,7 +162,7 @@ struct outgoing_owner {
 /* Cold, authenticated-origin delivery only. The receive owner retains this
  * storage until the shared kernel receipt completes origin publication. */
 struct receive_publication {
-    struct md_fs_anchor *origins[253];
+    struct md_fd_object *origins[253];
     struct md_fd_origin_update updates[253];
     int numbers[253];
 };
@@ -186,11 +193,14 @@ struct thread {
     struct user_pt_regs buffer_registers;
     struct md_fd_install buffer_delivery, proc_delivery;
     int proc_image_fd;
+    struct md_proc_file *proc_file;
+    struct md_proc_file_io proc_io;
+    int proc_waiting;
     struct md_fd_return buffer_return;
     int buffer_return_waiting;
     int buffer_delivered;
     int buffer_waiting;
-    struct md_watch_activation *watch_activation;
+    struct md_fd_selector *fd_selector;
     pid_t pid, tgid, parent;
     int ready, born, initial_stop, resume_lost, listening, terminal_stop;
     enum phase phase;
@@ -219,6 +229,7 @@ struct thread {
     struct md_exec_identity pending_identity;
     int exec_images[2];
     int exec_images_ready;
+    unsigned exec_mount_flags;
     int mapped_image, entered;
     int debug_step_call, debug_birth;
     pid_t debug_exec_old;
@@ -237,6 +248,8 @@ struct thread {
     struct mapping_owner *mapping;
     struct md_resource_order memory_order;
     enum memory_action memory_action;
+    struct md_fd_order memory_files;
+    struct md_mapping_change memory_change;
     int shm_filter;
     struct md_ipc_pending *ipc_pending;
     struct md_ipc_transport ipc_transport;
@@ -266,13 +279,10 @@ static struct md_fs_worker *filesystem;
 static struct md_fs_buffer_service *buffer_service;
 static struct md_mount_copy_service *mount_copy_service;
 static struct md_ipc_origins *origin_service;
-static struct md_shm *shm;
 static struct md_task_helpers *helpers;
-static struct md_ipc *ipc;
 static int ipc_events=-1;
 static int socket_events=-1;
 static uint64_t ipc_sequence;
-static const char *shm_store;
 static struct md_namespace_broker *broker;
 static struct md_task_registry *tasks;
 static struct md_identity launch_identity;
@@ -306,6 +316,7 @@ static void exec_images_release(struct thread *t) {
         t->exec_images[i]=-1;
     }
     t->exec_images_ready=0;
+    t->exec_mount_flags=0;
 }
 static void adapter_discard(struct thread *);
 static int describe_filter(pid_t pid, const struct user_pt_regs *regs) {
@@ -365,21 +376,19 @@ static void cleanup(void) {
         fd_discard(threads);
         adapter_discard(threads);
         md_memory_release(threads->memory);
-        md_watch_activation_release(threads->watch_activation);
-        md_shm_space_release(shm,threads->shm_space);
+        md_fd_selector_release(threads->fd_selector);
+        md_shm_space_release(threads->shm_space);
         ipc_unwatch(threads);
-        md_ipc_cancel(ipc,&threads->ipc_pending);
+        md_ipc_cancel(md_ipc_namespace_active(threads->resources.ipc),&threads->ipc_pending);
         md_ipc_transport_close(&threads->ipc_transport);
-        md_resources_unshare_finish(ipc, &threads->resources, &threads->resource_change, -ECANCELED);
-        md_resources_release(ipc, &threads->resources);
+        md_resources_unshare_finish(&threads->resources,&threads->identity,&threads->resource_change, -ECANCELED);
+        md_resources_release(&threads->resources);
         md_identity_release(&threads->identity);
         free(threads->identity_buffer);
         free(threads); threads = next;
     }
     md_admission_close(&admission);
     md_debugger_destroy(debugger); debugger = NULL;
-    md_shm_close(shm); shm = NULL;
-    md_ipc_close(ipc); ipc = NULL;
     if (ipc_events>=0) close(ipc_events);
     ipc_events=-1;
     if (socket_events>=0) close(socket_events);
@@ -442,6 +451,8 @@ static void outgoing_release(struct outgoing_owner *owner) {
     md_received_fds_release(owner->prepared); free(owner);
 }
 static void adapter_discard(struct thread *t) {
+    CHECK(!md_proc_file_io_cancel(&t->proc_io));
+    md_proc_file_release(t->proc_file); t->proc_file=NULL; t->proc_waiting=0;
     if (t->outgoing) {
         struct outgoing_owner *owner=t->outgoing; t->outgoing=NULL; owner->caller=0;
         if (!owner->brokered && (owner->stage==OUTGOING_CAPTURE || owner->stage==OUTGOING_SEND))
@@ -460,6 +471,9 @@ static void adapter_discard(struct thread *t) {
     }
     if (t->memory_order.queue && md_resource_order_cancel(&t->memory_order)==1)
         CHECK(!md_resource_order_complete(&t->memory_order));
+    if (t->memory_files.table && md_fd_order_cancel(&t->memory_files)==1)
+        CHECK(!md_fd_order_complete(&t->memory_files));
+    md_memory_mapping_abandon(t->memory,&t->memory_change);
     t->memory_action=0;
     CHECK(!md_fd_return_cancel(&t->buffer_return));
     if (t->receive) {
@@ -512,8 +526,8 @@ static struct thread *thread(pid_t pid) {
         .shm_space = md_shm_space_new(),
         .buffer_open = {.fd=-1}, .proc_image_fd=-1,
         .exec_images = {-1,-1},
-        .watch_activation = md_watch_activation_new()};
-    CHECK(t->memory && t->watch_activation && t->shm_space);
+        .fd_selector = md_fd_selector_new()};
+    CHECK(t->memory && t->fd_selector && t->shm_space);
     live++; total++; return t;
 }
 static void release_thread(struct thread *t) {
@@ -523,18 +537,18 @@ static void release_thread(struct thread *t) {
     exec_images_release(t);
     md_task_registry_forget(tasks, t->pid);
     md_identity_release(&t->identity);
-    CHECK(!md_shm_space_release(shm,t->shm_space)); t->shm_space = NULL;
+    CHECK(!md_shm_space_release(t->shm_space)); t->shm_space = NULL;
     ipc_unwatch(t);
-    CHECK(!md_ipc_cancel(ipc,&t->ipc_pending));
+    CHECK(!md_ipc_cancel(md_ipc_namespace_active(t->resources.ipc),&t->ipc_pending));
     md_ipc_transport_close(&t->ipc_transport);
-    CHECK(!md_resources_unshare_finish(ipc, &t->resources, &t->resource_change, -ECANCELED));
-    CHECK(!md_resources_release(ipc, &t->resources));
+    CHECK(!md_resources_unshare_finish(&t->resources,&t->identity,&t->resource_change, -ECANCELED));
+    CHECK(!md_resources_release(&t->resources));
     free(t->identity_buffer); t->identity_buffer = NULL;
     md_broker_forget(broker, t->pid);
     release_operation(t);
     md_memory_stack_return(t->memory, t->stack);
     md_memory_release(t->memory); t->memory = NULL;
-    md_watch_activation_release(t->watch_activation); t->watch_activation = NULL;
+    md_fd_selector_release(t->fd_selector); t->fd_selector = NULL;
     t->pid = 0; live--;
     if (buffered) adapter_progress();
 }
@@ -816,7 +830,7 @@ static void image_request(struct thread *t, const struct seccomp_notif *q) {
                 next.secure = next.value.uid.real != next.value.uid.effective
                     || next.value.gid.real != next.value.gid.effective;
                 if (matched) reply.error = md_identity_prepare_exec(&t->identity, admission.image,
-                    md_debugger_traced(debugger,t->pid), &next);
+                    md_debugger_traced(debugger,t->pid) || (t->exec_mount_flags&MD_MOUNT_NOSUID), &next);
                 else md_identity_exec(&t->identity, &next.value);
                 if (!reply.error && matched) {
                     fd = md_exec_image_dup(admission.image);
@@ -851,10 +865,10 @@ static void image_request(struct thread *t, const struct seccomp_notif *q) {
             const struct md_exec_identity *next = &t->pending_identity;
             for (size_t i = 0; !reply.error && i < count; i++) {
                 switch (aux[i].a_type) {
-                case AT_UID: aux[i].a_un.a_val = next->value.uid.real; found |= 1; break;
-                case AT_EUID: aux[i].a_un.a_val = next->value.uid.effective; found |= 2; break;
-                case AT_GID: aux[i].a_un.a_val = next->value.gid.real; found |= 4; break;
-                case AT_EGID: aux[i].a_un.a_val = next->value.gid.effective; found |= 8; break;
+                case AT_UID: aux[i].a_un.a_val = md_identity_visible_id(&next->value,0,next->value.uid.real); found |= 1; break;
+                case AT_EUID: aux[i].a_un.a_val = md_identity_visible_id(&next->value,0,next->value.uid.effective); found |= 2; break;
+                case AT_GID: aux[i].a_un.a_val = md_identity_visible_id(&next->value,1,next->value.gid.real); found |= 4; break;
+                case AT_EGID: aux[i].a_un.a_val = md_identity_visible_id(&next->value,1,next->value.gid.effective); found |= 8; break;
                 case AT_SECURE: aux[i].a_un.a_val = next->secure; found |= 16; break;
                 }
             }
@@ -887,7 +901,8 @@ static void image_request(struct thread *t, const struct seccomp_notif *q) {
 }
 static void shm_request(struct thread *t, const struct seccomp_notif *q) {
     struct seccomp_notif_resp reply = {.id=q->id};
-    int r = !shm_store ? -ENOTSUP : !shm ? md_shm_open(shm_store,&shm) : 0;
+    struct md_shm *shm=NULL;
+    int r=md_ipc_namespace_memory(t->resources.ipc,&shm);
     if (!r && (t->phase != DISPATCHING || q->data.instruction_pointer != RAW_GATE)) r = -EPERM;
     unsigned op = q->data.args[1];
     if (op==MD_SHM_STAT || op==MD_SHM_OPEN || op==MD_SHM_ATTACHED || op==MD_SHM_ABORT) r=-EINVAL;
@@ -906,7 +921,8 @@ static void ipc_request(struct thread *t, const struct seccomp_notif *q) {
     if (!r && (call.nr!=SYS_semget && call.nr!=SYS_semctl
             && call.nr!=SYS_semop && call.nr!=SYS_semtimedop && call.nr!=SYS_msgget
             && call.nr!=SYS_msgctl && call.nr!=SYS_msgsnd && call.nr!=SYS_msgrcv)) r=-EINVAL;
-    if (!r) r=!shm_store ? -ENOTSUP : !ipc ? md_ipc_open(shm_store,&ipc) : 0;
+    struct md_ipc *ipc=NULL;
+    if (!r) r=md_ipc_namespace_semaphores(t->resources.ipc,&ipc);
     long value=r;
     struct md_ipc_transport *channel=&t->ipc_transport;
     if (!r && q->data.args[1]==MD_IPC_CLOSE) {
@@ -1004,6 +1020,227 @@ static void proc_deliver(struct thread *t) {
         CHECK(!ioctl(listener,SECCOMP_IOCTL_NOTIF_SEND,&reply) || errno==ENOENT);
     }
 }
+static struct md_proc_file *proc_file_capture(struct thread *t, int fd) {
+    struct md_fd_object *object=md_fd_origins_object(t->resources.files,fd,NULL);
+    struct md_proc_file *file=md_proc_file_from_object(object);
+    if (!file) md_fd_object_release(object);
+    return file;
+}
+static int proc_node_stat(struct thread *target, enum md_proc_file_kind kind,
+        struct md_proc_file_node *node, struct stat *value) {
+    char path[64];
+    if (md_proc_file_directory(kind)) {
+        snprintf(path,sizeof(path),"/proc/%d%s",target->pid,kind==MD_PROC_FILE_NS_DIRECTORY ? "/ns" : "");
+        if (stat(path,value)) return -errno;
+        *node=(struct md_proc_file_node){value->st_dev,value->st_ino,target->pid};
+        value->st_uid=target->identity.uid.effective; value->st_gid=target->identity.gid.effective;
+        return 0;
+    }
+    if (md_proc_file_namespace(kind)) {
+        struct md_namespace_reference ref=md_namespace_reference_capture(
+            (enum md_namespace_kind)(kind-MD_PROC_FILE_NS_USER),&target->resources,target->identity.user_namespace);
+        md_namespace_reference_stat(&ref,value); md_namespace_reference_release(&ref);
+        *node=(struct md_proc_file_node){value->st_dev,value->st_ino,target->pid}; return 0;
+    }
+    if (md_proc_file_sysctl(kind)) {
+        /* These virtual sysctls exist independently of Android's sysctl DAC
+         * and SELinux labels. The accessible proc parent supplies the device. */
+        if (stat("/proc/sys/kernel",value)) return -errno;
+        value->st_ino=UINT64_C(0xc000000000000000)|(unsigned)kind;
+        *node=(struct md_proc_file_node){value->st_dev,value->st_ino,0};
+        value->st_mode=S_IFREG|(kind<=MD_PROC_FILE_DOMAINNAME ? 0644 : 0444);
+        value->st_nlink=1; value->st_rdev=0; value->st_size=0; value->st_blocks=0;
+        value->st_uid=0; value->st_gid=0; return 0;
+    }
+    snprintf(path,sizeof(path),"/proc/%d/status",target->pid);
+    if (stat(path,value)) return -errno;
+    *node=(struct md_proc_file_node){value->st_dev,value->st_ino,target->pid};
+    int protected=value->st_uid!=getuid();
+    uint32_t uid=target->identity.uid.effective, gid=target->identity.gid.effective;
+    if (protected) {
+        uid=md_user_namespace_into(target->identity.user_namespace,0,0);
+        gid=md_user_namespace_into(target->identity.user_namespace,1,0);
+        if (uid==UINT32_MAX) uid=0;
+        if (gid==UINT32_MAX) gid=0;
+    }
+    value->st_ino=((uint64_t)value->st_ino<<2)|((unsigned)kind+1)|UINT64_C(0x8000000000000000);
+    value->st_mode=S_IFREG|0644; value->st_nlink=1; value->st_rdev=0;
+    value->st_size=0; value->st_blocks=0; value->st_blksize=getpagesize();
+    value->st_uid=uid; value->st_gid=gid; return 0;
+}
+static int proc_node_access(const struct md_identity *id, const struct stat *st, unsigned mode, int effective) {
+    if (mode&~7U) return -EINVAL;
+    if ((mode&X_OK) && !S_ISDIR(st->st_mode)) return -EACCES;
+    if ((mode&W_OK) && S_ISDIR(st->st_mode)) return -EACCES;
+    if (!(mode&W_OK)) return 0;
+    if ((effective ? id->uid.fs : id->uid.real)==st->st_uid) return 0;
+    return md_identity_capable_in(id,NULL,CAP_DAC_OVERRIDE) ? 0 : -EACCES;
+}
+static int proc_node_metadata(struct thread *t, const struct md_proc_metadata_request *q, struct md_proc_metadata_result *out) {
+    struct stat *value=&out->value;
+    struct thread *target=find_thread(q->process);
+    struct md_proc_file *file=NULL;
+    struct md_proc_file_node node={0};
+    enum md_proc_file_kind kind;
+    if (q->kind) {
+        if (!md_proc_control_kind(q->kind)) return -EINVAL;
+        if (q->kind==MD_PROC_NS_UNSUPPORTED) return -ENOENT;
+        if (!target || !target->born) return q->kind==MD_PROC_PROCESS_DIRECTORY ? -EXDEV : -ENOENT;
+        kind=(enum md_proc_file_kind)(q->kind-MD_PROC_UID_MAP);
+    } else {
+        if (q->process!=t->pid) return -EPERM;
+        file=proc_file_capture(t,q->descriptor);
+        if (!file) return -EBADF;
+        node=md_proc_file_get_node(file);
+        kind=md_proc_file_kind(file);
+        target=find_thread(node.process);
+    }
+    int error=0;
+    struct md_proc_file_node current={0};
+    int sysctl=md_proc_file_sysctl(kind);
+    int namespace=md_proc_file_namespace(kind);
+    out->kind=(unsigned)kind;
+    if (namespace && file) md_namespace_reference_stat(md_proc_file_namespace_reference(file),value);
+    else if (namespace && target!=t && !debugger_allowed(t->pid,target->pid)) error=-EACCES;
+    else if (sysctl || (target && target->born)) error=proc_node_stat(target,kind,&current,value);
+    if (!namespace && !sysctl && !q->kind && (!target || error==-ENOENT || current.inode!=node.inode || current.device!=node.device)) {
+        *value=(struct stat){.st_dev=node.device,
+            .st_ino=md_proc_file_directory(kind) ? node.inode
+                : (node.inode<<2)|((unsigned)kind+1)|UINT64_C(0x8000000000000000),
+            .st_mode=md_proc_file_directory(kind) ? S_IFDIR|0500 : S_IFREG|0644,
+            .st_nlink=1,.st_blksize=getpagesize()};
+        error=0;
+    }
+    if (!error && namespace) {
+        if (q->nofollow || (file && (md_proc_file_flags(file)&(O_NOFOLLOW|O_PATH))==(O_NOFOLLOW|O_PATH)))
+            value->st_mode=S_IFLNK|0777;
+        if (q->access&(W_OK|X_OK)) error=-EACCES;
+    } else if (!error) error=sysctl ? md_proc_sysctl_access(kind,&t->identity,q->access,q->effective)
+        : proc_node_access(&t->identity,value,q->access,q->effective);
+    if (!error) {
+        value->st_uid=md_identity_visible_id(&t->identity,0,value->st_uid);
+        value->st_gid=md_identity_visible_id(&t->identity,1,value->st_gid);
+    }
+    md_proc_file_release(file); return error;
+}
+/* Returns zero after accepting asynchronous publication. The caller retains
+ * its proc input independently; delivery owns the new result's annotation. */
+static int proc_file_publish(struct thread *t, const struct seccomp_notif *q,
+        struct md_proc_file *file) {
+    if (t->proc_image_fd>=0) return -EBUSY;
+    int fd=md_proc_file_descriptor(file);
+    if (fd<0) return fd;
+    int error=md_fd_install_begin(&t->proc_delivery,t->resources.files,listener,q->id,
+        fd,md_proc_file_object(file),(unsigned)md_proc_file_flags(file)&O_CLOEXEC,fd_wakeup);
+    if (error) close(fd);
+    else {
+        t->proc_image_fd=fd;
+        /* EVENT_WAIT: exact destination table publication or task cancellation
+         * releases the retained carrier; no guest scratch descriptor exists. */
+        proc_deliver(t);
+    }
+    return error;
+}
+static void proc_file_request(struct thread *t, const struct seccomp_notif *q) {
+    struct seccomp_notif_resp reply={.id=q->id};
+    unsigned operation=(unsigned)q->data.args[1];
+    if (q->data.instruction_pointer!=RAW_GATE || t->phase!=DISPATCHING || q->data.args[5]) reply.error=-EPERM;
+    else if (operation==MD_PROC_FILE_KIND) {
+        if (q->data.args[3] || q->data.args[4]) reply.error=-EINVAL;
+        else {
+            struct md_proc_file *file=proc_file_capture(t,(int)q->data.args[2]);
+            reply.val=file ? md_proc_file_kind(file)+1 : 0; md_proc_file_release(file);
+        }
+    } else if (operation==MD_PROC_FILE_NAMESPACE_QUERY) {
+        const struct md_namespace_reference *ref=md_proc_file_namespace_reference(t->proc_file);
+        unsigned command=(unsigned)q->data.args[3];
+        if (!ref || t->original.regs[8]!=SYS_ioctl || t->original.regs[0]!=q->data.args[2]
+                || t->original.regs[1]!=command || q->data.args[4]) reply.error=-EPERM;
+        else if (command==NS_GET_NSTYPE) reply.val=md_namespace_reference_type(ref);
+        else if (command==NS_GET_OWNER_UID) {
+            if (ref->kind!=MD_NAMESPACE_USER) reply.error=-EINVAL;
+            else reply.val=md_identity_visible_id(&t->identity,0,md_user_namespace_creator(ref->value.user));
+        } else if (command==NS_GET_PARENT || command==NS_GET_USERNS) {
+            struct md_namespace_reference related={0};
+            reply.error=md_namespace_reference_related(ref,t->identity.user_namespace,
+                command==NS_GET_PARENT,&related);
+            struct md_proc_file *file=NULL;
+            if (!reply.error) {
+                file=md_proc_file_open_namespace(&related,&t->identity,O_RDONLY|O_CLOEXEC);
+                if (!file) reply.error=-errno;
+                md_namespace_reference_release(&related);
+            }
+            if (!reply.error) reply.error=proc_file_publish(t,q,file);
+            md_proc_file_release(file);
+            if (!reply.error) return;
+        }
+        else reply.error=-ENOTTY;
+    } else if (operation==MD_PROC_FILE_OPEN || operation==MD_PROC_FILE_REOPEN) {
+        struct thread *target=find_thread((pid_t)q->data.args[2]);
+        enum md_proc_kind kind=(enum md_proc_kind)q->data.args[3];
+        int flags=(int)q->data.args[4];
+        struct md_proc_file *source=operation==MD_PROC_FILE_REOPEN && target
+            ? proc_file_capture(target,(int)q->data.args[3]) : NULL;
+        if (source) kind=(enum md_proc_kind)(MD_PROC_UID_MAP+md_proc_file_kind(source));
+        if (!target || !target->born) reply.error=operation==MD_PROC_FILE_OPEN && kind==MD_PROC_PROCESS_DIRECTORY ? -EXDEV : -ENOENT;
+        else if (operation==MD_PROC_FILE_REOPEN && !source) reply.error=-EBADF;
+        else if (kind==MD_PROC_NS_UNSUPPORTED) reply.error=-ENOENT;
+        else if (!md_proc_control_kind(kind) || t->proc_image_fd>=0) reply.error=-EINVAL;
+        else if (source && target!=t && !debugger_allowed(t->pid,target->pid)) reply.error=-EACCES;
+        else {
+            struct md_proc_file_node node={0}; struct stat st;
+            struct md_proc_file_node previous=source ? md_proc_file_get_node(source) : node;
+            enum md_proc_file_kind file_kind=(enum md_proc_file_kind)(kind-MD_PROC_UID_MAP);
+            int sysctl=md_proc_file_sysctl(file_kind);
+            int namespace=md_proc_file_namespace(file_kind);
+            struct thread *owner=sysctl ? t : source ? find_thread(previous.process) : target;
+            int error=namespace && source ? 0 : !owner || !owner->born ? -ESRCH
+                : proc_node_stat(owner,file_kind,&node,&st);
+            if (namespace && source) {
+                node=previous; md_namespace_reference_stat(md_proc_file_namespace_reference(source),&st);
+            }
+            if (!error && namespace && !source && target!=t && !debugger_allowed(t->pid,target->pid)) error=-EACCES;
+            if (!error && source && (node.device!=previous.device || node.inode!=previous.inode)) error=-ESRCH;
+            unsigned mode=(flags&O_ACCMODE)!=O_RDONLY || (flags&O_TRUNC) ? W_OK : R_OK;
+            if (!error && namespace && (flags&O_NOFOLLOW) && !(flags&O_PATH)) error=-ELOOP;
+            if (!error && !(flags&O_PATH)) error=namespace ? mode==W_OK ? -EACCES : 0
+                : sysctl ? md_proc_sysctl_access(file_kind,&t->identity,mode,1)
+                : proc_node_access(&t->identity,&st,mode,1);
+            struct md_proc_file *file=NULL;
+            if (!error && source) file=md_proc_file_reopen(source,&t->identity,flags);
+            else if (!error && namespace) {
+                struct md_namespace_reference ref=md_namespace_reference_capture(
+                    (enum md_namespace_kind)(file_kind-MD_PROC_FILE_NS_USER),&target->resources,target->identity.user_namespace);
+                file=md_proc_file_open_namespace(&ref,&t->identity,flags); md_namespace_reference_release(&ref);
+            } else if (!error) file=md_proc_file_open(target->identity.user_namespace,file_kind,&t->identity,flags);
+            if (file && !source) md_proc_file_node(file,node);
+            int fd=error ? error : !file ? -errno : flags&O_PATH ? md_proc_file_descriptor(file) : 0;
+            TRACE("PROBE proc-control open pid=%d target=%d kind=%u flags=%x provider=%d\n",
+                t->pid,target->pid,(unsigned)kind,flags,fd);
+            if (fd<0) reply.error=fd;
+            else if (flags&O_PATH) {
+                if (!t->buffer.pool || t->proc_file) { close(fd); reply.error=-EPERM; }
+                else {
+                    t->proc_file=md_proc_file_retain(file);
+                    t->proc_image_fd=fd;
+                }
+            }
+            else {
+                reply.error=proc_file_publish(t,q,file);
+                if (!reply.error) {
+                    md_proc_file_release(file);
+                    md_proc_file_release(source);
+                    return;
+                }
+            }
+            md_proc_file_release(file);
+        }
+        md_proc_file_release(source);
+    } else reply.error=-EINVAL;
+    TRACE("PROBE proc-control request pid=%d operation=%u result=%lld error=%d\n",
+        t->pid,operation,(long long)reply.val,reply.error);
+    CHECK(!ioctl(listener,SECCOMP_IOCTL_NOTIF_SEND,&reply) || errno==ENOENT);
+}
 static void buffer_receive(struct thread *t, const struct seccomp_notif *q) {
     int error=0;
     if (!t->ready || q->data.instruction_pointer!=RAW_GATE
@@ -1012,7 +1249,7 @@ static void buffer_receive(struct thread *t, const struct seccomp_notif *q) {
             || t->buffer_delivery.files.table || t->buffer_delivered) error=-EPERM;
     else {
         error=md_fd_install_begin(&t->buffer_delivery,t->resources.files,listener,q->id,
-            t->buffer_open.fd,t->buffer_open.origin,t->buffer_open.flags&O_CLOEXEC,fd_wakeup);
+            t->buffer_open.fd,md_fs_anchor_object(t->buffer_open.origin),t->buffer_open.flags&O_CLOEXEC,fd_wakeup);
         if (!error) {
             /* EVENT_WAIT: the destination file table's preceding mutation.
              * Task cancellation retires this record before descriptor delivery. */
@@ -1058,7 +1295,8 @@ static void handle_notification(const struct seccomp_notif *request) {
         return;
     }
     if (q.data.nr == SYS_prctl) {
-        if (q.data.args[0] == MD_GUEST_PROC_IMAGE) {
+        if (q.data.args[0] == MD_GUEST_PROC_FILE) proc_file_request(t,&q);
+        else if (q.data.args[0] == MD_GUEST_PROC_IMAGE) {
             struct seccomp_notif_resp reply={.id=q.id};
             struct thread *target=find_thread((pid_t)q.data.args[1]);
             int fd=!target || !debugger_allowed(t->pid,target->pid) ? -EACCES
@@ -1112,6 +1350,10 @@ static void handle_notification(const struct seccomp_notif *request) {
         else image_request(t, &q);
         return;
     }
+    if (q.data.nr==SYS_getdents64 && t->phase==IDLE && q.data.instruction_pointer!=RAW_GATE) {
+        struct md_proc_file *file=proc_file_capture(t,(int)q.data.args[0]);
+        if (file) { CHECK(!t->proc_file); t->proc_file=file; delegate_begin(t,&q); return; }
+    }
     if (q.data.nr == SYS_getdents64 && md_domain_restricted(t->resources.fs)) {
         CHECK(t->phase == IDLE);
         struct seccomp_notif_resp reply = {.id = q.id, .flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE};
@@ -1138,6 +1380,10 @@ static void handle_notification(const struct seccomp_notif *request) {
             CHECK(!ioctl(listener, SECCOMP_IOCTL_NOTIF_SEND, &reply) || errno == ENOENT); return;
         }
         export_begin(t, &q); return;
+    }
+    if (q.data.nr!=SYS_getdents64 && t->phase==IDLE && q.data.instruction_pointer!=RAW_GATE) {
+        struct md_proc_file *file=proc_file_capture(t,(int)q.data.args[0]);
+        if (file) { CHECK(!t->proc_file); t->proc_file=file; delegate_begin(t,&q); return; }
     }
     int fd = duplicate_fd(q.pid, (int)q.data.args[0]);
     if (md_task_descriptor_needs_export(fd) || fd == -ESRCH) {
@@ -1336,7 +1582,7 @@ static void identity_copy_finish(struct thread *t, int error) {
     }
     if (!error && t->identity_stage == COPY_CAP_VERSION) error = t->identity_result;
     if (!error && r.regs[8] == SYS_setgroups)
-        error = md_identity_groups(&t->identity, t->identity_buffer, t->identity_count);
+        error = md_identity_setgroups(&t->identity, t->identity_buffer, t->identity_count);
     r.regs[0] = (uint64_t)(error ? (long)error : r.regs[8] == SYS_getgroups ? (long)t->identity_count : 0);
     free(t->identity_buffer); t->identity_buffer = NULL;
     if (!set_registers(t->pid, &r) || !restore_mask(t)) return;
@@ -1360,19 +1606,21 @@ static void identity_groups_call(struct thread *t, struct user_pt_regs *r) {
     int setting = r->regs[8] == SYS_setgroups;
     unsigned count = setting ? (unsigned)r->regs[0] : md_identity_group_count(&t->identity);
     int error = 0;
-    if (setting && !md_identity_capable(&t->identity, CAP_SETGID)) error = -EPERM;
+    if (setting && (!md_identity_capable(&t->identity, CAP_SETGID)
+            || !md_user_namespace_may_setgroups(t->identity.user_namespace))) error = -EPERM;
     else if ((int)r->regs[0] < 0 || (setting && (unsigned)r->regs[0] > MD_IDENTITY_GROUPS_MAX)
             || (!setting && r->regs[0] && (unsigned)r->regs[0] < count)) error = -EINVAL;
     if (error || (!setting && !r->regs[0])) { return_value(t, r, error ? error : (long)count); return; }
-    if (!count) { if (setting) md_identity_groups(&t->identity, NULL, 0); return_value(t, r, 0); return; }
+    if (!count) { if (setting) md_identity_setgroups(&t->identity, NULL, 0); return_value(t, r, 0); return; }
     uint32_t *buffer = malloc((size_t)count * sizeof(*buffer));
     if (!buffer) { return_value(t, r, -ENOMEM); return; }
-    if (!setting) memcpy(buffer, md_identity_group_data(&t->identity), (size_t)count * sizeof(*buffer));
+    if (!setting) for (unsigned i=0;i<count;++i)
+        buffer[i]=md_identity_visible_id(&t->identity,1,md_identity_group_data(&t->identity)[i]);
     struct iovec local = {buffer, (size_t)count * sizeof(*buffer)}, remote = {(void *)r->regs[1], local.iov_len};
     ssize_t copied = setting ? process_vm_readv(t->pid, &local, 1, &remote, 1, 0)
         : process_vm_writev(t->pid, &local, 1, &remote, 1, 0);
     if (copied == (ssize_t)local.iov_len) {
-        error = setting ? md_identity_groups(&t->identity, buffer, count) : 0;
+        error = setting ? md_identity_setgroups(&t->identity, buffer, count) : 0;
         free(buffer); return_value(t, r, error ? error : setting ? 0 : (long)count); return;
     }
     /* Task-affine copies preserve protected-memory and EFAULT semantics without
@@ -1410,16 +1658,19 @@ static int identity_call(struct thread *t, struct user_pt_regs *r, unsigned long
                 || !shield(t) || !skip(t->pid)) return 1;
         identity_copy_next(t); return 1;
     case SYS_getgroups: case SYS_setgroups: identity_groups_call(t, r); return 1;
-    case SYS_getuid: value = t->identity.uid.real; break;
-    case SYS_geteuid: value = t->identity.uid.effective; break;
-    case SYS_getgid: value = t->identity.gid.real; break;
-    case SYS_getegid: value = t->identity.gid.effective; break;
+    case SYS_getuid: value = md_identity_visible_id(&t->identity,0,t->identity.uid.real); break;
+    case SYS_geteuid: value = md_identity_visible_id(&t->identity,0,t->identity.uid.effective); break;
+    case SYS_getgid: value = md_identity_visible_id(&t->identity,1,t->identity.gid.real); break;
+    case SYS_getegid: value = md_identity_visible_id(&t->identity,1,t->identity.gid.effective); break;
     case SYS_getresuid: case SYS_getresgid: {
         const struct md_identity_ids *ids = nr == SYS_getresuid ? &t->identity.uid : &t->identity.gid;
         t->original = *r;
         if (!tracee_request(t, PTRACE_GETSIGMASK, (void *)sizeof(t->mask), &t->mask, "get-mask")
                 || !shield(t) || !skip(t->pid)) return 1;
-        r->pc = STORE_IDS; r->regs[3] = ids->real; r->regs[4] = ids->effective; r->regs[5] = ids->saved;
+        int group=nr==SYS_getresgid;
+        r->pc = STORE_IDS; r->regs[3] = md_identity_visible_id(&t->identity,group,ids->real);
+        r->regs[4] = md_identity_visible_id(&t->identity,group,ids->effective);
+        r->regs[5] = md_identity_visible_id(&t->identity,group,ids->saved);
         if (!set_registers(t->pid, r)) return 1;
         t->phase = STORING_IDS; resume(t->pid, 0); return 1;
     }
@@ -1541,9 +1792,9 @@ static void fd_finish(struct thread *t, long result) {
     }
     int exec=nr==SYS_execve || nr==SYS_execveat;
     if (exec || nr==SYS_unshare || (nr==SYS_close_range && (t->fd_registers.regs[2]&CLOSE_RANGE_UNSHARE)))
-        CHECK(!md_resources_unshare_finish(ipc,&t->resources,&t->resource_change,result));
-    if (nr==SYS_clone && t->resource_change.copy_mounts)
-        CHECK(!md_resources_unshare_finish(ipc,&t->resources,&t->resource_change,-ECANCELED));
+        CHECK(!md_resources_unshare_finish(&t->resources,&t->identity,&t->resource_change,result));
+    if (nr==SYS_clone && t->resource_change.namespaces)
+        CHECK(!md_resources_unshare_finish(&t->resources,&t->identity,&t->resource_change,-ECANCELED));
     if (exec && !result) md_fd_origins_exec(t->resources.files);
     if (t->fd_cwd && nr!=SYS_openat && !result)
         CHECK(!md_domain_set_cwd(t->fs_order.fs,md_domain_restricted(t->fs_order.fs) ? NULL : t->fd_origin));
@@ -1560,7 +1811,7 @@ static void mount_copy_complete(struct md_mount_copy_request *request, int actor
     t->mount_copy=NULL;
     if (!error) error=md_mount_copy_take(request,&t->resource_change.next.mounts,&t->resource_change.next.fs);
     if (error) {
-        CHECK(!md_resources_unshare_finish(ipc,&t->resources,&t->resource_change,error));
+        CHECK(!md_resources_unshare_finish(&t->resources,&t->identity,&t->resource_change,error));
         fd_discard(t); return_value(t,&t->fd_registers,error); return;
     }
     fd_native_start(t);
@@ -1570,8 +1821,8 @@ static void fd_start(struct thread *t) {
         CHECK(!md_fd_order_start(&t->fd_order));
     struct user_pt_regs *r=&t->fd_registers;
     int needs_fs=t->fd_job==MD_FD_INPUT ? (int)r->regs[2]==AT_FDCWD || (int)r->regs[3]==AT_FDCWD
-        : !t->fd_job && (t->fd_cwd || r->regs[8]==SYS_clone
-            || (r->regs[8]==SYS_unshare && (r->regs[0]&(CLONE_FS|CLONE_NEWNS))));
+        : !t->fd_job && (t->fd_cwd || r->regs[8]==SYS_clone || r->regs[8]==SYS_setns
+            || (r->regs[8]==SYS_unshare && (r->regs[0]&(CLONE_FS|CLONE_NEWNS|CLONE_NEWUSER))));
     if (needs_fs) {
         if (!t->fs_order.fs) {
             int ready=md_fs_order_begin(t->resources.fs,&t->fs_order,fd_wakeup);
@@ -1604,26 +1855,50 @@ static void fd_start(struct thread *t) {
         return;
     }
     int error=0;
+    if (r->regs[8]==SYS_setns) {
+        struct md_proc_file *file=proc_file_capture(t,(int)r->regs[0]);
+        const struct md_namespace_reference *ref=md_proc_file_namespace_reference(file);
+        if (!ref || (file && (md_proc_file_flags(file)&O_PATH))) error=(int)r->regs[0]<0 ? -EBADF : -EINVAL;
+        if (!error && ref->kind==MD_NAMESPACE_USER)
+            for (struct thread *other=threads;other;other=other->next)
+                if (other!=t && other->pid && other->tgid==t->tgid) { error=-EINVAL; break; }
+        if (!error) error=md_resources_setns_prepare(&t->resources,&t->identity,ref,
+            (unsigned)r->regs[1],&t->resource_change);
+        md_proc_file_release(file);
+        if (!error && t->resource_change.join_mounts) {
+            error=md_mount_join_submit(mount_copy_service,t->pid,t->resource_change.join_mounts,&t->mount_copy);
+            /* EVENT_WAIT: selected namespace root/cwd resolution; cancellation
+             * discards the unpublished context without changing task state. */
+            if (!error) return;
+        }
+    }
     if (r->regs[8]==SYS_execve || r->regs[8]==SYS_execveat || r->regs[8]==SYS_unshare
             || (r->regs[8]==SYS_close_range && (r->regs[2]&CLOSE_RANGE_UNSHARE)))
         error=md_resources_unshare_prepare(&t->resources,r->regs[8]==SYS_unshare ? r->regs[0] : CLONE_FILES,
-            &t->resource_change);
-    if (r->regs[8]==SYS_clone && (r->regs[0]&CLONE_NEWNS))
-        t->resource_change.copy_mounts=1;
-    if (!error && t->resource_change.copy_mounts) {
-        error=md_mount_copy_submit(mount_copy_service,t->pid,t->resources.mounts,t->resources.fs,&t->mount_copy);
+            &t->identity,&t->resource_change);
+    if (r->regs[8]==SYS_clone && (r->regs[0]&(CLONE_NEWNS|CLONE_NEWUTS|CLONE_NEWIPC|CLONE_NEWUSER)))
+        error=md_resources_unshare_prepare(&t->resources,r->regs[0]&(CLONE_NEWNS|CLONE_NEWUTS|CLONE_NEWIPC|CLONE_NEWUSER),
+            &t->identity,&t->resource_change);
+    if (!error && (t->resource_change.copy_mounts || t->resource_change.check_root)) {
+        error=md_mount_copy_submit(mount_copy_service,t->pid,t->resources.mounts,t->resources.fs,
+            t->resource_change.identity_pending ? t->resource_change.identity.user_namespace : t->identity.user_namespace,
+            t->resource_change.copy_mounts,t->resource_change.check_root,&t->mount_copy);
         /* EVENT_WAIT: worker publishes an independent mount/FS candidate;
          * terminal cancellation retires it without changing the task's view. */
         if (!error) return;
     }
     if (error) {
-        CHECK(!md_resources_unshare_finish(ipc,&t->resources,&t->resource_change,error));
+        CHECK(!md_resources_unshare_finish(&t->resources,&t->identity,&t->resource_change,error));
         fd_discard(t); return_value(t,r,error); return;
     }
     fd_native_start(t);
 }
 static void fd_native_start(struct thread *t) {
     struct user_pt_regs *r=&t->fd_registers;
+    if (r->regs[8]==SYS_setns) {
+        CHECK(!md_resources_unshare_finish(&t->resources,&t->identity,&t->resource_change,0));
+        fd_discard(t); return_value(t,r,0); return;
+    }
     unsigned long args[6];
     for (unsigned i=0;i<6;++i) args[i]=r->regs[i];
     int error=0;
@@ -1645,14 +1920,16 @@ static void fd_native_start(struct thread *t) {
         TRACE("PROBE path-capture pid=%d base=%d known=%d\n",t->pid,(int)r->regs[4],t->fd_origin!=NULL);
     }
     if (error) {
-        md_resources_unshare_finish(ipc,&t->resources,&t->resource_change,-ECANCELED);
+        md_resources_unshare_finish(&t->resources,&t->identity,&t->resource_change,-ECANCELED);
         fd_discard(t); return_value(t,r,error); return;
     }
     if (r->regs[8]==SYS_clone) { t->original=*r; t->phase=OBSERVING; }
-    if (t->resource_change.copy_mounts) {
+    if (t->resource_change.namespaces) {
         struct user_pt_regs native=*r;
-        native.regs[0]&=~(uint64_t)CLONE_NEWNS;
-        if (r->regs[8]==SYS_unshare) native.regs[0]|=CLONE_FS;
+        native.regs[0]&=~(uint64_t)t->resource_change.namespaces;
+        if (r->regs[8]==SYS_unshare && t->resource_change.copy_mounts) native.regs[0]|=CLONE_FS;
+        if (r->regs[8]==SYS_unshare && t->resource_change.identity_pending) native.regs[0]|=CLONE_FS|CLONE_THREAD;
+        if (r->regs[8]==SYS_unshare && (t->resource_change.namespaces&CLONE_NEWIPC)) native.regs[0]|=CLONE_SYSVSEM;
         if (!set_registers(t->pid,&native)) return;
     }
     t->fd_running=1; resume(t->pid,0);
@@ -1727,6 +2004,15 @@ static void buffer_reply_signal(struct thread *t, long result, const siginfo_t *
 }
 static void buffer_reply(struct thread *t, long result) {
     buffer_reply_signal(t,result,NULL);
+}
+static void proc_io_progress(struct thread *t) {
+    if (!t->proc_waiting || md_resource_order_state(&t->proc_io.turn)!=MD_RESOURCE_ORDER_READY) return;
+    struct md_buffer_span span;
+    long result=md_buffer_span(&t->buffer,&span);
+    if (!result) result=md_proc_file_io_execute(&t->proc_io,&t->identity,t->resources.uts,span.data,span.size,(size_t)getpagesize());
+    if (result>=0) CHECK(!md_proc_file_io_offer(&t->proc_io));
+    else CHECK(!md_proc_file_io_cancel(&t->proc_io));
+    t->proc_waiting=0; buffer_reply(t,result);
 }
 static void probe_complete(void *context, struct md_task_helper_result result) {
     struct probe_owner *owner=context;
@@ -2084,7 +2370,7 @@ static void buffer_complete(struct md_fs_buffer_request *request, pid_t pid, int
             md_received_fds_release(t->receive->expanded);
             t->receive->expanded=expanded;
         }
-        CHECK(md_fs_buffer_exec_take(request,t->exec_images)>=0);
+        CHECK(md_fs_buffer_exec_take(request,t->exec_images,&t->exec_mount_flags)>=0);
         if (!md_fs_buffer_task_pending(request)) CHECK(md_fs_buffer_open_take(request,&t->buffer_open)>=0);
     }
     TRACE("PROBE buffer-call pid=%d operation=%llu error=%d descriptor=%d\n",pid,t->buffer_registers.regs[1],error,t->buffer_open.fd>=0);
@@ -2144,7 +2430,7 @@ static int receive_return(struct thread *t, const int *indices, unsigned count) 
         int error=md_received_fds_select(source,indices,count,owner->outgoing,NULL);
         return error ? error : receive_return_begin(t,count,0);
     }
-    struct md_fs_anchor *origins[253];
+    struct md_fd_object *origins[253];
     int error=md_received_fds_select(source,indices,count,owner->outgoing,origins);
     if (error) return error;
     unsigned known=0;
@@ -2180,7 +2466,10 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
             && !md_fs_buffer_task_pending(t->buffer_call))) { CHECK(0); }
     t->buffer_registers=*r;
     if (!buffer_service && r->regs[0]!=MD_BUFFER_MAPPED && r->regs[0]!=MD_BUFFER_TAKE
-            && r->regs[0]!=MD_BUFFER_RELEASE && r->regs[0]!=MD_BUFFER_PROBE) {
+            && r->regs[0]!=MD_BUFFER_RELEASE && r->regs[0]!=MD_BUFFER_PROBE && r->regs[0]!=MD_BUFFER_UTS
+            && r->regs[0]!=MD_BUFFER_PROC_CHECK && r->regs[0]!=MD_BUFFER_PROC_IO && r->regs[0]!=MD_BUFFER_PROC_ACK
+            && r->regs[0]!=MD_BUFFER_PROC_RIGHTS && r->regs[0]!=MD_BUFFER_PROC_META && r->regs[0]!=MD_FS_BUFFER_RIGHTS_READY
+            && r->regs[0]!=MD_FS_BUFFER_RIGHTS_DONE && r->regs[0]!=MD_FS_BUFFER_CHANNEL_OBSERVED) {
         buffer_reply(t,-ENOTSUP); return;
     }
     if (t->ipc_transport.packet && r->regs[0]!=MD_BUFFER_RELEASE) {
@@ -2370,6 +2659,7 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
         md_fs_buffer_cancel(&t->buffer_call);
         md_fs_buffer_open_release(&t->buffer_open);
         md_ipc_transport_close(&t->ipc_transport);
+        if (t->proc_image_fd>=0) { close(t->proc_image_fd); t->proc_image_fd=-1; }
         t->buffer_delivered=0;
         result=md_buffer_release(&t->buffer); break;
     case MD_FS_BUFFER_TASK_DONE:
@@ -2382,10 +2672,60 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
         struct md_ipc_request call={.nr=t->original.regs[8]};
         for (unsigned i=0;i<6;++i) call.args[i]=t->original.regs[i];
         struct md_buffer_span span;
-        result=!shm_store ? -ENOTSUP : !ipc ? md_ipc_open(shm_store,&ipc) : 0;
+        struct md_ipc *ipc=NULL;
+        result=md_ipc_namespace_semaphores(t->resources.ipc,&ipc);
         if (!result) result=md_buffer_span(&t->buffer,&span);
         if (!result) result=md_ipc_transport_prepare(ipc,&t->ipc_transport,&call,
             t->ipc_pending!=NULL,span.data,span.size);
+        break;
+    }
+    case MD_BUFFER_PROC_META: {
+        if (t->phase!=DISPATCHING || r->regs[1] || r->regs[2] || !t->buffer.pool) break;
+        struct md_buffer_span span;
+        result=md_buffer_span(&t->buffer,&span);
+        if (result) break;
+        struct md_proc_metadata_request query; struct md_proc_metadata_result metadata;
+        if (span.size<sizeof(query) || span.size<sizeof(metadata)) { result=-EOVERFLOW; break; }
+        memcpy(&query,span.data,sizeof(query));
+        result=proc_node_metadata(t,&query,&metadata);
+        if (!result) memcpy(span.data,&metadata,sizeof(metadata));
+        break;
+    }
+    case MD_BUFFER_PROC_CHECK:
+        if (t->phase!=DISPATCHING || r->regs[1] || r->regs[2]) break;
+        result=t->proc_file ? md_proc_file_kind(t->proc_file)+1 : 0; break;
+    case MD_BUFFER_PROC_IO: {
+        if (t->phase!=DISPATCHING || !t->proc_file || !t->buffer.pool
+                || t->proc_io.file || r->regs[2]) break;
+        unsigned long args[6];
+        for (unsigned i=0;i<6;++i) args[i]=t->original.regs[i];
+        struct md_proc_io_spec spec;
+        result=md_proc_io_decode(t->original.regs[8],args,&spec);
+        if (result) break;
+        if ((!spec.seek && !spec.vector && r->regs[1]!=args[2]) || r->regs[1]>PTRDIFF_MAX) break;
+        result=md_proc_file_io_begin(&t->proc_io,t->proc_file,
+            spec.seek ? MD_PROC_FILE_SEEK : spec.directory ? MD_PROC_FILE_GETDENTS
+                : spec.writing ? MD_PROC_FILE_WRITE : MD_PROC_FILE_READ,
+            spec.positional,spec.offset,spec.whence,r->regs[1],fd_wakeup);
+        if (result<0) break;
+        t->proc_waiting=1;
+        /* EVENT_WAIT: preceding IO on this retained open description finishes
+         * or is cancelled. No descriptor-table turn spans copying to the guest. */
+        proc_io_progress(t); return;
+    }
+    case MD_BUFFER_PROC_ACK:
+        if (t->phase!=DISPATCHING || r->regs[2] || (long)r->regs[1]<-4095) break;
+        result=md_proc_file_io_finish(&t->proc_io,(long)r->regs[1]); break;
+    case MD_BUFFER_UTS: {
+        if (!t->buffer.pool || t->buffer_open.fd>=0 || t->phase!=DISPATCHING || r->regs[1] || r->regs[2]) break;
+        long nr=t->original.regs[8];
+        if (nr!=SYS_uname && nr!=SYS_sethostname && nr!=SYS_setdomainname) break;
+        struct md_buffer_span span;
+        result=md_buffer_span(&t->buffer,&span);
+        if (!result && !t->resources.uts) result=-ENOTSUP;
+        if (!result && nr==SYS_uname) md_uts_namespace_read(t->resources.uts,span.data);
+        else if (!result) result=!md_identity_capable_in(&t->identity,md_uts_namespace_owner(t->resources.uts),CAP_SYS_ADMIN) ? -EPERM
+            : md_uts_namespace_set(t->resources.uts,nr==SYS_setdomainname,span.data,t->original.regs[1]);
         break;
     }
     case MD_BUFFER_SHM_STAT: {
@@ -2394,7 +2734,8 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
                 || ((unsigned)t->original.regs[1]&~IPC_64)!=IPC_STAT
                 || r->regs[1]!=t->original.regs[0]) break;
         struct md_buffer_span span;
-        result=!shm_store ? -ENOTSUP : !shm ? md_shm_open(shm_store,&shm) : 0;
+        struct md_shm *shm=NULL;
+        result=md_ipc_namespace_memory(t->resources.ipc,&shm);
         if (!result) result=md_buffer_span(&t->buffer,&span);
         if (!result) {
             unsigned long args[4]={r->regs[1],0,0,0};
@@ -2430,16 +2771,20 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
             if (!result) { t->buffer_return_waiting=1; buffer_return_progress(t); return; }
         }
         break;
+    case MD_BUFFER_PROC_RIGHTS:
     case MD_FS_BUFFER_RIGHTS_BEGIN: {
-        if (!t->buffer.pool || t->buffer_open.fd<0 || t->buffer_delivered || t->buffer_delivery.files.table
-                || !(t->buffer_open.flags&O_PATH) || r->regs[1] || r->regs[2]) break;
+        int proc=r->regs[0]==MD_BUFFER_PROC_RIGHTS;
+        if (!t->buffer.pool || r->regs[1] || r->regs[2] || t->buffer_delivered || t->buffer_delivery.files.table) break;
+        if (proc ? !t->proc_file || t->proc_image_fd<0
+                : t->buffer_open.fd<0 || !(t->buffer_open.flags&O_PATH)) break;
         struct md_buffer_span span;
         result=md_buffer_span(&t->buffer,&span);
         if (result) break;
         struct md_fs_buffer_frame *frame=span.data;
-        if (frame->transfer!=MD_FS_BUFFER_RIGHTS) { result=-EINVAL; break; }
-        result=md_fd_return_begin(&t->buffer_return,t->resources.files,t->buffer_open.fd,
-            t->buffer_open.origin,t->buffer_open.flags&O_CLOEXEC ? FD_CLOEXEC : 0,
+        if (!proc && frame->transfer!=MD_FS_BUFFER_RIGHTS) { result=-EINVAL; break; }
+        int flags=(proc ? md_proc_file_flags(t->proc_file) : t->buffer_open.flags)&O_CLOEXEC ? FD_CLOEXEC : 0;
+        result=md_fd_return_begin(&t->buffer_return,t->resources.files,proc ? t->proc_image_fd : t->buffer_open.fd,
+            proc ? md_proc_file_object(t->proc_file) : md_fs_anchor_object(t->buffer_open.origin),flags,
             (void *)frame->receipt,fd_wakeup);
         if (result) break;
         t->buffer_return_waiting=1;
@@ -2473,6 +2818,7 @@ static void fd_progress(void) {
             if (!t->fd_running && (md_fd_order_state(&t->fd_order)==MD_RESOURCE_ORDER_READY
                     || md_fs_order_state(&t->fs_order)==MD_RESOURCE_ORDER_READY)) fd_start(t);
             export_progress(t);
+            proc_io_progress(t);
         }
     adapter_progress();
 }
@@ -2484,19 +2830,21 @@ static int domain_call(struct thread *t, struct user_pt_regs *r, unsigned long c
     }
     if (nr == SYS_unshare) {
         CHECK(t->phase == IDLE);
-        if ((r->regs[0]&CLONE_NEWNS) && !md_identity_capable(&t->identity,CAP_SYS_ADMIN)) {
+        if (!(r->regs[0]&CLONE_NEWUSER) && (r->regs[0]&(CLONE_NEWNS|CLONE_NEWUTS|CLONE_NEWIPC))
+                && !md_identity_capable(&t->identity,CAP_SYS_ADMIN)) {
             return_value(t,r,-EPERM); return 1;
         }
         fd_begin(t,r,0);
         return 1;
     }
-    if (nr == SYS_setns) { return_value(t, r, -ENOTSUP); return 1; }
+    if (nr == SYS_setns) { fd_begin(t,r,0); return 1; }
     if (nr == SYS_clone3) { return_value(t, r, -ENOSYS); return 1; }
     if (nr == SYS_clone) {
         if (!md_resources_clone_supported(r->regs[0])) {
             return_value(t, r, -EINVAL); return 1;
         }
-        if ((r->regs[0]&CLONE_NEWNS) && !md_identity_capable(&t->identity,CAP_SYS_ADMIN)) {
+        if (!(r->regs[0]&CLONE_NEWUSER) && (r->regs[0]&(CLONE_NEWNS|CLONE_NEWUTS|CLONE_NEWIPC))
+                && !md_identity_capable(&t->identity,CAP_SYS_ADMIN)) {
             return_value(t,r,-EPERM); return 1;
         }
         t->cloning = r->regs[0]; return 0;
@@ -2506,6 +2854,12 @@ static int domain_call(struct thread *t, struct user_pt_regs *r, unsigned long c
         else domain_path_call(t, r);
         return 1;
     }
+    if (nr==SYS_sethostname || nr==SYS_setdomainname) {
+        if (!md_identity_capable_in(&t->identity,md_uts_namespace_owner(t->resources.uts),CAP_SYS_ADMIN)) {
+            return_value(t,r,-EPERM); return 1;
+        }
+        if (cookie==MD_INTERCEPT_DISPATCH) return 0;
+    }
     if (!md_domain_restricted(t->resources.fs)) return 0;
     if (t->phase==PROC_OPENING && t->metadata.task_open && cookie==MD_INTERCEPT_NATIVE
             && nr==SYS_openat && (int)r->regs[0]==t->metadata.proc_directory
@@ -2513,7 +2867,7 @@ static int domain_call(struct thread *t, struct user_pt_regs *r, unsigned long c
             && md_fd_order_state(&t->metadata.files)==MD_RESOURCE_ORDER_RUNNING) {
         resume(t->pid,0); return 1;
     }
-    /* Read-only launch identity is independent of the restricted filesystem. */
+    /* UTS identity is independent of the restricted filesystem. */
     if (nr == SYS_uname && cookie == MD_INTERCEPT_DISPATCH) return 0;
     if (cookie==MD_INTERCEPT_DISPATCH && md_domain_ipc_call(nr)) return 0;
     if (nr == SYS_kill || nr == SYS_tgkill || nr == SYS_tkill) {
@@ -2527,7 +2881,8 @@ static int domain_call(struct thread *t, struct user_pt_regs *r, unsigned long c
     unsigned long args[6];
     for (unsigned i = 0; i < 6; i++) args[i] = r->regs[i];
     if (md_domain_native_call(nr, args)) {
-        if (cookie == MD_INTERCEPT_OBSERVE || cookie == MD_INTERCEPT_WATCH || cookie==MD_INTERCEPT_FD) return 0;
+        if (cookie == MD_INTERCEPT_OBSERVE || cookie == MD_INTERCEPT_WATCH
+                || cookie==MD_INTERCEPT_FD || cookie==MD_INTERCEPT_PROC || cookie==MD_INTERCEPT_MEMORY) return 0;
         resume(t->pid, 0); return 1;
     }
     int error = cookie == MD_INTERCEPT_DISPATCH ? md_domain_path_error(t->resources.fs) : -EPERM;
@@ -2642,9 +2997,9 @@ static void mapping_complete(void *context, struct md_task_helper_result result)
     struct mapping_owner *owner=context;
     if (value>=0) {
         unsigned long args[4]={(unsigned long)value};
-        CHECK(!md_shm_call(shm,owner->space,&owner->pending,NULL,owner->group,MD_SHM_ATTACHED,args,NULL));
-    } else CHECK(!md_shm_abort(shm,&owner->pending));
-    CHECK(!md_shm_space_release(shm,owner->space));
+        CHECK(!md_shm_call(NULL,owner->space,&owner->pending,NULL,owner->group,MD_SHM_ATTACHED,args,NULL));
+    } else CHECK(!md_shm_abort(&owner->pending));
+    CHECK(!md_shm_space_release(owner->space));
     if (owner->request.source>=0) close(owner->request.source);
     if (owner->order.queue && md_resource_order_cancel(&owner->order)==1)
         CHECK(!md_resource_order_complete(&owner->order));
@@ -2676,7 +3031,8 @@ static void mapping_start(struct thread *t) {
     if (error) mapping_complete(owner,(struct md_task_helper_result){.value=error,.descriptor=-1});
 }
 static void mapping_begin(struct thread *t, struct user_pt_regs *regs) {
-    long error=!shm_store ? -ENOTSUP : !shm ? md_shm_open(shm_store,&shm) : 0;
+    struct md_shm *shm=NULL;
+    long error=md_ipc_namespace_memory(t->resources.ipc,&shm);
     if (!error && (t->phase!=DISPATCHING || t->original.regs[8]!=SYS_shmat
             || t->mapping || !t->buffer.pool || t->buffer_call || t->ipc_transport.packet)) error=-EPERM;
     unsigned flags=t->original.regs[2];
@@ -2689,7 +3045,7 @@ static void mapping_begin(struct thread *t, struct user_pt_regs *regs) {
     if (!error) {
         *owner=(struct mapping_owner){.caller=t->pid,.group=t->tgid,.continuation=*regs,
             .request={.source=-1}};
-        owner->space=md_shm_space_fork(shm,t->shm_space,1);
+        owner->space=md_shm_space_fork(t->shm_space,1);
         owner->memory=md_memory_fork(t->memory,1);
         if (!owner->space || !owner->memory) error=-ENOMEM;
     }
@@ -2710,8 +3066,8 @@ static void mapping_begin(struct thread *t, struct user_pt_regs *regs) {
     if (!error) return;
     t->mapping=NULL;
     if (owner) {
-        CHECK(!md_shm_abort(shm,&owner->pending));
-        CHECK(!md_shm_space_release(shm,owner->space));
+        CHECK(!md_shm_abort(&owner->pending));
+        CHECK(!md_shm_space_release(owner->space));
         if (owner->request.source>=0) close(owner->request.source);
         md_memory_release(owner->memory);
         free(owner);
@@ -2720,8 +3076,9 @@ static void mapping_begin(struct thread *t, struct user_pt_regs *regs) {
     if (set_registers(t->pid,regs)) resume(t->pid,0);
 }
 static void memory_start(struct thread *t) {
-    if (md_resource_order_state(&t->memory_order)!=MD_RESOURCE_ORDER_READY) return;
-    CHECK(!md_resource_order_start(&t->memory_order));
+    enum md_resource_order_state state=md_resource_order_state(&t->memory_order);
+    if (state==MD_RESOURCE_ORDER_READY) CHECK(!md_resource_order_start(&t->memory_order));
+    else if (state!=MD_RESOURCE_ORDER_RUNNING) return;
     struct user_pt_regs regs=t->original;
     if (t->memory_action==MEMORY_DETACH) {
         if (!tracee_request(t,PTRACE_GETSIGMASK,(void *)sizeof(t->mask),&t->mask,"memory-mask")
@@ -2731,12 +3088,39 @@ static void memory_start(struct thread *t) {
         t->phase=IDLE;
         fd_begin(t,&regs,MD_INTERCEPT_FD);
     } else {
+        long nr=regs.regs[8];
+        int error=0, noexec=0;
+        int file=nr==SYS_mmap && !(regs.regs[3]&MAP_ANONYMOUS);
+        if (file) {
+            if (!t->memory_files.table) {
+                error=md_fd_order_begin(t->resources.files,&t->memory_files,fd_wakeup);
+                if (error>=0) error=0;
+            }
+            if (!error && md_fd_order_state(&t->memory_files)!=MD_RESOURCE_ORDER_READY) return;
+            if (!error) {
+                CHECK(!md_fd_order_start(&t->memory_files));
+                struct md_proc_file *control=proc_file_capture(t,(int)regs.regs[4]);
+                if (control) { error=-ENODEV; md_proc_file_release(control); }
+                struct md_fs_anchor *origin=md_fd_origins_get(t->resources.files,(int)regs.regs[4],NULL);
+                noexec=!!(md_fs_anchor_policy(origin)&MD_MOUNT_NOEXEC);
+                md_fs_anchor_release(origin);
+                if (!error && noexec && (regs.regs[2]&PROT_EXEC)) error=-EPERM;
+            }
+        }
+        if (!error && nr==SYS_mprotect) error=md_memory_exec_check(t->memory,regs.regs[0],regs.regs[1]);
         int overlap=md_shm_intersects(t->shm_space,regs.regs[0],regs.regs[1]);
-        if (regs.regs[8]==SYS_mremap && (regs.regs[3]&MREMAP_FIXED))
+        if (nr==SYS_mremap && (regs.regs[3]&MREMAP_FIXED))
             overlap|=md_shm_intersects(t->shm_space,regs.regs[4],regs.regs[2]);
-        if (overlap && regs.regs[8]==SYS_mremap) {
+        if (!error && overlap && nr==SYS_mremap) error=-ENOTSUP;
+        int observe=nr!=SYS_mprotect && (file || overlap || md_memory_has_policy(t->memory));
+        if (!error && observe) error=md_memory_mapping_prepare(t->memory,&t->memory_change,
+            nr==SYS_mmap ? MD_MAPPING_MAP : nr==SYS_munmap ? MD_MAPPING_UNMAP : MD_MAPPING_REMAP,
+            regs.regs[0],regs.regs[1],nr==SYS_mremap ? regs.regs[2] : 0,(unsigned)regs.regs[3],noexec);
+        if (error || !observe) {
+            if (t->memory_files.table) CHECK(!md_fd_order_complete(&t->memory_files));
             CHECK(!md_resource_order_complete(&t->memory_order)); t->memory_action=0;
-            t->phase=IDLE; return_value(t,&regs,-ENOTSUP);
+            t->phase=IDLE;
+            if (error) return_value(t,&regs,error); else resume(t->pid,0);
         } else { t->phase=OBSERVING; resume(t->pid,0); }
     }
 }
@@ -2892,7 +3276,7 @@ int main(int argc, char **argv) {
         admitted_path = argv[argument + 1]; argument += 2;
         CHECK(admitted_path[0] == '/');
     }
-    const char *selected_user = NULL, *selected_groups = NULL;
+    const char *selected_user = NULL, *selected_groups = NULL, *selected_hostname = NULL;
     launch_identity = md_identity_new(getuid(), getgid());
     tasks = md_task_registry_create(); CHECK(tasks);
     struct md_identity owner = md_identity_new(getuid(), getgid());
@@ -2912,6 +3296,10 @@ int main(int argc, char **argv) {
         selected_groups = argv[argument + 1]; argument += 2;
     }
     struct md_fs_attachment attachments[MD_FS_MOUNTS_MAX];
+    if (argument < argc && !strcmp(argv[argument], "--hostname")) {
+        CHECK(argument+2 < argc && md_hostname_valid(argv[argument+1]));
+        selected_hostname=argv[argument+1]; argument+=2;
+    }
     unsigned attachment_count = 0;
     while (argument < argc && (!strcmp(argv[argument], "--bind") || !strcmp(argv[argument], "--bind-ro"))) {
         CHECK(argument+2 < argc && attachment_count < MD_FS_MOUNTS_MAX);
@@ -2923,7 +3311,6 @@ int main(int argc, char **argv) {
     if (argument < argc && !strcmp(argv[argument], "--store")) {
         CHECK(argument + 4 < argc && !strcmp(argv[argument + 2], "--endpoint"));
         store = argv[argument + 1]; endpoint = argv[argument + 3]; argument += 4;
-        shm_store = store;
     }
     if (selected_user) {
         uint32_t uid, gid;
@@ -3015,6 +3402,7 @@ int main(int argc, char **argv) {
         struct md_task_resources owner_resources={.mounts=mounts};
         CHECK(!md_task_registry_publish(tasks,getpid(),getpid(),&owner,&owner_resources));
         CHECK(!md_resources_init(&thread(leader)->resources,mounts));
+        CHECK(!md_ipc_namespace_bind(thread(leader)->resources.ipc,store));
         CHECK(!md_task_registry_publish(tasks,leader,leader,&thread(leader)->identity,&thread(leader)->resources));
         broker = md_broker_create(filesystem, statistics != NULL, delegated_notification); CHECK(broker);
         buffer_service=md_fs_buffer_service_new(filesystem,tasks,fd_wakeup,buffer_complete); CHECK(buffer_service);
@@ -3025,7 +3413,9 @@ int main(int argc, char **argv) {
             else if (!strcmp(argv[i], "--namespace") && i+2 < argc) { program = argv[i+2]; break; }
         }
         CHECK(!md_launch_register(&registration, store, program, cwd, launch_identity.uid.effective));
-    }
+    } else CHECK(!md_resources_init(&thread(leader)->resources,NULL));
+    if (selected_hostname) CHECK(!md_uts_namespace_set(thread(leader)->resources.uts,0,
+        selected_hostname,strlen(selected_hostname)));
     byte = 'g'; CHECK(write(channel[0], &byte, 1) == 1); close(channel[0]);
     int64_t deadline = seconds ? md_event_now() + seconds * 1000000000LL : INT64_MAX;
     while (live || md_fs_buffer_children(buffer_service) || md_task_helpers_count(helpers)) {
@@ -3091,17 +3481,18 @@ int main(int argc, char **argv) {
                     t->debug_options=former->debug_options;
                     t->trace_options_dirty=former->trace_options_dirty;
                     release_operation(t);
-                    CHECK(!md_resources_unshare_finish(ipc, &t->resources, &t->resource_change, -ECANCELED));
-                    CHECK(!md_resources_release(ipc, &t->resources));
+                    CHECK(!md_resources_unshare_finish(&t->resources,&t->identity,&t->resource_change, -ECANCELED));
+                    CHECK(!md_resources_release(&t->resources));
                     t->resources = former->resources;
                     former->resources = (struct md_task_resources){0};
                     exec_images_release(t);
                     memcpy(t->exec_images,former->exec_images,sizeof(t->exec_images));
+                    t->exec_mount_flags=former->exec_mount_flags;
                     former->exec_images[0]=former->exec_images[1]=-1;
                     md_identity_release(&t->identity);
                     t->identity = md_identity_copy(&former->identity);
-                    md_watch_activation_release(t->watch_activation);
-                    t->watch_activation = former->watch_activation; former->watch_activation = NULL;
+                    md_fd_selector_release(t->fd_selector);
+                    t->fd_selector = former->fd_selector; former->fd_selector = NULL;
                     memcpy(t->endpoint, former->endpoint, sizeof(t->endpoint));
                     release_thread(former);
                 }
@@ -3110,10 +3501,10 @@ int main(int argc, char **argv) {
             adapter_discard(t);
             t->exec_images_ready=t->exec_images[0]>=0;
             md_memory_stack_return(t->memory, t->stack);
-            CHECK(!md_shm_space_release(shm,t->shm_space));
+            CHECK(!md_shm_space_release(t->shm_space));
             t->shm_space = md_shm_space_new(); CHECK(t->shm_space);
             ipc_unwatch(t);
-            CHECK(!md_ipc_cancel(ipc,&t->ipc_pending)); t->ipc_cancel=t->ipc_waking=0;
+            CHECK(!md_ipc_cancel(md_ipc_namespace_active(t->resources.ipc),&t->ipc_pending)); t->ipc_cancel=t->ipc_waking=0;
             md_ipc_transport_close(&t->ipc_transport);
             md_memory_release(t->memory); t->memory = md_memory_new(); CHECK(t->memory);
             t->phase = IDLE; t->stack = 0; t->ready = 0; t->resume_lost = 0; t->terminal_stop=0; images++;
@@ -3136,18 +3527,18 @@ int main(int argc, char **argv) {
             md_identity_release(&c->identity);
             c->identity = md_identity_copy(&t->identity);
             c->tgid = t->cloning & CLONE_THREAD ? t->tgid : c->pid;
-            CHECK(!md_shm_space_release(shm,c->shm_space));
-            c->shm_space = md_shm_space_fork(shm,t->shm_space,!!(t->cloning & CLONE_VM)); CHECK(c->shm_space);
-            CHECK(!md_resources_release(ipc, &c->resources));
+            CHECK(!md_shm_space_release(c->shm_space));
+            c->shm_space = md_shm_space_fork(t->shm_space,!!(t->cloning & CLONE_VM)); CHECK(c->shm_space);
+            CHECK(!md_resources_release(&c->resources));
             if (t->resources.fs) CHECK(!md_resources_fork(&t->resources, t->cloning, &c->resources));
-            if (t->resource_change.copy_mounts)
-                CHECK(!md_resources_unshare_finish(ipc,&c->resources,&t->resource_change,0));
+            if (t->resource_change.namespaces)
+                CHECK(!md_resources_unshare_finish(&c->resources,&c->identity,&t->resource_change,0));
             if (t->fd_running) fd_finish(t,(long)child);
             md_memory_release(c->memory);
             c->memory = md_memory_fork(t->memory, !!(t->cloning & CLONE_VM)); CHECK(c->memory);
-            md_watch_activation_release(c->watch_activation);
-            c->watch_activation = md_watch_activation_fork(t->watch_activation, !!(t->cloning & CLONE_THREAD));
-            CHECK(c->watch_activation);
+            md_fd_selector_release(c->fd_selector);
+            c->fd_selector = md_fd_selector_fork(t->fd_selector, !!(t->cloning & CLONE_THREAD));
+            CHECK(c->fd_selector);
             t->cloning = 0;
             memcpy(c->endpoint, t->endpoint, sizeof(c->endpoint));
             if (cancelling) CHECK(!md_process_signal_children(cancelling == 1 ? SIGTERM : SIGKILL));
@@ -3207,10 +3598,11 @@ int main(int argc, char **argv) {
                 if (regs.regs[8] < 512) statistics->calls[regs.regs[8]].trace++;
                 else statistics->unknown++;
             }
-            if (regs.regs[8] == SYS_prctl && regs.regs[0] == MD_GUEST_WATCH_FILTER
+            if (regs.regs[8] == SYS_prctl && regs.regs[0] == MD_GUEST_FD_FILTER
                     && regs.pc == RAW_GATE && t->phase == DISPATCHING) {
-                long value = regs.regs[2] == 0 ? md_watch_activation_has(t->watch_activation, (unsigned)regs.regs[1])
-                    : regs.regs[2] == 1 ? md_watch_activation_mark(t->watch_activation, (unsigned)regs.regs[1]) : -EINVAL;
+                long value = regs.regs[4] || regs.regs[5] ? -EINVAL
+                    : regs.regs[2] == 0 ? md_fd_selector_has(t->fd_selector, (unsigned)regs.regs[3], (unsigned)regs.regs[1])
+                    : regs.regs[2] == 1 ? md_fd_selector_mark(t->fd_selector, (unsigned)regs.regs[3], (unsigned)regs.regs[1]) : -EINVAL;
                 return_value(t, &regs, value); continue;
             }
             if (regs.regs[8] == SYS_prctl && regs.regs[0] == MD_GUEST_SHM_FILTER
@@ -3223,7 +3615,8 @@ int main(int argc, char **argv) {
             if (identity_call(t, &regs, cookie)) continue;
             if (domain_call(t, &regs, cookie)) continue;
             if (cookie==MD_INTERCEPT_FD || cookie==MD_INTERCEPT_CWD || cookie==MD_INTERCEPT_CAPTURE) {
-                if (cookie==MD_INTERCEPT_FD && regs.regs[8]==SYS_clone && t->shm_filter
+                if (cookie==MD_INTERCEPT_FD && regs.regs[8]==SYS_clone
+                        && (t->shm_filter || md_memory_has_policy(t->memory))
                         && !(regs.regs[0]&CLONE_VM)) {
                     memory_begin(t,&regs,MEMORY_FORK); continue;
                 }
@@ -3246,6 +3639,32 @@ int main(int argc, char **argv) {
                 memory_begin(t,&regs,MEMORY_KERNEL); continue;
             }
             if (descriptor_call(t, &regs, cookie)) continue;
+            if (cookie==MD_INTERCEPT_PROC) {
+                CHECK(t->ready && t->phase==IDLE && !t->proc_file);
+                long nr=regs.regs[8];
+                int index=nr==SYS_mmap ? 4 : 0;
+                struct md_proc_file *file=proc_file_capture(t,(int)regs.regs[index]);
+                if (!file && (nr==SYS_sendfile || nr==SYS_tee || nr==SYS_splice || nr==SYS_copy_file_range))
+                    file=proc_file_capture(t,(int)regs.regs[nr==SYS_sendfile || nr==SYS_tee ? 1 : 2]);
+                if (file) {
+                    unsigned long args[6];
+                    for (unsigned i=0;i<6;++i) args[i]=regs.regs[i];
+                    struct md_proc_io_spec spec;
+                    int namespace_ioctl=nr==SYS_ioctl && md_proc_file_namespace(md_proc_file_kind(file));
+                    int error=nr==SYS_fstatfs || namespace_ioctl ? 0 : md_proc_io_decode(nr,args,&spec);
+                    if (error && nr==SYS_ioctl) error=-ENOTTY;
+                    if (error && nr==SYS_mmap) error=-ENODEV;
+                    if (!error && namespace_ioctl && (md_proc_file_flags(file)&O_PATH)) error=-EBADF;
+                    if (!error && nr!=SYS_fstatfs && !namespace_ioctl) error=md_proc_file_access(file,
+                        spec.seek ? MD_PROC_FILE_SEEK : spec.directory ? MD_PROC_FILE_GETDENTS
+                            : spec.writing ? MD_PROC_FILE_WRITE : MD_PROC_FILE_READ);
+                    if (error) { md_proc_file_release(file); return_value(t,&regs,error); continue; }
+                    t->proc_file=file; cookie=MD_INTERCEPT_DISPATCH;
+                } else if (nr==SYS_mmap) { memory_begin(t,&regs,MEMORY_KERNEL); continue; }
+                else if (nr==SYS_read || nr==SYS_readv || nr==SYS_ioctl || nr==SYS_splice || nr==SYS_tee || nr==SYS_sendfile)
+                    cookie=MD_INTERCEPT_WATCH;
+                else { resume(pid,0); continue; }
+            }
             if (cookie == MD_INTERCEPT_WATCH) {
                 CHECK(t->ready && t->phase == IDLE);
                 t->original = regs;
@@ -3425,7 +3844,8 @@ int main(int argc, char **argv) {
                 if ((long)regs.regs[0] >= 0 && (t->original.regs[8] == SYS_munmap || t->original.regs[8] == SYS_mmap)) {
                     size_t length = t->original.regs[1], page = (size_t)getpagesize();
                     CHECK(length <= SIZE_MAX-(page-1));
-                    CHECK(!md_shm_unmapped(shm,t->shm_space,t->original.regs[0],(length+page-1)&~(page-1),t->tgid));
+                    uintptr_t address=t->original.regs[8]==SYS_mmap ? regs.regs[0] : t->original.regs[0];
+                    CHECK(!md_shm_unmapped(t->shm_space,address,(length+page-1)&~(page-1),t->tgid));
                 }
                 TRACE("PROBE native syscall pid=%d nr=%llu arg0=%#llx arg1=%#llx result=%lld\n",
                     pid, t->original.regs[8], t->original.regs[0], t->original.regs[1], (long long)regs.regs[0]);
@@ -3439,6 +3859,8 @@ int main(int argc, char **argv) {
                     TRACE("PROBE installed-filter pid=%d instructions=%d\n", pid, t->filter_length);
                 }
                 if (t->memory_action==MEMORY_KERNEL) {
+                    md_memory_mapping_finish(t->memory,&t->memory_change,(long)regs.regs[0]);
+                    if (t->memory_files.table) CHECK(!md_fd_order_complete(&t->memory_files));
                     CHECK(!md_resource_order_complete(&t->memory_order)); t->memory_action=0;
                 }
                 t->phase = IDLE; resume(pid, 0); continue;
@@ -3460,7 +3882,7 @@ int main(int argc, char **argv) {
             if (abi.fd_control && regs.pc==abi.fd_control && t->ready) {
                 fd_control(t,&regs); continue;
             }
-            if (abi.buffer_control && regs.pc==abi.buffer_control && t->ready && (buffer_service || !t->entered)) {
+            if (abi.buffer_control && regs.pc==abi.buffer_control && t->ready) {
                 buffer_control(t,&regs); continue;
             }
             if (abi.task_control && regs.pc==abi.task_control && t->ready) {
@@ -3533,6 +3955,8 @@ int main(int argc, char **argv) {
                 CHECK((long)regs.regs[0] > 0 && !(regs.regs[0] & (md_page_size - 1)));
                 t->stack = regs.regs[0]; CHECK(!md_memory_stack_add(t->memory, t->stack)); dispatch(t);
             } else if (regs.pc == DONE && t->phase == DISPATCHING) {
+                CHECK(!md_proc_file_io_cancel(&t->proc_io));
+                md_proc_file_release(t->proc_file); t->proc_file=NULL; t->proc_waiting=0;
                 long value = regs.regs[0];
                 if (value==MD_IPC_IO_RESTART) {
                     regs=t->original; regs.pc=RAW_GATE-4; regs.regs[8]=SYS_gettid;

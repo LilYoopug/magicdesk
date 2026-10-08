@@ -16,21 +16,21 @@ int md_received_fds_reserve(struct md_received_fds **owner, unsigned needed) {
     if (fresh) { p->references=1; p->count=0; p->origins=NULL; }
     p->capacity=capacity; *owner=p; return 0;
 }
-int md_received_fds_annotate(struct md_received_fds *p, struct md_fs_anchor *const *origins,
+int md_received_fds_annotate(struct md_received_fds *p, struct md_fd_object *const *origins,
         unsigned count) {
     if (!p || !origins || !count || count!=p->count) return -EINVAL;
     if (p->references!=1 || p->origins) return -EBUSY;
     unsigned known=0;
     for (unsigned i=0;i<count;++i) known+=origins[i]!=NULL;
     if (!known) return 0;
-    struct md_fs_anchor **next=calloc(count,sizeof(*next));
+    struct md_fd_object **next=calloc(count,sizeof(*next));
     if (!next) return -ENOMEM;
-    for (unsigned i=0;i<count;++i) next[i]=md_fs_anchor_retain(origins[i]);
+    for (unsigned i=0;i<count;++i) next[i]=md_fd_object_retain(origins[i]);
     p->origins=next;
     return 0;
 }
 int md_received_fds_select(const struct md_received_fds *p, const int *indices, unsigned count,
-        int *fds, struct md_fs_anchor **origins) {
+        int *fds, struct md_fd_object **origins) {
     if (!p || !indices || !fds || !count || count>253) return -EINVAL;
     for (unsigned i=0;i<count;++i) {
         if (indices[i]<0 || (unsigned)indices[i]>=p->count) return -EINVAL;
@@ -50,7 +50,7 @@ void md_received_fds_release(struct md_received_fds *p) {
     if (!p || --p->references) return;
     for (unsigned i=0;i<p->count;++i) {
         close(p->fds[i]);
-        if (p->origins) md_fs_anchor_release(p->origins[i]);
+        if (p->origins) md_fd_object_release(p->origins[i]);
     }
     free(p->origins);
     free(p);

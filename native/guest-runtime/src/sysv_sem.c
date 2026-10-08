@@ -84,7 +84,7 @@ static long get(struct md_ipc *s, struct md_ipc_pending *p) {
     if (!r && object) {
         r=md_ipc_load(s,MD_IPC_SEM,object,&st,sizeof(st));
         if (!r && (unsigned)count>st.sem_nsems) r=-EINVAL;
-        if (!r) r=md_ipc_permission(&p->identity,&st.sem_perm,((flags>>6)|(flags>>3)|flags)&7);
+        if (!r) r=md_ipc_perm_access(s->user_namespace,&p->identity,&st.sem_perm,((flags>>6)|(flags>>3)|flags)&7);
     } else if (!r) {
         if (!count) return -EINVAL;
         st.sem_perm=(struct ipc64_perm){.key=key,.uid=p->identity.uid.effective,.cuid=p->identity.uid.effective,
@@ -108,7 +108,7 @@ static long operate(struct md_ipc *s, struct md_ipc_pending *p, struct semid64_d
         if (ops[i].sem_num>=st->sem_nsems) return -EFBIG;
         mode|=ops[i].sem_op ? 2 : 4;
     }
-    int r=md_ipc_permission(&p->identity,&st->sem_perm,mode);
+    int r=md_ipc_perm_access(s->user_namespace,&p->identity,&st->sem_perm,mode);
     for (size_t i=0; !r && i<count; i++) {
         int val; pid_t last;
         r=value(s,object,ops[i].sem_num,&val,&last); if (r) break;
@@ -133,21 +133,24 @@ long md_ipc_sem(struct md_ipc *s, struct md_ipc_pending *p) {
     if (r) return r==-EINVAL && p->blocked ? -EIDRM : r;
     if (p->call.nr==SYS_semop || p->call.nr==SYS_semtimedop) return operate(s,p,&st);
     if (command==IPC_RMID || command==IPC_SET) {
-        r=md_ipc_owner(&p->identity,&st.sem_perm);
+        r=md_ipc_perm_owner(s->user_namespace,&p->identity,&st.sem_perm);
         if (r) return r;
         if (command==IPC_RMID) return md_ipc_remove(s,object);
         struct semid64_ds from;
         r=md_ipc_memory(p,a[3],&from,sizeof(from),0);
+        if (!r) r=md_ipc_perm_set(&p->identity,&st.sem_perm,from.sem_perm.uid,from.sem_perm.gid,from.sem_perm.mode);
         if (!r) {
-            st.sem_perm.uid=from.sem_perm.uid; st.sem_perm.gid=from.sem_perm.gid;
-            st.sem_perm.mode=from.sem_perm.mode&0777; st.sem_ctime=time(NULL);
+            st.sem_ctime=time(NULL);
             r=md_ipc_save(s,object,&st,sizeof(st));
         }
         return r;
     }
-    r=md_ipc_permission(&p->identity,&st.sem_perm,command==SETVAL || command==SETALL ? 2 : 4);
+    r=md_ipc_perm_access(s->user_namespace,&p->identity,&st.sem_perm,command==SETVAL || command==SETALL ? 2 : 4);
     if (r) return r;
-    if (command==IPC_STAT) return md_ipc_memory(p,a[3],&st,sizeof(st),1);
+    if (command==IPC_STAT) {
+        md_ipc_perm_visible(&p->identity,&st.sem_perm);
+        return md_ipc_memory(p,a[3],&st,sizeof(st),1);
+    }
     if (command==GETALL || command==SETALL) {
         size_t bytes=st.sem_nsems*sizeof(unsigned short);
         unsigned short *array=malloc(bytes); if (!array) return -ENOMEM;

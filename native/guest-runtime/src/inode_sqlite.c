@@ -29,10 +29,11 @@ static void initialize(void) {
     anchored.pNext=NULL; anchored.xFullPathname=full_path;
     status=sqlite3_vfs_register(&anchored,0);
 }
-int mdi_sqlite_reconnect(int root, sqlite3 **out) {
+int mdi_sqlite_open(int root, int create, sqlite3 **out) {
     pthread_once(&initialized,initialize);
     if (status!=SQLITE_OK) return mdi_sql_failure(status);
     char path[64]; snprintf(path,sizeof(path),"/proc/self/fd/%d/namespace.db",root);
     return mdi_sql_error(sqlite3_open_v2(path,out,
-        SQLITE_OPEN_READWRITE|SQLITE_OPEN_NOMUTEX|SQLITE_OPEN_NOFOLLOW,anchored.zName));
+        SQLITE_OPEN_READWRITE|SQLITE_OPEN_NOMUTEX|SQLITE_OPEN_NOFOLLOW
+            | (create ? SQLITE_OPEN_CREATE : 0),anchored.zName));
 }

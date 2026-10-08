@@ -2,6 +2,7 @@
 #include "file_calls.h"
 #include "namespace.h"
 #include "proc_paths.h"
+#include "proc_control.h"
 #include "raw.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -46,7 +47,6 @@ static long open_extended(const struct md_fs *fs, const char *exe, const unsigne
     if (!*path) return -ENOENT;
     if (*path == '/' && (how.resolve & RESOLVE_BENEATH)) return -EXDEV;
     if (how.resolve & RESOLVE_CACHED) return -EAGAIN;
-    if (!fs->endpoint[0]) return -ENOTSUP;
     /* Host mount paths keep the kernel's walk. Never apply IN_ROOT against
      * Android's root when the supplied descriptor belongs to the guest. */
     char mounted[PATH_MAX];
@@ -55,6 +55,26 @@ static long open_extended(const struct md_fs *fs, const char *exe, const unsigne
     if (r < 0) return r;
     if (md_fs_host_path(fs, mounted) && !(how.resolve & RESOLVE_IN_ROOT)) {
         struct md_proc_path ref = md_proc_path(mounted);
+        enum md_proc_kind kind=ref.kind==MD_PROC_FOREIGN ? ref.foreign_kind : ref.kind;
+        if (md_proc_control_kind(kind)) {
+            if (*ref.tail) return -ENOTDIR;
+            if (kind==MD_PROC_NS_UNSUPPORTED) return -ENOENT;
+            if (kind>=MD_PROC_NS_USER && kind<=MD_PROC_NS_IPC
+                    && (how.resolve&(RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS))) return -ELOOP;
+            /* Validate the same parent walk, without requiring host userns
+             * support or permission to access Android's unrelated sysctl. */
+            size_t length=md_length(path);
+            while (length && path[length-1]!='/') --length;
+            if (kind<=MD_PROC_SETGROUPS) {
+                if (length+sizeof("status")>sizeof(path)) return -ENAMETOOLONG;
+                memcpy(path+length,"status",sizeof("status"));
+            } else memcpy(path+length,".",2);
+            struct open_how probe=how; probe.flags=O_PATH|O_CLOEXEC; probe.mode=0;
+            long checked=RAW4(openat2,a[0],path,&probe,sizeof(probe));
+            if (checked<0) return checked;
+            RAW1(close,checked);
+            return md_proc_control_open(ref.process,kind,(int)how.flags);
+        }
         if (ref.kind == MD_PROC_FOREIGN) return -ENOTSUP;
         if (ref.kind == MD_PROC_CMDLINE || ref.kind == MD_PROC_AUXV) {
             /* Let the real proc walk validate relative scoping/symlinks before
@@ -72,7 +92,7 @@ static long open_extended(const struct md_fs *fs, const char *exe, const unsigne
         if (ref.kind == MD_PROC_EXE || ref.kind == MD_PROC_ROOT) return -ENOTSUP;
         return RAW4(openat2, a[0], path, &how, sizeof(how));
     }
-    return md_namespace_open_resolved(fs, (int)a[0], path, &how);
+    return !fs->endpoint[0] ? -ENOTSUP : md_namespace_open_resolved(fs, (int)a[0], path, &how);
 }
 
 static long path_at(const struct md_fs *fs, const char *exe, int fd,
@@ -91,12 +111,29 @@ static long path_at(const struct md_fs *fs, const char *exe, int fd,
 
 long md_file_call(const struct md_fs *fs, const char *exe, long nr, const unsigned long *a) {
     if (nr == SYS_openat2) return open_extended(fs, exe, a);
+    int descriptor=nr==SYS_fstat || nr==SYS_fstatfs || nr==SYS_fchown || nr==SYS_fchmod
+        || nr==SYS_getdents64 || nr==SYS_fchdir || (nr==SYS_utimensat && !a[1]);
+    if (nr==SYS_newfstatat || nr==SYS_statx || nr==SYS_faccessat2 || nr==SYS_fchownat || nr==SYS_fchmodat2) {
+        unsigned index=nr==SYS_statx ? 2 : nr==SYS_fchownat ? 4 : 3;
+        if (a[index]&AT_EMPTY_PATH) {
+            char first;
+            long error=md_read_memory(&first,(void *)a[1],1);
+            if (error<0) return error;
+            descriptor=!first;
+        }
+    }
+    if (descriptor) {
+        long known=md_proc_control_known((int)a[0]);
+        if (known<0) return known;
+        if (known) return nr==SYS_getdents64 ? md_proc_control_call(nr,a)
+            : md_proc_control_metadata((int)RAW0(gettid),MD_PROC_NONE,(int)a[0],nr,a);
+    }
     if (fs->endpoint[0]) return md_namespace_call(fs,exe,nr,a);
     char first[PATH_MAX], second[PATH_MAX];
     long r;
     int flags;
     switch (nr) {
-    case SYS_fstat: case SYS_getdents64: case SYS_lseek: case SYS_fsetxattr:
+    case SYS_fstat: case SYS_fstatfs: case SYS_getdents64: case SYS_lseek: case SYS_fsetxattr:
     case SYS_fchmod: case SYS_fchown: case SYS_fremovexattr: case SYS_fchdir:
     case SYS_fgetxattr: case SYS_flistxattr:
         return md_raw(nr,a[0],a[1],a[2],a[3],a[4],a[5]);
@@ -106,6 +143,9 @@ long md_file_call(const struct md_fs *fs, const char *exe, long nr, const unsign
                 ? MD_PATH_ENTRY : !(flags & O_NOFOLLOW), 0, first);
         if (r < 0) return r;
         struct md_proc_path image = md_proc_path(first);
+        enum md_proc_kind control=image.kind==MD_PROC_FOREIGN ? image.foreign_kind : image.kind;
+        if (md_proc_control_kind(control))
+            return *image.tail ? -ENOTDIR : md_proc_control_open(image.process,control,flags);
         if (image.kind == MD_PROC_CMDLINE || image.kind == MD_PROC_AUXV)
             return *image.tail ? -ENOTDIR : md_proc_image_open(fs, image.kind, flags);
         return RAW4(openat, AT_FDCWD, first, flags, a[3]);
@@ -116,6 +156,11 @@ long md_file_call(const struct md_fs *fs, const char *exe, long nr, const unsign
     case SYS_fchmodat2:
         flags = nr == SYS_statx ? (int)a[2] : nr == SYS_faccessat ? 0 : (int)a[3];
         r = path_at(fs, exe, (int)a[0], a[1], !(flags & AT_SYMLINK_NOFOLLOW), flags & AT_EMPTY_PATH, first);
+        if (r>=0) {
+            struct md_proc_path ref=md_proc_path(first);
+            enum md_proc_kind kind=ref.kind==MD_PROC_FOREIGN ? ref.foreign_kind : ref.kind;
+            if (md_proc_control_kind(kind)) return *ref.tail ? -ENOTDIR : md_proc_control_metadata(ref.process,kind,-1,nr,a);
+        }
         return r < 0 ? r : md_raw(nr, first[0] ? AT_FDCWD : a[0], (long)first, a[2], a[3], a[4], 0);
     case SYS_mkdirat:
     case SYS_unlinkat:

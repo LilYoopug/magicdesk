@@ -3,6 +3,7 @@
 #include "image_acl.h"
 #include "image_pool.h"
 #include "inode_internal.h"
+#include "inode_xattr.h"
 #include "image_io.h"
 #include "file_capability.h"
 #include "proc_paths.h"
@@ -125,7 +126,7 @@ static int entry_file(struct md_inode_store *s, struct archive *ar, struct archi
             mode = parsed; mode_seen = 1;
             continue;
         }
-        if (backup && !strncmp(name, "user.", 5)) {
+        if ((backup && !strncmp(name, "user.", 5)) || mdi_overlay_attribute(name)) {
             if (length > 65536 || strlen(name) > 255 || link) return -EINVAL;
             continue;
         }
@@ -224,12 +225,16 @@ static int entry_file(struct md_inode_store *s, struct archive *ar, struct archi
     if (fd >= 0) close(fd);
     if (!r) r = record_metadata(s, entry, &node, mode);
     if (!r && capability) r = mdi_file_capability(s,&node,capability,capability_size);
-    if (!r && backup) {
+    if (!r) {
         char native[128];
         snprintf(native, sizeof(native), "/proc/self/fd/%d/%s", s->objects, node.backing);
         archive_entry_xattr_reset(entry);
         while (!r && !archive_entry_xattr_next(entry, &name, &value, &length)) {
-            if (strncmp(name, "user.", 5)) continue;
+            if (mdi_overlay_attribute(name)) {
+                r=mdi_overlay_attribute_set(s,&node,name,length ? value : "",length);
+                continue;
+            }
+            if (!backup || strncmp(name, "user.", 5)) continue;
             if (lsetxattr(native, name, value, length, XATTR_CREATE)) {
                 if (errno != EEXIST) r = -errno;
                 else {
@@ -392,32 +397,6 @@ int md_image_rootfs(struct md_inode_store *s, int fd, uint64_t *bytes, uint64_t 
 int md_image_backup_tree(struct md_inode_store *s, int fd, uint64_t *bytes, uint64_t *entries) {
     return read_tree(s, fd, bytes, entries, 0, 1, -1);
 }
-static int discard_unreachable_backings(struct md_inode_store *s) {
-    int fd = openat(s->objects, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (fd < 0) return -errno;
-    DIR *dir = fdopendir(fd);
-    if (!dir) { int r = -errno; close(fd); return r; }
-    sqlite3_stmt *q = NULL;
-    int r = mdi_prepare(s, "SELECT 1 FROM backings WHERE backing=?1 AND source=0", &q);
-    while (!r) {
-        errno = 0;
-        struct dirent *entry = readdir(dir);
-        if (!entry) { if (errno) r = -errno; break; }
-        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
-        r = mdi_bind_id(q, 1, entry->d_name);
-        int rc = r ? SQLITE_ERROR : mdi_step(s, q);
-        if (!r && rc == SQLITE_DONE) {
-            struct stat st;
-            if (fstatat(fd, entry->d_name, &st, AT_SYMLINK_NOFOLLOW)
-                    || unlinkat(fd, entry->d_name, S_ISDIR(st.st_mode) ? AT_REMOVEDIR : 0)) r = -errno;
-        } else if (!r && rc != SQLITE_ROW) r = mdi_sql_failure(rc);
-        int reset = mdi_sql_error(sqlite3_reset(q));
-        if (!r) r = reset;
-    }
-    sqlite3_finalize(q); closedir(dir);
-    if (!r && fsync(s->objects)) r = -errno;
-    return r;
-}
 int md_image_layers_finish(struct md_inode_store *s, int preserve) {
     int r = mdi_begin(s, 1);
     if (r) return r;
@@ -446,8 +425,10 @@ int md_image_layers_finish(struct md_inode_store *s, int preserve) {
         "DELETE FROM objects WHERE object NOT IN image_live;"
         "INSERT INTO file_paths SELECT o.object,n.parent,n.name,o.name_count>1 "
             "FROM objects o JOIN names n ON n.object=o.object WHERE o.kind!=16384 GROUP BY o.object;"
-        "DELETE FROM sources WHERE id NOT IN (SELECT source FROM objects WHERE source>0);"
+        "DELETE FROM sources WHERE NOT EXISTS (SELECT 1 FROM objects "
+            "WHERE objects.source=sources.id AND objects.scope=sources.scope) "
+            "AND NOT EXISTS(SELECT 1 FROM inode_channels c WHERE c.source=sources.id AND c.scope=sources.scope);"
         "DROP TABLE image_live");
-    if (!r) r = discard_unreachable_backings(s);
+    if (!r) r = mdi_discard_untracked_backings(s);
     return mdi_commit(s, r);
 }

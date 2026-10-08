@@ -1,10 +1,13 @@
 #ifndef MD_INODE_CUSTODY_H
 #define MD_INODE_CUSTODY_H
 #include "inode_lifetime.h"
+#include "user_namespace.h"
 
-enum { MD_INODE_CUSTODY_FDS=512 };
+enum { MD_INODE_CUSTODY_FDS=514+MD_USER_NAMESPACE_DEPTH };
 /* Owned captured rights: immutable manifest, root maintenance lease, then
- * each loaded lower's objects directory and maintenance lease. No data OFDs,
+ * optional projection lease, each loaded lower's objects directory and maintenance lease, followed by the
+ * filesystem owner's user-namespace policy pages and optional stashed
+ * overlay credentials. No data OFDs,
  * SQLite handles or paths. Larger vectors need bounded transport chunks. */
 struct md_inode_custody_parcel { unsigned count; int fd[MD_INODE_CUSTODY_FDS]; };
 void md_inode_custody_parcel_close(struct md_inode_custody_parcel *);

@@ -12,7 +12,7 @@ static long get(struct md_ipc *s, struct md_ipc_pending *p) {
     struct msqid64_ds st={0};
     if (!r && object) {
         r=md_ipc_load(s,MD_IPC_MSG,object,&st,sizeof(st));
-        if (!r) r=md_ipc_permission(&p->identity,&st.msg_perm,((flags>>6)|(flags>>3)|flags)&7);
+        if (!r) r=md_ipc_perm_access(s->user_namespace,&p->identity,&st.msg_perm,((flags>>6)|(flags>>3)|flags)&7);
     } else if (!r) {
         st.msg_perm=(struct ipc64_perm){.key=key,.uid=p->identity.uid.effective,.cuid=p->identity.uid.effective,
             .gid=p->identity.gid.effective,.cgid=p->identity.gid.effective,.mode=flags&0777};
@@ -22,7 +22,7 @@ static long get(struct md_ipc *s, struct md_ipc_pending *p) {
     return r ? r : object;
 }
 static long send(struct md_ipc *s, struct md_ipc_pending *p, struct msqid64_ds *st) {
-    int r=md_ipc_permission(&p->identity,&st->msg_perm,2);
+    int r=md_ipc_perm_access(s->user_namespace,&p->identity,&st->msg_perm,2);
     if (r) return r;
     if (p->size>st->msg_qbytes || st->msg_cbytes>st->msg_qbytes-p->size || st->msg_qnum>=st->msg_qbytes)
         return p->call.args[3]&IPC_NOWAIT ? -EAGAIN : MD_IPC_WAIT;
@@ -43,7 +43,7 @@ static long send(struct md_ipc *s, struct md_ipc_pending *p, struct msqid64_ds *
 }
 static long receive(struct md_ipc *s, struct md_ipc_pending *p, struct msqid64_ds *st) {
     const unsigned long *a=p->call.args;
-    int r=md_ipc_permission(&p->identity,&st->msg_perm,4);
+    int r=md_ipc_perm_access(s->user_namespace,&p->identity,&st->msg_perm,4);
     if (r) return r;
     if (a[4]&MSG_COPY) return -ENOTSUP;
     long type=(long)a[3];
@@ -89,19 +89,20 @@ long md_ipc_msg(struct md_ipc *s, struct md_ipc_pending *p) {
     if (p->call.nr==SYS_msgrcv) return receive(s,p,&st);
     unsigned command=(unsigned)a[1]&~IPC_64;
     if (command==IPC_STAT) {
-        r=md_ipc_permission(&p->identity,&st.msg_perm,4);
+        r=md_ipc_perm_access(s->user_namespace,&p->identity,&st.msg_perm,4);
+        md_ipc_perm_visible(&p->identity,&st.msg_perm);
         return r ? r : md_ipc_memory(p,a[2],&st,sizeof(st),1);
     }
     if (command!=IPC_SET && command!=IPC_RMID) return -ENOTSUP;
-    r=md_ipc_owner(&p->identity,&st.msg_perm); if (r) return r;
+    r=md_ipc_perm_owner(s->user_namespace,&p->identity,&st.msg_perm); if (r) return r;
     if (command==IPC_RMID) return md_ipc_remove(s,a[0]);
     struct msqid64_ds from;
     r=md_ipc_memory(p,a[2],&from,sizeof(from),0);
-    if (!r && from.msg_qbytes>MD_MSGMNB && !md_identity_capable(&p->identity,CAP_SYS_RESOURCE)) r=-EPERM;
+    if (!r && from.msg_qbytes>MD_MSGMNB && !md_identity_capable_in(&p->identity,s->user_namespace,CAP_SYS_RESOURCE)) r=-EPERM;
     if (!r && from.msg_qbytes>1024*1024) r=-ERANGE;
+    if (!r) r=md_ipc_perm_set(&p->identity,&st.msg_perm,from.msg_perm.uid,from.msg_perm.gid,from.msg_perm.mode);
     if (!r) {
-        st.msg_perm.uid=from.msg_perm.uid; st.msg_perm.gid=from.msg_perm.gid;
-        st.msg_perm.mode=from.msg_perm.mode&0777; st.msg_qbytes=from.msg_qbytes; st.msg_ctime=time(NULL);
+        st.msg_qbytes=from.msg_qbytes; st.msg_ctime=time(NULL);
         r=md_ipc_save(s,a[0],&st,sizeof(st));
     }
     return r;

@@ -602,16 +602,17 @@ root-clamped `..`, getcwd and mount-table paths use the selected root.
 Its identity includes the mount and
 backend object, preserving native readonly policy. Existing cwd/descriptors remain
 usable, so chroot alone is not confinement. Guest mount views support local
-bind/move/remount, unmount and initial/attached-root pivot operations; arbitrary
-unattached native roots and other Linux namespace
-types remain unsupported. See the
+bind/move/remount, unmount and initial/attached-root pivot operations, with
+user, mount, UTS and SysV IPC namespace owners. Arbitrary unattached native
+roots and PID/network namespaces remain unsupported. See the
 [process resource contract](../native/guest-runtime/process-resources.md).
 
 `inode_metadata` enforces directory search, file access, ownership changes,
 sticky directories, setgid-parent inheritance, watch registration and timestamp permissions against
 logical inode owners/modes. `access()` checks real credentials for the whole
-path; `faccessat2(AT_EACCESS)` uses effective filesystem credentials. File data,
-mmap and already-open descriptors retain native kernel semantics. Metadata is
+path; `faccessat2(AT_EACCESS)` uses effective filesystem credentials. File data
+and already-open descriptors retain native kernel semantics; executable mappings
+also enforce the selected mount's noexec policy. Metadata is
 shared by hardlinks and retained across copy-up and independent launches.
 
 This is virtual guest root, not Android root or a security boundary. Native
@@ -691,6 +692,18 @@ O_PATH capture; aliases of another thread's resources remain unknown instead of
 borrowing the caller's metadata. Inherited/native descriptors and general
 application SCM_RIGHTS tracking remain incomplete. Guest `CLONE_NEWNS` copies
 the mount view and rebases root/cwd without retargeting existing descriptors.
+Guest UTS names and SysV IPC have independent retained owners. CLONE_NEWUTS
+copies hostname/domainname; CLONE_NEWIPC starts empty semaphore, message and
+shared-memory namespaces. Fork/exec retain the selected owners. Existing SHM
+mappings retain their original authority across namespace changes. These calls
+do not change Android's UTS/IPC namespaces. CLONE_NEWUSER creates a nested
+credential owner with writable proc ID maps, irreversible setgroups policy and
+namespace-scoped capabilities. Metadata and IPC credentials use canonical IDs
+internally and translate at the guest ABI. Proc UTS controls select the caller's
+current UTS namespace, while map FDs retain their target and opening authority.
+Typed proc FDs retain shared offsets across dup, fork and local SCM_RIGHTS;
+cross-supervisor transfer remains unsupported. No ordinary data IO is intercepted
+merely to identify these control descriptors.
 Bind, recursive bind, move, readonly remount, detach and initial/attached-root
 `pivot_root` use the same worker-owned graph. Normal unmount accounts for open
 origins, queued/imported message references and other process roots. Exported
@@ -701,9 +714,17 @@ origins, roots and children are released. Reused slots carry a new generation.
 Independent mounted inode stores retain their
 backing leases across namespace copies and authenticated FD transfer, including
 publisher exit and backing-directory rename. A watch instance can observe multiple
-mounted stores through independently retained observation sources. Tmpfs and
-overlay backends remain unsupported. See the
+mounted stores through independently retained observation sources. Logical tmpfs
+uses transient disk-backed inode storage; size quotas and kernel-memory accounting
+are not implemented. Overlay supports lower-only and writable upper/work mounts,
+copy-up, whiteouts, opaque directories and retained descriptors. Publication of
+the merged and upper namespaces shares one transaction. See the
 [resource contract](../native/guest-runtime/process-resources.md).
+Mount nosuid/nodev/noexec and readonly policy follows the selected mount, not the
+backing inode alone. Noexec covers executable/interpreter admission and mapped
+execution, including retained FDs, fork, remap and later mprotect. Native data IO
+is unchanged; file mappings and executable permission changes are observed by
+the address-space owner.
 
 Static PIE and fixed-address ET_EXEC use the same loader. ELF load alignment is
 retained, including 2 MiB alignment; an occupied fixed-address range fails without
@@ -794,7 +815,7 @@ reads use lazily armed descriptor classes and retained kernel-object identity.
 Protected readers copy in their own task without changing dumpability; queue
 delivery is acknowledged before consumption is confirmed. See the
 [watch contract](../native/guest-runtime/watches.md) for descriptor, hardlink,
-protected-copy and kernel limits. The current store format is 12;
+protected-copy and kernel limits. The current store format is 13;
 older stores are rejected, not migrated or deleted.
 
 ## Optional Kernel Support
@@ -1012,10 +1033,15 @@ files remain rejected. Logical credential drops and no_new_privs are enforced
 by the supervisor. Other operations retain real permission denials.
 
 The [production browser fixtures](../native/guest-exec-lab/browser/README.md)
-run stock Debian Chromium with its selected ordinary helper, three fresh profiles,
-calculated JavaScript/DOM results and PNG output, without sandbox-disabling flags.
-They observe real installed application filters and require process completion.
-Firefox has a separate headless screenshot workflow.
+check stock Debian Chromium with its selected ordinary helper, three fresh profiles,
+calculated JavaScript/DOM results and PNG output. The explicit set-ID route
+(`--setuid-route` in the fixture, Chromium's `--disable-namespace-sandbox` selector)
+passes with real installed application filters, admitted helper credentials and
+process completion. It does not use `--no-sandbox`. Automatic selection currently
+chooses the implemented user-namespace path but fails at the zygote's required
+PID namespace. The automatic browser regression is therefore unresolved; passing
+the alternate set-ID route is not a substitute. Firefox has a separate headless
+screenshot workflow.
 
 These results establish application execution, not complete security isolation.
 The restricted proc-root policy and ordinary guest chroot do not establish
@@ -1028,8 +1054,9 @@ successful page execution. See the [interception contract](../native/guest-runti
 
 Guest file sharing uses the selected guest's authenticated helper; live appearance
 updates are not integrated for this launch method. Kernel permission denials
-remain failures. Unprivileged user namespaces are unavailable in the tested
-native shell control as well as the guest.
+remain failures. Native unprivileged user namespaces are unavailable in the
+tested shell control. The guest user-namespace model does not require their
+kernel implementation and does not establish equivalent security confinement.
 
 The focused watch suite checks Debian GIO directory notifications from an
 independent writer and stock D-Bus config-watch registration/session requests.

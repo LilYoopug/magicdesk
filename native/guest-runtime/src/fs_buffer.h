@@ -27,7 +27,7 @@ static inline int md_fs_buffer_operation(unsigned operation) {
     switch (operation) {
     case MD_FS_OPEN: case MD_FS_REOPEN:
     case MD_FS_CREATE: case MD_FS_TEMPORARY: case MD_FS_OPEN_IMAGE: case MD_FS_OPEN_OBJECT:
-    case MD_FS_GETACL: case MD_FS_XATTR_OPEN: case MD_FS_MOUNT_TABLE:
+    case MD_FS_GETACL: case MD_FS_XATTR_OBJECT: case MD_FS_MOUNT_TABLE:
     case MD_FS_SETACL: case MD_FS_SOCKET_BIND: case MD_FS_IPC: case MD_FS_IPC_PEER:
     case MD_FS_WATCH_CREATE: case MD_FS_WATCH_ADD: case MD_FS_WATCH_REMOVE:
     case MD_FS_WATCH_BYTES: case MD_FS_WATCH_CONTAINS:
@@ -37,7 +37,7 @@ static inline int md_fs_buffer_operation(unsigned operation) {
     case MD_FS_SYMLINK: case MD_FS_LINK: case MD_FS_UNLINK: case MD_FS_RENAME:
     case MD_FS_CHMOD: case MD_FS_CHOWN: case MD_FS_ACCESS: case MD_FS_UTIMENS:
     case MD_FS_GETCAP: case MD_FS_SETCAP: case MD_FS_REMOVECAP:
-    case MD_FS_REMOVEACL: case MD_FS_LISTATTR: case MD_FS_OBJECT_ID:
+    case MD_FS_REMOVEACL: case MD_FS_OBJECT_ID:
     case MD_FS_SOCKET_ADDRESS: case MD_FS_SOCKET_NAME: case MD_FS_NATIVE_MOUNT:
     case MD_FS_CHROOT: case MD_FS_UMASK: case MD_FS_STATFS: case MD_FS_WATCH_PATH: case MD_FS_TASK_PATH:
     case MD_FS_XATTR: case MD_FS_FXATTR:

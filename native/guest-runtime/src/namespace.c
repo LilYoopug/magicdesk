@@ -21,7 +21,9 @@ static long namespace_request_deliver(const struct md_fs *fs, struct md_fs_reque
         if (!fs->image || !fs->image->executable_object[0]) return -ENOENT;
         q->directory[i]=-1; q->object[i]=fs->image->executable_object;
     }
-    unsigned bases = q->operation == MD_FS_LINK || q->operation == MD_FS_RENAME ? 2 : 1;
+    unsigned bases = q->operation == MD_FS_LINK || q->operation == MD_FS_RENAME
+        || (q->operation==MD_FS_MOUNT && (q->mode==MD_FS_MOUNT_BIND
+            || q->mode==MD_FS_MOUNT_PIVOT || q->mode==MD_FS_MOUNT_MOVE)) ? 2 : 1;
     for (unsigned i = 0; i < bases; ++i) {
         if (q->path[i] && q->path[i][0] == '/' && !(q->resolve & RESOLVE_IN_ROOT)) {
             q->directory[i] = -1; q->object[i]=NULL;
@@ -167,6 +169,12 @@ static long descriptor_call(const struct md_fs *fs, long nr, const unsigned long
     if (native) return md_raw(nr, a[0], a[1], a[2], a[3], a[4], a[5]);
     struct md_fs_response out;
     struct stat st;
+    if (nr==SYS_fstatfs) {
+        struct md_fs_request q={.operation=MD_FS_STATFS,.directory={(int)a[0],-1}};
+        long r=md_namespace_request(fs,&q,&out);
+        if (r==-EXDEV) return RAW2(fstatfs,a[0],a[1]);
+        return r<0 ? r : md_write_memory((void *)a[1],out.data,out.result.size);
+    }
     if (nr == SYS_getdents64) {
         /* The namespace validates the descriptor and advances its cursor in
          * one operation; a preliminary metadata RPC adds no authority. */
@@ -265,7 +273,7 @@ long md_namespace_call(const struct md_fs *fs, const char *exe, long nr, const u
         struct md_fs_response out;
         return md_namespace_request(fs,&q,&out);
     }
-    if (nr == SYS_fstat || nr == SYS_getdents64 || nr == SYS_lseek)
+    if (nr == SYS_fstat || nr == SYS_fstatfs || nr == SYS_getdents64 || nr == SYS_lseek)
         return descriptor_call(fs, nr, a);
     if (nr == SYS_fsetxattr || nr == SYS_fremovexattr || nr == SYS_fgetxattr || nr == SYS_flistxattr)
         return md_namespace_xattr(fs, nr, md_namespace_descriptor((int)a[0]), NULL, a);

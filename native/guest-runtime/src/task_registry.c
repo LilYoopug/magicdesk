@@ -56,7 +56,8 @@ int md_task_registry_publish(struct md_task_registry *r, pid_t tid, pid_t tgid,
     if (e->tgid == tgid && !memcmp(&e->value.uid, &v->uid, sizeof(v->uid))
             && !memcmp(&e->value.gid, &v->gid, sizeof(v->gid))
             && !memcmp(&e->value.caps, &v->caps, sizeof(v->caps))
-            && e->value.no_new_privs == v->no_new_privs && e->value.groups == v->groups) {
+            && e->value.no_new_privs == v->no_new_privs && e->value.groups == v->groups
+            && e->value.user_namespace == v->user_namespace) {
         goto published;
     }
     struct md_identity next = md_identity_copy(v);

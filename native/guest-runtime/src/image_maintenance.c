@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "image_maintenance.h"
 #include "image_publish.h"
+#include "private_tree.h"
 #include "inode_internal.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -44,7 +45,7 @@ int md_image_remove(const char *directory, int layer) {
     if (!r) {
         if (!resumed && syscall(SYS_renameat2, parent, name, parent, tomb, RENAME_NOREPLACE)) r = -errno;
         if (!r && fsync(parent)) r = -errno;
-        if (!r) r = md_image_discard(parent, tomb);
+        if (!r) r = md_private_tree_discard(parent, tomb);
         if (!r && fsync(parent)) r = -errno;
     }
     if (parent >= 0) close(parent);

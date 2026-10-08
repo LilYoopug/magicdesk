@@ -1,5 +1,6 @@
 #include "posix_acl.h"
 #include <errno.h>
+#include <stdlib.h>
 
 /* Linux's xattr representation is little-endian, like the supported ARM64 ABI. */
 _Static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, "ACL byte order");
@@ -33,6 +34,31 @@ int md_acl_valid(const void *data, size_t size) {
         }
     }
     return phase==6;
+}
+static int entry_order(const void *left, const void *right) {
+    const struct md_acl_entry *a=left,*b=right;
+    return a->tag!=b->tag ? (a->tag>b->tag ? 1 : -1)
+        : (a->id>b->id)-(a->id<b->id);
+}
+int md_acl_map(struct md_acl *acl, size_t size, const struct md_identity *id, int into) {
+    if (!id || !id->user_namespace) return 0;
+    size_t n=count(size);
+    if (into) for (size_t i=0;i<n;++i) {
+        const struct md_acl_entry *e=acl->entries+i;
+        if ((e->tag==MD_ACL_USER || e->tag==MD_ACL_GROUP)
+                && md_user_namespace_into(id->user_namespace,e->tag==MD_ACL_GROUP,e->id)==UINT32_MAX)
+            return -EINVAL;
+    }
+    for (size_t i=0;i<n;++i) {
+        struct md_acl_entry *e=acl->entries+i;
+        if (e->tag!=MD_ACL_USER && e->tag!=MD_ACL_GROUP) continue;
+        e->id=into ? md_user_namespace_into(id->user_namespace,e->tag==MD_ACL_GROUP,e->id)
+            : md_identity_visible_id(id,e->tag==MD_ACL_GROUP,e->id);
+    }
+    /* Disjoint map extents can reverse numeric order. Storage validation and
+     * callers still receive ordered named entries; unmapped read IDs may alias. */
+    qsort(acl->entries,n,sizeof(*acl->entries),entry_order);
+    return 0;
 }
 unsigned md_acl_mode(const struct md_acl *acl,size_t size,unsigned mode) {
     mode &= ~0777U;

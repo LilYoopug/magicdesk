@@ -112,8 +112,8 @@ static void ownership(struct md_fs_anchor *a, struct md_fs_anchor *b) {
         assert(cwd==(flags&CLONE_FS ? b : a)); md_fs_anchor_release(cwd);
         struct md_fd_origins *old=child.files;
         struct md_resource_change change;
-        assert(!md_resources_unshare_prepare(&child,CLONE_FILES,&change));
-        assert(!md_resources_unshare_finish(NULL,&child,&change,-EINVAL));
+        assert(!md_resources_unshare_prepare(&child,CLONE_FILES,NULL,&change));
+        assert(!md_resources_unshare_finish(&child,NULL,&change,-EINVAL));
         assert(child.files==old);
         assert(!md_resources_exec(&child));
         assert(child.files!=parent.files);
@@ -121,13 +121,13 @@ static void ownership(struct md_fs_anchor *a, struct md_fs_anchor *b) {
         expect(parent.files,71,b,FD_CLOEXEC);
         md_domain_paths(child.fs,&root,&cwd); assert(cwd==b); md_fs_anchor_release(cwd);
         assert((parent.fs==child.fs)==!!(flags&CLONE_FS));
-        assert(!md_resources_release(NULL,&child));
+        assert(!md_resources_release(&child));
         md_fd_origins_pin(parent.files);
-        assert(!md_resources_unshare_prepare(&parent,CLONE_FILES,&change));
+        assert(!md_resources_unshare_prepare(&parent,CLONE_FILES,NULL,&change));
         assert(change.next.files==parent.files);
-        assert(!md_resources_unshare_finish(NULL,&parent,&change,0));
+        assert(!md_resources_unshare_finish(&parent,NULL,&change,0));
         md_fd_origins_unpin(parent.files);
-        assert(!md_resources_release(NULL,&parent));
+        assert(!md_resources_release(&parent));
     }
 }
 static void rollback(struct md_fs_anchor *a) {
@@ -139,26 +139,26 @@ static void rollback(struct md_fs_anchor *a) {
     for (int n=0;n<16;++n) {
         struct md_resource_change change;
         allocation_budget=n;
-        int result=md_resources_unshare_prepare(&child,CLONE_FS|CLONE_FILES|CLONE_SYSVSEM,&change);
+        int result=md_resources_unshare_prepare(&child,CLONE_FS|CLONE_FILES|CLONE_SYSVSEM,NULL,&change);
         allocation_budget=-1;
         assert(child.files==parent.files && child.fs==parent.fs);
         if (result) {
             assert(result==-ENOMEM && !change.next.files && !change.next.fs && !change.next.sem_undo);
         } else {
             assert(change.next.files!=parent.files && change.next.fs!=parent.fs);
-            assert(!md_resources_unshare_finish(NULL,&child,&change,-ECANCELED));
+            assert(!md_resources_unshare_finish(&child,NULL,&change,-ECANCELED));
             completed=1; break;
         }
         expect(parent.files,5,a,0); expect(parent.files,66,a,FD_CLOEXEC);
     }
     assert(completed);
     struct md_resource_change change;
-    assert(!md_resources_unshare_prepare(&child,CLONE_FILES,&change));
-    assert(!md_resources_unshare_finish(NULL,&child,&change,0));
+    assert(!md_resources_unshare_prepare(&child,CLONE_FILES,NULL,&change));
+    assert(!md_resources_unshare_finish(&child,NULL,&change,0));
     assert(child.files!=parent.files && child.fs==parent.fs);
     assert(!md_fd_origins_close_range(child.files,0,UINT_MAX,0));
     expect(child.files,5,NULL,0); expect(parent.files,5,a,0);
-    assert(!md_resources_release(NULL,&child)); assert(!md_resources_release(NULL,&parent));
+    assert(!md_resources_release(&child)); assert(!md_resources_release(&parent));
 }
 struct readers { struct md_fd_origins *table; struct md_fs_anchor *a, *b; pthread_barrier_t start; };
 static void *read_origins(void *context) {
@@ -188,7 +188,7 @@ static void registry_and_readers(struct md_fs_anchor *a, struct md_fs_anchor *b)
     assert(snapshot.files==resources.files && snapshot.cwd==a && snapshot.mounts==a->view);
     assert(!md_domain_set_cwd(resources.fs,b)); assert(snapshot.cwd==a);
     md_task_registry_forget(registry,123); md_task_registry_destroy(registry);
-    md_identity_release(&identity); assert(!md_resources_release(NULL,&resources));
+    md_identity_release(&identity); assert(!md_resources_release(&resources));
     put(snapshot.files,9,a,0);
     struct readers readers={.table=snapshot.files,.a=a,.b=b};
     assert(!pthread_barrier_init(&readers.start,NULL,2));
@@ -263,7 +263,7 @@ static void filesystem_ordering(struct md_fs_anchor *origin) {
         assert(md_fd_order_begin(child.files,&files,NULL)==1 && !md_fd_order_start(&files));
         assert(md_fs_order_begin(child.fs,&b,NULL)==!(flags&CLONE_FS));
         assert(md_fs_order_cancel(&a)==1);
-        assert(!md_resources_release(NULL,&parent) && !md_resources_release(NULL,&child));
+        assert(!md_resources_release(&parent) && !md_resources_release(&child));
         assert(!md_fs_order_complete(&a));
         assert(md_fs_order_state(&b)==MD_RESOURCE_ORDER_READY && !md_fs_order_start(&b));
         struct md_fs_location root;
@@ -489,12 +489,13 @@ static void batches(struct md_fs_anchor *a, struct md_fs_anchor *b) {
     assert(source && target);
     put(source,7,a,0); put(source,8,b,FD_CLOEXEC);
     int fds[]={7,8,900,-1,7}, destination[]={40,41,42,43,44};
-    struct md_fs_anchor *origins[5]={0};
+    struct md_fd_object *origins[5]={0};
     allocation_budget=0;
-    assert(!md_fd_origins_capture(source,fds,5,origins));
+    assert(!md_fd_origins_capture_objects(source,fds,5,origins));
     allocation_budget=-1;
     put(source,7,b,0); md_fd_origins_release(source);
-    assert(origins[0]==a && origins[1]==b && !origins[2] && !origins[3] && origins[4]==a);
+    assert(origins[0]==md_fs_anchor_object(a) && origins[1]==md_fs_anchor_object(b)
+        && !origins[2] && !origins[3] && origins[4]==md_fs_anchor_object(a));
     for (unsigned i=0;i<5;++i) put(target,destination[i],b,0);
     struct md_fd_origin_update updates[5]={0};
     for (int budget=0;budget<3;++budget) {
@@ -516,19 +517,19 @@ static void batches(struct md_fs_anchor *a, struct md_fs_anchor *b) {
         assert(md_fd_origins_finish_batch(updates,5,destination,6)==-EINVAL);
         for (unsigned i=0;i<5;++i) {
             int changed=pass && !(pass==2 && i>=3);
-            struct md_fs_anchor *expected=changed ? origins[i] : b;
+            struct md_fs_anchor *expected=changed ? md_fs_anchor_from_object(origins[i]) : b;
             expect(target,destination[i],expected,changed && expected ? FD_CLOEXEC : 0);
         }
         unsigned received=pass==2 ? 3 : 5;
         assert(!md_fd_origins_finish_batch(updates,5,destination,received));
         allocation_budget=-1;
         for (unsigned i=0;i<received;++i)
-            expect(target,destination[i],origins[i],origins[i] ? FD_CLOEXEC : 0);
+            expect(target,destination[i],md_fs_anchor_from_object(origins[i]),origins[i] ? FD_CLOEXEC : 0);
         for (unsigned i=received;i<5;++i) expect(target,destination[i],b,0);
         /* Peeks prepare independent deliveries from the same immutable snapshot. */
         for (unsigned i=0;i<5;++i) assert(!updates[i].table && !updates[i].entry);
     }
-    struct md_fs_anchor *unknowns[2]={0};
+    struct md_fd_object *unknowns[2]={0};
     allocation_budget=0;
     assert(!md_fd_origins_prepare_batch(target,unknowns,0,2,updates));
     assert(!md_fd_origins_finish_batch(updates,2,destination,2));
@@ -545,7 +546,7 @@ static void batches(struct md_fs_anchor *a, struct md_fs_anchor *b) {
     expect(target,40,NULL,0); expect(other,41,NULL,0);
     md_fd_origins_finish(updates,-1); md_fd_origins_finish(updates+1,-1);
     md_fd_origins_release(other);
-    for (unsigned i=0;i<5;++i) md_fs_anchor_release(origins[i]);
+    for (unsigned i=0;i<5;++i) md_fd_object_release(origins[i]);
 
     put(target,40,a,0); put(target,41,b,0);
     struct batch_reader reader={.table=target,.a=a,.b=b};
@@ -554,7 +555,7 @@ static void batches(struct md_fs_anchor *a, struct md_fs_anchor *b) {
     /* EVENT_WAIT: enter the concurrent snapshot/publication test together. */
     pthread_barrier_wait(&reader.start);
     for (unsigned i=0;i<10000;++i) {
-        struct md_fs_anchor *pair[]={i%2 ? a : b,i%2 ? b : a};
+        struct md_fd_object *pair[]={md_fs_anchor_object(i%2 ? a : b),md_fs_anchor_object(i%2 ? b : a)};
         assert(!md_fd_origins_prepare_batch(target,pair,0,2,updates));
         assert(!md_fd_origins_finish_batch(updates,2,destination,2));
     }
@@ -569,7 +570,7 @@ static void deliveries(struct md_fs_anchor *a, struct md_fs_anchor *b) {
     unsigned before=descriptors();
     struct md_fd_delivery delivery={0};
     struct md_fd_origins *files=md_fd_origins_new(); assert(files);
-    struct md_fs_anchor *origins[]={a,NULL,b};
+    struct md_fd_object *origins[]={md_fs_anchor_object(a),NULL,md_fs_anchor_object(b)};
     struct md_fd_origin_update updates[3];
     int numbers[3]={-9,-9,-9};
     int fds[]={open("/",O_PATH|O_CLOEXEC),open("/",O_PATH|O_CLOEXEC),open("/",O_PATH|O_CLOEXEC)};
@@ -637,7 +638,7 @@ static void deliveries(struct md_fs_anchor *a, struct md_fs_anchor *b) {
         assert(!delivery.capacity && md_fd_delivery_receipt(&delivery)==-1);
         assert(fcntl(receipt_fd,F_GETFD)==-1 && errno==EBADF);
         for (unsigned i=0;i<3;++i) {
-            struct md_fs_anchor *expected=i<count ? origins[i] : b;
+            struct md_fs_anchor *expected=i<count ? md_fs_anchor_from_object(origins[i]) : b;
             expect(pin,fds[i],expected,i<count && expected ? FD_CLOEXEC : 0);
             assert(fcntl(fds[i],F_GETFD)==FD_CLOEXEC);
         }
@@ -992,7 +993,8 @@ static void received_origins(struct md_fs_anchor *a, struct md_fs_anchor *b) {
         int fd=open("/dev/null",O_RDONLY|O_CLOEXEC); assert(fd>=0);
         sources->fds[sources->count++]=fd;
     }
-    struct md_fs_anchor *origins[]={a,NULL,b,a}, *unknown[4]={0}, *selected[4];
+    struct md_fd_object *origins[]={md_fs_anchor_object(a),NULL,md_fs_anchor_object(b),md_fs_anchor_object(a)};
+    struct md_fd_object *unknown[4]={0}, *selected[4];
     assert(md_received_fds_annotate(sources,origins,3)==-EINVAL);
     allocation_budget=0;
     assert(!md_received_fds_annotate(sources,unknown,4) && !sources->origins);
@@ -1008,7 +1010,8 @@ static void received_origins(struct md_fs_anchor *a, struct md_fs_anchor *b) {
     assert(md_received_fds_select(sources,indices,4,output,selected)==-EINVAL && output[0]==-1);
     indices[3]=3;
     assert(!md_received_fds_select(sources,indices,4,output,selected));
-    assert(selected[0]==a && selected[1]==b && !selected[2] && selected[3]==a);
+    assert(selected[0]==md_fs_anchor_object(a) && selected[1]==md_fs_anchor_object(b)
+        && !selected[2] && selected[3]==md_fs_anchor_object(a));
     for (unsigned i=0;i<4;++i) assert(output[i]==sources->fds[indices[i]]);
     struct md_received_fds *retained=md_received_fds_retain(sources);
     assert(md_received_fds_annotate(sources,origins,4)==-EBUSY);
@@ -1022,7 +1025,7 @@ static void received_origins(struct md_fs_anchor *a, struct md_fs_anchor *b) {
 static void vector_preparation(struct md_fs_anchor *a, struct md_fs_anchor *b, int observed) {
     unsigned before=descriptors();
     struct md_fd_origins *files=md_fd_origins_new(); assert(files);
-    struct md_fs_anchor *origins[]={a,b,NULL};
+    struct md_fd_object *origins[]={md_fs_anchor_object(a),md_fs_anchor_object(b),NULL};
     struct md_fd_origin_update updates[3]; int numbers[3], source=open("/dev/null",O_RDONLY|O_CLOEXEC);
     assert(source>=0); int sources[]={source,source,source};
     union { struct cmsghdr align; char bytes[512]; } storage={0};
@@ -1060,7 +1063,7 @@ static void observed_delivery(struct md_fs_anchor *a, struct md_fs_anchor *b) {
     unsigned before=descriptors();
     int directory=open("/proc/self/fd",O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(directory>=0);
     struct md_fd_origins *files=md_fd_origins_new(); assert(files);
-    struct md_fs_anchor *origins[]={a,b,NULL};
+    struct md_fd_object *origins[]={md_fs_anchor_object(a),md_fs_anchor_object(b),NULL};
     struct md_fd_origin_update updates[3]; int numbers[3];
     struct md_fd_table_observation observation={0};
     struct md_fd_delivery delivery={0};
@@ -1075,7 +1078,7 @@ static void observed_delivery(struct md_fs_anchor *a, struct md_fs_anchor *b) {
     for (unsigned i=0;i<2;++i) {
         assert(numbers[i]==observation.candidates[i]);
         unsigned flags=0; struct md_fs_anchor *actual=md_fd_origins_get(files,numbers[i],&flags);
-        assert(actual==origins[i] && flags==FD_CLOEXEC); md_fs_anchor_release(actual);
+        assert(md_fs_anchor_object(actual)==origins[i] && flags==FD_CLOEXEC); md_fs_anchor_release(actual);
         assert(!close(numbers[i]));
     }
     md_fd_delivery_dispose(&delivery); md_fd_origins_release(files); close(directory);
@@ -1097,7 +1100,8 @@ static void observed_return_failure(struct md_fs_anchor *a) {
         assert(directory>=0);
         struct md_fd_table_observation observation={0};
         int number=-19;
-        struct md_fd_return_publication publication={.origins=&a,.updates=&update,.numbers=&number,
+        struct md_fd_object *object=md_fs_anchor_object(a);
+        struct md_fd_return_publication publication={.origins=&object,.updates=&update,.numbers=&number,
             .observation=&observation,.directory=directory,.flags=FD_CLOEXEC};
         struct md_fd_return operation={0};
         assert(!md_fd_return_vector_begin(&operation,files,&source,1,&publication,NULL));
@@ -1130,8 +1134,9 @@ static struct md_fd_message *message_capture(struct md_fd_origins *source, unsig
 static void message_vector(const struct md_fd_message *record, struct md_fs_anchor *a,
         struct md_fs_anchor *b) {
     assert(md_fd_message_count(record)==MD_FD_RECEIPT_MAX);
-    struct md_fs_anchor *const *origins=md_fd_message_origins(record);
-    for (unsigned i=0;i<MD_FD_RECEIPT_MAX;++i) assert(origins[i]==(i%3==0 ? a : i%3==1 ? b : NULL));
+    struct md_fd_object *const *origins=md_fd_message_origins(record);
+    for (unsigned i=0;i<MD_FD_RECEIPT_MAX;++i)
+        assert(origins[i]==md_fs_anchor_object(i%3==0 ? a : i%3==1 ? b : NULL));
 }
 static void message_custody(struct md_fs_anchor *a, struct md_fs_anchor *b) {
     unsigned before=descriptors();
@@ -1248,7 +1253,7 @@ static void message_batches(struct md_fs_anchor *a) {
     assert(!md_fd_messages_publish(messages,record,&connection,carrier[0],pipefd[0]));
     allocation_budget=0;
     md_fd_messages_free(messages);
-    assert(md_fd_message_count(record)==1 && md_fd_message_origins(record)[0]==a);
+    assert(md_fd_message_count(record)==1 && md_fd_message_origins(record)[0]==md_fs_anchor_object(a));
     assert(fcntl(pipefd[0],F_GETFD)==-1 && errno==EBADF);
     assert(!close(carrier[0]) && !close(carrier[1]) && !close(pipefd[1]));
     allocation_budget=-1;
@@ -1267,7 +1272,7 @@ static void *read_message(void *opaque) {
     assert(!md_event_wait_fd(reader->ready,POLLIN,md_event_now()+5000000000LL));
     uint64_t ready; assert(read(reader->ready,&ready,sizeof(ready))==sizeof(ready));
     assert(md_fd_message_count(reader->record)==1);
-    struct md_fs_anchor *origin=md_fd_message_origins(reader->record)[0];
+    struct md_fs_anchor *origin=md_fs_anchor_from_object(md_fd_message_origins(reader->record)[0]);
     struct stat identity;
     assert(origin && !fstat(md_fs_anchor_fd(origin),&identity) && S_ISDIR(identity.st_mode));
     return NULL;

@@ -686,7 +686,7 @@ sys.stdin.read()
                 object_id = row[0]
             source, backing = db.execute('SELECT source,backing FROM objects WHERE object=?',
                                          (object_id,)).fetchone()
-            directory = pathlib.Path(db.execute('SELECT path FROM sources WHERE id=?', (source,)).fetchone()[0]) \
+            directory = pathlib.Path(db.execute('SELECT path FROM sources WHERE scope=? AND id=?', (ROOT, source)).fetchone()[0]) \
                 if source else store / 'objects'
             return directory / backing
 
@@ -914,6 +914,34 @@ sys.stdin.read()
         instance = self.root / 'instance'
         self.command('create', self.destination, instance)
         self.assertEqual(json.loads(self.command('inspect', instance).stdout)['config']['config']['Cmd'], ['/bin/sh'])
+
+    def test_overlay_control_attributes_snapshot_backup_and_tombstone(self):
+        source = self.root / 'rootfs.tar.gz'
+        source.write_bytes(gzip.compress(tar([
+            ('upper', 'dir', '', 0o755, 0, 0, {'user.overlay.opaque': b'y'}),
+            ('upper/deleted', 'file', b'', 0o600, 0, 0, {'trusted.overlay.whiteout': b''}),
+        ])))
+        self.command('rootfs', source, self.destination)
+        instance = self.root / 'instance'
+        self.command('create', self.destination, instance)
+        for store in (self.destination, instance):
+            with sqlite3.connect(store / 'namespace.db') as db:
+                self.assertEqual(db.execute('SELECT name,value FROM overlay_attributes ORDER BY name').fetchall(),
+                                 [(2, b'y'), (3, b'')])
+        body = self.body('upper', instance)
+        self.assertEqual(ctypes.CDLL(None).setxattr(os.fsencode(body), b'user.overlay.opaque', b'y', 1, 0), 0)
+        with sqlite3.connect(instance / 'namespace.db') as db:
+            db.execute('UPDATE overlay_attributes SET value=NULL WHERE name=2')
+        archive = self.root / 'backup.tar.zst'
+        restored = self.root / 'restored'
+        self.command('backup', instance, archive)
+        self.command('restore', archive, restored)
+        with sqlite3.connect(restored / 'namespace.db') as db:
+            self.assertEqual(db.execute('SELECT name,value FROM overlay_attributes').fetchall(), [(3, b'')])
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.getxattr.restype = ctypes.c_ssize_t
+        self.assertEqual(libc.getxattr(os.fsencode(self.body('upper', restored)), b'user.overlay.opaque', None, 0), -1)
+        self.assertEqual(ctypes.get_errno(), errno.ENODATA)
 
 
 if __name__ == '__main__':

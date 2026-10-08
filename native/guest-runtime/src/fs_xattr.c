@@ -1,9 +1,11 @@
 #define _GNU_SOURCE
 #include "fs_engine.h"
 #include "posix_acl.h"
+#include "inode_internal.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/xattr.h>
 #include <unistd.h>
@@ -43,39 +45,25 @@ static void selected(struct md_filesystem *fs, const struct md_fs_request *q,
             return;
         }
     }
-    /* Logical permission checks and copy-up select the current backing. Native
-     * attachments return EXDEV only after checking their readonly policy. */
-    local=(struct md_fs_request){.operation=MD_FS_XATTR_OPEN,.directory={fd,-1},
-        .origin={origin,NULL},.path={name,NULL},.mode=list ? F_OK : set || remove ? W_OK : R_OK};
-    md_fs_view_execute(fs,&local,out,NULL);
-    int backing=out->fd;
-    if (out->error && out->error!=-EXDEV) return;
+    /* The selected inode engine owns the complete operation. Native attachments
+     * return EXDEV only after checking their mount's readonly policy. */
+    local=*q; local.operation=MD_FS_XATTR_OBJECT;
+    local.directory[0]=fd; local.origin[0]=origin;
+    local.path[0]=NULL; local.flags&=3U;
+    md_fs_view_execute(fs,&local,out,output);
+    if (out->error!=-EXDEV) return;
     *out=(struct md_fs_result){.fd=-1};
-    char path[64]; snprintf(path,sizeof(path),"/proc/self/fd/%d",backing>=0 ? backing : fd);
+    char path[64]; snprintf(path,sizeof(path),"/proc/self/fd/%d",fd);
     void *data=output ? output->data : NULL;
     size_t capacity=output ? output->capacity : 0;
     ssize_t result;
     if (list) {
-        char names[128];
-        struct md_fs_output extra={.data=names,.capacity=sizeof(names)};
-        local=(struct md_fs_request){.operation=MD_FS_LISTATTR,.directory={fd,-1},.origin={origin,NULL}};
-        struct md_fs_result attributes;
-        md_fs_view_execute(fs,&local,&attributes,&extra);
-        if (attributes.error==-EXDEV || attributes.error==-ENODATA) attributes.size=0;
-        else if (attributes.error) { out->error=attributes.error; goto done; }
-        result=listxattr(path,NULL,0);
-        if (result<0) out->error=-errno;
-        else if ((size_t)result>MD_FS_VALUE_MAX-attributes.size) out->error=-E2BIG;
-        else if (!q->capacity) out->position=result+attributes.size;
-        else if ((size_t)result+attributes.size>q->capacity || capacity<q->capacity) out->error=-ERANGE;
+        if (q->capacity && (!data || capacity<q->capacity)) out->error=-ERANGE;
         else {
-            result=listxattr(path,data,q->capacity-attributes.size);
+            result=listxattr(path,q->capacity ? data : NULL,q->capacity);
             if (result<0) out->error=-errno;
-            else if ((size_t)result>q->capacity-attributes.size) out->error=-ERANGE;
-            else {
-                memcpy((char *)data+result,names,attributes.size);
-                out->size=out->position=result+attributes.size;
-            }
+            else if (result>MD_FS_VALUE_MAX) out->error=-E2BIG;
+            else { out->position=result; out->size=q->capacity ? result : 0; }
         }
     } else if (set) out->error=setxattr(path,name,q->value,q->value_size,q->flags&3U) ? -errno : 0;
     else if (remove) out->error=removexattr(path,name) ? -errno : 0;
@@ -85,10 +73,8 @@ static void selected(struct md_filesystem *fs, const struct md_fs_request *q,
         if (result<0) out->error=-errno;
         else { out->position=result; out->size=q->capacity ? result : 0; }
     }
-done:
-    if (backing>=0) close(backing);
 }
-void md_fs_xattr(struct md_filesystem *fs, const struct md_fs_request *q,
+static void execute(struct md_filesystem *fs, const struct md_fs_request *q,
         struct md_fs_result *out, const struct md_fs_output *output) {
     *out=(struct md_fs_result){.fd=-1};
     int descriptor=q->operation==MD_FS_FXATTR, path=q->path[0] && *q->path[0];
@@ -110,4 +96,34 @@ void md_fs_xattr(struct md_filesystem *fs, const struct md_fs_request *q,
     selected(fs,q,fd,origin,out,output);
     if (path) close(fd);
     md_fs_anchor_release(opened);
+}
+void md_fs_xattr(struct md_filesystem *fs, const struct md_fs_request *q,
+        struct md_fs_result *out, const struct md_fs_output *output) {
+    const struct md_identity *id=fs->store->identity;
+    const char *name=q->path[1] ? q->path[1] : "";
+    int mapped_acl=id && id->user_namespace
+        && (!strcmp(name,MD_ACL_ACCESS_NAME) || !strcmp(name,MD_ACL_DEFAULT_NAME));
+    struct md_acl *value=NULL;
+    struct md_fs_request local;
+    if (mapped_acl && q->mode==MD_FS_XATTR_SET && q->value_size) {
+        *out=(struct md_fs_result){.fd=-1};
+        if (!md_acl_valid(q->value,q->value_size)) {
+            uint32_t version=0;
+            if (q->value && q->value_size>=4) memcpy(&version,q->value,4);
+            out->error=q->value_size>=4 && version!=2 ? -EOPNOTSUPP : -EINVAL; return;
+        }
+        value=malloc(q->value_size);
+        if (!value) { out->error=-ENOMEM; return; }
+        memcpy(value,q->value,q->value_size);
+        out->error=md_acl_map(value,q->value_size,id,1);
+        if (out->error) { free(value); return; }
+        local=*q; local.value=value; q=&local;
+    }
+    execute(fs,q,out,output);
+    free(value);
+    if (!out->error && mapped_acl && q->mode==MD_FS_XATTR_GET && out->size) {
+        if (!output || !md_acl_valid(output->data,out->size)) out->error=-EIO;
+        else out->error=md_acl_map(output->data,out->size,id,0);
+        if (out->error) out->size=out->position=0;
+    }
 }

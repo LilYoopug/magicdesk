@@ -10,6 +10,8 @@ Android Activities, named environments or launcher configuration.
 | Mount view | Shared independently of `CLONE_FS`; `CLONE_NEWNS` copies | `CLONE_NEWNS` copies and separates FS context | Retained |
 | Descriptor-origin annotations | `CLONE_FILES` | `CLONE_FILES`, `CLOSE_RANGE_UNSHARE` | Detach; remove close-on-exec entries |
 | Semaphore undo | `CLONE_SYSVSEM` | `CLONE_SYSVSEM` | Retained |
+| UTS names | Shared; `CLONE_NEWUTS` copies | `CLONE_NEWUTS` copies | Retained |
+| SysV IPC namespace | Shared; `CLONE_NEWIPC` creates an empty namespace | `CLONE_NEWIPC` creates an empty namespace and separates semaphore undo | Retained |
 
 The kernel owns cwd, umask, descriptor tables and open-file descriptions.
 The filesystem context owns guest root selection, optional cwd provenance and the admitted proc-root
@@ -179,8 +181,7 @@ the relocated base and remap its parents. Recursive bind, child-busy checks and
 retirement traverse the base and attachments in one topological order. Returning
 to the base preserves its explicit root identity for subsequent pivots; mountinfo
 publishes the selected root once and the relocated base at its covered path.
-Tmpfs and overlay backends are not yet
-supported.
+Ephemeral and layered mounts use the filesystem backends described below.
 
 Mounted inode filesystems retain backing custody separately from their placement.
 Bind and namespace copies share that custody, not a SQLite connection or mount
@@ -880,8 +881,11 @@ per-request allocation. Only scoped-root adapter calls materialize a local
 filesystem configuration.
 
 Arbitrary native/proc roots outside explicit attachments return ENOTSUP.
-Native-directory pathname traversal through inherited `/proc` or `/dev`
-descriptors also remains unsupported after guest chroot. The separately admitted
+Retained `/proc` and `/dev` directory descriptors remain usable after root
+selection. Their task-owned paths return to the caller's provider, never the
+filesystem worker's `self`. Selecting the initial inode root preserves its
+proc/dev boundary; a different root or mounted filesystem has ordinary names
+there. The separately admitted
 `/proc/self/fd` and `fdinfo` restriction retains its irreversible policy. These
 explicit limits are not successful mount or namespace emulation.
 
@@ -918,15 +922,152 @@ prepare/commit/rollback transaction as `unshare(CLONE_FILES)`, then applies its
 range operation only after kernel success. Ordinary close_range, close and
 descriptor-flag calls use their actual results without emulating native data IO.
 
+## UTS And IPC Ownership
+
+`uts_namespace` owns the guest hostname and domain name. `--hostname` initializes
+that owner once; fork and exec retain it. `uname`, `sethostname` and
+`setdomainname` use the same owner, including nondumpable callers through the
+shared adapter-buffer lease. Mutations require CAP_SYS_ADMIN in the owner's user
+namespace. Android's hostname and domain name are not modified. The hostname,
+domainname, ostype, osrelease and version proc sysctls use typed control files.
+Each IO selects the caller's current UTS owner, including an FD inherited before
+unshare. Sysctl DAC uses canonical global IDs; namespace CAP_SYS_ADMIN does not
+override that check. Hostname/domainname support partial reads and strict string
+writes; the other fields are read-only.
+The same sysctl provider exposes the read-only UID/GID overflow values used by
+namespace consumers; it does not read Android's global sysctl as guest policy.
+
+`ipc_namespace` independently owns lazy SysV semaphore/message and shared-memory
+authorities. The initial namespace is store-scoped across launches; NEWIPC has a
+fresh identity with separate keys and object lookup. Namespace destruction
+retires its unremoved objects. A forked task shares the selected namespace;
+NEWIPC and CLONE_SYSVSEM cannot be combined in clone. Unshare separates undo
+ownership and releases old adjustments against the old authority.
+
+Shared-memory mappings retain the authority that admitted them, independently of
+the task's current IPC namespace. Unshare does not detach those mappings. Fork,
+partial unmap, shmdt and address-space retirement account against each mapping's
+original authority. Fork and exit batch database updates per authority, not per
+mapping. No mapping copy or extra data path is introduced.
+
+Namespace candidates are prepared before clone/unshare executes. A confirmed
+kernel birth/exit event publishes them; failure retires only the candidates.
+UTS and IPC owners retain their user-namespace authority. Internal identities
+and IPC metadata use canonical IDs; ABI reads translate them into the caller's
+view. `CLONE_NEWUSER` prepares a nested owner with immutable UID/GID maps,
+irreversible setgroups denial and scoped capabilities. UID/GID map files retain
+their target and opening credentials; write validates synchronously, including
+parent authority and CAP_SETFCAP for mapping parent UID zero. Stat, ownership,
+ACL, SysV and Unix peer/message credential boundaries translate canonical IDs.
+Inherited mounts retain placement and readonly locks in a less privileged owner.
+
+Proc control files share descriptor ownership, offsets, copying and cancellation
+through `proc_file`. Their lazy selector is armed only in tables receiving those
+objects. Local SCM_RIGHTS custody retains the same live object, including a
+nondumpable receiver; queue discard releases it through worker-owned pipe EOF
+observation. Cross-supervisor control-file transfer returns EXDEV, and an
+unframed native peer is rejected before transfer. Ordinary filesystem origins
+continue to use portable capsules that survive their publishing supervisor.
+
+User, mount, UTS and IPC namespace descriptors retain typed resource ownership,
+not a process number or an Android proc-directory handle. Stat/statfs, readlink,
+dup/reopen, `NS_GET_NSTYPE`, `NS_GET_OWNER_UID`, `NS_GET_USERNS` and `NS_GET_PARENT`
+use that identity. Related user namespaces must lie within the caller's user
+namespace; the initial user namespace has no parent. Related-FD publication
+uses the same ordered descriptor installation as ordinary proc control files.
+Local SCM_RIGHTS keeps namespace owners alive after the creating task exits.
+The namespace directory enumerates the implemented user/mount/UTS/IPC entries,
+independently of the host's CONFIG_USER_NS. Directory positions belong to a
+retained open description; dup/fork share it and rejected output copying does
+not advance it. A directory whose process has exited returns ENOENT, while
+already opened namespace handles remain usable.
+Process directories retain native entries and add exactly one UID map, GID map
+and setgroups entry, with inode identities matching the corresponding proc files.
+Enumeration builds a bounded lazy snapshot on that open description; ordinary
+file IO and directory opens that are never enumerated do not allocate it.
+Unmanaged host-process directories retain native handling.
+
+`setns` enters these four namespace kinds under the caller's file-table and FS
+turns. User entry requires a single-threaded process with an unshared FS context;
+reentry cannot replenish capabilities. Namespace-scoped authority is checked
+before preparing a candidate. Mount entry resolves the selected namespace's
+effective root and cwd on the filesystem worker, then publishes both with the
+selected view. Failure discards the candidate. Old dirfds retain their original
+view. IPC entry separates SEM_UNDO and releases adjustments against the old
+authority. Pidfd-based multi-namespace entry is not implemented.
+
+Logical tmpfs uses a private transient inode store, not Android's kernel tmpfs.
+It supports mode/uid/gid, ordinary file operations, shared native mappings,
+namespace copies, bind policy and retained detached descriptors. Backing files
+consume the store's disk space; memory accounting, quotas and size options are
+not advertised. Nosuid, nodev and noexec are per-mount policies, independently retained
+by aliases and frozen by less-privileged namespace copies.
+Existing-name creation errors precede readonly rejection: mkdir on an existing
+directory returns EEXIST, and a read-only O_CREAT open can select an existing
+file without gaining write authority.
+
+Bind operands can be exact retained files or directories, including proc-FD
+aliases. Their mount provenance survives detach/rebind; selecting a regular
+file does not substitute its parent directory. Native proc/dev sources use the
+task-local capture path. PRIVATE and SLAVE propagation requests retain the
+private topology: there are no shared peers or masters. SHARED and UNBINDABLE
+remain unsupported, rather than pretending to propagate later mount changes.
+
+Overlay builds an unpublished merged metadata index bottom-to-top.
+Regular-file bodies retain source custody without copying. Names, hardlinks,
+directory precedence and user/trusted whiteout/opaque markers select the merged
+tree. Directory attributes come from the highest layer rather than a union of
+attributes; overlay control xattrs are hidden through the merged view without
+modifying lower bodies. Lower trees must remain unchanged while mounted.
+Without an upper layer the resulting store is read-only and rejects writable
+remounts. A writable mount reserves disjoint upper/work directories in the same
+inode filesystem and retains them for the view's lifetime, including detached
+FDs. The view and upper use a single SQLite transaction: name changes, copy-up
+metadata, whiteout/opaque publication and rollback are not separate journals.
+The upper namespace shares promoted regular-file bodies; old lower descriptors
+retain their original contents. Channel identities preserve FIFO/socket traffic
+through copy-up and remount. Lower/merged directory rename returns EXDEV;
+pure-upper directories can be renamed. Upper namespace observers receive
+committed create/delete events. External mutation of the lower or upper while
+mounted is not a supported synchronization mechanism. An overlay view as the
+upper filesystem is rejected; ordinary and transient inode stores are supported.
+Mounting credentials are retained with the view and checked alongside current
+caller permissions, including ACLs, metadata changes and upper sticky directories.
+Custody transfer and worker reconnection preserve this snapshot and its namespace.
+Denied publication rolls back merged/upper metadata together. Data IO through
+already admitted native descriptors retains its existing kernel behavior.
+
+Noexec admission applies to each executable, script interpreter and ELF loader,
+including descriptor-based execution and mount aliases. X_OK on regular files
+observes the same policy; directory traversal remains permitted. File-backed
+mmap captures live mount policy under the file-table turn. PROT_EXEC is rejected
+on a noexec mount, while a non-executable mapping retains its missing VM_MAYEXEC
+permission independently of FD closure or later remount. Mprotect cannot restore
+that permission. An earlier mapping from an executable mount keeps its original
+rights, matching the kernel's per-VMA policy rather than a retroactive remount.
+
+The address-space owner records only noexec intervals. Split/replacement, unmap,
+remap and fork share its existing resource turn; successful kernel results
+publish preallocated metadata. Failed calls preserve the old intervals. Ordinary
+read/write and non-replacing anonymous mmap remain native, with no policy record.
+File mmap is observed for live mount policy; executable mprotect and destructive
+mapping calls enter the supervisor, but unrelated calls need no syscall-exit
+observation. Adapter mappings use their admitted source through the existing raw
+gate. If a task loses an unobserved noexec mapping result, surviving CLONE_VM
+users receive EIO for subsequent executable mprotect rather than permission
+based on an assumed rollback. A fresh exec owns a fresh address space.
+
 ## Boundaries
 
 Concurrent named environments and launch-local attachments are not kernel Linux
-namespaces. Guest `CLONE_NEWNS` has the mount-view contract above;
-`CLONE_NEWUSER`, `CLONE_NEWIPC`, `CLONE_NEWUTS`,
-`CLONE_NEWPID`, `CLONE_NEWNET`, cgroup/time namespaces and `setns` are not
-implemented. Their creation is not reported as successful. Shared mutable mount
-publication, additional filesystem backends and user-namespace mappings remain
-separate contracts.
+namespaces. Guest `CLONE_NEWNS`, `CLONE_NEWUSER`, `CLONE_NEWIPC` and
+`CLONE_NEWUTS` have the contracts above. `CLONE_NEWPID`, `CLONE_NEWNET`,
+cgroup/time namespaces are not implemented. Their creation is not reported as
+successful. POSIX message-queue namespaces and UTS sysctl priority-change
+notification are not implemented. They must not be inferred from SysV separation
+or live sysctl reads. Tmpfs quotas remain open; unsupported
+options fail explicitly. Saved overlay credentials do not establish
+kernel-equivalent confinement for unadapted native access.
 
 Guest filesystem calls use mapped requests, not private per-call RPC sockets.
 The admitted table-owned export/return endpoints have explicit table lifetime;
@@ -954,6 +1095,21 @@ launches or peer guest processes. Programs retain the executor's host authority;
 successful browser execution is not proof of complete sandbox equivalence.
 
 ## Verification
+
+`test_namespace_apps.py BUILD STORE` runs stock Bubblewrap in a disposable
+Debian userspace under actual UID 2000. Cases cover a basic command, a read-only
+root with writable tmpfs, mapped UID/GID and hostname, and nested user/mount/UTS/
+IPC owners with independent temporary filesystems. `--trace` repeats these
+production paths through stock strace. Both the command exit and explicit output
+are checked; this is compatibility coverage, not kernel-equivalent isolation.
+The browser namespace-selection limitation remains separate in
+[Shroot](../../docs/guest-runtime.md#application-filters-and-browsers).
+
+The mount-flags fixture also transfers a noexec origin over SCM_RIGHTS to a
+nondumpable receiver with an installed application filter and an independent
+executable mount alias. The sender detaches its mount before the receiver
+checks mmap/mprotect: the received origin keeps its restriction while a fresh
+open through the receiver's own alias remains executable.
 
 `test_resources.py BUILD --case rpc` runs the filesystem transport fixture.
 Its exchange-ownership cases hold the client socket open through cancellation

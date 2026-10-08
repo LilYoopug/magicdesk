@@ -1,5 +1,7 @@
 #define _GNU_SOURCE
 #include "inode_internal.h"
+#include "inode_view.h"
+#include "inode_overlay.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/fs.h>
@@ -41,7 +43,8 @@ int md_inode_descriptor_source(struct md_inode_store *s, int fd, char *out, size
 }
 int mdi_sources_open(struct md_inode_store *s) {
     sqlite3_stmt *q = NULL;
-    int r = mdi_prepare(s, "SELECT id,path,device,inode FROM sources", &q);
+    int r = mdi_prepare(s, "SELECT id,path,device,inode FROM sources WHERE scope=?1", &q);
+    if (!r) r=mdi_bind_id(q,1,s->lifetime->scope);
     while (!r) {
         int rc = mdi_step(s, q);
         if (rc == SQLITE_DONE) break;
@@ -74,12 +77,18 @@ int mdi_source_register(struct md_inode_store *s, int objects, int *id) {
     if (!realpath(proc, path)) return -errno;
     struct stat st;
     if (fstat(objects, &st)) return -errno;
+    struct stat local;
+    if (fstat(s->objects,&local)) return -errno;
+    if (st.st_dev==local.st_dev && st.st_ino==local.st_ino) { *id=0; return 0; }
     sqlite3_stmt *q = NULL;
-    int r = mdi_prepare(s, "INSERT INTO sources(path,device,inode) VALUES(?1,?2,?3) "
-        "ON CONFLICT(device,inode) DO UPDATE SET path=excluded.path RETURNING id", &q);
+    int r = mdi_prepare(s, "INSERT INTO sources(id,path,device,inode,scope) VALUES("
+        "coalesce((SELECT id FROM sources WHERE scope=?4 AND device=?2 AND inode=?3),"
+        "(SELECT coalesce(max(id),0)+1 FROM sources WHERE scope=?4)),?1,?2,?3,?4) "
+        "ON CONFLICT(scope,device,inode) DO UPDATE SET path=excluded.path RETURNING id", &q);
     if (!r) r = mdi_sql_error(sqlite3_bind_text(q, 1, path, -1, SQLITE_STATIC));
     if (!r) r = mdi_sql_error(sqlite3_bind_int64(q, 2, (sqlite3_int64)st.st_dev));
     if (!r) r = mdi_sql_error(sqlite3_bind_int64(q, 3, (sqlite3_int64)st.st_ino));
+    if (!r) r=mdi_bind_id(q,4,s->lifetime->scope);
     if (!r) {
         int rc = mdi_step(s, q);
         if (rc != SQLITE_ROW) r = mdi_sql_failure(rc);
@@ -89,28 +98,32 @@ int mdi_source_register(struct md_inode_store *s, int objects, int *id) {
 }
 
 int mdi_import_shared(struct md_inode_store *s, int source, const char *backing, struct mdi_node *node) {
-    if (source <= 0 || source >= MDI_SOURCES || s->lifetime->sources[source] < 0
+    if (source < 0 || source >= MDI_SOURCES || (source && s->lifetime->sources[source] < 0)
             || strlen(backing) != 32 || strspn(backing, "0123456789abcdef") != 32) return -EINVAL;
     struct stat st;
-    if (fstatat(s->lifetime->sources[source], backing, &st, AT_SYMLINK_NOFOLLOW)) return -errno;
+    if (fstatat(source ? s->lifetime->sources[source] : s->objects, backing, &st, AT_SYMLINK_NOFOLLOW)) return -errno;
     if (!S_ISREG(st.st_mode)) return -EINVAL;
     char id[33];
     int r = mdi_random_id(id);
     sqlite3_stmt *q = NULL;
-    if (!r) r = mdi_prepare(s, "INSERT INTO objects(object,kind,device,inode,backing,shared,source,logical_inode,logical_device) "
-        "VALUES(?1,32768,?2,?3,?4,1,?5,?3,?2)", &q);
+    if (!r) r = mdi_prepare(s, "INSERT INTO objects(object,kind,device,inode,backing,shared,source,logical_inode,logical_device,scope) "
+        "VALUES(?1,32768,?2,?3,?4,1,?5,?3,?2,?6)", &q);
     if (!r) r = mdi_bind_id(q, 1, id);
     if (!r) r = mdi_sql_error(sqlite3_bind_int64(q, 2, (sqlite3_int64)st.st_dev));
     if (!r) r = mdi_sql_error(sqlite3_bind_int64(q, 3, (sqlite3_int64)st.st_ino));
     if (!r) r = mdi_bind_id(q, 4, backing);
     if (!r) r = mdi_sql_error(sqlite3_bind_int(q, 5, source));
+    if (!r) r = mdi_bind_id(q,6,s->lifetime->scope);
     if (!r) r = mdi_sql_error(mdi_step(s, q));
     sqlite3_finalize(q);
     if (!r) r = mdi_node(s, id, node);
     return r;
 }
 
-static int attributes(int source, int destination) {
+static int private_attribute(const char *name) {
+    return !strncmp(name,"user.overlay.",13) || !strncmp(name,"trusted.overlay.",16);
+}
+static int copy_attributes(int source, int destination,int overlay) {
     ssize_t size = flistxattr(source, NULL, 0);
     if (size < 0) return -errno;
     if (!size) return 0;
@@ -123,7 +136,7 @@ static int attributes(int source, int destination) {
         size_t length = strnlen(name, (size_t)size-at);
         if (length == (size_t)size-at) { r = -EIO; break; }
         at += length+1;
-        if (!strcmp(name, "security.selinux")) continue;
+        if (!strcmp(name, "security.selinux") || (overlay && private_attribute(name))) continue;
         ssize_t count = fgetxattr(source, name, NULL, 0);
         if (count < 0 || count > 65536) { r = count < 0 ? -errno : -E2BIG; break; }
         void *value = malloc(count ? (size_t)count : 1);
@@ -134,6 +147,27 @@ static int attributes(int source, int destination) {
     }
     free(names); return r;
 }
+int mdi_copy_attributes(int source,int destination) { return copy_attributes(source,destination,0); }
+static int replace_attributes(int source, int destination,int overlay) {
+    ssize_t size=flistxattr(destination,NULL,0);
+    if (size<0) return -errno;
+    if (size>65536) return -E2BIG;
+    char *names=size ? malloc((size_t)size) : NULL;
+    if (size && !names) return -ENOMEM;
+    int r=size && flistxattr(destination,names,(size_t)size)!=size ? -ESTALE : 0;
+    for (size_t at=0; !r && at<(size_t)size;) {
+        const char *name=names+at;
+        size_t length=strnlen(name,(size_t)size-at);
+        if (length==(size_t)size-at) { r=-EIO; break; }
+        at+=length+1;
+        if (strcmp(name,"security.selinux") && !(overlay && private_attribute(name))
+                && fremovexattr(destination,name)) r=-errno;
+    }
+    free(names);
+    return r ? r : copy_attributes(source,destination,overlay);
+}
+int mdi_replace_attributes(int source,int destination) { return replace_attributes(source,destination,0); }
+int mdi_overlay_replace_attributes(int source,int destination) { return replace_attributes(source,destination,1); }
 static int copy_bytes(struct md_inode_store *s, int source, int destination, off_t size) {
     if (!s->reflink_unavailable) {
         if (!ioctl(destination, FICLONE, source)) return 0;
@@ -157,8 +191,18 @@ static int copy_bytes(struct md_inode_store *s, int source, int destination, off
     }
     return 0;
 }
+int mdi_copy_body(struct md_inode_store *s, int source, int destination, const struct stat *before) {
+    int r=copy_bytes(s,source,destination,before->st_size);
+    if (!r) r=mdi_copy_attributes(source,destination);
+    struct timespec times[2]={before->st_atim,before->st_mtim};
+    if (!r && (fchmod(destination,before->st_mode&01777) || futimens(destination,times)
+            || fsync(destination))) r=-errno;
+    return r;
+}
 int mdi_copy_up(struct md_inode_store *s, struct mdi_node *node) {
     if (s->readonly) return -EROFS;
+    int mark=s->overlay ? mdi_overlay_touch(s,node) : 0;
+    if (mark) return mark;
     if (!node->shared) return 0;
     if (node->kind != S_IFREG) return -EIO;
     int directory = mdi_backing_directory(s, node);
@@ -176,11 +220,8 @@ int mdi_copy_up(struct md_inode_store *s, struct mdi_node *node) {
      * Publication exposes only future application IO to namespace observers. */
     if (!r && (destination = openat(s->lifetime->root, temporary, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600)) < 0)
         r = -errno;
-    if (!r) r = copy_bytes(s, source, destination, before.st_size);
-    if (!r) r = attributes(source, destination);
-    struct timespec times[2] = {before.st_atim, before.st_mtim};
-    if (!r && (fchmod(destination, before.st_mode & 01777) || futimens(destination, times)
-            || fsync(destination) || fstat(destination, &after))) r = -errno;
+    if (!r) r = mdi_copy_body(s,source,destination,&before);
+    if (!r && fstat(destination, &after)) r = -errno;
     if (destination >= 0) { if (close(destination) && !r) r = -errno; destination = -1; }
     if (!r && renameat(s->lifetime->root, temporary, s->objects, backing)) r = -errno;
     if (!r && (fsync(s->objects) || fsync(s->lifetime->root))) r = -errno;
@@ -200,10 +241,13 @@ int mdi_copy_up(struct md_inode_store *s, struct mdi_node *node) {
     return r;
 }
 int md_inode_store_seal(struct md_inode_store *s) {
+    if (strcmp(s->lifetime->scope,MDI_ROOT)) return -EINVAL;
     if (s->readonly) return 0;
     int r = mdi_begin(s, 1);
     if (r) return r;
-    r = mdi_sql(s, "UPDATE properties SET value=1 WHERE key='sealed'");
+    r=mdi_views_collect(s);
+    if (!r) r=mdi_views_busy(s);
+    if (!r) r = mdi_sql(s, "UPDATE properties SET value=1 WHERE key='sealed'");
     r = mdi_commit(s, r);
     if (!r) s->readonly = 1;
     return r;
@@ -228,10 +272,11 @@ int md_inode_prepare_reopen(struct md_inode_store *s, int original, int flags, i
     r = mdi_fd(s, original, &node);
     if (!r && (flags & O_DIRECTORY) && node.kind != S_IFDIR) r = -ENOTDIR;
     if (!r) r = mdi_open_permission(s, &node, flags);
-    if (!r && mutable && (flags & O_PATH) && s->identity && !md_identity_capable(s->identity, CAP_FOWNER)) {
+    if (!r && mutable && (flags & O_PATH) && s->identity) {
         struct stat st;
         r = mdi_stat(s, &node, &st);
-        if (!r && st.st_uid != s->identity->uid.fs) r = -EPERM;
+        if (!r && st.st_uid != s->identity->uid.fs
+                && !md_identity_file_capable(s->identity,st.st_uid,st.st_gid,CAP_FOWNER)) r = -EPERM;
     }
     if (!r && write) r = mdi_copy_up(s, &node);
     int fd = -1;

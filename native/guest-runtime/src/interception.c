@@ -6,6 +6,7 @@
 #include "socket_ancillary.h"
 #include "raw.h"
 #include "interception.h"
+#include "proc_control.h"
 #include "guest_domain.h"
 #include "watch_calls.h"
 #include "fd_client.h"
@@ -18,6 +19,7 @@
 #include <linux/seccomp.h>
 #include <sched.h>
 #include <sys/prctl.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/utsname.h>
 
@@ -78,11 +80,21 @@ extern char md_guest_buffer_admitted[];
 static long dispatch_files(const struct md_fs *fs, long nr, unsigned long a0, unsigned long a1, unsigned long a2,
         unsigned long a3, unsigned long a4, unsigned long a5) {
     unsigned long args[] = {a0, a1, a2, a3, a4, a5};
-    if (nr==SYS_uname) {
-        struct utsname identity;
-        long r=RAW1(uname,&identity);
-        if (!r && md_hostname[0]) md_copy(identity.nodename,sizeof(identity.nodename),md_hostname);
-        return r ? r : md_write_memory((void *)a0,&identity,sizeof(identity));
+    if (nr==SYS_read || nr==SYS_write || nr==SYS_readv || nr==SYS_writev
+            || nr==SYS_pread64 || nr==SYS_pwrite64 || nr==SYS_preadv || nr==SYS_pwritev
+            || nr==SYS_preadv2 || nr==SYS_pwritev2 || nr==SYS_lseek || nr==SYS_ioctl) {
+        long result=md_proc_control_call(nr,args);
+        if (result!=MD_WATCH_NATIVE) return result;
+    }
+    if (nr==SYS_uname || nr==SYS_sethostname || nr==SYS_setdomainname) {
+        if (nr!=SYS_uname && a1>=sizeof(((struct utsname *)0)->nodename)) return -EINVAL;
+        long memory=md_adapter_buffer_take();
+        if (memory<0) return memory;
+        long result=nr==SYS_uname ? 0 : md_read_memory((void *)memory,(void *)a0,a1);
+        if (!result) result=md_guest_buffer_control(MD_BUFFER_UTS,0,0);
+        if (!result && nr==SYS_uname) result=md_write_memory((void *)a0,(void *)memory,sizeof(struct utsname));
+        long released=md_adapter_buffer_release();
+        return result ? result : released;
     }
     if (nr == SYS_shmget || nr == SYS_shmat || nr == SYS_shmdt || nr == SYS_shmctl)
         return md_shm_dispatch(nr,args);
@@ -224,11 +236,12 @@ int md_interception_install(int inherited) {
             /* Descriptor metadata must remain serviceable after an application
              * installs a higher-precedence filter or becomes nondumpable. */
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_prctl, 0, 10),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_prctl, 0, 11),
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_FD_CHANNEL, 6, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_BUFFER, 5, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_PROC_IMAGE, 4, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_FD_CHANNEL, 7, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_BUFFER, 6, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_PROC_IMAGE, 5, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_PROC_FILE, 4, 0),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_SHM, 3, 0),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_IPC, 2, 0),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_MAP_IMAGE, 1, 0),
@@ -249,7 +262,34 @@ int md_interception_install(int inherited) {
             NATIVE(read) NATIVE(write) NATIVE(readv) NATIVE(writev)
             NATIVE(pread64) NATIVE(pwrite64)
             NATIVE(futex) NATIVE(set_robust_list) NATIVE(get_robust_list)
-            NATIVE(mmap) NATIVE(munmap) NATIVE(mprotect) NATIVE(madvise) NATIVE(brk)
+            /* Adapter/loader mappings use already admitted objects, not a
+             * second application operation or a new address-space turn. */
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)+4),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)(gate>>32),0,11),
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)gate,0,9),
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+            NATIVE(mmap) NATIVE(munmap) NATIVE(mremap) NATIVE(mprotect)
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+            /* File mappings require their descriptor's live mount policy.
+             * Anonymous non-replacing mappings and ordinary data IO stay native. */
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_mmap,0,6),
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[3])),
+            BPF_JUMP(BPF_JMP|BPF_JSET|BPF_K,MAP_FIXED,2,0),
+            BPF_JUMP(BPF_JMP|BPF_JSET|BPF_K,MAP_ANONYMOUS,0,1),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_MEMORY),
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_munmap,0,1),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_MEMORY),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_mremap,0,1),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_MEMORY),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_mprotect,0,4),
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[2])),
+            BPF_JUMP(BPF_JMP|BPF_JSET|BPF_K,PROT_EXEC,0,1),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_MEMORY),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
+            NATIVE(madvise) NATIVE(brk)
             NATIVE(rt_sigaction) NATIVE(rt_sigprocmask) NATIVE(rt_sigreturn) NATIVE(sigaltstack)
             NATIVE(getpid) NATIVE(getppid) NATIVE(gettid)
             NATIVE(getrandom) NATIVE(clock_gettime)
@@ -292,8 +332,7 @@ int md_interception_install(int inherited) {
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRACE | MD_INTERCEPT_EXEC),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRACE | MD_INTERCEPT_NATIVE),
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_uname, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, md_hostname[0] ? SECCOMP_RET_TRACE | MD_INTERCEPT_DISPATCH : SECCOMP_RET_ALLOW),
+            TRACE(uname) TRACE(sethostname) TRACE(setdomainname)
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_fstat, 0, 1),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
 #define IDENTITY(n) BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_##n, 0, 1), \
@@ -342,6 +381,6 @@ int md_interception_install(int inherited) {
     if (!result) md_guest_ready(listener, md_files.endpoint, MD_INTERCEPTION_MAGIC, &abi);
     if (!result) md_fd_client_enable();
     if (listener >= 0) RAW1(close, listener);
-    if (!result && md_files.endpoint[0]) result=md_adapter_buffer_install();
+    if (!result) result=md_adapter_buffer_install();
     return result;
 }

@@ -17,7 +17,11 @@
 
 void test_mount_copy(const char *base);
 void test_mount_storage(const char *base);
+void test_transient_store(const char *base);
+void test_inode_view(const char *base);
+int test_transient_store_child(int argc, char **argv);
 void test_fs_anchor(const char *base);
+void test_user_namespace_fs(const char *base);
 void test_mount_alias(const char *base);
 void test_mount_policy(const char *base);
 int test_mount_policy_child(int argc, char **argv);
@@ -258,6 +262,11 @@ static void task_mount_views(const char *base) {
     puts("PASS task-selected mount views, readonly policy, authenticated snapshots, stale roots and retained lifetime");
 }
 int main(int argc, char **argv) {
+    int transient=test_transient_store_child(argc,argv);
+    if (transient>=0) return transient;
+    if (argc==3 && !strcmp(argv[1],"--transient-store")) {
+        assert(!mkdir(argv[2],0700)); test_transient_store(argv[2]); test_inode_view(argv[2]); return 0;
+    }
     if (argc==3 && !strcmp(argv[1],"--mount-storage")) {
         assert(!mkdir(argv[2],0700)); test_mount_storage(argv[2]); return 0;
     }
@@ -370,8 +379,11 @@ int main(int argc, char **argv) {
             assert(descriptors()==before_metadata);
         }
     }
-    result = call(&fs, MD_FS_XATTR_OPEN, ro, "user.test", 0, W_OK, NULL, 0); assert(result.error == -EROFS);
-    result = call(&fs, MD_FS_XATTR_OPEN, ro, "", 0, F_OK, NULL, 0); assert(result.error == -EXDEV);
+    struct md_fs_request permission={.operation=MD_FS_XATTR_OBJECT,.directory={ro,-1},
+        .path={NULL,"user.test"},.mode=MD_FS_XATTR_SET};
+    md_fs_execute(&fs,&permission,&result,NULL); assert(result.error==-EROFS);
+    permission.mode=MD_FS_XATTR_LIST; permission.path[1]=NULL;
+    md_fs_execute(&fs,&permission,&result,NULL); assert(result.error==-EXDEV);
     for (unsigned descriptor=0;descriptor<2;++descriptor) {
         struct md_fs_request attr={.operation=descriptor ? MD_FS_FXATTR : MD_FS_XATTR,
             .directory={descriptor ? fd : -1,-1},.path={descriptor ? NULL : "/volume/file","user.md-worker"},
@@ -471,7 +483,10 @@ int main(int argc, char **argv) {
     task_mount_views(argv[1]);
     test_mount_copy(argv[1]);
     test_mount_storage(argv[1]);
+    test_transient_store(argv[1]);
+    test_inode_view(argv[1]);
     test_fs_anchor(argv[1]);
+    test_user_namespace_fs(argv[1]);
     test_mount_alias(argv[1]);
     test_mount_policy(argv[1]);
     test_mount_graph(argv[1]);

@@ -2,6 +2,7 @@
 #include "command_image.h"
 #include "elf.h"
 #include "linux_abi.h"
+#include "mount_policy.h"
 #include "raw.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -32,7 +33,7 @@ int md_command_script(char header[MD_SCRIPT_HEADER], char **name, char **argumen
 void md_command_images_close(struct md_command_images *images) {
     if (images->program>=0) RAW1(close,images->program);
     if (images->loader>=0) RAW1(close,images->loader);
-    *images=(struct md_command_images){-1,-1};
+    *images=(struct md_command_images){.program=-1,.loader=-1};
 }
 static long readable(int input) {
     struct stat st;
@@ -50,7 +51,7 @@ static long readable(int input) {
 }
 int md_command_images_prepare(struct md_command_recipe *recipe, struct md_command_images *images,
         const struct md_program *first, int inaccessible, md_command_acquire acquire, void *context) {
-    *images=(struct md_command_images){-1,-1};
+    *images=(struct md_command_images){.program=-1,.loader=-1};
     memset(recipe,0,sizeof(*recipe));
     struct md_program current=*first;
     long r=readable(first->fd);
@@ -58,7 +59,8 @@ int md_command_images_prepare(struct md_command_recipe *recipe, struct md_comman
     current.fd=(int)r;
     for (;;) {
         images->program=current.fd;
-        r=RAW4(faccessat2,current.fd,"",X_OK,AT_EMPTY_PATH|MD_AT_EACCESS);
+        r=current.mount_flags&MD_MOUNT_NOEXEC ? -EACCES
+            : RAW4(faccessat2,current.fd,"",X_OK,AT_EMPTY_PATH|MD_AT_EACCESS);
         struct stat st;
         if (!r) r=RAW2(fstat,current.fd,&st);
         if (!r && (!S_ISREG(st.st_mode) || (st.st_mode&(S_ISUID|S_ISGID)))) r=-EACCES;
@@ -73,7 +75,8 @@ int md_command_images_prepare(struct md_command_recipe *recipe, struct md_comman
                 r=acquire(context,interpreter,&loader);
                 if (!r) {
                     images->loader=loader.fd;
-                    r=RAW4(faccessat2,loader.fd,"",X_OK,AT_EMPTY_PATH|MD_AT_EACCESS);
+                    r=loader.mount_flags&MD_MOUNT_NOEXEC ? -EACCES
+                        : RAW4(faccessat2,loader.fd,"",X_OK,AT_EMPTY_PATH|MD_AT_EACCESS);
                     if (!r) r=md_elf_validate(loader.fd,1);
                 }
             }
@@ -81,6 +84,7 @@ int md_command_images_prepare(struct md_command_recipe *recipe, struct md_comman
                 md_copy(recipe->image.path,sizeof(recipe->image.path),current.identity.path);
                 memcpy(recipe->image.object,current.identity.object,sizeof(recipe->image.object));
                 recipe->loader=images->loader>=0;
+                images->mount_flags=current.mount_flags;
                 return 0;
             }
             break;

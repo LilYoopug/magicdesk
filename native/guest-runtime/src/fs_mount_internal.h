@@ -5,6 +5,18 @@
 #include "mount_namespace_internal.h"
 #include <limits.h>
 #include <stdatomic.h>
+#include <sys/mount.h>
+
+static inline unsigned md_fs_mount_flags(unsigned flags) {
+    return ((flags&MS_RDONLY) ? MD_MOUNT_READONLY : 0)
+        | ((flags&MS_NOSUID) ? MD_MOUNT_NOSUID : 0)
+        | ((flags&MS_NODEV) ? MD_MOUNT_NODEV : 0)
+        | ((flags&MS_NOEXEC) ? MD_MOUNT_NOEXEC : 0);
+}
+struct md_view_location;
+int md_fs_mount_temporary(struct md_filesystem *, const struct md_fs_request *, const struct md_view_location *);
+int md_fs_mount_overlay(struct md_filesystem *, const struct md_fs_request *, const struct md_view_location *);
+int md_fs_private_mounts_parent(struct md_inode_store *);
 
 enum { MD_VIEW_BUCKETS = 4096, MD_VIEW_OBJECT_LIMIT = 65536 };
 static inline int md_view_base(const struct md_mount_namespace *view, const struct md_view_mount *m) {
@@ -43,7 +55,7 @@ struct md_view_location {
     char name[NAME_MAX+1];
 };
 struct md_fs_anchor {
-    atomic_uint refs;
+    struct md_fd_object object;
     struct md_inode_lifetime *lifetime;
     struct md_mount_namespace *view;
     struct md_view_mount *mount;
@@ -63,6 +75,13 @@ int md_view_backing_path(struct md_filesystem *, int fd, const struct md_view_mo
 int md_view_attach_storage(struct md_filesystem *, struct md_inode_store *, int source,
         const struct md_view_location *target, unsigned policy);
 struct md_view_object *md_view_object(struct md_filesystem *, const char *id);
+/* Internal lookup opt-in: report task-owned proc traversal to the adapter
+ * before executing an operation. Never admitted as an openat2 resolve flag. */
+#define MD_VIEW_TASK_PATH (UINT64_C(1)<<63)
+int md_view_descriptor(struct md_filesystem *, int, const struct md_fs_anchor *, struct md_view_location *);
+/* Native device delegation is only for unannotated inherited descriptors.
+ * Attached devices must complete in the mount engine, including nodev policy. */
+int md_view_task_path(struct md_filesystem *, int, const char *, const char *, uint64_t, int native_devices);
 int md_view_walk(struct md_filesystem *, int base, const struct md_fs_anchor *, const char *path, int follow, int missing,
         uint64_t resolve, struct md_view_location *);
 void md_view_location_close(struct md_view_location *);

@@ -165,7 +165,9 @@ static void store_custody(const char *base) {
     struct md_fs_anchor *pins[]={anchor(&fs,"/"),anchor(&fs,"/value"),anchor(&fs,"/native")};
     struct md_fd_origins *source=md_fd_origins_new(); assert(source);
     int fds[3]; struct md_fd_origin_update updates[3];
-    assert(!md_fd_origins_prepare_batch(source,pins,0,3,updates));
+    struct md_fd_object *objects[3];
+    for (unsigned i=0;i<3;++i) objects[i]=md_fs_anchor_object(pins[i]);
+    assert(!md_fd_origins_prepare_batch(source,objects,0,3,updates));
     for (unsigned i=0;i<3;++i) fds[i]=md_fs_anchor_fd(pins[i]);
     assert(!md_fd_origins_finish_batch(updates,3,fds,3));
     struct md_fd_order turn={0};
@@ -195,7 +197,8 @@ static void store_custody(const char *base) {
     assert(!rename(upper,moved));
     assert(!md_inode_store_open(moved,0,&store));
     fs=(struct md_filesystem){.store=store}; assert(!md_fs_mounts_open(&fs,NULL,0));
-    struct md_fs_anchor *const *origins=md_fd_message_origins(message);
+    struct md_fs_anchor *origins[3];
+    for (unsigned i=0;i<3;++i) origins[i]=md_fs_anchor_from_object(md_fd_message_origins(message)[i]);
     opens(&fs,origins[0],"value",O_RDONLY,0,0);
     opens(&fs,origins[2],"value",O_RDWR,0,-EROFS);
     struct md_fs_result r=request(&fs,origins[1],md_fs_anchor_fd(origins[1]),MD_FS_FSTAT,NULL,0,0,NULL);

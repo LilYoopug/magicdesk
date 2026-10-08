@@ -18,7 +18,7 @@ def main():
     parser.add_argument("--server", default="magicdesk")
     parser.add_argument("--keep", action="store_true")
     parser.add_argument("--diagnostics", action="store_true")
-    parser.add_argument("--case", choices=("all", "kernel-baseline", "mapping-task", "pidfd-table", "fd-observation", "proc-custody", "exec-custody", "open-job", "ofd-order", "fd-handoff", "fd-parcel", "fd-messages", "ipc-peer", "ipc-origins", "ipc-ancillary", "mount-policy", "mount-graph", "mount-namespace", "inode-custody", "origin-transfer", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fd-lifecycle", "fs-dispatch", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture", "rpc", "stores"), default="all",
+    parser.add_argument("--case", choices=("all", "kernel-baseline", "mapping-task", "pidfd-table", "fd-observation", "proc-custody", "exec-custody", "open-job", "ofd-order", "fd-handoff", "fd-parcel", "fd-messages", "ipc-peer", "ipc-origins", "ipc-ancillary", "mount-policy", "mount-graph", "mount-namespace", "inode-custody", "origin-transfer", "transient-store", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fd-lifecycle", "fs-dispatch", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture", "rpc", "stores"), default="all",
                         help="Run resource regressions, FD handoff/parcel, terminal RPC custody, native FD lifecycle, or worker transport")
     parser.add_argument("--compare-installed", action="store_true",
                         help="Compare identical metadata/spawn fixtures with the installed runtime")
@@ -55,6 +55,28 @@ def main():
         if not passed:
             raise RuntimeError(name)
         return value
+
+    def check_namespaces():
+        check("guest namespace entry", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
+              + root + "/store --deadline-seconds 90 -- /bin/test setns", "PASS guest setns:")
+        check("guest overlay filesystems", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
+              + root + "/store --deadline-seconds 90 -- /bin/test overlay", "PASS guest overlay:")
+        check("guest namespace handles", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
+              + root + "/store --deadline-seconds 90 -- /bin/test namespace-handles", "PASS guest namespace handles:")
+        check("guest mount flags", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --admit-elf /bin/test --store "
+              + root + "/store --bind /dev /attached --deadline-seconds 90 -- /bin/test mount-flags", "PASS guest mount flags")
+        check("guest temporary filesystems", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
+              + root + "/store --deadline-seconds 90 -- /bin/test tmpfs", "PASS guest tmpfs:")
+        check("guest user namespace proc IO", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
+              + root + "/store --deadline-seconds 90 -- /bin/test user-proc", "PASS guest user proc files:")
+        check("guest user namespace lifecycle", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
+              + root + "/store --deadline-seconds 90 -- /bin/test user-namespace", "PASS guest user namespaces:")
+        check("direct guest UTS namespace lifecycle", root + "/libmagicdesk_guest_supervisor.so --diagnostics --user 0:0 --hostname launch-name "
+              + root + "/libmagicdesk_guest_bootstrap.so " + root + "/source /bin/test uts-namespace", "PASS guest UTS namespaces:")
+        runner = root + "/libmagicdesk_guest_run.so --user 0:0 --hostname launch-name --diagnostics --store " + root + "/store --deadline-seconds 90 -- /bin/test "
+        for kind in ("UTS", "IPC", "mount"):
+            check("guest " + kind + " namespace lifecycle", runner + kind.lower() + "-namespace",
+                  "PASS guest " + kind + " namespaces:")
 
     def check_kernel_workflows():
         runner = root + "/libmagicdesk_guest_kernel_baseline.so " + root + "/libmagicdesk_guest_run.so --store " + root + "/store --deadline-seconds 90 -- /bin/test "
@@ -284,7 +306,7 @@ def main():
             names = ("test_rpc",)
         if args.case == "stores":
             names = ("test_mounts", "test_inodes", "test_snapshot")
-        if args.case in ("mount-policy", "mount-graph", "inode-custody", "origin-transfer"):
+        if args.case in ("mount-policy", "mount-graph", "inode-custody", "origin-transfer", "transient-store"):
             names = ("test_mounts",)
         if args.case == "ipc-peer":
             names = ("test_ipc_peer", "fs_dispatch", "test_launch_registry")
@@ -299,11 +321,10 @@ def main():
             transport.upload(client, args.build / file, root + "/" + file)
         check("prepare fixtures", "chmod 700 " + root + "/*.so")
         if args.case == "mount-namespace":
-            check("fixture directories", "mkdir -p " + root + "/source/tmp " + root + "/source/bin")
+            check("fixture directories", "mkdir -p " + root + "/source/tmp " + root + "/source/bin " + root + "/source/attached")
             check("stage guest image", "cp " + root + "/libmagicdesk_guest_resource_guest.so " + root + "/source/bin/test")
             check("import fixture", root + "/libmagicdesk_guest_service.so --import " + root + "/source " + root + "/store")
-            check("guest mount namespace lifecycle", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
-                  + root + "/store --deadline-seconds 90 -- /bin/test mount-namespace", "PASS guest mount namespaces:")
+            check_namespaces()
             return
         if args.case in ("all", "fd-observation"):
             check("native FD table observation", root + "/libmagicdesk_guest_fd_observation.so",
@@ -321,6 +342,11 @@ def main():
         if args.case == "mount-policy":
             check("shared mount policy", root + "/libmagicdesk_guest_test_mounts.so --mount-policy " + root + "/policy",
                   "PASS mount policy exec peers", absent_patterns=(r"assertion .* failed",))
+            return
+        if args.case == "transient-store":
+            check("temporary filesystem custody", root + "/libmagicdesk_guest_test_mounts.so --transient-store " + root + "/transient",
+                  "PASS transient store: queued rights outlive publisher",
+                  absent_patterns=(r"assertion .* failed",))
             return
         if args.case == "mount-graph":
             check("portable mount graph", root + "/libmagicdesk_guest_test_mounts.so --mount-graph " + root + "/graph",
@@ -487,6 +513,7 @@ def main():
         check("stage root fixture", "cp " + root + "/libmagicdesk_guest_root_guest.so " + root + "/source/bin/root-test")
         check("import fixture", root + "/libmagicdesk_guest_service.so --import " + root + "/source " + root + "/store")
         check_kernel_workflows()
+        check_namespaces()
         check_buffers()
         check("native kernel namespace capabilities", root + "/libmagicdesk_guest_resource_guest.so probe " + root + "/native")
         check("native resource semantics", root + "/libmagicdesk_guest_resource_guest.so native " + root + "/native",

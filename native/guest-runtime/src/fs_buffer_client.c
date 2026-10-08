@@ -2,7 +2,7 @@
 #include "adapter_buffer.h"
 #include "fs_wire.h"
 #include "interception.h"
-#include "watch_calls.h"
+#include "fd_filter.h"
 #include "raw.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -28,13 +28,13 @@ static long check_channels(struct md_fs_buffer_frame *frame, long result) {
     }
     return result;
 }
-static long receive_rights(struct md_fs_buffer_frame *frame, unsigned flags) {
+long md_adapter_receive_fd(struct md_fs_buffer_frame *frame, unsigned flags, unsigned begin) {
     struct md_fd_receipt *receipt=(void *)frame->receipt;
     int error=md_fd_receipt_reset(receipt,1);
     if (error) return error;
     frame->receive.token=0; frame->receive.number=-1;
     receipt->vector=(struct iovec){&frame->receive.token,sizeof(frame->receive.token)};
-    long result=check_channels(frame,md_guest_buffer_control(MD_FS_BUFFER_RIGHTS_BEGIN,0,0));
+    long result=check_channels(frame,md_guest_buffer_control(begin,0,0));
     if (!result && frame->receive.number<0) {
         result=md_guest_buffer_admit(MD_FS_BUFFER_IMPORT);
         if (result>=0) result=md_guest_buffer_control(MD_FS_BUFFER_RIGHTS_READY,0,0);
@@ -74,7 +74,7 @@ static long receive_result(struct md_fs_buffer_frame *frame, const struct md_fs_
         if (fd<0) out->result.error=(int)fd;
         else out->result.fd=(int)fd;
     } else if (transfer==MD_FS_BUFFER_RIGHTS) {
-        long fd=receive_rights(frame,q->flags);
+        long fd=md_adapter_receive_fd(frame,q->flags,MD_FS_BUFFER_RIGHTS_BEGIN);
         if (fd<0) out->result.error=(int)fd;
         else out->result.fd=(int)fd;
     } else if (transfer==MD_FS_BUFFER_ANCHOR) {
@@ -214,7 +214,7 @@ long md_fs_buffer_inspect(const int *indices, unsigned count, struct md_received
     long released=md_adapter_buffer_release();
     return result ? result : released;
 }
-static long publish_mapped(struct md_fs_buffer_frame *frame, unsigned count, const unsigned char *watched,
+static long publish_mapped(struct md_fs_buffer_frame *frame, unsigned count, const unsigned char *selectors,
         void *control, size_t capacity, unsigned flags, int *out_flags, size_t *used) {
     struct md_fd_receipt *receipt=(void *)frame->receipt;
     size_t fit=capacity>CMSG_LEN(0) ? (capacity-CMSG_LEN(0))/sizeof(int) : 0;
@@ -238,7 +238,7 @@ static long publish_mapped(struct md_fs_buffer_frame *frame, unsigned count, con
     if (delivered<0) return delivered;
     long error=0;
     for (int i=0;i<delivered && !error;++i)
-        if (watched[i]) error=md_watch_arm_number(numbers[i]);
+        if (selectors[i]) error=md_fd_filter_arm_mask(selectors[i],numbers[i]);
     *used=0;
     if (delivered && !error) {
         struct cmsghdr h={.cmsg_len=CMSG_LEN((unsigned)delivered*sizeof(int)),.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_RIGHTS};
@@ -252,11 +252,11 @@ static long publish_mapped(struct md_fs_buffer_frame *frame, unsigned count, con
     if ((unsigned)delivered<count) *out_flags|=MSG_CTRUNC;
     return error ? error : received;
 }
-long md_fs_buffer_publish(const int *indices, const unsigned char *watched, unsigned count, void *control, size_t capacity,
+long md_fs_buffer_publish(const int *indices, const unsigned char *selectors, unsigned count, void *control, size_t capacity,
         unsigned flags, int *out_flags, size_t *used) {
     if (!count || count>253) return -EINVAL;
-    int has_watch=0;
-    for (unsigned i=0;i<count;++i) has_watch|=watched[i];
+    int has_selectors=0;
+    for (unsigned i=0;i<count;++i) has_selectors|=selectors[i];
     long address=md_adapter_buffer_take();
     if (address<0) return address;
     struct md_fs_buffer_frame *frame=(void *)address;
@@ -273,7 +273,7 @@ long md_fs_buffer_publish(const int *indices, const unsigned char *watched, unsi
     }
     /* The destination-table turn spans selector preparation and kernel copy.
      * Only descriptors that can fit are armed; no installed FD is speculative. */
-    if (!result && has_watch) {
+    if (!result && has_selectors) {
         struct rlimit limit;
         result=RAW4(prlimit64,0,RLIMIT_NOFILE,NULL,&limit);
         size_t fit=capacity>CMSG_LEN(0) ? (capacity-CMSG_LEN(0))/sizeof(int) : 0;
@@ -281,7 +281,7 @@ long md_fs_buffer_publish(const int *indices, const unsigned char *watched, unsi
         for (unsigned fd=0;!result && next<count && next<fit && fd<limit.rlim_cur && fd<INT_MAX;++fd) {
             long occupied=RAW2(fcntl,fd,F_GETFD);
             if (occupied==-EBADF) {
-                if (watched[next]) result=md_watch_arm_number((int)fd);
+                if (selectors[next]) result=md_fd_filter_arm_mask(selectors[next],(int)fd);
                 ++next;
             } else if (occupied<0) result=occupied;
         }
@@ -289,7 +289,7 @@ long md_fs_buffer_publish(const int *indices, const unsigned char *watched, unsi
     struct iovec vector={&frame->receive.token,sizeof(frame->receive.token)};
     struct msghdr message={.msg_iov=&vector,.msg_iovlen=1,.msg_control=control,.msg_controllen=capacity};
     if (!result) result=frame->receive.mapped
-        ? publish_mapped(frame,count,watched,control,capacity,flags,out_flags,used)
+        ? publish_mapped(frame,count,selectors,control,capacity,flags,out_flags,used)
         : RAW3(recvmsg,frame->receive.number,&message,MSG_DONTWAIT|(flags&MSG_CMSG_CLOEXEC));
     long finished=md_guest_buffer_control(MD_FS_BUFFER_RIGHTS_DONE,(unsigned long)result,0);
     if (result>=0 && !finished && !frame->receive.mapped) { *used=message.msg_controllen; *out_flags|=message.msg_flags&MSG_CTRUNC; }

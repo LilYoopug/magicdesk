@@ -13,6 +13,9 @@ enum { MD_ACL_USER_OBJ=1, MD_ACL_USER=2, MD_ACL_GROUP_OBJ=4,
 struct md_acl_entry { uint16_t tag, permissions; uint32_t id; };
 struct md_acl { uint32_t version; struct md_acl_entry entries[]; };
 int md_acl_valid(const void *, size_t);
+/* Canonical storage IDs and caller-facing xattr IDs. Input must be a validated
+ * ACL; an invalid mapping leaves the complete value unchanged. */
+int md_acl_map(struct md_acl *, size_t, const struct md_identity *, int into);
 unsigned md_acl_mode(const struct md_acl *, size_t, unsigned);
 void md_acl_chmod(struct md_acl *, size_t, unsigned, int inherit);
 int md_acl_permission(const struct md_acl *, size_t, const struct md_identity *,

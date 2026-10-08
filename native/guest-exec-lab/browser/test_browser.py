@@ -33,6 +33,8 @@ def main():
     parser.add_argument("--build", type=Path, required=True)
     parser.add_argument("--store", required=True)
     parser.add_argument("--installed", action="store_true")
+    parser.add_argument("--setuid-route", action="store_true",
+                        help="Select Chromium's set-ID sandbox instead of its user/PID namespace sandbox; seccomp remains enabled")
     parser.add_argument("--helper", default="/usr/lib/chromium/chrome-sandbox",
                         help="Guest path of the helper actually selected by Chromium")
     args = parser.parse_args()
@@ -53,6 +55,8 @@ def main():
             program = ["/usr/bin/env", "CHROME_DEVEL_SANDBOX=" + args.helper,
                        "/usr/lib/chromium/chromium", "--headless", "--no-first-run", "--enable-logging=stderr",
                        "--user-data-dir=/tmp/md-chrome-profile-" + token, "--window-size=800,600", "--dump-dom"]
+            if args.setuid_route:
+                program.append("--disable-namespace-sandbox")
             if index == 2:
                 program.append("--screenshot=" + artifact)
             program.append("data:text/html," + quote(page))
@@ -76,7 +80,8 @@ def main():
             assert len(paths) == 1, "missing exact run report"
             run = json.loads(Path(paths[0]).read_text())
             entry = {"case": "helper-rejected" if rejected else f"javascript-{index}",
-                     "report": paths[0], "verified": False, "sandboxFlagsDisabled": False}
+                     "report": paths[0], "verified": False, "noSandbox": False,
+                     "selectedSandboxRoute": "setuid" if args.setuid_route else "automatic"}
             report["runs"].append(entry)
             assert run["consoleClosed"] and run["uid"] == 2000 and run["guestUser"] == "2000:2000"
             output = next(item["output"] for item in run["commands"] if "--diagnostics " in item["command"])

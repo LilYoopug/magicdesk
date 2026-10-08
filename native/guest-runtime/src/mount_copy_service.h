@@ -11,7 +11,10 @@ int md_mount_copy_service_create(struct md_fs_worker *,
 /* Supervisor-only. Caller already owns its file-table and FS-context turns.
  * Worker snapshots mount state; neither candidate is published before success. */
 int md_mount_copy_submit(struct md_mount_copy_service *, int actor,
-        struct md_mount_namespace *, struct md_guest_domain *, struct md_mount_copy_request **);
+        struct md_mount_namespace *, struct md_guest_domain *, struct md_user_namespace *,
+        int copy_mounts, int check_root, struct md_mount_copy_request **);
+int md_mount_join_submit(struct md_mount_copy_service *, int actor,
+    struct md_mount_namespace *target, struct md_mount_copy_request **);
 void md_mount_copy_cancel(struct md_mount_copy_request **);
 int md_mount_copy_take(struct md_mount_copy_request *,
         struct md_mount_namespace **, struct md_guest_domain **);

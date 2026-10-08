@@ -231,6 +231,42 @@ int md_fs_root_select(struct md_filesystem *fs, const struct md_fs_location *roo
     }
     return 0;
 }
+int md_fs_root_is_mount_root(struct md_filesystem *fs, const struct md_fs_location *root) {
+    if (!fs->mounts) return -EINVAL;
+    if (!root->mount) return fs->mounts->root==&fs->mounts->base
+        && (!root->object[0] || !strcmp(root->object,MDI_ROOT));
+    struct md_view_object *p=md_view_object(fs,root->object);
+    if (!p || p->mount->id!=root->mount) return -ESTALE;
+    return p->mount==fs->mounts->root && md_view_same(&p->identity,&p->mount->native);
+}
+int md_fs_mounts_join_context(struct md_filesystem *fs, struct md_guest_domain *context) {
+    if (!fs->mounts || !context) return -EINVAL;
+    struct md_filesystem selected=*fs;
+    selected.native_root=NULL;
+    const char *previous=fs->store->root_id;
+    fs->store->root_id=NULL;
+    struct md_view_location root={.fd=-1,.parent=-1};
+    int r=md_view_walk(&selected,AT_FDCWD,NULL,"/",1,0,0,&root);
+    struct md_fs_anchor *origin=NULL;
+    struct md_fs_location location;
+    if (!r) {
+        struct stat st;
+        if (fstat(root.fd,&st)) r=-errno;
+        int retained=r ? -1 : fcntl(root.fd,F_DUPFD_CLOEXEC,3);
+        if (!r && retained<0) r=-errno;
+        if (!r) {
+            origin=md_view_anchor_new(md_inode_store_lifetime(fs->store),fs->mounts,root.mount,
+                retained,st.st_dev,st.st_ino);
+            if (!origin) { r=-errno; close(retained); }
+        }
+    }
+    if (!r) r=md_fs_root_capture(&selected,root.fd,origin,&location);
+    if (!r) r=md_domain_set_root(context,&location);
+    if (!r) r=md_domain_set_cwd(context,origin);
+    if (!r) md_domain_bind_mounts(context,fs->mounts);
+    md_fs_anchor_release(origin); md_view_location_close(&root);
+    fs->store->root_id=previous; return r;
+}
 void md_fs_mounts_close(struct md_filesystem *fs) {
     md_mount_namespace_release(fs->mounts);
     fs->mounts = NULL; fs->native_root = NULL;
@@ -321,7 +357,9 @@ int md_fs_mounts_copy(struct md_filesystem *fs, const struct md_fs_location *roo
     }
     struct md_mount_namespace *copy=md_mount_namespace_new();
     if (!copy) return -errno;
+    md_mount_namespace_set_owner(copy,md_mount_namespace_owner(fs->mounts));
     copy->base.policy.local=md_mount_policy_flags(&fs->mounts->base.policy);
+    copy->base.locked=fs->mounts->base.locked;
     struct md_fs_mounts *source=fs->mounts->tree;
     int r=0;
     if (source && source->count) {
@@ -338,7 +376,7 @@ int md_fs_mounts_copy(struct md_filesystem *fs, const struct md_fs_location *roo
         }
         /* Namespace copies get independent policy, even from a shared view. */
         *b=(struct md_view_mount){.source=-1,.target=-1,
-            .backing=a->backing,.detached=a->detached,.generation=a->generation,
+            .backing=a->backing,.detached=a->detached,.locked=a->locked,.generation=a->generation,
             .storage=md_inode_lifetime_retain(a->storage),
             .policy={.local=md_mount_policy_flags(&a->policy)},.native=a->native,.guest=a->guest,
             .parent=!a->parent ? NULL : !md_view_base(fs->mounts,a->parent)

@@ -8,8 +8,9 @@
 #include <sys/file.h>
 #include <unistd.h>
 
-struct fifo_pin { char object[33]; int fd; struct fifo_pin *next; };
-struct mdi_fifo_owner { char id[33]; int lease; struct fifo_pin *pins; };
+struct fifo_pin { char channel[33]; int fd; struct fifo_pin *next; };
+struct fifo_source { int source; struct md_inode_store *store; struct fifo_source *next; };
+struct mdi_fifo_owner { char id[33]; int lease; struct fifo_pin *pins; struct fifo_source *sources; };
 
 static int owner(struct md_inode_store *s) {
     if (s->fifos) return 0;
@@ -37,9 +38,11 @@ static int live(struct md_inode_store *s, const char *id) {
 }
 int mdi_fifo_descriptor(struct md_inode_store *s, const struct stat *st, struct mdi_node *node) {
     sqlite3_stmt *q = NULL;
-    int r = mdi_prepare(s, "SELECT object,owner FROM fifo_pins WHERE device=?1 AND inode=?2", &q);
+    int r = mdi_prepare(s, "SELECT c.object,p.owner FROM fifo_pins p JOIN inode_channels c ON c.channel=p.channel "
+        "WHERE p.device=?1 AND p.inode=?2 AND c.scope=?3", &q);
     if (!r) r = mdi_sql_error(sqlite3_bind_int64(q, 1, (sqlite3_int64)st->st_dev));
     if (!r) r = mdi_sql_error(sqlite3_bind_int64(q, 2, (sqlite3_int64)st->st_ino));
+    if (!r) r=mdi_bind_id(q,3,s->lifetime->scope);
     while (!r) {
         int rc = mdi_step(s, q);
         if (rc != SQLITE_ROW) { r = rc == SQLITE_DONE ? -EXDEV : mdi_sql_failure(rc); break; }
@@ -49,14 +52,15 @@ int mdi_fifo_descriptor(struct md_inode_store *s, const struct stat *st, struct 
     }
     sqlite3_finalize(q); return r;
 }
-static int acquire_pin(struct md_inode_store *s, const struct mdi_node *node) {
+static int acquire_pin(struct md_inode_store *s, const char *channel, int seed) {
     int cached = -1;
     for (struct fifo_pin *p = s->fifos->pins; p; p = p->next)
-        if (!strcmp(p->object, node->id)) { cached = p->fd; break; }
+        if (!strcmp(p->channel, channel)) { cached = p->fd; break; }
     sqlite3_stmt *q = NULL;
-    int r = mdi_prepare(s, "SELECT owner,pid,descriptor,device,inode FROM fifo_pins WHERE object=?1", &q);
-    if (!r) r = mdi_bind_id(q, 1, node->id);
+    int r = mdi_prepare(s, "SELECT owner,pid,descriptor,device,inode FROM fifo_pins WHERE channel=?1", &q);
+    if (!r) r = mdi_bind_id(q, 1, channel);
     int pin = cached;
+    if (!r && pin<0 && seed>=0 && (pin=fcntl(seed,F_DUPFD_CLOEXEC,0))<0) r=-errno;
     while (!r && pin < 0) {
         int rc = mdi_step(s, q);
         if (rc == SQLITE_DONE) break;
@@ -89,9 +93,9 @@ static int acquire_pin(struct md_inode_store *s, const struct mdi_node *node) {
     struct stat st;
     if (!r && fstat(pin, &st)) r = -errno;
     if (!r) r = mdi_prepare(s, "INSERT INTO fifo_pins VALUES(?1,?2,?3,?4,?5,?6) "
-        "ON CONFLICT(object,owner) DO UPDATE SET pid=excluded.pid,descriptor=excluded.descriptor,"
+        "ON CONFLICT(channel,owner) DO UPDATE SET pid=excluded.pid,descriptor=excluded.descriptor,"
         "device=excluded.device,inode=excluded.inode", &q);
-    if (!r) r = mdi_bind_id(q, 1, node->id);
+    if (!r) r = mdi_bind_id(q, 1, channel);
     if (!r) r = mdi_bind_id(q, 2, s->fifos->id);
     if (!r) r = mdi_sql_error(sqlite3_bind_int(q, 3, getpid()));
     if (!r) r = mdi_sql_error(sqlite3_bind_int(q, 4, pin));
@@ -103,29 +107,68 @@ static int acquire_pin(struct md_inode_store *s, const struct mdi_node *node) {
     if (cached >= 0) return pin;
     /* Retain even across an uncertain commit. No read/write endpoint is held,
      * so the kernel alone determines EOF, SIGPIPE and data lifetime. */
-    memcpy(p->object, node->id, sizeof(p->object)); p->fd = pin;
+    memcpy(p->channel, channel, sizeof(p->channel)); p->fd = pin;
     p->next = s->fifos->pins; s->fifos->pins = p;
     return pin;
 }
+static int source_store(struct md_inode_store *s,int source,struct md_inode_store **out) {
+    if (!source) { *out=s; return 0; }
+    for (struct fifo_source *p=s->fifos->sources;p;p=p->next)
+        if (p->source==source) { *out=p->store; return 0; }
+    int root=openat(s->lifetime->source_leases[source],".",O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+    if (root<0) return -errno;
+    struct stat st;
+    int r=fstat(root,&st) ? -errno : 0;
+    if (!r && flock(root,LOCK_SH|LOCK_NB)) r=errno==EWOULDBLOCK ? -EBUSY : -errno;
+    struct md_inode_lifetime *life=r ? NULL : mdi_lifetime_new(root,&st);
+    if (!r && !life) r=-ENOMEM;
+    struct fifo_source *p=r ? NULL : calloc(1,sizeof(*p));
+    if (!r && !p) r=-ENOMEM;
+    if (!r) r=md_inode_store_reconnect(life,&p->store);
+    if (life) md_inode_lifetime_release(life); else close(root);
+    if (r) { free(p); return r; }
+    p->source=source; p->next=s->fifos->sources; s->fifos->sources=p;
+    *out=p->store; return 0;
+}
 int mdi_fifo_prepare(struct md_inode_store *s, int original, struct md_open_completion *completion) {
-    int r = mdi_begin(s, 1), control = -1, pin = -1;
+    int r = mdi_begin(s, 0), control = -1, pin = -1;
     if (r) { close(original); return r; }
     struct mdi_node node;
     r = mdi_fd(s, original, &node);
     if (!r && node.kind != S_IFIFO) r = -EINVAL;
+    char channel[33]; int source=0;
+    if (!r) r=mdi_channel(s,&node,channel,&source);
+    r=mdi_finish(s,r);
     if (!r) r = owner(s);
-    if (!r) { pin = acquire_pin(s, &node); if (pin < 0) r = pin; }
-    char state[48]; snprintf(state, sizeof(state), "fifo-state-%s", r ? "" : node.id);
+    struct md_inode_store *canonical=NULL;
+    if (!r) r=source_store(s,source,&canonical);
+    /* Channel custody belongs to its creating store. Never hold two namespace
+     * transactions: projected inode identity and live pipe ownership are separate. */
+    if (!r && canonical!=s) {
+        r=mdi_begin(canonical,1);
+        if (!r) {
+            r=owner(canonical);
+            if (!r) { pin=acquire_pin(canonical,channel,-1); if (pin<0) r=pin; }
+            r=mdi_commit(canonical,r);
+        }
+    }
+    if (!r) {
+        r=mdi_begin(s,1);
+        if (!r) {
+            pin=acquire_pin(s,channel,pin);
+            r=mdi_commit(s,pin<0 ? pin : 0);
+        }
+    }
+    char state[48]; snprintf(state, sizeof(state), "fifo-state-%s", r ? "" : channel);
     /* Rendezvous bookkeeping is outside watched backing objects. It must not
      * masquerade as guest data writes/open/close notifications. */
-    if (!r && (control = openat(s->lifetime->root, state, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600)) < 0) r = -errno;
+    if (!r && (control = openat(canonical->lifetime->root, state, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600)) < 0) r = -errno;
     struct stat st;
     if (!r && fstat(control, &st)) r = -errno;
     if (!r && !st.st_size && ftruncate(control, 8)) r = -errno;
     if (!r && st.st_size && st.st_size != 8) r = -EIO;
     int out = -1;
     if (!r && (out = fcntl(pin, F_DUPFD_CLOEXEC, 0)) < 0) r = -errno;
-    r = mdi_commit(s, r);
     close(original);
     if (r) { if (control >= 0) close(control); if (out >= 0) close(out); return r; }
     *completion = (struct md_open_completion){MD_OPEN_PIPE, control};
@@ -142,6 +185,10 @@ void mdi_fifo_close(struct md_inode_store *s) {
         sqlite3_finalize(q); mdi_commit(s, r);
     }
     while (o->pins) { struct fifo_pin *p = o->pins; o->pins = p->next; close(p->fd); free(p); }
+    while (o->sources) {
+        struct fifo_source *p=o->sources; o->sources=p->next;
+        md_inode_store_close(p->store); free(p);
+    }
     char name[48]; snprintf(name, sizeof(name), "fifo-%s", o->id);
     unlinkat(s->lifetime->root, name, 0); close(o->lease);
     free(o); s->fifos = NULL;

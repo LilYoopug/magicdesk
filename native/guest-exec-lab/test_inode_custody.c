@@ -85,14 +85,14 @@ static void failures(struct md_inode_store *s, const char *base) {
         int seals=F_SEAL_GROW|F_SEAL_SHRINK|F_SEAL_WRITE|F_SEAL_SEAL;
         switch (i) {
         case 0: mutate_manifest(&p,0,0,seals,0); break;
-        case 1: mutate_manifest(&p,1,2,seals,0); break;
+        case 1: mutate_manifest(&p,1,99,seals,0); break;
         case 2: mutate_manifest(&p,2,256,seals,0); break;
         case 3: mutate_manifest(&p,3,1,seals,0); break;
         case 4: mutate_manifest(&p,4,~0U,seals,0); break;
-        case 5: mutate_manifest(&p,8,0,seals,0); break;
-        case 6: mutate_manifest(&p,8,256,seals,0); break;
-        case 7: mutate_manifest(&p,9,1,seals,0); break;
-        case 8: mutate_manifest(&p,18,1,seals,0); break;
+        case 5: mutate_manifest(&p,20,0,seals,0); break;
+        case 6: mutate_manifest(&p,20,256,seals,0); break;
+        case 7: mutate_manifest(&p,21,1,seals,0); break;
+        case 8: mutate_manifest(&p,30,1,seals,0); break;
         case 9: mutate_manifest(&p,1,1,seals,1); break;
         case 10: mutate_manifest(&p,1,1,seals&~F_SEAL_WRITE,0); break;
         case 11: { int fd=p.fd[2]; p.fd[2]=p.fd[3]; p.fd[3]=fd; break; }
@@ -308,7 +308,7 @@ static void bounds(const char *base) {
             assert(received->sources[255]>=0 && received->sources[1]<0); md_inode_lifetime_release(received);
         }
     }
-    assert(!md_inode_custody_export(s->lifetime,&p) && p.count==MD_INODE_CUSTODY_FDS); received=NULL;
+    assert(!md_inode_custody_export(s->lifetime,&p) && p.count==512); received=NULL;
     assert(!md_inode_custody_import(&p,s->lifetime->root,&received));
     for (unsigned i=1;i<MDI_SOURCES;++i) relation(received,i,1);
     int pair[2]; assert(!socketpair(AF_UNIX,SOCK_SEQPACKET|SOCK_NONBLOCK|SOCK_CLOEXEC,0,pair));

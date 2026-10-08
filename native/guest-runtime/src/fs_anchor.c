@@ -8,19 +8,27 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-struct md_fs_anchor *md_fs_anchor_retain(struct md_fs_anchor *p) {
-    if (p) atomic_fetch_add_explicit(&p->refs,1,memory_order_relaxed);
-    return p;
-}
-void md_fs_anchor_release(struct md_fs_anchor *p) {
-    if (!p || atomic_fetch_sub_explicit(&p->refs,1,memory_order_acq_rel)!=1) return;
+static void destroy(struct md_fd_object *object) {
+    struct md_fs_anchor *p=(void *)object;
     close(p->fd);
     if (p->mount_pin>=0) close(p->mount_pin);
     if (p->mount) atomic_fetch_sub_explicit(&p->mount->anchors,1,memory_order_relaxed);
     md_mount_namespace_release(p->view);
     md_inode_lifetime_release(p->lifetime); free(p);
 }
+static const struct md_fd_object_type type={.destroy=destroy};
+struct md_fd_object *md_fs_anchor_object(struct md_fs_anchor *p) { return p ? &p->object : NULL; }
+struct md_fs_anchor *md_fs_anchor_from_object(struct md_fd_object *p) {
+    return p && p->type==&type ? (void *)p : NULL;
+}
+struct md_fs_anchor *md_fs_anchor_retain(struct md_fs_anchor *p) {
+    md_fd_object_retain(md_fs_anchor_object(p)); return p;
+}
+void md_fs_anchor_release(struct md_fs_anchor *p) { md_fd_object_release(md_fs_anchor_object(p)); }
 int md_fs_anchor_fd(const struct md_fs_anchor *p) { return p ? p->fd : -1; }
+unsigned md_fs_anchor_policy(const struct md_fs_anchor *p) {
+    return !p || !p->view ? 0 : md_mount_policy_flags(p->mount ? &p->mount->policy : &p->view->base.policy);
+}
 int md_fs_anchor_same(const struct md_fs_anchor *a, const struct md_fs_anchor *b) {
     return a && b && a->view==b->view && a->mount==b->mount
         && a->device==b->device && a->inode==b->inode
@@ -37,7 +45,7 @@ static struct md_fs_anchor *create(struct md_inode_lifetime *lifetime,
     if (!mount && view) mount=&view->base;
     struct md_fs_anchor *p=calloc(1,sizeof(*p));
     if (!p) return NULL;
-    atomic_init(&p->refs,1);
+    md_fd_object_init(&p->object,&type);
     p->lifetime=md_inode_lifetime_retain(lifetime); p->view=md_mount_namespace_retain(view);
     p->mount=mount; p->fd=fd; p->mount_pin=pin; p->device=device; p->inode=inode;
     if (mount) atomic_fetch_add_explicit(&mount->anchors,1,memory_order_relaxed);

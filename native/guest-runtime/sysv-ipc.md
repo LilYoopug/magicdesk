@@ -1,7 +1,7 @@
 # SysV Semaphores And Messages
 
-The native supervisor owns a lazy, store-scoped semaphore and message-queue
-authority. `sysv_sem.c` and `sysv_msg.c` implement the ARM64 Linux operations;
+The native supervisor owns a lazy, namespace-scoped semaphore and message-queue
+authority. `ipc_namespace` selects it per task. `sysv_sem.c` and `sysv_msg.c` implement the ARM64 Linux operations;
 `sysv_ipc_db.c` owns transactions, permissions and launch leases. No daemon,
 Android service or host SysV kernel support is required. Launches that do not
 use these APIs open no IPC database, create no channel and install no waits.
@@ -11,7 +11,9 @@ use these APIs open no IPC database, create no channel and install no waits.
 Supported semaphore calls are semget, semop, semtimedop and semctl
 IPC_STAT/IPC_SET/IPC_RMID, GETVAL/SETVAL, GETALL/SETALL, GETPID, GETNCNT and
 GETZCNT. Operation vectors commit atomically; a blocked or rejected vector
-leaves every semaphore unchanged. Permissions use the launch's logical identity.
+leaves every semaphore unchanged. Permissions use the task's logical identity
+and capabilities scoped to the IPC owner's user namespace. Shared-memory,
+semaphore and message permissions use the same `ipc_permissions` contract.
 SEM_UNDO belongs to a reference-counted group: CLONE_SYSVSEM shares it, ordinary
 fork does not, exec retains it, and the last exit applies it. SETVAL/SETALL clear
 the affected adjustments. Exit adjustments clamp values to the supported range.
@@ -34,12 +36,17 @@ or execution.
 
 ## Waiting And Lifetime
 
-`ipc/sysv/ipc.db` contains keys, monotonic IDs, metadata, bounded message bodies,
+`ipc/v2/sysv/ipc.db` contains namespace-scoped keys, monotonic IDs, metadata, bounded message bodies,
 semaphore values, undo adjustments and waiter registrations. A native file lock
 serializes transactions across independent launches; SQLite uses WAL. This is
 transient IPC state, separate from OCI layers, filesystem names and snapshots.
-Unremoved objects remain available within the current boot; a changed kernel
-boot ID expires them. This is not a kernel IPC namespace or security boundary.
+The initial namespace shares objects across launches within the same store and
+boot. CLONE_NEWIPC creates an empty namespace; object IDs from another namespace
+fail lookup even when its key is reused locally. Unshare releases the previous
+SEM_UNDO group against its original authority. Isolated objects expire when
+their last owner disappears; initial objects expire on a changed kernel boot ID.
+The IPC storage version is independent of filesystem/OCI formats and does not
+reinterpret an earlier database. This is not a kernel IPC namespace or security boundary.
 
 Blocked calls subscribe to inotify and recheck after subscription. Committed
 mutations and closed owner leases wake them; no heartbeat or state-polling
@@ -62,8 +69,13 @@ thread exit does no IPC transaction unless that undo group used SEM_UNDO.
 Limits are 32,000 semaphores per set, 500 operations per vector, values/adjustments
 bounded by 32,767, 8 KiB per message and a default 16 KiB queue. Increasing queue
 capacity requires logical CAP_SYS_RESOURCE and is capped at 1 MiB. Host authority
-never changes. IPC_INFO/SEM_INFO/MSG_INFO, indexed enumeration, MSG_COPY and IPC
-namespace unshare are not implemented. These are not POSIX semaphore APIs.
+never changes. IPC_INFO/SEM_INFO/MSG_INFO, indexed enumeration and MSG_COPY are
+not implemented. These are not POSIX semaphore APIs.
+
+`test_resources.py --case mount-namespace` includes UTS/IPC clone, unshare, exec,
+protected memory, invalid combined flags, key/ID separation, semaphore wakeups,
+SEM_UNDO and SHM mappings retained across nested namespace changes. The same
+workflows are included in the full resource suite.
 
 `test_sysv_runtime.py` covers vector rollback, wait/wakeup, signals, removal,
 timeouts, zero waiters, fork/exec/thread undo, SIGKILL, SETVAL clearing undo,

@@ -7,17 +7,23 @@
 #include "posix_acl.h"
 #include "inode_lifetime.h"
 #include <stdatomic.h>
+#include "filesystem_kind.h"
 struct md_fs_result;
 struct md_fs_output;
-struct md_inode_boundary { char *path; size_t capacity; const char *suffix; };
+struct md_inode_boundary { char *path; size_t capacity; const char *suffix; unsigned operand; };
 
 #define MDI_ROOT "00000000000000000000000000000000"
 #define MDI_SOURCES 256
 struct md_inode_lifetime {
     atomic_uint refs;
-    int root;
+    int root, temporary;
+    enum md_filesystem_kind filesystem_kind;
+    struct md_user_namespace *owner;
+    struct md_identity *overlay_identity;
     dev_t device;
     ino_t inode;
+    char scope[33];
+    int scope_lease;
     int sources[MDI_SOURCES], source_leases[MDI_SOURCES];
 };
 /* Consumes the validated root/lease FD only on success. */
@@ -25,7 +31,7 @@ struct md_inode_lifetime *mdi_lifetime_new(int root, const struct stat *);
 enum mdi_query { MDI_NODE, MDI_FD, MDI_LOOKUP, MDI_DIRECTORY_NAME, MDI_READDIR,
     MDI_BEGIN, MDI_BEGIN_WRITE, MDI_COMMIT, MDI_ROLLBACK, MDI_EVENT, MDI_EVENT_TRIM,
     MDI_EVENT_END, MDI_EVENT_SCAN, MDI_EVENT_NAMES, MDI_BACKING_OBJECT, MDI_FILE_PATH, MDI_ACL,
-    MDI_QUERY_COUNT };
+    MDI_OVERLAY_LINK, MDI_QUERY_COUNT };
 struct md_inode_store {
     sqlite3 *db;
     int objects, watch_presence, locked, recording, readonly, reflink_unavailable;
@@ -38,6 +44,8 @@ struct md_inode_store {
     struct md_inode_watches *watches;
     struct mdi_fifo_owner *fifos;
     struct md_inode_statistics *statistics;
+    struct mdi_overlay_writer *overlay;
+    int write_transaction;
     sqlite3_stmt *queries[MDI_QUERY_COUNT];
 #ifdef MD_INODE_TESTING
     void (*observe)(enum md_inode_checkpoint, void *);
@@ -45,10 +53,10 @@ struct md_inode_store {
 #endif
 };
 static inline const char *mdi_root(const struct md_inode_store *s) {
-    return s->root_id ? s->root_id : MDI_ROOT;
+    return s->root_id ? s->root_id : s->lifetime->scope;
 }
 struct mdi_node {
-    char id[33], parent[33], backing[33];
+    char id[33], parent[33], backing[33], scope[33];
     mode_t kind;
     dev_t device, logical_device;
     ino_t inode, logical_inode;
@@ -67,7 +75,7 @@ struct mdi_location {
  * retains a final symlink except when a trailing slash requires traversal. */
 enum mdi_follow { MDI_FOLLOW, MDI_NOFOLLOW, MDI_ENTRY };
 int mdi_sql_error(int);
-int mdi_sqlite_reconnect(int root, sqlite3 **);
+int mdi_sqlite_open(int root, int create, sqlite3 **);
 int mdi_sql_failure(int);
 int mdi_sql(struct md_inode_store *, const char *);
 int mdi_begin(struct md_inode_store *, int write);
@@ -88,8 +96,10 @@ int mdi_backing_stat(struct md_inode_store *, const struct mdi_node *, struct st
 int mdi_fstat(struct md_inode_store *, int, struct mdi_node *, struct stat *);
 int mdi_access(struct md_inode_store *, const struct mdi_node *, int);
 int mdi_permission(struct md_inode_store *, const struct mdi_node *, int, int real);
+int mdi_permission_as(struct md_inode_store *, const struct mdi_node *, int, const struct md_identity *);
 int mdi_open_permission(struct md_inode_store *, const struct mdi_node *, int flags);
 int mdi_sticky(struct md_inode_store *, const struct mdi_location *);
+int mdi_sticky_as(struct md_inode_store *, const struct mdi_location *, const struct md_identity *);
 int mdi_metadata(struct md_inode_store *, const struct mdi_node *, uint32_t, uint32_t, mode_t);
 int mdi_file_capability(struct md_inode_store *, const struct mdi_node *, const void *, size_t);
 int mdi_acl_store(struct md_inode_store *, const struct mdi_node *, unsigned, const void *, size_t);
@@ -97,7 +107,11 @@ int mdi_acl_permission(struct md_inode_store *, const struct mdi_node *, const s
 int mdi_acl_chmod(struct md_inode_store *, const struct mdi_node *, unsigned);
 int mdi_acl_inherit(struct md_inode_store *, const struct mdi_node *, const struct mdi_node *, unsigned);
 void md_inode_acl(struct md_inode_store *, const struct md_fs_request *, struct md_fs_result *, const struct md_fs_output *);
-int md_inode_attributes(struct md_inode_store *, int, void *, size_t);
+int mdi_attributes(struct md_inode_store *, const struct mdi_node *, void *, size_t);
+int mdi_xattr_permission(struct md_inode_store *, const struct mdi_node *, const char *, int);
+int mdi_xattr_permission_as(struct md_inode_store *, const struct mdi_node *, const char *, int, const struct md_identity *);
+int mdi_setattr_permission(struct md_inode_store *, const struct mdi_node *, const struct md_fs_request *, const struct md_identity *);
+void md_inode_xattr(struct md_inode_store *, const struct md_fs_request *, struct md_fs_result *, const struct md_fs_output *);
 int mdi_walk(struct md_inode_store *, int, const char *, enum mdi_follow, int missing, struct mdi_location *);
 int mdi_host_boundary(struct md_inode_store *, const char *parent, const char *name, const char *tail, uint64_t resolve);
 int mdi_walk_resolved(struct md_inode_store *, int, const char *, enum mdi_follow, int missing,
@@ -112,16 +126,26 @@ int mdi_reparent(struct md_inode_store *, const struct mdi_node *, const char *p
 int mdi_empty(struct md_inode_store *, const struct mdi_node *);
 int mdi_allocate(struct md_inode_store *, mode_t kind, mode_t mode, int flags, const char *target,
         const char *parent, struct mdi_node *, int *fd);
+int mdi_allocate_root(struct md_inode_store *, struct mdi_node *);
 int mdi_commit(struct md_inode_store *, int);
 int mdi_random_id(char [33]);
 /* Called within the namespace write transaction, before exposing any writable
  * descriptor. Native data IO remains outside the namespace after this point. */
 int mdi_copy_up(struct md_inode_store *, struct mdi_node *);
+int mdi_copy_attributes(int source, int destination);
+int mdi_copy_body(struct md_inode_store *, int source, int destination, const struct stat *);
+int mdi_replace_attributes(int source, int destination);
+int mdi_overlay_replace_attributes(int source, int destination);
 int mdi_sources_open(struct md_inode_store *);
+/* Caller owns exclusive maintenance or an unpublished store. No live lower
+ * store or ordinary open description may depend on untracked physical bodies. */
+int mdi_discard_untracked_backings(struct md_inode_store *);
 int mdi_source_register(struct md_inode_store *, int objects, int *source);
 int mdi_import_shared(struct md_inode_store *, int source, const char *backing, struct mdi_node *);
 int mdi_backing_directory(struct md_inode_store *, const struct mdi_node *);
 int mdi_fifo_prepare(struct md_inode_store *, int, struct md_open_completion *);
+int mdi_channel(struct md_inode_store *, const struct mdi_node *, char [33], int *source);
+int mdi_channel_copy(struct md_inode_store *, const struct mdi_node *, struct md_inode_store *, const struct mdi_node *);
 int mdi_fifo_descriptor(struct md_inode_store *, const struct stat *, struct mdi_node *);
 void mdi_fifo_close(struct md_inode_store *);
 int mdi_event(struct md_inode_store *, const char *parent, const struct mdi_node *,

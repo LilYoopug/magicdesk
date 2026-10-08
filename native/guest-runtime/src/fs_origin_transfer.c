@@ -109,11 +109,11 @@ int md_fs_origin_export(const struct md_fd_message *message, struct md_fs_origin
     struct md_fs_anchor *anchors[MAX];
     struct md_mount_namespace *views[MAX];
     struct md_inode_lifetime *owners[MAX];
-    struct md_fs_anchor *const *entries=md_fd_message_origins(message);
+    struct md_fd_object *const *entries=md_fd_message_origins(message);
     unsigned rights=1;
     for (unsigned i=0;i<data.count;++i) {
-        struct md_fs_anchor *a=entries[i];
-        if (!a) continue;
+        struct md_fs_anchor *a=md_fs_anchor_from_object(entries[i]);
+        if (!a) { if (entries[i]) return -EOPNOTSUPP; continue; }
         unsigned n=0; while (n<data.origins && anchors[n]!=a) ++n;
         data.index[i]=n+1;
         if (n<data.origins) continue;

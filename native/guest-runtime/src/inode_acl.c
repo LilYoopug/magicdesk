@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "inode_internal.h"
+#include "inode_overlay.h"
 #include "fs_operation.h"
 #include <errno.h>
 #include <stdlib.h>
@@ -77,7 +78,8 @@ void md_inode_acl(struct md_inode_store *s,const struct md_fs_request *request,s
     struct mdi_node node;
     r=mdi_fd(s,request->directory[0],&node);
     const struct md_identity *ids=s->identity;
-    if(!r && write && ids && node.uid!=ids->uid.fs && !md_identity_capable(ids,CAP_FOWNER)) r=-EPERM;
+    if(!r && write) r=mdi_setattr_permission(s,&node,request,ids);
+    if(!r && write) r=mdi_overlay_setattr(s,&node,request);
     if(!r && write && !ids) r=-ENOTSUP;
     int present=!r && (node.acl_mask&request->mode);
     struct md_acl *acl=NULL; size_t size=request->capacity;
@@ -106,7 +108,7 @@ void md_inode_acl(struct md_inode_store *s,const struct md_fs_request *request,s
         if(!r) r=mdi_acl_store(s,&node,request->mode,acl,size);
         if(!r && acl && size>4 && request->mode==MD_ACL_ACCESS) {
             unsigned mode=md_acl_mode(acl,size,node.mode);
-            if(ids && !md_identity_capable(ids,CAP_FSETID) && !md_identity_in_group(ids,node.gid)) mode&=~S_ISGID;
+            if(ids && !md_identity_file_capable(ids,node.uid,node.gid,CAP_FSETID) && !md_identity_in_group(ids,node.gid)) mode&=~S_ISGID;
             r=mdi_metadata(s,&node,node.uid,node.gid,mode);
         }
         if(!r) r=mdi_event(s,NULL,&node,NULL,IN_ATTRIB,NULL);
@@ -116,23 +118,20 @@ void md_inode_acl(struct md_inode_store *s,const struct md_fs_request *request,s
     if(r) out->size=out->position=0;
     out->error=r;
 }
-int md_inode_attributes(struct md_inode_store *s,int fd,void *data,size_t capacity) {
-    int r=mdi_begin(s,0);
-    if(r) return r;
-    struct mdi_node node;
-    r=mdi_fd(s,fd,&node);
+int mdi_attributes(struct md_inode_store *s,const struct mdi_node *node,void *data,size_t capacity) {
+    int r=0;
     sqlite3_stmt *q=NULL;
     if(!r) r=mdi_prepare(s,"SELECT 1 FROM file_capabilities WHERE object=?1",&q);
-    if(!r) r=mdi_bind_id(q,1,node.id);
+    if(!r) r=mdi_bind_id(q,1,node->id);
     int cap=0;
     if(!r) { int rc=mdi_step(s,q); cap=rc==SQLITE_ROW; if(rc!=SQLITE_ROW && rc!=SQLITE_DONE) r=mdi_sql_failure(rc); }
     sqlite3_finalize(q);
     const char *names[]={MD_FILE_CAPABILITY_NAME,MD_ACL_ACCESS_NAME,MD_ACL_DEFAULT_NAME};
-    unsigned bits=r ? 0 : (unsigned)cap|(node.acl_mask<<1); size_t length=0;
+    unsigned bits=r ? 0 : (unsigned)cap|(node->acl_mask<<1); size_t length=0;
     for(unsigned i=0;!r && i<3;i++) if(bits&(1U<<i)) {
         size_t n=strlen(names[i])+1;
         if(!data || n>capacity-length) r=-ERANGE;
         else { memcpy((char *)data+length,names[i],n); length+=n; }
     }
-    r=mdi_finish(s,r); return r ? r : (int)length;
+    return r ? r : (int)length;
 }

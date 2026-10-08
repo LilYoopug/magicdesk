@@ -33,9 +33,10 @@ int md_image_inspect(const char *path) {
         r = config(s, &json);
         sqlite3_stmt *q = NULL;
         if (!r) r = md_json_query(s->db, json, "SELECT json_object('kind',?2,'config',json(?1),'sources',"
-            "(SELECT json_group_array(json_object('path',path,'device',device,'inode',inode)) FROM sources),"
+            "(SELECT json_group_array(json_object('path',path,'device',device,'inode',inode)) FROM sources WHERE scope=?3),"
             "'guestUsers',(SELECT value FROM properties WHERE key='image-users'))", &q);
         if (!r) sqlite3_bind_text(q, 2, s->readonly ? "image" : "instance", -1, SQLITE_STATIC);
+        if (!r) r=mdi_bind_id(q,3,s->lifetime->scope);
         if (!r) {
             int rc = sqlite3_step(q);
             if (rc != SQLITE_ROW) r = mdi_sql_failure(rc);

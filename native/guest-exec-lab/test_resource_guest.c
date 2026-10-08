@@ -53,7 +53,7 @@ static int mutate(void *argument) {
         assert(unshare(CLONE_FS | CLONE_VM) == -1 && errno == EINVAL);
     }
     if (c->unshare == -4) {
-        assert(unshare(CLONE_FS | CLONE_NEWUTS) == -1 && errno == ENOTSUP);
+        assert(unshare(CLONE_FS | CLONE_NEWNET) == -1 && errno == ENOTSUP);
     }
     if (c->unshare == -3) {
         char ready[24], done[24], file[24];
@@ -1922,7 +1922,25 @@ static void buffer_park(int protected) {
     get(parked[0]); abort();
 }
 void test_mount_namespace_guest(void);
+void test_tmpfs_guest(void);
+void test_overlay_guest(void);
+void test_setns_guest(void);
+int test_mount_flags_guest(int, char **);
+int test_uts_namespace_guest(int, char **);
+void test_ipc_namespace_guest(void);
+int test_user_namespace_guest(int, char **);
+int test_user_namespace_lifecycle(void);
+int test_namespace_handles_guest(void);
 int main(int argc, char **argv) {
+    if (argc==2 && !strcmp(argv[1],"tmpfs")) { test_tmpfs_guest(); return 0; }
+    if (argc==2 && !strcmp(argv[1],"overlay")) { test_overlay_guest(); return 0; }
+    if (argc==2 && !strcmp(argv[1],"setns")) { test_setns_guest(); return 0; }
+    if (argc>=2 && !strcmp(argv[1],"mount-flags")) return test_mount_flags_guest(argc,argv);
+    if (argc>=2 && !strcmp(argv[1],"uts-namespace")) return test_uts_namespace_guest(argc,argv);
+    if (argc>=2 && !strcmp(argv[1],"user-proc")) return test_user_namespace_guest(argc,argv);
+    if (argc>=2 && !strcmp(argv[1],"user-namespace")) return test_user_namespace_lifecycle();
+    if (argc>=2 && !strcmp(argv[1],"namespace-handles")) return test_namespace_handles_guest();
+    if (argc==2 && !strcmp(argv[1],"ipc-namespace")) { test_ipc_namespace_guest(); return 0; }
     setbuf(stdout, NULL); alarm(40);
     if (argc==2 && !strcmp(argv[1],"mount-namespace")) { test_mount_namespace_guest(); return 0; }
     if (argc==2 && !strcmp(argv[1],"exec-custody-target")) return 0;

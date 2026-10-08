@@ -7,6 +7,7 @@
 static int enabled;
 int md_adapter_buffer_ready(void) { return enabled; }
 int md_adapter_buffer_install(void) {
+    if (enabled) return 0;
     size_t stride=(sizeof(union md_adapter_frame)+md_page_size-1)/md_page_size*md_page_size;
     size_t size=stride*MD_ADAPTER_BUFFER_SLOTS;
     long fd=RAW2(prctl,MD_GUEST_BUFFER,size);

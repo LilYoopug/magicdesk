@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <sys/types.h>
 #include <linux/capability.h>
+#include "user_namespace.h"
 
 /* Guest credentials confer no Android/kernel authority. Copies retain the
  * immutable supplementary-group set; release each owning copy. */
@@ -15,6 +16,7 @@ struct md_identity {
     struct md_capabilities caps;
     int no_new_privs;
     struct md_identity_groups *groups;
+    struct md_user_namespace *user_namespace;
 };
 struct md_exec_image;
 struct md_exec_identity { struct md_identity value; int secure; };
@@ -26,6 +28,7 @@ int md_identity_groups(struct md_identity *, const uint32_t *, unsigned);
 unsigned md_identity_group_count(const struct md_identity *);
 const uint32_t *md_identity_group_data(const struct md_identity *);
 int md_identity_in_group(const struct md_identity *, uint32_t);
+/* set-ID operations accept IDs as seen in the caller's user namespace. */
 int md_identity_setuid(struct md_identity *, uint32_t);
 int md_identity_setgid(struct md_identity *, uint32_t);
 int md_identity_setreuid(struct md_identity *, uint32_t, uint32_t);
@@ -37,6 +40,16 @@ int md_identity_setresgid(struct md_identity *, uint32_t, uint32_t, uint32_t);
 int md_identity_no_new_privs(struct md_identity *, unsigned);
 int md_identity_may_chroot(const struct md_identity *);
 int md_identity_capable(const struct md_identity *, unsigned);
+int md_identity_capable_in(const struct md_identity *, const struct md_user_namespace *, unsigned);
+/* Filesystem IDs are canonical and mounts are not idmapped. FOWNER needs the
+ * owner UID mapped; other inode capabilities also require the owning GID. */
+int md_identity_file_capable(const struct md_identity *, uint32_t uid, uint32_t gid, unsigned);
+/* Stored IDs are canonical. Only syscall/ABI boundaries translate them. */
+uint32_t md_identity_visible_id(const struct md_identity *, int group, uint32_t);
+uint32_t md_identity_root(const struct md_identity *);
+int md_identity_enter_user_namespace(struct md_identity *);
+int md_identity_join_user_namespace(struct md_identity *, struct md_user_namespace *);
+int md_identity_setgroups(struct md_identity *, uint32_t *, unsigned);
 int md_identity_capset(struct md_identity *, uint64_t, uint64_t, uint64_t);
 long md_identity_cap_prctl(struct md_identity *, unsigned long, const unsigned long *);
 void md_identity_exec(const struct md_identity *, struct md_identity *);

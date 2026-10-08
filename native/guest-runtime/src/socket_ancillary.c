@@ -276,11 +276,11 @@ static size_t append(void *out, size_t used, size_t capacity, int type, int leve
     return used + (step < room ? step : room);
 }
 static long publish_rights(void *out, size_t used, size_t capacity,
-        int *fds, const unsigned char *watched, size_t count, int *flags, unsigned receive_flags) {
+        int *fds, const unsigned char *selectors, size_t count, int *flags, unsigned receive_flags) {
     size_t room=used<capacity?capacity-used:0;
     if (room<CMSG_LEN(sizeof(int))) { *flags|=MSG_CTRUNC; return used; }
     size_t delivered=0;
-    long error=md_fs_buffer_publish(fds,watched,(unsigned)count,(char *)out+used,room,receive_flags,flags,&delivered);
+    long error=md_fs_buffer_publish(fds,selectors,(unsigned)count,(char *)out+used,room,receive_flags,flags,&delivered);
     return error ? error : (long)(used+delivered);
 }
 static long publish(const struct md_fs *fs, int socket, const struct msghdr *original,
@@ -313,18 +313,18 @@ static long publish(const struct md_fs *fs, int socket, const struct msghdr *ori
         const void *data=CMSG_DATA(h); size_t n=h->cmsg_len-CMSG_LEN(0);
         if (h->cmsg_level==SOL_SOCKET && h->cmsg_type==SCM_CREDENTIALS && n==sizeof(claimed) && have_claim) data=&claimed;
         if (h->cmsg_level==SOL_SOCKET && h->cmsg_type==SCM_RIGHTS) {
-            size_t count=0; unsigned char watched[253];
+            size_t count=0; unsigned char selectors[253];
             for (size_t i=0;i<n/sizeof(int);i++,entry++) {
                 for (unsigned j=plan.first[entry];j<plan.first[entry+1];++j) {
                     const struct md_received_info *info=&plan.entries[j];
                     if (info->flags&MD_RECEIVED_CREDENTIALS) continue;
                     if (count==253 || info->index<0) return -EPROTO;
-                    watched[count]=!!(info->flags&MD_RECEIVED_WATCH);
+                    selectors[count]=(unsigned char)info->selectors;
                     indices[count++]=info->index;
                 }
             }
             if (!count) continue;
-            long published=publish_rights(out,used,capacity,indices,watched,count,&m.msg_flags,receive_flags);
+            long published=publish_rights(out,used,capacity,indices,selectors,count,&m.msg_flags,receive_flags);
             if (published<0) return published;
             used=(size_t)published;
             continue;

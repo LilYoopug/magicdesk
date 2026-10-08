@@ -76,6 +76,57 @@ void test_ipc_store_cleanup(const char *store) {
     for (unsigned i=0;i<sizeof(files)/sizeof(*files);++i) assert(!unlinkat(dir,files[i],0) || errno==ENOENT);
     assert(!close(dir) && !rmdir(path));
 }
+static void user_namespaces(struct md_ipc_credentials *owner) {
+    struct md_identity parent=md_identity_new(1000,2000), child=md_identity_copy(&parent);
+    uint32_t groups[]={2000,2001,3000};
+    assert(!md_identity_groups(&parent,groups,3) && !md_identity_enter_user_namespace(&child));
+    struct md_user_authority authority={.caps=UINT64_MAX};
+    struct md_id_extent users={0,1000,2}, gids={0,2000,2};
+    assert(!md_user_namespace_map(child.user_namespace,0,&authority,&authority,&users,1));
+    assert(!md_user_namespace_map(child.user_namespace,1,&authority,&authority,&gids,1));
+    int pair[2]; assert(!socketpair(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0,pair));
+    struct md_fs_request q={.operation=MD_FS_IPC,.flags=MD_IPC_PAIR,
+        .directory={pair[0],pair[1]},.peer=getpid()};
+    struct md_fs_result out;
+    md_ipc_credentials_execute(owner,&parent,&q,&out,NULL); assert(!out.error);
+    struct { struct md_ipc_identity identity; uint32_t groups[3]; } peer;
+    struct md_fs_output output={.data=&peer,.capacity=sizeof(peer)};
+    q.operation=MD_FS_IPC_PEER; q.mode=1;
+    md_ipc_credentials_execute(owner,&child,&q,&out,&output);
+    assert(!out.error && out.size==sizeof(peer) && !peer.identity.uid && !peer.identity.gid
+        && peer.identity.group_count==3 && peer.groups[0]==0 && peer.groups[1]==1 && peer.groups[2]==65534);
+    md_ipc_credentials_execute(owner,&parent,&q,&out,&output);
+    assert(!out.error && peer.identity.uid==1000 && peer.identity.gid==2000
+        && !memcmp(peer.groups,groups,sizeof(groups)));
+    q.operation=MD_FS_IPC; q.flags=MD_IPC_MESSAGE_CREATE; q.offset=getpid(); q.mode=0;
+    md_ipc_credentials_execute(owner,&child,&q,&out,NULL); assert(!out.error && out.fd>=0);
+    int token=out.fd;
+    q.flags=MD_IPC_MESSAGE_READ; q.directory[0]=pair[1]; q.directory[1]=token;
+    md_ipc_credentials_execute(owner,&parent,&q,&out,NULL);
+    assert(!out.error && out.info.uid==1000 && out.info.gid==2000);
+    md_ipc_credentials_execute(owner,&child,&q,&out,NULL);
+    assert(!out.error && !out.info.uid && !out.info.gid);
+    q.flags=MD_IPC_MESSAGE_CREATE; q.directory[0]=pair[0]; q.attributes.uid=2;
+    md_ipc_credentials_execute(owner,&child,&q,&out,NULL); assert(out.error==-EINVAL && out.fd==-1);
+    q.attributes.uid=1; child.caps.effective=0;
+    md_ipc_credentials_execute(owner,&child,&q,&out,NULL); assert(out.error==-EPERM && out.fd==-1);
+    q.attributes.uid=0;
+    md_ipc_credentials_execute(owner,&child,&q,&out,NULL); assert(!out.error && out.fd>=0); close(out.fd);
+    struct md_identity unmapped=md_identity_copy(&parent);
+    assert(!md_identity_enter_user_namespace(&unmapped));
+    q.flags=MD_IPC_MESSAGE_SENDER;
+    md_ipc_credentials_execute(owner,&unmapped,&q,&out,NULL); assert(!out.error && out.fd>=0);
+    int implicit=out.fd;
+    q.flags=MD_IPC_MESSAGE_READ; q.directory[0]=pair[1]; q.directory[1]=implicit;
+    md_ipc_credentials_execute(owner,&parent,&q,&out,NULL);
+    assert(!out.error && out.info.uid==1000 && out.info.gid==2000);
+    md_ipc_credentials_execute(owner,&unmapped,&q,&out,NULL);
+    assert(!out.error && out.info.uid==65534 && out.info.gid==65534);
+    close(implicit); md_identity_release(&unmapped);
+    close(token); close(pair[0]); close(pair[1]);
+    md_identity_release(&parent); md_identity_release(&child);
+    puts("PASS IPC namespace credentials: canonical snapshots, receiver-relative peers/groups/messages and unmapped/unauthorized sender rejection");
+}
 static void paired(struct md_ipc_credentials *first, struct md_ipc_credentials *second,
         struct md_ipc_credentials *foreign, int type) {
     int sockets[2], native[2];
@@ -437,6 +488,7 @@ void test_ipc_connections(const char *directory) {
         && !md_ipc_credentials_open(foreign_path,MD_IPC_TRANSPORT_NATIVE,&foreign));
     const int types[]={SOCK_STREAM,SOCK_DGRAM,SOCK_SEQPACKET};
     for (unsigned i=0;i<3;++i) paired(first,second,foreign,types[i]);
+    user_namespaces(first);
     independent(directory,first,second,SOCK_STREAM,1,MD_IPC_TRANSPORT_NATIVE,MD_IPC_TRANSPORT_NATIVE);
     independent(directory,first,second,SOCK_SEQPACKET,2,MD_IPC_TRANSPORT_NATIVE,MD_IPC_TRANSPORT_NATIVE);
     admission(first,3,0,0); admission(first,4,1,1);

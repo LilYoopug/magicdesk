@@ -4,20 +4,21 @@
 #include <stdint.h>
 
 enum { MD_FD_INSTALL_WAIT=-4096 };
-/* The caller retains the source FD and origin until completion/cancellation.
+/* The caller retains the source FD until completion/cancellation. The record
+ * retains its origin independently until then.
  * One supervisor event loop owns each record. No guest acknowledgement or
  * guessed close is needed: atomic ADDFD_SEND publishes the kernel result under
  * the destination table turn before any queued mutation can run. */
 struct md_fd_install {
     struct md_fd_order files;
-    struct md_fs_anchor *origin;
+    struct md_fd_object *origin;
     uint64_t notification;
     int listener, source;
     int retire_error;
     unsigned flags;
 };
 int md_fd_install_begin(struct md_fd_install *, struct md_fd_origins *,
-        int listener, uint64_t notification, int source, struct md_fs_anchor *,
+        int listener, uint64_t notification, int source, struct md_fd_object *,
         unsigned flags, struct md_resource_wakeup *);
 /* WAIT retains the record; any other result completes it. A negative result
  * still needs an error reply (ENOENT permits the receiver to have died).

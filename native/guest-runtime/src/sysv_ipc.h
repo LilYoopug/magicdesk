@@ -23,7 +23,7 @@ int md_ipc_transport_prepare(struct md_ipc *, struct md_ipc_transport *,
     const struct md_ipc_request *, int retry, void *memory, size_t capacity);
 void md_ipc_transport_close(struct md_ipc_transport *);
 
-int md_ipc_open(const char *, struct md_ipc **);
+int md_ipc_open(const char *, uint64_t namespace_id, struct md_user_namespace *owner, struct md_ipc **);
 void md_ipc_close(struct md_ipc *);
 struct md_ipc_undo *md_ipc_undo_new(void);
 struct md_ipc_undo *md_ipc_undo_fork(struct md_ipc_undo *, int shared);

@@ -5,12 +5,13 @@
 #include <sys/ioctl.h>
 
 int md_fd_install_begin(struct md_fd_install *p, struct md_fd_origins *files,
-        int listener, uint64_t notification, int source, struct md_fs_anchor *origin,
+        int listener, uint64_t notification, int source, struct md_fd_object *origin,
         unsigned flags, struct md_resource_wakeup *wakeup) {
     if (!p || p->files.table || !files || listener<0 || source<0 || flags&~O_CLOEXEC) return -EINVAL;
     *p=(struct md_fd_install){.listener=listener,.notification=notification,
-        .source=source,.origin=origin,.flags=flags};
+        .source=source,.origin=md_fd_object_retain(origin),.flags=flags};
     int result=md_fd_order_begin(files,&p->files,wakeup);
+    if (result<0) { md_fd_object_release(p->origin); p->origin=NULL; }
     return result<0 ? result : 0;
 }
 int md_fd_install_progress(struct md_fd_install *p) {
@@ -19,7 +20,7 @@ int md_fd_install_progress(struct md_fd_install *p) {
     int result=md_fd_order_start(&p->files);
     if (result) return result;
     struct md_fd_origin_update update={0};
-    result=md_fd_origins_prepare(p->files.table,p->origin,p->flags&O_CLOEXEC ? FD_CLOEXEC : 0,&update);
+    result=md_fd_origins_prepare_object(p->files.table,p->origin,p->flags&O_CLOEXEC ? FD_CLOEXEC : 0,&update);
     if (!result) {
         struct seccomp_notif_addfd add={.id=p->notification,.flags=SECCOMP_ADDFD_FLAG_SEND,
             .srcfd=p->source,.newfd_flags=p->flags};
@@ -28,11 +29,13 @@ int md_fd_install_progress(struct md_fd_install *p) {
     }
     md_fd_origins_finish(&update,result);
     p->retire_error=md_fd_order_complete(&p->files);
+    md_fd_object_release(p->origin); p->origin=NULL;
     return result;
 }
 int md_fd_install_cancel(struct md_fd_install *p) {
     if (!p) return -EINVAL;
-    if (!p->files.table) return 0;
-    int result=md_fd_order_cancel(&p->files);
-    return result==1 ? md_fd_order_complete(&p->files) : result;
+    int result=p->files.table ? md_fd_order_cancel(&p->files) : 0;
+    if (result==1) result=md_fd_order_complete(&p->files);
+    if (!p->files.table) { md_fd_object_release(p->origin); p->origin=NULL; }
+    return result;
 }

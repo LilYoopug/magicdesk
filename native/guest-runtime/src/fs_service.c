@@ -5,6 +5,7 @@
 #include "fs_engine.h"
 #include "image_catalogue.h"
 #include "inode_watch.h"
+#include "ipc_credentials.h"
 #include "ofd_order.h"
 #include "raw.h"
 #include <errno.h>
@@ -273,10 +274,11 @@ int md_fs_serve(struct md_filesystem *fs, int listener, int stop_fd,
         unsigned timeout_ms, struct md_fs_statistics *statistics, const struct md_fs_work_source *work) {
     struct md_inode_store *s = fs->store;
     if (!s || listener < 0 || stop_fd < 0 || !timeout_ms || timeout_ms > 60000) return -EINVAL;
-    enum { SLOTS = 32, BASE = 7 };
+    enum { SLOTS = 32, BASE = 8 };
     struct pollfd fds[BASE+SLOTS] = {{.fd = listener, .events = POLLIN}, {.fd = stop_fd, .events = POLLIN},
         {.fd = work ? work->fd : -1, .events = POLLIN}, {.fd = -1, .events = POLLIN},
-        {.fd = -1}, {.fd = md_fd_exchanges_pollfd(fs->exchanges), .events = POLLIN}, {.fd=-1,.events=POLLIN}};
+        {.fd = -1}, {.fd = md_fd_exchanges_pollfd(fs->exchanges), .events = POLLIN}, {.fd=-1,.events=POLLIN},
+        {.fd=-1,.events=POLLIN}};
     /* Fixed capacity, allocated once per service, never per request. */
     struct peer *peers = calloc(SLOTS, sizeof(*peers));
     if (!peers) return -ENOMEM;
@@ -328,9 +330,14 @@ int md_fs_serve(struct md_filesystem *fs, int listener, int stop_fd,
          * peer deadline drops only that connection, without replaying work. */
         fds[3].fd = work && work->notification_fd ? work->notification_fd(work->context) : -1;
         fds[4] = (struct pollfd){.fd = md_inode_watch_pollfd(s), .events = POLLIN};
+        fds[7].fd=md_ipc_credentials_pollfd(fs->ipc);
         int r = ppoll(fds, BASE+SLOTS, nearest == INT64_MAX ? NULL : &timeout, NULL);
         if (r < 0) { if (errno == EINTR) continue; error = -errno; break; }
         if (fds[1].revents) break;
+        if (fds[7].revents) {
+            int retired=md_ipc_credentials_dispatch(fs->ipc);
+            if (retired<0) { error=retired; break; }
+        }
         if (fds[6].revents) {
             uint64_t value;
             while (read(fds[6].fd,&value,sizeof(value))<0 && errno==EINTR) { }

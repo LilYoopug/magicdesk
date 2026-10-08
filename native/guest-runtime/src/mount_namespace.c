@@ -2,6 +2,8 @@
 #include "mount_graph.h"
 #include "mount_topology.h"
 #include "inode_lifetime.h"
+#include "user_namespace.h"
+#include "namespace_identity.h"
 #include <errno.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -56,6 +58,7 @@ struct md_mount_namespace *md_mount_namespace_new(void) {
         n->root=&n->base;
         int r=md_mount_id_allocate(&n->base.id);
         if (!r) r=md_mount_id_allocate(&n->shm_id);
+        if (!r) r=md_namespace_identity_new(&n->inode);
         if (!r) r=-pthread_mutex_init(&n->domains_lock,NULL);
         if (r) { free(n); errno=-r; return NULL; }
         atomic_init(&n->refs,1);
@@ -65,6 +68,22 @@ struct md_mount_namespace *md_mount_namespace_new(void) {
 struct md_mount_namespace *md_mount_namespace_retain(struct md_mount_namespace *n) {
     if (n) atomic_fetch_add_explicit(&n->refs,1,memory_order_relaxed);
     return n;
+}
+uint64_t md_mount_namespace_inode(const struct md_mount_namespace *n) { return n->inode; }
+struct md_user_namespace *md_mount_namespace_owner(const struct md_mount_namespace *n) { return n ? n->owner : NULL; }
+void md_mount_namespace_set_owner(struct md_mount_namespace *n, struct md_user_namespace *owner) {
+    struct md_user_namespace *old=n->owner;
+    n->owner=md_user_namespace_retain(owner); md_user_namespace_release(old);
+}
+int md_mount_namespace_lock_inherited(struct md_mount_namespace *n) {
+    int error=md_mount_policy_lock(&n->base.policy);
+    n->base.locked=1;
+    for (unsigned i=0;!error && n->tree && i<n->tree->count;++i)
+        if (n->tree->mounts[i].id) {
+            n->tree->mounts[i].locked=1;
+            error=md_mount_policy_lock(&n->tree->mounts[i].policy);
+        }
+    return error;
 }
 void md_view_mount_forget(struct md_fs_mounts *tree, struct md_view_mount *mount) {
     for (unsigned i=0;i<MD_VIEW_BUCKETS;++i) {
@@ -105,6 +124,7 @@ void md_mount_namespace_release(struct md_mount_namespace *n) {
         free(m);
     }
     md_mount_graph_close(n->graph);
+    md_user_namespace_release(n->owner);
     if (n->base.source>=0) close(n->base.source);
     if (n->base.target>=0) close(n->base.target);
     md_mount_policy_close(&n->base.policy);

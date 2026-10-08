@@ -923,11 +923,11 @@ static void value_transport(void) {
 }
 static void request_contract(void) {
     const struct md_fs_request requests[]={
-        {.operation=MD_FS_LISTATTR,.directory={3,-1}},
+        {.operation=MD_FS_XATTR_OBJECT,.directory={3,-1},.mode=MD_FS_XATTR_LIST},
         {.operation=MD_FS_GETACL,.directory={3,-1},.mode=MD_ACL_ACCESS},
         {.operation=MD_FS_SETACL,.directory={3,-1},.mode=MD_ACL_DEFAULT},
         {.operation=MD_FS_REMOVEACL,.directory={3,-1},.mode=MD_ACL_ACCESS},
-        {.operation=MD_FS_XATTR_OPEN,.directory={3,-1},.mode=F_OK},
+        {.operation=MD_FS_XATTR_OBJECT,.directory={3,-1},.mode=MD_FS_XATTR_GET,.path={NULL,"user.test"}},
         {.operation=MD_FS_MOUNT_TABLE,.directory={-1,-1}},
         {.operation=MD_FS_NATIVE_MOUNT,.directory={-1,-1},.offset=1},
     };

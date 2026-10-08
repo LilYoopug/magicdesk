@@ -479,10 +479,10 @@ static void exercise(int protected, enum scenario scenario, unsigned exported, i
                 assert(fcntl(c.result.received->fds[i],F_GETFD)==FD_CLOEXEC);
                 assert(fcntl(c.result.received->fds[i],F_GETFL)==fcntl(inputs[i],F_GETFL));
             }
-            struct md_fs_anchor *annotations[254]={0};
+            struct md_fd_object *annotations[254]={0};
             memcpy(annotations+skip,md_fd_message_origins(message),(exported-skip)*sizeof(*annotations));
             for (unsigned i=0;i<exported;++i)
-                if (annotations[i]) assert(!md_fs_anchor_check_fd(annotations[i],c.result.received->fds[i]));
+                if (annotations[i]) assert(!md_fs_anchor_check_fd(md_fs_anchor_from_object(annotations[i]),c.result.received->fds[i]));
             assert(!md_received_fds_annotate(c.result.received,annotations,exported));
             md_received_fds_release(retained); retained=c.result.received;
         }

@@ -13,6 +13,7 @@
 
 void test_fd_origins(void);
 void test_ofd_order(void);
+void test_user_namespace(void);
 static int descriptors(void) {
     DIR *dir = opendir("/proc/self/fd"); assert(dir);
     int count = 0;
@@ -76,39 +77,39 @@ static void contract(void) {
     assert(sibling.files!=parent.files);
     assert(sibling.mounts==parent.mounts);
     struct md_resource_change change;
-    assert(!md_resources_unshare_prepare(&child, CLONE_FS | CLONE_SYSVSEM, &change));
+    assert(!md_resources_unshare_prepare(&child, CLONE_FS | CLONE_SYSVSEM,NULL,&change));
     assert(change.next.fs != child.fs && change.next.sem_undo != child.sem_undo);
-    assert(!md_resources_unshare_finish(NULL, &child, &change, -EINVAL));
+    assert(!md_resources_unshare_finish(&child,NULL,&change, -EINVAL));
     assert(child.fs == parent.fs && child.sem_undo == parent.sem_undo);
     assert(!change.next.fs && !change.next.sem_undo && !change.next.mounts);
-    assert(!md_resources_unshare_prepare(&child, CLONE_FILES, &change));
+    assert(!md_resources_unshare_prepare(&child, CLONE_FILES,NULL,&change));
     assert(!change.next.fs && !change.next.sem_undo);
-    assert(!md_resources_unshare_finish(NULL, &child, &change, 0));
+    assert(!md_resources_unshare_finish(&child,NULL,&change, 0));
     assert(child.fs == parent.fs && child.sem_undo == parent.sem_undo);
-    assert(!md_resources_unshare_prepare(&child, CLONE_FS, &change));
-    assert(!md_resources_unshare_finish(NULL, &child, &change, 0));
+    assert(!md_resources_unshare_prepare(&child, CLONE_FS,NULL,&change));
+    assert(!md_resources_unshare_finish(&child,NULL,&change, 0));
     assert(child.fs != parent.fs && child.sem_undo == parent.sem_undo);
     assert(child.mounts==parent.mounts);
-    assert(!md_resources_unshare_prepare(&child, CLONE_SYSVSEM, &change));
-    assert(!md_resources_unshare_finish(NULL, &child, &change, 0));
+    assert(!md_resources_unshare_prepare(&child, CLONE_SYSVSEM,NULL,&change));
+    assert(!md_resources_unshare_finish(&child,NULL,&change, 0));
     assert(child.sem_undo != parent.sem_undo);
     md_domain_pin(child.fs);
-    assert(!md_resources_unshare_prepare(&child, CLONE_FS, &change));
+    assert(!md_resources_unshare_prepare(&child, CLONE_FS,NULL,&change));
     assert(change.next.fs == child.fs); // A sole owner needs no duplicate.
-    assert(!md_resources_unshare_finish(NULL, &child, &change, 0));
+    assert(!md_resources_unshare_finish(&child,NULL,&change, 0));
     md_domain_unpin(child.fs);
     assert(!md_domain_restrict(child.fs, getpid(), "/proc/self/fdinfo"));
     assert(!md_domain_chdir_root(child.fs));
     assert(md_domain_restricted(child.fs) && !md_domain_restricted(parent.fs));
-    assert(!md_resources_release(NULL, &sibling));
+    assert(!md_resources_release(&sibling));
     assert(!md_resources_fork(&child, CLONE_FS, &sibling));
-    assert(!md_resources_unshare_prepare(&sibling, CLONE_FS, &change));
+    assert(!md_resources_unshare_prepare(&sibling, CLONE_FS,NULL,&change));
     assert(change.next.fs != child.fs);
-    assert(!md_resources_unshare_finish(NULL, &sibling, &change, 0));
+    assert(!md_resources_unshare_finish(&sibling,NULL,&change, 0));
     assert(md_domain_restricted(sibling.fs) && md_domain_path_error(sibling.fs) == -EACCES);
-    assert(!md_resources_release(NULL, &sibling));
-    assert(!md_resources_release(NULL, &child));
-    assert(!md_resources_release(NULL, &parent));
+    assert(!md_resources_release(&sibling));
+    assert(!md_resources_release(&child));
+    assert(!md_resources_release(&parent));
 }
 static void root_is(struct md_guest_domain *fs, const struct md_fs_location *expected) {
     struct md_fs_location root; struct md_fs_anchor *cwd=NULL;
@@ -126,7 +127,7 @@ static void pending_root_relocation(void) {
     assert(!md_domain_set_root(parent.fs,&old));
     assert(!md_resources_fork(&parent,CLONE_FS,&child));
     struct md_resource_change pending;
-    assert(!md_resources_unshare_prepare(&child,CLONE_FS,&pending));
+    assert(!md_resources_unshare_prepare(&child,CLONE_FS,NULL,&pending));
     assert(pending.next.fs && pending.next.fs!=parent.fs);
     struct md_guest_domain *forked=md_domain_fork(parent.fs,0); assert(forked);
     struct md_guest_domain *isolated=md_domain_fork(parent.fs,0); assert(isolated);
@@ -136,32 +137,48 @@ static void pending_root_relocation(void) {
     md_domain_relocate_roots(view,&old,&next,NULL,NULL);
     root_is(parent.fs,&next); root_is(pending.next.fs,&next); root_is(forked,&next);
     root_is(isolated,&old);
-    assert(!md_resources_unshare_finish(NULL,&child,&pending,0)); root_is(child.fs,&next);
+    assert(!md_resources_unshare_finish(&child,NULL,&pending,0)); root_is(child.fs,&next);
     md_domain_release(forked); md_domain_release(isolated);
-    assert(!md_resources_release(NULL,&child)); assert(!md_resources_release(NULL,&parent));
+    assert(!md_resources_release(&child)); assert(!md_resources_release(&parent));
     md_mount_namespace_release(view); md_mount_namespace_release(other);
 }
 int main(void) {
     alarm(60);
-    unsigned long spaces[] = {CLONE_NEWUSER, CLONE_NEWUTS,
-        CLONE_NEWIPC, CLONE_NEWPID, CLONE_NEWNET, CLONE_NEWCGROUP};
+    unsigned long spaces[] = {CLONE_NEWPID, CLONE_NEWNET, CLONE_NEWCGROUP};
+    struct md_identity identity=md_identity_new(0,0);
     struct md_task_resources r; assert(!md_resources_init(&r,NULL));
     for (unsigned i = 0; i < sizeof(spaces)/sizeof(*spaces); i++) {
         struct md_resource_change change;
         assert(!md_resources_clone_supported(spaces[i]));
-        assert(md_resources_unshare_prepare(&r, spaces[i] | CLONE_FS, &change) == -ENOTSUP);
+        assert(md_resources_unshare_prepare(&r, spaces[i] | CLONE_FS,NULL,&change) == -ENOTSUP);
         assert(!change.next.fs && !change.next.sem_undo);
     }
     struct md_resource_change change;
+    assert(md_resources_clone_supported(CLONE_NEWUTS));
+    assert(md_resources_clone_supported(CLONE_NEWIPC));
+    assert(!md_resources_clone_supported(CLONE_NEWIPC|CLONE_SYSVSEM));
+    struct md_task_resources sibling;
+    assert(!md_resources_fork(&r,0,&sibling) && sibling.uts==r.uts);
+    assert(!md_uts_namespace_set(r.uts,0,"parent",6));
+    assert(!md_resources_unshare_prepare(&r,CLONE_NEWUTS,&identity,&change));
+    assert(change.next.uts && change.next.uts!=r.uts);
+    assert(!md_resources_unshare_finish(&r,NULL,&change,-EINVAL) && r.uts==sibling.uts);
+    assert(!md_resources_unshare_prepare(&r,CLONE_NEWUTS,&identity,&change));
+    assert(!md_resources_unshare_finish(&r,NULL,&change,0) && r.uts!=sibling.uts);
+    struct utsname names;
+    md_uts_namespace_read(r.uts,&names); assert(!strcmp(names.nodename,"parent"));
+    assert(!md_uts_namespace_set(r.uts,0,"child",5));
+    md_uts_namespace_read(sibling.uts,&names); assert(!strcmp(names.nodename,"parent"));
+    assert(!md_resources_release(&sibling));
     assert(md_resources_clone_supported(CLONE_NEWNS));
     assert(!md_resources_clone_supported(CLONE_NEWNS|CLONE_FS));
-    assert(md_resources_unshare_prepare(&r,CLONE_NEWNS,&change)==-ENOTSUP);
+    assert(md_resources_unshare_prepare(&r,CLONE_NEWNS,NULL,&change)==-ENOTSUP);
     r.mounts=md_mount_namespace_new(); assert(r.mounts);
-    assert(!md_resources_unshare_prepare(&r,CLONE_NEWNS,&change));
+    assert(!md_resources_unshare_prepare(&r,CLONE_NEWNS,&identity,&change));
     assert(change.copy_mounts && !change.next.fs && !change.next.mounts);
-    assert(md_resources_unshare_finish(NULL,&r,&change,0)==-EINVAL);
-    assert(md_resources_unshare_prepare(&r, 1UL << 63, &change) == -EINVAL);
-    assert(!md_resources_release(NULL, &r));
+    assert(md_resources_unshare_finish(&r,NULL,&change,0)==-EINVAL);
+    assert(md_resources_unshare_prepare(&r, 1UL << 63,NULL,&change) == -EINVAL);
+    assert(!md_resources_release(&r));
     int before = descriptors();
     for (unsigned i = 0; i < 100; i++) contract();
     for (unsigned i = 0; i < 100; i++) pending_root_relocation();
@@ -169,6 +186,7 @@ int main(void) {
     assert(descriptors() == before);
     test_fd_origins();
     test_ofd_order();
+    test_user_namespace();
     puts("PASS resource ownership, transactional unshare, retained roots and descriptor lifetime");
     alarm(0);
     return 0;

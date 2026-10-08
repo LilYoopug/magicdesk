@@ -6,7 +6,7 @@
 #include <sys/un.h>
 
 #define MD_FS_MAGIC 0x4d444653U
-#define MD_FS_VERSION 18U
+#define MD_FS_VERSION 20U
 #define MD_FS_MAX_FDS 2
 enum { MD_FS_REPLY_CHUNK=65536 };
 struct md_fs_packet {

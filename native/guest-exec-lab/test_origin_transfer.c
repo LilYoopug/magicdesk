@@ -9,6 +9,7 @@
 #include "event_wait.h"
 #include "ipc_capsule.h"
 #include "fd_bundle.h"
+#include "fd_selector.h"
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -61,11 +62,11 @@ static struct md_fs_anchor *anchor(struct md_filesystem *fs, const char *name) {
 static void pair(int fd[2]) {
     assert(!socketpair(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC|SOCK_NONBLOCK,0,fd));
 }
-static struct md_fd_message *capture(struct md_fs_anchor *const *entries, unsigned count) {
+static struct md_fd_message *capture_objects(struct md_fd_object *const *objects, unsigned count) {
     struct md_fd_origins *table=md_fd_origins_new(); assert(table);
     int numbers[253]; struct md_fd_origin_update updates[253];
     for (unsigned i=0;i<count;++i) numbers[i]=(int)i+10;
-    assert(!md_fd_origins_prepare_batch(table,entries,0,count,updates));
+    assert(!md_fd_origins_prepare_batch(table,objects,0,count,updates));
     assert(!md_fd_origins_finish_batch(updates,count,numbers,count));
     struct md_fd_order turn={0};
     assert(md_fd_order_begin(table,&turn,NULL)==1 && !md_fd_order_start(&turn));
@@ -73,6 +74,11 @@ static struct md_fd_message *capture(struct md_fs_anchor *const *entries, unsign
     assert(!md_fd_message_capture(table,numbers,count,&message));
     assert(!md_fd_order_complete(&turn)); md_fd_origins_release(table);
     return message;
+}
+static struct md_fd_message *capture(struct md_fs_anchor *const *entries, unsigned count) {
+    struct md_fd_object *objects[253];
+    for (unsigned i=0;i<count;++i) objects[i]=md_fs_anchor_object(entries[i]);
+    return capture_objects(objects,count);
 }
 static void publish(struct source *s, const char *store, struct md_fs_anchor *const *entries, unsigned count) {
     s->message=capture(entries,count);
@@ -172,6 +178,14 @@ static void engine(const char *base, struct md_fs_origin_vector *v, int changed)
     assert(md_fs_origin_vector_count(v)==253);
     engine_entries(base,md_fs_origin_vector_entries(v),changed);
 }
+static void engine_objects(const char *base, struct md_fd_object *const *objects) {
+    struct md_fs_anchor *anchors[253];
+    for (unsigned i=0;i<253;++i) {
+        anchors[i]=md_fs_anchor_from_object(objects[i]);
+        assert(!objects[i] || anchors[i]);
+    }
+    engine_entries(base,anchors,0);
+}
 static void copy_unlink(const char *base, struct md_fs_anchor *origin) {
     char store[PATH_MAX]; path(store,base,"store"); struct md_filesystem fs={0};
     assert(!md_inode_store_open(store,0,&fs.store) && !md_fs_mounts_open(&fs,NULL,0));
@@ -199,7 +213,9 @@ static void local(const char *base) {
     /* Imported origins use the ordinary table publication, fork and exec paths. */
     struct md_fd_origins *table=md_fd_origins_new(); assert(table); struct md_fd_origin_update updates[253];
     int numbers[253]; for (unsigned n=0;n<253;++n) numbers[n]=1000+(int)n;
-    assert(!md_fd_origins_prepare_batch(table,aa,FD_CLOEXEC,253,updates));
+    struct md_fd_object *objects[253];
+    for (unsigned n=0;n<253;++n) objects[n]=md_fs_anchor_object(aa[n]);
+    assert(!md_fd_origins_prepare_batch(table,objects,FD_CLOEXEC,253,updates));
     assert(!md_fd_origins_finish_batch(updates,253,numbers,253));
     struct md_fd_origins *copy=md_fd_origins_fork(table,0); assert(copy);
     md_fd_origins_release(table); md_fd_origins_exec(copy); md_fd_origins_release(copy);
@@ -586,14 +602,14 @@ static void capsules(const char *base, int mode) {
     for (unsigned i=0;i<253;++i) assert(fcntl(a->fds[i],F_GETFD)&FD_CLOEXEC);
     if (unknown) assert(!a->origins && !b->origins);
     else {
-        engine_entries(base,a->origins,0); engine_entries(base,b->origins,0);
-        assert(a->origins[1]->view==b->origins[1]->view);
+        engine_objects(base,a->origins); engine_objects(base,b->origins);
+        assert(md_fs_anchor_from_object(a->origins[1])->view==md_fs_anchor_from_object(b->origins[1])->view);
         char bytes[2]; assert(read(a->fds[5],bytes,1)==1 && bytes[0]=='l');
         assert(read(b->fds[5],bytes+1,1)==1 && bytes[1]=='o');
     }
     md_received_fds_release(a); close(carrier);
     md_ipc_capsules_free(owner); md_ipc_binding_release(&receiver); md_ipc_credentials_close(authority);
-    if (!unknown) { maintenance(base,1); engine_entries(base,b->origins,0); }
+    if (!unknown) { maintenance(base,1); engine_objects(base,b->origins); }
     md_received_fds_release(b); maintenance(base,0);
     ready(lifetime,POLLIN); assert(!read(lifetime,&c,1)); close(lifetime); assert(descriptors()==before);
     assert(!md_ipc_credentials_open(store,MD_IPC_TRANSPORT_ORIGINS_V1,&authority));
@@ -620,6 +636,75 @@ static void bundles(void) {
     assert(md_fd_bundle_pack(source,600,&bundle)==-EBADF && bundle==-1);
     close(fd); assert(descriptors()==before);
     puts("PASS immutable FD bundles: 253/600 rights, repeated peek, malformed size and partial construction cleanup");
+}
+struct typed_origin { struct md_fd_object object; unsigned *destroyed; };
+static void typed_destroy(struct md_fd_object *object) {
+    struct typed_origin *p=(void *)object; ++*p->destroyed; free(p);
+}
+static void typed_capsules(const char *base) {
+    unsigned before=descriptors(), destroyed=0;
+    char store[PATH_MAX]; path(store,base,"store");
+    struct md_inode_store *inode=NULL; assert(!md_inode_store_open(store,1,&inode));
+    md_inode_store_close(inode);
+    struct md_ipc_credentials *authority=NULL, *foreign=NULL;
+    assert(!md_ipc_credentials_open(store,MD_IPC_TRANSPORT_ORIGINS_V1,&authority));
+    assert(!md_ipc_credentials_open(store,MD_IPC_TRANSPORT_ORIGINS_V1,&foreign));
+    int app[2]; pair(app);
+    struct md_identity identity=md_identity_new(0,0);
+    struct md_fs_request q={.operation=MD_FS_IPC,.flags=MD_IPC_PAIR,.directory={app[0],app[1]},.peer=getpid()};
+    struct md_fs_result result; md_ipc_credentials_execute(authority,&identity,&q,&result,NULL);
+    assert(!result.error); md_identity_release(&identity);
+    struct md_ipc_binding sender={0},receiver={0},other={0};
+    assert(!md_ipc_credentials_bind(authority,app[0],&sender));
+    assert(!md_ipc_credentials_bind(authority,app[1],&receiver));
+    assert(!md_ipc_credentials_bind(foreign,app[1],&other));
+    struct md_ipc_capsules *owner=NULL, *outsider=NULL;
+    assert(!md_ipc_capsules_new(&sender,&owner) && !md_ipc_capsules_new(&other,&outsider));
+    static const struct md_fd_object_type type={.destroy=typed_destroy,.selectors=1U<<MD_FD_SELECTOR_PROC};
+    struct typed_origin *p=calloc(1,sizeof(*p)); assert(p);
+    md_fd_object_init(&p->object,&type); p->destroyed=&destroyed;
+    struct md_fd_object *objects[]={&p->object};
+    int fd=open("/dev/null",O_RDWR|O_CLOEXEC); assert(fd>=0);
+    unsigned warmed=0;
+    for (unsigned i=0;i<64;++i) {
+        struct md_fd_message *message=capture_objects(objects,1);
+        int carrier=-1;
+        assert(!md_ipc_capsules_publish(owner,&sender,"0123456789abcdef0123456789abcdef",message,&fd,1,&carrier));
+        md_fd_message_release(message);
+        assert(md_ipc_credentials_pollfd(authority)>=0 && !md_ipc_credentials_dispatch(authority));
+        struct md_received_fds *received=NULL;
+        unsigned held=descriptors();
+        assert(md_ipc_capsules_receive(outsider,&other,carrier,&received)==-EXDEV && !received);
+        assert(descriptors()==held);
+        if (i%2) {
+            assert(!md_ipc_capsules_receive(owner,&receiver,carrier,&received));
+            assert(received->count==1 && received->origins && received->origins[0]==&p->object);
+        }
+        close(carrier);
+        ready(md_ipc_credentials_pollfd(authority),POLLIN);
+        assert(md_ipc_credentials_dispatch(authority)==1 && !md_ipc_credentials_dispatch(authority));
+        assert(!destroyed); md_received_fds_release(received);
+        if (!i) warmed=descriptors();
+        else assert(descriptors()==warmed);
+    }
+    int reached=0;
+    for (int i=0;i<64 && !reached;++i) {
+        struct md_fd_message *message=capture_objects(objects,1); int carrier=-1;
+        test_mount_allocation_failure_after(i);
+        int error=md_ipc_capsules_publish(owner,&sender,"0123456789abcdef0123456789abcdef",message,&fd,1,&carrier);
+        test_mount_allocation_failure_after(-1);
+        if (!error) { reached=1; close(carrier); ready(md_ipc_credentials_pollfd(authority),POLLIN); }
+        else assert(error==-ENOMEM && carrier==-1);
+        assert(md_ipc_credentials_dispatch(authority)==(!error));
+        md_fd_message_release(message); assert(descriptors()==warmed);
+    }
+    assert(reached); md_fd_object_release(&p->object); assert(destroyed==1);
+    close(fd); close(app[0]); close(app[1]);
+    md_ipc_capsules_free(owner); md_ipc_capsules_free(outsider);
+    md_ipc_binding_release(&sender); md_ipc_binding_release(&receiver); md_ipc_binding_release(&other);
+    md_ipc_credentials_close(foreign); md_ipc_credentials_close(authority);
+    assert(descriptors()==before);
+    puts("PASS typed local capsules: exact authority, foreign rejection, queue discard, partial allocation, 64 cycles and final release");
 }
 static void unknown(const char *base) {
     unsigned before=descriptors(); char store[PATH_MAX]; path(store,base,"store");
@@ -667,12 +752,13 @@ static void mount_pins(const char *base) {
 void test_origin_transfer(const char *base) {
     alarm(120); bundles();
     const char *names[]={"origin-local","origin-faults","origin-processes","origin-unknown",
-        "origin-capsules","origin-capsules-unknown","origin-capsules-discard","origin-storage","origin-mount-pins"}; char name[PATH_MAX];
-    for (unsigned n=0;n<9;++n) {
+        "origin-capsules","origin-capsules-unknown","origin-capsules-discard","origin-storage","origin-mount-pins",
+        "origin-typed-capsules"}; char name[PATH_MAX];
+    for (unsigned n=0;n<10;++n) {
         path(name,base,names[n]); assert(!mkdir(name,0700));
         if (!n) local(name); else if (n==1) failures(name); else if (n==2) processes(name);
         else if (n==3) unknown(name); else if (n==7) storage_process(name);
-        else if (n==8) mount_pins(name); else capsules(name,(int)n-4);
+        else if (n==8) mount_pins(name); else if (n==9) typed_capsules(name); else capsules(name,(int)n-4);
     }
     alarm(0); puts("PASS portable message origins");
 }

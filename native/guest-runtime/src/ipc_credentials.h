@@ -46,7 +46,7 @@ void md_ipc_binding_release(struct md_ipc_binding *);
 enum md_ipc_operation {
     MD_IPC_LISTEN_BEGIN = 1, MD_IPC_LISTEN_END, MD_IPC_CONNECT_BEGIN,
     MD_IPC_CONNECT_END, MD_IPC_ACCEPT, MD_IPC_PAIR, MD_IPC_NAME,
-    MD_IPC_MESSAGE_CREATE, MD_IPC_MESSAGE_READ
+    MD_IPC_MESSAGE_CREATE, MD_IPC_MESSAGE_READ, MD_IPC_MESSAGE_SENDER
 };
 /* Offer applies only to new listeners/connections/pairs; opening another owner
  * cannot upgrade an existing connection. NATIVE adds no data-path work.
@@ -54,6 +54,9 @@ enum md_ipc_operation {
 int md_ipc_credentials_open(const char *store, enum md_ipc_ancillary_transport offer,
     struct md_ipc_credentials **);
 void md_ipc_credentials_close(struct md_ipc_credentials *);
+/* Worker-owned, event-driven retirement of process-local typed FD custody. */
+int md_ipc_credentials_pollfd(const struct md_ipc_credentials *);
+int md_ipc_credentials_dispatch(struct md_ipc_credentials *);
 void md_ipc_credentials_execute(struct md_ipc_credentials *, const struct md_identity *,
     const struct md_fs_request *, struct md_fs_result *, const struct md_fs_output *);
 #endif

@@ -34,9 +34,12 @@ int md_fs_result_valid(const struct md_fs_request *request, const struct md_fs_r
     uint32_t operation=request->operation;
     int opens = operation == MD_FS_MOUNT_TABLE || operation == MD_FS_OPEN || operation == MD_FS_CREATE || operation == MD_FS_TEMPORARY
         || operation == MD_FS_OPEN_OBJECT || operation == MD_FS_OPEN_IMAGE || operation == MD_FS_WATCH_CREATE
-        || operation == MD_FS_XATTR_OPEN || operation == MD_FS_REOPEN
-        || operation == MD_FS_TASK_PATH || (operation == MD_FS_IPC && request->flags == MD_IPC_MESSAGE_CREATE);
-    if (reply->error > 0 || reply->error < -4095 || reply->host_path>1
+        || operation == MD_FS_REOPEN
+        || operation == MD_FS_TASK_PATH || (operation == MD_FS_IPC
+            && (request->flags == MD_IPC_MESSAGE_CREATE || request->flags == MD_IPC_MESSAGE_SENDER));
+    if (reply->error > 0 || reply->error < -4095 || reply->host_path>2
+            || (reply->host_path==2 && (operation!=MD_FS_MOUNT || (request->mode!=MD_FS_MOUNT_BIND
+                && request->mode!=MD_FS_MOUNT_PIVOT && request->mode!=MD_FS_MOUNT_MOVE)))
             || reply->open_completion.kind > MD_OPEN_PIPE || reply->open_completion.kind < MD_OPEN_READY
             || (reply->open_completion.kind && (reply->error || reply->host_path || reply->size
                 || (operation != MD_FS_OPEN && operation != MD_FS_REOPEN && operation != MD_FS_OPEN_OBJECT)
@@ -48,7 +51,7 @@ int md_fs_result_valid(const struct md_fs_request *request, const struct md_fs_r
             || (reply->size && !reply->host_path && operation != MD_FS_READLINK && operation != MD_FS_PATH && operation != MD_FS_GETDENTS
                 && operation != MD_FS_SOCKET_ADDRESS && operation != MD_FS_SOCKET_NAME && operation != MD_FS_REALPATH
                 && operation != MD_FS_OBJECT_ID && operation != MD_FS_OPEN_IMAGE && operation != MD_FS_WATCH_READ
-                && operation != MD_FS_GETCAP && operation != MD_FS_LISTATTR && operation != MD_FS_STATFS
+                && operation != MD_FS_GETCAP && operation != MD_FS_STATFS
                 && !md_fs_operation_value(operation))
             || (!reply->error && !reply->host_path && operation==MD_FS_STATFS
                 && reply->size!=sizeof(struct md_fs_statfs))
@@ -58,7 +61,7 @@ int md_fs_result_valid(const struct md_fs_request *request, const struct md_fs_r
             || (reply->position && ((operation != MD_FS_SEEKDIR && operation != MD_FS_WATCH_ADD && operation != MD_FS_WATCH_PATH
                 && operation != MD_FS_WATCH_BYTES && operation != MD_FS_WATCH_CONTAINS && operation != MD_FS_IPC
                 && operation != MD_FS_GETACL && operation != MD_FS_UMASK
-                && operation != MD_FS_XATTR && operation != MD_FS_FXATTR) || reply->error)) || reply->position < 0
+                && operation != MD_FS_XATTR && operation != MD_FS_FXATTR && operation != MD_FS_XATTR_OBJECT) || reply->error)) || reply->position < 0
             || (operation==MD_FS_UMASK && reply->position>0777)
             || (operation == MD_FS_GETDENTS && (reply->size > request->capacity || !valid_entries(data, reply->size)))
             || (operation == MD_FS_WATCH_READ && reply->size > request->capacity)) return 0;
@@ -72,7 +75,7 @@ int md_fs_result_valid(const struct md_fs_request *request, const struct md_fs_r
                     +(request->mode ? id.group_count*sizeof(uint32_t) : 0)) return 0;
         }
     } else if (!reply->error && !reply->host_path && md_fs_operation_value(operation)) {
-        int read=operation==MD_FS_GETACL || ((operation==MD_FS_XATTR || operation==MD_FS_FXATTR)
+        int read=operation==MD_FS_GETACL || ((operation==MD_FS_XATTR || operation==MD_FS_FXATTR || operation==MD_FS_XATTR_OBJECT)
             && (request->mode==MD_FS_XATTR_GET || request->mode==MD_FS_XATTR_LIST));
         if (reply->position>MD_FS_VALUE_MAX || (read ? reply->size!=(request->capacity ? (uint64_t)reply->position : 0)
             || reply->size>request->capacity : reply->size || reply->position)) return 0;

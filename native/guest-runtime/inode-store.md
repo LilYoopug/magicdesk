@@ -40,15 +40,62 @@ lookup, `inode_metadata.c` owns guest permissions and metadata mutations, and
 `inode_acl.c` and `inode_capability.c` own logical security attributes;
 `inode_import.c` imports prepared trees. `inode_snapshot.c` owns
 immutable-source snapshots; `inode_backing.c` owns source validation and copy-up.
+`inode_view.c` owns retained namespace projections within one store transaction
+domain; `inode_maintenance.c` collects untracked backing objects only under
+exclusive maintenance or before a store is published.
 Their private contract is in
 `inode_internal.h`. Callers use the explicit dirfd-based `inode_store.h` API.
 The internal database format is versioned and incompatible formats are rejected,
-not migrated. Format 12 includes logical owners/modes, POSIX ACLs, file capabilities,
+not migrated. Format 13 includes scoped namespace views, logical owners/modes, POSIX ACLs, file capabilities,
 unambiguous file-path history, stable identities, backing history,
 immutable sources, socket addresses, FIFO ownership, transactional namespace
 counters and the [watch event journal](watches.md). Incompatible stores require a separately prepared store; opening
 one never rewrites or deletes it. Bind retains a name until
 unlink, including stale listeners; existing connections survive unlink/rebind.
+
+Each retained view selects its own root and physical-to-logical inode mapping.
+Different views can share a native body without aliasing their logical metadata;
+copy-up retains old descriptor identity within the originating view. Roots in
+the same store share one SQLite transaction and one short-lived object-directory
+gate. There is no second database journal for projection publication.
+Projection roots carry independent kernel leases through local references and
+SCM custody. Collection removes an unleased projection's metadata; native bodies
+remain while other stores may retain source leases. Exclusive maintenance
+collects bodies only after metadata retirement has committed. Normal open/stat
+does not run collection or allocate a view selector. Writable overlay uses a
+connection-local mutation journal to publish its merged and upper names within
+the same transaction. Upper/work reservations remain held by detached views
+until their last descriptor or origin releases custody.
+Each view has its own bounded lower-source catalogue. Retiring a view releases
+that catalogue instead of consuming source slots in the persistent instance.
+Upper/work reservations share the metadata transaction and retained projection
+lease. A dependent view retains its referenced parent metadata; collection
+retires children before parents. Reconnection and object-ID access preserve the
+selected scope, including after sender closure and queued SCM transfer.
+
+Overlay whiteout/opaque attributes are transactional metadata, including explicit
+tombstones that mask native attributes. Ordinary xattr operations and logical
+ACL/capability attributes execute through the same typed inode operation; backing
+FDs do not escape for a second, detached xattr mutation. Overlay views hide private
+control attributes. Directory attributes come from the selected layer.
+
+An overlay retains the mounting identity, supplementary groups and owning user
+namespace independently of the mounting task. Access checks apply both caller
+DAC/ACL and the saved identity's underlying-layer permissions. Copy-up requires
+read access to the lower body; upper-name changes check directory and sticky-bit
+permissions before publication. Metadata, ACL and capability changes use the same
+typed authorization helpers as ordinary stores. A sealed credential snapshot
+travels with cold custody transfers and reconnects; ordinary file IO does not
+serialize credentials or allocate an identity. Native SELinux checks remain in
+force. This is not kernel-equivalent confinement of unadapted syscalls.
+
+FIFO and pathname-socket channels have identities separate from a view's logical
+inode. Copy-up and remount retain the channel, including a lower from another
+store. FIFO pin custody and rendezvous remain with the creating store; projected
+opens publish their local inode association without holding two store transactions.
+Snapshots create fresh FIFO channels. Regular files do not use channel lookup.
+Successful upper-name publication emits the same committed directory events as
+ordinary inode operations; rollback does not notify an uncommitted name.
 
 ## Paths And Directories
 
@@ -151,8 +198,9 @@ metadata or claims it was preserved.
 
 Native objects and data are synced before namespace commit. Failure before commit
 leaves no published partial tree, but may retain untracked objects. An uncertain
-commit requires reopen/inspection before retry. The model still has no garbage
-collector; byte limits bound the current attempt, not accumulated failed attempts.
+commit requires reopen/inspection before retry. Exclusive maintenance can collect
+untracked physical allocations; byte limits bound the current attempt, not
+accumulated failed attempts while the store remains active.
 Import is not execution from the new namespace or successful package installation.
 
 ## Transactions
@@ -211,7 +259,7 @@ independent of OCI parsing and launch-local directory attachments.
   gate still returns EAGAIN. An IO error during commit can have an unknown
   outcome: inspect before replaying a mutation.
 - Detached objects and uncommitted allocations are retained and audited separately.
-  There is no live garbage collector. Removing metadata while another process
+  There is no live garbage collector for ordinary detached objects. Removing metadata while another process
   holds an FD would break descriptor lookup. Long-lived stores can therefore
   accumulate unreachable backing data; live reclamation remains unsupported.
 

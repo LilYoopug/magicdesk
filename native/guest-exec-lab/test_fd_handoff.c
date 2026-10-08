@@ -445,12 +445,13 @@ static void origin_vector_handoff(const char *directory, unsigned count, int tru
     struct md_fd_origins *source=md_fd_origins_new(), *target=md_fd_origins_new(); assert(source && target);
     int handles[]={first,second,pipefd[1],unknown};
     struct md_fs_anchor *known[]={a,b,p,NULL};
+    struct md_fd_object *objects[]={md_fs_anchor_object(a),md_fs_anchor_object(b),md_fs_anchor_object(p),NULL};
     struct md_fd_origin_update initial[4];
-    assert(!md_fd_origins_prepare_batch(source,known,0,4,initial));
+    assert(!md_fd_origins_prepare_batch(source,objects,0,4,initial));
     assert(!md_fd_origins_finish_batch(initial,4,handles,4));
-    int numbers[MAX_RIGHTS]; struct md_fs_anchor *origins[MAX_RIGHTS];
+    int numbers[MAX_RIGHTS]; struct md_fd_object *origins[MAX_RIGHTS];
     for (unsigned i=0;i<count;++i) numbers[i]=handles[i%4];
-    assert(!md_fd_origins_capture(source,numbers,count,origins));
+    assert(!md_fd_origins_capture_objects(source,numbers,count,origins));
     pid_t parent=getpid(), child=fork(); assert(child>=0);
     if (!child) {
         assert(!prctl(PR_SET_PDEATHSIG,SIGKILL));
@@ -524,7 +525,7 @@ static void origin_vector_handoff(const char *directory, unsigned count, int tru
         assert(peek ? n==-1 && errno==EAGAIN : n==0);
     }
     if (stack) assert(!munmap(stack,stack_size));
-    for (unsigned i=0;i<count;++i) md_fs_anchor_release(origins[i]);
+    for (unsigned i=0;i<count;++i) md_fd_object_release(origins[i]);
     md_fd_origins_release(target);
     md_fs_anchor_release(a); md_fs_anchor_release(b); md_fs_anchor_release(p);
     md_mount_namespace_release(views[0]); md_mount_namespace_release(views[1]);
@@ -603,7 +604,7 @@ static int origin_message_receive(int route, int peek) {
 static void origin_message_publish(const struct md_fd_message *record, int carrier,
         struct md_fd_origins *target, unsigned delivered, const off_t *positions) {
     unsigned count=md_fd_message_count(record);
-    struct md_fs_anchor *const *origins=md_fd_message_origins(record);
+    struct md_fd_object *const *origins=md_fd_message_origins(record);
     struct md_fd_origin_update updates[MD_FD_RECEIPT_MAX]; int numbers[MD_FD_RECEIPT_MAX];
     struct md_fd_delivery delivery={0};
     assert(!md_fd_delivery_prepare(&delivery,target,origins,FD_CLOEXEC,count,updates,numbers));
@@ -620,7 +621,7 @@ static void origin_message_publish(const struct md_fd_message *record, int carri
     md_fd_delivery_dispose(&delivery);
     assert(!md_fd_order_complete(&turn) && !md_fd_order_cancel(&next));
     for (unsigned i=0;i<delivered;++i) {
-        origin_at(target,numbers[i],origins[i]);
+        origin_at(target,numbers[i],md_fs_anchor_from_object(origins[i]));
         assert(fcntl(numbers[i],F_GETFD)==FD_CLOEXEC);
         if (positions) assert(lseek(numbers[i],0,SEEK_CUR)==positions[i]);
         assert(!close(numbers[i]) && !md_fd_origins_close_range(target,numbers[i],numbers[i],0));
@@ -646,10 +647,12 @@ static void origin_message_association(const char *directory, struct md_ipc_cred
     struct md_mount_namespace *views[]={md_mount_namespace_new(),md_mount_namespace_new()};
     assert(views[0] && views[1]);
     struct md_fs_anchor *known[]={capture(a,views[0]),capture(b,views[1]),capture(pipefd[1],views[0]),NULL};
+    struct md_fd_object *objects[4];
+    for (unsigned i=0;i<4;++i) objects[i]=md_fs_anchor_object(known[i]);
     struct md_fd_origins *source=md_fd_origins_new(), *target=md_fd_origins_new(); assert(source && target);
     int handles[]={a,b,pipefd[1],unknown};
     struct md_fd_origin_update initial[4];
-    assert(!md_fd_origins_prepare_batch(source,known,0,4,initial));
+    assert(!md_fd_origins_prepare_batch(source,objects,0,4,initial));
     assert(!md_fd_origins_finish_batch(initial,4,handles,4));
     struct md_fd_messages *messages=NULL;
     assert(!md_fd_messages_new(&messages));
@@ -659,7 +662,7 @@ static void origin_message_association(const char *directory, struct md_ipc_cred
         int inputs[MD_FD_RECEIPT_MAX];
         for (unsigned j=0;j<sizes[i];++j) inputs[j]=handles[(j+i)%4];
         carriers[i]=origin_message_offer(messages,records+i,source,inputs,sizes[i],authority,route[0]);
-        for (unsigned j=0;j<sizes[i];++j) assert(md_fd_message_origins(records[i])[j]==known[(j+i)%4]);
+        for (unsigned j=0;j<sizes[i];++j) assert(md_fd_message_origins(records[i])[j]==objects[(j+i)%4]);
     }
     /* Reusing the original number must change neither the carrier's kernel
      * descriptions nor its retained mount vector. Both opens share one inode. */
@@ -1068,9 +1071,9 @@ static int parcel_relay(const char *directory, unsigned count, unsigned availabl
         struct md_mount_namespace *views[]={md_mount_namespace_new(),md_mount_namespace_new()};
         assert(views[0] && views[1]);
         struct md_fs_anchor *known[]={capture(source,views[0]),capture(pathfd,views[1]),NULL};
-        struct md_fs_anchor *origins[MD_FD_RECEIPT_MAX];
+        struct md_fd_object *origins[MD_FD_RECEIPT_MAX];
         int sources[MD_FD_RECEIPT_MAX], handles[]={source,pathfd,pipefd[1]};
-        for (unsigned i=0;i<count;++i) { sources[i]=handles[i%3]; origins[i]=known[i%3]; }
+        for (unsigned i=0;i<count;++i) { sources[i]=handles[i%3]; origins[i]=md_fs_anchor_object(known[i%3]); }
         struct md_fd_origins *files=md_fd_origins_new(); assert(files);
         struct md_fd_origin_update updates[MD_FD_RECEIPT_MAX]; int numbers[MD_FD_RECEIPT_MAX];
         struct md_fd_delivery delivery={0};
@@ -1441,9 +1444,9 @@ static void parcel_local_slot(const char *directory, unsigned available, int pee
     struct md_mount_namespace *views[]={md_mount_namespace_new(),md_mount_namespace_new()};
     assert(views[0] && views[1]);
     struct md_fs_anchor *known[]={capture(source,views[0]),capture(pathfd,views[1]),NULL};
-    struct md_fs_anchor *origins[MD_FD_RECEIPT_MAX];
+    struct md_fd_object *origins[MD_FD_RECEIPT_MAX];
     int sources[MD_FD_RECEIPT_MAX], handles[]={source,pathfd,pipefd[1]};
-    for (unsigned i=0;i<capacity;++i) { sources[i]=handles[i%3]; origins[i]=known[i%3]; }
+    for (unsigned i=0;i<capacity;++i) { sources[i]=handles[i%3]; origins[i]=md_fs_anchor_object(known[i%3]); }
     struct md_fd_origins *files=md_fd_origins_new(); assert(files);
     struct md_fd_origin_update updates[MD_FD_RECEIPT_MAX]; int numbers[MD_FD_RECEIPT_MAX];
     struct md_fd_delivery delivery={0};
@@ -1621,10 +1624,10 @@ static void mapped_return(const char *directory, int mode, unsigned slots, int p
         .mode=mode,.slots=slots,.parent=getpid(),.result=-ECANCELED};
     struct md_fd_return first={0},second={0},third={0};
     assert(!md_fd_origins_abandon_range(files,endpoint,endpoint));
-    assert(!md_fd_return_begin(&first,files,source,origin,FD_CLOEXEC,receipt,NULL));
+    assert(!md_fd_return_begin(&first,files,source,md_fs_anchor_object(origin),FD_CLOEXEC,receipt,NULL));
     assert(md_fd_return_progress(&first,NULL)==MD_FD_RETURN_CHECK && first.endpoint==endpoint);
     assert(!md_fd_return_cancel(&first));
-    assert(!md_fd_return_begin(&first,files,source,origin,FD_CLOEXEC,receipt,NULL));
+    assert(!md_fd_return_begin(&first,files,source,md_fs_anchor_object(origin),FD_CLOEXEC,receipt,NULL));
     assert(md_fd_return_progress(&first,NULL)==MD_FD_RETURN_CHECK && first.endpoint==endpoint);
     struct md_fd_channel_observation observation={.error=-EPERM};
     assert(md_fd_return_observed(&first,&observation)==-EPERM && first.checking && !first.offered);
@@ -1714,7 +1717,7 @@ static void atomic_install(const char *directory, int available, int protected, 
     struct md_fd_order previous={0}, next={0};
     if (cancel==2) assert(md_fd_order_begin(files,&previous,NULL)==1 && !md_fd_order_start(&previous));
     struct md_fd_install operation={0};
-    assert(!md_fd_install_begin(&operation,files,notify,request.id,source,origin,cloexec ? O_CLOEXEC : 0,NULL));
+    assert(!md_fd_install_begin(&operation,files,notify,request.id,source,md_fs_anchor_object(origin),cloexec ? O_CLOEXEC : 0,NULL));
     assert(!md_fd_order_begin(files,&next,NULL));
     int status, result;
     if (cancel==1) {

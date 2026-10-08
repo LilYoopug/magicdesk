@@ -1,18 +1,22 @@
 #include "ipc_received.h"
 #include "ipc_capsule.h"
 #include "fs_engine.h"
+#include "fd_selector.h"
 #include <errno.h>
 #include <string.h>
 
 static int unrecognized(int error) {
     return error==-ENODATA || error==-ENOTSUP || error==-EAFNOSUPPORT || error==-EPROTOTYPE;
 }
-static int watch(struct md_fs_context *context, int fd, unsigned *flags) {
+static int selectors(struct md_fs_context *context, const struct md_received_fds *source,
+        unsigned index, unsigned *out) {
+    struct md_fd_object *origin=source->origins ? source->origins[index] : NULL;
+    if (origin && origin->type->selectors) { *out=origin->type->selectors; return 0; }
     struct md_fs_request q={.actor=context->actor,.peer=context->peer,
-        .operation=MD_FS_WATCH_CONTAINS,.directory={fd,-1}};
+        .operation=MD_FS_WATCH_CONTAINS,.directory={source->fds[index],-1}};
     struct md_fs_result result;
     md_fs_context_execute(context,&q,&result,NULL);
-    if (!result.error && result.position) *flags|=MD_RECEIVED_WATCH;
+    if (!result.error && result.position) *out|=1U<<MD_FD_SELECTOR_WATCH;
     return result.error;
 }
 int md_ipc_received_message(struct md_ipc_capsules **cache, struct md_fs_context *context,
@@ -56,11 +60,11 @@ int md_ipc_received_message(struct md_ipc_capsules **cache, struct md_fs_context
             for (unsigned j=0;data && j<data->count && !error;++j) {
                 struct md_received_info *entry=&plan.entries[plan.count++];
                 entry->index=(int)j;
-                error=watch(context,data->fds[j],&entry->flags);
+                error=selectors(context,data,j,&entry->selectors);
             }
         } else {
             struct md_received_info *entry=&plan.entries[plan.count++];
-            entry->index=indices[i]; error=watch(context,fd,&entry->flags);
+            entry->index=indices[i]; error=selectors(context,source,(unsigned)indices[i],&entry->selectors);
         }
     }
     md_ipc_binding_release(&binding);

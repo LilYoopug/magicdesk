@@ -7,6 +7,8 @@
 
 struct md_mount_namespace {
     atomic_uint refs;
+    uint64_t inode;
+    struct md_user_namespace *owner;
     unsigned shm_id;
     struct md_view_mount base;
     struct md_view_mount *root;

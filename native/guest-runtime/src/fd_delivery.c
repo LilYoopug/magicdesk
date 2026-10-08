@@ -17,7 +17,7 @@ void md_fd_delivery_dispose(struct md_fd_delivery *d) {
     *d=(struct md_fd_delivery){0};
 }
 static int prepare(struct md_fd_delivery *d, struct md_fd_origins *files,
-        struct md_fs_anchor *const *origins, unsigned flags, unsigned capacity,
+        struct md_fd_object *const *origins, unsigned flags, unsigned capacity,
         struct md_fd_origin_update *updates, int *numbers) {
     if (!d || !files || !origins || !updates || !numbers
             || !md_fd_receipt_size(capacity) || (flags&~FD_CLOEXEC)) return -EINVAL;
@@ -28,7 +28,7 @@ static int prepare(struct md_fd_delivery *d, struct md_fd_origins *files,
     return error;
 }
 int md_fd_delivery_prepare_mapped(struct md_fd_delivery *d, struct md_fd_origins *files,
-        struct md_fs_anchor *const *origins, unsigned flags, unsigned capacity,
+        struct md_fd_object *const *origins, unsigned flags, unsigned capacity,
         struct md_fd_origin_update *updates, int *numbers, struct md_fd_receipt *receipt) {
     if (!receipt) return -EINVAL;
     int error=prepare(d,files,origins,flags,capacity,updates,numbers);
@@ -36,7 +36,7 @@ int md_fd_delivery_prepare_mapped(struct md_fd_delivery *d, struct md_fd_origins
     return error;
 }
 int md_fd_delivery_prepare_observed(struct md_fd_delivery *d, struct md_fd_origins *files,
-        struct md_fs_anchor *const *origins, unsigned flags, unsigned capacity,
+        struct md_fd_object *const *origins, unsigned flags, unsigned capacity,
         struct md_fd_origin_update *updates, int *numbers, const struct md_fd_table_observation *observation) {
     if (!observation) return -EINVAL;
     int error=prepare(d,files,origins,flags,capacity,updates,numbers);
@@ -44,7 +44,7 @@ int md_fd_delivery_prepare_observed(struct md_fd_delivery *d, struct md_fd_origi
     return error;
 }
 int md_fd_delivery_prepare(struct md_fd_delivery *d, struct md_fd_origins *files,
-        struct md_fs_anchor *const *origins, unsigned flags, unsigned capacity,
+        struct md_fd_object *const *origins, unsigned flags, unsigned capacity,
         struct md_fd_origin_update *updates, int *numbers) {
     size_t size=md_fd_receipt_size(capacity);
     int error=prepare(d,files,origins,flags,capacity,updates,numbers);

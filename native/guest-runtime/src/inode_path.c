@@ -8,7 +8,8 @@
 #include <stdio.h>
 
 int mdi_host_boundary(struct md_inode_store *s, const char *parent, const char *name, const char *tail, uint64_t resolve) {
-    if (!s->boundary || s->root_id || strcmp(parent,MDI_ROOT)) return 0;
+    if (!s->boundary || strcmp(mdi_root(s),s->lifetime->scope)
+            || strcmp(parent,s->lifetime->scope)) return 0;
     if (strcmp(name,"proc") && strcmp(name,"dev")) return 0;
     const char *suffix=s->boundary->suffix ? s->boundary->suffix : "";
     const char *next=*tail ? tail : suffix; while (*next=='/') ++next;
@@ -132,7 +133,7 @@ static int directory_path(struct md_inode_store *s, struct mdi_node node, char *
     int r = node.kind == S_IFDIR ? 0 : -ENOTDIR;
     char path[PATH_MAX] = "";
     while (!r && strcmp(node.id, mdi_root(s))) {
-        if (!strcmp(node.id, MDI_ROOT)) return -ENOENT;
+        if (!strcmp(node.id, s->lifetime->scope)) return -ENOENT;
         sqlite3_stmt *q = NULL;
         r = mdi_query_acquire(s, MDI_DIRECTORY_NAME, &q);
         if (!r) r = mdi_bind_id(q, 1, node.parent);

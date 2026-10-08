@@ -9,11 +9,10 @@
 #include <unistd.h>
 
 #define SOCKET_PREFIX "md-guest-inode-"
-static int endpoint(const struct mdi_node *node, char *out, size_t size) {
+static int endpoint(struct md_inode_store *s,const struct mdi_node *node, char *out, size_t size) {
     if (size < sizeof(SOCKET_PREFIX) + 32) return -ENAMETOOLONG;
     strcpy(out, SOCKET_PREFIX);
-    strcat(out, node->id);
-    return 0;
+    return mdi_channel(s,node,out+sizeof(SOCKET_PREFIX)-1,NULL);
 }
 int md_inode_socket_bind(struct md_inode_store *s, int dirfd, const char *path, mode_t mode, int socket) {
     if (mode & ~0777) return -EINVAL;
@@ -39,7 +38,7 @@ int md_inode_socket_bind(struct md_inode_store *s, int dirfd, const char *path, 
     if (!r) r = mdi_add_name(s, loc.parent.id, loc.name, node.id);
     if (!r) r = mdi_event(s, loc.parent.id, &node, loc.name, IN_CREATE, NULL);
     struct sockaddr_un address = {.sun_family = AF_UNIX};
-    if (!r) r = endpoint(&node, address.sun_path + 1, sizeof(address.sun_path) - 1);
+    if (!r) r = endpoint(s,&node, address.sun_path + 1, sizeof(address.sun_path) - 1);
     if (!r && bind(socket, (struct sockaddr *)&address,
             (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + strlen(address.sun_path + 1)))) r = -errno;
     // Binding and committing cannot be atomically undone after a lost reply.
@@ -56,7 +55,7 @@ int md_inode_socket_address(struct md_inode_store *s, int dirfd, const char *pat
     struct stat st;
     if (!r) r = mdi_stat(s, &loc.node, &st);
     if (!r) r = mdi_permission(s, &loc.node, W_OK, 0);
-    if (!r) r = endpoint(&loc.node, out, size);
+    if (!r) r = endpoint(s,&loc.node, out, size);
     return mdi_finish(s, r);
 }
 int md_inode_socket_name(struct md_inode_store *s, const char *address, char *out, size_t size) {
@@ -67,7 +66,8 @@ int md_inode_socket_name(struct md_inode_store *s, const char *address, char *ou
     int r = mdi_begin(s, 0);
     if (r) return r;
     sqlite3_stmt *query = NULL;
-    r = mdi_prepare(s, "SELECT address FROM sockets WHERE object=?1", &query);
+    r = mdi_prepare(s, "SELECT s.address FROM sockets s JOIN inode_channels c ON c.object=s.object "
+        "WHERE c.channel=?1 LIMIT 1", &query);
     if (!r) r = mdi_bind_id(query, 1, address + prefix);
     if (!r) {
         int rc = mdi_step(s, query);

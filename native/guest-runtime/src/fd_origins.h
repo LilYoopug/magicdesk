@@ -44,16 +44,21 @@ struct md_fd_origins *md_fd_origins_pin(struct md_fd_origins *);
 void md_fd_origins_unpin(struct md_fd_origins *);
 /* A retained origin, or NULL for an untracked descriptor, not proof of EBADF. */
 struct md_fs_anchor *md_fd_origins_get(struct md_fd_origins *, int fd, unsigned *flags);
+struct md_fd_object *md_fd_origins_object(struct md_fd_origins *, int fd, unsigned *flags);
 /* Caller-owned vector of retained origins, captured under one metadata lock.
  * -1 and unannotated FDs produce NULL, not a guessed mount. Repeated source
  * numbers retain independent references. The caller holds the source table
  * turn through actual kernel FD capture; these anchors retain no data OFDs. */
 int md_fd_origins_capture(struct md_fd_origins *, const int *fds, unsigned count,
         struct md_fs_anchor **origins);
+int md_fd_origins_capture_objects(struct md_fd_origins *, const int *fds, unsigned count,
+        struct md_fd_object **);
 /* Prepare before a kernel mutation; finish is allocation-free. A negative
  * result discards it. NULL origin removes any prior destination annotation.
  * The caller orders kernel mutations; this lock alone cannot order syscalls. */
 int md_fd_origins_prepare(struct md_fd_origins *, struct md_fs_anchor *, unsigned flags,
+        struct md_fd_origin_update *);
+int md_fd_origins_prepare_object(struct md_fd_origins *, struct md_fd_object *, unsigned flags,
         struct md_fd_origin_update *);
 /* The same publication/mutation path owns both origins and infrastructure.
  * These operations require the table turn, just like ordinary descriptor dup. */
@@ -73,7 +78,7 @@ void md_fd_origins_finish(struct md_fd_origin_update *, int result_fd);
 /* Prepare a complete delivery before the kernel receive. Failure cancels all
  * prepared entries. A retained origin vector can prepare several independent
  * deliveries (MSG_PEEK); it is never consumed by preparation or publication. */
-int md_fd_origins_prepare_batch(struct md_fd_origins *, struct md_fs_anchor *const *origins,
+int md_fd_origins_prepare_batch(struct md_fd_origins *, struct md_fd_object *const *origins,
         unsigned flags, unsigned count, struct md_fd_origin_update *updates);
 /* Publish an installed prefix in one metadata transaction, discard the rest.
  * The destination table turn must cover kernel installation and publication.

@@ -18,7 +18,7 @@
 /* No adaptation, observation or logical identity in any domain. Shared with
  * seccomp so these kernel operations need no userspace policy round trip. */
 #define MD_DOMAIN_KERNEL_CALLS(X) \
-    X(fstatfs) X(pipe2) X(shutdown) X(waitid) \
+    X(pipe2) X(shutdown) X(waitid) \
     X(sysinfo) X(sched_yield) X(sched_getaffinity) \
     X(getrusage) X(getrlimit) X(gettimeofday)
 #define MD_DOMAIN_KERNEL_ARGUMENTS(X) \
@@ -51,6 +51,8 @@ int md_fs_order_complete(struct md_fs_order *);
 struct md_guest_domain *md_domain_new(void);
 struct md_guest_domain *md_domain_fork(struct md_guest_domain *, int shared);
 struct md_guest_domain *md_domain_unshare_prepare(struct md_guest_domain *);
+/* Supervisor-owned task membership, excluding registry and request pins. */
+int md_domain_shared(const struct md_guest_domain *);
 void md_domain_release(struct md_guest_domain *);
 void md_domain_pin(struct md_guest_domain *);
 void md_domain_unpin(struct md_guest_domain *);

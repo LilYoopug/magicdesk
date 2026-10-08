@@ -4,9 +4,9 @@
 #include "fd_origins.h"
 #include "fd_message_route.h"
 
-/* One supervisor's message-origin authority, not a transport negotiation.
- * No data OFD or carrier is retained. References/mutations belong to its event
- * loop; a worker borrows an immutable pinned vector until completion or join. */
+/* One owner's message-origin authority, not a transport negotiation.
+ * No data OFD or carrier is retained. Registry mutations belong to its event
+ * loop; immutable vectors may be retained across supervisor/worker handoff. */
 struct md_fd_messages;
 struct md_fd_message;
 int md_fd_messages_new(struct md_fd_messages **);
@@ -26,7 +26,7 @@ int md_fd_message_capture(struct md_fd_origins *, const int *, unsigned,
 struct md_fd_message *md_fd_message_retain(struct md_fd_message *);
 void md_fd_message_release(struct md_fd_message *);
 unsigned md_fd_message_count(const struct md_fd_message *);
-struct md_fs_anchor *const *md_fd_message_origins(const struct md_fd_message *);
+struct md_fd_object *const *md_fd_message_origins(const struct md_fd_message *);
 
 /* Bind an unpublished vector to its captured ORIGINS_V1 sending connection. The trusted
  * owner supplies its registered launch ID, not an application-supplied label.

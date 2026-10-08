@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "ipc_credentials.h"
+#include "fd_messages.h"
 #include "ipc_scope.h"
 #include <dirent.h>
 #include <errno.h>
@@ -35,10 +36,21 @@ static int execute(struct md_ipc_credentials *s, const char *text) {
 }
 void md_ipc_credentials_close(struct md_ipc_credentials *s) {
     if (!s) return;
+    if (s->scope) {
+        struct md_fd_messages *messages=s->scope->local_messages;
+        s->scope->local_messages=NULL;
+        md_fd_messages_free(messages);
+    }
     if (s->db) sqlite3_close(s->db);
     if (s->gate >= 0) close(s->gate);
     md_ipc_scope_release(s->scope);
     free(s);
+}
+int md_ipc_credentials_pollfd(const struct md_ipc_credentials *s) {
+    return s && s->scope ? md_fd_messages_fd(s->scope->local_messages) : -1;
+}
+int md_ipc_credentials_dispatch(struct md_ipc_credentials *s) {
+    return s && s->scope ? md_fd_messages_dispatch(s->scope->local_messages) : 0;
 }
 int md_ipc_credentials_open(const char *store, enum md_ipc_ancillary_transport offer,
         struct md_ipc_credentials **out) {
@@ -450,7 +462,7 @@ static int accept_peer(struct md_ipc_credentials *s, int fd, uint64_t key) {
     if (!r && id) r = save_connection(s, key, NULL, 0, NULL, 0, id, bytes, NULL, 0, 0, 0, 1, &connection, transport);
     free(id); return r;
 }
-static int peer_snapshot(struct md_ipc_credentials *s, const struct md_fs_request *req,
+static int peer_snapshot(struct md_ipc_credentials *s, const struct md_identity *viewer, const struct md_fs_request *req,
         uint64_t key, struct md_fs_result *result, const struct md_fs_output *output) {
     sqlite3_stmt *q = NULL;
     int r = statement(s, "SELECT peer,valid FROM connections WHERE cookie=?1", &q);
@@ -468,7 +480,16 @@ static int peer_snapshot(struct md_ipc_credentials *s, const struct md_fs_reques
     if (!req->mode) bytes=sizeof(struct md_ipc_identity);
     if (!r && (!output || !output->data)) r=-EFAULT;
     if (!r && output->capacity<bytes) r=-EOVERFLOW;
-    if (!r) { memcpy(output->data,id,bytes); result->size=bytes; }
+    if (!r) {
+        memcpy(output->data,id,bytes); result->size=bytes;
+        if (viewer->user_namespace) {
+            struct snapshot *visible=output->data;
+            visible->ids.uid=md_identity_visible_id(viewer,0,visible->ids.uid);
+            visible->ids.gid=md_identity_visible_id(viewer,1,visible->ids.gid);
+            if (req->mode) for (unsigned i=0;i<visible->ids.group_count;++i)
+                visible->groups[i]=md_identity_visible_id(viewer,1,visible->groups[i]);
+        }
+    }
     sqlite3_finalize(q); return r;
 }
 static int connection_key(struct md_ipc_credentials *s, uint64_t key, struct md_ipc_connection *out,
@@ -536,12 +557,16 @@ static int message_identity(struct md_ipc_credentials *s, const struct md_identi
     struct message_token token = {.magic=MESSAGE_MAGIC};
     struct stat st;
     int fd = -1;
-    if (req->flags == MD_IPC_MESSAGE_CREATE) {
-        if ((pid_t)req->offset != req->peer
-                || (!md_identity_capable(id, CAP_SETUID) && req->attributes.uid != id->uid.real
-                    && req->attributes.uid != id->uid.effective && req->attributes.uid != id->uid.saved)
-                || (!md_identity_capable(id, CAP_SETGID) && req->attributes.gid != id->gid.real
-                    && req->attributes.gid != id->gid.effective && req->attributes.gid != id->gid.saved)) return -EPERM;
+    if (req->flags == MD_IPC_MESSAGE_CREATE || req->flags == MD_IPC_MESSAGE_SENDER) {
+        int implicit=req->flags==MD_IPC_MESSAGE_SENDER;
+        uint32_t uid=implicit ? id->uid.effective : md_user_namespace_into(id->user_namespace,0,req->attributes.uid);
+        uint32_t gid=implicit ? id->gid.effective : md_user_namespace_into(id->user_namespace,1,req->attributes.gid);
+        if (uid==UINT32_MAX || gid==UINT32_MAX) return -EINVAL;
+        if ((!implicit && (pid_t)req->offset != req->peer)
+                || (!md_identity_capable(id, CAP_SETUID) && uid != id->uid.real
+                    && uid != id->uid.effective && uid != id->uid.saved)
+                || (!md_identity_capable(id, CAP_SETGID) && gid != id->gid.real
+                    && gid != id->gid.effective && gid != id->gid.saved)) return -EPERM;
         if (getrandom(token.nonce, sizeof(token.nonce), 0) != sizeof(token.nonce)) return -EIO;
         fd = (int)syscall(SYS_memfd_create, "guest-ipc-message", MFD_CLOEXEC | MFD_ALLOW_SEALING);
         if (fd < 0) return -errno;
@@ -553,7 +578,7 @@ static int message_identity(struct md_ipc_credentials *s, const struct md_identi
             sqlite3_bind_blob(q, 1, token.nonce, sizeof(token.nonce), SQLITE_STATIC);
             sqlite3_bind_blob(q, 2, connection.link, sizeof(connection.link), SQLITE_STATIC);
             sqlite3_bind_int64(q, 3, st.st_dev); sqlite3_bind_int64(q, 4, st.st_ino);
-            sqlite3_bind_int(q, 5, req->peer); sqlite3_bind_int64(q, 6, req->attributes.uid); sqlite3_bind_int64(q, 7, req->attributes.gid);
+            sqlite3_bind_int(q, 5, req->peer); sqlite3_bind_int64(q, 6, uid); sqlite3_bind_int64(q, 7, gid);
             sqlite3_bind_int(q, 8, (int)connection.side);
             r = sql(sqlite3_step(q));
         }
@@ -571,7 +596,11 @@ static int message_identity(struct md_ipc_credentials *s, const struct md_identi
             sqlite3_bind_int(q, 5, (int)(connection.side^1));
             int step = sqlite3_step(q);
             if (step != SQLITE_ROW) r = step == SQLITE_DONE ? -ENODATA : -EIO;
-            else { out->position = sqlite3_column_int(q, 0); out->info.uid = (uint32_t)sqlite3_column_int64(q, 1); out->info.gid = (uint32_t)sqlite3_column_int64(q, 2); }
+            else {
+                out->position = sqlite3_column_int(q, 0);
+                out->info.uid = md_identity_visible_id(id,0,(uint32_t)sqlite3_column_int64(q, 1));
+                out->info.gid = md_identity_visible_id(id,1,(uint32_t)sqlite3_column_int64(q, 2));
+            }
         }
     }
     sqlite3_finalize(q); return r;
@@ -585,7 +614,7 @@ void md_ipc_credentials_execute(struct md_ipc_credentials *s, const struct md_id
     if (!r && flock(s->gate, LOCK_EX)) r = -errno;
     if (r) { out->error = r; return; }
     if (q->operation==MD_FS_IPC_PEER) {
-        out->error=peer_snapshot(s,q,key,out,output);
+        out->error=peer_snapshot(s,identity,q,key,out,output);
         flock(s->gate,LOCK_UN); return;
     }
     size_t bytes = 0;
@@ -616,7 +645,8 @@ void md_ipc_credentials_execute(struct md_ipc_credentials *s, const struct md_id
         if (!r) r = save_connection(s, other, NULL, 0, self, bytes, self, bytes, NULL, 0, 0, 0, 1, &connection,s->offer);
         break;
     }
-    case MD_IPC_MESSAGE_CREATE: case MD_IPC_MESSAGE_READ: r = message_identity(s, identity, q, key, out); break;
+    case MD_IPC_MESSAGE_CREATE: case MD_IPC_MESSAGE_SENDER: case MD_IPC_MESSAGE_READ:
+        r = message_identity(s, identity, q, key, out); break;
     case MD_IPC_NAME: {
         struct sockaddr_un name; int n;
         r = decode_name(q->path[0], &name, &n);

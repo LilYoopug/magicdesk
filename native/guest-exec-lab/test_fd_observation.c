@@ -158,9 +158,9 @@ static void run(int shared, int protected, int cloexec, enum output output) {
     struct md_fs_result source={.fd=pipefd[1]};
     struct md_fs_output captured={.origin=&anchor};
     md_view_capture(&fs,view,NULL,&source,&captured); assert(!source.error && anchor);
-    struct md_fs_anchor *origins[COUNT]; int sources[COUNT],numbers[COUNT];
+    struct md_fd_object *origins[COUNT]; int sources[COUNT],numbers[COUNT];
     struct md_fd_origin_update updates[COUNT];
-    for (unsigned i=0;i<COUNT;++i) { sources[i]=pipefd[1]; origins[i]=i%3 ? anchor : NULL; }
+    for (unsigned i=0;i<COUNT;++i) { sources[i]=pipefd[1]; origins[i]=md_fs_anchor_object(i%3 ? anchor : NULL); }
     struct child context={channel[1],endpoint,protected,cloexec,output,getpid()};
     size_t stack_size=1024*1024;
     void *stack=mmap(NULL,stack_size,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_STACK,-1,0);
@@ -203,7 +203,7 @@ static void run(int shared, int protected, int cloexec, enum output output) {
         assert(numbers[i]==installed[i]);
         unsigned flags=~0U;
         struct md_fs_anchor *actual=md_fd_origins_get(files,numbers[i],&flags);
-        assert(actual==origins[i] && flags==(actual && cloexec ? FD_CLOEXEC : 0));
+        assert(md_fs_anchor_object(actual)==origins[i] && flags==(actual && cloexec ? FD_CLOEXEC : 0));
         md_fs_anchor_release(actual);
         if (shared) assert(fcntl(numbers[i],F_GETFD)==(cloexec ? FD_CLOEXEC : 0));
     }

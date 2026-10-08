@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "inode_internal.h"
+#include "inode_overlay.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/fs.h>
@@ -32,6 +33,7 @@ int md_inode_open_object(struct md_inode_store *s, const char *id, int flags) {
     if (r) return r;
     struct mdi_node node;
     r = mdi_node(s, id, &node);
+    if (!r && strcmp(node.scope,s->lifetime->scope)) r=-EXDEV;
     struct stat st;
     if (!r) r = mdi_backing_stat(s, &node, &st);
     if (!r && node.kind != S_IFREG) r = -EINVAL;
@@ -48,13 +50,14 @@ int md_inode_open_object(struct md_inode_store *s, const char *id, int flags) {
 static int create_node(struct md_inode_store *s, int dirfd, const char *path,
         mode_t kind, mode_t mode, const char *target) {
     if (mode & ~(s->identity ? 07777 : 01777)) return -ENOTSUP;
-    int r = mdi_begin(s, 1);
+    int r = mdi_begin(s, !s->readonly);
     if (r) return r;
     struct mdi_location loc;
     r = mdi_walk(s, dirfd, path, MDI_ENTRY, 1, &loc);
     if (!r && loc.trailing && kind == S_IFREG) r = -EISDIR;
     if (!r && loc.exists) r = -EEXIST;
     if (!r && loc.trailing && kind != S_IFDIR) r = -ENOENT;
+    if (!r && s->readonly) r=-EROFS;
     if (!r) r = mdi_parent_writable(s, &loc.parent);
     struct mdi_node node;
     int fd = -1;
@@ -134,7 +137,7 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
     if (create && (flags & O_DIRECTORY)) return -EINVAL;
     if (create && (mode & ~(s->identity ? 07777 : 01777))) return -ENOTSUP;
     int write = create || (flags & (O_WRONLY | O_RDWR | O_TRUNC));
-    int r = mdi_begin(s, !!write);
+    int r = mdi_begin(s, write && !s->readonly);
     if (r) return r;
     struct mdi_location loc;
     r = mdi_walk_resolved(s, dirfd, path, create && (flags & O_EXCL) ? MDI_ENTRY
@@ -144,6 +147,7 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
     if (!r && create && (flags & O_EXCL) && loc.exists) r = -EEXIST;
     if (!r && !loc.exists) {
         if (loc.trailing) r = -EISDIR;
+        if (!r && s->readonly) r=-EROFS;
         if (!r) r = mdi_parent_writable(s, &loc.parent);
         if (!r) r = mdi_allocate(s, S_IFREG, mode, flags, NULL, loc.parent.id, &loc.node, &fd);
         if (!r) r = mdi_add_name(s, loc.parent.id, loc.name, loc.node.id);
@@ -156,10 +160,11 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
     if (!r && loc.node.kind == S_IFLNK && !(flags & O_PATH)) r = -ELOOP;
     if (!r && loc.node.kind == S_IFSOCK && !(flags & O_PATH)) r = -ENXIO;
     if (!r && loc.node.kind == S_IFDIR && (flags & (O_WRONLY | O_RDWR | O_TRUNC | O_CREAT))) r = -EISDIR;
+    if (!r && s->readonly && (flags&(O_WRONLY|O_RDWR|O_TRUNC))) r=-EROFS;
     if (!r && image && loc.node.kind != S_IFREG) r = -EACCES;
     if (!r) r = mdi_open_permission(s, &loc.node, flags);
     if (!r && image) r = mdi_permission(s, &loc.node, X_OK, 0);
-    if (!r && write) r = mdi_copy_up(s, &loc.node);
+    if (!r && (flags&(O_WRONLY|O_RDWR|O_TRUNC))) r = mdi_copy_up(s, &loc.node);
     struct stat st;
     if (!r) r = mdi_backing_stat(s, &loc.node, &st);
     int directory = r ? -1 : mdi_backing_directory(s, &loc.node);
@@ -236,6 +241,8 @@ int md_inode_rename(struct md_inode_store *s, int sourcefd, const char *source,
     if (!r && flags == RENAME_EXCHANGE && !b.exists) r = -ENOENT;
     /* Kernel rename between two names of the same inode preserves both names. */
     if (!r && b.exists && !strcmp(a.node.id, b.node.id)) return mdi_finish(s, 0);
+    if (!r && s->overlay) r=mdi_overlay_rename_directory(s,&a.node);
+    if (!r && s->overlay && flags==RENAME_EXCHANGE) r=mdi_overlay_rename_directory(s,&b.node);
     if (!r && b.exists && flags != RENAME_EXCHANGE) {
         if (a.node.kind == S_IFDIR && b.node.kind != S_IFDIR) r = -ENOTDIR;
         if (a.node.kind != S_IFDIR && b.node.kind == S_IFDIR) r = -EISDIR;

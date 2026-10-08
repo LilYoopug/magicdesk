@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/openat2.h>
+#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -14,6 +15,46 @@ void md_view_location_close(struct md_view_location *p) {
     p->parent = p->fd = -1;
 }
 static int duplicate(int fd) { int copy = fcntl(fd, F_DUPFD_CLOEXEC, 3); return copy < 0 ? -errno : copy; }
+int md_view_descriptor(struct md_filesystem *fs, int fd, const struct md_fs_anchor *origin,
+        struct md_view_location *out) {
+    *out=(struct md_view_location){.parent=-1,.fd=-1};
+    int r=origin ? md_view_anchor_check(fs,fd,origin) : 0;
+    if (r) return r;
+    struct md_mount_namespace *view=origin ? origin->view : fs->mounts;
+    struct md_view_mount *mount=origin ? origin->mount : view ? &view->base : NULL;
+    if (!origin) {
+        struct md_view_object *object=NULL;
+        r=md_view_identity(fs,fd,&object);
+        if (!r) mount=object->mount;
+        else if (r==-EXDEV) {
+            char id[33];
+            r=md_inode_object_id(fs->store,fd,id);
+        }
+    }
+    if (r) return r;
+    out->fd=duplicate(fd);
+    if (out->fd<0) { r=out->fd; out->fd=-1; return r; }
+    out->view=view; out->mount=mount;
+    return 0;
+}
+int md_view_task_path(struct md_filesystem *fs, int fd, const char *name, const char *tail,
+        uint64_t resolve, int native_devices) {
+    struct md_inode_boundary *boundary=fs->store->boundary;
+    if (!boundary || !boundary->path) return 0;
+    char path[PATH_MAX];
+    int r=md_view_fdpath(fd,path,sizeof(path));
+    if (r) return r;
+    int proc=!strncmp(path,"/proc",5) && (!path[5] || path[5]=='/');
+    int device=native_devices && !strncmp(path,"/dev",4) && (!path[4] || path[4]=='/');
+    if (!proc && !device) return 0;
+    struct stat st;
+    if (fstat(fd,&st)) return -errno;
+    if (!S_ISDIR(st.st_mode)) return -ENOTDIR;
+    if (resolve&(RESOLVE_BENEATH|RESOLVE_IN_ROOT|RESOLVE_NO_XDEV)) return -EXDEV;
+    if (resolve&(RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS)) return -ENOTSUP;
+    int n=snprintf(boundary->path,boundary->capacity,"%s/%s%s",path,name,tail);
+    return n<0 || (size_t)n>=boundary->capacity ? -ENAMETOOLONG : -EREMOTE;
+}
 static int component(struct md_filesystem *fs, struct md_mount_namespace *view,
         struct md_view_mount *mount, int fd, const char *name) {
     if (md_view_inode(mount)) {
@@ -66,7 +107,7 @@ int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *
         uint64_t resolve, struct md_view_location *out) {
     *out = (struct md_view_location){.parent=-1,.fd=-1};
     if (!path || !*path) return -ENOENT;
-    if (resolve & ~(RESOLVE_BENEATH | RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV | RESOLVE_CACHED)) return -EINVAL;
+    if (resolve & ~(RESOLVE_BENEATH | RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV | RESOLVE_CACHED | MD_VIEW_TASK_PATH)) return -EINVAL;
     if ((resolve & (RESOLVE_BENEATH | RESOLVE_IN_ROOT)) == (RESOLVE_BENEATH | RESOLVE_IN_ROOT)) return -EINVAL;
     if (resolve & RESOLVE_CACHED) return -EAGAIN;
     if (path[0] == '/' && (resolve & RESOLVE_BENEATH)) return -EXDEV;
@@ -129,7 +170,10 @@ int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *
             if (next==-EREMOTE && (resolve&(RESOLVE_NO_XDEV|RESOLVE_IN_ROOT|RESOLVE_BENEATH))) next=-EXDEV;
             if (next==-EREMOTE && (resolve&(RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS))) next=-ENOTSUP;
         }
-        else next = component(fs, view, mount, fd, name);
+        else {
+            next=(resolve&MD_VIEW_TASK_PATH) ? md_view_task_path(fs,fd,name,todo,resolve,0) : 0;
+            if (!next) next=component(fs,view,mount,fd,name);
+        }
         if (next == -ENOENT && last && missing && (!trailing || missing > 1)) {
             out->parent = fd; fd = -1; out->view = view; out->mount = mount; strcpy(out->name, name); break;
         }

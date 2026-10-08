@@ -9,7 +9,7 @@ struct md_command_recipe {
     unsigned scripts, loader;
     char lines[MD_SCRIPT_DEPTH][MD_SCRIPT_HEADER];
 };
-struct md_command_images { int program, loader; };
+struct md_command_images { int program, loader; unsigned mount_flags; };
 typedef long (*md_command_acquire)(void *, const char *, struct md_program *);
 /* Borrows first; owns output images on success, none on failure. */
 int md_command_images_prepare(struct md_command_recipe *, struct md_command_images *,

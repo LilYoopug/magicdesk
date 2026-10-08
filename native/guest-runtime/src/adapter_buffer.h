@@ -4,12 +4,15 @@
 
 enum { MD_ADAPTER_BUFFER_SLOTS=32 };
 enum md_adapter_buffer_control { MD_BUFFER_MAPPED=1, MD_BUFFER_TAKE, MD_BUFFER_RELEASE,
-    MD_BUFFER_IPC_PREPARE, MD_BUFFER_SHM_STAT, MD_BUFFER_PROBE };
+    MD_BUFFER_IPC_PREPARE, MD_BUFFER_SHM_STAT, MD_BUFFER_PROBE, MD_BUFFER_UTS,
+    MD_BUFFER_PROC_CHECK, MD_BUFFER_PROC_IO, MD_BUFFER_PROC_ACK, MD_BUFFER_PROC_RIGHTS, MD_BUFFER_PROC_META };
 #ifndef MD_USE_LIBC
 int md_adapter_buffer_install(void);
 int md_adapter_buffer_ready(void);
 long md_adapter_buffer_take(void);
 long md_adapter_buffer_release(void);
 long md_guest_buffer_control(unsigned, unsigned long, unsigned long);
+struct md_fs_buffer_frame;
+long md_adapter_receive_fd(struct md_fs_buffer_frame *, unsigned flags, unsigned begin);
 #endif
 #endif

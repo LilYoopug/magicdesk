@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "image_publish.h"
+#include "private_tree.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -13,38 +14,8 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
-/* Only private staging trees and exclusively owned removal tombstones. */
-int md_image_discard(int parent, const char *name) {
-    int ref = openat(parent, name, O_PATH | O_NOFOLLOW | O_CLOEXEC);
-    if (ref < 0) return errno == ENOENT ? 0 : -errno;
-    struct stat st;
-    if (fstat(ref, &st)) { int r = -errno; close(ref); return r; }
-    if (!S_ISDIR(st.st_mode)) { close(ref); return unlinkat(parent, name, 0) ? -errno : 0; }
-    char proc[64];
-    snprintf(proc, sizeof(proc), "/proc/self/fd/%d", ref);
-    /* Imported directories can have mode 000. The retained O_PATH descriptor
-     * names our private object, not an archive-controlled symlink target. */
-    if (chmod(proc, 0700)) { int r = -errno; close(ref); return r; }
-    int fd = openat(ref, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    close(ref);
-    if (fd < 0) return -errno;
-    DIR *dir = fdopendir(fd);
-    if (!dir) { int r = -errno; close(fd); return r; }
-    struct dirent *entry;
-    int r = 0;
-    while (!r) {
-        errno = 0;
-        entry = readdir(dir);
-        if (!entry) { if (errno) r = -errno; break; }
-        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
-        r = md_image_discard(fd, entry->d_name);
-    }
-    closedir(dir);
-    if (!r && unlinkat(parent, name, AT_REMOVEDIR)) r = -errno;
-    return r;
-}
 void md_image_publish_close(struct md_image_publish *p) {
-    if (p->stage >= 0) { md_image_discard(p->parent, p->temporary); close(p->stage); }
+    if (p->stage >= 0) { md_private_tree_discard(p->parent, p->temporary); close(p->stage); }
     if (p->parent >= 0) close(p->parent);
     p->stage = p->parent = -1;
 }
@@ -70,7 +41,7 @@ static int recover(int parent) {
         if (fstat(stage, &st)) r = -errno;
         else if (st.st_uid != getuid() || (st.st_mode & 0777) != 0700) r = -EACCES;
         else if (flock(stage, LOCK_EX | LOCK_NB)) { if (errno != EWOULDBLOCK) r = -errno; }
-        else r = md_image_discard(parent, name);
+        else r = md_private_tree_discard(parent, name);
         close(stage);
         if (r) break;
     }

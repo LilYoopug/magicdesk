@@ -34,6 +34,14 @@ struct md_inode_lifetime;
 /* New worker-local connection to retained exact backing custody. Does not
  * reopen the lease or resolve source paths that may have been renamed. */
 int md_inode_store_reconnect(struct md_inode_lifetime *, struct md_inode_store **out);
+/* Initialize an unpublished, empty, exclusively prepared retained directory.
+ * The caller supplies lifetime custody; no pathname is reopened or retained. */
+int md_inode_store_initialize(struct md_inode_lifetime *, struct md_inode_store **out);
+/* Private temporary inode filesystem in the caller-selected backing directory.
+ * Same metadata/data semantics as an ordinary store; this does not imply RAM
+ * backing. Final retained custody retires it, including imported owners. */
+struct md_user_namespace;
+int md_inode_store_transient(int parent, struct md_user_namespace *, struct md_inode_store **out);
 void md_inode_store_close(struct md_inode_store *);
 int md_inode_store_seal(struct md_inode_store *);
 /* Prepare store-owned runtime resources before accepting guest operations.
@@ -64,7 +72,6 @@ int md_inode_stat(struct md_inode_store *, int dirfd, const char *path, int flag
 int md_inode_fstat(struct md_inode_store *, int fd, struct stat *);
 struct md_fs_request;
 int md_inode_metadata(struct md_inode_store *, const struct md_fs_request *);
-int md_inode_xattr_open(struct md_inode_store *, int fd, const char *name, int access);
 int md_inode_capability(struct md_inode_store *, const struct md_fs_request *, void *, size_t);
 /* Trusted offline import only; records logical ownership, never host chown. */
 int md_inode_import_metadata(struct md_inode_store *, int fd, uint32_t uid, uint32_t gid, mode_t);

@@ -19,9 +19,10 @@ struct md_fd_message {
     struct md_ipc_binding source;
     struct md_fd_message_route route;
     uint64_t cookie;
-    unsigned references, count, published;
+    atomic_uint references;
+    unsigned count, published;
     int monitor;
-    struct md_fs_anchor *origins[];
+    struct md_fd_object *origins[];
 };
 struct md_fd_messages {
     struct md_fd_message *buckets[BUCKETS];
@@ -39,22 +40,22 @@ int md_fd_message_capture(struct md_fd_origins *source, const int *fds, unsigned
     if (!source || !fds || !count || count>MD_FD_RECEIPT_MAX || !out || *out) return -EINVAL;
     struct md_fd_message *p=calloc(1,sizeof(*p)+count*sizeof(*p->origins));
     if (!p) return -ENOMEM;
-    int error=md_fd_origins_capture(source,fds,count,p->origins);
+    int error=md_fd_origins_capture_objects(source,fds,count,p->origins);
     if (error) { free(p); return error; }
-    p->references=1; p->count=count; p->monitor=-1; *out=p; return 0;
+    atomic_init(&p->references,1); p->count=count; p->monitor=-1; *out=p; return 0;
 }
 struct md_fd_message *md_fd_message_retain(struct md_fd_message *p) {
-    if (p) ++p->references;
+    if (p) atomic_fetch_add_explicit(&p->references,1,memory_order_relaxed);
     return p;
 }
 void md_fd_message_release(struct md_fd_message *p) {
-    if (!p || --p->references) return;
-    for (unsigned i=0;i<p->count;++i) md_fs_anchor_release(p->origins[i]);
+    if (!p || atomic_fetch_sub_explicit(&p->references,1,memory_order_acq_rel)!=1) return;
+    for (unsigned i=0;i<p->count;++i) md_fd_object_release(p->origins[i]);
     md_ipc_binding_release(&p->source);
     free(p);
 }
 unsigned md_fd_message_count(const struct md_fd_message *p) { return p ? p->count : 0; }
-struct md_fs_anchor *const *md_fd_message_origins(const struct md_fd_message *p) { return p ? p->origins : NULL; }
+struct md_fd_object *const *md_fd_message_origins(const struct md_fd_message *p) { return p ? p->origins : NULL; }
 int md_fd_message_bind(struct md_fd_message *p, const struct md_ipc_binding *source, const char *id) {
     if (!p || !source || !source->scope || source->connection.side>1
             || !id || strlen(id)!=32 || strspn(id,"0123456789abcdef")!=32) return -EINVAL;

@@ -56,6 +56,21 @@ Failure does not change the selected identity or require them for other services
 Base-root relocation uses that same userspace graph, O_PATH custody and origin
 leases. Guest pivot_root does not issue a privileged host mount/pivot syscall or
 add a kernel capability requirement.
+Guest UTS and SysV IPC namespaces also use supervisor-owned resources, not host
+namespace privileges. Their clone/unshare adapters remove only the implemented
+namespace flags before the ordinary kernel transition and commit on its exact
+success event. UTS argument copies reuse the mapped-buffer transport; IPC uses
+the existing store locks, getrandom identities and owner leases. These add no
+post-5.15 dependency. Guest CLONE_NEWUSER and typed proc map writes follow the
+5.15 UID/GID mapping and CAP_SETFCAP rules without requiring host CONFIG_USER_NS.
+UTS sysctl files use the same lazy descriptor-selector mechanism as map files.
+Local typed SCM_RIGHTS custody adds a pipe EOF to the existing worker event loop;
+it needs no newer kernel API, polling loop or additional worker thread.
+Noexec mapping policy uses the existing seccomp/ptrace observation and
+CLONE_VM ownership, not MFD_NOEXEC_SEAL or a host mount. MREMAP_DONTUNMAP is
+within the baseline (5.7); rejected native mappings keep their kernel errors.
+Focused tests cover execution admission, mmap/mprotect, remap, fork and failed
+metadata allocation. This adds no requirement for newer memfd execution flags.
 Portable backing custody uses the same sealed-manifest primitive and transfers
 existing root/lower directory descriptions through SCM_RIGHTS. CLOEXEC duplication
 and queued rights preserve their existing flock leases; import never relocks

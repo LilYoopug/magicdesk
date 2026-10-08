@@ -19,8 +19,8 @@ inode_compile() {
     "$compiler" "$runtime/inode_store.c" "$runtime/inode_db.c" "$runtime/inode_events.c" \
         "$runtime/inode_watch.c" "$runtime/watch_queue.c" "$runtime/inode_path.c" \
         "$runtime/inode_directory.c" "$runtime/inode_import.c" "$runtime/inode_socket.c" \
-        "$runtime/inode_backing.c" "$runtime/inode_snapshot.c" "$runtime/inode_fifo.c" "$runtime/file_open.c" "$runtime/guest_identity.c" \
-        "$runtime/task_registry.c" "$runtime/guest_domain.c" "$runtime/mount_namespace.c" "$runtime/fs_anchor.c" "$runtime/resource_order.c" "$runtime/ofd_order.c" "$runtime/fd_origins.c" "$runtime/fd_channel.c" "$runtime/fd_delivery.c" "$runtime/fd_exchange.c" "$runtime/inode_metadata.c" \
+        "$runtime/inode_backing.c" "$runtime/inode_snapshot.c" "$runtime/inode_view.c" "$runtime/inode_overlay_write.c" "$runtime/inode_overlay_policy.c" "$runtime/identity_snapshot.c" "$runtime/inode_maintenance.c" "$runtime/inode_fifo.c" "$runtime/inode_channel.c" "$runtime/file_open.c" "$runtime/guest_identity.c" \
+        "$runtime/task_registry.c" "$runtime/guest_domain.c" "$runtime/mount_namespace.c" "$runtime/fs_anchor.c" "$runtime/resource_order.c" "$runtime/ofd_order.c" "$runtime/fd_origins.c" "$runtime/fd_channel.c" "$runtime/fd_delivery.c" "$runtime/fd_exchange.c" "$runtime/inode_metadata.c" "$runtime/inode_xattr.c" \
         "$runtime/inode_capability.c" "$runtime/inode_acl.c" "$runtime/posix_acl.c" "$runtime/task_descriptor.c" "$runtime/task_lifetime.c" "$@"
 }
 node "$src/test_signature.mjs" "$work"
@@ -87,7 +87,7 @@ adapter_fixture() {
 "$cc" -iquote "$runtime" -std=c17 -O2 -g -Wall -Wextra -Werror -UNDEBUG -fno-builtin -DMD_NO_START -DMD_USE_LIBC "$@" \
     "$runtime/socket_calls.c" "$runtime/socket_namespace.c" "$runtime/socket_identity.c" "$runtime/socket_ancillary.c" "$runtime/socket_routes.c" "$runtime/file_calls.c" "$runtime/fs.c" "$runtime/proc_paths.c" \
     "$runtime/namespace.c" "$runtime/namespace_proc.c" "$runtime/proc_image.c" "$runtime/fd_metadata.c" "$runtime/fd_client.c" "$runtime/fs_client.c" "$runtime/fs_wire.c" "$runtime/file_open.c" \
-    "$runtime/event_wait.c" "$runtime/task_status.c" "$runtime/watch_calls.c" "$runtime/raw.c" "$runtime/memory.c" "$runtime/raw.S"
+    "$runtime/event_wait.c" "$runtime/task_status.c" "$runtime/watch_calls.c" "$runtime/fd_filter.c" "$runtime/proc_control.c" "$runtime/raw.c" "$runtime/memory.c" "$runtime/raw.S"
 }
 adapter_fixture -DMD_SOCKET_DRIVER "$src/test_sockets.c" -o "$work/bundle/md-sockets-test"
 adapter_fixture --target=aarch64-linux-android34 -fno-termux-rpath -static -DMD_USE_LIBC \

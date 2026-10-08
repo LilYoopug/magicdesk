@@ -6,7 +6,7 @@
 #define MD_GUEST_MAP_IMAGE 0x4d440101
 enum { MD_IMAGE_PROGRAM=0, MD_IMAGE_LOADER=1, MD_IMAGE_TAKE_PROGRAM=2, MD_IMAGE_TAKE_LOADER=3 };
 #define MD_GUEST_ENTER_IMAGE 0x4d440102
-#define MD_GUEST_WATCH_FILTER 0x4d440103
+#define MD_GUEST_FD_FILTER 0x4d440103
 #define MD_GUEST_SHM 0x4d440104
 #define MD_GUEST_SHM_FILTER 0x4d440105
 #define MD_GUEST_PROC_IMAGE 0x4d440106
@@ -14,6 +14,7 @@ enum { MD_IMAGE_PROGRAM=0, MD_IMAGE_LOADER=1, MD_IMAGE_TAKE_PROGRAM=2, MD_IMAGE_
 #define MD_GUEST_BUFFER 0x4d440108
 #define MD_GUEST_FD_CHANNEL 0x4d440109
 #define MD_GUEST_TASK_HELPER 0x4d44010a
+#define MD_GUEST_PROC_FILE 0x4d44010b
 enum md_export_control { MD_EXPORT_BEGIN=1, MD_EXPORT_READY, MD_EXPORT_OBSERVED };
 #define MD_EXPORT_ADMIT (-4096L)
 /* Register-only control works before/inside a mapped filesystem request too. */
@@ -34,7 +35,8 @@ enum md_interception_kind {
     MD_INTERCEPT_FD = 48,
     MD_INTERCEPT_CWD = 49,
     MD_INTERCEPT_CAPTURE = 50,
-    MD_INTERCEPT_TASK = 51
+    MD_INTERCEPT_TASK = 51,
+    MD_INTERCEPT_PROC = 52
 };
 
 /* Bootstrap-owned entry points, published before entering guest code. The

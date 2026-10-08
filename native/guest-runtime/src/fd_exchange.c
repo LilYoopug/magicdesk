@@ -133,7 +133,7 @@ int md_fd_exchange_offer(struct md_fd_exchange *e, struct md_fs_anchor *origin, 
     if (!e || count>2) return -EINVAL;
     pthread_mutex_lock(&e->lock);
     int error=md_fd_exchange_closed(e) ? -ECANCELED : e->offered ? -EALREADY : 0;
-    struct md_fs_anchor *origins[2]={origin,NULL};
+    struct md_fd_object *origins[2]={md_fs_anchor_object(origin),NULL};
     if (!error && count) error=md_fd_delivery_prepare(&e->delivery,e->files,origins,
         FD_CLOEXEC,count,e->output,e->numbers);
     if (!error) e->offered=1;
