@@ -6,6 +6,7 @@
 #include "socket_ancillary.h"
 #include "raw.h"
 #include "interception.h"
+#include "pid_calls.h"
 #include "proc_control.h"
 #include "guest_domain.h"
 #include "watch_calls.h"
@@ -219,7 +220,7 @@ int md_interception_install(int inherited) {
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)),
             BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)task,0,4),
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
-            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_prctl,0,1),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_gettid,0,1),
             BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_USER_NOTIF),
             BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_TASK),
             /* Declared on the original listener; a later listenerless filter

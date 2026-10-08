@@ -39,7 +39,7 @@ static void pair(struct md_ipc_credentials *s, int fd[2]) {
     struct md_identity id=md_identity_new(0,0);
     struct md_fs_request q={.operation=MD_FS_IPC,.flags=MD_IPC_PAIR,.directory={fd[0],fd[1]},.peer=getpid()};
     struct md_fs_result r;
-    md_ipc_credentials_execute(s,&id,&q,&r,NULL); md_identity_release(&id); assert(!r.error);
+    md_ipc_credentials_execute(s,&id,NULL,&q,&r,NULL); md_identity_release(&id); assert(!r.error);
 }
 static struct md_ipc_binding binding(struct md_ipc_credentials *s, int fd) {
     struct md_ipc_binding b={0}; assert(!md_ipc_credentials_bind(s,fd,&b)); return b;

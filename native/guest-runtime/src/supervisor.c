@@ -1283,7 +1283,7 @@ static void proc_file_request(struct thread *t, const struct seccomp_notif *q) {
 }
 static void buffer_receive(struct thread *t, const struct seccomp_notif *q) {
     int error=0;
-    if (!t->ready || q->data.instruction_pointer!=RAW_GATE
+    if (!t->ready || q->data.instruction_pointer!=abi.buffer_admit || q->data.nr!=SYS_gettid
             || q->data.args[1] || q->data.args[2] || q->data.args[3] || q->data.args[4] || q->data.args[5]
             || !t->buffer.pool || t->buffer_call || t->buffer_open.fd<0 || t->buffer_open.task_path
             || t->buffer_delivery.files.table || t->buffer_delivered) error=-EPERM;
@@ -1316,6 +1316,11 @@ static void handle_notification(const struct seccomp_notif *request) {
                 && !q.data.args[4] && !q.data.args[5]) {
             if (q.data.args[0]==MD_FS_BUFFER_IMPORT)
                 value=md_fd_return_install(&t->buffer_return,listener,q.id);
+            else if (q.data.args[0]==MD_FS_BUFFER_EXPORT)
+                value=md_fs_buffer_export_install(t->buffer_call,listener,q.id);
+            else if (q.data.args[0]==MD_FS_BUFFER_RESULT_ADMIT) {
+                buffer_receive(t,&q); return;
+            }
             else if (q.data.args[0]==MD_FS_BUFFER_IPC_ADMIT) {
                 struct md_fd_capture *capture=NULL;
                 struct md_fd_order *order=NULL;
@@ -1372,18 +1377,7 @@ static void handle_notification(const struct seccomp_notif *request) {
             struct seccomp_notif_resp reply={.id=q.id,.error=value};
             CHECK(!ioctl(listener,SECCOMP_IOCTL_NOTIF_SEND,&reply) || errno==ENOENT);
         } else if (q.data.args[0] == MD_GUEST_BUFFER) {
-            if (q.data.args[1]==MD_FS_BUFFER_EXPORT || q.data.args[1]==MD_FS_BUFFER_IMPORT) {
-                int result=q.data.instruction_pointer!=RAW_GATE || !t->ready
-                    || q.data.args[2] || q.data.args[3] || q.data.args[4] || q.data.args[5]
-                    ? -EPERM : q.data.args[1]==MD_FS_BUFFER_EXPORT
-                        ? md_fs_buffer_export_install(t->buffer_call,listener,q.id)
-                        : md_fd_return_install(&t->buffer_return,listener,q.id);
-                if (result<0) {
-                    struct seccomp_notif_resp reply={.id=q.id,.error=result};
-                    CHECK(!ioctl(listener,SECCOMP_IOCTL_NOTIF_SEND,&reply) || errno==ENOENT);
-                }
-            } else if (q.data.args[1]) buffer_setup(t,&q);
-            else buffer_receive(t,&q);
+            buffer_setup(t,&q);
         }
         else if (q.data.args[0] == MD_GUEST_SHM) shm_request(t,&q);
         else if (q.data.args[0] == MD_GUEST_IPC) ipc_request(t,&q);
@@ -2569,7 +2563,8 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
             && r->regs[0]!=MD_BUFFER_RELEASE && r->regs[0]!=MD_BUFFER_PROBE && r->regs[0]!=MD_BUFFER_UTS
             && r->regs[0]!=MD_BUFFER_PROC_CHECK && r->regs[0]!=MD_BUFFER_PROC_IO && r->regs[0]!=MD_BUFFER_PROC_ACK
             && r->regs[0]!=MD_BUFFER_PROC_RIGHTS && r->regs[0]!=MD_BUFFER_PROC_META && r->regs[0]!=MD_FS_BUFFER_RIGHTS_READY
-            && r->regs[0]!=MD_FS_BUFFER_RIGHTS_DONE && r->regs[0]!=MD_FS_BUFFER_CHANNEL_OBSERVED) {
+            && r->regs[0]!=MD_FS_BUFFER_RIGHTS_DONE && r->regs[0]!=MD_FS_BUFFER_CHANNEL_OBSERVED
+            && r->regs[0]!=MD_BUFFER_PID_NUMBER) {
         buffer_reply(t,-ENOTSUP); return;
     }
     if (t->ipc_transport.packet && r->regs[0]!=MD_BUFFER_RELEASE) {
@@ -2793,6 +2788,9 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
         if (!result) memcpy(span.data,&metadata,sizeof(metadata));
         break;
     }
+    case MD_BUFFER_PID_NUMBER:
+        if (t->phase!=DISPATCHING || r->regs[2]>1) break;
+        result=r->regs[2] ? native_pid(t,(pid_t)r->regs[1]) : visible_pid(t,(pid_t)r->regs[1]); break;
     case MD_BUFFER_PROC_CHECK:
         if (t->phase!=DISPATCHING || r->regs[1] || r->regs[2]) break;
         result=t->proc_file ? md_proc_file_kind(t->proc_file)+1 : 0; break;

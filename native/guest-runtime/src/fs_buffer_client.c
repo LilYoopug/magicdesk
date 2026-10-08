@@ -70,7 +70,7 @@ static long receive_result(struct md_fs_buffer_frame *frame, const struct md_fs_
         else result=-EPROTO;
     }
     else if (transfer==MD_FS_BUFFER_ADDFD) {
-        long fd=RAW1(prctl,MD_GUEST_BUFFER);
+        long fd=md_guest_buffer_admit(MD_FS_BUFFER_RESULT_ADMIT);
         if (fd<0) out->result.error=(int)fd;
         else out->result.fd=(int)fd;
     } else if (transfer==MD_FS_BUFFER_RIGHTS) {
@@ -143,7 +143,7 @@ static long exchange(const struct md_fs_request *q, struct md_fs_response *out,
         long fd=frame->export.number;
         long sent=-EPROTO;
         if (request && mask && !(mask&~3U)) {
-            if (fd<0) fd=RAW2(prctl,MD_GUEST_BUFFER,MD_FS_BUFFER_EXPORT);
+            if (fd<0) fd=md_guest_buffer_admit(MD_FS_BUFFER_EXPORT);
             struct md_fs_rights rights={0};
             for (unsigned i=0;i<2;++i)
                 if (mask&(1U<<i)) rights.fd[rights.count++]=q->directory[i];

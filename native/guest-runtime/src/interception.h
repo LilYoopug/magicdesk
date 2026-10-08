@@ -68,8 +68,6 @@ int md_interception_install(int inherited);
 long md_shm_dispatch(long, const unsigned long *);
 long md_ipc_dispatch(long, const unsigned long *);
 long md_pid_filter_install(void);
-long md_pid_signal_group(int selector,int signal);
-long md_pidfd_signal(const unsigned long *);
 int md_interception_map_image(int fd, int loader);
 int md_interception_enter_image(void *aux, unsigned count);
 #endif

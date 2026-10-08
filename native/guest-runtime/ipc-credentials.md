@@ -26,6 +26,12 @@ connect and socketpair capture effective guest UID/GID and supplementary groups.
 SO_PEERCRED and SO_PEERGROUPS read copied connection snapshots, not the peer's
 current credentials. A later credential drop, peer exit or FD transfer does not
 rewrite them. Native peer PID is checked before publishing a snapshot.
+The snapshot also captures the TGID's numbers in each ancestor PID namespace.
+Readers select their own namespace's number, or zero for an invisible peer.
+These immutable values survive reaping and native PID reuse without retaining
+the process. Thread senders use their TGID, not their TID. Task-registry snapshots
+retain that identity through worker execution; credential reads do not allocate
+another process object.
 The shared connection key contains a random link identity and its side, resolved
 from the captured socket's kernel cookie. Socketpair records both sides;
 connect/accept publish opposite sides independently. A client may queue a
@@ -64,7 +70,11 @@ their cookie-bound snapshots. Link indexing bounds registration lookups without
 adding work to ordinary data IO. An ambiguous snapshot does not replay a
 successful connection or invent an identity.
 
-Unregistered/external endpoints keep kernel credentials. Abstract socket names
+Unregistered/external endpoints keep kernel UID/GID authority. Their incoming
+PID is translated into the reader's PID namespace; an external process is zero
+in a child namespace. Outgoing explicit PIDs are translated back for the kernel's
+credential check. External receivers see actual Android credentials, never a
+private identity token. Abstract socket names
 remain in the host's shared namespace. These mappings do not provide network
 isolation or protect mutually hostile processes sharing the real executor UID.
 
@@ -334,7 +344,8 @@ forbids clone and SO_DOMAIN in both ordinary and nondumpable processes.
 ## Explicit Credential Messages
 
 SCM_CREDENTIALS validates the claimed guest IDs against the sending task. PID
-must identify that task's process; virtual root may select guest UID/GID, while
+must identify that task's process in its active PID namespace; virtual root may
+select guest UID/GID, while
 other users may select only their real/effective/saved IDs. The kernel receives
 the actual Android credentials, plus a sealed memfd capability as one extra
 SCM_RIGHTS descriptor. Its random nonce, connection identity, kernel file identity
@@ -342,6 +353,9 @@ and sending side are recorded by the metadata authority. Only the
 opposite side of the same connection can validate it; replay toward the sender,
 another connection or another store does not translate the token. The receiving
 adapter removes that descriptor and publishes the validated guest credentials instead.
+The token records the sender's immutable PID-number snapshot at send time.
+Queued messages and peeks retain those numbers after sender exit/reaping, even
+if the native PID has been assigned to another process.
 
 The namespace worker retains the sending capability; it never installs that FD
 in the application's shared table. The common outgoing owner captures source

@@ -2,6 +2,7 @@
 #define MD_IPC_CREDENTIALS_H
 #include "ipc_identity.h"
 #include "fs_operation.h"
+#include "pid_namespace.h"
 
 /* Store-scoped, live IPC metadata. Kernel sockets own data and descriptor
  * lifetimes; this authority owns connection-time identity/format snapshots. */
@@ -57,6 +58,6 @@ void md_ipc_credentials_close(struct md_ipc_credentials *);
 /* Worker-owned, event-driven retirement of process-local typed FD custody. */
 int md_ipc_credentials_pollfd(const struct md_ipc_credentials *);
 int md_ipc_credentials_dispatch(struct md_ipc_credentials *);
-void md_ipc_credentials_execute(struct md_ipc_credentials *, const struct md_identity *,
+void md_ipc_credentials_execute(struct md_ipc_credentials *, const struct md_identity *, const struct md_pid_identity *,
     const struct md_fs_request *, struct md_fs_result *, const struct md_fs_output *);
 #endif

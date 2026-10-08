@@ -95,7 +95,7 @@ static void run(struct md_fs_work *base, struct md_filesystem *fs, int error) {
         struct md_fs_request q={.operation=MD_FS_IPC,.flags=MD_IPC_PAIR,
             .directory={w->fds[0],w->fds[1]},.peer=getpid()};
         struct md_fs_result result;
-        md_ipc_credentials_execute(ipc,&identity,&q,&result,NULL);
+        md_ipc_credentials_execute(ipc,&identity,NULL,&q,&result,NULL);
         md_identity_release(&identity); assert(!result.error);
         if (w->operation==PAIR_NATIVE) md_ipc_credentials_close(ipc);
     } else if (w->operation==DATAGRAM_NAME) {
@@ -109,7 +109,7 @@ static void run(struct md_fs_work *base, struct md_filesystem *fs, int error) {
         struct md_fs_request q={.operation=MD_FS_IPC,.flags=w->operation==MESSAGE ? MD_IPC_MESSAGE_CREATE : MD_IPC_MESSAGE_READ,
             .directory={w->fds[0],w->operation==MESSAGE ? -1 : w->fds[1]},.peer=getpid(),.offset=getpid(),.attributes={.uid=1234,.gid=2345}};
         struct md_fs_result result;
-        md_ipc_credentials_execute(ipc,&identity,&q,&result,NULL);
+        md_ipc_credentials_execute(ipc,&identity,NULL,&q,&result,NULL);
         md_identity_release(&identity); assert(!result.error);
         if (w->operation==MESSAGE) { assert(result.fd>=0); w->fds[1]=result.fd; }
         else assert(result.position>0 && result.info.uid==(w->sender_identity ? 0U : 1234U)

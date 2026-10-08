@@ -21,7 +21,8 @@ enum md_fs_buffer_control { MD_FS_BUFFER_CALL=16, MD_FS_BUFFER_ACK, MD_FS_BUFFER
 enum { MD_FS_BUFFER_SOURCE=-2 };
 enum md_fs_buffer_transfer { MD_FS_BUFFER_NO_FD, MD_FS_BUFFER_ANCHOR, MD_FS_BUFFER_ADDFD, MD_FS_BUFFER_RIGHTS,
     MD_FS_BUFFER_TASK_PATH };
-enum { MD_FS_BUFFER_EXPORT=2, MD_FS_BUFFER_IMPORT=3, MD_FS_BUFFER_CHANNEL_CHECK=4, MD_FS_BUFFER_IPC_ADMIT=5 };
+enum { MD_FS_BUFFER_EXPORT=2, MD_FS_BUFFER_IMPORT=3, MD_FS_BUFFER_CHANNEL_CHECK=4,
+    MD_FS_BUFFER_IPC_ADMIT=5, MD_FS_BUFFER_RESULT_ADMIT=6 };
 /* Stateful inputs are captured according to md_fs_operation_data_inputs. */
 static inline int md_fs_buffer_operation(unsigned operation) {
     switch (operation) {

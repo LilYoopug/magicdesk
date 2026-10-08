@@ -46,7 +46,7 @@ static void pair(struct md_ipc_credentials *s, int type, int fd[2]) {
     struct md_identity identity=md_identity_new(0,0);
     struct md_fs_request q={.operation=MD_FS_IPC,.flags=MD_IPC_PAIR,.directory={fd[0],fd[1]},.peer=getpid()};
     struct md_fs_result r;
-    md_ipc_credentials_execute(s,&identity,&q,&r,NULL);
+    md_ipc_credentials_execute(s,&identity,NULL,&q,&r,NULL);
     md_identity_release(&identity); assert(!r.error);
 }
 static void control(int fd[2]) { assert(!socketpair(AF_UNIX,SOCK_SEQPACKET|SOCK_NONBLOCK|SOCK_CLOEXEC,0,fd)); }

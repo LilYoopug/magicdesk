@@ -20,7 +20,7 @@ static struct md_fs_result request(struct md_ipc_credentials *owner, unsigned op
     struct md_fs_request q={.operation=MD_FS_IPC,.flags=operation,.directory={fd,second},
         .peer=getpid(),.path={name,NULL},.offset=result};
     struct md_fs_result out;
-    md_ipc_credentials_execute(owner,&identity,&q,&out,NULL);
+    md_ipc_credentials_execute(owner,&identity,NULL,&q,&out,NULL);
     md_identity_release(&identity); return out;
 }
 static struct md_ipc_connection connection(struct md_ipc_credentials *owner, int fd) {
@@ -88,44 +88,91 @@ static void user_namespaces(struct md_ipc_credentials *owner) {
     struct md_fs_request q={.operation=MD_FS_IPC,.flags=MD_IPC_PAIR,
         .directory={pair[0],pair[1]},.peer=getpid()};
     struct md_fs_result out;
-    md_ipc_credentials_execute(owner,&parent,&q,&out,NULL); assert(!out.error);
+    md_ipc_credentials_execute(owner,&parent,NULL,&q,&out,NULL); assert(!out.error);
     struct { struct md_ipc_identity identity; uint32_t groups[3]; } peer;
     struct md_fs_output output={.data=&peer,.capacity=sizeof(peer)};
     q.operation=MD_FS_IPC_PEER; q.mode=1;
-    md_ipc_credentials_execute(owner,&child,&q,&out,&output);
+    md_ipc_credentials_execute(owner,&child,NULL,&q,&out,&output);
     assert(!out.error && out.size==sizeof(peer) && !peer.identity.uid && !peer.identity.gid
         && peer.identity.group_count==3 && peer.groups[0]==0 && peer.groups[1]==1 && peer.groups[2]==65534);
-    md_ipc_credentials_execute(owner,&parent,&q,&out,&output);
+    md_ipc_credentials_execute(owner,&parent,NULL,&q,&out,&output);
     assert(!out.error && peer.identity.uid==1000 && peer.identity.gid==2000
         && !memcmp(peer.groups,groups,sizeof(groups)));
     q.operation=MD_FS_IPC; q.flags=MD_IPC_MESSAGE_CREATE; q.offset=getpid(); q.mode=0;
-    md_ipc_credentials_execute(owner,&child,&q,&out,NULL); assert(!out.error && out.fd>=0);
+    md_ipc_credentials_execute(owner,&child,NULL,&q,&out,NULL); assert(!out.error && out.fd>=0);
     int token=out.fd;
     q.flags=MD_IPC_MESSAGE_READ; q.directory[0]=pair[1]; q.directory[1]=token;
-    md_ipc_credentials_execute(owner,&parent,&q,&out,NULL);
+    md_ipc_credentials_execute(owner,&parent,NULL,&q,&out,NULL);
     assert(!out.error && out.info.uid==1000 && out.info.gid==2000);
-    md_ipc_credentials_execute(owner,&child,&q,&out,NULL);
+    md_ipc_credentials_execute(owner,&child,NULL,&q,&out,NULL);
     assert(!out.error && !out.info.uid && !out.info.gid);
     q.flags=MD_IPC_MESSAGE_CREATE; q.directory[0]=pair[0]; q.attributes.uid=2;
-    md_ipc_credentials_execute(owner,&child,&q,&out,NULL); assert(out.error==-EINVAL && out.fd==-1);
+    md_ipc_credentials_execute(owner,&child,NULL,&q,&out,NULL); assert(out.error==-EINVAL && out.fd==-1);
     q.attributes.uid=1; child.caps.effective=0;
-    md_ipc_credentials_execute(owner,&child,&q,&out,NULL); assert(out.error==-EPERM && out.fd==-1);
+    md_ipc_credentials_execute(owner,&child,NULL,&q,&out,NULL); assert(out.error==-EPERM && out.fd==-1);
     q.attributes.uid=0;
-    md_ipc_credentials_execute(owner,&child,&q,&out,NULL); assert(!out.error && out.fd>=0); close(out.fd);
+    md_ipc_credentials_execute(owner,&child,NULL,&q,&out,NULL); assert(!out.error && out.fd>=0); close(out.fd);
     struct md_identity unmapped=md_identity_copy(&parent);
     assert(!md_identity_enter_user_namespace(&unmapped));
     q.flags=MD_IPC_MESSAGE_SENDER;
-    md_ipc_credentials_execute(owner,&unmapped,&q,&out,NULL); assert(!out.error && out.fd>=0);
+    md_ipc_credentials_execute(owner,&unmapped,NULL,&q,&out,NULL); assert(!out.error && out.fd>=0);
     int implicit=out.fd;
     q.flags=MD_IPC_MESSAGE_READ; q.directory[0]=pair[1]; q.directory[1]=implicit;
-    md_ipc_credentials_execute(owner,&parent,&q,&out,NULL);
+    md_ipc_credentials_execute(owner,&parent,NULL,&q,&out,NULL);
     assert(!out.error && out.info.uid==1000 && out.info.gid==2000);
-    md_ipc_credentials_execute(owner,&unmapped,&q,&out,NULL);
+    md_ipc_credentials_execute(owner,&unmapped,NULL,&q,&out,NULL);
     assert(!out.error && out.info.uid==65534 && out.info.gid==65534);
     close(implicit); md_identity_release(&unmapped);
     close(token); close(pair[0]); close(pair[1]);
     md_identity_release(&parent); md_identity_release(&child);
     puts("PASS IPC namespace credentials: canonical snapshots, receiver-relative peers/groups/messages and unmapped/unauthorized sender rejection");
+}
+static void pid_namespaces(struct md_ipc_credentials *owner) {
+    struct md_identity identity=md_identity_new(0,0);
+    struct md_pid_namespace *parent=md_pid_namespace_new(NULL,NULL);
+    struct md_pid_namespace *child=md_pid_namespace_new(parent,NULL);
+    struct md_pid_namespace *other=md_pid_namespace_new(NULL,NULL);
+    assert(parent && child && other);
+    struct md_pid_identity *viewers[4]={0}, *sender=NULL;
+    assert(!md_pid_identity_prepare(parent,&viewers[0])
+        && !md_pid_identity_prepare(child,&viewers[1])
+        && !md_pid_identity_prepare(other,&viewers[2])
+        && !md_pid_identity_prepare(child,&sender));
+    for (unsigned i=0;i<3;++i) assert(!md_pid_identity_publish(viewers[i],getpid()+i+1,getpid()+i+1));
+    assert(!md_pid_identity_publish(sender,getpid(),getpid()));
+    pid_t expected[]={md_pid_identity_number(sender,parent),md_pid_identity_number(sender,child),0,getpid()};
+    int pair[2]; assert(!socketpair(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0,pair));
+    struct md_fs_request q={.operation=MD_FS_IPC,.flags=MD_IPC_PAIR,
+        .directory={pair[0],pair[1]},.peer=getpid()};
+    struct md_fs_result out;
+    md_ipc_credentials_execute(owner,&identity,sender,&q,&out,NULL); assert(!out.error);
+    q.flags=MD_IPC_MESSAGE_CREATE; q.offset=getpid();
+    md_ipc_credentials_execute(owner,&identity,sender,&q,&out,NULL);
+    assert(out.error==-EPERM && out.fd==-1);
+    q.offset=expected[1];
+    md_ipc_credentials_execute(owner,&identity,sender,&q,&out,NULL); assert(!out.error && out.fd>=0);
+    int token=out.fd;
+    md_pid_identity_exit(sender); md_pid_identity_reap(sender); md_pid_identity_release(sender);
+    /* A new native process with the same PID cannot retarget saved credentials. */
+    assert(!md_pid_identity_prepare(child,&sender) && !md_pid_identity_publish(sender,getpid(),getpid()));
+    assert(md_pid_identity_number(sender,child)!=expected[1]);
+    for (unsigned i=0;i<4;++i) {
+        struct md_ipc_identity peer;
+        struct md_fs_output output={.data=&peer,.capacity=sizeof(peer)};
+        q.operation=MD_FS_IPC_PEER; q.mode=0;
+        md_ipc_credentials_execute(owner,&identity,viewers[i],&q,&out,&output);
+        assert(!out.error && out.size==sizeof(peer) && peer.pid==expected[i]);
+        q.operation=MD_FS_IPC; q.flags=MD_IPC_MESSAGE_READ;
+        q.directory[0]=pair[1]; q.directory[1]=token;
+        md_ipc_credentials_execute(owner,&identity,viewers[i],&q,&out,NULL);
+        assert(!out.error && out.position==expected[i]);
+    }
+    close(token); close(pair[0]); close(pair[1]);
+    md_pid_identity_release(sender);
+    for (unsigned i=0;i<3;++i) md_pid_identity_release(viewers[i]);
+    md_pid_namespace_release(other); md_pid_namespace_release(child); md_pid_namespace_release(parent);
+    md_identity_release(&identity);
+    puts("PASS IPC PID credentials: connection/send snapshots, receiver-relative numbers, reaping and native PID reuse");
 }
 static void paired(struct md_ipc_credentials *first, struct md_ipc_credentials *second,
         struct md_ipc_credentials *foreign, int type) {
@@ -489,6 +536,7 @@ void test_ipc_connections(const char *directory) {
     const int types[]={SOCK_STREAM,SOCK_DGRAM,SOCK_SEQPACKET};
     for (unsigned i=0;i<3;++i) paired(first,second,foreign,types[i]);
     user_namespaces(first);
+    pid_namespaces(first);
     independent(directory,first,second,SOCK_STREAM,1,MD_IPC_TRANSPORT_NATIVE,MD_IPC_TRANSPORT_NATIVE);
     independent(directory,first,second,SOCK_SEQPACKET,2,MD_IPC_TRANSPORT_NATIVE,MD_IPC_TRANSPORT_NATIVE);
     admission(first,3,0,0); admission(first,4,1,1);

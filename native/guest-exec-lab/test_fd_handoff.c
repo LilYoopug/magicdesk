@@ -632,7 +632,7 @@ static void origin_message_register(struct md_ipc_credentials *authority, const 
     struct md_fs_request request={.operation=MD_FS_IPC,.flags=MD_IPC_PAIR,
         .directory={sockets[0],sockets[1]},.peer=getpid()};
     struct md_fs_result result;
-    md_ipc_credentials_execute(authority,&identity,&request,&result,NULL);
+    md_ipc_credentials_execute(authority,&identity,NULL,&request,&result,NULL);
     assert(!result.error && result.fd==-1); md_identity_release(&identity);
 }
 static void origin_message_association(const char *directory, struct md_ipc_credentials *authority, int type, int discard) {

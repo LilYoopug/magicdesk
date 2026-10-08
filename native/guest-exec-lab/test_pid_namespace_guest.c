@@ -206,6 +206,46 @@ static void pidfd_transfer(void) {
     close(fd); close(channel[0]); reap(child);
     puts("PASS transferred pidfd retains PID1 policy in protected receiver");
 }
+static void *socket_credential_sender(void *data) {
+    int fd=*(int *)data;
+    struct ucred peer={0}; socklen_t size=sizeof(peer);
+    assert(syscall(SYS_gettid)!=getpid());
+    assert(!getsockopt(fd,SOL_SOCKET,SO_PEERCRED,&peer,&size));
+    assert(size==sizeof(peer) && peer.pid==1 && peer.uid==getuid());
+    char byte='c',control[CMSG_SPACE(sizeof(peer))]={0};
+    struct iovec vector={&byte,1};
+    struct msghdr message={.msg_iov=&vector,.msg_iovlen=1,.msg_control=control,.msg_controllen=sizeof(control)};
+    struct cmsghdr *header=CMSG_FIRSTHDR(&message);
+    *header=(struct cmsghdr){.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_CREDENTIALS,.cmsg_len=CMSG_LEN(sizeof(peer))};
+    peer=(struct ucred){getpid(),getuid(),getgid()};
+    memcpy(CMSG_DATA(header),&peer,sizeof(peer));
+    assert(sendmsg(fd,&message,0)==1);
+    return NULL;
+}
+static void socket_credentials(void) {
+    int pair[2]; assert(!socketpair(AF_UNIX,SOCK_SEQPACKET,0,pair));
+    int enabled=1;
+    assert(!setsockopt(pair[0],SOL_SOCKET,SO_PASSCRED,&enabled,sizeof(enabled)));
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        close(pair[0]);
+        pthread_t thread;
+        assert(!pthread_create(&thread,NULL,socket_credential_sender,&pair[1]));
+        assert(!pthread_join(thread,NULL));
+        close(pair[1]); _exit(0);
+    }
+    close(pair[1]); reap(child);
+    char byte,control[CMSG_SPACE(sizeof(struct ucred))]={0};
+    struct iovec data={&byte,1};
+    struct msghdr message={.msg_iov=&data,.msg_iovlen=1,.msg_control=control,.msg_controllen=sizeof(control)};
+    assert(recvmsg(pair[0],&message,0)==1 && byte=='c' && !(message.msg_flags&MSG_CTRUNC));
+    struct cmsghdr *header=CMSG_FIRSTHDR(&message);
+    assert(header && header->cmsg_level==SOL_SOCKET && header->cmsg_type==SCM_CREDENTIALS);
+    struct ucred peer; memcpy(&peer,CMSG_DATA(header),sizeof(peer));
+    assert(peer.pid==child && peer.uid==getuid() && peer.gid==getgid());
+    close(pair[0]);
+    puts("PASS PID socket peer and queued SCM_CREDENTIALS after sender reaping");
+}
 static void *debug_exec_worker(void *unused) {
     (void)unused;
     execl("/bin/test","/bin/test","pid-namespace","debug-exec",NULL);
@@ -243,10 +283,13 @@ static void debugger_exec(void) {
     assert(exec_seen);
     puts("PASS debugger nonleader exec reports namespace-visible former TID");
 }
-static int init(void *unused) {
-    (void)unused;
+static int init(void *inherited) {
     printf("pid init self=%d tid=%ld parent=%d\n",getpid(),syscall(SYS_gettid),getppid());
     assert(getpid()==1 && syscall(SYS_gettid)==1 && getppid()==0);
+    struct ucred outside; socklen_t size=sizeof(outside);
+    int fd=*(int *)inherited;
+    assert(!getsockopt(fd,SOL_SOCKET,SO_PEERCRED,&outside,&size) && !outside.pid);
+    close(fd);
     pid_t child=fork(); assert(child>=0);
     if (!child) {
         assert(getpid()==2 && syscall(SYS_gettid)==2 && getppid()==1);
@@ -268,6 +311,7 @@ static int init(void *unused) {
     autoreap_case();
     signal_cases();
     pidfd_transfer();
+    socket_credentials();
     debugger_exec();
     assert(!unshare(CLONE_NEWPID));
     assert(getpid()==1 && getppid()==0);
@@ -315,9 +359,11 @@ int test_pid_namespace_guest(int argc,char **argv) {
     }
     void *stack=malloc(1024*1024); assert(stack);
     pid_t original=getpid();
-    pid_t child=clone(init,(char *)stack+1024*1024,CLONE_NEWPID|SIGCHLD,NULL);
+    int pair[2]; assert(!socketpair(AF_UNIX,SOCK_SEQPACKET,0,pair));
+    pid_t child=clone(init,(char *)stack+1024*1024,CLONE_NEWPID|SIGCHLD,&pair[0]);
     if (child<0) perror("clone PID namespace");
     assert(child>0); reap(child);
+    close(pair[0]); close(pair[1]);
     child=clone(threaded_init,(char *)stack+1024*1024,CLONE_NEWPID|SIGCHLD,NULL);
     assert(child>0); reap(child);
     assert(getpid()==original);

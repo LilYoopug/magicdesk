@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "socket_ancillary.h"
 #include "socket_namespace.h"
+#include "pid_calls.h"
 #include "ipc_credentials.h"
 #include "watch_calls.h"
 #include "fs_rpc.h"
@@ -190,6 +191,11 @@ static long send_captured(const struct msghdr *original, const unsigned long *a,
         if (CMSG_ALIGN(h.cmsg_len)>original->msg_controllen-pos) break;
         pos+=CMSG_ALIGN(h.cmsg_len);
     }
+    long native_pid=0;
+    if (!result && frame->options.credentials) {
+        native_pid=md_pid_native(frame->options.claimed.pid);
+        if (native_pid<=0) result=-EPERM;
+    }
     if (!result) result=capture_inputs(md_guest_buffer_control(MD_FS_BUFFER_SEND_PREPARE,0,0),
         &frame->scratch.capture.capture,frame->input.keep,frame->input.count);
     if (!result) {
@@ -201,6 +207,10 @@ static long send_captured(const struct msghdr *original, const unsigned long *a,
         else {
             if (frame->destination.credentials && frame->options.credentials) {
                 struct ucred native={(pid_t)RAW0(getpid),(uid_t)RAW0(getuid),(gid_t)RAW0(getgid)};
+                memcpy((char *)control+credential_offset,&native,sizeof(native));
+            } else if (frame->options.credentials) {
+                struct ucred native=frame->options.claimed;
+                native.pid=(pid_t)native_pid;
                 memcpy((char *)control+credential_offset,&native,sizeof(native));
             }
             if (misc) memmove((char *)control+rights,control,misc);
@@ -311,7 +321,15 @@ static long publish(const struct md_fs *fs, int socket, const struct msghdr *ori
     void *out=original->msg_control; size_t used=0;
     for (struct cmsghdr *h=CMSG_FIRSTHDR(&m); h; h=next_header(&m,h)) {
         const void *data=CMSG_DATA(h); size_t n=h->cmsg_len-CMSG_LEN(0);
-        if (h->cmsg_level==SOL_SOCKET && h->cmsg_type==SCM_CREDENTIALS && n==sizeof(claimed) && have_claim) data=&claimed;
+        if (h->cmsg_level==SOL_SOCKET && h->cmsg_type==SCM_CREDENTIALS && n==sizeof(claimed)) {
+            if (!have_claim) {
+                memcpy(&claimed,data,sizeof(claimed));
+                long pid=md_pid_visible(claimed.pid);
+                if (pid<0 && claimed.pid>=0) return pid;
+                claimed.pid=(pid_t)pid;
+            }
+            data=&claimed;
+        }
         if (h->cmsg_level==SOL_SOCKET && h->cmsg_type==SCM_RIGHTS) {
             size_t count=0; unsigned char selectors[253];
             for (size_t i=0;i<n/sizeof(int);i++,entry++) {

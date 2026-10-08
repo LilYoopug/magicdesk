@@ -8,8 +8,9 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <string.h>
 
-enum { PID_LEVELS=32, PID_BUCKETS=127 };
+enum { PID_BUCKETS=127 };
 struct pid_number {
     struct pid_number *next;
     struct md_pid_identity *identity;
@@ -41,8 +42,26 @@ struct md_pid_identity {
 };
 static pthread_mutex_t registry_lock=PTHREAD_MUTEX_INITIALIZER;
 static struct md_pid_namespace *registry;
+unsigned md_pid_identity_export(const struct md_pid_identity *id, struct md_pid_number_value *out) {
+    if (!id) return 0;
+    for (unsigned i=0;i<id->count;++i)
+        out[i]=(struct md_pid_number_value){md_pid_namespace_inode(id->numbers[i].space),id->numbers[i].number,0};
+    return id->count;
+}
+int md_pid_numbers_visible(const void *data,size_t size,const struct md_pid_namespace *space,pid_t native) {
+    if (size%sizeof(struct md_pid_number_value) || size>MD_PID_LEVELS*sizeof(struct md_pid_number_value)) return -EPROTO;
+    if (!space || native<=0) return native;
+    uint64_t inode=md_pid_namespace_inode(space);
+    for (size_t offset=0;offset<size;offset+=sizeof(struct md_pid_number_value)) {
+        struct md_pid_number_value value;
+        memcpy(&value,(const char *)data+offset,sizeof(value));
+        if (value.reserved || value.number<=0) return -EPROTO;
+        if (value.namespace==inode) return value.number;
+    }
+    return 0;
+}
 struct md_pid_namespace *md_pid_namespace_new(struct md_pid_namespace *parent, struct md_user_namespace *owner) {
-    if (md_pid_namespace_depth(parent)>=PID_LEVELS) { errno=ENOSPC; return NULL; }
+    if (md_pid_namespace_depth(parent)>=MD_PID_LEVELS) { errno=ENOSPC; return NULL; }
     if (parent && !md_user_namespace_contains(parent->owner,owner)) { errno=EINVAL; return NULL; }
     struct md_pid_namespace *n=calloc(1,sizeof(*n));
     if (!n) return NULL;

@@ -431,10 +431,33 @@ static void external(const char *name,pid_t server) {
     CHECK(strlen(name)<sizeof(address.sun_path)-1);
     memcpy(address.sun_path+1,name,strlen(name));
     CHECK(!connect(fd,(void *)&address,offsetof(struct sockaddr_un,sun_path)+1+strlen(name)));
+    if (!server) {
+        CHECK(!prctl(PR_SET_DUMPABLE,0));
+        struct sock_filter filter[]={
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_prctl,0,1),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EPERM),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
+        };
+        struct sock_fprog program={sizeof(filter)/sizeof(*filter),filter};
+        CHECK(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0) && !prctl(PR_SET_SECCOMP,SECCOMP_MODE_FILTER,&program));
+        int snapshot=open("/proc/self/mountinfo",O_RDONLY|O_CLOEXEC);
+        char content[32];
+        CHECK(snapshot>=0 && read(snapshot,content,sizeof(content))>0 && !close(snapshot));
+    }
     peer(fd,server,2000,2000);
     send_identity(fd,0,-1,0);
     /* The actual kernel credentials remain authoritative outside this store. */
     CHECK(!setgid(2000)); send_identity(fd,2000,-1,1);
+    int one=1; CHECK(!setsockopt(fd,SOL_SOCKET,SO_PASSCRED,&one,sizeof(one)));
+    CHECK(write(fd,"r",1)==1);
+    char byte,control[CMSG_SPACE(sizeof(struct ucred))]={0}; struct iovec data={&byte,1};
+    struct msghdr message={.msg_iov=&data,.msg_iovlen=1,.msg_control=control,.msg_controllen=sizeof(control)};
+    CHECK(recvmsg(fd,&message,0)==1 && byte=='n' && !(message.msg_flags&MSG_CTRUNC));
+    struct cmsghdr *header=CMSG_FIRSTHDR(&message);
+    CHECK(header && header->cmsg_level==SOL_SOCKET && header->cmsg_type==SCM_CREDENTIALS);
+    struct ucred cred; memcpy(&cred,CMSG_DATA(header),sizeof(cred));
+    CHECK(cred.pid==server && cred.uid==2000 && cred.gid==2000);
     close(fd);
 }
 static void peer_full_table(int protected, unsigned count) {
@@ -1044,6 +1067,12 @@ int main(int argc,char **argv) {
     if (argc==4 && !strcmp(argv[1],"--origin-receive")) { origin_receive((unsigned)atoi(argv[2]),atoi(argv[3])); return 0; }
     if (argc==4 && !strcmp(argv[1],"--origin-send")) { origin_send((unsigned)atoi(argv[2]),atoi(argv[3])); return 0; }
     if (argc==4 && !strcmp(argv[1],"--external")) { external(argv[2],(pid_t)atoi(argv[3])); return 0; }
+    if (argc==4 && !strcmp(argv[1],"--external-pid")) {
+        CHECK(!unshare(CLONE_NEWPID));
+        pid_t child=fork(); CHECK(child>=0);
+        if (!child) { CHECK(getpid()==1); external(argv[2],0); _exit(0); }
+        done(child); puts("PASS native peers across PID namespace with protected memory and prctl denied"); return 0;
+    }
     CHECK(argc==1);
     send_contract();
     for (int protected=0;protected<2;++protected) for (int cancel=0;cancel<2;++cancel)

@@ -86,7 +86,7 @@ static void publish(struct source *s, const char *store, struct md_fs_anchor *co
     assert(!md_ipc_credentials_open(store,MD_IPC_TRANSPORT_ORIGINS_V1,&authority));
     int app[2]; pair(app); struct md_identity id=md_identity_new(0,0);
     struct md_fs_request q={.operation=MD_FS_IPC,.flags=MD_IPC_PAIR,.directory={app[0],app[1]},.peer=getpid()};
-    struct md_fs_result r; md_ipc_credentials_execute(authority,&id,&q,&r,NULL);
+    struct md_fs_result r; md_ipc_credentials_execute(authority,&id,NULL,&q,&r,NULL);
     assert(!r.error); md_identity_release(&id);
     struct md_ipc_binding sender={0}, receiver={0};
     assert(!md_ipc_credentials_bind(authority,app[0],&sender));
@@ -371,7 +371,7 @@ static void capsule_sender(int channel, const char *base, int unknown) {
     assert(!md_ipc_credentials_open(store,MD_IPC_TRANSPORT_ORIGINS_V1,&authority));
     int app[2]; pair(app); struct md_identity id=md_identity_new(0,0);
     struct md_fs_request q={.operation=MD_FS_IPC,.flags=MD_IPC_PAIR,.directory={app[0],app[1]},.peer=getpid()};
-    struct md_fs_result r; md_ipc_credentials_execute(authority,&id,&q,&r,NULL);
+    struct md_fs_result r; md_ipc_credentials_execute(authority,&id,NULL,&q,&r,NULL);
     assert(!r.error); md_identity_release(&id);
     struct md_ipc_binding sender={0}; assert(!md_ipc_credentials_bind(authority,app[0],&sender));
     char pending[PATH_MAX]; path(pending,store,"ipc/auth.pending"); file(pending,"partial");
@@ -652,7 +652,7 @@ static void typed_capsules(const char *base) {
     int app[2]; pair(app);
     struct md_identity identity=md_identity_new(0,0);
     struct md_fs_request q={.operation=MD_FS_IPC,.flags=MD_IPC_PAIR,.directory={app[0],app[1]},.peer=getpid()};
-    struct md_fs_result result; md_ipc_credentials_execute(authority,&identity,&q,&result,NULL);
+    struct md_fs_result result; md_ipc_credentials_execute(authority,&identity,NULL,&q,&result,NULL);
     assert(!result.error); md_identity_release(&identity);
     struct md_ipc_binding sender={0},receiver={0},other={0};
     assert(!md_ipc_credentials_bind(authority,app[0],&sender));

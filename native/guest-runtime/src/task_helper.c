@@ -163,7 +163,7 @@ static int clear_next(struct helper *m) {
             int channel=m->send_address || m->send_inputs->count>1;
             m->operation=channel ? SEND_CHANNEL : SEND_SOCKET;
             unsigned long args[6]={MD_GUEST_TASK_HELPER,channel ? 0 : 2};
-            return call(m,m->child,SYS_prctl,args);
+            return call(m,m->child,SYS_gettid,args);
         }
         m->operation=SEND_INPUT; m->keep_index=0;
         unsigned long args[6]={m->send.keep[0],F_GETFD};
@@ -171,7 +171,7 @@ static int clear_next(struct helper *m) {
     }
     m->operation=CHANNEL;
     unsigned long args[6]={MD_GUEST_TASK_HELPER,0};
-    return call(m,m->child,SYS_prctl,args);
+    return call(m,m->child,SYS_gettid,args);
 }
 static int receive_export(struct helper *m) {
     struct md_task_receive_frame *p=receive_frame(m);
@@ -249,7 +249,7 @@ static int advance(struct helper *m, long value) {
         m->observed=1;
         return abort_child(m);
     }
-    unsigned long args[6]={0}; long nr=SYS_prctl;
+    unsigned long args[6]={0}; long nr=SYS_gettid;
     switch (m->operation) {
         case CLEAR:
             if (value) return -EPROTO;
@@ -598,7 +598,7 @@ int md_task_helper_detach(struct md_task_helpers *manager, pid_t owner) {
 }
 int md_task_helper_notification(struct md_task_helpers *manager, int listener, const struct seccomp_notif *q) {
     for (struct helper *m=manager ? manager->first : NULL;m;m=m->next) if (m->child==(pid_t)q->pid) {
-        if (q->data.nr!=SYS_prctl || q->data.instruction_pointer!=m->abi.task_return
+        if (q->data.nr!=SYS_gettid || q->data.instruction_pointer!=m->abi.task_return
                 || q->data.args[0]!=MD_GUEST_TASK_HELPER
                 || q->data.args[1]!=(unsigned)(m->operation==SEND_SOCKET ? 2 : m->operation==BACKING)
                 || q->data.args[2] || q->data.args[3] || q->data.args[4] || q->data.args[5]

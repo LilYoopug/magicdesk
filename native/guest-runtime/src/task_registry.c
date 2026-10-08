@@ -15,6 +15,7 @@ struct entry {
     struct md_mount_namespace *mounts;
     struct md_fd_origins *files;
     struct md_pid_identity *pid;
+    struct md_pid_identity *pid_group;
 };
 struct md_task_registry { pthread_mutex_t lock; pid_t owner; struct entry *entries[BUCKETS]; };
 struct md_task_registry *md_task_registry_create(void) {
@@ -29,7 +30,7 @@ void md_task_registry_destroy(struct md_task_registry *r) {
         struct entry *e = r->entries[i]; r->entries[i] = e->next;
         md_identity_release(&e->value); md_domain_unpin(e->fs);
         md_mount_namespace_release(e->mounts); md_fd_origins_unpin(e->files);
-        md_pid_identity_release(e->pid); free(e);
+        md_pid_identity_release(e->pid); md_pid_identity_release(e->pid_group); free(e);
     }
     pthread_mutex_destroy(&r->lock); free(r);
 }
@@ -42,6 +43,7 @@ int md_task_registry_publish(struct md_task_registry *r, pid_t tid, pid_t tgid,
     struct md_guest_domain *old_fs=NULL;
     struct md_fd_origins *files=resources ? resources->files : NULL, *old_files=NULL;
     struct md_pid_identity *pid=resources ? resources->pid : NULL, *old_pid=NULL;
+    struct md_pid_identity *group=resources ? resources->pid_group : NULL, *old_group=NULL;
     unsigned bucket = (unsigned)tid % BUCKETS;
     pthread_mutex_lock(&r->lock);
     struct entry *e = r->entries[bucket];
@@ -57,6 +59,7 @@ int md_task_registry_publish(struct md_task_registry *r, pid_t tid, pid_t tgid,
     }
     if (e->files!=files) { old_files=e->files; e->files=md_fd_origins_pin(files); }
     if (e->pid!=pid) { old_pid=e->pid; e->pid=md_pid_identity_retain(pid); }
+    if (e->pid_group!=group) { old_group=e->pid_group; e->pid_group=md_pid_identity_retain(group); }
     if (e->tgid == tgid && !memcmp(&e->value.uid, &v->uid, sizeof(v->uid))
             && !memcmp(&e->value.gid, &v->gid, sizeof(v->gid))
             && !memcmp(&e->value.caps, &v->caps, sizeof(v->caps))
@@ -71,6 +74,7 @@ published:
     md_domain_unpin(old_fs); md_mount_namespace_release(old_mounts);
     md_fd_origins_unpin(old_files);
     md_pid_identity_release(old_pid);
+    md_pid_identity_release(old_group);
     return 0;
 }
 void md_task_registry_forget(struct md_task_registry *r, pid_t tid) {
@@ -84,7 +88,7 @@ void md_task_registry_forget(struct md_task_registry *r, pid_t tid) {
     if (e) {
         md_identity_release(&e->value); md_domain_unpin(e->fs);
         md_mount_namespace_release(e->mounts); md_fd_origins_unpin(e->files);
-        md_pid_identity_release(e->pid); free(e);
+        md_pid_identity_release(e->pid); md_pid_identity_release(e->pid_group); free(e);
     }
 }
 int md_task_registry_read(struct md_task_registry *r, pid_t tid, pid_t peer,
@@ -103,6 +107,7 @@ int md_task_registry_read(struct md_task_registry *r, pid_t tid, pid_t peer,
         out->mounts=md_mount_namespace_retain(e->mounts);
         out->files=md_fd_origins_pin(e->files);
         out->pid=md_pid_identity_retain(e->pid);
+        out->pid_group=md_pid_identity_retain(e->pid_group);
     }
     pthread_mutex_unlock(&r->lock); return error;
 }
@@ -113,5 +118,6 @@ void md_task_snapshot_release(struct md_task_snapshot *snapshot) {
     md_fd_origins_unpin(snapshot->files);
     md_fs_anchor_release(snapshot->cwd);
     md_pid_identity_release(snapshot->pid);
+    md_pid_identity_release(snapshot->pid_group);
     *snapshot=(struct md_task_snapshot){0};
 }

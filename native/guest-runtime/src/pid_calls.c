@@ -1,4 +1,5 @@
 #include "interception.h"
+#include "pid_calls.h"
 #include "raw.h"
 #include "fd_client.h"
 #include <errno.h>

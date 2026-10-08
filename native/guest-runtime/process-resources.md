@@ -1041,6 +1041,14 @@ file-table turn, so close/reuse cannot replace the checked target. Kernel
 pidfd wait/poll semantics remain native. Nonleader exec retains the TGID and
 publishes the former visible TID to the guest debugger before retiring it.
 
+Unix connection and explicit-message credentials capture immutable TGID-number
+snapshots using the same PID owner. They translate into the receiver's namespace
+without consulting a potentially reused native PID. Unrelated namespaces see
+zero; the native view keeps the actual PID. Native endpoints retain kernel
+UID/GID checks. Tests cover connection/message snapshots after reaping and native
+PID reuse, a threaded sender, inherited connections, and an external shell peer
+with a nondumpable guest whose filter denies prctl.
+
 A logical `proc` mount retains its selected PID namespace alongside mount
 identity and policy. The filesystem walker resolves numeric process/thread
 components, self and thread-self in that view. Enumeration filters native
@@ -1134,8 +1142,8 @@ options fail explicitly. Saved overlay credentials do not establish
 kernel-equivalent confinement for unadapted native access.
 
 Proc mounts are selected process views, not a complete virtual kernel procfs.
-Foreign `/proc/PID/mem`, signalfd sender translation, namespace-local Unix peer
-PID translation and a private devpts instance remain outside this contract.
+Foreign `/proc/PID/mem`, signalfd sender translation and a private devpts instance
+remain outside this contract.
 Inherited native proc descriptors retain their original view. Internal helper
 threads are filtered in a logical PID proc mount, not in Android's native procfs.
 Guest ptrace limitations are recorded in [debugging](debugging.md).
@@ -1143,7 +1151,11 @@ Guest ptrace limitations are recorded in [debugging](debugging.md).
 Guest filesystem calls use mapped requests, not private per-call RPC sockets.
 The admitted table-owned export/return endpoints have explicit table lifetime;
 ordinary requests borrow them. Sending credential capabilities stay in the
-worker and a private-table helper, whose reaping bounds their lifetime. Receiving
+worker and a private-table helper, whose reaping bounds their lifetime. Admission
+of export channels, direct ADDFD results and private-helper descriptors uses
+exact gettid notification sites. Application filters still apply; denying prctl
+does not prevent these admissions. A denied admission returns its error before
+publishing a descriptor. Receiving
 uses a private table and supervisor-owned source descriptions until kernel
 publication directly into application control memory. Cancellation releases only
 unpublished resources; published rights belong to the application. Batch

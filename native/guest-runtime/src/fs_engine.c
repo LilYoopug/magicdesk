@@ -233,7 +233,7 @@ static void context_execute(struct md_fs_context *context,
         struct md_ipc_credentials *ipc=NULL;
         int error=md_fs_ipc_authority(fs,&ipc);
         if (error) *out=(struct md_fs_result){.fd=-1,.error=error};
-        else md_ipc_credentials_execute(ipc, &identity, q, out, output);
+        else md_ipc_credentials_execute(ipc, &identity, task->pid_group, q, out, output);
         return;
     }
     if (context->authenticated && !task->mounts) {

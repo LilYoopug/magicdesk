@@ -145,7 +145,10 @@ loss after offering the reply retires possibly delivered records without replay.
 The worker owns completion, with no resource turn held across client delivery.
 Peer credentials and all supplementary groups return as mapped bytes, without
 a temporary identity FD. Full-table ordinary/protected callers retain short-buffer
-and output-fault semantics; external endpoints retain native credentials.
+and output-fault semantics. Connection and explicit-message snapshots retain
+namespace-relative process numbers after sender reaping. External endpoints
+retain native UID/GID authority; incoming PIDs are mapped into the receiver's
+namespace, with zero for an invisible process.
 Directory seeks use the same captured-description path, retaining the shared
 kernel position across dup and descriptor-number replacement without a guest
 RPC socket or a free guest FD slot. Task-affine directory enumeration uses mapped

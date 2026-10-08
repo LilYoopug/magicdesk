@@ -3,8 +3,26 @@
 #include "ipc_credentials.h"
 #include "fs_rpc.h"
 #include "raw.h"
+#include "pid_calls.h"
 #include <errno.h>
 #include <sys/socket.h>
+
+static long native_peer(const unsigned long *a) {
+    if ((int)a[2]!=SO_PEERCRED) return md_raw(SYS_getsockopt,a[0],a[1],a[2],a[3],a[4],0);
+    struct ucred peer; unsigned size=sizeof(peer);
+    long result=RAW5(getsockopt,a[0],SOL_SOCKET,SO_PEERCRED,&peer,&size);
+    if (result) return result;
+    unsigned capacity=0;
+    result=md_read_memory(&capacity,(void *)a[4],sizeof(capacity));
+    if (result) return result;
+    if ((int)capacity<0) return -EINVAL;
+    long pid=md_pid_visible(peer.pid);
+    if (pid<0 && peer.pid>=0) return pid;
+    peer.pid=(pid_t)pid;
+    if (size>capacity) size=capacity;
+    result=md_write_memory((void *)a[3],&peer,size);
+    return result ? result : md_write_memory((void *)a[4],&size,sizeof(size));
+}
 
 long md_socket_identity_call(const struct md_fs *fs, unsigned operation, int fd, int second,
         long result, const struct sockaddr_un *name, unsigned length) {
@@ -67,6 +85,6 @@ long md_socket_identity_option(const struct md_fs *fs, const unsigned long *a) {
     long r=md_fs_call_deliver(fs->endpoint,5000,&q,&out,peer_deliver,(void *)a);
     if (!r) r=out.result.error;
     if (r==-ENODATA || r==-ENOTSUP || r==-EAFNOSUPPORT || r==-EPROTOTYPE)
-        return md_raw(SYS_getsockopt, a[0], a[1], a[2], a[3], a[4], 0);
+        return native_peer(a);
     return r;
 }

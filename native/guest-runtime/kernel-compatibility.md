@@ -161,7 +161,13 @@ Production annotated return uses the existing mapped kernel receipt and
 SCM_RIGHTS, including O_PATH, without proc-table capture or ADDFD_SETFD. Filtered
 input capture reuses table-owned channels and atomic ADDFD_SEND only for channel
 admission. The exact gettid notification gate still evaluates application
-filters. None of these operations adds a post-5.15 dependency.
+filters. Mapped export-channel admission, direct ADDFD results and private-helper
+admissions use the same gettid mechanism rather than depending on application
+prctl policy. A protected PID-namespace fixture denies prctl and verifies cold
+metadata export, a returned mount-table FD and bidirectional native-peer
+credentials. Unix PID snapshots use the existing logical process identities and
+SCM transport; no kernel PID namespace or newer credential API is required.
+None of these operations adds a post-5.15 dependency.
 Filtered socket waits use ppoll, epoll and the existing ptrace signal-mask and
 syscall-register interfaces. Native WAITALL/batch jobs use pthreads, eventfd and
 a supervisor-local signal with an ARM64 syscall-entry cancellation gate. These

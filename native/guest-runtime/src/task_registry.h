@@ -16,6 +16,7 @@ struct md_task_snapshot {
     struct md_fd_origins *files;
     struct md_fs_anchor *cwd;
     struct md_pid_identity *pid;
+    struct md_pid_identity *pid_group;
 };
 struct md_task_registry *md_task_registry_create(void);
 void md_task_registry_destroy(struct md_task_registry *);

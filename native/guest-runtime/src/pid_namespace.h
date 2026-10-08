@@ -1,11 +1,18 @@
 #ifndef MD_PID_NAMESPACE_H
 #define MD_PID_NAMESPACE_H
 #include "user_namespace.h"
+#include <stddef.h>
 #include <sys/types.h>
 
 struct md_pid_namespace;
 struct md_pid_identity;
 struct md_identity;
+enum { MD_PID_LEVELS=32 };
+struct md_pid_number_value { uint64_t namespace; int32_t number; uint32_t reserved; };
+/* Immutable connection/message-time numbers, independent of later reaping or
+ * native PID reuse. No process reference is needed after capture. */
+unsigned md_pid_identity_export(const struct md_pid_identity *, struct md_pid_number_value *);
+int md_pid_numbers_visible(const void *, size_t, const struct md_pid_namespace *, pid_t native);
 /* NULL is the executor's native PID namespace. Child namespaces and their
  * identities are launch-owned; references never confer host signal authority. */
 struct md_pid_namespace *md_pid_namespace_new(struct md_pid_namespace *, struct md_user_namespace *);

@@ -114,7 +114,7 @@ static int credentials(struct md_ipc_origin_request *r, struct md_ipc_credential
         .offset=r->options.claimed.pid,
         .attributes={.uid=r->options.claimed.uid,.gid=r->options.claimed.gid}};
     struct md_fs_result result;
-    md_ipc_credentials_execute(authority,&r->task.task.identity,&q,&result,NULL);
+    md_ipc_credentials_execute(authority,&r->task.task.identity,r->task.task.pid_group,&q,&result,NULL);
     if (result.error) return result.error;
     if (result.fd<0) return -EPROTO;
     int error=0;
