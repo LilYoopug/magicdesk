@@ -3,6 +3,7 @@
 #include "file_calls.h"
 #include "namespace.h"
 #include "socket_calls.h"
+#include "network_calls.h"
 #include "socket_ancillary.h"
 #include "raw.h"
 #include "interception.h"
@@ -22,6 +23,7 @@
 #include <sys/prctl.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/ioctl.h>
 #include <sys/utsname.h>
 
 extern struct md_export_reply md_guest_export_control(unsigned, uint64_t, unsigned, unsigned, int);
@@ -84,6 +86,8 @@ static long dispatch_files(const struct md_fs *fs, long nr, unsigned long a0, un
     if (nr==SYS_unshare || nr==SYS_clone || nr==SYS_setns) return md_pid_filter_install();
     if (nr==SYS_kill && (int)a0<=0) return md_pid_signal_group((int)a0,(int)a1);
     if (nr==SYS_pidfd_send_signal) return md_pidfd_signal(args);
+    if (nr==SYS_ioctl && ((unsigned)a1==TIOCGPGRP || (unsigned)a1==TIOCSPGRP || (unsigned)a1==TIOCGSID))
+        return md_pid_terminal(args);
     if (nr==SYS_read || nr==SYS_write || nr==SYS_readv || nr==SYS_writev
             || nr==SYS_pread64 || nr==SYS_pwrite64 || nr==SYS_preadv || nr==SYS_pwritev
             || nr==SYS_preadv2 || nr==SYS_pwritev2 || nr==SYS_lseek || nr==SYS_ioctl) {
@@ -135,7 +139,25 @@ __attribute__((noinline)) static long dispatch_scoped(long nr, unsigned long a0,
 }
 long md_guest_dispatch(long nr, unsigned long a0, unsigned long a1, unsigned long a2,
         unsigned long a3, unsigned long a4, unsigned long a5, unsigned scoped) {
-    return scoped ? dispatch_scoped(nr,a0,a1,a2,a3,a4,a5)
+    if (scoped&MD_DISPATCH_NETWORK_CONTROL) {
+        unsigned long args[]={a0,a1,a2,a3,a4,a5};
+        return md_network_call(nr,args);
+    }
+    if ((scoped&MD_DISPATCH_OFFLINE) && nr==SYS_socket) {
+        unsigned long args[]={a0,a1,a2,a3,a4,a5};
+        return md_network_open(args);
+    }
+    if (scoped&MD_DISPATCH_OFFLINE_SOCKET) {
+        unsigned long args[]={a0,a1,a2,a3,a4,a5};
+        long error=md_socket_offline_error(nr,args);
+        if (error) return error;
+    }
+    if ((scoped&MD_DISPATCH_OFFLINE) && nr==SYS_socketpair) {
+        struct md_fs fs=md_files; fs.managed_paths=!!(scoped&MD_DISPATCH_PATHS);
+        unsigned long args[]={a0,a1,a2,a3,a4,a5};
+        return md_socket_pair(&fs,args,1);
+    }
+    return (scoped&MD_DISPATCH_PATHS) ? dispatch_scoped(nr,a0,a1,a2,a3,a4,a5)
         : dispatch_files(&md_files,nr,a0,a1,a2,a3,a4,a5);
 }
 static const struct md_interception_abi abi = {

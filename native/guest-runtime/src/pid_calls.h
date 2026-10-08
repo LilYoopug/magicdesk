@@ -18,4 +18,5 @@ static inline long md_pid_native(int visible) {
 }
 long md_pid_signal_group(int selector,int signal);
 long md_pidfd_signal(const unsigned long *);
+long md_pid_terminal(const unsigned long *);
 #endif

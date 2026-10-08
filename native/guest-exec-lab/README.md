@@ -4,6 +4,26 @@ Opt-in development tools and reference fixtures for
 [`native/guest-runtime`](../guest-runtime/README.md). Runtime sources live only in
 that native component; this directory is not packaged into the APK.
 
+## Namespace Clients
+
+`test_resources.py BUILD --case mount-namespace` includes offline network
+namespace identity/authority, inherited IPC, private devpts membership and
+controlling terminals, logical cgroup membership/readonly policy and native
+anonymous-memfd statx. The remaining mount/user/PID/UTS/IPC cases run unchanged.
+
+`test_glycin_runtime.py BUILD STORE --library libglycin-2.so.0` invokes the real
+distribution loader with Bubblewrap and its original seccomp filter. It asserts
+the decoded RGB pixels, not just process startup. The explicit
+`--fixture-deb PATH` option extracts additional packages only into the selected
+disposable test store; `--trace` retains diagnostics and strace output. It must
+not be used against a user's installed environment. Glycin 1.2.1's ARM64 filter
+can reject the libc uname call used for SVE detection; Glycin 2.x includes the
+upstream correction. Selecting a newer loader does not disable sandboxing.
+
+`browser/test_browser.py --build BUILD --store STORE` checks stock Chromium's
+sandbox-enabled user/PID route and JavaScript execution. These application
+checks do not certify kernel-equivalent confinement or Docker Engine support.
+
 ## Named Environment Workflows
 
 `test_environment_workflows.py --tag NAME --stage all` installs fresh public

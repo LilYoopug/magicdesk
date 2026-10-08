@@ -105,6 +105,8 @@ void md_view_mount_forget(struct md_fs_mounts *tree, struct md_view_mount *mount
     md_mount_policy_close(&mount->policy);
     md_inode_lifetime_release(mount->storage);
     md_pid_namespace_release(mount->pid_namespace);
+    md_devpts_release(mount->devpts);
+    md_cgroup_release(mount->cgroup);
     if (mount->source>=0) close(mount->source);
     if (mount->target>=0) close(mount->target);
     *mount=(struct md_view_mount){.source=-1,.target=-1,.detached=1,.generation=mount->generation};
@@ -121,6 +123,8 @@ void md_mount_namespace_release(struct md_mount_namespace *n) {
             md_mount_policy_close(&m->mounts[i].policy);
             md_inode_lifetime_release(m->mounts[i].storage);
             md_pid_namespace_release(m->mounts[i].pid_namespace);
+            md_devpts_release(m->mounts[i].devpts);
+            md_cgroup_release(m->mounts[i].cgroup);
             if (m->mounts[i].source>=0) close(m->mounts[i].source);
             if (m->mounts[i].target>=0) close(m->mounts[i].target);
         }

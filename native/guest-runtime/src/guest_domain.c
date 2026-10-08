@@ -293,7 +293,7 @@ int md_domain_native_call(long nr, const unsigned long a[6]) {
     MD_DOMAIN_KERNEL_CALLS(NATIVE_CASE)
     MD_DOMAIN_FD_CALLS(NATIVE_CASE)
 #undef NATIVE_CASE
-    case SYS_lseek: case SYS_getdents64: case SYS_socketpair:
+    case SYS_lseek: case SYS_getdents64: case SYS_socketpair: case SYS_pipe2:
     case SYS_mmap: case SYS_munmap: case SYS_mremap: case SYS_mprotect:
     /* Keep the original wait4 stop for the guest-debugger adapter. Restricted
      * filesystem roots do not remove the caller's kernel child relationship. */

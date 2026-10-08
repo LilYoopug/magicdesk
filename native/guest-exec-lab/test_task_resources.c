@@ -14,6 +14,7 @@
 void test_fd_origins(void);
 void test_ofd_order(void);
 void test_user_namespace(void);
+void test_descriptor_inode(void);
 static int descriptors(void) {
     DIR *dir = opendir("/proc/self/fd"); assert(dir);
     int count = 0;
@@ -172,9 +173,32 @@ static void pid_resource_transaction(void) {
     assert(!md_resources_release(&child));
     md_identity_release(&identity);
 }
+static void network_resource_transaction(void) {
+    struct md_task_resources owner, child;
+    struct md_identity identity=md_identity_new(0,0);
+    struct md_resource_change change;
+    assert(!md_resources_init(&owner,NULL));
+    assert(md_resources_clone_supported(CLONE_NEWNET));
+    assert(!md_network_namespace_offline(owner.network));
+    assert(!md_resources_fork(&owner,0,&child) && child.network==owner.network);
+    assert(!md_resources_unshare_prepare(&owner,CLONE_NEWNET,&identity,&change));
+    assert(change.next.network && md_network_namespace_offline(change.next.network));
+    assert(!md_resources_unshare_finish(&owner,NULL,&change,-EINVAL));
+    assert(child.network==owner.network && !change.next.network);
+    assert(!md_resources_unshare_prepare(&owner,CLONE_NEWNET,&identity,&change));
+    assert(!md_resources_unshare_finish(&owner,NULL,&change,0));
+    assert(owner.network!=child.network && md_network_namespace_offline(owner.network));
+    assert(md_network_namespace_inode(owner.network)!=md_network_namespace_inode(child.network));
+    struct md_fd_object *socket=md_network_socket_new(owner.network); assert(socket);
+    assert(!md_resources_exec(&owner) && md_network_socket_offline(socket));
+    assert(!md_resources_release(&owner));
+    assert(md_network_socket_offline(socket)); md_fd_object_release(socket);
+    assert(!md_network_namespace_offline(child.network));
+    assert(!md_resources_release(&child)); md_identity_release(&identity);
+}
 int main(void) {
     alarm(60);
-    unsigned long spaces[] = {CLONE_NEWNET, CLONE_NEWCGROUP};
+    unsigned long spaces[] = {CLONE_NEWCGROUP};
     struct md_identity identity=md_identity_new(0,0);
     struct md_task_resources r; assert(!md_resources_init(&r,NULL));
     for (unsigned i = 0; i < sizeof(spaces)/sizeof(*spaces); i++) {
@@ -214,10 +238,12 @@ int main(void) {
     for (unsigned i = 0; i < 100; i++) pending_root_relocation();
     nonleader_root();
     pid_resource_transaction();
+    network_resource_transaction();
     assert(descriptors() == before);
     test_fd_origins();
     test_ofd_order();
     test_user_namespace();
+    test_descriptor_inode();
     puts("PASS resource ownership, transactional unshare, retained roots and descriptor lifetime");
     alarm(0);
     return 0;

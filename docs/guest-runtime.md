@@ -606,13 +606,18 @@ Its identity includes the mount and
 backend object, preserving native readonly policy. Existing cwd/descriptors remain
 usable, so chroot alone is not confinement. Guest mount views support local
 bind/move/remount, unmount and initial/attached-root pivot operations, with
-user, mount, PID, UTS and SysV IPC namespace owners. PID namespaces select
+user, mount, PID, UTS, SysV IPC and offline network namespace owners. PID namespaces select
 process/thread IDs, child admission, wait/signal translation and mounted proc
 views through retained process resources. PID 1 adopts orphaned children and
 closes namespace admission when its last thread exits. Namespace-aware proc
 mounts and explicit native `/dev` binds can prepare a new root without host
-mount privileges. Arbitrary unattached native roots and network namespaces
-remain unsupported. See the
+mount privileges. New network namespaces expose a logical loopback control plane,
+not Android interfaces or external connectivity. Anonymous Unix socketpairs and
+inherited descriptors retain their IO authority. Private devpts views expose only
+their allocated terminals, with native terminal IO and caller-owned controlling
+sessions. Launch-local cgroup2 membership and permissive cgroup v1 devices views
+do not enforce resource limits or modify Android cgroups. Arbitrary unattached
+native roots remain unsupported. See the
 [process resource contract](../native/guest-runtime/process-resources.md).
 
 `inode_metadata` enforces directory search, file access, ownership changes,

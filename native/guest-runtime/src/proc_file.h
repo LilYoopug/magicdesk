@@ -3,6 +3,7 @@
 #include "guest_identity.h"
 #include "fd_object.h"
 #include "resource_order.h"
+#include "control_file.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -11,8 +12,21 @@ enum md_proc_file_kind { MD_PROC_FILE_UID_MAP, MD_PROC_FILE_GID_MAP, MD_PROC_FIL
     MD_PROC_FILE_OSRELEASE, MD_PROC_FILE_VERSION,
     MD_PROC_FILE_OVERFLOWUID, MD_PROC_FILE_OVERFLOWGID,
     MD_PROC_FILE_NS_USER, MD_PROC_FILE_NS_MOUNT, MD_PROC_FILE_NS_UTS, MD_PROC_FILE_NS_IPC,
-    MD_PROC_FILE_NS_PID, MD_PROC_FILE_NS_PID_CHILDREN,
-    MD_PROC_FILE_NS_DIRECTORY, MD_PROC_FILE_PROCESS_DIRECTORY, MD_PROC_FILE_STATUS, MD_PROC_FILE_STAT };
+    MD_PROC_FILE_NS_PID, MD_PROC_FILE_NS_PID_CHILDREN, MD_PROC_FILE_NS_NETWORK,
+    MD_PROC_FILE_NS_DIRECTORY, MD_PROC_FILE_PROCESS_DIRECTORY, MD_PROC_FILE_STATUS, MD_PROC_FILE_STAT,
+    MD_PROC_FILE_CGROUP, MD_PROC_FILE_CGROUPS,
+    MD_PROC_FILE_CONTROL };
+struct md_proc_file;
+struct md_cgroup_member;
+void md_proc_file_cgroup(struct md_proc_file *,struct md_cgroup_member *);
+static inline int md_proc_file_cgroup_kind(enum md_proc_file_kind kind) {
+    return kind==MD_PROC_FILE_CGROUP || kind==MD_PROC_FILE_CGROUPS;
+}
+int md_proc_file_control_access(const struct md_proc_file *,const struct md_identity *,unsigned);
+struct md_proc_file *md_proc_file_open_control(const struct md_control_file_ops *,void *,
+    const struct md_identity *,int flags);
+int md_proc_file_control_stat(const struct md_proc_file *,struct stat *);
+unsigned long md_proc_file_filesystem(const struct md_proc_file *);
 static inline int md_proc_file_process(enum md_proc_file_kind kind) {
     return kind==MD_PROC_FILE_STATUS || kind==MD_PROC_FILE_STAT;
 }
@@ -30,7 +44,7 @@ static inline int md_proc_file_sysctl(enum md_proc_file_kind kind) {
 struct md_proc_file;
 struct md_namespace_reference;
 static inline int md_proc_file_namespace(enum md_proc_file_kind kind) {
-    return kind>=MD_PROC_FILE_NS_USER && kind<=MD_PROC_FILE_NS_PID_CHILDREN;
+    return kind>=MD_PROC_FILE_NS_USER && kind<=MD_PROC_FILE_NS_NETWORK;
 }
 static inline const char *md_proc_file_namespace_name(enum md_proc_file_kind kind) {
     switch (kind) {
@@ -39,6 +53,7 @@ static inline const char *md_proc_file_namespace_name(enum md_proc_file_kind kin
     case MD_PROC_FILE_NS_UTS: return "uts";
     case MD_PROC_FILE_NS_IPC: return "ipc";
     case MD_PROC_FILE_NS_PID: case MD_PROC_FILE_NS_PID_CHILDREN: return "pid";
+    case MD_PROC_FILE_NS_NETWORK: return "net";
     default: return NULL;
     }
 }
@@ -82,6 +97,7 @@ struct md_proc_file_io {
     int64_t offset, next_position;
     size_t length;
     long result;
+    struct md_control_actor actor;
 };
 /* Caller owns zero-initialized operation storage until finish/cancel. The turn
  * pins the open description, never a descriptor number or a task lifetime. */

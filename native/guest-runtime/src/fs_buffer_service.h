@@ -3,6 +3,7 @@
 #include "interception_buffers.h"
 #include "resource_order.h"
 #include "file_open.h"
+#include "control_file.h"
 #include <sys/types.h>
 struct md_fs_worker;
 struct md_task_registry;
@@ -10,14 +11,17 @@ struct md_guest_domain;
 struct md_fs_buffer_service;
 struct md_fs_buffer_request;
 struct md_fs_anchor;
+struct md_fd_object;
 struct md_fs_task_capture;
 struct md_fs_buffer_open {
     int fd; unsigned flags, task_path; struct md_fs_anchor *origin;
+    struct md_fd_object *object;
     struct md_open_completion completion;
 };
 /* Transfer the completed result lease to its receiving task; no guest FD yet. */
 int md_fs_buffer_open_take(struct md_fs_buffer_request *, struct md_fs_buffer_open *);
 void md_fs_buffer_open_release(struct md_fs_buffer_open *);
+struct md_fd_object *md_fs_buffer_open_object(const struct md_fs_buffer_open *);
 /* A successful watch/directory read retains its request through copy
  * acknowledgement. Only directory reads retain their exact OFD turn;
  * no filesystem or file-table turn is held across copying. */
@@ -38,6 +42,10 @@ int md_fs_buffer_capture_target(const struct md_fs_buffer_request *, struct md_f
 int md_fs_buffer_capture_finish(struct md_fs_buffer_request *, int descriptor, int error);
 struct md_fs_buffer_service *md_fs_buffer_service_new(struct md_fs_worker *, struct md_task_registry *,
         struct md_resource_wakeup *, void (*complete)(struct md_fs_buffer_request *, pid_t, int));
+/* Configure before accepting work. The descriptor host owns the common IO
+ * implementation; filesystem providers only supply control-file semantics. */
+typedef struct md_fd_object *(*md_control_factory)(const struct md_control_file_ops *,void *,const struct md_identity *,int);
+void md_fs_buffer_control_factory(struct md_fs_buffer_service *,md_control_factory);
 /* Cancel requests and reap owned children, then stop/join the worker before
  * destroy. Records retain buffers independently of a dead/replaced task. */
 void md_fs_buffer_service_destroy(struct md_fs_buffer_service *);

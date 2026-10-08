@@ -181,6 +181,17 @@ export splits into existing 253-right packets. `--case fd-observation` checks
 protected callers, source-table replacement, quotas, filter denial and partial
 export cancellation. It adds no post-5.15 requirement or startup probe.
 
+Offline network namespaces, private devpts views and permissive cgroups require
+no post-5.15 interface or host namespace/cgroup privilege. Their owners use the
+existing resource transactions, socketpair/SCM_RIGHTS, native PTY ioctls and
+mapped control-file transport. Native terminal permission denials remain errors.
+Anonymous-pipe metadata carriers use O_TMPFILE and OFD locks, also within the
+baseline; no reader/writer endpoint is retained. `--case mount-namespace`,
+`--case origin-transfer`, `test_descriptor_metadata.py`, stock sandbox-enabled
+Chromium and `test_glycin_runtime.py` cover these paths under shell identity.
+Native statx may return mount ID zero for anonymous objects; the adapter retains
+that result instead of treating it as a failed mount lookup.
+
 ## Newer Interfaces
 
 Every owned dependency newer than 5.15 belongs here, including optional

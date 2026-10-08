@@ -1129,12 +1129,82 @@ gate. If a task loses an unobserved noexec mapping result, surviving CLONE_VM
 users receive EIO for subsequent executable mprotect rather than permission
 based on an assumed rollback. A fresh exec owns a fresh address space.
 
+## Offline Network Namespaces
+
+`network_namespace` owns a retained namespace identity and user-namespace
+authority. Clone, unshare, setns and typed `/proc/PID/ns/net` handles use the same
+resource transaction as the other namespace kinds. A new namespace is offline;
+it never silently falls back to Android networking. Existing sockets retain
+their original authority. Anonymous Unix socketpairs remain kernel IPC, with
+namespace annotations retained through descriptor-table operations.
+
+`network_calls` supplies bounded control requests through the existing mapped
+transport. New datagram control sockets and NETLINK_ROUTE expose only `lo`:
+interface index/name/flags/MTU queries and CAP_NET_ADMIN-authorized loopback
+address/up requests. Netlink replies use a native nonblocking queue for readiness;
+no interface mutation reaches Android. A failed reply publication does not
+commit a loopback change. Namespace changes need no per-data-IO polling or new
+service thread.
+
+New stream/addressed sockets, routes, interface dumps, multicast subscriptions,
+bridge/veth, external connectivity and port publication are not implemented.
+Unsupported requests return explicit errors. The control plane is not a TCP/IP
+stack: reporting loopback up does not provide loopback packet transport.
+Inherited network descriptions and native proc/sys network views remain outside
+this separation. Passing an offline typed socket to an independent supervisor
+is unsupported, rather than silently losing its namespace annotation.
+
+## Private Terminal Views
+
+`devpts_view` owns each mounted devpts directory and its logical uid/gid/mode
+policy. Only terminals allocated through that instance's ptmx are resolved or
+listed. Bind aliases and copied mount views retain the instance. Kernel slave
+identity, not just its number, guards against index reuse. Closed terminals
+disappear from directory results; the view retains no master/slave data FD.
+
+Data, termios, readiness, EOF and terminal sessions remain kernel operations.
+A slave open that may acquire a controlling terminal returns a deferred O_PATH
+pin. The opening guest task completes the open through the existing captured
+path and descriptor-publication turn; the filesystem worker cannot acquire the
+terminal on its behalf. PID namespace terminal group/session ioctls translate
+through the common PID owner; native permission errors are preserved.
+
+This is a private name/membership view over native PTYs, not a kernel devpts
+mount or a separate index allocator. It does not hide already inherited terminal
+descriptions or explicit native `/dev` attachments. TIOCGPTPEER-created slave
+descriptors currently retain native metadata rather than mounted-view
+provenance. Cross-supervisor mount export fails explicitly for private devpts.
+
+## Permissive Cgroups
+
+`cgroup` owns a launch-local world with a cgroup2 hierarchy and a cgroup v1
+`devices` hierarchy. Tasks retain membership independently of mount views;
+fork inherits it, exec preserves it, exit removes live membership. Proc cgroup
+files and control-file PID lists use the caller's PID namespace. Mounting the
+same hierarchy again retains its existing state.
+
+`fs_cgroup` supplies directory operations and typed `control_file` objects.
+The shared proc-control transport owns descriptor identity, IO ordering,
+dup/fork/SCM_RIGHTS, shared offsets and reopen behavior. Live readonly mount
+policy is enforced even through an already opened control. No cgroup data-file
+daemon or periodic task scan is involved. Removal rejects populated groups and
+releases backing directory descriptors; retired logical metadata remains until
+the launch world is released, allowing open controls to return ENODEV.
+
+The v2 controller list is empty; membership, events and domain type are real
+logical state, but CPU/memory/IO limits and freezing are not enforced. The v1
+devices list is always `a *:* rwm`; all-device allowance is accepted, restrictive
+rules are rejected. Unsupported controller enabling, freezes and release agents
+return EOPNOTSUPP. This interface never accesses Android's cgroup hierarchy or
+claims that a resource/security limit was installed. Cgroup namespaces,
+delegation and independent-supervisor hierarchy transfer are not implemented.
+
 ## Boundaries
 
 Concurrent named environments and launch-local attachments are not kernel Linux
 namespaces. Guest `CLONE_NEWNS`, `CLONE_NEWUSER`, `CLONE_NEWIPC`,
-`CLONE_NEWUTS` and `CLONE_NEWPID` have the contracts above. `CLONE_NEWNET`,
-cgroup/time namespaces are not implemented. Their creation is not reported as
+`CLONE_NEWUTS`, `CLONE_NEWPID` and `CLONE_NEWNET` have the contracts above.
+Cgroup/time namespaces are not implemented. Their creation is not reported as
 successful. POSIX message-queue namespaces and UTS sysctl priority-change
 notification are not implemented. They must not be inferred from SysV separation
 or live sysctl reads. Tmpfs quotas remain open; unsupported
@@ -1142,8 +1212,7 @@ options fail explicitly. Saved overlay credentials do not establish
 kernel-equivalent confinement for unadapted native access.
 
 Proc mounts are selected process views, not a complete virtual kernel procfs.
-Foreign `/proc/PID/mem`, signalfd sender translation and a private devpts instance
-remain outside this contract.
+Foreign `/proc/PID/mem` and signalfd sender translation remain outside this contract.
 Inherited native proc descriptors retain their original view. Internal helper
 threads are filtered in a logical PID proc mount, not in Android's native procfs.
 Guest ptrace limitations are recorded in [debugging](debugging.md).

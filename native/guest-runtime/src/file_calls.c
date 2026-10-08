@@ -3,6 +3,7 @@
 #include "namespace.h"
 #include "proc_paths.h"
 #include "proc_control.h"
+#include "descriptor_calls.h"
 #include "raw.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -59,7 +60,7 @@ static long open_extended(const struct md_fs *fs, const char *exe, const unsigne
         if (md_proc_control_kind(kind)) {
             if (*ref.tail) return -ENOTDIR;
             if (kind==MD_PROC_NS_UNSUPPORTED) return -ENOENT;
-            if (kind>=MD_PROC_NS_USER && kind<=MD_PROC_NS_IPC
+            if (kind>=MD_PROC_NS_USER && kind<=MD_PROC_NS_NETWORK
                     && (how.resolve&(RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS))) return -ELOOP;
             /* Validate the same parent walk, without requiring host userns
              * support or permission to access Android's unrelated sysctl. */
@@ -110,6 +111,7 @@ static long path_at(const struct md_fs *fs, const char *exe, int fd,
 }
 
 long md_file_call(const struct md_fs *fs, const char *exe, long nr, const unsigned long *a) {
+    if (nr==SYS_pipe2) return md_descriptor_pair(nr,a);
     if (nr == SYS_openat2) return open_extended(fs, exe, a);
     int descriptor=nr==SYS_fstat || nr==SYS_fstatfs || nr==SYS_fchown || nr==SYS_fchmod
         || nr==SYS_getdents64 || nr==SYS_fchdir || (nr==SYS_utimensat && !a[1]);
@@ -123,8 +125,9 @@ long md_file_call(const struct md_fs *fs, const char *exe, long nr, const unsign
         }
     }
     if (descriptor) {
-        long known=md_proc_control_known((int)a[0]);
+        long known=md_descriptor_kind((int)a[0]);
         if (known<0) return known;
+        if (known==MD_DESCRIPTOR_ANONYMOUS) return md_descriptor_metadata((int)a[0],nr,a);
         if (known) return nr==SYS_getdents64 ? md_proc_control_call(nr,a)
             : md_proc_control_metadata((int)RAW0(gettid),MD_PROC_NONE,(int)a[0],nr,a);
     }

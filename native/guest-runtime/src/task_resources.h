@@ -8,6 +8,8 @@
 #include "ipc_namespace.h"
 #include "guest_identity.h"
 #include "pid_namespace.h"
+#include "network_namespace.h"
+#include "cgroup.h"
 
 /* Linux owns the real FD table, cwd/umask and open descriptions. Optional path
  * annotations share their lifetimes without retaining data descriptions. */
@@ -21,6 +23,8 @@ struct md_task_resources {
     struct md_pid_identity *pid;
     struct md_pid_identity *pid_group;
     struct md_pid_namespace *pid_children;
+    struct md_network_namespace *network;
+    struct md_cgroup_member *cgroup;
 };
 struct md_resource_change {
     struct md_task_resources next;

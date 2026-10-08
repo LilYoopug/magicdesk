@@ -14,8 +14,9 @@ def bind(lib, name, result, *arguments):
 
 
 def main():
-    gio, gly, glib, obj = (c.CDLL(name) for name in
-                          ('libgio-2.0.so.0', 'libglycin-1.so.0', 'libglib-2.0.so.0', 'libgobject-2.0.so.0'))
+    gio, glib, obj = (c.CDLL(name) for name in
+                     ('libgio-2.0.so.0', 'libglib-2.0.so.0', 'libgobject-2.0.so.0'))
+    gly = c.CDLL(os.environ.get('GLYCIN_LIBRARY', 'libglycin-1.so.0'))
     pointer = c.c_void_p
     file_new = bind(gio, 'g_file_new_for_path', pointer, c.c_char_p)
     loader_new = bind(gly, 'gly_loader_new', pointer, pointer)

@@ -2,9 +2,10 @@
 #define MD_FILE_OPEN_H
 #include <fcntl.h>
 
-/* A FIFO pin is an authorized O_PATH descriptor, not an opened pipe endpoint.
- * Complete it in the calling task, outside the namespace worker/transaction. */
-enum md_open_kind { MD_OPEN_READY, MD_OPEN_FIFO, MD_OPEN_PIPE };
+/* A deferred pin is an authorized O_PATH descriptor, not a data endpoint.
+ * FIFO rendezvous and terminal acquisition finish outside the filesystem
+ * worker; MD_OPEN_CALLER preserves the opening task's session semantics. */
+enum md_open_kind { MD_OPEN_READY, MD_OPEN_FIFO, MD_OPEN_PIPE, MD_OPEN_CALLER };
 struct md_open_completion {
     enum md_open_kind kind;
     /* Owned only for MD_OPEN_PIPE; a regular-file rendezvous mapping. */

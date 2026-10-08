@@ -3,7 +3,7 @@
 import argparse
 from pathlib import Path
 
-from test_oci_services import Suite
+from test_oci_services import Suite, Server
 
 
 def main():
@@ -11,6 +11,9 @@ def main():
     parser.add_argument('build', type=Path)
     parser.add_argument('store')
     parser.add_argument('--trace', action='store_true')
+    parser.add_argument('--library', default='libglycin-1.so.0')
+    parser.add_argument('--fixture-deb', type=Path, action='append', default=[],
+                        help='Extract unmodified distribution binaries into this dedicated test store')
     args = parser.parse_args()
     suite = Suite(args.build, args.build)
     suite.report['store'] = args.store
@@ -19,12 +22,30 @@ def main():
         suite.transport.upload(suite.client, source, suite.base + '/loader.py')
         target = '/tmp/md-glycin-' + suite.report['id']
         base = [suite.runner, '--store', args.store, '--user', '2000:2000']
+        if args.trace:
+            base += ['--diagnostics']
         suite.command(base + ['--', '/bin/mkdir', target])
         prefix = base + ['--bind-ro', suite.base, target, '--deadline-seconds', '60', '--']
+        suite.report['fixturePackages'] = []
+        for index, package in enumerate(args.fixture_deb):
+            name = 'fixture-' + str(index) + '.deb'
+            suite.transport.upload(suite.client, package, suite.base + '/' + name)
+            setup = [suite.runner, '--store', args.store, '--user', '0:0', '--bind-ro', suite.base, target,
+                     '--deadline-seconds', '60', '--', '/usr/bin/dpkg-deb']
+            suite.report['fixturePackages'].append(suite.command(setup + ['-f', target + '/' + name]))
+            suite.command(setup + ['-x', target + '/' + name, '/'])
         suite.report['packages'] = suite.command(prefix + ['/usr/bin/dpkg-query', '-W', 'loupe', 'glycin-loaders', 'libglycin-1-0', 'bubblewrap'])
         trace = ['/usr/bin/strace', '-f', '-s', '160'] if args.trace else []
-        result = suite.command(prefix + trace + ['/usr/bin/env', 'RUST_LOG=glycin=debug', 'HOME=/tmp',
-                                                'python3', target + '/loader.py'], timeout=80)
+        command = prefix + trace + ['/usr/bin/env', 'RUST_LOG=glycin=debug', 'HOME=/tmp',
+                                    'GLYCIN_LIBRARY=' + args.library,
+                                    'python3', target + '/loader.py']
+        process = Server(suite, command)
+        try:
+            process.ready('PASS Glycin BWRAP decoded 2x1 RGB pixels', timeout=80)
+            process.completed()
+            result = ''.join(process.log)
+        finally:
+            process.close()
         assert 'PASS Glycin BWRAP decoded 2x1 RGB pixels' in result
         assert 'running without sandbox' not in result
         suite.report['passed'] = True

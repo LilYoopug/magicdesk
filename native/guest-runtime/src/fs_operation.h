@@ -7,6 +7,7 @@ enum { MD_FS_SOCKET_PIN=1 };
 #include "file_open.h"
 #include "fs_anchor.h"
 #include "ipc_identity.h"
+#include "control_file.h"
 
 enum md_fs_operation {
     MD_FS_CREATE = 1, MD_FS_OPEN, MD_FS_MKDIR, MD_FS_SYMLINK, MD_FS_READLINK,
@@ -24,7 +25,7 @@ enum md_fs_operation {
 };
 enum md_fs_mount_operation { MD_FS_MOUNT_BIND=1, MD_FS_MOUNT_REMOUNT,
     MD_FS_MOUNT_PROPAGATION, MD_FS_MOUNT_UMOUNT, MD_FS_MOUNT_TMPFS, MD_FS_MOUNT_OVERLAY, MD_FS_MOUNT_PIVOT,
-    MD_FS_MOUNT_MOVE, MD_FS_MOUNT_PROC };
+    MD_FS_MOUNT_MOVE, MD_FS_MOUNT_PROC, MD_FS_MOUNT_DEVPTS, MD_FS_MOUNT_CGROUP, MD_FS_MOUNT_CGROUP2 };
 enum { MD_FS_VALUE_MAX=65536, MD_FS_OUTPUT_MAX=MD_IPC_IDENTITY_MAX };
 enum md_fs_xattr { MD_FS_XATTR_GET=1, MD_FS_XATTR_SET, MD_FS_XATTR_LIST, MD_FS_XATTR_REMOVE };
 static inline int md_fs_operation_value(unsigned operation) {
@@ -115,6 +116,8 @@ struct md_fs_result {
     size_t size;
     int64_t position;
     struct md_fs_info info;
+    unsigned selectors;
+    unsigned requires_control;
 };
 /* Caller-owned output, independent of wire framing. Directory delivery runs
  * synchronously after the read transaction and before advancing the cursor.
@@ -133,5 +136,7 @@ struct md_fs_output {
     /* Optional owned path anchor from a successful file open/reopen. No origin
      * allocation occurs when omitted; caller releases a returned anchor. */
     struct md_fs_anchor **origin;
+    int (*control)(void *,const struct md_control_file_ops *,void *,const struct md_identity *,int);
+    void *control_context;
 };
 #endif

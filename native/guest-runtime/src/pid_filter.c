@@ -4,6 +4,7 @@
 #include <linux/filter.h>
 #include <linux/seccomp.h>
 #include <sys/prctl.h>
+#include <sys/ioctl.h>
 
 /* Installed only when a launch first uses a PID namespace. The runtime gate
  * retains native IDs for its own proc access and transport credentials. */
@@ -26,6 +27,13 @@ long md_pid_filter_install(void) {
         PROCESS(sched_getscheduler) PROCESS(sched_setscheduler) PROCESS(sched_getattr) PROCESS(sched_setattr)
         PROCESS(sched_rr_get_interval) PROCESS(get_robust_list) PROCESS(prlimit64)
         PROCESS(process_vm_readv) PROCESS(process_vm_writev) PROCESS(kcmp)
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_ioctl,0,6),
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[1])),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,TIOCGPGRP,2,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,TIOCSPGRP,1,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,TIOCGSID,0,1),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_PROCESS),
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
         BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_prctl,0,4),
         BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[0])),
         BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,PR_SET_CHILD_SUBREAPER,1,0),

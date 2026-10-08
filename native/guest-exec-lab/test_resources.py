@@ -57,6 +57,17 @@ def main():
         return value
 
     def check_namespaces():
+        check("native memfd metadata", root + "/libmagicdesk_guest_resource_guest.so native-metadata", "PASS native metadata:")
+        check("guest memfd metadata", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
+              + root + "/store --deadline-seconds 90 -- /bin/test native-metadata", "PASS native metadata:")
+        check("guest cgroup", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
+              + root + "/store --deadline-seconds 90 -- /bin/test cgroup", "PASS guest cgroup:")
+        check("guest PID-scoped cgroup", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
+              + root + "/store --deadline-seconds 90 -- /bin/test cgroup-pid", "PASS guest cgroup: PID namespace")
+        check("guest private devpts", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
+              + root + "/store --deadline-seconds 90 -- /bin/test devpts", "PASS guest devpts:")
+        check("guest PID-scoped devpts", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
+              + root + "/store --deadline-seconds 90 -- /bin/test devpts-pid", "PASS guest devpts: PID namespace")
         check("guest PID namespace lifecycle", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
               + root + "/store --deadline-seconds 90 -- /bin/test pid-namespace", "PASS guest PID namespaces:")
         check("guest namespace entry", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "

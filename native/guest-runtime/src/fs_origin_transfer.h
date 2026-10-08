@@ -13,6 +13,9 @@ enum { MD_FS_ORIGIN_MAX_RIGHTS=1+MD_FD_RECEIPT_MAX*(MD_INODE_CUSTODY_FDS+MD_MOUN
 struct md_fs_origin_parcel { unsigned count; int *fd; };
 void md_fs_origin_parcel_close(struct md_fs_origin_parcel *);
 int md_fs_origin_export(const struct md_fd_message *, struct md_fs_origin_parcel *);
+/* A typed custody envelope can select only the filesystem entries while
+ * preserving the authenticated route and original application indices. */
+int md_fs_origin_export_entries(const struct md_fd_message *, struct md_fd_object *const *, struct md_fs_origin_parcel *);
 
 /* One filesystem worker/store scope. Opens its own O_PATH reference relative
  * to the retained store directory, never duplicates its maintenance lock.

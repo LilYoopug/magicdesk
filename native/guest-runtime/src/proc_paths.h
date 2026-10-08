@@ -10,10 +10,11 @@ enum md_proc_kind { MD_PROC_NONE, MD_PROC_FD, MD_PROC_CWD, MD_PROC_ROOT, MD_PROC
                     MD_PROC_OSRELEASE, MD_PROC_VERSION,
                     MD_PROC_OVERFLOWUID, MD_PROC_OVERFLOWGID,
                     MD_PROC_NS_USER, MD_PROC_NS_MOUNT, MD_PROC_NS_UTS, MD_PROC_NS_IPC,
-                    MD_PROC_NS_PID, MD_PROC_NS_PID_CHILDREN,
+                    MD_PROC_NS_PID, MD_PROC_NS_PID_CHILDREN, MD_PROC_NS_NETWORK,
                     MD_PROC_NS_DIRECTORY,
                     MD_PROC_PROCESS_DIRECTORY,
                     MD_PROC_STATUS, MD_PROC_STAT,
+                    MD_PROC_CGROUP, MD_PROC_CGROUPS,
                     MD_PROC_NS_UNSUPPORTED };
 struct md_proc_path {
     enum md_proc_kind kind;

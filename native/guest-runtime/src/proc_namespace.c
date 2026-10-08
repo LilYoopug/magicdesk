@@ -15,6 +15,7 @@ struct md_namespace_reference md_namespace_reference_capture(enum md_namespace_k
     case MD_NAMESPACE_IPC: ref.value.ipc=md_ipc_namespace_retain(r->ipc); break;
     case MD_NAMESPACE_PID: ref.value.pid=md_pid_namespace_retain(md_pid_identity_namespace(r->pid)); break;
     case MD_NAMESPACE_PID_CHILDREN: ref.value.pid=md_pid_namespace_retain(r->pid_children); ref.kind=MD_NAMESPACE_PID; break;
+    case MD_NAMESPACE_NETWORK: ref.value.network=md_network_namespace_retain(r->network); break;
     }
     return ref;
 }
@@ -26,6 +27,7 @@ struct md_namespace_reference md_namespace_reference_copy(const struct md_namesp
     case MD_NAMESPACE_UTS: md_uts_namespace_retain(next.value.uts); break;
     case MD_NAMESPACE_IPC: md_ipc_namespace_retain(next.value.ipc); break;
     case MD_NAMESPACE_PID: case MD_NAMESPACE_PID_CHILDREN: md_pid_namespace_retain(next.value.pid); break;
+    case MD_NAMESPACE_NETWORK: md_network_namespace_retain(next.value.network); break;
     }
     return next;
 }
@@ -36,6 +38,7 @@ void md_namespace_reference_release(struct md_namespace_reference *ref) {
     case MD_NAMESPACE_UTS: md_uts_namespace_release(ref->value.uts); break;
     case MD_NAMESPACE_IPC: md_ipc_namespace_release(ref->value.ipc); break;
     case MD_NAMESPACE_PID: case MD_NAMESPACE_PID_CHILDREN: md_pid_namespace_release(ref->value.pid); break;
+    case MD_NAMESPACE_NETWORK: md_network_namespace_release(ref->value.network); break;
     }
     *ref=(struct md_namespace_reference){0};
 }
@@ -47,12 +50,13 @@ void md_namespace_reference_stat(const struct md_namespace_reference *ref, struc
     case MD_NAMESPACE_UTS: inode=md_uts_namespace_inode(ref->value.uts); break;
     case MD_NAMESPACE_IPC: inode=md_ipc_namespace_inode(ref->value.ipc); break;
     case MD_NAMESPACE_PID: case MD_NAMESPACE_PID_CHILDREN: inode=md_pid_namespace_inode(ref->value.pid); break;
+    case MD_NAMESPACE_NETWORK: inode=md_network_namespace_inode(ref->value.network); break;
     }
     *out=(struct stat){.st_dev=UINT32_C(0xfffe0000)+(unsigned)ref->kind,
         .st_ino=inode,.st_mode=S_IFREG|0444,.st_nlink=1,.st_blksize=getpagesize()};
 }
 unsigned long md_namespace_reference_type(const struct md_namespace_reference *ref) {
-    static const unsigned long types[]={CLONE_NEWUSER,CLONE_NEWNS,CLONE_NEWUTS,CLONE_NEWIPC,CLONE_NEWPID,CLONE_NEWPID};
+    static const unsigned long types[]={CLONE_NEWUSER,CLONE_NEWNS,CLONE_NEWUTS,CLONE_NEWIPC,CLONE_NEWPID,CLONE_NEWPID,CLONE_NEWNET};
     return types[ref->kind];
 }
 const struct md_user_namespace *md_namespace_reference_owner(const struct md_namespace_reference *ref) {
@@ -62,6 +66,7 @@ const struct md_user_namespace *md_namespace_reference_owner(const struct md_nam
     case MD_NAMESPACE_UTS: return md_uts_namespace_owner(ref->value.uts);
     case MD_NAMESPACE_IPC: return md_ipc_namespace_owner(ref->value.ipc);
     case MD_NAMESPACE_PID: case MD_NAMESPACE_PID_CHILDREN: return md_pid_namespace_owner(ref->value.pid);
+    case MD_NAMESPACE_NETWORK: return md_network_namespace_owner(ref->value.network);
     }
     return NULL;
 }

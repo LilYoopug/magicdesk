@@ -4,6 +4,7 @@
 #include "proc_control.h"
 #include "proc_file.h"
 #include "fd_metadata.h"
+#include "descriptor_calls.h"
 #include "interception.h"
 #include "fd_client.h"
 #include "fs_buffer.h"
@@ -22,7 +23,9 @@ long md_namespace_native_statx(const struct md_fs *fs, const unsigned long *args
     /* Publish ordinary mount IDs, never claim the kernel-global UNIQUE space. */
     long r=RAW5(statx,args[0],args[1],args[2],(args[3]&~(unsigned long)STATX_MNT_ID_UNIQUE)|STATX_MNT_ID,&st);
     if (r<0) return r;
-    if (st.stx_mask & STATX_MNT_ID) {
+    /* Anonymous kernel files can report MNT_ID with zero: they have no mount
+     * placement to translate. Preserve that result instead of rejecting stat. */
+    if ((st.stx_mask & STATX_MNT_ID) && st.stx_mnt_id) {
         struct md_fs_request q={.operation=MD_FS_NATIVE_MOUNT,.directory={-1,-1},.offset=(int64_t)st.stx_mnt_id};
         struct md_fs_response out;
         r=md_fs_call(fs->endpoint,5000,&q,&out);
@@ -221,8 +224,14 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
     int tail = ref.kind && *ref.tail;
     int native = !ref.kind || (!tail && link_operation(nr, a));
     if (!native && ref.kind==MD_PROC_FD && ref.process==(int)RAW0(gettid)) {
-        long known=md_proc_control_known(ref.descriptor);
+        long known=md_descriptor_kind(ref.descriptor);
         if (known<0) return known;
+        if (known==MD_DESCRIPTOR_ANONYMOUS) {
+            if (tail) return -ENOTDIR;
+            if (nr==SYS_openat) return md_namespace_proc_reopen(fs,ref.descriptor,(int)a[2]&~(O_CREAT|O_EXCL));
+            if (nr!=SYS_readlinkat) return md_descriptor_metadata(ref.descriptor,nr,a);
+            known=0;
+        }
         if (known) {
             if (tail) return -ENOTDIR;
             if (nr==SYS_openat) return md_proc_control_reopen(ref.process,ref.descriptor,(int)a[2]&~(O_CREAT|O_EXCL));

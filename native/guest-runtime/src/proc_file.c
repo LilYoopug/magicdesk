@@ -4,6 +4,7 @@
 #include "proc_namespace.h"
 #include "pid_namespace.h"
 #include "fd_selector.h"
+#include "cgroup.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -32,9 +33,14 @@ struct md_proc_file {
     struct md_pid_namespace *pid_view;
     char *content;
     size_t content_size;
+    const struct md_control_file_ops *control;
+    void *control_context;
+    struct md_cgroup_member *cgroup;
 };
 static void destroy(struct md_fd_object *object) {
     struct md_proc_file *f=(void *)object;
+    if (f->control) f->control->release(f->control_context);
+    md_cgroup_member_release(f->cgroup);
     md_resource_queue_destroy(&f->operations);
     if (md_proc_file_namespace(f->kind)) md_namespace_reference_release(&f->namespace);
     md_pid_namespace_release(f->pid_view); free(f->content);
@@ -50,13 +56,13 @@ struct md_proc_file *md_proc_file_from_object(struct md_fd_object *o) {
 }
 struct md_proc_file *md_proc_file_open(struct md_user_namespace *target,
         enum md_proc_file_kind kind, const struct md_identity *opener, int flags) {
-    int error=!opener || kind<MD_PROC_FILE_UID_MAP || kind>MD_PROC_FILE_STAT ? EINVAL : 0;
+    int error=!opener || kind<MD_PROC_FILE_UID_MAP || kind>MD_PROC_FILE_CONTROL ? EINVAL : 0;
     int directory=md_proc_file_directory(kind);
     if (!error && (flags&O_DIRECTORY) && !directory) error=ENOTDIR;
     if (!error && directory && !(flags&O_PATH) && ((flags&O_ACCMODE)!=O_RDONLY || (flags&O_TRUNC))) error=EISDIR;
     if (!error && (flags&(O_CREAT|O_EXCL))==(O_CREAT|O_EXCL)) error=EEXIST;
     if (!error && !(flags&O_PATH) && (flags&O_ACCMODE)==O_ACCMODE) error=EINVAL;
-    if (!error && !(flags&O_PATH) && (md_proc_file_namespace(kind) || md_proc_file_process(kind))
+    if (!error && !(flags&O_PATH) && (md_proc_file_namespace(kind) || md_proc_file_process(kind) || md_proc_file_cgroup_kind(kind))
             && ((flags&O_ACCMODE)!=O_RDONLY || (flags&O_TRUNC))) error=EACCES;
     if (!error && !(flags&O_PATH) && (flags&O_ACCMODE)!=O_RDONLY && kind==MD_PROC_FILE_SETGROUPS
             && !md_identity_capable_in(opener,target,CAP_SYS_ADMIN)) error=EACCES;
@@ -72,6 +78,25 @@ struct md_proc_file *md_proc_file_open(struct md_user_namespace *target,
         ? NULL : md_user_namespace_retain(target);
     f->opener=md_identity_copy(opener); f->kind=kind; f->flags=flags;
     return f;
+}
+struct md_proc_file *md_proc_file_open_control(const struct md_control_file_ops *ops,void *context,
+        const struct md_identity *id,int flags) {
+    int mode=(flags&O_PATH) ? 0 : (flags&O_ACCMODE)==O_RDWR ? R_OK|W_OK
+        : (flags&O_ACCMODE)==O_WRONLY ? W_OK : R_OK;
+    int error=!ops || !context ? -EINVAL : ops->access(context,id,(unsigned)mode);
+    if (error) { errno=-error; return NULL; }
+    struct md_proc_file *f=md_proc_file_open(NULL,MD_PROC_FILE_CONTROL,id,flags);
+    if (f) { f->control=ops; f->control_context=ops->retain(context); }
+    return f;
+}
+int md_proc_file_control_access(const struct md_proc_file *f,const struct md_identity *id,unsigned mode) {
+    return f && f->control ? f->control->access(f->control_context,id,mode) : -EINVAL;
+}
+int md_proc_file_control_stat(const struct md_proc_file *f,struct stat *st) {
+    return f && f->control ? f->control->stat(f->control_context,st) : -EINVAL;
+}
+unsigned long md_proc_file_filesystem(const struct md_proc_file *f) {
+    return f && f->control ? f->control->filesystem : 0;
 }
 struct md_proc_file *md_proc_file_open_namespace(const struct md_namespace_reference *ref,
         const struct md_identity *opener, int flags) {
@@ -101,14 +126,19 @@ void md_proc_file_process_state(struct md_proc_file *f,const struct md_identity 
     if (f->process_state) md_identity_release(&f->process_identity);
     f->process_identity=md_identity_copy(identity); f->process_state=1; f->tracer=tracer;
 }
+void md_proc_file_cgroup(struct md_proc_file *f,struct md_cgroup_member *member) {
+    struct md_cgroup_member *old=f->cgroup;
+    f->cgroup=md_cgroup_member_retain(member); md_cgroup_member_release(old);
+}
 struct md_proc_file_node md_proc_file_get_node(const struct md_proc_file *f) { return f->node; }
 enum md_proc_file_kind md_proc_file_kind(const struct md_proc_file *f) { return f->kind; }
 struct md_proc_file *md_proc_file_reopen(const struct md_proc_file *f,
         const struct md_identity *opener, int flags) {
-    struct md_proc_file *next=md_proc_file_namespace(f->kind)
+    struct md_proc_file *next=f->control ? md_proc_file_open_control(f->control,f->control_context,opener,flags)
+        : md_proc_file_namespace(f->kind)
         ? md_proc_file_open_namespace(&f->namespace,opener,flags)
         : md_proc_file_open(f->target,f->kind,opener,flags);
-    if (next) { next->node=f->node; md_proc_file_pid_view(next,f->pid_view); }
+    if (next) { next->node=f->node; md_proc_file_pid_view(next,f->pid_view); md_proc_file_cgroup(next,f->cgroup); }
     return next;
 }
 int md_proc_file_descriptor(const struct md_proc_file *f) {
@@ -270,6 +300,12 @@ long md_proc_file_read_at(struct md_proc_file *f, const struct md_uts_namespace 
     if (offset<0) return -EINVAL;
     if (md_proc_file_directory(f->kind)) return -EISDIR;
     if (md_proc_file_namespace(f->kind)) return -EINVAL;
+    if (md_proc_file_cgroup_kind(f->kind)) {
+        char text[8192];
+        long size=f->kind==MD_PROC_FILE_CGROUP ? md_cgroup_member_text(f->cgroup,text,sizeof(text))
+            : md_cgroup_controllers_text(f->cgroup,text,sizeof(text));
+        return size<0 ? size : (long)slice(out,capacity,(uint64_t)offset,text,(size_t)size);
+    }
     if (md_proc_file_process(f->kind)) {
         if (!capacity) return 0;
         int error=f->content ? 0 : process_content(f);
@@ -421,7 +457,7 @@ static int process_directory(struct md_proc_file *f,const char *path) {
     return r;
 }
 static long directory_entries(struct md_proc_file_io *io, void *bytes, size_t capacity) {
-    static const char *const names[]={".","..","user","mnt","uts","ipc","pid","pid_for_children"};
+    static const char *const names[]={".","..","user","mnt","uts","ipc","pid","pid_for_children","net"};
     struct md_proc_file *f=io->file;
     char path[64]; snprintf(path,sizeof(path),"/proc/%d%s",f->node.process,
         f->kind==MD_PROC_FILE_NS_DIRECTORY ? "/ns" : "");
@@ -455,7 +491,7 @@ static long directory_entries(struct md_proc_file_io *io, void *bytes, size_t ca
         if (record>capacity-size) return size ? (long)size : -EINVAL;
         struct entry *e=(void *)((char *)bytes+size);
         memset(e,0,record);
-        e->inode=i ? (f->node.inode<<3)|(uint64_t)i : f->node.inode;
+        e->inode=i ? (f->node.inode<<4)|(uint64_t)i : f->node.inode;
         e->next=i+1; e->length=(uint16_t)record; e->type=i<2 ? DT_DIR : DT_LNK;
         memcpy(e->name,names[i],length);
         size+=record; io->next_position=i+1;
@@ -487,6 +523,12 @@ long md_proc_file_io_execute(struct md_proc_file_io *io, const struct md_identit
         return io->result=directory_entries(io,bytes,capacity);
     }
     if (io->operation==MD_PROC_FILE_WRITE) {
+        if (f->control) {
+            if (io->length>capacity || io->length>=page_size || (io->length && !bytes)) return io->result=-EINVAL;
+            io->result=f->control->write(f->control_context,&io->actor,bytes,io->length);
+            if (io->result>0 && !io->positional) f->position=io->offset+io->result;
+            return io->result;
+        }
         /* Reject impossible proc writes before copying or allocating input. */
         size_t limit=f->kind==MD_PROC_FILE_SETGROUPS ? 8 : page_size;
         if ((f->flags&O_PATH) || (f->flags&O_ACCMODE)==O_RDONLY) return io->result=-EBADF;
@@ -501,7 +543,8 @@ long md_proc_file_io_execute(struct md_proc_file_io *io, const struct md_identit
     } else {
         size_t length=io->length<capacity ? io->length : capacity;
         if (length && !bytes) return io->result=-EFAULT;
-        io->result=md_proc_file_read_at(f,uts,bytes,length,io->offset);
+        io->result=f->control ? f->control->read(f->control_context,&io->actor,bytes,length,io->offset)
+            : md_proc_file_read_at(f,uts,bytes,length,io->offset);
     }
     return io->result;
 }

@@ -97,8 +97,9 @@ static int add_span(struct span *s, struct md_fs_origin_parcel *p, int *fd, unsi
     s->start=p->count; s->count=n;
     memcpy(p->fd+p->count,fd,n*sizeof(*fd)); p->count+=n; return 0;
 }
-int md_fs_origin_export(const struct md_fd_message *message, struct md_fs_origin_parcel *out) {
-    if (!out || out->fd || out->count) return -EINVAL;
+int md_fs_origin_export_entries(const struct md_fd_message *message, struct md_fd_object *const *entries,
+        struct md_fs_origin_parcel *out) {
+    if (!entries || !out || out->fd || out->count) return -EINVAL;
     struct manifest data={.magic=MAGIC,.version=VERSION};
     int r=md_fd_message_route(message,&data.route);
     if (r) return r;
@@ -109,7 +110,6 @@ int md_fs_origin_export(const struct md_fd_message *message, struct md_fs_origin
     struct md_fs_anchor *anchors[MAX];
     struct md_mount_namespace *views[MAX];
     struct md_inode_lifetime *owners[MAX];
-    struct md_fd_object *const *entries=md_fd_message_origins(message);
     unsigned rights=1;
     for (unsigned i=0;i<data.count;++i) {
         struct md_fs_anchor *a=md_fs_anchor_from_object(entries[i]);
@@ -185,6 +185,9 @@ int md_fs_origin_export(const struct md_fd_message *message, struct md_fs_origin
     if (r) md_fs_origin_parcel_close(&candidate);
     else *out=candidate;
     return r;
+}
+int md_fs_origin_export(const struct md_fd_message *message, struct md_fs_origin_parcel *out) {
+    return md_fs_origin_export_entries(message,md_fd_message_origins(message),out);
 }
 int md_fs_origin_imports_new(int root, struct md_fs_origin_imports **out) {
     if (!out || *out) return -EINVAL;

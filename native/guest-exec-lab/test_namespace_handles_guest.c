@@ -10,7 +10,12 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <net/if.h>
+#include <linux/sockios.h>
 #include <sys/syscall.h>
 #include <sys/vfs.h>
 #include <sys/wait.h>
@@ -33,18 +38,21 @@ static void directory_handles(void) {
     assert(lseek(fd,0,SEEK_CUR)==1); munmap(bad,4096);
     assert(!lseek(copy,0,SEEK_SET)); close(copy);
     DIR *dir=fdopendir(fd); assert(dir);
-    unsigned seen=0, count=0;
+    unsigned seen=0, count=0; ino_t inodes[9];
     for (struct dirent *e;(e=readdir(dir));) {
+        assert(count<9);
+        for (unsigned i=0;i<count;++i) assert(inodes[i]!=e->d_ino);
+        inodes[count]=e->d_ino;
         ++count;
         if (!strcmp(e->d_name,".") || !strcmp(e->d_name,"..")) { assert(e->d_type==DT_DIR); continue; }
-        const char *names[]={"user","mnt","uts","ipc","pid","pid_for_children"};
+        const char *names[]={"user","mnt","uts","ipc","pid","pid_for_children","net"};
         unsigned bit=0;
-        for (unsigned i=0;i<6;++i) if (!strcmp(e->d_name,names[i])) bit=1U<<i;
+        for (unsigned i=0;i<7;++i) if (!strcmp(e->d_name,names[i])) bit=1U<<i;
         assert(bit && !(seen&bit) && e->d_type==DT_LNK); seen|=bit;
         int ns=openat(fd,e->d_name,O_RDONLY|O_CLOEXEC); assert(ns>=0);
         assert(ioctl(ns,NS_GET_NSTYPE)>0); close(ns);
     }
-    assert(count==8 && seen==63);
+    assert(count==9 && seen==127);
     rewinddir(dir); assert(readdir(dir)); closedir(dir);
     int saved=open(".",O_RDONLY|O_DIRECTORY); assert(saved>=0);
     assert(!chdir("/proc/self/ns"));
@@ -125,11 +133,64 @@ static void retained_proc(void) {
     assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
     puts("PASS retained proc dirfd: scoped root, namespace directory, UID map and metadata");
 }
+static void unsupported_namespaces(void) {
+    assert(access("/proc/thread-self/ns/cgroup",F_OK)<0 && errno==ENOENT);
+    assert(unshare(CLONE_NEWCGROUP)<0 && errno==EOPNOTSUPP);
+    int fd=open("/proc/thread-self/ns/mnt",O_RDONLY|O_CLOEXEC); assert(fd>=0);
+    char target[128],source[128];
+    snprintf(target,sizeof(target),"/tmp/namespace-bind-%d",getpid());
+    int file=open(target,O_CREAT|O_EXCL|O_RDWR|O_CLOEXEC,0600); assert(file>=0); close(file);
+    assert(mount("/proc/thread-self/ns/mnt",target,NULL,MS_BIND,NULL)<0 && errno==EOPNOTSUPP);
+    snprintf(source,sizeof(source),"/proc/self/fd/%d",fd);
+    assert(mount(source,target,NULL,MS_BIND,NULL)<0 && errno==EOPNOTSUPP);
+    assert(!unlink(target));
+    close(fd);
+    puts("PASS unsupported namespaces: absent capability and explicit typed-bind rejection");
+}
+static void offline_network(void) {
+    int host=open("/proc/self/ns/net",O_RDONLY|O_CLOEXEC); assert(host>=0);
+    struct stat before,after; assert(!fstat(host,&before));
+    int inherited[2]; assert(!socketpair(AF_UNIX,SOCK_STREAM,0,inherited));
+    assert(!unshare(CLONE_NEWNET));
+    assert(!stat("/proc/self/ns/net",&after) && before.st_ino!=after.st_ino);
+    assert(socket(AF_INET,SOCK_STREAM,0)<0 && errno==EPROTONOSUPPORT);
+    int control=socket(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC,0); assert(control>=0);
+    struct ifreq interface={0}; memcpy(interface.ifr_name,"lo",3);
+    assert(!ioctl(control,SIOCGIFINDEX,&interface) && interface.ifr_ifindex==1);
+    memcpy(interface.ifr_name,"wlan0",6);
+    assert(ioctl(control,SIOCGIFINDEX,&interface)<0 && errno==ENODEV); close(control);
+    int local[2]; assert(!socketpair(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0,local));
+    assert(write(inherited[0],"a",1)==1);
+    char byte; assert(read(inherited[1],&byte,1)==1 && byte=='a');
+    assert(write(local[0],"b",1)==1 && read(local[1],&byte,1)==1 && byte=='b');
+    int copy=dup(local[0]); assert(copy>=0);
+    assert(!setns(host,CLONE_NEWNET));
+    assert(!stat("/proc/self/ns/net",&after) && before.st_ino==after.st_ino);
+    struct sockaddr_un address={.sun_family=AF_UNIX}; memcpy(address.sun_path+1,"md-offline",10);
+    assert(bind(copy,(void *)&address,sizeof(address))<0 && errno==EOPNOTSUPP);
+    int enabled=1;
+    assert(setsockopt(copy,SOL_SOCKET,SO_PASSCRED,&enabled,sizeof(enabled))<0 && errno==EOPNOTSUPP);
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        assert(!unshare(CLONE_NEWUSER|CLONE_NEWNET));
+        assert(setns(host,CLONE_NEWNET)<0 && errno==EPERM);
+        assert(bind(copy,(void *)&address,sizeof(address))<0 && errno==EOPNOTSUPP);
+        _exit(0);
+    }
+    int status;
+    /* EVENT_WAIT: namespace child exits; fixture alarm bounds a stuck syscall. */
+    assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
+    close(copy); close(host);
+    for (unsigned i=0;i<2;++i) { close(local[i]); close(inherited[i]); }
+    puts("PASS offline network: retained identity, loopback lookup, inherited IO, anonymous IPC and namespace authority");
+}
 int test_namespace_handles_guest(void) {
     alarm(60);
     directory_handles();
     process_directory();
     retained_proc();
+    unsupported_namespaces();
+    offline_network();
     const char *names[]={"user","mnt","uts","ipc"};
     int types[]={CLONE_NEWUSER,CLONE_NEWNS,CLONE_NEWUTS,CLONE_NEWIPC};
     int fds[4]; struct stat before[4];
@@ -199,7 +260,7 @@ int test_namespace_handles_guest(void) {
         struct stat value; assert(!fstat(fds[i],&value) && value.st_ino==before[i].st_ino);
         close(fds[i]);
     }
-    assert(access("/proc/self/ns/net",F_OK)<0 && errno==ENOENT);
+    assert(!access("/proc/self/ns/net",F_OK));
     assert(!access("/proc/self/ns/pid",F_OK));
     puts("PASS guest namespace handles: stable identities, retained resources, metadata, links, ioctls and independent unshare");
     return 0;

@@ -122,6 +122,12 @@ int md_view_identity(struct md_filesystem *fs, int fd, struct md_view_object **o
 }
 int md_view_backing_path(struct md_filesystem *fs, int fd, const struct md_view_mount *mount,
         char *out, size_t size) {
+    if (mount && mount->devpts) {
+        char name[32]; int r=md_devpts_name(mount->devpts,fd,name,sizeof(name));
+        if (r) return r;
+        int n=snprintf(out,size,"/%s",!strcmp(name,".") ? "" : name);
+        return n<0 || (size_t)n>=size ? -ERANGE : 0;
+    }
     if (!md_view_inode(mount)) return md_view_fdpath(fd,out,size);
     struct md_fs_storage_scope scope;
     int r=md_fs_storage_enter(fs,mount,&scope);
@@ -380,6 +386,8 @@ int md_fs_mounts_copy(struct md_filesystem *fs, const struct md_fs_location *roo
             .backing=a->backing,.detached=a->detached,.locked=a->locked,.generation=a->generation,
             .storage=md_inode_lifetime_retain(a->storage),
             .pid_namespace=md_pid_namespace_retain(a->pid_namespace),
+            .devpts=md_devpts_retain(a->devpts),
+            .cgroup=md_cgroup_retain(a->cgroup),
             .policy={.local=md_mount_policy_flags(&a->policy)},.native=a->native,.guest=a->guest,
             .parent=!a->parent ? NULL : !md_view_base(fs->mounts,a->parent)
                 ? &copy->tree->mounts[a->parent-source->mounts] : &copy->base};

@@ -262,6 +262,8 @@ static int describe(struct md_mount_namespace *view, const struct md_mount_layou
         if (!m->generation) return -EINVAL;
         e->generation=m->generation;
         if (!m->id) { e->flags=DETACHED|RETIRED; continue; }
+        /* A private device view cannot be flattened into a native attachment. */
+        if (m->devpts || m->cgroup) return -EOPNOTSUPP;
         e->descriptor=next; next+=3;
         if (m->storage) {
             if (!md_view_inode(m)) return -EINVAL;

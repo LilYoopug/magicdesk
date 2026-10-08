@@ -219,7 +219,7 @@ static void metadata(const struct md_fs_info *i, struct stat *s) {
 }
 /* Zero requests task-affine handling, one means delivered/cancelled. */
 static int reply(struct operation *op, const void *data) {
-    if (op->result.error == -EXDEV || op->result.error == -EREMOTE || op->result.host_path
+    if (op->result.error == -EXDEV || op->result.error == -EREMOTE || op->result.host_path || op->result.requires_control
             || op->result.open_completion.kind != MD_OPEN_READY || op->undelivered) return 0;
     struct seccomp_notif_resp response = {.id = op->notification.id, .error = op->result.error};
     if (!response.error && op->notification.data.nr == SYS_openat) {

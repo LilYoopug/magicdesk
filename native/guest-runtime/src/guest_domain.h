@@ -18,7 +18,7 @@
 /* No adaptation, observation or logical identity in any domain. Shared with
  * seccomp so these kernel operations need no userspace policy round trip. */
 #define MD_DOMAIN_KERNEL_CALLS(X) \
-    X(pipe2) X(shutdown) X(waitid) \
+    X(shutdown) X(waitid) \
     X(sysinfo) X(sched_yield) X(sched_getaffinity) \
     X(getrusage) X(getrlimit) X(gettimeofday)
 #define MD_DOMAIN_KERNEL_ARGUMENTS(X) \

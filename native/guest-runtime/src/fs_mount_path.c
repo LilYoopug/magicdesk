@@ -202,6 +202,8 @@ int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *
         else {
             if (mount && mount->backing==MD_MOUNT_PROC)
                 next=md_procfs_step(fs,mount,fd,name,todo,!last || follow>0 || (trailing && follow==0));
+            else if (mount && mount->backing==MD_MOUNT_DEVPTS)
+                next=md_devpts_step(mount->devpts,fd,name);
             else {
                 next=(resolve&MD_VIEW_TASK_PATH) ? md_view_task_path(fs,fd,name,todo,resolve,0) : 0;
                 if (!next) next=component(fs,view,mount,fd,name,0);

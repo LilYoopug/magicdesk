@@ -1183,9 +1183,8 @@ static void buffer_received_inspection(struct md_fs_buffer_service *service,
         struct md_interception_buffers *pool, struct md_interception_buffer *buffer,
         struct md_fs_buffer_frame *frame) {
     int sockets[2]; assert(!socketpair(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0,sockets));
-    *frame=(struct md_fs_buffer_frame){.input={.base={sockets[0],sockets[1]},.flags=MD_IPC_PAIR}};
-    assert(!buffer_request(service,worker,resources->fs,buffer,MD_FS_IPC));
-    assert(!frame->reply.result.error);
+    /* This fixture supplies a native vector, not an authenticated capsule.
+     * Registering an ORIGINS_V1 pair would correctly reject that wire format. */
     *frame=(struct md_fs_buffer_frame){.input={.base={-1,-1},.flags=IN_CLOEXEC|IN_NONBLOCK}};
     assert(!buffer_request(service,worker,resources->fs,buffer,MD_FS_WATCH_CREATE));
     assert(!frame->reply.result.error && buffered_open.fd>=0);
@@ -1237,6 +1236,9 @@ static void buffer_received_inspection(struct md_fs_buffer_service *service,
         for (;;) {
             worker_event(worker);
             if (!cancelled && buffer_callbacks==callbacks+1) {
+                if (buffer_error || buffer_pending || buffered_open.fd!=-1)
+                    fprintf(stderr,"received inspection: error=%d pending=%d fd=%d\n",
+                        buffer_error,buffer_pending!=NULL,buffered_open.fd);
                 assert(!buffer_error && !buffer_pending && buffered_open.fd==-1);
                 assert(frame->received_message.count==253 && frame->received_message.first[253]==253);
                 for (unsigned i=0;i<253;++i)

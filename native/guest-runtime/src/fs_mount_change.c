@@ -43,6 +43,8 @@ static void discard(struct md_view_mount *m) {
     md_mount_policy_close(&m->policy);
     md_inode_lifetime_release(m->storage);
     md_pid_namespace_release(m->pid_namespace);
+    md_devpts_release(m->devpts);
+    md_cgroup_release(m->cgroup);
 }
 static int publish(struct md_filesystem *fs, unsigned first,
         struct md_view_mount *entries, unsigned count) {
@@ -181,7 +183,11 @@ static int bind(struct md_filesystem *fs, const struct md_fs_request *q,
             native_source ? MD_MOUNT_NATIVE : source.mount ? source.mount->backing : MD_MOUNT_INODE,
             source.mount ? source.mount->storage : NULL,
             policy);
-        if (!r && source.mount) pending[root_slot].pid_namespace=md_pid_namespace_retain(source.mount->pid_namespace);
+        if (!r && source.mount) {
+            pending[root_slot].pid_namespace=md_pid_namespace_retain(source.mount->pid_namespace);
+            pending[root_slot].devpts=md_devpts_retain(source.mount->devpts);
+            pending[root_slot].cgroup=md_cgroup_retain(source.mount->cgroup);
+        }
     }
     struct md_fs_mounts *original=source.view ? source.view->tree : NULL;
     if (!(q->flags&MS_REC)) for (unsigned i=0;!r && original && i<original->count;++i) {
@@ -217,6 +223,8 @@ static int bind(struct md_filesystem *fs, const struct md_fs_request *q,
             m->backing,m->storage,md_mount_policy_flags(&m->policy));
         pending[slot].locked=m->locked;
         if (!r) pending[slot].pid_namespace=md_pid_namespace_retain(m->pid_namespace);
+        if (!r) pending[slot].devpts=md_devpts_retain(m->devpts);
+        if (!r) pending[slot].cgroup=md_cgroup_retain(m->cgroup);
     }
     /* No tree entry is visible until the complete recursive copy owns all its
      * descriptors. Failed preparation retires only the unpublished candidates. */
@@ -256,33 +264,55 @@ int md_view_attach_storage(struct md_filesystem *fs, struct md_inode_store *stor
     else discard(&pending[slot]);
     return r;
 }
-static int proc_mount(struct md_filesystem *fs,const struct md_fs_request *q,
+static int provider_mount(struct md_filesystem *fs,const struct md_fs_request *q,
         const struct md_view_location *target) {
+    int devpts=q->mode==MD_FS_MOUNT_DEVPTS;
+    int cgroup=q->mode==MD_FS_MOUNT_CGROUP || q->mode==MD_FS_MOUNT_CGROUP2;
     if (q->flags&~(MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC|MS_RELATIME|MS_NODIRATIME|MS_NOATIME)) return -ENOTSUP;
-    if (q->value_size && (q->value_size!=1 || *(const char *)q->value)) return -ENOTSUP;
+    if (q->mode==MD_FS_MOUNT_CGROUP) {
+        if (!q->value_size || strcmp(q->value,"devices")) return -ENOTSUP;
+    } else if (!devpts && q->value_size && (q->value_size!=1 || *(const char *)q->value)) return -ENOTSUP;
     struct stat st;
     if (fstat(target->fd,&st)) return -errno;
     if (!S_ISDIR(st.st_mode)) return -ENOTDIR;
     struct md_pid_namespace *pid=fs->actor ? md_pid_identity_namespace(fs->actor->pid) : NULL;
-    if (!md_identity_capable_in(fs->store->identity,md_pid_namespace_owner(pid),CAP_SYS_ADMIN)) return -EPERM;
-    int source=open("/proc",O_PATH|O_DIRECTORY|O_CLOEXEC);
-    if (source<0) return -errno;
+    if (!devpts && !cgroup && !md_identity_capable_in(fs->store->identity,md_pid_namespace_owner(pid),CAP_SYS_ADMIN)) return -EPERM;
+    struct md_devpts *private_pts=NULL;
+    struct md_cgroup_view *groups=NULL;
+    if (cgroup && (!fs->actor || !fs->actor->cgroup)) return -EOPNOTSUPP;
+    if (devpts || cgroup) {
+        int parent=md_fs_private_mounts_parent(fs->store);
+        if (parent<0) return parent;
+        if (devpts) private_pts=md_devpts_new(parent,q->value_size ? q->value : NULL,fs->store->identity);
+        else groups=md_cgroup_mount(fs->actor->cgroup,parent,q->mode==MD_FS_MOUNT_CGROUP,fs->store->identity);
+        int error=errno; close(parent); errno=error;
+    }
+    if ((devpts && !private_pts) || (cgroup && !groups)) return -errno;
+    int source=devpts ? openat(md_devpts_root(private_pts),".",O_PATH|O_DIRECTORY|O_CLOEXEC)
+        : cgroup ? openat(md_cgroup_root(groups),".",O_PATH|O_DIRECTORY|O_CLOEXEC)
+        : open("/proc",O_PATH|O_DIRECTORY|O_CLOEXEC);
+    if (source<0) { int error=-errno; md_devpts_release(private_pts); md_cgroup_release(groups); return error; }
     if (!fs->mounts->tree) fs->mounts->tree=calloc(1,sizeof(*fs->mounts->tree));
-    if (!fs->mounts->tree) { close(source); return -ENOMEM; }
+    if (!fs->mounts->tree) { close(source); md_devpts_release(private_pts); md_cgroup_release(groups); return -ENOMEM; }
     struct md_fs_mounts *tree=fs->mounts->tree;
     struct md_view_mount pending[MD_FS_MOUNTS_MAX];
     unsigned count=tree->count;
     memcpy(pending,tree->mounts,count*sizeof(*pending));
     int slot=vacant(pending,&count), error=slot<0 ? slot : 0;
     if (!error) {
-        error=prepare(&pending[slot],source,target->fd,target->mount,MD_MOUNT_PROC,NULL,
-            md_fs_mount_flags(q->flags)|MD_MOUNT_NOSUID|MD_MOUNT_NODEV|MD_MOUNT_NOEXEC);
-        if (!error) pending[slot].pid_namespace=md_pid_namespace_retain(pid);
+        error=prepare(&pending[slot],source,target->fd,target->mount,
+            devpts ? MD_MOUNT_DEVPTS : cgroup ? MD_MOUNT_CGROUP : MD_MOUNT_PROC,NULL,
+            md_fs_mount_flags(q->flags)|MD_MOUNT_NOSUID|MD_MOUNT_NOEXEC|(devpts ? 0 : MD_MOUNT_NODEV));
+        if (!error) {
+            if (devpts) pending[slot].devpts=md_devpts_retain(private_pts);
+            else if (cgroup) pending[slot].cgroup=md_cgroup_retain(groups);
+            else pending[slot].pid_namespace=md_pid_namespace_retain(pid);
+        }
         if (!error) error=publish(fs,0,pending,count);
         if (!error) { tree->mounts[slot]=pending[slot]; tree->count=count; }
         else discard(&pending[slot]);
     }
-    close(source); return error;
+    close(source); md_devpts_release(private_pts); md_cgroup_release(groups); return error;
 }
 static int unmount(struct md_filesystem *fs, const struct md_fs_request *q,
         const struct md_view_location *target) {
@@ -453,7 +483,9 @@ int md_fs_mount_change(struct md_filesystem *fs, struct md_guest_domain *context
     /* Release unused detached storage before a filesystem reserves shared
      * resources such as overlay upper/work directories. Live origins retain
      * their mount pins; collection never infers closure from a pathname. */
-    int r=(q->mode==MD_FS_MOUNT_BIND || q->mode==MD_FS_MOUNT_TMPFS || q->mode==MD_FS_MOUNT_OVERLAY || q->mode==MD_FS_MOUNT_PROC)
+    int r=(q->mode==MD_FS_MOUNT_BIND || q->mode==MD_FS_MOUNT_TMPFS || q->mode==MD_FS_MOUNT_OVERLAY
+            || q->mode==MD_FS_MOUNT_PROC || q->mode==MD_FS_MOUNT_DEVPTS
+            || q->mode==MD_FS_MOUNT_CGROUP || q->mode==MD_FS_MOUNT_CGROUP2)
         ? collect(fs) : 0;
     struct md_view_location target={.fd=-1,.parent=-1};
     if (!r) r=operand(fs,q,0,&target);
@@ -497,8 +529,8 @@ int md_fs_mount_change(struct md_filesystem *fs, struct md_guest_domain *context
         r=md_fs_mount_temporary(fs,q,&target); break;
     case MD_FS_MOUNT_OVERLAY:
         r=md_fs_mount_overlay(fs,q,&target); break;
-    case MD_FS_MOUNT_PROC:
-        r=proc_mount(fs,q,&target); break;
+    case MD_FS_MOUNT_PROC: case MD_FS_MOUNT_DEVPTS: case MD_FS_MOUNT_CGROUP: case MD_FS_MOUNT_CGROUP2:
+        r=provider_mount(fs,q,&target); break;
     default: r=-ENOTSUP; break;
     }
     if (!r) atomic_store_explicit(&fs->mounts->managed_paths,1,memory_order_release);

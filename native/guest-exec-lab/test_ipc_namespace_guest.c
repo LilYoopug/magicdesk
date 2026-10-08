@@ -45,7 +45,9 @@ static void private_objects(void) {
         assert(!strcmp(mapping,"private"));
         assert(write(ready[1],"r",1)==1);
         struct sembuf op={.sem_num=0,.sem_op=-1};
-        assert(!syscall(SYS_semop,sem,&op,1));
+        long result=syscall(SYS_semop,sem,&op,1);
+        if (result) fprintf(stderr,"private semop: %ld errno=%d (%s)\n",result,errno,strerror(errno));
+        assert(!result);
         assert(!syscall(SYS_shmdt,mapping));
         _exit(0);
     }

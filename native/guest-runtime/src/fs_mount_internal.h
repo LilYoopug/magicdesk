@@ -4,6 +4,8 @@
 #include "mount_policy.h"
 #include "mount_namespace_internal.h"
 #include "pid_namespace.h"
+#include "devpts_view.h"
+#include "cgroup.h"
 #include <limits.h>
 #include <stdatomic.h>
 #include <sys/mount.h>
@@ -15,6 +17,9 @@ static inline unsigned md_fs_mount_flags(unsigned flags) {
         | ((flags&MS_NOEXEC) ? MD_MOUNT_NOEXEC : 0);
 }
 struct md_view_location;
+int md_fs_cgroup_operation(struct md_filesystem *,struct md_mount_namespace *,
+    struct md_view_mount *,int fd,int parent,const char *name,const struct md_fs_request *,
+    struct md_fs_result *,const struct md_fs_output *);
 int md_fs_mount_temporary(struct md_filesystem *, const struct md_fs_request *, const struct md_view_location *);
 int md_fs_mount_overlay(struct md_filesystem *, const struct md_fs_request *, const struct md_view_location *);
 int md_fs_private_mounts_parent(struct md_inode_store *);

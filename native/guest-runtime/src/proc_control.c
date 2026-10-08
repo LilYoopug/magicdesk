@@ -2,6 +2,7 @@
 #include "proc_control.h"
 #include "proc_file.h"
 #include "fd_filter.h"
+#include "descriptor_calls.h"
 #include "adapter_buffer.h"
 #include "interception.h"
 #include "linux_abi.h"
@@ -21,7 +22,8 @@ long md_proc_control_known(int fd) {
 #ifdef MD_USE_LIBC
     (void)fd; return 0;
 #else
-    return RAW4(prctl,MD_GUEST_PROC_FILE,MD_PROC_FILE_KIND,fd,0);
+    long kind=md_descriptor_kind(fd);
+    return kind==MD_DESCRIPTOR_ANONYMOUS ? 0 : kind;
 #endif
 }
 static long control_open(unsigned operation, int process, int selector, int flags, uint64_t view) {
@@ -91,7 +93,7 @@ long md_proc_control_metadata(int process, enum md_proc_kind kind, int fd, long 
                 .stx_ctime={st.st_ctim.tv_sec,(uint32_t)st.st_ctim.tv_nsec,0}};
             result=md_write_memory((void *)a[4],&value,sizeof(value));
         } else if (nr==SYS_statfs || nr==SYS_fstatfs) {
-            struct statfs value={.f_type=namespace ? NSFS_MAGIC : PROC_SUPER_MAGIC,
+            struct statfs value={.f_type=metadata.filesystem ? metadata.filesystem : namespace ? NSFS_MAGIC : PROC_SUPER_MAGIC,
                 .f_bsize=md_page_size,.f_namelen=255,.f_frsize=md_page_size};
             result=md_write_memory((void *)a[1],&value,sizeof(value));
         } else if (nr==SYS_readlinkat) {

@@ -4,6 +4,29 @@
 #include "fd_client.h"
 #include <errno.h>
 #include <signal.h>
+#include <sys/ioctl.h>
+
+long md_pid_terminal(const unsigned long *a) {
+    int value=0;
+    int writing=(unsigned)a[1]==TIOCSPGRP;
+    long result=writing ? md_read_memory(&value,(void *)a[2],sizeof(value)) : 0;
+    if (result) return result;
+    if (writing && value>0) {
+        long native=md_pid_native(value);
+        if (native<=0) return native ? native : -ESRCH;
+        value=(int)native;
+    }
+    result=md_fd_control(MD_FD_USE,0,0,0);
+    if (result) return result;
+    result=RAW3(ioctl,a[0],a[1],&value);
+    if (!result && !writing) {
+        long visible=value>0 ? md_pid_visible(value) : value;
+        if (visible<0) result=visible;
+        else { value=(int)visible; result=md_write_memory((void *)a[2],&value,sizeof(value)); }
+    }
+    long released=md_fd_control(MD_FD_RELEASE,0,0,0);
+    return result ? result : released;
+}
 
 long md_pid_signal_group(int selector,int signal) {
     int last=0,sent=0;

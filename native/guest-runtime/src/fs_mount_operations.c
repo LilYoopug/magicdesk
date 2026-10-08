@@ -7,6 +7,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/openat2.h>
+#include <linux/magic.h>
+#include <sys/sysmacros.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/syscall.h>
@@ -51,6 +53,64 @@ static int record(struct md_filesystem *fs, int fd, struct md_view_mount *mount,
     if (r) close(fd); else out->fd = fd;
     return r;
 }
+static int devpts_operation(struct md_filesystem *fs,struct md_mount_namespace *view,
+        struct md_view_mount *mount,int fd,const struct md_fs_request *q,
+        struct md_fs_result *out,const struct md_fs_output *output) {
+    if (!mount || !mount->devpts) return 0;
+    const struct md_identity *id=fs->store->identity;
+    int r=0;
+    switch (q->operation) {
+    case MD_FS_STATFS:
+        md_fs_statfs_result(fd,md_mount_policy_flags(&mount->policy),NULL,out,output);
+        if (!out->error) ((struct md_fs_statfs *)output->data)->type=DEVPTS_SUPER_MAGIC;
+        break;
+    case MD_FS_STAT: case MD_FS_FSTAT: {
+        struct stat st; r=md_devpts_stat(mount->devpts,fd,&st);
+        if (!r) { md_fs_stat_info(&st,&out->info); out->info.mount_id=mount->id; }
+        break;
+    }
+    case MD_FS_ACCESS:
+        if (q->flags&~(AT_SYMLINK_NOFOLLOW|MD_AT_EACCESS)) r=-EINVAL;
+        else if ((q->mode&W_OK) && md_view_readonly(mount)) r=-EROFS;
+        else {
+            struct md_identity actor=*id;
+            if (!(q->flags&MD_AT_EACCESS)) { actor.uid.fs=actor.uid.real; actor.gid.fs=actor.gid.real; }
+            r=md_devpts_access(mount->devpts,fd,q->mode,&actor);
+        }
+        break;
+    case MD_FS_CHMOD:
+        r=md_view_readonly(mount) ? -EROFS : md_devpts_chmod(mount->devpts,fd,q->mode,id); break;
+    case MD_FS_CHOWN:
+        r=md_view_readonly(mount) ? -EROFS : md_devpts_chown(mount->devpts,fd,q->attributes.uid,q->attributes.gid,id); break;
+    case MD_FS_OPEN: case MD_FS_REOPEN: {
+        if (md_view_readonly(mount) && writable(q->flags)) { r=-EROFS; break; }
+        if (!(q->flags&O_PATH) && (q->flags&(O_CREAT|O_EXCL))==(O_CREAT|O_EXCL)) { r=-EEXIST; break; }
+        struct stat st;
+        if (fstat(fd,&st)) { r=-errno; break; }
+        r=device_open(mount,q->flags,st.st_mode); if (r) break;
+        if (!(q->flags&(O_PATH|O_NOCTTY)) && S_ISCHR(st.st_mode)
+                && !(major(st.st_rdev)==5 && minor(st.st_rdev)==2)) {
+            /* Controlling-terminal acquisition belongs to the caller's session,
+             * not to the namespace worker opening its retained path. */
+            r=md_devpts_access(mount->devpts,fd,(q->flags&O_ACCMODE)==O_RDWR ? R_OK|W_OK
+                : (q->flags&O_ACCMODE)==O_WRONLY ? W_OK : R_OK,id);
+            if (!r) {
+                r=fcntl(fd,F_DUPFD_CLOEXEC,3);
+                if (r<0) r=-errno;
+                else out->open_completion.kind=MD_OPEN_CALLER;
+            }
+        } else r=md_devpts_open(mount->devpts,fd,q->flags,id);
+        if (r>=0) { out->fd=r; r=0; md_view_capture(fs,view,mount,out,output); }
+        break;
+    }
+    case MD_FS_MKDIR: case MD_FS_CREATE: case MD_FS_MKNOD: case MD_FS_SYMLINK:
+    case MD_FS_UNLINK: case MD_FS_RENAME: case MD_FS_LINK: case MD_FS_UTIMENS:
+        r=-EPERM; break;
+    default: return 0;
+    }
+    if (r) out->error=r;
+    return 1;
+}
 static int descriptor(struct md_filesystem *fs, const struct md_fs_request *q,
         struct md_fs_result *out, const struct md_fs_output *output) {
     const struct md_fs_anchor *origin=q->origin[0];
@@ -71,6 +131,8 @@ static int descriptor(struct md_filesystem *fs, const struct md_fs_request *q,
     } else r=md_view_identity(fs,q->directory[0],&p);
     if (r == -EXDEV) return 0;
     if (r) { out->error = r; return 1; }
+    if (devpts_operation(fs,owner.mounts,p->mount,q->directory[0],q,out,output)) return 1;
+    if (md_fs_cgroup_operation(fs,owner.mounts,p->mount,q->directory[0],-1,NULL,q,out,output)) return 1;
     if (q->operation==MD_FS_ACCESS && (r=execute_access(p->mount,q->directory[0],q->mode))) {
         out->error=r; return 1;
     }
@@ -137,8 +199,9 @@ static int descriptor(struct md_filesystem *fs, const struct md_fs_request *q,
         if (before < 0) { r = -errno; break; }
         size_t count = q->capacity < capacity ? q->capacity : capacity;
         ssize_t n = p->mount->backing==MD_MOUNT_PROC ? md_procfs_getdents(p->mount,fd,data,count)
+            : p->mount->devpts ? md_devpts_getdents(p->mount->devpts,fd,data,count)
             : syscall(SYS_getdents64, fd, data, count);
-        if (n < 0) { r=p->mount->backing==MD_MOUNT_PROC ? (int)n : -errno; break; }
+        if (n < 0) { r=p->mount->backing==MD_MOUNT_PROC || p->mount->devpts ? (int)n : -errno; break; }
         /* Native and inode directories share the same publish-before-commit
          * contract. Restore on rejected output; never redispatch the read. */
         if (output->directory_position) {
@@ -269,6 +332,8 @@ static void inode_selected(struct md_filesystem *fs, const struct md_fs_request 
 static void native(struct md_filesystem *fs, const struct md_fs_request *q,
         struct md_view_location *a, struct md_view_location *b,
         struct md_fs_result *out, const struct md_fs_output *output) {
+    if (devpts_operation(fs,a->view,a->mount,a->fd,q,out,output)) return;
+    if (md_fs_cgroup_operation(fs,a->view,a->mount,a->fd,a->parent,a->name,q,out,output)) return;
     int r = 0;
     struct md_filesystem owner=*fs; owner.mounts=a->view;
     void *data = output ? output->data : NULL;

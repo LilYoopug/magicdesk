@@ -10,6 +10,7 @@
 #include "ipc_capsule.h"
 #include "fd_bundle.h"
 #include "fd_selector.h"
+#include "descriptor_inode.h"
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -718,6 +719,72 @@ static void unknown(const char *base) {
     md_fs_origin_vector_free(v); md_fs_origin_imports_free(i); message_close(&s);
     assert(descriptors()==before); puts("PASS unknown origin vector: one manifest, no invented mount or backing owner");
 }
+static void anonymous_capsules(const char *base) {
+    unsigned before=descriptors(); struct source source_state=source(base,1);
+    char store[PATH_MAX]; path(store,base,"store");
+    struct md_ipc_credentials *authority=NULL,*foreign=NULL;
+    assert(!md_ipc_credentials_open(store,MD_IPC_TRANSPORT_ORIGINS_V1,&authority));
+    assert(!md_ipc_credentials_open(store,MD_IPC_TRANSPORT_ORIGINS_V1,&foreign));
+    int app[2],ends[2]; pair(app); assert(!pipe2(ends,O_CLOEXEC|O_NONBLOCK));
+    struct md_identity root=md_identity_new(0,0);
+    struct md_fs_request q={.operation=MD_FS_IPC,.flags=MD_IPC_PAIR,.directory={app[0],app[1]},.peer=getpid()};
+    struct md_fs_result result; md_ipc_credentials_execute(authority,&root,NULL,&q,&result,NULL);
+    assert(!result.error);
+    struct md_ipc_binding sender={0},receiver={0};
+    assert(!md_ipc_credentials_bind(authority,app[0],&sender));
+    assert(!md_ipc_credentials_bind(foreign,app[1],&receiver));
+    struct md_ipc_capsules *owner=NULL,*reader=NULL;
+    assert(!md_ipc_capsules_new(&sender,&owner) && !md_ipc_capsules_new(&receiver,&reader));
+    struct md_fd_object *inode=md_descriptor_inode_new(&root,S_IFIFO|0600); assert(inode);
+    struct md_fd_object *objects[]={inode,md_fs_anchor_object(source_state.anchor[0]),inode};
+    int fds[]={ends[0],md_fs_anchor_fd(source_state.anchor[0]),ends[1]};
+    struct md_fd_message *message=capture_objects(objects,3); int carrier=-1;
+    assert(!md_ipc_capsules_publish(owner,&sender,"0123456789abcdef0123456789abcdef",message,fds,3,&carrier));
+    md_fd_message_release(message);
+    struct md_received_fds *received=NULL;
+    assert(!md_ipc_capsules_receive(reader,&receiver,carrier,&received));
+    /* Retain the warmed origins: collect may otherwise legitimately release
+     * their backing cache during an early failed receive. */
+    struct md_received_fds *warm=received; received=NULL;
+    unsigned warmed=descriptors();
+    int reached=0;
+    for (int i=0;i<128 && !reached;++i) {
+        test_mount_allocation_failure_after(i);
+        int error=md_ipc_capsules_receive(reader,&receiver,carrier,&received);
+        test_mount_allocation_failure_after(-1);
+        if (!error) {
+            reached=1; assert(received->count==3);
+            assert(md_descriptor_inode_is(received->origins[0]) && md_descriptor_inode_is(received->origins[2]));
+            assert(md_fs_anchor_from_object(received->origins[1]));
+            assert(!md_descriptor_inode_chown(received->origins[2],&root,121,122));
+            struct stat st={0}; assert(!md_descriptor_inode_stat(inode,&root,&st));
+            assert(st.st_uid==121 && st.st_gid==122);
+            assert(!md_descriptor_inode_chmod(inode,&root,0640));
+            assert(!md_descriptor_inode_stat(received->origins[0],&root,&st));
+            assert((st.st_mode&07777)==0640);
+            md_received_fds_release(received); received=NULL;
+        } else assert(error==-ENOMEM && !received);
+        unsigned current=descriptors();
+        if (current!=warmed) fprintf(stderr,"anonymous import allocation=%d error=%d fds=%u expected=%u\n",i,error,current,warmed);
+        assert(current==warmed);
+    }
+    assert(reached);
+    md_received_fds_release(warm);
+    md_fd_object_release(inode);
+    md_ipc_capsules_free(owner); md_ipc_binding_release(&sender); md_ipc_credentials_close(authority);
+    source_close(&source_state); close(ends[1]); close(app[0]);
+    assert(!md_ipc_capsules_receive(reader,&receiver,carrier,&received));
+    close(carrier);
+    assert(write(received->fds[2],"p",1)==1);
+    char byte; assert(read(ends[0],&byte,1)==1 && byte=='p');
+    md_received_fds_release(received);
+    assert(!read(ends[0],&byte,1));
+    close(ends[0]); close(app[1]);
+    md_ipc_capsules_free(reader); md_ipc_binding_release(&receiver); md_ipc_credentials_close(foreign);
+    md_identity_release(&root);
+    assert(descriptors()==before);
+    puts("PASS anonymous capsules: mixed origins, foreign authority, live metadata, allocation rollback, sender exit and EOF");
+}
 static int unmount_alias(struct md_filesystem *fs) {
     struct md_identity identity=md_identity_new(0,0);
     fs->store->identity=&identity;
@@ -753,12 +820,13 @@ void test_origin_transfer(const char *base) {
     alarm(120); bundles();
     const char *names[]={"origin-local","origin-faults","origin-processes","origin-unknown",
         "origin-capsules","origin-capsules-unknown","origin-capsules-discard","origin-storage","origin-mount-pins",
-        "origin-typed-capsules"}; char name[PATH_MAX];
-    for (unsigned n=0;n<10;++n) {
+        "origin-typed-capsules","origin-anonymous-capsules"}; char name[PATH_MAX];
+    for (unsigned n=0;n<11;++n) {
         path(name,base,names[n]); assert(!mkdir(name,0700));
         if (!n) local(name); else if (n==1) failures(name); else if (n==2) processes(name);
         else if (n==3) unknown(name); else if (n==7) storage_process(name);
-        else if (n==8) mount_pins(name); else if (n==9) typed_capsules(name); else capsules(name,(int)n-4);
+        else if (n==8) mount_pins(name); else if (n==9) typed_capsules(name);
+        else if (n==10) anonymous_capsules(name); else capsules(name,(int)n-4);
     }
     alarm(0); puts("PASS portable message origins");
 }

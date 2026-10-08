@@ -15,6 +15,7 @@
 #include "received_fds.h"
 #include "ipc_received.h"
 #include "ipc_capsule.h"
+#include "descriptor_inode.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -30,6 +31,7 @@ struct md_fs_buffer_service {
     struct md_resource_wakeup *wake;
     struct md_fs_buffer_request *requests;
     struct md_ipc_capsules *capsules; /* filesystem worker until stop/join */
+    md_control_factory control;
     void (*complete)(struct md_fs_buffer_request *, pid_t, int);
 };
 struct md_fs_buffer_request {
@@ -53,6 +55,7 @@ struct md_fs_buffer_request {
     int snapshot_waiting;
     size_t snapshot_size;
     struct md_fs_anchor *input[2];
+    struct md_fd_object *reopened;
     int captured[2];
     struct md_received_fds *received;
     struct md_received_fds *expanded;
@@ -79,10 +82,14 @@ void md_fs_buffer_open_release(struct md_fs_buffer_open *o) {
     if (o->fd>=0) close(o->fd);
     if (o->completion.kind==MD_OPEN_PIPE) close(o->completion.control);
     md_fs_anchor_release(o->origin);
+    md_fd_object_release(o->object);
     *o=(struct md_fs_buffer_open){.fd=-1};
 }
+struct md_fd_object *md_fs_buffer_open_object(const struct md_fs_buffer_open *o) {
+    return o->object ? o->object : md_fs_anchor_object(o->origin);
+}
 int md_fs_buffer_open_take(struct md_fs_buffer_request *r, struct md_fs_buffer_open *out) {
-    if (!r || !out || out->fd>=0 || out->origin) return -EINVAL;
+    if (!r || !out || out->fd>=0 || out->origin || out->object) return -EINVAL;
     if (r->task_pending) return 0;
     if (r->opened.fd<0) return 0;
     *out=r->opened; r->opened=(struct md_fs_buffer_open){.fd=-1}; return 1;
@@ -101,6 +108,7 @@ static void dispose(struct md_fs_buffer_request *r) {
         if (r->captured[i]>=0) close(r->captured[i]);
     }
     md_fs_context_end(&r->context);
+    md_fd_object_release(r->reopened);
     md_received_fds_release(r->received);
     md_received_fds_release(r->expanded);
     md_fd_channel_release(r->export);
@@ -185,7 +193,7 @@ static int complete(struct md_fs_work *work) {
         r->service->complete(r,r->actor,0);
         return 0;
     }
-    if (!r->cancelled && !r->error && r->opened.completion.kind) {
+    if (!r->cancelled && !r->error && r->opened.completion.kind && r->opened.completion.kind!=MD_OPEN_CALLER) {
         int error=md_open_job_start(&r->opening,r->opened.fd,r->request.flags,r->opened.completion);
         if (!error) {
             close(r->opened.fd); r->opened.fd=-1;
@@ -365,6 +373,17 @@ int md_fs_buffer_inspect_take(struct md_fs_buffer_request *r, struct md_received
     if (r->submitted || r->error) return -EINVAL;
     *out=r->expanded; r->expanded=NULL; return 1;
 }
+static int control_open(void *context,const struct md_control_file_ops *ops,void *data,
+        const struct md_identity *identity,int flags) {
+    struct md_fs_buffer_request *r=context;
+    if (!r->service->control) return -EOPNOTSUPP;
+    if (r->opened.object) return -EBUSY;
+    r->opened.object=r->service->control(ops,data,identity,flags);
+    return r->opened.object ? 0 : -errno;
+}
+void md_fs_buffer_control_factory(struct md_fs_buffer_service *s,md_control_factory factory) {
+    s->control=factory;
+}
 static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
     struct md_fs_buffer_request *r=(void *)work;
     r->error=error;
@@ -384,13 +403,20 @@ static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
         return;
     }
     struct md_fs_response *reply=&r->output->reply;
+    if (r->reopened && !(r->request.flags&O_PATH)) {
+        int mode=r->request.flags&O_ACCMODE;
+        r->error=md_descriptor_inode_access(r->reopened,&r->context.task.identity,
+            mode==O_RDONLY ? R_OK : mode==O_WRONLY ? W_OK : R_OK|W_OK);
+        if (r->error) return;
+    }
     memset(&reply->result,0,sizeof(reply->result));
     r->output->transfer=MD_FS_BUFFER_NO_FD;
     memset(r->output->source,0,sizeof(r->output->source));
     struct md_fs_output output={.data=reply->data,.capacity=sizeof(reply->data),
         .reserve_watch=r->request.operation==MD_FS_WATCH_READ,
         .directory_position=r->request.operation==MD_FS_GETDENTS ? &r->position : NULL,
-        .origin=md_fs_operation_has_origin(r->request.operation) ? &r->opened.origin : NULL};
+        .origin=md_fs_operation_has_origin(r->request.operation) ? &r->opened.origin : NULL,
+        .control=control_open,.control_context=r};
     if (md_fs_operation_value(r->request.operation)) {
         output.data=r->output->value; output.capacity=sizeof(r->output->value);
     }
@@ -411,9 +437,16 @@ static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
     } else md_fs_context_execute(&r->context,&r->request,&reply->result,&output);
     r->reserved=(output.reserve_watch || output.directory_position) && !reply->result.error;
     r->opened.fd=reply->result.fd; reply->result.fd=-1;
+    if (r->opened.object) reply->result.selectors=r->opened.object->type->selectors;
     r->opened.completion=reply->result.open_completion;
     reply->result.open_completion=(struct md_open_completion){0};
     if (r->opened.fd>=0) {
+        if (r->reopened) {
+            md_fs_anchor_release(r->opened.origin); r->opened.origin=NULL;
+            md_fd_object_release(r->opened.object);
+            r->opened.object=md_fd_object_retain(r->reopened);
+        }
+        if (r->opened.object) reply->result.selectors=r->opened.object->type->selectors;
         if (r->request.operation==MD_FS_TASK_PATH) {
             if (r->opened.completion.kind) { r->error=-EPROTO; return; }
             r->opened.task_path=r->request.mode;
@@ -421,6 +454,12 @@ static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
             snprintf(r->output->source,sizeof(r->output->source),"/proc/%d/fd/%d",getpid(),r->opened.fd);
             reply->delivery=MD_FS_REPLIED;
             return;
+        }
+        if (r->opened.completion.kind==MD_OPEN_CALLER) {
+            r->opened.flags=r->request.flags;
+            r->output->transfer=MD_FS_BUFFER_CALLER_OPEN;
+            snprintf(r->output->source,sizeof(r->output->source),"/proc/%d/fd/%d",getpid(),r->opened.fd);
+            reply->delivery=MD_FS_REPLIED; return;
         }
         if (r->opened.completion.kind) {
             r->opened.flags=O_CLOEXEC;
@@ -661,6 +700,11 @@ int md_fs_buffer_progress(struct md_fs_buffer_service *s) {
             int base=r->request.directory[i];
             if (base==AT_FDCWD) r->input[i]=md_fs_anchor_retain(r->context.task.cwd);
             else if (base>=0) r->input[i]=md_fd_origins_get(r->files.table,base,NULL);
+            if (!i && base>=0 && r->request.operation==MD_FS_REOPEN) {
+                struct md_fd_object *object=md_fd_origins_object(r->files.table,base,NULL);
+                if (md_descriptor_inode_is(object)) r->reopened=object;
+                else md_fd_object_release(object);
+            }
             if (base!=-1) {
                 r->request.origin[i]=r->input[i];
                 if (r->input[i] && !(data&(1U<<i))) {

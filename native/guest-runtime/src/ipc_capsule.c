@@ -3,6 +3,8 @@
 #include "ipc_scope.h"
 #include "fd_bundle.h"
 #include "fs_origin_transfer.h"
+#include "descriptor_inode.h"
+#include "descriptor_parcel.h"
 #include "fs_wire.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -18,7 +20,7 @@
 #include <unistd.h>
 
 enum { MAGIC=0x4d444643, VERSION=2, KEY_BYTES=32, CUSTODY_FDS=4,
-    PORTABLE=0, LOCAL=1 };
+    PORTABLE=0, LOCAL=1, PORTABLE_TYPED=2 };
 struct capsule {
     uint32_t magic, version, metadata, kind;
     struct md_fd_message_route route;
@@ -106,13 +108,14 @@ int md_ipc_capsules_publish(struct md_ipc_capsules *s, const struct md_ipc_bindi
         const char *launch, struct md_fd_message *message, const int *fds, unsigned count, int *out) {
     if (!message || !fds || !count || count!=md_fd_message_count(message) || !out || *out>=0) return -EINVAL;
     int error=binding(s,b);
-    int local=0, published=0, lifetime[2]={-1,-1};
+    int local=0, anonymous=0, published=0, lifetime[2]={-1,-1};
     struct md_fd_object *const *origins=md_fd_message_origins(message);
     for (unsigned i=0;!error && i<count;++i) {
         if (fds[i]<0) error=-EBADF;
         else if (origins[i]) {
             struct md_fs_anchor *anchor=md_fs_anchor_from_object(origins[i]);
             if (anchor) error=md_fs_anchor_check_fd(anchor,fds[i]);
+            else if (md_descriptor_inode_is(origins[i])) anonymous=1;
             else local=1;
         }
     }
@@ -129,7 +132,10 @@ int md_ipc_capsules_publish(struct md_ipc_capsules *s, const struct md_ipc_bindi
         if (!error) { lifetime[0]=-1; published=1; p.kind=LOCAL; }
     } else if (!error) error=md_fd_message_issue(message,pair[1]);
     if (!error) error=md_fd_message_route(message,&p.route);
-    if (!error && !local) error=md_fs_origin_export(message,&parcel);
+    if (!error && !local) {
+        p.kind=anonymous ? PORTABLE_TYPED : PORTABLE;
+        error=anonymous ? md_descriptor_parcel_export(message,fds,&parcel) : md_fs_origin_export(message,&parcel);
+    }
     if (!error) error=md_fd_bundle_pack(fds,count,&rights[0]);
     if (!error && !local) error=md_fd_bundle_pack(parcel.fd,parcel.count,&rights[1]);
     if (!error && local) { rights[1]=lifetime[1]; lifetime[1]=-1; }
@@ -157,8 +163,8 @@ int md_ipc_capsules_publish(struct md_ipc_capsules *s, const struct md_ipc_bindi
 }
 static int verify(struct md_ipc_capsules *s, const struct md_ipc_binding *b,
         int carrier, const struct capsule *p) {
-    if (p->magic!=MAGIC || p->version!=VERSION || p->kind>LOCAL
-            || (p->kind==PORTABLE ? !p->metadata : p->metadata!=0)
+    if (p->magic!=MAGIC || p->version!=VERSION || p->kind>PORTABLE_TYPED
+            || (p->kind!=LOCAL ? !p->metadata : p->metadata!=0)
             || p->metadata>MD_FS_ORIGIN_MAX_RIGHTS || p->route.magic!=MD_FD_ROUTE_MAGIC
             || p->route.version!=MD_FD_ROUTE_VERSION || !p->route.count
             || p->route.count>MD_FD_RECEIPT_MAX) return -EPROTO;
@@ -198,30 +204,32 @@ int md_ipc_capsules_receive(struct md_ipc_capsules *s, const struct md_ipc_bindi
         error=md_fd_messages_claim(b->scope->local_messages,b,carrier,&p.route,&local);
         if (error==-ENODATA) error=-EXDEV;
     }
-    if (!error && p.kind==PORTABLE) {
+    if (!error && p.kind!=LOCAL) {
         parcel.fd=malloc(p.metadata*sizeof(int));
         if (!parcel.fd) error=-ENOMEM;
     }
-    if (!error && p.kind==PORTABLE) {
+    if (!error && p.kind!=LOCAL) {
         error=md_fd_bundle_peek(rights[1],p.metadata,parcel.fd);
         if (!error) parcel.count=p.metadata;
     }
-    if (!error && p.kind==PORTABLE && !s->imports) error=md_fs_origin_imports_new(b->scope->root,&s->imports);
+    if (!error && p.kind!=LOCAL && !s->imports) error=md_fs_origin_imports_new(b->scope->root,&s->imports);
     if (!error && p.kind==PORTABLE) error=md_fs_origin_import(s->imports,&p.route,&parcel,&vector);
     if (!error) error=md_received_fds_reserve(&received,p.route.count);
     if (!error) {
         error=md_fd_bundle_peek(rights[0],p.route.count,received->fds);
         if (!error) received->count=p.route.count;
     }
-    if (!error && (local ? md_fd_message_count(local) : md_fs_origin_vector_count(vector))!=p.route.count) error=-EPROTO;
+    if (!error && p.kind==PORTABLE_TYPED) error=md_descriptor_parcel_import(s->imports,&p.route,&parcel,received);
+    if (!error && p.kind!=PORTABLE_TYPED
+            && (local ? md_fd_message_count(local) : md_fs_origin_vector_count(vector))!=p.route.count) error=-EPROTO;
     struct md_fs_anchor *const *entries=md_fs_origin_vector_entries(vector);
     struct md_fd_object *objects[MD_FD_RECEIPT_MAX];
-    for (unsigned i=0;!error && i<p.route.count;++i) {
+    for (unsigned i=0;!error && p.kind!=PORTABLE_TYPED && i<p.route.count;++i) {
         objects[i]=local ? md_fd_message_origins(local)[i] : md_fs_anchor_object(entries[i]);
         struct md_fs_anchor *anchor=md_fs_anchor_from_object(objects[i]);
         if (anchor) error=md_fs_anchor_check_fd(anchor,received->fds[i]);
     }
-    if (!error) {
+    if (!error && p.kind!=PORTABLE_TYPED) {
         error=md_received_fds_annotate(received,objects,p.route.count);
     }
     md_fd_message_release(local);

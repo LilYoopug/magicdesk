@@ -8,8 +8,9 @@
 int md_resources_init(struct md_task_resources *r, struct md_mount_namespace *mounts) {
     *r = (struct md_task_resources){.fs=md_domain_new(), .sem_undo=md_ipc_undo_new(),
         .mounts=md_mount_namespace_retain(mounts), .files=md_fd_origins_new(), .uts=md_uts_namespace_new(),
-        .ipc=md_ipc_namespace_new(NULL,0)};
-    if (r->fs && r->sem_undo && r->files && r->uts && r->ipc) { md_domain_bind_mounts(r->fs,mounts); return 0; }
+        .ipc=md_ipc_namespace_new(NULL,0), .network=md_network_namespace_new(NULL,0),
+        .cgroup=md_cgroup_member_new()};
+    if (r->fs && r->sem_undo && r->files && r->uts && r->ipc && r->network && r->cgroup) { md_domain_bind_mounts(r->fs,mounts); return 0; }
     md_resources_release(r); return -ENOMEM;
 }
 int md_resources_release(struct md_task_resources *r) {
@@ -20,6 +21,8 @@ int md_resources_release(struct md_task_resources *r) {
     md_pid_identity_release(r->pid);
     md_pid_identity_release(r->pid_group);
     md_pid_namespace_release(r->pid_children);
+    md_network_namespace_release(r->network);
+    md_cgroup_member_release(r->cgroup);
     int error = md_ipc_undo_release(md_ipc_namespace_active(r->ipc), r->sem_undo);
     md_ipc_namespace_release(r->ipc);
     *r = (struct md_task_resources){0};
@@ -33,6 +36,9 @@ int md_resources_fork(const struct md_task_resources *r, unsigned long flags,
         out->files=md_fd_origins_fork(r->files,!!(flags & CLONE_FILES));
         if (!out->files) { md_resources_release(out); return -ENOMEM; }
     }
+    if (r->cgroup && !(out->cgroup=md_cgroup_member_fork(r->cgroup))) {
+        md_resources_release(out); return -ENOMEM;
+    }
     out->sem_undo = md_ipc_undo_fork(r->sem_undo, !!(flags & CLONE_SYSVSEM));
     if (out->sem_undo) {
         out->mounts=md_mount_namespace_retain(r->mounts);
@@ -41,6 +47,7 @@ int md_resources_fork(const struct md_task_resources *r, unsigned long flags,
         out->pid=md_pid_identity_retain(r->pid);
         out->pid_group=md_pid_identity_retain(r->pid_group);
         out->pid_children=md_pid_namespace_retain(r->pid_children);
+        out->network=md_network_namespace_retain(r->network);
         return 0;
     }
     md_resources_release(out); return -ENOMEM;
@@ -54,8 +61,7 @@ int md_resources_exec(struct md_task_resources *r) {
     return 0;
 }
 int md_resources_clone_supported(unsigned long flags) {
-    return !(flags & (CLONE_NEWNET
-        | CLONE_NEWCGROUP))
+    return !(flags & CLONE_NEWCGROUP)
         && (!(flags&CLONE_NEWUSER) || !(flags&(CLONE_FS|CLONE_THREAD)))
         && (!(flags&CLONE_NEWPID) || !(flags&(CLONE_THREAD|CLONE_PARENT)))
         && (flags & (CLONE_NEWNS | CLONE_FS)) != (CLONE_NEWNS | CLONE_FS)
@@ -66,14 +72,13 @@ int md_resources_unshare_prepare(const struct md_task_resources *r, unsigned lon
     /* VM/SIGHAND/THREAD checks remain kernel-owned, including the requirement
      * that the caller is alone. Namespace flags are not successful no-ops. */
     unsigned long supported = CLONE_FS | CLONE_FILES | CLONE_SYSVSEM | CLONE_NEWNS
-        | CLONE_VM | CLONE_SIGHAND | CLONE_THREAD | CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWUSER | CLONE_NEWPID;
+        | CLONE_VM | CLONE_SIGHAND | CLONE_THREAD | CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET;
     *change = (struct md_resource_change){0};
-    unsigned long namespaces = CLONE_NEWNET
-        | CLONE_NEWCGROUP | CLONE_NEWTIME;
+    unsigned long namespaces = CLONE_NEWCGROUP | CLONE_NEWTIME;
     if (flags & ~(supported | namespaces)) return -EINVAL;
     if (flags & namespaces) return -ENOTSUP;
     if ((flags & CLONE_NEWNS) && !r->mounts) return -ENOTSUP;
-    unsigned long creating=flags&(CLONE_NEWNS|CLONE_NEWUTS|CLONE_NEWIPC|CLONE_NEWUSER|CLONE_NEWPID);
+    unsigned long creating=flags&(CLONE_NEWNS|CLONE_NEWUTS|CLONE_NEWIPC|CLONE_NEWUSER|CLONE_NEWPID|CLONE_NEWNET);
     if (creating && !identity) return -EINVAL;
     if (creating && !(flags&CLONE_NEWUSER) && !md_identity_capable(identity,CAP_SYS_ADMIN)) return -EPERM;
     struct md_user_namespace *owner=identity ? identity->user_namespace : NULL;
@@ -88,6 +93,10 @@ int md_resources_unshare_prepare(const struct md_task_resources *r, unsigned lon
     }
     struct md_task_resources next = {0};
     int error=-ENOMEM;
+    if (flags&CLONE_NEWNET) {
+        next.network=md_network_namespace_new(owner,1);
+        if (!next.network) { error=-errno; goto failed; }
+    }
     if (flags&CLONE_NEWPID) {
         if (r->pid_children!=md_pid_identity_namespace(r->pid)) { error=-EINVAL; goto failed; }
         next.pid_children=md_pid_namespace_new(r->pid_children,owner);
@@ -128,6 +137,10 @@ int md_resources_unshare_finish(struct md_task_resources *r,
         || (change->join_mounts && (!change->next.mounts || !change->next.fs))
         || (change->check_root && !change->next.fs));
     if (!result && !invalid) {
+        if (change->next.network) {
+            struct md_network_namespace *old=r->network;
+            r->network=change->next.network; change->next.network=old;
+        }
         if (change->pid_children_pending) {
             struct md_pid_namespace *old=r->pid_children;
             r->pid_children=change->next.pid_children; change->next.pid_children=old;
@@ -182,6 +195,8 @@ int md_resources_setns_prepare(const struct md_task_resources *r, const struct m
     const struct md_user_namespace *owner=md_namespace_reference_owner(target);
     if (!md_identity_capable(id,CAP_SYS_ADMIN) || !md_identity_capable_in(id,owner,CAP_SYS_ADMIN)) return -EPERM;
     switch (target->kind) {
+    case MD_NAMESPACE_NETWORK:
+        change->next.network=md_network_namespace_retain(target->value.network); break;
     case MD_NAMESPACE_MOUNT:
         if (!md_identity_capable(id,CAP_SYS_CHROOT)) return -EPERM;
         if (md_domain_shared(r->fs)) return -EINVAL;

@@ -51,6 +51,10 @@ struct md_proc_path md_proc_path(const char *path) {
         out.process=(int)RAW0(getpid);
         out.kind = MD_PROC_FD;
     } else if (word(&p, "proc")) {
+        if (word(&p,"cgroups")) {
+            out.kind=MD_PROC_CGROUPS; out.process=(int)RAW0(gettid);
+            out.tail=p; out.anchor_length=(size_t)(p-path); return out;
+        }
         if (word(&p,"mounts")) {
             out.kind=MD_PROC_MOUNTS; out.tail=p; out.anchor_length=(size_t)(p-path); return out;
         }
@@ -95,6 +99,7 @@ struct md_proc_path md_proc_path(const char *path) {
         else if (word(&p, "auxv")) out.kind = MD_PROC_AUXV;
         else if (word(&p,"status")) out.kind=MD_PROC_STATUS;
         else if (word(&p,"stat")) out.kind=MD_PROC_STAT;
+        else if (word(&p,"cgroup")) out.kind=MD_PROC_CGROUP;
         else if (word(&p, "mounts")) out.kind = MD_PROC_MOUNTS;
         else if (word(&p, "mountinfo")) out.kind = MD_PROC_MOUNTINFO;
         else if (word(&p, "uid_map")) out.kind = MD_PROC_UID_MAP;
@@ -107,6 +112,7 @@ struct md_proc_path md_proc_path(const char *path) {
             else if (word(&p,"ipc")) out.kind=MD_PROC_NS_IPC;
             else if (word(&p,"pid")) out.kind=MD_PROC_NS_PID;
             else if (word(&p,"pid_for_children")) out.kind=MD_PROC_NS_PID_CHILDREN;
+            else if (word(&p,"net")) out.kind=MD_PROC_NS_NETWORK;
             else if (*component(p)) { out.kind=MD_PROC_NS_UNSUPPORTED; p+=md_length(p); }
             else { out.kind=MD_PROC_NS_DIRECTORY; p=component(p); }
         }

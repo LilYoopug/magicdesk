@@ -56,9 +56,9 @@ int md_complete_open(int pin, int flags, struct md_open_completion completion) {
     if (pin < 0 || completion.kind == MD_OPEN_READY) return pin;
     char path[64]; descriptor_path(path, pin);
     flags = md_open_endpoint_flags(flags);
-    if (completion.kind == MD_OPEN_FIFO) {
-        /* EVENT_WAIT: native FIFO peer rendezvous; a caller signal cancels it.
-         * No namespace worker or transaction is retained. */
+    if (completion.kind == MD_OPEN_FIFO || completion.kind==MD_OPEN_CALLER) {
+        /* EVENT_WAIT: native FIFO peer rendezvous or terminal open; a caller
+         * signal cancels it. No namespace worker transaction is retained. */
         long r = C(openat, AT_FDCWD, path, flags, 0, 0, 0);
         C(close, pin, 0, 0, 0, 0, 0);
         return (int)r;

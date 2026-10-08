@@ -6,6 +6,7 @@
 #include "socket_identity.h"
 #include "ipc_credentials.h"
 #include "socket_ancillary.h"
+#include "descriptor_calls.h"
 #include "proc_paths.h"
 #include "raw.h"
 #include <errno.h>
@@ -23,6 +24,29 @@ static long domain(int fd) {
 }
 static long invoke(long nr, const unsigned long *a) {
     return md_raw(nr, a[0], a[1], a[2], a[3], a[4], a[5]);
+}
+long md_socket_pair(const struct md_fs *fs, const unsigned long *a, int offline) {
+    if (offline && (int)a[0]!=AF_UNIX) return -EAFNOSUPPORT;
+    long r=offline ? md_descriptor_pair(SYS_socketpair,a) : invoke(SYS_socketpair,a);
+    if (r<0 || (int)a[0]!=AF_UNIX || !fs->endpoint[0]) return r;
+    int pair[2]={-1,-1};
+    r=md_read_memory(pair,(void *)a[3],sizeof(pair));
+    if (!r) r=md_socket_identity_call(fs,MD_IPC_PAIR,pair[0],pair[1],0,NULL,0);
+    if (r<0) { RAW1(close,pair[0]); RAW1(close,pair[1]); }
+    return r;
+}
+long md_socket_offline_error(long nr, const unsigned long *a) {
+    /* Offline socketpairs have no address namespace or autobind. Payload and
+     * SCM_RIGHTS on their established connection remain native. */
+    if (nr==SYS_sendto) return a[4] && a[5] ? -EOPNOTSUPP : 0;
+    if (nr==SYS_sendmmsg) return -EOPNOTSUPP;
+    if (nr==SYS_sendmsg) {
+        struct msghdr message;
+        long error=md_read_memory(&message,(void *)a[1],sizeof(message));
+        if (error) return error;
+        return message.msg_name && message.msg_namelen ? -EOPNOTSUPP : 0;
+    }
+    return 0;
 }
 static long connect_socket(const struct md_fs *fs, int fd, const struct sockaddr_un *name, unsigned length) {
     long tracked = md_socket_identity_call(fs, MD_IPC_CONNECT_BEGIN, fd, -1, 0, name, length);
@@ -87,13 +111,7 @@ long md_socket_address_call(const struct md_fs *fs, const char *exe, long nr, co
     if (nr == SYS_recvmsg) return invoke(nr,a);
     if (nr == SYS_getsockopt) return md_socket_identity_option(fs, a);
     if (nr == SYS_socketpair) {
-        long r = invoke(nr, a);
-        if (r < 0 || (int)a[0] != AF_UNIX || !fs->endpoint[0]) return r;
-        int pair[2] = {-1,-1};
-        r = md_read_memory(pair, (void *)a[3], sizeof(pair));
-        if (!r) r = md_socket_identity_call(fs, MD_IPC_PAIR, pair[0], pair[1], 0, NULL, 0);
-        if (r < 0) { RAW1(close, pair[0]); RAW1(close, pair[1]); }
-        return r;
+        return md_socket_pair(fs,a,0);
     }
     if (nr == SYS_listen) {
         long family = domain((int)a[0]);

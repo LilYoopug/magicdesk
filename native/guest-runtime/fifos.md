@@ -1,4 +1,21 @@
-# Named Pipes
+# Pipes
+
+## Anonymous Pipes
+
+`pipe2` publishes both endpoints through one descriptor-table transaction.
+`descriptor_inode` records logical ownership, mode and ctime without retaining
+either data endpoint. Dup, fork and typed SCM_RIGHTS preserve that metadata;
+data, EOF, SIGPIPE and pipe capacity remain native. Ownership checks use the
+same guest credentials as named files.
+
+Independent-supervisor transfer uses authenticated typed parcels. Metadata is
+published lazily in an O_TMPFILE carrier with OFD locking and shared generations;
+ordinary pipe IO neither opens that carrier nor acquires its lock. Native peers
+receive ordinary kernel pipe descriptors, not a rewritten payload.
+`test_descriptor_inode.c`, `test_descriptor_metadata.py` and the origin-transfer
+suite check metadata sharing, malformed imports and exact descriptor cleanup.
+
+## Named Pipes
 
 Guest FIFO names, ownership, modes, ACLs, hardlinks and rename/unlink use the
 ordinary inode namespace. OCI layers and prepared-tree import retain FIFO

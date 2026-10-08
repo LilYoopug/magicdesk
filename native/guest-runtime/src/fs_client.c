@@ -41,7 +41,7 @@ int md_fs_result_valid(const struct md_fs_request *request, const struct md_fs_r
             || (reply->proc_namespace && !reply->host_path)
             || (reply->host_path==2 && (operation!=MD_FS_MOUNT || (request->mode!=MD_FS_MOUNT_BIND
                 && request->mode!=MD_FS_MOUNT_PIVOT && request->mode!=MD_FS_MOUNT_MOVE)))
-            || reply->open_completion.kind > MD_OPEN_PIPE || reply->open_completion.kind < MD_OPEN_READY
+            || reply->open_completion.kind > MD_OPEN_CALLER || reply->open_completion.kind < MD_OPEN_READY
             || (reply->open_completion.kind && (reply->error || reply->host_path || reply->size
                 || (operation != MD_FS_OPEN && operation != MD_FS_REOPEN && operation != MD_FS_OPEN_OBJECT)
                 || (request->flags & O_PATH)))

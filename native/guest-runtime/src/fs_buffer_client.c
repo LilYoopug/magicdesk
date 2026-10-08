@@ -55,7 +55,7 @@ static long receive_result(struct md_fs_buffer_frame *frame, const struct md_fs_
     unsigned transfer=frame->transfer;
     unsigned descriptors=transfer!=MD_FS_BUFFER_NO_FD;
     if (out->delivery!=MD_FS_REPLIED || out->result.fd!=-1 || out->result.open_completion.kind
-            || transfer>MD_FS_BUFFER_TASK_PATH
+            || transfer>MD_FS_BUFFER_CALLER_OPEN
             || !md_fs_result_valid(q,&out->result,data,capacity,descriptors)) result=-EPROTO;
     else if (transfer==MD_FS_BUFFER_TASK_PATH) {
         if (q->operation!=MD_FS_TASK_PATH || frame->source[sizeof(frame->source)-1]
@@ -77,14 +77,19 @@ static long receive_result(struct md_fs_buffer_frame *frame, const struct md_fs_
         long fd=md_adapter_receive_fd(frame,q->flags,MD_FS_BUFFER_RIGHTS_BEGIN);
         if (fd<0) out->result.error=(int)fd;
         else out->result.fd=(int)fd;
-    } else if (transfer==MD_FS_BUFFER_ANCHOR) {
+    } else if (transfer==MD_FS_BUFFER_ANCHOR || transfer==MD_FS_BUFFER_CALLER_OPEN) {
         if (frame->source[sizeof(frame->source)-1] || !md_prefix(frame->source,"/proc/")) result=-EPROTO;
         else {
             long fd=md_guest_open_anchor(AT_FDCWD,frame->source,
-                O_PATH|(q->flags&(O_CLOEXEC|O_DIRECTORY|O_NOFOLLOW)),0,MD_FS_BUFFER_SOURCE);
+                transfer==MD_FS_BUFFER_CALLER_OPEN ? md_open_endpoint_flags(q->flags)
+                    : O_PATH|(q->flags&(O_CLOEXEC|O_DIRECTORY|O_NOFOLLOW)),0,MD_FS_BUFFER_SOURCE);
             if (fd<0) out->result.error=(int)fd;
             else out->result.fd=(int)fd;
         }
+    }
+    if (!result && !out->result.error && out->result.fd>=0 && out->result.selectors) {
+        result=md_fd_filter_arm_mask(out->result.selectors,out->result.fd);
+        if (result) { RAW1(close,out->result.fd); out->result.fd=-1; }
     }
     if ((q->operation==MD_FS_WATCH_READ || q->operation==MD_FS_GETDENTS) && !out->result.error) {
         int copied=result ? (int)result : deliver ? deliver(context,out->data,out->result.size) : 0;

@@ -4,7 +4,7 @@
 #include <sys/stat.h>
 
 enum md_namespace_kind { MD_NAMESPACE_USER, MD_NAMESPACE_MOUNT, MD_NAMESPACE_UTS, MD_NAMESPACE_IPC,
-    MD_NAMESPACE_PID, MD_NAMESPACE_PID_CHILDREN };
+    MD_NAMESPACE_PID, MD_NAMESPACE_PID_CHILDREN, MD_NAMESPACE_NETWORK };
 struct md_task_resources;
 struct md_namespace_reference {
     enum md_namespace_kind kind;
@@ -14,6 +14,7 @@ struct md_namespace_reference {
         struct md_uts_namespace *uts;
         struct md_ipc_namespace *ipc;
         struct md_pid_namespace *pid;
+        struct md_network_namespace *network;
     } value;
 };
 /* References own resources, not a pid or a proc-directory carrier. */
