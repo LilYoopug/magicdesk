@@ -37,7 +37,7 @@ static inline int md_proc_file_process(enum md_proc_file_kind kind) {
 struct md_pid_namespace;
 struct md_proc_file;
 void md_proc_file_pid_view(struct md_proc_file *,struct md_pid_namespace *);
-void md_proc_file_process_state(struct md_proc_file *,const struct md_identity *,pid_t tracer);
+void md_proc_file_process_state(struct md_proc_file *,const struct md_identity *,struct md_pid_namespace *,pid_t tracer);
 static inline int md_proc_file_directory(enum md_proc_file_kind kind) {
     return kind==MD_PROC_FILE_NS_DIRECTORY || kind==MD_PROC_FILE_PROCESS_DIRECTORY;
 }

@@ -140,11 +140,50 @@ static void range_sharing(unsigned flags, int invalid) {
     close(c.ready[0]); close(c.ready[1]); close(c.done[0]); close(c.done[1]);
     printf("PASS close_range flags=%#x invalid=%d\n",flags,invalid);
 }
-static void restricted_descriptors(void) {
+static int import_descriptor(int original);
+static void restricted_descriptors(int via_prctl) {
     pid_t child=fork(); assert(child>=0);
     if (!child) {
         int file=open("value",O_RDWR|O_CREAT,0600); assert(file>=0);
+        int channel[2]; assert(!pipe(channel));
+        int proc=open("/proc/self/uid_map",O_RDONLY); assert(proc>=0);
+        struct sock_filter rules[]={
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_prctl,0,1),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EPERM),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_seccomp,0,1),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EPERM),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_prlimit64,0,1),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EPERM),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
+        };
+        struct sock_fprog program={sizeof(rules)/sizeof(*rules),rules};
+        assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+        if (via_prctl) assert(!prctl(PR_SET_SECCOMP,SECCOMP_MODE_FILTER,&program));
+        else assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+        assert(prctl(PR_GET_DUMPABLE)==-1 && errno==EPERM);
+        assert(syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program)==-1 && errno==EPERM);
+        int imported=import_descriptor(proc); assert(imported>=0);
+        char imported_text[128]; assert(read(imported,imported_text,sizeof(imported_text))>0);
+        assert(!lseek(imported,0,SEEK_SET) && !close(imported));
+        int slot=dup(proc); assert(slot>=0 && !close(slot));
+        /* A proc selector outlives the descriptor which armed it. Reusing its
+         * slot must retain ordinary IO, also after the root becomes restricted. */
+        assert(dup3(file,slot,0)==slot);
         assert(!chroot("/proc/self/fdinfo"));
+        char data[128]={0};
+        int proc_copy=fcntl(proc,F_DUPFD_CLOEXEC,200); assert(proc_copy>=200);
+        assert(read(proc_copy,data,sizeof(data))>0);
+        assert(lseek(proc_copy,0,SEEK_SET)==0);
+        assert(!close(proc_copy));
+        assert(read(proc,data,sizeof(data))>0);
+        assert(write(slot,"z",1)==1 && lseek(slot,0,SEEK_SET)==0);
+        assert(read(slot,data,1)==1 && data[0]=='z');
+        assert(!fsync(slot));
+        assert(dup3(channel[1],slot,0)==slot);
+        put(slot); get(channel[0]);
+        assert(!close(slot) && !close(proc));
+        close(channel[0]); close(channel[1]);
         int copy=dup(file); assert(copy>=0);
         int target=fcntl(file,F_DUPFD,100); assert(target>=100);
         assert(dup3(copy,target,O_CLOEXEC)==target);
@@ -164,7 +203,7 @@ static void restricted_descriptors(void) {
         _exit(0);
     }
     reap(child);
-    puts("PASS restricted proc-root preserves native descriptor mutation and flags");
+    printf("PASS restricted proc-root preserves typed IO, reused descriptor IO, mutation and flags prctl=%d\n",via_prctl);
 }
 struct cwd_context { int ready[2], go[2], directory[2], bad, writer; };
 static int cwd_worker(void *argument) {
@@ -2041,6 +2080,9 @@ int main(int argc, char **argv) {
         buffer_park(!strcmp(argv[1],"buffer-park-protected")); return 1;
     }
     if (!strcmp(argv[1], "noop")) return 0;
+    if (!strcmp(argv[1], "restricted-descriptors")) {
+        restricted_descriptors(0); restricted_descriptors(1); return 0;
+    }
     if (!strcmp(argv[1], "metadata") || !strcmp(argv[1], "spawn")) { workload(argv[1]); return 0; }
     if (!strcmp(argv[1], "probe")) { probe(); return 0; }
     if (!strcmp(argv[1],"rpc-cwd") || !strcmp(argv[1],"rpc-cwd-protected")) {
@@ -2062,7 +2104,7 @@ int main(int argc, char **argv) {
     }
     int guest = !strcmp(argv[1], "guest");
     assert(guest || !strcmp(argv[1], "native"));
-    if (guest) restricted_descriptors();
+    if (guest) { restricted_descriptors(0); restricted_descriptors(1); }
     concurrent_cwd(0);
     concurrent_cwd(CLONE_FILES);
     concurrent_aliases();

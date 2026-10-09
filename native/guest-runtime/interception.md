@@ -61,7 +61,10 @@ the admitted proc-root restriction, with application filters still in force.
 Application filters still evaluate kernel-fast-path calls. Logical credentials,
 root changes, filter installation and dumpability changes retain their observers.
 Watch descriptors install bounded FD-class read selectors lazily; reads in
-unselected classes stay native. Kernel-object identity distinguishes watch
+unselected classes stay native until an application installs its own filter.
+Before that irreversible boundary, a single group-wide selector covers future
+typed descriptors without later seccomp calls. The application filter itself
+is replayed unchanged and retains all denials. Kernel-object identity distinguishes watch
 readers from ordinary descriptors sharing a class. Selected reads retain their
 original signal context while the worker waits for records; protected readers
 use task-affine copying and a native readiness wait. Filter installation ownership is separate from

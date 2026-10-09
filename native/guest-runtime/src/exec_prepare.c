@@ -18,6 +18,7 @@ static long acquire_at(struct md_fs_context *context, int base, const struct md_
         .operation=object ? MD_FS_OPEN_OBJECT : MD_FS_OPEN_IMAGE,
         .directory={object ? -1 : base,-1},.origin={object ? NULL : origin,NULL},
         .path={object ? object : path,NULL},.flags=object ? O_RDONLY|O_CLOEXEC : flags};
+    if (object) q.mode=MD_FS_OBJECT_EXECUTE;
     struct md_fs_result result;
     struct md_fs_anchor *resolved=NULL;
     struct md_fs_output output={.data=&program->identity,.capacity=sizeof(program->identity),.origin=&resolved};
@@ -119,6 +120,11 @@ int md_fs_command_prepare(struct md_fs_context *context, const struct md_fs_requ
             **proc_image=first;
             return error;
         }
+    }
+    if (!error && !owned && first.identity.object[0] && context->task.landlock) {
+        struct md_program checked;
+        error=(int)acquire_at(context,-1,NULL,first.identity.path,0,first.identity.object,&checked);
+        if (!error) close(checked.fd);
     }
     if (!error) error=md_command_images_prepare(recipe,images,&first,
         q->mode&MD_EXEC_INACCESSIBLE,acquire,context);

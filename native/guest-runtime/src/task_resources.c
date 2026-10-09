@@ -25,6 +25,7 @@ int md_resources_release(struct md_task_resources *r) {
     md_network_namespace_release(r->network);
     md_cgroup_member_release(r->cgroup);
     md_cgroup_namespace_release(r->cgroup_namespace);
+    md_landlock_release(r->landlock);
     int error = md_ipc_undo_release(md_ipc_namespace_active(r->ipc), r->sem_undo);
     md_ipc_namespace_release(r->ipc);
     *r = (struct md_task_resources){0};
@@ -51,6 +52,7 @@ int md_resources_fork(const struct md_task_resources *r, unsigned long flags,
         out->pid_children=md_pid_namespace_retain(r->pid_children);
         out->network=md_network_namespace_retain(r->network);
         out->cgroup_namespace=md_cgroup_namespace_retain(r->cgroup_namespace);
+        out->landlock=md_landlock_retain(r->landlock);
         return 0;
     }
     md_resources_release(out); return -ENOMEM;

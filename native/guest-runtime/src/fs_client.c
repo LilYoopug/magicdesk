@@ -38,6 +38,7 @@ int md_fs_result_valid(const struct md_fs_request *request, const struct md_fs_r
         || operation == MD_FS_REOPEN || operation==MD_FS_FSOPEN || operation==MD_FS_FSMOUNT
         || operation==MD_FS_FDINFO
         || (operation==MD_FS_BPF && md_bpf_opens(request->mode))
+        || (operation==MD_FS_LANDLOCK && request->mode==MD_LL_CREATE)
         || operation == MD_FS_TASK_PATH || (operation == MD_FS_IPC
             && (request->flags == MD_IPC_MESSAGE_CREATE || request->flags == MD_IPC_MESSAGE_SENDER));
     if (reply->error > 0 || reply->error < -4095 || reply->host_path>2

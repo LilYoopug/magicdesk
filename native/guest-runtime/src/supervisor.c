@@ -258,7 +258,7 @@ struct thread {
     struct md_fd_order memory_files;
     struct md_mapping_change memory_change;
     int shm_filter;
-    int pid_filter, pid_preflight, debug_replay_entry;
+    int pid_filter, pid_preflight, filter_preflight, debug_replay_entry;
     struct md_pid_identity *pid_reservation;
     long pid_result;
     struct { uintptr_t address; pid_t value; } pid_stores[2];
@@ -1091,11 +1091,13 @@ struct proc_owner {
     pid_t pid;
     const struct md_identity *identity;
     const struct md_task_resources *resources;
+    struct md_pid_namespace *pid_namespace;
 };
 static struct proc_owner proc_owner(pid_t pid) {
     struct thread *t=find_thread(pid);
-    if (t && t->born) return (struct proc_owner){pid,&t->identity,&t->resources};
-    return (struct proc_owner){pid,md_pid_identity_credentials(md_pid_retired_find(&retired_pids,pid)),NULL};
+    if (t && t->born) return (struct proc_owner){pid,&t->identity,&t->resources,md_pid_identity_namespace(t->resources.pid)};
+    struct md_pid_identity *retired=md_pid_retired_find(&retired_pids,pid);
+    return (struct proc_owner){pid,md_pid_identity_credentials(retired),NULL,md_pid_identity_namespace(retired)};
 }
 static uid_t process_signal_uid(struct thread *observer,pid_t sender,uid_t fallback) {
     const struct md_identity *identity=proc_owner(sender).identity;
@@ -1332,15 +1334,7 @@ static void proc_file_request(struct thread *t, const struct seccomp_notif *q) {
     unsigned operation=(unsigned)q->data.args[1];
     if (q->data.instruction_pointer!=RAW_GATE || t->phase!=DISPATCHING
             || (q->data.args[5] && operation!=MD_PROC_FILE_OPEN)) reply.error=-EPERM;
-    else if (operation==MD_PROC_FILE_KIND) {
-        if (q->data.args[3] || q->data.args[4]) reply.error=-EINVAL;
-        else {
-            struct md_fd_object *object=md_fd_origins_object(t->resources.files,(int)q->data.args[2],NULL);
-            struct md_proc_file *file=md_proc_file_from_object(object);
-            reply.val=file ? md_proc_file_kind(file)+1 : md_descriptor_inode_is(object) ? MD_DESCRIPTOR_ANONYMOUS : 0;
-            md_fd_object_release(object);
-        }
-    } else if (operation==MD_PROC_FILE_NAMESPACE_QUERY) {
+    else if (operation==MD_PROC_FILE_NAMESPACE_QUERY) {
         const struct md_namespace_reference *ref=md_proc_file_namespace_reference(t->proc_file);
         unsigned command=(unsigned)q->data.args[3];
         if (!ref || t->original.regs[8]!=SYS_ioctl || t->original.regs[0]!=q->data.args[2]
@@ -2267,7 +2261,22 @@ static void fd_control(struct thread *t, struct user_pt_regs *r) {
     unsigned operation=(unsigned)r->regs[0];
     uint64_t id=r->regs[1];
     long result=0;
-    if (operation==MD_FD_INPUT || operation==MD_FD_RECEIVE || operation==MD_FD_USE || operation==MD_FD_PAIR_BEGIN) {
+    if (operation==MD_FD_KIND) {
+        if (t->phase!=DISPATCHING || id || (long)r->regs[2]<INT_MIN
+                || (long)r->regs[2]>INT_MAX || r->regs[3]) result=-EINVAL;
+        else {
+            struct md_fd_object *object=md_fd_origins_object(t->resources.files,(int)r->regs[2],NULL);
+            struct md_proc_file *file=md_proc_file_from_object(object);
+            result=file ? md_proc_file_kind(file)+1 : md_descriptor_inode_is(object) ? MD_DESCRIPTOR_ANONYMOUS : 0;
+            md_fd_object_release(object);
+        }
+    } else if (operation==MD_FD_SELECTOR_QUERY || operation==MD_FD_SELECTOR_MARK) {
+        if (t->phase!=DISPATCHING || id>=MD_FD_SELECTOR_KINDS || (long)r->regs[2]< -1
+                || (long)r->regs[2]>INT_MAX || r->regs[3]) result=-EINVAL;
+        else result=operation==MD_FD_SELECTOR_QUERY
+            ? md_fd_selector_has(t->fd_selector,(unsigned)id,(int)r->regs[2])
+            : md_fd_selector_mark(t->fd_selector,(unsigned)id,(int)r->regs[2]);
+    } else if (operation==MD_FD_INPUT || operation==MD_FD_RECEIVE || operation==MD_FD_USE || operation==MD_FD_PAIR_BEGIN) {
         if ((operation==MD_FD_PAIR_BEGIN && (t->phase!=DISPATCHING
                     || (t->original.regs[8]!=SYS_pipe2 && (t->original.regs[8]!=SYS_socketpair
                         || !md_network_namespace_offline(t->resources.network)))))
@@ -2327,7 +2336,8 @@ static void proc_io_progress(struct thread *t) {
     if (!result) {
         struct md_proc_file_node node=md_proc_file_get_node(t->proc_io.file);
         struct proc_owner owner=proc_owner(node.process);
-        if (owner.identity) md_proc_file_process_state(t->proc_io.file,owner.identity,md_debugger_owner(debugger,owner.pid));
+        if (owner.identity) md_proc_file_process_state(t->proc_io.file,owner.identity,owner.pid_namespace,
+            md_debugger_owner(debugger,owner.pid));
         t->proc_io.actor=(struct md_control_actor){t->pid,&t->identity,&t->resources};
         result=md_proc_file_io_execute(&t->proc_io,&t->identity,t->resources.uts,span.data,span.size,(size_t)getpagesize());
     }
@@ -2684,6 +2694,11 @@ static void buffer_complete(struct md_fs_buffer_request *request, pid_t pid, int
             && !md_fs_buffer_snapshot_pending(request) && !md_fs_buffer_task_pending(request)) t->buffer_call=NULL;
     if (!error) {
         struct md_received_fds *expanded=NULL;
+        struct md_landlock_policy *landlock=md_fs_buffer_landlock_take(request);
+        if (landlock) {
+            md_landlock_release(t->resources.landlock); t->resources.landlock=landlock;
+            CHECK(!md_task_registry_publish(tasks,t->pid,t->tgid,&t->identity,&t->resources));
+        }
         int inspected=md_fs_buffer_inspect_take(request,&expanded);
         CHECK(inspected>=0);
         if (inspected) {
@@ -3365,6 +3380,16 @@ static int network_descriptor_call(long nr) {
 }
 static int domain_call(struct thread *t, struct user_pt_regs *r, unsigned long cookie) {
     long nr = r->regs[8];
+    if (t->ready && t->phase==IDLE && cookie==MD_INTERCEPT_OBSERVE && r->pc!=RAW_GATE
+            && ((nr==SYS_seccomp && (unsigned)r->regs[0]==SECCOMP_SET_MODE_FILTER)
+                || (nr==SYS_prctl && (unsigned)r->regs[0]==PR_SET_SECCOMP
+                    && (unsigned)r->regs[1]==SECCOMP_MODE_FILTER))
+            && !md_fd_selector_has(t->fd_selector,MD_FD_SELECTOR_PROC,-1)) {
+        t->original=*r; t->filter_preflight=1;
+        if (tracee_request(t,PTRACE_GETSIGMASK,(void *)sizeof(t->mask),&t->mask,"filter-admission-mask")
+                && shield(t) && skip(t->pid)) dispatch_with_stack(t);
+        return 1;
+    }
     if (t->phase==PROCESS_INIT_EXIT && nr==SYS_prctl && r->pc==RAW_GATE
             && r->regs[0]==PR_SET_CHILD_SUBREAPER && r->regs[1]==1
             && !r->regs[2] && !r->regs[3] && !r->regs[4] && !r->regs[5]) {
@@ -3441,6 +3466,16 @@ static int domain_call(struct thread *t, struct user_pt_regs *r, unsigned long c
         if (cookie==MD_INTERCEPT_DISPATCH) return 0;
     }
     if (!md_domain_restricted(t->resources.fs)) return 0;
+    /* FD selectors require adapter admission for the new slot as well as the
+     * kernel table mutation. A restricted root does not turn that dispatch
+     * into an unobserved native dup, losing the retained object's identity. */
+    if (cookie==MD_INTERCEPT_DISPATCH && (nr==SYS_dup || nr==SYS_dup3
+            || (nr==SYS_fcntl && ((unsigned)r->regs[1]==F_DUPFD
+                || (unsigned)r->regs[1]==F_DUPFD_CLOEXEC)))) return 0;
+    /* These selectors operate on retained descriptions, not paths. Their
+     * owners validate typed IO and recheck reused slots before native IO;
+     * a restricted root must not revoke an already opened pipe or proc file. */
+    if (cookie==MD_INTERCEPT_PROC || cookie==MD_INTERCEPT_WATCH) return 0;
     if (t->phase==PROC_OPENING && t->metadata.task_open && cookie==MD_INTERCEPT_NATIVE
             && nr==SYS_openat && (int)r->regs[0]==t->metadata.proc_directory
             && r->regs[1]==abi.proc_open_path && r->regs[2]==(O_RDONLY|O_DIRECTORY|O_CLOEXEC)
@@ -3591,7 +3626,8 @@ static void dispatch(struct thread *t) {
     regs.pc = DISPATCH; regs.sp = t->stack; regs.regs[30] = DONE;
     regs.regs[0] = t->original.regs[8];
     for (unsigned i = 0; i < 6; i++) regs.regs[i + 1] = t->original.regs[i];
-    unsigned policy = md_domain_scoped(t->resources.fs) || md_mount_namespace_managed_paths(t->resources.mounts);
+    unsigned policy = md_domain_scoped(t->resources.fs) || md_mount_namespace_managed_paths(t->resources.mounts)
+        || t->resources.landlock;
     if (md_network_namespace_offline(t->resources.network)) policy|=MD_DISPATCH_OFFLINE;
     if (network_descriptor_call(t->original.regs[8])) {
         struct md_fd_object *object=md_fd_origins_object(t->resources.files,(int)t->original.regs[0],NULL);
@@ -4113,7 +4149,7 @@ int main(int argc, char **argv) {
         if (event==PTRACE_EVENT_EXIT) {
             /* ESRCH invalidates the preceding stop, not this newly observed
              * terminal stop. Registers may be inspected here, never fabricated. */
-            TRACE("PROBE terminal-stop pid=%d lost=%d\n",pid,t->resume_lost);
+            int resume_lost=t->resume_lost;
             t->resume_lost=0; t->terminal_stop=1;
             if (t->fd_running && t->fd_capture) {
                 struct user_pt_regs terminal;
@@ -4126,6 +4162,7 @@ int main(int argc, char **argv) {
             adapter_discard(t);
             unsigned long message;
             if (!tracee_request(t,PTRACE_GETEVENTMSG,NULL,&message,"debug-exit")) continue;
+            TRACE("PROBE terminal-stop pid=%d lost=%d status=%#lx\n",pid,resume_lost,message);
             if (!md_debugger_event(debugger,pid,event,message)) resume(pid,0);
         } else if (event==PTRACE_EVENT_VFORK_DONE) {
             unsigned long child;
@@ -4292,13 +4329,6 @@ int main(int argc, char **argv) {
             if (statistics) {
                 if (regs.regs[8] < 512) statistics->calls[regs.regs[8]].trace++;
                 else statistics->unknown++;
-            }
-            if (regs.regs[8] == SYS_prctl && regs.regs[0] == MD_GUEST_FD_FILTER
-                    && regs.pc == RAW_GATE && t->phase == DISPATCHING) {
-                long value = regs.regs[4] || regs.regs[5] ? -EINVAL
-                    : regs.regs[2] == 0 ? md_fd_selector_has(t->fd_selector, (unsigned)regs.regs[3], (unsigned)regs.regs[1])
-                    : regs.regs[2] == 1 ? md_fd_selector_mark(t->fd_selector, (unsigned)regs.regs[3], (unsigned)regs.regs[1]) : -EINVAL;
-                return_value(t, &regs, value); continue;
             }
             if (regs.regs[8] == SYS_prctl && regs.regs[0] == MD_GUEST_SHM_FILTER
                     && regs.pc == RAW_GATE && t->phase == DISPATCHING) {
@@ -4789,8 +4819,8 @@ int main(int argc, char **argv) {
                 CHECK(!md_proc_file_io_cancel(&t->proc_io));
                 md_proc_file_release(t->proc_file); t->proc_file=NULL; t->proc_waiting=0;
                 long value = regs.regs[0];
-                if (t->pid_preflight) {
-                    t->pid_preflight=0;
+                if (t->pid_preflight || t->filter_preflight) {
+                    t->pid_preflight=t->filter_preflight=0;
                     regs=t->original;
                     if (!value) {
                         regs.pc-=4;

@@ -44,7 +44,15 @@ int md_fs_request_validate(const struct md_fs_request *q) {
     if (q->value_size>MD_FS_VALUE_MAX || (q->value_size && !q->value)
             || (q->value_size && q->operation!=MD_FS_XATTR && q->operation!=MD_FS_FXATTR && q->operation!=MD_FS_XATTR_OBJECT
                 && q->operation!=MD_FS_SETACL && q->operation!=MD_FS_MOUNT
-                && q->operation!=MD_FS_FSCONFIG && q->operation!=MD_FS_BPF)) return -EINVAL;
+                && q->operation!=MD_FS_FSCONFIG && q->operation!=MD_FS_BPF && q->operation!=MD_FS_LANDLOCK)) return -EINVAL;
+    if (q->operation==MD_FS_LANDLOCK) {
+        unsigned expected=q->mode==MD_LL_CREATE ? 0 : q->mode==MD_LL_ADD ? 3 : 1;
+        return q->mode<MD_LL_CREATE || q->mode>MD_LL_RESTRICT || descriptors!=expected
+            || *a || *b || q->offset || q->capacity || q->value_size!=sizeof(uint64_t)
+            || q->capture[0].path || q->capture[1].path || q->object[0] || q->object[1]
+            || (expected && q->directory[0]<0) || (expected==3 && q->directory[1]<0)
+            || q->flags!=(q->mode==MD_LL_CREATE ? O_RDWR|O_CLOEXEC : 0) ? -EINVAL : 0;
+    }
     if (q->operation==MD_FS_BPF) {
         if (*a || *b || q->offset || q->value_size<sizeof(struct md_bpf_request)
                 || q->capacity>MD_FS_VALUE_MAX || q->capture[0].path || q->capture[1].path
@@ -157,7 +165,7 @@ int md_fs_request_validate(const struct md_fs_request *q) {
     if ((q->capacity && q->operation != MD_FS_GETDENTS && q->operation != MD_FS_WATCH_READ) || q->capacity > PATH_MAX
             || (q->offset && q->operation != MD_FS_SEEKDIR)) return -EINVAL;
     if (q->operation == MD_FS_REOPEN)
-        return descriptors != 1 || *a || *b || (q->mode&~(MD_FS_REOPEN_MUTABLE|MD_FS_REOPEN_NATIVE)) ? -EINVAL : 0;
+        return descriptors != 1 || *a || *b || (q->mode&~(MD_FS_REOPEN_MUTABLE|MD_FS_REOPEN_NATIVE|MD_FS_REOPEN_EXECUTE)) ? -EINVAL : 0;
     if (q->operation == MD_FS_ACCESS)
         return (descriptors & 2) || (!*a && descriptors != 1) || *b ? -EINVAL : 0;
     if (q->operation >= MD_FS_CHMOD && q->operation <= MD_FS_UTIMENS)
@@ -175,7 +183,7 @@ int md_fs_request_validate(const struct md_fs_request *q) {
     if (q->operation == MD_FS_OBJECT_ID)
         return descriptors != 1 || *a || *b || q->flags || q->mode ? -EINVAL : 0;
     if (q->operation == MD_FS_OPEN_OBJECT)
-        return descriptors || !*a || *b || q->mode ? -EINVAL : 0;
+        return descriptors || !*a || *b || (q->mode&~MD_FS_OBJECT_EXECUTE) ? -EINVAL : 0;
     if (q->operation == MD_FS_OPEN_IMAGE)
         return (descriptors & 2) || !*a || *b || q->mode || (q->flags & ~O_NOFOLLOW) ? -EINVAL : 0;
     if (q->operation == MD_FS_GETDENTS || q->operation == MD_FS_SEEKDIR) {

@@ -36,6 +36,22 @@ static void link_is(const char *path,const char *expected) {
     if (n<0 || strcmp(value,expected)) fprintf(stderr,"proc link %s = %s (n=%zd errno=%d), expected %s\n",path,value,n,errno,expected);
     assert(n>0 && !strcmp(value,expected));
 }
+static void inherited_proc_status(unsigned depth) {
+    int fd=open("/proc/self/status",O_RDONLY|O_CLOEXEC); assert(fd>=0);
+    char text[16384]; ssize_t n=read(fd,text,sizeof(text)-1); assert(n>0); text[n]=0; close(fd);
+    const char *names[]={"\nNSpid:","\nNStgid:"};
+    for (unsigned i=0;i<2;++i) {
+        char *line=strstr(text,names[i]); assert(line); line+=strlen(names[i]);
+        unsigned count=0; long last=0;
+        while (*line && *line!='\n') {
+            if (*line=='\t' || *line==' ') { ++line; continue; }
+            char *end; last=strtol(line,&end,10); assert(end!=line && last>0); line=end; ++count;
+        }
+        if (count!=depth || last!=getpid()) fprintf(stderr,"inherited proc depth=%u expected=%u last=%ld pid=%d\n%s",count,depth,last,getpid(),text);
+        assert(count==depth && last==getpid());
+    }
+    puts("PASS inherited proc status retains the complete PID namespace chain");
+}
 static void proc_cases(void) {
     assert(!unshare(CLONE_NEWNS));
     assert(!mkdir("/tmp/pid-proc",0700));
@@ -286,6 +302,7 @@ static void debugger_exec(void) {
 static int init(void *inherited) {
     printf("pid init self=%d tid=%ld parent=%d\n",getpid(),syscall(SYS_gettid),getppid());
     assert(getpid()==1 && syscall(SYS_gettid)==1 && getppid()==0);
+    inherited_proc_status(2);
     struct ucred outside; socklen_t size=sizeof(outside);
     int fd=*(int *)inherited;
     assert(!getsockopt(fd,SOL_SOCKET,SO_PEERCRED,&outside,&size) && !outside.pid);
@@ -319,7 +336,7 @@ static int init(void *inherited) {
     errno=0;
     assert(readlink("/tmp/pid-proc/self/ns/pid_for_children",path,sizeof(path))==-1 && errno==ENOENT);
     child=fork(); assert(child>=0);
-    if (!child) { assert(getpid()==1 && getppid()==0); _exit(0); }
+    if (!child) { assert(getpid()==1 && getppid()==0); inherited_proc_status(3); _exit(0); }
     assert(child>3); reap(child);
     return 0;
 }

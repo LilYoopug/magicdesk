@@ -32,6 +32,7 @@ struct md_proc_file {
     void *directory;
     size_t directory_size, directory_capacity;
     struct md_pid_namespace *pid_view;
+    struct md_pid_namespace *process_pid_namespace;
     char *content;
     size_t content_size;
     const struct md_control_file_ops *control;
@@ -44,6 +45,7 @@ static void destroy(struct md_fd_object *object) {
     md_cgroup_member_release(f->cgroup);
     md_resource_queue_destroy(&f->operations);
     md_pid_namespace_release(f->pid_view); free(f->content);
+    md_pid_namespace_release(f->process_pid_namespace);
     if (f->process_state) md_identity_release(&f->process_identity);
     md_user_namespace_release(f->target); md_identity_release(&f->opener); free(f->directory); free(f);
 }
@@ -150,10 +152,13 @@ void md_proc_file_pid_view(struct md_proc_file *f, struct md_pid_namespace *view
     struct md_pid_namespace *old=f->pid_view;
     f->pid_view=md_pid_namespace_retain(view); md_pid_namespace_release(old);
 }
-void md_proc_file_process_state(struct md_proc_file *f,const struct md_identity *identity,pid_t tracer) {
+void md_proc_file_process_state(struct md_proc_file *f,const struct md_identity *identity,
+        struct md_pid_namespace *space,pid_t tracer) {
     if (!md_proc_file_process(f->kind) || f->content) return;
     if (f->process_state) md_identity_release(&f->process_identity);
     f->process_identity=md_identity_copy(identity); f->process_state=1; f->tracer=tracer;
+    struct md_pid_namespace *old=f->process_pid_namespace;
+    f->process_pid_namespace=md_pid_namespace_retain(space); md_pid_namespace_release(old);
 }
 void md_proc_file_cgroup(struct md_proc_file *f,struct md_cgroup_member *member) {
     struct md_cgroup_member *old=f->cgroup;
@@ -249,15 +254,16 @@ static void process_status_line(struct md_proc_file *f, FILE *out, const char *l
         size_t n=strlen(lists[i]);
         if (strncmp(line,lists[i],n)) continue;
         pid_t native=(pid_t)strtol(line+n,NULL,10);
-        struct md_pid_identity *id=md_pid_namespace_find(f->pid_view,native);
-        struct md_pid_namespace *views[33], *view=md_pid_identity_namespace(id);
+        /* A proc mount belongs to the observer's namespace, not the selected
+         * task's. Keep the target chain even for the implicit root proc view. */
+        struct md_pid_namespace *views[33], *view=f->process_pid_namespace;
         unsigned count=0;
         while (view && view!=f->pid_view && count<32) {
             views[count++]=view; view=md_pid_namespace_parent(view);
         }
         fprintf(out,"%s\t%d",lists[i],process_number(f->pid_view,native));
-        while (count) fprintf(out,"\t%d",md_pid_identity_number(id,views[--count]));
-        fputc('\n',out); md_pid_identity_release(id); return;
+        while (count) fprintf(out,"\t%d",process_number(views[--count],native));
+        fputc('\n',out); return;
     }
     fputs(line,out);
 }

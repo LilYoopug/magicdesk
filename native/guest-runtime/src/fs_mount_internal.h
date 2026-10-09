@@ -29,6 +29,9 @@ static inline unsigned md_fs_mount_flags(unsigned flags) {
 }
 struct md_view_location;
 void md_fs_bpf(struct md_filesystem *,const struct md_fs_request *,struct md_fs_result *,const struct md_fs_output *);
+void md_fs_landlock(struct md_filesystem *,const struct md_fs_request *,struct md_fs_result *,const struct md_fs_output *);
+int md_fs_landlock_native(struct md_filesystem *,const struct md_fs_request *,struct md_view_mount *,int fd);
+int md_fs_landlock_delegate(struct md_filesystem *,const struct md_fs_request *,const char *);
 int md_fs_proc_operation(struct md_filesystem *,struct md_mount_namespace *,struct md_view_mount *,
     int,const struct md_fs_request *,struct md_fs_result *,const struct md_fs_output *);
 int md_fs_cgroup_operation(struct md_filesystem *,struct md_mount_namespace *,

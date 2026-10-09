@@ -22,8 +22,10 @@ enum md_fs_operation {
     MD_FS_XATTR_OBJECT, MD_FS_MOUNT_TABLE, MD_FS_NATIVE_MOUNT, MD_FS_MKNOD,
     MD_FS_CHROOT, MD_FS_UMASK, MD_FS_STATFS, MD_FS_WATCH_PATH,
     MD_FS_TASK_PATH, MD_FS_XATTR, MD_FS_FXATTR, MD_FS_IPC_PEER, MD_FS_MOUNT,
-    MD_FS_FSOPEN, MD_FS_FSCONFIG, MD_FS_FSMOUNT, MD_FS_BPF, MD_FS_FDINFO, MD_FS_LAST = MD_FS_FDINFO
+    MD_FS_FSOPEN, MD_FS_FSCONFIG, MD_FS_FSMOUNT, MD_FS_BPF, MD_FS_FDINFO,
+    MD_FS_LANDLOCK, MD_FS_LAST = MD_FS_LANDLOCK
 };
+enum { MD_LL_CREATE=1, MD_LL_ADD, MD_LL_RESTRICT };
 enum md_fs_mount_operation { MD_FS_MOUNT_BIND=1, MD_FS_MOUNT_REMOUNT,
     MD_FS_MOUNT_PROPAGATION, MD_FS_MOUNT_UMOUNT, MD_FS_MOUNT_TMPFS, MD_FS_MOUNT_OVERLAY, MD_FS_MOUNT_PIVOT,
     MD_FS_MOUNT_MOVE, MD_FS_MOUNT_PROC, MD_FS_MOUNT_DEVPTS, MD_FS_MOUNT_CGROUP, MD_FS_MOUNT_CGROUP2,
@@ -33,13 +35,14 @@ enum md_fs_xattr { MD_FS_XATTR_GET=1, MD_FS_XATTR_SET, MD_FS_XATTR_LIST, MD_FS_X
 static inline int md_fs_operation_value(unsigned operation) {
     return operation==MD_FS_XATTR || operation==MD_FS_FXATTR || operation==MD_FS_XATTR_OBJECT
         || operation==MD_FS_GETACL || operation==MD_FS_SETACL || operation==MD_FS_IPC_PEER
-        || operation==MD_FS_MOUNT || operation==MD_FS_FSCONFIG || operation==MD_FS_BPF;
+        || operation==MD_FS_MOUNT || operation==MD_FS_FSCONFIG || operation==MD_FS_BPF || operation==MD_FS_LANDLOCK;
 }
 enum { MD_FS_STAT_MOUNT = 1 };
 /* A proc magic-link description may name another mount tree. It is display
  * text, not an executable identity or a path known to resolve in the caller. */
 enum { MD_FS_PATH_DISPLAY = 1 };
-enum { MD_FS_REOPEN_MUTABLE=1, MD_FS_REOPEN_NATIVE=2 };
+enum { MD_FS_REOPEN_MUTABLE=1, MD_FS_REOPEN_NATIVE=2, MD_FS_REOPEN_EXECUTE=4 };
+enum { MD_FS_OBJECT_EXECUTE=1 };
 enum md_fs_task_path { MD_FS_TASK_CHDIR=1, MD_FS_TASK_TRUNCATE, MD_FS_TASK_FCHDIR };
 static inline int md_fs_operation_has_origin(unsigned operation) {
     return operation==MD_FS_OPEN || operation==MD_FS_CREATE || operation==MD_FS_REOPEN
@@ -146,5 +149,6 @@ struct md_fs_output {
     struct md_fs_anchor **origin;
     int (*control)(void *,const struct md_control_file_ops *,void *,const struct md_identity *,int);
     void *control_context;
+    struct md_landlock_policy **landlock;
 };
 #endif

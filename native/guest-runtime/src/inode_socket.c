@@ -25,6 +25,7 @@ int md_inode_socket_bind(struct md_inode_store *s, int dirfd, const char *path, 
     if (!r && loc.exists) r = -EADDRINUSE;
     if (!r && loc.trailing) r = -ENOENT;
     if (!r) r = mdi_parent_writable(s, &loc.parent);
+    if (!r) r=mdi_landlock(s,&loc.parent,NULL,MD_LL_MAKE_SOCK);
     struct mdi_node node;
     int fd = -1;
     if (!r) r = mdi_allocate(s, S_IFSOCK, mode, O_RDWR, NULL, loc.parent.id, &node, &fd);

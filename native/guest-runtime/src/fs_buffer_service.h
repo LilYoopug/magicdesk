@@ -81,6 +81,7 @@ int md_fs_buffer_inspect_take(struct md_fs_buffer_request *, struct md_received_
 int md_fs_buffer_exec_begin(struct md_fs_buffer_service *, pid_t, struct md_guest_domain *,
         const struct md_interception_buffer *, struct md_fs_buffer_request **);
 int md_fs_buffer_exec_take(struct md_fs_buffer_request *, int descriptors[2], unsigned *mount_flags, int *anonymous);
+struct md_landlock_policy *md_fs_buffer_landlock_take(struct md_fs_buffer_request *);
 int md_fs_buffer_snapshot_begin(struct md_fs_buffer_service *, pid_t, struct md_guest_domain *,
         const struct md_interception_buffer *, unsigned flags, struct md_fs_buffer_request **);
 int md_fs_buffer_snapshot_pending(const struct md_fs_buffer_request *);

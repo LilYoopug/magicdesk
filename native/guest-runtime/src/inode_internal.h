@@ -8,6 +8,7 @@
 #include "inode_lifetime.h"
 #include <stdatomic.h>
 #include "filesystem_kind.h"
+#include "landlock_policy.h"
 struct md_fs_result;
 struct md_fs_output;
 struct md_inode_boundary { char *path; size_t capacity; const char *suffix; unsigned operand; int mount_root, native_directory; uint64_t proc_namespace; };
@@ -37,6 +38,8 @@ struct md_inode_store {
     int objects, watch_presence, locked, recording, readonly, reflink_unavailable;
     struct md_inode_lifetime *lifetime;
     const struct md_identity *identity;
+    const struct md_landlock_policy *landlock;
+    int landlock_execute;
     const char *root_id;
     unsigned creation_mask;
     struct md_inode_boundary *boundary;
@@ -71,6 +74,8 @@ struct mdi_location {
     char name[NAME_MAX+1];
     int exists, special, trailing;
 };
+int mdi_landlock(struct md_inode_store *,const struct mdi_node *,const struct mdi_node *,uint64_t);
+int mdi_landlock_object(struct md_inode_store *,const struct mdi_node *,uint64_t);
 /* ENTRY retains the final directory entry (unlink/rename/create). NOFOLLOW
  * retains a final symlink except when a trailing slash requires traversal. */
 enum mdi_follow { MDI_FOLLOW, MDI_NOFOLLOW, MDI_ENTRY };

@@ -104,13 +104,19 @@ int md_catalogue_open(struct md_image_catalogue *c, struct md_inode_store *s, in
             int error = md_inode_object_id(s, fd, object);
             close(fd);
             if (error) return error;
-            if (!strcmp(object, c->object)) return open_snapshot(c, flags);
+            if (!strcmp(object, c->object)) {
+                error=md_inode_landlock_fd(s,c->entry.source,flags);
+                return error ? error : open_snapshot(c,flags);
+            }
         } else if (fd != -ENOENT) return fd;
     }
     return md_inode_prepare_open(s, dir, path, flags, mode, resolve, completion);
 }
 int md_catalogue_open_object(struct md_image_catalogue *c, struct md_inode_store *s, const char *id, int flags) {
-    if (c && !strcmp(id, c->object)) return open_snapshot(c, flags);
+    if (c && !strcmp(id, c->object)) {
+        int error=md_inode_landlock_fd(s,c->entry.source,flags);
+        return error ? error : open_snapshot(c,flags);
+    }
     return md_inode_open_object(s, id, flags);
 }
 int md_catalogue_open_image(struct md_image_catalogue *c, struct md_inode_store *s, int dir,
@@ -129,7 +135,10 @@ int md_catalogue_reopen(struct md_image_catalogue *c, struct md_inode_store *s, 
         struct md_open_completion *completion) {
     *completion = (struct md_open_completion){0};
     int original = original_fd(c, s, fd);
-    if (c && original == c->entry.source) return mutable ? -EROFS : open_snapshot(c, flags);
+    if (c && original == c->entry.source) {
+        int error=mutable ? -EROFS : md_inode_landlock_fd(s,original,flags);
+        return error ? error : open_snapshot(c,flags);
+    }
     return md_inode_prepare_reopen(s, original, flags, mutable, completion);
 }
 int md_catalogue_path(struct md_image_catalogue *c, struct md_inode_store *s, int fd, char *out, size_t size) {

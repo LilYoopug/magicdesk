@@ -260,15 +260,16 @@ configurations, not a claim of complete desktop compatibility. Fedora 44's Glyci
 2.1.5 decodes PNG and SVG through stock Bubblewrap with its original seccomp
 filter. GNOME devkit is checked with an explicit private system bus and PipeWire;
 the installer recipe still needs this session-service arrangement. Rolling Arch's
-default pacman sandbox requires Landlock support. Missing operations are not
-bypassed by silently disabling sandboxes.
+default pacman sandbox uses Shroot's Landlock filesystem policy, independently
+of host kernel Landlock availability. Missing operations are not bypassed by
+silently disabling sandboxes.
 
 Images and repository packages are trusted executable inputs, not sandboxed
 content. `--image REF` selects another OCI source of the same distribution and
 version; the guest architecture and OS are checked before package setup. Arch
 uses a community publisher and performs a complete rolling userspace upgrade.
 Package signing remains enabled; `--arch-sandbox disable-filesystem` is an
-explicit, reported pacman opt-out for kernels where its Landlock setup fails.
+explicit, reported pacman opt-out, not required by the tested stock Arch workflow.
 Package output and errors stay in the console.
 
 Package setup uses the guest root account, without granting Android root or
@@ -1023,8 +1024,8 @@ These are userspace workflows, not booted systemd or virtual-machine certificati
 The [image coverage](../native/guest-runtime/images.md#checks) also records server,
 language-runtime and compiler checks. Stock GDB live debugging uses the
 [nested debugger contract](../native/guest-runtime/debugging.md), with explicit
-request and lifecycle limits. Arch package testing on a kernel without Landlock
-requires an explicit filesystem-sandbox opt-out; ordinary userspace does not.
+request and lifecycle limits. Stock Arch pacman retains its filesystem sandbox
+on a host without Landlock through the guest filesystem policy.
 Minimal Astra ARM64 userspace and Docker inside a QEMU TCG virtual machine have
 separate checks; neither establishes booted-distribution compatibility on Android.
 Gentoo ARM64 stage3 passes userspace and GCC/pthread/fork/file checks. Image import
@@ -1110,6 +1111,37 @@ same manifest under `/usr/share/vulkan/icd.d`, passes the Mousepad edit/save/clo
 workflow without forcing software rendering. An explicit llvmpipe run is a
 separate control, not the runtime's default or an automatic fallback.
 
+## Filesystem Restrictions
+
+Shroot implements the three Landlock syscalls with ABI 1 filesystem rights.
+Mutable ruleset descriptors use the existing typed-file transport. Applying a
+ruleset installs an immutable thread-local domain; up to 16 domains intersect.
+Fork/exec inherit the domain, whereas an existing sibling sharing files or cwd
+does not acquire another thread's restrictions. Closing or adding rules to the
+original descriptor cannot remove or widen an installed domain.
+
+Rules retain logical object identity and store lifetime. File operations check
+the selected dentry and its ancestry within the same namespace transaction,
+before mutation or writable-open publication. Directory rename and backing
+copy-up do not retarget the grant. ABI 1 rejects cross-directory rename/link.
+Already opened data descriptions retain their authority; proc-FD reopening and
+executable preparation recheck it. Ordinary data IO adds no policy RPC, and
+tasks without a domain allocate no Landlock state.
+
+Explicit rules currently require inode-backed targets. Native providers can
+inherit grants through retained guest mountpoints; unsupported native rule
+targets/mutations fail explicitly. Ambiguous descriptor hardlink ancestry is
+denied rather than selecting a permissive alias. Cross-store mount ancestry and
+full native-provider rules are not established. This is filesystem policy within
+Shroot's compatibility model, not native LSM isolation: Landlock ptrace-domain
+confinement is not implemented. Network/scoping and newer filesystem rights are
+not advertised; existing network and debugger behavior is unchanged.
+
+The ABI 1 fixture checks positive and negative access, attribute/FD validation,
+hardlinks, symlinks, retained directory identity, policy stacking, preopened FDs,
+proc reads, thread sharing and fork/exec including descriptor execution. A native
+Linux VM runs the same assertions independently of the Android kernel.
+
 ## Application Filters And Browsers
 
 The production supervisor preserves application signal handlers, alternate stacks
@@ -1118,6 +1150,14 @@ protected descriptor metadata, nondumpable exec, non-leader exec, job control an
 retained descriptors. Kernel-only calls share one policy definition between the
 domain checker and the seccomp fast path; argument-dependent permissions compare
 all 64 bits. Identity, namespace and filter-state changes retain their observers.
+Before an application installs its own seccomp filter, the runtime prepares
+future typed-descriptor IO for that thread group. Receiving or duplicating a
+virtual file then needs no later filter installation or RLIMIT_NOFILE query.
+The application filter is replayed unchanged; its denials remain effective.
+This broadens FD interception only for application-filtered workloads. Other
+programs keep the lazy descriptor-class path. Restricted proc roots preserve
+already-opened descriptions and ordered publication of their duplicates.
+Implicit and mounted proc views retain the target's nested PID-number chain.
 Protected access uses task-affine export and same-site replay
 without restoring dumpability. A second physical tracer cannot attach concurrently.
 Guest debuggers within the same launch use the supervisor-owned

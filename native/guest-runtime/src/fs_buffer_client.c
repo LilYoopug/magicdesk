@@ -262,6 +262,11 @@ long md_fs_buffer_publish(const int *indices, const unsigned char *selectors, un
     if (!count || count>253) return -EINVAL;
     int has_selectors=0;
     for (unsigned i=0;i<count;++i) has_selectors|=selectors[i];
+    if (has_selectors) {
+        long ready=md_fd_filter_prepared((unsigned)has_selectors);
+        if (ready<0) return ready;
+        if (ready) has_selectors=0;
+    }
     long address=md_adapter_buffer_take();
     if (address<0) return address;
     struct md_fs_buffer_frame *frame=(void *)address;
@@ -276,8 +281,9 @@ long md_fs_buffer_publish(const int *indices, const unsigned char *selectors, un
         result=md_guest_buffer_admit(MD_FS_BUFFER_IMPORT);
         if (result>=0) result=md_guest_buffer_control(MD_FS_BUFFER_RIGHTS_READY,0,0);
     }
-    /* The destination-table turn spans selector preparation and kernel copy.
-     * Only descriptors that can fit are armed; no installed FD is speculative. */
+    /* Prepared sandbox filters need neither a limit query nor a free-slot
+     * scan. Otherwise the table turn spans selector preparation and kernel
+     * copy; only descriptors that can fit are armed, never speculative FDs. */
     if (!result && has_selectors) {
         struct rlimit limit;
         result=RAW4(prlimit64,0,RLIMIT_NOFILE,NULL,&limit);

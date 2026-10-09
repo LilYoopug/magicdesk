@@ -11,7 +11,7 @@
 #include <sys/sysmacros.h>
 
 long md_descriptor_kind(int fd) {
-    return RAW4(prctl,MD_GUEST_PROC_FILE,MD_PROC_FILE_KIND,fd,0);
+    return md_fd_control(MD_FD_KIND,0,fd,0);
 }
 long md_descriptor_pair(long nr, const unsigned long *a) {
     int ends[2]={-1,-1};

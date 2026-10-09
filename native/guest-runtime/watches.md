@@ -63,10 +63,24 @@ per retained chain even across arbitrary descriptor-number churn. Reusing a
 class installs no filter. A selector
 only requests interception; retained kernel device/inode identity decides whether
 the descriptor still belongs to a watch. Unselected classes keep native reads.
+Selector bookkeeping and descriptor-kind queries use the register-only FD
+control channel, independently of application `prctl` policy. Before the first
+application filter is installed, one shared selector admits all future typed-FD
+numbers, including descriptors received through SCM_RIGHTS after the application
+forbids further seccomp calls. Preparation precedes replay of the original filter
+request; its ERRNO/TRAP/KILL decisions remain effective. Prepared receivers need
+no RLIMIT_NOFILE query or free-slot scan. Unsandboxed workloads retain selective
+activation. Anonymous mmap ignores its FD; private helper calls retain their own
+interception owner. Installing either filter still requires actual permission.
+Restricted roots retain typed and native IO through already opened descriptions, including
+ordinary descriptors which reuse an armed class.
 An ordinary descriptor in an armed class takes interception, then executes its
 native operation. Saturating all classes therefore mediates these operations on
 every FD; this bounds filter growth, not worst-case interception cost. Kernel
 filter limits and divergent TSYNC chains still return explicit errors.
+The prepared path mediates FD IO across all numbers in that filtered thread
+group; it is a compatibility cost confined to application-filtered workloads,
+not a claim that their ordinary IO remains interception-free.
 
 The original listener declares a read gate. Selected calls replay through it
 with their signal mask restored before blocking. `watch_broker.c` holds empty

@@ -131,6 +131,9 @@ static int descriptor(struct md_filesystem *fs, const struct md_fs_request *q,
     } else r=md_view_identity(fs,q->directory[0],&p);
     if (r == -EXDEV) return 0;
     if (r) { out->error = r; return 1; }
+    if (!md_view_inode(p->mount) && (r=md_fs_landlock_native(fs,q,p->mount,q->directory[0]))) {
+        out->error=r; return 1;
+    }
     if (md_fs_mount_file_operation(fs,owner.mounts,p->mount,q->directory[0],q,out,output)) return 1;
     if (md_fs_proc_operation(fs,owner.mounts,p->mount,q->directory[0],q,out,output)) return 1;
     if (devpts_operation(fs,owner.mounts,p->mount,q->directory[0],q,out,output)) return 1;
@@ -336,6 +339,8 @@ static void inode_selected(struct md_filesystem *fs, const struct md_fs_request 
 static void native(struct md_filesystem *fs, const struct md_fs_request *q,
         struct md_view_location *a, struct md_view_location *b,
         struct md_fs_result *out, const struct md_fs_output *output) {
+    int policy=md_fs_landlock_native(fs,q,a->mount,a->fd);
+    if (policy) { out->error=policy; return; }
     if (md_fs_mount_file_operation(fs,a->view,a->mount,a->fd,q,out,output)) return;
     if (md_fs_proc_operation(fs,a->view,a->mount,a->fd,q,out,output)) return;
     if (devpts_operation(fs,a->view,a->mount,a->fd,q,out,output)) return;
@@ -511,6 +516,8 @@ void md_fs_mounts_execute(struct md_filesystem *fs, const struct md_fs_request *
             struct stat st;
             if (fstat(p->fd, &st)) { out->error = -errno; return; }
             if (!S_ISREG(st.st_mode)) { out->error = -EINVAL; return; }
+            int policy=md_fs_landlock_native(fs,q,p->mount,p->fd);
+            if (policy) { out->error=policy; return; }
             int fd = reopen(p, (int)q->flags, 0, &out->open_completion);
             if (fd < 0) out->error = fd; else out->fd = fd;
             md_view_capture(fs,fs->mounts,p->mount,out,output);

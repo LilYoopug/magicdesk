@@ -230,6 +230,39 @@ static void ipc_mount_lifetime(void) {
     assert(!rmdir(path));
     puts("PASS mqueue namespace custody: snapshots, final-owner cleanup and native FD baseline");
 }
+static int no_landlock_rule(void *context,const struct md_landlock_key *key) {
+    (void)context; (void)key; assert(0); return 0;
+}
+static void landlock_resources(void) {
+    errno=0; assert(!md_landlock_ruleset_new(0) && errno==ENOMSG);
+    errno=0; assert(!md_landlock_ruleset_new(MD_LL_ALL+1) && errno==EINVAL);
+    struct md_landlock_ruleset *rules=md_landlock_ruleset_new(MD_LL_WRITE_FILE); assert(rules);
+    struct md_task_resources parent,child;
+    assert(!md_resources_init(&parent,NULL));
+    for (unsigned i=0;i<MD_LANDLOCK_LAYERS;++i) {
+        struct md_landlock_policy *next=md_landlock_restrict(parent.landlock,rules); assert(next);
+        md_landlock_release(parent.landlock); parent.landlock=next;
+    }
+    errno=0; assert(!md_landlock_restrict(parent.landlock,rules) && errno==E2BIG);
+    md_landlock_ruleset_release(rules);
+    assert(md_landlock_check(parent.landlock,MD_LL_WRITE_FILE,no_landlock_rule,NULL)==-EACCES);
+    assert(!md_landlock_check(parent.landlock,MD_LL_READ_FILE,no_landlock_rule,NULL));
+    assert(!md_resources_fork(&parent,CLONE_FILES|CLONE_FS,&child));
+    assert(child.landlock==parent.landlock);
+    struct md_task_registry *registry=md_task_registry_create(); assert(registry);
+    struct md_identity id=md_identity_new(0,0);
+    assert(!md_task_registry_publish(registry,getpid(),getpid(),&id,&parent));
+    struct md_task_snapshot snapshot;
+    assert(!md_task_registry_read(registry,getpid(),0,&snapshot));
+    assert(snapshot.landlock==parent.landlock);
+    assert(!md_resources_exec(&child) && child.landlock==parent.landlock);
+    assert(!md_resources_release(&parent));
+    md_task_registry_forget(registry,getpid()); md_task_registry_destroy(registry);
+    assert(!md_resources_release(&child));
+    assert(md_landlock_check(snapshot.landlock,MD_LL_WRITE_FILE,no_landlock_rule,NULL)==-EACCES);
+    md_task_snapshot_release(&snapshot); md_identity_release(&id);
+    puts("PASS Landlock immutable domains, layer bounds, fork/exec and worker snapshot custody");
+}
 int main(void) {
     alarm(60);
     struct md_identity identity=md_identity_new(0,0);
@@ -274,6 +307,7 @@ int main(void) {
     assert(md_resources_unshare_prepare(&r, 1UL << 63,NULL,&change) == -EINVAL);
     assert(!md_resources_release(&r));
     int before = descriptors();
+    landlock_resources();
     for (unsigned i = 0; i < 100; i++) contract();
     for (unsigned i = 0; i < 100; i++) pending_root_relocation();
     nonleader_root();

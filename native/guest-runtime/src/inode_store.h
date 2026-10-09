@@ -85,6 +85,7 @@ int md_inode_temporary(struct md_inode_store *);
 /* Stable store-local identity. Retained objects outlive names and open FDs. */
 int md_inode_object_id(struct md_inode_store *, int fd, char out[33]);
 int md_inode_open_object(struct md_inode_store *, const char *id, int flags);
+int md_inode_landlock_fd(struct md_inode_store *,int fd,int flags);
 /* Stable physical name of an already opened backing object. The store and its
  * source leases must outlive use; guest unlink/rename/copy-up cannot retarget it.
  * EXDEV means the descriptor has no leased backing name in this store. */

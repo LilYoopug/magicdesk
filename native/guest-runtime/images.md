@@ -348,10 +348,14 @@ an unchanged signature-verified official rootfs archive wrapped as an OCI layer;
 its imported POSIX ACLs remain visible through getfacl. Package checks explicitly
 own and terminate any GnuPG agents; launch completion never abandons descendants.
 DNS configuration belongs to the private test instance, not the runtime.
-Arch's base userspace and ACL import pass, but its default pacman download
-sandbox requires Landlock. On this device the native UID 2000 control returns
-ENOSYS for Landlock as well; default package synchronization fails. The runtime
-does not turn that missing kernel isolation into a successful no-op.
+Arch's base userspace and ACL import pass. `test_arch_runtime.py` checks unchanged
+pacman 7.1 configuration, the stock `alpm` account transition, actual Landlock
+filesystem restrictions and package database synchronization without a sandbox
+opt-out. The guest ABI 1 filesystem policy runs independently of the host's
+Landlock support; the native UID 2000 control returns ENOSYS on this device.
+The restriction fixture also runs on an unprivileged reference Linux VM.
+`--install-package` additionally installs, runs and removes `tree`, retaining an
+already-installed copy. This is not a full rolling-system upgrade certification.
 The fixture's explicit `--arch-without-landlock` disables only pacman's filesystem
 sandbox, preserving its syscall filtering and signature policy. With this opt-out,
 package installation/reinstallation, account permissions, session D-Bus and Python

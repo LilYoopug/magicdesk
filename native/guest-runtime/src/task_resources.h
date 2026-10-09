@@ -10,6 +10,7 @@
 #include "pid_namespace.h"
 #include "network_namespace.h"
 #include "cgroup.h"
+#include "landlock_policy.h"
 
 /* Linux owns the real FD table, cwd/umask and open descriptions. Optional path
  * annotations share their lifetimes without retaining data descriptions. */
@@ -26,6 +27,7 @@ struct md_task_resources {
     struct md_network_namespace *network;
     struct md_cgroup_member *cgroup;
     struct md_cgroup_namespace *cgroup_namespace;
+    struct md_landlock_policy *landlock;
 };
 struct md_resource_change {
     struct md_task_resources next;

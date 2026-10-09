@@ -20,6 +20,7 @@ struct entry {
     struct md_cgroup_namespace *cgroup_namespace;
     struct md_network_namespace *network;
     struct md_ipc_namespace *ipc;
+    struct md_landlock_policy *landlock;
 };
 struct md_task_registry { pthread_mutex_t lock; pid_t owner; struct entry *entries[BUCKETS]; };
 struct md_task_registry *md_task_registry_create(void) {
@@ -37,7 +38,8 @@ void md_task_registry_destroy(struct md_task_registry *r) {
         md_pid_identity_release(e->pid); md_pid_identity_release(e->pid_group);
         md_cgroup_member_depart(e->cgroup,e->tid); md_cgroup_member_release(e->cgroup);
         md_cgroup_namespace_release(e->cgroup_namespace);
-        md_network_namespace_release(e->network); md_ipc_namespace_release(e->ipc); free(e);
+        md_network_namespace_release(e->network); md_ipc_namespace_release(e->ipc);
+        md_landlock_release(e->landlock); free(e);
     }
     pthread_mutex_destroy(&r->lock); free(r);
 }
@@ -55,6 +57,7 @@ int md_task_registry_publish(struct md_task_registry *r, pid_t tid, pid_t tgid,
     struct md_cgroup_namespace *cgroup_ns=resources ? resources->cgroup_namespace : NULL, *old_cgroup_ns=NULL;
     struct md_network_namespace *network=resources ? resources->network : NULL, *old_network=NULL;
     struct md_ipc_namespace *ipc=resources ? resources->ipc : NULL, *old_ipc=NULL;
+    struct md_landlock_policy *landlock=resources ? resources->landlock : NULL, *old_landlock=NULL;
     unsigned bucket = (unsigned)tid % BUCKETS;
     pthread_mutex_lock(&r->lock);
     struct entry *e = r->entries[bucket];
@@ -80,6 +83,7 @@ int md_task_registry_publish(struct md_task_registry *r, pid_t tid, pid_t tgid,
         old_network=e->network; e->network=md_network_namespace_retain(network);
     }
     if (e->ipc!=ipc) { old_ipc=e->ipc; e->ipc=md_ipc_namespace_retain(ipc); }
+    if (e->landlock!=landlock) { old_landlock=e->landlock; e->landlock=md_landlock_retain(landlock); }
     if (e->tgid == tgid && !memcmp(&e->value.uid, &v->uid, sizeof(v->uid))
             && !memcmp(&e->value.gid, &v->gid, sizeof(v->gid))
             && !memcmp(&e->value.caps, &v->caps, sizeof(v->caps))
@@ -99,6 +103,7 @@ published:
     md_cgroup_namespace_release(old_cgroup_ns);
     md_network_namespace_release(old_network);
     md_ipc_namespace_release(old_ipc);
+    md_landlock_release(old_landlock);
     return 0;
 }
 void md_task_registry_forget(struct md_task_registry *r, pid_t tid) {
@@ -115,7 +120,8 @@ void md_task_registry_forget(struct md_task_registry *r, pid_t tid) {
         md_pid_identity_release(e->pid); md_pid_identity_release(e->pid_group);
         md_cgroup_member_depart(e->cgroup,e->tid); md_cgroup_member_release(e->cgroup);
         md_cgroup_namespace_release(e->cgroup_namespace);
-        md_network_namespace_release(e->network); md_ipc_namespace_release(e->ipc); free(e);
+        md_network_namespace_release(e->network); md_ipc_namespace_release(e->ipc);
+        md_landlock_release(e->landlock); free(e);
     }
 }
 int md_task_registry_read(struct md_task_registry *r, pid_t tid, pid_t peer,
@@ -139,6 +145,7 @@ int md_task_registry_read(struct md_task_registry *r, pid_t tid, pid_t peer,
         out->cgroup_namespace=md_cgroup_namespace_retain(e->cgroup_namespace);
         out->network=md_network_namespace_retain(e->network);
         out->ipc=md_ipc_namespace_retain(e->ipc);
+        out->landlock=md_landlock_retain(e->landlock);
     }
     pthread_mutex_unlock(&r->lock); return error;
 }
@@ -154,5 +161,6 @@ void md_task_snapshot_release(struct md_task_snapshot *snapshot) {
     md_cgroup_namespace_release(snapshot->cgroup_namespace);
     md_network_namespace_release(snapshot->network);
     md_ipc_namespace_release(snapshot->ipc);
+    md_landlock_release(snapshot->landlock);
     *snapshot=(struct md_task_snapshot){0};
 }

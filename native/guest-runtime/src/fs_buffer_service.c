@@ -64,6 +64,7 @@ struct md_fs_buffer_request {
     struct md_task_snapshot *root[2];
     struct md_fd_object *reopened;
     struct md_fd_object *control_input;
+    struct md_landlock_policy *landlock;
     int captured[2];
     struct md_received_fds *received;
     struct md_received_fds *expanded;
@@ -103,6 +104,7 @@ int md_fs_buffer_open_take(struct md_fs_buffer_request *r, struct md_fs_buffer_o
     *out=r->opened; r->opened=(struct md_fs_buffer_open){.fd=-1}; return 1;
 }
 static void dispose(struct md_fs_buffer_request *r) {
+    md_landlock_release(r->landlock);
     struct md_fs_buffer_request **p=&r->service->requests;
     while (*p && *p!=r) p=&(*p)->next;
     if (*p) *p=r->next;
@@ -425,6 +427,7 @@ static int resolve_roots(struct md_fs_buffer_request *r) {
         struct md_fs_context context=r->context;
         context.task=*r->root[i];
         context.task.identity=r->context.task.identity;
+        context.task.landlock=r->context.task.landlock;
         struct md_fs_request q={.actor=context.actor,.peer=context.peer,.operation=MD_FS_OPEN,
             .directory={-1,-1},.path={"/",NULL},.flags=O_PATH|O_DIRECTORY|O_CLOEXEC};
         struct md_fs_output out={.origin=&r->input[i]};
@@ -473,7 +476,7 @@ static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
         .reserve_watch=r->request.operation==MD_FS_WATCH_READ,
         .directory_position=r->request.operation==MD_FS_GETDENTS ? &r->position : NULL,
         .origin=md_fs_operation_has_origin(r->request.operation) ? &r->opened.origin : NULL,
-        .control=control_open,.control_context=r};
+        .control=control_open,.control_context=r,.landlock=&r->landlock};
     if (md_fs_operation_value(r->request.operation)) {
         output.data=r->output->value; output.capacity=sizeof(r->output->value);
     }
@@ -714,6 +717,11 @@ int md_fs_buffer_snapshot_begin(struct md_fs_buffer_service *s, pid_t actor, str
         const struct md_interception_buffer *buffer, unsigned flags, struct md_fs_buffer_request **out) {
     return begin(s,actor,fs,MD_FS_TEMPORARY,buffer,out,0,1,flags);
 }
+struct md_landlock_policy *md_fs_buffer_landlock_take(struct md_fs_buffer_request *r) {
+    if (r->error || r->output->reply.result.error) return NULL;
+    struct md_landlock_policy *policy=r->landlock;
+    r->landlock=NULL; return policy;
+}
 int md_fs_buffer_exec_take(struct md_fs_buffer_request *r, int out[2], unsigned *mount_flags, int *anonymous) {
     if (!r || !out || !mount_flags || !anonymous) return -EINVAL;
     if (!r->executable) return 0;
@@ -809,7 +817,7 @@ int md_fs_buffer_progress(struct md_fs_buffer_service *s) {
                 r->request.origin[i]=r->input[i];
             }
             if (base>=0 && ((!i && (r->request.operation==MD_FS_FSCONFIG || r->request.operation==MD_FS_FSMOUNT
-                        || r->request.operation==MD_FS_BPF))
+                        || r->request.operation==MD_FS_BPF || r->request.operation==MD_FS_LANDLOCK))
                     || (i==1 && r->request.operation==MD_FS_MOUNT && r->request.mode==MD_FS_MOUNT_BIND
                         && r->request.path[i] && !*r->request.path[i]))
                     && s->control_query) {

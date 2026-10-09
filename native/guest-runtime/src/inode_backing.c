@@ -272,6 +272,7 @@ int md_inode_prepare_reopen(struct md_inode_store *s, int original, int flags, i
     r = mdi_fd(s, original, &node);
     if (!r && (flags & O_DIRECTORY) && node.kind != S_IFDIR) r = -ENOTDIR;
     if (!r) r = mdi_open_permission(s, &node, flags);
+    if (!r) r=mdi_landlock_object(s,&node,s->landlock_execute ? MD_LL_EXECUTE : md_landlock_open_access(flags,node.kind));
     if (!r && mutable && (flags & O_PATH) && s->identity) {
         struct stat st;
         r = mdi_stat(s, &node, &st);

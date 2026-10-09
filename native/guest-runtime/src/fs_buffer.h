@@ -43,6 +43,7 @@ static inline int md_fs_buffer_operation(unsigned operation) {
     case MD_FS_CHROOT: case MD_FS_UMASK: case MD_FS_STATFS: case MD_FS_WATCH_PATH: case MD_FS_TASK_PATH:
     case MD_FS_XATTR: case MD_FS_FXATTR:
     case MD_FS_MOUNT: case MD_FS_FSOPEN: case MD_FS_FSCONFIG: case MD_FS_FSMOUNT: case MD_FS_BPF: case MD_FS_FDINFO:
+    case MD_FS_LANDLOCK:
         return 1;
     default: return 0;
     }

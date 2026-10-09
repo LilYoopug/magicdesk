@@ -22,7 +22,7 @@ target_compile_definitions(guest-parcels PRIVATE MD_NO_START MD_USE_LIBC)
 target_compile_options(guest-parcels PRIVATE -O2 -Wall -Wextra -Werror -fno-pie)
 set(origins ${src}/fs_anchor.c ${src}/fs_origin_transfer.c ${src}/inode_lifetime.c ${src}/inode_custody.c ${src}/sealed_manifest.c ${src}/ipc_scope.c ${src}/mount_policy.c ${src}/mount_graph.c ${src}/resource_order.c ${src}/ofd_order.c ${src}/fd_origins.c ${src}/fd_channel.c ${src}/fd_mutation.c ${src}/fd_delivery.c ${src}/fd_table_observation.c ${src}/fd_return.c ${src}/fd_exchange.c ${src}/received_fds.c ${src}/fd_messages.c ${src}/task_descriptor.c ${src}/task_lifetime.c)
 list(APPEND origins ${src}/devpts_view.c ${src}/cgroup.c ${src}/cgroup_program.c ${src}/sysfs_view.c ${src}/network_namespace.c ${src}/network_sysctl.c
-    ${src}/ipc_namespace.c ${src}/mqueue_view.c)
+    ${src}/ipc_namespace.c ${src}/mqueue_view.c ${src}/landlock_policy.c ${src}/landlock_file.c)
 set(mounts ${src}/fs_mounts.c ${src}/fs_mount_path.c ${src}/fs_mount_operations.c ${src}/fs_mount_table.c ${src}/fs_mount_change.c ${src}/fs_temporary.c ${src}/fs_overlay.c ${src}/fs_storage.c)
 list(APPEND mounts ${src}/proc_paths.c ${src}/procfs_view.c ${src}/proc_fdinfo.c ${src}/fs_proc.c ${src}/fs_cgroup.c ${src}/fs_bpf.c ${src}/fs_sysfs.c ${src}/fs_mqueue.c ${src}/fs_mount_file.c ${src}/mount_source.c ${src}/fs_context.c)
 set(inodes ${src}/inode_store.c ${src}/inode_db.c ${src}/inode_sqlite.c ${src}/inode_events.c ${src}/inode_watch.c ${src}/watch_queue.c ${src}/inode_path.c
@@ -33,7 +33,8 @@ set(ipc ${src}/sysv_ipc.c ${src}/sysv_ipc_db.c ${src}/sysv_sem.c ${src}/sysv_msg
 set(capsules ${src}/ipc_capsule.c ${src}/fd_bundle.c ${src}/ipc_received.c ${src}/descriptor_inode.c ${src}/descriptor_parcel.c)
 list(APPEND origins ${src}/mount_stream.c ${src}/mount_pin.c)
 list(APPEND origins ${src}/temporary_directory.c ${src}/private_tree.c)
-list(APPEND inodes ${src}/identity_snapshot.c ${src}/inode_overlay_policy.c)
+list(APPEND inodes ${src}/identity_snapshot.c ${src}/inode_overlay_policy.c ${src}/inode_landlock.c)
+list(APPEND mounts ${src}/fs_landlock.c)
 list(APPEND origins ${src}/identity_snapshot.c)
 list(APPEND inodes ${src}/mount_stream.c ${src}/mount_pin.c
     ${src}/temporary_directory.c ${src}/private_tree.c ${src}/inode_transient.c ${src}/inode_overlay.c ${src}/inode_overlay_write.c)
@@ -55,7 +56,7 @@ endfunction()
 guest_executable(bootstrap ${src}/bootstrap.c ${src}/elf.c ${src}/exec.c ${src}/command.c ${src}/command_image.c
     ${src}/interception.c ${src}/interception_entry.S ${src}/fd_client.c ${src}/watch_calls.c ${src}/fd_filter.c ${src}/shm_calls.c ${src}/ipc_calls.c ${src}/pid_filter.c ${src}/pid_calls.c
     ${src}/file_calls.c ${src}/fs.c ${src}/proc_paths.c ${src}/proc_image.c ${src}/proc_control.c ${src}/program_files.c ${src}/task_status.c
-    ${src}/namespace.c ${src}/namespace_proc.c ${src}/namespace_mount.c ${src}/namespace_mount_fd.c ${src}/namespace_bpf.c ${src}/socket_calls.c ${src}/socket_namespace.c ${src}/socket_identity.c ${src}/socket_ancillary.c ${src}/socket_routes.c ${src}/fd_metadata.c
+    ${src}/namespace.c ${src}/namespace_proc.c ${src}/namespace_mount.c ${src}/namespace_mount_fd.c ${src}/namespace_bpf.c ${src}/namespace_landlock.c ${src}/socket_calls.c ${src}/socket_namespace.c ${src}/socket_identity.c ${src}/socket_ancillary.c ${src}/socket_routes.c ${src}/fd_metadata.c
     ${src}/task_receive.c ${src}/fs_client.c ${src}/fs_buffer_client.c ${src}/adapter_buffer.c ${src}/file_open.c ${wire} ${src}/raw.c ${src}/raw.S)
 target_sources(bootstrap PRIVATE ${src}/descriptor_calls.c)
 guest_freestanding(bootstrap)
@@ -99,6 +100,10 @@ install(TARGETS bootstrap supervisor run service image RUNTIME DESTINATION lib)
 
 option(MAGICDESK_GUEST_FIXTURES "Build standalone native fixtures" OFF)
 if(MAGICDESK_GUEST_FIXTURES)
+    guest_executable(landlock_guest ../guest-exec-lab/test_landlock_guest.c)
+    target_compile_options(landlock_guest PRIVATE -UNDEBUG)
+    guest_executable(vm_init ../guest-exec-lab/test_vm_init.c)
+    target_compile_options(vm_init PRIVATE -UNDEBUG)
     guest_executable(test_pid_namespace ../guest-exec-lab/test_pid_namespace.c ${identity})
     target_compile_options(test_pid_namespace PRIVATE -iquote ${src} -UNDEBUG)
     guest_executable(capabilities ../guest-exec-lab/test_capabilities.c)

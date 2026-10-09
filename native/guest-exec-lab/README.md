@@ -951,6 +951,11 @@ checks its baseline after waitpid. Reports use
 `resource-fd-custody-dirfd-results.json` and `resource-fd-custody-nofollow-results.json`.
 Arbitrary native/anonymous nofollow sources are outside this coverage.
 
+`--case restricted-descriptors` checks typed SCM_RIGHTS receipt after an
+application denies `prctl`, `seccomp` and `prlimit64`, through both filter-install
+interfaces. It retains the denials and checks typed dup, reused ordinary/pipe
+slots, offsets, flags and close_range after a restricted proc-root change.
+
 `--case rpc` selects the filesystem transport fixture, including exchange
 retirement with a deliberately open client socket. Cancellation before/after
 reply publication must release service-owned endpoints, receipts and contexts
@@ -1207,10 +1212,44 @@ python native/guest-exec-lab/test_qemu_runtime.py --help
 The rootfs wrapper retains an unchanged official Arch Linux ARM tarball as one
 OCI layer. Verify its detached signature before importing; wrapping alone is not
 authentication. Arch package commands retain pacman's configured sandbox and
-signature checks. A kernel without Landlock cannot pass that default download
-workflow; `test_isolation.py` measures availability directly outside guest execution.
+signature checks. Shroot supplies ABI 1 filesystem restrictions even when the
+host lacks Landlock; `test_isolation.py` measures native availability separately.
 `--arch-without-landlock` explicitly selects only pacman's filesystem-sandbox
 opt-out for package checks; signatures and syscall filtering remain enabled.
+
+`test_arch_runtime.py` is the separate **as-is** acceptance check. It rejects
+effective sandbox opt-outs, retains `DownloadUser=alpm`, checks the stock account
+transition, runs the filesystem restriction contract, then synchronizes pacman's
+databases. `--install-package` also installs and runs `tree`, removing it only
+when it was not installed before the check. Use a disposable instance with initialized signing keys and DNS;
+synchronization changes its package databases. Neither missing Landlock nor a
+failed synchronization counts as a pass. It compares the ABI probe with native
+UID 2000, but does not mistake that probe for enforcement coverage.
+
+```sh
+cmake --build BUILD --target bootstrap supervisor run image landlock_guest vm_init
+python native/guest-exec-lab/test_arch_runtime.py BUILD ARCH_STORE --install-package
+python native/guest-exec-lab/test_kernel_vm.py BUILD --kernel ARM64_KERNEL \
+  --fixture BUILD/libmagicdesk_guest_landlock_guest.so
+```
+
+The static `landlock_guest` fixture uses ABI 1 rights: permitted/denied paths,
+symlinks, hardlink aliases, same-directory rename, rejected cross-directory
+rename/link, preopened data FDs versus proc-FD reopening, ruleset-FD duplication
+and mutation, stacked intersections, fork/exec, thread-local policy and retained
+directory identity after rename/replacement. `--setup-only DIRECTORY` validates
+only fixture setup and cleanup; it never reports enforcement success.
+The same assertions run inside Shroot and under an unprivileged UID in a Linux
+QEMU control VM. Native Android shell cannot create the fixture's hardlinks;
+only its ABI probe runs outside Shroot on that device.
+
+`test_kernel_vm.py` requires local `qemu-system-aarch64` and `cpio`. It creates a
+minimal initramfs and records kernel/fixture/init hashes and the serial log.
+The VM has no network, host filesystem attachment or Docker service. Its init
+runs the contract as UID 1000 and powers off only that VM; it does not reboot
+Android. A process deadline kills a hung emulator. This control is a reference
+Linux implementation, not a Shroot pass or a new runtime kernel requirement.
+
 XZ rootfs archives are transcoded without changing tar contents, including device
 entries. The production importer owns omission/reporting for native `/dev` and
 rejection of unsupported objects elsewhere. Verify source signatures before

@@ -18,7 +18,7 @@ def main():
     parser.add_argument("--server", default="magicdesk")
     parser.add_argument("--keep", action="store_true")
     parser.add_argument("--diagnostics", action="store_true")
-    parser.add_argument("--case", choices=("all", "kernel-baseline", "mapping-task", "pidfd-table", "fd-observation", "proc-custody", "exec-custody", "open-job", "ofd-order", "fd-handoff", "fd-parcel", "fd-messages", "ipc-peer", "ipc-origins", "ipc-ancillary", "mount-policy", "mount-graph", "mount-namespace", "inode-custody", "origin-transfer", "transient-store", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fd-lifecycle", "fs-dispatch", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture", "rpc", "stores"), default="all",
+    parser.add_argument("--case", choices=("all", "kernel-baseline", "mapping-task", "pidfd-table", "fd-observation", "proc-custody", "exec-custody", "open-job", "ofd-order", "fd-handoff", "fd-parcel", "fd-messages", "ipc-peer", "ipc-origins", "ipc-ancillary", "mount-policy", "mount-graph", "mount-namespace", "inode-custody", "origin-transfer", "transient-store", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fd-lifecycle", "restricted-descriptors", "fs-dispatch", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture", "rpc", "stores"), default="all",
                         help="Run resource regressions, FD handoff/parcel, terminal RPC custody, native FD lifecycle, or worker transport")
     parser.add_argument("--compare-installed", action="store_true",
                         help="Compare identical metadata/spawn fixtures with the installed runtime")
@@ -322,6 +322,8 @@ def main():
             "test_task_resources", "test_inodes", "test_mounts", "test_credentials", "test_rpc", "test_snapshot", "fd_handoff", "test_ipc_peer")
         if args.case in ("mount-namespace", "proc-custody", "exec-custody", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture"):
             names = ("bootstrap", "supervisor", "run", "service", "resource_guest")
+        if args.case == "restricted-descriptors":
+            names = ("bootstrap", "supervisor", "run", "service", "resource_guest")
         if args.case == "fs-directory":
             names += ("fs_dispatch",)
         if args.case in ("all", "fs-buffer"):
@@ -363,11 +365,16 @@ def main():
         if args.case in ("all", "fs-dispatch", "fs-directory"):
             check("broker directory notification ownership", root + "/libmagicdesk_guest_fs_dispatch.so --broker-directory "
                   + root + "/broker-directory", "PASS broker directory notification ownership")
-        if args.case == "mount-namespace":
+        if args.case in ("mount-namespace", "restricted-descriptors"):
             check("fixture directories", "mkdir -p " + root + "/source/tmp " + root + "/source/bin " + root + "/source/attached")
             check("stage guest image", "cp " + root + "/libmagicdesk_guest_resource_guest.so " + root + "/source/bin/test")
             check("import fixture", root + "/libmagicdesk_guest_service.so --import " + root + "/source " + root + "/store")
-            check_namespaces()
+            if args.case == "mount-namespace":
+                check_namespaces()
+            else:
+                check("restricted descriptor IO and prctl policy", root + "/libmagicdesk_guest_run.so --user 0:0 --store "
+                      + root + "/store --deadline-seconds 30 -- /bin/test restricted-descriptors /tmp",
+                      "PASS restricted proc-root preserves typed IO, reused descriptor IO, mutation and flags")
             return
         if args.case in ("all", "fd-observation"):
             check("native FD table observation", root + "/libmagicdesk_guest_fd_observation.so",

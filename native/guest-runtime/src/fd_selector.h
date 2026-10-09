@@ -11,6 +11,8 @@ struct md_fd_selector;
 struct md_fd_selector *md_fd_selector_new(void);
 struct md_fd_selector *md_fd_selector_fork(struct md_fd_selector *, int shared);
 void md_fd_selector_release(struct md_fd_selector *);
-int md_fd_selector_has(struct md_fd_selector *, unsigned kind, unsigned fd);
-int md_fd_selector_mark(struct md_fd_selector *, unsigned kind, unsigned fd);
+/* -1 selects all descriptor numbers, for admission before application filters
+ * make later selector installation impossible. PROC also covers WATCH calls. */
+int md_fd_selector_has(struct md_fd_selector *, unsigned kind, int fd);
+int md_fd_selector_mark(struct md_fd_selector *, unsigned kind, int fd);
 #endif

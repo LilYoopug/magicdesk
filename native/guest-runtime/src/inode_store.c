@@ -38,6 +38,7 @@ int md_inode_open_object(struct md_inode_store *s, const char *id, int flags) {
     if (!r) r = mdi_backing_stat(s, &node, &st);
     if (!r && node.kind != S_IFREG) r = -EINVAL;
     if (!r && !(flags & O_PATH)) r = mdi_permission(s, &node, R_OK, 0);
+    if (!r) r=mdi_landlock_object(s,&node,s->landlock_execute ? MD_LL_EXECUTE : md_landlock_open_access(flags,node.kind));
     int fd = -1;
     int directory = r ? -1 : mdi_backing_directory(s, &node);
     if (!r && directory < 0) r = directory;
@@ -59,6 +60,7 @@ static int create_node(struct md_inode_store *s, int dirfd, const char *path,
     if (!r && loc.trailing && kind != S_IFDIR) r = -ENOENT;
     if (!r && s->readonly) r=-EROFS;
     if (!r) r = mdi_parent_writable(s, &loc.parent);
+    if (!r) r=mdi_landlock(s,&loc.parent,NULL,md_landlock_make_access(kind));
     struct mdi_node node;
     int fd = -1;
     if (!r) r = mdi_allocate(s, kind, mode, O_RDWR, target,
@@ -149,6 +151,7 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
         if (loc.trailing) r = -EISDIR;
         if (!r && s->readonly) r=-EROFS;
         if (!r) r = mdi_parent_writable(s, &loc.parent);
+        if (!r) r=mdi_landlock(s,&loc.parent,NULL,MD_LL_MAKE_REG|md_landlock_open_access(flags,S_IFREG));
         if (!r) r = mdi_allocate(s, S_IFREG, mode, flags, NULL, loc.parent.id, &loc.node, &fd);
         if (!r) r = mdi_add_name(s, loc.parent.id, loc.name, loc.node.id);
         if (!r) r = mdi_event(s, loc.parent.id, &loc.node, loc.name, IN_CREATE, NULL);
@@ -164,6 +167,7 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
     if (!r && image && loc.node.kind != S_IFREG) r = -EACCES;
     if (!r) r = mdi_open_permission(s, &loc.node, flags);
     if (!r && image) r = mdi_permission(s, &loc.node, X_OK, 0);
+    if (!r) r=mdi_landlock(s,&loc.node,&loc.parent,image ? MD_LL_EXECUTE : md_landlock_open_access(flags,loc.node.kind));
     if (!r && (flags&(O_WRONLY|O_RDWR|O_TRUNC))) r = mdi_copy_up(s, &loc.node);
     struct stat st;
     if (!r) r = mdi_backing_stat(s, &loc.node, &st);
@@ -196,6 +200,8 @@ int md_inode_link(struct md_inode_store *s, int sourcefd, const char *source,
     if (!r && b.exists) r = -EEXIST;
     if (!r && b.trailing) r = -ENOENT;
     if (!r) r = mdi_parent_writable(s, &b.parent);
+    if (!r && s->landlock && strcmp(a.parent.id,b.parent.id)) r=-EXDEV;
+    if (!r) r=mdi_landlock(s,&b.parent,NULL,md_landlock_make_access(a.node.kind));
     if (!r) r = mdi_add_name(s, b.parent.id, b.name, a.node.id);
     if (!r) r = mdi_event(s, b.parent.id, &a.node, b.name, IN_CREATE, NULL);
     if (!r) r = mdi_event(s, NULL, &a.node, NULL, IN_ATTRIB, NULL);
@@ -221,6 +227,7 @@ int md_inode_unlink(struct md_inode_store *s, int dirfd, const char *path, int f
     }
     if (!r) r = mdi_parent_writable(s, &loc.parent);
     if (!r) r = mdi_sticky(s, &loc);
+    if (!r) r=mdi_landlock(s,&loc.parent,NULL,loc.node.kind==S_IFDIR ? MD_LL_REMOVE_DIR : MD_LL_REMOVE_FILE);
     if (!r) r = mdi_delete_name(s, loc.parent.id, loc.name);
     if (!r) r = mdi_removed_event(s, &loc, 1);
     return mdi_commit(s, r);
@@ -239,6 +246,11 @@ int md_inode_rename(struct md_inode_store *s, int sourcefd, const char *source,
     if (!r && b.trailing && b.exists && b.node.kind != S_IFDIR) r = -ENOTDIR;
     if (!r && flags == RENAME_NOREPLACE && b.exists) r = -EEXIST;
     if (!r && flags == RENAME_EXCHANGE && !b.exists) r = -ENOENT;
+    if (!r && s->landlock && strcmp(a.parent.id,b.parent.id)) r=-EXDEV;
+    if (!r) r=mdi_landlock(s,&a.parent,NULL,(a.node.kind==S_IFDIR ? MD_LL_REMOVE_DIR : MD_LL_REMOVE_FILE)
+        | md_landlock_make_access(a.node.kind)
+        | (b.exists ? (b.node.kind==S_IFDIR ? MD_LL_REMOVE_DIR : MD_LL_REMOVE_FILE) : 0)
+        | (flags==RENAME_EXCHANGE ? md_landlock_make_access(b.node.kind) : 0));
     /* Kernel rename between two names of the same inode preserves both names. */
     if (!r && b.exists && !strcmp(a.node.id, b.node.id)) return mdi_finish(s, 0);
     if (!r && s->overlay) r=mdi_overlay_rename_directory(s,&a.node);

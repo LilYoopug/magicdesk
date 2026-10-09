@@ -121,6 +121,16 @@ static void selectors(void) {
     assert(!md_fd_selector_has(copy,MD_FD_SELECTOR_PROC,7));
     assert(md_fd_selector_has(copy,MD_FD_SELECTOR_WATCH,7)==1);
     assert(md_fd_selector_has(a,MD_FD_SELECTOR_KINDS,7)==-EINVAL);
+    assert(md_fd_selector_has(a,MD_FD_SELECTOR_PROC,-2)==-EINVAL);
+    assert(!md_fd_selector_has(a,MD_FD_SELECTOR_PROC,-1));
+    assert(!md_fd_selector_mark(a,MD_FD_SELECTOR_PROC,-1));
+    assert(md_fd_selector_has(shared,MD_FD_SELECTOR_PROC,12345)==1);
+    assert(md_fd_selector_has(shared,MD_FD_SELECTOR_WATCH,-1)==1);
+    assert(!md_fd_selector_has(copy,MD_FD_SELECTOR_PROC,-1));
+    struct md_fd_selector *prepared=md_fd_selector_fork(a,0); assert(prepared);
+    assert(md_fd_selector_has(prepared,MD_FD_SELECTOR_PROC,-1)==1);
+    assert(md_fd_selector_has(prepared,MD_FD_SELECTOR_WATCH,98765)==1);
+    md_fd_selector_release(prepared);
     md_fd_selector_release(a); md_fd_selector_release(copy); md_fd_selector_release(shared);
 }
 static void ordered_io(void) {

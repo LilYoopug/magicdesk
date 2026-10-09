@@ -13,6 +13,17 @@ Android-version inference or `uname`-only capability check. Kernel configuration
 SELinux, application filters and vendor backports affect availability. Headers
 merely allow compiling an operation; they do not make it available at runtime.
 
+Guest Landlock filesystem ABI 1 is implemented by `landlock_policy`, the task
+resource owners and the filesystem worker; it does not require the host's
+`CONFIG_SECURITY_LANDLOCK` or become a shared-startup prerequisite. Its syscall
+numbers and filesystem rights predate the 5.15 baseline. Newer ABI rights are
+rejected, not advertised as enforced. Native host queries retain the kernel's
+own result. `landlock_guest` and `test_arch_runtime.py` distinguish that query
+from actual guest permission checks. The same ABI 1 assertions run under UID
+1000 in a reference Linux 6.18 QEMU VM; that reference does not raise Shroot's
+minimum. See [filesystem restrictions](../../docs/guest-runtime.md#filesystem-restrictions)
+for provider limits and the difference from native security confinement.
+
 The baseline includes pidfds, selective ptrace, seccomp notifications,
 `openat2`, `faccessat2`, `close_range` and shared/sealed memfds. In particular,
 atomic `SECCOMP_ADDFD_FLAG_SEND` is a required FD-publication primitive, available

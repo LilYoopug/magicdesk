@@ -29,7 +29,7 @@ static inline int md_proc_io_decode(long nr, const unsigned long *a, struct md_p
     }
     return out->positional && out->offset<0 ? -EINVAL : 0;
 }
-enum { MD_PROC_FILE_OPEN=1, MD_PROC_FILE_KIND, MD_PROC_FILE_REOPEN, MD_PROC_FILE_NAMESPACE_QUERY };
+enum { MD_PROC_FILE_OPEN=1, MD_PROC_FILE_REOPEN, MD_PROC_FILE_NAMESPACE_QUERY };
 struct md_proc_metadata_request { int32_t process, descriptor; uint32_t kind, access, effective, nofollow; };
 struct md_proc_metadata_result { struct stat value; uint32_t kind; unsigned long filesystem; };
 static inline int md_proc_control_kind(enum md_proc_kind kind) {
