@@ -7,6 +7,7 @@ import shutil
 import signal
 import socket
 import stat
+import struct
 import tempfile
 
 libc = ctypes.CDLL(None, use_errno=True)
@@ -127,11 +128,117 @@ def signal_identity():
         os.close(ready)
 
 
+def foreign_descriptors():
+    with tempfile.TemporaryDirectory(prefix='proc-fd-') as directory:
+        path = directory + '/removed'
+        stream = open(path, 'w+b')
+        stream.write(b'retained file')
+        stream.flush()
+        os.unlink(path)
+        sock = socket.socket()
+        sock.bind(('127.0.0.1', 0))
+        sock.listen()
+        pipe, writer = os.pipe()
+        namespace = os.open('/proc/self/ns/pid', os.O_RDONLY)
+        release, done = os.pipe()
+        acknowledged, notify = os.pipe()
+        pid = os.fork()
+        if not pid:
+            os.close(done)
+            os.close(acknowledged)
+            while True:
+                # EVENT_WAIT: parent controls each FD transition; harness bounds failure.
+                command = os.read(release, 1)
+                if command == b'Q':
+                    os._exit(0)
+                if command == b'C':
+                    os.close(stream.fileno())
+                elif command == b'R':
+                    os.dup2(sock.fileno(), stream.fileno())
+                else:
+                    os._exit(1)
+                os.write(notify, command)
+        os.close(release)
+        os.close(notify)
+        try:
+            def inspect():
+                for fd in (stream.fileno(), sock.fileno(), pipe, namespace):
+                    name = f'/proc/{pid}/fd/{fd}'
+                    expected, actual = os.fstat(fd), os.stat(name)
+                    assert (actual.st_dev, actual.st_ino, actual.st_mode, actual.st_size) == (
+                        expected.st_dev, expected.st_ino, expected.st_mode, expected.st_size), (name, expected, actual)
+                    assert stat.S_ISLNK(os.lstat(name).st_mode)
+                    assert os.readlink(name) == os.readlink(f'/proc/self/fd/{fd}')
+                    value = ctypes.create_string_buffer(256)
+                    native(libc.statx, -100, os.fsencode(name), 0, 0x7ff, value)
+                    assert struct.unpack_from('=Q', value.raw, 32)[0] == expected.st_ino
+                    assert struct.unpack_from('=H', value.raw, 28)[0] == expected.st_mode
+                    native(libc.statx, -100, os.fsencode(name), 0x100, 0x7ff, value)
+                    assert stat.S_ISLNK(struct.unpack_from('=H', value.raw, 28)[0])
+                assert os.readlink(f'/proc/{pid}/cwd') == os.getcwd()
+                assert os.stat(f'/proc/{pid}/cwd').st_ino == os.stat('.').st_ino
+                assert os.stat(f'/proc/{pid}/exe').st_ino == os.stat('/proc/self/exe').st_ino
+                directory_fd = os.open(f'/proc/{pid}/fd', os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    assert os.stat(str(sock.fileno()), dir_fd=directory_fd).st_ino == os.fstat(sock.fileno()).st_ino
+                finally:
+                    os.close(directory_fd)
+
+            inspect()
+            reader = os.fork()
+            if not reader:
+                try:
+                    native(libc.prctl, 4, 0, 0, 0, 0)
+                    inspect()
+                except BaseException:
+                    import traceback
+                    traceback.print_exc()
+                    os._exit(1)
+                os._exit(0)
+            assert os.waitpid(reader, 0)[1] == 0
+            denied = os.fork()
+            if not denied:
+                try:
+                    os.setgid(1234)
+                    os.setuid(1234)
+                    for name in (f'/proc/{pid}/fd/{sock.fileno()}', f'/proc/{pid}/cwd', f'/proc/{pid}/exe'):
+                        rejects(errno.EACCES, os.stat, name)
+                        rejects(errno.EACCES, os.readlink, name)
+                except BaseException:
+                    import traceback
+                    traceback.print_exc()
+                    os._exit(1)
+                os._exit(0)
+            assert os.waitpid(denied, 0)[1] == 0
+            reused = f'/proc/{pid}/fd/{stream.fileno()}'
+            os.write(done, b'C')
+            assert os.read(acknowledged, 1) == b'C'
+            rejects(errno.ENOENT, os.stat, reused)
+            os.write(done, b'R')
+            assert os.read(acknowledged, 1) == b'R'
+            assert os.stat(reused).st_ino == os.fstat(sock.fileno()).st_ino
+            assert stat.S_ISSOCK(os.stat(reused).st_mode)
+            os.write(done, b'Q')
+            assert os.waitpid(pid, 0)[1] == 0
+            old_pid, pid = pid, None
+            rejects(errno.ENOENT, os.stat, f'/proc/{old_pid}/fd/{sock.fileno()}')
+        finally:
+            if pid is not None:
+                os.kill(pid, 9)
+                os.waitpid(pid, 0)
+            stream.close()
+            sock.close()
+            for fd in (pipe, writer, namespace, done, acknowledged):
+                os.close(fd)
+    print('PASS foreign proc metadata: sockets, pipes, deleted files, namespaces, cwd, exe, protected reader and denied identity', flush=True)
+
+
 def main():
     status_identity('self', 0, 0)
     if os.getpid() == 1:
         signal_identity()
     descriptor_info()
+    foreign_descriptors()
     protected_info = os.fork()
     if not protected_info:
         try:

@@ -43,6 +43,9 @@ watched dispositions are restored in the guest before exec. There are no
 signal-handler locks or periodic process scans. The syscall supervisor maintains
 explicit thread/address-space records on clone/exec/exit events; waiting itself
 does not allocate per poll iteration.
+Guest `CLONE_UNTRACED` suppresses automatic attachment by a guest debugger,
+not runtime supervision. The native clone omits that flag while the retained
+guest flags still control debugger birth publication and resource inheritance.
 `event_wait.c` shares freestanding monotonic descriptor waits with filesystem RPC;
 deadlines remain absolute across EINTR.
 

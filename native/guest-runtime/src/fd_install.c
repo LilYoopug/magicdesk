@@ -7,7 +7,17 @@
 int md_fd_install_begin(struct md_fd_install *p, struct md_fd_origins *files,
         int listener, uint64_t notification, int source, struct md_fd_object *origin,
         unsigned flags, struct md_resource_wakeup *wakeup) {
-    if (!p || p->files.table || !files || listener<0 || source<0 || flags&~O_CLOEXEC) return -EINVAL;
+    if (!p || !files || listener<0 || source<0 || flags&~O_CLOEXEC) return -EINVAL;
+    if (p->files.table) {
+        if (p->files.table!=files || p->listener!=listener || p->source!=source
+                || p->origin!=origin || p->flags!=flags || p->notification==notification) return -EBUSY;
+        if (!ioctl(listener,SECCOMP_IOCTL_NOTIF_ID_VALID,&p->notification)) return -EBUSY;
+        if (errno!=ENOENT) return -errno;
+        /* A restarted admission can precede the queued turn's wakeup. Retire
+         * only its expired notification; the caller still owns this result. */
+        int error=md_fd_install_cancel(p);
+        if (error) return error;
+    }
     *p=(struct md_fd_install){.listener=listener,.notification=notification,
         .source=source,.origin=md_fd_object_retain(origin),.flags=flags};
     int result=md_fd_order_begin(files,&p->files,wakeup);
@@ -25,7 +35,7 @@ int md_fd_install_progress(struct md_fd_install *p) {
         struct seccomp_notif_addfd add={.id=p->notification,.flags=SECCOMP_ADDFD_FLAG_SEND,
             .srcfd=p->source,.newfd_flags=p->flags};
         result=ioctl(p->listener,SECCOMP_IOCTL_NOTIF_ADDFD,&add);
-        if (result<0) result=-errno;
+        if (result<0) result=errno==ENOENT ? MD_FD_INSTALL_CANCELLED : -errno;
     }
     md_fd_origins_finish(&update,result);
     p->retire_error=md_fd_order_complete(&p->files);

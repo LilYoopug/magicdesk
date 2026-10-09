@@ -1676,6 +1676,14 @@ static void mapped_return(const char *directory, int mode, unsigned slots, int p
     assert(!munmap(stack,65536) && !munmap(memory,4096) && descriptors()==before);
     printf("PASS mapped result ownership mode=%d slots=%u path=%d: exact terminal receipt, fork channel order, cancellation and EOF\n",mode,slots,path_only);
 }
+static int install_signal_socket;
+static void install_signal(int signal) {
+    (void)signal;
+    char byte;
+    assert(write(install_signal_socket,"i",1)==1);
+    /* EVENT_WAIT: parent verifies cancellation before releasing syscall restart. */
+    assert(read(install_signal_socket,&byte,1)==1 && byte=='r');
+}
 static void atomic_install(const char *directory, int available, int protected, int cloexec, int cancel) {
     unsigned before=descriptors();
     char path[PATH_MAX]; snprintf(path,sizeof(path),"%s/install",directory);
@@ -1687,6 +1695,12 @@ static void atomic_install(const char *directory, int available, int protected, 
     pid_t child=fork(); assert(child>=0);
     if (!child) {
         close(sockets[0]);
+        if (cancel>=3) {
+            install_signal_socket=sockets[1];
+            struct sigaction action={.sa_handler=install_signal,.sa_flags=SA_RESTART};
+            sigemptyset(&action.sa_mask);
+            assert(!sigaction(SIGUSR1,&action,NULL));
+        }
         if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
         int notify=listener(0);
         send_message(sockets[1],(struct message){.kind=LISTENER},notify);
@@ -1715,15 +1729,33 @@ static void atomic_install(const char *directory, int available, int protected, 
     struct seccomp_notif request={0};
     assert(!ioctl(notify,SECCOMP_IOCTL_NOTIF_RECV,&request));
     struct md_fd_order previous={0}, next={0};
-    if (cancel==2) assert(md_fd_order_begin(files,&previous,NULL)==1 && !md_fd_order_start(&previous));
+    if (cancel==2 || cancel==4) assert(md_fd_order_begin(files,&previous,NULL)==1 && !md_fd_order_start(&previous));
     struct md_fd_install operation={0};
     assert(!md_fd_install_begin(&operation,files,notify,request.id,source,md_fs_anchor_object(origin),cloexec ? O_CLOEXEC : 0,NULL));
     assert(!md_fd_order_begin(files,&next,NULL));
+    if (cancel>=3) {
+        uint64_t previous_notification=request.id;
+        assert(!kill(child,SIGUSR1));
+        char byte;
+        assert(read(sockets[0],&byte,1)==1 && byte=='i');
+        if (cancel==3) {
+            assert(md_fd_install_progress(&operation)==MD_FD_INSTALL_CANCELLED);
+            assert(!operation.retire_error && !operation.files.table);
+            assert(md_fd_order_state(&next)==MD_RESOURCE_ORDER_READY && !md_fd_order_cancel(&next));
+        } else assert(md_fd_install_progress(&operation)==MD_FD_INSTALL_WAIT);
+        assert(write(sockets[0],"r",1)==1);
+        /* EVENT_WAIT: SA_RESTART issues a new notification for the same result. */
+        memset(&request,0,sizeof(request));
+        assert(!ioctl(notify,SECCOMP_IOCTL_NOTIF_RECV,&request) && request.id!=previous_notification);
+        assert(!md_fd_install_begin(&operation,files,notify,request.id,source,md_fs_anchor_object(origin),cloexec ? O_CLOEXEC : 0,NULL));
+        if (cancel==4) assert(!md_fd_order_cancel(&next) && !md_fd_order_complete(&previous));
+        assert(!md_fd_order_begin(files,&next,NULL));
+    }
     int status, result;
     if (cancel==1) {
         assert(!kill(child,SIGKILL));
         assert(waitpid(child,&status,0)==child && WIFSIGNALED(status) && WTERMSIG(status)==SIGKILL);
-        assert(md_fd_install_progress(&operation)==-ENOENT);
+        assert(md_fd_install_progress(&operation)==MD_FD_INSTALL_CANCELLED);
     } else {
         if (cancel==2) {
             assert(md_fd_install_progress(&operation)==MD_FD_INSTALL_WAIT);
@@ -1788,8 +1820,10 @@ int main(int argc, char **argv) {
         atomic_install(argv[1],1,protected,cloexec,0);
         atomic_install(argv[1],-1,protected,cloexec,1);
         atomic_install(argv[1],-1,protected,cloexec,2);
+        atomic_install(argv[1],1,protected,cloexec,3);
+        atomic_install(argv[1],1,protected,cloexec,4);
     }
-    puts("PASS production atomic FD installation: protected receivers, 0/1 slots, CLOEXEC, origin ordering, queued cancellation and dead recipient");
+    puts("PASS production atomic FD installation: protected receivers, 0/1 slots, CLOEXEC, origin ordering, queued cancellation, dead recipient and signal restart");
     retained_receipt(argv[1],0,0);
     retained_receipt(argv[1],1,0);
     retained_receipt(argv[1],2,0);

@@ -85,7 +85,10 @@ passes both formats under UID 2000.
 
 `test_proc_root_runtime.py BUILD STORE` checks foreign proc-root traversal,
 retained roots after target exit, credential rejection, protected readers,
-live fdinfo position/flags/close state and logical pidfd fields. It runs with
+live fdinfo position/flags/close state and logical pidfd fields. Foreign FD
+stat/statx/readlink cover sockets, pipes, deleted files, namespace handles,
+close/reuse and target exit; cwd and executable metadata select guest objects.
+It runs with
 implicit proc and with stock `unshare --pid --fork --mount-proc`.
 
 `test_thread_identity_runtime.py BUILD STORE FIXTURE --debuggers` uses the glibc
@@ -112,6 +115,39 @@ systemd session or GPU test.
 `browser/test_browser.py --build BUILD --store STORE` checks stock Chromium's
 sandbox-enabled user/PID route and JavaScript execution. These application
 checks do not certify kernel-equivalent confinement or Docker Engine support.
+
+## Holo ARM64 Userspace
+
+`test_steamos_runtime.py BUILD STORE [--archive HOST_TAR]` imports a prepared
+Holo rootfs into a new store and checks guest identity, SysV IPC, FIFO,
+user/PID/mount namespaces and HTTPS as `steamlab`. Archive ownership is retained;
+the executor must be UID 2000. It does not boot SteamOS or alter Android partitions.
+`--socket-owner` adds a Python/lsof loopback-owner check required by Steam's UI
+authentication. It must resolve the listener's PID and guest UID, not merely
+establish a TCP connection. This passes with stock Holo `lsof`; neither its
+output nor Steam's peer verification is replaced.
+
+`test_steamos_graphics.py BUILD STORE --client steam|glx|vulkan|gles` uses ordinary
+shell graphics sessions and private virtual displays. The prepared store needs
+the ARM Steam bootstrap in `/home/steamlab/client`, XKB data in
+`/usr/share/xkeyboard-config-2`, Turnip in `/opt/mesa`, and the glibc-compatible
+Freedreno bundle in `/opt/mesa-debian`. Steam also needs its Holo GUI dependencies
+and the ARM64 GTK2 libraries from Valve's Steam Runtime in `/opt/steam-gtk2`;
+Holo's `gtk2-compat` package provides build metadata, not those shared libraries.
+The build directory supplies
+`recipe-classes` from `GraphicalRecipe.java` and the `md-await-exit` completion
+fixture. `--timeout` bounds the entire launch, including Steam's own updates;
+no sandbox-disable flags are supplied. `--window-title` requires an exact native
+window title so an updater cannot stand in for the login UI. Bounded pixel
+observation rejects a blank frame and Steam's small initial loading indicator;
+visually inspect the captured form. GPU probes capture changing frames.
+Steam mapping/capture is reported separately and is not a successful login,
+game execution or complete SteamOS session. Cleanup cancels the owned runtime
+and observes its exit before releasing the graphics session and display.
+
+`test_debugger_runtime.py OUTPUT --instance STORE --build BUILD --case clone-untraced`
+checks copied/shared file tables, zero/SIGCHLD exit signals, guest filesystem
+access and guest-debugger non-inheritance for `CLONE_UNTRACED` children.
 
 ## Named Environment Workflows
 
@@ -834,7 +870,10 @@ debugger lifecycle checks and real GDB attach, LLDB, gdbserver, strace, gprof,
 Callgrind and perf-event checks. `--proot ubuntu` selects the same cases in an
 installed Termux PRoot distribution; `--case NAME` restricts a run. The
 `gdb-attach-threads` case checks all 41 target threads, backtraces, a memory write,
-detach and normal target exit. `syscall-exec` checks image-entry ordering and
+detach and normal target exit. `gdb-active-io` requires repeated breakpoints and
+normal exit while eight peer threads create, write, read, reopen, rename and
+unlink files, exercising
+all-stop delivery across internal adapter operations. `syscall-exec` checks image-entry ordering and
 paired syscall stops across exec; strace checks decoded arguments and fork
 events without stray-exec recovery. The prepared
 userspace needs GCC, Python 3, GDB, LLDB, gdbserver, binutils, strace and Valgrind.
@@ -913,7 +952,9 @@ native checks with `--case fd-handoff` without importing a store.
 The same fixture runs the production `fd_install` primitive against real seccomp
 notifications, covering protected receivers, zero/one free slot, both CLOEXEC
 choices, exact origin publication, queued cancellation and receiver death before
-atomic installation. No installed result is reclaimed by guessing a guest FD.
+atomic installation. Signal handshakes also force live syscall restart before
+and after retirement of the expired installation turn. No installed result is
+reclaimed by guessing a guest FD.
 
 `--case mapping-task` is an explicit kernel feasibility check, separate from the
 default runtime suite. It tests private-FD CLONE_VM helpers under UID 2000:

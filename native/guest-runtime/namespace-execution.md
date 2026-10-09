@@ -136,8 +136,12 @@ exactly-once guarantee; operation receipts/recovery policy remain future work.
 The adapter recognizes absolute `/proc/self`, `/proc/thread-self`, current
 PID/TID and current-thread `/proc/PID/task/TID` paths for `fd/N`, `cwd`, `root`
 and `exe`, plus `/dev/fd/N` and the three standard-stream links. Repeated slashes
-and `.` components within those prefixes are accepted. Recognized foreign-process
-magic links return ENOTSUP; they cannot be assigned this namespace's identity.
+and `.` components within those prefixes are accepted. Foreign-process FD and
+cwd metadata/readlink require process-access authorization; ordinary objects
+use retained O_PATH capture and typed proc descriptors keep their provider.
+Foreign executable metadata captures the selected guest image through the
+same image owner used by exec, without a temporary FD in the guest table.
+Other foreign aliases remain explicit ENOTSUP unless separately implemented.
 
 Opening a file descriptor alias uses the kernel's proc magic link: it rechecks
 permissions and creates a new open file description, with an independent offset.

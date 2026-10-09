@@ -949,6 +949,17 @@ Routed X11 and Wayland both run Mousepad and Galculator, including repeated
 independent clients in one retained session. The X11 negative check rejects an
 incorrect cookie before a window is mapped.
 
+Prepared Holo Core ARM64 preview (`mash-20251118.3`, glibc 2.42) passes SysV IPC,
+FIFO, user/PID/mount namespaces and HTTPS as guest user `steamlab` under shell.
+With compatible external Mesa bundles, captured changing frames confirm
+Turnip Vulkan through Wayland, Freedreno OpenGL 4.6 through X11 and GLES 3.2
+through Wayland on Adreno 840. GLES client lifetime beyond these short probes
+needs further coverage. The ARM64 Steam client updates, identifies its local
+CEF connection with unmodified `lsof`, and renders the sign-in form through X11.
+Process-access checks remain active; no sandbox-disable flags are supplied.
+These are prepared-userspace checks, not a booted SteamOS session, Plasma
+desktop, Steam login or game compatibility claim.
+
 Installed `.desktop` recipes use the shortcut editor's actual launch builder.
 Both protocols pass bidirectional Unicode clipboard exchange, Mousepad saving
 with fresh-process readback, simultaneous Mousepad/Galculator launches sharing

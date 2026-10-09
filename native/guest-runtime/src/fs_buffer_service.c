@@ -62,6 +62,7 @@ struct md_fs_buffer_request {
     size_t snapshot_size;
     struct md_fs_anchor *input[2];
     struct md_task_snapshot *root[2];
+    struct md_program *proc_object[2];
     struct md_fd_object *reopened;
     struct md_fd_object *control_input;
     struct md_landlock_policy *landlock;
@@ -116,6 +117,10 @@ static void dispose(struct md_fs_buffer_request *r) {
     for (unsigned i=0;i<2;++i) {
         md_fs_anchor_release(r->input[i]);
         if (r->root[i]) { md_task_snapshot_release(r->root[i]); free(r->root[i]); }
+        if (r->proc_object[i]) {
+            if (r->proc_object[i]->fd>=0) close(r->proc_object[i]->fd);
+            free(r->proc_object[i]);
+        }
         if (r->captured[i]>=0) close(r->captured[i]);
     }
     md_fs_context_end(&r->context);
@@ -422,7 +427,24 @@ void md_fs_buffer_exec_capture(struct md_fs_buffer_service *s,md_exec_capture ca
 void md_fs_buffer_root_capture(struct md_fs_buffer_service *s,md_root_capture capture) {
     s->root_capture=capture;
 }
-static int resolve_roots(struct md_fs_buffer_request *r) {
+static int resolve_proc_objects(struct md_fs_buffer_request *r) {
+    for (unsigned i=0;i<2;++i) if (r->proc_object[i]) {
+        struct md_program *image=r->proc_object[i];
+        if (image->fd>=0) {
+            r->captured[i]=image->fd; image->fd=-1;
+        } else {
+            struct md_fs_request q={.actor=r->context.actor,.peer=r->context.peer,.operation=MD_FS_OPEN_OBJECT,
+                .directory={-1,-1},.path={image->identity.object,NULL},.flags=O_PATH|O_CLOEXEC};
+            struct md_fs_output out={.origin=&r->input[i]};
+            struct md_fs_result result;
+            md_fs_context_execute(&r->context,&q,&result,&out);
+            if (result.error) { if (result.fd>=0) close(result.fd); return result.error; }
+            r->captured[i]=result.fd;
+        }
+        r->request.directory[i]=r->captured[i];
+        r->request.origin[i]=r->input[i];
+        free(image); r->proc_object[i]=NULL;
+    }
     for (unsigned i=0;i<2;++i) if (r->root[i]) {
         struct md_fs_context context=r->context;
         context.task=*r->root[i];
@@ -455,7 +477,7 @@ static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
         return;
     }
     r->context.filesystem=fs;
-    r->error=resolve_roots(r);
+    r->error=resolve_proc_objects(r);
     if (r->error) return;
     if (r->received) { r->error=inspect_received(r); return; }
     if (r->executable) {
@@ -747,16 +769,27 @@ static struct md_fs_anchor *capture_origin(struct md_fs_buffer_request *r,unsign
     md_task_snapshot_release(&target);
     return origin;
 }
-static int capture_root(struct md_fs_buffer_request *r,unsigned index) {
+static int capture_proc_object(struct md_fs_buffer_request *r,unsigned index) {
     const struct md_fs_task_capture *capture=&r->request.capture[index];
     if (!capture->path || (capture->flags&O_NOFOLLOW)) return 0;
     struct md_proc_path path=md_proc_path_for(capture->path,r->context.task.tid,r->context.task.tgid);
     enum md_proc_kind kind=path.kind==MD_PROC_FOREIGN ? path.foreign_kind : path.kind;
-    if (kind!=MD_PROC_ROOT || !path.tail || *path.tail) return 0;
-    if (!r->service->root_capture) return -EOPNOTSUPP;
-    r->root[index]=calloc(1,sizeof(*r->root[index]));
-    if (!r->root[index]) return -ENOMEM;
-    int error=r->service->root_capture(r->actor,path.process,r->root[index]);
+    if ((kind!=MD_PROC_ROOT && kind!=MD_PROC_EXE) || !path.tail || *path.tail) return 0;
+    int error;
+    if (kind==MD_PROC_EXE) {
+        if (!r->service->exec_capture) return -EOPNOTSUPP;
+        struct md_program *image=calloc(1,sizeof(*image));
+        if (!image) return -ENOMEM;
+        image->fd=-1;
+        r->proc_object[index]=image;
+        snprintf(image->identity.path,sizeof(image->identity.path),"%s",capture->path);
+        error=r->service->exec_capture(r->actor,image);
+    } else {
+        if (!r->service->root_capture) return -EOPNOTSUPP;
+        r->root[index]=calloc(1,sizeof(*r->root[index]));
+        if (!r->root[index]) return -ENOMEM;
+        error=r->service->root_capture(r->actor,path.process,r->root[index]);
+    }
     if (error) return error;
     r->capture_mask&=~(1U<<index);
     r->request.capture[index]=(struct md_fs_task_capture){0};
@@ -810,7 +843,7 @@ int md_fs_buffer_progress(struct md_fs_buffer_service *s) {
                 }
             }
             if (r->capture_mask&(1U<<i)) {
-                int captured=capture_root(r,i);
+                int captured=capture_proc_object(r,i);
                 if (captured<0) { error=captured; break; }
                 if (captured) continue;
                 r->input[i]=r->request.operation==MD_FS_FDINFO ? NULL : capture_origin(r,i);

@@ -558,6 +558,13 @@ void md_fs_mounts_execute(struct md_filesystem *fs, const struct md_fs_request *
             return;
         }
         inode(fs,origin ? origin->view : fs->mounts,origin ? origin->mount : NULL,q,out,output);
+        if (out->error==-EXDEV && q->operation==MD_FS_FSTAT) {
+            /* Anonymous native objects have no mount/inode-store placement.
+             * Inspect the retained FD, not the proc name which may be reused. */
+            struct stat st;
+            out->error=fstat(q->directory[0],&st) ? -errno : 0;
+            if (!out->error) md_fs_stat_info(&st,&out->info);
+        }
         return;
     }
     struct md_view_location a = {.parent=-1,.fd=-1}, b = {.parent=-1,.fd=-1};

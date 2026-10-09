@@ -97,7 +97,8 @@ long md_proc_control_metadata(int process, enum md_proc_kind kind, int fd, long 
                 .f_bsize=md_page_size,.f_namelen=255,.f_frsize=md_page_size};
             result=md_write_memory((void *)a[1],&value,sizeof(value));
         } else if (nr==SYS_readlinkat) {
-            if (!namespace || !a[3]) result=-EINVAL;
+            if (!namespace) result=kind==MD_PROC_FD ? -EXDEV : -EINVAL;
+            else if (!a[3]) result=-EINVAL;
             else {
                 char label[64]; md_copy(label,sizeof(label),md_proc_file_namespace_name(metadata.kind));
                 md_append(label,sizeof(label),":["); md_decimal(label+md_length(label),st.st_ino);

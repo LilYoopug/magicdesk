@@ -87,8 +87,12 @@ an application signal or a guest wait FD.
 
 `fd_install` owns atomic ADDFD_SEND publication for mapped filesystem results and
 foreign-process image opens. The result provider retains the source FD while the
-destination table turn is queued. Cancellation before installation releases only
-that provider reference. After installation, the kernel result publishes origin
+destination table turn is queued. An expired notification is distinct from a
+delivered result: a live task may restart admission after a signal or debugger
+stop. The provider retains its already-open result across that restart, without
+repeating filesystem creation. A restarted admission may retire an expired
+queued turn for the same result; a live notification cannot be replaced. Task
+teardown releases the retained provider reference. After installation, the kernel result publishes origin
 metadata before the next table mutation; task death cannot turn it into rollback.
 An internal retirement/wakeup error is separate from the committed kernel result
 and cannot produce a second notification reply. O_PATH uses its separate retained
@@ -1121,6 +1125,13 @@ caller's credentials; no temporary root FD enters the guest table. Opened roots
 survive target exit and retain their view rather than resolving a reused PID.
 Status/stat snapshots also apply to supervised processes in the implicit proc
 provider, without requiring an explicit proc mount.
+
+Foreign FD/cwd metadata and readlink use the same process-access policy. Native
+magic-link capture retains the selected object across worker execution; socket
+metadata is read from that FD rather than by replaying a reusable proc spelling.
+Typed proc descriptors keep their logical provider metadata. Foreign executable
+stat retains the guest image description for worker resolution, not the Android
+bootstrap or a temporary descriptor installed in the caller.
 
 Current-process `fdinfo` captures the actual proc file in a private-table helper,
 not a copy of the described application FD. Seeking to zero refreshes native

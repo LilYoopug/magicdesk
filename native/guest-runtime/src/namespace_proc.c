@@ -243,8 +243,17 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
             return md_namespace_path_call(fs,nr,a,operand,*relative ? relative : ".");
         }
         if (*ref.tail) return -ENOTSUP;
-        if (ref.foreign_kind==MD_PROC_FD && nr==SYS_readlinkat)
-            return host_readlink(fs,&ref,path,a);
+        if (ref.foreign_kind==MD_PROC_FD || ref.foreign_kind==MD_PROC_CWD
+                || (ref.foreign_kind==MD_PROC_EXE && (nr==SYS_newfstatat || nr==SYS_statx))) {
+            if (nr!=SYS_newfstatat && nr!=SYS_statx && nr!=SYS_readlinkat) return -ENOTSUP;
+            long result=md_proc_control_metadata(ref.process,ref.foreign_kind,ref.descriptor,nr,a);
+            if (result!=-EXDEV) return result;
+            /* Reuse the retained-object path below, without treating another
+             * process's descriptor number or executable as caller-owned. */
+            ref.kind=ref.foreign_kind;
+        }
+    }
+    if (ref.kind==MD_PROC_FOREIGN) {
         if (ref.foreign_kind!=MD_PROC_EXE && ref.foreign_kind!=MD_PROC_CMDLINE
                 && ref.foreign_kind!=MD_PROC_AUXV) return -ENOTSUP;
         if (nr!=SYS_openat && nr!=SYS_readlinkat) return -ENOTSUP;
@@ -323,9 +332,10 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
     memcpy(anchor, path, length); anchor[length] = 0;
     struct md_namespace_operand operand=md_namespace_descriptor(-1);
     int owned=-1;
-    int image=ref.kind==MD_PROC_EXE && fs->image && fs->image->executable_object[0];
+    int local_image=ref.kind==MD_PROC_EXE && ref.foreign_kind!=MD_PROC_EXE;
+    int image=local_image && fs->image && fs->image->executable_object[0];
     if (image) operand.descriptor=MD_NAMESPACE_EXECUTABLE;
-    else if (!native && ref.kind == MD_PROC_EXE) {
+    else if (!native && local_image) {
         long fd=md_proc_executable_open(fs,exe,O_PATH|O_CLOEXEC|(tail ? O_DIRECTORY : 0));
         if (fd<0) return fd;
         owned=operand.descriptor=(int)fd;

@@ -25,6 +25,10 @@ Supported requests include register sets, memory peek/poke, signal information
 and masks, continue, single step, syscall entry/exit information, interrupt,
 listen, detach, kill, event messages and fork/vfork/clone/exec/exit options.
 Attach/interrupt stops are published at a guest boundary, outside adapter code.
+An inferior's unmaskable SIGSTOP also waits for that boundary, after its internal
+file-table and filesystem turns finish. Its original siginfo belongs to the
+debugger relationship; suppressing the stop does not group-stop the application
+or expose adapter registers. Untraced processes retain kernel job control.
 Admitting a trace relationship activates observation in the owner's whole thread
 group. A native wait entered before that relationship is interrupted and restarted
 through the same debugger-aware wait path. This also covers a child requesting
@@ -112,9 +116,13 @@ completion and normal debugger exit.
 `test_debugger_runtime.py` adds identical Shroot/PRoot attach, seize, interrupt,
 exit-event, syscall-information, mixed-wait, debugger-death, EXITKILL and
 non-leader inferior-exec checks. Real-tool scenarios verify GDB sibling attach
-with a memory write and detach, including a 41-thread target, LLDB source stepping,
-GDB through gdbserver, strace following a child, gprof function output and
-Callgrind instruction counts.
+with a memory write and detach, including a 41-thread target, and repeated GDB
+breakpoints while eight peer threads create files, write and read data, reopen
+with O_NOATIME, rename and unlink. Interrupted FD admission retains the created
+file and resumes only descriptor delivery, including a restart overtaking an
+expired queued admission. They also cover
+LLDB source stepping, GDB through gdbserver, strace following a child, gprof
+function output and Callgrind instruction counts.
 The `syscall-exec` case requires paired entry/exit stops with the exec event
 between them and a successful exec result. The strace workflow checks decoded
 open arguments and child creation, and rejects stray exec-event recovery.

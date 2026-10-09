@@ -61,6 +61,45 @@ assert 'input = 41' in result.stdout and 'result = 42' in result.stdout
 assert 'exited with status = 0' in result.stdout
 print('PASS lldb')
 '''
+GDB_IO = r'''
+import subprocess
+child = subprocess.Popen(['/tmp/md-debugger-tests', 'gdb-io-target'],
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+debugger = None
+try:
+    assert child.stdout.readline().strip() == 'READY'
+    commands = ['gdb', '--batch', '-nx', '-ex', 'set debuginfod enabled off',
+                '-ex', 'attach '+str(child.pid), '-ex', 'break io_marker',
+                '-ex', 'echo MD_ATTACHED\\n']
+    for iteration in range(16):
+        commands += ['-ex', 'continue',
+                     '-ex', 'python assert int(gdb.parse_and_eval("iteration")) == '+str(iteration),
+                     '-ex', 'echo MD_IO_BREAK\\n']
+    commands += ['-ex', 'detach', '-ex', 'echo MD_DETACHED\\n']
+    debugger = subprocess.Popen(commands, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    output = []
+    # EVENT_WAIT: attach acknowledgement releases target; outer timeout cancels failures.
+    for line in debugger.stdout:
+        print(line, end='', flush=True)
+        output.append(line)
+        if line.strip() == 'MD_ATTACHED':
+            child.stdin.write('x'*16)
+            child.stdin.flush()
+    assert debugger.wait(timeout=10) == 0
+    remaining, _ = child.communicate(timeout=10)
+    print(remaining)
+    assert child.returncode == 0 and 'PASS gdb-io-target' in remaining
+    output = ''.join(output)
+    assert output.count('MD_IO_BREAK') == 16 and 'MD_DETACHED' in output
+    assert 'Error while executing Python code' not in output
+    print('PASS gdb-active-io')
+finally:
+    if debugger is not None:
+        if debugger.poll() is None: debugger.kill()
+        debugger.wait(timeout=10)
+    if child.poll() is None: child.kill()
+    child.wait(timeout=10)
+'''
 GDB_SHM = r'''
 import subprocess
 commands = ['gdb', '--batch', '-nx', '/tmp/md-debugger-tests',
@@ -83,9 +122,10 @@ print('PASS gdb-shm')
 
 def commands():
     cases = [(name, [TARGET, name]) for name in ('attach', 'seize', 'trace-exit', 'syscall', 'syscall-exec', 'mixed',
-                                               'kill-stopped', 'owner-exit', 'exitkill', 'thread-exec', 'perf-event')]
+                                               'kill-stopped', 'owner-exit', 'exitkill', 'thread-exec', 'clone-untraced', 'perf-event')]
     cases.append(('gdb-attach', ['python3', '-c', GDB_ATTACH]))
     cases.append(('gdb-attach-threads', ['python3', '-c', GDB_ATTACH, 'gdb-thread-target']))
+    cases.append(('gdb-active-io', ['python3', '-c', GDB_IO]))
     cases.append(('gdb-shm', ['python3', '-c', GDB_SHM]))
     cases.append(('lldb', ['python3', '-c', LLDB]))
     cases.append(('gdbserver', ['gdb', '--batch', '-nx', '-x', '/tmp/md-gdbserver.commands']))

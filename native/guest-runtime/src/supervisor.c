@@ -1064,11 +1064,20 @@ static void buffer_deliver(struct thread *t) {
     int installed=md_fd_install_progress(&t->buffer_delivery);
     if (installed==MD_FD_INSTALL_WAIT) return;
     CHECK(!t->buffer_delivery.retire_error);
-    t->buffer_delivered=1;
+    if (installed==MD_FD_INSTALL_CANCELLED) {
+        /* EVENT_WAIT: a restarted admission or task teardown owns the retained
+         * open result. The filesystem operation itself must not be replayed. */
+        TRACE("PROBE buffer-delivery cancelled pid=%d notification=%llu\n",t->pid,
+            (unsigned long long)t->buffer_delivery.notification);
+        return;
+    }
     if (installed<0) {
         struct seccomp_notif_resp reply={.id=t->buffer_delivery.notification,.error=installed};
-        CHECK(!ioctl(listener,SECCOMP_IOCTL_NOTIF_SEND,&reply) || errno==ENOENT);
+        if (ioctl(listener,SECCOMP_IOCTL_NOTIF_SEND,&reply)) {
+            CHECK(errno==ENOENT); return;
+        }
     }
+    t->buffer_delivered=1;
 }
 static void proc_deliver(struct thread *t) {
     if (!t->proc_delivery.files.table) return;
@@ -1076,6 +1085,7 @@ static void proc_deliver(struct thread *t) {
     if (installed==MD_FD_INSTALL_WAIT) return;
     CHECK(!t->proc_delivery.retire_error);
     close(t->proc_image_fd); t->proc_image_fd=-1;
+    if (installed==MD_FD_INSTALL_CANCELLED) return;
     if (installed<0) {
         struct seccomp_notif_resp reply={.id=t->proc_delivery.notification,.error=installed};
         CHECK(!ioctl(listener,SECCOMP_IOCTL_NOTIF_SEND,&reply) || errno==ENOENT);
@@ -1178,7 +1188,19 @@ static int proc_node_metadata(struct thread *t, const struct md_proc_metadata_re
     struct md_proc_file *file=NULL;
     struct md_proc_file_node node={0};
     enum md_proc_file_kind kind;
-    if (q->kind) {
+    if (q->kind==MD_PROC_FD || q->kind==MD_PROC_CWD || q->kind==MD_PROC_EXE) {
+        struct thread *owner=find_thread(q->process);
+        if (!owner || !owner->born) return -ENOENT;
+        if (owner!=t && !debugger_allowed(t->pid,owner->pid)) return -EACCES;
+        /* Authorization precedes native capture. Typed descriptors retain their
+         * provider metadata; their carrier must never become the stat result. */
+        if (q->kind!=MD_PROC_FD || q->nofollow) return -EXDEV;
+        file=proc_file_capture(owner,q->descriptor);
+        if (!file) return -EXDEV;
+        node=md_proc_file_get_node(file);
+        kind=md_proc_file_kind(file);
+        target=proc_owner(node.process);
+    } else if (q->kind) {
         if (!md_proc_control_kind(q->kind)) return -EINVAL;
         if (q->kind==MD_PROC_NS_UNSUPPORTED) return -ENOENT;
         if (!target.identity) return q->kind==MD_PROC_PROCESS_DIRECTORY
@@ -1215,7 +1237,7 @@ static int proc_node_metadata(struct thread *t, const struct md_proc_metadata_re
     if (namespace && file) md_namespace_reference_stat(md_proc_file_namespace_reference(file),value);
     else if (namespace && target.pid!=t->pid && !debugger_allowed(t->pid,target.pid)) error=-EACCES;
     else if (sysctl || target.identity) error=proc_node_stat(target,kind,&current,value);
-    if (!namespace && !sysctl && !q->kind && (!target.identity || error==-ENOENT || current.inode!=node.inode || current.device!=node.device)) {
+    if (!namespace && !sysctl && file && (!target.identity || error==-ENOENT || current.inode!=node.inode || current.device!=node.device)) {
         *value=(struct stat){.st_dev=node.device,
             .st_ino=md_proc_file_directory(kind) || md_proc_file_process(kind) ? node.inode
                 : (node.inode<<2)|((unsigned)kind+1)|UINT64_C(0x8000000000000000),
@@ -1479,7 +1501,7 @@ static void buffer_receive(struct thread *t, const struct seccomp_notif *q) {
     if (!t->ready || q->data.instruction_pointer!=abi.buffer_admit || q->data.nr!=SYS_gettid
             || q->data.args[1] || q->data.args[2] || q->data.args[3] || q->data.args[4] || q->data.args[5]
             || !t->buffer.pool || t->buffer_call || t->buffer_open.fd<0 || t->buffer_open.task_path
-            || t->buffer_delivery.files.table || t->buffer_delivered) error=-EPERM;
+            || t->buffer_delivered) error=-EPERM;
     else {
         error=md_fd_install_begin(&t->buffer_delivery,t->resources.files,listener,q->id,
             t->buffer_open.fd,md_fs_buffer_open_object(&t->buffer_open),t->buffer_open.flags&O_CLOEXEC,fd_wakeup);
@@ -1489,6 +1511,9 @@ static void buffer_receive(struct thread *t, const struct seccomp_notif *q) {
             buffer_deliver(t); return;
         }
     }
+    TRACE("PROBE buffer-receive rejected pid=%d error=%d delivered=%d pending=%d old=%llu new=%llu fd=%d\n",
+        t->pid,error,t->buffer_delivered,t->buffer_delivery.files.table!=NULL,
+        (unsigned long long)t->buffer_delivery.notification,(unsigned long long)q->id,t->buffer_open.fd);
     struct seccomp_notif_resp reply={.id=q->id,.error=error};
     CHECK(!ioctl(listener,SECCOMP_IOCTL_NOTIF_SEND,&reply) || errno==ENOENT);
 }
@@ -2219,9 +2244,11 @@ static void fd_native_start(struct thread *t) {
         t->original=*r; t->phase=OBSERVING;
         t->pid_parent_address=t->pid_reservation && (r->regs[0]&CLONE_PARENT_SETTID) ? r->regs[2] : 0;
     }
-    if (t->resource_change.namespaces) {
+    if (t->resource_change.namespaces || (r->regs[8]==SYS_clone && (r->regs[0]&CLONE_UNTRACED))) {
         struct user_pt_regs native=*r;
         native.regs[0]&=~(uint64_t)t->resource_change.namespaces;
+        /* Guest debugger policy cannot detach a child from runtime ownership. */
+        if (r->regs[8]==SYS_clone) native.regs[0]&=~(uint64_t)CLONE_UNTRACED;
         if (r->regs[8]==SYS_unshare && t->resource_change.copy_mounts) native.regs[0]|=CLONE_FS;
         if (r->regs[8]==SYS_unshare && t->resource_change.identity_pending) native.regs[0]|=CLONE_FS|CLONE_THREAD;
         if (r->regs[8]==SYS_unshare && (t->resource_change.namespaces&CLONE_NEWPID)) native.regs[0]|=CLONE_THREAD;
@@ -3529,6 +3556,9 @@ static int debug_syscall_exit(struct thread *t, const struct user_pt_regs *regs)
     t->debug_call_active=t->debug_adapter=0;
     return active && md_debugger_syscall(debugger,t->pid,regs,0);
 }
+static int debugger_at_boundary(const struct thread *t) {
+    return t->phase==IDLE && !t->fd_running && !t->fd_order.table && !t->fs_order.fs;
+}
 static void resume(pid_t pid, int sig) {
     struct thread *t = thread(pid);
     if (t->resume_lost) return;
@@ -3581,7 +3611,7 @@ static void resume(pid_t pid, int sig) {
     enum phase phase = t->phase;
     if (t->trace_options_dirty && debugger_options(pid,t->debug_options)) return;
     if (phase!=IDLE && t->debug_call_active) t->debug_adapter=1;
-    if (phase==IDLE && t->entered && t->process_image) {
+    if (debugger_at_boundary(t) && t->entered && t->process_image) {
         if (t->debug_call_active && t->debug_adapter) {
             struct user_pt_regs regs;
             if (!registers(pid,&regs)) return;
@@ -3589,7 +3619,7 @@ static void resume(pid_t pid, int sig) {
         }
         if (md_debugger_boundary(debugger,pid)) return;
     }
-    if (phase==IDLE && t->debug_step_call) {
+    if (debugger_at_boundary(t) && t->debug_step_call) {
         t->debug_step_call=0;
         siginfo_t info={.si_signo=SIGTRAP,.si_code=TRAP_TRACE};
         if (md_debugger_stop(debugger,pid,(SIGTRAP<<8)|0x7f,&info,0)) return;
@@ -4277,18 +4307,19 @@ int main(int argc, char **argv) {
             md_fd_selector_release(c->fd_selector);
             c->fd_selector = md_fd_selector_fork(t->fd_selector, !!(t->cloning & CLONE_THREAD));
             CHECK(c->fd_selector);
+            int untraced=!!(t->cloning&CLONE_UNTRACED);
             t->cloning = 0;
             memcpy(c->endpoint, t->endpoint, sizeof(c->endpoint));
             if (cancelling) CHECK(!md_process_signal_children(cancelling == 1 ? SIGTERM : SIGKILL));
             /* EVENT_WAIT: a newborn stop and its parent's birth event can
              * arrive in either order. Both must precede the child's resume. */
-            int debug_birth=md_debugger_birth(debugger,pid,c->pid,event); CHECK(debug_birth>=0);
+            int debug_birth=untraced ? 0 : md_debugger_birth(debugger,pid,c->pid,event); CHECK(debug_birth>=0);
             c->debug_birth=debug_birth;
             if (c->initial_stop) resume(c->pid,0);
             if (!debug_birth) resume(pid, 0);
         } else if (event == PTRACE_EVENT_STOP) {
             if (sig == SIGSTOP || sig == SIGTSTP || sig == SIGTTIN || sig == SIGTTOU) {
-                if (t->phase==IDLE && md_debugger_stop(debugger,pid,status,NULL,0)) continue;
+                if (debugger_at_boundary(t) && md_debugger_stop(debugger,pid,status,NULL,0)) continue;
                 /* EVENT_WAIT: preserve the kernel group-stop until SIGCONT or
                  * exit. CONT here would silently discard the application's stop.
                  * Keep the operation phase intact across the listening state. */
@@ -4302,7 +4333,7 @@ int main(int argc, char **argv) {
             if (wake) { CHECK(sig == SIGTRAP); t->listening = 0; group_wakes++; }
             if (interrupted_operation(t)) continue;
             if (wake) { resume(pid, 0); continue; }
-            if (t->initial_stop && t->phase==IDLE && t->entered && md_debugger_boundary(debugger,pid)) {
+            if (t->initial_stop && debugger_at_boundary(t) && t->entered && md_debugger_boundary(debugger,pid)) {
                 t->initial_stop=1; continue;
             }
             CHECK(sig == SIGTRAP);
@@ -4890,7 +4921,7 @@ int main(int argc, char **argv) {
                 t->phase = IDLE; resume(pid, deliver);
             } else {
                 siginfo_t info;
-                if (t->phase==IDLE && !native_trace(PTRACE_GETSIGINFO,pid,NULL,&info)
+                if (debugger_at_boundary(t) && !native_trace(PTRACE_GETSIGINFO,pid,NULL,&info)
                         && md_debugger_stop(debugger,pid,status,&info,0)) continue;
                 TRACE("PROBE guest SIGTRAP pid=%d pc=%#llx lr=%#llx phase=%d\n",
                     pid, regs.pc, regs.regs[30], t->phase);
@@ -4900,7 +4931,15 @@ int main(int argc, char **argv) {
         } else {
             siginfo_t debug_info;
             TRACE("PROBE signal stop pid=%d signal=%d phase=%d\n",pid,sig,t->phase);
-            if (t->phase==IDLE && !native_trace(PTRACE_GETSIGINFO,pid,NULL,&debug_info)
+            if (sig==SIGSTOP && !debugger_at_boundary(t)
+                    && !native_trace(PTRACE_GETSIGINFO,pid,NULL,&debug_info)
+                    && md_debugger_defer_stop(debugger,pid,&debug_info)) {
+                /* EVENT_WAIT: finish the internal operation before publishing
+                 * the debugger stop; task exit/cancellation releases its owner.
+                 * Delivering SIGSTOP now would group-stop shared resource owners. */
+                resume(pid,0); continue;
+            }
+            if (debugger_at_boundary(t) && !native_trace(PTRACE_GETSIGINFO,pid,NULL,&debug_info)
                     && md_debugger_stop(debugger,pid,status,&debug_info,0)) continue;
             struct user_pt_regs regs;
             if ((sig == SIGSYS || sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGILL)

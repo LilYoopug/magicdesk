@@ -29,7 +29,7 @@ struct inferior {
     int seized, pending, syscall_mode, syscall_stop;
     struct ptrace_syscall_info syscall;
     struct rusage usage;
-    siginfo_t info;
+    siginfo_t info, deferred_stop;
 };
 struct waiting {
     struct waiting *next;
@@ -226,11 +226,25 @@ int md_debugger_newborn(struct md_debugger *d, pid_t pid) {
     return p && md_debugger_stop(d,pid,p->seized ? (SIGTRAP<<8)|0x7f|(PTRACE_EVENT_STOP<<16)
         : (SIGSTOP<<8)|0x7f,NULL,0);
 }
+int md_debugger_defer_stop(struct md_debugger *d, pid_t pid, const siginfo_t *info) {
+    struct inferior *p=find(d,pid);
+    if (!p || p->terminal || info->si_signo!=SIGSTOP) return 0;
+    /* SIGSTOP cannot be masked during an adapter operation. Retain its first
+     * delivery like a pending standard signal, without stopping resource owners. */
+    if (!p->deferred_stop.si_signo) p->deferred_stop=*info;
+    return 1;
+}
 int md_debugger_boundary(struct md_debugger *d, pid_t pid) {
     struct inferior *p=find(d,pid);
-    if (!p || !p->pending || p->stopped) return 0;
-    p->pending=0;
-    return md_debugger_newborn(d,pid);
+    if (!p || p->stopped) return 0;
+    if (p->pending) {
+        p->pending=0;
+        return md_debugger_newborn(d,pid);
+    }
+    if (!p->deferred_stop.si_signo) return 0;
+    siginfo_t info=p->deferred_stop;
+    p->deferred_stop=(siginfo_t){0};
+    return md_debugger_stop(d,pid,(SIGSTOP<<8)|0x7f,&info,0);
 }
 int md_debugger_observing(struct md_debugger *d, pid_t pid) {
     for (struct inferior *p=d->inferiors; p; p=p->next)

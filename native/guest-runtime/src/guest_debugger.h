@@ -32,6 +32,7 @@ struct md_debugger *md_debugger_create(const struct md_debugger_host *);
 void md_debugger_destroy(struct md_debugger *);
 int md_debugger_call(struct md_debugger *, pid_t, struct user_pt_regs *);
 int md_debugger_stop(struct md_debugger *, pid_t, int, const siginfo_t *, unsigned long);
+int md_debugger_defer_stop(struct md_debugger *, pid_t, const siginfo_t *);
 int md_debugger_exec(struct md_debugger *, pid_t, pid_t);
 int md_debugger_birth(struct md_debugger *, pid_t, pid_t, unsigned);
 int md_debugger_event(struct md_debugger *, pid_t, unsigned, unsigned long);

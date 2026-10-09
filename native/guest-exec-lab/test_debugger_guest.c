@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,6 +13,7 @@
 #include <linux/ptrace.h>
 #include <linux/perf_event.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <sys/ioctl.h>
 #include <sys/resource.h>
 #include <sys/shm.h>
@@ -33,6 +35,42 @@ static void exited(pid_t child, int code) {
     int status;
     assert(waitpid(child, &status, 0) == child);
     assert(WIFEXITED(status) && WEXITSTATUS(status) == code);
+}
+static int untraced_child(void *unused) {
+    (void)unused;
+    int fd=open("/etc/passwd",O_RDONLY); assert(fd>=0);
+    char bytes[64]; assert(read(fd,bytes,sizeof(bytes))>0); assert(!close(fd));
+    struct stat st; assert(!stat("/etc/passwd",&st) && st.st_size>0);
+    return 42;
+}
+static void untraced_clone_test(void) {
+    for (unsigned traced=0;traced<2;++traced) {
+        pid_t parent=fork(); assert(parent>=0);
+        if (!parent) {
+            if (traced) { assert(!ptrace(PTRACE_TRACEME,0,0,0)); raise(SIGSTOP); }
+            size_t size=1024*1024;
+            char *stack=malloc(size); assert(stack);
+            for (unsigned shared=0;shared<2;++shared) for (unsigned signal=0;signal<2;++signal) {
+                int flags=CLONE_UNTRACED|(shared ? CLONE_FS|CLONE_FILES : 0)|(signal ? SIGCHLD : 0);
+                pid_t child=clone(untraced_child,stack+size,flags,NULL); assert(child>0);
+                int status;
+                /* EVENT_WAIT: child completion; fixture alarm bounds a missing birth/exit. */
+                assert(waitpid(child,&status,signal ? 0 : __WCLONE)==child);
+                assert(WIFEXITED(status) && WEXITSTATUS(status)==42);
+            }
+            free(stack); _exit(0);
+        }
+        if (!traced) { exited(parent,0); continue; }
+        assert(WSTOPSIG(stop(parent))==SIGSTOP);
+        assert(!ptrace(PTRACE_SETOPTIONS,parent,0,PTRACE_O_TRACEFORK|PTRACE_O_TRACECLONE));
+        assert(!ptrace(PTRACE_CONT,parent,0,0));
+        for (;;) {
+            int status; assert(waitpid(parent,&status,0)==parent);
+            if (WIFEXITED(status)) { assert(!WEXITSTATUS(status)); break; }
+            assert(WIFSTOPPED(status) && !(status>>16) && WSTOPSIG(status)==SIGCHLD);
+            assert(!ptrace(PTRACE_CONT,parent,0,SIGCHLD));
+        }
+    }
 }
 static void attach_test(int seize, int trace_exit) {
     int ready[2], release[2]; assert(!pipe(ready) && !pipe(release));
@@ -302,6 +340,51 @@ static void gdb_target(int threaded) {
         assert(!pthread_barrier_destroy(&ready_barrier));
     }
 }
+static atomic_int io_exit;
+static atomic_uint io_calls;
+static char io_directory[]="/tmp/md-debugger-io.XXXXXX";
+static void *gdb_io_worker(void *argument) {
+    char path[128], renamed[128];
+    snprintf(path,sizeof(path),"%s/%zu",io_directory,(size_t)argument);
+    snprintf(renamed,sizeof(renamed),"%s/%zu.done",io_directory,(size_t)argument);
+    pthread_barrier_wait(&ready_barrier);
+    while (!atomic_load(&io_exit)) {
+        assert(!access("/etc/passwd", R_OK));
+        int fd=open(path,O_CREAT|O_EXCL|O_RDWR|O_CLOEXEC,0700);
+        if (fd<0) perror("gdb-active-io create");
+        assert(fd>=0);
+        assert(pwrite(fd,"fixture",7,4096)==7);
+        char bytes[7];
+        assert(pread(fd,bytes,sizeof(bytes),4096)==sizeof(bytes));
+        assert(!memcmp(bytes,"fixture",sizeof(bytes)));
+        assert(!close(fd));
+        fd=open(path,O_WRONLY|O_NOATIME|O_CLOEXEC);
+        if (fd<0) perror("gdb-active-io reopen");
+        assert(fd>=0 && !close(fd));
+        assert(!rename(path,renamed) && !unlink(renamed));
+        atomic_fetch_add(&io_calls, 1);
+    }
+    return NULL;
+}
+__attribute__((noinline)) static void io_marker(unsigned iteration) {
+    assert(iteration < 16);
+}
+static void gdb_io_target(void) {
+    pthread_t workers[8];
+    assert(mkdtemp(io_directory));
+    assert(!pthread_barrier_init(&ready_barrier, NULL, 9));
+    for (size_t i=0;i<8;++i) assert(!pthread_create(&workers[i], NULL, gdb_io_worker, (void *)i));
+    pthread_barrier_wait(&ready_barrier);
+    puts("READY"); fflush(stdout);
+    char c;
+    /* EVENT_WAIT: debugger attachment permits each breakpoint; alarm bounds failure. */
+    for (unsigned i=0;i<16;++i) { assert(read(0,&c,1)==1); io_marker(i); }
+    atomic_store(&io_exit,1);
+    for (unsigned i=0;i<8;++i) assert(!pthread_join(workers[i],NULL));
+    assert(atomic_load(&io_calls)>0);
+    assert(!pthread_barrier_destroy(&ready_barrier));
+    assert(!rmdir(io_directory));
+}
 __attribute__((noinline)) static void shm_marker(char *address) {
     assert(*address=='S');
 }
@@ -327,9 +410,11 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "owner-exit")) owner_test(0);
     else if (!strcmp(argv[1], "exitkill")) owner_test(1);
     else if (!strcmp(argv[1], "thread-exec")) exec_thread_test();
+    else if (!strcmp(argv[1], "clone-untraced")) untraced_clone_test();
     else if (!strcmp(argv[1], "perf-event")) { if (!perf_test()) return 0; }
     else if (!strcmp(argv[1], "gdb-target")) gdb_target(0);
     else if (!strcmp(argv[1], "gdb-thread-target")) gdb_target(1);
+    else if (!strcmp(argv[1], "gdb-io-target")) gdb_io_target();
     else if (!strcmp(argv[1], "shm-target")) shm_target();
     else return 2;
     printf("PASS %s\n", argv[1]); return 0;
