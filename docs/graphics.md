@@ -115,6 +115,14 @@ The [Linux installer](shroot.md#linux-installer) builds a complete,
 private Linux client stack for `--gpu turnip` and retains a software alternative.
 Its `--print-mesa-patch` export is also the lab's patch source.
 
+The GLX patch advertises callbacks from the effective loader backend, including
+when an application sets `LIBGL_KOPPER_DISABLE`. The Turnip profile selects Zink
+through `MESA_LOADER_DRIVER_OVERRIDE`, without forcing `GALLIUM_DRIVER` into the
+software loader. Applications explicitly disabling Kopper retain Mesa's software
+presentation; ordinary GLX and Wayland EGL clients retain the hardware path.
+The GLX fixture checks both GPU readback and actual X11 pixels, not just the
+renderer string or successful context creation.
+
 The same patch implements Turnip KGSL calibrated timestamps with
 `IOCTL_KGSL_READ_CALIBRATED_TIMESTAMPS`. Extension discovery probes the selected
 device: if the ioctl is unavailable or denied, neither the KHR nor EXT calibrated

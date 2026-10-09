@@ -80,6 +80,30 @@ python - <<'PY'
 import os
 import socket
 import subprocess
+import sys
+import time
+
+def owners(port, expected):
+    started = time.monotonic()
+    # EVENT_WAIT: stock lsof completion; expiry fails ownership discovery.
+    result = subprocess.run(['lsof', '-P', '-F', 'upnR', '-i',
+                             'TCP@127.0.0.1:' + str(port)],
+                            capture_output=True, text=True, timeout=20)
+    print('lsof:', result.returncode, 'seconds:', time.monotonic() - started,
+          result.stdout, result.stderr, flush=True)
+    assert result.returncode == 0, 'TCP owner not discoverable'
+    records = {}
+    current = None
+    for line in result.stdout.splitlines():
+        if line.startswith('p'):
+            current = int(line[1:])
+            records[current] = {}
+        elif current is not None and line[:1] in ('u', 'R'):
+            records[current][line[0]] = int(line[1:])
+    for pid, parent in expected.items():
+        assert pid in records, ('Wrong owner PID', pid, records)
+        assert records[pid].get('u') == os.getuid(), ('Wrong owner UID', records)
+        assert records[pid].get('R') == parent, ('Wrong owner parent', records)
 
 with socket.socket() as listener:
     listener.bind(('127.0.0.1', 0))
@@ -87,17 +111,26 @@ with socket.socket() as listener:
     pid = os.getpid()
     port = listener.getsockname()[1]
     print('Socket owner:', pid, os.getuid(), 'port:', port, flush=True)
-    result = subprocess.run(['lsof', '-P', '-F', 'upnR', '-i',
-                             'TCP@127.0.0.1:' + str(port)],
-                            capture_output=True, text=True, timeout=20)
-    print('lsof:', result.returncode, result.stdout, result.stderr, flush=True)
-    if result.returncode:
-        details = subprocess.run(['lsof', '-P', '-p', str(pid)],
-                                 capture_output=True, text=True, timeout=20)
-        print(details.stdout, details.stderr, flush=True)
-    assert result.returncode == 0, 'TCP owner not discoverable'
-    assert 'p' + str(pid) in result.stdout.splitlines(), 'Wrong owner PID'
-    assert 'u' + str(os.getuid()) in result.stdout.splitlines(), 'Wrong owner UID'
+    owners(port, {pid: os.getppid()})
+    child = subprocess.Popen([sys.executable, '-c',
+        'import socket,sys; '
+        's=socket.create_connection(("127.0.0.1",int(sys.argv[1])),timeout=5); '
+        'sys.stdin.buffer.read(1); s.close()', str(port)], stdin=subprocess.PIPE)
+    try:
+        listener.settimeout(5)
+        # EVENT_WAIT: the child's connection; expiry fails before owner inspection.
+        connection, peer = listener.accept()
+        with connection:
+            owners(peer[1], {pid: os.getppid(), child.pid: pid})
+    finally:
+        # EVENT_WAIT: pipe EOF releases the child; expiry requires explicit cleanup.
+        child.stdin.close()
+        try:
+            child.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait(timeout=5)
+    assert child.returncode == 0, 'Socket peer did not exit cleanly'
 PY
 '''),)
         for name, script in checks:

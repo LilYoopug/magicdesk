@@ -15,6 +15,7 @@
 #include <unistd.h>
 #include <sys/prctl.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdatomic.h>
 #include "private_memory.h"
 #include "memory_replace.h"
@@ -347,6 +348,37 @@ static void replacement_contract(void) {
     }
     puts("PASS replacement contract: cancellation at every boundary, failed save/install/restore/cleanup and missing terminal observation");
 }
+static void candidate_policy(int protected) {
+    struct md_private_memory_access access={-1,-1,-1};
+    assert(!md_private_memory_access_open(&access));
+    int saved=prctl(PR_GET_DUMPABLE);
+    if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
+    int fd=memfd_create("candidate-policy",MFD_CLOEXEC);
+    assert(fd>=0 && !ftruncate(fd,page));
+    unsigned char *original=mmap(NULL,page,PROT_READ|PROT_WRITE,MAP_PRIVATE,fd,0);
+    assert(original!=MAP_FAILED); emit(original,37);
+    struct md_private_memory view={.address=(uintptr_t)original,.length=page,
+        .page_size=page,.source=fd,.protection=PROT_READ|PROT_EXEC};
+    struct md_private_memory_plan plan;
+    assert(!md_private_memory_plan(&view,&access,&plan));
+    void *candidate=mmap(NULL,page,view.protection,plan.flags,fd,0);
+    assert(candidate!=MAP_FAILED); view.candidate=(uintptr_t)candidate;
+    uint64_t entry=0;
+    assert(pread(access.pagemap,&entry,sizeof(entry),(view.candidate/page)*sizeof(entry))==sizeof(entry));
+    assert(!(entry&(UINT64_C(3)<<62)));
+    /* Simulate a soft-dirty-cleared original. Candidate admission needs only
+     * its pagemap entry, never a second smaps description or root PFNs. */
+    plan.advice=0;
+    struct md_private_memory_access copy_access=access; copy_access.maps=-1;
+    long result=md_private_memory_copy(&view,&copy_access,&plan);
+    assert(result==((entry&(UINT64_C(1)<<55)) ? -EOPNOTSUPP : 0));
+    if (!result) { int (*run)(void)=candidate; assert(run()==37 && view.copied_pages==1); }
+    md_private_memory_discard(&view);
+    assert(!munmap(original,page)); close(fd);
+    if (protected) assert(!prctl(PR_SET_DUMPABLE,saved));
+    md_private_memory_access_close(&access);
+    printf("PASS candidate policy: protected=%d, exact pagemap soft-dirty admission without smaps rescan\n",protected);
+}
 static void runtime_replacement(int protected) {
     struct md_private_memory_access access={-1,-1,-1};
     assert(!md_private_memory_access_open(&access));
@@ -453,6 +485,50 @@ static void *automatic_io(void *unused) {
     }
     return NULL;
 }
+struct jit_vfork {
+    int ready[2], release[2];
+    int exec;
+    void *stack;
+    size_t stack_size;
+};
+static int jit_vfork_child(void *context) {
+    struct jit_vfork *v=context;
+    char byte='r';
+    if (syscall(SYS_write,v->ready[1],&byte,1)!=1) return 1;
+    /* EVENT_WAIT: the JIT caller releases this child only after repair. The
+     * fixture alarm bounds a barrier waiting on its kernel-blocked parent. */
+    if (syscall(SYS_read,v->release[0],&byte,1)!=1) return 1;
+    if (v->exec) {
+        char *args[]={"/proc/self/exe","--automatic",NULL};
+        execv(args[0],args);
+        return 2;
+    }
+    return 0;
+}
+static void *jit_vfork_parent(void *context) {
+    struct jit_vfork *v=context;
+    pid_t child=clone(jit_vfork_child,(char *)v->stack+v->stack_size,
+        CLONE_VM|CLONE_VFORK|SIGCHLD,v);
+    assert(child>0);
+    wait_child(child);
+    return NULL;
+}
+static void automatic_vfork(int exec) {
+    struct jit_vfork v={.stack_size=16*page,.exec=exec};
+    assert(!pipe2(v.ready,O_CLOEXEC) && !pipe2(v.release,O_CLOEXEC));
+    v.stack=mmap(NULL,v.stack_size,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    assert(v.stack!=MAP_FAILED);
+    pthread_t parent; assert(!pthread_create(&parent,NULL,jit_vfork_parent,&v));
+    char byte;
+    /* EVENT_WAIT: readiness proves the vfork child exists before JIT repair. */
+    assert(read(v.ready[0],&byte,1)==1);
+    automatic_jit(NULL);
+    assert(write(v.release[1],&byte,1)==1 && !pthread_join(parent,NULL));
+    assert(!munmap(v.stack,v.stack_size));
+    for (unsigned i=0;i<2;++i) { close(v.ready[i]); close(v.release[i]); }
+    automatic_jit(NULL);
+    printf("PASS automatic private-file JIT with a kernel-blocked vfork parent: exec=%d\n",exec);
+}
 int main(int argc, char **argv) {
     if (argc!=2) return 2;
     alarm(30); setvbuf(stdout,NULL,_IOLBF,0);
@@ -460,6 +536,9 @@ int main(int argc, char **argv) {
     printf("uid=%u page=%zu\n",(unsigned)getuid(),page);
     int fd=syscall(SYS_memfd_create,"jit-memory-policy",MFD_CLOEXEC|MFD_ALLOW_SEALING);
     assert(fd>=0 && !ftruncate(fd,page));
+    if (!strcmp(argv[1],"--automatic-vfork")) {
+        close(fd); automatic_vfork(0); automatic_vfork(1); return 0;
+    }
     if (!strcmp(argv[1],"--automatic-threads")) {
         close(fd);
         for (int protected=0;protected<=1;++protected) {
@@ -508,6 +587,8 @@ int main(int argc, char **argv) {
     runtime_preparation(0);
     runtime_preparation(1);
     replacement_contract();
+    candidate_policy(0);
+    candidate_policy(1);
     runtime_replacement(0);
     runtime_replacement(1);
     close(fd);

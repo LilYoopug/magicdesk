@@ -2,6 +2,7 @@
 #include "task_quiesce.h"
 #include <errno.h>
 #include <signal.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <sys/ptrace.h>
 #include <sys/wait.h>
@@ -60,6 +61,11 @@ int md_task_quiesce_stop(struct md_task_quiesce *q) {
 int md_task_quiesce_ready(const struct md_task_quiesce *q) {
     for (const struct participant *p=q->participants;p;p=p->next) if (!p->stopped) return 0;
     return 1;
+}
+void md_task_quiesce_describe(const struct md_task_quiesce *q,int fd) {
+    for (const struct participant *p=q->participants;p;p=p->next) if (!p->stopped)
+        dprintf(fd,"guest-runtime: memory writer pid=%d resume=%d interrupted=%d\n",
+            p->pid,p->resume,p->interrupted);
 }
 int md_task_quiesce_event(struct md_task_quiesce *q,pid_t pid,int status,const struct rusage *usage) {
     struct participant *p=find(q,pid);

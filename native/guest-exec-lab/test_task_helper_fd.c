@@ -42,7 +42,7 @@ enum scenario { NORMAL, FULL, DENIED, KILLED_OPEN, CANCEL_CHANNEL, CANCEL_EXPORT
     CANCEL_SECOND, NO_SLOT, INVALID_INPUT, REPLACE_CAPTURED, CLONE_DENIED,
     ONE_SLOT, CANCEL_RIGHT, FILTER_EPIPE, PEER_CLOSED, SIGNAL_PIPE, CANCEL_IMPORT, PREFIX_SLOTS,
     EXACT_SLOTS, IMPORT_DENIED, CLOSE_DENIED, CONTROL_FAULT, ANCHOR_REJECT, ANCHOR_CANCEL, ANCHOR_DELIVER,
-    CANCEL_CAPTURE, REPLACE_PATH };
+    CANCEL_CAPTURE, REPLACE_PATH, INTERRUPT_OWNER };
 struct snapshot { unsigned char present[512]; };
 struct completed {
     int called, captured, mutate, socket, source;
@@ -389,6 +389,10 @@ static void exercise_request(int protected, enum scenario scenario, unsigned exp
                 request.send_anchor=scenario==ANCHOR_DELIVER ? native_anchor : path;
             }
         }
+        /* The ordinary stop won a race with a writer-barrier interrupt. Its
+         * delayed acknowledgement must not complete or cancel the helper. */
+        if (scenario==INTERRUPT_OWNER) assert(!ptrace(PTRACE_INTERRUPT,child,0,0));
+        int owner_interrupted=0;
         assert(!md_task_helper_begin(helpers,child,child,&saved,&abi,memory,&buffer,&request,completed,&c));
         if (native_anchor>=0) close(native_anchor);
         md_received_fds_release(send_inputs); request.send_inputs=NULL;
@@ -397,6 +401,8 @@ static void exercise_request(int protected, enum scenario scenario, unsigned exp
             pid_t pid;
             while ((pid=waitpid(-1,&status,__WALL|WNOHANG))>0) {
                 unsigned event=(unsigned)status>>16;
+                if (pid==child && event==PTRACE_EVENT_STOP && WSTOPSIG(status)==SIGTRAP)
+                    ++owner_interrupted;
                 if (capture && (scenario==CANCEL_CAPTURE || scenario==REPLACE_PATH)
                         && pid!=child && WIFSTOPPED(status) && !event && WSTOPSIG(status)==SIGTRAP) {
                     struct user_pt_regs r=registers(pid);
@@ -460,6 +466,7 @@ static void exercise_request(int protected, enum scenario scenario, unsigned exp
             }
         }
         assert(c.called==1 && !md_task_helpers_count(helpers) && !early_child);
+        assert(scenario!=INTERRUPT_OWNER || owner_interrupted==1);
         assert(c.captured==(exported && scenario!=CLONE_DENIED ? 1 : 0));
         if (c.files) {
             assert(scenario==CLONE_DENIED && md_fd_order_cancel(&c.turn)==1
@@ -524,7 +531,7 @@ static void exercise_request(int protected, enum scenario scenario, unsigned exp
             assert(c.result.signal.si_signo==(scenario==SIGNAL_PIPE ? SIGPIPE : 0));
             if (destination>=0) {
                 int delivered=scenario==NORMAL || scenario==FULL || scenario==CANCEL_EXPORT || scenario==EXACT_SLOTS
-                    || scenario==ANCHOR_DELIVER;
+                    || scenario==ANCHOR_DELIVER || scenario==INTERRUPT_OWNER;
                 if (delivered) {
                     char byte; struct iovec io={&byte,1};
                     union { struct cmsghdr align; char bytes[CMSG_SPACE(253*sizeof(int))]; } control={0};
@@ -625,6 +632,9 @@ int main(int argc, char **argv) {
     for (int protected=0;protected<2;++protected)
         for (enum scenario s=NORMAL;s<=CANCEL_EXPORT;++s) exercise(protected,s,0,0);
     for (int protected=0;protected<2;++protected) {
+        exercise(protected,INTERRUPT_OWNER,0,0);
+        exercise(protected,INTERRUPT_OWNER,254,0);
+        exercise(protected,INTERRUPT_OWNER,0,253);
         for (enum scenario s=NORMAL;s<=CLONE_DENIED;++s) exercise(protected,s,254,0);
         exercise(protected,NORMAL,1,0);
         for (enum scenario s=NORMAL;s<=SIGNAL_PIPE;++s)

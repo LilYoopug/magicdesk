@@ -662,7 +662,13 @@ int md_task_helper_event(struct md_task_helpers *manager, pid_t pid, int status)
     unsigned event=(unsigned)status>>16;
     int sig=WSTOPSIG(status), error=0;
     if (!child && (event==PTRACE_EVENT_EXIT || event==PTRACE_EVENT_EXEC)) return 0;
-    if (!child && event==PTRACE_EVENT_CLONE) {
+    if (!child && event==PTRACE_EVENT_STOP && sig==SIGTRAP) {
+        /* An interrupt can lose to an ordinary stop and arrive after the
+         * caller lent us its registers. Continue the current gate, not the
+         * caller's saved syscall. Application group-stops remain external. */
+        if (m->parent_ready) return -EPROTO;
+        error=resume(m,pid);
+    } else if (!child && event==PTRACE_EVENT_CLONE) {
         unsigned long born;
         error=(int)trace(m,PTRACE_GETEVENTMSG,pid,NULL,&born);
         if (!error) {

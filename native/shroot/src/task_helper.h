@@ -81,7 +81,9 @@ int md_task_helper_begin(struct md_task_helpers *, pid_t owner, pid_t group,
         const struct md_task_helper_request *, md_task_helper_complete, void *completion);
 /* Owner terminal/exec notification must precede record reuse. */
 int md_task_helper_detach(struct md_task_helpers *, pid_t owner);
-/* 1 consumed, 0 belongs to the ordinary guest path, negative errno fatal. */
+/* 1 consumed, 0 belongs to the ordinary guest path, negative errno fatal.
+ * Late interrupt acknowledgements continue the lent execution in place;
+ * caller exit/exec, signals and application group-stops retain outer ownership. */
 int md_task_helper_event(struct md_task_helpers *, pid_t, int status);
 int md_task_helper_notification(struct md_task_helpers *, int listener, const struct seccomp_notif *);
 #endif

@@ -399,7 +399,10 @@ Turnip setup installs distribution-specific build dependencies and compiles Mesa
 26.2.3 inside the guest. The HTTPS source archive has a pinned SHA-256; the
 non-DRM Wayland/Zink and capability-probed KGSL timestamp changes are embedded
 in the installer and applied without fuzz. Turnip, Zink, EGL,
-GLX and GBM come from that same build. `--jobs N` controls compiler parallelism
+GLX and GBM come from that same build. Its GLX loader advertises the capabilities
+of the effective backend when an application disables Kopper. The profile does
+not force Zink into that application's software presentation path; other clients
+retain Turnip. `--jobs N` controls compiler parallelism
 (1-8, default 2). Allow several GB of space for sources, build files and libraries.
 Build work stays in `/var/cache/magicdesk/mesa/` for resuming; completed libraries
 have an immutable recipe-addressed prefix in `/opt/magicdesk/mesa/`.
@@ -440,7 +443,11 @@ sh ~/install_linux.sh --name plasma --resume --gui plasma --gpu turnip
 
 Plasma launches its classic session inside the selected graphical connection,
 without booting systemd or a system bus. Hardware-related KDE services may remain
-unavailable. The software profile uses the distribution's KWin with QPainter on
+unavailable. GUI recipes configure PipeWire clients to use native scheduling
+checks without Portal/RTKit delegation; these sessions do not supply a privileged
+realtime scheduler. The settings live in PipeWire's client configuration drop-ins,
+not in syscall emulation, and leave kernel resource limits intact.
+The software profile uses the distribution's KWin with QPainter on
 Wayland; switching profiles affects new launches, not an already running session.
 On RM11 under UID 2000, the private Wayland compositor renders Plasma, Dolphin,
 its launcher and Overview through Zink/Turnip. A nested EGL client submits
@@ -912,7 +919,11 @@ The task-affine private-memory preparer admits a clean executable file mapping
 and materializes only the original COW pages through retained proc-memory access.
 Unchanged pages keep their file relationship; file truncation and DONTNEED remain
 kernel-owned. It validates the original VMA's permissions and supported advice
-before constructing a candidate. The replacement transaction retains the original
+before constructing a candidate.
+VMA policy is read once with writers quiescent; no pre-barrier snapshot is reused.
+The unpublished candidate's pagemap soft-dirty bit preserves cleared-original
+semantics without another address-space-wide smaps scan or a cached policy.
+The replacement transaction retains the original
 VMA at a reserved address until installation or rollback is confirmed. Cancellation
 before publication restores the original; cancellation after confirmed publication
 finishes cleanup. Failed restoration or missing syscall observation retains custody
@@ -923,15 +934,24 @@ native transitions are unchanged. It needs no preload, application-specific
 patch or JIT-disable setting. A cold launch-tree barrier stops guest threads and
 existing private helpers, then acknowledges a namespace-worker pause. Real wait
 events retain their status, ordering and rusage; synthetic interrupts resume with
-their original ptrace continuation. The worker uses existing eventfds, holds no
+their original ptrace continuation. Interrupts already requested by syscall or
+debugger owners are deferred to those owners, never consumed as barrier stops.
+An interrupt acknowledgement may arrive after an ordinary stop won the race.
+Helpers and replacement calls continue their current execution in place;
+they neither replay the syscall nor mistake the pause for its result.
+The worker uses existing eventfds, holds no
 database/queue locks while paused, and leaves queued callbacks for normal dispatch.
+Kernel-blocked `vfork` parents are already quiescent: mandatory VFORK_DONE
+observation precedes their return to userspace. The barrier does not wait for
+an interrupt that depends on resuming the stopped child.
 Only the request's mapping helper runs during preparation. The original caller
 executes each replacement syscall with an individually observed result. Expired
 barriers or lost publication observations terminate the owned launch rather than
 resuming an uncertain address space. Ordinary file IO needs no barrier or new
 thread. Unsupported special VMAs retain the native error; an already protected
 fork child without independently captured proc authority likewise remains native.
-Focused device checks cover concurrent ordinary/nondumpable JIT writers, stock
+Focused device checks cover concurrent ordinary/nondumpable JIT writers, JIT
+during `vfork` with child exit/exec and subsequent parent compilation, stock
 SteamOS Plasma QML and repeated generated-code execution under guest GDB/strace.
 Stock Chromium's sandbox-enabled JavaScript workflow is a separate regression
 check; these results do not certify every application's mapping semantics.

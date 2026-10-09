@@ -105,7 +105,12 @@ mapping types); rejected native mappings keep their kernel errors.
 Focused tests cover execution admission, mmap/mprotect, remap, fork and failed
 metadata allocation. This adds no requirement for newer memfd execution flags.
 Private-memory preparation uses retained smaps/mem/pagemap descriptions, ordinary
-private file mappings and pagemap's present/swap/file bits, all within 5.15.
+private file mappings and pagemap's present/swap/file/soft-dirty bits, all within 5.15.
+Candidate admission reads bit 55 from its untouched mapping: both populated and
+absent entries include the VMA's soft-dirty flag, as implemented in
+[Linux 5.15 pagemap](https://github.com/torvalds/linux/blob/v5.15/fs/proc/task_mmu.c).
+This avoids a second smaps walk without requiring PROCMAP_QUERY or soft-dirty
+tracking to be enabled. An unreadable entry remains a preparation failure.
 It neither reads PFNs nor requires CAP_SYS_ADMIN. Proc access is captured before
 nondumpable state and cannot be reused for a forked address space. Missing
 access, unknown VMA flags and unsupported mapping types fail preparation without
@@ -126,8 +131,12 @@ Focused checks cover cancellation, destructive-destination failures, failed
 restoration/cleanup and lost syscall observation. Automatic repair additionally
 uses baseline PTRACE_INTERRUPT, wait4 and original CONT/SYSCALL/SINGLESTEP
 continuations to quiesce launch-owned writers. Existing group stops stay stopped;
-real events and rusage return to the normal dispatcher. The helper and worker
-barriers add no post-5.15 dependency. Concurrent ordinary/protected JIT writers
+real events and rusage return to the normal dispatcher. Pending syscall/debugger
+interrupts retain their original event owner across nested barriers. The helper and worker
+barriers add no post-5.15 dependency. A `vfork` parent remains kernel-blocked
+until the baseline PTRACE_EVENT_VFORK_DONE stop; child exit/exec and concurrent
+JIT compilation exercise this ordering without waiting for another interrupt.
+Concurrent ordinary/protected JIT writers
 with namespace IO and stock SteamOS Plasma QML exercise the integrated path.
 The opt-in `test_jit_memory.c` experiment uses ordinary mmap/mprotect,
 `MREMAP_FIXED`, memfds and fork; these fit the baseline. Its optional

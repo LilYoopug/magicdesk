@@ -97,6 +97,27 @@ if os.environ.get("TEST_FAIL") == stage:
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("xfce", self.calls()[-1][-9])
 
+    def test_gui_pipewire_clients_do_not_request_unavailable_realtime_services(self):
+        result = self.run_script('--yes', '--gui', 'plasma')
+        self.assertEqual(0, result.returncode, result.stderr)
+        setup = self.payload.read_text()
+        start = setup.index('    for config in client.conf client-rt.conf; do\n')
+        end = setup.index('    done\n', start) + len('    done\n')
+        directory = self.directory / 'pipewire'
+        snippet = setup[start:end].replace('/etc/pipewire', str(directory))
+        # EVENT_WAIT: extracted configuration writer exit; timeout fails a stuck recipe.
+        written = subprocess.run(['sh', '-eu', '-c', snippet], capture_output=True,
+                                 text=True, timeout=5)
+        self.assertEqual(0, written.returncode, written.stderr)
+        for config in ('client.conf', 'client-rt.conf'):
+            contents = (directory / (config + '.d') / '90-magicdesk-scheduling.conf').read_text()
+            self.assertEqual('module.rt.args = {\n'
+                             '    rtportal.enabled = false\n'
+                             '    rtkit.enabled = false\n}\n', contents)
+        self.assertLess(setup.index('if [ "$gui" != none ] && [ "$gui" != keep ]; then'), start)
+        self.assertNotIn('rlimits.enabled = false', setup)
+        self.assertNotIn('rt.time.hard =', setup)
+
     def test_steamos_uses_pinned_helper_and_local_oci_with_separate_library(self):
         result = self.run_script('--yes', '--distro', 'steamos', '--downloads', str(self.directory / 'downloads'))
         self.assertEqual(0, result.returncode, result.stderr)
@@ -266,6 +287,9 @@ if os.environ.get("TEST_FAIL") == stage:
         self.assertIn('[ -n "${MAGICDESK_MESA_PREFIX:-}" ] || exit 0', kwin)
         self.assertNotIn("version=6.3.6", gpu)
         self.assertIn('export KWIN_COMPOSE=Q QT_QUICK_BACKEND=software', self.payload.read_text())
+        plasma = self.payload.read_text().split("cat > /usr/local/bin/magicdesk-plasma", 1)[1]
+        self.assertLess(plasma.index('mkdir -p -m 1777 /tmp/.X11-unix'),
+                        plasma.index('exec startplasma-wayland'))
         self.assertIn('Plasma Desktop (wayland)', result.stdout)
         self.assertEqual("4", self.calls()[-1][-2])
         self.assertEqual(0, subprocess.run(["sh", "-n"], input=kwin, text=True).returncode)
@@ -451,8 +475,10 @@ if os.environ.get("TEST_FAIL") == stage:
     def test_patch_export_needs_no_executor_and_includes_egl_and_kgsl_capabilities(self):
         result = self.run_script("--print-mesa-patch", TEST_UID="10001")
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual(2, result.stdout.count("+   if ("))
         self.assertIn("disp->Options.ForceSoftware || disp->Options.Zink", result.stdout)
+        self.assertIn("+   priv->driver = psc->kopper ? GLX_DRIVER_ZINK_YES : GLX_DRIVER_SW;", result.stdout)
+        self.assertIn("+   if (psc->kopper)", result.stdout)
+        self.assertIn("+   if (!psc->kopper)", result.stdout)
         self.assertIn("IOCTL_KGSL_READ_CALIBRATED_TIMESTAMPS", result.stdout)
         self.assertIn("dev->local_fd, &timestamp) == 0", result.stdout)
         self.assertIn("kgsl_read_gpu_timestamp(dev->fd, ts)", result.stdout)
@@ -507,6 +533,14 @@ if os.environ.get("TEST_FAIL") == stage:
                 self.assertEqual(accepted, result.returncode == 0, result.stderr)
                 if accepted:
                     self.assertIn("MESA_LOADER_DRIVER_OVERRIDE=zink", profile.read_text())
+                    activated = subprocess.run(
+                        ["sh", "-eu", "-c", '. "$1"; printf "%s|%s" '
+                         '"$MESA_LOADER_DRIVER_OVERRIDE" "${GALLIUM_DRIVER-unset}"',
+                         "sh", str(profile)],
+                        env=dict(environment, GALLIUM_DRIVER="zink"),
+                        capture_output=True, text=True, timeout=5)
+                    self.assertEqual(0, activated.returncode, activated.stderr)
+                    self.assertEqual("zink|unset", activated.stdout)
                 else:
                     self.assertEqual("previous profile\n", profile.read_text())
 

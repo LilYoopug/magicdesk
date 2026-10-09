@@ -118,7 +118,37 @@ Mesa 26.2.3: explicitly selected Zink uses Kopper without a DRM render node.
 The EGLDevice convention matches platform_x11_finalize(force_zink).
 KGSL calibrated timestamps use the kernel timestamp ioctl when available;
 unsupported kernels do not advertise that extension. Queue queries are unchanged.
+GLX loader capabilities follow the effective backend when Kopper is disabled.
 
+--- a/src/glx/drisw_glx.c
++++ b/src/glx/drisw_glx.c
+@@ -642,7 +642,7 @@ driswCreateScreen(int screen, struct glx_display *priv, enum glx_driver glx_driver, bool driver_name_is_inferred)
+    psc->kopper = !strcmp(driver, "zink");
+    psc->base.driverName = strdup(driver);
+
+-   if (glx_driver)
++   if (psc->kopper)
+       loader_extensions_local = kopper_extensions_noshm;
+ #ifdef HAVE_SYS_SHM_H
+    else if (!x11_xcb_display_supports_xshm(XGetXCBConnection(priv->dpy), &xshm_opcode))
+@@ -650,7 +650,7 @@ driswCreateScreen(int screen, struct glx_display *priv, enum glx_driver glx_driver, bool driver_name_is_inferred)
+ #endif
+    else
+       loader_extensions_local = loader_extensions_shm;
+-   priv->driver = glx_driver ? GLX_DRIVER_ZINK_YES : GLX_DRIVER_SW;
++   priv->driver = psc->kopper ? GLX_DRIVER_ZINK_YES : GLX_DRIVER_SW;
+
+    if (!dri_screen_init(&psc->base, priv, screen, -1, loader_extensions_local, driver_name_is_inferred)) {
+       if (!glx_driver || !driver_name_is_inferred)
+@@ -664,7 +664,7 @@ driswCreateScreen(int screen, struct glx_display *priv, enum glx_driver glx_driver, bool driver_name_is_inferred)
+    psp->createDrawable = driswCreateDrawable;
+    psp->swapBuffers = driswSwapBuffers;
+
+-   if (!glx_driver)
++   if (!psc->kopper)
+       psp->copySubBuffer = drisw_copy_sub_buffer;
+
+    if (psc->kopper) {
 --- a/src/egl/drivers/dri2/platform_wayland.c
 +++ b/src/egl/drivers/dri2/platform_wayland.c
 @@ -3262,7 +3262,7 @@ dri2_initialize_wayland_swrast(_EGLDisplay *disp)
@@ -1565,7 +1595,8 @@ export LD_LIBRARY_PATH="$MAGICDESK_MESA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRAR
 export LIBGL_DRIVERS_PATH="$MAGICDESK_MESA_PREFIX/lib/dri"
 export __EGL_VENDOR_LIBRARY_FILENAMES="$MAGICDESK_MESA_PREFIX/share/glvnd/egl_vendor.d/50_mesa.json"
 export VK_DRIVER_FILES="$MAGICDESK_MESA_PREFIX/share/vulkan/icd.d/freedreno_icd.aarch64.json"
-export MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink LIBGL_KOPPER_DRI2=true
+# Let applications disabling Kopper select a working software presentation path.
+export MESA_LOADER_DRIVER_OVERRIDE=zink LIBGL_KOPPER_DRI2=true
 PROFILE
     # EVENT_WAIT: Vulkan enumeration exits; timeout rejects a hung driver, never activates it.
     probe_status=0
@@ -1708,6 +1739,18 @@ if [ "$gui" != none ] && [ "$gui" != keep ]; then
         gnome:dnf) packages gnome-shell mutter-devkit gnome-terminal nautilus gnome-text-editor ;;
     esac
 
+    # These sessions do not provide a privileged realtime scheduling service.
+    # Keep native scheduling checks; a desktop portal is not proof of RTKit.
+    for config in client.conf client-rt.conf; do
+        mkdir -p "/etc/pipewire/$config.d"
+        cat > "/etc/pipewire/$config.d/90-magicdesk-scheduling.conf" <<'PIPEWIRE'
+module.rt.args = {
+    rtportal.enabled = false
+    rtkit.enabled = false
+}
+PIPEWIRE
+    done
+
     # Protocol-specific entries are ours; distribution/user launchers are never rewritten.
     for backend in x11 wayland; do
         apps='mousepad thunar terminal'
@@ -1785,6 +1828,7 @@ set -eu
 [ ! -r /etc/profile.d/magicdesk-graphics.sh ] || . /etc/profile.d/magicdesk-graphics.sh
 export XDG_CURRENT_DESKTOP=KDE XDG_SESSION_DESKTOP=KDE KDE_FULL_SESSION=true KDE_SESSION_VERSION=6
 unset QT_QUICK_BACKEND WAYLAND_SOCKET KWIN_NO_TIMER_QUERY
+mkdir -p -m 1777 /tmp/.X11-unix
 mkdir -p "$HOME/.config"
 kwriteconfig6 --file startkderc --group General --key systemdBoot false
 case "${1:-wayland}" in

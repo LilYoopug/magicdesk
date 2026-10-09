@@ -147,6 +147,8 @@ directly, without interposition. They copy only private COW pages into a clean
 executable view, retaining native DONTNEED and clean-page file coherence. The
 fixture also covers repeated compilation, nonzero offsets, partial and PROT_NONE
 views, stale provenance and retained proc access after PR_SET_DUMPABLE=0.
+Fresh-candidate soft-dirty admission is checked through pagemap with smaps
+deliberately unavailable, for ordinary and nondumpable callers.
 `memory_replace.c` is exercised at every cancellation boundary, with failed
 reserve/save/install/restore/cleanup and missing terminal observation. Native and
 guest checks execute its commands, including rollback after a simulated fixed
@@ -158,10 +160,20 @@ Four concurrent JIT writers run alongside namespace IO with both ordinary and
 nondumpable credentials, including proc-FD closure and immediate number reuse
 for memfds. Protected source capture uses the production SCM_RIGHTS
 helper. `test_task_quiesce.c` checks preserved resume modes, deferred signals and
-rusage, both birth-event orders, helper ownership and a new barrier before all
+rusage, pending syscall/debugger interrupts, both birth-event orders, helper ownership and a new barrier before all
 previous events are replayed. Stock SteamOS Plasma QML also has device coverage
 with this runtime, without preload or a disabled JIT; compositor GPU coverage
 is separate.
+
+`fixtures/jit_workload.qml` measures repeated function compilation through stock
+Qt QML, checking the numerical result without a machine-specific speed threshold.
+Run `QT_FORCE_STDERR_LOGGING=1 QT_QPA_PLATFORM=offscreen qml --apptype core
+jit_workload.qml` with JIT enabled. Alternate runtime builds against the same
+userspace and compare multiple samples; this is not a compositor frame-rate test.
+The automatic JIT fixture also holds a `CLONE_VM|CLONE_VFORK` child at a pipe
+rendezvous while another thread compiles, then checks both child exit and exec
+and subsequent parent compilation. Readiness and release use pipe events; the
+alarm bounds a deadlocked writer barrier.
 `test_debugger_runtime.py --case gdb-jit --case strace-jit` repeats private-file
 compilation under a guest debugger. GDB observes all four generated-code versions
 without helper threads; strace sees successful application mprotect calls without
@@ -177,10 +189,12 @@ cleanup with ordinary/protected receivers and both CLOEXEC modes.
 Holo rootfs into a new store and checks guest identity, SysV IPC, FIFO,
 user/PID/mount namespaces and HTTPS as `steamlab`. Archive ownership is retained;
 the executor must be UID 2000. It does not boot SteamOS or alter Android partitions.
-`--socket-owner` adds a Python/lsof loopback-owner check required by Steam's UI
-authentication. It must resolve the listener's PID and guest UID, not merely
-establish a TCP connection. This passes with stock Holo `lsof`; neither its
-output nor Steam's peer verification is replaced.
+`--socket-owner` checks stock `lsof` discovery for a loopback listener and an
+established connection between parent and child. Queries by the client's port
+must retain both owner PIDs, guest UIDs and parent PIDs; command durations are
+reported separately. Neither `lsof` output nor Steam's peer verification is
+replaced. Small-fixture success does not establish discovery latency in a
+large graphical process tree.
 
 `test_steamos_graphics.py BUILD STORE --client steam|glx|vulkan|gles` uses ordinary
 shell graphics sessions and private virtual displays. The prepared store needs
@@ -567,6 +581,19 @@ Turnip ICD selected, run without arguments for EXT and with `khr` for KHR.
 Both require 16 successful GPU submissions and calibration brackets. Run the
 unmodified driver as a negative control, not as an expected success.
 
+`test_glx_loader.c`, built with `cc -O2 -Wall -Wextra -Werror test_glx_loader.c
+-lGL -lX11 -o test_glx_loader`, checks advertised swap-control callbacks, GPU
+readback and exact X11 pixels after a swap. Run through the graphical socket
+route with the installer's private Mesa selected and `GALLIUM_DRIVER` unset:
+`LIBGL_KOPPER_DISABLE=false ./test_glx_loader 1` exercises Zink/Kopper;
+`LIBGL_KOPPER_DISABLE=true ./test_glx_loader 0` exercises its software alternative.
+Also run with explicit software rendering. A bounded pixel probe permits
+asynchronous Vulkan presentation; expiry fails, and each invocation needs an
+outer process timeout for driver hangs. With unmodified Mesa, explicitly selected
+Zink plus disabled Kopper can advertise a missing callback and crash the query.
+Forcing `GALLIUM_DRIVER=zink` into the software loader is not a working fallback:
+GPU readback can succeed while the X11 window remains black.
+
 Build `fixtures/kgsl_no_calibration.c` with `cc -shared -fPIC -Wall -Wextra
 -Werror kgsl_no_calibration.c -ldl -o kgsl_no_calibration.so`. Its test-only
 `LD_PRELOAD` denies the calibrated timestamp ioctl with `ENOTTY`; run the patched
@@ -784,6 +811,10 @@ manager and its real ptrace/notification lifecycle. Twelve cases cover protected
 callers, quota exhaustion, repeated capture, open rejection, fatal filters and
 cancellation before/after directory export. It checks unchanged caller tables,
 once-only completion, returned stack leases, final pipe EOF and FD balance.
+Delayed owner-interrupt cases force a pending PTRACE_INTERRUPT before helper
+admission, including protected callers, a 254-descriptor export and a
+253-descriptor send. They require exactly one acknowledgement, unchanged
+caller tables and exactly one delivered message.
 These are component checks, not enabled guest message framing. No Desktop, APK
 install or distribution is required.
 

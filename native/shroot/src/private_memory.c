@@ -3,13 +3,14 @@
 #include "raw.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 
 enum { DONTFORK=1, DONTDUMP=2, SEQUENTIAL=4, RANDOM=8, HUGE=16, NOHUGE=32, MERGEABLE=64, SOFT_DIRTY=128 };
 struct vma { uintptr_t first, end; uint64_t offset, inode; unsigned major, minor; int private; };
-struct lines { int fd; size_t cursor, size; char bytes[4096]; };
+struct lines { int fd; size_t cursor, size; char bytes[16384]; };
 static int line(struct lines *r, char *out, size_t capacity) {
     size_t used=0; int truncated=0;
     for (;;) {
@@ -20,9 +21,13 @@ static int line(struct lines *r, char *out, size_t capacity) {
             if (!n) return used || truncated ? -EPROTO : 0;
             r->cursor=0; r->size=(size_t)n;
         }
-        char c=r->bytes[r->cursor++];
-        if (c=='\n') { out[used]=0; return truncated ? 2 : 1; }
-        if (used+1<capacity) out[used++]=c; else truncated=1;
+        const char *begin=r->bytes+r->cursor;
+        const char *end=memchr(begin,'\n',r->size-r->cursor);
+        size_t count=end ? (size_t)(end-begin) : r->size-r->cursor;
+        size_t copy=count;
+        if (copy>capacity-used-1) { copy=capacity-used-1; truncated=1; }
+        memcpy(out+used,begin,copy); used+=copy; r->cursor+=count;
+        if (end) { ++r->cursor; out[used]=0; return truncated ? 2 : 1; }
     }
 }
 static int number(const char **text, unsigned base, uint64_t *out) {
@@ -148,13 +153,13 @@ long md_private_memory_copy(struct md_private_memory *m, const struct md_private
     size_t page=m->page_size;
     long error=0;
     if (!(plan->advice&SOFT_DIRTY)) {
-        /* A kernel without soft-dirty tracking has no sd on either VMA. A
-         * cleared original on a tracking kernel must not become newly dirty
-         * merely because we replaced its VMA. Probe the actual candidate. */
-        struct md_private_memory probe=*m; probe.address=m->candidate;
-        unsigned candidate_advice; int candidate_flags;
-        error=policy(&probe,access->maps,&candidate_advice,&candidate_flags);
-        if (!error && (candidate_advice&SOFT_DIRTY)) error=-EOPNOTSUPP;
+        /* The unpublished candidate is a fresh, untouched mmap of our retained
+         * source. Pagemap includes VM_SOFTDIRTY even for absent pages (5.15).
+         * Inspect this exact VMA, not kernel-version guesses or another full
+         * smaps walk. A cleared original must not become newly soft-dirty. */
+        uint64_t entry=0;
+        error=exact(access->pagemap,&entry,sizeof(entry),(m->candidate/page)*sizeof(entry),0);
+        if (!error && (entry&(UINT64_C(1)<<55))) error=-EOPNOTSUPP;
     }
     if (error) return error;
     long scratch=RAW6(mmap,0,page,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);

@@ -389,6 +389,10 @@ def main():
             check("automatic concurrent private-file JIT", root + "/libmagicdesk_guest_run.so --diagnostics --user 1000:1000 --store "
                   + root + "/store --deadline-seconds 60 -- /bin/test --automatic-threads",
                   "PASS automatic concurrent private-file JIT: protected=1")
+            check("automatic private-file JIT during vfork", root + "/libmagicdesk_guest_run.so --diagnostics --user 1000:1000 --store "
+                  + root + "/store --deadline-seconds 60 -- /bin/test --automatic-vfork",
+                  "PASS automatic private-file JIT with a kernel-blocked vfork parent: exec=1",
+                  patterns=(r"vfork parent: exec=0",))
             return
         if args.case in ("all", "fs-dispatch", "fs-directory"):
             check("broker directory notification ownership", root + "/libmagicdesk_guest_fs_dispatch.so --broker-directory "

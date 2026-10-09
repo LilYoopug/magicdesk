@@ -64,6 +64,21 @@ int main(void) {
     assert(!md_task_quiesce_event(q,7,stop(SIGTRAP,PTRACE_EVENT_STOP),NULL));
     assert(!md_task_quiesce_release(q));
     assert(md_task_quiesce_take(q,&status,NULL)==7);
+    /* An existing syscall/debugger interrupt has the same kernel stop as
+     * ours, but belongs to its original owner, across nested repairs too. */
+    int old_resumes=resumes;
+    previous=interrupts;
+    assert(!md_task_quiesce_add(q,8,0,0));
+    assert(!md_task_quiesce_stop(q) && interrupts==previous);
+    assert(!md_task_quiesce_event(q,8,stop(SIGTRAP,PTRACE_EVENT_STOP),&saved));
+    assert(md_task_quiesce_ready(q) && !md_task_quiesce_release(q));
+    assert(resumes==old_resumes);
+    assert(!md_task_quiesce_add(q,8,0,0));
+    assert(!md_task_quiesce_stop(q) && md_task_quiesce_ready(q));
+    assert(!md_task_quiesce_release(q) && resumes==old_resumes && interrupts==previous);
+    assert(md_task_quiesce_take(q,&status,&usage)==8);
+    assert(status==stop(SIGTRAP,PTRACE_EVENT_STOP) && usage.ru_maxrss==123);
+    assert(!md_task_quiesce_take(q,&status,NULL));
     md_task_quiesce_destroy(q);
     puts("PASS task quiescence: exact resume, deferred signals/rusage, nested replay, both birth orders and private helper ownership");
     return 0;

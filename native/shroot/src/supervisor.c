@@ -250,7 +250,8 @@ struct thread {
     int mapped_image, entered;
     int debug_step_call, debug_birth;
     pid_t debug_exec_old;
-    int kernel_stopped, kernel_resume, trace_options_dirty, debug_call_active, debug_adapter;
+    int kernel_stopped, kernel_resume, interrupt_pending, trace_options_dirty, debug_call_active, debug_adapter;
+    pid_t vfork_child;
     int terminal_observation;
     unsigned long debug_options;
     uint64_t debug_wait_mask;
@@ -550,7 +551,10 @@ static long native_trace(int request, pid_t pid, void *address, void *data) {
 }
 static int tracee_request(struct thread *t, int request, void *address, void *data, const char *operation) {
     if (t->resume_lost) return 0;
-    if (native_trace(request, t->pid, address, data)>=0) return 1;
+    if (native_trace(request, t->pid, address, data)>=0) {
+        if (request==PTRACE_INTERRUPT) t->interrupt_pending=1;
+        return 1;
+    }
     CHECK(errno == ESRCH);
     /* EVENT_WAIT: concurrent group death/exec may invalidate a reported stop.
      * Keep ownership until its exact exit/exec event; the tree deadline bounds
@@ -1787,7 +1791,8 @@ static int debugger_interrupt(pid_t pid) {
     if (!t) return -ESRCH;
     /* An owned stop already queued by clone is itself the interruption boundary. */
     if (t->kernel_stopped || (pid!=leader && t->born && !t->initial_stop)) return 0;
-    return native_trace(PTRACE_INTERRUPT,pid,NULL,NULL) ? -errno : 0;
+    if (native_trace(PTRACE_INTERRUPT,pid,NULL,NULL)) return -errno;
+    t->interrupt_pending=1; return 0;
 }
 static int debugger_observe(pid_t owner) {
     struct thread *parent=find_thread(owner);
@@ -4117,6 +4122,7 @@ static pid_t wait_event(int *status, struct rusage *usage, int64_t deadline) {
 }
 struct memory_execution {
     struct thread *actor;
+    const char *stage;
     int64_t deadline;
     int complete;
     struct md_task_helper_result result;
@@ -4135,8 +4141,20 @@ static pid_t memory_event(struct memory_execution *execution,int *status,struct 
             {notifications ? listener : -1,POLLIN,0}};
         /* EVENT_WAIT: exact ptrace/helper event. An expired writer barrier
          * terminates this owned tree; unknown memory publication is not resumed. */
-        CHECK(md_event_wait(fds,2,execution->deadline)>=0);
-        if (fds[0].revents) { drain(); CHECK(!cancelling); }
+        long error=md_event_wait(fds,2,execution->deadline);
+        if (error<0) {
+            fprintf(stderr,"guest-runtime: memory barrier pid=%d stage=%s error=%ld\n",
+                execution->actor->pid,execution->stage,error);
+            md_task_quiesce_describe(memory_barrier,STDERR_FILENO);
+            errno=(int)-error;
+        }
+        CHECK(error>=0);
+        if (fds[0].revents) {
+            drain();
+            /* Cancellation owns the entire launch. Cleanup kills/reaps its
+             * writers; never resume a possibly partially replaced mapping. */
+            if (cancelling) exit(result);
+        }
         if (fds[1].revents&POLLIN) {
             struct seccomp_notif q={0};
             if (ioctl(listener,SECCOMP_IOCTL_NOTIF_RECV,&q)) { CHECK(errno==ENOENT || errno==EINTR); continue; }
@@ -4151,6 +4169,7 @@ static void memory_complete(void *context,struct md_task_helper_result result) {
     execution->result=result; execution->complete=1;
 }
 static long memory_call(struct memory_execution *execution,const struct md_memory_replace_call *call) {
+    execution->stage="replace";
     struct thread *t=execution->actor;
     struct user_pt_regs regs={.pc=abi.task_call,.sp=t->original.sp};
     regs.regs[8]=call->number; memcpy(regs.regs,call->args,sizeof(call->args));
@@ -4162,6 +4181,11 @@ static long memory_call(struct memory_execution *execution,const struct md_memor
         if (pid!=t->pid) { CHECK(!md_task_quiesce_event(memory_barrier,pid,status,&usage)); continue; }
         CHECK(WIFSTOPPED(status));
         unsigned event=(unsigned)status>>16;
+        /* A late writer-barrier interrupt only pauses this already selected
+         * call. Resume in place; never reissue a possibly completed syscall. */
+        if (event==PTRACE_EVENT_STOP && WSTOPSIG(status)==SIGTRAP) {
+            CHECK(!native_trace(PTRACE_CONT,pid,NULL,NULL)); continue;
+        }
         CHECK(registers(pid,&regs));
         if (event==PTRACE_EVENT_SECCOMP) {
             unsigned long cookie;
@@ -4184,16 +4208,19 @@ static long memory_repair(struct thread *t,const struct user_pt_regs *returned) 
     mapping.length=(mapping.length+md_page_size-1)&~(md_page_size-1);
     if (!md_memory_file_view(t->memory,mapping.address,mapping.length,&mapping.source,&mapping.offset)) return -EACCES;
     struct md_private_memory_plan plan;
-    long error=md_private_memory_plan(&mapping,access,&plan);
-    if (error) { TRACE("PROBE memory-repair-policy pid=%d error=%ld\n",t->pid,error); return -EACCES; }
     struct md_interception_buffer buffer={0};
-    error=md_buffers_take(md_memory_buffers(t->memory),&buffer);
+    long error=md_buffers_take(md_memory_buffers(t->memory),&buffer);
     if (error) return -EACCES;
     if (!memory_barrier) { memory_barrier=md_task_quiesce_new(native_trace); CHECK(memory_barrier); }
-    struct memory_execution execution={.actor=t,.deadline=md_event_now()+5000000000LL};
+    struct memory_execution execution={.actor=t,.stage="writers",.deadline=md_event_now()+5000000000LL};
     for (struct thread *peer=threads;peer;peer=peer->next) if (peer->pid)
         CHECK(!md_task_quiesce_add(memory_barrier,peer->pid,
-            peer==t || peer->kernel_stopped || peer->listening,peer->kernel_resume));
+            /* The kernel holds a vfork parent until its child's exec/exit.
+             * TRACEVFORKDONE then stops it before any user memory access. */
+            peer==t || peer->kernel_stopped || peer->listening || peer->vfork_child,
+            /* An earlier interrupt belongs to the syscall/debugger owner.
+             * Defer that stop instead of consuming it as our own pause. */
+            peer->interrupt_pending ? 0 : peer->kernel_resume));
     CHECK(!md_task_helpers_visit(helpers,memory_participant,memory_barrier));
     CHECK(!md_task_quiesce_stop(memory_barrier));
     while (!md_task_quiesce_ready(memory_barrier)) {
@@ -4213,7 +4240,8 @@ static long memory_repair(struct thread *t,const struct user_pt_regs *returned) 
         }
         CHECK(md_fs_worker_pause_state(&pause)==1);
     }
-    /* Validate again after the last possible writer has stopped. */
+    /* One authoritative VMA validation, after the last possible writer stops.
+     * Scanning smaps before quiescence adds cost without reusable authority. */
     error=md_private_memory_plan(&mapping,access,&plan);
     uint64_t mask=0;
     if (!error) {
@@ -4226,11 +4254,19 @@ static long memory_repair(struct thread *t,const struct user_pt_regs *returned) 
                 .protection=mapping.protection,.flags=plan.flags}};
         error=md_task_helper_begin(helpers,t->pid,t->tgid,returned,&abi,t->memory,&buffer,
             &request,memory_complete,&execution);
+        execution.stage="map";
         while (!error && !execution.complete) {
             int status; struct rusage usage;
             pid_t pid=memory_event(&execution,&status,&usage,1);
-            if (md_task_helper_owns(helpers,t->pid,pid)) CHECK(md_task_helper_event(helpers,pid,status)==1);
-            else CHECK(!md_task_quiesce_event(memory_barrier,pid,status,&usage));
+            if (md_task_helper_owns(helpers,t->pid,pid)) {
+                int handled=md_task_helper_event(helpers,pid,status);
+                if (handled!=1) {
+                    fprintf(stderr,"guest-runtime: memory helper owner=%d pid=%d status=%#x result=%d\n",
+                        t->pid,pid,status,handled);
+                    errno=handled<0 ? -handled : EPROTO;
+                }
+                CHECK(handled==1);
+            } else CHECK(!md_task_quiesce_event(memory_barrier,pid,status,&usage));
         }
         if (!error) error=execution.result.value<0 ? execution.result.value : 0;
         if (!error) {
@@ -4461,6 +4497,7 @@ int main(int argc, char **argv) {
         if (mapped) { adapter_progress(); continue; }
         struct thread *t = thread(pid);
         t->kernel_stopped=1;
+        t->interrupt_pending=0;
         if (md_debugger_active(debugger)) t->usage=usage;
         if (WIFEXITED(status) || WIFSIGNALED(status)) {
             int code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
@@ -4511,6 +4548,8 @@ int main(int argc, char **argv) {
         } else if (event==PTRACE_EVENT_VFORK_DONE) {
             unsigned long child;
             if (!tracee_request(t,PTRACE_GETEVENTMSG,NULL,&child,"vfork-complete")) continue;
+            CHECK(t->vfork_child==(pid_t)child);
+            t->vfork_child=0;
             if (!md_debugger_event(debugger,pid,event,child)) resume(pid,0);
         } else if (event == PTRACE_EVENT_EXEC) {
             /* A non-leader exec replaces the task behind the leader's PID. */
@@ -4572,6 +4611,10 @@ int main(int argc, char **argv) {
         } else if (event == PTRACE_EVENT_FORK || event == PTRACE_EVENT_VFORK || event == PTRACE_EVENT_CLONE) {
             unsigned long child;
             if (!tracee_request(t, PTRACE_GETEVENTMSG, NULL, &child, "birth-event")) continue;
+            if (event==PTRACE_EVENT_VFORK) {
+                CHECK(!t->vfork_child);
+                t->vfork_child=(pid_t)child;
+            }
             struct thread *c = thread(child);
             CHECK(!c->born);
             c->born = 1; c->ready = t->ready;
