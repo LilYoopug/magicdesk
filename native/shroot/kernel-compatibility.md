@@ -52,6 +52,15 @@ explicit: unavailable memfd/sealing returns an error while retaining local
 policy. It adds no shared-startup requirement and never substitutes a stale copy
 for the requested live policy. `--case mount-policy` checks rejected memfd,
 mapping and sealing operations, including a native seccomp-injected seal denial.
+Native `/proc/self/mountinfo` snapshots use its baseline namespace-generation
+`poll(POLLPRI)` notification, with a zero timeout for observation, not a wait.
+The namespace owner retains the source descriptor and invalidates cached native
+entries on change or observation failure. Changes during construction prevent
+reuse; guest mounts and namespace-relative IDs are generated per request.
+`test_native_mounts` covers reuse, invalidation, interrupted/failed observation,
+changes during reading and descriptor release, plus a real kernel-source read.
+It is included in `test_resources.py --case stores`; no newer kernel primitive
+or startup probe is required.
 Portable attachment graphs use the same baseline memfd interface with immutable
 `F_SEAL_WRITE` manifests, O_PATH directory rights and CLOEXEC duplication. They
 add no newer-kernel requirement or startup probe. Graph publication/import fails

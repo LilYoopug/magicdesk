@@ -76,10 +76,10 @@ int md_fs_storage_enter(struct md_filesystem *fs, const struct md_view_mount *mo
     store->identity=fs->store->identity; store->creation_mask=fs->store->creation_mask;
     store->landlock=fs->store->landlock;
     store->landlock_execute=fs->store->landlock_execute;
-    /* Implicit providers belong to the selected root, not every bind alias of
-     * its inode. A future root still exposes real dentries for mount setup. */
+    /* Pivoted roots retain their providers. Ordinary bind aliases still expose
+     * real dentries until selected as roots, rather than inventing proc/dev. */
     store->boundary=store==fs->store && (!mount || !fs->mounts || mount==&fs->mounts->base
-        || mount==md_view_root_mount(fs)) ? fs->store->boundary : NULL;
+        || mount==md_view_root_mount(fs) || mount->root_providers) ? fs->store->boundary : NULL;
     store->root_id=store==fs->store ? fs->store->root_id : NULL;
     return 0;
 }

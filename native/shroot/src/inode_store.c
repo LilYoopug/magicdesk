@@ -195,7 +195,10 @@ int md_inode_link(struct md_inode_store *s, int sourcefd, const char *source,
     if (r) return r;
     struct mdi_location a, b;
     r = mdi_walk(s, sourcefd, source, flags & AT_SYMLINK_FOLLOW ? MDI_FOLLOW : MDI_NOFOLLOW, 0, &a);
-    if (!r) r = mdi_walk(s, targetfd, target, MDI_ENTRY, 1, &b);
+    if (!r) {
+        r = mdi_walk(s, targetfd, target, MDI_ENTRY, 1, &b);
+        if (r==-EREMOTE && s->boundary) s->boundary->operand=1;
+    }
     if (!r && a.node.kind == S_IFDIR) r = -EPERM;
     if (!r && b.exists) r = -EEXIST;
     if (!r && b.trailing) r = -ENOENT;
@@ -239,7 +242,10 @@ int md_inode_rename(struct md_inode_store *s, int sourcefd, const char *source,
     if (r) return r;
     struct mdi_location a, b;
     r = mdi_walk(s, sourcefd, source, MDI_ENTRY, 0, &a);
-    if (!r) r = mdi_walk(s, targetfd, target, MDI_ENTRY, 1, &b);
+    if (!r) {
+        r = mdi_walk(s, targetfd, target, MDI_ENTRY, 1, &b);
+        if (r==-EREMOTE && s->boundary) s->boundary->operand=1;
+    }
     if (!r && (a.special || b.special)) r = -EBUSY;
     if (!r && a.trailing && a.node.kind != S_IFDIR) r = -ENOTDIR;
     if (!r && b.trailing && a.node.kind != S_IFDIR) r = -ENOTDIR;

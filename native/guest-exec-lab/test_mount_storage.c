@@ -50,6 +50,24 @@ static void mount_call(struct md_filesystem *fs, unsigned mode, unsigned flags,
     if (r.error) fprintf(stderr,"storage mount %s: %d\n",target,r.error);
     assert(!r.error);
 }
+static void image_aliases(struct md_filesystem *fs) {
+    const char *paths[]={"/volume/program","/volume/dir/program-alias","/volume/program-link",
+        "/alias/program","/alias/dir/program-alias","/alias/program-link"};
+    char ids[2][33];
+    for (unsigned i=0;i<6;++i) {
+        struct md_image_identity image;
+        struct md_fs_result r=call(fs,(struct md_fs_request){.operation=MD_FS_OPEN_IMAGE,
+            .directory={-1,-1},.path={paths[i],NULL}},
+            &(struct md_fs_output){.data=&image,.capacity=sizeof(image)});
+        assert(!r.error && r.fd>=0);
+        assert(!strcmp(image.path,paths[i%3==2 ? i-1 : i]));
+        if (i%3==0) memcpy(ids[i/3],image.object,sizeof(image.object));
+        else assert(!strcmp(ids[i/3],image.object));
+        close(r.fd);
+    }
+    assert(strcmp(ids[0],ids[1]));
+    puts("PASS named image lookup: hardlinks and symlinks retain resolved names and per-mount identities");
+}
 static int subscribe(struct md_filesystem *fs, int reader, const char *path) {
     struct md_fs_result r=call(fs,(struct md_fs_request){.operation=MD_FS_WATCH_PATH,
         .flags=IN_CREATE|IN_MOVED_FROM|IN_MOVED_TO|IN_DELETE,.directory={-1,reader},
@@ -142,6 +160,9 @@ void test_mount_storage(const char *base) {
     assert(!md_inode_mkdir(main,-1,"/volume",0755) && !md_inode_mkdir(main,-1,"/alias",0755));
     assert(!md_inode_mkdir(second,-1,"/dir",0755) && !md_inode_mkdir(second,-1,"/dev",0755));
     put(main,"/value","main"); put(second,"/value","second"); put(second,"/dev/plain","ordinary");
+    int program=md_inode_open(second,-1,"/program",O_CREAT|O_WRONLY,0755); assert(program>=0); close(program);
+    assert(!md_inode_link(second,-1,"/program",-1,"/dir/program-alias",0));
+    assert(!md_inode_symlink(second,"dir/program-alias",-1,"/program-link"));
     int value=md_inode_open(second,-1,"/value",O_PATH,0); assert(value>=0);
     assert(!md_inode_import_metadata(second,value,1001,1002,0640)); close(value);
     assert(!md_inode_symlink(second,"/value",-1,"/absolute"));
@@ -166,6 +187,7 @@ void test_mount_storage(const char *base) {
     assert(!rename(moved,extra));
     mount_call(&fs,MD_FS_MOUNT_BIND,MS_BIND,"/alias","/volume");
     assert(fs.mounts->tree->mounts[0].storage==fs.mounts->tree->mounts[1].storage);
+    image_aliases(&fs);
     struct md_fs_anchor *held=NULL;
     fd=opened(&fs,"/alias/dir",O_PATH|O_DIRECTORY,NULL,&held); close(fd);
     watches(&fs,extra);

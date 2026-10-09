@@ -43,7 +43,8 @@ int md_fs_result_valid(const struct md_fs_request *request, const struct md_fs_r
             && (request->flags == MD_IPC_MESSAGE_CREATE || request->flags == MD_IPC_MESSAGE_SENDER));
     if (reply->error > 0 || reply->error < -4095 || reply->host_path>2
             || (reply->proc_namespace && !reply->host_path)
-            || (reply->host_path==2 && (operation!=MD_FS_MOUNT || (request->mode!=MD_FS_MOUNT_BIND
+            || (reply->host_path==2 && operation!=MD_FS_LINK && operation!=MD_FS_RENAME
+                && (operation!=MD_FS_MOUNT || (request->mode!=MD_FS_MOUNT_BIND
                 && request->mode!=MD_FS_MOUNT_PIVOT && request->mode!=MD_FS_MOUNT_MOVE
                 && request->mode!=MD_FS_MOUNT_MOVE_FD)))
             || reply->open_completion.kind > MD_OPEN_CALLER || reply->open_completion.kind < MD_OPEN_READY

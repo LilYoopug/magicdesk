@@ -341,7 +341,8 @@ long md_namespace_call(const struct md_fs *fs, const char *exe, long nr, const u
     if (r < 0)
         return r;
     /* Direct and symlink-resolved host boundaries use the same task adapter. */
-    if (md_fs_host_path(fs, first) && nr != SYS_inotify_add_watch && nr != SYS_chroot)
+    if (md_fs_host_path(fs, first) && nr != SYS_inotify_add_watch && nr != SYS_chroot
+            && nr!=SYS_renameat && nr!=SYS_renameat2 && nr!=SYS_linkat)
         return md_namespace_host_call(fs, exe, nr, a, path_index, first,0);
     return md_namespace_path_call(fs, nr, a, md_namespace_descriptor(base), first);
 }
@@ -502,13 +503,11 @@ __attribute__((noinline)) static long path_metadata(const struct md_fs *fs, long
         r = md_namespace_relative_mount(fs, (int)a[2], second);
         if (r < 0)
             return r;
-        if (md_fs_host_path(fs, second))
-            return -EXDEV;
         q.operation = nr == SYS_linkat ? MD_FS_LINK : MD_FS_RENAME;
         q.directory[1] = (int)a[2];
         q.path[1] = second;
         q.flags = nr == SYS_renameat ? 0 : (uint32_t)a[4];
-        break;
+        return md_namespace_paths_request(fs,&q);
     case SYS_faccessat:
     case SYS_faccessat2: {
         int flags = nr == SYS_faccessat2 ? (int)a[3] : 0;

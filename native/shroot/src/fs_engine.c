@@ -326,7 +326,6 @@ static void context_execute(struct md_fs_context *context,
     }
     if (out->error==-EREMOTE) {
         if (q->operation==MD_FS_CHROOT) out->error=-ENOTSUP;
-        else if (q->operation==MD_FS_LINK || q->operation==MD_FS_RENAME) out->error=-EXDEV;
         else if (boundary.path && boundary.capacity) {
             out->error=0; out->host_path=boundary.operand+1; out->size=strlen(boundary.path)+1;
             out->proc_namespace=boundary.proc_namespace;

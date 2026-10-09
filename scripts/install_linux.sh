@@ -119,10 +119,25 @@ The EGLDevice convention matches platform_x11_finalize(force_zink).
 KGSL calibrated timestamps use the kernel timestamp ioctl when available;
 unsupported kernels do not advertise that extension. Queue queries are unchanged.
 GLX loader capabilities follow the effective backend when Kopper is disabled.
+Zink retains GPU rendering with sw_winsys readback presentation when the client
+disables Kopper or the X server lacks DRI3. Direct Vulkan presentation is unchanged.
 
 --- a/src/glx/drisw_glx.c
 +++ b/src/glx/drisw_glx.c
-@@ -642,7 +642,7 @@ driswCreateScreen(int screen, struct glx_display *priv, enum glx_driver glx_driver, bool driver_name_is_inferred)
+@@ -634,6 +634,12 @@
+
+    /* this is only relevant if zink bits are set */
+    glx_driver &= (GLX_DRIVER_ZINK_INFER | GLX_DRIVER_ZINK_YES);
++   /* Without DRI3, use the frontend's readback presentation, not Vulkan WSI. */
++   if (glx_driver && !kopper_disable) {
++      int opcode, event, error;
++      kopper_disable = !XQueryExtension(priv->dpy, "DRI3", &opcode, &event, &error);
++   }
++
+    const char *driver = glx_driver && !kopper_disable ? "zink" : "swrast";
+
+    psc = calloc(1, sizeof *psc);
+@@ -642,7 +648,7 @@
     psc->kopper = !strcmp(driver, "zink");
     psc->base.driverName = strdup(driver);
 
@@ -131,7 +146,7 @@ GLX loader capabilities follow the effective backend when Kopper is disabled.
        loader_extensions_local = kopper_extensions_noshm;
  #ifdef HAVE_SYS_SHM_H
     else if (!x11_xcb_display_supports_xshm(XGetXCBConnection(priv->dpy), &xshm_opcode))
-@@ -650,7 +650,7 @@ driswCreateScreen(int screen, struct glx_display *priv, enum glx_driver glx_driver, bool driver_name_is_inferred)
+@@ -650,7 +656,7 @@
  #endif
     else
        loader_extensions_local = loader_extensions_shm;
@@ -140,7 +155,7 @@ GLX loader capabilities follow the effective backend when Kopper is disabled.
 
     if (!dri_screen_init(&psc->base, priv, screen, -1, loader_extensions_local, driver_name_is_inferred)) {
        if (!glx_driver || !driver_name_is_inferred)
-@@ -664,7 +664,7 @@ driswCreateScreen(int screen, struct glx_display *priv, enum glx_driver glx_driver, bool driver_name_is_inferred)
+@@ -664,7 +670,7 @@
     psp->createDrawable = driswCreateDrawable;
     psp->swapBuffers = driswSwapBuffers;
 
@@ -258,6 +273,134 @@ GLX loader capabilities follow the effective backend when Kopper is disabled.
        .device_get_suspend_count = kgsl_device_get_suspend_count,
        .device_check_status = kgsl_device_check_status,
        .submitqueue_new = kgsl_submitqueue_new,
+--- a/src/gallium/drivers/zink/zink_screen.c
++++ b/src/gallium/drivers/zink/zink_screen.c
+@@ -34,6 +34,9 @@
+ #include "zink_public.h"
+ #include "zink_query.h"
+ #include "zink_resource.h"
++#include "frontend/sw_winsys.h"
++#include "util/u_inlines.h"
++#include "util/u_surface.h"
+ #include "zink_state.h"
+ #include "nir_to_spirv/nir_to_spirv.h" // for SPIRV_VERSION
+
+@@ -1892,6 +1895,45 @@
+ }
+
+ static void
++zink_present_readback(struct zink_screen *screen, struct pipe_context *pipe,
++                      struct pipe_resource *pres, unsigned level, unsigned layer,
++                      void *drawable, unsigned nboxes, struct pipe_box *boxes)
++{
++   struct sw_winsys *ws = screen->winsys;
++   struct zink_resource *res = zink_resource(pres);
++   if (!ws || !(pres->bind & PIPE_BIND_DISPLAY_TARGET))
++      return;
++
++   if (res->sw_dt && res->sw_level != level) {
++      ws->displaytarget_destroy(ws, res->sw_dt);
++      res->sw_dt = NULL;
++   }
++   unsigned width = u_minify(pres->width0, level);
++   unsigned height = u_minify(pres->height0, level);
++   if (!res->sw_dt) {
++      res->sw_dt = ws->displaytarget_create(ws, pres->bind, pres->format,
++                                           width, height, 64, NULL, &res->sw_stride);
++      res->sw_level = level;
++      if (!res->sw_dt)
++         return;
++   }
++   struct pipe_transfer *transfer = NULL;
++   void *pixels = pipe_texture_map(pipe, pres, level, layer, PIPE_MAP_READ,
++                                  0, 0, width, height, &transfer);
++   if (!pixels)
++      return;
++   void *output = ws->displaytarget_map(ws, res->sw_dt, PIPE_MAP_WRITE);
++   if (output) {
++      util_copy_rect(output, pres->format, res->sw_stride, 0, 0, width, height,
++                     pixels, transfer->stride, 0, 0);
++      ws->displaytarget_unmap(ws, res->sw_dt);
++   }
++   pipe_texture_unmap(pipe, transfer);
++   if (output)
++      ws->displaytarget_display(ws, res->sw_dt, drawable, nboxes, boxes);
++}
++
++static void
+ zink_flush_frontbuffer(struct pipe_screen *pscreen,
+                        struct pipe_context *pctx,
+                        struct pipe_resource *pres,
+@@ -1904,9 +1946,12 @@
+    struct zink_resource *res = zink_resource(pres);
+    struct zink_context *ctx = zink_context(pctx);
+
+-   /* if the surface is no longer a swapchain, this is a no-op */
+-   if (!zink_is_swapchain(res))
++   /* A non-Kopper frontend owns presentation; Vulkan still renders the image. */
++   if (!zink_is_swapchain(res)) {
++      zink_present_readback(screen, pctx, pres, level, layer,
++                            winsys_drawable_handle, nboxes, sub_box);
+       return;
++   }
+
+    ctx = zink_tc_context_unwrap(pctx);
+
+@@ -3862,9 +3907,10 @@
+    struct zink_screen *ret = zink_internal_create_screen(config, -1, -1, 0);
+    if (ret) {
+       ret->drm_fd = -1;
+-   }
+-
+-   return &ret->base;
++      ret->winsys = winsys;
++   }
++
++   return ret ? &ret->base : NULL;
+ }
+
+ static inline int
+--- a/src/gallium/drivers/zink/zink_types.h
++++ b/src/gallium/drivers/zink/zink_types.h
+@@ -1268,6 +1268,9 @@
+ struct zink_resource {
+    struct threaded_resource base;
+
++   struct sw_displaytarget *sw_dt;
++   unsigned sw_stride, sw_level;
++
+    enum pipe_format internal_format:16;
+
+    struct zink_resource_object *obj;
+@@ -1367,6 +1370,8 @@
+
+ struct zink_screen {
+    struct pipe_screen base;
++
++   struct sw_winsys *winsys;
+
+    const char *vendor_name;
+    const char *device_name;
+--- a/src/gallium/drivers/zink/zink_resource.c
++++ b/src/gallium/drivers/zink/zink_resource.c
+@@ -47,6 +47,7 @@
+ #include "util/u_upload_mgr.h"
+ #include "util/os_file.h"
+ #include "frontend/winsys_handle.h"
++#include "frontend/sw_winsys.h"
+
+ #if !defined(__APPLE__)
+ #define ZINK_USE_DMABUF
+@@ -254,6 +255,9 @@
+    struct zink_resource *res = zink_resource(pres);
+    /* prevent double-free when unrefing internal surfaces */
+    res->base.b.reference.count = 999;
++
++   if (res->sw_dt)
++      screen->winsys->displaytarget_destroy(screen->winsys, res->sw_dt);
+
+ #ifdef HAVE_LIBDRM
+    if (res->ro_scanout)
 PATCH
 }
 
@@ -1595,8 +1738,8 @@ export LD_LIBRARY_PATH="$MAGICDESK_MESA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRAR
 export LIBGL_DRIVERS_PATH="$MAGICDESK_MESA_PREFIX/lib/dri"
 export __EGL_VENDOR_LIBRARY_FILENAMES="$MAGICDESK_MESA_PREFIX/share/glvnd/egl_vendor.d/50_mesa.json"
 export VK_DRIVER_FILES="$MAGICDESK_MESA_PREFIX/share/vulkan/icd.d/freedreno_icd.aarch64.json"
-# Let applications disabling Kopper select a working software presentation path.
-export MESA_LOADER_DRIVER_OVERRIDE=zink LIBGL_KOPPER_DRI2=true
+# Zink can also present through the frontend when Kopper/DRI3 is unavailable.
+export MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink LIBGL_KOPPER_DRI2=true
 PROFILE
     # EVENT_WAIT: Vulkan enumeration exits; timeout rejects a hung driver, never activates it.
     probe_status=0
@@ -1751,6 +1894,21 @@ module.rt.args = {
 PIPEWIRE
     done
 
+    # VLC's relocatable Linux build guesses its plugin directory from native
+    # /proc/self/maps. Object-backed stores need its explicit search path.
+    mkdir -p /etc/profile.d
+    cat > /etc/profile.d/magicdesk-applications.sh <<'APPLICATIONS'
+if [ "${VLC_PLUGIN_PATH+x}" != x ]; then
+    for _md_lib in /usr/lib /usr/lib64 /usr/lib/*-linux-gnu; do
+        if [ -d "$_md_lib/vlc/plugins" ]; then
+            export VLC_PLUGIN_PATH=$_md_lib/vlc/plugins
+            break
+        fi
+    done
+    unset _md_lib
+fi
+APPLICATIONS
+
     # Protocol-specific entries are ours; distribution/user launchers are never rewritten.
     for backend in x11 wayland; do
         apps='mousepad thunar terminal'
@@ -1826,6 +1984,7 @@ ENTRY
 #!/bin/sh
 set -eu
 [ ! -r /etc/profile.d/magicdesk-graphics.sh ] || . /etc/profile.d/magicdesk-graphics.sh
+[ ! -r /etc/profile.d/magicdesk-applications.sh ] || . /etc/profile.d/magicdesk-applications.sh
 export XDG_CURRENT_DESKTOP=KDE XDG_SESSION_DESKTOP=KDE KDE_FULL_SESSION=true KDE_SESSION_VERSION=6
 unset QT_QUICK_BACKEND WAYLAND_SOCKET KWIN_NO_TIMER_QUERY
 mkdir -p -m 1777 /tmp/.X11-unix

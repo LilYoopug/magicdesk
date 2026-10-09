@@ -273,10 +273,13 @@ static void sizes(const char *base) {
         entries[i]=(struct md_fs_attachment){host[i],target[i],i&1};
     }
     assert(!md_fs_mounts_open(&fs,entries,MD_FS_MOUNTS_MAX));
+    fs.mounts->base.root_providers=1;
+    fs.mounts->tree->mounts[MD_FS_MOUNTS_MAX-1].root_providers=1;
     assert(!md_mount_graph_export(fs.mounts,fs.store->lifetime->root,&p) && p.count==4+3*MD_FS_MOUNTS_MAX);
     assert(p.count>253); /* Exercises the transport beyond one SCM_RIGHTS message. */
     received=NULL; assert(!md_mount_graph_import(&p,&received));
     assert(received->tree->count==MD_FS_MOUNTS_MAX);
+    assert(received->base.root_providers && received->tree->mounts[MD_FS_MOUNTS_MAX-1].root_providers);
     for (unsigned i=0;i<MD_FS_MOUNTS_MAX;++i) {
         assert(md_view_readonly(&received->tree->mounts[i])==(int)(i&1));
         assert(md_view_same(&received->tree->mounts[i].native,&fs.mounts->tree->mounts[i].native));
@@ -291,6 +294,7 @@ static void sizes(const char *base) {
     struct md_mount_namespace *copy=NULL; struct md_fs_location copied_root;
     assert(!md_fs_mounts_copy(&fs,&(struct md_fs_location){0},&copy,&copied_root));
     assert(copy->tree->count==MD_FS_MOUNTS_MAX && copy->tree!=fs.mounts->tree);
+    assert(copy->base.root_providers && copy->tree->mounts[MD_FS_MOUNTS_MAX-1].root_providers);
     for (unsigned i=0;i<MD_FS_MOUNTS_MAX;++i)
         assert(md_view_same(&copy->tree->mounts[i].native,&fs.mounts->tree->mounts[i].native));
     md_mount_namespace_release(copy);

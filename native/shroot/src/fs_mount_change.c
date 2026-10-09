@@ -314,6 +314,7 @@ static int bind(struct md_filesystem *fs, const struct md_fs_request *q,
         r=prepare(&pending[slot],m->source,m->target,&tree->mounts[parent],
             m->backing,m->storage,md_mount_policy_flags(&m->policy));
         pending[slot].locked=m->locked;
+        pending[slot].root_providers=m->root_providers;
         if (!r) pending[slot].pid_namespace=md_pid_namespace_retain(m->pid_namespace);
         if (!r) pending[slot].devpts=md_devpts_retain(m->devpts);
         if (!r) pending[slot].cgroup=md_cgroup_retain(m->cgroup);
@@ -514,6 +515,7 @@ static int pivot(struct md_filesystem *fs, struct md_guest_domain *context,
         struct md_view_mount *b=next->mount==&fs->mounts->base ? &base : &pending[next->mount-tree->mounts];
         b->target=inherited_target; b->guest=inherited_guest; b->parent=inherited_parent;
         a->target=covered; a->guest=st; a->parent=put.mount;
+        a->root_providers=1;
         if (a->locked) { b->locked=1; a->locked=0; }
         struct md_mount_layout l={.base=&base,.entries=pending,.count=tree->count,
             .root=old==fs->mounts->root ? next->mount : fs->mounts->root};
@@ -527,6 +529,7 @@ static int pivot(struct md_filesystem *fs, struct md_guest_domain *context,
         close(new->target); new->target=inherited_target; new->guest=inherited_guest; new->parent=inherited_parent;
         if (initialized) { old->source=base.source; old->native=base.native; }
         old->target=covered; old->guest=st; old->parent=put.mount;
+        old->root_providers=1;
         if (old->locked) { new->locked=1; old->locked=0; }
         if (fs->mounts->root==old) fs->mounts->root=new;
         md_domain_relocate_roots(fs->mounts,&before,&after,from,to);

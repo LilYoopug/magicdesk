@@ -26,7 +26,7 @@ def guest():
         source = root / 'source'
         source.mkdir()
         (source / 'marker').write_text('shared')
-        targets = [root / str(i) for i in range(40)]
+        targets = [root / str(i) for i in range(192)]
         for target in targets:
             target.mkdir()
             call(40, source, target, 0, 4096, 0)
@@ -37,7 +37,7 @@ def guest():
         assert len(ids) == len(targets) and len(set(ids)) == len(targets), ids
         retained = os.open(targets[-1], os.O_RDONLY | os.O_DIRECTORY)
         cleanup.callback(os.close, retained)
-        print('PASS 40 simultaneous bind mounts with distinct identities and actual IO', flush=True)
+        print(f'PASS {len(targets)} simultaneous bind mounts with distinct identities and actual IO', flush=True)
 
         child = os.fork()
         if child == 0:

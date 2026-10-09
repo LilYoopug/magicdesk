@@ -15,6 +15,7 @@ struct md_mount_namespace {
     struct md_view_mount *root;
     struct md_fs_mounts *tree;
     struct md_mount_identity *native_ids;
+    struct md_native_mounts *native_mounts;
     struct md_mount_graph *graph;
     /* Weak membership: each FS context retains the view, not vice versa.
      * Fork publication and root relocation share this short lifecycle lock. */

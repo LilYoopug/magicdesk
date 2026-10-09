@@ -21,7 +21,7 @@ add_library(guest-parcels STATIC ${src}/fd_bundle.c ${src}/fs_wire.c ${src}/raw.
 target_compile_definitions(guest-parcels PRIVATE MD_NO_START MD_USE_LIBC)
 target_compile_options(guest-parcels PRIVATE -O2 -Wall -Wextra -Werror -fno-pie)
 set(origins ${src}/fs_anchor.c ${src}/fs_origin_transfer.c ${src}/inode_lifetime.c ${src}/inode_custody.c ${src}/sealed_manifest.c ${src}/ipc_scope.c ${src}/mount_policy.c ${src}/mount_graph.c ${src}/resource_order.c ${src}/ofd_order.c ${src}/fd_origins.c ${src}/fd_channel.c ${src}/fd_mutation.c ${src}/fd_delivery.c ${src}/fd_table_observation.c ${src}/fd_return.c ${src}/fd_exchange.c ${src}/received_fds.c ${src}/fd_messages.c ${src}/task_descriptor.c ${src}/task_lifetime.c)
-list(APPEND origins ${src}/devpts_view.c ${src}/cgroup.c ${src}/cgroup_program.c ${src}/sysfs_view.c ${src}/network_namespace.c ${src}/network_sysctl.c
+list(APPEND origins ${src}/native_mounts.c ${src}/devpts_view.c ${src}/cgroup.c ${src}/cgroup_program.c ${src}/sysfs_view.c ${src}/network_namespace.c ${src}/network_sysctl.c
     ${src}/ipc_namespace.c ${src}/mqueue_view.c ${src}/landlock_policy.c ${src}/landlock_file.c)
 set(mounts ${src}/fs_mounts.c ${src}/fs_mount_path.c ${src}/fs_mount_operations.c ${src}/fs_mount_table.c ${src}/fs_mount_change.c ${src}/fs_temporary.c ${src}/fs_overlay.c ${src}/fs_storage.c)
 list(APPEND mounts ${src}/proc_paths.c ${src}/procfs_view.c ${src}/proc_fdinfo.c ${src}/fs_proc.c ${src}/fs_cgroup.c ${src}/fs_bpf.c ${src}/fs_sysfs.c ${src}/fs_mqueue.c ${src}/fs_mount_file.c ${src}/mount_source.c ${src}/fs_context.c)
@@ -188,6 +188,9 @@ if(MAGICDESK_GUEST_FIXTURES)
     target_compile_options(test_elf PRIVATE -iquote ${src} -UNDEBUG)
     target_compile_definitions(test_elf PRIVATE MD_NO_START MD_USE_LIBC)
     guest_executable(test_launch_registry ../guest-exec-lab/test_launch_registry.c ${src}/launch_registry.c)
+    guest_executable(test_native_mounts ../guest-exec-lab/test_native_mounts.c ${src}/native_mounts.c)
+    target_compile_options(test_native_mounts PRIVATE -iquote ${src} -UNDEBUG)
+    target_link_options(test_native_mounts PRIVATE -Wl,--wrap=fopen -Wl,--wrap=fseek -Wl,--wrap=poll)
     target_compile_options(test_launch_registry PRIVATE -iquote ${src} -UNDEBUG)
     target_compile_definitions(image PRIVATE MD_INODE_TESTING)
     foreach(name inodes import rpc snapshot mounts credentials)

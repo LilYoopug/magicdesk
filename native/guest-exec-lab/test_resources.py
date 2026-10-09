@@ -307,7 +307,7 @@ def main():
               root + "/ipc-store", root + "/addressed"]), "PASS addressed send custody:")
         check("guest capsule send and receive", shlex.join([root + "/libmagicdesk_guest_fs_dispatch.so",
               "--ipc-origin-guest", root + "/ipc-store", root + "/libmagicdesk_guest_run.so"]),
-              "PASS guest capsule receive mode=13 protected=1")
+              "PASS guest capsule receive mode=14 protected=5")
         for receive in range(4):
             for protected in range(2):
                 for guest in (False, True):
@@ -329,7 +329,7 @@ def main():
         if args.case in ("all", "fs-buffer"):
             names += ("test_interception_buffers",)
         if args.case == "all":
-            names += ("test_open_job", "fs_dispatch", "test_launch_registry", "ipc_credentials_guest", "ipc_io_job", "fd_observation", "task_helper_fd")
+            names += ("test_open_job", "fs_dispatch", "test_launch_registry", "ipc_credentials_guest", "ipc_io_job", "fd_observation", "task_helper_fd", "test_native_mounts")
         if args.case == "fd-observation":
             names = ("fd_observation", "task_helper_fd")
         if args.case == "ipc-ancillary":
@@ -349,7 +349,7 @@ def main():
         if args.case == "rpc":
             names = ("test_rpc",)
         if args.case == "stores":
-            names = ("test_mounts", "test_inodes", "test_snapshot")
+            names = ("test_mounts", "test_inodes", "test_snapshot", "test_native_mounts")
         if args.case in ("mount-policy", "mount-graph", "inode-custody", "origin-transfer", "transient-store"):
             names = ("test_mounts",)
         if args.case == "ipc-peer":
@@ -459,6 +459,9 @@ def main():
                   "PASS asynchronous IPC peer admission")
             if args.case == "ipc-peer":
                 return
+        if args.case in ("all", "stores"):
+            check("native mount invalidation", root + "/libmagicdesk_guest_test_native_mounts.so",
+                  "PASS native mount snapshots:")
         if args.case == "stores":
             for name in ("mounts", "inodes", "snapshot"):
                 check(name + " model", root + "/libmagicdesk_guest_test_" + name + ".so " + root + "/model-" + name,

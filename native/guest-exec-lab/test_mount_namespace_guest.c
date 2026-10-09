@@ -21,6 +21,13 @@ static uint64_t id(int fd, const char *path) {
     assert(st.stx_mask&STATX_MNT_ID); assert(st.stx_mnt_id); return st.stx_mnt_id;
 }
 struct context { uint64_t original; int dir; int split; };
+static void not_a_link(const char *path) {
+    char text[PATH_MAX];
+    assert(readlink(path,text,sizeof(text))<0 && errno==EINVAL);
+    int fd=open(path,O_PATH|O_NOFOLLOW); assert(fd>=0);
+    assert(readlinkat(fd,"",text,sizeof(text))<0 && errno==ENOENT);
+    close(fd);
+}
 static int copied(void *argument) {
     struct context *c=argument;
     if (c->split) assert(!unshare(CLONE_NEWNS));
@@ -35,18 +42,58 @@ static int copied(void *argument) {
     assert(!chdir("/"));
     return 0;
 }
+static void entry_aliases(int dir,const char *proc) {
+    char from[160],to[160];
+    snprintf(from,sizeof(from),"%s/fd/%d/entry-a",proc,dir);
+    snprintf(to,sizeof(to),"%s/fd/%d/entry-b",proc,dir);
+    int fd=openat(dir,"entry-a",O_CREAT|O_EXCL|O_RDWR,0600); assert(fd>=0); close(fd);
+    assert(!rename(from,to));
+    assert(!renameat(AT_FDCWD,to,dir,"entry-a"));
+    assert(!renameat(dir,"entry-a",AT_FDCWD,to));
+    assert(!link(to,from));
+    struct stat a,b;
+    int inspected=stat(from,&a);
+    if (inspected) fprintf(stderr,"stat %s: %s\n",from,strerror(errno));
+    assert(!inspected && !stat(to,&b));
+    assert(a.st_ino==b.st_ino && a.st_dev==b.st_dev && a.st_nlink==2);
+    assert(syscall(SYS_renameat2,AT_FDCWD,from,AT_FDCWD,to,RENAME_NOREPLACE)<0 && errno==EEXIST);
+    assert(!unlink(from) && !unlink(to));
+    assert(!symlinkat("value",dir,"entry-a"));
+    assert(!rename(from,to));
+    assert(!lstat(to,&b) && S_ISLNK(b.st_mode));
+    assert(!link(to,from));
+    assert(!lstat(from,&a) && S_ISLNK(a.st_mode) && a.st_ino==b.st_ino);
+    assert(!unlink(from));
+    assert(!linkat(AT_FDCWD,to,AT_FDCWD,from,AT_SYMLINK_FOLLOW));
+    assert(!lstat(from,&a) && S_ISREG(a.st_mode));
+    assert(!unlink(from) && !unlink(to));
+    assert(rename(from,to)<0 && errno==ENOENT);
+}
 static void binding(void) {
     assert(!mkdir("/tmp/source",0755)); assert(!mkdir("/tmp/target",0755));
     int value=open("/tmp/source/value",O_CREAT|O_WRONLY,0644); assert(value>=0);
     assert(write(value,"data",4)==4); close(value);
     assert(!mount("/tmp/source","/tmp/target",NULL,MS_BIND,NULL));
+    not_a_link("/tmp/target");
+    not_a_link("/tmp/target/.");
+    not_a_link("/tmp/target/value");
     uint64_t first=id(AT_FDCWD,"/tmp/source"), second=id(AT_FDCWD,"/tmp/target");
     assert(first!=second);
     value=open("/tmp/target/value",O_RDONLY); assert(value>=0);
     char text[8]={0}; assert(read(value,text,sizeof(text))==4 && !strcmp(text,"data")); close(value);
     int dir=open("/tmp/target",O_PATH|O_DIRECTORY); assert(dir>=0);
     assert(id(dir,"")==second);
+    entry_aliases(dir,"/proc/self");
+    entry_aliases(dir,"/proc/thread-self");
+    assert(!symlink("/proc","/tmp/entry-proc"));
+    entry_aliases(dir,"/tmp/entry-proc/self");
+    assert(!unlink("/tmp/entry-proc"));
+    char alias[128]; snprintf(alias,sizeof(alias),"/proc/self/fd/%d/value",dir);
+    assert(rename(alias,"/tmp/source/other")<0 && errno==EXDEV);
     assert(!mount(NULL,"/tmp/target",NULL,MS_BIND|MS_REMOUNT|MS_RDONLY,NULL));
+    char other[128]; snprintf(other,sizeof(other),"/proc/self/fd/%d/other",dir);
+    assert(rename(alias,other)<0 && errno==EROFS);
+    assert(link(alias,other)<0 && errno==EROFS);
     value=openat(dir,"value",O_RDWR); assert(value<0 && errno==EROFS);
     value=open("/tmp/source/value",O_RDWR); assert(value>=0); close(value);
     assert(umount2("/tmp/target",0)<0 && errno==EBUSY);
@@ -81,6 +128,8 @@ static void descriptor_bind(void) {
     snprintf(to,sizeof(to),"/tmp/proc-copy/thread-self/fd/%d",target);
     assert(!mkdir("/tmp/proc-copy",0755));
     assert(!mount("/proc","/tmp/proc-copy",NULL,MS_BIND,NULL));
+    int directory=open("/tmp/source",O_PATH|O_DIRECTORY); assert(directory>=0);
+    entry_aliases(directory,"/tmp/proc-copy/self"); close(directory);
     assert(!mount(from,to,NULL,MS_BIND,NULL));
     int value=open("/tmp/fd-file",O_RDONLY); assert(value>=0);
     char data[4]; assert(read(value,data,4)==4 && !memcmp(data,"data",4)); close(value);
@@ -160,11 +209,17 @@ static void stacks(void) {
     puts("PASS guest mount stacks: covered parent traversal, absolute links, detach and retained cwd");
 }
 static void files(void) {
+    assert(!link("/tmp/source/value","/tmp/source/value-alias"));
     int fd=open("/tmp/file-target",O_CREAT|O_WRONLY,0644); assert(fd>=0); close(fd);
     assert(!mount("/tmp/source/value","/tmp/file-target",NULL,MS_BIND,NULL));
+    not_a_link("/tmp/file-target");
     uint64_t mounted=id(AT_FDCWD,"/tmp/file-target");
     assert(mounted!=id(AT_FDCWD,"/tmp/source/value"));
     fd=open("/tmp/file-target",O_RDWR); assert(fd>=0);
+    char proc[80],path[PATH_MAX];
+    snprintf(proc,sizeof(proc),"/proc/self/fd/%d",fd);
+    ssize_t length=readlink(proc,path,sizeof(path)-1); assert(length>=0); path[length]=0;
+    assert(!strcmp(path,"/tmp/file-target"));
     char text[8]={0}; assert(read(fd,text,sizeof(text))==4 && !strcmp(text,"data"));
     assert(write(fd,"!",1)==1); close(fd);
     struct stat st; assert(!stat("/tmp/source/value",&st) && st.st_size==5);
@@ -264,6 +319,8 @@ static int pivoting(void *argument) {
     assert(!syscall(SYS_pivot_root,next_path,put_path));
     assert(id(AT_FDCWD,"/")==next && id(AT_FDCWD,".")==next);
     assert(id(held,"")==previous && id(AT_FDCWD,"/old")==previous);
+    not_a_link("/");
+    not_a_link("/old");
     char cwd[128]; assert(getcwd(cwd,sizeof(cwd)) && !strcmp(cwd,"/"));
     assert(id(AT_FDCWD,"/..")==next);
     if (initial) assert(umount2("/",MNT_DETACH)<0 && errno==EBUSY);
@@ -293,6 +350,27 @@ static int pivoting(void *argument) {
     assert(getcwd(cwd,sizeof(cwd)) && !strcmp(cwd,"/"));
     puts(initial ? "PASS initial pivot root: peer roots, cwd, retained base, recursive copy, reverse pivot, detach and namespace copy"
         : "PASS pivot root: peer roots, selective cwd relocation, old dirfd and detached old root");
+    return 0;
+}
+static int retained_providers(void *argument) {
+    (void)argument;
+    assert(!mkdir("/tmp/provider-root",0755));
+    assert(!mount("/","/tmp/provider-root",NULL,MS_BIND,NULL));
+    assert(!chdir("/tmp/provider-root") && !chroot(".") && !chdir("/"));
+    assert(!mount("tmpfs","/tmp","tmpfs",0,NULL));
+    assert(!mkdir("/tmp/next",0755));
+    assert(!mount("tmpfs","/tmp/next","tmpfs",0,NULL));
+    assert(!mkdir("/tmp/next/old",0755));
+    assert(!syscall(SYS_pivot_root,"/tmp/next","/tmp/next/old"));
+    assert(!chdir("/"));
+    for (unsigned copy=0;copy<2;++copy) {
+        if (copy) assert(!unshare(CLONE_NEWNS));
+        int fd=open("/old/proc/self/status",O_RDONLY); assert(fd>=0);
+        char data[128]; assert(read(fd,data,sizeof(data))>0); close(fd);
+        fd=open("/old/dev/null",O_WRONLY); assert(fd>=0);
+        assert(write(fd,"x",1)==1); close(fd);
+    }
+    puts("PASS pivoted root providers: non-base root, native proc/dev and namespace-copy retention");
     return 0;
 }
 void test_mount_namespace_guest(void) {
@@ -341,6 +419,12 @@ void test_mount_namespace_guest(void) {
         int status; assert(waitpid(pivot,&status,0)==pivot && WIFEXITED(status) && !WEXITSTATUS(status));
     }
     assert(id(AT_FDCWD,"/")==c.original);
+    pid_t providers=clone(retained_providers,(char *)stack+1024*1024,SIGCHLD|CLONE_NEWNS,NULL);
+    assert(providers>0);
+    /* EVENT_WAIT: isolated pivot/copy child exits; the guest deadline fails a hang. */
+    int provider_status;
+    assert(waitpid(providers,&provider_status,0)==providers && WIFEXITED(provider_status)
+        && !WEXITSTATUS(provider_status));
     assert(!setresuid(1000,1000,1000));
     assert(unshare(CLONE_NEWNS)<0 && errno==EPERM);
     close(c.dir); free(stack);

@@ -4,6 +4,7 @@
 #include "inode_lifetime.h"
 #include "user_namespace.h"
 #include "namespace_identity.h"
+#include "native_mounts.h"
 #include <errno.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -142,6 +143,7 @@ void md_mount_namespace_release(struct md_mount_namespace *n) {
     if (n->base.target>=0) close(n->base.target);
     md_mount_policy_close(&n->base.policy);
     pthread_mutex_destroy(&n->domains_lock);
+    md_native_mounts_release(n->native_mounts);
     free(n->native_ids); free(n);
 }
 int md_mount_namespace_attached(const struct md_mount_namespace *n) {

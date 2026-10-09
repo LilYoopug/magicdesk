@@ -25,7 +25,7 @@ long md_namespace_mount_fd(const struct md_fs *fs,long nr,const unsigned long *a
             if (!*key && !(flags&AT_EMPTY_PATH)) return -ENOENT;
             q.directory[0]=(int)a[0]; q.path[0]=key;
         }
-        return md_namespace_mount_request(fs,&q);
+        return md_namespace_paths_request(fs,&q);
     }
     if (nr==SYS_move_mount) {
         unsigned flags=(unsigned)a[4];
@@ -37,7 +37,7 @@ long md_namespace_mount_fd(const struct md_fs *fs,long nr,const unsigned long *a
         if (r<0) return r;
         if ((!*key && !(flags&MOVE_MOUNT_T_EMPTY_PATH)) || (!*value && !(flags&MOVE_MOUNT_F_EMPTY_PATH))) return -ENOENT;
         q.path[0]=key; q.path[1]=value;
-        return md_namespace_mount_request(fs,&q);
+        return md_namespace_paths_request(fs,&q);
     }
     if (nr==SYS_fsopen) {
         if ((unsigned)a[1]&~FSOPEN_CLOEXEC) return -EINVAL;

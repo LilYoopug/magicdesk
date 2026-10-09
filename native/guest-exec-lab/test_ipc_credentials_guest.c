@@ -628,7 +628,30 @@ static void origin_rights(struct msghdr *m, unsigned expected, int flags, unsign
     origin_descriptors(fds,expected,flags);
 }
 static void capture_channel_admission(int socket, int full);
+static int admit_shared_channel(void *unused) {
+    (void)unused;
+    struct sock_filter code[]={BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)};
+    struct sock_fprog filter={sizeof(code)/sizeof(*code),code};
+    CHECK(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0) && !prctl(PR_SET_SECCOMP,SECCOMP_MODE_FILTER,&filter));
+    int socket_fd=socket(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC,0); CHECK(socket_fd>=0);
+    capture_channel_admission(socket_fd,0);
+    CHECK(!close(socket_fd));
+    return 0;
+}
+static void warm_shared_channel(void) {
+    /* A filtered child admits one shared-table channel. The parent remains
+     * unfiltered, so its subsequent IO tests ordinary channel reuse. */
+    int filter=prctl(PR_GET_SECCOMP);
+    size_t size=1024*1024;
+    void *stack=mmap(NULL,size,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    CHECK(stack!=MAP_FAILED);
+    pid_t child=clone(admit_shared_channel,(char *)stack+size,CLONE_FILES|SIGCHLD,NULL);
+    CHECK(child>=0); done(child);
+    CHECK(prctl(PR_GET_SECCOMP)==filter && !munmap(stack,size));
+}
 static void origin_send(unsigned mode, int protected) {
+    int warm=protected&4; protected&=1;
+    if (warm) warm_shared_channel();
     CHECK(mode<16);
     int file=open("/tmp/outgoing-file",O_CREAT|O_RDWR|O_TRUNC|O_CLOEXEC,0600);
     CHECK(file>=0 && write(file,"send",4)==4 && lseek(file,1,SEEK_SET)==1);
@@ -694,7 +717,7 @@ static void origin_send(unsigned mode, int protected) {
         CHECK(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0) && !prctl(PR_SET_SECCOMP,SECCOMP_MODE_FILTER,&filter));
         int domain; socklen_t length=sizeof(domain);
         CHECK(getsockopt(STDIN_FILENO,SOL_SOCKET,SO_DOMAIN,&domain,&length)==-1 && errno==EACCES);
-        capture_channel_admission(STDIN_FILENO,0);
+        if (!warm) capture_channel_admission(STDIN_FILENO,0);
     }
     if (mode==15) {
         struct sock_filter code[]={
@@ -704,15 +727,17 @@ static void origin_send(unsigned mode, int protected) {
             BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)};
         struct sock_fprog filter={sizeof(code)/sizeof(*code),code};
         CHECK(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0) && !prctl(PR_SET_SECCOMP,SECCOMP_MODE_FILTER,&filter));
+        CHECK(syscall(SYS_gettid)==-1 && errno==EACCES);
     }
     int before[1024]; for (unsigned i=0;i<1024;++i) before[i]=fcntl((int)i,F_GETFD);
     int batch=mode==6 || mode==13;
     int result=batch ? sendmmsg(STDIN_FILENO,messages,2,MSG_NOSIGNAL)
         : (int)sendmsg(STDIN_FILENO,&messages[0].msg_hdr,MSG_NOSIGNAL);
-    int expected=mode==4 ? EBADF : mode==5 || mode==15 ? EACCES : mode==7 ? EFAULT : mode==11 ? EINVAL : mode==14 ? EPERM : 0;
+    /* Only cold channel admission requires gettid; warm reuse must not repeat it. */
+    int expected=mode==4 ? EBADF : mode==5 || (mode==15 && !warm) ? EACCES : mode==7 ? EFAULT : mode==11 ? EINVAL : mode==14 ? EPERM : 0;
     if (expected) CHECK(result==-1 && errno==expected);
     else CHECK(result==(batch ? 2 : 1));
-    if (mode==15) CHECK(sendmsg(STDIN_FILENO,&messages[0].msg_hdr,MSG_NOSIGNAL)==-1 && errno==EACCES);
+    if (mode==15 && !warm) CHECK(sendmsg(STDIN_FILENO,&messages[0].msg_hdr,MSG_NOSIGNAL)==-1 && errno==EACCES);
     for (unsigned i=0;i<1024;++i) CHECK(before[i]==fcntl((int)i,F_GETFD));
     if (mode==2) CHECK(!setrlimit(RLIMIT_NOFILE,&limit));
     while (held_count) CHECK(!close(held[--held_count]));
@@ -720,7 +745,8 @@ static void origin_send(unsigned mode, int protected) {
     printf("PASS capsule guest sender mode=%u protected=%d\n",mode,protected);
 }
 static void origin_receive(unsigned mode, int protected) {
-    int filtered=protected&2; protected&=1;
+    int filtered=protected&2, warm=protected&4; protected&=1;
+    if (warm) warm_shared_channel();
     CHECK(mode<15); if (protected) CHECK(!prctl(PR_SET_DUMPABLE,0));
     if (filtered) {
         struct sock_filter code[]={

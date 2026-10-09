@@ -379,7 +379,7 @@ Recvmmsg uses one native batch so its
 timeout and partial completion are not replaced by a userspace receive loop.
 MSG_PEEK does not consume identity metadata; truncation closes unpublished FDs.
 
-Unfiltered receive runs in a same-process private-table helper. Its socket is captured
+Unfiltered receive without an admitted channel runs in a same-process private-table helper. Its socket is captured
 under the destination table turn; the turn ends at clone, before blocking IO.
 Unrelated inherited descriptors are closed before receiving. The helper exports
 the actual socket and received rights through an owned channel and is reaped
@@ -401,14 +401,19 @@ cannot retarget the accepted receive. Classification does not authenticate an
 arbitrary message's mount-origin association.
 
 Application-filtered operations export the captured socket and source rights
-through the existing table-owned channel. Admission uses an exact gettid gate,
+through the existing table-owned channel. Ordinary operations reuse that path
+when their held file-table turn finds an already admitted, unambiguous channel.
+This includes a channel admitted by a filtered CLONE_FILES peer. Ordinary IO
+does not create a new infrastructure FD just to select this optimization;
+cold/uncertain tables retain the private-helper path and its capacity semantics.
+Admission uses an exact gettid gate,
 still subject to all installed application filters. A denial retires capture
 and releases its ordering turn; there is no filter rewrite or retry of the send.
 For authenticated peers, supervisor IO carries a validated sender token so its
 own native PID/UID does not become the peer's virtual identity. Native peers
 retain task-affine sending. Both paths share origin preparation and custody.
 
-The filtered IO owner uses the mapped 64 KiB data and 4 KiB control buffers
+The broker IO owner uses the mapped 64 KiB data and 4 KiB control buffers
 inline, not as message-size ceilings. Larger single messages allocate temporary
 host storage and copy through bounded chunks; one datagram remains one native
 send. Iovec inputs are captured once. Ordinary small single-message IO adds no

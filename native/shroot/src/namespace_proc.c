@@ -104,6 +104,56 @@ int md_namespace_proc_borrow(const struct md_proc_path *ref, int *fd) {
     else return 0;
     return 1;
 }
+long md_namespace_paths_request(const struct md_fs *fs,struct md_fs_request *q) {
+    struct md_fs_response out;
+    char selected[2][PATH_MAX], relative[2][PATH_MAX];
+    unsigned captured=0;
+    int entries=q->operation==MD_FS_LINK || q->operation==MD_FS_RENAME;
+    for (;;) {
+        long r=md_namespace_request(fs,q,&out);
+        if (r!=-EREMOTE) return r;
+        unsigned index=out.result.host_path-1;
+        if (index>1 || (captured&(1U<<index))) return -ELOOP;
+        captured|=1U<<index;
+        /* A delegated lookup has not executed the mutation. Resolve its input
+         * through the same table-owned capture used by mount operations. */
+        struct md_proc_path ref=md_proc_path(out.data);
+        enum md_proc_kind kind=ref.kind==MD_PROC_FOREIGN ? ref.foreign_kind : ref.kind;
+        int bind_source=q->operation==MD_FS_MOUNT && index==1 && q->mode==MD_FS_MOUNT_BIND;
+        if (md_proc_control_kind(kind) && !bind_source) return -EOPNOTSUPP;
+        /* Entry mutations must retain the final name, not follow it and
+         * mutate a proc magic link's target. Only directory suffixes enter
+         * the guest namespace; proc entries themselves remain unsupported. */
+        if (entries && ((kind!=MD_PROC_FD && kind!=MD_PROC_CWD && kind!=MD_PROC_ROOT)
+                || !ref.tail || !*ref.tail)) return -EOPNOTSUPP;
+        int fd=-1;
+        if (md_namespace_proc_borrow(&ref,&fd)) {
+            long control=md_proc_control_known(fd);
+            if (control<0) return control;
+            if (control && !bind_source) return entries ? -ENOTDIR : -EOPNOTSUPP;
+            const char *tail=ref.tail;
+            int trailing=*tail!=0;
+            while (*tail=='/') ++tail;
+            r=md_copy(relative[index],sizeof(relative[index]),*tail ? tail : trailing ? "." : "");
+            if (r<0) return r;
+            q->directory[index]=fd; q->path[index]=relative[index];
+        } else if (ref.kind==MD_PROC_ROOT && ref.process==(int)RAW0(gettid)) {
+            r=md_copy(relative[index],sizeof(relative[index]),*ref.tail ? ref.tail : "/");
+            if (r<0) return r;
+            q->directory[index]=AT_FDCWD; q->path[index]=relative[index];
+        } else {
+            const char *tail=entries ? ref.tail : "";
+            while (*tail=='/') ++tail;
+            r=md_copy(relative[index],sizeof(relative[index]),entries ? (*tail ? tail : ".") : "");
+            if (r<0) return r;
+            if (entries) out.data[ref.anchor_length]=0;
+            r=md_proc_task_path(out.data,selected[index],sizeof(selected[index]));
+            if (r<0) return r;
+            q->directory[index]=-1; q->path[index]=relative[index];
+            q->capture[index]=(struct md_fs_task_capture){selected[index],O_PATH|(entries ? O_DIRECTORY : 0)};
+        }
+    }
+}
 static long host_readlink(const struct md_fs *fs, const struct md_proc_path *ref,
         const char *path, const unsigned long *a) {
     if (!a[3]) return -EINVAL;
@@ -169,7 +219,6 @@ static long native_call(const struct md_fs *fs, long nr, const unsigned long *a)
 }
 long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, const unsigned long *a,
                             unsigned path_index, const char *path, uint64_t proc_namespace) {
-    if (nr == SYS_renameat || nr == SYS_renameat2 || nr == SYS_linkat) return -ENOTSUP;
     struct md_proc_path ref = md_proc_path(path);
     enum md_proc_kind control=ref.kind==MD_PROC_FOREIGN ? ref.foreign_kind : ref.kind;
     if (control==MD_PROC_FDINFO && proc_namespace && nr==SYS_openat) {

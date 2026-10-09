@@ -23,6 +23,8 @@ struct md_view_mount {
     struct md_ipc_namespace *ipc_namespace;
     struct md_control_file file;
     int detached, locked;
+    /* Implicit launch providers retained by a root moved through pivot_root. */
+    int root_providers;
     atomic_uint anchors;
     struct md_view_mount *parent;
     struct stat native, guest;

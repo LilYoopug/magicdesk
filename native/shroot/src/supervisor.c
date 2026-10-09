@@ -2491,6 +2491,14 @@ static void outgoing_captured(void *context) {
     struct outgoing_owner *owner=context;
     CHECK(!md_fd_order_complete(&owner->files));
 }
+static int reusable_io_channel(struct thread *t) {
+    /* Called under the file-table turn. Reuse an admitted channel without
+     * adding an infrastructure FD to ordinary IO or exhausting a full table. */
+    struct md_fd_channel *channel=NULL; int number=-1;
+    int error=md_fd_origins_channel(t->resources.files,&number,&channel);
+    md_fd_channel_release(channel);
+    return !error && number>=0;
+}
 static void outgoing_start(struct thread *t) {
     struct outgoing_owner *owner=t->outgoing;
     if (!owner || owner->stage!=OUTGOING_QUEUED) return;
@@ -2505,6 +2513,8 @@ static void outgoing_start(struct thread *t) {
     if (!error) {
         owner->context.actor=t->pid; owner->context.peer=t->tgid;
         owner->context.authenticated=owner->context.has_identity=1;
+        owner->brokered|=reusable_io_channel(t);
+        owner->options.brokered=owner->brokered;
         error=md_fs_order_complete(&owner->fs_order);
     }
     if (!error && owner->input.count>1)
@@ -2683,6 +2693,7 @@ static void receive_start(struct thread *t) {
     struct receive_owner *owner=t->receive;
     if (!owner || owner->started || md_fd_order_state(&owner->files)!=MD_RESOURCE_ORDER_READY) return;
     int error=md_fd_order_start(&owner->files);
+    if (!error) owner->brokered|=reusable_io_channel(t);
     if (!error && owner->brokered) {
         owner->started=1; ipc_capture_step(t,MD_FS_BUFFER_IPC_CAPTURE_READY,0); return;
     }

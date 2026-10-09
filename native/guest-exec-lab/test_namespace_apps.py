@@ -14,7 +14,7 @@ def main():
     parser.add_argument('build', type=Path)
     parser.add_argument('store')
     parser.add_argument('--trace', action='store_true')
-    parser.add_argument('--case', choices=('all', 'basic', 'readonly', 'identity', 'nested', 'pid', 'pid-debugger'), default='all')
+    parser.add_argument('--case', choices=('all', 'basic', 'split-root', 'readonly', 'identity', 'nested', 'pid', 'pid-debugger'), default='all')
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
     spec = importlib.util.spec_from_file_location('transport', repo / 'scripts/mcp-client.py')
@@ -61,6 +61,18 @@ def main():
         # EVENT_WAIT: the runtime observes owned children; its deadline cancels
         # a stalled process tree rather than treating elapsed time as readiness.
         cases = {
+            'split-root': (['--ro-bind', '/etc', '/etc', '--ro-bind', '/usr', '/usr',
+                            '--symlink', 'usr/bin', '/bin', '--symlink', 'usr/lib', '/lib',
+                            '--symlink', 'usr/lib', '/lib64', '--symlink', 'usr/bin', '/sbin',
+                            '--proc', '/proc', '--dev-bind', '/dev', '/dev', '--tmpfs', '/tmp',
+                            '--', '/bin/sh', '-ec',
+                            'test -d /etc; test -d /usr; '
+                            'test "$(realpath /etc)" = /etc; '
+                            'test "$(readlink /bin)" = usr/bin; '
+                            'exec 3</tmp; printf data >/tmp/file-a; '
+                            'mv /proc/self/fd/3/file-a /proc/self/fd/3/file-b; '
+                            'test "$(cat /tmp/file-b)" = data; echo MD-BWRAP-SPLIT-ROOT'],
+                           'MD-BWRAP-SPLIT-ROOT'),
             'pid-debugger': (['--unshare-pid', '--ro-bind', '/', '/', '--proc', '/proc',
                              '--dev-bind', '/dev', '/dev', '--tmpfs', '/tmp', '--',
                              '/usr/bin/gdb', '-nx', '-batch',

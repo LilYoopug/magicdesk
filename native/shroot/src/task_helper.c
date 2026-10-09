@@ -87,6 +87,12 @@ static long trace(struct helper *m, int request, pid_t pid, void *address, void 
     long r=m->manager->callbacks.trace(request,pid,address,data);
     return r<0 ? -errno : r;
 }
+static int protocol_error(struct helper *m,int line) {
+    fprintf(stderr,"guest-runtime: helper protocol line=%d owner=%d child=%d kind=%d parent=%d operation=%d ready=%d reaped=%d cancelled=%d started=%d\n",
+        line,m->owner,m->child,m->kind,m->parent_operation,m->operation,
+        m->parent_ready,m->reaped,m->cancelled,m->started);
+    return -EPROTO;
+}
 static int resume(struct helper *m, pid_t pid) {
     long r=trace(m,PTRACE_CONT,pid,NULL,NULL);
     if (!r && pid==m->child) m->child_stopped=0;
@@ -177,7 +183,7 @@ static int clear_next(struct helper *m) {
 }
 static int receive_export(struct helper *m) {
     struct md_task_receive_frame *p=receive_frame(m);
-    if (!p || !p->count || p->count>253) return -EPROTO;
+    if (!p || !p->count || p->count>253) return protocol_error(m,__LINE__);
     unsigned needed=(m->received ? m->received->count : 0)+p->count;
     if (needed>253U*1024+1) return -EOVERFLOW;
     int error=md_received_fds_reserve(&m->received,needed);
@@ -206,7 +212,7 @@ static int export_next(struct helper *m) {
         m->result=0; m->observed=1; return abort_child(m);
     }
     struct md_task_receive_frame *p=receive_frame(m);
-    if (!p) return -EPROTO;
+    if (!p) return protocol_error(m,__LINE__);
     p->count=m->export_count-m->export_offset;
     if (p->count>253) p->count=253;
     memcpy(p->descriptors,m->export_inputs+m->export_offset,p->count*sizeof(int));
@@ -225,7 +231,7 @@ static int child_begin(struct helper *m) {
 static int observe(struct helper *m, const struct user_pt_regs *r) {
     if (m->observed || !m->started) return 0;
     long address=(long)r->regs[0];
-    if (r->pc!=m->abi.task_return || r->regs[8]!=SYS_mmap) return -EPROTO;
+    if (r->pc!=m->abi.task_return || r->regs[8]!=SYS_mmap) return protocol_error(m,__LINE__);
     if (address<=0) {
         m->result=address<0 && address>=-4095 ? address : -ECANCELED;
         m->observed=1; return 0;
@@ -254,7 +260,7 @@ static int advance(struct helper *m, long value) {
     unsigned long args[6]={0}; long nr=SYS_gettid;
     switch (m->operation) {
         case CLEAR:
-            if (value) return -EPROTO;
+            if (value) return protocol_error(m,__LINE__);
             return clear_next(m);
         case SEND_INPUT:
             if (++m->keep_index<m->send.count) {
@@ -267,26 +273,26 @@ static int advance(struct helper *m, long value) {
         case SEND_CHANNEL:
             /* SCM_RIGHTS preserves O_PATH; ADDFD cannot install it. Import
              * before the application socket so its slot replaces this channel. */
-            if (value>INT_MAX) return -EPROTO;
+            if (value>INT_MAX) return protocol_error(m,__LINE__);
             m->endpoint=(int)value; m->operation=m->send_address ? SEND_ANCHOR : SEND_IMPORT; nr=SYS_recvmsg;
             args[0]=value; args[1]=m->send_import+offsetof(struct md_task_send_import,message);
             args[2]=MSG_CMSG_CLOEXEC|MSG_DONTWAIT;
             break;
         case SEND_ANCHOR: {
             struct md_buffer_span span;
-            if (md_buffer_span(&m->buffer,&span)) return -EPROTO;
+            if (md_buffer_span(&m->buffer,&span)) return protocol_error(m,__LINE__);
             struct md_task_send_import *p=(void *)((char *)span.data+m->send_import-m->parcel);
-            if (value!=sizeof(p->token) || p->token!=m->anchor_token) return -EPROTO;
+            if (value!=sizeof(p->token) || p->token!=m->anchor_token) return protocol_error(m,__LINE__);
             if (p->message.msg_flags&MSG_CTRUNC) { m->result=-EMFILE; return abort_child(m); }
             if (p->message.msg_flags&MSG_TRUNC || p->message.msg_controllen!=sizeof(p->anchor)
                     || p->anchor.align.cmsg_level!=SOL_SOCKET || p->anchor.align.cmsg_type!=SCM_RIGHTS
-                    || p->anchor.align.cmsg_len!=CMSG_LEN(sizeof(int))) return -EPROTO;
+                    || p->anchor.align.cmsg_len!=CMSG_LEN(sizeof(int))) return protocol_error(m,__LINE__);
             int fd=-1; memcpy(&fd,CMSG_DATA(&p->anchor.align),sizeof(fd));
-            if (fd<0) return -EPROTO;
+            if (fd<0) return protocol_error(m,__LINE__);
             struct sockaddr_un *a=(void *)((char *)span.data+m->send_address-m->parcel);
             *a=(struct sockaddr_un){.sun_family=AF_UNIX};
             int n=snprintf(a->sun_path,sizeof(a->sun_path),"/proc/thread-self/fd/%d",fd);
-            if (n<0 || (unsigned)n>=sizeof(a->sun_path)) return -EPROTO;
+            if (n<0 || (unsigned)n>=sizeof(a->sun_path)) return protocol_error(m,__LINE__);
             struct msghdr *message=(void *)((char *)span.data+m->send.message-m->parcel);
             message->msg_name=(void *)m->send_address;
             message->msg_namelen=offsetof(struct sockaddr_un,sun_path)+n+1;
@@ -302,14 +308,14 @@ static int advance(struct helper *m, long value) {
         }
         case SEND_IMPORT: {
             struct md_buffer_span span;
-            if (md_buffer_span(&m->buffer,&span)) return -EPROTO;
+            if (md_buffer_span(&m->buffer,&span)) return protocol_error(m,__LINE__);
             struct md_task_send_import *p=(void *)((char *)span.data+m->send_import-m->parcel);
-            if (value!=sizeof(p->token) || p->token!=m->send_token) return -EPROTO;
+            if (value!=sizeof(p->token) || p->token!=m->send_token) return protocol_error(m,__LINE__);
             /* Kernel SCM_RIGHTS publication reports quota and copy failures
              * alike as CTRUNC. Never send the successfully imported prefix. */
             if (p->message.msg_flags&MSG_CTRUNC) { m->result=-EMFILE; return abort_child(m); }
             if (p->message.msg_flags&MSG_TRUNC
-                    || p->message.msg_controllen!=CMSG_SPACE((m->send_inputs->count-1)*sizeof(int))) return -EPROTO;
+                    || p->message.msg_controllen!=CMSG_SPACE((m->send_inputs->count-1)*sizeof(int))) return protocol_error(m,__LINE__);
             m->operation=SEND_CLOSE; nr=SYS_close; args[0]=m->endpoint;
             break;
         }
@@ -318,13 +324,13 @@ static int advance(struct helper *m, long value) {
             args[0]=MD_GUEST_TASK_HELPER; args[1]=2;
             break;
         case SEND_SOCKET:
-            if (value>INT_MAX) return -EPROTO;
+            if (value>INT_MAX) return protocol_error(m,__LINE__);
             m->send.socket=(int)value;
             m->operation=SEND; nr=SYS_sendmsg;
             args[0]=value; args[1]=m->send.message; args[2]=(unsigned)m->send.flags;
             if (m->send.sendto) {
                 struct md_buffer_span span;
-                if (md_buffer_span(&m->buffer,&span)) return -EPROTO;
+                if (md_buffer_span(&m->buffer,&span)) return protocol_error(m,__LINE__);
                 struct msghdr *message=(void *)((char *)span.data+m->send.message-m->parcel);
                 nr=SYS_sendto; args[1]=(uintptr_t)m->send.payload.iov_base; args[2]=m->send.payload.iov_len;
                 args[3]=(unsigned)m->send.flags; args[4]=(uintptr_t)message->msg_name; args[5]=message->msg_namelen;
@@ -334,11 +340,11 @@ static int advance(struct helper *m, long value) {
             m->result=value; m->observed=1;
             return abort_child(m);
         case RECEIVE_CHANNEL: {
-            if (value>INT_MAX) return -EPROTO;
+            if (value>INT_MAX) return protocol_error(m,__LINE__);
             m->endpoint=(int)value; m->operation=RECEIVE;
             if (m->kind==MD_TASK_HELPER_EXPORT) return export_next(m);
             struct md_task_receive_frame *p=receive_frame(m);
-            if (!p) return -EPROTO;
+            if (!p) return protocol_error(m,__LINE__);
             nr=p->input.batch ? SYS_recvmmsg : SYS_recvmsg;
             args[0]=p->input.socket; args[1]=p->input.messages;
             args[2]=p->input.batch ? p->input.count : (unsigned)p->input.flags;
@@ -347,7 +353,7 @@ static int advance(struct helper *m, long value) {
         }
         case RECEIVE: {
             struct md_task_receive_frame *p=receive_frame(m);
-            if (!p) return -EPROTO;
+            if (!p) return protocol_error(m,__LINE__);
             p->result=value; p->cursor=0; p->offset=0; p->total=0;
             if (value<0 && !p->input.batch) {
                 m->result=0; m->observed=1; return abort_child(m);
@@ -355,9 +361,9 @@ static int advance(struct helper *m, long value) {
             return receive_collect(m);
         }
         case RECEIVE_EXPORT: {
-            if (value!=sizeof(uint64_t)) return -EPROTO;
+            if (value!=sizeof(uint64_t)) return protocol_error(m,__LINE__);
             struct md_task_receive_frame *p=receive_frame(m);
-            if (!p) return -EPROTO;
+            if (!p) return protocol_error(m,__LINE__);
             int error=md_fd_channel_capture_vector_finish(&m->capture);
             if (error) { m->result=error; return abort_child(m); }
             memcpy(m->received->fds+m->received->count,m->export_fds,p->count*sizeof(int));
@@ -369,16 +375,16 @@ static int advance(struct helper *m, long value) {
         }
         case RECEIVE_COLLECT:
             if (value==1) return receive_export(m);
-            if (value) return -EPROTO;
+            if (value) return protocol_error(m,__LINE__);
             m->result=0; m->observed=1;
             return abort_child(m);
         case CHANNEL:
-            if (value) return -EPROTO;
+            if (value) return protocol_error(m,__LINE__);
             m->operation=OPEN; nr=SYS_openat;
             args[0]=AT_FDCWD; args[1]=m->parcel+offsetof(struct parcel,path); args[2]=m->flags;
             break;
         case OPEN: {
-            if (value>INT32_MAX) return -EPROTO;
+            if (value>INT32_MAX) return protocol_error(m,__LINE__);
             if (m->kind==MD_TASK_HELPER_CAPTURE && (m->flags&O_PATH) && !(m->flags&O_NOFOLLOW)) {
                 /* The stopped helper owns a private table: this alias pins the
                  * object already opened under caller filters, not its pathname.
@@ -411,7 +417,7 @@ static int advance(struct helper *m, long value) {
             break;
         }
         case EXPORT: {
-            if (value!=sizeof(uint64_t)) return -EPROTO;
+            if (value!=sizeof(uint64_t)) return protocol_error(m,__LINE__);
             struct md_fd_channel_input input;
             int error=md_fd_channel_capture_finish(&m->capture,&input);
             if (error) { m->result=error; return abort_child(m); }
@@ -429,7 +435,7 @@ static int advance(struct helper *m, long value) {
             break;
         }
         case BACKING:
-            if (value) return -EPROTO;
+            if (value) return protocol_error(m,__LINE__);
             m->operation=MAP; nr=SYS_mmap;
             args[0]=m->request.address; args[1]=m->request.size;
             args[2]=m->request.protection; args[3]=m->request.flags;
@@ -438,7 +444,7 @@ static int advance(struct helper *m, long value) {
         case MAP:
             m->observed=1; m->result=value;
             return abort_child(m);
-        default: return -EPROTO;
+        default: return protocol_error(m,__LINE__);
     }
     return call(m,m->child,nr,args);
 }
@@ -625,7 +631,7 @@ int md_task_helper_notification(struct md_task_helpers *manager, int listener, c
                 || q->data.args[1]!=(unsigned)(m->operation==SEND_SOCKET ? 2 : m->operation==BACKING)
                 || q->data.args[2] || q->data.args[3] || q->data.args[4] || q->data.args[5]
                 || (m->operation!=CHANNEL && m->operation!=BACKING && m->operation!=SEND_SOCKET
-                    && m->operation!=SEND_CHANNEL && m->operation!=RECEIVE_CHANNEL)) return -EPROTO;
+                    && m->operation!=SEND_CHANNEL && m->operation!=RECEIVE_CHANNEL)) return protocol_error(m,__LINE__);
         struct seccomp_notif_addfd add={.id=q->id,.flags=SECCOMP_ADDFD_FLAG_SEND
                 |(m->operation==RECEIVE_CHANNEL
                     ? 0 : SECCOMP_ADDFD_FLAG_SETFD),
@@ -658,7 +664,7 @@ int md_task_helper_event(struct md_task_helpers *manager, pid_t pid, int status)
         if (!m->owner || m->parent_ready) complete(m);
         return 1;
     }
-    if (!WIFSTOPPED(status)) return -EPROTO;
+    if (!WIFSTOPPED(status)) return protocol_error(m,__LINE__);
     unsigned event=(unsigned)status>>16;
     int sig=WSTOPSIG(status), error=0;
     if (!child && (event==PTRACE_EVENT_EXIT || event==PTRACE_EVENT_EXEC)) return 0;
@@ -666,13 +672,13 @@ int md_task_helper_event(struct md_task_helpers *manager, pid_t pid, int status)
         /* An interrupt can lose to an ordinary stop and arrive after the
          * caller lent us its registers. Continue the current gate, not the
          * caller's saved syscall. Application group-stops remain external. */
-        if (m->parent_ready) return -EPROTO;
+        if (m->parent_ready) return protocol_error(m,__LINE__);
         error=resume(m,pid);
     } else if (!child && event==PTRACE_EVENT_CLONE) {
         unsigned long born;
         error=(int)trace(m,PTRACE_GETEVENTMSG,pid,NULL,&born);
         if (!error) {
-            if (m->child || m->parent_operation!=CLONE) return -EPROTO;
+            if (m->child || m->parent_operation!=CLONE) return protocol_error(m,__LINE__);
             m->child=(pid_t)born;
             if (m->captured) { m->captured(m->completion); m->captured=NULL; }
             int ready=manager->callbacks.newborn(m->child);
@@ -697,7 +703,7 @@ int md_task_helper_event(struct md_task_helpers *manager, pid_t pid, int status)
     } else if (event==PTRACE_EVENT_SECCOMP) {
         struct user_pt_regs r;
         error=registers(m,pid,&r,0);
-        if (!error && r.pc!=m->abi.task_return) return -EPROTO;
+        if (!error && r.pc!=m->abi.task_return) return protocol_error(m,__LINE__);
         if (!error) {
             if (child && m->operation==MAP) m->started=1;
             error=resume(m,pid);
@@ -708,7 +714,7 @@ int md_task_helper_event(struct md_task_helpers *manager, pid_t pid, int status)
         if (!error && !child && m->parent_operation==ALLOCATE && r.pc==m->abi.allocated) {
             long top=r.regs[0];
             if (top<0) { m->result=top; complete(m); return 1; }
-            if (!top || top%(size_t)getpagesize()) return -EPROTO;
+            if (!top || top%(size_t)getpagesize()) return protocol_error(m,__LINE__);
             m->stack=top;
             error=md_memory_stack_add(m->memory,m->stack);
             if (!error) error=clone_begin(m);
@@ -718,16 +724,16 @@ int md_task_helper_event(struct md_task_helpers *manager, pid_t pid, int status)
             if (child) error=advance(m,(long)r.regs[0]);
             else {
                 if ((long)r.regs[0]<0) {
-                    if (m->child) return -EPROTO;
+                    if (m->child) return protocol_error(m,__LINE__);
                     m->result=(long)r.regs[0]; complete(m); return 1;
                 }
-                if (!m->child || r.regs[0]!=(unsigned)m->child) return -EPROTO;
+                if (!m->child || r.regs[0]!=(unsigned)m->child) return protocol_error(m,__LINE__);
                 /* EVENT_WAIT: exact helper reaping. Completion owns the caller
                  * continuation; no userspace wait or settling delay is used. */
                 m->parent_ready=1;
                 if (m->reaped) { complete(m); return 1; }
             }
-        } else if (!error) return -EPROTO;
+        } else if (!error) return protocol_error(m,__LINE__);
     } else if (child) {
         m->result=-EINTR;
         if (m->operation==MAP) {

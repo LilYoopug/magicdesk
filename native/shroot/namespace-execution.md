@@ -45,6 +45,10 @@ launch and exec preparation. Both the stock loader and target program are opened
 from the selected backend. The stock interpreter owns linking/TLS/dlopen. Exec carries the
 endpoint in bootstrap arguments, not environment variables, and retains one
 seccomp filter and the real kernel cwd/descriptors.
+Named image opens retain the walker's resolved final component, including
+hardlink aliases and symlink targets inside bind mounts; they do not reconstruct
+that component from an ambiguous inode. Descriptor-only path reporting retains
+its separate provenance requirements.
 
 ## File Contract
 
@@ -104,6 +108,10 @@ seccomp filter and the real kernel cwd/descriptors.
   nested chroot: `/proc` inside a selected directory is an ordinary backend
   path. Relative operations based at a host directory recognize these
   boundaries too. Selected current-process/thread magic links are described below.
+  A root moved by `pivot_root` retains its implicit providers at the old-root
+  placement. This mount-owned property survives namespace copies and graph
+  transfer; ordinary bind aliases do not acquire providers merely by aliasing
+  the launch root.
   Cross-mount symlinks and arbitrary proc aliases remain incomplete.
 - Inotify combines backing-inode data events and transactional directory/name
   events through the [shared watch owner](watches.md). Exact hardlink-dentry data
@@ -161,7 +169,12 @@ The shared [resource contract](process-resources.md) defines that distinction.
 
 A directory suffix such as `/proc/self/fd/N/child` captures the directory first
 and uses the common namespace path dispatcher. Directory enumeration, symlinks,
-creation and metadata therefore share normal virtual-directory semantics. For
+creation and metadata therefore share normal virtual-directory semantics.
+Link and rename resolve both directory operands through the same captured-input
+dispatcher as mounts. Direct, symlinked and bind-mounted proc aliases preserve
+final-component semantics, rename flags, mount identity and readonly policy.
+Only unexecuted lookup boundaries are resolved again; mutations are not replayed.
+Mutation of the proc entries themselves remains unsupported. For
 unowned host directories, suffix operations use the retained native directory
 through its proc alias. The guest `root` and `exe` links select the virtual root
 and the supplied guest executable, rather than Android's root or the bootstrap.
@@ -172,7 +185,8 @@ names. Any hardlink history makes descriptor-dentry reconstruction ambiguous:
 readlink then returns ENOTSUP rather than guessing a surviving name or exposing
 a backing-store filename. Native pipe/socket
 link text and unowned host links retain kernel behavior. Detached directory
-paths are not fabricated. Link/rename through host path aliases remain unsupported.
+paths are not fabricated. A bind mount's root has an exact mountpoint path even
+when its backing file has hardlink aliases; no backing name is guessed.
 
 Explicit current-process/thread cmdline and auxv opens return a guest-image
 snapshot backed by an unlinked temporary file. Reads and seek use the ordinary

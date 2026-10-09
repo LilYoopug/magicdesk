@@ -118,6 +118,34 @@ if os.environ.get("TEST_FAIL") == stage:
         self.assertNotIn('rlimits.enabled = false', setup)
         self.assertNotIn('rt.time.hard =', setup)
 
+    def test_application_paths_follow_guest_layout_and_keep_explicit_values(self):
+        result = self.run_script('--yes', '--gui', 'plasma')
+        self.assertEqual(0, result.returncode, result.stderr)
+        setup = self.payload.read_text()
+        profile = setup.split("<<'APPLICATIONS'\n", 1)[1].split('\nAPPLICATIONS\n', 1)[0]
+        root = self.directory / 'application-paths'
+        profile = profile.replace('/usr/lib', str(root / 'usr/lib'))
+        command = profile + '\nprintf "%s" "${VLC_PLUGIN_PATH-unset}"'
+        environment = dict(self.environment)
+        environment.pop('VLC_PLUGIN_PATH', None)
+        def run():
+            # EVENT_WAIT: profile process exit; timeout fails a stuck recipe.
+            value = subprocess.run(['sh', '-eu', '-c', command], env=environment,
+                                   capture_output=True, text=True, timeout=5)
+            self.assertEqual(0, value.returncode, value.stderr)
+            return value.stdout
+        self.assertEqual('unset', run())
+        multiarch = root / 'usr/lib/aarch64-linux-gnu/vlc/plugins'
+        multiarch.mkdir(parents=True)
+        self.assertEqual(str(multiarch), run())
+        native = root / 'usr/lib/vlc/plugins'
+        native.mkdir(parents=True)
+        self.assertEqual(str(native), run())
+        for value in ('/custom/plugins', ''):
+            environment['VLC_PLUGIN_PATH'] = value
+            self.assertEqual(value, run())
+        self.assertIn('. /etc/profile.d/magicdesk-applications.sh', setup)
+
     def test_steamos_uses_pinned_helper_and_local_oci_with_separate_library(self):
         result = self.run_script('--yes', '--distro', 'steamos', '--downloads', str(self.directory / 'downloads'))
         self.assertEqual(0, result.returncode, result.stderr)
@@ -479,6 +507,10 @@ if os.environ.get("TEST_FAIL") == stage:
         self.assertIn("+   priv->driver = psc->kopper ? GLX_DRIVER_ZINK_YES : GLX_DRIVER_SW;", result.stdout)
         self.assertIn("+   if (psc->kopper)", result.stdout)
         self.assertIn("+   if (!psc->kopper)", result.stdout)
+        self.assertIn('XQueryExtension(priv->dpy, "DRI3"', result.stdout)
+        self.assertIn("zink_present_readback(screen, pctx, pres, level, layer,", result.stdout)
+        self.assertIn("pipe_texture_map(pipe, pres, level, layer, PIPE_MAP_READ,", result.stdout)
+        self.assertIn("displaytarget_destroy(screen->winsys, res->sw_dt)", result.stdout)
         self.assertIn("IOCTL_KGSL_READ_CALIBRATED_TIMESTAMPS", result.stdout)
         self.assertIn("dev->local_fd, &timestamp) == 0", result.stdout)
         self.assertIn("kgsl_read_gpu_timestamp(dev->fd, ts)", result.stdout)
@@ -540,7 +572,7 @@ if os.environ.get("TEST_FAIL") == stage:
                         env=dict(environment, GALLIUM_DRIVER="zink"),
                         capture_output=True, text=True, timeout=5)
                     self.assertEqual(0, activated.returncode, activated.stderr)
-                    self.assertEqual("zink|unset", activated.stdout)
+                    self.assertEqual("zink|zink", activated.stdout)
                 else:
                     self.assertEqual("previous profile\n", profile.read_text())
 

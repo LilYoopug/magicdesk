@@ -992,6 +992,14 @@ static void result_contract(void) {
     r.host_path=1;
     CHECK(md_fs_result_valid(&q,&r,"/x",3,0));
     CHECK(!md_fs_result_valid(&q,&r,"xx",3,0));
+    r.host_path=2;
+    CHECK(!md_fs_result_valid(&q,&r,"/x",3,0));
+    q.operation=MD_FS_RENAME;
+    CHECK(md_fs_result_valid(&q,&r,"/x",3,0));
+    q.operation=MD_FS_LINK;
+    CHECK(md_fs_result_valid(&q,&r,"/x",3,0));
+    r.error=-EACCES;
+    CHECK(!md_fs_result_valid(&q,&r,"/x",3,0));
     q.operation=MD_FS_OBJECT_ID; r=(struct md_fs_result){.fd=-1,.size=32};
     CHECK(!md_fs_result_valid(&q,&r,guard,32,0));
     q.operation=MD_FS_GETCAP;

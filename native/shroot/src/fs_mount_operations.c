@@ -322,12 +322,28 @@ static void inode_selected(struct md_filesystem *fs, const struct md_fs_request 
         local.operation=MD_FS_REOPEN; local.flags=flags&~(O_CREAT|O_EXCL); local.mode=0;
     }
     inode(fs,a->view,a->mount,&local,out,output);
+    /* The selected FD preserves the object, not the caller's path syntax.
+     * readlink(non-link) is EINVAL; readlinkat(fd, "") is ENOENT. */
+    if (q->operation==MD_FS_READLINK && out->error==-ENOENT) {
+        struct stat st;
+        if (!fstat(a->fd,&st) && !S_ISLNK(st.st_mode)) out->error=-EINVAL;
+    }
     if (out->error || q->operation!=MD_FS_OPEN_IMAGE) return;
     struct md_image_identity *identity=output->data;
     struct md_filesystem owner=*fs; owner.mounts=a->view;
     struct md_view_object *object=NULL;
     int r=a->view!=fs->mounts ? -ENOENT : md_view_record(&owner,a->fd,a->mount,&object);
-    if (!r) r=md_view_path(fs,a->fd,a->mount,identity->path,sizeof(identity->path));
+    /* Named lookup already selected the dentry. Reconstructing the final
+     * component from its inode loses hardlink identity unnecessarily. */
+    if (!r && strcmp(a->name,".")) {
+        r=md_view_path(fs,a->parent,a->mount,identity->path,sizeof(identity->path));
+        if (!r) {
+            size_t length=strlen(identity->path);
+            int n=snprintf(identity->path+length,sizeof(identity->path)-length,"%s%s",
+                length==1 ? "" : "/",a->name);
+            if (n<0 || (size_t)n>=sizeof(identity->path)-length) r=-ERANGE;
+        }
+    } else if (!r) r=md_view_path(fs,a->fd,a->mount,identity->path,sizeof(identity->path));
     if (!r) {
         memcpy(identity->object,object->id,sizeof(identity->object));
         out->size=offsetof(struct md_image_identity,path)+strlen(identity->path)+1;
@@ -445,6 +461,12 @@ static void native(struct md_filesystem *fs, const struct md_fs_request *q,
         ssize_t n = a->mount->backing==MD_MOUNT_PROC ? md_procfs_readlink(fs,a->mount,a->fd,data,capacity)
             : readlinkat(a->fd, "", data, capacity);
         if (n < 0) r=a->mount->backing==MD_MOUNT_PROC ? (int)n : -errno; else out->size = (size_t)n;
+        /* This branch resolved a nonempty pathname; descriptor-only requests
+         * retain the kernel's empty-path errno in descriptor(). */
+        if (r==-ENOENT && a->mount->backing!=MD_MOUNT_PROC) {
+            struct stat st;
+            if (!fstat(a->fd,&st) && !S_ISLNK(st.st_mode)) r=-EINVAL;
+        }
         break;
     }
     case MD_FS_MKDIR: if (mkdirat(a->parent, a->name, q->mode&~q->attributes.creation_mask)) r = -errno; break;
@@ -568,13 +590,15 @@ void md_fs_mounts_execute(struct md_filesystem *fs, const struct md_fs_request *
         return;
     }
     struct md_view_location a = {.parent=-1,.fd=-1}, b = {.parent=-1,.fd=-1};
-    uint64_t resolve=q->resolve;
-    if (q->operation==MD_FS_READLINK || q->operation==MD_FS_OPEN_IMAGE
-            || (q->operation==MD_FS_OPEN && !writable(q->flags)))
-        resolve|=MD_VIEW_TASK_PATH;
-    int r = md_view_walk(fs, q->directory[0], q->origin[0], q->path[0], follow(q), missing(q), resolve, &a);
     int pair = q->operation == MD_FS_LINK || q->operation == MD_FS_RENAME;
-    if (!r && pair) r = md_view_walk(fs, q->directory[1], q->origin[1], q->path[1], -1, 1, 0, &b);
+    /* A proc alias is task-owned for metadata and mutation as well as opens.
+     * Never resolve self/fd against the filesystem worker's descriptor table. */
+    uint64_t resolve=q->resolve|MD_VIEW_TASK_PATH;
+    int r = md_view_walk(fs, q->directory[0], q->origin[0], q->path[0], follow(q), missing(q), resolve, &a);
+    if (!r && pair) {
+        r = md_view_walk(fs, q->directory[1], q->origin[1], q->path[1], -1, 1, MD_VIEW_TASK_PATH, &b);
+        if (r==-EREMOTE && fs->store->boundary) fs->store->boundary->operand=1;
+    }
     if (!r && pair && (a.view != b.view || a.mount != b.mount)) r = -EXDEV;
     if (!r && a.fd>=0 && (q->operation==MD_FS_MKDIR || q->operation==MD_FS_MKNOD
             || q->operation==MD_FS_SYMLINK || q->operation==MD_FS_CREATE

@@ -144,6 +144,13 @@ static int location_path(struct md_filesystem *fs, int fd, struct md_view_mount 
     struct stat st;
     if (fstat(fd, &st)) return -errno;
     if (!st.st_nlink) return -ENOENT;
+    /* A mount root is named by its covered dentry, not by the backing
+     * inode's aliases. File binds need no source-name reconstruction. */
+    if (md_view_same(&st,&m->native)) {
+        if (m->parent) return location_path(fs,m->target,m->parent,out,size);
+        if (size<2) return -ERANGE;
+        strcpy(out,"/"); return 0;
+    }
     int r=md_view_backing_path(fs,m->source,m,root,sizeof(root));
     if (!r) r=md_view_backing_path(fs,fd,m,path,sizeof(path));
     if (!r && !beneath(path, root)) r = -EXDEV;
@@ -367,6 +374,7 @@ int md_fs_mounts_copy(struct md_filesystem *fs, const struct md_fs_location *roo
     atomic_store_explicit(&copy->managed_paths,md_mount_namespace_managed_paths(fs->mounts),memory_order_relaxed);
     copy->base.policy.local=md_mount_policy_flags(&fs->mounts->base.policy);
     copy->base.locked=fs->mounts->base.locked;
+    copy->base.root_providers=fs->mounts->base.root_providers;
     struct md_fs_mounts *source=fs->mounts->tree;
     int r=0;
     if (source && source->count) {
@@ -389,6 +397,7 @@ int md_fs_mounts_copy(struct md_filesystem *fs, const struct md_fs_location *roo
         /* Namespace copies get independent policy, even from a shared view. */
         *b=(struct md_view_mount){.source=-1,.target=-1,
             .backing=a->backing,.detached=a->detached,.locked=a->locked,.generation=a->generation,
+            .root_providers=a->root_providers,
             .storage=md_inode_lifetime_retain(a->storage),
             .pid_namespace=md_pid_namespace_retain(a->pid_namespace),
             .devpts=md_devpts_retain(a->devpts),

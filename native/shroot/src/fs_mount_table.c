@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "fs_mount_internal.h"
 #include "inode_internal.h"
+#include "native_mounts.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -43,22 +44,20 @@ int md_fs_native_mount(struct md_filesystem *fs, uint64_t native, uint64_t *gues
     return 0;
 }
 
-static int below(const char *path, const char *root) {
-    size_t n=strlen(root);
-    return !strncmp(path,root,n) && (!path[n] || path[n]=='/');
-}
 /* Native mounts retain kernel IO and authority, but IDs identify instances in
  * the selected view, as for logical mounts. statx uses this same map. */
 static int native_entries(struct md_filesystem *fs, FILE *out, unsigned info, unsigned *dev_id) {
-    FILE *in=fopen("/proc/self/mountinfo","re");
+    const char *bytes; size_t size;
+    int r=md_native_mounts_read(&fs->mounts->native_mounts,&bytes,&size);
+    if (r) return r;
+    FILE *in=fmemopen((void *)bytes,size,"r");
     if (!in) return -errno;
-    char *line=NULL; size_t capacity=0; int r=0;
+    char *line=NULL; size_t capacity=0;
     while (!r && getline(&line,&capacity,in)>=0) {
         unsigned long long raw, parent; int rest=0;
         char device[64], root[PATH_MAX], path[PATH_MAX], options[1024];
         if (sscanf(line,"%llu %llu %n%63s %4095s %4095s %1023s",
                 &raw,&parent,&rest,device,root,path,options)!=6) { r=-EPROTO; break; }
-        if ((!below(path,"/proc") && !below(path,"/dev")) || below(path,"/dev/shm")) continue;
         uint64_t id, owner=fs->mounts->base.id;
         r=md_fs_native_mount(fs,raw,&id);
         if (!r && strcmp(path,"/dev") && strcmp(path,"/proc"))

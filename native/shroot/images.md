@@ -267,7 +267,7 @@ O_PATH references do not hold extra writable descriptions or file locks. Native
 directory reads share the publish-before-cursor-commit contract. Watches use the
 existing native-event path rather than a second watcher system.
 
-The view allows at most 128 mount slots and 65,536 retained native identities.
+The view allows at most 512 mount slots and 65,536 retained native identities.
 Launch attachments and guest-created mounts use the same namespace bound.
 Detached mounts occupy their slots until retained descriptions and children
 release them. Exhaustion returns ENOSPC; it does not discard a live mount.

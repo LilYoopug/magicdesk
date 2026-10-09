@@ -542,6 +542,10 @@ helper reaping. Format selection inspects only the captured socket on the worker
 not a preliminary guest SO_DOMAIN call or a reusable source number. Non-Unix
 sockets retain native selection and kernel ancillary validation. Releasing the
 mapped buffer drops any unused prepared result.
+An ordinary caller with an already admitted, unambiguous table-owned channel
+reuses the broker capture path under the same table turn. No new infrastructure
+FD is admitted for this optimization. Authenticated destinations can also use
+broker sending; external peers retain task-affine IO and native credentials.
 Explicit credentials join the prepared vector after captured-identity validation.
 An optional native pathname anchor has separate custody and a private import;
 it cannot consume the 253-right message budget or become an application right.
@@ -582,7 +586,7 @@ observation; it does not receive FD numbers into a temporary application buffer
 and copy them afterward. Subsequent batch messages replace expanded custody
 only after the preceding message's publication has finished.
 
-`--case ipc-ancillary` runs 18 actual guest send cases with an explicitly bound
+`--case ipc-ancillary` runs guest send cases with an explicitly bound
 socket inherited through the runner. Protected/unprotected cases cover one and
 253 file/O_PATH rights, full caller tables, split headers, invalid FD, rejected
 send, sendmmsg, payload EFAULT and a sandbox denying SO_DOMAIN. Import starts
@@ -593,7 +597,7 @@ no unrelated pipe writer or resource turn retained during IO. Signal checks
 cover SIGPIPE delivery, masking and MSG_NOSIGNAL. A native/guest UDP control
 checks payload delivery with ignored rights and unchanged descriptors.
 
-The same case runs 28 actual guest receive cases with a prepared,
+The same case runs guest receive cases with a prepared,
 explicitly bound socket inherited through the runner. No sender worker remains
 at receive time. Protected/unprotected cases check 253 mixed rights, shared
 offsets, logical openat through imported directory origins, repeated peek,
@@ -601,7 +605,11 @@ recvmmsg, control truncation, control/header EFAULT and zero/three free table
 slots. Explicit credentials are tested on either side of the coalesced capsule,
 with SO_PASSCRED enabled and disabled; NATIVE delivery leaves a capsule opaque.
 Every case requires payload EOF, exact descriptor balance and final store
-maintenance admission. Seven `--case ipc-origins` worker cases check decoder
+maintenance admission. The matrix also runs ordinary protected/unprotected
+callers after a filtered CLONE_FILES child admits the shared channel and exits.
+Their source tables, prepared sender tokens, imported rights and full-table
+publication must remain correct without requiring a filter on the caller.
+Seven `--case ipc-origins` worker cases check decoder
 result ownership, cancellation before/after execution, join before callback,
 untaken completion, wrong direction and partial annotation allocation failure.
 
@@ -1172,7 +1180,10 @@ file without gaining write authority.
 
 Bind operands can be exact retained files or directories, including proc-FD
 aliases. Their mount provenance survives detach/rebind; selecting a regular
-file does not substitute its parent directory. Native proc/dev sources use the
+file does not substitute its parent directory. Named readlink on a non-link
+returns EINVAL, including bind roots; empty-path descriptor readlink retains
+ENOENT. A mount-root path is reconstructed from its covered dentry, independently
+of ambiguous hardlink names in the backing store. Native proc/dev sources use the
 task-local capture path. PRIVATE and SLAVE propagation requests retain the
 private topology: there are no shared peers or masters. SHARED and UNBINDABLE
 remain unsupported, rather than pretending to propagate later mount changes.

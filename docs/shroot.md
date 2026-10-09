@@ -123,7 +123,13 @@ read-only/O_PATH result. Task death or rejected copying releases construction
 resources without changing a surviving shared guest table. Reading the kernel
 umask likewise opens status only on the worker, without caching or modifying it.
 Mount-table opens deliver read-only/O_PATH results directly, with retained
-provenance for subsequent metadata calls. Proc-image snapshots retain the same
+provenance for subsequent metadata calls. Each guest mount view lazily retains
+the native proc/dev mount entries and their kernel mountinfo descriptor.
+Nonblocking POLLPRI generation observation invalidates those bytes on native
+mount changes; failed observation invalidates the snapshot and returns an error.
+Guest mount IDs, root visibility and mount policy are evaluated on every open,
+not cached with the native entries. The namespace owns final descriptor release.
+Proc-image snapshots retain the same
 provenance. Path-based chmod/chown/utimens and statfs execute in the selected view
 without temporary guest FDs. Inotify registration similarly resolves the watched
 path on the worker while capturing the actual queue description; native proc
@@ -400,9 +406,13 @@ Turnip setup installs distribution-specific build dependencies and compiles Mesa
 non-DRM Wayland/Zink and capability-probed KGSL timestamp changes are embedded
 in the installer and applied without fuzz. Turnip, Zink, EGL,
 GLX and GBM come from that same build. Its GLX loader advertises the capabilities
-of the effective backend when an application disables Kopper. The profile does
-not force Zink into that application's software presentation path; other clients
-retain Turnip. `--jobs N` controls compiler parallelism
+of the effective backend when an application disables Kopper or its X server
+lacks DRI3. Zink retains GPU rendering in that case and presents through the
+frontend's CPU readback path. Its display buffer belongs to the rendered resource
+and is reused across frames; direct Kopper presentation remains unchanged.
+This is accelerated rendering with a frame copy, not zero-copy presentation.
+Steam's CEF interface and animated GLX output have coverage in nested Xwayland
+on Adreno 840. `--jobs N` controls compiler parallelism
 (1-8, default 2). Allow several GB of space for sources, build files and libraries.
 Build work stays in `/var/cache/magicdesk/mesa/` for resuming; completed libraries
 have an immutable recipe-addressed prefix in `/opt/magicdesk/mesa/`.
@@ -447,6 +457,11 @@ unavailable. GUI recipes configure PipeWire clients to use native scheduling
 checks without Portal/RTKit delegation; these sessions do not supply a privileged
 realtime scheduler. The settings live in PipeWire's client configuration drop-ins,
 not in syscall emulation, and leave kernel resource limits intact.
+The application profile supplies VLC's installed plugin directory when
+`VLC_PLUGIN_PATH` is unset, including multiarch layouts. This avoids VLC's native
+`/proc/self/maps` relocation guess in an object-backed store without replacing
+its packages or user launchers. Explicit application overrides remain intact;
+this does not virtualize the pathnames in native proc mapping tables.
 The software profile uses the distribution's KWin with QPainter on
 Wayland; switching profiles affects new launches, not an already running session.
 On RM11 under UID 2000, the private Wayland compositor renders Plasma, Dolphin,
@@ -997,8 +1012,11 @@ resolution, credential validation and creation-time ancillary format. Adapted
 peers use authenticated origin capsules; sockets inherited from or passed to
 unadapted consumers retain native format. Exporting an already adapted socket to
 a native peer fails explicitly rather than exposing its private protocol.
-Unfiltered IO uses private-table helpers; application-filtered IO captures exact
-inputs through the table-owned channel, without requiring another guest thread.
+Application-filtered IO captures exact inputs through the table-owned channel,
+without requiring another guest thread. Ordinary IO reuses an already admitted,
+unambiguous channel under the same file-table turn. Without one, it retains
+private-table helpers rather than consuming a new infrastructure FD. Native
+peers retain task-affine sending and their actual kernel credentials.
 Small messages use inline mapped storage; larger messages use owner-scoped host
 buffers and bounded copy chunks, without splitting a datagram. Interruptible
 readiness waits retain no FD-table turn. Stream WAITALL/low-water receives and

@@ -987,10 +987,11 @@ static void transfer_guest_send(const char *path, const char *runner, unsigned m
     }
     close(application[0]); reap_child(child);
     struct md_ipc_origins *service=NULL; assert(!md_ipc_origins_new(o.worker,launch_id,&service));
-    unsigned messages=mode==4 || mode==5 || mode==7 || mode==11 || mode==14 || mode==15 ? 0 : mode==6 || mode==13 ? 2 : 1;
+    unsigned messages=mode==4 || mode==5 || mode==7 || mode==11 || mode==14 || (mode==15 && !(protected&4))
+        ? 0 : mode==6 || mode==13 ? 2 : 1;
     for (unsigned n=0;n<messages;++n) {
         char byte; struct md_fs_rights rights={0};
-        unsigned sender=mode==8 || mode==13;
+        unsigned sender=mode!=9 && mode!=10 && (mode==8 || mode==13 || (protected&4));
         unsigned tokens=mode==9 || mode==10 || sender, data=mode!=10;
         assert(md_fs_receive(application[1],&byte,1,&rights)==1 && byte=='s' && rights.count==data+tokens);
         if (tokens) {
@@ -1026,10 +1027,12 @@ void md_test_ipc_origin_guest(const char *path, const char *runner) {
     alarm(180); setbuf(stdout,NULL);
     for (unsigned protected=0;protected<2;++protected)
         for (unsigned mode=0;mode<16;++mode) transfer_guest_send(path,runner,mode,protected);
-    for (unsigned protected=0;protected<4;++protected) for (unsigned mode=0;mode<15;++mode) {
+    for (unsigned protected=4;protected<6;++protected)
+        for (unsigned mode=0;mode<16;++mode) transfer_guest_send(path,runner,mode,protected);
+    for (unsigned protected=0;protected<6;++protected) for (unsigned mode=0;mode<15;++mode) {
         /* Batch broker IO and helper-specific in-flight quotas have their own
          * contracts. This matrix covers scalar receipt publication. */
-        if ((protected&2) && (mode==3 || mode==9)) continue;
+        if ((protected&6) && (mode==3 || mode==9)) continue;
         unsigned before=descriptors(); struct transfer_fixture f;
         transfer_new(&f,path); transfer_prepare(&f);
         int rights[2]={f.result[0].received->fds[1],-1}, token=-1;

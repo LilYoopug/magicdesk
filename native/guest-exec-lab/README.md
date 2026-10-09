@@ -16,9 +16,21 @@ Namespace-file binds cover path and O_PATH sources, nsfs metadata, setns and
 related ioctls, exited owners, recursive binds, independent namespace copies,
 mount-cycle rejection, readonly controls and repeated lazy-unmount retirement.
 The remaining mount/user/PID/UTS/IPC cases run in the same suite.
+File binds cover non-link readlink errors and exact mount-root paths for
+hardlinked sources. Proc directory suffix tests exercise two-path rename/link,
+nofollow and followed symlinks, mixed dirfd/path operands, readonly and EXDEV
+rejection through direct, symlinked and bind-mounted proc views.
+Pivoted non-base roots retain proc/dev providers across namespace copies.
+Mounted-store image tests retain exact hardlink and symlink names alongside
+per-mount executable identities.
 Tmpfs cases cover permissive capacity requests, malformed options, native writes
 and shared mappings, aliases and detached ownership. Key-service absence checks
 cover protected callers, fork/exec, namespaces, chroot and application filters.
+
+`test_namespace_apps.py BUILD STORE --case split-root` runs stock Bubblewrap
+with separate `/etc` and `/usr` binds, merged-usr links, proc/dev mounts and
+private tmpfs. Its guest checks realpath and atomic replacement through proc-FD
+paths. The prepared store supplies Bubblewrap and ordinary shell utilities.
 
 `test_mount_api.py BUILD STORE` checks descriptor-based mounts with stock
 util-linux consumers. It covers filesystem-context lifetime and authority,
@@ -27,9 +39,9 @@ of locked policies. ABI checks include empty paths, nofollow, versioned
 structures, shared openat2 validation, protected callers and explicit errors
 for unsupported attributes. The prepared store needs Python and util-linux.
 
-`test_mount_capacity.py BUILD STORE` checks 40 simultaneous guest bind mounts,
+`test_mount_capacity.py BUILD STORE` checks 192 simultaneous guest bind mounts,
 distinct mountinfo identities, namespace-copy isolation, detached directory FDs
-and slot reuse. The native mount-graph fixture also checks all 128 slots, copies,
+and slot reuse. The native mount-graph fixture also checks all 512 slots, copies,
 exact FD cleanup and graph transport beyond one SCM_RIGHTS message.
 
 `test_mqueue_mount.py BUILD STORE` checks the limited IPC-owned mqueue filesystem:

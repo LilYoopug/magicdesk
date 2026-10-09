@@ -86,6 +86,10 @@ static void nested_mounts(const char *base) {
         r=call(&fs,MD_FS_PATH,fd,NULL,0,0,bytes,sizeof(bytes));
         assert(!r.error && !strcmp(bytes,path)); close(fd);
         int dir=opened(&fs,names[i],O_PATH|O_DIRECTORY);
+        r=call(&fs,MD_FS_READLINK,-1,names[i],0,0,bytes,sizeof(bytes));
+        assert(r.error==-EINVAL);
+        r=call(&fs,MD_FS_READLINK,dir,"",0,0,bytes,sizeof(bytes));
+        assert(r.error==-ENOENT);
         r=call(&fs,MD_FS_OPEN,dir,"../marker",O_RDONLY,0,NULL,0);
         if (!i) assert(r.error==-ENOENT);
         else { assert(!r.error && read(r.fd,bytes,1)==1 && bytes[0]=="012"[i-1]); close(r.fd); }
