@@ -1,7 +1,7 @@
 #define _GNU_SOURCE
-#include "../guest-runtime/src/event_wait.h"
+#include "../shroot/src/event_wait.h"
 #ifndef MD_GUEST_PROBE
-#include "../guest-runtime/src/fs_rpc.h"
+#include "../shroot/src/fs_rpc.h"
 #endif
 #include <errno.h>
 #include <fcntl.h>

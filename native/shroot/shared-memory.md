@@ -86,7 +86,7 @@ authority and task-affine argument transport.
 store separation, permissions, read-only faults, fork/exec/exit, IPC_RMID, partial
 munmap and unrelated mappings in holes. `test_oci_services.py` runs stock PostgreSQL
 initdb, SQL traffic, shutdown and fresh-process readback. Device scope is recorded
-in [guest coverage](../../docs/guest-runtime.md#coverage-and-limits).
+in [guest coverage](../../docs/shroot.md#coverage-and-limits).
 
 `test_sysv_runtime.py --case shm-slots --case shm-denied` checks repeated zero-slot
 and one-slot attachment/detachment and rejected mmap, with ordinary and

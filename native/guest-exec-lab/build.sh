@@ -5,7 +5,7 @@ if [ "$#" -ne 1 ]; then
     exit 2
 fi
 src=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
-runtime="$src/../guest-runtime/src"
+runtime="$src/../shroot/src"
 app="$src/../../app/src/main/java/io/github/mekhontsev/magicdesk"
 work=$(CDPATH= cd -- "$1" && pwd)
 sysroot=$work/sysroot
@@ -106,7 +106,7 @@ guest_cc() {
         -fuse-ld=lld -std=c17 -O2 -g -Wall -Wextra -Werror -fPIC -mno-outline-atomics -nostdlib "$@" \
         -L"$sysroot/lib/aarch64-linux-gnu" -l:libc.so.6
 }
-cmake -S "$src/../guest-runtime" -B "$work/native-runtime" -G Ninja \
+cmake -S "$src/../shroot" -B "$work/native-runtime" -G Ninja \
     -DCMAKE_C_COMPILER="$cc" -DCMAKE_ASM_COMPILER="$cc" \
     -DANDROID_PLATFORM_LEVEL=34 \
     -DCMAKE_C_FLAGS=--target=aarch64-linux-android34 \

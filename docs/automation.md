@@ -231,7 +231,7 @@ sh ~/install_linux.sh
 ```
 
 Run the script only after the download succeeds. The maintained
-[Linux installer](guest-runtime.md#linux-installer) uses this stable URL; release
+[Linux installer](shroot.md#linux-installer) uses this stable URL; release
 tags also retain their exact scripts. The downloader itself never executes
 downloaded content. In shell consoles, `~` is
 `/data/local/tmp/magicdesk`; root uses its separate
@@ -289,7 +289,7 @@ part of the user's command environment; do not pass it to untrusted code.
 one invocation in a MagicDesk-prepared shell or native Termux environment.
 It keeps the program's UID, terminal and process group. The wrapper owns a
 temporary key until that invocation exits; its descendants inherit that key.
-For supervised guest trees, `magicdesk-guest exec NAME --magicdesk -- PROGRAM`
+For supervised guest trees, `shroot exec NAME --magicdesk -- PROGRAM`
 retains access for the whole tree. Neither option enables MCP or opens an
 externally reachable listener.
 
@@ -933,7 +933,7 @@ Normal commands include:
 Use `tools/list` as the authoritative command and argument catalog.
 
 `guest.list` and `guest.inspect` read the shell-owned named environment catalog.
-`guest.start` takes literal `magicdesk-guest` arguments and returns an operation
+`guest.start` takes literal `shroot` arguments and returns an operation
 ID; `guest.status` waits for output/exit revisions and returns a bounded output
 tail, while `guest.cancel` cancels that operation's command tree. Accepted is not
 completed, and cancelled is not rolled back. Receipts survive MCP disconnect but
@@ -953,7 +953,7 @@ executor and returns a session ID before readiness; it does not open an Android
 host. Its optional `connection` selects `auto`, Wayland-only `inherited`, or
 Shell-only `routed` admission for independent guest connections. The latter
 requires explicit address routes supplied by the guest launch adapter; it is
-not a general cross-UID pathname socket. See [guest connections](guest-runtime.md#graphical-connections).
+not a general cross-UID pathname socket. See [guest connections](shroot.md#graphical-connections).
 `keyboardDirectory` accepts a host path or `guest:/absolute/store`; the latter
 uses bounded export of `/usr/share/X11/xkb` from the selected guest namespace.
 `graphics.list` supplies native window IDs; `graphics.open_window` uses the

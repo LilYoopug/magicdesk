@@ -22,7 +22,7 @@ class InstallLinuxTest(unittest.TestCase):
         self.directory = Path(self.temp.name)
         self.log = self.directory / "calls.jsonl"
         self.payload = self.directory / "guest.sh"
-        stub = self.directory / "magicdesk-guest"
+        stub = self.directory / "shroot"
         stub.write_text("#!" + sys.executable + r'''
 import json, os, sys
 from pathlib import Path
@@ -100,7 +100,7 @@ if os.environ.get("TEST_FAIL") == stage:
                 self.assertIn("not a whole Linux desktop", hints)
                 self.assertNotIn("Whole desktop:", hints)
                 self.assertIn("Shroot environments > work > New session", hints)
-                self.assertIn("Console: magicdesk-guest login work\n", hints)
+                self.assertIn("Console: shroot login work\n", hints)
 
     def test_desktop_launch_hints_match_generated_entry_not_app_protocol(self):
         profiles = (("xfce", "debian", "wayland", "Xfce Desktop"),
@@ -127,7 +127,7 @@ if os.environ.get("TEST_FAIL") == stage:
         self.assertNotIn("open Apps", hints)
         self.assertNotIn("Individual apps:", hints)
         self.assertNotIn("Whole desktop:", hints)
-        self.assertIn("Console: magicdesk-guest login tools\n", hints)
+        self.assertIn("Console: shroot login tools\n", hints)
 
     def test_plasma_recipe_is_explicit_pinned_and_separate_from_mesa(self):
         result = self.run_script("--yes", "--gui", "plasma", "--gpu", "turnip", "--jobs", "4")
@@ -203,7 +203,7 @@ if os.environ.get("TEST_FAIL") == stage:
         self.assertIn("Existing GUI entries were preserved", hints)
         self.assertNotIn("Individual apps:", hints)
         self.assertNotIn("Whole desktop:", hints)
-        self.assertIn("Console: magicdesk-guest login existing\n", hints)
+        self.assertIn("Console: shroot login existing\n", hints)
 
     def test_distribution_profiles_share_setup_and_selected_image(self):
         images = {"debian": "debian:trixie-slim", "ubuntu": "ubuntu:24.04", "alpine": "alpine:3.23",

@@ -77,14 +77,14 @@ def main():
         client.call('guest.stop', {'name': name, 'launchId': live[0]['launchId']})
         remaining = until(lambda: client.call('guest.launches', {'name': name})['launches'], lambda value: len(value) == 1, 'exact stop')
         assert remaining[0]['launchId'] == live[1]['launchId'], remaining
-        command('magicdesk-guest', 'stop', name, remaining[0]['launchId'])
+        command('shroot', 'stop', name, remaining[0]['launchId'])
         for operation in operations: finish(client.call('guest.status', {'operationId': operation}))
         operations.clear()
         assert not client.call('guest.launches', {'name': name})['launches']
         check('MCP and CLI stop exact launches without touching their peer', live)
 
         display = client.call('create_display', {'type': 'virtual', 'width': 1000, 'height': 700, 'densityDpi': 160})
-        terminal = client.call('terminal.open', {'backend': 'shell', 'command': 'magicdesk-guest login ' + shlex.quote(name),
+        terminal = client.call('terminal.open', {'backend': 'shell', 'command': 'shroot login ' + shlex.quote(name),
                                'placement': 'display', 'displayId': display['id']})['terminalId']
         live = until(lambda: client.call('guest.launches', {'name': name})['launches'], bool, 'terminal ownership')
         assert len(live) == 1
@@ -96,7 +96,7 @@ def main():
 
         for name in args.names:
             descriptor = '[Desktop Entry]\nType=Application\nName=Catalog Wayland\nExec=mousepad\nIcon=org.xfce.mousepad\nX-MagicDesk-Graphics=wayland\n'
-            command('magicdesk-guest', 'exec', name, '--', '/bin/sh', '-c',
+            command('shroot', 'exec', name, '--', '/bin/sh', '-c',
                     'mkdir -p "$HOME/.local/share/applications"; printf %s ' + shlex.quote(descriptor)
                     + ' > "$HOME/.local/share/applications/md-catalog-test.desktop"')
         entries = client.call('list_desktop_entries', {'source': 'guest', 'limit': 256})['entries']
@@ -139,7 +139,7 @@ def main():
             sessions.remove(session)
             check(entry['name'] + ' ' + entry['graphics']['protocol'], {'entry': entry, 'launch': live, 'host': hosts})
         for name in args.names:
-            command('magicdesk-guest', 'exec', name, '--', '/bin/sh', '-c', 'rm "$HOME/.local/share/applications/md-catalog-test.desktop"')
+            command('shroot', 'exec', name, '--', '/bin/sh', '-c', 'rm "$HOME/.local/share/applications/md-catalog-test.desktop"')
         fresh = client.call('list_desktop_entries', {'source': 'guest', 'query': 'Catalog Wayland'})
         assert fresh['total'] == 0, fresh
         state = client.call('get_state')

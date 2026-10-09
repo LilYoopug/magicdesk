@@ -18,7 +18,7 @@ public class GuestConfigurationTest {
         var env = new LinuxLaunchRecipe.Environment(LinuxLaunchRecipe.Kind.MANAGED_GUEST, "/library/instances/id", DesktopExecBackend.SHELL, "");
         var recipe = LinuxLaunchRecipe.build("Work", env, "", "", "", LinuxLaunchRecipe.Presentation.TERMINAL);
         var arguments = DesktopExecTemplate.expandArguments(recipe.exec, DesktopLaunchArguments.empty(), "Work", "", "");
-        assertEquals("'magicdesk-guest' 'image' 'login' '/library/instances/id' '--'", arguments);
+        assertEquals("'shroot' 'image' 'login' '/library/instances/id' '--'", arguments);
     }
 
     @Test public void graphicsGetsKeyboardFromItsStoreAndRetainsFileIdentity() {

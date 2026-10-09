@@ -590,7 +590,7 @@ def main():
               + " -- /bin/root-test attached", "PASS guest roots")
         if args.compare_installed:
             result["comparison"] = {}
-            candidates = {"installed": "magicdesk-guest", "candidate": root + "/libmagicdesk_guest_run.so"}
+            candidates = {"installed": "shroot", "candidate": root + "/libmagicdesk_guest_run.so"}
             for workload in ("metadata", "spawn"):
                 samples = {name: [] for name in candidates}
                 counters = {}

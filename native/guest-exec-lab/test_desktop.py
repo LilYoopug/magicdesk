@@ -36,7 +36,7 @@ def main():
     receipt = log + ".exit"
     bus_file = "/tmp/desktop-" + tag + ".bus"
     profile = "/tmp/desktop-" + tag + ".profile"
-    runner = "magicdesk-guest" if args.installed else args.runtime + "/libmagicdesk_guest_run.so"
+    runner = "shroot" if args.installed else args.runtime + "/libmagicdesk_guest_run.so"
 
     def command(text):
         response = client.call("console.execute", {"sessionId": console, "command": text})
@@ -65,7 +65,7 @@ def main():
 
     try:
         if not args.installed:
-            command("ln -sf libmagicdesk_guest_run.so " + shlex.quote(args.runtime + "/magicdesk-guest"))
+            command("ln -sf libmagicdesk_guest_run.so " + shlex.quote(args.runtime + "/shroot"))
         display = client.call("create_display", {"type": "virtual", "width": 1200, "height": 800, "densityDpi": 160})
         session = client.call("graphics.start", {"protocol": "x11", "backend": "shell", "connection": "routed",
             "name": "Guest Xfce " + tag, "keyboardDirectory": args.keyboard_directory})["sessionId"]

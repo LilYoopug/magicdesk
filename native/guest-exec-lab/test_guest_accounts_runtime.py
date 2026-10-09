@@ -47,7 +47,7 @@ def main():
             destination = base + ('/fixtures/' if target == 'guest_interfaces' else '/') + filename
             transport.upload(client, args.build / filename, destination)
             command(['chmod', '700', destination])
-        runner = (command(['/system/bin/sh', '-c', 'command -v magicdesk-guest']).strip()
+        runner = (command(['/system/bin/sh', '-c', 'command -v shroot']).strip()
                   if args.installed else base + '/libmagicdesk_guest_run.so')
         root = [runner, '--store', args.store, '--user', '0:0', '--deadline-seconds', '60']
         command(root + ['--', '/bin/mkdir', '-p', '/fixture'])

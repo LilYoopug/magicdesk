@@ -49,7 +49,7 @@ def main():
             destination = base + ('/fixtures/' if name == 'ipc_credentials_guest' else '/') + filename
             transport.upload(client, args.build / filename, destination)
             command(['chmod', '700', destination])
-        runner = (command(['/system/bin/sh', '-c', 'command -v magicdesk-guest'])['output'].strip()
+        runner = (command(['/system/bin/sh', '-c', 'command -v shroot'])['output'].strip()
                   if args.installed else base + '/libmagicdesk_guest_run.so')
         run = [runner, '--store', args.store, '--user', '0:0', '--deadline-seconds', '30']
         command(run + ['--', '/bin/mkdir', '-p', '/fixture'])

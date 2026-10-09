@@ -27,6 +27,7 @@ final class CommandShellEnvironment {
         install(directory.resolve("magicdesk"), SCRIPT);
         install(directory.resolve("magicdesk-connect"), CONNECT_SCRIPT);
         install(directory.resolve(GuestLaunchPlan.TOOL), GuestRuntimeCommand.SCRIPT);
+        Files.deleteIfExists(directory.resolve("magicdesk-guest"));
         sValues = new Values(endpoint, apk, libraries);
     }
 

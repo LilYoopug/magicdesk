@@ -390,15 +390,15 @@ prepared chroot without Termux at all: the same Console, individual Linux window
 or whole Linux desktop. Provide an entry script and, for graphics, the guest's
 XKB data path. See [chroot setup](docs/x11.md#chroot-without-termux).
 
-**[Shroot](docs/guest-runtime.md)** is MagicDesk's experimental Linux runtime for
+**[Shroot](docs/shroot.md)** is MagicDesk's experimental Linux runtime for
 the authorized shell executor (UID 2000), without root, Termux or PRoot. It runs
 prepared ARM64 glibc/musl distributions and OCI images through the same terminal,
-X11 and Wayland services. `magicdesk-guest` installs and manages independent
+X11 and Wayland services. `shroot` installs and manages independent
 environments, shared image data and explicit directory attachments. Shroot is not
 a container security boundary or Docker Engine; guest programs retain the selected
 executor's authority. Required kernel capabilities are checked at launch, without
 affecting ordinary MagicDesk tools on unsupported kernels. Its minimum supported
-kernel is **Linux 5.15**; [kernel-specific requirements and coverage](native/guest-runtime/kernel-compatibility.md)
+kernel is **Linux 5.15**; [kernel-specific requirements and coverage](native/shroot/kernel-compatibility.md)
 are separate from MagicDesk's Android minimum.
 
 To install Linux, open a MagicDesk **Shell** console and run:
@@ -421,12 +421,12 @@ After installation:
   open **Xfce Desktop** or **Weston Desktop** from that same list. The default
   `apps` profile installs individual applications, not a whole desktop.
 - **Terminal:** choose **Terminal sessions > New session > Shroot environments**
-  and your environment, or run `magicdesk-guest login NAME` in a Shell console,
+  and your environment, or run `shroot login NAME` in a Shell console,
   replacing `NAME` with the environment name chosen during installation.
 
 These launches do not require starting MagicDesk Desktop or rerunning the installer.
 See [Linux setup](docs/getting-started.md#install-linux-with-shroot) for requirements
-and [installer profiles](docs/guest-runtime.md#linux-installer) for their limits.
+and [installer profiles](docs/shroot.md#linux-installer) for their limits.
 
 Optional [MagicDesk command access](docs/automation.md#linux-command-access)
 lets Shroot, PRoot and native Termux programs use the same automation commands,

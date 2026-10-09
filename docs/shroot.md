@@ -8,7 +8,7 @@ syscalls can access Android resources. Use trusted programs and prepared stores.
 
 ## Boundaries
 
-`native/guest-runtime` is C/assembly plus a standalone CMake build. It has no
+`native/shroot` is C/assembly plus a standalone CMake build. It has no
 Java tree, JNI entry points, Android framework policy or display ownership.
 The app owns typed launch recipes, `.desktop` storage and lazy helper staging.
 The existing shell, PTY and graphical services own invocation and presentation.
@@ -215,6 +215,9 @@ executor; prepared chroot scripts retain their existing root requirements.
 
 ## Commands
 
+`shroot` manages Linux environments and launches their programs. Standalone
+file downloads use `magicdesk download`; no Linux environment is required.
+
 ### Linux installer
 
 [`scripts/install_linux.sh`](../scripts/install_linux.sh) installs ARM64 Linux
@@ -295,7 +298,7 @@ Existing names are never replaced. `--resume` explicitly continues package
 setup after detecting and validating the distribution. Without explicit options
 it preserves GUI entries, locale, timezone, fonts and graphics profile. It does
 not remove previously installed desktops when another profile is added. After an
-interrupted image installation, inspect `magicdesk-guest list` before choosing a
+interrupted image installation, inspect `shroot list` before choosing a
 new installation or resuming. A package failure leaves the environment available
 for diagnosis and retry.
 
@@ -373,7 +376,7 @@ GPUs or all Plasma services.
 Graphical launches keep the normal per-launch runtime directory,
 session bus and X11/Wayland connection; the script does not start an Android
 service, display server or system D-Bus daemon. A shell is available with
-`magicdesk-guest login NAME`.
+`shroot login NAME`.
 
 Focused RM11 checks under UID 2000 cover package setup, guest settings and resume
 for all five distributions. Without managed Desktop, catalog-launched Mousepad,
@@ -387,19 +390,19 @@ GUI failures remain recorded, not counted as passes.
 In a newly opened MagicDesk Shell console or terminal:
 
 ```sh
-magicdesk-guest install debian:trixie-slim --name work
-magicdesk-guest install alpine:3.23 --name tools
-magicdesk-guest list
-magicdesk-guest login work
-magicdesk-guest exec work -- /bin/sh -c 'mkdir -p /mnt/project'
-magicdesk-guest exec work --bind /sdcard/Download /mnt/project -- /bin/sh
-magicdesk-guest run tools -- /bin/sh
-magicdesk-guest launches work
-magicdesk-guest stop work LAUNCH_ID
-magicdesk-guest backup work /sdcard/Download/work.tar.zst
-magicdesk-guest restore /sdcard/Download/work.tar.zst --name restored
-magicdesk-guest remove tools
-magicdesk-guest prune
+shroot install debian:trixie-slim --name work
+shroot install alpine:3.23 --name tools
+shroot list
+shroot login work
+shroot exec work -- /bin/sh -c 'mkdir -p /mnt/project'
+shroot exec work --bind /sdcard/Download /mnt/project -- /bin/sh
+shroot run tools -- /bin/sh
+shroot launches work
+shroot stop work LAUNCH_ID
+shroot backup work /sdcard/Download/work.tar.zst
+shroot restore /sdcard/Download/work.tar.zst --name restored
+shroot remove tools
+shroot prune
 ```
 
 The named-environment manager runs entirely through MagicDesk's selected shell
@@ -447,8 +450,8 @@ All three share user, environment, cwd, hostname and directory-attachment option
 `--magicdesk` explicitly enables the shared [Linux command channel](automation.md#linux-command-access):
 
 ```sh
-magicdesk-guest exec work --magicdesk -- magicdesk get_state
-magicdesk-guest login work --magicdesk
+shroot exec work --magicdesk -- magicdesk get_state
+shroot login work --magicdesk
 ```
 
 The supervisor borrows a launch-scoped key and read-only client mount at
@@ -465,7 +468,7 @@ comma-separated numeric addresses. System DNS is a one-shot active-network
 snapshot under the selected command identity, not a live Android resolver proxy.
 Private DNS/VPN require an explicit policy because copying addresses cannot
 preserve those semantics. No public resolver is chosen implicitly. Nonempty or
-symlinked `/etc/resolv.conf` is retained. `magicdesk-guest dns NAME POLICY --replace`
+symlinked `/etc/resolv.conf` is retained. `shroot dns NAME POLICY --replace`
 explicitly replaces it in an inactive environment; without `--replace` the same
 preservation rule applies. Restore preserves the backed-up configuration.
 The guest owns later DNS changes, certificates, accounts and optional services;
@@ -492,10 +495,10 @@ before retrying an operation whose result was lost. There is no background GC.
 Low-level prepared-store commands remain available:
 
 ```sh
-magicdesk-guest --probe
-magicdesk-guest --import /absolute/prepared-rootfs /absolute/new-store
-magicdesk-guest --store /absolute/store --home /tmp --cwd / -- /bin/sh -l
-magicdesk-guest --store /absolute/store --user root -- /bin/sh -l
+shroot --probe
+shroot --import /absolute/prepared-rootfs /absolute/new-store
+shroot --store /absolute/store --home /tmp --cwd / -- /bin/sh -l
+shroot --store /absolute/store --user root -- /bin/sh -l
 ```
 
 `--import` accepts an immutable prepared tree, not an archive or distribution name.
@@ -510,13 +513,13 @@ files still belong to the executor and never acquire kernel set-ID bits.
 Local OCI layouts use the separate offline image command:
 
 ```sh
-magicdesk-guest image import /absolute/oci-layout /absolute/image --preserve-ownership
-magicdesk-guest image create /absolute/image /absolute/instance
-magicdesk-guest image run /absolute/instance -- /bin/sh
-magicdesk-guest image import /absolute/oci-layout /absolute/another-image --preserve-ownership --layers /absolute/layer-pool
-magicdesk-guest image rootfs /absolute/rootfs.tar.gz /absolute/rootfs-image
-magicdesk-guest image backup /absolute/instance /absolute/backup.tar.zst
-magicdesk-guest image restore /absolute/backup.tar.zst /absolute/restored-instance
+shroot image import /absolute/oci-layout /absolute/image --preserve-ownership
+shroot image create /absolute/image /absolute/instance
+shroot image run /absolute/instance -- /bin/sh
+shroot image import /absolute/oci-layout /absolute/another-image --preserve-ownership --layers /absolute/layer-pool
+shroot image rootfs /absolute/rootfs.tar.gz /absolute/rootfs-image
+shroot image backup /absolute/instance /absolute/backup.tar.zst
+shroot image restore /absolute/backup.tar.zst /absolute/restored-instance
 ```
 
 Instances share immutable file bodies and copy up on mutation. Shared-layer reuse
@@ -530,10 +533,10 @@ and `--bind-ro HOST GUEST` attach existing directories to one launch, also for
 ordinary `--store` commands. Nested targets use declaration order, parent first;
 each attachment retains its own readonly policy. Import/staging does not probe
 guest-execution kernel capabilities; execution does. See
-[images and filesystem views](../native/guest-runtime/images.md)
+[images and filesystem views](../native/shroot/images.md)
 for formats, explicit ownership mapping, source lifetimes and limitations.
 This provides OCI image execution, not Docker Engine or a container isolation boundary.
-The [application-image checks](../native/guest-runtime/images.md#checks) exercise
+The [application-image checks](../native/shroot/images.md#checks) exercise
 stock entrypoints, network requests and persistent data, separately from import
 and base-image shell execution. Unsupported image metadata and kernel interfaces
 remain explicit errors.
@@ -657,7 +660,7 @@ FDs and attachments have logical lifetime and query support, but the permissive
 provider does not execute device filters or grant native BPF access. Other BPF
 facilities and network hooks remain unsupported. Arbitrary unattached
 native roots remain unsupported. See the
-[process resource contract](../native/guest-runtime/process-resources.md).
+[process resource contract](../native/shroot/process-resources.md).
 
 Offline IPv4 sysctls for unprivileged ports, ping groups and local port ranges
 belong to the selected network namespace. Their ordinary proc IO uses the shared
@@ -697,7 +700,7 @@ UID-before-GID service entrypoints. Internal Unix connections publish captured g
 and groups; explicit SCM_CREDENTIALS messages use the same identity model.
 External peers still see real Android credentials. Unmodified session D-Bus can
 run as guest root, including independent clients sharing the store, without
-disabling authentication. See the [IPC credential contract](../native/guest-runtime/ipc-credentials.md)
+disabling authentication. See the [IPC credential contract](../native/shroot/ipc-credentials.md)
 for ownership, implicit credential messages and transport limits.
 General set-ID metadata is not executable admission: only explicitly admitted,
 sealed ELF helpers receive a set-ID transition. Stored file capabilities are
@@ -810,7 +813,7 @@ hints while retaining backing timestamp behavior. Neither per-mount atime
 guarantees nor kernel-memory accounting are provided. Overlay supports lower-only and writable upper/work mounts,
 copy-up, whiteouts, opaque directories and retained descriptors. Publication of
 the merged and upper namespaces shares one transaction. See the
-[resource contract](../native/guest-runtime/process-resources.md).
+[resource contract](../native/shroot/process-resources.md).
 Mount nosuid/nodev/noexec and readonly policy follows the selected mount, not the
 backing inode alone. Noexec covers executable/interpreter admission and mapped
 execution, including retained FDs, fork, remap and later mprotect. Native data IO
@@ -850,7 +853,7 @@ stores have independent names; explicitly abstract sockets retain the host's
 shared abstract namespace and are not isolated.
 Named pipes use the same namespace and kernel pipe payloads, without requiring
 native FIFO creation under Android shell policy. Peer-open rendezvous belongs to
-a cancellable supervisor operation outside namespace transactions. See the [FIFO contract](../native/guest-runtime/fifos.md)
+a cancellable supervisor operation outside namespace transactions. See the [FIFO contract](../native/shroot/fifos.md)
 for readiness and watch limitations.
 Unix `sendmsg`, `sendmmsg` and addressed `sendto` share captured outgoing custody.
 Ordinary connected payload-only sends remain native. The worker owns address
@@ -875,7 +878,7 @@ results, including O_PATH; neither manual FD-number selection nor a receiver's
 proc-FD directory is needed. Terminal cancellation publishes the installed
 prefix and drains only queued rights. Tests cover protected receivers, output
 faults, full tables and unchanged application filters. See
-[Unix IPC credentials](../native/guest-runtime/ipc-credentials.md) for custody,
+[Unix IPC credentials](../native/shroot/ipc-credentials.md) for custody,
 resource-limit and batch-publication contracts.
 
 `/dev/shm` belongs to the guest store, including access relative to a `/dev`
@@ -888,9 +891,9 @@ kernel SysV IPC support. A task-affine helper shares the address space but has a
 private file table, so backing/transport descriptors never occupy application
 slots. Mapping publication, detach and fork share an address-space turn; caller
 death and exec retain helper ownership until kernel reaping. Application filter
-denials remain errors. See [shared memory](../native/guest-runtime/shared-memory.md)
+denials remain errors. See [shared memory](../native/shroot/shared-memory.md)
 for supported operations and lifecycle limits.
-Store-scoped [SysV semaphores and message queues](../native/guest-runtime/sysv-ipc.md)
+Store-scoped [SysV semaphores and message queues](../native/shroot/sysv-ipc.md)
 support atomic vectors, SEM_UNDO, typed messages and signal-interruptible waits.
 Argument/result copying is task-affine, including nondumpable programs; IPC
 transactions do not span guest waits. Filesystem and SysV adapters share the
@@ -905,7 +908,7 @@ Subscriptions and bounded queues belong to the existing namespace worker; watch
 reads use lazily armed descriptor classes and retained kernel-object identity.
 Protected readers copy in their own task without changing dumpability; queue
 delivery is acknowledged before consumption is confirmed. See the
-[watch contract](../native/guest-runtime/watches.md) for descriptor, hardlink,
+[watch contract](../native/shroot/watches.md) for descriptor, hardlink,
 protected-copy and kernel limits. The current store format is 13;
 older stores are rejected, not migrated or deleted.
 
@@ -913,12 +916,12 @@ older stores are rejected, not migrated or deleted.
 
 Shroot's minimum supported Linux kernel is 5.15. Interfaces newer than that
 baseline, their fallbacks and verification limits are recorded in
-[kernel compatibility](../native/guest-runtime/kernel-compatibility.md).
+[kernel compatibility](../native/shroot/kernel-compatibility.md).
 The version alone does not prove the selected executor's capabilities or firmware
 permissions.
 
 Guest executables are never loaded into the app or shell service with
-`System.loadLibrary`. `magicdesk-guest` stages a content-addressed immutable
+`System.loadLibrary`. `shroot` stages a content-addressed immutable
 version only when invoked. A launch first probes pidfds, subreapers, faccessat2,
 executable mappings, selective ptrace and seccomp notifications in a child process.
 It also exercises atomic descriptor publication and a private-table helper through
@@ -1032,9 +1035,9 @@ CentOS Stream 10 DNF, logical account management and authenticated session D-Bus
 Ubuntu Mousepad is checked through X11 and Wayland with editing, saved-file readback
 and clean exit; QEMU user-mode runs an x86-64 ELF with file IO and fork/wait.
 These are userspace workflows, not booted systemd or virtual-machine certification.
-The [image coverage](../native/guest-runtime/images.md#checks) also records server,
+The [image coverage](../native/shroot/images.md#checks) also records server,
 language-runtime and compiler checks. Stock GDB live debugging uses the
-[nested debugger contract](../native/guest-runtime/debugging.md), with explicit
+[nested debugger contract](../native/shroot/debugging.md), with explicit
 request and lifecycle limits. Stock Arch pacman retains its filesystem sandbox
 on a host without Landlock through the guest filesystem policy.
 Minimal Astra ARM64 userspace and Docker inside a QEMU TCG virtual machine have
@@ -1172,7 +1175,7 @@ Implicit and mounted proc views retain the target's nested PID-number chain.
 Protected access uses task-affine export and same-site replay
 without restoring dumpability. A second physical tracer cannot attach concurrently.
 Guest debuggers within the same launch use the supervisor-owned
-[nested debugger contract](../native/guest-runtime/debugging.md); external attach
+[nested debugger contract](../native/shroot/debugging.md); external attach
 and arbitrary crash-reporter compatibility are not established.
 
 `--admit-elf /absolute/guest/path` explicitly selects an ordinary ELF for a
@@ -1200,7 +1203,7 @@ mapped-code protection, complete descriptor/root confinement and authenticated
 filesystem authorization remain unfinished. The same-UID filesystem service does
 not automatically enforce a caller's seccomp domain. Unadapted syscalls retain
 host semantics, and Chromium child SIGTRAP exits are recorded separately from
-successful page execution. See the [interception contract](../native/guest-runtime/interception.md).
+successful page execution. See the [interception contract](../native/shroot/interception.md).
 
 Guest file sharing uses the selected guest's authenticated helper; live appearance
 updates are not integrated for this launch method. Kernel permission denials
@@ -1232,7 +1235,7 @@ The installed CLI also retains the shared terminal's controlling PTY: interactiv
 dash job control, Ctrl+Z/fg/Ctrl+C, detachment and return to the Android shell
 were checked on the device above, without Desktop.
 
-The [native contracts](../native/guest-runtime/README.md) describe syscall,
+The [native contracts](../native/shroot/README.md) describe syscall,
 filesystem, execution-policy and lifetime limits. The
 [fixture tools](../native/guest-exec-lab/README.md) retain signed package inputs
 and exact device observations separately from the shipped runtime.

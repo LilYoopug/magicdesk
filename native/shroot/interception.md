@@ -301,7 +301,7 @@ leaves the cursor unchanged. Cancellation after publication/advance may have an
 uncertain outcome, like a lost RPC reply. Restricted domains retain their native
 descriptor-read policy, and application seccomp filters still apply.
 
-`magicdesk-guest --statistics --store STORE -- PROGRAM` enables aggregate
+`shroot --statistics --store STORE -- PROGRAM` enables aggregate
 syscall/ptrace/stop counters, broker handling/delegation counts, engine operation
 times, SQLite costs and CPU usage, printed once on completion. Namespace-worker
 CPU is a subset of supervisor process CPU, not an additional cost. Collection and clock

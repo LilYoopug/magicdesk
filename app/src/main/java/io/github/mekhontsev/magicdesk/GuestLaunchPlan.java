@@ -6,7 +6,7 @@ import java.util.Objects;
 
 /** Argument-only contract shared by terminal, background and graphical launch adapters. */
 public record GuestLaunchPlan(GuestEnvironment environment, String directory, List<String> command, boolean magicDesk) {
-    public static final String TOOL = "magicdesk-guest";
+    public static final String TOOL = "shroot";
     public GuestLaunchPlan(GuestEnvironment environment, String directory, List<String> command) {
         this(environment, directory, command, false);
     }

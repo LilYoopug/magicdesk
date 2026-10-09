@@ -56,7 +56,7 @@ MagicDesk's local `x11-runtime` module. X11 and Wayland use MagicDesk's shared
 
 The experimental native guest filesystem service statically links unmodified
 SQLite 3.50.4. The amalgamation archive and SHA-256 are pinned in
-[`native/guest-runtime/CMakeLists.txt`](native/guest-runtime/CMakeLists.txt).
+[`native/shroot/CMakeLists.txt`](native/shroot/CMakeLists.txt).
 SQLite is public domain; its dedication is packaged under
 `assets/licenses/guest-runtime/sqlite.txt`. It is not linked into the bootstrap
 or syscall handler. Debian fixture packages are development inputs and are not
@@ -67,7 +67,7 @@ included in the APK.
 The native guest image utility links libarchive 3.8.9 (BSD-style licenses),
 zlib 1.3.2 (zlib license), Zstandard 1.5.7 (BSD license), and the SHA-256 component
 of Mbed TLS 3.6.7 (Apache-2.0). Hash-verified upstream source archives are pinned in
-[`native/guest-runtime/image-dependencies.cmake`](native/guest-runtime/image-dependencies.cmake).
+[`native/shroot/image-dependencies.cmake`](native/shroot/image-dependencies.cmake).
 Their license texts are packaged under `assets/licenses/guest-images`. Archive,
 compression and digest code is not linked into the guest syscall adapter.
 

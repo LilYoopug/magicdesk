@@ -161,7 +161,7 @@ and optional user. Installation and package-manager output stay in the console.
 Software graphics is the default. Turnip requires a compatible Adreno device
 and builds a private Mesa inside Linux; it does not replace Android drivers.
 GUI recipes and distro-specific limits are listed in the
-[installer guide](guest-runtime.md#linux-installer).
+[installer guide](shroot.md#linux-installer).
 
 ### Launch Installed Linux
 
@@ -184,15 +184,15 @@ For a whole Linux desktop in one viewer, open **Xfce Desktop** with the `xfce`
 profile or **Weston Desktop** with `weston`. Fedora's `gnome` profile adds
 **GNOME Shell (development kit)**; it remains experimental and needs a working
 Linux system bus. The `apps` profile does not install a whole desktop, and `none`
-installs console tools only. See the [profile limits](guest-runtime.md#linux-installer).
+installs console tools only. See the [profile limits](shroot.md#linux-installer).
 
 For a login shell, choose **Terminal sessions > New session > Shroot environments**,
 then your environment and **New session**. The same picker can show its running launches.
 Alternatively, in a MagicDesk Shell console:
 
 ```sh
-magicdesk-guest list
-magicdesk-guest login debian
+shroot list
+shroot login debian
 ```
 
 Replace `debian` with the environment name you chose, which can differ from the

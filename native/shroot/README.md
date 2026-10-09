@@ -7,7 +7,7 @@ Shroot is experimental, **not a security sandbox or a complete Linux ABI**.
 Programs retain the selected executor's host authority.
 
 Installation, named environments, OCI images and user-facing launch recipes
-belong in the [application guide](../../docs/guest-runtime.md).
+belong in the [application guide](../../docs/shroot.md).
 
 ## Ownership
 
@@ -89,7 +89,7 @@ the tested shell domain.
 
 Explicit socket routes translate selected addresses to the executor's graphical
 admission endpoint without proxying payloads or changing descriptor identity.
-The [application connection owner](../../docs/guest-runtime.md#graphical-connections)
+The [application connection owner](../../docs/shroot.md#graphical-connections)
 authenticates clients and transfers connections to X11/Wayland servers. An inherited
 Wayland FD supplies one connection; independent child clients need a routed endpoint.
 
@@ -110,7 +110,7 @@ debugger, browser and GPU workflows are separate checks; Desktop self-tests do
 not replace them. Lab preparation does not configure user distributions.
 
 Device coverage and limits are recorded in the
-[application guide](../../docs/guest-runtime.md#coverage-and-limits).
+[application guide](../../docs/shroot.md#coverage-and-limits).
 API 34, other firmware, 16 KiB pages and actual root execution require their own
 device verification. Build success or synthetic checks do not supply that coverage.
 

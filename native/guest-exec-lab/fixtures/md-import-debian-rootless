@@ -12,8 +12,8 @@ tar -xzf "$base/debian.tar.gz" --exclude=usr/bin/perl5.40.1 -C "$base/debian-sou
 find "$base/debian-source" -perm /6000 -print -exec chmod a-s {} \;
 mkdir -p "$base/debian-source/dev/shm"
 chmod 1777 "$base/debian-source/dev/shm"
-magicdesk-guest --import "$base/debian-source" "$base/debian-store"
-magicdesk-guest --store "$base/debian-store" -- /bin/tar --no-same-owner \
+shroot --import "$base/debian-source" "$base/debian-store"
+shroot --store "$base/debian-store" -- /bin/tar --no-same-owner \
     -xzf - -C / usr/bin/perl5.40.1 < "$base/debian.tar.gz"
-magicdesk-guest --store "$base/debian-store" -- /bin/sh -c \
+shroot --store "$base/debian-store" -- /bin/sh -c \
     'test /usr/bin/perl -ef /usr/bin/perl5.40.1'

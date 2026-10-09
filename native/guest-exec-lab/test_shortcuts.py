@@ -89,7 +89,7 @@ def main():
                 rejected = json.loads(str(error))
                 assert rejected["error"]["code"] == "INVALID_ARGUMENT", rejected
                 report["rejectedFilters"].append(name)
-        cli = command("command -v magicdesk-guest").strip()
+        cli = command("command -v shroot").strip()
         assert cli.startswith("/") and "\n" not in cli
         installed = shlex.join([cli, "--store", root + "/rootfs/tmp/imported-rootfs", "--", "/bin/sh", "-c"])
 

@@ -198,7 +198,7 @@ import does not implement live promotion, object reclamation or notifications.
 Keep SQLite and its locks outside the guest process. Preserve the direct kernel data path
 and truthful failure/commit outcomes as syscall coverage expands. A real fixture
 install/update/purge workflow and distribution package-manager checks pass;
-see [application coverage](../../docs/guest-runtime.md#coverage-and-limits).
+see [application coverage](../../docs/shroot.md#coverage-and-limits).
 Those workflows do not establish a complete Linux ABI, live storage reclamation
 or security isolation.
 

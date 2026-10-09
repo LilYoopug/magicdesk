@@ -110,7 +110,7 @@ def main():
         awaiter = root + "/md-await-" + tag
         transport.upload(client, args.build / "bundle/md-await-exit", awaiter)
         command("chmod 700 " + shlex.quote(awaiter))
-        cli = command("command -v magicdesk-guest").strip() if args.installed else ""
+        cli = command("command -v shroot").strip() if args.installed else ""
         home = " --home /home/shell" if args.application else ""
         installed = shlex.quote(cli) + " --store " + root + "/rootfs/tmp/imported-rootfs" + home + " -- "
 

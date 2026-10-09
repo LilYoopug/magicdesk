@@ -1,13 +1,13 @@
 # Guest Browser Fixtures
 
 These fixtures build and test the production native runtime in
-`native/guest-runtime`. They do not contain a second syscall implementation.
+`native/shroot`. They do not contain a second syscall implementation.
 Use a prepared disposable Debian store with matching browsers, libraries, fonts
 and helper fixtures, never a personal browser profile.
 
 The runtime supports application filters but is **not a complete security
 sandbox**. Real executor credentials remain UID 2000 in these tests. The
-[interception contract](../../guest-runtime/interception.md) defines ownership,
+[interception contract](../../shroot/interception.md) defines ownership,
 logical image admission and remaining isolation limits.
 
 ## Build And Run

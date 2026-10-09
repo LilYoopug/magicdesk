@@ -27,18 +27,18 @@ public final class GuestEnvironmentMain {
             System.out.println("""
                     Shroot: Linux environments through the selected shell/root executor.
 
-                    magicdesk-guest install REPOSITORY[:TAG] --name NAME
-                    magicdesk-guest install PATH --oci|--rootfs --name NAME
-                    magicdesk-guest list | inspect NAME | path NAME
-                    magicdesk-guest launches NAME | stop NAME LAUNCH_ID
-                    magicdesk-guest applications
-                    magicdesk-guest login NAME [OPTIONS] [-- SHELL...]
-                    magicdesk-guest exec NAME [OPTIONS] -- COMMAND...
-                    magicdesk-guest run NAME [OPTIONS] [-- ARGS...]
-                    magicdesk-guest backup NAME ARCHIVE.tar.zst
-                    magicdesk-guest restore ARCHIVE --name NAME
-                    magicdesk-guest remove NAME | prune
-                    magicdesk-guest dns NAME system|preserve|IP[,IP...] [--replace]
+                    shroot install REPOSITORY[:TAG] --name NAME
+                    shroot install PATH --oci|--rootfs --name NAME
+                    shroot list | inspect NAME | path NAME
+                    shroot launches NAME | stop NAME LAUNCH_ID
+                    shroot applications
+                    shroot login NAME [OPTIONS] [-- SHELL...]
+                    shroot exec NAME [OPTIONS] -- COMMAND...
+                    shroot run NAME [OPTIONS] [-- ARGS...]
+                    shroot backup NAME ARCHIVE.tar.zst
+                    shroot restore ARCHIVE --name NAME
+                    shroot remove NAME | prune
+                    shroot dns NAME system|preserve|IP[,IP...] [--replace]
 
                     Launch options: --bind HOST GUEST, --bind-ro HOST GUEST,
                       --user USER[:GROUP], --cwd /PATH, --env KEY=VALUE, --hostname NAME, --magicdesk.
@@ -101,7 +101,7 @@ public final class GuestEnvironmentMain {
         } else if (command.equals("remove") && arguments.length == 2) {
             library.remove(arguments[1]); System.out.println("Removed " + arguments[1]);
         } else if (command.equals("prune") && arguments.length == 1) library.prune();
-        else throw new IllegalArgumentException("Invalid command. See magicdesk-guest --help");
+        else throw new IllegalArgumentException("Invalid command. See shroot --help");
     }
 
     private static String resolver(String policy) throws Exception {

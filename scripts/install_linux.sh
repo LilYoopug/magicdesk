@@ -1657,10 +1657,10 @@ while [ "$#" -gt 0 ]; do
 done
 if [ "$resume" = yes ]; then
     [ -n "$name" ] || fail '--resume requires --name NAME.'
-    [ -z "$dns" ] && [ -z "$image" ] || fail '--resume retains image and DNS; use magicdesk-guest dns to change DNS.'
+    [ -z "$dns" ] && [ -z "$image" ] || fail '--resume retains image and DNS; use shroot dns to change DNS.'
 fi
 
-command -v magicdesk-guest >/dev/null 2>&1 || fail 'Open a MagicDesk Shell console with shell access first.'
+command -v shroot >/dev/null 2>&1 || fail 'Open a MagicDesk Shell console with shell access first.'
 case "$(id -u)" in 2000|0) ;; *) fail 'Shroot requires the selected Android shell (UID 2000) or root executor.' ;; esac
 if [ "$yes" = no ]; then
     [ -t 0 ] || fail 'Interactive input is unavailable. Save the script before running it, or use --yes.'
@@ -1731,7 +1731,7 @@ fi
 
 # Read-only validation precedes every existing-environment mutation.
 if [ "$resume" = yes ]; then
-    detected=$(magicdesk-guest exec "$name" --user root -- /bin/sh -c '. /etc/os-release; printf "%s\n" "$ID"')
+    detected=$(shroot exec "$name" --user root -- /bin/sh -c '. /etc/os-release; printf "%s\n" "$ID"')
     case "$detected" in archarm) detected=arch ;; esac
     [ -z "$distro" ] || [ "$distro" = "$detected" ] || fail 'Selected distribution does not match the existing environment.'
     distro=$detected
@@ -1772,24 +1772,24 @@ finish() {
                 "$gui" "$gpu" "$jobs" "$locale_name" "$zone" "$fonts" "$arch_sandbox" >&2
             [ "$distro" != arch ] || printf 'If pacman reports Landlock unsupported, an explicit --arch-sandbox disable-filesystem permits package setup without that sandbox.\n' >&2
         else
-            printf 'Inspect magicdesk-guest list before retrying an interrupted installation.\n' >&2
+            printf 'Inspect shroot list before retrying an interrupted installation.\n' >&2
         fi
     fi
 }
 trap finish 0
 trap 'exit 130' INT
 trap 'exit 143' TERM
-magicdesk-guest --probe
+shroot --probe
 if [ "$resume" = no ]; then
     stage='installing the Linux image'
-    magicdesk-guest install "$image" --name "$name" --dns "$dns"
+    shroot install "$image" --name "$name" --dns "$dns"
     if [ "$dns" != preserve ]; then
         stage='applying selected DNS to the new environment'
-        magicdesk-guest dns "$name" "$dns" --replace
+        shroot dns "$name" "$dns" --replace
     fi
 fi
 stage='validating the selected environment'
-magicdesk-guest exec "$name" --user root -- /bin/sh -c '
+shroot exec "$name" --user root -- /bin/sh -c '
     set -eu
     . /etc/os-release
     case "$ID" in archarm) ID=arch ;; esac
@@ -1803,14 +1803,14 @@ magicdesk-guest exec "$name" --user root -- /bin/sh -c '
 ' sh "$distro" "$version"
 ready=yes
 stage='installing packages and guest settings'
-system_setup | magicdesk-guest exec "$name" --user root --env DEBIAN_FRONTEND=noninteractive -- /bin/sh -s -- \
+system_setup | shroot exec "$name" --user root --env DEBIAN_FRONTEND=noninteractive -- /bin/sh -s -- \
     "$gui" "$protocol" "$locale_name" "$zone" "$new_user" "$fonts" "$cache" "$arch_sandbox" "$extras"
 
 if [ "$gpu" != keep ]; then
     stage="preparing the $gpu graphics profile"
     recipe=$(graphics_setup | sha256sum)
     recipe=${recipe%% *}
-    graphics_setup | magicdesk-guest exec "$name" --user root --env DEBIAN_FRONTEND=noninteractive \
+    graphics_setup | shroot exec "$name" --user root --env DEBIAN_FRONTEND=noninteractive \
         -- /bin/sh -s -- "$gpu" "$jobs" "$recipe" "$arch_sandbox"
 fi
 
@@ -1818,7 +1818,7 @@ if [ "$gui" = plasma ]; then
     stage='preparing the nested Plasma compositor'
     recipe=$(plasma_setup | sha256sum)
     recipe=${recipe%% *}
-    plasma_setup | magicdesk-guest exec "$name" --user root --env DEBIAN_FRONTEND=noninteractive \
+    plasma_setup | shroot exec "$name" --user root --env DEBIAN_FRONTEND=noninteractive \
         -- /bin/sh -s -- "$jobs" "$recipe"
 fi
 
@@ -1849,11 +1849,11 @@ case "$gui" in
 esac
 printf 'Terminal: Terminal sessions > New session > Shroot environments > %s > New session.\n' "$name"
 printf 'Keep privileged access available; no MagicDesk Desktop session or installer rerun is needed.\n'
-printf 'Console: magicdesk-guest login %s\n' "$name"
-if [ -n "$new_user" ]; then printf 'User console: magicdesk-guest login %s --user %s\n' "$name" "$new_user"; fi
-printf 'Folder attachment: magicdesk-guest login %s --bind /sdcard/Download /mnt\n' "$name"
-printf 'Optional Android command access: magicdesk-guest login %s --magicdesk\n' "$name"
-printf 'Backup (close its applications first): magicdesk-guest backup %s /sdcard/Download/%s.tar.zst\n' "$name" "$name"
+printf 'Console: shroot login %s\n' "$name"
+if [ -n "$new_user" ]; then printf 'User console: shroot login %s --user %s\n' "$name" "$new_user"; fi
+printf 'Folder attachment: shroot login %s --bind /sdcard/Download /mnt\n' "$name"
+printf 'Optional Android command access: shroot login %s --magicdesk\n' "$name"
+printf 'Backup (close its applications first): shroot backup %s /sdcard/Download/%s.tar.zst\n' "$name" "$name"
 if [ "$gpu" = turnip ]; then
     printf 'Software fallback: sh install_linux.sh --name %s --resume --gpu software\n' "$name"
 fi

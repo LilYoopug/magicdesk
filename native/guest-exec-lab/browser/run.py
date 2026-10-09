@@ -70,7 +70,7 @@ def main():
             command("chmod 700 " + remote + "/*")
             report["hashes"] = command("sha256sum " + remote + "/*")["output"]
         report["installed"] = args.installed
-        runner = "magicdesk-guest" if args.installed else remote + "/libmagicdesk_guest_run.so"
+        runner = "shroot" if args.installed else remote + "/libmagicdesk_guest_run.so"
         baseline = [runner, "--store", args.store, "--"]
         if args.expect_artifact:
             command(shlex.join(baseline + ["/usr/bin/test", "!", "-e", args.expect_artifact]))

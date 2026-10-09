@@ -1,7 +1,7 @@
 # Guest Runtime Fixtures
 
 Opt-in development tools and reference fixtures for
-[`native/guest-runtime`](../guest-runtime/README.md). Runtime sources live only in
+[`native/shroot`](../shroot/README.md). Runtime sources live only in
 that native component; this directory is not packaged into the APK.
 
 ## Namespace Clients
@@ -453,7 +453,7 @@ python native/guest-exec-lab/test_userspace.py BUILD \
 ```
 
 Run again with `--protocol x11`. `--installed` selects the APK's lazy
-`magicdesk-guest` command; omitting it selects immutable staged test binaries.
+`shroot` command; omitting it selects immutable staged test binaries.
 `STAGED_HELPERS` also supplies the exact-process exit watcher. Checks require
 real pixels, keyboard editing, saved-file readback and process exit, not only a
 mapped native window. Host/user HOME and Desktop ownership must remain unchanged.
@@ -588,7 +588,7 @@ prepared Turnip manifest passes the same workflow. Keep this distribution
 failure distinct from the guest syscall mechanism or Android frame transport.
 
 Exact successful device coverage and unsupported ABI surfaces belong in
-[Guest runtime](../../docs/guest-runtime.md#coverage-and-limits), not a general
+[Guest runtime](../../docs/shroot.md#coverage-and-limits), not a general
 claim of distribution or driver compatibility.
 
 ## OCI And Filesystem View Checks
@@ -787,7 +787,7 @@ control negotiation cannot change its application format.
 This is not end-to-end application mount-origin
 transfer, custodian-supervisor death or Desktop coverage.
 
-Configure `native/guest-runtime` with `-DMAGICDESK_GUEST_FIXTURES=ON` and build
+Configure `native/shroot` with `-DMAGICDESK_GUEST_FIXTURES=ON` and build
 `bootstrap supervisor run service image test_snapshot test_mounts`.
 The offline importer tests require Python and the `zstd` CLI:
 
@@ -856,7 +856,7 @@ The development check installs packages only with explicit `--install`, in its
 selected disposable Debian store. Compiler and live-debugger results are separate;
 reading symbols is not a debugger pass. Reports preserve failures, image digests
 and exact commands. Current coverage and unsupported requirements are in
-[image checks](../guest-runtime/images.md#checks).
+[image checks](../shroot/images.md#checks).
 
 `test_proot_debugger.py REPORT.json --distribution ubuntu` runs the same GDB
 sources, commands and assertions in an installed Termux PRoot distribution with
@@ -886,7 +886,7 @@ profiling. Device capability and debugger compatibility are separate results.
 This permits a current gdbserver control when an older distribution package has
 an upstream ARM64 register bug. Timeouts fail their cases and the launch owner
 cancels remaining descendants. Shroot fixtures persist only in the explicitly
-selected disposable store. See the [debugger contract and measured coverage](../guest-runtime/debugging.md).
+selected disposable store. See the [debugger contract and measured coverage](../shroot/debugging.md).
 
 `test_kernel_contract.py OUTPUT --fixture BUILD/libmagicdesk_guest_kernel_contract.so
 --instance STORE [--build BUILD]` compares normalized observations from the same
@@ -914,7 +914,7 @@ semantics, protected copying, independent launch traffic and owner-death recover
 `test_sysv_apps.py` accepts the same arguments and tests stock fakeroot-sysv,
 PHP with sysvsem/sysvmsg/pcntl, Symfony Lock and Apache prefork. These packages
 must already be present; the tests do not install software. `--case NAME` selects
-individual workflows. See the [SysV contract](../guest-runtime/sysv-ipc.md).
+individual workflows. See the [SysV contract](../shroot/sysv-ipc.md).
 
 `test_resources.py BUILD [--compare-installed]` stages a disposable minimal
 store and runs the same `resource_guest` executable natively and through Shroot
@@ -924,7 +924,7 @@ metadata and spawn workloads without compiling guest packages. It records the
 installed app identity, separate timings and opt-in runtime counters. Fixtures
 are removed unless `--keep` is explicitly selected. Build `resource_guest` and
 `test_task_resources` with `MAGICDESK_GUEST_FIXTURES=ON`; run the latter directly
-for the resource-owner unit contract. See [process resources](../guest-runtime/process-resources.md).
+for the resource-owner unit contract. See [process resources](../shroot/process-resources.md).
 
 `--case kernel-baseline` runs exact-task descriptor/lifetime checks with
 `PIDFD_THREAD` disabled, the resource model under that same restriction, and
@@ -932,7 +932,7 @@ production private-thread proc capture plus mapped descriptor/data/import cases.
 It also exercises launch admission with missing mandatory operations and ADDFD
 permission/ABI errors; independent shell execution must remain available.
 This subset is included in the default resource suite. Kernel dependencies and
-coverage are recorded in [kernel compatibility](../guest-runtime/kernel-compatibility.md).
+coverage are recorded in [kernel compatibility](../shroot/kernel-compatibility.md).
 
 The same runner checks ordered FD-origin vectors and native `SCM_RIGHTS`
 handoffs of up to 253 descriptors: distinct mount origins for one inode,
@@ -971,7 +971,7 @@ exit-denying ERRNO filter. The reader is the production `mapping_observation`.
 The separate SysV runtime cases cover private-helper admission, full caller
 tables, fatal filters, competing mappings/fork, caller death and exec. Stock GDB
 and strace checks verify internal helper event exclusion; see
-[shared-memory ownership](../guest-runtime/shared-memory.md).
+[shared-memory ownership](../shroot/shared-memory.md).
 
 The default suite also checks relative RPC with a retained cwd, including mixed
 explicit/cwd bases, two cwd bases and a protected caller. A real guest filter
@@ -1214,7 +1214,7 @@ Checks retain exact OFD offsets, O_PATH identity, CLOEXEC and pipe EOF. The pare
 pre-admits its pidfd infrastructure slot; the test does not establish zero-cost
 admission or production ancillary publication/cancellation. Its report is
 `resource-pidfd-table-results.json`. See
-[kernel compatibility](../guest-runtime/kernel-compatibility.md).
+[kernel compatibility](../shroot/kernel-compatibility.md).
 
 `--case fd-parcel` separately measures a socket-carried FD-list candidate,
 including O_PATH, sender exit, peeks, read discard, queue closure, failed sends
@@ -1415,11 +1415,11 @@ Activation controls explicitly observe EBUSY for a second USER_NOTIF listener,
 ENOSYS rather than listener inheritance for a listenerless notification filter,
 and TSYNC rejection after a peer diverges its filter chain. These are verified
 limitations, not successful runtime workarounds. Production integration and
-its ownership limits are described in the [watch contract](../guest-runtime/watches.md).
+its ownership limits are described in the [watch contract](../shroot/watches.md).
 
 ## Production Watch Checks
 
-Configure `native/guest-runtime` with `-DMAGICDESK_GUEST_FIXTURES=ON`, then build
+Configure `native/shroot` with `-DMAGICDESK_GUEST_FIXTURES=ON`, then build
 `bootstrap supervisor run service watch_guest watch_launch watch_store`.
 `test_watch_runtime.py BUILD_DIRECTORY` stages immutable production binaries
 through the configured MCP server, requires actual shell UID 2000, imports a
@@ -1499,7 +1499,7 @@ directory; SSH retains key authentication and strict ownership checks.
 
 `test_fifo_runtime.py BUILD --store STORE` checks independent launches sharing
 FIFO streams and repeated ownership lifetimes. The service fixture covers
-single-launch FIFO semantics; the [FIFO contract](../guest-runtime/fifos.md)
+single-launch FIFO semantics; the [FIFO contract](../shroot/fifos.md)
 lists readiness and watch limitations rather than treating these as certified.
 
 `prepare_blender_gpu.py` stages explicitly supplied, hash-recorded Zink/Turnip

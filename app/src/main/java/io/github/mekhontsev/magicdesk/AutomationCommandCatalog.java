@@ -11,7 +11,7 @@ final class AutomationCommandCatalog {
 
     static JSONArray create() throws JSONException {
         final JSONArray tools = new JSONArray()
-                .put(readTool("guest.list", "List guest environments", "Read the same shell-owned named environment catalog as magicdesk-guest and the terminal picker. No Desktop or Termux requirement.",
+                .put(readTool("guest.list", "List guest environments", "Read the same shell-owned named environment catalog as shroot and the terminal picker. No Desktop or Termux requirement.",
                         objectSchema(new JSONObject().put("library", stringProperty("Optional absolute library root.")))))
                 .put(readTool("guest.inspect", "Inspect guest environment", "Read a named environment, immutable store identity, image configuration and backing dependencies.",
                         objectSchema(new JSONObject().put("name", stringProperty("Environment name."))
@@ -23,7 +23,7 @@ final class AutomationCommandCatalog {
                         objectSchema(new JSONObject().put("name", stringProperty("Environment name."))
                                 .put("launchId", stringProperty("Exact launchId returned by guest.launches."))
                                 .put("library", stringProperty("Optional absolute library root.")), "name", "launchId")))
-                .put(actionTool("guest.start", "Start guest operation", "Run the shared magicdesk-guest CLI asynchronously under the selected shell/root identity. Arguments begin with install, restore, backup, remove, prune, dns, exec or run. Returns an operationId, not completion. Observe guest.status. Does not require Termux or Desktop. Cancellation can leave published resources: inspect before retrying.",
+                .put(actionTool("guest.start", "Start guest operation", "Run the shared shroot CLI asynchronously under the selected shell/root identity. Arguments begin with install, restore, backup, remove, prune, dns, exec or run. Returns an operationId, not completion. Observe guest.status. Does not require Termux or Desktop. Cancellation can leave published resources: inspect before retrying.",
                         objectSchema(new JSONObject().put("arguments", arrayProperty("Literal CLI arguments; no shell parsing.", stringProperty("Argument.")))
                                 .put("library", stringProperty("Optional absolute library root for this operation only.")), "arguments")))
                 .put(readTool("guest.status", "Observe guest operation", "Read bounded output and exact completion, or event-wait after a revision. A timeout only ends observation. Results survive client disconnect, not app restart; up to 64 operations retained.",

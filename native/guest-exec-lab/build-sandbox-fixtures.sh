@@ -5,7 +5,7 @@ if [ "$#" -ne 1 ]; then
     exit 2
 fi
 src=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
-runtime="$src/../guest-runtime/src"
+runtime="$src/../shroot/src"
 work=$(CDPATH= cd -- "$1" && pwd)
 sysroot="$work/sysroot"
 cc=${CC:-clang}

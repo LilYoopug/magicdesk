@@ -21,7 +21,7 @@ rejected, not advertised as enforced. Native host queries retain the kernel's
 own result. `landlock_guest` and `test_arch_runtime.py` distinguish that query
 from actual guest permission checks. The same ABI 1 assertions run under UID
 1000 in a reference Linux 6.18 QEMU VM; that reference does not raise Shroot's
-minimum. See [filesystem restrictions](../../docs/guest-runtime.md#filesystem-restrictions)
+minimum. See [filesystem restrictions](../../docs/shroot.md#filesystem-restrictions)
 for provider limits and the difference from native security confinement.
 
 The baseline includes pidfds, selective ptrace, seccomp notifications,

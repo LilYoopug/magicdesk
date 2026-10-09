@@ -432,7 +432,7 @@ not confer the old object's authority. The actual store and host UID stay unchan
 The supervisor checks object identity, seals and byte equality, rather than
 trusting a guest's stat result. Because shell SELinux denies ordinary proc reopen
 of the memfd, the bounded fixture retains a separate sealed copy per readable
-open; see the current [admission contract](../guest-runtime/interception.md#image-admission-and-logical-credentials).
+open; see the current [admission contract](../shroot/interception.md#image-admission-and-logical-credentials).
 
 Three stock whole-browser launches with fresh profiles execute JavaScript and
 return computed DOM, without disabled-sandbox flags. Each installs five actual

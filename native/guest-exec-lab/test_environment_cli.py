@@ -50,7 +50,7 @@ def main():
 
         def guest(*argv, success=True):
             return command(['env', 'MAGICDESK_GUEST_HOME=' + directory + '/library',
-                            'magicdesk-guest', *argv], success=success)
+                            'shroot', *argv], success=success)
 
         command(['mkdir', '-p', directory + '/rw', directory + '/ro'])
         assert command(['id', '-u']).strip() == '2000'
@@ -99,7 +99,7 @@ def main():
         def hold():
             try:
                 text = shlex.join(['timeout', '120', 'env', 'MAGICDESK_GUEST_HOME=' + directory + '/library',
-                                  'magicdesk-guest', 'exec', names[0], '--', 'wget', '-qO-',
+                                  'shroot', 'exec', names[0], '--', 'wget', '-qO-',
                                   'http://127.0.0.1:' + str(server.server_port) + '/hold'])
                 held_result.append(client.call('console.execute', {'sessionId': holding, 'command': text}))
             except Exception as error:

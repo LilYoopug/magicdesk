@@ -2,7 +2,7 @@
 set -eu
 test "$#" = 1
 src=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
-runtime="$src/../guest-runtime/src"
+runtime="$src/../shroot/src"
 mkdir -p "$1"
 ${CC:-clang} --target=aarch64-linux-android34 -fno-termux-rpath -static \
     -DMD_NO_START -DMD_USE_LIBC -std=c17 -O2 -Wall -Wextra -Werror \

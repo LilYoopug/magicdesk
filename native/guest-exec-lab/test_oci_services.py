@@ -124,7 +124,7 @@ class Suite:
         self.console = self.client.call('console.open', {'directory': '/data/local/tmp'})['sessionId']
         self.report['consoleId'] = self.console
         self.command(['mkdir', self.base])
-        self.runner = self.command(['/system/bin/sh', '-c', 'command -v magicdesk-guest']).strip()
+        self.runner = self.command(['/system/bin/sh', '-c', 'command -v shroot']).strip()
         self.image = None
         if build:
             hashes = {}

@@ -54,8 +54,8 @@ def main():
 
     try:
         if not args.installed:
-            command("ln -sf libmagicdesk_guest_run.so " + shlex.quote(args.runtime + "/magicdesk-guest"))
-        runner = "magicdesk-guest" if args.installed else args.runtime + "/libmagicdesk_guest_run.so"
+            command("ln -sf libmagicdesk_guest_run.so " + shlex.quote(args.runtime + "/shroot"))
+        runner = "shroot" if args.installed else args.runtime + "/libmagicdesk_guest_run.so"
         report["preflight"] = command(shlex.join([runner, "--store", args.store, "--",
             "/bin/sh", "-ec", "command -v vulkaninfo; command -v vkcube; test -r /opt/md-gpu/turnip.json"]))
         display = client.call("create_display", {"type": "virtual", "width": 1000, "height": 700, "densityDpi": 160})

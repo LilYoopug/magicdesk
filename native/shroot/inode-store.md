@@ -337,7 +337,7 @@ RPC descriptor transfer does not supply storage reclamation policy.
 Host ownership stays the real executor identity; guest ownership is logical.
 
 Installed distributions, package-manager transactions and OCI image workflows
-use this same namespace. Their [coverage](../../docs/guest-runtime.md#coverage-and-limits)
+use this same namespace. Their [coverage](../../docs/shroot.md#coverage-and-limits)
 does not imply a complete Linux ABI or filesystem isolation. Direct-backend
 hardlink controls retain the host's independent restrictions. SQLite stays in
 native namespace owners, outside guest execution.

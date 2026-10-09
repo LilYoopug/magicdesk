@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(MagicDeskGuestRuntime LANGUAGES C ASM)
+project(MagicDeskShroot LANGUAGES C ASM)
 
 include(FetchContent)
 FetchContent_Declare(sqlite

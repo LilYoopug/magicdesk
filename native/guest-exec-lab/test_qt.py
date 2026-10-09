@@ -57,7 +57,7 @@ def main():
         client.call("input.key_chord", {"displayId": display["id"], "keys": list(values)})
 
     try:
-        cli = command("command -v magicdesk-guest").strip()
+        cli = command("command -v shroot").strip()
         store = root + "/rootfs/tmp/imported-rootfs"
         installed = shlex.join([cli, "--store", store, "--", "/bin/sh", "-c"])
 

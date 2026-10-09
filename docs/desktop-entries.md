@@ -64,7 +64,7 @@ PRoot and custom scripts use their selected executor, not a separate command bac
 or an explicitly prepared store through the Shell executor. It shares the same
 terminal/application/desktop, user and directory controls. Named environments
 also publish installed application entries to Start; see
-[Shroot environments](guest-runtime.md#named-environments). The selected store
+[Shroot environments](shroot.md#named-environments). The selected store
 identity belongs to the recipe, not to a global current distribution.
 
 Long-press or right-click a user-created Termux shortcut in Start and select
@@ -82,7 +82,7 @@ and temporary `XDG_RUNTIME_DIR`. This is not a security sandbox. Arbitrary
 Android file arguments are not mapped into the guest; the editor hides file
 associations for these recipes. PRoot and prepared entry scripts retain their
 external distribution setup. Shroot supplies its own environment catalog and
-installed-application discovery through the [guest runtime](guest-runtime.md).
+installed-application discovery through the [guest runtime](shroot.md).
 
 ### Custom Linux Entry Scripts
 
@@ -118,7 +118,7 @@ directory. The Linux editor emits `X-MagicDesk-FileEnvironment`, an explicit
 environment/user identity retained in Recent and used to isolate launch correlation.
 This is a MagicDesk desktop-entry extension, not a freedesktop standard key.
 
-The experimental [guest runtime](guest-runtime.md) uses normal Shell entries
+The experimental [guest runtime](shroot.md) uses normal Shell entries
 with a prepared store. Its X11 and Wayland recipes declare
 `X-MagicDesk-GraphicsConnection=routed`: explicit guest addresses connect through
 the captured executor's admission endpoint, without requiring an app-private

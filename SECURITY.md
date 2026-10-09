@@ -54,7 +54,7 @@ in a private security report.
 Shroot runs trusted Linux programs with the selected shell/root executor's
 authority. Its guest users, virtual root, OCI layers and browser-filter support
 do not make it a container security boundary. A guest program can reach Android
-resources allowed to that executor. See [Shroot boundaries](docs/guest-runtime.md#boundaries).
+resources allowed to that executor. See [Shroot boundaries](docs/shroot.md#boundaries).
 Only opt trusted programs into the additional MagicDesk command channel.
 
 For ordinary crashes, display compatibility and feature requests, use

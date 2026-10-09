@@ -127,13 +127,13 @@ def cmakeAndroidTarget = {
     ]
 }
 
-def guestBuild = layout.buildDirectory.dir('guestRuntime').get().asFile
+def guestBuild = layout.buildDirectory.dir('shroot').get().asFile
 def configureGuest = tasks.register('configureGuestRuntime', Exec) {
-    inputs.files rootProject.file('native/guest-runtime/CMakeLists.txt'), rootProject.file('native/guest-runtime/image-dependencies.cmake')
+    inputs.files rootProject.file('native/shroot/CMakeLists.txt'), rootProject.file('native/shroot/image-dependencies.cmake')
     inputs.property 'nativeTarget', nativeTarget
     outputs.file new File(guestBuild, 'build.ninja')
     doFirst {
-        commandLine(['cmake', '-S', rootProject.file('native/guest-runtime'), '-B', guestBuild,
+        commandLine(['cmake', '-S', rootProject.file('native/shroot'), '-B', guestBuild,
                 '-G', 'Ninja', "-DANDROID_PLATFORM_LEVEL=${android.defaultConfig.minSdk}"] + cmakeAndroidTarget())
     }
 }

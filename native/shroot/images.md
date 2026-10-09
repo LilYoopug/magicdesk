@@ -4,23 +4,23 @@ The offline image utility accepts a local OCI image layout containing an OCI or
 Docker schema-2 Linux ARM64 manifest. It imports layers into a sealed inode store,
 creates independent writable instances and invokes the ordinary guest runner.
 The native utility has no registry client, Docker daemon, kernel mount or privilege
-change. The app-side [named-environment manager](../../docs/guest-runtime.md#commands)
+change. The app-side [named-environment manager](../../docs/shroot.md#commands)
 supplies HTTPS acquisition, names and dependency-aware cleanup using this same API.
 This is image execution, not OCI runtime-spec or Docker Engine compatibility.
 
 ## Commands
 
 ```sh
-magicdesk-guest image import /host/layout /host/image --preserve-ownership
-magicdesk-guest image create /host/image /host/instance
-magicdesk-guest image inspect /host/instance
-magicdesk-guest image run /host/instance -- /bin/sh
-magicdesk-guest image run /host/instance --user 1000:1000 -- /bin/sh
-magicdesk-guest image run /host/instance --bind /host/project /mnt -- /bin/sh
-magicdesk-guest image import /host/layout /host/image2 --preserve-ownership --layers /host/layers
-magicdesk-guest image rootfs /host/rootfs.tar.gz /host/rootfs-image
-magicdesk-guest image backup /host/instance /host/backup.tar.zst
-magicdesk-guest image restore /host/backup.tar.zst /host/restored-instance
+shroot image import /host/layout /host/image --preserve-ownership
+shroot image create /host/image /host/instance
+shroot image inspect /host/instance
+shroot image run /host/instance -- /bin/sh
+shroot image run /host/instance --user 1000:1000 -- /bin/sh
+shroot image run /host/instance --bind /host/project /mnt -- /bin/sh
+shroot image import /host/layout /host/image2 --preserve-ownership --layers /host/layers
+shroot image rootfs /host/rootfs.tar.gz /host/rootfs-image
+shroot image backup /host/instance /host/backup.tar.zst
+shroot image restore /host/backup.tar.zst /host/restored-instance
 ```
 
 Destinations must not exist. `--reference TAG` selects an index annotation;
@@ -417,7 +417,7 @@ denied on the test device. Actual shell policy permits observations denied to th
 ordinary Termux UID; this does not grant CAP_NET_ADMIN, raw sockets or firewall control.
 
 These observations are from the RM11/API 36 device identified in
-[guest coverage](../../docs/guest-runtime.md), not cross-device guarantees.
+[guest coverage](../../docs/shroot.md), not cross-device guarantees.
 `test_service_runtime.c` checks descriptor reopening and path identity, native
 O_DIRECT, capability/securebits transitions, file capabilities, POSIX ACLs,
 initial stack boundaries, protected copies, application seccomp precedence and

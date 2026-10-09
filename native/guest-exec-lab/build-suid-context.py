@@ -39,7 +39,7 @@ def main():
             raise ValueError("Chromium source checksum mismatch: " + name)
     (args.build / "suid-source.json").write_text(json.dumps({"version": VERSION, "sha256": hashes}, indent=2) + "\n")
     src = Path(__file__).resolve().parent
-    runtime = src.parent / "guest-runtime/src"
+    runtime = src.parent / "shroot/src"
     subprocess.run([os.environ.get("CC", "clang"), "--target=aarch64-linux-android34",
                     "-fno-termux-rpath", "-static", "-DMD_NO_START", "-DMD_USE_LIBC",
                     "-std=gnu17", "-O2", "-Wall", "-Wextra", "-Werror",

@@ -171,7 +171,7 @@ def main():
                 guest('install', image, '--name', name, '--dns', args.dns)
                 shell(name, 'set -eu; test "$HOME" = /root; test "$USER" = root; test -x "$SHELL"; '
                            'printf "seed\\n" > /tmp/workflow.txt; cat /etc/resolv.conf')
-                login = command('magicdesk-guest', 'login', name, '--', '/bin/sh', '-c',
+                login = command('shroot', 'login', name, '--', '/bin/sh', '-c',
                                 'test "$PWD" = "$HOME" && printf "%s:%s:%s" "$USER" "$HOME" "$SHELL"')
                 assert login.startswith('root:/root:'), login
                 packages = 'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends mousepad thunar dbus-x11 xkb-data fonts-dejavu-core ca-certificates python3-gi' if distro == 'debian' else 'apk add mousepad thunar dbus xkeyboard-config font-dejavu ca-certificates py3-gobject3'
@@ -195,7 +195,7 @@ def main():
                             "printf 'mdworkflow:x:1234:1234:Workflow:/home/mdworkflow:/bin/sh\\n' >> /etc/passwd; "
                             "printf 'mdworkflow:x:1234:\\n' >> /etc/group; fi; "
                             "mkdir -p /home/mdworkflow; chown 1234:1234 /home/mdworkflow")
-                actual = command('magicdesk-guest', 'login', name, '--user', 'mdworkflow', '--', '/bin/sh', '-c',
+                actual = command('shroot', 'login', name, '--user', 'mdworkflow', '--', '/bin/sh', '-c',
                                  'set -eu; test "$(id -u)" = 1234; test "$PWD" = "$HOME"; '
                                  'printf "%s:%s:%s" "$USER" "$HOME" "$SHELL"')
                 assert actual == 'mdworkflow:/home/mdworkflow:/bin/sh', actual

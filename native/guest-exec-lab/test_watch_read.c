@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
-#include "../guest-runtime/src/event_wait.h"
-#include "../guest-runtime/src/watch_queue.h"
+#include "../shroot/src/event_wait.h"
+#include "../shroot/src/watch_queue.h"
 #include <elf.h>
 #include <errno.h>
 #include <fcntl.h>

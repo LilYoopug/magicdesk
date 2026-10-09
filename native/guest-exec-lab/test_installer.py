@@ -49,7 +49,7 @@ def main():
         if args.arch_without_landlock:
             invocation += ['--arch-sandbox', 'disable-filesystem']
         command(invocation)
-        inspect = command(['magicdesk-guest', 'inspect', args.name])
+        inspect = command(['shroot', 'inspect', args.name])
         report['environment'] = json.loads(inspect)
         checks = ('set -eu\ncat /etc/os-release\n'
                   'test "$(cat /etc/locale.conf)" = LANG=ru_RU.UTF-8\n'
@@ -59,8 +59,8 @@ def main():
                   'if command -v mousepad; then command -v thunar; command -v xfce4-terminal; '
                   'dbus-run-session -- dbus-send --session --print-reply '
                   '--dest=org.freedesktop.DBus / org.freedesktop.DBus.ListNames; fi\n')
-        command(['magicdesk-guest', 'exec', args.name, '--user', 'root', '--', '/bin/sh', '-c', checks])
-        command(['magicdesk-guest', 'login', args.name, '--user', 'mdtester', '--', '/bin/sh', '-lc',
+        command(['shroot', 'exec', args.name, '--user', 'root', '--', '/bin/sh', '-c', checks])
+        command(['shroot', 'login', args.name, '--user', 'mdtester', '--', '/bin/sh', '-lc',
                  'set -eu; test "$LANG" = ru_RU.UTF-8; test "${LC_ALL:-$LANG}" = ru_RU.UTF-8; '
                  'locale; test "$HOME" = /home/mdtester; '
                  'printf retained > "$HOME/installer-sentinel"'])
@@ -68,7 +68,7 @@ def main():
         if args.arch_without_landlock:
             resume += ['--arch-sandbox', 'disable-filesystem']
         command(resume)
-        command(['magicdesk-guest', 'login', args.name, '--user', 'mdtester', '--', '/bin/sh', '-lc',
+        command(['shroot', 'login', args.name, '--user', 'mdtester', '--', '/bin/sh', '-lc',
                  'set -eu; test "$LANG" = ru_RU.UTF-8; test "${LC_ALL:-$LANG}" = ru_RU.UTF-8; '
                  'test "$(cat "$HOME/installer-sentinel")" = retained'])
         report['passed'] = True

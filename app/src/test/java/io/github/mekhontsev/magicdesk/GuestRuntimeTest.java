@@ -14,10 +14,28 @@ import org.junit.rules.TemporaryFolder;
 public class GuestRuntimeTest {
     @Rule public TemporaryFolder temporary = new TemporaryFolder();
 
+    @Test public void publicCommandAndHelpUseShroot() throws Exception {
+        assertEquals("shroot", GuestLaunchPlan.TOOL);
+        var output = new java.io.ByteArrayOutputStream();
+        var previous = System.out;
+        try (var capture = new java.io.PrintStream(output, true, java.nio.charset.StandardCharsets.UTF_8)) {
+            System.setOut(capture);
+            GuestEnvironmentMain.execute(null, new String[]{"--help"});
+        } finally {
+            System.setOut(previous);
+        }
+        String help = output.toString(java.nio.charset.StandardCharsets.UTF_8);
+        assertTrue(help.contains("shroot install "));
+        assertTrue(help.contains("shroot login "));
+        assertTrue(help.contains("shroot exec "));
+        assertTrue(help.contains("shroot backup "));
+        assertFalse(help.contains("magicdesk-guest"));
+    }
+
     @Test public void launchPlanKeepsHostAndGuestPathsAndArgumentsSeparate() {
         var plan = new GuestLaunchPlan(new GuestEnvironment("/host/a ' b", "/home/shell", ""),
                 "/guest/c d", List.of("/bin/sh", "-c", "echo '$HOME'"));
-        assertEquals(List.of("magicdesk-guest", "--store", "/host/a ' b", "--home", "/home/shell",
+        assertEquals(List.of("shroot", "--store", "/host/a ' b", "--home", "/home/shell",
                 "--cwd", "/guest/c d", "--", "/bin/sh", "-c", "echo '$HOME'"), plan.arguments());
         GuestLaunchPlan.requireIdentity(2000);
         GuestLaunchPlan.requireIdentity(0);
@@ -48,7 +66,7 @@ public class GuestRuntimeTest {
     @Test public void guestUserIsAnExplicitLaunchArgumentNotAnExecutorSwitch() {
         var plan = new GuestLaunchPlan(new GuestEnvironment("/store", "/tmp", " 1000:200 "),
                 "/", List.of("/bin/sh"));
-        assertEquals(List.of("magicdesk-guest", "--store", "/store", "--home", "/tmp",
+        assertEquals(List.of("shroot", "--store", "/store", "--home", "/tmp",
                 "--cwd", "/", "--user", "1000:200", "--", "/bin/sh"), plan.arguments());
         for (String invalid : List.of("root:bad:group", "-1", "root;id", "root:", "root\nother"))
             assertThrows(IllegalArgumentException.class, () -> new GuestEnvironment("/store", "/tmp", invalid));
@@ -151,7 +169,7 @@ public class GuestRuntimeTest {
     @Test public void routedInvocationPreservesLiteralGuestArgumentsAndDynamicEndpoint() throws Exception {
         assumeFalse(System.getProperty("os.name").startsWith("Windows"));
         Path tools = temporary.newFolder().toPath();
-        Path stub = Files.writeString(tools.resolve("magicdesk-guest"), "#!/bin/sh\nprintf '%s\\n' \"$@\"\n");
+        Path stub = Files.writeString(tools.resolve("shroot"), "#!/bin/sh\nprintf '%s\\n' \"$@\"\n");
         assertTrue(stub.toFile().setExecutable(true));
         var plan = new GuestLaunchPlan(new GuestEnvironment("/host/a ' b", "/home/shell", ""), "/guest dir",
                 List.of("/bin/sh", "-c", "echo '$HOME'"));

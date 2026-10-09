@@ -50,13 +50,13 @@ def main():
         assert before['readiness']['interactive'] and not before['readiness']['deviceLocked']
         suite.command([suite.image, 'export-tree', args.store, '/usr/share/xkeyboard-config-2', suite.base + '/xkb'])
         with tempfile.TemporaryDirectory() as temporary:
-            wrapper = Path(temporary) / 'magicdesk-guest'
+            wrapper = Path(temporary) / 'shroot'
             wrapper.write_text('#!/system/bin/sh\nprintf "%s\\n" "$$" > ' + shlex.quote(pidfile)
                                + '\nexec ' + shlex.quote(suite.runner)
                                + ' --diagnostics --deadline-seconds ' + str(args.timeout) + ' "$@"\n')
-            suite.transport.upload(client, wrapper, suite.base + '/magicdesk-guest')
+            suite.transport.upload(client, wrapper, suite.base + '/shroot')
         suite.transport.upload(client, args.build / 'md-await-exit', suite.base + '/md-await-exit')
-        suite.command(['chmod', '700', suite.base + '/magicdesk-guest', suite.base + '/md-await-exit'])
+        suite.command(['chmod', '700', suite.base + '/shroot', suite.base + '/md-await-exit'])
         display = client.call('create_display', dict(type='virtual', width=1280, height=800, densityDpi=160))
         session = client.call('graphics.start', dict(protocol=protocol, backend='shell', connection='routed',
             name='Holo ARM64 ' + args.client, keyboardDirectory=suite.base + '/xkb'))['sessionId']

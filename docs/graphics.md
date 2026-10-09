@@ -111,7 +111,7 @@ that path; forcing only `GALLIUM_DRIVER=zink` can instead produce empty SHM fram
 This is a tested client-side patch, not a bundled driver or general Mesa support
 claim. Different GPUs and distribution builds require their own checks.
 
-The [Linux installer](guest-runtime.md#linux-installer) builds a complete,
+The [Linux installer](shroot.md#linux-installer) builds a complete,
 private Linux client stack for `--gpu turnip` and retains a software alternative.
 Its `--print-mesa-patch` export is also the lab's patch source.
 

@@ -235,7 +235,7 @@ retains the same failing hard-link controls as a separate comparison.
 
 This is one fixture lifecycle, not full-distribution compatibility. Separate
 fresh-image APT/APK checks and selected upgrades are documented in the
-[application coverage](../../docs/guest-runtime.md#coverage-and-limits).
+[application coverage](../../docs/shroot.md#coverage-and-limits).
 Arbitrary maintainer scripts, privileged kernel operations,
 broader GTK/Qt workflows, exact hardlink-dentry notifications, object reclamation,
 power loss and API 34/16 KiB coverage retain their documented limits. Execution-policy checks described in the main

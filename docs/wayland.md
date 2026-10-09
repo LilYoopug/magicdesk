@@ -32,7 +32,7 @@ use a session-owned named endpoint with descriptor admission, described below.
 The launch recipe selects the connection contract through
 `X-MagicDesk-GraphicsConnection`, independently of executor UID. `inherited`
 selects one existing FD; `routed` selects the experimental
-[guest runtime's admission endpoint](guest-runtime.md#graphical-connections).
+[guest runtime's admission endpoint](shroot.md#graphical-connections).
 That endpoint supports independent guest clients under UID 2000: the shell
 service accepts connections, checks peer UID and transfers connected descriptors
 to the compositor. `mdw_server_accept` consumes each FD on the protocol event

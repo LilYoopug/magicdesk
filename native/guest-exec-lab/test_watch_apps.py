@@ -43,7 +43,7 @@ def main():
         return response["output"]
 
     def guest(value):
-        return command(shlex.join(["timeout", "60", "magicdesk-guest", "--store", args.store,
+        return command(shlex.join(["timeout", "60", "shroot", "--store", args.store,
             "--home", "/home/shell", "--", "/bin/sh", "-c", value]))
 
     def wait(condition, **selection):

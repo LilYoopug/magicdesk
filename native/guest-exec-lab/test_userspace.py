@@ -47,7 +47,7 @@ def main():
     log = args.runtime + "/gui-" + tag + ".log"
     receipt = log + ".exit"
     document = "/tmp/userspace-" + tag + ".txt"
-    runner = "magicdesk-guest" if args.installed else args.runtime + "/libmagicdesk_guest_run.so"
+    runner = "shroot" if args.installed else args.runtime + "/libmagicdesk_guest_run.so"
 
     def command(value):
         response = client.call("console.execute", {"sessionId": console, "command": value})
@@ -69,7 +69,7 @@ def main():
         assert "uid=2000" in result["identity"]
         guest("printf 'seed\\n' > " + document)
         if not args.installed:
-            command("ln -sf libmagicdesk_guest_run.so " + shlex.quote(args.runtime + "/magicdesk-guest"))
+            command("ln -sf libmagicdesk_guest_run.so " + shlex.quote(args.runtime + "/shroot"))
         display = client.call("create_display", {"type": "virtual", "width": 1000, "height": 700, "densityDpi": 160})
         session = client.call("graphics.start", {"protocol": args.protocol, "backend": "shell", "connection": "routed",
             "name": "Userspace " + tag, "keyboardDirectory": args.keyboard_directory})["sessionId"]

@@ -70,7 +70,7 @@ the successful Miracast direct-pointer path.
 
 ## Independent-Service Matrix
 
-Shroot has its own [device coverage and limits](guest-runtime.md#coverage-and-limits)
+Shroot has its own [device coverage and limits](shroot.md#coverage-and-limits)
 and [fixture commands](../native/guest-exec-lab/README.md). On RM11/API 36 under
 UID 2000 these exercise glibc/musl userspaces, packages and OCI layers, concurrent
 launches, watches/IPC, debuggers, browser filters and X11/Wayland applications.

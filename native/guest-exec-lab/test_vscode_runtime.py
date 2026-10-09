@@ -63,7 +63,7 @@ def main():
                    + ' --diagnostics --admit-elf /opt/md-vscode/chrome-sandbox "$@"\n')
         suite.report['admittedElf'] = '/opt/md-vscode/chrome-sandbox'
         suite.command(['/system/bin/sh', '-c', 'printf %s "$1" > "$2"; chmod 700 "$2"',
-                       'fixture', wrapper, suite.base + '/magicdesk-guest'])
+                       'fixture', wrapper, suite.base + '/shroot'])
         display = suite.client.call('create_display', {'type': 'virtual', 'width': 1280, 'height': 900, 'densityDpi': 160})
         session = suite.client.call('graphics.start', {'protocol': 'x11', 'backend': 'shell', 'connection': 'routed',
             'name': 'VS Code sandbox and GDB', 'keyboardDirectory': args.keyboard_directory})['sessionId']
