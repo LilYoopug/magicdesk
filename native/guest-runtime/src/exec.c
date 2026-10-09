@@ -23,8 +23,9 @@ static long prepare_retained(const struct md_fs *fs, int base, const char *path,
         int inaccessible, struct md_command_recipe *recipe) {
     char routed[PATH_MAX];
     long error=md_copy(routed,sizeof(routed),path);
-    if (!error) error=md_namespace_relative_mount(fs,base,routed);
     if (error) return error;
+    /* Preserve dirfd provenance. A proc descriptor's displayed PID is not a
+     * pathname in the caller's current proc mount or PID namespace. */
     struct md_fs_request q={.operation=MD_FS_OPEN_IMAGE,.directory={base,-1},.path={routed,NULL},
         .flags=flags&AT_SYMLINK_NOFOLLOW ? O_NOFOLLOW : 0,
         .mode=inaccessible ? MD_EXEC_INACCESSIBLE : 0,.offset=base>=0 ? base : 0};

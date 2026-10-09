@@ -6,6 +6,13 @@
 struct md_cgroup_member;
 struct md_cgroup_view;
 struct md_cgroup_namespace;
+struct md_cgroup_programs;
+struct md_cgroup_program;
+struct md_cgroup_programs *md_cgroup_program_registry(struct md_cgroup_member *,int create);
+int md_cgroup_program_query(struct md_cgroup_view *,int,struct md_cgroup_member *,
+    const struct md_identity *,unsigned,uint32_t *,unsigned,unsigned *,unsigned *);
+int md_cgroup_program_attach(struct md_cgroup_view *,int,struct md_cgroup_member *,
+    const struct md_identity *,struct md_cgroup_program *,unsigned,int detach);
 struct md_cgroup_namespace *md_cgroup_namespace_new(struct md_cgroup_member *,struct md_user_namespace *);
 struct md_cgroup_namespace *md_cgroup_namespace_retain(struct md_cgroup_namespace *);
 void md_cgroup_namespace_release(struct md_cgroup_namespace *);

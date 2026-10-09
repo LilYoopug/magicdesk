@@ -1,11 +1,15 @@
 #define _GNU_SOURCE
 #include "task_resources.h"
+#include "task_registry.h"
+#include "mqueue_view.h"
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <sched.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>
@@ -196,6 +200,36 @@ static void network_resource_transaction(void) {
     assert(!md_network_namespace_offline(child.network));
     assert(!md_resources_release(&child)); md_identity_release(&identity);
 }
+static void ipc_mount_lifetime(void) {
+    char path[]="/data/local/tmp/md-mqueue-owner-XXXXXX";
+    assert(mkdtemp(path));
+    int parent=open(path,O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(parent>=0);
+    int before=descriptors();
+    for (unsigned i=0;i<40;++i) {
+        struct md_identity id=md_identity_new(0,0);
+        struct md_task_resources task; assert(!md_resources_init(&task,NULL));
+        struct md_task_registry *registry=md_task_registry_create(); assert(registry);
+        struct md_mqueue_view *view=md_ipc_namespace_queues(task.ipc,parent); assert(view);
+        assert(view==md_ipc_namespace_queues(task.ipc,parent));
+        assert(!md_ipc_namespace_active(task.ipc));
+        assert(!md_task_registry_publish(registry,getpid(),getpid(),&id,&task));
+        struct md_task_snapshot snapshot;
+        assert(!md_task_registry_read(registry,getpid(),0,&snapshot));
+        assert(snapshot.ipc==task.ipc);
+        md_task_registry_forget(registry,getpid());
+        md_task_registry_destroy(registry);
+        assert(!md_resources_release(&task));
+        struct stat st;
+        assert(!md_mqueue_stat(view,md_mqueue_root(view),&st) && st.st_size==40);
+        assert(md_ipc_namespace_queues(snapshot.ipc,-1)==view);
+        md_task_snapshot_release(&snapshot);
+        md_identity_release(&id);
+        assert(descriptors()==before);
+    }
+    close(parent);
+    assert(!rmdir(path));
+    puts("PASS mqueue namespace custody: snapshots, final-owner cleanup and native FD baseline");
+}
 int main(void) {
     alarm(60);
     struct md_identity identity=md_identity_new(0,0);
@@ -245,6 +279,7 @@ int main(void) {
     nonleader_root();
     pid_resource_transaction();
     network_resource_transaction();
+    ipc_mount_lifetime();
     assert(descriptors() == before);
     test_fd_origins();
     test_ofd_order();

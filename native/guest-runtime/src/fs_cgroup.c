@@ -63,7 +63,7 @@ int md_fs_cgroup_operation(struct md_filesystem *fs,struct md_mount_namespace *v
             if (r>=0) {
                 out->fd=r; r=ops ? output->control(output->control_context,ops,context,id,(int)q->flags) : 0;
                 if (r) { close(out->fd); out->fd=-1; }
-                else if (!ops && output && output->origin) *output->origin=md_fs_anchor_retain(origin);
+                else if (output && output->origin) *output->origin=md_fs_anchor_retain(origin);
             }
         }
         if (ops) ops->release(context);

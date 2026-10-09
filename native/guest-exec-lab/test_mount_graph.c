@@ -274,12 +274,26 @@ static void sizes(const char *base) {
     }
     assert(!md_fs_mounts_open(&fs,entries,MD_FS_MOUNTS_MAX));
     assert(!md_mount_graph_export(fs.mounts,fs.store->lifetime->root,&p) && p.count==4+3*MD_FS_MOUNTS_MAX);
+    assert(p.count>253); /* Exercises the transport beyond one SCM_RIGHTS message. */
     received=NULL; assert(!md_mount_graph_import(&p,&received));
     assert(received->tree->count==MD_FS_MOUNTS_MAX);
     for (unsigned i=0;i<MD_FS_MOUNTS_MAX;++i) {
         assert(md_view_readonly(&received->tree->mounts[i])==(int)(i&1));
         assert(md_view_same(&received->tree->mounts[i].native,&fs.mounts->tree->mounts[i].native));
     }
+    struct md_identity actor=md_identity_new(0,0);
+    fs.store->identity=&actor;
+    struct md_fs_request extra={.operation=MD_FS_MOUNT,.mode=MD_FS_MOUNT_BIND,
+        .directory={-1,-1},.path={target[0],target[1]},.flags=MS_BIND};
+    assert(md_fs_mount_change(&fs,NULL,&extra)==-ENOSPC);
+    assert(fs.mounts->tree->count==MD_FS_MOUNTS_MAX);
+    fs.store->identity=NULL; md_identity_release(&actor);
+    struct md_mount_namespace *copy=NULL; struct md_fs_location copied_root;
+    assert(!md_fs_mounts_copy(&fs,&(struct md_fs_location){0},&copy,&copied_root));
+    assert(copy->tree->count==MD_FS_MOUNTS_MAX && copy->tree!=fs.mounts->tree);
+    for (unsigned i=0;i<MD_FS_MOUNTS_MAX;++i)
+        assert(md_view_same(&copy->tree->mounts[i].native,&fs.mounts->tree->mounts[i].native));
+    md_mount_namespace_release(copy);
     md_mount_namespace_release(received); close_filesystem(&fs); assert(descriptors()==before);
     puts("PASS mount graph bounds: empty and maximum topology, exact rights count and cleanup");
 }

@@ -99,6 +99,11 @@ the kernel has separated its file table. Death during preparation, failed exec
 and task teardown release the leases without leaving temporary image descriptors
 in a surviving CLONE_FILES peer. Initial loading and worker preparation share
 the same ELF and shebang parser.
+Foreign `/proc/PID/exe` execution resolves the selected task image through that
+same worker preparation. The supervisor captures its executable identity after
+the process-access check; anonymous images retain their readable description.
+Absolute paths, symlinks and relative proc dirfds share this selection, including
+logical PID proc mounts. No temporary image FD enters the caller's file table.
 Anonymous memfd ELF images retain their actual readable description through
 exec, fork and process teardown. Their `/proc/.../exe` views use the common
 typed control-file provider, preserving inode identity, seals, independent open
@@ -121,10 +126,15 @@ original descriptor once and delivers only the final open result. Native and
 attached objects share the retained-object reopening primitive, preserving
 independent offsets, deferred FIFO completion and readonly mount policy.
 Regular-file/FIFO creation keeps its intermediate descriptors on the worker.
+Creating character/block devices returns EPERM, consistently with the absent
+CAP_MKNOD authority. Existing native devices can be bind-mounted with their real
+access permissions and per-mount nodev policy; no device-creation rights are granted.
 Path chdir and truncate retain the selected object there; the caller executes
 the final syscall through its leased proc path. This preserves CLONE_FS state,
 RLIMIT_FSIZE and SIGXFSZ without a private guest FD, including current-thread
-proc-FD aliases. Completion or task death releases the exact lease.
+proc-FD aliases. Completion or task death releases the exact lease. Typed
+control files reject native path mutation rather than exposing their carrier
+for truncate; internal metadata selection retains their mount provenance.
 Descriptor-based fchdir retains the original file-table and CLONE_FS turns from
 input capture through task-local execution and adapter acknowledgement. Its
 worker-owned origin publishes only after confirmed success; native rejection
@@ -180,6 +190,12 @@ same-TGID helper with a private file table and copied FS context. It returns
 captured O_PATH descriptions directly to the supervisor; no temporary guest
 slot or retry of the filesystem operation is needed. FS/table turns remain held
 through capture and exact helper reaping. Application filters remain effective.
+After the helper opens a path, ordinary O_PATH custody uses its stopped private
+table's proc-FD alias, not another pathname lookup or data open. Restricted proc
+access and nofollow descriptions retain exact SCM_RIGHTS transfer. This lets
+bind mounts retain an existing device even when Android denies data access;
+subsequent device IO still obeys that denial. Stateful FDs are never reopened
+through this path.
 Native fchdir stays in the caller with the ordinary cwd-completion observer.
 These paths use the same namespace engine and sealed-image catalogue.
 Operation results and caller-owned output are independent of RPC framing; direct
@@ -633,9 +649,33 @@ their allocated terminals, with native terminal IO and caller-owned controlling
 sessions. Launch-local cgroup2 membership and permissive cgroup v1 devices views
 do not enforce resource limits or modify Android cgroups. Cgroup namespaces
 retain roots independently of membership; proc paths and new mounts use that
-view, while existing mounts keep their roots. Arbitrary unattached
+view, while existing mounts keep their roots. Cgroup2 device-BPF program IDs,
+FDs and attachments have logical lifetime and query support, but the permissive
+provider does not execute device filters or grant native BPF access. Other BPF
+facilities and network hooks remain unsupported. Arbitrary unattached
 native roots remain unsupported. See the
 [process resource contract](../native/guest-runtime/process-resources.md).
+
+Offline IPv4 sysctls for unprivileged ports, ping groups and local port ranges
+belong to the selected network namespace. Their ordinary proc IO uses the shared
+typed descriptor transport, with namespace authority, retained mount policy and
+explicit unsupported operations. These settings do not implement packet transport
+or change Android's network settings. Namespace-mounted proc omits host-global
+`sysrq-trigger`, `kcore`, `kmsg` and `keys`, which have no guest provider.
+
+Logical sysfs mounts retain their opening network namespace. The offline view
+exposes `class/net/lo`, its device attributes and a mountpoint for cgroups,
+without binding Android `/sys`. Loopback attributes share the ioctl/netlink
+state and remain live through setns, bind mounts and retained descriptors.
+Host-network sysfs, additional device classes and attribute mutations are not
+implemented and return explicit errors. This is a limited provider, not a full
+kernel device tree.
+
+The limited `mqueue` provider retains the selected IPC namespace and supports
+directory metadata, enumeration and mount lifetime, including fsopen capture,
+bind aliases and detached descriptors. It does not implement POSIX queue IO:
+all `mq_*` syscalls return ENOSYS, and filesystem creation returns EOPNOTSUPP
+instead of creating ordinary files. Android queues are never delegated.
 
 `inode_metadata` enforces directory search, file access, ownership changes,
 sticky directories, setgid-parent inheritance, watch registration and timestamp permissions against
@@ -747,7 +787,7 @@ namespace ownership; CREATE prepares the filesystem before placement. The
 returned O_PATH mount descriptor can access its detached root and attach it in
 the creating mount view. Dup, fork and local SCM_RIGHTS retain these owners.
 Supported flag/string parameters cover the admitted tmpfs, overlay, proc,
-devpts and cgroup providers. Reconfiguration, binary/path/FD parameters and
+devpts, cgroup, sysfs and limited mqueue providers. Reconfiguration, binary/path/FD parameters and
 unsupported mount attributes fail explicitly; contexts cannot be transferred
 between independent supervisors. Closing a context releases its unpublished
 filesystem; detached mount storage follows the ordinary origin/graph lifetime.
@@ -1122,7 +1162,7 @@ snapshots with native read/seek afterwards; the worker allocates an unlinked
 construction file only on those explicit opens, not on ordinary IO. The caller
 needs only the final result slot, including when nondumpable. Namespace `/proc/self/exe`
 open/stat retains executable inode identity after unlink, path reuse and close_range,
-without a permanent hidden FD. Foreign-process aliases, snapshot stat metadata and
+without a permanent hidden FD. General foreign-process proc aliases, snapshot stat metadata and
 descriptor-exec readlink's original dentry identity remain incomplete. The direct
 backend retains path-based executable reopening. This is not a fully virtualized procfs.
 

@@ -23,7 +23,7 @@ struct md_control_file_ops {
     void (*release)(void *);
     int (*stat)(void *,struct stat *);
     long (*read)(void *,const struct md_control_actor *,void *,size_t,int64_t);
-    long (*write)(void *,const struct md_control_actor *,const void *,size_t);
+    long (*write)(void *,const struct md_control_actor *,const void *,size_t,int64_t);
     unsigned long filesystem;
     int (*access)(void *,const struct md_identity *,unsigned);
     int nonseekable;

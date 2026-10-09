@@ -41,7 +41,8 @@ __asm__(".text\n.global helper_call\nhelper_call:\nsvc #0\n"
 enum scenario { NORMAL, FULL, DENIED, KILLED_OPEN, CANCEL_CHANNEL, CANCEL_EXPORT,
     CANCEL_SECOND, NO_SLOT, INVALID_INPUT, REPLACE_CAPTURED, CLONE_DENIED,
     ONE_SLOT, CANCEL_RIGHT, FILTER_EPIPE, PEER_CLOSED, SIGNAL_PIPE, CANCEL_IMPORT, PREFIX_SLOTS,
-    EXACT_SLOTS, IMPORT_DENIED, CLOSE_DENIED, CONTROL_FAULT, ANCHOR_REJECT, ANCHOR_CANCEL, ANCHOR_DELIVER };
+    EXACT_SLOTS, IMPORT_DENIED, CLOSE_DENIED, CONTROL_FAULT, ANCHOR_REJECT, ANCHOR_CANCEL, ANCHOR_DELIVER,
+    CANCEL_CAPTURE, REPLACE_PATH };
 struct snapshot { unsigned char present[512]; };
 struct completed {
     int called, captured, mutate, socket, source;
@@ -142,7 +143,7 @@ static void actor(int socket, int writer, int file, int path, int replacement, i
     if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
     struct sock_filter code[]={
         BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
-        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_prctl,0,3),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_gettid,0,3),
         BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[0])),
         BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,MD_GUEST_TASK_HELPER,0,1),
         BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_USER_NOTIF),
@@ -251,8 +252,11 @@ struct send_frame {
     struct md_task_send_import import;
     struct sockaddr_un address;
 };
-static void exercise(int protected, enum scenario scenario, unsigned exported, int sending) {
+static void exercise_request(int protected, enum scenario scenario, unsigned exported, int sending,
+        const struct md_task_helper_request *capture) {
     unsigned before=descriptors(); early_child=0;
+    int reference=capture ? open(capture->path,capture->flags|O_CLOEXEC) : -1;
+    assert(!capture || reference>=0);
     sigset_t signals,previous; sigemptyset(&signals); sigaddset(&signals,SIGCHLD);
     assert(!sigprocmask(SIG_BLOCK,&signals,&previous));
     int signal_fd=signalfd(-1,&signals,SFD_CLOEXEC|SFD_NONBLOCK); assert(signal_fd>=0);
@@ -304,6 +308,7 @@ static void exercise(int protected, enum scenario scenario, unsigned exported, i
     request.path=NULL; request.flags=O_DIRECTORY;
     assert(md_task_helper_begin(helpers,child,child,&saved,&abi,memory,&buffer,&request,completed,&c)==-EINVAL);
     request.flags=0;
+    if (capture) request=*capture;
     if (exported) {
         request=(struct md_task_helper_request){.kind=MD_TASK_HELPER_EXPORT,
             .descriptors=inputs,.descriptor_count=exported,.captured=captured};
@@ -392,6 +397,19 @@ static void exercise(int protected, enum scenario scenario, unsigned exported, i
             pid_t pid;
             while ((pid=waitpid(-1,&status,__WALL|WNOHANG))>0) {
                 unsigned event=(unsigned)status>>16;
+                if (capture && (scenario==CANCEL_CAPTURE || scenario==REPLACE_PATH)
+                        && pid!=child && WIFSTOPPED(status) && !event && WSTOPSIG(status)==SIGTRAP) {
+                    struct user_pt_regs r=registers(pid);
+                    if (r.pc==(uintptr_t)helper_return && r.regs[8]==SYS_openat && (long)r.regs[0]>=0) {
+                        if (scenario==CANCEL_CAPTURE) {
+                            assert(!md_task_helper_detach(helpers,child)); cancelled=1;
+                        } else {
+                            assert(!unlink(capture->path));
+                            int replacement=open(capture->path,O_CREAT|O_EXCL|O_WRONLY|O_CLOEXEC,0600);
+                            assert(replacement>=0); close(replacement);
+                        }
+                    }
+                }
                 if ((scenario==CANCEL_EXPORT || scenario==CANCEL_SECOND) && !cancelled && pid!=child && WIFSTOPPED(status)
                         && !event && WSTOPSIG(status)==SIGTRAP) {
                     struct user_pt_regs r=registers(pid);
@@ -487,8 +505,17 @@ static void exercise(int protected, enum scenario scenario, unsigned exported, i
             md_received_fds_release(retained); retained=c.result.received;
         }
         else {
+            if (c.result.value) fprintf(stderr,"capture=%s protected=%d scenario=%d result=%ld\n",
+                capture ? capture->path : "fd-table",protected,scenario,c.result.value);
             assert(!c.result.value && c.result.descriptor>=0);
-            check_directory(c.result.descriptor,snapshot);
+            if (capture) {
+                struct stat expected,actual;
+                assert(!fstat(reference,&expected) && !fstat(c.result.descriptor,&actual));
+                assert(expected.st_dev==actual.st_dev && expected.st_ino==actual.st_ino
+                    && expected.st_mode==actual.st_mode && expected.st_rdev==actual.st_rdev);
+                assert(fcntl(c.result.descriptor,F_GETFL)==fcntl(reference,F_GETFL));
+                assert(fcntl(c.result.descriptor,F_GETFD)==FD_CLOEXEC);
+            } else check_directory(c.result.descriptor,snapshot);
             if (directory>=0) close(directory);
             directory=c.result.descriptor;
         }
@@ -550,16 +577,41 @@ static void exercise(int protected, enum scenario scenario, unsigned exported, i
     md_fs_anchor_release(origin); md_mount_namespace_release(view);
     if (directory>=0) {
         struct md_fd_table_observation o={0};
-        assert(md_fd_table_observation_begin(&o,directory,3)==-ENOENT);
+        if (!capture) assert(md_fd_table_observation_begin(&o,directory,3)==-ENOENT);
         close(directory);
     }
+    if (reference>=0) close(reference);
     md_task_helpers_destroy(helpers); assert(!md_buffer_release(&buffer)); md_memory_release(memory);
     assert(!munmap(mapping,size) && !munmap(stack,65536) && !munmap(snapshot,sizeof(*snapshot)));
     close(pipes[0]); close(listener); close(sockets[0]); close(sockets[1]); close(signal_fd);
     assert(!sigprocmask(SIG_SETMASK,&previous,NULL));
     assert(descriptors()==before);
-    printf("PASS task helper FD custody protected=%d scenario=%d exported=%u sending=%d rounds=%u\n",
-        protected,scenario,exported,sending,rounds);
+    printf("PASS task helper FD custody protected=%d scenario=%d exported=%u sending=%d capture=%s rounds=%u\n",
+        protected,scenario,exported,sending,capture ? capture->path : "none",rounds);
+}
+static void exercise(int protected, enum scenario scenario, unsigned exported, int sending) {
+    exercise_request(protected,scenario,exported,sending,NULL);
+}
+static void path_captures(void) {
+    char name[4096],link[4096];
+    assert(snprintf(name,sizeof(name),"%s/path-XXXXXX",directory_path)<(int)sizeof(name));
+    int fd=mkstemp(name); assert(fd>=0); close(fd);
+    assert(snprintf(link,sizeof(link),"%s.link",name)<(int)sizeof(link));
+    assert(!symlink(name,link));
+    struct md_task_helper_request request={.kind=MD_TASK_HELPER_CAPTURE,.path=name,.flags=O_PATH};
+    for (int protected=0;protected<2;++protected) {
+        enum scenario scenarios[]={NORMAL,FULL,DENIED,KILLED_OPEN,CANCEL_CHANNEL,CANCEL_CAPTURE,REPLACE_PATH};
+        for (unsigned i=0;i<sizeof(scenarios)/sizeof(*scenarios);++i)
+            exercise_request(protected,scenarios[i],0,0,&request);
+        request.path=link; request.flags=O_PATH|O_NOFOLLOW;
+        exercise_request(protected,NORMAL,0,0,&request);
+        request.path=directory_path; request.flags=O_PATH|O_DIRECTORY;
+        exercise_request(protected,NORMAL,0,0,&request);
+        request.path=name; request.flags=O_PATH;
+    }
+    assert(!unlink(link) && !unlink(name));
+    request.path="/dev/full";
+    exercise_request(0,NORMAL,0,0,&request);
 }
 int main(int argc, char **argv) {
     assert(argc==2 || (argc==3 && !strcmp(argv[2],"--native-anchor"))); directory_path=argv[1];
@@ -569,6 +621,7 @@ int main(int argc, char **argv) {
         puts("PASS captured native pathname delivery and exact release"); return 0;
     }
     native_control_fault();
+    path_captures();
     for (int protected=0;protected<2;++protected)
         for (enum scenario s=NORMAL;s<=CANCEL_EXPORT;++s) exercise(protected,s,0,0);
     for (int protected=0;protected<2;++protected) {

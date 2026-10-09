@@ -19,6 +19,8 @@ struct md_task_snapshot {
     struct md_pid_identity *pid_group;
     struct md_cgroup_member *cgroup;
     struct md_cgroup_namespace *cgroup_namespace;
+    struct md_network_namespace *network;
+    struct md_ipc_namespace *ipc;
 };
 struct md_task_registry *md_task_registry_create(void);
 void md_task_registry_destroy(struct md_task_registry *);

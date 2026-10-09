@@ -35,6 +35,7 @@ struct md_fs_buffer_service {
     md_control_factory control;
     md_control_query control_query;
     md_control_capture control_capture;
+    md_exec_capture exec_capture;
     void (*complete)(struct md_fs_buffer_request *, pid_t, int);
 };
 struct md_fs_buffer_request {
@@ -53,6 +54,7 @@ struct md_fs_buffer_request {
     struct md_fs_buffer_open opened;
     struct md_open_job opening;
     struct md_command_images images;
+    struct md_program *proc_image;
     struct md_file_snapshot snapshot;
     enum { SNAPSHOT_NONE, SNAPSHOT_BEGIN, SNAPSHOT_APPEND, SNAPSHOT_FINISH } snapshot_phase;
     int snapshot_waiting;
@@ -119,6 +121,10 @@ static void dispose(struct md_fs_buffer_request *r) {
     md_fd_channel_release(r->export);
     md_fs_buffer_open_release(&r->opened);
     md_command_images_close(&r->images);
+    if (r->proc_image) {
+        if (r->proc_image->fd>=0) close(r->proc_image->fd);
+        free(r->proc_image);
+    }
     md_file_snapshot_close(&r->snapshot);
     md_buffer_release(&r->buffer);
     free(r);
@@ -173,6 +179,16 @@ int md_fs_buffer_snapshot_advance(struct md_fs_buffer_request *r, int finish) {
 static int complete(struct md_fs_work *work) {
     struct md_fs_buffer_request *r=(void *)work;
     r->submitted=0;
+    if (!r->cancelled && r->executable && r->error==-EREMOTE && r->proc_image) {
+        r->error=r->service->exec_capture
+            ? r->service->exec_capture(r->actor,r->proc_image) : -EOPNOTSUPP;
+        if (!r->error) {
+            /* EVENT_WAIT: preparation resumes with the authorized image;
+             * cancellation releases its ownership without a guest FD. */
+            r->error=md_fs_worker_submit(r->service->worker,&r->work);
+            if (!r->error) { r->submitted=1; return 0; }
+        }
+    }
     if (!r->cancelled && !r->error && r->snapshot_phase
             && r->snapshot_phase!=SNAPSHOT_FINISH) {
         /* EVENT_WAIT: the caller copies the next chunk or completes the file.
@@ -395,6 +411,9 @@ void md_fs_buffer_control_query(struct md_fs_buffer_service *s,md_control_query 
 void md_fs_buffer_control_capture(struct md_fs_buffer_service *s,md_control_capture capture) {
     s->control_capture=capture;
 }
+void md_fs_buffer_exec_capture(struct md_fs_buffer_service *s,md_exec_capture capture) {
+    s->exec_capture=capture;
+}
 static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
     struct md_fs_buffer_request *r=(void *)work;
     r->error=error;
@@ -410,7 +429,7 @@ static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
     r->context.filesystem=fs;
     if (r->received) { r->error=inspect_received(r); return; }
     if (r->executable) {
-        r->error=md_fs_command_prepare(&r->context,&r->request,&r->output->command,&r->images);
+        r->error=md_fs_command_prepare(&r->context,&r->request,&r->proc_image,&r->output->command,&r->images);
         return;
     }
     struct md_fs_response *reply=&r->output->reply;
@@ -743,7 +762,8 @@ int md_fs_buffer_progress(struct md_fs_buffer_service *s) {
                 r->input[i]=capture_origin(r,i);
                 r->request.origin[i]=r->input[i];
             }
-            if (base>=0 && ((!i && (r->request.operation==MD_FS_FSCONFIG || r->request.operation==MD_FS_FSMOUNT))
+            if (base>=0 && ((!i && (r->request.operation==MD_FS_FSCONFIG || r->request.operation==MD_FS_FSMOUNT
+                        || r->request.operation==MD_FS_BPF))
                     || (i==1 && r->request.operation==MD_FS_MOUNT && r->request.mode==MD_FS_MOUNT_BIND
                         && r->request.path[i] && !*r->request.path[i]))
                     && s->control_query) {

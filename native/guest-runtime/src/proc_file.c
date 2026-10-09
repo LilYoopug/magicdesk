@@ -562,7 +562,7 @@ long md_proc_file_io_execute(struct md_proc_file_io *io, const struct md_identit
     if (io->operation==MD_PROC_FILE_WRITE) {
         if (f->control) {
             if (io->length>capacity || io->length>=page_size || (io->length && !bytes)) return io->result=-EINVAL;
-            io->result=f->control->write(f->control_context,&io->actor,bytes,io->length);
+            io->result=f->control->write(f->control_context,&io->actor,bytes,io->length,io->offset);
             if (io->result>0 && !io->positional) f->position=io->offset+io->result;
             return io->result;
         }

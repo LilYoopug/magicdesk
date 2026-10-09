@@ -6,6 +6,7 @@
 #include "raw.h"
 #include "fd_client.h"
 #include "fs_buffer.h"
+#include "bpf_request.h"
 #include <errno.h>
 #include <poll.h>
 #include <sys/socket.h>
@@ -35,6 +36,7 @@ int md_fs_result_valid(const struct md_fs_request *request, const struct md_fs_r
     int opens = operation == MD_FS_MOUNT_TABLE || operation == MD_FS_OPEN || operation == MD_FS_CREATE || operation == MD_FS_TEMPORARY
         || operation == MD_FS_OPEN_OBJECT || operation == MD_FS_OPEN_IMAGE || operation == MD_FS_WATCH_CREATE
         || operation == MD_FS_REOPEN || operation==MD_FS_FSOPEN || operation==MD_FS_FSMOUNT
+        || (operation==MD_FS_BPF && md_bpf_opens(request->mode))
         || operation == MD_FS_TASK_PATH || (operation == MD_FS_IPC
             && (request->flags == MD_IPC_MESSAGE_CREATE || request->flags == MD_IPC_MESSAGE_SENDER));
     if (reply->error > 0 || reply->error < -4095 || reply->host_path>2
@@ -76,6 +78,17 @@ int md_fs_result_valid(const struct md_fs_request *request, const struct md_fs_r
             if (id.group_count>MD_IDENTITY_GROUPS_MAX || reply->size!=sizeof(id)
                     +(request->mode ? id.group_count*sizeof(uint32_t) : 0)) return 0;
         }
+    } else if (operation==MD_FS_BPF && !reply->error) {
+        if (reply->host_path || reply->position || reply->size>request->capacity) return 0;
+        if (request->mode==BPF_OBJ_GET_INFO_BY_FD) return reply->size==sizeof(struct bpf_prog_info);
+        if (request->mode==BPF_PROG_QUERY) {
+            if (reply->size<sizeof(struct md_bpf_query)) return 0;
+            struct md_bpf_query query; memcpy(&query,data,sizeof(query));
+            unsigned count=(request->capacity-sizeof(query))/sizeof(uint32_t);
+            if (count>query.count) count=query.count;
+            return reply->size==sizeof(query)+count*sizeof(uint32_t);
+        }
+        return reply->size==0;
     } else if (!reply->error && !reply->host_path && md_fs_operation_value(operation)) {
         int read=operation==MD_FS_GETACL || ((operation==MD_FS_XATTR || operation==MD_FS_FXATTR || operation==MD_FS_XATTR_OBJECT)
             && (request->mode==MD_FS_XATTR_GET || request->mode==MD_FS_XATTR_LIST));

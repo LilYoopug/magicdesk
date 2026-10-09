@@ -51,7 +51,11 @@ int md_fs_mount_file_operation(struct md_filesystem *fs,struct md_mount_namespac
             r=output->control(output->control_context,file.ops,context,id,(int)q->flags);
             if (!r) {
                 int opened=file.ops->descriptor(context,(int)q->flags);
-                if (opened<0) r=opened; else out->fd=opened;
+                if (opened<0) r=opened;
+                else {
+                    out->fd=opened;
+                    if (output->origin) *output->origin=md_fs_anchor_retain(origin);
+                }
             }
             file.ops->release(context);
         }

@@ -1,22 +1,15 @@
 #define _GNU_SOURCE
-#include "ipc_namespace.h"
+#include "ipc_namespace_internal.h"
+#include "mqueue_view.h"
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/random.h>
 
-struct md_ipc_namespace {
-    unsigned references;
-    uint64_t id;
-    char *store;
-    struct md_ipc *semaphores;
-    struct md_shm *memory;
-    struct md_user_namespace *owner;
-};
 struct md_ipc_namespace *md_ipc_namespace_new(const char *store, int isolated) {
     struct md_ipc_namespace *n=calloc(1,sizeof(*n));
     if (!n) return NULL;
-    n->references=1;
+    atomic_init(&n->references,1);
     if (isolated && (getrandom(&n->id,sizeof(n->id),0)!=sizeof(n->id) || !n->id)) {
         free(n); return NULL;
     }
@@ -29,7 +22,7 @@ int md_ipc_namespace_bind(struct md_ipc_namespace *n, const char *store) {
     return n->store ? 0 : -ENOMEM;
 }
 struct md_ipc_namespace *md_ipc_namespace_retain(struct md_ipc_namespace *n) {
-    if (n) ++n->references;
+    if (n) atomic_fetch_add_explicit(&n->references,1,memory_order_relaxed);
     return n;
 }
 uint64_t md_ipc_namespace_inode(const struct md_ipc_namespace *n) { return n->id ? n->id : 1; }
@@ -40,26 +33,14 @@ struct md_ipc_namespace *md_ipc_namespace_copy(const struct md_ipc_namespace *n,
     return copy;
 }
 void md_ipc_namespace_release(struct md_ipc_namespace *n) {
-    if (!n || --n->references) return;
-    md_ipc_close(n->semaphores);
-    md_shm_close(n->memory);
+    if (!n || atomic_fetch_sub_explicit(&n->references,1,memory_order_acq_rel)!=1) return;
+    if (n->release_services) n->release_services(n);
+    md_mqueue_view_free(n->queues);
     md_user_namespace_release(n->owner);
     free(n->store); free(n);
 }
-int md_ipc_namespace_semaphores(struct md_ipc_namespace *n, struct md_ipc **out) {
-    *out=NULL;
-    if (!n || !n->store) return -ENOTSUP;
-    int error=n->semaphores ? 0 : md_ipc_open(n->store,n->id,n->owner,&n->semaphores);
-    if (!error) *out=n->semaphores;
-    return error;
-}
-int md_ipc_namespace_memory(struct md_ipc_namespace *n, struct md_shm **out) {
-    *out=NULL;
-    if (!n || !n->store) return -ENOTSUP;
-    int error=n->memory ? 0 : md_shm_open(n->store,n->id,n->owner,&n->memory);
-    if (!error) *out=n->memory;
-    return error;
-}
-struct md_ipc *md_ipc_namespace_active(const struct md_ipc_namespace *n) {
-    return n ? n->semaphores : NULL;
+struct md_mqueue_view *md_ipc_namespace_queues(struct md_ipc_namespace *n,int parent) {
+    if (!n) { errno=EOPNOTSUPP; return NULL; }
+    if (!n->queues && parent>=0) n->queues=md_mqueue_view_new(parent,n->owner);
+    return n->queues;
 }

@@ -64,6 +64,11 @@ the existing store locks, getrandom identities and owner leases. These add no
 post-5.15 dependency. Guest CLONE_NEWUSER and typed proc map writes follow the
 5.15 UID/GID mapping and CAP_SETFCAP rules without requiring host CONFIG_USER_NS.
 UTS sysctl files use the same lazy descriptor-selector mechanism as map files.
+Offline IPv4 sysctls use the shared typed-control transport and retained mount
+anchors; numeric values and permissions are launch-owned state, not host sysctl
+writes. They add no post-5.15 interface. Foreign proc executable selection reuses
+the existing process-image inspection, worker preparation and anonymous-image
+custody; it does not add a kernel exec or proc-FD capability requirement.
 Local typed SCM_RIGHTS custody adds a pipe EOF to the existing worker event loop;
 it needs no newer kernel API, polling loop or additional worker thread.
 Guest PID namespaces likewise use retained userspace identities, not native
@@ -160,6 +165,13 @@ the device policy, production private-table capture and cancellation, partial
 control faults, protected/shared-table receivers, quotas and fatal exit. The
 typed capture request reuses the same helper lifecycle, clone flags, private
 channel and atomic ADDFD_SEND; it adds no kernel primitive or startup probe.
+O_PATH capture can retain the stopped private helper's object through
+`/proc/<tid>/fd/<n>` with O_PATH, available in 5.15. Restricted proc access falls
+back to SCM_RIGHTS; nofollow and stateful descriptions retain exact transfer.
+`--case fd-observation` checks regular/directory/nofollow objects, protected
+callers, filters, full tables, cancellation, name replacement and `/dev/full`
+custody. `test_device_bind.py` checks device binding separately from the native
+data-access denial. No post-5.15 primitive or privilege change is required.
 This is an alternative observation fixture, not the guest annotated-return path.
 Production annotated return uses the existing mapped kernel receipt and
 SCM_RIGHTS, including O_PATH, without proc-table capture or ADDFD_SETFD. Filtered
@@ -210,6 +222,15 @@ or newer syscall is required. `--case mount-namespace` covers relative proc path
 mounted proc, clone/unshare/setns, retained handles, removed roots, owner checks
 and `fsopen` capture under UID 2000.
 
+Logical cgroup-device BPF uses the userspace ABI available before 5.15, sealed
+memfd carriers and the existing control-FD delivery/ownership contract. It never
+calls host bpf or requires CAP_BPF, native cgroup hooks, BTF or a newer kernel.
+`cgroup_program`, `namespace_bpf` and `fs_bpf` own this permissive bookkeeping;
+unsupported commands/features fail explicitly rather than falling through to
+Android. `test_cgroup_bpf.py` covers program/attachment lifetime, protected exec,
+SCM_RIGHTS, readonly policy, failed FD publication, invalid attributes and exact
+warmed descriptor cleanup under UID 2000.
+
 The descriptor mount API (`fsopen`, `fsconfig`, `fsmount`, `move_mount`,
 `mount_setattr`) follows
 the Linux 5.15 userspace contract through `fs_context`, `mount_source` and the
@@ -220,6 +241,21 @@ origin/ADDFD/SCM_RIGHTS delivery mechanisms. No newer kernel interface is needed
 transient-store fixture covers detached graph custody and exact FD retirement.
 Attribute changes use the existing single-writer policy, including recursive
 preflight and locked-policy rejection; no host mount_setattr call is required.
+
+`sysfs_view` retains the existing logical network owner and exposes its loopback
+state through typed control files, O_PATH provenance and a private native name
+tree. Legacy mount and fsopen share this provider; no host sysfs mount or
+post-5.15 API is used. `test_sysfs.py` covers namespace authority and capture,
+live netlink updates, retained/bound files, cgroup nesting, unsupported mutations,
+stock util-linux mounting and repeated detached retirement under UID 2000.
+
+`mqueue_view` implements a limited IPC-owned directory provider through the same
+mount APIs, without CONFIG_POSIX_MQUEUE or a host mount. POSIX message calls
+explicitly return ENOSYS; their absence must not fall through to Android queues
+on kernels which enable them. No post-5.15 API is required. `test_mqueue_mount.py`
+checks both mount APIs, IPC capture and authority, bind/copy/readonly behavior
+and unsupported operations. The resource-owner fixture checks final namespace
+release, private-tree removal and exact native FD baseline over 40 iterations.
 
 ## Newer Interfaces
 

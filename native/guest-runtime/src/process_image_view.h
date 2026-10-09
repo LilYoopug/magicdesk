@@ -11,4 +11,6 @@ void md_process_executable_release(struct md_process_executable *);
 struct md_control_file md_process_executable_view(struct md_process_executable *);
 int md_process_image_view(pid_t, uintptr_t image, unsigned kind, unsigned flags, const char *endpoint, pid_t caller);
 ssize_t md_process_image_link(pid_t, uintptr_t image, char *, size_t capacity);
+struct md_image_identity;
+int md_process_image_identity(pid_t,uintptr_t image,struct md_image_identity *);
 #endif

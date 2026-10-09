@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "cgroup.h"
+#include "cgroup_program.h"
 #include "task_resources.h"
 #include "temporary_directory.h"
 #include "file_permissions.h"
@@ -33,12 +34,15 @@ struct group {
     struct stat identity,files[FILES];
     uid_t uid; gid_t gid;
     char name[256];
+    struct md_cgroup_program **programs;
+    unsigned program_count,program_flags;
 };
 struct world {
     atomic_uint refs;
     pthread_mutex_t lock;
     struct md_cgroup_member *members;
     struct md_cgroup_view *views[2];
+    struct md_cgroup_programs *programs;
 };
 struct md_cgroup_view {
     struct world *world;
@@ -70,14 +74,27 @@ struct opened {
     struct md_fs_anchor *origin;
 };
 static struct world *retain(struct world *w) { atomic_fetch_add(&w->refs,1); return w; }
+static void clear_programs(struct group *g) {
+    for (unsigned i=0;i<g->program_count;++i) md_cgroup_program_release(g->programs[i]);
+    free(g->programs); g->programs=NULL; g->program_count=g->program_flags=0;
+}
 static void release(struct world *w) {
     if (atomic_fetch_sub(&w->refs,1)!=1) return;
     for (unsigned i=0;i<2;++i) if (w->views[i]) {
         struct md_cgroup_view *v=w->views[i];
-        while (v->groups) { struct group *g=v->groups; v->groups=g->next; if (g->fd>=0) close(g->fd); free(g); }
+        while (v->groups) { struct group *g=v->groups; v->groups=g->next; clear_programs(g); if (g->fd>=0) close(g->fd); free(g); }
         md_temporary_directory_release(v->storage); free(v);
     }
+    md_cgroup_programs_release(w->programs);
     pthread_mutex_destroy(&w->lock); free(w);
+}
+struct md_cgroup_programs *md_cgroup_program_registry(struct md_cgroup_member *m,int create) {
+    if (!m) { errno=EINVAL; return NULL; }
+    struct world *w=m->world;
+    pthread_mutex_lock(&w->lock);
+    if (!w->programs && create) w->programs=md_cgroup_programs_new();
+    struct md_cgroup_programs *p=md_cgroup_programs_retain(w->programs);
+    pthread_mutex_unlock(&w->lock); return p;
 }
 struct md_cgroup_namespace *md_cgroup_namespace_new(struct md_cgroup_member *m,struct md_user_namespace *owner) {
     if (!m) { errno=EINVAL; return NULL; }
@@ -216,6 +233,58 @@ int md_cgroup_stat(struct md_cgroup_view *v,int fd,struct stat *st) {
 static int capable(const struct md_identity *id,struct group *g) {
     return id->uid.fs==g->uid || md_identity_file_capable(id,g->uid,g->gid,CAP_DAC_OVERRIDE);
 }
+int md_cgroup_program_query(struct md_cgroup_view *v,int fd,struct md_cgroup_member *member,
+        const struct md_identity *id,unsigned flags,uint32_t *ids,unsigned capacity,unsigned *count,unsigned *attach_flags) {
+    if (!member || member->world!=v->world) return -EXDEV;
+    if (v->devices) return -EINVAL;
+    if (flags&~BPF_F_QUERY_EFFECTIVE) return -EINVAL;
+    struct stat st; if (fstat(fd,&st)) return -errno;
+    pthread_mutex_lock(&v->world->lock); unsigned file;
+    struct group *g=lookup(v,&st,&file);
+    int r=!g || g->removed ? -ENODEV : file!=FILES ? -EINVAL : !capable(id,g) ? -EACCES : 0;
+    *count=*attach_flags=0;
+    if (!r) {
+        *attach_flags=flags ? 0 : g->program_flags;
+        for (;g;g=flags ? g->parent : NULL) for (unsigned i=0;i<g->program_count;++i) {
+            if (*count<capacity) ids[*count]=md_cgroup_program_id(g->programs[i]);
+            ++*count;
+        }
+    }
+    pthread_mutex_unlock(&v->world->lock); return r;
+}
+int md_cgroup_program_attach(struct md_cgroup_view *v,int fd,struct md_cgroup_member *member,
+        const struct md_identity *id,struct md_cgroup_program *program,unsigned flags,int detach) {
+    if (!member || member->world!=v->world) return -EXDEV;
+    if (v->devices || flags&~BPF_F_ALLOW_MULTI || (detach && flags)) return -EINVAL;
+    if (md_cgroup_program_type(program)!=BPF_PROG_TYPE_CGROUP_DEVICE) return -EINVAL;
+    struct stat st; if (fstat(fd,&st)) return -errno;
+    pthread_mutex_lock(&v->world->lock); unsigned file;
+    struct group *g=lookup(v,&st,&file);
+    int r=!g || g->removed ? -ENODEV : file!=FILES ? -EINVAL : !capable(id,g) ? -EACCES : 0;
+    if (!r && !md_cgroup_program_belongs(program,v->world->programs)) r=-EINVAL;
+    if (!r) {
+        unsigned index=0;
+        while (index<g->program_count && g->programs[index]!=program) ++index;
+        if (detach) {
+            if (index==g->program_count) r=-ENOENT;
+            else {
+                md_cgroup_program_release(g->programs[index]);
+                memmove(g->programs+index,g->programs+index+1,(--g->program_count-index)*sizeof(*g->programs));
+                if (!g->program_count) clear_programs(g);
+            }
+        } else if (g->program_count && g->program_flags!=flags) r=-EINVAL;
+        else if (index<g->program_count) r=-EEXIST;
+        else if (!flags && g->program_count) {
+            md_cgroup_program_release(g->programs[0]); g->programs[0]=md_cgroup_program_retain(program);
+        } else if (g->program_count==MD_CGROUP_PROGRAM_ATTACHMENTS) r=-E2BIG;
+        else {
+            void *next=realloc(g->programs,(g->program_count+1)*sizeof(*g->programs));
+            if (!next) r=-ENOMEM;
+            else { g->programs=next; g->programs[g->program_count++]=md_cgroup_program_retain(program); g->program_flags=flags; }
+        }
+    }
+    pthread_mutex_unlock(&v->world->lock); return r;
+}
 int md_cgroup_mkdir(struct md_cgroup_view *v,int parent,const char *name,const struct md_identity *id) {
     struct stat st; if (fstat(parent,&st)) return -errno;
     if (strchr(name,'/') || strlen(name)>=256 || !*name || !strcmp(name,".") || !strcmp(name,"..")) return -EINVAL;
@@ -251,6 +320,7 @@ int md_cgroup_rmdir(struct md_cgroup_view *v,int fd,const char *name,const struc
         if (unlinkat(fd,name,AT_REMOVEDIR)) r=-errno;
         else {
             g->removed=1;
+            clear_programs(g);
             /* Open controls and captured task snapshots may still refer to
              * the logical group; they do not need its backing directory FD. */
             close(g->fd); g->fd=-1;
@@ -329,7 +399,8 @@ static long control_read(void *ctx,const struct md_control_actor *actor,void *da
     }
     free(text); return error ? error : (long)size;
 }
-static long control_write(void *ctx,const struct md_control_actor *actor,const void *data,size_t size) {
+static long control_write(void *ctx,const struct md_control_actor *actor,const void *data,size_t size,int64_t offset) {
+    (void)offset;
     if (!actor || !actor->resources || !actor->identity || size>=4096) return -EINVAL;
     struct opened *o=ctx; struct md_cgroup_view *v=o->view;
     if (!actor->resources->cgroup || actor->resources->cgroup->world!=v->world) return -EXDEV;

@@ -63,7 +63,9 @@ static long open_extended(const struct md_fs *fs, const char *exe, const unsigne
             long checked=RAW4(openat2,a[0],path,&probe,sizeof(probe));
             if (checked<0) return checked;
             RAW1(close,checked);
-            return md_proc_control_open(ref.process,kind,(int)how.flags);
+            long result=md_proc_control_open(ref.process,kind,(int)how.flags);
+            return result==-EXDEV && md_proc_network_sysctl(kind)
+                ? RAW4(openat2,a[0],a[1],&how,sizeof(how)) : result;
         }
         if (ref.kind == MD_PROC_FOREIGN) return -ENOTSUP;
         if (ref.kind == MD_PROC_CMDLINE || ref.kind == MD_PROC_AUXV) {
@@ -136,8 +138,10 @@ long md_file_call(const struct md_fs *fs, const char *exe, long nr, const unsign
         if (r < 0) return r;
         struct md_proc_path image = md_proc_path(first);
         enum md_proc_kind control=image.kind==MD_PROC_FOREIGN ? image.foreign_kind : image.kind;
-        if (md_proc_control_kind(control))
-            return *image.tail ? -ENOTDIR : md_proc_control_open(image.process,control,flags);
+        if (md_proc_control_kind(control)) {
+            long result=*image.tail ? -ENOTDIR : md_proc_control_open(image.process,control,flags);
+            if (result!=-EXDEV || !md_proc_network_sysctl(control)) return result;
+        }
         if (image.kind == MD_PROC_CMDLINE || image.kind == MD_PROC_AUXV)
             return *image.tail ? -ENOTDIR : md_proc_image_open(fs, image.kind, flags);
         return RAW4(openat, AT_FDCWD, first, flags, a[3]);
@@ -151,7 +155,10 @@ long md_file_call(const struct md_fs *fs, const char *exe, long nr, const unsign
         if (r>=0) {
             struct md_proc_path ref=md_proc_path(first);
             enum md_proc_kind kind=ref.kind==MD_PROC_FOREIGN ? ref.foreign_kind : ref.kind;
-            if (md_proc_control_kind(kind)) return *ref.tail ? -ENOTDIR : md_proc_control_metadata(ref.process,kind,-1,nr,a);
+            if (md_proc_control_kind(kind)) {
+                long result=*ref.tail ? -ENOTDIR : md_proc_control_metadata(ref.process,kind,-1,nr,a);
+                if (result!=-EXDEV || !md_proc_network_sysctl(kind)) return result;
+            }
         }
         return r < 0 ? r : md_raw(nr, first[0] ? AT_FDCWD : a[0], (long)first, a[2], a[3], a[4], 0);
     case SYS_mkdirat:

@@ -33,7 +33,7 @@ enum { MD_PROC_FILE_OPEN=1, MD_PROC_FILE_KIND, MD_PROC_FILE_REOPEN, MD_PROC_FILE
 struct md_proc_metadata_request { int32_t process, descriptor; uint32_t kind, access, effective, nofollow; };
 struct md_proc_metadata_result { struct stat value; uint32_t kind; unsigned long filesystem; };
 static inline int md_proc_control_kind(enum md_proc_kind kind) {
-    return kind>=MD_PROC_UID_MAP && kind<=MD_PROC_NS_UNSUPPORTED;
+    return (kind>=MD_PROC_UID_MAP && kind<=MD_PROC_NS_UNSUPPORTED) || md_proc_network_sysctl(kind);
 }
 long md_proc_control_open(int process, enum md_proc_kind, int flags);
 long md_proc_control_open_view(int process, enum md_proc_kind, int flags, uint64_t view);

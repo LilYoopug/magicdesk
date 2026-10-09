@@ -251,10 +251,10 @@ multiple mounts. General alias admission still requires complete descriptor
 provenance, not a guessed native inode match.
 The initial tree is built at launch and retained by task resources independently
 of CLONE_FS. Its objects and native mount-ID map follow that view's lifetime,
-not the worker's current request. The worker can construct an unpublished copy
-with independent IDs, policy and rebased root; guest-created mount namespaces
-are not implemented. See [process resources](process-resources.md) for ownership
-and publication boundaries.
+not the worker's current request. The worker constructs unpublished copies with
+independent IDs, policy and rebased roots for guest mount namespaces. Guest
+clone, unshare and setns use the same retained view and publication contracts.
+See [process resources](process-resources.md) for ownership and publication boundaries.
 
 Native metadata identity is retained across rename/unlink. Readonly policy also
 applies to descriptor-based metadata changes and writable reopens, not just
@@ -265,16 +265,20 @@ O_PATH references do not hold extra writable descriptions or file locks. Native
 directory reads share the publish-before-cursor-commit contract. Watches use the
 existing native-event path rather than a second watcher system.
 
-The view allows at most 16 attachments and 65,536 retained native identities.
+The view allows at most 128 mount slots and 65,536 retained native identities.
+Launch attachments and guest-created mounts use the same namespace bound.
+Detached mounts occupy their slots until retained descriptions and children
+release them. Exhaustion returns ENOSPC; it does not discard a live mount.
 Final release closes the view after its worker, tasks, registry and requests
 have relinquished their references; capacity exhaustion is explicit.
 Pathname socket creation/address translation in an attached directory is not
 implemented. Existing guest-store sockets and explicit graphics routes remain
 separate supported paths. Native host hardlinks require the host's permission;
 the inode store's logical hardlink emulation does not apply to host volumes.
-These bindings do not implement mount(2), mount propagation, OverlayFS, FUSE,
-cgroups or filesystem confinement. A future mount adapter should update this
-same view with explicit namespace ownership, not duplicate path translation.
+Guest mount operations, logical OverlayFS and the supported proc/devpts/sysfs,
+mqueue and cgroup providers compose into this same namespace-owned view.
+They do not grant native Android mount authority or filesystem confinement.
+Shared mount propagation and FUSE remain unsupported.
 
 ## Checks
 

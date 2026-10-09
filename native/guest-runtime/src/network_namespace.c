@@ -16,22 +16,29 @@
 #include <net/if.h>
 #include <linux/if_arp.h>
 #include <netinet/in.h>
+#include <pthread.h>
 
 struct md_network_namespace {
     atomic_uint references;
     uint64_t inode;
     struct md_user_namespace *owner;
     int offline;
-    unsigned loopback_flags;
+    atomic_uint loopback_flags;
     uint32_t loopback_address;
+    pthread_mutex_t policy_lock;
+    uint32_t unprivileged_port, ping_groups[2], local_ports[2];
 };
 struct md_network_namespace *md_network_namespace_new(struct md_user_namespace *owner, int offline) {
     struct md_network_namespace *n=calloc(1,sizeof(*n));
     if (!n) return NULL;
     int error=md_namespace_identity_new(&n->inode);
     if (error) { free(n); errno=-error; return NULL; }
+    error=pthread_mutex_init(&n->policy_lock,NULL);
+    if (error) { free(n); errno=error; return NULL; }
+    n->unprivileged_port=1024; n->ping_groups[0]=1;
+    n->local_ports[0]=32768; n->local_ports[1]=60999;
     atomic_init(&n->references,1); n->owner=md_user_namespace_retain(owner); n->offline=!!offline;
-    n->loopback_flags=IFF_LOOPBACK;
+    atomic_init(&n->loopback_flags,IFF_LOOPBACK);
     return n;
 }
 struct md_network_namespace *md_network_namespace_retain(struct md_network_namespace *n) {
@@ -40,11 +47,54 @@ struct md_network_namespace *md_network_namespace_retain(struct md_network_names
 }
 void md_network_namespace_release(struct md_network_namespace *n) {
     if (!n || atomic_fetch_sub_explicit(&n->references,1,memory_order_acq_rel)!=1) return;
+    pthread_mutex_destroy(&n->policy_lock);
     md_user_namespace_release(n->owner); free(n);
 }
 uint64_t md_network_namespace_inode(const struct md_network_namespace *n) { return n->inode; }
 const struct md_user_namespace *md_network_namespace_owner(const struct md_network_namespace *n) { return n->owner; }
 int md_network_namespace_offline(const struct md_network_namespace *n) { return n && n->offline; }
+int md_network_parameter_get(struct md_network_namespace *n,enum md_network_parameter kind,uint32_t out[2]) {
+    if (!md_network_namespace_offline(n)) return -EXDEV;
+    pthread_mutex_lock(&n->policy_lock);
+    int error=0;
+    switch (kind) {
+    case MD_NET_UNPRIVILEGED_PORT: out[0]=n->unprivileged_port; out[1]=0; break;
+    case MD_NET_PING_GROUPS: memcpy(out,n->ping_groups,sizeof(n->ping_groups)); break;
+    case MD_NET_LOCAL_PORTS: memcpy(out,n->local_ports,sizeof(n->local_ports)); break;
+    default: error=-EINVAL;
+    }
+    pthread_mutex_unlock(&n->policy_lock); return error;
+}
+int md_network_parameter_set(struct md_network_namespace *n,enum md_network_parameter kind,const uint32_t in[2]) {
+    if (!md_network_namespace_offline(n)) return -EXDEV;
+    pthread_mutex_lock(&n->policy_lock);
+    int error=0;
+    switch (kind) {
+    case MD_NET_UNPRIVILEGED_PORT:
+        if (in[0]>65535 || in[0]>n->local_ports[0]) error=-EINVAL;
+        else n->unprivileged_port=in[0];
+        break;
+    case MD_NET_PING_GROUPS:
+        if (in[0]==UINT32_MAX || in[1]==UINT32_MAX) error=-EINVAL;
+        else if (in[0]>in[1]) { n->ping_groups[0]=1; n->ping_groups[1]=0; }
+        else memcpy(n->ping_groups,in,sizeof(n->ping_groups));
+        break;
+    case MD_NET_LOCAL_PORTS:
+        if (!in[0] || in[0]>in[1] || in[1]>65535 || in[0]<n->unprivileged_port) error=-EINVAL;
+        else memcpy(n->local_ports,in,sizeof(n->local_ports));
+        break;
+    default: error=-EINVAL;
+    }
+    pthread_mutex_unlock(&n->policy_lock); return error;
+}
+int md_network_link_info(const struct md_network_namespace *n,unsigned index,struct md_network_link *out) {
+    if (!md_network_namespace_offline(n)) return -EOPNOTSUPP;
+    if (index!=1) return -ENODEV;
+    unsigned flags=atomic_load_explicit(&n->loopback_flags,memory_order_relaxed);
+    *out=(struct md_network_link){.index=1,.flags=flags,.mtu=65536,
+        .type=ARPHRD_LOOPBACK,.state=(flags&IFF_UP) ? IF_OPER_UNKNOWN : IF_OPER_DOWN,.name="lo"};
+    return 0;
+}
 struct network_socket {
     struct md_fd_object object;
     struct md_network_namespace *space;
@@ -124,8 +174,8 @@ static int route_change(struct network_socket *s, const struct md_identity *iden
     }
     return -EOPNOTSUPP;
 }
-static unsigned loopback_flags(const struct md_network_namespace *space) {
-    return space->loopback_flags | ((space->loopback_flags&IFF_UP) ? IFF_RUNNING|IFF_LOWER_UP : 0);
+static unsigned link_flags(const struct md_network_link *link) {
+    return link->flags | ((link->flags&IFF_UP) ? IFF_RUNNING|IFF_LOWER_UP : 0);
 }
 static size_t attribute(void *out,unsigned type,const void *data,size_t size) {
     struct rtattr *a=out;
@@ -156,17 +206,20 @@ static int route_query(const struct network_socket *s,const struct nlmsghdr *h,s
     }
     if (remaining) return -EINVAL;
     if (!dump && !named && !m->ifi_index) return -EINVAL;
+    struct md_network_link info;
+    int error=md_network_link_info(s->space,1,&info);
+    if (error) return error;
     struct nlmsghdr *reply=out;
     *reply=(struct nlmsghdr){.nlmsg_len=NLMSG_LENGTH(sizeof(*m)),.nlmsg_type=RTM_NEWLINK,
         .nlmsg_flags=dump ? NLM_F_MULTI : 0,.nlmsg_seq=h->nlmsg_seq,.nlmsg_pid=s->port};
     struct ifinfomsg *link=NLMSG_DATA(reply);
-    *link=(struct ifinfomsg){.ifi_family=AF_UNSPEC,.ifi_type=ARPHRD_LOOPBACK,
-        .ifi_index=1,.ifi_flags=loopback_flags(s->space)};
+    *link=(struct ifinfomsg){.ifi_family=AF_UNSPEC,.ifi_type=info.type,
+        .ifi_index=info.index,.ifi_flags=link_flags(&info)};
     char *at=(char *)out+reply->nlmsg_len;
-    at+=attribute(at,IFLA_IFNAME,"lo",3);
-    uint32_t mtu=65536; at+=attribute(at,IFLA_MTU,&mtu,sizeof(mtu));
-    unsigned char address[6]={0}; at+=attribute(at,IFLA_ADDRESS,address,sizeof(address));
-    unsigned char state=(s->space->loopback_flags&IFF_UP) ? IF_OPER_UNKNOWN : IF_OPER_DOWN;
+    at+=attribute(at,IFLA_IFNAME,info.name,strlen(info.name)+1);
+    uint32_t mtu=info.mtu; at+=attribute(at,IFLA_MTU,&mtu,sizeof(mtu));
+    at+=attribute(at,IFLA_ADDRESS,info.address,sizeof(info.address));
+    unsigned char state=info.state;
     at+=attribute(at,IFLA_OPERSTATE,&state,sizeof(state));
     reply->nlmsg_len=(uint32_t)(at-(char *)out);
     if (dump) {
@@ -189,15 +242,18 @@ long md_network_socket_call(struct md_fd_object *object, const struct md_identit
     struct network_socket *s=(void *)object;
     if (nr==SYS_ioctl) {
         if (size!=sizeof(struct ifreq)) return -EINVAL;
+        struct md_network_link info;
+        int error=md_network_link_info(s->space,1,&info);
+        if (error) return error;
         struct ifreq *r=data;
         if (a[1]==SIOCGIFNAME) {
             if (r->ifr_ifindex!=1) return -ENODEV;
-            memset(r->ifr_name,0,IFNAMSIZ); memcpy(r->ifr_name,"lo",3); return 0;
+            memcpy(r->ifr_name,info.name,IFNAMSIZ); return 0;
         }
         if (memcmp(r->ifr_name,"lo",3)) return -ENODEV;
-        if (a[1]==SIOCGIFINDEX) r->ifr_ifindex=1;
-        else if (a[1]==SIOCGIFFLAGS) r->ifr_flags=(short)loopback_flags(s->space);
-        else if (a[1]==SIOCGIFMTU) r->ifr_mtu=65536;
+        if (a[1]==SIOCGIFINDEX) r->ifr_ifindex=info.index;
+        else if (a[1]==SIOCGIFFLAGS) r->ifr_flags=(short)link_flags(&info);
+        else if (a[1]==SIOCGIFMTU) r->ifr_mtu=info.mtu;
         else return -EOPNOTSUPP;
         return 0;
     }

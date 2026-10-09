@@ -1132,6 +1132,21 @@ static int proc_node_access(const struct md_identity *id, const struct stat *st,
 }
 static int proc_node_metadata(struct thread *t, const struct md_proc_metadata_request *q, struct md_proc_metadata_result *out) {
     struct stat *value=&out->value;
+    if (md_proc_network_sysctl(q->kind)) {
+        struct md_control_file view=md_network_sysctl_new(t->resources.network,
+            (enum md_network_parameter)(q->kind-MD_PROC_NET_UNPRIVILEGED_PORT),NULL);
+        if (!view.ops) return -errno;
+        int error=view.ops->stat(view.context,value);
+        struct md_identity actor=t->identity;
+        if (!q->effective) { actor.uid.fs=actor.uid.real; actor.gid.fs=actor.gid.real; }
+        if (!error) error=view.ops->access(view.context,&actor,q->access);
+        if (!error) {
+            value->st_uid=md_identity_visible_id(&t->identity,0,value->st_uid);
+            value->st_gid=md_identity_visible_id(&t->identity,1,value->st_gid);
+            out->kind=MD_PROC_FILE_CONTROL; out->filesystem=view.ops->filesystem;
+        }
+        md_control_file_release(view); return error;
+    }
     struct proc_owner target=proc_owner(q->process);
     struct md_proc_file *file=NULL;
     struct md_proc_file_node node={0};
@@ -1256,6 +1271,26 @@ static int control_file_capture(pid_t actor,const char *path,struct md_fd_object
     }
     *out=md_proc_file_object(file); return 1;
 }
+static int executable_capture(pid_t actor,struct md_program *image) {
+    struct thread *t=find_thread(actor);
+    if (!t) return -ESRCH;
+    struct md_proc_path selected=md_proc_path_for(image->identity.path,t->pid,t->tgid);
+    TRACE("PROBE exec-proc capture actor=%d path=%s target=%d\n",actor,image->identity.path,selected.process);
+    enum md_proc_kind kind=selected.kind==MD_PROC_FOREIGN ? selected.foreign_kind : selected.kind;
+    if (kind!=MD_PROC_EXE || *selected.tail || image->fd>=0) return -EINVAL;
+    struct thread *target=find_thread(selected.process);
+    if (!target || !target->born) return -ENOENT;
+    if (target!=t && !debugger_allowed(t->pid,target->pid)) return -EACCES;
+    int error=md_process_image_identity(target->pid,target->process_image,&image->identity);
+    if (error) return error;
+    if (target->executable) {
+        struct md_control_file view=md_process_executable_view(target->executable);
+        int fd=view.ops->descriptor(view.context,O_RDONLY|O_CLOEXEC);
+        if (fd<0) return fd;
+        image->fd=fd;
+    } else if (!image->identity.object[0]) return -ENOENT;
+    return 0;
+}
 static void proc_file_request(struct thread *t, const struct seccomp_notif *q) {
     struct seccomp_notif_resp reply={.id=q->id};
     unsigned operation=(unsigned)q->data.args[1];
@@ -1293,6 +1328,24 @@ static void proc_file_request(struct thread *t, const struct seccomp_notif *q) {
             if (!reply.error) return;
         }
         else reply.error=-ENOTTY;
+    } else if (operation==MD_PROC_FILE_OPEN && md_proc_network_sysctl(q->data.args[3])) {
+        int flags=(int)q->data.args[4];
+        struct md_control_file view=md_network_sysctl_new(t->resources.network,
+            (enum md_network_parameter)(q->data.args[3]-MD_PROC_NET_UNPRIVILEGED_PORT),NULL);
+        struct md_proc_file *file=NULL;
+        if (!view.ops) reply.error=-errno;
+        else {
+            file=md_proc_file_open_control(view.ops,view.context,&t->identity,flags);
+            if (!file) reply.error=-errno;
+            else if (flags&O_PATH) {
+                int fd=md_proc_file_descriptor(file);
+                if (fd<0) reply.error=fd;
+                else if (!t->buffer.pool || t->proc_file || t->proc_image_fd>=0) { close(fd); reply.error=-EPERM; }
+                else { t->proc_file=md_proc_file_retain(file); t->proc_image_fd=fd; }
+            } else reply.error=proc_file_publish(t,q,file);
+        }
+        md_control_file_release(view); md_proc_file_release(file);
+        if (!reply.error && !(flags&O_PATH)) return;
     } else if (operation==MD_PROC_FILE_OPEN && q->data.args[3]==MD_PROC_EXE) {
         struct thread *target=find_thread((pid_t)q->data.args[2]);
         int flags=(int)q->data.args[4];
@@ -3947,6 +4000,7 @@ int main(int argc, char **argv) {
         md_fs_buffer_control_factory(buffer_service,control_file_create);
         md_fs_buffer_control_query(buffer_service,control_file_query);
         md_fs_buffer_control_capture(buffer_service,control_file_capture);
+        md_fs_buffer_exec_capture(buffer_service,executable_capture);
         CHECK(!md_mount_copy_service_create(filesystem,mount_copy_complete,&mount_copy_service));
         const char *program = "", *cwd = "/";
         for (int i = argument+1; i+1 < argc; ++i) {

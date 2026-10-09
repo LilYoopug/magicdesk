@@ -59,6 +59,15 @@ struct md_proc_path md_proc_path_for(const char *path,int tid,int tgid) {
             out.kind=MD_PROC_MOUNTS; out.tail=p; out.anchor_length=(size_t)(p-path); return out;
         }
         if (word(&p,"sys")) {
+            if (word(&p,"net")) {
+                if (!word(&p,"ipv4")) return out;
+                if (word(&p,"ip_unprivileged_port_start")) out.kind=MD_PROC_NET_UNPRIVILEGED_PORT;
+                else if (word(&p,"ping_group_range")) out.kind=MD_PROC_NET_PING_GROUPS;
+                else if (word(&p,"ip_local_port_range")) out.kind=MD_PROC_NET_LOCAL_PORTS;
+                else return out;
+                out.process=tid;
+                out.tail=p; out.anchor_length=(size_t)(p-path); return out;
+            }
             if (!word(&p,"kernel")) return out;
             if (word(&p,"hostname")) out.kind=MD_PROC_HOSTNAME;
             else if (word(&p,"domainname")) out.kind=MD_PROC_DOMAINNAME;

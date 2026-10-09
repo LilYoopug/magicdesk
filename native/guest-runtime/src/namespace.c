@@ -286,6 +286,7 @@ long md_namespace_call(const struct md_fs *fs, const char *exe, long nr, const u
         if (result != -EXDEV) return result;
         return md_raw(nr,a[0],a[1],a[2],a[3],a[4],a[5]);
     }
+    if (nr==SYS_bpf) return md_namespace_bpf(fs,a);
     if (nr==SYS_mount || nr==SYS_umount2 || nr==SYS_pivot_root) return md_namespace_mount(fs,nr,a);
     if (nr==SYS_fsopen || nr==SYS_fsconfig || nr==SYS_fsmount || nr==SYS_move_mount || nr==SYS_mount_setattr)
         return md_namespace_mount_fd(fs,nr,a);
@@ -360,6 +361,9 @@ long md_namespace_path_call(const struct md_fs *fs, long nr, const unsigned long
     case SYS_mknodat: {
         unsigned mode = (unsigned)a[2];
         if (!(mode&S_IFMT)) mode|=S_IFREG;
+        /* Device creation has no guest authority (CAP_MKNOD is not advertised).
+         * Existing devices may be bound, subject to native open permissions. */
+        if ((mode&S_IFMT)==S_IFCHR || (mode&S_IFMT)==S_IFBLK) return -EPERM;
         if ((mode&S_IFMT)!=S_IFIFO && (mode&S_IFMT)!=S_IFREG) return -ENOTSUP;
         long masked=md_namespace_creation_mode(fs,0777);
         if (masked<0) return masked;

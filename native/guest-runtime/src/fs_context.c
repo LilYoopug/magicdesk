@@ -17,6 +17,8 @@ struct filesystem_context {
     struct md_pid_identity *pid;
     struct md_cgroup_member *cgroup;
     struct md_cgroup_namespace *cgroup_namespace;
+    struct md_network_namespace *network;
+    struct md_ipc_namespace *ipc;
     struct md_mount_source source;
     struct stat stat;
     unsigned type,flags;
@@ -34,7 +36,8 @@ static void release(void *data) {
     md_mount_source_close(&c->source);
     md_identity_release(&c->opener);
     md_pid_identity_release(c->pid); md_cgroup_member_release(c->cgroup);
-    md_cgroup_namespace_release(c->cgroup_namespace); free(c);
+    md_cgroup_namespace_release(c->cgroup_namespace);
+    md_network_namespace_release(c->network); md_ipc_namespace_release(c->ipc); free(c);
 }
 static int stat_context(void *data,struct stat *st) {
     *st=((struct filesystem_context *)data)->stat; return 0;
@@ -42,7 +45,8 @@ static int stat_context(void *data,struct stat *st) {
 static long read_context(void *data,const struct md_control_actor *actor,void *out,size_t size,int64_t offset) {
     (void)data; (void)actor; (void)out; (void)size; (void)offset; return -ENODATA;
 }
-static long write_context(void *data,const struct md_control_actor *actor,const void *in,size_t size) {
+static long write_context(void *data,const struct md_control_actor *actor,const void *in,size_t size,int64_t offset) {
+    (void)offset;
     (void)data; (void)actor; (void)in; (void)size; return -EINVAL;
 }
 static int access_context(void *data,const struct md_identity *id,unsigned mode) {
@@ -54,7 +58,9 @@ static const struct md_control_file_ops context_ops={.retain=retain,.release=rel
 static unsigned filesystem_type(const char *name) {
     static const struct { const char *name; unsigned type; } types[]={
         {"tmpfs",MD_FS_MOUNT_TMPFS},{"overlay",MD_FS_MOUNT_OVERLAY},{"proc",MD_FS_MOUNT_PROC},
-        {"devpts",MD_FS_MOUNT_DEVPTS},{"cgroup",MD_FS_MOUNT_CGROUP},{"cgroup2",MD_FS_MOUNT_CGROUP2}};
+        {"devpts",MD_FS_MOUNT_DEVPTS},{"sysfs",MD_FS_MOUNT_SYSFS},
+        {"mqueue",MD_FS_MOUNT_MQUEUE},
+        {"cgroup",MD_FS_MOUNT_CGROUP},{"cgroup2",MD_FS_MOUNT_CGROUP2}};
     for (unsigned i=0;i<sizeof(types)/sizeof(*types);++i) if (!strcmp(name,types[i].name)) return types[i].type;
     return 0;
 }
@@ -67,6 +73,12 @@ static int open_context(struct md_filesystem *fs,const struct md_fs_request *q,
     if (!capable(fs)) return -EPERM;
     unsigned type=filesystem_type(q->path[0]);
     if (!type) return -ENODEV;
+    if (type==MD_FS_MOUNT_SYSFS && (!fs->actor || !fs->actor->network)) return -EOPNOTSUPP;
+    if (type==MD_FS_MOUNT_SYSFS && !md_identity_capable_in(fs->store->identity,
+            md_network_namespace_owner(fs->actor->network),CAP_SYS_ADMIN)) return -EPERM;
+    if (type==MD_FS_MOUNT_MQUEUE && (!fs->actor || !fs->actor->ipc)) return -EOPNOTSUPP;
+    if (type==MD_FS_MOUNT_MQUEUE && !md_identity_capable_in(fs->store->identity,
+            md_ipc_namespace_owner(fs->actor->ipc),CAP_SYS_ADMIN)) return -EPERM;
     if (!out || !out->control) return -EOPNOTSUPP;
     struct filesystem_context *c=calloc(1,sizeof(*c));
     if (!c) return -ENOMEM;
@@ -75,6 +87,8 @@ static int open_context(struct md_filesystem *fs,const struct md_fs_request *q,
     c->pid=md_pid_identity_retain(fs->actor ? fs->actor->pid : NULL);
     c->cgroup=md_cgroup_member_retain(fs->actor ? fs->actor->cgroup : NULL);
     c->cgroup_namespace=md_cgroup_namespace_retain(fs->actor ? fs->actor->cgroup_namespace : NULL);
+    c->network=md_network_namespace_retain(fs->actor ? fs->actor->network : NULL);
+    c->ipc=md_ipc_namespace_retain(fs->actor ? fs->actor->ipc : NULL);
     int fd=memfd_create("fscontext",MFD_CLOEXEC|MFD_ALLOW_SEALING);
     int r=fd<0 ? -errno : fstat(fd,&c->stat) ? -errno : 0;
     if (!r && fcntl(fd,F_ADD_SEALS,F_SEAL_SEAL|F_SEAL_WRITE|F_SEAL_GROW|F_SEAL_SHRINK)) r=-errno;
@@ -132,6 +146,8 @@ static int configure(struct md_filesystem *fs,struct filesystem_context *c,const
     struct md_task_snapshot captured=actor ? *actor : (struct md_task_snapshot){0};
     captured.pid=c->pid; captured.cgroup=c->cgroup;
     captured.cgroup_namespace=c->cgroup_namespace;
+    captured.network=c->network;
+    captured.ipc=c->ipc;
     fs->store->identity=&c->opener; fs->actor=&captured;
     struct md_fs_request create={.mode=c->type,.flags=c->flags,
         .value=c->options,.value_size=(unsigned)c->size+1};

@@ -205,6 +205,12 @@ def main():
                           "PASS mutation under signals:")
 
     def check_exec_custody():
+        check("native foreign executable", root + "/libmagicdesk_guest_resource_guest.so proc-exec direct " + root + "/native",
+              "PASS foreign executable selection")
+        for image in ("direct", "memfd", "pid"):
+            check("guest foreign executable " + image, root + "/libmagicdesk_guest_run.so --diagnostics --store " + root
+                  + "/store" + (" --user 0" if image == "pid" else "")
+                  + " --deadline-seconds 90 -- /bin/test proc-exec " + image + " /tmp", "PASS foreign executable selection")
         check("native exec preparation control", root + "/libmagicdesk_guest_resource_guest.so exec-custody-native "
               + root + "/native", "PASS exec preparation custody")
         check("guest exec preparation custody", root + "/libmagicdesk_guest_run.so --diagnostics --store " + root

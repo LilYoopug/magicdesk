@@ -66,7 +66,7 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
                               '        break\n' if no_new_keyring else '')
                            + 'command = ["/usr/sbin/runc", *args]\n'
                            + ('command = ["/usr/bin/strace", "-D", "-f", "-s", "256", "-e", '
-                              '"trace=%process,%file,%signal,%network,prctl,read,write,keyctl", "-o", '
+                              '"trace=%process,%file,%signal,%network,prctl,capget,capset,read,write,keyctl", "-o", '
                               + repr(str(base / 'runc-')) + ' + str(os.getpid()) + ".log", *command]\n'
                               if trace_runtime else '')
                            + 'os.execv(command[0], command)\n')

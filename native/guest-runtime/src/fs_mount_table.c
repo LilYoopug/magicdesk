@@ -99,6 +99,8 @@ static const char *filesystem_type(const struct md_view_mount *mount) {
     if (mount && mount->file.ops && mount->file.ops->namespace_reference) return "nsfs";
     if (mount && mount->backing==MD_MOUNT_PROC) return "proc";
     if (mount && mount->backing==MD_MOUNT_DEVPTS) return "devpts";
+    if (mount && mount->backing==MD_MOUNT_SYSFS) return "sysfs";
+    if (mount && mount->backing==MD_MOUNT_MQUEUE) return "mqueue";
     if (mount && mount->cgroup) return md_cgroup_devices(mount->cgroup) ? "cgroup" : "cgroup2";
     return !md_view_inode(mount) ? "none" : md_filesystem_name(mount->storage ? mount->storage->filesystem_kind : MD_FILESYSTEM_INODE);
 }

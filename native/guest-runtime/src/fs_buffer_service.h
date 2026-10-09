@@ -54,6 +54,11 @@ void md_fs_buffer_control_query(struct md_fs_buffer_service *,md_control_query);
  * Returns 1 with an owned typed object, 0 for a native path, or an error. */
 typedef int (*md_control_capture)(pid_t,const char *,struct md_fd_object **);
 void md_fs_buffer_control_capture(struct md_fs_buffer_service *,md_control_capture);
+struct md_program;
+/* Supervisor-thread capture of a namespace-resolved proc executable. On
+ * success, replaces the proc spelling with an object identity or owned FD. */
+typedef int (*md_exec_capture)(pid_t,struct md_program *);
+void md_fs_buffer_exec_capture(struct md_fs_buffer_service *,md_exec_capture);
 /* Cancel requests and reap owned children, then stop/join the worker before
  * destroy. Records retain buffers independently of a dead/replaced task. */
 void md_fs_buffer_service_destroy(struct md_fs_buffer_service *);

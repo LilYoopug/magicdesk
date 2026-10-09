@@ -393,6 +393,8 @@ int md_fs_mounts_copy(struct md_filesystem *fs, const struct md_fs_location *roo
             .pid_namespace=md_pid_namespace_retain(a->pid_namespace),
             .devpts=md_devpts_retain(a->devpts),
             .cgroup=md_cgroup_retain(a->cgroup),
+            .sysfs=md_sysfs_retain(a->sysfs),
+            .ipc_namespace=md_ipc_namespace_retain(a->ipc_namespace),
             .file=md_control_file_retain(a->file),
             .policy={.local=md_mount_policy_flags(&a->policy)},.native=a->native,.guest=a->guest,
             .parent=!a->parent ? NULL : !md_view_base(fs->mounts,a->parent)

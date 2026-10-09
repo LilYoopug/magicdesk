@@ -180,7 +180,7 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
         if (*ref.tail) return -ENOTDIR;
         long result=nr==SYS_openat ? md_proc_control_open_view(ref.process,control,(int)a[2],proc_namespace)
             : md_proc_control_metadata(ref.process,control,-1,nr,a);
-        if (result!=-EXDEV || control!=MD_PROC_PROCESS_DIRECTORY) return result;
+        if (result!=-EXDEV || (control!=MD_PROC_PROCESS_DIRECTORY && !md_proc_network_sysctl(control))) return result;
         ref.kind=MD_PROC_NONE;
     }
     if (ref.kind==MD_PROC_MOUNTS || ref.kind==MD_PROC_MOUNTINFO) {

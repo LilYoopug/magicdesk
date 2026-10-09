@@ -377,6 +377,22 @@ static int advance(struct helper *m, long value) {
             break;
         case OPEN: {
             if (value>INT32_MAX) return -EPROTO;
+            if (m->kind==MD_TASK_HELPER_CAPTURE && !(m->flags&O_NOFOLLOW)) {
+                /* The stopped helper owns a private table: this alias pins the
+                 * object already opened under caller filters, not its pathname.
+                 * O_PATH needs no data access (unlike SCM_RIGHTS file_receive).
+                 * Stateful and nofollow descriptions retain exact FD transfer. */
+                char path[64];
+                snprintf(path,sizeof(path),"/proc/%d/fd/%d",m->child,(int)value);
+                m->maps=open(path,m->flags);
+                if (m->maps>=0) { m->result=0; return abort_child(m); }
+                int error=errno;
+                if (error!=EACCES && error!=EPERM && error!=ENOENT) {
+                    m->result=-error; return abort_child(m);
+                }
+                /* Protected proc access can be denied independently of rights
+                 * transfer. Keep the task-local export without changing identity. */
+            }
             int error=md_fd_channel_capture_begin(m->channel,m->group,1,&m->capture);
             if (error) { m->result=error; return abort_child(m); }
             struct md_buffer_span span;

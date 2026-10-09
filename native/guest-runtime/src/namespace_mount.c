@@ -44,6 +44,8 @@ long md_namespace_mount(const struct md_fs *fs, long nr, const unsigned long *a)
             else if (md_equal(type,"devpts")) q.mode=MD_FS_MOUNT_DEVPTS;
             else if (md_equal(type,"cgroup")) q.mode=MD_FS_MOUNT_CGROUP;
             else if (md_equal(type,"cgroup2")) q.mode=MD_FS_MOUNT_CGROUP2;
+            else if (md_equal(type,"sysfs")) q.mode=MD_FS_MOUNT_SYSFS;
+            else if (md_equal(type,"mqueue")) q.mode=MD_FS_MOUNT_MQUEUE;
             else return -ENODEV;
             if (a[4]) r=md_read_string(data,sizeof(data),(const char *)a[4]);
             if (r>=0 && a[4]) { q.value=data; q.value_size=(uint32_t)md_length(data)+1; }

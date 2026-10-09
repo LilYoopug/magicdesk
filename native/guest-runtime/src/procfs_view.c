@@ -2,6 +2,8 @@
 #include "procfs_view.h"
 #include "fs_mount_internal.h"
 #include "inode_internal.h"
+#include "proc_paths.h"
+#include "network_namespace.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -51,7 +53,15 @@ static int control(const char *path,const char *name) {
             || !strcmp(name,"auxv") || !strcmp(name,"fd") || !strcmp(name,"fdinfo")
             || !strcmp(name,"root") || !strcmp(name,"cwd") || !strcmp(name,"mounts")
             || !strcmp(name,"mountinfo") || !strcmp(name,"cgroup");
-    return !strcmp(path,"/proc/sys/kernel") || (!strcmp(path,"/proc") && !strcmp(name,"cgroups"));
+    return !strcmp(path,"/proc/sys/kernel") || !strcmp(path,"/proc/sys/net/ipv4")
+        || (!strcmp(path,"/proc") && !strcmp(name,"cgroups"));
+}
+static int kernel_global(const char *name) {
+    /* A mounted guest proc has no host reboot, raw kernel memory, kernel log
+     * or global key inventory provider. Keep lookup and enumeration consistent;
+     * never turn unrelated native permission failures into missing files. */
+    return !strcmp(name,"sysrq-trigger") || !strcmp(name,"kcore")
+        || !strcmp(name,"kmsg") || !strcmp(name,"keys");
 }
 int md_procfs_step(struct md_filesystem *fs,struct md_view_mount *mount,int fd,
         const char *name,const char *tail,int follow) {
@@ -59,6 +69,7 @@ int md_procfs_step(struct md_filesystem *fs,struct md_view_mount *mount,int fd,
     int r=md_view_fdpath(fd,path,sizeof(path));
     if (r) return r;
     pid_t group=directory(path);
+    if (group==-1 && kernel_global(name)) return -ENOENT;
     if (group==-1 && (!strcmp(name,"self") || !strcmp(name,"thread-self"))) {
         if (follow) {
             if (!fs->actor) return -ESRCH;
@@ -79,7 +90,11 @@ int md_procfs_step(struct md_filesystem *fs,struct md_view_mount *mount,int fd,
     if ((control(path,name) || content) && boundary && boundary->path) {
         boundary->proc_namespace=md_pid_namespace_inode(mount->pid_namespace);
         int n=snprintf(boundary->path,boundary->capacity,"%s/%s%s",path,name,tail);
-        return n<0 || (size_t)n>=boundary->capacity ? -ENAMETOOLONG : -EREMOTE;
+        if (n<0 || (size_t)n>=boundary->capacity) return -ENAMETOOLONG;
+        /* Namespace-owned controls stay on the worker so their open
+         * descriptions can retain the selected mount's live policy. */
+        if (!fs->actor || !md_network_namespace_offline(fs->actor->network)
+                || !md_proc_network_sysctl(md_proc_path_for(boundary->path,0,0).kind)) return -EREMOTE;
     }
     int next=openat(fd,name,O_PATH|O_NOFOLLOW|O_CLOEXEC);
     return next<0 ? -errno : next;
@@ -106,7 +121,7 @@ ssize_t md_procfs_getdents(const struct md_view_mount *mount,int fd,void *data,s
     int error=md_view_fdpath(fd,path,sizeof(path));
     if (error) return error;
     pid_t group=directory(path);
-    if (!group || !mount->pid_namespace) {
+    if (!group || (group>0 && !mount->pid_namespace)) {
         ssize_t n=syscall(SYS_getdents64,fd,data,capacity);
         return n<0 ? -errno : n;
     }
@@ -125,7 +140,7 @@ ssize_t md_procfs_getdents(const struct md_view_mount *mount,int fd,void *data,s
             if (entry->d_reclen<offsetof(struct dirent,d_name)+2 || entry->d_reclen>(size_t)n-read) return -EIO;
             size_t length=entry->d_reclen;
             char mapped[32]; const char *name=entry->d_name;
-            pid_t native=decimal(entry->d_name,NULL), number=0;
+            pid_t native=mount->pid_namespace ? decimal(entry->d_name,NULL) : 0, number=0;
             if (native) {
                 struct md_pid_identity *id=md_pid_namespace_find(mount->pid_namespace,native);
                 if (md_pid_identity_group(id)==(group>0 ? group : native))
@@ -135,7 +150,7 @@ ssize_t md_procfs_getdents(const struct md_view_mount *mount,int fd,void *data,s
                     snprintf(mapped,sizeof(mapped),"%d",number); name=mapped;
                 }
             }
-            if (!native || number) {
+            if ((!native || number) && !(group==-1 && kernel_global(name))) {
                 size_t bytes=strlen(name)+1;
                 size_t record=(offsetof(struct dirent,d_name)+bytes+7)&~(size_t)7;
                 if (record>capacity-written) {
@@ -152,7 +167,7 @@ ssize_t md_procfs_getdents(const struct md_view_mount *mount,int fd,void *data,s
             read+=length;
         }
         if (written) return (ssize_t)written;
-        /* Kernel directory cookies advance while invisible tasks are skipped;
+        /* Kernel directory cookies advance while omitted entries are skipped;
          * the shared directory turn owns rollback until output publication. */
     }
 }

@@ -13,6 +13,8 @@ struct md_mount_source {
     struct md_pid_namespace *pid;
     struct md_devpts *devpts;
     struct md_cgroup_view *cgroup;
+    struct md_sysfs *sysfs;
+    struct md_ipc_namespace *ipc;
 };
 void md_mount_source_close(struct md_mount_source *);
 int md_mount_source_create(struct md_filesystem *,const struct md_fs_request *,struct md_mount_source *);

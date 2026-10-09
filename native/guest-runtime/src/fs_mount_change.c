@@ -112,6 +112,8 @@ static void discard(struct md_view_mount *m) {
     md_pid_namespace_release(m->pid_namespace);
     md_devpts_release(m->devpts);
     md_cgroup_release(m->cgroup);
+    md_sysfs_release(m->sysfs);
+    md_ipc_namespace_release(m->ipc_namespace);
     md_control_file_release(m->file);
 }
 static int publish(struct md_filesystem *fs, unsigned first,
@@ -273,6 +275,8 @@ static int bind(struct md_filesystem *fs, const struct md_fs_request *q,
             pending[root_slot].pid_namespace=md_pid_namespace_retain(source.mount->pid_namespace);
             pending[root_slot].devpts=md_devpts_retain(source.mount->devpts);
             pending[root_slot].cgroup=md_cgroup_retain(source.mount->cgroup);
+            pending[root_slot].sysfs=md_sysfs_retain(source.mount->sysfs);
+            pending[root_slot].ipc_namespace=md_ipc_namespace_retain(source.mount->ipc_namespace);
         }
         if (!r) pending[root_slot].file=md_control_file_retain(file);
     }
@@ -312,6 +316,8 @@ static int bind(struct md_filesystem *fs, const struct md_fs_request *q,
         if (!r) pending[slot].pid_namespace=md_pid_namespace_retain(m->pid_namespace);
         if (!r) pending[slot].devpts=md_devpts_retain(m->devpts);
         if (!r) pending[slot].cgroup=md_cgroup_retain(m->cgroup);
+        if (!r) pending[slot].sysfs=md_sysfs_retain(m->sysfs);
+        if (!r) pending[slot].ipc_namespace=md_ipc_namespace_retain(m->ipc_namespace);
         if (!r) pending[slot].file=md_control_file_retain(m->file);
         if (!r && md_view_file_cycle(m->file,fs->mounts)) r=-EINVAL;
     }
@@ -354,6 +360,8 @@ int md_view_attach_source(struct md_filesystem *fs, const struct md_mount_source
         pending[slot].pid_namespace=md_pid_namespace_retain(source->pid);
         pending[slot].devpts=md_devpts_retain(source->devpts);
         pending[slot].cgroup=md_cgroup_retain(source->cgroup);
+        pending[slot].sysfs=md_sysfs_retain(source->sysfs);
+        pending[slot].ipc_namespace=md_ipc_namespace_retain(source->ipc);
     }
     if (!r) r=publish(fs,0,pending,count);
     if (!r) {
@@ -550,7 +558,8 @@ int md_fs_mount_change(struct md_filesystem *fs, struct md_guest_domain *context
      * their mount pins; collection never infers closure from a pathname. */
     int r=(q->mode==MD_FS_MOUNT_BIND || q->mode==MD_FS_MOUNT_TMPFS || q->mode==MD_FS_MOUNT_OVERLAY
             || q->mode==MD_FS_MOUNT_PROC || q->mode==MD_FS_MOUNT_DEVPTS
-            || q->mode==MD_FS_MOUNT_CGROUP || q->mode==MD_FS_MOUNT_CGROUP2)
+            || q->mode==MD_FS_MOUNT_CGROUP || q->mode==MD_FS_MOUNT_CGROUP2 || q->mode==MD_FS_MOUNT_SYSFS
+            || q->mode==MD_FS_MOUNT_MQUEUE)
         ? md_view_mount_collect(fs) : 0;
     struct md_view_location target={.fd=-1,.parent=-1};
     if (!r) r=operand(fs,q,0,&target);
@@ -589,7 +598,7 @@ int md_fs_mount_change(struct md_filesystem *fs, struct md_guest_domain *context
         break;
     }
     case MD_FS_MOUNT_TMPFS: case MD_FS_MOUNT_OVERLAY:
-    case MD_FS_MOUNT_PROC: case MD_FS_MOUNT_DEVPTS: case MD_FS_MOUNT_CGROUP: case MD_FS_MOUNT_CGROUP2: {
+    case MD_FS_MOUNT_PROC: case MD_FS_MOUNT_DEVPTS: case MD_FS_MOUNT_CGROUP: case MD_FS_MOUNT_CGROUP2: case MD_FS_MOUNT_SYSFS: case MD_FS_MOUNT_MQUEUE: {
         struct stat st;
         r=fstat(target.fd,&st) ? -errno : !S_ISDIR(st.st_mode) ? -ENOTDIR : 0;
         struct md_mount_source source={.fd=-1};

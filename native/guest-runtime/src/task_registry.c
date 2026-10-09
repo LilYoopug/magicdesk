@@ -18,6 +18,8 @@ struct entry {
     struct md_pid_identity *pid_group;
     struct md_cgroup_member *cgroup;
     struct md_cgroup_namespace *cgroup_namespace;
+    struct md_network_namespace *network;
+    struct md_ipc_namespace *ipc;
 };
 struct md_task_registry { pthread_mutex_t lock; pid_t owner; struct entry *entries[BUCKETS]; };
 struct md_task_registry *md_task_registry_create(void) {
@@ -34,7 +36,8 @@ void md_task_registry_destroy(struct md_task_registry *r) {
         md_mount_namespace_release(e->mounts); md_fd_origins_unpin(e->files);
         md_pid_identity_release(e->pid); md_pid_identity_release(e->pid_group);
         md_cgroup_member_depart(e->cgroup,e->tid); md_cgroup_member_release(e->cgroup);
-        md_cgroup_namespace_release(e->cgroup_namespace); free(e);
+        md_cgroup_namespace_release(e->cgroup_namespace);
+        md_network_namespace_release(e->network); md_ipc_namespace_release(e->ipc); free(e);
     }
     pthread_mutex_destroy(&r->lock); free(r);
 }
@@ -50,6 +53,8 @@ int md_task_registry_publish(struct md_task_registry *r, pid_t tid, pid_t tgid,
     struct md_pid_identity *group=resources ? resources->pid_group : NULL, *old_group=NULL;
     struct md_cgroup_member *cgroup=resources ? resources->cgroup : NULL, *old_cgroup=NULL;
     struct md_cgroup_namespace *cgroup_ns=resources ? resources->cgroup_namespace : NULL, *old_cgroup_ns=NULL;
+    struct md_network_namespace *network=resources ? resources->network : NULL, *old_network=NULL;
+    struct md_ipc_namespace *ipc=resources ? resources->ipc : NULL, *old_ipc=NULL;
     unsigned bucket = (unsigned)tid % BUCKETS;
     pthread_mutex_lock(&r->lock);
     struct entry *e = r->entries[bucket];
@@ -71,6 +76,10 @@ int md_task_registry_publish(struct md_task_registry *r, pid_t tid, pid_t tgid,
         old_cgroup_ns=e->cgroup_namespace; e->cgroup_namespace=md_cgroup_namespace_retain(cgroup_ns);
     }
     md_cgroup_member_publish(cgroup,tid,tgid,pid,group);
+    if (e->network!=network) {
+        old_network=e->network; e->network=md_network_namespace_retain(network);
+    }
+    if (e->ipc!=ipc) { old_ipc=e->ipc; e->ipc=md_ipc_namespace_retain(ipc); }
     if (e->tgid == tgid && !memcmp(&e->value.uid, &v->uid, sizeof(v->uid))
             && !memcmp(&e->value.gid, &v->gid, sizeof(v->gid))
             && !memcmp(&e->value.caps, &v->caps, sizeof(v->caps))
@@ -88,6 +97,8 @@ published:
     md_pid_identity_release(old_group);
     md_cgroup_member_depart(old_cgroup,tid); md_cgroup_member_release(old_cgroup);
     md_cgroup_namespace_release(old_cgroup_ns);
+    md_network_namespace_release(old_network);
+    md_ipc_namespace_release(old_ipc);
     return 0;
 }
 void md_task_registry_forget(struct md_task_registry *r, pid_t tid) {
@@ -103,7 +114,8 @@ void md_task_registry_forget(struct md_task_registry *r, pid_t tid) {
         md_mount_namespace_release(e->mounts); md_fd_origins_unpin(e->files);
         md_pid_identity_release(e->pid); md_pid_identity_release(e->pid_group);
         md_cgroup_member_depart(e->cgroup,e->tid); md_cgroup_member_release(e->cgroup);
-        md_cgroup_namespace_release(e->cgroup_namespace); free(e);
+        md_cgroup_namespace_release(e->cgroup_namespace);
+        md_network_namespace_release(e->network); md_ipc_namespace_release(e->ipc); free(e);
     }
 }
 int md_task_registry_read(struct md_task_registry *r, pid_t tid, pid_t peer,
@@ -125,6 +137,8 @@ int md_task_registry_read(struct md_task_registry *r, pid_t tid, pid_t peer,
         out->pid_group=md_pid_identity_retain(e->pid_group);
         out->cgroup=md_cgroup_member_retain(e->cgroup);
         out->cgroup_namespace=md_cgroup_namespace_retain(e->cgroup_namespace);
+        out->network=md_network_namespace_retain(e->network);
+        out->ipc=md_ipc_namespace_retain(e->ipc);
     }
     pthread_mutex_unlock(&r->lock); return error;
 }
@@ -138,5 +152,7 @@ void md_task_snapshot_release(struct md_task_snapshot *snapshot) {
     md_pid_identity_release(snapshot->pid_group);
     md_cgroup_member_release(snapshot->cgroup);
     md_cgroup_namespace_release(snapshot->cgroup_namespace);
+    md_network_namespace_release(snapshot->network);
+    md_ipc_namespace_release(snapshot->ipc);
     *snapshot=(struct md_task_snapshot){0};
 }

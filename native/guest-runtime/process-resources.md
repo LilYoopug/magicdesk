@@ -190,7 +190,7 @@ a `mount_source` prepared filesystem, and a graph placement. Legacy mount uses
 the same source factory and attachment transaction. Typed control input is
 retained under the descriptor-table turn before worker submission, so close or
 FD reuse cannot retarget a configuration operation. CREATE captures provider
-resources using the opener's credentials and PID/cgroup ownership. Parameters,
+resources using the opener's credentials and PID/cgroup/network ownership. Parameters,
 created, mounted and failed phases reject invalid ordering. Ordinary filesystem
 requests acquire no new owner or probe.
 
@@ -1115,6 +1115,11 @@ pivot_root; unrelated directory aliases remain ordinary guest dentries. Nested
 Bubblewrap can therefore construct a new root with `--proc /proc` and
 `--dev-bind /dev /dev`, without borrowing host mount authority. `/dev` uses the
 selected native devices and their real permissions, not a private device manager.
+Guest device-node creation returns EPERM: CAP_MKNOD is not advertised and there
+is no device-creation authority. Regular-file and FIFO mknod remain supported.
+Callers may bind an existing native device onto a regular placeholder, including
+through a retained proc-FD target. Native rdev, IO and access checks are preserved;
+nodev rejects new opens without invalidating already-open descriptions.
 
 ## Logical Filesystems
 
@@ -1214,6 +1219,65 @@ Inherited network descriptions and native proc/sys network views remain outside
 this separation. Passing an offline typed socket to an independent supervisor
 is unsupported, rather than silently losing its namespace annotation.
 
+## Namespace-Owned Sysctls
+
+`network_sysctl` supplies the offline namespace's
+`ip_unprivileged_port_start`, `ping_group_range` and `ip_local_port_range`.
+Validated updates share one namespace lock, including overlapping port bounds.
+Opening captures the network owner; subsequent setns does not retarget that FD.
+Writes require CAP_NET_ADMIN in its user owner, without touching host sysctls.
+Host-network views retain native access and errors. Values configure the logical
+control plane only; addressed packet IO is not implemented.
+
+Mounted proc controls are selected on the filesystem worker and retain a live
+mount anchor. Readonly policy applies to future opens and already opened writers,
+including after lazy detach. Ordinary proc spelling uses the same typed provider
+without a logical mount anchor. The common descriptor host supplies dup/fork,
+offsets and positional IO; numeric writes at a nonzero offset consume bytes without
+changing the value. No additional service thread or per-IO FD is created.
+
+## Namespace-Owned Sysfs
+
+`sysfs_view` retains the network namespace selected at legacy mount or fsopen.
+Mount authorization belongs to that network namespace's user owner. The limited
+offline tree contains `class/net/lo`, its relative device/subsystem links,
+identity/MTU/flags/operstate/carrier attributes and `fs/cgroup` for separate mounts.
+`network_namespace` supplies the same atomic link snapshot to sysfs, ioctl and
+netlink. Mounted views do not follow the reader's later setns.
+
+The private name tree supplies stable native inode identities and ordinary
+directory enumeration, not attribute data or Android device access. Typed control
+files use the common IO/cursor contract; retained mount origins keep both the
+tree and network owner alive. Bind/copy/detach share ordinary mount ownership.
+Closing the final owner retires the temporary tree. An unknown attribute returns
+ENOENT; unimplemented mutations and host-network sysfs return EOPNOTSUPP.
+Cross-supervisor export is rejected rather than flattening the provider into a
+native bind. No host mount, background refresh or per-read descriptor is needed.
+
+## Limited Mqueue Mounts
+
+`mqueue_view` is a lazy, worker-owned filesystem held by the task's IPC namespace.
+Legacy mount and fsopen check CAP_SYS_ADMIN in that namespace's user owner;
+fsopen captures it before later unshare/setns. Repeated mounts of the same IPC
+owner share root inode identity and logical mode/ownership. Different IPC owners
+have distinct instances. Mount copies, bind aliases and retained directory
+descriptors keep the whole IPC namespace alive after the task leaves it.
+
+The supported surface is directory enumeration, stat/statfs, chmod/chown,
+mountinfo and ordinary readonly mount policy. POSIX queue creation and message
+delivery are not implemented: all six mq syscalls report ENOSYS, regardless of
+the host kernel's mqueue configuration. File creation through the mount reports
+EOPNOTSUPP; no regular file or Android queue substitutes for a guest queue.
+Cross-supervisor export is rejected. The initial namespace's mount metadata is
+launch-local, not a shared POSIX queue service across independent launches.
+
+The IPC namespace's atomic lifetime is independent of its lazy SysV services.
+The shared task registry publishes retained IPC snapshots; services retain their
+supervisor-side implementation and release callback. Mounting does not open a
+SysV database. Final namespace release removes the private directory and its
+native descriptors. Focused checks cover both mount APIs, namespace authority,
+retained/copy/bind behavior and exact native FD cleanup.
+
 ## Private Terminal Views
 
 `devpts_view` owns each mounted devpts directory and its logical uid/gid/mode
@@ -1270,19 +1334,48 @@ return EOPNOTSUPP. This interface never accesses Android's cgroup hierarchy or
 claims that a resource/security limit was installed. Controller delegation and
 independent-supervisor hierarchy transfer are not implemented.
 
+`cgroup_program` owns launch-local logical BPF program IDs, descriptors and
+cgroup2 device attachments. `namespace_bpf` captures the bounded syscall ABI;
+`fs_bpf` executes through the existing filesystem worker and typed control-FD
+transport. Loading, lookup by ID, information queries, multi-attach, detach and
+direct/effective queries share the cgroup owner. Descriptor and attachment
+references independently retain a program; the registry is weak, so closing
+the final FD after detach removes its ID. Removing a group releases its
+attachments. Retained targets respect live readonly mount policy.
+
+Admission accepts at most 4096 forward-only instructions from a limited
+arithmetic/branch subset, with device-context field reads for CGROUP_DEVICE.
+CGROUP_SKB accepts the same arithmetic subset without packet access, but
+network attachment returns EOPNOTSUPP. Loading is separate from attaching;
+neither action installs a host BPF program. Maps, helpers, loops, JIT/BTF
+exports, pinning, replacement and other attachment types are unavailable.
+Unavailable bpf commands return EINVAL, as for Linux command feature probes;
+unsupported operations within recognized commands fail explicitly.
+
+Device attachments are bookkeeping in the **permissive** provider, not an
+executed predicate or enforced device restriction. Native Android access
+denials remain unchanged. No per-IO accounting, host BPF capability, background
+worker or runtime dependency is added. Programs and attachment arrays are
+allocated only when requested, with limits of 4096 live programs per launch
+and 64 direct attachments per group.
+
 ## Boundaries
 
 Concurrent named environments and launch-local attachments are not kernel Linux
 namespaces. Guest `CLONE_NEWNS`, `CLONE_NEWUSER`, `CLONE_NEWIPC`,
 `CLONE_NEWUTS`, `CLONE_NEWPID`, `CLONE_NEWNET` and `CLONE_NEWCGROUP` have the
 contracts above. Time namespaces are not implemented; their creation is not
-reported as successful. POSIX message-queue namespaces and UTS sysctl priority-change
-notification are not implemented. They must not be inferred from SysV separation
-or live sysctl reads. Tmpfs quotas remain open; unsupported
+reported as successful. POSIX message delivery and UTS sysctl priority-change
+notification are not implemented. They must not be inferred from the limited
+mqueue filesystem, SysV separation or live sysctl reads. Tmpfs quotas remain open; unsupported
 options fail explicitly. Saved overlay credentials do not establish
 kernel-equivalent confinement for unadapted native access.
 
 Proc mounts are selected process views, not a complete virtual kernel procfs.
+Lookup and directory enumeration omit host-global `sysrq-trigger`, `kcore`,
+`kmsg` and `keys`: no guest kernel-control, raw-memory, kernel-log or global-key
+provider exists. Other native permission errors remain errors, not missing files.
+Native proc descriptors outside these mounted views are unchanged.
 Foreign `/proc/PID/mem` and signalfd sender translation remain outside this contract.
 Inherited native proc descriptors retain their original view. Internal helper
 threads are filtered in a logical PID proc mount, not in Android's native procfs.
@@ -1795,7 +1888,13 @@ Kernel-path operands and unknown cwd use `task_helper`, also used for SHM
 mapping. Its private table owns open results and the transport endpoint until
 kernel reaping. Successful capture transfers an owned O_PATH description to the
 retained filesystem request; rejection/cancellation closes it without publishing
-an application FD. Two operands are captured under one request's resource turns,
+an application FD. For ordinary O_PATH results, the supervisor opens the stopped
+helper's exact proc-FD alias while its private table owns the source. This does
+not repeat name resolution or require device data access. Restricted proc access
+falls back to task-local SCM_RIGHTS, also used for nofollow descriptions. Stateful
+inputs never use this object-only reopening. Both routes preserve caller open
+filters, cancellation and terminal reaping; subsequent data opens retain native
+permission checks. Two operands are captured under one request's resource turns,
 with independently owned descriptions unless both select the same cwd/path.
 The filesystem worker rejects unresolved kernel-path operands, and host RPC
 does not accept them. Stateful inputs still require actual OFD capture.

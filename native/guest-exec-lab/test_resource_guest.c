@@ -687,7 +687,10 @@ static int capture_terminal_child(void *context) {
     assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
     char text[128];
     ssize_t result=readlink("/proc/thread-self/cwd",text,sizeof(text));
-    if (c->guest) assert(result==-1 && errno==(c->stage<2 ? EACCES : ECANCELED));
+    /* Dumpable O_PATH capture no longer calls sendmsg. Protected callers
+     * still exercise the exact export-thread death and terminal cleanup. */
+    if (c->guest && (c->stage!=3 || c->protected))
+        assert(result==-1 && errno==(c->stage<2 ? EACCES : ECANCELED));
     else assert(result==4 && !memcmp(text,"/dev",4));
     return 0;
 }
@@ -709,7 +712,7 @@ static void capture_terminal(int guest) {
     free(stack);
     for (int i=0;i<count;++i) assert(!close(held[i]));
     assert(!setrlimit(RLIMIT_NOFILE,&saved) && !close(directory));
-    puts("PASS capture terminal ownership: private clone denial, clear/open/send failure, protected shared-table survivors and no free slots");
+    puts("PASS capture terminal ownership: clone/clear/open failure, proc custody without sendmsg, protected export death and full-table survivors");
 }
 struct proc_context { int first, second; struct stat expected; char cwd[PATH_MAX]; };
 static void *proc_thread(void *argument) {
@@ -1965,6 +1968,10 @@ int main(int argc, char **argv) {
     setbuf(stdout, NULL); alarm(40);
     if (argc==2 && !strcmp(argv[1],"mount-namespace")) { test_mount_namespace_guest(); return 0; }
     if (argc==2 && !strcmp(argv[1],"exec-custody-target")) return 0;
+    if (argc>=2 && !strcmp(argv[1],"proc-exec")) {
+        extern int test_proc_exec_guest(int, char **);
+        return test_proc_exec_guest(argc,argv);
+    }
     if (argc == 5 && !strcmp(argv[1], "exec-undo")) {
         struct sembuf op = {.sem_num=0, .sem_op=-1, .sem_flg=SEM_UNDO};
         assert(!syscall(SYS_semop, atoi(argv[2]), &op, 1));

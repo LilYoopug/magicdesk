@@ -6,6 +6,9 @@
 #include "pid_namespace.h"
 #include "devpts_view.h"
 #include "cgroup.h"
+#include "sysfs_view.h"
+#include "ipc_namespace.h"
+#include "mqueue_view.h"
 #include "mount_source.h"
 #include "proc_namespace.h"
 #include <limits.h>
@@ -25,11 +28,18 @@ static inline unsigned md_fs_mount_flags(unsigned flags) {
         | ((flags&MS_NOEXEC) ? MD_MOUNT_NOEXEC : 0);
 }
 struct md_view_location;
+void md_fs_bpf(struct md_filesystem *,const struct md_fs_request *,struct md_fs_result *,const struct md_fs_output *);
+int md_fs_proc_operation(struct md_filesystem *,struct md_mount_namespace *,struct md_view_mount *,
+    int,const struct md_fs_request *,struct md_fs_result *,const struct md_fs_output *);
 int md_fs_cgroup_operation(struct md_filesystem *,struct md_mount_namespace *,
     struct md_view_mount *,int fd,int parent,const char *name,const struct md_fs_request *,
     struct md_fs_result *,const struct md_fs_output *);
 int md_fs_mount_file_operation(struct md_filesystem *,struct md_mount_namespace *,
     struct md_view_mount *,int,const struct md_fs_request *,struct md_fs_result *,const struct md_fs_output *);
+int md_fs_sysfs_operation(struct md_filesystem *,struct md_mount_namespace *,struct md_view_mount *,
+    int,const struct md_fs_request *,struct md_fs_result *,const struct md_fs_output *);
+int md_fs_mqueue_operation(struct md_filesystem *,struct md_mount_namespace *,struct md_view_mount *,
+    int,const struct md_fs_request *,struct md_fs_result *,const struct md_fs_output *);
 static inline const struct md_mount_namespace *md_view_file_namespace(struct md_control_file file) {
     const struct md_namespace_reference *ref=file.ops && file.ops->namespace_reference
         ? file.ops->namespace_reference(file.context) : NULL;

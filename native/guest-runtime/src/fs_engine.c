@@ -97,6 +97,12 @@ static void watch_path(struct md_filesystem *fs, const struct md_fs_request *q,
     md_fs_anchor_release(origin);
     if (wd<0) out->error=wd; else out->position=wd;
 }
+static int reject_native_control(void *context,const struct md_control_file_ops *ops,
+        void *data,const struct md_identity *identity,int flags) {
+    (void)context; (void)ops; (void)data; (void)identity; (void)flags;
+    /* A typed provider's carrier is not authority for a native path mutation. */
+    return -EOPNOTSUPP;
+}
 static void task_path(struct md_filesystem *fs, const struct md_fs_request *q,
         struct md_fs_result *out, const struct md_fs_output *output) {
     int directory=q->mode==MD_FS_TASK_CHDIR || q->mode==MD_FS_TASK_FCHDIR;
@@ -109,6 +115,7 @@ static void task_path(struct md_filesystem *fs, const struct md_fs_request *q,
     struct md_fs_anchor *origin=NULL;
     struct md_fs_output capture=output ? *output : (struct md_fs_output){0};
     capture.origin=fs->mounts || (output && output->origin) ? &origin : NULL;
+    capture.control=reject_native_control; capture.control_context=NULL;
     md_fs_view_execute(fs,&open,out,&capture);
     if (out->error) return;
     int fd=out->fd; out->fd=-1;
@@ -268,6 +275,7 @@ static void context_execute(struct md_fs_context *context,
         *out=(struct md_fs_result){.fd=-1,.error=md_fs_mount_change(fs,task->fs,q)};
     else if (q->operation==MD_FS_FSOPEN || q->operation==MD_FS_FSCONFIG || q->operation==MD_FS_FSMOUNT)
         md_fs_context_mount(fs,q,out,output);
+    else if (q->operation==MD_FS_BPF) md_fs_bpf(fs,q,out,output);
     else if (q->operation == MD_FS_WATCH_PATH) watch_path(fs,q,out,output);
     else if (q->operation == MD_FS_WATCH_ADD) {
         int wd=watch_add(fs,q->directory[0],q->directory[1],q->origin[1],q->flags);

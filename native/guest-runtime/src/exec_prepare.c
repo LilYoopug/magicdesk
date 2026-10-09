@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -29,10 +30,15 @@ static long acquire_at(struct md_fs_context *context, int base, const struct md_
         int error=md_copy(native,sizeof(native),(char *)&program->identity);
         memset(&program->identity,0,sizeof(program->identity));
         if (error) return error;
-        /* Current-image and same-table magic links are captured before worker
-         * admission. An unresolved magic link must not select the bootstrap
-         * or a supervisor descriptor instead of the guest's object. */
-        if (md_proc_path(native).kind!=MD_PROC_NONE) return -ENOTSUP;
+        struct md_proc_path proc=md_proc_path(native);
+        enum md_proc_kind kind=proc.kind==MD_PROC_FOREIGN ? proc.foreign_kind : proc.kind;
+        if (kind==MD_PROC_EXE && !*proc.tail) {
+            if (flags&O_NOFOLLOW) return -ELOOP;
+            md_copy(program->identity.path,sizeof(program->identity.path),native);
+            return -EREMOTE;
+        }
+        /* Never select the bootstrap or a supervisor FD for a guest magic link. */
+        if (kind!=MD_PROC_NONE) return -ENOTSUP;
         /* Native paths remain subject to real permissions; never inspect the
          * worker's own /proc/self when the caller asked for its process. */
         if (md_prefix(native,"/proc/self/") || md_prefix(native,"/proc/thread-self/")) {
@@ -67,11 +73,19 @@ static long acquire(void *owner, const char *path, struct md_program *program) {
     return acquire_at(context,md_fs_anchor_fd(cwd),cwd,path,0,NULL,program);
 }
 int md_fs_command_prepare(struct md_fs_context *context, const struct md_fs_request *q,
-        struct md_command_recipe *recipe, struct md_command_images *images) {
+        struct md_program **proc_image, struct md_command_recipe *recipe, struct md_command_images *images) {
     *images=(struct md_command_images){.program=-1,.loader=-1};
     struct md_program first={.fd=-1};
     int error;
-    if (!*q->path[0]) {
+    int owned=0;
+    if (*proc_image) {
+        if ((*proc_image)->fd>=0) { first=**proc_image; error=0; }
+        else if ((*proc_image)->identity.object[0]) {
+            error=(int)acquire_at(context,-1,NULL,(*proc_image)->identity.path,0,
+                (*proc_image)->identity.object,&first);
+            owned=1;
+        } else error=-EPROTO;
+    } else if (!*q->path[0]) {
         first.fd=q->directory[0];
         first.mount_flags=md_fs_anchor_policy(q->origin[0]);
         snprintf(first.identity.path,sizeof(first.identity.path),"/dev/fd/%lld",(long long)q->offset);
@@ -95,10 +109,19 @@ int md_fs_command_prepare(struct md_fs_context *context, const struct md_fs_requ
                 else { first.identity.path[n]=0; error=0; }
             }
         }
-    } else error=(int)acquire_at(context,q->directory[0],q->origin[0],q->path[0],q->flags,
-        q->mode&MD_EXEC_OBJECT ? q->path[1] : NULL,&first);
+    } else {
+        error=(int)acquire_at(context,q->directory[0],q->origin[0],q->path[0],q->flags,
+            q->mode&MD_EXEC_OBJECT ? q->path[1] : NULL,&first);
+        owned=1;
+        if (error==-EREMOTE) {
+            *proc_image=malloc(sizeof(**proc_image));
+            if (!*proc_image) return -ENOMEM;
+            **proc_image=first;
+            return error;
+        }
+    }
     if (!error) error=md_command_images_prepare(recipe,images,&first,
         q->mode&MD_EXEC_INACCESSIBLE,acquire,context);
-    if (*q->path[0] && first.fd>=0) close(first.fd);
+    if (owned && first.fd>=0) close(first.fd);
     return error;
 }

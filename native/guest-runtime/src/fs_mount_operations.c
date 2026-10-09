@@ -132,8 +132,11 @@ static int descriptor(struct md_filesystem *fs, const struct md_fs_request *q,
     if (r == -EXDEV) return 0;
     if (r) { out->error = r; return 1; }
     if (md_fs_mount_file_operation(fs,owner.mounts,p->mount,q->directory[0],q,out,output)) return 1;
+    if (md_fs_proc_operation(fs,owner.mounts,p->mount,q->directory[0],q,out,output)) return 1;
     if (devpts_operation(fs,owner.mounts,p->mount,q->directory[0],q,out,output)) return 1;
     if (md_fs_cgroup_operation(fs,owner.mounts,p->mount,q->directory[0],-1,NULL,q,out,output)) return 1;
+    if (md_fs_sysfs_operation(fs,owner.mounts,p->mount,q->directory[0],q,out,output)) return 1;
+    if (md_fs_mqueue_operation(fs,owner.mounts,p->mount,q->directory[0],q,out,output)) return 1;
     if (q->operation==MD_FS_ACCESS && (r=execute_access(p->mount,q->directory[0],q->mode))) {
         out->error=r; return 1;
     }
@@ -334,8 +337,11 @@ static void native(struct md_filesystem *fs, const struct md_fs_request *q,
         struct md_view_location *a, struct md_view_location *b,
         struct md_fs_result *out, const struct md_fs_output *output) {
     if (md_fs_mount_file_operation(fs,a->view,a->mount,a->fd,q,out,output)) return;
+    if (md_fs_proc_operation(fs,a->view,a->mount,a->fd,q,out,output)) return;
     if (devpts_operation(fs,a->view,a->mount,a->fd,q,out,output)) return;
     if (md_fs_cgroup_operation(fs,a->view,a->mount,a->fd,a->parent,a->name,q,out,output)) return;
+    if (md_fs_sysfs_operation(fs,a->view,a->mount,a->fd,q,out,output)) return;
+    if (md_fs_mqueue_operation(fs,a->view,a->mount,a->fd,q,out,output)) return;
     int r = 0;
     struct md_filesystem owner=*fs; owner.mounts=a->view;
     void *data = output ? output->data : NULL;
@@ -391,7 +397,10 @@ static void native(struct md_filesystem *fs, const struct md_fs_request *q,
         if (fifo && (flags & O_CREAT) && (flags & O_EXCL)) { r = -EEXIST; break; }
         if (fifo && (flags & O_DIRECTORY)) { r = -ENOTDIR; break; }
         int deferred = fifo && !(flags & O_PATH);
-        int selected=a->fd>=0 && !strcmp(a->name,".");
+        /* Proc entries can use namespace-visible PIDs. The walker has already
+         * selected their native inode; replaying parent/name selects another
+         * process when the logical and native PID numbers differ. */
+        int selected=a->fd>=0 && (!strcmp(a->name,".") || a->mount->backing==MD_MOUNT_PROC);
         if (selected && !(flags&O_PATH) && (flags&(O_CREAT|O_EXCL))==(O_CREAT|O_EXCL)) { r=-EEXIST; break; }
         if (selected && !(flags&O_PATH) && (flags&O_CREAT) && S_ISDIR(existing.st_mode)) { r=-EISDIR; break; }
         int fd=selected ? md_reopen_file(a->fd,(flags&~(O_CREAT|O_EXCL))|O_CLOEXEC,&out->open_completion)
@@ -531,7 +540,8 @@ void md_fs_mounts_execute(struct md_filesystem *fs, const struct md_fs_request *
     }
     struct md_view_location a = {.parent=-1,.fd=-1}, b = {.parent=-1,.fd=-1};
     uint64_t resolve=q->resolve;
-    if (q->operation==MD_FS_READLINK || (q->operation==MD_FS_OPEN && !writable(q->flags)))
+    if (q->operation==MD_FS_READLINK || q->operation==MD_FS_OPEN_IMAGE
+            || (q->operation==MD_FS_OPEN && !writable(q->flags)))
         resolve|=MD_VIEW_TASK_PATH;
     int r = md_view_walk(fs, q->directory[0], q->origin[0], q->path[0], follow(q), missing(q), resolve, &a);
     int pair = q->operation == MD_FS_LINK || q->operation == MD_FS_RENAME;

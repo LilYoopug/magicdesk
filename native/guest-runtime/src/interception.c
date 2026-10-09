@@ -342,6 +342,10 @@ int md_interception_install(int inherited) {
 #define UNAVAILABLE(n) BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_##n,0,1), \
             BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|ENOSYS),
             UNAVAILABLE(add_key) UNAVAILABLE(request_key) UNAVAILABLE(keyctl)
+            /* Mounting a namespace view does not enable POSIX queue IO. Never
+             * leak unadapted mq calls into the Android IPC namespace. */
+            UNAVAILABLE(mq_open) UNAVAILABLE(mq_unlink) UNAVAILABLE(mq_timedsend)
+            UNAVAILABLE(mq_timedreceive) UNAVAILABLE(mq_notify) UNAVAILABLE(mq_getsetattr)
 #undef UNAVAILABLE
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, instruction_pointer) + 4),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)(gate >> 32), 0, 12 + transport_instructions),

@@ -2,6 +2,7 @@
 #include "fs_operation.h"
 #include "ipc_credentials.h"
 #include "posix_acl.h"
+#include "bpf_request.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/limits.h>
@@ -38,7 +39,35 @@ int md_fs_request_validate(const struct md_fs_request *q) {
     if (q->value_size>MD_FS_VALUE_MAX || (q->value_size && !q->value)
             || (q->value_size && q->operation!=MD_FS_XATTR && q->operation!=MD_FS_FXATTR && q->operation!=MD_FS_XATTR_OBJECT
                 && q->operation!=MD_FS_SETACL && q->operation!=MD_FS_MOUNT
-                && q->operation!=MD_FS_FSCONFIG)) return -EINVAL;
+                && q->operation!=MD_FS_FSCONFIG && q->operation!=MD_FS_BPF)) return -EINVAL;
+    if (q->operation==MD_FS_BPF) {
+        if (*a || *b || q->offset || q->value_size<sizeof(struct md_bpf_request)
+                || q->capacity>MD_FS_VALUE_MAX || q->capture[0].path || q->capture[1].path
+                || q->object[0] || q->object[1]) return -EINVAL;
+        struct md_bpf_request in; memcpy(&in,q->value,sizeof(in));
+        unsigned expected=md_bpf_opens(q->mode) ? 0
+            : q->mode==BPF_PROG_QUERY || q->mode==BPF_OBJ_GET_INFO_BY_FD ? 1 : 3;
+        if (descriptors!=expected || (expected && q->directory[0]<0)
+                || (expected==3 && q->directory[1]<0)
+                || q->flags!=(md_bpf_opens(q->mode) ? O_RDWR|O_CLOEXEC : 0)) return -EINVAL;
+        if (q->mode==BPF_PROG_LOAD)
+            return !in.count || in.count>MD_BPF_INSTRUCTIONS_MAX || !md_bpf_program_type(in.type)
+                || in.flags || in.id || q->capacity
+                || q->value_size!=sizeof(in)+in.count*sizeof(struct bpf_insn)
+                || strnlen(in.name,sizeof(in.name))==sizeof(in.name) ? -EINVAL : 0;
+        if (q->value_size!=sizeof(in) || in.count || in.type || in.name[0]) return -EINVAL;
+        if (q->mode==BPF_PROG_GET_FD_BY_ID) return in.flags || q->capacity ? -EINVAL : 0;
+        if (in.id) return -EINVAL;
+        if (q->mode==BPF_OBJ_GET_INFO_BY_FD) return in.flags || q->capacity!=sizeof(struct bpf_prog_info) ? -EINVAL : 0;
+        if (q->mode==BPF_PROG_QUERY)
+            return (in.flags&~BPF_F_QUERY_EFFECTIVE) || q->capacity<sizeof(struct md_bpf_query)
+                || q->capacity>sizeof(struct md_bpf_query)+MD_BPF_QUERY_MAX*sizeof(uint32_t)
+                || (q->capacity-sizeof(struct md_bpf_query))%sizeof(uint32_t) ? -EINVAL : 0;
+        if (q->mode==BPF_PROG_ATTACH || q->mode==BPF_PROG_DETACH)
+            return q->capacity || (in.flags&~BPF_F_ALLOW_MULTI)
+                || (q->mode==BPF_PROG_DETACH && in.flags) ? -EINVAL : 0;
+        return -EOPNOTSUPP;
+    }
     if (q->operation==MD_FS_FSOPEN)
         return descriptors || !*a || *b || (q->flags&~(O_RDWR|O_CLOEXEC))
             || q->mode || q->capacity || q->offset ? -EINVAL : 0;
@@ -63,7 +92,8 @@ int md_fs_request_validate(const struct md_fs_request *q) {
                 || (pair ? (!*b && !(descriptors&2)) : *b || (descriptors&2))
                 || (q->mode!=MD_FS_MOUNT_TMPFS && q->mode!=MD_FS_MOUNT_OVERLAY && q->mode!=MD_FS_MOUNT_PROC
                     && q->mode!=MD_FS_MOUNT_DEVPTS && q->mode!=MD_FS_MOUNT_CGROUP
-                    && q->mode!=MD_FS_MOUNT_CGROUP2 && q->mode!=MD_FS_MOUNT_SETATTR && q->value_size)) return -EINVAL;
+                    && q->mode!=MD_FS_MOUNT_CGROUP2 && q->mode!=MD_FS_MOUNT_SYSFS && q->mode!=MD_FS_MOUNT_MQUEUE
+                    && q->mode!=MD_FS_MOUNT_SETATTR && q->value_size)) return -EINVAL;
         if (q->mode==MD_FS_MOUNT_SETATTR)
             return q->value_size!=sizeof(struct mount_attr)
                 || (q->flags&~(AT_EMPTY_PATH|AT_RECURSIVE|AT_SYMLINK_NOFOLLOW|AT_NO_AUTOMOUNT)) ? -EINVAL : 0;

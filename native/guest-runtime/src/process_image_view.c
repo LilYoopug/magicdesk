@@ -3,6 +3,7 @@
 #include "proc_paths.h"
 #include "fs_rpc.h"
 #include "control_file.h"
+#include "program_files.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -83,6 +84,14 @@ ssize_t md_process_image_link(pid_t pid, uintptr_t image, char *out, size_t capa
         if (!out[size]) return (ssize_t)size;
     }
     return -ENAMETOOLONG;
+}
+int md_process_image_identity(pid_t pid,uintptr_t image,struct md_image_identity *out) {
+    memset(out,0,sizeof(*out));
+    ssize_t result=md_process_image_link(pid,image,out->path,sizeof(out->path));
+    if (result<0) return (int)result;
+    int error=copy(pid,image+offsetof(struct md_process_image,executable_object),out->object,sizeof(out->object));
+    if (!error && out->object[sizeof(out->object)-1]) error=-EPROTO;
+    return error;
 }
 int md_process_image_view(pid_t pid, uintptr_t image, unsigned kind, unsigned flags, const char *endpoint, pid_t caller) {
     if (!image) return -ENOENT;

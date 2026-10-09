@@ -27,6 +27,51 @@ of locked policies. ABI checks include empty paths, nofollow, versioned
 structures, shared openat2 validation, protected callers and explicit errors
 for unsupported attributes. The prepared store needs Python and util-linux.
 
+`test_mount_capacity.py BUILD STORE` checks 40 simultaneous guest bind mounts,
+distinct mountinfo identities, namespace-copy isolation, detached directory FDs
+and slot reuse. The native mount-graph fixture also checks all 128 slots, copies,
+exact FD cleanup and graph transport beyond one SCM_RIGHTS message.
+
+`test_mqueue_mount.py BUILD STORE` checks the limited IPC-owned mqueue filesystem:
+mount/fsopen capture, shared metadata, isolated owners, setns, copied/bound mounts,
+readonly policy, detached descriptors and explicit unsupported queue operations.
+It requires Python, util-linux and strace, but no compiler or host mqueue support.
+The native resource-owner fixture separately checks final-owner tree/FD cleanup.
+
+`test_device_bind.py BUILD STORE` checks EPERM for device creation without
+CAP_MKNOD, proc-FD bind targets, native rdev/IO, nodev and detached FD lifetime.
+Regular-file/FIFO creation and non-root denial remain covered. It requires
+Python and util-linux. `/dev/full` binding and metadata are required even when
+Android denies data access; the bound path must preserve that denial.
+Native `/dev/full` IO is conditional on Android shell
+access; a denied source is reported separately, not counted as successful IO.
+
+`test_cgroup_bpf.py BUILD STORE` checks permissive cgroup2 device-program
+load/info/ID lookup, multi-attach, detach, inherited queries and removed-group
+lifetime. Coverage includes dup/fork/protected exec, SCM_RIGHTS, readonly
+targets, full FD tables, ENOSPC/EFAULT, versioned attributes and repeated exact
+warmed FD cleanup. It verifies that return-zero programs do not enforce device
+restrictions and that network hooks/maps/BTF remain unavailable. The store
+needs Python and util-linux, not host BPF permission or a compiler.
+
+`test_network_sysctl.py BUILD STORE` checks namespace-owned IPv4 parameters,
+bounded parsing, coordinated port ranges, namespace isolation and writer
+authority. It includes retained FDs across unshare, shared dup offsets, positional
+IO, O_PATH metadata and readonly remount/detach enforcement. Host sysctls are not
+written. The prepared store needs Python and util-linux.
+
+`test_proc_mount_policy.py BUILD STORE` checks omission of unsupported host-kernel
+controls in namespace-mounted proc, consistent lookup/enumeration, ordinary proc
+binds and readonly remounts. It never writes host control files.
+
+`test_sysfs.py BUILD STORE` checks the logical offline sysfs provider through
+legacy mount and stock util-linux's descriptor API. Coverage includes live
+netlink/ioctl agreement, namespace capture and authority, namespace copying,
+file/directory binds, detached descriptors, cgroup nesting, metadata and
+unsupported mutation errors. It also checks that native truncate cannot modify
+the carriers of sysfs or cgroup controls. The prepared store needs Python,
+util-linux and strace.
+
 `test_glycin_runtime.py BUILD STORE --library libglycin-2.so.0` invokes the real
 distribution loader with Bubblewrap and its original seccomp filter. It asserts
 the decoded RGB pixels, not just process startup. The explicit
@@ -1009,6 +1054,9 @@ ordinary and nondumpable callers killed by a pread filter, 64 failed execs per
 caller with an invalid environment, and successful exec with all filesystem-RPC
 socket calls forbidden. The surviving CLONE_FILES peer must retain exactly its
 original FD set. It also runs in the default resource and buffer suites.
+Foreign proc-exe cases cover native control, ordinary/anonymous images,
+absolute/symlink/relative-dirfd paths, nondumpable callers and O_NOFOLLOW.
+A private PID namespace repeats them through its mounted proc with logical PID 1.
 
 `python native/guest-exec-lab/test_anonymous_exec.py BUILD STORE` uses a disposable
 Debian store with Python. It executes ordinary and sealed memfd ELF images,
