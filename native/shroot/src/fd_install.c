@@ -26,7 +26,16 @@ int md_fd_install_begin(struct md_fd_install *p, struct md_fd_origins *files,
 }
 int md_fd_install_progress(struct md_fd_install *p) {
     if (!p || !p->files.table) return -EINVAL;
-    if (md_fd_order_state(&p->files)!=MD_RESOURCE_ORDER_READY) return MD_FD_INSTALL_WAIT;
+    if (md_fd_order_state(&p->files)!=MD_RESOURCE_ORDER_READY) {
+        int valid;
+        do { valid=ioctl(p->listener,SECCOMP_IOCTL_NOTIF_ID_VALID,&p->notification); } while (valid<0 && errno==EINTR);
+        if (!valid) return MD_FD_INSTALL_WAIT;
+        int result=errno==ENOENT ? MD_FD_INSTALL_CANCELLED : -errno;
+        /* An interrupted receiver can restart before preceding table work
+         * finishes. Retire its cancelled publication without that table turn. */
+        p->retire_error=md_fd_install_cancel(p);
+        return result;
+    }
     int result=md_fd_order_start(&p->files);
     if (result) return result;
     struct md_fd_origin_update update={0};

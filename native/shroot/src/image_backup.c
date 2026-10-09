@@ -102,7 +102,7 @@ static int write_tree(struct md_inode_store *s, struct archive *ar) {
         int rc = mdi_step(s, q); if (rc == SQLITE_DONE) break;
         if (rc != SQLITE_ROW) { r = mdi_sql_failure(rc); break; }
         const char *path = (const char *)sqlite3_column_text(q, 1);
-        if (!path || strlen(path) >= PATH_MAX-8 || ++entries > 200000) { r = -EFBIG; break; }
+        if (!path || strlen(path) >= PATH_MAX-8 || ++entries > MD_IMAGE_MAX_ENTRIES) { r = -EFBIG; break; }
         struct mdi_node node; struct stat st;
         r = mdi_node(s, (const char *)sqlite3_column_text(q, 0), &node);
         if (!r) r = mdi_stat(s, &node, &st);
@@ -135,7 +135,7 @@ static int write_tree(struct md_inode_store *s, struct archive *ar) {
         }
         int fd = -1;
         if (!r && !linked && node.kind == S_IFREG) {
-            if (st.st_size < 0 || (uint64_t)st.st_size > 8ULL*1024*1024*1024-total) r = -EFBIG;
+            if (st.st_size < 0 || (uint64_t)st.st_size > MD_IMAGE_MAX_BYTES-total) r = -EFBIG;
             else { total += st.st_size; archive_entry_set_size(e, st.st_size); }
             int directory = mdi_backing_directory(s, &node);
             if (!r && (fd = openat(directory, node.backing, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)) < 0) r = -errno;
@@ -239,7 +239,7 @@ int md_image_archive_import(const char *archive, const char *destination, int ba
     struct md_image_publish p = {.parent=-1, .stage=-1};
     int r = md_image_publish_begin(destination, &p);
     int snapshot = -1;
-    if (!r) r = md_image_snapshot(fd, p.stage, 8ULL*1024*1024*1024, &snapshot);
+    if (!r) r = md_image_snapshot(fd, p.stage, MD_IMAGE_MAX_BYTES, &snapshot);
     struct md_inode_store *s = NULL;
     if (!r) r = md_inode_store_open(p.path, 1, &s);
     char *config = NULL;

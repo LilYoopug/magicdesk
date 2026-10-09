@@ -36,7 +36,7 @@ struct helper {
     struct helper *next;
     struct md_task_helpers *manager;
     pid_t owner, group, child;
-    int parent_ready, reaped, started, cancelled, before, observed;
+    int parent_ready, reaped, started, cancelled, before, observed, child_stopped;
     enum operation parent_operation, operation;
     long result;
     struct md_interception_abi abi;
@@ -89,6 +89,7 @@ static long trace(struct helper *m, int request, pid_t pid, void *address, void 
 }
 static int resume(struct helper *m, pid_t pid) {
     long r=trace(m,PTRACE_CONT,pid,NULL,NULL);
+    if (!r && pid==m->child) m->child_stopped=0;
     /* EVENT_WAIT: ESRCH can precede an already queued exec/exit. Retain every
      * resource until that exact event; the launch deadline bounds lost events. */
     return r==-ESRCH ? 0 : (int)r;
@@ -650,6 +651,7 @@ int md_task_helper_event(struct md_task_helpers *manager, pid_t pid, int status)
     while (m && m->owner!=pid && m->child!=pid) m=m->next;
     if (!m) return 0;
     int child=pid==m->child;
+    if (child) m->child_stopped=1;
     if (WIFEXITED(status) || WIFSIGNALED(status)) {
         if (!child) return 0;
         m->reaped=1;
@@ -730,4 +732,17 @@ int md_task_helper_event(struct md_task_helpers *manager, pid_t pid, int status)
         if (!error) error=abort_child(m);
     } else return 0;
     return error && error!=-ESRCH ? error : 1;
+}
+int md_task_helpers_visit(struct md_task_helpers *manager,int (*visit)(void *,pid_t,int),void *context) {
+    for (struct helper *m=manager ? manager->first : NULL;m;m=m->next) {
+        int error=m->owner ? visit(context,m->owner,m->parent_ready) : 0;
+        if (!error && m->child && !m->reaped) error=visit(context,m->child,m->child_stopped);
+        if (error) return error;
+    }
+    return 0;
+}
+int md_task_helper_owns(struct md_task_helpers *manager,pid_t owner,pid_t task) {
+    for (struct helper *m=manager ? manager->first : NULL;m;m=m->next)
+        if (m->owner==owner && (m->owner==task || m->child==task)) return 1;
+    return 0;
 }

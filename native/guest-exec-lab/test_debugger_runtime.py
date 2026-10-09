@@ -118,6 +118,25 @@ assert 'Error while executing Python code' not in result.stderr
 assert '[New ' not in result.stdout
 print('PASS gdb-shm')
 '''
+GDB_JIT = r'''
+import subprocess
+commands = ['gdb', '--batch', '-nx', '/tmp/md-debugger-tests',
+    '-ex', 'set debuginfod enabled off', '-ex', 'set args jit-target',
+    '-ex', 'break jit_marker', '-ex', 'run']
+for value in range(37, 41):
+    commands += ['-ex', 'python assert len(gdb.selected_inferior().threads()) == 1',
+                 '-ex', 'python assert int(gdb.parse_and_eval("value")) == '+str(value),
+                 '-ex', 'python assert int(gdb.parse_and_eval("address[0]")) == '+str(0x52800000 | value << 5),
+                 '-ex', 'echo MD_JIT_BREAK\\n', '-ex', 'continue']
+# EVENT_WAIT: each executable view reaches its breakpoint; expiry fails the run.
+result = subprocess.run(commands, capture_output=True, text=True, timeout=25)
+print(result.stdout, result.stderr)
+assert result.returncode == 0 and result.stdout.count('MD_JIT_BREAK') == 4
+assert 'PASS jit-target' in result.stdout and 'exited normally' in result.stdout
+assert 'Error while executing Python code' not in result.stderr
+assert '[New ' not in result.stdout
+print('PASS gdb-jit')
+'''
 
 
 def commands():
@@ -127,6 +146,7 @@ def commands():
     cases.append(('gdb-attach-threads', ['python3', '-c', GDB_ATTACH, 'gdb-thread-target']))
     cases.append(('gdb-active-io', ['python3', '-c', GDB_IO]))
     cases.append(('gdb-shm', ['python3', '-c', GDB_SHM]))
+    cases.append(('gdb-jit', ['python3', '-c', GDB_JIT]))
     cases.append(('lldb', ['python3', '-c', LLDB]))
     cases.append(('gdbserver', ['gdb', '--batch', '-nx', '-x', '/tmp/md-gdbserver.commands']))
     cases.append(('gprof', ['/bin/sh', '-ec',
@@ -151,6 +171,13 @@ def commands():
         "test \"$(grep -c '^.*shmat(' /tmp/md-debugger-shm.log)\" = 4\n"
         "test \"$(grep -c '^.*shmdt(' /tmp/md-debugger-shm.log)\" = 4\n"
         "! grep -E 'clone3?\\(|close_range\\(0,' /tmp/md-debugger-shm.log\necho PASS strace-shm"]))
+    cases.append(('strace-jit', ['/bin/sh', '-ec',
+        "strace -f -qq -e trace=mprotect,mremap,clone,clone3 -o /tmp/md-debugger-jit.log "
+        "/tmp/md-debugger-tests jit-target 2>/tmp/md-debugger-jit.err\n"
+        "cat /tmp/md-debugger-jit.err\n"
+        "! grep -q 'Stray PTRACE_EVENT' /tmp/md-debugger-jit.err\n"
+        "test \"$(grep -c 'mprotect(.*PROT_READ|PROT_EXEC) *= 0' /tmp/md-debugger-jit.log)\" = 4\n"
+        "! grep -E 'mremap\\(|clone3?\\(|= -1' /tmp/md-debugger-jit.log\necho PASS strace-jit"]))
     return cases
 
 

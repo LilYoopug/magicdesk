@@ -69,6 +69,13 @@ static void control_attributes(struct md_inode_store *s) {
         .path={NULL,"user.overlay.opaque"},.mode=MD_FS_XATTR_REMOVE};
     struct md_fs_output output={.data=data,.capacity=sizeof(data)};
     struct md_fs_result result={.fd=-1};
+    struct md_fs_request label={.operation=MD_FS_XATTR_OBJECT,.directory={fd,-1},
+        .path={NULL,"security.selinux"},.mode=MD_FS_XATTR_GET,.capacity=sizeof(data)};
+    md_inode_xattr(s,&label,&result,&output); assert(result.error==-ENODATA);
+    label.mode=MD_FS_XATTR_SET; label.value="label"; label.value_size=5; label.capacity=5;
+    md_inode_xattr(s,&label,&result,NULL); assert(result.error==-EOPNOTSUPP);
+    label.mode=MD_FS_XATTR_REMOVE; label.value=NULL; label.value_size=label.capacity=0;
+    md_inode_xattr(s,&label,&result,NULL); assert(result.error==-ENODATA);
     md_inode_xattr(s,&q,&result,NULL); assert(!result.error && result.fd<0);
     md_inode_xattr(s,&q,&result,NULL); assert(result.error==-ENODATA);
     q.mode=MD_FS_XATTR_SET; q.flags=XATTR_REPLACE;
@@ -81,7 +88,7 @@ static void control_attributes(struct md_inode_store *s) {
     q.path[1]=NULL; q.mode=MD_FS_XATTR_LIST; q.capacity=sizeof(data); q.value_size=0; q.value=NULL;
     md_inode_xattr(s,&q,&result,&output);
     assert(!result.error && result.size>0 && listed(data,result.size,"user.overlay.opaque")
-        && listed(data,result.size,"trusted.overlay.whiteout"));
+        && listed(data,result.size,"trusted.overlay.whiteout") && !listed(data,result.size,"security.selinux"));
     q.capacity=0;
     size_t length=result.size;
     md_inode_xattr(s,&q,&result,NULL); assert(!result.error && result.position==(ssize_t)length && !result.size);

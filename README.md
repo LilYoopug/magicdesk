@@ -408,9 +408,12 @@ magicdesk download https://raw.githubusercontent.com/mekhontsev/magicdesk/main/s
 sh ~/install_linux.sh
 ```
 
-The installer asks for Debian, Ubuntu, Alpine, Fedora or Arch Linux ARM, an
-environment name, GUI profile and optional graphics setup. Package installation
-runs visibly in the console. Several independent environments can coexist.
+The installer asks for Debian, Ubuntu, Alpine, Fedora, Arch Linux ARM or SteamOS
+ARM64, an environment name, GUI profile and optional graphics setup. Package
+installation runs visibly in the console. SteamOS preserves its supplied
+applications and system drivers, with a nested Plasma desktop and automatic
+Turnip selection; see the [recovery-image recipe](docs/shroot.md#steamos-recovery-image).
+Several independent environments can coexist.
 
 After installation:
 

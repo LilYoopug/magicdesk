@@ -1,8 +1,10 @@
 #ifndef MD_INTERCEPTION_MEMORY_H
 #define MD_INTERCEPTION_MEMORY_H
 #include <stdint.h>
+#include <sys/types.h>
 #include "interception_buffers.h"
 #include "resource_order.h"
+#include "private_memory.h"
 
 /* Supervisor-owned mappings in one tracee address space. CLONE_VM shares this
  * owner; fork copies stack metadata and retains the shared buffer allocator.
@@ -21,9 +23,18 @@ uintptr_t md_memory_buffer_address(struct md_interception_memory *, const struct
 /* Mapping commit and destructive memory calls share this address-space turn.
  * The caller retains the memory owner until completing/cancelling the turn. */
 int md_memory_order_begin(struct md_interception_memory *, struct md_resource_order *, struct md_resource_wakeup *);
-/* Only VM_MAYEXEC restrictions need metadata; unrestricted mappings stay
- * kernel-owned. Prepare reserves storage before execution, finish allocates
- * nothing. All calls below require the address-space turn. */
+/* Optional task-affine proc access. CLONE_VM shares it; fork/exec do not, since
+ * each proc file pins an exact mm even when its original task disappears. */
+int md_memory_private_access_set(struct md_interception_memory *, const struct md_private_memory_access *);
+/* The caller holds the exact task stopped throughout capture. Failure is
+ * optional capability loss, never a reason to change dumpability or identity. */
+int md_memory_private_access_capture(struct md_interception_memory *, pid_t);
+const struct md_private_memory_access *md_memory_private_access(const struct md_interception_memory *);
+/* File provenance and VM_MAYEXEC policy belong to the address space, not its
+ * threads' descriptor tables. Prepare reserves storage before execution;
+ * finish allocates nothing. All calls below require the address-space turn. */
+struct md_memory_backing;
+struct md_memory_file_range;
 enum md_mapping_operation { MD_MAPPING_MAP, MD_MAPPING_UNMAP, MD_MAPPING_REMAP };
 struct md_mapping_change {
     enum md_mapping_operation operation;
@@ -31,11 +42,22 @@ struct md_mapping_change {
     size_t length, new_length;
     unsigned flags;
     int noexec, prepared;
+    struct md_memory_backing *backing;
+    uint64_t offset;
+    struct md_memory_file_range *moving;
+    size_t moving_count;
 };
 int md_memory_has_policy(const struct md_interception_memory *);
 int md_memory_exec_check(const struct md_interception_memory *, uintptr_t, size_t);
 int md_memory_mapping_prepare(struct md_interception_memory *, struct md_mapping_change *,
     enum md_mapping_operation, uintptr_t, size_t, size_t new_length, unsigned flags, int noexec);
+/* Borrows a regular-file description and retains its own CLOEXEC reference.
+ * A failed syscall never publishes it. Native devices remain kernel-owned. */
+int md_memory_mapping_backing(struct md_interception_memory *, struct md_mapping_change *, int fd, uint64_t offset);
+/* Borrowed under the address-space turn. No pathname lookup or FD-number reuse.
+ * Returns 1 for continuous provenance, 0 for an untracked/mixed range. */
+int md_memory_file_view(const struct md_interception_memory *, uintptr_t, size_t,
+    int *fd, uint64_t *offset);
 void md_memory_mapping_finish(struct md_interception_memory *, struct md_mapping_change *, long result);
 void md_memory_mapping_abandon(struct md_interception_memory *, struct md_mapping_change *);
 #endif

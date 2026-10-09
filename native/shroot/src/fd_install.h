@@ -26,6 +26,7 @@ int md_fd_install_begin(struct md_fd_install *, struct md_fd_origins *,
  * notification expired before installation, not that the source was consumed.
  * Other negative results still need an error reply; only kernel acceptance of
  * that reply completes delivery. A stopped live receiver may restart its call.
+ * Expired queued notifications retire without waiting for the table turn.
  * retire_error reports an internal turn/wakeup failure separately: it cannot
  * replace a committed kernel result or authorize a second notification reply. */
 int md_fd_install_progress(struct md_fd_install *);

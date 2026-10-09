@@ -11,6 +11,9 @@ struct md_fs_work_source {
     void (*ready)(void *, struct md_filesystem *);
     int (*notification_fd)(void *);
     int (*notification)(void *, struct md_filesystem *, short);
+    /* A confirmed pause admits only work-control and stop readiness. No peer,
+     * watch, notification or filesystem callback runs until it is released. */
+    int (*paused)(void *);
 };
 /* Calling thread exclusively owns store. Stop-FD readiness ends the service;
  * caller retains both listener/stop FDs. Peer requests never own its lifetime. */

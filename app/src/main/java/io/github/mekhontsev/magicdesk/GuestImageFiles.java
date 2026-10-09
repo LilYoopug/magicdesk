@@ -18,7 +18,8 @@ final class GuestImageFiles {
     interface DirectorySync { void sync(Path directory) throws IOException; }
     static final DirectorySync DIRECTORY_SYNC = GuestImageFiles::syncDirectory;
     static final long JSON_LIMIT = 8 * 1024 * 1024;
-    static final long BLOB_LIMIT = 8L * 1024 * 1024 * 1024;
+    // Keep acquisition and native image_io.h's streaming archive bound aligned.
+    static final long BLOB_LIMIT = 64L * 1024 * 1024 * 1024;
 
     static String digest(InputStream input) throws IOException {
         MessageDigest digest = sha256();

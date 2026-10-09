@@ -2,14 +2,23 @@
 #include "interception_memory.h"
 #include <assert.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 struct slot { uintptr_t top; int used; struct slot *next; };
 struct exec_range { uintptr_t first, end; };
+struct md_memory_backing { size_t references; int fd; dev_t device; ino_t inode; };
+struct md_memory_file_range {
+    uintptr_t first, end;
+    uint64_t offset;
+    struct md_memory_backing *backing;
+};
 struct md_interception_memory {
     unsigned references;
     struct slot *slots;
@@ -19,7 +28,26 @@ struct md_interception_memory {
     struct exec_range *noexec;
     size_t ranges, capacity;
     int execution_unknown;
+    struct md_memory_file_range *files;
+    size_t file_count, file_capacity;
+    struct md_private_memory_access access;
+    int access_ready;
 };
+static struct md_memory_backing *backing_retain(struct md_memory_backing *b) {
+    if (b) { assert(b->references<SIZE_MAX); ++b->references; }
+    return b;
+}
+static void backing_release(struct md_memory_backing *b) {
+    if (b && !--b->references) { close(b->fd); free(b); }
+}
+static void file_ranges_release(struct md_memory_file_range *ranges, size_t count) {
+    for (size_t i=0;i<count;++i) backing_release(ranges[i].backing);
+    free(ranges);
+}
+static void files_forget(struct md_interception_memory *s) {
+    file_ranges_release(s->files,s->file_count);
+    s->files=NULL; s->file_count=s->file_capacity=0;
+}
 
 struct md_interception_memory *md_memory_new(void) {
     struct md_interception_memory *s = calloc(1, sizeof(*s));
@@ -49,12 +77,22 @@ struct md_interception_memory *md_memory_fork(struct md_interception_memory *s, 
         copy->ranges=copy->capacity=s->ranges;
     }
     copy->execution_unknown=s->execution_unknown;
+    if (s->file_count) {
+        copy->files=malloc(s->file_count*sizeof(*copy->files));
+        if (copy->files) {
+            memcpy(copy->files,s->files,s->file_count*sizeof(*copy->files));
+            copy->file_count=copy->file_capacity=s->file_count;
+            for (size_t i=0;i<copy->file_count;++i) backing_retain(copy->files[i].backing);
+        }
+    }
     return copy;
 }
 void md_memory_release(struct md_interception_memory *s) {
     if (!s || --s->references) return;
     while (s->slots) { struct slot *next = s->slots->next; free(s->slots); s->slots = next; }
-    md_buffers_release(s->buffers); md_resource_queue_destroy(&s->mappings); free(s->noexec); free(s);
+    md_buffers_release(s->buffers); md_resource_queue_destroy(&s->mappings); free(s->noexec);
+    if (s->access_ready) { close(s->access.maps); close(s->access.memory); close(s->access.pagemap); }
+    file_ranges_release(s->files,s->file_count); free(s);
 }
 uintptr_t md_memory_stack_take(struct md_interception_memory *s) {
     for (struct slot *p = s->slots; p; p = p->next)
@@ -94,8 +132,44 @@ int md_memory_order_begin(struct md_interception_memory *s, struct md_resource_o
         struct md_resource_wakeup *wake) {
     return s ? md_resource_order_begin(&s->mappings,order,wake) : -EINVAL;
 }
+int md_memory_private_access_set(struct md_interception_memory *s, const struct md_private_memory_access *access) {
+    if (s->access_ready) return -EALREADY;
+    int inputs[]={access->maps,access->memory,access->pagemap}, retained[3];
+    for (unsigned i=0;i<3;++i) {
+        retained[i]=fcntl(inputs[i],F_DUPFD_CLOEXEC,0);
+        if (retained[i]<0) {
+            int error=-errno;
+            while (i) close(retained[--i]);
+            return error;
+        }
+    }
+    s->access=(struct md_private_memory_access){retained[0],retained[1],retained[2]};
+    s->access_ready=1; return 0;
+}
+const struct md_private_memory_access *md_memory_private_access(const struct md_interception_memory *s) {
+    return s->access_ready ? &s->access : NULL;
+}
+int md_memory_private_access_capture(struct md_interception_memory *s, pid_t task) {
+    if (!s || task<=0) return -EINVAL;
+    if (s->access_ready) return -EALREADY;
+    char path[64];
+    snprintf(path,sizeof(path),"/proc/%d",task);
+    int directory=open(path,O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+    if (directory<0) return -errno;
+    const char *names[]={"smaps","mem","pagemap"};
+    int fds[3], error=0;
+    unsigned count=0;
+    for (;count<3;++count) {
+        fds[count]=openat(directory,names[count],(count==1 ? O_RDWR : O_RDONLY)|O_CLOEXEC);
+        if (fds[count]<0) { error=-errno; break; }
+    }
+    close(directory);
+    if (error) { while (count) close(fds[--count]); return error; }
+    s->access=(struct md_private_memory_access){fds[0],fds[1],fds[2]};
+    s->access_ready=1; return 0;
+}
 int md_memory_has_policy(const struct md_interception_memory *s) {
-    return s->ranges || s->execution_unknown;
+    return s->ranges || s->execution_unknown || s->file_count;
 }
 static int rounded(size_t length, size_t *out) {
     size_t page=(size_t)getpagesize();
@@ -148,6 +222,109 @@ static void insert_range(struct md_interception_memory *s, uintptr_t first, size
     s->noexec[begin]=(struct exec_range){first,end};
     s->ranges=s->ranges-(after-begin)+1;
 }
+static int files_reserve(struct md_interception_memory *s, size_t extra) {
+    if (extra>SIZE_MAX/sizeof(*s->files)-s->file_count) return -ENOMEM;
+    size_t needed=s->file_count+extra;
+    if (needed<=s->file_capacity) return 0;
+    size_t capacity=needed<=SIZE_MAX/2/sizeof(*s->files) ? needed*2 : needed;
+    void *files=realloc(s->files,capacity*sizeof(*s->files));
+    if (!files) return -ENOMEM;
+    s->files=files; s->file_capacity=capacity; return 0;
+}
+static void files_remove(struct md_interception_memory *s, uintptr_t first, size_t size) {
+    uintptr_t end=first+size;
+    for (size_t i=0;size && i<s->file_count;) {
+        struct md_memory_file_range *r=s->files+i;
+        if (r->first>=end) break;
+        if (r->end<=first) { ++i; continue; }
+        if (r->first<first && r->end>end) {
+            assert(s->file_count<s->file_capacity);
+            memmove(r+2,r+1,(s->file_count-i-1)*sizeof(*r));
+            r[1]=(struct md_memory_file_range){end,r->end,r->offset+end-r->first,backing_retain(r->backing)};
+            r->end=first; ++s->file_count; break;
+        }
+        if (r->first<first) { r->end=first; ++i; }
+        else if (r->end>end) { r->offset+=end-r->first; r->first=end; break; }
+        else {
+            backing_release(r->backing);
+            memmove(r,r+1,(s->file_count-i-1)*sizeof(*r)); --s->file_count;
+        }
+    }
+}
+static void files_insert(struct md_interception_memory *s, struct md_memory_file_range r) {
+    if (r.first==r.end) return;
+    size_t i=0;
+    while (i<s->file_count && s->files[i].first<r.first) ++i;
+    assert(s->file_count<s->file_capacity);
+    memmove(s->files+i+1,s->files+i,(s->file_count-i)*sizeof(*s->files));
+    r.backing=backing_retain(r.backing); s->files[i]=r; ++s->file_count;
+}
+int md_memory_mapping_backing(struct md_interception_memory *s, struct md_mapping_change *c, int fd, uint64_t offset) {
+    if (!c->prepared || c->operation!=MD_MAPPING_MAP || c->backing
+            || (c->flags&MAP_TYPE)!=MAP_PRIVATE || (c->flags&MAP_ANONYMOUS)) return -EINVAL;
+    if (offset%(size_t)getpagesize() || c->length>INT64_MAX
+            || offset>(uint64_t)INT64_MAX-c->length) return -EINVAL;
+    struct stat st;
+    if (fstat(fd,&st)) return -errno;
+    if (!S_ISREG(st.st_mode)) return 0;
+    int error=files_reserve(s,4);
+    if (error) return error;
+    struct md_memory_backing *b=malloc(sizeof(*b));
+    if (!b) return -ENOMEM;
+    int retained=fcntl(fd,F_DUPFD_CLOEXEC,0);
+    if (retained<0) { int error=-errno; free(b); return error; }
+    *b=(struct md_memory_backing){1,retained,st.st_dev,st.st_ino};
+    c->backing=b; c->offset=offset; return 0;
+}
+int md_memory_file_view(const struct md_interception_memory *s, uintptr_t first, size_t size,
+        int *fd, uint64_t *offset) {
+    if (!size || first>UINTPTR_MAX-size || s->execution_unknown) return 0;
+    uintptr_t cursor=first, end=first+size;
+    const struct md_memory_backing *backing=NULL; uint64_t position=0;
+    for (size_t i=0;i<s->file_count && cursor<end;++i) {
+        const struct md_memory_file_range *r=s->files+i;
+        if (r->end<=cursor) continue;
+        if (r->first>cursor) return 0;
+        uint64_t at=r->offset+cursor-r->first;
+        if (!backing) { backing=r->backing; position=at; }
+        else if (r->backing->device!=backing->device || r->backing->inode!=backing->inode
+                || at!=position+cursor-first) return 0;
+        cursor=r->end<end ? r->end : end;
+    }
+    if (cursor!=end) return 0;
+    *fd=backing->fd; *offset=position; return 1;
+}
+static void change_release(struct md_mapping_change *c) {
+    backing_release(c->backing); file_ranges_release(c->moving,c->moving_count);
+    *c=(struct md_mapping_change){0};
+}
+static int files_prepare(struct md_interception_memory *s, struct md_mapping_change *c) {
+    if (!s->file_count) return 0;
+    uintptr_t address=c->address;
+    size_t size=c->length, next=c->new_length;
+    if (c->operation==MD_MAPPING_REMAP && size) {
+        size_t count=0;
+        for (size_t i=0;i<s->file_count;++i)
+            if (s->files[i].first<address+size && s->files[i].end>address) ++count;
+        if (count) {
+            c->moving=malloc(count*sizeof(*c->moving));
+            if (!c->moving) return -ENOMEM;
+            for (size_t i=0;i<s->file_count;++i) {
+                struct md_memory_file_range r=s->files[i];
+                if (r.first>=address+size || r.end<=address) continue;
+                if (r.first<address) { r.offset+=address-r.first; r.first=address; }
+                if (r.end>address+size) r.end=address+size;
+                r.first-=address; r.end-=address;
+                if (r.first>=next) continue;
+                if (r.end>next || r.end==size) r.end=next;
+                if (r.end-r.first>INT64_MAX || r.offset>(uint64_t)INT64_MAX-(r.end-r.first)) return -EOVERFLOW;
+                r.backing=backing_retain(r.backing);
+                c->moving[c->moving_count++]=r;
+            }
+        }
+    }
+    return files_reserve(s,4+c->moving_count);
+}
 int md_memory_mapping_prepare(struct md_interception_memory *s, struct md_mapping_change *c,
         enum md_mapping_operation operation, uintptr_t address, size_t length,
         size_t new_length, unsigned flags, int noexec) {
@@ -171,27 +348,50 @@ int md_memory_mapping_prepare(struct md_interception_memory *s, struct md_mappin
             s->noexec=ranges; s->capacity=capacity;
         }
     }
-    *c=(struct md_mapping_change){operation,address,size,next,flags,!!noexec,1};
+    struct md_mapping_change candidate={.operation=operation,.address=address,.length=size,
+        .new_length=next,.flags=flags,.noexec=!!noexec,.prepared=1};
+    if (files_prepare(s,&candidate)) {
+        /* File repair is optional. Memory pressure discards its authority,
+         * without failing native mapping or dropping mandatory noexec policy. */
+        files_forget(s);
+        file_ranges_release(candidate.moving,candidate.moving_count);
+        candidate.moving=NULL; candidate.moving_count=0;
+    }
+    *c=candidate;
     return 0;
 }
 void md_memory_mapping_finish(struct md_interception_memory *s, struct md_mapping_change *c, long result) {
     if (!c->prepared) return;
     if (result>=0) {
-        if (c->operation==MD_MAPPING_UNMAP) remove_range(s,c->address,c->length);
+        if (c->operation==MD_MAPPING_UNMAP) {
+            remove_range(s,c->address,c->length); files_remove(s,c->address,c->length);
+        }
         else {
             uintptr_t address=(uintptr_t)result;
             size_t size=c->operation==MD_MAPPING_MAP ? c->length : c->new_length;
-            if (c->operation==MD_MAPPING_REMAP && !(c->flags&MREMAP_DONTUNMAP))
-                remove_range(s,c->address,c->length);
+            if (c->operation==MD_MAPPING_REMAP && !(c->flags&MREMAP_DONTUNMAP)) {
+                remove_range(s,c->address,c->length); files_remove(s,c->address,c->length);
+            }
             remove_range(s,address,size);
+            files_remove(s,address,size);
             if (c->noexec) insert_range(s,address,size);
+            if (c->backing) files_insert(s,(struct md_memory_file_range){address,address+size,c->offset,c->backing});
+            for (size_t i=0;i<c->moving_count;++i) {
+                struct md_memory_file_range r=c->moving[i];
+                r.first+=address; r.end+=address; files_insert(s,r);
+            }
         }
     }
-    *c=(struct md_mapping_change){0};
+    change_release(c);
 }
 void md_memory_mapping_abandon(struct md_interception_memory *s, struct md_mapping_change *c) {
     /* A lost mapping result is not proof that the kernel did nothing. Keep
      * surviving CLONE_VM users from granting execute rights to an unknown VMA. */
-    if (c->prepared && c->noexec) s->execution_unknown=1;
-    *c=(struct md_mapping_change){0};
+    if (c->prepared) {
+        if (c->noexec || s->ranges) s->execution_unknown=1;
+        /* Optional repair provenance must not revoke otherwise native execute
+         * permission. Losing it disables repair, not the kernel's own check. */
+        files_forget(s);
+    }
+    change_release(c);
 }

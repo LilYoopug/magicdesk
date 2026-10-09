@@ -18,7 +18,7 @@ def main():
     parser.add_argument("--server", default="magicdesk")
     parser.add_argument("--keep", action="store_true")
     parser.add_argument("--diagnostics", action="store_true")
-    parser.add_argument("--case", choices=("all", "kernel-baseline", "mapping-task", "pidfd-table", "fd-observation", "proc-custody", "exec-custody", "open-job", "ofd-order", "fd-handoff", "fd-parcel", "fd-messages", "ipc-peer", "ipc-origins", "ipc-ancillary", "mount-policy", "mount-graph", "mount-namespace", "inode-custody", "origin-transfer", "transient-store", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fd-lifecycle", "restricted-descriptors", "fs-dispatch", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture", "rpc", "stores"), default="all",
+    parser.add_argument("--case", choices=("all", "kernel-baseline", "mapping-task", "private-memory", "pidfd-table", "fd-observation", "proc-custody", "exec-custody", "open-job", "ofd-order", "fd-handoff", "fd-parcel", "fd-messages", "ipc-peer", "ipc-origins", "ipc-ancillary", "mount-policy", "mount-graph", "mount-namespace", "inode-custody", "origin-transfer", "transient-store", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fd-lifecycle", "restricted-descriptors", "fs-dispatch", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture", "rpc", "stores"), default="all",
                         help="Run resource regressions, FD handoff/parcel, terminal RPC custody, native FD lifecycle, or worker transport")
     parser.add_argument("--compare-installed", action="store_true",
                         help="Compare identical metadata/spawn fixtures with the installed runtime")
@@ -342,6 +342,8 @@ def main():
             names = ("fd_lifecycle",)
         if args.case == "mapping-task":
             names = ("mapping_task",)
+        if args.case == "private-memory":
+            names = ("bootstrap", "supervisor", "run", "service", "jit_memory", "task_quiesce", "test_interception_buffers", "fs_dispatch")
         if args.case == "fs-dispatch":
             names = ("fs_dispatch", "test_interception_buffers")
         if args.case == "rpc":
@@ -362,6 +364,32 @@ def main():
             file = "libmagicdesk_guest_" + name + ".so"
             transport.upload(client, args.build / file, root + "/" + file)
         check("prepare fixtures", "chmod 700 " + root + "/*.so")
+        if args.case == "private-memory":
+            check("task quiescence", root + "/libmagicdesk_guest_task_quiesce.so", "PASS task quiescence")
+            check("private mapping ownership", root + "/libmagicdesk_guest_test_interception_buffers.so",
+                  "PASS shared request buffer ownership")
+            check("namespace worker quiescence", root + "/libmagicdesk_guest_fs_dispatch.so --worker-pause " + root + "/worker-pause",
+                  "PASS worker quiescence")
+            check("native private-memory preparation", root + "/libmagicdesk_guest_jit_memory.so " + root,
+                  "PASS policy matrix and rejected-replacement regressions")
+            check("private-memory fixture directories", "mkdir -p " + root + "/source/tmp " + root + "/source/bin")
+            check("private-memory fixture image", "cp " + root + "/libmagicdesk_guest_jit_memory.so " + root + "/source/bin/test")
+            check("private-memory fixture access", "chmod 755 " + root + "/source " + root + "/source/bin " + root + "/source/bin/test")
+            check("private-memory temporary directory", "chmod 1777 " + root + "/source/tmp")
+            check("private-memory fixture import", root + "/libmagicdesk_guest_service.so --import " + root + "/source " + root + "/store --preserve-ownership")
+            check("guest private-memory preparation", root + "/libmagicdesk_guest_run.so --diagnostics --user 1000:1000 --store "
+                  + root + "/store --deadline-seconds 60 -- /bin/test /tmp",
+                  "PASS policy matrix and rejected-replacement regressions",
+                  patterns=(r"PROBE memory-access pid=\d+ result=0",
+                            r"PROBE memory-backing pid=\d+ fd=\d+ retained=1 result=0"))
+            check("automatic private-file JIT", root + "/libmagicdesk_guest_run.so --diagnostics --user 1000:1000 --store "
+                  + root + "/store --deadline-seconds 60 -- /bin/test --automatic",
+                  "PASS automatic private-file JIT",
+                  patterns=(r"PROBE memory-repair pid=\d+ address=0x[0-9a-f]+ size=4096 pages=1 result=0",))
+            check("automatic concurrent private-file JIT", root + "/libmagicdesk_guest_run.so --diagnostics --user 1000:1000 --store "
+                  + root + "/store --deadline-seconds 60 -- /bin/test --automatic-threads",
+                  "PASS automatic concurrent private-file JIT: protected=1")
+            return
         if args.case in ("all", "fs-dispatch", "fs-directory"):
             check("broker directory notification ownership", root + "/libmagicdesk_guest_fs_dispatch.so --broker-directory "
                   + root + "/broker-directory", "PASS broker directory notification ownership")

@@ -136,9 +136,8 @@ def main():
         check("direct strict attribute copy retains SELinux denial", "timeout 30 " + launch
               + "/bin/cp --preserve=xattr /tmp/md-direct-xattrs/archive-source /tmp/md-direct-xattrs/copied",
               code=1, contains=["setting attribute 'security.selinux'", "Permission denied"], limitation=True)
-        check("namespace strict attribute copy retains SELinux denial", "timeout 30 " + namespace
-              + "/bin/cp --preserve=xattr /tmp/md-ns-xattrs/archive-source /tmp/md-ns-xattrs/copied",
-              code=1, contains=["setting attribute 'security.selinux'", "Permission denied"], limitation=True)
+        check("namespace strict attribute copy excludes backing SELinux label", "timeout 30 " + namespace
+              + "/bin/cp --preserve=xattr /tmp/md-ns-xattrs/archive-source /tmp/md-ns-xattrs/copied")
         check("namespace copied attributes persist", "timeout 30 " + namespace
               + "/usr/bin/md-xattrs-fixture /tmp/md-ns-xattrs/copied verify", contains="PASS copied/archive xattrs")
         check("namespace coreutils archive-mode copy", "timeout 30 " + namespace

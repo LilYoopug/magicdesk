@@ -118,6 +118,61 @@ checks do not certify kernel-equivalent confinement or Docker Engine support.
 
 ## Holo ARM64 Userspace
 
+### Executable Private Memory
+
+`test_jit_memory.c` covers the native policy matrix, private-memory preparation,
+replacement transactions and automatic mprotect repair. Build the native
+`jit_memory` and `task_quiesce` CMake fixtures. The matrix takes one writable
+directory; `--automatic` and `--automatic-threads` require a Shroot launch.
+`test_resources.py BUILD --case private-memory` checks memory ownership and runs
+the same fixture natively and in an isolated Shroot store. It asserts supervisor
+proc/backing capture, independent protected-child memory, FD exhaustion cleanup,
+and noexec preservation after optional provenance loss. Worker-pause checks cover
+acknowledgement, queued work, independent workers, cancellation and shutdown
+without allocating another transport or retaining database locks. Compare actual UID 2000
+execution with execution inside the guest; a virtual guest UID is not the host
+executor identity.
+
+The matrix compares anonymous, private/shared memfd and regular-file mappings.
+It detects why unconditional anonymous/shared/backed-snapshot substitutions
+violate file reload or fork semantics. A separate single-threaded private-view
+prototype executes generated ARM64/x86-64 code, retains the original description,
+checks W^X, fork isolation, kernel IO, backing reload, relocation and failed
+preparation. Its explicit reload operation models logical `MADV_DONTNEED`;
+it does not transparently intercept arbitrary application syscalls. Native
+private-COW execution denial is reported independently of those assertions.
+
+The file-backed preparation checks use `native/shroot/src/private_memory.c`
+directly, without interposition. They copy only private COW pages into a clean
+executable view, retaining native DONTNEED and clean-page file coherence. The
+fixture also covers repeated compilation, nonzero offsets, partial and PROT_NONE
+views, stale provenance and retained proc access after PR_SET_DUMPABLE=0.
+`memory_replace.c` is exercised at every cancellation boundary, with failed
+reserve/save/install/restore/cleanup and missing terminal observation. Native and
+guest checks execute its commands, including rollback after a simulated fixed
+move removes its destination before failing. Both original COW data and native
+DONTNEED survive rollback; completed transactions retain no scratch mappings.
+The same suite tests the automatic supervisor path with ordinary application
+`mprotect`, closed input FDs, generated code, backing reload and repeated RX.
+Four concurrent JIT writers run alongside namespace IO with both ordinary and
+nondumpable credentials, including proc-FD closure and immediate number reuse
+for memfds. Protected source capture uses the production SCM_RIGHTS
+helper. `test_task_quiesce.c` checks preserved resume modes, deferred signals and
+rusage, both birth-event orders, helper ownership and a new barrier before all
+previous events are replayed. Stock SteamOS Plasma QML also has device coverage
+with this runtime, without preload or a disabled JIT; compositor GPU coverage
+is separate.
+`test_debugger_runtime.py --case gdb-jit --case strace-jit` repeats private-file
+compilation under a guest debugger. GDB observes all four generated-code versions
+without helper threads; strace sees successful application mprotect calls without
+the internal replacement syscalls or helper births. The same harness covers
+ordinary and multithreaded attach, detach and shared-memory helpers.
+`test_resources.py BUILD --case fd-handoff` also checks expired queued ADDFD
+admission, notification restart before queue readiness and retained-carrier
+cleanup with ordinary/protected receivers and both CLOEXEC modes.
+
+### Steam Client
+
 `test_steamos_runtime.py BUILD STORE [--archive HOST_TAR]` imports a prepared
 Holo rootfs into a new store and checks guest identity, SysV IPC, FIFO,
 user/PID/mount namespaces and HTTPS as `steamlab`. Archive ownership is retained;

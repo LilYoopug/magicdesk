@@ -66,7 +66,7 @@ target_link_options(bootstrap PRIVATE -Wl,--image-base=0x2000000000)
 guest_executable(supervisor ${src}/supervisor.c ${src}/task_resources.c ${src}/command_access.c ../command-client/wire.c ${src}/launch_registry.c ${src}/launch_peer.c ${src}/process_owner.c ${src}/interception_memory.c ${src}/interception_buffers.c ${src}/guest_domain.c
     ${src}/mount_copy_service.c ${src}/uts_namespace.c ${src}/ipc_namespace_services.c ${src}/proc_file.c ${src}/proc_sysctl.c ${src}/proc_namespace.c
     ${src}/fd_selector.c ${src}/sysv_shm.c ${src}/guest_debugger.c ${src}/process_image_view.c ${src}/fd_install.c ${src}/pid_descriptor.c
-    ${src}/task_helper.c ${src}/mapping_observation.c ${src}/fd_capture.c ${src}/ipc_io_host.c ${src}/ipc_io_job.c ${src}/ipc_io_entry.S
+    ${src}/task_helper.c ${src}/task_quiesce.c ${src}/private_memory.c ${src}/mapping_observation.c ${src}/memory_replace.c ${src}/fd_capture.c ${src}/ipc_io_host.c ${src}/ipc_io_job.c ${src}/ipc_io_entry.S
     ${ipc}
     ${identity} ${src}/guest_accounts.c ${src}/elf_admission.c ${src}/elf.c ${src}/fs_client.c ${wire} ${raw}
     ${src}/fs_worker.c ${src}/fs_service.c ${src}/ipc_peer_service.c ${src}/ipc_origins.c ${src}/fs_buffer_service.c ${src}/file_open_job.c ${src}/file_snapshot.c ${src}/command_image.c ${src}/exec_prepare.c ${namespace_engine} ${src}/image_catalogue.c ${inodes} ${mounts}
@@ -100,6 +100,12 @@ install(TARGETS bootstrap supervisor run service image RUNTIME DESTINATION lib)
 
 option(MAGICDESK_GUEST_FIXTURES "Build standalone native fixtures" OFF)
 if(MAGICDESK_GUEST_FIXTURES)
+    guest_executable(jit_memory ../guest-exec-lab/test_jit_memory.c ${src}/private_memory.c ${src}/memory_replace.c ${raw})
+    guest_executable(task_quiesce ../guest-exec-lab/test_task_quiesce.c ${src}/task_quiesce.c)
+    target_compile_options(task_quiesce PRIVATE -iquote ${src} -UNDEBUG)
+    target_compile_options(jit_memory PRIVATE -UNDEBUG)
+    target_compile_definitions(jit_memory PRIVATE MD_NO_START MD_USE_LIBC)
+    target_compile_options(jit_memory PRIVATE -iquote ${src})
     guest_executable(landlock_guest ../guest-exec-lab/test_landlock_guest.c)
     target_compile_options(landlock_guest PRIVATE -UNDEBUG)
     guest_executable(vm_init ../guest-exec-lab/test_vm_init.c)

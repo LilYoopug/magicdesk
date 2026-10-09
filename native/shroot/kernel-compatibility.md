@@ -100,9 +100,42 @@ requirement; `test_thread_identity_runtime.py` and `test_proc_root_runtime.py`
 cover ordinary/protected tasks, PID namespaces and debugger ownership.
 Noexec mapping policy uses the existing seccomp/ptrace observation and
 CLONE_VM ownership, not MFD_NOEXEC_SEAL or a host mount. MREMAP_DONTUNMAP is
-within the baseline (5.7); rejected native mappings keep their kernel errors.
+within the baseline (5.7 for anonymous private mappings, 5.13 for additional
+mapping types); rejected native mappings keep their kernel errors.
 Focused tests cover execution admission, mmap/mprotect, remap, fork and failed
 metadata allocation. This adds no requirement for newer memfd execution flags.
+Private-memory preparation uses retained smaps/mem/pagemap descriptions, ordinary
+private file mappings and pagemap's present/swap/file bits, all within 5.15.
+It neither reads PFNs nor requires CAP_SYS_ADMIN. Proc access is captured before
+nondumpable state and cannot be reused for a forked address space. Missing
+access, unknown VMA flags and unsupported mapping types fail preparation without
+replacing the original mapping. The kernel retains COW, truncation and DONTNEED
+semantics. `test_resources.py --case private-memory` covers the memory owner and
+native/guest preparation under UID 2000, including retained access after
+PR_SET_DUMPABLE=0, supervisor source capture, exact child-mm ownership and partial
+proc-capture FD exhaustion. Direct source capture uses the existing task-descriptor
+adapter, falling back to the existing private-table SCM_RIGHTS capture. Denied
+capture leaves native mmap intact without reopening a source by pathname or
+changing dumpability. The namespace
+worker's acknowledged pause uses existing eventfds and pthread synchronization,
+with no newer kernel dependency. The replacement transaction uses baseline mmap/munmap and
+fixed mremap, retaining the original VMA separately through commit or rollback.
+A failed fixed move does not prove that its destination remains mapped; see
+[Linux 5.15 mremap](https://github.com/torvalds/linux/blob/v5.15/mm/mremap.c).
+Focused checks cover cancellation, destructive-destination failures, failed
+restoration/cleanup and lost syscall observation. Automatic repair additionally
+uses baseline PTRACE_INTERRUPT, wait4 and original CONT/SYSCALL/SINGLESTEP
+continuations to quiesce launch-owned writers. Existing group stops stay stopped;
+real events and rusage return to the normal dispatcher. The helper and worker
+barriers add no post-5.15 dependency. Concurrent ordinary/protected JIT writers
+with namespace IO and stock SteamOS Plasma QML exercise the integrated path.
+The opt-in `test_jit_memory.c` experiment uses ordinary mmap/mprotect,
+`MREMAP_FIXED`, memfds and fork; these fit the baseline. Its optional
+userfaultfd probe separately tests full kernel-fault handling and
+`UFFD_USER_MODE_ONLY` (since 5.11), without requiring either for production
+Shroot or the private-view prototype. Available user-mode faults do not imply
+permission to service kernel accesses to missing pages. The experiment does not
+use newer userfaultfd move/poison ioctls or change SELinux/sysctl policy.
 Anonymous ELF custody uses baseline `F_GET_SEALS`, CLOEXEC duplication, pread
 and backed mappings. It does not require `MFD_EXEC` or `MFD_NOEXEC_SEAL`.
 `test_anonymous_exec.py` checks ordinary/sealed images and process-image lifetime;

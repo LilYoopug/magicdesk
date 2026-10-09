@@ -60,6 +60,8 @@ int mdi_overlay_attribute_set(struct md_inode_store *s,const struct mdi_node *no
 }
 ssize_t mdi_xattr_get(struct md_inode_store *s,const struct mdi_node *node,
         const char *name,void *out,size_t capacity) {
+    /* Android labels protect the physical backing, not the guest inode. */
+    if (!strcmp(name,"security.selinux")) return -ENODATA;
     int key=mdi_overlay_attribute(name);
     if (key) {
         ssize_t r=control_get(s,node,key,out,capacity);
@@ -91,7 +93,7 @@ int mdi_overlay_attributes_copy(struct md_inode_store *target,const struct mdi_n
     sqlite3_finalize(q); return r;
 }
 static int visible(struct md_inode_store *s,const char *name,int internal) {
-    if (!strcmp(name,MD_FILE_CAPABILITY_NAME) || !strcmp(name,MD_ACL_ACCESS_NAME)
+    if (!strcmp(name,"security.selinux") || !strcmp(name,MD_FILE_CAPABILITY_NAME) || !strcmp(name,MD_ACL_ACCESS_NAME)
             || !strcmp(name,MD_ACL_DEFAULT_NAME)) return 0;
     if (internal) return 1;
     if (s->lifetime->filesystem_kind==MD_FILESYSTEM_OVERLAY && private_name(name)) return 0;
@@ -157,6 +159,7 @@ void md_inode_xattr(struct md_inode_store *s,const struct md_fs_request *q,
     if (!r && !list && s->lifetime->filesystem_kind==MD_FILESYSTEM_OVERLAY && private_name(name))
         r=write ? -EPERM : -ENODATA;
     if (!r) r=mdi_xattr_permission(s,&node,name,list ? F_OK : write ? W_OK : R_OK);
+    if (!r && !list && !strcmp(name,"security.selinux")) r=set ? -EOPNOTSUPP : -ENODATA;
     if (!r && !write && q->capacity && (!output || !output->data || output->capacity<q->capacity)) r=-ERANGE;
     void *data=q->capacity && output ? output->data : NULL;
     ssize_t result=0;

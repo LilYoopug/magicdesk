@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <sys/eventfd.h>
 #include <sys/resource.h>
 #include <unistd.h>
@@ -34,6 +35,8 @@ struct md_fs_worker {
     int notification_fd, exited;
     void *notification_context;
     int (*notification)(void *, struct md_filesystem *, short);
+    struct md_fs_worker_pause *pause;
+    atomic_int pause_requested;
 };
 static void wake(int fd) {
     uint64_t one = 1;
@@ -45,7 +48,7 @@ static void drain(int fd) {
 }
 static struct md_fs_work *take_submitted(struct md_fs_worker *w, int *stopping) {
     pthread_mutex_lock(&w->lock);
-    struct md_fs_work *work=w->submitted;
+    struct md_fs_work *work=(!w->pause || w->stopping) ? w->submitted : NULL;
     if (work) {
         w->submitted=work->next;
         if (!w->submitted) w->submitted_tail=&w->submitted;
@@ -67,8 +70,19 @@ static void run_ready(void *context, struct md_filesystem *fs) {
         work->run(work,stopping ? NULL : fs,stopping ? -ESHUTDOWN : 0);
         md_fs_worker_publish(w,work);
     }
-    pthread_mutex_lock(&w->lock); int more=w->submitted!=NULL; pthread_mutex_unlock(&w->lock);
+    pthread_mutex_lock(&w->lock); int more=w->submitted && !w->pause; pthread_mutex_unlock(&w->lock);
     if (more) wake(w->wake);
+}
+static int paused(void *context) {
+    struct md_fs_worker *w=context;
+    if (!atomic_load_explicit(&w->pause_requested,memory_order_relaxed)) return 0;
+    pthread_mutex_lock(&w->lock);
+    int active=w->pause && !w->stopping;
+    int acknowledge=active && !w->pause->acknowledged;
+    if (acknowledge) w->pause->acknowledged=1;
+    pthread_mutex_unlock(&w->lock);
+    if (acknowledge) wake(w->done);
+    return active;
 }
 static int notification_fd(void *context) {
     struct md_fs_worker *w = context;
@@ -113,7 +127,7 @@ static void *run(void *context) {
     if (!error) {
         if (w->statistics) md_inode_measure(store, &stats);
         struct md_fs_work_source source = {.fd = w->wake, .context = w, .ready = run_ready,
-            .notification_fd = notification_fd, .notification = notification};
+            .notification_fd = notification_fd, .notification = notification, .paused=paused};
         error = md_fs_serve(&fs, listener, w->stop, 5000, w->statistics ? &rpc : NULL, &source);
     }
     pthread_mutex_lock(&w->lock); w->stopping=1; pthread_mutex_unlock(&w->lock);
@@ -160,6 +174,7 @@ int md_fs_worker_start(const char *store, const char *endpoint, const char *admi
     if (!w) return -ENOMEM;
     w->wake = w->done = w->stop = w->ready = -1;
     w->notification_fd = -1;
+    atomic_init(&w->pause_requested,0);
     w->store = store; w->endpoint = endpoint; w->admit = admit; w->statistics = statistics;
     w->tasks = tasks;
     w->exchanges=exchanges;
@@ -197,6 +212,39 @@ int md_fs_worker_wake_fd(struct md_fs_worker *w) { return w ? w->wake : -1; }
 struct md_mount_namespace *md_fs_worker_mounts(struct md_fs_worker *w) { return w ? w->mounts : NULL; }
 struct md_ofd_orders *md_fs_worker_cursors(struct md_fs_worker *w) { return w ? w->cursors : NULL; }
 void md_fs_worker_wake(struct md_fs_worker *w) { if (w) wake(w->wake); }
+int md_fs_worker_pause_begin(struct md_fs_worker *w, struct md_fs_worker_pause *p) {
+    if (!w || !p || p->owner) return -EINVAL;
+    pthread_mutex_lock(&w->lock);
+    int error=w->stopping ? -ESHUTDOWN : w->error ? w->error : w->pause ? -EBUSY : 0;
+    if (!error) {
+        *p=(struct md_fs_worker_pause){.owner=w}; w->pause=p;
+        atomic_store_explicit(&w->pause_requested,1,memory_order_relaxed);
+    }
+    pthread_mutex_unlock(&w->lock);
+    if (!error) wake(w->wake);
+    return error;
+}
+int md_fs_worker_pause_state(const struct md_fs_worker_pause *p) {
+    if (!p || !p->owner) return -EINVAL;
+    struct md_fs_worker *w=p->owner;
+    pthread_mutex_lock(&w->lock);
+    int state=w->pause!=p ? -EINVAL : w->stopping ? -ESHUTDOWN : w->error ? w->error : p->acknowledged;
+    pthread_mutex_unlock(&w->lock);
+    return state;
+}
+int md_fs_worker_pause_end(struct md_fs_worker_pause *p) {
+    if (!p || !p->owner) return -EINVAL;
+    struct md_fs_worker *w=p->owner;
+    pthread_mutex_lock(&w->lock);
+    int error=w->pause!=p ? -EINVAL : 0;
+    if (!error) {
+        w->pause=NULL; *p=(struct md_fs_worker_pause){0};
+        atomic_store_explicit(&w->pause_requested,0,memory_order_relaxed);
+    }
+    pthread_mutex_unlock(&w->lock);
+    if (!error) wake(w->wake);
+    return error;
+}
 int md_fs_worker_error(struct md_fs_worker *w) {
     pthread_mutex_lock(&w->lock); int error = w->error; pthread_mutex_unlock(&w->lock);
     return error;
@@ -256,6 +304,7 @@ int md_fs_worker_stop(struct md_fs_worker *w) {
     }
     int error = pthread_join(w->thread, NULL);
     if (!error && w->error != -ESHUTDOWN) error = -w->error;
+    if (w->pause) *w->pause=(struct md_fs_worker_pause){0};
     close(w->wake); close(w->done); close(w->stop); close(w->ready);
     md_mount_namespace_release(w->mounts);
     md_ofd_orders_release(w->cursors);

@@ -25,6 +25,7 @@
 #include <signal.h>
 #include <sched.h>
 #include <stddef.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -588,6 +589,101 @@ static void queue_failure(const char *store) {
     assert(callback_error && cancelled && cancelled<96 && md_fs_worker_stop(w)==-EIO);
     assert(!close(gate) && !close(started) && !close(failed));
     printf("PASS worker queue accepted=96 completed=%u cancelled=%u callbackErrorPreserved=1\n",count,cancelled);
+}
+struct pause_job {
+    struct md_fs_work work;
+    atomic_int *allowed;
+    atomic_int called;
+    int error, completed;
+};
+static void pause_job_run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
+    struct pause_job *job=(void *)work;
+    assert(!!fs==!error && (error || atomic_load(job->allowed)));
+    job->error=error; assert(!atomic_fetch_add(&job->called,1));
+}
+static int pause_job_complete(struct md_fs_work *work) {
+    struct pause_job *job=(void *)work;
+    assert(atomic_load(&job->called)==1 && !job->completed++); return 0;
+}
+static void pause_wait(struct md_fs_worker *worker, struct md_fs_worker_pause *pause) {
+    int64_t deadline=md_event_now()+5000000000LL;
+    /* EVENT_WAIT: this token's worker acknowledgement, not a settling interval.
+     * Shutdown or expiry fails the requested quiescence. */
+    while (!md_fs_worker_pause_state(pause)) {
+        assert(md_event_wait_fd(md_fs_worker_fd(worker),POLLIN,deadline)>=0);
+        assert(!md_fs_worker_dispatch(worker));
+    }
+    assert(md_fs_worker_pause_state(pause)==1);
+}
+static void worker_pause(const char *store) {
+    unsigned before=all_fds();
+    for (int stop=0;stop<2;++stop) {
+        char endpoint[80]; snprintf(endpoint,sizeof(endpoint),"md-worker-pause-%d-%d",getpid(),stop);
+        struct md_fs_worker *worker=NULL;
+        assert(!md_fs_worker_start(store,endpoint,NULL,NULL,NULL,NULL,0,0,NULL,&worker));
+        struct md_fs_worker_pause pause={0}, other={0};
+        atomic_int allowed=0;
+        struct pause_job jobs[8]={0};
+        assert(!md_fs_worker_pause_begin(worker,&pause));
+        assert(md_fs_worker_pause_begin(worker,&other)==-EBUSY && !other.owner);
+        pause_wait(worker,&pause);
+        for (unsigned i=0;i<8;++i) {
+            jobs[i]=(struct pause_job){.work={.run=pause_job_run,.complete=pause_job_complete},.allowed=&allowed};
+            assert(!md_fs_worker_submit(worker,&jobs[i].work));
+        }
+        if (stop) {
+            assert(!md_fs_worker_stop(worker) && !pause.owner);
+            for (unsigned i=0;i<8;++i)
+                assert(atomic_load(&jobs[i].called)==1 && jobs[i].error==-ESHUTDOWN && !jobs[i].completed);
+        } else {
+            /* A second worker on the same store must remain independent: the
+             * pause retains no database lock or global filesystem exclusion. */
+            char second_endpoint[80]; snprintf(second_endpoint,sizeof(second_endpoint),"md-worker-other-%d",getpid());
+            struct md_fs_worker *second=NULL;
+            assert(!md_fs_worker_start(store,second_endpoint,NULL,NULL,NULL,NULL,0,0,NULL,&second));
+            atomic_int second_allowed=1;
+            struct pause_job independent={.work={.run=pause_job_run,.complete=pause_job_complete},.allowed=&second_allowed};
+            assert(!md_fs_worker_submit(second,&independent.work));
+            int64_t deadline=md_event_now()+5000000000LL;
+            while (!independent.completed) {
+                assert(md_event_wait_fd(md_fs_worker_fd(second),POLLIN,deadline)>=0);
+                assert(!md_fs_worker_dispatch(second));
+            }
+            assert(!md_fs_worker_stop(second));
+            for (unsigned i=0;i<8;++i) assert(!atomic_load(&jobs[i].called));
+            atomic_store(&allowed,1);
+            assert(!md_fs_worker_pause_end(&pause));
+            assert(md_fs_worker_pause_state(&pause)==-EINVAL);
+            unsigned complete=0;
+            while (complete<8) {
+                assert(md_event_wait_fd(md_fs_worker_fd(worker),POLLIN,deadline)>=0);
+                assert(!md_fs_worker_dispatch(worker));
+                complete=0; for (unsigned i=0;i<8;++i) { complete+=jobs[i].completed; assert(!jobs[i].error); }
+            }
+            for (unsigned cycle=0;cycle<16;++cycle) {
+                assert(!md_fs_worker_pause_begin(worker,&pause)); pause_wait(worker,&pause);
+                assert(!md_fs_worker_pause_end(&pause));
+            }
+            int gate=eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK),started=eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK);
+            assert(gate>=0 && started>=0);
+            struct queued blocked={.work={.run=queued_run,.complete=queued_complete},.gate=gate,.started=started};
+            assert(!md_fs_worker_submit(worker,&blocked.work));
+            assert(md_event_wait_fd(started,POLLIN,md_event_now()+5000000000LL)>=0);
+            assert(!md_fs_worker_pause_begin(worker,&pause));
+            assert(!md_fs_worker_pause_state(&pause));
+            assert(!md_fs_worker_pause_end(&pause));
+            uint64_t one=1; assert(write(gate,&one,sizeof(one))==sizeof(one));
+            deadline=md_event_now()+5000000000LL;
+            while (!blocked.completed) {
+                assert(md_event_wait_fd(md_fs_worker_fd(worker),POLLIN,deadline)>=0);
+                assert(!md_fs_worker_dispatch(worker));
+            }
+            assert(!blocked.error && !md_fs_worker_stop(worker));
+            assert(!close(gate) && !close(started));
+        }
+        assert(all_fds()==before);
+    }
+    puts("PASS worker quiescence: confirmed pause, independent workers, deferred work, cancellation before acknowledgement, reuse and shutdown without FD leaks");
 }
 struct root_capture { struct md_fs_work work; struct md_fs_anchor *origin; int completed; };
 static void root_run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
@@ -1556,6 +1652,11 @@ void md_test_ipc_origin_child(const char *,int,unsigned);
 void md_test_ipc_origin_guest(const char *,const char *);
 void md_test_namespace_broker(const char *);
 int main(int argc, char **argv) {
+    if (argc==3 && !strcmp(argv[1],"--worker-pause")) {
+        alarm(30); setbuf(stdout,NULL);
+        struct md_inode_store *store=NULL; assert(!md_inode_store_open(argv[2],1,&store));
+        md_inode_store_close(store); worker_pause(argv[2]); return 0;
+    }
     if (argc==3 && !strcmp(argv[1],"--broker-directory")) { md_test_namespace_broker(argv[2]); return 0; }
     if (argc==3 && !strcmp(argv[1],"--ipc-peer")) { md_test_ipc_peer_worker(argv[2]); return 0; }
     if (argc==3 && !strcmp(argv[1],"--ipc-origins")) { md_test_ipc_origins(argv[2]); return 0; }
@@ -1579,6 +1680,7 @@ int main(int argc, char **argv) {
                     path_request(store,kind,protected,slots,cancelled,shared,exec_image,unsigned_argument);
     }
     queue_failure(store);
+    worker_pause(store);
     buffer_service_lifetime(store,MD_FS_OPEN);
     buffer_service_lifetime(store,MD_FS_TEMPORARY);
     buffer_export_lifetime(store);

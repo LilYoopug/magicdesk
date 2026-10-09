@@ -162,6 +162,12 @@ Software graphics is the default. Turnip requires a compatible Adreno device
 and builds a private Mesa inside Linux; it does not replace Android drivers.
 GUI recipes and distro-specific limits are listed in the
 [installer guide](shroot.md#linux-installer).
+SteamOS ARM64 uses an official recovery archive and preserves its supplied
+applications and system drivers. Its default Plasma profile adds a nested
+Wayland launcher and probes a private Turnip build on accessible KGSL GPUs,
+with software rendering otherwise.
+See [SteamOS recovery image](shroot.md#steamos-recovery-image) for storage
+requirements and the `steamos` guest account.
 
 ### Launch Installed Linux
 

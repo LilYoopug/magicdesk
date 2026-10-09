@@ -66,6 +66,10 @@ struct md_task_helpers *md_task_helpers_new(const struct md_task_helper_callback
 /* Every helper must be reaped before destruction. */
 void md_task_helpers_destroy(struct md_task_helpers *);
 unsigned md_task_helpers_count(const struct md_task_helpers *);
+/* Snapshot for a supervisor-owned writer barrier; private helper tasks are
+ * not ordinary guests. All helper resumes use PTRACE_CONT. */
+int md_task_helpers_visit(struct md_task_helpers *, int (*)(void *,pid_t,int), void *);
+int md_task_helper_owns(struct md_task_helpers *,pid_t owner,pid_t task);
 /* Borrows source on entry; accepted operations retain their own description,
  * memory owner, scratch stack and buffer lease. No caller FD is installed.
  * Completion occurs once after helper reaping or a confirmed pre-birth error.

@@ -80,6 +80,12 @@ the receive queue and drains unreceived rights on cancellation, without closing
 an installed application FD. Cold admission needs the infrastructure slot plus
 the result slot; admitted channels need only the result slot. Native quota and
 application filter denials remain errors.
+Typed descriptor dispatch captures its annotation under the same file-table
+turn as close/dup publication. A reused number cannot be classified from a
+preceding descriptor's uncommitted close. The turn ends after retaining the
+object, before application IO. Interrupted queued FD installations retire their
+expired notification independently of queue readiness; a restarted proc request
+releases the old unpublished carrier before creating another admission.
 Temporary-file and mount-table results use atomic ADDFD_SEND under the
 destination table turn, without a guest service FD.
 Deferred FIFO opens retain their pin and rendezvous resources outside the guest
@@ -155,8 +161,12 @@ RPC requests share this operand contract. Stateful operations still require the
 actual open file description, not an inode or pathname substitute.
 Xattr and POSIX ACL requests use bounded byte values in the shared mapping,
 not guest memfds or returned data FDs. The worker captures input bytes before
-execution and owns target selection, permission checks and copy-up. Descriptor
-variants capture the actual input description and reject O_PATH. Both mapped
+execution and owns target selection, permission checks and copy-up.
+The store's Android SELinux label is not a guest inode attribute: reads/removals
+return ENODATA, writes return EOPNOTSUPP, and enumeration omits it. Native bind
+attachments retain their real xattrs and kernel permissions. Guest file
+capabilities and POSIX ACLs remain independent logical metadata.
+Descriptor variants capture the actual input description and reject O_PATH. Both mapped
 and native RPC transports support values up to 64 KiB and explicit output-copy
 failure. Ordinary requests clear only their header, not unused value pages.
 Protected regular-file seeks also stay native; table ordering prevents close/dup
@@ -253,11 +263,12 @@ are command-line options; `--yes` suppresses questions. `--list` is read-only.
 | Alpine 3.23 | `alpine:3.23` | apps, Xfce, Weston |
 | Fedora 44 | `registry.fedoraproject.org/fedora:44` | apps, Xfce, Weston, experimental GNOME devkit |
 | Arch Linux ARM | `menci/archlinuxarm:base` (community image) | apps, Xfce, Weston |
+| SteamOS ARM64 0.3.0 | Official Valve Steam Frame recovery archive | supplied applications, Plasma 6 |
 
 `none` installs console tools only. `apps` supplies Mousepad, Thunar and Xfce
 Terminal, XKB data, icons and a session D-Bus setup. `xfce` adds an X11 desktop;
 `weston` adds a nested Wayland desktop with Xwayland. `plasma` adds KDE Plasma 6
-with X11 and Wayland desktop entries on Debian. `gnome` selects Fedora's
+with X11 and Wayland desktop entries on Debian and SteamOS. `gnome` selects Fedora's
 development-kit shell, not a systemd/GDM login session. GUI recipes are package
 configurations, not a claim of complete desktop compatibility. Fedora 44's Glycin
 2.1.5 decodes PNG and SVG through stock Bubblewrap with its original seccomp
@@ -309,6 +320,64 @@ No public resolver is selected automatically. For a new environment, system or
 explicit DNS replaces the image's resolver through the existing offline DNS
 command; `preserve` leaves it alone. Resume retains existing DNS.
 
+#### SteamOS recovery image
+
+```sh
+sh ~/install_linux.sh --distro steamos --name steamos --yes
+```
+
+The installer downloads the pinned Valve ARM64 recovery archive with SHA-256
+verification. A temporary, digest-pinned official `python:3.14-alpine3.23` OCI
+environment reads the GPT/Btrfs image without mounting it. Pinned binary wheels
+for Dissect Btrfs, cstruct and util are downloaded and verified by
+`magicdesk download`; neither Python nor a compiler is required on Android.
+These external readers are AGPL-3.0 projects from
+[Dissect](https://github.com/fox-it/dissect.btrfs), not APK dependencies.
+The conversion code is embedded in `install_linux.sh`.
+
+The root partition and its factory `/var` defaults become a local OCI layer,
+preserving file contents, ownership, modes, timestamps, symlinks, hardlinks,
+POSIX ACLs and file capabilities. Btrfs compression attributes describe storage
+only and are omitted. Other unsupported attributes stop conversion explicitly.
+Recovery-disk repair tools, EFI partitions and recovery `/etc` overrides are not
+installed. Android partitions and mount state are untouched.
+
+The named environment uses the image's ordinary `steamos` account. Its supplied
+Steam client archive is prepared in that account's home without replacing an
+existing Steam installation. After refreshing Apps, select Steam or another
+supplied application; `shroot login steamos` opens a terminal as `steamos`.
+Use `shroot login steamos --user root` for guest administration.
+
+Reserve about 35 GB of free storage during conversion/import. Verified source
+archives and wheels remain in `$HOME/downloads` (`--downloads DIR` overrides
+this); a validated import releases its own temporary converter environment
+and local OCI layout even if later package setup fails. Failed conversion/import
+retains the exact work directory printed in the console. It never prunes unrelated
+Shroot environments or downloads.
+
+SteamOS defaults to `--gui plasma --gpu auto --fonts keep`: it retains its supplied
+program selection and repository configuration, adding explicit nested Plasma
+launchers. Before preparing Steam for first
+use, it updates packages with `pacman -Syu` against those repositories, retaining
+the image's keyring and signature policy. A package-manager failure stops setup and retains the
+environment for `--resume`; guest networking must work with the selected DNS.
+Resume repeats the package update before continuing. This does not move to Arch's
+rolling repositories or invoke SteamOS's disk/firmware updater.
+Kernel-module scriptlets can warn about missing modules for the running Android
+kernel; the guest's kernel packages do not replace it. System-manager hooks skip
+services in the non-booted environment. Their diagnostics remain in the console.
+Locale, timezone and additional guest-user settings remain available. This is
+SteamOS userspace, not a booted recovery/VR session; individual games require
+their own verification. `--gui keep --gpu keep` deploys only the supplied stack.
+The private graphics recipe builds Mesa and a matching KWin 6.2.5 adapter without
+replacing Valve's packages or upgrading Plasma to a different ABI. Choose
+**Plasma Desktop (wayland)** in Apps after setup. To add this configuration to an
+already deployed image:
+
+```sh
+sh ~/install_linux.sh --name steamos --resume --gui plasma --gpu auto
+```
+
 Refresh MagicDesk's Linux application list after installation. Distribution
 entries remain untouched; `--protocol x11|wayland|both` controls the installer's
 own application entries. Selected whole-desktop entries open in one viewer.
@@ -344,12 +413,18 @@ is verified on Debian; other distribution toolchains require separate validation
 Software fallback uses the distribution's
 unchanged libraries. Neither profile replaces Android libraries, distribution
 drivers or the APK renderer, and no privileged identity switch is performed.
+`--gpu auto` first checks access to KGSL, then builds and probes Turnip when it
+is available. An unavailable or incompatible GPU selects software rendering with
+a visible diagnostic. Download, package and compilation failures stop setup;
+they are not classified as unsupported hardware. Explicit `--gpu turnip` fails
+instead of selecting software when its GPU probe fails.
 The lab obtains the identical patch with `sh scripts/install_linux.sh --print-mesa-patch`.
 
-The Debian 13 `plasma` profile adds both `Plasma Desktop (x11)` and
+The `plasma` profile adds both `Plasma Desktop (x11)` and
 `Plasma Desktop (wayland)`. With Turnip selected, it additionally builds pinned
-KWin 6.3.6 from a checksum-verified KDE archive. Its ordinary patch is embedded
-in the installer (`--print-kwin-patch`); no semantic patch engine, KWin fork,
+KWin 6.3.6 for Debian 13 or 6.2.5 for SteamOS from a checksum-verified KDE archive.
+The shared DMA-BUF adapter and version-specific API changes are embedded
+in the installer (`--print-kwin-patch [VERSION]`); no semantic patch engine, KWin fork,
 APK dependency or system compositor replacement is involved. The recipe includes
 Debian's Plasma dependency minimum. Work stays in `/var/cache/magicdesk/kwin/`,
 and complete builds use immutable `/opt/magicdesk/kwin/` prefixes. Only the
@@ -819,6 +894,47 @@ backing inode alone. Noexec covers executable/interpreter admission and mapped
 execution, including retained FDs, fork, remap and later mprotect. Native data IO
 is unchanged; file mappings and executable permission changes are observed by
 the address-space owner.
+
+The native memory owner retains captured private-file backing descriptions and
+offsets independently of application FD numbers. Splits, replacement, remap and
+fork retain or release that provenance through the mapping transaction; commit
+allocates no metadata. Optional proc-memory access belongs to the exact address
+space: CLONE_VM shares it, while fork and exec require independent capture.
+The supervisor captures proc access while each fresh image is stopped before
+entry, and independently at a non-CLONE_VM child's initial stop. Private file
+mmap captures its source under the existing address-space and FD-table turns.
+Protected tables and kernels without exact-task descriptor access use the
+existing private-table SCM_RIGHTS helper, retaining the source-table turn until
+its clone captures the description. Capture failures, memory pressure and lost
+provenance disable repair; they do not relax mandatory noexec policy or revoke
+otherwise native execute permission.
+The task-affine private-memory preparer admits a clean executable file mapping
+and materializes only the original COW pages through retained proc-memory access.
+Unchanged pages keep their file relationship; file truncation and DONTNEED remain
+kernel-owned. It validates the original VMA's permissions and supported advice
+before constructing a candidate. The replacement transaction retains the original
+VMA at a reserved address until installation or rollback is confirmed. Cancellation
+before publication restores the original; cancellation after confirmed publication
+finishes cleanup. Failed restoration or missing syscall observation retains custody
+and forbids resuming the address space without reconciliation or termination.
+The supervisor applies this path automatically after native `mprotect` rejects
+executable permission with EACCES on a tracked private-file range. Successful
+native transitions are unchanged. It needs no preload, application-specific
+patch or JIT-disable setting. A cold launch-tree barrier stops guest threads and
+existing private helpers, then acknowledges a namespace-worker pause. Real wait
+events retain their status, ordering and rusage; synthetic interrupts resume with
+their original ptrace continuation. The worker uses existing eventfds, holds no
+database/queue locks while paused, and leaves queued callbacks for normal dispatch.
+Only the request's mapping helper runs during preparation. The original caller
+executes each replacement syscall with an individually observed result. Expired
+barriers or lost publication observations terminate the owned launch rather than
+resuming an uncertain address space. Ordinary file IO needs no barrier or new
+thread. Unsupported special VMAs retain the native error; an already protected
+fork child without independently captured proc authority likewise remains native.
+Focused device checks cover concurrent ordinary/nondumpable JIT writers, stock
+SteamOS Plasma QML and repeated generated-code execution under guest GDB/strace.
+Stock Chromium's sandbox-enabled JavaScript workflow is a separate regression
+check; these results do not certify every application's mapping semantics.
 
 Static PIE and fixed-address ET_EXEC use the same loader. ELF load alignment is
 retained, including 2 MiB alignment; an occupied fixed-address range fails without

@@ -4,23 +4,26 @@ set -eu
 
 usage() {
     cat <<'HELP'
-Usage: sh install_linux.sh [--distro debian|ubuntu|alpine|fedora|arch] [OPTIONS]
+Usage: sh install_linux.sh [--distro debian|ubuntu|alpine|fedora|arch|steamos] [OPTIONS]
 
 Install an ARM64 Linux userspace in Shroot. Choose applications or a desktop
 independently of the distribution. Installation output stays in this console.
-New environments use software rendering unless Turnip is explicitly selected.
+New environments use software rendering unless Turnip is selected; SteamOS
+defaults to automatic Turnip detection and a Wayland Plasma desktop.
 
   --distro ID   Debian 13 (default), Ubuntu 24.04, Alpine 3.23, Fedora 44,
-                or rolling Arch Linux ARM (community menci/archlinuxarm image)
+                rolling Arch Linux ARM, or SteamOS ARM64 (official recovery image)
   --name NAME   Independent environment name (default: distribution name)
   --image REF   Alternative OCI reference for the SAME distribution/version
-  --gui MODE    none, apps (default), xfce, weston, plasma (Debian 13),
+  --downloads DIR  Recovery archive/wheel cache (default: $HOME/downloads)
+  --gui MODE    none, apps (default), xfce, weston, plasma (Debian 13/SteamOS),
                 gnome (Fedora devkit), keep
                 apps: Mousepad, Thunar, Xfce Terminal; xfce: X11 desktop;
                 weston: Wayland desktop; plasma: X11 and nested Wayland desktops;
                 gnome: experimental nested shell
   --protocol P  x11, wayland, both (default); installer application entries
   --gpu keep    Retain the graphics profile (default)
+  --gpu auto    Try Turnip when KGSL is accessible, otherwise use software
   --gpu software  Use the distribution's software renderer
   --gpu turnip  Build private Mesa/Zink/Turnip for a supported Adreno KGSL GPU
   --jobs N      Mesa/KWin compiler jobs, 1-8 (default: 2)
@@ -38,7 +41,8 @@ New environments use software rendering unless Turnip is explicitly selected.
   --resume      Continue in --name NAME; detect distribution, preserve GUI by default
   --list        Show available distribution/profile combinations
   --print-mesa-patch  Print the embedded patch without running the installer
-  --print-kwin-patch  Print the pinned KWin patch without running the installer
+  --print-kwin-patch [6.3.6|6.2.5]  Print the matching embedded KWin patch
+  --print-recovery-reader  Print the embedded SteamOS image converter
 
 Turnip builds inside Linux, needs several GB of free space and can take a while.
 The source version and SHA-256 are pinned; no Android or distribution drivers are replaced.
@@ -49,6 +53,10 @@ No Termux or Android root is required. Use trusted images: Shroot is not a
 security sandbox. The current shell/root identity is never changed.
 Fedora/Arch GUI recipes are experimental: Glycin/Bubblewrap can fail on Android.
 GNOME devkit additionally needs a working Linux system bus.
+SteamOS retains its supplied applications, fonts and system drivers. The default
+--gui plasma --gpu auto adds a nested desktop and a private graphics profile.
+It needs about 35 GB free during conversion, not a booted recovery/VR session.
+Its packages are updated from the image's configured repositories before first use.
 HELP
 }
 
@@ -58,7 +66,8 @@ configurations() {
         'ubuntu        24.04       ubuntu:24.04                              none/apps/xfce/weston' \
         'alpine        3.23        alpine:3.23                               none/apps/xfce/weston' \
         'fedora        44          registry.fedoraproject.org/fedora:44       none/apps/xfce/weston/gnome' \
-        'arch          rolling     menci/archlinuxarm:base (community)        none/apps/xfce/weston'
+        'arch          rolling     menci/archlinuxarm:base (community)        none/apps/xfce/weston' \
+        'steamos       0.3.0       Valve Steam Frame recovery                plasma/keep (supplied applications)'
     printf '%s\n' 'Fedora/Arch GUI: experimental (Glycin/Bubblewrap); GNOME also requires a Linux system bus.'
 }
 
@@ -73,6 +82,7 @@ case "$ID" in
     alpine) family=apk ;;
     fedora) family=dnf ;;
     arch|archarm) family=pacman ;;
+    steamos) family=recovery ;;
     *) echo "Unsupported distribution: $ID" >&2; exit 1 ;;
 esac
 pacman_command() {
@@ -87,12 +97,13 @@ packages() {
         apt) apt-get install -y --no-install-recommends "$@" </dev/null ;;
         apk) apk add "$@" </dev/null ;;
         dnf) dnf -y --setopt=install_weak_deps=False install "$@" </dev/null ;;
-        pacman) pacman_command -S --needed --noconfirm "$@" ;;
+        pacman|recovery) pacman_command -S --needed --noconfirm "$@" ;;
+        *) echo 'Package setup is unavailable for this image.' >&2; exit 1 ;;
     esac
 }
 package_cleanup() {
     # pacman-key's service is scoped to the package keyring, not a user's GPG home.
-    if [ "$family" = pacman ] && command -v gpgconf >/dev/null 2>&1; then
+    if { [ "$family" = pacman ] || [ "$family" = recovery ]; } && command -v gpgconf >/dev/null 2>&1; then
         gpgconf --homedir /etc/pacman.d/gnupg --kill all || {
             echo 'Could not stop the package-keyring GPG services.' >&2
         }
@@ -221,21 +232,10 @@ PATCH
 }
 
 kwin_patch() {
+    case "${1:-6.3.6}" in 6.2.5|6.3.6) ;; *) return 1 ;; esac
     cat <<'PATCH'
-KWin 6.3.6: nested DMA-BUF v3/EGL rendering without a DRM device.
-The dependency minimum follows Debian's relax-interplasma-versioned-deps patch.
+KWin: nested DMA-BUF v3/EGL rendering without a DRM device.
 
---- a/CMakeLists.txt
-+++ b/CMakeLists.txt
-@@ -7,7 +7,7 @@
- set(CMAKE_CXX_STANDARD 23)
- set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
--set(PROJECT_DEP_VERSION "6.3.6")
-+set(PROJECT_DEP_VERSION "6.3.4")
- set(QT_MIN_VERSION "6.7.0")
- set(KF6_MIN_VERSION "6.10.0")
- set(KDE_COMPILERSETTINGS_LEVEL "5.82")
 --- a/src/backends/wayland/CMakeLists.txt
 +++ b/src/backends/wayland/CMakeLists.txt
 @@ -1,4 +1,5 @@
@@ -432,186 +432,6 @@ The dependency minimum follows Debian's relax-interplasma-versioned-deps patch.
  };
 
  class WaylandDisplay : public QObject
---- a/src/backends/wayland/wayland_egl_backend.cpp
-+++ b/src/backends/wayland/wayland_egl_backend.cpp
-@@ -9,6 +9,7 @@
- */
-
- #include "wayland_egl_backend.h"
-+#include "dmaheapgraphicsbufferallocator.h"
- #include "core/drmdevice.h"
- #include "core/gbmgraphicsbufferallocator.h"
- #include "opengl/eglswapchain.h"
-@@ -71,7 +72,7 @@
-             if (it == formatTable.constEnd()) {
-                 continue;
-             }
--            m_swapchain = EglSwapchain::create(m_backend->drmDevice()->allocator(), m_backend->openglContext(), nativeSize, it.key(), it.value());
-+            m_swapchain = EglSwapchain::create(m_backend->graphicsBufferAllocator(), m_backend->openglContext(), nativeSize, it.key(), it.value());
-             if (m_swapchain) {
-                 break;
-             }
-@@ -83,7 +84,7 @@
-     }
-
-     m_buffer = m_swapchain->acquire();
--    if (!m_buffer) {
-+    if (!m_buffer || !m_backend->acquireBuffer(m_buffer->buffer())) {
-         return std::nullopt;
-     }
-
-@@ -103,6 +104,9 @@
-     // Flush rendering commands to the dmabuf.
-     glFlush();
-     EGLNativeFence releaseFence{m_backend->eglDisplayObject()};
-+    if (!m_backend->releaseBuffer(m_buffer->buffer(), releaseFence.fileDescriptor())) {
-+        return false;
-+    }
-
-     static_cast<WaylandOutput *>(m_output)->setPrimaryBuffer(m_backend->backend()->importBuffer(m_buffer->buffer()));
-     m_swapchain->release(m_buffer, releaseFence.takeFileDescriptor());
-@@ -159,28 +163,24 @@
-     const QSize bufferSize(std::ceil(tmp.width()), std::ceil(tmp.height()));
-     if (!m_swapchain || m_swapchain->size() != bufferSize) {
-         const QHash<uint32_t, QList<uint64_t>> formatTable = m_backend->backend()->display()->linuxDmabuf()->formats();
--        uint32_t format = DRM_FORMAT_INVALID;
--        QList<uint64_t> modifiers;
-         for (const uint32_t &candidateFormat : {DRM_FORMAT_ARGB2101010, DRM_FORMAT_ARGB8888}) {
-             auto it = formatTable.constFind(candidateFormat);
--            if (it != formatTable.constEnd()) {
--                format = it.key();
--                modifiers = it.value();
-+            if (it == formatTable.constEnd()) {
-+                continue;
-+            }
-+            m_swapchain = EglSwapchain::create(m_backend->graphicsBufferAllocator(), m_backend->openglContext(), bufferSize, it.key(), it.value());
-+            if (m_swapchain) {
-                 break;
-             }
-         }
--        if (format == DRM_FORMAT_INVALID) {
--            qCWarning(KWIN_WAYLAND_BACKEND) << "Could not find a suitable render format";
--            return std::nullopt;
--        }
--        m_swapchain = EglSwapchain::create(m_backend->drmDevice()->allocator(), m_backend->openglContext(), bufferSize, format, modifiers);
-         if (!m_swapchain) {
-+            qCWarning(KWIN_WAYLAND_BACKEND) << "Could not find a suitable cursor format";
-             return std::nullopt;
-         }
-     }
-
-     m_buffer = m_swapchain->acquire();
--    if (!m_buffer) {
-+    if (!m_buffer || !m_backend->acquireBuffer(m_buffer->buffer())) {
-         return std::nullopt;
-     }
-
-@@ -201,12 +201,16 @@
-     // Flush rendering commands to the dmabuf.
-     glFlush();
-
-+    EGLNativeFence releaseFence{m_backend->eglDisplayObject()};
-+    if (!m_backend->releaseBuffer(m_buffer->buffer(), releaseFence.fileDescriptor())) {
-+        return false;
-+    }
-+
-     wl_buffer *buffer = m_backend->backend()->importBuffer(m_buffer->buffer());
-     Q_ASSERT(buffer);
-
-     static_cast<WaylandOutput *>(m_output)->cursor()->update(buffer, scale(), hotspot().toPoint());
-
--    EGLNativeFence releaseFence{m_backend->eglDisplayObject()};
-     m_swapchain->release(m_buffer, releaseFence.takeFileDescriptor());
-     return true;
- }
-@@ -248,6 +252,21 @@
-     return m_backend->drmDevice();
- }
-
-+GraphicsBufferAllocator *WaylandEglBackend::graphicsBufferAllocator() const
-+{
-+    return m_allocator ? m_allocator.get() : AbstractEglBackend::graphicsBufferAllocator();
-+}
-+
-+bool WaylandEglBackend::acquireBuffer(GraphicsBuffer *buffer)
-+{
-+    return eglDisplayObject()->acquireDmaBuf(buffer, true);
-+}
-+
-+bool WaylandEglBackend::releaseBuffer(GraphicsBuffer *buffer, const FileDescriptor &fence)
-+{
-+    return eglDisplayObject()->releaseDmaBuf(buffer, fence, true);
-+}
-+
- void WaylandEglBackend::cleanupSurfaces()
- {
-     m_outputs.clear();
-@@ -267,14 +286,19 @@
-     initClientExtensions();
-
-     if (!m_backend->sceneEglDisplayObject()) {
--        for (const QByteArray &extension : {QByteArrayLiteral("EGL_EXT_platform_base"), QByteArrayLiteral("EGL_KHR_platform_gbm")}) {
-+        const auto platform = drmDevice() ? QByteArrayLiteral("EGL_KHR_platform_gbm") : QByteArrayLiteral("EGL_KHR_platform_wayland");
-+        for (const QByteArray &extension : {QByteArrayLiteral("EGL_EXT_platform_base"), platform}) {
-             if (!hasClientExtension(extension)) {
-                 qCWarning(KWIN_WAYLAND_BACKEND) << extension << "client extension is not supported by the platform";
-                 return false;
-             }
-         }
-
--        m_backend->setEglDisplay(EglDisplay::create(eglGetPlatformDisplayEXT(EGL_PLATFORM_GBM_KHR, m_backend->drmDevice()->gbmDevice(), nullptr)));
-+        if (drmDevice()) {
-+            m_backend->setEglDisplay(EglDisplay::create(eglGetPlatformDisplayEXT(EGL_PLATFORM_GBM_KHR, drmDevice()->gbmDevice(), nullptr)));
-+        } else {
-+            m_backend->setEglDisplay(EglDisplay::create(eglGetPlatformDisplayEXT(EGL_PLATFORM_WAYLAND_KHR, m_backend->display()->nativeDisplay(), nullptr)));
-+        }
-     }
-
-     const auto display = m_backend->sceneEglDisplayObject();
-@@ -282,6 +306,22 @@
-         return false;
-     }
-     setEglDisplay(display);
-+    if (!drmDevice()) {
-+        for (const auto &extension : {QByteArrayLiteral("EGL_EXT_image_dma_buf_import_modifiers"),
-+                                     QByteArrayLiteral("EGL_ANDROID_native_fence_sync"),
-+                                     QByteArrayLiteral("EGL_KHR_wait_sync")}) {
-+            if (!display->hasExtension(extension)) {
-+                qCWarning(KWIN_WAYLAND_BACKEND) << "DMA heap rendering requires" << extension;
-+                return false;
-+            }
-+        }
-+        auto allocator = std::make_unique<DmaHeapGraphicsBufferAllocator>();
-+        if (!allocator->isValid()) {
-+            return false;
-+        }
-+        m_allocator = std::move(allocator);
-+        display->setDmaBufSyncRequired(true);
-+    }
-     return true;
- }
-
-@@ -296,6 +336,20 @@
-         return;
-     }
-
-+    if (m_allocator) {
-+        // Validate allocation, EGL import and both synchronization directions before
-+        // advertising GPU composition or DMA-BUF to nested clients.
-+        const auto formats = m_backend->display()->linuxDmabuf()->formats();
-+        auto probe = EglSwapchain::create(m_allocator.get(), openglContext(), QSize(64, 64),
-+                                          DRM_FORMAT_XRGB8888, formats.value(DRM_FORMAT_XRGB8888));
-+        auto slot = probe ? probe->acquire() : nullptr;
-+        EGLNativeFence fence{eglDisplayObject()};
-+        if (!slot || !acquireBuffer(slot->buffer()) || !releaseBuffer(slot->buffer(), fence.fileDescriptor())) {
-+            setFailed("DMA heap buffer import or synchronization is unavailable");
-+            return;
-+        }
-+    }
-+
-     initWayland();
- }
-
 --- a/src/backends/wayland/wayland_egl_backend.h
 +++ b/src/backends/wayland/wayland_egl_backend.h
 @@ -98,6 +98,9 @@
@@ -632,77 +452,6 @@ The dependency minimum follows Debian's relax-interplasma-versioned-deps patch.
      std::map<Output *, Layers> m_outputs;
  };
 
---- a/src/compositor_wayland.cpp
-+++ b/src/compositor_wayland.cpp
-@@ -120,7 +120,7 @@
-     return true;
- }
-
--void WaylandCompositor::createRenderer()
-+bool WaylandCompositor::createRenderer()
- {
-     // If compositing has been restarted, try to use the last used compositing type.
-     const QList<CompositingType> availableCompositors = kwinApp()->outputBackend()->supportedCompositors();
-@@ -161,9 +161,16 @@
-             break;
-         } else if (qEnvironmentVariableIsSet("KWIN_COMPOSE")) {
-             qCCritical(KWIN_CORE) << "Could not fulfill the requested compositing mode in KWIN_COMPOSE:" << type << ". Exiting.";
--            qApp->quit();
-+            break;
-         }
-     }
-+    if (m_backend) {
-+        return true;
-+    }
-+    qCCritical(KWIN_CORE) << "The used windowing system requires compositing";
-+    // Startup may run before exec(); queue the failure for the event loop.
-+    QMetaObject::invokeMethod(qApp, [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
-+    return false;
- }
-
- void WaylandCompositor::createScene()
-@@ -191,16 +198,8 @@
-     Q_EMIT aboutToToggleCompositing();
-     m_state = State::Starting;
-
--    if (!m_backend) {
--        createRenderer();
--    }
--
--    if (!m_backend) {
-+    if (!m_backend && !createRenderer()) {
-         m_state = State::Off;
--
--        qCCritical(KWIN_CORE) << "The used windowing system requires compositing";
--        qCCritical(KWIN_CORE) << "We are going to quit KWin now as it is broken";
--        qApp->quit();
-         return;
-     }
-
---- a/src/compositor_wayland.h
-+++ b/src/compositor_wayland.h
-@@ -23,7 +23,7 @@
-     static WaylandCompositor *create(QObject *parent = nullptr);
-     ~WaylandCompositor() override;
-
--    void createRenderer();
-+    bool createRenderer();
-
-     void start() override;
-     void stop() override;
---- a/src/main_wayland.cpp
-+++ b/src/main_wayland.cpp
-@@ -142,7 +142,9 @@
-     createTabletModeManager();
-
-     auto compositor = WaylandCompositor::create();
--    compositor->createRenderer();
-+    if (!compositor->createRenderer()) {
-+        return;
-+    }
-     createWorkspace();
-     createColorManager();
-     createPlugins();
 --- a/src/opengl/egldisplay.cpp
 +++ b/src/opengl/egldisplay.cpp
 @@ -7,6 +7,9 @@
@@ -1101,9 +850,481 @@ The dependency minimum follows Debian's relax-interplasma-versioned-deps patch.
      InputMethodV1Interface *inputMethod() const
      {
 PATCH
+    case "${1:-6.3.6}" in
+        6.2.5) cat <<'PATCH'
+--- a/src/backends/wayland/wayland_egl_backend.cpp
++++ b/src/backends/wayland/wayland_egl_backend.cpp
+@@ -9,6 +9,7 @@
+ */
+
+ #include "wayland_egl_backend.h"
++#include "dmaheapgraphicsbufferallocator.h"
+ #include "core/drmdevice.h"
+ #include "core/gbmgraphicsbufferallocator.h"
+ #include "opengl/eglswapchain.h"
+@@ -71,7 +72,7 @@
+             if (it == formatTable.constEnd()) {
+                 continue;
+             }
+-            m_swapchain = EglSwapchain::create(m_backend->drmDevice()->allocator(), m_backend->openglContext(), nativeSize, it.key(), it.value());
++            m_swapchain = EglSwapchain::create(m_backend->graphicsBufferAllocator(), m_backend->openglContext(), nativeSize, it.key(), it.value());
+             if (m_swapchain) {
+                 break;
+             }
+@@ -83,7 +84,7 @@
+     }
+
+     m_buffer = m_swapchain->acquire();
+-    if (!m_buffer) {
++    if (!m_buffer || !m_backend->acquireBuffer(m_buffer->buffer())) {
+         return std::nullopt;
+     }
+
+@@ -103,6 +104,9 @@
+     // Flush rendering commands to the dmabuf.
+     glFlush();
+     EGLNativeFence releaseFence{m_backend->eglDisplayObject()};
++    if (!m_backend->releaseBuffer(m_buffer->buffer(), releaseFence.fileDescriptor())) {
++        return false;
++    }
+
+     m_presentationBuffer = m_backend->backend()->importBuffer(m_buffer->buffer());
+     m_swapchain->release(m_buffer, releaseFence.takeFileDescriptor());
+@@ -170,28 +174,24 @@
+     const QSize bufferSize(std::ceil(tmp.width()), std::ceil(tmp.height()));
+     if (!m_swapchain || m_swapchain->size() != bufferSize) {
+         const QHash<uint32_t, QList<uint64_t>> formatTable = m_backend->backend()->display()->linuxDmabuf()->formats();
+-        uint32_t format = DRM_FORMAT_INVALID;
+-        QList<uint64_t> modifiers;
+         for (const uint32_t &candidateFormat : {DRM_FORMAT_ARGB2101010, DRM_FORMAT_ARGB8888}) {
+             auto it = formatTable.constFind(candidateFormat);
+-            if (it != formatTable.constEnd()) {
+-                format = it.key();
+-                modifiers = it.value();
++            if (it == formatTable.constEnd()) {
++                continue;
++            }
++            m_swapchain = EglSwapchain::create(m_backend->graphicsBufferAllocator(), m_backend->openglContext(), bufferSize, it.key(), it.value());
++            if (m_swapchain) {
+                 break;
+             }
+         }
+-        if (format == DRM_FORMAT_INVALID) {
+-            qCWarning(KWIN_WAYLAND_BACKEND) << "Could not find a suitable render format";
+-            return std::nullopt;
+-        }
+-        m_swapchain = EglSwapchain::create(m_backend->drmDevice()->allocator(), m_backend->openglContext(), bufferSize, format, modifiers);
+         if (!m_swapchain) {
++            qCWarning(KWIN_WAYLAND_BACKEND) << "Could not find a suitable cursor format";
+             return std::nullopt;
+         }
+     }
+
+     m_buffer = m_swapchain->acquire();
+-    if (!m_buffer) {
++    if (!m_buffer || !m_backend->acquireBuffer(m_buffer->buffer())) {
+         return std::nullopt;
+     }
+
+@@ -212,12 +212,16 @@
+     // Flush rendering commands to the dmabuf.
+     glFlush();
+
++    EGLNativeFence releaseFence{m_backend->eglDisplayObject()};
++    if (!m_backend->releaseBuffer(m_buffer->buffer(), releaseFence.fileDescriptor())) {
++        return false;
++    }
++
+     wl_buffer *buffer = m_backend->backend()->importBuffer(m_buffer->buffer());
+     Q_ASSERT(buffer);
+
+     static_cast<WaylandOutput *>(m_output)->cursor()->update(buffer, scale(), hotspot().toPoint());
+
+-    EGLNativeFence releaseFence{m_backend->eglDisplayObject()};
+     m_swapchain->release(m_buffer, releaseFence.takeFileDescriptor());
+     return true;
+ }
+@@ -259,6 +263,21 @@
+     return m_backend->drmDevice();
+ }
+
++GraphicsBufferAllocator *WaylandEglBackend::graphicsBufferAllocator() const
++{
++    return m_allocator ? m_allocator.get() : AbstractEglBackend::graphicsBufferAllocator();
++}
++
++bool WaylandEglBackend::acquireBuffer(GraphicsBuffer *buffer)
++{
++    return eglDisplayObject()->acquireDmaBuf(buffer, true);
++}
++
++bool WaylandEglBackend::releaseBuffer(GraphicsBuffer *buffer, const FileDescriptor &fence)
++{
++    return eglDisplayObject()->releaseDmaBuf(buffer, fence, true);
++}
++
+ void WaylandEglBackend::cleanupSurfaces()
+ {
+     m_outputs.clear();
+@@ -278,14 +297,19 @@
+     initClientExtensions();
+
+     if (!m_backend->sceneEglDisplayObject()) {
+-        for (const QByteArray &extension : {QByteArrayLiteral("EGL_EXT_platform_base"), QByteArrayLiteral("EGL_KHR_platform_gbm")}) {
++        const auto platform = drmDevice() ? QByteArrayLiteral("EGL_KHR_platform_gbm") : QByteArrayLiteral("EGL_KHR_platform_wayland");
++        for (const QByteArray &extension : {QByteArrayLiteral("EGL_EXT_platform_base"), platform}) {
+             if (!hasClientExtension(extension)) {
+                 qCWarning(KWIN_WAYLAND_BACKEND) << extension << "client extension is not supported by the platform";
+                 return false;
+             }
+         }
+
+-        m_backend->setEglDisplay(EglDisplay::create(eglGetPlatformDisplayEXT(EGL_PLATFORM_GBM_KHR, m_backend->drmDevice()->gbmDevice(), nullptr)));
++        if (drmDevice()) {
++            m_backend->setEglDisplay(EglDisplay::create(eglGetPlatformDisplayEXT(EGL_PLATFORM_GBM_KHR, drmDevice()->gbmDevice(), nullptr)));
++        } else {
++            m_backend->setEglDisplay(EglDisplay::create(eglGetPlatformDisplayEXT(EGL_PLATFORM_WAYLAND_KHR, m_backend->display()->nativeDisplay(), nullptr)));
++        }
+     }
+
+     const auto display = m_backend->sceneEglDisplayObject();
+@@ -293,6 +317,22 @@
+         return false;
+     }
+     setEglDisplay(display);
++    if (!drmDevice()) {
++        for (const auto &extension : {QByteArrayLiteral("EGL_EXT_image_dma_buf_import_modifiers"),
++                                     QByteArrayLiteral("EGL_ANDROID_native_fence_sync"),
++                                     QByteArrayLiteral("EGL_KHR_wait_sync")}) {
++            if (!display->hasExtension(extension)) {
++                qCWarning(KWIN_WAYLAND_BACKEND) << "DMA heap rendering requires" << extension;
++                return false;
++            }
++        }
++        auto allocator = std::make_unique<DmaHeapGraphicsBufferAllocator>();
++        if (!allocator->isValid()) {
++            return false;
++        }
++        m_allocator = std::move(allocator);
++        display->setDmaBufSyncRequired(true);
++    }
+     return true;
+ }
+
+@@ -307,6 +347,20 @@
+         return;
+     }
+
++    if (m_allocator) {
++        // Validate allocation, EGL import and both synchronization directions before
++        // advertising GPU composition or DMA-BUF to nested clients.
++        const auto formats = m_backend->display()->linuxDmabuf()->formats();
++        auto probe = EglSwapchain::create(m_allocator.get(), openglContext(), QSize(64, 64),
++                                          DRM_FORMAT_XRGB8888, formats.value(DRM_FORMAT_XRGB8888));
++        auto slot = probe ? probe->acquire() : nullptr;
++        EGLNativeFence fence{eglDisplayObject()};
++        if (!slot || !acquireBuffer(slot->buffer()) || !releaseBuffer(slot->buffer(), fence.fileDescriptor())) {
++            setFailed("DMA heap buffer import or synchronization is unavailable");
++            return;
++        }
++    }
++
+     initWayland();
+ }
+
+--- a/src/compositor_wayland.cpp
++++ b/src/compositor_wayland.cpp
+@@ -167,7 +167,7 @@
+             break;
+         } else if (qEnvironmentVariableIsSet("KWIN_COMPOSE")) {
+             qCCritical(KWIN_CORE) << "Could not fulfill the requested compositing mode in KWIN_COMPOSE:" << type << ". Exiting.";
+-            qApp->quit();
++            break;
+         }
+     }
+
+@@ -176,7 +176,8 @@
+
+         qCCritical(KWIN_CORE) << "The used windowing system requires compositing";
+         qCCritical(KWIN_CORE) << "We are going to quit KWin now as it is broken";
+-        qApp->quit();
++        // Startup may run before exec(); queue the failure for the event loop.
++        QMetaObject::invokeMethod(qApp, [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
+         return;
+     }
+
+PATCH
+            ;;
+        6.3.6) cat <<'PATCH'
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -7,7 +7,7 @@
+ set(CMAKE_CXX_STANDARD 23)
+ set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+-set(PROJECT_DEP_VERSION "6.3.6")
++set(PROJECT_DEP_VERSION "6.3.4")
+ set(QT_MIN_VERSION "6.7.0")
+ set(KF6_MIN_VERSION "6.10.0")
+ set(KDE_COMPILERSETTINGS_LEVEL "5.82")
+--- a/src/backends/wayland/wayland_egl_backend.cpp
++++ b/src/backends/wayland/wayland_egl_backend.cpp
+@@ -9,6 +9,7 @@
+ */
+
+ #include "wayland_egl_backend.h"
++#include "dmaheapgraphicsbufferallocator.h"
+ #include "core/drmdevice.h"
+ #include "core/gbmgraphicsbufferallocator.h"
+ #include "opengl/eglswapchain.h"
+@@ -71,7 +72,7 @@
+             if (it == formatTable.constEnd()) {
+                 continue;
+             }
+-            m_swapchain = EglSwapchain::create(m_backend->drmDevice()->allocator(), m_backend->openglContext(), nativeSize, it.key(), it.value());
++            m_swapchain = EglSwapchain::create(m_backend->graphicsBufferAllocator(), m_backend->openglContext(), nativeSize, it.key(), it.value());
+             if (m_swapchain) {
+                 break;
+             }
+@@ -83,7 +84,7 @@
+     }
+
+     m_buffer = m_swapchain->acquire();
+-    if (!m_buffer) {
++    if (!m_buffer || !m_backend->acquireBuffer(m_buffer->buffer())) {
+         return std::nullopt;
+     }
+
+@@ -103,6 +104,9 @@
+     // Flush rendering commands to the dmabuf.
+     glFlush();
+     EGLNativeFence releaseFence{m_backend->eglDisplayObject()};
++    if (!m_backend->releaseBuffer(m_buffer->buffer(), releaseFence.fileDescriptor())) {
++        return false;
++    }
+
+     static_cast<WaylandOutput *>(m_output)->setPrimaryBuffer(m_backend->backend()->importBuffer(m_buffer->buffer()));
+     m_swapchain->release(m_buffer, releaseFence.takeFileDescriptor());
+@@ -159,28 +163,24 @@
+     const QSize bufferSize(std::ceil(tmp.width()), std::ceil(tmp.height()));
+     if (!m_swapchain || m_swapchain->size() != bufferSize) {
+         const QHash<uint32_t, QList<uint64_t>> formatTable = m_backend->backend()->display()->linuxDmabuf()->formats();
+-        uint32_t format = DRM_FORMAT_INVALID;
+-        QList<uint64_t> modifiers;
+         for (const uint32_t &candidateFormat : {DRM_FORMAT_ARGB2101010, DRM_FORMAT_ARGB8888}) {
+             auto it = formatTable.constFind(candidateFormat);
+-            if (it != formatTable.constEnd()) {
+-                format = it.key();
+-                modifiers = it.value();
++            if (it == formatTable.constEnd()) {
++                continue;
++            }
++            m_swapchain = EglSwapchain::create(m_backend->graphicsBufferAllocator(), m_backend->openglContext(), bufferSize, it.key(), it.value());
++            if (m_swapchain) {
+                 break;
+             }
+         }
+-        if (format == DRM_FORMAT_INVALID) {
+-            qCWarning(KWIN_WAYLAND_BACKEND) << "Could not find a suitable render format";
+-            return std::nullopt;
+-        }
+-        m_swapchain = EglSwapchain::create(m_backend->drmDevice()->allocator(), m_backend->openglContext(), bufferSize, format, modifiers);
+         if (!m_swapchain) {
++            qCWarning(KWIN_WAYLAND_BACKEND) << "Could not find a suitable cursor format";
+             return std::nullopt;
+         }
+     }
+
+     m_buffer = m_swapchain->acquire();
+-    if (!m_buffer) {
++    if (!m_buffer || !m_backend->acquireBuffer(m_buffer->buffer())) {
+         return std::nullopt;
+     }
+
+@@ -201,12 +201,16 @@
+     // Flush rendering commands to the dmabuf.
+     glFlush();
+
++    EGLNativeFence releaseFence{m_backend->eglDisplayObject()};
++    if (!m_backend->releaseBuffer(m_buffer->buffer(), releaseFence.fileDescriptor())) {
++        return false;
++    }
++
+     wl_buffer *buffer = m_backend->backend()->importBuffer(m_buffer->buffer());
+     Q_ASSERT(buffer);
+
+     static_cast<WaylandOutput *>(m_output)->cursor()->update(buffer, scale(), hotspot().toPoint());
+
+-    EGLNativeFence releaseFence{m_backend->eglDisplayObject()};
+     m_swapchain->release(m_buffer, releaseFence.takeFileDescriptor());
+     return true;
+ }
+@@ -248,6 +252,21 @@
+     return m_backend->drmDevice();
+ }
+
++GraphicsBufferAllocator *WaylandEglBackend::graphicsBufferAllocator() const
++{
++    return m_allocator ? m_allocator.get() : AbstractEglBackend::graphicsBufferAllocator();
++}
++
++bool WaylandEglBackend::acquireBuffer(GraphicsBuffer *buffer)
++{
++    return eglDisplayObject()->acquireDmaBuf(buffer, true);
++}
++
++bool WaylandEglBackend::releaseBuffer(GraphicsBuffer *buffer, const FileDescriptor &fence)
++{
++    return eglDisplayObject()->releaseDmaBuf(buffer, fence, true);
++}
++
+ void WaylandEglBackend::cleanupSurfaces()
+ {
+     m_outputs.clear();
+@@ -267,14 +286,19 @@
+     initClientExtensions();
+
+     if (!m_backend->sceneEglDisplayObject()) {
+-        for (const QByteArray &extension : {QByteArrayLiteral("EGL_EXT_platform_base"), QByteArrayLiteral("EGL_KHR_platform_gbm")}) {
++        const auto platform = drmDevice() ? QByteArrayLiteral("EGL_KHR_platform_gbm") : QByteArrayLiteral("EGL_KHR_platform_wayland");
++        for (const QByteArray &extension : {QByteArrayLiteral("EGL_EXT_platform_base"), platform}) {
+             if (!hasClientExtension(extension)) {
+                 qCWarning(KWIN_WAYLAND_BACKEND) << extension << "client extension is not supported by the platform";
+                 return false;
+             }
+         }
+
+-        m_backend->setEglDisplay(EglDisplay::create(eglGetPlatformDisplayEXT(EGL_PLATFORM_GBM_KHR, m_backend->drmDevice()->gbmDevice(), nullptr)));
++        if (drmDevice()) {
++            m_backend->setEglDisplay(EglDisplay::create(eglGetPlatformDisplayEXT(EGL_PLATFORM_GBM_KHR, drmDevice()->gbmDevice(), nullptr)));
++        } else {
++            m_backend->setEglDisplay(EglDisplay::create(eglGetPlatformDisplayEXT(EGL_PLATFORM_WAYLAND_KHR, m_backend->display()->nativeDisplay(), nullptr)));
++        }
+     }
+
+     const auto display = m_backend->sceneEglDisplayObject();
+@@ -282,6 +306,22 @@
+         return false;
+     }
+     setEglDisplay(display);
++    if (!drmDevice()) {
++        for (const auto &extension : {QByteArrayLiteral("EGL_EXT_image_dma_buf_import_modifiers"),
++                                     QByteArrayLiteral("EGL_ANDROID_native_fence_sync"),
++                                     QByteArrayLiteral("EGL_KHR_wait_sync")}) {
++            if (!display->hasExtension(extension)) {
++                qCWarning(KWIN_WAYLAND_BACKEND) << "DMA heap rendering requires" << extension;
++                return false;
++            }
++        }
++        auto allocator = std::make_unique<DmaHeapGraphicsBufferAllocator>();
++        if (!allocator->isValid()) {
++            return false;
++        }
++        m_allocator = std::move(allocator);
++        display->setDmaBufSyncRequired(true);
++    }
+     return true;
+ }
+
+@@ -296,6 +336,20 @@
+         return;
+     }
+
++    if (m_allocator) {
++        // Validate allocation, EGL import and both synchronization directions before
++        // advertising GPU composition or DMA-BUF to nested clients.
++        const auto formats = m_backend->display()->linuxDmabuf()->formats();
++        auto probe = EglSwapchain::create(m_allocator.get(), openglContext(), QSize(64, 64),
++                                          DRM_FORMAT_XRGB8888, formats.value(DRM_FORMAT_XRGB8888));
++        auto slot = probe ? probe->acquire() : nullptr;
++        EGLNativeFence fence{eglDisplayObject()};
++        if (!slot || !acquireBuffer(slot->buffer()) || !releaseBuffer(slot->buffer(), fence.fileDescriptor())) {
++            setFailed("DMA heap buffer import or synchronization is unavailable");
++            return;
++        }
++    }
++
+     initWayland();
+ }
+
+--- a/src/compositor_wayland.cpp
++++ b/src/compositor_wayland.cpp
+@@ -120,7 +120,7 @@
+     return true;
+ }
+
+-void WaylandCompositor::createRenderer()
++bool WaylandCompositor::createRenderer()
+ {
+     // If compositing has been restarted, try to use the last used compositing type.
+     const QList<CompositingType> availableCompositors = kwinApp()->outputBackend()->supportedCompositors();
+@@ -161,9 +161,16 @@
+             break;
+         } else if (qEnvironmentVariableIsSet("KWIN_COMPOSE")) {
+             qCCritical(KWIN_CORE) << "Could not fulfill the requested compositing mode in KWIN_COMPOSE:" << type << ". Exiting.";
+-            qApp->quit();
++            break;
+         }
+     }
++    if (m_backend) {
++        return true;
++    }
++    qCCritical(KWIN_CORE) << "The used windowing system requires compositing";
++    // Startup may run before exec(); queue the failure for the event loop.
++    QMetaObject::invokeMethod(qApp, [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
++    return false;
+ }
+
+ void WaylandCompositor::createScene()
+@@ -191,16 +198,8 @@
+     Q_EMIT aboutToToggleCompositing();
+     m_state = State::Starting;
+
+-    if (!m_backend) {
+-        createRenderer();
+-    }
+-
+-    if (!m_backend) {
++    if (!m_backend && !createRenderer()) {
+         m_state = State::Off;
+-
+-        qCCritical(KWIN_CORE) << "The used windowing system requires compositing";
+-        qCCritical(KWIN_CORE) << "We are going to quit KWin now as it is broken";
+-        qApp->quit();
+         return;
+     }
+
+--- a/src/compositor_wayland.h
++++ b/src/compositor_wayland.h
+@@ -23,7 +23,7 @@
+     static WaylandCompositor *create(QObject *parent = nullptr);
+     ~WaylandCompositor() override;
+
+-    void createRenderer();
++    bool createRenderer();
+
+     void start() override;
+     void stop() override;
+--- a/src/main_wayland.cpp
++++ b/src/main_wayland.cpp
+@@ -142,7 +142,9 @@
+     createTabletModeManager();
+
+     auto compositor = WaylandCompositor::create();
+-    compositor->createRenderer();
++    if (!compositor->createRenderer()) {
++        return;
++    }
+     createWorkspace();
+     createColorManager();
+     createPlugins();
+PATCH
+            ;;
+    esac
 }
 
 plasma_setup() {
+    case "$distro" in steamos) kwin_version=6.2.5 ;; *) kwin_version=6.3.6 ;; esac
     distribution_support
     cat <<'KWIN_HEAD'
 jobs=$1
@@ -1111,26 +1332,32 @@ recipe=$2
 [ -x /usr/local/bin/magicdesk-plasma ] || exit 0
 [ ! -r /etc/profile.d/magicdesk-graphics.sh ] || . /etc/profile.d/magicdesk-graphics.sh
 [ -n "${MAGICDESK_MESA_PREFIX:-}" ] || exit 0
-[ "$ID" = debian ] && [ "$VERSION_ID" = 13 ] || {
-    echo 'The pinned KWin recipe requires Debian 13.' >&2; exit 1;
-}
-version=6.3.6
-archive_sha=27f2205f06d58f1d1f480d2a94ae24022c2f95b9c1fdc5a549f8e143713fce12
+case "$ID:$VERSION_ID" in
+    debian:13)
+        version=6.3.6
+        archive_sha=27f2205f06d58f1d1f480d2a94ae24022c2f95b9c1fdc5a549f8e143713fce12 ;;
+    steamos:0.3.0)
+        version=6.2.5
+        archive_sha=5cc450a6e41105c8c49929b72550b331237f96aafb294690f4707bdc5f776848 ;;
+    *) echo 'The pinned KWin recipe requires Debian 13 or SteamOS 0.3.0.' >&2; exit 1 ;;
+esac
 prefix=/opt/magicdesk/kwin/$version-$recipe
 work=/var/cache/magicdesk/kwin/$version-$recipe
 mkdir -p /var/lib/magicdesk /etc/magicdesk "$work"
 exec 9>/var/lib/magicdesk/installer.lock
 flock -n 9 || { echo 'Another graphics setup is running in this environment.' >&2; exit 1; }
 candidate=/etc/magicdesk/plasma-kwin.sh.new
-trap 'status=$?; rm -f "$candidate"; exit "$status"' 0
+trap 'status=$?; rm -f "$candidate"; package_cleanup; exit "$status"' 0
 trap 'exit 130' INT
 trap 'exit 143' TERM
 cat > "$work/dmaheap.patch" <<'KWIN_PATCH'
 KWIN_HEAD
-    kwin_patch
+    kwin_patch "$kwin_version"
     cat <<'KWIN_BODY'
 KWIN_PATCH
 if [ ! -f "$prefix/.complete" ]; then
+    case "$family" in
+    apt)
     packages build-essential cmake ninja-build extra-cmake-modules pkgconf patch curl xz-utils \
         gettext hwdata breeze-dev kscreenlocker-dev kwayland-dev \
         libcanberra-dev libcap-dev libdisplay-info-dev libdrm-dev libegl-dev libeis-dev \
@@ -1152,7 +1379,12 @@ if [ ! -f "$prefix/.complete" ]; then
         libxcvt-dev libxkbcommon-dev libxkbcommon-x11-dev plasma-wayland-protocols \
         qt6-5compat-dev qt6-base-dev qt6-base-private-dev qt6-declarative-dev \
         qt6-declarative-private-dev qt6-sensors-dev qt6-svg-dev qt6-tools-dev \
-        qt6-wayland-dev qt6-wayland-dev-tools wayland-protocols xwayland
+        qt6-wayland-dev qt6-wayland-dev-tools wayland-protocols xwayland ;;
+    recovery)
+        # Arch-style packages already include headers; retain the image's Plasma ABI.
+        packages base-devel cmake ninja extra-cmake-modules pkgconf patch curl xz \
+            gettext wayland-protocols plasma-wayland-protocols ;;
+    esac
     mkdir -p /var/cache/magicdesk/kwin/downloads
     archive=/var/cache/magicdesk/kwin/downloads/kwin-$version.tar.xz
     if ! printf '%s  %s\n' "$archive_sha" "$archive" | sha256sum -c - >/dev/null 2>&1; then
@@ -1215,6 +1447,16 @@ trap 'status=$?; rm -f "$candidate"; package_cleanup; exit "$status"' 0
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+automatic=no
+if [ "$gpu" = auto ]; then
+    automatic=yes
+    gpu=software
+    if [ -c /dev/kgsl-3d0 ] && [ -r /dev/kgsl-3d0 ] && [ -w /dev/kgsl-3d0 ]; then
+        gpu=turnip
+    else
+        printf 'KGSL is unavailable; selecting software rendering.\n'
+    fi
+fi
 if [ "$gpu" = turnip ]; then
     [ -c /dev/kgsl-3d0 ] && [ -r /dev/kgsl-3d0 ] && [ -w /dev/kgsl-3d0 ] || {
         echo 'Turnip requires access to /dev/kgsl-3d0; the graphics profile is unchanged.' >&2
@@ -1245,7 +1487,7 @@ MESA_PATCH
         python3-ply bison flex patch curl xz glslang libdrm-devel expat-devel libzstd-devel zlib-ng-compat-devel \
         elfutils-libelf-devel wayland-devel wayland-protocols-devel libglvnd-devel vulkan-headers vulkan-tools \
         libX11-devel libXext-devel libXfixes-devel libXxf86vm-devel libXrandr-devel libxshmfence-devel libxcb-devel ;;
-    pacman) packages base-devel meson ninja pkgconf python-mako python-yaml python-ply bison flex \
+    pacman|recovery) packages base-devel meson ninja pkgconf python-mako python-yaml python-ply bison flex \
         patch curl xz glslang libdrm expat zstd zlib libelf wayland wayland-protocols libglvnd vulkan-headers \
         vulkan-tools libx11 libxext libxfixes libxxf86vm libxrandr libxshmfence libxcb ;;
     esac
@@ -1296,7 +1538,8 @@ MESA_PATCH
 fi
 
 # Remove only our previously exported library directory when re-sourcing a login profile.
-cat > "$candidate" <<'PROFILE'
+reset_profile() {
+cat <<'PROFILE'
 if [ -n "${MAGICDESK_MESA_PREFIX:-}" ]; then
     _md_paths=${LD_LIBRARY_PATH:-}
     _md_kept=
@@ -1313,6 +1556,8 @@ fi
 unset MAGICDESK_MESA_PREFIX LIBGL_ALWAYS_SOFTWARE GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE
 unset LIBGL_DRIVERS_PATH LIBGL_KOPPER_DRI2 __EGL_VENDOR_LIBRARY_FILENAMES VK_DRIVER_FILES VK_ICD_FILENAMES
 PROFILE
+}
+reset_profile > "$candidate"
 if [ "$gpu" = turnip ]; then
     printf 'export MAGICDESK_MESA_PREFIX=%s\n' "$prefix" >> "$candidate"
     cat >> "$candidate" <<'PROFILE'
@@ -1323,13 +1568,20 @@ export VK_DRIVER_FILES="$MAGICDESK_MESA_PREFIX/share/vulkan/icd.d/freedreno_icd.
 export MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink LIBGL_KOPPER_DRI2=true
 PROFILE
     # EVENT_WAIT: Vulkan enumeration exits; timeout rejects a hung driver, never activates it.
+    probe_status=0
     /bin/sh -c '. "$1"; unset DISPLAY WAYLAND_DISPLAY; exec timeout 30 vulkaninfo --summary' sh "$candidate" \
-        > "$work/vulkan-probe.log" 2>&1 || { cat "$work/vulkan-probe.log"; exit 1; }
+        > "$work/vulkan-probe.log" 2>&1 || probe_status=$?
     cat "$work/vulkan-probe.log"
-    grep -Eq 'driverID[[:space:]]*=[[:space:]]*DRIVER_ID_MESA_TURNIP' "$work/vulkan-probe.log" || {
-        echo 'No Turnip GPU found; the graphics profile is unchanged.' >&2; exit 1;
-    }
-else
+    if [ "$probe_status" -ne 0 ] || ! grep -Eq 'driverID[[:space:]]*=[[:space:]]*DRIVER_ID_MESA_TURNIP' "$work/vulkan-probe.log"; then
+        [ "$automatic" = yes ] || {
+            echo 'No working Turnip GPU found; the graphics profile is unchanged.' >&2; exit 1;
+        }
+        printf 'Turnip could not initialize this GPU (status %s); selecting software rendering.\n' "$probe_status"
+        gpu=software
+        reset_profile > "$candidate"
+    fi
+fi
+if [ "$gpu" = software ]; then
     printf 'export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe\n' >> "$candidate"
 fi
 chmod 644 "$candidate"
@@ -1385,6 +1637,13 @@ case "$family" in
         # Rolling repositories require a complete userspace upgrade, not pacman -Sy.
         pacman_command -Syu --noconfirm
         packages ca-certificates bash coreutils util-linux tzdata ;;
+    recovery)
+        # Keep the image's repository branch, keyring and signature policy.
+        # This updates userspace packages, not Android or SteamOS A/B partitions.
+        printf 'Updating SteamOS packages from the image repositories...\n'
+        printf 'Kernel/service hooks may warn about the non-booted environment. Android is not updated.\n'
+        pacman_command -Syu --noconfirm
+        dbus-uuidgen --ensure ;;
 esac
 mkdir -p /var/lib/magicdesk /etc/profile.d /usr/local/bin /usr/local/share/applications
 if [ "$setup_locked" = no ]; then
@@ -1401,7 +1660,7 @@ if [ "$locale_name" != keep ]; then
     if [ "$locale_name" != C.UTF-8 ]; then
         language=${locale_name%%_*}
         case "$family" in
-            apt|pacman) localedef -i "${locale_name%.UTF-8}" -f UTF-8 "$locale_name" ;;
+            apt|pacman|recovery) localedef -i "${locale_name%.UTF-8}" -f UTF-8 "$locale_name" ;;
             dnf) packages "glibc-langpack-$language" ;;
             apk)
                 MUSL_LOCPATH=/usr/share/i18n/locales/musl locale -a | grep -Fqx "${locale_name%.UTF-8}" || {
@@ -1451,7 +1710,9 @@ if [ "$gui" != none ] && [ "$gui" != keep ]; then
 
     # Protocol-specific entries are ours; distribution/user launchers are never rewritten.
     for backend in x11 wayland; do
-        for app in mousepad thunar terminal; do
+        apps='mousepad thunar terminal'
+        [ "$family" != recovery ] || apps=
+        for app in $apps; do
             entry=/usr/local/share/applications/magicdesk-$app-$backend.desktop
             if [ "$protocol" != both ] && [ "$protocol" != "$backend" ]; then
                 rm -f "$entry"
@@ -1562,9 +1823,11 @@ LAUNCH
     if [ ! -e /etc/profile.d/magicdesk-graphics.sh ]; then
         printf 'export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe\n' > /etc/profile.d/magicdesk-graphics.sh
     fi
-    command -v mousepad
-    command -v thunar
-    command -v xfce4-terminal
+    if [ "$family" != recovery ]; then
+        command -v mousepad
+        command -v thunar
+        command -v xfce4-terminal
+    fi
 fi
 
 if [ "$fonts" != keep ]; then
@@ -1592,6 +1855,299 @@ fi
 SETUP
 }
 
+recovery_reader() {
+    cat <<'READER'
+import base64
+import bz2
+import hashlib
+import io
+import json
+import mmap
+from pathlib import Path
+import stat
+import struct
+import sys
+import tarfile
+import zlib
+
+
+def exact(stream, size):
+    data = stream.read(size)
+    if len(data) != size:
+        raise ValueError('Truncated recovery image')
+    return data
+
+
+def partition_table(stream):
+    header = bytearray(exact(stream, 1024)[512:])
+    if header[:8] != b'EFI PART':
+        raise ValueError('Expected a GPT recovery image')
+    size, checksum = struct.unpack_from('<II', header, 12)
+    if not 92 <= size <= 512:
+        raise ValueError('Invalid GPT header length')
+    struct.pack_into('<I', header, 16, 0)
+    if zlib.crc32(header[:size]) != checksum:
+        raise ValueError('GPT header checksum mismatch')
+    first, last = struct.unpack_from('<QQ', header, 40)
+    lba, count, stride, crc = struct.unpack_from('<QIII', header, 72)
+    if lba != 2 or not 1 <= count <= 4096 or stride != 128:
+        raise ValueError('Unsupported GPT entry layout')
+    table = exact(stream, count * stride)
+    if zlib.crc32(table) != crc:
+        raise ValueError('GPT table checksum mismatch')
+    parts = {}
+    ranges = []
+    for i in range(count):
+        entry = table[i * stride:(i + 1) * stride]
+        if entry[:16] == bytes(16):
+            continue
+        start, end = struct.unpack_from('<QQ', entry, 32)
+        name = entry[56:128].decode('utf-16-le').rstrip('\0')
+        if not first <= start <= end <= last or name in parts:
+            raise ValueError('Invalid or duplicate GPT partition')
+        parts[name] = (start * 512, (end - start + 1) * 512)
+        ranges.append((start, end))
+    ranges.sort()
+    if any(a[1] >= b[0] for a, b in zip(ranges, ranges[1:])):
+        raise ValueError('Overlapping GPT partitions')
+    return parts, 1024 + len(table)
+
+
+def extract_root(archive, target):
+    with bz2.open(archive, 'rb') as source:
+        parts, offset = partition_table(source)
+        start, size = parts['rootfs-A']
+        if start < offset or size > 16 * 1024**3:
+            raise ValueError('Unsupported recovery root partition')
+        print(f'Reading rootfs-A: {size // 1024**2} MiB', flush=True)
+        while offset < start:
+            offset += len(exact(source, min(start - offset, 4 * 1024**2)))
+        with target.open('xb') as output:
+            remaining = size
+            while remaining:
+                block = exact(source, min(remaining, 4 * 1024**2))
+                output.write(block)
+                remaining -= len(block)
+                if (size - remaining) % (256 * 1024**2) == 0 or not remaining:
+                    print(f'Read {(size - remaining) // 1024**2}/{size // 1024**2} MiB', flush=True)
+        # Consume the tail: a complete bzip2 stream, not just a readable partition.
+        while source.read(4 * 1024**2):
+            pass
+
+
+def acl_text(value):
+    if len(value) < 4 or struct.unpack_from('<I', value)[0] != 2 or (len(value) - 4) % 8:
+        raise ValueError('Invalid POSIX ACL')
+    names = {1: 'user', 2: 'user', 4: 'group', 8: 'group', 16: 'mask', 32: 'other'}
+    entries = []
+    for tag, perm, identifier in struct.iter_unpack('<HHI', value[4:]):
+        if tag not in names or perm > 7:
+            raise ValueError('Invalid POSIX ACL entry')
+        who = str(identifier) if tag in (2, 8) else ''
+        mode = ''.join(c if perm & bit else '-' for c, bit in [('r', 4), ('w', 2), ('x', 1)])
+        entries.append(f'{names[tag]}:{who}:{mode}')
+    return ','.join(entries)
+
+
+def xattrs(node):
+    from dissect.btrfs.c_btrfs import c_btrfs
+    for _, data in node.subvolume.tree.cursor().iter(
+            node.inum, c_btrfs.BTRFS_XATTR_ITEM_KEY, 0, ignore_offset=True):
+        stream = io.BytesIO(data)
+        while stream.tell() < len(data):
+            item = c_btrfs.btrfs_dir_item(stream)
+            yield item.name.decode('utf-8'), item.data
+
+
+def metadata(node, name):
+    info = tarfile.TarInfo(name)
+    info.mode = stat.S_IMODE(node.mode)
+    info.uid, info.gid = node.uid, node.gid
+    info.mtime = node.mtime_ns // 10**9
+    for field in ('mtime', 'atime'):
+        value = getattr(node, field + '_ns')
+        seconds, nanos = divmod(abs(value), 10**9)
+        info.pax_headers[field] = f'{"-" if value < 0 else ""}{seconds}.{nanos:09d}'
+    for key, value in xattrs(node):
+        if key == 'btrfs.compression':
+            continue  # Filesystem storage policy, not a userspace file attribute.
+        if key in ('system.posix_acl_access', 'system.posix_acl_default'):
+            info.pax_headers['SCHILY.acl.' + key.rsplit('_', 1)[1]] = acl_text(value)
+        elif key == 'security.capability':
+            info.pax_headers['LIBARCHIVE.xattr.' + key] = base64.b64encode(value).decode()
+        else:
+            raise ValueError(f'Unsupported image attribute {key} on {name}')
+    return info
+
+
+def children(node):
+    return {name: child for name, child in node.iterdir() if name not in ('.', '..')}
+
+
+def export_tree(archive, node, path='', fallback=None, links=None, factory=False):
+    links = {} if links is None else links
+    name = path or '.'
+    info = metadata(node, name)
+    kind = stat.S_IFMT(node.mode)
+    if kind == stat.S_IFDIR:
+        info.type = tarfile.DIRTYPE
+    elif kind == stat.S_IFLNK:
+        info.type, info.linkname = tarfile.SYMTYPE, node.link
+    elif kind == stat.S_IFIFO:
+        info.type = tarfile.FIFOTYPE
+    elif kind == stat.S_IFREG:
+        key = (factory, node.subvolume.objectid, node.inum)
+        if key in links:
+            info.type, info.linkname = tarfile.LNKTYPE, links[key]
+        else:
+            info.size = node.size
+            links[key] = name
+    else:
+        raise ValueError(f'Unsupported file type {oct(kind)} at {name}')
+    if info.isreg():
+        with node.open() as source:
+            archive.addfile(info, source)
+    else:
+        archive.addfile(info)
+    if len(archive.members) % 5000 == 0:
+        print(f'Exported {len(archive.members)} entries: /{name}', flush=True)
+    if kind == stat.S_IFDIR:
+        entries = children(node)
+        defaults = children(fallback) if fallback else {}
+        for child in sorted(entries.keys() | defaults.keys()):
+            if not child or '/' in child or '\0' in child or child.startswith('.wh.'):
+                raise ValueError('Invalid filesystem name')
+            primary = entries.get(child)
+            secondary = defaults.get(child)
+            if primary is None:
+                # Factory contents are copies, not aliases of /usr/share/factory.
+                export_tree(archive, secondary, f'{path}/{child}'.lstrip('/'), links=links, factory=True)
+            else:
+                if not (primary.is_dir() and secondary and secondary.is_dir()):
+                    secondary = None
+                export_tree(archive, primary, f'{path}/{child}'.lstrip('/'), secondary, links, factory)
+
+
+class HashWriter:
+    def __init__(self, stream):
+        self.stream, self.digest = stream, hashlib.sha256()
+
+    def write(self, data):
+        self.digest.update(data)
+        return self.stream.write(data)
+
+
+def json_blob(directory, value, media):
+    data = json.dumps(value, separators=(',', ':')).encode()
+    digest = hashlib.sha256(data).hexdigest()
+    (directory / digest).write_bytes(data)
+    return {'mediaType': media, 'digest': 'sha256:' + digest, 'size': len(data)}
+
+
+def convert(image, destination):
+    from compression import zstd
+    from dissect.btrfs import Btrfs
+    blobs = destination / 'blobs/sha256'
+    blobs.mkdir(parents=True)
+    layer = destination / 'layer.tmp'
+    with image.open('rb') as source, mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ) as mapped:
+        fs = Btrfs(mapped)
+        release = fs.get('/etc/os-release').open().read().decode()
+        if '\nID=steamos\n' not in release or '\nVERSION_ID=0.3.0\n' not in release:
+            raise ValueError('Unexpected SteamOS release')
+        with zstd.open(layer, 'wb', level=3) as compressed:
+            writer = HashWriter(compressed)
+            with tarfile.open(fileobj=writer, mode='w|', format=tarfile.PAX_FORMAT) as tar:
+                # Recovery /var contains reimaging tools. Populate the installed
+                # userspace from rootfs and its factory defaults instead.
+                root = fs.get('/')
+                info = metadata(root, '.')
+                info.type = tarfile.DIRTYPE
+                tar.addfile(info)
+                links = {}
+                for name, node in sorted(children(root).items()):
+                    print(f'Exporting /{name}', flush=True)
+                    default = fs.get('/usr/share/factory/var') if name == 'var' else None
+                    export_tree(tar, node, name, default, links)
+        diff_id = writer.digest.hexdigest()
+    with layer.open('rb') as source:
+        digest = hashlib.file_digest(source, 'sha256').hexdigest()
+    length = layer.stat().st_size
+    layer.rename(blobs / digest)
+    config = json_blob(blobs, {
+        'architecture': 'arm64', 'os': 'linux',
+        'config': {'User': 'steamos', 'WorkingDir': '/home/steamos', 'Cmd': ['/bin/bash'],
+                   'Env': ['PATH=/usr/local/sbin:/usr/local/bin:/usr/bin', 'HOME=/home/steamos'],
+                   'Labels': {'org.opencontainers.image.title': 'SteamOS ARM64',
+                              'org.opencontainers.image.version': '0.3.0',
+                              'io.github.mekhontsev.magicdesk.recovery.sha256':
+                              '3a4a077f1b1f40688ab3279affcb56776bd97c54db1573e7c65fc52a97106676'}},
+        'rootfs': {'type': 'layers', 'diff_ids': ['sha256:' + diff_id]}},
+        'application/vnd.oci.image.config.v1+json')
+    manifest = json_blob(blobs, {'schemaVersion': 2, 'config': config, 'layers': [{
+        'mediaType': 'application/vnd.oci.image.layer.v1.tar+zstd',
+        'digest': 'sha256:' + digest, 'size': length}]},
+        'application/vnd.oci.image.manifest.v1+json')
+    (destination / 'oci-layout').write_text('{"imageLayoutVersion":"1.0.0"}')
+    (destination / 'index.json').write_text(json.dumps({'schemaVersion': 2, 'manifests': [manifest]}))
+    print(f'Local SteamOS image ready: {length // 1024**2} MiB', flush=True)
+
+
+if __name__ == '__main__':
+    archive, work = Path(sys.argv[1]), Path(sys.argv[2])
+    image = work / 'rootfs.img'
+    extract_root(archive, image)
+    convert(image, work / 'oci')
+    image.unlink()
+READER
+}
+
+recovery_download() {
+    file="$downloads/${1##*/}"
+    if [ -f "$file" ] && [ ! -L "$file" ]; then
+        actual=$(sha256sum "$file"); actual=${actual%% *}
+        if [ "$actual" = "$2" ]; then printf 'Using verified %s\n' "$file"; return; fi
+    fi
+    magicdesk download "$1" "$file" --sha256 "$2"
+}
+
+recovery_helper() { MAGICDESK_GUEST_HOME="$recovery_work/library" shroot "$@"; }
+
+prepare_recovery() {
+    command -v magicdesk >/dev/null 2>&1 || fail 'magicdesk download is required for recovery images.'
+    environments=$(shroot list)
+    if printf '%s\n' "$environments" | cut -f1 | grep -Fxq "$name"; then
+        fail "Environment $name already exists; use --resume to continue setup."
+    fi
+    downloads=${downloads:-${HOME:?}/downloads}
+    mkdir -p "$downloads"
+    downloads=$(cd "$downloads" && pwd -P)
+    work_parent=${TMPDIR:-$HOME/.cache}
+    mkdir -p "$work_parent"
+    work_parent=$(cd "$work_parent" && pwd -P)
+    case "$work_parent/" in "$downloads/"*) fail 'Temporary work must be outside the read-only download cache.' ;; esac
+    recovery_work=$(mktemp -d "$work_parent/magicdesk-steamos-XXXXXX")
+    mkdir "$recovery_work/exchange"
+    # Validate the selected DNS policy before fetching the multi-GB recovery archive.
+    stage='preparing the temporary Python environment'
+    recovery_helper install 'python@sha256:fe368aeff9df1995b57f0aa9bbced949a2a98fb3e6dfd92568e5f6acea6220f7' --name unpack --dns "$dns"
+    stage='downloading the official SteamOS recovery image'
+    recovery_download "$source" '3a4a077f1b1f40688ab3279affcb56776bd97c54db1573e7c65fc52a97106676'
+    stage='downloading pinned filesystem readers'
+    recovery_download 'https://files.pythonhosted.org/packages/a8/24/717afae59efd76fb85d882af52eeea827207776dd8bfdcd24916a0de5288/dissect_btrfs-1.10-py3-none-any.whl' '22569fba43c1740aa998544998beee09b599ff95f45d4fe3e05a47fac689d938'
+    recovery_download 'https://files.pythonhosted.org/packages/37/1c/dc626b1b0e477546c8e80d8cb028442ef4602af276c405f7a5ccc85b0b5a/dissect_cstruct-4.7-py3-none-any.whl' '0427621ce67baa3106df2dc63a320d0a7f5c2da88ba3faf2ef5886a1a6b458fd'
+    recovery_download 'https://files.pythonhosted.org/packages/cd/09/926cbb3fed29f762e676fb6a8d62b68c6bf536f817892cd35e89145e30e7/dissect_util-3.24-cp310-abi3-musllinux_1_2_aarch64.whl' 'df4130e896201c44e6b3d8ec1c022b586915abaedd1552f9c1b878bd343ae696'
+    stage='installing the verified filesystem readers'
+    recovery_helper exec unpack --bind-ro "$downloads" /mnt -- /usr/local/bin/python3 -m pip install \
+        --no-index --no-deps --only-binary=:all: --no-cache-dir --root-user-action=ignore \
+        /mnt/dissect_btrfs-1.10-py3-none-any.whl /mnt/dissect_cstruct-4.7-py3-none-any.whl \
+        /mnt/dissect_util-3.24-cp310-abi3-musllinux_1_2_aarch64.whl
+    stage='converting SteamOS to a local Linux image'
+    recovery_reader | recovery_helper exec unpack --bind "$recovery_work/exchange" /mnt \
+        --bind-ro "$downloads" /media -- /usr/local/bin/python3 - "/media/${source##*/}" /mnt
+    image="$recovery_work/exchange/oci"
+}
+
 fail() { printf '%s\n' "$*" >&2; exit 1; }
 ask() {
     printf '%s [%s]: ' "$1" "$2"
@@ -1605,7 +2161,8 @@ recipe_defaults() {
         alpine) source=alpine:3.23; version=3.23 ;;
         fedora) source=registry.fedoraproject.org/fedora:44; version=44 ;;
         arch) source=menci/archlinuxarm:base; version=rolling ;;
-        *) fail 'Distribution must be debian, ubuntu, alpine, fedora or arch.' ;;
+        steamos) source=https://steamdeck-images.steamos.cloud/recovery/steamframe-oobe-repair-20260922.5153644-0.3.0.img.bz2; version=0.3.0 ;;
+        *) fail 'Distribution must be debian, ubuntu, alpine, fedora, arch or steamos.' ;;
     esac
 }
 gui_notice() {
@@ -1618,7 +2175,12 @@ gui_notice() {
     [ "$gui" != gnome ] || printf 'GNOME devkit also needs a Linux system bus; this recipe does not boot one.\n'
 }
 if [ "$#" = 1 ] && [ "$1" = --print-mesa-patch ]; then mesa_patch; exit 0; fi
-if [ "$#" = 1 ] && [ "$1" = --print-kwin-patch ]; then kwin_patch; exit 0; fi
+if [ "$#" -ge 1 ] && [ "$1" = --print-kwin-patch ]; then
+    [ "$#" -le 2 ] || fail 'Expected one KWin version.'
+    kwin_patch "${2:-6.3.6}" || fail 'KWin version must be 6.3.6 or 6.2.5.'
+    exit 0
+fi
+if [ "$#" = 1 ] && [ "$1" = --print-recovery-reader ]; then recovery_reader; exit 0; fi
 distro=
 name=
 image=
@@ -1636,9 +2198,11 @@ extras=
 yes=no
 resume=no
 dns=
+downloads=
+recovery_work=
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --distro|--name|--image|--gui|--protocol|--gpu|--jobs|--locale|--timezone|--create-user|--fonts|--cache|--arch-sandbox|--package|--dns)
+        --distro|--name|--image|--downloads|--gui|--protocol|--gpu|--jobs|--locale|--timezone|--create-user|--fonts|--cache|--arch-sandbox|--package|--dns)
             [ "$#" -ge 2 ] && [ -n "$2" ] || fail "Missing value for $1"
             case "$1" in
                 --distro) distro=$2 ;; --name) name=$2 ;; --image) image=$2 ;; --gui) gui=$2 ;;
@@ -1646,6 +2210,7 @@ while [ "$#" -gt 0 ]; do
                 --timezone) zone=$2 ;; --create-user) new_user=$2 ;; --fonts) fonts=$2 ;;
                 --cache) cache=$2 ;; --arch-sandbox) arch_sandbox=$2 ;;
                 --package) extras="${extras:+$extras }$2" ;; --dns) dns=$2 ;;
+                --downloads) downloads=$2 ;;
             esac
             shift 2 ;;
         --yes) yes=yes; shift ;;
@@ -1669,35 +2234,51 @@ if [ "$yes" = no ]; then
         if [ -z "$distro" ]; then ask 'Distribution' debian; distro=$answer; fi
     fi
     if [ -z "$name" ]; then ask 'Independent environment name' "${distro:-debian}"; name=$answer; fi
+    if [ "$distro" = steamos ]; then
+        fonts=${fonts:-keep}
+        printf 'SteamOS retains its supplied applications and system drivers.\n'
+    fi
     if [ -z "$gui" ]; then
         default_gui=apps; [ "$resume" = no ] || default_gui=keep
-        ask 'GUI: none/apps/xfce/weston/plasma (Debian)/gnome (Fedora devkit)/keep' "$default_gui"; gui=$answer
+        [ "$distro" != steamos ] || default_gui=plasma
+        ask 'GUI: none/apps/xfce/weston/plasma (Debian/SteamOS)/gnome (Fedora devkit)/keep' "$default_gui"; gui=$answer
     fi
-    if [ -z "$gpu" ]; then ask 'Graphics: keep/software/turnip (Adreno KGSL; builds Mesa)' keep; gpu=$answer; fi
-    if [ "$gpu" = turnip ] && [ "$jobs" = 2 ]; then ask 'Mesa compiler jobs (1-8)' 2; jobs=$answer; fi
+    if [ -z "$gpu" ]; then
+        default_gpu=keep
+        if [ "$distro" = steamos ] && [ "$resume" = no ]; then default_gpu=auto; fi
+        ask 'Graphics: keep/software/auto/turnip (Adreno KGSL; builds Mesa)' "$default_gpu"; gpu=$answer
+    fi
+    if { [ "$gpu" = turnip ] || [ "$gpu" = auto ]; } && [ "$jobs" = 2 ]; then ask 'Mesa compiler jobs (1-8)' 2; jobs=$answer; fi
     if [ -z "$locale_name" ]; then ask 'Locale, e.g. ru_RU.UTF-8; keep leaves it unchanged' keep; locale_name=$answer; fi
     if [ -z "$zone" ]; then ask 'Timezone: system, IANA zone, or keep' keep; zone=$answer; fi
     if [ -z "$fonts" ]; then
         default_fonts=basic; [ "$resume" = no ] || default_fonts=keep
+        [ "$distro" != steamos ] || default_fonts=keep
         ask 'Fonts: basic/cjk/keep' "$default_fonts"; fonts=$answer
     fi
     ask 'Additional settings (guest user, protocol, packages, DNS, cache, Arch sandbox)? y/N' N
     case "$answer" in
         y|Y|yes|YES)
             if [ -z "$new_user" ]; then ask 'Create guest user (empty = no new account)' ''; new_user=$answer; fi
-            ask 'Installer application entries: both/x11/wayland' "$protocol"; protocol=$answer
-            ask 'Additional repository packages (space-separated)' "$extras"; extras=$answer
+            if [ "$distro" != steamos ]; then
+                ask 'Installer application entries: both/x11/wayland' "$protocol"; protocol=$answer
+                ask 'Additional repository packages (space-separated)' "$extras"; extras=$answer
+            fi
             if [ "$resume" = no ] && [ -z "$dns" ]; then
                 ask 'DNS: system; Private DNS/VPN needs explicit IPs (plain guest DNS)' system; dns=$answer
             fi
-            ask 'Downloaded package cache: keep/clean' "$cache"; cache=$answer
+            if [ "$distro" != steamos ]; then ask 'Downloaded package cache: keep/clean' "$cache"; cache=$answer; fi
             if [ "$distro" = arch ] || [ "$resume" = yes ]; then
                 ask 'Arch pacman filesystem sandbox: keep/disable-filesystem' "$arch_sandbox"; arch_sandbox=$answer
             fi ;;
     esac
 fi
 name=${name:-${distro:-debian}}
-if [ "$resume" = yes ]; then gui=${gui:-keep}; fonts=${fonts:-keep}; else gui=${gui:-apps}; fonts=${fonts:-basic}; fi
+if [ "$resume" = yes ]; then
+    gui=${gui:-keep}; fonts=${fonts:-keep}
+elif [ "$distro" = steamos ]; then
+    gui=${gui:-plasma}; gpu=${gpu:-auto}; fonts=${fonts:-keep}
+else gui=${gui:-apps}; fonts=${fonts:-basic}; fi
 gpu=${gpu:-keep}
 locale_name=${locale_name:-keep}
 zone=${zone:-keep}
@@ -1706,7 +2287,7 @@ case "$name" in ''|[!A-Za-z0-9]*|*[!A-Za-z0-9_.-]*) fail 'Invalid environment na
 [ "${#name}" -le 64 ] || fail 'Name must be at most 64 characters.'
 case "$gui" in none|apps|xfce|weston|plasma|gnome|keep) ;; *) fail 'Invalid GUI profile.' ;; esac
 case "$protocol" in both|x11|wayland) ;; *) fail 'Protocol must be both, x11 or wayland.' ;; esac
-case "$gpu" in keep|software|turnip) ;; *) fail 'GPU must be keep, software or turnip.' ;; esac
+case "$gpu" in keep|software|turnip|auto) ;; *) fail 'GPU must be keep, software, auto or turnip.' ;; esac
 case "$jobs" in [1-8]) ;; *) fail 'Jobs must be between 1 and 8.' ;; esac
 case "$locale_name" in
     keep|C.UTF-8) ;;
@@ -1739,10 +2320,15 @@ else
     distro=${distro:-debian}
 fi
 recipe_defaults
+if [ "$distro" = steamos ]; then
+    [ -z "$image" ] || fail 'SteamOS uses its pinned official recovery archive, not --image.'
+    { [ "$gui" = keep ] || [ "$gui" = plasma ]; } && [ "$fonts" = keep ] && [ -z "$extras" ] \
+        && [ "$cache" = keep ] || fail 'SteamOS supports plasma/keep with supplied applications and fonts.'
+fi
 [ -n "$image" ] || image=$source
 [ "$distro" = arch ] || [ "$arch_sandbox" = keep ] || fail '--arch-sandbox is only applicable to Arch.'
 [ "$gui" != gnome ] || [ "$distro" = fedora ] || fail 'The GNOME devkit recipe currently requires Fedora 44. Use apps, Xfce or Weston on other distributions.'
-[ "$gui" != plasma ] || [ "$distro" = debian ] || fail 'The Plasma recipe currently requires Debian 13.'
+[ "$gui" != plasma ] || [ "$distro" = debian ] || [ "$distro" = steamos ] || fail 'The Plasma recipe requires Debian 13 or SteamOS 0.3.0.'
 [ "$gui" != none ] || [ "$gpu" = keep ] || fail 'Choose a GUI profile before installing graphics; use --gui keep for an existing GUI.'
 
 printf '\n%s %s ARM64 | %s | GUI=%s | graphics=%s\n' "$distro" "$version" "$name" "$gui" "$gpu"
@@ -1764,6 +2350,17 @@ stage='checking Shroot'
 ready=no
 finish() {
     status=$?
+    if [ -n "$recovery_work" ]; then
+        if [ "$status" -eq 0 ] || [ "$ready" = yes ]; then
+            if recovery_helper remove unpack && recovery_helper prune; then
+                rm -rf "$recovery_work"
+            else
+                printf 'Temporary converter retained: %s\n' "$recovery_work" >&2
+            fi
+        else
+            printf 'Recovery conversion work retained for inspection: %s\n' "$recovery_work" >&2
+        fi
+    fi
     if [ "$status" -ne 0 ]; then
         printf '\nInstallation stopped while %s (exit %s).\n' "$stage" "$status" >&2
         if [ "$ready" = yes ]; then
@@ -1781,8 +2378,13 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 shroot --probe
 if [ "$resume" = no ]; then
+    [ "$distro" != steamos ] || prepare_recovery
     stage='installing the Linux image'
-    shroot install "$image" --name "$name" --dns "$dns"
+    if [ "$distro" = steamos ]; then
+        shroot install "$image" --oci --name "$name" --dns "$dns"
+    else
+        shroot install "$image" --name "$name" --dns "$dns"
+    fi
     if [ "$dns" != preserve ]; then
         stage='applying selected DNS to the new environment'
         shroot dns "$name" "$dns" --replace
@@ -1799,12 +2401,35 @@ shroot exec "$name" --user root -- /bin/sh -c '
         alpine) case "$VERSION_ID" in "$2".*) ;; *) exit 1 ;; esac; [ "$(apk --print-arch)" = aarch64 ] ;;
         fedora) [ "$VERSION_ID" = "$2" ] && [ "$(rpm --eval "%{_arch}")" = aarch64 ] ;;
         arch) [ "$(uname -m)" = aarch64 ] ;;
+        steamos) [ "$VERSION_ID" = "$2" ] && [ "$(uname -m)" = aarch64 ] ;;
     esac || { echo "Unexpected distribution version or architecture; setup was not applied." >&2; exit 1; }
 ' sh "$distro" "$version"
 ready=yes
 stage='installing packages and guest settings'
 system_setup | shroot exec "$name" --user root --env DEBIAN_FRONTEND=noninteractive -- /bin/sh -s -- \
     "$gui" "$protocol" "$locale_name" "$zone" "$new_user" "$fonts" "$cache" "$arch_sandbox" "$extras"
+
+if [ "$distro" = steamos ]; then
+    stage='preparing the supplied Steam client'
+    printf 'Preparing the supplied Steam client for the steamos account...\n'
+    shroot exec "$name" -- /bin/sh -c '
+        set -eu
+        [ "$(id -un)" = steamos ]
+        mkdir -p "$HOME/.steam" "$HOME/.local/share"
+        exec 9>"$HOME/.steam/installer.lock"
+        flock -n 9 || { echo "Another Steam setup is running." >&2; exit 1; }
+        if [ ! -d "$HOME/.local/share/Steam" ]; then
+            work=$(mktemp -d "$HOME/.local/share/.steam-XXXXXX")
+            trap '\''rm -rf "$work"'\'' 0
+            tar --zstd --checkpoint=10000 -xf /usr/lib/steam/steam.tar.zst -C "$work"
+            [ -x "$work/steamrtarm64/steam" ]
+            mv "$work" "$HOME/.local/share/Steam"
+        fi
+        if [ ! -e "$HOME/.steam/steam" ] && [ ! -L "$HOME/.steam/steam" ]; then
+            ln -s ../.local/share/Steam "$HOME/.steam/steam"
+        fi
+    '
+fi
 
 if [ "$gpu" != keep ]; then
     stage="preparing the $gpu graphics profile"
@@ -1834,7 +2459,9 @@ case "$gui" in
     none) printf 'No GUI was installed by this run. Use a terminal below.\n' ;;
     keep) printf 'Existing GUI entries were preserved; choose an installed application or desktop.\n' ;;
     *)
-        for backend in x11 wayland; do
+        app_backends='x11 wayland'
+        [ "$distro" != steamos ] || app_backends=
+        for backend in $app_backends; do
             if [ "$protocol" = both ] || [ "$protocol" = "$backend" ]; then
                 printf 'Individual apps: Mousepad (%s), Thunar (%s), Xfce Terminal (%s).\n' "$backend" "$backend" "$backend"
             fi
@@ -1850,6 +2477,7 @@ esac
 printf 'Terminal: Terminal sessions > New session > Shroot environments > %s > New session.\n' "$name"
 printf 'Keep privileged access available; no MagicDesk Desktop session or installer rerun is needed.\n'
 printf 'Console: shroot login %s\n' "$name"
+[ "$distro" != steamos ] || printf 'SteamOS uses the steamos guest account. Open Steam from Apps; its own updater may download client components.\nThis installs Linux userspace, not SteamOS boot, recovery or VR services. GPU/game compatibility is a separate check.\n'
 if [ -n "$new_user" ]; then printf 'User console: shroot login %s --user %s\n' "$name" "$new_user"; fi
 printf 'Folder attachment: shroot login %s --bind /sdcard/Download /mnt\n' "$name"
 printf 'Optional Android command access: shroot login %s --magicdesk\n' "$name"

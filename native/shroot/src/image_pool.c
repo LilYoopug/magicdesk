@@ -44,10 +44,10 @@ static int extract(int fd, int objects) {
         int rc = archive_read_next_header(ar, &entry);
         if (rc == ARCHIVE_EOF) break;
         if (rc != ARCHIVE_OK || archive_entry_is_encrypted(entry)) { r = -EBADMSG; break; }
-        if (++index > 200000) { r = -EFBIG; break; }
+        if (++index > MD_IMAGE_MAX_ENTRIES) { r = -EFBIG; break; }
         if (archive_entry_filetype(entry) != S_IFREG || archive_entry_hardlink(entry)) continue;
         int64_t size = archive_entry_size(entry);
-        if (size < 0 || (uint64_t)size > 8ULL*1024*1024*1024-bytes) { r = -EFBIG; break; }
+        if (size < 0 || (uint64_t)size > MD_IMAGE_MAX_BYTES-bytes) { r = -EFBIG; break; }
         char name[33]; md_image_pool_name(index, name);
         int out = openat(objects, name, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, 0600);
         if (out < 0) { r = -errno; break; }

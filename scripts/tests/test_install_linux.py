@@ -33,13 +33,22 @@ args = sys.argv[1:]
 with open(os.environ["TEST_LOG"], "a") as log:
     log.write(json.dumps(args) + "\n")
 stage = args[0]
+if Path(sys.argv[0]).name == "magicdesk":
+    Path(args[2]).write_bytes(b"test download")
+    sys.exit(0)
+if stage == "list":
+    print(os.environ.get("TEST_ENVIRONMENTS", ""))
 if stage == "exec":
+    if args[1] == "unpack":
+        if args[-1] == "/mnt":
+            Path(os.environ["TEST_PAYLOAD"] + ".reader").write_text(sys.stdin.read())
+        sys.exit(23 if os.environ.get("TEST_FAIL") == "converter" else 0)
     stage = "setup" if "-s" in args else "detect" if len(args) == 8 else "validate"
     if stage == "detect":
         print(os.environ.get("TEST_DISTRO", "debian"))
     if stage == "setup":
         payload = sys.stdin.read()
-        if args[-4] in ("turnip", "software"):
+        if args[-4] in ("turnip", "software", "auto"):
             stage = "graphics"
         if "version=6.3.6" in payload:
             stage = "kwin"
@@ -52,8 +61,10 @@ if os.environ.get("TEST_FAIL") == stage:
         stub.chmod(0o755)
         shutil.copyfile(stub, self.directory / "id")
         (self.directory / "id").chmod(0o755)
+        shutil.copyfile(stub, self.directory / "magicdesk")
+        (self.directory / "magicdesk").chmod(0o755)
         self.environment = dict(os.environ, PATH=str(self.directory) + os.pathsep + os.environ["PATH"],
-                                TEST_LOG=str(self.log), TEST_PAYLOAD=str(self.payload))
+                                TEST_LOG=str(self.log), TEST_PAYLOAD=str(self.payload), TMPDIR=str(self.directory))
 
     def run_script(self, *args, **environment):
         # EVENT_WAIT: installer exit; timeout fails a stuck subprocess.
@@ -85,6 +96,118 @@ if os.environ.get("TEST_FAIL") == stage:
         result = self.run_script("--yes", "--gui", "xfce", TEST_UID="0")
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("xfce", self.calls()[-1][-9])
+
+    def test_steamos_uses_pinned_helper_and_local_oci_with_separate_library(self):
+        result = self.run_script('--yes', '--distro', 'steamos', '--downloads', str(self.directory / 'downloads'))
+        self.assertEqual(0, result.returncode, result.stderr)
+        calls = self.calls()
+        downloads = [c for c in calls if c[0] == 'download']
+        self.assertEqual(4, len(downloads))
+        self.assertTrue(all('--sha256' in c for c in downloads))
+        installs = [c for c in calls if c[0] == 'install']
+        self.assertIn('python@sha256:', installs[0][1])
+        self.assertEqual(['--name', 'unpack', '--dns', 'system'], installs[0][2:])
+        self.assertEqual(['--oci', '--name', 'steamos', '--dns', 'system'], installs[1][2:])
+        reader = Path(str(self.payload) + '.reader').read_text()
+        self.assertIn("'User': 'steamos'", reader)
+        self.assertIn("parts['rootfs-A']", reader)
+        setup = self.payload.read_text()
+        self.assertIn("Updating SteamOS packages from the image repositories", setup)
+        self.assertIn('pacman_command -Syu --noconfirm\n        dbus-uuidgen --ensure', setup)
+        setup_index = next(i for i, c in enumerate(calls) if '-s' in c)
+        steam_index = next(i for i, c in enumerate(calls) if any('steam.tar.zst' in a for a in c))
+        self.assertLess(setup_index, steam_index)
+        self.assertIn(['remove', 'unpack'], calls)
+        self.assertEqual(['prune'], calls[-1])
+        self.assertFalse(list(self.directory.glob('magicdesk-steamos-*')))
+
+    def test_steamos_rejects_package_recipes_before_download(self):
+        for option in (('--gui', 'apps'), ('--fonts', 'cjk'),
+                       ('--image', 'arbitrary:latest'), ('--package', 'firefox')):
+            with self.subTest(option=option):
+                result = self.run_script('--yes', '--distro', 'steamos', *option)
+                self.assertNotEqual(0, result.returncode)
+                self.assertEqual([], self.calls())
+
+    def test_recovery_failure_retains_work_and_never_imports_partial_output(self):
+        result = self.run_script('--yes', '--distro', 'steamos', '--downloads', str(self.directory / 'downloads'),
+                                 TEST_FAIL='converter')
+        self.assertEqual(23, result.returncode)
+        self.assertIn('retained for inspection', result.stderr)
+        self.assertEqual(1, len([c for c in self.calls() if c[0] == 'install']))
+        self.assertNotIn(['prune'], self.calls())
+
+    def test_steamos_resume_does_not_download_or_convert(self):
+        result = self.run_script('--yes', '--resume', '--name', 'steam', TEST_DISTRO='steamos')
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertTrue(all(c[0] not in ('install', 'download', 'prune') for c in self.calls()))
+
+    def test_steamos_plasma_uses_matching_kwin_and_shared_gpu_recipe(self):
+        result = self.run_script('--yes', '--resume', '--name', 'steam', '--gui', 'plasma',
+                                 '--gpu', 'auto', TEST_DISTRO='steamos')
+        self.assertEqual(0, result.returncode, result.stderr)
+        kwin = Path(str(self.payload) + '.kwin').read_text()
+        self.assertIn('version=6.2.5', kwin)
+        self.assertIn('5cc450a6e41105c8c49929b72550b331237f96aafb294690f4707bdc5f776848', kwin)
+        self.assertIn('m_presentationBuffer = m_backend->backend()->importBuffer', kwin)
+        self.assertNotIn('bool WaylandCompositor::createRenderer()', kwin)
+        self.assertIn('KGSL is unavailable', Path(str(self.payload) + '.gpu').read_text())
+        self.assertIn('Plasma Desktop (wayland)', result.stdout)
+        self.assertNotIn('Individual apps:', result.stdout)
+        self.assertEqual(0, subprocess.run(['sh', '-n'], input=kwin, text=True).returncode)
+
+    def test_steamos_defaults_to_plasma_and_automatic_gpu(self):
+        result = self.run_script('--yes', '--distro', 'steamos', '--downloads', str(self.directory / 'downloads'))
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn('GUI=plasma | graphics=auto', result.stdout)
+        self.assertTrue(Path(str(self.payload) + '.kwin').is_file())
+        self.assertTrue(Path(str(self.payload) + '.gpu').is_file())
+
+    def test_kwin_patch_versions_share_fence_contract(self):
+        for version in ('6.2.5', '6.3.6'):
+            result = self.run_script('--print-kwin-patch', version, TEST_UID='10001')
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn('DMA_BUF_IOCTL_EXPORT_SYNC_FILE', result.stdout)
+            self.assertIn('DMA_BUF_IOCTL_IMPORT_SYNC_FILE', result.stdout)
+            self.assertIn('QCoreApplication::exit(1)', result.stdout)
+            self.assertEqual([], self.calls())
+        self.assertNotEqual(0, self.run_script('--print-kwin-patch', '6.4.0').returncode)
+
+    def test_steamos_update_failure_retains_environment_before_client_setup(self):
+        result = self.run_script('--yes', '--resume', '--name', 'steam',
+                                 TEST_DISTRO='steamos', TEST_FAIL='setup')
+        self.assertEqual(23, result.returncode)
+        self.assertIn('Environment retained', result.stderr)
+        self.assertNotIn('Linux is ready', result.stdout)
+        self.assertTrue(all(not any('steam.tar.zst' in a for a in c) for c in self.calls()))
+
+    def test_steamos_package_failure_releases_already_imported_conversion(self):
+        result = self.run_script('--yes', '--distro', 'steamos',
+                                 '--downloads', str(self.directory / 'downloads'), TEST_FAIL='setup')
+        self.assertEqual(23, result.returncode)
+        self.assertIn('Environment retained', result.stderr)
+        self.assertIn(['remove', 'unpack'], self.calls())
+        self.assertEqual(['prune'], self.calls()[-1])
+        self.assertFalse(list(self.directory.glob('magicdesk-steamos-*')))
+
+    def test_steamos_existing_name_is_rejected_before_fetching(self):
+        result = self.run_script('--yes', '--distro', 'steamos', TEST_ENVIRONMENTS='steamos\tsource\t/store')
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn('already exists', result.stderr)
+        self.assertEqual([['--probe'], ['list']], self.calls())
+
+    def test_steamos_work_cannot_overlap_read_only_cache(self):
+        result = self.run_script('--yes', '--distro', 'steamos', '--downloads', str(self.directory),
+                                 TMPDIR=str(self.directory / 'tmp'))
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn('outside the read-only download cache', result.stderr)
+        self.assertTrue(all(c[0] not in ('install', 'download') for c in self.calls()))
+
+    def test_recovery_dns_failure_does_not_fetch_recovery_archive(self):
+        result = self.run_script('--yes', '--distro', 'steamos', '--downloads', str(self.directory / 'downloads'),
+                                 TEST_FAIL='install')
+        self.assertEqual(23, result.returncode)
+        self.assertTrue(all(c[0] != 'download' for c in self.calls()))
 
     def test_app_launch_hints_match_selected_protocol(self):
         for protocol in ("x11", "wayland", "both"):
@@ -303,7 +426,7 @@ if os.environ.get("TEST_FAIL") == stage:
     def test_bad_names_and_options_do_not_mutate_any_environment(self):
         for args in [("--name", "../bad"), ("--name", "bad;id"), ("--name", "-bad"),
                      ("--name", "a" * 65), ("--gui", "gnome"), ("--unknown",), ("--gui",),
-                     ("--gpu", "auto"), ("--jobs", "0"), ("--jobs", "9"), ("--jobs", "1;id"),
+                     ("--gpu", "invalid"), ("--jobs", "0"), ("--jobs", "9"), ("--jobs", "1;id"),
                      ("--print-mesa-patch", "--yes")]:
             with self.subTest(args=args):
                 self.assertNotEqual(0, self.run_script("--yes", *args).returncode)

@@ -75,7 +75,9 @@ jobs:
 
       - name: Verify Linux installer fixtures
         if: runner.os == 'Linux'
-        run: python3 -m unittest discover -s scripts/tests -p test_install_linux.py
+        run: |
+          python3 -m unittest discover -s scripts/tests -p test_install_linux.py
+          python3 -m unittest discover -s scripts/tests -p test_recovery_reader.py
 
       - name: Graphics native host tools
         uses: ./.github/actions/setup-graphics-build

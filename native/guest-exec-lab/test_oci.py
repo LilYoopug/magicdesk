@@ -726,6 +726,21 @@ sys.stdin.read()
         self.assertNotEqual(self.body('a'), self.body('b'))
         self.assertEqual(self.body('a'), self.body('c'))
 
+    def test_pool_large_tree_cleanup_keeps_live_local_backings(self):
+        lower = [('old', 'dir', ''), ('old/body', 'file', b'old')]
+        upper = [('.wh.old', 'file', b'')]
+        for i in range(2048):
+            upper.extend([(f'd{i}', 'dir', ''), (f'd{i}/body', 'file', b'body'),
+                          (f'd{i}/link', 'sym', 'body')])
+        self.pool_import(self.layout([lower, upper]))
+        self.assertIsNone(self.body('old'))
+        with sqlite3.connect(self.destination / 'namespace.db') as db:
+            expected = {row[0] for row in db.execute('SELECT backing FROM backings WHERE source=0')}
+        actual = {p.name for p in (self.destination / 'objects').iterdir()}
+        self.assertEqual(expected, actual)
+        self.assertEqual(4097, len(actual))
+        self.assertEqual(b'body', self.body('d2047/body').read_bytes())
+
     def test_pool_repeated_layer_retains_independent_inodes(self):
         common = [('a', 'file', b'lower')]
         layout = self.layout([common, [('old', 'hard', 'a')], common])

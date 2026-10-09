@@ -302,6 +302,17 @@ int md_fs_serve(struct md_filesystem *fs, int listener, int stop_fd,
     fs->statistics=statistics;
     for (unsigned i = BASE; i < BASE+SLOTS; ++i) fds[i].fd = -1;
     for (;;) {
+        if (work && work->paused && work->paused(work->context)) {
+            struct pollfd control[]={{stop_fd,POLLIN,0},{work->fd,POLLIN,0}};
+            /* EVENT_WAIT: explicit worker-pause release or shutdown; the
+             * supervisor's operation deadline owns cancellation. No namespace
+             * transaction or queue lock crosses this wait. */
+            long ready=md_event_wait(control,2,INT64_MAX);
+            if (ready<0) { error=(int)ready; break; }
+            if (control[0].revents) break;
+            if (control[1].revents) work->ready(work->context,fs);
+            continue;
+        }
         long now = md_event_now(); if (now < 0) { error = (int)now; break; }
         int64_t nearest = INT64_MAX;
         int expired_watch = 0;

@@ -10,6 +10,8 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
+#include <sys/prctl.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static int fail_allocation;
@@ -219,9 +221,188 @@ static void mapping_policy(void) {
     md_memory_release(m); md_memory_release(copy);
     puts("PASS mapping policy: allocation-free ordinary IO, prepare rollback, split/move/clone, fork independence and unknown terminal result");
 }
-int main(void) {
+static void file_views(void) {
+    size_t p=(size_t)getpagesize(); uintptr_t base=0x20000000;
+    int fd=memfd_create("mapping-owner",MFD_CLOEXEC); assert(fd>=0 && !ftruncate(fd,8*p));
+    struct md_interception_memory *m=md_memory_new(); assert(m);
+    struct md_mapping_change c={0}; int source=-1; uint64_t offset=0;
+    assert(!md_memory_mapping_prepare(m,&c,MD_MAPPING_MAP,0,3*p,0,MAP_PRIVATE,0));
+    assert(!md_memory_mapping_backing(m,&c,fd,p));
     unsigned before=descriptors();
-    slots(); owner_lifetime(); failures(); address_spaces(); payload_reuse(); mapping_policy();
+    md_memory_mapping_finish(m,&c,-ENOMEM);
+    assert(descriptors()+1==before && !md_memory_has_policy(m));
+    assert(!md_memory_mapping_prepare(m,&c,MD_MAPPING_MAP,0,3*p,0,MAP_PRIVATE,0));
+    fail_allocation=1;
+    assert(md_memory_mapping_backing(m,&c,fd,p)==-ENOMEM && !c.backing);
+    fail_allocation=0;
+    assert(md_memory_mapping_backing(m,&c,fd,UINT64_MAX)==-EINVAL);
+    assert(!md_memory_mapping_backing(m,&c,fd,p));
+    fail_allocation=1;
+    md_memory_mapping_finish(m,&c,(long)base);
+    assert(md_memory_file_view(m,base,3*p,&source,&offset)==1 && offset==p && source!=fd);
+    assert((fcntl(source,F_GETFD)&FD_CLOEXEC) && !close(fd));
+    fail_allocation=0;
+    struct md_interception_memory *copy=md_memory_fork(m,0); assert(copy);
+    before=descriptors();
+    assert(!md_memory_mapping_prepare(m,&c,MD_MAPPING_UNMAP,base+p,p,0,0,0));
+    fail_allocation=1; md_memory_mapping_finish(m,&c,0); fail_allocation=0;
+    assert(!md_memory_file_view(m,base,3*p,&source,&offset));
+    assert(md_memory_file_view(m,base,p,&source,&offset)==1 && offset==p);
+    assert(md_memory_file_view(m,base+2*p,p,&source,&offset)==1 && offset==3*p);
+    assert(md_memory_file_view(copy,base,3*p,&source,&offset)==1 && offset==p);
+    assert(descriptors()==before);
+    assert(!md_memory_mapping_prepare(m,&c,MD_MAPPING_REMAP,base+2*p,p,2*p,MREMAP_MAYMOVE,0));
+    fail_allocation=1; md_memory_mapping_finish(m,&c,(long)(base+10*p)); fail_allocation=0;
+    assert(!md_memory_file_view(m,base+2*p,p,&source,&offset));
+    assert(md_memory_file_view(m,base+10*p,2*p,&source,&offset)==1 && offset==3*p);
+    assert(!md_memory_mapping_prepare(m,&c,MD_MAPPING_REMAP,base+10*p,2*p,p,MREMAP_MAYMOVE|MREMAP_DONTUNMAP,0));
+    fail_allocation=1; md_memory_mapping_finish(m,&c,(long)(base+20*p)); fail_allocation=0;
+    assert(md_memory_file_view(m,base+10*p,2*p,&source,&offset)==1 && offset==3*p);
+    assert(md_memory_file_view(m,base+20*p,p,&source,&offset)==1 && offset==3*p);
+    assert(!md_memory_mapping_prepare(m,&c,MD_MAPPING_MAP,base+10*p,p,0,MAP_ANONYMOUS|MAP_PRIVATE|MAP_FIXED,0));
+    fail_allocation=1; md_memory_mapping_finish(m,&c,(long)(base+10*p)); fail_allocation=0;
+    assert(!md_memory_file_view(m,base+10*p,p,&source,&offset));
+    assert(md_memory_file_view(m,base+11*p,p,&source,&offset)==1 && offset==4*p);
+    assert(!md_memory_mapping_prepare(m,&c,MD_MAPPING_REMAP,base+11*p,p,p,MREMAP_MAYMOVE,0));
+    md_memory_mapping_finish(m,&c,-ENOMEM);
+    assert(md_memory_file_view(m,base+11*p,p,&source,&offset)==1 && offset==4*p);
+    assert(!md_memory_mapping_prepare(m,&c,MD_MAPPING_UNMAP,base,32*p,0,0,0));
+    md_memory_mapping_finish(m,&c,0);
+    assert(!md_memory_has_policy(m) && fcntl(source,F_GETFD)>=0);
+    md_memory_release(m);
+    assert(md_memory_file_view(copy,base,3*p,&source,&offset)==1 && offset==p);
+    md_memory_release(copy);
+    assert(fcntl(source,F_GETFD)==-1 && errno==EBADF);
+    puts("PASS private mapping provenance: closed input, fork retention, split, move/grow/shrink, DONTUNMAP, replacement, rollback and allocation-free publication");
+}
+static void file_view_failures(void) {
+    size_t p=(size_t)getpagesize(); uintptr_t base=0x30000000;
+    int fd=memfd_create("mapping-failures",MFD_CLOEXEC); assert(fd>=0 && !ftruncate(fd,8*p));
+    struct md_interception_memory *m=md_memory_new(); assert(m);
+    struct md_mapping_change c={0}; int source=-1; uint64_t offset=0;
+    for (unsigned i=0;i<2;++i) {
+        assert(!md_memory_mapping_prepare(m,&c,MD_MAPPING_MAP,0,p,0,MAP_PRIVATE,0));
+        assert(!md_memory_mapping_backing(m,&c,fd,i*p));
+        md_memory_mapping_finish(m,&c,(long)(base+i*p));
+    }
+    assert(md_memory_file_view(m,base,2*p,&source,&offset)==1 && offset==0);
+    unsigned before=descriptors();
+    fail_allocation=1;
+    assert(!md_memory_fork(m,0));
+    fail_allocation=0;
+    struct md_interception_memory *pressure=md_memory_fork(m,0); assert(pressure);
+    assert(!md_memory_mapping_prepare(pressure,&c,MD_MAPPING_MAP,0,p,0,MAP_PRIVATE,1));
+    md_memory_mapping_finish(pressure,&c,(long)(base+30*p));
+    fail_allocation=1;
+    assert(!md_memory_mapping_prepare(pressure,&c,MD_MAPPING_REMAP,base,2*p,2*p,MREMAP_MAYMOVE,0));
+    md_memory_mapping_finish(pressure,&c,(long)(base+10*p));
+    fail_allocation=0;
+    assert(!md_memory_file_view(pressure,base+10*p,p,&source,&offset));
+    assert(!md_memory_exec_check(pressure,base+10*p,p));
+    assert(md_memory_exec_check(pressure,base+30*p,p)==-EACCES);
+    md_memory_release(pressure);
+    assert(descriptors()==before && md_memory_file_view(m,base,2*p,&source,&offset)==1);
+    assert(!md_memory_mapping_prepare(m,&c,MD_MAPPING_REMAP,base,2*p,2*p,MREMAP_MAYMOVE,0));
+    fail_allocation=1; md_memory_mapping_finish(m,&c,(long)(base+10*p)); fail_allocation=0;
+    assert(md_memory_file_view(m,base+10*p,2*p,&source,&offset)==1 && !offset);
+    assert(!md_memory_mapping_prepare(m,&c,MD_MAPPING_MAP,0,p,0,MAP_PRIVATE,0));
+    assert(md_memory_mapping_backing(m,&c,-1,0)==-EBADF && !c.backing);
+    md_memory_mapping_finish(m,&c,-EBADF);
+    assert(!md_memory_mapping_prepare(m,&c,MD_MAPPING_MAP,0,p,0,MAP_PRIVATE,0));
+    assert(!md_memory_mapping_backing(m,&c,fd,0));
+    md_memory_mapping_abandon(m,&c);
+    assert(!md_memory_file_view(m,base+10*p,p,&source,&offset));
+    assert(!md_memory_exec_check(m,base+10*p,p));
+    assert(descriptors()==before-2);
+    md_memory_release(m); close(fd);
+    puts("PASS private mapping failures: distinct same-file descriptions, failed fork/move/capture and unknown publication retain no unsafe provenance");
+}
+static void memory_access_lifetime(void) {
+    struct md_interception_memory *parent=md_memory_new(); assert(parent);
+    int fd=memfd_create("memory-access-lifetime",MFD_CLOEXEC); assert(fd>=0);
+    struct md_private_memory_access inputs={fd,fd,-1};
+    unsigned before=descriptors();
+    assert(md_memory_private_access_set(parent,&inputs)==-EBADF);
+    assert(!md_memory_private_access(parent) && descriptors()==before);
+    inputs.pagemap=fd;
+    assert(!md_memory_private_access_set(parent,&inputs));
+    assert(md_memory_private_access_set(parent,&inputs)==-EALREADY);
+    struct md_interception_memory *shared=md_memory_fork(parent,1), *child=md_memory_fork(parent,0);
+    assert(shared==parent && child && !md_memory_private_access(child));
+    const struct md_private_memory_access *access=md_memory_private_access(parent);
+    assert(access && access==md_memory_private_access(shared));
+    int retained[]={access->maps,access->memory,access->pagemap};
+    close(fd);
+    md_memory_release(parent);
+    for (unsigned i=0;i<3;++i) assert(fcntl(retained[i],F_GETFD)&FD_CLOEXEC);
+    md_memory_release(shared);
+    for (unsigned i=0;i<3;++i) assert(fcntl(retained[i],F_GETFD)==-1 && errno==EBADF);
+    md_memory_release(child);
+    puts("PASS private-memory authority: transactional capture, CLONE_VM retention and independent fork address space");
+}
+static void memory_access_capture(void) {
+    struct md_interception_memory *m=md_memory_new(); assert(m);
+    assert(md_memory_private_access_capture(m,0)==-EINVAL);
+    struct rlimit saved; assert(!getrlimit(RLIMIT_NOFILE,&saved) && saved.rlim_max>=64);
+    struct rlimit limit=saved; limit.rlim_cur=64; assert(!setrlimit(RLIMIT_NOFILE,&limit));
+    int fds[64], n=0, fd;
+    while ((fd=fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,0))>=0) { assert(n<64); fds[n++]=fd; }
+    assert(errno==EMFILE && n>=3);
+    for (unsigned available=0;available<4;++available) {
+        assert(md_memory_private_access_capture(m,getpid())==-EMFILE && !md_memory_private_access(m));
+        if (available<3) assert(!close(fds[--n]));
+    }
+    for (int i=0;i<n;++i) assert(!close(fds[i]));
+    assert(!setrlimit(RLIMIT_NOFILE,&saved));
+    fail_allocation=1;
+    assert(!md_memory_private_access_capture(m,getpid()));
+    fail_allocation=0;
+    assert(md_memory_private_access_capture(m,getpid())==-EALREADY);
+    unsigned char *memory=mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    assert(memory!=MAP_FAILED); *memory=19;
+    unsigned char value=0;
+    assert(pread(md_memory_private_access(m)->memory,&value,1,(off_t)memory)==1 && value==19);
+    assert(!munmap(memory,4096)); md_memory_release(m);
+    puts("PASS private-memory capture: exact self mm, allocation-free admission and rollback at every FD exhaustion point");
+}
+static void memory_access_protected_child(void) {
+    unsigned char *memory=mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    assert(memory!=MAP_FAILED); *memory=19;
+    int parent[2], child[2]; assert(!pipe2(parent,O_CLOEXEC) && !pipe2(child,O_CLOEXEC));
+    pid_t owner=getpid(), pid=fork(); assert(pid>=0);
+    if (!pid) {
+        assert(!prctl(PR_SET_PDEATHSIG,SIGKILL) && getppid()==owner);
+        close(parent[1]); close(child[0]);
+        unsigned char event=1;
+        /* EVENT_WAIT: the fixture parent controls capture/protection boundaries;
+         * its alarm and PDEATHSIG terminate a failed rendezvous. */
+        assert(read(parent[0],&event,1)==1);
+        assert(!prctl(PR_SET_DUMPABLE,0));
+        *memory=37; assert(write(child[1],&event,1)==1);
+        assert(read(parent[0],&event,1)==1 && *memory==43);
+        _exit(0);
+    }
+    close(parent[0]); close(child[1]);
+    struct md_interception_memory *m=md_memory_new(); assert(m);
+    assert(!md_memory_private_access_capture(m,pid));
+    unsigned char event=1, value=0;
+    assert(write(parent[1],&event,1)==1 && read(child[0],&event,1)==1);
+    const struct md_private_memory_access *access=md_memory_private_access(m);
+    assert(pread(access->memory,&value,1,(off_t)memory)==1 && value==37);
+    value=43; assert(pwrite(access->memory,&value,1,(off_t)memory)==1 && *memory==19);
+    assert(write(parent[1],&event,1)==1);
+    int status;
+    while (waitpid(pid,&status,0)<0) assert(errno==EINTR);
+    assert(WIFEXITED(status) && !WEXITSTATUS(status));
+    assert(pread(access->memory,&value,1,(off_t)memory)==0);
+    md_memory_release(m); close(parent[1]); close(child[0]); assert(!munmap(memory,4096));
+    puts("PASS private-memory capture: protected child retains exact mm, parent COW stays independent, exited mm cannot target a reused PID");
+}
+int main(void) {
+    alarm(30);
+    unsigned before=descriptors();
+    slots(); owner_lifetime(); failures(); address_spaces(); payload_reuse(); mapping_policy(); file_views(); file_view_failures();
+    memory_access_lifetime(); memory_access_capture(); memory_access_protected_child();
     assert(descriptors()==before);
     puts("PASS shared request buffer ownership");
     return 0;

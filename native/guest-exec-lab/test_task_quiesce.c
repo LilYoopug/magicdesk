@@ -1,0 +1,70 @@
+#define _GNU_SOURCE
+#include "task_quiesce.h"
+#include <assert.h>
+#include <errno.h>
+#include <signal.h>
+#include <stdio.h>
+#include <sys/ptrace.h>
+#include <sys/wait.h>
+
+static int interrupts, resumes, request;
+static pid_t resumed, newborn;
+static long trace(int op,pid_t pid,void *address,void *data) {
+    (void)address;
+    if (op==PTRACE_GETEVENTMSG) { *(unsigned long *)data=(unsigned long)newborn; return 0; }
+    if (op==PTRACE_INTERRUPT) { ++interrupts; return 0; }
+    assert(op==PTRACE_CONT || op==PTRACE_SYSCALL || op==PTRACE_SINGLESTEP);
+    ++resumes; resumed=pid; request=op; return 0;
+}
+static int stop(int signal,unsigned event) { return (int)(event<<16)|(signal<<8)|0x7f; }
+int main(void) {
+    struct md_task_quiesce *q=md_task_quiesce_new(trace); assert(q);
+    assert(!md_task_quiesce_add(q,1,0,PTRACE_SYSCALL));
+    assert(!md_task_quiesce_add(q,2,1,PTRACE_CONT));
+    assert(!md_task_quiesce_stop(q) && interrupts==1 && !md_task_quiesce_ready(q));
+    assert(!md_task_quiesce_event(q,1,stop(SIGTRAP,PTRACE_EVENT_STOP),NULL));
+    assert(md_task_quiesce_ready(q));
+    assert(!md_task_quiesce_release(q) && resumes==1 && resumed==1 && request==PTRACE_SYSCALL);
+    int status; struct rusage usage;
+    assert(!md_task_quiesce_take(q,&status,&usage));
+
+    assert(!md_task_quiesce_add(q,3,0,PTRACE_CONT));
+    assert(!md_task_quiesce_stop(q));
+    struct rusage saved={.ru_maxrss=123};
+    assert(!md_task_quiesce_event(q,3,stop(SIGUSR1,0),&saved));
+    assert(md_task_quiesce_ready(q) && !md_task_quiesce_release(q) && resumes==1);
+    /* A second repair can begin before the first repair's events are replayed. */
+    int previous=interrupts;
+    assert(!md_task_quiesce_add(q,3,0,PTRACE_CONT));
+    assert(!md_task_quiesce_stop(q) && interrupts==previous && md_task_quiesce_ready(q));
+    assert(!md_task_quiesce_release(q));
+    assert(md_task_quiesce_take(q,&status,&usage)==3 && status==stop(SIGUSR1,0) && usage.ru_maxrss==123);
+
+    for (int child_first=0;child_first<2;++child_first) {
+        assert(!md_task_quiesce_add(q,4,0,PTRACE_SYSCALL));
+        assert(!md_task_quiesce_stop(q)); newborn=5;
+        if (child_first) assert(!md_task_quiesce_event(q,5,stop(SIGTRAP,PTRACE_EVENT_STOP),NULL));
+        assert(!md_task_quiesce_event(q,4,stop(SIGTRAP,PTRACE_EVENT_CLONE),NULL));
+        assert(md_task_quiesce_ready(q)==child_first);
+        if (!child_first) assert(!md_task_quiesce_event(q,5,stop(SIGTRAP,PTRACE_EVENT_STOP),NULL));
+        assert(md_task_quiesce_ready(q));
+        assert(!md_task_quiesce_release(q));
+        assert(md_task_quiesce_newborn(q,5)==1 && !md_task_quiesce_newborn(q,5));
+        assert(md_task_quiesce_take(q,&status,NULL)==4 && status==stop(SIGTRAP,PTRACE_EVENT_CLONE));
+        assert(!md_task_quiesce_take(q,&status,NULL));
+    }
+    assert(!md_task_quiesce_add(q,6,1,PTRACE_SYSCALL));
+    assert(!md_task_quiesce_add(q,6,0,PTRACE_CONT));
+    assert(!md_task_quiesce_stop(q));
+    assert(!md_task_quiesce_event(q,6,stop(SIGTRAP,PTRACE_EVENT_STOP),NULL));
+    assert(!md_task_quiesce_release(q) && resumed==6 && request==PTRACE_CONT);
+    assert(!md_task_quiesce_add(q,7,0,0));
+    previous=interrupts;
+    assert(!md_task_quiesce_stop(q) && interrupts==previous);
+    assert(!md_task_quiesce_event(q,7,stop(SIGTRAP,PTRACE_EVENT_STOP),NULL));
+    assert(!md_task_quiesce_release(q));
+    assert(md_task_quiesce_take(q,&status,NULL)==7);
+    md_task_quiesce_destroy(q);
+    puts("PASS task quiescence: exact resume, deferred signals/rusage, nested replay, both birth orders and private helper ownership");
+    return 0;
+}

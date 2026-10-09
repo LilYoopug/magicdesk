@@ -76,8 +76,10 @@ not the supervisor or syscall adapter. Sources and licenses are pinned in
 Descriptor sizes/digests and uncompressed diff_ids are checked before applying
 each layer. Private input snapshots prevent a verified source blob being replaced
 between hashing and extraction. Tar, gzip and zstd layers are supported. JSON is
-bounded to 8 MiB, each blob/uncompressed layer to 8 GiB, and imported content to
-8 GiB/200,000 entries. Duplicate keys/names, NULs, malformed metadata, unsupported
+bounded to 8 MiB, each blob/uncompressed layer to 64 GiB, and imported content to
+64 GiB/2,000,000 entries. Import, shared layers and backup use the same streaming
+bounds from `image_io.h`; these are resource ceilings, not preallocated buffers.
+Duplicate keys/names, NULs, malformed metadata, unsupported
 compression, ambiguous indices and digest failures are errors.
 `--blobs DIRECTORY` selects an explicit SHA-256 blob directory instead of the
 layout's `blobs/sha256`. This lets the registry adapter supply its verified cache

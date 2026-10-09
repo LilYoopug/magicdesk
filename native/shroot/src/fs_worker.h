@@ -17,6 +17,14 @@ struct md_fs_work {
     void (*run)(struct md_fs_work *, struct md_filesystem *, int error);
     int (*complete)(struct md_fs_work *);
 };
+/* Supervisor-owned token, retained until end or worker_stop returns. Begin is
+ * only a request: state==1 proves the worker has stopped all namespace work,
+ * including broker memory writes. Completion uses the existing worker FD.
+ * Other supervisors/services are independent. No nested or implicit pause. */
+struct md_fs_worker_pause { struct md_fs_worker *owner; int acknowledged; };
+int md_fs_worker_pause_begin(struct md_fs_worker *, struct md_fs_worker_pause *);
+int md_fs_worker_pause_state(const struct md_fs_worker_pause *);
+int md_fs_worker_pause_end(struct md_fs_worker_pause *);
 /* One worker owns the namespace, image catalogue and both request transports.
  * Published work transfers to the supervisor. Queue locks never cover IO. */
 int md_fs_worker_start(const char *store, const char *endpoint, const char *admit, struct md_task_registry *, struct md_fd_exchanges *,

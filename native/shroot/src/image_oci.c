@@ -160,7 +160,7 @@ int md_image_unpack(int blobs, int scratch, const struct md_image_descriptor *d,
             la_ssize_t n = archive_read_data(ar, buffer, sizeof(buffer));
             if (n < 0) { r = -EBADMSG; break; }
             if (!n) break;
-            if ((uint64_t)n > 8ULL*1024*1024*1024-size) { r = -EFBIG; break; }
+            if ((uint64_t)n > MD_IMAGE_MAX_BYTES-size) { r = -EFBIG; break; }
             size += (uint64_t)n; r = md_image_write(result, buffer, (size_t)n);
         }
         if (!r && archive_read_next_header(ar, &entry) != ARCHIVE_EOF) r = -EBADMSG;

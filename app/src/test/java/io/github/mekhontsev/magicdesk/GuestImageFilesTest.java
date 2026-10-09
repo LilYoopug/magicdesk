@@ -3,6 +3,8 @@ package io.github.mekhontsev.magicdesk;
 import static org.junit.Assert.*;
 import static org.junit.Assume.assumeTrue;
 import java.io.IOException;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -13,6 +15,17 @@ import org.junit.rules.TemporaryFolder;
 
 public class GuestImageFilesTest {
     @Rule public TemporaryFolder temporary = new TemporaryFolder();
+
+    @Test public void streamingLimitRemainsEnforcedWithoutPreallocatingIt() throws Exception {
+        byte[] bytes = new byte[9];
+        var output = new ByteArrayOutputStream();
+        assertThrows(IOException.class, () -> GuestImageFiles.copy(
+                new ByteArrayInputStream(bytes), output, 8, null));
+        assertEquals(0, output.size());
+        assertEquals(9, GuestImageFiles.copy(new ByteArrayInputStream(bytes), output,
+                GuestImageFiles.BLOB_LIMIT, null));
+        assertArrayEquals(bytes, output.toByteArray());
+    }
 
     // Publication fixtures model the directory barrier; its POSIX adapter is tested separately.
     static void assertDirectorySync(Path directory) {

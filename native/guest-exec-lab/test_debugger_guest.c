@@ -15,6 +15,7 @@
 #include <stdint.h>
 #include <stdatomic.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/shm.h>
 #include <sys/stat.h>
@@ -398,6 +399,27 @@ static void shm_target(void) {
     struct shmid_ds info;
     assert(!shmctl(id,IPC_STAT,&info) && !info.shm_nattch && !shmctl(id,IPC_RMID,NULL));
 }
+__attribute__((noinline)) static void jit_marker(uint32_t *address, unsigned value) {
+    assert(address[0]==(0x52800000u|(value<<5)));
+}
+static void jit_target(void) {
+    size_t page=(size_t)sysconf(_SC_PAGESIZE);
+    int fd=memfd_create("debugger-jit",MFD_CLOEXEC);
+    assert(fd>=0 && !ftruncate(fd,page));
+    uint32_t *address=mmap(NULL,page,PROT_READ|PROT_WRITE,MAP_PRIVATE,fd,0);
+    assert(address!=MAP_FAILED && !close(fd));
+    for (unsigned value=37;value<41;++value) {
+        if (value!=37) assert(!mprotect(address,page,PROT_READ|PROT_WRITE));
+        /* AArch64 mov w0, #value; ret. No runtime/preload entry points. */
+        address[0]=0x52800000u|(value<<5); address[1]=0xd65f03c0u;
+        __builtin___clear_cache((char *)address,(char *)(address+2));
+        assert(!mprotect(address,page,PROT_READ|PROT_EXEC));
+        jit_marker(address,value);
+        int (*run)(void)=(void *)address;
+        assert(run()==(int)value);
+    }
+    assert(!munmap(address,page));
+}
 int main(int argc, char **argv) {
     assert(argc == 2); alarm(20);
     if (!strcmp(argv[1], "attach")) attach_test(0, 0);
@@ -416,6 +438,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "gdb-thread-target")) gdb_target(1);
     else if (!strcmp(argv[1], "gdb-io-target")) gdb_io_target();
     else if (!strcmp(argv[1], "shm-target")) shm_target();
+    else if (!strcmp(argv[1], "jit-target")) jit_target();
     else return 2;
     printf("PASS %s\n", argv[1]); return 0;
 }

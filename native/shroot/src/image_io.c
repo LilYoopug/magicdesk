@@ -93,7 +93,7 @@ int md_image_snapshot(int fd, int scratch, uint64_t limit, int *out) {
 }
 int md_image_blob(int blobs, int scratch, const char *digest, uint64_t size, int *out) {
     *out = -1;
-    if (!md_image_digest_valid(digest) || size > 8ULL * 1024 * 1024 * 1024) return -EINVAL;
+    if (!md_image_digest_valid(digest) || size > MD_IMAGE_MAX_BYTES) return -EINVAL;
     int fd = openat(blobs, digest + 7, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0) return -errno;
     int snapshot = -1;

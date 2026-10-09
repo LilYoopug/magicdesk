@@ -207,7 +207,7 @@ static int entry_file(struct md_inode_store *s, struct archive *ar, struct archi
     }
     if (!r && kind == S_IFREG) {
         int64_t size = archive_entry_size(entry);
-        if (size < 0 || (uint64_t)size > 8ULL * 1024 * 1024 * 1024 - *bytes) r = -EFBIG;
+        if (size < 0 || (uint64_t)size > MD_IMAGE_MAX_BYTES - *bytes) r = -EFBIG;
         unsigned char buffer[65536];
         uint64_t total = 0;
         while (!r && !node.shared) {
@@ -346,7 +346,7 @@ static int read_tree(struct md_inode_store *s, int fd, uint64_t *bytes, uint64_t
             if (rc == ARCHIVE_EOF) break;
             if (rc != ARCHIVE_OK) { r = -EBADMSG; break; }
             ++index;
-            if (!pass && ++*entries > 200000) { r = -EFBIG; break; }
+            if (!pass && ++*entries > MD_IMAGE_MAX_ENTRIES) { r = -EFBIG; break; }
             char path[PATH_MAX];
             const char *name_in = archive_entry_pathname(entry);
             if (backup) {

@@ -124,7 +124,7 @@ class Suite:
         self.console = self.client.call('console.open', {'directory': '/data/local/tmp'})['sessionId']
         self.report['consoleId'] = self.console
         self.command(['mkdir', self.base])
-        self.runner = self.command(['/system/bin/sh', '-c', 'command -v shroot']).strip()
+        self.runner = None
         self.image = None
         if build:
             hashes = {}
@@ -140,6 +140,8 @@ class Suite:
             self.image = self.base + '/libmagicdesk_guest_image.so'
             self.report['nativeBuild'] = str(build)
             self.report['nativeHashes'] = hashes
+        else:
+            self.runner = self.command(['/system/bin/sh', '-c', 'command -v shroot']).strip()
 
     def image_command(self, *args):
         return [self.image, *args] if self.image else [self.runner, 'image', *args]
