@@ -172,15 +172,32 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
     if (nr == SYS_renameat || nr == SYS_renameat2 || nr == SYS_linkat) return -ENOTSUP;
     struct md_proc_path ref = md_proc_path(path);
     enum md_proc_kind control=ref.kind==MD_PROC_FOREIGN ? ref.foreign_kind : ref.kind;
-    if (!proc_namespace && (control==MD_PROC_STATUS || control==MD_PROC_STAT)) {
-        ref.kind=control=MD_PROC_NONE;
+    if (control==MD_PROC_FDINFO && proc_namespace && nr==SYS_openat) {
+        if (*ref.tail) return -ENOTDIR;
+        if (ref.kind==MD_PROC_FOREIGN) return -ENOTSUP;
+        int flags=(int)a[2];
+        if (flags&O_DIRECTORY) return -ENOTDIR;
+        if (!(flags&O_PATH) && ((flags&O_ACCMODE)!=O_RDONLY || (flags&O_TRUNC))) return -EACCES;
+        if ((flags&(O_CREAT|O_EXCL))==(O_CREAT|O_EXCL)) return -EEXIST;
+        char selected[96]="/proc/";
+        md_decimal(selected+md_length(selected),(unsigned)ref.process);
+        md_append(selected,sizeof(selected),"/fdinfo/");
+        md_decimal(selected+md_length(selected),(unsigned)ref.descriptor);
+        struct md_fs_request q={.operation=MD_FS_FDINFO,.directory={-1,-1},
+            .capture={{selected,O_RDONLY|O_CLOEXEC}},
+            .flags=(unsigned)flags&(O_PATH|O_CLOEXEC),.offset=(int64_t)proc_namespace};
+        struct md_fs_response out;
+        long result=md_namespace_request(fs,&q,&out);
+        return result<0 ? result : out.result.fd;
     }
+    if (control==MD_PROC_FDINFO) ref.kind=MD_PROC_NONE;
     if (md_proc_control_kind(control)) {
         if (control==MD_PROC_NS_UNSUPPORTED) return -ENOENT;
         if (*ref.tail) return -ENOTDIR;
         long result=nr==SYS_openat ? md_proc_control_open_view(ref.process,control,(int)a[2],proc_namespace)
             : md_proc_control_metadata(ref.process,control,-1,nr,a);
-        if (result!=-EXDEV || (control!=MD_PROC_PROCESS_DIRECTORY && !md_proc_network_sysctl(control))) return result;
+        if (result!=-EXDEV || (control!=MD_PROC_PROCESS_DIRECTORY && control!=MD_PROC_STATUS
+                && control!=MD_PROC_STAT && !md_proc_network_sysctl(control))) return result;
         ref.kind=MD_PROC_NONE;
     }
     if (ref.kind==MD_PROC_MOUNTS || ref.kind==MD_PROC_MOUNTINFO) {
@@ -203,6 +220,28 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
         ref.kind=MD_PROC_NONE;
     }
     if (ref.kind == MD_PROC_FOREIGN) {
+        if (ref.foreign_kind==MD_PROC_ROOT) {
+            if (!*ref.tail && link_operation(nr,a)) {
+                unsigned long args[6]; memcpy(args,a,sizeof(args));
+                args[path_index]=(unsigned long)path;
+                return native_call(fs,nr,args);
+            }
+            char anchor[PATH_MAX];
+            size_t length=*ref.tail ? ref.anchor_length : md_length(path);
+            memcpy(anchor,path,length); anchor[length]=0;
+            struct md_namespace_operand operand={.descriptor=-1,.capture={anchor,O_PATH|O_DIRECTORY}};
+            if (!*ref.tail && nr==SYS_readlinkat) {
+                struct md_fs_request q={.operation=MD_FS_PATH,.mode=MD_FS_PATH_DISPLAY,
+                    .directory={-1,-1},.capture={operand.capture}};
+                struct md_fs_response out;
+                long result=md_namespace_request(fs,&q,&out);
+                return result<0 ? result : link_result(out.data,a);
+            }
+            const char *relative=ref.tail;
+            while (*relative=='/') ++relative;
+            if (!*ref.tail && nr!=SYS_openat) return target_call(fs,nr,a,operand);
+            return md_namespace_path_call(fs,nr,a,operand,*relative ? relative : ".");
+        }
         if (*ref.tail) return -ENOTSUP;
         if (ref.foreign_kind==MD_PROC_FD && nr==SYS_readlinkat)
             return host_readlink(fs,&ref,path,a);

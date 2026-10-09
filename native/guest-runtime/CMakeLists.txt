@@ -24,7 +24,7 @@ set(origins ${src}/fs_anchor.c ${src}/fs_origin_transfer.c ${src}/inode_lifetime
 list(APPEND origins ${src}/devpts_view.c ${src}/cgroup.c ${src}/cgroup_program.c ${src}/sysfs_view.c ${src}/network_namespace.c ${src}/network_sysctl.c
     ${src}/ipc_namespace.c ${src}/mqueue_view.c)
 set(mounts ${src}/fs_mounts.c ${src}/fs_mount_path.c ${src}/fs_mount_operations.c ${src}/fs_mount_table.c ${src}/fs_mount_change.c ${src}/fs_temporary.c ${src}/fs_overlay.c ${src}/fs_storage.c)
-list(APPEND mounts ${src}/proc_paths.c ${src}/procfs_view.c ${src}/fs_proc.c ${src}/fs_cgroup.c ${src}/fs_bpf.c ${src}/fs_sysfs.c ${src}/fs_mqueue.c ${src}/fs_mount_file.c ${src}/mount_source.c ${src}/fs_context.c)
+list(APPEND mounts ${src}/proc_paths.c ${src}/procfs_view.c ${src}/proc_fdinfo.c ${src}/fs_proc.c ${src}/fs_cgroup.c ${src}/fs_bpf.c ${src}/fs_sysfs.c ${src}/fs_mqueue.c ${src}/fs_mount_file.c ${src}/mount_source.c ${src}/fs_context.c)
 set(inodes ${src}/inode_store.c ${src}/inode_db.c ${src}/inode_sqlite.c ${src}/inode_events.c ${src}/inode_watch.c ${src}/watch_queue.c ${src}/inode_path.c
     ${src}/inode_directory.c ${src}/inode_import.c ${src}/inode_socket.c ${src}/inode_backing.c ${src}/inode_snapshot.c ${src}/inode_view.c ${src}/inode_maintenance.c ${src}/inode_fifo.c ${src}/inode_channel.c ${src}/file_open.c
     ${identity} ${src}/task_registry.c ${src}/guest_domain.c ${src}/mount_namespace.c ${origins} ${src}/inode_metadata.c ${src}/inode_xattr.c ${src}/inode_capability.c ${src}/inode_acl.c ${src}/posix_acl.c)
@@ -138,9 +138,10 @@ if(MAGICDESK_GUEST_FIXTURES)
     target_compile_options(fd_observation PRIVATE -iquote ${src} -UNDEBUG)
     target_link_libraries(fd_observation PRIVATE guest-sqlite m)
     guest_executable(task_helper_fd ../guest-exec-lab/test_task_helper_fd.c ${src}/task_helper.c
-        ${src}/mapping_observation.c ${src}/interception_memory.c ${src}/interception_buffers.c
-        ${origins} ${src}/mount_namespace.c ${identity})
+        ${src}/mapping_observation.c ${src}/interception_memory.c ${src}/interception_buffers.c ${src}/proc_paths.c
+        ${origins} ${src}/mount_namespace.c ${identity} ${raw})
     target_compile_options(task_helper_fd PRIVATE -iquote ${src} -UNDEBUG)
+    target_compile_definitions(task_helper_fd PRIVATE MD_NO_START MD_USE_LIBC)
     target_link_libraries(task_helper_fd PRIVATE guest-sqlite m)
     guest_executable(test_interception_buffers ../guest-exec-lab/test_interception_buffers.c ${src}/interception_buffers.c ${src}/interception_memory.c ${src}/resource_order.c)
     target_compile_options(test_interception_buffers PRIVATE -iquote ${src} -UNDEBUG)

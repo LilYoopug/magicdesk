@@ -477,6 +477,21 @@ static int local_inode_view(struct md_filesystem *fs, const struct md_fs_request
 void md_fs_mounts_execute(struct md_filesystem *fs, const struct md_fs_request *q,
         struct md_fs_result *out, const struct md_fs_output *output) {
     *out = (struct md_fs_result){.fd=-1};
+    if (q->operation==MD_FS_PATH && q->mode==MD_FS_PATH_DISPLAY && q->origin[0]
+            && q->origin[0]->view && q->origin[0]->view!=fs->mounts) {
+        out->error=md_view_anchor_check(fs,q->directory[0],q->origin[0]);
+        if (!out->error && (!output || !output->data)) out->error=-EINVAL;
+        if (!out->error) {
+            struct md_filesystem owner=*fs;
+            owner.mounts=q->origin[0]->view; owner.native_root=NULL;
+            const char *root=fs->store->root_id;
+            fs->store->root_id=NULL;
+            out->error=md_view_path(&owner,q->directory[0],q->origin[0]->mount,output->data,output->capacity);
+            fs->store->root_id=root;
+            if (!out->error) out->size=strlen(output->data)+1;
+        }
+        return;
+    }
     /* A same-view inode origin does not introduce a mount crossing. Let the
      * inode engine perform its one authoritative walk after origin validation. */
     int local=local_inode_view(fs,q);

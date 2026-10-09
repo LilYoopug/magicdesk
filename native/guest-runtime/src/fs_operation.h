@@ -22,7 +22,7 @@ enum md_fs_operation {
     MD_FS_XATTR_OBJECT, MD_FS_MOUNT_TABLE, MD_FS_NATIVE_MOUNT, MD_FS_MKNOD,
     MD_FS_CHROOT, MD_FS_UMASK, MD_FS_STATFS, MD_FS_WATCH_PATH,
     MD_FS_TASK_PATH, MD_FS_XATTR, MD_FS_FXATTR, MD_FS_IPC_PEER, MD_FS_MOUNT,
-    MD_FS_FSOPEN, MD_FS_FSCONFIG, MD_FS_FSMOUNT, MD_FS_BPF, MD_FS_LAST = MD_FS_BPF
+    MD_FS_FSOPEN, MD_FS_FSCONFIG, MD_FS_FSMOUNT, MD_FS_BPF, MD_FS_FDINFO, MD_FS_LAST = MD_FS_FDINFO
 };
 enum md_fs_mount_operation { MD_FS_MOUNT_BIND=1, MD_FS_MOUNT_REMOUNT,
     MD_FS_MOUNT_PROPAGATION, MD_FS_MOUNT_UMOUNT, MD_FS_MOUNT_TMPFS, MD_FS_MOUNT_OVERLAY, MD_FS_MOUNT_PIVOT,
@@ -36,6 +36,9 @@ static inline int md_fs_operation_value(unsigned operation) {
         || operation==MD_FS_MOUNT || operation==MD_FS_FSCONFIG || operation==MD_FS_BPF;
 }
 enum { MD_FS_STAT_MOUNT = 1 };
+/* A proc magic-link description may name another mount tree. It is display
+ * text, not an executable identity or a path known to resolve in the caller. */
+enum { MD_FS_PATH_DISPLAY = 1 };
 enum { MD_FS_REOPEN_MUTABLE=1, MD_FS_REOPEN_NATIVE=2 };
 enum md_fs_task_path { MD_FS_TASK_CHDIR=1, MD_FS_TASK_TRUNCATE, MD_FS_TASK_FCHDIR };
 static inline int md_fs_operation_has_origin(unsigned operation) {

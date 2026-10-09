@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Guest-side pixel assertion through the distribution's unmodified Glycin ABI."""
 import ctypes as c
+import argparse
 import os
 import struct
 import tempfile
@@ -14,6 +15,9 @@ def bind(lib, name, result, *arguments):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--format', choices=('png', 'svg'), default='png')
+    args = parser.parse_args()
     gio, glib, obj = (c.CDLL(name) for name in
                      ('libgio-2.0.so.0', 'libglib-2.0.so.0', 'libgobject-2.0.so.0'))
     gly = c.CDLL(os.environ.get('GLYCIN_LIBRARY', 'libglycin-1.so.0'))
@@ -48,10 +52,13 @@ def main():
 
     png = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('!IIBBBBB', 2, 1, 8, 2, 0, 0, 0))
     png += chunk(b'IDAT', zlib.compress(b'\0\xff\0\0\0\xff\0')) + chunk(b'IEND', b'')
+    svg = (b'<svg xmlns="http://www.w3.org/2000/svg" width="2" height="1">'
+           b'<path fill="#ff0000" d="M0 0h1v1H0z"/>'
+           b'<path fill="#00ff00" d="M1 0h1v1H1z"/></svg>')
     with tempfile.TemporaryDirectory(prefix='glycin-fixture-') as directory:
-        path = os.path.join(directory, 'red-green.png')
+        path = os.path.join(directory, 'red-green.' + args.format)
         with open(path, 'wb') as output:
-            output.write(png)
+            output.write(png if args.format == 'png' else svg)
         file = file_new(os.fsencode(path))
         loader = loader_new(file)
         selector(loader, 1)  # BWRAP, never the development/no-sandbox selector.
@@ -64,8 +71,15 @@ def main():
             size = c.c_size_t()
             raw = data(bytes_(frame), c.byref(size))
             pixels = c.string_at(raw, size.value)
-            assert format_(frame) == 7, (format_(frame), pixels.hex())  # RGB8
-            assert stride(frame) >= 6 and pixels[:6] == b'\xff\0\0\0\xff\0', pixels.hex()
+            # Glycin uses GdkMemoryFormat; the two opaque pixels have exact bytes.
+            expected = {7: b'\xff\0\0\0\xff\0',
+                        0: b'\0\0\xff\xff\0\xff\0\xff',
+                        3: b'\0\0\xff\xff\0\xff\0\xff',
+                        2: b'\xff\0\0\xff\0\xff\0\xff',
+                        5: b'\xff\0\0\xff\0\xff\0\xff'}
+            row = expected.get(format_(frame))
+            assert row is not None, (format_(frame), pixels.hex())
+            assert stride(frame) >= len(row) and pixels[:len(row)] == row, pixels.hex()
             print('PASS Glycin BWRAP decoded 2x1 RGB pixels', flush=True)
         finally:
             for value in (frame, image, loader, file):

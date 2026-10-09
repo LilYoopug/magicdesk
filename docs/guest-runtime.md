@@ -256,10 +256,12 @@ Terminal, XKB data, icons and a session D-Bus setup. `xfce` adds an X11 desktop;
 `weston` adds a nested Wayland desktop with Xwayland. `plasma` adds KDE Plasma 6
 with X11 and Wayland desktop entries on Debian. `gnome` selects Fedora's
 development-kit shell, not a systemd/GDM login session. GUI recipes are package
-configurations, not a claim of complete desktop compatibility. Fedora 44 and
-rolling Arch use Glycin image loaders whose complete launch contract still needs
-validation beyond the stock Bubblewrap namespace fixtures; GNOME also needs a
-system-bus arrangement. Missing operations are not bypassed by silently disabling sandboxes.
+configurations, not a claim of complete desktop compatibility. Fedora 44's Glycin
+2.1.5 decodes PNG and SVG through stock Bubblewrap with its original seccomp
+filter. GNOME devkit is checked with an explicit private system bus and PipeWire;
+the installer recipe still needs this session-service arrangement. Rolling Arch's
+default pacman sandbox requires Landlock support. Missing operations are not
+bypassed by silently disabling sandboxes.
 
 Images and repository packages are trusted executable inputs, not sandboxed
 content. `--image REF` selects another OCI source of the same distribution and
@@ -984,6 +986,15 @@ editing, saving, WM resize, viewer detachment/reopening and zero-status logout.
 Readiness awaits both shell surfaces and Xfce's D-Bus Idle state, not a delay.
 This fixture selects software rendering and lacks optional system-bus services;
 it is not a complete booted Linux system or a GNOME certification.
+
+The Fedora 44 GNOME 50.5 devkit fixture runs stock GNOME Shell/Mutter with a
+private PID namespace, proc mount and `/run`, a system D-Bus daemon, and a
+developer-owned session bus, PipeWire and WirePlumber. It checks rendered pixels,
+Alt+F2 and a real GNOME Text Editor window inside the desktop, then releases the
+graphics session and virtual display. The renderer is llvmpipe. This is not a
+GDM/systemd/logind login session, hardware-acceleration certification or a claim
+that every GNOME system service is available. A separate service fixture checks
+system-bus authentication and an actual PipeWire protocol query.
 
 A separate Linux Mesa 26.2.3 Turnip/KGSL fixture runs `vkcube` on Adreno 840
 under UID 2000 through both Wayland and X11. It checks changing Android pixels, 600 submitted

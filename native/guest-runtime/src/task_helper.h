@@ -23,6 +23,8 @@ struct md_task_helper_request {
     enum md_task_helper_kind kind;
     struct md_task_mapping_request mapping;
     /* CAPTURE only: copied before acceptance, resolved in captured FS context.
+     * O_PATH captures objects; an exact own-process fdinfo path may instead be
+     * opened read-only and exported intact, preserving its live table lookup.
      * FD_TABLE takes no path/flags: it opens /proc/<exact owner tid>/fd read-only
      * in the private table and exports only that directory, never a caller FD. */
     const char *path;

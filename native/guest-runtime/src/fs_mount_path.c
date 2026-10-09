@@ -109,7 +109,7 @@ int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *
         uint64_t resolve, struct md_view_location *out) {
     *out = (struct md_view_location){.parent=-1,.fd=-1};
     if (!path || !*path) return -ENOENT;
-    if (resolve & ~(RESOLVE_BENEATH | RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV | RESOLVE_CACHED | MD_VIEW_TASK_PATH | MD_VIEW_PROVIDER_SOURCE)) return -EINVAL;
+    if (resolve & ~(RESOLVE_BENEATH | RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV | RESOLVE_CACHED | MD_VIEW_TASK_PATH | MD_VIEW_PROVIDER_SOURCE | MD_VIEW_MOUNT_TARGET)) return -EINVAL;
     if ((resolve & (RESOLVE_BENEATH | RESOLVE_IN_ROOT)) == (RESOLVE_BENEATH | RESOLVE_IN_ROOT)) return -EINVAL;
     if (resolve & RESOLVE_CACHED) return -EAGAIN;
     if (path[0] == '/' && (resolve & RESOLVE_BENEATH)) return -EXDEV;
@@ -176,7 +176,8 @@ int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *
             if (boundary) boundary->suffix=todo;
             next = component(fs, view, mount, fd, name,!!(resolve&MD_VIEW_PROVIDER_SOURCE));
             if (boundary) boundary->suffix=previous_suffix;
-            if (next==-EREMOTE && view && view->tree) {
+            int placement=last && (resolve&MD_VIEW_MOUNT_TARGET);
+            if (next==-EREMOTE && view && (view->tree || placement)) {
                 /* An explicit mount covers the initial filesystem's implicit
                  * proc/dev provider. Resolve only its covered dentry here;
                  * an ordinary root bind must retain the provider fallback. */
@@ -186,7 +187,7 @@ int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *
                 if (covered>=0) {
                     int entered=enter(view,&covered,&next_mount,resolve);
                     if (entered) { close(covered); next=entered; }
-                    else if (next_mount!=mount) next=covered;
+                    else if (next_mount!=mount || placement) next=covered;
                     else close(covered);
                 }
             }

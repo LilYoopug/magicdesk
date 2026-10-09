@@ -46,7 +46,11 @@ children remain, a blocking wait returns to the kernel with ordinary signal
 semantics. Kernel parenthood
 retains real-child exit reaping; traced nonchildren have supervisor-owned exit
 records. Event waits end on a trace event, owned child exit or launch cancellation,
-not a settling delay. EXITKILL and stopped-inferior release belong to debugger
+not a settling delay. Nonleader thread termination belongs to the virtual trace
+relationship: the native parent cannot reap it as an ordinary child of the
+debugger while the supervisor remains the kernel ptracer. Only a process leader
+with actual parenthood can use native child reaping.
+EXITKILL and stopped-inferior release belong to debugger
 lifetime. Records are released when consumed or their owner exits.
 Invalid wait flags are rejected before consuming an event. waitid siginfo includes
 the inferior's logical UID and distinguishes normal, killed and core-dumped exits.
@@ -99,6 +103,11 @@ The development fixture runs stock Ubuntu GDB 15.1 with breakpoints, source
 stepping, locals, backtraces, a thread breakpoint, signal delivery, fork detachment,
 child exec and normal exit. Reading symbols alone is not a passing debugger test.
 Raw-instruction stepping and unsupported-request coverage remain separate work.
+
+`test_thread_identity_runtime.py --debuggers` checks recursive pthread mutexes,
+shared-memory clone TID publication and child clearing under stock strace and
+GDB in a PID namespace, including nondumpable callers. It requires both fixture
+completion and normal debugger exit.
 
 `test_debugger_runtime.py` adds identical Shroot/PRoot attach, seize, interrupt,
 exit-event, syscall-information, mixed-wait, debugger-death, EXITKILL and

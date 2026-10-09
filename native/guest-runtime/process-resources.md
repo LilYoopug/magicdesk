@@ -1058,6 +1058,12 @@ change an ancestor's native PID view.
 
 Clone reserves numbers before the kernel transition and publishes them at the
 confirmed birth event without allocating. Failed clone retires its reservation.
+For shared-memory clone, the stopped newborn publishes both parent- and child-TID
+fields before either task returns to guest code. The parent remains event-parked
+until publication or newborn death; it cannot rewrite a field after the kernel
+has cleared it on child exit. Protected memory uses the existing task-affine
+store adapter. Nonshared parent output stays with the parent. The same birth
+boundary precedes guest-debugger notification.
 Each task retains its TID identity, its TGID identity and the namespace selected
 for future children. Unshare/setns only changes the last of these; the caller
 does not move into its children's namespace. Entry is limited to the current
@@ -1108,6 +1114,21 @@ Status/stat use typed per-open snapshots with guest IDs, credentials and debugge
 relationships; seeking to zero refreshes the snapshot. A zombie remains visible
 until wait consumes it. Namespace handles retain their owners after task exit;
 opening pid_for_children before its first child returns ENOENT.
+
+Foreign `/proc/PID/root` access captures the selected task's retained root and
+mount view after the process-access check. Traversal uses that root with the
+caller's credentials; no temporary root FD enters the guest table. Opened roots
+survive target exit and retain their view rather than resolving a reused PID.
+Status/stat snapshots also apply to supervised processes in the implicit proc
+provider, without requiring an explicit proc mount.
+
+Current-process `fdinfo` captures the actual proc file in a private-table helper,
+not a copy of the described application FD. Seeking to zero refreshes native
+position, flags and close/reuse state. PID fields translate through the selected
+logical proc namespace; a host without CONFIG_PID_NS can still supply logical
+NSpid from the runtime's retained identities. Unknown native fields are preserved.
+The typed read-only provider shares offsets across dup and preserves positional
+reads. Foreign-process fdinfo remains explicitly unsupported.
 
 Explicit mounts override the initial root's implicit proc/dev providers. Bind
 source resolution can retain those providers through old-root descriptors after

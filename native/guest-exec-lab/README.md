@@ -80,6 +80,34 @@ disposable test store; `--trace` retains diagnostics and strace output. It must
 not be used against a user's installed environment. Glycin 1.2.1's ARM64 filter
 can reject the libc uname call used for SVE detection; Glycin 2.x includes the
 upstream correction. Selecting a newer loader does not disable sandboxing.
+`--format png|svg` selects exact pixel checks; Fedora 44's stock Glycin 2.1.5
+passes both formats under UID 2000.
+
+`test_proc_root_runtime.py BUILD STORE` checks foreign proc-root traversal,
+retained roots after target exit, credential rejection, protected readers,
+live fdinfo position/flags/close state and logical pidfd fields. It runs with
+implicit proc and with stock `unshare --pid --fork --mount-proc`.
+
+`test_thread_identity_runtime.py BUILD STORE FIXTURE --debuggers` uses the glibc
+`md-thread_identity-fixture` built by `build-libc-fixtures.sh`. Ordinary and
+nondumpable callers exercise recursive pthread mutexes, shared-memory clone
+parent/child TID fields and kernel child clearing. Optional installed strace/GDB
+must observe normal completion inside a PID namespace.
+
+`test_desktop_services_runtime.py BUILD STORE` checks a stock system D-Bus daemon,
+authentication from the `developer` account and PipeWire's real `pw-cli info 0`
+request. It creates a private PID/proc/run view and waits on daemon output;
+no systemd boot or host bus is required.
+
+`test_gnome_runtime.py BUILD STORE` runs Fedora 44 GNOME devkit in that private
+service arrangement with PipeWire/WirePlumber and llvmpipe. The disposable store
+needs GNOME Shell, GNOME Text Editor, the `developer` account and their ordinary
+distribution dependencies; the host needs ImageMagick. It creates its own virtual
+display, checks rendered content and Alt+F2, launches the editor and verifies
+both its bus registration and visible window. Screenshots and the exact launch
+recipe are retained in the report. Cleanup stops the graphics session and removes
+the display. `--trace` adds strace diagnostics. This is not a GDM login, booted
+systemd session or GPU test.
 
 `browser/test_browser.py --build BUILD --store STORE` checks stock Chromium's
 sandbox-enabled user/PID route and JavaScript execution. These application

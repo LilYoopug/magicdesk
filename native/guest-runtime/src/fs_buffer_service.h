@@ -59,6 +59,11 @@ struct md_program;
  * success, replaces the proc spelling with an object identity or owned FD. */
 typedef int (*md_exec_capture)(pid_t,struct md_program *);
 void md_fs_buffer_exec_capture(struct md_fs_buffer_service *,md_exec_capture);
+struct md_task_snapshot;
+/* Capture a live task's logical root after process-access authorization. The
+ * worker resolves that snapshot; no Android root descriptor enters the guest. */
+typedef int (*md_root_capture)(pid_t,pid_t,struct md_task_snapshot *);
+void md_fs_buffer_root_capture(struct md_fs_buffer_service *,md_root_capture);
 /* Cancel requests and reap owned children, then stop/join the worker before
  * destroy. Records retain buffers independently of a dead/replaced task. */
 void md_fs_buffer_service_destroy(struct md_fs_buffer_service *);

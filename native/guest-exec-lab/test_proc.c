@@ -223,10 +223,6 @@ int main(int argc, char **argv) {
     CHECK(child >= 0 && read(child, text, 1) == 0);
     CHECK(stat(path, &st) == 0 && S_ISCHR(st.st_mode));
     close(child); close(host);
-    if (namespace) {
-        snprintf(path, sizeof(path), "/proc/%d/root", getppid());
-        CHECK(open(path, O_RDONLY) == -1 && errno == ENOTSUP);
-    }
     int saved = fcntl(0, F_DUPFD_CLOEXEC, 0);
     CHECK(saved >= 0 && dup2(fd, 0) == 0);
     child = open("/dev/stdin", O_RDONLY);

@@ -82,6 +82,11 @@ issue a host mount. No PIDFD_THREAD, PIDFD_SIGNAL_THREAD or newer pidfd ioctl is
 required. `--case mount-namespace`, stock Bubblewrap/GDB and Chromium's automatic
 user/PID route cover these paths under actual UID 2000; the APK's other services
 do not acquire these prerequisites.
+Shared clone-TID publication uses the existing ptrace birth stop and task-affine
+memory adapter. Proc-root capture and live fdinfo use retained O_PATH/proc
+descriptions and that same private-table helper. None adds a post-5.15 runtime
+requirement; `test_thread_identity_runtime.py` and `test_proc_root_runtime.py`
+cover ordinary/protected tasks, PID namespaces and debugger ownership.
 Noexec mapping policy uses the existing seccomp/ptrace observation and
 CLONE_VM ownership, not MFD_NOEXEC_SEAL or a host mount. MREMAP_DONTUNMAP is
 within the baseline (5.7); rejected native mappings keep their kernel errors.
@@ -268,6 +273,7 @@ retain native errors; arbitrary new guest syscalls are not runtime requirements.
 | `PIDFD_THREAD` | 6.9 | `task_descriptor.c` owns descriptor capture; `task_lifetime.c` owns exact-thread liveness for restricted proc roots. | Try flags zero for the same task. A non-leader rejected with EINVAL is reported as ENOTSUP and uses task-affine SCM_RIGHTS export. Liveness retains `/proc/<tid>/stat` instead: a flags-zero pidfd observes group death, not exact-thread death. Never substitute the leader's file table. |
 | `SECCOMP_IOCTL_NOTIF_SET_FLAGS` / `SECCOMP_USER_NOTIF_FD_SYNC_WAKE_UP` | 6.6 | `namespace_broker.c`: optional notification scheduling hint. | Failed ioctl leaves normal notification wakeups enabled; no permission or affinity change. |
 | `fchmodat2` | 6.5; `AT_EMPTY_PATH` in 6.6 | `namespace.c` translates store metadata through the worker. `file_calls.c` also has a native direct-backend path. | Logical store metadata does not require this host syscall. Native passthrough retains ENOSYS/flag errors; no fake success or unconditional startup requirement. |
+| `SO_PEERPIDFD` | 6.5 | `test_proc_root_guest.py`: optional coverage of native peer-pidfd fields in logical fdinfo. | ENOPROTOOPT/EINVAL/ENOSYS skips only this optional acquisition; baseline pidfd_open and fdinfo assertions still run. This is not a runtime prerequisite. |
 | `STATX_MNT_ID_UNIQUE` | 6.8 | `namespace_proc.c`: distinguishes globally unique mount IDs from the runtime's ordinary mount-ID namespace. | The adapter strips the UNIQUE request and asks for `STATX_MNT_ID` (5.8); returned masks do not claim UNIQUE support. |
 | `PROCMAP_QUERY` | 6.11 | `test_mapping_task.c`: optional binary mapping-observation experiment. | Production `mapping_observation.c` reads a retained maps file. The fixture records unavailable ioctl access separately and verifies the text path. |
 | `MFD_EXEC` | 6.3 | `test_exec_policy.c`: explicit executable-memfd policy experiment. | This experiment reports failure; production image admission does not require this flag. |
@@ -275,6 +281,7 @@ retain native errors; arbitrary new guest syscalls are not runtime requirements.
 
 Version references: [pidfd_open flags](https://man7.org/linux/man-pages/man2/pidfd_open.2.html),
 [Linux 6.6 seccomp ABI](https://github.com/torvalds/linux/blob/v6.6/include/uapi/linux/seccomp.h),
+[Linux 6.5 socket options](https://github.com/torvalds/linux/blob/v6.5/include/uapi/asm-generic/socket.h),
 [chmod flags](https://man7.org/linux/man-pages/man2/chmod.2.html),
 [statx masks](https://man7.org/linux/man-pages/man2/statx.2.html),
 [Linux 6.11 proc API](https://www.kernel.org/doc/html/v6.11/filesystems/proc.html),

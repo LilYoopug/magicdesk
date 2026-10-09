@@ -76,7 +76,11 @@ static int add(struct md_debugger *d, pid_t pid, pid_t owner, unsigned long opti
     if (!p) return -ENOMEM;
     *p=(struct inferior){.next=d->inferiors,.pid=pid,.owner=owner,.options=options,
         .number=d->host.visible_pid ? d->host.visible_pid(owner,pid) : pid,
-        .real_child=d->host.group(d->host.parent(pid))==d->host.group(owner),.group=getpgid(pid)};
+        /* Nonleader threads have no native parent wait result. Their terminal
+         * event belongs to this tracing relationship, even when the debugger
+         * is also the thread group's real parent. */
+        .real_child=d->host.group(pid)==pid
+            && d->host.group(d->host.parent(pid))==d->host.group(owner),.group=getpgid(pid)};
     d->inferiors=p;
     int error=d->host.observe(owner);
     if (error) { d->inferiors=p->next; free(p); }

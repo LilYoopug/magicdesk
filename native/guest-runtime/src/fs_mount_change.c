@@ -24,7 +24,8 @@ static int operand(struct md_filesystem *fs, const struct md_fs_request *q, unsi
     int r=*q->path[index]
         ? md_view_walk(fs,q->directory[index],q->origin[index],q->path[index],
             follow,0,
-            MD_VIEW_TASK_PATH|(index==1 && q->mode==MD_FS_MOUNT_BIND ? MD_VIEW_PROVIDER_SOURCE : 0),out)
+            MD_VIEW_TASK_PATH|(index==1 && q->mode==MD_FS_MOUNT_BIND ? MD_VIEW_PROVIDER_SOURCE : 0)
+                |(!index ? MD_VIEW_MOUNT_TARGET : 0),out)
         : md_view_descriptor(fs,q->directory[index],q->origin[index],out);
     if (r==-EREMOTE && fs->store->boundary) fs->store->boundary->operand=index;
     return r;

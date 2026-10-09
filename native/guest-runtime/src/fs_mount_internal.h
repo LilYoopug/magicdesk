@@ -120,6 +120,8 @@ struct md_view_object *md_view_object(struct md_filesystem *, const char *id);
 #define MD_VIEW_TASK_PATH (UINT64_C(1)<<63)
 /* Bind sources may capture an implicit provider from a retained old root. */
 #define MD_VIEW_PROVIDER_SOURCE (UINT64_C(1)<<62)
+/* Mount placement may cover the initial proc/dev provider's own dentry. */
+#define MD_VIEW_MOUNT_TARGET (UINT64_C(1)<<61)
 int md_view_descriptor(struct md_filesystem *, int, const struct md_fs_anchor *, struct md_view_location *);
 /* Native device delegation is only for unannotated inherited descriptors.
  * Attached devices must complete in the mount engine, including nodev policy. */

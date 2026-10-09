@@ -3,6 +3,7 @@
 #include "ipc_credentials.h"
 #include "posix_acl.h"
 #include "bpf_request.h"
+#include "proc_paths.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/limits.h>
@@ -16,10 +17,14 @@ int md_fs_request_validate(const struct md_fs_request *q) {
     unsigned descriptors=0;
     for (unsigned i=0;i<2;++i) {
         if (q->capture[i].path) {
+            struct md_proc_path proc=md_proc_path_for(q->capture[i].path,0,0);
+            int fdinfo=q->operation==MD_FS_FDINFO && !i
+                && proc.kind==MD_PROC_FOREIGN && proc.foreign_kind==MD_PROC_FDINFO
+                && !*proc.tail && q->capture[i].flags==O_CLOEXEC;
             if (q->directory[i]!=-1 || q->object[i] || q->origin[i]
                     || (md_fs_operation_data_inputs(q->operation)&(1U<<i))
                     || !*q->capture[i].path || strnlen(q->capture[i].path,PATH_MAX)==PATH_MAX
-                    || !(q->capture[i].flags&O_PATH)
+                    || (!(q->capture[i].flags&O_PATH) && !fdinfo)
                     || q->capture[i].flags&~(O_PATH|O_CLOEXEC|O_DIRECTORY|O_NOFOLLOW)) return -EINVAL;
             descriptors|=1U<<i;
         } else if (q->capture[i].flags) return -EINVAL;
@@ -71,6 +76,9 @@ int md_fs_request_validate(const struct md_fs_request *q) {
     if (q->operation==MD_FS_FSOPEN)
         return descriptors || !*a || *b || (q->flags&~(O_RDWR|O_CLOEXEC))
             || q->mode || q->capacity || q->offset ? -EINVAL : 0;
+    if (q->operation==MD_FS_FDINFO)
+        return descriptors!=1 || (q->directory[0]<0 && !q->capture[0].path) || *a || *b || q->mode || q->capacity
+            || q->offset<0 || (q->flags&~(O_PATH|O_CLOEXEC)) ? -EINVAL : 0;
     if (q->operation==MD_FS_FSMOUNT)
         return descriptors!=1 || q->directory[0]<0 || *a || *b || (q->flags&~(O_PATH|O_CLOEXEC))
             || q->capacity || q->offset ? -EINVAL : 0;
@@ -184,7 +192,8 @@ int md_fs_request_validate(const struct md_fs_request *q) {
     if ((!binary && (descriptors & 2))
             || (!binary && q->operation != MD_FS_SYMLINK && *b)
             || (q->mode && q->operation != MD_FS_CREATE && q->operation != MD_FS_MKDIR && q->operation != MD_FS_OPEN
-                && !((q->operation==MD_FS_STAT || q->operation==MD_FS_FSTAT) && q->mode==MD_FS_STAT_MOUNT))
+                && !((q->operation==MD_FS_STAT || q->operation==MD_FS_FSTAT) && q->mode==MD_FS_STAT_MOUNT)
+                && !(q->operation==MD_FS_PATH && q->mode==MD_FS_PATH_DISPLAY))
             || (q->flags && q->operation != MD_FS_OPEN && q->operation != MD_FS_LINK
                 && q->operation != MD_FS_RENAME && q->operation != MD_FS_UNLINK && q->operation != MD_FS_STAT)
             || ((q->operation == MD_FS_FSTAT || q->operation == MD_FS_PATH) && *a)

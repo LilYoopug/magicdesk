@@ -12,6 +12,7 @@ def main():
     parser.add_argument('store')
     parser.add_argument('--trace', action='store_true')
     parser.add_argument('--library', default='libglycin-1.so.0')
+    parser.add_argument('--format', choices=('png', 'svg'), default='png')
     parser.add_argument('--fixture-deb', type=Path, action='append', default=[],
                         help='Extract unmodified distribution binaries into this dedicated test store')
     args = parser.parse_args()
@@ -34,11 +35,23 @@ def main():
                      '--deadline-seconds', '60', '--', '/usr/bin/dpkg-deb']
             suite.report['fixturePackages'].append(suite.command(setup + ['-f', target + '/' + name]))
             suite.command(setup + ['-x', target + '/' + name, '/'])
-        suite.report['packages'] = suite.command(prefix + ['/usr/bin/dpkg-query', '-W', 'loupe', 'glycin-loaders', 'libglycin-1-0', 'bubblewrap'])
+        suite.report['format'] = args.format
+        suite.report['packages'] = suite.command(prefix + ['/bin/sh', '-ec', '''
+cat /etc/os-release
+if command -v dpkg-query >/dev/null; then
+    dpkg-query -W '*glycin*' bubblewrap
+elif command -v rpm >/dev/null; then
+    rpm -qa '*glycin*' bubblewrap
+elif command -v pacman >/dev/null; then
+    pacman -Q glycin bubblewrap
+else
+    exit 1
+fi
+'''])
         trace = ['/usr/bin/strace', '-f', '-s', '160'] if args.trace else []
         command = prefix + trace + ['/usr/bin/env', 'RUST_LOG=glycin=debug', 'HOME=/tmp',
                                     'GLYCIN_LIBRARY=' + args.library,
-                                    'python3', target + '/loader.py']
+                                    'python3', target + '/loader.py', '--format', args.format]
         process = Server(suite, command)
         try:
             process.ready('PASS Glycin BWRAP decoded 2x1 RGB pixels', timeout=80)

@@ -261,8 +261,11 @@ struct thread {
     int pid_filter, pid_preflight, debug_replay_entry;
     struct md_pid_identity *pid_reservation;
     long pid_result;
-    uintptr_t pid_store_address, pid_parent_address;
-    pid_t pid_store_value;
+    struct { uintptr_t address; pid_t value; } pid_stores[2];
+    unsigned pid_store_count;
+    uintptr_t pid_parent_address;
+    struct thread *pid_birth_parent, *pid_birth_child;
+    int pid_birth_waiting, pid_birth_signal;
     int pid_init_pending;
     struct user_pt_regs process_return;
     int process_info_code;
@@ -552,7 +555,29 @@ static struct thread *thread(pid_t pid) {
     CHECK(t->memory && t->fd_selector && t->shm_space);
     live++; total++; return t;
 }
+static void pid_birth_release(struct thread *child) {
+    struct thread *parent=child->pid_birth_parent;
+    if (!parent) return;
+    CHECK(parent->pid_birth_child==child);
+    child->pid_birth_parent=NULL; parent->pid_birth_child=NULL;
+    if (parent->pid_birth_waiting) {
+        int sig=parent->pid_birth_signal;
+        parent->pid_birth_waiting=parent->pid_birth_signal=0;
+        resume(parent->pid,sig);
+    }
+}
+static void pid_store_add(struct thread *t, uintptr_t address, pid_t value) {
+    if (!address) return;
+    CHECK(t->pid_store_count<2);
+    t->pid_stores[t->pid_store_count].address=address;
+    t->pid_stores[t->pid_store_count++].value=value;
+}
 static void release_thread(struct thread *t) {
+    pid_birth_release(t);
+    if (t->pid_birth_child) {
+        t->pid_birth_child->pid_birth_parent=NULL;
+        t->pid_birth_child=NULL;
+    }
     int buffered=t->buffer.pool || t->buffer_call || t->buffer_waiting;
     fd_discard(t);
     adapter_discard(t);
@@ -1154,7 +1179,8 @@ static int proc_node_metadata(struct thread *t, const struct md_proc_metadata_re
     if (q->kind) {
         if (!md_proc_control_kind(q->kind)) return -EINVAL;
         if (q->kind==MD_PROC_NS_UNSUPPORTED) return -ENOENT;
-        if (!target.identity) return q->kind==MD_PROC_PROCESS_DIRECTORY ? -EXDEV : -ENOENT;
+        if (!target.identity) return q->kind==MD_PROC_PROCESS_DIRECTORY
+            || q->kind==MD_PROC_STATUS || q->kind==MD_PROC_STAT ? -EXDEV : -ENOENT;
         kind=(enum md_proc_file_kind)(q->kind-MD_PROC_UID_MAP);
     } else {
         if (q->process!=t->pid) return -EPERM;
@@ -1291,6 +1317,16 @@ static int executable_capture(pid_t actor,struct md_program *image) {
     } else if (!image->identity.object[0]) return -ENOENT;
     return 0;
 }
+static int root_capture(pid_t actor,pid_t process,struct md_task_snapshot *snapshot) {
+    struct thread *t=find_thread(actor), *target=find_thread(process);
+    if (!t || !target || !target->born) return -ENOENT;
+    if (target!=t && !debugger_allowed(actor,process)) return -EACCES;
+    char path[64],link[PATH_MAX];
+    snprintf(path,sizeof(path),"/proc/%d/root",process);
+    if (readlink(path,link,sizeof(link))<0) return -errno;
+    if (md_domain_restricted(target->resources.fs)) return -EACCES;
+    return md_task_registry_read(tasks,process,0,snapshot);
+}
 static void proc_file_request(struct thread *t, const struct seccomp_notif *q) {
     struct seccomp_notif_resp reply={.id=q->id};
     unsigned operation=(unsigned)q->data.args[1];
@@ -1376,7 +1412,8 @@ static void proc_file_request(struct thread *t, const struct seccomp_notif *q) {
         struct md_proc_file *source=operation==MD_PROC_FILE_REOPEN && target
             ? proc_file_capture(target,(int)q->data.args[3]) : NULL;
         if (source) kind=(enum md_proc_kind)(MD_PROC_UID_MAP+md_proc_file_kind(source));
-        if (!selected.identity) reply.error=operation==MD_PROC_FILE_OPEN && kind==MD_PROC_PROCESS_DIRECTORY ? -EXDEV : -ENOENT;
+        if (!selected.identity) reply.error=operation==MD_PROC_FILE_OPEN && (kind==MD_PROC_PROCESS_DIRECTORY
+            || kind==MD_PROC_STATUS || kind==MD_PROC_STAT) ? -EXDEV : -ENOENT;
         else if (operation==MD_PROC_FILE_REOPEN && !source) reply.error=-EBADF;
         else if (!source && kind==MD_PROC_NS_UNSUPPORTED) reply.error=-ENOENT;
         else if ((!source && !md_proc_control_kind(kind)) || t->proc_image_fd>=0) reply.error=-EINVAL;
@@ -3466,6 +3503,16 @@ static void resume(pid_t pid, int sig) {
         if (tracee_request(t,PTRACE_CONT,NULL,NULL,"continue-exit")) t->kernel_stopped=0;
         return;
     }
+    if (t->pid_birth_child) {
+        /* EVENT_WAIT: the stopped newborn publishes shared SETTID fields before
+         * either task returns to libc. Completion or death releases the parent;
+         * launch cancellation bounds a missing event. No late parent rewrite may
+         * race the newborn's mutex ownership or kernel CHILD_CLEARTID store. */
+        CHECK(!t->pid_birth_waiting || !sig || sig==t->pid_birth_signal);
+        t->pid_birth_waiting=1;
+        if (sig) t->pid_birth_signal=sig;
+        return;
+    }
     if (t->phase==IDLE && t->pid_init_pending && t->initial_stop) {
         struct user_pt_regs regs;
         if (!registers(pid,&regs)) return;
@@ -3477,15 +3524,23 @@ static void resume(pid_t pid, int sig) {
         t->phase=PROCESS_INIT_ENTRY; t->pid_init_pending=0;
         if (!set_registers(pid,&regs)) return;
     }
-    if (t->phase==IDLE && t->pid_store_address && t->initial_stop) {
+    if (t->phase==IDLE && t->pid_store_count && t->initial_stop) {
         struct user_pt_regs regs;
         if (!registers(pid,&regs)) return;
         t->original=regs;
         if (!tracee_request(t,PTRACE_GETSIGMASK,(void *)sizeof(t->mask),&t->mask,"pid-store-mask") || !shield(t)) return;
-        regs.pc=abi.store_groups; regs.regs[0]=t->pid_store_address;
-        regs.regs[1]=1; regs.regs[3]=t->pid_store_value;
-        t->pid_store_address=0; t->phase=PROCESS_TID_STORE;
+        regs.pc=abi.store_groups; regs.regs[0]=t->pid_stores[0].address;
+        regs.regs[1]=1; regs.regs[3]=t->pid_stores[0].value;
+        --t->pid_store_count; t->pid_stores[0]=t->pid_stores[1];
+        t->phase=PROCESS_TID_STORE;
         if (!set_registers(pid,&regs)) return;
+    }
+    if (t->phase==IDLE && t->initial_stop) {
+        pid_birth_release(t);
+        if (t->debug_birth) {
+            t->debug_birth=0;
+            if (md_debugger_newborn(debugger,pid)) return;
+        }
     }
     CHECK(!md_task_registry_publish(tasks, t->pid, t->tgid, &t->identity, &t->resources));
     enum phase phase = t->phase;
@@ -4001,6 +4056,7 @@ int main(int argc, char **argv) {
         md_fs_buffer_control_query(buffer_service,control_file_query);
         md_fs_buffer_control_capture(buffer_service,control_file_capture);
         md_fs_buffer_exec_capture(buffer_service,executable_capture);
+        md_fs_buffer_root_capture(buffer_service,root_capture);
         CHECK(!md_mount_copy_service_create(filesystem,mount_copy_complete,&mount_copy_service));
         const char *program = "", *cwd = "/";
         for (int i = argument+1; i+1 < argc; ++i) {
@@ -4168,11 +4224,16 @@ int main(int argc, char **argv) {
             if (t->cloning&CLONE_NEWPID)
                 TRACE("PROBE pid-namespace init=%d visible=1 depth=%u\n",c->pid,
                     md_pid_namespace_depth(md_pid_identity_namespace(c->resources.pid)));
-            if (c->resources.pid && (t->cloning&CLONE_CHILD_SETTID)) {
-                c->pid_store_address=t->original.regs[4];
-                c->pid_store_value=md_pid_identity_number(c->resources.pid,md_pid_identity_namespace(c->resources.pid));
-            }
             t->pid_result=md_pid_identity_number(c->resources.pid,md_pid_identity_namespace(t->resources.pid));
+            if (t->pid_parent_address && (t->cloning&CLONE_VM)) {
+                CHECK(!t->pid_birth_child && !c->pid_birth_parent);
+                pid_store_add(c,t->pid_parent_address,(pid_t)t->pid_result);
+                t->pid_parent_address=0;
+                t->pid_birth_child=c; c->pid_birth_parent=t;
+            }
+            if (c->resources.pid && (t->cloning&CLONE_CHILD_SETTID))
+                pid_store_add(c,t->original.regs[4],
+                    md_pid_identity_number(c->resources.pid,md_pid_identity_namespace(c->resources.pid)));
             if (t->fd_running) fd_finish(t,(long)child);
             md_memory_release(c->memory);
             c->memory = md_memory_fork(t->memory, !!(t->cloning & CLONE_VM)); CHECK(c->memory);
@@ -4186,10 +4247,7 @@ int main(int argc, char **argv) {
              * arrive in either order. Both must precede the child's resume. */
             int debug_birth=md_debugger_birth(debugger,pid,c->pid,event); CHECK(debug_birth>=0);
             c->debug_birth=debug_birth;
-            if (c->initial_stop) {
-                if (!c->debug_birth || !md_debugger_newborn(debugger,c->pid)) resume(c->pid,0);
-                c->debug_birth=0;
-            }
+            if (c->initial_stop) resume(c->pid,0);
             if (!debug_birth) resume(pid, 0);
         } else if (event == PTRACE_EVENT_STOP) {
             if (sig == SIGSTOP || sig == SIGTSTP || sig == SIGTTIN || sig == SIGTTOU) {
@@ -4207,7 +4265,7 @@ int main(int argc, char **argv) {
             if (wake) { CHECK(sig == SIGTRAP); t->listening = 0; group_wakes++; }
             if (interrupted_operation(t)) continue;
             if (wake) { resume(pid, 0); continue; }
-            if (t->phase==IDLE && t->entered && md_debugger_boundary(debugger,pid)) {
+            if (t->initial_stop && t->phase==IDLE && t->entered && md_debugger_boundary(debugger,pid)) {
                 t->initial_stop=1; continue;
             }
             CHECK(sig == SIGTRAP);
@@ -4218,10 +4276,7 @@ int main(int argc, char **argv) {
                 CHECK(t->born); raced_wakes++; resume(pid, 0); continue;
             }
             t->initial_stop = 1;
-            if (t->born) {
-                if (!t->debug_birth || !md_debugger_newborn(debugger,pid)) resume(pid,0);
-                t->debug_birth=0;
-            }
+            if (t->born) resume(pid,0);
         }
         else if (event == PTRACE_EVENT_SECCOMP) {
             unsigned long cookie;
@@ -4585,10 +4640,8 @@ int main(int argc, char **argv) {
                         if (!set_registers(pid,&regs)) continue;
                     }
                     t->pid_result=0;
-                    if ((long)regs.regs[0]>0 && t->pid_parent_address) {
-                        t->pid_store_address=t->pid_parent_address;
-                        t->pid_store_value=(pid_t)regs.regs[0];
-                    }
+                    if ((long)regs.regs[0]>0 && t->pid_parent_address)
+                        pid_store_add(t,t->pid_parent_address,(pid_t)regs.regs[0]);
                     t->pid_parent_address=0;
                 }
                 if ((long)regs.regs[0] >= 0 && (t->original.regs[8] == SYS_munmap || t->original.regs[8] == SYS_mmap)) {

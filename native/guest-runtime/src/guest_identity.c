@@ -68,7 +68,7 @@ struct md_identity md_identity_new(uint32_t uid, uint32_t gid) {
         | (1ULL << CAP_FOWNER) | (1ULL << CAP_FSETID) | (1ULL << CAP_SETUID)
         | (1ULL << CAP_SETGID) | (1ULL << CAP_SETPCAP) | (1ULL << CAP_SYS_CHROOT)
         | (1ULL << CAP_IPC_OWNER) | (1ULL << CAP_SETFCAP) | (1ULL << CAP_SYS_ADMIN)
-        | (1ULL << CAP_NET_ADMIN);
+        | (1ULL << CAP_NET_ADMIN) | (1ULL << CAP_KILL);
     return (struct md_identity){.uid = {uid, uid, uid, uid}, .gid = {gid, gid, gid, gid},
         .caps = {.bounding = supported, .permitted = uid ? 0 : supported,
             .effective = uid ? 0 : supported}};

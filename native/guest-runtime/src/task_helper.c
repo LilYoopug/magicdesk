@@ -4,6 +4,7 @@
 #include "mapping_observation.h"
 #include "fd_channel.h"
 #include "received_fds.h"
+#include "proc_paths.h"
 #include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -377,7 +378,7 @@ static int advance(struct helper *m, long value) {
             break;
         case OPEN: {
             if (value>INT32_MAX) return -EPROTO;
-            if (m->kind==MD_TASK_HELPER_CAPTURE && !(m->flags&O_NOFOLLOW)) {
+            if (m->kind==MD_TASK_HELPER_CAPTURE && (m->flags&O_PATH) && !(m->flags&O_NOFOLLOW)) {
                 /* The stopped helper owns a private table: this alias pins the
                  * object already opened under caller filters, not its pathname.
                  * O_PATH needs no data access (unlike SCM_RIGHTS file_receive).
@@ -491,8 +492,12 @@ int md_task_helper_begin(struct md_task_helpers *manager, pid_t owner, pid_t gro
             || !request->receive.count || request->receive.count>1024 || request->receive.batch>1
             || (!request->receive.batch && request->receive.count!=1) || !request->captured)) return -EINVAL;
     if (request->kind==MD_TASK_HELPER_MAP && !request->mapping.size) return -EINVAL;
-    if (request->kind==MD_TASK_HELPER_CAPTURE && (!(request->flags&O_PATH)
-            || request->flags&~(O_PATH|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW))) return -EINVAL;
+    if (request->kind==MD_TASK_HELPER_CAPTURE) {
+        struct md_proc_path proc=md_proc_path_for(path,owner,group);
+        int fdinfo=proc.kind==MD_PROC_FDINFO && !*proc.tail && request->flags==O_CLOEXEC;
+        if ((!(request->flags&O_PATH) && !fdinfo)
+                || request->flags&~(O_PATH|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW)) return -EINVAL;
+    }
     for (struct helper *m=manager->first;m;m=m->next) if (m->owner==owner) return -EBUSY;
     unsigned exporting=request->kind==MD_TASK_HELPER_EXPORT ? request->descriptor_count : 0;
     struct helper *m=calloc(1,sizeof(*m)+exporting*sizeof(int));

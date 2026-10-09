@@ -101,6 +101,10 @@ struct md_proc_path md_proc_path_for(const char *path,int tid,int tgid) {
             out.descriptor=(int)number(&p);
             if (out.descriptor < 0) return out;
             out.kind = MD_PROC_FD;
+        } else if (word(&p, "fdinfo")) {
+            out.descriptor=(int)number(&p);
+            if (out.descriptor < 0) return out;
+            out.kind=MD_PROC_FDINFO;
         } else if (word(&p, "cwd")) out.kind = MD_PROC_CWD;
         else if (word(&p, "root")) out.kind = MD_PROC_ROOT;
         else if (word(&p, "exe")) out.kind = MD_PROC_EXE;
