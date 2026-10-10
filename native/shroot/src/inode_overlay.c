@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/inotify.h>
 #include <sys/xattr.h>
 #include <unistd.h>
 
@@ -333,6 +334,39 @@ int md_inode_overlay_layer(struct md_inode_store *index, struct md_inode_store *
         int directory, int user_xattr) {
     return layer(index,source,directory,user_xattr,0);
 }
+/* Linux exposes an empty, mode-000 work/work directory. Recreate only that
+ * empty internal directory on remount; never discard foreign workdir contents. */
+static int prepare_workdir(struct md_inode_store *s, const struct mdi_node *work) {
+    sqlite3_stmt *q=NULL;
+    int r=mdi_prepare(s,"SELECT 1 FROM names WHERE parent=?1 AND name!=?2 LIMIT 1",&q);
+    if (!r) r=mdi_bind_id(q,1,work->id);
+    if (!r) r=mdi_bind_name(q,2,"work");
+    if (!r) {
+        int next=mdi_step(s,q);
+        if (next==SQLITE_ROW) r=-ENOTEMPTY;
+        else if (next!=SQLITE_DONE) r=mdi_sql_failure(next);
+    }
+    sqlite3_finalize(q);
+    struct mdi_node node;
+    if (!r) {
+        int found=mdi_lookup(s,work->id,"work",&node);
+        if (!found) {
+            int empty=node.kind==S_IFDIR ? mdi_empty(s,&node) : 0;
+            if (empty!=1) r=empty<0 ? empty : -ENOTEMPTY;
+            if (!r) r=mdi_delete_name(s,work->id,"work");
+            if (!r) r=mdi_event(s,work->id,&node,"work",IN_DELETE,NULL);
+        } else if (found!=-ENOENT) r=found;
+    }
+    int fd=-1;
+    if (!r) r=mdi_allocate(s,S_IFDIR,0700,O_RDONLY,NULL,work->id,&node,&fd);
+    if (fd>=0) close(fd);
+    if (!r) r=mdi_acl_store(s,&node,MD_ACL_ACCESS,NULL,0);
+    if (!r) r=mdi_acl_store(s,&node,MD_ACL_DEFAULT,NULL,0);
+    if (!r) r=mdi_metadata(s,&node,node.uid,node.gid,0);
+    if (!r) r=mdi_add_name(s,work->id,"work",node.id);
+    if (!r) r=mdi_event(s,work->id,&node,"work",IN_CREATE,NULL);
+    return r;
+}
 int md_inode_overlay_prepare_upper(struct md_inode_store *index, struct md_inode_store *source,
         int upper_fd, int work_fd, int user_xattr) {
     if (!index || !source || md_inode_lifetime_same(index->lifetime,source->lifetime)
@@ -355,10 +389,6 @@ int md_inode_overlay_prepare_upper(struct md_inode_store *index, struct md_inode
         if (!overlap) overlap=mdi_ancestor(&borrowed,work.id,upper.id);
         if (overlap) r=overlap<0 ? overlap : -EINVAL;
     }
-    if (!r) {
-        int empty=mdi_empty(&borrowed,&work);
-        if (empty!=1) r=empty<0 ? empty : -ENOTEMPTY;
-    }
     if (!r) r=mdi_views_collect(index);
     sqlite3_stmt *q=NULL;
     if (!r) r=mdi_prepare(index,"SELECT 1 FROM inode_views WHERE upper IN (?1,?2) OR work IN (?1,?2)",&q);
@@ -370,6 +400,7 @@ int md_inode_overlay_prepare_upper(struct md_inode_store *index, struct md_inode
         else if (next!=SQLITE_DONE) r=mdi_sql_failure(next);
     }
     sqlite3_finalize(q); q=NULL;
+    if (!r) r=prepare_workdir(&borrowed,&work);
     if (!r) r=mdi_prepare(index,"UPDATE inode_views SET upper=?1,work=?2,user_xattr=?3 "
         "WHERE scope=?4 AND upper IS NULL",&q);
     if (!r) r=mdi_bind_id(q,1,upper.id);

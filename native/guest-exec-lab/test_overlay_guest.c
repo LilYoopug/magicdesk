@@ -38,10 +38,14 @@ static void writable(void) {
     int mounted=mount("overlay","/tmp/overlay/merged","overlay",0,options);
     if (mounted) perror("writable overlay mount");
     assert(!mounted);
+    struct stat work_stat;
+    assert(!stat("/tmp/overlay/work/work",&work_stat));
+    assert(S_ISDIR(work_stat.st_mode) && !(work_stat.st_mode&07777));
+    assert(!chown("/tmp/overlay/work/work",0,0));
     int root=open("/tmp/overlay/merged",O_RDONLY|O_DIRECTORY); assert(root>=0);
     int old=openat(root,"original",O_RDONLY); assert(old>=0);
-    int file=openat(root,"original",O_RDWR); assert(file>=0);
-    assert(pwrite(file,"upper",5,0)==5 && !ftruncate(file,5));
+    int writable_file=openat(root,"original",O_RDWR); assert(writable_file>=0);
+    assert(pwrite(writable_file,"upper",5,0)==5 && !ftruncate(writable_file,5));
     contents(AT_FDCWD,"/tmp/overlay/writable/original","upper");
     contents(root,"alias","upper");
     contents(AT_FDCWD,"/tmp/overlay/lower/original","shared body");
@@ -68,7 +72,7 @@ static void writable(void) {
     assert(!umount2("/tmp/overlay/merged",MNT_DETACH));
     contents(root,"moved","upper");
     assert(mount("overlay","/tmp/overlay/second","overlay",0,options)<0 && errno==EBUSY);
-    close(file); close(old); close(root);
+    close(writable_file); close(old); close(root);
     mounted=mount("overlay","/tmp/overlay/merged","overlay",0,options);
     if (mounted) perror("writable overlay remount after final close");
     assert(!mounted);
@@ -76,6 +80,13 @@ static void writable(void) {
     contents(AT_FDCWD,"/tmp/overlay/merged/new-link","upper");
     missing("/tmp/overlay/merged/original"); missing("/tmp/overlay/merged/deleted");
     missing("/tmp/overlay/merged/sub/low");
+    assert(!umount2("/tmp/overlay/merged",0));
+    file("/tmp/overlay/work/foreign","preserve");
+    assert(mount("overlay","/tmp/overlay/merged","overlay",0,options)<0 && errno==ENOTEMPTY);
+    contents(AT_FDCWD,"/tmp/overlay/work/foreign","preserve");
+    assert(!unlink("/tmp/overlay/work/foreign"));
+    assert(!mount("overlay","/tmp/overlay/merged","overlay",0,options));
+    assert(!stat("/tmp/overlay/work/work",&work_stat) && !(work_stat.st_mode&07777));
     assert(!umount2("/tmp/overlay/merged",0));
     const char *bad[]={"lowerdir=/tmp/overlay/lower,upperdir=/tmp/overlay/writable",
         "lowerdir=/tmp/overlay/lower,workdir=/tmp/overlay/work",

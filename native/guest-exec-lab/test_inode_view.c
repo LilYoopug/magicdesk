@@ -263,6 +263,9 @@ static void merge_views(struct md_inode_store *s) {
     assert(!md_inode_view_create(s,MD_FILESYSTEM_OVERLAY,&b));
     assert(!md_inode_overlay_layer(a,s,lower,1));
     assert(!md_inode_overlay_prepare_upper(a,s,upper,work,1));
+    struct stat work_stat;
+    assert(!md_inode_stat(s,work,"work",0,&work_stat));
+    assert(S_ISDIR(work_stat.st_mode) && !(work_stat.st_mode&07777));
     assert(!md_inode_overlay_layer(b,s,lower,1));
     int fd=md_inode_open(a,-1,"/replaced",O_RDONLY,0); assert(fd>=0); text(fd,"upper"); close(fd);
     fd=md_inode_open(b,-1,"/replaced",O_RDONLY,0); assert(fd>=0); text(fd,"lower"); close(fd);
@@ -281,6 +284,7 @@ static void merge_views(struct md_inode_store *s) {
     assert(!md_inode_view_create(s,MD_FILESYSTEM_OVERLAY,&b));
     assert(!md_inode_overlay_layer(b,s,lower,1));
     assert(!md_inode_overlay_prepare_upper(b,s,upper,work,1));
+    assert(!md_inode_stat(s,work,"work",0,&work_stat) && !(work_stat.st_mode&07777));
     int nested_upper=md_inode_open(b,-1,"/nested-upper",O_RDONLY|O_DIRECTORY,0);
     int nested_work=md_inode_open(b,-1,"/nested-work",O_RDONLY|O_DIRECTORY,0);
     assert(nested_upper>=0 && nested_work>=0);

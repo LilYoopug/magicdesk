@@ -25,6 +25,10 @@ after commit or rollback. Separate launches can share a store without exposing
 ordinary internal transaction contention to guest syscalls. There is no polling
 or transaction replay; data IO through opened descriptors stays native. An
 external database writer that bypasses this gate still produces an explicit error.
+Initial store admission prepares indexes for every foreign-key child lookup,
+so collecting an overlay view does not repeatedly scan the whole store.
+Retained worker reconnects and ordinary filesystem operations do not prepare
+indexes; the schema format and file contents remain unchanged.
 The supervisor handles regular-file seeks through retained kernel descriptors
 without namespace RPC; directory cursors remain namespace-owned. Filesystem
 RPC replies retain their connection until exchange completion, task cancellation

@@ -813,6 +813,35 @@ static void membership_queries(void) {
     close(dir); md_inode_store_close(writer); md_inode_store_close(s);
     puts("PASS directory membership: transactional counters, live unlink and unchanged full stat");
 }
+static void foreign_key_indexes(sqlite3 *db) {
+    /* Each deleted parent probes every referencing column. An unindexed
+     * child turns bulk view collection into a quadratic full-store scan. */
+    sqlite3_stmt *keys=NULL;
+    CHECK(sqlite3_prepare_v2(db,"SELECT s.name,f.\"from\",f.seq FROM sqlite_schema s, "
+        "pragma_foreign_key_list(s.name) f WHERE s.type='table'",-1,&keys,NULL)==SQLITE_OK);
+    unsigned count=0;
+    int next;
+    while ((next=sqlite3_step(keys))==SQLITE_ROW) {
+        CHECK(sqlite3_column_int(keys,2)==0);
+        char *sql=sqlite3_mprintf("EXPLAIN QUERY PLAN SELECT 1 FROM \"%w\" WHERE \"%w\"=?1",
+            sqlite3_column_text(keys,0),sqlite3_column_text(keys,1));
+        CHECK(sql);
+        sqlite3_stmt *plan=NULL;
+        CHECK(sqlite3_prepare_v2(db,sql,-1,&plan,NULL)==SQLITE_OK);
+        sqlite3_free(sql);
+        CHECK(sqlite3_step(plan)==SQLITE_ROW);
+        const char *detail=(const char *)sqlite3_column_text(plan,3);
+        if (!detail || strncmp(detail,"SEARCH ",7))
+            fprintf(stderr,"Unindexed foreign key %s.%s: %s\n",sqlite3_column_text(keys,0),
+                sqlite3_column_text(keys,1),detail ? detail : "missing plan");
+        CHECK(detail && !strncmp(detail,"SEARCH ",7));
+        CHECK(sqlite3_step(plan)==SQLITE_DONE);
+        sqlite3_finalize(plan); ++count;
+    }
+    CHECK(next==SQLITE_DONE && count>=18);
+    sqlite3_finalize(keys);
+    puts("PASS every foreign-key child lookup uses an index, including view collection");
+}
 static void counter_audit(void) {
     struct md_inode_store *s = store("counter-audit", 1);
     int fd = md_inode_create(s, MD_INODE_ROOT, "file", 0600); CHECK(fd >= 0); close(fd);
@@ -822,6 +851,7 @@ static void counter_audit(void) {
     char database[PATH_MAX]; path(database, "counter-audit/namespace.db");
     sqlite3 *db;
     CHECK(sqlite3_open(database, &db) == SQLITE_OK);
+    foreign_key_indexes(db);
     CHECK(sqlite3_exec(db, "UPDATE objects SET name_count=0 WHERE kind=32768", NULL, NULL, NULL) == SQLITE_OK);
     CHECK(md_inode_audit(s, &audit) == -EIO);
     CHECK(sqlite3_exec(db, "UPDATE objects SET name_count=1 WHERE kind=32768;"
@@ -830,6 +860,13 @@ static void counter_audit(void) {
     CHECK(sqlite3_exec(db, "UPDATE objects SET directory_count=1 WHERE object='00000000000000000000000000000000'",
         NULL, NULL, NULL) == SQLITE_OK);
     CHECK(!md_inode_audit(s, &audit));
+    md_inode_store_close(s);
+    CHECK(sqlite3_exec(db,"DROP INDEX objects_parent; DROP INDEX backings_object;"
+        "DROP INDEX inode_views_upper; DROP INDEX inode_views_work; DROP INDEX overlay_origins_object;"
+        "DROP INDEX overlay_links_upper; DROP INDEX file_paths_parent",NULL,NULL,NULL)==SQLITE_OK);
+    s=store("counter-audit",0);
+    foreign_key_indexes(db);
+    CHECK(!md_inode_audit(s,&audit));
     md_inode_store_close(s);
     CHECK(sqlite3_exec(db, "PRAGMA user_version=4", NULL, NULL, NULL) == SQLITE_OK);
     char directory[PATH_MAX]; path(directory, "counter-audit");

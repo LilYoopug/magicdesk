@@ -417,6 +417,22 @@ int mdi_allocate_root(struct md_inode_store *s, struct mdi_node *node) {
     int fd;
     return make_object(s,s->lifetime->scope,S_IFDIR,0700,0,NULL,s->lifetime->scope,node,&fd);
 }
+static int prepare_lookup_indexes(struct md_inode_store *s) {
+    /* Foreign-key checks run per removed parent. All child lookups must be
+     * indexed; otherwise collecting a view repeatedly scans the whole store.
+     * This is cold admission work, not part of retained worker reconnects. */
+    int r=mdi_sql(s,"BEGIN IMMEDIATE;"
+        "CREATE INDEX IF NOT EXISTS objects_parent ON objects(parent);"
+        "CREATE INDEX IF NOT EXISTS backings_object ON backings(object);"
+        "CREATE INDEX IF NOT EXISTS inode_views_upper ON inode_views(upper);"
+        "CREATE INDEX IF NOT EXISTS inode_views_work ON inode_views(work);"
+        "CREATE INDEX IF NOT EXISTS overlay_origins_object ON overlay_origins(object);"
+        "CREATE INDEX IF NOT EXISTS overlay_links_upper ON overlay_links(upper);"
+        "CREATE INDEX IF NOT EXISTS file_paths_parent ON file_paths(parent);"
+        "COMMIT;");
+    if (r) mdi_sql(s,"ROLLBACK");
+    return r;
+}
 static int store_open(const char *directory, int create, int exclusive,
         struct md_inode_lifetime *retained, struct md_inode_store **out) {
     if (!out) return -EFAULT;
@@ -550,6 +566,7 @@ static int store_open(const char *directory, int create, int exclusive,
         else if (sqlite3_column_int(q, 0) != 13) r = -EPROTONOSUPPORT;
     }
     sqlite3_finalize(q); q = NULL;
+    if (!r && (!retained || create)) r=prepare_lookup_indexes(s);
     if (!r) r = mdi_prepare(s, "PRAGMA journal_mode", &q);
     if (!r) {
         int rc = mdi_step(s, q);
