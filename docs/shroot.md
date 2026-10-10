@@ -349,8 +349,11 @@ Recovery-disk repair tools, EFI partitions and recovery `/etc` overrides are not
 installed. Android partitions and mount state are untouched.
 
 The named environment uses the image's ordinary `steamos` account. Its supplied
-Steam client archive is prepared in that account's home without replacing an
-existing Steam installation. After refreshing Apps, select Steam or another
+Steam client archive and missing SDK/root links are prepared in that account's
+home without replacing an existing installation or user-owned links.
+The Turnip profile supplies overridable FEX GL/Vulkan thunk defaults and exposes
+its private Mesa prefix to pressure-vessel; it does not replace per-game FEX
+configuration. After refreshing Apps, select Steam or another
 supplied application; `shroot login steamos` opens a terminal as `steamos`.
 Use `shroot login steamos --user root` for guest administration.
 

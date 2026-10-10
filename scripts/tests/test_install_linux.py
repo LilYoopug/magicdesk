@@ -191,6 +191,31 @@ if os.environ.get("TEST_FAIL") == stage:
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertTrue(all(c[0] not in ('install', 'download', 'prune') for c in self.calls()))
 
+    def test_steamos_desktop_bootstrap_supplies_sdk_links_and_preserves_existing_paths(self):
+        result = self.run_script('--yes', '--resume', '--name', 'steam', TEST_DISTRO='steamos')
+        self.assertEqual(0, result.returncode, result.stderr)
+        command = next(c[-1] for c in self.calls() if any('steam.tar.zst' in a for a in c))
+        command = command.replace('[ "$(id -un)" = steamos ]', ':')
+        home = self.directory / 'steam-home'
+        client = home / '.local/share/Steam'
+        client.mkdir(parents=True)
+        config = home / '.steam'
+        config.mkdir()
+        (config / 'sdk32').symlink_to('custom-missing-sdk')
+        (config / 'sdk64').write_text('user-owned')
+        for _ in range(2):
+            # EVENT_WAIT: bootstrap exit; timeout fails a stuck client setup.
+            setup = subprocess.run(['sh', '-c', command],
+                                   env=dict(self.environment, HOME=str(home)),
+                                   capture_output=True, text=True, timeout=5)
+            self.assertEqual(0, setup.returncode, setup.stderr)
+        self.assertEqual(client, (config / 'root').resolve())
+        for link, target in (('sdkarm64', 'linuxarm64'), ('binarm64', 'steamrtarm64'),
+                             ('bin32', 'ubuntu12_32'), ('bin64', 'ubuntu12_64')):
+            self.assertEqual(client / target, (config / link).resolve())
+        self.assertEqual('custom-missing-sdk', os.readlink(config / 'sdk32'))
+        self.assertEqual('user-owned', (config / 'sdk64').read_text())
+
     def test_steamos_plasma_uses_matching_kwin_and_shared_gpu_recipe(self):
         result = self.run_script('--yes', '--resume', '--name', 'steam', '--gui', 'plasma',
                                  '--gpu', 'auto', TEST_DISTRO='steamos')
@@ -590,6 +615,41 @@ if os.environ.get("TEST_FAIL") == stage:
                                 env=environment, capture_output=True, text=True, timeout=5)
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("/custom:/other|1|llvmpipe|unset|unset", result.stdout)
+
+    def test_fex_graphics_defaults_preserve_overrides_and_follow_profile(self):
+        recipe = self.profile_recipe()
+        config = self.directory / 'fex-thunks.json'
+        config.write_text('{"ThunksDB":{"GL":"1","Vulkan":"1"}}')
+        recipe = recipe.replace('/opt/magicdesk/fex-thunks.json', str(config))
+        probe = self.directory / 'vulkaninfo'
+        probe.write_text('#!/bin/sh\necho driverID = DRIVER_ID_MESA_TURNIP\n')
+        probe.chmod(0o755)
+        profiles = []
+        for gpu in ('turnip', 'software'):
+            profile = self.directory / (gpu + '.sh')
+            env = dict(self.environment, gpu=gpu, prefix='/opt/magicdesk/mesa/test',
+                       candidate=str(profile) + '.new', profile=str(profile), work=str(self.directory))
+            subprocess.run(['sh', '-eu', '-c', recipe], env=env, capture_output=True,
+                           check=True, timeout=5)
+            profiles.append(str(profile))
+        script = '. "$1"; . "$1"; printf "%s|%s|%s|%s\\n" ' \
+                 '"$FEX_THUNKCONFIG" "${FEX_HOSTENV-unset}" "$PRESSURE_VESSEL_FILESYSTEMS_RO" "$FEX_APP_CONFIG"; ' \
+                 '. "$2"; printf "%s|%s|%s|%s\\n" ' \
+                 '"${FEX_THUNKCONFIG-unset}" "${FEX_HOSTENV-unset}" ' \
+                 '"$PRESSURE_VESSEL_FILESYSTEMS_RO" "$FEX_APP_CONFIG"'
+        prefix = '/opt/magicdesk/mesa/test'
+        for custom in (False, True):
+            env = dict(self.environment, FEX_APP_CONFIG='/user/game.json',
+                       PRESSURE_VESSEL_FILESYSTEMS_RO='/user/files')
+            if custom:
+                env.update(FEX_THUNKCONFIG='/user/thunks.json', FEX_HOSTENV='TEST=1')
+            result = subprocess.run(['sh', '-eu', '-c', script, 'sh', *profiles],
+                                    env=env, capture_output=True, text=True, timeout=5)
+            self.assertEqual(0, result.returncode, result.stderr)
+            chosen = '/user/thunks.json|TEST=1' if custom else str(config) + '|unset'
+            retained = '/user/thunks.json|TEST=1' if custom else 'unset|unset'
+            self.assertEqual(chosen + '|' + prefix + ':' + str(config) + ':/user/files|/user/game.json\n' +
+                             retained + '|/user/files|/user/game.json\n', result.stdout)
 
     @unittest.skipUnless(hasattr(os, "openpty"), "PTY required")
     def test_questions_use_saved_script_stdin(self):

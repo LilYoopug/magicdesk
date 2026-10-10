@@ -1713,6 +1713,10 @@ fi
 # Remove only our previously exported library directory when re-sourcing a login profile.
 reset_profile() {
 cat <<'PROFILE'
+if [ -n "${MAGICDESK_FEX_THUNKCONFIG:-}" ] && [ "${FEX_THUNKCONFIG:-}" = "$MAGICDESK_FEX_THUNKCONFIG" ]; then
+    unset FEX_THUNKCONFIG
+fi
+unset MAGICDESK_FEX_THUNKCONFIG
 if [ -n "${MAGICDESK_MESA_PREFIX:-}" ]; then
     _md_paths=${LD_LIBRARY_PATH:-}
     _md_kept=
@@ -1724,6 +1728,16 @@ if [ -n "${MAGICDESK_MESA_PREFIX:-}" ]; then
         fi
     done
     if [ -n "$_md_kept" ]; then export LD_LIBRARY_PATH=$_md_kept; else unset LD_LIBRARY_PATH; fi
+    _md_paths=${PRESSURE_VESSEL_FILESYSTEMS_RO:-}
+    _md_kept=
+    while [ -n "$_md_paths" ]; do
+        _md_item=${_md_paths%%:*}
+        case $_md_paths in *:*) _md_paths=${_md_paths#*:} ;; *) _md_paths= ;; esac
+        if [ -n "$_md_item" ] && [ "$_md_item" != "$MAGICDESK_MESA_PREFIX" ] && [ "$_md_item" != /opt/magicdesk/fex-thunks.json ]; then
+            _md_kept=${_md_kept:+$_md_kept:}$_md_item
+        fi
+    done
+    if [ -n "$_md_kept" ]; then export PRESSURE_VESSEL_FILESYSTEMS_RO=$_md_kept; else unset PRESSURE_VESSEL_FILESYSTEMS_RO; fi
     unset _md_paths _md_kept _md_item
 fi
 unset MAGICDESK_MESA_PREFIX LIBGL_ALWAYS_SOFTWARE GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE
@@ -1740,6 +1754,14 @@ export __EGL_VENDOR_LIBRARY_FILENAMES="$MAGICDESK_MESA_PREFIX/share/glvnd/egl_ve
 export VK_DRIVER_FILES="$MAGICDESK_MESA_PREFIX/share/vulkan/icd.d/freedreno_icd.aarch64.json"
 # Zink can also present through the frontend when Kopper/DRI3 is unavailable.
 export MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink LIBGL_KOPPER_DRI2=true
+# Thunk defaults are loaded before FEX's per-game overrides; never replace those.
+if [ -r /opt/magicdesk/fex-thunks.json ]; then
+    if [ "${FEX_THUNKCONFIG+x}" != x ]; then
+        export FEX_THUNKCONFIG=/opt/magicdesk/fex-thunks.json
+        export MAGICDESK_FEX_THUNKCONFIG=$FEX_THUNKCONFIG
+    fi
+    export PRESSURE_VESSEL_FILESYSTEMS_RO="$MAGICDESK_MESA_PREFIX:/opt/magicdesk/fex-thunks.json${PRESSURE_VESSEL_FILESYSTEMS_RO:+:$PRESSURE_VESSEL_FILESYSTEMS_RO}"
+fi
 PROFILE
     # EVENT_WAIT: Vulkan enumeration exits; timeout rejects a hung driver, never activates it.
     probe_status=0
@@ -1820,6 +1842,12 @@ case "$family" in
         dbus-uuidgen --ensure ;;
 esac
 mkdir -p /var/lib/magicdesk /etc/profile.d /usr/local/bin /usr/local/share/applications
+if [ "$family" = recovery ]; then
+    mkdir -p /opt/magicdesk
+    cat > /opt/magicdesk/fex-thunks.json <<'FEX_DEFAULTS'
+{"ThunksDB":{"GL":"1","Vulkan":"1"}}
+FEX_DEFAULTS
+fi
 if [ "$setup_locked" = no ]; then
     exec 9>/var/lib/magicdesk/installer.lock
     flock -n 9 || { echo 'Another environment setup is running.' >&2; exit 1; }
@@ -2631,6 +2659,17 @@ if [ "$distro" = steamos ]; then
         if [ ! -e "$HOME/.steam/steam" ] && [ ! -L "$HOME/.steam/steam" ]; then
             ln -s ../.local/share/Steam "$HOME/.steam/steam"
         fi
+        # Desktop launches need the SDK paths too, without RUNSTEAM session policy.
+        for link in root sdk32 sdk64 sdkarm64 bin32 bin64 binarm64; do
+            case "$link" in
+                root) target=. ;;
+                sdk32) target=linux32 ;; sdk64) target=linux64 ;; sdkarm64) target=linuxarm64 ;;
+                bin32) target=ubuntu12_32 ;; bin64) target=ubuntu12_64 ;; binarm64) target=steamrtarm64 ;;
+            esac
+            if [ ! -e "$HOME/.steam/$link" ] && [ ! -L "$HOME/.steam/$link" ]; then
+                ln -s "steam/$target" "$HOME/.steam/$link"
+            fi
+        done
     '
 fi
 
