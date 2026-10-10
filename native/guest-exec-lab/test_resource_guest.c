@@ -1584,8 +1584,12 @@ static void watch_slots(void) {
                 assert(wd>=0 && !inotify_rm_watch(watch,wd));
                 wd=inotify_add_watch(watch,alias,IN_ATTRIB);
                 assert(wd>=0 && !inotify_rm_watch(watch,wd));
-                wd=inotify_add_watch(watch,"/proc/thread-self/status",IN_ATTRIB);
-                assert(wd>=0 && !inotify_rm_watch(watch,wd));
+                const char *proc[]={"/proc/thread-self/status","/proc/thread-self/stat","/proc/thread-self"};
+                for (unsigned p=0;p<3;++p) {
+                    wd=inotify_add_watch(watch,proc[p],IN_ATTRIB|(p==2 ? IN_ONLYDIR : 0));
+                    assert(wd>=0 && !inotify_rm_watch(watch,wd));
+                    if (p!=2) assert(inotify_add_watch(watch,proc[p],IN_ATTRIB|IN_ONLYDIR)==-1 && errno==ENOTDIR);
+                }
                 assert(inotify_add_watch(watch,"watch-slots",IN_ATTRIB|IN_ONLYDIR)==-1 && errno==ENOTDIR);
                 assert(inotify_add_watch(watch,"watch-missing",IN_ATTRIB)==-1 && errno==ENOENT);
                 assert(export_fds(NULL)==before);

@@ -1021,6 +1021,10 @@ nondumpable receiver; queue discard releases it through worker-owned pipe EOF
 observation. Cross-supervisor control-file transfer returns EXDEV, and an
 unframed native peer is rejected before transfer. Ordinary filesystem origins
 continue to use portable capsules that survive their publishing supervisor.
+Selector collisions and the pre-sandbox all-FD selector preserve the original
+syscall owner: ordinary `lseek`, `getdents64` and `fstatfs` return to the filesystem
+adapter rather than bypassing directory cursors or mount metadata. Native data
+IO remains native when no typed provider owns it.
 
 User, mount, PID, UTS, IPC, network and cgroup namespace descriptors retain typed resource ownership,
 not a process number or an Android proc-directory handle. Stat/statfs, readlink,

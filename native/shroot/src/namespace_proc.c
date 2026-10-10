@@ -243,7 +243,12 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
     if (md_proc_control_kind(control)) {
         if (control==MD_PROC_NS_UNSUPPORTED) return -ENOENT;
         if (*ref.tail) return -ENOTDIR;
-        long result=nr==SYS_openat ? md_proc_control_open_view(ref.process,control,(int)a[2],proc_namespace)
+        /* Process text is virtualized, but its inode and watch lifetime still
+         * belong to procfs. Capture the native target under caller authority. */
+        int process_watch=nr==SYS_inotify_add_watch && (control==MD_PROC_PROCESS_DIRECTORY
+            || control==MD_PROC_STATUS || control==MD_PROC_STAT);
+        long result=process_watch ? -EXDEV
+            : nr==SYS_openat ? md_proc_control_open_view(ref.process,control,(int)a[2],proc_namespace)
             : md_proc_control_metadata(ref.process,control,-1,nr,a);
         if (result!=-EXDEV || (control!=MD_PROC_PROCESS_DIRECTORY && control!=MD_PROC_STATUS
                 && control!=MD_PROC_STAT && !md_proc_network_sysctl(control))) return result;

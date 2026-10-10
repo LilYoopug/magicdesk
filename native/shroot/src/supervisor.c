@@ -3910,6 +3910,10 @@ static void proc_lookup_start(struct thread *t) {
         file=proc_file_capture(t,(int)regs.regs[nr==SYS_sendfile || nr==SYS_tee ? 1 : 2]);
     CHECK(!md_fd_order_complete(&t->proc_lookup));
     t->phase=IDLE;
+    /* A selector collision changes the filter cookie, not syscall ownership.
+     * Ordinary directory cursors and filesystem metadata still need their
+     * filesystem adapter, including after the pre-sandbox all-FD selector. */
+    int filesystem=!file && (nr==SYS_lseek || nr==SYS_getdents64 || nr==SYS_fstatfs);
     if (nr==SYS_mmap) {
         md_proc_file_release(file);
         memory_begin(t,&regs,MEMORY_KERNEL); return;
@@ -3934,13 +3938,13 @@ static void proc_lookup_start(struct thread *t) {
                 : spec.writing ? MD_PROC_FILE_WRITE : MD_PROC_FILE_READ);
         if (error) { md_proc_file_release(file); return_value(t,&regs,error); return; }
         t->proc_file=file;
-    } else if (nr!=SYS_read && nr!=SYS_readv && nr!=SYS_ioctl && nr!=SYS_splice && nr!=SYS_tee && nr!=SYS_sendfile) {
+    } else if (!filesystem && nr!=SYS_read && nr!=SYS_readv && nr!=SYS_ioctl && nr!=SYS_splice && nr!=SYS_tee && nr!=SYS_sendfile) {
         resume(t->pid,0); return;
     }
     t->watch_wait=0;
     if (!tracee_request(t,PTRACE_GETSIGMASK,(void *)sizeof(t->mask),&t->mask,"proc-lookup-mask")
             || !shield(t) || !skip(t->pid)) return;
-    if (file) {
+    if (file || filesystem) {
         calls++; t->calls++; t->debug_step_call=md_debugger_step(debugger,t->pid);
         dispatch_with_stack(t);
     } else { t->phase=WATCH_CANCEL; resume(t->pid,0); }

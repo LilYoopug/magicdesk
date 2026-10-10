@@ -173,6 +173,9 @@ Current executable metadata and watches use a captured store-object identity;
 the worker opens and releases its own target even after unlink. Mapped and native
 RPC requests share this operand contract. Stateful operations still require the
 actual open file description, not an inode or pathname substitute.
+Process proc directories, `status` and `stat` retain their native watch targets
+even when their displayed contents are virtualized. Target capture uses caller
+authority and requires no free application descriptor slot.
 Xattr and POSIX ACL requests use bounded byte values in the shared mapping,
 not guest memfds or returned data FDs. The worker captures input bytes before
 execution and owns target selection, permission checks and copy-up.
