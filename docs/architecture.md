@@ -22,6 +22,10 @@ behavior, static verification and remaining device coverage.
   and embedded X11/Wayland sessions. [Linux audio](audio.md) has independent
   launch leases, executor-side socket admission and an app-UID PipeWire/AAudio
   service; it is not owned by a renderer or Desktop.
+  `LinuxLaunchServices` also retains [Shroot gamepad input](gamepads.md): Android
+  hosts supply focus and events, while native guest providers own Linux device
+  semantics. Neither input-device discovery nor force feedback belongs to X11
+  or Wayland protocol code.
   MCP is an authorized adapter to these services, not their lifetime owner.
   `hosted-runtime` contains the shared process-context adapter and retained-server
   lifecycle used by X11 and the [Wayland runtime](wayland.md).

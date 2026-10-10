@@ -13,6 +13,8 @@ enum { MD_FS_ORIGIN_MAX_RIGHTS=1+MD_FD_RECEIPT_MAX*(MD_INODE_CUSTODY_FDS+MD_MOUN
 struct md_fs_origin_parcel { unsigned count; int *fd; };
 void md_fs_origin_parcel_close(struct md_fs_origin_parcel *);
 int md_fs_origin_export(const struct md_fd_message *, struct md_fs_origin_parcel *);
+/* Includes the retained view, not just the selected inode's backing file. */
+int md_fs_anchor_portable(const struct md_fs_anchor *);
 /* A typed custody envelope can select only the filesystem entries while
  * preserving the authenticated route and original application indices. */
 int md_fs_origin_export_entries(const struct md_fd_message *, struct md_fd_object *const *, struct md_fs_origin_parcel *);

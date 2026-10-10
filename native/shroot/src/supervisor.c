@@ -3,6 +3,8 @@
 #include "event_wait.h"
 #include "fs_rpc.h"
 #include "fs_worker.h"
+#include "input_session.h"
+#include "device_events.h"
 #include "mount_copy_service.h"
 #include "mount_policy.h"
 #include "fs_engine.h"
@@ -217,6 +219,8 @@ struct thread {
     unsigned buffer_descriptor_operation;
     unsigned long buffer_descriptor_argument;
     int proc_waiting;
+    struct md_control_pending *control_pending;
+    size_t control_size;
     struct md_fd_return buffer_return;
     int buffer_return_waiting;
     int buffer_delivered;
@@ -502,6 +506,7 @@ static void outgoing_release(struct outgoing_owner *owner) {
     md_received_fds_release(owner->prepared); free(owner);
 }
 static void adapter_discard(struct thread *t) {
+    if (t->control_pending) { t->control_pending->dispose(t->control_pending); t->control_pending=NULL; }
     if (t->proc_lookup.table) CHECK(!md_fd_order_cancel(&t->proc_lookup));
     if (t->buffer_descriptor_order.table) CHECK(!md_fd_order_cancel(&t->buffer_descriptor_order));
     t->buffer_descriptor_operation=0;
@@ -1226,7 +1231,10 @@ static int proc_node_metadata(struct thread *t, const struct md_proc_metadata_re
     enum md_proc_file_kind kind;
     if (q->kind==MD_PROC_FD || q->kind==MD_PROC_CWD || q->kind==MD_PROC_EXE) {
         struct thread *owner=find_thread(q->process);
-        if (!owner || !owner->born) return -ENOENT;
+        /* Unmanaged processes still have real proc entries. The caller's
+         * native capture enforces Android access, just like status/stat. */
+        if (!owner) return -EXDEV;
+        if (!owner->born) return -ENOENT;
         if (owner!=t && !debugger_allowed(t->pid,owner->pid)) return -EACCES;
         /* Authorization precedes native capture. Typed descriptors retain their
          * provider metadata; their carrier must never become the stat result. */
@@ -1317,8 +1325,15 @@ static int proc_file_publish(struct thread *t, const struct seccomp_notif *q,
     return error;
 }
 static struct md_fd_object *control_file_create(const struct md_control_file_ops *ops,void *context,
-        const struct md_identity *id,int flags) {
-    return md_proc_file_object(md_proc_file_open_control(ops,context,id,flags));
+        const struct md_identity *id,int flags,int *descriptor) {
+    struct md_proc_file *file=md_proc_file_open_control(ops,context,id,flags);
+    if (!file) return NULL;
+    if (ops->descriptor && !(flags&O_PATH)) {
+        int fd=md_proc_file_descriptor(file);
+        if (fd<0) { md_proc_file_release(file); errno=-fd; return NULL; }
+        *descriptor=fd;
+    }
+    return md_proc_file_object(file);
 }
 static int control_file_query(struct md_fd_object *object,unsigned operation,struct md_control_file *out) {
     struct md_proc_file *file=md_proc_file_from_object(object);
@@ -1563,8 +1578,7 @@ static void handle_notification(const struct seccomp_notif *request) {
     CHECK(mapped>=0);
     if (mapped) return;
     struct seccomp_notif q = *request;
-    CHECK(q.data.nr == SYS_fstat || q.data.nr == SYS_openat || q.data.nr == SYS_newfstatat
-        || q.data.nr == SYS_getdents64 || q.data.nr == SYS_prctl || q.data.nr == SYS_gettid);
+    CHECK(md_broker_filesystem_call(q.data.nr) || q.data.nr==SYS_prctl || q.data.nr==SYS_gettid);
     struct thread *t = find_thread((pid_t)q.pid);
     CHECK(t && t->born);
     /* A restarted notification can precede the cancelled carrier's queue
@@ -1668,6 +1682,10 @@ static void handle_notification(const struct seccomp_notif *request) {
         CHECK(t->phase == IDLE);
         if (!md_domain_restricted(t->resources.fs)) {
             delegate_begin(t, &q); return;
+        }
+        if (q.data.nr==SYS_readlinkat) {
+            struct seccomp_notif_resp reply={.id=q.id,.error=md_domain_path_error(t->resources.fs)};
+            CHECK(!ioctl(listener,SECCOMP_IOCTL_NOTIF_SEND,&reply) || errno==ENOENT); return;
         }
         if ((int)q.data.args[0] < 0) {
             struct seccomp_notif_resp reply = {.id = q.id,
@@ -1776,12 +1794,7 @@ static pid_t debugger_native_pid(pid_t observer,pid_t visible) {
 static int debugger_allowed(pid_t caller, pid_t pid) {
     struct thread *from=find_thread(caller), *to=find_thread(pid);
     if (!from || !to || md_domain_restricted(from->resources.fs)) return 0;
-    return from->identity.uid.effective==to->identity.uid.real
-        && from->identity.uid.effective==to->identity.uid.effective
-        && from->identity.uid.effective==to->identity.uid.saved
-        && from->identity.gid.effective==to->identity.gid.real
-        && from->identity.gid.effective==to->identity.gid.effective
-        && from->identity.gid.effective==to->identity.gid.saved;
+    return md_identity_may_inspect(&from->identity,&to->identity);
 }
 static void debugger_complete(pid_t pid, struct user_pt_regs *regs, long value) {
     struct thread *t=find_thread(pid);
@@ -1796,11 +1809,15 @@ static int debugger_attachable(pid_t caller, pid_t pid) {
     struct iovec local={&byte,1}, remote={(void *)t->process_image,1};
     return process_vm_readv(pid,&local,1,&remote,1,0)==1;
 }
+static int birth_stop_pending(const struct thread *t) {
+    /* The initial leader is seized while running, not auto-attached by clone. */
+    return t->pid!=leader && t->born && !t->initial_stop;
+}
 static int debugger_interrupt(pid_t pid) {
     struct thread *t=find_thread(pid);
     if (!t) return -ESRCH;
     /* An owned stop already queued by clone is itself the interruption boundary. */
-    if (t->kernel_stopped || (pid!=leader && t->born && !t->initial_stop)) return 0;
+    if (t->kernel_stopped || birth_stop_pending(t)) return 0;
     if (native_trace(PTRACE_INTERRUPT,pid,NULL,NULL)) return -errno;
     t->interrupt_pending=1; return 0;
 }
@@ -2400,7 +2417,27 @@ static void buffer_reply_signal(struct thread *t, long result, const siginfo_t *
 static void buffer_reply(struct thread *t, long result) {
     buffer_reply_signal(t,result,NULL);
 }
+static void control_progress(struct thread *t) {
+    struct md_control_pending *pending=t->control_pending;
+    if (!pending) return;
+    struct md_buffer_span span;
+    long result=md_buffer_span(&t->buffer,&span);
+    if (!result && t->control_size>span.size) result=-EOVERFLOW;
+    if (!result) result=pending->resume(pending,span.data,t->control_size);
+    if (result==-EINPROGRESS && md_event_now()<pending->deadline) return;
+    if (result==-EINPROGRESS) result=-ETIMEDOUT;
+    t->control_pending=NULL; pending->dispose(pending);
+    buffer_reply(t,result);
+}
 static void proc_io_progress(struct thread *t) {
+    if (t->proc_waiting==2) {
+        struct md_control_file file=md_proc_file_control(t->proc_file);
+        if (!file.ops->readable(file.context)) return;
+        int result=md_proc_file_io_begin(&t->proc_io,t->proc_file,MD_PROC_FILE_READ,
+            0,0,0,t->buffer_registers.regs[1],fd_wakeup);
+        if (result<0) { t->proc_waiting=0; buffer_reply(t,result); return; }
+        t->proc_waiting=1;
+    }
     if (!t->proc_waiting || md_resource_order_state(&t->proc_io.turn)!=MD_RESOURCE_ORDER_READY) return;
     struct md_buffer_span span;
     long result=md_buffer_span(&t->buffer,&span);
@@ -2411,6 +2448,15 @@ static void proc_io_progress(struct thread *t) {
             md_debugger_owner(debugger,owner.pid));
         t->proc_io.actor=(struct md_control_actor){t->pid,&t->identity,&t->resources};
         result=md_proc_file_io_execute(&t->proc_io,&t->identity,t->resources.uts,span.data,span.size,(size_t)getpagesize());
+    }
+    struct md_control_file file=md_proc_file_control(t->proc_file);
+    if (result==-EAGAIN && t->proc_io.operation==MD_PROC_FILE_READ && !t->proc_io.positional
+            && !(md_proc_file_flags(t->proc_file)&O_NONBLOCK) && file.ops && file.ops->readable) {
+        CHECK(!md_proc_file_io_cancel(&t->proc_io));
+        /* EVENT_WAIT: provider publishes readable/terminal state and signals
+         * fd_ready. Exit or signal cancels this retained OFD, not a reused FD.
+         * No file-table or IO turn is held while waiting for input. */
+        t->proc_waiting=2; return;
     }
     if (result>=0) CHECK(!md_proc_file_io_offer(&t->proc_io));
     else CHECK(!md_proc_file_io_cancel(&t->proc_io));
@@ -2943,8 +2989,10 @@ static void buffer_descriptor_start(struct thread *t) {
     if (!result && network) {
         unsigned long args[6]; for (unsigned i=0;i<6;++i) args[i]=t->original.regs[i];
         struct md_network_target resolver={.context=t,.resolve=network_namespace_capture};
-        result=md_network_socket_call(object,&t->identity,nr,args,span.data,span.size,
-            t->buffer_descriptor_argument,visible_pid(t,t->tgid),&resolver);
+        result=md_device_events_is(object)
+            ? md_device_events_call(object,nr,args,span.data,span.size,t->buffer_descriptor_argument,visible_pid(t,t->tgid))
+            : md_network_socket_call(object,&t->identity,nr,args,span.data,span.size,
+                t->buffer_descriptor_argument,visible_pid(t,t->tgid),&resolver);
     } else if (!result) {
         if (!md_descriptor_inode_is(object)) result=-EBADF;
         else if (nr==SYS_fchown || nr==SYS_fchownat) {
@@ -2986,6 +3034,7 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
             && r->regs[0]!=MD_BUFFER_PROC_RIGHTS && r->regs[0]!=MD_BUFFER_PROC_META && r->regs[0]!=MD_FS_BUFFER_RIGHTS_READY
             && r->regs[0]!=MD_FS_BUFFER_RIGHTS_DONE && r->regs[0]!=MD_FS_BUFFER_CHANNEL_OBSERVED
             && r->regs[0]!=MD_BUFFER_PID_NUMBER && r->regs[0]!=MD_BUFFER_DESCRIPTOR_META
+            && r->regs[0]!=MD_BUFFER_CONTROL_IOCTL_SPEC && r->regs[0]!=MD_BUFFER_CONTROL_IOCTL
             && r->regs[0]!=MD_BUFFER_NETWORK_OPEN && r->regs[0]!=MD_BUFFER_NETWORK_CALL && r->regs[0]!=MD_BUFFER_NETWORK_DATA
             && r->regs[0]!=MD_FS_BUFFER_RIGHTS_BEGIN) {
         buffer_reply(t,-ENOTSUP); return;
@@ -3213,8 +3262,11 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
         struct md_buffer_span span;
         result=md_buffer_span(&t->buffer,&span);
         if (result) break;
-        result=md_network_socket_open(t->resources.network,(int)t->original.regs[0],
-            (int)t->original.regs[1],(int)t->original.regs[2],&t->buffer_open.object,&t->buffer_open.fd);
+        struct md_device_events *events=md_fs_worker_device_events(filesystem);
+        result=events && t->original.regs[0]==AF_NETLINK && t->original.regs[2]==NETLINK_KOBJECT_UEVENT
+            ? md_device_events_socket(events,(int)t->original.regs[1],&t->buffer_open.object,&t->buffer_open.fd)
+            : md_network_socket_open(t->resources.network,(int)t->original.regs[0],
+                (int)t->original.regs[1],(int)t->original.regs[2],&t->buffer_open.object,&t->buffer_open.fd);
         if (!result) {
             t->buffer_open.flags=t->original.regs[1]&SOCK_CLOEXEC;
             ((struct md_fs_buffer_frame *)span.data)->transfer=MD_FS_BUFFER_RIGHTS;
@@ -3249,6 +3301,36 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
     case MD_BUFFER_PROC_CHECK:
         if (t->phase!=DISPATCHING || r->regs[1] || r->regs[2]) break;
         result=t->proc_file ? md_proc_file_kind(t->proc_file)+1 : 0; break;
+    case MD_BUFFER_CONTROL_IOCTL_SPEC: case MD_BUFFER_CONTROL_IOCTL: {
+        if (t->phase!=DISPATCHING || !t->proc_file || t->original.regs[8]!=SYS_ioctl
+                || r->regs[1] || r->regs[2]) break;
+        struct md_control_file file=md_proc_file_control(t->proc_file);
+        if (!file.ops || !file.ops->ioctl_spec || (!file.ops->ioctl && !file.ops->ioctl_async)) { result=-ENOTTY; break; }
+        struct md_control_ioctl spec={0};
+        unsigned command=(unsigned)t->original.regs[1];
+        result=file.ops->ioctl_spec(file.context,command,&spec);
+        if (result) break;
+        if (spec.size>MD_CONTROL_IOCTL_MAX || spec.direction&~(MD_CONTROL_IN|MD_CONTROL_OUT|MD_CONTROL_STRING)) { result=-EOVERFLOW; break; }
+        if (r->regs[0]==MD_BUFFER_CONTROL_IOCTL_SPEC) {
+            result=(long)((uint64_t)spec.size|((uint64_t)spec.direction<<32)); break;
+        }
+        struct md_buffer_span span;
+        result=md_buffer_span(&t->buffer,&span);
+        if (!result && spec.size>span.size) result=-EOVERFLOW;
+        struct md_control_actor actor={t->pid,&t->identity,&t->resources};
+        if (!result) result=file.ops->ioctl_async
+            ? file.ops->ioctl_async(file.context,&actor,command,t->original.regs[2],span.data,spec.size,&t->control_pending)
+            : file.ops->ioctl(file.context,&actor,command,t->original.regs[2],span.data,spec.size);
+        if (t->control_pending) {
+            if (result==-EINPROGRESS) {
+                /* EVENT_WAIT: device-provider completion or request deadline;
+                 * no file-table/OFD turn is held across a userspace reply. */
+                t->control_size=spec.size; return;
+            }
+            t->control_pending->dispose(t->control_pending); t->control_pending=NULL;
+        }
+        break;
+    }
     case MD_BUFFER_PROC_IO: {
         if (t->phase!=DISPATCHING || !t->proc_file || !t->buffer.pool
                 || t->proc_io.file || r->regs[2]) break;
@@ -3373,6 +3455,7 @@ static void fd_progress(void) {
             if (!t->fd_running && (md_fd_order_state(&t->fd_order)==MD_RESOURCE_ORDER_READY
                     || md_fs_order_state(&t->fs_order)==MD_RESOURCE_ORDER_READY)) fd_start(t);
             export_progress(t);
+            control_progress(t);
             proc_io_progress(t);
             proc_lookup_start(t);
         }
@@ -3574,8 +3657,11 @@ static int domain_call(struct thread *t, struct user_pt_regs *r, unsigned long c
     if (t->ready && t->phase==IDLE) {
         struct md_fd_object *object=network_descriptor_call(nr)
             ? md_fd_origins_object(t->resources.files,(int)r->regs[0],NULL) : NULL;
-        int control=md_network_socket_control(object) || md_network_endpoint_is(object); md_fd_object_release(object);
-        if (control || (nr==SYS_socket && md_network_namespace_managed(t->resources.network))) {
+        int control=md_network_socket_control(object) || md_network_endpoint_is(object) || md_device_events_is(object);
+        md_fd_object_release(object);
+        int devices=nr==SYS_socket && r->regs[0]==AF_NETLINK && r->regs[2]==NETLINK_KOBJECT_UEVENT
+            && md_fs_worker_device_events(filesystem);
+        if (control || devices || (nr==SYS_socket && md_network_namespace_managed(t->resources.network))) {
             t->original=*r;
             if (tracee_request(t,PTRACE_GETSIGMASK,(void *)sizeof(t->mask),&t->mask,"network-call-mask")
                     && shield(t) && skip(t->pid)) dispatch_with_stack(t);
@@ -3804,11 +3890,15 @@ static void dispatch(struct thread *t) {
     unsigned policy = md_domain_scoped(t->resources.fs) || md_mount_namespace_managed_paths(t->resources.mounts)
         || t->resources.landlock;
     if (md_network_namespace_managed(t->resources.network)) policy|=MD_DISPATCH_NETWORK_SCOPED;
+    if (t->original.regs[8]==SYS_socket && t->original.regs[0]==AF_NETLINK
+            && t->original.regs[2]==NETLINK_KOBJECT_UEVENT && md_fs_worker_device_events(filesystem))
+        policy|=MD_DISPATCH_DEVICE_EVENTS;
     if (network_descriptor_call(t->original.regs[8])) {
         struct md_fd_object *object=md_fd_origins_object(t->resources.files,(int)t->original.regs[0],NULL);
         if (md_network_socket_offline(object)) policy|=MD_DISPATCH_OFFLINE_SOCKET;
         if (md_network_socket_control(object)) policy|=MD_DISPATCH_NETWORK_CONTROL;
         if (md_network_endpoint_is(object)) policy|=MD_DISPATCH_NETWORK_DATA;
+        if (md_device_events_is(object)) policy|=MD_DISPATCH_DEVICE_EVENTS;
         md_fd_object_release(object);
     }
     regs.regs[9] = policy;
@@ -4020,7 +4110,9 @@ static void proc_lookup_start(struct thread *t) {
         unsigned long args[6];
         for (unsigned i=0;i<6;++i) args[i]=regs.regs[i];
         struct md_proc_io_spec spec;
-        int namespace_ioctl=nr==SYS_ioctl && md_proc_file_namespace(md_proc_file_kind(file));
+        struct md_control_file control=md_proc_file_control(file);
+        int namespace_ioctl=nr==SYS_ioctl && (md_proc_file_namespace(md_proc_file_kind(file))
+            || (control.ops && control.ops->ioctl));
         int error=nr==SYS_fstatfs || namespace_ioctl ? 0 : md_proc_io_decode(nr,args,&spec);
         if (error && nr==SYS_ioctl) error=-ENOTTY;
         if (!error && namespace_ioctl && (md_proc_file_flags(file)&O_PATH)) error=-EBADF;
@@ -4199,7 +4291,15 @@ static pid_t wait_event(int *status, struct rusage *usage, int64_t deadline) {
             {md_fs_worker_fd(filesystem), POLLIN, 0}, {fd_ready,POLLIN,0}, {ipc_events,POLLIN,0},
             {socket_events,POLLIN,0}};
         int64_t bound = cancelling ? cancellation_deadline : deadline;
+        int64_t control_bound=INT64_MAX;
+        for (struct thread *t=threads;t;t=t->next) if (t->pid && t->control_pending)
+            if (t->control_pending->deadline<control_bound) control_bound=t->control_pending->deadline;
+        if (control_bound<bound) bound=control_bound;
         long outcome = md_event_wait(events, 6, bound);
+        if (outcome==-ETIMEDOUT && bound==control_bound) {
+            for (struct thread *t=threads;t;t=t->next) if (t->pid) control_progress(t);
+            continue;
+        }
         if (outcome == -ETIMEDOUT && cancelling == 1) {
             /* EVENT_WAIT: graceful cancellation expired; drain killed children
              * for at most ten seconds before reporting incomplete cleanup. */
@@ -4233,8 +4333,8 @@ struct memory_execution {
     int complete;
     struct md_task_helper_result result;
 };
-static int memory_participant(void *context,pid_t pid,int stopped) {
-    return md_task_quiesce_add(context,pid,stopped,PTRACE_CONT);
+static int memory_participant(void *context,pid_t pid,int stopped,int request) {
+    return md_task_quiesce_add(context,pid,stopped,request);
 }
 /* No normal continuation or callback may run while writers are stopped.
  * The only runnable tasks belong to this request's existing mapping helper. */
@@ -4324,9 +4424,9 @@ static long memory_repair(struct thread *t,const struct user_pt_regs *returned) 
             /* The kernel holds a vfork parent until its child's exec/exit.
              * TRACEVFORKDONE then stops it before any user memory access. */
             peer==t || peer->kernel_stopped || peer->listening || peer->vfork_child,
-            /* An earlier interrupt belongs to the syscall/debugger owner.
-             * Defer that stop instead of consuming it as our own pause. */
-            peer->interrupt_pending ? 0 : peer->kernel_resume));
+            /* Earlier interrupts and pending birth stops retain their owner.
+             * Neither is a barrier pause that we may resume ourselves. */
+            peer->interrupt_pending || birth_stop_pending(peer) ? 0 : peer->kernel_resume));
     CHECK(!md_task_helpers_visit(helpers,memory_participant,memory_barrier));
     CHECK(!md_task_quiesce_stop(memory_barrier));
     while (!md_task_quiesce_ready(memory_barrier)) {
@@ -4474,6 +4574,10 @@ int main(int argc, char **argv) {
         network_mode=MD_NETWORK_ROUTED; argument+=2;
     }
     unsigned attachment_count = 0;
+    const char *gamepad_endpoint=NULL;
+    if (argument<argc && !strcmp(argv[argument],"--gamepad-endpoint")) {
+        CHECK(argument+2<argc && *argv[argument+1]); gamepad_endpoint=argv[argument+1]; argument+=2;
+    }
     while (argument < argc && (!strcmp(argv[argument], "--bind") || !strcmp(argv[argument], "--bind-ro"))) {
         CHECK(argument+2 < argc && attachment_count < MD_FS_MOUNTS_MAX);
         attachments[attachment_count++] = (struct md_fs_attachment){
@@ -4567,7 +4671,8 @@ int main(int argc, char **argv) {
          * uses zero; creation requests already contain the guest's masked mode. */
         umask(0);
         CHECK(!md_task_registry_publish(tasks, leader, leader, &thread(leader)->identity, NULL));
-        int startup = md_fs_worker_start(store, endpoint, admitted_path, tasks, fd_exchanges, attachments, attachment_count, statistics != NULL, &inherited_ipc, &filesystem);
+        struct md_input_launch input={.endpoint=gamepad_endpoint,.wake_fd=fd_ready};
+        int startup = md_fs_worker_start(store, endpoint, admitted_path, tasks, fd_exchanges, attachments, attachment_count, statistics != NULL, &inherited_ipc, &input, &filesystem);
         md_ipc_inherited_release(&inherited_ipc);
         if (startup) errno = -startup;
         CHECK(!startup);
@@ -4719,7 +4824,8 @@ int main(int argc, char **argv) {
             ipc_unwatch(t);
             CHECK(!md_ipc_cancel(md_ipc_namespace_active(t->resources.ipc),&t->ipc_pending)); t->ipc_cancel=t->ipc_waking=0;
             md_ipc_transport_close(&t->ipc_transport);
-            md_memory_release(t->memory); t->memory = md_memory_new(); CHECK(t->memory);
+            struct md_interception_memory *memory=md_memory_new_image(t->memory); CHECK(memory);
+            md_memory_release(t->memory); t->memory=memory;
             t->memory_access_pending=0;
             t->phase = IDLE; t->stack = 0; t->ready = 0; t->resume_lost = 0; t->terminal_stop=0; images++;
             t->mapped_image = 0; t->entered = 0;
@@ -4908,16 +5014,10 @@ int main(int argc, char **argv) {
                 memory_begin(t,&regs,MEMORY_KERNEL); continue;
             }
             if (descriptor_call(t, &regs, cookie)) continue;
-            if (cookie==MD_INTERCEPT_PROC) {
+            /* Stacked selectors survive close/reuse and fork/exec. The newest
+             * filter's cookie is not the type of the current description. */
+            if (cookie==MD_INTERCEPT_PROC || cookie==MD_INTERCEPT_WATCH) {
                 proc_lookup_begin(t,&regs); continue;
-            }
-            if (cookie == MD_INTERCEPT_WATCH) {
-                CHECK(t->ready && t->phase == IDLE);
-                t->original = regs;
-                t->watch_wait = 0;
-                if (!tracee_request(t, PTRACE_GETSIGMASK, (void *)sizeof(t->mask), &t->mask, "watch-mask")
-                        || !shield(t) || !skip(pid)) continue;
-                t->phase = WATCH_CANCEL; resume(pid, 0); continue;
             }
             if (cookie == MD_INTERCEPT_NATIVE) {
                 if (t->phase==IDLE && md_debugger_step(debugger,pid)) {
@@ -5295,6 +5395,7 @@ int main(int argc, char **argv) {
                 CHECK((long)regs.regs[0] > 0 && !(regs.regs[0] & (md_page_size - 1)));
                 t->stack = regs.regs[0]; CHECK(!md_memory_stack_add(t->memory, t->stack)); dispatch(t);
             } else if (regs.pc == DONE && t->phase == DISPATCHING) {
+                CHECK(!t->control_pending);
                 CHECK(!md_proc_file_io_cancel(&t->proc_io));
                 md_proc_file_release(t->proc_file); t->proc_file=NULL; t->proc_waiting=0;
                 long value = regs.regs[0];

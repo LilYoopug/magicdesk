@@ -13,6 +13,7 @@ void md_mount_source_close(struct md_mount_source *s) {
     md_devpts_release(s->devpts);
     md_cgroup_release(s->cgroup);
     md_sysfs_release(s->sysfs);
+    md_provider_tree_release(s->provider);
     md_ipc_namespace_release(s->ipc);
     *s=(struct md_mount_source){.fd=-1};
 }

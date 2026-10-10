@@ -77,11 +77,21 @@ echo MD_STEAMOS_NETWORK_OK
         if args.socket_owner:
             checks += (('tcp-owner-discovery', '''
 python - <<'PY'
+import ctypes
 import os
 import socket
 import subprocess
 import sys
 import time
+
+# Desktop launchers inherit both proc and inotify selectors. lsof must see
+# real process metadata even when its FD number has both filter histories.
+with open('/proc/self/stat', 'rb') as stream:
+    assert stream.read()
+libc = ctypes.CDLL(None, use_errno=True)
+watch = libc.inotify_init1(os.O_CLOEXEC)
+assert watch >= 0, ctypes.get_errno()
+os.close(watch)
 
 def owners(port, expected):
     started = time.monotonic()

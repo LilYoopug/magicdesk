@@ -161,34 +161,34 @@ bool mdw_server_shell_output(MdwServer *server, int width, int height) {
         mdw_toplevels_clear(server);
         struct wlr_output *output = server->shell_output;
         server->shell_output = NULL;
-        bool restored = mdw_initial_output_refresh(server);
-        if (output) wlr_output_destroy(output);
-        return restored;
+        mdw_monitor_release(server, output);
+        return true;
     }
     if (width < 1 || height < 1 || width > 16384 || height > 16384 || !server->events.shell)
         return false;
     const bool creating = !server->shell_output;
     if (creating) {
-        server->shell_output = wlr_headless_add_output(server->backend, width, height);
+        server->shell_output = mdw_monitor_acquire(server, width, height);
         if (!server->shell_output) return false;
-        wlr_output_set_name(server->shell_output, "MagicDesk");
+        if (!server->shell_output->global) wlr_output_set_name(server->shell_output, "MagicDesk");
         wlr_output_set_description(server->shell_output, "MagicDesk workspace");
     }
     struct wlr_output_state state;
     wlr_output_state_init(&state);
     wlr_output_state_set_enabled(&state, true);
+    wlr_output_state_set_scale(&state, 1);
     wlr_output_state_set_custom_mode(&state, width, height, 60000);
     bool committed = wlr_output_commit_state(server->shell_output, &state);
     wlr_output_state_finish(&state);
     if (!committed) {
         if (creating) {
-            wlr_output_destroy(server->shell_output);
+            mdw_monitor_release(server, server->shell_output);
             server->shell_output = NULL;
         }
         return false;
     }
     if (!wlr_output_layout_add(server->output_layout, server->shell_output, 0, 0) ||
-            !mdw_toplevels_prepare(server) || !mdw_initial_output_refresh(server)) {
+            !mdw_toplevels_prepare(server)) {
         mdw_server_shell_output(server, 0, 0);
         return false;
     }

@@ -222,8 +222,19 @@ static int mount_slot(const struct md_mount_namespace *view, const struct md_vie
     for (unsigned i=0;i<count;++i) if (view->tree && m==&view->tree->mounts[i]) return (int)i+1;
     return -ESTALE;
 }
+static int mount_portable(const struct md_view_mount *m) {
+    return !m->devpts && !m->cgroup && !m->sysfs && !m->provider && !m->ipc_namespace && !m->file.ops;
+}
+int md_mount_graph_portable(const struct md_mount_namespace *view) {
+    if (!view) return 1;
+    if (!mount_portable(&view->base)) return 0;
+    if (view->tree) for (unsigned i=0;i<view->tree->count;++i)
+        if (view->tree->mounts[i].id && !mount_portable(&view->tree->mounts[i])) return 0;
+    return 1;
+}
 static int describe(struct md_mount_namespace *view, const struct md_mount_layout *l, struct manifest *out,
         int fds[MD_MOUNT_GRAPH_PLACEMENT_FDS], struct md_inode_lifetime **owners) {
+    if (!mount_portable(l->base)) return -EOPNOTSUPP;
     const struct md_view_mount *entries=l->entries;
     unsigned count=l->count;
     *out=(struct manifest){.magic=MAGIC,.version=VERSION,
@@ -265,7 +276,7 @@ static int describe(struct md_mount_namespace *view, const struct md_mount_layou
         e->generation=m->generation;
         if (!m->id) { e->flags=DETACHED|RETIRED; continue; }
         /* A private device view cannot be flattened into a native attachment. */
-        if (m->devpts || m->cgroup || m->sysfs || m->ipc_namespace || m->file.ops) return -EOPNOTSUPP;
+        if (!mount_portable(m)) return -EOPNOTSUPP;
         e->descriptor=next; next+=3;
         if (m->storage) {
             if (!md_view_inode(m)) return -EINVAL;

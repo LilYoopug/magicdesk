@@ -8,6 +8,14 @@ Android 14 / API 34 and managed Desktop remains Android 15 / API 35; neither
 acquires Shroot's kernel requirements. Shell tools, Termux, prepared chroot and
 graphics services remain independent when guest execution is unavailable.
 
+The optional gamepad bus uses baseline Unix stream/datagram socketpairs,
+eventfd, poll/epoll, SCM credentials and the existing typed descriptor transport.
+Evdev/joydev/uinput and udev discovery are guest providers; no native uinput
+permission, input-driver module, device-node creation or global kernel uevent
+subscription is required. The exported input ioctls predate 5.15. Unsupported
+device classes fail explicitly. `test_input_devices`, `test_input_uinput`,
+`fs_dispatch --input` and the guest/SDL fixtures cover these boundaries.
+
 Admission uses actual operations under the selected executor identity, not an
 Android-version inference or `uname`-only capability check. Kernel configuration,
 SELinux, application filters and vendor backports affect availability. Headers
@@ -25,7 +33,11 @@ minimum. See [filesystem restrictions](../../docs/shroot.md#filesystem-restricti
 for provider limits and the difference from native security confinement.
 
 The baseline includes pidfds, selective ptrace, seccomp notifications,
-`openat2`, `faccessat2`, `close_range` and shared/sealed memfds. In particular,
+`openat2`, `faccessat2`, `close_range` and shared/sealed memfds. The native read
+provider uses `openat2(RESOLVE_NO_SYMLINKS, O_PATH|O_NOFOLLOW)` to pin admitted
+task-independent paths. A missing or denied operation retains task-affine
+dispatch; self aliases and private proc views do not use this optimization.
+These flags predate the 5.15 baseline. In particular,
 atomic `SECCOMP_ADDFD_FLAG_SEND` is a required FD-publication primitive, available
 since Linux 5.14. Separate ADDFD and reply calls are not an equivalent fallback:
 cancellation between them can leave an installed descriptor without a confirmed

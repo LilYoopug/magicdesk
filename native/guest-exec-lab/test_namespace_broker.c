@@ -2,6 +2,8 @@
 #include "namespace_broker.h"
 #include "fs_mounts.h"
 #include "task_resources.h"
+#include "fs_native.h"
+#include "inode_internal.h"
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -142,7 +144,7 @@ static void run(const char *store,const char *native,int directory,int cancel) {
     char endpoint[80]; snprintf(endpoint,sizeof(endpoint),"md-dir-broker-%d-%d",parent,child);
     struct md_fs_attachment attachment={.source=native,.target="/native"};
     assert(!md_fs_worker_start(store,endpoint,NULL,tasks,NULL,native ? &attachment : NULL,
-        native ? 1 : 0,0,NULL,&worker));
+        native ? 1 : 0,0,NULL,NULL,&worker));
     struct md_task_resources resources={.fs=md_domain_new(),.files=md_fd_origins_new(),
         .mounts=md_fs_worker_mounts(worker)};
     assert(resources.fs && resources.files);
@@ -165,6 +167,83 @@ static void run(const char *store,const char *native,int directory,int cancel) {
     assert(WIFEXITED(status) && !WEXITSTATUS(status));
     printf("PASS broker directory publication: native=%d cancelledAfterCopy=%d faultAndPartialCopy=1 complete=96 noDescriptorLeak=1\n",native!=NULL,cancel);
 }
+static unsigned native_provider_released;
+static void native_provider_release(struct md_fd_object *object) {
+    (void)object; ++native_provider_released;
+}
+static void managed_proc_reads(const char *store) {
+    unsigned before=descriptors();
+    struct md_task_registry *tasks=md_task_registry_create(); assert(tasks);
+    struct md_task_resources resources={.fs=md_domain_new(),.files=md_fd_origins_new()};
+    assert(resources.fs && resources.files);
+    struct md_identity id=md_identity_new(1000,1000);
+    assert(!md_task_registry_publish(tasks,getpid(),getpid(),&id,&resources));
+    struct md_task_snapshot actor={.tid=getpid()+100000,.tgid=getpid()+100000,
+        .identity=id,.fs=resources.fs};
+    struct md_inode_store *s=NULL; assert(!md_inode_store_open(store,0,&s));
+    struct md_filesystem fs={.store=s,.actor=&actor,.tasks=tasks};
+    int sockets[2]; assert(!socketpair(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0,sockets));
+    char path[96],data[256],expected[256];
+    snprintf(path,sizeof(path),"/proc/%d/fd/%d",getpid(),sockets[0]);
+    ssize_t length=readlink(path,expected,sizeof(expected)); assert(length>0);
+    struct stat native; assert(!fstat(sockets[0],&native));
+    struct md_inode_boundary boundary={.path=path,.capacity=sizeof(path)};
+    struct md_fs_output output={.data=data,.capacity=sizeof(data)};
+    struct md_fd_order busy={0};
+    const struct md_fd_object_type provider={.destroy=native_provider_release};
+    struct md_fd_object typed;
+    md_fd_object_init(&typed,&provider);
+    int dumpable=prctl(PR_GET_DUMPABLE); assert(dumpable>=0);
+    assert(!prctl(PR_SET_DUMPABLE,1));
+    for (unsigned scenario=0;scenario<7;++scenario) {
+        if (scenario==1) {
+            assert(md_fd_order_begin(resources.files,&busy,NULL)==1);
+            assert(!md_fd_order_start(&busy));
+        }
+        if (scenario==2) actor.identity.uid.effective=1001;
+        if (scenario==3) {
+            struct md_fd_origin_update update;
+            assert(!md_fd_origins_prepare_object(resources.files,&typed,0,&update));
+            md_fd_origins_finish(&update,sockets[0]);
+        }
+        if (scenario==4) {
+            assert(!close(sockets[0]));
+            int fd=open("/dev/null",O_RDONLY|O_CLOEXEC); assert(fd>=0);
+            if (fd!=sockets[0]) { assert(dup2(fd,sockets[0])==sockets[0]); close(fd); }
+            assert(!fstat(sockets[0],&native));
+            length=readlink(path,expected,sizeof(expected)); assert(length>0);
+        }
+        if (scenario==5) {
+            /* A native service owner is authenticated in this registry but has
+             * no guest file table. Its proc observations retain kernel policy. */
+            assert(!md_task_registry_publish(tasks,getpid(),getpid(),&id,NULL));
+            actor.identity.uid.effective=1001;
+        }
+        if (scenario==6) assert(!prctl(PR_SET_DUMPABLE,0));
+        for (unsigned op=0;op<3;++op) {
+            struct md_fs_request q={.operation=op==2 ? MD_FS_READLINK : MD_FS_STAT,
+                .flags=op==1 ? AT_SYMLINK_NOFOLLOW : 0};
+            struct md_fs_result out={.fd=-1,.error=-EREMOTE};
+            md_fs_native_boundary(&fs,&boundary,&q,&out,&output);
+            if ((scenario>=1 && scenario<=3) || scenario==6) { assert(out.error==-EREMOTE); continue; }
+            assert(!out.error && !out.host_path && out.fd==-1);
+            if (op==2) assert(out.size==(size_t)length && !memcmp(data,expected,out.size));
+            else if (op==1) assert(S_ISLNK(out.info.mode));
+            else assert(out.info.inode==native.st_ino && out.info.mode==native.st_mode);
+        }
+        if (scenario==1) assert(!md_fd_order_complete(&busy));
+        if (scenario==2) actor.identity.uid.effective=1000;
+        if (scenario==3) assert(!md_fd_origins_close_range(resources.files,sockets[0],sockets[0],0));
+    }
+    assert(!prctl(PR_SET_DUMPABLE,dumpable));
+    assert(!close(sockets[0]) && !close(sockets[1]));
+    md_task_registry_destroy(tasks); md_fd_origins_release(resources.files);
+    md_domain_release(resources.fs); md_identity_release(&id);
+    md_fd_object_release(&typed); assert(native_provider_released==1);
+    md_inode_store_close(s);
+    assert(descriptors()==before);
+    puts("PASS managed proc observations: socket identity, descriptor reuse, credentials, busy table and typed provider fallback, no FD leak");
+}
 void md_test_namespace_broker(const char *root) {
     setbuf(stdout,NULL); alarm(60);
     assert(!mkdir(root,0700));
@@ -186,7 +265,11 @@ void md_test_namespace_broker(const char *root) {
     for (int cancelled=0;cancelled<2;++cancelled) {
         run(store,NULL,directory,cancelled);
         run(store,native,attached,cancelled);
+        /* A native description without a guest bind uses the same cursor
+         * publication contract, not an adapter replay after copying. */
+        run(store,NULL,attached,cancelled);
     }
-    assert(!close(directory) && !close(attached)); alarm(0);
+    assert(!close(directory) && !close(attached));
+    managed_proc_reads(store); alarm(0);
     puts("PASS broker directory notification ownership");
 }

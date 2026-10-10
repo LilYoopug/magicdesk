@@ -2027,7 +2027,7 @@ if [ "$gui" != none ] && [ "$gui" != keep ]; then
     install_audio_session
     case "$family" in
         apt) packages dbus-x11 xkb-data adwaita-icon-theme mousepad thunar xfce4-terminal \
-            libgl1-mesa-dri libegl-mesa0 libglx-mesa0 ;;
+            libgl1-mesa-dri libegl-mesa0 libglx-mesa0 libegl1 libgl1 libgles2 ;;
         apk) packages dbus dbus-x11 xkeyboard-config adwaita-icon-theme mousepad thunar xfce4-terminal \
             mesa-dri-gallium mesa-egl mesa-gl ;;
         dnf) packages dbus-daemon dbus-x11 xkeyboard-config adwaita-icon-theme mousepad Thunar xfce4-terminal \

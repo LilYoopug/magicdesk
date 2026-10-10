@@ -114,7 +114,10 @@ int md_ipc_capsules_publish(struct md_ipc_capsules *s, const struct md_ipc_bindi
         if (fds[i]<0) error=-EBADF;
         else if (origins[i]) {
             struct md_fs_anchor *anchor=md_fs_anchor_from_object(origins[i]);
-            if (anchor) error=md_fs_anchor_check_fd(anchor,fds[i]);
+            if (anchor) {
+                error=md_fs_anchor_check_fd(anchor,fds[i]);
+                if (!md_fs_anchor_portable(anchor)) local=1;
+            }
             else if (md_descriptor_inode_is(origins[i])) anonymous=1;
             else local=1;
         }

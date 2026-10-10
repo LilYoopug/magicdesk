@@ -137,11 +137,14 @@ remains explicit, without a different UID or system-policy fallback.
   Looper, without a polling timer. Startup announcements still require host-side
   UID, nonce, session and Binder validation before use.
 - Hosts borrow outputs. Releasing an output does not close its Wayland client.
-- Before accepting clients, the runtime publishes an initial logical monitor
-  with the launch context's geometry and scale. It has no renderer, swapchain,
-  frame loop or input owner. A real application or shell output replaces it;
-  releasing the last such output restores it before removing that output's
-  global, so a retained session never temporarily loses all monitors.
+- Before accepting clients, the runtime publishes a persistent primary logical
+  monitor with the launch context's geometry and scale. The first application or
+  workspace host borrows it; concurrent hosts acquire additional monitors.
+  Releasing the primary host frees its rendering allocations but retains the
+  same global and last geometry until session shutdown. Hiding a host stops its
+  frames and input without unplugging its monitor. Client discovery never relies
+  on binding a replacement global before processing removal of the last ready
+  monitor. Creating the primary monitor acquires no renderer or input owner.
   Closing a window sends `xdg_toplevel.close`; client destruction is a separate
   observation. Closing the retained session stops the server.
 - Frames cross Binder as retained HardwareBuffers and acquire fences, or sealed

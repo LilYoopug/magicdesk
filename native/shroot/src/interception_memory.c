@@ -13,7 +13,19 @@
 
 struct slot { uintptr_t top; int used; struct slot *next; };
 struct exec_range { uintptr_t first, end; };
-struct md_memory_backing { size_t references; int fd; dev_t device; ino_t inode; };
+enum { BACKING_BUCKETS = 127 };
+struct backing_pool {
+    size_t references;
+    struct md_memory_backing *buckets[BACKING_BUCKETS];
+};
+struct md_memory_backing {
+    size_t references;
+    int fd, indexed;
+    dev_t device;
+    ino_t inode;
+    struct backing_pool *pool;
+    struct md_memory_backing *next;
+};
 struct md_memory_file_range {
     uintptr_t first, end;
     uint64_t offset;
@@ -32,13 +44,34 @@ struct md_interception_memory {
     size_t file_count, file_capacity;
     struct md_private_memory_access access;
     int access_ready;
+    struct backing_pool *backings;
 };
+static unsigned backing_bucket(dev_t device, ino_t inode) {
+    return ((uint64_t)device ^ (uint64_t)inode) % BACKING_BUCKETS;
+}
+static struct backing_pool *pool_retain(struct backing_pool *p) {
+    assert(p->references<SIZE_MAX); ++p->references; return p;
+}
+static void pool_release(struct backing_pool *p) {
+    if (p && !--p->references) {
+        for (unsigned i=0;i<BACKING_BUCKETS;++i) assert(!p->buckets[i]);
+        free(p);
+    }
+}
 static struct md_memory_backing *backing_retain(struct md_memory_backing *b) {
     if (b) { assert(b->references<SIZE_MAX); ++b->references; }
     return b;
 }
 static void backing_release(struct md_memory_backing *b) {
-    if (b && !--b->references) { close(b->fd); free(b); }
+    if (b && !--b->references) {
+        struct backing_pool *p=b->pool;
+        if (b->indexed) {
+            struct md_memory_backing **slot=&p->buckets[backing_bucket(b->device,b->inode)];
+            while (*slot && *slot!=b) slot=&(*slot)->next;
+            assert(*slot==b); *slot=b->next;
+        }
+        close(b->fd); free(b); pool_release(p);
+    }
 }
 static void file_ranges_release(struct md_memory_file_range *ranges, size_t count) {
     for (size_t i=0;i<count;++i) backing_release(ranges[i].backing);
@@ -49,17 +82,27 @@ static void files_forget(struct md_interception_memory *s) {
     s->files=NULL; s->file_count=s->file_capacity=0;
 }
 
-struct md_interception_memory *md_memory_new(void) {
+static struct md_interception_memory *memory_new(struct backing_pool *pool) {
     struct md_interception_memory *s = calloc(1, sizeof(*s));
     if (s) {
         if (md_resource_queue_init(&s->mappings)) { free(s); return NULL; }
+        if (pool) s->backings=pool_retain(pool);
+        else {
+            s->backings=calloc(1,sizeof(*s->backings));
+            if (!s->backings) { md_resource_queue_destroy(&s->mappings); free(s); return NULL; }
+            s->backings->references=1;
+        }
         s->references=1;
     }
     return s;
 }
+struct md_interception_memory *md_memory_new(void) { return memory_new(NULL); }
+struct md_interception_memory *md_memory_new_image(struct md_interception_memory *s) {
+    return memory_new(s->backings);
+}
 struct md_interception_memory *md_memory_fork(struct md_interception_memory *s, int shared) {
     if (shared) { if (s->references==UINT_MAX) return NULL; s->references++; return s; }
-    struct md_interception_memory *copy = md_memory_new();
+    struct md_interception_memory *copy = memory_new(s->backings);
     if (!copy) return NULL;
     /* fork inherits mappings, but not other threads or active continuations. */
     for (struct slot *p = s->slots; p; p = p->next) {
@@ -92,7 +135,7 @@ void md_memory_release(struct md_interception_memory *s) {
     while (s->slots) { struct slot *next = s->slots->next; free(s->slots); s->slots = next; }
     md_buffers_release(s->buffers); md_resource_queue_destroy(&s->mappings); free(s->noexec);
     if (s->access_ready) { close(s->access.maps); close(s->access.memory); close(s->access.pagemap); }
-    file_ranges_release(s->files,s->file_count); free(s);
+    file_ranges_release(s->files,s->file_count); pool_release(s->backings); free(s);
 }
 uintptr_t md_memory_stack_take(struct md_interception_memory *s) {
     for (struct slot *p = s->slots; p; p = p->next)
@@ -267,13 +310,33 @@ int md_memory_mapping_backing(struct md_interception_memory *s, struct md_mappin
     struct stat st;
     if (fstat(fd,&st)) return -errno;
     if (!S_ISREG(st.st_mode)) return 0;
+    int flags=fcntl(fd,F_GETFL);
+    if (flags<0) return -errno;
+    if ((flags&O_PATH) || (flags&O_ACCMODE)==O_WRONLY) return 0;
     int error=files_reserve(s,4);
     if (error) return error;
+    /* Backings serve positional file reads/mappings only, never application
+     * IO offsets. The pool owns no cached reference: the final mapping or
+     * pending change removes its entry and closes the exact retained file. */
+    unsigned bucket=backing_bucket(st.st_dev,st.st_ino);
+    for (struct md_memory_backing *b=s->backings->buckets[bucket];b;b=b->next) {
+        if (b->device==st.st_dev && b->inode==st.st_ino) {
+            c->backing=backing_retain(b); c->offset=offset; return 0;
+        }
+    }
     struct md_memory_backing *b=malloc(sizeof(*b));
     if (!b) return -ENOMEM;
-    int retained=fcntl(fd,F_DUPFD_CLOEXEC,0);
+    /* A pooled source has its own read-only open description. Guest F_SETFL
+     * cannot change another address space's repair source. If native policy
+     * prevents reopening, retain the admitted description without pooling. */
+    char path[64]; snprintf(path,sizeof(path),"/proc/self/fd/%d",fd);
+    int retained=open(path,O_RDONLY|O_CLOEXEC), indexed=retained>=0;
+    if (retained<0) retained=fcntl(fd,F_DUPFD_CLOEXEC,0);
     if (retained<0) { int error=-errno; free(b); return error; }
-    *b=(struct md_memory_backing){1,retained,st.st_dev,st.st_ino};
+    *b=(struct md_memory_backing){.references=1,.fd=retained,.indexed=indexed,
+        .device=st.st_dev,.inode=st.st_ino,.pool=pool_retain(s->backings),
+        .next=s->backings->buckets[bucket]};
+    if (indexed) s->backings->buckets[bucket]=b;
     c->backing=b; c->offset=offset; return 0;
 }
 int md_memory_file_view(const struct md_interception_memory *s, uintptr_t first, size_t size,

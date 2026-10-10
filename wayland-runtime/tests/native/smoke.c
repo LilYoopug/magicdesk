@@ -23,6 +23,14 @@ int main(void) {
         assert(wlr_output_layout_get(server->output_layout, server->initial_output));
         assert(server->initial_output->width == 900 && server->initial_output->scale == 1.5);
         assert(!server->initial_output->swapchain && !server->initial_output->renderer);
+        struct wlr_output *primary = mdw_monitor_acquire(server, 100, 80);
+        struct wlr_output *secondary = mdw_monitor_acquire(server, 200, 160);
+        assert(primary == server->initial_output && secondary && secondary != primary);
+        mdw_monitor_release(server, primary);
+        assert(wlr_output_layout_get(server->output_layout, primary));
+        assert(mdw_monitor_acquire(server, 300, 240) == primary);
+        mdw_monitor_release(server, secondary);
+        mdw_monitor_release(server, primary);
         struct wl_display *client = wl_display_connect(mdw_server_socket(server));
         assert(client);
         assert(mdw_server_dispatch(server, 0) >= 0);

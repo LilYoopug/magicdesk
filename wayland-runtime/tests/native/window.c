@@ -1,5 +1,7 @@
 #define _GNU_SOURCE
-#include "wayland_server.h"
+#define WLR_USE_UNSTABLE
+#include "wayland_internal.h"
+#include <wlr/types/wlr_output.h>
 #include "xdg-shell-client-protocol.h"
 #include "text-input-unstable-v3-client-protocol.h"
 #include "linux-dmabuf-v1-client-protocol.h"
@@ -251,10 +253,8 @@ static void global(void *data, struct wl_registry *registry, uint32_t name,
 static void global_remove(void *data, struct wl_registry *registry, uint32_t name) {
     (void)registry;
     struct Client *client = data;
-    if (name == client->initial_monitor) {
-        assert(client->monitors >= 2); // Replacement is published before removal.
-        client->monitors--;
-    }
+    // The primary monitor outlives host detach/recreate and window destruction.
+    assert(name != client->initial_monitor);
 }
 static const struct wl_registry_listener registry_listener = {global, global_remove};
 
@@ -390,8 +390,9 @@ static void run_client(const char *socket) {
     xdg_wm_base_destroy(client.shell);
     wl_shm_destroy(client.shm);
     wl_compositor_destroy(client.compositor);
+    assert(wl_display_roundtrip(client.display) >= 0);
+    assert(client.monitors == 1);
     wl_registry_destroy(registry);
-    assert(wl_display_flush(client.display) >= 0);
     wl_display_disconnect(client.display);
 }
 
@@ -632,6 +633,8 @@ int main(int argc, char **argv) {
     assert(!mdw_window_close(server, host.window));
     assert(!mdw_output_resize(output, 80, 60));
     mdw_output_destroy(output);
+    assert(!server->initial_output_borrowed);
+    assert(!server->initial_output->swapchain && !server->initial_output->renderer);
     mdw_server_destroy(server);
     int status;
     assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);

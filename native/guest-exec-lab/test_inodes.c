@@ -715,6 +715,14 @@ static void reused_queries(void) {
     CHECK(!md_inode_fstat(s, fd, &st) && st.st_nlink == 0 && st.st_ino == original.st_ino);
     CHECK(statistics.query_reuses > 100 && statistics.prepare.calls == 0);
     CHECK(statistics.step.calls && statistics.transaction.calls && statistics.lock.calls);
+    CHECK(statistics.metadata_cache_hits && statistics.metadata_cache_misses);
+    /* Local mutations and native content changes invalidate different things:
+     * namespace attributes must refresh; file sizes always come from the FD. */
+    CHECK(!md_inode_import_metadata(s,next,123,456,0640));
+    CHECK(!md_inode_fstat(s,next,&st) && st.st_uid==123 && st.st_gid==456
+        && (st.st_mode&0777)==0640);
+    CHECK(!ftruncate(next,313) && !md_inode_fstat(s,next,&st) && st.st_size==313);
+    CHECK(!md_inode_import_metadata(s,next,getuid(),getgid(),0600));
     md_inode_measure(s, NULL);
     struct md_inode_statistics snapshot = statistics;
     state(s, "value", 1);
@@ -761,14 +769,14 @@ static void metadata_queries(void) {
     struct md_inode_statistics statistics = {0};
     md_inode_measure(s, &statistics);
     opened = md_inode_open(s, dir, "value", O_RDONLY, 0); CHECK(opened >= 0); close(opened);
-    /* BEGIN, directory lookup, name lookup, COMMIT; open needs no link count. */
-    CHECK(statistics.step.calls == 4);
+    /* BEGIN/version/COMMIT; warm directory/name rows require no SQL lookup. */
+    CHECK(statistics.step.calls == 3);
     uint64_t before = statistics.step.calls;
     CHECK(!md_inode_fstat(s, fd, &st) && st.st_nlink == 1);
-    CHECK(statistics.step.calls - before == 3); /* BEGIN, one metadata row, COMMIT. */
+    CHECK(statistics.step.calls - before == 3);
     before = statistics.step.calls;
     CHECK(!md_inode_stat(s, dir, "value", 0, &st) && st.st_nlink == 1);
-    CHECK(statistics.step.calls - before == 4); /* Walk already owns logical metadata. */
+    CHECK(statistics.step.calls - before == 3);
     uint64_t links = statistics.link_count_queries;
     CHECK(md_inode_getdents(s, dir, entries, sizeof(entries)) > 0);
     CHECK(md_inode_getdents(s, dir, entries, sizeof(entries)) == 0);
@@ -784,6 +792,33 @@ static void metadata_queries(void) {
     md_inode_measure(s, NULL);
     close(next); close(dir); close(fd); md_inode_store_close(writer); md_inode_store_close(s);
     puts("PASS metadata programs: minimal open/fstat queries, live FD attributes and fresh directory batches");
+}
+static void cached_path_names(void) {
+    struct md_inode_store *s=store("path-cache",1), *writer=store("path-cache",0);
+    CHECK(!md_inode_mkdir(writer,-1,"/parent",0700));
+    CHECK(!md_inode_mkdir(writer,-1,"/parent/child",0700));
+    int fd=md_inode_create(writer,-1,"/parent/child/value",0600); CHECK(fd>=0);
+    int dir=md_inode_open(s,-1,"/parent/child",O_PATH|O_DIRECTORY,0); CHECK(dir>=0);
+    char path[PATH_MAX];
+    for (unsigned i=0;i<8;++i) {
+        CHECK(!md_inode_path(s,fd,path,sizeof(path)) && !strcmp(path,"/parent/child/value"));
+        CHECK(!md_inode_path(s,dir,path,sizeof(path)) && !strcmp(path,"/parent/child"));
+    }
+    CHECK(!md_inode_rename(writer,-1,"/parent",-1,"/moved",0));
+    CHECK(!md_inode_path(s,fd,path,sizeof(path)) && !strcmp(path,"/moved/child/value"));
+    CHECK(!md_inode_path(s,dir,path,sizeof(path)) && !strcmp(path,"/moved/child"));
+    CHECK(!md_inode_rename(s,-1,"/moved/child/value",-1,"/moved/child/new",0));
+    CHECK(!md_inode_path(s,fd,path,sizeof(path)) && !strcmp(path,"/moved/child/new"));
+    CHECK(!md_inode_unlink(writer,-1,"/moved/child/new",0));
+    CHECK(!md_inode_path(s,fd,path,sizeof(path)) && !strcmp(path,"/moved/child/new (deleted)"));
+    int next=md_inode_create(writer,-1,"/moved/child/new",0600); CHECK(next>=0);
+    CHECK(!md_inode_path(s,next,path,sizeof(path)) && !strcmp(path,"/moved/child/new"));
+    CHECK(!md_inode_link(writer,-1,"/moved/child/new",-1,"/alias",0));
+    CHECK(md_inode_path(s,next,path,sizeof(path))==-ENOTSUP);
+    CHECK(!md_inode_unlink(writer,-1,"/alias",0));
+    CHECK(md_inode_path(s,next,path,sizeof(path))==-ENOTSUP);
+    close(next); close(dir); close(fd); md_inode_store_close(writer); md_inode_store_close(s);
+    puts("PASS cached path names: external parent rename, local rename, open-unlinked, reuse and hardlink ambiguity");
 }
 static void membership_queries(void) {
     struct md_inode_store *s = store("membership", 1), *writer = store("membership", 0);
@@ -883,7 +918,7 @@ int main(int argc, char **argv) {
     if (argc == 3) { CHECK(!strcmp(argv[2], "exec-child")); exec_child("exec"); return 0; }
     CHECK(mkdir(root, 0700) == 0);
     descriptors(); namespace(); contention(); multiple_stores(); across_exec(argv[0]);
-    hierarchy(); symlinks(); permissions(); kernel_reference(); scoped_paths(); reused_queries(); metadata_queries();
+    hierarchy(); symlinks(); permissions(); kernel_reference(); scoped_paths(); reused_queries(); metadata_queries(); cached_path_names();
     directory_publication(); membership_queries(); counter_audit();
     unsigned serial = 0;
     recovery(CREATE, MD_OBJECT_SYNCED, serial++);

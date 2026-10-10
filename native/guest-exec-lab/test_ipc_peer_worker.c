@@ -154,7 +154,7 @@ static struct owner owner_new(const char *store) {
     static unsigned serial;
     char endpoint[80]; snprintf(endpoint,sizeof(endpoint),"md-peer-worker-%d-%u",getpid(),++serial);
     struct owner o={0};
-    assert(!md_fs_worker_start(store,endpoint,NULL,NULL,NULL,NULL,0,0,NULL,&o.worker));
+    assert(!md_fs_worker_start(store,endpoint,NULL,NULL,NULL,NULL,0,0,NULL,NULL,&o.worker));
     /* Service-loop wakeup ownership is established after startup publication. */
     struct work mark={.operation=DECLARE}; submit(&o,&mark); finish(&o,&mark);
     unsigned before=descriptors();

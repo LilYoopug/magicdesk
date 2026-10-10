@@ -1,7 +1,6 @@
 #define _GNU_SOURCE
 #include "namespace_broker.h"
 #include "fs_engine.h"
-#include "proc_paths.h"
 #include "watch_broker.h"
 #include "task_descriptor.h"
 #include "ofd_order.h"
@@ -80,11 +79,10 @@ static int pathname(pid_t pid, uintptr_t address, char *out, size_t capacity) {
     }
     return -ENAMETOOLONG;
 }
-static int deliver_directory(void *context, const void *data, size_t size) {
-    struct operation *op = context;
+static int deliver_bytes(struct operation *op, uintptr_t pointer, const void *data, size_t size) {
     if (!valid(op)) return -ECANCELED;
     if (!size) return 0;
-    struct iovec local = {(void *)data, size}, remote = {(void *)op->notification.data.args[1], size};
+    struct iovec local = {(void *)data, size}, remote = {(void *)pointer, size};
     ssize_t n = process_vm_writev(op->notification.pid, &local, 1, &remote, 1, 0);
     /* Only a denied, untouched output may fall back to the task-affine path.
      * Partial copies and notification cancellation are terminal for this call. */
@@ -98,15 +96,6 @@ static void execute(struct operation *op,
         .directory_position=op->request.operation==MD_FS_GETDENTS ? &op->position : NULL,
         .origin=op->request.operation==MD_FS_OPEN ? &op->output_origin : NULL};
     if (valid(op)) md_fs_context_execute(&op->context, &op->request, &op->result, &output);
-    if (op->result.error == -EXDEV && op->request.operation == MD_FS_FSTAT) {
-        /* Native descriptors outside the namespace retain kernel metadata. */
-        struct stat st;
-        if (fstat(op->directory, &st)) op->result.error = -errno;
-        else {
-            memcpy(data, &st, sizeof(st));
-            op->result.size = sizeof(st); op->result.error = 0;
-        }
-    }
 }
 struct md_namespace_broker *md_broker_create(struct md_fs_worker *worker, int statistics,
         void (*delegate)(const struct seccomp_notif *)) {
@@ -160,24 +149,30 @@ static int recycle(struct md_namespace_broker *b, struct operation *op) {
 }
 static int prepare(struct md_filesystem *fs, struct operation *op, size_t capacity) {
     const struct seccomp_notif *q = &op->notification;
-    if (q->data.nr != SYS_openat && q->data.nr != SYS_newfstatat
-            && q->data.nr != SYS_fstat && q->data.nr != SYS_getdents64) return 0;
+    if (!md_broker_filesystem_call(q->data.nr)) return 0;
     /* Mutating opens retain the task-affine path, never speculative replay. */
     /* ADDFD uses fget(), which rejects O_PATH; SCM_RIGHTS preserves it. */
     if (q->data.nr == SYS_openat && (q->data.args[2] & (O_CREAT | O_TRUNC | __O_TMPFILE | O_PATH))) return 0;
     if (q->data.nr == SYS_newfstatat && (q->data.args[3] & ~(AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT))) return 0;
+    if (q->data.nr==SYS_readlinkat && !q->data.args[3]) return -EINVAL;
     op->request = (struct md_fs_request){.actor = (int)q->pid, .operation = MD_FS_FSTAT, .directory = {-1, -1}};
     op->path[0] = 0;
     if (q->data.nr == SYS_getdents64) {
         op->request.operation = MD_FS_GETDENTS;
         op->request.capacity = q->data.args[2] > capacity ? (uint32_t)capacity : (uint32_t)q->data.args[2];
     } else if (q->data.nr != SYS_fstat) {
-        if (pathname(q->pid, q->data.args[1], op->path, sizeof(op->path)) || md_host_path(op->path)) goto delegate;
-        if (!*op->path && (q->data.nr != SYS_newfstatat || !(q->data.args[3] & AT_EMPTY_PATH))) goto delegate;
+        if (pathname(q->pid, q->data.args[1], op->path, sizeof(op->path))) goto delegate;
+        if (!*op->path && q->data.nr!=SYS_readlinkat
+                && (q->data.nr != SYS_newfstatat || !(q->data.args[3] & AT_EMPTY_PATH))) goto delegate;
         op->request.path[0] = op->path;
-        if (*op->path) op->request.operation = q->data.nr == SYS_openat ? MD_FS_OPEN : MD_FS_STAT;
-        op->request.flags = q->data.nr == SYS_openat ? (uint32_t)q->data.args[2]
-            : *op->path ? (uint32_t)(q->data.args[3] & AT_SYMLINK_NOFOLLOW) : 0;
+        if (q->data.nr==SYS_readlinkat) {
+            op->request.operation=MD_FS_READLINK;
+            op->request.capacity=q->data.args[3]>capacity ? (uint32_t)capacity : (uint32_t)q->data.args[3];
+        } else {
+            if (*op->path) op->request.operation = q->data.nr == SYS_openat ? MD_FS_OPEN : MD_FS_STAT;
+            op->request.flags = q->data.nr == SYS_openat ? (uint32_t)q->data.args[2]
+                : *op->path ? (uint32_t)(q->data.args[3] & AT_SYMLINK_NOFOLLOW) : 0;
+        }
     }
     int error=md_fs_context_begin(fs,(int)q->pid,0,&op->context);
     if (error) return error;
@@ -238,10 +233,15 @@ static int reply(struct operation *op, const void *data) {
         int fd=ioctl(op->listener, SECCOMP_IOCTL_NOTIF_ADDFD, &add);
         if (fd>=0) { md_fd_origins_finish(&op->update,fd); return 1; }
         response.error = -errno;
-    } else if (!response.error && op->notification.data.nr == SYS_getdents64) {
-        response.error=deliver_directory(op,data,op->result.size);
+    } else if (!response.error && (op->notification.data.nr == SYS_getdents64
+            || op->notification.data.nr==SYS_readlinkat)) {
+        size_t size=op->result.size;
+        int link=op->notification.data.nr==SYS_readlinkat;
+        if (link && size>op->request.capacity) size=op->request.capacity;
+        response.error=link && !op->request.capacity ? -EINVAL
+            : deliver_bytes(op,op->notification.data.args[link ? 2 : 1],data,size);
         if (op->undelivered) return 0;
-        if (!response.error) response.val=op->result.size;
+        if (!response.error) response.val=size;
     } else if (!response.error) {
         if (!valid(op)) return 1;
         struct stat st;
@@ -290,7 +290,7 @@ static int perform(struct md_namespace_broker *b, struct operation *op, int prep
     struct counters *count=b->counts && (unsigned)op->notification.data.nr<512
         ? &b->counts[op->notification.data.nr] : NULL;
     if (prepared>0 && !op->cursor.owner) {
-        if (md_fd_order_state(&op->order)==MD_RESOURCE_ORDER_READY) {
+        if (op->order.table && md_fd_order_state(&op->order)==MD_RESOURCE_ORDER_READY) {
             int error=md_fd_order_start(&op->order);
             if (error) return error;
         }
@@ -427,7 +427,10 @@ static int receive(void *context, struct md_filesystem *fs, short events) {
     op->task=task;
     op->result = (struct md_fs_result){.fd = -1};
     int prepared = eligible ? prepare(fs, op, sizeof(b->output)) : 0;
-    if (prepared>0) {
+    /* Absolute metadata/link lookups neither borrow nor publish a caller FD.
+     * Task-relative proc objects delegate before execution and acquire their
+     * own table turn. Do not serialize ordinary pathname reads with close/dup. */
+    if (prepared>0 && (*op->path!='/' || op->request.operation==MD_FS_OPEN)) {
         int ready=md_fd_order_begin(op->context.task.files,&op->order,b->wakeup);
         if (ready<0) prepared=ready;
         else if (!ready) {

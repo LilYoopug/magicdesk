@@ -644,11 +644,25 @@ struct typed_origin { struct md_fd_object object; unsigned *destroyed; };
 static void typed_destroy(struct md_fd_object *object) {
     struct typed_origin *p=(void *)object; ++*p->destroyed; free(p);
 }
-static void typed_capsules(const char *base) {
+static void typed_capsules(const char *base, int private_view) {
     unsigned before=descriptors(), destroyed=0;
     char store[PATH_MAX]; path(store,base,"store");
-    struct md_inode_store *inode=NULL; assert(!md_inode_store_open(store,1,&inode));
-    md_inode_store_close(inode);
+    struct source source_state={0};
+    if (private_view) {
+        source_state=source(base,1);
+        assert(md_fs_anchor_portable(source_state.anchor[5]));
+        int parent=open(base,O_PATH|O_DIRECTORY|O_CLOEXEC); assert(parent>=0);
+        struct md_view_mount *mount=&source_state.fs.mounts->tree->mounts[0];
+        mount->provider=md_provider_tree_new(parent,mount->source,NULL,0,NULL,NULL);
+        close(parent); assert(mount->provider);
+        assert(!md_fs_anchor_portable(source_state.anchor[5]));
+        struct md_fs_origin_parcel parcel={0};
+        assert(md_fs_origin_export(source_state.message,&parcel)==-EOPNOTSUPP && !parcel.count);
+    }
+    if (!private_view) {
+        struct md_inode_store *inode=NULL; assert(!md_inode_store_open(store,1,&inode));
+        md_inode_store_close(inode);
+    }
     struct md_ipc_credentials *authority=NULL, *foreign=NULL;
     assert(!md_ipc_credentials_open(store,MD_IPC_TRANSPORT_ORIGINS_V1,&authority));
     assert(!md_ipc_credentials_open(store,MD_IPC_TRANSPORT_ORIGINS_V1,&foreign));
@@ -666,8 +680,9 @@ static void typed_capsules(const char *base) {
     static const struct md_fd_object_type type={.destroy=typed_destroy,.selectors=1U<<MD_FD_SELECTOR_PROC};
     struct typed_origin *p=calloc(1,sizeof(*p)); assert(p);
     md_fd_object_init(&p->object,&type); p->destroyed=&destroyed;
-    struct md_fd_object *objects[]={&p->object};
-    int fd=open("/dev/null",O_RDWR|O_CLOEXEC); assert(fd>=0);
+    struct md_fd_object *objects[]={private_view ? md_fs_anchor_object(source_state.anchor[5]) : &p->object};
+    int fd=private_view ? fcntl(md_fs_anchor_fd(source_state.anchor[5]),F_DUPFD_CLOEXEC,3)
+        : open("/dev/null",O_RDWR|O_CLOEXEC); assert(fd>=0);
     unsigned warmed=0;
     for (unsigned i=0;i<64;++i) {
         struct md_fd_message *message=capture_objects(objects,1);
@@ -681,7 +696,7 @@ static void typed_capsules(const char *base) {
         assert(descriptors()==held);
         if (i%2) {
             assert(!md_ipc_capsules_receive(owner,&receiver,carrier,&received));
-            assert(received->count==1 && received->origins && received->origins[0]==&p->object);
+            assert(received->count==1 && received->origins && received->origins[0]==objects[0]);
         }
         close(carrier);
         ready(md_ipc_credentials_pollfd(authority),POLLIN);
@@ -706,8 +721,11 @@ static void typed_capsules(const char *base) {
     md_ipc_capsules_free(owner); md_ipc_capsules_free(outsider);
     md_ipc_binding_release(&sender); md_ipc_binding_release(&receiver); md_ipc_binding_release(&other);
     md_ipc_credentials_close(foreign); md_ipc_credentials_close(authority);
+    if (private_view) source_close(&source_state);
     assert(descriptors()==before);
-    puts("PASS typed local capsules: exact authority, foreign rejection, queue discard, partial allocation, 64 cycles and final release");
+    puts(private_view
+        ? "PASS private-view file capsules: exact anchor, foreign rejection, queue discard, allocation rollback and final release"
+        : "PASS typed local capsules: exact authority, foreign rejection, queue discard, partial allocation, 64 cycles and final release");
 }
 static void unknown(const char *base) {
     unsigned before=descriptors(); char store[PATH_MAX]; path(store,base,"store");
@@ -822,13 +840,14 @@ void test_origin_transfer(const char *base) {
     alarm(120); bundles();
     const char *names[]={"origin-local","origin-faults","origin-processes","origin-unknown",
         "origin-capsules","origin-capsules-unknown","origin-capsules-discard","origin-storage","origin-mount-pins",
-        "origin-typed-capsules","origin-anonymous-capsules"}; char name[PATH_MAX];
-    for (unsigned n=0;n<11;++n) {
+        "origin-typed-capsules","origin-anonymous-capsules","origin-private-view-capsules"}; char name[PATH_MAX];
+    for (unsigned n=0;n<12;++n) {
         path(name,base,names[n]); assert(!mkdir(name,0700));
         if (!n) local(name); else if (n==1) failures(name); else if (n==2) processes(name);
         else if (n==3) unknown(name); else if (n==7) storage_process(name);
-        else if (n==8) mount_pins(name); else if (n==9) typed_capsules(name);
-        else if (n==10) anonymous_capsules(name); else capsules(name,(int)n-4);
+        else if (n==8) mount_pins(name); else if (n==9) typed_capsules(name,0);
+        else if (n==10) anonymous_capsules(name); else if (n==11) typed_capsules(name,1);
+        else capsules(name,(int)n-4);
     }
     alarm(0); puts("PASS portable message origins");
 }

@@ -31,6 +31,9 @@ int md_identity_groups(struct md_identity *, const uint32_t *, unsigned);
 unsigned md_identity_group_count(const struct md_identity *);
 const uint32_t *md_identity_group_data(const struct md_identity *);
 int md_identity_in_group(const struct md_identity *, uint32_t);
+/* Credential portion of process inspection. Namespace/root policy and native
+ * proc access remain the caller's responsibility; this grants no host rights. */
+int md_identity_may_inspect(const struct md_identity *observer, const struct md_identity *target);
 /* set-ID operations accept IDs as seen in the caller's user namespace. */
 int md_identity_setuid(struct md_identity *, uint32_t);
 int md_identity_setgid(struct md_identity *, uint32_t);

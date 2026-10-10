@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "fs_mount_internal.h"
+#include "fs_native.h"
 #include "inode_internal.h"
 #include "fs_storage.h"
 #include "linux_abi.h"
@@ -111,6 +112,14 @@ static int devpts_operation(struct md_filesystem *fs,struct md_mount_namespace *
     if (r) out->error=r;
     return 1;
 }
+static ssize_t directory_entries(void *context, int fd, void *data, size_t count) {
+    struct md_view_mount *mount=context;
+    if (mount->backing==MD_MOUNT_PROC) return md_procfs_getdents(mount,fd,data,count);
+    if (mount->devpts) return md_devpts_getdents(mount->devpts,fd,data,count);
+    if (mount->provider) return md_provider_tree_getdents(mount->provider,fd,data,count);
+    ssize_t n=syscall(SYS_getdents64,fd,data,count);
+    return n<0 ? -errno : n;
+}
 static int descriptor(struct md_filesystem *fs, const struct md_fs_request *q,
         struct md_fs_result *out, const struct md_fs_output *output) {
     const struct md_fs_anchor *origin=q->origin[0];
@@ -139,6 +148,7 @@ static int descriptor(struct md_filesystem *fs, const struct md_fs_request *q,
     if (devpts_operation(fs,owner.mounts,p->mount,q->directory[0],q,out,output)) return 1;
     if (md_fs_cgroup_operation(fs,owner.mounts,p->mount,q->directory[0],-1,NULL,q,out,output)) return 1;
     if (md_fs_sysfs_operation(fs,owner.mounts,p->mount,q->directory[0],q,out,output)) return 1;
+    if (md_fs_provider_operation(fs,owner.mounts,p->mount,q->directory[0],q,out,output)) return 1;
     if (md_fs_mqueue_operation(fs,owner.mounts,p->mount,q->directory[0],q,out,output)) return 1;
     if (q->operation==MD_FS_ACCESS && (r=execute_access(p->mount,q->directory[0],q->mode))) {
         out->error=r; return 1;
@@ -199,27 +209,9 @@ static int descriptor(struct md_filesystem *fs, const struct md_fs_request *q,
         if (pos < 0) r = -errno; else out->position = pos;
         break;
     }
-    case MD_FS_GETDENTS: {
-        if (!data || !capacity) { r = -EINVAL; break; }
-        int fd = q->directory[0];
-        off_t before = lseek(fd, 0, SEEK_CUR);
-        if (before < 0) { r = -errno; break; }
-        size_t count = q->capacity < capacity ? q->capacity : capacity;
-        ssize_t n = p->mount->backing==MD_MOUNT_PROC ? md_procfs_getdents(p->mount,fd,data,count)
-            : p->mount->devpts ? md_devpts_getdents(p->mount->devpts,fd,data,count)
-            : syscall(SYS_getdents64, fd, data, count);
-        if (n < 0) { r=p->mount->backing==MD_MOUNT_PROC || p->mount->devpts ? (int)n : -errno; break; }
-        /* Native and inode directories share the same publish-before-commit
-         * contract. Restore on rejected output; never redispatch the read. */
-        if (output->directory_position) {
-            off_t next=lseek(fd,0,SEEK_CUR);
-            if (next<0) r=-errno;
-            else *output->directory_position=next;
-        } else if (output->deliver) r = output->deliver(output->context, data, (size_t)n);
-        if (r || output->directory_position) { if (lseek(fd, before, SEEK_SET) < 0) r = -errno; }
-        if (!r) out->size = (size_t)n;
+    case MD_FS_GETDENTS:
+        md_fs_directory_read(q,out,output,directory_entries,p->mount);
         break;
-    }
     default: return 0;
     }
     if (r) out->error = r;
@@ -362,6 +354,7 @@ static void native(struct md_filesystem *fs, const struct md_fs_request *q,
     if (devpts_operation(fs,a->view,a->mount,a->fd,q,out,output)) return;
     if (md_fs_cgroup_operation(fs,a->view,a->mount,a->fd,a->parent,a->name,q,out,output)) return;
     if (md_fs_sysfs_operation(fs,a->view,a->mount,a->fd,q,out,output)) return;
+    if (md_fs_provider_operation(fs,a->view,a->mount,a->fd,q,out,output)) return;
     if (md_fs_mqueue_operation(fs,a->view,a->mount,a->fd,q,out,output)) return;
     int r = 0;
     struct md_filesystem owner=*fs; owner.mounts=a->view;
@@ -421,7 +414,7 @@ static void native(struct md_filesystem *fs, const struct md_fs_request *q,
         /* Proc entries can use namespace-visible PIDs. The walker has already
          * selected their native inode; replaying parent/name selects another
          * process when the logical and native PID numbers differ. */
-        int selected=a->fd>=0 && (!strcmp(a->name,".") || a->mount->backing==MD_MOUNT_PROC);
+        int selected=a->fd>=0 && (!strcmp(a->name,".") || a->mount->backing==MD_MOUNT_PROC || a->mount->provider);
         if (selected && !(flags&O_PATH) && (flags&(O_CREAT|O_EXCL))==(O_CREAT|O_EXCL)) { r=-EEXIST; break; }
         if (selected && !(flags&O_PATH) && (flags&O_CREAT) && S_ISDIR(existing.st_mode)) { r=-EISDIR; break; }
         int fd=selected ? md_reopen_file(a->fd,(flags&~(O_CREAT|O_EXCL))|O_CLOEXEC,&out->open_completion)
@@ -605,6 +598,21 @@ void md_fs_mounts_execute(struct md_filesystem *fs, const struct md_fs_request *
             || (q->operation==MD_FS_OPEN && !(q->flags&O_PATH)
                 && (q->flags&(O_CREAT|O_EXCL))==(O_CREAT|O_EXCL)))) r=-EEXIST;
     if (!r && mutates(q,&a) && a.mount && md_view_readonly(a.mount)) r = -EROFS;
+    if (!r && mutates(q,&a) && a.mount && a.mount->provider) {
+        int private=md_provider_tree_private(a.mount->provider,a.fd>=0 ? a.fd : a.parent);
+        if (private<0) r=private;
+        else if (private) {
+            struct md_control_file control={0};
+            int device=md_provider_tree_control(a.mount->provider,a.fd,&control);
+            md_control_file_release(control);
+            if (device<0) r=device;
+            else if (!device || (q->operation!=MD_FS_OPEN && q->operation!=MD_FS_REOPEN)) r=-EROFS;
+        }
+        if (!r && pair && b.mount && b.mount->provider) {
+            private=md_provider_tree_private(b.mount->provider,b.fd>=0 ? b.fd : b.parent);
+            if (private) r=private<0 ? private : -EROFS;
+        }
+    }
     if (!r && q->operation==MD_FS_ACCESS) r=execute_access(a.mount,a.fd,q->mode);
     if (!r && (q->operation == MD_FS_UNLINK || q->operation == MD_FS_RENAME)
             && (mounted_root(&a) || (pair && mounted_root(&b)))) r = -EBUSY;

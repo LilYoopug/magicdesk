@@ -132,31 +132,50 @@ int mdi_ancestor(struct md_inode_store *s, const char *ancestor, const char *chi
     return r;
 }
 
+static int path_name(struct md_inode_store *s, const struct mdi_node *node, struct mdi_path_name *name) {
+    int directory=node->kind==S_IFDIR;
+    struct mdi_cache_key key={.query=directory ? MDI_DIRECTORY_NAME : MDI_FILE_PATH,
+        .id=node->id,.name=directory ? node->parent : NULL};
+    if (mdi_cache_name_get(s,&key,name)) return 0;
+    sqlite3_stmt *q=NULL;
+    int r=mdi_query_acquire(s,key.query,&q);
+    if (!r) r=mdi_bind_id(q,1,directory ? node->parent : node->id);
+    if (!r && directory) r=mdi_bind_id(q,2,node->id);
+    if (!r) {
+        int rc=mdi_step(s,q);
+        if (rc!=SQLITE_ROW) r=rc==SQLITE_DONE ? (directory ? -ENOENT : -ENOTSUP) : mdi_sql_failure(rc);
+        else {
+            int column=directory ? 0 : 1;
+            int length=sqlite3_column_bytes(q,column);
+            if (length<1 || length>NAME_MAX || (!directory && sqlite3_column_bytes(q,0)!=32)) r=-EIO;
+            else {
+                memcpy(name->parent,directory ? (const void *)node->parent : sqlite3_column_text(q,0),32);
+                name->parent[32]=0;
+                memcpy(name->name,sqlite3_column_blob(q,column),length); name->name[length]=0;
+                name->ambiguous=directory ? 0 : sqlite3_column_int(q,2);
+                if (memchr(name->name,0,length) || mdi_name_valid(name->name)) r=-EIO;
+            }
+        }
+    }
+    r=mdi_query_release(q,r);
+    if (!r) mdi_cache_name_put(s,&key,name);
+    return r;
+}
 static int directory_path(struct md_inode_store *s, struct mdi_node node, char *out, size_t size) {
     int r = node.kind == S_IFDIR ? 0 : -ENOTDIR;
     char path[PATH_MAX] = "";
     while (!r && strcmp(node.id, mdi_root(s))) {
         if (!strcmp(node.id, s->lifetime->scope)) return -ENOENT;
-        sqlite3_stmt *q = NULL;
-        r = mdi_query_acquire(s, MDI_DIRECTORY_NAME, &q);
-        if (!r) r = mdi_bind_id(q, 1, node.parent);
-        if (!r) r = mdi_bind_id(q, 2, node.id);
+        struct mdi_path_name name;
+        r=path_name(s,&node,&name);
         if (!r) {
-            int rc = mdi_step(s, q);
-            if (rc != SQLITE_ROW) r = rc == SQLITE_DONE ? -ENOENT : mdi_sql_error(rc);
+            size_t n=strlen(name.name), old=strlen(path);
+            if (old+n+1>=sizeof(path)) r=-ENAMETOOLONG;
             else {
-                int n = sqlite3_column_bytes(q, 0);
-                size_t old = strlen(path);
-                if (n < 1 || n > NAME_MAX) r = -EIO;
-                else if (old + (size_t)n + 1 >= sizeof(path)) r = -ENAMETOOLONG;
-                else {
-                    memmove(path+n+1, path, old+1); path[0] = '/';
-                    memcpy(path+1, sqlite3_column_blob(q, 0), (size_t)n);
-                    if (memchr(path+1, 0, (size_t)n)) r = -EIO;
-                }
+                memmove(path+n+1,path,old+1); path[0]='/';
+                memcpy(path+1,name.name,n);
             }
         }
-        r = mdi_query_release(q, r);
         if (!r) r = mdi_node(s, node.parent, &node);
     }
     if (!r) {
@@ -184,27 +203,11 @@ int mdi_node_path(struct md_inode_store *s, const struct mdi_node *source, char 
         /* An inode which has ever had aliases cannot identify the dentry of an
          * arbitrary inherited FD. Keep that uncertainty even after unlinking an
          * alias; choosing the remaining name would misidentify old descriptors. */
-        sqlite3_stmt *q = NULL;
         struct mdi_location location = {.node = node};
-        char parent[33];
-        r = mdi_query_acquire(s, MDI_FILE_PATH, &q);
-        if (!r) r = mdi_bind_id(q, 1, node.id);
-        if (!r) {
-            int rc = mdi_step(s, q);
-            if (rc != SQLITE_ROW) r = rc == SQLITE_DONE ? -ENOTSUP : mdi_sql_failure(rc);
-            else if (sqlite3_column_int(q, 2)) r = -ENOTSUP;
-            else {
-                int length = sqlite3_column_bytes(q, 1);
-                if (sqlite3_column_bytes(q, 0) != 32 || length < 1 || length > NAME_MAX) r = -EIO;
-                else {
-                    memcpy(parent, sqlite3_column_text(q, 0), 32); parent[32] = 0;
-                    memcpy(location.name, sqlite3_column_blob(q, 1), length); location.name[length] = 0;
-                    if (memchr(location.name, 0, length) || mdi_name_valid(location.name)) r = -EIO;
-                }
-            }
-        }
-        r = mdi_query_release(q, r);
-        if (!r) r = mdi_node(s, parent, &location.parent);
+        struct mdi_path_name name;
+        r=path_name(s,&node,&name);
+        if (!r && name.ambiguous) r=-ENOTSUP;
+        if (!r) { strcpy(location.name,name.name); r=mdi_node(s,name.parent,&location.parent); }
         if (!r) r = mdi_location_path(s, &location, out, size);
         if (!r && !node.links) {
             size_t length = strlen(out);

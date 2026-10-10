@@ -91,7 +91,11 @@ struct md_proc_file *md_proc_file_open_control(const struct md_control_file_ops 
     const struct md_namespace_reference *ref=ops->namespace_reference ? ops->namespace_reference(context) : NULL;
     struct md_proc_file *f=md_proc_file_open(NULL,ref
         ? (enum md_proc_file_kind)(MD_PROC_FILE_NS_USER+ref->kind) : MD_PROC_FILE_CONTROL,id,flags);
-    if (f) { f->control=ops; f->control_context=ops->retain(context); }
+    if (f) {
+        void *opened=ops->open && !(flags&O_PATH) ? ops->open(context,flags) : ops->retain(context);
+        if (!opened) { int saved=errno; md_proc_file_release(f); errno=saved; return NULL; }
+        f->control=ops; f->control_context=opened;
+    }
     return f;
 }
 int md_proc_file_control_access(const struct md_proc_file *f,const struct md_identity *id,unsigned mode) {
@@ -600,6 +604,8 @@ int md_proc_file_io_finish(struct md_proc_file_io *io, long copied) {
     if (!io || !io->file || !io->executed) return -EINVAL;
     if (io->operation==MD_PROC_FILE_READ && io->result>=0) {
         if (copied>io->result || (copied>0 && !io->offered)) return -EINVAL;
+        if (io->file->control && io->file->control->read_commit)
+            io->file->control->read_commit(io->file->control_context,copied>0 ? (size_t)copied : 0);
         if (copied>0 && !io->positional) io->file->position=io->offset+copied;
     }
     if (io->operation==MD_PROC_FILE_GETDENTS && io->result>=0) {

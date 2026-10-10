@@ -14,6 +14,7 @@ struct md_mount_source {
     struct md_devpts *devpts;
     struct md_cgroup_view *cgroup;
     struct md_sysfs *sysfs;
+    struct md_provider_tree *provider;
     struct md_ipc_namespace *ipc;
 };
 void md_mount_source_close(struct md_mount_source *);

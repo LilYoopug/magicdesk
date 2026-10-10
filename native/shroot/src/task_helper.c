@@ -745,10 +745,13 @@ int md_task_helper_event(struct md_task_helpers *manager, pid_t pid, int status)
     } else return 0;
     return error && error!=-ESRCH ? error : 1;
 }
-int md_task_helpers_visit(struct md_task_helpers *manager,int (*visit)(void *,pid_t,int),void *context) {
+int md_task_helpers_visit(struct md_task_helpers *manager,int (*visit)(void *,pid_t,int,int),void *context) {
     for (struct helper *m=manager ? manager->first : NULL;m;m=m->next) {
-        int error=m->owner ? visit(context,m->owner,m->parent_ready) : 0;
-        if (!error && m->child && !m->reaped) error=visit(context,m->child,m->child_stopped);
+        int error=m->owner ? visit(context,m->owner,m->parent_ready,PTRACE_CONT) : 0;
+        /* Before child_begin, EVENT_STOP is its initial stop, not a barrier
+         * interrupt. Only the helper owner may initialize and resume it. */
+        if (!error && m->child && !m->reaped)
+            error=visit(context,m->child,m->child_stopped,m->operation ? PTRACE_CONT : 0);
         if (error) return error;
     }
     return 0;

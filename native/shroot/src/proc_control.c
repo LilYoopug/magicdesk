@@ -88,6 +88,7 @@ long md_proc_control_metadata(int process, enum md_proc_kind kind, int fd, long 
                 .stx_nlink=(uint32_t)st.st_nlink,.stx_uid=st.st_uid,.stx_gid=st.st_gid,
                 .stx_mode=(uint16_t)st.st_mode,.stx_ino=st.st_ino,.stx_size=(uint64_t)st.st_size,
                 .stx_dev_major=major(st.st_dev),.stx_dev_minor=minor(st.st_dev),
+                .stx_rdev_major=major(st.st_rdev),.stx_rdev_minor=minor(st.st_rdev),
                 .stx_atime={st.st_atim.tv_sec,(uint32_t)st.st_atim.tv_nsec,0},
                 .stx_mtime={st.st_mtim.tv_sec,(uint32_t)st.st_mtim.tv_nsec,0},
                 .stx_ctime={st.st_ctim.tv_sec,(uint32_t)st.st_ctim.tv_nsec,0}};
@@ -128,7 +129,28 @@ long md_proc_control_call(long nr, const unsigned long *a) {
     long active=md_guest_buffer_control(MD_BUFFER_PROC_CHECK,0,0);
     if (active<=0) return active<0 ? active : MD_WATCH_NATIVE;
     if (nr==SYS_ioctl) {
-        if (!md_proc_file_namespace((enum md_proc_file_kind)(active-1))) return -ENOTTY;
+        if (!md_proc_file_namespace((enum md_proc_file_kind)(active-1))) {
+            long packed=md_guest_buffer_control(MD_BUFFER_CONTROL_IOCTL_SPEC,0,0);
+            if (packed<0) return packed;
+            size_t size=(uint32_t)packed;
+            unsigned direction=(unsigned)((uint64_t)packed>>32);
+            if (size>MD_CONTROL_IOCTL_MAX || direction&~(MD_CONTROL_IN|MD_CONTROL_OUT|MD_CONTROL_STRING)) return -EPROTO;
+            long memory=md_adapter_buffer_take();
+            if (memory<0) return memory;
+            memset((void *)memory,0,size);
+            long result=(direction&MD_CONTROL_IN) ? md_read_memory((void *)memory,(void *)a[2],size) : 0;
+            if (direction&MD_CONTROL_STRING) {
+                result=md_read_string((void *)memory,size,(void *)a[2]);
+                if (result>=0) result=0;
+            }
+            if (!result) result=md_guest_buffer_control(MD_BUFFER_CONTROL_IOCTL,0,0);
+            if (result>=0 && (direction&MD_CONTROL_OUT)) {
+                long error=md_write_memory((void *)a[2],(void *)memory,size);
+                if (error) result=error;
+            }
+            long released=md_adapter_buffer_release();
+            return result<0 ? result : released<0 ? released : result;
+        }
         long value=RAW5(prctl,MD_GUEST_PROC_FILE,MD_PROC_FILE_NAMESPACE_QUERY,a[0],a[1],0);
         if (value>=0 && a[1]==NS_GET_OWNER_UID) {
             uint32_t uid=(uint32_t)value;

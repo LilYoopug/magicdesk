@@ -58,6 +58,7 @@ int md_view_task_path(struct md_filesystem *fs, int fd, const char *name, const 
 }
 static int component(struct md_filesystem *fs, struct md_mount_namespace *view,
         struct md_view_mount *mount, int fd, const char *name, int provider_source) {
+    if (mount && mount->provider) return md_provider_tree_step(mount->provider,fd,name);
     if (md_view_inode(mount)) {
         struct md_fs_storage_scope scope;
         int r=md_fs_storage_enter(fs,mount,&scope);

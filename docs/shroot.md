@@ -25,6 +25,14 @@ after commit or rollback. Separate launches can share a store without exposing
 ordinary internal transaction contention to guest syscalls. There is no polling
 or transaction replay; data IO through opened descriptors stays native. An
 external database writer that bypasses this gate still produces an explicit error.
+Read transactions share a bounded worker-local cache of inode metadata, directory
+entries and reverse-name records. SQLite's snapshot data version and connection
+write count invalidate it across writers; local mutations and rollbacks discard
+cached rows. Permissions are checked for the current caller, and sizes/timestamps
+still come from the live native object. No process, FD number or native-path
+result is retained by this cache. Single-provider metadata requests share one
+read transaction across nested lookups; mount crossings retain their independent
+provider transaction boundaries.
 Initial store admission prepares indexes for every foreign-key child lookup,
 so collecting an overlay view does not repeatedly scan the whole store.
 Retained worker reconnects and ordinary filesystem operations do not prepare
@@ -33,13 +41,27 @@ The supervisor handles regular-file seeks through retained kernel descriptors
 without namespace RPC; directory cursors remain namespace-owned. Filesystem
 RPC replies retain their connection until exchange completion, task cancellation
 or client release, with event-driven progress and a bounded peer lifetime.
-Ordinary open/stat and directory-read requests are handled directly by that worker through seccomp
+Ordinary open/stat, readlink and directory-read requests are handled directly by that worker through seccomp
 notifications, without invoking a guest-side RPC. Protected accesses, O_PATH,
 namespace mutations and directory seeks retain the task-affine adapter. Direct
 broker directory reads prepare their bytes without advancing the shared cursor.
 The existing OFD turn spans copying and kernel reply acceptance; only an accepted
 successful reply commits the cursor. Cancellation after copying and failed or
 partial output leave the cursor unchanged, without replaying a committed read.
+Native-backed reads use the same filesystem engine after logical namespace and
+permission checks. Task-independent native paths can complete in the worker.
+Authenticated native service owners have no guest file table; observing their
+proc entries follows the same kernel-checked path as other native processes.
+Managed proc-FD metadata and links also use that path when process credentials
+permit inspection and the target's file-table turn is immediately available.
+The turn spans typed-object inspection and kernel target capture; filesystem
+descriptions retain their original mount provenance for names and metadata.
+Special descriptor providers never expose their carrier metadata. Contention delegates
+without blocking the worker. Self/thread aliases, other managed-process views,
+private proc views, devices and blocking opens retain their task-affine providers.
+Unknown native descriptors preserve
+kernel metadata rather than becoming missing guest objects. Native, inode,
+mounted and generated directories share the output/cursor publication contract.
 Path and metadata requests with captured cwd/dirfd inputs use bootstrap-mapped
 shared input/output and register control, without a temporary guest descriptor
 or service socket per call. The file-table and filesystem turns capture retained
@@ -87,7 +109,10 @@ application filter denials remain errors.
 Typed descriptor dispatch captures its annotation under the same file-table
 turn as close/dup publication. A reused number cannot be classified from a
 preceding descriptor's uncommitted close. The turn ends after retaining the
-object, before application IO. Interrupted queued FD installations retire their
+object, before application IO. Proc and watch selectors share this dispatch:
+stacked seccomp filter order cannot change the current descriptor's type after
+close/reuse or inheritance. Ordinary unselected data IO remains native.
+Interrupted queued FD installations retire their
 expired notification independently of queue readiness; a restarted proc request
 releases the old unpublished carrier before creating another admission.
 Temporary-file and mount-table results use atomic ADDFD_SEND under the
@@ -725,6 +750,14 @@ and abstract display address. Its normal MIT-MAGIC-COOKIE-1 handshake remains
 mandatory. Each guest launch writes the supplied authority into its private
 runtime directory; session cookies are not persisted in `.desktop` recipes.
 
+## Gamepad Input
+
+[Linux gamepads](gamepads.md) attach to Shroot graphical launches through an
+executor-authenticated, launch-owned endpoint. Android host focus selects the
+input recipient independently of X11 or Wayland. The native input bus exposes
+evdev/joydev, sysfs/libudev discovery and guest-private uinput with asynchronous
+rumble handshakes. It never creates Android input devices or requires root.
+
 ## Guest Credentials
 
 `--user NAME|UID[:GROUP|GID]` selects a launch-local guest identity. Names and
@@ -972,7 +1005,13 @@ the address-space owner.
 The native memory owner retains captured private-file backing descriptions and
 offsets independently of application FD numbers. Splits, replacement, remap and
 fork retain or release that provenance through the mapping transaction; commit
-allocates no metadata. Optional proc-memory access belongs to the exact address
+allocates no metadata. A launch-family backing pool shares one independent
+read-only description per retained file identity across mappings, fork and exec.
+The pool is not a cache: the final mapping or pending transaction releases its
+entry and FD. Application offsets and status-flag changes cannot affect pooled
+sources. If native policy denies an independent reopen, that mapping retains its
+admitted source without pooling. Exec inherits the pool, not prior mappings or
+private-memory authority. Optional proc-memory access belongs to the exact address
 space: CLONE_VM shares it, while fork and exec require independent capture.
 The supervisor captures proc access while each fresh image is stopped before
 entry, and independently at a non-CLONE_VM child's initial stop. Private file
@@ -1002,7 +1041,9 @@ patch or JIT-disable setting. A cold launch-tree barrier stops guest threads and
 existing private helpers, then acknowledges a namespace-worker pause. Real wait
 events retain their status, ordering and rusage; synthetic interrupts resume with
 their original ptrace continuation. Interrupts already requested by syscall or
-debugger owners are deferred to those owners, never consumed as barrier stops.
+debugger owners and initial stops of newborn tasks are deferred to their owners,
+never consumed as barrier stops. This includes private helpers whose registers
+and file tables have not yet been initialized.
 An interrupt acknowledgement may arrive after an ordinary stop won the race.
 Helpers and replacement calls continue their current execution in place;
 they neither replay the syscall nor mistake the pause for its result.
@@ -1064,6 +1105,12 @@ resolution, credential validation and creation-time ancillary format. Adapted
 peers use authenticated origin capsules; sockets inherited from or passed to
 unadapted consumers retain native format. Exporting an already adapted socket to
 a native peer fails explicitly rather than exposing its private protocol.
+Origins whose retained mount view contains private providers use local custody,
+including ordinary files and shared memory in that view. Processes in the same
+launch receive the exact objects; another launch cannot import those private
+owners and receives an explicit error. Serializable views retain portable
+cross-launch custody. Queue discard and receiver release use the same lifetime
+tracking for both forms.
 Application-filtered IO captures exact inputs through the table-owned channel,
 without requiring another guest thread. Ordinary IO reuses an already admitted,
 unambiguous channel under the same file-table turn. Without one, it retains
@@ -1091,7 +1138,7 @@ resource-limit and batch-publication contracts.
 descriptor or cwd. Execution preparation creates this directory with mode 01777
 and guest-root ownership when absent; it does not overwrite existing metadata
 or change the sealed image. POSIX shared memory, mmap, descriptor passing and unlinked
-data work across independent launches. Store-scoped System V shared memory uses
+data work across independent launches with portable mount views. Store-scoped System V shared memory uses
 native mapped backing files and a separate lazy IPC authority; it does not require
 kernel SysV IPC support. A task-affine helper shares the address space but has a
 private file table, so backing/transport descriptors never occupy application

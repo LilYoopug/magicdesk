@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
@@ -280,6 +281,7 @@ static void file_view_failures(void) {
     int fd=memfd_create("mapping-failures",MFD_CLOEXEC); assert(fd>=0 && !ftruncate(fd,8*p));
     struct md_interception_memory *m=md_memory_new(); assert(m);
     struct md_mapping_change c={0}; int source=-1; uint64_t offset=0;
+    unsigned empty=descriptors();
     for (unsigned i=0;i<2;++i) {
         assert(!md_memory_mapping_prepare(m,&c,MD_MAPPING_MAP,0,p,0,MAP_PRIVATE,0));
         assert(!md_memory_mapping_backing(m,&c,fd,i*p));
@@ -313,9 +315,58 @@ static void file_view_failures(void) {
     md_memory_mapping_abandon(m,&c);
     assert(!md_memory_file_view(m,base+10*p,p,&source,&offset));
     assert(!md_memory_exec_check(m,base+10*p,p));
-    assert(descriptors()==before-2);
+    assert(descriptors()==empty);
     md_memory_release(m); close(fd);
-    puts("PASS private mapping failures: distinct same-file descriptions, failed fork/move/capture and unknown publication retain no unsafe provenance");
+    puts("PASS private mapping failures: shared same-file backing, failed fork/move/capture and unknown publication retain no unsafe provenance");
+}
+static void file_backing_lifetime(void) {
+    unsigned initial=descriptors();
+    size_t page=(size_t)getpagesize();
+    uintptr_t base=0x100000;
+    char path[]=".md-mapping-backing-XXXXXX";
+    int fd=mkstemp(path);
+    int other=memfd_create("distinct-mapping-backing",MFD_CLOEXEC);
+    assert(fd>=0 && other>=0 && !ftruncate(fd,32*page) && !ftruncate(other,page));
+    int reopened=open(path,O_RDWR|O_CLOEXEC);
+    assert(!unlink(path) && reopened>=0);
+    struct md_interception_memory *root=md_memory_new(); assert(root);
+    struct md_interception_memory *images[32];
+    int source=-1, shared=-1; uint64_t offset=0;
+    unsigned before=descriptors();
+    for (unsigned i=0;i<32;++i) {
+        images[i]=md_memory_new_image(root); assert(images[i]);
+        assert(!md_memory_file_view(images[i],base,page,&source,&offset));
+        for (unsigned j=0;j<8;++j) {
+            struct md_mapping_change c={0};
+            assert(!md_memory_mapping_prepare(images[i],&c,MD_MAPPING_MAP,0,page,0,MAP_PRIVATE,0));
+            assert(!md_memory_mapping_backing(images[i],&c,j&1 ? reopened : fd,j*page));
+            md_memory_mapping_finish(images[i],&c,(long)(base+j*page));
+        }
+        assert(md_memory_file_view(images[i],base,8*page,&source,&offset) && !offset);
+        if (!i) shared=source;
+        assert(source==shared && descriptors()==before+1);
+    }
+    struct md_mapping_change failed={0};
+    assert(!md_memory_mapping_prepare(root,&failed,MD_MAPPING_MAP,0,page,0,MAP_PRIVATE,0));
+    assert(!md_memory_mapping_backing(root,&failed,other,0));
+    assert(descriptors()==before+2);
+    md_memory_mapping_finish(root,&failed,-ENOMEM);
+    assert(descriptors()==before+1);
+    struct md_interception_memory *child=md_memory_fork(images[0],0); assert(child);
+    assert(!fcntl(fd,F_SETFL,fcntl(fd,F_GETFL)|O_APPEND|O_NONBLOCK));
+    assert((fcntl(shared,F_GETFL)&(O_ACCMODE|O_APPEND|O_NONBLOCK))==O_RDONLY);
+    md_memory_release(root); close(fd); close(reopened); close(other);
+    for (unsigned i=0;i<32;++i) md_memory_release(images[i]);
+    assert(md_memory_file_view(child,base,8*page,&source,&offset) && source==shared);
+    assert(descriptors()==initial+1);
+    struct md_mapping_change remove={0};
+    assert(!md_memory_mapping_prepare(child,&remove,MD_MAPPING_UNMAP,base,8*page,0,0,0));
+    md_memory_mapping_finish(child,&remove,0);
+    assert(!md_memory_file_view(child,base,page,&source,&offset));
+    assert(descriptors()==initial);
+    md_memory_release(child);
+    assert(descriptors()==initial);
+    puts("PASS file backing ownership: independent opens, 32 exec images, 256 mappings, fork, failed mmap and final unmap retain exactly one FD per file");
 }
 static void memory_access_lifetime(void) {
     struct md_interception_memory *parent=md_memory_new(); assert(parent);
@@ -402,7 +453,7 @@ int main(void) {
     alarm(30);
     unsigned before=descriptors();
     slots(); owner_lifetime(); failures(); address_spaces(); payload_reuse(); mapping_policy(); file_views(); file_view_failures();
-    memory_access_lifetime(); memory_access_capture(); memory_access_protected_child();
+    file_backing_lifetime(); memory_access_lifetime(); memory_access_capture(); memory_access_protected_child();
     assert(descriptors()==before);
     puts("PASS shared request buffer ownership");
     return 0;

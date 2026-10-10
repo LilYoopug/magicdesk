@@ -65,6 +65,7 @@ struct md_fs_buffer_request {
     struct md_program *proc_object[2];
     struct md_fd_object *reopened;
     struct md_fd_object *control_input;
+    int control_descriptor;
     struct md_landlock_policy *landlock;
     int captured[2];
     struct md_received_fds *received;
@@ -105,6 +106,7 @@ int md_fs_buffer_open_take(struct md_fs_buffer_request *r, struct md_fs_buffer_o
     *out=r->opened; r->opened=(struct md_fs_buffer_open){.fd=-1}; return 1;
 }
 static void dispose(struct md_fs_buffer_request *r) {
+    if (r->control_descriptor>=0) close(r->control_descriptor);
     md_landlock_release(r->landlock);
     struct md_fs_buffer_request **p=&r->service->requests;
     while (*p && *p!=r) p=&(*p)->next;
@@ -409,7 +411,7 @@ static int control_open(void *context,const struct md_control_file_ops *ops,void
     struct md_fs_buffer_request *r=context;
     if (!r->service->control) return -EOPNOTSUPP;
     if (r->opened.object) return -EBUSY;
-    r->opened.object=r->service->control(ops,data,identity,flags);
+    r->opened.object=r->service->control(ops,data,identity,flags,&r->control_descriptor);
     return r->opened.object ? 0 : -errno;
 }
 void md_fs_buffer_control_factory(struct md_fs_buffer_service *s,md_control_factory factory) {
@@ -519,6 +521,9 @@ static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
     } else md_fs_context_execute(&r->context,&r->request,&reply->result,&output);
     r->reserved=(output.reserve_watch || output.directory_position) && !reply->result.error;
     r->opened.fd=reply->result.fd; reply->result.fd=-1;
+    if (!reply->result.error && r->opened.fd>=0 && r->control_descriptor>=0) {
+        close(r->opened.fd); r->opened.fd=r->control_descriptor; r->control_descriptor=-1;
+    }
     if (r->opened.object) reply->result.selectors=r->opened.object->type->selectors;
     r->opened.completion=reply->result.open_completion;
     reply->result.open_completion=(struct md_open_completion){0};
@@ -642,7 +647,7 @@ static int begin(struct md_fs_buffer_service *s, pid_t actor, struct md_guest_do
     struct md_fs_buffer_request *r=calloc(1,sizeof(*r)+lengths[0]+lengths[1]+q.value_size+object_bytes+capture_bytes
         +(snapshot ? sizeof(input->snapshot.data) : 0));
     if (!r) return -ENOMEM;
-    r->service=s; r->actor=actor; r->opened.fd=-1;
+    r->service=s; r->actor=actor; r->opened.fd=r->control_descriptor=-1;
     r->images=(struct md_command_images){.program=-1,.loader=-1}; r->executable=executable;
     r->snapshot=(struct md_file_snapshot){.fd=-1,.flags=snapshot_flags};
     r->snapshot_phase=snapshot ? SNAPSHOT_BEGIN : SNAPSHOT_NONE;
@@ -710,7 +715,7 @@ int md_fs_buffer_inspect_begin(struct md_fs_buffer_service *s, pid_t actor, stru
     if (!count || count>253) return -EINVAL;
     struct md_fs_buffer_request *r=calloc(1,sizeof(*r)+count*sizeof(int));
     if (!r) return -ENOMEM;
-    r->service=s; r->actor=actor; r->output=frame; r->opened.fd=-1;
+    r->service=s; r->actor=actor; r->output=frame; r->opened.fd=r->control_descriptor=-1;
     r->images=(struct md_command_images){.program=-1,.loader=-1};
     r->snapshot.fd=-1; r->captured[0]=r->captured[1]=-1;
     r->received=md_received_fds_retain(sources); r->received_count=count;

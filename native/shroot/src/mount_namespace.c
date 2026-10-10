@@ -109,6 +109,7 @@ void md_view_mount_forget(struct md_fs_mounts *tree, struct md_view_mount *mount
     md_devpts_release(mount->devpts);
     md_cgroup_release(mount->cgroup);
     md_sysfs_release(mount->sysfs);
+    md_provider_tree_release(mount->provider);
     md_ipc_namespace_release(mount->ipc_namespace);
     md_control_file_release(mount->file);
     if (mount->source>=0) close(mount->source);
@@ -130,6 +131,7 @@ void md_mount_namespace_release(struct md_mount_namespace *n) {
             md_devpts_release(m->mounts[i].devpts);
             md_cgroup_release(m->mounts[i].cgroup);
             md_sysfs_release(m->mounts[i].sysfs);
+            md_provider_tree_release(m->mounts[i].provider);
             md_ipc_namespace_release(m->mounts[i].ipc_namespace);
             md_control_file_release(m->mounts[i].file);
             if (m->mounts[i].source>=0) close(m->mounts[i].source);

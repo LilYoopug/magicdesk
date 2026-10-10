@@ -33,6 +33,10 @@ struct cached_view {
 struct md_fs_origin_imports { int root; struct md_fd_identity store; struct cached_view *views; };
 struct md_fs_origin_vector { unsigned count; struct md_fs_anchor *entries[]; };
 
+int md_fs_anchor_portable(const struct md_fs_anchor *a) {
+    return !a || md_mount_graph_portable(a->view);
+}
+
 static size_t manifest_size(const struct manifest *m) {
     return offsetof(struct manifest,index)+m->count*sizeof(*m->index)
         +m->origins*sizeof(*m->origin)+(m->owners+m->views)*sizeof(struct span);

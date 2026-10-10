@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "fs_engine.h"
+#include "fs_native.h"
 #include "proc_fdinfo.h"
 #include "fs_context.h"
 #include "image_catalogue.h"
@@ -276,6 +277,16 @@ static void context_execute(struct md_fs_context *context,
     struct md_inode_boundary *previous_boundary=fs->store->boundary;
     fs->store->boundary=&boundary;
     fs->store->creation_mask=q->attributes.creation_mask;
+    /* Only a single-provider request can share its transaction across nested
+     * lookups. Mount crossings may open another connection to the same backing
+     * store; its lock must never be acquired under this connection's lock. */
+    int read_scope=!root_error && !md_mount_namespace_attached(fs->mounts)
+        && !q->origin[0] && !q->origin[1]
+        && (q->operation==MD_FS_STAT || q->operation==MD_FS_READLINK);
+    if (read_scope) {
+        root_error=mdi_begin(fs->store,0);
+        if (root_error) read_scope=0;
+    }
     if (root_error) *out=(struct md_fs_result){.fd=-1,.error=root_error};
     else if (task->landlock && (q->operation==MD_FS_MOUNT || q->operation==MD_FS_FSMOUNT))
         *out=(struct md_fs_result){.fd=-1,.error=-EPERM};
@@ -305,6 +316,9 @@ static void context_execute(struct md_fs_context *context,
         if (error) out->error=error;
     }
     fs->store->boundary=previous_boundary;
+    if (out->error==-EXDEV) md_fs_native_descriptor(q,out,output);
+    if (out->error==-EREMOTE && !fs->store->landlock)
+        md_fs_native_boundary(fs,&boundary,q,out,output);
     if (out->error==-EREMOTE && boundary.native_directory && q->resolve) {
         /* The logical walker admitted this native root. Resolve the remaining
          * suffix under that root in one kernel operation, never discard the
@@ -331,6 +345,7 @@ static void context_execute(struct md_fs_context *context,
             out->proc_namespace=boundary.proc_namespace;
         }
     }
+    if (read_scope) out->error=mdi_finish(fs->store,out->error);
     fs->store->creation_mask=previous_mask;
     fs->store->root_id=previous_root;
     fs->native_root=previous_native_root;

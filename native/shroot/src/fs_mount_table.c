@@ -4,6 +4,7 @@
 #include "native_mounts.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/magic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -99,6 +100,7 @@ static const char *filesystem_type(const struct md_view_mount *mount) {
     if (mount && mount->backing==MD_MOUNT_PROC) return "proc";
     if (mount && mount->backing==MD_MOUNT_DEVPTS) return "devpts";
     if (mount && mount->backing==MD_MOUNT_SYSFS) return "sysfs";
+    if (mount && mount->provider) return md_provider_tree_filesystem(mount->provider)==SYSFS_MAGIC ? "sysfs" : "tmpfs";
     if (mount && mount->backing==MD_MOUNT_MQUEUE) return "mqueue";
     if (mount && mount->cgroup) return md_cgroup_devices(mount->cgroup) ? "cgroup" : "cgroup2";
     return !md_view_inode(mount) ? "none" : md_filesystem_name(mount->storage ? mount->storage->filesystem_kind : MD_FILESYSTEM_INODE);

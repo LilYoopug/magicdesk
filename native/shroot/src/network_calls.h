@@ -2,5 +2,6 @@
 #define MD_NETWORK_CALLS_H
 long md_network_open(const unsigned long *);
 long md_network_call(long, const unsigned long *);
+long md_device_event_call(long,const unsigned long *);
 long md_network_data_call(long,const unsigned long *);
 #endif

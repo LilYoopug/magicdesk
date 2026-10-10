@@ -7,6 +7,8 @@
 #include "event_wait.h"
 #include "ipc_credentials.h"
 #include "ofd_order.h"
+#include "input_session.h"
+#include "device_events.h"
 #include <errno.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -29,6 +31,8 @@ struct md_fs_worker {
     const struct md_fs_attachment *attachments;
     unsigned attachment_count;
     const struct md_ipc_inherited *inherited;
+    const struct md_input_launch *input;
+    struct md_device_events *device_events;
     struct md_fs_work *completed, **completed_tail;
     struct md_fs_work *submitted, **submitted_tail;
     int stopping;
@@ -111,6 +115,10 @@ static void *run(void *context) {
     struct md_filesystem fs = {.store=store, .storage=&storage, .images=images, .tasks=w->tasks, .exchanges=w->exchanges,
         .cursors=w->cursors,.ipc_store=w->store};
     if (!error) error = md_fs_mounts_open(&fs, w->attachments, w->attachment_count);
+    struct md_input_session *input=NULL;
+    if (!error) error=md_input_session_start(&fs,w->input,&input);
+    if (!error) w->device_events=md_device_events_retain(md_input_session_events(input));
+    w->input=NULL;
     if (!error && w->inherited && w->inherited->count) {
         struct md_ipc_credentials *authority=NULL;
         error=md_fs_ipc_authority(&fs,&authority);
@@ -139,16 +147,20 @@ static void *run(void *context) {
         md_fs_worker_publish(w,work);
     }
     if (listener >= 0) close(listener);
+    md_input_session_stop(input);
     md_fs_mounts_close(&fs);
     md_fs_storage_close(&storage);
     md_ipc_credentials_close(fs.ipc);
     md_image_catalogue_close(images); md_inode_store_close(store);
     if (w->statistics) {
-        const struct md_cost *costs[] = {&stats.prepare, &stats.step, &stats.transaction, &stats.lock};
-        const char *names[] = {"prepare", "step", "transaction", "lock"};
-        for (unsigned i = 0; i < 4; ++i) fprintf(stderr, "MD_STORE phase=%s calls=%llu ns=%llu\n", names[i],
+        const struct md_cost *costs[] = {&stats.prepare, &stats.step, &stats.transaction, &stats.lock,
+            &stats.version,&stats.descriptor,&stats.path};
+        const char *names[] = {"prepare", "step", "transaction", "lock", "version", "descriptor", "path"};
+        for (unsigned i = 0; i < sizeof(costs)/sizeof(costs[0]); ++i) fprintf(stderr, "MD_STORE phase=%s calls=%llu ns=%llu\n", names[i],
             (unsigned long long)costs[i]->calls, (unsigned long long)costs[i]->nanoseconds);
         fprintf(stderr, "MD_STORE queryReuses=%llu\n", (unsigned long long)stats.query_reuses);
+        fprintf(stderr,"MD_STORE metadataCacheHits=%llu metadataCacheMisses=%llu\n",
+            (unsigned long long)stats.metadata_cache_hits,(unsigned long long)stats.metadata_cache_misses);
         fprintf(stderr, "MD_STORE linkCountQueries=%llu membershipQueries=%llu\n",
             (unsigned long long)stats.link_count_queries, (unsigned long long)stats.membership_queries);
         for (unsigned i = 0; i <= MD_FS_LAST; ++i) if (rpc.operation[i].calls)
@@ -169,7 +181,7 @@ static void *run(void *context) {
 }
 int md_fs_worker_start(const char *store, const char *endpoint, const char *admit, struct md_task_registry *tasks, struct md_fd_exchanges *exchanges,
         const struct md_fs_attachment *attachments, unsigned attachment_count, int statistics,
-        const struct md_ipc_inherited *inherited, struct md_fs_worker **out) {
+        const struct md_ipc_inherited *inherited, const struct md_input_launch *input, struct md_fs_worker **out) {
     struct md_fs_worker *w = calloc(1, sizeof(*w));
     if (!w) return -ENOMEM;
     w->wake = w->done = w->stop = w->ready = -1;
@@ -180,6 +192,7 @@ int md_fs_worker_start(const char *store, const char *endpoint, const char *admi
     w->exchanges=exchanges;
     w->attachments = attachments; w->attachment_count = attachment_count;
     w->inherited=inherited;
+    w->input=input;
     w->completed_tail = &w->completed;
     w->submitted_tail = &w->submitted;
     int *fds[] = {&w->wake, &w->done, &w->stop, &w->ready};
@@ -210,6 +223,7 @@ failed:
 int md_fs_worker_fd(struct md_fs_worker *w) { return w ? w->done : -1; }
 int md_fs_worker_wake_fd(struct md_fs_worker *w) { return w ? w->wake : -1; }
 struct md_mount_namespace *md_fs_worker_mounts(struct md_fs_worker *w) { return w ? w->mounts : NULL; }
+struct md_device_events *md_fs_worker_device_events(struct md_fs_worker *w) { return w ? w->device_events : NULL; }
 struct md_ofd_orders *md_fs_worker_cursors(struct md_fs_worker *w) { return w ? w->cursors : NULL; }
 void md_fs_worker_wake(struct md_fs_worker *w) { if (w) wake(w->wake); }
 int md_fs_worker_pause_begin(struct md_fs_worker *w, struct md_fs_worker_pause *p) {
@@ -307,6 +321,7 @@ int md_fs_worker_stop(struct md_fs_worker *w) {
     if (w->pause) *w->pause=(struct md_fs_worker_pause){0};
     close(w->wake); close(w->done); close(w->stop); close(w->ready);
     md_mount_namespace_release(w->mounts);
+    md_device_events_release(w->device_events);
     md_ofd_orders_release(w->cursors);
     pthread_mutex_destroy(&w->lock); free(w);
     return -error;

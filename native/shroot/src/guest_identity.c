@@ -51,6 +51,11 @@ int md_identity_in_group(const struct md_identity *v, uint32_t gid) {
     return v->groups && bsearch(&gid, v->groups->ids, v->groups->count,
         sizeof(gid), compare_gid) != NULL;
 }
+int md_identity_may_inspect(const struct md_identity *from, const struct md_identity *to) {
+    return from->uid.effective==to->uid.real && from->uid.effective==to->uid.effective
+        && from->uid.effective==to->uid.saved && from->gid.effective==to->gid.real
+        && from->gid.effective==to->gid.effective && from->gid.effective==to->gid.saved;
+}
 int md_identity_setgroups(struct md_identity *v, uint32_t *ids, unsigned count) {
     if (!md_identity_capable(v,CAP_SETGID) || !md_user_namespace_may_setgroups(v->user_namespace)) return -EPERM;
     if (count>MD_IDENTITY_GROUPS_MAX) return -EINVAL;

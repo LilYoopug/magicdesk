@@ -10,6 +10,8 @@ struct md_mount_namespace;
 struct md_fd_exchanges;
 struct md_ofd_orders;
 struct md_ipc_inherited;
+struct md_input_launch;
+struct md_device_events;
 struct md_fs_work {
     struct md_fs_work *next;
     /* Worker callback never blocks on the requesting task. A nonzero error
@@ -29,12 +31,13 @@ int md_fs_worker_pause_end(struct md_fs_worker_pause *);
  * Published work transfers to the supervisor. Queue locks never cover IO. */
 int md_fs_worker_start(const char *store, const char *endpoint, const char *admit, struct md_task_registry *, struct md_fd_exchanges *,
         const struct md_fs_attachment *, unsigned attachment_count, int statistics,
-        const struct md_ipc_inherited *, struct md_fs_worker **out);
+        const struct md_ipc_inherited *, const struct md_input_launch *, struct md_fs_worker **out);
 int md_fs_worker_fd(struct md_fs_worker *);
 /* Borrowed nonblocking eventfd for cross-owner readiness, valid until stop. */
 int md_fs_worker_wake_fd(struct md_fs_worker *);
 /* Borrowed until worker_stop; initialized before startup acknowledges readiness. */
 struct md_mount_namespace *md_fs_worker_mounts(struct md_fs_worker *);
+struct md_device_events *md_fs_worker_device_events(struct md_fs_worker *);
 struct md_ofd_orders *md_fs_worker_cursors(struct md_fs_worker *);
 void md_fs_worker_wake(struct md_fs_worker *);
 /* Caller-owned intrusive records containing trusted host-side state, never

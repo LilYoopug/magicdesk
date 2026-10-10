@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "task_helper.h"
+#include "task_quiesce.h"
 #include "adapter_frame.h"
 #include "fd_table_observation.h"
 #include "received_fds.h"
@@ -42,7 +43,7 @@ enum scenario { NORMAL, FULL, DENIED, KILLED_OPEN, CANCEL_CHANNEL, CANCEL_EXPORT
     CANCEL_SECOND, NO_SLOT, INVALID_INPUT, REPLACE_CAPTURED, CLONE_DENIED,
     ONE_SLOT, CANCEL_RIGHT, FILTER_EPIPE, PEER_CLOSED, SIGNAL_PIPE, CANCEL_IMPORT, PREFIX_SLOTS,
     EXACT_SLOTS, IMPORT_DENIED, CLOSE_DENIED, CONTROL_FAULT, ANCHOR_REJECT, ANCHOR_CANCEL, ANCHOR_DELIVER,
-    CANCEL_CAPTURE, REPLACE_PATH, INTERRUPT_OWNER };
+    CANCEL_CAPTURE, REPLACE_PATH, INTERRUPT_OWNER, QUIESCE_NEWBORN };
 struct snapshot { unsigned char present[512]; };
 struct completed {
     int called, captured, mutate, socket, source;
@@ -244,6 +245,36 @@ static struct md_fd_message *capture_message(struct completed *c, const int *inp
         && md_fd_order_state(&c->mutation)==MD_RESOURCE_ORDER_QUEUED);
     return message;
 }
+static int participant(void *context,pid_t pid,int stopped,int request) {
+    return md_task_quiesce_add(context,pid,stopped,request);
+}
+static void quiesce_newborn(struct md_task_helpers *helpers,pid_t owner) {
+    /* Select the parent first: the helper's initial stop is still unclaimed
+     * when an unrelated executable-memory repair pauses all writers. */
+    int status=wait_child(owner);
+    assert(WIFSTOPPED(status) && (unsigned)status>>16==PTRACE_EVENT_CLONE);
+    unsigned long child; assert(!ptrace(PTRACE_GETEVENTMSG,owner,NULL,&child));
+    assert(md_task_helper_event(helpers,owner,status)==1);
+    struct md_task_quiesce *q=md_task_quiesce_new(trace); assert(q);
+    assert(!md_task_helpers_visit(helpers,participant,q));
+    assert(!md_task_quiesce_stop(q));
+    while (!md_task_quiesce_ready(q)) {
+        /* EVENT_WAIT: both writers must stop; the fixture alarm bounds failure. */
+        pid_t pid=waitpid(-1,&status,__WALL); assert(pid>0);
+        assert(!md_task_quiesce_event(q,pid,status,NULL));
+    }
+    assert(!md_task_quiesce_release(q));
+    int initial=0; pid_t pid;
+    while ((pid=md_task_quiesce_take(q,&status,NULL))) {
+        if (pid==(pid_t)child) {
+            assert(WIFSTOPPED(status) && (unsigned)status>>16==PTRACE_EVENT_STOP);
+            ++initial;
+        }
+        assert(md_task_helper_event(helpers,pid,status)==1);
+    }
+    assert(initial==1);
+    md_task_quiesce_destroy(q);
+}
 struct send_frame {
     struct msghdr message;
     struct iovec vector;
@@ -394,6 +425,7 @@ static void exercise_request(int protected, enum scenario scenario, unsigned exp
         if (scenario==INTERRUPT_OWNER) assert(!ptrace(PTRACE_INTERRUPT,child,0,0));
         int owner_interrupted=0;
         assert(!md_task_helper_begin(helpers,child,child,&saved,&abi,memory,&buffer,&request,completed,&c));
+        if (scenario==QUIESCE_NEWBORN) quiesce_newborn(helpers,child);
         if (native_anchor>=0) close(native_anchor);
         md_received_fds_release(send_inputs); request.send_inputs=NULL;
         if (exported) memset(offered,0xff,exported*sizeof(int));
@@ -531,7 +563,7 @@ static void exercise_request(int protected, enum scenario scenario, unsigned exp
             assert(c.result.signal.si_signo==(scenario==SIGNAL_PIPE ? SIGPIPE : 0));
             if (destination>=0) {
                 int delivered=scenario==NORMAL || scenario==FULL || scenario==CANCEL_EXPORT || scenario==EXACT_SLOTS
-                    || scenario==ANCHOR_DELIVER || scenario==INTERRUPT_OWNER;
+                    || scenario==ANCHOR_DELIVER || scenario==INTERRUPT_OWNER || scenario==QUIESCE_NEWBORN;
                 if (delivered) {
                     char byte; struct iovec io={&byte,1};
                     union { struct cmsghdr align; char bytes[CMSG_SPACE(253*sizeof(int))]; } control={0};
@@ -628,6 +660,11 @@ int main(int argc, char **argv) {
         puts("PASS captured native pathname delivery and exact release"); return 0;
     }
     native_control_fault();
+    for (int protected=0;protected<2;++protected) {
+        exercise(protected,QUIESCE_NEWBORN,0,0);
+        exercise(protected,QUIESCE_NEWBORN,254,0);
+        exercise(protected,QUIESCE_NEWBORN,0,253);
+    }
     path_captures();
     for (int protected=0;protected<2;++protected)
         for (enum scenario s=NORMAL;s<=CANCEL_EXPORT;++s) exercise(protected,s,0,0);

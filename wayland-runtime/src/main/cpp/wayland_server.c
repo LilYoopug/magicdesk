@@ -248,9 +248,7 @@ static void release_output(MdwOutput *output) {
     struct wlr_output *native = output->output;
     output->output = NULL;
     output->scene_output = NULL;
-    if (!mdw_initial_output_refresh(output->server))
-        report_error(output->server, "Cannot restore initial Wayland output");
-    wlr_output_destroy(native);
+    mdw_monitor_release(output->server, native);
 }
 
 bool mdw_view_init(MdwServer *server, struct MdwView *view, struct wlr_surface *surface) {
@@ -601,16 +599,26 @@ const char *mdw_server_socket(const MdwServer *server) {
     return server->socket;
 }
 
-bool mdw_initial_output_refresh(MdwServer *server) {
-    if (!server->initial_output) return true;
-    bool hosted = server->shell_output != NULL;
-    MdwOutput *output;
-    wl_list_for_each(output, &server->outputs, link) {
-        if (output->output && wlr_output_layout_get(server->output_layout, output->output)) hosted = true;
+struct wlr_output *mdw_monitor_acquire(MdwServer *server, int width, int height) {
+    if (server->initial_output && !server->initial_output_borrowed) {
+        server->initial_output_borrowed = true;
+        return server->initial_output;
     }
-    if (hosted) wlr_output_layout_remove(server->output_layout, server->initial_output);
-    else if (!wlr_output_layout_add(server->output_layout, server->initial_output, 0, 0)) return false;
-    return true;
+    return wlr_headless_add_output(server->backend, width, height);
+}
+
+void mdw_monitor_release(MdwServer *server, struct wlr_output *output) {
+    if (!output) return;
+    if (output != server->initial_output) { wlr_output_destroy(output); return; }
+    // A registry global is not a ready replacement monitor: binding and its
+    // geometry require another client/server exchange. Keep the primary global
+    // and last geometry alive, but relinquish the host's rendering allocations.
+    wlr_swapchain_destroy(output->swapchain);
+    wlr_swapchain_destroy(output->cursor_swapchain);
+    output->swapchain = output->cursor_swapchain = NULL;
+    output->allocator = NULL;
+    output->renderer = NULL;
+    server->initial_output_borrowed = false;
 }
 
 bool mdw_server_initial_output(MdwServer *server, int width, int height, double scale) {
@@ -618,8 +626,8 @@ bool mdw_server_initial_output(MdwServer *server, int width, int height, double 
             !isfinite(scale) || scale < .25 || scale > 16 || server->initial_output) return false;
     struct wlr_output *output = wlr_headless_add_output(server->backend, width, height);
     if (!output) return false;
-    wlr_output_set_name(output, "MagicDesk-initial");
-    wlr_output_set_description(output, "MagicDesk initial application geometry");
+    wlr_output_set_name(output, "MagicDesk");
+    wlr_output_set_description(output, "MagicDesk logical monitor");
     struct wlr_output_state state;
     wlr_output_state_init(&state);
     wlr_output_state_set_enabled(&state, true);
@@ -629,7 +637,7 @@ bool mdw_server_initial_output(MdwServer *server, int width, int height, double 
     wlr_output_state_finish(&state);
     if (!committed) { wlr_output_destroy(output); return false; }
     server->initial_output = output;
-    if (mdw_initial_output_refresh(server)) return true;
+    if (wlr_output_layout_add(server->output_layout, output, 0, 0)) return true;
     server->initial_output = NULL;
     wlr_output_destroy(output);
     return false;
@@ -674,31 +682,32 @@ static MdwOutput *create_output(MdwServer *server, uint64_t id, int width, int h
     output->view = view;
     output->visible = true;
     output->scale = output->render_scale = 1;
-    output->output = wlr_headless_add_output(server->backend, width, height);
+    bool monitor = configure && view->configure;
+    output->output = monitor ? mdw_monitor_acquire(server, width, height)
+        : wlr_headless_add_output(server->backend, width, height);
     if (!output->output) { free(output); return NULL; }
     // Only application hosts are monitors. Shell and dependent render targets
     // borrow their owner's coordinates; advertising them causes monitor churn.
     // Hosts have independent local coordinate spaces, not a tiled desktop.
-    if (configure && view->configure &&
+    if (monitor &&
             !wlr_output_layout_add(server->output_layout, output->output, 0, 0)) {
-        wlr_output_destroy(output->output);
+        mdw_monitor_release(server, output->output);
         free(output);
         return NULL;
     }
     if (!wlr_output_init_render(output->output, server->allocator, server->renderer)) {
-        wlr_output_destroy(output->output);
+        mdw_monitor_release(server, output->output);
         free(output);
         return NULL;
     }
     output->scene_output = wlr_scene_output_create(view->scene, output->output);
-    if (!output->scene_output) { wlr_output_destroy(output->output); free(output); return NULL; }
+    if (!output->scene_output) { mdw_monitor_release(server, output->output); free(output); return NULL; }
     wl_list_insert(&server->outputs, &output->link);
     listen_signal(&output->output->events.frame, &output->frame, output_frame);
     listen_signal(&output->output->events.commit, &output->commit, output_commit);
     if (!(configure ? mdw_output_resize(output, width, height) : mdw_output_viewport(output, 0, 0, width, height))) {
         mdw_output_destroy(output); return NULL;
     }
-    if (!mdw_initial_output_refresh(server)) { mdw_output_destroy(output); return NULL; }
     return output;
 }
 
@@ -796,6 +805,13 @@ bool mdw_output_viewport(MdwOutput *output, int x, int y, int width, int height)
 bool mdw_output_set_visible(MdwOutput *output, bool visible) {
     if (!output || !output->output) return false;
     if (output->visible == visible) return true;
+    // Hiding a host stops its frames and input; it does not unplug its monitor.
+    if (!visible && wlr_output_layout_get(output->server->output_layout, output->output)) {
+        output->visible = false;
+        cancel_source_wait(output);
+        mdw_output_focus(output, false);
+        return true;
+    }
     struct wlr_output_state state;
     wlr_output_state_init(&state);
     wlr_output_state_set_enabled(&state, visible);
@@ -1053,14 +1069,14 @@ int mdw_server_dispatch(MdwServer *server, int timeout_ms) {
 
 void mdw_server_destroy(MdwServer *server) {
     if (!server) return;
-    if (server->initial_output) wlr_output_destroy(server->initial_output);
-    server->initial_output = NULL;
     MdwOutput *output, *next;
     wl_list_for_each_safe(output, next, &server->outputs, link) mdw_output_destroy(output);
     if (server->display) wl_display_destroy_clients(server->display);
     mdw_cursor_finish(server);
     mdw_input_finish(server);
     mdw_shell_finish(server);
+    if (server->initial_output) wlr_output_destroy(server->initial_output);
+    server->initial_output = NULL;
     if (server->shell) {
         wl_list_remove(&server->new_toplevel.link);
         wl_list_remove(&server->new_popup.link);

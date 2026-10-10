@@ -376,7 +376,7 @@ static void run_client(const char *socket, bool workspace, bool home, bool defer
     while (!client.closed) assert(wl_display_dispatch(client.display) >= 0);
     assert(wl_display_roundtrip(client.display) >= 0);
     if (!workspace) {
-        assert(client.outputs == 2 && client.monitors[0].removed && !client.monitors[1].removed);
+        assert(client.outputs == 2 && !client.monitors[0].removed && !client.monitors[1].removed);
         assert(client.monitors[0].width == 1000 && client.monitors[0].height == 750);
         assert(client.monitors[0].updates >= 2);
         assert(client.monitors[1].width == 40 && client.monitors[1].height == 30);

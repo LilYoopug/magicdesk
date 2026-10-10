@@ -122,6 +122,7 @@ int md_view_identity(struct md_filesystem *fs, int fd, struct md_view_object **o
 }
 int md_view_backing_path(struct md_filesystem *fs, int fd, const struct md_view_mount *mount,
         char *out, size_t size) {
+    if (mount && mount->provider) return md_provider_tree_path(mount->provider,fd,out,size);
     if (mount && mount->devpts) {
         char name[32]; int r=md_devpts_name(mount->devpts,fd,name,sizeof(name));
         if (r) return r;
@@ -403,6 +404,7 @@ int md_fs_mounts_copy(struct md_filesystem *fs, const struct md_fs_location *roo
             .devpts=md_devpts_retain(a->devpts),
             .cgroup=md_cgroup_retain(a->cgroup),
             .sysfs=md_sysfs_retain(a->sysfs),
+            .provider=md_provider_tree_retain(a->provider),
             .ipc_namespace=md_ipc_namespace_retain(a->ipc_namespace),
             .file=md_control_file_retain(a->file),
             .policy={.local=md_mount_policy_flags(&a->policy)},.native=a->native,.guest=a->guest,

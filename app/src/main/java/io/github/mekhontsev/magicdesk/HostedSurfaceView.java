@@ -20,6 +20,7 @@ final class HostedSurfaceView extends SurfaceView implements SurfaceHolder.Callb
     private final HostedPointerInput pointerInput;
     private final HostedCursor cursor = new HostedCursor();
     private HostedSurfaceOutput output;
+    private LinuxGamepads gamepads;
     private SurfaceBinding surfaceBinding;
     private boolean inputAllowed = true;
     private boolean keyboardAllowed = true;
@@ -76,6 +77,17 @@ final class HostedSurfaceView extends SurfaceView implements SurfaceHolder.Callb
         if (moved && textConnection != null) textConnection.cursorChanged();
     }
 
+    void gamepads(LinuxGamepads lease) {
+        if (gamepads != null) gamepads.focus(this, false);
+        gamepads = lease;
+        updateGamepadFocus();
+    }
+
+    private void updateGamepadFocus() {
+        if (gamepads != null) gamepads.focus(this,
+                inputAllowed && output != null && isFocused() && hasWindowFocus());
+    }
+
     void cursor(android.graphics.Bitmap image, int hotspotX, int hotspotY, boolean hidden) {
         cursor.set(image, hotspotX, hotspotY, hidden);
         updateCursor();
@@ -119,6 +131,7 @@ final class HostedSurfaceView extends SurfaceView implements SurfaceHolder.Callb
     void release() {
         if (textConnection != null) { textConnection.dispose(); textConnection = null; }
         releaseInput();
+        gamepads = null;
         if (output != null) {
             if (ownsOutput) output.close();
             else if (surfaceBinding != null) surfaceBinding.changed(null, 0, 0);
@@ -135,6 +148,7 @@ final class HostedSurfaceView extends SurfaceView implements SurfaceHolder.Callb
     void allowInput(boolean allowed) {
         if (inputAllowed && !allowed) releaseInput();
         inputAllowed = allowed;
+        updateGamepadFocus();
     }
 
     void allowKeyboard(boolean allowed) {
@@ -151,6 +165,7 @@ final class HostedSurfaceView extends SurfaceView implements SurfaceHolder.Callb
     }
 
     private void releaseInput() {
+        if (gamepads != null) gamepads.focus(this, false);
         if (!contentDrag) pointerInput.release();
         releaseKeys();
     }
@@ -169,6 +184,7 @@ final class HostedSurfaceView extends SurfaceView implements SurfaceHolder.Callb
 
     @Override protected void onFocusChanged(boolean gain, int direction, android.graphics.Rect previous) {
         super.onFocusChanged(gain, direction, previous);
+        updateGamepadFocus();
         if (gain && keyboardAllowed && inputAllowed && output != null && hasWindowFocus()) {
             if (focusBoundary != null) focusBoundary.run(); else output.focus();
         }
@@ -178,6 +194,7 @@ final class HostedSurfaceView extends SurfaceView implements SurfaceHolder.Callb
 
     @Override public void onWindowFocusChanged(boolean gain) {
         super.onWindowFocusChanged(gain);
+        updateGamepadFocus();
         if (!gain) {
             if (focusBoundary == null) releaseInput();
             if (focusBoundary == null && output != null) output.blur();
@@ -224,6 +241,7 @@ final class HostedSurfaceView extends SurfaceView implements SurfaceHolder.Callb
 
     private boolean motion(MotionEvent event) {
         if (!inputAllowed) return false;
+        if (output != null && gamepads != null && gamepads.motion(this, event)) return true;
         rawX = event.getRawX(); rawY = event.getRawY();
         if (windowMotion != null && windowMotion.test(event)) return true;
         if (contentDrag) return true;
@@ -238,6 +256,7 @@ final class HostedSurfaceView extends SurfaceView implements SurfaceHolder.Callb
     @Override public boolean onKeyUp(int key, KeyEvent event) { return key(event, false) || super.onKeyUp(key, event); }
 
     private boolean key(KeyEvent event, boolean down) {
+        if (inputAllowed && output != null && gamepads != null && gamepads.key(this, event)) return true;
         if (!keyboardAllowed || !inputAllowed || output == null || event.getKeyCode() == KeyEvent.KEYCODE_BACK || event.getKeyCode() == KeyEvent.KEYCODE_VOLUME_UP
                 || event.getKeyCode() == KeyEvent.KEYCODE_VOLUME_DOWN) return false;
         int scan = event.getScanCode();

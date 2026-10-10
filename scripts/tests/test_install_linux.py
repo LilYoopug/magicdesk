@@ -97,6 +97,21 @@ if os.environ.get("TEST_FAIL") == stage:
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("xfce", self.calls()[-1][-9])
 
+    def test_gui_installs_gl_dispatch_libraries_with_mesa_drivers(self):
+        result = self.run_script('--yes', '--gui', 'apps')
+        self.assertEqual(0, result.returncode, result.stderr)
+        setup = self.payload.read_text()
+        start = setup.index('    case "$family" in\n        apt) packages dbus-x11')
+        end = setup.index('\n    dbus-uuidgen --ensure', start)
+        command = 'family=apt\npackages() { printf "%s\\n" "$@"; }\n' + setup[start:end]
+        # EVENT_WAIT: package selection exits; timeout fails a stuck recipe.
+        selected = subprocess.run(['sh', '-eu', '-c', command], capture_output=True,
+                                  text=True, timeout=5)
+        self.assertEqual(0, selected.returncode, selected.stderr)
+        packages = set(selected.stdout.splitlines())
+        self.assertTrue({'libgl1-mesa-dri', 'libegl-mesa0', 'libglx-mesa0',
+                         'libegl1', 'libgl1', 'libgles2'} <= packages)
+
     def test_audio_session_owns_graph_and_keeps_host_transport_separate(self):
         result = self.run_script('--print-audio-session')
         self.assertEqual(0, result.returncode, result.stderr)

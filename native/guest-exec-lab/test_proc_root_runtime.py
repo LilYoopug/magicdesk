@@ -15,7 +15,10 @@ def main():
     base = [suite.runner, '--store', args.store, '--user', '0:0']
     try:
         suite.transport.upload(suite.client, Path(__file__).with_name('test_proc_root_guest.py'), suite.base + '/probe.py')
+        suite.transport.upload(suite.client, Path(__file__).with_name('test_fd_selector_guest.py'), suite.base + '/selectors.py')
         suite.command(base + ['--', '/bin/mkdir', target])
+        suite.command(base + ['--bind-ro', suite.base, target, '--deadline-seconds', '60', '--',
+                              '/usr/bin/python3', target + '/selectors.py'])
         for wrapper in ([], ['/usr/bin/unshare', '--pid', '--fork', '--mount-proc']):
             process = Server(suite, base + ['--bind-ro', suite.base, target, '--deadline-seconds', '90',
                                            '--'] + wrapper + ['/usr/bin/python3', target + '/probe.py'])

@@ -142,6 +142,10 @@ __attribute__((noinline)) static long dispatch_scoped(long nr, unsigned long a0,
 }
 long md_guest_dispatch(long nr, unsigned long a0, unsigned long a1, unsigned long a2,
         unsigned long a3, unsigned long a4, unsigned long a5, unsigned scoped) {
+    if (scoped&MD_DISPATCH_DEVICE_EVENTS) {
+        unsigned long args[]={a0,a1,a2,a3,a4,a5};
+        return nr==SYS_socket ? md_network_open(args) : md_device_event_call(nr,args);
+    }
     if (scoped&MD_DISPATCH_NETWORK_DATA) {
         unsigned long args[]={a0,a1,a2,a3,a4,a5};
         return md_network_data_call(nr,args);
@@ -397,6 +401,8 @@ int md_interception_install(int inherited) {
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_newfstatat, 0, 1),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_getdents64, 0, 1),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_readlinkat, 0, 1),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_prctl, 0, 5),
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])),

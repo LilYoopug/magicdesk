@@ -15,7 +15,9 @@ final class X11Execution {
     final String serverPackage;
     private final Context context;
     private final String keyboardSource;
-    private LinuxAudio audio;
+    private LinuxLaunchServices services;
+
+    LinuxGamepads gamepads() { return services == null ? null : services.gamepads; }
 
     X11Execution(Context context, DesktopExecBackend backend, String keyboardSource) {
         this.context = context.getApplicationContext();
@@ -40,17 +42,17 @@ final class X11Execution {
     }
 
     Closeable startServer(X11LaunchSpec spec, CommandExecution.Completion completion) throws IOException {
-        audio = LinuxAudio.prepare(context, commands);
+        services = LinuxLaunchServices.prepare(context, commands);
         try {
             Closeable server = startServerProcess(spec, (code, output, error) -> {
-                audio.close(); completion.complete(code, output, error);
+                services.close(); completion.complete(code, output, error);
             });
-            return () -> { try { server.close(); } finally { audio.close(); } };
-        } catch (IOException | RuntimeException error) { audio.close(); throw error; }
+            return () -> { try { server.close(); } finally { services.close(); } };
+        } catch (IOException | RuntimeException error) { services.close(); throw error; }
     }
 
     Closeable startClient(String command, String directory, String name, CommandExecution.Completion completion) {
-        return commands.start(audio.exports() + command, directory, name, null, completion);
+        return commands.start(services.exports() + command, directory, name, null, completion);
     }
 
     private Closeable startServerProcess(X11LaunchSpec spec, CommandExecution.Completion completion) throws IOException {

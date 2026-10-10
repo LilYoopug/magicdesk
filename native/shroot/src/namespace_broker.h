@@ -2,6 +2,11 @@
 #define MD_NAMESPACE_BROKER_H
 #include "fs_worker.h"
 #include <linux/seccomp.h>
+#include <sys/syscall.h>
+static inline int md_broker_filesystem_call(int nr) {
+    return nr==SYS_openat || nr==SYS_newfstatat || nr==SYS_fstat
+        || nr==SYS_getdents64 || nr==SYS_readlinkat;
+}
 struct md_namespace_broker;
 struct md_namespace_broker *md_broker_create(struct md_fs_worker *, int statistics,
         void (*delegate)(const struct seccomp_notif *));

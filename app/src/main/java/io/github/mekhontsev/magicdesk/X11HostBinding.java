@@ -48,6 +48,7 @@ final class X11HostBinding implements X11Sessions.Listener {
             try {
                 output = session.openOutput(window);
                 surface.bind(new X11SurfaceOutput(output));
+                surface.gamepads(session.execution.gamepads());
                 exchange = new HostedContentExchange(activity, surface, new X11ContentExchange(activity, session, output));
                 if (window != 0) family = new HostedFamilyWindows(activity, surface, new HostedFamilyWindows.Backend() {
                     @Override public HostedShellOutput borrow(java.util.function.Consumer<HostedFamilyGeometry> changed,
@@ -58,6 +59,7 @@ final class X11HostBinding implements X11Sessions.Listener {
                         return new X11SurfaceOutput(dependentOutput);
                     }
                     @Override public void mounted(HostedSurfaceView view) {
+                        view.gamepads(session.execution.gamepads());
                         dependentExchange = new HostedContentExchange(activity, view,
                                 new X11ContentExchange(activity, session, dependentOutput));
                         updateExchangeFocus();

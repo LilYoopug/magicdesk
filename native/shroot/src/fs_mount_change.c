@@ -114,6 +114,7 @@ static void discard(struct md_view_mount *m) {
     md_devpts_release(m->devpts);
     md_cgroup_release(m->cgroup);
     md_sysfs_release(m->sysfs);
+    md_provider_tree_release(m->provider);
     md_ipc_namespace_release(m->ipc_namespace);
     md_control_file_release(m->file);
 }
@@ -277,6 +278,7 @@ static int bind(struct md_filesystem *fs, const struct md_fs_request *q,
             pending[root_slot].devpts=md_devpts_retain(source.mount->devpts);
             pending[root_slot].cgroup=md_cgroup_retain(source.mount->cgroup);
             pending[root_slot].sysfs=md_sysfs_retain(source.mount->sysfs);
+            pending[root_slot].provider=md_provider_tree_retain(source.mount->provider);
             pending[root_slot].ipc_namespace=md_ipc_namespace_retain(source.mount->ipc_namespace);
         }
         if (!r) pending[root_slot].file=md_control_file_retain(file);
@@ -319,6 +321,7 @@ static int bind(struct md_filesystem *fs, const struct md_fs_request *q,
         if (!r) pending[slot].devpts=md_devpts_retain(m->devpts);
         if (!r) pending[slot].cgroup=md_cgroup_retain(m->cgroup);
         if (!r) pending[slot].sysfs=md_sysfs_retain(m->sysfs);
+        if (!r) pending[slot].provider=md_provider_tree_retain(m->provider);
         if (!r) pending[slot].ipc_namespace=md_ipc_namespace_retain(m->ipc_namespace);
         if (!r) pending[slot].file=md_control_file_retain(m->file);
         if (!r && md_view_file_cycle(m->file,fs->mounts)) r=-EINVAL;
@@ -363,6 +366,7 @@ int md_view_attach_source(struct md_filesystem *fs, const struct md_mount_source
         pending[slot].devpts=md_devpts_retain(source->devpts);
         pending[slot].cgroup=md_cgroup_retain(source->cgroup);
         pending[slot].sysfs=md_sysfs_retain(source->sysfs);
+        pending[slot].provider=md_provider_tree_retain(source->provider);
         pending[slot].ipc_namespace=md_ipc_namespace_retain(source->ipc);
     }
     if (!r) r=publish(fs,0,pending,count);

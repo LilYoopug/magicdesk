@@ -151,18 +151,61 @@ long md_network_data_call(long nr,const unsigned long *a) {
     }
     return result ? result : released;
 }
-long md_network_call(long nr, const unsigned long *a) {
+static long device_receive_ready(void) {
+    long memory=md_adapter_buffer_take(); if (memory<0) return memory;
+    long result=md_guest_buffer_control(MD_BUFFER_NETWORK_CALL,0,0);
+    long released=md_adapter_buffer_release(); return result ? result : released;
+}
+static long device_source(const struct msghdr *message,long received,struct sockaddr_nl *source) {
+    char prefix[8]={0}; size_t used=0;
+    size_t needed=received<8 ? (size_t)received : 8;
+    for (size_t i=0;i<message->msg_iovlen && used<needed;++i) {
+        struct iovec part;
+        long error=md_read_memory(&part,message->msg_iov+i,sizeof(part)); if (error) return error;
+        size_t n=part.iov_len<needed-used ? part.iov_len : needed-used;
+        if (n) { error=md_read_memory(prefix+used,part.iov_base,n); if (error) return error; used+=n; }
+    }
+    unsigned match=used==8;
+    for (unsigned i=0;i<8;++i) match&=prefix[i]=="libudev"[i];
+    source->nl_groups=match ? 2 : 1;
+    return 0;
+}
+static long device_credentials(const struct msghdr *message) {
+    size_t offset=0;
+    while (message->msg_controllen-offset>=sizeof(struct cmsghdr)) {
+        struct cmsghdr c;
+        long error=md_read_memory(&c,(char *)message->msg_control+offset,sizeof(c)); if (error) return error;
+        if (c.cmsg_len<CMSG_LEN(0) || c.cmsg_len>message->msg_controllen-offset) return -EPROTO;
+        if (c.cmsg_level==SOL_SOCKET && c.cmsg_type==SCM_CREDENTIALS && c.cmsg_len==CMSG_LEN(sizeof(struct ucred))) {
+            struct ucred trusted={0};
+            error=md_write_memory((char *)message->msg_control+offset+CMSG_LEN(0),&trusted,sizeof(trusted));
+            if (error) return error;
+        }
+        size_t step=CMSG_ALIGN(c.cmsg_len);
+        if (step>message->msg_controllen-offset) break;
+        offset+=step;
+    }
+    return 0;
+}
+static long control_call(long nr,const unsigned long *a,int events) {
     /* These options describe the real message queue, not a host interface or
      * peer identity. Let the kernel own validation, dup sharing and timeouts. */
     if ((nr==SYS_setsockopt || nr==SYS_getsockopt) && queue_option(a[1],a[2]))
         return md_raw(nr,a[0],a[1],a[2],a[3],a[4],a[5]);
+    if (events && (nr==SYS_setsockopt || nr==SYS_getsockopt) && a[1]==SOL_SOCKET
+            && (a[2]==SO_PASSCRED || a[2]==SO_ATTACH_FILTER || a[2]==SO_DETACH_FILTER || a[2]==SO_RCVBUFFORCE))
+        return md_raw(nr,a[0],a[1],a[2],a[3],a[4],a[5]);
     if (nr==SYS_ioctl && (a[1]==FIONBIO || a[1]==FIONREAD || a[1]==TIOCOUTQ))
         return RAW3(ioctl,a[0],a[1],a[2]);
     if (nr==SYS_read || nr==SYS_readv || nr==SYS_recvfrom || nr==SYS_recvmsg || nr==SYS_recvmmsg) {
+        if (events) { long error=device_receive_ready(); if (error) return error; }
         if (nr==SYS_recvfrom && a[4]) {
             long result=RAW6(recvfrom,a[0],a[1],a[2],a[3],0,0);
             struct sockaddr_nl source={.nl_family=AF_NETLINK};
-            long error=result<0 ? 0 : output((void *)a[4],(void *)a[5],&source,sizeof(source));
+            struct iovec vector={(void *)a[1],a[2]};
+            struct msghdr message={.msg_iov=&vector,.msg_iovlen=1};
+            long error=events && result>=0 ? device_source(&message,result<(long)a[2] ? result : (long)a[2],&source) : 0;
+            if (!error && result>=0) error=output((void *)a[4],(void *)a[5],&source,sizeof(source));
             return error ? error : result;
         }
         if (nr==SYS_recvmsg) {
@@ -173,11 +216,13 @@ long md_network_call(long nr, const unsigned long *a) {
             long result=RAW3(recvmsg,a[0],&native,a[2]); if (result<0) return result;
             if (original.msg_name) {
                 struct sockaddr_nl source={.nl_family=AF_NETLINK};
+                if (events) { error=device_source(&native,result,&source); if (error) return error; }
                 size_t size=original.msg_namelen<sizeof(source) ? original.msg_namelen : sizeof(source);
                 error=md_write_memory(original.msg_name,&source,size);
                 original.msg_namelen=sizeof(source);
             }
             original.msg_controllen=native.msg_controllen; original.msg_flags=native.msg_flags;
+            if (!error && events) error=device_credentials(&native);
             if (!error) error=md_write_memory((void *)a[1],&original,sizeof(original));
             return error ? error : result;
         }
@@ -234,3 +279,5 @@ long md_network_call(long nr, const unsigned long *a) {
         result=output((void *)a[nr==SYS_getsockname ? 1 : 3],(void *)a[nr==SYS_getsockname ? 2 : 4],(void *)memory,result);
     long released=md_adapter_buffer_release(); return result ? result : released;
 }
+long md_network_call(long nr,const unsigned long *a) { return control_call(nr,a,0); }
+long md_device_event_call(long nr,const unsigned long *a) { return control_call(nr,a,1); }

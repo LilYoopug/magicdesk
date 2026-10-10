@@ -35,6 +35,7 @@ final class WaylandHostBinding implements AutoCloseable {
         output = session.openOutput(window, surface.getWidth(), surface.getHeight());
         updateDensity();
         surface.bind(new WaylandSurfaceOutput(output));
+        surface.gamepads(session.execution.gamepads());
         exchange = new HostedContentExchange(activity, surface, new WaylandContentExchange(activity, session, output));
         family = new HostedFamilyWindows(activity, surface, new HostedFamilyWindows.Backend() {
             @Override public HostedShellOutput borrow(Consumer<HostedFamilyGeometry> changed, Consumer<Throwable> failed) {
@@ -54,6 +55,7 @@ final class WaylandHostBinding implements AutoCloseable {
                 updateExchangeFocus();
             }
             @Override public void mounted(HostedSurfaceView view) {
+                view.gamepads(session.execution.gamepads());
                 dependentSurface = view;
                 dependentExchange = new HostedContentExchange(activity, view,
                         new WaylandContentExchange(activity, session, dependents));

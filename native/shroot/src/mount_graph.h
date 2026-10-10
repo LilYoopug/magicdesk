@@ -15,6 +15,8 @@ enum { MD_MOUNT_GRAPH_PLACEMENT_FDS=6+3*MD_FS_MOUNTS_MAX,
 struct md_mount_graph_parcel { unsigned count; int *fd; };
 void md_mount_graph_parcel_close(struct md_mount_graph_parcel *);
 unsigned md_mount_graph_rights(struct md_mount_namespace *);
+/* Private providers retain process-local owners, not serializable host paths. */
+int md_mount_graph_portable(const struct md_mount_namespace *);
 /* Worker-only. The final right identifies the live topology stream. Snapshot
  * rights retain their own revision and backing stores until import completes. */
 int md_mount_graph_export(struct md_mount_namespace *, int store_root, struct md_mount_graph_parcel *);

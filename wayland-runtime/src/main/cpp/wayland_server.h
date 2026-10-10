@@ -114,8 +114,8 @@ void mdw_content_drag(MdwServer *server, MdwOutput *output, MdwDragAction action
     uint64_t offer, double x, double y, bool accepted);
 
 MdwServer *mdw_server_create(void);
-// Logical discovery geometry while no application/workspace output exists.
-// No renderer, surface, input ownership or frame loop is acquired.
+// Initial geometry of the session's persistent primary monitor. Application and
+// workspace hosts borrow it; creating it acquires no rendering or input owner.
 bool mdw_server_initial_output(MdwServer *server, int width, int height, double scale);
 void mdw_server_set_events(MdwServer *server, const MdwEvents *events);
 const char *mdw_server_socket(const MdwServer *server);

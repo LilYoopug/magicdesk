@@ -142,6 +142,16 @@ systemd session or GPU test.
 sandbox-enabled user/PID route and JavaScript execution. These application
 checks do not certify kernel-equivalent confinement or Docker Engine support.
 
+`test_native_reads_runtime.py BUILD STORE` checks inode, bind and native reads
+under shell, including protected callers and managed proc-FD observations.
+Bind aliases retain the opened descriptor's exact mount provenance.
+Process credentials, kernel dumpability and logical namespace handles retain
+their respective access rules. The filesystem directory suite also checks
+direct worker observations against FD reuse, occupied table turns and typed
+provider fallback, including exact descriptor cleanup. Authenticated native
+service owners use native inspection rather than guest-table admission;
+nondumpable owners retain the caller-side permission check.
+
 ## Holo ARM64 Userspace
 
 ### Executable Private Memory
@@ -151,7 +161,10 @@ replacement transactions and automatic mprotect repair. Build the native
 `jit_memory` and `task_quiesce` CMake fixtures. The matrix takes one writable
 directory; `--automatic` and `--automatic-threads` require a Shroot launch.
 `test_resources.py BUILD --case private-memory` checks memory ownership and runs
-the same fixture natively and in an isolated Shroot store. It asserts supervisor
+the backing-lifetime regression: independent opens, 32 exec images and 256
+mappings share one file source, with fork, failed mmap, status flags and final
+unmap checked against exact FD counts. It runs the JIT policy fixture natively
+and in an isolated Shroot store. It asserts supervisor
 proc/backing capture, independent protected-child memory, FD exhaustion cleanup,
 and noexec preservation after optional provenance loss. Worker-pause checks cover
 acknowledgement, queued work, independent workers, cancellation and shutdown

@@ -32,7 +32,8 @@ struct md_inode_lifetime *mdi_lifetime_new(int root, const struct stat *);
 enum mdi_query { MDI_NODE, MDI_FD, MDI_LOOKUP, MDI_DIRECTORY_NAME, MDI_READDIR,
     MDI_BEGIN, MDI_BEGIN_WRITE, MDI_COMMIT, MDI_ROLLBACK, MDI_EVENT, MDI_EVENT_TRIM,
     MDI_EVENT_END, MDI_EVENT_SCAN, MDI_EVENT_NAMES, MDI_BACKING_OBJECT, MDI_FILE_PATH, MDI_ACL,
-    MDI_OVERLAY_LINK, MDI_QUERY_COUNT };
+    MDI_OVERLAY_LINK, MDI_DATA_VERSION, MDI_QUERY_COUNT };
+struct mdi_read_cache;
 struct md_inode_store {
     sqlite3 *db;
     int objects, watch_presence, locked, recording, readonly, reflink_unavailable;
@@ -49,6 +50,9 @@ struct md_inode_store {
     struct md_inode_statistics *statistics;
     struct mdi_overlay_writer *overlay;
     int write_transaction;
+    struct mdi_read_cache *read_cache;
+    int cache_checked;
+    unsigned read_depth;
     sqlite3_stmt *queries[MDI_QUERY_COUNT];
 #ifdef MD_INODE_TESTING
     void (*observe)(enum md_inode_checkpoint, void *);
@@ -74,6 +78,18 @@ struct mdi_location {
     char name[NAME_MAX+1];
     int exists, special, trailing;
 };
+struct mdi_cache_key {
+    enum mdi_query query;
+    uint64_t device, inode;
+    const char *id, *name;
+};
+struct mdi_path_name { char parent[33], name[NAME_MAX+1]; int ambiguous; };
+int mdi_cache_name_get(struct md_inode_store *, const struct mdi_cache_key *, struct mdi_path_name *);
+void mdi_cache_name_put(struct md_inode_store *, const struct mdi_cache_key *, const struct mdi_path_name *);
+int mdi_cache_get(struct md_inode_store *, const struct mdi_cache_key *, struct mdi_node *, int *result);
+void mdi_cache_put(struct md_inode_store *, const struct mdi_cache_key *, const struct mdi_node *, int result);
+void mdi_cache_invalidate(struct md_inode_store *);
+void mdi_cache_snapshot(struct md_inode_store *, sqlite3_int64 version);
 int mdi_landlock(struct md_inode_store *,const struct mdi_node *,const struct mdi_node *,uint64_t);
 int mdi_landlock_object(struct md_inode_store *,const struct mdi_node *,uint64_t);
 /* ENTRY retains the final directory entry (unlink/rename/create). NOFOLLOW

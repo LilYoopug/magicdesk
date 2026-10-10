@@ -25,6 +25,7 @@ int mdi_sql_error(int rc) {
     }
 }
 int mdi_sql(struct md_inode_store *s, const char *text) {
+    mdi_cache_invalidate(s);
     struct md_cost *cost = s->statistics ? &s->statistics->transaction : NULL;
     int64_t begin = md_cost_begin(cost);
     int result = mdi_sql_error(sqlite3_exec(s->db, text, NULL, NULL, NULL));
@@ -42,9 +43,17 @@ int mdi_prepare(struct md_inode_store *s, const char *text, sqlite3_stmt **out) 
 }
 int mdi_step(struct md_inode_store *s, sqlite3_stmt *q) {
     struct md_cost *cost = s->statistics ? &s->statistics->step : NULL;
+    uint64_t before=cost ? cost->nanoseconds : 0;
     int64_t begin = md_cost_begin(cost);
     int result = sqlite3_step(q);
-    md_cost_end(cost, begin); return result;
+    md_cost_end(cost, begin);
+    if (s->statistics) {
+        struct md_cost *kind=q==s->queries[MDI_DATA_VERSION] ? &s->statistics->version
+            : q==s->queries[MDI_FD] ? &s->statistics->descriptor
+            : q==s->queries[MDI_DIRECTORY_NAME] || q==s->queries[MDI_FILE_PATH] ? &s->statistics->path : NULL;
+        if (kind) { ++kind->calls; kind->nanoseconds+=cost->nanoseconds-before; }
+    }
+    return result;
 }
 void md_inode_measure(struct md_inode_store *s, struct md_inode_statistics *statistics) {
     s->statistics = statistics;
@@ -103,20 +112,40 @@ static int transaction(struct md_inode_store *s, enum mdi_query slot) {
 }
 int mdi_begin(struct md_inode_store *s, int write) {
     if (write && s->readonly) return -EROFS;
+    if (s->read_depth) {
+        if (write) return -EDEADLK;
+        ++s->read_depth; return 0;
+    }
     int r = store_lock(s);
     if (r) return r;
     s->recording = 0;
     s->write_transaction=!!write;
+    s->cache_checked=0;
+    if (write) mdi_cache_invalidate(s);
     if (write) {
         if (!flock(s->watch_presence, LOCK_EX | LOCK_NB)) {
             if (flock(s->watch_presence, LOCK_UN)) r = -errno;
         } else if (errno == EWOULDBLOCK) s->recording = 1;
         else r = -errno;
     }
-    if (!r) r = transaction(s, write ? MDI_BEGIN_WRITE : MDI_BEGIN);
+    if (!r) r=transaction(s,write ? MDI_BEGIN_WRITE : MDI_BEGIN);
+    if (!r && !write) {
+        sqlite3_stmt *query=NULL;
+        r=mdi_query_acquire(s,MDI_DATA_VERSION,&query);
+        if (!r) {
+            int rc=mdi_step(s,query);
+            if (rc!=SQLITE_ROW) r=mdi_sql_failure(rc);
+        }
+        if (!r) mdi_cache_snapshot(s,sqlite3_column_int64(query,0));
+        r=mdi_query_release(query,r);
+        if (r) transaction(s,MDI_ROLLBACK);
+        else s->read_depth=1;
+    }
     return r ? store_unlock(s, r) : 0;
 }
 int mdi_finish(struct md_inode_store *s, int result) {
+    if (s->read_depth && --s->read_depth) return result;
+    s->cache_checked=0;
     if (!result && s->write_transaction && s->overlay) result=mdi_overlay_flush(s);
     if (!result) result = transaction(s, MDI_COMMIT);
     if (result) transaction(s, MDI_ROLLBACK);
@@ -206,7 +235,8 @@ int mdi_query_acquire(struct md_inode_store *s, enum mdi_query slot, sqlite3_stm
         [MDI_BACKING_OBJECT] = "SELECT object FROM backings WHERE backing=?1 AND source=?2 AND scope=?3",
         [MDI_FILE_PATH] = "SELECT parent,name,ambiguous FROM file_paths WHERE object=?1",
         [MDI_ACL] = "SELECT value FROM inode_acls WHERE object=?1 AND type=?2",
-        [MDI_OVERLAY_LINK] = "SELECT upper,lower FROM overlay_links WHERE object=?1"
+        [MDI_OVERLAY_LINK] = "SELECT upper,lower FROM overlay_links WHERE object=?1",
+        [MDI_DATA_VERSION] = "PRAGMA main.data_version"
     };
 #undef NODE_COLUMNS
     int result = 0;
@@ -219,39 +249,61 @@ int mdi_query_acquire(struct md_inode_store *s, enum mdi_query slot, sqlite3_stm
 }
 int mdi_query_release(sqlite3_stmt *q, int result) {
     if (!q) return result;
-    /* Cache only the compiled program, never rows, bindings or a read snapshot. */
+    /* Statement reuse never retains bindings or a read snapshot. */
     int reset = mdi_sql_error(sqlite3_reset(q));
     int clear = mdi_sql_error(sqlite3_clear_bindings(q));
     return result ? result : reset ? reset : clear;
 }
 int mdi_node(struct md_inode_store *s, const char *id, struct mdi_node *node) {
+    /* Callers may select node->parent into that same node. Keep the lookup
+     * key independent of the output overwritten by read_node/cache delivery. */
+    char selected[33];
+    int cacheable=strnlen(id,sizeof(selected))<sizeof(selected);
+    if (cacheable) strcpy(selected,id);
+    const struct mdi_cache_key key={.query=MDI_NODE,.id=selected};
+    int cached;
+    if (cacheable && mdi_cache_get(s,&key,node,&cached)) return cached;
     sqlite3_stmt *q = NULL;
     int r = mdi_query_acquire(s, MDI_NODE, &q);
     if (!r) r = mdi_bind_id(q, 1, id);
     if (!r) r = read_node(s, q, node);
-    return mdi_query_release(q, r);
+    r=mdi_query_release(q,r);
+    if (cacheable) mdi_cache_put(s,&key,node,r);
+    return r;
 }
 static int descriptor_node(struct md_inode_store *s, const struct stat *st,
         struct mdi_node *node) {
     if (S_ISFIFO(st->st_mode)) return mdi_fifo_descriptor(s, st, node);
+    const struct mdi_cache_key key={.query=MDI_FD,.device=st->st_dev,.inode=st->st_ino};
+    int cached;
+    if (mdi_cache_get(s,&key,node,&cached)) return cached==-ENOENT ? -EXDEV : cached;
     sqlite3_stmt *q = NULL;
     int r = mdi_query_acquire(s, MDI_FD, &q);
     if (!r) r = mdi_sql_error(sqlite3_bind_int64(q, 1, (sqlite3_int64)st->st_dev));
     if (!r) r = mdi_sql_error(sqlite3_bind_int64(q, 2, (sqlite3_int64)st->st_ino));
     if (!r) r = read_node(s, q, node);
-    r = mdi_query_release(q, r); return r == -ENOENT ? -EXDEV : r;
+    r=mdi_query_release(q,r); mdi_cache_put(s,&key,node,r);
+    return r==-ENOENT ? -EXDEV : r;
 }
 int mdi_fd(struct md_inode_store *s, int fd, struct mdi_node *node) {
     struct stat st;
     return fstat(fd, &st) ? -errno : descriptor_node(s, &st, node);
 }
 int mdi_lookup(struct md_inode_store *s, const char *parent, const char *name, struct mdi_node *node) {
+    char selected[33];
+    int cacheable=strnlen(parent,sizeof(selected))<sizeof(selected);
+    if (cacheable) strcpy(selected,parent);
+    const struct mdi_cache_key key={.query=MDI_LOOKUP,.id=selected,.name=name};
+    int cached;
+    if (cacheable && mdi_cache_get(s,&key,node,&cached)) return cached;
     sqlite3_stmt *q = NULL;
     int r = mdi_query_acquire(s, MDI_LOOKUP, &q);
     if (!r) r = mdi_bind_id(q, 1, parent);
     if (!r) r = mdi_bind_name(q, 2, name);
     if (!r) r = read_node(s, q, node);
-    return mdi_query_release(q, r);
+    r=mdi_query_release(q,r);
+    if (cacheable) mdi_cache_put(s,&key,node,r);
+    return r;
 }
 int mdi_add_name(struct md_inode_store *s, const char *parent, const char *name, const char *object) {
     sqlite3_stmt *q = NULL;
@@ -617,7 +669,7 @@ void md_inode_store_close(struct md_inode_store *s) {
     if (s->objects >= 0) close(s->objects);
     if (s->watch_presence >= 0) close(s->watch_presence);
     md_inode_lifetime_release(s->lifetime);
-    free(s);
+    free(s->read_cache); free(s);
 }
 #ifdef MD_INODE_TESTING
 void md_inode_observe(struct md_inode_store *s, void (*observer)(enum md_inode_checkpoint, void *), void *context) {
