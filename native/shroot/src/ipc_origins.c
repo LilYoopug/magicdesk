@@ -194,6 +194,11 @@ static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
         else if (r->source->count>1) error=prepare(r,&binding);
     }
     if (!error && r->kind==PREPARE && bound) error=credentials(r,authority);
+    if (!error && r->kind==PREPARE && !bound && r->options.credentials) {
+        uint32_t uid,gid;
+        error=md_ipc_credentials_claim(&r->task.task.identity,r->task.task.pid_group,
+            r->task.peer,&r->options.claimed,&uid,&gid);
+    }
     md_ipc_binding_release(&binding); r->error=error;
 }
 static int completed(struct md_fs_work *work) {

@@ -38,10 +38,11 @@ final class TermuxPtyBridgeLauncher {
             final int rows,
             final int columns,
             final String workingDirectory,
-            final String startupCommand) throws IOException {
+            final String startupCommand,
+            final java.util.Map<String, String> environment) throws IOException {
         final Helper helper = readHelper(context);
         TermuxIntegration.runPtyBridge(context, endpoint, port, token, rows, columns,
-                workingDirectory, startupCommand, helper.target, helper.encoded);
+                workingDirectory, startupCommand, helper.target, helper.encoded, environment);
     }
 
     static Helper readHelper(Context context) throws IOException {

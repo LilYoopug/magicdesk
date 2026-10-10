@@ -422,7 +422,7 @@ final class X11Sessions {
                 if (state != State.READY) return;
                 var resource = resources.reserve();
                 try {
-                    resource.attach(execution.commands.start(script, directory, name, null, (code, output, failure) -> {
+                    resource.attach(execution.startClient(script, directory, name, (code, output, failure) -> {
                         resource.close();
                         if (failure != null || code != 0) commandFailed(failure != null ? failure
                                 : new IllegalStateException("X11 command exited (" + code + "): " + output), false);
@@ -438,7 +438,7 @@ final class X11Sessions {
             if (state != State.READY) return;
             var resource = resources.reserve();
             try {
-                resource.attach(execution.commands.start(launch.clientCommand(display, startupCommand, clientEndpoint), startupDirectory, name, null,
+                resource.attach(execution.startClient(launch.clientCommand(display, startupCommand, clientEndpoint), startupDirectory, name,
                         (code, output, failure) -> {
                             resource.close();
                             if (stopped()) return;

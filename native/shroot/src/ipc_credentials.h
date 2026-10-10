@@ -7,6 +7,9 @@
 /* Store-scoped, live IPC metadata. Kernel sockets own data and descriptor
  * lifetimes; this authority owns connection-time identity/format snapshots. */
 struct md_ipc_credentials;
+struct ucred;
+int md_ipc_credentials_claim(const struct md_identity *, const struct md_pid_identity *,
+    pid_t peer, const struct ucred *, uint32_t *uid, uint32_t *gid);
 /* Immutable application ancillary format, selected at socketpair/connect from
  * runtime-owner declarations, never from application bytes or a received FD.
  * NATIVE is also the explicit agreement when either endpoint offers none. */

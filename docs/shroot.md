@@ -197,7 +197,8 @@ Peer credentials and all supplementary groups return as mapped bytes, without
 a temporary identity FD. Full-table ordinary/protected callers retain short-buffer
 and output-fault semantics. Connection and explicit-message snapshots retain
 namespace-relative process numbers after sender reaping. External endpoints
-retain native UID/GID authority; incoming PIDs are mapped into the receiver's
+validate explicit guest sender claims and transmit actual Android credentials,
+without granting guest root host authority. Incoming PIDs are mapped into the receiver's
 namespace, with zero for an invisible process.
 Directory seeks use the same captured-description path, retaining the shared
 kernel position across dup and descriptor-number replacement without a guest

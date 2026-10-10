@@ -1150,4 +1150,5 @@
     <string name="setup_apply_restart_system_ui">Anwenden und Oberfläche neu starten</string>
     <string name="setup_restarting_system_ui">Systemoberfläche wird neu gestartet…</string>
     <string name="setup_system_ui_restart_wait">Ein Neustart der Systemoberfläche wurde kürzlich versucht. Zwischen Versuchen muss mindestens eine Minute liegen.</string>
+    <string name="linux_audio">Linux-Audio</string>
 </resources>

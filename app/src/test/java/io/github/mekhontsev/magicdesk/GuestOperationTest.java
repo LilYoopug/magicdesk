@@ -6,7 +6,7 @@ import static org.junit.Assert.*;
 
 public class GuestOperationTest {
     @Test public void outputIsBoundedAndCancellationDoesNotClaimCompletion() throws Exception {
-        var operation = new GuestEnvironmentOperations.Operation("literal command", 2000);
+        var operation = new GuestEnvironmentOperations.Operation("literal command", 2000, false);
         byte[] bytes = "x".repeat(70000).getBytes(StandardCharsets.UTF_8);
         operation.append(bytes, 0, bytes.length);
         var running = operation.snapshot();

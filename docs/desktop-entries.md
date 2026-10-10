@@ -86,6 +86,13 @@ installed-application discovery through the [guest runtime](shroot.md).
 
 ### Custom Linux Entry Scripts
 
+Audio is independent of the selected graphics protocol. When
+`MAGICDESK_AUDIO_PIPEWIRE` and `MAGICDESK_AUDIO_PULSE` are present, an entry script
+can bind these socket paths into its guest and set `PIPEWIRE_REMOTE` and
+`PULSE_SERVER=unix:PATH` to the guest paths. Preserve the two `MAGICDESK_AUDIO_*`
+guest paths for nested desktop sessions. Shroot's CLI supplies abstract-socket
+routes itself. See [Linux audio](audio.md) and the prepared chroot example.
+
 The script is an entry adapter for an already prepared environment, not a
 container installer. It runs as the selected Termux UID or the already-authorized
 shell service UID and receives:

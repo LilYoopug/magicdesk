@@ -35,6 +35,10 @@
     </application>
 
     <instrumentation
+        android:name=".LinuxAudioInstrumentation"
+        android:functionalTest="true"
+        android:targetPackage="io.github.mekhontsev.magicdesk" />
+    <instrumentation
         android:name=".GuestFilesInstrumentation"
         android:targetPackage="io.github.mekhontsev.magicdesk" />
     <instrumentation

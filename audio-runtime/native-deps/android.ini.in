@@ -1,0 +1,13 @@
+[binaries]
+c = @MD_CC@
+ar = @MD_AR@
+[built-in options]
+c_args = @MD_FLAGS@
+c_link_args = @MD_LINK_FLAGS@
+[host_machine]
+system = 'android'
+cpu_family = 'aarch64'
+cpu = 'armv8-a'
+endian = 'little'
+[properties]
+needs_exe_wrapper = true

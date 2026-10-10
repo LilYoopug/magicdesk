@@ -255,7 +255,8 @@ final class TermuxIntegration {
             final String workingDirectory,
             final String startupCommand,
             final String target,
-            final String encodedHelper) {
+            final String encodedHelper,
+            final java.util.Map<String, String> environment) {
         endpoint.requireAvailable();
         final Intent intent = new Intent(ACTION_RUN_COMMAND)
                 .setComponent(endpoint.service)
@@ -264,7 +265,8 @@ final class TermuxIntegration {
                         "$PREFIX/bin/bash")
                 .putExtra(EXTRA_ARGUMENTS, new String[]{
                         "-lc",
-                        AutomationCommandRuntime.get(context).prepareTermux(endpoint) + PTY_BOOTSTRAP,
+                        AutomationCommandRuntime.get(context).prepareTermux(endpoint)
+                                + TerminalLaunchEnvironment.exports(environment) + PTY_BOOTSTRAP,
                         "magicdesk-termux-pty",
                         Integer.toString(port),
                         token,

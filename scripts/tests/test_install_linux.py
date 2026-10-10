@@ -97,6 +97,32 @@ if os.environ.get("TEST_FAIL") == stage:
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("xfce", self.calls()[-1][-9])
 
+    def test_audio_session_owns_graph_and_keeps_host_transport_separate(self):
+        result = self.run_script('--print-audio-session')
+        self.assertEqual(0, result.returncode, result.stderr)
+        helper = self.directory / 'audio-session'
+        helper.write_text(result.stdout)
+        self.assertEqual(0, subprocess.run(['bash', '-n', str(helper)]).returncode)
+        self.assertIn('libpipewire-module-pulse-tunnel', result.stdout)
+        self.assertIn('pw-link --input --monitor', result.stdout)
+        self.assertLess(result.stdout.index('Guest Android audio sink was not configured.'),
+                        result.stdout.index('"$@" <&0'))
+        self.assertLess(result.stdout.index('pipewire-pulse.conf.d/90-magicdesk.conf'),
+                        result.stdout.index('libpipewire-module-pulse-tunnel'))
+        self.assertIn('MAGICDESK_AUDIO_SESSION=active', result.stdout)
+        self.assertIn('EVENT_WAIT:', result.stdout)
+        self.assertNotIn('sleep ', result.stdout)
+        env = dict(self.environment)
+        env.pop('MAGICDESK_AUDIO_PULSE', None)
+        # EVENT_WAIT: without an audio capability, the original command exits normally.
+        bypass = subprocess.run(['bash', str(helper), 'sh', '-c', 'exit 17'], env=env, timeout=5)
+        self.assertEqual(17, bypass.returncode)
+        result = self.run_script('--yes', '--gui', 'plasma')
+        self.assertEqual(0, result.returncode, result.stderr)
+        setup = self.payload.read_text()
+        self.assertIn('packages pipewire pipewire-pulse wireplumber pipewire-alsa', setup)
+        self.assertIn('Exec=magicdesk-audio-session magicdesk-plasma', setup)
+
     def test_gui_pipewire_clients_do_not_request_unavailable_realtime_services(self):
         result = self.run_script('--yes', '--gui', 'plasma')
         self.assertEqual(0, result.returncode, result.stderr)

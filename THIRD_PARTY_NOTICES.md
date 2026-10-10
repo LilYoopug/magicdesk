@@ -81,6 +81,16 @@ The build preserves their license notices under `assets/licenses/wayland` in
 the APK, including libdrm's per-file notices. The local Android shared-memory
 adapter is applied as a checked source patch; wlroots is not a fork.
 
+## PipeWire Audio
+
+`audio-runtime` builds PipeWire 1.4.9 from a hash-verified upstream archive.
+Bionic compatibility and executor-owned FD admission are local source patches.
+The APK contains the native and Pulse protocol modules, audio adapters and SPA
+support/converters, not PulseAudio, WirePlumber, ALSA drivers or a D-Bus daemon.
+PipeWire's MIT license notices are packaged under `assets/licenses/pipewire`.
+Source URL, checksum and patches are in
+[`audio-runtime/native-deps`](audio-runtime/native-deps).
+
 ## JetBrains Mono Nerd Font Mono
 
 Console bundles the unmodified regular, bold, italic and bold-italic faces of

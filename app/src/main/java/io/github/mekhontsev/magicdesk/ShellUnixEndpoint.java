@@ -18,6 +18,9 @@ final class ShellUnixEndpoint extends IShellUnixEndpoint.Stub {
     private final int clientUid;
     private final int ioTimeoutMillis;
     private final Object state = new Object();
+    private final Object handoff = new Object();
+    private android.net.LocalServerSocket fileListener;
+    private java.nio.file.Path fileDirectory;
     private final IBinder.DeathRecipient died = this::release;
     private volatile boolean closed;
     private long offered, acknowledged;
@@ -33,19 +36,59 @@ final class ShellUnixEndpoint extends IShellUnixEndpoint.Stub {
         listener = new LocalServerSocket(name);
         try { receiver.asBinder().linkToDeath(died, 0); }
         catch (RemoteException error) { listener.close(); throw new IOException("Endpoint owner is gone", error); }
-        try { new Thread(this::accept, "MagicDeskUnixAdmission").start(); }
+        try { new Thread(() -> accept(listener, false), "MagicDeskUnixAdmission").start(); }
         catch (RuntimeException | Error error) { release(); throw error; }
     }
 
-    private void accept() {
+    @Override public String filesystemPath() {
+        checkOwner();
+        synchronized (state) {
+            if (closed) throw new IllegalStateException("Unix endpoint closed");
+            if (fileDirectory != null) return fileDirectory.resolve("socket").toString();
+            java.nio.file.Path directory = null;
+            try {
+                String base = clientUid == 0 || clientUid == 2000 ? "/data/local/tmp"
+                        : java.util.Objects.requireNonNull(System.getenv("HOME"));
+                directory = java.nio.file.Files.createTempDirectory(java.nio.file.Path.of(base), ".md-unix-");
+                Os.chmod(directory.toString(), 0700);
+                String path = directory.resolve("socket").toString();
+                if (path.getBytes(java.nio.charset.StandardCharsets.UTF_8).length >= 108)
+                    throw new IOException("Unix endpoint path too long");
+                try (var socket = new android.net.LocalSocket()) {
+                    socket.bind(new android.net.LocalSocketAddress(path, android.net.LocalSocketAddress.Namespace.FILESYSTEM));
+                    var descriptor = Os.dup(socket.getFileDescriptor());
+                    try { fileListener = new android.net.LocalServerSocket(descriptor); }
+                    catch (IOException | RuntimeException error) { Os.close(descriptor); throw error; }
+                }
+                // Root may explicitly bind this socket (not its private parent) into a chroot for a guest user.
+                if (clientUid == 0) Os.chmod(path, 0666);
+                fileDirectory = directory;
+                var selected = fileListener;
+                new Thread(() -> accept(selected, clientUid == 0), "MagicDeskUnixFileAdmission").start();
+                return path;
+            } catch (IOException | android.system.ErrnoException | RuntimeException error) {
+                if (fileListener != null) try { fileListener.close(); } catch (IOException ignored) { }
+                fileListener = null;
+                fileDirectory = null;
+                if (directory != null) {
+                    try { java.nio.file.Files.deleteIfExists(directory.resolve("socket")); java.nio.file.Files.deleteIfExists(directory); }
+                    catch (IOException ignored) { }
+                }
+                throw new IllegalStateException("Cannot create filesystem endpoint", error);
+            }
+        }
+    }
+
+    private void accept(LocalServerSocket selected, boolean delegatedRootSocket) {
         try {
             while (!closed) {
                 // EVENT_WAIT: incoming kernel connection; owner death/close shuts down the listener.
-                try (var client = listener.accept()) {
+                try (var client = selected.accept()) {
                     if (closed) break;
-                    if (client.getPeerCredentials().getUid() != clientUid) continue;
+                    if (client.getPeerCredentials().getUid() != clientUid && !delegatedRootSocket) continue;
                     // Configure under the socket owner's SELinux identity, before handing off its FD.
                     client.setSoTimeout(ioTimeoutMillis);
+                    synchronized (handoff) {
                     final long serial;
                     synchronized (state) { serial = ++offered; }
                     try (var descriptor = ParcelFileDescriptor.dup(client.getFileDescriptor())) {
@@ -59,6 +102,7 @@ final class ShellUnixEndpoint extends IShellUnixEndpoint.Stub {
                             if (remaining <= 0) throw new IOException("Unix connection handoff timed out");
                             EventDrivenWaits.await(state, EventDrivenWaits.Reason.UNIX_CONNECTION_HANDOFF, remaining);
                         }
+                    }
                     }
                 }
             }
@@ -79,7 +123,7 @@ final class ShellUnixEndpoint extends IShellUnixEndpoint.Stub {
     private void checkOwner() {
         if (Binder.getCallingUid() != ownerUid) throw new SecurityException("Wrong Unix endpoint owner");
     }
-    private void release() {
+    void release() {
         synchronized (state) {
             if (closed) return;
             closed = true;
@@ -88,5 +132,14 @@ final class ShellUnixEndpoint extends IShellUnixEndpoint.Stub {
         receiver.asBinder().unlinkToDeath(died, 0);
         try { Os.shutdown(listener.getFileDescriptor(), OsConstants.SHUT_RDWR); } catch (android.system.ErrnoException ignored) { }
         try { listener.close(); } catch (IOException ignored) { }
+        if (fileListener != null) {
+            try { Os.shutdown(fileListener.getFileDescriptor(), OsConstants.SHUT_RDWR); }
+            catch (android.system.ErrnoException ignored) { }
+            try { fileListener.close(); } catch (IOException ignored) { }
+        }
+        if (fileDirectory != null) {
+            try { java.nio.file.Files.deleteIfExists(fileDirectory.resolve("socket")); java.nio.file.Files.deleteIfExists(fileDirectory); }
+            catch (IOException ignored) { }
+        }
     }
 }

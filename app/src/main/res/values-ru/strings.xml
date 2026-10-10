@@ -1172,4 +1172,5 @@
     <string name="setup_apply_restart_system_ui">Применить и перезапустить System UI</string>
     <string name="setup_restarting_system_ui">Перезапуск System UI…</string>
     <string name="setup_system_ui_restart_wait">Недавно уже была попытка перезапуска System UI. Между попытками должна пройти как минимум минута.</string>
+    <string name="linux_audio">Звук Linux</string>
 </resources>

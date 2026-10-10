@@ -1,0 +1,197 @@
+--- a/src/modules/module-protocol-native.c
++++ b/src/modules/module-protocol-native.c
+@@ -607,6 +607,7 @@
+ 
+ static struct client_data *client_new(struct server *s, int fd)
+ {
++	bool owns_fd = false;
+ 	struct client_data *this;
+ 	struct pw_impl_client *client;
+ 	struct pw_protocol *protocol = s->this.protocol;
+@@ -698,6 +699,7 @@
+ 		res = -errno;
+ 		goto cleanup_client;
+ 	}
++	owns_fd = true;
+ 
+ 	this->connection = pw_protocol_native_connection_new(protocol->context, fd);
+ 	if (this->connection == NULL) {
+@@ -723,6 +725,7 @@
+ 	pw_impl_client_destroy(client);
+ 	errno = -res;
+ exit:
++	if (!owns_fd) { int saved = errno; close(fd); errno = saved; }
+ 	return NULL;
+ }
+ 
+@@ -835,7 +838,6 @@
+ 	client = client_new(s, client_fd);
+ 	if (client == NULL) {
+ 		pw_log_error("server %p: failed to create client", s);
+-		close(client_fd);
+ 		return;
+ 	}
+ }
+@@ -851,6 +853,23 @@
+ 	}
+ }
+ 
++/* The embedding host authenticates and accepts in the executor's SELinux domain. */
++SPA_EXPORT
++struct pw_impl_client *magicdesk_native_accept(struct pw_protocol *protocol, int fd)
++{
++	struct pw_protocol_server *server;
++	if (protocol == NULL || spa_list_is_empty(&protocol->server_list)) {
++		close(fd);
++		errno = ENOTCONN;
++		return NULL;
++	}
++	server = spa_list_first(&protocol->server_list, struct pw_protocol_server, link);
++	struct server *s = SPA_CONTAINER_OF(server, struct server, this);
++	struct client_data *client = client_new(s, fd);
++	if (client == NULL) return NULL;
++	return client->client;
++}
++
+ static int write_socket_address(struct server *s)
+ {
+ 	long v;
+--- a/src/modules/module-protocol-pulse/server.c
++++ b/src/modules/module-protocol-pulse/server.c
+@@ -364,35 +364,18 @@
+ 	goto done;
+ }
+ 
+-static void
+-on_connect(void *data, int fd, uint32_t mask)
++static int
++accept_client(void *data, int client_fd, void *owner)
+ {
+ 	struct server * const server = data;
+ 	struct impl * const impl = server->impl;
+-	struct sockaddr_storage name;
+-	socklen_t length;
+-	int client_fd, val;
++	int val;
+ 	struct client *client = NULL;
+ 	const char *client_access = NULL;
+ 	const char *error_reason = NULL;
+ 	pid_t pid;
+ 
+-	length = sizeof(name);
+-	client_fd = accept4(fd, (struct sockaddr *) &name, &length, SOCK_CLOEXEC);
+-	if (client_fd < 0) {
+-		if (errno == EMFILE || errno == ENFILE) {
+-			if (server->n_clients > 0) {
+-				int m = server->source->mask;
+-				SPA_FLAG_CLEAR(m, SPA_IO_IN);
+-				pw_loop_update_io(impl->loop, server->source, m);
+-				server->wait_clients++;
+-			}
+-		}
+-		goto error;
+-	}
+-
+ 	if (server->n_clients >= server->max_clients) {
+-		close(client_fd);
+ 		error_reason = "too many client application connections";
+ 		errno = ECONNREFUSED;
+ 		goto error;
+@@ -401,6 +384,7 @@
+ 	client = client_new(server);
+ 	if (client == NULL)
+ 		goto error;
++	client->embedding_owner = owner;
+ 
+ 	pw_log_debug("server %p: new client %p fd:%d", server, client, client_fd);
+ 
+@@ -438,7 +422,7 @@
+ #ifdef SO_PRIORITY
+ 		val = 6;
+-		if (setsockopt(client_fd, SOL_SOCKET, SO_PRIORITY, &val, sizeof(val)) < 0)
++		if (owner == NULL && setsockopt(client_fd, SOL_SOCKET, SO_PRIORITY, &val, sizeof(val)) < 0)
+ 			pw_log_warn("setsockopt(SO_PRIORITY) failed: %m");
+ #endif
+ 
+ 		pid = get_client_pid(client, client_fd);
+@@ -504,14 +488,51 @@
+ 	}
+ 	pw_properties_set(client->props, PW_KEY_CLIENT_ACCESS, client_access);
+ 
+-	return;
++	return 0;
+ 
+ error:
++	val = errno ? -errno : -EIO;
+ 	pw_log_error("server %p: %s: %m", server,
+ 			error_reason ? error_reason : "failed to create client");
+ 
++	if (client == NULL || client->source == NULL)
++		close(client_fd);
+ 	if (client)
+ 		client_free(client);
++	return val;
++}
++
++static void on_connect(void *data, int fd, uint32_t mask)
++{
++	struct server *server = data;
++	int client_fd = accept4(fd, NULL, NULL, SOCK_CLOEXEC);
++	if (client_fd < 0) {
++		if ((errno == EMFILE || errno == ENFILE) && server->n_clients > 0) {
++			pw_loop_update_io(server->impl->loop, server->source, server->source->mask & ~SPA_IO_IN);
++			server->wait_clients++;
++		}
++		return;
++	}
++	accept_client(server, client_fd, NULL);
++}
++
++SPA_EXPORT
++int magicdesk_pulse_accept(struct pw_protocol_pulse *pulse, int fd, void *owner)
++{
++	struct impl *impl = (struct impl *)pulse;
++	if (spa_list_is_empty(&impl->servers)) { close(fd); return -ENOTCONN; }
++	return accept_client(spa_list_first(&impl->servers, struct server, link), fd, owner);
++}
++
++SPA_EXPORT
++void magicdesk_pulse_disconnect(struct pw_protocol_pulse *pulse, void *owner)
++{
++	struct impl *impl = (struct impl *)pulse;
++	struct server *server;
++	struct client *client, *next;
++	spa_list_for_each(server, &impl->servers, link)
++		spa_list_for_each_safe(client, next, &server->clients, link)
++			if (client->embedding_owner == owner) client_free(client);
+ }
+ 
+ static int parse_unix_address(const char *address, struct sockaddr_storage *addrs, int len)
+--- a/src/modules/module-protocol-pulse/pulse-server.c
++++ b/src/modules/module-protocol-pulse/pulse-server.c
+@@ -5478,6 +5478,7 @@
+ 	def->quantum_limit = 8192;
+ }
+ 
++SPA_EXPORT
+ struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
+ 		struct pw_properties *props, size_t user_data_size)
+ {
+@@ -5590,6 +5591,7 @@
+ 	return SPA_PTROFF(pulse, sizeof(struct impl), void);
+ }
+ 
++SPA_EXPORT
+ void pw_protocol_pulse_destroy(struct pw_protocol_pulse *pulse)
+ {
+ 	struct impl *impl = (struct impl*)pulse;
+--- a/src/modules/module-protocol-pulse/client.h
++++ b/src/modules/module-protocol-pulse/client.h
+@@ -31,6 +31,7 @@
+ };
+ 
+ struct client {
++	void *embedding_owner;
+ 	struct spa_list link;
+ 	struct impl *impl;
+ 	struct server *server;

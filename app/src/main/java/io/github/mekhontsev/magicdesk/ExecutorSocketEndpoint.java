@@ -11,6 +11,7 @@ import java.util.function.Consumer;
 /** Captured executor admission shared by protocol servers; no graphics or protocol proxy. */
 final class ExecutorSocketEndpoint implements Closeable {
     interface Sink { void accept(ParcelFileDescriptor socket) throws RemoteException, IOException; }
+    interface Factory { IShellUnixEndpoint open(String name, int uid, int timeout, IUnixConnectionReceiver receiver) throws IOException, RemoteException; }
     final String name;
     private final CompletableFuture<IShellUnixEndpoint> endpoint = new CompletableFuture<>();
     private final java.util.concurrent.atomic.AtomicBoolean closed = new java.util.concurrent.atomic.AtomicBoolean();
@@ -21,6 +22,10 @@ final class ExecutorSocketEndpoint implements Closeable {
     }
 
     ExecutorSocketEndpoint(int uid, int ioTimeoutMillis, Sink sink, Consumer<Throwable> failure) throws IOException {
+        this(uid, ioTimeoutMillis, ShellAccess::openUnixEndpoint, sink, failure);
+    }
+
+    ExecutorSocketEndpoint(int uid, int ioTimeoutMillis, Factory factory, Sink sink, Consumer<Throwable> failure) throws IOException {
         byte[] nonce = new byte[32]; new java.security.SecureRandom().nextBytes(nonce);
         name = "magicdesk-" + java.util.HexFormat.of().formatHex(nonce);
         died = () -> {
@@ -52,7 +57,7 @@ final class ExecutorSocketEndpoint implements Closeable {
         };
         IShellUnixEndpoint owner = null;
         try {
-            owner = ShellAccess.openUnixEndpoint(name, uid, ioTimeoutMillis, receiver);
+            owner = factory.open(name, uid, ioTimeoutMillis, receiver);
             owner.asBinder().linkToDeath(died, 0);
             endpoint.complete(owner);
         } catch (IOException | RemoteException | RuntimeException error) {
@@ -60,6 +65,11 @@ final class ExecutorSocketEndpoint implements Closeable {
             if (owner != null) try { owner.close(); } catch (RemoteException ignored) { }
             throw new IOException("Cannot open executor socket endpoint", error);
         }
+    }
+
+    String filesystemPath() throws IOException {
+        try { return endpoint.join().filesystemPath(); }
+        catch (RemoteException | RuntimeException error) { throw new IOException("Cannot expose Unix endpoint", error); }
     }
 
     @Override public void close() {

@@ -7,6 +7,8 @@ its Android adapters. X11 and Wayland use the same shared graphics backend;
 the APK packages the compositor and a separate host renderer.
 Individual application sessions share the [Linux appearance preference](linux-appearance.md)
 bridge with X11; whole Linux desktops retain their own settings provider.
+[Linux audio](audio.md) also shares one launch-scoped service with X11 and
+terminals; the compositor neither mixes sound nor owns Android audio focus.
 **Linux graphics** manages X11 and Wayland sessions through the same controls;
 Wayland opens each toplevel in an ordinary Android host. A nested compositor can
 instead present a whole Linux desktop in a retained Android viewer. The shared

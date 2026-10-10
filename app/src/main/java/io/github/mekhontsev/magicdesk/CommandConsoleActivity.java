@@ -448,18 +448,17 @@ public final class CommandConsoleActivity extends Activity
     }
 
     private TerminalTransport.Factory terminalTransportFactory() {
-        if (mBackend != DesktopExecBackend.TERMUX) {
-            return (directory, rows, columns, startupCommand) ->
-                    ShellAccess.openPty(directory, rows, columns);
-        }
         final Context application = getApplicationContext();
-        return (directory, rows, columns, startupCommand) ->
-                TermuxPtyTransport.open(
-                        application,
-                        directory,
-                        rows,
-                        columns,
-                        startupCommand);
+        final DesktopExecBackend backend = mBackend;
+        return (directory, rows, columns, startupCommand) -> {
+            var audio = LinuxAudio.prepare(application, new CommandExecution(application, backend));
+            try {
+                TerminalTransport terminal = backend == DesktopExecBackend.TERMUX
+                        ? TermuxPtyTransport.open(application, directory, rows, columns, startupCommand, audio.environment())
+                        : ShellAccess.openPty(directory, rows, columns, audio.environment());
+                return new ScopedTerminalTransport(terminal, audio);
+            } catch (IOException | RuntimeException error) { audio.close(); throw error; }
+        };
     }
 
     private static String takeAutoRunCommand(final Intent intent) {

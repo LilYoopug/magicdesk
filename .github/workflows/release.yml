@@ -73,6 +73,7 @@ jobs:
             :hosted-runtime:lintRelease \
             :wayland-runtime:testDebugUnitTest \
             :wayland-runtime:lintRelease \
+            :audio-runtime:lintRelease \
             :app:lintRelease \
             :app:assembleRelease
 

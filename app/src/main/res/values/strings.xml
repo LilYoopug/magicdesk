@@ -1150,4 +1150,5 @@
     <string name="setup_apply_restart_system_ui">Apply and restart System UI</string>
     <string name="setup_restarting_system_ui">Restarting System UI&#8230;</string>
     <string name="setup_system_ui_restart_wait">System UI was restarted recently. Wait at least one minute between attempts.</string>
+    <string name="linux_audio">Linux audio</string>
 </resources>

@@ -1,0 +1,1 @@
+-keep class io.github.mekhontsev.magicdesk.audio.AudioEngine { *; }

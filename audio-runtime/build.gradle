@@ -1,0 +1,86 @@
+plugins { id 'com.android.library' }
+
+def termux = System.getenv('PREFIX')?.startsWith('/data/data/')
+def dependencyDirectory = layout.buildDirectory.dir('dependencies').get().asFile
+def supplied = providers.gradleProperty('magicDeskAudioRuntime')
+def prefix = supplied.isPresent() ? file(supplied.get()) : new File(dependencyDirectory, 'prefix')
+def output = layout.buildDirectory.dir('jniLibs').get().asFile
+def assets = layout.buildDirectory.dir('licenseAssets').get().asFile
+def meson = providers.gradleProperty('magicDeskMeson').orElse(
+        rootProject.file('build/wayland-tools/bin/meson').isFile()
+            ? rootProject.file('build/wayland-tools/bin/meson').path : 'meson').get()
+def libraries = ['libpipewire-0.3.so', 'libmagicdesk_audio.so', 'libspa-support.so',
+    'libspa-audioconvert.so', 'libspa-audiomixer.so',
+    'libpipewire-module-protocol-native.so', 'libpipewire-module-client-node.so',
+    'libpipewire-module-adapter.so', 'libpipewire-module-metadata.so',
+    'libpipewire-module-protocol-pulse.so']
+
+android {
+    namespace 'io.github.mekhontsev.magicdesk.audio'
+    compileSdk 37
+    ndkVersion '27.3.13750724'
+    defaultConfig {
+        minSdk 34
+        ndk { abiFilters 'arm64-v8a' }
+        consumerProguardFiles 'consumer-rules.pro'
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    sourceSets.main.jniLibs.srcDir output
+    sourceSets.main.assets.srcDir assets
+}
+
+def nativeBuild
+if (!supplied.isPresent()) {
+    def configure = tasks.register('configureDependencies', Exec) {
+        inputs.files fileTree('native-deps')
+        outputs.file new File(dependencyDirectory, 'build.ninja')
+        doFirst {
+            if (!termux && System.getProperty('os.name').toLowerCase(Locale.ROOT).contains('win'))
+                throw new GradleException('Supply magicDeskAudioRuntime exported from Linux/Termux.')
+            def ndk = termux ? null : (System.getenv('ANDROID_NDK_HOME') ?: System.getenv('ANDROID_NDK_ROOT')
+                    ?: androidComponents.sdkComponents.ndkDirectory.get().asFile.path)
+            def target = termux ? ["-DCMAKE_C_COMPILER=${System.getenv('PREFIX')}/bin/clang",
+                    '-DCMAKE_C_FLAGS=--target=aarch64-linux-android34', '-DCMAKE_SHARED_LINKER_FLAGS=-fno-termux-rpath']
+                    : ["-DCMAKE_TOOLCHAIN_FILE=${ndk}/build/cmake/android.toolchain.cmake",
+                        '-DANDROID_ABI=arm64-v8a', '-DANDROID_PLATFORM=android-34']
+            commandLine(['cmake', '-S', file('native-deps'), '-B', dependencyDirectory,
+                '-G', 'Ninja', "-DMESON=${meson}"] + target)
+        }
+    }
+    nativeBuild = tasks.register('buildDependencies', Exec) {
+        dependsOn configure
+        commandLine 'cmake', '--build', dependencyDirectory, '--parallel', '2'
+    }
+}
+def packageNative = tasks.register('packageNative', Sync) {
+    if (nativeBuild != null) dependsOn nativeBuild
+    from(fileTree(new File(prefix, 'lib')) { libraries.each { include "**/${it}" } }) {
+        eachFile { path = name }
+        includeEmptyDirs = false
+    }
+    if (!supplied.isPresent()) from new File(dependencyDirectory, 'libmagicdesk_audio.so')
+    into new File(output, 'arm64-v8a')
+    doLast {
+        libraries.each {
+            if (!new File(output, "arm64-v8a/${it}").isFile())
+                throw new GradleException("Audio runtime is missing ${it}")
+        }
+    }
+}
+def licenses = tasks.register('collectLicenses', Sync) {
+    if (nativeBuild != null) dependsOn nativeBuild
+    from(new File(prefix, 'licenses')) {
+        include 'LICENSE', 'COPYING'
+    }
+    into new File(assets, 'licenses/pipewire')
+}
+tasks.named('preBuild').configure { dependsOn packageNative, licenses }
+tasks.register('exportRuntime', Sync) {
+    dependsOn packageNative, licenses
+    from(new File(output, 'arm64-v8a')) { into 'lib' }
+    from(new File(assets, 'licenses/pipewire')) { into 'licenses' }
+    into layout.buildDirectory.dir('runtime')
+}

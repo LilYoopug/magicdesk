@@ -46,6 +46,8 @@ static void external(char **argv,int namespaced) {
     char data; struct iovec io={&data,1};
     union { struct cmsghdr align; char bytes[128]; } control={0};
     struct msghdr m={.msg_iov=&io,.msg_iovlen=1,.msg_control=control.bytes,.msg_controllen=sizeof(control.bytes)};
+    for (unsigned repeat=0;repeat<2;++repeat) {
+    m.msg_controllen=sizeof(control.bytes);
     CHECK(recvmsg(peerfd,&m,0)==1 && data=='m');
     struct cmsghdr *h=CMSG_FIRSTHDR(&m);
     CHECK(h && h->cmsg_level==SOL_SOCKET && h->cmsg_type==SCM_CREDENTIALS && !CMSG_NXTHDR(&m,h));
@@ -53,12 +55,13 @@ static void external(char **argv,int namespaced) {
     CHECK(value.uid==2000 && value.gid==2000 && !(m.msg_flags&MSG_CTRUNC));
     struct ucred connected; socklen_t size=sizeof(connected);
     CHECK(!getsockopt(peerfd,SOL_SOCKET,SO_PEERCRED,&connected,&size) && value.pid==connected.pid);
+    }
     /* EVENT_WAIT: the receiver enables credential delivery before our send. */
     CHECK(read(peerfd,&data,1)==1 && data=='r');
     CHECK(write(peerfd,"n",1)==1);
     int status; CHECK(waitpid(server,&status,0)==server && WIFEXITED(status) && !WEXITSTATUS(status)); server=0;
     close(peerfd); close(fd);
-    puts("PASS external endpoint: actual shell credentials, rejected root claim, no transport token");
+    puts("PASS external endpoint: guest self maps to shell authority, forged claim rejected, no transport token");
 }
 int main(int argc,char **argv) {
     CHECK(argc==4 && getuid()==2000); atexit(cleanup);

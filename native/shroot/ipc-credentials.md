@@ -346,7 +346,7 @@ forbids clone and SO_DOMAIN in both ordinary and nondumpable processes.
 SCM_CREDENTIALS validates the claimed guest IDs against the sending task. PID
 must identify that task's process in its active PID namespace; virtual root may
 select guest UID/GID, while
-other users may select only their real/effective/saved IDs. The kernel receives
+other users may select only their real/effective/saved IDs. On adapted connections the kernel receives
 the actual Android credentials, plus a sealed memfd capability as one extra
 SCM_RIGHTS descriptor. Its random nonce, connection identity, kernel file identity
 and sending side are recorded by the metadata authority. Only the
@@ -356,6 +356,12 @@ adapter removes that descriptor and publishes the validated guest credentials in
 The token records the sender's immutable PID-number snapshot at send time.
 Queued messages and peeks retain those numbers after sender exit/reaping, even
 if the native PID has been assigned to another process.
+
+External sockets use the same logical-claim validation, then send only the
+actual Android process credentials. Guest root and guest users never become
+host UID 0 or another host account. No identity capability crosses this boundary.
+The external-peer fixture covers self claims, denied forgery after dropping
+guest privileges, and protected callers inside a PID namespace.
 
 The namespace worker retains the sending capability; it never installs that FD
 in the application's shared table. The common outgoing owner captures source

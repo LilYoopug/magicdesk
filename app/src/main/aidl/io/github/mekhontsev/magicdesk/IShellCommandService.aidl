@@ -318,6 +318,7 @@ interface IShellCommandService {
         String workingDirectory,
         int rows,
         int columns,
+        in String[] environment,
         long requestId,
         IBinder ownerToken) = 90;
 

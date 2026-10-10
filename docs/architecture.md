@@ -19,7 +19,9 @@ Desktop. The [API-level contract](runtime-api-levels.md) records OS-dependent
 behavior, static verification and remaining device coverage.
 
 - Shared services own files, profiles, content, shell execution, Termux PTYs
-  and embedded X11/Wayland sessions.
+  and embedded X11/Wayland sessions. [Linux audio](audio.md) has independent
+  launch leases, executor-side socket admission and an app-UID PipeWire/AAudio
+  service; it is not owned by a renderer or Desktop.
   MCP is an authorized adapter to these services, not their lifetime owner.
   `hosted-runtime` contains the shared process-context adapter and retained-server
   lifecycle used by X11 and the [Wayland runtime](wayland.md).
@@ -607,6 +609,7 @@ component.
 | Hidden API stubs | `hidden-api-stubs/` | Compile-time signatures only; never packaged |
 | Terminal emulator | `terminal-emulator/` | Local byte-stream parser, screen buffers and terminal graphics |
 | Shared graphical runtime | `hosted-runtime/` | Server lifecycle, Vulkan/software composition, buffer transport and Android frame presentation |
+| Linux audio runtime | `audio-runtime/` | PipeWire protocols, mixing and AAudio output in the private audio process |
 | X11 Android runtime | `x11-runtime/` | Server entry point, Binder connection, JNI and Android renderer adapters |
 | X11 native engine | `vendor/magicdesk-x11/lorie/src/main/cpp/` | X server, protocol and adapters to shared multi-output graphics |
 | Wayland runtime | `wayland-runtime/` | wlroots compositor, protocol state, client admission and Android adapters |

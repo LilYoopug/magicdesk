@@ -562,6 +562,19 @@ int md_ipc_credentials_bind(struct md_ipc_credentials *s, int fd, struct md_ipc_
 }
 struct message_token { uint64_t magic; unsigned char nonce[16]; };
 #define MESSAGE_MAGIC UINT64_C(0x4d44495043494431)
+int md_ipc_credentials_claim(const struct md_identity *id, const struct md_pid_identity *process,
+        pid_t peer, const struct ucred *claim, uint32_t *uid, uint32_t *gid) {
+    *uid=md_user_namespace_into(id->user_namespace,0,claim->uid);
+    *gid=md_user_namespace_into(id->user_namespace,1,claim->gid);
+    if (*uid==UINT32_MAX || *gid==UINT32_MAX) return -EINVAL;
+    pid_t self=process ? md_pid_identity_number(process,md_pid_identity_namespace(process)) : peer;
+    if (claim->pid!=self
+            || (!md_identity_capable(id,CAP_SETUID) && *uid!=id->uid.real
+                && *uid!=id->uid.effective && *uid!=id->uid.saved)
+            || (!md_identity_capable(id,CAP_SETGID) && *gid!=id->gid.real
+                && *gid!=id->gid.effective && *gid!=id->gid.saved)) return -EPERM;
+    return 0;
+}
 static int message_identity(struct md_ipc_credentials *s, const struct md_identity *id, const struct md_pid_identity *process,
         const struct md_fs_request *req, uint64_t key, struct md_fs_result *out) {
     struct md_ipc_connection connection;
@@ -573,15 +586,9 @@ static int message_identity(struct md_ipc_credentials *s, const struct md_identi
     int fd = -1;
     if (req->flags == MD_IPC_MESSAGE_CREATE || req->flags == MD_IPC_MESSAGE_SENDER) {
         int implicit=req->flags==MD_IPC_MESSAGE_SENDER;
-        uint32_t uid=implicit ? id->uid.effective : md_user_namespace_into(id->user_namespace,0,req->attributes.uid);
-        uint32_t gid=implicit ? id->gid.effective : md_user_namespace_into(id->user_namespace,1,req->attributes.gid);
-        if (uid==UINT32_MAX || gid==UINT32_MAX) return -EINVAL;
-        pid_t self=process ? md_pid_identity_number(process,md_pid_identity_namespace(process)) : req->peer;
-        if ((!implicit && (pid_t)req->offset != self)
-                || (!md_identity_capable(id, CAP_SETUID) && uid != id->uid.real
-                    && uid != id->uid.effective && uid != id->uid.saved)
-                || (!md_identity_capable(id, CAP_SETGID) && gid != id->gid.real
-                    && gid != id->gid.effective && gid != id->gid.saved)) return -EPERM;
+        uint32_t uid=id->uid.effective, gid=id->gid.effective;
+        struct ucred claim={(pid_t)req->offset,req->attributes.uid,req->attributes.gid};
+        if (!implicit && (r=md_ipc_credentials_claim(id,process,req->peer,&claim,&uid,&gid))) return r;
         if (getrandom(token.nonce, sizeof(token.nonce), 0) != sizeof(token.nonce)) return -EIO;
         fd = (int)syscall(SYS_memfd_create, "guest-ipc-message", MFD_CLOEXEC | MFD_ALLOW_SEALING);
         if (fd < 0) return -errno;

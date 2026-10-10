@@ -15,6 +15,7 @@ final class X11Execution {
     final String serverPackage;
     private final Context context;
     private final String keyboardSource;
+    private LinuxAudio audio;
 
     X11Execution(Context context, DesktopExecBackend backend, String keyboardSource) {
         this.context = context.getApplicationContext();
@@ -39,6 +40,20 @@ final class X11Execution {
     }
 
     Closeable startServer(X11LaunchSpec spec, CommandExecution.Completion completion) throws IOException {
+        audio = LinuxAudio.prepare(context, commands);
+        try {
+            Closeable server = startServerProcess(spec, (code, output, error) -> {
+                audio.close(); completion.complete(code, output, error);
+            });
+            return () -> { try { server.close(); } finally { audio.close(); } };
+        } catch (IOException | RuntimeException error) { audio.close(); throw error; }
+    }
+
+    Closeable startClient(String command, String directory, String name, CommandExecution.Completion completion) {
+        return commands.start(audio.exports() + command, directory, name, null, completion);
+    }
+
+    private Closeable startServerProcess(X11LaunchSpec spec, CommandExecution.Completion completion) throws IOException {
         if (commands.termux != null) return commands.start(spec.serverCommand, "", spec.id, spec.stdin, completion);
         String keyboard = HostedKeyboardData.prepare(context, keyboardSource);
         Path directory = Path.of(spec.directory);

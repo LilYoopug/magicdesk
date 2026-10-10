@@ -1,0 +1,26 @@
+--- a/src/pipewire/meson.build
++++ b/src/pipewire/meson.build
+@@ -136,6 +136,4 @@
+ libpipewire = shared_library(pipewire_name, pipewire_sources,
+-  version : libversion,
+-  soversion : soversion,
+   c_args : libpipewire_c_args,
+   include_directories : [pipewire_inc, configinc, includes_inc],
+   install : true,
+--- a/src/pipewire/data-loop.c
++++ b/src/pipewire/data-loop.c
+@@ -276,10 +276,14 @@
+ 	if (loop->running) {
+ 		struct spa_thread_utils *utils;
++#ifndef __ANDROID__
+ 		if (loop->cancel) {
+ 			pw_log_debug("%p cancel", loop);
+ 			pthread_cancel(loop->thread);
+ 		} else {
++#endif
+ 			pw_log_debug("%p signal", loop);
+ 			pw_loop_invoke(loop->loop, do_stop, 1, NULL, 0, false, loop);
++#ifndef __ANDROID__
+ 		}
++#endif
+ 		pw_log_debug("%p join", loop);

@@ -348,6 +348,12 @@ Installed Termux graphical entries default to X11. To select Wayland, use
 **New command app > Termux graphics**, choose the protocol and supply a
 Wayland-capable command. Linux environment launchers offer the same choice.
 
+Linux playback uses the shared [PipeWire audio service](docs/audio.md), with
+native PipeWire and PulseAudio-compatible clients routed to Android's selected
+audio output. It works independently of Desktop and graphics. Installer-created
+whole-desktop sessions retain their own PipeWire/WirePlumber mixer and route it
+to Android; no PulseAudio daemon, root or microphone permission is required.
+
 Copy text, HTML, PNG images and files between Android and Linux applications.
 Clipboard and copy drag-and-drop use the same Android content exchange for X11
 and Wayland, including separate sessions. The receiving application must support

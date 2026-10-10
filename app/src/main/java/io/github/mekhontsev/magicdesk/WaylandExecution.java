@@ -29,6 +29,7 @@ final class WaylandExecution {
     private final GraphicalConnectionMode connectionMode;
     private final int initialWidth, initialHeight;
     private final double initialScale;
+    private LinuxAudio audio;
 
     private String shell() { return commands.termux == null ? "/system/bin/sh" : new java.io.File(commands.home).getParent() + "/usr/bin/sh"; }
 
@@ -63,6 +64,16 @@ final class WaylandExecution {
     }
 
     Closeable startServer(CommandExecution.Completion completion) throws IOException {
+        audio = LinuxAudio.prepare(context, commands);
+        try {
+            Closeable server = startServerProcess((code, output, error) -> {
+                audio.close(); completion.complete(code, output, error);
+            });
+            return () -> { try { server.close(); } finally { audio.close(); } };
+        } catch (IOException | RuntimeException error) { audio.close(); throw error; }
+    }
+
+    private Closeable startServerProcess(CommandExecution.Completion completion) throws IOException {
         var info = context.getApplicationInfo();
         var environment = new LinkedHashMap<String, String>();
         environment.put("CLASSPATH", info.sourceDir);
@@ -113,7 +124,7 @@ final class WaylandExecution {
         String identity = commands.termux == null ? "com.android.shell" : commands.termux.packageName;
         String shell = commands.termux == null ? "/system/bin/sh" : new java.io.File(commands.home).getParent() + "/usr/bin/sh";
         // WAYLAND_SOCKET is assigned only after app_process hands the connection to the native helper.
-        String script = "unset DISPLAY WAYLAND_DISPLAY\nexport XDG_SESSION_TYPE=wayland"
+        String script = audio.exports() + "unset DISPLAY WAYLAND_DISPLAY\nexport XDG_SESSION_TYPE=wayland"
                 + appearance.exports() + "\n" + appearance.command(command, shell);
         String invocation = "env -u LD_PRELOAD -u LD_LIBRARY_PATH CLASSPATH=" + q(info.sourceDir) + " "
                 + String.join(" ", handoff.arguments(identity, info.nativeLibraryDir + "/libmagicdesk_wayland_client.so",
@@ -137,14 +148,14 @@ final class WaylandExecution {
 
     Closeable startEndpointClient(String socket, String command, String workingDirectory, CommandExecution.Completion completion) {
         if (hasRoutedEndpoint()) {
-            String script = "unset DISPLAY WAYLAND_SOCKET\nexport XDG_SESSION_TYPE=wayland WAYLAND_DISPLAY="
+            String script = audio.exports() + "unset DISPLAY WAYLAND_SOCKET\nexport XDG_SESSION_TYPE=wayland WAYLAND_DISPLAY="
                     + q(GuestGraphicalConnection.WAYLAND_PATH) + " MAGICDESK_GRAPHICS_ENDPOINT=" + q(socket)
                     + guestFiles.exports() + appearance.exports() + "\n" + appearance.command(command, shell());
             return commands.start(script, workingDirectory, id + "-client", null, completion);
         }
         if (!hasNamedEndpoint() || socket == null || !socket.matches("wayland-[0-9]+"))
             throw new IllegalArgumentException("No accessible Wayland socket");
-        String script = "unset DISPLAY WAYLAND_SOCKET\nexport XDG_SESSION_TYPE=wayland XDG_RUNTIME_DIR=" + q(directory)
+        String script = audio.exports() + "unset DISPLAY WAYLAND_SOCKET\nexport XDG_SESSION_TYPE=wayland XDG_RUNTIME_DIR=" + q(directory)
                 + " WAYLAND_DISPLAY=" + q(socket) + " MAGICDESK_WAYLAND_RUNTIME=" + q(directory)
                 + guestFiles.exports() + appearance.exports() + "\n" + appearance.command(command, shell());
         return commands.start(script, workingDirectory, id + "-client", null, completion);

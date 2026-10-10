@@ -68,7 +68,8 @@ final class GuestEnvironmentOperations {
             operations.remove(oldest);
         }
         String command = inLibrary(GuestEnvironmentCatalog.command(arguments), library);
-        Operation operation = new Operation(command, ShellAccess.currentSnapshot().uid);
+        Operation operation = new Operation(command, ShellAccess.currentSnapshot().uid,
+                arguments[0].equals("exec") || arguments[0].equals("run"));
         operations.put(operation.id, operation);
         workers.execute(operation::run);
         return operation.snapshot();
@@ -94,6 +95,8 @@ final class GuestEnvironmentOperations {
         final String id = "guest-" + UUID.randomUUID();
         final String command;
         final int uid;
+        final boolean playback;
+        final OperationResources resources = new OperationResources();
         final ShellCommandSession session = new ShellCommandSession("/data/local/tmp");
         final byte[] tail = new byte[65536];
         int used;
@@ -103,18 +106,29 @@ final class GuestEnvironmentOperations {
         Integer exitCode;
         String error = "";
 
-        Operation(String command, int uid) { this.command = command; this.uid = uid; }
+        Operation(String command, int uid, boolean playback) {
+            this.command = command; this.uid = uid; this.playback = playback;
+        }
 
         void run() {
             try {
                 requireShell();
                 if (ShellAccess.currentSnapshot().uid != uid) throw new IOException("Selected executor identity changed");
-                var result = session.execute("/system/bin/sh -c " + ShellCommandLine.quote(command) + " 2>&1", this::append);
+                String environment = "";
+                if (playback) {
+                    var slot = resources.reserve();
+                    var context = MagicDeskApplication.applicationContext();
+                    var audio = LinuxAudio.prepare(context, new CommandExecution(context, DesktopExecBackend.SHELL));
+                    slot.attach(audio);
+                    environment = audio.exports();
+                }
+                var result = session.execute("/system/bin/sh -c " + ShellCommandLine.quote(environment + command) + " 2>&1", this::append);
                 synchronized (this) { exitCode = result.exitCode(); }
             } catch (Exception failure) {
                 synchronized (this) { error = ShellAccess.usefulMessage(failure); }
             } finally {
                 session.close();
+                resources.close();
                 synchronized (this) { done = true; revision++; notifyAll(); }
             }
         }
@@ -134,6 +148,7 @@ final class GuestEnvironmentOperations {
                 cancellation = true; revision++; notifyAll();
             }
             session.close();
+            resources.close();
         }
 
         synchronized JSONObject observe(long after, int timeout) throws Exception {

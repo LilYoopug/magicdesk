@@ -1161,4 +1161,5 @@
     <string name="setup_apply_restart_system_ui">Aplicar e reiniciar interface</string>
     <string name="setup_restarting_system_ui">Reiniciando interface do sistema…</string>
     <string name="setup_system_ui_restart_wait">Houve uma tentativa recente de reiniciar a interface do sistema. Aguarde pelo menos um minuto entre tentativas.</string>
+    <string name="linux_audio">Áudio do Linux</string>
 </resources>

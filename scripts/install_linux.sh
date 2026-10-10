@@ -1786,8 +1786,140 @@ printf 'Graphics profile activated for new launches: %s\n' "$gpu"
 GPU_BODY
 }
 
+audio_session() {
+    cat <<'AUDIO'
+#!/bin/bash
+set -euo pipefail
+if [[ ${1:-} == --ready ]]; then
+    printf '%s\n' "$2" >&3
+    exit
+fi
+[[ $# != 0 ]] || { echo 'Expected desktop command.' >&2; exit 2; }
+[[ -n ${MAGICDESK_AUDIO_PULSE:-} ]] || exec "$@"
+[[ ${MAGICDESK_AUDIO_SESSION:-} != active ]] || exec "$@"
+host=$MAGICDESK_AUDIO_PULSE
+[[ $host == /* && $host != *$'\n'* && $host != *$'\r'* ]] || {
+    echo 'Invalid Android audio endpoint.' >&2; exit 2;
+}
+work=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/magicdesk-audio.XXXXXXXX")
+children=()
+cleanup() {
+    local status=$?
+    trap - EXIT INT TERM
+    # EVENT_WAIT: release clients before their server; wait owns only our child processes.
+    for (( i=${#children[@]}-1; i>=0; i-- )); do
+        kill "${children[i]}" 2>/dev/null || :
+        wait "${children[i]}" 2>/dev/null || :
+    done
+    rm -rf -- "$work"
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+mkdir -p "$work/config/pipewire.conf.d" "$work/config/pipewire-pulse.conf.d" "$work/wp/wireplumber.conf.d"
+cp /usr/share/pipewire/pipewire.conf /usr/share/pipewire/pipewire-pulse.conf "$work/config/"
+cp /usr/share/wireplumber/wireplumber.conf "$work/wp/"
+if [[ -d /usr/share/wireplumber/main.lua.d ]]; then
+    # WirePlumber 0.4 (Ubuntu 24.04) uses Lua configuration, not feature profiles.
+    for part in main.lua.d policy.lua.d bluetooth.lua.d common; do
+        cp -a "/usr/share/wireplumber/$part" "$work/wp/"
+    done
+    cat > "$work/wp/main.lua.d/80-magicdesk.lua" <<'LUA'
+alsa_monitor.enabled = false
+v4l2_monitor.enabled = false
+libcamera_monitor.enabled = false
+LUA
+    cat > "$work/wp/bluetooth.lua.d/80-magicdesk.lua" <<'LUA'
+bluez_monitor.enabled = false
+bluez_midi_monitor.enabled = false
+LUA
+fi
+host=unix:${host//\\/\\\\}
+host=${host//\"/\\\"}
+cat > "$work/config/pipewire.conf.d/90-magicdesk.conf" <<CONFIG
+context.properties = { default.clock.rate = 48000 mem.allow-mlock = false }
+module.rt.args = { rtportal.enabled = false rtkit.enabled = false }
+context.exec = [ { path = /usr/local/bin/magicdesk-audio-session args = "--ready core" } ]
+CONFIG
+# Keep the remote tunnel in a client context, not a core-to-itself connection.
+cat > "$work/config/pipewire-pulse.conf.d/90-magicdesk.conf" <<CONFIG
+module.rt.args = { rtportal.enabled = false rtkit.enabled = false }
+context.modules = [
+  { name = libpipewire-module-pulse-tunnel args = {
+      tunnel.mode = sink
+      pulse.server.address = "$host"
+      pulse.latency = 30
+      audio.rate = 48000
+      audio.channels = 2
+      audio.position = [ FL FR ]
+      stream.props = {
+        node.name = magicdesk.android
+        node.description = "Android audio"
+      }
+  } }
+]
+context.exec = [ { path = /usr/local/bin/magicdesk-audio-session args = "--ready pulse" } ]
+CONFIG
+cat > "$work/wp/wireplumber.conf.d/90-magicdesk.conf" <<'CONFIG'
+wireplumber.profiles = {
+  main = { monitor.alsa = disabled monitor.bluez = disabled monitor.v4l2 = disabled monitor.libcamera = disabled }
+}
+CONFIG
+export PIPEWIRE_RUNTIME_DIR=$work PULSE_RUNTIME_PATH=$work/pulse
+export PIPEWIRE_REMOTE=pipewire-0 PULSE_SERVER=unix:$work/pulse/native
+export MAGICDESK_AUDIO_SESSION=active
+mkfifo "$work/ready"
+exec 3<>"$work/ready"
+PIPEWIRE_CONFIG_DIR=$work/config pipewire &
+children+=("$!")
+# EVENT_WAIT: PipeWire context.exec startup receipt; expiry tears down this session.
+read -r -t 15 receipt <&3 && [[ $receipt == core ]] || {
+    echo 'Guest PipeWire startup failed.' >&2; exit 1;
+}
+WIREPLUMBER_CONFIG_DIR=$work/wp wireplumber 3>&- &
+children+=("$!")
+PIPEWIRE_CONFIG_DIR=$work/config pipewire-pulse &
+children+=("$!")
+# EVENT_WAIT: Pulse protocol server initialization, not a fixed startup delay.
+read -r -t 15 receipt <&3 && [[ $receipt == pulse ]] || {
+    echo 'Guest Pulse compatibility startup failed.' >&2; exit 1;
+}
+# EVENT_WAIT: the policy manager publishes both output ports; expiry rejects startup.
+# A listening server alone does not mean that its sink has been configured.
+exec 4< <(pw-link --input --monitor 3>&-)
+monitor=$!
+children+=("$monitor")
+left=0 right=0 deadline=$((SECONDS + 15))
+while (( !left || !right )); do
+    remaining=$((deadline - SECONDS))
+    (( remaining > 0 )) && IFS= read -r -t "$remaining" port <&4 || {
+        echo 'Guest Android audio sink was not configured.' >&2; exit 1;
+    }
+    case $port in
+        *magicdesk.android:*_FL) left=1 ;;
+        *magicdesk.android:*_FR) right=1 ;;
+    esac
+done
+exec 4<&-
+kill "$monitor" 2>/dev/null || :
+wait "$monitor" 2>/dev/null || :
+unset 'children[-1]'
+"$@" <&0 3>&- &
+children+=("$!")
+# EVENT_WAIT: desktop command lifetime; signal traps stop all owned audio services.
+status=0
+wait "${children[-1]}" || status=$?
+unset 'children[-1]'
+exit "$status"
+AUDIO
+}
+
 system_setup() {
     distribution_support
+    printf "install_audio_session() {\ncat > /usr/local/bin/magicdesk-audio-session <<'MD_AUDIO_SESSION'\n"
+    audio_session
+    printf 'MD_AUDIO_SESSION\nchmod 755 /usr/local/bin/magicdesk-audio-session\n}\n'
     cat <<'SETUP'
 gui=$1
 protocol=$2
@@ -1887,6 +2019,13 @@ fi
 
 if [ "$gui" != none ] && [ "$gui" != keep ]; then
     case "$family" in
+        apt) packages pipewire pipewire-pulse wireplumber pipewire-alsa pulseaudio-utils ;;
+        apk) packages pipewire pipewire-pulse pipewire-tools wireplumber pipewire-alsa pulseaudio-utils ;;
+        dnf) packages pipewire pipewire-pulseaudio pipewire-utils wireplumber pipewire-alsa pulseaudio-utils ;;
+        pacman|recovery) packages pipewire pipewire-pulse wireplumber pipewire-alsa ;;
+    esac
+    install_audio_session
+    case "$family" in
         apt) packages dbus-x11 xkb-data adwaita-icon-theme mousepad thunar xfce4-terminal \
             libgl1-mesa-dri libegl-mesa0 libglx-mesa0 ;;
         apk) packages dbus dbus-x11 xkeyboard-config adwaita-icon-theme mousepad thunar xfce4-terminal \
@@ -1961,7 +2100,7 @@ APPLICATIONS
 [Desktop Entry]
 Type=Application
 Name=Xfce Desktop
-Exec=env XDG_CURRENT_DESKTOP=XFCE XDG_SESSION_DESKTOP=xfce xfce4-session
+Exec=magicdesk-audio-session env XDG_CURRENT_DESKTOP=XFCE XDG_SESSION_DESKTOP=xfce xfce4-session
 Icon=org.xfce.xfdesktop
 Terminal=false
 Categories=System;
@@ -1984,7 +2123,7 @@ LAUNCH
 [Desktop Entry]
 Type=Application
 Name=Weston Desktop
-Exec=magicdesk-weston
+Exec=magicdesk-audio-session magicdesk-weston
 Icon=computer
 Terminal=false
 Categories=System;
@@ -1998,7 +2137,7 @@ ENTRY
 [Desktop Entry]
 Type=Application
 Name=GNOME Shell (development kit)
-Exec=env XDG_CURRENT_DESKTOP=GNOME gnome-shell --devkit
+Exec=magicdesk-audio-session env XDG_CURRENT_DESKTOP=GNOME gnome-shell --devkit
 Icon=computer
 Terminal=false
 Categories=System;
@@ -2047,7 +2186,7 @@ esac
 LAUNCH
         chmod 755 /usr/local/bin/magicdesk-plasma
         for backend in x11 wayland; do
-            printf '[Desktop Entry]\nType=Application\nName=Plasma Desktop (%s)\nExec=magicdesk-plasma %s\nIcon=preferences-desktop\nTerminal=false\nCategories=System;\nX-MagicDesk-Graphics=%s\nX-MagicDesk-GraphicsMode=desktop\n' \
+            printf '[Desktop Entry]\nType=Application\nName=Plasma Desktop (%s)\nExec=magicdesk-audio-session magicdesk-plasma %s\nIcon=preferences-desktop\nTerminal=false\nCategories=System;\nX-MagicDesk-Graphics=%s\nX-MagicDesk-GraphicsMode=desktop\n' \
                 "$backend" "$backend" "$backend" > "/usr/local/share/applications/magicdesk-plasma-$backend.desktop"
         done
     fi
@@ -2406,6 +2545,7 @@ gui_notice() {
     [ "$gui" != gnome ] || printf 'GNOME devkit also needs a Linux system bus; this recipe does not boot one.\n'
 }
 if [ "$#" = 1 ] && [ "$1" = --print-mesa-patch ]; then mesa_patch; exit 0; fi
+if [ "$#" = 1 ] && [ "$1" = --print-audio-session ]; then audio_session; exit 0; fi
 if [ "$#" -ge 1 ] && [ "$1" = --print-kwin-patch ]; then
     [ "$#" -le 2 ] || fail 'Expected one KWin version.'
     kwin_patch "${2:-6.3.6}" || fail 'KWin version must be 6.3.6 or 6.2.5.'

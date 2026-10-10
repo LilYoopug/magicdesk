@@ -33,6 +33,16 @@ guest_file_socket=
 guest_file_token=
 guest_appearance_socket=
 guest_appearance_token=
+guest_audio_native=
+guest_audio_pulse=
+if [ -n "${MAGICDESK_AUDIO_PIPEWIRE:-}" ] && [ -n "${MAGICDESK_AUDIO_PULSE:-}" ]; then
+    mkdir -p "$root/tmp/magicdesk-audio"
+    touch "$root/tmp/magicdesk-audio/pipewire" "$root/tmp/magicdesk-audio/pulse"
+    mount --bind "$MAGICDESK_AUDIO_PIPEWIRE" "$root/tmp/magicdesk-audio/pipewire"
+    mount --bind "$MAGICDESK_AUDIO_PULSE" "$root/tmp/magicdesk-audio/pulse"
+    guest_audio_native=/tmp/magicdesk-audio/pipewire
+    guest_audio_pulse=/tmp/magicdesk-audio/pulse
+fi
 if [ -n "${DISPLAY:-}" ]; then
     : "${MAGICDESK_X11_RUNTIME:?Missing X11 runtime}" "${MAGICDESK_X11_TMPDIR:?Missing X socket directory}"
     mkdir -p "$root/tmp/magicdesk-x11" "$root/tmp/.X11-unix"
@@ -69,6 +79,8 @@ exec /system/bin/chroot "$root" /usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bi
     WAYLAND_DISPLAY="$guest_wayland" XDG_SESSION_TYPE="$guest_session" \
     MAGICDESK_GUEST_FILES_SOCKET="$guest_file_socket" MAGICDESK_GUEST_FILES_TOKEN="$guest_file_token" \
     MAGICDESK_APPEARANCE_SOCKET="$guest_appearance_socket" MAGICDESK_APPEARANCE_TOKEN="$guest_appearance_token" \
+    PIPEWIRE_REMOTE="$guest_audio_native" PULSE_SERVER="${guest_audio_pulse:+unix:$guest_audio_pulse}" \
+    MAGICDESK_AUDIO_PIPEWIRE="$guest_audio_native" MAGICDESK_AUDIO_PULSE="$guest_audio_pulse" \
     /bin/sh -c '
         user=$1; work=$2; shift 2
         entry=$(awk -F: -v name="$user" '\''$1 == name { print $0; exit }'\'' /etc/passwd)

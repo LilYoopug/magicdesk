@@ -205,12 +205,11 @@ static long send_captured(const struct msghdr *original, const unsigned long *a,
         size_t rights=frame->rights ? CMSG_SPACE(frame->rights*sizeof(int)) : 0;
         if (frame->rights>253 || frame->rights!=expected || rights>capacity-misc) result=-EPROTO;
         else {
-            if (frame->destination.credentials && frame->options.credentials) {
+            if (frame->options.credentials) {
+                /* The worker validates the logical claim for both boundaries.
+                 * Only adapted peers receive its identity capsule; native peers
+                 * always see the actual sender, never guest root credentials. */
                 struct ucred native={(pid_t)RAW0(getpid),(uid_t)RAW0(getuid),(gid_t)RAW0(getgid)};
-                memcpy((char *)control+credential_offset,&native,sizeof(native));
-            } else if (frame->options.credentials) {
-                struct ucred native=frame->options.claimed;
-                native.pid=(pid_t)native_pid;
                 memcpy((char *)control+credential_offset,&native,sizeof(native));
             }
             if (misc) memmove((char *)control+rights,control,misc);

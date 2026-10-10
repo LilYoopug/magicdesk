@@ -1139,4 +1139,5 @@
     <string name="setup_apply_restart_system_ui">应用并重启系统界面</string>
     <string name="setup_restarting_system_ui">正在重启系统界面…</string>
     <string name="setup_system_ui_restart_wait">最近已尝试重启系统界面。两次尝试之间请至少等待一分钟。</string>
+    <string name="linux_audio">Linux 音频</string>
 </resources>

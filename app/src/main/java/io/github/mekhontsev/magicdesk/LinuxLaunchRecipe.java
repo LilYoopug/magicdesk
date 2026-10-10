@@ -68,7 +68,9 @@ final class LinuxLaunchRecipe {
                 ? ": \"${DISPLAY:?Missing X11 display}\" \"${XAUTHORITY:?Missing X11 authorization}\"; "
                 : ": \"${WAYLAND_DISPLAY:?Missing Wayland display}\" \"${MAGICDESK_WAYLAND_RUNTIME:?Missing Wayland runtime}\"; ");
         final boolean proot = environment.kind() == Kind.PROOT;
-        host.append("exec ").append(proot ? "proot-distro login --isolated" : q(environment.target()));
+        if (proot) host.append("md_login() { if [ -n \"${MAGICDESK_AUDIO_PIPEWIRE:-}\" ] && [ -n \"${MAGICDESK_AUDIO_PULSE:-}\" ]; then "
+                + "set -- " + LinuxAudioEnvironment.prootArguments() + " \"$@\"; fi; exec proot-distro login --isolated \"$@\"; }; ");
+        host.append(proot ? "md_login" : "exec " + q(environment.target()));
         if (!user.isEmpty()) host.append(" --user ").append(q(user));
         if (!directory.isEmpty()) host.append(" --work-dir ").append(q(directory));
         if (environment.magicDesk() && proot) {

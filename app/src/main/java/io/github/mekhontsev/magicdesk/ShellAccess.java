@@ -1224,7 +1224,8 @@ public final class ShellAccess {
     static ShellPtyHandle openPty(
             final String workingDirectory,
             final int rows,
-            final int columns) throws IOException {
+            final int columns,
+            final java.util.Map<String, String> environment) throws IOException {
         if (workingDirectory == null || !workingDirectory.startsWith("/")) {
             throw new IOException("PTY working directory must be absolute");
         }
@@ -1239,6 +1240,7 @@ public final class ShellAccess {
                     workingDirectory,
                     rows,
                     columns,
+                    TerminalLaunchEnvironment.encode(environment),
                     requestId,
                     ownerToken);
             if (descriptor == null) {

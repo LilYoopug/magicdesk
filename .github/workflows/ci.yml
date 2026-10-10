@@ -156,6 +156,7 @@ jobs:
             :hosted-runtime:lintRelease \
             :wayland-runtime:testDebugUnitTest \
             :wayland-runtime:lintRelease \
+            :audio-runtime:lintRelease \
             :app:lintRelease \
             :kernel-fixes:lintRelease \
             :app:assembleRelease \
@@ -174,6 +175,7 @@ jobs:
             :hosted-runtime:lintRelease \
             :wayland-runtime:testDebugUnitTest \
             :wayland-runtime:lintRelease \
+            :audio-runtime:lintRelease \
             :app:lintRelease \
             :kernel-fixes:lintRelease \
             :app:assembleRelease \
@@ -183,7 +185,15 @@ jobs:
         run: ./gradlew --no-daemon -p x11-runtime/example :app:assembleDebug :app:lintDebug
 
       - name: Export Android Wayland runtime
-        run: ./gradlew --no-daemon :wayland-runtime:exportRuntime
+        run: ./gradlew --no-daemon :wayland-runtime:exportRuntime :audio-runtime:exportRuntime
+
+      - name: Share verified audio runtime with Windows build
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: audio-android-runtime
+          if-no-files-found: error
+          retention-days: 7
+          path: audio-runtime/build/runtime/
 
       - name: Share verified Wayland runtime with Windows build
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
@@ -304,6 +314,7 @@ jobs:
         shell: pwsh
         run: |
           gh run download "$env:GITHUB_RUN_ID" --repo "$env:GITHUB_REPOSITORY" --name wayland-android-runtime --dir "$env:RUNNER_TEMP/wayland-runtime"
+          gh run download "$env:GITHUB_RUN_ID" --repo "$env:GITHUB_REPOSITORY" --name audio-android-runtime --dir "$env:RUNNER_TEMP/audio-runtime"
 
       - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884
         with:
@@ -323,7 +334,7 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install meson==1.9.1 ninja
-          .\gradlew.bat --no-daemon "-PmagicDeskWaylandRuntime=$env:RUNNER_TEMP/wayland-runtime" verifyDevelopment
+          .\gradlew.bat --no-daemon "-PmagicDeskWaylandRuntime=$env:RUNNER_TEMP/wayland-runtime" "-PmagicDeskAudioRuntime=$env:RUNNER_TEMP/audio-runtime" verifyDevelopment
 
       - name: Verify independent X11 host
         shell: pwsh

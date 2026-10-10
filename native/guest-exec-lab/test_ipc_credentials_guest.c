@@ -446,9 +446,11 @@ static void external(const char *name,pid_t server) {
         CHECK(snapshot>=0 && read(snapshot,content,sizeof(content))>0 && !close(snapshot));
     }
     peer(fd,server,2000,2000);
+    send_identity(fd,0,-1,1);
+    /* Guest self claims map to actual authority; forged guest claims still fail. */
+    CHECK(!setgid(1234) && !setuid(1234));
     send_identity(fd,0,-1,0);
-    /* The actual kernel credentials remain authoritative outside this store. */
-    CHECK(!setgid(2000)); send_identity(fd,2000,-1,1);
+    send_identity(fd,1234,-1,1);
     int one=1; CHECK(!setsockopt(fd,SOL_SOCKET,SO_PASSCRED,&one,sizeof(one)));
     CHECK(write(fd,"r",1)==1);
     char byte,control[CMSG_SPACE(sizeof(struct ucred))]={0}; struct iovec data={&byte,1};

@@ -64,14 +64,15 @@ final class TermuxPtyTransport implements TerminalTransport {
             final String workingDirectory,
             final int rows,
             final int columns,
-            final String startupCommand) throws IOException {
+            final String startupCommand,
+            final java.util.Map<String, String> environment) throws IOException {
         try {
             return openInternal(
                     context,
                     workingDirectory,
                     rows,
                     columns,
-                    startupCommand);
+                    startupCommand, environment);
         } catch (IOException | RuntimeException error) {
             FAILURES.incrementAndGet();
             sLastError = ShellAccess.usefulMessage(error);
@@ -98,7 +99,8 @@ final class TermuxPtyTransport implements TerminalTransport {
             final String workingDirectory,
             final int rows,
             final int columns,
-            final String startupCommand) throws IOException {
+            final String startupCommand,
+            final java.util.Map<String, String> environment) throws IOException {
         final TermuxIntegration.Endpoint endpoint = TermuxIntegration.inspect(context);
         endpoint.requireAvailable();
         final String token = newToken();
@@ -116,7 +118,7 @@ final class TermuxPtyTransport implements TerminalTransport {
                     rows,
                     columns,
                     workingDirectory,
-                    startupCommand);
+                    startupCommand, environment);
             while (android.os.SystemClock.uptimeMillis() < deadline) {
                 final int remaining = (int) Math.max(
                         1L,

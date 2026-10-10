@@ -533,6 +533,7 @@ public final class ShellCommandService extends IShellCommandService.Stub {
             final String workingDirectory,
             final int rows,
             final int columns,
+            final String[] environment,
             final long requestId,
             final IBinder ownerToken) {
         if (ownerToken == null) {
@@ -562,14 +563,14 @@ public final class ShellCommandService extends IShellCommandService.Stub {
             final File helper = new File(
                     mContext.getApplicationInfo().nativeLibraryDir,
                     PTY_HELPER_NAME);
-            process = ShellExecutionEnvironment.processBuilder(
+            ProcessBuilder builder = ShellExecutionEnvironment.processBuilder(
                     true,
                     helper.getAbsolutePath(),
                     Integer.toString(rows),
                     Integer.toString(columns),
-                    workingDirectory)
-                    .redirectErrorStream(true)
-                    .start();
+                    workingDirectory);
+            builder.environment().putAll(TerminalLaunchEnvironment.decode(environment));
+            process = builder.redirectErrorStream(true).start();
             final PtyStreamSession session = new PtyStreamSession(
                     requestId, process, writeSide, ownerToken);
             mStreams.put(Long.valueOf(requestId), session);
