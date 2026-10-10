@@ -16,6 +16,9 @@ final class WaylandSurfaceOutput implements HostedShellOutput {
     @Override public void focus() { output.focus(true); }
     @Override public void blur() { output.focus(false); }
     @Override public void pointer(float x, float y) { output.pointer(x, y); }
+    @Override public void captureListener(java.util.function.LongConsumer listener) { output.captureListener(listener); }
+    @Override public void pointerCapture(long serial, boolean captured) { output.pointerCapture(serial, captured); }
+    @Override public void relative(long serial, float dx, float dy) { output.relative(serial, dx, dy); }
     @Override public void button(float x, float y, Button button, boolean down) {
         output.pointer(x, y);
         output.button(switch (button) { case PRIMARY -> 0; case MIDDLE -> 1; case SECONDARY -> 2; }, down);

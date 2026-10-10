@@ -120,9 +120,15 @@ static long arm(enum md_fd_selector_kind kind, int fd) {
     struct sock_fprog program=kind==MD_FD_SELECTOR_WATCH
         ? (struct sock_fprog){sizeof(watch_code)/sizeof(*watch_code),watch_code}
         : (struct sock_fprog){sizeof(proc_code)/sizeof(*proc_code),proc_code};
-    result=RAW3(seccomp,SECCOMP_SET_MODE_FILTER,SECCOMP_FILTER_FLAG_TSYNC,&program);
+    for (;;) {
+        result=RAW3(seccomp,SECCOMP_SET_MODE_FILTER,SECCOMP_FILTER_FLAG_TSYNC,&program);
+        if (result<=0) break;
+        /* EVENT_WAIT: a retiring private helper can temporarily reject TSYNC.
+         * Retry only after its exit; incompatible live filters remain errors. */
+        result=md_fd_control(MD_FD_SELECTOR_EXIT,(uint64_t)result,0,0);
+        if (result<0) return result;
+    }
     /* The selector is published only after every sibling accepted its filter. */
-    if (result>0) return -ENOTSUP;
     return result ? result : md_fd_control(MD_FD_SELECTOR_MARK,kind,fd,0);
 #endif
 }

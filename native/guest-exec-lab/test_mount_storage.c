@@ -12,6 +12,8 @@
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/inotify.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 void test_mount_allocation_failure_after(int);
@@ -67,6 +69,86 @@ static void image_aliases(struct md_filesystem *fs) {
     }
     assert(strcmp(ids[0],ids[1]));
     puts("PASS named image lookup: hardlinks and symlinks retain resolved names and per-mount identities");
+}
+static void file_binds(const char *base) {
+    unsigned before=descriptors();
+    char path[PATH_MAX];
+    assert(snprintf(path,sizeof(path),"%s/storage-file-binds",base)<PATH_MAX);
+    struct md_inode_store *store=NULL;
+    assert(!md_inode_store_open(path,1,&store));
+    put(store,"/source","file");
+    assert(!md_inode_link(store,-1,"/source",-1,"/source-alias",0));
+    assert(!md_inode_mkdir(store,-1,"/directory",0700));
+    assert(!md_inode_mkdir(store,-1,"/sibling",0700));
+    put(store,"/plain","plain"); put(store,"/recursive","recursive");
+    struct md_identity root=md_identity_new(0,0); store->identity=&root;
+    struct md_fs_storage_cache storage={0};
+    struct md_filesystem fs={.store=store,.storage=&storage};
+    assert(!md_fs_mounts_open(&fs,NULL,0));
+    mount_call(&fs,MD_FS_MOUNT_BIND,MS_BIND,"/sibling","/directory");
+    /* A locked sibling is not a child of either hardlink name. */
+    fs.mounts->tree->mounts[0].locked=1;
+    mount_call(&fs,MD_FS_MOUNT_BIND,MS_BIND,"/plain","/source");
+    mount_call(&fs,MD_FS_MOUNT_BIND,MS_BIND|MS_REC,"/recursive","/source-alias");
+    assert(fs.mounts->tree->count==3);
+    contents(&fs,"/plain",NULL,"file"); contents(&fs,"/recursive",NULL,"file");
+    mount_call(&fs,MD_FS_MOUNT_REMOUNT,MS_REMOUNT|MS_BIND|MS_RDONLY,"/recursive",NULL);
+    struct md_fs_result r=call(&fs,(struct md_fs_request){.operation=MD_FS_OPEN,
+        .directory={-1,-1},.path={"/recursive",NULL},.flags=O_WRONLY},NULL);
+    assert(r.error==-EROFS);
+    int fd=opened(&fs,"/plain",O_WRONLY|O_TRUNC,NULL,NULL);
+    assert(write(fd,"shared",6)==6); close(fd);
+    contents(&fs,"/source-alias",NULL,"shared"); contents(&fs,"/recursive",NULL,"shared");
+    md_fs_mounts_close(&fs); md_fs_storage_close(&storage);
+    md_inode_store_close(store); md_identity_release(&root);
+    assert(descriptors()==before);
+    puts("PASS file binds: hardlink sources, recursive/plain binds, locked siblings and independent policy");
+}
+static void socket_binds(const char *base) {
+    unsigned before=descriptors();
+    char path[PATH_MAX];
+    assert(snprintf(path,sizeof(path),"%s/storage-socket-binds",base)<PATH_MAX);
+    struct md_inode_store *store=NULL;
+    assert(!md_inode_store_open(path,1,&store));
+    struct md_identity root=md_identity_new(0,0); store->identity=&root;
+    int server=socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0); assert(server>=0);
+    assert(!md_inode_socket_bind(store,-1,"/socket",0600,server));
+    assert(!listen(server,1));
+    assert(!md_inode_link(store,-1,"/socket",-1,"/socket-alias",0));
+    put(store,"/mounted","target"); put(store,"/plain","plain");
+    char expected[108];
+    assert(!md_inode_socket_address(store,-1,"/socket",expected,sizeof(expected)));
+    struct md_fs_storage_cache storage={0};
+    struct md_filesystem fs={.store=store,.storage=&storage};
+    assert(!md_fs_mounts_open(&fs,NULL,0));
+    mount_call(&fs,MD_FS_MOUNT_BIND,MS_BIND|MS_REC,"/mounted","/socket-alias");
+    mount_call(&fs,MD_FS_MOUNT_REMOUNT,MS_REMOUNT|MS_BIND|MS_RDONLY,"/mounted",NULL);
+    assert(!md_inode_unlink(store,-1,"/socket",0));
+    assert(!md_inode_unlink(store,-1,"/socket-alias",0));
+    char endpoint[108];
+    struct md_fs_output output={.data=endpoint,.capacity=sizeof(endpoint)};
+    struct md_fs_result r=call(&fs,(struct md_fs_request){.operation=MD_FS_SOCKET_ADDRESS,
+        .directory={-1,-1},.path={"/mounted",NULL},.flags=MD_FS_SOCKET_PIN},&output);
+    if (r.error) fprintf(stderr,"mounted socket address: %d\n",r.error);
+    assert(!r.error && !strcmp(endpoint,expected));
+    struct md_identity denied=md_identity_new(1000,1000); store->identity=&denied;
+    struct md_fs_result denied_result=call(&fs,(struct md_fs_request){.operation=MD_FS_SOCKET_ADDRESS,
+        .directory={-1,-1},.path={"/mounted",NULL}},&output);
+    assert(denied_result.error==-EACCES);
+    store->identity=&root; md_identity_release(&denied);
+    struct sockaddr_un address={.sun_family=AF_UNIX};
+    memcpy(address.sun_path+1,endpoint,r.size-1);
+    int client=socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0); assert(client>=0);
+    assert(!connect(client,(struct sockaddr *)&address,offsetof(struct sockaddr_un,sun_path)+r.size));
+    int peer=accept4(server,NULL,NULL,SOCK_CLOEXEC); assert(peer>=0);
+    close(peer); close(client); close(server);
+    r=call(&fs,(struct md_fs_request){.operation=MD_FS_SOCKET_ADDRESS,
+        .directory={-1,-1},.path={"/plain",NULL}},&output);
+    assert(r.error==-ECONNREFUSED);
+    md_fs_mounts_close(&fs); md_fs_storage_close(&storage);
+    md_inode_store_close(store); md_identity_release(&root);
+    assert(descriptors()==before);
+    puts("PASS socket binds: readonly hardlink mount retains endpoint after unlink and permits connections");
 }
 static int subscribe(struct md_filesystem *fs, int reader, const char *path) {
     struct md_fs_result r=call(fs,(struct md_fs_request){.operation=MD_FS_WATCH_PATH,
@@ -150,6 +232,8 @@ static void storage_cache(struct md_inode_store *main, const char *base) {
     puts("PASS mounted-store cache: bounded LRU, active scopes, reconnect and maintenance-lease release");
 }
 void test_mount_storage(const char *base) {
+    file_binds(base);
+    socket_binds(base);
     unsigned before=descriptors();
     char path[PATH_MAX], extra[PATH_MAX], moved[PATH_MAX];
     assert(snprintf(path,sizeof(path),"%s/storage-main",base)<PATH_MAX);

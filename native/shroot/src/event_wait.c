@@ -9,6 +9,15 @@ long md_event_now(void) {
     long r = RAW2(clock_gettime, CLOCK_MONOTONIC, &time);
     return r < 0 ? r : time.tv_sec * 1000000000LL + time.tv_nsec;
 }
+long md_event_poll(struct pollfd *fds, unsigned count) {
+    const struct timespec timeout = {0};
+    long r;
+    do { r = RAW5(ppoll, fds, count, &timeout, 0, 8); } while (r == -EINTR);
+    if (r < 0) return r;
+    for (unsigned i = 0; i < count; ++i)
+        if (fds[i].revents & POLLNVAL) return -EBADF;
+    return r;
+}
 long md_event_wait(struct pollfd *fds, unsigned count, int64_t deadline) {
     for (;;) {
         struct timespec timeout, *bound = NULL;

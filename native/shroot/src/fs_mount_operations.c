@@ -266,6 +266,7 @@ static int selected_operation(unsigned operation) {
     switch (operation) {
     case MD_FS_CREATE: case MD_FS_OPEN: case MD_FS_OPEN_IMAGE: case MD_FS_STAT: case MD_FS_STATFS:
     case MD_FS_ACCESS: case MD_FS_CHMOD: case MD_FS_CHOWN: case MD_FS_UTIMENS: case MD_FS_READLINK:
+    case MD_FS_SOCKET_ADDRESS:
         return 1;
     default: return 0;
     }

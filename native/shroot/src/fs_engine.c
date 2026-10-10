@@ -468,7 +468,7 @@ static void inode_execute(struct md_filesystem *fs,
     case MD_FS_SOCKET_BIND: r = md_inode_socket_bind(s, first, a, q->mode, second); break;
     case MD_FS_SOCKET_ADDRESS: case MD_FS_SOCKET_NAME:
         r = q->operation == MD_FS_SOCKET_ADDRESS
-            ? md_inode_socket_address(s, first, a, data, capacity)
+            ? md_inode_socket_address(s, first, q->path[0], data, capacity)
             : md_inode_socket_name(s, a, data, capacity);
         if (!r) out->size = strlen(data) + 1;
         break;

@@ -23,6 +23,11 @@ rejection through direct, symlinked and bind-mounted proc views.
 Pivoted non-base roots retain proc/dev providers across namespace copies.
 Mounted-store image tests retain exact hardlink and symlink names alongside
 per-mount executable identities.
+Native storage tests bind both names of a hardlinked file, recursively and
+non-recursively, with an unrelated locked mount present. They check shared
+contents, independent readonly policy and exact descriptor cleanup.
+Socket binds retain the selected endpoint through hardlink aliases and unlink;
+readonly mounts allow connections while socket write permissions remain enforced.
 Tmpfs cases cover permissive capacity requests, malformed options, native writes
 and shared mappings, aliases and detached ownership. Key-service absence checks
 cover protected callers, fork/exec, namespaces, chroot and application filters.
@@ -917,8 +922,8 @@ Configure `native/shroot` with `-DMAGICDESK_GUEST_FIXTURES=ON` and build
 `test_mounts --path-walk NEW_DIRECTORY` isolates logical path traversal and its
 depth-independent FD/transaction bounds. The full mount suite includes it.
 `fixtures/path-workloads.py` runs deep-path reads, existing writable opens and
-create/rename/unlink cycles in a disposable guest directory, checking contents
-and inode identity while reporting timings. Bind its containing directory into
+create/rename/unlink and hardlink/unlink cycles in a disposable guest directory,
+checking contents and inode identity while reporting timings. Bind its containing directory into
 the same prepared guest for both runtime versions; use `--statistics` separately
 for work counts. Timings are observations, not pass/fail thresholds.
 The offline importer tests require Python and the `zstd` CLI:
@@ -1087,6 +1092,23 @@ choices, exact origin publication, queued cancellation and receiver death before
 atomic installation. Signal handshakes also force live syscall restart before
 and after retirement of the expired installation turn. No installed result is
 reclaimed by guessing a guest FD.
+
+`--case event-fairness` runs sixteen continuous identity-syscall producers beside
+task-affine proc reads that need worker completion. The reads must finish before
+the producers' failure deadline, not after they stop. Native, virtual-root and
+ordinary guest-user cases use the selected shell identity. The default resource
+suite includes the same regression.
+It also runs `test_task_wait.c`: directed TID selection, stale/coalesced hints,
+interruption, exact status/rusage propagation, drained-queue invalidation and
+the mandatory general-wait budget under continuous activity.
+`test_task_wait_live.c` collects over six thousand real syscall stops from 24
+concurrent tracees using blocked SIGCHLD/signalfd. Repeated reads of a drained
+collector must perform no wait syscall, and all children must exit with their
+expected status. Both fixtures run in the default resource suite.
+`test_pending.c` checks allocation-free continuation queues: duplicate admission,
+bounded dispatch, cancellation of a queued peer, record reuse during dispatch,
+and explicit recursive-dispatch rejection. Blocked continuations are exercised
+through the resource, FD-custody and private-memory suites as well.
 
 `--case mapping-task` is an explicit kernel feasibility check, separate from the
 default runtime suite. It tests private-FD CLONE_VM helpers under UID 2000:

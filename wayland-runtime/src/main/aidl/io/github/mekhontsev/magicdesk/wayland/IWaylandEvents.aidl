@@ -26,4 +26,5 @@ oneway interface IWaylandEvents {
     void contentReply(long request, in @nullable ParcelFileDescriptor data);
     void dragEvent(long output, long offer, boolean finished, boolean accepted);
     void cursor(long output, in @nullable int[] pixels, int width, int height, int hotspotX, int hotspotY, boolean hidden);
+    void pointerCapture(long output, long serial);
 }

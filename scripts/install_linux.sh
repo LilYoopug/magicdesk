@@ -1838,24 +1838,29 @@ fi
 host=unix:${host//\\/\\\\}
 host=${host//\"/\\\"}
 cat > "$work/config/pipewire.conf.d/90-magicdesk.conf" <<CONFIG
-context.properties = { default.clock.rate = 48000 mem.allow-mlock = false }
+# The guest graph has no hardware clock or guaranteed real-time scheduling.
+# Keep a bounded scheduling budget even when a client requests a tiny quantum.
+context.properties = { default.clock.rate = 48000 default.clock.min-quantum = 1024 mem.allow-mlock = false }
 module.rt.args = { rtportal.enabled = false rtkit.enabled = false }
 context.exec = [ { path = /usr/local/bin/magicdesk-audio-session args = "--ready core" } ]
 CONFIG
 # Keep the remote tunnel in a client context, not a core-to-itself connection.
 cat > "$work/config/pipewire-pulse.conf.d/90-magicdesk.conf" <<CONFIG
 module.rt.args = { rtportal.enabled = false rtkit.enabled = false }
+pulse.properties = { pulse.min.req = 1024/48000 pulse.min.quantum = 1024/48000 }
 context.modules = [
   { name = libpipewire-module-pulse-tunnel args = {
       tunnel.mode = sink
       pulse.server.address = "$host"
-      pulse.latency = 30
+      pulse.latency = 60
       audio.rate = 48000
       audio.channels = 2
       audio.position = [ FL FR ]
       stream.props = {
         node.name = magicdesk.android
         node.description = "Android audio"
+        # This is the guest's output device, not an internal routing node.
+        node.virtual = false
       }
   } }
 ]
@@ -1915,11 +1920,97 @@ exit "$status"
 AUDIO
 }
 
+steam_game() {
+    cat <<'STEAM_GAME'
+#!/usr/bin/env python3
+"""Steam Launch Options: magicdesk-steam-game %command%."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+
+
+CONTAINER = r'''
+set -eu
+# FEX's empty-root lookup is relative to cwd; the container root is explicit.
+if [ "${FEX_ROOTFS-unset}" = "" ]; then export FEX_ROOTFS=/; fi
+if [ -n "${MAGICDESK_MESA_PREFIX:-}" ]; then
+    export LD_LIBRARY_PATH="$MAGICDESK_MESA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export LIBGL_DRIVERS_PATH="$MAGICDESK_MESA_PREFIX/lib/dri${LIBGL_DRIVERS_PATH:+:$LIBGL_DRIVERS_PATH}"
+fi
+exec "$@"
+'''
+
+
+def launch(command):
+    if not command:
+        raise ValueError('Use magicdesk-steam-game %command% in Steam Launch Options')
+    if 'PRESSURE_VESSEL_EMULATOR' not in os.environ:
+        # Steam declares its selected tools. argv also covers launchers that omit
+        # that variable; never guess the user's Steam library location.
+        directories = [Path(p) for p in os.environ.get('STEAM_COMPAT_TOOL_PATHS', '').split(':') if p]
+        directories += [Path(p).parent for p in command if os.path.isabs(p)]
+        for directory in dict.fromkeys(directories):
+            source = directory / 'emulator.json'
+            if not source.is_file():
+                continue
+            manifest = json.loads(source.read_text())
+            emulator = manifest.get('emulator_v0', {})
+            if 'FEX_ROOTFS' not in emulator.get('container_environment', {}):
+                continue
+            for key in ('argv', 'container_argv', 'main_argv', 'server_argv'):
+                value = emulator.get(key)
+                if value is None:
+                    continue
+                if isinstance(value, str):
+                    value = [value]
+                if not isinstance(value, list) or not value or not all(isinstance(p, str) for p in value):
+                    raise ValueError('Invalid emulator command: ' + key)
+                if not os.path.isabs(value[0]):
+                    value[0] = str((directory / value[0]).absolute())
+                emulator[key] = value
+            for key in ('container_argv', 'main_argv'):
+                # pressure-vessel maps this native host executable into /run/host.
+                emulator[key] = ['/usr/bin/sh', '-c', CONTAINER,
+                                 'magicdesk-steam-container', *emulator[key]]
+            # SteamOS /bin/sh is Bash; its dependency must be captured with FEX's.
+            emulator['required_libraries'] = list(dict.fromkeys([
+                *emulator.get('required_libraries', []), 'libreadline.so.8']))
+            data = json.dumps(manifest, sort_keys=True, indent=2).encode() + b'\n'
+            cache = Path(os.environ.get('XDG_CACHE_HOME') or Path.home() / '.cache') / 'magicdesk/steam-fex'
+            cache.mkdir(parents=True, exist_ok=True, mode=0o700)
+            target = cache / (hashlib.sha256(data).hexdigest() + '.json')
+            if not target.is_file():
+                fd, temporary = tempfile.mkstemp(dir=cache)
+                try:
+                    with os.fdopen(fd, 'wb') as output:
+                        output.write(data)
+                    os.replace(temporary, target)
+                finally:
+                    if os.path.exists(temporary):
+                        os.unlink(temporary)
+            os.environ['PRESSURE_VESSEL_EMULATOR'] = str(target)
+            break
+    os.execvp(command[0], command)
+
+
+try:
+    launch(sys.argv[1:])
+except (OSError, ValueError, KeyError, TypeError) as error:
+    sys.exit('magicdesk-steam-game: ' + str(error))
+STEAM_GAME
+}
+
 system_setup() {
     distribution_support
     printf "install_audio_session() {\ncat > /usr/local/bin/magicdesk-audio-session <<'MD_AUDIO_SESSION'\n"
     audio_session
     printf 'MD_AUDIO_SESSION\nchmod 755 /usr/local/bin/magicdesk-audio-session\n}\n'
+    printf "install_steam_game() {\ncat > /usr/local/bin/magicdesk-steam-game <<'MD_STEAM_GAME'\n"
+    steam_game
+    printf 'MD_STEAM_GAME\nchmod 755 /usr/local/bin/magicdesk-steam-game\n}\n'
     cat <<'SETUP'
 gui=$1
 protocol=$2
@@ -1979,6 +2070,7 @@ if [ "$family" = recovery ]; then
     cat > /opt/magicdesk/fex-thunks.json <<'FEX_DEFAULTS'
 {"ThunksDB":{"GL":"1","Vulkan":"1"}}
 FEX_DEFAULTS
+    install_steam_game
 fi
 if [ "$setup_locked" = no ]; then
     exec 9>/var/lib/magicdesk/installer.lock
@@ -2546,6 +2638,7 @@ gui_notice() {
 }
 if [ "$#" = 1 ] && [ "$1" = --print-mesa-patch ]; then mesa_patch; exit 0; fi
 if [ "$#" = 1 ] && [ "$1" = --print-audio-session ]; then audio_session; exit 0; fi
+if [ "$#" = 1 ] && [ "$1" = --print-steam-game ]; then steam_game; exit 0; fi
 if [ "$#" -ge 1 ] && [ "$1" = --print-kwin-patch ]; then
     [ "$#" -le 2 ] || fail 'Expected one KWin version.'
     kwin_patch "${2:-6.3.6}" || fail 'KWin version must be 6.3.6 or 6.2.5.'
@@ -2859,7 +2952,7 @@ esac
 printf 'Terminal: Terminal sessions > New session > Shroot environments > %s > New session.\n' "$name"
 printf 'Keep privileged access available; no MagicDesk Desktop session or installer rerun is needed.\n'
 printf 'Console: shroot login %s\n' "$name"
-[ "$distro" != steamos ] || printf 'SteamOS uses the steamos guest account. Open Steam from Apps; its own updater may download client components.\nThis installs Linux userspace, not SteamOS boot, recovery or VR services. GPU/game compatibility is a separate check.\n'
+[ "$distro" != steamos ] || printf '%s\n' 'SteamOS uses the steamos guest account. Open Steam from Apps; its own updater may download client components.' 'For x86 Linux games using FEX, set Steam Launch Options: magicdesk-steam-game %command%' 'This installs Linux userspace, not SteamOS boot, recovery or VR services. GPU/game compatibility is a separate check.'
 if [ -n "$new_user" ]; then printf 'User console: shroot login %s --user %s\n' "$name" "$new_user"; fi
 printf 'Folder attachment: shroot login %s --bind /sdcard/Download /mnt\n' "$name"
 printf 'Optional Android command access: shroot login %s --magicdesk\n' "$name"

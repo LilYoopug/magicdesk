@@ -955,6 +955,43 @@ static void counter_audit(void) {
     sqlite3_finalize(q); CHECK(sqlite3_close(db) == SQLITE_OK);
     puts("PASS independent counter audit and non-mutating unsupported-format rejection");
 }
+static void retained_journal(void) {
+    struct md_inode_store *a=store("journal",1);
+    int fd=md_inode_create(a,MD_INODE_ROOT,"file",0600);
+    CHECK(fd>=0); close(fd);
+    struct md_inode_store *b=store("journal",0);
+    char journal[PATH_MAX]; path(journal,"journal/namespace.db-journal");
+    struct stat first, next;
+    CHECK(!stat(journal,&first) && first.st_size>0);
+    for (unsigned i=0;i<16;i++) {
+        struct md_inode_store *s=i&1 ? a : b;
+        CHECK(!md_inode_link(s,MD_INODE_ROOT,"file",MD_INODE_ROOT,"link",0));
+        CHECK(!md_inode_unlink(s,MD_INODE_ROOT,"link",0));
+        CHECK(!stat(journal,&next) && first.st_ino==next.st_ino && first.st_dev==next.st_dev);
+        CHECK(next.st_size>0 && next.st_size<=1048576);
+        fd=open(journal,O_RDONLY|O_CLOEXEC); CHECK(fd>=0);
+        unsigned char header[28];
+        CHECK(read(fd,header,sizeof(header))==sizeof(header)); close(fd);
+        for (unsigned j=0;j<sizeof(header);j++) CHECK(!header[j]);
+        CHECK(state(s,"file",1).st_size==0);
+    }
+    md_inode_store_close(a); md_inode_store_close(b);
+    a=store("journal",0);
+    struct md_inode_audit audit;
+    CHECK(!md_inode_audit(a,&audit)); md_inode_store_close(a);
+    char database[PATH_MAX], directory[PATH_MAX];
+    path(database,"journal/namespace.db"); path(directory,"journal");
+    sqlite3 *db; CHECK(sqlite3_open(database,&db)==SQLITE_OK);
+    CHECK(sqlite3_exec(db,"PRAGMA journal_mode=WAL",NULL,NULL,NULL)==SQLITE_OK);
+    CHECK(sqlite3_close(db)==SQLITE_OK);
+    CHECK(md_inode_store_open(directory,0,&a)==-ENOTSUP && !a);
+    CHECK(sqlite3_open(database,&db)==SQLITE_OK);
+    sqlite3_stmt *q;
+    CHECK(sqlite3_prepare_v2(db,"PRAGMA journal_mode",-1,&q,NULL)==SQLITE_OK);
+    CHECK(sqlite3_step(q)==SQLITE_ROW && !strcmp((const char *)sqlite3_column_text(q,0),"wal"));
+    sqlite3_finalize(q); CHECK(sqlite3_close(db)==SQLITE_OK);
+    puts("PASS retained rollback journal: shared connections, stable inode, invalidated header and non-mutating WAL rejection");
+}
 int main(int argc, char **argv) {
     CHECK(argc == 2 || argc == 3);
     CHECK(argv[1][0] == '/' && strlen(argv[1]) < sizeof(root)); strcpy(root, argv[1]);
@@ -962,7 +999,7 @@ int main(int argc, char **argv) {
     CHECK(mkdir(root, 0700) == 0);
     descriptors(); namespace(); contention(); multiple_stores(); across_exec(argv[0]);
     hierarchy(); symlinks(); permissions(); kernel_reference(); scoped_paths(); reused_queries(); metadata_queries(); cached_path_names();
-    mutation_cache(); directory_publication(); membership_queries(); counter_audit();
+    mutation_cache(); directory_publication(); membership_queries(); counter_audit(); retained_journal();
     unsigned serial = 0;
     recovery(CREATE, MD_OBJECT_SYNCED, serial++);
     for (enum operation op = CREATE; op <= EXCHANGE; ++op) {

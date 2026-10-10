@@ -582,7 +582,7 @@ MdwServer *mdw_server_create(void) {
     wlr_keyboard_set_repeat_info(&server->keyboard, 25, 600);
     wlr_seat_set_keyboard(server->seat, &server->keyboard);
     wlr_seat_set_capabilities(server->seat, WL_SEAT_CAPABILITY_KEYBOARD | WL_SEAT_CAPABILITY_POINTER);
-    if (!mdw_input_init(server) || !mdw_cursor_init(server)) goto fail;
+    if (!mdw_input_init(server) || !mdw_cursor_init(server) || !mdw_pointer_init(server)) goto fail;
     server->shell = wlr_xdg_shell_create(server->display, 6);
     if (!server->shell) goto fail;
     listen_signal(&server->shell->events.new_toplevel, &server->new_toplevel, new_toplevel);
@@ -937,6 +937,7 @@ bool mdw_output_pointer(MdwOutput *output, double x, double y) {
     if (!accepts_input(output) || !isfinite(x) || !isfinite(y)) return false;
     // Pointer delivery selects its output independently of keyboard focus.
     claim_pointer(output);
+    if (mdw_pointer_locked(output->server, output)) return true;
     double local_x, local_y;
     // Hit-test the rendered scene, not the client's asynchronously acknowledged size.
     struct wlr_scene_node *node = wlr_scene_node_at(&output->view->scene->tree.node,
@@ -946,11 +947,27 @@ bool mdw_output_pointer(MdwOutput *output, double x, double y) {
         ? wlr_scene_surface_try_from_buffer(wlr_scene_buffer_from_node(node)) : NULL;
     struct wlr_surface *surface = scene_surface ? scene_surface->surface : NULL;
     if (surface) {
+        struct wlr_seat_pointer_state *state = &output->server->seat->pointer_state;
+        if (surface == state->focused_surface)
+            mdw_pointer_motion(output->server, local_x - state->sx, local_y - state->sy);
         wlr_seat_pointer_notify_enter(output->server->seat, surface, local_x, local_y);
         wlr_seat_pointer_notify_motion(output->server->seat, time_msec(), local_x, local_y);
     } else wlr_seat_pointer_notify_clear_focus(output->server->seat);
     wlr_seat_pointer_notify_frame(output->server->seat);
+    mdw_pointer_refresh(output->server);
     return surface != NULL;
+}
+
+bool mdw_output_pointer_capture(MdwOutput *output, uint64_t serial, bool captured) {
+    return output && (!captured || accepts_input(output)) &&
+        mdw_pointer_capture(output->server, output, serial, captured);
+}
+
+bool mdw_output_relative(MdwOutput *output, uint64_t serial, double dx, double dy) {
+    return accepts_input(output) && isfinite(dx) && isfinite(dy) &&
+        mdw_pointer_relative(output->server, output, serial,
+            dx * output->output->width / output->render_scale,
+            dy * output->output->height / output->render_scale);
 }
 
 struct CaretGeometry {
@@ -1073,6 +1090,7 @@ void mdw_server_destroy(MdwServer *server) {
     wl_list_for_each_safe(output, next, &server->outputs, link) mdw_output_destroy(output);
     if (server->display) wl_display_destroy_clients(server->display);
     mdw_cursor_finish(server);
+    mdw_pointer_finish(server);
     mdw_input_finish(server);
     mdw_shell_finish(server);
     if (server->initial_output) wlr_output_destroy(server->initial_output);

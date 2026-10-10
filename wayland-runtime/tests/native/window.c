@@ -5,6 +5,8 @@
 #include "xdg-shell-client-protocol.h"
 #include "text-input-unstable-v3-client-protocol.h"
 #include "linux-dmabuf-v1-client-protocol.h"
+#include "pointer-constraints-unstable-v1-client-protocol.h"
+#include "relative-pointer-unstable-v1-client-protocol.h"
 #ifdef __ANDROID__
 #include "dmabuf_producer.h"
 #endif
@@ -29,6 +31,7 @@ static bool minimum_client_size, bounded_client_size;
 static bool interaction;
 static bool dma_client;
 static bool dma_cursor;
+static bool pointer_lock_test;
 
 struct Client {
     struct wl_display *display;
@@ -41,6 +44,12 @@ struct Client {
     struct xdg_toplevel *toplevel;
     struct wl_seat *seat;
     struct wl_pointer *pointer;
+    struct zwp_pointer_constraints_v1 *constraints;
+    struct zwp_relative_pointer_manager_v1 *relative_manager;
+    struct zwp_relative_pointer_v1 *relative;
+    struct zwp_locked_pointer_v1 *lock;
+    int locks, unlocks, relative_events;
+    bool pointer_locked, relative_pending;
     struct wl_keyboard *keyboard;
     struct zwp_text_input_manager_v3 *text_manager;
     struct zwp_text_input_v3 *text;
@@ -106,11 +115,61 @@ static const struct zwp_text_input_v3_listener text_listener = {
     .commit_string = text_commit, .delete_surrounding_text = text_delete, .done = text_done,
 };
 
+static void locked(void *data, struct zwp_locked_pointer_v1 *lock) {
+    (void)lock;
+    struct Client *client = data;
+    client->pointer_locked = true;
+    ++client->locks;
+}
+static void unlocked(void *data, struct zwp_locked_pointer_v1 *lock) {
+    (void)lock;
+    struct Client *client = data;
+    client->pointer_locked = false;
+    ++client->unlocks;
+    xdg_toplevel_set_app_id(client->toplevel, "pointer-unlocked");
+}
+static const struct zwp_locked_pointer_v1_listener lock_listener = {.locked = locked, .unlocked = unlocked};
+
+static void relative_motion(void *data, struct zwp_relative_pointer_v1 *relative, uint32_t hi, uint32_t lo,
+        wl_fixed_t dx, wl_fixed_t dy, wl_fixed_t raw_dx, wl_fixed_t raw_dy) {
+    (void)relative;
+    struct Client *client = data;
+    assert(hi || lo);
+    assert(client->pointer_locked && dx == raw_dx && dy == raw_dy);
+    assert(fabs(wl_fixed_to_double(dx) - 10) < .001 && fabs(wl_fixed_to_double(dy) + 15) < .001);
+    ++client->relative_events;
+    assert(!client->relative_pending);
+    client->relative_pending = true;
+}
+static const struct zwp_relative_pointer_v1_listener relative_listener = {.relative_motion = relative_motion};
+
+static void pointer_frame(void *data, struct wl_pointer *pointer) {
+    (void)pointer;
+    struct Client *client = data;
+    if (!client->relative_pending) return;
+    client->relative_pending = false;
+    if (client->relative_events == 2) {
+        zwp_locked_pointer_v1_destroy(client->lock);
+        client->pointer_locked = false;
+        client->lock = zwp_pointer_constraints_v1_lock_pointer(client->constraints, client->surface,
+            client->pointer, NULL, ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_ONESHOT);
+        zwp_locked_pointer_v1_add_listener(client->lock, &lock_listener, client);
+    } else xdg_toplevel_set_app_id(client->toplevel, "pointer-moved");
+}
+
 static void pointer_enter(void *data, struct wl_pointer *pointer, uint32_t serial,
         struct wl_surface *surface, wl_fixed_t x, wl_fixed_t y) {
     (void)pointer; (void)serial;
     struct Client *client = data;
     assert(surface == client->surface);
+    if (pointer_lock_test && !client->lock) {
+        assert(client->constraints && client->relative_manager);
+        client->relative = zwp_relative_pointer_manager_v1_get_relative_pointer(client->relative_manager, pointer);
+        zwp_relative_pointer_v1_add_listener(client->relative, &relative_listener, client);
+        client->lock = zwp_pointer_constraints_v1_lock_pointer(client->constraints, surface, pointer,
+            NULL, ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT);
+        zwp_locked_pointer_v1_add_listener(client->lock, &lock_listener, client);
+    }
     assert(fabs(wl_fixed_to_double(x) - (bounded_client_size ? 300 : minimum_client_size ? 40 : interaction ? 10 : fixed_client_size ? 40 : 20)) < .01
         && fabs(wl_fixed_to_double(y) - (bounded_client_size ? 75 : minimum_client_size ? 60 : interaction ? 7.5 : fixed_client_size ? 30 : 15)) < .01);
     if (interaction) {
@@ -152,6 +211,7 @@ static void pointer_leave(void *data, struct wl_pointer *pointer, uint32_t seria
 }
 static void pointer_motion(void *data, struct wl_pointer *pointer, uint32_t time, wl_fixed_t x, wl_fixed_t y) {
     (void)data; (void)pointer; (void)time; (void)x; (void)y;
+    assert(!((struct Client *)data)->pointer_locked);
 }
 static void pointer_button(void *data, struct wl_pointer *pointer, uint32_t serial,
         uint32_t time, uint32_t button, uint32_t state) {
@@ -174,7 +234,7 @@ static void pointer_axis(void *data, struct wl_pointer *pointer, uint32_t time,
 }
 static const struct wl_pointer_listener pointer_listener = {
     .enter = pointer_enter, .leave = pointer_leave, .motion = pointer_motion,
-    .button = pointer_button, .axis = pointer_axis,
+    .button = pointer_button, .axis = pointer_axis, .frame = pointer_frame,
 };
 
 static void keyboard_keymap(void *data, struct wl_keyboard *keyboard, uint32_t format,
@@ -205,9 +265,12 @@ static void keyboard_modifiers(void *data, struct wl_keyboard *keyboard, uint32_
         uint32_t depressed, uint32_t latched, uint32_t locked, uint32_t group) {
     (void)data; (void)keyboard; (void)serial; (void)depressed; (void)latched; (void)locked; (void)group;
 }
+static void keyboard_repeat(void *data, struct wl_keyboard *keyboard, int32_t rate, int32_t delay) {
+    (void)data; (void)keyboard; (void)rate; (void)delay;
+}
 static const struct wl_keyboard_listener keyboard_listener = {
     .keymap = keyboard_keymap, .enter = keyboard_enter, .leave = keyboard_leave,
-    .key = keyboard_key, .modifiers = keyboard_modifiers,
+    .key = keyboard_key, .modifiers = keyboard_modifiers, .repeat_info = keyboard_repeat,
 };
 static void seat_capabilities(void *data, struct wl_seat *seat, uint32_t capabilities) {
     struct Client *client = data;
@@ -220,12 +283,19 @@ static void seat_capabilities(void *data, struct wl_seat *seat, uint32_t capabil
         wl_keyboard_add_listener(client->keyboard, &keyboard_listener, client);
     }
 }
-static const struct wl_seat_listener seat_listener = {.capabilities = seat_capabilities};
+static void seat_name(void *data, struct wl_seat *seat, const char *name) {
+    (void)data; (void)seat; (void)name;
+}
+static const struct wl_seat_listener seat_listener = {.capabilities = seat_capabilities, .name = seat_name};
 
 static void global(void *data, struct wl_registry *registry, uint32_t name,
         const char *interface, uint32_t version) {
     (void)version;
     struct Client *client = data;
+    if (!strcmp(interface, "zwp_pointer_constraints_v1"))
+        client->constraints = wl_registry_bind(registry, name, &zwp_pointer_constraints_v1_interface, 1);
+    if (!strcmp(interface, "zwp_relative_pointer_manager_v1"))
+        client->relative_manager = wl_registry_bind(registry, name, &zwp_relative_pointer_manager_v1_interface, 1);
     if (!strcmp(interface, "wl_output")) {
         if (!client->initial_monitor) client->initial_monitor = name;
         client->monitors++;
@@ -242,7 +312,7 @@ static void global(void *data, struct wl_registry *registry, uint32_t name,
     else if (!strcmp(interface, "zwp_text_input_manager_v3"))
         client->text_manager = wl_registry_bind(registry, name, &zwp_text_input_manager_v3_interface, 1);
     else if (!strcmp(interface, "wl_seat")) {
-        client->seat = wl_registry_bind(registry, name, &wl_seat_interface, 1);
+        client->seat = wl_registry_bind(registry, name, &wl_seat_interface, pointer_lock_test ? 5 : 1);
         wl_seat_add_listener(client->seat, &seat_listener, client);
     }
     else if (!strcmp(interface, "xdg_wm_base")) {
@@ -336,6 +406,7 @@ static void toplevel_close(void *data, struct xdg_toplevel *toplevel) {
     assert(client->key_down == 1 && client->key_up == 1);
     assert(client->button_down == 1 && client->button_up == 1);
     if (interaction) assert(client->committed && client->fullscreen && client->maximized && client->width == 40 && client->height == 30);
+    if (pointer_lock_test) assert(client->locks == 3 && client->unlocks == 2 && client->relative_events == 3 && !client->pointer_locked);
     client->closed = true;
 }
 static const struct xdg_toplevel_listener toplevel_listener = {
@@ -401,6 +472,8 @@ struct Host {
     bool mapped, destroyed;
     bool text_enabled, cursor_seen;
     uint64_t editor;
+    uint64_t capture_serial;
+    int capture_requests, capture_releases;
     uint32_t text_revision;
     int gestures;
     int frames;
@@ -427,7 +500,8 @@ static void window_event(void *data, uint64_t id, const MdwWindow *window) {
     host->mapped = window->mapped;
     if (window->mapped) {
         assert(!strcmp(window->title, "MagicDesk Wayland fixture"));
-        assert(!strcmp(window->app_id, "io.magicdesk.fixture") || (interaction && !strcmp(window->app_id, "io.magicdesk.committed")));
+        assert(!strcmp(window->app_id, "io.magicdesk.fixture") || (interaction && !strcmp(window->app_id, "io.magicdesk.committed")) ||
+            (pointer_lock_test && (!strcmp(window->app_id, "pointer-moved") || !strcmp(window->app_id, "pointer-unlocked"))));
     }
 }
 
@@ -496,6 +570,14 @@ static void window_gesture(void *data, uint64_t window, uint32_t edges) {
     assert(edges == (host->gestures == 0 ? 0 : XDG_TOPLEVEL_RESIZE_EDGE_BOTTOM_RIGHT));
     ++host->gestures;
 }
+static void capture_event(void *data, MdwOutput *output, uint64_t serial) {
+    (void)output;
+    struct Host *host = data;
+    host->capture_serial = serial;
+    if (serial) ++host->capture_requests;
+    else ++host->capture_releases;
+}
+
 static void cursor_event(void *data, MdwOutput *output, const uint32_t *pixels,
         int width, int height, int x, int y, bool hidden) {
     (void)output;
@@ -509,6 +591,7 @@ int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--dma-client")) { dma_client = true; run_client(NULL); return 0; }
     if (argc == 2 && !strcmp(argv[1], "--client")) { run_client(NULL); return 0; }
     fixed_client_size = argc == 2 && !strcmp(argv[1], "--fixed-size");
+    pointer_lock_test = argc == 2 && !strcmp(argv[1], "--pointer-lock");
     minimum_client_size = argc == 2 && !strcmp(argv[1], "--minimum-size");
     bounded_client_size = argc == 2 && !strcmp(argv[1], "--bounded-size");
     int offered_height = bounded_client_size ? 20 : minimum_client_size ? 120 : 60;
@@ -525,10 +608,11 @@ int main(int argc, char **argv) {
     assert(mdw_server_fd(server) >= 0);
     struct Host host = {.allow_render = true};
     MdwEvents events = {.window = window_event, .window_gesture = window_gesture, .frame = frame_event, .can_render = can_render,
-        .error = error_event, .text_input = text_input_event, .cursor = cursor_event, .context = &host};
+        .error = error_event, .text_input = text_input_event, .cursor = cursor_event,
+        .pointer_capture = capture_event, .context = &host};
     mdw_server_set_events(server, &events);
     int connection = argc == 2 && !strcmp(argv[1], "--fd") ? mdw_server_connect(server) : -1;
-    assert(argc == 1 || connection >= 0 || fixed_client_size || minimum_client_size || bounded_client_size || interaction);
+    assert(argc == 1 || connection >= 0 || fixed_client_size || minimum_client_size || bounded_client_size || interaction || pointer_lock_test);
     pid_t child = fork();
     assert(child >= 0);
     if (child == 0) {
@@ -546,8 +630,12 @@ int main(int argc, char **argv) {
     MdwOutput *output = NULL;
     bool detached = false, closing = false, deferred = false, resumed = false;
     bool input_sent = false, text_sent = false, minimize_seen = false;
+    int capture_stage = 0;
+    uint64_t old_capture = 0;
     while (!host.destroyed) {
-        assert(mdw_server_dispatch(server, -1) >= 0);
+        // Process a ready host capture receipt before blocking on the next client event.
+        assert(mdw_server_dispatch(server,
+            pointer_lock_test && host.capture_serial && host.capture_serial != old_capture ? 0 : -1) >= 0);
         if (host.mapped && !output) {
             output = mdw_output_create(server, host.window, 80, offered_height);
             assert(output);
@@ -622,7 +710,38 @@ int main(int argc, char **argv) {
                 text_sent = true;
             }
         }
-        if (input_sent && !closing && (!interaction ||
+        if (pointer_lock_test && input_sent && !closing) {
+            if ((capture_stage == 0 || capture_stage == 2 || (capture_stage == 3 && host.capture_requests == 3)) && host.capture_serial
+                    && host.capture_serial != old_capture) {
+                uint64_t serial = host.capture_serial;
+                assert(!mdw_output_relative(output, serial, .125, -.25));
+                assert(!mdw_output_pointer_capture(output, old_capture, true));
+                assert(mdw_output_pointer_capture(output, serial, true));
+                assert(mdw_output_relative(output, serial, .125, -.25));
+                assert(!mdw_output_relative(output, serial + 1, .125, -.25));
+                assert(!mdw_output_relative(output, serial, NAN, 0));
+                // A delayed absolute sample (including button positioning) cannot unlock or warp.
+                assert(mdw_output_pointer(output, .9, .9));
+                old_capture = serial;
+                capture_stage = capture_stage == 3 ? 5 : capture_stage + 1;
+            } else if ((capture_stage == 1 || capture_stage == 5) && !strcmp(host.app_id, "pointer-moved")) {
+                assert(mdw_output_focus(output, false));
+                assert(host.capture_serial == 0);
+                assert(!mdw_output_relative(output, old_capture, 1, 1));
+                assert(!mdw_output_pointer_capture(output, old_capture, true));
+                if (capture_stage == 1) capture_stage = 7;
+                else capture_stage = 6;
+            } else if (capture_stage == 7 && !strcmp(host.app_id, "pointer-unlocked")) {
+                assert(mdw_output_focus(output, true));
+                assert(mdw_output_pointer(output, .25, .25));
+                capture_stage = 2;
+            } else if (capture_stage == 6 && !strcmp(host.app_id, "pointer-unlocked")) {
+                assert(host.capture_requests == 3 && host.capture_releases == 3);
+                assert(mdw_window_close(server, host.window));
+                closing = true;
+            }
+        }
+        if (input_sent && !pointer_lock_test && !closing && (!interaction ||
                 (host.cursor_seen && minimize_seen && host.gestures == 2 && !strcmp(host.app_id, "io.magicdesk.committed")))) {
             assert(mdw_output_focus(output, false));
             assert(!mdw_output_key(output, KEY_A, false));

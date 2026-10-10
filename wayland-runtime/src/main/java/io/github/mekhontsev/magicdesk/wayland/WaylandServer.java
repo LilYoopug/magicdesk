@@ -232,6 +232,12 @@ public final class WaylandServer extends IWaylandServer.Stub {
         });
     }
     @Override public void pointer(long id, double x, double y) { output(id, pointer -> nativePointer(pointer, x, y)); }
+    @Override public void pointerCapture(long id, long serial, boolean captured) {
+        output(id, pointer -> nativePointerCapture(pointer, serial, captured));
+    }
+    @Override public void relative(long id, long serial, double dx, double dy) {
+        output(id, pointer -> nativeRelative(pointer, serial, dx, dy));
+    }
     @Override public void button(long id, int button, boolean down) { output(id, pointer -> nativeButton(pointer, button, down)); }
     @Override public void scroll(long id, double horizontal, double vertical) {
         output(id, pointer -> nativeScroll(pointer, horizontal, vertical));
@@ -477,6 +483,13 @@ public final class WaylandServer extends IWaylandServer.Stub {
         catch (RemoteException error) { requestStop(); }
     }
 
+    private void onPointerCapture(long pointer, long serial) {
+        Output output = nativeOutputs.get(pointer);
+        if (output == null) return;
+        try { owner.pointerCapture(output.id, serial); }
+        catch (RemoteException error) { requestStop(); }
+    }
+
     private void onShell(long id, byte[] name, boolean mapped, boolean configureNeeded, int layer, int keyboard,
             int anchors, long width, long height, int left, int top, int right, int bottom,
             int exclusiveZone, boolean removed) {
@@ -586,6 +599,8 @@ public final class WaylandServer extends IWaylandServer.Stub {
     private static native boolean nativeScale(long output, double scale);
     private static native long nativeBorrowDependents(long output);
     private static native void nativePointer(long output, double x, double y);
+    private static native void nativePointerCapture(long output, long serial, boolean captured);
+    private static native void nativeRelative(long output, long serial, double dx, double dy);
     private static native void nativeButton(long output, int button, boolean down);
     private static native void nativeScroll(long output, double horizontal, double vertical);
     private static native void nativeKey(long output, int androidKey, int scanCode, boolean down);

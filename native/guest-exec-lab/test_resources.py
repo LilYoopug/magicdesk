@@ -18,7 +18,7 @@ def main():
     parser.add_argument("--server", default="magicdesk")
     parser.add_argument("--keep", action="store_true")
     parser.add_argument("--diagnostics", action="store_true")
-    parser.add_argument("--case", choices=("all", "kernel-baseline", "mapping-task", "private-memory", "pidfd-table", "fd-observation", "proc-custody", "exec-custody", "open-job", "ofd-order", "fd-handoff", "fd-parcel", "fd-messages", "ipc-peer", "ipc-origins", "ipc-ancillary", "mount-policy", "mount-graph", "mount-namespace", "inode-custody", "origin-transfer", "transient-store", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fd-lifecycle", "restricted-descriptors", "fs-dispatch", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture", "rpc", "stores"), default="all",
+    parser.add_argument("--case", choices=("all", "event-fairness", "kernel-baseline", "mapping-task", "private-memory", "pidfd-table", "fd-observation", "proc-custody", "exec-custody", "open-job", "ofd-order", "fd-handoff", "fd-parcel", "fd-messages", "ipc-peer", "ipc-origins", "ipc-ancillary", "mount-policy", "mount-graph", "mount-namespace", "inode-custody", "origin-transfer", "transient-store", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fd-lifecycle", "restricted-descriptors", "fs-dispatch", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture", "rpc", "stores"), default="all",
                         help="Run resource regressions, FD handoff/parcel, terminal RPC custody, native FD lifecycle, or worker transport")
     parser.add_argument("--compare-installed", action="store_true",
                         help="Compare identical metadata/spawn fixtures with the installed runtime")
@@ -181,8 +181,15 @@ def main():
         check("native buffered group exit", root + "/libmagicdesk_guest_resource_guest.so buffer-exit " + root + "/native",
               "PASS buffered group exit")
         # EVENT_WAIT: the outer bound also covers failure inside supervisor cleanup.
-        check("guest buffered group exit", "timeout -k 5 105 " + root + "/libmagicdesk_guest_run.so --diagnostics --store " + root
-              + "/store --deadline-seconds 90 -- /bin/test buffer-exit /tmp", "PASS buffered group exit")
+        # Keep high-volume syscall diagnostics outside the bounded command output;
+        # otherwise successful termination can lose its required PASS marker.
+        try:
+            check("guest buffered group exit", "timeout -k 5 105 " + root + "/libmagicdesk_guest_run.so --diagnostics --store " + root
+                  + "/store --deadline-seconds 90 -- /bin/test buffer-exit /tmp 2>" + root + "/buffer-exit.log",
+                  "PASS buffered group exit")
+        finally:
+            transport.download(client, root + "/buffer-exit.log",
+                               args.build / "buffer-exit.log", overwrite=True)
         for suffix in ("", "-protected"):
             # EVENT_WAIT: idle tree expiry must reap terminal stops. An outer
             # timeout has a different exit code and cannot count as cleanup.
@@ -360,10 +367,37 @@ def main():
             names = ("test_task_resources",)
         if args.case == "pidfd-table":
             names = ("pidfd_table",)
+        if args.case == "event-fairness":
+            names = ("bootstrap", "supervisor", "run", "service")
+        if args.case in ("all", "event-fairness"):
+            names += ("event_fairness", "task_wait", "task_wait_live", "pending")
         for name in names:
             file = "libmagicdesk_guest_" + name + ".so"
             transport.upload(client, args.build / file, root + "/" + file)
         check("prepare fixtures", "chmod 700 " + root + "/*.so")
+        if args.case in ("all", "event-fairness"):
+            check("pending continuations", root + "/libmagicdesk_guest_pending.so",
+                  "PASS pending continuations")
+            check("task event selection", root + "/libmagicdesk_guest_task_wait.so",
+                  "PASS task event selection")
+            check("live task event collection", root + "/libmagicdesk_guest_task_wait_live.so",
+                  "PASS live wait collection")
+            check("native event fairness", root + "/libmagicdesk_guest_event_fairness.so",
+                  "PASS worker completions under continuous ptrace stops")
+            check("event fairness source", "mkdir -p " + root + "/fair-source/bin " + root + "/fair-source/tmp")
+            check("event fairness image", "cp " + root + "/libmagicdesk_guest_event_fairness.so " + root + "/fair-source/bin/test")
+            check("event fairness access", "chmod 755 " + root + "/fair-source "
+                  + root + "/fair-source/bin " + root + "/fair-source/bin/test "
+                  + root + "/fair-source/tmp")
+            check("event fairness import", root + "/libmagicdesk_guest_service.so --import "
+                  + root + "/fair-source " + root + "/fair-store --preserve-ownership")
+            for user in ("0:0", "1000:1000"):
+                check("guest event fairness " + user, "timeout -k 5 25 " + root
+                      + "/libmagicdesk_guest_run.so --user " + user + " --store "
+                      + root + "/fair-store --deadline-seconds 20 -- /bin/test",
+                      "PASS worker completions under continuous ptrace stops")
+            if args.case == "event-fairness":
+                return
         if args.case == "private-memory":
             check("task quiescence", root + "/libmagicdesk_guest_task_quiesce.so", "PASS task quiescence")
             check("private mapping ownership", root + "/libmagicdesk_guest_test_interception_buffers.so",

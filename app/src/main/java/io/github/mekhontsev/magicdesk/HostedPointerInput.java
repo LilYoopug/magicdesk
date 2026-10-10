@@ -20,6 +20,7 @@ final class HostedPointerInput {
     private float x = .5f, y = .5f, startX, startY, previousX, previousY;
     private int buttons, physicalButtons;
     private boolean contact, pendingTap, syntheticButton, scrolling, relative, moved, windowGesture;
+    private long captureSerial;
 
     HostedPointerInput(View view) {
         this.view = view;
@@ -67,6 +68,34 @@ final class HostedPointerInput {
         position(startX, startY);
         syntheticButton = true;
         updateButtons();
+    }
+
+    boolean captured(MotionEvent event, long serial) {
+        if (serial == 0 || output == null || !viewport.available()) return false;
+        if (event.isFromSource(InputDevice.SOURCE_TOUCHPAD)) {
+            // Captured touchpads deliver contact positions, not mouse deltas.
+            captureSerial = serial;
+            try { return event(event); }
+            finally { captureSerial = 0; }
+        }
+        if (!event.isFromSource(InputDevice.SOURCE_MOUSE_RELATIVE)) return false;
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_CANCEL) { release(); return true; }
+        if (action == MotionEvent.ACTION_MOVE || action == MotionEvent.ACTION_HOVER_MOVE) {
+            for (int i = 0; i < event.getHistorySize(); ++i)
+                relativePixels(serial, event.getHistoricalX(0, i), event.getHistoricalY(0, i));
+            relativePixels(serial, event.getX(), event.getY());
+        }
+        if (action == MotionEvent.ACTION_SCROLL)
+            output.scroll(x, y, event.getAxisValue(MotionEvent.AXIS_HSCROLL), event.getAxisValue(MotionEvent.AXIS_VSCROLL));
+        physicalButtons = event.getButtonState();
+        updateButtons();
+        return true;
+    }
+
+    private void relativePixels(long serial, float dx, float dy) {
+        if (Float.isFinite(dx) && Float.isFinite(dy) && (dx != 0 || dy != 0))
+            output.relative(serial, dx / viewport.width(), dy / viewport.height());
     }
 
     boolean event(MotionEvent event) {
@@ -165,9 +194,12 @@ final class HostedPointerInput {
                 }
             }
             if (relative) {
-                x = Math.max(0, Math.min(1, x + (px - previousX) / viewport.width()));
-                y = Math.max(0, Math.min(1, y + (py - previousY) / viewport.height()));
-                output.pointer(x, y);
+                if (captureSerial != 0) relativePixels(captureSerial, px - previousX, py - previousY);
+                else {
+                    x = Math.max(0, Math.min(1, x + (px - previousX) / viewport.width()));
+                    y = Math.max(0, Math.min(1, y + (py - previousY) / viewport.height()));
+                    output.pointer(x, y);
+                }
             } else position(px, py);
             previousX = px; previousY = py;
             updateButtons();

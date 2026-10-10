@@ -49,6 +49,17 @@ Compatibility reports expose lease count, graph demand, output error, received
 and rendered frames, padding, overruns, queue depth and Android xruns. Reading
 diagnostics does not start an audio service. These counters are graph-wide,
 not per-client accounting.
+Zero output errors or xruns do not certify uninterrupted source audio: a client
+or guest tunnel can supply silence before the Android ring. Audible continuity
+requires inspecting PCM from the affected stream under the reproducing workload,
+alongside transport and scheduling observations.
+`silenceFrames` counts padding by the Android ring consumer, not zero-valued PCM
+received from a client. PipeWire's graph deadline counters are also distinct from
+Pulse stream underruns: its Pulse server can fill an empty client buffer with
+silence while completing the graph cycle on time. Continuity checks should use
+a known continuous source, observe the client stream and guest sink separately,
+and verify the measurement with a bounded producer-stall control. A quiet PCM
+block alone is not an error for arbitrary application content.
 
 ## Linux Environments
 
@@ -71,6 +82,13 @@ The Plasma launcher acquires this audio session for both X11 and Wayland,
 including direct console launches. An already active audio session is reused.
 The shared Android sink does not accept guest-wide volume changes; a desktop's
 device-volume control belongs to its private guest graph.
+The tunnel is published as the guest's output device (`node.virtual = false`),
+so standard desktop mixers show it without enabling hidden virtual devices.
+Its network transport and software volume control remain explicit.
+The guest graph and Pulse request floor are 1024 frames at 48 kHz (about 21 ms),
+with a 60 ms tunnel target. This bounds scheduling pressure in an environment
+without hardware-clock ownership or guaranteed real-time scheduling. It does
+not change the Android output quantum or direct-client audio policy.
 
 The wrapper uses private per-session runtime/configuration directories and
 PipeWire startup receipts and output-port events, not fixed sleeps. Applications

@@ -119,6 +119,11 @@ if os.environ.get("TEST_FAIL") == stage:
         helper.write_text(result.stdout)
         self.assertEqual(0, subprocess.run(['bash', '-n', str(helper)]).returncode)
         self.assertIn('libpipewire-module-pulse-tunnel', result.stdout)
+        self.assertIn('node.virtual = false', result.stdout)
+        self.assertIn('default.clock.min-quantum = 1024', result.stdout)
+        self.assertIn('pulse.min.req = 1024/48000', result.stdout)
+        self.assertIn('pulse.min.quantum = 1024/48000', result.stdout)
+        self.assertIn('pulse.latency = 60', result.stdout)
         self.assertIn('pw-link --input --monitor', result.stdout)
         self.assertLess(result.stdout.index('Guest Android audio sink was not configured.'),
                         result.stdout.index('"$@" <&0'))
@@ -243,6 +248,99 @@ if os.environ.get("TEST_FAIL") == stage:
         self.assertIn(['remove', 'unpack'], calls)
         self.assertEqual(['prune'], calls[-1])
         self.assertFalse(list(self.directory.glob('magicdesk-steamos-*')))
+
+    def steam_game_fixture(self):
+        helper = self.directory / 'steam-game.py'
+        helper.write_text(self.run_script('--print-steam-game').stdout)
+        tool = self.directory / 'FEX tool'
+        tool.mkdir()
+        manifest = {'emulator_v0': {
+            'argv': './usr/bin/FEX', 'container_argv': ['./usr/bin/FEX', '--option'],
+            'main_argv': './FEXCompatTool', 'server_argv': './usr/bin/FEXServerManager',
+            'environment': {'FEX_PORTABLE': '1'}, 'container_environment': {'FEX_ROOTFS': ''},
+            'required_architectures': ['aarch64-linux-gnu'], 'required_libraries': ['libc.so.6'],
+        }}
+        source = tool / 'emulator.json'
+        source.write_text(json.dumps(manifest))
+        capture = tool / 'capture.py'
+        capture.write_text('import json, os, sys\nprint(json.dumps({"argv": sys.argv[1:], '
+                           '"manifest": os.environ.get("PRESSURE_VESSEL_EMULATOR")}))\n')
+        environment = dict(self.environment, XDG_CACHE_HOME=str(self.directory / 'cache'),
+                           STEAM_COMPAT_TOOL_PATHS=str(tool))
+        environment.pop('PRESSURE_VESSEL_EMULATOR', None)
+        return helper, source, capture, environment
+
+    def test_steam_game_derives_manifest_without_modifying_valve_or_arguments(self):
+        helper, source, capture, environment = self.steam_game_fixture()
+        original = source.read_bytes()
+        command = [sys.executable, str(helper), sys.executable, str(capture), 'a b', '--test']
+        # EVENT_WAIT: launcher replaces itself with the capture process; timeout fails the test.
+        result = subprocess.run(command, env=environment, text=True, capture_output=True, timeout=5)
+        self.assertEqual(0, result.returncode, result.stderr)
+        captured = json.loads(result.stdout)
+        self.assertEqual(['a b', '--test'], captured['argv'])
+        target = Path(captured['manifest'])
+        wrapped = json.loads(target.read_text())['emulator_v0']
+        self.assertEqual([str(source.parent / 'usr/bin/FEX')], wrapped['argv'])
+        self.assertEqual(['/usr/bin/sh', '-c'], wrapped['main_argv'][:2])
+        self.assertEqual(str(source.parent / 'FEXCompatTool'), wrapped['main_argv'][-1])
+        self.assertEqual('--option', wrapped['container_argv'][-1])
+        self.assertEqual(['libc.so.6', 'libreadline.so.8'], wrapped['required_libraries'])
+        self.assertEqual(original, source.read_bytes())
+        repeated = subprocess.run(command, env=environment, text=True, capture_output=True, timeout=5)
+        self.assertEqual(str(target), json.loads(repeated.stdout)['manifest'])
+        updated = json.loads(original)
+        updated['emulator_v0']['main_argv'] = './NewCompatTool'
+        source.write_text(json.dumps(updated))
+        changed = subprocess.run(command, env=environment, text=True, capture_output=True, timeout=5)
+        self.assertNotEqual(str(target), json.loads(changed.stdout)['manifest'])
+
+    def test_steam_game_respects_custom_emulator_and_native_commands(self):
+        helper, source, capture, environment = self.steam_game_fixture()
+        command = [sys.executable, str(helper), sys.executable, str(capture)]
+        environment['PRESSURE_VESSEL_EMULATOR'] = '/custom/emulator.json'
+        result = subprocess.run(command, env=environment, text=True, capture_output=True, timeout=5)
+        self.assertEqual('/custom/emulator.json', json.loads(result.stdout)['manifest'])
+        environment.pop('PRESSURE_VESSEL_EMULATOR')
+        source.unlink()
+        result = subprocess.run(command, env=environment, text=True, capture_output=True, timeout=5)
+        self.assertIsNone(json.loads(result.stdout)['manifest'])
+
+    def test_steam_game_finds_selected_tool_in_arguments(self):
+        helper, source, capture, environment = self.steam_game_fixture()
+        environment.pop('STEAM_COMPAT_TOOL_PATHS')
+        result = subprocess.run([sys.executable, str(helper), sys.executable, str(capture)],
+                                env=environment, text=True, capture_output=True, timeout=5)
+        self.assertEqual(0, result.returncode, result.stderr)
+        target = Path(json.loads(result.stdout)['manifest'])
+        wrapped = json.loads(target.read_text())['emulator_v0']
+        self.assertEqual(str(source.parent / 'FEXCompatTool'), wrapped['main_argv'][-1])
+
+    def test_steam_container_environment_is_scoped_and_preserves_search_paths(self):
+        helper, source, capture, environment = self.steam_game_fixture()
+        result = subprocess.run([sys.executable, str(helper), sys.executable, str(capture)],
+                                env=environment, text=True, capture_output=True, timeout=5)
+        target = Path(json.loads(result.stdout)['manifest'])
+        wrapper = json.loads(target.read_text())['emulator_v0']['main_argv'][2]
+        capture.write_text('import json, os, sys\nprint(json.dumps([os.environ.get(k) for k in sys.argv[1:]]))\n')
+        command = ['sh', '-c', wrapper, 'container', sys.executable, str(capture),
+                   'FEX_ROOTFS', 'LD_LIBRARY_PATH', 'LIBGL_DRIVERS_PATH']
+        for root, expected in [('', '/'), ('/selected', '/selected'), (None, None)]:
+            env = dict(environment, MAGICDESK_MESA_PREFIX='/private mesa',
+                       LD_LIBRARY_PATH='/runtime/lib', LIBGL_DRIVERS_PATH='/runtime/dri')
+            env.pop('FEX_ROOTFS', None)
+            if root is not None:
+                env['FEX_ROOTFS'] = root
+            result = subprocess.run(command, env=env, text=True, capture_output=True, timeout=5)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual([expected, '/private mesa/lib:/runtime/lib',
+                              '/private mesa/lib/dri:/runtime/dri'], json.loads(result.stdout))
+        env = dict(environment, FEX_ROOTFS='', LD_LIBRARY_PATH='/runtime/lib')
+        env.pop('MAGICDESK_MESA_PREFIX', None)
+        env.pop('LIBGL_DRIVERS_PATH', None)
+        result = subprocess.run(command, env=env, text=True, capture_output=True, timeout=5)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(['/', '/runtime/lib', None], json.loads(result.stdout))
 
     def test_steamos_rejects_package_recipes_before_download(self):
         for option in (('--gui', 'apps'), ('--fonts', 'cjk'),

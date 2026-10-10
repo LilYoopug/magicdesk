@@ -272,7 +272,13 @@ independent of OCI parsing and launch-local directory attachments.
   and lock waiting do not promise bounded service completion; the caller's RPC
   deadline bounds observation, not cancellation of an accepted request. Offline
   import must not contend with live clients.
-- The rollback journal uses `synchronous=EXTRA`. No SQLite busy timeout or
+- Connections use a retained `PERSIST` rollback journal with
+  `synchronous=EXTRA`. Commit invalidates the journal header instead of
+  unlinking/recreating the journal and synchronizing its directory each time.
+  The retained journal has a 1 MiB post-transaction size limit; transactions
+  can still grow it as needed. Every operation retains its own synchronous
+  commit and recovery boundary; foreign WAL databases are rejected without
+  converting their journal mode. No SQLite busy timeout or
   automatic replay is installed. An external SQLite writer bypassing the store
   gate still returns EAGAIN. An IO error during commit can have an unknown
   outcome: inspect before replaying a mutation.
@@ -329,6 +335,10 @@ real shell UID 2000 in `u:r:shell:s0` on NX809J / API 36 / Linux 6.12.23 / 4 KiB
   Precommit checkpoints flush actual dirty database pages and verify a nonempty
   rollback journal. Reopening checks names, inode identity, database integrity,
   foreign keys and orphan accounting.
+- Retained rollback journals keep their inode across alternating writers,
+  invalidate their header after commit and respect the post-commit size limit.
+  Reopening audits the namespace; a foreign WAL store is rejected without
+  changing its journal mode.
 - Twelve additional hierarchy SIGKILL boundaries: mkdir/symlink after object
   sync, and mkdir/symlink/directory move/exchange/rmdir before and after commit.
   Retained directory FDs, parent paths and shared file data remain coherent after

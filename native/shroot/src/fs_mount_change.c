@@ -98,6 +98,11 @@ static int attributes(struct md_filesystem *fs, const struct md_fs_request *q,
     return 0;
 }
 static int beneath(struct md_filesystem *fs, int fd, const struct md_view_location *source) {
+    struct stat st;
+    if (fstat(source->fd,&st)) return -errno;
+    /* A file bind has no descendants. Its inode can have several names, none
+     * of which is needed to retain the selected file as the new mount root. */
+    if (!S_ISDIR(st.st_mode)) return 0;
     char path[PATH_MAX], root[PATH_MAX];
     int r=md_view_backing_path(fs,source->fd,source->mount,root,sizeof(root));
     if (!r) r=md_view_backing_path(fs,fd,source->mount,path,sizeof(path));

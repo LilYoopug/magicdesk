@@ -19,6 +19,27 @@ connection. There is no current distribution, global guest root or singleton
 per launch method. Separate guest stores and independent PRoot/chroot entry
 scripts can be used concurrently. Each guest launch owns a supervised process tree
 and one native namespace worker inside its supervisor; cancelling it does not cancel another launch.
+The supervisor services ready worker, descriptor and socket events alongside
+ptrace stops on every event-loop turn. Continuous syscall traffic cannot defer
+these completions until tracees become idle; readiness checks do not introduce
+periodic waits or per-event allocations.
+Resource-blocked continuations register in supervisor-owned intrusive queues.
+Descriptor readiness and adapter progress visit only those registered waits,
+not every guest thread. A dispatch services one bounded snapshot; callbacks can
+cancel pending entries or defer themselves to the next turn. Task teardown
+removes entries before record reuse, and nested completion retains its wakeup.
+The existing resource turns remain authoritative; the queues neither cache
+descriptor identities nor alter guest seccomp or debugger state.
+Supervisor and namespace-broker task lookup use TID indexes. The existing
+owners retain records through terminal cleanup and outstanding worker borrows;
+index removal precedes reuse, and lookups allocate no memory.
+SIGCHLD supplies a TID hint for nonblocking wait collection. A bounded number of
+directed waits is followed by a general wait, so coalesced signals do not exclude
+unnotified tasks. The kernel retains all statuses; debugger rusage and the memory
+barrier use the same collector, without a second userspace event queue.
+A general wait returning no status marks collection drained until the next
+SIGCHLD. Worker/socket readiness does not repeat a kernel-wide task search;
+a stale directed hint alone never establishes that the queue is empty.
 Stores persist independently of those processes. Metadata operations on the
 same store acquire a kernel file lock before entering SQLite and release it
 after commit or rollback. Separate launches can share a store without exposing
@@ -120,6 +141,10 @@ preceding descriptor's uncommitted close. The turn ends after retaining the
 object, before application IO. Proc and watch selectors share this dispatch:
 stacked seccomp filter order cannot change the current descriptor's type after
 close/reuse or inheritance. Ordinary unselected data IO remains native.
+Selector synchronization waits for the terminal event of an exact retiring
+private helper when that helper rejects TSYNC. Already-departed TIDs allow a
+fresh kernel synchronization attempt; incompatible live filters remain errors.
+The selector is published only after successful kernel synchronization.
 Interrupted queued FD installations retire their
 expired notification independently of queue readiness; a restarted proc request
 releases the old unpublished carrier before creating another admission.
@@ -401,6 +426,22 @@ its private Mesa prefix to pressure-vessel; it does not replace per-game FEX
 configuration. After refreshing Apps, select Steam or another
 supplied application; `shroot login steamos` opens a terminal as `steamos`.
 Use `shroot login steamos --user root` for guest administration.
+
+For an x86 Linux game using Valve's FEX compatibility tool, set its Steam
+**Properties > General > Launch Options** to:
+
+```text
+magicdesk-steam-game %command%
+```
+
+The recipe installs this launcher inside SteamOS. It derives a cached emulator
+descriptor from the selected Steam tool, retaining its architectures, library
+requirements and arguments. Inside pressure-vessel it makes FEX's empty root
+explicit (`/`) and gives the private Mesa profile priority while preserving the
+runtime's library paths. Valve's files and per-game FEX configuration are not
+modified. Commands without a matching FEX descriptor and an explicitly supplied
+`PRESSURE_VESSEL_EMULATOR` pass through unchanged. This does not guarantee
+compatibility with every game or Proton configuration.
 
 Reserve about 35 GB of free storage during conversion/import. Verified source
 archives and wheels remain in `$HOME/downloads` (`--downloads DIR` overrides
@@ -1103,6 +1144,9 @@ relative addresses, returned addresses, rename, stale listeners and unlink/rebin
 are tested. Unlinking a name does not invalidate existing connections. Different
 stores have independent names; explicitly abstract sockets retain the host's
 shared abstract namespace and are not isolated.
+An individual socket bind retains the selected endpoint, including hardlink
+aliases and removed source names. Connecting through a readonly mount does not
+mutate the filesystem; the socket's write permissions still apply.
 Named pipes use the same namespace and kernel pipe payloads, without requiring
 native FIFO creation under Android shell policy. Peer-open rendezvous belongs to
 a cancellable supervisor operation outside namespace transactions. See the [FIFO contract](../native/shroot/fifos.md)

@@ -51,7 +51,8 @@ int md_inode_socket_address(struct md_inode_store *s, int dirfd, const char *pat
     int r = mdi_begin(s, 0);
     if (r) return r;
     struct mdi_location loc;
-    r = mdi_walk(s, dirfd, path, MDI_FOLLOW, 0, &loc);
+    /* A bind-mounted endpoint is already selected, including after unlink. */
+    r = path ? mdi_walk(s, dirfd, path, MDI_FOLLOW, 0, &loc) : mdi_fd(s, dirfd, &loc.node);
     if (!r && loc.node.kind != S_IFSOCK) r = -ECONNREFUSED;
     struct stat st;
     if (!r) r = mdi_stat(s, &loc.node, &st);

@@ -12,6 +12,10 @@ interface HostedSurfaceOutput extends AutoCloseable {
     void focus();
     default void blur() { }
     void pointer(float x, float y);
+    /** UI-thread callback: nonzero request identity, zero revokes relative pointer capture. */
+    default void captureListener(java.util.function.LongConsumer listener) { }
+    default void pointerCapture(long serial, boolean captured) { }
+    default void relative(long serial, float dx, float dy) { }
     void button(float x, float y, Button button, boolean down);
     void scroll(float x, float y, float horizontal, float vertical);
     default boolean supportsTouch() { return false; }

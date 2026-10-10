@@ -18,6 +18,7 @@ final class HostedSurfaceView extends SurfaceView implements SurfaceHolder.Callb
         default void redraw(Runnable finished) { finished.run(); }
     }
     private final HostedPointerInput pointerInput;
+    private final HostedPointerCapture pointerCapture;
     private final HostedCursor cursor = new HostedCursor();
     private HostedSurfaceOutput output;
     private LinuxGamepads gamepads;
@@ -40,6 +41,10 @@ final class HostedSurfaceView extends SurfaceView implements SurfaceHolder.Callb
     HostedSurfaceView(Context context) {
         super(context);
         pointerInput = new HostedPointerInput(this);
+        pointerCapture = new HostedPointerCapture(new HostedPointerCapture.Host() {
+            @Override public void request() { requestPointerCapture(); }
+            @Override public void release() { releasePointerCapture(); }
+        });
         setFocusable(true);
         setFocusableInTouchMode(true);
         addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
@@ -62,6 +67,8 @@ final class HostedSurfaceView extends SurfaceView implements SurfaceHolder.Callb
         output = next;
         surfaceBinding = next == null ? null : java.util.Objects.requireNonNull(surfaces);
         pointerInput.bind(next);
+        updatePointerCapture();
+        pointerCapture.bind(next);
         if (output != null && getHolder().getSurface().isValid() && getWidth() > 0 && getHeight() > 0)
             attachSurface(getHolder(), getWidth(), getHeight());
     }
@@ -73,6 +80,7 @@ final class HostedSurfaceView extends SurfaceView implements SurfaceHolder.Callb
         boolean moved = !next.equals(viewport);
         viewport = next;
         pointerInput.viewport(viewport);
+        updatePointerCapture();
         updateCursor();
         if (moved && textConnection != null) textConnection.cursorChanged();
     }
@@ -86,6 +94,32 @@ final class HostedSurfaceView extends SurfaceView implements SurfaceHolder.Callb
     private void updateGamepadFocus() {
         if (gamepads != null) gamepads.focus(this,
                 inputAllowed && output != null && isFocused() && hasWindowFocus());
+    }
+
+    private void updatePointerCapture() {
+        if (pointerCapture != null) pointerCapture.eligible(inputAllowed && keyboardAllowed && !contentDrag
+                && output != null && isAttachedToWindow() && isShown() && isFocused()
+                && hasWindowFocus() && viewport.available() && getHolder().getSurface().isValid());
+    }
+
+    @Override public void onPointerCaptureChange(boolean captured) {
+        super.onPointerCaptureChange(captured);
+        pointerInput.release();
+        pointerCapture.changed(captured);
+    }
+
+    @Override public boolean onCapturedPointerEvent(MotionEvent event) {
+        return inputAllowed && pointerInput.captured(event, pointerCapture.serial());
+    }
+
+    @Override protected void onDetachedFromWindow() {
+        pointerCapture.eligible(false);
+        super.onDetachedFromWindow();
+    }
+
+    @Override protected void onVisibilityChanged(android.view.View changed, int visibility) {
+        super.onVisibilityChanged(changed, visibility);
+        updatePointerCapture();
     }
 
     void cursor(android.graphics.Bitmap image, int hotspotX, int hotspotY, boolean hidden) {
@@ -131,6 +165,7 @@ final class HostedSurfaceView extends SurfaceView implements SurfaceHolder.Callb
     void release() {
         if (textConnection != null) { textConnection.dispose(); textConnection = null; }
         releaseInput();
+        pointerCapture.bind(null);
         gamepads = null;
         if (output != null) {
             if (ownsOutput) output.close();
@@ -148,12 +183,14 @@ final class HostedSurfaceView extends SurfaceView implements SurfaceHolder.Callb
     void allowInput(boolean allowed) {
         if (inputAllowed && !allowed) releaseInput();
         inputAllowed = allowed;
+        updatePointerCapture();
         updateGamepadFocus();
     }
 
     void allowKeyboard(boolean allowed) {
         if (keyboardAllowed == allowed) return;
         keyboardAllowed = allowed;
+        updatePointerCapture();
         if (!allowed) {
             releaseKeys();
             if (focusBoundary != null) focusBoundary.run();
@@ -165,6 +202,7 @@ final class HostedSurfaceView extends SurfaceView implements SurfaceHolder.Callb
     }
 
     private void releaseInput() {
+        pointerCapture.cancel();
         if (gamepads != null) gamepads.focus(this, false);
         if (!contentDrag) pointerInput.release();
         releaseKeys();
@@ -184,6 +222,7 @@ final class HostedSurfaceView extends SurfaceView implements SurfaceHolder.Callb
 
     @Override protected void onFocusChanged(boolean gain, int direction, android.graphics.Rect previous) {
         super.onFocusChanged(gain, direction, previous);
+        updatePointerCapture();
         updateGamepadFocus();
         if (gain && keyboardAllowed && inputAllowed && output != null && hasWindowFocus()) {
             if (focusBoundary != null) focusBoundary.run(); else output.focus();
@@ -194,6 +233,7 @@ final class HostedSurfaceView extends SurfaceView implements SurfaceHolder.Callb
 
     @Override public void onWindowFocusChanged(boolean gain) {
         super.onWindowFocusChanged(gain);
+        updatePointerCapture();
         updateGamepadFocus();
         if (!gain) {
             if (focusBoundary == null) releaseInput();
@@ -215,6 +255,7 @@ final class HostedSurfaceView extends SurfaceView implements SurfaceHolder.Callb
     }
 
     void releaseFamilyInput() {
+        pointerCapture.cancel();
         if (!contentDrag) pointerInput.release();
         releaseHeldKeys();
     }
@@ -225,8 +266,8 @@ final class HostedSurfaceView extends SurfaceView implements SurfaceHolder.Callb
 
     boolean canStartContentDrag() { return output != null && !contentDrag && pointerInput.dragging(); }
     void beforeInteraction(Runnable action) { beforeInteraction = action; }
-    void beginContentDrag() { contentDrag = true; pointerInput.handoff(); }
-    void endContentDrag() { contentDrag = false; pointerInput.handoff(); }
+    void beginContentDrag() { contentDrag = true; updatePointerCapture(); pointerInput.handoff(); }
+    void endContentDrag() { contentDrag = false; updatePointerCapture(); pointerInput.handoff(); }
 
     @SuppressLint("ClickableViewAccessibility") // HostedPointerInput calls performClick for completed taps.
     @Override public boolean onTouchEvent(MotionEvent event) {
@@ -302,6 +343,7 @@ final class HostedSurfaceView extends SurfaceView implements SurfaceHolder.Callb
     private void attachSurface(SurfaceHolder holder, int width, int height) {
         if (output == null) return;
         surfaceBinding.changed(holder.getSurface(), width, height);
+        updatePointerCapture();
         // Window focus may arrive before the first Surface, or remain held while it is replaced.
         if (keyboardAllowed && inputAllowed && hasWindowFocus() && isFocused()) {
             if (focusBoundary != null) focusBoundary.run(); else output.focus();

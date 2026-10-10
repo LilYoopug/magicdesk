@@ -127,6 +127,16 @@ public final class WaylandSession implements AutoCloseable {
                 main.post(() -> { if (!closed.get() && !output.released.get()) listener.textInputChanged(id); });
             });
         }
+        @Override public void pointerCapture(long id, long serial) {
+            checkCaller();
+            handler.post(() -> {
+                Output output = outputs.get(id);
+                if (output == null || closed.get() || output.released.get()) return;
+                main.post(() -> {
+                    if (!closed.get() && !output.released.get()) output.captureRequested(serial);
+                });
+            });
+        }
         @Override public void cursor(long id, int[] pixels, int width, int height, int x, int y, boolean hidden) {
             checkCaller();
             if (pixels != null && (width < 1 || height < 1 || width > 256 || height > 256 || pixels.length != width * height))
@@ -607,6 +617,8 @@ public final class WaylandSession implements AutoCloseable {
         private final AtomicBoolean released = new AtomicBoolean();
         private final HostedFramePresenter presenter;
         private final FramePresentation presentation = new FramePresentation();
+        private java.util.function.LongConsumer captureListener;
+        private long captureSerial;
 
         private Output(long id, long window, ShellBinding binding, Output parent,
                 java.util.function.Consumer<Throwable> failure) {
@@ -697,6 +709,19 @@ public final class WaylandSession implements AutoCloseable {
         public void focus(boolean focused) { command(() -> server.focus(id, focused)); }
         public void scale(double scale) { command(() -> server.scale(id, scale)); }
         public void pointer(double x, double y) { command(() -> server.pointer(id, x, y)); }
+        /** UI-thread ownership: one Android input host per borrowed output. */
+        public void captureListener(java.util.function.LongConsumer listener) {
+            captureListener = listener;
+            if (listener != null) listener.accept(released.get() ? 0 : captureSerial);
+        }
+        private void captureRequested(long serial) {
+            captureSerial = serial;
+            if (captureListener != null) captureListener.accept(serial);
+        }
+        public void pointerCapture(long serial, boolean captured) {
+            command(() -> server.pointerCapture(id, serial, captured));
+        }
+        public void relative(long serial, double dx, double dy) { command(() -> server.relative(id, serial, dx, dy)); }
         public void button(int button, boolean down) { command(() -> server.button(id, button, down)); }
         public void scroll(double horizontal, double vertical) { command(() -> server.scroll(id, horizontal, vertical)); }
         public void key(int evdevCode, boolean down) { key(0, evdevCode, down); }
@@ -722,6 +747,7 @@ public final class WaylandSession implements AutoCloseable {
 
         private void release() {
             released.set(true);
+            main.post(() -> captureRequested(0));
             unlinkFamily();
             presentation.invalidate("Wayland output released");
             presenter.close();

@@ -497,6 +497,19 @@ static int prepare_lookup_indexes(struct md_inode_store *s) {
     if (r) mdi_sql(s,"ROLLBACK");
     return r;
 }
+static int journal_mode(struct md_inode_store *s, const char *sql, const char *expected) {
+    sqlite3_stmt *q=NULL;
+    int r=mdi_prepare(s,sql,&q);
+    if (!r) {
+        int rc=mdi_step(s,q);
+        if (rc!=SQLITE_ROW) r=mdi_sql_failure(rc);
+        else {
+            const char *mode=(const char *)sqlite3_column_text(q,0);
+            if (!mode || strcmp(mode,expected)) r=-ENOTSUP;
+        }
+    }
+    sqlite3_finalize(q); return r;
+}
 static int store_open(const char *directory, int create, int exclusive,
         struct md_inode_lifetime *retained, struct md_inode_store **out) {
     if (!out) return -EFAULT;
@@ -527,9 +540,14 @@ static int store_open(const char *directory, int create, int exclusive,
     if (!r) r = store_lock(s);
     if (!r) r = mdi_sqlite_open(root,create,&s->db);
     if (!r) r = mdi_sql_error(sqlite3_extended_result_codes(s->db, 1));
+    /* Reject foreign WAL stores before changing connection policy. PERSIST
+     * reuses a rollback journal; EXTRA still synchronizes every commit. */
+    if (!r) r = journal_mode(s,"PRAGMA journal_mode","delete");
+    if (!r) r = journal_mode(s,"PRAGMA journal_mode=PERSIST","persist");
     if (!r) r = mdi_sql(s, "PRAGMA foreign_keys=ON; PRAGMA synchronous=EXTRA; PRAGMA trusted_schema=OFF");
+    if (!r) r = mdi_sql(s,"PRAGMA journal_size_limit=1048576");
     if (!r && create) {
-        r = mdi_sql(s, "PRAGMA journal_mode=DELETE; BEGIN IMMEDIATE;"
+        r = mdi_sql(s, "BEGIN IMMEDIATE;"
             "CREATE TABLE objects(object TEXT PRIMARY KEY CHECK(length(object)=32),kind INTEGER NOT NULL,"
                 "device INTEGER NOT NULL,inode INTEGER NOT NULL,parent TEXT REFERENCES objects,"
                 "name_count INTEGER NOT NULL DEFAULT 0 CHECK(name_count>=0),"
@@ -631,14 +649,6 @@ static int store_open(const char *directory, int create, int exclusive,
     }
     sqlite3_finalize(q); q = NULL;
     if (!r && (!retained || create)) r=prepare_lookup_indexes(s);
-    if (!r) r = mdi_prepare(s, "PRAGMA journal_mode", &q);
-    if (!r) {
-        int rc = mdi_step(s, q);
-        if (rc != SQLITE_ROW) r = mdi_sql_failure(rc);
-        else if (strcmp((const char *)sqlite3_column_text(q, 0), "delete")) r = -ENOTSUP;
-    }
-    sqlite3_finalize(q);
-    q = NULL;
     if (!r) r = mdi_prepare(s, "SELECT value FROM properties WHERE key='sealed'", &q);
     if (!r) {
         int rc = mdi_step(s, q);

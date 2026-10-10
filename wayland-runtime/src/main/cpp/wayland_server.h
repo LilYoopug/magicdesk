@@ -92,6 +92,8 @@ typedef struct {
     /* Borrowed ARGB pixels, never rendered into the client image. Null selects the host default. */
     void (*cursor)(void *context, MdwOutput *output, const uint32_t *pixels,
         int width, int height, int hotspot_x, int hotspot_y, bool hidden);
+    /* Nonzero serial requests relative capture; zero revokes it. Host confirms the exact serial. */
+    void (*pointer_capture)(void *context, MdwOutput *output, uint64_t serial);
 	void (*frame)(void *context, MdwOutput *output, const MdwFrame *frame);
 	bool (*can_render)(void *context, MdwOutput *output);
 	void (*error)(void *context, const char *message);
@@ -142,6 +144,9 @@ bool mdw_output_refresh(MdwOutput *output);
 void mdw_output_frame_consumed(MdwOutput *output);
 bool mdw_output_focus(MdwOutput *output, bool focused);
 bool mdw_output_pointer(MdwOutput *output, double x, double y);
+bool mdw_output_pointer_capture(MdwOutput *output, uint64_t serial, bool captured);
+/* Relative deltas use fractions of the rendered viewport, without absolute-position clamping. */
+bool mdw_output_relative(MdwOutput *output, uint64_t serial, double dx, double dy);
 bool mdw_output_button(MdwOutput *output, MdwButton button, bool down);
 bool mdw_output_scroll(MdwOutput *output, double horizontal, double vertical);
 bool mdw_output_key(MdwOutput *output, uint32_t evdev_code, bool down);

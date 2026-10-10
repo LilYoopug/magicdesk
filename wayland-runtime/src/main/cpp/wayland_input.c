@@ -82,6 +82,7 @@ void mdw_input_refresh(MdwServer *server) {
         publish_text(input);
     }
     mdw_cursor_refresh(server);
+    mdw_pointer_refresh(server);
 }
 
 static bool capture_context(struct MdwTextInput *item) {

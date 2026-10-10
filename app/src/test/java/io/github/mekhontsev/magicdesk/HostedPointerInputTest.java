@@ -5,6 +5,35 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 public final class HostedPointerInputTest {
+    @Test public void capturedMouseKeepsEveryDeltaAndDoesNotClampOrWarp() throws Exception {
+        verify("""
+            var f=new Input(); f.source=InputDevice.SOURCE_MOUSE_RELATIVE; f.tool=MotionEvent.TOOL_TYPE_MOUSE;
+            var e=f.event(2,1,2000,-100); e.historyY=new float[]{1,2};
+            check(!f.input.captured(e,0),"unconfirmed capture cannot send movement");
+            check(f.input.captured(e,7),"captured event accepted");
+            check(f.out.deltas.equals(List.of("7:2,-0.1","7:2,-0.1","7:2,-0.1")),"history, scale and unclamped delta");
+            check(f.out.x==0 && f.out.y==0,"relative motion must not change absolute cursor");
+            f.buttons=1; f.input.captured(f.event(11,1,999,999),7);
+            f.input.captured(f.event(0,1,999,999),7);
+            f.buttons=0; f.input.captured(f.event(12,1,999,999),7);
+            check(f.out.edges.equals(List.of("PRIMARY:true","PRIMARY:false")),"balanced captured button edges");
+            check(f.out.deltas.size()==3,"buttons cannot replay motion deltas");
+            """);
+    }
+
+    @Test public void capturedTouchpadUsesContactDifferencesAndRebasesEachTouch() throws Exception {
+        verify("""
+            var f=new Input(); f.source=InputDevice.SOURCE_TOUCHPAD;
+            f.input.captured(f.event(0,1,800,800),9);
+            f.input.captured(f.event(2,1,900,700),9);
+            f.input.captured(f.event(1,1,900,700),9);
+            f.input.captured(f.event(0,1,100,100),9);
+            f.input.captured(f.event(2,1,200,100),9);
+            f.input.captured(f.event(1,1,200,100),9);
+            check(f.out.deltas.equals(List.of("9:0.1,-0.1","9:0.1,0")),"raw contacts must not be mistaken for relative coordinates");
+            check(f.out.edges.isEmpty(),"movement is not a tap");
+            """);
+    }
     @Test public void directContactsKeepIdsAndCancelWithoutResurrectingLateUpdates() throws Exception {
         verify("""
             var f=new Input(); f.out.direct=true;
@@ -306,6 +335,7 @@ public final class HostedPointerInputTest {
             enum Button { PRIMARY, MIDDLE, SECONDARY }
             void pointer(float x,float y); void button(float x,float y,Button button,boolean down);
             void scroll(float x,float y,float h,float v);
+            void relative(long serial,float dx,float dy);
             default boolean supportsTouch(){return false;} default boolean supportsTablet(){return false;}
             default void touch(int id,HostedTouchPhase phase,float x,float y,float pressure){}
             default void tablet(boolean eraser,boolean proximity,float x,float y,float pressure,float tx,float ty,int buttons){}
@@ -314,6 +344,8 @@ public final class HostedPointerInputTest {
         static class Output implements HostedSurfaceOutput {
             final List<String> edges=new ArrayList<>(), scrolls=new ArrayList<>();
             final List<String> contacts=new ArrayList<>();
+            final List<String> deltas=new ArrayList<>();
+            public void relative(long serial,float dx,float dy){deltas.add(serial+":"+number(dx)+","+number(dy));}
             boolean direct,eraser; int cancels,penButtons; float pressure;
             public boolean supportsTouch(){return direct;} public boolean supportsTablet(){return direct;}
             public void touch(int id,HostedTouchPhase phase,float x,float y,float pressure){
@@ -343,7 +375,7 @@ public final class HostedPointerInputTest {
             float getScaledVerticalScrollFactor(){return 50;}
             static int getLongPressTimeout(){return 500;}
         }
-        static class InputDevice { static final int SOURCE_TOUCHPAD=0x100008, SOURCE_MOUSE=0x2002, SOURCE_TOUCHSCREEN=0x1002; }
+        static class InputDevice { static final int SOURCE_TOUCHPAD=0x100008, SOURCE_MOUSE=0x2002, SOURCE_TOUCHSCREEN=0x1002, SOURCE_MOUSE_RELATIVE=0x20004; }
         static class DesktopAutomationEventJournal {
             static int count;
             static final List<String> details=new ArrayList<>();

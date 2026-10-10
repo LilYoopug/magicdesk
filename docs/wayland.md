@@ -202,6 +202,23 @@ classified Android touchpad history. Direct touch/tablet protocols are not
 advertised; those tools retain pointer emulation until a backend implements the
 shared contact/proximity contract.
 
+Relative-pointer events and pointer-constraints locks use wlroots' protocol
+implementations. `wayland_pointer` owns the focused surface's request and its
+lifetime; `HostedPointerCapture` owns the Android capture lease. A request is
+activated only after Android confirms capture for that exact output/request.
+Relative movement retains batched samples and viewport scale without clamping
+at the screen edges, and terminates each pointer packet with `wl_pointer.frame`.
+Absolute positioning cannot warp a locked pointer.
+Focus loss, Surface removal, client destruction and host replacement revoke
+capture. Confinement requests remain unactivated: hiding Android's cursor does
+not implement visible-cursor confinement. Cursor-position hints are optional and
+do not warp Android's global pointer. Android supplies processed deltas; the
+relative protocol's unaccelerated field currently carries the same deltas.
+Nested compositors retain their own capture policy; KWin uses Right Ctrl to
+toggle its parent-window grab. The native `wayland-pointer-lock` fixture covers
+acknowledgement, stale requests, persistent/one-shot locks and teardown; shared
+host tests cover capture eligibility and mouse/touchpad event conversion.
+
 `HostedSurfaceView` owns Android input and IME lifecycle. The Wayland adapter
 bridges `text-input-v3` preedit and committed UTF-8 text to the focused client.
 Other text-input protocols are not implemented.

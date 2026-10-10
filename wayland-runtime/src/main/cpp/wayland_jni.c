@@ -29,7 +29,7 @@ struct Bridge {
     MdwServer *server;
     JNIEnv *env;
     jobject owner;
-    jmethodID window, window_gesture, shell, geometry, toplevel_action, frame, wanted, can_render, error, text_input, cursor;
+    jmethodID window, window_gesture, shell, geometry, toplevel_action, frame, wanted, can_render, error, text_input, cursor, pointer_capture;
     jmethodID content_offer, content_request, content_reply, drag_event;
 };
 
@@ -187,6 +187,13 @@ static void text_input_event(void *context, MdwOutput *output, const MdwTextStat
     if (text) (*env)->DeleteLocalRef(env, text);
 }
 
+static void pointer_capture_event(void *context, MdwOutput *output, uint64_t serial) {
+    struct Bridge *bridge = context;
+    JNIEnv *env = bridge->env;
+    if (!(*env)->ExceptionCheck(env))
+        (*env)->CallVoidMethod(env, bridge->owner, bridge->pointer_capture, (jlong)(intptr_t)output, (jlong)serial);
+}
+
 static void cursor_event(void *context, MdwOutput *output, const uint32_t *pixels,
         int width, int height, int x, int y, bool hidden) {
     struct Bridge *bridge = context;
@@ -292,6 +299,7 @@ JNIEXPORT jlong JNICALL JNI(nativeStart)(JNIEnv *env, jobject owner, jint width,
     if (!(*env)->ExceptionCheck(env)) bridge->error = (*env)->GetMethodID(env, type, "onError", "(Ljava/lang/String;)V");
     if (!(*env)->ExceptionCheck(env)) bridge->text_input = (*env)->GetMethodID(env, type, "onTextInput", "(JJJ[BIIIIZFFFFZ)V");
     if (!(*env)->ExceptionCheck(env)) bridge->cursor = (*env)->GetMethodID(env, type, "onCursor", "(J[IIIIIZ)V");
+    if (!(*env)->ExceptionCheck(env)) bridge->pointer_capture = (*env)->GetMethodID(env, type, "onPointerCapture", "(JJ)V");
     if (!(*env)->ExceptionCheck(env)) bridge->content_offer = (*env)->GetMethodID(env, type, "onContentOffer", "(IJJLjava/lang/String;)V");
     if (!(*env)->ExceptionCheck(env)) bridge->content_request = (*env)->GetMethodID(env, type, "onContentRequest", "(IJJLjava/lang/String;)V");
     if (!(*env)->ExceptionCheck(env)) bridge->content_reply = (*env)->GetMethodID(env, type, "onContentReply", "(JI)V");
@@ -310,7 +318,8 @@ JNIEXPORT jlong JNICALL JNI(nativeStart)(JNIEnv *env, jobject owner, jint width,
     MdwEvents events = {.window = window_event, .window_gesture = window_gesture,
         .shell = shell_event, .geometry = geometry_event, .toplevel_action = toplevel_action,
         .frame = frame_event, .can_render = can_render,
-        .error = error_event, .text_input = text_input_event, .cursor = cursor_event, .context = bridge,
+        .error = error_event, .text_input = text_input_event, .cursor = cursor_event,
+        .pointer_capture = pointer_capture_event, .context = bridge,
         .content_offer = content_offer, .content_request = content_request, .content_reply = content_reply, .drag_event = drag_event};
     mdw_server_set_events(bridge->server, &events);
     return (jlong)(intptr_t)bridge;
@@ -472,6 +481,16 @@ JNIEXPORT void JNICALL JNI(nativeFocus)(JNIEnv *env, jclass type, jlong output, 
 JNIEXPORT void JNICALL JNI(nativePointer)(JNIEnv *env, jclass type, jlong output, jdouble x, jdouble y) {
     (void)env; (void)type;
     mdw_output_pointer((void *)(intptr_t)output, x, y);
+}
+
+JNIEXPORT void JNICALL JNI(nativePointerCapture)(JNIEnv *env, jclass type, jlong output, jlong serial, jboolean captured) {
+    (void)env; (void)type;
+    mdw_output_pointer_capture((void *)(intptr_t)output, serial, captured);
+}
+
+JNIEXPORT void JNICALL JNI(nativeRelative)(JNIEnv *env, jclass type, jlong output, jlong serial, jdouble dx, jdouble dy) {
+    (void)env; (void)type;
+    mdw_output_relative((void *)(intptr_t)output, serial, dx, dy);
 }
 
 JNIEXPORT void JNICALL JNI(nativeButton)(JNIEnv *env, jclass type, jlong output, jint button, jboolean down) {

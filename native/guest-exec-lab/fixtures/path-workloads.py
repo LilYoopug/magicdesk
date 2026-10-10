@@ -55,10 +55,23 @@ def main():
                 assert files[i % 32].read_bytes() == b"namespace data"
             return 64
 
+        def links():
+            for _ in range(4):
+                aliases = [directory / f"link-{i}" for i in range(len(files))]
+                for source, alias, inode in zip(files, aliases, identities):
+                    os.link(source, alias)
+                    assert alias.stat().st_ino == inode
+                    assert source.stat().st_nlink == 2
+                for source, alias in zip(files, aliases):
+                    alias.unlink()
+                    assert source.stat().st_nlink == 1
+            return 256
+
         for _ in range(3):
             measure("deep-read", reads)
             measure("existing-writable", existing_writes)
             measure("create-rename-unlink", mutations)
+            measure("link-unlink", links)
     finally:
         shutil.rmtree(root)
 

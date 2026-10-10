@@ -480,7 +480,9 @@ static atomic_int io_done;
 static void *automatic_io(void *unused) {
     (void)unused;
     while (!atomic_load(&io_done)) {
-        int fd=open("/proc/self/status",O_RDONLY|O_CLOEXEC); assert(fd>=0);
+        int fd=open("/proc/self/status",O_RDONLY|O_CLOEXEC);
+        if (fd<0) perror("automatic proc status open");
+        assert(fd>=0);
         char data[256]; assert(read(fd,data,sizeof(data))>0); close(fd);
     }
     return NULL;

@@ -4,6 +4,8 @@
 #include <stdint.h>
 
 long md_event_now(void);
+/* Nonblocking readiness snapshot: ready count, zero, or a negative errno. */
+long md_event_poll(struct pollfd *, unsigned count);
 /* Absolute monotonic nanoseconds; INT64_MAX means no time limit. */
 long md_event_wait(struct pollfd *, unsigned count, int64_t deadline);
 long md_event_wait_fd(int fd, short events, int64_t deadline);

@@ -38,6 +38,8 @@ mdw_protocol(xdg-shell ${PROTOCOL_DIR}/stable/xdg-shell/xdg-shell.xml)
 mdw_protocol(xdg-output-unstable-v1 ${PROTOCOL_DIR}/unstable/xdg-output/xdg-output-unstable-v1.xml)
 mdw_protocol(linux-dmabuf-v1 ${PROTOCOL_DIR}/stable/linux-dmabuf/linux-dmabuf-v1.xml)
 mdw_protocol(text-input-unstable-v3 ${PROTOCOL_DIR}/unstable/text-input/text-input-unstable-v3.xml)
+mdw_protocol(pointer-constraints-unstable-v1 ${PROTOCOL_DIR}/unstable/pointer-constraints/pointer-constraints-unstable-v1.xml)
+mdw_protocol(relative-pointer-unstable-v1 ${PROTOCOL_DIR}/unstable/relative-pointer/relative-pointer-unstable-v1.xml)
 set(MDW_WLR_PROTOCOL_DIR "" CACHE PATH "Protocol XML directory from pinned wlroots source")
 set(LAYER_XML "${MDW_WLR_PROTOCOL_DIR}/wlr-layer-shell-unstable-v1.xml")
 if(NOT EXISTS "${LAYER_XML}")
@@ -45,10 +47,11 @@ if(NOT EXISTS "${LAYER_XML}")
 endif()
 mdw_protocol(wlr-layer-shell-unstable-v1 ${LAYER_XML})
 mdw_protocol(wlr-foreign-toplevel-management-unstable-v1 ${MDW_WLR_PROTOCOL_DIR}/wlr-foreign-toplevel-management-unstable-v1.xml)
-add_library(magicdesk_wayland STATIC wayland_server.c wayland_renderer.c wayland_dmabuf.c wayland_input.c wayland_cursor.c wayland_content.c content_stream.c wayland_shell.c wayland_scene.c wayland_geometry.c wayland_popup.c wayland_toplevels.c
+add_library(magicdesk_wayland STATIC wayland_server.c wayland_renderer.c wayland_dmabuf.c wayland_input.c wayland_cursor.c wayland_pointer.c wayland_content.c content_stream.c wayland_shell.c wayland_scene.c wayland_geometry.c wayland_popup.c wayland_toplevels.c
 	${CMAKE_CURRENT_BINARY_DIR}/linux-dmabuf-v1-protocol.h
 	${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-protocol.h
 	${CMAKE_CURRENT_BINARY_DIR}/text-input-unstable-v3-protocol.h
+	${CMAKE_CURRENT_BINARY_DIR}/pointer-constraints-unstable-v1-protocol.h
 	${CMAKE_CURRENT_BINARY_DIR}/wlr-layer-shell-unstable-v1-protocol.h)
 add_library(magicdesk_frame STATIC frame_fd.c)
 target_link_libraries(magicdesk_frame PUBLIC magicdesk_graphics PkgConfig::WLROOTS)
@@ -133,6 +136,8 @@ target_link_libraries(wayland-smoke PRIVATE magicdesk_wayland)
 add_test(NAME wayland-smoke COMMAND wayland-smoke)
 set_tests_properties(wayland-smoke PROPERTIES TIMEOUT 10)
 add_executable(wayland-window-test ../../../tests/native/window.c
+	${CMAKE_CURRENT_BINARY_DIR}/pointer-constraints-unstable-v1-client-protocol.h ${CMAKE_CURRENT_BINARY_DIR}/pointer-constraints-unstable-v1-protocol.c
+	${CMAKE_CURRENT_BINARY_DIR}/relative-pointer-unstable-v1-client-protocol.h ${CMAKE_CURRENT_BINARY_DIR}/relative-pointer-unstable-v1-protocol.c
 	${CMAKE_CURRENT_BINARY_DIR}/linux-dmabuf-v1-client-protocol.h
 	${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-client-protocol.h ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-protocol.c
     ${CMAKE_CURRENT_BINARY_DIR}/text-input-unstable-v3-client-protocol.h ${CMAKE_CURRENT_BINARY_DIR}/text-input-unstable-v3-protocol.c)
@@ -147,6 +152,8 @@ add_test(NAME wayland-window-fixed-size COMMAND wayland-window-test --fixed-size
 add_test(NAME wayland-window-minimum-size COMMAND wayland-window-test --minimum-size)
 add_test(NAME wayland-window-bounded-size COMMAND wayland-window-test --bounded-size)
 add_test(NAME wayland-interaction COMMAND wayland-window-test --interaction)
+add_test(NAME wayland-pointer-lock COMMAND wayland-window-test --pointer-lock)
+set_tests_properties(wayland-pointer-lock PROPERTIES TIMEOUT 15)
 if(MDG_ANDROID_BUILD)
     add_test(NAME wayland-gpu-cursor COMMAND wayland-window-test --dma-cursor)
     set_tests_properties(wayland-gpu-cursor PROPERTIES TIMEOUT 15)

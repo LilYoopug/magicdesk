@@ -22,6 +22,8 @@ public final class HostedFamilyInputTest {
             Runnable focusBoundary;
             Output output = new Output();
             Pointer pointerInput = new Pointer();
+            static class Capture { void cancel() {} }
+            Capture pointerCapture = new Capture();
             public static void verify() {
                 var parent = new Fixture(); var child = new Fixture();
                 parent.focusBoundary = child.focusBoundary = () -> {};

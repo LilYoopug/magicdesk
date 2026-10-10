@@ -71,6 +71,9 @@ unsigned md_task_helpers_count(const struct md_task_helpers *);
  * the barrier must preserve it for this helper's event handler. */
 int md_task_helpers_visit(struct md_task_helpers *, int (*)(void *,pid_t,int,int), void *);
 int md_task_helper_owns(struct md_task_helpers *,pid_t owner,pid_t task);
+/* True only while this group's exact private helper is terminating, before
+ * its terminal wait event. It cannot execute another application operation. */
+int md_task_helper_retiring(struct md_task_helpers *,pid_t group,pid_t task);
 /* Borrows source on entry; accepted operations retain their own description,
  * memory owner, scratch stack and buffer lease. No caller FD is installed.
  * Completion occurs once after helper reaping or a confirmed pre-birth error.

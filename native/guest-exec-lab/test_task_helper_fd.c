@@ -466,7 +466,14 @@ static void exercise_request(int protected, enum scenario scenario, unsigned exp
                         assert(!md_task_helper_detach(helpers,child)); cancelled=1;
                     }
                 }
+                if (scenario==NORMAL && pid!=child && event==PTRACE_EVENT_EXIT) {
+                    assert(md_task_helper_retiring(helpers,child,pid));
+                    assert(!md_task_helper_retiring(helpers,child+1,pid));
+                    assert(!md_task_helper_retiring(helpers,child,child));
+                }
                 int handled=md_task_helper_event(helpers,pid,status);
+                if (WIFEXITED(status) || WIFSIGNALED(status))
+                    assert(!md_task_helper_retiring(helpers,child,pid));
                 if (handled<0) fprintf(stderr,"helper event pid=%d owner=%d status=%x error=%d\n",pid,child,status,handled);
                 assert(handled>=0);
                 if (!handled) {

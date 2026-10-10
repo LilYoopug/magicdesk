@@ -36,6 +36,7 @@ struct operation {
     int listener, directory, undelivered;
     char path[PATH_MAX];
 };
+enum { TASK_BUCKETS = 257 };
 struct md_namespace_broker {
     struct md_fs_worker *worker;
     void (*delegate)(const struct seccomp_notif *);
@@ -43,6 +44,7 @@ struct md_namespace_broker {
     struct operation *all, *free;
     struct operation *waiting;
     struct task *tasks;
+    struct task *task_index[TASK_BUCKETS];
     pthread_mutex_t lock;
     int listener;
     struct counters { uint64_t received, handled, delegated; } *counts;
@@ -54,6 +56,7 @@ struct md_namespace_broker {
 };
 struct task {
     struct task *next;
+    struct task *indexed;
     int pid, eligible, process, borrowed;
     uintptr_t gate, watch_gate;
 };
@@ -263,25 +266,39 @@ static int reply(struct operation *op, const void *data) {
     }
     return 1;
 }
+/* Caller holds the broker lock; borrowed retired records stay outside the index. */
+static struct task *find_task(struct md_namespace_broker *b, int pid) {
+    if (pid <= 0) return NULL;
+    for (struct task *t = b->task_index[(unsigned)pid % TASK_BUCKETS]; t; t = t->indexed)
+        if (t->pid == pid) return t;
+    return NULL;
+}
 int md_broker_task(struct md_namespace_broker *b, int pid, int eligible, uintptr_t raw_gate, uintptr_t watch_gate) {
+    if (pid <= 0) return -EINVAL;
     pthread_mutex_lock(&b->lock);
-    struct task *t = b->tasks, *vacant = NULL;
-    while (t && t->pid != pid) { if (!t->pid && !t->borrowed) vacant = t; t = t->next; }
+    struct task *t = find_task(b, pid);
     if (!t) {
-        t = vacant;
+        for (t = b->tasks; t && (t->pid || t->borrowed); t = t->next) { }
         if (!t) { t = calloc(1, sizeof(*t)); if (t) { t->process = -1; t->next = b->tasks; b->tasks = t; } }
+        if (t) {
+            unsigned bucket = (unsigned)pid % TASK_BUCKETS;
+            t->indexed = b->task_index[bucket]; b->task_index[bucket] = t;
+        }
     }
     if (t) { t->pid = pid; t->eligible = eligible; t->gate = raw_gate; t->watch_gate = watch_gate; }
     pthread_mutex_unlock(&b->lock);
     return t ? 0 : -ENOMEM;
 }
 void md_broker_forget(struct md_namespace_broker *b, int pid) {
-    if (!b) return;
+    if (!b || pid <= 0) return;
     pthread_mutex_lock(&b->lock);
-    for (struct task *t = b->tasks; t; t = t->next) if (t->pid == pid) {
+    struct task **slot = &b->task_index[(unsigned)pid % TASK_BUCKETS];
+    while (*slot && (*slot)->pid != pid) slot = &(*slot)->indexed;
+    struct task *t = *slot;
+    if (t) {
+        *slot = t->indexed; t->indexed = NULL;
         t->pid = 0;
         if (!t->borrowed && t->process >= 0) { close(t->process); t->process = -1; }
-        break;
     }
     pthread_mutex_unlock(&b->lock);
     md_fs_worker_wake(b->worker);
@@ -392,11 +409,11 @@ static int receive(void *context, struct md_filesystem *fs, short events) {
     if (count) count->received++;
     pthread_mutex_lock(&b->lock);
     int eligible = 0, watch = 0;
-    struct task *task = NULL;
-    for (struct task *t = b->tasks; t; t = t->next) if (t->pid == (int)q.pid) {
-        eligible = t->eligible && q.data.instruction_pointer != t->gate;
-        watch = q.data.instruction_pointer == t->watch_gate;
-        task = t; t->borrowed++; break;
+    struct task *task = find_task(b, (int)q.pid);
+    if (task) {
+        eligible = task->eligible && q.data.instruction_pointer != task->gate;
+        watch = q.data.instruction_pointer == task->watch_gate;
+        task->borrowed++;
     }
     if (watch) {
         pthread_mutex_unlock(&b->lock);

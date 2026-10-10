@@ -761,3 +761,8 @@ int md_task_helper_owns(struct md_task_helpers *manager,pid_t owner,pid_t task) 
         if (m->owner==owner && (m->owner==task || m->child==task)) return 1;
     return 0;
 }
+int md_task_helper_retiring(struct md_task_helpers *manager,pid_t group,pid_t task) {
+    for (struct helper *m=manager ? manager->first : NULL;m;m=m->next)
+        if (m->group==group && m->child==task && !m->reaped && m->operation==EXIT) return 1;
+    return 0;
+}
