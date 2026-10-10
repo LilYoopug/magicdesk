@@ -2161,7 +2161,7 @@ case "${1:-wayland}" in
     x11)
         unset WAYLAND_DISPLAY
         export QT_QPA_PLATFORM=xcb KWIN_COMPOSE=O2
-        exec startplasma-x11 ;;
+        exec magicdesk-audio-session startplasma-x11 ;;
     wayland)
         unset DISPLAY
         export QT_QPA_PLATFORM=wayland
@@ -2180,13 +2180,13 @@ case "${1:-wayland}" in
         else
             export KWIN_COMPOSE=Q QT_QUICK_BACKEND=software
         fi
-        exec startplasma-wayland ;;
+        exec magicdesk-audio-session startplasma-wayland ;;
     *) echo 'Expected x11 or wayland.' >&2; exit 2 ;;
 esac
 LAUNCH
         chmod 755 /usr/local/bin/magicdesk-plasma
         for backend in x11 wayland; do
-            printf '[Desktop Entry]\nType=Application\nName=Plasma Desktop (%s)\nExec=magicdesk-audio-session magicdesk-plasma %s\nIcon=preferences-desktop\nTerminal=false\nCategories=System;\nX-MagicDesk-Graphics=%s\nX-MagicDesk-GraphicsMode=desktop\n' \
+            printf '[Desktop Entry]\nType=Application\nName=Plasma Desktop (%s)\nExec=magicdesk-plasma %s\nIcon=preferences-desktop\nTerminal=false\nCategories=System;\nX-MagicDesk-Graphics=%s\nX-MagicDesk-GraphicsMode=desktop\n' \
                 "$backend" "$backend" "$backend" > "/usr/local/share/applications/magicdesk-plasma-$backend.desktop"
         done
     fi

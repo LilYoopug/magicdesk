@@ -132,11 +132,44 @@ if os.environ.get("TEST_FAIL") == stage:
         # EVENT_WAIT: without an audio capability, the original command exits normally.
         bypass = subprocess.run(['bash', str(helper), 'sh', '-c', 'exit 17'], env=env, timeout=5)
         self.assertEqual(17, bypass.returncode)
+        nested = subprocess.run(['bash', str(helper), 'sh', '-c', 'exit 19'],
+                                env=dict(env, MAGICDESK_AUDIO_PULSE='/unused',
+                                         MAGICDESK_AUDIO_SESSION='active'), timeout=5)
+        self.assertEqual(19, nested.returncode)
         result = self.run_script('--yes', '--gui', 'plasma')
         self.assertEqual(0, result.returncode, result.stderr)
         setup = self.payload.read_text()
         self.assertIn('packages pipewire pipewire-pulse wireplumber pipewire-alsa', setup)
-        self.assertIn('Exec=magicdesk-audio-session magicdesk-plasma', setup)
+        self.assertIn('Exec=magicdesk-plasma %s', setup)
+
+    def test_direct_plasma_launch_owns_audio_for_each_protocol_and_distribution(self):
+        audio = self.directory / 'magicdesk-audio-session'
+        audio.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\nexit 23\n')
+        audio.chmod(0o755)
+        config = self.directory / 'kwriteconfig6'
+        config.write_text('#!/bin/sh\nexit 0\n')
+        config.chmod(0o755)
+        home = self.directory / 'home'
+        home.mkdir()
+        environment = dict(self.environment, HOME=str(home))
+        environment.pop('MAGICDESK_MESA_PREFIX', None)
+        for distro in ('debian', 'steamos'):
+            result = self.run_script('--yes', '--resume', '--name', 'desktop',
+                                     '--gui', 'plasma', TEST_DISTRO=distro)
+            self.assertEqual(0, result.returncode, result.stderr)
+            payload = self.payload.read_text()
+            self.assertIn('    install_audio_session\n', payload)
+            launcher = payload.split("cat > /usr/local/bin/magicdesk-plasma <<'LAUNCH'\n", 1)[1]
+            launcher = launcher.split('\nLAUNCH\n', 1)[0]
+            launcher = launcher.replace('/etc/profile.d/', str(self.directory / 'profiles') + '/')
+            launcher = launcher.replace('/tmp/.X11-unix', str(self.directory / 'x11'))
+            for protocol in ('x11', 'wayland'):
+                with self.subTest(distro=distro, protocol=protocol):
+                    # EVENT_WAIT: launcher reaches its audio owner; expiry fails the fixture.
+                    launched = subprocess.run(['sh', '-c', launcher, 'magicdesk-plasma', protocol],
+                                              env=environment, capture_output=True, text=True, timeout=5)
+                    self.assertEqual(23, launched.returncode, launched.stderr)
+                    self.assertEqual('startplasma-' + protocol + '\n', launched.stdout)
 
     def test_gui_pipewire_clients_do_not_request_unavailable_realtime_services(self):
         result = self.run_script('--yes', '--gui', 'plasma')
@@ -383,7 +416,7 @@ if os.environ.get("TEST_FAIL") == stage:
         self.assertIn('export KWIN_COMPOSE=Q QT_QUICK_BACKEND=software', self.payload.read_text())
         plasma = self.payload.read_text().split("cat > /usr/local/bin/magicdesk-plasma", 1)[1]
         self.assertLess(plasma.index('mkdir -p -m 1777 /tmp/.X11-unix'),
-                        plasma.index('exec startplasma-wayland'))
+                        plasma.index('exec magicdesk-audio-session startplasma-wayland'))
         self.assertIn('Plasma Desktop (wayland)', result.stdout)
         self.assertEqual("4", self.calls()[-1][-2])
         self.assertEqual(0, subprocess.run(["sh", "-n"], input=kwin, text=True).returncode)

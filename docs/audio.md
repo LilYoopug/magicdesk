@@ -67,6 +67,10 @@ pulse-tunnel sink, sending the guest mix to Android without a core-to-itself
 connection. Guest volume controls operate on the guest graph; Android
 volume remains independent. ALSA applications use the distribution's
 PipeWire ALSA plugin. Hardware discovery remains disabled in the guest session.
+The Plasma launcher acquires this audio session for both X11 and Wayland,
+including direct console launches. An already active audio session is reused.
+The shared Android sink does not accept guest-wide volume changes; a desktop's
+device-volume control belongs to its private guest graph.
 
 The wrapper uses private per-session runtime/configuration directories and
 PipeWire startup receipts and output-port events, not fixed sleeps. Applications
