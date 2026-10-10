@@ -173,6 +173,11 @@ static int waiting(struct md_ipc_io *op, int error) {
     return (error==EAGAIN || error==EWOULDBLOCK) && !op->nonblocking
         && (op->deadline==INT64_MAX || md_event_now()<op->deadline);
 }
+static int admit(struct md_ipc_io *op,struct md_ipc_io_message *io,int fd,int flags,int sending) {
+    if (op->initialized) return 0;
+    if (!md_ipc_io_inline(io)) return -EINVAL;
+    return md_ipc_io_prepare(op,io,fd,flags,sending);
+}
 static int collect_rights(struct md_received_fds *fds, struct msghdr *message) {
     int error=0;
     for (struct cmsghdr *h=CMSG_FIRSTHDR(message);h;h=CMSG_NXTHDR(message,h)) {
@@ -223,9 +228,11 @@ static int receive_batch(struct md_ipc_io *op, struct md_received_fds **custody,
 }
 int md_ipc_io_receive(struct md_ipc_io *op, struct md_received_fds **custody,
         struct md_ipc_io_message *io, int flags, long *result) {
-    if (!op->initialized || !*custody || (*custody)->count!=1) { *result=-EINVAL; return 0; }
+    if (!*custody || (*custody)->count!=1) { *result=-EINVAL; return 0; }
+    int error=admit(op,io,(*custody)->fds[0],flags,0);
+    if (error) { *result=error; return 0; }
     if (op->batch) return receive_batch(op,custody,io,flags,result);
-    int error=md_received_fds_reserve(custody,254);
+    error=md_received_fds_reserve(custody,254);
     if (error) { *result=error; return 0; }
     struct md_received_fds *fds=*custody;
     char *bytes=op->data ? op->data : io->data;
@@ -261,7 +268,9 @@ int md_ipc_io_receive(struct md_ipc_io *op, struct md_received_fds **custody,
 }
 int md_ipc_io_send(struct md_ipc_io *op, const struct md_received_fds *fds,
         struct md_ipc_io_message *io, int flags, long *result) {
-    if (!op->initialized || !fds || !fds->count) { *result=-EINVAL; return 0; }
+    if (!fds || !fds->count) { *result=-EINVAL; return 0; }
+    int error=admit(op,io,fds->fds[0],flags,1);
+    if (error) { *result=error; return 0; }
     char *bytes=op->data ? op->data : io->data;
     char *control=op->control ? op->control : io->control;
     struct iovec data={bytes+op->done,op->capacity-op->done};

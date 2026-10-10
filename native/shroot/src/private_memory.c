@@ -165,17 +165,23 @@ long md_private_memory_copy(struct md_private_memory *m, const struct md_private
     long scratch=RAW6(mmap,0,page,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
     if (scratch<0) return scratch;
     m->copied_pages=0;
-    for (size_t at=0;!error && at<m->length;at+=page) {
-        uint64_t entry=0;
-        error=exact(access->pagemap,&entry,sizeof(entry),((m->address+at)/page)*sizeof(entry),0);
+    uint64_t entries[256];
+    for (size_t at=0;!error && at<m->length;) {
+        size_t count=(m->length-at)/page;
+        if (count>sizeof(entries)/sizeof(*entries)) count=sizeof(entries)/sizeof(*entries);
+        error=exact(access->pagemap,entries,count*sizeof(*entries),
+            ((m->address+at)/page)*sizeof(*entries),0);
         if (error) break;
         /* Bit 61 distinguishes file pages from private COW. Copying clean
          * pages would incorrectly detach them from later file writes. PFNs
          * are neither requested nor needed, including protected processes. */
-        if (!(entry&(UINT64_C(3)<<62)) || (entry&(UINT64_C(1)<<61))) continue;
-        error=exact(access->memory,(void *)scratch,page,m->address+at,0);
-        if (!error) error=exact(access->memory,(void *)scratch,page,m->candidate+at,1);
-        if (!error) ++m->copied_pages;
+        for (size_t i=0;!error && i<count;++i,at+=page) {
+            uint64_t entry=entries[i];
+            if (!(entry&(UINT64_C(3)<<62)) || (entry&(UINT64_C(1)<<61))) continue;
+            error=exact(access->memory,(void *)scratch,page,m->address+at,0);
+            if (!error) error=exact(access->memory,(void *)scratch,page,m->candidate+at,1);
+            if (!error) ++m->copied_pages;
+        }
     }
     RAW2(munmap,scratch,page);
     return error;

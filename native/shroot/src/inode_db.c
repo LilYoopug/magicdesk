@@ -248,7 +248,11 @@ int mdi_query_acquire(struct md_inode_store *s, enum mdi_query slot, sqlite3_stm
         [MDI_FILE_PATH] = "SELECT parent,name,ambiguous FROM file_paths WHERE object=?1",
         [MDI_ACL] = "SELECT value FROM inode_acls WHERE object=?1 AND type=?2",
         [MDI_OVERLAY_LINK] = "SELECT upper,lower FROM overlay_links WHERE object=?1",
-        [MDI_DATA_VERSION] = "PRAGMA main.data_version"
+        [MDI_DATA_VERSION] = "PRAGMA main.data_version",
+        [MDI_ADD_NAME] = "INSERT INTO names(parent,name,object) VALUES(?1,?2,?3)",
+        [MDI_DELETE_NAME] = "DELETE FROM names WHERE parent=?1 AND name=?2",
+        [MDI_REPARENT] = "UPDATE objects SET parent=?1 WHERE object=?2",
+        [MDI_EMPTY] = "SELECT NOT EXISTS(SELECT 1 FROM names WHERE parent=?1)"
     };
 #undef NODE_COLUMNS
     int result = 0;
@@ -319,40 +323,40 @@ int mdi_lookup(struct md_inode_store *s, const char *parent, const char *name, s
 }
 int mdi_add_name(struct md_inode_store *s, const char *parent, const char *name, const char *object) {
     sqlite3_stmt *q = NULL;
-    int r = mdi_prepare(s, "INSERT INTO names(parent,name,object) VALUES(?1,?2,?3)", &q);
+    int r = mdi_query_acquire(s, MDI_ADD_NAME, &q);
     if (!r) r = mdi_bind_id(q, 1, parent);
     if (!r) r = mdi_bind_name(q, 2, name);
     if (!r) r = mdi_bind_id(q, 3, object);
     if (!r) r = mdi_sql_error(mdi_step(s, q));
-    sqlite3_finalize(q); return r;
+    return mdi_query_release(q,r);
 }
 int mdi_delete_name(struct md_inode_store *s, const char *parent, const char *name) {
     sqlite3_stmt *q = NULL;
-    int r = mdi_prepare(s, "DELETE FROM names WHERE parent=?1 AND name=?2", &q);
+    int r = mdi_query_acquire(s, MDI_DELETE_NAME, &q);
     if (!r) r = mdi_bind_id(q, 1, parent);
     if (!r) r = mdi_bind_name(q, 2, name);
     if (!r) r = mdi_sql_error(mdi_step(s, q));
     if (!r && !sqlite3_changes(s->db)) r = -ENOENT;
-    sqlite3_finalize(q); return r;
+    return mdi_query_release(q,r);
 }
 int mdi_reparent(struct md_inode_store *s, const struct mdi_node *node, const char *parent) {
     if (node->kind != S_IFDIR) return 0;
     sqlite3_stmt *q = NULL;
-    int r = mdi_prepare(s, "UPDATE objects SET parent=?1 WHERE object=?2", &q);
+    int r = mdi_query_acquire(s, MDI_REPARENT, &q);
     if (!r) r = mdi_bind_id(q, 1, parent);
     if (!r) r = mdi_bind_id(q, 2, node->id);
     if (!r) r = mdi_sql_error(mdi_step(s, q));
-    sqlite3_finalize(q); return r;
+    return mdi_query_release(q,r);
 }
 int mdi_empty(struct md_inode_store *s, const struct mdi_node *node) {
     sqlite3_stmt *q = NULL;
-    int r = mdi_prepare(s, "SELECT NOT EXISTS(SELECT 1 FROM names WHERE parent=?1)", &q);
+    int r = mdi_query_acquire(s, MDI_EMPTY, &q);
     if (!r) r = mdi_bind_id(q, 1, node->id);
     if (!r) {
         int rc = mdi_step(s, q);
         r = rc == SQLITE_ROW ? sqlite3_column_int(q, 0) : mdi_sql_failure(rc);
     }
-    sqlite3_finalize(q); return r;
+    return mdi_query_release(q,r);
 }
 static int backing_identity(const struct mdi_node *node, struct stat *st) {
     mode_t backing = node->kind == S_IFSOCK || node->kind == S_IFIFO ? S_IFREG : node->kind;
@@ -435,8 +439,8 @@ static int make_object(struct md_inode_store *s, const char *id, mode_t kind, mo
     } else if (symlinkat(target, s->objects, id)) return -errno;
     struct stat st;
     int r = fstatat(s->objects, id, &st, AT_SYMLINK_NOFOLLOW) ? -errno : 0;
-    if (!r && *fd >= 0 && fsync(*fd)) r = -errno;
-    if (!r && fsync(s->objects)) r = -errno;
+    if (!r && *fd >= 0) r = mdi_sync(s,*fd);
+    if (!r) r = mdi_sync(s,s->objects);
     if (!r) r = checkpoint(s, MD_OBJECT_SYNCED);
     sqlite3_stmt *q = NULL;
     if (!r) r = mdi_prepare(s, "INSERT INTO objects(object,kind,device,inode,parent,backing,logical_inode,logical_device,mode,uid,gid,scope) "
@@ -497,6 +501,9 @@ static int prepare_lookup_indexes(struct md_inode_store *s) {
     if (r) mdi_sql(s,"ROLLBACK");
     return r;
 }
+int mdi_sync(struct md_inode_store *s, int fd) {
+    return s->lifetime->temporary || !fsync(fd) ? 0 : -errno;
+}
 static int journal_mode(struct md_inode_store *s, const char *sql, const char *expected) {
     sqlite3_stmt *q=NULL;
     int r=mdi_prepare(s,sql,&q);
@@ -540,11 +547,12 @@ static int store_open(const char *directory, int create, int exclusive,
     if (!r) r = store_lock(s);
     if (!r) r = mdi_sqlite_open(root,create,&s->db);
     if (!r) r = mdi_sql_error(sqlite3_extended_result_codes(s->db, 1));
-    /* Reject foreign WAL stores before changing connection policy. PERSIST
-     * reuses a rollback journal; EXTRA still synchronizes every commit. */
+    /* Every store retains rollback and interprocess isolation. Only persistent
+     * lifetimes require power-loss durability, including retained reconnects. */
     if (!r) r = journal_mode(s,"PRAGMA journal_mode","delete");
     if (!r) r = journal_mode(s,"PRAGMA journal_mode=PERSIST","persist");
-    if (!r) r = mdi_sql(s, "PRAGMA foreign_keys=ON; PRAGMA synchronous=EXTRA; PRAGMA trusted_schema=OFF");
+    if (!r) r = mdi_sql(s, "PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF");
+    if (!r) r = mdi_sql(s,s->lifetime->temporary ? "PRAGMA synchronous=OFF" : "PRAGMA synchronous=EXTRA");
     if (!r) r = mdi_sql(s,"PRAGMA journal_size_limit=1048576");
     if (!r && create) {
         r = mdi_sql(s, "BEGIN IMMEDIATE;"
@@ -658,7 +666,7 @@ static int store_open(const char *directory, int create, int exclusive,
     sqlite3_finalize(q);
     if (!r && (s->watch_presence = openat(root, "watch.lock",
             O_RDWR | O_CLOEXEC | O_NOFOLLOW | (create ? O_CREAT | O_EXCL : 0), 0600)) < 0) r = -errno;
-    if (!r && create && fsync(root)) r = -errno;
+    if (!r && create) r = mdi_sync(s,root);
     if (!r) r = mdi_sources_open(s);
     if (!r) r = md_inode_view_validate(s);
     if (!r) r = mdi_overlay_writer_open(s);

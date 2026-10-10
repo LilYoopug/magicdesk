@@ -296,10 +296,25 @@ static void runtime_preparation(int protected) {
     assert(!md_private_memory_prepare(&view,&access) && !view.copied_pages);
     run=(void *)view.candidate; assert(run()==11);
     md_private_memory_discard(&view);
-    assert(!munmap(original,2*page)); close(fd);
+    assert(!munmap(original,2*page));
+    size_t pages=513;
+    assert(!ftruncate(fd,pages*page));
+    original=mmap(NULL,pages*page,PROT_READ|PROT_WRITE,MAP_PRIVATE,fd,0);
+    assert(original!=MAP_FAILED);
+    const size_t dirty[]={0,255,256,512};
+    for (unsigned i=0;i<sizeof(dirty)/sizeof(*dirty);++i) original[dirty[i]*page]=(unsigned char)(41+i);
+    view=(struct md_private_memory){.address=(uintptr_t)original,.length=pages*page,
+        .page_size=page,.source=fd,.protection=PROT_READ|PROT_EXEC};
+    assert(!md_private_memory_prepare(&view,&access) && view.copied_pages==4);
+    for (unsigned i=0;i<sizeof(dirty)/sizeof(*dirty);++i)
+        assert(((unsigned char *)view.candidate)[dirty[i]*page]==41+i);
+    next=97; assert(pwrite(fd,&next,1,2*page)==1);
+    assert(((unsigned char *)view.candidate)[2*page]==next);
+    md_private_memory_discard(&view);
+    assert(!munmap(original,pages*page)); close(fd);
     if (protected) assert(!prctl(PR_SET_DUMPABLE,saved));
     md_private_memory_access_close(&access);
-    puts("PASS runtime private preparation: COW only, clean alias, DONTNEED, offset, partial/PROT_NONE views, repeated JIT and stale source rejection");
+    puts("PASS runtime private preparation: COW only, clean alias, DONTNEED, offset, partial/PROT_NONE views, repeated JIT, pagemap batch boundaries and stale source rejection");
 }
 static void replacement_contract(void) {
     const uintptr_t original=0x100000, candidate=0x200000, backup=0x300000;

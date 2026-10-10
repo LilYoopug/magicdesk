@@ -193,6 +193,8 @@ fixture also covers repeated compilation, nonzero offsets, partial and PROT_NONE
 views, stale provenance and retained proc access after PR_SET_DUMPABLE=0.
 Fresh-candidate soft-dirty admission is checked through pagemap with smaps
 deliberately unavailable, for ordinary and nondumpable callers.
+The 513-page fixture crosses pagemap batch boundaries with dirty and clean pages,
+checking exact copy counts and continued visibility of clean-file updates.
 `memory_replace.c` is exercised at every cancellation boundary, with failed
 reserve/save/install/restore/cleanup and missing terminal observation. Native and
 guest checks execute its commands, including rollback after a simulated fixed
@@ -208,6 +210,27 @@ rusage, pending syscall/debugger interrupts, both birth-event orders, helper own
 previous events are replayed. Stock SteamOS Plasma QML also has device coverage
 with this runtime, without preload or a disabled JIT; compositor GPU coverage
 is separate.
+Barrier coverage also includes repeated 4,096-participant generations, hash
+collisions and exact readiness after the final stop.
+
+### Audio Continuity
+
+Run `fixtures/audio-continuity.py --env-pid DESKTOP_PID --target NODE --seconds 90`
+inside the selected guest session. Use a desktop/client environment rather than
+PipeWire's server-only configuration. The fixture records stereo 48 kHz PCM,
+reports all-zero 10 ms blocks after warmup and delivery gaps over 80 ms, and
+retains monotonic observation times. `test_audio_continuity.py` checks fragmented
+input, warmup, trailing bytes and quiet but nonzero samples.
+
+Use a continuously sounding source. Zero spans during intentional silence are
+not underruns; zero graph/xrun counters are not evidence of continuity. For a
+game workload, verify pointer capture, then repeat identical relative movement.
+Correlate source/sink PCM with the audio threads' scheduling, without tracing
+every supervisor syscall during the measurement. Recording ends after receiving
+the requested frames and sending SIGINT: pw-cat can return 1 for this intentional
+stop because it reports success only for drained playback. Unexpected early EOF,
+missing frames, stderr and other termination codes remain failures. See
+[pw-cat](https://github.com/PipeWire/pipewire/blob/master/src/tools/pw-cat.c).
 
 `fixtures/jit_workload.qml` measures repeated function compilation through stock
 Qt QML, checking the numerical result without a machine-specific speed threshold.
@@ -719,6 +742,12 @@ claim of distribution or driver compatibility.
 
 ## OCI And Filesystem View Checks
 
+Transient-store checks retain a journal across SIGKILL at object publication,
+namespace staging and commit. Reconnect and transferred custody preserve the
+temporary durability policy and exact final cleanup. Persistent-store checks
+assert synchronous EXTRA independently; retained-directory journal access also
+survives renaming the store while two connections remain open.
+
 `test_resources.py BUILD --case mount-policy` checks the attachment-policy owner
 without running Desktop or replacing the APK. Local policy creates no descriptor;
 explicit publication shares live flags through a size/write-restricted memfd.
@@ -1077,6 +1106,9 @@ sender exit, repeated `MSG_PEEK`, truncated delivery and pipe EOF. Model checks
 cover allocation-failure rollback and atomic batch publication under concurrent
 readers. The controlled native fixture supplies the source/message association;
 it does not establish general application-message origin transfer.
+Filtered socket IO covers the inline/staged boundary at 0, 1, 65535, 65536 and
+65537 bytes with actual rights transfer, CLOEXEC and pipe EOF after final
+receipt cleanup, both natively and inside a nondumpable guest.
 Retained receipt checks cover capacities 1-253, malformed input beside a guard
 page and vector publication after a CLONE_FILES receiver exits without an ACK.
 RPC and controlled native handoffs use the production `fd_delivery` owner. Its

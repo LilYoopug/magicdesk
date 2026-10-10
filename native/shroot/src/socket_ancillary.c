@@ -114,7 +114,9 @@ long md_socket_payload_prepare(struct md_ipc_io_message *io, const struct msghdr
         if (v.iov_len>INT_MAX-io->size) return -EMSGSIZE;
         io->size+=v.iov_len;
     }
-    long error=md_guest_buffer_control(MD_FS_BUFFER_IPC_IO_PREPARE,0,0);
+    /* Inline messages need no host allocation or intermediate acknowledgement.
+     * Admission and IO share the commit; large/batch transfers retain staging. */
+    long error=md_ipc_io_inline(io) ? 0 : md_guest_buffer_control(MD_FS_BUFFER_IPC_IO_PREPARE,0,0);
     if (error) return error;
     if (!sending) return 0;
     size_t offset=0;
@@ -467,7 +469,6 @@ long md_socket_ancillary_receive(const struct md_fs *fs, const char *exe, const 
         long error=publish(fs,(int)a[0],&original,m,(void *)a[1],(unsigned)a[2]);
         if (error < 0) r=error;
     }
-    md_guest_buffer_control(MD_FS_BUFFER_RECEIVED_DROP,0,0);
     release(storage,local,size); return r;
 }
 long md_socket_ancillary_batch(const struct md_fs *fs, const unsigned long *a) {
@@ -528,7 +529,6 @@ long md_socket_ancillary_batch(const struct md_fs *fs, const unsigned long *a) {
             result=i?(long)i:error; break;
         }
     }
-    if (prepared) md_guest_buffer_control(MD_FS_BUFFER_RECEIVED_DROP,0,0);
     for (unsigned i=0;i<count;i++) release(items[i].buffer,items[i].local,items[i].size);
     release(memory,local,size); return result;
 }

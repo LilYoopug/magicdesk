@@ -46,6 +46,13 @@ after commit or rollback. Separate launches can share a store without exposing
 ordinary internal transaction contention to guest syscalls. There is no polling
 or transaction replay; data IO through opened descriptors stays native. An
 external database writer that bypasses this gate still produces an explicit error.
+Persistent stores use a retained rollback journal and synchronous publication.
+Transient mount lifetimes retain the same journal, locking and process-crash
+recovery, but do not flush metadata or newly published bodies to durable storage.
+The destination lifetime owns this policy across reconnect, transfer and copy-up;
+ordinary application fsync remains native. Persistent stores never inherit a
+transient source's policy. Journal existence is checked through the retained
+store directory on every transaction, without caching another writer's state.
 Transactions share a bounded worker-local cache of inode metadata, directory
 entries and reverse-name records. SQLite's snapshot data version invalidates it
 across writers; local preupdate hooks retire dependent rows, including trigger
@@ -62,6 +69,8 @@ to that segment; no SQLite lock spans caller copying or FIFO rendezvous.
 Existing writable opens begin as reads and promote only for creation, copy-up
 or overlay publication under the already-held store gate. Promotion does not
 release the snapshot, replay the lookup or relax durable namespace commits.
+Common namespace mutations reuse connection-owned prepared statements with
+reset bindings; transaction boundaries and cache invalidation stay authoritative.
 Initial store admission prepares indexes for every foreign-key child lookup,
 so collecting an overlay view does not repeatedly scan the whole store.
 Retained worker reconnects and ordinary filesystem operations do not prepare
@@ -1072,6 +1081,8 @@ provenance disable repair; they do not relax mandatory noexec policy or revoke
 otherwise native execute permission.
 The task-affine private-memory preparer admits a clean executable file mapping
 and materializes only the original COW pages through retained proc-memory access.
+Pagemap entries are read in bounded stack-backed batches, without changing the
+per-page copy decision or detaching clean pages from their file.
 Unchanged pages keep their file relationship; file truncation and DONTNEED remain
 kernel-owned. It validates the original VMA's permissions and supported advice
 before constructing a candidate.
@@ -1087,7 +1098,9 @@ The supervisor applies this path automatically after native `mprotect` rejects
 executable permission with EACCES on a tracked private-file range. Successful
 native transitions are unchanged. It needs no preload, application-specific
 patch or JIT-disable setting. A cold launch-tree barrier stops guest threads and
-existing private helpers, then acknowledges a namespace-worker pause. Real wait
+existing private helpers, then acknowledges a namespace-worker pause. Barrier
+participants use a TID index and explicit outstanding count, without repeated
+full-list searches for each stop. Real wait
 events retain their status, ordering and rusage; synthetic interrupts resume with
 their original ptrace continuation. Interrupts already requested by syscall or
 debugger owners and initial stops of newborn tasks are deferred to their owners,

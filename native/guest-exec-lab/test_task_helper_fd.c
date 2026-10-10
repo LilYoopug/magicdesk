@@ -605,6 +605,16 @@ static void exercise_request(int protected, enum scenario scenario, unsigned exp
         assert(!ptrace(PTRACE_CONT,child,0,0));
     }
     status=wait_child(child);
+    if (!cancelled && scenario==QUIESCE_NEWBORN && WIFSTOPPED(status)
+            && (unsigned)status>>16==PTRACE_EVENT_STOP && WSTOPSIG(status)==SIGTRAP) {
+        /* A barrier interrupt can lose to the owner's ordinary stop and arrive
+         * after helper completion. Continue in place, as the supervisor does;
+         * never restore registers again or replay the completed operation. */
+        assert(!ptrace(PTRACE_CONT,child,0,0)); status=wait_child(child);
+    }
+    if (!WIFSTOPPED(status) || (unsigned)status>>16!=PTRACE_EVENT_EXIT)
+        fprintf(stderr,"helper owner exit protected=%d scenario=%d exported=%u sending=%d cancelled=%d status=%#x\n",
+            protected,scenario,exported,sending,cancelled,status);
     assert(WIFSTOPPED(status) && (unsigned)status>>16==PTRACE_EVENT_EXIT);
     assert(!ptrace(PTRACE_CONT,child,0,0)); status=wait_child(child);
     assert(cancelled ? WIFSIGNALED(status) && WTERMSIG(status)==SIGKILL : WIFEXITED(status) && !WEXITSTATUS(status));

@@ -28,14 +28,16 @@ static int clone_node(struct md_inode_store *source, struct md_inode_store *targ
         int from=openat(source->objects,node->backing,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
         if (from<0) r=-errno;
         else { r=mdi_replace_attributes(from,fd); close(from); }
-        if (!r && (fchmod(fd, st.st_mode & 01777) || futimens(fd, times) || fsync(fd))) r = -errno;
+        if (!r && (fchmod(fd, st.st_mode & 01777) || futimens(fd, times))) r = -errno;
+        if (!r) r=mdi_sync(target,fd);
         close(fd);
         if (r) return r;
     } else if (node->kind == S_IFIFO) {
         int fd = openat(target->objects, node->backing, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
         if (fd < 0) return -errno;
         struct timespec times[2] = {st.st_atim, st.st_mtim};
-        if (futimens(fd, times) || fsync(fd)) r = -errno;
+        if (futimens(fd, times)) r = -errno;
+        if (!r) r=mdi_sync(target,fd);
         close(fd);
         if (r) return r;
     } else if (node->kind != S_IFREG) return -ENOTSUP;
@@ -105,7 +107,7 @@ int md_inode_snapshot(struct md_inode_store *source, struct md_inode_store *targ
             if (!r) r = mdi_sql(target, "DELETE FROM sources WHERE NOT EXISTS "
                 "(SELECT 1 FROM objects WHERE objects.source=sources.id AND objects.scope=sources.scope) "
                 "AND NOT EXISTS(SELECT 1 FROM inode_channels c WHERE c.source=sources.id AND c.scope=sources.scope)");
-            if (!r && fsync(target->objects)) r = -errno;
+            if (!r) r=mdi_sync(target,target->objects);
             r = mdi_commit(target, r);
         }
     }

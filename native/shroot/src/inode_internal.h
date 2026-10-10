@@ -32,7 +32,8 @@ struct md_inode_lifetime *mdi_lifetime_new(int root, const struct stat *);
 enum mdi_query { MDI_NODE, MDI_FD, MDI_LOOKUP, MDI_DIRECTORY_NAME, MDI_READDIR,
     MDI_BEGIN, MDI_BEGIN_WRITE, MDI_COMMIT, MDI_ROLLBACK, MDI_EVENT, MDI_EVENT_TRIM,
     MDI_EVENT_END, MDI_EVENT_SCAN, MDI_EVENT_NAMES, MDI_BACKING_OBJECT, MDI_FILE_PATH, MDI_ACL,
-    MDI_OVERLAY_LINK, MDI_DATA_VERSION, MDI_QUERY_COUNT };
+    MDI_OVERLAY_LINK, MDI_DATA_VERSION, MDI_ADD_NAME, MDI_DELETE_NAME, MDI_REPARENT,
+    MDI_EMPTY, MDI_QUERY_COUNT };
 struct mdi_read_cache;
 struct md_inode_store {
     sqlite3 *db;
@@ -99,6 +100,9 @@ int mdi_sql_error(int);
 int mdi_sqlite_open(int root, int create, sqlite3 **);
 int mdi_sql_failure(int);
 int mdi_sql(struct md_inode_store *, const char *);
+/* Publication durability follows the destination lifetime. Transient mounts
+ * retain transaction rollback, but have no power-loss persistence contract. */
+int mdi_sync(struct md_inode_store *, int fd);
 int mdi_begin(struct md_inode_store *, int write);
 /* Promote the sole read snapshot under its already-held exclusive store gate.
  * Never releases the gate, re-resolves the pathname, or replays an operation. */

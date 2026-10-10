@@ -585,6 +585,12 @@ ordinary annotated `fd_return`, including partial output faults and terminal
 observation; it does not receive FD numbers into a temporary application buffer
 and copy them afterward. Subsequent batch messages replace expanded custody
 only after the preceding message's publication has finished.
+The terminal syscall acknowledgement releases the final receive custody; batch
+and accept intermediate publications retain their explicit release boundaries.
+Brokered messages fitting the shared payload and control buffers combine
+admission with IO commit. Larger and batched messages retain staged preparation.
+Both paths use the same socket timeout, nonblocking, low-water and rights owners;
+no socket flags or readiness decisions are cached across operations.
 
 `--case ipc-ancillary` runs guest send cases with an explicitly bound
 socket inherited through the runner. Protected/unprotected cases cover one and

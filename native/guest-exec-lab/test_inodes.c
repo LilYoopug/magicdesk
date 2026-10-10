@@ -30,6 +30,11 @@ static struct md_inode_store *store(const char *name, int create) {
     char p[PATH_MAX]; path(p, name);
     struct md_inode_store *s = NULL;
     CHECK(md_inode_store_open(p, create, &s) == 0);
+    sqlite3_stmt *q=NULL;
+    CHECK(sqlite3_prepare_v2(s->db,"PRAGMA synchronous",-1,&q,NULL)==SQLITE_OK);
+    CHECK(sqlite3_step(q)==SQLITE_ROW && sqlite3_column_int(q,0)==3);
+    sqlite3_finalize(q);
+    CHECK(mdi_sync(s,-1)==-EBADF);
     return s;
 }
 static struct stat state(struct md_inode_store *s, const char *name, nlink_t links) {
@@ -975,6 +980,14 @@ static void retained_journal(void) {
         for (unsigned j=0;j<sizeof(header);j++) CHECK(!header[j]);
         CHECK(state(s,"file",1).st_size==0);
     }
+    char before[PATH_MAX], moved[PATH_MAX];
+    path(before,"journal"); path(moved,"journal-moved");
+    CHECK(!rename(before,moved));
+    CHECK(!md_inode_link(a,MD_INODE_ROOT,"file",MD_INODE_ROOT,"after-move",0));
+    CHECK(state(b,"after-move",2).st_ino==state(a,"file",2).st_ino);
+    CHECK(!md_inode_unlink(b,MD_INODE_ROOT,"after-move",0));
+    state(a,"file",1);
+    CHECK(!rename(moved,before));
     md_inode_store_close(a); md_inode_store_close(b);
     a=store("journal",0);
     struct md_inode_audit audit;

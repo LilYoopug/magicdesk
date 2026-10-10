@@ -29,6 +29,11 @@ static unsigned entries(int parent) {
     assert(!closedir(d)); return count;
 }
 static void content(struct md_inode_store *store) {
+    sqlite3_stmt *q=NULL;
+    assert(sqlite3_prepare_v2(store->db,"PRAGMA synchronous",-1,&q,NULL)==SQLITE_OK);
+    assert(sqlite3_step(q)==SQLITE_ROW && !sqlite3_column_int(q,0));
+    sqlite3_finalize(q);
+    assert(!mdi_sync(store,-1));
     int fd=md_inode_open(store,-1,"/file",O_RDONLY,0); assert(fd>=0);
     char text[16]; assert(read(fd,text,sizeof(text))==5 && !memcmp(text,"hello",5));
     assert(!close(fd));
@@ -92,11 +97,59 @@ static void transferred(int parent) {
     assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
     assert(!entries(parent));
 }
+struct crash_gate { int ready, hold; enum md_inode_checkpoint point; };
+static void crash_checkpoint(enum md_inode_checkpoint point,void *context) {
+    struct crash_gate *gate=context;
+    if (point!=gate->point) return;
+    assert(write(gate->ready,"r",1)==1);
+    char byte;
+    /* EVENT_WAIT: test owner kills this child at the exact journal boundary. */
+    assert(read(gate->hold,&byte,1)==1);
+    abort();
+}
+static void recovery(int parent) {
+    const enum md_inode_checkpoint points[]={MD_OBJECT_SYNCED,MD_NAMESPACE_STAGED,MD_NAMESPACE_COMMITTED};
+    for (unsigned i=0;i<sizeof(points)/sizeof(points[0]);++i) {
+        struct md_inode_store *s=NULL; assert(!md_inode_store_transient(parent,NULL,&s));
+        struct md_inode_lifetime *owner=md_inode_lifetime_retain(s->lifetime);
+        md_inode_store_close(s);
+        int ready[2],hold[2]; assert(!pipe(ready) && !pipe(hold));
+        pid_t child=fork(); assert(child>=0);
+        if (!child) {
+            close(ready[0]); close(hold[1]);
+            assert(!md_inode_store_reconnect(owner,&s));
+            struct crash_gate gate={ready[1],hold[0],points[i]};
+            md_inode_observe(s,crash_checkpoint,&gate);
+            md_inode_create(s,-1,"/new",0600);
+            _exit(99);
+        }
+        close(ready[1]); close(hold[0]); char byte;
+        /* EVENT_WAIT: exact publication boundary; runner deadline catches hangs. */
+        assert(read(ready[0],&byte,1)==1 && byte=='r');
+        if (points[i]==MD_NAMESPACE_STAGED) {
+            struct stat st;
+            assert(!fstatat(owner->root,"namespace.db-journal",&st,0) && st.st_size>0);
+        }
+        assert(!kill(child,SIGKILL)); int status;
+        assert(waitpid(child,&status,0)==child && WIFSIGNALED(status) && WTERMSIG(status)==SIGKILL);
+        close(ready[0]); close(hold[1]);
+        assert(!md_inode_store_reconnect(owner,&s));
+        struct stat st; int committed=points[i]==MD_NAMESPACE_COMMITTED;
+        assert(md_inode_stat(s,-1,"/new",0,&st)==(committed ? 0 : -ENOENT));
+        struct md_inode_audit audit; assert(!md_inode_audit(s,&audit));
+        assert(audit.objects==(unsigned)(1+committed) && audit.untracked==(unsigned)!committed);
+        md_inode_store_close(s); md_inode_lifetime_release(owner);
+        assert(!entries(parent));
+    }
+    puts("PASS transient journals: process death before/after commit, intact rollback and final retirement");
+}
 void test_transient_store(const char *base) {
     char path[PATH_MAX]; snprintf(path,sizeof(path),"%s/transient",base);
     assert(!mkdir(path,0700));
     int parent=open(path,O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(parent>=0);
     unsigned before=descriptors();
+    recovery(parent);
+    assert(descriptors()==before);
     for (unsigned i=0;i<32;++i) {
         struct md_inode_store *s=NULL; assert(!md_inode_store_transient(parent,NULL,&s));
         assert(s->lifetime->temporary && !md_temporary_directory_check(s->lifetime->root));

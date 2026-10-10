@@ -195,8 +195,8 @@ int mdi_copy_body(struct md_inode_store *s, int source, int destination, const s
     int r=copy_bytes(s,source,destination,before->st_size);
     if (!r) r=mdi_copy_attributes(source,destination);
     struct timespec times[2]={before->st_atim,before->st_mtim};
-    if (!r && (fchmod(destination,before->st_mode&01777) || futimens(destination,times)
-            || fsync(destination))) r=-errno;
+    if (!r && (fchmod(destination,before->st_mode&01777) || futimens(destination,times))) r=-errno;
+    if (!r) r=mdi_sync(s,destination);
     return r;
 }
 int mdi_copy_up(struct md_inode_store *s, struct mdi_node *node) {
@@ -224,7 +224,8 @@ int mdi_copy_up(struct md_inode_store *s, struct mdi_node *node) {
     if (!r && fstat(destination, &after)) r = -errno;
     if (destination >= 0) { if (close(destination) && !r) r = -errno; destination = -1; }
     if (!r && renameat(s->lifetime->root, temporary, s->objects, backing)) r = -errno;
-    if (!r && (fsync(s->objects) || fsync(s->lifetime->root))) r = -errno;
+    if (!r) r=mdi_sync(s,s->objects);
+    if (!r) r=mdi_sync(s,s->lifetime->root);
     if (r && *temporary) unlinkat(s->lifetime->root, temporary, 0);
     sqlite3_stmt *q = NULL;
     if (!r) r = mdi_prepare(s, "UPDATE objects SET backing=?1,device=?2,inode=?3,shared=0,source=0 WHERE object=?4", &q);

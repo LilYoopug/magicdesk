@@ -36,6 +36,6 @@ int mdi_discard_untracked_backings(struct md_inode_store *s) {
     sqlite3_finalize(q); closedir(dir);
     int drop=mdi_sql(s,"DROP TABLE IF EXISTS temp.maintenance_backings");
     if (!r) r=drop;
-    if (!r && fsync(s->objects)) r=-errno;
+    if (!r) r=mdi_sync(s,s->objects);
     return r;
 }

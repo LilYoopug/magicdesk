@@ -79,6 +79,18 @@ int main(void) {
     assert(md_task_quiesce_take(q,&status,&usage)==8);
     assert(status==stop(SIGTRAP,PTRACE_EVENT_STOP) && usage.ru_maxrss==123);
     assert(!md_task_quiesce_take(q,&status,NULL));
+    for (unsigned round=0;round<3;++round) {
+        enum { COUNT=4096 };
+        int start=resumes;
+        for (int i=0;i<COUNT;++i) assert(!md_task_quiesce_add(q,100+i,0,PTRACE_CONT));
+        assert(!md_task_quiesce_stop(q) && !md_task_quiesce_ready(q));
+        for (int i=0;i<COUNT;++i) {
+            assert(!md_task_quiesce_event(q,100+i,stop(SIGTRAP,PTRACE_EVENT_STOP),NULL));
+            assert(md_task_quiesce_ready(q)==(i==COUNT-1));
+        }
+        assert(!md_task_quiesce_release(q) && resumes==start+COUNT);
+        assert(!md_task_quiesce_take(q,&status,NULL));
+    }
     md_task_quiesce_destroy(q);
     puts("PASS task quiescence: exact resume, deferred signals/rusage, nested replay, both birth orders and private helper ownership");
     return 0;

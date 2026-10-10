@@ -21,4 +21,8 @@ struct md_ipc_io_message {
     _Alignas(struct cmsghdr) char control[MD_IPC_IO_CONTROL];
     char data[MD_IPC_IO_DATA];
 };
+static inline int md_ipc_io_inline(const struct md_ipc_io_message *io) {
+    return !io->batch_count && io->size<=sizeof(io->data)
+        && io->control_size<=sizeof(io->control);
+}
 #endif

@@ -54,8 +54,37 @@ static void io_batch_inputs(unsigned mode) {
     CHECK(recv(alias,bytes,1,0)==-1 && errno==EAGAIN);
     CHECK(!close(alias) && !close(sockets[0]) && !close(sockets[1]) && !munmap(mapping,2*page));
 }
+static void io_inline_boundary(void) {
+    int pair[2]; CHECK(!socketpair(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC,0,pair));
+    io_filter(); CHECK(!prctl(PR_SET_DUMPABLE,0));
+    const size_t sizes[]={0,1,65535,65536,65537};
+    char *sent=malloc(65537), *received=malloc(65537); CHECK(sent && received);
+    for (unsigned i=0;i<65537;++i) sent[i]=(char)(i*37);
+    for (unsigned pass=0;pass<8;++pass) for (unsigned i=0;i<sizeof(sizes)/sizeof(*sizes);++i) {
+        int pipefd[2]; CHECK(!pipe2(pipefd,O_NONBLOCK|O_CLOEXEC));
+        union { struct cmsghdr align; char data[512]; } control={0};
+        control.align=(struct cmsghdr){.cmsg_len=CMSG_LEN(sizeof(int)),.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_RIGHTS};
+        memcpy(CMSG_DATA(&control.align),&pipefd[1],sizeof(int));
+        struct iovec vectors[2]={{sent,sizes[i]/2},{sent+sizes[i]/2,sizes[i]-sizes[i]/2}};
+        struct msghdr m={.msg_iov=vectors,.msg_iovlen=2,.msg_control=control.data,.msg_controllen=CMSG_SPACE(sizeof(int))};
+        CHECK(sendmsg(pair[0],&m,MSG_NOSIGNAL)==(ssize_t)sizes[i] && !close(pipefd[1]));
+        vectors[0].iov_base=received; vectors[1].iov_base=received+sizes[i]/2;
+        m.msg_controllen=sizeof(control);
+        CHECK(recvmsg(pair[1],&m,MSG_CMSG_CLOEXEC)==(ssize_t)sizes[i] && !memcmp(sent,received,sizes[i]));
+        struct cmsghdr *h=CMSG_FIRSTHDR(&m);
+        CHECK(h && h->cmsg_type==SCM_RIGHTS && h->cmsg_len==CMSG_LEN(sizeof(int)));
+        int delivered; memcpy(&delivered,CMSG_DATA(h),sizeof(int));
+        CHECK(fcntl(delivered,F_GETFD)&FD_CLOEXEC);
+        CHECK(!close(delivered));
+        char byte; CHECK(read(pipefd[0],&byte,1)==0 && !close(pipefd[0]));
+    }
+    free(received); free(sent); CHECK(!close(pair[0]) && !close(pair[1]));
+}
 static void io_contract(unsigned mode) {
     alarm(15);
+    if (mode==29) {
+        io_inline_boundary(); printf("PASS filtered socket IO mode=%u\n",mode); return;
+    }
     if (mode==25 || mode==26) {
         io_batch_inputs(mode); printf("PASS filtered socket IO mode=%u\n",mode); return;
     }

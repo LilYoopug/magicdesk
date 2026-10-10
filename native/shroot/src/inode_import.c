@@ -60,8 +60,8 @@ static int metadata(struct importer *i, const struct mdi_node *node, int fd, con
         int r = mdi_metadata(i->store, node, node->uid, node->gid, source->st_mode & 01777);
         if (r) return r;
     } else if (fd >= 0 && fchmod(fd, source->st_mode & 01777)) return -errno;
-    if (fd >= 0 && (futimens(fd, times) || fsync(fd))) return -errno;
-    return 0;
+    if (fd >= 0 && futimens(fd, times)) return -errno;
+    return fd >= 0 ? mdi_sync(i->store,fd) : 0;
 }
 static int acls(struct importer *i,const struct mdi_node *node,int fd) {
     const char *names[]={MD_ACL_ACCESS_NAME,MD_ACL_DEFAULT_NAME};
@@ -191,8 +191,8 @@ static int leaf(struct importer *i, struct import_frame *frame, const char *name
         if (!r && capability_size) r=mdi_file_capability(i->store,&node,capability,capability_size);
         if (!r && link) {
             struct timespec times[2] = {st->st_atim, st->st_mtim};
-            if (utimensat(i->store->objects, node.id, times, AT_SYMLINK_NOFOLLOW)
-                    || fsync(i->store->objects)) r = -errno;
+            if (utimensat(i->store->objects, node.id, times, AT_SYMLINK_NOFOLLOW)) r = -errno;
+            if (!r) r=mdi_sync(i->store,i->store->objects);
         }
         if (!r) r = origin(i->store, st, &node, 1);
     }

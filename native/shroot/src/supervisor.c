@@ -5514,6 +5514,13 @@ int main(int argc, char **argv) {
                 t->stack = regs.regs[0]; CHECK(!md_memory_stack_add(t->memory, t->stack)); dispatch(t);
             } else if (regs.pc == DONE && t->phase == DISPATCHING) {
                 CHECK(!t->control_pending);
+                /* Terminal acknowledgement owns the remaining socket custody.
+                 * Intermediate publication still releases/reacquires its buffer;
+                 * no extra stop is needed after the final userspace copy. */
+                if (t->receive) {
+                    CHECK((t->receive->ready || t->receive->brokered) && !t->receive->io_waiting);
+                    receive_release(t->receive); t->receive=NULL;
+                }
                 retry_clear(t,RETRY_PROC_IO);
                 CHECK(!md_proc_file_io_cancel(&t->proc_io));
                 md_proc_file_release(t->proc_file); t->proc_file=NULL; t->proc_waiting=0;
