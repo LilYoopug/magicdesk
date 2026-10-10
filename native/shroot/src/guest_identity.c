@@ -62,13 +62,10 @@ int md_identity_setgroups(struct md_identity *v, uint32_t *ids, unsigned count) 
 }
 
 struct md_identity md_identity_new(uint32_t uid, uint32_t gid) {
-    /* Only capabilities with an authority in this runtime are advertised.
-     * These never authorize operations on Android's native resources. */
-    uint64_t supported = (1ULL << CAP_CHOWN) | (1ULL << CAP_DAC_OVERRIDE)
-        | (1ULL << CAP_FOWNER) | (1ULL << CAP_FSETID) | (1ULL << CAP_SETUID)
-        | (1ULL << CAP_SETGID) | (1ULL << CAP_SETPCAP) | (1ULL << CAP_SYS_CHROOT)
-        | (1ULL << CAP_IPC_OWNER) | (1ULL << CAP_SETFCAP) | (1ULL << CAP_SYS_ADMIN)
-        | (1ULL << CAP_NET_ADMIN) | (1ULL << CAP_KILL);
+    /* Credentials describe guest authority, not an inventory of implemented
+     * syscalls. Each backend still checks ownership, support and native access;
+     * these bits never enter the Android task's kernel credentials. */
+    uint64_t supported = MD_CAP_VALID;
     return (struct md_identity){.uid = {uid, uid, uid, uid}, .gid = {gid, gid, gid, gid},
         .caps = {.bounding = supported, .permitted = uid ? 0 : supported,
             .effective = uid ? 0 : supported}};
@@ -145,7 +142,7 @@ long md_identity_cap_prctl(struct md_identity *v, unsigned long op, const unsign
         v->caps.securebits = a[0]; return 0;
     }
     case PR_CAPBSET_READ: case PR_CAPBSET_DROP:
-        if (a[0] > CAP_LAST_CAP) return -EINVAL;
+        if (a[0] > MD_CAP_LAST) return -EINVAL;
         if (op == PR_CAPBSET_READ) return !!(v->caps.bounding & (1ULL << a[0]));
         if (!md_identity_capable(v, CAP_SETPCAP)) return -EPERM;
         v->caps.bounding &= ~(1ULL << a[0]); return 0;
@@ -155,7 +152,7 @@ long md_identity_cap_prctl(struct md_identity *v, unsigned long op, const unsign
             if (a[1]) return -EINVAL;
             v->caps.ambient = 0; return 0;
         }
-        if (a[1] > CAP_LAST_CAP) return -EINVAL;
+        if (a[1] > MD_CAP_LAST) return -EINVAL;
         uint64_t bit = 1ULL << a[1];
         if (a[0] == PR_CAP_AMBIENT_IS_SET) return !!(v->caps.ambient & bit);
         if (a[0] == PR_CAP_AMBIENT_LOWER) { v->caps.ambient &= ~bit; return 0; }

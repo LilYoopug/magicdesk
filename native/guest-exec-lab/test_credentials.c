@@ -11,10 +11,42 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <sys/prctl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+static void capabilities(void) {
+    struct md_identity root=md_identity_new(0,0), user=md_identity_new(1000,1000);
+    assert(root.caps.bounding==MD_CAP_VALID && root.caps.permitted==MD_CAP_VALID
+        && root.caps.effective==MD_CAP_VALID && !root.caps.inheritable && !root.caps.ambient);
+    assert(user.caps.bounding==MD_CAP_VALID && !user.caps.permitted && !user.caps.effective);
+    uint64_t selected=(UINT64_C(1)<<CAP_NET_BIND_SERVICE)|(UINT64_C(1)<<CAP_NET_RAW)
+        |(UINT64_C(1)<<CAP_MKNOD)|(UINT64_C(1)<<CAP_AUDIT_WRITE)|(UINT64_C(1)<<CAP_SETPCAP);
+    assert(!md_identity_capset(&root,selected,selected,selected));
+    assert(md_identity_capset(&user,selected,selected,0)==-EPERM);
+    assert(md_identity_capset(&root,selected|(UINT64_C(1)<<CAP_SYS_ADMIN),selected,0)==-EPERM);
+    unsigned long args[4]={CAP_NET_RAW};
+    assert(md_identity_cap_prctl(&root,PR_CAPBSET_READ,args)==1);
+    assert(!md_identity_cap_prctl(&root,PR_CAPBSET_DROP,args));
+    assert(!md_identity_cap_prctl(&root,PR_CAPBSET_READ,args));
+    assert(md_identity_capable(&root,CAP_NET_RAW));
+    args[0]=MD_CAP_LAST+1;
+    assert(md_identity_cap_prctl(&root,PR_CAPBSET_READ,args)==-EINVAL);
+    args[0]=PR_CAP_AMBIENT_RAISE; args[1]=CAP_AUDIT_WRITE;
+    assert(!md_identity_cap_prctl(&root,PR_CAP_AMBIENT,args));
+    struct md_identity next=md_identity_copy(&root);
+    assert(!md_identity_no_new_privs(&root,1));
+    md_identity_exec(&root,&next);
+    assert(!(next.caps.permitted&~selected));
+    md_identity_release(&next);
+    assert(!md_identity_enter_user_namespace(&user));
+    assert(user.caps.effective==MD_CAP_VALID);
+    assert(!md_identity_capable_in(&user,NULL,CAP_NET_ADMIN));
+    md_identity_release(&root); md_identity_release(&user);
+    puts("PASS capability ABI: namespace-local authority, reduction, bounding, ambient and no-new-privs");
+}
 
 static void identities(void) {
     struct md_identity root = md_identity_new(0, 0);
@@ -241,7 +273,7 @@ static void accounts(struct md_inode_store *s) {
     assert(md_guest_user_resolve(&fs,"1000:",&selected)==-EINVAL);
 }
 int main(int argc, char **argv) {
-    assert(argc == 2); identities(); concurrent_snapshots(); umask(0);
+    assert(argc == 2); identities(); capabilities(); concurrent_snapshots(); umask(0);
     struct md_inode_store *s = NULL;
     assert(!md_inode_store_open(argv[1], 1, &s));
     struct md_identity root=md_identity_new(0,0), user=md_identity_new(1000,1000), other=md_identity_new(1001,1001);

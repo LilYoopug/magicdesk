@@ -142,8 +142,12 @@ original descriptor once and delivers only the final open result. Native and
 attached objects share the retained-object reopening primitive, preserving
 independent offsets, deferred FIFO completion and readonly mount policy.
 Regular-file/FIFO creation keeps its intermediate descriptors on the worker.
-Creating character/block devices returns EPERM, consistently with the absent
-CAP_MKNOD authority. Existing native devices can be bind-mounted with their real
+Guest capability sets retain Linux 5.15's credential bits independently of
+backend availability. Dropping or inheriting them changes guest authority only;
+no capability is added to the Android process. Each operation still checks its
+namespace ownership, implementation and native access. Creating character/block
+devices returns EPERM because native device creation is not authorized.
+Existing native devices can be bind-mounted with their real
 access permissions and per-mount nodev policy; no device-creation rights are granted.
 Path chdir and truncate retain the selected object there; the caller executes
 the final syscall through its leased proc path. This preserves CLONE_FS state,

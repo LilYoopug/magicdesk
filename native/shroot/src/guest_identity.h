@@ -8,6 +8,9 @@
 /* Guest credentials confer no Android/kernel authority. Copies retain the
  * immutable supplementary-group set; release each owning copy. */
 #define MD_IDENTITY_GROUPS_MAX 65536
+/* Linux 5.15's credential ABI, independent of host headers and backend support. */
+#define MD_CAP_LAST CAP_CHECKPOINT_RESTORE
+#define MD_CAP_VALID ((UINT64_C(1) << (MD_CAP_LAST + 1)) - 1)
 struct md_identity_groups;
 struct md_identity_ids { uint32_t real, effective, saved, fs; };
 struct md_capabilities { uint64_t permitted, effective, inheritable, bounding, ambient; unsigned securebits; };
