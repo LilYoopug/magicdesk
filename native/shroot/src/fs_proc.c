@@ -12,7 +12,7 @@ int md_fs_proc_operation(struct md_filesystem *fs,struct md_mount_namespace *vie
         struct md_view_mount *mount,int fd,const struct md_fs_request *q,
         struct md_fs_result *out,const struct md_fs_output *output) {
     if (!mount || mount->backing!=MD_MOUNT_PROC || fd<0 || !fs->actor
-            || !md_network_namespace_offline(fs->actor->network)) return 0;
+            || !md_network_namespace_managed(fs->actor->network)) return 0;
     char path[PATH_MAX];
     int r=md_view_fdpath(fd,path,sizeof(path));
     if (r) { out->error=r; return 1; }

@@ -47,6 +47,10 @@ network namespace do not change. `inspect` includes the `guestUsers` policy.
 Each instance gets a stable launch hostname derived from its storage identity;
 `--hostname NAME` overrides it. The ordinary runner accepts the same option.
 This changes guest uname's nodename, not Android's hostname or network namespace.
+`--network routed` selects the launch-owned logical IPv4 transport for run,
+exec and login; its absence preserves native networking. The ordinary store
+runner accepts the same option. No Android network namespace or interface is
+modified. See [network ownership](process-resources.md#network-namespaces).
 
 An instance is a normal guest store. Existing shell, PTY and graphical recipes
 can use it through `--store`, including their explicit graphics routes and

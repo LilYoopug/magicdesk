@@ -11,6 +11,8 @@
 #include "namespace_broker.h"
 #include "guest_domain.h"
 #include "task_resources.h"
+#include "network_route.h"
+#include "network_io.h"
 #include "fd_mutation.h"
 #include "descriptor_inode.h"
 #include "descriptor_calls.h"
@@ -193,6 +195,7 @@ struct receive_owner {
     struct md_fd_capture capture;
     int brokered, io_waiting;
     struct md_ipc_io io;
+    struct md_network_io network;
 };
 struct thread {
     struct thread *next;
@@ -210,6 +213,9 @@ struct thread {
     struct md_proc_file *proc_file;
     struct md_proc_file_io proc_io;
     struct md_fd_order proc_lookup;
+    struct md_fd_order buffer_descriptor_order;
+    unsigned buffer_descriptor_operation;
+    unsigned long buffer_descriptor_argument;
     int proc_waiting;
     struct md_fd_return buffer_return;
     int buffer_return_waiting;
@@ -337,6 +343,7 @@ static void mapping_complete(void *, struct md_task_helper_result);
 static void mapping_start(struct thread *);
 static void memory_start(struct thread *);
 static void proc_lookup_start(struct thread *);
+static void buffer_descriptor_start(struct thread *);
 static void dispatch(struct thread *t);
 static void report_statistics(void);
 static int debugger_allowed(pid_t, pid_t);
@@ -469,6 +476,7 @@ static void receive_release(struct receive_owner *owner) {
     if (!owner) return;
     if (owner->io_waiting && owner->received)
         epoll_ctl(socket_events,EPOLL_CTL_DEL,md_ipc_io_event(&owner->io,owner->received->fds[0]),NULL);
+    if (owner->network.number) md_network_io_release(&owner->network,&owner->io);
     md_ipc_io_release(&owner->io);
     md_fd_capture_cancel(&owner->capture);
     if (owner->files.table && md_fd_order_cancel(&owner->files)==1)
@@ -495,6 +503,8 @@ static void outgoing_release(struct outgoing_owner *owner) {
 }
 static void adapter_discard(struct thread *t) {
     if (t->proc_lookup.table) CHECK(!md_fd_order_cancel(&t->proc_lookup));
+    if (t->buffer_descriptor_order.table) CHECK(!md_fd_order_cancel(&t->buffer_descriptor_order));
+    t->buffer_descriptor_operation=0;
     if (t->memory_capture) {
         t->memory_capture->caller=0; t->memory_capture=NULL;
         CHECK(!md_task_helper_detach(helpers,t->pid));
@@ -2340,7 +2350,7 @@ static void fd_control(struct thread *t, struct user_pt_regs *r) {
     } else if (operation==MD_FD_INPUT || operation==MD_FD_RECEIVE || operation==MD_FD_USE || operation==MD_FD_PAIR_BEGIN) {
         if ((operation==MD_FD_PAIR_BEGIN && (t->phase!=DISPATCHING
                     || (t->original.regs[8]!=SYS_pipe2 && (t->original.regs[8]!=SYS_socketpair
-                        || !md_network_namespace_offline(t->resources.network)))))
+                        || !md_network_namespace_managed(t->resources.network)))))
                 || t->fd_order.table || (operation==MD_FD_USE || operation==MD_FD_PAIR_BEGIN ? id || r->regs[2] || r->regs[3]
                 : operation==MD_FD_INPUT ? t->fd_exchange!=NULL
                 : !id || id!=md_fd_exchange_id(t->fd_exchange))) result=-EINVAL;
@@ -2627,7 +2637,31 @@ static void socket_complete(struct thread *t, long result) {
     if (t->outgoing) {
         if (result==-EPIPE && !(t->outgoing->input.flags&MSG_NOSIGNAL)) t->socket_sigpipe=1;
         outgoing_complete(t->outgoing,(struct md_task_helper_result){.value=result,.descriptor=-1});
-    } else receive_complete(t->receive,(struct md_task_helper_result){.value=result,.descriptor=-1,.received=t->receive->received});
+    } else {
+        struct receive_owner *owner=t->receive;
+        if (result==-EPIPE && md_network_io_sending(&owner->network)
+                && !(md_network_io_flags(&owner->network)&MSG_NOSIGNAL)) t->socket_sigpipe=1;
+        if (owner->network.number && (owner->network.number==SYS_accept || owner->network.number==SYS_accept4)
+                && result>=0) {
+            int fd=(int)result;
+            owner->io.native_ready=0;
+            result=md_network_endpoint_accept(owner->network.endpoint,fd,&t->buffer_open.object);
+            if (!result) {
+                struct md_buffer_span span;
+                result=md_buffer_span(&t->buffer,&span);
+                if (!result) {
+                    struct md_ipc_io_message *io=&((struct md_task_receive_frame *)span.data)->io;
+                    result=md_network_endpoint_name(t->buffer_open.object,fd,1,&io->address,&io->address_size);
+                }
+            }
+            if (result) { close(fd); md_fd_object_release(t->buffer_open.object); t->buffer_open.object=NULL; }
+            else {
+                t->buffer_open.fd=fd;
+                t->buffer_open.flags=owner->network.number==SYS_accept4 ? owner->network.args[3]&SOCK_CLOEXEC : 0;
+            }
+        }
+        receive_complete(owner,(struct md_task_helper_result){.value=result,.descriptor=-1,.received=owner->received});
+    }
 }
 static int socket_watch(struct thread *t) {
     int *watch=t->outgoing ? &t->outgoing->io_waiting : &t->receive->io_waiting;
@@ -2636,7 +2670,9 @@ static int socket_watch(struct thread *t) {
     if (socket_events<0) return -errno;
     int fd=t->outgoing ? t->outgoing->prepared->fds[0] : t->receive->received->fds[0];
     fd=md_ipc_io_event(socket_operation(t),fd);
-    struct epoll_event event={.events=(t->outgoing ? EPOLLOUT : EPOLLIN)|EPOLLONESHOT,.data.u32=(unsigned)t->pid};
+    int sending=t->outgoing || (t->receive && !t->receive->io.job.started
+        && md_network_io_sending(&t->receive->network));
+    struct epoll_event event={.events=(sending ? EPOLLOUT : EPOLLIN)|EPOLLONESHOT,.data.u32=(unsigned)t->pid};
     if (epoll_ctl(socket_events,EPOLL_CTL_ADD,fd,&event)) return -errno;
     if (t->outgoing) t->outgoing->io_waiting=1;
     else t->receive->io_waiting=1;
@@ -2652,7 +2688,8 @@ static void socket_io_progress(struct thread *t) {
     if (!result) {
         struct md_ipc_io_message *io=out ? &((struct md_task_outgoing_frame *)span.data)->scratch.capture.io
             : &((struct md_task_receive_frame *)span.data)->io;
-        waiting=out ? md_ipc_io_send(&out->io,out->prepared,io,out->input.flags,&result)
+        waiting=in && in->network.number ? md_network_io_progress(&in->network,&in->io,&in->received,io,&result)
+            : out ? md_ipc_io_send(&out->io,out->prepared,io,out->input.flags,&result)
             : md_ipc_io_receive(&in->io,&in->received,io,in->request.flags,&result);
     }
     if (waiting) {
@@ -2693,6 +2730,10 @@ static void receive_start(struct thread *t) {
     struct receive_owner *owner=t->receive;
     if (!owner || owner->started || md_fd_order_state(&owner->files)!=MD_RESOURCE_ORDER_READY) return;
     int error=md_fd_order_start(&owner->files);
+    if (!error && owner->network.number) {
+        owner->network.endpoint=md_fd_origins_object(t->resources.files,owner->request.socket,NULL);
+        if (!md_network_endpoint_is(owner->network.endpoint)) error=-EBADF;
+    }
     if (!error) owner->brokered|=reusable_io_channel(t);
     if (!error && owner->brokered) {
         owner->started=1; ipc_capture_step(t,MD_FS_BUFFER_IPC_CAPTURE_READY,0); return;
@@ -2720,6 +2761,16 @@ static void receive_begin(struct thread *t, const struct user_pt_regs *regs) {
         *owner=(struct receive_owner){.caller=t->pid,.continuation=*regs,
             .brokered=t->application_filter,
             .request=((struct md_task_receive_frame *)span.data)->input};
+        if (regs->regs[0]==MD_BUFFER_NETWORK_DATA) {
+            owner->brokered=1; owner->network.number=t->original.regs[8];
+            owner->network.identity=&t->identity;
+            for (unsigned i=0;i<6;++i) owner->network.args[i]=t->original.regs[i];
+            if (owner->network.number==SYS_sendmmsg) {
+                owner->network.number=SYS_sendmsg;
+                owner->network.args[2]=t->original.regs[3];
+            }
+            owner->request.socket=(int)t->original.regs[0];
+        }
         error=md_fd_order_begin(t->resources.files,&owner->files,fd_wakeup);
         if (error>0) error=0;
     }
@@ -2865,12 +2916,62 @@ static void adapter_progress(void) {
             if (t->mapping && !t->mapping->started) mapping_start(t);
             if (t->phase==MEMORY_WAIT) memory_start(t);
             if (t->buffer_waiting) buffer_take(t);
+            buffer_descriptor_start(t);
             receive_start(t);
             outgoing_start(t);
             buffer_deliver(t);
             proc_deliver(t);
             buffer_return_progress(t);
         }
+}
+static int network_namespace_capture(void *context,int fd,struct md_network_namespace **out) {
+    struct thread *t=context;
+    struct md_proc_file *file=proc_file_capture(t,fd);
+    const struct md_namespace_reference *ref=md_proc_file_namespace_reference(file);
+    int error=!ref || ref->kind!=MD_NAMESPACE_NETWORK || (md_proc_file_flags(file)&O_PATH) ? -EINVAL : 0;
+    if (!error) *out=md_network_namespace_retain(ref->value.network);
+    md_proc_file_release(file); return error;
+}
+static void buffer_descriptor_start(struct thread *t) {
+    if (md_fd_order_state(&t->buffer_descriptor_order)!=MD_RESOURCE_ORDER_READY) return;
+    CHECK(t->phase==DISPATCHING && !md_fd_order_start(&t->buffer_descriptor_order));
+    int network=t->buffer_descriptor_operation==MD_BUFFER_NETWORK_CALL;
+    int fd=network ? (int)t->original.regs[0] : (int)t->buffer_descriptor_argument;
+    struct md_fd_object *object=md_fd_origins_object(t->resources.files,fd,NULL);
+    struct md_buffer_span span;
+    long result=md_buffer_span(&t->buffer,&span),nr=t->original.regs[8];
+    if (!result && network) {
+        unsigned long args[6]; for (unsigned i=0;i<6;++i) args[i]=t->original.regs[i];
+        struct md_network_target resolver={.context=t,.resolve=network_namespace_capture};
+        result=md_network_socket_call(object,&t->identity,nr,args,span.data,span.size,
+            t->buffer_descriptor_argument,visible_pid(t,t->tgid),&resolver);
+    } else if (!result) {
+        if (!md_descriptor_inode_is(object)) result=-EBADF;
+        else if (nr==SYS_fchown || nr==SYS_fchownat) {
+            unsigned offset=nr==SYS_fchown ? 1 : 2;
+            result=md_descriptor_inode_chown(object,&t->identity,
+                (uint32_t)t->original.regs[offset],(uint32_t)t->original.regs[offset+1]);
+        } else if (nr==SYS_fchmod || nr==SYS_fchmodat || nr==SYS_fchmodat2)
+            result=md_descriptor_inode_chmod(object,&t->identity,(mode_t)t->original.regs[nr==SYS_fchmod ? 1 : 2]);
+        else if (nr==SYS_fstat || nr==SYS_newfstatat || nr==SYS_statx)
+            result=md_descriptor_inode_stat(object,&t->identity,span.data);
+        else result=-EOPNOTSUPP;
+    }
+    md_fd_object_release(object);
+    CHECK(!md_fd_order_complete(&t->buffer_descriptor_order));
+    t->buffer_descriptor_operation=0;
+    buffer_reply(t,result);
+}
+static void buffer_descriptor_begin(struct thread *t,const struct user_pt_regs *r) {
+    CHECK(!t->buffer_descriptor_order.table);
+    t->buffer_descriptor_operation=(unsigned)r->regs[0];
+    t->buffer_descriptor_argument=r->regs[1];
+    int error=md_fd_order_begin(t->resources.files,&t->buffer_descriptor_order,fd_wakeup);
+    if (error<0) { t->buffer_descriptor_operation=0; buffer_reply(t,error); return; }
+    /* EVENT_WAIT: preceding close/dup publication, cancelled on task death.
+     * Only nonblocking typed operations and retained namespace-FD lookup run
+     * under this turn; it ends before the adapter copies the result to userspace. */
+    buffer_descriptor_start(t);
 }
 static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
     long result=-EINVAL;
@@ -2885,7 +2986,7 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
             && r->regs[0]!=MD_BUFFER_PROC_RIGHTS && r->regs[0]!=MD_BUFFER_PROC_META && r->regs[0]!=MD_FS_BUFFER_RIGHTS_READY
             && r->regs[0]!=MD_FS_BUFFER_RIGHTS_DONE && r->regs[0]!=MD_FS_BUFFER_CHANNEL_OBSERVED
             && r->regs[0]!=MD_BUFFER_PID_NUMBER && r->regs[0]!=MD_BUFFER_DESCRIPTOR_META
-            && r->regs[0]!=MD_BUFFER_NETWORK_OPEN && r->regs[0]!=MD_BUFFER_NETWORK_CALL
+            && r->regs[0]!=MD_BUFFER_NETWORK_OPEN && r->regs[0]!=MD_BUFFER_NETWORK_CALL && r->regs[0]!=MD_BUFFER_NETWORK_DATA
             && r->regs[0]!=MD_FS_BUFFER_RIGHTS_BEGIN) {
         buffer_reply(t,-ENOTSUP); return;
     }
@@ -2927,7 +3028,12 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
         if (r->regs[0]==MD_FS_BUFFER_IPC_IO_PREPARE) {
             int fd=t->outgoing ? t->outgoing->prepared->fds[0] : t->receive->received->fds[0];
             int flags=t->outgoing ? t->outgoing->input.flags : t->receive->request.flags;
-            result=md_ipc_io_prepare(op,io,fd,flags,t->outgoing!=NULL);
+            int sending=t->outgoing!=NULL;
+            if (t->receive && t->receive->network.number) {
+                flags=md_network_io_flags(&t->receive->network);
+                sending=md_network_io_sending(&t->receive->network);
+            }
+            result=md_ipc_io_prepare(op,io,fd,flags,sending);
         } else if (r->regs[0]==MD_FS_BUFFER_IPC_IO_SELECT)
             result=md_ipc_io_select(op,io,io->batch_index);
         else if (io->transfer&~(MD_IPC_IO_CONTROL_BYTES|MD_IPC_IO_READ_BYTES)) result=-EINVAL;
@@ -2965,6 +3071,11 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
                 || (t->original.regs[8]!=SYS_recvmsg && t->original.regs[8]!=SYS_recvmmsg)) break;
         /* EVENT_WAIT: private native receive, export and exact helper reaping.
          * Source capture alone holds the table turn, never the blocking IO. */
+        receive_begin(t,r); return;
+    case MD_BUFFER_NETWORK_DATA:
+        if (t->phase!=DISPATCHING || t->receive || !t->buffer.pool || r->regs[1] || r->regs[2]) break;
+        /* EVENT_WAIT: exact socket capture followed by the common cancellable
+         * native IO owner. No file-table turn spans connect or accept. */
         receive_begin(t,r); return;
     case MD_FS_BUFFER_RECEIVED_DROP:
         if (!t->receive || (!t->receive->ready && !t->receive->brokered)
@@ -3112,32 +3223,11 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
     }
     case MD_BUFFER_NETWORK_CALL: {
         if (t->phase!=DISPATCHING || !t->buffer.pool || r->regs[1]>MD_NETWORK_BUFFER_SIZE || r->regs[2]) break;
-        struct md_fd_object *object=md_fd_origins_object(t->resources.files,(int)t->original.regs[0],NULL);
-        struct md_buffer_span span;
-        result=md_buffer_span(&t->buffer,&span);
-        unsigned long args[6]; for (unsigned i=0;i<6;++i) args[i]=t->original.regs[i];
-        if (!result) result=md_network_socket_call(object,&t->identity,t->original.regs[8],args,
-            span.data,span.size,r->regs[1],visible_pid(t,t->tgid));
-        md_fd_object_release(object); break;
+        buffer_descriptor_begin(t,r); return;
     }
     case MD_BUFFER_DESCRIPTOR_META: {
         if (t->phase!=DISPATCHING || !t->buffer.pool || r->regs[2]!=t->original.regs[8]) break;
-        struct md_fd_object *object=md_fd_origins_object(t->resources.files,(int)r->regs[1],NULL);
-        struct md_buffer_span span;
-        result=md_descriptor_inode_is(object) ? md_buffer_span(&t->buffer,&span) : -EBADF;
-        long nr=t->original.regs[8];
-        if (!result) {
-            if (nr==SYS_fchown || nr==SYS_fchownat) {
-                unsigned offset=nr==SYS_fchown ? 1 : 2;
-                result=md_descriptor_inode_chown(object,&t->identity,
-                    (uint32_t)t->original.regs[offset],(uint32_t)t->original.regs[offset+1]);
-            } else if (nr==SYS_fchmod || nr==SYS_fchmodat || nr==SYS_fchmodat2)
-                result=md_descriptor_inode_chmod(object,&t->identity,(mode_t)t->original.regs[nr==SYS_fchmod ? 1 : 2]);
-            else if (nr==SYS_fstat || nr==SYS_newfstatat || nr==SYS_statx)
-                result=md_descriptor_inode_stat(object,&t->identity,span.data);
-            else result=-EOPNOTSUPP;
-        }
-        md_fd_object_release(object); break;
+        buffer_descriptor_begin(t,r); return;
     }
     case MD_BUFFER_PROC_META: {
         if (t->phase!=DISPATCHING || r->regs[1] || r->regs[2] || !t->buffer.pool) break;
@@ -3484,8 +3574,8 @@ static int domain_call(struct thread *t, struct user_pt_regs *r, unsigned long c
     if (t->ready && t->phase==IDLE) {
         struct md_fd_object *object=network_descriptor_call(nr)
             ? md_fd_origins_object(t->resources.files,(int)r->regs[0],NULL) : NULL;
-        int control=md_network_socket_control(object); md_fd_object_release(object);
-        if (control || (nr==SYS_socket && md_network_namespace_offline(t->resources.network))) {
+        int control=md_network_socket_control(object) || md_network_endpoint_is(object); md_fd_object_release(object);
+        if (control || (nr==SYS_socket && md_network_namespace_managed(t->resources.network))) {
             t->original=*r;
             if (tracee_request(t,PTRACE_GETSIGMASK,(void *)sizeof(t->mask),&t->mask,"network-call-mask")
                     && shield(t) && skip(t->pid)) dispatch_with_stack(t);
@@ -3713,11 +3803,12 @@ static void dispatch(struct thread *t) {
     for (unsigned i = 0; i < 6; i++) regs.regs[i + 1] = t->original.regs[i];
     unsigned policy = md_domain_scoped(t->resources.fs) || md_mount_namespace_managed_paths(t->resources.mounts)
         || t->resources.landlock;
-    if (md_network_namespace_offline(t->resources.network)) policy|=MD_DISPATCH_OFFLINE;
+    if (md_network_namespace_managed(t->resources.network)) policy|=MD_DISPATCH_NETWORK_SCOPED;
     if (network_descriptor_call(t->original.regs[8])) {
         struct md_fd_object *object=md_fd_origins_object(t->resources.files,(int)t->original.regs[0],NULL);
         if (md_network_socket_offline(object)) policy|=MD_DISPATCH_OFFLINE_SOCKET;
         if (md_network_socket_control(object)) policy|=MD_DISPATCH_NETWORK_CONTROL;
+        if (md_network_endpoint_is(object)) policy|=MD_DISPATCH_NETWORK_DATA;
         md_fd_object_release(object);
     }
     regs.regs[9] = policy;
@@ -4377,6 +4468,11 @@ int main(int argc, char **argv) {
         CHECK(argument+2 < argc && md_hostname_valid(argv[argument+1]));
         selected_hostname=argv[argument+1]; argument+=2;
     }
+    enum md_network_mode network_mode=MD_NETWORK_NATIVE;
+    if (argument < argc && !strcmp(argv[argument],"--network")) {
+        CHECK(argument+2<argc && !strcmp(argv[argument+1],"routed"));
+        network_mode=MD_NETWORK_ROUTED; argument+=2;
+    }
     unsigned attachment_count = 0;
     while (argument < argc && (!strcmp(argv[argument], "--bind") || !strcmp(argv[argument], "--bind-ro"))) {
         CHECK(argument+2 < argc && attachment_count < MD_FS_MOUNTS_MAX);
@@ -4496,6 +4592,12 @@ int main(int argc, char **argv) {
         }
         CHECK(!md_launch_register(&registration, store, program, cwd, launch_identity.uid.effective));
     } else CHECK(!md_resources_init(&thread(leader)->resources,NULL));
+    if (network_mode!=MD_NETWORK_NATIVE) {
+        struct md_network_namespace *network=md_network_namespace_new(launch_identity.user_namespace,network_mode);
+        CHECK(network);
+        md_network_namespace_release(thread(leader)->resources.network);
+        thread(leader)->resources.network=network;
+    }
     if (selected_hostname) CHECK(!md_uts_namespace_set(thread(leader)->resources.uts,0,
         selected_hostname,strlen(selected_hostname)));
     byte = 'g'; CHECK(write(channel[0], &byte, 1) == 1); close(channel[0]);

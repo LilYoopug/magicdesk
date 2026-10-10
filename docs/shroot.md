@@ -646,7 +646,8 @@ each attachment retains its own readonly policy. Import/staging does not probe
 guest-execution kernel capabilities; execution does. See
 [images and filesystem views](../native/shroot/images.md)
 for formats, explicit ownership mapping, source lifetimes and limitations.
-This provides OCI image execution, not Docker Engine or a container isolation boundary.
+This provides direct OCI image execution, independently of Docker Engine, and
+is not a container isolation boundary.
 The [application-image checks](../native/shroot/images.md#checks) exercise
 stock entrypoints, network requests and persistent data, separately from import
 and base-image shell execution. Unsupported image metadata and kernel interfaces
@@ -752,15 +753,16 @@ Its identity includes the mount and
 backend object, preserving native readonly policy. Existing cwd/descriptors remain
 usable, so chroot alone is not confinement. Guest mount views support local
 bind/move/remount, unmount and initial/attached-root pivot operations, with
-user, mount, PID, UTS, SysV IPC, cgroup and offline network namespace owners. PID namespaces select
+user, mount, PID, UTS, SysV IPC, cgroup and network namespace owners. PID namespaces select
 process/thread IDs, child admission, wait/signal translation and mounted proc
 views through retained process resources. PID 1 adopts orphaned children and
 closes namespace admission when its last thread exits. Namespace-aware proc
 mounts and explicit native `/dev` binds can prepare a new root without host
 mount privileges. Typed namespace-file binds retain their setns/ioctl authority after the
 creating process exits. Mount-namespace copies prevent cyclic ownership.
-New network namespaces expose a logical loopback control plane,
-not Android interfaces or external connectivity. Anonymous Unix socketpairs and
+New network namespaces start with down loopback and no external connectivity.
+Ordinary launches retain native networking. Explicit `--network routed` selects
+the logical IPv4 backend described below. Anonymous Unix socketpairs and
 inherited descriptors retain their IO authority. Private devpts views expose only
 their allocated terminals, with native terminal IO and caller-owned controlling
 sessions. Launch-local cgroup2 membership and permissive cgroup v1 devices views
@@ -773,7 +775,7 @@ facilities and network hooks remain unsupported. Arbitrary unattached
 native roots remain unsupported. See the
 [process resource contract](../native/shroot/process-resources.md).
 
-Offline IPv4 sysctls for unprivileged ports, ping groups and local port ranges
+Logical IPv4 sysctls for unprivileged ports, ping groups and local port ranges
 belong to the selected network namespace. Their ordinary proc IO uses the shared
 typed descriptor transport, with namespace authority, retained mount policy and
 explicit unsupported operations. These settings do not implement packet transport
@@ -787,6 +789,41 @@ state and remain live through setns, bind mounts and retained descriptors.
 Host-network sysfs, additional device classes and attribute mutations are not
 implemented and return explicit errors. This is a limited provider, not a full
 kernel device tree.
+
+**Routed networking.**
+
+`shroot login NAME --network routed` and the corresponding run/exec/store options
+create one launch-owned fabric. Its initial namespace has an IPv4 uplink; child
+network namespaces remain disconnected until configured. Typed NETLINK_ROUTE
+requests implement bridge/veth creation, addresses, routes, master assignment,
+namespace-FD moves and paired teardown. Mutations and their queued ACK share
+one transaction; rejected publication rolls back the mutation. No Android
+interface, route or firewall is changed.
+
+IPv4 TCP/UDP sockets retain their creation namespace through dup/fork and setns.
+Logical private ports map to native ephemeral ports, allowing concurrent
+containers to use the same internal port. Routed-root binds publish real ports.
+Connect, accept and addressed datagrams use the common exact-description capture
+and cancellable IO owner; ordinary stream reads/writes remain native. Endpoint
+metadata never retains a data open description. Control requests use the same
+file-table order as close/dup, released before copying output to the application.
+The default native path allocates no routed endpoint or per-message owner.
+
+Stock Docker Engine can run inside this launch with logical cgroups and its
+existing userland proxy. Configure the daemon with `--iptables=false`,
+`--ip6tables=false`, `--ip-forward=false`, `--ip-masq=false` and
+`--userland-proxy=true`; ordinary `docker run -p HOST:CONTAINER[/udp]` commands
+then use that proxy. VFS and overlay2 have focused UID 2000 coverage for concurrent
+containers, TCP/UDP publication from another Android UID, outbound DNS/HTTP and
+port release; overlay2 also covers bidirectional inter-container TCP/UDP exchange.
+This is not an unconfigured Docker host or enforcement of cgroup limits.
+
+The backend is not a security boundary: native ephemeral backing ports remain
+reachable and inherited native descriptors retain their authority. IPv6, raw
+packets, netfilter, multicast/broadcast, device-bound sockets and routed
+`recvmmsg` are unsupported. Outgoing network ancillary data is rejected;
+incoming packet metadata is not translated. These limits must not be mistaken
+for full Linux network namespace isolation.
 
 The limited `mqueue` provider retains the selected IPC namespace and supports
 directory metadata, enumeration and mount lifetime, including fsopen capture,

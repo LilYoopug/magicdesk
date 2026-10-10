@@ -41,7 +41,8 @@ public final class GuestEnvironmentMain {
                     shroot dns NAME system|preserve|IP[,IP...] [--replace]
 
                     Launch options: --bind HOST GUEST, --bind-ro HOST GUEST,
-                      --user USER[:GROUP], --cwd /PATH, --env KEY=VALUE, --hostname NAME, --magicdesk.
+                      --user USER[:GROUP], --cwd /PATH, --env KEY=VALUE, --hostname NAME,
+                      --network routed, --magicdesk.
                     --magicdesk grants this launch access to the MagicDesk CLI and Android commands.
                     run retains the image Entrypoint/Cmd; --entrypoint PROGRAM overrides it.
                     exec starts a new process in the selected store, not in an existing process tree.

@@ -275,6 +275,16 @@ Chromium and `test_glycin_runtime.py` cover these paths under shell identity.
 Native statx may return mount ID zero for anonymous objects; the adapter retains
 that result instead of treating it as a failed mount lookup.
 
+Opt-in routed networking uses the Linux 5.15 NETLINK_ROUTE wire contract in
+`network_route`, retained namespace/interface/endpoint owners in `network_model`
+and `network_endpoint`, and the existing baseline capture/cancellable IO path
+in `network_io`. Its native sockets, accept4, eventfd and SCM_RIGHTS introduce
+no post-5.15 dependency or privileged Android network operation. Unsupported
+protocols return explicit errors. `test_network_{model,route,endpoint}.c`,
+`test_routed_network.py` and `probe_docker_runtime.py --profile routed
+--exercise-ports` cover mutation rollback, namespace moves, TCP/UDP, independent
+port observation, outbound DNS/HTTP and cleanup under actual UID 2000.
+
 Namespace-handle bind mounts use retained typed providers, baseline sealed
 memfd carriers, O_PATH and descriptor duplication. They do not call host mount
 or setns and introduce no post-5.15 dependency. Carrier reads are never reopened

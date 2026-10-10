@@ -212,7 +212,9 @@ static int receive_batch(struct md_ipc_io *op, struct md_received_fds **custody,
     op->native_ready=0;
     int error=0;
     while (batch->completed<batch->count && batch->messages[batch->completed].msg_len!=UINT_MAX) {
-        int collected=collect_rights(*custody,&batch->messages[batch->completed++].msg_hdr);
+        struct msghdr *message=&batch->messages[batch->completed++].msg_hdr;
+        message->msg_flags&=~(MSG_CMSG_CLOEXEC&~flags);
+        int collected=collect_rights(*custody,message);
         if (collected) error=collected;
     }
     batch->received=1; io->batch_count=batch->completed; io->timeout=batch->timeout;
@@ -253,7 +255,7 @@ int md_ipc_io_receive(struct md_ipc_io *op, struct md_received_fds **custody,
     error=collect_rights(fds,&message);
     op->done+=(size_t)n;
     io->control_size=message.msg_controllen; io->address_size=message.msg_namelen;
-    io->flags=message.msg_flags;
+    io->flags=message.msg_flags&~(MSG_CMSG_CLOEXEC&~flags);
     *result=error ? error : (long)op->done;
     return 0;
 }

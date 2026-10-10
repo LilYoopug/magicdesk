@@ -81,6 +81,7 @@ static void io_contract(unsigned mode) {
         CHECK(sendmsg(pair[0],&message,0)==(ssize_t)length);
         data=(struct iovec){received,length}; message.msg_control=control; message.msg_controllen=control_size;
         CHECK(recvmsg(pair[1],&message,0)==(ssize_t)length && !memcmp(sent,received,length));
+        CHECK(!(message.msg_flags&MSG_CMSG_CLOEXEC));
         free(sent); free(received); free(control);
     } else if (mode>=16 && mode<=23) {
         unsigned sent=mode==18 ? 0 : mode==19 ? 1 : mode==16 ? 2 : 3;

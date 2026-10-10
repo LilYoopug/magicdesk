@@ -1236,45 +1236,61 @@ gate. If a task loses an unobserved noexec mapping result, surviving CLONE_VM
 users receive EIO for subsequent executable mprotect rather than permission
 based on an assumed rollback. A fresh exec owns a fresh address space.
 
-## Offline Network Namespaces
+## Network Namespaces
 
-`network_namespace` owns a retained namespace identity and user-namespace
+`network_model` owns a retained namespace identity and user-namespace
 authority. Clone, unshare, setns and typed `/proc/PID/ns/net` handles use the same
 resource transaction as the other namespace kinds. A new namespace is offline;
 it never silently falls back to Android networking. Existing sockets retain
 their original authority. Anonymous Unix socketpairs remain kernel IPC, with
 namespace annotations retained through descriptor-table operations.
 
-`network_calls` supplies bounded control requests through the existing mapped
-transport. New datagram control sockets and NETLINK_ROUTE expose only `lo`:
-interface index/name/flags/MTU queries and CAP_NET_ADMIN-authorized loopback
-address/up requests. RTM_GETLINK selects the same loopback by name/index or
-enumerates it with a multipart completion; replies preserve sequence, identity
-and ACK semantics. No host interface is included. Netlink replies use a native nonblocking queue for readiness;
-no interface mutation reaches Android. A failed reply publication does not
-commit a loopback change. Namespace changes need no per-data-IO polling or new
-service thread. Socket queue buffer/timeout options use the actual carrier,
-including shared dup state, kernel argument validation and receive timeout.
-Interface/credential options remain denied. Reply publication stays nonblocking;
-queue exhaustion is an explicit error before any state change.
+`network_calls` supplies bounded requests through the existing mapped transport;
+`network_namespace` owns control-socket carriers and `network_route` owns the
+NETLINK_ROUTE codec. Queries and CAP_NET_ADMIN-authorized mutations share one
+model: loopback, bridge/veth, master assignment, IPv4 addresses, routes and
+typed namespace-FD moves. Replies preserve sequence, port identity, ACK and dump
+completion. Interface state and ACK publication share a fabric turn and mutation
+journal; allocation, encoding or queue failure rolls back all affected namespaces.
+The journal exists only for mutations, not queries or data IO. Netlink carriers
+provide kernel readiness and queue options without changing Android interfaces.
+Control descriptor selection joins the close/dup table turn, including capture
+of a namespace FD, and ends before guest output copying.
 
-New stream/addressed sockets, routes, address dumps, multicast subscriptions,
-bridge/veth, external connectivity and port publication are not implemented.
-Unsupported requests return explicit errors. The control plane is not a TCP/IP
-stack: reporting loopback up does not provide loopback packet transport.
-Inherited network descriptions and native proc/sys network views remain outside
-this separation. Passing an offline typed socket to an independent supervisor
-is unsupported, rather than silently losing its namespace annotation.
+Default launches use native networking. Opt-in `--network routed` creates a
+launch-owned fabric with an IPv4 uplink in its initial namespace. Children start
+offline; configured bridge/veth routes grant connectivity. `network_endpoint`
+retains creation-namespace provenance, logical bind/peer addresses and private
+port translation, never a data OFD. The weak fabric endpoint list unlinks before
+final release. Namespace peers can use identical internal ports; routed-root
+binds use real Android ports, including conflicts and final release.
+
+`network_io` uses the shared exact-description capture and cancellable IO owner
+for control, connect/accept and addressed TCP/UDP calls. No table/fabric turn
+spans blocking IO or guest copying. Connect/accept jobs use the existing
+completion event and interrupt/reap path; cancellation closes an undelivered
+accepted FD. Ordinary stream IO remains native. Shared payload/vector helpers
+serve both Unix ancillary transport and routed message IO; native networking
+does not allocate these routed owners.
+
+IPv6, raw packets, netfilter, multicast subscriptions/broadcast,
+device-bound sockets and routed recvmmsg return explicit errors. Outgoing
+network ancillary data is rejected; incoming packet metadata is not translated.
+This is not packet-level isolation: native ephemeral backing ports remain
+reachable, and inherited native descriptions retain authority. Independent
+supervisor transfer of these typed network owners is unsupported rather than
+silently dropping their annotations.
 
 ## Namespace-Owned Sysctls
 
-`network_sysctl` supplies the offline namespace's
+`network_sysctl` supplies the managed namespace's
 `ip_unprivileged_port_start`, `ping_group_range` and `ip_local_port_range`.
 Validated updates share one namespace lock, including overlapping port bounds.
 Opening captures the network owner; subsequent setns does not retarget that FD.
 Writes require CAP_NET_ADMIN in its user owner, without touching host sysctls.
-Host-network views retain native access and errors. Values configure the logical
-control plane only; addressed packet IO is not implemented.
+Host-network views retain native access and errors. Logical unprivileged-port
+and ephemeral-range settings also govern routed endpoint allocation. Ping group
+configuration does not imply an ICMP transport.
 
 Mounted proc controls are selected on the filesystem worker and retain a live
 mount anchor. Readonly policy applies to future opens and already opened writers,

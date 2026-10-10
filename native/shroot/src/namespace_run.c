@@ -28,6 +28,7 @@ void md_boot(uintptr_t *stack) {
     const char *user = NULL;
     const char *groups = NULL;
     const char *hostname = NULL;
+    const char *network = NULL;
     char *overrides[128]; unsigned override_count = 0;
     struct md_fs_attachment attachments[MD_FS_MOUNTS_MAX]; unsigned attachment_count = 0;
     size_t program = 1;
@@ -52,6 +53,10 @@ void md_boot(uintptr_t *stack) {
         if (md_equal(argv[program], "--store") && !store) store = argv[program + 1];
         else if (md_equal(argv[program], "--cwd")) cwd = argv[program + 1];
         else if (md_equal(argv[program], "--home")) home = argv[program + 1];
+        else if (md_equal(argv[program], "--network") && !network) {
+            network=argv[program+1];
+            if (!md_equal(network,"routed")) md_die("unsupported network backend",-EINVAL);
+        }
         else if (md_equal(argv[program], "--hostname") && !hostname) {
             hostname=argv[program+1];
             if (!md_hostname_valid(hostname)) md_die("invalid guest hostname",-EINVAL);
@@ -122,6 +127,7 @@ void md_boot(uintptr_t *stack) {
         if (user) { args[n++] = "--user"; args[n++] = (char *)user; }
         if (groups) { args[n++] = "--groups"; args[n++] = (char *)groups; }
         if (hostname) { args[n++]="--hostname"; args[n++]=(char *)hostname; }
+        if (network) { args[n++]="--network"; args[n++]=(char *)network; }
         for (unsigned i = 0; i < attachment_count; ++i) {
             args[n++] = attachments[i].readonly ? "--bind-ro" : "--bind";
             args[n++] = (char *)attachments[i].source; args[n++] = (char *)attachments[i].target;

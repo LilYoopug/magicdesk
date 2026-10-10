@@ -1,0 +1,69 @@
+#define _GNU_SOURCE
+#include "network_endpoint.h"
+#include "network_internal.h"
+#include "guest_identity.h"
+#include <assert.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <net/if.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+void test_network_endpoint(void) {
+    struct md_network_namespace *root=md_network_namespace_new(NULL,MD_NETWORK_ROUTED);
+    struct md_network_namespace *a=md_network_namespace_copy(root,NULL), *b=md_network_namespace_copy(root,NULL);
+    struct md_network_namespace *offline=md_network_namespace_new(NULL,MD_NETWORK_PRIVATE);
+    assert(root && a && b && offline);
+    struct md_identity identity=md_identity_new(0,0),user=md_identity_new(1000,1000);
+    struct md_fd_object *first=NULL,*second=NULL,*conflict=NULL;
+    int f=-1,s=-1,c=-1;
+    assert(md_network_endpoint_open(offline,AF_INET,SOCK_STREAM,0,&first,&f)==-EOPNOTSUPP);
+    assert(md_network_endpoint_open(a,AF_INET6,SOCK_STREAM,0,&first,&f)==-EAFNOSUPPORT);
+    assert(!md_network_endpoint_open(a,AF_INET,SOCK_STREAM,0,&first,&f));
+    assert(!md_network_endpoint_open(b,AF_INET,SOCK_STREAM,0,&second,&s));
+    assert(!md_network_endpoint_open(a,AF_INET,SOCK_STREAM,0,&conflict,&c));
+    struct sockaddr_in local={.sin_family=AF_INET,.sin_port=htons(80)};
+    assert(md_network_endpoint_bind(first,f,&user,(void *)&local,sizeof(local))==-EACCES);
+    assert(!md_network_endpoint_bind(first,f,&identity,(void *)&local,sizeof(local)));
+    assert(!md_network_endpoint_bind(second,s,&identity,(void *)&local,sizeof(local)));
+    assert(md_network_endpoint_bind(conflict,c,&identity,(void *)&local,sizeof(local))==-EADDRINUSE);
+    struct sockaddr_in real_a,real_b; socklen_t length=sizeof(real_a);
+    assert(!getsockname(f,(void *)&real_a,&length)); length=sizeof(real_b);
+    assert(!getsockname(s,(void *)&real_b,&length) && real_a.sin_port!=real_b.sin_port);
+    struct sockaddr_storage logical;
+    assert(!md_network_endpoint_name(first,f,0,&logical,&length));
+    assert(((struct sockaddr_in *)&logical)->sin_port==htons(80));
+    struct sockaddr_in internet=real_b;
+    internet.sin_addr.s_addr=htonl(0xcb007109);
+    memcpy(&logical,&internet,sizeof(internet)); length=sizeof(internet);
+    assert(!md_network_endpoint_source(first,&logical,&length));
+    assert(!memcmp(&logical,&internet,sizeof(internet)));
+    struct sockaddr_in remote={.sin_family=AF_INET,.sin_port=htons(443),.sin_addr.s_addr=htonl(0x01010101)};
+    assert(md_network_endpoint_destination(first,(void *)&remote,sizeof(remote),&logical,&length)==-ENETUNREACH);
+    /* Retaining provenance does not retain the application's OFD. */
+    close(f); close(s); close(c);
+    assert(fcntl(f,F_GETFD)==-1 && errno==EBADF);
+    md_fd_object_release(first); md_fd_object_release(second); md_fd_object_release(conflict);
+    assert(!root->fabric->endpoints);
+    uint32_t ports[2]={49100,49101};
+    assert(!md_network_parameter_set(a,MD_NET_LOCAL_PORTS,ports));
+    assert(!md_network_endpoint_open(a,AF_INET,SOCK_STREAM,0,&first,&f));
+    assert(!md_network_endpoint_open(a,AF_INET,SOCK_STREAM,0,&second,&s));
+    assert(!md_network_endpoint_open(a,AF_INET,SOCK_STREAM,0,&conflict,&c));
+    local.sin_port=0;
+    assert(!md_network_endpoint_bind(first,f,&identity,(void *)&local,sizeof(local)));
+    assert(!md_network_endpoint_bind(second,s,&identity,(void *)&local,sizeof(local)));
+    assert(md_network_endpoint_bind(conflict,c,&identity,(void *)&local,sizeof(local))==-EADDRINUSE);
+    assert(!md_network_endpoint_name(first,f,0,&logical,&length));
+    assert(ntohs(((struct sockaddr_in *)&logical)->sin_port)==49100);
+    assert(!md_network_endpoint_name(second,s,0,&logical,&length));
+    assert(ntohs(((struct sockaddr_in *)&logical)->sin_port)==49101);
+    close(f); md_fd_object_release(first);
+    assert(!md_network_endpoint_bind(conflict,c,&identity,(void *)&local,sizeof(local)));
+    close(s); close(c); md_fd_object_release(second); md_fd_object_release(conflict);
+    md_network_namespace_release(a); md_network_namespace_release(b);
+    md_network_namespace_release(root); md_network_namespace_release(offline);
+    md_identity_release(&identity); md_identity_release(&user);
+    puts("PASS network endpoints: namespace port reuse, conflicts, credentials, offline routing and OFD custody");
+}

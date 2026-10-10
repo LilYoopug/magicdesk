@@ -142,11 +142,15 @@ __attribute__((noinline)) static long dispatch_scoped(long nr, unsigned long a0,
 }
 long md_guest_dispatch(long nr, unsigned long a0, unsigned long a1, unsigned long a2,
         unsigned long a3, unsigned long a4, unsigned long a5, unsigned scoped) {
+    if (scoped&MD_DISPATCH_NETWORK_DATA) {
+        unsigned long args[]={a0,a1,a2,a3,a4,a5};
+        return md_network_data_call(nr,args);
+    }
     if (scoped&MD_DISPATCH_NETWORK_CONTROL) {
         unsigned long args[]={a0,a1,a2,a3,a4,a5};
         return md_network_call(nr,args);
     }
-    if ((scoped&MD_DISPATCH_OFFLINE) && nr==SYS_socket) {
+    if ((scoped&MD_DISPATCH_NETWORK_SCOPED) && nr==SYS_socket) {
         unsigned long args[]={a0,a1,a2,a3,a4,a5};
         return md_network_open(args);
     }
@@ -155,7 +159,7 @@ long md_guest_dispatch(long nr, unsigned long a0, unsigned long a1, unsigned lon
         long error=md_socket_offline_error(nr,args);
         if (error) return error;
     }
-    if ((scoped&MD_DISPATCH_OFFLINE) && nr==SYS_socketpair) {
+    if ((scoped&MD_DISPATCH_NETWORK_SCOPED) && nr==SYS_socketpair) {
         struct md_fs fs=md_files; fs.managed_paths=!!(scoped&MD_DISPATCH_PATHS);
         unsigned long args[]={a0,a1,a2,a3,a4,a5};
         return md_socket_pair(&fs,args,1);

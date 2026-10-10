@@ -21,7 +21,7 @@ add_library(guest-parcels STATIC ${src}/fd_bundle.c ${src}/fs_wire.c ${src}/raw.
 target_compile_definitions(guest-parcels PRIVATE MD_NO_START MD_USE_LIBC)
 target_compile_options(guest-parcels PRIVATE -O2 -Wall -Wextra -Werror -fno-pie)
 set(origins ${src}/fs_anchor.c ${src}/fs_origin_transfer.c ${src}/inode_lifetime.c ${src}/inode_custody.c ${src}/sealed_manifest.c ${src}/ipc_scope.c ${src}/mount_policy.c ${src}/mount_graph.c ${src}/resource_order.c ${src}/ofd_order.c ${src}/fd_origins.c ${src}/fd_channel.c ${src}/fd_mutation.c ${src}/fd_delivery.c ${src}/fd_table_observation.c ${src}/fd_return.c ${src}/fd_exchange.c ${src}/received_fds.c ${src}/fd_messages.c ${src}/task_descriptor.c ${src}/task_lifetime.c)
-list(APPEND origins ${src}/native_mounts.c ${src}/devpts_view.c ${src}/cgroup.c ${src}/cgroup_program.c ${src}/sysfs_view.c ${src}/network_namespace.c ${src}/network_sysctl.c
+list(APPEND origins ${src}/native_mounts.c ${src}/devpts_view.c ${src}/cgroup.c ${src}/cgroup_program.c ${src}/sysfs_view.c ${src}/network_namespace.c ${src}/network_model.c ${src}/network_route.c ${src}/network_endpoint.c ${src}/network_sysctl.c
     ${src}/ipc_namespace.c ${src}/mqueue_view.c ${src}/landlock_policy.c ${src}/landlock_file.c)
 set(mounts ${src}/fs_mounts.c ${src}/fs_mount_path.c ${src}/fs_mount_operations.c ${src}/fs_mount_table.c ${src}/fs_mount_change.c ${src}/fs_temporary.c ${src}/fs_overlay.c ${src}/fs_storage.c)
 list(APPEND mounts ${src}/proc_paths.c ${src}/procfs_view.c ${src}/proc_fdinfo.c ${src}/fs_proc.c ${src}/fs_cgroup.c ${src}/fs_bpf.c ${src}/fs_sysfs.c ${src}/fs_mqueue.c ${src}/fs_mount_file.c ${src}/mount_source.c ${src}/fs_context.c)
@@ -66,7 +66,7 @@ target_link_options(bootstrap PRIVATE -Wl,--image-base=0x2000000000)
 guest_executable(supervisor ${src}/supervisor.c ${src}/task_resources.c ${src}/command_access.c ../command-client/wire.c ${src}/launch_registry.c ${src}/launch_peer.c ${src}/process_owner.c ${src}/interception_memory.c ${src}/interception_buffers.c ${src}/guest_domain.c
     ${src}/mount_copy_service.c ${src}/uts_namespace.c ${src}/ipc_namespace_services.c ${src}/proc_file.c ${src}/proc_sysctl.c ${src}/proc_namespace.c
     ${src}/fd_selector.c ${src}/sysv_shm.c ${src}/guest_debugger.c ${src}/process_image_view.c ${src}/fd_install.c ${src}/pid_descriptor.c
-    ${src}/task_helper.c ${src}/task_quiesce.c ${src}/private_memory.c ${src}/mapping_observation.c ${src}/memory_replace.c ${src}/fd_capture.c ${src}/ipc_io_host.c ${src}/ipc_io_job.c ${src}/ipc_io_entry.S
+    ${src}/task_helper.c ${src}/task_quiesce.c ${src}/private_memory.c ${src}/mapping_observation.c ${src}/memory_replace.c ${src}/fd_capture.c ${src}/ipc_io_host.c ${src}/ipc_io_job.c ${src}/ipc_io_entry.S ${src}/network_io.c
     ${ipc}
     ${identity} ${src}/guest_accounts.c ${src}/elf_admission.c ${src}/elf.c ${src}/fs_client.c ${wire} ${raw}
     ${src}/fs_worker.c ${src}/fs_service.c ${src}/ipc_peer_service.c ${src}/ipc_origins.c ${src}/fs_buffer_service.c ${src}/file_open_job.c ${src}/file_snapshot.c ${src}/command_image.c ${src}/exec_prepare.c ${namespace_engine} ${src}/image_catalogue.c ${inodes} ${mounts}
@@ -122,6 +122,7 @@ if(MAGICDESK_GUEST_FIXTURES)
     target_compile_definitions(test_task_resources PRIVATE MD_NO_START MD_USE_LIBC)
     target_sources(test_task_resources PRIVATE ../guest-exec-lab/test_user_namespace.c ${src}/proc_file.c ${src}/proc_sysctl.c ${src}/proc_namespace.c ${src}/fd_selector.c)
     target_sources(test_task_resources PRIVATE ${src}/descriptor_inode.c ../guest-exec-lab/test_descriptor_inode.c)
+    target_sources(test_task_resources PRIVATE ../guest-exec-lab/test_network_model.c ../guest-exec-lab/test_network_route.c ../guest-exec-lab/test_network_endpoint.c)
     target_compile_options(test_task_resources PRIVATE -iquote ${src} -UNDEBUG)
     target_link_libraries(test_task_resources PRIVATE guest-sqlite m)
     target_link_options(test_task_resources PRIVATE -Wl,--wrap=calloc -Wl,--wrap=malloc)

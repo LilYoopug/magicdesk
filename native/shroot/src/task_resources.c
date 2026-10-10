@@ -105,7 +105,7 @@ int md_resources_unshare_prepare(const struct md_task_resources *r, unsigned lon
         if (!next.cgroup_namespace) { error=-errno; goto failed; }
     }
     if (flags&CLONE_NEWNET) {
-        next.network=md_network_namespace_new(owner,1);
+        next.network=md_network_namespace_copy(r->network,owner);
         if (!next.network) { error=-errno; goto failed; }
     }
     if (flags&CLONE_NEWPID) {

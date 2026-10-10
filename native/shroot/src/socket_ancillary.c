@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "socket_ancillary.h"
+#include "socket_payload.h"
 #include "socket_namespace.h"
 #include "pid_calls.h"
 #include "ipc_credentials.h"
@@ -37,7 +38,7 @@ static void *buffer(size_t size, void *local, size_t capacity) {
 }
 static void release(void *p, void *local, size_t size) { if (p && p != local) RAW2(munmap,p,size); }
 extern long md_guest_buffer_control(unsigned, unsigned long, unsigned long);
-static long capture_inputs(long state, struct md_fd_capture_frame *f, const int *numbers, unsigned count) {
+long md_socket_capture_inputs(long state, struct md_fd_capture_frame *f, const int *numbers, unsigned count) {
     while (state>0 && state!=MD_IPC_TASK_IO) {
         if (state==MD_FD_CAPTURE_ADMIT) {
             /* Admission must not turn an originally invalid source slot into
@@ -90,8 +91,7 @@ static long io_transfer(struct md_ipc_io_message *io, void *memory, size_t size,
     }
     return 0;
 }
-struct io_vectors { struct iovec local[8], *items; size_t bytes; };
-static long io_vectors_open(struct io_vectors *vectors, struct msghdr *m) {
+long md_socket_vectors_open(struct md_socket_vectors *vectors, struct msghdr *m) {
     if (m->msg_iovlen>1024) return -EMSGSIZE;
     vectors->bytes=m->msg_iovlen*sizeof(struct iovec);
     vectors->items=buffer(vectors->bytes,vectors->local,sizeof(vectors->local));
@@ -101,10 +101,10 @@ static long io_vectors_open(struct io_vectors *vectors, struct msghdr *m) {
     else m->msg_iov=vectors->items;
     return error;
 }
-static void io_vectors_close(struct io_vectors *vectors) {
+void md_socket_vectors_close(struct md_socket_vectors *vectors) {
     release(vectors->items,vectors->local,vectors->bytes);
 }
-static long io_prepare(struct md_ipc_io_message *io, const struct msghdr *m, int sending) {
+long md_socket_payload_prepare(struct md_ipc_io_message *io, const struct msghdr *m, int sending) {
     if (m->msg_iovlen>1024) return -EMSGSIZE;
     if (m->msg_namelen>sizeof(io->address)) return -EINVAL;
     io->size=0; io->control_size=m->msg_controllen;
@@ -130,7 +130,7 @@ static long io_prepare(struct md_ipc_io_message *io, const struct msghdr *m, int
     if (md_read_memory(&io->address,m->msg_name,io->address_size)) return -EFAULT;
     return 0;
 }
-static long io_scatter(struct md_ipc_io_message *io, struct msghdr *m, long result, int batch) {
+long md_socket_payload_scatter(struct md_ipc_io_message *io, struct msghdr *m, long result, int batch) {
     if (result<0) return result;
     size_t copied=0, remaining=(size_t)result<io->size ? (size_t)result : io->size;
     for (size_t i=0;remaining && i<m->msg_iovlen;++i) {
@@ -196,7 +196,7 @@ static long send_captured(const struct msghdr *original, const unsigned long *a,
         native_pid=md_pid_native(frame->options.claimed.pid);
         if (native_pid<=0) result=-EPERM;
     }
-    if (!result) result=capture_inputs(md_guest_buffer_control(MD_FS_BUFFER_SEND_PREPARE,0,0),
+    if (!result) result=md_socket_capture_inputs(md_guest_buffer_control(MD_FS_BUFFER_SEND_PREPARE,0,0),
         &frame->scratch.capture.capture,frame->input.keep,frame->input.count);
     if (!result) {
         unsigned data=frame->input.count-1;
@@ -228,13 +228,13 @@ static long send_captured(const struct msghdr *original, const unsigned long *a,
                 frame->message.msg_namelen=frame->destination.length;
             }
             if (frame->brokered) {
-                struct io_vectors vectors;
+                struct md_socket_vectors vectors;
                 struct msghdr view=frame->message;
                 frame->scratch.capture.io.batch_count=0;
-                result=io_vectors_open(&vectors,&view);
+                result=md_socket_vectors_open(&vectors,&view);
                 if (!result) {
-                    result=io_prepare(&frame->scratch.capture.io,&view,1);
-                    io_vectors_close(&vectors);
+                    result=md_socket_payload_prepare(&frame->scratch.capture.io,&view,1);
+                    md_socket_vectors_close(&vectors);
                 }
             }
             if (!result) result=md_guest_buffer_control(MD_FS_BUFFER_SEND_COMMIT,0,0);
@@ -370,7 +370,7 @@ static size_t native_capacity(size_t capacity) {
 static long receive_batch_owned(struct md_task_receive_frame *frame, int *accepted) {
     struct md_task_receive *input=&frame->input;
     struct mmsghdr *messages=(void *)input->messages;
-    struct entry { struct io_vectors vectors; struct msghdr view; int opened; };
+    struct entry { struct md_socket_vectors vectors; struct msghdr view; int opened; };
     struct entry local[4];
     size_t size=input->count*sizeof(struct entry);
     struct entry *entries=buffer(size,local,sizeof(local));
@@ -383,7 +383,7 @@ static long receive_batch_owned(struct md_task_receive_frame *frame, int *accept
         struct entry *entry=&entries[prepared];
         *entry=(struct entry){0};
         entry->view=messages[prepared].msg_hdr;
-        result=(int)entry->view.msg_namelen<0 ? -EINVAL : io_vectors_open(&entry->vectors,&entry->view);
+        result=(int)entry->view.msg_namelen<0 ? -EINVAL : md_socket_vectors_open(&entry->vectors,&entry->view);
         io->batch_count=input->count; io->batch_index=prepared;
         io->vector_error=(int)result;
         if (result==-EFAULT || result==-EMSGSIZE || result==-EINVAL) {
@@ -393,7 +393,7 @@ static long receive_batch_owned(struct md_task_receive_frame *frame, int *accept
         }
         if (result) break;
         entry->opened=1; ++prepared;
-        result=io_prepare(io,&entry->view,0);
+        result=md_socket_payload_prepare(io,&entry->view,0);
     }
     if (!result) {
         result=md_guest_buffer_control(MD_FS_BUFFER_IPC_RECEIVE,0,0); *accepted=1;
@@ -402,7 +402,7 @@ static long receive_batch_owned(struct md_task_receive_frame *frame, int *accept
         else for (unsigned i=0;i<completed;++i) {
             io->batch_index=i;
             long length=md_guest_buffer_control(MD_FS_BUFFER_IPC_IO_SELECT,0,0);
-            if (length>=0) length=io_scatter(io,&entries[i].view,length,1);
+            if (length>=0) length=md_socket_payload_scatter(io,&entries[i].view,length,1);
             if (length<0) { result=i ? (long)i : length; break; }
             messages[i].msg_hdr.msg_namelen=entries[i].view.msg_namelen;
             messages[i].msg_hdr.msg_controllen=entries[i].view.msg_controllen;
@@ -412,7 +412,7 @@ static long receive_batch_owned(struct md_task_receive_frame *frame, int *accept
         if (input->timeout && result>=0 && md_write_memory((void *)input->timeout,&io->timeout,sizeof(io->timeout)))
             result=-EFAULT;
     }
-    for (unsigned i=0;i<prepared;++i) if (entries[i].opened) io_vectors_close(&entries[i].vectors);
+    for (unsigned i=0;i<prepared;++i) if (entries[i].opened) md_socket_vectors_close(&entries[i].vectors);
     release(entries,local,size); return result;
 }
 static long receive_owned(struct md_task_receive input, int *accepted) {
@@ -421,25 +421,25 @@ static long receive_owned(struct md_task_receive input, int *accepted) {
     if (address<0) return address;
     struct md_task_receive_frame *frame=(void *)address;
     frame->input=input;
-    long result=capture_inputs(md_guest_buffer_control(MD_FS_BUFFER_TASK_RECEIVE,0,0),
+    long result=md_socket_capture_inputs(md_guest_buffer_control(MD_FS_BUFFER_TASK_RECEIVE,0,0),
         &frame->capture,&frame->input.socket,1);
     if (result==MD_IPC_TASK_IO) {
         if (input.batch) result=receive_batch_owned(frame,accepted);
         else {
             struct msghdr *m=(void *)input.messages;
             struct msghdr view=*m;
-            struct io_vectors vectors;
+            struct md_socket_vectors vectors;
             frame->io.batch_count=0;
-            result=io_vectors_open(&vectors,&view);
+            result=md_socket_vectors_open(&vectors,&view);
             if (!result) {
-                result=io_prepare(&frame->io,&view,0);
+                result=md_socket_payload_prepare(&frame->io,&view,0);
                 if (!result) {
                     result=md_guest_buffer_control(MD_FS_BUFFER_IPC_RECEIVE,0,0);
                     *accepted=1;
-                    result=io_scatter(&frame->io,&view,result,0);
+                    result=md_socket_payload_scatter(&frame->io,&view,result,0);
                     m->msg_namelen=view.msg_namelen; m->msg_controllen=view.msg_controllen; m->msg_flags=view.msg_flags;
                 }
-                io_vectors_close(&vectors);
+                md_socket_vectors_close(&vectors);
             }
         }
     } else if (!result) { *accepted=1; result=frame->result; }

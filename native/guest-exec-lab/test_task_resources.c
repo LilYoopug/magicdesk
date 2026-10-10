@@ -183,21 +183,21 @@ static void network_resource_transaction(void) {
     struct md_resource_change change;
     assert(!md_resources_init(&owner,NULL));
     assert(md_resources_clone_supported(CLONE_NEWNET));
-    assert(!md_network_namespace_offline(owner.network));
+    assert(!md_network_namespace_managed(owner.network));
     assert(!md_resources_fork(&owner,0,&child) && child.network==owner.network);
     assert(!md_resources_unshare_prepare(&owner,CLONE_NEWNET,&identity,&change));
-    assert(change.next.network && md_network_namespace_offline(change.next.network));
+    assert(change.next.network && md_network_namespace_managed(change.next.network));
     assert(!md_resources_unshare_finish(&owner,NULL,&change,-EINVAL));
     assert(child.network==owner.network && !change.next.network);
     assert(!md_resources_unshare_prepare(&owner,CLONE_NEWNET,&identity,&change));
     assert(!md_resources_unshare_finish(&owner,NULL,&change,0));
-    assert(owner.network!=child.network && md_network_namespace_offline(owner.network));
+    assert(owner.network!=child.network && md_network_namespace_managed(owner.network));
     assert(md_network_namespace_inode(owner.network)!=md_network_namespace_inode(child.network));
     struct md_fd_object *socket=md_network_socket_new(owner.network); assert(socket);
     assert(!md_resources_exec(&owner) && md_network_socket_offline(socket));
     assert(!md_resources_release(&owner));
     assert(md_network_socket_offline(socket)); md_fd_object_release(socket);
-    assert(!md_network_namespace_offline(child.network));
+    assert(!md_network_namespace_managed(child.network));
     assert(!md_resources_release(&child)); md_identity_release(&identity);
 }
 static void ipc_mount_lifetime(void) {
@@ -263,7 +263,13 @@ static void landlock_resources(void) {
     md_task_snapshot_release(&snapshot); md_identity_release(&id);
     puts("PASS Landlock immutable domains, layer bounds, fork/exec and worker snapshot custody");
 }
+void test_network_model(void);
+void test_network_route(void);
+void test_network_endpoint(void);
 int main(void) {
+    test_network_model();
+    test_network_route();
+    test_network_endpoint();
     alarm(60);
     struct md_identity identity=md_identity_new(0,0);
     struct md_task_resources r; assert(!md_resources_init(&r,NULL));

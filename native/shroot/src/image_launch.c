@@ -132,6 +132,7 @@ int md_image_launch(enum md_image_command kind, int argc, char **argv) {
     struct md_socket_routes routes = {0};
     const char *selected_user = NULL;
     const char *hostname_override = NULL;
+    const char *network = NULL;
     int position = 1, commands = 0;
     while (position < argc && strcmp(argv[position], "--")) {
         if (!strcmp(argv[position], "--magicdesk") && !commands) { commands = 1; position++; continue; }
@@ -153,6 +154,7 @@ int md_image_launch(enum md_image_command kind, int argc, char **argv) {
         else if (!strcmp(option, "--cwd") && value[0] == '/') cwd_override = value;
         else if (!strcmp(option, "--entrypoint") && kind == MD_IMAGE_RUN) entry_override = value;
         else if (!strcmp(option, "--hostname") && !hostname_override && md_hostname_valid(value)) hostname_override = value;
+        else if (!strcmp(option, "--network") && !network && !strcmp(value,"routed")) network = value;
         else if (!strcmp(option, "--env") && override_count < 128) overrides[override_count++] = value;
         else return -EINVAL;
     }
@@ -235,6 +237,7 @@ int md_image_launch(enum md_image_command kind, int argc, char **argv) {
         if (commands) launch[n++] = "--magicdesk";
         launch[n++] = "--cwd"; launch[n++] = (char *)working;
         launch[n++] = "--hostname"; launch[n++] = (char *)(hostname_override ? hostname_override : hostname);
+        if (network) { launch[n++]="--network"; launch[n++]=(char *)network; }
         for (unsigned i = 0; i < routes.count; ++i) {
             launch[n++] = routes.entries[i].abstract ? "--socket-abstract" : "--socket-path";
             launch[n++] = routes.entries[i].source; launch[n++] = routes.entries[i].destination;

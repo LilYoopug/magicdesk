@@ -93,7 +93,7 @@ int md_procfs_step(struct md_filesystem *fs,struct md_view_mount *mount,int fd,
         if (n<0 || (size_t)n>=boundary->capacity) return -ENAMETOOLONG;
         /* Namespace-owned controls stay on the worker so their open
          * descriptions can retain the selected mount's live policy. */
-        if (!fs->actor || !md_network_namespace_offline(fs->actor->network)
+        if (!fs->actor || !md_network_namespace_managed(fs->actor->network)
                 || !md_proc_network_sysctl(md_proc_path_for(boundary->path,0,0).kind)) return -EREMOTE;
     }
     int next=openat(fd,name,O_PATH|O_NOFOLLOW|O_CLOEXEC);

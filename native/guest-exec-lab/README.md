@@ -72,6 +72,20 @@ authority. It includes retained FDs across unshare, shared dup offsets, position
 IO, O_PATH metadata and readonly remount/detach enforcement. Host sysctls are not
 written. The prepared store needs Python and util-linux.
 
+`test_routed_network.py BUILD STORE` exercises opt-in routed IPv4 with stock
+iproute2: bridge/veth topology, namespace-FD moves, routes, TCP/UDP, addressed
+messages and teardown. The native resource-owner tests cover atomic netlink
+mutation/ACK rollback, port conflicts, credentials and endpoint ownership.
+
+`probe_docker_runtime.py BUILD STORE --profile routed --cgroup v2
+--storage-driver overlay2 --image python:3.13-alpine --exercise-ports` runs stock
+Docker/containerd/runc under the selected executor. It requires those packages
+in a disposable Debian store. Assertions cover two containers with identical
+internal ports, bidirectional peer exchange, outbound DNS/HTTP, TCP/UDP `-p`
+publication from an observer outside Shroot, conflict rejection, port release
+and daemon shutdown. VFS is selectable independently. Diagnostic profiles
+without `--exercise-ports` record capabilities, not passing port coverage.
+
 `test_proc_mount_policy.py BUILD STORE` checks omission of unsupported host-kernel
 controls in namespace-mounted proc, consistent lookup/enumeration, ordinary proc
 binds and readonly remounts. It never writes host control files.

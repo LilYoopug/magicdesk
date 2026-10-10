@@ -1005,6 +1005,7 @@ static void transfer_guest_send(const char *path, const char *runner, unsigned m
         struct transfer_result r={.owner=pthread_self()};
         assert(!md_ipc_origins_receive(service,input,transfer_ready,&r,&r.request));
         md_received_fds_release(input); transfer_wait(&o,&r);
+        if (r.error) fprintf(stderr,"capsule send mode=%u protected=%u receive error=%d\n",mode,protected,r.error);
         assert(!r.error && !md_ipc_origins_take(&r.request,&r.received,NULL));
         unsigned count=mode ? 253 : 1;
         assert(r.received->count==count && r.received->origins);
