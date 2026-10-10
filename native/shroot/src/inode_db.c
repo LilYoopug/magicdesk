@@ -252,7 +252,11 @@ int mdi_query_acquire(struct md_inode_store *s, enum mdi_query slot, sqlite3_stm
         [MDI_ADD_NAME] = "INSERT INTO names(parent,name,object) VALUES(?1,?2,?3)",
         [MDI_DELETE_NAME] = "DELETE FROM names WHERE parent=?1 AND name=?2",
         [MDI_REPARENT] = "UPDATE objects SET parent=?1 WHERE object=?2",
-        [MDI_EMPTY] = "SELECT NOT EXISTS(SELECT 1 FROM names WHERE parent=?1)"
+        [MDI_EMPTY] = "SELECT NOT EXISTS(SELECT 1 FROM names WHERE parent=?1)",
+        [MDI_CREATE_OBJECT] = "INSERT INTO objects(object,kind,device,inode,parent,backing,logical_inode,logical_device,mode,uid,gid,scope) "
+            "VALUES(?1,?2,?3,?4,?5,?1,?4,?3,?6,?7,?8,?9)",
+        [MDI_METADATA] = "UPDATE objects SET uid=?1,gid=?2,mode=?3 WHERE object=?4 "
+            "AND (uid!=?1 OR gid!=?2 OR mode!=?3)"
     };
 #undef NODE_COLUMNS
     int result = 0;
@@ -443,8 +447,7 @@ static int make_object(struct md_inode_store *s, const char *id, mode_t kind, mo
     if (!r) r = mdi_sync(s,s->objects);
     if (!r) r = checkpoint(s, MD_OBJECT_SYNCED);
     sqlite3_stmt *q = NULL;
-    if (!r) r = mdi_prepare(s, "INSERT INTO objects(object,kind,device,inode,parent,backing,logical_inode,logical_device,mode,uid,gid,scope) "
-        "VALUES(?1,?2,?3,?4,?5,?1,?4,?3,?6,?7,?8,?9)", &q);
+    if (!r) r = mdi_query_acquire(s, MDI_CREATE_OBJECT, &q);
     if (!r) r = mdi_bind_id(q, 1, id);
     if (!r) r = mdi_sql_error(sqlite3_bind_int(q, 2, (int)kind));
     if (!r) r = mdi_sql_error(sqlite3_bind_int64(q, 3, (sqlite3_int64)st.st_dev));
@@ -455,7 +458,7 @@ static int make_object(struct md_inode_store *s, const char *id, mode_t kind, mo
     if (!r) r = mdi_sql_error(sqlite3_bind_int64(q, 8, gid));
     if (!r) r = mdi_bind_id(q,9,s->lifetime->scope);
     if (!r) r = mdi_sql_error(mdi_step(s, q));
-    sqlite3_finalize(q);
+    r = mdi_query_release(q,r);
     if (!r) r = mdi_node(s, id, node);
     if (!r && (p.acl_mask&MD_ACL_DEFAULT) && kind!=S_IFLNK) {
         r=mdi_acl_inherit(s,&p,node,(mode&07000)|(requested&0777));

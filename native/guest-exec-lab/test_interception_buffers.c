@@ -132,9 +132,13 @@ static void address_spaces(void) {
     assert(md_memory_buffers_mapped(parent,0x40000000,size+1)==-EINVAL);
     assert(!md_memory_buffers_mapped(parent,0x40000000,size));
     assert(md_memory_buffers_mapped(parent,0x40000000,size)==-EALREADY);
+    assert(!md_memory_exposed(parent)); md_memory_expose(parent);
     struct md_interception_memory *thread=md_memory_fork(parent,1);
     struct md_interception_memory *child=md_memory_fork(parent,0);
     assert(thread==parent && child && child!=parent && md_memory_buffers(child)==pool);
+    assert(md_memory_exposed(thread) && !md_memory_exposed(child));
+    struct md_interception_memory *image=md_memory_new_image(parent); assert(image);
+    assert(!md_memory_exposed(image)); md_memory_release(image);
     struct md_resource_order first={0}, next={0}, independent={0};
     assert(md_memory_order_begin(parent,&first,NULL)==1 && !md_resource_order_start(&first));
     assert(md_memory_order_begin(thread,&next,NULL)==0);

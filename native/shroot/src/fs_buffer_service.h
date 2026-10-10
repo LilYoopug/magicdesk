@@ -9,6 +9,7 @@ struct md_fs_worker;
 struct md_task_registry;
 struct md_guest_domain;
 struct md_fs_buffer_service;
+void md_fs_buffer_admission(struct md_fs_buffer_service *, int (*)(pid_t));
 struct md_fs_buffer_request;
 struct md_fs_anchor;
 struct md_fd_object;

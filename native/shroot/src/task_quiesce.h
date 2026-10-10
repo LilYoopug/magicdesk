@@ -4,7 +4,7 @@
 #include <sys/types.h>
 
 struct md_task_quiesce;
-/* A cold launch-tree barrier. Real wait events retain their exact order and
+/* A cold explicitly selected task barrier. Real wait events retain their exact order and
  * rusage for the normal dispatcher; only our synthetic interrupt is consumed.
  * Already stopped/listening tasks stay stopped. A kernel-blocked vfork parent
  * also qualifies: mandatory TRACEVFORKDONE stops it before userspace resumes.
@@ -16,6 +16,7 @@ void md_task_quiesce_destroy(struct md_task_quiesce *);
 int md_task_quiesce_add(struct md_task_quiesce *, pid_t, int stopped, int resume_request);
 int md_task_quiesce_stop(struct md_task_quiesce *);
 int md_task_quiesce_ready(const struct md_task_quiesce *);
+int md_task_quiesce_contains(struct md_task_quiesce *, pid_t);
 void md_task_quiesce_describe(const struct md_task_quiesce *, int fd);
 int md_task_quiesce_event(struct md_task_quiesce *, pid_t, int, const struct rusage *);
 /* Releases only synthetic stops. Deferred events remain owned until take. */

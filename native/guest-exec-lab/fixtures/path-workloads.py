@@ -67,11 +67,22 @@ def main():
                     assert source.stat().st_nlink == 1
             return 256
 
+        def metadata():
+            for path in files:
+                path.chmod(0o640)
+            for _ in range(8):
+                for path, inode in zip(files, identities):
+                    path.chmod(0o640)
+                    st = path.stat()
+                    assert st.st_ino == inode and st.st_mode & 0o7777 == 0o640
+            return 256
+
         for _ in range(3):
             measure("deep-read", reads)
             measure("existing-writable", existing_writes)
             measure("create-rename-unlink", mutations)
             measure("link-unlink", links)
+            measure("metadata-repeat", metadata)
     finally:
         shutil.rmtree(root)
 

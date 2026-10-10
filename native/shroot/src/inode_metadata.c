@@ -153,13 +153,13 @@ int mdi_setattr_permission(struct md_inode_store *s, const struct mdi_node *node
 int mdi_metadata(struct md_inode_store *s, const struct mdi_node *node, uint32_t uid, uint32_t gid, mode_t mode) {
     if (uid == UINT32_MAX || gid == UINT32_MAX || (mode & ~07777)) return -EINVAL;
     sqlite3_stmt *q = NULL;
-    int r = mdi_prepare(s, "UPDATE objects SET uid=?1,gid=?2,mode=?3 WHERE object=?4", &q);
+    int r = mdi_query_acquire(s, MDI_METADATA, &q);
     if (!r) r = mdi_sql_error(sqlite3_bind_int64(q, 1, uid));
     if (!r) r = mdi_sql_error(sqlite3_bind_int64(q, 2, gid));
     if (!r) r = mdi_sql_error(sqlite3_bind_int(q, 3, (int)mode));
     if (!r) r = mdi_bind_id(q, 4, node->id);
     if (!r) r = mdi_sql_error(mdi_step(s, q));
-    sqlite3_finalize(q);
+    r = mdi_query_release(q,r);
     /* Keep the caller-owned backing usable without granting kernel set-ID.
      * This is data storage, not the guest's permission authority. */
     int dir = r ? -1 : mdi_backing_directory(s, node);

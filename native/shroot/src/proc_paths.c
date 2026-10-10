@@ -110,6 +110,7 @@ struct md_proc_path md_proc_path_for(const char *path,int tid,int tgid) {
         else if (word(&p, "exe")) out.kind = MD_PROC_EXE;
         else if (word(&p, "cmdline")) out.kind = MD_PROC_CMDLINE;
         else if (word(&p, "auxv")) out.kind = MD_PROC_AUXV;
+        else if (word(&p, "mem")) out.kind = MD_PROC_MEMORY;
         else if (word(&p,"status")) out.kind=MD_PROC_STATUS;
         else if (word(&p,"stat")) out.kind=MD_PROC_STAT;
         else if (word(&p,"cgroup")) out.kind=MD_PROC_CGROUP;

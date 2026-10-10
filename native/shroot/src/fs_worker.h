@@ -18,6 +18,9 @@ struct md_fs_work {
      * retires accepted work during shutdown, with no filesystem access. */
     void (*run)(struct md_fs_work *, struct md_filesystem *, int error);
     int (*complete)(struct md_fs_work *);
+    /* Supervisor-only admission. A held completion retains its owner and is
+     * retried by dispatch after the owner releases its barrier. */
+    int (*ready)(struct md_fs_work *);
 };
 /* Supervisor-owned token, retained until end or worker_stop returns. Begin is
  * only a request: state==1 proves the worker has stopped all namespace work,

@@ -16,7 +16,8 @@ enum md_proc_kind { MD_PROC_NONE, MD_PROC_FD, MD_PROC_FDINFO, MD_PROC_CWD, MD_PR
                     MD_PROC_STATUS, MD_PROC_STAT,
                     MD_PROC_CGROUP, MD_PROC_CGROUPS,
                     MD_PROC_NS_UNSUPPORTED,
-                    MD_PROC_NET_UNPRIVILEGED_PORT, MD_PROC_NET_PING_GROUPS, MD_PROC_NET_LOCAL_PORTS };
+                    MD_PROC_NET_UNPRIVILEGED_PORT, MD_PROC_NET_PING_GROUPS, MD_PROC_NET_LOCAL_PORTS,
+                    MD_PROC_MEMORY };
 static inline int md_proc_network_sysctl(enum md_proc_kind kind) {
     return kind>=MD_PROC_NET_UNPRIVILEGED_PORT && kind<=MD_PROC_NET_LOCAL_PORTS;
 }

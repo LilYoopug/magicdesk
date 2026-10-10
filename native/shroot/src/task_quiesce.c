@@ -39,9 +39,13 @@ void md_task_quiesce_destroy(struct md_task_quiesce *q) {
     free(q);
 }
 static struct participant *find(struct md_task_quiesce *q,pid_t pid) {
+    if (!q) return NULL;
     for (struct participant *p=q->index[(unsigned)pid%PARTICIPANT_BUCKETS];p;p=p->indexed)
         if (p->pid==pid) return p;
     return NULL;
+}
+int md_task_quiesce_contains(struct md_task_quiesce *q,pid_t pid) {
+    return find(q,pid)!=NULL;
 }
 static void stopped(struct md_task_quiesce *q,struct participant *p,int value) {
     value=!!value;

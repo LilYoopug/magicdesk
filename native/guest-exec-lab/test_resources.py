@@ -426,7 +426,20 @@ def main():
             check("automatic private-file JIT during vfork", root + "/libmagicdesk_guest_run.so --diagnostics --user 1000:1000 --store "
                   + root + "/store --deadline-seconds 60 -- /bin/test --automatic-vfork",
                   "PASS automatic private-file JIT with a kernel-blocked vfork parent: exec=1",
-                  patterns=(r"vfork parent: exec=0",))
+                  patterns=(r"vfork parent: exec=0", r"CLONE_VM process: exec=0", r"CLONE_VM process: exec=1"))
+            for name, writer in (("process", 0), ("remote", 1), ("mem-fd", 2)):
+                scope = "launch" if writer == 2 else "address-space"
+                patterns = [rf"PROBE memory-repair .* result=0 scope={scope}"]
+                if not writer:
+                    patterns.append(r"PROBE memory-repair .* scope=address-space otherEvents=[1-9][0-9]*")
+                elif writer == 2:
+                    patterns.extend(rf"independent process: writer={mode} completed=[1-9][0-9]*"
+                                    for mode in (3, 4))
+                check("automatic private-file JIT with " + name,
+                      root + "/libmagicdesk_guest_run.so --diagnostics --user 1000:1000 --store "
+                      + root + "/store --deadline-seconds 60 -- /bin/test --automatic-" + name,
+                      f"PASS automatic private-file JIT with independent process: writer={writer}",
+                      patterns=tuple(patterns))
             return
         if args.case in ("all", "fs-dispatch", "fs-directory"):
             check("broker directory notification ownership", root + "/libmagicdesk_guest_fs_dispatch.so --broker-directory "

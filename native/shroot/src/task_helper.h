@@ -69,7 +69,7 @@ unsigned md_task_helpers_count(const struct md_task_helpers *);
 /* Snapshot for a supervisor-owned writer barrier: task, stopped, resume request.
  * A zero request waits for an externally owned stop, including initial birth;
  * the barrier must preserve it for this helper's event handler. */
-int md_task_helpers_visit(struct md_task_helpers *, int (*)(void *,pid_t,int,int), void *);
+int md_task_helpers_visit(struct md_task_helpers *, struct md_interception_memory *, int (*)(void *,pid_t,int,int), void *);
 int md_task_helper_owns(struct md_task_helpers *,pid_t owner,pid_t task);
 /* True only while this group's exact private helper is terminating, before
  * its terminal wait event. It cannot execute another application operation. */
@@ -89,5 +89,6 @@ int md_task_helper_detach(struct md_task_helpers *, pid_t owner);
  * Late interrupt acknowledgements continue the lent execution in place;
  * caller exit/exec, signals and application group-stops retain outer ownership. */
 int md_task_helper_event(struct md_task_helpers *, pid_t, int status);
+struct md_interception_memory *md_task_helper_memory(struct md_task_helpers *, pid_t);
 int md_task_helper_notification(struct md_task_helpers *, int listener, const struct seccomp_notif *);
 #endif

@@ -256,7 +256,7 @@ static void quiesce_newborn(struct md_task_helpers *helpers,pid_t owner) {
     unsigned long child; assert(!ptrace(PTRACE_GETEVENTMSG,owner,NULL,&child));
     assert(md_task_helper_event(helpers,owner,status)==1);
     struct md_task_quiesce *q=md_task_quiesce_new(trace); assert(q);
-    assert(!md_task_helpers_visit(helpers,participant,q));
+    assert(!md_task_helpers_visit(helpers,NULL,participant,q));
     assert(!md_task_quiesce_stop(q));
     while (!md_task_quiesce_ready(q)) {
         /* EVENT_WAIT: both writers must stop; the fixture alarm bounds failure. */

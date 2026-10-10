@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
+#include <stdlib.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
@@ -11,6 +12,12 @@
 enum { DONTFORK=1, DONTDUMP=2, SEQUENTIAL=4, RANDOM=8, HUGE=16, NOHUGE=32, MERGEABLE=64, SOFT_DIRTY=128 };
 struct vma { uintptr_t first, end; uint64_t offset, inode; unsigned major, minor; int private; };
 struct lines { int fd; size_t cursor, size; char bytes[16384]; };
+struct md_private_memory_scan {
+    struct md_private_memory *mapping;
+    struct stat backing;
+    struct lines input;
+    int selected;
+};
 static int line(struct lines *r, char *out, size_t capacity) {
     size_t used=0; int truncated=0;
     for (;;) {
@@ -88,31 +95,26 @@ static int flags(const char *text, int protection, unsigned *advice, int *mappin
     }
     return ((unsigned)protection&~may) ? -EACCES : 0;
 }
-static long policy(struct md_private_memory *m, int maps, unsigned *advice, int *mapping_flags) {
-    struct stat st;
-    long error=RAW2(fstat,m->source,&st);
-    if (error<0) return error;
-    if (!S_ISREG(st.st_mode)) return -EOPNOTSUPP;
-    error=RAW3(lseek,maps,0,SEEK_SET);
-    if (error<0) return error;
-    struct lines input={.fd=maps}; char text[512]; struct vma v={0}; int selected=0;
-    error=-EFAULT;
-    for (;;) {
-        int read=line(&input,text,sizeof(text));
-        if (read<=0) { if (read<0) error=read; break; }
+long md_private_memory_scan_step(struct md_private_memory_scan *scan,struct md_private_memory_plan *plan) {
+    struct md_private_memory *m=scan->mapping;
+    char text[512]; struct vma v;
+    for (unsigned i=0;i<128;++i) {
+        int read=line(&scan->input,text,sizeof(text));
+        if (read<=0) return read<0 ? read : -EFAULT;
         if (header(text,&v)) {
-            if (v.first>m->address || selected) break;
+            if (v.first>m->address || scan->selected) return -EFAULT;
             if (v.end<=m->address) continue;
-            if (v.end<m->address+m->length) { error=-EOPNOTSUPP; break; }
-            if (!v.private || v.inode!=st.st_ino || makedev(v.major,v.minor)!=st.st_dev
+            if (v.end<m->address+m->length) return -EOPNOTSUPP;
+            if (!v.private || v.inode!=scan->backing.st_ino || makedev(v.major,v.minor)!=scan->backing.st_dev
                     || v.offset>UINT64_MAX-(m->address-v.first)
-                    || v.offset+m->address-v.first!=m->offset) { error=-ESTALE; break; }
-            selected=1;
-        } else if (selected && md_prefix(text,"VmFlags:")) {
-            error=read==2 ? -EPROTO : flags(text+8,m->protection,advice,mapping_flags); break;
+                    || v.offset+m->address-v.first!=m->offset) return -ESTALE;
+            scan->selected=1;
+        } else if (scan->selected && md_prefix(text,"VmFlags:")) {
+            int error=read==2 ? -EPROTO : flags(text+8,m->protection,&plan->advice,&plan->flags);
+            return error ? error : 1;
         }
     }
-    return error;
+    return 0;
 }
 static long exact(int fd, void *buffer, size_t size, uint64_t offset, int write) {
     long n;
@@ -138,21 +140,35 @@ long md_private_memory_access_open(struct md_private_memory_access *access) {
     if (error>=0) { next.pagemap=(int)error; *access=next; return 0; }
     md_private_memory_access_close(&next); return error;
 }
-long md_private_memory_plan(struct md_private_memory *m, const struct md_private_memory_access *access,
-        struct md_private_memory_plan *plan) {
+long md_private_memory_scan_begin(struct md_private_memory *m,const struct md_private_memory_access *access,
+        struct md_private_memory_scan **out) {
     size_t page=m->page_size;
     if (m->candidate || !page || (page&(page-1)) || !m->length || m->length%page
             || m->address%page || m->address>UINTPTR_MAX-m->length || m->offset%page
             || m->length>INT64_MAX || m->offset>(uint64_t)INT64_MAX-m->length
             || !(m->protection&PROT_EXEC) || (m->protection&~(PROT_READ|PROT_WRITE|PROT_EXEC))) return -EINVAL;
-    return policy(m,access->maps,&plan->advice,&plan->flags);
+    struct md_private_memory_scan *scan=calloc(1,sizeof(*scan));
+    if (!scan) return -ENOMEM;
+    long error=RAW2(fstat,m->source,&scan->backing);
+    if (!error && !S_ISREG(scan->backing.st_mode)) error=-EOPNOTSUPP;
+    if (!error) error=RAW3(lseek,access->maps,0,SEEK_SET);
+    if (error<0) { free(scan); return error; }
+    scan->mapping=m; scan->input.fd=access->maps; *out=scan; return 0;
 }
-long md_private_memory_copy(struct md_private_memory *m, const struct md_private_memory_access *access,
-        const struct md_private_memory_plan *plan) {
+void md_private_memory_scan_end(struct md_private_memory_scan *scan) { free(scan); }
+long md_private_memory_plan(struct md_private_memory *m,const struct md_private_memory_access *access,
+        struct md_private_memory_plan *plan) {
+    struct md_private_memory_scan *scan=NULL;
+    long error=md_private_memory_scan_begin(m,access,&scan);
+    if (!error) do { error=md_private_memory_scan_step(scan,plan); } while (!error);
+    md_private_memory_scan_end(scan); return error<0 ? error : 0;
+}
+long md_private_memory_copy_step(struct md_private_memory *m,const struct md_private_memory_access *access,
+        const struct md_private_memory_plan *plan,size_t *position,void *scratch,size_t scratch_size) {
     if (!m->candidate || !m->page_size || m->length%m->page_size) return -EINVAL;
     size_t page=m->page_size;
     long error=0;
-    if (!(plan->advice&SOFT_DIRTY)) {
+    if (!*position && !(plan->advice&SOFT_DIRTY)) {
         /* The unpublished candidate is a fresh, untouched mmap of our retained
          * source. Pagemap includes VM_SOFTDIRTY even for absent pages (5.15).
          * Inspect this exact VMA, not kernel-version guesses or another full
@@ -162,29 +178,46 @@ long md_private_memory_copy(struct md_private_memory *m, const struct md_private
         if (!error && (entry&(UINT64_C(1)<<55))) error=-EOPNOTSUPP;
     }
     if (error) return error;
-    long scratch=RAW6(mmap,0,page,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
-    if (scratch<0) return scratch;
-    m->copied_pages=0;
+    if (*position>m->length || *position%page || !scratch || scratch_size<page) return -EINVAL;
+    if (!*position) m->copied_pages=0;
     uint64_t entries[256];
-    for (size_t at=0;!error && at<m->length;) {
+    size_t at=*position;
+    if (at<m->length) {
         size_t count=(m->length-at)/page;
         if (count>sizeof(entries)/sizeof(*entries)) count=sizeof(entries)/sizeof(*entries);
         error=exact(access->pagemap,entries,count*sizeof(*entries),
             ((m->address+at)/page)*sizeof(*entries),0);
-        if (error) break;
+        if (error) return error;
         /* Bit 61 distinguishes file pages from private COW. Copying clean
          * pages would incorrectly detach them from later file writes. PFNs
          * are neither requested nor needed, including protected processes. */
-        for (size_t i=0;!error && i<count;++i,at+=page) {
+        for (size_t i=0;!error && i<count;) {
             uint64_t entry=entries[i];
-            if (!(entry&(UINT64_C(3)<<62)) || (entry&(UINT64_C(1)<<61))) continue;
-            error=exact(access->memory,(void *)scratch,page,m->address+at,0);
-            if (!error) error=exact(access->memory,(void *)scratch,page,m->candidate+at,1);
-            if (!error) ++m->copied_pages;
+            if (!(entry&(UINT64_C(3)<<62)) || (entry&(UINT64_C(1)<<61))) { ++i; at+=page; continue; }
+            size_t pages=1;
+            while (i+pages<count && pages<scratch_size/page) {
+                entry=entries[i+pages];
+                if (!(entry&(UINT64_C(3)<<62)) || (entry&(UINT64_C(1)<<61))) break;
+                ++pages;
+            }
+            size_t bytes=pages*page;
+            error=exact(access->memory,scratch,bytes,m->address+at,0);
+            if (!error) error=exact(access->memory,scratch,bytes,m->candidate+at,1);
+            if (!error) m->copied_pages+=pages;
+            i+=pages; at+=bytes;
         }
     }
-    RAW2(munmap,scratch,page);
-    return error;
+    *position=at; return error ? error : at==m->length;
+}
+long md_private_memory_copy(struct md_private_memory *m,const struct md_private_memory_access *access,
+        const struct md_private_memory_plan *plan) {
+    size_t size=MD_PRIVATE_MEMORY_COPY_BYTES;
+    if (m->page_size>size) size=m->page_size;
+    long scratch=RAW6(mmap,0,size,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    if (scratch<0) return scratch;
+    size_t position=0; long result;
+    do { result=md_private_memory_copy_step(m,access,plan,&position,(void *)scratch,size); } while (!result);
+    RAW2(munmap,scratch,size); return result<0 ? result : 0;
 }
 int md_private_memory_advice(const struct md_private_memory_plan *plan, unsigned index) {
     const struct { unsigned bit; int value; } properties[]={

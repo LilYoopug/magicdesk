@@ -5,6 +5,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
+#include <time.h>
 #include <sys/prctl.h>
 #include <sys/ptrace.h>
 #include <sys/signalfd.h>
@@ -12,11 +13,14 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-static unsigned calls;
+static unsigned calls, general, directed, misses;
 pid_t __real_wait4(pid_t, int *, int, struct rusage *);
 pid_t __wrap_wait4(pid_t pid, int *status, int options, struct rusage *usage) {
     calls++;
-    return __real_wait4(pid,status,options,usage);
+    if (pid==-1) general++; else directed++;
+    pid_t result=__real_wait4(pid,status,options,usage);
+    if (!result) misses++;
+    return result;
 }
 int main(void) {
     enum { CHILDREN=24, REQUESTS=128 };
@@ -28,6 +32,8 @@ int main(void) {
     pid_t children[CHILDREN];
     unsigned seen[CHILDREN]={0};
     pid_t parent=getpid();
+    struct timespec started,ended;
+    assert(!clock_gettime(CLOCK_MONOTONIC,&started));
     alarm(30);
     for (unsigned i=0;i<CHILDREN;i++) {
         children[i]=fork(); assert(children[i]>=0);
@@ -42,13 +48,14 @@ int main(void) {
     struct md_task_wait state={0};
     unsigned exited=0, stops=0, empty=0;
     while (exited<CHILDREN) {
-        struct signalfd_siginfo info;
+        struct signalfd_siginfo info[8];
         ssize_t bytes;
-        while ((bytes=read(fd,&info,sizeof(info)))==(ssize_t)sizeof(info)) {
-            assert(info.ssi_signo==SIGCHLD);
-            md_task_wait_hint(&state,(pid_t)info.ssi_pid);
+        do { bytes=read(fd,info,sizeof(info)); } while (bytes<0 && errno==EINTR);
+        assert((bytes<0 && errno==EAGAIN) || (bytes>0 && bytes%(ssize_t)sizeof(*info)==0));
+        for (ssize_t i=0;i<bytes/(ssize_t)sizeof(*info);i++) {
+            assert(info[i].ssi_signo==SIGCHLD);
+            md_task_wait_hint(&state,(pid_t)info[i].ssi_pid);
         }
-        assert(bytes<0 && errno==EAGAIN);
         int status;
         pid_t pid=md_task_wait_ready(&state,&status,NULL);
         if (pid<0 && errno==EINTR) continue;
@@ -81,7 +88,9 @@ int main(void) {
     }
     assert(stops>=CHILDREN*REQUESTS*2);
     alarm(0); close(fd);
-    printf("PASS live wait collection: children=%u stops=%u empty=%u calls=%u\n",
-        exited,stops,empty,calls);
+    assert(!clock_gettime(CLOCK_MONOTONIC,&ended));
+    double elapsed=ended.tv_sec-started.tv_sec+(ended.tv_nsec-started.tv_nsec)/1e9;
+    printf("PASS live wait collection: children=%u stops=%u empty=%u calls=%u general=%u directed=%u misses=%u seconds=%.6f\n",
+        exited,stops,empty,calls,general,directed,misses,elapsed);
     return 0;
 }

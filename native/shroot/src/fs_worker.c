@@ -300,6 +300,12 @@ int md_fs_worker_dispatch(struct md_fs_worker *w) {
     while (completed) {
         struct md_fs_work *work=completed; completed=work->next;
         work->next=NULL;
+        if (work->ready && !work->ready(work)) {
+            pthread_mutex_lock(&w->lock);
+            *w->completed_tail=work; w->completed_tail=&work->next;
+            pthread_mutex_unlock(&w->lock);
+            continue;
+        }
         int result=work->complete(work);
         if (!error) error=result;
     }

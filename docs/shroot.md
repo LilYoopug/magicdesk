@@ -33,8 +33,10 @@ descriptor identities nor alter guest seccomp or debugger state.
 Supervisor and namespace-broker task lookup use TID indexes. The existing
 owners retain records through terminal cleanup and outstanding worker borrows;
 index removal precedes reuse, and lookups allocate no memory.
-SIGCHLD supplies a TID hint for nonblocking wait collection. A bounded number of
-directed waits is followed by a general wait, so coalesced signals do not exclude
+SIGCHLD supplies bounded, deduplicated TID hints for nonblocking wait collection.
+Signal readiness consumes one stack-allocated batch without an extra empty read;
+remaining signals keep the descriptor readable. A bounded number of
+directed attempts is followed by a general wait, so coalesced signals do not exclude
 unnotified tasks. The kernel retains all statuses; debugger rusage and the memory
 barrier use the same collector, without a second userspace event queue.
 A general wait returning no status marks collection drained until the next
@@ -71,6 +73,9 @@ or overlay publication under the already-held store gate. Promotion does not
 release the snapshot, replay the lookup or relax durable namespace commits.
 Common namespace mutations reuse connection-owned prepared statements with
 reset bindings; transaction boundaries and cache invalidation stay authoritative.
+Creation and metadata updates share this reuse. Identical stored owner/mode values
+do not rewrite namespace rows; native attribute operations, ACL effects and watch
+publication still execute, including updates from another store connection.
 Initial store admission prepares indexes for every foreign-key child lookup,
 so collecting an overlay view does not repeatedly scan the whole store.
 Retained worker reconnects and ordinary filesystem operations do not prepare
@@ -1083,6 +1088,9 @@ The task-affine private-memory preparer admits a clean executable file mapping
 and materializes only the original COW pages through retained proc-memory access.
 Pagemap entries are read in bounded stack-backed batches, without changing the
 per-page copy decision or detaching clean pages from their file.
+Contiguous private pages share bounded 64 KiB copies. Mapping validation and
+copying advance incrementally through the supervisor event loop; each repair
+owns its scratch storage, with no allocation per page.
 Unchanged pages keep their file relationship; file truncation and DONTNEED remain
 kernel-owned. It validates the original VMA's permissions and supported advice
 before constructing a candidate.
@@ -1097,9 +1105,16 @@ and forbids resuming the address space without reconciliation or termination.
 The supervisor applies this path automatically after native `mprotect` rejects
 executable permission with EACCES on a tracked private-file range. Successful
 native transitions are unchanged. It needs no preload, application-specific
-patch or JIT-disable setting. A cold launch-tree barrier stops guest threads and
-existing private helpers, then acknowledges a namespace-worker pause. Barrier
-participants use a TID index and explicit outstanding count, without repeated
+patch or JIT-disable setting. A cold address-space barrier stops CLONE_VM peers,
+their private helpers and observed remote-memory writers. New debugger and
+process-memory requests targeting that address space wait for publication.
+Opening its raw proc-memory description, including O_PATH that can later be
+reopened, marks that address space as externally exposed. Its subsequent repairs
+retain a launch-wide barrier because raw descriptor transfer does not provide
+complete writer ownership. This conservative lifetime ends with the address
+space; closing the original descriptor does not prove all copies are gone.
+Neither scope establishes exclusion of arbitrary native writers outside the launch.
+Barrier participants use a TID index and explicit outstanding count, without repeated
 full-list searches for each stop. Real wait
 events retain their status, ordering and rusage; synthetic interrupts resume with
 their original ptrace continuation. Interrupts already requested by syscall or
@@ -1109,20 +1124,30 @@ and file tables have not yet been initialized.
 An interrupt acknowledgement may arrive after an ordinary stop won the race.
 Helpers and replacement calls continue their current execution in place;
 they neither replay the syscall nor mistake the pause for its result.
-The worker uses existing eventfds, holds no
-database/queue locks while paused, and leaves queued callbacks for normal dispatch.
+The worker acknowledges a short pause after participant notifications are
+cancelled by observed ptrace stops, draining any raced copy. It then resumes
+unrelated work. Completions and resource retries for stopped participants retain
+their owners until release; independent completions remain dispatchable. The
+worker uses existing eventfds and holds no database/queue locks while paused.
 Kernel-blocked `vfork` parents are already quiescent: mandatory VFORK_DONE
 observation precedes their return to userspace. The barrier does not wait for
 an interrupt that depends on resuming the stopped child.
-Only the request's mapping helper runs during preparation. The original caller
+Within the selected address space only the request's mapping helper runs during
+preparation. Other address spaces, sockets and the namespace worker continue
+through the ordinary event loop. Repair has no nested wait dispatcher.
+Diagnostics report actor, range, scope, concurrent events and per-stage costs.
+The original caller
 executes each replacement syscall with an individually observed result. Expired
 barriers or lost publication observations terminate the owned launch rather than
 resuming an uncertain address space. Ordinary file IO needs no barrier or new
 thread. Unsupported special VMAs retain the native error; an already protected
 fork child without independently captured proc authority likewise remains native.
 Focused device checks cover concurrent ordinary/nondumpable JIT writers, JIT
-during `vfork` with child exit/exec and subsequent parent compilation, stock
+during `vfork` and ordinary `CLONE_VM` with child exit/exec and subsequent parent compilation, stock
 SteamOS Plasma QML and repeated generated-code execution under guest GDB/strace.
+Independent-process checks verify namespace progress during large repairs,
+process_vm_writev updates and inherited proc-memory descriptors without lost data,
+including direct opens, `openat2` and writable reopening of O_PATH descriptors.
 Stock Chromium's sandbox-enabled JavaScript workflow is a separate regression
 check; these results do not certify every application's mapping semantics.
 

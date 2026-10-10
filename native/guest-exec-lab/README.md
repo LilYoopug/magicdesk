@@ -195,6 +195,8 @@ Fresh-candidate soft-dirty admission is checked through pagemap with smaps
 deliberately unavailable, for ordinary and nondumpable callers.
 The 513-page fixture crosses pagemap batch boundaries with dirty and clean pages,
 checking exact copy counts and continued visibility of clean-file updates.
+Contiguous COW runs cross copy-buffer boundaries; incremental copying returns to
+its caller after at most 256 page entries, without copying clean gaps.
 `memory_replace.c` is exercised at every cancellation boundary, with failed
 reserve/save/install/restore/cleanup and missing terminal observation. Native and
 guest checks execute its commands, including rollback after a simulated fixed
@@ -212,6 +214,16 @@ with this runtime, without preload or a disabled JIT; compositor GPU coverage
 is separate.
 Barrier coverage also includes repeated 4,096-participant generations, hash
 collisions and exact readiness after the final stop.
+An independent process performs namespace IO during 8 MiB repairs; diagnostics
+must show events serviced inside the address-space barrier. Remote process-memory
+writes and inherited proc-memory descriptions check data preservation and selection
+of the conservative exposed-memory barrier. Proc-memory variants cover direct
+opens, `openat2` and writable reopening of O_PATH descriptors. Exposure follows
+CLONE_VM ownership, not a fork copy or the next exec image. Both `vfork` and
+ordinary CLONE_VM children compile code before exit/exec; their parent continues
+compilation afterwards.
+Worker completion admission holds one result while another completes on the same
+worker, produces no repeated wake while held, and publishes exactly once on release.
 
 ### Audio Continuity
 
@@ -221,6 +233,11 @@ PipeWire's server-only configuration. The fixture records stereo 48 kHz PCM,
 reports all-zero 10 ms blocks after warmup and delivery gaps over 80 ms, and
 retains monotonic observation times. `test_audio_continuity.py` checks fragmented
 input, warmup, trailing bytes and quiet but nonzero samples.
+For one continuous idle/motion/idle recording, replace `--seconds` with
+`--phase idle-before:30 --phase motion:30 --phase idle-after:30`. Phase events
+report both the intended PCM-frame boundary and its actual observation time;
+the external input driver records when it starts and stops. No recorder is
+reconnected between phases. Tests cover late delivery across phase boundaries.
 
 Use a continuously sounding source. Zero spans during intentional silence are
 not underruns; zero graph/xrun counters are not evidence of continuity. For a
@@ -951,7 +968,7 @@ Configure `native/shroot` with `-DMAGICDESK_GUEST_FIXTURES=ON` and build
 `test_mounts --path-walk NEW_DIRECTORY` isolates logical path traversal and its
 depth-independent FD/transaction bounds. The full mount suite includes it.
 `fixtures/path-workloads.py` runs deep-path reads, existing writable opens and
-create/rename/unlink and hardlink/unlink cycles in a disposable guest directory,
+create/rename/unlink, hardlink/unlink and repeated metadata updates in a disposable guest directory,
 checking contents and inode identity while reporting timings. Bind its containing directory into
 the same prepared guest for both runtime versions; use `--statistics` separately
 for work counts. Timings are observations, not pass/fail thresholds.
@@ -1131,12 +1148,14 @@ the producers' failure deadline, not after they stop. Native, virtual-root and
 ordinary guest-user cases use the selected shell identity. The default resource
 suite includes the same regression.
 It also runs `test_task_wait.c`: directed TID selection, stale/coalesced hints,
+hint deduplication, overflow and wraparound,
 interruption, exact status/rusage propagation, drained-queue invalidation and
 the mandatory general-wait budget under continuous activity.
 `test_task_wait_live.c` collects over six thousand real syscall stops from 24
 concurrent tracees using blocked SIGCHLD/signalfd. Repeated reads of a drained
 collector must perform no wait syscall, and all children must exit with their
-expected status. Both fixtures run in the default resource suite.
+expected status. It reports directed/general call counts, misses and elapsed
+time without timing assertions. Both fixtures run in the default resource suite.
 `test_pending.c` checks allocation-free continuation queues: duplicate admission,
 bounded dispatch, cancellation of a queued peer, record reuse during dispatch,
 and explicit recursive-dispatch rejection. Blocked continuations are exercised

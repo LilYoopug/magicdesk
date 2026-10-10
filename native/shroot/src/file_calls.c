@@ -4,6 +4,7 @@
 #include "proc_paths.h"
 #include "proc_control.h"
 #include "descriptor_calls.h"
+#include "adapter_buffer.h"
 #include "raw.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -46,6 +47,12 @@ static long open_extended(const struct md_fs *fs, const char *exe, const unsigne
     if (md_fs_host_path(fs, mounted) && !(how.resolve & RESOLVE_IN_ROOT)) {
         struct md_proc_path ref = md_proc_path(mounted);
         enum md_proc_kind kind=ref.kind==MD_PROC_FOREIGN ? ref.foreign_kind : ref.kind;
+        if (kind==MD_PROC_MEMORY) {
+            if (*ref.tail) return -ENOTDIR;
+            long admitted=md_guest_buffer_control(MD_BUFFER_MEMORY_EXPOSE,(unsigned)ref.process,0);
+            if (admitted<0) return admitted;
+            return RAW4(openat2,a[0],path,&how,sizeof(how));
+        }
         if (md_proc_control_kind(kind)) {
             if (*ref.tail) return -ENOTDIR;
             if (kind==MD_PROC_NS_UNSUPPORTED) return -ENOENT;
@@ -138,6 +145,10 @@ long md_file_call(const struct md_fs *fs, const char *exe, long nr, const unsign
         if (r < 0) return r;
         struct md_proc_path image = md_proc_path(first);
         enum md_proc_kind control=image.kind==MD_PROC_FOREIGN ? image.foreign_kind : image.kind;
+        if (control==MD_PROC_MEMORY) {
+            r=md_guest_buffer_control(MD_BUFFER_MEMORY_EXPOSE,(unsigned)image.process,0);
+            if (r<0) return r;
+        }
         if (md_proc_control_kind(control)) {
             long result=*image.tail ? -ENOTDIR : md_proc_control_open(image.process,control,flags);
             if (result!=-EXDEV || !md_proc_network_sysctl(control)) return result;

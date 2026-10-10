@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/userfaultfd.h>
+#include <linux/openat2.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,6 +15,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <sys/prctl.h>
+#include <sys/uio.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>
@@ -311,6 +313,28 @@ static void runtime_preparation(int protected) {
     next=97; assert(pwrite(fd,&next,1,2*page)==1);
     assert(((unsigned char *)view.candidate)[2*page]==next);
     md_private_memory_discard(&view);
+    size_t dirty_count=0;
+    for (size_t i=0;i<pages;++i) if (i%65!=64) { original[i*page]=(unsigned char)i; ++dirty_count; }
+    struct md_private_memory_plan plan;
+    struct md_private_memory_scan *scan=NULL;
+    assert(!md_private_memory_scan_begin(&view,&access,&scan));
+    long ready;
+    do { ready=md_private_memory_scan_step(scan,&plan); } while (!ready);
+    assert(ready==1); md_private_memory_scan_end(scan);
+    view.candidate=(uintptr_t)mmap(NULL,pages*page,view.protection,plan.flags,fd,0);
+    assert((void *)view.candidate!=MAP_FAILED);
+    void *scratch=malloc(MD_PRIVATE_MEMORY_COPY_BYTES); assert(scratch);
+    size_t position=0; unsigned turns=0;
+    do {
+        size_t previous=position;
+        ready=md_private_memory_copy_step(&view,&access,&plan,&position,scratch,MD_PRIVATE_MEMORY_COPY_BYTES);
+        assert(ready>=0 && position>previous && position-previous<=256*page); ++turns;
+    } while (!ready);
+    assert(turns==3 && view.copied_pages==dirty_count);
+    for (size_t i=0;i<pages;++i) if (i%65!=64) assert(((unsigned char *)view.candidate)[i*page]==(unsigned char)i);
+    next=103; assert(pwrite(fd,&next,1,64*page)==1);
+    assert(((unsigned char *)view.candidate)[64*page]==next);
+    free(scratch); md_private_memory_discard(&view);
     assert(!munmap(original,pages*page)); close(fd);
     if (protected) assert(!prctl(PR_SET_DUMPABLE,saved));
     md_private_memory_access_close(&access);
@@ -504,7 +528,7 @@ static void *automatic_io(void *unused) {
 }
 struct jit_vfork {
     int ready[2], release[2];
-    int exec;
+    int exec, wait_parent;
     void *stack;
     size_t stack_size;
 };
@@ -525,13 +549,13 @@ static int jit_vfork_child(void *context) {
 static void *jit_vfork_parent(void *context) {
     struct jit_vfork *v=context;
     pid_t child=clone(jit_vfork_child,(char *)v->stack+v->stack_size,
-        CLONE_VM|CLONE_VFORK|SIGCHLD,v);
+        CLONE_VM|(v->wait_parent ? CLONE_VFORK : 0)|SIGCHLD,v);
     assert(child>0);
     wait_child(child);
     return NULL;
 }
-static void automatic_vfork(int exec) {
-    struct jit_vfork v={.stack_size=16*page,.exec=exec};
+static void automatic_vfork(int exec,int wait_parent) {
+    struct jit_vfork v={.stack_size=16*page,.exec=exec,.wait_parent=wait_parent};
     assert(!pipe2(v.ready,O_CLOEXEC) && !pipe2(v.release,O_CLOEXEC));
     v.stack=mmap(NULL,v.stack_size,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
     assert(v.stack!=MAP_FAILED);
@@ -544,7 +568,76 @@ static void automatic_vfork(int exec) {
     assert(!munmap(v.stack,v.stack_size));
     for (unsigned i=0;i<2;++i) { close(v.ready[i]); close(v.release[i]); }
     automatic_jit(NULL);
-    printf("PASS automatic private-file JIT with a kernel-blocked vfork parent: exec=%d\n",exec);
+    printf("PASS automatic private-file JIT with %s: exec=%d\n",
+        wait_parent ? "a kernel-blocked vfork parent" : "a CLONE_VM process",exec);
+}
+struct jit_peer {
+    atomic_int stop;
+    atomic_ulong completed;
+};
+static void automatic_process(int writer) {
+    struct jit_peer *state=mmap(NULL,page,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS,-1,0);
+    assert(state!=MAP_FAILED);
+    size_t length=2048*page;
+    int fd=memfd_create("jit-peer",MFD_CLOEXEC);
+    assert(fd>=0 && !ftruncate(fd,length));
+    unsigned char *p=mmap(NULL,length,PROT_READ|PROT_WRITE,MAP_PRIVATE,fd,0);
+    assert(p!=MAP_FAILED); close(fd);
+    for (size_t i=0;i<length;i+=page) p[i]=17;
+    unsigned long *value=(void *)(p+length-sizeof(*value));
+    *value=0;
+    int memory=-1;
+    if (writer==2) {
+        /* An O_PATH lease can become a writable memory descriptor after fork.
+         * Exposure belongs to the target address space, not the opening TID. */
+        memory=open("/proc/self/mem",O_PATH|O_CLOEXEC);
+        assert(memory>=0);
+    } else if (writer==3) {
+        memory=open("/proc/self/mem",O_RDWR|O_CLOEXEC); assert(memory>=0);
+    } else if (writer==4) {
+        struct open_how how={.flags=O_RDWR|O_CLOEXEC};
+        memory=syscall(SYS_openat2,AT_FDCWD,"/proc/self/mem",&how,sizeof(how)); assert(memory>=0);
+    }
+    pid_t parent=getpid(),child=fork(); assert(child>=0);
+    if (!child) {
+        if (writer==2) {
+            char path[64]; snprintf(path,sizeof(path),"/proc/self/fd/%d",memory);
+            int reopened=open(path,O_RDWR|O_CLOEXEC);
+            assert(reopened>=0); close(memory); memory=reopened;
+        }
+        unsigned long n=0;
+        while (!atomic_load(&state->stop)) {
+            ++n;
+            if (writer==1) {
+                struct iovec local={&n,sizeof(n)},remote={value,sizeof(n)};
+                assert(process_vm_writev(parent,&local,1,&remote,1,0)==sizeof(n));
+            } else if (writer>=2) {
+                assert(pwrite(memory,&n,sizeof(n),(off_t)(uintptr_t)value)==sizeof(n));
+            } else {
+                int input=open("/proc/self/status",O_RDONLY|O_CLOEXEC);
+                assert(input>=0);
+                char data[256]; assert(read(input,data,sizeof(data))>0); close(input);
+            }
+            atomic_store(&state->completed,n);
+        }
+        if (memory>=0) close(memory);
+        _exit(0);
+    }
+    /* EVENT_WAIT: a confirmed peer operation precedes the repair. The outer
+     * alarm bounds lack of progress; no settling interval establishes readiness. */
+    while (!atomic_load(&state->completed)) sched_yield();
+    for (unsigned i=0;i<8;++i) {
+        emit(p,37+i);
+        assert(!mprotect(p,length,PROT_READ|PROT_WRITE|PROT_EXEC));
+        int (*run)(void)=(void *)p; assert(run()==37+(int)i);
+        assert(!mprotect(p,length,PROT_READ|PROT_WRITE));
+    }
+    atomic_store(&state->stop,1); wait_child(child);
+    unsigned long completed=atomic_load(&state->completed);
+    assert(completed>0 && (!writer || *value==completed));
+    if (memory>=0) close(memory);
+    assert(!munmap(p,length) && !munmap(state,page));
+    printf("PASS automatic private-file JIT with independent process: writer=%d completed=%lu\n",writer,completed);
 }
 int main(int argc, char **argv) {
     if (argc!=2) return 2;
@@ -553,8 +646,20 @@ int main(int argc, char **argv) {
     printf("uid=%u page=%zu\n",(unsigned)getuid(),page);
     int fd=syscall(SYS_memfd_create,"jit-memory-policy",MFD_CLOEXEC|MFD_ALLOW_SEALING);
     assert(fd>=0 && !ftruncate(fd,page));
+    if (!strcmp(argv[1],"--automatic-process")) {
+        close(fd); automatic_process(0); return 0;
+    }
+    if (!strcmp(argv[1],"--automatic-remote")) {
+        close(fd); automatic_process(1); return 0;
+    }
+    if (!strcmp(argv[1],"--automatic-mem-fd")) {
+        close(fd); automatic_process(2); automatic_process(3); automatic_process(4); return 0;
+    }
     if (!strcmp(argv[1],"--automatic-vfork")) {
-        close(fd); automatic_vfork(0); automatic_vfork(1); return 0;
+        close(fd);
+        automatic_vfork(0,1); automatic_vfork(1,1);
+        automatic_vfork(0,0); automatic_vfork(1,0);
+        return 0;
     }
     if (!strcmp(argv[1],"--automatic-threads")) {
         close(fd);

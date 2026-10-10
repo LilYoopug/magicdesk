@@ -727,6 +727,18 @@ static void reused_queries(void) {
     CHECK(!md_inode_import_metadata(s,next,123,456,0640));
     CHECK(!md_inode_fstat(s,next,&st) && st.st_uid==123 && st.st_gid==456
         && (st.st_mode&0777)==0640);
+    sqlite3_int64 changes=sqlite3_total_changes64(s->db);
+    uint64_t prepares=statistics.prepare.calls;
+    /* Idempotent namespace values need no database rewrite. Native chmod still
+     * executes, preserving ctime and repairing the backing's required access. */
+    CHECK(!fchmod(next,0400));
+    CHECK(!md_inode_import_metadata(s,next,123,456,0640));
+    CHECK(sqlite3_total_changes64(s->db)==changes && statistics.prepare.calls==prepares);
+    CHECK(!fstat(next,&st) && (st.st_mode&0777)==0600);
+    CHECK(!md_inode_import_metadata(writer,next,321,654,0750));
+    CHECK(!md_inode_import_metadata(s,next,123,456,0640));
+    CHECK(!md_inode_fstat(writer,next,&st) && st.st_uid==123 && st.st_gid==456
+        && (st.st_mode&0777)==0640);
     CHECK(!ftruncate(next,313) && !md_inode_fstat(s,next,&st) && st.st_size==313);
     CHECK(!md_inode_import_metadata(s,next,getuid(),getgid(),0600));
     md_inode_measure(s, NULL);

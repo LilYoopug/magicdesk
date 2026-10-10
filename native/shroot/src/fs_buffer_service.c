@@ -38,7 +38,9 @@ struct md_fs_buffer_service {
     md_exec_capture exec_capture;
     md_root_capture root_capture;
     void (*complete)(struct md_fs_buffer_request *, pid_t, int);
+    int (*admit)(pid_t);
 };
+void md_fs_buffer_admission(struct md_fs_buffer_service *s,int (*admit)(pid_t)) { s->admit=admit; }
 struct md_fs_buffer_request {
     struct md_fs_work work;
     struct md_fs_buffer_service *service;
@@ -188,8 +190,15 @@ int md_fs_buffer_snapshot_advance(struct md_fs_buffer_request *r, int finish) {
     if (!error) r->submitted=1;
     return error;
 }
+static int ready(struct md_fs_work *work) {
+    struct md_fs_buffer_request *r=(void *)work;
+    return r->cancelled || !r->service->admit || r->service->admit(r->actor);
+}
 static int complete(struct md_fs_work *work) {
     struct md_fs_buffer_request *r=(void *)work;
+    if (!ready(work)) {
+        r->submitted=1; md_fs_worker_publish(r->service->worker,work); return 0;
+    }
     r->submitted=0;
     if (!r->cancelled && r->executable && r->error==-EREMOTE && r->proc_image) {
         r->error=r->service->exec_capture
@@ -694,7 +703,7 @@ static int begin(struct md_fs_buffer_service *s, pid_t actor, struct md_guest_do
         }
     }
     if (error) { dispose(r); return error; }
-    r->work=(struct md_fs_work){.run=run,.complete=complete};
+    r->work=(struct md_fs_work){.run=run,.complete=complete,.ready=ready};
     r->next=s->requests; s->requests=r; *out=r;
     return 0;
 }
@@ -730,7 +739,7 @@ int md_fs_buffer_inspect_begin(struct md_fs_buffer_service *s, pid_t actor, stru
     if (error) { dispose(r); return error; }
     r->context.actor=actor; r->context.peer=r->context.task.tgid;
     r->context.authenticated=r->context.has_identity=1;
-    r->work=(struct md_fs_work){.run=run,.complete=complete};
+    r->work=(struct md_fs_work){.run=run,.complete=complete,.ready=ready};
     r->next=s->requests; s->requests=r;
     error=md_fs_worker_submit(s->worker,&r->work);
     if (error) { dispose(r); return error; }
@@ -804,6 +813,7 @@ int md_fs_buffer_progress(struct md_fs_buffer_service *s) {
     if (!s) return 0;
     for (struct md_fs_buffer_request *r=s->requests,*next; r; r=next) {
         next=r->next;
+        if (!ready(&r->work)) continue;
         if (r->submitted || r->opening.pid || r->delivering || r->exporting || r->channel_checking
                 || r->snapshot_waiting || r->task_pending || r->capturing) continue;
         if (r->cursor_waiting) {

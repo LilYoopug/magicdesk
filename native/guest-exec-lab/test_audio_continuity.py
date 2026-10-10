@@ -10,6 +10,17 @@ spec.loader.exec_module(audio)
 
 
 class ContinuityTest(unittest.TestCase):
+    def test_phase_boundaries_and_late_delivery(self):
+        phases = audio.PhaseTimeline([('before', 2), ('motion', 2), ('after', 2)], 48000)
+        self.assertEqual(phases.advance(480, 10)[0]['frame'], 0)
+        self.assertEqual(phases.advance(95999, 11), [])
+        events = phases.advance(200000, 12)
+        self.assertEqual([e['name'] for e in events], ['motion', 'after'])
+        self.assertEqual([e['frame'] for e in events], [96000, 192000])
+        self.assertTrue(all(e['observedFrame'] == 200000 and e['observed'] == 12 for e in events))
+        self.assertEqual(phases.advance(288000, 13), [])
+        self.assertEqual(len(phases.markers), 3)
+
     def test_fragmented_frames_and_warmup(self):
         pcm = audio.PCMWindow()
         size = pcm.block_bytes

@@ -594,8 +594,11 @@ struct pause_job {
     struct md_fs_work work;
     atomic_int *allowed;
     atomic_int called;
-    int error, completed;
+    int error, completed, held;
 };
+static int pause_job_ready(struct md_fs_work *work) {
+    return !((struct pause_job *)work)->held;
+}
 static void pause_job_run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
     struct pause_job *job=(void *)work;
     assert(!!fs==!error && (error || atomic_load(job->allowed)));
@@ -664,6 +667,23 @@ static void worker_pause(const char *store) {
                 assert(!md_fs_worker_pause_begin(worker,&pause)); pause_wait(worker,&pause);
                 assert(!md_fs_worker_pause_end(&pause));
             }
+            struct pause_job held={.work={.run=pause_job_run,.complete=pause_job_complete,
+                .ready=pause_job_ready},.allowed=&allowed,.held=1};
+            struct pause_job free_job={.work={.run=pause_job_run,.complete=pause_job_complete},.allowed=&allowed};
+            assert(!md_fs_worker_submit(worker,&held.work));
+            assert(!md_fs_worker_submit(worker,&free_job.work));
+            deadline=md_event_now()+5000000000LL;
+            /* EVENT_WAIT: the second completion proves that the held first
+             * completion does not block unrelated work on this same worker. */
+            while (!free_job.completed) {
+                assert(md_event_wait_fd(md_fs_worker_fd(worker),POLLIN,deadline)>=0);
+                assert(!md_fs_worker_dispatch(worker));
+            }
+            assert(atomic_load(&held.called)==1 && !held.completed);
+            struct pollfd quiet={md_fs_worker_fd(worker),POLLIN,0};
+            assert(!poll(&quiet,1,0));
+            held.held=0;
+            assert(!md_fs_worker_dispatch(worker) && held.completed==1);
             int gate=eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK),started=eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK);
             assert(gate>=0 && started>=0);
             struct queued blocked={.work={.run=queued_run,.complete=queued_complete},.gate=gate,.started=started};

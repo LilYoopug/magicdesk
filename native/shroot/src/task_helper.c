@@ -745,8 +745,10 @@ int md_task_helper_event(struct md_task_helpers *manager, pid_t pid, int status)
     } else return 0;
     return error && error!=-ESRCH ? error : 1;
 }
-int md_task_helpers_visit(struct md_task_helpers *manager,int (*visit)(void *,pid_t,int,int),void *context) {
+int md_task_helpers_visit(struct md_task_helpers *manager,struct md_interception_memory *memory,
+        int (*visit)(void *,pid_t,int,int),void *context) {
     for (struct helper *m=manager ? manager->first : NULL;m;m=m->next) {
+        if (memory && m->memory!=memory) continue;
         int error=m->owner ? visit(context,m->owner,m->parent_ready,PTRACE_CONT) : 0;
         /* Before child_begin, EVENT_STOP is its initial stop, not a barrier
          * interrupt. Only the helper owner may initialize and resume it. */
@@ -760,6 +762,11 @@ int md_task_helper_owns(struct md_task_helpers *manager,pid_t owner,pid_t task) 
     for (struct helper *m=manager ? manager->first : NULL;m;m=m->next)
         if (m->owner==owner && (m->owner==task || m->child==task)) return 1;
     return 0;
+}
+struct md_interception_memory *md_task_helper_memory(struct md_task_helpers *manager,pid_t task) {
+    for (struct helper *m=manager ? manager->first : NULL;m;m=m->next)
+        if (m->owner==task || m->child==task) return m->memory;
+    return NULL;
 }
 int md_task_helper_retiring(struct md_task_helpers *manager,pid_t group,pid_t task) {
     for (struct helper *m=manager ? manager->first : NULL;m;m=m->next)

@@ -8,6 +8,7 @@
 #include "interception.h"
 #include "fd_client.h"
 #include "fs_buffer.h"
+#include "adapter_buffer.h"
 #include "raw.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -221,6 +222,15 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
                             unsigned path_index, const char *path, uint64_t proc_namespace) {
     struct md_proc_path ref = md_proc_path(path);
     enum md_proc_kind control=ref.kind==MD_PROC_FOREIGN ? ref.foreign_kind : ref.kind;
+    if (control==MD_PROC_MEMORY) {
+        if (*ref.tail) return -ENOTDIR;
+        if (nr==SYS_openat) {
+            long admitted=md_guest_buffer_control(MD_BUFFER_MEMORY_EXPOSE,(unsigned)ref.process,0);
+            if (admitted<0) return admitted;
+        }
+        unsigned long args[6]; memcpy(args,a,sizeof(args)); args[path_index]=(unsigned long)path;
+        return native_call(fs,nr,args);
+    }
     if (control==MD_PROC_FDINFO && proc_namespace && nr==SYS_openat) {
         if (*ref.tail) return -ENOTDIR;
         if (ref.kind==MD_PROC_FOREIGN) return -ENOTSUP;

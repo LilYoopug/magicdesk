@@ -44,6 +44,7 @@ struct md_interception_memory {
     size_t file_count, file_capacity;
     struct md_private_memory_access access;
     int access_ready;
+    int exposed;
     struct backing_pool *backings;
 };
 static unsigned backing_bucket(dev_t device, ino_t inode) {
@@ -97,6 +98,8 @@ static struct md_interception_memory *memory_new(struct backing_pool *pool) {
     return s;
 }
 struct md_interception_memory *md_memory_new(void) { return memory_new(NULL); }
+void md_memory_expose(struct md_interception_memory *s) { s->exposed=1; }
+int md_memory_exposed(const struct md_interception_memory *s) { return s && s->exposed; }
 struct md_interception_memory *md_memory_new_image(struct md_interception_memory *s) {
     return memory_new(s->backings);
 }

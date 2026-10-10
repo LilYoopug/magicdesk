@@ -20,6 +20,16 @@ struct md_private_memory {
  * as authority over a different address space. */
 struct md_private_memory_access { int maps, memory, pagemap; };
 struct md_private_memory_plan { unsigned advice; int flags; };
+struct md_private_memory_scan;
+enum { MD_PRIVATE_MEMORY_COPY_BYTES=65536 };
+/* Incremental preparation bounds supervisor work per event-loop turn. A step
+ * returns 0 for more work, 1 for completion, or a negative errno. */
+long md_private_memory_scan_begin(struct md_private_memory *, const struct md_private_memory_access *,
+    struct md_private_memory_scan **);
+long md_private_memory_scan_step(struct md_private_memory_scan *, struct md_private_memory_plan *);
+void md_private_memory_scan_end(struct md_private_memory_scan *);
+long md_private_memory_copy_step(struct md_private_memory *, const struct md_private_memory_access *,
+    const struct md_private_memory_plan *, size_t *position, void *buffer, size_t buffer_size);
 /* Supervisor-side preparation borrows exact-mm proc access. Only candidate
  * mmap and advice require execution in that mm; copy uses proc descriptions. */
 long md_private_memory_plan(struct md_private_memory *, const struct md_private_memory_access *,

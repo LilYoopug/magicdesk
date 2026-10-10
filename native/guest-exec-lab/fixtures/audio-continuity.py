@@ -15,6 +15,25 @@ import subprocess
 import time
 
 
+class PhaseTimeline:
+    def __init__(self, phases, rate):
+        self.pending = []
+        end = 0
+        for name, seconds in phases:
+            self.pending.append((name, end))
+            end += seconds * rate
+        self.markers = []
+
+    def advance(self, frames, timestamp):
+        added = []
+        while self.pending and frames >= self.pending[0][1]:
+            name, frame = self.pending.pop(0)
+            added.append(dict(event='phase', name=name, frame=frame,
+                              observedFrame=frames, observed=timestamp))
+        self.markers.extend(added)
+        return added
+
+
 class PCMWindow:
     rate = 48000
     block_frames = 480
@@ -53,7 +72,23 @@ def main():
     parser.add_argument('--env-pid', type=int, required=True)
     parser.add_argument('--target', required=True)
     parser.add_argument('--seconds', type=int, default=90)
+    parser.add_argument('--phase', action='append', default=[], metavar='NAME:SECONDS',
+                        help='Consecutive phases on one recorder connection; replaces --seconds')
     args = parser.parse_args()
+    phases = []
+    for value in args.phase:
+        try:
+            name, seconds = value.rsplit(':', 1)
+            seconds = int(seconds)
+            if not name or seconds <= 0:
+                raise ValueError()
+        except ValueError:
+            parser.error('phase must be NAME:positive-seconds')
+        phases.append((name, seconds))
+    if phases:
+        args.seconds = sum(seconds for _, seconds in phases)
+    else:
+        phases = [('capture', args.seconds)]
     if not 3 <= args.seconds <= 600:
         parser.error('seconds must be in 3..600')
     env = dict(entry.split('=', 1) for entry in
@@ -67,6 +102,7 @@ def main():
     pcm = PCMWindow()
     start = last = time.monotonic()
     gaps = []
+    timeline = PhaseTimeline(phases, pcm.rate)
     print(json.dumps(dict(event='recording', start=start, target=args.target)), flush=True)
     try:
         while pcm.frames < args.seconds * pcm.rate:
@@ -82,6 +118,8 @@ def main():
                 gaps.append(dict(start=last, end=stamp))
             last = stamp
             pcm.feed(data, stamp)
+            for marker in timeline.advance(pcm.frames, stamp):
+                print(json.dumps(marker), flush=True)
         pcm.finish_span(last)
         if process.poll() is not None:
             raise RuntimeError('recorder exited before requested stop')
@@ -91,6 +129,7 @@ def main():
         report = dict(target=args.target, start=start, end=last, frames=pcm.frames,
                       rate=pcm.rate, zeroSpans=pcm.spans, deliveryGaps80ms=gaps,
                       recorderExit=process.returncode, stoppedByClient=True,
+                      phases=timeline.markers,
                       stderr=stderr.decode(errors='replace'))
         print(json.dumps(report), flush=True)
         # pw-cat reports success only for a drained playback stream; a requested
