@@ -237,7 +237,16 @@ static void semantics(const char *exe) {
     }
     joined(child, 0);
     int foreign = open("/dev/null", O_RDONLY); CHECK(foreign >= 0);
-    call(e, MD_FS_FSTAT, foreign, NULL, -1, NULL, 0, 0, -EXDEV); close(foreign);
+    struct stat native;
+    CHECK(!fstat(foreign,&native));
+    result=call(e,MD_FS_FSTAT,foreign,NULL,-1,NULL,0,0,0);
+    CHECK(result.result.info.device==(uint64_t)native.st_dev
+        && result.result.info.inode==(uint64_t)native.st_ino
+        && result.result.info.mode==(uint32_t)native.st_mode
+        && result.result.info.rdev==(uint64_t)native.st_rdev);
+    /* Native metadata is valid; it does not invent a logical store identity. */
+    call(e,MD_FS_OBJECT_ID,foreign,NULL,-1,NULL,0,0,-EXDEV);
+    close(foreign);
     call(e, MD_FS_UNLINK, dir, "sym", -1, NULL, 0, 0, 0);
     call(e, MD_FS_UNLINK, -1, "moved", -1, NULL, AT_REMOVEDIR, 0, 0);
     result = call(e, MD_FS_FSTAT, dir, NULL, -1, NULL, 0, 0, 0); CHECK(!result.result.info.links);

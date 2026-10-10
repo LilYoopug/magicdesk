@@ -16,6 +16,7 @@
 #include <unistd.h>
 
 void test_mount_copy(const char *base);
+void test_path_walk(const char *base);
 void test_mount_storage(const char *base);
 void test_transient_store(const char *base);
 void test_fs_context(const char *base);
@@ -275,6 +276,9 @@ int main(int argc, char **argv) {
     if (argc==3 && !strcmp(argv[1],"--mount-storage")) {
         assert(!mkdir(argv[2],0700)); test_mount_storage(argv[2]); return 0;
     }
+    if (argc==3 && !strcmp(argv[1],"--path-walk")) {
+        assert(!mkdir(argv[2],0700)); test_path_walk(argv[2]); return 0;
+    }
     setvbuf(stdout,NULL,_IONBF,0);
     int child=test_mount_policy_child(argc,argv);
     if (child>=0) return child;
@@ -485,6 +489,7 @@ int main(int argc, char **argv) {
     puts("PASS host-boundary symlinks, guest shared memory, resolution constraints and guest mount tables");
     puts("PASS scoped roots, retained attachments and filtered mount tables");
     nested_mounts(argv[1]);
+    test_path_walk(argv[1]);
     task_mount_views(argv[1]);
     test_mount_copy(argv[1]);
     test_mount_storage(argv[1]);

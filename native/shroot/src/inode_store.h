@@ -21,6 +21,8 @@ struct md_inode_statistics {
     uint64_t query_reuses;
     uint64_t link_count_queries, membership_queries;
     uint64_t metadata_cache_hits, metadata_cache_misses;
+    uint64_t walk_components, walk_materializations;
+    uint64_t write_admissions;
 };
 /* Caller-owned diagnostic counters; NULL disables clock sampling. */
 void md_inode_measure(struct md_inode_store *, struct md_inode_statistics *);

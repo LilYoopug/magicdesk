@@ -56,54 +56,138 @@ int md_view_task_path(struct md_filesystem *fs, int fd, const char *name, const 
     int n=snprintf(boundary->path,boundary->capacity,"%s/%s%s",path,name,tail);
     return n<0 || (size_t)n>=boundary->capacity ? -ENAMETOOLONG : -EREMOTE;
 }
-static int component(struct md_filesystem *fs, struct md_mount_namespace *view,
-        struct md_view_mount *mount, int fd, const char *name, int provider_source) {
-    if (mount && mount->provider) return md_provider_tree_step(mount->provider,fd,name);
-    if (md_view_inode(mount)) {
-        struct md_fs_storage_scope scope;
-        int r=md_fs_storage_enter(fs,mount,&scope);
-        if (r) return r;
-        if (provider_source && scope.store==fs->store) scope.store->boundary=scope.boundary;
-        if (view!=fs->mounts) scope.store->root_id=NULL;
-        int next=md_inode_open(scope.store,fd,name,O_PATH|O_NOFOLLOW|O_CLOEXEC,0);
-        md_fs_storage_leave(&scope);
-        return next;
-    }
-    int next = openat(fd, name, O_PATH | O_NOFOLLOW | O_CLOEXEC);
-    return next < 0 ? -errno : next;
+/* Points retain logical identity within one provider snapshot. Only boundary
+ * crossing and result publication materialize descriptors. No snapshot or
+ * storage lock survives the walk, client copying, or entry to another store. */
+struct path_point {
+    int fd, logical;
+    struct stat identity;
+    struct mdi_node node;
+};
+struct path_walk {
+    struct md_filesystem *fs;
+    struct md_fs_storage_scope scope;
+    struct md_mount_namespace *view;
+    struct md_view_mount *mount;
+    uint64_t resolve;
+};
+static void point_close(struct path_point *p) {
+    if (p->fd>=0) close(p->fd);
+    *p=(struct path_point){.fd=-1};
 }
-static int enter(struct md_mount_namespace *view, int *fd, struct md_view_mount **mount, uint64_t resolve) {
+static int point_native(struct path_point *p,int fd) {
+    *p=(struct path_point){.fd=fd};
+    if (fd<0) return fd;
+    return fstat(fd,&p->identity) ? -errno : 0;
+}
+static int walk_leave(struct path_walk *w,int result) {
+    if (w->scope.store) {
+        result=mdi_finish(w->scope.store,result);
+        md_fs_storage_leave(&w->scope);
+    }
+    return result;
+}
+static int walk_select(struct path_walk *w,struct md_mount_namespace *view,
+        struct md_view_mount *mount) {
+    if (w->scope.store && w->view==view && w->mount==mount) return 0;
+    int r=walk_leave(w,0);
+    if (r || !md_view_inode(mount)) return r;
+    r=md_fs_storage_enter(w->fs,mount,&w->scope);
+    if (r) return r;
+    if ((w->resolve&MD_VIEW_PROVIDER_SOURCE) && w->scope.store==w->fs->store)
+        w->scope.store->boundary=w->scope.boundary;
+    if (view!=w->fs->mounts) w->scope.store->root_id=NULL;
+    r=mdi_begin(w->scope.store,0);
+    if (r) md_fs_storage_leave(&w->scope);
+    else { w->view=view; w->mount=mount; }
+    return r;
+}
+static int point_logical(struct path_walk *w,struct path_point *p) {
+    if (p->logical) return 0;
+    int r=mdi_fd(w->scope.store,p->fd,&p->node);
+    if (!r) p->logical=1;
+    return r;
+}
+static int point_fd(struct path_walk *w,struct path_point *p) {
+    if (p->fd>=0) return 0;
+    struct md_inode_store *s=w->scope.store;
+    if (!s || !p->logical) return -EIO;
+    int directory=mdi_backing_directory(s,&p->node);
+    if (directory<0) return directory;
+    int fd=openat(directory,p->node.backing,O_PATH|O_NOFOLLOW|O_CLOEXEC);
+    if (fd<0) return -errno;
+    struct stat st;
+    int r=fstat(fd,&st) ? -errno : !md_view_same(&st,&p->identity) ? -EIO : 0;
+    if (r) { close(fd); return r; }
+    if (s->statistics) ++s->statistics->walk_materializations;
+    p->fd=fd; return 0;
+}
+static int component(struct path_walk *w,struct md_mount_namespace *view,
+        struct md_view_mount *mount,struct path_point *current,const char *name,
+        const char *tail,int covered,struct path_point *next) {
+    int r=walk_select(w,view,mount);
+    if (r) return r;
+    if (md_view_inode(mount)) {
+        struct md_inode_store *s=w->scope.store;
+        r=point_logical(w,current);
+        struct md_inode_boundary *boundary=s->boundary;
+        if (covered) s->boundary=NULL;
+        if (!r) r=mdi_path_step(s,&current->node,name,tail,0,&next->node);
+        s->boundary=boundary;
+        if (!r) r=mdi_backing_stat(s,&next->node,&next->identity);
+        if (!r) {
+            next->logical=1;
+            if (s->statistics) ++s->statistics->walk_components;
+        }
+        return r;
+    }
+    if (mount && mount->provider)
+        return point_native(next,md_provider_tree_step(mount->provider,current->fd,name));
+    int fd=openat(current->fd,name,O_PATH|O_NOFOLLOW|O_CLOEXEC);
+    return point_native(next,fd<0 ? -errno : fd);
+}
+static int enter(struct md_mount_namespace *view,
+        struct path_point *p,struct md_view_mount **mount,uint64_t resolve) {
     struct md_fs_mounts *tree = view ? view->tree : NULL;
     if (!tree) return 0;
-    struct stat st;
-    if (fstat(*fd, &st)) return -errno;
     for (unsigned i = 0; i <= tree->count; ++i) {
         struct md_view_mount *m = i ? &tree->mounts[i-1] : &view->base;
         if (m->source<0) continue;
-        if (m->detached || m->parent != *mount || !md_view_same(&st, &m->guest)) continue;
+        if (m->detached || m->parent != *mount || !md_view_same(&p->identity, &m->guest)) continue;
         if (resolve & RESOLVE_NO_XDEV) return -EXDEV;
         int copy = duplicate(m->source);
         if (copy < 0) return copy;
-        close(*fd); *fd = copy; *mount = m;
-        return enter(view,fd,mount,resolve);
+        point_close(p); *mount=m;
+        int r=point_native(p,copy);
+        return r ? r : enter(view,p,mount,resolve);
     }
     return 0;
 }
-static int parent(struct md_filesystem *fs, struct md_mount_namespace *view,
-        struct md_view_mount **mount, int fd, uint64_t resolve) {
-    struct stat st;
-    if (fstat(fd,&st)) return -errno;
+static int parent(struct path_walk *w, struct md_mount_namespace *view,
+        struct md_view_mount **mount, struct path_point *current, uint64_t resolve,
+        struct path_point *next) {
+    struct md_filesystem *fs=w->fs;
+    struct stat st=current->identity;
+    int fd=-1, clamped=0;
     /* A stack can contain several mounted roots at the same dentry. Leave all
      * of them before taking one directory step; never use a source's parent. */
     while (*mount && md_view_same(&st,&(*mount)->native)) {
-        if (view && *mount==view->root) return duplicate(fd);
+        if (view && *mount==view->root) { clamped=1; break; }
         if (fs->native_root && view==fs->mounts && *mount==fs->native_root->mount
-                && md_view_same(&st,&fs->native_root->identity)) return duplicate(fd);
-        if ((*mount)->detached) return duplicate(fd);
+                && md_view_same(&st,&fs->native_root->identity)) { clamped=1; break; }
+        if ((*mount)->detached) { clamped=1; break; }
         if (resolve&RESOLVE_NO_XDEV) return -EXDEV;
         fd=(*mount)->target; st=(*mount)->guest; *mount=(*mount)->parent;
     }
-    return component(fs,view,*mount,fd,"..",0);
+    if (fd<0) {
+        int r=point_fd(w,current);
+        return r ? r : point_native(next,duplicate(current->fd));
+    }
+    struct path_point target={.fd=-1};
+    int r=point_native(&target,duplicate(fd));
+    if (!r && clamped) { *next=target; target.fd=-1; }
+    else if (!r) r=component(w,view,*mount,&target,"..","",0,next);
+    point_close(&target); return r;
 }
 int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *origin,
         const char *path, int follow, int missing,
@@ -126,20 +210,22 @@ int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *
     }
     int r = !from_root && origin ? md_view_anchor_check(fs,base,origin) : 0;
     if (r) return r;
-    int fd = from_root ? md_view_root_fd(fs) : duplicate(base);
-    if (fd < 0) return fd;
+    struct path_walk walk={.fs=fs,.resolve=resolve};
+    struct path_point current={.fd=-1};
+    r=point_native(&current,from_root ? md_view_root_fd(fs) : duplicate(base));
+    if (r) { point_close(&current); return r; }
     struct md_mount_namespace *view = !from_root && origin ? origin->view : fs->mounts;
     struct md_view_mount *mount = view ? &view->base : NULL;
     if (from_root) mount=md_view_root_mount(fs);
     else if (origin) mount=origin->mount;
     else {
         struct md_view_object *object = NULL;
-        r = md_view_identity(fs, fd, &object);
+        r = md_view_identity(fs, current.fd, &object);
         if (!r) mount=object->mount;
         if (r == -EXDEV) r = 0;
     }
-    if (!r && from_root && !fs->native_root) r = enter(view, &fd, &mount, resolve);
-    int boundary_fd = !r ? duplicate(fd) : -1;
+    if (!r && from_root && !fs->native_root) r = enter(view, &current, &mount, resolve);
+    int boundary_fd = !r ? duplicate(current.fd) : -1;
     struct md_view_mount *boundary_mount = mount;
     struct md_mount_namespace *boundary_view = view;
     if (!r && boundary_fd < 0) r = boundary_fd;
@@ -147,11 +233,19 @@ int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *
     if (!r && fstat(boundary_fd, &boundary)) r = -errno;
     unsigned links = 0;
     while (!r) {
-        struct stat current;
-        if (fstat(fd, &current)) { r = -errno; break; }
-        if (!S_ISDIR(current.st_mode)) { r = -ENOTDIR; break; }
+        r=walk_select(&walk,view,mount);
+        if (r) break;
+        if (!S_ISDIR(current.identity.st_mode)) { r = -ENOTDIR; break; }
         char *start = todo; while (*start == '/') ++start;
-        if (!*start) { out->parent = duplicate(fd); out->fd = fd; fd = -1; out->view = view; out->mount = mount; strcpy(out->name, "."); r = out->parent < 0 ? out->parent : 0; break; }
+        if (!*start) {
+            r=point_fd(&walk,&current);
+            if (!r) {
+                out->parent=duplicate(current.fd); out->fd=current.fd; current.fd=-1;
+                out->view=view; out->mount=mount; strcpy(out->name,".");
+                r=out->parent<0 ? out->parent : 0;
+            }
+            break;
+        }
         char *end = start; while (*end && *end != '/') ++end;
         size_t length = (size_t)(end-start);
         if (length > NAME_MAX) { r = -ENAMETOOLONG; break; }
@@ -159,69 +253,73 @@ int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *
         int trailing = *end == '/';
         memmove(todo, end, strlen(end)+1);
         char *rest = todo; while (*rest == '/') ++rest;
-        int last = !*rest, next = -1;
+        int last = !*rest;
+        struct path_point next={.fd=-1};
         struct md_view_mount *next_mount = mount;
-        if (!strcmp(name, "..") && (resolve & (RESOLVE_BENEATH | RESOLVE_IN_ROOT)) && view == boundary_view && mount == boundary_mount && md_view_same(&current, &boundary)) {
+        if (!strcmp(name, "..") && (resolve & (RESOLVE_BENEATH | RESOLVE_IN_ROOT)) && view == boundary_view && mount == boundary_mount && md_view_same(&current.identity, &boundary)) {
             if (resolve & RESOLVE_BENEATH) { r = -EXDEV; break; }
-            next = duplicate(fd);
+            r=component(&walk,view,mount,&current,".",todo,0,&next);
         } else if (!strcmp(name,"..") && fs->native_root && view==fs->mounts && mount==fs->native_root->mount
-                && md_view_same(&current,&fs->native_root->identity)) {
-            next = duplicate(fd);
-        } else if (!strcmp(name, "..") && mount && md_view_same(&current, &mount->native)) {
-            next = parent(fs,view,&next_mount,fd,resolve);
+                && md_view_same(&current.identity,&fs->native_root->identity)) {
+            r=component(&walk,view,mount,&current,".",todo,0,&next);
+        } else if (!strcmp(name, "..") && mount && md_view_same(&current.identity, &mount->native)) {
+            /* The result may still need its old parent after this step. */
+            r=point_fd(&walk,&current);
+            if (!r) r = parent(&walk,view,&next_mount,&current,resolve,&next);
         } else if (md_view_inode(mount)) {
-            /* The component walker must retain the unconsumed suffix when a
-             * logical path crosses into a task-owned host filesystem. */
-            struct md_inode_boundary *boundary=fs->store->boundary;
-            const char *previous_suffix=boundary ? boundary->suffix : NULL;
-            if (boundary) boundary->suffix=todo;
-            next = component(fs, view, mount, fd, name,!!(resolve&MD_VIEW_PROVIDER_SOURCE));
-            if (boundary) boundary->suffix=previous_suffix;
+            struct md_inode_boundary *boundary=walk.scope.store->boundary;
+            r = component(&walk,view,mount,&current,name,todo,0,&next);
             int placement=last && (resolve&MD_VIEW_MOUNT_TARGET);
-            if (next==-EREMOTE && view && (view->tree || placement)) {
+            if (r==-EREMOTE && view && (view->tree || placement)) {
                 /* An explicit mount covers the initial filesystem's implicit
                  * proc/dev provider. Resolve only its covered dentry here;
                  * an ordinary root bind must retain the provider fallback. */
-                fs->store->boundary=NULL;
-                int covered=component(fs,view,mount,fd,name,0);
-                fs->store->boundary=boundary;
-                if (covered>=0) {
-                    int entered=enter(view,&covered,&next_mount,resolve);
-                    if (entered) { close(covered); next=entered; }
-                    else if (next_mount!=mount || placement) next=covered;
-                    else close(covered);
+                struct path_point covered={.fd=-1};
+                int selected=component(&walk,view,mount,&current,name,todo,1,&covered);
+                if (!selected) {
+                    selected=enter(view,&covered,&next_mount,resolve);
+                    if (selected) r=selected;
+                    else if (next_mount!=mount || placement) { next=covered; covered.fd=-1; r=0; }
                 }
+                point_close(&covered);
             }
             /* Entering an admitted native mount root is not an escape or a
              * magic-link traversal. Delegating an unresolved suffix would be;
              * retain the stricter failure until its walker owns that scope. */
-            if (next==-EREMOTE && ((resolve&RESOLVE_NO_XDEV)
+            if (r==-EREMOTE && ((resolve&RESOLVE_NO_XDEV)
                     || ((!boundary || (!boundary->mount_root && !boundary->native_directory))
-                        && (resolve&(RESOLVE_IN_ROOT|RESOLVE_BENEATH))))) next=-EXDEV;
-            if (next==-EREMOTE && (!boundary || (!boundary->mount_root && !boundary->native_directory))
-                    && (resolve&(RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS))) next=-ENOTSUP;
+                        && (resolve&(RESOLVE_IN_ROOT|RESOLVE_BENEATH))))) r=-EXDEV;
+            if (r==-EREMOTE && (!boundary || (!boundary->mount_root && !boundary->native_directory))
+                    && (resolve&(RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS))) r=-ENOTSUP;
         }
         else {
             if (mount && mount->backing==MD_MOUNT_PROC)
-                next=md_procfs_step(fs,mount,fd,name,todo,!last || follow>0 || (trailing && follow==0));
+                r=point_native(&next,md_procfs_step(fs,mount,current.fd,name,todo,!last || follow>0 || (trailing && follow==0)));
             else if (mount && mount->backing==MD_MOUNT_DEVPTS)
-                next=md_devpts_step(mount->devpts,fd,name);
+                r=point_native(&next,md_devpts_step(mount->devpts,current.fd,name));
             else {
-                next=(resolve&MD_VIEW_TASK_PATH) ? md_view_task_path(fs,fd,name,todo,resolve,0) : 0;
-                if (!next) next=component(fs,view,mount,fd,name,0);
+                r=(resolve&MD_VIEW_TASK_PATH) ? md_view_task_path(fs,current.fd,name,todo,resolve,0) : 0;
+                if (!r) r=component(&walk,view,mount,&current,name,todo,0,&next);
             }
         }
-        if (next == -ENOENT && last && missing && (!trailing || missing > 1)) {
-            out->parent = fd; fd = -1; out->view = view; out->mount = mount; strcpy(out->name, name); break;
+        if (r == -ENOENT && last && missing && (!trailing || missing > 1)) {
+            r=point_fd(&walk,&current);
+            if (!r) { out->parent=current.fd; current.fd=-1; out->view=view; out->mount=mount; strcpy(out->name,name); }
+            point_close(&next); break;
         }
-        if (next < 0) { r = next; break; }
-        struct stat st;
-        if (fstat(next, &st)) { r = -errno; close(next); break; }
-        if (S_ISLNK(st.st_mode) && (!last || follow > 0 || (trailing && follow == 0))) {
-            if (++links > 40 || (resolve & RESOLVE_NO_SYMLINKS)) { close(next); r = -ELOOP; break; }
+        if (r) { point_close(&next); break; }
+        if (S_ISLNK(next.identity.st_mode) && (!last || follow > 0 || (trailing && follow == 0))) {
+            if (++links > 40 || (resolve & RESOLVE_NO_SYMLINKS)) { point_close(&next); r = -ELOOP; break; }
             char target[PATH_MAX];
-            ssize_t n = readlinkat(next, "", target, sizeof(target)); close(next);
-            if (n < 0) { r = -errno; break; }
+            ssize_t n;
+            if (next.logical) {
+                int directory=mdi_backing_directory(walk.scope.store,&next.node);
+                if (directory<0) { point_close(&next); r=directory; break; }
+                n=readlinkat(directory,next.node.backing,target,sizeof(target));
+            } else n=readlinkat(next.fd,"",target,sizeof(target));
+            int error=errno;
+            point_close(&next);
+            if (n < 0) { r = -error; break; }
             size_t rest_size = strlen(todo);
             if (!n) { r = -ENOENT; break; }
             if ((size_t)n + rest_size >= sizeof(target)) { r = -ENAMETOOLONG; break; }
@@ -232,29 +330,37 @@ int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *
                 struct md_view_mount *root_mount = resolve & RESOLVE_IN_ROOT ? boundary_mount
                     : md_view_root_mount(fs);
                 if ((resolve & RESOLVE_NO_XDEV) && (view!=root_view || mount!=root_mount)) { r=-EXDEV; break; }
-                close(fd);
-                fd = resolve & RESOLVE_IN_ROOT ? duplicate(boundary_fd) : md_view_root_fd(fs);
+                r=walk_leave(&walk,0);
+                if (r) break;
+                point_close(&current);
+                r=point_native(&current,resolve & RESOLVE_IN_ROOT ? duplicate(boundary_fd) : md_view_root_fd(fs));
                 view=root_view; mount=root_mount;
-                if (fd < 0) r = fd;
-                else if (!(resolve&RESOLVE_IN_ROOT) && !fs->native_root) r=enter(view,&fd,&mount,resolve);
+                if (!r && !(resolve&RESOLVE_IN_ROOT) && !fs->native_root) r=enter(view,&current,&mount,resolve);
             }
             continue;
         }
-        if (strcmp(name,".")) r = enter(view, &next, &next_mount, resolve);
-        if (!r && (!last || trailing) && !S_ISDIR(st.st_mode)) r = -ENOTDIR;
-        if (r) { close(next); break; }
+        if (strcmp(name,".")) r = enter(view,&next,&next_mount,resolve);
+        if (!r && (!last || trailing) && !S_ISDIR(next.identity.st_mode)) r = -ENOTDIR;
+        if (r) { point_close(&next); break; }
         if (last) {
             out->boundary = next_mount != mount;
             /* A mount root is materialized by its source FD, never its covered dentry. */
             if (out->boundary || !strcmp(name, "..")) {
-                close(fd); fd = duplicate(next); strcpy(name, ".");
-                if (fd < 0) { r = fd; close(next); break; }
+                r=point_fd(&walk,&next);
+                if (!r) { point_close(&current); r=point_native(&current,duplicate(next.fd)); strcpy(name,"."); }
             }
-            out->parent = fd; fd = -1; out->fd = next; out->view = view; out->mount = next_mount; strcpy(out->name, name); break;
+            if (!r) r=point_fd(&walk,&current);
+            if (!r) r=point_fd(&walk,&next);
+            if (!r) {
+                out->parent=current.fd; current.fd=-1; out->fd=next.fd; next.fd=-1;
+                out->view=view; out->mount=next_mount; strcpy(out->name,name);
+            }
+            point_close(&next); break;
         }
-        close(fd); fd = next; mount = next_mount;
+        point_close(&current); current=next; mount=next_mount;
     }
-    if (fd >= 0) close(fd);
+    r=walk_leave(&walk,r);
+    point_close(&current);
     if (boundary_fd >= 0) close(boundary_fd);
     if (r) md_view_location_close(out);
     return r;

@@ -11,7 +11,7 @@
 #include "landlock_policy.h"
 struct md_fs_result;
 struct md_fs_output;
-struct md_inode_boundary { char *path; size_t capacity; const char *suffix; unsigned operand; int mount_root, native_directory; uint64_t proc_namespace; };
+struct md_inode_boundary { char *path; size_t capacity; unsigned operand; int mount_root, native_directory; uint64_t proc_namespace; };
 
 #define MDI_ROOT "00000000000000000000000000000000"
 #define MDI_SOURCES 256
@@ -100,6 +100,9 @@ int mdi_sqlite_open(int root, int create, sqlite3 **);
 int mdi_sql_failure(int);
 int mdi_sql(struct md_inode_store *, const char *);
 int mdi_begin(struct md_inode_store *, int write);
+/* Promote the sole read snapshot under its already-held exclusive store gate.
+ * Never releases the gate, re-resolves the pathname, or replays an operation. */
+int mdi_write(struct md_inode_store *);
 int mdi_prepare(struct md_inode_store *, const char *, sqlite3_stmt **);
 int mdi_query_acquire(struct md_inode_store *, enum mdi_query, sqlite3_stmt **);
 int mdi_query_release(sqlite3_stmt *, int result);
@@ -134,6 +137,8 @@ int mdi_xattr_permission_as(struct md_inode_store *, const struct mdi_node *, co
 int mdi_setattr_permission(struct md_inode_store *, const struct mdi_node *, const struct md_fs_request *, const struct md_identity *);
 void md_inode_xattr(struct md_inode_store *, const struct md_fs_request *, struct md_fs_result *, const struct md_fs_output *);
 int mdi_walk(struct md_inode_store *, int, const char *, enum mdi_follow, int missing, struct mdi_location *);
+int mdi_path_step(struct md_inode_store *, const struct mdi_node *, const char *,
+        const char *tail, uint64_t resolve, struct mdi_node *);
 int mdi_host_boundary(struct md_inode_store *, const char *parent, const char *name, const char *tail, uint64_t resolve);
 int mdi_walk_resolved(struct md_inode_store *, int, const char *, enum mdi_follow, int missing,
         uint64_t resolve, struct mdi_location *);

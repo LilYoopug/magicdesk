@@ -138,8 +138,7 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
     int create = flags & O_CREAT;
     if (create && (flags & O_DIRECTORY)) return -EINVAL;
     if (create && (mode & ~(s->identity ? 07777 : 01777))) return -ENOTSUP;
-    int write = create || (flags & (O_WRONLY | O_RDWR | O_TRUNC));
-    int r = mdi_begin(s, write && !s->readonly);
+    int r = mdi_begin(s, 0);
     if (r) return r;
     struct mdi_location loc;
     r = mdi_walk_resolved(s, dirfd, path, create && (flags & O_EXCL) ? MDI_ENTRY
@@ -152,6 +151,7 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
         if (!r && s->readonly) r=-EROFS;
         if (!r) r = mdi_parent_writable(s, &loc.parent);
         if (!r) r=mdi_landlock(s,&loc.parent,NULL,MD_LL_MAKE_REG|md_landlock_open_access(flags,S_IFREG));
+        if (!r) r=mdi_write(s);
         if (!r) r = mdi_allocate(s, S_IFREG, mode, flags, NULL, loc.parent.id, &loc.node, &fd);
         if (!r) r = mdi_add_name(s, loc.parent.id, loc.name, loc.node.id);
         if (!r) r = mdi_event(s, loc.parent.id, &loc.node, loc.name, IN_CREATE, NULL);
@@ -168,7 +168,10 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
     if (!r) r = mdi_open_permission(s, &loc.node, flags);
     if (!r && image) r = mdi_permission(s, &loc.node, X_OK, 0);
     if (!r) r=mdi_landlock(s,&loc.node,&loc.parent,image ? MD_LL_EXECUTE : md_landlock_open_access(flags,loc.node.kind));
-    if (!r && (flags&(O_WRONLY|O_RDWR|O_TRUNC))) r = mdi_copy_up(s, &loc.node);
+    if (!r && (flags&(O_WRONLY|O_RDWR|O_TRUNC)) && (loc.node.shared || s->overlay)) {
+        r=mdi_write(s);
+        if (!r) r=mdi_copy_up(s,&loc.node);
+    }
     struct stat st;
     if (!r) r = mdi_backing_stat(s, &loc.node, &st);
     int directory = r ? -1 : mdi_backing_directory(s, &loc.node);

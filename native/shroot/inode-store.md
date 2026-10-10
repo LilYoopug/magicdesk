@@ -34,6 +34,7 @@ a timeout is not cancellation of a committed operation.
 
 `inode_db.c` owns transactions, allocation, identities and metadata queries;
 `inode_path.c` resolves paths and reconstructs directory paths;
+`inode_cache.c` owns bounded metadata caching and row-dependency invalidation;
 `inode_store.c` defines namespace operations, `inode_directory.c` implements
 directory cursors, `inode_socket.c` implements socket publication and address
 lookup, `inode_metadata.c` owns guest permissions and metadata mutations, and
@@ -104,6 +105,14 @@ sentinel or a real backing-directory FD. Native descriptor duplication and
 fork/exec inheritance preserve identity. Directory moves update the namespace
 parent edge, so an already-open FD resolves `..` and its reconstructed path at
 the new location. There is no process-global emulated cwd or cached path string.
+
+The inode and mount walkers share the logical component lookup primitive.
+Within one mount segment, the latter retains inode points and one read snapshot;
+intermediate components do not allocate native descriptors. Native providers
+retain their actual descriptors, while final parent/object results are pinned
+before releasing the snapshot. Points retain the selected view and mount context;
+native identity alone cannot choose a bind alias. Crossing a provider releases
+the old transaction before entering another, avoiding cross-store lock ordering.
 
 Directory hard links and moves into descendants are rejected. Replacing or
 removing a directory requires it to be empty. Removed directories retain their
@@ -211,8 +220,13 @@ independent of OCI parsing and launch-local directory attachments.
 
 - Each connection reuses compiled inode, descriptor, name and directory queries,
   plus BEGIN/BEGIN IMMEDIATE/COMMIT/ROLLBACK programs. Every use resets the statement and clears all bindings
-  before leaving the operation. No rows, paths or read snapshots are cached;
-  other writers and native file-data changes remain visible in the next operation.
+  before leaving the operation. A bounded metadata cache is admitted against
+  SQLite's current data version; no read snapshot survives the operation.
+  Local preupdate hooks invalidate dependent object/name/backing/path rows,
+  including trigger changes, without running SQL from the hook. Rollback of
+  mutations discards speculative records; read-only failure does not clear them.
+  Other writers invalidate the cache on the next admission. Native attributes
+  and permission decisions are not cached.
   Statements are finalized with their owning connection.
 - Each object stores its name count and child-directory count. Insert/delete
   triggers maintain them in the same transaction as namespace changes, including
@@ -226,7 +240,11 @@ independent of OCI parsing and launch-local directory attachments.
   No pathname reopening or cached native attribute snapshot substitutes for an FD.
 - Image opening returns one retained FD, its object identity and canonical dentry
   path in one read transaction. Ordinary opens do not reconstruct unused paths.
-  Reconstructing a directory path reuses prepared parent-name queries, not cached names.
+  Reconstructing a directory path uses versioned parent-name records.
+- Ordinary writable opens retain read admission when no namespace or backing
+  change is needed. Creation, copy-up and overlay publication promote that
+  sole snapshot under its retained exclusive store gate. Nested read snapshots
+  cannot promote. No pathname is re-resolved and no mutation is replayed.
 - Create allocates a randomly named native object, syncs regular-file data and
   its containing directory before publishing a reference. A collision fails
   without truncation. Symlink data and directory metadata retain filesystem
@@ -285,6 +303,12 @@ real shell UID 2000 in `u:r:shell:s0` on NX809J / API 36 / Linux 6.12.23 / 4 KiB
 - Reused queries observe another connection's link/unlink and name replacement,
   missing-name lookups, native truncation and open-unlinked FD identity without
   recompiling the warmed read programs.
+- Existing writable opens admit no metadata write; unrelated local mutations
+  preserve warmed paths. Same-transaction negative-name and trigger-count reads,
+  rollback and nested-promotion rejection validate cache publication.
+- The mounted-path fixture covers 24 directory depths with two final descriptor
+  materializations and depth-independent transaction admission, plus native
+  crossings, symlinks, error cleanup and another connection's parent rename.
 - Open/fstat query counts, directory batches observing another writer, and
   rejected/cancelled directory delivery before shared-cursor advancement.
 - Node reads share transactional membership and link counts; another owner's

@@ -78,6 +78,9 @@ int main(int argc, char **argv) {
         cost("prepare", &database.prepare); cost("step", &database.step);
         cost("transaction", &database.transaction); cost("lock", &database.lock);
         fprintf(stderr, "MD_STORE queryReuses=%llu\n", (unsigned long long)database.query_reuses);
+        fprintf(stderr,"MD_STORE walkComponents=%llu walkMaterializations=%llu writeAdmissions=%llu\n",
+            (unsigned long long)database.walk_components,(unsigned long long)database.walk_materializations,
+            (unsigned long long)database.write_admissions);
         for (unsigned i = 0; i <= MD_FS_LAST; i++) if (filesystem.operation[i].calls)
             fprintf(stderr, "MD_FS operation=%u calls=%llu ns=%llu\n", i,
                 (unsigned long long)filesystem.operation[i].calls,

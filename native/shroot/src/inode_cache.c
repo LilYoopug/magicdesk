@@ -12,24 +12,75 @@ struct mdi_cache_entry {
     union { struct mdi_node node; struct mdi_path_name name; } value;
 };
 struct mdi_read_cache {
-    sqlite3_int64 version, changes;
+    sqlite3_int64 version;
     uint64_t clock;
+    int dirty;
     struct mdi_cache_entry entries[CACHE_SLOTS];
 };
 void mdi_cache_invalidate(struct md_inode_store *s) {
     s->cache_checked=0;
     if (s->read_cache) memset(s->read_cache,0,sizeof(*s->read_cache));
 }
+static int equals(sqlite3_value *value,const char *text) {
+    int size=sqlite3_value_bytes(value);
+    return size==(int)strlen(text) && !memcmp(sqlite3_value_blob(value),text,(size_t)size);
+}
+/* Observe rows, including trigger writes, rather than duplicating mutation
+ * knowledge in open/link/rename/ACL/copy-up callers. This hook does not run SQL
+ * or allocate cache entries. Failed transactions discard all speculative rows. */
+static void changed_row(struct md_inode_store *s,sqlite3 *db,const char *table,int old) {
+    int object=!strcmp(table,"objects"), names=!strcmp(table,"names"),
+        backing=!strcmp(table,"backings"), path=!strcmp(table,"file_paths");
+    if (!object && !names && !backing && !path) return;
+    s->read_cache->dirty=1;
+    sqlite3_value *id=NULL,*parent=NULL,*name=NULL,*device=NULL,*inode=NULL;
+    int (*value)(sqlite3 *,int,sqlite3_value **)=old ? sqlite3_preupdate_old : sqlite3_preupdate_new;
+    int r=value(db,names ? 3 : backing ? 1 : 0,&id);
+    if (!r && names) r=value(db,1,&parent);
+    if (!r && names) r=value(db,2,&name);
+    if (!r && backing) r=value(db,2,&device);
+    if (!r && backing) r=value(db,3,&inode);
+    if (r) { mdi_cache_invalidate(s); return; }
+    for (unsigned i=0;i<CACHE_SLOTS;++i) {
+        struct mdi_cache_entry *e=&s->read_cache->entries[i];
+        if (!e->valid) continue;
+        int node_query=e->query==MDI_NODE || e->query==MDI_LOOKUP || e->query==MDI_FD;
+        int affected=object && ((node_query && !e->result && equals(id,e->value.node.id))
+            || (e->query!=MDI_FD && equals(id,e->id)));
+        if (names) affected=(e->query==MDI_LOOKUP && equals(parent,e->id) && equals(name,e->name))
+            || ((e->query==MDI_DIRECTORY_NAME || e->query==MDI_FILE_PATH) && equals(id,e->id));
+        if (backing) affected=e->query==MDI_FD && e->device==(uint64_t)sqlite3_value_int64(device)
+            && e->inode==(uint64_t)sqlite3_value_int64(inode);
+        if (path) affected=e->query==MDI_FILE_PATH && equals(id,e->id);
+        if (affected) { e->valid=0; e->used=0; }
+    }
+}
+static void changed(void *context,sqlite3 *db,int operation,const char *database,
+        const char *table,sqlite3_int64 before,sqlite3_int64 after) {
+    (void)before; (void)after;
+    struct md_inode_store *s=context;
+    if (!s->read_cache || strcmp(database,"main")) return;
+    if (operation!=SQLITE_INSERT) changed_row(s,db,table,1);
+    if (operation!=SQLITE_DELETE) changed_row(s,db,table,0);
+}
+static void rolled_back(void *context) {
+    struct md_inode_store *s=context;
+    if (s->read_cache && s->read_cache->dirty) mdi_cache_invalidate(s);
+}
 void mdi_cache_snapshot(struct md_inode_store *s, sqlite3_int64 version) {
     s->cache_checked=-1;
-    if (!s->read_cache && !(s->read_cache=calloc(1,sizeof(*s->read_cache)))) return;
-    /* The active transaction owns this SQLite snapshot. Version detects other
-     * connections; total_changes also detects this connection's writes. */
-    sqlite3_int64 changes=sqlite3_total_changes64(s->db);
-    if (s->read_cache->version!=version || s->read_cache->changes!=changes) {
-        mdi_cache_invalidate(s);
-        s->read_cache->version=version; s->read_cache->changes=changes;
+    if (!s->read_cache) {
+        if (!(s->read_cache=calloc(1,sizeof(*s->read_cache)))) return;
+        sqlite3_preupdate_hook(s->db,changed,s);
+        sqlite3_rollback_hook(s->db,rolled_back,s);
     }
+    /* External writers retire the snapshot; local row hooks invalidate only
+     * dependent records. Native attributes and authorization are never cached. */
+    if (s->read_cache->version!=version) {
+        mdi_cache_invalidate(s);
+        s->read_cache->version=version;
+    }
+    s->read_cache->dirty=0;
     s->cache_checked=1;
 }
 static uint64_t hash_bytes(uint64_t hash, const void *data, size_t length) {
@@ -47,7 +98,7 @@ static uint64_t key_hash(const struct md_inode_store *s, const struct mdi_cache_
     return hash;
 }
 static struct mdi_cache_entry *get(struct md_inode_store *s, const struct mdi_cache_key *key) {
-    if (!s->locked || s->write_transaction || s->cache_checked!=1) return NULL;
+    if (!s->locked || s->cache_checked!=1) return NULL;
     uint64_t hash=key_hash(s,key);
     struct mdi_cache_entry *set=&s->read_cache->entries[(hash%CACHE_SETS)*CACHE_WAYS];
     for (unsigned i=0;i<CACHE_WAYS;++i) {
@@ -65,7 +116,7 @@ static struct mdi_cache_entry *get(struct md_inode_store *s, const struct mdi_ca
     return NULL;
 }
 static struct mdi_cache_entry *put(struct md_inode_store *s, const struct mdi_cache_key *key, int result) {
-    if (s->cache_checked!=1 || s->write_transaction || (result && result!=-ENOENT)) return NULL;
+    if (!s->locked || s->cache_checked!=1 || (result && result!=-ENOENT)) return NULL;
     if ((key->id && strlen(key->id)>32) || (key->name && strlen(key->name)>NAME_MAX)) return NULL;
     uint64_t hash=key_hash(s,key);
     struct mdi_cache_entry *set=&s->read_cache->entries[(hash%CACHE_SETS)*CACHE_WAYS], *entry=set;

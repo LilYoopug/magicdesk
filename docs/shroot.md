@@ -25,14 +25,22 @@ after commit or rollback. Separate launches can share a store without exposing
 ordinary internal transaction contention to guest syscalls. There is no polling
 or transaction replay; data IO through opened descriptors stays native. An
 external database writer that bypasses this gate still produces an explicit error.
-Read transactions share a bounded worker-local cache of inode metadata, directory
-entries and reverse-name records. SQLite's snapshot data version and connection
-write count invalidate it across writers; local mutations and rollbacks discard
-cached rows. Permissions are checked for the current caller, and sizes/timestamps
-still come from the live native object. No process, FD number or native-path
-result is retained by this cache. Single-provider metadata requests share one
-read transaction across nested lookups; mount crossings retain their independent
-provider transaction boundaries.
+Transactions share a bounded worker-local cache of inode metadata, directory
+entries and reverse-name records. SQLite's snapshot data version invalidates it
+across writers; local preupdate hooks retire dependent rows, including trigger
+changes. A rolled-back mutation discards speculative rows. Read failures and
+unrelated local mutations preserve valid entries. Permissions are checked for
+the current caller, and sizes/timestamps still come from the live native object.
+No process, FD number or native-path
+result is retained by this cache. The mount walker uses logical inode points
+within each provider snapshot, not a descriptor and transaction per component.
+It materializes exact descriptors at native boundaries and result publication.
+Mount crossings release the previous provider transaction before acquiring the
+next, including another view of the same store. Credential/root policy is scoped
+to that segment; no SQLite lock spans caller copying or FIFO rendezvous.
+Existing writable opens begin as reads and promote only for creation, copy-up
+or overlay publication under the already-held store gate. Promotion does not
+release the snapshot, replay the lookup or relax durable namespace commits.
 Initial store admission prepares indexes for every foreign-key child lookup,
 so collecting an overlay view does not repeatedly scan the whole store.
 Retained worker reconnects and ordinary filesystem operations do not prepare
@@ -253,9 +261,9 @@ Native fchdir stays in the caller with the ordinary cwd-completion observer.
 These paths use the same namespace engine and sealed-image catalogue.
 Operation results and caller-owned output are independent of RPC framing; direct
 directory reads use one reusable 64 KiB worker buffer rather than an RPC-sized batch.
-The namespace owner reuses compiled queries and transaction programs, never cached
-metadata or transaction snapshots. Node reads include transactionally maintained
-name and child-directory counters; stat and directory membership need no counting
+The namespace owner reuses compiled queries and transaction programs alongside
+the versioned metadata cache, without retaining transaction snapshots. Node reads
+include transactionally maintained name and child-directory counters; stat and directory membership need no counting
 subqueries or second logical lookup. Native attributes and access checks remain live.
 Optional `--statistics` profiles syscall stops, filesystem
 operations, SQLite and CPU costs without per-call logs or clock sampling

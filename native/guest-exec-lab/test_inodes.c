@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "inode_store.h"
+#include "inode_internal.h"
 #include "fs_operation.h"
 #include "linux_abi.h"
 #include <errno.h>
@@ -793,6 +794,48 @@ static void metadata_queries(void) {
     close(next); close(dir); close(fd); md_inode_store_close(writer); md_inode_store_close(s);
     puts("PASS metadata programs: minimal open/fstat queries, live FD attributes and fresh directory batches");
 }
+static void mutation_cache(void) {
+    struct md_inode_store *s=store("mutation-cache",1);
+    CHECK(!md_inode_mkdir(s,-1,"/stable",0700));
+    CHECK(!md_inode_mkdir(s,-1,"/busy",0700));
+    int fd=md_inode_create(s,-1,"/stable/value",0600); CHECK(fd>=0); close(fd);
+    struct stat st;
+    CHECK(!md_inode_stat(s,-1,"/stable/value",0,&st));
+    struct md_inode_statistics stats={0}; md_inode_measure(s,&stats);
+    for (unsigned i=0;i<16;++i) {
+        fd=md_inode_open(s,-1,"/stable/value",O_RDWR|O_CREAT,0600); CHECK(fd>=0); close(fd);
+    }
+    CHECK(!stats.write_admissions && stats.step.calls==16*3);
+    for (unsigned i=0;i<16;++i) {
+        fd=md_inode_create(s,-1,"/busy/changed",0600); CHECK(fd>=0); close(fd);
+        uint64_t before=stats.step.calls;
+        CHECK(!md_inode_stat(s,-1,"/stable/value",0,&st));
+        CHECK(stats.step.calls-before==3);
+        CHECK(!md_inode_unlink(s,-1,"/busy/changed",0));
+    }
+    CHECK(stats.write_admissions==32);
+    /* Exact negative entries, trigger-maintained counts, and rollback are
+     * checked inside the same write snapshot, not only after a new admission. */
+    CHECK(!mdi_begin(s,1));
+    struct mdi_node root, value, absent;
+    CHECK(!mdi_node(s,mdi_root(s),&root));
+    CHECK(mdi_lookup(s,root.id,"alias",&absent)==-ENOENT);
+    struct mdi_location loc;
+    CHECK(!mdi_walk(s,-1,"/stable/value",MDI_FOLLOW,0,&loc));
+    CHECK(!mdi_add_name(s,root.id,"alias",loc.node.id));
+    CHECK(!mdi_lookup(s,root.id,"alias",&value) && value.links==2);
+    CHECK(!mdi_node(s,loc.node.id,&value) && value.links==2);
+    CHECK(mdi_finish(s,-ECANCELED)==-ECANCELED);
+    CHECK(md_inode_stat(s,-1,"/alias",0,&st)==-ENOENT);
+    CHECK(!md_inode_stat(s,-1,"/stable/value",0,&st) && st.st_nlink==1);
+    CHECK(!mdi_begin(s,0));
+    CHECK(!mdi_begin(s,0));
+    CHECK(mdi_write(s)==-EDEADLK);
+    CHECK(!mdi_finish(s,0) && !mdi_finish(s,0));
+    md_inode_measure(s,NULL); md_inode_store_close(s);
+    puts("PASS mutation admission: existing writable opens retain read snapshots; unrelated writes retain cache rows");
+    puts("PASS row invalidation: negative names, trigger counts, rollback and rejected nested promotion");
+}
 static void cached_path_names(void) {
     struct md_inode_store *s=store("path-cache",1), *writer=store("path-cache",0);
     CHECK(!md_inode_mkdir(writer,-1,"/parent",0700));
@@ -919,7 +962,7 @@ int main(int argc, char **argv) {
     CHECK(mkdir(root, 0700) == 0);
     descriptors(); namespace(); contention(); multiple_stores(); across_exec(argv[0]);
     hierarchy(); symlinks(); permissions(); kernel_reference(); scoped_paths(); reused_queries(); metadata_queries(); cached_path_names();
-    directory_publication(); membership_queries(); counter_audit();
+    mutation_cache(); directory_publication(); membership_queries(); counter_audit();
     unsigned serial = 0;
     recovery(CREATE, MD_OBJECT_SYNCED, serial++);
     for (enum operation op = CREATE; op <= EXCHANGE; ++op) {

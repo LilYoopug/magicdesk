@@ -110,6 +110,23 @@ static int transaction(struct md_inode_store *s, enum mdi_query slot) {
     md_cost_end(cost, begin);
     return r;
 }
+static int watch_writes(struct md_inode_store *s) {
+    if (!flock(s->watch_presence,LOCK_EX|LOCK_NB))
+        return flock(s->watch_presence,LOCK_UN) ? -errno : 0;
+    if (errno!=EWOULDBLOCK) return -errno;
+    s->recording=1; return 0;
+}
+int mdi_write(struct md_inode_store *s) {
+    if (s->readonly) return -EROFS;
+    if (s->write_transaction) return 0;
+    if (!s->locked || s->read_depth!=1) return -EDEADLK;
+    int r=watch_writes(s);
+    if (!r) {
+        s->write_transaction=1; s->read_depth=0;
+        if (s->statistics) ++s->statistics->write_admissions;
+    }
+    return r;
+}
 int mdi_begin(struct md_inode_store *s, int write) {
     if (write && s->readonly) return -EROFS;
     if (s->read_depth) {
@@ -121,15 +138,10 @@ int mdi_begin(struct md_inode_store *s, int write) {
     s->recording = 0;
     s->write_transaction=!!write;
     s->cache_checked=0;
-    if (write) mdi_cache_invalidate(s);
-    if (write) {
-        if (!flock(s->watch_presence, LOCK_EX | LOCK_NB)) {
-            if (flock(s->watch_presence, LOCK_UN)) r = -errno;
-        } else if (errno == EWOULDBLOCK) s->recording = 1;
-        else r = -errno;
-    }
+    if (write) r=watch_writes(s);
     if (!r) r=transaction(s,write ? MDI_BEGIN_WRITE : MDI_BEGIN);
-    if (!r && !write) {
+    if (!r && write && s->statistics) ++s->statistics->write_admissions;
+    if (!r) {
         sqlite3_stmt *query=NULL;
         r=mdi_query_acquire(s,MDI_DATA_VERSION,&query);
         if (!r) {
@@ -139,7 +151,7 @@ int mdi_begin(struct md_inode_store *s, int write) {
         if (!r) mdi_cache_snapshot(s,sqlite3_column_int64(query,0));
         r=mdi_query_release(query,r);
         if (r) transaction(s,MDI_ROLLBACK);
-        else s->read_depth=1;
+        else if (!write) s->read_depth=1;
     }
     return r ? store_unlock(s, r) : 0;
 }

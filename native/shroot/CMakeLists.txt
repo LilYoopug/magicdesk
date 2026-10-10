@@ -9,6 +9,7 @@ FetchContent_Declare(sqlite
 FetchContent_MakeAvailable(sqlite)
 add_library(guest-sqlite STATIC ${sqlite_SOURCE_DIR}/sqlite3.c)
 target_include_directories(guest-sqlite PUBLIC ${sqlite_SOURCE_DIR})
+target_compile_definitions(guest-sqlite PUBLIC SQLITE_ENABLE_PREUPDATE_HOOK)
 target_compile_definitions(guest-sqlite PRIVATE SQLITE_THREADSAFE=0 SQLITE_OMIT_LOAD_EXTENSION
     SQLITE_DQS=0 SQLITE_DEFAULT_MEMSTATUS=0 SQLITE_OMIT_DEPRECATED)
 target_compile_options(guest-sqlite PRIVATE -O2 -fno-pie)
@@ -223,6 +224,7 @@ if(MAGICDESK_GUEST_FIXTURES)
     target_sources(test_mounts PRIVATE ../guest-exec-lab/test_mount_copy.c ../guest-exec-lab/test_fs_anchor.c ../guest-exec-lab/test_user_namespace_fs.c ../guest-exec-lab/test_mount_alias.c ../guest-exec-lab/test_mount_policy.c ../guest-exec-lab/test_mount_graph.c ../guest-exec-lab/test_inode_custody.c ../guest-exec-lab/test_origin_transfer.c ${namespace_engine} ${mounts} ${src}/image_catalogue.c
         ${src}/elf_admission.c ${identity} ${src}/elf.c ${src}/fs_client.c ${wire} ${raw})
     target_compile_definitions(test_mounts PRIVATE MD_NO_START MD_USE_LIBC)
+    target_sources(test_mounts PRIVATE ../guest-exec-lab/test_path_walk.c)
     target_sources(test_mounts PRIVATE ../guest-exec-lab/test_mount_storage.c ../guest-exec-lab/test_transient_store.c ../guest-exec-lab/test_inode_view.c ../guest-exec-lab/test_fs_context.c)
     target_sources(test_mounts PRIVATE ${capsules})
     target_link_libraries(test_mounts PRIVATE guest-sha256)

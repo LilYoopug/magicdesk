@@ -159,6 +159,9 @@ static void *run(void *context) {
         for (unsigned i = 0; i < sizeof(costs)/sizeof(costs[0]); ++i) fprintf(stderr, "MD_STORE phase=%s calls=%llu ns=%llu\n", names[i],
             (unsigned long long)costs[i]->calls, (unsigned long long)costs[i]->nanoseconds);
         fprintf(stderr, "MD_STORE queryReuses=%llu\n", (unsigned long long)stats.query_reuses);
+        fprintf(stderr,"MD_STORE walkComponents=%llu walkMaterializations=%llu writeAdmissions=%llu\n",
+            (unsigned long long)stats.walk_components,(unsigned long long)stats.walk_materializations,
+            (unsigned long long)stats.write_admissions);
         fprintf(stderr,"MD_STORE metadataCacheHits=%llu metadataCacheMisses=%llu\n",
             (unsigned long long)stats.metadata_cache_hits,(unsigned long long)stats.metadata_cache_misses);
         fprintf(stderr, "MD_STORE linkCountQueries=%llu membershipQueries=%llu\n",

@@ -11,8 +11,7 @@ int mdi_host_boundary(struct md_inode_store *s, const char *parent, const char *
     if (!s->boundary || strcmp(mdi_root(s),s->lifetime->scope)
             || strcmp(parent,s->lifetime->scope)) return 0;
     if (strcmp(name,"proc") && strcmp(name,"dev")) return 0;
-    const char *suffix=s->boundary->suffix ? s->boundary->suffix : "";
-    const char *next=*tail ? tail : suffix; while (*next=='/') ++next;
+    const char *next=tail; while (*next=='/') ++next;
     if (!strcmp(name,"dev") && !strncmp(next,"shm",3) && (!next[3] || next[3]=='/')) return 0;
     s->boundary->mount_root=!*next;
     s->boundary->native_directory=!strcmp(name,"dev");
@@ -20,10 +19,21 @@ int mdi_host_boundary(struct md_inode_store *s, const char *parent, const char *
             && (resolve&(RESOLVE_IN_ROOT|RESOLVE_BENEATH)))) return -EXDEV;
     if (*next && !s->boundary->native_directory && (resolve&(RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS))) return -ENOTSUP;
     if (!s->boundary->path) return -EREMOTE;
-    int n=snprintf(s->boundary->path,s->boundary->capacity,"/%s%s%s",name,tail,suffix);
+    int n=snprintf(s->boundary->path,s->boundary->capacity,"/%s%s",name,tail);
     return n<0 || (size_t)n>=s->boundary->capacity ? -ENAMETOOLONG : -EREMOTE;
 }
 
+int mdi_path_step(struct md_inode_store *s, const struct mdi_node *current,
+        const char *name, const char *tail, uint64_t resolve, struct mdi_node *next) {
+    int r=mdi_access(s,current,X_OK);
+    if (!r) r=mdi_host_boundary(s,current->id,name,tail,resolve);
+    if (r) return r;
+    if (!strcmp(name,".") || (!strcmp(name,"..") && !strcmp(current->id,mdi_root(s)))) {
+        *next=*current; return 0;
+    }
+    return !strcmp(name,"..") ? mdi_node(s,current->parent,next)
+        : mdi_lookup(s,current->id,name,next);
+}
 int mdi_walk(struct md_inode_store *s, int dirfd, const char *path,
         enum mdi_follow follow, int missing, struct mdi_location *out) {
     return mdi_walk_resolved(s, dirfd, path, follow, missing, 0, out);
@@ -58,7 +68,6 @@ int mdi_walk_resolved(struct md_inode_store *s, int dirfd, const char *path,
             out->trailing = 1;
             return 0;
         }
-        if ((r = mdi_access(s, &current, X_OK))) return r;
         char *end = start; while (*end && *end != '/') ++end;
         size_t size = (size_t)(end-start);
         if (size > NAME_MAX) return -ENAMETOOLONG;
@@ -67,19 +76,14 @@ int mdi_walk_resolved(struct md_inode_store *s, int dirfd, const char *path,
         memmove(todo, end, strlen(end)+1);
         char *rest = todo; while (*rest == '/') ++rest;
         int last = !*rest;
-        r=mdi_host_boundary(s,current.id,name,todo,resolve);
-        if (r) return r;
         struct mdi_node next;
         int special = !strcmp(name, ".") || !strcmp(name, "..");
-        if (!strcmp(name, ".")) { next = current; r = 0; }
-        else if (!strcmp(name, "..")) {
-            if ((resolve & (RESOLVE_BENEATH | RESOLVE_IN_ROOT)) && !strcmp(current.id, boundary.id)) {
-                if (resolve & RESOLVE_BENEATH) return -EXDEV;
-                next = current; r = 0;
-            } else if (!strcmp(current.id, mdi_root(s))) { next = current; r = 0; }
-            else r = mdi_node(s, current.parent, &next);
-        }
-        else r = mdi_lookup(s, current.id, name, &next);
+        if (!strcmp(name,"..") && (resolve&(RESOLVE_BENEATH|RESOLVE_IN_ROOT))
+                && !strcmp(current.id,boundary.id)) {
+            r=mdi_access(s,&current,X_OK);
+            if (!r && (resolve&RESOLVE_BENEATH)) r=-EXDEV;
+            next=current;
+        } else r=mdi_path_step(s,&current,name,todo,resolve,&next);
         if (r == -ENOENT && last && missing && !special) {
             out->parent = current; strcpy(out->name, name);
             out->trailing = slash;

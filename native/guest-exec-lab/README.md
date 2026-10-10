@@ -914,6 +914,13 @@ transfer, custodian-supervisor death or Desktop coverage.
 
 Configure `native/shroot` with `-DMAGICDESK_GUEST_FIXTURES=ON` and build
 `bootstrap supervisor run service image test_snapshot test_mounts`.
+`test_mounts --path-walk NEW_DIRECTORY` isolates logical path traversal and its
+depth-independent FD/transaction bounds. The full mount suite includes it.
+`fixtures/path-workloads.py` runs deep-path reads, existing writable opens and
+create/rename/unlink cycles in a disposable guest directory, checking contents
+and inode identity while reporting timings. Bind its containing directory into
+the same prepared guest for both runtime versions; use `--statistics` separately
+for work counts. Timings are observations, not pass/fail thresholds.
 The offline importer tests require Python and the `zstd` CLI:
 
 ```sh
