@@ -645,7 +645,7 @@ static int begin(struct md_fs_buffer_service *s, pid_t actor, struct md_guest_do
                 || q.flags&~O_NOFOLLOW || q.mode&~(MD_EXEC_INACCESSIBLE|MD_EXEC_OBJECT)
                 || q.capacity || q.resolve || q.offset<0 || q.offset>INT_MAX
                 || (!!(q.mode&MD_EXEC_OBJECT)!=!!lengths[1])) return -EINVAL;
-    } else if (!md_fs_buffer_operation(operation) || (operation==MD_FS_OPEN && !lengths[0])) return -EINVAL;
+    } else if (!md_fs_operation_valid(operation) || (operation==MD_FS_OPEN && !lengths[0])) return -EINVAL;
     for (unsigned i=0;i<2;++i)
         if (lengths[i]>PATH_MAX || (q.directory[i]<0 && q.directory[i]!=-1 && q.directory[i]!=AT_FDCWD))
             return -EINVAL;

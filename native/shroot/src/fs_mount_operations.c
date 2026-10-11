@@ -74,8 +74,7 @@ static int devpts_operation(struct md_filesystem *fs,struct md_mount_namespace *
         if (q->flags&~(AT_SYMLINK_NOFOLLOW|MD_AT_EACCESS)) r=-EINVAL;
         else if ((q->mode&W_OK) && md_view_readonly(mount)) r=-EROFS;
         else {
-            struct md_identity actor=*id;
-            if (!(q->flags&MD_AT_EACCESS)) { actor.uid.fs=actor.uid.real; actor.gid.fs=actor.gid.real; }
+            struct md_identity actor=md_identity_access(id,!!(q->flags&MD_AT_EACCESS));
             r=md_devpts_access(mount->devpts,fd,q->mode,&actor);
         }
         break;
@@ -120,6 +119,17 @@ static ssize_t directory_entries(void *context, int fd, void *data, size_t count
     ssize_t n=syscall(SYS_getdents64,fd,data,count);
     return n<0 ? -errno : n;
 }
+static int virtual_operation(struct md_filesystem *fs,struct md_mount_namespace *view,
+        struct md_view_mount *mount,int fd,int parent,const char *name,
+        const struct md_fs_request *q,struct md_fs_result *out,const struct md_fs_output *output) {
+    return md_fs_mount_file_operation(fs,view,mount,fd,q,out,output)
+        || md_fs_proc_operation(fs,view,mount,fd,q,out,output)
+        || devpts_operation(fs,view,mount,fd,q,out,output)
+        || md_fs_cgroup_operation(fs,view,mount,fd,parent,name,q,out,output)
+        || md_fs_sysfs_operation(fs,view,mount,fd,q,out,output)
+        || md_fs_provider_operation(fs,view,mount,fd,q,out,output)
+        || md_fs_mqueue_operation(fs,view,mount,fd,q,out,output);
+}
 static int descriptor(struct md_filesystem *fs, const struct md_fs_request *q,
         struct md_fs_result *out, const struct md_fs_output *output) {
     const struct md_fs_anchor *origin=q->origin[0];
@@ -143,13 +153,7 @@ static int descriptor(struct md_filesystem *fs, const struct md_fs_request *q,
     if (!md_view_inode(p->mount) && (r=md_fs_landlock_native(fs,q,p->mount,q->directory[0]))) {
         out->error=r; return 1;
     }
-    if (md_fs_mount_file_operation(fs,owner.mounts,p->mount,q->directory[0],q,out,output)) return 1;
-    if (md_fs_proc_operation(fs,owner.mounts,p->mount,q->directory[0],q,out,output)) return 1;
-    if (devpts_operation(fs,owner.mounts,p->mount,q->directory[0],q,out,output)) return 1;
-    if (md_fs_cgroup_operation(fs,owner.mounts,p->mount,q->directory[0],-1,NULL,q,out,output)) return 1;
-    if (md_fs_sysfs_operation(fs,owner.mounts,p->mount,q->directory[0],q,out,output)) return 1;
-    if (md_fs_provider_operation(fs,owner.mounts,p->mount,q->directory[0],q,out,output)) return 1;
-    if (md_fs_mqueue_operation(fs,owner.mounts,p->mount,q->directory[0],q,out,output)) return 1;
+    if (virtual_operation(fs,owner.mounts,p->mount,q->directory[0],-1,NULL,q,out,output)) return 1;
     if (q->operation==MD_FS_ACCESS && (r=execute_access(p->mount,q->directory[0],q->mode))) {
         out->error=r; return 1;
     }
@@ -350,13 +354,7 @@ static void native(struct md_filesystem *fs, const struct md_fs_request *q,
         struct md_fs_result *out, const struct md_fs_output *output) {
     int policy=md_fs_landlock_native(fs,q,a->mount,a->fd);
     if (policy) { out->error=policy; return; }
-    if (md_fs_mount_file_operation(fs,a->view,a->mount,a->fd,q,out,output)) return;
-    if (md_fs_proc_operation(fs,a->view,a->mount,a->fd,q,out,output)) return;
-    if (devpts_operation(fs,a->view,a->mount,a->fd,q,out,output)) return;
-    if (md_fs_cgroup_operation(fs,a->view,a->mount,a->fd,a->parent,a->name,q,out,output)) return;
-    if (md_fs_sysfs_operation(fs,a->view,a->mount,a->fd,q,out,output)) return;
-    if (md_fs_provider_operation(fs,a->view,a->mount,a->fd,q,out,output)) return;
-    if (md_fs_mqueue_operation(fs,a->view,a->mount,a->fd,q,out,output)) return;
+    if (virtual_operation(fs,a->view,a->mount,a->fd,a->parent,a->name,q,out,output)) return;
     int r = 0;
     struct md_filesystem owner=*fs; owner.mounts=a->view;
     void *data = output ? output->data : NULL;

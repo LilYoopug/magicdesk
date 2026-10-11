@@ -7,6 +7,7 @@
 #include "fs_mounts.h"
 #include "guest_accounts.h"
 #include "linux_abi.h"
+#include "file_permissions.h"
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -17,8 +18,41 @@
 #include <string.h>
 #include <unistd.h>
 
+static void file_permissions(void) {
+    struct md_identity reader=md_identity_new(1000,1000);
+    reader.caps.effective=UINT64_C(1)<<CAP_DAC_READ_SEARCH;
+    struct stat node={.st_uid=1001,.st_gid=1001,.st_mode=S_IFREG};
+    for (unsigned directory=0;directory<2;++directory) {
+        node.st_mode=directory ? S_IFDIR : S_IFREG;
+        for (unsigned mode=0;mode<8;++mode) {
+            int expected=mode&W_OK || (!directory && (mode&X_OK)) ? -EACCES : 0;
+            assert(md_file_permissions(&node,mode,&reader)==expected);
+        }
+    }
+    reader.caps.effective=UINT64_C(1)<<CAP_DAC_OVERRIDE;
+    for (unsigned executable=0;executable<2;++executable) {
+        node.st_mode=S_IFREG|(executable ? 0001 : 0);
+        for (unsigned mode=0;mode<8;++mode)
+            assert(md_file_permissions(&node,mode,&reader)==((mode&X_OK) && !executable ? -EACCES : 0));
+    }
+    reader.caps.effective=0; node.st_mode=S_IFREG|0640; node.st_uid=1000;
+    assert(!md_file_permissions(&node,R_OK|W_OK,&reader));
+    assert(md_file_permissions(&node,X_OK,&reader)==-EACCES);
+    assert(md_file_permissions(&node,8,&reader)==-EINVAL);
+    md_identity_release(&reader);
+    puts("PASS shared file DAC: read/search, override, executable bits and ordinary modes");
+}
 static void capabilities(void) {
     struct md_identity root=md_identity_new(0,0), user=md_identity_new(1000,1000);
+    struct md_identity setid=root;
+    setid.uid.real=1000; setid.gid.real=1001;
+    struct md_identity real=md_identity_access(&setid,0), effective=md_identity_access(&setid,1);
+    assert(real.uid.fs==1000 && real.gid.fs==1001 && !real.caps.effective);
+    assert(effective.uid.fs==0 && effective.gid.fs==0 && effective.caps.effective==MD_CAP_VALID);
+    assert(setid.uid.fs==0 && setid.caps.effective==MD_CAP_VALID);
+    setid=root; setid.caps.effective=0;
+    real=md_identity_access(&setid,0); effective=md_identity_access(&setid,1);
+    assert(real.caps.effective==MD_CAP_VALID && !effective.caps.effective);
     assert(root.caps.bounding==MD_CAP_VALID && root.caps.permitted==MD_CAP_VALID
         && root.caps.effective==MD_CAP_VALID && !root.caps.inheritable && !root.caps.ambient);
     assert(user.caps.bounding==MD_CAP_VALID && !user.caps.permitted && !user.caps.effective);
@@ -273,7 +307,7 @@ static void accounts(struct md_inode_store *s) {
     assert(md_guest_user_resolve(&fs,"1000:",&selected)==-EINVAL);
 }
 int main(int argc, char **argv) {
-    assert(argc == 2); identities(); capabilities(); concurrent_snapshots(); umask(0);
+    assert(argc == 2); identities(); capabilities(); file_permissions(); concurrent_snapshots(); umask(0);
     struct md_inode_store *s = NULL;
     assert(!md_inode_store_open(argv[1], 1, &s));
     struct md_identity root=md_identity_new(0,0), user=md_identity_new(1000,1000), other=md_identity_new(1001,1001);

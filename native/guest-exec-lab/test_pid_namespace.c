@@ -3,7 +3,6 @@
 #include <errno.h>
 #include <stdio.h>
 
-static int gone(pid_t pid) { return pid==20003; }
 int main(void) {
     struct md_pid_identity *a=NULL,*b=NULL,*c=NULL;
     assert(!md_pid_identity_prepare(NULL,&a) && !a);
@@ -33,10 +32,7 @@ int main(void) {
     found=md_pid_namespace_lookup(inner,1); assert(found==b && !md_pid_identity_live(found));
     md_pid_identity_release(found);
     assert(!md_pid_identity_exit(c));
-    struct md_pid_retired retired={0};
-    md_pid_retired_take(&retired,md_pid_identity_retain(c));
-    md_pid_retired_collect(&retired,gone);
-    assert(!retired.head);
+    md_pid_identity_reap(c);
     assert(!md_pid_namespace_lookup(outer,3) && !md_pid_namespace_find(outer,20003));
     assert(md_pid_identity_number(c,outer)==3);
     md_pid_identity_release(c);

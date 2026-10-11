@@ -110,19 +110,6 @@ static int beneath(struct md_filesystem *fs, int fd, const struct md_view_locati
     size_t length=strlen(root);
     return !strncmp(root,path,length) && (length==1 || !path[length] || path[length]=='/');
 }
-static void discard(struct md_view_mount *m) {
-    if (m->source>=0) close(m->source);
-    if (m->target>=0) close(m->target);
-    md_mount_policy_close(&m->policy);
-    md_inode_lifetime_release(m->storage);
-    md_pid_namespace_release(m->pid_namespace);
-    md_devpts_release(m->devpts);
-    md_cgroup_release(m->cgroup);
-    md_sysfs_release(m->sysfs);
-    md_provider_tree_release(m->provider);
-    md_ipc_namespace_release(m->ipc_namespace);
-    md_control_file_release(m->file);
-}
 static int publish(struct md_filesystem *fs, unsigned first,
         struct md_view_mount *entries, unsigned count) {
     if (!fs->mounts->graph) return 0;
@@ -337,7 +324,7 @@ static int bind(struct md_filesystem *fs, const struct md_fs_request *q,
     if (!r) {
         for (unsigned i=0;i<prepared;++i) tree->mounts[slots[i]]=pending[slots[i]];
         tree->count=count;
-    } else for (unsigned i=0;i<prepared;++i) discard(&pending[slots[i]]);
+    } else for (unsigned i=0;i<prepared;++i) md_view_mount_close(&pending[slots[i]]);
     md_control_file_release(file); md_view_location_close(&source); return r;
 }
 int md_view_attach_source(struct md_filesystem *fs, const struct md_mount_source *source,
@@ -380,7 +367,7 @@ int md_view_attach_source(struct md_filesystem *fs, const struct md_mount_source
         if (out) *out=&tree->mounts[slot];
         atomic_store_explicit(&fs->mounts->managed_paths,1,memory_order_release);
     }
-    else discard(&pending[slot]);
+    else md_view_mount_close(&pending[slot]);
     return r;
 }
 static int unmount(struct md_filesystem *fs, const struct md_fs_request *q,

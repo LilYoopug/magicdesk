@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "descriptor_calls.h"
+#include "file_metadata.h"
 #include "adapter_buffer.h"
 #include "fd_client.h"
 #include "interception.h"
@@ -52,13 +53,8 @@ long md_descriptor_metadata(int fd, long nr, const unsigned long *a) {
     if (!result && (nr==SYS_fstat || nr==SYS_newfstatat))
         result=md_write_memory((void *)a[nr==SYS_fstat ? 1 : 2],st,sizeof(*st));
     else if (!result && nr==SYS_statx) {
-        struct statx value={.stx_mask=STATX_BASIC_STATS,.stx_blksize=st->st_blksize,
-            .stx_nlink=st->st_nlink,.stx_uid=st->st_uid,.stx_gid=st->st_gid,
-            .stx_mode=st->st_mode,.stx_ino=st->st_ino,.stx_size=st->st_size,.stx_blocks=st->st_blocks,
-            .stx_dev_major=major(st->st_dev),.stx_dev_minor=minor(st->st_dev),
-            .stx_atime={st->st_atim.tv_sec,st->st_atim.tv_nsec,0},
-            .stx_mtime={st->st_mtim.tv_sec,st->st_mtim.tv_nsec,0},
-            .stx_ctime={st->st_ctim.tv_sec,st->st_ctim.tv_nsec,0}};
+        struct statx value;
+        md_stat_statx(st,&value);
         result=md_write_memory((void *)a[4],&value,sizeof(value));
     }
     long released=md_adapter_buffer_release();

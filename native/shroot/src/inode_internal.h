@@ -97,7 +97,6 @@ int mdi_landlock_object(struct md_inode_store *,const struct mdi_node *,uint64_t
  * retains a final symlink except when a trailing slash requires traversal. */
 enum mdi_follow { MDI_FOLLOW, MDI_NOFOLLOW, MDI_ENTRY };
 int mdi_sql_error(int);
-int mdi_sqlite_open(int root, int create, sqlite3 **);
 int mdi_sql_failure(int);
 int mdi_sql(struct md_inode_store *, const char *);
 /* Publication durability follows the destination lifetime. Transient mounts

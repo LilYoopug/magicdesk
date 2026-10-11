@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "descriptor_inode.h"
+#include "file_permissions.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -93,11 +94,8 @@ int md_descriptor_inode_access(struct md_fd_object *object, const struct md_iden
     struct descriptor_inode *node=(void *)object; struct state value;
     int error=begin(node,&value); if (error) return error;
     error=end(node,NULL); if (error) return error;
-    unsigned shift=id->uid.fs==value.uid ? 6 : md_identity_in_group(id,value.gid) ? 3 : 0;
-    if (((value.mode>>shift)&mode)==(unsigned)mode) return 0;
-    if (!(mode&X_OK) && md_identity_file_capable(id,value.uid,value.gid,CAP_DAC_OVERRIDE)) return 0;
-    if (!(mode&(W_OK|X_OK)) && md_identity_file_capable(id,value.uid,value.gid,CAP_DAC_READ_SEARCH)) return 0;
-    return -EACCES;
+    struct stat st={.st_uid=value.uid,.st_gid=value.gid,.st_mode=value.mode};
+    return md_file_permissions(&st,(unsigned)mode,id);
 }
 static int changed(struct state *value) {
     struct timespec now; if (clock_gettime(CLOCK_REALTIME,&now)) return -errno;

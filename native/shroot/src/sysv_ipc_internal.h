@@ -2,12 +2,13 @@
 #define MD_SYSV_IPC_INTERNAL_H
 #include "sysv_ipc.h"
 #include "ipc_permissions.h"
+#include "ipc_database.h"
 #include <linux/sem.h>
 #include <linux/msg.h>
 #include <sqlite3.h>
 
 enum { MD_IPC_SEM = 1, MD_IPC_MSG = 2, MD_MSGMAX = 8192, MD_MSGMNB = 16384 };
-struct md_ipc { sqlite3 *db; int dir, gate, lease, events; int64_t owner; uint64_t namespace_id; int changed;
+struct md_ipc { struct md_ipc_database database; int events; uint64_t namespace_id; int changed;
     struct md_user_namespace *user_namespace; };
 struct md_ipc_undo { unsigned refs; int used; uint64_t id; };
 struct md_ipc_pending {

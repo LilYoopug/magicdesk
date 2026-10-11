@@ -18,6 +18,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 
+static const char *membership_proc="/proc";
 static void read_text(const char *path,char *text,size_t size) {
     int fd=open(path,O_RDONLY|O_CLOEXEC);
     if (fd<0) fprintf(stderr,"cgroup open %s: %s\n",path,strerror(errno));
@@ -45,7 +46,17 @@ int test_cgroup_guest(int pid_namespace) {
     if (pid_namespace) {
         alarm(45); assert(!unshare(CLONE_NEWPID));
         pid_t child=fork(); assert(child>=0);
-        if (!child) _exit(test_cgroup_guest(0));
+        if (!child) {
+            assert(!unshare(CLONE_NEWNS));
+            membership_proc="/tmp/cg-proc";
+            assert(!mkdir(membership_proc,0700));
+            int mounted=mount("proc",membership_proc,"proc",0,NULL);
+            if (mounted) perror("PID cgroup proc mount");
+            assert(!mounted);
+            int result=test_cgroup_guest(0);
+            assert(!umount2(membership_proc,0) && !rmdir(membership_proc));
+            _exit(result);
+        }
         int status; assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
         puts("PASS guest cgroup: PID namespace membership"); return 0;
     }
@@ -74,11 +85,25 @@ int test_cgroup_guest(int pid_namespace) {
     int copy=dup(fd); assert(copy>=0);
     char alias[64]; snprintf(alias,sizeof(alias),"/proc/self/fd/%d",copy);
     read_text(alias,text,sizeof(text)); assert(strstr(text,pid));
+    assert(!mkdir("/tmp/cgv2/zombie",0700) && !mkdir("/tmp/cgv1/zombie",0700));
     pid_t child=fork(); assert(child>=0);
     if (!child) {
         read_text("/proc/self/cgroup",text,sizeof(text)); assert(strstr(text,"0::/child\n"));
-        assert(write(copy,"0",1)==1); _exit(0);
+        assert(write(copy,"0",1)==1);
+        assert(writing("/tmp/cgv2/zombie/cgroup.procs","0")==1);
+        assert(writing("/tmp/cgv1/zombie/cgroup.procs","0")==1); _exit(0);
     }
+    /* EVENT_WAIT: retain the exited child until proc inspection; alarm bounds failure. */
+    siginfo_t exited={0};
+    assert(!waitid(P_PID,child,&exited,WEXITED|WNOWAIT) && exited.si_pid==child);
+    char exited_path[64]; snprintf(exited_path,sizeof(exited_path),"%s/%d/cgroup",membership_proc,child);
+    read_text(exited_path,text,sizeof(text));
+    assert(strstr(text,"0::/zombie\n") && strstr(text,"1:devices:/\n"));
+    int membership=open(exited_path,O_RDONLY|O_CLOEXEC); assert(membership>=0);
+    assert(!rmdir("/tmp/cgv2/zombie") && !rmdir("/tmp/cgv1/zombie"));
+    read_text(exited_path,text,sizeof(text)); assert(strstr(text,"0::/zombie (deleted)\n"));
+    ssize_t length=read(membership,text,sizeof(text)-1); assert(length>=0); text[length]=0;
+    assert(strstr(text,"0::/zombie (deleted)\n")); close(membership);
     int status; assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
     assert(rmdir("/tmp/cgv2/child")<0 && errno==EBUSY);
     assert(writing("/tmp/cgv2/cgroup.freeze","1")<0 && errno==EOPNOTSUPP);

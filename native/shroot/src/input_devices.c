@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "event_signal.h"
 #include "input_devices.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -55,9 +56,7 @@ static void assign(uint8_t *bits,unsigned n,int value) {
     if (value) bits[n/8]|=1U<<(n%8); else bits[n/8]&=~(1U<<(n%8));
 }
 static void wake(struct md_input_bus *bus) {
-    if (bus->wake<0) return;
-    uint64_t value=1;
-    while (write(bus->wake,&value,sizeof(value))<0 && errno==EINTR) { }
+    if (bus->wake>=0) md_event_signal(bus->wake);
 }
 static void signal_reader(struct input_reader *r) {
     if (r->signaled || !r->opened) return;

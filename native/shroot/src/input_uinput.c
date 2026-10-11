@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "event_signal.h"
 #include "input_uinput.h"
 #include "event_wait.h"
 #include <errno.h>
@@ -51,8 +52,7 @@ static void wake(struct ui_state *s) {
         char byte=1;
         if (send(s->signal[1],&byte,1,MSG_DONTWAIT|MSG_NOSIGNAL)==1) s->signaled=1;
     }
-    uint64_t one=1;
-    while (write(s->owner->wake,&one,8)<0 && errno==EINTR) { }
+    md_event_signal(s->owner->wake);
 }
 static void *state_retain(void *context) {
     struct ui_state *s=context; atomic_fetch_add_explicit(&s->references,1,memory_order_relaxed); return s;

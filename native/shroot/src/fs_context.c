@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "fs_context.h"
+#include "fs_control.h"
 #include "fs_mount_internal.h"
 #include "inode_internal.h"
 #include <errno.h>
@@ -69,7 +70,7 @@ static int capable(struct md_filesystem *fs) {
         md_mount_namespace_owner(fs->mounts),CAP_SYS_ADMIN);
 }
 static int open_context(struct md_filesystem *fs,const struct md_fs_request *q,
-        const struct md_fs_output *out) {
+        struct md_fs_result *result,const struct md_fs_output *out) {
     if (!capable(fs)) return -EPERM;
     unsigned type=filesystem_type(q->path[0]);
     if (!type) return -ENODEV;
@@ -93,10 +94,11 @@ static int open_context(struct md_filesystem *fs,const struct md_fs_request *q,
     int r=fd<0 ? -errno : fstat(fd,&c->stat) ? -errno : 0;
     if (!r && fcntl(fd,F_ADD_SEALS,F_SEAL_SEAL|F_SEAL_WRITE|F_SEAL_GROW|F_SEAL_SHRINK)) r=-errno;
     c->stat.st_mode=S_IFREG|0600; c->stat.st_uid=c->opener.uid.fs; c->stat.st_gid=c->opener.gid.fs;
-    if (!r) r=out->control(out->control_context,&context_ops,c,&c->opener,(int)q->flags);
+    if (r) { if (fd>=0) close(fd); }
+    else r=md_fs_control_publish(fd,(struct md_control_file){&context_ops,c},NULL,
+        &c->opener,(int)q->flags,result,out);
     release(c);
-    if (r && fd>=0) close(fd);
-    return r ? r : fd;
+    return r;
 }
 static int parameter(struct filesystem_context *c,const struct md_fs_request *q) {
     const char *key=q->path[0],*value=q->value;
@@ -190,8 +192,7 @@ void md_fs_context_mount(struct md_filesystem *fs,const struct md_fs_request *q,
         struct md_fs_result *result,const struct md_fs_output *out) {
     *result=(struct md_fs_result){.fd=-1};
     if (q->operation==MD_FS_FSOPEN) {
-        int fd=open_context(fs,q,out);
-        if (fd<0) result->error=fd; else result->fd=fd;
+        result->error=open_context(fs,q,result,out);
         return;
     }
     if (q->control.ops!=&context_ops) { result->error=-EINVAL; return; }

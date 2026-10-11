@@ -63,6 +63,10 @@ per retained chain even across arbitrary descriptor-number churn. Reusing a
 class installs no filter. A selector
 only requests interception; retained kernel device/inode identity decides whether
 the descriptor still belongs to a watch. Unselected classes keep native reads.
+A caller-local `fstat` is only a fast rejection of ordinary non-socket FDs.
+If an application filter denies it, the filesystem owner classifies the captured
+descriptor instead; an optional inspection cannot veto an otherwise permitted
+dup/read. Application filter decisions on the actual operation remain effective.
 Selector bookkeeping and descriptor-kind queries use the register-only FD
 control channel, independently of application `prctl` policy. Before the first
 application filter is installed, one shared selector admits all future typed-FD
@@ -139,6 +143,8 @@ while another request appends, withhold acknowledgement and kill the service.
 The production mapped-service fixture checks acknowledgement, rejected-copy
 rollback, invalid acknowledgements and cancellation on either side of offering
 the reply, including buffer and descriptor lifetime through worker completion.
+SysV full-table fixtures also deny `fstat` while filling the table with ordinary
+duplicates, retaining permitted FD operations in both dumpable and protected callers.
 
 Stock Debian GIO's `GInotifyFileMonitor` receives create/rename/delete from an
 independent launch; the fixture rejects a polling backend. Stock D-Bus registers

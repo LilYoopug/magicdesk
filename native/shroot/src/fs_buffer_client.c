@@ -12,7 +12,7 @@
 extern long md_guest_buffer_control(unsigned, unsigned long, unsigned long);
 extern long md_guest_open_anchor(int, const char *, int, unsigned, int);
 int md_fs_buffer_accepts(const struct md_fs_request *q) {
-    return md_adapter_buffer_ready() && q && md_fs_buffer_operation(q->operation);
+    return md_adapter_buffer_ready() && q && md_fs_operation_valid(q->operation);
 }
 static long check_channels(struct md_fs_buffer_frame *frame, long result) {
     /* EVENT_WAIT: each reply selects one ambiguous slot under the table turn;

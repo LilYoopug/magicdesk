@@ -331,3 +331,12 @@ int md_identity_prepare_exec(const struct md_identity *current, const struct md_
         .secure = next.uid.real != next.uid.effective || next.gid.real != next.gid.effective};
     return 0;
 }
+struct md_identity md_identity_access(const struct md_identity *id,int effective) {
+    struct md_identity actor=*id;
+    if (!effective) {
+        actor.uid.fs=actor.uid.real;
+        actor.gid.fs=actor.gid.real;
+        actor.caps.effective=actor.uid.real==md_identity_root(id) ? actor.caps.permitted : 0;
+    }
+    return actor;
+}

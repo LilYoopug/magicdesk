@@ -2,7 +2,9 @@
 
 The native supervisor owns a lazy, namespace-scoped semaphore and message-queue
 authority. `ipc_namespace` selects it per task. `sysv_sem.c` and `sysv_msg.c` implement the ARM64 Linux operations;
-`sysv_ipc_db.c` owns transactions, permissions and launch leases. No daemon,
+`sysv_ipc_db.c` owns semaphore/message schema and transaction policy. `ipc_database`
+shares storage admission, transaction gates, boot identity and launch leases with
+`sysv_shm`; permissions belong to `ipc_permissions`. No daemon,
 Android service or host SysV kernel support is required. Launches that do not
 use these APIs open no IPC database, create no channel and install no waits.
 
@@ -48,6 +50,15 @@ their last owner disappears; initial objects expire on a changed kernel boot ID.
 The IPC storage version is independent of filesystem/OCI formats and does not
 reinterpret an earlier database. This is not a kernel IPC namespace or security boundary.
 
+The embedded database owner retains its directory until SQLite closes. Admission
+holds the gate through schema setup, boot validation and owner registration.
+Only committed registration permits owner cleanup; failed admission releases its
+provisional lease without modifying another live owner. Invalid boot metadata
+returns an error. Reaping uses the same lease-liveness mechanism for SHM and
+semaphores/messages, with domain-specific reference cleanup and SEM_UNDO callbacks.
+Commit retains the gate for provider-specific post-commit publication or body
+collection, then releases it. No additional object or allocation is required per call.
+
 Blocked calls subscribe to inotify and recheck after subscription. Committed
 mutations and closed owner leases wake them; no heartbeat or state-polling
 interval is used. The supervisor owns the watcher and an epoll registration with
@@ -87,6 +98,10 @@ metadata and blocked waits. Sixteen killed CLONE_FILES waiters leave the survivo
 FD baseline intact. Forty simultaneous waiters exceed the shared slot capacity
 without starving the producer; a seccomp-denied ppoll returns its error and
 removes the waiter.
+The resource fixture also verifies failed admission, owner-ID collisions,
+malformed boot metadata and exact descriptor cleanup. Database tests cover
+independent concurrent connections, retained-directory rename, WAL/rollback
+locking, rollback visibility and symlink rejection.
 
 `test_sysv_apps.py` exercises stock fakeroot-sysv, Symfony SemaphoreStore,
 PHP SysV message queues and Apache prefork with `Mutex sysvsem default` and two

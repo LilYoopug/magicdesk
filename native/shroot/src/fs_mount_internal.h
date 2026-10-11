@@ -143,6 +143,9 @@ struct md_fs_anchor *md_view_anchor_new(struct md_inode_lifetime *, struct md_mo
         struct md_view_mount *, int fd, dev_t, ino_t);
 struct md_fs_anchor *md_view_anchor_import(struct md_inode_lifetime *, struct md_mount_namespace *,
         struct md_view_mount *, int fd, int pin, dev_t, ino_t);
+/* Retains an already selected provider descriptor; does not resolve its name. */
+int md_view_anchor_duplicate(struct md_filesystem *,struct md_mount_namespace *,struct md_view_mount *,
+        int fd,struct md_fs_anchor **);
 void md_view_capture(struct md_filesystem *, struct md_mount_namespace *, struct md_view_mount *,
         struct md_fs_result *, const struct md_fs_output *);
 #endif

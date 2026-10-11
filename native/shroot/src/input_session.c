@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/eventfd.h>
+#include "event_signal.h"
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -46,10 +47,6 @@ struct md_input_session {
     unsigned head,count;
 };
 _Static_assert(sizeof(struct md_input_description)==1780,"gamepad description wire ABI");
-static void wake(int fd) {
-    uint64_t one=1;
-    while (write(fd,&one,sizeof(one))<0 && errno==EINTR) { }
-}
 static void *retain_nodes(void *context) {
     struct device_nodes *n=context;
     atomic_fetch_add_explicit(&n->references,1,memory_order_relaxed); return n;
@@ -89,7 +86,7 @@ static void feedback(void *context,const struct md_input_rumble *effect) {
             .effect=effect->effect,.strong=effect->strong,.weak=effect->weak,
             .duration=effect->milliseconds,.delay=effect->delay,.repeats=effect->repeats};
     }
-    pthread_mutex_unlock(&s->lock); wake(s->wake);
+    pthread_mutex_unlock(&s->lock); md_event_signal(s->wake);
 }
 static int directory(int root,const char *path) {
     char copy[PATH_MAX];
@@ -254,7 +251,7 @@ static int packet(struct md_input_session *s,const struct header *h,const unsign
     }
     case REMOVE: if (h->size) return -EPROTO; unpublish(s,h->slot); return 0;
     case NEUTRAL: if (h->size) return -EPROTO; md_input_neutralize(s->bus); return 0;
-    case READY: if (h->size || *ready) return -EPROTO; *ready=1; wake(s->ready); return 0;
+    case READY: if (h->size || *ready) return -EPROTO; *ready=1; md_event_signal(s->ready); return 0;
     case FRAME: {
         if (!*ready || h->size%8 || h->size/8>MD_INPUT_QUEUE-1) return -EPROTO;
         struct input_event events[MD_INPUT_QUEUE];
@@ -278,7 +275,7 @@ static void *transport(void *context) {
         /* EVENT_WAIT: input/feedback readiness or stop event; no periodic polling. */
         long result=md_event_wait(events,2,INT64_MAX);
         if (result<0) { error=(int)result; break; }
-        if (events[1].revents) { uint64_t value; while (read(s->wake,&value,8)<0 && errno==EINTR) { } }
+        if (events[1].revents && (error=md_event_acknowledge(s->wake))) break;
         if (events[0].revents&POLLOUT) {
             pthread_mutex_lock(&s->lock);
             ssize_t n=send(s->socket,(char *)&s->feedback[s->head]+sent,sizeof(struct feedback)-sent,MSG_NOSIGNAL|MSG_DONTWAIT);
@@ -305,7 +302,7 @@ static void *transport(void *context) {
     md_uinput_stop(s->uinput);
     md_input_disconnect(s->bus);
     if (!ready && !error) error=-ENOTCONN;
-    atomic_store(&s->error,error); wake(s->ready); return NULL;
+    atomic_store(&s->error,error); md_event_signal(s->ready); return NULL;
 }
 static int mount_tree(struct md_filesystem *fs,struct md_provider_tree *tree,const char *path) {
     struct md_view_location location={.fd=-1,.parent=-1};
@@ -404,7 +401,7 @@ failed:
 void md_input_session_stop(struct md_input_session *s) {
     if (!s) return;
     atomic_store(&s->stopping,1);
-    if (s->wake>=0) wake(s->wake);
+    if (s->wake>=0) md_event_signal(s->wake);
     if (s->started) pthread_join(s->thread,NULL);
     md_uinput_stop(s->uinput);
     md_device_events_stop(s->events);

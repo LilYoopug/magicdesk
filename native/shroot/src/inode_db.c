@@ -3,6 +3,7 @@
 #include "inode_watch.h"
 #include "inode_view.h"
 #include "inode_overlay.h"
+#include "storage_database.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -14,15 +15,7 @@
 #include <unistd.h>
 
 int mdi_sql_error(int rc) {
-    if (rc == SQLITE_CONSTRAINT_PRIMARYKEY || rc == SQLITE_CONSTRAINT_UNIQUE) return -EEXIST;
-    switch (rc & 255) {
-    case SQLITE_OK: case SQLITE_ROW: case SQLITE_DONE: return 0;
-    case SQLITE_BUSY: case SQLITE_LOCKED: return -EAGAIN;
-    case SQLITE_NOMEM: return -ENOMEM;
-    case SQLITE_FULL: return -ENOSPC;
-    case SQLITE_READONLY: return -EROFS;
-    default: return -EIO;
-    }
+    return md_database_result(rc);
 }
 int mdi_sql(struct md_inode_store *s, const char *text) {
     mdi_cache_invalidate(s);
@@ -548,7 +541,7 @@ static int store_open(const char *directory, int create, int exclusive,
     s->objects = s->watch_presence = -1;
     if (!r && (s->objects = openat(root, "objects", O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)) < 0) r = -errno;
     if (!r) r = store_lock(s);
-    if (!r) r = mdi_sqlite_open(root,create,&s->db);
+    if (!r) r = md_database_open(root,"namespace.db",create,&s->db);
     if (!r) r = mdi_sql_error(sqlite3_extended_result_codes(s->db, 1));
     /* Every store retains rollback and interprocess isolation. Only persistent
      * lifetimes require power-loss durability, including retained reconnects. */

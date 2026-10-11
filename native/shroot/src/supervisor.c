@@ -77,6 +77,7 @@
 #include "process_image_view.h"
 #include <sys/signalfd.h>
 #include <sys/eventfd.h>
+#include "event_signal.h"
 #include <sys/epoll.h>
 #include "launch_registry.h"
 #include <sys/socket.h>
@@ -335,7 +336,6 @@ static void retry_wait(struct thread *t, enum retry_kind kind) {
 enum { THREAD_BUCKETS = 257 };
 static struct thread *thread_index[THREAD_BUCKETS];
 static struct md_task_wait task_wait;
-static struct md_pid_retired retired_pids;
 static int pid_collection_pending;
 static struct md_debugger *debugger;
 static pid_t leader;
@@ -737,14 +737,7 @@ static int descriptor_stat(struct thread *t, int fd, struct stat *st, int native
     if (!error || error == -EXDEV) {
         if (fstat(fd, st)) error = -errno;
         else if (!error) {
-            st->st_dev = response.result.info.device; st->st_ino = response.result.info.inode;
-            st->st_nlink = response.result.info.links; st->st_mode = response.result.info.mode;
-            st->st_uid = response.result.info.uid; st->st_gid = response.result.info.gid;
-            st->st_rdev = response.result.info.rdev; st->st_size = response.result.info.size;
-            st->st_blocks = response.result.info.blocks; st->st_blksize = response.result.info.block_size;
-            st->st_atim = (struct timespec){response.result.info.access_seconds, response.result.info.access_nanos};
-            st->st_mtim = (struct timespec){response.result.info.modify_seconds, response.result.info.modify_nanos};
-            st->st_ctim = (struct timespec){response.result.info.change_seconds, response.result.info.change_nanos};
+            md_fs_info_stat(&response.result.info,st);
         }
         else error = 0;
     }
@@ -1209,12 +1202,14 @@ struct proc_owner {
     const struct md_identity *identity;
     const struct md_task_resources *resources;
     struct md_pid_namespace *pid_namespace;
+    struct md_cgroup_member *cgroup;
 };
 static struct proc_owner proc_owner(pid_t pid) {
     struct thread *t=find_thread(pid);
-    if (t && t->born) return (struct proc_owner){pid,&t->identity,&t->resources,md_pid_identity_namespace(t->resources.pid)};
-    struct md_pid_identity *retired=md_pid_retired_find(&retired_pids,pid);
-    return (struct proc_owner){pid,md_pid_identity_credentials(retired),NULL,md_pid_identity_namespace(retired)};
+    if (t && t->born) return (struct proc_owner){pid,&t->identity,&t->resources,
+        md_pid_identity_namespace(t->resources.pid),t->resources.cgroup};
+    struct md_task_retired_view retired=md_task_registry_retired(tasks,pid);
+    return (struct proc_owner){pid,retired.identity,NULL,md_pid_identity_namespace(retired.pid),retired.cgroup};
 }
 static uid_t process_signal_uid(struct thread *observer,pid_t sender,uid_t fallback) {
     const struct md_identity *identity=proc_owner(sender).identity;
@@ -1271,8 +1266,9 @@ static int proc_node_access(const struct md_identity *id, const struct stat *st,
     if ((mode&X_OK) && !S_ISDIR(st->st_mode)) return -EACCES;
     if ((mode&W_OK) && S_ISDIR(st->st_mode)) return -EACCES;
     if (!(mode&W_OK)) return 0;
-    if ((effective ? id->uid.fs : id->uid.real)==st->st_uid) return 0;
-    return md_identity_capable_in(id,NULL,CAP_DAC_OVERRIDE) ? 0 : -EACCES;
+    struct md_identity actor=md_identity_access(id,effective);
+    if (actor.uid.fs==st->st_uid) return 0;
+    return md_identity_capable_in(&actor,NULL,CAP_DAC_OVERRIDE) ? 0 : -EACCES;
 }
 static int proc_node_metadata(struct thread *t, const struct md_proc_metadata_request *q, struct md_proc_metadata_result *out) {
     struct stat *value=&out->value;
@@ -1281,8 +1277,7 @@ static int proc_node_metadata(struct thread *t, const struct md_proc_metadata_re
             (enum md_network_parameter)(q->kind-MD_PROC_NET_UNPRIVILEGED_PORT),NULL);
         if (!view.ops) return -errno;
         int error=view.ops->stat(view.context,value);
-        struct md_identity actor=t->identity;
-        if (!q->effective) { actor.uid.fs=actor.uid.real; actor.gid.fs=actor.gid.real; }
+        struct md_identity actor=md_identity_access(&t->identity,q->effective);
         if (!error) error=view.ops->access(view.context,&actor,q->access);
         if (!error) {
             value->st_uid=md_identity_visible_id(&t->identity,0,value->st_uid);
@@ -1330,8 +1325,7 @@ static int proc_node_metadata(struct thread *t, const struct md_proc_metadata_re
         out->kind=(unsigned)kind;
         error=md_proc_file_control_stat(file,value);
         if (!error) {
-            struct md_identity actor=t->identity;
-            if (!q->effective) { actor.uid.fs=actor.uid.real; actor.gid.fs=actor.gid.real; }
+            struct md_identity actor=md_identity_access(&t->identity,q->effective);
             error=md_proc_file_control_access(file,&actor,q->access);
         }
         if (!error) {
@@ -1587,7 +1581,7 @@ static void proc_file_request(struct thread *t, const struct seccomp_notif *q) {
             } else if (!error) file=md_proc_file_open(selected.identity->user_namespace,file_kind,&t->identity,flags);
             if (file && !source) {
                 md_proc_file_node(file,node); md_proc_file_pid_view(file,view);
-                if (md_proc_file_cgroup_kind(file_kind)) md_proc_file_cgroup(file,selected.resources->cgroup);
+                if (md_proc_file_cgroup_kind(file_kind)) md_proc_file_cgroup(file,selected.cgroup);
             }
             md_pid_namespace_release(view);
             int fd=error ? error : !file ? -errno : flags&O_PATH ? md_proc_file_descriptor(file) : 0;
@@ -1842,7 +1836,7 @@ static int debugger_parent(pid_t pid) {
     return t ? t->parent : 0;
 }
 static void debugger_reaped(pid_t pid,int native_wait) {
-    if (native_wait) md_pid_retired_reap(&retired_pids,pid);
+    if (native_wait) md_task_registry_reap(tasks,pid);
     else pid_collection_pending=1;
 }
 static int debugger_group(pid_t pid) {
@@ -3101,10 +3095,7 @@ static void retry_dispatch(unsigned queue) {
     if (md_pending_dispatch(&retry_queues[queue],retry_progress,NULL)==-EBUSY) {
         /* Preserve a nested completion wakeup without recursive dispatch or
          * an unbounded drain that could starve ptrace/worker events. */
-        uint64_t one=1;
-        ssize_t n;
-        do { n=write(fd_ready,&one,sizeof(one)); } while (n<0 && errno==EINTR);
-        CHECK(n==(ssize_t)sizeof(one) || (n<0 && errno==EAGAIN));
+        CHECK(!md_event_signal(fd_ready));
     }
 }
 static void adapter_progress(void) {
@@ -3596,8 +3587,7 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
     buffer_reply(t,result); adapter_progress();
 }
 static void fd_progress(void) {
-    uint64_t value;
-    while (read(fd_ready,&value,sizeof(value))<0 && errno==EINTR) { }
+    md_event_acknowledge(fd_ready);
     retry_dispatch(1);
     adapter_progress();
 }
@@ -4426,13 +4416,13 @@ static int pid_gone(pid_t pid) {
     return fstatat(AT_FDCWD,path,&st,0)<0 && errno==ENOENT;
 }
 static void pid_collect(void) {
-    if (!pid_collection_pending || !retired_pids.head) { pid_collection_pending=0; return; }
+    if (!pid_collection_pending || !md_task_registry_has_retired(tasks)) { pid_collection_pending=0; return; }
     for (struct thread *t=threads;t;t=t->next) if (t->pid
             && (t->phase==PROCESS_OBSERVING || t->phase==PROCESS_INFO_LOAD || t->phase==PROCESS_INFO_STORE
                 || t->phase==DEBUG_WAIT_ENTRY || t->phase==DEBUG_WAIT_EXIT)) return;
     /* Exit may precede translation of a completed kernel wait. Only quiescent
      * wait ownership permits collecting automatically reaped identities. */
-    md_pid_retired_collect(&retired_pids,pid_gone); pid_collection_pending=0;
+    md_task_registry_collect(tasks,pid_gone); pid_collection_pending=0;
 }
 static void progress_events(const struct pollfd *events) {
     if (events[0].revents) drain();
@@ -4443,6 +4433,13 @@ static void progress_events(const struct pollfd *events) {
     if (events[1].revents & POLLIN) external_stat();
     if (events[1].revents & POLLHUP) { close(listener); listener = -1; }
 }
+enum { EVENT_SOURCES = 6 };
+static void event_sources(struct pollfd events[EVENT_SOURCES]) {
+    const struct pollfd current[EVENT_SOURCES] = {{signal_fd,POLLIN,0}, {broker ? -1 : listener,POLLIN,0},
+        {md_fs_worker_fd(filesystem),POLLIN,0}, {fd_ready,POLLIN,0},
+        {ipc_events,POLLIN,0}, {socket_events,POLLIN,0}};
+    memcpy(events,current,sizeof(current));
+}
 static pid_t wait_event(int *status, struct rusage *usage, int64_t deadline) {
     for (;;) {
         memory_progress();
@@ -4452,12 +4449,11 @@ static pid_t wait_event(int *status, struct rusage *usage, int64_t deadline) {
             memory_completions_pending=0;
             CHECK(!md_fs_worker_dispatch(filesystem)); fd_progress();
         }
-        struct pollfd events[] = {{signal_fd, POLLIN, 0}, {broker ? -1 : listener, POLLIN, 0},
-            {md_fs_worker_fd(filesystem), POLLIN, 0}, {fd_ready,POLLIN,0},
-            {ipc_events,POLLIN,0}, {socket_events,POLLIN,0}};
+        struct pollfd events[EVENT_SOURCES];
+        event_sources(events);
         /* A continuously runnable tracee must not starve worker completions,
          * socket readiness or cancellation. Service both sources each turn. */
-        long ready = md_event_poll(events, 6);
+        long ready = md_event_poll(events, EVENT_SOURCES);
         CHECK(ready >= 0);
         if (ready) progress_events(events);
         pid_t pid = md_task_wait_ready(&task_wait, status, md_debugger_active(debugger) ? usage : NULL);
@@ -4472,7 +4468,10 @@ static pid_t wait_event(int *status, struct rusage *usage, int64_t deadline) {
             if (t->control_pending->deadline<control_bound) control_bound=t->control_pending->deadline;
         if (control_bound<bound) bound=control_bound;
         if (memory_deadline()<bound) bound=memory_deadline();
-        long outcome = md_event_wait(events, 6, bound);
+        /* Dispatch may retire a source, notably bootstrap's listener on HUP.
+         * A readiness snapshot cannot outlive its callbacks' descriptor owners. */
+        event_sources(events);
+        long outcome = md_event_wait(events, EVENT_SOURCES, bound);
         if (outcome==-ETIMEDOUT && bound==control_bound) {
             for (struct thread *t=threads;t;t=t->next) if (t->pid) control_progress(t);
             continue;
@@ -5016,8 +5015,11 @@ int main(int argc, char **argv) {
             if (pid == leader && !cancelling) result = code;
             if (code) TRACE("PROBE exit pid=%d status=%d ready=%d calls=%u\n", pid, code, t->ready, t->calls);
             int traced=md_debugger_traced(debugger,pid);
+            if (t->born && (t->pid==t->tgid || traced)) {
+                md_task_registry_retire(tasks,pid,&t->identity);
+                pid_collection_pending=1;
+            }
             if (t->resources.pid) {
-                md_pid_identity_exit_credentials(t->resources.pid,&t->identity);
                 if (md_pid_identity_exit(t->resources.pid)) {
                     struct md_pid_namespace *space=md_pid_identity_namespace(t->resources.pid);
                     for (struct thread *member=threads;member;member=member->next)
@@ -5025,8 +5027,7 @@ int main(int argc, char **argv) {
                                 && md_pid_namespace_contains(space,md_pid_identity_namespace(member->resources.pid)))
                             syscall(SYS_tgkill,member->tgid,member->pid,SIGKILL);
                 }
-                if (t->pid==t->tgid || traced) md_pid_retired_take(&retired_pids,t->resources.pid);
-                else md_pid_identity_release(t->resources.pid);
+                md_pid_identity_release(t->resources.pid);
                 pid_collection_pending=1;
                 t->resources.pid=NULL;
             }
@@ -5087,7 +5088,7 @@ int main(int argc, char **argv) {
                     t->resources = former->resources;
                     former->resources = (struct md_task_resources){0};
                     md_pid_identity_exec(t->resources.pid,t->resources.pid_group);
-                    md_pid_retired_reap(&retired_pids,pid);
+                    md_task_registry_reap(tasks,pid);
                     md_pid_identity_release(t->resources.pid);
                     t->resources.pid=md_pid_identity_retain(t->resources.pid_group);
                     exec_images_release(t);
@@ -5386,7 +5387,7 @@ int main(int argc, char **argv) {
                 if (value>0 && (nr==SYS_getppid || nr==SYS_wait4 || nr==SYS_getpgid || nr==SYS_getsid
                         || nr==SYS_setsid || nr==SYS_set_tid_address)) {
                     regs.regs[0]=visible_pid(t,(pid_t)value);
-                    if (nr==SYS_wait4) md_pid_retired_reap(&retired_pids,(pid_t)value);
+                    if (nr==SYS_wait4) md_task_registry_reap(tasks,(pid_t)value);
                 }
                 if (!set_registers(pid,&regs)) continue;
                 if (t->debug_call_active) t->debug_adapter=1;
@@ -5628,7 +5629,7 @@ int main(int argc, char **argv) {
             if (regs.pc==abi.stored_groups && t->phase==PROCESS_INFO_STORE) {
                 if (t->original.regs[8]==SYS_waitid && !(t->original.regs[3]&WNOWAIT) && (t->process_info_code==CLD_EXITED
                         || t->process_info_code==CLD_KILLED || t->process_info_code==CLD_DUMPED))
-                    md_pid_retired_reap(&retired_pids,t->process_info_native);
+                    md_task_registry_reap(tasks,t->process_info_native);
                 if (!set_registers(pid,&t->process_return) || !restore_mask(t)) continue;
                 t->phase=IDLE; resume(pid,0); continue;
             }
@@ -5896,7 +5897,6 @@ int main(int argc, char **argv) {
         group_stops, group_wakes, raced_wakes);
     TRACE("PROBE identity admittedImages=%u changes=%u hostUid=%u\n",
         admitted_images, identity_changes, getuid());
-    md_pid_retired_release(&retired_pids);
     close(signal_fd); return result;
 }
 static void report_statistics(void) {

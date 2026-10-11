@@ -29,7 +29,7 @@ static int undo(struct md_ipc *s, struct md_ipc_pending *p, unsigned number, int
     sqlite3_stmt *q=NULL;
     int r=md_ipc_query(s,"SELECT delta FROM undo WHERE owner=?1 AND space=?2 AND object=?3 AND n=?4",&q);
     if (!r) {
-        sqlite3_bind_int64(q,1,s->owner); sqlite3_bind_int64(q,2,p->undo);
+        sqlite3_bind_int64(q,1,s->database.owner); sqlite3_bind_int64(q,2,p->undo);
         sqlite3_bind_int(q,3,p->call.args[0]); sqlite3_bind_int(q,4,number);
         int step=sqlite3_step(q);
         if (step==SQLITE_ROW) delta+=sqlite3_column_int(q,0); else if (step!=SQLITE_DONE) r=-EIO;
@@ -39,7 +39,7 @@ static int undo(struct md_ipc *s, struct md_ipc_pending *p, unsigned number, int
     if (!r) r=md_ipc_query(s,"INSERT INTO undo VALUES(?1,?2,?3,?4,?5,?6) "
         "ON CONFLICT(owner,space,object,n) DO UPDATE SET delta=excluded.delta,pid=excluded.pid",&q);
     if (!r) {
-        sqlite3_bind_int64(q,1,s->owner); sqlite3_bind_int64(q,2,p->undo);
+        sqlite3_bind_int64(q,1,s->database.owner); sqlite3_bind_int64(q,2,p->undo);
         sqlite3_bind_int(q,3,p->call.args[0]); sqlite3_bind_int(q,4,number);
         sqlite3_bind_int(q,5,delta); sqlite3_bind_int(q,6,p->pid); r=md_ipc_sql(sqlite3_step(q));
     }

@@ -37,8 +37,7 @@ int md_fs_mqueue_operation(struct md_filesystem *fs,struct md_mount_namespace *v
         else if ((q->mode&W_OK) && md_view_readonly(mount)) r=-EROFS;
         else r=md_mqueue_stat(queues,fd,&st);
         if (!r) {
-            struct md_identity actor=*id;
-            if (!(q->flags&MD_AT_EACCESS)) { actor.uid.fs=actor.uid.real; actor.gid.fs=actor.gid.real; }
+            struct md_identity actor=md_identity_access(id,!!(q->flags&MD_AT_EACCESS));
             r=md_file_permissions(&st,q->mode,&actor);
         }
         break;

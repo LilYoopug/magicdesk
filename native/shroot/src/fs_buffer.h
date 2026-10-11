@@ -23,31 +23,6 @@ enum md_fs_buffer_transfer { MD_FS_BUFFER_NO_FD, MD_FS_BUFFER_ANCHOR, MD_FS_BUFF
     MD_FS_BUFFER_TASK_PATH, MD_FS_BUFFER_CALLER_OPEN };
 enum { MD_FS_BUFFER_EXPORT=2, MD_FS_BUFFER_IMPORT=3, MD_FS_BUFFER_CHANNEL_CHECK=4,
     MD_FS_BUFFER_IPC_ADMIT=5, MD_FS_BUFFER_RESULT_ADMIT=6 };
-/* Stateful inputs are captured according to md_fs_operation_data_inputs. */
-static inline int md_fs_buffer_operation(unsigned operation) {
-    switch (operation) {
-    case MD_FS_OPEN: case MD_FS_REOPEN:
-    case MD_FS_CREATE: case MD_FS_TEMPORARY: case MD_FS_OPEN_IMAGE: case MD_FS_OPEN_OBJECT:
-    case MD_FS_GETACL: case MD_FS_XATTR_OBJECT: case MD_FS_MOUNT_TABLE:
-    case MD_FS_SETACL: case MD_FS_SOCKET_BIND: case MD_FS_IPC: case MD_FS_IPC_PEER:
-    case MD_FS_WATCH_CREATE: case MD_FS_WATCH_ADD: case MD_FS_WATCH_REMOVE:
-    case MD_FS_WATCH_BYTES: case MD_FS_WATCH_CONTAINS:
-    case MD_FS_WATCH_READ: case MD_FS_SEEKDIR: case MD_FS_GETDENTS:
-    case MD_FS_PATH: case MD_FS_READLINK: case MD_FS_REALPATH:
-    case MD_FS_STAT: case MD_FS_FSTAT: case MD_FS_MKDIR: case MD_FS_MKNOD:
-    case MD_FS_SYMLINK: case MD_FS_LINK: case MD_FS_UNLINK: case MD_FS_RENAME:
-    case MD_FS_CHMOD: case MD_FS_CHOWN: case MD_FS_ACCESS: case MD_FS_UTIMENS:
-    case MD_FS_GETCAP: case MD_FS_SETCAP: case MD_FS_REMOVECAP:
-    case MD_FS_REMOVEACL: case MD_FS_OBJECT_ID:
-    case MD_FS_SOCKET_ADDRESS: case MD_FS_SOCKET_NAME: case MD_FS_NATIVE_MOUNT:
-    case MD_FS_CHROOT: case MD_FS_UMASK: case MD_FS_STATFS: case MD_FS_WATCH_PATH: case MD_FS_TASK_PATH:
-    case MD_FS_XATTR: case MD_FS_FXATTR:
-    case MD_FS_MOUNT: case MD_FS_FSOPEN: case MD_FS_FSCONFIG: case MD_FS_FSMOUNT: case MD_FS_BPF: case MD_FS_FDINFO:
-    case MD_FS_LANDLOCK:
-        return 1;
-    default: return 0;
-    }
-}
 struct md_fs_buffer_input {
     int base[2];
     unsigned flags, mode, capacity, value_size;

@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "proc_fdinfo.h"
 #include "fs_engine.h"
+#include "fs_control.h"
 #include "pid_namespace.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -116,9 +117,10 @@ void md_fs_fdinfo(struct md_filesystem *fs,const struct md_fs_request *q,
     if (!result->error) {
         f->stat.st_uid=fs->actor->identity.uid.effective;
         f->stat.st_gid=fs->actor->identity.gid.effective;
-        result->error=output->control(output->control_context,&ops,f,&fs->actor->identity,(int)q->flags);
+        result->error=md_fs_control_publish(fd,(struct md_control_file){&ops,f},NULL,
+            &fs->actor->identity,(int)q->flags,result,output);
+        fd=-1;
     }
     release(f);
-    if (result->error) { if (fd>=0) close(fd); }
-    else result->fd=fd;
+    if (fd>=0) close(fd);
 }

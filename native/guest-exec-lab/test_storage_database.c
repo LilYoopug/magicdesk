@@ -1,0 +1,93 @@
+#define _GNU_SOURCE
+#include "storage_database.h"
+#include "private_tree.h"
+#include <assert.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+static void execute(sqlite3 *db,const char *sql) {
+    int r=sqlite3_exec(db,sql,NULL,NULL,NULL);
+    if (r!=SQLITE_OK) fprintf(stderr,"database: %s: %s\n",sql,sqlite3_errmsg(db));
+    assert(r==SQLITE_OK);
+}
+static int value(sqlite3 *db) {
+    sqlite3_stmt *q=NULL;
+    assert(sqlite3_prepare_v2(db,"SELECT value FROM test",-1,&q,NULL)==SQLITE_OK);
+    assert(sqlite3_step(q)==SQLITE_ROW);
+    int n=sqlite3_column_int(q,0);
+    assert(sqlite3_finalize(q)==SQLITE_OK); return n;
+}
+static void retained(const char *journal) {
+    char path[]="storage-database-XXXXXX"; assert(mkdtemp(path));
+    int parent=open(path,O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(parent>=0);
+    assert(!mkdirat(parent,"original",0700));
+    int root=openat(parent,"original",O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(root>=0);
+    sqlite3 *first=NULL,*second=NULL;
+    assert(!md_database_open(root,"state.db",1,&first));
+    execute(first,journal); execute(first,"CREATE TABLE test(value);INSERT INTO test VALUES(1)");
+    assert(!renameat(parent,"original",parent,"renamed"));
+    int alias=openat(parent,"renamed",O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(alias>=0);
+    assert(!md_database_open(alias,"state.db",0,&second));
+    assert(value(second)==1);
+    execute(first,"BEGIN IMMEDIATE;UPDATE test SET value=2");
+    assert(md_database_result(sqlite3_exec(second,"BEGIN IMMEDIATE",NULL,NULL,NULL))==-EAGAIN);
+    assert(value(second)==1);
+    execute(first,"COMMIT"); assert(value(second)==2);
+    execute(second,"BEGIN IMMEDIATE;UPDATE test SET value=3;ROLLBACK");
+    assert(value(first)==2);
+    assert(sqlite3_close(first)==SQLITE_OK); close(root);
+    execute(second,"UPDATE test SET value=4");
+    assert(sqlite3_close(second)==SQLITE_OK);
+    assert(!md_database_open(alias,"state.db",0,&first)); assert(value(first)==4);
+    assert(sqlite3_close(first)==SQLITE_OK);
+    assert(!symlinkat("state.db",alias,"link.db"));
+    assert(md_database_open(alias,"link.db",0,&first)<0 && !first);
+    assert(md_database_open(alias,"../state.db",1,&first)==-EINVAL && !first);
+    assert(md_database_open(alias,"missing.db",0,&first)<0 && !first);
+    close(alias); close(parent); assert(!md_private_tree_discard(AT_FDCWD,path));
+}
+struct concurrent { int directory; const char *name; pthread_barrier_t *start; };
+static void *connections(void *context) {
+    struct concurrent *c=context;
+    /* EVENT_WAIT: both independent database owners start; fixture alarm fails a missing peer. */
+    int ready=pthread_barrier_wait(c->start);
+    assert(!ready || ready==PTHREAD_BARRIER_SERIAL_THREAD);
+    for (unsigned i=0;i<64;++i) {
+        sqlite3 *db=NULL;
+        assert(!md_database_open(c->directory,c->name,1,&db));
+        assert(!sqlite3_db_mutex(db));
+        execute(db,"PRAGMA journal_mode=WAL;CREATE TABLE IF NOT EXISTS test(value);");
+        execute(db,"BEGIN IMMEDIATE;DELETE FROM test;INSERT INTO test VALUES(1);COMMIT");
+        assert(value(db)==1);
+        assert(sqlite3_close(db)==SQLITE_OK);
+    }
+    return NULL;
+}
+static void concurrent(void) {
+    char path[]="database-threads-XXXXXX"; assert(mkdtemp(path));
+    int root=open(path,O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(root>=0);
+    pthread_barrier_t start; assert(!pthread_barrier_init(&start,NULL,2));
+    struct concurrent owners[]={{root,"first.db",&start},{root,"second.db",&start}};
+    pthread_t threads[2];
+    for (unsigned i=0;i<2;++i) assert(!pthread_create(&threads[i],NULL,connections,&owners[i]));
+    /* EVENT_WAIT: both owners finish their transactions; fixture alarm bounds deadlock. */
+    for (unsigned i=0;i<2;++i) assert(!pthread_join(threads[i],NULL));
+    assert(!pthread_barrier_destroy(&start)); close(root);
+    assert(!md_private_tree_discard(AT_FDCWD,path));
+}
+void test_storage_database(void) {
+    assert(sqlite3_threadsafe()!=0);
+    concurrent();
+    retained("PRAGMA journal_mode=WAL");
+    retained("PRAGMA journal_mode=PERSIST");
+    assert(md_database_result(SQLITE_NOMEM)==-ENOMEM);
+    assert(md_database_result(SQLITE_FULL)==-ENOSPC);
+    assert(md_database_result(SQLITE_READONLY)==-EROFS);
+    assert(md_database_result(SQLITE_CONSTRAINT_UNIQUE)==-EEXIST);
+    puts("PASS retained database directories, concurrent owners, WAL/rollback locking, failure ownership and errno");
+}

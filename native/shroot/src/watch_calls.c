@@ -25,7 +25,10 @@ static long watched(const struct md_fs *fs, int fd) {
     if (fd < 0 || !*fs->endpoint) return 0;
     struct stat st;
     long r = RAW2(fstat, fd, &st);
-    if (r || !S_ISSOCK(st.st_mode)) return r;
+    if (!r && !S_ISSOCK(st.st_mode)) return 0;
+    /* This is only a local fast rejection, not guest IO. A sandbox may deny
+     * fstat while allowing dup/read; the filesystem owner still determines
+     * watch identity from the captured descriptor, without relaxing filters. */
     struct md_fs_response out;
     r = request(fs, MD_FS_WATCH_CONTAINS, fd, -1, 0, &out);
     return r ? r : (long)out.result.position;

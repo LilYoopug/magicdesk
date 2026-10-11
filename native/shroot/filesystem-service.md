@@ -33,6 +33,28 @@ separate from successful namespace package-lifecycle checks.
   Image-open replies additionally carry a bounded object ID and canonical path,
   captured with the descriptor in one namespace transaction.
 
+`file_metadata.h` owns conversion between native stat, fixed-width metadata and
+guest stat/statx, including device identity, allocated blocks and timestamps.
+Only known mount IDs are advertised. Access checks use a borrowed
+`md_identity_access` value for real or effective credentials; they never mutate
+the request's retained identity. `file_permissions.h` supplies common mode-bit
+and DAC capability rules for inode storage, virtual providers and descriptor
+metadata. Inode ACLs and provider-specific restrictions remain with their owners.
+
+Both transports accept the same operation set from `fs_operation.h`. Path and
+descriptor dispatch use one ordered virtual-provider selection. `fs_control`
+prepares the carrier before publishing typed behavior and origin: a failed open
+cannot leave a registered control object, and every failure closes its carrier.
+Anonymous Landlock/BPF/fscontext descriptors and proc fdinfo use the same
+publication contract without a mount origin. Providers retain their own access,
+readonly and IO semantics.
+
+Host readiness uses `event_signal.h` for owned nonblocking eventfds. Signals
+coalesce; one acknowledgement consumes a burst without draining a concurrent
+producer indefinitely. Queue/state remains authoritative, not the event counter.
+EINTR retries the same syscall; an empty acknowledgement or saturated signal
+is harmless. Socket payloads and semaphore counters do not use this contract.
+
 The abstract Unix SOCK_SEQPACKET endpoint has no filesystem path to translate.
 Both ends check SO_PEERCRED against their effective UID. Device fixtures require
 the already-selected shell UID 2000; build-host tests use the host UID. This is
@@ -95,9 +117,9 @@ cross the service; they operate on the actual shared kernel object.
 Image preparation uses a read-only open operation that returns both the exact
 descriptor and its logical identity. A sealed catalogue image retains its original
 namespace object ID; admission and executable access checks remain separate.
-Namespace path xattrs likewise operate in the client on the retained native
-inode, with real kernel permission checks. Values are not serialized into the
-service protocol or stored in SQLite.
+Xattrs use bounded captured values through the shared filesystem operation
+contract. Inode-backed attributes retain guest metadata and permissions; native
+attachments retain their real xattrs and kernel access checks.
 
 Directory reads return bounded Linux getdents64 records. Explicit capacity and
 offset fields are validated, as are returned record boundaries, cookies and names.

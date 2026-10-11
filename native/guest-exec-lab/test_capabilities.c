@@ -56,6 +56,10 @@ int main(int argc, char **argv) {
         assert(execute(argv[1], argv[2], missing[i], ENOSYS) == 126);
         assert(execute(NULL, NULL, missing[i], ENOSYS) == 0);
     }
+    /* Bootstrap HUP and SIGCHLD are independent events: closing the listener
+     * must leave a valid wait set while child exit is still in flight. */
+    for (unsigned i=0;i<32;i++)
+        assert(execute(argv[1],argv[2],SYS_close_range,ENOSYS)==126);
     const int publication_errors[]={EINVAL,EACCES};
     for (unsigned i=0;i<sizeof(publication_errors)/sizeof(*publication_errors);++i) {
         assert(execute(argv[1],argv[2],NO_ADDFD,publication_errors[i])==126);

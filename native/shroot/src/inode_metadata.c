@@ -3,6 +3,7 @@
 #include "inode_overlay.h"
 #include "fs_operation.h"
 #include "linux_abi.h"
+#include "file_permissions.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -39,22 +40,15 @@ int mdi_permission_as(struct md_inode_store *s, const struct mdi_node *node, int
     struct stat st;
     int error = mdi_stat(s, node, &st);
     if (error || !mode) return error;
-    struct md_identity ids = *identity;
-    if (md_identity_file_capable(&ids,st.st_uid,st.st_gid,CAP_DAC_OVERRIDE))
-        return (mode & X_OK) && !S_ISDIR(st.st_mode) && !(st.st_mode & 0111) ? -EACCES : 0;
-    if (!(mode&W_OK) && (!(mode&X_OK) || S_ISDIR(st.st_mode))
-            && md_identity_file_capable(&ids,st.st_uid,st.st_gid,CAP_DAC_READ_SEARCH)) return 0;
-    if (node->acl_mask&MD_ACL_ACCESS) return mdi_acl_permission(s,node,&ids,mode);
-    unsigned shift = ids.uid.fs == st.st_uid ? 6 : md_identity_in_group(&ids, st.st_gid) ? 3 : 0;
-    return (((unsigned)st.st_mode >> shift) & (unsigned)mode) == (unsigned)mode ? 0 : -EACCES;
+    if (md_file_dac_override(&st,mode,identity)) return 0;
+    if (node->acl_mask&MD_ACL_ACCESS) return mdi_acl_permission(s,node,identity,mode);
+    return md_file_mode_allows(&st,mode,identity) ? 0 : -EACCES;
 }
 int mdi_permission(struct md_inode_store *s, const struct mdi_node *node, int mode, int real) {
     struct md_identity ids;
     const struct md_identity *actor=s->identity;
     if (real && actor) {
-        ids=*actor;
-        ids.uid.fs=ids.uid.real; ids.gid.fs=ids.gid.real;
-        ids.caps.effective=ids.uid.real==md_identity_root(&ids) ? ids.caps.permitted : 0;
+        ids=md_identity_access(actor,0);
         actor=&ids;
     }
     int r;

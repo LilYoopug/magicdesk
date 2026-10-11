@@ -15,6 +15,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/eventfd.h>
+#include "event_signal.h"
 #include <unistd.h>
 
 #ifdef MD_FS_TESTING
@@ -352,8 +353,8 @@ int md_fs_serve(struct md_filesystem *fs, int listener, int stop_fd,
             if (retired<0) { error=retired; break; }
         }
         if (fds[6].revents) {
-            uint64_t value;
-            while (read(fds[6].fd,&value,sizeof(value))<0 && errno==EINTR) { }
+            error=md_event_acknowledge(fds[6].fd);
+            if (error) break;
         }
         if (fds[5].revents) {
             error=md_fd_exchanges_drain(fs->exchanges);

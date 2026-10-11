@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "fs_mount_internal.h"
+#include "fs_control.h"
 #include "inode_internal.h"
 #include "linux_abi.h"
 #include <errno.h>
@@ -44,10 +45,14 @@ int md_fs_provider_operation(struct md_filesystem *fs,struct md_mount_namespace 
         if (!result) { md_fs_stat_info(&st,&out->info); out->info.mount_id=mount->id; }
         break;
     }
-    case MD_FS_ACCESS:
+    case MD_FS_ACCESS: {
         if (q->flags&~(AT_SYMLINK_NOFOLLOW|MD_AT_EACCESS) || q->mode&~7U) result=-EINVAL;
-        else result=file.ops->access(file.context,id,q->mode);
+        else {
+            struct md_identity actor=md_identity_access(id,!!(q->flags&MD_AT_EACCESS));
+            result=file.ops->access(file.context,&actor,q->mode);
+        }
         break;
+    }
     case MD_FS_OPEN: case MD_FS_REOPEN: {
         unsigned flags=q->flags;
         if (!(flags&O_PATH) && (md_mount_policy_flags(&mount->policy)&MD_MOUNT_NODEV)) { result=-EACCES; break; }
@@ -55,19 +60,11 @@ int md_fs_provider_operation(struct md_filesystem *fs,struct md_mount_namespace 
         if (flags&(O_DIRECTORY|O_TRUNC) || (flags&O_ACCMODE)==O_ACCMODE) { result=-EINVAL; break; }
         if (!(flags&O_PATH) && (flags&O_ACCMODE) && md_view_readonly(mount)) { result=-EROFS; break; }
         if (!output || !output->control) { out->requires_control=1; result=-EOPNOTSUPP; break; }
-        int copy=fcntl(fd,F_DUPFD_CLOEXEC,3);
-        if (copy<0) { result=-errno; break; }
-        struct stat st;
-        if (fstat(fd,&st)) { result=-errno; close(copy); break; }
-        struct md_fs_anchor *origin=md_view_anchor_new(md_inode_store_lifetime(fs->store),view,mount,copy,st.st_dev,st.st_ino);
-        if (!origin) { result=-errno; close(copy); break; }
+        struct md_fs_anchor *origin=NULL;
+        result=md_view_anchor_duplicate(fs,view,mount,fd,&origin);
+        if (result) break;
         int carrier=fcntl(fd,F_DUPFD_CLOEXEC,3);
-        if (carrier<0) result=-errno;
-        else {
-            result=output->control(output->control_context,file.ops,file.context,id,(int)flags);
-            if (result) close(carrier);
-            else { out->fd=carrier; if (output->origin) *output->origin=md_fs_anchor_retain(origin); }
-        }
+        result=md_fs_control_publish(carrier<0 ? -errno : carrier,file,origin,id,(int)flags,out,output);
         md_fs_anchor_release(origin); break;
     }
     case MD_FS_GETCAP: case MD_FS_GETACL: result=-ENODATA; break;

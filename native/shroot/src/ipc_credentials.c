@@ -2,6 +2,7 @@
 #include "ipc_credentials.h"
 #include "fd_messages.h"
 #include "ipc_scope.h"
+#include "storage_database.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -23,11 +24,11 @@
 struct md_ipc_credentials {
     sqlite3 *db;
     struct md_ipc_scope *scope;
-    int gate;
+    int gate, directory;
     enum md_ipc_ancillary_transport offer;
 };
 struct snapshot { struct md_ipc_identity ids; uint32_t process_count; uint32_t groups[]; };
-static int sql(int rc) { return rc == SQLITE_OK || rc == SQLITE_DONE || rc == SQLITE_ROW ? 0 : -EIO; }
+static int sql(int rc) { return md_database_result(rc); }
 static int statement(struct md_ipc_credentials *s, const char *text, sqlite3_stmt **q) {
     return sql(sqlite3_prepare_v2(s->db, text, -1, q, NULL));
 }
@@ -42,6 +43,7 @@ void md_ipc_credentials_close(struct md_ipc_credentials *s) {
         md_fd_messages_free(messages);
     }
     if (s->db) sqlite3_close(s->db);
+    if (s->directory>=0) close(s->directory);
     if (s->gate >= 0) close(s->gate);
     md_ipc_scope_release(s->scope);
     free(s);
@@ -58,7 +60,7 @@ int md_ipc_credentials_open(const char *store, enum md_ipc_ancillary_transport o
         return -EINVAL;
     struct md_ipc_credentials *s = calloc(1, sizeof(*s));
     if (!s) return -ENOMEM;
-    s->gate = -1;
+    s->gate = s->directory = -1;
     s->offer = offer;
     s->scope=calloc(1,sizeof(*s->scope));
     if (!s->scope) { free(s); return -ENOMEM; }
@@ -80,12 +82,8 @@ int md_ipc_credentials_open(const char *store, enum md_ipc_ancillary_transport o
     if (!r && (s->scope->lease = openat(dir, "live", O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600)) < 0) r = -errno;
     int first = !r && !flock(s->scope->lease, LOCK_EX | LOCK_NB);
     if (!r && !first && errno != EWOULDBLOCK) r = -errno;
-    char link[64], path[PATH_MAX];
-    snprintf(link, sizeof(link), "/proc/self/fd/%d", dir);
-    ssize_t length = r ? -1 : readlink(link, path, sizeof(path)-sizeof("/credentials.db"));
-    if (!r && length < 0) r = -errno;
-    if (!r) memcpy(path+length, "/credentials.db", sizeof("/credentials.db"));
-    if (!r) r = sql(sqlite3_open_v2(path, &s->db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOFOLLOW, NULL));
+    s->directory=dir;
+    if (!r) r=md_database_open(dir,"credentials.db",1,&s->db);
     if (!r && first) r = execute(s, "DROP TABLE IF EXISTS endpoints;DROP TABLE IF EXISTS connections;DROP TABLE IF EXISTS messages;DROP TABLE IF EXISTS native_sockets;");
     if (!r && first && unlinkat(dir,"auth",0) && errno!=ENOENT) r=-errno;
     if (!r && first && unlinkat(dir,"auth.pending",0) && errno!=ENOENT) r=-errno;
@@ -101,7 +99,6 @@ int md_ipc_credentials_open(const char *store, enum md_ipc_ancillary_transport o
      * earlier boot. This directory is not part of OCI/image inode metadata. */
     if (!r && flock(s->scope->lease, LOCK_SH)) r = -errno;
     if (s->gate >= 0) flock(s->gate, LOCK_UN);
-    if (dir >= 0) close(dir);
     if (r) md_ipc_credentials_close(s); else *out = s;
     return r;
 }

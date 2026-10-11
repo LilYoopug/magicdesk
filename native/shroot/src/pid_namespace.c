@@ -1,7 +1,6 @@
 #define _GNU_SOURCE
 #include "pid_namespace.h"
 #include "namespace_identity.h"
-#include "guest_identity.h"
 #include <assert.h>
 #include <errno.h>
 #include <limits.h>
@@ -35,9 +34,6 @@ struct md_pid_identity {
     struct md_pid_namespace *space;
     atomic_int native, group, live, subreaper, reaped;
     unsigned count;
-    struct md_pid_identity *retired_next;
-    struct md_identity exit_identity;
-    int credentials;
     struct pid_number numbers[];
 };
 static pthread_mutex_t registry_lock=PTHREAD_MUTEX_INITIALIZER;
@@ -194,7 +190,6 @@ void md_pid_identity_release(struct md_pid_identity *p) {
         struct pid_number **link=slot(n,number->number); assert(*link==number); *link=number->next;
         pthread_mutex_unlock(&n->lock);
     }
-    if (p->credentials) md_identity_release(&p->exit_identity);
     md_pid_namespace_release(p->space); free(p);
 }
 struct md_pid_namespace *md_pid_identity_namespace(const struct md_pid_identity *p) { return p ? p->space : NULL; }
@@ -210,14 +205,6 @@ int md_pid_identity_live(const struct md_pid_identity *p) { return p && atomic_l
 int md_pid_identity_subreaper(const struct md_pid_identity *p) { return p && atomic_load_explicit(&p->subreaper,memory_order_relaxed); }
 void md_pid_identity_set_subreaper(struct md_pid_identity *p,int value) {
     if (p) atomic_store_explicit(&p->subreaper,!!value,memory_order_relaxed);
-}
-void md_pid_identity_exit_credentials(struct md_pid_identity *p,const struct md_identity *identity) {
-    if (!p) return;
-    if (p->credentials) md_identity_release(&p->exit_identity);
-    p->exit_identity=md_identity_copy(identity); p->credentials=1;
-}
-const struct md_identity *md_pid_identity_credentials(const struct md_pid_identity *p) {
-    return p && p->credentials ? &p->exit_identity : NULL;
 }
 int md_pid_identity_exit(struct md_pid_identity *p) {
     if (!p || !atomic_exchange_explicit(&p->live,0,memory_order_acq_rel)) return 0;
@@ -264,34 +251,4 @@ struct md_pid_identity *md_pid_namespace_find(struct md_pid_namespace *n,pid_t n
                 p=try_retain(number->identity); break;
             }
     pthread_mutex_unlock(&n->lock); return p;
-}
-void md_pid_retired_take(struct md_pid_retired *retired, struct md_pid_identity *p) {
-    if (!p) return;
-    p->retired_next=retired->head; retired->head=p;
-}
-struct md_pid_identity *md_pid_retired_find(const struct md_pid_retired *retired,pid_t native) {
-    for (struct md_pid_identity *p=retired->head;p;p=p->retired_next)
-        if (md_pid_identity_native(p)==native) return p;
-    return NULL;
-}
-void md_pid_retired_reap(struct md_pid_retired *retired, pid_t native) {
-    struct md_pid_identity **slot=&retired->head;
-    while (*slot && md_pid_identity_native(*slot)!=native) slot=&(*slot)->retired_next;
-    if (*slot) {
-        struct md_pid_identity *p=*slot; *slot=p->retired_next; p->retired_next=NULL;
-        md_pid_identity_reap(p);
-        md_pid_identity_release(p);
-    }
-}
-void md_pid_retired_release(struct md_pid_retired *retired) {
-    while (retired->head) md_pid_retired_reap(retired,md_pid_identity_native(retired->head));
-}
-void md_pid_retired_collect(struct md_pid_retired *retired,int (*gone)(pid_t)) {
-    struct md_pid_identity **at=&retired->head;
-    while (*at) {
-        struct md_pid_identity *p=*at;
-        if (md_pid_identity_live(p) || !gone(md_pid_identity_native(p))) { at=&p->retired_next; continue; }
-        *at=p->retired_next; p->retired_next=NULL;
-        md_pid_identity_reap(p); md_pid_identity_release(p);
-    }
 }

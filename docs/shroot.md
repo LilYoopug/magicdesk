@@ -48,6 +48,9 @@ after commit or rollback. Separate launches can share a store without exposing
 ordinary internal transaction contention to guest syscalls. There is no polling
 or transaction replay; data IO through opened descriptors stays native. An
 external database writer that bypasses this gate still produces an explicit error.
+Inode and IPC databases share retained-directory opening and error conversion.
+SQLite protects its process-global state across the supervisor and namespace
+worker; individual connections remain thread-confined and use no connection mutex.
 Persistent stores use a retained rollback journal and synchronous publication.
 Transient mount lifetimes retain the same journal, locking and process-crash
 recovery, but do not flush metadata or newly published bodies to durable storage.

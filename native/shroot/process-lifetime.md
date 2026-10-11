@@ -48,6 +48,9 @@ not runtime supervision. The native clone omits that flag while the retained
 guest flags still control debugger birth publication and resource inheritance.
 `event_wait.c` shares freestanding monotonic descriptor waits with filesystem RPC;
 deadlines remain absolute across EINTR.
+Readiness snapshots are consumed before their callbacks retire descriptor owners.
+The supervisor rebuilds its wait set after dispatch, so bootstrap socket HUP
+cannot leave a closed descriptor in the next wait for child exit.
 
 Cancellation sends SIGTERM followed by SIGCONT to owned children. After a
 two-second grace bound it escalates to SIGKILL, with ten seconds for reaping.
@@ -73,6 +76,8 @@ without sleeps. Tests cover double-fork/setsid descendants using the namespace
 after root exit, root exit/signal status, concurrent launches, rapid orphaning,
 ignored SIGTERM, acknowledged SIGSTOP, escalation, frontend/namespace-owner SIGKILL,
 failed launches, unrelated-process isolation, descriptor release and final ECHILD.
+Capability fixtures also exercise repeated bootstrap admission failures; missing
+guest-only kernel operations must not become supervisor or shared-shell failures.
 
 Coverage is NX809J / API 36 / Linux 6.12.23 under actual UID 2000. Other kernels,
 Android releases and SELinux policies need verification. This is not cgroup

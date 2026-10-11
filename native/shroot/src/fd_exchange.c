@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "fd_exchange.h"
 #include "fd_delivery.h"
+#include "event_signal.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -42,11 +43,7 @@ int md_fd_exchanges_pollfd(const struct md_fd_exchanges *set) {
     return set ? set->wake : -1;
 }
 int md_fd_exchanges_drain(struct md_fd_exchanges *set) {
-    if (!set) return -EINVAL;
-    uint64_t value;
-    ssize_t n;
-    do { n=read(set->wake,&value,sizeof(value)); } while (n<0 && errno==EINTR);
-    return n==sizeof(value) || (n<0 && errno==EAGAIN) ? 0 : n<0 ? -errno : -EIO;
+    return set ? md_event_acknowledge(set->wake) : -EINVAL;
 }
 int md_fd_exchange_closed(const struct md_fd_exchange *e) {
     return e && atomic_load_explicit(&e->closed,memory_order_acquire);
@@ -117,11 +114,7 @@ void md_fd_exchange_close(struct md_fd_exchanges *set, struct md_fd_exchange *e)
     if (*at) { *at=e->next; found=1; }
     atomic_store_explicit(&e->closed,1,memory_order_release);
     pthread_mutex_unlock(&set->lock);
-    /* Eventfd saturation already represents a pending wake. Its lifetime is
-     * the exchange registry's, which outlives the filesystem worker. */
-    uint64_t value=1;
-    ssize_t n;
-    do { n=write(set->wake,&value,sizeof(value)); } while (n<0 && errno==EINTR);
+    md_event_signal(set->wake);
     if (found) md_fd_exchange_release(e);
     md_fd_exchange_release(e);
 }

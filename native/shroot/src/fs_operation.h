@@ -4,6 +4,7 @@ enum { MD_FS_SOCKET_PIN=1 };
 #include <stddef.h>
 #include <stdint.h>
 #include "file_capability.h"
+#include "file_metadata.h"
 #include "file_open.h"
 #include "fs_anchor.h"
 #include "ipc_identity.h"
@@ -25,6 +26,10 @@ enum md_fs_operation {
     MD_FS_FSOPEN, MD_FS_FSCONFIG, MD_FS_FSMOUNT, MD_FS_BPF, MD_FS_FDINFO,
     MD_FS_LANDLOCK, MD_FS_LAST = MD_FS_LANDLOCK
 };
+/* Both transports carry the complete operation contract. */
+static inline int md_fs_operation_valid(unsigned operation) {
+    return operation>=MD_FS_CREATE && operation<=MD_FS_LAST;
+}
 enum { MD_LL_CREATE=1, MD_LL_ADD, MD_LL_RESTRICT };
 enum md_fs_mount_operation { MD_FS_MOUNT_BIND=1, MD_FS_MOUNT_REMOUNT,
     MD_FS_MOUNT_PROPAGATION, MD_FS_MOUNT_UMOUNT, MD_FS_MOUNT_TMPFS, MD_FS_MOUNT_OVERLAY, MD_FS_MOUNT_PIVOT,
@@ -105,13 +110,6 @@ static inline int md_fs_object_id_valid(const char *id) {
         if (!((id[i]>='0' && id[i]<='9') || (id[i]>='a' && id[i]<='f'))) return 0;
     return !id[32];
 }
-struct md_fs_info {
-    uint64_t device, inode, links, rdev, mount_id;
-    int64_t size, blocks;
-    uint32_t mode, uid, gid, block_size;
-    int64_t access_seconds, modify_seconds, change_seconds;
-    uint32_t access_nanos, modify_nanos, change_nanos, reserved;
-};
 /* Linux ARM64 statfs output. libc field names differ; the syscall ABI does not. */
 struct md_fs_statfs {
     uint64_t type, block_size, blocks, free_blocks, available_blocks, files, free_files;

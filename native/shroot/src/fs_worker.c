@@ -5,6 +5,7 @@
 #include "fs_storage.h"
 #include "image_catalogue.h"
 #include "event_wait.h"
+#include "event_signal.h"
 #include "ipc_credentials.h"
 #include "ofd_order.h"
 #include "input_session.h"
@@ -42,14 +43,6 @@ struct md_fs_worker {
     struct md_fs_worker_pause *pause;
     atomic_int pause_requested;
 };
-static void wake(int fd) {
-    uint64_t one = 1;
-    while (write(fd, &one, sizeof(one)) < 0 && errno == EINTR) { }
-}
-static void drain(int fd) {
-    uint64_t value;
-    while (read(fd, &value, sizeof(value)) < 0 && errno == EINTR) { }
-}
 static struct md_fs_work *take_submitted(struct md_fs_worker *w, int *stopping) {
     pthread_mutex_lock(&w->lock);
     struct md_fs_work *work=(!w->pause || w->stopping) ? w->submitted : NULL;
@@ -64,7 +57,7 @@ static struct md_fs_work *take_submitted(struct md_fs_worker *w, int *stopping) 
 }
 static void run_ready(void *context, struct md_filesystem *fs) {
     struct md_fs_worker *w = context;
-    drain(w->wake);
+    md_event_acknowledge(w->wake);
     /* Bound a producer burst without starving socket requests, notifications
      * or stop readiness. No queue lock covers execution or publication. */
     for (unsigned i=0;i<32;++i) {
@@ -75,7 +68,7 @@ static void run_ready(void *context, struct md_filesystem *fs) {
         md_fs_worker_publish(w,work);
     }
     pthread_mutex_lock(&w->lock); int more=w->submitted && !w->pause; pthread_mutex_unlock(&w->lock);
-    if (more) wake(w->wake);
+    if (more) md_event_signal(w->wake);
 }
 static int paused(void *context) {
     struct md_fs_worker *w=context;
@@ -85,7 +78,7 @@ static int paused(void *context) {
     int acknowledge=active && !w->pause->acknowledged;
     if (acknowledge) w->pause->acknowledged=1;
     pthread_mutex_unlock(&w->lock);
-    if (acknowledge) wake(w->done);
+    if (acknowledge) md_event_signal(w->done);
     return active;
 }
 static int notification_fd(void *context) {
@@ -129,7 +122,7 @@ static void *run(void *context) {
     pthread_mutex_lock(&w->lock);
     w->mounts=md_mount_namespace_retain(fs.mounts); w->error=error;
     pthread_mutex_unlock(&w->lock);
-    wake(w->ready);
+    md_event_signal(w->ready);
     struct md_inode_statistics stats = {0};
     struct md_fs_statistics rpc = {0};
     if (!error) {
@@ -179,7 +172,7 @@ static void *run(void *context) {
     w->error = error ? error : -ESHUTDOWN;
     w->exited = 1;
     pthread_mutex_unlock(&w->lock);
-    wake(w->done);
+    md_event_signal(w->done);
     return NULL;
 }
 int md_fs_worker_start(const char *store, const char *endpoint, const char *admit, struct md_task_registry *tasks, struct md_fd_exchanges *exchanges,
@@ -228,7 +221,7 @@ int md_fs_worker_wake_fd(struct md_fs_worker *w) { return w ? w->wake : -1; }
 struct md_mount_namespace *md_fs_worker_mounts(struct md_fs_worker *w) { return w ? w->mounts : NULL; }
 struct md_device_events *md_fs_worker_device_events(struct md_fs_worker *w) { return w ? w->device_events : NULL; }
 struct md_ofd_orders *md_fs_worker_cursors(struct md_fs_worker *w) { return w ? w->cursors : NULL; }
-void md_fs_worker_wake(struct md_fs_worker *w) { if (w) wake(w->wake); }
+void md_fs_worker_wake(struct md_fs_worker *w) { if (w) md_event_signal(w->wake); }
 int md_fs_worker_pause_begin(struct md_fs_worker *w, struct md_fs_worker_pause *p) {
     if (!w || !p || p->owner) return -EINVAL;
     pthread_mutex_lock(&w->lock);
@@ -238,7 +231,7 @@ int md_fs_worker_pause_begin(struct md_fs_worker *w, struct md_fs_worker_pause *
         atomic_store_explicit(&w->pause_requested,1,memory_order_relaxed);
     }
     pthread_mutex_unlock(&w->lock);
-    if (!error) wake(w->wake);
+    if (!error) md_event_signal(w->wake);
     return error;
 }
 int md_fs_worker_pause_state(const struct md_fs_worker_pause *p) {
@@ -259,7 +252,7 @@ int md_fs_worker_pause_end(struct md_fs_worker_pause *p) {
         atomic_store_explicit(&w->pause_requested,0,memory_order_relaxed);
     }
     pthread_mutex_unlock(&w->lock);
-    if (!error) wake(w->wake);
+    if (!error) md_event_signal(w->wake);
     return error;
 }
 int md_fs_worker_error(struct md_fs_worker *w) {
@@ -270,13 +263,13 @@ void md_fs_worker_notifications(struct md_fs_worker *w, int fd, void *context,
         int (*ready)(void *, struct md_filesystem *, short)) {
     pthread_mutex_lock(&w->lock);
     w->notification_fd = fd; w->notification_context = context; w->notification = ready;
-    pthread_mutex_unlock(&w->lock); wake(w->wake);
+    pthread_mutex_unlock(&w->lock); md_event_signal(w->wake);
 }
 void md_fs_worker_publish(struct md_fs_worker *w, struct md_fs_work *work) {
     work->next = NULL;
     pthread_mutex_lock(&w->lock);
     *w->completed_tail = work; w->completed_tail = &work->next;
-    pthread_mutex_unlock(&w->lock); wake(w->done);
+    pthread_mutex_unlock(&w->lock); md_event_signal(w->done);
 }
 int md_fs_worker_submit(struct md_fs_worker *w, struct md_fs_work *work) {
     if (!w || !work || !work->run || !work->complete) return -EINVAL;
@@ -287,11 +280,11 @@ int md_fs_worker_submit(struct md_fs_worker *w, struct md_fs_work *work) {
         *w->submitted_tail=work; w->submitted_tail=&work->next;
     }
     pthread_mutex_unlock(&w->lock);
-    if (!error) wake(w->wake);
+    if (!error) md_event_signal(w->wake);
     return error;
 }
 int md_fs_worker_dispatch(struct md_fs_worker *w) {
-    drain(w->done);
+    md_event_acknowledge(w->done);
     pthread_mutex_lock(&w->lock);
     struct md_fs_work *completed = w->completed;
     w->completed = NULL; w->completed_tail = &w->completed;
@@ -314,7 +307,7 @@ int md_fs_worker_dispatch(struct md_fs_worker *w) {
 int md_fs_worker_stop(struct md_fs_worker *w) {
     if (!w) return 0;
     pthread_mutex_lock(&w->lock); w->stopping=1; pthread_mutex_unlock(&w->lock);
-    wake(w->stop);
+    md_event_signal(w->stop);
     /* EVENT_WAIT: worker exit after stop readiness; expiry leaves its memory
      * owned by the process, whose caller must terminate instead of freeing it. */
     int64_t deadline = md_event_now() + 10000000000LL;
@@ -323,7 +316,7 @@ int md_fs_worker_stop(struct md_fs_worker *w) {
         if (exited) break;
         int r = (int)md_event_wait_fd(w->done, POLLIN, deadline);
         if (r < 0) return r;
-        drain(w->done);
+        md_event_acknowledge(w->done);
     }
     int error = pthread_join(w->thread, NULL);
     if (!error && w->error != -ESHUTDOWN) error = -w->error;

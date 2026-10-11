@@ -42,9 +42,6 @@ pid_t md_pid_identity_number(const struct md_pid_identity *, const struct md_pid
 int md_pid_identity_live(const struct md_pid_identity *);
 int md_pid_identity_subreaper(const struct md_pid_identity *);
 void md_pid_identity_set_subreaper(struct md_pid_identity *, int);
-/* Supervisor-owned exit snapshot, retained without allocating at exit. */
-void md_pid_identity_exit_credentials(struct md_pid_identity *,const struct md_identity *);
-const struct md_identity *md_pid_identity_credentials(const struct md_pid_identity *);
 /* Retires the task. The last live thread in PID 1 closes namespace admission;
  * the process owner then terminates descendants. */
 int md_pid_identity_exit(struct md_pid_identity *);
@@ -56,13 +53,4 @@ void md_pid_identity_exec(struct md_pid_identity *thread, struct md_pid_identity
  * check liveness before issuing a host operation against the native number. */
 struct md_pid_identity *md_pid_namespace_lookup(struct md_pid_namespace *, pid_t visible);
 struct md_pid_identity *md_pid_namespace_find(struct md_pid_namespace *, pid_t native);
-/* The supervisor owns exited identities until guest wait consumes them. This
- * list uses storage reserved with the identity, not an allocation at exit. */
-struct md_pid_retired { struct md_pid_identity *head; };
-void md_pid_retired_take(struct md_pid_retired *, struct md_pid_identity *);
-struct md_pid_identity *md_pid_retired_find(const struct md_pid_retired *,pid_t);
-void md_pid_retired_reap(struct md_pid_retired *, pid_t native);
-/* Called only after all pending guest wait-result translations are complete. */
-void md_pid_retired_collect(struct md_pid_retired *, int (*gone)(pid_t));
-void md_pid_retired_release(struct md_pid_retired *);
 #endif

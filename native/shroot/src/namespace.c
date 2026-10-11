@@ -111,25 +111,6 @@ long md_namespace_open_resolved(const struct md_fs *fs, int base, const char *pa
         const struct open_how *how) {
     return open_operand(fs,md_namespace_descriptor(base),path,how);
 }
-static void stat_info(const struct md_fs_info *i, struct stat *s) {
-    memset(s, 0, sizeof(*s));
-    s->st_dev = i->device;
-    s->st_ino = i->inode;
-    s->st_nlink = i->links;
-    s->st_rdev = i->rdev;
-    s->st_size = i->size;
-    s->st_blocks = i->blocks;
-    s->st_mode = i->mode;
-    s->st_uid = i->uid;
-    s->st_gid = i->gid;
-    s->st_blksize = i->block_size;
-    s->st_atim.tv_sec = i->access_seconds;
-    s->st_atim.tv_nsec = i->access_nanos;
-    s->st_mtim.tv_sec = i->modify_seconds;
-    s->st_mtim.tv_nsec = i->modify_nanos;
-    s->st_ctim.tv_sec = i->change_seconds;
-    s->st_ctim.tv_nsec = i->change_nanos;
-}
 long md_namespace_inspect(const struct md_fs *fs, struct md_namespace_operand operand,
         const char *path, int flags, unsigned mode, struct md_fs_response *out) {
     int fd=operand.descriptor;
@@ -192,7 +173,7 @@ static long descriptor_call(const struct md_fs *fs, long nr, const unsigned long
     if (r < 0)
         return r;
     if (nr == SYS_fstat) {
-        stat_info(&out.result.info, &st);
+        md_fs_info_stat(&out.result.info, &st);
         return md_write_memory((void *)a[1], &st, sizeof(st));
     }
     if (!S_ISDIR(out.result.info.mode))
@@ -433,33 +414,11 @@ __attribute__((noinline)) static long path_metadata(const struct md_fs *fs, long
             return r;
         if (nr == SYS_newfstatat) {
             struct stat st;
-            stat_info(&out.result.info, &st);
+            md_fs_info_stat(&out.result.info, &st);
             return md_write_memory((void *)a[2], &st, sizeof(st));
         }
-        struct statx st = {0};
-        st.stx_mask = STATX_BASIC_STATS;
-        if (out.result.info.mount_id) {
-            st.stx_mask |= STATX_MNT_ID;
-            st.stx_mnt_id=out.result.info.mount_id;
-        }
-        st.stx_blksize = out.result.info.block_size;
-        st.stx_nlink = (uint32_t)out.result.info.links;
-        st.stx_uid = out.result.info.uid;
-        st.stx_gid = out.result.info.gid;
-        st.stx_mode = (uint16_t)out.result.info.mode;
-        st.stx_ino = out.result.info.inode;
-        st.stx_size = out.result.info.size;
-        st.stx_blocks = out.result.info.blocks;
-        st.stx_atime.tv_sec = out.result.info.access_seconds;
-        st.stx_atime.tv_nsec = out.result.info.access_nanos;
-        st.stx_mtime.tv_sec = out.result.info.modify_seconds;
-        st.stx_mtime.tv_nsec = out.result.info.modify_nanos;
-        st.stx_ctime.tv_sec = out.result.info.change_seconds;
-        st.stx_ctime.tv_nsec = out.result.info.change_nanos;
-        st.stx_dev_major = major(out.result.info.device);
-        st.stx_dev_minor = minor(out.result.info.device);
-        st.stx_rdev_major = major(out.result.info.rdev);
-        st.stx_rdev_minor = minor(out.result.info.rdev);
+        struct statx st;
+        md_fs_info_statx(&out.result.info,&st);
         return md_write_memory((void *)a[4], &st, sizeof(st));
     }
     case SYS_mkdirat:

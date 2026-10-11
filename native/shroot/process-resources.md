@@ -63,6 +63,10 @@ completion callbacks. Queueing itself allocates no records. Stop/failure closes
 admission and retires pending work with an error before the store is released.
 Terminal owners retain their records through worker join and release their own
 results; worker stop does not invoke supervisor callbacks during teardown.
+An accepted job retired with an error has no filesystem context. Mount copy/join
+and other work handlers propagate that error before accessing the store or
+creating a candidate. Intrusive request ownership survives until completion or
+the terminal owner's post-join cleanup.
 Ordinary direct notification handling does not traverse the submission queue.
 
 `interception_buffers` provides bounded shared payload slots for the production
@@ -118,6 +122,9 @@ references. Fork and threads retain the same view, regardless of CLONE_FS;
 unsharing cwd/root or semaphore undo does not split it. Nonleader exec transfers
 the executing task's reference with its other resources. Final release closes
 retained descriptors outside the registry lock.
+Mount rollback, slot retirement and namespace destruction use
+`md_view_mount_close` for descriptor, policy and provider ownership. Closing a
+partial instance leaves an empty detached slot while preserving its generation.
 
 The filesystem worker builds the initial view before acknowledging readiness,
 and remains the sole executor of path resolution and object registration. The
@@ -211,6 +218,12 @@ control-file IO, while cgroup controls retain their existing cursor semantics.
 Reconfiguration, typed binary/path/FD parameters, cross-view placement and
 unimplemented attributes are not silently accepted.
 
+`fs_control` owns shared stat/access/statfs/open validation and descriptor
+publication for native-backed cgroup/sysfs controls. Providers supply metadata,
+filesystem type and control preparation; their mutations and provider-specific
+errors remain separate. Origin capture, reopen, callback failure and carrier
+release have one owner, with no provider object allocation per operation.
+
 `mount_setattr` resolves a mount root by path or retained descriptor, including
 a detached construction root. Readonly/nosuid/nodev/noexec changes use the same
 policy as legacy remount. Recursive changes preflight every selected mount's
@@ -238,9 +251,14 @@ custody has no other owner. Watches own independent connections and can outlive
 cache eviction. No cache sweep or filesystem probe is added to ordinary data IO.
 Path traversal, roots, metadata, object IDs and reopen select the mounted store.
 Retained old-view dirfds remain usable after the original worker connection closes.
-The private retained-directory SQLite VFS preserves the lease FD as the directory
-anchor through rename; stock Unix VFS IO, journaling, locking and nofollow opens
-remain in use. Portable graphs retain each distinct mounted store's maintenance
+`storage_database` supplies the retained-directory SQLite VFS and result-to-errno
+mapping for inode stores, IPC credentials and SysV authorities. It preserves the
+directory FD through rename; stock Unix VFS IO, rollback/WAL journaling, locking
+and nofollow opens remain in use. Each connection borrows a directory retained
+until close, and failed opening returns no partial connection. SQLite's multithread
+mode protects its global state across supervisor/worker owners; NOMUTEX connections
+remain confined to one owner without redundant per-query connection locking.
+Portable graphs retain each distinct mounted store's maintenance
 and loaded-source leases once, including aliases. Imports reconnect under the
 same custody after publisher exit, without trusting the original store path.
 Watch instances own one queue and independent sources for each selected store.
@@ -1107,8 +1125,17 @@ credentials and pending-signal behavior. Wait/signal output maps sender numbers
 and known guest UIDs; arbitrary SI_QUEUE payloads are not reinterpreted as host
 identities. Protected output uses the existing task-affine memory access.
 
-Exited identities retain credentials until the guest consumes the terminal wait
-event. Reaping removes their lookup visibility independently of open pidfds.
+`task_registry` owns live and retired task records. Exit releases filesystem,
+file-table and namespace execution resources, retaining only credentials, PID
+identity and cgroup membership in the existing record. Retired records cannot
+authenticate new worker requests. Proc observation distinguishes a retired guest
+from an external native process, including without a virtual PID namespace;
+native fast paths must not substitute Android credentials or cgroups.
+Retirement and reaping allocate no objects. A separate intrusive retired list
+avoids scanning live tasks during collection. PID-number ownership itself does
+not retain credentials or filesystem resources.
+
+Reaping removes lookup visibility independently of open pidfds.
 Automatically reaped children are collected only when no pending native wait
 result still needs translation. Collection is lifecycle-triggered, not polling.
 Debugger notifications retain their own visible number and do not reap a child's
@@ -1136,6 +1163,10 @@ Status/stat use typed per-open snapshots with guest IDs, credentials and debugge
 relationships; seeking to zero refreshes the snapshot. A zombie remains visible
 until wait consumes it. Namespace handles retain their owners after task exit;
 opening pid_for_children before its first child returns ENOENT.
+Zombie cgroup v2 observations retain the last membership and mark a removed
+group with ` (deleted)`; v1 reports the hierarchy root. Exited members do not
+populate `cgroup.procs` or prevent removal. Already-open membership files retain
+the same provider independently of the task record.
 
 Foreign `/proc/PID/root` access captures the selected task's retained root and
 mount view after the process-access check. Traversal uses that root with the

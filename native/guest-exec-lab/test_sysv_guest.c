@@ -242,7 +242,10 @@ static void shm_slots(int denied) {
             limit.rlim_cur=64; assert(!setrlimit(RLIMIT_NOFILE,&limit));
             int last=-1, fd;
             while ((fd=fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,0))>=0) last=fd;
-            assert(errno==EMFILE && last>=3);
+            int failure=errno;
+            if (failure!=EMFILE || last<3)
+                fprintf(stderr,"SHM slot setup: protected=%d denied=%d last=%d errno=%d\n",protected,denied,last,failure);
+            assert(failure==EMFILE && last>=3);
             struct shmid_ds info;
             for (unsigned round=0;round<16;++round) {
                 for (unsigned free_slot=0;free_slot<2;++free_slot) {

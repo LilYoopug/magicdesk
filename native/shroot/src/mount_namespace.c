@@ -87,6 +87,20 @@ int md_mount_namespace_lock_inherited(struct md_mount_namespace *n) {
         }
     return error;
 }
+void md_view_mount_close(struct md_view_mount *mount) {
+    md_mount_policy_close(&mount->policy);
+    md_inode_lifetime_release(mount->storage);
+    md_pid_namespace_release(mount->pid_namespace);
+    md_devpts_release(mount->devpts);
+    md_cgroup_release(mount->cgroup);
+    md_sysfs_release(mount->sysfs);
+    md_provider_tree_release(mount->provider);
+    md_ipc_namespace_release(mount->ipc_namespace);
+    md_control_file_release(mount->file);
+    if (mount->source>=0) close(mount->source);
+    if (mount->target>=0) close(mount->target);
+    *mount=(struct md_view_mount){.source=-1,.target=-1,.detached=1,.generation=mount->generation};
+}
 void md_view_mount_forget(struct md_fs_mounts *tree, struct md_view_mount *mount) {
     for (unsigned i=0;i<MD_VIEW_BUCKETS;++i) {
         struct md_view_object **p=&tree->by_id[i];
@@ -103,18 +117,7 @@ void md_view_mount_forget(struct md_fs_mounts *tree, struct md_view_mount *mount
             close(old->fd); free(old); --tree->objects;
         }
     }
-    md_mount_policy_close(&mount->policy);
-    md_inode_lifetime_release(mount->storage);
-    md_pid_namespace_release(mount->pid_namespace);
-    md_devpts_release(mount->devpts);
-    md_cgroup_release(mount->cgroup);
-    md_sysfs_release(mount->sysfs);
-    md_provider_tree_release(mount->provider);
-    md_ipc_namespace_release(mount->ipc_namespace);
-    md_control_file_release(mount->file);
-    if (mount->source>=0) close(mount->source);
-    if (mount->target>=0) close(mount->target);
-    *mount=(struct md_view_mount){.source=-1,.target=-1,.detached=1,.generation=mount->generation};
+    md_view_mount_close(mount);
 }
 void md_mount_namespace_release(struct md_mount_namespace *n) {
     if (!n || atomic_fetch_sub_explicit(&n->refs,1,memory_order_acq_rel)!=1) return;
@@ -124,26 +127,12 @@ void md_mount_namespace_release(struct md_mount_namespace *n) {
             struct md_view_object *p=m->table[i];
             while (p) { struct md_view_object *next=p->next; close(p->fd); free(p); p=next; }
         }
-        for (unsigned i=0;i<m->count;++i) {
-            md_mount_policy_close(&m->mounts[i].policy);
-            md_inode_lifetime_release(m->mounts[i].storage);
-            md_pid_namespace_release(m->mounts[i].pid_namespace);
-            md_devpts_release(m->mounts[i].devpts);
-            md_cgroup_release(m->mounts[i].cgroup);
-            md_sysfs_release(m->mounts[i].sysfs);
-            md_provider_tree_release(m->mounts[i].provider);
-            md_ipc_namespace_release(m->mounts[i].ipc_namespace);
-            md_control_file_release(m->mounts[i].file);
-            if (m->mounts[i].source>=0) close(m->mounts[i].source);
-            if (m->mounts[i].target>=0) close(m->mounts[i].target);
-        }
+        for (unsigned i=0;i<m->count;++i) md_view_mount_close(&m->mounts[i]);
         free(m);
     }
     md_mount_graph_close(n->graph);
     md_user_namespace_release(n->owner);
-    if (n->base.source>=0) close(n->base.source);
-    if (n->base.target>=0) close(n->base.target);
-    md_mount_policy_close(&n->base.policy);
+    md_view_mount_close(&n->base);
     pthread_mutex_destroy(&n->domains_lock);
     md_native_mounts_release(n->native_mounts);
     free(n->native_ids); free(n);

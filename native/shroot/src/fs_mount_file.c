@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "fs_mount_internal.h"
+#include "fs_control.h"
 #include "inode_internal.h"
 #include "linux_abi.h"
 #include <errno.h>
@@ -30,8 +31,7 @@ int md_fs_mount_file_operation(struct md_filesystem *fs,struct md_mount_namespac
     case MD_FS_ACCESS:
         if (q->flags&~(AT_SYMLINK_NOFOLLOW|MD_AT_EACCESS)) r=-EINVAL;
         else {
-            struct md_identity actor=*id;
-            if (!(q->flags&MD_AT_EACCESS)) { actor.uid.fs=actor.uid.real; actor.gid.fs=actor.gid.real; }
+            struct md_identity actor=md_identity_access(id,!!(q->flags&MD_AT_EACCESS));
             r=file.ops->access(file.context,&actor,q->mode);
         }
         break;
@@ -39,24 +39,15 @@ int md_fs_mount_file_operation(struct md_filesystem *fs,struct md_mount_namespac
         if (!(q->flags&O_PATH) && (q->flags&(O_CREAT|O_EXCL))==(O_CREAT|O_EXCL)) { r=-EEXIST; break; }
         if (q->flags&O_DIRECTORY) { r=-ENOTDIR; break; }
         if (!output || !output->control) { out->requires_control=1; r=-EOPNOTSUPP; break; }
-        struct stat st;
-        if (fstat(fd,&st)) { r=-errno; break; }
-        int pin=fcntl(fd,F_DUPFD_CLOEXEC,3);
-        if (pin<0) { r=-errno; break; }
-        struct md_fs_anchor *origin=md_view_anchor_new(md_inode_store_lifetime(fs->store),view,mount,pin,st.st_dev,st.st_ino);
-        if (!origin) { r=-errno; close(pin); break; }
+        struct md_fs_anchor *origin=NULL;
+        r=md_view_anchor_duplicate(fs,view,mount,fd,&origin);
+        if (r) break;
         void *context=file.ops->at(file.context,origin);
         if (!context) r=-errno;
         else {
-            r=output->control(output->control_context,file.ops,context,id,(int)q->flags);
-            if (!r) {
-                int opened=file.ops->descriptor(context,(int)q->flags);
-                if (opened<0) r=opened;
-                else {
-                    out->fd=opened;
-                    if (output->origin) *output->origin=md_fs_anchor_retain(origin);
-                }
-            }
+            int opened=file.ops->descriptor(context,(int)q->flags);
+            r=md_fs_control_publish(opened,(struct md_control_file){file.ops,context},
+                origin,id,(int)q->flags,out,output);
             file.ops->release(context);
         }
         md_fs_anchor_release(origin); break;

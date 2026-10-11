@@ -55,6 +55,7 @@ struct md_cgroup_member {
     struct world *world;
     struct group *groups[2];
     pid_t tid,tgid;
+    int departed;
     struct md_pid_identity *pid,*pid_group;
 };
 struct md_cgroup_namespace {
@@ -151,14 +152,14 @@ void md_cgroup_member_publish(struct md_cgroup_member *m,pid_t tid,pid_t tgid,
     if (!m) return;
     pthread_mutex_lock(&m->world->lock);
     struct md_pid_identity *old=m->pid,*old_group=m->pid_group;
-    m->tid=tid; m->tgid=tgid; m->pid=md_pid_identity_retain(pid);
+    m->tid=tid; m->tgid=tgid; m->departed=0; m->pid=md_pid_identity_retain(pid);
     m->pid_group=md_pid_identity_retain(group);
     pthread_mutex_unlock(&m->world->lock); md_pid_identity_release(old); md_pid_identity_release(old_group);
 }
 void md_cgroup_member_depart(struct md_cgroup_member *m,pid_t tid) {
     if (!m) return;
     pthread_mutex_lock(&m->world->lock);
-    if (m->tid==tid) m->tid=0;
+    if (m->tid==tid) { m->tid=0; m->departed=1; }
     pthread_mutex_unlock(&m->world->lock);
 }
 static int populate(struct md_cgroup_view *v,struct group *g) {
@@ -500,9 +501,11 @@ long md_cgroup_member_text(struct md_cgroup_member *m,const struct md_cgroup_nam
     for (unsigned i=0;i<2 && !r;++i) {
         if (i && !m->world->views[i]) continue;
         struct group *root=ns->roots[i] ? ns->roots[i] : m->world->views[i] ? m->world->views[i]->root : NULL;
-        char path[4096]; r=group_path(m->groups[i],root,path,sizeof(path));
+        struct group *group=i && m->departed ? m->world->views[i]->root : m->groups[i];
+        char path[4096]; r=group_path(group,root,path,sizeof(path));
         if (r<0) break;
-        int n=snprintf(text+length,capacity-length,"%s%s\n",i ? "1:devices:" : "0::",path);
+        int n=snprintf(text+length,capacity-length,"%s%s%s\n",i ? "1:devices:" : "0::",path,
+            !i && group && group->removed ? " (deleted)" : "");
         r=n<0 || (size_t)n>=capacity-length ? -ERANGE : 0;
         if (!r) length+=(size_t)n;
     }

@@ -1,4 +1,5 @@
 #include "resource_order.h"
+#include "event_signal.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdatomic.h>
@@ -33,11 +34,7 @@ void md_resource_wakeup_release(struct md_resource_wakeup *wake) {
     close(wake->fd); free(wake);
 }
 static int signal_ready(struct md_resource_wakeup *wake) {
-    if (!wake) return 0;
-    uint64_t one=1;
-    ssize_t n;
-    do { n=write(wake->fd,&one,sizeof(one)); } while (n<0 && errno==EINTR);
-    return n==(ssize_t)sizeof(one) || (n<0 && errno==EAGAIN) ? 0 : -EIO;
+    return wake ? md_event_signal(wake->fd) : 0;
 }
 int md_resource_order_begin(struct md_resource_queue *q, struct md_resource_order *op, struct md_resource_wakeup *wake) {
     if (!q || !op) return -EINVAL;

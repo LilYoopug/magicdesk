@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "fs_mount_internal.h"
 #include "fs_storage.h"
+#include "fs_control.h"
 #include "inode_internal.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -90,9 +91,9 @@ void md_fs_landlock(struct md_filesystem *fs,const struct md_fs_request *q,
         int fd=md_landlock_ruleset_open(rules,id,&ops,&context);
         if (fd<0) r=fd;
         else {
-            r=output->control(output->control_context,ops,context,id,O_RDWR|O_CLOEXEC);
-            ops->release(context);
-            if (r) close(fd); else out->fd=fd;
+            struct md_control_file file={ops,context};
+            r=md_fs_control_publish(fd,file,NULL,id,O_RDWR|O_CLOEXEC,out,output);
+            md_control_file_release(file);
         }
         md_landlock_ruleset_release(rules);
     } else if (!rules) r=-EBADFD;

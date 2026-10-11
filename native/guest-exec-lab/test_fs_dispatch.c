@@ -1672,12 +1672,13 @@ void md_test_ipc_origin_child(const char *,int,unsigned);
 void md_test_ipc_origin_guest(const char *,const char *);
 void md_test_namespace_broker(const char *);
 void md_test_input_session(const char *);
+void md_test_mount_copy_service(const char *);
 int main(int argc, char **argv) {
     if (argc==3 && !strcmp(argv[1],"--input")) { md_test_input_session(argv[2]); return 0; }
     if (argc==3 && !strcmp(argv[1],"--worker-pause")) {
         alarm(30); setbuf(stdout,NULL);
         struct md_inode_store *store=NULL; assert(!md_inode_store_open(argv[2],1,&store));
-        md_inode_store_close(store); worker_pause(argv[2]); return 0;
+        md_inode_store_close(store); worker_pause(argv[2]); md_test_mount_copy_service(argv[2]); return 0;
     }
     if (argc==3 && !strcmp(argv[1],"--broker-directory")) { md_test_namespace_broker(argv[2]); return 0; }
     if (argc==3 && !strcmp(argv[1],"--ipc-peer")) { md_test_ipc_peer_worker(argv[2]); return 0; }
@@ -1703,6 +1704,7 @@ int main(int argc, char **argv) {
     }
     queue_failure(store);
     worker_pause(store);
+    md_test_mount_copy_service(store);
     buffer_service_lifetime(store,MD_FS_OPEN);
     buffer_service_lifetime(store,MD_FS_TEMPORARY);
     buffer_export_lifetime(store);

@@ -4,6 +4,7 @@
 #include "inode_internal.h"
 #include "task_registry.h"
 #include "task_resources.h"
+#include "mount_instance.h"
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -16,6 +17,7 @@
 #include <unistd.h>
 
 void test_mount_copy(const char *base);
+void test_fs_control(const char *base);
 void test_path_walk(const char *base);
 void test_mount_storage(const char *base);
 void test_transient_store(const char *base);
@@ -171,6 +173,15 @@ static void nested_mounts(const char *base) {
         assert(md_fs_mounts_open(&fs,overlapping,2)==-EXDEV && !fs.mounts);
         assert(descriptors()==before);
     }
+    struct md_view_mount partial={.source=open(source[0],O_PATH|O_CLOEXEC),.target=-1,.generation=17};
+    assert(partial.source>=0 && !md_mount_policy_set(&partial.policy,MD_MOUNT_READONLY));
+    assert(md_mount_policy_share(&partial.policy)>=0);
+    md_view_mount_close(&partial);
+    assert(partial.source==-1 && partial.target==-1 && partial.detached && !partial.id && partial.generation==17);
+    int reused=open(source[0],O_PATH|O_CLOEXEC); assert(reused>=0);
+    md_view_mount_close(&partial);
+    assert(fcntl(reused,F_GETFD)>=0); close(reused);
+    assert(descriptors()==before);
     md_inode_store_close(s);
     puts("PASS nested mount topology, independent readonly, parent IDs, retained covered FDs and rename");
     puts("PASS native roots, root-clamped traversal, absolute symlinks and nested mount visibility");
@@ -492,6 +503,7 @@ int main(int argc, char **argv) {
     test_path_walk(argv[1]);
     task_mount_views(argv[1]);
     test_mount_copy(argv[1]);
+    test_fs_control(argv[1]);
     test_mount_storage(argv[1]);
     test_transient_store(argv[1]);
     test_fs_context(argv[1]);

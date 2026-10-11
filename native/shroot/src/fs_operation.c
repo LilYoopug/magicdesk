@@ -38,7 +38,7 @@ int md_fs_request_validate(const struct md_fs_request *q) {
         if (q->directory[i]!=-1) descriptors|=1U<<i;
     }
     const char *a=q->path[0] ? q->path[0] : "", *b=q->path[1] ? q->path[1] : "";
-    if (q->operation < MD_FS_CREATE || q->operation > MD_FS_LAST) return -ENOTSUP;
+    if (!md_fs_operation_valid(q->operation)) return -ENOTSUP;
     if (q->attributes.creation_mask & ~0777U) return -EINVAL;
     if (q->resolve && q->operation != MD_FS_OPEN) return -EINVAL;
     if (q->value_size>MD_FS_VALUE_MAX || (q->value_size && !q->value)

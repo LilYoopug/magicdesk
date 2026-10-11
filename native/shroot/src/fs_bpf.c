@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "fs_mount_internal.h"
+#include "fs_control.h"
 #include "inode_internal.h"
 #include "cgroup_program.h"
 #include "bpf_request.h"
@@ -8,14 +9,15 @@
 #include <string.h>
 #include <unistd.h>
 
-static int publish(struct md_cgroup_program *p,const struct md_identity *id,const struct md_fs_output *out) {
+static int publish(struct md_cgroup_program *p,const struct md_identity *id,
+        struct md_fs_result *result,const struct md_fs_output *out) {
     if (!out || !out->control) return -EOPNOTSUPP;
     const struct md_control_file_ops *ops=NULL; void *context=NULL;
     int fd=md_cgroup_program_open(p,id,&ops,&context);
     if (fd<0) return fd;
-    int r=out->control(out->control_context,ops,context,id,O_RDWR|O_CLOEXEC);
-    ops->release(context);
-    if (r) { close(fd); return r; } return fd;
+    struct md_control_file file={ops,context};
+    int r=md_fs_control_publish(fd,file,NULL,id,O_RDWR|O_CLOEXEC,result,out);
+    md_control_file_release(file); return r;
 }
 void md_fs_bpf(struct md_filesystem *fs,const struct md_fs_request *q,
         struct md_fs_result *result,const struct md_fs_output *out) {
@@ -40,10 +42,7 @@ void md_fs_bpf(struct md_filesystem *fs,const struct md_fs_request *q,
             }
         } else { p=md_cgroup_program_find(registry,input.id); if (!p) r=-ENOENT; }
         md_cgroup_programs_release(registry);
-        if (!r) {
-            int fd=publish(p,id,out);
-            if (fd<0) r=fd; else result->fd=fd;
-        }
+        if (!r) r=publish(p,id,result,out);
         md_cgroup_program_release(p);
     } else if (q->mode==BPF_OBJ_GET_INFO_BY_FD) {
         p=md_cgroup_program_control(q->control);

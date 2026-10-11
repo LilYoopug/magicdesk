@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "ipc_io_job.h"
+#include "event_signal.h"
 #include <errno.h>
 #include <signal.h>
 #include <stdint.h>
@@ -34,10 +35,7 @@ static void *run(void *opaque) {
     int error=pthread_sigmask(SIG_SETMASK,&mask,NULL);
     job->result=error ? -error : md_ipc_io_syscall(job->number,
         job->args[0],job->args[1],job->args[2],job->args[3],job->args[4],&job->cancelled);
-    uint64_t one=1;
-    ssize_t written;
-    do { written=write(job->event,&one,sizeof(one)); } while (written<0 && errno==EINTR);
-    if (written!=sizeof(one)) abort();
+    if (md_event_signal(job->event)) abort();
     return NULL;
 }
 int md_ipc_io_job_start(struct md_ipc_io_job *job, long number, const long args[5]) {

@@ -25,7 +25,7 @@ struct md_ipc_undo *md_ipc_undo_fork(struct md_ipc_undo *u, int shared) {
 int md_ipc_undo_release(struct md_ipc *s, struct md_ipc_undo *u) {
     if (!u || --u->refs) return 0;
     int r=s && u->used ? md_ipc_begin(s) : 0;
-    if (s && u->used && !r) r=md_ipc_finish(s,md_ipc_undo_apply(s,s->owner,u->id));
+    if (s && u->used && !r) r=md_ipc_finish(s,md_ipc_undo_apply(s,s->database.owner,u->id));
     free(u); return r;
 }
 static int unregister(struct md_ipc *s, struct md_ipc_pending *p) {
@@ -33,7 +33,7 @@ static int unregister(struct md_ipc *s, struct md_ipc_pending *p) {
     sqlite3_stmt *q=NULL;
     int r=md_ipc_query(s,"DELETE FROM waiters WHERE owner=?1 AND tid=?2",&q);
     if (!r) {
-        sqlite3_bind_int64(q,1,s->owner); sqlite3_bind_int(q,2,p->tid); r=md_ipc_sql(sqlite3_step(q));
+        sqlite3_bind_int64(q,1,s->database.owner); sqlite3_bind_int(q,2,p->tid); r=md_ipc_sql(sqlite3_step(q));
     }
     sqlite3_finalize(q); if (!r) p->registered=0; return r;
 }
@@ -53,7 +53,7 @@ int md_ipc_cancel(struct md_ipc *s, struct md_ipc_pending **pending) {
 static int watcher(struct md_ipc *s, struct md_ipc_pending *p) {
     p->watcher=inotify_init1(IN_CLOEXEC|IN_NONBLOCK);
     if (p->watcher<0) return -errno;
-    char path[64]; snprintf(path,sizeof(path),"/proc/self/fd/%d",s->dir);
+    char path[64]; snprintf(path,sizeof(path),"/proc/self/fd/%d",s->database.directory);
     /* Events include committed metadata and closed owner leases. A killed
      * supervisor therefore wakes peers to reap SEM_UNDO without polling. */
     return inotify_add_watch(p->watcher,path,IN_MODIFY|IN_CLOSE_WRITE|IN_DELETE)<0 ? -errno : 0;
@@ -97,7 +97,7 @@ static int register_wait(struct md_ipc *s, struct md_ipc_pending *p) {
         "ON CONFLICT(owner,tid) DO UPDATE SET n=excluded.n,zero=excluded.zero "
         "WHERE n!=excluded.n OR zero!=excluded.zero",&q);
     if (!r) {
-        sqlite3_bind_int64(q,1,s->owner); sqlite3_bind_int(q,2,p->tid);
+        sqlite3_bind_int64(q,1,s->database.owner); sqlite3_bind_int(q,2,p->tid);
         sqlite3_bind_int(q,3,p->call.args[0]); sqlite3_bind_int(q,4,p->number); sqlite3_bind_int(q,5,p->zero);
         r=md_ipc_sql(sqlite3_step(q));
     }

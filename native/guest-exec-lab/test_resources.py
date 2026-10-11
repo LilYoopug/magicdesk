@@ -336,7 +336,7 @@ def main():
         if args.case in ("all", "fs-buffer"):
             names += ("test_interception_buffers",)
         if args.case == "all":
-            names += ("test_open_job", "fs_dispatch", "test_launch_registry", "ipc_credentials_guest", "ipc_io_job", "fd_observation", "task_helper_fd", "test_native_mounts")
+            names += ("test_open_job", "fs_dispatch", "test_launch_registry", "ipc_credentials_guest", "ipc_io_job", "fd_observation", "task_helper_fd", "test_native_mounts", "file_metadata", "event_signal")
         if args.case == "fd-observation":
             names = ("fd_observation", "task_helper_fd")
         if args.case == "ipc-ancillary":
@@ -375,6 +375,9 @@ def main():
             file = "libmagicdesk_guest_" + name + ".so"
             transport.upload(client, args.build / file, root + "/" + file)
         check("prepare fixtures", "chmod 700 " + root + "/*.so")
+        if args.case == "all":
+            check("file metadata ABI", root + "/libmagicdesk_guest_file_metadata.so", "PASS file metadata:")
+            check("event signals", root + "/libmagicdesk_guest_event_signal.so", "PASS event signal:")
         if args.case in ("all", "event-fairness"):
             check("pending continuations", root + "/libmagicdesk_guest_pending.so",
                   "PASS pending continuations")

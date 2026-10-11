@@ -56,7 +56,7 @@ static int task_relative(struct md_filesystem *fs, const char *path,
     struct md_proc_path ref=md_proc_path_for(path,fs->actor->tid,fs->actor->tgid);
     if (!ref.process) return ref.kind!=MD_PROC_NONE;
     struct md_task_snapshot task;
-    int error=md_task_registry_read(fs->tasks,ref.process,0,&task);
+    int error=md_task_registry_probe(fs->tasks,ref.process,0,&task);
     int relative=error!=-ESRCH;
     /* Native service owners are registered for authenticated worker requests,
      * not as guest processes. They have no guest file table or typed carriers;

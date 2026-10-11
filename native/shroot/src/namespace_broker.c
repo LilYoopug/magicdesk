@@ -209,13 +209,6 @@ static int capture(struct operation *op) {
     }
     return 1;
 }
-static void metadata(const struct md_fs_info *i, struct stat *s) {
-    *s = (struct stat){.st_dev = i->device, .st_ino = i->inode, .st_nlink = i->links,
-        .st_rdev = i->rdev, .st_size = i->size, .st_blocks = i->blocks, .st_mode = i->mode,
-        .st_uid = i->uid, .st_gid = i->gid, .st_blksize = i->block_size,
-        .st_atim = {i->access_seconds, i->access_nanos}, .st_mtim = {i->modify_seconds, i->modify_nanos},
-        .st_ctim = {i->change_seconds, i->change_nanos}};
-}
 /* Zero requests task-affine handling, one means delivered/cancelled. */
 static int reply(struct operation *op, const void *data) {
     if (op->result.error == -EXDEV || op->result.error == -EREMOTE || op->result.host_path || op->result.requires_control
@@ -249,7 +242,7 @@ static int reply(struct operation *op, const void *data) {
         if (!valid(op)) return 1;
         struct stat st;
         if (op->result.size == sizeof(st)) memcpy(&st, data, sizeof(st));
-        else metadata(&op->result.info, &st);
+        else md_fs_info_stat(&op->result.info, &st);
         uintptr_t pointer = op->notification.data.args[op->notification.data.nr == SYS_newfstatat ? 2 : 1];
         struct iovec local = {&st, sizeof(st)}, remote = {(void *)pointer, sizeof(st)};
         ssize_t n = process_vm_writev(op->notification.pid, &local, 1, &remote, 1, 0);

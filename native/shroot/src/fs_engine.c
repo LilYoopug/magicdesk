@@ -142,14 +142,6 @@ static void task_path(struct md_filesystem *fs, const struct md_fs_request *q,
     md_fs_anchor_release(origin);
 }
 
-void md_fs_stat_info(const struct stat *s, struct md_fs_info *out) {
-    *out = (struct md_fs_info){.device = s->st_dev, .inode = s->st_ino, .links = s->st_nlink,
-        .rdev = s->st_rdev, .size = s->st_size, .blocks = s->st_blocks, .mode = s->st_mode,
-        .uid = s->st_uid, .gid = s->st_gid, .block_size = (uint32_t)s->st_blksize,
-        .access_seconds = s->st_atim.tv_sec, .modify_seconds = s->st_mtim.tv_sec,
-        .change_seconds = s->st_ctim.tv_sec, .access_nanos = (uint32_t)s->st_atim.tv_nsec,
-        .modify_nanos = (uint32_t)s->st_mtim.tv_nsec, .change_nanos = (uint32_t)s->st_ctim.tv_nsec};
-}
 void md_fs_statfs_result(int fd, unsigned policy, const struct md_inode_lifetime *storage,
         struct md_fs_result *out, const struct md_fs_output *output) {
     if (!output || !output->data || output->capacity<sizeof(struct md_fs_statfs)) {
@@ -252,10 +244,8 @@ static void context_execute(struct md_fs_context *context,
         *out=(struct md_fs_result){.fd=-1,.error=-ENOTSUP};
         return;
     }
-    if (context->has_identity && q->operation == MD_FS_ACCESS && !(q->flags & MD_AT_EACCESS)) {
-        identity.uid.fs = identity.uid.real; identity.gid.fs = identity.gid.real;
-        identity.caps.effective = identity.uid.real==md_identity_root(&identity) ? identity.caps.permitted : 0;
-    }
+    if (context->has_identity && q->operation == MD_FS_ACCESS)
+        identity=md_identity_access(&identity,!!(q->flags&MD_AT_EACCESS));
     fs->store->identity = context->has_identity ? &identity : NULL;
     unsigned previous_mask=fs->store->creation_mask;
     const char *previous_root=fs->store->root_id;

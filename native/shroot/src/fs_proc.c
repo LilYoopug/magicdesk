@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "fs_mount_internal.h"
+#include "fs_control.h"
 #include "inode_internal.h"
 #include "network_namespace.h"
 #include "proc_paths.h"
@@ -20,16 +21,8 @@ int md_fs_proc_operation(struct md_filesystem *fs,struct md_mount_namespace *vie
     if (!md_proc_network_sysctl(ref.kind)) return 0;
     if (q->operation==MD_FS_PATH || q->operation==MD_FS_OBJECT_ID) return 0;
     struct md_fs_anchor *origin=NULL;
-    if (q->operation==MD_FS_OPEN || q->operation==MD_FS_REOPEN) {
-        struct stat st;
-        if (fstat(fd,&st)) r=-errno;
-        int copy=r ? -1 : fcntl(fd,F_DUPFD_CLOEXEC,3);
-        if (!r && copy<0) r=-errno;
-        if (!r) {
-            origin=md_view_anchor_new(md_inode_store_lifetime(fs->store),view,mount,copy,st.st_dev,st.st_ino);
-            if (!origin) { r=-errno; close(copy); }
-        }
-    }
+    if (q->operation==MD_FS_OPEN || q->operation==MD_FS_REOPEN)
+        r=md_view_anchor_duplicate(fs,view,mount,fd,&origin);
     struct md_control_file file={0};
     if (!r) {
         file=md_network_sysctl_new(fs->actor->network,
@@ -47,8 +40,7 @@ int md_fs_proc_operation(struct md_filesystem *fs,struct md_mount_namespace *vie
     case MD_FS_ACCESS: {
         if (q->flags&~(AT_SYMLINK_NOFOLLOW|MD_AT_EACCESS)) { r=-EINVAL; break; }
         if ((q->mode&W_OK) && md_view_readonly(mount)) { r=-EROFS; break; }
-        struct md_identity actor=*id;
-        if (!(q->flags&MD_AT_EACCESS)) { actor.uid.fs=actor.uid.real; actor.gid.fs=actor.gid.real; }
+        struct md_identity actor=md_identity_access(id,!!(q->flags&MD_AT_EACCESS));
         r=file.ops->access(file.context,&actor,q->mode); break;
     }
     case MD_FS_STATFS:
@@ -61,13 +53,10 @@ int md_fs_proc_operation(struct md_filesystem *fs,struct md_mount_namespace *vie
         }
         if (q->operation==MD_FS_REOPEN && (q->mode&MD_FS_REOPEN_MUTABLE)) { r=-EOPNOTSUPP; break; }
         if (!output || !output->control) { out->requires_control=1; r=-EOPNOTSUPP; break; }
-        r=output->control(output->control_context,file.ops,file.context,id,(int)q->flags);
-        if (!r) {
-            /* The descriptor host owns all data semantics; never reopen the
-             * Android sysctl for read/write merely to supply a carrier. */
-            out->fd=open("/dev/null",O_CLOEXEC|(q->flags&~(O_CREAT|O_EXCL|O_TRUNC)));
-            if (out->fd<0) r=-errno;
-        }
+        /* The descriptor host owns all data semantics; never reopen the
+         * Android sysctl for read/write merely to supply a carrier. */
+        int carrier=open("/dev/null",O_CLOEXEC|(q->flags&~(O_CREAT|O_EXCL|O_TRUNC)));
+        r=md_fs_control_publish(carrier<0 ? -errno : carrier,file,NULL,id,(int)q->flags,out,output);
         break;
     }
     case MD_FS_READLINK: r=-EINVAL; break;

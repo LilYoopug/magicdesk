@@ -13,16 +13,17 @@ struct md_mount_copy_service {
 struct md_mount_copy_request {
     struct md_fs_work work;
     struct md_mount_copy_service *service;
-    struct md_mount_copy_request *next;
+    struct md_mount_copy_request *next, **previous;
     struct md_mount_namespace *source, *copy;
     struct md_guest_domain *fs;
     struct md_user_namespace *owner;
     int actor, cancelled, error, copy_mounts, check_root, joining;
 };
 static void dispose(struct md_mount_copy_request *r) {
-    struct md_mount_copy_request **at=&r->service->requests;
-    while (*at && *at!=r) at=&(*at)->next;
-    if (*at) *at=r->next;
+    if (r->previous) {
+        *r->previous=r->next;
+        if (r->next) r->next->previous=r->previous;
+    }
     md_mount_namespace_release(r->source);
     md_mount_namespace_release(r->copy);
     md_domain_release(r->fs);
@@ -31,6 +32,7 @@ static void dispose(struct md_mount_copy_request *r) {
 }
 static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
     struct md_mount_copy_request *r=(void *)work;
+    if (error) { r->error=error; return; }
     if (r->joining) {
         struct md_filesystem target=*fs;
         target.mounts=r->source;
@@ -65,6 +67,15 @@ static int complete(struct md_fs_work *work) {
     if (!r->cancelled) r->service->complete(r,r->actor,r->error);
     dispose(r); return 0;
 }
+static int submit(struct md_mount_copy_request *r,struct md_mount_copy_request **out) {
+    struct md_mount_copy_service *s=r->service;
+    r->work=(struct md_fs_work){.run=run,.complete=complete};
+    int error=r->fs ? md_fs_worker_submit(s->worker,&r->work) : -ENOMEM;
+    if (error) { dispose(r); return error; }
+    r->next=s->requests; r->previous=&s->requests;
+    if (r->next) r->next->previous=&r->next;
+    s->requests=r; *out=r; return 0;
+}
 int md_mount_copy_service_create(struct md_fs_worker *worker,
         void (*callback)(struct md_mount_copy_request *, int, int), struct md_mount_copy_service **out) {
     if (!worker || !callback || !out || *out) return -EINVAL;
@@ -82,11 +93,7 @@ int md_mount_copy_submit(struct md_mount_copy_service *s, int actor,
     r->service=s; r->actor=actor; r->source=md_mount_namespace_retain(source);
     r->owner=md_user_namespace_retain(owner); r->copy_mounts=!!copy_mounts; r->check_root=!!check_root;
     r->fs=md_domain_fork(fs,0);
-    r->work=(struct md_fs_work){.run=run,.complete=complete};
-    int error=r->fs ? 0 : -ENOMEM;
-    if (!error) error=md_fs_worker_submit(s->worker,&r->work);
-    if (error) { dispose(r); return error; }
-    r->next=s->requests; s->requests=r; *out=r; return 0;
+    return submit(r,out);
 }
 void md_mount_copy_cancel(struct md_mount_copy_request **owner) {
     if (owner && *owner) { (*owner)->cancelled=1; *owner=NULL; }
@@ -98,10 +105,7 @@ int md_mount_join_submit(struct md_mount_copy_service *s, int actor,
     if (!r) return -ENOMEM;
     r->service=s; r->actor=actor; r->source=md_mount_namespace_retain(target); r->joining=1;
     r->fs=md_domain_new();
-    r->work=(struct md_fs_work){.run=run,.complete=complete};
-    int error=r->fs ? md_fs_worker_submit(s->worker,&r->work) : -ENOMEM;
-    if (error) { dispose(r); return error; }
-    r->next=s->requests; s->requests=r; *out=r; return 0;
+    return submit(r,out);
 }
 int md_mount_copy_take(struct md_mount_copy_request *r,
         struct md_mount_namespace **view, struct md_guest_domain **fs) {

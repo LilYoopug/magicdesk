@@ -74,6 +74,17 @@ int md_view_anchor_check(struct md_filesystem *fs, int fd, const struct md_fs_an
     if (!md_inode_lifetime_same(md_inode_store_lifetime(fs->store),p->lifetime)) return -ESTALE;
     return md_fs_anchor_check_fd(p,fd);
 }
+int md_view_anchor_duplicate(struct md_filesystem *fs,struct md_mount_namespace *view,
+        struct md_view_mount *mount,int fd,struct md_fs_anchor **out) {
+    struct stat st;
+    if (fstat(fd,&st)) return -errno;
+    int copy=fcntl(fd,F_DUPFD_CLOEXEC,3);
+    if (copy<0) return -errno;
+    struct md_fs_anchor *origin=md_view_anchor_new(md_inode_store_lifetime(fs->store),
+        view,mount,copy,st.st_dev,st.st_ino);
+    if (!origin) { int error=-errno; close(copy); return error; }
+    *out=origin; return 0;
+}
 void md_view_capture(struct md_filesystem *fs, struct md_mount_namespace *view,
         struct md_view_mount *mount, struct md_fs_result *out, const struct md_fs_output *output) {
     if (out->error || out->fd<0 || !output || !output->origin) return;

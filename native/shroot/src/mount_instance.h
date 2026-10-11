@@ -30,4 +30,7 @@ struct md_view_mount {
     struct md_view_mount *parent;
     struct stat native, guest;
 };
+/* Caller has retired all anchors and placement references. Also accepts a
+ * partially prepared instance; preserve its generation when retiring a slot. */
+void md_view_mount_close(struct md_view_mount *);
 #endif

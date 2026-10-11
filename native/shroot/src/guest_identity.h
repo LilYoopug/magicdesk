@@ -26,6 +26,9 @@ struct md_exec_identity { struct md_identity value; int secure; };
 
 struct md_identity md_identity_new(uint32_t uid, uint32_t gid);
 struct md_identity md_identity_copy(const struct md_identity *);
+/* Borrowed access(2) credentials, not an owning copy. Real-ID checks also
+ * select permitted capabilities for namespace root and none for other users. */
+struct md_identity md_identity_access(const struct md_identity *,int effective);
 void md_identity_release(struct md_identity *);
 int md_identity_groups(struct md_identity *, const uint32_t *, unsigned);
 unsigned md_identity_group_count(const struct md_identity *);

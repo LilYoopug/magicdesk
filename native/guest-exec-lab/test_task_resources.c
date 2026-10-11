@@ -19,6 +19,7 @@ void test_fd_origins(void);
 void test_ofd_order(void);
 void test_user_namespace(void);
 void test_descriptor_inode(void);
+void test_ipc_database(void);
 static int descriptors(void) {
     DIR *dir = opendir("/proc/self/fd"); assert(dir);
     int count = 0;
@@ -266,11 +267,14 @@ static void landlock_resources(void) {
 void test_network_model(void);
 void test_network_route(void);
 void test_network_endpoint(void);
+void test_task_registry_exit(void);
 int main(void) {
+    alarm(60);
+    test_ipc_database();
+    test_task_registry_exit();
     test_network_model();
     test_network_route();
     test_network_endpoint();
-    alarm(60);
     struct md_identity identity=md_identity_new(0,0);
     struct md_task_resources r; assert(!md_resources_init(&r,NULL));
     struct md_resource_change change;

@@ -1,14 +1,21 @@
 #define _GNU_SOURCE
-#include "inode_internal.h"
+#include "storage_database.h"
+#include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static sqlite3_vfs anchored;
 static pthread_once_t initialized=PTHREAD_ONCE_INIT;
 static int status=SQLITE_ERROR;
+static int leaf(const char *name) {
+    return name && *name && strcmp(name,".") && strcmp(name,"..")
+        && !strchr(name,'/') && strlen(name)<=NAME_MAX;
+}
 static int retained_path(const char *path, const char **name) {
     static const char prefix[]="/proc/self/fd/";
     if (strncmp(path,prefix,sizeof(prefix)-1)) return -1;
@@ -20,8 +27,7 @@ static int retained_path(const char *path, const char **name) {
         fd=fd*10+digit;
     }
     if (p==first || *p++!='/') return -1;
-    if (strcmp(p,"namespace.db") && strcmp(p,"namespace.db-journal")
-            && strcmp(p,"namespace.db-wal") && strcmp(p,"namespace.db-shm")) return -1;
+    if (!leaf(p)) return -1;
     *name=p; return (int)fd;
 }
 static int access_path(sqlite3_vfs *vfs,const char *path,int flags,int *result) {
@@ -46,25 +52,41 @@ static int full_path(sqlite3_vfs *vfs, const char *path, int capacity, char *out
      * the retained directory FD instead of SQLite's pathname canonicalization.
      * The stock Unix VFS still owns IO, journaling, locks and O_NOFOLLOW opens. */
     const char *name;
-    if (retained_path(path,&name)<0 || strcmp(name,"namespace.db")) return SQLITE_CANTOPEN;
+    if (retained_path(path,&name)<0) return SQLITE_CANTOPEN;
     size_t n=strlen(path);
     if (capacity<=0 || n>=(size_t)capacity) return SQLITE_CANTOPEN;
     memcpy(out,path,n+1); return SQLITE_OK;
 }
 static void initialize(void) {
-    sqlite3_vfs *unix=sqlite3_vfs_find("unix");
-    if (!unix) return;
-    anchored=*unix;
+    sqlite3_vfs *base=sqlite3_vfs_find("unix");
+    if (!base) return;
+    anchored=*base;
     anchored.zName="shroot-retained-directory";
     anchored.pNext=NULL; anchored.xFullPathname=full_path;
     anchored.xAccess=access_path;
     status=sqlite3_vfs_register(&anchored,0);
 }
-int mdi_sqlite_open(int root, int create, sqlite3 **out) {
+int md_database_result(int rc) {
+    if (rc==SQLITE_CONSTRAINT_PRIMARYKEY || rc==SQLITE_CONSTRAINT_UNIQUE) return -EEXIST;
+    switch (rc&255) {
+    case SQLITE_OK: case SQLITE_ROW: case SQLITE_DONE: return 0;
+    case SQLITE_BUSY: case SQLITE_LOCKED: return -EAGAIN;
+    case SQLITE_NOMEM: return -ENOMEM;
+    case SQLITE_FULL: return -ENOSPC;
+    case SQLITE_READONLY: return -EROFS;
+    default: return -EIO;
+    }
+}
+int md_database_open(int root, const char *name, int create, sqlite3 **out) {
+    if (!out) return -EINVAL;
+    *out=NULL;
+    if (root<0 || !leaf(name)) return -EINVAL;
     pthread_once(&initialized,initialize);
-    if (status!=SQLITE_OK) return mdi_sql_failure(status);
-    char path[64]; snprintf(path,sizeof(path),"/proc/self/fd/%d/namespace.db",root);
-    return mdi_sql_error(sqlite3_open_v2(path,out,
+    if (status!=SQLITE_OK) return md_database_result(status);
+    char path[NAME_MAX+64]; snprintf(path,sizeof(path),"/proc/self/fd/%d/%s",root,name);
+    int r=md_database_result(sqlite3_open_v2(path,out,
         SQLITE_OPEN_READWRITE|SQLITE_OPEN_NOMUTEX|SQLITE_OPEN_NOFOLLOW
             | (create ? SQLITE_OPEN_CREATE : 0),anchored.zName));
+    if (r) { sqlite3_close(*out); *out=NULL; }
+    return r;
 }

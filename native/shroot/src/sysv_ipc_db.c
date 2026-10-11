@@ -1,23 +1,18 @@
 #define _GNU_SOURCE
 #include "sysv_ipc_internal.h"
-#include "ipc_storage.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/file.h>
-#include <sys/random.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
-int md_ipc_sql(int r) { return r == SQLITE_OK || r == SQLITE_ROW || r == SQLITE_DONE ? 0 : -EIO; }
+int md_ipc_sql(int r) { return md_ipc_database_sql(r); }
 int md_ipc_exec(struct md_ipc *s, const char *text) {
-    return md_ipc_sql(sqlite3_exec(s->db, text, NULL, NULL, NULL));
+    return md_ipc_database_exec(&s->database,text);
 }
 int md_ipc_query(struct md_ipc *s, const char *text, sqlite3_stmt **q) {
-    return md_ipc_sql(sqlite3_prepare_v2(s->db, text, -1, q, NULL));
+    return md_ipc_database_query(&s->database,text,q);
 }
 int md_ipc_memory(struct md_ipc_pending *p, uintptr_t address, void *data, size_t size, int write) {
     if (!size) return 0;
@@ -73,7 +68,7 @@ int md_ipc_create(struct md_ipc *s, int kind, int key, const void *data, size_t 
     }
     sqlite3_finalize(q);
     if (!r) {
-        int64_t next=sqlite3_last_insert_rowid(s->db);
+        int64_t next=sqlite3_last_insert_rowid(s->database.handle);
         if (next<=0 || next>INT_MAX) r=-ENOSPC; else *id=(int)next;
         s->changed=1;
     }
@@ -85,8 +80,8 @@ int md_ipc_remove(struct md_ipc *s, int id) {
     if (!r) { sqlite3_bind_int(q,1,id); r=md_ipc_sql(sqlite3_step(q)); }
     sqlite3_finalize(q); if (!r) s->changed=1; return r;
 }
-static void owner_name(char name[64], int64_t id) { snprintf(name,64,"owner-%016llx",(long long)id); }
-static int remove_owner(struct md_ipc *s, int64_t owner) {
+static int remove_owner(void *context, int64_t owner) {
+    struct md_ipc *s=context;
     int r=md_ipc_undo_apply(s,owner,0);
     sqlite3_stmt *q=NULL;
     if (!r) r=md_ipc_query(s,"DELETE FROM owners WHERE id=?1",&q);
@@ -96,64 +91,30 @@ static int remove_owner(struct md_ipc *s, int64_t owner) {
     return r;
 }
 static int reap(struct md_ipc *s) {
-    sqlite3_stmt *q=NULL;
-    int r=md_ipc_query(s,"SELECT id FROM owners",&q);
-    if (!r) {
-        int step;
-        while ((step=sqlite3_step(q))==SQLITE_ROW) {
-            int64_t owner=sqlite3_column_int64(q,0);
-            if (owner==s->owner) continue;
-            char name[64]; owner_name(name,owner);
-            int fd=openat(s->dir,name,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);
-            int dead=fd<0 && errno==ENOENT;
-            if (fd>=0) { dead=!flock(fd,LOCK_EX|LOCK_NB); if (!dead && errno!=EWOULDBLOCK) r=-errno; }
-            else if (!dead) r=-errno;
-            if (!r && dead) { r=remove_owner(s,owner); if (!r) unlinkat(s->dir,name,0); }
-            if (fd>=0) close(fd);
-            if (r) break;
-        }
-        if (!r && step!=SQLITE_DONE) r=-EIO;
-    }
-    sqlite3_finalize(q); return r;
+    return md_ipc_database_reap(&s->database,"SELECT id FROM owners",remove_owner,s);
 }
 int md_ipc_begin(struct md_ipc *s) {
-    if (flock(s->gate,LOCK_EX)) return -errno;
+    int r=md_ipc_database_begin(&s->database);
+    if (r) return r;
     s->changed=0;
-    int r=md_ipc_exec(s,"BEGIN IMMEDIATE");
-    if (!r) r=reap(s);
-    if (r) { md_ipc_exec(s,"ROLLBACK"); flock(s->gate,LOCK_UN); }
+    r=reap(s);
+    if (r) { md_ipc_database_commit(&s->database,r); md_ipc_database_unlock(&s->database); }
     return r;
 }
 int md_ipc_finish(struct md_ipc *s, int error) {
-    if (!error) error=md_ipc_exec(s,"COMMIT");
-    if (error) md_ipc_exec(s,"ROLLBACK");
-    else if (s->changed && pwrite(s->events,"e",1,0)!=1) error=-EIO;
-    flock(s->gate,LOCK_UN); return error;
+    error=md_ipc_database_commit(&s->database,error);
+    if (!error && s->changed && pwrite(s->events,"e",1,0)!=1) error=-EIO;
+    md_ipc_database_unlock(&s->database); return error;
 }
 int md_ipc_open(const char *store, uint64_t namespace_id, struct md_user_namespace *owner, struct md_ipc **out) {
     *out=NULL;
     struct md_ipc *s=calloc(1,sizeof(*s)); if (!s) return -ENOMEM;
-    s->dir=s->gate=s->lease=s->events=-1;
+    s->events=-1;
     s->namespace_id=namespace_id;
     s->user_namespace=md_user_namespace_retain(owner);
-    s->dir=md_ipc_storage_open(store,"sysv");
-    int r=s->dir<0 ? s->dir : 0;
-    if (!r && (s->gate=openat(s->dir,"gate",O_CREAT|O_RDWR|O_CLOEXEC|O_NOFOLLOW,0600))<0) r=-errno;
-    if (!r && (s->events=openat(s->dir,"events",O_CREAT|O_RDWR|O_CLOEXEC|O_NOFOLLOW,0600))<0) r=-errno;
-    if (!r && getrandom(&s->owner,sizeof(s->owner),0)!=sizeof(s->owner)) r=-EIO;
-    s->owner&=INT64_MAX;
-    char name[64]; owner_name(name,s->owner);
-    if (!r && (s->lease=openat(s->dir,name,O_CREAT|O_EXCL|O_RDWR|O_CLOEXEC|O_NOFOLLOW,0600))<0) r=-errno;
-    if (!r && flock(s->lease,LOCK_EX|LOCK_NB)) r=-errno;
-    int locked=!r && !flock(s->gate,LOCK_EX);
-    if (!r && !locked) r=-errno;
-    char descriptor[64], path[PATH_MAX];
-    snprintf(descriptor,sizeof(descriptor),"/proc/self/fd/%d",s->dir);
-    ssize_t length=r ? -1 : readlink(descriptor,path,sizeof(path)-sizeof("/ipc.db"));
-    if (!r && (length<0 || length>=(ssize_t)(sizeof(path)-sizeof("/ipc.db")))) r=-ENAMETOOLONG;
-    if (!r) memcpy(path+length,"/ipc.db",sizeof("/ipc.db"));
-    if (!r) r=md_ipc_sql(sqlite3_open_v2(path,&s->db,SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE|SQLITE_OPEN_NOFOLLOW,NULL));
-    if (!r) r=md_ipc_exec(s,"PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;"
+    int r=md_ipc_database_open(&s->database,store,"sysv","ipc.db");
+    if (!r && (s->events=openat(s->database.directory,"events",O_CREAT|O_RDWR|O_CLOEXEC|O_NOFOLLOW,0600))<0) r=-errno;
+    if (!r) r=md_ipc_exec(s,
         "CREATE TABLE IF NOT EXISTS objects(id INTEGER PRIMARY KEY AUTOINCREMENT,kind INTEGER,key INTEGER,info BLOB,namespace INTEGER NOT NULL);"
         "CREATE UNIQUE INDEX IF NOT EXISTS object_key ON objects(namespace,kind,key) WHERE key!=0;"
         "CREATE TABLE IF NOT EXISTS sems(object INTEGER REFERENCES objects ON DELETE CASCADE,n INTEGER,value INTEGER,pid INTEGER,PRIMARY KEY(object,n));"
@@ -161,45 +122,28 @@ int md_ipc_open(const char *store, uint64_t namespace_id, struct md_user_namespa
         "CREATE INDEX IF NOT EXISTS message_order ON messages(object,type,seq);"
         "CREATE TABLE IF NOT EXISTS owners(id INTEGER PRIMARY KEY,namespace INTEGER NOT NULL);"
         "CREATE TABLE IF NOT EXISTS undo(owner INTEGER REFERENCES owners ON DELETE CASCADE,space INTEGER,object INTEGER REFERENCES objects ON DELETE CASCADE,n INTEGER,delta INTEGER,pid INTEGER,PRIMARY KEY(owner,space,object,n));"
-        "CREATE TABLE IF NOT EXISTS waiters(owner INTEGER REFERENCES owners ON DELETE CASCADE,tid INTEGER,object INTEGER REFERENCES objects ON DELETE CASCADE,n INTEGER,zero INTEGER,PRIMARY KEY(owner,tid));"
-        "CREATE TABLE IF NOT EXISTS metadata(name TEXT PRIMARY KEY,value TEXT);");
-    char boot[64]={0}; int fd=!r ? open("/proc/sys/kernel/random/boot_id",O_RDONLY|O_CLOEXEC) : -1;
-    if (!r && (fd<0 || read(fd,boot,sizeof(boot)-1)<=0)) r=-EIO;
-    if (fd>=0) close(fd);
-    sqlite3_stmt *q=NULL; int changed=1;
+        "CREATE TABLE IF NOT EXISTS waiters(owner INTEGER REFERENCES owners ON DELETE CASCADE,tid INTEGER,object INTEGER REFERENCES objects ON DELETE CASCADE,n INTEGER,zero INTEGER,PRIMARY KEY(owner,tid));");
+    sqlite3_stmt *q=NULL;
     if (!r) r=md_ipc_exec(s,"BEGIN IMMEDIATE");
-    if (!r) r=md_ipc_query(s,"SELECT value FROM metadata WHERE name='boot'",&q);
-    if (!r) {
-        int step=sqlite3_step(q);
-        if (step==SQLITE_ROW) changed=strcmp((const char *)sqlite3_column_text(q,0),boot)!=0;
-        else if (step!=SQLITE_DONE) r=-EIO;
-    }
-    sqlite3_finalize(q); q=NULL;
-    if (!r && changed) r=md_ipc_exec(s,"DELETE FROM objects; DELETE FROM owners;");
-    if (!r) r=md_ipc_query(s,"INSERT OR REPLACE INTO metadata VALUES('boot',?1)",&q);
-    if (!r) { sqlite3_bind_text(q,1,boot,-1,SQLITE_STATIC); r=md_ipc_sql(sqlite3_step(q)); }
-    sqlite3_finalize(q); q=NULL;
+    if (!r) r=md_ipc_database_boot(&s->database,"DELETE FROM objects; DELETE FROM owners;");
     if (!r) r=reap(s);
     if (!r) r=md_ipc_query(s,"INSERT INTO owners VALUES(?1,?2)",&q);
     if (!r) {
-        sqlite3_bind_int64(q,1,s->owner); sqlite3_bind_int64(q,2,s->namespace_id);
+        sqlite3_bind_int64(q,1,s->database.owner); sqlite3_bind_int64(q,2,s->namespace_id);
         r=md_ipc_sql(sqlite3_step(q));
     }
     sqlite3_finalize(q);
-    if (!r) r=md_ipc_exec(s,"COMMIT");
-    if (r && s->db) md_ipc_exec(s,"ROLLBACK");
-    if (locked) flock(s->gate,LOCK_UN);
+    if (s->database.handle) r=md_ipc_database_commit(&s->database,r);
+    if (!r) s->database.admitted=1;
+    md_ipc_database_unlock(&s->database);
     if (r) md_ipc_close(s); else *out=s;
     return r;
 }
 void md_ipc_close(struct md_ipc *s) {
     if (!s) return;
-    if (s->db && s->gate>=0 && !md_ipc_begin(s)) md_ipc_finish(s,remove_owner(s,s->owner));
-    if (s->lease>=0) { char name[64]; owner_name(name,s->owner); unlinkat(s->dir,name,0); close(s->lease); }
-    if (s->db) sqlite3_close(s->db);
+    if (s->database.admitted && !md_ipc_begin(s)) md_ipc_finish(s,remove_owner(s,s->database.owner));
     if (s->events>=0) close(s->events);
-    if (s->gate>=0) close(s->gate);
-    if (s->dir>=0) close(s->dir);
+    md_ipc_database_close(&s->database);
     md_user_namespace_release(s->user_namespace);
     free(s);
 }
