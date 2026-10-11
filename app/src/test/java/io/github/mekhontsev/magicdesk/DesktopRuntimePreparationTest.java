@@ -28,6 +28,10 @@ public final class DesktopRuntimePreparationTest {
                 < source.indexOf("DesktopHomeRoleLease.prepare("));
         assertTrue(source.indexOf("RuntimeCapabilities.requireDesktop();")
                 < source.indexOf("DisplayProfileController.prepareTarget("));
+        assertTrue(source.indexOf("DesktopRuntimeBridge.noteDesktopTarget(")
+                < source.indexOf("DesktopSystemTheme.prepare();"));
+        assertTrue(source.indexOf("DesktopSystemTheme.prepare();")
+                < source.indexOf("DesktopHomeRoleLease.activate("));
     }
 
     @Test public void phoneSelfTestUsesProductionStartQueueBeforeObservingHost() throws Exception {

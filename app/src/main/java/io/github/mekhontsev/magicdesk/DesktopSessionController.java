@@ -74,6 +74,7 @@ final class DesktopSessionController {
             DesktopRuntimeBridge.noteDesktopTarget(
                     preparedTarget, resolvedPolicy);
             SecondaryDisplayWindowing.prepare(preparedTarget.workspaceDisplayId);
+            DesktopSystemTheme.prepare();
             DesktopHomeRoleLease.activate(homeAcquisition);
             final Boolean visibleTaskSnapshot =
                     MagicDeskRuntime.hasVisibleAppTaskSnapshot(

@@ -9,6 +9,10 @@ import android.os.Looper;
 import android.provider.Settings;
 
 import java.io.IOException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /** App-process owner; recovery never starts Desktop or acquires privileges. */
 final class DesktopSystemTheme {
@@ -42,15 +46,43 @@ final class DesktopSystemTheme {
     static void refresh() {
         final DesktopSystemTheme owner = sInstance;
         if (owner == null) return;
-        TaskCommandQueue.execute(() -> owner.run(() -> {
-            final boolean active = DesktopRuntimeBridge.hasWorkspaces();
-            final DesktopSystemThemeSession.Preference preference = active
-                    ? MagicDeskSettings.load().systemTheme
-                    : DesktopSystemThemeSession.Preference.UNCHANGED;
-            if (owner.mSession.update(preference, active)) {
-                owner.mStatus = active ? "requested=" + preference : "idle";
-            }
-        }));
+        TaskCommandQueue.execute(() -> owner.run(owner::reconcile));
+    }
+
+    /** The selected workspace must be published before this pre-HOME barrier. */
+    static void prepare() throws IOException {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            throw new IllegalStateException("system-theme preparation must run off the UI thread");
+        }
+        final DesktopSystemTheme owner = sInstance;
+        if (owner == null) return;
+        final CompletableFuture<Void> ready = new CompletableFuture<>();
+        TaskCommandQueue.execute(() -> {
+            if (ready.isCancelled()) return;
+            owner.run(owner::reconcile);
+            ready.complete(null);
+        });
+        try {
+            // EVENT_WAIT: serialized theme reconciliation; timeout aborts HOME startup.
+            ready.get(ExternalDisplayController.START_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new IOException("system-theme preparation interrupted", error);
+        } catch (ExecutionException | TimeoutException error) {
+            throw new IOException("system-theme preparation did not complete", error);
+        } finally {
+            ready.cancel(false);
+        }
+    }
+
+    private void reconcile() throws IOException {
+        final boolean active = DesktopRuntimeBridge.hasWorkspaces();
+        final DesktopSystemThemeSession.Preference preference = active
+                ? MagicDeskSettings.load().systemTheme
+                : DesktopSystemThemeSession.Preference.UNCHANGED;
+        if (mSession.update(preference, active)) {
+            mStatus = active ? "requested=" + preference : "idle";
+        }
     }
 
     static String diagnostics() { return sInstance == null ? "idle" : sInstance.mStatus; }

@@ -727,7 +727,10 @@ runtime integration and are not distributed through the same release path.
   while MagicDesk still owns the change. A settings observer relinquishes ownership
   on an observed external change; ordinary workspace refreshes do not reapply it.
   `DesktopSystemTheme` serializes setting events and workspace reconciliation on
-  the existing command queue. Privileged-service readiness recovers an interrupted
+  the existing command queue. Desktop startup publishes its workspace and awaits
+  that reconciliation before activating HOME, so the initial host uses the selected
+  system theme. An expired preparation aborts startup rather than launching HOME
+  ahead of the pending theme operation. Privileged-service readiness recovers an interrupted
   override without starting Desktop. Failed restoration retains the journal for
   subsequent recovery. The framework adapter checks the current user and does
   not redirect a profile's request to the privileged service's user. There is no
