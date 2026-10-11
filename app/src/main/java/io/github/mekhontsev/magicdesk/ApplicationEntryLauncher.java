@@ -12,6 +12,11 @@ final class ApplicationEntryLauncher {
 
     static void launch(Context context, DesktopLaunchRequest request, ToolLaunchTarget target,
             String uniqueId, BooleanSupplier alive, Consumer<Throwable> complete) {
+        launch(context, request, target, uniqueId, null, alive, complete);
+    }
+
+    static void launch(Context context, DesktopLaunchRequest request, ToolLaunchTarget target,
+            String uniqueId, android.os.CancellationSignal cancellation, BooleanSupplier alive, Consumer<Throwable> complete) {
         TaskCommandQueue.execute(() -> {
             try {
                 target.requireCurrent(DesktopRuntimeBridge.workspaceDisplayIds());
@@ -28,7 +33,7 @@ final class ApplicationEntryLauncher {
                         if (!alive.getAsBoolean()) return;
                         try {
                             new DesktopLaunchCoordinator(new StandaloneDesktopLaunchContext(
-                                    context, target.displayId, uniqueId)).launch(request, result -> {
+                                    context, target.displayId, uniqueId, cancellation)).launch(request, result -> {
                                 if (alive.getAsBoolean()) complete.accept(result.succeeded() ? null
                                         : new IllegalStateException(result.error));
                             });

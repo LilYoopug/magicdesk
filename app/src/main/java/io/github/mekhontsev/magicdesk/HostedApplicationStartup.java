@@ -75,6 +75,8 @@ final class HostedApplicationStartup {
         synchronized (PENDING) { PENDING.put(session.id(), this); }
         session.presentation().beginLaunch();
         session.listen(listener);
+        if (host.cancellation() != null) host.cancellation().setOnCancelListener(() -> new android.os.Handler(android.os.Looper.getMainLooper()).post(() ->
+                complete(DesktopActivityLaunchResult.failed("Application launch cancelled"))));
         host.onStarted(request);
         changed();
     }
@@ -144,6 +146,7 @@ final class HostedApplicationStartup {
     private void complete(DesktopActivityLaunchResult result) {
         if (ended) return;
         ended = true;
+        if (host.cancellation() != null) host.cancellation().setOnCancelListener(null);
         outcome = result;
         session.unlisten(listener);
         synchronized (PENDING) { PENDING.remove(session.id(), this); }

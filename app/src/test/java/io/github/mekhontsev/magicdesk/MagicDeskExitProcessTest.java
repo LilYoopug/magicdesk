@@ -53,7 +53,10 @@ public final class MagicDeskExitProcessTest {
                 static class GuestEnvironmentOperations { static void closeCurrent() { events.add("guest-operations"); } }
                 static class GraphicalSessions { static void closeAll() { events.add("graphics"); } }
                 static class AutomationCommandRuntime { static void closeCurrent() { events.add("cli"); } }
+                static class RunCommandService { }
+                static class Intent { Intent(Object context, Class<?> type) { check(type == RunCommandService.class, "wrong external service"); } }
                 static class Service {
+                    void stopService(Intent intent) { events.add("external-stop-request"); }
                     boolean mDestroyed;
                     Object mShellStateListener;
                     final Handler mHandler = new Handler();
@@ -73,9 +76,9 @@ public final class MagicDeskExitProcessTest {
                     check(events.isEmpty(), "service cleanup ran on task worker");
                     service.mHandler.dispatch();
                     check(events.equals(List.of("detach", "listener", "displays", "desktop", "input",
-                            "terminals", "guest-operations", "graphics", "mcp", "cli", "handler", "complete")), "shutdown order: " + events);
+                            "terminals", "external-stop-request", "guest-operations", "graphics", "mcp", "cli", "handler", "complete")), "shutdown order: " + events);
                     service.closeRuntime();
-                    check(events.size() == 12, "onDestroy repeated completed cleanup");
+                    check(events.size() == 13, "onDestroy repeated completed cleanup");
                     check(service.mDestroyed && service.mDisplayInput == null && service.mMcpRuntime == null,
                             "runtime retained resources");
                 }

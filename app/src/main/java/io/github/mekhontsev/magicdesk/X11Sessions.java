@@ -51,26 +51,25 @@ final class X11Sessions {
         var shortcut = new DesktopApplicationShortcut(name, "", exec, null, "", DesktopLaunchMode.AUTO,
                 false, backend, false).withGraphics(new GraphicalLaunchOptions(GraphicalProtocol.X11, true,
                         keyboardDirectory, "", "", connection));
-        return start(context, name, command, "", false, "", RecentApplications.describe(context, shortcut, ""), backend, keyboardDirectory);
+        return start(context, name, command, "", "", RecentApplications.describe(context, shortcut, ""), backend, shortcut.graphics);
     }
 
     static Session startCommand(Context context, String name, String command, String directory, String desktopFile,
-            boolean application, RecentApplicationStore.Entry recipe, DesktopExecBackend backend, String keyboardDirectory) {
+            RecentApplicationStore.Entry recipe, DesktopExecBackend backend, GraphicalLaunchOptions graphics) {
         if (command == null || command.isBlank()) throw new IllegalArgumentException("Missing X11 command");
-        return start(context, name, command, DesktopExecWorkingDirectory.normalize(directory), application, desktopFile, recipe,
-                backend, keyboardDirectory);
+        return start(context, name, command, DesktopExecWorkingDirectory.normalize(directory), desktopFile, recipe,
+                backend, graphics);
     }
 
-    private static Session start(Context context, String name, String command, String directory, boolean application, String desktopFile,
-            RecentApplicationStore.Entry recipe, DesktopExecBackend backend, String keyboardDirectory) {
-        if (recipe != null && recipe.shortcut().graphics != null
-                && recipe.shortcut().graphics.connectionMode() == GraphicalConnectionMode.ROUTED && backend != DesktopExecBackend.SHELL)
+    private static Session start(Context context, String name, String command, String directory, String desktopFile,
+            RecentApplicationStore.Entry recipe, DesktopExecBackend backend, GraphicalLaunchOptions graphics) {
+        if (graphics.connectionMode() == GraphicalConnectionMode.ROUTED && backend != DesktopExecBackend.SHELL)
             throw new IllegalArgumentException("Routed connections require the selected Shell executor");
         Context app = context.getApplicationContext();
-        X11Execution execution = new X11Execution(app, backend, keyboardDirectory);
+        X11Execution execution = new X11Execution(app, backend, graphics.keyboardDirectory());
         if (name == null || name.isBlank() || name.length() > 128)
             throw new IllegalArgumentException("X11 session name must contain 1 to 128 characters");
-        Session session = new Session(app, execution, name.trim(), command == null ? "" : command, directory, application,
+        Session session = new Session(app, execution, name.trim(), command == null ? "" : command, directory, graphics,
                 HostedUiScale.resolve(context), desktopFile, recipe);
         synchronized (SESSIONS) { SESSIONS.put(session.id(), session); }
         try {
@@ -171,6 +170,7 @@ final class X11Sessions {
         private final X11LaunchSpec launch;
         private final String startupCommand;
         private final String startupDirectory;
+        private final GraphicalLaunchOptions graphics;
         private final HostedApplicationLifetime applicationLifetime = new HostedApplicationLifetime();
         private boolean hadApplicationWindow;
         private final Runnable windowTimeout = this::windowReadinessExpired;
@@ -192,11 +192,12 @@ final class X11Sessions {
         private final HostedWindowOwners windowControlOwners = new HostedWindowOwners();
 
         Session(Context context, X11Execution execution, String name, String command,
-                String directory, boolean application, float uiScale, String desktopFile, RecentApplicationStore.Entry recipe) {
+                String directory, GraphicalLaunchOptions graphics, float uiScale, String desktopFile, RecentApplicationStore.Entry recipe) {
             this.context = context;
             this.execution = execution;
             this.name = name;
-            this.application = application;
+            this.graphics = graphics;
+            this.application = !graphics.desktop();
             this.recipe = recipe;
             presentation = new HostedWindowPresentation(context, this);
             presentationKey = GraphicalPresentationPreferences.key(execution.commands.scope, desktopFile);
@@ -204,8 +205,7 @@ final class X11Sessions {
             density = new X11Density(uiScale);
             startupCommand = command;
             startupDirectory = directory;
-            launch = execution.spec(density.resolve(scalePercent), application,
-                    recipe == null || recipe.shortcut().graphics == null ? "" : recipe.shortcut().graphics.fileEnvironment());
+            launch = execution.spec(density.resolve(scalePercent), application, graphics.fileEnvironment());
         }
 
         int scalePercent() { return scalePercent; }
@@ -237,7 +237,7 @@ final class X11Sessions {
             windowRecipes.keySet().retainAll(snapshot.stream().filter(X11Session.Window::applicationWindow)
                     .map(X11Session.Window::id).toList());
             if (recipe == null) return;
-            String expected = recipe.shortcut().graphics == null ? "" : recipe.shortcut().graphics.startupClass();
+            String expected = graphics.startupClass();
             boolean initial = !hadApplicationWindow;
             for (var item : snapshot) if (item.applicationWindow()) {
                 if (initial || item.matchesClass(expected)) windowRecipes.putIfAbsent(item.id(), recipe);
@@ -527,8 +527,7 @@ final class X11Sessions {
                     try { resource.attach(launch.guestFiles.admit(execution.commands.uid, process::acceptGuestFiles, this::fail)); }
                     catch (java.io.IOException | RuntimeException failure) { resource.close(); throw failure; }
                 }
-                if (recipe != null && recipe.shortcut().graphics != null
-                        && recipe.shortcut().graphics.connectionMode() == GraphicalConnectionMode.ROUTED) {
+                if (graphics.connectionMode() == GraphicalConnectionMode.ROUTED) {
                     var resource = resources.reserve();
                     try {
                         var endpoint = new ExecutorSocketEndpoint(execution.commands.uid, process::acceptClient, this::fail);
@@ -559,7 +558,7 @@ final class X11Sessions {
                     }));
                     if (startupCommand.isBlank()) return;
                     if (application) {
-                        String expected = recipe == null || recipe.shortcut().graphics == null ? "" : recipe.shortcut().graphics.startupClass();
+                        String expected = graphics.startupClass();
                         LAUNCHES.begin(id(), launchScope(), expected);
                         DesktopAutomationEventJournal.record("x11", "launch_tracking", true,
                                 "session=" + id() + " scope=" + launchScope() + " class=" + expected);

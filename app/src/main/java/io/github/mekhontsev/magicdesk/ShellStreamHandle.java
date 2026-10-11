@@ -4,12 +4,11 @@ import android.os.IBinder;
 import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
 
-import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-public final class ShellStreamHandle implements Closeable {
+public final class ShellStreamHandle implements CommandStream {
     private final long mRequestId;
     private final InputStream mInput;
     // The remote UserService owns the stream only while this Binder is alive.

@@ -11,6 +11,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 final class CommandExecution {
     private static final ExecutorService WORK = Executors.newCachedThreadPool(r -> new Thread(r, "CommandExecution"));
     interface Completion { void complete(int exitCode, String output, Throwable error); }
+    interface DetailedCompletion { void complete(ShellCommandOutput.Result result, Throwable error); }
     final DesktopExecBackend backend;
     final TermuxIntegration.Endpoint termux;
     final int uid;
@@ -37,33 +38,46 @@ final class CommandExecution {
     }
 
     Closeable start(String command, String directory, String label, String stdin, Completion completion) {
+        return start(command, directory, stdin, null, (result, error) -> completion.complete(
+                result == null ? -1 : result.exitCode(), result == null ? "" : result.output(), error));
+    }
+
+    void requireCurrent() {
         if (termux != null) {
-            var result = TermuxIntegration.runBackgroundShellCommandForResult(context, termux,
-                    boundedOutput(command), label, directory.isEmpty() ? home : directory, 0, stdin,
-                    (value, error) -> completion.complete(value == null ? -1 : value.exitCode,
-                            value == null ? "" : value.usefulMessage(), error != null ? error
-                                    : value != null && !value.success() ? new IllegalStateException(value.usefulMessage()) : null));
-            return () -> TermuxCommandResultReceiver.cancel(result);
-        }
-        if (stdin != null) throw new IllegalArgumentException("Shell command input is not supported by this runner");
-        if (!ShellAccess.isReady() || ShellAccess.currentSnapshot().uid != uid)
+            var current = TermuxIntegration.inspect(context);
+            current.requireAvailable();
+            if (current.uid != uid || !current.packageName.equals(scope))
+                throw new IllegalStateException("Termux identity changed");
+        } else if (!ShellAccess.isReady() || ShellAccess.currentSnapshot().uid != uid)
             throw new IllegalStateException("The command service identity changed");
-        ShellCommandSession session = new ShellCommandSession(directory.isEmpty() ? home : directory);
+    }
+
+    Closeable start(String command, String directory, String stdin, ShellCommandOutput.Sink stdout,
+            DetailedCompletion completion) {
+        requireCurrent();
+        String token = java.util.UUID.randomUUID().toString().replace("-", "");
+        ShellCommandSession session = new ShellCommandSession(directory.isEmpty() ? home : directory,
+                termux == null ? null : new ShellCommandExecutor("__MAGICDESK_CWD_" + token + "__",
+                        () -> new TermuxCommandStream(context, termux)), token);
         AtomicBoolean closed = new AtomicBoolean();
         WORK.execute(() -> {
             try {
-                // A recipe may use exec/exit; its shell must not consume the transport's completion boundary.
-                var result = session.execute("/system/bin/sh -c " + ShellCommandLine.quote(command));
-                if (!closed.get()) completion.complete(result.exitCode(), result.output(), null);
+                requireCurrent();
+                String setup = termux == null ? "" : AutomationCommandRuntime.get(context).prepareTermux(termux);
+                String shell = termux == null ? "/system/bin/sh" : termux.homeDirectory + "/../usr/bin/bash";
+                var result = session.execute(setup + invocation(shell, command, stdin), stdout);
+                if (!closed.get()) completion.complete(result, null);
             } catch (IOException | RuntimeException error) {
-                if (!closed.get()) completion.complete(-1, "", error);
+                if (!closed.get()) completion.complete(null, error);
             } finally { session.close(); }
         });
         return () -> { closed.set(true); session.close(); };
     }
 
-    // RUN_COMMAND retains output until exit. Drain it continuously with bounded storage and the real exit status.
-    static String boundedOutput(String command) {
-        return "set -o pipefail\n{\n" + command + "\n} 2>&1 | tail -c 16384 >&2\n";
+    static String invocation(String shell, String command, String stdin) {
+        // exec/exit belong to the child shell, not the transport's completion boundary.
+        return (stdin == null ? "" : "printf '%s' " + ShellCommandLine.quote(stdin) + " | ")
+                + ShellCommandLine.quote(shell) + " -c " + ShellCommandLine.quote(command)
+                + (stdin == null ? " </dev/null" : "");
     }
 }

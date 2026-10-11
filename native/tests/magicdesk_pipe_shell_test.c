@@ -40,7 +40,32 @@ static size_t frame(int fd, int *kind, uint8_t *bytes) {
     return size;
 }
 
+static struct fixture start_socket(void) {
+    int listener = socket(AF_INET, SOCK_STREAM, 0);
+    assert(listener >= 0);
+    struct sockaddr_in address = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    assert(bind(listener, (struct sockaddr *) &address, sizeof(address)) == 0 && listen(listener, 1) == 0);
+    socklen_t size = sizeof(address);
+    assert(getsockname(listener, (struct sockaddr *) &address, &size) == 0);
+    char port[16]; snprintf(port, sizeof(port), "%u", ntohs(address.sin_port));
+    char token[] = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const pid_t pid = fork();
+    assert(pid >= 0);
+    if (!pid) {
+        close(listener);
+        char *args[] = {"bridge", "--pipe-socket", port, token,
+                access("/system/bin/sh", X_OK) == 0 ? "/system/bin/sh" : "/bin/sh", NULL};
+        _exit(bridge_main(5, args));
+    }
+    int peer = accept(listener, NULL, NULL); assert(peer >= 0); close(listener);
+    uint8_t hello[69]; read_exact(peer, hello, sizeof(hello));
+    assert(hello[0] == FRAME_HELLO && decode_u32(hello + 1) == 64 && memcmp(hello + 5, token, 64) == 0);
+    int output = dup(peer); assert(output >= 0);
+    return (struct fixture){pid, peer, output};
+}
+
 static int stop(struct fixture f) {
+    (void) shutdown(f.input, SHUT_WR);
     close(f.input);
     int status;
     assert(waitpid(f.pid, &status, 0) == f.pid && WIFEXITED(status));
@@ -70,7 +95,7 @@ int main(void) {
     const size_t size = frame(f.output, &kind, bytes);
     assert(kind == PIPE_STDOUT && size == 6 && memcmp(bytes, "kept:/", 6) == 0);
     for (int attempt = 0; attempt < 8; attempt++) {
-        if (attempt != 0) f = start();
+        if (attempt != 0) f = attempt % 2 ? start_socket() : start();
         // Install ignored HUP before fork so every iteration needs SIGKILL.
         command = "trap '' HUP; (while :; do :; done) & printf '%s\\n' $!; wait\n";
         assert(write_all(f.input, command, strlen(command)) == 0);

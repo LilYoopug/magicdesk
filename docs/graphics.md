@@ -7,6 +7,11 @@ Termux, a DRM device, or EGL. The Android baseline is API 34.
 
 ## Boundaries
 
+App-side launches pass `GraphicalLaunchOptions` directly to both session backends.
+Connection mode, file-environment identity, keyboard data and startup class are
+runtime configuration, independent of optional Recent history. A launch without
+a persisted shortcut retains those options without creating a history entry.
+
 - `MdgDevice` owns rendering resources on one serialized worker/event loop.
   Devices are independent; there is no process-global rendering lock.
 - `MdgImage` retains an AHardwareBuffer, imports a linear DMA-BUF, or owns/borrows CPU storage. Pixel format,

@@ -269,6 +269,16 @@ public final class SettingsActivity extends Activity
         saveSetting(MagicDeskMcpPreferences.setEnabled(this, enabled));
     }
 
+    @Override public void setRunCommandEnabled(boolean enabled) {
+        if (!enabled) { saveSetting(RunCommandPreferences.setEnabled(this, false)); return; }
+        UiDialogs.builder(this).setTitle(R.string.run_command_title)
+                .setMessage(R.string.run_command_permission_description)
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton(android.R.string.ok, (dialog, which) ->
+                        saveSetting(RunCommandPreferences.setEnabled(this, true)))
+                .setOnDismissListener(dialog -> render()).show();
+    }
+
     @Override
     public void configureMcpAccess(final boolean network) {
         final var values = MagicDeskMcpPreferences.load(this);

@@ -63,15 +63,15 @@ public final class X11LaunchSpecTest {
                 + "\n" + command, a.clientCommand("17", command));
     }
 
-    @Test public void graphicalCommandsDrainOutputAndPreserveFailureStatus() throws Exception {
+    @Test public void commandChildPreservesStdinAndFailureStatus() throws Exception {
         String shell = System.getenv().getOrDefault("MAGICDESK_TEST_BASH", "bash");
-        Process process = new ProcessBuilder(shell, "-c", CommandExecution.boundedOutput(
-                "printf '%20000s' x; printf 'final error' >&2; exit 17")).start();
+        Process process = new ProcessBuilder(shell, "-c", CommandExecution.invocation(shell,
+                "cat; printf 'final error' >&2; exit 17", "a'\n$HOME\n")).start();
         byte[] output = process.getErrorStream().readAllBytes();
         assertEquals(new String(output, StandardCharsets.UTF_8), 17, process.waitFor());
-        assertEquals(16384, output.length);
+        assertEquals(11, output.length);
         assertTrue(new String(output, StandardCharsets.UTF_8).endsWith("final error"));
-        assertEquals(0, process.getInputStream().readAllBytes().length);
+        assertEquals("a'\n$HOME\n", new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8));
     }
 
     @Test public void rejectsInvalidDisplayAndEmptyCommands() {

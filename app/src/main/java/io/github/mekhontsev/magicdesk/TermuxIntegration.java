@@ -286,6 +286,17 @@ final class TermuxIntegration {
         context.startForegroundService(intent);
     }
 
+    static void runCommandBridge(Context context, Endpoint endpoint, int port, String token,
+            TermuxPtyBridgeLauncher.Helper helper) {
+        String bootstrap = "set -eu\ntarget=\"${HOME:?}/.local/libexec/$3\"\n"
+                + TermuxPtyBridgeLauncher.INSTALL_HELPER
+                + "exec \"$target\" --pipe-socket \"$1\" \"$2\" \"${PREFIX:?}/bin/bash\"";
+        context.startForegroundService(shellIntent(endpoint,
+                new String[]{"--noprofile", "--norc", "-c", bootstrap, "magicdesk-command", Integer.toString(port), token, helper.target()},
+                "MagicDesk command", endpoint.homeDirectory)
+                .putExtra(EXTRA_STDIN, helper.encoded()).putExtra(EXTRA_BACKGROUND, true));
+    }
+
     private static Intent commandIntent(
             final Endpoint endpoint,
             final String command,

@@ -8,6 +8,7 @@ public final class ApplicationEntryLauncherTest {
                 interface BooleanSupplier extends java.util.function.BooleanSupplier { }
                 interface Consumer<T> extends java.util.function.Consumer<T> { }
                 static class Context { }
+                static class CancellationSignal { }
                 static class DesktopLaunchRequest { }
                 static class ToolLaunchTarget {
                     int displayId = 7; boolean desktop;
@@ -24,7 +25,8 @@ public final class ApplicationEntryLauncherTest {
                 static final Queue MAIN = new Queue();
                 static class TaskCommandQueue { static void execute(Runnable r) { r.run(); } }
                 static class StandaloneDesktopLaunchContext {
-                    StandaloneDesktopLaunchContext(Context c, int d, String id) { }
+                    static CancellationSignal cancellation;
+                    StandaloneDesktopLaunchContext(Context c, int d, String id, CancellationSignal signal) { cancellation = signal; }
                 }
                 static class Result {
                     String error;
@@ -57,7 +59,13 @@ public final class ApplicationEntryLauncherTest {
                     alive[0] = false;
                     DesktopLaunchCoordinator.completion.accept(new Result(null));
                     check(events.isEmpty(), "closed caller received a late completion");
+                    alive[0] = true;
+                    var cancellation = new CancellationSignal();
+                    launch(new Context(), new DesktopLaunchRequest(), new ToolLaunchTarget(), "display-7",
+                            cancellation, () -> alive[0], events::add);
+                    check(StandaloneDesktopLaunchContext.cancellation == cancellation, "launch cancellation lost at host boundary");
                 }
-                """ + RuntimeSourceFixture.methods("ApplicationEntryLauncher", "launch"));
+                """ + RuntimeSourceFixture.methods("ApplicationEntryLauncher", "launch")
+                        .replace("android.os.CancellationSignal", "CancellationSignal"));
     }
 }

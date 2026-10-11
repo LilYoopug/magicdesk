@@ -612,6 +612,7 @@ public final class MagicDeskRuntimeService extends Service
             mDisplayInput = null;
         }
         ConsoleTerminalRegistry.closeAll();
+        stopService(new Intent(this, RunCommandService.class));
         GuestEnvironmentOperations.closeCurrent();
         GraphicalSessions.closeAll();
         if (mMcpRuntime != null) {

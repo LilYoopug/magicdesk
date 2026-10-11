@@ -9,7 +9,9 @@ final class ShellCommandExecutor
     private final Object mStateLock = new Object();
     private final String mMarker;
     private final boolean mInheritCommandChannel;
-    private ShellStreamHandle mStream;
+    interface StreamFactory { CommandStream open() throws IOException; }
+    private final StreamFactory mFactory;
+    private CommandStream mStream;
     private boolean mClosed;
     private boolean mCommandActive;
     private boolean mCancelNextCommand;
@@ -17,11 +19,16 @@ final class ShellCommandExecutor
     ShellCommandExecutor(String marker) { this(marker, true); }
     ShellCommandExecutor(String marker, boolean inheritCommandChannel) {
         mMarker = marker; mInheritCommandChannel = inheritCommandChannel;
+        mFactory = null;
+    }
+
+    ShellCommandExecutor(String marker, StreamFactory factory) {
+        mMarker = marker; mInheritCommandChannel = false; mFactory = factory;
     }
 
     @Override public ShellCommandOutput.Result execute(String command, ShellCommandOutput.Sink stdout)
             throws IOException {
-        final ShellStreamHandle stream = beginCommand();
+        final CommandStream stream = beginCommand();
         try {
             // Parse the whole request before executing it, so a large request
             // cannot deadlock its writer against output from an earlier line.
@@ -39,7 +46,7 @@ final class ShellCommandExecutor
     }
 
     @Override public void cancelCurrent() {
-        final ShellStreamHandle stream;
+        final CommandStream stream;
         synchronized (mStateLock) {
             if (mClosed) return;
             if (!mCommandActive) { mCancelNextCommand = true; return; }
@@ -50,7 +57,7 @@ final class ShellCommandExecutor
     }
 
     @Override public void close() {
-        final ShellStreamHandle stream;
+        final CommandStream stream;
         synchronized (mStateLock) {
             mClosed = true;
             stream = mStream;
@@ -59,7 +66,7 @@ final class ShellCommandExecutor
         if (stream != null) stream.close();
     }
 
-    private ShellStreamHandle beginCommand() throws IOException {
+    private CommandStream beginCommand() throws IOException {
         synchronized (mStateLock) {
             if (mClosed) throw new IOException("console shell is closed");
             if (mCancelNextCommand) {
@@ -67,12 +74,15 @@ final class ShellCommandExecutor
                 throw new IOException("console command was stopped");
             }
             if (mStream == null) {
-                final File helper = new File(MagicDeskApplication.applicationContext()
-                        .getApplicationInfo().nativeLibraryDir, "libmagicdesk_pty_bridge.so");
-                mStream = ShellAccess.openOwnedStream((mInheritCommandChannel ? "" :
-                        "unset MAGICDESK_COMMAND_ENDPOINT MAGICDESK_COMMAND_BUILD MAGICDESK_COMMAND_APK; ")
-                        + "exec " + ShellCommandLine.quote(helper.getPath())
-                        + " --pipe-shell /system/bin/sh");
+                if (mFactory != null) mStream = mFactory.open();
+                else {
+                    final File helper = new File(MagicDeskApplication.applicationContext()
+                            .getApplicationInfo().nativeLibraryDir, "libmagicdesk_pty_bridge.so");
+                    mStream = ShellAccess.openOwnedStream((mInheritCommandChannel ? "" :
+                            "unset MAGICDESK_COMMAND_ENDPOINT MAGICDESK_COMMAND_BUILD MAGICDESK_COMMAND_APK; ")
+                            + "exec " + ShellCommandLine.quote(helper.getPath())
+                            + " --pipe-shell /system/bin/sh");
+                }
             }
             mCommandActive = true;
             return mStream;

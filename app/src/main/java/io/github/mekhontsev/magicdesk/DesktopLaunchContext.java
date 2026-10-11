@@ -6,6 +6,7 @@ import android.os.Looper;
 
 /** Host operations required by the launch coordinator. */
 interface DesktopLaunchContext {
+    default android.os.CancellationSignal cancellation() { return null; }
     Context context();
 
     default void onMain(Runnable action) {

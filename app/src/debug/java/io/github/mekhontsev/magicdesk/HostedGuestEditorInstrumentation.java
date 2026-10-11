@@ -79,7 +79,8 @@ public final class HostedGuestEditorInstrumentation extends Instrumentation impl
             try {
                 runOnMainSync(() -> {
                     if (guestStore == null) {
-                        session = WaylandSessions.start(context, "Guest editor fixture", command, "", DesktopExecBackend.TERMUX, "");
+                        session = WaylandSessions.start(context, "Guest editor fixture", command, "", DesktopExecBackend.TERMUX,
+                                new GraphicalLaunchOptions(GraphicalProtocol.WAYLAND, false, "", "", ""), null);
                     } else {
                         var environment = new LinuxLaunchRecipe.Environment(LinuxLaunchRecipe.Kind.GUEST,
                                 guestStore, DesktopExecBackend.SHELL, keyboard);
@@ -88,7 +89,7 @@ public final class HostedGuestEditorInstrumentation extends Instrumentation impl
                         String launch = DesktopExecTemplate.expandArguments(recipe.exec, DesktopLaunchArguments.empty(),
                                 recipe.name, recipe.icon, "");
                         session = WaylandSessions.start(context.createDisplayContext(display), "Guest editor fixture", launch,
-                                "", recipe.execBackend, keyboard, null, false, recipe.graphics.connectionMode());
+                                "", recipe.execBackend, recipe.graphics, null);
                     }
                     session.listen(this);
                 });

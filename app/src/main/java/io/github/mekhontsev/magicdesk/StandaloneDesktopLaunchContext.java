@@ -10,9 +10,15 @@ final class StandaloneDesktopLaunchContext implements DesktopLaunchContext {
     private final Context mContext;
     private final int mDisplayId;
     private final String mUniqueId;
+    private final android.os.CancellationSignal mCancellation;
 
     StandaloneDesktopLaunchContext(Context activity, int displayId, String uniqueId) {
+        this(activity, displayId, uniqueId, null);
+    }
+
+    StandaloneDesktopLaunchContext(Context activity, int displayId, String uniqueId, android.os.CancellationSignal cancellation) {
         mContext = activity;
+        mCancellation = cancellation;
         mDisplayId = displayId;
         mUniqueId = uniqueId;
     }
@@ -85,9 +91,11 @@ final class StandaloneDesktopLaunchContext implements DesktopLaunchContext {
 
     @Override
     public boolean isUnavailable() {
-        return mContext instanceof Activity activity
+        return mCancellation != null && mCancellation.isCanceled() || mContext instanceof Activity activity
                 && (activity.isFinishing() || activity.isDestroyed());
     }
+
+    @Override public android.os.CancellationSignal cancellation() { return mCancellation; }
 
     @Override
     public void onStarted(final DesktopLaunchRequest request) {

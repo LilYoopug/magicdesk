@@ -68,11 +68,9 @@ final class GraphicalSessions {
         var exec = request.exec;
         return switch (exec.graphics.protocol()) {
             case X11 -> new X11(X11Sessions.startCommand(context, request.name, exec.command,
-                    exec.workingDirectory, request.desktopFilePath, !exec.graphics.desktop(), recipe,
-                    exec.backend, exec.graphics.keyboardDirectory()));
-            case WAYLAND -> new Wayland(WaylandSessions.start(context, request.name, exec.command,
-                    exec.workingDirectory, exec.backend, exec.graphics.keyboardDirectory(), recipe,
-                    exec.graphics.desktop(), exec.graphics.connectionMode()));
+                    exec.workingDirectory, request.desktopFilePath, recipe, exec.backend, exec.graphics));
+            case WAYLAND -> new Wayland(WaylandSessions.startApplication(context, request.name, exec.command,
+                    exec.workingDirectory, exec.backend, exec.graphics, recipe));
         };
     }
     static Session start(Context context, GraphicalProtocol protocol, String name, String command, String directory,
@@ -91,7 +89,8 @@ final class GraphicalSessions {
                 if (!cwd.isEmpty()) script = "cd -- " + ShellCommandLine.quote(cwd) + " || exit\n" + script;
                 yield new X11(X11Sessions.start(context, name, script, backend, keyboard, connection));
             }
-            case WAYLAND -> new Wayland(WaylandSessions.start(context, name, command, directory, backend, keyboard, null, desktop, connection));
+            case WAYLAND -> new Wayland(WaylandSessions.start(context, name, command, directory, backend,
+                    new GraphicalLaunchOptions(protocol, desktop, keyboard, "", "", connection), null));
         };
     }
     static Session find(String id) {

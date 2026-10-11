@@ -7,7 +7,8 @@ final class DesktopExecSpec {
     final boolean terminal;
     final String workingDirectory;
     final GraphicalLaunchOptions graphics;
-    final boolean literal;
+    enum Syntax { TEMPLATE, ARGUMENTS, PREPARED }
+    final Syntax syntax;
 
     DesktopExecSpec(
             final DesktopExecBackend backend,
@@ -26,6 +27,11 @@ final class DesktopExecSpec {
 
     DesktopExecSpec(DesktopExecBackend backend, String command, boolean terminal,
             String workingDirectory, GraphicalLaunchOptions graphics, boolean literal) {
+        this(backend, command, terminal, workingDirectory, graphics, literal ? Syntax.ARGUMENTS : Syntax.TEMPLATE);
+    }
+
+    private DesktopExecSpec(DesktopExecBackend backend, String command, boolean terminal,
+            String workingDirectory, GraphicalLaunchOptions graphics, Syntax syntax) {
         this.backend = backend == null
                 ? DesktopExecBackend.SHELL : backend;
         this.command = DesktopExecCommand.normalize(command);
@@ -34,13 +40,13 @@ final class DesktopExecSpec {
         }
         this.terminal = terminal;
         this.graphics = graphics;
-        this.literal = literal;
+        this.syntax = syntax;
         this.workingDirectory = DesktopExecWorkingDirectory.normalize(
                 workingDirectory);
     }
 
     DesktopExecSpec withCommand(final String value) {
         return new DesktopExecSpec(
-                backend, value, terminal, workingDirectory, graphics, literal);
+                backend, value, terminal, workingDirectory, graphics, Syntax.PREPARED);
     }
 }

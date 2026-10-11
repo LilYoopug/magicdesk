@@ -1163,4 +1163,7 @@
     <string name="launcher_export_preparing">Preparing launcher…</string>
     <string name="launcher_export_failed">Could not open launcher: %1$s</string>
     <string name="launcher_export_install_failed">Android could not install the launcher.</string>
+    <string name="run_command_title">External command access</string>
+    <string name="run_command_permission_label">Run commands through MagicDesk</string>
+    <string name="run_command_permission_description">Allows this app to run arbitrary commands with the selected shell, root or Termux identity, including Shroot environments. Grant only to apps you trust. This is not a sandbox.</string>
 </resources>

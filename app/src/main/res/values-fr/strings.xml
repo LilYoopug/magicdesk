@@ -1174,4 +1174,7 @@
     <string name="launcher_export_preparing">Préparation du raccourci…</string>
     <string name="launcher_export_failed">Impossible d’ouvrir le raccourci : %1$s</string>
     <string name="launcher_export_install_failed">Android n’a pas pu installer le raccourci.</string>
+    <string name="run_command_title">Accès aux commandes externes</string>
+    <string name="run_command_permission_label">Exécuter des commandes via MagicDesk</string>
+    <string name="run_command_permission_description">Autorise cette application à exécuter des commandes arbitraires avec les droits shell, root ou Termux sélectionnés, y compris dans les environnements Shroot. Réservez cet accès aux applications de confiance. Ce service ne constitue pas un bac à sable.</string>
 </resources>

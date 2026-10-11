@@ -56,6 +56,11 @@ public final class X11HostBindingTest {
                     default void onWindowGesture(long window, io.github.mekhontsev.magicdesk.hosted.HostedWindowGesture gesture) { }
                 }
                 static class Session {
+                    final Execution execution = new Execution();
+                    static class Execution {
+                        final Object gamepads = new Object();
+                        Object gamepads() { return gamepads; }
+                    }
                     final Presentation presentation = new Presentation();
                     class Presentation {
                         boolean hasFocusedHost() { return true; }
@@ -125,6 +130,8 @@ public final class X11HostBindingTest {
                 record Geometry(int width, int height) { }
                 Geometry geometry() { return new Geometry(width, height); }
                 X11SurfaceOutput output;
+                Object gamepads;
+                void gamepads(Object value) { gamepads = value; }
                 boolean failBind;
                 int width, height, cursors;
                 void bind(X11SurfaceOutput output) { this.output = output; if (failBind) throw new IllegalStateException("bind failed"); }
@@ -174,6 +181,7 @@ public final class X11HostBindingTest {
                 var host = new X11HostBinding(activity, surface, session, 31, true, () -> changes[0]++);
                 check(session.listeners.size() == 1 && session.densities.contains(host) && session.hosts.contains(10), "host registration");
                 host.refresh(31, true);
+                check(surface.gamepads == session.execution.gamepads(), "host must borrow its executor gamepad route");
                 var output = session.output;
                 check(session.opens == 1 && session.confirmed.serial() == -1 && session.actual.fullscreen(), "request identity and acknowledgement");
                 var fullscreen = HostedFullscreen.created.get(0);

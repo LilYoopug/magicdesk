@@ -6,9 +6,9 @@ public final class X11ApplicationIdentityTest {
     @Test public void sharedServerRetainsIndividualRecipesAndHostTasks() throws Exception {
         RuntimeSourceFixture.verify("""
             record Application(Fixture session, long window) { }
-            record Recipe(String key) { Shortcut shortcut() { return new Shortcut(); } }
-            static class Shortcut { Options graphics = new Options(); }
+            record Recipe(String key) { }
             static class Options { String startupClass() { return "writer"; } }
+            Options graphics = new Options();
             static class X11Session {
                 record Window(long id, String cls, boolean applicationWindow) {
                     Window(long id, String cls) { this(id, cls, true); }

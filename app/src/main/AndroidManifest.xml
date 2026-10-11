@@ -4,6 +4,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <permission android:name="${applicationId}.permission.RUN_COMMAND"
+        android:protectionLevel="dangerous"
+        android:label="@string/run_command_permission_label"
+        android:description="@string/run_command_permission_description" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -69,6 +73,12 @@
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
         <activity android:name=".LauncherEntryActivity" android:exported="true"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+        <service android:name=".RunCommandService" android:exported="true"
+            android:permission="${applicationId}.permission.RUN_COMMAND"
+            android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Explicitly authorized external command execution and result delivery" />
+        </service>
         <service
             android:name=".DesktopShortcutService"
             android:exported="true"

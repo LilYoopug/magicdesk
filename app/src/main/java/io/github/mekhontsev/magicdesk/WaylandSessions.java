@@ -39,30 +39,21 @@ final class WaylandSessions {
     }
 
     static Session start(Context context, String name, String command, String directory,
-            DesktopExecBackend backend, String keyboard) {
-        return start(context, name, command, directory, backend, keyboard, null);
+            DesktopExecBackend backend, GraphicalLaunchOptions graphics, RecentApplicationStore.Entry recipe) {
+        return start(context, name, command, directory, backend, graphics, recipe, false);
     }
 
-    static Session start(Context context, String name, String command, String directory,
-            DesktopExecBackend backend, String keyboard, RecentApplicationStore.Entry recipe) {
-        return start(context, name, command, directory, backend, keyboard, recipe,
-                recipe != null && recipe.shortcut().graphics.desktop());
+    static Session startApplication(Context context, String name, String command, String directory,
+            DesktopExecBackend backend, GraphicalLaunchOptions graphics, RecentApplicationStore.Entry recipe) {
+        return start(context, name, command, directory, backend, graphics, recipe, true);
     }
 
-    static Session start(Context context, String name, String command, String directory,
-            DesktopExecBackend backend, String keyboard, RecentApplicationStore.Entry recipe, boolean desktop) {
-        return start(context, name, command, directory, backend, keyboard, recipe, desktop,
-                recipe == null ? GraphicalConnectionMode.AUTO : recipe.shortcut().graphics.connectionMode());
-    }
-
-    static Session start(Context context, String name, String command, String directory,
-            DesktopExecBackend backend, String keyboard, RecentApplicationStore.Entry recipe, boolean desktop, GraphicalConnectionMode connection) {
+    private static Session start(Context context, String name, String command, String directory,
+            DesktopExecBackend backend, GraphicalLaunchOptions graphics, RecentApplicationStore.Entry recipe, boolean application) {
         if (name == null || name.isBlank() || name.length() > 128)
             throw new IllegalArgumentException("Session name must contain 1 to 128 characters");
-        var graphics = recipe == null ? null : recipe.shortcut().graphics;
-        Session session = new Session(context.getApplicationContext(), name.trim(), new WaylandExecution(context, backend, keyboard,
-                graphics == null ? "" : graphics.fileEnvironment(), desktop,
-                connection), recipe, desktop);
+        Session session = new Session(context.getApplicationContext(), name.trim(), new WaylandExecution(context, backend, graphics.keyboardDirectory(),
+                graphics.fileEnvironment(), graphics.desktop(), graphics.connectionMode()), recipe, graphics.desktop(), application);
         synchronized (SESSIONS) { SESSIONS.put(session.id(), session); }
         MAIN.post(() -> session.start(command, directory));
         return session;
@@ -155,8 +146,8 @@ final class WaylandSessions {
                 if (!stopped() && connection != null) connection.setColorScheme(value);
             }));
             MAIN.removeCallbacks(timeout);
-            // EVENT_WAIT: first client map after a recipe launch; expiry fails the launch.
-            if (recipe != null) MAIN.postDelayed(applicationTimeout, 60_000);
+            // EVENT_WAIT: first client map after an application launch; expiry fails the launch.
+            if (application) MAIN.postDelayed(applicationTimeout, 60_000);
             if (startupCommand != null && !startupCommand.isBlank()) launchCommand(startupCommand, startupDirectory, true);
             changed();
         }
@@ -204,9 +195,9 @@ final class WaylandSessions {
             });
         }
 
-        Session(Context context, String name, WaylandExecution execution, RecentApplicationStore.Entry recipe, boolean desktop) {
+        Session(Context context, String name, WaylandExecution execution, RecentApplicationStore.Entry recipe, boolean desktop, boolean application) {
             this.context = context; this.name = name; this.execution = execution;
-            this.recipe = recipe; this.desktop = desktop; application = recipe != null && !desktop;
+            this.recipe = recipe; this.desktop = desktop; this.application = application && !desktop;
             presentationKey = GraphicalPresentationPreferences.key(execution.commands.scope,
                     recipe == null ? "" : recipe.sourcePath());
             scalePercent = GraphicalPresentationPreferences.load(context, presentationKey);

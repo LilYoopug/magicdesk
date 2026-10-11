@@ -13,6 +13,11 @@ is Android 14; managed Desktop and its self-tests require Android 15. Server
 availability, service prerequisites and client grants are independent checks.
 See [Runtime API levels](runtime-api-levels.md) for the validation boundary.
 
+The separate Android [RUN_COMMAND API](run-command.md) allows authorized apps
+to launch shell, Termux and Shroot commands through the same execution, terminal
+and graphics services. It has its own Android permission and local opt-in;
+it does not consume MCP grants or expose the automation tool catalog.
+
 Native [appearance](appearance.md) has shared schema, validation, read/apply,
 preview/confirm/cancel, preset and reset operations. Version 4 describes 1-4
 native panels on any edge and shared background opacity and blur, with optional

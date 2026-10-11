@@ -28,3 +28,7 @@ include ':hosted-runtime'
 include ':wayland-runtime'
 include ':audio-runtime'
 include ':launcher-template'
+if (providers.gradleProperty('commandClientFixture').isPresent()) {
+    include ':run-command-client'
+    project(':run-command-client').projectDir = file('tests/run-command-client')
+}

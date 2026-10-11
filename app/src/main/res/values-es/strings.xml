@@ -1174,4 +1174,7 @@
     <string name="launcher_export_preparing">Preparando lanzador…</string>
     <string name="launcher_export_failed">No se pudo abrir el lanzador: %1$s</string>
     <string name="launcher_export_install_failed">Android no pudo instalar el lanzador.</string>
+    <string name="run_command_title">Acceso a comandos externos</string>
+    <string name="run_command_permission_label">Ejecutar comandos mediante MagicDesk</string>
+    <string name="run_command_permission_description">Permite a esta aplicación ejecutar cualquier comando con la identidad seleccionada de shell, root o Termux, incluso en entornos Shroot. Concede acceso solo a aplicaciones de confianza. No es un entorno aislado.</string>
 </resources>

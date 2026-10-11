@@ -1163,4 +1163,7 @@
     <string name="launcher_export_preparing">Starter wird vorbereitet…</string>
     <string name="launcher_export_failed">Starter konnte nicht geöffnet werden: %1$s</string>
     <string name="launcher_export_install_failed">Android konnte den Starter nicht installieren.</string>
+    <string name="run_command_title">Externer Befehlszugriff</string>
+    <string name="run_command_permission_label">Befehle über MagicDesk ausführen</string>
+    <string name="run_command_permission_description">Erlaubt dieser App, beliebige Befehle mit der ausgewählten Shell-, Root- oder Termux-Identität auszuführen, auch in Shroot-Umgebungen. Nur vertrauenswürdigen Apps erlauben. Dies ist keine Sandbox.</string>
 </resources>

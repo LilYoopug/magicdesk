@@ -954,6 +954,17 @@ static int peer_output_command(int argc, char **argv) {
 
 int main(int argc, char **argv) {
     if (argc == 3 && strcmp(argv[1], "--pipe-shell") == 0) return pipe_shell_command(argv[2]);
+    if (argc == 5 && strcmp(argv[1], "--pipe-socket") == 0) {
+        if (!valid_token(argv[3]) || argv[4][0] != '/') return 2;
+        int peer = connect_loopback(strtol(argv[2], NULL, 10));
+        if (peer < 0) return 1;
+        if (write_frame(peer, FRAME_HELLO, argv[3], (uint32_t) strlen(argv[3]))
+                || dup2(peer, STDIN_FILENO) < 0 || dup2(peer, STDOUT_FILENO) < 0) {
+            close(peer); return 1;
+        }
+        if (peer > STDERR_FILENO) close(peer);
+        return pipe_shell_command(argv[4]);
+    }
     if (argc >= 2 && (strcmp(argv[1], "--describe-pty") == 0
             || strcmp(argv[1], "--emit-pty") == 0)) return peer_output_command(argc, argv);
     const int socket_mode = argc == 10 && strcmp(argv[1], "--socket") == 0;

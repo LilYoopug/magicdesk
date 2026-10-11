@@ -40,6 +40,7 @@ final class SettingsView {
         void setOpenFilesWithSingleClick(boolean enabled);
 
         void setMcpEnabled(boolean enabled);
+        void setRunCommandEnabled(boolean enabled);
 
         void configureMcpAccess(boolean network);
 
@@ -99,6 +100,7 @@ final class SettingsView {
     private boolean mDesktopSettingsAvailable;
     private View mResetCompatibilityDefaults;
     private Switch mMcpEnabled;
+    private Switch mRunCommandEnabled;
     private TextView mMcpStatus;
     private Switch mMcpNetworkEnabled;
     private TextView mMcpNetworkStatus;
@@ -248,6 +250,10 @@ final class SettingsView {
                 LinearLayout.LayoutParams.WRAP_CONTENT));
 
         addSection(content, R.string.settings_section_automation);
+        mRunCommandEnabled = addSwitch(content, R.string.run_command_title);
+        mRunCommandEnabled.setOnCheckedChangeListener((button, checked) -> {
+            if (!mRendering) mActions.setRunCommandEnabled(checked);
+        });
         mMcpEnabled = addSwitch(content, R.string.settings_mcp_enabled);
         mMcpEnabled.setOnCheckedChangeListener((button, checked) -> {
             if (!mRendering) {
@@ -417,6 +423,7 @@ final class SettingsView {
             mDisableAdaptiveBrightness.setChecked(settings.disableAdaptiveBrightness);
         }
         mMcpEnabled.setChecked(mcp.enabled);
+        mRunCommandEnabled.setChecked(RunCommandPreferences.enabled(mActivity));
         mMcpNetworkEnabled.setChecked(mcp.enabled && mcp.networkEnabled);
         mMcpNetworkEnabled.setEnabled(mcp.enabled);
         mMcpNetworkStatus.setText(!mcp.networkEnabled

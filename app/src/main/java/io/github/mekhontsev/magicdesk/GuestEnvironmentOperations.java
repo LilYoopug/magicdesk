@@ -35,8 +35,13 @@ final class GuestEnvironmentOperations {
     }
 
     static String read(String library, String... arguments) throws IOException {
+        return read(library, null, arguments);
+    }
+
+    static String read(String library, android.os.CancellationSignal cancellation, String... arguments) throws IOException {
         requireShell();
         var session = new ShellCommandSession("/data/local/tmp");
+        if (cancellation != null) cancellation.setOnCancelListener(session::close);
         try {
             var output = new java.io.ByteArrayOutputStream();
             var result = session.execute(inLibrary(GuestEnvironmentCatalog.command(arguments), library), (bytes, offset, count) -> {
@@ -45,7 +50,10 @@ final class GuestEnvironmentOperations {
             });
             if (result.exitCode() != 0) throw new IOException(result.stderr());
             return output.toString(StandardCharsets.UTF_8).trim();
-        } finally { session.close(); }
+        } finally {
+            if (cancellation != null) cancellation.setOnCancelListener(null);
+            session.close();
+        }
     }
 
     synchronized JSONObject start(JSONArray values, String library) throws Exception {

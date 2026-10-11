@@ -128,10 +128,10 @@ final class DesktopLaunchRequest {
     }
 
     DesktopLaunchRequest prepareExec() {
-        if (exec == null) {
+        if (exec == null || exec.syntax == DesktopExecSpec.Syntax.PREPARED) {
             return this;
         }
-        String command = exec.literal
+        String command = exec.syntax == DesktopExecSpec.Syntax.ARGUMENTS
                 ? DesktopExecTemplate.expandArguments(exec.command, arguments, name, icon, desktopFilePath)
                 : DesktopExecTemplate.expand(exec.command, arguments, name, icon, desktopFilePath);
         return withExec(exec.withCommand(command));

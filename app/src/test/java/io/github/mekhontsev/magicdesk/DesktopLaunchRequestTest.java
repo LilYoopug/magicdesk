@@ -154,4 +154,13 @@ public final class DesktopLaunchRequestTest {
         assertNull(request.androidLaunch);
         assertNotNull(request.exec);
     }
+
+    @Test public void preparedCommandIsNotExpandedAgain() {
+        var request = new DesktopLaunchRequest("Command", "", null, null,
+                new DesktopExecSpec(DesktopExecBackend.SHELL, "printf '%s' '%f'", false)
+                        .withCommand("printf '%s' '%f'"),
+                DesktopLaunchPresentation.automatic(), DesktopLaunchArguments.empty(), "");
+        org.junit.Assert.assertSame(request, request.prepareExec());
+        assertEquals("printf '%s' '%f'", request.prepareExec().exec.command);
+    }
 }

@@ -4014,6 +4014,23 @@ session pickers, Task Manager and automation, not by resource-sampling timers.
 Bounded Termux commands use its documented `RUN_COMMAND_PENDING_INTENT`
 result channel. The result receiver is explicit, non-exported, one-shot, and
 bounded by a timeout; long-running PTY commands do not wait for process exit.
+Streaming `CommandExecution` uses one framed `ShellCommandSession` contract for
+shell and Termux. `CommandStream` owns its transport: a privileged-service pipe
+for shell, or an authenticated loopback relay bootstrapped through the selected
+Termux endpoint. Both drain stdout/stderr continuously and close their owned
+process session on cancellation; no PTY is allocated for background commands.
+
+The Android [external-command API](run-command.md) is a separate authorized
+adapter to these services. `RunCommandService` requires an Android dangerous
+permission and an explicit user opt-in, captures the selected executor identity,
+and resolves Shroot environments by stable catalog ID. It does not use MCP
+tokens, start privileged access, or own Desktop. Background requests retain
+their command channel until completion; interactive requests hand ownership to
+the shared terminal or graphics service. Deadlines cancel unhanded resources,
+with potentially blocking cleanup off the Android main thread. Raw requests do
+not create application-history entries. Graphical configuration and application
+lifetime are independent of that optional history.
+
 Explicit commands and composite Android launches use the shared
 [Desktop Entry format](desktop-entries.md).
 The explicit **Run script** action in Files opens Console with a safely quoted

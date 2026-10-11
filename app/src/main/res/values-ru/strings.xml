@@ -1185,4 +1185,7 @@
     <string name="launcher_export_preparing">Подготовка ярлыка…</string>
     <string name="launcher_export_failed">Не удалось открыть ярлык: %1$s</string>
     <string name="launcher_export_install_failed">Android не удалось установить ярлык.</string>
+    <string name="run_command_title">Доступ к внешним командам</string>
+    <string name="run_command_permission_label">Запуск команд через MagicDesk</string>
+    <string name="run_command_permission_description">Разрешает этому приложению выполнять произвольные команды с выбранными правами shell, root или Termux, в том числе в средах Shroot. Давайте доступ только доверенным приложениям. Это не песочница.</string>
 </resources>

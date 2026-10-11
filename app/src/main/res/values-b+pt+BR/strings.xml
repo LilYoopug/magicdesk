@@ -1174,4 +1174,7 @@
     <string name="launcher_export_preparing">Preparando iniciador…</string>
     <string name="launcher_export_failed">Não foi possível abrir o iniciador: %1$s</string>
     <string name="launcher_export_install_failed">O Android não pôde instalar o iniciador.</string>
+    <string name="run_command_title">Acesso a comandos externos</string>
+    <string name="run_command_permission_label">Executar comandos pelo MagicDesk</string>
+    <string name="run_command_permission_description">Permite que este aplicativo execute comandos arbitrários com a identidade shell, root ou Termux selecionada, inclusive em ambientes Shroot. Conceda acesso apenas a aplicativos confiáveis. Não é um ambiente isolado.</string>
 </resources>

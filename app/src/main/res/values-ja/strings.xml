@@ -1152,4 +1152,7 @@
     <string name="launcher_export_preparing">ランチャーを準備中…</string>
     <string name="launcher_export_failed">ランチャーを開けませんでした: %1$s</string>
     <string name="launcher_export_install_failed">Android でランチャーをインストールできませんでした。</string>
+    <string name="run_command_title">外部コマンドへのアクセス</string>
+    <string name="run_command_permission_label">MagicDesk 経由でコマンドを実行</string>
+    <string name="run_command_permission_description">選択された shell、root、Termux の権限で、このアプリが任意のコマンドを実行できるようにします。Shroot 環境も対象です。信頼できるアプリにのみ許可してください。サンドボックスではありません。</string>
 </resources>

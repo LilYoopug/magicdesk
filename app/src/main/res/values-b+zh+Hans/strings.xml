@@ -1152,4 +1152,7 @@
     <string name="launcher_export_preparing">正在准备启动器…</string>
     <string name="launcher_export_failed">无法打开启动器：%1$s</string>
     <string name="launcher_export_install_failed">Android 无法安装启动器。</string>
+    <string name="run_command_title">外部命令访问</string>
+    <string name="run_command_permission_label">通过 MagicDesk 运行命令</string>
+    <string name="run_command_permission_description">允许此应用以所选的 shell、root 或 Termux 身份执行任意命令，包括在 Shroot 环境中。请仅向可信应用授权。这不是沙盒。</string>
 </resources>

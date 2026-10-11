@@ -610,6 +610,11 @@ Desktop targets.
 
 ## Automation
 
+Android apps can use the optional [RUN_COMMAND API](docs/run-command.md) for
+shell, Termux and Shroot commands, in the background or in terminal/X11/Wayland
+windows. It requires an Android permission and a separate opt-in in Settings,
+not MCP or a managed Desktop.
+
 The optional MCP server exposes the same services used by the UI:
 
 - Device, runtime, display and task state, events and exact-operation waits.
