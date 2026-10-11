@@ -1028,7 +1028,7 @@ final class AutomationCommandCatalog {
                 .put(destructiveTool(
                         "terminal.close",
                         "End terminal session",
-                        "End one terminal session and close its attached window, if any.",
+                        "End one terminal session. Its window remains available for another session.",
                         terminalSchema()))
                 .put(readTool(
                         "tmux.list",

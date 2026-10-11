@@ -24,29 +24,51 @@ final class TerminalSessionsDialog {
     private final SessionsAdapter adapter = new SessionsAdapter();
     private final TextView status;
     private final AlertDialog dialog;
+    private final android.widget.ListPopupWindow dropdown;
+    private final java.util.function.Consumer<Intent> selection;
     private List<TerminalSessions.Item> items = List.of();
     private TmuxSessionProvider.Snapshot tmux;
     private boolean loading;
 
     private TerminalSessionsDialog(Activity activity, ToolLaunchTarget target, String uniqueId,
-            DesktopLaunchPresentation presentation) {
+            DesktopLaunchPresentation presentation, View anchor, java.util.function.Consumer<Intent> selection) {
         this.activity = activity;
         this.target = target;
         this.uniqueId = uniqueId;
         this.presentation = presentation;
+        this.selection = selection;
         status = new TextView(activity);
         status.setTextSize(13);
         status.setPadding(dp(24), dp(8), dp(24), dp(8));
-        dialog = UiDialogs.builder(activity).setTitle(R.string.terminal_sessions)
+        UiAppearance.text(status, UiColor.MUTED);
+        dialog = anchor != null ? null : UiDialogs.builder(activity).setTitle(R.string.terminal_sessions)
                 .setAdapter(adapter, (picker, index) -> open(items.get(index)))
                 .setPositiveButton(R.string.terminal_new, null)
                 .setNeutralButton(R.string.action_refresh, null)
                 .setNegativeButton(android.R.string.cancel, null).create();
+        dropdown = anchor == null ? null : new android.widget.ListPopupWindow(activity);
+        if (dropdown != null) {
+            dropdown.setAnchorView(anchor);
+            dropdown.setModal(true);
+            dropdown.setBackgroundDrawable(UiAppearance.paint(activity, UiColor.PANEL, dp(8), UiColor.HOVER));
+            dropdown.setInputMethodMode(android.widget.ListPopupWindow.INPUT_METHOD_NOT_NEEDED);
+            dropdown.setWidth(Math.min(dp(360), activity.getResources().getDisplayMetrics().widthPixels - dp(24)));
+            dropdown.setAdapter(adapter);
+            dropdown.setPromptView(status);
+            dropdown.setOnItemClickListener((parent, view, position, id) -> {
+                if (position == items.size()) create();
+                else open(items.get(position));
+            });
+        }
     }
 
     static void show(Activity activity) {
-        show(activity, ToolLaunchTarget.resolve("auto", activity.getDisplay() == null
-                ? 0 : activity.getDisplay().getDisplayId(), DesktopRuntimeBridge.workspaceDisplayIds()), null);
+        show(activity, currentTarget(activity), null);
+    }
+
+    private static ToolLaunchTarget currentTarget(Activity activity) {
+        return ToolLaunchTarget.resolve("auto", activity.getDisplay() == null
+                ? 0 : activity.getDisplay().getDisplayId(), DesktopRuntimeBridge.workspaceDisplayIds());
     }
 
     static void show(Activity activity, ToolLaunchTarget target, String uniqueId) {
@@ -54,7 +76,7 @@ final class TerminalSessionsDialog {
     }
 
     static void show(Activity activity, ToolLaunchTarget target, String uniqueId, DesktopLaunchPresentation presentation) {
-        final var picker = new TerminalSessionsDialog(activity, target, uniqueId, presentation);
+        final var picker = new TerminalSessionsDialog(activity, target, uniqueId, presentation, null, null);
         picker.dialog.show();
         picker.dialog.getListView().addFooterView(picker.status, null, false);
         picker.dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> picker.create());
@@ -63,6 +85,27 @@ final class TerminalSessionsDialog {
             picker.actions(picker.items.get(position)); return true;
         });
         picker.load();
+    }
+
+    static void showDropdown(Activity activity, View anchor) {
+        showDropdown(activity, anchor, null);
+    }
+
+    static void showDropdown(Activity activity, View anchor, java.util.function.Consumer<Intent> selection) {
+        final var picker = new TerminalSessionsDialog(activity, currentTarget(activity), null,
+                DesktopLaunchPresentation.automatic(), anchor, selection);
+        picker.dropdown.show();
+        picker.dropdown.getListView().setOnItemLongClickListener((parent, view, position, id) -> {
+            if (position >= picker.items.size()) return false;
+            picker.actions(picker.items.get(position));
+            return true;
+        });
+        picker.load();
+    }
+
+    private void dismiss() {
+        if (dialog != null) dialog.dismiss();
+        if (dropdown != null) dropdown.dismiss();
     }
 
     private void load() {
@@ -92,7 +135,10 @@ final class TerminalSessionsDialog {
         }));
     }
 
-    private boolean alive() { return dialog.isShowing() && !activity.isFinishing() && !activity.isDestroyed(); }
+    private boolean alive() {
+        return (dialog != null ? dialog.isShowing() : dropdown.isShowing())
+                && !activity.isFinishing() && !activity.isDestroyed();
+    }
 
     private void render() {
         items = TerminalSessions.merge(ConsoleTerminalRegistry.list(), tmux);
@@ -110,8 +156,10 @@ final class TerminalSessionsDialog {
     }
 
     private void openIntent(Intent intent) {
-        dialog.dismiss();
-        TerminalSessions.open(activity, intent, target, uniqueId, presentation, this::result);
+        if (activity.isFinishing() || activity.isDestroyed()) return;
+        dismiss();
+        if (selection != null) selection.accept(intent);
+        else TerminalSessions.open(activity, intent, target, uniqueId, presentation, this::result);
     }
 
     private void prepareTmux(String id, String name) {
@@ -248,10 +296,20 @@ final class TerminalSessionsDialog {
     private int dp(int value) { return Math.round(value * activity.getResources().getDisplayMetrics().density); }
 
     private final class SessionsAdapter extends BaseAdapter {
-        @Override public int getCount() { return items.size(); }
-        @Override public Object getItem(int position) { return items.get(position); }
+        @Override public int getCount() { return items.size() + (dropdown == null ? 0 : 1); }
+        @Override public Object getItem(int position) { return position < items.size() ? items.get(position) : null; }
         @Override public long getItemId(int position) { return position; }
         @Override public View getView(int position, View recycled, ViewGroup parent) {
+            if (position == items.size()) {
+                final TextView create = new TextView(activity);
+                create.setText(R.string.terminal_new);
+                create.setTextSize(16);
+                create.setGravity(Gravity.CENTER_VERTICAL);
+                create.setPadding(dp(24), dp(12), dp(24), dp(12));
+                create.setMinHeight(dp(48));
+                UiAppearance.text(create, UiColor.ACCENT);
+                return create;
+            }
             final var item = items.get(position);
             final LinearLayout row = new LinearLayout(activity);
             row.setGravity(Gravity.CENTER_VERTICAL);
@@ -260,10 +318,13 @@ final class TerminalSessionsDialog {
             text.setOrientation(LinearLayout.VERTICAL);
             final TextView name = new TextView(activity);
             name.setText(title(item)); name.setTextSize(16); name.setSingleLine(true);
+            UiAppearance.text(name, item.terminal() != null && item.terminal().taskId == activity.getTaskId()
+                    ? UiColor.ACCENT : UiColor.TEXT);
             name.setEllipsize(android.text.TextUtils.TruncateAt.END);
             text.addView(name);
             final TextView detail = new TextView(activity);
             detail.setTextSize(12); detail.setMaxLines(2);
+            UiAppearance.text(detail, UiColor.MUTED);
             detail.setEllipsize(android.text.TextUtils.TruncateAt.END);
             final String state = activity.getString(item.terminal() != null && item.terminal().taskId >= 0
                     ? R.string.terminal_window_open : R.string.terminal_window_closed);
@@ -276,6 +337,7 @@ final class TerminalSessionsDialog {
             row.addView(text, new LinearLayout.LayoutParams(0, dp(64), 1));
             final ImageButton more = new ImageButton(activity);
             more.setImageResource(R.drawable.ic_arrow_down);
+            UiAppearance.imageStates(more, UiColor.TEXT);
             more.setContentDescription(activity.getString(R.string.terminal_session_actions, title(item)));
             more.setTooltipText(more.getContentDescription());
             more.setBackgroundColor(android.graphics.Color.TRANSPARENT);

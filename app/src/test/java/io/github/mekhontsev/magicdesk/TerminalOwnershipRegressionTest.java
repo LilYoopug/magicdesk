@@ -21,7 +21,7 @@ public final class TerminalOwnershipRegressionTest {
         RuntimeSourceFixture.verify(fixture() + """
                 public static void verify() {
                     check(mostRecent() == null, "empty registry offered a terminal");
-                    Activity first = new Activity(), second = new Activity();
+                    Activity first = new HostActivity(), second = new HostActivity();
                     ConsoleTerminalSession a = acquire("terminal-a", ignored -> new ConsoleTerminalSession());
                     register(first, a, new ConsoleTerminalView(), "terminal-a");
                     focused("terminal-a", first);
@@ -49,7 +49,7 @@ public final class TerminalOwnershipRegressionTest {
     @Test public void staleAndFinishingWindowFocusCannotReplaceRecentTerminal() throws Exception {
         RuntimeSourceFixture.verify(fixture() + """
                 public static void verify() {
-                    Activity old = new Activity(), replacement = new Activity(), other = new Activity();
+                    Activity old = new HostActivity(), replacement = new HostActivity(), other = new HostActivity();
                     ConsoleTerminalSession a = acquire("terminal-a", ignored -> new ConsoleTerminalSession());
                     register(old, a, new ConsoleTerminalView(), "terminal-a");
                     focused("terminal-a", old);
@@ -71,7 +71,7 @@ public final class TerminalOwnershipRegressionTest {
         RuntimeSourceFixture.verify(fixture() + """
                 public static void verify() {
                     ConsoleTerminalSession session = acquire("terminal-a", ignored -> new ConsoleTerminalSession());
-                    Activity first = new Activity(); ConsoleTerminalView oldView = new ConsoleTerminalView();
+                    Activity first = new HostActivity(); ConsoleTerminalView oldView = new ConsoleTerminalView();
                     register(first, session, oldView, "terminal-a");
                     long generation = attachmentGeneration("terminal-a");
                     detach("terminal-a", first);
@@ -79,14 +79,15 @@ public final class TerminalOwnershipRegressionTest {
                     check(oldView.detached && !first.finished, "detach waited for Activity destruction to release the View");
                     check(!session.closed, "detach terminated PTY");
                     check(acquire("terminal-a", null) == session, "attach replaced PTY");
-                    Activity second = new Activity(); ConsoleTerminalView view = new ConsoleTerminalView();
+                    Activity second = new HostActivity(); ConsoleTerminalView view = new ConsoleTerminalView();
                     register(second, session, view, "terminal-a");
                     check(hasWindowLocked("terminal-a", generation), "new attachment not acknowledged");
                     check(!hasWindowLocked("terminal-a", attachmentGeneration("terminal-a")), "old attachment acknowledged");
                     detach("terminal-a", first);
                     check(hasWindowLocked("terminal-a", generation), "stale Activity detached new window");
                     check(close("terminal-a"), "close rejected retained session");
-                    check(session.closed && second.finished && view.detached, "close did not release all owners");
+                    check(session.closed && !second.finished && second.released == 1 && view.detached,
+                            "ending PTY must release the binding, not its window");
                     try { acquire("terminal-a", null); throw new AssertionError("expired attach created shell"); }
                     catch (IllegalStateException expected) { }
                 }
@@ -97,7 +98,7 @@ public final class TerminalOwnershipRegressionTest {
         RuntimeSourceFixture.verify(fixture() + """
                 public static void verify() {
                     ConsoleTerminalSession session = acquire("terminal-c", ignored -> new ConsoleTerminalSession());
-                    Activity activity = new Activity(); ConsoleTerminalView view = new ConsoleTerminalView();
+                    Activity activity = new HostActivity(); ConsoleTerminalView view = new ConsoleTerminalView();
                     register(activity, session, view, "terminal-c");
                     check(hide("terminal-c"), "hide failed");
                     check(activity.finished && view.detached && !session.closed, "hide did not separate window and PTY");
@@ -107,18 +108,56 @@ public final class TerminalOwnershipRegressionTest {
                 """);
     }
 
-    @Test public void replacingLiveViewDisconnectsOldViewBeforeItsActivityFinishes() throws Exception {
+    @Test public void transferReleasesInputButKeepsBothWindowsAlive() throws Exception {
         RuntimeSourceFixture.verify(fixture() + """
                 public static void verify() {
                     ConsoleTerminalSession session = acquire("terminal-b", ignored -> new ConsoleTerminalSession());
-                    Activity first = new Activity(); ConsoleTerminalView oldView = new ConsoleTerminalView();
+                    Activity first = new HostActivity(); ConsoleTerminalView oldView = new ConsoleTerminalView();
                     register(first, session, oldView, "terminal-b");
-                    Activity second = new Activity();
+                    Activity second = new HostActivity();
                     register(second, session, new ConsoleTerminalView(), "terminal-b");
-                    check(first.finished && oldView.detached, "old presentation retained input/resize ownership");
+                    check(!first.finished && first.released == 1 && oldView.detached,
+                            "transfer must empty the old window and revoke input/resize");
                     check(!session.closed, "reattachment closed PTY");
                     detach("terminal-b", first);
                     check(hasWindowLocked("terminal-b", 0), "old destruction unregistered new view");
+                }
+                """);
+    }
+
+    @Test public void oneWindowSwitchesSessionsWithoutClosingEitherPty() throws Exception {
+        RuntimeSourceFixture.verify(fixture() + """
+                public static void verify() {
+                    Activity window = new HostActivity(); ConsoleTerminalView view = new ConsoleTerminalView();
+                    ConsoleTerminalSession a = acquire("terminal-a", ignored -> new ConsoleTerminalSession());
+                    ConsoleTerminalSession b = acquire("terminal-b", ignored -> new ConsoleTerminalSession());
+                    ENTRIES.get("terminal-a").tmuxSessionId = "$1";
+                    register(window, a, view, "terminal-a");
+                    long generation = attachmentGeneration("terminal-a");
+                    register(window, b, view, "terminal-b");
+                    check(!hasWindowLocked("terminal-a", 0) && hasWindowLocked("terminal-b", 0),
+                            "one window was bound to two sessions");
+                    check(window.released == 1 && view.detached && !window.finished, "old binding not released");
+                    check(!a.closed && !b.closed, "switch killed a PTY or tmux client");
+                    register(window, a, view, "terminal-a");
+                    check(hasWindowLocked("terminal-a", generation), "switch back was not a new attachment");
+                    close("terminal-b");
+                    check(window.released == 2 && hasWindowLocked("terminal-a", 0),
+                            "background PTY exit detached the selected session");
+                }
+                """);
+    }
+
+    @Test public void repeatedRegistrationDoesNotRevokeInputOrCreateFalseAttachmentReceipt() throws Exception {
+        RuntimeSourceFixture.verify(fixture() + """
+                public static void verify() {
+                    Activity window = new HostActivity(); ConsoleTerminalView view = new ConsoleTerminalView();
+                    ConsoleTerminalSession a = acquire("terminal-a", ignored -> new ConsoleTerminalSession());
+                    register(window, a, view, "terminal-a");
+                    long generation = attachmentGeneration("terminal-a");
+                    register(window, a, view, "terminal-a");
+                    check(!view.detached && window.released == 0, "unchanged binding was revoked");
+                    check(attachmentGeneration("terminal-a") == generation, "spurious attachment receipt");
                 }
                 """);
     }
@@ -128,11 +167,11 @@ public final class TerminalOwnershipRegressionTest {
                 public static void verify() {
                     ConsoleTerminalSession session = acquire("terminal-d", ignored -> new ConsoleTerminalSession());
                     ENTRIES.get("terminal-d").tmuxSessionId = "$2";
-                    Activity old = new Activity();
+                    Activity old = new HostActivity();
                     register(old, session, new ConsoleTerminalView(), "terminal-d");
                     detach("terminal-d", old);
                     check(!session.closed, "configuration destruction closed tmux client");
-                    Activity next = new Activity();
+                    Activity next = new HostActivity();
                     register(next, session, new ConsoleTerminalView(), "terminal-d");
                     old.finished = true;
                     detach("terminal-d", old);
@@ -142,7 +181,7 @@ public final class TerminalOwnershipRegressionTest {
                     check(session.closed && !ENTRIES.containsKey("terminal-d"), "caption close retained invisible tmux client");
                     session = acquire("terminal-e", ignored -> new ConsoleTerminalSession());
                     ENTRIES.get("terminal-e").tmuxSessionId = "$3";
-                    register(new Activity(), session, new ConsoleTerminalView(), "terminal-e");
+                    register(new HostActivity(), session, new ConsoleTerminalView(), "terminal-e");
                     check(hide("terminal-e") && session.closed, "explicit detach retained tmux client");
                 }
                 """);
@@ -155,7 +194,10 @@ public final class TerminalOwnershipRegressionTest {
                 interface Consumer<T> extends java.util.function.Consumer<T> {}
                 static class ConsoleTerminalSession { interface Listener {} boolean closed; void close() { closed=true; } }
                 static class ConsoleTerminalView { boolean detached; void attach(Object a,Object b) { detached=true; } }
-                static class Activity { boolean finished; boolean isDestroyed() { return false; }
+                static class HostActivity extends Activity implements TerminalWindowAttachment.Host {}
+                static class Activity {
+                    boolean finished; int released; public void onTerminalDetached() { released++; }
+                    boolean isDestroyed() { return false; }
                     boolean isFinishing() { return finished; }
                     int getTaskId() { return 1; } void finishAndRemoveTask() { finished=true; } }
                 static class DesktopAutomationEventJournal { static void record(String t,String o,boolean s,String d) {} }

@@ -7,7 +7,6 @@ import android.os.Bundle;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
-import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
@@ -276,10 +275,7 @@ public final class ActivityExplorerActivity extends Activity {
 
     private Spinner spinner(final String[] values) {
         final Spinner spinner = new Spinner(this);
-        spinner.setAdapter(new ArrayAdapter<>(
-                this,
-                android.R.layout.simple_spinner_dropdown_item,
-                values));
+        UiChoiceAdapter.bind(spinner, values);
         return spinner;
     }
 

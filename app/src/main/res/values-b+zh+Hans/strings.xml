@@ -1155,4 +1155,6 @@
     <string name="run_command_title">外部命令访问</string>
     <string name="run_command_permission_label">通过 MagicDesk 运行命令</string>
     <string name="run_command_permission_description">允许此应用以所选的 shell、root 或 Termux 身份执行任意命令，包括在 Shroot 环境中。请仅向可信应用授权。这不是沙盒。</string>
+    <string name="terminal_move_here">移到此处</string>
+    <string name="terminal_move_confirm">%1$s 已在另一个窗口中打开。要将此会话移到此处吗？</string>
 </resources>

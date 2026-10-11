@@ -911,7 +911,6 @@ final class DesktopPanelWindowController {
                     updateHostFocus();
                 }
             });
-            UiAppearance.dialog(dialog);
             dialog.show();
             return true;
         } catch (RuntimeException error) {

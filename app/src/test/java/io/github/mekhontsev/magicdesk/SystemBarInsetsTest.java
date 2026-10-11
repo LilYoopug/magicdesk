@@ -7,7 +7,7 @@ import static org.junit.Assert.assertTrue;
 public final class SystemBarInsetsTest {
     @Test public void consoleReservesKeyboardSpace() throws Exception {
         assertTrue(RuntimeSourceFixture.methods("ConsoleTerminalWindow", "createContentView")
-                .contains("UiToolLayout.page(mActivity, UiColor.BACKGROUND, true)"));
+                .contains("UiToolLayout.page(mActivity, UiColor.BACKGROUND, true, 0, 0)"));
         assertTrue(RuntimeSourceFixture.methods("UiToolLayout", "page").contains("SystemBarInsets.addToPadding(page, ime)"));
     }
 

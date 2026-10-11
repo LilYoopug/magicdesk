@@ -529,11 +529,13 @@ public final class ConsoleTerminalScrollingTest {
                     void onDetachedFromWindow() {} void onWindowFocusChanged(boolean focused) {}
                 }
                 static class Input { String key(KeyEvent e,TerminalEmulator t) { return "key"; } }
+                static class AppearanceStore { static void unlisten(Runnable listener) {} }
                 record TerminalHyperlink(String uri) {}
                 static class TerminalImage {}
                 interface ClipboardActions { void copySelection(); void pasteClipboard(); void showLink(TerminalHyperlink link);
                     default void showImage(TerminalImage image) {} }
                 static class View extends BaseView {
+                    final Runnable mAppearanceListener=()->{};
                     final Resettable mRegionScroll=new Resettable(); Object mScrollListener;
                     static class Resettable {
                         int resets,inputs,ends; boolean active,continuous;

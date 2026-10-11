@@ -1,7 +1,6 @@
 package io.github.mekhontsev.magicdesk;
 
 import android.app.Activity;
-import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.view.Gravity;
 import android.view.View;
@@ -18,21 +17,26 @@ final class ConsoleTerminalWindow {
     private final ConsoleTerminalView mTerminalView;
     private final ConsoleTerminalActions mActions;
     private final Runnable mCreateApplication;
+    private final java.util.function.Consumer<android.content.Intent> mSelectSession;
     private final View mContent;
     private FrameLayout mTerminalContainer;
     private TextView mShellStatus;
-    private ImageButton mSessions, mShowToolbar, mClear, mCopy, mPaste;
+    private TextView mSessions;
+    private ImageButton mShowToolbar, mClear, mCopy, mPaste, mHistory, mCreateShortcut, mOpenFiles;
+    private TextView mEmpty;
     private android.widget.ProgressBar mProgress;
     private LinearLayout mToolbar;
     private LinearLayout.LayoutParams mTerminalParams;
     private boolean mToolbarVisible = true;
 
     ConsoleTerminalWindow(Activity activity, ConsoleTerminalView view,
-            ConsoleTerminalActions actions, Runnable createApplication) {
+            ConsoleTerminalActions actions, Runnable createApplication,
+            java.util.function.Consumer<android.content.Intent> selectSession) {
         mActivity = activity;
         mTerminalView = view;
         mActions = actions;
         mCreateApplication = createApplication;
+        mSelectSession = selectSession;
         mContent = createContentView();
     }
 
@@ -40,16 +44,27 @@ final class ConsoleTerminalWindow {
     void toggleToolbar() { setToolbarVisible(!mToolbarVisible); }
 
     private View createContentView() {
-        final LinearLayout page = UiToolLayout.page(mActivity, UiColor.BACKGROUND, true);
+        final LinearLayout page = UiToolLayout.page(mActivity, UiColor.BACKGROUND, true, 0, 0);
 
         mToolbar = new LinearLayout(mActivity);
         mToolbar.setOrientation(LinearLayout.HORIZONTAL);
         mToolbar.setGravity(Gravity.CENTER_VERTICAL);
 
-        mSessions = createIconButton(
-                R.drawable.ic_file_new_window, R.string.terminal_sessions,
-                view -> TerminalSessionsDialog.show(mActivity));
-        mToolbar.addView(mSessions, buttonParams());
+        mSessions = new TextView(mActivity);
+        mSessions.setText(R.string.terminal_sessions);
+        mSessions.setTextSize(14);
+        mSessions.setGravity(Gravity.CENTER_VERTICAL);
+        mSessions.setSingleLine(true);
+        mSessions.setFocusable(true);
+        mSessions.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        mSessions.setPadding(dp(8), 0, dp(8), 0);
+        final var arrow = mActivity.getDrawable(R.drawable.ic_arrow_down);
+        arrow.setBounds(0, 0, dp(18), dp(18));
+        mSessions.setCompoundDrawablesRelative(null, null, arrow, null);
+        UiAppearance.compound(mSessions, UiColor.TEXT);
+        mSessions.setCompoundDrawablePadding(dp(4));
+        mSessions.setOnClickListener(view -> TerminalSessionsDialog.showDropdown(mActivity, view, mSelectSession));
+        mToolbar.addView(mSessions, new LinearLayout.LayoutParams(dp(160), dp(44)));
         mClear = createIconButton(
                 R.drawable.ic_clear_output,
                 R.string.console_clear,
@@ -67,24 +82,25 @@ final class ConsoleTerminalWindow {
                 R.string.console_paste,
                 view -> mActions.pasteClipboard());
         mToolbar.addView(mPaste, buttonParams());
-        mToolbar.addView(createIconButton(R.drawable.ic_history,
-                R.string.console_commands, view -> mActions.showCommandHistory()), buttonParams());
+        mHistory = createIconButton(R.drawable.ic_history,
+                R.string.console_commands, view -> mActions.showCommandHistory());
+        mToolbar.addView(mHistory, buttonParams());
         mToolbar.addView(createIconButton(R.drawable.ic_notifications,
                 R.string.console_notifications, view -> mActions.showNotificationSettings()), buttonParams());
         mToolbar.addView(createIconButton(R.drawable.ic_font_size,
                 R.string.console_font_size, view -> ConsoleFontSizeDialog.show(mActivity,
                         R.string.console_font_size, mTerminalView.fontSizeSp(),
                         ConsolePreferences.fontSizeSp(mActivity), mTerminalView::setFontSizeSp)), buttonParams());
-        final ImageButton createApplication = createIconButton(
+        mCreateShortcut = createIconButton(
                 R.drawable.ic_add,
                 R.string.action_new_terminal_application,
                 view -> mCreateApplication.run());
-        mToolbar.addView(createApplication, buttonParams());
-        final ImageButton openFiles = createIconButton(
+        mToolbar.addView(mCreateShortcut, buttonParams());
+        mOpenFiles = createIconButton(
                 R.drawable.ic_folder_open,
                 R.string.console_open_working_directory,
                 view -> mActions.openSelectedPathOrWorkingDirectory());
-        mToolbar.addView(openFiles, buttonParams());
+        mToolbar.addView(mOpenFiles, buttonParams());
         final ImageButton hideToolbar = createIconButton(
                 R.drawable.ic_arrow_up,
                 R.string.console_hide_toolbar,
@@ -116,6 +132,17 @@ final class ConsoleTerminalWindow {
         mTerminalContainer.addView(mTerminalView, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
+        mEmpty = new TextView(mActivity);
+        mEmpty.setText(R.string.terminal_sessions);
+        mEmpty.setTextSize(16);
+        mEmpty.setGravity(Gravity.CENTER);
+        UiAppearance.text(mEmpty, UiColor.ACCENT);
+        mEmpty.setOnClickListener(view -> {
+            setToolbarVisible(true);
+            mSessions.post(mSessions::performClick);
+        });
+        final var emptyParams = new FrameLayout.LayoutParams(-2, dp(48), Gravity.CENTER);
+        mTerminalContainer.addView(mEmpty, emptyParams);
         mShowToolbar = createIconButton(
                 R.drawable.ic_arrow_down,
                 R.string.console_show_toolbar,
@@ -193,11 +220,27 @@ final class ConsoleTerminalWindow {
         mClear.setEnabled(ready);
         mCopy.setEnabled(attached);
         mPaste.setEnabled(ready);
+        mHistory.setEnabled(attached);
+        mCreateShortcut.setEnabled(attached);
+        mOpenFiles.setEnabled(ready);
+    }
+
+    void updateSession(String label, boolean attached) {
+        mSessions.setText(label);
+        mEmpty.setVisibility(attached ? View.GONE : View.VISIBLE);
+        if (!attached) mProgress.setVisibility(View.INVISIBLE);
     }
 
     void updateStatus(DesktopExecBackend mBackend, ShellAccess.Snapshot mSnapshot,
             String mTerminalStatus, boolean mTerminalFailed) {
         if (mShellStatus == null || mSessions == null) return;
+        if (mBackend == null) {
+            mShellStatus.setVisibility(View.GONE);
+            mSessions.setTooltipText(mActivity.getString(R.string.terminal_sessions));
+            mSessions.setContentDescription(mActivity.getString(R.string.terminal_sessions));
+            UiAppearance.text(mSessions, UiColor.TEXT);
+            return;
+        }
         final boolean termux = mBackend == DesktopExecBackend.TERMUX;
         final boolean unavailable = !termux && (mSnapshot == null || !mSnapshot.isReady());
         final boolean root = !termux && !unavailable && mSnapshot.uid == ShellAccess.ROOT_UID;
@@ -207,7 +250,7 @@ final class ConsoleTerminalWindow {
         final String description = mActivity.getString(R.string.terminal_sessions) + "\n" + identity;
         mSessions.setTooltipText(description);
         mSessions.setContentDescription(description);
-        UiAppearance.imageStates(mSessions, root ? UiColor.ATTENTION : UiColor.TEXT);
+        UiAppearance.text(mSessions, root ? UiColor.ATTENTION : UiColor.TEXT);
 
         final String status = unavailable ? mActivity.getString(R.string.console_shell_unavailable,
                 mSnapshot == null || mSnapshot.error.isEmpty()

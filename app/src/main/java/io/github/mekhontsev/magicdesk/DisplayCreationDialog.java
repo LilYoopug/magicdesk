@@ -5,7 +5,6 @@ import android.app.AlertDialog;
 import android.text.InputType;
 import android.view.View;
 import android.widget.AdapterView;
-import android.widget.ArrayAdapter;
 import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -160,10 +159,7 @@ final class DisplayCreationDialog {
 
     private Spinner spinner(final LinearLayout parent, final String[] labels) {
         final Spinner spinner = new Spinner(mActivity);
-        final ArrayAdapter<String> adapter = new ArrayAdapter<>(mActivity,
-                android.R.layout.simple_spinner_item, labels);
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        spinner.setAdapter(adapter);
+        UiChoiceAdapter.bind(spinner, labels);
         parent.addView(spinner, new LinearLayout.LayoutParams(-1, dp(48)));
         return spinner;
     }

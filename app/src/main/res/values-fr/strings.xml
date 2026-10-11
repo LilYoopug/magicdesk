@@ -1177,4 +1177,6 @@
     <string name="run_command_title">Accès aux commandes externes</string>
     <string name="run_command_permission_label">Exécuter des commandes via MagicDesk</string>
     <string name="run_command_permission_description">Autorise cette application à exécuter des commandes arbitraires avec les droits shell, root ou Termux sélectionnés, y compris dans les environnements Shroot. Réservez cet accès aux applications de confiance. Ce service ne constitue pas un bac à sable.</string>
+    <string name="terminal_move_here">Déplacer ici</string>
+    <string name="terminal_move_confirm">%1$s est ouverte dans une autre fenêtre. Déplacer cette session ici ?</string>
 </resources>

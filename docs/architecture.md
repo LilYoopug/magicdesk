@@ -1119,14 +1119,17 @@ runtime integration and are not distributed through the same release path.
   caption overlap. Layout and inset callbacks update the fit before drawing;
   attachment owns observation lifetime. Callers retain their show/dismiss/button
   callbacks. This contract does not require Desktop or privileged access.
+  `UiChoiceAdapter` shares the host palette across a spinner's selected value,
+  lazily created dropdown rows and popup background while preserving typed values.
   Appearance settings are a page inside Settings, with the same Activity content
   inset policy and a measured `UiContentColumn`; focused edits use modal dialogs.
 - `ShellAppearance` separates semantic colors, typography, resources, control
   shapes and background presentation from panel layout. Its `Backdrop` combines
   opacity and blur radius; the common backdrop supplies native shell panels and
   popup backgrounds through Window bindings, while a nullable `PanelStyle.backdrop`
-  overrides it for one panel. Dialogs created with `UiDialogs.themedBuilder`
-  share that backdrop; arbitrary Android dialogs are not automatically themed.
+  overrides it for one panel. App dialogs share their owner's scoped palette
+  and backdrop through `UiDialogs.builder`, including native controls and lazy
+  list rows; external Android dialogs are not modified.
   `AppearanceStore` persists app-private defaults and sparse workspace overrides
   without Desktop or privileged services; Settings, MCP and the CLI share its
   validator. Workspace keys use stable identities,
@@ -2407,7 +2410,11 @@ names, and constructs quoted attach or create commands. A selected session is
 then opened through the ordinary Termux Console path with explicit tmux identity.
 `TerminalSessions` merges local terminals and server sessions using live tmux
 client PIDs; `TerminalSessionsDialog` is shared by the control panel and both
-console toolbars. Reopening a live client presents its existing window; closing
+console toolbars. A console switches the single `TerminalWindowAttachment` in its
+existing task; transfer releases the former host into an empty selection state.
+Recreation restores a retained identity without replaying commands or reclaiming
+a session transferred to another task. PTY exit releases the binding, not the
+window. Reopening a live client from outside a console presents its existing window; closing
 a managed tmux window releases only that client's controlling PTY. Ordinary
 terminals retain their PTY on window close. Recreation and stale Activity cleanup
 cannot disconnect a replacement view. There is no session poller. The public Termux

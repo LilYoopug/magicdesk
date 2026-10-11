@@ -4,6 +4,22 @@ import org.junit.Test;
 
 /** Exercises the real View/IME methods without requiring a running Android IME. */
 public final class TerminalInputConnectionOwnershipTest {
+    @Test public void switchingSessionsRejectsOldImeWithoutWritingToEitherSession() throws Exception {
+        RuntimeSourceFixture.verify(fixture() + """
+                public static void verify() {
+                    ConsoleTerminalView view = new ConsoleTerminalView();
+                    ConsoleTerminalSession a = new ConsoleTerminalSession(), b = new ConsoleTerminalSession();
+                    view.attach(a, null);
+                    var old = view.onCreateInputConnection(new EditorInfo());
+                    view.attach(b, null);
+                    check(!old.commitText("stale", 1), "old connection accepted input after switch");
+                    check(!old.sendKeyEvent(new KeyEvent()), "old connection dispatched key to new session");
+                    var current = view.onCreateInputConnection(new EditorInfo());
+                    check(current.commitText("new", 1), "new connection rejected input");
+                    check(a.output.toString().isEmpty() && b.output.toString().equals("new"), "input crossed sessions");
+                }
+                """);
+    }
     @Test public void anotherConnectionDoesNotRevokeTheConnectionStillUsedByTheIme() throws Exception {
         RuntimeSourceFixture.verify(fixture() + """
                 public static void verify() {
@@ -111,6 +127,9 @@ public final class TerminalInputConnectionOwnershipTest {
                     Emulator emulator() { return new Emulator(); }
                 }
                 static class ConsoleTerminalView extends View {
+                    void resetAttachmentInput() {}
+                    void restartSessionInput() {}
+                    void refreshAppearance() {}
                     final Resettable mRegionScroll=new Resettable(); Object mScrollListener;
                     static class Resettable { void reset() {} }
                     boolean isAttachedToWindow() { return true; }

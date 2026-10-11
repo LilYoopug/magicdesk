@@ -128,6 +128,10 @@ public final class TerminalEmulator {
     private static final int DECSET_BIT_LEFTRIGHT_MARGIN_MODE = 1 << 11;
     /** Not really DECSET bit... - http://www.vt100.net/docs/vt510-rm/DECSACE */
     private static final int DECSET_BIT_RECTANGULAR_CHANGEATTRIBUTE = 1 << 12;
+    /** DECSET 2031 - host color-scheme change reports. */
+    private static final int DECSET_BIT_COLOR_SCHEME_REPORTING = 1 << 13;
+
+    private boolean mDarkColorScheme = true;
 
 
     private String mTitle;
@@ -372,6 +376,8 @@ public final class TerminalEmulator {
                 return DECSET_BIT_MOUSE_PROTOCOL_SGR;
             case 2004:
                 return DECSET_BIT_BRACKETED_PASTE_MODE;
+            case 2031:
+                return DECSET_BIT_COLOR_SCHEME_REPORTING;
             default:
                 return -1;
             // throw new IllegalArgumentException("Unsupported decset: " + decsetBit);
@@ -398,6 +404,17 @@ public final class TerminalEmulator {
         mClient = client;
         setCursorStyle();
         setCursorBlinkState(true);
+    }
+
+    /** Publish the host preference after updating its palette, independently of program OSC overrides. */
+    public void setColorScheme(boolean dark) {
+        if (mDarkColorScheme == dark) return;
+        mDarkColorScheme = dark;
+        if (isDecsetInternalBitSet(DECSET_BIT_COLOR_SCHEME_REPORTING)) reportColorScheme();
+    }
+
+    private void reportColorScheme() {
+        mSession.write(mDarkColorScheme ? "\033[?997;1n" : "\033[?997;2n");
     }
 
     public TerminalBuffer getScreen() {
@@ -1238,6 +1255,9 @@ public final class TerminalEmulator {
                         // Extended Cursor Position (DECXCPR - http://www.vt100.net/docs/vt510-rm/DECXCPR). Page=1.
                         mSession.write(String.format(Locale.US, "\033[?%d;%d;1R", mCursorRow + 1, mCursorCol + 1));
                         break;
+                    case 996:
+                        reportColorScheme();
+                        break;
                     default:
                         finishSequence();
                         return;
@@ -1253,7 +1273,8 @@ public final class TerminalEmulator {
                         Logger.logWarn(mClient, LOG_TAG, "Ignoring request to save/recall decset bit=" + externalBit);
                     } else {
                         if (b == 's') {
-                            mSavedDecSetFlags |= internalBit;
+                            mSavedDecSetFlags = (mSavedDecSetFlags & ~internalBit)
+                                    | (mCurrentDecSetFlags & internalBit);
                         } else {
                             doDecSetOrReset((mSavedDecSetFlags & internalBit) != 0, externalBit);
                         }
@@ -1366,7 +1387,8 @@ public final class TerminalEmulator {
                 break;
             }
             case 2004:
-                // Bracketed paste mode - setting bit is enough.
+            case 2031:
+                // Bracketed paste and color-scheme reporting need only their mode bit.
                 break;
             default:
                 unknownParameter(externalBit);

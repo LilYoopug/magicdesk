@@ -127,14 +127,14 @@ public class OperatingSystemControlTest extends TerminalTestCase {
 		}
 
 		enterString("\033]104;0\007");
-		expectedColors[0] = TerminalColors.COLOR_SCHEME.mDefaultColors[0];
+		expectedColors[0] = new TerminalColorScheme().mDefaultColors[0];
 		assertIndexColorsMatch(expectedColors);
 		enterString("\033]104;1;2\007");
-		expectedColors[1] = TerminalColors.COLOR_SCHEME.mDefaultColors[1];
-		expectedColors[2] = TerminalColors.COLOR_SCHEME.mDefaultColors[2];
+		expectedColors[1] = new TerminalColorScheme().mDefaultColors[1];
+		expectedColors[2] = new TerminalColorScheme().mDefaultColors[2];
 		assertIndexColorsMatch(expectedColors);
 		enterString("\033]104\007"); // Reset all colors.
-		assertIndexColorsMatch(TerminalColors.COLOR_SCHEME.mDefaultColors);
+		assertIndexColorsMatch(new TerminalColorScheme().mDefaultColors);
 	}
 
 	public void disabledTestSetClipboard() {
@@ -148,7 +148,7 @@ public class OperatingSystemControlTest extends TerminalTestCase {
 		enterString("\033]4;5;#00FFAB\007").assertColor(5, 0xFF00FFAB);
 		enterString("\033]4;255;#ABFFAB\007").assertColor(255, 0xFFABFFAB);
 		mTerminal.reset();
-		assertIndexColorsMatch(TerminalColors.COLOR_SCHEME.mDefaultColors);
+		assertIndexColorsMatch(new TerminalColorScheme().mDefaultColors);
 	}
 
 	public void testSettingDynamicColors() {

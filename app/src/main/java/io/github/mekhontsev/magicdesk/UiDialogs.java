@@ -3,33 +3,27 @@ package io.github.mekhontsev.magicdesk;
 import android.app.Activity;
 import android.app.AlertDialog;
 
-/** Native modal creation. Callers retain their show, dismiss and button callbacks. */
+/** Native modals share the owner's appearance and inset policy, not its lifecycle callbacks. */
 final class UiDialogs {
     private UiDialogs() {}
 
     static AlertDialog.Builder builder(Activity owner) {
-        return new Builder(owner, false);
-    }
-
-    static AlertDialog.Builder themedBuilder(Activity owner) {
-        return new Builder(owner, true);
+        return new Builder(owner);
     }
 
     private static final class Builder extends AlertDialog.Builder {
         private final Activity owner;
-        private final boolean themed;
 
-        Builder(Activity owner, boolean themed) {
+        Builder(Activity owner) {
             super(owner);
             this.owner = owner;
-            this.themed = themed;
         }
 
         @Override public AlertDialog create() {
             AlertDialog dialog = super.create();
             dialog.setOwnerActivity(owner);
             dialog.create();
-            if (themed) UiAppearance.dialog(dialog);
+            UiAppearance.dialog(dialog);
             DialogContentInsets.bind(dialog.findViewById(android.R.id.content), owner);
             return dialog;
         }

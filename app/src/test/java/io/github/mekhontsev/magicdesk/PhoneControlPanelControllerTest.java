@@ -11,6 +11,17 @@ import org.junit.Test;
 
 public final class PhoneControlPanelControllerTest {
     @Test
+    public void headerOpensTheSharedSessionDropdownBeforeSettings() throws Exception {
+        final String header = RuntimeSourceFixture.methods("PhoneControlPanelController", "createHeader");
+        assertTrue(header.contains("R.drawable.ic_file_console, R.string.terminal_sessions"));
+        assertTrue(header.contains("terminals.setOnClickListener(view -> TerminalSessionsDialog.showDropdown(mActivity, view))"));
+        assertTrue(header.indexOf("header.addView(terminals,") < header.indexOf("header.addView(settings,"));
+        assertFalse(header.contains("setEnabled"));
+        assertFalse(header.contains("TerminalSessions.open"));
+        assertFalse(header.contains("ConsoleTerminalRegistry"));
+    }
+
+    @Test
     public void contentWidthFollowsParentMeasurementAfterResize() throws Exception {
         RuntimeSourceFixture.verify("""
                 static class Gravity { static int TOP = 1, CENTER_HORIZONTAL = 2; }

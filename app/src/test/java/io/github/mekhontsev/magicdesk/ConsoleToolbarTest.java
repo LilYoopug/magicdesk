@@ -16,12 +16,12 @@ public final class ConsoleToolbarTest {
                     view.updateStatus(view.mBackend,view.mSnapshot,view.mTerminalStatus,view.mTerminalFailed);
                     check(view.mShellStatus.visibility == View.GONE, "persistent shell label");
                     check(view.mSessions.tooltip.equals("Sessions\\nShell UID 2000"), "missing shell UID");
-                    check(view.mSessions.tint == UiColor.TEXT, "shell marked as root");
+                    check(view.mSessions.color == UiColor.TEXT, "shell marked as root");
                     view.mSnapshot = new Snapshot(true, 0, "");
                     view.updateStatus(view.mBackend,view.mSnapshot,view.mTerminalStatus,view.mTerminalFailed);
                     check(view.mShellStatus.visibility == View.GONE, "persistent root label");
                     check(view.mSessions.tooltip.equals("Sessions\\nRoot UID 0"), "missing root UID");
-                    check(view.mSessions.tint == UiColor.ATTENTION, "root not distinguished");
+                    check(view.mSessions.color == UiColor.ATTENTION, "root not distinguished");
                     check(view.mSessions.tooltip.equals(view.mSessions.description), "inaccessible identity");
                 }
                 """);
@@ -54,6 +54,9 @@ public final class ConsoleToolbarTest {
                     view.mSnapshot = null;
                     view.updateStatus(view.mBackend,view.mSnapshot,view.mTerminalStatus,view.mTerminalFailed);
                     check(view.mShellStatus.text.equals("Unavailable: unavailable"), "unknown service failed");
+                    view.updateStatus(null, null, "", false);
+                    check(view.mShellStatus.visibility == View.GONE, "empty window requires shell access");
+                    check(view.mSessions.description.equals("Sessions"), "empty window kept old backend identity");
                 }
                 """);
     }

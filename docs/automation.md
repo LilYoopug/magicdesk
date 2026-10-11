@@ -1127,7 +1127,8 @@ ordinary session succeeds. For a managed tmux connection it releases the client
 PTY instead, reporting `ptyRetained=false`; reconnect through `tmux.open`.
 `terminal.attach` presents an existing window on the requested display or attaches
 a window to the same PTY and emulator. `observed` requires a registered window
-after successful presentation/launch. `terminal.close` ends the PTY and closes its window.
+after successful presentation/launch. `terminal.close` ends the PTY and releases its
+window binding; the window remains available for another session.
 Detached sessions report `attached=false`, `taskId=-1` and `displayId=-1`.
 They remain readable and writable; closing the MCP connection does not own their
 lifetime. They survive window and display closure but not application process

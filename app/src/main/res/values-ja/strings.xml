@@ -1155,4 +1155,6 @@
     <string name="run_command_title">外部コマンドへのアクセス</string>
     <string name="run_command_permission_label">MagicDesk 経由でコマンドを実行</string>
     <string name="run_command_permission_description">選択された shell、root、Termux の権限で、このアプリが任意のコマンドを実行できるようにします。Shroot 環境も対象です。信頼できるアプリにのみ許可してください。サンドボックスではありません。</string>
+    <string name="terminal_move_here">ここに移動</string>
+    <string name="terminal_move_confirm">%1$s は別のウィンドウで開いています。このセッションをここに移動しますか？</string>
 </resources>

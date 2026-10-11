@@ -225,6 +225,10 @@ final class PhoneControlPanelController {
                 0,
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 1));
+        final ImageButton terminals = mUi.menuIconButton(
+                R.drawable.ic_file_console, R.string.terminal_sessions);
+        terminals.setOnClickListener(view -> TerminalSessionsDialog.showDropdown(mActivity, view));
+        header.addView(terminals, new LinearLayout.LayoutParams(dp(48), dp(48)));
         final ImageButton settings = mUi.menuIconButton(
                 R.drawable.ic_settings, R.string.action_settings);
         settings.setOnClickListener(view -> mActions.openSettings());

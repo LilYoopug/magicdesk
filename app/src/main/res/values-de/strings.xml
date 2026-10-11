@@ -1166,4 +1166,6 @@
     <string name="run_command_title">Externer Befehlszugriff</string>
     <string name="run_command_permission_label">Befehle über MagicDesk ausführen</string>
     <string name="run_command_permission_description">Erlaubt dieser App, beliebige Befehle mit der ausgewählten Shell-, Root- oder Termux-Identität auszuführen, auch in Shroot-Umgebungen. Nur vertrauenswürdigen Apps erlauben. Dies ist keine Sandbox.</string>
+    <string name="terminal_move_here">Hierher verschieben</string>
+    <string name="terminal_move_confirm">%1$s ist in einem anderen Fenster geöffnet. Diese Sitzung hierher verschieben?</string>
 </resources>

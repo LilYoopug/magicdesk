@@ -1166,4 +1166,6 @@
     <string name="run_command_title">External command access</string>
     <string name="run_command_permission_label">Run commands through MagicDesk</string>
     <string name="run_command_permission_description">Allows this app to run arbitrary commands with the selected shell, root or Termux identity, including Shroot environments. Grant only to apps you trust. This is not a sandbox.</string>
+    <string name="terminal_move_here">Move here</string>
+    <string name="terminal_move_confirm">%1$s is open in another window. Move this session here?</string>
 </resources>

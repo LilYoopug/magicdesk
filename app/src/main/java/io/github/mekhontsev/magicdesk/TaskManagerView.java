@@ -226,9 +226,7 @@ final class TaskManagerView {
     }
     private Spinner spinner(String[] values) {
         final Spinner spinner = new Spinner(activity);
-        final ArrayAdapter<String> choices = new ArrayAdapter<>(activity, android.R.layout.simple_spinner_item, values);
-        choices.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        spinner.setAdapter(choices); return spinner;
+        UiChoiceAdapter.bind(spinner, values); return spinner;
     }
     private LinearLayout horizontal() {
         final LinearLayout row = new LinearLayout(activity); row.setGravity(Gravity.CENTER_VERTICAL); return row;

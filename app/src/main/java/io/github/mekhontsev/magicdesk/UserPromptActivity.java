@@ -103,6 +103,7 @@ public final class UserPromptActivity extends Activity {
         content.addView(buttons);
         final LinearLayout page = UiToolLayout.page(this, UiColor.BACKGROUND, true);
         page.addView(UiToolLayout.scroll(content, 640), new LinearLayout.LayoutParams(-1, 0, 1));
+        UiAppearance.contents(page);
         setContentView(page);
         completion = owner.registry.whenFinished(id, () -> runOnUiThread(() -> {
             if (!isFinishing() && !isDestroyed()) finishAndRemoveTask();

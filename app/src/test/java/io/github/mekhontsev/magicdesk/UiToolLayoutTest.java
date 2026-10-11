@@ -4,6 +4,32 @@ import static org.junit.Assert.*;
 import org.junit.Test;
 
 public final class UiToolLayoutTest {
+    @Test public void edgeToEdgeContentKeepsSystemInsetsWithoutFormPadding() throws Exception {
+        RuntimeSourceFixture.verify("""
+                static class Context {}
+                enum UiColor { BACKGROUND }
+                static class LinearLayout {
+                    int left,top,right,bottom; boolean insets,ime;
+                    void setPadding(int l,int t,int r,int b){left=l;top=t;right=r;bottom=b;}
+                }
+                static class UiAppearance { static void background(LinearLayout p,UiColor c){} }
+                static class SystemBarInsets {
+                    static void addToPadding(LinearLayout p,boolean ime){p.insets=true;p.ime=ime;}
+                }
+                static int dp(Context c,int value){return value*3;}
+                static LinearLayout column(Context c){return new LinearLayout();}
+                """ + RuntimeSourceFixture.methods("UiToolLayout", "page") + """
+                public static void verify() {
+                    var form=page(new Context(),UiColor.BACKGROUND,true);
+                    check(form.left==36 && form.right==36 && form.top==24 && form.bottom==24,
+                            "default form margins changed");
+                    var terminal=page(new Context(),UiColor.BACKGROUND,true,0,0);
+                    check(terminal.left==0 && terminal.right==0 && terminal.top==0 && terminal.bottom==0,
+                            "terminal retained decorative padding");
+                    check(form.insets && terminal.insets && terminal.ime, "edge-to-edge content lost insets/IME");
+                }
+                """);
+    }
     @Test public void toolPagesShareInsetsWithoutChangingSpecializedSurfaces() throws Exception {
         for (String[] owner : new String[][] {
                 {"SettingsView", "create"}, {"FileManagerView", "FileManagerView"},

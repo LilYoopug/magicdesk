@@ -105,6 +105,21 @@ the first following frame with `setprop log.tag.MDTerminalScroll DEBUG`.
 This opt-in log contains no terminal text. Disable it with
 `setprop log.tag.MDTerminalScroll INFO`.
 
+Terminal defaults follow the host's resolved light/dark appearance: black text
+and cursor on white in light mode, white on black in dark mode. Changes apply
+to an attached session without restarting its PTY. ANSI colors and explicit OSC
+palette overrides remain program-owned; OSC resets restore that session's current
+theme defaults. Detached sessions retain their palette until attached to a host.
+Programs can query the host's light/dark preference with `CSI ? 996 n` and
+subscribe to changes with DEC private mode `2031`. Replies and subscribed
+updates use `CSI ? 997 ; 1 n` (dark) or `CSI ? 997 ; 2 n` (light), after palette
+updates. OSC color overrides do not change this host preference. Reset clears
+the subscription, not the host theme. See the
+[color-scheme reporting protocol](https://contour-terminal.org/vt-extensions/color-palette-update-notifications/).
+Programs own their explicit RGB styling; adapting it requires their cooperation.
+A shared tmux pane has one application palette even when clients use different
+themes; MagicDesk does not rewrite its colors or detach other clients.
+
 Touch selection has Android-themed start/end handles. Dragging either endpoint
 adjusts the same terminal-cell selection used by mouse selection and copying.
 The handles are attached application subpanels, not application overlays.
@@ -116,16 +131,24 @@ terminal clipboard protocols remain exact; no-selection Copy reads the transcrip
 
 ## Sessions
 
-Phone Control Panel's **Apps** launcher and both console toolbars use one
-**Terminal sessions** picker. All session types are created in that picker.
+Phone Control Panel's terminal button beside Settings, its **Apps** launcher and
+console session dropdowns use one **Terminal sessions** catalog and creation flow.
 It combines retained MagicDesk PTYs with tmux sessions discovered in the selected
 Termux package. A tmux session and its MagicDesk client appear once; live tmux
 client PIDs identify the current session even after switching inside tmux.
 Ordinary shells that happen to run tmux are not reclassified as managed clients.
 Discovery runs on demand, and missing Termux access does not hide local terminals.
 
-Selecting a row shows its existing window or attaches a window on the selected
-display. **New session** offers Android shell, Termux shell and tmux. Row actions
+The header dropdown shows the session's existing window or attaches a window on
+the Control Panel's own display; the Apps launcher uses its selected display.
+An empty dropdown still offers **New session**. A console dropdown switches the current window to the selected
+session without changing its task or geometry. Transferring a session from another
+window requires confirmation and leaves that window empty. Each PTY has one input
+and resize owner; switching retains the previous PTY, output and history. Session
+IDs are independent of window IDs, including notification and automation targets.
+Window recreation reattaches the selected session without replaying launch commands.
+
+**New session** offers Android shell, Termux shell, Shroot environments and tmux. Row actions
 include Rename, Detach and explicit, confirmed termination. A local name belongs
 to the retained terminal and takes precedence over OSC titles; tmux names belong
 to the tmux server. Ordinary Termux app tabs are not exposed by its command API.
@@ -136,6 +159,7 @@ advertise them. This declares a capability of that client only; it does not
 change the user's tmux configuration or the features of other attached terminals.
 
 Closing an ordinary console window retains its PTY, emulator and programs.
+Ending a session leaves its window available for selecting or creating another one.
 Ending the terminal releases its entire UNIX session, including foreground and
 background jobs that ignore hangup. Processes that created an independent UNIX
 session, such as a tmux server, are not terminated by PTY cleanup.

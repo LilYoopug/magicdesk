@@ -2,7 +2,6 @@ package io.github.mekhontsev.magicdesk;
 
 import android.content.Context;
 import android.view.View;
-import android.widget.ArrayAdapter;
 import android.widget.AdapterView;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -109,11 +108,9 @@ final class LinuxEnvironmentPicker extends LinearLayout {
 
     private void updateMethods() {
         String[] labels = getResources().getStringArray(R.array.command_app_linux_methods);
-        var adapter = new ArrayAdapter<>(getContext(), android.R.layout.simple_spinner_item,
+        UiChoiceAdapter.bind(method,
                 kinds.stream().map(kind -> kind == LinuxLaunchRecipe.Kind.MANAGED_GUEST
                         ? getContext().getString(R.string.guest_environments) : labels[kind.ordinal()]).toList());
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        method.setAdapter(adapter);
     }
 
     void setGraphical(boolean graphical) {
@@ -149,9 +146,7 @@ final class LinuxEnvironmentPicker extends LinearLayout {
                 guestRequest = GuestEnvironmentCatalog.load(getContext(), (entries, error) -> post(() -> {
                     if (expected != generation) return;
                     guests = entries;
-                    var adapter = new ArrayAdapter<>(getContext(), android.R.layout.simple_spinner_item, guests);
-                    adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-                    choices.setAdapter(adapter);
+                    UiChoiceAdapter.bind(choices, guests);
                     status.setText(error == null ? getContext().getString(R.string.guest_empty) : ShellAccess.usefulMessage(error));
                     status.setVisibility(error != null || guests.isEmpty() ? View.VISIBLE : View.GONE);
                 }));
@@ -167,10 +162,7 @@ final class LinuxEnvironmentPicker extends LinearLayout {
                             if (result == null || !result.success()) throw new IllegalStateException(
                                     result == null ? "No proot-distro result" : result.usefulMessage());
                             List<String> names = LinuxLaunchRecipe.parseInstalledProot(result.stdout);
-                            ArrayAdapter<String> adapter = new ArrayAdapter<>(getContext(),
-                                    android.R.layout.simple_spinner_item, names);
-                            adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-                            choices.setAdapter(adapter);
+                            UiChoiceAdapter.bind(choices, names);
                             status.setText(R.string.command_app_proot_empty);
                             status.setVisibility(names.isEmpty() ? View.VISIBLE : View.GONE);
                         } catch (RuntimeException error) { status.setText(ShellAccess.usefulMessage(error)); }

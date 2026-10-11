@@ -6,7 +6,6 @@ import android.graphics.Typeface;
 import android.text.InputType;
 import android.view.View;
 import android.widget.AdapterView;
-import android.widget.ArrayAdapter;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -347,13 +346,7 @@ final class DesktopCommandApplicationDialog {
             final int values,
             final int selected) {
         final Spinner spinner = new Spinner(activity);
-        final ArrayAdapter<CharSequence> adapter = ArrayAdapter.createFromResource(
-                activity,
-                values,
-                android.R.layout.simple_spinner_item);
-        adapter.setDropDownViewResource(
-                android.R.layout.simple_spinner_dropdown_item);
-        spinner.setAdapter(adapter);
+        UiChoiceAdapter.bind(spinner, activity.getResources().getTextArray(values));
         spinner.setSelection(selected);
         return spinner;
     }

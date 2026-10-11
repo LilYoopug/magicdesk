@@ -51,20 +51,7 @@ public final class DesktopUiFactory {
 
     android.widget.Spinner spinner(final String[] items) {
         final android.widget.Spinner spinner = new android.widget.Spinner(mContext);
-        UiAppearance.backgroundTint(spinner, MUTED);
-        spinner.setAdapter(new android.widget.ArrayAdapter<String>(mContext, android.R.layout.simple_spinner_dropdown_item, items) {
-            @Override public View getView(int position, View convert, android.view.ViewGroup parent) {
-                final View view = super.getView(position, convert, parent);
-                UiAppearance.text((TextView) view, TEXT);
-                return view;
-            }
-            @Override public View getDropDownView(int position, View convert, android.view.ViewGroup parent) {
-                final View view = super.getDropDownView(position, convert, parent);
-                UiAppearance.text((TextView) view, TEXT);
-                UiAppearance.background(view, PANEL);
-                return view;
-            }
-        });
+        UiChoiceAdapter.bind(spinner, items);
         return spinner;
     }
 

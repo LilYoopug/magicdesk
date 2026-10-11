@@ -6,6 +6,9 @@ import java.util.function.Consumer;
 
 /** The sole optional window of a retained PTY. All mutations run on the UI thread. */
 final class TerminalWindowAttachment {
+    interface Host {
+        void onTerminalDetached();
+    }
     private WeakReference<Activity> owner = new WeakReference<>(null);
     private WeakReference<ConsoleTerminalView> surface = new WeakReference<>(null);
     private long generation;
@@ -16,13 +19,11 @@ final class TerminalWindowAttachment {
     boolean present() { return owner.get() != null && surface.get() != null; }
 
     void replace(Activity activity, ConsoleTerminalView view) {
-        Activity previous = owner.get();
-        ConsoleTerminalView previousView = surface.get();
-        if (previousView != null && previousView != view) previousView.attach(null, null);
+        if (owner.get() == activity && surface.get() == view) return;
+        release();
         owner = new WeakReference<>(activity);
         surface = new WeakReference<>(view);
         generation++;
-        if (previous != null && previous != activity && !previous.isDestroyed()) previous.finishAndRemoveTask();
     }
 
     boolean detach(Activity activity) {
@@ -32,17 +33,13 @@ final class TerminalWindowAttachment {
     }
 
     void release() {
+        Activity activity = owner.get();
         ConsoleTerminalView view = surface.get();
-        // Revoke input/resize ownership before closing the Activity or the PTY.
+        // Revoke input/resize ownership before notifying the former host.
         if (view != null) view.attach(null, null);
         owner.clear();
         surface.clear();
-    }
-
-    void close() {
-        Activity activity = owner.get();
-        release();
-        if (activity != null && !activity.isDestroyed()) activity.finishAndRemoveTask();
+        if (activity instanceof Host host && !activity.isDestroyed()) host.onTerminalDetached();
     }
 
     void prune() {

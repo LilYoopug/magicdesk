@@ -18,6 +18,8 @@ final class ConsoleTerminalInput {
         mComposeAccent = composeAccent;
     }
 
+    void reset() { mPendingAccent = 0; }
+
     String text(final int unicode) {
         final boolean deadKey = (unicode & KeyCharacterMap.COMBINING_ACCENT) != 0;
         final int codePoint = unicode & KeyCharacterMap.COMBINING_ACCENT_MASK;

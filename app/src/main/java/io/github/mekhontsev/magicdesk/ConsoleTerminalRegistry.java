@@ -66,6 +66,9 @@ final class ConsoleTerminalRegistry {
             if (entry == null || entry.session != session) {
                 throw new IllegalStateException("terminal session is not owned by the runtime");
             }
+            for (Entry other : ENTRIES.values()) {
+                if (other != entry) other.window.detach(activity);
+            }
             entry.window.replace(activity, view);
             ENTRIES.notifyAll();
         }
@@ -415,7 +418,7 @@ final class ConsoleTerminalRegistry {
                 ENTRIES.notifyAll();
             }
             if (entry == null) { return false; }
-            entry.window.close();
+            entry.window.release();
             entry.session.close();
             entry.notifications.close();
             DesktopAutomationEventJournal.record("terminal", "closed", true, "terminalId=" + id);
@@ -437,8 +440,12 @@ final class ConsoleTerminalRegistry {
         return callOnMain(() -> {
             final Entry entry = find(id);
             if (entry == null) { return false; }
-            if (!entry.tmuxSessionId.isEmpty()) { return close(id); }
             final Activity activity = entry.window.owner();
+            if (!entry.tmuxSessionId.isEmpty()) {
+                close(id);
+                if (activity != null && !activity.isDestroyed()) activity.finishAndRemoveTask();
+                return true;
+            }
             if (activity == null) { return true; }
             detach(id, activity);
             if (!activity.isDestroyed()) { activity.finishAndRemoveTask(); }

@@ -3,7 +3,6 @@ package io.github.mekhontsev.magicdesk;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.text.InputType;
-import android.widget.ArrayAdapter;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.Spinner;
@@ -38,10 +37,7 @@ final class McpNetworkSettingsDialog {
         warning.setText(R.string.settings_mcp_network_warning);
         content.addView(warning);
         final Spinner interfaces = new Spinner(activity);
-        final ArrayAdapter<McpNetworkInterfaces.Binding> adapter = new ArrayAdapter<>(
-                activity, android.R.layout.simple_spinner_item, bindings);
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        interfaces.setAdapter(adapter);
+        UiChoiceAdapter.bind(interfaces, bindings);
         interfaces.setContentDescription(activity.getString(R.string.settings_mcp_network_interface));
         for (int i = 0; i < bindings.size(); i++) {
             if (bindings.get(i).name.equals(settings.networkInterface)) interfaces.setSelection(i);

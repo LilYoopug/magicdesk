@@ -89,10 +89,22 @@ public final class UiAppearance {
         background.backdrop = true;
         background.refresh();
         UiBackdrop.bind(dialog.getWindow(), background);
-        dialogContents(root);
+        contents(root);
     }
-    private static void dialogContents(View view) {
-        if (view instanceof TextView text && view.getTag(R.id.appearance_binding) == null) textStates(text, UiColor.TEXT);
+    static void contents(View view) {
+        if (view.getTag(R.id.appearance_binding) == null) {
+            if (view instanceof TextView text) {
+                textStates(text, UiColor.TEXT);
+                if (text instanceof android.widget.EditText) {
+                    hint(text, UiColor.MUTED);
+                    backgroundTint(text, UiColor.MUTED);
+                } else if (text instanceof android.widget.Button && !(text instanceof android.widget.CompoundButton)) {
+                    backgroundTint(text, UiColor.SURFACE);
+                }
+            } else if (view instanceof android.widget.ProgressBar progress) {
+                progress(progress, UiColor.ACCENT);
+            }
+        }
         if (view instanceof android.widget.CheckedTextView) {
             bind(view, Property.CHECK_MARK, (v, t) -> {
                 var tint = new ColorStateList(new int[][] {new int[] {-android.R.attr.state_enabled},
@@ -108,12 +120,12 @@ public final class UiAppearance {
         // Adapter rows are materialized after dialog creation, and again as the list scrolls.
         if (view instanceof android.widget.AbsListView list) {
             list.setOnHierarchyChangeListener(new android.view.ViewGroup.OnHierarchyChangeListener() {
-                @Override public void onChildViewAdded(View parent, View child) { dialogContents(child); }
+                @Override public void onChildViewAdded(View parent, View child) { contents(child); }
                 @Override public void onChildViewRemoved(View parent, View child) { }
             });
         }
         if (view instanceof android.view.ViewGroup group) {
-            for (int i = 0; i < group.getChildCount(); i++) dialogContents(group.getChildAt(i));
+            for (int i = 0; i < group.getChildCount(); i++) contents(group.getChildAt(i));
         }
     }
     static ColorStateList states(ShellAppearance theme, UiColor role) {

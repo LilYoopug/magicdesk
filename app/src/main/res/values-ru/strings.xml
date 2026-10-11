@@ -1188,4 +1188,6 @@
     <string name="run_command_title">Доступ к внешним командам</string>
     <string name="run_command_permission_label">Запуск команд через MagicDesk</string>
     <string name="run_command_permission_description">Разрешает этому приложению выполнять произвольные команды с выбранными правами shell, root или Termux, в том числе в средах Shroot. Давайте доступ только доверенным приложениям. Это не песочница.</string>
+    <string name="terminal_move_here">Перенести сюда</string>
+    <string name="terminal_move_confirm">Сеанс %1$s открыт в другом окне. Перенести его сюда?</string>
 </resources>

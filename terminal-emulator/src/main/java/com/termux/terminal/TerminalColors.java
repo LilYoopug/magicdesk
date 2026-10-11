@@ -5,8 +5,8 @@ import android.graphics.Color;
 /** Current terminal colors (if different from default). */
 public final class TerminalColors {
 
-    /** Static data - a bit ugly but ok for now. */
-    public static final TerminalColorScheme COLOR_SCHEME = new TerminalColorScheme();
+    private final int[] mDefaultColors = new TerminalColorScheme().mDefaultColors;
+    private final boolean[] mOverrides = new boolean[TextStyle.NUM_INDEXED_COLORS];
 
     /**
      * The current terminal colors, which are normally set from the color theme, but may be set dynamically with the OSC
@@ -21,12 +21,22 @@ public final class TerminalColors {
 
     /** Reset a particular indexed color with the default color from the color theme. */
     public void reset(int index) {
-        mCurrentColors[index] = COLOR_SCHEME.mDefaultColors[index];
+        mOverrides[index] = false;
+        mCurrentColors[index] = mDefaultColors[index];
     }
 
     /** Reset all indexed colors with the default color from the color theme. */
     public void reset() {
-        System.arraycopy(COLOR_SCHEME.mDefaultColors, 0, mCurrentColors, 0, TextStyle.NUM_INDEXED_COLORS);
+        java.util.Arrays.fill(mOverrides, false);
+        System.arraycopy(mDefaultColors, 0, mCurrentColors, 0, TextStyle.NUM_INDEXED_COLORS);
+    }
+
+    /** Update this terminal's theme without replacing a program's explicit OSC color. */
+    public boolean setDefaultColor(int index, int color) {
+        mDefaultColors[index] = color;
+        if (mOverrides[index] || mCurrentColors[index] == color) return false;
+        mCurrentColors[index] = color;
+        return true;
     }
 
     /**
@@ -72,7 +82,10 @@ public final class TerminalColors {
     /** Try parse a color from a text parameter and into a specified index. */
     public void tryParseColor(int intoIndex, String textParameter) {
         int c = parse(textParameter);
-        if (c != 0) mCurrentColors[intoIndex] = c;
+        if (c != 0) {
+            mOverrides[intoIndex] = true;
+            mCurrentColors[intoIndex] = c;
+        }
     }
 
     /**

@@ -26,6 +26,7 @@ import com.termux.terminal.TerminalHyperlink;
 import com.termux.terminal.TerminalImage;
 import com.termux.terminal.TerminalFrame;
 import com.termux.terminal.TerminalScrollAnimation;
+import com.termux.terminal.TextStyle;
 
 /** Interactive MagicDesk terminal surface with its own renderer. */
 final class ConsoleTerminalView extends View {
@@ -42,6 +43,8 @@ final class ConsoleTerminalView extends View {
     private static final int SCROLL_ROWS = 3;
 
     private MagicDeskTerminalRenderer mRenderer;
+    private final Runnable mAppearanceListener = this::refreshAppearance;
+    private int mBackgroundColor;
     private final TerminalScrollAnimation mRegionScroll = new TerminalScrollAnimation();
     private static final String SCROLL_TRACE = "MDTerminalScroll";
     private int mTracedScrollEdits;
@@ -156,6 +159,7 @@ final class ConsoleTerminalView extends View {
         setFocusable(true);
         setFocusableInTouchMode(true);
         setVerticalScrollBarEnabled(true);
+        refreshAppearance();
     }
 
     void attach(
@@ -164,16 +168,44 @@ final class ConsoleTerminalView extends View {
         stopFling();
         mRegionScroll.reset();
         if (mSession != null) mSession.emulator().removeScrollListener(mScrollListener);
-        if (mSession != session) {
+        final boolean changed = mSession != session;
+        if (changed) {
+            resetAttachmentInput();
             clearSelection();
             mViewport.live();
             mInputAttachment = session == null ? null : new Object();
         }
         mSession = session;
+        refreshAppearance();
         if (mSession != null && isAttachedToWindow()) mSession.emulator().setScrollListener(mScrollListener);
         mActions = actions;
         resizeTerminal();
         invalidate();
+        if (changed) restartSessionInput();
+    }
+
+    private void restartSessionInput() {
+        if (!isAttachedToWindow()) return;
+        final var input = getContext().getSystemService(android.view.inputmethod.InputMethodManager.class);
+        if (input != null) input.restartInput(this);
+    }
+
+    private void resetAttachmentInput() {
+        if (mTerminalMousePress && mSession != null) {
+            mSession.emulator().sendMouseEvent(mTerminalMouseButton,
+                    mViewport.columnAt(mDownX) + 1, mViewport.screenRowAt(mDownY) + 1, false);
+        }
+        mTerminalMousePress = false;
+        mTouchScrolling = false;
+        mFontScaleGesture = false;
+        mImageGesture = false;
+        mTouchScrollRemainder = mWheelScrollRemainder = mFontWheelRemainder = 0;
+        mInput.reset();
+        final long now = android.os.SystemClock.uptimeMillis();
+        final MotionEvent cancel = MotionEvent.obtain(now, now, MotionEvent.ACTION_CANCEL, 0, 0, 0);
+        mGestures.onTouchEvent(cancel);
+        mScaleGestures.onTouchEvent(cancel);
+        cancel.recycle();
     }
 
     int fontSizeSp() { return mFontSizeSp; }
@@ -198,11 +230,26 @@ final class ConsoleTerminalView extends View {
         // Android applies the current display density and nonlinear accessibility font scale.
         mRenderer = new MagicDeskTerminalRenderer(getResources().getFont(R.font.console_mono), TypedValue.applyDimension(
                 TypedValue.COMPLEX_UNIT_SP, mFontSizeSp, getResources().getDisplayMetrics()));
-        mContentPadding = Math.round(6.0f * getResources().getDisplayMetrics().density);
+        mContentPadding = Math.round(2.0f * getResources().getDisplayMetrics().density);
         mViewport.metrics(mRenderer.cellWidth(), mRenderer.cellHeight(), mContentPadding);
         mTouchSlop = ViewConfiguration.get(getContext()).getScaledTouchSlop();
         resizeTerminal();
         clampTopRow();
+        invalidate();
+    }
+
+    private void refreshAppearance() {
+        final boolean night = AppearanceStore.resolved(getContext()).theme().palette().night();
+        mBackgroundColor = night ? 0xff000000 : 0xffffffff;
+        final int foreground = night ? 0xffffffff : 0xff000000;
+        if (mSession != null) {
+            final var colors = mSession.emulator().mColors;
+            boolean changed = colors.setDefaultColor(TextStyle.COLOR_INDEX_FOREGROUND, foreground);
+            changed |= colors.setDefaultColor(TextStyle.COLOR_INDEX_BACKGROUND, mBackgroundColor);
+            changed |= colors.setDefaultColor(TextStyle.COLOR_INDEX_CURSOR, foreground);
+            if (changed) mRegionScroll.reset();
+            mSession.emulator().setColorScheme(night);
+        }
         invalidate();
     }
 
@@ -370,11 +417,14 @@ final class ConsoleTerminalView extends View {
     @Override
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
+        AppearanceStore.listen(mAppearanceListener);
+        refreshAppearance();
         if (mSession != null) mSession.emulator().setScrollListener(mScrollListener);
     }
 
     @Override
     protected void onDetachedFromWindow() {
+        AppearanceStore.unlisten(mAppearanceListener);
         stopFling();
         mRegionScroll.reset();
         if (mSession != null) mSession.emulator().removeScrollListener(mScrollListener);
@@ -394,7 +444,7 @@ final class ConsoleTerminalView extends View {
     protected void onDraw(final Canvas canvas) {
         super.onDraw(canvas);
         if (mSession == null) {
-            canvas.drawColor(0xFF000000);
+            canvas.drawColor(mBackgroundColor);
             return;
         }
         canvas.save();

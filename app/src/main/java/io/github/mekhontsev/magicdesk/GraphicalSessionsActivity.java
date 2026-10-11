@@ -165,10 +165,7 @@ public final class GraphicalSessionsActivity extends Activity {
         EditText name = field(fields, R.string.x11_session_name);
         EditText command = field(fields, R.string.x11_command_optional);
         android.widget.Spinner protocol = new android.widget.Spinner(this);
-        var protocols = new android.widget.ArrayAdapter<>(this, android.R.layout.simple_spinner_item,
-                new String[]{"X11", "Wayland"});
-        protocols.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        protocol.setAdapter(protocols);
+        UiChoiceAdapter.bind(protocol, new String[]{"X11", "Wayland"});
         fields.addView(protocol);
         android.widget.CheckBox desktop = new android.widget.CheckBox(this);
         desktop.setText(R.string.graphics_nested_desktop);
@@ -180,10 +177,7 @@ public final class GraphicalSessionsActivity extends Activity {
             @Override public void onNothingSelected(android.widget.AdapterView<?> parent) { }
         });
         android.widget.Spinner backend = new android.widget.Spinner(this);
-        var options = new android.widget.ArrayAdapter<>(this, android.R.layout.simple_spinner_item,
-                new String[]{"Termux", "Shell / root"});
-        options.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        backend.setAdapter(options);
+        UiChoiceAdapter.bind(backend, new String[]{"Termux", "Shell / root"});
         backend.setSelection(TermuxIntegration.isAvailable(this) ? 0 : 1);
         fields.addView(backend);
         EditText keyboard = field(fields, R.string.x11_keyboard_directory);

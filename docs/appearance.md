@@ -166,9 +166,9 @@ scale is 0-2 and border width 0-3 dp.
 ## Backdrops
 
 The root `backdrop` supplies the common background for native shell panels and
-popup backgrounds through their Window bindings. Themed modals created through
-`UiDialogs.themedBuilder` and panel-owned dialogs use the same backdrop;
-other app dialogs retain the Android theme. Appearance settings itself is a
+popup backgrounds through their Window bindings. App modals created through
+`UiDialogs.builder` use the owner's scoped palette and backdrop for both native
+controls and custom content, including lazily created list rows. Appearance settings itself is a
 full-width Settings page with a bounded content column. The backdrop contains
 `opacity` (0.15-1, default 1) and `blurRadiusDp` (integer
 0-64, default 0). A panel's optional `style.backdrop` object overrides that

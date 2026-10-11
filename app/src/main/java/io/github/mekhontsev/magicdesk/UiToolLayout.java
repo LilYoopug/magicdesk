@@ -14,9 +14,14 @@ final class UiToolLayout {
     static int dp(Context context, int value) { return Math.round(value * context.getResources().getDisplayMetrics().density); }
 
     static LinearLayout page(Context context, UiColor color, boolean ime) {
+        return page(context, color, ime, 12, 8);
+    }
+
+    static LinearLayout page(Context context, UiColor color, boolean ime, int horizontalDp, int verticalDp) {
         LinearLayout page = column(context);
         UiAppearance.background(page, color);
-        page.setPadding(dp(context, 12), dp(context, 8), dp(context, 12), dp(context, 8));
+        page.setPadding(dp(context, horizontalDp), dp(context, verticalDp),
+                dp(context, horizontalDp), dp(context, verticalDp));
         SystemBarInsets.addToPadding(page, ime);
         return page;
     }

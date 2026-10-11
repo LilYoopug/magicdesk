@@ -13,7 +13,7 @@ import java.io.IOException;
 
 public final class CommandConsoleActivity extends Activity
         implements ShellAccess.StateListener,
-        ConsoleTerminalSession.Listener {
+        ConsoleTerminalSession.Listener, TerminalWindowAttachment.Host {
     private static final String EXTRA_INITIAL_DIRECTORY =
             "io.github.mekhontsev.magicdesk.extra.CONSOLE_DIRECTORY";
     private static final String EXTRA_AUTO_RUN_COMMAND =
@@ -26,7 +26,8 @@ public final class CommandConsoleActivity extends Activity
             "io.github.mekhontsev.magicdesk.extra.CONSOLE_ATTACH_ONLY";
     private static final String EXTRA_TMUX_SESSION = "tmux_session";
     private static final String EXTRA_TMUX_CREATED = "tmux_created";
-    private static final String STATE_WORKING_DIRECTORY = "working_directory";
+    private static final String STATE_SESSION = "session_intent";
+    private static final String EXTRA_EMPTY = "empty_terminal_window";
     private static final String STATE_FONT_SIZE = "font_size_sp";
 
     private ConsoleTerminalView mTerminalView;
@@ -169,47 +170,13 @@ public final class CommandConsoleActivity extends Activity
                 ? ShellAccess.currentSnapshot() : null;
         mTerminalView = new ConsoleTerminalView(this);
         mActions = new ConsoleTerminalActions(this, mTerminalView, () -> mSession);
-        mWindow = new ConsoleTerminalWindow(this, mTerminalView, mActions, this::createTerminalApplication);
+        mWindow = new ConsoleTerminalWindow(this, mTerminalView, mActions,
+                this::createTerminalApplication, this::selectSession);
         setContentView(mWindow.content());
         if (savedInstanceState != null) {
             mTerminalView.setFontSizeSp(savedInstanceState.getInt(STATE_FONT_SIZE, mTerminalView.fontSizeSp()));
         }
 
-        final String restoredDirectory = savedInstanceState == null
-                ? null : savedInstanceState.getString(STATE_WORKING_DIRECTORY);
-        final String initialDirectory = restoredDirectory == null
-                ? initialDirectory(getIntent()) : restoredDirectory;
-        final String startupCommand = takeAutoRunCommand(getIntent());
-        final TerminalTransport.Factory transportFactory =
-                terminalTransportFactory();
-        String sessionId = getIntent().getStringExtra(EXTRA_TERMINAL_ID);
-        if (sessionId == null || sessionId.isEmpty()) { sessionId = ConsoleTerminalRegistry.nextId(); }
-        getIntent().putExtra(EXTRA_TERMINAL_ID, sessionId);
-        try {
-            mSession = ConsoleTerminalRegistry.acquire(sessionId,
-                    getIntent().getBooleanExtra(EXTRA_ATTACH_ONLY, false) ? null
-                            : listener -> new ConsoleTerminalSession(
-                                    initialDirectory,
-                                    mTerminalView.columns(),
-                                    mTerminalView.rows(),
-                                    mTerminalView.cellWidth(),
-                                    mTerminalView.cellHeight(),
-                                    mBackend,
-                                    startupCommand,
-                                    transportFactory,
-                                    listener));
-        } catch (IllegalArgumentException | IllegalStateException error) {
-            Toast.makeText(this, ShellAccess.usefulMessage(error), Toast.LENGTH_LONG).show();
-            finish();
-            return;
-        }
-        MagicDeskRuntime.startTools(this, mBackend == DesktopExecBackend.SHELL);
-        if (getIntent().hasExtra(EXTRA_TMUX_SESSION)) {
-            if (mBackend != DesktopExecBackend.TERMUX) throw new IllegalArgumentException("tmux requires Termux");
-            ConsoleTerminalRegistry.bindTmux(sessionId, getIntent().getStringExtra(EXTRA_TMUX_SESSION),
-                    getIntent().getLongExtra(EXTRA_TMUX_CREATED, 0));
-        }
-        mTerminalView.attach(mSession, mActions);
         mTerminalView.addOnLayoutChangeListener((
                 view,
                 left,
@@ -220,39 +187,24 @@ public final class CommandConsoleActivity extends Activity
                 oldTop,
                 oldRight,
                 oldBottom) -> maybeStartSession());
-        mTerminalRegistryId = ConsoleTerminalRegistry.register(
-                this,
-                mSession,
-                mTerminalView,
-                getIntent().getStringExtra(EXTRA_TERMINAL_ID));
-        applyLaunchRequest(getIntent(), false);
-        onTitleChanged(mSession.title());
-        onMetadataChanged();
-        updateShellStatus();
-        updateActions();
-        mTerminalView.post(() -> {
-            if (!isFinishing() && !isDestroyed()) {
-                mTerminalView.requestFocus();
-                maybeStartSession();
-            }
-        });
+        final Intent restored = savedInstanceState == null ? null
+                : savedInstanceState.getParcelable(STATE_SESSION, Intent.class);
+        final Intent request = restored == null ? getIntent() : restored;
+        if (restored != null) restoreSession(restored);
+        else if (request.getBooleanExtra(EXTRA_EMPTY, false)) onTerminalDetached();
+        else openSession(request);
     }
 
     @Override
     protected void onNewIntent(final Intent intent) {
         super.onNewIntent(intent);
-        setIntent(intent);
-        applyLaunchRequest(intent, true);
+        openSession(intent);
     }
 
     @Override
     protected void onSaveInstanceState(final Bundle state) {
         if (mTerminalView != null) { state.putInt(STATE_FONT_SIZE, mTerminalView.fontSizeSp()); }
-        if (mSession != null) {
-            state.putString(
-                    STATE_WORKING_DIRECTORY,
-                    mSession.workingDirectory());
-        }
+        state.putParcelable(STATE_SESSION, getIntent());
         super.onSaveInstanceState(state);
     }
 
@@ -277,9 +229,7 @@ public final class CommandConsoleActivity extends Activity
     @Override
     protected void onStart() {
         super.onStart();
-        if (mBackend == DesktopExecBackend.SHELL) {
-            ShellAccess.addStateListener(this);
-        }
+        ShellAccess.addStateListener(this);
         maybeStartSession();
     }
 
@@ -318,7 +268,7 @@ public final class CommandConsoleActivity extends Activity
             return;
         }
         runOnUiThread(() -> {
-            if (isFinishing() || isDestroyed()) {
+            if (isFinishing() || isDestroyed() || mBackend != DesktopExecBackend.SHELL) {
                 return;
             }
             mSnapshot = snapshot;
@@ -348,12 +298,7 @@ public final class CommandConsoleActivity extends Activity
 
     @Override
     public void onFinished() {
-        if (isFinishing() || isDestroyed()) {
-            return;
-        }
-        if (!mTerminalFailed) {
-            finish();
-        }
+        // The registry releases the binding when its PTY exits.
     }
 
     @Override
@@ -379,6 +324,8 @@ public final class CommandConsoleActivity extends Activity
                 : snapshot.taskLabel(fallback);
         setTitle(label);
         DesktopTaskDescription.apply(this, label, R.drawable.ic_file_console);
+        mWindow.updateSession(mSession == null ? getString(R.string.terminal_sessions) : label,
+                mSession != null);
     }
 
     @Override public void onNotification(final String message) { }
@@ -427,29 +374,90 @@ public final class CommandConsoleActivity extends Activity
                 null);
     }
 
-    private void applyLaunchRequest(
-            final Intent intent, final boolean applyDirectory) {
-        if (intent == null) {
+    private void selectSession(Intent request) {
+        final String id = terminalId(request);
+        final var session = id == null ? null : ConsoleTerminalRegistry.status(id);
+        if (session != null && session.taskId >= 0 && session.taskId != getTaskId()) {
+            UiDialogs.builder(this).setTitle(R.string.terminal_move_here)
+                    .setMessage(getString(R.string.terminal_move_confirm,
+                            session.taskLabel(getString(R.string.console_title))))
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .setPositiveButton(R.string.terminal_move_here, (dialog, which) -> openSession(request)).show();
+        } else openSession(request);
+    }
+
+    private void restoreSession(Intent request) {
+        final String id = terminalId(request);
+        final var session = id == null ? null : ConsoleTerminalRegistry.status(id);
+        // Saved Activity state may precede a transfer out of a stopped window.
+        if (session == null || session.taskId >= 0 && session.taskId != getTaskId()) onTerminalDetached();
+        else openSession(attachIntent(this, session));
+    }
+
+    private void openSession(Intent request) {
+        if (isFinishing() || isDestroyed()) return;
+        String id = terminalId(request);
+        if (id != null && id.equals(mTerminalRegistryId)) {
+            mTerminalView.requestFocus();
             return;
         }
-        if (applyDirectory && intent.hasExtra(EXTRA_INITIAL_DIRECTORY)) {
-            final String directory = intent.getStringExtra(
-                    EXTRA_INITIAL_DIRECTORY);
-            if (directory != null && directory.startsWith("/")) {
-                mSession.write("cd -- "
-                        + ShellCommandLine.quote(directory) + "\r");
+        final DesktopExecBackend requestedBackend = backend(request);
+        final String tmuxId = request.getStringExtra(EXTRA_TMUX_SESSION);
+        final long tmuxCreated = request.getLongExtra(EXTRA_TMUX_CREATED, 0);
+        try {
+            if (tmuxId != null && (requestedBackend != DesktopExecBackend.TERMUX
+                    || !TmuxSessionProvider.isSessionId(tmuxId) || tmuxCreated < 0)) {
+                throw new IllegalArgumentException("invalid tmux binding");
             }
-        }
-        final String autoRun = takeAutoRunCommand(intent);
-        if (autoRun != null && !autoRun.trim().isEmpty()) {
-            mSession.write(autoRun + "\r");
-            mTerminalView.scrollToBottom();
+            if (id == null || id.isEmpty()) id = ConsoleTerminalRegistry.nextId();
+            final String command = takeAutoRunCommand(request);
+            final TerminalTransport.Factory transport = terminalTransportFactory(requestedBackend);
+            final ConsoleTerminalSession next = ConsoleTerminalRegistry.acquire(id,
+                    request.getBooleanExtra(EXTRA_ATTACH_ONLY, false) ? null
+                            : listener -> new ConsoleTerminalSession(initialDirectory(request),
+                                    mTerminalView.columns(), mTerminalView.rows(), mTerminalView.cellWidth(),
+                                    mTerminalView.cellHeight(), requestedBackend, command, transport, listener));
+            if (tmuxId != null) ConsoleTerminalRegistry.bindTmux(id, tmuxId, tmuxCreated);
+            // Registration revokes both former bindings before this window adopts the session.
+            ConsoleTerminalRegistry.register(this, next, mTerminalView, id);
+            mSession = next;
+            mTerminalRegistryId = id;
+            mBackend = next.backend();
+            mSnapshot = mBackend == DesktopExecBackend.SHELL ? ShellAccess.currentSnapshot() : null;
+            mTerminalFailed = false;
+            mPermissionRequested = false;
+            mTerminalStatus = "";
+            setIntent(attachIntent(this, ConsoleTerminalRegistry.status(id)));
+            mTerminalView.attach(next, mActions);
+            MagicDeskRuntime.startTools(this, mBackend == DesktopExecBackend.SHELL);
+            onTitleChanged(next.title());
+            onMetadataChanged();
+            updateShellStatus();
+            updateActions();
+            if (hasWindowFocus()) ConsoleTerminalRegistry.focused(id, this);
+            mTerminalView.requestFocus();
+            maybeStartSession();
+        } catch (IllegalArgumentException | IllegalStateException error) {
+            Toast.makeText(this, ShellAccess.usefulMessage(error), Toast.LENGTH_LONG).show();
+            if (mSession == null) onTerminalDetached();
         }
     }
 
-    private TerminalTransport.Factory terminalTransportFactory() {
+    @Override public void onTerminalDetached() {
+        mSession = null;
+        mTerminalRegistryId = "";
+        mBackend = null;
+        mSnapshot = null;
+        mTerminalStatus = "";
+        mTerminalFailed = false;
+        setIntent(new Intent(this, CommandConsoleActivity.class).putExtra(EXTRA_EMPTY, true));
+        onTitleChanged("");
+        updateShellStatus();
+        updateActions();
+    }
+
+    private TerminalTransport.Factory terminalTransportFactory(DesktopExecBackend backend) {
         final Context application = getApplicationContext();
-        final DesktopExecBackend backend = mBackend;
         return (directory, rows, columns, startupCommand) -> {
             var audio = LinuxAudio.prepare(application, new CommandExecution(application, backend));
             try {
@@ -473,7 +481,7 @@ public final class CommandConsoleActivity extends Activity
     private void maybeStartSession() {
         if (mSession == null
                 || mTerminalView == null
-                || !mTerminalView.isLaidOut()
+                || mTerminalView.getWidth() <= 0 || mTerminalView.getHeight() <= 0
                 || mTerminalFailed) {
             return;
         }

@@ -125,8 +125,9 @@ final class ConsoleTerminalActions implements ConsoleTerminalView.Actions, AutoC
     }
 
     void showCommandHistory() {
-        if (mSession.get() == null) { return; }
-        final var history = mSession.get().emulator().getCommandHistory();
+        final var session = mSession.get();
+        if (session == null) { return; }
+        final var history = session.emulator().getCommandHistory();
         final var commands = new java.util.ArrayList<>(history.snapshots());
         java.util.Collections.reverse(commands);
         final String[] labels = new String[commands.size()];
@@ -139,6 +140,7 @@ final class ConsoleTerminalActions implements ConsoleTerminalView.Actions, AutoC
                 .setNegativeButton(android.R.string.cancel, null);
         if (commands.isEmpty()) { dialog.setMessage(R.string.console_no_commands); }
         else { dialog.setItems(labels, (picker, index) -> {
+            if (mSession.get() != session) return;
             final var command = commands.get(index);
             final java.util.ArrayList<String> actions = new java.util.ArrayList<>();
             final java.util.ArrayList<Runnable> handlers = new java.util.ArrayList<>();
@@ -152,7 +154,7 @@ final class ConsoleTerminalActions implements ConsoleTerminalView.Actions, AutoC
                     else { Toast.makeText(mActivity, R.string.console_output_expired, Toast.LENGTH_SHORT).show(); }
                 });
             }
-            if (command.position() != null && !mSession.get().emulator().isAlternateBufferActive()) {
+            if (command.position() != null && !session.emulator().isAlternateBufferActive()) {
                 for (final boolean output : new boolean[]{false, true}) {
                     if (history.range(command.id(), output) == null) { continue; }
                     actions.add(mActivity.getString(output ? R.string.console_select_output : R.string.console_select_command));
@@ -169,7 +171,9 @@ final class ConsoleTerminalActions implements ConsoleTerminalView.Actions, AutoC
                 });
             }
             UiDialogs.builder(mActivity).setTitle(labels[index])
-                    .setItems(actions.toArray(new String[0]), (menu, action) -> handlers.get(action).run())
+                    .setItems(actions.toArray(new String[0]), (menu, action) -> {
+                        if (mSession.get() == session) handlers.get(action).run();
+                    })
                     .setNegativeButton(android.R.string.cancel, null).show();
         }); }
         dialog.show();
@@ -248,13 +252,16 @@ final class ConsoleTerminalActions implements ConsoleTerminalView.Actions, AutoC
     }
 
     void openSelectedPathOrWorkingDirectory() {
+        final var session = mSession.get();
+        if (session == null) return;
         final String selected = mTerminalView.selectedText();
         if (selected.isEmpty()) {
             refreshWorkingDirectory(directory -> openFilesAt(
                     createFilesDirectoryInfo(directory)));
             return;
         }
-        mSession.get().requestWorkingDirectory((directory, lookupError) -> {
+        session.requestWorkingDirectory((directory, lookupError) -> {
+            if (mSession.get() != session) return;
             final String resolved;
             try {
                 resolved = ConsolePathText.resolveSelectedPath(
@@ -281,11 +288,12 @@ final class ConsoleTerminalActions implements ConsoleTerminalView.Actions, AutoC
     }
 
     void refreshWorkingDirectory(final Consumer<String> action) {
-        if (mSession.get() == null) {
+        final var session = mSession.get();
+        if (session == null) {
             return;
         }
-        mSession.get().requestWorkingDirectory((directory, error) -> {
-            if (action != null && !mActivity.isFinishing() && !mActivity.isDestroyed()) {
+        session.requestWorkingDirectory((directory, error) -> {
+            if (mSession.get() == session && action != null && !mActivity.isFinishing() && !mActivity.isDestroyed()) {
                 action.accept(directory);
             }
         });
