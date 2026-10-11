@@ -6,6 +6,11 @@ Desktop or access to Android's physical `/dev/input` nodes. X11 and Wayland use
 the same Android host binding. Termux, PRoot and chroot do not consume this
 bridge.
 
+The GUI recipes in `install_linux.sh` install SDL2 and libudev, along with
+Wayland decorations and the distribution's graphics loaders. No gamepad toggle,
+Android device bind, udev daemon or SDL backend override is needed. Environments
+prepared outside the installer need the equivalent client libraries.
+
 ## Ownership
 
 `LinuxLaunchServices` retains audio and gamepad capabilities independently of

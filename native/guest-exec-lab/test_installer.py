@@ -15,7 +15,7 @@ def main():
     parser.add_argument('--gui', default='apps')
     parser.add_argument('--name', required=True, help='Dedicated fixture name; retained for graphics checks')
     parser.add_argument('--resume', action='store_true')
-    parser.add_argument('--arch-without-landlock', action='store_true')
+    parser.add_argument('--library', help='Dedicated shell-owned library, isolated from existing image caches')
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
     spec = importlib.util.spec_from_file_location('transport', repo / 'scripts/mcp-client.py')
@@ -26,7 +26,7 @@ def main():
                               timeout=3600, request_timeout=3600)
     state = client.call('get_state')
     assert state['shell']['uid'] == 2000
-    report = {'app': state['app'], 'distro': args.distro, 'gui': args.gui, 'name': args.name,
+    report = {'app': state['app'], 'distro': args.distro, 'gui': args.gui, 'name': args.name, 'library': args.library,
               'checks': [], 'passed': False}
     console = client.call('console.open', {'directory': '/data/local/tmp/magicdesk'})['sessionId']
     try:
@@ -38,6 +38,8 @@ def main():
             assert result['exitCode'] == 0, result
             return result['output']
 
+        if args.library:
+            command(['export', 'MAGICDESK_GUEST_HOME=' + args.library])
         source = repo / 'scripts/install_linux.sh'
         digest = hashlib.sha256(source.read_bytes()).hexdigest()
         script = '/data/local/tmp/magicdesk/installer-test-' + args.name + '-' + digest + '.sh'
@@ -46,8 +48,6 @@ def main():
                       '--gui', args.gui, '--locale', 'ru_RU.UTF-8', '--timezone', 'Asia/Krasnoyarsk',
                       '--create-user', 'mdtester', '--package', 'jq']
         invocation += ['--resume'] if args.resume else ['--dns', '1.1.1.1,1.0.0.1']
-        if args.arch_without_landlock:
-            invocation += ['--arch-sandbox', 'disable-filesystem']
         command(invocation)
         inspect = command(['shroot', 'inspect', args.name])
         report['environment'] = json.loads(inspect)
@@ -59,14 +59,23 @@ def main():
                   'if command -v mousepad; then command -v thunar; command -v xfce4-terminal; '
                   'dbus-run-session -- dbus-send --session --print-reply '
                   '--dest=org.freedesktop.DBus / org.freedesktop.DBus.ListNames; fi\n')
+        if args.gui not in ('none', 'keep'):
+            checks += ('bash -n /usr/local/bin/magicdesk-audio-session\n'
+                       'sh -n /usr/local/bin/magicdesk-desktop-session\n'
+                       'for program in pipewire pipewire-pulse wireplumber pw-link; do command -v "$program"; done\n'
+                       'for library in libudev.so.1 libSDL2-2.0.so.0; do\n'
+                       '  found=no\n'
+                       '  for path in /usr/lib/"$library" /usr/lib64/"$library" /usr/lib/*-linux-gnu/"$library"; do\n'
+                       '    [ ! -e "$path" ] || found=yes\n'
+                       '  done\n'
+                       '  [ "$found" = yes ] || { echo "Missing library: $library" >&2; exit 1; }\n'
+                       'done\n')
         command(['shroot', 'exec', args.name, '--user', 'root', '--', '/bin/sh', '-c', checks])
         command(['shroot', 'login', args.name, '--user', 'mdtester', '--', '/bin/sh', '-lc',
                  'set -eu; test "$LANG" = ru_RU.UTF-8; test "${LC_ALL:-$LANG}" = ru_RU.UTF-8; '
                  'locale; test "$HOME" = /home/mdtester; '
                  'printf retained > "$HOME/installer-sentinel"'])
         resume = ['sh', script, '--yes', '--name', args.name, '--resume']
-        if args.arch_without_landlock:
-            resume += ['--arch-sandbox', 'disable-filesystem']
         command(resume)
         command(['shroot', 'login', args.name, '--user', 'mdtester', '--', '/bin/sh', '-lc',
                  'set -eu; test "$LANG" = ru_RU.UTF-8; test "${LC_ALL:-$LANG}" = ru_RU.UTF-8; '

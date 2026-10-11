@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import selectors
+import shlex
 import shutil
 import subprocess
 import sys
@@ -48,7 +49,7 @@ if stage == "exec":
         print(os.environ.get("TEST_DISTRO", "debian"))
     if stage == "setup":
         payload = sys.stdin.read()
-        if args[-4] in ("turnip", "software", "auto"):
+        if args[-3] in ("turnip", "software", "auto"):
             stage = "graphics"
         if "version=6.3.6" in payload:
             stage = "kwin"
@@ -81,11 +82,11 @@ if os.environ.get("TEST_FAIL") == stage:
         self.assertEqual(["install", "debian:trixie-slim", "--name", "work", "--dns", "system"], self.calls()[1])
         self.assertEqual(["dns", "work", "system", "--replace"], self.calls()[2])
         self.assertEqual(["exec", "work", "--user", "root", "--env", "DEBIAN_FRONTEND=noninteractive",
-                          "--", "/bin/sh", "-s", "--", "apps", "both", "keep", "keep", "", "basic", "keep", "keep", ""], self.calls()[-1])
+                          "--", "/bin/sh", "-s", "--", "apps", "both", "keep", "keep", "", "basic", "keep", ""], self.calls()[-1])
         self.assertIn("Linux is ready: work", result.stdout)
         payload = self.payload.read_text()
         self.assertIn('apt-get install -y --no-install-recommends "$@" </dev/null', payload)
-        self.assertIn("X-MagicDesk-Graphics=wayland", payload)
+        self.assertIn('backend=wayland', payload)
         self.assertIn("X-MagicDesk-GraphicsMode=desktop", payload)
         self.assertIn("printf 'unset LC_ALL\\nexport LANG=%s\\n'", payload)
         self.assertIn('path-include /usr/share/locale/*', payload)
@@ -95,7 +96,7 @@ if os.environ.get("TEST_FAIL") == stage:
     def test_xfce_profile_and_root_executor(self):
         result = self.run_script("--yes", "--gui", "xfce", TEST_UID="0")
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual("xfce", self.calls()[-1][-9])
+        self.assertEqual("xfce", self.calls()[-1][-8])
 
     def test_gui_installs_gl_dispatch_libraries_with_mesa_drivers(self):
         result = self.run_script('--yes', '--gui', 'apps')
@@ -119,6 +120,7 @@ if os.environ.get("TEST_FAIL") == stage:
         helper.write_text(result.stdout)
         self.assertEqual(0, subprocess.run(['bash', '-n', str(helper)]).returncode)
         self.assertIn('libpipewire-module-pulse-tunnel', result.stdout)
+        self.assertIn('node.name = magicdesk.android', result.stdout)
         self.assertIn('node.virtual = false', result.stdout)
         self.assertIn('default.clock.min-quantum = 1024', result.stdout)
         self.assertIn('pulse.min.req = 1024/48000', result.stdout)
@@ -130,6 +132,8 @@ if os.environ.get("TEST_FAIL") == stage:
         self.assertLess(result.stdout.index('pipewire-pulse.conf.d/90-magicdesk.conf'),
                         result.stdout.index('libpipewire-module-pulse-tunnel'))
         self.assertIn('MAGICDESK_AUDIO_SESSION=active', result.stdout)
+        self.assertIn('export DISABLE_RTKIT=1', result.stdout)
+        self.assertNotIn('module.rt.args', result.stdout)
         self.assertIn('EVENT_WAIT:', result.stdout)
         self.assertNotIn('sleep ', result.stdout)
         env = dict(self.environment)
@@ -144,13 +148,77 @@ if os.environ.get("TEST_FAIL") == stage:
         result = self.run_script('--yes', '--gui', 'plasma')
         self.assertEqual(0, result.returncode, result.stderr)
         setup = self.payload.read_text()
-        self.assertIn('packages pipewire pipewire-pulse wireplumber pipewire-alsa', setup)
-        self.assertIn('Exec=magicdesk-plasma %s', setup)
+        self.assertIn('packages pipewire pipewire-bin pipewire-pulse wireplumber pipewire-alsa', setup)
+        self.assertIn('Exec=magicdesk-desktop-session %s', setup)
 
-    def test_direct_plasma_launch_owns_audio_for_each_protocol_and_distribution(self):
+    def test_all_package_families_supply_audio_gamepads_and_wayland_decorations(self):
+        self.assertEqual(0, self.run_script('--yes').returncode)
+        setup = self.payload.read_text()
+        start = setup.index('    case "$family" in\n        apt) packages pipewire')
+        end = setup.index('\n    install_audio_session', start)
+        expected = {
+            'apt': {'pipewire-bin', 'pipewire-pulse', 'wireplumber', 'pipewire-alsa',
+                    'libsdl2-2.0-0', 'libudev1', 'libdecor-0-plugin-1-cairo'},
+            'apk': {'pipewire-tools', 'pipewire-pulse', 'wireplumber', 'pipewire-alsa',
+                    'sdl2', 'eudev-libs', 'libdecor'},
+            'dnf': {'pipewire-utils', 'pipewire-pulseaudio', 'wireplumber', 'pipewire-alsa',
+                    'sdl2-compat', 'systemd-libs', 'libdecor'},
+            'pacman': {'pipewire-pulse', 'wireplumber', 'pipewire-alsa', 'libpulse',
+                       'sdl2', 'systemd-libs', 'libdecor'},
+        }
+        expected['recovery'] = expected['pacman']
+        for family, libraries in expected.items():
+            with self.subTest(family=family):
+                command = 'family=' + family + '\npackages() { printf "%s\\n" "$@"; }\n' + setup[start:end]
+                # EVENT_WAIT: distribution dependency selection must exit without host changes.
+                result = subprocess.run(['sh', '-eu', '-c', command], capture_output=True, text=True, timeout=5)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertTrue(libraries <= set(result.stdout.splitlines()), result.stdout)
+        self.assertNotIn('SDL_JOYSTICK_HIDAPI=', setup)
+        self.assertNotIn('SDL_AUDIODRIVER=', setup)
+        self.assertNotIn('QML_DISABLE', setup)
+        self.assertNotIn('KWIN_NO_TIMER_QUERY', setup)
+
+    def test_desktop_entry_refresh_preserves_selection_and_distribution_entries(self):
+        self.assertEqual(0, self.run_script('--yes').returncode)
+        setup = self.payload.read_text()
+        start = setup.index('if [ "$gui_services" = yes ]; then\n    # Refresh only')
+        end = setup.index('\nif [ "$fonts" != keep ]; then', start)
+        applications = self.directory / 'local/share/applications'
+        applications.mkdir(parents=True)
+        for program in ('xfce4-session', 'weston', 'gnome-shell', 'startplasma-x11', 'startplasma-wayland'):
+            executable = self.directory / program
+            executable.write_text('#!/bin/sh\nexit 0\n')
+            executable.chmod(0o755)
+        old = applications / 'magicdesk-xfce.desktop'
+        old.write_text('installer entry')
+        custom = applications / 'user.desktop'
+        custom.write_text('user entry')
+        command = setup[start:end].replace('/usr/local/', str(self.directory / 'local') + '/')
+        for gui, modes in [('keep', ['xfce']), ('plasma', ['xfce', 'plasma-x11', 'plasma-wayland']),
+                           ('weston', ['xfce', 'plasma-x11', 'plasma-wayland', 'weston'])]:
+            # EVENT_WAIT: entry refresh must exit and preserve unrelated files.
+            result = subprocess.run(['sh', '-eu', '-c', command],
+                                    env=dict(self.environment, gui=gui, gui_services='yes'),
+                                    capture_output=True, text=True, timeout=5)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual('user entry', custom.read_text())
+            self.assertEqual({f'magicdesk-{mode}.desktop' for mode in modes},
+                             {p.name for p in applications.glob('magicdesk-*.desktop')})
+            for mode in modes:
+                entry = (applications / f'magicdesk-{mode}.desktop').read_text()
+                self.assertIn('Exec=magicdesk-desktop-session ' + mode + '\n', entry)
+                self.assertIn('X-MagicDesk-GraphicsMode=desktop\n', entry)
+
+    def test_desktop_launch_owns_audio_and_preserves_gamepad_for_each_protocol(self):
         audio = self.directory / 'magicdesk-audio-session'
-        audio.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\nexit 23\n')
+        audio.write_text('#!' + sys.executable + '\nimport json, os, sys\n'
+                         'print(json.dumps({"argv": sys.argv[1:], "env": dict(os.environ)}))\n'
+                         'sys.exit(23)\n')
         audio.chmod(0o755)
+        bus = self.directory / 'dbus-run-session'
+        bus.write_text('#!/bin/sh\nshift\nexport DBUS_SESSION_BUS_ADDRESS=unix:path=/test-bus\nexec "$@"\n')
+        bus.chmod(0o755)
         config = self.directory / 'kwriteconfig6'
         config.write_text('#!/bin/sh\nexit 0\n')
         config.chmod(0o755)
@@ -158,23 +226,107 @@ if os.environ.get("TEST_FAIL") == stage:
         home.mkdir()
         environment = dict(self.environment, HOME=str(home))
         environment.pop('MAGICDESK_MESA_PREFIX', None)
-        for distro in ('debian', 'steamos'):
-            result = self.run_script('--yes', '--resume', '--name', 'desktop',
-                                     '--gui', 'plasma', TEST_DISTRO=distro)
-            self.assertEqual(0, result.returncode, result.stderr)
-            payload = self.payload.read_text()
-            self.assertIn('    install_audio_session\n', payload)
-            launcher = payload.split("cat > /usr/local/bin/magicdesk-plasma <<'LAUNCH'\n", 1)[1]
-            launcher = launcher.split('\nLAUNCH\n', 1)[0]
-            launcher = launcher.replace('/etc/profile.d/', str(self.directory / 'profiles') + '/')
-            launcher = launcher.replace('/tmp/.X11-unix', str(self.directory / 'x11'))
-            for protocol in ('x11', 'wayland'):
-                with self.subTest(distro=distro, protocol=protocol):
+        launcher = self.run_script('--print-desktop-session').stdout
+        launcher = launcher.replace('/etc/profile.d/', str(self.directory / 'profiles') + '/')
+        launcher = launcher.replace('/tmp/.X11-unix', str(self.directory / 'x11'))
+        modes = {'xfce': 'xfce4-session', 'weston': 'weston', 'gnome': 'gnome-shell',
+                 'plasma-x11': 'startplasma-x11', 'plasma-wayland': 'startplasma-wayland'}
+        for mode, program in modes.items():
+            for inherited in (False, True):
+                with self.subTest(mode=mode, inherited=inherited):
+                    environment.pop('DBUS_SESSION_BUS_ADDRESS', None)
+                    if inherited:
+                        environment['DBUS_SESSION_BUS_ADDRESS'] = 'unix:path=/existing-bus'
+                    environment.update(MAGICDESK_GAMEPAD_ENDPOINT='abstract-gamepad',
+                                       MAGICDESK_AUDIO_PULSE='/tmp/android-pulse')
                     # EVENT_WAIT: launcher reaches its audio owner; expiry fails the fixture.
-                    launched = subprocess.run(['sh', '-c', launcher, 'magicdesk-plasma', protocol],
+                    launched = subprocess.run(['sh', '-c', launcher, 'desktop', mode, 'a b'],
                                               env=environment, capture_output=True, text=True, timeout=5)
                     self.assertEqual(23, launched.returncode, launched.stderr)
-                    self.assertEqual('startplasma-' + protocol + '\n', launched.stdout)
+                    captured = json.loads(launched.stdout)
+                    self.assertEqual(program, captured['argv'][0])
+                    self.assertEqual('a b', captured['argv'][-1])
+                    self.assertEqual('abstract-gamepad', captured['env']['MAGICDESK_GAMEPAD_ENDPOINT'])
+                    self.assertEqual('/tmp/android-pulse', captured['env']['MAGICDESK_AUDIO_PULSE'])
+                    self.assertEqual('unix:path=/existing-bus' if inherited else 'unix:path=/test-bus',
+                                     captured['env']['DBUS_SESSION_BUS_ADDRESS'])
+
+    def test_desktop_profile_selects_renderer_and_private_kwin_without_driver_overrides(self):
+        capture = self.directory / 'magicdesk-audio-session'
+        capture.write_text('#!' + sys.executable + '\nimport json, os, sys\n'
+                           'print(json.dumps({"argv": sys.argv[1:], "env": dict(os.environ)}))\n')
+        capture.chmod(0o755)
+        config = self.directory / 'kwriteconfig6'
+        config.write_text('#!/bin/sh\nexit 0\n')
+        config.chmod(0o755)
+        profiles = self.directory / 'profiles'
+        profiles.mkdir()
+        kwin = self.directory / 'kwin'
+        (kwin / 'bin').mkdir(parents=True)
+        executable = kwin / 'bin/kwin_wayland'
+        executable.write_text('#!/bin/sh\nexit 0\n')
+        executable.chmod(0o755)
+        selection = self.directory / 'plasma-kwin.sh'
+        selection.write_text('kwin_prefix=' + shlex.quote(str(kwin)) + '\n')
+        launcher = self.run_script('--print-desktop-session').stdout
+        launcher = launcher.replace('/etc/profile.d/', str(profiles) + '/')
+        launcher = launcher.replace('/etc/magicdesk/plasma-kwin.sh', str(selection))
+        launcher = launcher.replace('/tmp/.X11-unix', str(self.directory / 'x11'))
+        environment = dict(self.environment, HOME=str(self.directory / 'home'),
+                           DBUS_SESSION_BUS_ADDRESS='unix:path=/existing-bus')
+        for key in ('MAGICDESK_MESA_PREFIX', 'KWIN_COMPOSE', 'QT_QUICK_BACKEND'):
+            environment.pop(key, None)
+        for gpu in ('software', 'turnip'):
+            (profiles / 'magicdesk-graphics.sh').write_text(
+                'export MAGICDESK_MESA_PREFIX=/opt/private-mesa\n' if gpu == 'turnip' else
+                'export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe\n')
+            for mode in ('weston', 'plasma-wayland', 'plasma-x11'):
+                with self.subTest(gpu=gpu, mode=mode):
+                    # EVENT_WAIT: the launch reaches its audio owner with the selected graphics profile.
+                    result = subprocess.run(['sh', '-c', launcher, 'desktop', mode],
+                                            env=environment, capture_output=True, text=True, timeout=5)
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    captured = json.loads(result.stdout)
+                    env = captured['env']
+                    if mode == 'weston':
+                        self.assertIn('--renderer=' + ('gl' if gpu == 'turnip' else 'pixman'), captured['argv'])
+                    elif mode == 'plasma-wayland' and gpu == 'software':
+                        self.assertEqual('Q', env['KWIN_COMPOSE'])
+                        self.assertEqual('software', env['QT_QUICK_BACKEND'])
+                    else:
+                        self.assertNotIn('KWIN_COMPOSE', env)
+                        self.assertNotIn('QT_QUICK_BACKEND', env)
+                    self.assertEqual(mode == 'plasma-wayland' and gpu == 'turnip',
+                                     env['PATH'].startswith(str(kwin / 'bin') + ':'))
+                    if gpu == 'turnip':
+                        self.assertEqual('/opt/private-mesa', env['MAGICDESK_MESA_PREFIX'])
+        selection.unlink()
+        rejected = subprocess.run(['sh', '-c', launcher, 'desktop', 'plasma-wayland'],
+                                  env=environment, capture_output=True, text=True, timeout=5)
+        self.assertNotEqual(0, rejected.returncode)
+        self.assertIn('Complete Plasma Turnip setup', rejected.stderr)
+
+    def test_mixer_dependencies_refresh_for_existing_desktops(self):
+        self.assertEqual(0, self.run_script('--yes').returncode)
+        setup = self.payload.read_text()
+        start = setup.index('    [ "$family" = recovery ] || packages pavucontrol')
+        end = setup.index('\nfi\n', start)
+        applications = self.directory / 'apps'
+        applications.mkdir()
+        snippet = setup[start:end].replace('/usr/local/share/applications', str(applications))
+        command = 'packages() { printf "%s\\n" "$@"; }\n' + snippet
+        for gui, existing, expected in (
+                ('apps', (), {'pavucontrol'}),
+                ('xfce', (), {'pavucontrol', 'xfce4-pulseaudio-plugin'}),
+                ('keep', ('xfce', 'plasma-wayland'), {'pavucontrol', 'xfce4-pulseaudio-plugin', 'plasma-pa'})):
+            for mode in existing:
+                (applications / f'magicdesk-{mode}.desktop').touch()
+            # EVENT_WAIT: dependency selection exits without starting a package manager.
+            result = subprocess.run(['sh', '-eu', '-c', command],
+                                    env=dict(self.environment, gui=gui, family='apt'),
+                                    capture_output=True, text=True, timeout=5)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(expected, set(result.stdout.splitlines()))
 
     def test_gui_pipewire_clients_do_not_request_unavailable_realtime_services(self):
         result = self.run_script('--yes', '--gui', 'plasma')
@@ -184,16 +336,21 @@ if os.environ.get("TEST_FAIL") == stage:
         end = setup.index('    done\n', start) + len('    done\n')
         directory = self.directory / 'pipewire'
         snippet = setup[start:end].replace('/etc/pipewire', str(directory))
-        # EVENT_WAIT: extracted configuration writer exit; timeout fails a stuck recipe.
+        for config in ('client.conf', 'client-rt.conf'):
+            folder = directory / (config + '.d')
+            folder.mkdir(parents=True)
+            (folder / '90-magicdesk-scheduling.conf').write_text('module.rt.args = {}\n')
+            (folder / 'user.conf').write_text('retained')
+        # EVENT_WAIT: owned configuration cleanup; timeout fails a stuck recipe.
         written = subprocess.run(['sh', '-eu', '-c', snippet], capture_output=True,
                                  text=True, timeout=5)
         self.assertEqual(0, written.returncode, written.stderr)
         for config in ('client.conf', 'client-rt.conf'):
-            contents = (directory / (config + '.d') / '90-magicdesk-scheduling.conf').read_text()
-            self.assertEqual('module.rt.args = {\n'
-                             '    rtportal.enabled = false\n'
-                             '    rtkit.enabled = false\n}\n', contents)
-        self.assertLess(setup.index('if [ "$gui" != none ] && [ "$gui" != keep ]; then'), start)
+            folder = directory / (config + '.d')
+            self.assertFalse((folder / '90-magicdesk-scheduling.conf').exists())
+            self.assertEqual('retained', (folder / 'user.conf').read_text())
+        self.assertIn('export DISABLE_RTKIT=1', setup)
+        self.assertLess(setup.index('if [ "$gui_services" = yes ]; then'), start)
         self.assertNotIn('rlimits.enabled = false', setup)
         self.assertNotIn('rt.time.hard =', setup)
 
@@ -241,7 +398,7 @@ if os.environ.get("TEST_FAIL") == stage:
         self.assertIn("parts['rootfs-A']", reader)
         setup = self.payload.read_text()
         self.assertIn("Updating SteamOS packages from the image repositories", setup)
-        self.assertIn('pacman_command -Syu --noconfirm\n        dbus-uuidgen --ensure', setup)
+        self.assertIn('pacman -Syu --noconfirm </dev/null\n        dbus-uuidgen --ensure', setup)
         setup_index = next(i for i, c in enumerate(calls) if '-s' in c)
         steam_index = next(i for i, c in enumerate(calls) if any('steam.tar.zst' in a for a in c))
         self.assertLess(setup_index, steam_index)
@@ -480,7 +637,7 @@ if os.environ.get("TEST_FAIL") == stage:
                 result = self.run_script("--yes", "--distro", distro, "--gui", gui, "--protocol", protocol)
                 self.assertEqual(0, result.returncode, result.stderr)
                 hints = result.stdout.split("Next steps:\n", 1)[1]
-                self.assertIn(f"Name={title}\n", self.payload.read_text())
+                self.assertIn(f"title='{title}'", self.payload.read_text())
                 self.assertIn(title, hints)
                 for _, _, _, other_title in profiles:
                     if other_title != title:
@@ -512,9 +669,9 @@ if os.environ.get("TEST_FAIL") == stage:
         self.assertIn('[ -n "${MAGICDESK_MESA_PREFIX:-}" ] || exit 0', kwin)
         self.assertNotIn("version=6.3.6", gpu)
         self.assertIn('export KWIN_COMPOSE=Q QT_QUICK_BACKEND=software', self.payload.read_text())
-        plasma = self.payload.read_text().split("cat > /usr/local/bin/magicdesk-plasma", 1)[1]
+        plasma = self.run_script('--print-desktop-session').stdout
         self.assertLess(plasma.index('mkdir -p -m 1777 /tmp/.X11-unix'),
-                        plasma.index('exec magicdesk-audio-session startplasma-wayland'))
+                        plasma.index('set -- startplasma-wayland'))
         self.assertIn('Plasma Desktop (wayland)', result.stdout)
         self.assertEqual("4", self.calls()[-1][-2])
         self.assertEqual(0, subprocess.run(["sh", "-n"], input=kwin, text=True).returncode)
@@ -570,7 +727,7 @@ if os.environ.get("TEST_FAIL") == stage:
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual(["exec", "--probe", "exec", "exec"], [args[0] for args in self.calls()])
         self.assertEqual(["sh", "debian", "13"], self.calls()[2][-3:])
-        self.assertEqual(["keep", "both", "keep", "keep", "", "keep", "keep", "keep", ""], self.calls()[-1][-9:])
+        self.assertEqual(["keep", "both", "keep", "keep", "", "keep", "keep", ""], self.calls()[-1][-8:])
         hints = result.stdout.split("Next steps:\n", 1)[1]
         self.assertIn("Existing GUI entries were preserved", hints)
         self.assertNotIn("Individual apps:", hints)
@@ -587,7 +744,7 @@ if os.environ.get("TEST_FAIL") == stage:
                     result = self.run_script("--yes", "--distro", distro, "--gui", gui)
                     self.assertEqual(0, result.returncode, result.stderr)
                     self.assertEqual(["install", source, "--name", distro, "--dns", "system"], self.calls()[1])
-                    self.assertEqual(gui, self.calls()[-1][-9])
+                    self.assertEqual(gui, self.calls()[-1][-8])
                     self.assertEqual(0, subprocess.run(["sh", "-n", str(self.payload)]).returncode)
 
     def test_settings_are_literal_arguments_and_additional_packages_accumulate(self):
@@ -595,8 +752,8 @@ if os.environ.get("TEST_FAIL") == stage:
                                  "--timezone", "Asia/Krasnoyarsk", "--create-user", "developer", "--fonts", "cjk",
                                  "--cache", "clean", "--package", "git", "--package", "gdb")
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual(["apps", "wayland", "ru_RU.UTF-8", "Asia/Krasnoyarsk", "developer", "cjk", "clean", "keep", "git gdb"],
-                         self.calls()[-1][-9:])
+        self.assertEqual(["apps", "wayland", "ru_RU.UTF-8", "Asia/Krasnoyarsk", "developer", "cjk", "clean", "git gdb"],
+                         self.calls()[-1][-8:])
         self.assertIn("--user developer", result.stdout)
         self.assertIn("--bind", result.stdout)
         self.assertIn("--magicdesk", result.stdout)
@@ -623,13 +780,13 @@ if os.environ.get("TEST_FAIL") == stage:
                 self.assertNotEqual(0, result.returncode)
                 self.assertEqual([], self.calls())
 
-    def test_arch_sandbox_opt_out_is_explicit_and_does_not_disable_signature_checks(self):
-        result = self.run_script("--yes", "--distro", "arch", "--arch-sandbox", "disable-filesystem")
+    def test_arch_uses_package_sandbox_without_opt_out_or_signature_changes(self):
+        result = self.run_script("--yes", "--distro", "arch")
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn("WARNING", result.stdout)
-        self.assertEqual("disable-filesystem", self.calls()[-1][-2])
-        self.assertIn("--disable-sandbox-filesystem", self.payload.read_text())
+        self.assertIn('pacman -Syu --noconfirm </dev/null', self.payload.read_text())
+        self.assertNotIn("--disable-sandbox", self.payload.read_text())
         self.assertNotIn("SigLevel", self.payload.read_text())
+        self.assertNotIn('Glycin/Bubblewrap image loader', result.stdout)
 
     def test_list_is_read_only_and_names_all_sources(self):
         result = self.run_script("--list", TEST_UID="10001")
@@ -723,7 +880,7 @@ if os.environ.get("TEST_FAIL") == stage:
                 self.assertEqual(0, result.returncode, result.stderr)
                 payload = Path(str(self.payload) + ".gpu")
                 digest = hashlib.sha256(payload.read_bytes()).hexdigest()
-                self.assertEqual([gpu, jobs, digest, "keep"], self.calls()[-1][-4:])
+                self.assertEqual([gpu, jobs, digest], self.calls()[-2][-3:])
                 self.assertEqual(0, subprocess.run(["sh", "-n", str(payload)]).returncode)
                 self.assertIn(self.run_script("--print-mesa-patch").stdout, payload.read_text())
                 self.assertIn("--fuzz=0", payload.read_text())
@@ -827,15 +984,15 @@ if os.environ.get("TEST_FAIL") == stage:
     def test_questions_use_saved_script_stdin(self):
         self.questions(b"debian\ninteractive\nxfce\nkeep\nkeep\nkeep\nbasic\nn\ny\n")
         self.assertEqual(["install", "debian:trixie-slim", "--name", "interactive", "--dns", "system"], self.calls()[1])
-        self.assertEqual("xfce", self.calls()[-1][-9])
+        self.assertEqual("xfce", self.calls()[-1][-8])
 
     @unittest.skipUnless(hasattr(os, "openpty"), "PTY required")
     def test_advanced_questions_select_real_options_without_command_flags(self):
         output = self.questions(b"ubuntu\ninteractive\napps\nsoftware\nru_RU.UTF-8\nAsia/Krasnoyarsk\ncjk\ny\n"
                                 b"developer\nwayland\ngit gdb\n192.0.2.1\nclean\ny\n")
         self.assertEqual(["install", "ubuntu:24.04", "--name", "interactive", "--dns", "192.0.2.1"], self.calls()[1])
-        self.assertEqual(["apps", "wayland", "ru_RU.UTF-8", "Asia/Krasnoyarsk", "developer", "cjk", "clean", "keep", "git gdb"],
-                         self.calls()[-2][-9:])
+        self.assertEqual(["apps", "wayland", "ru_RU.UTF-8", "Asia/Krasnoyarsk", "developer", "cjk", "clean", "git gdb"],
+                         self.calls()[-3][-8:])
         self.assertIn("Guest account=developer | extra packages=git gdb", output)
 
     def questions(self, answers):

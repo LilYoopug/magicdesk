@@ -71,15 +71,17 @@ the authorized abstract endpoints; shell does not need to create filesystem
 socket nodes on Android. No launcher silently changes privilege identity.
 
 `install_linux.sh` installs PipeWire client support with GUI profiles. Individual
-applications connect directly. Whole-desktop entries use
-`magicdesk-audio-session`, which owns a guest PipeWire core, WirePlumber and
+applications connect directly. The shared `magicdesk-desktop-session` launcher
+uses `magicdesk-audio-session`, which owns a guest PipeWire core, WirePlumber and
 PipeWire's Pulse compatibility server. Its client context owns the standard
 pulse-tunnel sink, sending the guest mix to Android without a core-to-itself
 connection. Guest volume controls operate on the guest graph; Android
 volume remains independent. ALSA applications use the distribution's
 PipeWire ALSA plugin. Hardware discovery remains disabled in the guest session.
-The Plasma launcher acquires this audio session for both X11 and Wayland,
-including direct console launches. An already active audio session is reused.
+Xfce, Weston, GNOME devkit and Plasma launch through the same audio owner,
+including direct launches in a prepared graphical console. The desktop launcher
+reuses the supplied D-Bus session or creates one; an already active audio session
+is reused. Resume refreshes installed GUI helpers and mixer dependencies.
 The shared Android sink does not accept guest-wide volume changes; a desktop's
 device-volume control belongs to its private guest graph.
 The tunnel is published as the guest's output device (`node.virtual = false`),
@@ -97,6 +99,9 @@ user's global audio configuration or replace a running system audio service.
 Without an audio capability it runs the original desktop command unchanged.
 WirePlumber 0.4 uses its Lua configuration; 0.5+ uses feature profiles. Both
 disable guest hardware discovery while retaining normal stream policy.
+The launch-scoped `DISABLE_RTKIT` switch prevents requests to unavailable
+realtime services without disabling native scheduling or rewriting distribution
+PipeWire configuration.
 
 ## Build and Verification
 
@@ -115,6 +120,8 @@ only its library allowlist and license texts. Windows builds consume
   native factory access, followed by successful playback through the same lease.
 - `LinuxAudioEnvironmentTest` and installer fixtures: literal environment values,
   optional routes and guest session construction.
+- `test_installer_audio.py`: the installed desktop wrapper, private default sink,
+  volume/mute notifications during silent playback and owned-process cleanup.
 
 Device tests use silence or an inaudible signal. They establish protocol and
 output operation, not a subjective listening or physical-speaker quality test.

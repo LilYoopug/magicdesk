@@ -35,7 +35,6 @@ defaults to automatic Turnip detection and a Wayland Plasma desktop.
   --fonts F    basic (default), cjk (also Chinese/Japanese/Korean), keep
   --package P   Additional repository package (repeatable)
   --cache C     keep (default), clean (package downloads only, not Mesa work)
-  --arch-sandbox P  keep (default), disable-filesystem (explicit pacman opt-out)
   --dns POLICY  New image DNS: system (default), preserve, or IP[,IP...]
   --yes         Accept the selected configuration without questions
   --resume      Continue in --name NAME; detect distribution, preserve GUI by default
@@ -51,8 +50,9 @@ the selected profile; already running programs are not restarted.
 
 No Termux or Android root is required. Use trusted images: Shroot is not a
 security sandbox. The current shell/root identity is never changed.
-Fedora/Arch GUI recipes are experimental: Glycin/Bubblewrap can fail on Android.
-GNOME devkit additionally needs a working Linux system bus.
+GUI profiles include PipeWire audio, SDL gamepad discovery and Wayland decorations.
+Graphical Shroot launches receive Android gamepads automatically; no host device binds.
+GNOME devkit needs a working Linux system bus; this installer does not boot system services.
 SteamOS retains its supplied applications, fonts and system drivers. The default
 --gui plasma --gpu auto adds a nested desktop and a private graphics profile.
 It needs about 35 GB free during conversion, not a booted recovery/VR session.
@@ -68,7 +68,8 @@ configurations() {
         'fedora        44          registry.fedoraproject.org/fedora:44       none/apps/xfce/weston/gnome' \
         'arch          rolling     menci/archlinuxarm:base (community)        none/apps/xfce/weston' \
         'steamos       0.3.0       Valve Steam Frame recovery                plasma/keep (supplied applications)'
-    printf '%s\n' 'Fedora/Arch GUI: experimental (Glycin/Bubblewrap); GNOME also requires a Linux system bus.'
+    printf '%s\n' 'GUI profiles include Android audio and gamepad client libraries.' \
+        'GNOME devkit requires a Linux system bus.'
 }
 
 # Package-manager differences stay here; setup and the Mesa recipe share them.
@@ -85,19 +86,12 @@ case "$ID" in
     steamos) family=recovery ;;
     *) echo "Unsupported distribution: $ID" >&2; exit 1 ;;
 esac
-pacman_command() {
-    if [ "${arch_sandbox:-keep}" = disable-filesystem ]; then
-        pacman --disable-sandbox-filesystem "$@" </dev/null
-    else
-        pacman "$@" </dev/null
-    fi
-}
 packages() {
     case "$family" in
         apt) apt-get install -y --no-install-recommends "$@" </dev/null ;;
         apk) apk add "$@" </dev/null ;;
         dnf) dnf -y --setopt=install_weak_deps=False install "$@" </dev/null ;;
-        pacman|recovery) pacman_command -S --needed --noconfirm "$@" ;;
+        pacman|recovery) pacman -S --needed --noconfirm "$@" </dev/null ;;
         *) echo 'Package setup is unavailable for this image.' >&2; exit 1 ;;
     esac
 }
@@ -1502,7 +1496,7 @@ plasma_setup() {
     cat <<'KWIN_HEAD'
 jobs=$1
 recipe=$2
-[ -x /usr/local/bin/magicdesk-plasma ] || exit 0
+[ -f /usr/local/share/applications/magicdesk-plasma-wayland.desktop ] || exit 0
 [ ! -r /etc/profile.d/magicdesk-graphics.sh ] || . /etc/profile.d/magicdesk-graphics.sh
 [ -n "${MAGICDESK_MESA_PREFIX:-}" ] || exit 0
 case "$ID:$VERSION_ID" in
@@ -1608,7 +1602,6 @@ umask 022
 gpu=$1
 jobs=$2
 recipe=$3
-arch_sandbox=$4
 version=26.2.3
 archive_sha=1628058a8d2c0615975de5a15ab7bbb9638c50000b5bed9456ff423ea034a81f
 mkdir -p /var/lib/magicdesk /etc/profile.d
@@ -1786,6 +1779,68 @@ printf 'Graphics profile activated for new launches: %s\n' "$gpu"
 GPU_BODY
 }
 
+desktop_session() {
+    cat <<'DESKTOP'
+#!/bin/sh
+set -eu
+desktop=${1:?Expected xfce, weston, gnome, plasma-x11 or plasma-wayland}
+shift
+[ ! -r /etc/profile.d/magicdesk-graphics.sh ] || . /etc/profile.d/magicdesk-graphics.sh
+[ ! -r /etc/profile.d/magicdesk-applications.sh ] || . /etc/profile.d/magicdesk-applications.sh
+case "$desktop" in
+    xfce)
+        unset WAYLAND_DISPLAY WAYLAND_SOCKET
+        export XDG_SESSION_TYPE=x11 XDG_CURRENT_DESKTOP=XFCE XDG_SESSION_DESKTOP=xfce
+        set -- xfce4-session "$@" ;;
+    weston)
+        export XDG_SESSION_TYPE=wayland
+        renderer=pixman
+        [ -z "${MAGICDESK_MESA_PREFIX:-}" ] || renderer=gl
+        mkdir -p -m 1777 /tmp/.X11-unix
+        set -- weston --backend=wayland --renderer="$renderer" --shell=desktop-shell.so --xwayland "$@" ;;
+    gnome)
+        export XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=GNOME
+        set -- gnome-shell --devkit "$@" ;;
+    plasma-x11|plasma-wayland)
+        export XDG_CURRENT_DESKTOP=KDE XDG_SESSION_DESKTOP=KDE KDE_FULL_SESSION=true KDE_SESSION_VERSION=6
+        unset WAYLAND_SOCKET
+        mkdir -p -m 1777 /tmp/.X11-unix
+        mkdir -p "$HOME/.config"
+        kwriteconfig6 --file startkderc --group General --key systemdBoot false
+        if [ "$desktop" = plasma-x11 ]; then
+            unset WAYLAND_DISPLAY
+            export XDG_SESSION_TYPE=x11 QT_QPA_PLATFORM=xcb
+            set -- startplasma-x11 "$@"
+        else
+            unset DISPLAY
+            export XDG_SESSION_TYPE=wayland QT_QPA_PLATFORM=wayland
+            if [ -n "${MAGICDESK_MESA_PREFIX:-}" ]; then
+                [ -r /etc/magicdesk/plasma-kwin.sh ] || {
+                    echo 'Complete Plasma Turnip setup before launching the Wayland desktop.' >&2; exit 1;
+                }
+                . /etc/magicdesk/plasma-kwin.sh
+                [ -x "$kwin_prefix/bin/kwin_wayland" ] || exit 1
+                export PATH="$kwin_prefix/bin:$PATH"
+                export LD_LIBRARY_PATH="$kwin_prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+                export QT_PLUGIN_PATH="$kwin_prefix/lib/qt6/plugins${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
+                export QML_IMPORT_PATH="$kwin_prefix/lib/qt6/qml${QML_IMPORT_PATH:+:$QML_IMPORT_PATH}"
+                export XDG_DATA_DIRS="$kwin_prefix/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+            else
+                # The stock nested compositor has no DRM output in this session.
+                export KWIN_COMPOSE=Q QT_QUICK_BACKEND=software
+            fi
+            set -- startplasma-wayland "$@"
+        fi ;;
+    *) echo "Unknown desktop: $desktop" >&2; exit 2 ;;
+esac
+# Reuse the launcher's bus. Direct guest-console launches get the same contract.
+if [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+    exec magicdesk-audio-session "$@"
+fi
+exec dbus-run-session -- magicdesk-audio-session "$@"
+DESKTOP
+}
+
 audio_session() {
     cat <<'AUDIO'
 #!/bin/bash
@@ -1797,6 +1852,8 @@ fi
 [[ $# != 0 ]] || { echo 'Expected desktop command.' >&2; exit 2; }
 [[ -n ${MAGICDESK_AUDIO_PULSE:-} ]] || exec "$@"
 [[ ${MAGICDESK_AUDIO_SESSION:-} != active ]] || exec "$@"
+# Native scheduling remains available; this session does not provide RTKit.
+export DISABLE_RTKIT=1
 host=$MAGICDESK_AUDIO_PULSE
 [[ $host == /* && $host != *$'\n'* && $host != *$'\r'* ]] || {
     echo 'Invalid Android audio endpoint.' >&2; exit 2;
@@ -1841,12 +1898,10 @@ cat > "$work/config/pipewire.conf.d/90-magicdesk.conf" <<CONFIG
 # The guest graph has no hardware clock or guaranteed real-time scheduling.
 # Keep a bounded scheduling budget even when a client requests a tiny quantum.
 context.properties = { default.clock.rate = 48000 default.clock.min-quantum = 1024 mem.allow-mlock = false }
-module.rt.args = { rtportal.enabled = false rtkit.enabled = false }
 context.exec = [ { path = /usr/local/bin/magicdesk-audio-session args = "--ready core" } ]
 CONFIG
 # Keep the remote tunnel in a client context, not a core-to-itself connection.
 cat > "$work/config/pipewire-pulse.conf.d/90-magicdesk.conf" <<CONFIG
-module.rt.args = { rtportal.enabled = false rtkit.enabled = false }
 pulse.properties = { pulse.min.req = 1024/48000 pulse.min.quantum = 1024/48000 }
 context.modules = [
   { name = libpipewire-module-pulse-tunnel args = {
@@ -1868,7 +1923,11 @@ context.exec = [ { path = /usr/local/bin/magicdesk-audio-session args = "--ready
 CONFIG
 cat > "$work/wp/wireplumber.conf.d/90-magicdesk.conf" <<'CONFIG'
 wireplumber.profiles = {
-  main = { monitor.alsa = disabled monitor.bluez = disabled monitor.v4l2 = disabled monitor.libcamera = disabled }
+  main = {
+    monitor.alsa = disabled monitor.alsa-midi = disabled
+    monitor.bluez = disabled monitor.bluez-midi = disabled
+    monitor.v4l2 = disabled monitor.libcamera = disabled
+  }
 }
 CONFIG
 export PIPEWIRE_RUNTIME_DIR=$work PULSE_RUNTIME_PATH=$work/pulse
@@ -2005,6 +2064,9 @@ STEAM_GAME
 
 system_setup() {
     distribution_support
+    printf "install_desktop_session() {\ncat > /usr/local/bin/magicdesk-desktop-session <<'MD_DESKTOP_SESSION'\n"
+    desktop_session
+    printf 'MD_DESKTOP_SESSION\nchmod 755 /usr/local/bin/magicdesk-desktop-session\n}\n'
     printf "install_audio_session() {\ncat > /usr/local/bin/magicdesk-audio-session <<'MD_AUDIO_SESSION'\n"
     audio_session
     printf 'MD_AUDIO_SESSION\nchmod 755 /usr/local/bin/magicdesk-audio-session\n}\n'
@@ -2019,8 +2081,7 @@ zone=$4
 new_user=$5
 fonts=$6
 cache=$7
-arch_sandbox=$8
-extras=$9
+extras=$8
 # Minimal images may need util-linux first; package managers own their bootstrap locks.
 setup_locked=no
 if command -v flock >/dev/null 2>&1; then
@@ -2054,14 +2115,14 @@ case "$family" in
         pacman-key --init </dev/null
         pacman-key --populate archlinuxarm </dev/null
         # Rolling repositories require a complete userspace upgrade, not pacman -Sy.
-        pacman_command -Syu --noconfirm
+        pacman -Syu --noconfirm </dev/null
         packages ca-certificates bash coreutils util-linux tzdata ;;
     recovery)
         # Keep the image's repository branch, keyring and signature policy.
         # This updates userspace packages, not Android or SteamOS A/B partitions.
         printf 'Updating SteamOS packages from the image repositories...\n'
         printf 'Kernel/service hooks may warn about the non-booted environment. Android is not updated.\n'
-        pacman_command -Syu --noconfirm
+        pacman -Syu --noconfirm </dev/null
         dbus-uuidgen --ensure ;;
 esac
 mkdir -p /var/lib/magicdesk /etc/profile.d /usr/local/bin /usr/local/share/applications
@@ -2109,14 +2170,31 @@ if [ -n "$new_user" ]; then
     fi
 fi
 
-if [ "$gui" != none ] && [ "$gui" != keep ]; then
+# Keep the selected desktops on resume, but refresh their shared launch services.
+gui_services=no
+if { [ "$gui" != none ] && [ "$gui" != keep ]; } || [ -x /usr/local/bin/magicdesk-audio-session ]; then
+    gui_services=yes
     case "$family" in
-        apt) packages pipewire pipewire-pulse wireplumber pipewire-alsa pulseaudio-utils ;;
-        apk) packages pipewire pipewire-pulse pipewire-tools wireplumber pipewire-alsa pulseaudio-utils ;;
-        dnf) packages pipewire pipewire-pulseaudio pipewire-utils wireplumber pipewire-alsa pulseaudio-utils ;;
-        pacman|recovery) packages pipewire pipewire-pulse wireplumber pipewire-alsa ;;
+        apt) packages pipewire pipewire-bin pipewire-pulse wireplumber pipewire-alsa pulseaudio-utils \
+            libsdl2-2.0-0 libudev1 libdecor-0-plugin-1-cairo ;;
+        apk) packages pipewire pipewire-pulse pipewire-tools wireplumber pipewire-alsa pulseaudio-utils \
+            sdl2 eudev-libs libdecor ;;
+        dnf) packages pipewire pipewire-pulseaudio pipewire-utils wireplumber pipewire-alsa pulseaudio-utils \
+            sdl2-compat systemd-libs libdecor ;;
+        pacman|recovery) packages pipewire pipewire-pulse wireplumber pipewire-alsa libpulse \
+            sdl2 systemd-libs libdecor ;;
     esac
     install_audio_session
+    install_desktop_session
+    [ "$family" = recovery ] || packages pavucontrol
+    if [ "$gui" = xfce ] || [ -f /usr/local/share/applications/magicdesk-xfce.desktop ]; then
+        packages xfce4-pulseaudio-plugin
+    fi
+    if [ "$gui" = plasma ] || [ -f /usr/local/share/applications/magicdesk-plasma-wayland.desktop ]; then
+        packages plasma-pa
+    fi
+fi
+if [ "$gui" != none ] && [ "$gui" != keep ]; then
     case "$family" in
         apt) packages dbus-x11 xkb-data adwaita-icon-theme mousepad thunar xfce4-terminal \
             libgl1-mesa-dri libegl-mesa0 libglx-mesa0 libegl1 libgl1 libgles2 ;;
@@ -2128,9 +2206,8 @@ if [ "$gui" != none ] && [ "$gui" != keep ]; then
     esac
     dbus-uuidgen --ensure
     case "$gui:$family" in
-        xfce:apt|xfce:apk) packages xfce4 ;;
+        xfce:apt|xfce:apk|xfce:pacman) packages xfce4 ;;
         xfce:dnf) packages xfce4-session xfce4-panel xfce4-settings xfce4-appfinder xfdesktop xfwm4 ;;
-        xfce:pacman) packages xfce4 ;;
         weston:apk) packages weston weston-shell-desktop weston-backend-wayland weston-clients weston-xwayland xwayland ;;
         weston:apt) packages weston xwayland ;;
         weston:dnf) packages weston xorg-x11-server-Xwayland ;;
@@ -2140,23 +2217,19 @@ if [ "$gui" != none ] && [ "$gui" != keep ]; then
             qml6-module-qtquick-layouts qml6-module-qtquick-window ;;
         gnome:dnf) packages gnome-shell mutter-devkit gnome-terminal nautilus gnome-text-editor ;;
     esac
-
-    # These sessions do not provide a privileged realtime scheduling service.
-    # Keep native scheduling checks; a desktop portal is not proof of RTKit.
+fi
+if [ "$gui_services" = yes ]; then
+    # Scheduling policy is launch-scoped, not a replacement for distro config.
     for config in client.conf client-rt.conf; do
-        mkdir -p "/etc/pipewire/$config.d"
-        cat > "/etc/pipewire/$config.d/90-magicdesk-scheduling.conf" <<'PIPEWIRE'
-module.rt.args = {
-    rtportal.enabled = false
-    rtkit.enabled = false
-}
-PIPEWIRE
+        rm -f "/etc/pipewire/$config.d/90-magicdesk-scheduling.conf"
     done
 
     # VLC's relocatable Linux build guesses its plugin directory from native
     # /proc/self/maps. Object-backed stores need its explicit search path.
     mkdir -p /etc/profile.d
     cat > /etc/profile.d/magicdesk-applications.sh <<'APPLICATIONS'
+# No realtime portal/RTKit service; PipeWire may still use native scheduling.
+export DISABLE_RTKIT=1
 if [ "${VLC_PLUGIN_PATH+x}" != x ]; then
     for _md_lib in /usr/lib /usr/lib64 /usr/lib/*-linux-gnu; do
         if [ -d "$_md_lib/vlc/plugins" ]; then
@@ -2168,6 +2241,8 @@ if [ "${VLC_PLUGIN_PATH+x}" != x ]; then
 fi
 APPLICATIONS
 
+fi
+if [ "$gui" != none ] && [ "$gui" != keep ]; then
     # Protocol-specific entries are ours; distribution/user launchers are never rewritten.
     for backend in x11 wayland; do
         apps='mousepad thunar terminal'
@@ -2187,101 +2262,6 @@ APPLICATIONS
                 "$title" "$backend" "$backend" "$cmd" "$icon" "$backend" > "$entry"
         done
     done
-    if [ "$gui" = xfce ]; then
-        cat > /usr/local/share/applications/magicdesk-xfce.desktop <<'ENTRY'
-[Desktop Entry]
-Type=Application
-Name=Xfce Desktop
-Exec=magicdesk-audio-session env XDG_CURRENT_DESKTOP=XFCE XDG_SESSION_DESKTOP=xfce xfce4-session
-Icon=org.xfce.xfdesktop
-Terminal=false
-Categories=System;
-X-MagicDesk-Graphics=x11
-X-MagicDesk-GraphicsMode=desktop
-ENTRY
-        command -v xfce4-session
-    fi
-    if [ "$gui" = weston ]; then
-        cat > /usr/local/bin/magicdesk-weston <<'LAUNCH'
-#!/bin/sh
-set -eu
-renderer=pixman
-[ -z "${MAGICDESK_MESA_PREFIX:-}" ] || renderer=gl
-mkdir -p -m 1777 /tmp/.X11-unix
-exec weston --backend=wayland --renderer="$renderer" --shell=desktop-shell.so --xwayland
-LAUNCH
-        chmod 755 /usr/local/bin/magicdesk-weston
-        cat > /usr/local/share/applications/magicdesk-weston.desktop <<'ENTRY'
-[Desktop Entry]
-Type=Application
-Name=Weston Desktop
-Exec=magicdesk-audio-session magicdesk-weston
-Icon=computer
-Terminal=false
-Categories=System;
-X-MagicDesk-Graphics=wayland
-X-MagicDesk-GraphicsMode=desktop
-ENTRY
-        command -v weston
-    fi
-    if [ "$gui" = gnome ]; then
-        cat > /usr/local/share/applications/magicdesk-gnome.desktop <<'ENTRY'
-[Desktop Entry]
-Type=Application
-Name=GNOME Shell (development kit)
-Exec=magicdesk-audio-session env XDG_CURRENT_DESKTOP=GNOME gnome-shell --devkit
-Icon=computer
-Terminal=false
-Categories=System;
-X-MagicDesk-Graphics=wayland
-X-MagicDesk-GraphicsMode=desktop
-ENTRY
-        command -v gnome-shell
-    fi
-    if [ "$gui" = plasma ]; then
-        cat > /usr/local/bin/magicdesk-plasma <<'LAUNCH'
-#!/bin/sh
-set -eu
-[ ! -r /etc/profile.d/magicdesk-graphics.sh ] || . /etc/profile.d/magicdesk-graphics.sh
-[ ! -r /etc/profile.d/magicdesk-applications.sh ] || . /etc/profile.d/magicdesk-applications.sh
-export XDG_CURRENT_DESKTOP=KDE XDG_SESSION_DESKTOP=KDE KDE_FULL_SESSION=true KDE_SESSION_VERSION=6
-unset QT_QUICK_BACKEND WAYLAND_SOCKET KWIN_NO_TIMER_QUERY
-mkdir -p -m 1777 /tmp/.X11-unix
-mkdir -p "$HOME/.config"
-kwriteconfig6 --file startkderc --group General --key systemdBoot false
-case "${1:-wayland}" in
-    x11)
-        unset WAYLAND_DISPLAY
-        export QT_QPA_PLATFORM=xcb KWIN_COMPOSE=O2
-        exec magicdesk-audio-session startplasma-x11 ;;
-    wayland)
-        unset DISPLAY
-        export QT_QPA_PLATFORM=wayland
-        if [ -n "${MAGICDESK_MESA_PREFIX:-}" ]; then
-            [ -r /etc/magicdesk/plasma-kwin.sh ] || {
-                echo 'Complete Plasma Turnip setup before launching the Wayland desktop.' >&2; exit 1;
-            }
-            . /etc/magicdesk/plasma-kwin.sh
-            [ -x "$kwin_prefix/bin/kwin_wayland" ] || exit 1
-            export PATH="$kwin_prefix/bin:$PATH"
-            export LD_LIBRARY_PATH="$kwin_prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-            export QT_PLUGIN_PATH="$kwin_prefix/lib/qt6/plugins${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
-            export QML_IMPORT_PATH="$kwin_prefix/lib/qt6/qml${QML_IMPORT_PATH:+:$QML_IMPORT_PATH}"
-            export XDG_DATA_DIRS="$kwin_prefix/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
-            export KWIN_COMPOSE=O2
-        else
-            export KWIN_COMPOSE=Q QT_QUICK_BACKEND=software
-        fi
-        exec magicdesk-audio-session startplasma-wayland ;;
-    *) echo 'Expected x11 or wayland.' >&2; exit 2 ;;
-esac
-LAUNCH
-        chmod 755 /usr/local/bin/magicdesk-plasma
-        for backend in x11 wayland; do
-            printf '[Desktop Entry]\nType=Application\nName=Plasma Desktop (%s)\nExec=magicdesk-plasma %s\nIcon=preferences-desktop\nTerminal=false\nCategories=System;\nX-MagicDesk-Graphics=%s\nX-MagicDesk-GraphicsMode=desktop\n' \
-                "$backend" "$backend" "$backend" > "/usr/local/share/applications/magicdesk-plasma-$backend.desktop"
-        done
-    fi
     if [ ! -e /etc/profile.d/magicdesk-graphics.sh ]; then
         printf 'export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe\n' > /etc/profile.d/magicdesk-graphics.sh
     fi
@@ -2290,6 +2270,24 @@ LAUNCH
         command -v thunar
         command -v xfce4-terminal
     fi
+fi
+
+if [ "$gui_services" = yes ]; then
+    # Refresh only installer-owned entries that exist or were explicitly selected.
+    for desktop in xfce weston gnome plasma-x11 plasma-wayland; do
+        entry=/usr/local/share/applications/magicdesk-$desktop.desktop
+        [ "$gui" = "${desktop%%-*}" ] || [ -f "$entry" ] || continue
+        case "$desktop" in
+            xfce) title='Xfce Desktop'; backend=x11; icon=org.xfce.xfdesktop; program=xfce4-session ;;
+            weston) title='Weston Desktop'; backend=wayland; icon=computer; program=weston ;;
+            gnome) title='GNOME Shell (development kit)'; backend=wayland; icon=computer; program=gnome-shell ;;
+            plasma-*) backend=${desktop#plasma-}; title="Plasma Desktop ($backend)"; icon=preferences-desktop; program=startplasma-$backend ;;
+        esac
+        command -v "$program"
+        printf '[Desktop Entry]\nType=Application\nName=%s\nExec=magicdesk-desktop-session %s\nIcon=%s\nTerminal=false\nCategories=System;\nX-MagicDesk-Graphics=%s\nX-MagicDesk-GraphicsMode=desktop\n' \
+            "$title" "$desktop" "$icon" "$backend" > "$entry"
+    done
+    rm -f /usr/local/bin/magicdesk-plasma /usr/local/bin/magicdesk-weston
 fi
 
 if [ "$fonts" != keep ]; then
@@ -2311,7 +2309,7 @@ if [ "$cache" = clean ]; then
         apt) apt-get clean ;;
         apk) rm -f /var/cache/apk/*.apk ;;
         dnf) dnf clean packages ;;
-        pacman) pacman_command -Sc --noconfirm ;;
+        pacman) pacman -Sc --noconfirm </dev/null ;;
     esac
 fi
 SETUP
@@ -2628,15 +2626,10 @@ recipe_defaults() {
     esac
 }
 gui_notice() {
-    case "$distro:$gui" in
-        fedora:none|arch:none) ;;
-        fedora:*|arch:*)
-            printf 'WARNING: Fedora/Arch GUI may fail in the Glycin/Bubblewrap image loader on Android.\n'
-            printf 'No image-loader or browser sandbox is disabled by this recipe.\n' ;;
-    esac
     [ "$gui" != gnome ] || printf 'GNOME devkit also needs a Linux system bus; this recipe does not boot one.\n'
 }
 if [ "$#" = 1 ] && [ "$1" = --print-mesa-patch ]; then mesa_patch; exit 0; fi
+if [ "$#" = 1 ] && [ "$1" = --print-desktop-session ]; then desktop_session; exit 0; fi
 if [ "$#" = 1 ] && [ "$1" = --print-audio-session ]; then audio_session; exit 0; fi
 if [ "$#" = 1 ] && [ "$1" = --print-steam-game ]; then steam_game; exit 0; fi
 if [ "$#" -ge 1 ] && [ "$1" = --print-kwin-patch ]; then
@@ -2657,7 +2650,6 @@ zone=
 new_user=
 fonts=
 cache=keep
-arch_sandbox=keep
 extras=
 yes=no
 resume=no
@@ -2666,13 +2658,13 @@ downloads=
 recovery_work=
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --distro|--name|--image|--downloads|--gui|--protocol|--gpu|--jobs|--locale|--timezone|--create-user|--fonts|--cache|--arch-sandbox|--package|--dns)
+        --distro|--name|--image|--downloads|--gui|--protocol|--gpu|--jobs|--locale|--timezone|--create-user|--fonts|--cache|--package|--dns)
             [ "$#" -ge 2 ] && [ -n "$2" ] || fail "Missing value for $1"
             case "$1" in
                 --distro) distro=$2 ;; --name) name=$2 ;; --image) image=$2 ;; --gui) gui=$2 ;;
                 --protocol) protocol=$2 ;; --gpu) gpu=$2 ;; --jobs) jobs=$2 ;; --locale) locale_name=$2 ;;
                 --timezone) zone=$2 ;; --create-user) new_user=$2 ;; --fonts) fonts=$2 ;;
-                --cache) cache=$2 ;; --arch-sandbox) arch_sandbox=$2 ;;
+                --cache) cache=$2 ;;
                 --package) extras="${extras:+$extras }$2" ;; --dns) dns=$2 ;;
                 --downloads) downloads=$2 ;;
             esac
@@ -2720,7 +2712,7 @@ if [ "$yes" = no ]; then
         [ "$distro" != steamos ] || default_fonts=keep
         ask 'Fonts: basic/cjk/keep' "$default_fonts"; fonts=$answer
     fi
-    ask 'Additional settings (guest user, protocol, packages, DNS, cache, Arch sandbox)? y/N' N
+    ask 'Additional settings (guest user, protocol, packages, DNS, cache)? y/N' N
     case "$answer" in
         y|Y|yes|YES)
             if [ -z "$new_user" ]; then ask 'Create guest user (empty = no new account)' ''; new_user=$answer; fi
@@ -2732,9 +2724,7 @@ if [ "$yes" = no ]; then
                 ask 'DNS: system; Private DNS/VPN needs explicit IPs (plain guest DNS)' system; dns=$answer
             fi
             if [ "$distro" != steamos ]; then ask 'Downloaded package cache: keep/clean' "$cache"; cache=$answer; fi
-            if [ "$distro" = arch ] || [ "$resume" = yes ]; then
-                ask 'Arch pacman filesystem sandbox: keep/disable-filesystem' "$arch_sandbox"; arch_sandbox=$answer
-            fi ;;
+            ;;
     esac
 fi
 name=${name:-${distro:-debian}}
@@ -2769,7 +2759,6 @@ if [ -n "$new_user" ]; then
 fi
 case "$fonts" in basic|cjk|keep) ;; *) fail 'Fonts must be basic, cjk or keep.' ;; esac
 case "$cache" in keep|clean) ;; *) fail 'Cache must be keep or clean.' ;; esac
-case "$arch_sandbox" in keep|disable-filesystem) ;; *) fail 'Invalid Arch sandbox policy.' ;; esac
 if [ -n "$extras" ]; then
     printf '%s\n' "$extras" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9+_.-]*( [A-Za-z0-9][A-Za-z0-9+_.-]*)*$' || fail 'Expected repository package names, not options or shell commands.'
 fi
@@ -2790,7 +2779,6 @@ if [ "$distro" = steamos ]; then
         && [ "$cache" = keep ] || fail 'SteamOS supports plasma/keep with supplied applications and fonts.'
 fi
 [ -n "$image" ] || image=$source
-[ "$distro" = arch ] || [ "$arch_sandbox" = keep ] || fail '--arch-sandbox is only applicable to Arch.'
 [ "$gui" != gnome ] || [ "$distro" = fedora ] || fail 'The GNOME devkit recipe currently requires Fedora 44. Use apps, Xfce or Weston on other distributions.'
 [ "$gui" != plasma ] || [ "$distro" = debian ] || [ "$distro" = steamos ] || fail 'The Plasma recipe requires Debian 13 or SteamOS 0.3.0.'
 [ "$gui" != none ] || [ "$gpu" = keep ] || fail 'Choose a GUI profile before installing graphics; use --gui keep for an existing GUI.'
@@ -2802,7 +2790,6 @@ printf 'Guest account=%s | extra packages=%s | package cache=%s\n' "${new_user:-
 if [ "$resume" = yes ]; then printf 'Continue the existing environment without replacing user data.\n'
 else printf 'Source: %s\nGuest DNS: %s\n' "$image" "$dns"; fi
 [ "$distro" != arch ] || printf 'Arch uses a community OCI image. Trust its publisher before continuing.\n'
-[ "$arch_sandbox" = keep ] || printf 'WARNING: pacman filesystem sandbox is explicitly disabled for this installation.\n'
 [ "$gui" != gnome ] || printf 'GNOME development kit is experimental; it is not a booted systemd/GDM desktop.\n'
 gui_notice
 if [ "$yes" = no ]; then
@@ -2829,9 +2816,8 @@ finish() {
         printf '\nInstallation stopped while %s (exit %s).\n' "$stage" "$status" >&2
         if [ "$ready" = yes ]; then
             printf 'Environment retained. Repeat your options with --name %s --resume (do not reinstall).\n' "$name" >&2
-            printf 'GUI=%s GPU=%s jobs=%s locale=%s timezone=%s fonts=%s arch-sandbox=%s\n' \
-                "$gui" "$gpu" "$jobs" "$locale_name" "$zone" "$fonts" "$arch_sandbox" >&2
-            [ "$distro" != arch ] || printf 'If pacman reports Landlock unsupported, an explicit --arch-sandbox disable-filesystem permits package setup without that sandbox.\n' >&2
+            printf 'GUI=%s GPU=%s jobs=%s locale=%s timezone=%s fonts=%s\n' \
+                "$gui" "$gpu" "$jobs" "$locale_name" "$zone" "$fonts" >&2
         else
             printf 'Inspect shroot list before retrying an interrupted installation.\n' >&2
         fi
@@ -2871,7 +2857,7 @@ shroot exec "$name" --user root -- /bin/sh -c '
 ready=yes
 stage='installing packages and guest settings'
 system_setup | shroot exec "$name" --user root --env DEBIAN_FRONTEND=noninteractive -- /bin/sh -s -- \
-    "$gui" "$protocol" "$locale_name" "$zone" "$new_user" "$fonts" "$cache" "$arch_sandbox" "$extras"
+    "$gui" "$protocol" "$locale_name" "$zone" "$new_user" "$fonts" "$cache" "$extras"
 
 if [ "$distro" = steamos ]; then
     stage='preparing the supplied Steam client'
@@ -2911,10 +2897,10 @@ if [ "$gpu" != keep ]; then
     recipe=$(graphics_setup | sha256sum)
     recipe=${recipe%% *}
     graphics_setup | shroot exec "$name" --user root --env DEBIAN_FRONTEND=noninteractive \
-        -- /bin/sh -s -- "$gpu" "$jobs" "$recipe" "$arch_sandbox"
+        -- /bin/sh -s -- "$gpu" "$jobs" "$recipe"
 fi
 
-if [ "$gui" = plasma ]; then
+if [ "$gui" = plasma ] || [ "$gpu" != keep ]; then
     stage='preparing the nested Plasma compositor'
     recipe=$(plasma_setup | sha256sum)
     recipe=${recipe%% *}
@@ -2929,6 +2915,8 @@ printf '\nNext steps:\n'
 if [ "$gui" != none ]; then
     printf 'In MagicDesk Control Panel, select a display and open Apps (Start).\n'
     printf 'Press Refresh beside the search field to load installed Linux entries.\n'
+    printf 'Audio connects to Android automatically. Desktop volume controls use their private PipeWire graph.\n'
+    printf 'Android gamepads are available in the focused Shroot window, on X11 and Wayland.\n'
 fi
 case "$gui" in
     none) printf 'No GUI was installed by this run. Use a terminal below.\n' ;;

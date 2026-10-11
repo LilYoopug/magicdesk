@@ -343,7 +343,7 @@ release tag when keeping an older MagicDesk version.
 The script itself asks for the distribution, independent environment name,
 GUI profile, graphics driver, locale, timezone and fonts. Additional questions
 cover an optional guest account, X11/Wayland application entries, extra packages,
-DNS, package-download cleanup and Arch's filesystem sandbox. The same choices
+DNS and package-download cleanup. The same choices
 are command-line options; `--yes` suppresses questions. `--list` is read-only.
 
 | Distribution | Source | GUI recipes |
@@ -368,12 +368,19 @@ default pacman sandbox uses Shroot's Landlock filesystem policy, independently
 of host kernel Landlock availability. Missing operations are not bypassed by
 silently disabling sandboxes.
 
+Every GUI profile installs PipeWire/Pulse client support, the ALSA plugin,
+SDL2, libudev and Wayland window decorations. Android audio and gamepads are
+provided by the shared Shroot launch services, without raw host input-device
+binds or extra controller daemons. Gamepad input follows the focused Android
+host. Desktop volume controls use a private guest PipeWire graph; Xfce and
+Plasma include their mixer integration. Individual applications connect directly
+to Android's audio service. See [audio](audio.md) and [gamepads](gamepads.md).
+
 Images and repository packages are trusted executable inputs, not sandboxed
 content. `--image REF` selects another OCI source of the same distribution and
 version; the guest architecture and OS are checked before package setup. Arch
 uses a community publisher and performs a complete rolling userspace upgrade.
-Package signing remains enabled; `--arch-sandbox disable-filesystem` is an
-explicit, reported pacman opt-out, not required by the tested stock Arch workflow.
+Package signing and pacman's default filesystem sandbox remain enabled.
 Package output and errors stay in the console.
 
 Package setup uses the guest root account, without granting Android root or
@@ -397,8 +404,10 @@ sh ~/install_linux.sh --name debian --resume --gui plasma --gpu turnip
 
 Existing names are never replaced. `--resume` explicitly continues package
 setup after detecting and validating the distribution. Without explicit options
-it preserves GUI entries, locale, timezone, fonts and graphics profile. It does
-not remove previously installed desktops when another profile is added. After an
+it preserves GUI selection, locale, timezone, fonts and graphics profile while
+refreshing installed GUI service dependencies, helper scripts and installer-owned
+desktop entries. It does not remove previously installed desktops when another
+profile is added or rewrite distribution/user launchers. After an
 interrupted image installation, inspect `shroot list` before choosing a
 new installation or resuming. A package failure leaves the environment available
 for diagnosis and retry.
@@ -545,14 +554,23 @@ APK dependency or system compositor replacement is involved. The recipe includes
 Debian's Plasma dependency minimum. Work stays in `/var/cache/magicdesk/kwin/`,
 and complete builds use immutable `/opt/magicdesk/kwin/` prefixes. Only the
 Wayland desktop launcher selects those libraries, plugins and executables.
-An unsuccessful KWin build retains the previous KWin selection. Explicit
-`--gui plasma` also prepares this path when adding Turnip to an existing desktop;
-`--gui keep` does not build a new compositor.
+An unsuccessful KWin build retains the previous KWin selection. Adding Turnip
+to an installed Plasma desktop also prepares its matching KWin adapter when
+`--gui keep` is selected; it does not install Plasma in an applications-only
+environment.
 
 ```sh
 sh ~/install_linux.sh --distro debian --name plasma --gui plasma --gpu turnip
 sh ~/install_linux.sh --name plasma --resume --gui plasma --gpu turnip
 ```
+
+All whole-desktop entries use `magicdesk-desktop-session MODE`, where MODE is
+`xfce`, `weston`, `gnome`, `plasma-x11` or `plasma-wayland`. It reads the current
+graphics/application profile, reuses a supplied D-Bus session (or starts one),
+and acquires the guest audio graph without replacing the launch's gamepad
+capability. The same helper can run in a prepared graphical console. Software
+Weston uses Pixman and software Plasma Wayland uses QPainter; the Turnip profile
+selects OpenGL Weston and the private KWin adapter.
 
 Plasma launches its classic session inside the selected graphical connection,
 without booting systemd or a system bus. Hardware-related KDE services may remain

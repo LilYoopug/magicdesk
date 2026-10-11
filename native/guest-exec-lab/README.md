@@ -705,7 +705,7 @@ Do not install this control in a guest login profile.
 
 For the nested Plasma check, build the exact `--print-kwin-patch` from the
 installer against its pinned archive in a private prefix. Use the installer's
-`magicdesk-plasma wayland` launcher under an ordinary guest account and the
+`magicdesk-desktop-session plasma-wayland` launcher under an ordinary guest account and the
 production graphical socket route. On an owned virtual display, verify actual
 desktop pixels, Dolphin, launcher input, Overview and resize. KWin's D-Bus
 `supportInformation` must report OpenGL and the intended GPU; the session bus
@@ -724,9 +724,15 @@ APK drivers.
 `test_installer.py --distro ID --name TEST_NAME --gui MODE` exercises the public
 installer through MagicDesk's shell executor. It checks package setup, locale,
 timezone, an ordinary guest account and settings persistence across resume.
-The named test environment is retained. `--resume` continues that fixture;
-`--arch-without-landlock` explicitly opts out of pacman's filesystem sandbox.
+GUI checks verify shared launcher syntax, PipeWire tools and SDL/libudev libraries.
+The named test environment is retained. `--resume` continues that fixture.
+`--library PATH` isolates its stores and cached images from other test environments.
 The test uses explicit guest DNS, not Android's encrypted resolver.
+
+`test_installer_audio.py --names TEST_NAME ... [--library PATH]` starts the
+installed audio wrapper, checks its private default sink and volume/mute changes
+during silent playback, then releases its processes. It does not change Android
+volume. Stream activation and property changes are observed through Pulse events.
 
 `test_installer_graphics.py --names TEST_NAME ...` launches the installer's
 catalog entries on an owned virtual display without Desktop. It records actual
