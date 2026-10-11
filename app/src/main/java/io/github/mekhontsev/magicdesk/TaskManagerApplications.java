@@ -9,12 +9,12 @@ import java.util.Set;
 
 /** Joins window and session catalogs; it owns neither and does not infer ownership from process names. */
 final class TaskManagerApplications {
-    sealed interface Target permits AndroidApp, Terminal, Tmux, X11 { }
+    sealed interface Target permits AndroidApp, Terminal, Tmux, Graphics { }
     record AndroidApp(TaskRepository.TaskEntry task) implements Target { }
     record Terminal(ConsoleTerminalRegistry.Snapshot session) implements Target { }
     record Tmux(TmuxSessionProvider.Session session) implements Target { }
-    record X11(X11Sessions.Session session) implements Target { }
-    record Entry(String id, String title, String detail, String packageName, Target target,
+    record Graphics(String sessionId) implements Target { }
+    record Entry(String id, String title, String detail, Target target,
             List<TaskRepository.TaskEntry> windows, Set<SystemProcessSnapshot.Identity> processes) { }
 
     static List<Entry> collect(Context context, List<TaskRepository.TaskEntry> tasks,
@@ -48,22 +48,13 @@ final class TaskManagerApplications {
             result.add(new Entry(server != null ? "tmux:" + server.id + ":" + server.createdSeconds : terminal.id,
                     title, server != null ? "tmux | " + server.windows + " windows | " + server.attachedClients + " clients"
                             : terminal.backend + " | " + terminal.workingDirectory,
-                    termux ? endpoint.packageName : context.getPackageName(),
                     server != null ? new Tmux(server) : new Terminal(terminal), windows,
                     processes.descendants(pids, uid)));
         }
-        for (var session : X11Sessions.list()) {
-            if (session.stopped()) continue;
-            final var ids = session.hostTaskIds();
-            final var windows = visible.stream().filter(t -> ids.contains(t.taskId)).toList();
-            for (var window : windows) claimed.add(window.taskId);
-            // Only the server has a published process identity; client totals remain separate processes.
-            final var server = processes.matching(p -> p.uid == session.execution.serverUid && p.name.equals(session.id()));
-            result.add(new Entry(session.id(), session.name,
-                    "X11 " + session.display() + " | " + session.state().name().toLowerCase(java.util.Locale.ROOT)
-                            + " | " + context.getString(R.string.task_manager_server_resources),
-                    session.execution.serverPackage, new X11(session), windows, server));
-        }
+        final var graphics = graphics(GraphicalSessions.list(), visible, processes,
+                context.getString(R.string.task_manager_server_resources));
+        result.addAll(graphics);
+        for (var entry : graphics) for (var window : entry.windows()) claimed.add(window.taskId);
         for (var task : visible) {
             if (claimed.contains(task.taskId)) continue;
             String label = task.packageName;
@@ -76,11 +67,29 @@ final class TaskManagerApplications {
             final String title = TaskTitle.resolve(context, null, task);
             result.add(new Entry("task:" + task.userId + ":" + task.taskId,
                     title.equals(task.packageName) ? label : title, task.packageName + " | " + task.windowingMode,
-                    task.packageName, new AndroidApp(task), List.of(task),
+                    new AndroidApp(task), List.of(task),
                     processes.matching(p -> p.uid == owner && (p.name.equals(task.packageName)
                             || p.name.startsWith(task.packageName + ":")))));
         }
         result.sort(java.util.Comparator.comparing(Entry::title, String.CASE_INSENSITIVE_ORDER).thenComparing(Entry::id));
+        return List.copyOf(result);
+    }
+
+    static List<Entry> graphics(List<GraphicalSessions.Session> sessions,
+            List<TaskRepository.TaskEntry> tasks, ProcessCatalog processes, String resourceLabel) {
+        final var result = new ArrayList<Entry>();
+        for (var session : sessions) {
+            if (session.stopped()) continue;
+            final var ids = new HashSet<Integer>();
+            for (var host : session.hosts()) ids.add(host.taskId());
+            final var windows = tasks.stream().filter(t -> ids.contains(t.taskId)).toList();
+            final int uid = session.identity().serverUid();
+            // Both backends publish their unique session ID as the server process name.
+            final var server = processes.matching(p -> p.uid == uid && p.name.equals(session.id()));
+            result.add(new Entry(session.id(), session.name(), session.protocol() + " | "
+                    + session.state().toLowerCase(java.util.Locale.ROOT) + " | " + resourceLabel,
+                    new Graphics(session.id()), windows, server));
+        }
         return List.copyOf(result);
     }
     private TaskManagerApplications() { }

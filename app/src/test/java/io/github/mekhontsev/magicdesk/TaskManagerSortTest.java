@@ -20,9 +20,9 @@ public final class TaskManagerSortTest {
             assertEquals(List.of(large,small,unknown),List.of(unknown,small,large).stream().sorted(sort.processes()).toList());
     }
     @Test public void applicationsShareOrderingButUseAggregatedResources() {
-        var a=new TaskManagerApplications.Entry("a","Alpha","","",null,List.of(),Set.of());
-        var b=new TaskManagerApplications.Entry("b","beta","","",null,List.of(),Set.of());
-        var u=new TaskManagerApplications.Entry("u","Unknown","","",null,List.of(),Set.of());
+        var a=new TaskManagerApplications.Entry("a","Alpha","",null,List.of(),Set.of());
+        var b=new TaskManagerApplications.Entry("b","beta","",null,List.of(),Set.of());
+        var u=new TaskManagerApplications.Entry("u","Unknown","",null,List.of(),Set.of());
         var resources=Map.of("a",new SystemMonitorRepository.Resources(1,10),
                 "b",new SystemMonitorRepository.Resources(5,100),"u",SystemMonitorRepository.Resources.UNKNOWN);
         assertEquals(List.of(a,b,u),List.of(u,b,a).stream().sorted(TaskManagerSort.NAME.applications(e->resources.get(e.id()))).toList());

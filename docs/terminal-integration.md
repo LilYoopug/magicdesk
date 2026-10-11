@@ -141,8 +141,8 @@ Discovery runs on demand, and missing Termux access does not hide local terminal
 
 The header dropdown shows the session's existing window or attaches a window on
 the Control Panel's own display; the Apps launcher uses its selected display.
-An empty dropdown still offers **New session**. A console dropdown switches the current window to the selected
-session without changing its task or geometry. Transferring a session from another
+An empty dropdown still offers **New session**. A console dropdown switches the
+current window to the selected session without changing its task or geometry. Transferring a session from another
 window requires confirmation and leaves that window empty. Each PTY has one input
 and resize owner; switching retains the previous PTY, output and history. Session
 IDs are independent of window IDs, including notification and automation targets.

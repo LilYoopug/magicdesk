@@ -1,12 +1,11 @@
 package io.github.mekhontsev.magicdesk;
 
 import android.app.Activity;
-import android.app.AlertDialog;
-import android.content.Intent;
 import android.view.View;
 import android.widget.PopupMenu;
 import android.widget.Toast;
 import java.io.IOException;
+import java.util.List;
 import java.util.function.Consumer;
 
 /** UI actions use each resource owner's existing lifecycle, never package-wide substitutes. */
@@ -37,14 +36,7 @@ final class TaskManagerActions {
                     }
                     TerminalSessions.open(activity, TerminalSessions.tmuxIntent(activity, live, snapshot), target, null, this::result);
                 }));
-            } else if (entry.target() instanceof TaskManagerApplications.X11 x11) {
-                if (X11Sessions.find(x11.session().id()) != x11.session() || x11.session().stopped())
-                    throw new IOException("X11 session has ended");
-                final Intent intent = X11Activity.windowIntent(activity, x11.session(), 0)
-                        .putExtra(X11Activity.APPLICATION, x11.session().application);
-                ToolApplications.open(activity, intent, target, null,
-                        DesktopLaunchPresentation.automatic().withInstancePolicy(DesktopTaskInstancePolicy.CREATE_NEW), this::result);
-            }
+            } else if (entry.target() instanceof TaskManagerApplications.Graphics graphics) openGraphics(graphics.sessionId());
         } catch (IOException | RuntimeException error) { result(error); }
     }
 
@@ -52,7 +44,8 @@ final class TaskManagerActions {
         final PopupMenu menu = new PopupMenu(activity, anchor);
         add(menu, R.string.task_manager_focus, () -> open(entry));
         if (!entry.windows().isEmpty()) add(menu, R.string.task_manager_close, () -> chooseWindow(entry, WindowAction.CLOSE));
-        if (entry.target() instanceof TaskManagerApplications.X11 && !entry.windows().isEmpty())
+        if (entry.target() instanceof TaskManagerApplications.Graphics
+                && !windows(entry, WindowAction.FORCE_STOP).isEmpty())
             add(menu, R.string.task_manager_force_stop, () -> chooseWindow(entry, WindowAction.FORCE_STOP));
         if (!entry.processes().isEmpty()) add(menu, R.string.task_manager_processes, () -> processes.accept(entry));
         if (entry.target() instanceof TaskManagerApplications.AndroidApp app) {
@@ -81,24 +74,65 @@ final class TaskManagerActions {
                 ConsoleTerminalRegistry.close(terminal.session().id);
             else if (entry.target() instanceof TaskManagerApplications.Tmux tmux) {
                 TmuxSessionProvider.end(activity, tmux.session(), this::result); return;
-            } else if (entry.target() instanceof TaskManagerApplications.X11 x11) {
-                if (X11Sessions.find(x11.session().id()) == x11.session()) x11.session().close();
+            } else if (entry.target() instanceof TaskManagerApplications.Graphics graphics) {
+                final var session = GraphicalSessions.find(graphics.sessionId());
+                if (session != null && !session.stopped()) session.close();
             }
             refresh.run();
         } catch (RuntimeException error) { result(error); }
     }
 
+    static GraphicalSessions.Session requireGraphics(String id) {
+        final var session = GraphicalSessions.find(id);
+        if (session == null || session.stopped()) throw new IllegalStateException("Graphical session has ended");
+        if (!session.ready()) throw new IllegalStateException("Graphical session is not ready");
+        return session;
+    }
+
+    static List<GraphicalSessions.Window> applicationWindows(GraphicalSessions.Session session) {
+        return session.windows().stream().filter(GraphicalSessions.Window::mapped).toList();
+    }
+
+    private void openGraphics(String id) {
+        final var session = requireGraphics(id);
+        if (!session.application() && session.desktop()) { openGraphicsWindow(id, 0); return; }
+        final var windows = applicationWindows(session);
+        if (windows.isEmpty()) throw new IllegalStateException("Graphical session has no mapped application windows");
+        if (windows.size() == 1) { openGraphicsWindow(id, windows.get(0).id()); return; }
+        final String[] labels = windows.stream().map(window -> window.title().isBlank()
+                ? session.protocol() + " " + Long.toUnsignedString(window.id()) : window.title()).toArray(String[]::new);
+        UiDialogs.builder(activity).setTitle(R.string.graphics_windows)
+                .setItems(labels, (dialog, which) -> openGraphicsWindow(id, windows.get(which).id()))
+                .setNegativeButton(android.R.string.cancel, null).show();
+    }
+
+    private void openGraphicsWindow(String id, long window) {
+        try {
+            final var session = requireGraphics(id);
+            if (window != 0 && applicationWindows(session).stream().noneMatch(item -> item.id() == window))
+                throw new IllegalStateException("Graphical window has closed");
+            ToolApplications.openSibling(activity, session.windowIntent(activity, window), this::result);
+        } catch (RuntimeException error) { result(error); }
+    }
+
     private void chooseWindow(TaskManagerApplications.Entry entry, WindowAction action) {
-        if (entry.windows().size() == 1) { window(entry.windows().get(0), action); return; }
-        final String[] names = entry.windows().stream().map(t -> TaskTitle.resolve(activity, null, t)
+        final var windows = windows(entry, action);
+        if (windows.isEmpty()) { result(new IOException("No available windows")); return; }
+        if (windows.size() == 1) { window(windows.get(0), action); return; }
+        final String[] names = windows.stream().map(t -> TaskTitle.resolve(activity, null, t)
                 + " [" + t.displayId + "] #" + t.taskId).toArray(String[]::new);
         UiDialogs.builder(activity).setTitle(switch (action) {
                     case OPEN -> R.string.task_manager_focus;
                     case CLOSE -> R.string.task_manager_close;
                     case FORCE_STOP -> R.string.task_manager_force_stop;
                 })
-                .setItems(names, (d, i) -> window(entry.windows().get(i), action))
+                .setItems(names, (d, i) -> window(windows.get(i), action))
                 .setNegativeButton(android.R.string.cancel, null).show();
+    }
+
+    private static List<TaskRepository.TaskEntry> windows(TaskManagerApplications.Entry entry, WindowAction action) {
+        return action == WindowAction.FORCE_STOP ? entry.windows().stream()
+                .filter(task -> BuiltInWindowRegistry.forceCloseAction(task) != null).toList() : entry.windows();
     }
 
     private void window(TaskRepository.TaskEntry task, WindowAction action) {

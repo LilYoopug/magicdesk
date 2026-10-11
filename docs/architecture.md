@@ -1865,18 +1865,23 @@ requests use a typed counter snapshot without enumerating processes.
 `SystemMonitorReader` publishes bounded procfs snapshots through the existing
 privileged service. `SystemMonitorRepository` calculates rates between samples;
 `ProcessCatalog` projects identities and process trees without knowing about
-Android windows, Termux, or X11. Identity is PID, UID and process start ticks,
-never a command name. Exited processes and failed observations discard old
+Android windows, Termux, or graphical protocols. Identity is PID, UID and process
+start ticks, never a command name. Exited processes and failed observations discard old
 counters. Inaccessible processes remain explicitly reported as incomplete
 observation, not zero consumption.
 
 `TaskManagerApplications` joins Android tasks, retained PTYs, tmux sessions and
-X11 sessions without taking ownership of their lifetimes. Session host tasks are
-claimed once; multiple tmux clients remain one session entry. Android resource
+X11/Wayland sessions through `GraphicalSessions`, without taking ownership of their
+lifetimes. Session host tasks are claimed once; multiple tmux clients remain one
+session entry. Android resource
 figures are package-process totals and can be shared by multiple windows. tmux
-resources come from pane processes and their same-UID descendants. X11 entries
+resources come from pane processes and their same-UID descendants. Graphical entries
 label server-only resources; clients remain visible in Processes. The Termux
 filter includes processes started outside MagicDesk as well.
+Graphical targets retain session IDs and re-resolve their owners before acting.
+Hostless sessions reopen a whole-desktop viewer or a selected mapped client;
+client selection is revalidated before launch. Force-close availability comes
+from each Android host's existing close contract, not its graphical protocol.
 Applications and Processes share name, CPU and memory ordering through
 `TaskManagerSort`; processes additionally offer PID ordering and a collapsible
 tree. Resource sorts place unknown samples last and use stable identity/name
@@ -2224,9 +2229,9 @@ closes, even if executor teardown discards its queued work. No additional thread
 or periodic query is involved. A resize received while the transport opens is
 applied to the PTY before sending input queued during startup.
 The registry delegates its optional Activity/View binding to
-`TerminalWindowAttachment`. Replacement revokes the previous surface before
-finishing its window; a stale Activity cannot detach a replacement. Attachment
-generations remain observable by automation. Notification throttling and cleanup
+`TerminalWindowAttachment`. Replacement revokes the previous surface and leaves
+its window in an empty selection state; a stale Activity cannot detach a
+replacement. Attachment generations remain observable by automation. Notification throttling and cleanup
 belong to `TerminalNotifications.Session`, including while the PTY has no window.
 Neither component owns or replaces the terminal transport.
 The local [`terminal-emulator`](../terminal-emulator/README.md) module, based on
@@ -2409,9 +2414,11 @@ absent tmux executable from an empty tmux server, validates session ids and
 names, and constructs quoted attach or create commands. A selected session is
 then opened through the ordinary Termux Console path with explicit tmux identity.
 `TerminalSessions` merges local terminals and server sessions using live tmux
-client PIDs; `TerminalSessionsDialog` is shared by the control panel and both
-console toolbars. A console switches the single `TerminalWindowAttachment` in its
-existing task; transfer releases the former host into an empty selection state.
+client PIDs; `TerminalSessionsDialog` is shared by the control panel's header,
+Start's Terminal sessions entry and both console toolbars. The header targets
+its own screen; Start retains its selected launch destination. An empty picker
+still offers creation. A console switches the single `TerminalWindowAttachment`
+in its existing task; transfer releases the former host into an empty selection state.
 Recreation restores a retained identity without replaying commands or reclaiming
 a session transferred to another task. PTY exit releases the binding, not the
 window. Reopening a live client from outside a console presents its existing window; closing

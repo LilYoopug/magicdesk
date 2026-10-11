@@ -66,8 +66,13 @@ preference through [XSettings and the Settings portal](linux-appearance.md).
 This follows the Android system theme, including its temporary Desktop override,
 not the shell's independent palette. Whole Linux desktops retain their own settings.
 
-Appearance does not restyle third-party applications, their captions, arbitrary
-Android dialogs or terminal protocol colors. Widget bindings, Android
+Terminal default foreground, background and cursor colors follow the host's
+resolved light/dark mode. Explicit ANSI/RGB and OSC palette choices remain under
+the terminal application's control; [terminal integration](terminal-integration.md)
+describes color queries and mode-change notifications.
+
+Appearance does not restyle third-party applications, their captions or arbitrary
+Android dialogs. Widget bindings, Android
 application identities and permissions are independent. The **Android** section's
 **System theme during Desktop** is a separate, temporary system-wide preference.
 It is shared by all Desktop workspaces, independently of the appearance scope,

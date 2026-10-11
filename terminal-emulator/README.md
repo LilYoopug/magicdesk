@@ -9,6 +9,9 @@ commit `5b657c6adf4304e5198951ce815fe0205dcac29c`.
 The module owns escape-sequence parsing, screen/scrollback buffers, cell styles,
 Unicode widths, key encoding and terminal graphics placement. MagicDesk maintains
 it locally, including OSC 8/9/133, Sixel and Kitty support.
+Host-supplied default colors are separate from application palette overrides.
+The parser owns light/dark queries (DSR 996/997) and DEC mode 2031 notifications;
+the Android host supplies the resolved mode without resetting terminal state.
 
 PTY processes, Android windows, rendering, clipboard policy and user actions
 belong to the application. The module has no JNI library or dependency on an

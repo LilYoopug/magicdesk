@@ -200,8 +200,9 @@ Import/export a [JSON theme](docs/appearance.md) or a ZIP containing its icons,
 fonts and media. The same validated document and preview workflow are available
 through Settings, MCP and the CLI, with an exported JSON Schema. MagicDesk's
 windows also publish their palette to Android's native captions; firmware decides
-how to render those decorations. Themes do not restyle third-party apps or
-terminal content. **System theme during Desktop** is a separate Android-wide
+how to render those decorations. Terminal default colors follow the host's
+light/dark mode; application-selected terminal colors remain unchanged.
+Themes do not restyle third-party apps. **System theme during Desktop** is a separate Android-wide
 setting; individual Linux applications receive Android's light/dark preference.
 
 ## Tools Without Desktop
@@ -210,6 +211,8 @@ Open **Apps** from Phone Control Panel to launch Files, other applications or a
 terminal on the phone or a selected display. No Desktop setup is needed: tools use ordinary fullscreen
 Activities outside a managed session and the existing window controller inside
 one. Opening a tool does not acquire HOME.
+The terminal button beside Settings opens the shared session picker on the
+control panel's screen; **Apps > Terminal sessions** uses Start's selected display.
 
 ### Files And Content
 
@@ -291,6 +294,9 @@ See Android applications, retained terminals, tmux and X11/Wayland sessions in o
 process trees and a Termux filter. Sort by name, CPU or memory, find a busy
 process, return to its window or end a session explicitly. Available process
 details and actions depend on the connected service's permissions.
+X11 and Wayland rows group each session's Android windows and report server-only
+resources. Sessions remain listed without a viewer; reopening presents a live
+application window or the session's whole-desktop viewer.
 
 ## Linux Applications
 
@@ -435,8 +441,8 @@ After installation:
 - **Applications:** open **Apps** in MagicDesk's control panel, press **Refresh**
   beside the search field, then select an installed entry such as
   **Mousepad (x11)** or **Mousepad (wayland)**.
-- **Whole Linux desktop:** if you selected the `xfce` or `weston` profile,
-  open **Xfce Desktop** or **Weston Desktop** from that same list. The default
+- **Whole Linux desktop:** open **Xfce Desktop**, **Weston Desktop** or
+  **Plasma Desktop** from that same list for the corresponding installer profile. The default
   `apps` profile installs individual applications, not a whole desktop.
 - **Terminal:** choose **Terminal sessions > New session > Shroot environments**
   and your environment, or run `shroot login NAME` in a Shell console,
@@ -714,8 +720,9 @@ the independent tools.
    and authorize MagicDesk, or select
    **Root (su)** in **Settings > Integrations**, reopen MagicDesk and approve the
    root request. Termux is optional and has its own permission setup.
-3. Use **Apps** for Files and other applications. Its **Terminal sessions** entry
-   creates or opens Android-shell, Termux and tmux terminals without Desktop.
+3. Use **Apps** for Files and other applications. The terminal button beside
+   Settings and **Apps > Terminal sessions** share the picker for Android-shell,
+   Termux and tmux terminals, without Desktop.
 4. For Desktop, open **Settings > Device setup**, complete the required changes,
    and reboot only when setup requests it. Restart Shizuku afterward as needed.
 5. Find the phone, a connected display, or one created through **Create display**
@@ -832,6 +839,11 @@ Network MCP uses HTTP, not TLS. Enable it only on a trusted network or through a
 protected VPN/tunnel; do not expose it directly to the Internet. Grant only the
 access the client needs. Accepted actions may continue after a grant is revoked.
 
+The [external command API](docs/run-command.md) has a separate Android permission
+and a local opt-in, disabled by default. Grant it only to trusted apps; it can
+execute commands under the selected shell/root or Termux identity independently
+of MCP grants.
+
 See [Privilege boundaries](docs/privilege-modes.md) and
 [third-party notices](THIRD_PARTY_NOTICES.md).
 
@@ -903,7 +915,7 @@ git submodule update --init --recursive
 ```
 
 Host builds do not replace device testing. Native helpers are currently ARM64;
-Remaining API 34 native validation and other ABIs are tracked in the
+remaining API 34 native validation and other ABIs are tracked in the
 [validation plan](docs/testing-backlog.md).
 
 > **Development note:** MagicDesk is a vibe-coded project, built primarily through
@@ -916,9 +928,14 @@ Remaining API 34 native validation and other ABIs are tracked in the
 - [Getting started](docs/getting-started.md)
 - [Workstation tools](docs/workstation-tools.md)
 - [Terminal integration](docs/terminal-integration.md)
+- [External command API](docs/run-command.md)
+- [Shroot and Linux installation](docs/shroot.md)
 - [Embedded X11 and Linux applications](docs/x11.md)
 - [Embedded Wayland](docs/wayland.md)
 - [Shared graphics](docs/graphics.md)
+- [Linux audio](docs/audio.md)
+- [Linux gamepads](docs/gamepads.md)
+- [Linux appearance](docs/linux-appearance.md)
 - [Shell layout and Linux panels](docs/shell-layout.md)
 - [Native appearance and theme format](docs/appearance.md)
 - [Architecture](docs/architecture.md)

@@ -290,7 +290,7 @@ neither is an installed FD. Unrecognized terminal state remains unknown. This
 adds one option update on first capture and an exit event for participating
 tasks, not additional per-IO stops or cleanup injection into a dying task.
 See [publication ordering](process-resources.md#publication-ordering) for lifetime
-rules and the remaining inherited/native/general-SCM_RIGHTS boundaries.
+rules, inherited/native provenance limits and adapted SCM_RIGHTS origin transport.
 Directory reads validate and enumerate through one namespace operation without a
 preliminary metadata RPC. A reusable 64 KiB worker buffer bounds output independently
 of the RPC frame, with no per-read allocation. The engine's synchronous output callback runs after

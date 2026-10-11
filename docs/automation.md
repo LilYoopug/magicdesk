@@ -19,8 +19,9 @@ and graphics services. It has its own Android permission and local opt-in;
 it does not consume MCP grants or expose the automation tool catalog.
 
 Native [appearance](appearance.md) has shared schema, validation, read/apply,
-preview/confirm/cancel, preset and reset operations. Version 4 describes 1-4
-native panels on any edge and shared background opacity and blur, with optional
+preview/confirm/cancel, preset and reset operations. Version 6 describes light/dark
+mode and per-tone palettes, semantic control styles, 1-4 native panels on any edge,
+and shared background opacity and blur, with optional
 per-panel overrides, Start composition, media and AGSL wallpaper resources, motion
 and opt-in device-signal bindings. Optional `workspaceKey` selects a stable workspace
 identity, not a display ID or live residency ID; omission selects global defaults.

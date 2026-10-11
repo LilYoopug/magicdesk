@@ -44,6 +44,7 @@ final class GraphicalSessions {
         HostedWindowPresentation presentation();
         default Application redirect() { return null; }
         default boolean desktop() { return false; }
+        default boolean application() { return !desktop(); }
         default boolean canIntegrateShell() { return false; }
         default AutoCloseable bindShell(DesktopShellActivity host, java.util.function.Consumer<String> ended) {
             throw new UnsupportedOperationException("Shell integration is unavailable for this session");
@@ -137,6 +138,7 @@ final class GraphicalSessions {
         public boolean stopped() { return session.stopped(); }
         public boolean canExecute() { return session.canExecuteHostCommand(); }
         public boolean desktop() { return true; }
+        public boolean application() { return session.application; }
         public boolean canIntegrateShell() { return !session.application; }
         public AutoCloseable bindShell(DesktopShellActivity host, java.util.function.Consumer<String> ended) {
             var binding = session.bindShell(host.panels().shellScope(), host.getResources().getDisplayMetrics().densityDpi, ended);

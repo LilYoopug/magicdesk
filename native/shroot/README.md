@@ -73,19 +73,23 @@ X_OK does not reproduce all kernel execution/LSM checks. The adapter rejects
 Supporting a caller of that interface requires validating the actual kernel ABI
 and routing checks to the backing FD under the existing identity.
 
-Unselected syscalls retain host semantics. General mount/cgroup/container
-isolation and all Linux syscall entry points are not virtualized. Guest seccomp
-filters remain installed; browser execution does not establish native-Linux
-sandbox equivalence. Permission denials never authorize fallback to root.
+Unselected syscalls retain host semantics. Logical mount namespaces, overlay and
+private devpts views, guest namespace identities, routed IPv4 and permissive
+cgroup membership implement the bounded contracts in
+[process resources](process-resources.md); they do not create host kernel
+namespaces or enforce host cgroup resource limits. Not every Linux syscall is
+virtualized. Guest seccomp filters remain installed; browser execution does not
+establish native-Linux sandbox equivalence. Permission denials never authorize fallback to root.
 Missing guest capabilities leave other MagicDesk services available.
 
 ## Unix Client Transport
 
 Pathname sockets in the inode namespace have logical names and unique abstract
-kernel endpoints. Bind publication is transactional; connected payloads,
-SCM_RIGHTS and mmap remain native. Store-scoped Unix credentials follow the
-separate credential authority. Direct-backend pathname bind is unsupported on
-the tested shell domain.
+kernel endpoints. Bind publication is transactional; connected payloads and mmap
+use native kernel objects. Adapted ancillary transfers preserve descriptor origins
+through authenticated capsules; native peers retain native transport. Store-scoped
+Unix credentials follow the [credential authority](ipc-credentials.md).
+Direct-backend pathname bind is unsupported on the tested shell domain.
 
 Explicit socket routes translate selected addresses to the executor's graphical
 admission endpoint without proxying payloads or changing descriptor identity.

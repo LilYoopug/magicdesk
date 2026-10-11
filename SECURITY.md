@@ -51,6 +51,13 @@ sandbox. See [the README security section](README.md#security) and
 Suspected bypasses of authentication, permissions or those boundaries belong
 in a private security report.
 
+The optional [external command API](docs/run-command.md) delegates command
+execution to Android apps granted MagicDesk's `RUN_COMMAND` permission while
+the local opt-in is enabled. It is independent of MCP authorization and disabled
+by default. Grant it only to trusted apps: the chosen executor can have shell or
+root authority. Launcher exports authorize a retained entry, not arbitrary
+commands supplied by its caller.
+
 Shroot runs trusted Linux programs with the selected shell/root executor's
 authority. Its guest users, virtual root, OCI layers and browser-filter support
 do not make it a container security boundary. A guest program can reach Android

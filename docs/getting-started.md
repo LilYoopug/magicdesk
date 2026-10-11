@@ -60,6 +60,10 @@ capability separately from missing setup.
 
 ## Open Tools
 
+The terminal button beside Settings opens **Terminal sessions** on the control
+panel's own screen. It shares the picker with console toolbars and Apps, and
+offers **New session** even when no sessions exist.
+
 Open **Apps** in the control panel, then choose an application or **Terminal
 sessions**. The selector beside Start search defaults to **Current**, the screen
 containing Start. Select another display there to launch on it.
@@ -187,7 +191,8 @@ entries with `(x11)` and/or `(wayland)` suffixes according to the selected proto
 Choose one of these entries to run an individual application.
 
 For a whole Linux desktop in one viewer, open **Xfce Desktop** with the `xfce`
-profile or **Weston Desktop** with `weston`. Fedora's `gnome` profile adds
+profile, **Weston Desktop** with `weston`, or **Plasma Desktop** with `plasma`
+on Debian or SteamOS. Fedora's `gnome` profile adds
 **GNOME Shell (development kit)**; it remains experimental and needs a working
 Linux system bus. The `apps` profile does not install a whole desktop, and `none`
 installs console tools only. See the [profile limits](shroot.md#linux-installer).

@@ -150,6 +150,10 @@ Every retained Console session owns an independent process attached to a real
 pseudo-terminal. A window is its optional presentation, not its lifetime owner.
 Closing an ordinary window detaches it; **Terminal sessions** can reattach the
 same PTY.
+The control panel's terminal button, **Apps > Terminal sessions** and console
+toolbars share one picker. A console can switch sessions in its existing window
+without restarting a PTY. Moving an attachment between windows leaves the former
+window ready for another selection.
 **End session**, shell exit, transport failure or runtime exit terminates it.
 Sessions survive Close Desktop but not MagicDesk process death or APK replacement.
 Managed tmux connections have a different close contract: only the client PTY
@@ -172,6 +176,10 @@ The shared renderer also supports Nerd Font glyphs, clickable links, shell-marke
 command history, static Sixel/Kitty images and fractional local-history scrolling.
 See [Terminal integration](terminal-integration.md) for protocols, touch selection,
 image export and the limits of smooth scrolling inside terminal applications.
+Default foreground, background and cursor colors follow the host's resolved
+light/dark mode. Explicit terminal palette overrides and application-selected
+colors retain their protocol meaning; theme-aware applications can subscribe
+to mode changes.
 
 Swipe with one finger or use the mouse wheel to scroll. In the ordinary shell,
 this reads scrollback; in a mouse-aware application such as tmux, it sends wheel
@@ -309,7 +317,7 @@ taskbar, and can be selected from the control panel's display row actions.
 
 Task Manager provides:
 
-- Android tasks, retained terminals, tmux and X11 sessions in Applications;
+- Android tasks, retained terminals, tmux and X11/Wayland sessions in Applications;
 - process trees with name, CPU, RSS memory and PID sorting, plus a Termux filter
   that also includes processes started outside MagicDesk;
 - exact-task focus/close and explicit session termination through their owners;
@@ -318,9 +326,13 @@ Task Manager provides:
 
 Application rows can be sorted by name, CPU and memory too. CPU uses 100 percent
 per core for a process/session; RSS can include shared memory. Unknown samples
-are not reported as zero. X11 session figures cover the server, while its client
+are not reported as zero. X11/Wayland session figures cover the server, while client
 processes remain visible in Processes. Resource sampling stops when the tool
 is no longer visible; Task Manager does not require Desktop.
+Each graphical row groups the session's Android hosts without duplicate Android
+rows. A retained session without a host can reopen its whole-desktop viewer or
+a mapped application window. Closing a viewer and ending its session are separate
+actions; force-close is offered only by hosts that support it.
 
 The desktop also integrates:
 

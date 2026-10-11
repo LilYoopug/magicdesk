@@ -403,6 +403,22 @@ provide MagicDesk with structured launch metadata or a dynamic destination
 display. Use a MagicDesk-generated shortcut or `X-MagicDesk-Intent` when native
 desktop window placement matters.
 
+## Android Launcher Exports
+
+A saved Linux catalog entry can be exported as an Android launcher application
+from its entry actions. MagicDesk builds and signs a small launcher APK locally; Android
+asks the user to install it. It then appears in ordinary Android launchers.
+Removing the export uses Android's uninstall confirmation and leaves the source
+entry intact.
+
+The launcher retains the entry's source, profile and executor identity. MagicDesk
+resolves the current entry on each launch; deleting the source makes it unavailable.
+Caller extras cannot substitute a different command. This does not grant the
+external `RUN_COMMAND` permission or require MCP, HOME or Desktop. Clearing
+MagicDesk's application data removes export authorization; recreate the export
+afterward. See [external command access](run-command.md) for the separate API
+used by apps that need to submit their own commands.
+
 ## Window modes
 
 `X-MagicDesk-WindowMode` accepts:

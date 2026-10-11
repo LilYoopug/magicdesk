@@ -817,9 +817,11 @@ unshare and exec use the same ordered ownership transition. The seccomp filter
 and restricted-domain policy share the descriptor-operation list; observation
 does not remove native descriptor capabilities after a proc-root restriction.
 
-This does not yet cover inherited/native descriptors or general
-application SCM_RIGHTS transfers. An unconfirmed native mutation at task death
-forgets any known affected destination instead of claiming rollback or retaining
+Application SCM_RIGHTS transfers on negotiated `ORIGINS_V1` connections carry
+authenticated origin capsules through the receive adapter. Unannotated inherited
+descriptors and native transports retain unknown provenance; see
+[Unix transport negotiation](ipc-credentials.md). An unconfirmed native mutation
+at task death forgets any known affected destination instead of claiming rollback or retaining
 a potentially stale origin. An automatically assigned dup result is then unknown.
 The dedicated O_PATH capture is narrower: at its exact openat return gate,
 terminal registers identify a delivered FD or no delivery. Both ABI spellings of
@@ -927,8 +929,9 @@ copying any output. Invalid or duplicate numbers leave the output unchanged.
 The shared mapping is a lifetime mechanism, not protection against a malicious
 guest modifying its own memory. `fd_delivery` does not authenticate source/message
 association; that belongs to the transport, while retained anchors own backing
-custody. General application SCM_RIGHTS provenance is not yet connected to the
-guest adapter.
+custody. Application SCM_RIGHTS provenance uses the negotiated capsule transport
+described in [self-contained origin custody](#self-contained-origin-custody),
+not `fd_delivery` alone.
 See the kernel's [userspace notification contract](https://www.kernel.org/doc/html/latest/userspace-api/seccomp_filter.html#userspace-notification).
 
 ## Guest Roots
