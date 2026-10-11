@@ -144,8 +144,8 @@ final class RuntimeDesktopTaskCoordinator {
         Entry(final int displayId) {
             this.displayId = displayId;
             tasks = new DesktopTaskController(displayId, mContext, mHandler, mTaskStackChanged,
-                    (id, observed, workArea, ownershipReady, ownedTaskIds) -> {
-                        mParking.observe(id, observed, workArea, ownershipReady, ownedTaskIds);
+                    (id, observed, workArea, ownershipReady, ownedTaskIds, floatingBounds) -> {
+                        mParking.observe(id, observed, workArea, ownershipReady, ownedTaskIds, floatingBounds);
                         final DesktopSessionSnapshot session = DesktopRuntimeBridge.getSessionSnapshot(id);
                         final int hostTaskId = session.hostTaskId();
                         if (hostTaskId >= 0 && hostTaskId != preparedHostTaskId

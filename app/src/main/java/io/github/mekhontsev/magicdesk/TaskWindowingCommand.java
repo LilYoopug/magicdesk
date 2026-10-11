@@ -11,6 +11,47 @@ public final class TaskWindowingCommand {
     private TaskWindowingCommand() {
     }
 
+    static void validateGeometry(int displayId, int[] taskIds, Rect[] bounds) {
+        if (displayId < 0 || taskIds == null || bounds == null
+                || taskIds.length == 0 || taskIds.length != bounds.length) {
+            throw new IllegalArgumentException("invalid geometry plan");
+        }
+        java.util.Set<Integer> seen = new java.util.HashSet<>();
+        for (int i = 0; i < taskIds.length; i++) {
+            if (taskIds[i] < 0 || !seen.add(taskIds[i]) || bounds[i] == null
+                    || bounds[i].right <= bounds[i].left || bounds[i].bottom <= bounds[i].top) {
+                throw new IllegalArgumentException("invalid geometry placement");
+            }
+        }
+    }
+
+    static void resizeBounds(Object service, int displayId, int[] taskIds, Rect[] bounds)
+            throws ReflectiveOperationException {
+        validateGeometry(displayId, taskIds, bounds);
+        if (taskIds.length > 1) FrameworkWindowCommitBarrier.awaitSystemTransitions();
+        Object[] tokens = new Object[taskIds.length];
+        for (int i = 0; i < taskIds.length; i++) {
+            Object task = HiddenTaskApi.requireTask(service, displayId, taskIds[i]);
+            if (HiddenTaskApi.getTaskWindowingMode(task) != WINDOWING_MODE_FREEFORM) {
+                throw new IllegalStateException("geometry target is no longer freeform");
+            }
+            tokens[i] = HiddenTaskApi.getTaskToken(task);
+        }
+        if (taskIds.length == 1) {
+            HiddenTaskApi.resizeTaskBounds(service, displayId, taskIds[0], bounds[0]);
+            return;
+        }
+        FrameworkWindowingApi windowing = FrameworkRuntime.current().windowing();
+        Object transaction = windowing.newTransaction();
+        for (int i = 0; i < taskIds.length; i++) {
+            windowing.setBounds(transaction, tokens[i], bounds[i]);
+        }
+        ShellWindowTransitionExecutor.startForShellAdoption(displayId,
+                ShellWindowTransitionExecutor.SystemTransition.CHANGE,
+                windowing.transactionClass(), transaction, "place-desktop-windows");
+        FrameworkWindowCommitBarrier.awaitSystemTransitions();
+    }
+
     public static void main(final String[] args) {
         try {
             if (args.length == 7 && "freeform".equals(args[0])) {

@@ -985,7 +985,7 @@ final class DesktopWindowTransitionController {
             return;
         }
         final RelativeWindowBounds relative = RelativeWindowBounds.from(
-                bounds, workAreaBounds);
+                mTaskStates.state(task.taskId).persistentWindowBounds(bounds), workAreaBounds);
         if (relative != null) {
             AppWindowStateStore.rememberWindowed(
                     mAppProfile.windowReference(task), relative);

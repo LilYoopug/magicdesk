@@ -23,7 +23,7 @@ final class DesktopTaskParkingController implements DesktopTaskParkingRuntime {
     private final Map<Integer, ParkedTask> mParked =
             new LinkedHashMap<>();
     private record Observation(List<ParkedTask> topFirst, boolean ownershipReady,
-            Set<Integer> ownedTaskIds) { }
+            Set<Integer> ownedTaskIds, Map<Integer, Rect> floatingBounds) { }
     private final Map<Integer, Observation> mObservations = new LinkedHashMap<>();
     private static final class Restore {
         final DesktopDisplayTarget target;
@@ -54,7 +54,8 @@ final class DesktopTaskParkingController implements DesktopTaskParkingRuntime {
             final List<TaskRepository.TaskEntry> tasks,
             final Rect workArea,
             final boolean ownershipReady,
-            final Set<Integer> ownedTaskIds) {
+            final Set<Integer> ownedTaskIds,
+            final Map<Integer, Rect> floatingBounds) {
         if (displayId < Display.DEFAULT_DISPLAY
                 || tasks == null
                 || !hasArea(workArea)) {
@@ -66,10 +67,12 @@ final class DesktopTaskParkingController implements DesktopTaskParkingRuntime {
                         : captureTasks(
                                 tasks,
                                 workArea,
-                                ownership);
+                                ownership,
+                                floatingBounds);
         final DesktopDisplayTarget pendingTarget;
         synchronized (mLock) {
-            mObservations.put(displayId, new Observation(observed, ownershipReady, ownership));
+            mObservations.put(displayId, new Observation(observed, ownershipReady, ownership,
+                    copyBounds(floatingBounds)));
             final Restore restore = mRestores.get(displayId);
             pendingTarget = restore == null ? null : restore.target;
         }
@@ -192,10 +195,12 @@ final class DesktopTaskParkingController implements DesktopTaskParkingRuntime {
         }
         final boolean ownershipReady;
         final Set<Integer> ownedTaskIds;
+        final Map<Integer, Rect> floatingBounds;
         synchronized (mLock) {
             final Observation observation = mObservations.get(source.workspaceDisplayId);
             ownershipReady = observation != null && observation.ownershipReady;
             ownedTaskIds = observation != null ? observation.ownedTaskIds : Collections.emptySet();
+            floatingBounds = observation != null ? observation.floatingBounds : Collections.emptyMap();
         }
         if (!ownershipReady) {
             recordFailure(
@@ -207,13 +212,15 @@ final class DesktopTaskParkingController implements DesktopTaskParkingRuntime {
         final List<ParkedTask> candidates = captureTasks(
                 snapshot.tasks,
                 workArea,
-                ownedTaskIds);
+                ownedTaskIds,
+                floatingBounds);
         observe(
                 source.workspaceDisplayId,
                 snapshot.tasks,
                 workArea,
                 ownershipReady,
-                ownedTaskIds);
+                ownedTaskIds,
+                floatingBounds);
         try {
             // Snapshot geometry before restoring display defaults: inherited
             // modes can change as part of that restoration.
@@ -600,6 +607,14 @@ final class DesktopTaskParkingController implements DesktopTaskParkingRuntime {
             final List<TaskRepository.TaskEntry> tasks,
             final Rect workArea,
             final Set<Integer> ownedTaskIds) {
+        return captureTasks(tasks, workArea, ownedTaskIds, Collections.emptyMap());
+    }
+
+    static List<ParkedTask> captureTasks(
+            final List<TaskRepository.TaskEntry> tasks,
+            final Rect workArea,
+            final Set<Integer> ownedTaskIds,
+            final Map<Integer, Rect> floatingBounds) {
         final List<ParkedTask> result = new ArrayList<>();
         if (tasks == null || workArea == null
                 || workArea.right <= workArea.left
@@ -613,6 +628,8 @@ final class DesktopTaskParkingController implements DesktopTaskParkingRuntime {
                                     Integer.valueOf(task.taskId)))) {
                 continue;
             }
+            final Rect savedBounds = task.isFreeform()
+                    ? floatingBounds.getOrDefault(task.taskId, task.bounds) : task.bounds;
             result.add(new ParkedTask(
                     task.taskId,
                     task.userId,
@@ -620,11 +637,19 @@ final class DesktopTaskParkingController implements DesktopTaskParkingRuntime {
                     task.packageName,
                     !task.isFreeform(),
                     task.visible,
-                    task.hasBounds()
-                            ? RelativeWindowBounds.from(task.bounds, workArea)
+                    hasArea(savedBounds)
+                            ? RelativeWindowBounds.from(savedBounds, workArea)
                             : null));
         }
         return result;
+    }
+
+    private static Map<Integer, Rect> copyBounds(Map<Integer, Rect> bounds) {
+        if (bounds.isEmpty()) return Collections.emptyMap();
+        Map<Integer, Rect> copy = new LinkedHashMap<>();
+        bounds.forEach((id, rect) -> copy.put(id, DesktopWindowLayoutController.rect(
+                DesktopWindowLayoutController.bounds(rect))));
+        return Collections.unmodifiableMap(copy);
     }
 
     static void mergePreservedTasks(

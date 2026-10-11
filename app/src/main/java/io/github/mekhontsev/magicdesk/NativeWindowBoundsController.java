@@ -4,8 +4,6 @@ import android.content.Context;
 import android.graphics.Point;
 import android.graphics.Rect;
 import android.hardware.display.DisplayManager;
-import android.os.Handler;
-import android.util.Log;
 import android.view.Display;
 
 import java.util.List;
@@ -17,23 +15,21 @@ final class NativeWindowBoundsController {
         DesktopViewport viewport();
         Rect workAreaBounds();
         void scheduleRefresh();
+        void placeWindow(int taskId, Rect bounds, boolean preserveRestore,
+                TaskRepository.ActionCallback callback);
     }
 
-    private static final String TAG = "MagicDeskTasks";
     private static final int TASKBAR_RESERVE_DP = 64;
 
     private final Context mApplicationContext;
-    private final Handler mHandler;
     private final DesktopTaskRuntimeRegistry mTaskStates;
     private final RuntimeState mRuntimeState;
 
     NativeWindowBoundsController(
             final Context context,
-            final Handler handler,
             final DesktopTaskRuntimeRegistry taskStates,
             final RuntimeState runtimeState) {
         mApplicationContext = context.getApplicationContext();
-        mHandler = handler;
         mTaskStates = taskStates;
         mRuntimeState = runtimeState;
     }
@@ -125,52 +121,7 @@ final class NativeWindowBoundsController {
             final Rect targetBounds,
             final boolean preservesRestoreBounds,
             final TaskRepository.ActionCallback callback) {
-        final int taskId = task.taskId;
-        final DesktopTaskRuntimeState state = mTaskStates.state(taskId);
-        final Rect previousArrangement = state.arrangedWindowBounds();
-        final DesktopTaskRuntimeState.BoundsTransition transition =
-                state.beginBoundsTransition(
-                        targetBounds, preservesRestoreBounds);
-        if (preservesRestoreBounds) state.setArrangedWindowBounds(targetBounds);
-        TaskRepository.resizeTaskBounds(
-                task,
-                targetBounds,
-                result -> mHandler.post(() -> {
-                    if (!mTaskStates.isCurrent(taskId, state)
-                            || !state.isBoundsTransition(transition)) {
-                        if (result.success) {
-                            mRuntimeState.scheduleRefresh();
-                        }
-                        complete(callback, result);
-                        return;
-                    }
-                    // The task service has completed the request. Do not keep
-                    // waiting for an exact rectangle that Android may constrain
-                    // or the user may have already moved beyond.
-                    state.clearBoundsTransition(transition);
-                    if (!result.success) {
-                        state.setArrangedWindowBounds(previousArrangement);
-                        Log.w(TAG,
-                                "native bounds transition failed task="
-                                        + taskId
-                                        + " message=" + result.message);
-                        complete(callback, result);
-                        return;
-                    }
-                    if (!preservesRestoreBounds) {
-                        state.clearWindowRestoreBounds();
-                    }
-                    mRuntimeState.scheduleRefresh();
-                    complete(callback, result);
-                }));
-    }
-
-    private static void complete(
-            final TaskRepository.ActionCallback callback,
-            final TaskRepository.ActionResult result) {
-        if (callback != null) {
-            callback.onComplete(result);
-        }
+        mRuntimeState.placeWindow(task.taskId, targetBounds, preservesRestoreBounds, callback);
     }
 
     void reconcile(final List<TaskRepository.TaskEntry> tasks) {
@@ -194,6 +145,10 @@ final class NativeWindowBoundsController {
             }
             final DesktopTaskRuntimeState state =
                     mTaskStates.state(task.taskId);
+            if (state.layoutOwnership().isOwned()) {
+                state.clearBoundsObservation();
+                continue;
+            }
             if (state.isFullscreenTransition()
                     || state.fullscreenRestoreBounds() != null) {
                 state.clearNativeBoundsState();

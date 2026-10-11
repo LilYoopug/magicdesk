@@ -409,12 +409,16 @@ public final class NativeWindowBoundsReconciliationTest {
                     public boolean equals(Object o) { return o instanceof Rect r && left==r.left && top==r.top && right==r.right && bottom==r.bottom; }
                 }
                 static class ActivityInfo { static final int SCREEN_ORIENTATION_UNSPECIFIED = -1; }
-                """ + "static " + RuntimeSourceFixture.nestedClass("DesktopTaskRuntimeState", "DesktopTaskRuntimeState") + """
+                """ + "static " + RuntimeSourceFixture.nestedClass("DesktopTaskRuntimeState", "DesktopTaskRuntimeState")
+                + "static " + RuntimeSourceFixture.nestedClass("DesktopWindowLayoutController", "DesktopWindowLayoutController")
+                        .replace("DesktopTaskRuntimeRegistry", "States")
+                        .replace("BooleanSupplier", "java.util.function.BooleanSupplier") + """
                 static class States {
                     final Map<Integer, DesktopTaskRuntimeState> states = new HashMap<>();
                     DesktopTaskRuntimeState state(int id) { return states.computeIfAbsent(id, DesktopTaskRuntimeState::new); }
                     DesktopTaskRuntimeState find(int id) { return states.get(id); }
                     boolean isCurrent(int id, DesktopTaskRuntimeState state) { return states.get(id)==state; }
+                    List<DesktopTaskRuntimeState> snapshot() { return new ArrayList<>(states.values()); }
                 }
                 static class RuntimeState {
                     int demotions;
@@ -423,6 +427,15 @@ public final class NativeWindowBoundsReconciliationTest {
                     void scheduleRefresh() {}
                     void demoteTask(int id) { demotions++; }
                     void focusTask(int id) {}
+                    void placeWindow(int id, Rect bounds, boolean preserve, TaskRepository.ActionCallback callback) {
+                        Fixture f = TaskRepository.owner;
+                        var workspace = f.layout.workspace(66, f.workArea, List.of(f.task), Set.of(), f.task.taskId);
+                        var request = WindowLayoutPolicy.Request.place(new WindowLayoutPolicy.Placement(id,
+                                DesktopWindowLayoutController.bounds(bounds), preserve
+                                ? WindowLayoutPolicy.Retention.ARRANGEMENT : WindowLayoutPolicy.Retention.FLOATING));
+                        f.layout.execute(workspace, f.layout.plan(workspace, request), List.of(f.task), () -> true,
+                                result -> { if (callback != null) callback.onComplete(result); });
+                    }
                 }
                 static class TaskRepository {
                     static Fixture owner;
@@ -459,6 +472,10 @@ public final class NativeWindowBoundsReconciliationTest {
                 final States mTaskStates = new States();
                 final RuntimeState mRuntimeState = new RuntimeState();
                 final Handler mHandler = new Handler();
+                final DesktopWindowLayoutController layout = new DesktopWindowLayoutController(
+                        mTaskStates, Runnable::run, (display, tasks, bounds, callback) ->
+                            TaskRepository.resizeTaskBounds(tasks.get(0), bounds.get(0), callback),
+                        new FloatingWindowLayoutPolicy());
                 final List<Rect> requests = new ArrayList<>();
                 final Queue<TaskRepository.ActionCallback> callbacks = new ArrayDeque<>();
                 final TaskRepository.TaskEntry task = new TaskRepository.TaskEntry();
@@ -498,7 +515,10 @@ public final class NativeWindowBoundsReconciliationTest {
                 "NativeWindowBoundsController", "reconcile", "observeBounds",
                 "getSnappedBounds", "snappedBounds",
                 "rememberRestoreBounds", "occupiesHeight", "getDefaultWindowBounds",
-                "correctNativeCaptionSnapBounds", "sameBounds", "rect", "requestBounds", "complete"),
-                java.nio.file.Path.of("../hosted-runtime/src/main/java/io/github/mekhontsev/magicdesk/hosted/HostedMaximization.java").toAbsolutePath().toString());
+                "correctNativeCaptionSnapBounds", "sameBounds", "rect", "requestBounds"),
+                java.nio.file.Path.of("../hosted-runtime/src/main/java/io/github/mekhontsev/magicdesk/hosted/HostedMaximization.java").toAbsolutePath().toString(),
+                java.nio.file.Path.of("src/main/java/io/github/mekhontsev/magicdesk/WindowLayoutPolicy.java").toAbsolutePath().toString(),
+                java.nio.file.Path.of("src/main/java/io/github/mekhontsev/magicdesk/WindowLayoutOwnership.java").toAbsolutePath().toString(),
+                java.nio.file.Path.of("src/main/java/io/github/mekhontsev/magicdesk/FloatingWindowLayoutPolicy.java").toAbsolutePath().toString());
     }
 }

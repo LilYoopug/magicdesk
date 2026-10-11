@@ -69,6 +69,7 @@ final class DesktopTaskRuntimeState {
     }
 
     private final int mTaskId;
+    private final WindowLayoutOwnership mLayoutOwnership = new WindowLayoutOwnership();
 
     private Rect mLastWindowBounds;
     private BoundsTransition mBoundsTransition;
@@ -94,6 +95,17 @@ final class DesktopTaskRuntimeState {
 
     int taskId() {
         return mTaskId;
+    }
+
+    WindowLayoutOwnership layoutOwnership() { return mLayoutOwnership; }
+
+    synchronized Rect persistentWindowBounds(final Rect observed) {
+        final WindowLayoutPolicy.Bounds floating = mLayoutOwnership.floatingBounds();
+        if (floating == null) return copy(observed);
+        final Rect bounds = new Rect();
+        bounds.left = floating.left(); bounds.top = floating.top();
+        bounds.right = floating.right(); bounds.bottom = floating.bottom();
+        return bounds;
     }
 
     synchronized Rect lastWindowBounds() {

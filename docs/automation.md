@@ -1804,6 +1804,11 @@ is locked at its current value for the run and restored exactly afterward. If
 the tested desktop session closes, its existing lifecycle event cancels the run
 and cleanup begins; no background session polling is added.
 
+`LAYOUT-001` verifies a two-task geometry plan before production activation.
+`LAYOUT-002` releases that temporary policy and verifies the original floating
+rectangles. Both use the shared workspace queue and shell geometry executor;
+the test policy does not change task focus or Android hierarchy itself.
+
 The native-caption snap scenario (`NATIVE-SNAP-001` through `003`, with dependent
 `FOCUS-006` and `007`) runs only when the platform diagnostics provider defines
 that scenario. Currently only the Nubia windowing profile opts in. Other

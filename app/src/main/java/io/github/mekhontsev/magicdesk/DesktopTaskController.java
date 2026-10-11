@@ -17,6 +17,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 final class DesktopTaskController implements DesktopTaskRuntime {
@@ -26,7 +27,8 @@ final class DesktopTaskController implements DesktopTaskRuntime {
                 List<TaskRepository.TaskEntry> tasks,
                 Rect workArea,
                 boolean ownershipReady,
-                Set<Integer> ownedTaskIds);
+                Set<Integer> ownedTaskIds,
+                Map<Integer, Rect> floatingBounds);
     }
 
     private static final String TAG = "MagicDeskTasks";
@@ -64,6 +66,9 @@ final class DesktopTaskController implements DesktopTaskRuntime {
     private final DesktopDisplayTaskState mDisplayTaskState;
     private final DesktopTaskRuntimeRegistry mTaskRuntimeStates;
     private final NativeWindowBoundsController mNativeWindowBounds;
+    private final DesktopWindowLayoutController mWindowLayout;
+    private boolean mLayoutRefreshQueued;
+    private WindowLayoutPolicy.Workspace mLastLayoutObservation;
     private final DesktopWindowTransitionController mWindowTransitions;
     private final AppWindowStateTracker mAppWindowStates;
     private final AppPresentationRuntimeController mAppPresentations;
@@ -113,9 +118,10 @@ final class DesktopTaskController implements DesktopTaskRuntime {
         mAppWindowStates = new AppWindowStateTracker(handler);
         mDisplayTaskState = new DesktopDisplayTaskState();
         mTaskRuntimeStates = new DesktopTaskRuntimeRegistry();
+        mWindowLayout = new DesktopWindowLayoutController(mTaskRuntimeStates, handler::post,
+                TaskRepository::applyWindowGeometry, new FloatingWindowLayoutPolicy());
         mNativeWindowBounds = new NativeWindowBoundsController(
                 mApplicationContext,
-                handler,
                 mTaskRuntimeStates,
                 new NativeWindowBoundsController.RuntimeState() {
                     @Override
@@ -146,6 +152,12 @@ final class DesktopTaskController implements DesktopTaskRuntime {
                     @Override
                     public void scheduleRefresh() {
                         DesktopTaskController.this.scheduleRefresh(0);
+                    }
+
+                    @Override
+                    public void placeWindow(int taskId, Rect bounds, boolean preserveRestore,
+                            TaskRepository.ActionCallback callback) {
+                        requestWindowPlacement(taskId, bounds, preserveRestore, callback);
                     }
                 });
         mWindowTransitions = new DesktopWindowTransitionController(
@@ -324,6 +336,7 @@ final class DesktopTaskController implements DesktopTaskRuntime {
                             return;
                         }
                         if (stateKey != null
+                                && !isLayoutOwned(task.taskId)
                                 && !mNativeWindowBounds
                                         .isNativeCaptionSnapOutsideWorkArea(
                                                 bounds)) {
@@ -495,6 +508,8 @@ final class DesktopTaskController implements DesktopTaskRuntime {
         mGeneration++;
         mWindowTransitions.cancelPendingTransitions("desktop task runtime stopped");
         mWorkspaceQueue.cancelAll("desktop task runtime stopped");
+        mLayoutRefreshQueued = false;
+        mLastLayoutObservation = null;
         mHandler.removeCallbacks(mRefreshRunnable);
         mRefreshDueUptimeMillis = -1;
         mTaskWatcher.setPhoneTouchpadRequested(false);
@@ -904,7 +919,7 @@ final class DesktopTaskController implements DesktopTaskRuntime {
 
     private interface WorkspaceOperation {
         void run(TaskRepository.Snapshot workspace,
-                TaskRepository.ActionCallback completion);
+                DesktopWorkspaceQueue.Completion completion);
     }
 
     private void enqueueWorkspaceOperation(
@@ -976,7 +991,7 @@ final class DesktopTaskController implements DesktopTaskRuntime {
                 completeActionCallback(completion, false, "task unavailable");
                 return;
             }
-            activateThroughGateway(taskId, completion);
+            activateThroughGateway(workspace, taskId, completion);
         });
     }
 
@@ -1184,7 +1199,7 @@ final class DesktopTaskController implements DesktopTaskRuntime {
             }
             if (EffectiveTaskStack.shouldActivateTaskbarTarget(
                     workspace, task, concealedTaskIds, mObservedFocusedTaskId)) {
-                activateThroughGateway(taskId, completion);
+                activateThroughGateway(workspace, taskId, completion);
             } else {
                 demoteTask(workspace, taskId, completion);
             }
@@ -1275,13 +1290,91 @@ final class DesktopTaskController implements DesktopTaskRuntime {
 
     /** Common focus route for taskbar, Alt+Tab, overview, and automation. */
     private void activateThroughGateway(
+            final TaskRepository.Snapshot workspace,
             final int focusedTaskId,
-            final TaskRepository.ActionCallback callback) {
-        focusThroughGateway(
-                DesktopWorkspaceCommand.ACTIVATE,
-                Collections.singletonList(Integer.valueOf(focusedTaskId)),
-                focusedTaskId,
-                callback);
+            final DesktopWorkspaceQueue.Completion callback) {
+        applyWindowLayout(workspace, WindowLayoutPolicy.Request.reveal(focusedTaskId),
+                callback, result -> {
+                    if (!callback.isCurrent()) return;
+                    if (!result.success) { callback.onComplete(result); return; }
+                    focusThroughGateway(DesktopWorkspaceCommand.ACTIVATE,
+                            Collections.singletonList(focusedTaskId), focusedTaskId, callback);
+                });
+    }
+
+    private boolean isLayoutOwned(int taskId) {
+        DesktopTaskRuntimeState state = mTaskRuntimeStates.find(taskId);
+        return state != null && state.layoutOwnership().isOwned();
+    }
+
+    @Override
+    public void setWindowLayoutPolicy(WindowLayoutPolicy policy, TaskRepository.ActionCallback callback) {
+        if (policy == null) {
+            completeActionCallback(callback, false, "layout policy is required");
+            return;
+        }
+        enqueueWorkspaceOperation(mDisplayId, callback, (workspace, completion) ->
+                applyWindowLayout(workspace, WindowLayoutPolicy.Request.release(), completion, result -> {
+                    if (!completion.isCurrent()) return;
+                    if (result.success) {
+                        mWindowLayout.replacePolicy(policy);
+                        mLastLayoutObservation = null;
+                        scheduleRefresh(0);
+                    }
+                    completion.onComplete(result);
+                }));
+    }
+
+    private WindowLayoutPolicy.Workspace layoutWorkspace(TaskRepository.Snapshot snapshot) {
+        Set<Integer> concealed;
+        synchronized (mTaskbarConcealedTaskIds) {
+            concealed = new LinkedHashSet<>(mTaskbarConcealedTaskIds);
+        }
+        return mWindowLayout.workspace(mDisplayId, mNativeWindowBounds.getTaskbarMaximizedBounds(),
+                snapshot.tasks, concealed, mObservedFocusedTaskId);
+    }
+
+    private void requestWindowPlacement(int taskId, Rect bounds, boolean preserveRestore,
+            TaskRepository.ActionCallback callback) {
+        WindowLayoutPolicy.Request request = WindowLayoutPolicy.Request.place(
+                new WindowLayoutPolicy.Placement(taskId, DesktopWindowLayoutController.bounds(bounds),
+                        preserveRestore ? WindowLayoutPolicy.Retention.ARRANGEMENT
+                                : WindowLayoutPolicy.Retention.FLOATING));
+        enqueueWorkspaceOperation(mDisplayId, result -> {
+            if (!result.success) Log.w(TAG, "window placement failed task=" + taskId
+                    + " message=" + result.message);
+            completeActionCallback(callback, result.success, result.message);
+        }, (workspace, completion) -> applyWindowLayout(workspace, request, completion, completion));
+    }
+
+    private void applyWindowLayout(TaskRepository.Snapshot snapshot, WindowLayoutPolicy.Request request,
+            DesktopWorkspaceQueue.Completion operation, TaskRepository.ActionCallback callback) {
+        WindowLayoutPolicy.Workspace workspace = layoutWorkspace(snapshot);
+        WindowLayoutPolicy.Plan plan = mWindowLayout.plan(workspace, request);
+        mWindowLayout.execute(workspace, plan, snapshot.tasks, operation::isCurrent, result -> {
+            if (result.success && !plan.placements().isEmpty()) scheduleRefresh(0);
+            callback.onComplete(result);
+        });
+    }
+
+    private void reconcileWindowLayout(TaskRepository.Snapshot snapshot) {
+        if (mLayoutRefreshQueued || !mRunning || !mTaskWatcherReady
+                || !mWindowLayout.observesWorkspace()) return;
+        WindowLayoutPolicy.Request request = WindowLayoutPolicy.Request.observe();
+        WindowLayoutPolicy.Workspace observed = layoutWorkspace(snapshot);
+        if (observed.equals(mLastLayoutObservation)) return;
+        mLastLayoutObservation = observed;
+        try {
+            if (mWindowLayout.plan(observed, request).isEmpty()) return;
+        } catch (RuntimeException error) {
+            Log.w(TAG, "window layout rejected observation", error);
+            return;
+        }
+        mLayoutRefreshQueued = true;
+        enqueueWorkspaceOperation(mDisplayId, result -> {
+            mLayoutRefreshQueued = false;
+            if (!result.success) Log.w(TAG, "window layout failed: " + result.message);
+        }, (workspace, completion) -> applyWindowLayout(workspace, request, completion, completion));
     }
 
     private int currentDesktopHostTaskId() {
@@ -2065,7 +2158,8 @@ final class DesktopTaskController implements DesktopTaskRuntime {
                     snapshot.tasks,
                     DesktopRuntimeBridge.getDesktopWorkAreaBounds(mDisplayId),
                     mDesktopOwnershipReady,
-                    mDesktopOwnedTaskIds);
+                    mDesktopOwnedTaskIds,
+                    mWindowLayout.floatingBounds(snapshot.tasks));
         }
         mAutomationEvents.observe(snapshot);
         final TaskRepository.Snapshot workspace =
@@ -2082,6 +2176,7 @@ final class DesktopTaskController implements DesktopTaskRuntime {
                         mWindowContext));
         reconcileTaskbarConcealment(workspace.tasks);
         mNativeWindowBounds.reconcile(workspace.tasks);
+        reconcileWindowLayout(workspace);
         // Workspace operations remain ownership-scoped, but shell chrome must
         // follow the physical display foreground. A foreign fullscreen task
         // can be launched by SystemUI without joining the desktop workspace.

@@ -2205,6 +2205,9 @@ final class DesktopSelfTestWindowSuite {
                 surfaceReference,
                 surfaceObservation);
 
+        DesktopSelfTestLayoutSuite.run(result, displayId, firstTaskId, secondTaskId,
+                leftBounds, rightBounds);
+
         DesktopSelfTestInputSuite.runWindowFocusTests(
                 context,
                 result,

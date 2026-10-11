@@ -513,6 +513,16 @@ public final class MagicDeskRuntime {
         return tasks == null ? null : tasks.observedTaskSnapshot(displayId);
     }
 
+    static void setWindowLayoutPolicy(int displayId, WindowLayoutPolicy policy,
+            TaskRepository.ActionCallback callback) {
+        final DesktopTaskRuntime tasks = desktopTasks(displayId);
+        if (tasks == null) {
+            callback.onComplete(new TaskRepository.ActionResult(false, "desktop task runtime unavailable"));
+        } else {
+            tasks.setWindowLayoutPolicy(policy, callback);
+        }
+    }
+
     static TaskRepository.Snapshot selectDesktopTaskSnapshot(
             final int displayId,
             final TaskRepository.Snapshot snapshot) {

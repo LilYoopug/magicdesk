@@ -18,6 +18,29 @@ import java.util.Map;
 
 public final class DesktopTaskParkingControllerTest {
     @Test
+    public void temporaryLayoutCoordinatesAreNotParkedAsFloatingGeometry() {
+        var app = task(10, "org.example.app", "org.example.app/.Main", "freeform", null, true);
+        app.bounds.left = 0; app.bounds.top = 0; app.bounds.right = 1000; app.bounds.bottom = 1000;
+        Rect original = rect(500, 100, 1500, 900);
+        Rect area = rect(0, 0, 2000, 1000);
+        var captured = DesktopTaskParkingController.captureTasks(List.of(app), area,
+                java.util.Set.of(10), Map.of(10, original));
+        assertEquals(RelativeWindowBounds.from(original, area), captured.get(0).bounds);
+        assertFalse(captured.get(0).fullscreen);
+    }
+
+    @Test
+    public void suspendedLayoutDoesNotConvertParkedFullscreenToFloating() {
+        var app = task(10, "org.example.app", "org.example.app/.Main", "fullscreen", null, true);
+        app.bounds.left = 0; app.bounds.top = 0; app.bounds.right = 2000; app.bounds.bottom = 1000;
+        Rect area = rect(0, 0, 2000, 1000);
+        var captured = DesktopTaskParkingController.captureTasks(List.of(app), area,
+                java.util.Set.of(10), Map.of(10, rect(500, 100, 1500, 900)));
+        assertTrue(captured.get(0).fullscreen);
+        assertEquals(RelativeWindowBounds.from(area, area), captured.get(0).bounds);
+    }
+
+    @Test
     public void parkingIncludesLiveAppsAndBuiltInsButNotInfrastructure() {
         final TaskRepository.TaskEntry app = task(
                 10,

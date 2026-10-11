@@ -569,6 +569,11 @@ start/close owner. Startup prepares the components before acquiring the role.
 
 ## Activate and demote
 
+Application [layout preparation](window-layout.md) may precede activation in
+the same workspace queue. Its geometry plan is a separate bounds-only operation;
+the subsequent `ACTIVATE` command remains z-order-only. Fullscreen tasks are
+ineligible for layout placement, including while their transition is pending.
+
 Task selection is modeled as z-order, not as a window-state transition:
 
 - `activate(target)` places the selected task at the front of its compatible

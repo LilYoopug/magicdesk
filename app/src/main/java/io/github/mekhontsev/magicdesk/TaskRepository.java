@@ -228,6 +228,33 @@ public final class TaskRepository {
         });
     }
 
+    static void applyWindowGeometry(int displayId, List<TaskEntry> tasks, List<Rect> bounds,
+            ActionCallback callback) {
+        if (tasks.isEmpty() || tasks.size() != bounds.size()) {
+            complete(callback, false, "invalid geometry plan");
+            return;
+        }
+        for (int i = 0; i < tasks.size(); i++) {
+            if (tasks.get(i).displayId != displayId || !tasks.get(i).isBoundedFreeform()
+                    || !hasExplicitBounds(bounds.get(i))) {
+                complete(callback, false, "invalid geometry target");
+                return;
+            }
+        }
+        if (tasks.size() == 1) {
+            resizeTaskBounds(tasks.get(0), bounds.get(0), callback);
+            return;
+        }
+        int[] ids = tasks.stream().mapToInt(task -> task.taskId).toArray();
+        Rect[] targets = bounds.stream().map(Rect::new).toArray(Rect[]::new);
+        TaskCommandQueue.execute(() -> {
+            try {
+                ShellAccess.resizeTaskBounds(displayId, ids, targets);
+                complete(callback, true, "");
+            } catch (IOException error) { complete(callback, false, usefulMessage(error)); }
+        });
+    }
+
     static void sendBackToDisplay(final int displayId, final ActionCallback callback) {
         if (displayId < 0) {
             complete(callback, false, "invalid display");

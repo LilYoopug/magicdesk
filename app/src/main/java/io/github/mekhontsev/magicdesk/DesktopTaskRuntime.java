@@ -15,6 +15,8 @@ interface DesktopTaskRuntime {
 
     TaskRepository.Snapshot observedTaskSnapshot(int displayId);
 
+    void setWindowLayoutPolicy(WindowLayoutPolicy policy, TaskRepository.ActionCallback callback);
+
     TaskRepository.Snapshot selectDesktopTaskSnapshot(
             int displayId, TaskRepository.Snapshot snapshot);
 

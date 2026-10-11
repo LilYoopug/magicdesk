@@ -1327,6 +1327,11 @@ by this foundation.
 
 ### Tasks and windows
 
+- Application geometry policies and their shared executor are described in
+  [Application window layout](window-layout.md). Floating resize, snap and
+  maximize use the same workspace queue as layout preparation before activation.
+  Temporary layout geometry is separate from saved positions and fullscreen
+  residency; shell reservations and Android task-area topology retain their owners.
 - `TaskRepository` reads exact tasks and performs narrow shell operations.
 - `DesktopTaskWatcher` owns the application-side typed task-observer callback
   and immediate focus acknowledgements. Observer configuration runs on its

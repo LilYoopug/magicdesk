@@ -494,7 +494,7 @@ interface IShellCommandService {
         io.github.mekhontsev.magicdesk.IInputRegionCallback callback) = 148;
     void orderHostedSurface(in android.view.SurfaceControl surface,
         in android.view.SurfaceControl relative) = 149;
-    void resizeTaskBounds(int displayId, int taskId, in Rect bounds) = 150;
+    void resizeTaskBounds(int displayId, in int[] taskIds, in Rect[] bounds) = 150;
     String getSystemNightMode(int userId) = 151;
     void setSystemNightMode(int userId, String mode) = 152;
     io.github.mekhontsev.magicdesk.SystemCpuSnapshot readSystemCpuSnapshot() = 153;
