@@ -348,6 +348,15 @@ Installed Termux graphical entries default to X11. To select Wayland, use
 **New command app > Termux graphics**, choose the protocol and supply a
 Wayland-capable command. Linux environment launchers offer the same choice.
 
+Long-press an installed Termux or Shroot application in Start and choose
+**Add to Android launcher** to install a small APK entry with its name and icon.
+Android asks for installation permission and confirmation. The entry launches
+through MagicDesk on the current display, without starting Desktop. Termux
+entries need neither Shizuku nor root; Shroot entries retain their selected
+shell identity. The same menu updates or removes an entry. Uninstalling the
+entry does not remove the Linux application. After clearing MagicDesk's data
+or reinstalling it without preserving data, remove and recreate these entries.
+
 Linux playback uses the shared [PipeWire audio service](docs/audio.md), with
 native PipeWire and PulseAudio-compatible clients routed to Android's selected
 audio output. It works independently of Desktop and graphics. Installer-created

@@ -302,7 +302,9 @@ final class FileOpenWithController {
                     && recycled.getTag() instanceof Row
                     ? (Row) recycled.getTag() : createRow();
             final Target target = getItem(position);
-            row.icon.setImageDrawable(target.icon);
+            ApplicationIconBinding.clear(row.icon);
+            if (target.desktopHandler != null) ApplicationIconBinding.bind(row.icon, target.desktopHandler.shortcut);
+            else row.icon.setImageDrawable(target.icon);
             row.label.setText(target.label);
             row.packageName.setText(target == mPreferred && target.android()
                     ? mHost.getString(

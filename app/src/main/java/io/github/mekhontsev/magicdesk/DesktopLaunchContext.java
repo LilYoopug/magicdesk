@@ -24,7 +24,17 @@ interface DesktopLaunchContext {
             Runnable onPrepared,
             DesktopActivityLaunchResult.Completion completion);
 
-    void launchConsole(DesktopLaunchRequest request);
+    default void launchConsole(DesktopLaunchRequest request, DesktopActivityLaunchResult.Completion completion) {
+        var target = destination();
+        var presentation = target.desktop ? DesktopLaunchPresentation.automatic() : request.presentation;
+        BuiltInWindowLauncher.launch(context(), CommandConsoleActivity.createPreparedCommandIntent(context(),
+                        request.exec.command, request.exec.workingDirectory, request.exec.backend),
+                CommandConsoleActivity.launchTarget(), target, destinationUniqueId(),
+                presentation.withInstancePolicy(DesktopTaskInstancePolicy.CREATE_NEW), error ->
+                        completion.onComplete(error == null
+                                ? DesktopActivityLaunchResult.unmanagedAccepted(target.displayId)
+                                : DesktopActivityLaunchResult.failed(error)));
+    }
 
     boolean isUnavailable();
 

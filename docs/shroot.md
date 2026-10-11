@@ -772,8 +772,12 @@ Installed guest applications also feed Start's shared application catalog.
 Discovery reads `.desktop` files from the image account's XDG data directories
 without starting guest processes. Application identities include the immutable
 environment ID; duplicate names in different environments remain independent.
-The same recipe builder handles terminal, X11 and Wayland entries. Bounded PNG
-icons use the shared bitmap decoder; unavailable icons use the ordinary fallback.
+The same recipe builder handles terminal, X11 and Wayland entries. Metadata
+discovery does not read icons. The shared artwork service resolves requested
+guest launcher IDs independently of the catalog, including entries retained in
+recent launches. Bounded batches read only the selected immutable environments,
+respect XDG entry precedence and decode PNGs off the UI thread. One unavailable
+icon does not discard other artwork; missing images use the ordinary fallback.
 The cached snapshot refreshes explicitly through Start's refresh control or
 MCP discovery, not on every menu opening. Package changes inside a running guest
 require that refresh. Discovery does not supply Android file arguments or a new

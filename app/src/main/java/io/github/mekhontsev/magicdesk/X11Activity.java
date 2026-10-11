@@ -33,6 +33,8 @@ public final class X11Activity extends Activity implements
     private boolean detached;
     private volatile BuiltInWindowRegistry.Presentation presentation;
     private RecentApplicationStore.Entry identityRecipe;
+    private final ApplicationIconSubscription artwork = new ApplicationIconSubscription(this, this::refreshArtwork);
+    private Bitmap clientIcon;
     private volatile AppReference windowApplication;
 
     static Intent createIntent(Context context) { return new Intent(context, X11Activity.class); }
@@ -110,7 +112,7 @@ public final class X11Activity extends Activity implements
             if (info != null) {
                 seenWindow = true;
                 String title = info.title().isBlank() ? session.name : info.title();
-                present(title, DesktopApplicationIconResolver.hostedIcon(info.icon(), currentRecipe));
+                present(title, info.icon());
             } else if (seenWindow || ready) { finish(); return; }
         }
         status.setText(session == null ? getString(R.string.x11_no_session)
@@ -142,7 +144,14 @@ public final class X11Activity extends Activity implements
     @Override public AppReference windowApplication() { return windowApplication; }
     @Override public void desktopPresentationChanged() { if (binding != null) binding.presentationChanged(); }
 
-    private void present(String title, Bitmap icon) {
+    private void refreshArtwork() {
+        if (!isDestroyed() && !isFinishing() && presentation != null) present(presentation.title(), clientIcon);
+    }
+
+    private void present(String title, Bitmap client) {
+        clientIcon = client;
+        artwork.set(client == null ? identityRecipe : null);
+        Bitmap icon = DesktopApplicationIconResolver.hostedIcon(client, identityRecipe);
         if (presentation != null && presentation.title().equals(title) && presentation.icon() == icon) return;
         presentation = new BuiltInWindowRegistry.Presentation(title, icon);
         setTitle(title);
@@ -203,6 +212,7 @@ public final class X11Activity extends Activity implements
     }
 
     @Override public void onDestroy() {
+        artwork.close();
         if (binding != null) binding.close(isFinishing() && !detached);
         binding = null;
         BuiltInWindowRegistry.unregister(this);

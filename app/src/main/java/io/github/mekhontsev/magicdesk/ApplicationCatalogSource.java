@@ -7,7 +7,11 @@ import java.util.function.Consumer;
 /** One UI-thread catalog source; readers retain the last successful immutable result. */
 final class ApplicationCatalogSource<T> {
     record Snapshot<T>(List<T> entries, boolean ready, boolean loading, String error) { }
-    interface Completion<T> { void complete(List<T> entries, String error); }
+    interface Completion<T> {
+        void publish(List<T> entries, String error, boolean available);
+        default void complete(List<T> entries, String error) { publish(entries, error, error.isEmpty()); }
+        default void partial(List<T> entries, String error) { publish(entries, error, true); }
+    }
     interface Loader<T> { void load(Completion<T> complete); }
 
     private final Loader<T> loader;
@@ -48,13 +52,13 @@ final class ApplicationCatalogSource<T> {
         snapshot = new Snapshot<>(snapshot.entries(), snapshot.ready(), true, "");
         changed.run();
         try {
-            loader.load((entries, error) -> complete(request, requestedRevision, entries, error));
+            loader.load((entries, error, available) -> complete(request, requestedRevision, entries, error, available));
         } catch (RuntimeException error) {
-            complete(request, requestedRevision, List.of(), error.toString());
+            complete(request, requestedRevision, List.of(), error.toString(), false);
         }
     }
 
-    private void complete(long request, long requestedRevision, List<T> entries, String error) {
+    private void complete(long request, long requestedRevision, List<T> entries, String error, boolean available) {
         if (request != requestGeneration || !snapshot.loading()) return;
         if (requestedRevision != revision) {
             snapshot = new Snapshot<>(snapshot.entries(), snapshot.ready(), false, "");
@@ -62,8 +66,8 @@ final class ApplicationCatalogSource<T> {
             return;
         }
         dirty = !error.isEmpty();
-        snapshot = error.isEmpty()
-                ? new Snapshot<>(List.copyOf(entries), true, false, "")
+        snapshot = available
+                ? new Snapshot<>(List.copyOf(entries), true, false, error)
                 : new Snapshot<>(snapshot.entries(), snapshot.ready(), false, error);
         finishWaiters(snapshot);
         changed.run();

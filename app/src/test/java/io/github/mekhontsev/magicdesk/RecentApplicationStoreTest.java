@@ -123,6 +123,55 @@ public final class RecentApplicationStoreTest {
         try (var files = Files.list(directory())) { assertEquals(RecentApplicationStore.LIMIT, files.count()); }
     }
 
+    @Test public void removingOneRecipePreservesOtherRecipesProfilesAndSourceFiles() throws Exception {
+        Path source = temporary.newFile("source.desktop").toPath();
+        Files.writeString(source, "original shortcut");
+        var original = entry(x11("Editor", "editor"), "/source.desktop");
+        var otherRecipe = entry(x11("Editor", "editor --new-window"), original.sourcePath());
+        var otherEndpoint = new RecentApplicationStore.Entry(original.shortcut(), original.sourcePath(), "other.termux", 100);
+        var android = entry(android(new AppProfile(0, 5), "example.app"), "");
+        var workProfile = entry(android(new AppProfile(10, 19), "example.app"), "");
+        for (var item : List.of(original, otherRecipe, otherEndpoint, android, workProfile)) store().record(item);
+        assertEquals(List.of(workProfile.key(), android.key(), otherEndpoint.key(), otherRecipe.key()),
+                store().remove(original).stream().map(RecentApplicationStore.Entry::key).toList());
+        assertEquals(4, store().remove(original).size());
+        assertEquals(3, store().remove(android).size());
+        assertEquals("original shortcut", Files.readString(source));
+    }
+
+    @Test public void clearOnlyRemovesSelectedHistoryAndNewLaunchesRepopulateIt() throws Exception {
+        var desktop = new RecentApplicationStore(directory().resolve("desktop"));
+        var independent = new RecentApplicationStore(directory().resolve("independent"));
+        var app = entry(x11("Editor", "editor"), "/editor.desktop");
+        desktop.record(app); independent.record(app);
+        assertTrue(desktop.clear().isEmpty());
+        assertEquals(1, independent.read().size());
+        assertTrue(new RecentApplicationStore(directory().resolve("desktop")).read().isEmpty());
+        assertEquals(1, desktop.record(app).size());
+        assertTrue(independent.clear().isEmpty());
+        assertEquals(1, desktop.read().size());
+    }
+
+    @Test public void clearDropsMalformedRecordsWithoutRecursingOrDeletingOtherFiles() throws Exception {
+        store().record(entry(x11("Editor", "editor"), ""));
+        Files.writeString(directory().resolve("broken.desktop"), "broken");
+        Files.writeString(directory().resolve("oversize.desktop"), "x".repeat(65537));
+        Files.writeString(directory().resolve("keep.txt"), "keep");
+        Path child = Files.createDirectories(directory().resolve("nested.desktop"));
+        Files.writeString(child.resolve("keep.desktop"), "keep");
+        assertTrue(store().clear().isEmpty());
+        assertFalse(Files.exists(directory().resolve("broken.desktop")));
+        assertFalse(Files.exists(directory().resolve("oversize.desktop")));
+        assertEquals("keep", Files.readString(directory().resolve("keep.txt")));
+        assertEquals("keep", Files.readString(child.resolve("keep.desktop")));
+    }
+
+    @Test public void emptyHistoryEditsDoNotCreateStorage() throws Exception {
+        assertTrue(store().clear().isEmpty());
+        assertTrue(store().remove(entry(x11("Editor", "editor"), "")).isEmpty());
+        assertFalse(Files.exists(directory()));
+    }
+
     @Test public void scopesHaveIndependentOrderAndLimitsButTheSameRecipeIdentity() throws Exception {
         var desktopPath = directory().resolve(RecentLaunchScope.DESKTOP.directory);
         var independentPath = directory().resolve(RecentLaunchScope.INDEPENDENT.directory);

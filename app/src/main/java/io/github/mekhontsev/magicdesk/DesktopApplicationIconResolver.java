@@ -9,22 +9,20 @@ final class DesktopApplicationIconResolver {
     private DesktopApplicationIconResolver() {
     }
 
-    static android.graphics.Bitmap cachedIcon(DesktopApplicationShortcut shortcut) {
-        if (shortcut == null) return null;
-        if (shortcut.icon.startsWith("guest:")) return ApplicationCatalog.cachedGuestIcon(shortcut.icon);
-        return shortcut.hasExecLaunch() && shortcut.execBackend == DesktopExecBackend.TERMUX
-                ? ApplicationCatalog.cachedTermuxIcon(shortcut.icon) : null;
-    }
-
     static android.graphics.Bitmap hostedIcon(android.graphics.Bitmap client, RecentApplicationStore.Entry recipe) {
-        return client != null ? client : recipe == null ? null : cachedIcon(recipe.shortcut());
+        return client != null ? client : recipe == null ? null
+                : ApplicationIcons.cached(ApplicationIcons.key(recipe.shortcut(), recipe.termuxPackage()));
     }
 
     static Drawable resolve(
             final Context context,
             final DesktopApplicationShortcut shortcut) {
+        return resolve(context, shortcut, null);
+    }
+
+    static Drawable resolve(Context context, DesktopApplicationShortcut shortcut, String termuxPackage) {
         if (shortcut.icon.startsWith("guest:") || shortcut.hasExecLaunch() && shortcut.execBackend == DesktopExecBackend.TERMUX) {
-            final var bitmap = cachedIcon(shortcut);
+            final var bitmap = ApplicationIcons.cached(ApplicationIcons.key(shortcut, termuxPackage));
             return bitmap == null ? UiAppearance.symbol(context, R.drawable.ic_file_console, UiColor.TEXT)
                     : new android.graphics.drawable.BitmapDrawable(context.getResources(), bitmap);
         }

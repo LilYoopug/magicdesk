@@ -149,4 +149,16 @@ public final class ApplicationCatalogSourceTest {
         assertFalse(replies.get(0).loading());
         assertTrue(replies.get(0).error().contains("load failed"));
     }
+
+    @Test public void partialCatalogPublishesHealthyEntriesAndPreservesFailureEvidence() {
+        var test = new Source();
+        test.source.ensureLoaded();
+        test.requests.get(0).partial(List.of("healthy guest"), "other guest unavailable");
+        assertTrue(test.source.snapshot().ready());
+        assertEquals(List.of("healthy guest"), test.source.snapshot().entries());
+        assertEquals("other guest unavailable", test.source.snapshot().error());
+        assertEquals(1, test.requests.size());
+        test.source.ensureLoaded();
+        assertEquals(2, test.requests.size());
+    }
 }

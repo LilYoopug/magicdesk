@@ -2,7 +2,7 @@ package io.github.mekhontsev.magicdesk;
 
 import android.os.SystemClock;
 
-/** Typed completion of an Activity launch through a desktop launch context. */
+/** Typed launch handoff: an observed task, accepted ordinary window/command, or failure. */
 final class DesktopActivityLaunchResult {
     enum Outcome {
         OBSERVED_TASK,

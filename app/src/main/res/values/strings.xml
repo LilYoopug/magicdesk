@@ -1151,4 +1151,16 @@
     <string name="setup_restarting_system_ui">Restarting System UI&#8230;</string>
     <string name="setup_system_ui_restart_wait">System UI was restarted recently. Wait at least one minute between attempts.</string>
     <string name="linux_audio">Linux audio</string>
+    <string name="action_clear_recent">Clear history</string>
+    <string name="action_remove_recent">Remove from recent</string>
+    <string name="clear_recent_desktop_confirmation">Clear Desktop launch history? Apps, shortcuts and running tasks will not be affected.</string>
+    <string name="clear_recent_independent_confirmation">Clear independent launch history? Apps, shortcuts and running tasks will not be affected.</string>
+    <string name="recent_edit_failed">Could not update history: %1$s</string>
+    <string name="launcher_export_title">Add to Android launcher</string>
+    <string name="launcher_export_install">Install</string>
+    <string name="launcher_export_update">Update</string>
+    <string name="launcher_export_remove">Remove launcher</string>
+    <string name="launcher_export_preparing">Preparing launcher…</string>
+    <string name="launcher_export_failed">Could not open launcher: %1$s</string>
+    <string name="launcher_export_install_failed">Android could not install the launcher.</string>
 </resources>

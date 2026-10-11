@@ -22,11 +22,22 @@ public class GuestEnvironmentLibraryTest {
     private static final class Images implements GuestEnvironmentLibrary.Images {
         final Map<Path, JSONObject> stores = new HashMap<>();
         final List<List<String>> commands = new ArrayList<>();
+        final Map<Path, String> applications = new HashMap<>();
+        final Map<String, String> icons = new HashMap<>();
         boolean busy;
         @Override public String invoke(String... args) throws Exception {
             commands.add(List.of(args));
             Path path = Path.of(args[1]);
             switch (args[0]) {
+                case "applications" -> {
+                    String value = applications.getOrDefault(path, "");
+                    if (value.equals("unavailable")) throw new IOException("Unreadable environment");
+                    return value;
+                }
+                case "icon" -> {
+                    if (args[2].equals("broken")) throw new IOException("Unreadable artwork");
+                    return icons.getOrDefault(path + ":" + args[2], "");
+                }
                 case "recover-staging", "launches" -> { }
                 case "rootfs", "import", "restore" -> {
                     Path target = Path.of(args[2]); Files.createDirectory(target);
@@ -124,5 +135,65 @@ public class GuestEnvironmentLibraryTest {
         assertTrue(script.contains("exec \"$md_guest/libmagicdesk_guest_image.so\" \"$md_action\" \"$md_store\" \"$@\""));
         assertFalse(script.contains("eval "));
         assertFalse(script.contains("exec /system/bin/app_process"));
+    }
+
+    private static String desktop(String path, String icon, boolean hidden) throws Exception {
+        return new JSONObject().put("path", path).put("text", "[Desktop Entry]\nType=Application\nName=Test\nExec=test\nIcon="
+                + icon + "\nHidden=" + hidden + "\n").toString() + "\n";
+    }
+
+    @Test public void metadataDoesNotFetchArtworkAndIconsResolveOnlyRequestedImmutableOwners() throws Exception {
+        Path root = temporary.newFolder().toPath(), archive = temporary.newFile().toPath();
+        Images images = new Images(); var library = library(root, images);
+        var a = library.restore(archive, "first"); var b = library.restore(archive, "second");
+        images.applications.put(a.store(), desktop("/usr/share/applications/editor.desktop", "editor", false));
+        images.applications.put(b.store(), desktop("/usr/share/applications/editor.desktop", "editor", false));
+        images.icons.put(a.store() + ":editor", "aa"); images.icons.put(b.store() + ":editor", "bb");
+        assertEquals(2, library.applications().length());
+        assertFalse(images.commands.stream().anyMatch(c -> c.get(0).equals("icon")));
+        images.commands.clear();
+        String key = "guest:" + a.id() + ":editor.desktop";
+        assertEquals("aa", library.icons(List.of(key)).getJSONObject(0).getString("png"));
+        assertFalse(images.commands.stream().anyMatch(c -> c.contains(b.store().toString())));
+        library.remove("first"); library.restore(archive, "first");
+        assertFalse(library.icons(List.of(key)).getJSONObject(0).has("png"));
+        assertThrows(IllegalArgumentException.class, () -> library.icons(List.of("guest:../bad:file.desktop")));
+        assertThrows(IllegalArgumentException.class, () -> library.icons(java.util.Collections.nCopies(5, key)));
+    }
+
+    @Test public void hiddenEntriesMaskLowerArtworkAndOneFailureDoesNotDiscardOtherIcons() throws Exception {
+        Path root = temporary.newFolder().toPath(), archive = temporary.newFile().toPath();
+        Images images = new Images(); var library = library(root, images);
+        var a = library.restore(archive, "first");
+        images.applications.put(a.store(), desktop("/root/.local/share/applications/hidden.desktop", "editor", true)
+                + desktop("/usr/share/applications/hidden.desktop", "editor", false)
+                + desktop("/usr/share/applications/bad.desktop", "broken", false)
+                + desktop("/usr/share/applications/good.desktop", "editor", false)
+                + desktop("/usr/share/applications/also.desktop", "editor", false));
+        images.icons.put(a.store() + ":editor", "aabb");
+        images.commands.clear();
+        String prefix = "guest:" + a.id() + ":";
+        var result = library.icons(List.of(prefix + "hidden.desktop", prefix + "bad.desktop", prefix + "good.desktop", prefix + "also.desktop"));
+        assertFalse(result.getJSONObject(0).has("png"));
+        assertTrue(result.getJSONObject(1).has("error"));
+        assertEquals("aabb", result.getJSONObject(2).getString("png"));
+        assertEquals("aabb", result.getJSONObject(3).getString("png"));
+        assertEquals(1, images.commands.stream().filter(c -> c.get(0).equals("applications")).count());
+        assertEquals(1, images.commands.stream().filter(c -> c.contains("editor")).count());
+    }
+
+    @Test public void unavailableEnvironmentDoesNotHideHealthyApplicationsOrArtwork() throws Exception {
+        Path root = temporary.newFolder().toPath(), archive = temporary.newFile().toPath();
+        Images images = new Images(); var library = library(root, images);
+        var bad = library.restore(archive, "bad"); var good = library.restore(archive, "good");
+        images.applications.put(bad.store(), "unavailable");
+        images.applications.put(good.store(), desktop("/usr/share/applications/editor.desktop", "editor", false));
+        images.icons.put(good.store() + ":editor", "abcd");
+        var records = GuestApplicationRecords.parse(library.applications().toString());
+        assertEquals(1, records.entries().size());
+        assertTrue(records.error().contains("bad: "));
+        var icons = library.icons(List.of("guest:" + bad.id() + ":editor.desktop", "guest:" + good.id() + ":editor.desktop"));
+        assertTrue(icons.getJSONObject(0).has("error"));
+        assertEquals("abcd", icons.getJSONObject(1).getString("png"));
     }
 }

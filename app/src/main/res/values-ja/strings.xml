@@ -1140,4 +1140,16 @@
     <string name="setup_restarting_system_ui">システム UI を再起動中…</string>
     <string name="setup_system_ui_restart_wait">システム UI の再起動は最近試行されました。次の試行まで少なくとも 1 分お待ちください。</string>
     <string name="linux_audio">Linux の音声</string>
+    <string name="action_clear_recent">履歴を消去</string>
+    <string name="action_remove_recent">履歴から削除</string>
+    <string name="clear_recent_desktop_confirmation">Desktop の起動履歴を消去しますか？アプリ、ショートカット、実行中のタスクには影響しません。</string>
+    <string name="clear_recent_independent_confirmation">独立した起動の履歴を消去しますか？アプリ、ショートカット、実行中のタスクには影響しません。</string>
+    <string name="recent_edit_failed">履歴を更新できませんでした: %1$s</string>
+    <string name="launcher_export_title">Android ランチャーに追加</string>
+    <string name="launcher_export_install">インストール</string>
+    <string name="launcher_export_update">更新</string>
+    <string name="launcher_export_remove">ランチャーを削除</string>
+    <string name="launcher_export_preparing">ランチャーを準備中…</string>
+    <string name="launcher_export_failed">ランチャーを開けませんでした: %1$s</string>
+    <string name="launcher_export_install_failed">Android でランチャーをインストールできませんでした。</string>
 </resources>

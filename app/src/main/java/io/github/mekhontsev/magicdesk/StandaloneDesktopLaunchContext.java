@@ -84,22 +84,6 @@ final class StandaloneDesktopLaunchContext implements DesktopLaunchContext {
     }
 
     @Override
-    public void launchConsole(
-            final DesktopLaunchRequest request) {
-        BuiltInWindowLauncher.launch(mContext,
-                CommandConsoleActivity.createPreparedCommandIntent(
-                        mContext,
-                        request.exec.command,
-                        request.exec.workingDirectory,
-                        request.exec.backend),
-                CommandConsoleActivity.launchTarget(),
-                ToolLaunchTarget.resolve("display", mDisplayId, DesktopRuntimeBridge.workspaceDisplayIds()),
-                mUniqueId, request.presentation.withInstancePolicy(DesktopTaskInstancePolicy.CREATE_NEW), error -> {
-                    if (error != null) { onFailure(request, error); }
-                });
-    }
-
-    @Override
     public boolean isUnavailable() {
         return mContext instanceof Activity activity
                 && (activity.isFinishing() || activity.isDestroyed());

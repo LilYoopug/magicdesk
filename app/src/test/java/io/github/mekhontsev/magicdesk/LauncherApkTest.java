@@ -1,0 +1,96 @@
+package io.github.mekhontsev.magicdesk;
+
+import static org.junit.Assert.*;
+import java.io.ByteArrayInputStream;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.KeyStore;
+import java.security.PrivateKey;
+import java.security.cert.X509Certificate;
+import java.util.Map;
+import java.util.zip.ZipFile;
+import org.junit.Rule;
+import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
+
+public final class LauncherApkTest {
+    @Rule public TemporaryFolder temporary = new TemporaryFolder();
+    private Path template() { return Path.of(System.getProperty("magicdesk.launcherTemplate")); }
+
+    private byte[] apk(String label) throws Exception {
+        byte[] icon;
+        try (var zip = new ZipFile(template().toFile())) {
+            var image = zip.stream().filter(entry -> entry.getName().startsWith("res/") && entry.getName().endsWith(".png"))
+                    .findFirst().orElseThrow();
+            try (var input = zip.getInputStream(image)) { icon = input.readAllBytes(); }
+        }
+        try (var input = Files.newInputStream(template())) {
+            return LauncherApk.assemble(input, "example.magicdesk", "example.magicdesk.launcher.e" + "a".repeat(32), label, icon);
+        }
+    }
+
+    @Test public void independentAndroidVerifierAcceptsSignatureAndRejectsTampering() throws Exception {
+        Path keys = temporary.getRoot().toPath().resolve("test.p12");
+        String exe = System.getProperty("os.name").startsWith("Windows") ? ".exe" : "";
+        run(true, Path.of(System.getProperty("java.home"), "bin", "keytool" + exe).toString(), "-genkeypair", "-keystore", keys.toString(),
+                "-storetype", "PKCS12", "-storepass", "password", "-keypass", "password", "-alias", "test", "-keyalg", "RSA",
+                "-keysize", "2048", "-dname", "CN=LauncherTest", "-validity", "1");
+        var store = KeyStore.getInstance("PKCS12");
+        try (var input = Files.newInputStream(keys)) { store.load(input, "password".toCharArray()); }
+        byte[] signed = LauncherApk.sign(apk("GIMP \u4e2d\u6587 \ud83d\udd27"), (PrivateKey) store.getKey("test", "password".toCharArray()),
+                (X509Certificate) store.getCertificate("test"));
+        Path output = temporary.getRoot().toPath().resolve("launcher.apk");
+        Files.write(output, signed);
+        verify(true, output);
+        // Modify an entry byte without touching ZIP layout, independently exercising the content digest.
+        signed[150] ^= 1;
+        Files.write(output, signed);
+        verify(false, output);
+    }
+
+    @Test public void rebuiltTemplateKeepsDexAndAlignedResourcesWithoutDependencies() throws Exception {
+        byte[] unsigned = apk("Very long \u0440\u0443\u0441\u0441\u043a\u043e\u0435 name");
+        Path output = temporary.getRoot().toPath().resolve("unsigned.apk");
+        Files.write(output, unsigned);
+        try (var before = new ZipFile(template().toFile()); var after = new ZipFile(output.toFile())) {
+            assertArrayEquals(before.getInputStream(before.getEntry("classes.dex")).readAllBytes(),
+                    after.getInputStream(after.getEntry("classes.dex")).readAllBytes());
+            assertEquals(java.util.zip.ZipEntry.STORED, after.getEntry("resources.arsc").getMethod());
+        }
+        var in = ByteBuffer.wrap(unsigned).order(ByteOrder.LITTLE_ENDIAN);
+        for (int at = 0; in.getInt(at) == 0x04034b50;) {
+            int size = in.getInt(at + 18), name = Short.toUnsignedInt(in.getShort(at + 26));
+            int extra = Short.toUnsignedInt(in.getShort(at + 28));
+            int start = at + 30 + name + extra;
+            assertEquals(0, start & 3);
+            at = start + size;
+        }
+    }
+
+    @Test public void malformedOrUnexpectedTemplatesAreRejected() throws Exception {
+        assertThrows(java.io.IOException.class, () -> LauncherManifest.replace(new byte[7], Map.of()));
+        try (var zip = new ZipFile(template().toFile())) {
+            byte[] manifest = zip.getInputStream(zip.getEntry("AndroidManifest.xml")).readAllBytes();
+            assertThrows(java.io.IOException.class, () -> LauncherManifest.replace(manifest, Map.of("missing", "value")));
+            byte[] bad = manifest.clone(); bad[4] ^= 1;
+            assertThrows(java.io.IOException.class, () -> LauncherManifest.replace(bad, Map.of()));
+            assertThrows(java.io.IOException.class, () -> LauncherManifest.replace(manifest,
+                    Map.of("MAGICDESK_LAUNCHER_LABEL", "bad\0label")));
+        }
+        assertThrows(java.io.IOException.class, () -> LauncherApk.assemble(new ByteArrayInputStream(new byte[0]), "a", "b", "c", new byte[0]));
+    }
+
+    private static void verify(boolean expected, Path apk) throws Exception {
+        String signer = System.getProperty("magicdesk.apksigner");
+        if (signer.endsWith(".bat")) run(expected, "cmd", "/c", signer, "verify", "--min-sdk-version", "34", apk.toString());
+        else run(expected, signer, "verify", "--min-sdk-version", "34", apk.toString());
+    }
+
+    private static void run(boolean expected, String... command) throws Exception {
+        Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
+        String output = new String(process.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        assertEquals(output, expected, process.waitFor() == 0);
+    }
+}

@@ -54,8 +54,7 @@ final class DesktopItemViewFactory {
                 item.setAlpha(0.72f);
             }
         } else if (applicationShortcut != null) {
-            icon.setImageDrawable(DesktopApplicationIconResolver.resolve(
-                    mActivity, applicationShortcut));
+            ApplicationIconBinding.bind(icon, applicationShortcut);
         } else if (webShortcut != null) {
             icon.setImageResource(R.drawable.ic_desktop_web_link);
         } else if (file.thumbnail != null) {

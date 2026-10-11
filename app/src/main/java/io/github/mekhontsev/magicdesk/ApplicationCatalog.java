@@ -28,8 +28,7 @@ final class ApplicationCatalog {
 
     record Snapshot(ApplicationCatalogSource.Snapshot<AppItem> android,
             ApplicationCatalogSource.Snapshot<DesktopApplicationRepository.Entry> termux,
-            ApplicationCatalogSource.Snapshot<DesktopApplicationRepository.Entry> guest,
-            java.util.Map<String, android.graphics.Bitmap> termuxIcons) {
+            ApplicationCatalogSource.Snapshot<DesktopApplicationRepository.Entry> guest) {
         List<StartMenuEntry> applications(List<AppItem> apps,
                 List<DesktopApplicationRepository.Entry> desktop) {
             final List<StartMenuEntry> entries = new ArrayList<>();
@@ -47,9 +46,7 @@ final class ApplicationCatalog {
     private final ApplicationCatalogSource<AppItem> android;
     private final ApplicationCatalogSource<DesktopApplicationRepository.Entry> termux;
     private final ApplicationCatalogSource<DesktopApplicationRepository.Entry> guest;
-    private java.util.Map<String, android.graphics.Bitmap> guestIcons = java.util.Map.of();
     private int guestOwner = -1;
-    private final ApplicationIconCache<android.graphics.Bitmap> icons;
     private TermuxIntegration.Endpoint endpoint;
     private String termuxOwner = "";
     private String lastTermuxError = "";
@@ -69,9 +66,6 @@ final class ApplicationCatalog {
         android = new ApplicationCatalogSource<>(this::loadAndroid, this::changed);
         termux = new ApplicationCatalogSource<>(this::loadTermuxSource, this::termuxChanged);
         guest = new ApplicationCatalogSource<>(this::loadGuestSource, this::changed);
-        icons = new ApplicationIconCache<>(TermuxIconCommand.BATCH_SIZE,
-                (keys, complete) -> TermuxApplicationIcons.load(context, endpoint, IO, keys, complete),
-                this::changed);
         final LauncherApps launcher = context.getSystemService(LauncherApps.class);
         if (launcher != null) launcher.registerCallback(new LauncherApps.Callback() {
             @Override public void onPackageAdded(String name, UserHandle user) { packagesChanged(); }
@@ -94,15 +88,7 @@ final class ApplicationCatalog {
         });
     }
 
-    Snapshot snapshot() { return new Snapshot(android.snapshot(), termux.snapshot(), guest.snapshot(), icons.snapshot()); }
-
-    static android.graphics.Bitmap cachedGuestIcon(String name) {
-        return instance == null ? null : instance.guestIcons.get(name);
-    }
-
-    static android.graphics.Bitmap cachedTermuxIcon(String name) {
-        return instance == null ? null : instance.icons.snapshot().get(name);
-    }
+    Snapshot snapshot() { return new Snapshot(android.snapshot(), termux.snapshot(), guest.snapshot()); }
 
     List<AppItem> androidApps(boolean freeform) {
         final List<AppItem> apps = android.snapshot().entries();
@@ -128,6 +114,7 @@ final class ApplicationCatalog {
     }
 
     void refreshApplications() {
+        ApplicationIcons.refresh();
         android.invalidate(); termux.invalidate(); guest.invalidate();
         refresh();
     }
@@ -135,7 +122,7 @@ final class ApplicationCatalog {
     private boolean inspectGuest() {
         int uid = ShellAccess.isReady() ? ShellAccess.currentSnapshot().uid : -1;
         if (uid != guestOwner) {
-            guestOwner = uid; guestIcons = java.util.Map.of();
+            guestOwner = uid;
             guest.reset(uid < 0 ? "Privileged command service is unavailable" : "");
         }
         return uid == 2000 || uid == 0;
@@ -146,16 +133,12 @@ final class ApplicationCatalog {
         IO.execute(() -> {
             try {
                 var result = GuestApplicationRecords.parse(GuestEnvironmentOperations.read("", "applications"));
-                var images = new java.util.HashMap<String, android.graphics.Bitmap>();
-                result.icons().forEach((key, bytes) -> {
-                    var image = ApplicationIconBitmap.decode(bytes);
-                    if (image != null) images.put(key, image);
-                });
                 MAIN.post(() -> {
                     inspectGuest();
                     if (owner != guestOwner) return;
-                    guestIcons = java.util.Map.copyOf(images);
-                    complete.complete(result.entries(), "");
+                    if (!result.error().isEmpty()) CompatibilityDiagnostics.record("GUEST-APPS-001",
+                            "Some guest applications could not be loaded", result.error());
+                    complete.partial(result.entries(), result.error());
                 });
             } catch (Exception error) {
                 MAIN.post(() -> {
@@ -195,13 +178,14 @@ final class ApplicationCatalog {
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt(); throw new IOException("Guest catalog interrupted", error);
         }
-        if (!result.get().error().isEmpty()) throw new IOException(result.get().error());
+        if (!result.get().ready() && !result.get().error().isEmpty()) throw new IOException(result.get().error());
         return result.get().entries();
     }
 
     void ensureAndroid() { android.ensureLoaded(); }
 
     void termuxApplicationsChanged() {
+        ApplicationIcons.refresh();
         termux.invalidate();
         refresh();
     }
@@ -222,7 +206,6 @@ final class ApplicationCatalog {
                 : IntegrationPackage.TERMUX.selected() + "|unavailable";
         if (!identity.equals(termuxOwner)) {
             termuxOwner = identity;
-            icons.reset();
             termux.reset(endpoint.error);
         }
         return endpoint.available();
@@ -245,18 +228,13 @@ final class ApplicationCatalog {
     private void loadTermuxSource(
             ApplicationCatalogSource.Completion<DesktopApplicationRepository.Entry> complete) {
         final String owner = termuxOwner;
-        TermuxApplicationSource.load(context, endpoint, (entries, error) -> {
+        TermuxApplicationSource.load(context, endpoint, (entries, error, availableResult) -> {
             final boolean available = inspectTermux();
             if (!owner.equals(termuxOwner)) {
                 if (available && !listeners.isEmpty()) termux.ensureLoaded();
                 return;
             }
-            complete.complete(entries, error);
-            if (error.isEmpty()) {
-                final var names = new java.util.LinkedHashSet<String>();
-                for (var entry : entries) if (TermuxIconCommand.valid(entry.shortcut.icon)) names.add(entry.shortcut.icon);
-                icons.update(names);
-            }
+            complete.publish(entries, error, availableResult);
         });
     }
 

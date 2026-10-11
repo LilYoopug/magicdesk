@@ -1,0 +1,17 @@
+def templateProject = project(':launcher-template')
+def templateAsset = tasks.register('packageLauncherTemplate', Sync) {
+    dependsOn ':launcher-template:assembleRelease'
+    from templateProject.layout.buildDirectory.file('outputs/apk/release/launcher-template-release-unsigned.apk')
+    into layout.buildDirectory.dir('generated/launcherTemplate/launcher')
+    rename { 'template.apk' }
+}
+android.sourceSets.main.assets.srcDir layout.buildDirectory.dir('generated/launcherTemplate').get().asFile
+tasks.named('preBuild').configure { dependsOn templateAsset }
+
+tasks.withType(Test).configureEach {
+    dependsOn templateAsset
+    systemProperty 'magicdesk.launcherTemplate', layout.buildDirectory.file('generated/launcherTemplate/launcher/template.apk').get().asFile
+    def suffix = System.getProperty('os.name').toLowerCase(Locale.ROOT).contains('windows') ? '.bat' : ''
+    systemProperty 'magicdesk.apksigner', new File(androidComponents.sdkComponents.sdkDirectory.get().asFile,
+            "build-tools/${android.buildToolsVersion}/apksigner${suffix}")
+}

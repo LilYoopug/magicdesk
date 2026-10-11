@@ -27,6 +27,7 @@ public final class WaylandActivity extends Activity implements WaylandSessions.L
     private volatile BuiltInWindowRegistry.Presentation presentation;
     private volatile AppReference application;
     private RecentApplicationStore.Entry identityRecipe;
+    private final ApplicationIconSubscription artwork = new ApplicationIconSubscription(this, this::refreshArtwork);
     private boolean pendingLaunch;
     private boolean detached;
 
@@ -108,9 +109,13 @@ public final class WaylandActivity extends Activity implements WaylandSessions.L
         if (binding != null) binding.refresh();
     }
 
+    private void refreshArtwork() {
+        if (!isDestroyed() && !isFinishing() && presentation != null) present(presentation.title());
+    }
+
     private void present(String title) {
-        var recipe = session.recipe();
-        var icon = DesktopApplicationIconResolver.hostedIcon(null, recipe);
+        artwork.set(identityRecipe);
+        var icon = DesktopApplicationIconResolver.hostedIcon(null, identityRecipe);
         if (presentation != null && presentation.title().equals(title) && presentation.icon() == icon) return;
         presentation = new BuiltInWindowRegistry.Presentation(title, icon);
         setTitle(title);
@@ -172,6 +177,7 @@ public final class WaylandActivity extends Activity implements WaylandSessions.L
     }
     @Override public void detachHostedWindow() { detached = true; finishAndRemoveTask(); }
     @Override public void onDestroy() {
+        artwork.close();
         if (isFinishing() && pendingLaunch && session != null && !session.desktop) session.close();
         boolean request = isFinishing() && !detached && session != null && !session.desktop && session.ready() && session.containsWindow(window);
         if (request) session.closeWindow(window, false);

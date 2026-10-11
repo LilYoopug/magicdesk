@@ -2,6 +2,7 @@ package io.github.mekhontsev.magicdesk;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import org.junit.Test;
 import static org.junit.Assert.*;
 
@@ -59,22 +60,26 @@ public final class ApplicationCatalogTest {
         assertFalse(RuntimeSourceFixture.methods("ApplicationCatalog", "inspectTermux").contains("ShellAccess"));
         assertTrue(source("DesktopEntrySource").contains("ApplicationCatalog.loadTermux"));
         final String termux = RuntimeSourceFixture.methods("ApplicationCatalog", "loadTermuxSource");
-        assertTrue(termux.indexOf("inspectTermux()") < termux.indexOf("complete.complete"));
+        assertTrue(termux.indexOf("inspectTermux()") < termux.indexOf("complete.publish"));
         assertTrue(termux.contains("!owner.equals(termuxOwner)"));
     }
 
     @Test public void iconsAreOptionalCachedAndBoundWithoutRebuildingStart() throws Exception {
         final String lookup = RuntimeSourceFixture.methods("DesktopApplicationIconResolver", "resolve");
-        final String cached = RuntimeSourceFixture.methods("DesktopApplicationIconResolver", "cachedIcon");
-        assertTrue(lookup.contains("cachedIcon(shortcut)"));
-        assertTrue(cached.contains("ApplicationCatalog.cachedTermuxIcon"));
-        assertTrue(cached.contains("ApplicationCatalog.cachedGuestIcon"));
-        assertFalse((lookup + cached).contains("runBackgroundShellCommand"));
-        assertFalse((lookup + cached).contains("decodeByteArray"));
-        final String refresh = RuntimeSourceFixture.methods("StartMenuContent", "refreshIcons");
-        assertTrue(refresh.contains("bindIcon"));
-        assertFalse(refresh.contains("renderBody"));
-        assertTrue(RuntimeSourceFixture.methods("ApplicationCatalog", "inspectTermux").contains("icons.reset()"));
+        assertTrue(lookup.contains("ApplicationIcons.cached"));
+        assertFalse(lookup.contains("runBackgroundShellCommand"));
+        assertFalse(lookup.contains("decodeByteArray"));
+        assertFalse(source("ApplicationCatalog").contains("ApplicationIconCache"));
+        assertFalse(source("ApplicationCatalog").contains("ApplicationIconBitmap"));
+        assertTrue(RuntimeSourceFixture.methods("StartMenuContent", "bindIcon").contains("ApplicationIconBinding.bind"));
+        assertTrue(RuntimeSourceFixture.methods("StartMenuContent", "bindIcon").contains("entry.recent.termuxPackage()"));
+        assertFalse(source("ApplicationIconBinding").contains("renderBody"));
+        assertTrue(RuntimeSourceFixture.methods("ApplicationIconBinding", "onViewDetachedFromWindow").contains("subscription.close()"));
+        assertTrue(RuntimeSourceFixture.methods("ApplicationIconBinding", "clear").contains("removeOnAttachStateChangeListener"));
+        for (String host : List.of("X11Activity", "WaylandActivity")) {
+            assertTrue(RuntimeSourceFixture.methods(host, "onDestroy").contains("artwork.close()"));
+            assertTrue(RuntimeSourceFixture.methods(host, "present").contains("identityRecipe"));
+        }
         final String icons = source("TermuxApplicationIcons");
         assertTrue(icons.contains("decoder.execute"));
         assertFalse(icons.contains("ShellAccess"));

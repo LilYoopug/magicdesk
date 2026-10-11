@@ -2123,8 +2123,8 @@ public abstract class DesktopShellActivity extends Activity
 
     void registerStartContextTarget(View view, AppItem app,
             java.util.function.Supplier<StartDisplaySelector.Target> destination,
-            java.util.function.Supplier<DesktopLaunchPresentation> presentation) {
-        mContextMenuController.registerStartTarget(view, app, destination, presentation);
+            java.util.function.Supplier<DesktopLaunchPresentation> presentation, Runnable removeRecent) {
+        mContextMenuController.registerStartTarget(view, app, destination, presentation, removeRecent);
     }
 
     void launchDefault(final AppItem app) {

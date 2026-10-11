@@ -41,7 +41,7 @@ final class StartMenuContent {
         DesktopAutomationUiRegistry automation();
         void open(StartMenuEntry result);
         void dismiss();
-        default void appContext(View view, AppItem app) { }
+        default void appContext(View view, AppItem app, Runnable removeRecent) { }
         default void fileContext(View view, DesktopFile file) { }
         default void populateTools(LinearLayout parent, int spacing, boolean capture) { }
         default void requestSearchFocus() { }
@@ -69,6 +69,7 @@ final class StartMenuContent {
     private LinearLayout mBody;
     private EditText mSearch;
     private LinearLayout mSearchRow;
+    private android.widget.ImageButton mClearRecent;
     private StartLaunchControls mLaunchControls;
     private boolean mFocusable = true;
     private int mMode = MENU_RECENT;
@@ -83,6 +84,13 @@ final class StartMenuContent {
     private boolean mPrepared, mReleased;
     private ShellComposition.Start mAppearance;
     private final Runnable mAppearanceChanged = this::appearanceChanged;
+    private final java.util.function.Consumer<RecentLaunchScope> mRecentChanged = this::recentChanged;
+
+    private void recentChanged(RecentLaunchScope scope) {
+        if (mReleased || !mPrepared || scope != mLaunchControls.recentScope()) return;
+        mSearchController.update(mSearchQuery, entries(mMode, true));
+        renderBody();
+    }
 
     StartMenuContent(
             final Activity activity,
@@ -213,6 +221,14 @@ final class StartMenuContent {
         refresh.setOnClickListener(view -> mCatalog.refreshApplications());
         mSearchRow.addView(refresh, new LinearLayout.LayoutParams(dp(48), dp(48)));
         mHost.automation().register(refresh, "start.refresh", "button", mActivity.getString(R.string.action_refresh));
+        mClearRecent = new android.widget.ImageButton(mActivity);
+        mClearRecent.setImageDrawable(UiAppearance.symbol(mActivity, R.drawable.ic_file_delete, UiColor.TEXT));
+        mClearRecent.setBackgroundColor(android.graphics.Color.TRANSPARENT);
+        mClearRecent.setContentDescription(mActivity.getString(R.string.action_clear_recent));
+        mClearRecent.setTooltipText(mActivity.getString(R.string.action_clear_recent));
+        mClearRecent.setOnClickListener(view -> confirmClearRecent());
+        mSearchRow.addView(mClearRecent, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        mHost.automation().register(mClearRecent, "start.recent.clear", "button", mActivity.getString(R.string.action_clear_recent));
         mLaunchControls = new StartLaunchControls(mActivity, mUi, mHost.automation(), this::destinationChanged);
         mContent.setOrientation(LinearLayout.VERTICAL);
         final LinearLayout.LayoutParams contentParams = new LinearLayout.LayoutParams(
@@ -302,6 +318,7 @@ final class StartMenuContent {
         if (!mPrepared) {
             mPrepared = true;
             mCatalog.subscribe(mCatalogListener);
+            RecentApplications.subscribe(mRecentChanged);
             mCatalog.refresh();
             mObservedCatalog = mCatalog.snapshot();
             RecentApplications.refresh(mActivity, () -> {
@@ -362,7 +379,6 @@ final class StartMenuContent {
                 && previous.guest().entries() == next.guest().entries()
                 && (next.android().ready() || (previous.android().loading() == next.android().loading()
                         && previous.android().error().equals(next.android().error())))) {
-            if (previous.termuxIcons() != next.termuxIcons()) refreshIcons(mBody);
             return;
         }
         mSearchController.update(mSearchQuery, entries(mMode, true));
@@ -372,6 +388,7 @@ final class StartMenuContent {
     void pause() {
         mPrepared = false;
         mCatalog.unsubscribe(mCatalogListener);
+        RecentApplications.unsubscribe(mRecentChanged);
         mLaunchControls.dismiss();
         mSearch.setShowSoftInputOnFocus(false);
         mSearchController.pause();
@@ -382,6 +399,7 @@ final class StartMenuContent {
         mReleased = true;
         mPrepared = false;
         mCatalog.unsubscribe(mCatalogListener);
+        RecentApplications.unsubscribe(mRecentChanged);
         mLaunchControls.dismiss();
         mSearchController.close();
         mEntriesView = null;
@@ -417,6 +435,12 @@ final class StartMenuContent {
     }
 
     private void renderBody() {
+        if (mClearRecent != null) {
+            mClearRecent.setVisibility(mMode == MENU_RECENT ? View.VISIBLE : View.GONE);
+            boolean enabled = !RecentApplications.entries(mLaunchControls.recentScope()).isEmpty();
+            mClearRecent.setEnabled(enabled);
+            mClearRecent.setAlpha(enabled ? 1f : .4f);
+        }
         if (mBody == null) {
             return;
         }
@@ -864,37 +888,45 @@ final class StartMenuContent {
     }
 
     private void bindIcon(final ImageView icon, final StartMenuEntry entry) {
+        ApplicationIconBinding.clear(icon);
         icon.setTag(entry);
         if (entry.app != null) { UiApplicationIcon.bind(icon, entry.app, UiColor.TEXT); }
         else if (entry.builtIn != null) { UiAppearance.icon(icon, searchIcon(entry), UiColor.TEXT); }
         else if (entry.desktopApplication != null) {
-            icon.setImageDrawable(DesktopApplicationIconResolver.resolve(
-                    mActivity, entry.desktopApplication.shortcut));
+            ApplicationIconBinding.bind(icon, entry.desktopApplication.shortcut,
+                    entry.recent == null ? null : entry.recent.termuxPackage());
         } else { UiAppearance.icon(icon, searchIcon(entry), UiColor.TEXT); }
     }
 
-    private void refreshIcons(View view) {
-        if (view instanceof ImageView icon && icon.getTag() instanceof StartMenuEntry entry) {
-            if (entry.desktopApplication != null) bindIcon(icon, entry);
-        } else if (view instanceof android.view.ViewGroup group)
-            for (int i = 0; i < group.getChildCount(); i++) refreshIcons(group.getChildAt(i));
-    }
-
     private void bindContextMenu(View view, StartMenuEntry entry) {
-        if (entry.app != null) mHost.appContext(view, entry.app);
+        final RecentLaunchScope scope = mLaunchControls.recentScope();
+        final Runnable removeRecent = entry.recent == null ? null : () ->
+                RecentApplications.remove(mActivity, scope, entry.recent, this::recentEditCompleted);
+        if (entry.app != null) mHost.appContext(view, entry.app, removeRecent);
         else if (entry.desktopApplication != null) {
             var application = entry.desktopApplication;
             if (application.desktopFile != null) mHost.fileContext(view, application.desktopFile);
-            else if (application.shortcut.execBackend == DesktopExecBackend.TERMUX) {
+            else if (removeRecent != null || application.shortcut.hasExecLaunch()) {
                 view.setOnLongClickListener(anchor -> {
-                    final boolean userShortcut = (entry.recent == null
+                    final boolean userShortcut = application.shortcut.execBackend == DesktopExecBackend.TERMUX
+                            && (entry.recent == null
                             || entry.recent.termuxPackage().equals(IntegrationPackage.TERMUX.selected()))
                             && mCatalog.snapshot().termux().entries().stream().anyMatch(current -> current.userShortcut
                                     && current.desktopFilePath.equals(application.desktopFilePath));
-                    final boolean scale = application.shortcut.graphics != null
+                    final boolean scale = application.shortcut.execBackend == DesktopExecBackend.TERMUX
+                            && application.shortcut.graphics != null
                             && !application.desktopFilePath.isBlank();
-                    if (!userShortcut && !scale) return false;
+                    final boolean export = application.shortcut.hasExecLaunch() && !application.desktopFilePath.isBlank();
+                    if (!userShortcut && !scale && removeRecent == null && !export) return false;
                     final android.widget.PopupMenu menu = new android.widget.PopupMenu(mActivity, anchor);
+                    if (export) menu.getMenu().add(R.string.launcher_export_title)
+                            .setOnMenuItemClickListener(item -> {
+                                LauncherExportActivity.open(mActivity, application,
+                                        entry.recent == null ? null : entry.recent.termuxPackage());
+                                return true;
+                            });
+                    if (removeRecent != null) menu.getMenu().add(R.string.action_remove_recent)
+                            .setOnMenuItemClickListener(item -> { removeRecent.run(); return true; });
                     if (scale) menu.getMenu().add(R.string.app_presentation_scale)
                             .setOnMenuItemClickListener(item -> {
                                 GraphicalScaleDialog.show(mActivity, entry.label, entry.recent == null
@@ -913,6 +945,28 @@ final class StartMenuContent {
                 view.setOnContextClickListener(View::performLongClick);
             }
         }
+    }
+
+    private void confirmClearRecent() {
+        final RecentLaunchScope scope = mLaunchControls.recentScope();
+        final var dialog = UiDialogs.builder(mActivity)
+                .setTitle(R.string.action_clear_recent)
+                .setMessage(scope == RecentLaunchScope.DESKTOP
+                        ? R.string.clear_recent_desktop_confirmation : R.string.clear_recent_independent_confirmation)
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton(R.string.action_clear_recent, (confirm, which) ->
+                        RecentApplications.clear(mActivity, scope, this::recentEditCompleted))
+                .show();
+        mHost.automation().register(dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE),
+                "start.recent.clear.confirm", "button", mActivity.getString(R.string.action_clear_recent));
+        mHost.automation().register(dialog.getButton(android.app.AlertDialog.BUTTON_NEGATIVE),
+                "start.recent.clear.cancel", "button", mActivity.getString(android.R.string.cancel));
+    }
+
+    private void recentEditCompleted(Throwable error) {
+        if (error != null && !mActivity.isFinishing() && !mActivity.isDestroyed())
+            android.widget.Toast.makeText(mActivity, mActivity.getString(R.string.recent_edit_failed,
+                    ShellAccess.usefulMessage(error)), android.widget.Toast.LENGTH_LONG).show();
     }
 
     private static String modeName(final int mode) {

@@ -203,12 +203,14 @@ final class FullscreenStartController implements StartMenuContent.Host {
         else { mActivity.finish(); }
     }
 
-    @Override public void appContext(android.view.View view, AppItem app) {
+    @Override public void appContext(android.view.View view, AppItem app, Runnable removeRecent) {
         view.setOnContextClickListener(anchor -> anchor.performLongClick());
         view.setOnLongClickListener(anchor -> {
             final android.widget.PopupMenu menu = new android.widget.PopupMenu(mActivity, anchor);
             final StartDisplaySelector.Target target = mStart.destination();
             final DesktopLaunchPresentation selected = mStart.presentation();
+            if (removeRecent != null) menu.getMenu().add(R.string.action_remove_recent)
+                    .setOnMenuItemClickListener(item -> { removeRecent.run(); return true; });
             menu.getMenu().add(R.string.action_open).setOnMenuItemClickListener(item -> {
                 launch(StartMenuEntry.app(app), target, selected); return true;
             });

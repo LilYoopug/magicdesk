@@ -18,6 +18,17 @@ final class RecentApplications {
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private record Snapshot(List<RecentApplicationStore.Entry> entries, String error) { }
     private static volatile Map<RecentLaunchScope, Snapshot> snapshots = Map.of();
+    private static final java.util.Set<java.util.function.Consumer<RecentLaunchScope>> listeners = new java.util.LinkedHashSet<>();
+
+    // UI subscriptions and delivery are confined to the main thread.
+    static void subscribe(java.util.function.Consumer<RecentLaunchScope> listener) { listeners.add(listener); }
+    static void unsubscribe(java.util.function.Consumer<RecentLaunchScope> listener) { listeners.remove(listener); }
+
+    private static void notifyChanged(RecentLaunchScope scope) {
+        MAIN.post(() -> {
+            for (var listener : List.copyOf(listeners)) listener.accept(scope);
+        });
+    }
 
     static List<RecentApplicationStore.Entry> entries(RecentLaunchScope scope) {
         return snapshots.getOrDefault(scope, new Snapshot(List.of(), "")).entries();
@@ -70,7 +81,40 @@ final class RecentApplications {
             for (var scope : RecentLaunchScope.values()) {
                 try { publish(scope, store(app, scope).removeSource(termuxPackage, sourcePath), ""); }
                 catch (java.io.IOException | RuntimeException failure) { failed(scope, failure); error = failure; }
+                notifyChanged(scope);
             }
+            final Throwable result = error;
+            MAIN.post(() -> complete.accept(result));
+        });
+    }
+
+    static void remove(Context context, RecentLaunchScope scope, RecentApplicationStore.Entry entry,
+            java.util.function.Consumer<Throwable> complete) {
+        edit(context, scope, history -> history.remove(entry), complete);
+    }
+
+    static void clear(Context context, RecentLaunchScope scope, java.util.function.Consumer<Throwable> complete) {
+        edit(context, scope, RecentApplicationStore::clear, complete);
+    }
+
+    private interface Edit {
+        List<RecentApplicationStore.Entry> apply(RecentApplicationStore history) throws java.io.IOException;
+    }
+
+    private static void edit(Context context, RecentLaunchScope scope, Edit edit,
+            java.util.function.Consumer<Throwable> complete) {
+        Context app = context.getApplicationContext();
+        IO.execute(() -> {
+            Throwable error = null;
+            try { publish(scope, edit.apply(store(app, scope)), ""); }
+            catch (java.io.IOException | RuntimeException failure) {
+                // A multi-record clear may have partially succeeded. Reconcile before publishing failure.
+                try { publish(scope, store(app, scope).read(), ""); }
+                catch (java.io.IOException | RuntimeException readFailure) { failure.addSuppressed(readFailure); }
+                failed(scope, failure);
+                error = failure;
+            }
+            notifyChanged(scope);
             final Throwable result = error;
             MAIN.post(() -> complete.accept(result));
         });

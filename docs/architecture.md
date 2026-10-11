@@ -3315,6 +3315,11 @@ identities; terminal backend remains meaningful, and X11 records its original
 recipe with the explicit launch scope after readiness. Live managed-task focus
 can update Desktop history without assigning independent tasks to that history.
 Shell availability never changes the meaning of Recent.
+Recent offers scope-specific history clearing with confirmation and per-entry
+removal through the existing context menus. These operations delete only private
+history records, not source shortcuts, pins or running tasks. Edits share the
+launch-history IO queue and notify visible Start instances; the action retains
+the scope selected when it was opened even if the destination changes.
 
 Fullscreen Start also has a separate Running tab. Ordinary HOME Running is
 derived from its local tasks through `HomeRecentApps`. It includes
@@ -3340,15 +3345,52 @@ sorts entries, while each Start retains its own navigation and subscribes only
 while presented. Grid capacity follows each panel's measured viewport, including
 keyboard resizing.
 
-The same catalog owns optional Termux artwork through `ApplicationIconCache`.
-It deduplicates names, caches misses, evicts removed names and invalidates
-in-flight results on endpoint changes. `TermuxIconCommand` performs bounded PNG
-lookups through RUN_COMMAND in four-icon batches; `TermuxApplicationIcons`
-decodes and downsamples on the existing catalog worker. Renderers only read
-immutable bitmap snapshots. Start updates visible artwork in place instead of
-rebuilding its grid. No filesystem scan, X server, privilege acquisition or
-per-icon command runs during binding or scrolling. See [X11 applications](x11.md#applications)
-for the deliberately limited bitmap lookup and process-lifetime cache policy.
+Guest discovery isolates unreadable environments: healthy entries remain
+available, while the source snapshot and compatibility diagnostics retain the
+per-environment errors. A partial result is distinct from a failed query, which
+retains the last successful snapshot.
+
+`ApplicationIcons` owns optional Linux artwork independently of discovery.
+`ApplicationIconBinding` subscribes attached views, including recent launches,
+file shortcuts and application pickers; X11/Wayland hosts retain a subscription
+for their task presentation. Native client artwork takes precedence. Keys retain
+the Termux package or immutable guest environment ID; history never borrows an
+icon from another installation. `ApplicationIconCache` coalesces demand, pins
+active entries and retains at most 256 idle hits/misses per provider. Source
+changes discard stale completions; explicit refresh and reconnection retry
+misses and failed reads. Termux uses bounded four-icon RUN_COMMAND batches;
+guest artwork reads only requested environments through their inode namespace.
+Metadata discovery does not load image files. Decoding runs on an artwork worker,
+and renderers read immutable bitmap snapshots. Completion updates only the
+subscribed image or task presentation, without rebuilding lists. Binding adds
+no synchronous file or command I/O and requires neither Desktop nor an X server.
+See [X11 applications](x11.md#applications) for the bounded PNG lookup policy.
+
+`LauncherExports` exposes saved Linux catalog entries to Android launchers.
+The build-only `launcher-template` module supplies one unsigned Activity APK;
+bounded manifest string-pool substitution and PNG replacement produce an entry
+without an on-device compiler or APK library. `LauncherApk` writes aligned ZIP
+entries and APK Signature Scheme v2 framing using Java cryptography and an
+installation-local AndroidKeyStore RSA key. SDK `apksigner` independently
+verifies the format in unit tests. Installation and removal use Android's
+interactive package UI and `GeneratedContentProvider` read grants, never a
+privileged installer fallback.
+
+`LauncherExportStore` retains a random package identity, source path, Android
+profile, executor package/UID and signing-certificate digest in private storage.
+The exported `LauncherEntryActivity` accepts no command or target from extras:
+Android's result-calling package and its certificate must match a private record.
+Each activation resolves the live source and validates the retained executor
+identity before dispatch through `ApplicationEntryLauncher` and `ToolLaunchTarget`.
+For independent launches, completion follows the real window handoff or command
+dispatch, not coordinator admission. This keeps transient callers alive during
+Linux startup; terminal recipes use the same built-in window gateway in both
+launch contexts.
+Deleted entries and changed identities fail explicitly. Exporting does not
+acquire Desktop, HOME, input or MCP, and Termux entries require no shell service.
+Artwork uses the shared icon service; history and launcher registration have
+independent lifetimes. Clearing app data invalidates exports and their signing
+key; old packages must be removed and recreated.
 
 Every Start has a compact launch-display selector alongside search. **Current**
 means the display hosting that instance, not the selected input display. Choosing

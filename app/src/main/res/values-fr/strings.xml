@@ -1162,4 +1162,16 @@
     <string name="setup_restarting_system_ui">Redémarrage de l\'interface système…</string>
     <string name="setup_system_ui_restart_wait">Une tentative de redémarrage de l\'interface système a eu lieu récemment. Attendez au moins une minute entre les tentatives.</string>
     <string name="linux_audio">Audio Linux</string>
+    <string name="action_clear_recent">Effacer l\'historique</string>
+    <string name="action_remove_recent">Retirer des récents</string>
+    <string name="clear_recent_desktop_confirmation">Effacer l\'historique des lancements Desktop ? Les apps, les raccourcis et les tâches en cours ne seront pas affectés.</string>
+    <string name="clear_recent_independent_confirmation">Effacer l\'historique des lancements indépendants ? Les apps, les raccourcis et les tâches en cours ne seront pas affectés.</string>
+    <string name="recent_edit_failed">Impossible de mettre à jour l\'historique : %1$s</string>
+    <string name="launcher_export_title">Ajouter au lanceur Android</string>
+    <string name="launcher_export_install">Installer</string>
+    <string name="launcher_export_update">Mettre à jour</string>
+    <string name="launcher_export_remove">Supprimer le raccourci</string>
+    <string name="launcher_export_preparing">Préparation du raccourci…</string>
+    <string name="launcher_export_failed">Impossible d’ouvrir le raccourci : %1$s</string>
+    <string name="launcher_export_install_failed">Android n’a pas pu installer le raccourci.</string>
 </resources>

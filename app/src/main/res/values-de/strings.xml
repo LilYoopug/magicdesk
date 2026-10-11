@@ -1151,4 +1151,16 @@
     <string name="setup_restarting_system_ui">Systemoberfläche wird neu gestartet…</string>
     <string name="setup_system_ui_restart_wait">Ein Neustart der Systemoberfläche wurde kürzlich versucht. Zwischen Versuchen muss mindestens eine Minute liegen.</string>
     <string name="linux_audio">Linux-Audio</string>
+    <string name="action_clear_recent">Verlauf löschen</string>
+    <string name="action_remove_recent">Aus Verlauf entfernen</string>
+    <string name="clear_recent_desktop_confirmation">Desktop-Startverlauf löschen? Apps, Verknüpfungen und laufende Aufgaben bleiben unverändert.</string>
+    <string name="clear_recent_independent_confirmation">Verlauf unabhängiger Starts löschen? Apps, Verknüpfungen und laufende Aufgaben bleiben unverändert.</string>
+    <string name="recent_edit_failed">Verlauf konnte nicht aktualisiert werden: %1$s</string>
+    <string name="launcher_export_title">Zum Android-Launcher hinzufügen</string>
+    <string name="launcher_export_install">Installieren</string>
+    <string name="launcher_export_update">Aktualisieren</string>
+    <string name="launcher_export_remove">Starter entfernen</string>
+    <string name="launcher_export_preparing">Starter wird vorbereitet…</string>
+    <string name="launcher_export_failed">Starter konnte nicht geöffnet werden: %1$s</string>
+    <string name="launcher_export_install_failed">Android konnte den Starter nicht installieren.</string>
 </resources>

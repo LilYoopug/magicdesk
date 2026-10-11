@@ -27,9 +27,11 @@ final class ApplicationEntryLauncher {
                     MAIN.post(() -> {
                         if (!alive.getAsBoolean()) return;
                         try {
-                            boolean accepted = new DesktopLaunchCoordinator(new StandaloneDesktopLaunchContext(
-                                    context, target.displayId, uniqueId)).launch(request);
-                            complete.accept(accepted ? null : new IllegalStateException("application launch was rejected"));
+                            new DesktopLaunchCoordinator(new StandaloneDesktopLaunchContext(
+                                    context, target.displayId, uniqueId)).launch(request, result -> {
+                                if (alive.getAsBoolean()) complete.accept(result.succeeded() ? null
+                                        : new IllegalStateException(result.error));
+                            });
                         } catch (RuntimeException error) { complete.accept(error); }
                     });
                 }

@@ -177,11 +177,11 @@ final class ShellFileAdapter extends BaseAdapter {
         item.file = file;
         applySelection(item);
         item.icon.clearColorFilter();
+        ApplicationIconBinding.clear(item.icon);
         if (folderShortcut != null) {
             item.icon.setImageResource(R.drawable.ic_desktop_folder_link);
         } else if (applicationShortcut != null) {
-            item.icon.setImageDrawable(DesktopApplicationIconResolver.resolve(
-                    mContext, applicationShortcut));
+            ApplicationIconBinding.bind(item.icon, applicationShortcut);
         } else if (webShortcut != null) {
             item.icon.setImageResource(R.drawable.ic_desktop_web_link);
         } else {

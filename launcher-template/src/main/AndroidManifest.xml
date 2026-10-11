@@ -1,0 +1,14 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:allowBackup="false" android:label="MAGICDESK_LAUNCHER_LABEL"
+        android:icon="@drawable/launcher_icon" android:resizeableActivity="true"
+        android:theme="@android:style/Theme.Translucent.NoTitleBar">
+        <meta-data android:name="magicdesk.package" android:value="MAGICDESK_TARGET_PACKAGE" />
+        <activity android:name="io.github.mekhontsev.magicdesk.launcher.LaunchActivity"
+            android:exported="true" android:excludeFromRecents="true" android:taskAffinity="">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

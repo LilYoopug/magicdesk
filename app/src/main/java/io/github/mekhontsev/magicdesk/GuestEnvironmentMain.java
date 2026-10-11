@@ -77,6 +77,8 @@ public final class GuestEnvironmentMain {
             System.out.println(library.catalog());
         } else if (command.equals("applications") && arguments.length == 1) {
             System.out.println(library.applications());
+        } else if (command.equals("icons")) {
+            System.out.println(library.icons(java.util.Arrays.asList(arguments).subList(1, arguments.length)));
         } else if (command.equals("dns") && (arguments.length == 3
                 || arguments.length == 4 && arguments[3].equals("--replace"))) {
             String contents = resolver(arguments[2]);

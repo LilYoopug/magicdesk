@@ -101,7 +101,8 @@ final class DesktopLaunchCoordinator {
                 ? "" : DesktopExecSessionTracker.begin(prepared);
         final Runnable execute = prepared.exec == null
                 ? null : () -> mContext.onMain(
-                        () -> execute(prepared, sessionId, recentScope));
+                        () -> execute(prepared, sessionId, recentScope,
+                                prepared.androidLaunch != null || prepared.androidShortcut != null ? null : completion));
         if (prepared.androidLaunch != null
                 || prepared.androidShortcut != null) {
             try {
@@ -124,10 +125,6 @@ final class DesktopLaunchCoordinator {
             return true;
         }
         if (execute != null) {
-            if (completion != null) {
-                complete(completion, DesktopActivityLaunchResult.failed(
-                        "launch request has no Android Activity"));
-            }
             execute.run();
             return true;
         }
@@ -157,17 +154,23 @@ final class DesktopLaunchCoordinator {
     private void execute(
             final DesktopLaunchRequest request,
             final String sessionId,
-            final RecentLaunchScope recentScope) {
+            final RecentLaunchScope recentScope,
+            final DesktopActivityLaunchResult.Completion completion) {
         if (request.exec == null || mContext.isUnavailable()) {
             DesktopExecSessionTracker.failed(sessionId);
+            complete(completion, DesktopActivityLaunchResult.failed("Launch host has closed"));
             return;
         }
         try {
             if (request.exec.terminal) {
-                mContext.launchConsole(request);
-                DesktopExecSessionTracker.delegated(sessionId);
-                mContext.onStarted(request);
-                RecentApplications.record(mContext.context(), request, recentScope);
+                mContext.launchConsole(request, result -> {
+                    if (result.succeeded()) {
+                        DesktopExecSessionTracker.delegated(sessionId);
+                        mContext.onStarted(request);
+                        RecentApplications.record(mContext.context(), request, recentScope);
+                    } else DesktopExecSessionTracker.failed(sessionId);
+                    completeActivity(request, completion, result);
+                });
                 return;
             }
             final WeakReference<DesktopLaunchContext> context =
@@ -208,10 +211,10 @@ final class DesktopLaunchCoordinator {
                                     }
                                 }
                             });
-            handleStartResult(request, sessionId, result, recentScope);
+            handleStartResult(request, sessionId, result, recentScope, completion);
         } catch (RuntimeException error) {
             DesktopExecSessionTracker.failed(sessionId);
-            mContext.onFailure(request, error);
+            completeActivity(request, completion, DesktopActivityLaunchResult.failed(error));
         }
     }
 
@@ -219,10 +222,12 @@ final class DesktopLaunchCoordinator {
             final DesktopLaunchRequest request,
             final String sessionId,
             final DesktopExecRunner.StartResult result,
-            final RecentLaunchScope recentScope) {
+            final RecentLaunchScope recentScope,
+            final DesktopActivityLaunchResult.Completion completion) {
         if (result == DesktopExecRunner.StartResult.UNAVAILABLE) {
             DesktopExecSessionTracker.failed(sessionId);
-            mContext.onUnavailable(request);
+            if (completion == null) mContext.onUnavailable(request);
+            complete(completion, DesktopActivityLaunchResult.failed("desktop launch backend is unavailable"));
         } else if (result == DesktopExecRunner.StartResult.STARTED) {
             final DesktopExecCapabilities capabilities =
                     request.exec.backend.capabilities();
@@ -233,6 +238,10 @@ final class DesktopLaunchCoordinator {
             }
             mContext.onStarted(request);
             RecentApplications.record(mContext.context(), request, recentScope);
+            complete(completion, DesktopActivityLaunchResult.unmanagedAccepted(mContext.destination().displayId));
+        } else {
+            DesktopExecSessionTracker.failed(sessionId);
+            complete(completion, DesktopActivityLaunchResult.failed("desktop launch requires user permission"));
         }
     }
 }

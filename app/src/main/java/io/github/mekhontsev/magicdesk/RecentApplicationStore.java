@@ -103,6 +103,22 @@ final class RecentApplicationStore {
         return read();
     }
 
+    List<Entry> remove(Entry entry) throws IOException {
+        Files.deleteIfExists(directory.resolve(entry.key() + ".desktop"));
+        return read();
+    }
+
+    List<Entry> clear() throws IOException {
+        if (!Files.exists(directory)) return List.of();
+        // Clear invalid history records too, without following links or touching launch sources.
+        try (var paths = Files.newDirectoryStream(directory, "*.desktop")) {
+            for (Path path : paths) {
+                if (!Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) Files.deleteIfExists(path);
+            }
+        }
+        return read();
+    }
+
     private static String digest(String... values) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");

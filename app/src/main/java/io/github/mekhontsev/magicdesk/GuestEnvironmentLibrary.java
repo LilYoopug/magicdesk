@@ -109,27 +109,82 @@ final class GuestEnvironmentLibrary {
     JSONArray applications() throws Exception {
         JSONArray result = new JSONArray();
         for (Environment environment : list()) {
-            var icons = new java.util.HashMap<String, String>();
-            for (String line : images.invoke("applications", environment.store().toString()).split("\\n")) {
-                if (line.isBlank()) continue;
-                JSONObject item = new JSONObject(line);
-                var shortcut = DesktopEntryFile.parseGuestApplication(item.getString("text"));
-                // Hidden entries remain in the snapshot so their IDs can mask lower XDG directories.
-                if (shortcut != null && TermuxIconCommand.valid(shortcut.icon)) {
-                    String png = icons.get(shortcut.icon);
-                    if (png == null) {
-                        png = images.invoke("icon", environment.store().toString(), shortcut.icon).trim();
-                        icons.put(shortcut.icon, png);
-                    }
-                    item.put("png", png);
-                }
-                item.put("environment", new JSONObject().put("name", environment.name()).put("id", environment.id())
-                        .put("source", environment.source()).put("store", environment.store().toString()));
-                if (result.length() >= 1024) throw new IOException("Too many guest applications");
-                result.put(item);
+            var owner = new JSONObject().put("name", environment.name()).put("id", environment.id())
+                    .put("source", environment.source()).put("store", environment.store().toString());
+            List<JSONObject> records;
+            try {
+                records = applicationRecords(environment);
+            } catch (Exception error) {
+                result.put(new JSONObject().put("environment", owner).put("error", error.toString()));
+                continue;
             }
+            for (var item : records) result.put(item.put("environment", owner));
+            if (result.length() > 1024) throw new IOException("Too many guest applications");
         }
         if (result.toString().length() > GuestImageFiles.JSON_LIMIT) throw new IOException("Guest catalog is too large");
+        return result;
+    }
+
+    private List<JSONObject> applicationRecords(Environment environment) throws Exception {
+        var result = new java.util.ArrayList<JSONObject>();
+        String text = images.invoke("applications", environment.store().toString());
+        if (text.length() > GuestImageFiles.JSON_LIMIT) throw new IOException("Guest catalog is too large");
+        for (String line : text.split("\\n")) {
+            if (line.isBlank()) continue;
+            if (result.size() >= 1024) throw new IOException("Too many guest applications");
+            result.add(new JSONObject(line));
+        }
+        return result;
+    }
+
+    JSONArray icons(List<String> references) throws Exception {
+        if (references.isEmpty() || references.size() > TermuxIconCommand.BATCH_SIZE)
+            throw new IllegalArgumentException("Invalid icon batch size");
+        var keys = new java.util.LinkedHashSet<ApplicationIconKey>();
+        for (String reference : references) {
+            var key = ApplicationIconKey.guest(reference);
+            if (key == null) throw new IllegalArgumentException("Invalid guest icon reference");
+            keys.add(key);
+        }
+        var environments = list();
+        var records = new java.util.HashMap<String, java.util.Map<String, String>>();
+        var pixels = new java.util.HashMap<String, String>();
+        JSONArray result = new JSONArray();
+        for (var key : keys) {
+            var item = new JSONObject().put("id", key.guestReference());
+            try {
+                var environment = environments.stream().filter(value -> value.id().equals(key.owner())).findFirst().orElse(null);
+                if (environment != null) {
+                    var names = records.get(key.owner());
+                    if (names == null) {
+                        names = new java.util.LinkedHashMap<>();
+                        for (var entry : applicationRecords(environment)) {
+                            String id = ApplicationIconKey.desktopId(entry.getString("path"));
+                            if (names.containsKey(id)) continue;
+                            // The first XDG entry owns the ID, including a Hidden entry with no artwork.
+                            var shortcut = DesktopEntryFile.parseGuestApplication(entry.getString("text"));
+                            names.put(id, shortcut == null ? "" : shortcut.icon);
+                        }
+                        records.put(key.owner(), names);
+                    }
+                    String name = names.get(key.name());
+                    if (name != null && TermuxIconCommand.valid(name)) {
+                        String source = key.owner() + ":" + name;
+                        String png = pixels.get(source);
+                        if (png == null) {
+                            png = images.invoke("icon", environment.store().toString(), name).trim();
+                            if (png.length() > 32768 || (png.length() & 1) != 0 || !png.matches("[0-9a-f]*"))
+                                throw new IOException("Invalid guest icon reply");
+                            pixels.put(source, png);
+                        }
+                        item.put("png", png);
+                    }
+                }
+            } catch (Exception error) {
+                item.put("error", error.getClass().getSimpleName());
+            }
+            result.put(item);
+        }
         return result;
     }
 

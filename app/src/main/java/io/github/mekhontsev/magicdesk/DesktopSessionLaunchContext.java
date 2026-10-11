@@ -151,19 +151,6 @@ final class DesktopSessionLaunchContext implements DesktopLaunchContext {
     }
 
     @Override
-    public void launchConsole(
-            final DesktopLaunchRequest request) {
-        mActivity.launchInternalWindow(
-                CommandConsoleActivity.createPreparedCommandIntent(
-                        mActivity,
-                        request.exec.command,
-                        request.exec.workingDirectory,
-                        request.exec.backend),
-                CommandConsoleActivity.launchTarget(),
-                request.name);
-    }
-
-    @Override
     public boolean isUnavailable() {
         return mActivity.isActivityUnavailable();
     }

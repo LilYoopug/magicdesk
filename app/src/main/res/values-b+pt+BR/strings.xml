@@ -1162,4 +1162,16 @@
     <string name="setup_restarting_system_ui">Reiniciando interface do sistema…</string>
     <string name="setup_system_ui_restart_wait">Houve uma tentativa recente de reiniciar a interface do sistema. Aguarde pelo menos um minuto entre tentativas.</string>
     <string name="linux_audio">Áudio do Linux</string>
+    <string name="action_clear_recent">Limpar histórico</string>
+    <string name="action_remove_recent">Remover dos recentes</string>
+    <string name="clear_recent_desktop_confirmation">Limpar o histórico de inicializações do Desktop? Apps, atalhos e tarefas em execução não serão afetados.</string>
+    <string name="clear_recent_independent_confirmation">Limpar o histórico de inicializações independentes? Apps, atalhos e tarefas em execução não serão afetados.</string>
+    <string name="recent_edit_failed">Não foi possível atualizar o histórico: %1$s</string>
+    <string name="launcher_export_title">Adicionar ao iniciador do Android</string>
+    <string name="launcher_export_install">Instalar</string>
+    <string name="launcher_export_update">Atualizar</string>
+    <string name="launcher_export_remove">Remover iniciador</string>
+    <string name="launcher_export_preparing">Preparando iniciador…</string>
+    <string name="launcher_export_failed">Não foi possível abrir o iniciador: %1$s</string>
+    <string name="launcher_export_install_failed">O Android não pôde instalar o iniciador.</string>
 </resources>

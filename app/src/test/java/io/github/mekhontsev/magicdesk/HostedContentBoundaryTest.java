@@ -21,12 +21,15 @@ public final class HostedContentBoundaryTest {
             Runnable focusBoundary;
             boolean inputAllowed = true, keyboardAllowed = true;
             boolean windowFocus, viewFocus;
+            int captureUpdates;
+            void updatePointerCapture() { captureUpdates++; }
             boolean hasWindowFocus() { return windowFocus; }
             boolean isFocused() { return viewFocus; }
             public static void verify() {
                 var fixture = new Fixture();
                 fixture.attachSurface(new SurfaceHolder(), 640, 480);
                 check(fixture.output.calls.equals(List.of("surface")), "background output must not acquire focus");
+                check(fixture.captureUpdates == 1, "surface attachment must refresh pointer capture");
                 fixture.windowFocus = true;
                 fixture.viewFocus = true;
                 fixture.output.calls.clear();

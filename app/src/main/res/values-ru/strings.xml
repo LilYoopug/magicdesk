@@ -1173,4 +1173,16 @@
     <string name="setup_restarting_system_ui">Перезапуск System UI…</string>
     <string name="setup_system_ui_restart_wait">Недавно уже была попытка перезапуска System UI. Между попытками должна пройти как минимум минута.</string>
     <string name="linux_audio">Звук Linux</string>
+    <string name="action_clear_recent">Очистить историю</string>
+    <string name="action_remove_recent">Убрать из недавних</string>
+    <string name="clear_recent_desktop_confirmation">Очистить историю запусков Desktop? Приложения, ярлыки и запущенные задачи останутся без изменений.</string>
+    <string name="clear_recent_independent_confirmation">Очистить историю независимых запусков? Приложения, ярлыки и запущенные задачи останутся без изменений.</string>
+    <string name="recent_edit_failed">Не удалось изменить историю: %1$s</string>
+    <string name="launcher_export_title">Добавить в лаунчер Android</string>
+    <string name="launcher_export_install">Установить</string>
+    <string name="launcher_export_update">Обновить</string>
+    <string name="launcher_export_remove">Удалить ярлык</string>
+    <string name="launcher_export_preparing">Подготовка ярлыка…</string>
+    <string name="launcher_export_failed">Не удалось открыть ярлык: %1$s</string>
+    <string name="launcher_export_install_failed">Android не удалось установить ярлык.</string>
 </resources>

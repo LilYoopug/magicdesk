@@ -447,8 +447,8 @@ if (RuntimeLimits.active().termux() && TermuxIntegration.isInstalled(mActivity))
 
     void registerStartTarget(View view, AppItem app,
             java.util.function.Supplier<StartDisplaySelector.Target> destination,
-            java.util.function.Supplier<DesktopLaunchPresentation> presentation) {
-        registerTarget(view, ContextTarget.startApp(app, destination, presentation));
+            java.util.function.Supplier<DesktopLaunchPresentation> presentation, Runnable removeRecent) {
+        registerTarget(view, ContextTarget.startApp(app, destination, presentation, removeRecent));
     }
 
     private void showTargetMenu(
@@ -461,7 +461,8 @@ if (RuntimeLimits.active().termux() && TermuxIntegration.isInstalled(mActivity))
             showAppMenu(
                     x, y, target.app, target.task, target.file,
                     target.launchDestination == null ? null : target.launchDestination.get(),
-                    target.launchPresentation == null ? DesktopLaunchPresentation.automatic() : target.launchPresentation.get());
+                    target.launchPresentation == null ? DesktopLaunchPresentation.automatic() : target.launchPresentation.get(),
+                    target.removeRecent);
         } else if (target.file != null) {
             showFileMenu(x, y, target.file);
         } else if (target.appWidgetId >= 0) {
@@ -630,7 +631,7 @@ if (RuntimeLimits.active().termux() && TermuxIntegration.isInstalled(mActivity))
             final TaskRepository.TaskEntry exactTask,
             final DesktopFile desktopFile,
             final StartDisplaySelector.Target destination,
-            final DesktopLaunchPresentation presentation) {
+            final DesktopLaunchPresentation presentation, final Runnable removeRecent) {
         final DesktopPanelWindowController panels = mActivity.panels();
         if (mPanel == null || panels == null) {
             return;
@@ -645,7 +646,7 @@ if (RuntimeLimits.active().termux() && TermuxIntegration.isInstalled(mActivity))
                 task,
                 desktopFile,
                 List.of(),
-                false, destination, presentation));
+                false, destination, presentation, removeRecent));
         if (!panels.isRequested(mMenuRoot)) {
             return;
         }
@@ -658,7 +659,7 @@ if (RuntimeLimits.active().termux() && TermuxIntegration.isInstalled(mActivity))
             }
             final boolean hasWidgets = mActivity.hasDesktopWidgets(app.packageName);
             return new AppMenuState(x, y, app, task, desktopFile,
-                    shortcuts, hasWidgets, destination, presentation);
+                    shortcuts, hasWidgets, destination, presentation, removeRecent);
         }, null).thenAccept(completion -> request.deliver(mActivity::runOnUiThread, () -> {
             if (request != mShortcutRequest) {
                 return;
@@ -685,6 +686,8 @@ if (RuntimeLimits.active().termux() && TermuxIntegration.isInstalled(mActivity))
 
     private void showAppMenu(final AppMenuState state) {
         prepareAppMenuTitle(state.app, state.task);
+        if (state.removeRecent != null) addAction(R.string.action_remove_recent, UiColor.SURFACE,
+                true, view -> state.removeRecent.run());
 
         addAction(
                 state.task == null
@@ -1199,6 +1202,7 @@ if (RuntimeLimits.active().termux() && TermuxIntegration.isInstalled(mActivity))
         final boolean hasWidgets;
         final StartDisplaySelector.Target destination;
         final DesktopLaunchPresentation presentation;
+        final Runnable removeRecent;
 
         AppMenuState(
                 final float x,
@@ -1208,7 +1212,7 @@ if (RuntimeLimits.active().termux() && TermuxIntegration.isInstalled(mActivity))
                 final DesktopFile desktopFile,
                 final List<AppShortcutAction> shortcuts,
                 final boolean hasWidgets, final StartDisplaySelector.Target destination,
-                final DesktopLaunchPresentation presentation) {
+                final DesktopLaunchPresentation presentation, final Runnable removeRecent) {
             this.x = x;
             this.y = y;
             this.app = app;
@@ -1218,6 +1222,7 @@ if (RuntimeLimits.active().termux() && TermuxIntegration.isInstalled(mActivity))
             this.hasWidgets = hasWidgets;
             this.destination = destination;
             this.presentation = presentation;
+            this.removeRecent = removeRecent;
         }
     }
 }
