@@ -15,11 +15,10 @@ public class RunCommandRequestTest {
         var request = RunCommandRequest.parse(json.toString());
         assertEquals(2000, request.executorUid());
         assertEquals("background", request.mode());
-        String shell = System.getenv().getOrDefault("MAGICDESK_TEST_BASH", "bash");
         // Use the host printf executable without changing argument handling.
-        Process process = new ProcessBuilder(shell, "-c", request.script().replace("'/bin/printf'", "printf")).start();
-        assertEquals("a'\n$(id) ; *", new String(process.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8));
-        assertEquals(0, process.waitFor());
+        var result = PosixShellFixture.run(request.script().replace("'/bin/printf'", "printf"));
+        assertEquals(result.stderr, 0, result.exitCode);
+        assertEquals("a'\n$(id) ; *", new String(result.stdout, java.nio.charset.StandardCharsets.UTF_8));
     }
     @Test public void rejectsAmbiguousAndMalformedRequests() throws Exception {
         for (String extra : new String[]{"\"executorUid\":0.5", "\"executorUid\":10000", "\"version\":2", "\"cwd\":\"relative\"",

@@ -64,14 +64,11 @@ public final class X11LaunchSpecTest {
     }
 
     @Test public void commandChildPreservesStdinAndFailureStatus() throws Exception {
-        String shell = System.getenv().getOrDefault("MAGICDESK_TEST_BASH", "bash");
-        Process process = new ProcessBuilder(shell, "-c", CommandExecution.invocation(shell,
-                "cat; printf 'final error' >&2; exit 17", "a'\n$HOME\n")).start();
-        byte[] output = process.getErrorStream().readAllBytes();
-        assertEquals(new String(output, StandardCharsets.UTF_8), 17, process.waitFor());
-        assertEquals(11, output.length);
-        assertTrue(new String(output, StandardCharsets.UTF_8).endsWith("final error"));
-        assertEquals("a'\n$HOME\n", new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8));
+        var result = PosixShellFixture.run(CommandExecution.invocation(PosixShellFixture.executable(),
+                "cat; printf 'final error' >&2; exit 17", "a'\n$HOME\n"));
+        assertEquals(result.stderr, 17, result.exitCode);
+        assertEquals("final error", result.stderr);
+        assertEquals("a'\n$HOME\n", new String(result.stdout, StandardCharsets.UTF_8));
     }
 
     @Test public void rejectsInvalidDisplayAndEmptyCommands() {

@@ -189,9 +189,19 @@ public class GuestEnvironmentLibraryTest {
         images.applications.put(bad.store(), "unavailable");
         images.applications.put(good.store(), desktop("/usr/share/applications/editor.desktop", "editor", false));
         images.icons.put(good.store() + ":editor", "abcd");
-        var records = GuestApplicationRecords.parse(library.applications().toString());
-        assertEquals(1, records.entries().size());
-        assertTrue(records.error().contains("bad: "));
+        var records = library.applications();
+        assertEquals(2, records.length());
+        var byOwner = new HashMap<String, JSONObject>();
+        for (int i = 0; i < records.length(); ++i) {
+            var record = records.getJSONObject(i);
+            byOwner.put(record.getJSONObject("environment").getString("id"), record);
+        }
+        assertTrue(byOwner.get(bad.id()).getString("error").contains("Unreadable environment"));
+        var healthy = byOwner.get(good.id());
+        assertFalse(healthy.has("error"));
+        assertEquals(good.store().toString(), healthy.getJSONObject("environment").getString("store"));
+        assertEquals("/usr/share/applications/editor.desktop", healthy.getString("path"));
+        assertTrue(healthy.getString("text").contains("Icon=editor"));
         var icons = library.icons(List.of("guest:" + bad.id() + ":editor.desktop", "guest:" + good.id() + ":editor.desktop"));
         assertTrue(icons.getJSONObject(0).has("error"));
         assertEquals("abcd", icons.getJSONObject(1).getString("png"));

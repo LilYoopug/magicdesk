@@ -31,6 +31,17 @@ public class GuestApplicationRecordsTest {
         assertNotEquals(result.entries().get(0).desktopFilePath, result.entries().get(1).desktopFilePath);
     }
 
+    @Test public void unavailableEnvironmentDoesNotHideHealthyApplications() throws Exception {
+        var unavailable = new JSONObject().put("environment", new JSONObject().put("id", A).put("name", "bad")
+                .put("store", "/library/instances/" + A).put("source", "fixture"))
+                .put("error", "Unreadable environment");
+        var healthy = entry(B, "good", "/usr/share/applications/editor.desktop", "Name=Editor\nExec=editor\nIcon=editor\n");
+        var result = GuestApplicationRecords.parse(new JSONArray().put(unavailable).put(healthy).toString());
+        assertEquals(1, result.entries().size());
+        assertTrue(result.entries().get(0).shortcut.exec.contains(B));
+        assertEquals("bad: Unreadable environment", result.error());
+    }
+
     @Test public void hiddenUserEntryMasksSystemEntryAndTerminalKeepsItsPresentation() throws Exception {
         var records = new JSONArray().put(entry(A, "work", "/root/.local/share/applications/editor.desktop", "Hidden=true\n"))
                 .put(entry(A, "work", "/usr/share/applications/editor.desktop", "Name=Editor\nExec=editor\n"))
