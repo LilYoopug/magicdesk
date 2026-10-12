@@ -1362,6 +1362,8 @@ static void message_worker(void) {
 }
 void test_fd_origins(void) {
     extern void test_task_receive(int *);
+    extern void test_epoll_owner(int *);
+    test_epoll_owner(&allocation_budget);
     test_task_receive(&allocation_budget);
     received_custody();
     message_worker();

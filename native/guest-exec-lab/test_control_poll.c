@@ -65,7 +65,7 @@ static void epoll_sysctl(void) {
     assert(md_control_epoll_collect(q,events,4)==1 && events[0].data.u64==102
         && events[0].events==EPOLLIN);
     assert(!md_control_epoll_collect(q,events,4));
-    md_control_epoll_free(q);
+    md_control_epoll_release(q);
     md_proc_file_release(a); md_proc_file_release(b); md_proc_file_release(constant);
     md_uts_namespace_release(uts); md_identity_release(&id);
     assert(descriptors()==before);

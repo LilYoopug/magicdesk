@@ -14,6 +14,7 @@ struct interest {
     int fd,wake,armed,queued,disabled;
 };
 struct md_control_epoll {
+    struct md_fd_object object;
     int events,ready,signalled;
     unsigned pending;
     struct interest *first,*head,*tail;
@@ -59,9 +60,13 @@ static void discard(struct md_control_epoll *q,struct interest *i) {
     if (i->next) i->next->previous=i->previous;
     md_control_file_release(i->provider); md_fd_object_release(i->identity); free(i);
 }
-struct md_control_epoll *md_control_epoll_new(void) {
-    struct md_control_epoll *q=calloc(1,sizeof(*q));
-    if (!q) return NULL;
+static void transport_close(struct md_control_epoll *q) {
+    if (q->ready>=0) close(q->ready);
+    if (q->events>=0) close(q->events);
+    q->events=q->ready=-1; q->signalled=0;
+}
+static int transport_open(struct md_control_epoll *q) {
+    if (q->events>=0) return 0;
     q->events=epoll_create1(EPOLL_CLOEXEC); q->ready=-1;
     int error=q->events<0 ? errno : 0;
     if (!error) { q->ready=eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK); if (q->ready<0) error=errno; }
@@ -69,15 +74,30 @@ struct md_control_epoll *md_control_epoll_new(void) {
         struct epoll_event event={.events=EPOLLIN,.data.ptr=NULL};
         if (epoll_ctl(q->events,EPOLL_CTL_ADD,q->ready,&event)) error=errno;
     }
-    if (error) { md_control_epoll_free(q); errno=error; return NULL; }
+    if (error) transport_close(q);
+    return -error;
+}
+static void destroy(struct md_fd_object *object) {
+    struct md_control_epoll *q=(void *)object;
+    while (q->first) discard(q,q->first);
+    transport_close(q); free(q);
+}
+static const struct md_fd_object_type type={.destroy=destroy};
+struct md_control_epoll *md_control_epoll_new(void) {
+    struct md_control_epoll *q=calloc(1,sizeof(*q));
+    if (!q) return NULL;
+    md_fd_object_init(&q->object,&type);
+    q->events=q->ready=-1;
     return q;
 }
-void md_control_epoll_free(struct md_control_epoll *q) {
-    if (!q) return;
-    while (q->first) discard(q,q->first);
-    if (q->ready>=0) close(q->ready);
-    if (q->events>=0) close(q->events);
-    free(q);
+struct md_fd_object *md_control_epoll_object(struct md_control_epoll *q) {
+    return q ? &q->object : NULL;
+}
+struct md_control_epoll *md_control_epoll_from_object(struct md_fd_object *object) {
+    return object && object->type==&type ? (void *)object : NULL;
+}
+void md_control_epoll_release(struct md_control_epoll *q) {
+    md_fd_object_release(md_control_epoll_object(q));
 }
 int md_control_epoll_descriptor(const struct md_control_epoll *q) {
     return q ? q->events : -EINVAL;
@@ -117,6 +137,7 @@ int md_control_epoll_ctl(struct md_control_epoll *q,int operation,int fd,
     }
     if (i) return -EEXIST;
     if (!provider.ops || !provider.ops->poll) return -EPERM;
+    int cold=q->events<0;
     i=calloc(1,sizeof(*i));
     if (!i) return -ENOMEM;
     i->wake=-1; i->fd=fd; i->event=*event;
@@ -128,17 +149,23 @@ int md_control_epoll_ctl(struct md_control_epoll *q,int operation,int fd,
         i->wake=fcntl(descriptor,F_DUPFD_CLOEXEC,3);
         if (i->wake<0) error=-errno;
     }
+    if (!error) error=transport_open(q);
     if (!error) error=arm(q,i);
     long mask=error ? error : provider.ops->poll(provider.context);
-    if (mask<0) { discard(q,i); return (int)mask; }
+    if (mask<0) {
+        discard(q,i);
+        if (cold) transport_close(q);
+        return (int)mask;
+    }
     if ((uint32_t)mask&requested(event)) enqueue(q,i);
     error=ready_signal(q);
-    if (error) discard(q,i);
+    if (error) { discard(q,i); if (cold) transport_close(q); }
     return error;
 }
 int md_control_epoll_collect(struct md_control_epoll *q,struct epoll_event *out,int capacity) {
     if (!q || capacity<=0) return -EINVAL;
     if (!out) return -EFAULT;
+    if (q->events<0) return 0;
     struct epoll_event wakes[32];
     int count=epoll_wait(q->events,wakes,32,0);
     if (count<0) return -errno;

@@ -93,7 +93,7 @@ static void identities(void) {
     assert(!md_control_event_publish(source));
     assert(md_control_epoll_collect(q,out,4)==1 && out[0].data.u64==UINT64_MAX);
     md_control_epoll_retire(q,&b->identity); empty(q);
-    md_control_epoll_free(q); release(a); release(b); md_control_event_release(source);
+    md_control_epoll_release(q); release(a); release(b); md_control_event_release(source);
     assert(descriptors()==before);
     puts("PASS virtual epoll identity: duplicate data, dup consumption, FD reuse and final retirement");
 }
@@ -126,7 +126,7 @@ static void policies(void) {
     assert(ctl(q,EPOLL_CTL_MOD,1,a,EPOLLIN,7)==-EIO); a->error=0;
     assert(!md_control_event_publish(source));
     assert(md_control_epoll_collect(q,out,2)==1 && out[0].data.u64==4);
-    md_control_epoll_free(q); release(a); release(b); md_control_event_release(source);
+    md_control_epoll_release(q); release(a); release(b); md_control_event_release(source);
     puts("PASS virtual epoll level/edge/oneshot, fair bounded results and failed rearm");
 }
 static void mixed(void) {
@@ -154,7 +154,7 @@ static void mixed(void) {
         assert(!poll(waiters,2,0));
     }
     control_no_allocation(0);
-    md_control_epoll_free(q); release(s); md_control_event_release(source);
+    md_control_epoll_release(q); release(s); md_control_event_release(source);
     close(native); close(counter);
     assert(descriptors()==before);
     puts("PASS mixed native/virtual epoll: existing equal data, 100000 rounds without allocation or FD leak");
@@ -180,7 +180,7 @@ static void batch_retirement(void) {
         }
     }
     assert(total==48); empty(q);
-    md_control_epoll_free(q);
+    md_control_epoll_release(q);
     for (unsigned i=1;i<97;i+=2) release(items[i]);
     md_control_event_release(source);
     puts("PASS virtual epoll multi-batch readiness and queued subscription retirement");
@@ -196,10 +196,12 @@ static void admission_failure(void) {
     control_fail_allocation(1);
     assert(ctl(q,EPOLL_CTL_ADD,9,s,EPOLLIN,9)==-ENOMEM);
     control_fail_allocation(0); empty(q);
+    assert(md_control_epoll_descriptor(q)==-1);
     unsigned references=atomic_load(&s->identity.references);
     s->error=-EIO;
     assert(ctl(q,EPOLL_CTL_ADD,9,s,EPOLLIN,9)==-EIO);
     s->error=0; assert(atomic_load(&s->identity.references)==references); empty(q);
+    assert(md_control_epoll_descriptor(q)==-1);
     struct rlimit limit; assert(!getrlimit(RLIMIT_NOFILE,&limit));
     /* Exhaust only this fixture's descriptor table, retaining the hard limit. */
     struct rlimit small=limit;
@@ -211,14 +213,23 @@ static void admission_failure(void) {
         if (fd<0) { assert(errno==EMFILE); break; }
         held[count++]=fd;
     }
-    assert(ctl(q,EPOLL_CTL_ADD,9,s,EPOLLIN,9)==-EMFILE);
-    assert(atomic_load(&s->identity.references)==references);
-    while (count) close(held[--count]);
-    assert(!setrlimit(RLIMIT_NOFILE,&limit)); empty(q);
+    struct md_control_epoll *metadata=md_control_epoll_new();
+    assert(metadata && md_control_epoll_descriptor(metadata)==-1);
+    md_control_epoll_release(metadata);
+    /* Fail at each cold transport acquisition: source duplicate, internal
+     * epoll, then ready eventfd. No failed prefix publishes a wake handle. */
+    for (unsigned available=0;available<3;++available) {
+        assert(ctl(q,EPOLL_CTL_ADD,9,s,EPOLLIN,9)==-EMFILE);
+        assert(atomic_load(&s->identity.references)==references);
+        assert(md_control_epoll_descriptor(q)==-1 && count>0);
+        assert(!close(held[--count]));
+    }
     assert(!ctl(q,EPOLL_CTL_ADD,9,s,EPOLLIN,9));
+    while (count) close(held[--count]);
+    assert(!setrlimit(RLIMIT_NOFILE,&limit));
     struct epoll_event out;
     assert(md_control_epoll_collect(q,&out,1)==1 && out.data.u64==9);
-    md_control_epoll_free(q); release(s); md_control_event_release(source);
+    md_control_epoll_release(q); release(s); md_control_event_release(source);
     assert(descriptors()==before);
     puts("PASS virtual epoll admission: ENOMEM, provider failure and EMFILE rollback/recovery");
 }

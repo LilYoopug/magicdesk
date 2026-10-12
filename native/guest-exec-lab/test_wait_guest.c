@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include <assert.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
 #include <poll.h>
@@ -12,10 +13,53 @@
 #include <sys/eventfd.h>
 #include <sys/prctl.h>
 #include <sys/select.h>
+#include <sys/socket.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
+static void epoll_custody(void) {
+    int fd=eventfd(1,EFD_CLOEXEC|EFD_NONBLOCK),ep=epoll_create1(EPOLL_CLOEXEC);
+    assert(fd>=0 && ep>=0);
+    int duplicate=fcntl(ep,F_DUPFD_CLOEXEC,0); assert(duplicate>=0);
+    struct epoll_event event={.events=EPOLLIN,.data.u64=UINT64_MAX},out;
+    assert(!epoll_ctl(duplicate,EPOLL_CTL_ADD,fd,&event));
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        assert(epoll_wait(ep,&out,1,0)==1 && out.data.u64==UINT64_MAX);
+        event.data.u64=0;
+        assert(!epoll_ctl(duplicate,EPOLL_CTL_MOD,fd,&event));
+        _exit(0);
+    }
+    int status; assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
+    assert(epoll_wait(ep,&out,1,0)==1 && out.data.u64==0);
+    int pair[2]; assert(!socketpair(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC,0,pair));
+    union { struct cmsghdr align; char data[CMSG_SPACE(2*sizeof(int))]; } control={0};
+    char byte='e'; struct iovec vector={&byte,1};
+    struct msghdr message={.msg_iov=&vector,.msg_iovlen=1,
+        .msg_control=control.data,.msg_controllen=sizeof(control.data)};
+    struct cmsghdr *header=CMSG_FIRSTHDR(&message);
+    header->cmsg_level=SOL_SOCKET; header->cmsg_type=SCM_RIGHTS;
+    header->cmsg_len=CMSG_LEN(2*sizeof(int));
+    int *rights=(void *)CMSG_DATA(header); rights[0]=ep; rights[1]=duplicate;
+    assert(sendmsg(pair[0],&message,MSG_NOSIGNAL)==1);
+    assert(!close(ep) && !close(duplicate));
+    assert(recvmsg(pair[1],&message,MSG_CMSG_CLOEXEC)==1
+        && !(message.msg_flags&(MSG_TRUNC|MSG_CTRUNC)));
+    header=CMSG_FIRSTHDR(&message);
+    assert(header && header->cmsg_level==SOL_SOCKET && header->cmsg_type==SCM_RIGHTS
+        && header->cmsg_len==CMSG_LEN(2*sizeof(int)));
+    rights=(void *)CMSG_DATA(header);
+    for (int i=0;i<2;++i) {
+        assert(fcntl(rights[i],F_GETFD)==FD_CLOEXEC);
+        assert(epoll_wait(rights[i],&out,1,0)==1 && out.data.u64==0);
+    }
+    assert(!epoll_ctl(rights[0],EPOLL_CTL_DEL,fd,NULL));
+    assert(!epoll_wait(rights[1],&out,1,0));
+    close(rights[0]); close(rights[1]); close(pair[0]); close(pair[1]); close(fd);
+    puts("PASS native epoll custody: dup/fork and queued rights after sender aliases close");
+}
 static void sandbox(void) {
     struct sock_filter filter[]={
         BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
@@ -36,6 +80,7 @@ int main(int argc,char **argv) {
     struct epoll_event event={.events=EPOLLIN,.data.u64=UINT64_C(0x1020304050607080)},out;
     assert(!epoll_ctl(ep,EPOLL_CTL_ADD,fd,&event));
     if (filtered) sandbox();
+    epoll_custody();
     struct timespec start,end; assert(!clock_gettime(CLOCK_MONOTONIC,&start));
     for (unsigned i=0;i<10000;++i) {
         struct pollfd p={fd,POLLIN,0};

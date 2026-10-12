@@ -19,7 +19,8 @@ void control_no_allocation(int enabled) { atomic_store(&no_allocation,enabled); 
 void control_fail_allocation(unsigned after) { atomic_store(&fail_allocation,after); }
 static int allocation_fails(void) {
     unsigned left=atomic_load(&fail_allocation);
-    if (!left || atomic_fetch_sub(&fail_allocation,1)!=1) return 0;
+    while (left && !atomic_compare_exchange_weak(&fail_allocation,&left,left-1)) {}
+    if (left!=1) return 0;
     errno=ENOMEM; return 1;
 }
 void *__real_malloc(size_t);

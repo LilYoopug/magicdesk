@@ -1049,8 +1049,15 @@ without per-event allocation. Sysctl placements and unopened provider prototypes
 have no carrier FD. Concurrent captures of one open publish a single sealed
 carrier, while independent opens retain different carrier identities.
 
-`control_epoll` is the internal virtual-interest collector, currently exercised
-by native fixtures rather than guest syscall dispatch. It keys registrations by
+`control_epoll` is a typed open-description authority and virtual-interest
+collector, currently exercised by native fixtures rather than guest syscall
+dispatch. Existing file tables, duplication, copied/shared tables and queued
+local message vectors retain that same authority; it has no parallel alias
+registry and retains no duplicate of the application's native epoll descriptor.
+Its constructor allocates metadata only. The first successful virtual ADD
+publishes its wake transport, whose descriptor remains stable through an empty
+interest set until final authority release. Failed cold admission releases the
+unpublished transport. The owner keys registrations by
 retained open-description identity plus registering FD. Native kernel epoll
 registrations and application event data remain untouched, including equal data
 values. Virtual events are collected into a separate result slice through a

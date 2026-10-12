@@ -52,10 +52,17 @@ notification test. The same case runs real native and Shroot wait loops and
 requires zero interception counters for `ppoll`, `pselect6`, `epoll_pwait`,
 `epoll_pwait2`, creation and registration, both before and after an application
 filter denies further seccomp installation. Timings are diagnostic, not a
-stable performance benchmark.
+stable performance benchmark. Native and guest runs also retain epoll identity
+through dup, forked registration changes and queued SCM_RIGHTS after all source
+aliases close; both received aliases observe the same kernel interest set.
 The `ofd-order` case checks typed sysctl masks, read independence, independent
 opens/shared references, UTS copies, constant providers and concurrent lazy
-carrier publication. These checks do not whitelist default-boot failures.
+carrier publication. It also exercises the typed epoll authority through the
+actual file-table and queued-message owners: publication failure, dup/reuse,
+fork/unshare, exec CLOEXEC, transfer after source-table teardown and final
+transport cleanup. Empty authorities have no wake FDs; completion and retirement
+run under allocation-failure guards. These checks do not whitelist default-boot
+failures or establish guest virtual-subscription admission.
 
 `test_openrc.py --build BUILD --store STORE` needs an Alpine store with openrc
 and util-linux. It runs stock sysinit/boot initialization and dedicated runlevels
