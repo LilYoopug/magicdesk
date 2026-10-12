@@ -25,7 +25,10 @@ int md_mount_graph_acquire_pin(struct md_mount_namespace *, const struct md_view
 int md_mount_graph_exclude(const struct md_mount_namespace *, const struct md_view_mount *, int *lease);
 int md_mount_graph_check_pin(const struct md_mount_namespace *, int pin);
 /* Publish a prepared tree before making it locally visible. Parent pointers
- * in the candidate refer to the namespace's stable mount slots. */
+ * in the candidate refer to the namespace's stable mount slots. A nonportable
+ * provider publishes an unavailable revision, not a native approximation.
+ * Local mounts continue; foreign sync explicitly fails until a complete
+ * portable revision is published again. */
 struct md_mount_layout {
     const struct md_view_mount *base, *entries, *root;
     unsigned count;

@@ -216,6 +216,11 @@ aliases retain task-affine lookup. Current-thread proc-FD reopening captures the
 original descriptor once and delivers only the final open result. Native and
 attached objects share the retained-object reopening primitive, preserving
 independent offsets, deferred FIFO completion and readonly mount policy.
+Filesystem attribute ioctls (`FS_IOC_GETFLAGS`/`SETFLAGS`, inode-version and
+`FSGETXATTR`/`FSSETXATTR`) select that same provider. Logical files return
+`ENOTTY` for unsupported attributes instead of exposing Android backing-inode
+flags or permission failures. Native attachments retain kernel behavior and
+readonly mount checks. Invalid and `O_PATH` descriptors return `EBADF`.
 Regular-file/FIFO creation keeps its intermediate descriptors on the worker.
 Guest capability sets retain Linux 5.15's credential bits independently of
 backend availability. Dropping or inheriting them changes guest authority only;
@@ -1057,6 +1062,10 @@ current UTS namespace, while map FDs retain their target and opening authority.
 Typed proc FDs retain shared offsets across dup, fork and local SCM_RIGHTS;
 cross-supervisor transfer remains unsupported. No ordinary data IO is intercepted
 merely to identify these control descriptors.
+Self `fdinfo` uses the same logical mount/inode identities as `statx`, including
+retained descriptors on detached mounts. Offset, flags and pidfd liveness remain
+native observations. A detected replacement of the underlying object returns
+`ESTALE` instead of combining new native fields with the opening metadata.
 Bind, recursive bind, move, readonly remount, detach and initial/attached-root
 `pivot_root` use the same worker-owned graph. Normal unmount accounts for open
 origins, queued/imported message references and other process roots. Exported
@@ -1070,14 +1079,27 @@ namespace ownership; CREATE prepares the filesystem before placement. The
 returned O_PATH mount descriptor can access its detached root and attach it in
 the creating mount view. Dup, fork and local SCM_RIGHTS retain these owners.
 Supported flag/string parameters cover the admitted tmpfs, overlay, proc,
-devpts, cgroup, sysfs and limited mqueue providers. Reconfiguration, binary/path/FD parameters and
+devpts, cgroup, sysfs and limited mqueue providers. After fsmount, tmpfs contexts
+can reconfigure their backing-wide read-only policy. The store gate excludes
+new writable opens while short-lived native read leases reject existing writable
+descriptions and shared writable mappings, including unlinked files. SQLite
+publication and its existing snapshot version propagate the policy to retained
+connections, bind aliases and copied namespaces; immutable image sealing and
+per-mount restrictions remain separate. Ordinary data IO stays native. Lease
+denials are explicit errors, not permission changes or a successful partial
+freeze. Other reconfiguration options, binary/path/FD parameters and
 unsupported mount attributes fail explicitly; contexts cannot be transferred
 between independent supervisors. Closing a context releases its unpublished
 filesystem; detached mount storage follows the ordinary origin/graph lifetime.
-`mount_setattr` updates the same readonly/nosuid/nodev/noexec policy by path or
+`mount_setattr` updates the same readonly/nosuid/nodev/noexec/nosymfollow policy by path or
 mount FD, including recursively. All selected mounts are checked before any
 policy changes; inherited locked attributes cannot be removed. Atime options
-remain compatibility hints. ID-mapped mounts, nosymfollow and shared propagation
+remain compatibility hints. `nosymfollow` rejects symlink traversal with ELOOP
+in the common mount walker, including retained dirfds, bind aliases and typed
+proc links. Reading/statting the link itself and O_PATH|O_NOFOLLOW remain allowed.
+Unknown task-affine suffixes fail explicitly instead of losing mount policy on
+delegation. Mountinfo and statfs report the selected mount's policy.
+ID-mapped mounts and shared propagation
 are not implemented.
 Independent mounted inode stores retain their
 backing leases across namespace copies and authenticated FD transfer, including
@@ -1376,6 +1398,47 @@ editing, saving, WM resize, viewer detachment/reopening and zero-status logout.
 Readiness awaits both shell surfaces and Xfce's D-Bus Idle state, not a delay.
 This fixture selects software rendering and lacks optional system-bus services;
 it is not a complete booted Linux system or a GNOME certification.
+
+`test_systemd.py` starts unmodified systemd as guest PID 1 under
+actual UID 2000, in private PID/mount/UTS/IPC/cgroup namespaces with proc, tmpfs
+`/run`, a private `/dev` with a real PTY console, sysfs and the logical cgroup2
+provider. Debian 257, Arch 262 and Fedora 259 checks cover both the system manager and a
+`systemd --user` manager. Both report `SystemState=running`. The check starts/stops
+oneshot and `Type=notify` services, activates a service through a TCP socket,
+and exits both managers normally. It uses a dedicated target without distro
+hardware services; this is manager/service coverage, not a complete default
+boot, GDM/logind session or hardware-management guarantee. Guest cgroups retain
+their documented logical, non-enforcing resource policy. Android's init and
+system services are not changed.
+Debian 257, Ubuntu 255, Fedora 259 and Arch 262 pass the combined
+`StateDirectory`/`SetCredential` service case. It exercises logical filesystem
+metadata ioctls and tmpfs read-only reconfiguration; Arch additionally requests
+`nosymfollow` on its credentials mount.
+Arch 262 also passes combined `PrivateDevices`, `ProtectHome`, `ProtectHostname`,
+`ProtectControlGroups`, `ProtectKernelLogs`, `ProtectKernelModules`, and
+`ProtectSystem=strict` service setup with a writable test-output path and
+diagnostic `MountFlags=slave`. This isolates those policies; it does not certify
+the unsupported shared propagation or `ProtectProc` policy.
+
+`test_openrc.py` checks Alpine 3.23 with OpenRC 0.63: real `sysinit`/`boot`
+initialization, dependency ordering, daemon start/status/restart, runlevel change
+and process cleanup under actual UID 2000. Its private mount/PID namespace uses
+a dedicated service tree; no fake boot marker is installed. This covers OpenRC
+as a service manager under a fixture PID 1, not `openrc-init` or the default
+Alpine hardware boot sequence. Direct application launch does not require either
+OpenRC or systemd.
+
+`test_os_boot.py` instead starts each distribution's default target with a
+diagnostic observer, not a replacement target. Debian 13, Ubuntu 24.04, Arch and
+Fedora 44 have default-boot coverage, but those runs remain degraded or fail to
+complete; this is not a passing distro boot. Outstanding runtime boundaries
+include shared mount propagation, proc `hidepid`, journald's hostname poll/error
+notification and datagram FD-store transfer. Early Arch service setup also has
+an unresolved intermittent ENOENT in mountinfo/proc-FD mount-target lookup.
+The OpenRC mode boots Alpine 3.23's real `openrc-init` as PID 1 using its stock
+container service policy and private runlevel configuration. It checks default
+runlevel services, restart and stop, then cancels the exact registered launch
+and verifies retirement. It does not boot hardware services or reboot Android.
 
 The Fedora 44 GNOME 50.5 devkit fixture runs stock GNOME Shell/Mutter with a
 private PID namespace, proc mount and `/run`, a system D-Bus daemon, and a

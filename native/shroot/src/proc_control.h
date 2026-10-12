@@ -1,6 +1,7 @@
 #ifndef MD_PROC_CONTROL_H
 #define MD_PROC_CONTROL_H
 #include "proc_paths.h"
+#include "file_metadata.h"
 #include <errno.h>
 #include <stdint.h>
 #include <sys/syscall.h>
@@ -29,9 +30,9 @@ static inline int md_proc_io_decode(long nr, const unsigned long *a, struct md_p
     }
     return out->positional && out->offset<0 ? -EINVAL : 0;
 }
-enum { MD_PROC_FILE_OPEN=1, MD_PROC_FILE_REOPEN, MD_PROC_FILE_NAMESPACE_QUERY };
+enum { MD_PROC_FILE_OPEN=1, MD_PROC_FILE_REOPEN, MD_PROC_FILE_NAMESPACE_QUERY, MD_PROC_FILE_PIDFD_NAMESPACE };
 struct md_proc_metadata_request { int32_t process, descriptor; uint32_t kind, access, effective, nofollow; };
-struct md_proc_metadata_result { struct stat value; uint32_t kind; unsigned long filesystem; };
+struct md_proc_metadata_result { struct md_fs_info value; uint32_t kind; unsigned long filesystem; };
 static inline int md_proc_control_kind(enum md_proc_kind kind) {
     return (kind>=MD_PROC_UID_MAP && kind<=MD_PROC_NS_UNSUPPORTED) || md_proc_network_sysctl(kind);
 }

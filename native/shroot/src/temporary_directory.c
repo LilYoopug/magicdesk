@@ -13,7 +13,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-static const char prefix[]=".md-transient-", marker[]=".shroot-transient";
+static const char prefix[]=".md-transient-", marker[]=MD_TEMPORARY_DIRECTORY_MARKER;
 struct identity { uint32_t magic, version; uint64_t device, inode; };
 static int owned(int fd, struct stat *st) {
     if (fstat(fd,st)) return -errno;

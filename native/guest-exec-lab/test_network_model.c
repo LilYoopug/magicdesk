@@ -10,6 +10,12 @@ void test_network_model(void) {
     struct md_network_namespace *child=md_network_namespace_copy(root,NULL);
     struct md_network_namespace *foreign=md_network_namespace_new(NULL,MD_NETWORK_PRIVATE);
     assert(child && foreign && child->fabric==root->fabric && foreign->fabric!=root->fabric);
+    struct md_fd_object *routed_pair=md_network_socket_new(root);
+    struct md_fd_object *offline_pair=md_network_socket_new(foreign);
+    assert(routed_pair && offline_pair);
+    assert(!md_network_socket_offline(routed_pair));
+    assert(md_network_socket_offline(offline_pair));
+    md_fd_object_release(routed_pair); md_fd_object_release(offline_pair);
     assert(child->count==1 && !child->default_interface && !child->links[0].ipv4);
     unsigned first=0,second=0,bridge=0;
     pthread_mutex_lock(&root->fabric->lock);

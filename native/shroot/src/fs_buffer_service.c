@@ -845,8 +845,9 @@ int md_fs_buffer_progress(struct md_fs_buffer_service *s) {
         if (r->executable && !*r->request.path[0]) data=1;
         for (unsigned i=0;i<2 && !error;++i) {
             int base=r->request.directory[i];
-            if (i==1 && (r->capture_mask&(1U<<i)) && r->request.operation==MD_FS_MOUNT
-                    && r->request.mode==MD_FS_MOUNT_BIND && s->control_capture && s->control_query) {
+            int bind_source=(i==1 && r->request.operation==MD_FS_MOUNT && r->request.mode==MD_FS_MOUNT_BIND)
+                || (!i && r->request.operation==MD_FS_OPEN_TREE);
+            if (bind_source && (r->capture_mask&(1U<<i)) && s->control_capture && s->control_query) {
                 int found=s->control_capture(r->actor,r->request.capture[i].path,&r->control_input);
                 if (found<0) { error=found; break; }
                 if (found) {
@@ -866,16 +867,27 @@ int md_fs_buffer_progress(struct md_fs_buffer_service *s) {
             }
             if (base>=0 && ((!i && (r->request.operation==MD_FS_FSCONFIG || r->request.operation==MD_FS_FSMOUNT
                         || r->request.operation==MD_FS_BPF || r->request.operation==MD_FS_LANDLOCK))
-                    || (i==1 && r->request.operation==MD_FS_MOUNT && r->request.mode==MD_FS_MOUNT_BIND
+                    || (i==1 && r->request.operation==MD_FS_FDINFO)
+                    || (bind_source
                         && r->request.path[i] && !*r->request.path[i]))
                     && s->control_query) {
                 r->control_input=md_fd_origins_object(r->files.table,base,NULL);
                 int found=s->control_query(r->control_input,r->request.operation,&r->request.control);
                 if (found<0) { error=found; break; }
-                if (found) continue;
+                if (found && r->request.operation!=MD_FS_FDINFO) continue;
             }
             if (base==AT_FDCWD) r->input[i]=md_fs_anchor_retain(r->context.task.cwd);
             else if (base>=0) r->input[i]=md_fd_origins_get(r->files.table,base,NULL);
+            if (!i && base>=0 && !r->input[i] && r->request.operation==MD_FS_MOUNT && s->control_query) {
+                struct md_fd_object *object=md_fd_origins_object(r->files.table,base,NULL);
+                struct md_control_file file={0};
+                int found=s->control_query(object,r->request.operation,&file);
+                if (found>0 && file.ops->origin) r->input[i]=md_fs_anchor_retain(file.ops->origin(file.context));
+                if (found>0 && !r->input[i]) error=-EOPNOTSUPP;
+                else if (found<0) error=found;
+                md_fd_object_release(object);
+                if (error) break;
+            }
             if (!i && base>=0 && r->request.operation==MD_FS_REOPEN) {
                 struct md_fd_object *object=md_fd_origins_object(r->files.table,base,NULL);
                 if (md_descriptor_inode_is(object)) r->reopened=object;

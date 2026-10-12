@@ -112,7 +112,8 @@ long md_namespace_paths_request(const struct md_fs *fs,struct md_fs_request *q) 
     int entries=q->operation==MD_FS_LINK || q->operation==MD_FS_RENAME;
     for (;;) {
         long r=md_namespace_request(fs,q,&out);
-        if (r!=-EREMOTE) return r;
+        if (r!=-EREMOTE) return r<0 || q->operation!=MD_FS_OPEN_TREE ? r
+            : md_namespace_open_result(&out.result,q->flags);
         unsigned index=out.result.host_path-1;
         if (index>1 || (captured&(1U<<index))) return -ELOOP;
         captured|=1U<<index;
@@ -120,7 +121,8 @@ long md_namespace_paths_request(const struct md_fs *fs,struct md_fs_request *q) 
          * through the same table-owned capture used by mount operations. */
         struct md_proc_path ref=md_proc_path(out.data);
         enum md_proc_kind kind=ref.kind==MD_PROC_FOREIGN ? ref.foreign_kind : ref.kind;
-        int bind_source=q->operation==MD_FS_MOUNT && index==1 && q->mode==MD_FS_MOUNT_BIND;
+        int bind_source=(q->operation==MD_FS_MOUNT && index==1 && q->mode==MD_FS_MOUNT_BIND)
+            || (q->operation==MD_FS_OPEN_TREE && index==0);
         if (md_proc_control_kind(kind) && !bind_source) return -EOPNOTSUPP;
         /* Entry mutations must retain the final name, not follow it and
          * mutate a proc magic link's target. Only directory suffixes enter
@@ -131,7 +133,8 @@ long md_namespace_paths_request(const struct md_fs *fs,struct md_fs_request *q) 
         if (md_namespace_proc_borrow(&ref,&fd)) {
             long control=md_proc_control_known(fd);
             if (control<0) return control;
-            if (control && !bind_source) return entries ? -ENOTDIR : -EOPNOTSUPP;
+            if (control && !bind_source && !(q->operation==MD_FS_MOUNT && index==0))
+                return entries ? -ENOTDIR : -EOPNOTSUPP;
             const char *tail=ref.tail;
             int trailing=*tail!=0;
             while (*tail=='/') ++tail;
@@ -231,7 +234,7 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
         unsigned long args[6]; memcpy(args,a,sizeof(args)); args[path_index]=(unsigned long)path;
         return native_call(fs,nr,args);
     }
-    if (control==MD_PROC_FDINFO && proc_namespace && nr==SYS_openat) {
+    if (control==MD_PROC_FDINFO && (proc_namespace || ref.kind!=MD_PROC_FOREIGN) && nr==SYS_openat) {
         if (*ref.tail) return -ENOTDIR;
         if (ref.kind==MD_PROC_FOREIGN) return -ENOTSUP;
         int flags=(int)a[2];
@@ -242,7 +245,7 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
         md_decimal(selected+md_length(selected),(unsigned)ref.process);
         md_append(selected,sizeof(selected),"/fdinfo/");
         md_decimal(selected+md_length(selected),(unsigned)ref.descriptor);
-        struct md_fs_request q={.operation=MD_FS_FDINFO,.directory={-1,-1},
+        struct md_fs_request q={.operation=MD_FS_FDINFO,.directory={-1,ref.descriptor},
             .capture={{selected,O_RDONLY|O_CLOEXEC}},
             .flags=(unsigned)flags&(O_PATH|O_CLOEXEC),.offset=(int64_t)proc_namespace};
         struct md_fs_response out;

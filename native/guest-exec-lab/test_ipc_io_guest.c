@@ -1,6 +1,21 @@
 /* Included by the credential fixture to share native/guest launch coverage. */
 #include <sys/time.h>
 #include <sys/timerfd.h>
+#include <dirent.h>
+#ifndef SO_PASSPIDFD
+#define SO_PASSPIDFD 76
+#endif
+#ifndef SCM_PIDFD
+#define SCM_PIDFD 0x04
+#endif
+
+static unsigned io_fd_count(void) {
+    DIR *directory=opendir("/proc/self/fd"); CHECK(directory);
+    unsigned count=0;
+    for (struct dirent *entry;(entry=readdir(directory));)
+        if (entry->d_name[0]!='.') ++count;
+    CHECK(!closedir(directory)); return count;
+}
 
 static void io_filter(void) {
     struct sock_filter code[]={
@@ -80,8 +95,82 @@ static void io_inline_boundary(void) {
     }
     free(received); free(sent); CHECK(!close(pair[0]) && !close(pair[1]));
 }
+static void io_pidfd(unsigned filtered) {
+    int pair[2],on=1; CHECK(!socketpair(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC,0,pair));
+    if (setsockopt(pair[1],SOL_SOCKET,SO_PASSPIDFD,&on,sizeof(on))) {
+        CHECK(errno==ENOPROTOOPT || errno==EINVAL);
+        close(pair[0]); close(pair[1]);
+        puts("SKIP optional SO_PASSPIDFD: kernel does not supply ancillary pidfds"); return;
+    }
+    if (filtered) { io_filter(); CHECK(!prctl(PR_SET_DUMPABLE,0)); }
+    unsigned before=io_fd_count();
+    for (unsigned pass=0;pass<8;++pass) {
+        int pipes[2]; CHECK(!pipe2(pipes,O_CLOEXEC|O_NONBLOCK));
+        union { struct cmsghdr align; char bytes[2048]; } control={0};
+        unsigned count=pass==7 ? 253 : 1;
+        control.align=(struct cmsghdr){.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_RIGHTS,
+            .cmsg_len=CMSG_LEN(count*sizeof(int))};
+        int *fds=(void *)CMSG_DATA(&control.align);
+        for (unsigned i=0;i<count;++i) fds[i]=pipes[1];
+        char byte='p'; struct iovec vector={&byte,1};
+        struct msghdr sent={.msg_iov=&vector,.msg_iovlen=1,.msg_control=&control,
+            .msg_controllen=CMSG_SPACE(count*sizeof(int))};
+        unsigned messages=pass%2 ? 3 : 1;
+        for (unsigned i=0;i<messages;++i) CHECK(sendmsg(pair[0],&sent,0)==1);
+        CHECK(!close(pipes[1]));
+        for (unsigned peek=1;;--peek) {
+            struct mmsghdr batch[3]={0};
+            union { struct cmsghdr align; char bytes[2048]; } controls[3]={0};
+            for (unsigned i=0;i<messages;++i) batch[i].msg_hdr=(struct msghdr){
+                .msg_iov=&vector,.msg_iovlen=1,.msg_control=&controls[i],
+                .msg_controllen=pass==1 ? 0 : sizeof(controls[i])};
+            int flags=MSG_DONTWAIT|(peek ? MSG_PEEK : 0);
+            if (messages==1) CHECK(recvmsg(pair[1],&batch[0].msg_hdr,flags)==1);
+            else {
+                int received=recvmmsg(pair[1],batch,messages,flags,NULL);
+                if (received!=(int)messages) fprintf(stderr,"pidfd pass=%u peek=%u filtered=%u batch=%d errno=%d\n",
+                    pass,peek,filtered,received,errno);
+                CHECK(received==(int)messages);
+            }
+            for (unsigned i=0;i<messages;++i) {
+                unsigned rights=0,pidfds=0;
+                struct msghdr *m=&batch[i].msg_hdr;
+                for (struct cmsghdr *h=CMSG_FIRSTHDR(m);h;h=CMSG_NXTHDR(m,h)) {
+                    if (h->cmsg_level!=SOL_SOCKET) continue;
+                    if (h->cmsg_type==SCM_RIGHTS) {
+                        unsigned n=(h->cmsg_len-CMSG_LEN(0))/sizeof(int);
+                        int *received=(void *)CMSG_DATA(h);
+                        for (unsigned j=0;j<n;++j) CHECK(!close(received[j]));
+                        rights+=n;
+                    } else if (h->cmsg_type==SCM_PIDFD) {
+                        int fd; CHECK(h->cmsg_len==CMSG_LEN(sizeof(fd)));
+                        memcpy(&fd,CMSG_DATA(h),sizeof(fd));
+                        CHECK(fd>=0 && (fcntl(fd,F_GETFD)&FD_CLOEXEC));
+                        CHECK(!syscall(SYS_pidfd_send_signal,fd,0,NULL,0));
+                        CHECK(!close(fd)); ++pidfds;
+                    }
+                }
+                if (pass!=1) CHECK(rights==count && pidfds==1 && !(m->msg_flags&MSG_CTRUNC));
+                else CHECK(!rights && !pidfds && (m->msg_flags&MSG_CTRUNC));
+            }
+            if (!peek) break;
+        }
+        CHECK(read(pipes[0],&byte,1)==0 && !close(pipes[0]));
+        unsigned after=io_fd_count();
+        /* First publication may acquire the runtime's retained import channel. */
+        if (!pass) before=after;
+        else {
+            if (after!=before) fprintf(stderr,"pidfd FD count pass=%u before=%u after=%u\n",pass,before,after);
+            CHECK(after==before);
+        }
+    }
+    CHECK(!close(pair[0]) && !close(pair[1]));
+}
 static void io_contract(unsigned mode) {
     alarm(15);
+    if (mode==30 || mode==31) {
+        io_pidfd(mode==31); printf("PASS filtered socket IO mode=%u\n",mode); return;
+    }
     if (mode==29) {
         io_inline_boundary(); printf("PASS filtered socket IO mode=%u\n",mode); return;
     }

@@ -8,6 +8,8 @@
 #include "raw.h"
 #include "interception.h"
 #include "pid_calls.h"
+#include "linux_abi.h"
+#include "terminal_calls.h"
 #include "proc_control.h"
 #include "guest_domain.h"
 #include "watch_calls.h"
@@ -25,6 +27,7 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
+#include "filesystem_ioctl.h"
 #include <sys/utsname.h>
 
 extern struct md_export_reply md_guest_export_control(unsigned, uint64_t, unsigned, unsigned, int);
@@ -89,6 +92,7 @@ static long dispatch_files(const struct md_fs *fs, long nr, unsigned long a0, un
     if (nr==SYS_unshare || nr==SYS_clone || nr==SYS_setns) return md_pid_filter_install();
     if (nr==SYS_kill && (int)a0<=0) return md_pid_signal_group((int)a0,(int)a1);
     if (nr==SYS_pidfd_send_signal) return md_pidfd_signal(args);
+    if (nr==SYS_ioctl && md_pidfd_namespace_command((unsigned)a1)) return md_pidfd_namespace(args);
     if (nr==SYS_ioctl && ((unsigned)a1==TIOCGPGRP || (unsigned)a1==TIOCSPGRP || (unsigned)a1==TIOCGSID))
         return md_pid_terminal(args);
     if (nr==SYS_read || nr==SYS_write || nr==SYS_readv || nr==SYS_writev
@@ -97,6 +101,10 @@ static long dispatch_files(const struct md_fs *fs, long nr, unsigned long a0, un
         long result=md_proc_control_call(nr,args);
         if (result!=MD_WATCH_NATIVE) return result;
     }
+    if (nr==SYS_ioctl && md_terminal_attributes_command((unsigned)a1))
+        return md_terminal_attributes(args);
+    if (nr==SYS_ioctl && md_filesystem_ioctl_command((unsigned)a1))
+        return fs->endpoint[0] ? md_namespace_call(fs,md_executable,nr,args) : RAW3(ioctl,a0,a1,a2);
     if (nr==SYS_uname || nr==SYS_sethostname || nr==SYS_setdomainname) {
         if (nr!=SYS_uname && a1>=sizeof(((struct utsname *)0)->nodename)) return -EINVAL;
         long memory=md_adapter_buffer_take();

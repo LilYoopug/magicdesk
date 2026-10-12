@@ -15,18 +15,33 @@
 #include <limits.h>
 #include <stdatomic.h>
 #include <sys/mount.h>
+#include <linux/mount.h>
+#include <unistd.h>
 
 /* Data IO retains the backing filesystem's timestamps. Atime requests are
  * compatibility hints, not per-mount timestamp guarantees. */
 #define MD_FS_MOUNT_ATIME_HINTS (MS_NOATIME|MS_NODIRATIME|MS_RELATIME|MS_STRICTATIME|MS_LAZYTIME)
-#define MD_FS_MOUNT_POLICY_FLAGS (MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC)
+#define MD_FS_MOUNT_POLICY_FLAGS (MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC|MS_NOSYMFOLLOW)
 #define MD_FS_MOUNT_FLAGS (MD_FS_MOUNT_POLICY_FLAGS|MD_FS_MOUNT_ATIME_HINTS)
 
 static inline unsigned md_fs_mount_flags(unsigned flags) {
     return ((flags&MS_RDONLY) ? MD_MOUNT_READONLY : 0)
         | ((flags&MS_NOSUID) ? MD_MOUNT_NOSUID : 0)
         | ((flags&MS_NODEV) ? MD_MOUNT_NODEV : 0)
-        | ((flags&MS_NOEXEC) ? MD_MOUNT_NOEXEC : 0);
+        | ((flags&MS_NOEXEC) ? MD_MOUNT_NOEXEC : 0)
+        | ((flags&MS_NOSYMFOLLOW) ? MD_MOUNT_NOSYMFOLLOW : 0);
+}
+static inline unsigned md_fs_mount_attributes(uint64_t flags) {
+    return ((flags&MOUNT_ATTR_RDONLY) ? MD_MOUNT_READONLY : 0)
+        | ((flags&MOUNT_ATTR_NOSUID) ? MD_MOUNT_NOSUID : 0)
+        | ((flags&MOUNT_ATTR_NODEV) ? MD_MOUNT_NODEV : 0)
+        | ((flags&MOUNT_ATTR_NOEXEC) ? MD_MOUNT_NOEXEC : 0)
+        | ((flags&MOUNT_ATTR_NOSYMFOLLOW) ? MD_MOUNT_NOSYMFOLLOW : 0);
+}
+static inline int md_view_policy_walk(const struct md_filesystem *fs,const struct md_fs_request *q) {
+    unsigned flags=fs->mounts ? md_mount_policy_flags(&fs->mounts->base.policy) : 0;
+    return (flags&MD_MOUNT_NOSYMFOLLOW)
+        || ((flags&MD_MOUNT_NOEXEC) && q->operation==MD_FS_ACCESS && (q->mode&X_OK));
 }
 struct md_view_location;
 void md_fs_bpf(struct md_filesystem *,const struct md_fs_request *,struct md_fs_result *,const struct md_fs_output *);
@@ -70,6 +85,9 @@ static inline int md_view_inode(const struct md_view_mount *m) {
 }
 static inline int md_view_readonly(const struct md_view_mount *m) {
     return m && !!(md_mount_policy_flags(&m->policy)&MD_MOUNT_READONLY);
+}
+static inline int md_view_nosymfollow(const struct md_view_mount *m) {
+    return m && !!(md_mount_policy_flags(&m->policy)&MD_MOUNT_NOSYMFOLLOW);
 }
 struct md_view_object {
     struct md_view_object *next, *id_next;
@@ -129,6 +147,7 @@ struct md_view_object *md_view_object(struct md_filesystem *, const char *id);
 /* Mount placement may cover the initial proc/dev provider's own dentry. */
 #define MD_VIEW_MOUNT_TARGET (UINT64_C(1)<<61)
 int md_view_descriptor(struct md_filesystem *, int, const struct md_fs_anchor *, struct md_view_location *);
+int md_view_location_mountpoint(struct md_view_location *);
 /* Native device delegation is only for unannotated inherited descriptors.
  * Attached devices must complete in the mount engine, including nodev policy. */
 int md_view_task_path(struct md_filesystem *, int, const char *, const char *, uint64_t, int native_devices);

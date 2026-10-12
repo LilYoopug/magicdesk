@@ -5,6 +5,7 @@
 #include "fs_storage.h"
 #include "linux_abi.h"
 #include "procfs_view.h"
+#include "filesystem_ioctl.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/openat2.h>
@@ -130,6 +131,15 @@ static int virtual_operation(struct md_filesystem *fs,struct md_mount_namespace 
         || md_fs_provider_operation(fs,view,mount,fd,q,out,output)
         || md_fs_mqueue_operation(fs,view,mount,fd,q,out,output);
 }
+static void mount_metadata(const struct md_view_mount *mount,int fd,
+        const struct md_fs_request *q,struct md_fs_result *out) {
+    if (!mount || out->error || !(q->mode&MD_FS_STAT_MOUNT)
+            || (q->operation!=MD_FS_STAT && q->operation!=MD_FS_FSTAT)
+            || (out->info.attributes_mask&STATX_ATTR_MOUNT_ROOT)) return;
+    struct stat st;
+    if (fstat(fd,&st)) out->error=-errno;
+    else md_fs_info_mount(&out->info,mount->id,md_view_same(&st,&mount->native));
+}
 static int descriptor(struct md_filesystem *fs, const struct md_fs_request *q,
         struct md_fs_result *out, const struct md_fs_output *output) {
     const struct md_fs_anchor *origin=q->origin[0];
@@ -153,7 +163,12 @@ static int descriptor(struct md_filesystem *fs, const struct md_fs_request *q,
     if (!md_view_inode(p->mount) && (r=md_fs_landlock_native(fs,q,p->mount,q->directory[0]))) {
         out->error=r; return 1;
     }
-    if (virtual_operation(fs,owner.mounts,p->mount,q->directory[0],-1,NULL,q,out,output)) return 1;
+    if (q->operation==MD_FS_IOCTL && p->mount->backing!=MD_MOUNT_NATIVE) {
+        out->error=-ENOTTY; return 1;
+    }
+    if (virtual_operation(fs,owner.mounts,p->mount,q->directory[0],-1,NULL,q,out,output)) {
+        mount_metadata(p->mount,q->directory[0],q,out); return 1;
+    }
     if (q->operation==MD_FS_ACCESS && (r=execute_access(p->mount,q->directory[0],q->mode))) {
         out->error=r; return 1;
     }
@@ -174,6 +189,8 @@ static int descriptor(struct md_filesystem *fs, const struct md_fs_request *q,
          * The adapter handles EXDEV through the same readonly-aware reopen. */
         r = md_view_readonly(p->mount) ? -EROFS : -EXDEV; break;
     case MD_FS_GETCAP: case MD_FS_GETACL: r = -EXDEV; break;
+    case MD_FS_IOCTL:
+        r=md_view_readonly(p->mount) && md_filesystem_ioctl_writes(q->mode) ? -EROFS : -EXDEV; break;
     case MD_FS_ACCESS:
         if (q->flags&~MD_AT_EACCESS || q->mode&~(R_OK|W_OK|X_OK)) r=-EINVAL;
         else if (md_view_readonly(p->mount) && (q->mode&W_OK)) r=-EROFS;
@@ -182,7 +199,9 @@ static int descriptor(struct md_filesystem *fs, const struct md_fs_request *q,
     case MD_FS_XATTR_OBJECT:
         r = md_view_readonly(p->mount) && (q->mode==MD_FS_XATTR_SET || q->mode==MD_FS_XATTR_REMOVE)
             ? -EROFS : -EXDEV; break;
-    case MD_FS_FSTAT: result_stat(out, q->directory[0], p->mount); break;
+    case MD_FS_FSTAT:
+        result_stat(out,q->directory[0],p->mount);
+        mount_metadata(p->mount,q->directory[0],q,out); break;
     case MD_FS_STATFS: md_fs_statfs_result(q->directory[0],md_mount_policy_flags(&p->mount->policy),NULL,out,output); break;
     case MD_FS_READLINK: {
         if (!data || !capacity) { r=-EINVAL; break; }
@@ -478,8 +497,7 @@ static void native(struct md_filesystem *fs, const struct md_fs_request *q,
 }
 static int local_inode_view(struct md_filesystem *fs, const struct md_fs_request *q) {
     if (md_mount_namespace_attached(fs->mounts) || fs->native_root || q->resolve) return 0;
-    if (q->operation==MD_FS_ACCESS && (q->mode&X_OK) && fs->mounts
-            && (md_mount_policy_flags(&fs->mounts->base.policy)&MD_MOUNT_NOEXEC)) return 0;
+    if (md_view_policy_walk(fs,q)) return 0;
     for (unsigned i=0;i<2;++i) {
         const struct md_fs_anchor *p=q->origin[i];
         if (p && (p->view!=fs->mounts || !md_view_base(p->view,p->mount))) return 0;
@@ -548,7 +566,7 @@ void md_fs_mounts_execute(struct md_filesystem *fs, const struct md_fs_request *
             }
         }
         switch (q->operation) {
-        case MD_FS_FSTAT: case MD_FS_STATFS: case MD_FS_PATH: case MD_FS_REOPEN: case MD_FS_GETDENTS: case MD_FS_READLINK:
+        case MD_FS_FSTAT: case MD_FS_STATFS: case MD_FS_IOCTL: case MD_FS_PATH: case MD_FS_REOPEN: case MD_FS_GETDENTS: case MD_FS_READLINK:
         case MD_FS_CHMOD: case MD_FS_CHOWN: case MD_FS_ACCESS: case MD_FS_UTIMENS:
         case MD_FS_GETCAP: case MD_FS_SETCAP: case MD_FS_REMOVECAP:
         case MD_FS_GETACL: case MD_FS_SETACL: case MD_FS_REMOVEACL: case MD_FS_XATTR_OBJECT:
@@ -597,16 +615,12 @@ void md_fs_mounts_execute(struct md_filesystem *fs, const struct md_fs_request *
             || (q->operation==MD_FS_OPEN && !(q->flags&O_PATH)
                 && (q->flags&(O_CREAT|O_EXCL))==(O_CREAT|O_EXCL)))) r=-EEXIST;
     if (!r && mutates(q,&a) && a.mount && md_view_readonly(a.mount)) r = -EROFS;
-    if (!r && mutates(q,&a) && a.mount && a.mount->provider) {
+    /* Data opens are authorized by the selected typed provider below. Only
+     * namespace mutations must be rejected before that provider dispatch. */
+    if (!r && mutates(q,&a) && q->operation!=MD_FS_OPEN && q->operation!=MD_FS_REOPEN
+            && a.mount && a.mount->provider) {
         int private=md_provider_tree_private(a.mount->provider,a.fd>=0 ? a.fd : a.parent);
-        if (private<0) r=private;
-        else if (private) {
-            struct md_control_file control={0};
-            int device=md_provider_tree_control(a.mount->provider,a.fd,&control);
-            md_control_file_release(control);
-            if (device<0) r=device;
-            else if (!device || (q->operation!=MD_FS_OPEN && q->operation!=MD_FS_REOPEN)) r=-EROFS;
-        }
+        if (private) r=private<0 ? private : -EROFS;
         if (!r && pair && b.mount && b.mount->provider) {
             private=md_provider_tree_private(b.mount->provider,b.fd>=0 ? b.fd : b.parent);
             if (private) r=private<0 ? private : -EROFS;
@@ -629,5 +643,6 @@ void md_fs_mounts_execute(struct md_filesystem *fs, const struct md_fs_request *
         if (pair) { local.directory[1] = b.parent; local.path[1] = b.name; }
         inode(fs,a.view,a.mount,&local,out,output);
     } else out->error = r;
+    mount_metadata(a.mount,a.fd,q,out);
     md_view_location_close(&a); md_view_location_close(&b);
 }

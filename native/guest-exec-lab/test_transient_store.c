@@ -143,12 +143,59 @@ static void recovery(int parent) {
     }
     puts("PASS transient journals: process death before/after commit, intact rollback and final retirement");
 }
+static void reconfiguration(int parent) {
+    struct md_inode_store *s=NULL;
+    assert(!md_inode_store_transient(parent,NULL,&s));
+    s->lifetime->filesystem_kind=MD_FILESYSTEM_TMPFS;
+    int fd=md_inode_create(s,-1,"/file",0600); assert(fd>=0 && !close(fd));
+    int pair[2]; assert(!socketpair(AF_UNIX,SOCK_STREAM,0,pair));
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        close(pair[0]);
+        struct md_inode_store *peer=NULL;
+        assert(!md_inode_store_reconnect(s->lifetime,&peer));
+        int writer=md_inode_open(peer,-1,"/file",O_WRONLY,0); assert(writer>=0);
+        assert(write(pair[1],"w",1)==1);
+        char byte;
+        /* EVENT_WAIT: parent tests the writer, then asks for its exact release. */
+        assert(read(pair[1],&byte,1)==1 && byte=='c');
+        assert(!close(writer) && write(pair[1],"c",1)==1);
+        /* EVENT_WAIT: parent publishes readonly through another connection. */
+        assert(read(pair[1],&byte,1)==1 && byte=='r');
+        assert(md_inode_store_readonly(peer)==1);
+        assert(md_inode_open(peer,-1,"/file",O_WRONLY,0)==-EROFS);
+        assert(md_inode_mkdir(peer,-1,"/blocked",0700)==-EROFS);
+        assert(write(pair[1],"r",1)==1);
+        /* EVENT_WAIT: parent clears only superblock policy. */
+        assert(read(pair[1],&byte,1)==1 && byte=='w');
+        assert(!md_inode_store_readonly(peer));
+        writer=md_inode_open(peer,-1,"/file",O_WRONLY,0); assert(writer>=0 && !close(writer));
+        md_inode_store_close(peer); close(pair[1]); _exit(0);
+    }
+    close(pair[1]); char byte;
+    /* EVENT_WAIT: peer retains writable FD; no timing-based writer inference. */
+    assert(read(pair[0],&byte,1)==1 && byte=='w');
+    assert(md_inode_store_reconfigure(s,1)==-EBUSY);
+    assert(!md_inode_store_readonly(s));
+    assert(write(pair[0],"c",1)==1 && read(pair[0],&byte,1)==1 && byte=='c');
+    assert(!md_inode_store_reconfigure(s,1) && md_inode_store_readonly(s)==1);
+    assert(write(pair[0],"r",1)==1 && read(pair[0],&byte,1)==1 && byte=='r');
+    assert(!md_inode_store_reconfigure(s,0));
+    assert(write(pair[0],"w",1)==1); close(pair[0]);
+    int status;
+    /* EVENT_WAIT: independent connection closes after observing writable. */
+    assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
+    md_inode_store_close(s);
+    assert(!entries(parent));
+    puts("PASS transient superblock: native writer exclusion and live cross-process readonly policy");
+}
 void test_transient_store(const char *base) {
     char path[PATH_MAX]; snprintf(path,sizeof(path),"%s/transient",base);
     assert(!mkdir(path,0700));
     int parent=open(path,O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(parent>=0);
     unsigned before=descriptors();
     recovery(parent);
+    reconfiguration(parent);
     assert(descriptors()==before);
     for (unsigned i=0;i<32;++i) {
         struct md_inode_store *s=NULL; assert(!md_inode_store_transient(parent,NULL,&s));

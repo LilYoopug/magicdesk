@@ -300,7 +300,7 @@ def main():
                "--user", "0:0", "--deadline-seconds", "90", "--", "/bin/test"]
         if args.diagnostics:
             run.insert(1, "--diagnostics")
-        for mode in range(30):
+        for mode in range(32):
             for guest in (False, True):
                 check(f"filtered socket IO {mode} guest={guest}",
                       shlex.join((run if guest else [fixture]) + ["--io", str(mode)]),

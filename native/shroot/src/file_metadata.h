@@ -7,7 +7,7 @@
 
 /* Transport-neutral metadata; no guest pointers or libc-dependent padding. */
 struct md_fs_info {
-    uint64_t device, inode, links, rdev, mount_id;
+    uint64_t device, inode, links, rdev, mount_id, attributes, attributes_mask;
     int64_t size, blocks;
     uint32_t mode, uid, gid, block_size;
     int64_t access_seconds, modify_seconds, change_seconds;
@@ -31,6 +31,7 @@ static inline void md_fs_info_stat(const struct md_fs_info *i, struct stat *s) {
 static inline void md_fs_info_statx(const struct md_fs_info *i, struct statx *s) {
     *s=(struct statx){.stx_mask=STATX_BASIC_STATS|(i->mount_id ? STATX_MNT_ID : 0),
         .stx_mnt_id=i->mount_id,.stx_blksize=i->block_size,.stx_nlink=(uint32_t)i->links,
+        .stx_attributes=i->attributes,.stx_attributes_mask=i->attributes_mask,
         .stx_uid=i->uid,.stx_gid=i->gid,.stx_mode=(uint16_t)i->mode,.stx_ino=i->inode,
         .stx_size=i->size,.stx_blocks=i->blocks,
         .stx_atime={i->access_seconds,i->access_nanos,0},
@@ -38,6 +39,11 @@ static inline void md_fs_info_statx(const struct md_fs_info *i, struct statx *s)
         .stx_ctime={i->change_seconds,i->change_nanos,0},
         .stx_dev_major=major(i->device),.stx_dev_minor=minor(i->device),
         .stx_rdev_major=major(i->rdev),.stx_rdev_minor=minor(i->rdev)};
+}
+static inline void md_fs_info_mount(struct md_fs_info *info,uint64_t id,int root) {
+    info->mount_id=id;
+    info->attributes_mask|=STATX_ATTR_MOUNT_ROOT;
+    info->attributes=(info->attributes&~STATX_ATTR_MOUNT_ROOT)|(root ? STATX_ATTR_MOUNT_ROOT : 0);
 }
 static inline void md_stat_statx(const struct stat *s, struct statx *out) {
     struct md_fs_info info;

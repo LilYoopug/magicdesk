@@ -62,6 +62,8 @@ struct md_mount_namespace *md_mount_namespace_new(void) {
         if (!r) r=md_namespace_identity_new(&n->inode);
         if (!r) r=-pthread_mutex_init(&n->domains_lock,NULL);
         if (r) { free(n); errno=-r; return NULL; }
+        r=-pthread_mutex_init(&n->tables_lock,NULL);
+        if (r) { pthread_mutex_destroy(&n->domains_lock); free(n); errno=-r; return NULL; }
         atomic_init(&n->refs,1);
         atomic_init(&n->managed_paths,0);
     }
@@ -134,6 +136,7 @@ void md_mount_namespace_release(struct md_mount_namespace *n) {
     md_user_namespace_release(n->owner);
     md_view_mount_close(&n->base);
     pthread_mutex_destroy(&n->domains_lock);
+    pthread_mutex_destroy(&n->tables_lock);
     md_native_mounts_release(n->native_mounts);
     free(n->native_ids); free(n);
 }

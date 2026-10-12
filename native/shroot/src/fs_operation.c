@@ -4,6 +4,7 @@
 #include "posix_acl.h"
 #include "bpf_request.h"
 #include "proc_paths.h"
+#include "filesystem_ioctl.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/limits.h>
@@ -84,8 +85,15 @@ int md_fs_request_validate(const struct md_fs_request *q) {
     if (q->operation==MD_FS_FSOPEN)
         return descriptors || !*a || *b || (q->flags&~(O_RDWR|O_CLOEXEC))
             || q->mode || q->capacity || q->offset ? -EINVAL : 0;
+    if (q->operation==MD_FS_IOCTL)
+        return descriptors!=1 || q->directory[0]<0 || *a || *b || q->flags
+            || q->capacity || q->offset || !md_filesystem_ioctl_command(q->mode) ? -EINVAL : 0;
+    if (q->operation==MD_FS_OPEN_TREE)
+        return (!*a && !(descriptors&1)) || *b || (descriptors&2)
+            || q->flags&~(O_PATH|O_CLOEXEC) || !(q->flags&O_PATH)
+            || q->mode&~(AT_RECURSIVE|AT_SYMLINK_NOFOLLOW) || q->capacity || q->offset ? -EINVAL : 0;
     if (q->operation==MD_FS_FDINFO)
-        return descriptors!=1 || (q->directory[0]<0 && !q->capture[0].path) || *a || *b || q->mode || q->capacity
+        return descriptors!=3 || (q->directory[0]<0 && !q->capture[0].path) || q->directory[1]<0 || *a || *b || q->mode || q->capacity
             || q->offset<0 || (q->flags&~(O_PATH|O_CLOEXEC)) ? -EINVAL : 0;
     if (q->operation==MD_FS_FSMOUNT)
         return descriptors!=1 || q->directory[0]<0 || *a || *b || (q->flags&~(O_PATH|O_CLOEXEC))

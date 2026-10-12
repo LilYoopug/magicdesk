@@ -46,7 +46,7 @@ struct md_provider_tree *md_provider_tree_new(int parent,int lower,const char *c
         tree->opaque[i]=strdup(opaque[i]); if (!tree->opaque[i]) goto failed;
         tree->opaque_count++;
     }
-    tree->ops=ops; tree->context=ops ? ops->retain(context) : NULL;
+    tree->ops=ops; tree->context=ops && ops->retain ? ops->retain(context) : context;
     return tree;
 failed: {
     int error=errno; md_provider_tree_release(tree); errno=error; return NULL;
@@ -57,7 +57,7 @@ struct md_provider_tree *md_provider_tree_retain(struct md_provider_tree *tree) 
 }
 void md_provider_tree_release(struct md_provider_tree *tree) {
     if (!tree || atomic_fetch_sub_explicit(&tree->references,1,memory_order_acq_rel)!=1) return;
-    if (tree->ops) tree->ops->release(tree->context);
+    if (tree->ops && tree->ops->release) tree->ops->release(tree->context);
     if (tree->lower>=0) close(tree->lower);
     if (tree->upper>=0) md_temporary_directory_release(tree->upper);
     for (unsigned i=0;i<tree->opaque_count;++i) free(tree->opaque[i]);
@@ -92,9 +92,13 @@ static int opaque(struct md_provider_tree *tree,const char *path) {
     return 0;
 }
 static const char *relative(const char *path) { return path[1] ? path+1 : "."; }
+static int internal(const char *directory,const char *name) {
+    return !strcmp(directory,"/") && !strcmp(name,MD_TEMPORARY_DIRECTORY_MARKER);
+}
 int md_provider_tree_step(struct md_provider_tree *tree,int directory,const char *name) {
     char path[PATH_MAX]; int error=md_provider_tree_path(tree,directory,path,sizeof(path));
     if (error) return error;
+    if (internal(path,name)) return -ENOENT;
     if (!strcmp(name,"..")) {
         char *slash=strrchr(path,'/'); if (slash==path) path[1]=0; else *slash=0;
     } else if (strcmp(name,".")) {
@@ -129,6 +133,7 @@ ssize_t md_provider_tree_getdents(struct md_provider_tree *tree,int fd,void *out
         for (;;) {
             errno=0; struct dirent *e=readdir(dir);
             if (!e) { if (errno) error=-errno; break; }
+            if (internal(path,e->d_name)) continue;
             struct stat st;
             if (i && upper>=0 && !fstatat(upper,e->d_name,&st,AT_SYMLINK_NOFOLLOW)) continue;
             if (index++<position) continue;
@@ -138,7 +143,8 @@ ssize_t md_provider_tree_getdents(struct md_provider_tree *tree,int fd,void *out
             struct entry *entry=(void *)((char *)out+used);
             memset(entry,0,size); entry->ino=e->d_ino; entry->offset=index;
             entry->size=(uint16_t)size; entry->type=e->d_type; memcpy(entry->name,e->d_name,n);
-            int node=openat(roots[i],e->d_name,O_PATH|O_NOFOLLOW|O_CLOEXEC);
+            int node=tree->ops && tree->ops->control
+                ? openat(roots[i],e->d_name,O_PATH|O_NOFOLLOW|O_CLOEXEC) : -1;
             if (node>=0) {
                 struct md_control_file control={0};
                 int managed=md_provider_tree_control(tree,node,&control);
@@ -160,5 +166,5 @@ ssize_t md_provider_tree_getdents(struct md_provider_tree *tree,int fd,void *out
     return error ? error : (ssize_t)used;
 }
 int md_provider_tree_control(struct md_provider_tree *tree,int fd,struct md_control_file *out) {
-    return tree->ops && fd>=0 ? tree->ops->control(tree->context,fd,out) : 0;
+    return tree->ops && tree->ops->control && fd>=0 ? tree->ops->control(tree->context,fd,out) : 0;
 }

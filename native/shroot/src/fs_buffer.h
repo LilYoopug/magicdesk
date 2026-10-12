@@ -19,6 +19,8 @@ enum md_fs_buffer_control { MD_FS_BUFFER_CALL=16, MD_FS_BUFFER_ACK, MD_FS_BUFFER
     MD_FS_BUFFER_IPC_CAPTURE_OBSERVED, MD_FS_BUFFER_IPC_RECEIVE,
     MD_FS_BUFFER_IPC_IO_PREPARE, MD_FS_BUFFER_IPC_IO_COPY, MD_FS_BUFFER_IPC_IO_SELECT };
 enum { MD_FS_BUFFER_SOURCE=-2 };
+/* Kernel ancillary FDs do not index a capsule-expanded application vector. */
+enum md_received_source { MD_RECEIVED_KERNEL, MD_RECEIVED_APPLICATION };
 enum md_fs_buffer_transfer { MD_FS_BUFFER_NO_FD, MD_FS_BUFFER_ANCHOR, MD_FS_BUFFER_ADDFD, MD_FS_BUFFER_RIGHTS,
     MD_FS_BUFFER_TASK_PATH, MD_FS_BUFFER_CALLER_OPEN };
 enum { MD_FS_BUFFER_EXPORT=2, MD_FS_BUFFER_IMPORT=3, MD_FS_BUFFER_CHANNEL_CHECK=4,
@@ -47,7 +49,7 @@ struct md_fs_buffer_frame {
     struct { uint64_t request; unsigned mask; int number; } export;
     char source[96];
     struct { uint64_t token; int number; unsigned mapped; } receive;
-    struct { unsigned count; int index[253]; } rights;
+    struct { unsigned count; enum md_received_source source; int index[253]; } rights;
     struct { int number; struct md_fd_channel_observation observation; } channel;
     _Alignas(struct md_fd_receipt) unsigned char receipt[
         offsetof(struct md_fd_receipt,control)+CMSG_SPACE(MD_FD_RECEIPT_MAX*sizeof(int))];
@@ -68,6 +70,7 @@ long md_fs_buffer_proc_link(int process, void *out, size_t capacity);
 long md_fs_buffer_call(const struct md_fs_request *, struct md_fs_response *,
         int (*deliver)(void *, const void *, size_t), void *context);
 long md_fs_buffer_inspect(const int *, unsigned, struct md_received_message *);
-long md_fs_buffer_publish(const int *, const unsigned char *, unsigned, void *, size_t, unsigned, int *, size_t *);
+long md_fs_buffer_publish(enum md_received_source, const int *, const unsigned char *, unsigned,
+    void *, size_t, unsigned, int *, size_t *);
 #endif
 #endif

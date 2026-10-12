@@ -90,7 +90,7 @@ struct md_proc_file *md_proc_file_open_control(const struct md_control_file_ops 
     if (error) { errno=-error; return NULL; }
     const struct md_namespace_reference *ref=ops->namespace_reference ? ops->namespace_reference(context) : NULL;
     struct md_proc_file *f=md_proc_file_open(NULL,ref
-        ? (enum md_proc_file_kind)(MD_PROC_FILE_NS_USER+ref->kind) : MD_PROC_FILE_CONTROL,id,flags);
+        ? (enum md_proc_file_kind)(MD_PROC_FILE_NS_USER+ref->kind) : md_proc_sysctl_kind(ops,context),id,flags);
     if (f) {
         void *opened=ops->open && !(flags&O_PATH) ? ops->open(context,flags) : ops->retain(context);
         if (!opened) { int saved=errno; md_proc_file_release(f); errno=saved; return NULL; }
@@ -570,7 +570,7 @@ long md_proc_file_io_execute(struct md_proc_file_io *io, const struct md_identit
         return io->result=directory_entries(io,bytes,capacity);
     }
     if (io->operation==MD_PROC_FILE_WRITE) {
-        if (f->control) {
+        if (f->control && !md_proc_file_sysctl(f->kind)) {
             if (io->length>capacity || io->length>=page_size || (io->length && !bytes)) return io->result=-EINVAL;
             io->result=f->control->write(f->control_context,&io->actor,bytes,io->length,io->offset);
             if (io->result>0 && !io->positional) f->position=io->offset+io->result;
@@ -580,6 +580,8 @@ long md_proc_file_io_execute(struct md_proc_file_io *io, const struct md_identit
         size_t limit=f->kind==MD_PROC_FILE_SETGROUPS ? 8 : page_size;
         if ((f->flags&O_PATH) || (f->flags&O_ACCMODE)==O_RDONLY) return io->result=-EBADF;
         int sysctl=md_proc_file_sysctl(f->kind);
+        if (sysctl && f->control && (md_proc_file_control_access(f,writer,W_OK)==-EROFS))
+            return io->result=-EROFS;
         if (!sysctl && (io->offset || io->length>=limit)) return io->result=-EINVAL;
         size_t required=sysctl && io->length>64 ? 64 : io->length;
         if (required>capacity || (required && !bytes)) return io->result=-EFAULT;

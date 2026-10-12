@@ -2,6 +2,7 @@
 #include "fs_context.h"
 #include "fs_control.h"
 #include "fs_mount_internal.h"
+#include "fs_storage.h"
 #include "inode_internal.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -22,7 +23,7 @@ struct filesystem_context {
     struct md_ipc_namespace *ipc;
     struct md_mount_source source;
     struct stat stat;
-    unsigned type,flags;
+    unsigned type,flags,flags_mask;
     enum { PARAMETERS, CREATED, MOUNTED, FAILED } phase;
     size_t size;
     char options[PATH_MAX];
@@ -103,9 +104,10 @@ static int open_context(struct md_filesystem *fs,const struct md_fs_request *q,
 static int parameter(struct filesystem_context *c,const struct md_fs_request *q) {
     const char *key=q->path[0],*value=q->value;
     int string=q->mode==FSCONFIG_SET_STRING;
-    if (!strcmp(key,"source")) return string ? 0 : -EINVAL;
+    if (!strcmp(key,"source")) return !string ? -EINVAL : c->phase==MOUNTED ? -EOPNOTSUPP : 0;
     if (!strcmp(key,"ro") || !strcmp(key,"rw")) {
         if (string) return -EINVAL;
+        c->flags_mask|=MS_RDONLY;
         c->flags=!strcmp(key,"ro") ? MS_RDONLY : 0; return 0;
     }
     int known=0,expect_string=1;
@@ -122,7 +124,9 @@ static int parameter(struct filesystem_context *c,const struct md_fs_request *q)
     case MD_FS_MOUNT_CGROUP: known=!strcmp(key,"devices"); expect_string=0; break;
     default: break;
     }
-    if (!known) return -EOPNOTSUPP;
+    /* Unknown filesystem options are EINVAL, including optional newer-kernel
+     * flags. Callers may retry without them; do not claim their semantics. */
+    if (!known) return -EINVAL;
     if (string!=expect_string) return -EINVAL;
     /* The existing providers consume legacy option lists. Reject ambiguous
      * encodings instead of splitting a single fsconfig value into options. */
@@ -137,7 +141,19 @@ static int parameter(struct filesystem_context *c,const struct md_fs_request *q)
     *at=0; c->size+=bytes; return 0;
 }
 static int configure(struct md_filesystem *fs,struct filesystem_context *c,const struct md_fs_request *q) {
-    if (q->mode==FSCONFIG_CMD_RECONFIGURE) return -EOPNOTSUPP;
+    if (c->phase==MOUNTED) {
+        if (q->mode==FSCONFIG_CMD_CREATE) return -EBUSY;
+        if (q->mode!=FSCONFIG_CMD_RECONFIGURE) return parameter(c,q);
+        if (!md_identity_capable_in(fs->store->identity,c->opener.user_namespace,CAP_SYS_ADMIN)) return -EPERM;
+        if (c->type!=MD_FS_MOUNT_TMPFS || c->size) return -EOPNOTSUPP;
+        struct md_inode_store *store;
+        struct md_view_mount source={.backing=MD_MOUNT_INODE,.storage=c->source.storage};
+        int r=md_fs_storage_get(fs,&source,&store);
+        if (!r && c->flags_mask) r=md_inode_store_reconfigure(store,!!(c->flags&MS_RDONLY));
+        if (!r) { c->flags=0; c->flags_mask=0; }
+        return r;
+    }
+    if (q->mode==FSCONFIG_CMD_RECONFIGURE) return -EBUSY;
     if (c->phase!=PARAMETERS) return -EBUSY;
     if (q->mode!=FSCONFIG_CMD_CREATE) return parameter(c,q);
     if (!md_identity_capable_in(fs->store->identity,c->opener.user_namespace,CAP_SYS_ADMIN)) return -EPERM;
@@ -154,6 +170,7 @@ static int configure(struct md_filesystem *fs,struct filesystem_context *c,const
     struct md_fs_request create={.mode=c->type,.flags=c->flags,
         .value=c->options,.value_size=(unsigned)c->size+1};
     r=md_mount_source_create(fs,&create,&c->source);
+    if (!r && c->type==MD_FS_MOUNT_TMPFS) c->source.policy&=~MD_MOUNT_READONLY;
     fs->store->identity=identity; fs->actor=actor;
     c->phase=r ? FAILED : CREATED;
     return r;
@@ -163,16 +180,13 @@ static int mount_context(struct md_filesystem *fs,struct filesystem_context *c,c
     if (!capable(fs)) return -EPERM;
     unsigned attrs=q->mode;
     if (attrs&~(MOUNT_ATTR_RDONLY|MOUNT_ATTR_NOSUID|MOUNT_ATTR_NODEV|MOUNT_ATTR_NOEXEC
-            |MOUNT_ATTR__ATIME|MOUNT_ATTR_NODIRATIME)) return -EOPNOTSUPP;
+            |MOUNT_ATTR_NOSYMFOLLOW|MOUNT_ATTR__ATIME|MOUNT_ATTR_NODIRATIME)) return -EOPNOTSUPP;
     if ((attrs&MOUNT_ATTR__ATIME)!=MOUNT_ATTR_RELATIME && (attrs&MOUNT_ATTR__ATIME)!=MOUNT_ATTR_NOATIME
             && (attrs&MOUNT_ATTR__ATIME)!=MOUNT_ATTR_STRICTATIME) return -EINVAL;
     if (c->phase!=CREATED) return c->source.fd<0 ? -EINVAL : -EBUSY;
     if (!out || !out->origin) return -EOPNOTSUPP;
     struct md_mount_source source=c->source;
-    source.policy|=((attrs&MOUNT_ATTR_RDONLY) ? MD_MOUNT_READONLY : 0)
-        | ((attrs&MOUNT_ATTR_NOSUID) ? MD_MOUNT_NOSUID : 0)
-        | ((attrs&MOUNT_ATTR_NODEV) ? MD_MOUNT_NODEV : 0)
-        | ((attrs&MOUNT_ATTR_NOEXEC) ? MD_MOUNT_NOEXEC : 0);
+    source.policy|=md_fs_mount_attributes(attrs);
     int fd=fcntl(source.fd,F_DUPFD_CLOEXEC,3);
     if (fd<0) return -errno;
     struct md_view_mount *mount=NULL;
@@ -186,6 +200,7 @@ static int mount_context(struct md_filesystem *fs,struct filesystem_context *c,c
         md_view_mount_collect(fs); return result->error;
     }
     c->phase=MOUNTED;
+    c->size=0; c->options[0]=0; c->flags=0; c->flags_mask=0;
     return 0;
 }
 void md_fs_context_mount(struct md_filesystem *fs,const struct md_fs_request *q,

@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "task_receive.h"
+#include "socket_control.h"
 #include <errno.h>
 #include <limits.h>
 
@@ -23,9 +24,9 @@ long md_task_receive_collect(struct md_task_receive_frame *frame) {
         for (size_t offset=0; m->msg_control && m->msg_controllen-offset>=sizeof(struct cmsghdr);) {
             struct cmsghdr *h=(void *)((char *)m->msg_control+offset);
             if (h->cmsg_len<CMSG_LEN(0) || h->cmsg_len>m->msg_controllen-offset) return -EPROTO;
-            if (h->cmsg_level==SOL_SOCKET && h->cmsg_type==SCM_RIGHTS) {
-                size_t n=(h->cmsg_len-CMSG_LEN(0))/sizeof(int);
-                if (n>253-visited) return -EPROTO;
+            unsigned n=md_socket_control_fds(h);
+            if (n) {
+                if (n>MD_SOCKET_RECEIVED_FDS-visited) return -EPROTO;
                 int *fds=(void *)CMSG_DATA(h);
                 for (unsigned i=0;i<n;++i,++visited) {
                     if (visited<frame->offset) continue;

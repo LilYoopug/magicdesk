@@ -2,12 +2,15 @@
 #include "fs_mount_internal.h"
 #include "inode_internal.h"
 #include "native_mounts.h"
+#include "fs_control.h"
+#include "fs_storage.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/magic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/sysmacros.h>
 #include <unistd.h>
 
@@ -83,20 +86,30 @@ static void escaped(FILE *stream, const char *text) {
     }
 }
 static void entry(FILE *stream, unsigned info, unsigned id, unsigned parent, dev_t device,
-        const char *path, const char *type, const char *source, unsigned policy,const char *super_options) {
-    char options[32];
-    snprintf(options,sizeof(options),"%s%s%s%s",policy&MD_MOUNT_READONLY ? "ro" : "rw",
+        const char *path, const char *type, const char *source, unsigned policy,int super_readonly,const char *super_options) {
+    char options[64];
+    snprintf(options,sizeof(options),"%s%s%s%s%s",policy&MD_MOUNT_READONLY ? "ro" : "rw",
         policy&MD_MOUNT_NOSUID ? ",nosuid" : "",policy&MD_MOUNT_NODEV ? ",nodev" : "",
-        policy&MD_MOUNT_NOEXEC ? ",noexec" : "");
+        policy&MD_MOUNT_NOEXEC ? ",noexec" : "",policy&MD_MOUNT_NOSYMFOLLOW ? ",nosymfollow" : "");
     if (info) {
         fprintf(stream,"%u %u %u:%u / ",id,parent,major(device),minor(device)); escaped(stream,path);
-        fprintf(stream," %s - %s %s %s%s\n",options,type,source,options,super_options);
+        fprintf(stream," %s - %s %s %s%s\n",options,type,source,super_readonly ? "ro" : "rw",super_options);
     } else {
+        if (super_readonly) memcpy(options,"ro",2);
         fprintf(stream,"%s ",source); escaped(stream,path); fprintf(stream," %s %s%s 0 0\n",type,options,super_options);
     }
 }
+static int super_readonly(struct md_filesystem *fs,const struct md_view_mount *mount) {
+    if (!md_view_inode(mount)) return 0;
+    struct md_inode_store *store;
+    int r=md_fs_storage_get(fs,mount,&store);
+    return r ? r : md_inode_store_readonly(store);
+}
 static const char *filesystem_type(const struct md_view_mount *mount) {
-    if (mount && mount->file.ops && mount->file.ops->namespace_reference) return "nsfs";
+    if (mount && mount->file.ops) {
+        if (mount->file.ops->filesystem==NSFS_MAGIC) return "nsfs";
+        if (mount->file.ops->filesystem==PROC_SUPER_MAGIC) return "proc";
+    }
     if (mount && mount->backing==MD_MOUNT_PROC) return "proc";
     if (mount && mount->backing==MD_MOUNT_DEVPTS) return "devpts";
     if (mount && mount->backing==MD_MOUNT_SYSFS) return "sysfs";
@@ -122,17 +135,19 @@ int md_fs_mount_table(struct md_filesystem *fs, unsigned info, unsigned flags) {
     if (root_fd>=0) close(root_fd);
     const struct md_view_mount *selected=md_view_root_mount(fs);
     unsigned dev_id=fs->mounts->base.id;
+    int readonly=super_readonly(fs,selected);
+    if (!r && readonly<0) r=readonly;
     if (!r) {
         if (!md_view_base(fs->mounts,selected)) {
             const struct md_view_mount *m=selected;
             entry(stream,info,m->id,m->parent ? m->parent->id : m->id,
                 root.st_dev,"/",filesystem_type(m),
-                md_view_inode(m) ? "guest" : "attachment",md_mount_policy_flags(&m->policy),filesystem_options(m));
+                md_view_inode(m) ? "guest" : "attachment",md_mount_policy_flags(&m->policy),readonly,filesystem_options(m));
         } else entry(stream,info,fs->mounts->base.id,fs->mounts->base.id,root.st_dev,"/","guestfs","guest",
-            md_mount_policy_flags(&fs->mounts->base.policy) | (fs->store->readonly ? MD_MOUNT_READONLY : 0),"");
+            md_mount_policy_flags(&fs->mounts->base.policy),readonly,"");
         if (!fs->store->root_id && !fs->native_root && selected==&fs->mounts->base) {
             r=native_entries(fs,stream,info,&dev_id);
-            if (!r) entry(stream,info,fs->mounts->shm_id,dev_id,root.st_dev,"/dev/shm","guestfs","guest",fs->store->readonly,"");
+            if (!r) entry(stream,info,fs->mounts->shm_id,dev_id,root.st_dev,"/dev/shm","guestfs","guest",0,readonly,"");
         }
     }
     struct md_fs_mounts *tree=fs->mounts ? fs->mounts->tree : NULL;
@@ -143,9 +158,10 @@ int md_fs_mount_table(struct md_filesystem *fs, unsigned info, unsigned flags) {
         if (r == -ENOENT && (fs->store->root_id || fs->native_root)) { r=0; continue; }
         struct stat st=m->native;
         if (!r && m->file.ops) r=m->file.ops->stat(m->file.context,&st);
+        if (!r) { readonly=super_readonly(fs,m); if (readonly<0) r=readonly; }
         if (!r) entry(stream,info,m->id,m->parent ? m->parent->id : fs->mounts->base.id,
             st.st_dev,path,filesystem_type(m),
-            md_view_inode(m) ? "guest" : "attachment",md_mount_policy_flags(&m->policy),filesystem_options(m));
+            md_view_inode(m) ? "guest" : "attachment",md_mount_policy_flags(&m->policy),readonly,filesystem_options(m));
     }
     if (!r && (fflush(stream) || ferror(stream))) r=-EIO;
     int readable=-1;
@@ -157,4 +173,159 @@ int md_fs_mount_table(struct md_filesystem *fs, unsigned info, unsigned flags) {
     if (fclose(stream) && !r) r=-errno;
     if (r && readable>=0) close(readable);
     return r ? r : readable;
+}
+
+struct md_mount_table_file {
+    atomic_uint references;
+    struct md_mount_table_file *next;
+    struct md_mount_namespace *view;
+    struct md_fs_location root;
+    struct md_fs_anchor *root_anchor;
+    pthread_mutex_t lock;
+    struct stat metadata;
+    unsigned info;
+    int latest, reading, error, linked;
+    int reader, writer;
+};
+static void *table_retain(void *context) {
+    struct md_mount_table_file *f=context;
+    atomic_fetch_add_explicit(&f->references,1,memory_order_relaxed); return f;
+}
+static void table_release(void *context) {
+    struct md_mount_table_file *f=context;
+    struct md_mount_namespace *view=f->view;
+    pthread_mutex_lock(&view->tables_lock);
+    int last=atomic_fetch_sub_explicit(&f->references,1,memory_order_acq_rel)==1;
+    if (last && f->linked) {
+        struct md_mount_table_file **link=&view->tables;
+        while (*link && *link!=f) link=&(*link)->next;
+        if (*link) *link=f->next;
+    }
+    pthread_mutex_unlock(&view->tables_lock);
+    if (!last) return;
+    if (f->latest>=0) close(f->latest);
+    if (f->reading>=0) close(f->reading);
+    if (f->reader>=0) close(f->reader);
+    if (f->writer>=0) close(f->writer);
+    md_fs_anchor_release(f->root_anchor); pthread_mutex_destroy(&f->lock);
+    md_mount_namespace_release(view); free(f);
+}
+static int table_stat(void *context,struct stat *out) {
+    *out=((struct md_mount_table_file *)context)->metadata; return 0;
+}
+static int table_access(void *context,const struct md_identity *id,unsigned mode) {
+    (void)context; (void)id;
+    return mode&~7U ? -EINVAL : mode&(W_OK|X_OK) ? -EACCES : 0;
+}
+static int table_descriptor(void *context,int flags) {
+    struct md_mount_table_file *f=context;
+    if (flags&O_PATH) return -EOPNOTSUPP;
+    int fd=fcntl(f->reader>=0 ? f->reader : f->latest,F_DUPFD_CLOEXEC,3);
+    return fd<0 ? -errno : fd;
+}
+static long table_read(void *context,const struct md_control_actor *actor,void *out,size_t size,int64_t offset) {
+    (void)actor;
+    struct md_mount_table_file *f=context;
+    if (offset<0) return -EINVAL;
+    pthread_mutex_lock(&f->lock);
+    int error=f->error;
+    if (!error && (!offset || f->reading<0)) {
+        int fd=fcntl(f->latest,F_DUPFD_CLOEXEC,3);
+        if (fd<0) error=-errno;
+        else { if (f->reading>=0) close(f->reading); f->reading=fd; }
+        if (!error && f->reader>=0) { char byte; recv(f->reader,&byte,1,MSG_DONTWAIT|MSG_OOB); }
+    }
+    long result=error ? error : pread(f->reading,out,size,offset);
+    if (!error && result<0) result=-errno;
+    pthread_mutex_unlock(&f->lock); return result;
+}
+static const struct md_control_file_ops table_ops={.retain=table_retain,.release=table_release,
+    .stat=table_stat,.access=table_access,.read=table_read,.filesystem=PROC_SUPER_MAGIC,.descriptor=table_descriptor};
+
+static int table_socket(struct md_mount_table_file *f) {
+    int pair[2];
+    if (socketpair(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK,0,pair)) return -errno;
+    char byte;
+    ssize_t n=send(pair[1],"m",1,MSG_OOB|MSG_NOSIGNAL);
+    int error=n==1 ? 0 : n<0 ? -errno : -EIO;
+    if (!error) {
+        n=recv(pair[0],&byte,1,MSG_OOB);
+        if (n!=1) error=n<0 ? -errno : -EIO;
+    }
+    if (!error) {
+        n=send(pair[1],"r",1,MSG_NOSIGNAL);
+        if (n!=1) error=n<0 ? -errno : -EIO;
+    }
+    if (error) { close(pair[0]); close(pair[1]); return error; }
+    f->reader=pair[0]; f->writer=pair[1]; return 0;
+}
+static int table_signal(struct md_mount_table_file *f) {
+    if (f->reader<0) return 0;
+    char bytes[64];
+    while (recv(f->reader,bytes,sizeof(bytes),MSG_DONTWAIT)>0);
+    recv(f->reader,bytes,1,MSG_DONTWAIT|MSG_OOB);
+    ssize_t n=send(f->writer,"rm",2,MSG_OOB|MSG_DONTWAIT|MSG_NOSIGNAL);
+    return n==2 ? 0 : n<0 ? -errno : -EIO;
+}
+
+void md_fs_mount_table_open(struct md_filesystem *fs,const struct md_fs_request *q,
+        struct md_fs_result *out,const struct md_fs_output *output) {
+    int fd=md_fs_mount_table(fs,q->mode,q->flags);
+    if (fd<0) { out->error=fd; return; }
+    if ((q->flags&O_PATH) || !output || !output->control) {
+        out->fd=fd; md_view_capture(fs,fs->mounts,fs->inode_mount,out,output); return;
+    }
+    struct md_mount_table_file *f=calloc(1,sizeof(*f));
+    if (!f) { close(fd); out->error=-ENOMEM; return; }
+    int error=-pthread_mutex_init(&f->lock,NULL);
+    if (error) { close(fd); free(f); out->error=error; return; }
+    atomic_init(&f->references,1); f->view=md_mount_namespace_retain(fs->mounts);
+    f->latest=fd; f->reading=f->reader=f->writer=-1; f->info=q->mode;
+    int root=md_view_root_fd(fs);
+    error=root<0 ? root : md_view_anchor_duplicate(fs,fs->mounts,md_view_root_mount(fs),root,&f->root_anchor);
+    if (!error) error=md_fs_root_capture(fs,root,f->root_anchor,&f->root);
+    if (root>=0) close(root);
+    if (!error && stat(q->mode ? "/proc/self/mountinfo" : "/proc/self/mounts",&f->metadata)) error=-errno;
+    if (!error) {
+        error=table_socket(f);
+        /* Optional AF_UNIX_OOB support. Without it, reads remain live but
+         * epoll explicitly rejects the regular-file carrier with EPERM. */
+        if (error==-EOPNOTSUPP) error=0;
+    }
+    if (!error) {
+        pthread_mutex_lock(&f->view->tables_lock);
+        f->next=f->view->tables; f->view->tables=f; f->linked=1;
+        pthread_mutex_unlock(&f->view->tables_lock);
+        error=md_fs_control_publish(table_descriptor(f,(int)q->flags),
+            (struct md_control_file){&table_ops,f},NULL,fs->store->identity,(int)q->flags,out,output);
+    }
+    table_release(f); if (error) out->error=error;
+}
+void md_fs_mount_table_changed(struct md_filesystem *fs) {
+    struct md_mount_namespace *view=fs->mounts;
+    if (!view) return;
+    pthread_mutex_lock(&view->tables_lock);
+    struct md_mount_table_file *f=view->tables;
+    if (f) table_retain(f);
+    pthread_mutex_unlock(&view->tables_lock);
+    while (f) {
+        /* Only the filesystem worker renders. Publication/release locks cover
+         * pointer and descriptor swaps, never namespace or database work. */
+        struct md_filesystem selected=*fs;
+        const char *old_root=fs->store->root_id;
+        int error=md_fs_root_select(&selected,&f->root);
+        int fd=error ? error : md_fs_mount_table(&selected,f->info,0);
+        fs->store->root_id=old_root;
+        pthread_mutex_lock(&f->lock);
+        if (fd>=0) { close(f->latest); f->latest=fd; }
+        f->error=fd<0 ? fd : 0;
+        int changed=table_signal(f);
+        if (changed && !f->error) f->error=changed;
+        pthread_mutex_unlock(&f->lock);
+        pthread_mutex_lock(&view->tables_lock);
+        struct md_mount_table_file *next=f->next;
+        if (next) table_retain(next);
+        pthread_mutex_unlock(&view->tables_lock);
+        table_release(f); f=next;
+    }
 }

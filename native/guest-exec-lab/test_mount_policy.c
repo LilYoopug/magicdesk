@@ -131,14 +131,15 @@ static void basics(void) {
     md_mount_policy_close(&p); assert(descriptors()==before);
     for (unsigned flags=0;flags<=MD_MOUNT_FLAGS;++flags) {
         assert(!md_mount_policy_set(&p,flags) && !md_mount_policy_lock(&p));
-        unsigned locked=flags|(flags<<MD_MOUNT_LOCK_SHIFT);
+        unsigned restrictions=flags&MD_MOUNT_LOCKABLE;
+        unsigned locked=flags|(restrictions<<MD_MOUNT_LOCK_SHIFT);
         assert(md_mount_policy_flags(&p)==locked);
         for (unsigned next=0;next<=MD_MOUNT_FLAGS;++next) {
             unsigned previous=md_mount_policy_flags(&p);
-            assert(md_mount_policy_check(&p,next)==((flags&~next) ? -EPERM : 0));
+            assert(md_mount_policy_check(&p,next)==((restrictions&~next) ? -EPERM : 0));
             assert(md_mount_policy_flags(&p)==previous);
             int result=md_mount_policy_set(&p,next);
-            assert(result==((flags&~next) ? -EPERM : 0));
+            assert(result==((restrictions&~next) ? -EPERM : 0));
         }
         assert(!md_mount_policy_set(&p,flags));
         int shared=md_mount_policy_share(&p); assert(shared>=0);
@@ -153,7 +154,7 @@ static void malformed(void) {
     unsigned before=descriptors();
     for (unsigned i=0;i<8;++i) {
         int fd=memfd_create("bad-policy",MFD_CLOEXEC|MFD_ALLOW_SEALING); assert(fd>=0);
-        uint32_t header[5]={0x4d444d50U,4,0,0,0}; size_t bytes=16;
+        uint32_t header[5]={0x4d444d50U,5,0,0,0}; size_t bytes=16;
         int seals=F_SEAL_GROW|F_SEAL_SHRINK|F_SEAL_FUTURE_WRITE|F_SEAL_SEAL;
         switch (i) {
         case 0: ++header[0]; break;
@@ -233,7 +234,7 @@ static void engine_checks(struct md_filesystem *fs, struct md_fs_anchor *origin,
     else { assert(!r.error && r.fd>=0); close(r.fd); }
     char bytes[8192]; int fd=md_fs_mount_table(fs,1,O_RDONLY); assert(fd>=0);
     ssize_t n=read(fd,bytes,sizeof(bytes)-1); assert(n>0); bytes[n]=0; close(fd);
-    assert(strstr(bytes,readonly ? " /volume ro - none attachment ro" : " /volume rw - none attachment rw"));
+    assert(strstr(bytes,readonly ? " /volume ro - none attachment rw" : " /volume rw - none attachment rw"));
 }
 int test_mount_policy_child(int argc, char **argv) {
     if (argc!=4 || (strcmp(argv[1],"--policy-reader") && strcmp(argv[1],"--policy-writer"))) return -1;
@@ -284,7 +285,35 @@ static void processes(const char *base) {
     md_mount_policy_close(&observer); close(fds[0]); assert(descriptors()==before);
     puts("PASS mount policy exec peers: live engine open/reopen/access/xattr/mountinfo, retained anchors, source view/SQLite release and queued state after writer exit");
 }
+static void base_symlinks(const char *base) {
+    unsigned before=descriptors();
+    struct md_filesystem fs=filesystem(base,0);
+    md_fs_mounts_close(&fs);
+    assert(!md_fs_mounts_open(&fs,NULL,0) && !md_mount_namespace_attached(fs.mounts));
+    int fd=md_inode_open(fs.store,MD_INODE_ROOT,"/value",O_CREAT|O_WRONLY,0600); assert(fd>=0); close(fd);
+    assert(!md_inode_symlink(fs.store,"value",MD_INODE_ROOT,"/link"));
+    struct md_fs_request q={.operation=MD_FS_OPEN,.directory={MD_INODE_ROOT,-1},
+        .path={"/link",NULL},.flags=O_RDONLY};
+    struct md_fs_result r;
+    md_fs_execute(&fs,&q,&r,NULL); assert(!r.error); close(r.fd);
+    assert(!md_mount_policy_set(&fs.mounts->base.policy,MD_MOUNT_NOSYMFOLLOW));
+    md_fs_execute(&fs,&q,&r,NULL); assert(r.error==-ELOOP);
+    q.flags=O_PATH|O_NOFOLLOW;
+    md_fs_execute(&fs,&q,&r,NULL); assert(!r.error); close(r.fd);
+    struct md_fs_anchor *origin=NULL;
+    q.path[0]="/"; q.flags=O_PATH|O_DIRECTORY;
+    md_fs_execute(&fs,&q,&r,&(struct md_fs_output){.origin=&origin}); assert(!r.error && origin);
+    int root=r.fd;
+    q.directory[0]=root; q.origin[0]=origin; q.path[0]="link"; q.flags=O_RDONLY;
+    md_fs_execute(&fs,&q,&r,NULL); assert(r.error==-ELOOP);
+    assert(!md_mount_policy_set(&fs.mounts->base.policy,0));
+    md_fs_execute(&fs,&q,&r,NULL); assert(!r.error); close(r.fd);
+    md_fs_anchor_release(origin); close(root);
+    md_fs_mounts_close(&fs); md_inode_store_close(fs.store);
+    assert(descriptors()==before);
+    puts("PASS mount policy: base-only inode view and retained dirfd enforce nosymfollow without attachments");
+}
 void test_mount_policy(const char *base) {
     /* EVENT_WAIT: complete fixture failure bound, including exact child reaping. */
-    alarm(60); basics(); malformed(); sealing_rejection(); processes(base); alarm(0);
+    alarm(60); basics(); malformed(); sealing_rejection(); processes(base); base_symlinks(base); alarm(0);
 }

@@ -120,23 +120,29 @@ int md_elf_load(int fd, int loader, struct md_image *image) {
         if (p->p_type != PT_LOAD || !p->p_memsz) continue;
         uintptr_t start = down(p->p_vaddr), end = up(p->p_vaddr + p->p_memsz);
         uintptr_t file_end = p->p_filesz ? up(p->p_vaddr + p->p_filesz) : start;
+        int prot = (p->p_flags & PF_R ? PROT_READ : 0) | (p->p_flags & PF_W ? PROT_WRITE : 0)
+                | (p->p_flags & PF_X ? PROT_EXEC : 0);
+        size_t padding = p->p_filesz && p->p_memsz > p->p_filesz
+                ? file_end - p->p_vaddr - p->p_filesz : 0;
+        /* Executable segments normally need no writes. Mapping them with
+         * final permissions preserves inherited W^X/MDWE restrictions. */
+        int initial = padding && !(prot & PROT_WRITE) ? PROT_READ | PROT_WRITE : prot;
         // MAP_FIXED is restricted to the range reserved by this loader above.
         if (file_end > start) {
-            long mapped = RAW6(mmap, base + start, file_end - start, PROT_READ | PROT_WRITE,
+            long mapped = RAW6(mmap, base + start, file_end - start, initial,
                     MAP_PRIVATE | MAP_FIXED, fd, down(p->p_offset));
             if (mapped < 0) { r = (int)mapped; goto fail; }
-            if (p->p_memsz > p->p_filesz)
-                memset((void *)(base + p->p_vaddr + p->p_filesz), 0, file_end - p->p_vaddr - p->p_filesz);
+            if (padding) memset((void *)(base + p->p_vaddr + p->p_filesz), 0, padding);
+            if (initial != prot) {
+                r = (int)RAW3(mprotect, base + start, file_end - start, prot);
+                if (r < 0) goto fail;
+            }
         }
         if (end > file_end) {
-            long mapped = RAW6(mmap, base + file_end, end - file_end, PROT_READ | PROT_WRITE,
+            long mapped = RAW6(mmap, base + file_end, end - file_end, prot,
                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
             if (mapped < 0) { r = (int)mapped; goto fail; }
         }
-        int prot = (p->p_flags & PF_R ? PROT_READ : 0) | (p->p_flags & PF_W ? PROT_WRITE : 0)
-                | (p->p_flags & PF_X ? PROT_EXEC : 0);
-        r = (int)RAW3(mprotect, base + start, end - start, prot);
-        if (r < 0) goto fail;
     }
     *image = (struct md_image){base, base + data.header.e_entry, base + phdr, data.header.e_phnum};
     return 0;

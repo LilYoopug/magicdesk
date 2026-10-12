@@ -13,7 +13,7 @@
 #include <string.h>
 #include <unistd.h>
 
-enum { MAGIC=0x4d444d47U, VERSION=11, HEADER=128 };
+enum { MAGIC=0x4d444d47U, VERSION=12, HEADER=128 };
 enum { INODE=1, DETACHED=2, RETIRED=4, LOCKED=8, PROC=16, PARENTLESS=32, ROOT_PROVIDERS=64 };
 struct entry { uint32_t parent, flags; struct md_fd_identity source, target, policy;
     uint32_t storage, descriptor; uint64_t generation, proc_namespace; };
@@ -22,7 +22,7 @@ struct manifest {
     uint32_t magic, version, count, storages;
     struct md_fd_identity root_policy;
     struct md_fd_identity stream, pin;
-    uint64_t revision, reserved;
+    uint64_t revision, unavailable;
     struct md_fd_identity base_source, base_target;
     uint32_t root, base_parent, base_flags, base_descriptor;
     struct entry entries[MD_FS_MOUNTS_MAX];
@@ -175,7 +175,12 @@ static int read_manifest(int fd, struct manifest *out, struct md_fd_identity *id
     memset(out,0,sizeof(*out)); memcpy(out,bytes,HEADER);
     if (out->magic!=MAGIC || out->version!=VERSION || out->storages>out->count
             || out->count>MD_FS_MOUNTS_MAX || manifest_size(out)!=n
-            || !out->revision || out->reserved) return -EPROTO;
+            || !out->revision) return -EPROTO;
+    if (out->unavailable) {
+        struct manifest expected={.magic=MAGIC,.version=VERSION,
+            .stream=out->stream,.revision=out->revision,.unavailable=EOPNOTSUPP};
+        return n!=HEADER || memcmp(out,&expected,HEADER) ? -EPROTO : 0;
+    }
     memcpy(out->entries,bytes+HEADER,out->count*sizeof(struct entry));
     memcpy(out->storage,bytes+HEADER+out->count*sizeof(struct entry),out->storages*sizeof(struct storage));
     unsigned owners=0, next=3;
@@ -234,7 +239,10 @@ int md_mount_graph_portable(const struct md_mount_namespace *view) {
 }
 static int describe(struct md_mount_namespace *view, const struct md_mount_layout *l, struct manifest *out,
         int fds[MD_MOUNT_GRAPH_PLACEMENT_FDS], struct md_inode_lifetime **owners) {
+    if (l->count>MD_FS_MOUNTS_MAX) return -EINVAL;
     if (!mount_portable(l->base)) return -EOPNOTSUPP;
+    for (unsigned i=0;i<l->count;++i)
+        if (l->entries[i].id && !mount_portable(&l->entries[i])) return -EOPNOTSUPP;
     const struct md_view_mount *entries=l->entries;
     unsigned count=l->count;
     *out=(struct manifest){.magic=MAGIC,.version=VERSION,
@@ -349,6 +357,14 @@ int md_mount_graph_update(struct md_mount_namespace *view, const struct md_mount
     struct manifest data; int fds[MD_MOUNT_GRAPH_PLACEMENT_FDS];
     struct md_inode_lifetime *owners[MD_FS_MOUNTS_MAX];
     int r=describe(view,l,&data,fds,owners);
+    /* Exportability is not mount authority. A local typed provider publishes
+     * an unavailable revision so foreign views cannot use stale topology or
+     * mistake its Android carrier for the logical provider. */
+    if (r==-EOPNOTSUPP) {
+        data=(struct manifest){.magic=MAGIC,.version=VERSION,
+            .stream=g->identity,.unavailable=EOPNOTSUPP};
+        r=0;
+    }
     if (r) return r;
     data.revision=g->revision+1;
     unsigned char bytes[sizeof(data)]; size_t size=manifest_bytes(&data,bytes);
@@ -357,8 +373,11 @@ int md_mount_graph_update(struct md_mount_namespace *view, const struct md_mount
     if (fd<0) return fd;
     fds[0]=fd;
     struct md_mount_graph_parcel p={0};
-    r=parcel(&data,fds,owners,&p);
-    if (!r) r=md_mount_stream_publish(g->reader,g->writer,g->revision,p.fd,p.count);
+    if (data.unavailable) r=md_mount_stream_publish(g->reader,g->writer,g->revision,&fd,1);
+    else {
+        r=parcel(&data,fds,owners,&p);
+        if (!r) r=md_mount_stream_publish(g->reader,g->writer,g->revision,p.fd,p.count);
+    }
     md_mount_graph_parcel_close(&p);
     if (r) close(fd);
     else { if (g->fd>=0) close(g->fd); g->fd=fd; ++g->revision; }
@@ -368,6 +387,7 @@ int md_mount_graph_export(struct md_mount_namespace *view, int root, struct md_m
     if (!view || !out || out->count || out->fd) return -EINVAL;
     int r=md_mount_graph_sync(view);
     if (r) return r;
+    if (!md_mount_graph_portable(view)) return -EOPNOTSUPP;
     if (!view->graph) {
         struct md_mount_graph *g=create();
         if (!g) return -ENOMEM;
@@ -485,6 +505,15 @@ static int import(struct md_mount_graph_parcel *p, struct md_mount_namespace **o
     struct manifest data; struct md_fd_identity id;
     r=read_manifest(p->fd[0],&data,&id);
     if (r) return r;
+    if (data.unavailable) {
+        if (p->count!=2) return -EPROTO;
+        struct stat stream;
+        if (fstat(p->fd[1],&stream)) return -errno;
+        if (!S_ISSOCK(stream.st_mode) || !md_fd_identity_same(md_fd_identity(&stream),data.stream)) return -EPROTO;
+        if (*out && (!(*out)->graph || !md_fd_identity_same((*out)->graph->identity,data.stream)
+                || data.revision<=(*out)->graph->revision)) return -ESTALE;
+        return -EOPNOTSUPP;
+    }
     unsigned rights=placement_rights(&data);
     for (unsigned i=0;i<data.storages;++i) rights+=data.storage[i].count;
     if (p->count!=rights+1) return -EPROTO;

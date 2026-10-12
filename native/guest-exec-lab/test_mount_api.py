@@ -6,8 +6,10 @@ import ctypes
 import errno
 import fcntl
 import os
+import select
 from pathlib import Path
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -51,6 +53,233 @@ def guest():
         except OSError as error:
             assert error.errno == errno.EROFS, error
 
+    def mount_root(path='', fd=-100, expected=True):
+        value = ctypes.create_string_buffer(256)
+        call(291, fd, str(path), 0x1000 if not path else 0, 0x17ff, ctypes.addressof(value))
+        attributes = struct.unpack_from('Q', value, 8)[0]
+        mask = struct.unpack_from('Q', value, 56)[0]
+        assert mask & 0x2000, 'missing STATX_ATTR_MOUNT_ROOT support'
+        assert bool(attributes & 0x2000) == expected, (path, fd, attributes, expected)
+
+    def mount_identity(path='', fd=-100):
+        value = ctypes.create_string_buffer(256)
+        call(291, fd, str(path), 0x1000 if not path else 0, 0x17ff, ctypes.addressof(value))
+        assert struct.unpack_from('I', value)[0] & 0x1000, 'missing STATX_MNT_ID'
+        return struct.unpack_from('Q', value, 144)[0]
+
+    def filesystem_ioctls(root):
+        commands = (0x80086601, 0x40086602, 0x80087601, 0x40087602,
+                    0x801c581f, 0x401c5820)
+        value = ctypes.create_string_buffer(32)
+
+        def check(fd, error=errno.ENOTTY):
+            for command in commands:
+                call(29, fd, command, ctypes.addressof(value), error=error)
+
+        path = root / 'ioctl-file'
+        path.touch()
+        regular = os.open(path, os.O_RDWR)
+        directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        check(regular)
+        check(directory)
+        duplicate = os.dup(regular)
+        check(duplicate)
+        os.close(duplicate)
+        invalid = os.open(path, os.O_PATH)
+        check(invalid, errno.EBADF)
+        os.close(invalid)
+        check(invalid, errno.EBADF)
+        left, right = socket.socketpair()
+        left.sendmsg([b'x'], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array('i', [regular]))])
+        _, ancillary, _, _ = right.recvmsg(1, socket.CMSG_SPACE(4))
+        received = array.array('i')
+        received.frombytes(ancillary[0][2])
+        check(received[0])
+        os.close(received[0])
+        left.close()
+        right.close()
+        alias = root / 'ioctl-alias'
+        alias.touch()
+        call(40, str(path), str(alias), 0, 4096, 0)
+        with open(alias, 'rb') as stream:
+            check(stream.fileno())
+        call(39, str(alias), 2)
+        alias.unlink()
+        context = create()
+        detached = call(432, context, 1, 0)
+        temporary = os.open('.', os.O_RDONLY | os.O_DIRECTORY, dir_fd=detached)
+        check(temporary)
+        os.close(temporary)
+        os.close(detached)
+        os.close(context)
+        child = os.fork()
+        if child == 0:
+            try:
+                class Filter(ctypes.Structure):
+                    _fields_ = [('code', ctypes.c_ushort), ('jt', ctypes.c_ubyte),
+                                ('jf', ctypes.c_ubyte), ('k', ctypes.c_uint)]
+
+                class Program(ctypes.Structure):
+                    _fields_ = [('length', ctypes.c_ushort), ('filter', ctypes.POINTER(Filter))]
+
+                instruction = Filter(6, 0, 0, 0x7fff0000)  # SECCOMP_RET_ALLOW
+                program = Program(1, ctypes.pointer(instruction))
+                call(167, 38, 1, 0, 0, 0)  # PR_SET_NO_NEW_PRIVS
+                call(277, 1, 0, ctypes.addressof(program))
+                check(regular)
+                check(directory)
+                os._exit(0)
+            except BaseException:
+                import traceback
+                traceback.print_exc()
+                os._exit(1)
+        # EVENT_WAIT: inherited/sandboxed FD tests; outer deadline fails a hang.
+        assert os.waitpid(child, 0)[1] == 0
+        os.close(directory)
+        os.close(regular)
+        path.unlink()
+        # A native attachment keeps its readonly policy; unrelated native
+        # ioctls still execute against the original open description.
+        with open(__file__, 'rb') as stream:
+            call(29, stream.fileno(), commands[1], ctypes.addressof(value), error=errno.EROFS)
+        read, write = os.pipe()
+        os.write(write, b'abc')
+        call(29, read, 0x541b, ctypes.addressof(value))  # FIONREAD
+        assert struct.unpack_from('i', value)[0] == 3
+        os.close(read)
+        os.close(write)
+        print('PASS filesystem ioctl provider ownership, transfer, sandbox and native IO', flush=True)
+
+    def nosymfollow(root):
+        nosym = 0x200000  # MOUNT_ATTR_NOSYMFOLLOW; statfs uses ST_NOSYMFOLLOW (0x2000).
+
+        def denied(action):
+            try:
+                result = action()
+                if isinstance(result, int):
+                    os.close(result)
+                raise AssertionError('nosymfollow accepted a symlink traversal')
+            except OSError as error:
+                assert error.errno == errno.ELOOP, error
+
+        context = create()
+        detached = call(432, context, 1, nosym)
+        os.close(context)
+        data = os.open('value', os.O_CREAT | os.O_RDWR, 0o600, dir_fd=detached)
+        os.write(data, b'value')
+        os.close(data)
+        os.symlink('value', 'link', dir_fd=detached)
+        denied(lambda: os.open('link', os.O_RDONLY, dir_fd=detached))
+        assert os.readlink('link', dir_fd=detached) == 'value'
+        link = os.open('link', os.O_PATH | os.O_NOFOLLOW, dir_fd=detached)
+        assert os.fstat(link).st_mode & 0o170000 == 0o120000
+        os.close(link)
+        source, alias = root / 'nosym', root / 'sym'
+        source.mkdir()
+        alias.mkdir()
+        call(429, detached, '', -100, str(source), 4)
+        call(40, str(source), str(alias), 0, 4096, 0)
+        attributes(alias, clear_bits=nosym)
+        assert (alias / 'link').read_text() == 'value'
+        denied(lambda: (source / 'link').read_text())
+        denied(lambda: (source / 'link').stat())
+        assert (source / 'link').lstat().st_mode & 0o170000 == 0o120000
+        (source / 'dir').mkdir()
+        (source / 'dirlink').symlink_to('dir')
+        denied(lambda: os.open(source / 'dirlink' / 'new', os.O_CREAT | os.O_WRONLY, 0o600))
+        denied(lambda: os.stat(str(source / 'dirlink') + '/'))
+        assert os.statvfs(source).f_flag & 0x2000
+        assert not os.statvfs(alias).f_flag & 0x2000
+        entries = Path('/proc/self/mountinfo').read_text().splitlines()
+        entry = next(line for line in entries if line.split()[4] == str(source))
+        assert 'nosymfollow' in entry.split()[5].split(','), entry
+        child = os.fork()
+        if child == 0:
+            try:
+                call(97, 0x10000000 | 0x20000)
+                Path('/proc/self/uid_map').write_text('0 0 1\n')
+                Path('/proc/self/setgroups').write_text('deny\n')
+                Path('/proc/self/gid_map').write_text('0 0 1\n')
+                denied(lambda: (source / 'link').read_text())
+                # Linux does not lock NOSYMFOLLOW across user namespaces.
+                attributes(source, clear_bits=nosym)
+                assert (source / 'link').read_text() == 'value'
+                os._exit(0)
+            except BaseException:
+                import traceback
+                traceback.print_exc()
+                os._exit(1)
+        # EVENT_WAIT: inherited mount-policy check; outer deadline fails a hang.
+        assert os.waitpid(child, 0)[1] == 0
+        denied(lambda: (source / 'link').read_text())
+        call(40, 0, str(source), 0, 4096 | 32, 0)  # Legacy bind remount clears NOSYMFOLLOW.
+        reopened = os.open('link', os.O_RDONLY, dir_fd=detached)
+        os.close(reopened)
+        call(40, 0, str(source), 0, 4096 | 32 | 256, 0)
+        denied(lambda: os.open('link', os.O_RDONLY, dir_fd=detached))
+        call(39, str(source), 2)
+        denied(lambda: os.open('link', os.O_RDONLY, dir_fd=detached))
+        os.close(detached)
+        call(39, str(alias), 2)
+        source.rmdir()
+        alias.rmdir()
+
+        # Native attachments obey the same mount-local policy.
+        native = Path(__file__).with_name('linked.py')
+        assert native.read_bytes() == Path(__file__).read_bytes()
+        attributes(native.parent, set_bits=nosym)
+        denied(native.read_bytes)
+        assert native.lstat().st_mode & 0o170000 == 0o120000
+        attributes(native.parent, clear_bits=nosym)
+
+        # Typed proc delegation must not skip mount or openat2 link policy.
+        proc = root / 'nosym-proc'
+        proc.mkdir()
+        call(40, 'none', str(proc), 'proc', 256, 0)
+        denied(lambda: os.stat(proc / 'self'))
+        denied(lambda: os.stat(proc / 'thread-self' / 'status'))
+        assert os.readlink(proc / 'self') == str(os.getpid())
+        task = proc / str(os.getpid())
+        assert (task / 'status').read_text()
+        with open(__file__, 'rb') as stream:
+            for path in (task / 'exe', task / 'root', task / 'cwd', task / 'ns' / 'mnt',
+                         task / 'fd' / str(stream.fileno())):
+                denied(lambda: os.open(path, os.O_RDONLY))
+                assert path.lstat().st_mode & 0o170000 == 0o120000, path
+                assert os.readlink(path), path
+        call(39, str(proc), 2)
+        proc.rmdir()
+        print('PASS nosymfollow: detached/native/proc, alias, remount, retained FD and namespace locks', flush=True)
+
+    def root_operands(root):
+        descriptor = os.open('/', os.O_PATH | os.O_DIRECTORY)
+        reference = '/proc/self/fd/' + str(descriptor)
+        for path in ('/', reference):
+            call(40, 0, path, 0, (1 << 19) | 16384, 0)  # MS_SLAVE | MS_REC
+            call(40, 0, path, 0, 4096 | 32 | 2, 0)  # Bind remount NOSUID.
+            assert os.statvfs('/').f_flag & os.ST_NOSUID
+            call(40, 0, path, 0, 4096 | 32, 0)
+        ordinary = os.open(root, os.O_PATH | os.O_DIRECTORY)
+        call(40, 0, '/proc/self/fd/' + str(ordinary), 0, 1 << 19, 0, error=errno.EINVAL)
+        os.close(ordinary)
+        os.close(descriptor)
+        child = os.fork()
+        if child == 0:
+            try:
+                os.chroot(root)
+                os.chdir('/')
+                # A process root is not necessarily the root of its mount.
+                call(40, 0, '/', 0, 1 << 19, 0, error=errno.EINVAL)
+                call(40, 0, '/', 0, 4096 | 32 | 2, 0, error=errno.EINVAL)
+                os._exit(0)
+            except BaseException:
+                import traceback
+                traceback.print_exc()
+                os._exit(1)
+        # EVENT_WAIT: isolated chroot checks; outer deadline fails a hang.
+        assert os.waitpid(child, 0)[1] == 0
+        print('PASS mount root identity: pathname, proc FD, remount and chroot rejection', flush=True)
+
     # The launch enters a child user/mount namespace but retains its parent's
     # cgroup namespace. fsopen must not acquire the authority of a later unshare.
     old_context = call(430, 'cgroup2', 1)
@@ -61,6 +290,129 @@ def guest():
 
     with tempfile.TemporaryDirectory(prefix='md-fsopen-') as directory:
         root = Path(directory)
+        root_operands(root)
+        filesystem_ioctls(root)
+        nosymfollow(root)
+        mount_root('/')
+        mount_root(root, expected=False)
+        watched = os.open('/proc/self/mountinfo', os.O_RDONLY | os.O_CLOEXEC)
+        event = select.epoll()
+        event.register(watched, select.EPOLLPRI)
+        os.read(watched, 1 << 20)
+        assert not event.poll(0)
+        context = create()
+        detached = call(432, context, 1, 0)
+        os.close(context)
+        assert not event.poll(0), 'detached mounts must not publish a placement'
+        call(429, detached, '', -100, str(root), 4)
+        mount_root(root)
+        os.close(detached)
+        assert event.poll(0), 'missing mount namespace notification'
+        os.lseek(watched, 0, os.SEEK_SET)
+        assert (' ' + str(root) + ' ') in os.read(watched, 1 << 20).decode()
+        assert not event.poll(0), 'reading did not acknowledge mount change'
+        call(39, str(root), 2)
+        assert event.poll(0), 'missing unmount notification'
+        os.lseek(watched, 0, os.SEEK_SET)
+        assert (' ' + str(root) + ' ') not in os.read(watched, 1 << 20).decode()
+        assert not event.poll(0)
+        event.close()
+        os.close(watched)
+        print('PASS live mount table, epoll notification, reread and unmount', flush=True)
+
+        mounted = root / 'mounted'
+        mounted.mkdir()
+        alias = root / 'alias'
+        alias.symlink_to(mounted)
+        call(40, 'tmpfs', str(mounted), 'tmpfs', 0, 0)
+        mount_root(mounted)
+        (mounted / 'kept').touch()
+        call(39, str(alias), 8, error=errno.EINVAL)  # UMOUNT_NOFOLLOW
+        assert (mounted / 'kept').exists()
+        call(39, str(mounted), 8)
+        assert not (mounted / 'kept').exists()
+        call(40, 'tmpfs', str(mounted), 'tmpfs', 0, 0)
+        call(39, str(alias), 0)
+        alias.unlink()
+        mounted.rmdir()
+        print('PASS unmount nofollow preserves the symlink target', flush=True)
+
+        mounted.mkdir()
+        before = os.open(mounted, os.O_PATH | os.O_DIRECTORY)
+        before_id = os.stat(mounted).st_ino
+        call(40, 'tmpfs', str(mounted), 'tmpfs', 0, 0)
+        mount_root(mounted)
+        mount_root(fd=before, expected=False)
+        call(40, 0, f'/proc/self/fd/{before}', 0, 1 | 32 | 4096, 0)
+        assert os.fstat(before).st_ino == before_id
+        write_denied(mounted / 'blocked')
+        call(39, f'/proc/self/fd/{before}', 2)
+        (mounted / 'writable').touch()
+        (mounted / 'writable').unlink()
+        os.close(before)
+        mounted.rmdir()
+        print('PASS legacy mount target follows overmount without retargeting old FD', flush=True)
+
+        source = '/proc/sys/kernel/domainname'
+        parent = os.open('/proc/sys/kernel', os.O_PATH)
+        sysctl = os.open(source, os.O_PATH)
+
+        def fdinfo(fd):
+            return dict(line.split(':', 1) for line in Path(f'/proc/self/fdinfo/{fd}').read_text().splitlines())
+
+        assert fdinfo(parent)['mnt_id'] == fdinfo(sysctl)['mnt_id']
+        assert int(fdinfo(sysctl)['ino']) == os.fstat(sysctl).st_ino
+        os.close(parent)
+        os.close(sysctl)
+        bound = root / 'sysctl'
+        bound.touch()
+        call(40, source, str(bound), 0, 4096, 0)
+        assert bound.read_text() == Path(source).read_text()
+        assert os.stat(bound).st_ino == os.stat(source).st_ino
+        sysctl = os.open(bound, os.O_PATH)
+        assert int(fdinfo(sysctl)['ino']) == os.fstat(sysctl).st_ino
+        assert mount_identity(bound) == mount_identity(fd=sysctl) == int(fdinfo(sysctl)['mnt_id'])
+        mount_root(fd=sysctl)
+        os.close(sysctl)
+        attributes(bound, set_bits=1)
+        write_denied(bound)
+        call(39, str(bound), 2)
+        bound.unlink()
+        print('PASS typed sysctl bind mount and readonly policy', flush=True)
+
+        proc = root / 'proc'
+        proc.mkdir()
+        call(97, 0x04000000)  # The test owns a private UTS namespace.
+        call(40, 'proc', str(proc), 'proc', 0, 0)
+        domain = proc / 'sys/kernel/domainname'
+        sysctl = call(428, -100, str(domain), os.O_CLOEXEC | 0x100)
+        assert mount_identity(domain) == mount_identity(fd=sysctl)
+        mount_root(fd=sysctl, expected=False)
+        duplicate = os.dup(sysctl)
+        assert mount_identity(fd=duplicate) == mount_identity(fd=sysctl)
+        os.close(duplicate)
+        left, right = socket.socketpair()
+        left.sendmsg([b'x'], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array('i', [sysctl]))])
+        _, ancillary, _, _ = right.recvmsg(1, socket.CMSG_SPACE(4))
+        received = array.array('i')
+        received.frombytes(ancillary[0][2])
+        assert mount_identity(fd=received[0]) == mount_identity(fd=sysctl)
+        mount_root(fd=received[0], expected=False)
+        os.close(received[0])
+        left.close()
+        right.close()
+        os.close(sysctl)
+        previous = domain.read_text()
+        domain.write_text('md-proc-view\n')
+        assert domain.read_text() == 'md-proc-view\n'
+        assert Path(source).read_text() == 'md-proc-view\n'
+        domain.write_text(previous)
+        attributes(proc, set_bits=1)
+        write_denied(domain)
+        call(39, str(proc), 2)
+        proc.rmdir()
+        print('PASS mounted proc sysctl write and readonly policy', flush=True)
+
         call(430, 'unknown', 0, error=errno.ENODEV)
         call(430, 'tmpfs', 2, error=errno.EINVAL)
         call(431, 123456, 6, 0, 0, 0, error=errno.EBADF)
@@ -77,7 +429,8 @@ def guest():
             except OSError as error:
                 assert error.errno == expected, error
         call(432, fd, 1, 0, error=errno.EINVAL)
-        call(431, fd, 0, 'unsupported', 0, 0, error=errno.EOPNOTSUPP)
+        call(431, fd, 0, 'unsupported', 0, 0, error=errno.EINVAL)
+        call(431, fd, 0, 'noswap', 0, 0, error=errno.EINVAL)
         call(431, fd, 0, 'size', 0, 0, error=errno.EINVAL)
         config(fd, 'mode', '0700')
         config(fd, 'size', '1')
@@ -109,6 +462,56 @@ def guest():
         call(429, mount, '', -100, str(root), 4, error=errno.EINVAL)
         os.close(mount)
         print('PASS fscontext state, dup, detached IO, attach and unmount', flush=True)
+
+        # Superblock reconfiguration affects every alias, not just the mount
+        # returned by fsmount. Native leases include unlinked writers and mmap.
+        import mmap
+        context = create(mode='0755')
+        mount = call(432, context, 1, 0)
+        data = os.open('data', os.O_CREAT | os.O_RDWR, 0o600, dir_fd=mount)
+        os.ftruncate(data, mmap.PAGESIZE)
+        call(431, context, 0, 'ro', 0, 0)
+        call(431, context, 7, 0, 0, 0, error=errno.EBUSY)
+        mapping = mmap.mmap(data, mmap.PAGESIZE, flags=mmap.MAP_SHARED)
+        os.close(data)
+        call(431, context, 7, 0, 0, 0, error=errno.EBUSY)
+        mapping.close()
+        call(429, mount, '', -100, str(root), 4)
+        alias = root / 'alias'
+        alias.mkdir()
+        call(40, str(root), str(alias), 0, 4096, 0)
+        data = os.open(root / 'unlinked', os.O_CREAT | os.O_RDWR, 0o600)
+        os.unlink(root / 'unlinked')
+        call(431, context, 7, 0, 0, 0, error=errno.EBUSY)
+        os.close(data)
+        call(431, context, 7, 0, 0, 0)
+        for path in (root, alias):
+            write_denied(path / 'blocked')
+            write_denied(path / 'data')
+            assert os.statvfs(path).f_flag & os.ST_RDONLY
+        assert os.fstatvfs(mount).f_flag & os.ST_RDONLY
+        fields = next(line.split(' - ') for line in Path('/proc/self/mountinfo').read_text().splitlines()
+                      if line.split()[4] == str(alias))
+        assert fields[1].split()[2] == 'ro', fields
+        child = os.fork()
+        if child == 0:
+            call(97, 0x20000)  # CLONE_NEWNS retains superblock policy.
+            write_denied(alias / 'child-blocked')
+            os._exit(0)
+        # EVENT_WAIT: inherited namespace completes; outer deadline fails a hang.
+        assert os.waitpid(child, 0)[1] == 0
+        attributes(alias, set_bits=1)
+        call(431, context, 0, 'rw', 0, 0)
+        call(431, context, 7, 0, 0, 0)
+        assert not os.statvfs(root).f_flag & os.ST_RDONLY
+        (root / 'data').write_bytes(b'writable')
+        write_denied(alias / 'data')
+        call(39, str(alias), 2)
+        alias.rmdir()
+        call(39, str(root), 2)
+        os.close(mount)
+        os.close(context)
+        print('PASS fsconfig reconfigure: writers, unlinked files, mmap, aliases, namespace and per-mount policy', flush=True)
 
         # Real SCM_RIGHTS transfers retain authority, not the carrier inode.
         left, right = socket.socketpair()
@@ -160,7 +563,7 @@ def guest():
         attributes(root, clear_bits=0x10, error=errno.EINVAL)
         attributes(root, set_bits=0x30, clear_bits=0x70, error=errno.EINVAL)
         attributes(root, set_bits=0x100000, error=errno.EOPNOTSUPP)  # IDMAP
-        attributes(root, set_bits=0x200000, error=errno.EOPNOTSUPP)  # NOSYMFOLLOW
+        attributes(root, set_bits=0x200000, error=errno.EINVAL)  # Not a mount root.
         attributes(root, propagation=(1 << 18) | (1 << 19), error=errno.EINVAL)
         attributes(root, propagation=1 << 20, error=errno.EOPNOTSUPP)  # SHARED
         context = create()
@@ -248,6 +651,57 @@ def guest():
         os.close(mount)
         print('PASS mount_setattr: ABI, detached FD, recursive policy, locked rollback and retained origins', flush=True)
 
+        source, destination = root / 'source', root / 'destination'
+        source.mkdir()
+        destination.mkdir()
+        (source / 'value').write_text('source')
+        call(428, -100, str(source), 2, error=errno.EINVAL)
+        call(428, -100, str(source), 0x8000, error=errno.EINVAL)
+        opened = call(428, -100, str(source), os.O_CLOEXEC)
+        assert fcntl.fcntl(opened, fcntl.F_GETFD) & fcntl.FD_CLOEXEC
+        duplicate = call(428, opened, '', 0x1000)
+        assert not fcntl.fcntl(duplicate, fcntl.F_GETFD) & fcntl.FD_CLOEXEC
+        assert os.fstat(duplicate).st_ino == source.stat().st_ino
+        os.close(duplicate)
+        clone = call(428, opened, '', 1 | os.O_CLOEXEC | 0x1000)
+        os.close(opened)
+        attributes(fd=clone, flags=0x1000, set_bits=1)
+        call(429, clone, '', -100, str(destination), 4)
+        os.close(clone)
+        assert (destination / 'value').read_text() == 'source'
+        write_denied(destination / 'value')
+        (source / 'value').write_text('shared')
+        assert (destination / 'value').read_text() == 'shared'
+        call(39, str(destination), 2)
+
+        (source / 'child').mkdir()
+        context = create()
+        child_mount = call(432, context, 1, 0)
+        os.close(context)
+        call(429, child_mount, '', -100, str(source / 'child'), 4)
+        os.close(child_mount)
+        (source / 'child' / 'nested').write_text('nested')
+        clone = call(428, -100, str(source), 1 | os.O_CLOEXEC | 0x8000)
+        call(429, clone, '', -100, str(destination), 4)
+        os.close(clone)
+        assert (destination / 'child' / 'nested').read_text() == 'nested'
+        call(39, str(source / 'child'), 2)
+        assert (destination / 'child' / 'nested').read_text() == 'nested'
+        call(39, str(destination), 2)
+        with open(root / 'device', 'w'):
+            pass
+        clone = call(428, -100, '/dev/null', 1 | os.O_CLOEXEC)
+        call(429, clone, '', -100, str(root / 'device'), 4)
+        os.close(clone)
+        with open(root / 'device', 'rb') as device:
+            assert device.read(1) == b''
+        call(39, str(root / 'device'), 2)
+        before = len(os.listdir('/proc/self/fd'))
+        for _ in range(96):
+            os.close(call(428, -100, str(source), 1 | os.O_CLOEXEC))
+        assert len(os.listdir('/proc/self/fd')) == before
+        print('PASS open_tree: retained roots, recursive clones, native files, policy and cleanup', flush=True)
+
         # openat2 shares the versioned-structure reader, not mount semantics.
         how = (ctypes.c_uint64 * 4)(os.O_PATH, 0, 0, 0)
         opened = call(437, -100, str(root), ctypes.addressof(how), ctypes.sizeof(how))
@@ -318,9 +772,10 @@ def main():
     from test_oci_services import Suite
     suite = Suite(args.build, args.build)
     target = '/tmp/md-mount-api-' + suite.report['id']
-    prefix = [suite.runner, '--store', args.store, '--user', '0:0']
+    prefix = [suite.runner, '--store', args.store, '--user', '0:0', '--network', 'routed']
     try:
         suite.transport.upload(suite.client, Path(__file__), suite.base + '/test.py')
+        suite.command(['/system/bin/ln', '-s', 'test.py', suite.base + '/linked.py'])
         suite.command(prefix + ['--', '/bin/mkdir', target])
         command = prefix + ['--bind-ro', suite.base, target, '--deadline-seconds', '100', '--',
                             '/usr/bin/unshare', '--user', '--map-users=0:0:65536', '--map-groups=0:0:65536',

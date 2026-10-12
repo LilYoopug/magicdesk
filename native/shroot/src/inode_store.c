@@ -51,16 +51,17 @@ int md_inode_open_object(struct md_inode_store *s, const char *id, int flags) {
 static int create_node(struct md_inode_store *s, int dirfd, const char *path,
         mode_t kind, mode_t mode, const char *target) {
     if (mode & ~(s->identity ? 07777 : 01777)) return -ENOTSUP;
-    int r = mdi_begin(s, !s->readonly);
+    int r = mdi_begin(s, 0);
     if (r) return r;
     struct mdi_location loc;
     r = mdi_walk(s, dirfd, path, MDI_ENTRY, 1, &loc);
     if (!r && loc.trailing && kind == S_IFREG) r = -EISDIR;
     if (!r && loc.exists) r = -EEXIST;
     if (!r && loc.trailing && kind != S_IFDIR) r = -ENOENT;
-    if (!r && s->readonly) r=-EROFS;
+    if (!r && mdi_readonly(s)) r=-EROFS;
     if (!r) r = mdi_parent_writable(s, &loc.parent);
     if (!r) r=mdi_landlock(s,&loc.parent,NULL,md_landlock_make_access(kind));
+    if (!r) r=mdi_write(s);
     struct mdi_node node;
     int fd = -1;
     if (!r) r = mdi_allocate(s, kind, mode, O_RDWR, target,
@@ -148,7 +149,7 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
     if (!r && create && (flags & O_EXCL) && loc.exists) r = -EEXIST;
     if (!r && !loc.exists) {
         if (loc.trailing) r = -EISDIR;
-        if (!r && s->readonly) r=-EROFS;
+        if (!r && mdi_readonly(s)) r=-EROFS;
         if (!r) r = mdi_parent_writable(s, &loc.parent);
         if (!r) r=mdi_landlock(s,&loc.parent,NULL,MD_LL_MAKE_REG|md_landlock_open_access(flags,S_IFREG));
         if (!r) r=mdi_write(s);
@@ -163,7 +164,7 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
     if (!r && loc.node.kind == S_IFLNK && !(flags & O_PATH)) r = -ELOOP;
     if (!r && loc.node.kind == S_IFSOCK && !(flags & O_PATH)) r = -ENXIO;
     if (!r && loc.node.kind == S_IFDIR && (flags & (O_WRONLY | O_RDWR | O_TRUNC | O_CREAT))) r = -EISDIR;
-    if (!r && s->readonly && (flags&(O_WRONLY|O_RDWR|O_TRUNC))) r=-EROFS;
+    if (!r && mdi_readonly(s) && (flags&(O_WRONLY|O_RDWR|O_TRUNC))) r=-EROFS;
     if (!r && image && loc.node.kind != S_IFREG) r = -EACCES;
     if (!r) r = mdi_open_permission(s, &loc.node, flags);
     if (!r && image) r = mdi_permission(s, &loc.node, X_OK, 0);
@@ -309,8 +310,12 @@ int md_inode_stat(struct md_inode_store *s, int dirfd, const char *path, int fla
     struct mdi_location loc;
     r = mdi_walk(s, dirfd, path, flags & AT_SYMLINK_NOFOLLOW ? MDI_NOFOLLOW : MDI_FOLLOW, 0, &loc);
     if (!r) r = mdi_stat(s, &loc.node, st);
-    if (!r && s->stat_path && mdi_location_path(s, &loc, s->stat_path, PATH_MAX))
-        s->stat_path[0] = 0;
+    if (!r && s->stat_location) {
+        struct mdi_stat_location *p=s->stat_location;
+        p->device=loc.node.device; p->inode=loc.node.inode;
+        p->root=!strcmp(loc.node.id,s->lifetime->scope);
+        if (mdi_location_path(s,&loc,p->path,sizeof(p->path))) p->path[0]=0;
+    }
     return mdi_finish(s, r);
 }
 int md_inode_fstat(struct md_inode_store *s, int fd, struct stat *st) {
@@ -319,8 +324,12 @@ int md_inode_fstat(struct md_inode_store *s, int fd, struct stat *st) {
     if (r) return r;
     struct mdi_node node;
     r = mdi_fstat(s, fd, &node, st);
-    if (!r && s->stat_path && mdi_node_path(s, &node, s->stat_path, PATH_MAX))
-        s->stat_path[0] = 0;
+    if (!r && s->stat_location) {
+        struct mdi_stat_location *p=s->stat_location;
+        p->device=node.device; p->inode=node.inode;
+        p->root=!strcmp(node.id,s->lifetime->scope);
+        if (mdi_node_path(s,&node,p->path,sizeof(p->path))) p->path[0]=0;
+    }
     return mdi_finish(s, r);
 }
 int md_inode_list(struct md_inode_store *s, int dirfd, const char *path,

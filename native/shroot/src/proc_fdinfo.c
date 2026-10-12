@@ -2,15 +2,19 @@
 #include "proc_fdinfo.h"
 #include "fs_engine.h"
 #include "fs_control.h"
+#include "fs_mounts.h"
 #include "pid_namespace.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <linux/magic.h>
+#include <linux/stat.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/syscall.h>
 
 struct fdinfo {
     atomic_uint references;
@@ -19,6 +23,8 @@ struct fdinfo {
     struct md_pid_namespace *view;
     char *text;
     size_t size;
+    uint64_t mount_id, inode;
+    uint64_t native_mount, native_inode;
 };
 static void *retain(void *context) {
     struct fdinfo *f=context;
@@ -69,6 +75,14 @@ static int refresh(struct fdinfo *f) {
             if (prefix==4) { has_pid=1; target=pid; }
             else has_nested=1;
             write_pid(out,prefix==4 ? "Pid:" : "NSpid:",pid,f->view,prefix==6);
+        } else if (f->mount_id && !strncmp(line,"mnt_id:",7)) {
+            uint64_t current;
+            if (sscanf(line+7,"%" SCNu64,&current)!=1 || current!=f->native_mount) { error=-ESTALE; break; }
+            fprintf(out,"mnt_id:\t%" PRIu64 "\n",f->mount_id);
+        } else if (f->mount_id && !strncmp(line,"ino:",4)) {
+            uint64_t current;
+            if (sscanf(line+4,"%" SCNu64,&current)!=1 || current!=f->native_inode) { error=-ESTALE; break; }
+            fprintf(out,"ino:\t%" PRIu64 "\n",f->inode);
         } else fputs(line,out);
     }
     /* Native kernels without CONFIG_PID_NS omit NSpid. A logical proc mount
@@ -100,8 +114,40 @@ void md_fs_fdinfo(struct md_filesystem *fs,const struct md_fs_request *q,
     struct fdinfo *f=calloc(1,sizeof(*f));
     if (!f) { result->error=-ENOMEM; return; }
     atomic_init(&f->references,1); f->fd=-1;
-    f->view=md_pid_namespace_by_inode((uint64_t)q->offset);
-    if (!f->view && (uint64_t)q->offset!=md_pid_namespace_inode(NULL)) result->error=-ENOENT;
+    f->view=q->offset ? md_pid_namespace_by_inode((uint64_t)q->offset) : NULL;
+    if (q->offset && !f->view && (uint64_t)q->offset!=md_pid_namespace_inode(NULL)) result->error=-ENOENT;
+    if (!result->error && q->directory[1]>=0) {
+        struct md_control_file control=q->control;
+        const struct md_fs_anchor *origin=control.ops && control.ops->origin
+            ? control.ops->origin(control.context) : q->origin[1];
+        struct md_fs_request metadata={.operation=MD_FS_FSTAT,
+            .directory={origin ? md_fs_anchor_fd(origin) : q->directory[1],-1},
+            .origin={origin,NULL},.mode=MD_FS_STAT_MOUNT};
+        struct md_fs_result info={.error=-EXDEV};
+        if (!control.ops || origin) md_fs_view_execute(fs,&metadata,&info,NULL);
+        if (info.error && info.error!=-EXDEV) result->error=info.error;
+        if (!info.error) { f->mount_id=info.info.mount_id; f->inode=info.info.inode; }
+        struct statx native;
+        if (!result->error && syscall(SYS_statx,q->directory[1],"",AT_EMPTY_PATH,
+                STATX_MNT_ID|STATX_INO,&native)) result->error=-errno;
+        if (!result->error) {
+            f->native_mount=native.stx_mnt_id; f->native_inode=native.stx_ino;
+            if (!f->mount_id && native.stx_mnt_id) {
+                result->error=md_fs_native_mount(fs,native.stx_mnt_id,&f->mount_id);
+                f->inode=native.stx_ino;
+            }
+        }
+        if (!result->error && control.ops) {
+            struct stat st;
+            result->error=control.ops->stat(control.context,&st);
+            if (!result->error) f->inode=st.st_ino;
+            if (!result->error && !origin && control.ops->filesystem==PROC_SUPER_MAGIC) {
+                struct statx proc;
+                if (syscall(SYS_statx,AT_FDCWD,"/proc",0,STATX_MNT_ID,&proc)) result->error=-errno;
+                else result->error=md_fs_native_mount(fs,proc.stx_mnt_id,&f->mount_id);
+            }
+        }
+    }
     if (!result->error) {
         f->fd=fcntl(q->directory[0],F_DUPFD_CLOEXEC,0);
         if (f->fd<0) result->error=-errno;

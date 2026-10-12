@@ -5,6 +5,7 @@
 #include "event_wait.h"
 #include "mount_topology.h"
 #include "inode_internal.h"
+#include "proc_sysctl.h"
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -416,6 +417,52 @@ static void updates(const char *base) {
     assert(descriptors()==before);
     puts("PASS live mount graph: move, detach, append, stable old dirfd, forwarding and writer exit");
 }
+static void private_publication(const char *base) {
+    unsigned before=descriptors();
+    char directory[PATH_MAX]; path(directory,base,"private-publication"); assert(!mkdir(directory,0700));
+    struct md_filesystem fs=filesystem(directory,1), peer={.store=fs.store};
+    struct md_mount_graph_parcel p={0};
+    assert(!md_mount_graph_export(fs.mounts,fs.store->lifetime->root,&p));
+    assert(!md_mount_graph_import(&p,&peer.mounts));
+    unsigned id=peer.mounts->tree->mounts[0].id;
+    struct md_view_mount next[MD_FS_MOUNTS_MAX];
+    memcpy(next,fs.mounts->tree->mounts,fs.mounts->tree->count*sizeof(*next));
+    next[2].file=md_proc_sysctl_new(MD_PROC_FILE_HOSTNAME,NULL); assert(next[2].file.ops);
+    struct md_mount_layout layout={.base=&fs.mounts->base,.root=fs.mounts->root,
+        .entries=next,.count=fs.mounts->tree->count};
+    unsigned stable=descriptors(); int committed=0;
+    for (int i=0;i<16 && !committed;++i) {
+        fail_allocation=i;
+        int r=md_mount_graph_update(fs.mounts,&layout);
+        fail_allocation=-1;
+        if (!r) committed=1;
+        else {
+            assert(r==-ENOMEM && descriptors()==stable);
+            contents(&peer,"/outer/nested/value",NULL,"value");
+        }
+    }
+    assert(committed);
+    fs.mounts->tree->mounts[2].file=next[2].file;
+    contents(&fs,"/outer/nested/value",NULL,"value");
+    assert(md_mount_graph_export(fs.mounts,fs.store->lifetime->root,&p)==-EOPNOTSUPP && !p.count);
+    stable=descriptors();
+    for (unsigned i=0;i<16;++i) {
+        assert(md_mount_graph_sync(peer.mounts)==-EOPNOTSUPP);
+        struct md_fs_result result=open_file(&peer,"/outer/nested/value",O_RDONLY,NULL,NULL);
+        assert(result.error==-EOPNOTSUPP && result.fd<0 && descriptors()==stable);
+    }
+    next[2].file=(struct md_control_file){0};
+    assert(!md_mount_graph_update(fs.mounts,&layout));
+    md_control_file_release(fs.mounts->tree->mounts[2].file);
+    fs.mounts->tree->mounts[2].file=(struct md_control_file){0};
+    contents(&peer,"/outer/nested/value",NULL,"value");
+    assert(peer.mounts->tree->mounts[0].id==id);
+    assert(!md_mount_graph_export(fs.mounts,fs.store->lifetime->root,&p));
+    assert(!md_mount_graph_import(&p,&peer.mounts));
+    md_fs_mounts_close(&peer); close_filesystem(&fs);
+    assert(descriptors()==before);
+    puts("PASS private mount publication: local authority, explicit foreign rejection, recovery and rollback");
+}
 static void retirement(const char *base, int exported) {
     unsigned before=descriptors();
     char directory[PATH_MAX]; path(directory,base,exported ? "retire-shared" : "retire-local");
@@ -633,6 +680,6 @@ void test_mount_graph(const char *base) {
     alarm(60); char model[PATH_MAX], peers[PATH_MAX];
     path(model,base,"graph-model"); path(peers,base,"graph-peers");
     assert(!mkdir(model,0700) && !mkdir(peers,0700));
-    models(model); sizes(base); unordered(base); updates(base);
+    models(model); sizes(base); unordered(base); updates(base); private_publication(base);
     retirement(base,0); retirement(base,1); processes(peers); initial_pivot(base); alarm(0);
 }

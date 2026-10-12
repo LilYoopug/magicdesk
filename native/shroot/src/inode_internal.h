@@ -35,9 +35,17 @@ enum mdi_query { MDI_NODE, MDI_FD, MDI_LOOKUP, MDI_DIRECTORY_NAME, MDI_READDIR,
     MDI_OVERLAY_LINK, MDI_DATA_VERSION, MDI_ADD_NAME, MDI_DELETE_NAME, MDI_REPARENT,
     MDI_EMPTY, MDI_CREATE_OBJECT, MDI_METADATA, MDI_QUERY_COUNT };
 struct mdi_read_cache;
+struct mdi_stat_location {
+    char path[PATH_MAX];
+    dev_t device;
+    ino_t inode;
+    int root;
+};
 struct md_inode_store {
     sqlite3 *db;
     int objects, watch_presence, locked, recording, readonly, reflink_unavailable;
+    int super_readonly, super_checked;
+    sqlite3_int64 super_version;
     struct md_inode_lifetime *lifetime;
     const struct md_identity *identity;
     const struct md_landlock_policy *landlock;
@@ -45,7 +53,7 @@ struct md_inode_store {
     const char *root_id;
     unsigned creation_mask;
     struct md_inode_boundary *boundary;
-    char *stat_path;
+    struct mdi_stat_location *stat_location;
     struct md_inode_watches *watches;
     struct mdi_fifo_owner *fifos;
     struct md_inode_statistics *statistics;
@@ -60,6 +68,10 @@ struct md_inode_store {
     void *context;
 #endif
 };
+static inline int mdi_readonly(const struct md_inode_store *s) {
+    return s->readonly || s->super_readonly;
+}
+int mdi_super_refresh(struct md_inode_store *, sqlite3_int64 version);
 static inline const char *mdi_root(const struct md_inode_store *s) {
     return s->root_id ? s->root_id : s->lifetime->scope;
 }

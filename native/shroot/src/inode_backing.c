@@ -200,7 +200,7 @@ int mdi_copy_body(struct md_inode_store *s, int source, int destination, const s
     return r;
 }
 int mdi_copy_up(struct md_inode_store *s, struct mdi_node *node) {
-    if (s->readonly) return -EROFS;
+    if (mdi_readonly(s)) return -EROFS;
     int mark=s->overlay ? mdi_overlay_touch(s,node) : 0;
     if (mark) return mark;
     if (!node->shared) return 0;

@@ -2,6 +2,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <linux/stat.h>
 #include <sched.h>
 #include <signal.h>
@@ -18,7 +19,22 @@
 static uint64_t id(int fd, const char *path) {
     struct statx st={0};
     assert(!syscall(SYS_statx,fd,path,*path ? 0 : AT_EMPTY_PATH,STATX_MNT_ID,&st));
-    assert(st.stx_mask&STATX_MNT_ID); assert(st.stx_mnt_id); return st.stx_mnt_id;
+    assert(st.stx_mask&STATX_MNT_ID); assert(st.stx_mnt_id);
+    return st.stx_mnt_id;
+}
+static void fdinfo_matches(int fd) {
+    struct statx st={0};
+    assert(!syscall(SYS_statx,fd,"",AT_EMPTY_PATH,STATX_MNT_ID|STATX_INO,&st));
+    char name[64],line[256];
+    snprintf(name,sizeof(name),"/proc/self/fdinfo/%d",fd);
+    FILE *info=fopen(name,"re"); assert(info);
+    uint64_t mount=0,inode=0;
+    while (fgets(line,sizeof(line),info)) {
+        if (!strncmp(line,"mnt_id:",7)) assert(sscanf(line+7,"%" SCNu64,&mount)==1);
+        if (!strncmp(line,"ino:",4)) assert(sscanf(line+4,"%" SCNu64,&inode)==1);
+    }
+    assert(!ferror(info)); fclose(info);
+    assert(mount==st.stx_mnt_id && inode==st.stx_ino);
 }
 struct context { uint64_t original; int dir; int split; };
 static void not_a_link(const char *path) {
@@ -83,6 +99,7 @@ static void binding(void) {
     char text[8]={0}; assert(read(value,text,sizeof(text))==4 && !strcmp(text,"data")); close(value);
     int dir=open("/tmp/target",O_PATH|O_DIRECTORY); assert(dir>=0);
     assert(id(dir,"")==second);
+    fdinfo_matches(dir);
     entry_aliases(dir,"/proc/self");
     entry_aliases(dir,"/proc/thread-self");
     assert(!symlink("/proc","/tmp/entry-proc"));
@@ -100,6 +117,7 @@ static void binding(void) {
     assert(!umount2("/tmp/target",MNT_DETACH));
     assert(id(AT_FDCWD,"/tmp/target")==first);
     assert(id(dir,"")==second);
+    fdinfo_matches(dir);
     value=openat(dir,"value",O_RDONLY); assert(value>=0); close(value);
     value=open("/tmp/target/value",O_RDONLY); assert(value<0 && errno==ENOENT);
     close(dir);
@@ -352,6 +370,22 @@ static int pivoting(void *argument) {
         : "PASS pivot root: peer roots, selective cwd relocation, old dirfd and detached old root");
     return 0;
 }
+static int stacked_pivot(void *argument) {
+    (void)argument;
+    assert(!mkdir("/tmp/pivot-stack",0755));
+    assert(!mount("/","/tmp/pivot-stack",NULL,MS_BIND|MS_REC,NULL));
+    int previous=open("/",O_PATH|O_DIRECTORY); assert(previous>=0);
+    uint64_t old=id(previous,""), next=id(AT_FDCWD,"/tmp/pivot-stack");
+    assert(old!=next);
+    assert(!chdir("/tmp/pivot-stack"));
+    assert(!syscall(SYS_pivot_root,".","."));
+    assert(!umount2(".",MNT_DETACH));
+    assert(!chdir("/") && id(AT_FDCWD,"/")==next);
+    assert(id(previous,"")==old);
+    close(previous);
+    puts("PASS stacked pivot_root: detach covered old root through cwd, retain old FD identity");
+    return 0;
+}
 static int retained_providers(void *argument) {
     (void)argument;
     assert(!mkdir("/tmp/provider-root",0755));
@@ -419,6 +453,12 @@ void test_mount_namespace_guest(void) {
         int status; assert(waitpid(pivot,&status,0)==pivot && WIFEXITED(status) && !WEXITSTATUS(status));
     }
     assert(id(AT_FDCWD,"/")==c.original);
+    pid_t stacked=clone(stacked_pivot,(char *)stack+1024*1024,SIGCHLD|CLONE_NEWNS,NULL);
+    assert(stacked>0);
+    int stacked_status;
+    /* EVENT_WAIT: exact stacked pivot child, bounded by the guest deadline. */
+    assert(waitpid(stacked,&stacked_status,0)==stacked && WIFEXITED(stacked_status)
+        && !WEXITSTATUS(stacked_status));
     pid_t providers=clone(retained_providers,(char *)stack+1024*1024,SIGCHLD|CLONE_NEWNS,NULL);
     assert(providers>0);
     /* EVENT_WAIT: isolated pivot/copy child exits; the guest deadline fails a hang. */

@@ -244,6 +244,15 @@ static long metadata_request(const struct md_fs *fs, long nr, struct md_namespac
     return md_namespace_request(fs, &q, out);
 }
 long md_namespace_call(const struct md_fs *fs, const char *exe, long nr, const unsigned long *a) {
+    if (nr==SYS_ioctl) {
+        long flags=RAW3(fcntl,a[0],F_GETFL,0);
+        if (flags<0) return flags;
+        if (flags&O_PATH) return -EBADF;
+        struct md_fs_request q={.operation=MD_FS_IOCTL,.directory={(int)a[0],-1},.mode=(unsigned)a[1]};
+        struct md_fs_response out;
+        long result=md_namespace_request(fs,&q,&out);
+        return result==-EXDEV ? RAW3(ioctl,a[0],a[1],a[2]) : result;
+    }
     if (nr == SYS_fchdir) {
         if ((int)a[0]<0) return -EBADF;
         long native=md_namespace_native_descriptor((int)a[0]);
@@ -271,7 +280,8 @@ long md_namespace_call(const struct md_fs *fs, const char *exe, long nr, const u
     if (nr==SYS_landlock_create_ruleset || nr==SYS_landlock_add_rule || nr==SYS_landlock_restrict_self)
         return md_namespace_landlock(fs,nr,a);
     if (nr==SYS_mount || nr==SYS_umount2 || nr==SYS_pivot_root) return md_namespace_mount(fs,nr,a);
-    if (nr==SYS_fsopen || nr==SYS_fsconfig || nr==SYS_fsmount || nr==SYS_move_mount || nr==SYS_mount_setattr)
+    if (nr==SYS_fsopen || nr==SYS_fsconfig || nr==SYS_fsmount || nr==SYS_open_tree
+            || nr==SYS_move_mount || nr==SYS_mount_setattr)
         return md_namespace_mount_fd(fs,nr,a);
     if (nr == SYS_getcwd) {
         struct md_fs_request q = {.operation = MD_FS_PATH, .directory = {AT_FDCWD, -1}};

@@ -318,11 +318,20 @@ per-message vector after publication. Cancellation and worker join release
 untaken results. Known origins use the shared kernel-written receipt and the
 same publication owner as scalar file results. This works with O_PATH and
 application filters that forbid private helper creation.
+Kernel-generated `SCM_PIDFD` also transfers descriptor ownership. The common
+ancillary classifier includes it in capture, cancellation and release, with
+capacity for 253 application rights plus one pidfd per message. Publication
+selects raw kernel custody explicitly, independently of expanded application
+capsules; both use the same descriptor delivery/receipt mechanism. Pidfds retain
+CLOEXEC even without MSG_CMSG_CLOEXEC. Negative kernel pidfd results remain
+ordinary error payloads and never enter custody.
 
 The `ipc-ancillary` case covers actual guest sends and receives, including
 protected/full-table callers, 253 rights, split headers, send/receive batches,
-peek, partial memory faults, credentials and quota errors. Send checks import
-only after the sender exits. Blocked native sends additionally check caller
+peek, partial memory faults, credentials and quota errors.
+Kernel-pidfd cases also check mixed rights, truncation, repeated FD cleanup and
+process filters forbidding helper threads, when SO_PASSPIDFD is available.
+Send checks import only after the sender exits. Blocked native sends additionally check caller
 death, source-slot replacement and unrelated pipe EOF. Signal checks retain
 SIGPIPE delivery, masking and MSG_NOSIGNAL. Native/guest UDP controls check
 payload delivery without rights; denied guest SO_DOMAIN cannot change selected framing. Native

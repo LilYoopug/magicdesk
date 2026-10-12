@@ -49,6 +49,8 @@ struct md_control_file_ops {
      * any previous placement before the mount itself retains the provider. */
     const struct md_namespace_reference *(*namespace_reference)(void *);
     void *(*at)(void *,struct md_fs_anchor *);
+    /* Borrowed placement, distinct from the native descriptor carrier. */
+    struct md_fs_anchor *(*origin)(void *);
     /* Optional independent per-open state; dup/fork retain the same context. */
     void *(*open)(void *,int flags);
     int (*ioctl_spec)(void *,unsigned command,struct md_control_ioctl *);

@@ -4,6 +4,7 @@
 #include "mapping_observation.h"
 #include "fd_channel.h"
 #include "received_fds.h"
+#include "socket_control.h"
 #include "proc_paths.h"
 #include <elf.h>
 #include <errno.h>
@@ -185,7 +186,7 @@ static int receive_export(struct helper *m) {
     struct md_task_receive_frame *p=receive_frame(m);
     if (!p || !p->count || p->count>253) return protocol_error(m,__LINE__);
     unsigned needed=(m->received ? m->received->count : 0)+p->count;
-    if (needed>253U*1024+1) return -EOVERFLOW;
+    if (needed>MD_SOCKET_RECEIVED_FDS*1024U+1) return -EOVERFLOW;
     int error=md_received_fds_reserve(&m->received,needed);
     if (error) { m->result=error; return abort_child(m); }
     error=md_fd_channel_capture_vector_begin(m->channel,m->group,p->count,m->export_fds,&m->capture);

@@ -3,15 +3,45 @@
 #include "fs_mount_internal.h"
 #include "inode_internal.h"
 #include "proc_paths.h"
+#include "proc_sysctl.h"
 #include "network_namespace.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/magic.h>
+#include <linux/openat2.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+
+static const struct md_provider_tree_ops tree_ops={.filesystem=PROC_SUPER_MAGIC};
+struct md_provider_tree *md_procfs_new(int parent) {
+    int lower=open("/proc",O_PATH|O_DIRECTORY|O_CLOEXEC);
+    if (lower<0) return NULL;
+    struct md_provider_tree *tree=md_provider_tree_new(parent,lower,NULL,0,&tree_ops,NULL);
+    int error=tree ? 0 : errno;
+    close(lower);
+    if (!tree) { errno=error; return NULL; }
+    int root=md_provider_tree_root(tree);
+    if (mkdirat(root,"sys",0755) || mkdirat(root,"sys/kernel",0755)) error=errno;
+    for (unsigned i=MD_PROC_FILE_HOSTNAME;!error && i<=MD_PROC_FILE_OVERFLOWGID;++i) {
+        char path[64]; snprintf(path,sizeof(path),"sys/kernel/%s",md_proc_sysctl_name(i));
+        int fd=openat(root,path,O_CREAT|O_EXCL|O_WRONLY|O_CLOEXEC,0600);
+        if (fd<0) error=errno; else close(fd);
+    }
+    if (error) { md_provider_tree_release(tree); errno=error; return NULL; }
+    return tree;
+}
+int md_procfs_path(const struct md_view_mount *mount,int fd,char *out,size_t size) {
+    if (!mount->provider) return md_view_fdpath(fd,out,size);
+    if (size<6) return -ENAMETOOLONG;
+    memcpy(out,"/proc",5);
+    int result=md_provider_tree_path(mount->provider,fd,out+5,size-5);
+    if (!result && !strcmp(out,"/proc/")) out[5]=0;
+    return result;
+}
 
 static pid_t decimal(const char *name,const char **end) {
     unsigned long value=0;
@@ -64,14 +94,16 @@ static int kernel_global(const char *name) {
         || !strcmp(name,"kmsg") || !strcmp(name,"keys");
 }
 int md_procfs_step(struct md_filesystem *fs,struct md_view_mount *mount,int fd,
-        const char *name,const char *tail,int follow) {
+        const char *name,const char *tail,int follow_final,uint64_t resolve) {
     char path[PATH_MAX], mapped[32];
-    int r=md_view_fdpath(fd,path,sizeof(path));
+    int r=md_procfs_path(mount,fd,path,sizeof(path));
     if (r) return r;
     pid_t group=directory(path);
+    int no_links=md_view_nosymfollow(mount) || (resolve&RESOLVE_NO_SYMLINKS);
     if (group==-1 && kernel_global(name)) return -ENOENT;
     if (group==-1 && (!strcmp(name,"self") || !strcmp(name,"thread-self"))) {
-        if (follow) {
+        if (follow_final || *tail) {
+            if (no_links) return -ELOOP;
             if (!fs->actor) return -ESRCH;
             pid_t native=!strcmp(name,"self") ? fs->actor->tgid : fs->actor->tid;
             if (!native || !visible(mount,native)) return -ENOENT;
@@ -93,16 +125,28 @@ int md_procfs_step(struct md_filesystem *fs,struct md_view_mount *mount,int fd,
         if (n<0 || (size_t)n>=boundary->capacity) return -ENAMETOOLONG;
         /* Namespace-owned controls stay on the worker so their open
          * descriptions can retain the selected mount's live policy. */
-        if (!fs->actor || !md_network_namespace_managed(fs->actor->network)
-                || !md_proc_network_sysctl(md_proc_path_for(boundary->path,0,0).kind)) return -EREMOTE;
+        struct md_proc_path selected=md_proc_path_for(boundary->path,0,0);
+        enum md_proc_kind kind=selected.kind==MD_PROC_FOREIGN ? selected.foreign_kind : selected.kind;
+        if (no_links || (resolve&RESOLVE_NO_MAGICLINKS)) {
+            int link=kind==MD_PROC_FD || kind==MD_PROC_ROOT || kind==MD_PROC_CWD || kind==MD_PROC_EXE
+                || (kind>=MD_PROC_NS_USER && kind<=MD_PROC_NS_CGROUP) || kind==MD_PROC_NS_UNSUPPORTED;
+            if (link && (follow_final || (selected.tail && *selected.tail))) return -ELOOP;
+            /* Unclassified task-affine suffixes cannot discard the selected
+             * mount's traversal policy when delegated to a native provider. */
+            if (kind==MD_PROC_NONE && *tail) return -EOPNOTSUPP;
+        }
+        int sysctl=md_proc_file_sysctl((enum md_proc_file_kind)(kind-MD_PROC_UID_MAP));
+        if (!sysctl && (!fs->actor || !md_network_namespace_managed(fs->actor->network)
+                || !md_proc_network_sysctl(kind))) return -EREMOTE;
     }
+    if (mount->provider) return md_provider_tree_step(mount->provider,fd,name);
     int next=openat(fd,name,O_PATH|O_NOFOLLOW|O_CLOEXEC);
     return next<0 ? -errno : next;
 }
 ssize_t md_procfs_readlink(struct md_filesystem *fs,const struct md_view_mount *mount,
         int fd,void *data,size_t capacity) {
     char path[PATH_MAX], value[64];
-    int r=md_view_fdpath(fd,path,sizeof(path));
+    int r=md_procfs_path(mount,fd,path,sizeof(path));
     if (r) return r;
     if (strcmp(path,"/proc/self") && strcmp(path,"/proc/thread-self")) {
         ssize_t n=readlinkat(fd,"",data,capacity); return n<0 ? -errno : n;
@@ -118,10 +162,11 @@ ssize_t md_procfs_readlink(struct md_filesystem *fs,const struct md_view_mount *
 }
 ssize_t md_procfs_getdents(const struct md_view_mount *mount,int fd,void *data,size_t capacity) {
     char path[PATH_MAX];
-    int error=md_view_fdpath(fd,path,sizeof(path));
+    int error=md_procfs_path(mount,fd,path,sizeof(path));
     if (error) return error;
     pid_t group=directory(path);
     if (!group || (group>0 && !mount->pid_namespace)) {
+        if (mount->provider) return md_provider_tree_getdents(mount->provider,fd,data,capacity);
         ssize_t n=syscall(SYS_getdents64,fd,data,capacity);
         return n<0 ? -errno : n;
     }
@@ -131,8 +176,10 @@ ssize_t md_procfs_getdents(const struct md_view_mount *mount,int fd,void *data,s
     for (;;) {
         off_t cursor=lseek(fd,0,SEEK_CUR);
         if (cursor<0) return -errno;
-        ssize_t n=syscall(SYS_getdents64,fd,input,capacity<sizeof(input) ? capacity : sizeof(input));
-        if (n<0) return -errno;
+        size_t size=capacity<sizeof(input) ? capacity : sizeof(input);
+        ssize_t n=mount->provider ? md_provider_tree_getdents(mount->provider,fd,input,size)
+            : syscall(SYS_getdents64,fd,input,size);
+        if (n<0) return mount->provider ? n : -errno;
         if (!n) return n;
         size_t read=0,written=0;
         while (read<(size_t)n) {

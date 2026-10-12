@@ -15,6 +15,9 @@ void md_fs_anchor_release(struct md_fs_anchor *);
 int md_fs_anchor_fd(const struct md_fs_anchor *);
 /* Live mount policy under the caller's already retained provenance. */
 unsigned md_fs_anchor_policy(const struct md_fs_anchor *);
+struct md_fs_info;
+/* Add placement identity to provider metadata without exposing its carrier. */
+void md_fs_anchor_mount_info(const struct md_fs_anchor *,struct md_fs_info *);
 int md_fs_anchor_same(const struct md_fs_anchor *, const struct md_fs_anchor *);
 /* Object identity only, not authority to associate an arbitrary FD with a view.
  * Callers establish that association before checking the actual kernel object. */

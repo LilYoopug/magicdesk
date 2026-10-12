@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+"""Stock systemd PID 1, service/notify/socket activation under actual shell UID.
+
+Requires a disposable Debian-like Shroot store with systemd, util-linux and bash.
+No distro units, host devices, reboot or shutdown targets are started.
+"""
+import argparse
+from pathlib import Path
+import shlex
+import socket
+
+from init_fixture import PREPARE as INIT_PREPARE, TRACE_SYSCALLS
+from test_oci_services import Suite
+
+
+PREPARE = INIT_PREPARE + r'''
+export SYSTEMD_LOG_LEVEL=debug
+mkdir -p /run/systemd/system /run/md-user /run/md-user-units
+chmod 700 /run/md-user
+cat > /run/systemd/system/md-test.target <<EOF
+[Unit]
+DefaultDependencies=no
+Requires=md-driver.service
+After=md-driver.service
+EOF
+cat > /run/systemd/system/md-driver.service <<EOF
+[Unit]
+DefaultDependencies=no
+[Service]
+Type=simple
+ExecStart=/bin/bash $1/driver.sh $1 $2
+StandardOutput=append:$1/services.log
+StandardError=inherit
+EOF
+cat > /run/systemd/system/md-oneshot.service <<EOF
+[Unit]
+DefaultDependencies=no
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+MemoryDenyWriteExecute=yes
+NoNewPrivileges=yes
+SystemCallFilter=@system-service
+ExecStart=/bin/sh -c 'echo oneshot > $1/oneshot'
+StandardOutput=append:$1/oneshot.log
+StandardError=inherit
+EOF
+printf '%s\n' "$3" >> /run/systemd/system/md-oneshot.service
+cat > /run/systemd/system/md-notify.service <<EOF
+[Unit]
+DefaultDependencies=no
+[Service]
+Type=notify
+NotifyAccess=all
+TimeoutStartSec=10
+TimeoutStopSec=5
+ExecStart=/bin/sh -ec 'systemd-notify --ready; exec sleep infinity'
+StandardOutput=append:$1/notify.log
+StandardError=inherit
+EOF
+cat > /run/systemd/system/md-user.service <<EOF
+[Unit]
+DefaultDependencies=no
+[Service]
+Type=notify
+TimeoutStartSec=15
+TimeoutStopSec=5
+Environment=XDG_RUNTIME_DIR=/run/md-user
+Environment=SYSTEMD_UNIT_PATH=/run/md-user-units:
+ExecStart=/usr/lib/systemd/systemd --user --unit=md-user.target
+StandardOutput=append:$1/user.log
+StandardError=inherit
+EOF
+cat > /run/md-user-units/md-user.target <<EOF
+[Unit]
+DefaultDependencies=no
+Requires=md-user-oneshot.service
+After=md-user-oneshot.service
+EOF
+cat > /run/md-user-units/md-user-oneshot.service <<EOF
+[Unit]
+DefaultDependencies=no
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'echo user > $1/user-result'
+StandardOutput=append:$1/user-service.log
+StandardError=inherit
+EOF
+cat > /run/systemd/system/md-echo.socket <<EOF
+[Unit]
+DefaultDependencies=no
+[Socket]
+ListenStream=127.0.0.1:$2
+Accept=yes
+EOF
+cat > /run/systemd/system/md-echo@.service <<EOF
+[Unit]
+DefaultDependencies=no
+[Service]
+ExecStart=/bin/cat
+StandardInput=socket
+StandardOutput=socket
+StandardError=null
+EOF
+cat > "$1/driver.sh" <<'EOF'
+set -eux
+trap 'code=$?; if test "$code" != 0; then systemctl status --no-pager md-oneshot.service || :; systemctl exit "$code"; fi' EXIT
+test "$(systemctl show -p SystemState --value)" = running
+systemctl show -p Version -p SystemState
+systemctl start md-notify.service
+test "$(systemctl show -p ActiveState --value md-notify.service)" = active
+systemctl start md-oneshot.service
+test "$(cat "$1/oneshot")" = oneshot
+test "$(systemctl show -p ActiveState --value md-oneshot.service)" = active
+systemctl start md-user.service
+export XDG_RUNTIME_DIR=/run/md-user
+systemctl --user start md-user.target
+test "$(cat "$1/user-result")" = user
+systemctl --user show -p Version -p SystemState
+systemctl --user stop md-user-oneshot.service
+systemctl --user exit
+systemctl start md-echo.socket
+exec 3<>/dev/tcp/127.0.0.1/"$2"
+printf 'socket-activated\n' >&3
+IFS= read -r -t 10 response <&3
+test "$response" = socket-activated
+exec 3>&-
+systemctl stop md-echo.socket md-oneshot.service md-notify.service md-user.service
+printf 'PASS systemd PID1, notify, oneshot, user manager and socket activation\n' > "$1/result"
+systemctl exit 0
+EOF
+exec /usr/lib/systemd/systemd --system --unit=md-test.target --show-status=no --crash-shell=no --crash-reboot=no
+'''
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--store', required=True)
+    parser.add_argument('--build', type=Path)
+    parser.add_argument('--output', type=Path, default=Path('build/systemd-results'))
+    parser.add_argument('--trace', action='store_true', help='Requires strace in the guest')
+    parser.add_argument('--property', action='append', default=[],
+                        help='Additional service property for the hardened oneshot')
+    args = parser.parse_args()
+    suite = Suite(args.output, args.build)
+    target = '/tmp/md-systemd-' + suite.report['id']
+    prefix = [suite.runner, '--store', args.store, '--user', '0:0', '--network', 'routed']
+    created = False
+    try:
+        with socket.socket() as reservation:
+            reservation.bind(('127.0.0.1', 0))
+            port = str(reservation.getsockname()[1])
+        suite.command(prefix + ['--', '/bin/mkdir', target])
+        created = True
+        command = prefix + ['--bind', suite.base, target, '--deadline-seconds', '90', '--']
+        boot = []
+        if args.trace:
+            boot += ['/usr/bin/strace', '-f', '-s', '256', '-e',
+                        'trace=' + TRACE_SYSCALLS,
+                        '-o', target + '/trace.log']
+        # EVENT_WAIT: manager/service completion; the launch deadline kills a
+        # failed fixture instead of treating elapsed time as successful boot.
+        boot += ['/usr/bin/unshare', '--mount', '--pid', '--fork', '--mount-proc',
+                    '--uts', '--ipc', '--cgroup', '/bin/sh', '-ec', PREPARE, 'systemd-test', target, port,
+                    '\n'.join(args.property)]
+        command += ['/usr/bin/script', '-q', '-e', '-c', shlex.join(boot), '/dev/null']
+        suite.command(command, timeout=110)
+        result = suite.command(['/system/bin/cat', suite.base + '/result'])
+        assert 'PASS systemd PID1' in result
+        suite.report['passed'] = True
+    finally:
+        try:
+            for name in ('services.log', 'oneshot.log', 'notify.log', 'user.log', 'user-service.log', 'result'):
+                suite.command(['/system/bin/sh', '-c', 'test ! -f "$1" || tail -100 "$1"',
+                               'systemd-log', suite.base + '/' + name])
+            if args.trace:
+                suite.transport.download(suite.client, suite.base + '/trace.log',
+                                         args.output / (suite.report['id'] + '.trace'))
+        finally:
+            try:
+                if created:
+                    suite.command(prefix + ['--', '/bin/rmdir', target])
+            finally:
+                suite.finish()
+
+
+if __name__ == '__main__':
+    main()

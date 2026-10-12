@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "socket_ancillary.h"
+#include "socket_control.h"
 #include "socket_payload.h"
 #include "socket_namespace.h"
 #include "pid_calls.h"
@@ -286,12 +287,12 @@ static size_t append(void *out, size_t used, size_t capacity, int type, int leve
     size_t step = CMSG_SPACE(copied);
     return used + (step < room ? step : room);
 }
-static long publish_rights(void *out, size_t used, size_t capacity,
+static long publish_rights(enum md_received_source source, void *out, size_t used, size_t capacity,
         int *fds, const unsigned char *selectors, size_t count, int *flags, unsigned receive_flags) {
     size_t room=used<capacity?capacity-used:0;
     if (room<CMSG_LEN(sizeof(int))) { *flags|=MSG_CTRUNC; return used; }
     size_t delivered=0;
-    long error=md_fs_buffer_publish(fds,selectors,(unsigned)count,(char *)out+used,room,receive_flags,flags,&delivered);
+    long error=md_fs_buffer_publish(source,fds,selectors,(unsigned)count,(char *)out+used,room,receive_flags,flags,&delivered);
     return error ? error : (long)(used+delivered);
 }
 static long publish(const struct md_fs *fs, int socket, const struct msghdr *original,
@@ -331,6 +332,24 @@ static long publish(const struct md_fs *fs, int socket, const struct msghdr *ori
             }
             data=&claimed;
         }
+        if (h->cmsg_level==SOL_SOCKET && h->cmsg_type==SCM_PIDFD && n==sizeof(int)) {
+            int index; memcpy(&index,data,sizeof(index));
+            if (index<0) {
+                used=append(out,used,capacity,SCM_PIDFD,SOL_SOCKET,data,n,&m.msg_flags);
+                continue;
+            }
+            const unsigned char selector=0;
+            long published=publish_rights(MD_RECEIVED_KERNEL,out,used,capacity,&index,&selector,1,&m.msg_flags,
+                receive_flags|MSG_CMSG_CLOEXEC);
+            if (published<0) return published;
+            if ((size_t)published>used) {
+                int type=SCM_PIDFD;
+                long error=md_write_memory((char *)out+used+offsetof(struct cmsghdr,cmsg_type),&type,sizeof(type));
+                if (error) return error;
+            }
+            used=(size_t)published;
+            continue;
+        }
         if (h->cmsg_level==SOL_SOCKET && h->cmsg_type==SCM_RIGHTS) {
             size_t count=0; unsigned char selectors[253];
             for (size_t i=0;i<n/sizeof(int);i++,entry++) {
@@ -343,7 +362,7 @@ static long publish(const struct md_fs *fs, int socket, const struct msghdr *ori
                 }
             }
             if (!count) continue;
-            long published=publish_rights(out,used,capacity,indices,selectors,count,&m.msg_flags,receive_flags);
+            long published=publish_rights(MD_RECEIVED_APPLICATION,out,used,capacity,indices,selectors,count,&m.msg_flags,receive_flags);
             if (published<0) return published;
             used=(size_t)published;
             continue;

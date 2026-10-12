@@ -24,7 +24,7 @@ enum md_fs_operation {
     MD_FS_CHROOT, MD_FS_UMASK, MD_FS_STATFS, MD_FS_WATCH_PATH,
     MD_FS_TASK_PATH, MD_FS_XATTR, MD_FS_FXATTR, MD_FS_IPC_PEER, MD_FS_MOUNT,
     MD_FS_FSOPEN, MD_FS_FSCONFIG, MD_FS_FSMOUNT, MD_FS_BPF, MD_FS_FDINFO,
-    MD_FS_LANDLOCK, MD_FS_LAST = MD_FS_LANDLOCK
+    MD_FS_LANDLOCK, MD_FS_OPEN_TREE, MD_FS_IOCTL, MD_FS_LAST = MD_FS_IOCTL
 };
 /* Both transports carry the complete operation contract. */
 static inline int md_fs_operation_valid(unsigned operation) {
@@ -52,7 +52,8 @@ enum md_fs_task_path { MD_FS_TASK_CHDIR=1, MD_FS_TASK_TRUNCATE, MD_FS_TASK_FCHDI
 static inline int md_fs_operation_has_origin(unsigned operation) {
     return operation==MD_FS_OPEN || operation==MD_FS_CREATE || operation==MD_FS_REOPEN
         || operation==MD_FS_OPEN_OBJECT || operation==MD_FS_OPEN_IMAGE
-        || operation==MD_FS_MOUNT_TABLE || operation==MD_FS_TASK_PATH || operation==MD_FS_FSMOUNT;
+        || operation==MD_FS_MOUNT_TABLE || operation==MD_FS_TASK_PATH || operation==MD_FS_FSMOUNT
+        || operation==MD_FS_OPEN_TREE;
 }
 /* A path anchor is sufficient only for object identity. These inputs consume
  * a real OFD (offset, socket, queue, or payload) and must never use its anchor. */

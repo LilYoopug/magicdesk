@@ -163,6 +163,14 @@ static int enter(struct md_mount_namespace *view,
     }
     return 0;
 }
+int md_view_location_mountpoint(struct md_view_location *location) {
+    struct path_point point={.fd=-1};
+    int error=point_native(&point,location->fd);
+    location->fd=-1;
+    if (!error) error=enter(location->view,&point,&location->mount,0);
+    location->fd=point.fd;
+    return error;
+}
 static int parent(struct path_walk *w, struct md_mount_namespace *view,
         struct md_view_mount **mount, struct path_point *current, uint64_t resolve,
         struct path_point *next) {
@@ -291,14 +299,17 @@ int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *
                         && (resolve&(RESOLVE_IN_ROOT|RESOLVE_BENEATH))))) r=-EXDEV;
             if (r==-EREMOTE && (!boundary || (!boundary->mount_root && !boundary->native_directory))
                     && (resolve&(RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS))) r=-ENOTSUP;
+            if (r==-EREMOTE && md_view_nosymfollow(mount)) r=-EOPNOTSUPP;
         }
         else {
             if (mount && mount->backing==MD_MOUNT_PROC)
-                r=point_native(&next,md_procfs_step(fs,mount,current.fd,name,todo,!last || follow>0 || (trailing && follow==0)));
+                r=point_native(&next,md_procfs_step(fs,mount,current.fd,name,todo,
+                    follow>0 || (trailing && follow==0 && todo[strlen(todo)-1]=='/'),resolve));
             else if (mount && mount->backing==MD_MOUNT_DEVPTS)
                 r=point_native(&next,md_devpts_step(mount->devpts,current.fd,name));
             else {
                 r=(resolve&MD_VIEW_TASK_PATH) ? md_view_task_path(fs,current.fd,name,todo,resolve,0) : 0;
+                if (r==-EREMOTE && md_view_nosymfollow(mount)) r=-EOPNOTSUPP;
                 if (!r) r=component(&walk,view,mount,&current,name,todo,0,&next);
             }
         }
@@ -308,8 +319,12 @@ int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *
             point_close(&next); break;
         }
         if (r) { point_close(&next); break; }
+        if (strcmp(name,".")) r=enter(view,&next,&next_mount,resolve);
+        if (r) { point_close(&next); break; }
         if (S_ISLNK(next.identity.st_mode) && (!last || follow > 0 || (trailing && follow == 0))) {
-            if (++links > 40 || (resolve & RESOLVE_NO_SYMLINKS)) { point_close(&next); r = -ELOOP; break; }
+            if (++links > 40 || (resolve & RESOLVE_NO_SYMLINKS) || md_view_nosymfollow(next_mount)) {
+                point_close(&next); r=-ELOOP; break;
+            }
             char target[PATH_MAX];
             ssize_t n;
             if (next.logical) {
@@ -339,7 +354,6 @@ int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *
             }
             continue;
         }
-        if (strcmp(name,".")) r = enter(view,&next,&next_mount,resolve);
         if (!r && (!last || trailing) && !S_ISDIR(next.identity.st_mode)) r = -ENOTDIR;
         if (r) { point_close(&next); break; }
         if (last) {

@@ -430,8 +430,45 @@ static void offline_network(void) {
     for (unsigned i=0;i<2;++i) { close(local[i]); close(inherited[i]); }
     puts("PASS offline network: retained identity, loopback lookup, inherited IO, anonymous IPC and namespace authority");
 }
+static void pidfd_namespaces(void) {
+    pid_t outer=fork(); assert(outer>=0);
+    if (!outer) {
+        assert(!unshare(CLONE_NEWPID));
+        pid_t inner=fork(); assert(inner>=0);
+        if (!inner) {
+            assert(getpid()==1);
+            int process=syscall(SYS_pidfd_open,getpid(),0); assert(process>=0);
+            const char *names[]={"cgroup","ipc","mnt","net","pid","pid_for_children",NULL,NULL,"user","uts"};
+            for (unsigned i=0;i<10;++i) {
+                int ns=ioctl(process,0xff01+i,0);
+                if (!names[i]) { assert(ns<0 && errno==EOPNOTSUPP); continue; }
+                if (ns<0) fprintf(stderr,"pidfd namespace %s: %s\n",names[i],strerror(errno));
+                assert(ns>=0 && (fcntl(ns,F_GETFD)&FD_CLOEXEC));
+                char path[64]; snprintf(path,sizeof(path),"/proc/self/ns/%s",names[i]);
+                struct stat expected,actual;
+                assert(!stat(path,&expected) && !fstat(ns,&actual));
+                assert(expected.st_dev==actual.st_dev && expected.st_ino==actual.st_ino);
+                assert(ioctl(ns,NS_GET_NSTYPE)>0);
+                struct statfs fs; assert(!fstatfs(ns,&fs) && fs.f_type==NSFS_MAGIC);
+                close(ns);
+            }
+            assert(ioctl(process,0xff09,1)<0 && errno==EINVAL);
+            close(process);
+            assert(ioctl(process,0xff09,0)<0 && errno==EBADF);
+            _exit(0);
+        }
+        int status;
+        /* EVENT_WAIT: namespace init termination, bounded by the fixture alarm. */
+        assert(waitpid(inner,&status,0)==inner && WIFEXITED(status) && !WEXITSTATUS(status));
+        _exit(0);
+    }
+    int status;
+    assert(waitpid(outer,&status,0)==outer && WIFEXITED(status) && !WEXITSTATUS(status));
+    puts("PASS pidfd namespaces: same identities as proc, CLOEXEC, type, arguments and closed handles");
+}
 int test_namespace_handles_guest(void) {
     alarm(60);
+    pidfd_namespaces();
     directory_handles();
     process_directory();
     retained_proc();

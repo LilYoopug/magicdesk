@@ -17,6 +17,8 @@ struct md_mount_namespace {
     struct md_mount_identity *native_ids;
     struct md_native_mounts *native_mounts;
     struct md_mount_graph *graph;
+    pthread_mutex_t tables_lock;
+    struct md_mount_table_file *tables;
     /* Weak membership: each FS context retains the view, not vice versa.
      * Fork publication and root relocation share this short lifecycle lock. */
     pthread_mutex_t domains_lock;

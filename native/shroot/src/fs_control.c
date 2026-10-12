@@ -70,7 +70,7 @@ int md_fs_control_operation(struct md_filesystem *fs,struct md_mount_namespace *
         break;
     case MD_FS_OPEN: case MD_FS_REOPEN:
         if (fd<0) { r=-ENOENT; break; }
-        if (q->flags&~(O_ACCMODE|O_CLOEXEC|O_APPEND|O_TRUNC|O_NONBLOCK|O_NOFOLLOW|O_DIRECTORY|O_PATH|O_CREAT|O_EXCL|O_LARGEFILE)) {
+        if (q->flags&~(O_ACCMODE|O_CLOEXEC|O_APPEND|O_TRUNC|O_NONBLOCK|O_NOCTTY|O_NOFOLLOW|O_DIRECTORY|O_PATH|O_CREAT|O_EXCL|O_LARGEFILE)) {
             r=-EOPNOTSUPP; break;
         }
         if ((q->flags&O_ACCMODE)==O_ACCMODE) { r=-EINVAL; break; }

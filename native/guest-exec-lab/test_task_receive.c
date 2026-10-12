@@ -1,6 +1,8 @@
 #define _GNU_SOURCE
 #include "task_receive.h"
+#include "socket_control.h"
 #include <assert.h>
+#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,6 +32,15 @@ static void vectors(unsigned messages_count, unsigned rights_count, unsigned com
             m->msg_controllen+=CMSG_SPACE(sizeof(struct ucred));
             m->msg_controllen+=rights(m,m->msg_controllen,rights_count-rights_count/2,2000+total+rights_count/2);
         } else m->msg_controllen=rights(m,0,rights_count,2000+total);
+        if (rights_count==254) {
+            struct cmsghdr *h=(void *)controls[i].bytes;
+            h->cmsg_len=CMSG_LEN(253*sizeof(int));
+            m->msg_controllen=CMSG_SPACE(253*sizeof(int));
+            h=(void *)(controls[i].bytes+m->msg_controllen);
+            *h=(struct cmsghdr){.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_PIDFD,.cmsg_len=CMSG_LEN(sizeof(int))};
+            int fd=2000+total+253; memcpy(CMSG_DATA(h),&fd,sizeof(fd));
+            m->msg_controllen+=CMSG_SPACE(sizeof(fd));
+        }
         total+=rights_count;
         messages[i].msg_len=i<completed ? 1 : UINT_MAX;
     }
@@ -53,8 +64,7 @@ static void vectors(unsigned messages_count, unsigned rights_count, unsigned com
     for (unsigned i=0;i<messages_count;++i) {
         struct msghdr *m=&messages[i].msg_hdr;
         for (struct cmsghdr *h=CMSG_FIRSTHDR(m);h;h=CMSG_NXTHDR(m,h)) {
-            if (h->cmsg_type!=SCM_RIGHTS) continue;
-            unsigned count=(h->cmsg_len-CMSG_LEN(0))/sizeof(int);
+            unsigned count=md_socket_control_fds(h);
             int *fds=(void *)CMSG_DATA(h);
             for (unsigned j=0;j<count;++j,++index) assert(fds[j]==(i<completed ? (int)index : (int)(1999+index)));
         }
@@ -73,4 +83,11 @@ void test_task_receive(int *budget) {
     }
     vectors(1024,2,1024,0,budget);
     vectors(1024,253,1024,1,budget);
+    vectors(1,254,1,0,budget);
+    vectors(4,254,4,0,budget);
+    vectors(4,254,2,0,budget);
+    union control control={0};
+    control.align=(struct cmsghdr){.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_PIDFD,.cmsg_len=CMSG_LEN(sizeof(int))};
+    int error=-EMFILE; memcpy(CMSG_DATA(&control.align),&error,sizeof(error));
+    assert(!md_socket_control_fds(&control.align));
 }

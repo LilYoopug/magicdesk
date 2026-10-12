@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "fs_mount_internal.h"
 #include "inode_internal.h"
+#include "procfs_view.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
@@ -82,10 +83,17 @@ int md_mount_source_create(struct md_filesystem *fs,const struct md_fs_request *
         else s.cgroup=md_cgroup_mount(fs->actor->cgroup,parent,q->mode==MD_FS_MOUNT_CGROUP,fs->store->identity);
         int error=errno; close(parent); errno=error;
         if ((devpts && !s.devpts) || (cgroup && !s.cgroup)) return -errno;
-    } else s.pid=md_pid_namespace_retain(pid);
+    } else {
+        s.pid=md_pid_namespace_retain(pid);
+        int parent=md_fs_private_mounts_parent(fs->store);
+        if (parent<0) { md_mount_source_close(&s); return parent; }
+        s.provider=md_procfs_new(parent);
+        int error=errno; close(parent);
+        if (!s.provider) { md_mount_source_close(&s); return -error; }
+    }
     s.fd=devpts ? openat(md_devpts_root(s.devpts),".",O_PATH|O_DIRECTORY|O_CLOEXEC)
         : cgroup ? md_cgroup_open_root(s.cgroup,fs->actor->cgroup_namespace)
-        : open("/proc",O_PATH|O_DIRECTORY|O_CLOEXEC);
+        : openat(md_provider_tree_root(s.provider),".",O_PATH|O_DIRECTORY|O_CLOEXEC);
     if (s.fd<0) { int r=-errno; md_mount_source_close(&s); return r; }
     *out=s; return 0;
 }

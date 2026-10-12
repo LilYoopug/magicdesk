@@ -257,7 +257,7 @@ static long publish_mapped(struct md_fs_buffer_frame *frame, unsigned count, con
     if ((unsigned)delivered<count) *out_flags|=MSG_CTRUNC;
     return error ? error : received;
 }
-long md_fs_buffer_publish(const int *indices, const unsigned char *selectors, unsigned count, void *control, size_t capacity,
+long md_fs_buffer_publish(enum md_received_source source, const int *indices, const unsigned char *selectors, unsigned count, void *control, size_t capacity,
         unsigned flags, int *out_flags, size_t *used) {
     if (!count || count>253) return -EINVAL;
     int has_selectors=0;
@@ -270,7 +270,8 @@ long md_fs_buffer_publish(const int *indices, const unsigned char *selectors, un
     long address=md_adapter_buffer_take();
     if (address<0) return address;
     struct md_fs_buffer_frame *frame=(void *)address;
-    frame->rights.count=count; memcpy(frame->rights.index,indices,count*sizeof(int));
+    frame->rights.count=count; frame->rights.source=source;
+    memcpy(frame->rights.index,indices,count*sizeof(int));
     frame->receive.token=0; frame->receive.number=-1; frame->receive.mapped=0;
     struct md_fd_receipt *receipt=(void *)frame->receipt;
     long initialized=md_fd_receipt_reset(receipt,count);

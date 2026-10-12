@@ -29,6 +29,11 @@ int md_fs_anchor_fd(const struct md_fs_anchor *p) { return p ? p->fd : -1; }
 unsigned md_fs_anchor_policy(const struct md_fs_anchor *p) {
     return !p || !p->view ? 0 : md_mount_policy_flags(p->mount ? &p->mount->policy : &p->view->base.policy);
 }
+void md_fs_anchor_mount_info(const struct md_fs_anchor *p,struct md_fs_info *info) {
+    if (!p || !p->mount) return;
+    md_fs_info_mount(info,p->mount->id,
+        p->device==p->mount->native.st_dev && p->inode==p->mount->native.st_ino);
+}
 int md_fs_anchor_same(const struct md_fs_anchor *a, const struct md_fs_anchor *b) {
     return a && b && a->view==b->view && a->mount==b->mount
         && a->device==b->device && a->inode==b->inode

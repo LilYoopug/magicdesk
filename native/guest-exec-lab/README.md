@@ -6,6 +6,40 @@ that native component; this directory is not packaged into the APK.
 
 ## Namespace Clients
 
+`test_systemd.py --build BUILD --store STORE` runs stock systemd as guest PID 1
+under actual UID 2000. The disposable Debian-like store needs systemd, bash and
+util-linux including `script`; optional `--trace` also needs strace. It creates private namespaces,
+proc, `/run`, a private `/dev` with a PTY console, sysfs and cgroup2, then boots a dedicated target without distro
+hardware units. Assertions cover system/user managers, oneshot/notify services,
+TCP socket activation, stop and normal manager exit. The supervised deadline
+bounds failures; it never invokes a host reboot or shutdown target. This is not
+a default-target boot or GNOME login test.
+`--property KEY=VALUE` extends the tested oneshot's service restrictions.
+The combined `StateDirectory=md-init-probe` and `SetCredential=md-probe:hello`
+case covers filesystem metadata ioctls, read-only tmpfs reconfiguration and
+Arch 262's nosymfollow credentials mount. A diagnostic `MountFlags=slave` case
+can isolate other namespace policies, but does not certify default propagation.
+
+`test_os_boot.py --build BUILD --store STORE` boots the packaged default target
+and asserts a non-degraded result. Its observer waits for systemd's startup
+jobs and collects only this invocation's journal, failed units and service state.
+Debian, Ubuntu, Arch and Fedora default boots currently fail or remain degraded;
+the fixture does not whitelist them. `--trace` includes pathname lookup, metadata,
+both mount APIs and epoll registration, using the same syscall set as the manager
+fixture. `--init openrc` uses Alpine's real
+`openrc-init`, stock container service policy and a private runlevel selection.
+It checks the default services, restart/stop and exact launch-registry cleanup.
+The device transport is closed only after that launch has terminated.
+`init_fixture.py` owns the shared private-filesystem/console setup; OpenRC's
+in-guest observer does not import host-side transport dependencies.
+
+`test_openrc.py --build BUILD --store STORE` needs an Alpine store with openrc
+and util-linux. It runs stock sysinit/boot initialization and dedicated runlevels
+inside private mounts/PIDs, checks dependency order and daemon status/restart,
+then verifies stop and process cleanup. It neither creates a fake OpenRC boot
+marker nor invokes reboot/shutdown. The fixture shell owns PID 1; this does not
+test the separate `openrc-init` program or default distro hardware services.
+
 `test_resources.py BUILD --case mount-namespace` includes offline network
 namespace identity/authority, inherited IPC, private devpts membership and
 controlling terminals, logical cgroup membership/readonly policy and native
@@ -15,7 +49,21 @@ retained namespace handles, removal, user-namespace authority and fsopen capture
 Namespace-file binds cover path and O_PATH sources, nsfs metadata, setns and
 related ioctls, exited owners, recursive binds, independent namespace copies,
 mount-cycle rejection, readonly controls and repeated lazy-unmount retirement.
-The remaining mount/user/PID/UTS/IPC cases run in the same suite.
+The remaining mount/user/PID/UTS/IPC cases run in the same suite. Open and detached
+mount descriptors also compare fdinfo mount/inode fields with statx.
+`test_mount_api.py` covers tmpfs superblock reconfiguration with live/unlinked
+writers, retained shared mappings, bind aliases, namespace copies and separate
+per-mount restrictions. The transient-store native fixture checks independent
+process connections and policy invalidation, as well as exact descriptor cleanup.
+The mount-API fixture also checks nosymfollow on detached/native/proc mounts,
+per-alias remount, retained origins and namespace copies. Initial-root remount
+and propagation use identical pathname/proc-FD assertions; a chroot into an
+ordinary directory must not turn that directory into a mount root.
+Filesystem-attribute ioctl checks cover regular files, directories, bind aliases,
+detached tmpfs, dup/fork/SCM_RIGHTS and a seccomp-filtered caller, without exposing
+Android storage attributes. Native readonly attachments and pipe ioctls retain
+their distinct semantics. Mount-graph checks cover local provider publication,
+explicit foreign rejection, restored synchronization and allocation rollback.
 File binds cover non-link readlink errors and exact mount-root paths for
 hardlinked sources. Proc directory suffix tests exercise two-path rename/link,
 nofollow and followed symlinks, mixed dirfd/path operands, readonly and EXDEV

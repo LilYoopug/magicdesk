@@ -16,10 +16,12 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/openat2.h>
+#include <linux/mount.h>
 #include <string.h>
 #include <sys/inotify.h>
 #include <sys/syscall.h>
 #include <sys/vfs.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 void md_fs_view_execute(struct md_filesystem *fs, const struct md_fs_request *q,
@@ -30,8 +32,7 @@ void md_fs_view_execute(struct md_filesystem *fs, const struct md_fs_request *q,
         .error=md_view_anchor_check(fs,q->directory[0],q->origin[0])};
     if (native && !out->error) out->error=-EXDEV;
     else if (!native && (md_mount_namespace_attached(fs->mounts) || q->origin[0] || q->origin[1]
-            || (fs->mounts && q->operation==MD_FS_ACCESS && (q->mode&X_OK)
-                && (md_mount_policy_flags(&fs->mounts->base.policy)&MD_MOUNT_NOEXEC))))
+            || md_view_policy_walk(fs,q)))
         md_fs_mounts_execute(fs,q,out,output);
     else if (!native) md_fs_inode_execute(fs,q,out,output);
     /* An unannotated proc/dev dirfd can predate a root change. A rejected inode
@@ -158,7 +159,8 @@ void md_fs_statfs_result(int fd, unsigned policy, const struct md_inode_lifetime
     if (storage) value.flags&=~(uint64_t)(MS_RDONLY|MS_NOSUID|MS_NODEV);
     value.flags|=((policy&MD_MOUNT_READONLY) ? MS_RDONLY : 0)
         | ((policy&MD_MOUNT_NOSUID) ? MS_NOSUID : 0) | ((policy&MD_MOUNT_NODEV) ? MS_NODEV : 0)
-        | ((policy&MD_MOUNT_NOEXEC) ? MS_NOEXEC : 0);
+        | ((policy&MD_MOUNT_NOEXEC) ? MS_NOEXEC : 0)
+        | ((policy&MD_MOUNT_NOSYMFOLLOW) ? ST_NOSYMFOLLOW : 0);
     if (storage && storage->filesystem_kind) {
         value.type=md_filesystem_magic(storage->filesystem_kind);
         uint64_t id=(uint64_t)storage->inode;
@@ -268,13 +270,15 @@ static void context_execute(struct md_fs_context *context,
     fs->store->boundary=&boundary;
     fs->store->creation_mask=q->attributes.creation_mask;
     if (root_error) *out=(struct md_fs_result){.fd=-1,.error=root_error};
-    else if (task->landlock && (q->operation==MD_FS_MOUNT || q->operation==MD_FS_FSMOUNT))
+    else if (task->landlock && (q->operation==MD_FS_MOUNT || q->operation==MD_FS_FSMOUNT
+            || q->operation==MD_FS_OPEN_TREE))
         *out=(struct md_fs_result){.fd=-1,.error=-EPERM};
     else if (q->operation == MD_FS_CHROOT) change_root(fs, task->fs, q, out);
     else if (q->operation==MD_FS_MOUNT)
         *out=(struct md_fs_result){.fd=-1,.error=md_fs_mount_change(fs,task->fs,q)};
     else if (q->operation==MD_FS_FSOPEN || q->operation==MD_FS_FSCONFIG || q->operation==MD_FS_FSMOUNT)
         md_fs_context_mount(fs,q,out,output);
+    else if (q->operation==MD_FS_OPEN_TREE) md_fs_open_tree(fs,q,out,output);
     else if (q->operation==MD_FS_BPF) md_fs_bpf(fs,q,out,output);
     else if (q->operation==MD_FS_LANDLOCK) md_fs_landlock(fs,q,out,output);
     else if (q->operation==MD_FS_FDINFO) md_fs_fdinfo(fs,q,out,output);
@@ -325,6 +329,8 @@ static void context_execute(struct md_fs_context *context,
             out->proc_namespace=boundary.proc_namespace;
         }
     }
+    if (!out->error && (q->operation==MD_FS_MOUNT || (q->operation==MD_FS_FSCONFIG
+            && q->mode==FSCONFIG_CMD_RECONFIGURE))) md_fs_mount_table_changed(fs);
     fs->store->creation_mask=previous_mask;
     fs->store->root_id=previous_root;
     fs->native_root=previous_native_root;
@@ -478,18 +484,37 @@ static void inode_execute(struct md_filesystem *fs,
     case MD_FS_RENAME: r = md_inode_rename(s, first, a, second, b, q->flags); break;
     case MD_FS_STAT: case MD_FS_FSTAT: {
         if (q->mode & ~MD_FS_STAT_MOUNT) { r=-EINVAL; break; }
-        char path[PATH_MAX];
-        char *previous=s->stat_path;
-        if (q->mode & MD_FS_STAT_MOUNT) { path[0]=0; s->stat_path=path; }
+        struct mdi_stat_location location, *previous=s->stat_location;
+        if (q->mode & MD_FS_STAT_MOUNT) {
+            location.path[0]=0; location.device=0; location.inode=0; location.root=0;
+            s->stat_location=&location;
+        }
         r = q->operation == MD_FS_STAT ? md_catalogue_stat(images, s, first, a, (int)q->flags, &st)
             : md_catalogue_fstat(images, s, first, &st);
-        s->stat_path=previous;
+        s->stat_location=previous;
         if (!r) md_fs_stat_info(&st, &out->info);
-        if (!r && (q->mode & MD_FS_STAT_MOUNT) && fs->inode_mount)
-            out->info.mount_id=fs->inode_mount->id;
-        else if (!r && (q->mode & MD_FS_STAT_MOUNT) && *path)
-            r=md_fs_base_mount(fs,!strncmp(path,"/dev/shm",8) && (!path[8] || path[8]=='/'),
-                &out->info.mount_id);
+        if (!r && (q->mode & MD_FS_STAT_MOUNT)) {
+            const struct md_view_mount *mount=fs->inode_mount;
+            uint64_t id=0;
+            int root=location.root;
+            if (mount) {
+                id=mount->id;
+                if (mount->source>=0)
+                    root=location.device==mount->native.st_dev && location.inode==mount->native.st_ino;
+            } else if (*location.path) {
+                int shared=!strncmp(location.path,"/dev/shm",8)
+                    && (!location.path[8] || location.path[8]=='/');
+                r=md_fs_base_mount(fs,shared,&id);
+                if (shared) root=!strcmp(location.path,"/dev/shm");
+            }
+            if (!r) md_fs_info_mount(&out->info,id,root);
+        }
+        break;
+    }
+    case MD_FS_IOCTL: {
+        struct stat st;
+        r=md_inode_fstat(s,first,&st);
+        if (!r) r=-ENOTTY;
         break;
     }
     case MD_FS_STATFS: {
@@ -499,8 +524,12 @@ static void inode_execute(struct md_filesystem *fs,
             const struct md_view_mount *mount=fs->inode_mount ? fs->inode_mount
                 : fs->mounts ? &fs->mounts->base : NULL;
             unsigned policy=mount ? md_mount_policy_flags(&mount->policy) : 0;
-            if (s->readonly) policy|=MD_MOUNT_READONLY;
-            md_fs_statfs_result(fd,policy,s->lifetime,out,output);
+            int readonly=md_inode_store_readonly(s);
+            if (readonly<0) out->error=readonly;
+            else {
+                if (readonly) policy|=MD_MOUNT_READONLY;
+                md_fs_statfs_result(fd,policy,s->lifetime,out,output);
+            }
             if (*a) close(fd);
         }
         return;
@@ -514,7 +543,7 @@ static void inode_execute(struct md_filesystem *fs,
         if (!r) out->size = strlen(data) + 1;
         break;
     case MD_FS_TEMPORARY: r = md_inode_temporary(s); goto opened;
-    case MD_FS_MOUNT_TABLE: r = md_fs_mount_table(fs,q->mode,q->flags); goto opened;
+    case MD_FS_MOUNT_TABLE: md_fs_mount_table_open(fs,q,out,output); return;
     case MD_FS_NATIVE_MOUNT:
         r=md_fs_native_mount(fs,(uint64_t)q->offset,&out->info.mount_id); break;
     case MD_FS_READLINK:

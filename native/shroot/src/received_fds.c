@@ -1,11 +1,12 @@
 #include "received_fds.h"
 #include "fs_anchor.h"
+#include "socket_control.h"
 #include <errno.h>
 #include <stdlib.h>
 #include <unistd.h>
 
 int md_received_fds_reserve(struct md_received_fds **owner, unsigned needed) {
-    if (!owner || !needed || needed>253U*1024+1) return -EINVAL;
+    if (!owner || !needed || needed>MD_SOCKET_RECEIVED_FDS*1024U+1) return -EINVAL;
     struct md_received_fds *p=*owner;
     int fresh=!p;
     if (p && (p->references!=1 || p->origins)) return -EBUSY;

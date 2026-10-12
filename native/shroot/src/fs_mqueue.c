@@ -44,7 +44,7 @@ int md_fs_mqueue_operation(struct md_filesystem *fs,struct md_mount_namespace *v
     }
     case MD_FS_OPEN: case MD_FS_REOPEN: {
         if (fd<0) { r=(q->flags&O_CREAT) ? -EOPNOTSUPP : -ENOENT; break; }
-        if (q->flags&~(O_CLOEXEC|O_DIRECTORY|O_PATH|O_NOFOLLOW|O_NONBLOCK|O_LARGEFILE|O_ACCMODE|O_CREAT|O_EXCL|O_TRUNC)) {
+        if (q->flags&~(O_CLOEXEC|O_DIRECTORY|O_PATH|O_NOFOLLOW|O_NONBLOCK|O_NOCTTY|O_LARGEFILE|O_ACCMODE|O_CREAT|O_EXCL|O_TRUNC)) {
             r=-EOPNOTSUPP; break;
         }
         if (!(q->flags&O_PATH) && (q->flags&(O_ACCMODE|O_CREAT|O_TRUNC))) { r=-EISDIR; break; }

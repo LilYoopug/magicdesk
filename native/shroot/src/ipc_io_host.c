@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "ipc_io_host.h"
+#include "socket_control.h"
 #include "event_wait.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -26,8 +27,7 @@ struct md_ipc_io_batch {
 };
 static void close_rights(struct msghdr *m) {
     for (struct cmsghdr *h=CMSG_FIRSTHDR(m);h;h=CMSG_NXTHDR(m,h)) {
-        if (h->cmsg_level!=SOL_SOCKET || h->cmsg_type!=SCM_RIGHTS) continue;
-        unsigned count=(h->cmsg_len-CMSG_LEN(0))/sizeof(int);
+        unsigned count=md_socket_control_fds(h);
         int *fds=(void *)CMSG_DATA(h);
         for (unsigned i=0;i<count;++i) close(fds[i]);
     }
@@ -181,8 +181,7 @@ static int admit(struct md_ipc_io *op,struct md_ipc_io_message *io,int fd,int fl
 static int collect_rights(struct md_received_fds *fds, struct msghdr *message) {
     int error=0;
     for (struct cmsghdr *h=CMSG_FIRSTHDR(message);h;h=CMSG_NXTHDR(message,h)) {
-        if (h->cmsg_level!=SOL_SOCKET || h->cmsg_type!=SCM_RIGHTS) continue;
-        unsigned count=(h->cmsg_len-CMSG_LEN(0))/sizeof(int);
+        unsigned count=md_socket_control_fds(h);
         int *received=(void *)CMSG_DATA(h);
         for (unsigned i=0;i<count;++i) {
             if (fds->count==fds->capacity) { close(received[i]); error=-EPROTO; continue; }
@@ -198,7 +197,7 @@ static int receive_batch(struct md_ipc_io *op, struct md_received_fds **custody,
     if (!batch->prepared || batch->received) { *result=-EINVAL; return 0; }
     if (!op->job.started && !op->native_ready) {
         int error=allocate_batch(batch);
-        if (!error) error=md_received_fds_reserve(custody,1+253*batch->prepared);
+        if (!error) error=md_received_fds_reserve(custody,1+MD_SOCKET_RECEIVED_FDS*batch->prepared);
         if (error) { *result=error; return 0; }
         long args[5]={(*custody)->fds[0],(long)batch->messages,batch->prepared,
             flags|MSG_CMSG_CLOEXEC,batch->timed ? (long)&batch->timeout : 0};
@@ -232,7 +231,7 @@ int md_ipc_io_receive(struct md_ipc_io *op, struct md_received_fds **custody,
     int error=admit(op,io,(*custody)->fds[0],flags,0);
     if (error) { *result=error; return 0; }
     if (op->batch) return receive_batch(op,custody,io,flags,result);
-    error=md_received_fds_reserve(custody,254);
+    error=md_received_fds_reserve(custody,1+MD_SOCKET_RECEIVED_FDS);
     if (error) { *result=error; return 0; }
     struct md_received_fds *fds=*custody;
     char *bytes=op->data ? op->data : io->data;

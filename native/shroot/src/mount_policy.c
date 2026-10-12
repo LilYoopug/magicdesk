@@ -8,7 +8,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-enum { MAGIC=0x4d444d50U, VERSION=4U,
+enum { MAGIC=0x4d444d50U, VERSION=5U,
     SEALS=F_SEAL_GROW|F_SEAL_SHRINK|F_SEAL_FUTURE_WRITE|F_SEAL_SEAL };
 struct md_mount_policy_page { uint32_t magic, version, reserved; atomic_uint flags; };
 _Static_assert(ATOMIC_INT_LOCK_FREE==2 && sizeof(atomic_uint)==4,
@@ -35,7 +35,7 @@ int md_mount_policy_set(struct md_mount_policy *p, unsigned flags) {
 }
 int md_mount_policy_lock(struct md_mount_policy *p) {
     unsigned flags=md_mount_policy_flags(p);
-    return md_mount_policy_set(p,flags|((flags&MD_MOUNT_FLAGS)<<MD_MOUNT_LOCK_SHIFT));
+    return md_mount_policy_set(p,flags|((flags&MD_MOUNT_LOCKABLE)<<MD_MOUNT_LOCK_SHIFT));
 }
 void md_mount_policy_close(struct md_mount_policy *p) {
     if (!p) return;

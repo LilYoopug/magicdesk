@@ -64,6 +64,13 @@ explicit: unavailable memfd/sealing returns an error while retaining local
 policy. It adds no shared-startup requirement and never substitutes a stale copy
 for the requested live policy. `--case mount-policy` checks rejected memfd,
 mapping and sealing operations, including a native seccomp-injected seal denial.
+Guest `MS_NOSYMFOLLOW` and `MOUNT_ATTR_NOSYMFOLLOW` use the common mount policy and
+component walker, not a host mount. Their semantics and the distinct
+`ST_NOSYMFOLLOW` statfs bit exist in the
+[Linux 5.15 ABI](https://github.com/torvalds/linux/blob/v5.15/include/linux/statfs.h).
+`test_mount_api.py` covers detached tmpfs, native attachments, proc links, bind
+aliases, remount and namespace copies; `--case mount-policy` also checks a bare
+inode root with no attachments. Ordinary data IO needs no additional interception.
 Native `/proc/self/mountinfo` snapshots use its baseline namespace-generation
 `poll(POLLPRI)` notification, with a zero timeout for observation, not a wait.
 The namespace owner retains the source descriptor and invalidates cached native
@@ -330,6 +337,31 @@ origin/ADDFD/SCM_RIGHTS delivery mechanisms. No newer kernel interface is needed
 transient-store fixture covers detached graph custody and exact FD retirement.
 Attribute changes use the existing single-writer policy, including recursive
 preflight and locked-policy rejection; no host mount_setattr call is required.
+Tmpfs read-only reconfiguration uses baseline `F_SETLEASE/F_RDLCK` under the
+existing store gate to detect native writers and shared writable mappings.
+`inode_super.c` releases each probe lease before policy publication; native
+unsupported/permission errors fail the requested reconfiguration only. Lease
+break signals target the worker TID through baseline `F_SETOWN_EX`, with scoped
+blocking and pending-signal preservation. Policy lives in the retained store,
+not a new per-write syscall adapter. `test_mount_api.py` and the native
+transient-store fixture cover writers, unlinked files, mappings, aliases,
+cross-process snapshots and release. This does not require a post-5.15 kernel.
+
+`open_tree` and `STATX_ATTR_MOUNT_ROOT` use the same logical mount identity and
+detached-origin lifetime; neither requires host mount privilege. Mounted proc
+directories retain PID selection and typed UTS controls. `test_mount_api.py`
+and `--case mount-namespace` cover these paths under shell identity.
+
+Live mount-table descriptors use optional AF_UNIX out-of-band readiness
+(`CONFIG_AF_UNIX_OOB`, upstream 5.15). `fs_mount_table.c` falls back to a regular
+typed descriptor when the host rejects OOB: table reads remain supported, but
+epoll registration may fail. PRI readiness is not a complete procfs ERR/poll
+contract; typed UTS sysctl poll notification remains unsupported.
+
+`terminal_calls.c` first tries native termios2 on the original task/FD. Firmware
+EACCES or ENOTTY falls back to legacy termios for representable standard baud
+rates only; arbitrary BOTHER rates return EOPNOTSUPP when native termios2 is
+unavailable. `test_terminal_attributes.py` checks both ABI and terminal identity.
 
 `sysfs_view` retains the existing logical network owner and exposes its loopback
 state through typed control files, O_PATH provenance and a private native name
@@ -358,6 +390,8 @@ retain native errors; arbitrary new guest syscalls are not runtime requirements.
 | `SECCOMP_IOCTL_NOTIF_SET_FLAGS` / `SECCOMP_USER_NOTIF_FD_SYNC_WAKE_UP` | 6.6 | `namespace_broker.c`: optional notification scheduling hint. | Failed ioctl leaves normal notification wakeups enabled; no permission or affinity change. |
 | `fchmodat2` | 6.5; `AT_EMPTY_PATH` in 6.6 | `namespace.c` translates store metadata through the worker. `file_calls.c` also has a native direct-backend path. | Logical store metadata does not require this host syscall. Native passthrough retains ENOSYS/flag errors; no fake success or unconditional startup requirement. |
 | `SO_PEERPIDFD` | 6.5 | `test_proc_root_guest.py`: optional coverage of native peer-pidfd fields in logical fdinfo. | ENOPROTOOPT/EINVAL/ENOSYS skips only this optional acquisition; baseline pidfd_open and fdinfo assertions still run. This is not a runtime prerequisite. |
+| `SO_PASSPIDFD` / `SCM_PIDFD` | 6.5 | `socket_control.h`, `ipc_io_host.c`, `task_receive.c` and `socket_ancillary.c`: receive, custody, CLOEXEC publication and cleanup of kernel-generated pidfds. `ipc-ancillary` compares native/guest scalar, batch, peek, truncation and filtered receives; `test_systemd.py` covers notify delivery. | The socket option retains native ENOPROTOOPT/EINVAL when unavailable; no synthetic support or startup requirement. The optional pidfd fixture reports that absence; ordinary credential and rights tests still run. Negative pidfd payloads remain errno values, not owned descriptors. |
+| `PIDFD_GET_*_NAMESPACE` | 6.11 | `pid_calls.c`, `supervisor.c` and `namespace_proc.c`: guest pidfds return retained logical namespace handles through the common FD-publication path. `--case mount-namespace` and systemd directory setup cover the ABI. | No host namespace ioctl is required for managed pidfds. Time namespaces remain EOPNOTSUPP; unowned native pidfds retain native errors. |
 | `STATX_MNT_ID_UNIQUE` | 6.8 | `namespace_proc.c`: distinguishes globally unique mount IDs from the runtime's ordinary mount-ID namespace. | The adapter strips the UNIQUE request and asks for `STATX_MNT_ID` (5.8); returned masks do not claim UNIQUE support. |
 | `PROCMAP_QUERY` | 6.11 | `test_mapping_task.c`: optional binary mapping-observation experiment. | Production `mapping_observation.c` reads a retained maps file. The fixture records unavailable ioctl access separately and verifies the text path. |
 | `MFD_EXEC` | 6.3 | `test_exec_policy.c`: explicit executable-memfd policy experiment. | This experiment reports failure; production image admission does not require this flag. |

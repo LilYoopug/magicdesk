@@ -20,14 +20,14 @@
 
 static const char *membership_proc="/proc";
 static void read_text(const char *path,char *text,size_t size) {
-    int fd=open(path,O_RDONLY|O_CLOEXEC);
+    int fd=open(path,O_RDONLY|O_CLOEXEC|O_NOCTTY);
     if (fd<0) fprintf(stderr,"cgroup open %s: %s\n",path,strerror(errno));
     assert(fd>=0); ssize_t n=read(fd,text,size-1);
     if (n<0) fprintf(stderr,"cgroup read %s: %s\n",path,strerror(errno));
     assert(n>=0); text[n]=0; close(fd);
 }
 static int writing(const char *path,const char *text) {
-    int fd=open(path,O_WRONLY|O_CLOEXEC); assert(fd>=0);
+    int fd=open(path,O_WRONLY|O_CLOEXEC|O_NOCTTY); assert(fd>=0);
     ssize_t n=write(fd,text,strlen(text)); int error=errno; close(fd); errno=error;
     return (int)n;
 }

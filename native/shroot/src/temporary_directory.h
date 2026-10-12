@@ -1,5 +1,6 @@
 #ifndef MD_TEMPORARY_DIRECTORY_H
 #define MD_TEMPORARY_DIRECTORY_H
+#define MD_TEMPORARY_DIRECTORY_MARKER ".shroot-transient"
 /* Creates a private child in an explicitly selected backing directory.
  * Returns an independently shared-locked root description. Its lifetime may
  * cross SCM_RIGHTS without any process-local reference count in the receiver. */

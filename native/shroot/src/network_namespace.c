@@ -75,7 +75,11 @@ struct md_fd_object *md_network_socket_new(struct md_network_namespace *n) {
     return &s->object;
 }
 int md_network_socket_offline(const struct md_fd_object *object) {
-    return object && (object->type==&socket_type || object->type==&control_type);
+    if (!object) return 0;
+    if (object->type==&control_type) return 1;
+    if (object->type!=&socket_type) return 0;
+    const struct network_socket *socket=(const void *)object;
+    return !md_network_endpoint_enabled(socket->space);
 }
 int md_network_socket_control(const struct md_fd_object *object) {
     return object && object->type==&control_type;

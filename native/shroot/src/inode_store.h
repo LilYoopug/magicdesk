@@ -48,6 +48,10 @@ struct md_user_namespace;
 int md_inode_store_transient(int parent, struct md_user_namespace *, struct md_inode_store **out);
 void md_inode_store_close(struct md_inode_store *);
 int md_inode_store_seal(struct md_inode_store *);
+/* Mutable superblock policy for transient tmpfs; independent of per-mount
+ * restrictions and immutable image sealing. Negative errno on unavailable IO. */
+int md_inode_store_readonly(struct md_inode_store *);
+int md_inode_store_reconfigure(struct md_inode_store *, int readonly);
 /* Prepare store-owned runtime resources before accepting guest operations.
  * Existing directories retain their owners and permissions. */
 int md_inode_runtime_prepare(struct md_inode_store *);

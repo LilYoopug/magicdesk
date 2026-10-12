@@ -225,15 +225,27 @@ errors remain separate. Origin capture, reopen, callback failure and carrier
 release have one owner, with no provider object allocation per operation.
 
 `mount_setattr` resolves a mount root by path or retained descriptor, including
-a detached construction root. Readonly/nosuid/nodev/noexec changes use the same
+a detached construction root. Readonly/nosuid/nodev/noexec/nosymfollow changes use the same
 policy as legacy remount. Recursive changes preflight every selected mount's
 writer authority, locked attributes and backing writability before publication
 on the filesystem worker. Failure leaves all policies unchanged. Atime settings
 are validated compatibility hints, not timestamp enforcement. Private/slave
-propagation preserves the private graph; peer groups, ID mapping and nosymfollow
-are explicitly unsupported. The syscall adapter validates the versioned binary
+propagation preserves the private graph; peer groups and ID mapping are
+explicitly unsupported. Nosymfollow is mount-local, not a store setting: the
+component walker checks the selected mount before following a link. Bind aliases
+can have different policies; retained dirfds follow their original mount's live
+policy. Linux's user-namespace locks cover readonly/nosuid/nodev/noexec, not
+nosymfollow. Link inspection remains available. Typed proc links check traversal
+before delegation; an unclassified task-affine suffix is explicitly unsupported
+when its policy cannot be retained. The syscall adapter validates the versioned binary
 structure and zero extension before submitting typed bytes; ordinary IO gains
 no allocation, counter or observer.
+
+Mount-root admission uses resolved object identity for remount, propagation,
+attributes, move, unmount and pivot. The initial inode root uses its logical
+ID until relocation materializes a mount source. A proc-FD spelling has the
+same authority as a direct path; chroot into an ordinary directory does not
+make that directory the root of its mount.
 
 `test_mount_api.py` exercises syscall state/order, descriptor flags, dup/fork,
 SCM_RIGHTS, detached-root IO, readonly attachment, recursive attributes, locked
@@ -1048,6 +1060,13 @@ nondumpable receiver; queue discard releases it through worker-owned pipe EOF
 observation. Cross-supervisor control-file transfer returns EXDEV, and an
 unframed native peer is rejected before transfer. Ordinary filesystem origins
 continue to use portable capsules that survive their publishing supervisor.
+Exporting a graph does not prevent its owner from subsequently adding local
+typed mounts. Such a change publishes an explicit unavailable revision:
+foreign views return `EOPNOTSUPP` rather than traverse stale topology or a
+provider's physical carrier. Local operations continue. Removing those providers
+and publishing a complete portable graph restores foreign synchronization with
+the same surviving mount identities. This is an explicit transport limitation,
+not cross-supervisor support for private providers.
 Selector collisions and the pre-sandbox all-FD selector preserve the original
 syscall owner: ordinary `lseek`, `getdents64` and `fstatfs` return to the filesystem
 adapter rather than bypassing directory cursors or mount metadata. Native data
@@ -1184,6 +1203,10 @@ metadata is read from that FD rather than by replaying a reusable proc spelling.
 Typed proc descriptors keep their logical provider metadata. Foreign executable
 stat retains the guest image description for worker resolution, not the Android
 bootstrap or a temporary descriptor installed in the caller.
+Typed metadata uses the common `md_fs_info` representation. Providers with a
+retained filesystem origin add its mount ID and mount-root attribute without
+restatting their inert carrier or resolving a path. This applies to ordinary and
+O_PATH descriptions, including dup and local SCM_RIGHTS transfer.
 
 Current-process `fdinfo` captures the actual proc file in a private-table helper,
 not a copy of the described application FD. Seeking to zero refreshes native

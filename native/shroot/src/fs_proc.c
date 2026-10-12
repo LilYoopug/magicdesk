@@ -4,28 +4,65 @@
 #include "inode_internal.h"
 #include "network_namespace.h"
 #include "proc_paths.h"
+#include "proc_sysctl.h"
+#include "procfs_view.h"
 #include "linux_abi.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/magic.h>
 #include <unistd.h>
 
 int md_fs_proc_operation(struct md_filesystem *fs,struct md_mount_namespace *view,
         struct md_view_mount *mount,int fd,const struct md_fs_request *q,
         struct md_fs_result *out,const struct md_fs_output *output) {
-    if (!mount || mount->backing!=MD_MOUNT_PROC || fd<0 || !fs->actor
-            || !md_network_namespace_managed(fs->actor->network)) return 0;
+    if (!mount || mount->backing!=MD_MOUNT_PROC || fd<0 || !fs->actor) return 0;
     char path[PATH_MAX];
-    int r=md_view_fdpath(fd,path,sizeof(path));
+    int r=md_procfs_path(mount,fd,path,sizeof(path));
     if (r) { out->error=r; return 1; }
     struct md_proc_path ref=md_proc_path_for(path,0,0);
-    if (!md_proc_network_sysctl(ref.kind)) return 0;
+    enum md_proc_file_kind kind=(enum md_proc_file_kind)(ref.kind-MD_PROC_UID_MAP);
+    int sysctl=md_proc_file_sysctl(kind);
+    if (q->operation==MD_FS_STATFS) {
+        md_fs_statfs_result(fd,md_mount_policy_flags(&mount->policy),NULL,out,output);
+        if (!out->error) ((struct md_fs_statfs *)output->data)->type=PROC_SUPER_MAGIC;
+        return 1;
+    }
+    if (!sysctl && (q->operation==MD_FS_STAT || q->operation==MD_FS_FSTAT)
+            && mount->provider) {
+        int private=md_provider_tree_private(mount->provider,fd);
+        if (private<0) { out->error=private; return 1; }
+        if (private) {
+            struct stat st;
+            r=stat(path,&st) ? -errno : 0;
+            if (!r) { md_fs_stat_info(&st,&out->info); out->info.mount_id=mount->id; }
+            else out->error=r;
+            return 1;
+        }
+    }
+    if (!sysctl && (!md_proc_network_sysctl(ref.kind)
+            || !md_network_namespace_managed(fs->actor->network))) return 0;
     if (q->operation==MD_FS_PATH || q->operation==MD_FS_OBJECT_ID) return 0;
+    /* Metadata/access do not need an open description or its carrier memfd. */
+    if (sysctl && (q->operation==MD_FS_STAT || q->operation==MD_FS_FSTAT)) {
+        struct stat st;
+        r=md_proc_sysctl_stat(kind,&st);
+        if (!r) { md_fs_stat_info(&st,&out->info); out->info.mount_id=mount->id; }
+        else out->error=r;
+        return 1;
+    }
+    if (sysctl && q->operation==MD_FS_ACCESS) {
+        if (q->flags&~(AT_SYMLINK_NOFOLLOW|MD_AT_EACCESS)) r=-EINVAL;
+        else if ((q->mode&W_OK) && md_view_readonly(mount)) r=-EROFS;
+        else r=md_proc_sysctl_access(kind,fs->store->identity,q->mode,!!(q->flags&MD_AT_EACCESS));
+        if (r) out->error=r;
+        return 1;
+    }
     struct md_fs_anchor *origin=NULL;
     if (q->operation==MD_FS_OPEN || q->operation==MD_FS_REOPEN)
         r=md_view_anchor_duplicate(fs,view,mount,fd,&origin);
     struct md_control_file file={0};
     if (!r) {
-        file=md_network_sysctl_new(fs->actor->network,
+        file=sysctl ? md_proc_sysctl_new(kind,origin) : md_network_sysctl_new(fs->actor->network,
             (enum md_network_parameter)(ref.kind-MD_PROC_NET_UNPRIVILEGED_PORT),origin);
         if (!file.ops) r=-errno;
     }
@@ -48,15 +85,17 @@ int md_fs_proc_operation(struct md_filesystem *fs,struct md_mount_namespace *vie
         break;
     case MD_FS_OPEN: case MD_FS_REOPEN: {
         if (q->flags&O_DIRECTORY) { r=-ENOTDIR; break; }
-        if (q->flags&~(O_ACCMODE|O_CLOEXEC|O_APPEND|O_TRUNC|O_NONBLOCK|O_NOFOLLOW|O_PATH|O_CREAT|O_EXCL|O_LARGEFILE)) {
+        if (q->flags&~(O_ACCMODE|O_CLOEXEC|O_APPEND|O_TRUNC|O_NONBLOCK|O_NOCTTY|O_NOFOLLOW|O_PATH|O_CREAT|O_EXCL|O_LARGEFILE)) {
             r=-EOPNOTSUPP; break;
         }
         if (q->operation==MD_FS_REOPEN && (q->mode&MD_FS_REOPEN_MUTABLE)) { r=-EOPNOTSUPP; break; }
         if (!output || !output->control) { out->requires_control=1; r=-EOPNOTSUPP; break; }
         /* The descriptor host owns all data semantics; never reopen the
          * Android sysctl for read/write merely to supply a carrier. */
-        int carrier=open("/dev/null",O_CLOEXEC|(q->flags&~(O_CREAT|O_EXCL|O_TRUNC)));
-        r=md_fs_control_publish(carrier<0 ? -errno : carrier,file,NULL,id,(int)q->flags,out,output);
+        int carrier;
+        if (file.ops->descriptor) carrier=file.ops->descriptor(file.context,(int)q->flags);
+        else { carrier=open("/dev/null",O_CLOEXEC|(q->flags&~(O_CREAT|O_EXCL|O_TRUNC))); if (carrier<0) carrier=-errno; }
+        r=md_fs_control_publish(carrier,file,origin,id,(int)q->flags,out,output);
         break;
     }
     case MD_FS_READLINK: r=-EINVAL; break;

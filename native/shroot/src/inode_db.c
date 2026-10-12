@@ -110,7 +110,7 @@ static int watch_writes(struct md_inode_store *s) {
     s->recording=1; return 0;
 }
 int mdi_write(struct md_inode_store *s) {
-    if (s->readonly) return -EROFS;
+    if (mdi_readonly(s)) return -EROFS;
     if (s->write_transaction) return 0;
     if (!s->locked || s->read_depth!=1) return -EDEADLK;
     int r=watch_writes(s);
@@ -141,8 +141,11 @@ int mdi_begin(struct md_inode_store *s, int write) {
             int rc=mdi_step(s,query);
             if (rc!=SQLITE_ROW) r=mdi_sql_failure(rc);
         }
-        if (!r) mdi_cache_snapshot(s,sqlite3_column_int64(query,0));
+        sqlite3_int64 version=!r ? sqlite3_column_int64(query,0) : 0;
+        if (!r) mdi_cache_snapshot(s,version);
         r=mdi_query_release(query,r);
+        if (!r) r=mdi_super_refresh(s,version);
+        if (!r && write && s->super_readonly) r=-EROFS;
         if (r) transaction(s,MDI_ROLLBACK);
         else if (!write) s->read_depth=1;
     }

@@ -66,7 +66,8 @@ void test_tmpfs_guest(void) {
         assert(mount("tmpfs","/tmp/temporary","tmpfs",0,bad[i])<0 && errno==EINVAL);
         assert(!access("/tmp/temporary/covered",F_OK));
     }
-    assert(mount("tmpfs","/tmp/temporary","tmpfs",0,"unknown=1")<0 && errno==EOPNOTSUPP);
+    assert(mount("tmpfs","/tmp/temporary","tmpfs",0,"unknown=1")<0 && errno==EINVAL);
+    assert(!access("/tmp/temporary/covered",F_OK));
     const char *capacity[]={"size=0","size=65536k","size=50%","size=0x10M","nr_blocks=1,nr_inodes=1"};
     for (unsigned i=0;i<sizeof(capacity)/sizeof(*capacity);++i) {
         assert(!mount("tmpfs","/tmp/temporary","tmpfs",MS_STRICTATIME,capacity[i]));

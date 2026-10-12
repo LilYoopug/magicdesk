@@ -64,7 +64,7 @@ static int parse(const char *text, const struct md_identity *id, struct options 
         if (length>=5 && !memcmp(at,"mode=",5)) mode=1;
         else if (length>=4 && !memcmp(at,"uid=",4)) group=0;
         else if (length>=4 && !memcmp(at,"gid=",4)) group=1;
-        else return -EOPNOTSUPP;
+        else return -EINVAL;
         unsigned prefix=mode ? 5 : 4; uint32_t value;
         int r=number(at+prefix,length-prefix,mode ? 8 : 10,&value);
         if (r) return r;
@@ -110,6 +110,7 @@ int md_fs_mount_temporary(struct md_filesystem *fs, const struct md_fs_request *
         if (root<0) r=root;
     }
     if (!r) r=md_inode_import_metadata(store,root,options.uid,options.gid,options.mode);
+    if (!r && (q->flags&MS_RDONLY)) r=md_inode_store_reconfigure(store,1);
     if (!r) {
         *out=(struct md_mount_source){.fd=root,.backing=MD_MOUNT_INODE,
             .storage=md_inode_lifetime_retain(store->lifetime),.policy=md_fs_mount_flags(q->flags)};

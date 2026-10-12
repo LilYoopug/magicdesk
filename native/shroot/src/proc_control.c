@@ -80,13 +80,13 @@ long md_proc_control_metadata(int process, enum md_proc_kind kind, int fd, long 
     long result=md_guest_buffer_control(MD_BUFFER_PROC_META,0,0);
     if (!result && !access) {
         struct md_proc_metadata_result metadata; memcpy(&metadata,(void *)memory,sizeof(metadata));
-        struct stat st=metadata.value;
+        struct stat st; md_fs_info_stat(&metadata.value,&st);
         int namespace=md_proc_file_namespace(metadata.kind);
         if (nr==SYS_fstat || nr==SYS_newfstatat)
             result=md_write_memory((void *)a[nr==SYS_fstat ? 1 : 2],&st,sizeof(st));
         else if (nr==SYS_statx) {
             struct statx value;
-            md_stat_statx(&st,&value);
+            md_fs_info_statx(&metadata.value,&value);
             result=md_write_memory((void *)a[4],&value,sizeof(value));
         } else if (nr==SYS_statfs || nr==SYS_fstatfs) {
             struct statfs value={.f_type=metadata.filesystem ? metadata.filesystem : namespace ? NSFS_MAGIC : PROC_SUPER_MAGIC,
