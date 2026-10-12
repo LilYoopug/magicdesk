@@ -18,7 +18,7 @@ def main():
     parser.add_argument("--server", default="magicdesk")
     parser.add_argument("--keep", action="store_true")
     parser.add_argument("--diagnostics", action="store_true")
-    parser.add_argument("--case", choices=("all", "launch-cancel", "event-fairness", "kernel-baseline", "mapping-task", "private-memory", "pidfd-table", "fd-observation", "proc-custody", "exec-custody", "open-job", "ofd-order", "fd-handoff", "fd-parcel", "fd-messages", "ipc-peer", "ipc-origins", "ipc-ancillary", "mount-policy", "mount-graph", "mount-namespace", "inode-custody", "origin-transfer", "transient-store", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fd-lifecycle", "restricted-descriptors", "fs-dispatch", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture", "rpc", "stores"), default="all",
+    parser.add_argument("--case", choices=("all", "control-event", "launch-cancel", "event-fairness", "kernel-baseline", "mapping-task", "private-memory", "pidfd-table", "fd-observation", "proc-custody", "exec-custody", "open-job", "ofd-order", "fd-handoff", "fd-parcel", "fd-messages", "ipc-peer", "ipc-origins", "ipc-ancillary", "mount-policy", "mount-graph", "mount-namespace", "inode-custody", "origin-transfer", "transient-store", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fd-lifecycle", "restricted-descriptors", "fs-dispatch", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture", "rpc", "stores"), default="all",
                         help="Run resource regressions, FD handoff/parcel, terminal RPC custody, native FD lifecycle, or worker transport")
     parser.add_argument("--compare-installed", action="store_true",
                         help="Compare identical metadata/spawn fixtures with the installed runtime")
@@ -348,6 +348,9 @@ def main():
             names += ("test_interception_buffers",)
         if args.case == "all":
             names += ("test_open_job", "fs_dispatch", "test_launch_registry", "ipc_credentials_guest", "ipc_io_job", "fd_observation", "task_helper_fd", "test_native_mounts", "file_metadata", "event_signal")
+            names += ("control_event", "wait_guest")
+        if args.case == "control-event":
+            names = ("control_event", "wait_guest", "bootstrap", "supervisor", "run", "service")
         if args.case == "fd-observation":
             names = ("fd_observation", "task_helper_fd")
         if args.case == "ipc-ancillary":
@@ -386,6 +389,22 @@ def main():
             file = "libmagicdesk_guest_" + name + ".so"
             transport.upload(client, args.build / file, root + "/" + file)
         check("prepare fixtures", "chmod 700 " + root + "/*.so")
+        if args.case in ("all", "control-event"):
+            check("control event ownership", "timeout -k 5 60 " + root + "/libmagicdesk_guest_control_event.so",
+                  "PASS mixed native wakeups and coalesced generations")
+            check("wait fixture directories", "mkdir -p " + root + "/wait-source/bin")
+            check("wait fixture image", "cp " + root + "/libmagicdesk_guest_wait_guest.so " + root + "/wait-source/bin/waits")
+            check("wait fixture import", root + "/libmagicdesk_guest_service.so --import "
+                  + root + "/wait-source " + root + "/wait-store")
+            for filtered in range(2):
+                check("native wait control " + str(filtered), root + "/libmagicdesk_guest_wait_guest.so "
+                      + str(filtered), "PASS native wait fast paths")
+                check("guest wait fast paths " + str(filtered), root + "/libmagicdesk_guest_run.so --statistics --store "
+                      + root + "/wait-store --deadline-seconds 30 -- /bin/waits " + str(filtered),
+                      "PASS native wait fast paths",
+                      absent_patterns=(r"MD_SYSCALL nr=(?:20|21|22|72|73|441) ",))
+            if args.case == "control-event":
+                return
         if args.case == "all":
             check("file metadata ABI", root + "/libmagicdesk_guest_file_metadata.so", "PASS file metadata:")
             check("event signals", root + "/libmagicdesk_guest_event_signal.so", "PASS event signal:")

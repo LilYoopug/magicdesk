@@ -1038,6 +1038,31 @@ writes; the other fields are read-only.
 The same sysctl provider exposes the read-only UID/GID overflow values used by
 namespace consumers; it does not read Android's global sysctl as guest policy.
 
+UTS providers retain a `control_event` generation source with an independent
+cursor for each open. Dup references share consumption; namespace copies share
+the notification sources while retaining distinct names. Reading does not
+acknowledge a change: provider readiness does, following
+[Linux proc_sys_poll](https://github.com/torvalds/linux/blob/v5.15/fs/proc/proc_sysctl.c#L580-L625).
+Wake eventfds are allocated only when observed. Publication, acknowledgement
+and subscriber retirement use one source lock; pending generations coalesce
+without per-event allocation. Sysctl placements and unopened provider prototypes
+have no carrier FD. Concurrent captures of one open publish a single sealed
+carrier, while independent opens retain different carrier identities.
+
+`control_epoll` is the internal virtual-interest collector, currently exercised
+by native fixtures rather than guest syscall dispatch. It keys registrations by
+retained open-description identity plus registering FD. Native kernel epoll
+registrations and application event data remain untouched, including equal data
+values. Virtual events are collected into a separate result slice through a
+bounded ready queue. Level, edge and one-shot interests share provider readiness;
+exclusive and wake-lock requests return an explicit unsupported error.
+The enclosing descriptor custodian supplies confirmed OFD retirement, including
+aliases and queued transfers. Registration references alone cannot determine it.
+This model does not establish guest poll/epoll notification support or fix
+journald. Guest wait interception, shared-epoll admission and terminal custody
+are not connected to the collector. Ordinary native waits, including
+`epoll_pwait2`, use the shared kernel-call policy without supervisor stops.
+
 `ipc_namespace` independently owns lazy SysV semaphore/message and shared-memory
 authorities. The initial namespace is store-scoped across launches; NEWIPC has a
 fresh identity with separate keys and object lookup. Namespace destruction

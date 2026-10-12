@@ -42,6 +42,21 @@ The device transport is closed only after that launch has terminated.
 `init_fixture.py` owns the shared private-filesystem/console setup; OpenRC's
 in-guest observer does not import host-side transport dependencies.
 
+`test_resources.py BUILD --case control-event` runs source and virtual-interest
+model fixtures as UID 2000. They cover generation coalescing, concurrent
+publication/subscription/retirement, duplicate event data, open-description
+identity, level/edge/one-shot delivery, bounded fairness and failed admission.
+Mixed native/virtual collection performs 100,000 rounds with allocation guards
+and exact FD cleanup. This is an internal collector test, not a guest epoll
+notification test. The same case runs real native and Shroot wait loops and
+requires zero interception counters for `ppoll`, `pselect6`, `epoll_pwait`,
+`epoll_pwait2`, creation and registration, both before and after an application
+filter denies further seccomp installation. Timings are diagnostic, not a
+stable performance benchmark.
+The `ofd-order` case checks typed sysctl masks, read independence, independent
+opens/shared references, UTS copies, constant providers and concurrent lazy
+carrier publication. These checks do not whitelist default-boot failures.
+
 `test_openrc.py --build BUILD --store STORE` needs an Alpine store with openrc
 and util-linux. It runs stock sysinit/boot initialization and dedicated runlevels
 inside private mounts/PIDs, checks dependency order and daemon status/restart,

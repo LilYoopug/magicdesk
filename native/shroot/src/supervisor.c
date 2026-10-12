@@ -1441,7 +1441,7 @@ static int control_file_capture(pid_t actor,const char *path,struct md_fd_object
         int error=proc_node_stat(proc_owner(target->pid),type,&node,&st);
         if (error) return error;
         if (md_proc_file_sysctl(type)) {
-            struct md_control_file control=md_proc_sysctl_new(type,NULL);
+            struct md_control_file control=md_proc_sysctl_new(type,NULL,t->resources.uts);
             if (!control.ops) return -errno;
             file=md_proc_file_open_control(control.ops,control.context,&t->identity,O_PATH);
             md_control_file_release(control);
@@ -1605,7 +1605,7 @@ static void proc_file_request(struct thread *t, const struct seccomp_notif *q) {
                     (enum md_namespace_kind)(file_kind-MD_PROC_FILE_NS_USER),selected.resources,selected.identity->user_namespace);
                 file=md_proc_file_open_namespace(&ref,&t->identity,flags); md_namespace_reference_release(&ref);
             } else if (!error && sysctl) {
-                struct md_control_file control=md_proc_sysctl_new(file_kind,NULL);
+                struct md_control_file control=md_proc_sysctl_new(file_kind,NULL,t->resources.uts);
                 if (control.ops) {
                     file=md_proc_file_open_control(control.ops,control.context,&t->identity,flags);
                     md_control_file_release(control);

@@ -109,6 +109,12 @@ the existing store locks, getrandom identities and owner leases. These add no
 post-5.15 dependency. Guest CLONE_NEWUSER and typed proc map writes follow the
 5.15 UID/GID mapping and CAP_SETFCAP rules without requiring host CONFIG_USER_NS.
 UTS sysctl files use the same lazy descriptor-selector mechanism as map files.
+Their internal notification model uses baseline eventfd, epoll, atomic references
+and a source mutex; it requires no kernel change above 5.15. Independent opens
+own generation cursors and lazy wake descriptors. The virtual-interest collector
+has native fixture coverage, not guest syscall integration. Native `epoll_pwait2`
+(Linux 5.11) shares the direct wait policy; unsupported or denied native calls
+retain their kernel error. No notification thread or periodic sampling is added.
 Offline IPv4 sysctls use the shared typed-control transport and retained mount
 anchors; numeric values and permissions are launch-owned state, not host sysctl
 writes. They add no post-5.15 interface. Foreign proc executable selection reuses

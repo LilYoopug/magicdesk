@@ -68,7 +68,7 @@ int md_fs_proc_operation(struct md_filesystem *fs,struct md_mount_namespace *vie
         r=md_view_anchor_duplicate(fs,view,mount,fd,&origin);
     struct md_control_file file={0};
     if (!r) {
-        file=sysctl ? md_proc_sysctl_new(kind,origin) : md_network_sysctl_new(fs->actor->network,
+        file=sysctl ? md_proc_sysctl_new(kind,origin,fs->actor->uts) : md_network_sysctl_new(fs->actor->network,
             (enum md_network_parameter)(ref.kind-MD_PROC_NET_UNPRIVILEGED_PORT),origin);
         if (!file.ops) r=-errno;
     }

@@ -62,6 +62,13 @@ struct md_control_file_ops {
      * readable also returns true for terminal errors (disconnect/revoke). */
     int (*readable)(void *);
     void (*read_commit)(void *,size_t copied);
+    /* Optional virtual readiness. The wake FD is only a transport hint; it is
+     * not the file's application-visible event mask. poll consumes provider
+     * state, independently of reads. poll_descriptor returns zero and a
+     * borrowed FD, or -1 in the output for a source without notifications.
+     * Negative return values are errors, never application event masks. */
+    int (*poll_descriptor)(void *,int *descriptor);
+    long (*poll)(void *);
 };
 static inline struct md_control_file md_control_file_retain(struct md_control_file f) {
     if (f.ops) f.context=f.ops->retain(f.context);

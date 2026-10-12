@@ -29,7 +29,7 @@ set(origins ${src}/fs_anchor.c ${src}/fs_origin_transfer.c ${src}/inode_lifetime
 list(APPEND origins ${src}/native_mounts.c ${src}/devpts_view.c ${src}/cgroup.c ${src}/cgroup_program.c ${src}/sysfs_view.c ${src}/network_namespace.c ${src}/network_model.c ${src}/network_route.c ${src}/network_endpoint.c ${src}/network_sysctl.c
     ${src}/ipc_namespace.c ${src}/mqueue_view.c ${src}/landlock_policy.c ${src}/landlock_file.c
     ${src}/mount_stream.c ${src}/mount_pin.c ${src}/temporary_directory.c ${src}/private_tree.c
-    ${src}/provider_tree.c ${src}/device_events.c ${src}/identity_snapshot.c ${src}/proc_sysctl.c ${src}/uts_namespace.c)
+    ${src}/provider_tree.c ${src}/device_events.c ${src}/identity_snapshot.c ${src}/proc_sysctl.c ${src}/uts_namespace.c ${src}/control_event.c)
 set(mounts ${src}/fs_mounts.c ${src}/fs_mount_path.c ${src}/fs_mount_operations.c ${src}/fs_mount_table.c ${src}/fs_mount_change.c ${src}/fs_mount_lifecycle.c ${src}/fs_temporary.c ${src}/fs_overlay.c ${src}/fs_storage.c)
 list(APPEND mounts ${src}/proc_paths.c ${src}/procfs_view.c ${src}/proc_fdinfo.c ${src}/fs_proc.c ${src}/fs_cgroup.c ${src}/fs_bpf.c ${src}/fs_sysfs.c ${src}/fs_mqueue.c ${src}/fs_mount_file.c ${src}/mount_source.c ${src}/fs_context.c
     ${src}/fs_landlock.c ${src}/fs_provider.c ${src}/fs_control.c)
@@ -104,6 +104,12 @@ install(TARGETS bootstrap supervisor run service image RUNTIME DESTINATION lib)
 
 option(MAGICDESK_GUEST_FIXTURES "Build standalone native fixtures" OFF)
 if(MAGICDESK_GUEST_FIXTURES)
+    guest_executable(control_event ../guest-exec-lab/test_control_event.c
+        ../guest-exec-lab/test_control_epoll.c ${src}/control_event.c ${src}/control_epoll.c)
+    target_compile_options(control_event PRIVATE -iquote ${src} -UNDEBUG)
+    target_link_options(control_event PRIVATE -Wl,--wrap=malloc -Wl,--wrap=calloc)
+    guest_executable(wait_guest ../guest-exec-lab/test_wait_guest.c)
+    target_compile_options(wait_guest PRIVATE -UNDEBUG)
     guest_executable(event_signal ../guest-exec-lab/test_event_signal.c)
     target_compile_options(event_signal PRIVATE -iquote ${src} -UNDEBUG)
     target_link_options(event_signal PRIVATE -Wl,--wrap=read -Wl,--wrap=write)
@@ -140,6 +146,7 @@ if(MAGICDESK_GUEST_FIXTURES)
         ${src}/task_receive.c ${src}/event_wait.c ${raw})
     target_compile_definitions(test_task_resources PRIVATE MD_NO_START MD_USE_LIBC)
     target_sources(test_task_resources PRIVATE ../guest-exec-lab/test_user_namespace.c ${src}/proc_file.c ${src}/proc_sysctl.c ${src}/proc_namespace.c ${src}/fd_selector.c)
+    target_sources(test_task_resources PRIVATE ../guest-exec-lab/test_control_poll.c ${src}/control_epoll.c)
     target_sources(test_task_resources PRIVATE ${src}/descriptor_inode.c ../guest-exec-lab/test_descriptor_inode.c)
     target_sources(test_task_resources PRIVATE ../guest-exec-lab/test_network_model.c ../guest-exec-lab/test_network_route.c ../guest-exec-lab/test_network_endpoint.c)
     target_compile_options(test_task_resources PRIVATE -iquote ${src} -UNDEBUG)

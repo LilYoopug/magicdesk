@@ -427,7 +427,7 @@ static void private_publication(const char *base) {
     unsigned id=peer.mounts->tree->mounts[0].id;
     struct md_view_mount next[MD_FS_MOUNTS_MAX];
     memcpy(next,fs.mounts->tree->mounts,fs.mounts->tree->count*sizeof(*next));
-    next[2].file=md_proc_sysctl_new(MD_PROC_FILE_HOSTNAME,NULL); assert(next[2].file.ops);
+    next[2].file=md_proc_sysctl_new(MD_PROC_FILE_HOSTNAME,NULL,NULL); assert(next[2].file.ops);
     struct md_mount_layout layout={.base=&fs.mounts->base,.root=fs.mounts->root,
         .entries=next,.count=fs.mounts->tree->count};
     unsigned stable=descriptors(); int committed=0;

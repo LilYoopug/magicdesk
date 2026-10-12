@@ -18,6 +18,7 @@
 void test_fd_origins(void);
 void test_ofd_order(void);
 void test_user_namespace(void);
+void test_control_poll(void);
 void test_descriptor_inode(void);
 void test_ipc_database(void);
 static int descriptors(void) {
@@ -328,6 +329,7 @@ int main(void) {
     test_fd_origins();
     test_ofd_order();
     test_user_namespace();
+    test_control_poll();
     test_descriptor_inode();
     puts("PASS resource ownership, transactional unshare, retained roots and descriptor lifetime");
     alarm(0);

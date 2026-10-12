@@ -19,6 +19,7 @@
  * seccomp so these kernel operations need no userspace policy round trip. */
 #define MD_DOMAIN_KERNEL_CALLS(X) \
     X(shutdown) X(waitid) \
+    X(ppoll) X(pselect6) X(epoll_pwait) X(epoll_pwait2) X(epoll_ctl) X(epoll_create1) \
     X(sysinfo) X(sched_yield) X(sched_getaffinity) \
     X(getrusage) X(getrlimit) X(gettimeofday)
 #define MD_DOMAIN_KERNEL_ARGUMENTS(X) \

@@ -21,6 +21,7 @@ struct md_task_snapshot {
     struct md_cgroup_namespace *cgroup_namespace;
     struct md_network_namespace *network;
     struct md_ipc_namespace *ipc;
+    struct md_uts_namespace *uts;
     struct md_landlock_policy *landlock;
 };
 struct md_task_registry *md_task_registry_create(void);
