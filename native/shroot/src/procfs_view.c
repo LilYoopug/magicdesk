@@ -16,14 +16,70 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
-static const struct md_provider_tree_ops tree_ops={.filesystem=PROC_SUPER_MAGIC};
-struct md_provider_tree *md_procfs_new(int parent) {
+struct proc_policy { unsigned hidepid,pidonly; uint32_t gid; };
+static const struct md_provider_tree_ops tree_ops={.filesystem=PROC_SUPER_MAGIC,.release=free};
+static const struct proc_policy *policy(const struct md_view_mount *mount) {
+    return md_provider_tree_context(mount->provider,&tree_ops);
+}
+static int options(struct proc_policy *p,const char *text,const struct md_identity *id) {
+    *p=(struct proc_policy){0};
+    while (text && *text) {
+        size_t size=strcspn(text,",");
+        char option[128];
+        if (!size || size>=sizeof(option)) return -EINVAL;
+        memcpy(option,text,size); option[size]=0;
+        char *value=strchr(option,'=');
+        if (!value) return -EINVAL;
+        *value++=0;
+        if (!strcmp(option,"hidepid")) {
+            if (!strcmp(value,"off") || !strcmp(value,"0")) p->hidepid=0;
+            else if (!strcmp(value,"noaccess") || !strcmp(value,"1")) p->hidepid=1;
+            else if (!strcmp(value,"invisible") || !strcmp(value,"2")) p->hidepid=2;
+            else if (!strcmp(value,"ptraceable") || !strcmp(value,"4")) p->hidepid=4;
+            else return -EINVAL;
+        } else if (!strcmp(option,"gid")) {
+            if (*value<'0' || *value>'9') return -EINVAL;
+            char *end; errno=0;
+            unsigned long gid=strtoul(value,&end,10);
+            if (errno || *end || gid>=UINT32_MAX) return -EINVAL;
+            p->gid=md_user_namespace_into(id ? id->user_namespace : NULL,1,(uint32_t)gid);
+            if (p->gid==UINT32_MAX) return -EINVAL;
+        } else if (!strcmp(option,"subset")) {
+            if (*value && strcmp(value,"pid")) return -EINVAL;
+            if (*value) p->pidonly=1;
+        } else return -EINVAL;
+        text+=size; if (*text) ++text;
+    }
+    return 0;
+}
+int md_procfs_options(const struct md_view_mount *mount,const struct md_identity *id,char *out,size_t size) {
+    const struct proc_policy *p=policy(mount);
+    if (!size) return -ENAMETOOLONG;
+    out[0]=0;
+    if (!p) return 0;
+    char gid[40]="",hide[24]="";
+    if (p->gid) snprintf(gid,sizeof(gid),",gid=%u",id ? md_identity_visible_id(id,1,p->gid) : p->gid);
+    if (p->hidepid) snprintf(hide,sizeof(hide),",hidepid=%u",p->hidepid);
+    int n=snprintf(out,size,"%s%s%s",gid,hide,p->pidonly ? ",subset=pid" : "");
+    return n<0 || (size_t)n>=size ? -ENAMETOOLONG : 0;
+}
+struct md_provider_tree *md_procfs_new(int parent,const char *text,const struct md_identity *id) {
+    struct proc_policy *p=malloc(sizeof(*p));
+    if (!p) return NULL;
+    int error=options(p,text,id);
+    if (error) { free(p); errno=-error; return NULL; }
+    if (p->hidepid) {
+        int probe=open("/proc/self/io",O_RDONLY|O_CLOEXEC);
+        error=probe<0 ? (errno==ENOENT ? EOPNOTSUPP : errno) : 0;
+        if (probe>=0) close(probe);
+        if (error) { free(p); errno=error; return NULL; }
+    }
     int lower=open("/proc",O_PATH|O_DIRECTORY|O_CLOEXEC);
-    if (lower<0) return NULL;
-    struct md_provider_tree *tree=md_provider_tree_new(parent,lower,NULL,0,&tree_ops,NULL);
-    int error=tree ? 0 : errno;
+    if (lower<0) { error=errno; free(p); errno=error; return NULL; }
+    struct md_provider_tree *tree=md_provider_tree_new(parent,lower,NULL,0,&tree_ops,p);
+    error=tree ? 0 : errno;
     close(lower);
-    if (!tree) { errno=error; return NULL; }
+    if (!tree) { free(p); errno=error; return NULL; }
     int root=md_provider_tree_root(tree);
     if (mkdirat(root,"sys",0755) || mkdirat(root,"sys/kernel",0755)) error=errno;
     for (unsigned i=MD_PROC_FILE_HOSTNAME;!error && i<=MD_PROC_FILE_OVERFLOWGID;++i) {
@@ -61,6 +117,46 @@ static pid_t visible(const struct md_view_mount *mount,pid_t native) {
     pid_t result=md_pid_identity_number(id,mount->pid_namespace);
     md_pid_identity_release(id); return result;
 }
+static int inspect(struct md_filesystem *fs,pid_t native) {
+    if (!fs->actor || !fs->store->identity) return 0;
+    if (native==fs->actor->tid || native==fs->actor->tgid) return 1;
+    struct md_task_credentials task;
+    int r=md_task_registry_credentials(fs->tasks,native,&task);
+    if (r) return r==-ESRCH ? 0 : r;
+    const struct md_identity target=task.identity;
+    const struct md_identity *from=fs->store->identity;
+    int same=task.group==fs->actor->tgid;
+    int privileged=md_identity_capable_in(from,target.user_namespace,CAP_SYS_PTRACE);
+    int allowed=same || privileged || (from->uid.fs==target.uid.real
+        && from->uid.fs==target.uid.effective && from->uid.fs==target.uid.saved
+        && from->gid.fs==target.gid.real && from->gid.fs==target.gid.effective
+        && from->gid.fs==target.gid.saved && from->user_namespace==target.user_namespace
+        && !(target.caps.permitted&~from->caps.effective));
+    md_identity_release(&task.identity);
+    if (!allowed || same || privileged || task.retired) return allowed;
+    /* proc io performs READ_FSCREDS at read time, including dumpability and
+     * LSM checks, even for zombies whose namespace links are already gone. */
+    char path[64],byte;
+    snprintf(path,sizeof(path),"/proc/%d/io",native);
+    int fd=open(path,O_RDONLY|O_CLOEXEC);
+    int error=fd<0 ? errno : 0;
+    if (fd>=0) { if (read(fd,&byte,1)<0) error=errno; close(fd); }
+    return !error ? 1 : error==EACCES || error==EPERM || error==ENOENT || error==ESRCH ? 0 : -error;
+}
+static int permitted(struct md_filesystem *fs,const struct proc_policy *p,pid_t native,unsigned minimum) {
+    if (!p || !p->hidepid || (p->hidepid!=4 && (p->hidepid<minimum
+            || (fs->store->identity && p->gid!=UINT32_MAX && md_identity_in_group(fs->store->identity,p->gid))))) return 1;
+    return inspect(fs,native);
+}
+int md_procfs_check(struct md_filesystem *fs,const struct md_view_mount *mount,const char *path,unsigned minimum) {
+    const struct proc_policy *p=policy(mount);
+    if (!p || !p->hidepid || strncmp(path,"/proc/",6)) return 0;
+    const char *end;
+    pid_t native=decimal(path+6,&end);
+    if (!native || (*end && *end!='/')) return 0;
+    int r=permitted(fs,p,native,minimum);
+    return r<0 ? r : r ? 0 : p->hidepid==1 ? -EPERM : -ENOENT;
+}
 /* Returns a native TGID for a task directory, -1 for the proc root, else zero. */
 static pid_t directory(const char *path) {
     if (!strcmp(path,"/proc")) return -1;
@@ -93,14 +189,21 @@ static int kernel_global(const char *name) {
     return !strcmp(name,"sysrq-trigger") || !strcmp(name,"kcore")
         || !strcmp(name,"kmsg") || !strcmp(name,"keys");
 }
+static int omitted(const struct proc_policy *p,const char *name) {
+    return kernel_global(name) || (p && p->pidonly && !decimal(name,NULL)
+        && strcmp(name,".") && strcmp(name,"..") && strcmp(name,"self") && strcmp(name,"thread-self"));
+}
 int md_procfs_step(struct md_filesystem *fs,struct md_view_mount *mount,int fd,
         const char *name,const char *tail,int follow_final,uint64_t resolve) {
     char path[PATH_MAX], mapped[32];
     int r=md_procfs_path(mount,fd,path,sizeof(path));
     if (r) return r;
+    r=md_procfs_check(fs,mount,path,1);
+    if (r) return r;
     pid_t group=directory(path);
     int no_links=md_view_nosymfollow(mount) || (resolve&RESOLVE_NO_SYMLINKS);
-    if (group==-1 && kernel_global(name)) return -ENOENT;
+    const struct proc_policy *p=policy(mount);
+    if (group==-1 && omitted(p,name)) return -ENOENT;
     if (group==-1 && (!strcmp(name,"self") || !strcmp(name,"thread-self"))) {
         if (follow_final || *tail) {
             if (no_links) return -ELOOP;
@@ -116,6 +219,10 @@ int md_procfs_step(struct md_filesystem *fs,struct md_view_mount *mount,int fd,
         md_pid_identity_release(id);
         if (!native) return -ENOENT;
         snprintf(mapped,sizeof(mapped),"%d",native); name=mapped;
+    }
+    if (group && p && p->hidepid==4 && decimal(name,NULL)) {
+        int allowed=permitted(fs,p,decimal(name,NULL),1);
+        if (allowed<=0) return allowed ? allowed : -ENOENT;
     }
     struct md_inode_boundary *boundary=fs->store->boundary;
     int content=process_directory(path) && (!strcmp(name,"status") || !strcmp(name,"stat"));
@@ -160,10 +267,13 @@ ssize_t md_procfs_readlink(struct md_filesystem *fs,const struct md_view_mount *
     size_t bytes=(size_t)n<capacity ? (size_t)n : capacity;
     memcpy(data,value,bytes); return (ssize_t)bytes;
 }
-ssize_t md_procfs_getdents(const struct md_view_mount *mount,int fd,void *data,size_t capacity) {
+ssize_t md_procfs_getdents(struct md_filesystem *fs,const struct md_view_mount *mount,int fd,void *data,size_t capacity) {
     char path[PATH_MAX];
     int error=md_procfs_path(mount,fd,path,sizeof(path));
     if (error) return error;
+    error=md_procfs_check(fs,mount,path,1);
+    if (error) return error;
+    const struct proc_policy *p=policy(mount);
     pid_t group=directory(path);
     if (!group || (group>0 && !mount->pid_namespace)) {
         if (mount->provider) return md_provider_tree_getdents(mount->provider,fd,data,capacity);
@@ -187,8 +297,9 @@ ssize_t md_procfs_getdents(const struct md_view_mount *mount,int fd,void *data,s
             if (entry->d_reclen<offsetof(struct dirent,d_name)+2 || entry->d_reclen>(size_t)n-read) return -EIO;
             size_t length=entry->d_reclen;
             char mapped[32]; const char *name=entry->d_name;
-            pid_t native=mount->pid_namespace ? decimal(entry->d_name,NULL) : 0, number=0;
-            if (native) {
+            pid_t native=decimal(entry->d_name,NULL), number=native;
+            if (native && mount->pid_namespace) {
+                number=0;
                 struct md_pid_identity *id=md_pid_namespace_find(mount->pid_namespace,native);
                 if (md_pid_identity_group(id)==(group>0 ? group : native))
                     number=md_pid_identity_number(id,mount->pid_namespace);
@@ -197,7 +308,9 @@ ssize_t md_procfs_getdents(const struct md_view_mount *mount,int fd,void *data,s
                     snprintf(mapped,sizeof(mapped),"%d",number); name=mapped;
                 }
             }
-            if ((!native || number) && !(group==-1 && kernel_global(name))) {
+            int allowed=native && number ? permitted(fs,p,native,2) : 1;
+            if (allowed<0) return allowed;
+            if (allowed && (!native || number) && !(group==-1 && omitted(p,name))) {
                 size_t bytes=strlen(name)+1;
                 size_t record=(offsetof(struct dirent,d_name)+bytes+7)&~(size_t)7;
                 if (record>capacity-written) {

@@ -112,6 +112,8 @@ static int parameter(struct filesystem_context *c,const struct md_fs_request *q)
     }
     int known=0,expect_string=1;
     switch (c->type) {
+    case MD_FS_MOUNT_PROC:
+        known=!strcmp(key,"hidepid") || !strcmp(key,"gid") || !strcmp(key,"subset"); break;
     case MD_FS_MOUNT_TMPFS:
         known=!strcmp(key,"mode") || !strcmp(key,"uid") || !strcmp(key,"gid")
             || !strcmp(key,"size") || !strcmp(key,"nr_blocks") || !strcmp(key,"nr_inodes"); break;

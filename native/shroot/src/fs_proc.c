@@ -27,6 +27,12 @@ int md_fs_proc_operation(struct md_filesystem *fs,struct md_mount_namespace *vie
         if (!out->error) ((struct md_fs_statfs *)output->data)->type=PROC_SUPER_MAGIC;
         return 1;
     }
+    if (q->operation!=MD_FS_PATH && q->operation!=MD_FS_OBJECT_ID) {
+        unsigned minimum=q->operation==MD_FS_STAT || q->operation==MD_FS_FSTAT
+            || ((q->operation==MD_FS_OPEN || q->operation==MD_FS_REOPEN) && (q->flags&O_PATH)) ? 2 : 1;
+        r=md_procfs_check(fs,mount,path,minimum);
+        if (r) { out->error=r; return 1; }
+    }
     if (!sysctl && (q->operation==MD_FS_STAT || q->operation==MD_FS_FSTAT)
             && mount->provider) {
         int private=md_provider_tree_private(mount->provider,fd);

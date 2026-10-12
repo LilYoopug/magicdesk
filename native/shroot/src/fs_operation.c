@@ -117,7 +117,7 @@ int md_fs_request_validate(const struct md_fs_request *q) {
                 || (q->mode!=MD_FS_MOUNT_TMPFS && q->mode!=MD_FS_MOUNT_OVERLAY && q->mode!=MD_FS_MOUNT_PROC
                     && q->mode!=MD_FS_MOUNT_DEVPTS && q->mode!=MD_FS_MOUNT_CGROUP
                     && q->mode!=MD_FS_MOUNT_CGROUP2 && q->mode!=MD_FS_MOUNT_SYSFS && q->mode!=MD_FS_MOUNT_MQUEUE
-                    && q->mode!=MD_FS_MOUNT_SETATTR && q->value_size)) return -EINVAL;
+                    && q->mode!=MD_FS_MOUNT_REMOUNT && q->mode!=MD_FS_MOUNT_SETATTR && q->value_size)) return -EINVAL;
         if (q->mode==MD_FS_MOUNT_SETATTR)
             return q->value_size!=sizeof(struct mount_attr)
                 || (q->flags&~(AT_EMPTY_PATH|AT_RECURSIVE|AT_SYMLINK_NOFOLLOW|AT_NO_AUTOMOUNT)) ? -EINVAL : 0;

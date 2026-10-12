@@ -24,4 +24,6 @@ ssize_t md_provider_tree_getdents(struct md_provider_tree *,int fd,void *,size_t
 int md_provider_tree_control(struct md_provider_tree *,int fd,struct md_control_file *);
 int md_provider_tree_private(struct md_provider_tree *,int fd);
 unsigned long md_provider_tree_filesystem(struct md_provider_tree *);
+/* Borrowed owner state, only for the matching typed provider. */
+void *md_provider_tree_context(struct md_provider_tree *,const struct md_provider_tree_ops *);
 #endif

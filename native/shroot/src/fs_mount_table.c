@@ -4,6 +4,7 @@
 #include "native_mounts.h"
 #include "fs_control.h"
 #include "fs_storage.h"
+#include "procfs_view.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/magic.h>
@@ -118,8 +119,10 @@ static const char *filesystem_type(const struct md_view_mount *mount) {
     if (mount && mount->cgroup) return md_cgroup_devices(mount->cgroup) ? "cgroup" : "cgroup2";
     return !md_view_inode(mount) ? "none" : md_filesystem_name(mount->storage ? mount->storage->filesystem_kind : MD_FILESYSTEM_INODE);
 }
-static const char *filesystem_options(const struct md_view_mount *mount) {
-    return mount && mount->cgroup && md_cgroup_devices(mount->cgroup) ? ",devices" : "";
+static int filesystem_options(struct md_filesystem *fs,const struct md_view_mount *mount,char *out,size_t size) {
+    if (mount && mount->backing==MD_MOUNT_PROC) return md_procfs_options(mount,fs->store->identity,out,size);
+    snprintf(out,size,"%s",mount && mount->cgroup && md_cgroup_devices(mount->cgroup) ? ",devices" : "");
+    return 0;
 }
 int md_fs_mount_table(struct md_filesystem *fs, unsigned info, unsigned flags) {
     if (info>1 || (flags&~(O_PATH|O_CLOEXEC))) return -EINVAL;
@@ -141,9 +144,10 @@ int md_fs_mount_table(struct md_filesystem *fs, unsigned info, unsigned flags) {
     if (!r) {
         if (!md_view_base(fs->mounts,selected)) {
             const struct md_view_mount *m=selected;
-            entry(stream,info,m->id,m->parent ? m->parent->id : m->id,
+            char options[128]; r=filesystem_options(fs,m,options,sizeof(options));
+            if (!r) entry(stream,info,m->id,m->parent ? m->parent->id : m->id,
                 root.st_dev,"/",filesystem_type(m),
-                md_view_inode(m) ? "guest" : "attachment",md_mount_policy_flags(&m->policy),readonly,filesystem_options(m));
+                md_view_inode(m) ? "guest" : "attachment",md_mount_policy_flags(&m->policy),readonly,options);
         } else entry(stream,info,fs->mounts->base.id,fs->mounts->base.id,root.st_dev,"/","guestfs","guest",
             md_mount_policy_flags(&fs->mounts->base.policy),readonly,"");
         if (!fs->store->root_id && !fs->native_root && selected==&fs->mounts->base) {
@@ -160,9 +164,11 @@ int md_fs_mount_table(struct md_filesystem *fs, unsigned info, unsigned flags) {
         struct stat st=m->native;
         if (!r && m->file.ops) r=m->file.ops->stat(m->file.context,&st);
         if (!r) { readonly=super_readonly(fs,m); if (readonly<0) r=readonly; }
+        char options[128];
+        if (!r) r=filesystem_options(fs,m,options,sizeof(options));
         if (!r) entry(stream,info,m->id,m->parent ? m->parent->id : fs->mounts->base.id,
             st.st_dev,path,filesystem_type(m),
-            md_view_inode(m) ? "guest" : "attachment",md_mount_policy_flags(&m->policy),readonly,filesystem_options(m));
+            md_view_inode(m) ? "guest" : "attachment",md_mount_policy_flags(&m->policy),readonly,options);
     }
     if (!r && (fflush(stream) || ferror(stream))) r=-EIO;
     int readable=-1;

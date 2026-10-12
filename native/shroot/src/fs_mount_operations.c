@@ -112,9 +112,11 @@ static int devpts_operation(struct md_filesystem *fs,struct md_mount_namespace *
     if (r) out->error=r;
     return 1;
 }
+struct directory_context { struct md_filesystem *fs; struct md_view_mount *mount; };
 static ssize_t directory_entries(void *context, int fd, void *data, size_t count) {
-    struct md_view_mount *mount=context;
-    if (mount->backing==MD_MOUNT_PROC) return md_procfs_getdents(mount,fd,data,count);
+    struct directory_context *c=context;
+    struct md_view_mount *mount=c->mount;
+    if (mount->backing==MD_MOUNT_PROC) return md_procfs_getdents(c->fs,mount,fd,data,count);
     if (mount->devpts) return md_devpts_getdents(mount->devpts,fd,data,count);
     if (mount->provider) return md_provider_tree_getdents(mount->provider,fd,data,count);
     ssize_t n=syscall(SYS_getdents64,fd,data,count);
@@ -232,9 +234,11 @@ static int descriptor(struct md_filesystem *fs, const struct md_fs_request *q,
         if (pos < 0) r = -errno; else out->position = pos;
         break;
     }
-    case MD_FS_GETDENTS:
-        md_fs_directory_read(q,out,output,directory_entries,p->mount);
+    case MD_FS_GETDENTS: {
+        struct directory_context context={fs,p->mount};
+        md_fs_directory_read(q,out,output,directory_entries,&context);
         break;
+    }
     default: return 0;
     }
     if (r) out->error = r;

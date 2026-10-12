@@ -18,7 +18,7 @@ def main():
     parser.add_argument("--server", default="magicdesk")
     parser.add_argument("--keep", action="store_true")
     parser.add_argument("--diagnostics", action="store_true")
-    parser.add_argument("--case", choices=("all", "event-fairness", "kernel-baseline", "mapping-task", "private-memory", "pidfd-table", "fd-observation", "proc-custody", "exec-custody", "open-job", "ofd-order", "fd-handoff", "fd-parcel", "fd-messages", "ipc-peer", "ipc-origins", "ipc-ancillary", "mount-policy", "mount-graph", "mount-namespace", "inode-custody", "origin-transfer", "transient-store", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fd-lifecycle", "restricted-descriptors", "fs-dispatch", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture", "rpc", "stores"), default="all",
+    parser.add_argument("--case", choices=("all", "launch-cancel", "event-fairness", "kernel-baseline", "mapping-task", "private-memory", "pidfd-table", "fd-observation", "proc-custody", "exec-custody", "open-job", "ofd-order", "fd-handoff", "fd-parcel", "fd-messages", "ipc-peer", "ipc-origins", "ipc-ancillary", "mount-policy", "mount-graph", "mount-namespace", "inode-custody", "origin-transfer", "transient-store", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fd-lifecycle", "restricted-descriptors", "fs-dispatch", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture", "rpc", "stores"), default="all",
                         help="Run resource regressions, FD handoff/parcel, terminal RPC custody, native FD lifecycle, or worker transport")
     parser.add_argument("--compare-installed", action="store_true",
                         help="Compare identical metadata/spawn fixtures with the installed runtime")
@@ -190,14 +190,25 @@ def main():
         finally:
             transport.download(client, root + "/buffer-exit.log",
                                args.build / "buffer-exit.log", overwrite=True)
-        for suffix in ("", "-protected"):
-            # EVENT_WAIT: idle tree expiry must reap terminal stops. An outer
-            # timeout has a different exit code and cannot count as cleanup.
-            check("guest terminal cleanup" + suffix, "timeout -k 5 15 " + root
-                  + "/libmagicdesk_guest_run.so --diagnostics --store " + root
-                  + "/store --deadline-seconds 1 -- /bin/test buffer-park" + suffix + " /tmp",
-                  "READY buffered parked group",
-                  patterns=(r"supervisor failure line=\d+ outcome >= 0 errno=110",), exit_code=125)
+        check_cancellation()
+
+    def check_cancellation():
+        for workload in ("park", "busy"):
+            for suffix in ("", "-protected"):
+                # EVENT_WAIT: idle and continuously active trees must expire
+                # and reap all peers; the busy group ignores graceful TERM.
+                # Outer-timeout recovery has a different exit status.
+                value = check("guest terminal cleanup " + workload + suffix, "timeout -k 5 15 " + root
+                              + "/libmagicdesk_guest_run.so --store " + root
+                              + "/store --deadline-seconds 2 -- /bin/test buffer-" + workload + suffix + " /tmp",
+                              "READY buffered parked group",
+                              patterns=(r"guest-runtime: launch deadline expired",), exit_code=125,
+                              absent_patterns=(r"supervisor failure", r"cleanup deadline expired"))
+                match = re.search(r"^TRACEES (\d+(?: \d+){8})$", value["output"], re.MULTILINE)
+                if not match:
+                    raise RuntimeError("Missing exact tracee identities")
+                check("all cancellation tracees reaped", "for pid in " + match[1]
+                      + '; do test ! -d /proc/"$pid" || exit 1; done')
 
     def check_mutation_signals():
         for protected in range(2):
@@ -327,7 +338,7 @@ def main():
         names = ("fd_handoff",) if args.case in ("fd-handoff", "fd-parcel", "fd-messages") else (
             "bootstrap", "supervisor", "run", "service", "resource_guest", "root_guest",
             "test_task_resources", "test_inodes", "test_mounts", "test_credentials", "test_rpc", "test_snapshot", "fd_handoff", "test_ipc_peer")
-        if args.case in ("mount-namespace", "proc-custody", "exec-custody", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture"):
+        if args.case in ("launch-cancel", "mount-namespace", "proc-custody", "exec-custody", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture"):
             names = ("bootstrap", "supervisor", "run", "service", "resource_guest")
         if args.case == "restricted-descriptors":
             names = ("bootstrap", "supervisor", "run", "service", "resource_guest")
@@ -592,11 +603,14 @@ def main():
                 "unobserved": [line.removeprefix("UNOBSERVED ") for line in value["output"].splitlines()
                                if line.startswith("UNOBSERVED ")]})
             return
-        if args.case in ("proc-custody", "exec-custody", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture"):
+        if args.case in ("launch-cancel", "proc-custody", "exec-custody", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture"):
             check("fixture directories", "mkdir -p " + root + "/native " + root + "/source/tmp "
                   + root + "/source/bin " + root + "/source/attached")
             check("stage guest image", "cp " + root + "/libmagicdesk_guest_resource_guest.so " + root + "/source/bin/test")
             check("import fixture", root + "/libmagicdesk_guest_service.so --import " + root + "/source " + root + "/store")
+            if args.case == "launch-cancel":
+                check_cancellation()
+                return
             if args.case == "proc-custody":
                 check_proc_custody()
                 return

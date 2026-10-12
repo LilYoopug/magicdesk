@@ -64,6 +64,9 @@ void md_provider_tree_release(struct md_provider_tree *tree) {
     free(tree->opaque); free(tree);
 }
 int md_provider_tree_root(struct md_provider_tree *tree) { return tree->upper; }
+void *md_provider_tree_context(struct md_provider_tree *tree,const struct md_provider_tree_ops *ops) {
+    return tree && tree->ops==ops ? tree->context : NULL;
+}
 int md_provider_tree_private(struct md_provider_tree *tree,int fd) {
     if (fd<0) return 0;
     char path[PATH_MAX],root[PATH_MAX];

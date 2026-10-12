@@ -21,6 +21,12 @@ Android-version inference or `uname`-only capability check. Kernel configuration
 SELinux, application filters and vendor backports affect availability. Headers
 merely allow compiling an operation; they do not make it available at runtime.
 
+Launch cancellation uses baseline `timerfd_create(CLOCK_MONOTONIC)` and
+`timerfd_settime` in the supervisor's existing poll loop. The descriptor is lazy
+for unbounded launches; admission errors fail that launch, never shared services.
+`test_resources.py --case launch-cancel` covers idle/busy, dumpable/protected
+groups, ignored TERM, exact reaping and the distinction from cleanup failure.
+
 Guest Landlock filesystem ABI 1 is implemented by `landlock_policy`, the task
 resource owners and the filesystem worker; it does not require the host's
 `CONFIG_SECURITY_LANDLOCK` or become a shared-startup prerequisite. Its syscall
@@ -121,6 +127,14 @@ issue a host mount. No PIDFD_THREAD, PIDFD_SIGNAL_THREAD or newer pidfd ioctl is
 required. `--case mount-namespace`, stock Bubblewrap/GDB and Chromium's automatic
 user/PID route cover these paths under actual UID 2000; the APK's other services
 do not acquire these prerequisites.
+Mounted proc visibility policies use the Linux 5.15 `hidepid`/`gid`/`subset`
+semantics in `procfs_view`, without host mount authority or newer syscalls.
+Live peer inspection uses `/proc/PID/io`'s READ_FSCREDS check, including native
+dumpability and LSM policy. Missing `/proc/self/io` (CONFIG_TASK_IO_ACCOUNTING)
+rejects a restricted proc mount with EOPNOTSUPP; permission/resource failures
+remain explicit. Guest credentials and capabilities never elevate native file
+access. `test_proc_policy.py` checks credentials, groups, protected/live/zombie
+tasks, retained FDs, bind/copy and both mount APIs under shell.
 Shared clone-TID publication uses the existing ptrace birth stop and task-affine
 memory adapter. Proc-root capture and live fdinfo use retained O_PATH/proc
 descriptions and that same private-table helper. None adds a post-5.15 runtime

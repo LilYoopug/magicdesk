@@ -50,5 +50,9 @@ int md_task_registry_read(struct md_task_registry *, pid_t tid, pid_t peer, stru
 /* As read, but distinguishes a retired guest (-ESTALE) from an external PID
  * (-ESRCH). A native fast path must not expose the host state of a retired guest. */
 int md_task_registry_probe(struct md_task_registry *,pid_t tid,pid_t peer,struct md_task_snapshot *);
+/* Credential-only observation, including unreaped tasks. No filesystem/file-table
+ * pins or allocations; release the returned identity with md_identity_release. */
+struct md_task_credentials { pid_t group; int retired; struct md_identity identity; };
+int md_task_registry_credentials(struct md_task_registry *,pid_t,struct md_task_credentials *);
 void md_task_snapshot_release(struct md_task_snapshot *);
 #endif

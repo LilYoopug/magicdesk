@@ -58,6 +58,12 @@ void test_task_registry_exit(void) {
     struct md_pid_identity *pid=md_pid_identity_retain(resources.pid);
     struct md_identity id=md_identity_new(2000,2000);
     assert(!md_task_registry_publish(registry,20003,20003,&id,&resources));
+    struct md_task_credentials observed;
+    allocation_budget=0;
+    assert(!md_task_registry_credentials(registry,20003,&observed));
+    assert(observed.group==20003 && !observed.retired && observed.identity.uid.effective==2000);
+    md_identity_release(&observed.identity);
+    allocation_budget=-1;
     id.uid.effective=1234;
     struct md_cgroup_member *member=resources.cgroup;
     allocation_budget=0;
@@ -70,11 +76,15 @@ void test_task_registry_exit(void) {
     struct md_task_retired_view retired=md_task_registry_retired(registry,20003);
     assert(retired.identity && retired.identity->uid.effective==1234);
     assert(retired.pid==pid && retired.cgroup==member);
+    assert(!md_task_registry_credentials(registry,20003,&observed));
+    assert(observed.group==20003 && observed.retired && observed.identity.uid.effective==1234);
+    md_identity_release(&observed.identity);
     assert(!md_resources_release(&resources)); md_identity_release(&id);
     assert(md_task_registry_has_retired(registry));
     md_task_registry_collect(registry,retired_gone);
     assert(!md_task_registry_has_retired(registry));
     assert(!md_task_registry_retired(registry,20003).identity);
+    assert(md_task_registry_credentials(registry,20003,&observed)==-ESRCH);
     assert(!md_pid_namespace_lookup(space,1));
     allocation_budget=-1;
     md_pid_identity_release(pid); md_pid_namespace_release(space);

@@ -210,6 +210,17 @@ int md_task_registry_read(struct md_task_registry *r,pid_t tid,pid_t peer,struct
     int error=md_task_registry_probe(r,tid,peer,out);
     return error==-ESTALE ? -ESRCH : error;
 }
+int md_task_registry_credentials(struct md_task_registry *r,pid_t tid,struct md_task_credentials *out) {
+    *out=(struct md_task_credentials){0};
+    if (!r || tid<=0) return -ESRCH;
+    pthread_mutex_lock(&r->lock);
+    struct entry *e=r->entries[(unsigned)tid%BUCKETS];
+    while (e && e->tid!=tid) e=e->next;
+    int found=e!=NULL;
+    if (e) *out=(struct md_task_credentials){.group=e->tgid,.retired=e->retired,.identity=md_identity_copy(&e->value)};
+    pthread_mutex_unlock(&r->lock);
+    return found ? 0 : -ESRCH;
+}
 void md_task_snapshot_release(struct md_task_snapshot *snapshot) {
     md_identity_release(&snapshot->identity);
     md_domain_unpin(snapshot->fs);

@@ -1952,16 +1952,22 @@ static void buffer_exit(void) {
     }
     puts("PASS buffered group exit: 24 groups, 8 active peers, ordinary/protected callers");
 }
-static void buffer_park(int protected) {
+static void buffer_park(int protected,int busy) {
     int ready[2],parked[2]; assert(!pipe(ready) && !pipe(parked));
-    struct buffer_exit_peer context={ready[1],parked[0]};
+    struct buffer_exit_peer context={ready[1],busy ? -1 : parked[0]};
+    if (busy) assert(signal(SIGTERM,SIG_IGN)!=SIG_ERR);
     if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
+    pid_t peers[8];
     for (unsigned i=0;i<8;++i) {
         void *stack=malloc(1024*1024); assert(stack);
-        assert(clone(buffer_exit_busy,(char *)stack+1024*1024,
-            CLONE_VM|CLONE_FILES|CLONE_FS|CLONE_SIGHAND|CLONE_THREAD,&context)>0);
+        peers[i]=clone(buffer_exit_busy,(char *)stack+1024*1024,
+            CLONE_VM|CLONE_FILES|CLONE_FS|CLONE_SIGHAND|CLONE_THREAD,&context);
+        assert(peers[i]>0);
     }
     for (unsigned i=0;i<8;++i) get(ready[0]);
+    printf("TRACEES %d",getpid());
+    for (unsigned i=0;i<8;++i) printf(" %d",peers[i]);
+    putchar('\n');
     puts("READY buffered parked group");
     /* EVENT_WAIT: deliberately no writer; the supervisor deadline must fail
      * and reap every TRACEEXIT-observed peer without outer-timeout recovery. */
@@ -2081,7 +2087,10 @@ int main(int argc, char **argv) {
     }
     if (!strcmp(argv[1],"buffer-exit")) { buffer_exit(); return 0; }
     if (!strcmp(argv[1],"buffer-park") || !strcmp(argv[1],"buffer-park-protected")) {
-        buffer_park(!strcmp(argv[1],"buffer-park-protected")); return 1;
+        buffer_park(!strcmp(argv[1],"buffer-park-protected"),0); return 1;
+    }
+    if (!strcmp(argv[1],"buffer-busy") || !strcmp(argv[1],"buffer-busy-protected")) {
+        buffer_park(!strcmp(argv[1],"buffer-busy-protected"),1); return 1;
     }
     if (!strcmp(argv[1], "noop")) return 0;
     if (!strcmp(argv[1], "restricted-descriptors")) {

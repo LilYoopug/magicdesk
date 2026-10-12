@@ -23,6 +23,11 @@ The supervisor services ready worker, descriptor and socket events alongside
 ptrace stops on every event-loop turn. Continuous syscall traffic cannot defer
 these completions until tracees become idle; readiness checks do not introduce
 periodic waits or per-event allocations.
+An optional launch deadline uses a supervisor-owned monotonic timerfd in that
+same loop, including when tasks remain continuously runnable. Expiry reports a
+launch timeout (exit 125), not an internal supervisor failure. Signal cancellation
+and deadline expiry share TERM/KILL escalation and exact terminal-event cleanup.
+Ordinary launches allocate no timer until cancellation is requested.
 Resource-blocked continuations register in supervisor-owned intrusive queues.
 Descriptor readiness and adapter progress visit only those registered waits,
 not every guest thread. A dispatch services one bounded snapshot; callbacks can
@@ -1424,9 +1429,17 @@ metadata ioctls and tmpfs read-only reconfiguration; Arch additionally requests
 `nosymfollow` on its credentials mount.
 Arch 262 also passes combined `PrivateDevices`, `ProtectHome`, `ProtectHostname`,
 `ProtectControlGroups`, `ProtectKernelLogs`, `ProtectKernelModules`, and
-`ProtectSystem=strict` service setup with a writable test-output path and
-diagnostic `MountFlags=slave`. This isolates those policies; it does not certify
-the unsupported shared propagation or `ProtectProc` policy.
+`ProtectSystem=strict`, `ProtectProc=invisible`, and `ProcSubset=pid` service
+setup with a writable test-output path and diagnostic `MountFlags=slave`.
+This isolates those policies; it does not certify shared mount propagation.
+Mounted proc views support `hidepid=0/1/2/4` (including their named forms),
+the `gid` exception and `subset=pid`. Lookup, enumeration and retained-directory
+operations use the caller's current filesystem credentials. Bind and namespace
+copies retain the same policy; separately created proc instances are independent.
+Credential-only snapshots require no allocation or whole-task-resource capture.
+Native access remains a ceiling, and unregistered host processes are not granted
+guest inspection authority. Changing filesystem options through remount remains
+explicitly unsupported, rather than silently ignoring a requested restriction.
 
 `test_openrc.py` checks Alpine 3.23 with OpenRC 0.63: real `sysinit`/`boot`
 initialization, dependency ordering, daemon start/status/restart, runlevel change
@@ -1440,7 +1453,7 @@ OpenRC or systemd.
 diagnostic observer, not a replacement target. Debian 13, Ubuntu 24.04, Arch and
 Fedora 44 have default-boot coverage, but those runs remain degraded or fail to
 complete; this is not a passing distro boot. Outstanding runtime boundaries
-include shared mount propagation, proc `hidepid`, journald's hostname poll/error
+include shared mount propagation, journald's hostname poll/error
 notification and datagram FD-store transfer.
 The OpenRC mode boots Alpine 3.23's real `openrc-init` as PID 1 using its stock
 container service policy and private runlevel configuration. It checks default

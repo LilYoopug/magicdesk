@@ -19,6 +19,15 @@ The combined `StateDirectory=md-init-probe` and `SetCredential=md-probe:hello`
 case covers filesystem metadata ioctls, read-only tmpfs reconfiguration and
 Arch 262's nosymfollow credentials mount. A diagnostic `MountFlags=slave` case
 can isolate other namespace policies, but does not certify default propagation.
+The combined hardening case also covers `ProtectProc=invisible` and `ProcSubset=pid`.
+
+`test_proc_policy.py BUILD STORE` checks mounted proc visibility with stock
+Python/util-linux: all four hidepid modes, primary/supplementary exception groups,
+fsuid, native dumpability, retained directory FDs, zombies, subset filtering,
+fsconfig, bind aliases and namespace copies. Invalid creation options and
+unsupported option remounts must fail, not silently relax a policy. The native
+resource-owner fixture checks allocation-free credential snapshots before and
+after task retirement, with exact descriptor cleanup.
 
 `test_os_boot.py --build BUILD --store STORE` boots the packaged default target
 and asserts a non-degraded result. Its observer waits for systemd's startup
@@ -1365,8 +1374,10 @@ including nondumpable processes. Pipe acknowledgements precede exit_group;
 observed terminal recovery after ESRCH is diagnostic, not timing-based readiness.
 An outer deadline bounds supervisor cleanup, and the runner persists an error
 report even if console execution or closure fails.
-Parked-group cases require the explicit supervisor deadline error and exit 125;
-outer-timeout recovery is a failure, not a cleanup pass.
+`--case launch-cancel` isolates parked and continuously active groups, ordinary
+and nondumpable, including ignored TERM. It requires the explicit launch deadline
+diagnostic, exit 125 and disappearance of every recorded native tracee. Internal
+supervisor errors, incomplete cleanup and outer-timeout recovery fail the test.
 
 `--case fs-export` runs native controls and the production protected-input
 transport. It forbids guest socket/connect/recvmsg, fills RLIMIT_NOFILE before

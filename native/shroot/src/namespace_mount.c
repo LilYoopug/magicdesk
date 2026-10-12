@@ -24,7 +24,13 @@ long md_namespace_mount(const struct md_fs *fs, long nr, const unsigned long *a)
          * policy. Normalize once at the syscall ABI, before selecting a verb. */
         if ((q.flags&MS_MGC_MSK)==MS_MGC_VAL) q.flags&=~MS_MGC_MSK;
         q.flags&=~MS_SILENT;
-        if (q.flags&MS_REMOUNT) q.mode=MD_FS_MOUNT_REMOUNT;
+        if (q.flags&MS_REMOUNT) {
+            q.mode=MD_FS_MOUNT_REMOUNT;
+            if (!(q.flags&MS_BIND) && a[4]) {
+                r=md_read_string(data,sizeof(data),(const char *)a[4]);
+                if (r>=0) { q.value=data; q.value_size=(uint32_t)md_length(data)+1; }
+            }
+        }
         else if (q.flags&MS_BIND) {
             q.mode=MD_FS_MOUNT_BIND;
             r=md_read_string(source,sizeof(source),(const char *)a[0]);

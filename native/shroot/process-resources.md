@@ -1190,6 +1190,20 @@ identity and policy. The filesystem walker resolves numeric process/thread
 components, self and thread-self in that view. Enumeration filters native
 entries and repacks names without assuming equal numeric widths. Native
 directory cookies and the shared OFD turn retain seek and rejected-copy behavior.
+The proc provider owns immutable `hidepid`, canonical exception GID and `subset`
+options. Both mount APIs create it; bind and mount-namespace copies retain it.
+`hidepid=1` keeps directory metadata but denies another process's contents;
+`2` hides those directories, while `4` always requires inspection permission,
+including for the exception group. `subset=pid` omits non-task root entries.
+Traversal, directory reads and descriptor operations share the same policy.
+Inspection captures only group identity, credentials and retirement state from
+the registry, without allocations or unrelated resource pins. It checks fs IDs,
+namespace-scoped CAP_SYS_PTRACE and effective capability coverage. Unprivileged
+live peers also pass the native proc IO READ_FSCREDS check; retired guest tasks
+use their retained credentials without reusing a dead native PID. Unknown host
+processes do not acquire guest credentials. Policy-free proc views skip these
+checks, and native file-data IO is unchanged. Filesystem-option remounts fail
+explicitly; per-mount bind flags retain their separate contract.
 Status/stat use typed per-open snapshots with guest IDs, credentials and debugger
 relationships; seeking to zero refreshes the snapshot. A zombie remains visible
 until wait consumes it. Namespace handles retain their owners after task exit;
@@ -1963,9 +1977,13 @@ Group-exit cases terminate 24 groups of eight peers during buffered calls,
 including protected processes. A confirmed terminal stop after ESRCH retires
 pending work and continues toward reaping without resuming the adapter. The
 diagnostic counts observed races; it does not enumerate every interleaving.
-Parked-group cases require deadline failure followed by completed terminal-stop
-cleanup, both dumpable and protected. The expected supervisor failure is distinct
-from an outer timeout, which fails the check.
+Parked and continuously active groups require explicit launch-deadline failure
+(exit 125) followed by completed terminal-stop cleanup, both dumpable and
+protected. Active peers ignore TERM to exercise KILL escalation. The monotonic
+timerfd joins the supervisor's existing event loop; a busy ptrace queue cannot
+postpone expiry. Unbounded launches allocate it only on cancellation. Internal
+supervisor failure, incomplete cleanup and outer-timeout recovery fail the test;
+every reported tracee must have left native procfs when the runner returns.
 
 The production mapped transport covers captured cwd/dirfd path identities and
 metadata, O_PATH (including stable nofollow sources), and data-FD results from

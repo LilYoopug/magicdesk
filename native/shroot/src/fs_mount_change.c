@@ -604,6 +604,7 @@ int md_fs_mount_change(struct md_filesystem *fs, struct md_guest_domain *context
         r=attributes(fs,q,&target,&attr); break;
     case MD_FS_MOUNT_REMOUNT:
         if (q->flags&~(MS_REMOUNT|MS_BIND|MD_FS_MOUNT_FLAGS)) r=-ENOTSUP;
+        else if (q->value_size && *(const char *)q->value) r=-EOPNOTSUPP;
         else {
             struct md_view_mount *mount=target.mount;
             r=require_root(fs,&target);

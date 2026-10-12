@@ -79,6 +79,7 @@
 #include "process_image_view.h"
 #include <sys/signalfd.h>
 #include <sys/eventfd.h>
+#include <sys/timerfd.h>
 #include "event_signal.h"
 #include <sys/epoll.h>
 #include "launch_registry.h"
@@ -350,7 +351,7 @@ static struct md_resource_wakeup *fd_wakeup;
 static struct md_fd_exchanges *fd_exchanges;
 static int cancelling;
 static struct md_launch_registration registration = {.directory=-1, .record=-1};
-static int64_t cancellation_deadline;
+static int cancellation_timer = -1;
 static unsigned external_stats, external_errors;
 static unsigned protected_stats;
 static unsigned retained_calls, retained_errors;
@@ -449,6 +450,7 @@ static void describe_process(pid_t pid, uint64_t pc) {
 }
 static void cleanup(void) {
     report_statistics();
+    if (cancellation_timer>=0) { close(cancellation_timer); cancellation_timer=-1; }
     for (struct thread *t = threads; t; t = t->next) if (t->pid) {
         kill(t->pid, SIGKILL); release_operation(t); adapter_discard(t);
     }
@@ -4458,6 +4460,39 @@ static int interrupted_operation(struct thread *t) {
     }
     return 1;
 }
+static void cancellation_arm(unsigned seconds) {
+    if (cancellation_timer<0) {
+        cancellation_timer=timerfd_create(CLOCK_MONOTONIC,TFD_CLOEXEC|TFD_NONBLOCK);
+        CHECK(cancellation_timer>=0);
+    }
+    const struct itimerspec timer={.it_value.tv_sec=seconds};
+    CHECK(!timerfd_settime(cancellation_timer,0,&timer,NULL));
+}
+static void cancel_tree(int status) {
+    result=status; cancelling=1;
+    cancellation_arm(2);
+    CHECK(!md_process_signal_children(SIGTERM));
+}
+static void cancellation_expired(void) {
+    uint64_t count;
+    ssize_t n;
+    do { n=read(cancellation_timer,&count,sizeof(count)); } while (n<0 && errno==EINTR);
+    /* A signal may have rearmed an already-ready deadline in this dispatch. */
+    if (n<0 && errno==EAGAIN) return;
+    CHECK(n==sizeof(count));
+    if (!cancelling) {
+        fprintf(stderr,"guest-runtime: launch deadline expired\n");
+        cancel_tree(125);
+    } else if (cancelling==1) {
+        /* EVENT_WAIT: graceful cancellation expired; allow ten seconds to
+         * reap the killed tree, then report incomplete cleanup explicitly. */
+        cancelling=2; cancellation_arm(10);
+        CHECK(!md_process_signal_children(SIGKILL));
+    } else {
+        fprintf(stderr,"guest-runtime: cancellation cleanup deadline expired\n");
+        errno=ETIMEDOUT; CHECK(0);
+    }
+}
 static void drain(void) {
     struct signalfd_siginfo signals[8];
     ssize_t bytes;
@@ -4471,9 +4506,7 @@ static void drain(void) {
         if (info.ssi_signo == SIGCHLD) md_task_wait_hint(&task_wait, (pid_t)info.ssi_pid);
         else if (!cancelling) {
             TRACE("PROBE cancelled signal=%u\n", info.ssi_signo);
-            result = 128 + info.ssi_signo; cancelling = 1;
-            cancellation_deadline = md_event_now() + 2000000000LL;
-            CHECK(!md_process_signal_children(SIGTERM));
+            cancel_tree(128 + info.ssi_signo);
         }
     }
 }
@@ -4493,6 +4526,7 @@ static void pid_collect(void) {
 }
 static void progress_events(const struct pollfd *events) {
     if (events[0].revents) drain();
+    if (events[6].revents) cancellation_expired();
     if (events[2].revents) { CHECK(!md_fs_worker_dispatch(filesystem)); adapter_progress(); }
     if (events[3].revents) fd_progress();
     if (events[4].revents) ipc_events_ready();
@@ -4500,14 +4534,14 @@ static void progress_events(const struct pollfd *events) {
     if (events[1].revents & POLLIN) external_stat();
     if (events[1].revents & POLLHUP) { close(listener); listener = -1; }
 }
-enum { EVENT_SOURCES = 6 };
+enum { EVENT_SOURCES = 7 };
 static void event_sources(struct pollfd events[EVENT_SOURCES]) {
     const struct pollfd current[EVENT_SOURCES] = {{signal_fd,POLLIN,0}, {broker ? -1 : listener,POLLIN,0},
         {md_fs_worker_fd(filesystem),POLLIN,0}, {fd_ready,POLLIN,0},
-        {ipc_events,POLLIN,0}, {socket_events,POLLIN,0}};
+        {ipc_events,POLLIN,0}, {socket_events,POLLIN,0}, {cancellation_timer,POLLIN,0}};
     memcpy(events,current,sizeof(current));
 }
-static pid_t wait_event(int *status, struct rusage *usage, int64_t deadline) {
+static pid_t wait_event(int *status, struct rusage *usage) {
     for (;;) {
         memory_progress();
         pid_t held=memory_execution ? 0 : md_task_quiesce_take(memory_barrier,status,usage);
@@ -4527,9 +4561,9 @@ static pid_t wait_event(int *status, struct rusage *usage, int64_t deadline) {
         if (pid > 0) return pid;
         CHECK(pid == 0 || errno == EINTR);
         if (memory_runnable()) continue;
-        /* EVENT_WAIT: ptrace stop/exit or cancellation via signalfd; expiry
-         * fails and cancels the owned tree, never counts as readiness. */
-        int64_t bound = cancelling ? cancellation_deadline : deadline;
+        /* EVENT_WAIT: task/resource progress, signal or cancellation timer.
+         * The timer is serviced even while ptrace continuously has work. */
+        int64_t bound = INT64_MAX;
         int64_t control_bound=INT64_MAX;
         for (struct thread *t=threads;t;t=t->next) if (t->pid && t->control_pending)
             if (t->control_pending->deadline<control_bound) control_bound=t->control_pending->deadline;
@@ -4542,12 +4576,6 @@ static pid_t wait_event(int *status, struct rusage *usage, int64_t deadline) {
         if (outcome==-ETIMEDOUT && bound==control_bound) {
             for (struct thread *t=threads;t;t=t->next) if (t->pid) control_progress(t);
             continue;
-        }
-        if (outcome == -ETIMEDOUT && cancelling == 1) {
-            /* EVENT_WAIT: graceful cancellation expired; drain killed children
-             * for at most ten seconds before reporting incomplete cleanup. */
-            cancelling = 2; cancellation_deadline = md_event_now() + 10000000000LL;
-            CHECK(!md_process_signal_children(SIGKILL)); continue;
         }
         if (outcome < 0) {
             if (diagnostics) {
@@ -5061,10 +5089,10 @@ int main(int argc, char **argv) {
     if (selected_hostname) CHECK(!md_uts_namespace_set(thread(leader)->resources.uts,0,
         selected_hostname,strlen(selected_hostname)));
     byte = 'g'; CHECK(write(channel[0], &byte, 1) == 1); close(channel[0]);
-    int64_t deadline = seconds ? md_event_now() + seconds * 1000000000LL : INT64_MAX;
+    if (seconds) cancellation_arm((unsigned)seconds);
     while (live || md_fs_buffer_children(buffer_service) || md_task_helpers_count(helpers)) {
         pid_collect();
-        int status; struct rusage usage; pid_t pid = wait_event(&status, &usage, deadline);
+        int status; struct rusage usage; pid_t pid = wait_event(&status, &usage);
         if (memory_event(pid,status,&usage)) continue;
         int opened=md_fs_buffer_child(buffer_service,pid,status);
         CHECK(opened>=0);
