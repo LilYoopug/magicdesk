@@ -16,10 +16,27 @@ struct interest {
 };
 struct md_control_epoll {
     struct md_fd_object object;
+    atomic_uint admission;
     int events,ready,signalled;
     unsigned pending;
     struct interest *first,*head,*tail;
 };
+enum { NATIVE=1U<<30, VIRTUAL=1U<<31, EXPORTS=NATIVE-1 };
+static int export_begin(struct md_fd_object *object) {
+    struct md_control_epoll *q=(void *)object;
+    unsigned state=atomic_load_explicit(&q->admission,memory_order_acquire);
+    for (;;) {
+        if (state&VIRTUAL) return -EOPNOTSUPP;
+        if ((state&EXPORTS)==EXPORTS) return -EOVERFLOW;
+        if (atomic_compare_exchange_weak_explicit(&q->admission,&state,state+1,
+                memory_order_acq_rel,memory_order_acquire)) return 0;
+    }
+}
+static void export_end(struct md_fd_object *object,int escaped) {
+    struct md_control_epoll *q=(void *)object;
+    if (escaped) atomic_fetch_or_explicit(&q->admission,NATIVE,memory_order_release);
+    atomic_fetch_sub_explicit(&q->admission,1,memory_order_release);
+}
 static int ready_signal(struct md_control_epoll *q) {
     int pending=!!q->pending;
     if (pending==q->signalled) return 0;
@@ -87,11 +104,12 @@ static void destroy(struct md_fd_object *object) {
     while (q->first) discard(q,q->first);
     transport_close(q); free(q);
 }
-static const struct md_fd_object_type type={.destroy=destroy};
+static const struct md_fd_object_type type={.destroy=destroy,.export_begin=export_begin,.export_end=export_end};
 struct md_control_epoll *md_control_epoll_new(void) {
     struct md_control_epoll *q=calloc(1,sizeof(*q));
     if (!q) return NULL;
     md_fd_object_init(&q->object,&type);
+    atomic_init(&q->admission,0);
     q->events=q->ready=-1;
     return q;
 }
@@ -132,7 +150,7 @@ static void reap(struct md_control_epoll *q) {
 static uint32_t requested(const struct epoll_event *e) {
     return (e->events&~(EPOLLET|EPOLLONESHOT))|EPOLLERR|EPOLLHUP;
 }
-int md_control_epoll_ctl(struct md_control_epoll *q,int operation,int fd,
+static int control(struct md_control_epoll *q,int operation,int fd,
         struct md_fd_object *identity,struct md_control_file provider,const struct epoll_event *event) {
     if (!q || !identity || fd<0) return -EINVAL;
     if (operation!=EPOLL_CTL_ADD && operation!=EPOLL_CTL_MOD && operation!=EPOLL_CTL_DEL) return -EINVAL;
@@ -197,6 +215,22 @@ int md_control_epoll_ctl(struct md_control_epoll *q,int operation,int fd,
     if ((uint32_t)mask&requested(event)) enqueue(q,i);
     error=ready_signal(q);
     if (error) { discard(q,i); if (cold) transport_close(q); }
+    return error;
+}
+int md_control_epoll_ctl(struct md_control_epoll *q,int operation,int fd,
+        struct md_fd_object *identity,struct md_control_file provider,const struct epoll_event *event) {
+    if (!q) return -EINVAL;
+    int admitted=0;
+    if (operation==EPOLL_CTL_ADD) {
+        unsigned state=0;
+        admitted=atomic_compare_exchange_strong_explicit(&q->admission,&state,VIRTUAL,
+            memory_order_acq_rel,memory_order_acquire);
+        if (!admitted && !(state&VIRTUAL)) return state&NATIVE ? -EOPNOTSUPP : -EBUSY;
+    }
+    int error=control(q,operation,fd,identity,provider,event);
+    /* A failed first subscription publishes no virtual state. Native send
+     * reservations and activation exclude one another, including worker races. */
+    if (error && admitted) atomic_store_explicit(&q->admission,0,memory_order_release);
     return error;
 }
 int md_control_epoll_collect(struct md_control_epoll *q,struct epoll_event *out,int capacity) {

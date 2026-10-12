@@ -122,6 +122,12 @@ accessing the provider; final release publishes expiry before destruction.
 `ofd-order` covers table and queued-transfer custody. No native epoll nesting,
 kernel OFD reference-count inspection or newer syscall is required for this
 internal lifetime mechanism.
+Epoll creation custody and optional native-export reservations reuse the
+existing file-table terminal observation, SCM_RIGHTS and userspace atomics.
+They add no post-5.15 dependency, retained native epoll duplicate or kernel
+nesting level. `control-event` requires zero interception of ordinary control
+and wait calls (creation alone is observed); `ofd-order` covers export rollback
+and activation races, and `ipc-origins` covers independent receiver custody.
 Offline IPv4 sysctls use the shared typed-control transport and retained mount
 anchors; numeric values and permissions are launch-owned state, not host sysctl
 writes. They add no post-5.15 interface. Foreign proc executable selection reuses

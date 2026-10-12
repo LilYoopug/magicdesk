@@ -12,6 +12,8 @@
 #include "received_fds.h"
 #include "fd_return.h"
 #include "fd_channel.h"
+#include "control_epoll.h"
+#include "descriptor_inode.h"
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -380,12 +382,10 @@ static void transfer_ready(struct md_ipc_origin_request *r, int error, void *con
     out->error=error;
 }
 static void mark(struct owner *o) { struct work w={0}; submit(o,&w); finish(o,&w); }
-static struct md_fd_message *message_snapshot(struct md_fs_anchor *const *entries, unsigned count) {
+static struct md_fd_message *object_snapshot(struct md_fd_object *const *objects, unsigned count) {
     struct md_fd_origins *table=md_fd_origins_new(); assert(table && count<=253);
     int numbers[253]; struct md_fd_origin_update updates[253];
     for (unsigned i=0;i<count;++i) numbers[i]=(int)i+10;
-    struct md_fd_object *objects[253];
-    for (unsigned i=0;i<count;++i) objects[i]=md_fs_anchor_object(entries[i]);
     assert(!md_fd_origins_prepare_batch(table,objects,0,count,updates));
     assert(!md_fd_origins_finish_batch(updates,count,numbers,count));
     struct md_fd_order turn={0}; assert(md_fd_order_begin(table,&turn,NULL)==1 && !md_fd_order_start(&turn));
@@ -393,6 +393,12 @@ static struct md_fd_message *message_snapshot(struct md_fs_anchor *const *entrie
     assert(!md_fd_message_capture(table,numbers,count,&message));
     assert(!md_fd_order_complete(&turn)); md_fd_origins_release(table);
     return message;
+}
+static struct md_fd_message *message_snapshot(struct md_fs_anchor *const *entries, unsigned count) {
+    assert(count<=253);
+    struct md_fd_object *objects[253];
+    for (unsigned i=0;i<count;++i) objects[i]=md_fs_anchor_object(entries[i]);
+    return object_snapshot(objects,count);
 }
 static struct md_received_fds *captured(const int *fds, unsigned count) {
     struct md_received_fds *p=NULL; assert(!md_received_fds_reserve(&p,count));
@@ -432,7 +438,6 @@ static void transfer_wait(struct owner *o, struct transfer_result *r) {
 static void prepare_begin(struct transfer_fixture *f) {
     assert(!md_ipc_origins_prepare(f->service[0],f->message,f->capture,
         transfer_ready,&f->result[0],&f->result[0].request));
-    md_fd_message_release(f->message); f->message=NULL;
     md_received_fds_release(f->capture); f->capture=NULL;
 }
 static void transfer_prepare(struct transfer_fixture *f) {
@@ -449,7 +454,9 @@ static void receive_begin(struct transfer_fixture *f) {
     md_received_fds_release(input);
 }
 static void transfer_exchange(struct transfer_fixture *f) {
-    transfer_prepare(f); receive_begin(f); transfer_wait(&f->owner[1],&f->result[1]);
+    transfer_prepare(f);
+    md_fd_message_export_end(f->message,1);
+    receive_begin(f); transfer_wait(&f->owner[1],&f->result[1]);
     assert(!f->result[1].error && !md_ipc_origins_take(&f->result[1].request,&f->result[1].received,NULL));
 }
 static void transfer_close(struct transfer_fixture *f) {
@@ -463,6 +470,49 @@ static void transfer_close(struct transfer_fixture *f) {
     if (f->payload_reader>=0) {
         char byte; await(f->payload_reader); assert(!read(f->payload_reader,&byte,1)); close(f->payload_reader);
     }
+}
+static void transfer_epoll(const char *path,unsigned typed) {
+    unsigned before=descriptors();
+    struct transfer_fixture f={.application={-1,-1},.payload_reader=-1};
+    for (unsigned i=0;i<2;++i) {
+        f.owner[i]=owner_new(path);
+        assert(!md_ipc_origins_new(f.owner[i].worker,launch_id,&f.service[i]));
+        f.result[i].owner=pthread_self();
+    }
+    pair(&f.owner[0],f.application);
+    int ep=epoll_create1(EPOLL_CLOEXEC),wake=eventfd(1,EFD_NONBLOCK|EFD_CLOEXEC);
+    assert(ep>=0 && wake>=0);
+    struct epoll_event event={.events=EPOLLIN,.data.u64=UINT64_MAX},out;
+    assert(!epoll_ctl(ep,EPOLL_CTL_ADD,wake,&event));
+    struct md_control_epoll *q=md_control_epoll_new(); assert(q);
+    struct md_fd_object *objects[2]={md_control_epoll_object(q),NULL};
+    int fds[3]={f.application[0],ep,-1}; unsigned count=typed ? 2 : 1;
+    struct md_identity root=md_identity_new(0,0);
+    if (typed) {
+        int ends[2]; assert(!pipe2(ends,O_CLOEXEC|O_NONBLOCK));
+        f.payload_reader=ends[0]; fds[2]=ends[1];
+        objects[1]=md_descriptor_inode_new(&root,S_IFIFO|0600); assert(objects[1]);
+    }
+    f.message=object_snapshot(objects,count); f.capture=captured(fds,count+1);
+    transfer_prepare(&f);
+    assert(md_fd_message_exports_native(f.message,0));
+    assert(!md_fd_message_exports_native(f.message,1));
+    assert(md_control_epoll_ctl(q,EPOLL_CTL_ADD,1,objects[0],(struct md_control_file){0},&event)==-EBUSY);
+    /* Deliver to another worker/IPC owner with no local origin registry. The
+     * capsule must preserve the native OFD, not require the sender's pointer. */
+    md_fd_message_export_end(f.message,1);
+    assert(md_control_epoll_ctl(q,EPOLL_CTL_ADD,1,objects[0],(struct md_control_file){0},&event)==-EOPNOTSUPP);
+    close(ep); if (typed) close(fds[2]);
+    receive_begin(&f); transfer_wait(&f.owner[1],&f.result[1]);
+    assert(!f.result[1].error && !md_ipc_origins_take(&f.result[1].request,&f.result[1].received,NULL));
+    struct md_received_fds *received=f.result[1].received;
+    assert(received->count==count && (!received->origins || !received->origins[0]));
+    assert(epoll_wait(received->fds[0],&out,1,0)==1 && out.data.u64==UINT64_MAX && out.events==EPOLLIN);
+    if (typed) assert(received->origins && md_descriptor_inode_is(received->origins[1]));
+    close(wake); transfer_close(&f);
+    md_fd_object_release(objects[1]); md_control_epoll_release(q); md_identity_release(&root);
+    assert(descriptors()==before);
+    printf("PASS native epoll capsule typed=%u: independent receiver, original OFD and exact release\n",typed);
 }
 static void transfer_success(const char *path) {
     unsigned before=descriptors(); struct transfer_fixture f; transfer_new(&f,path);
@@ -955,6 +1005,7 @@ void md_test_ipc_origins(const char *path) {
     /* EVENT_WAIT: total bound covers all native callbacks, joins and reaping. */
     alarm(90); setbuf(stdout,NULL);
     struct md_inode_store *store=NULL; assert(!md_inode_store_open(path,1,&store)); md_inode_store_close(store);
+    for (unsigned typed=0;typed<2;++typed) transfer_epoll(path,typed);
     transfer_success(path);
     for (unsigned mode=0;mode<3;++mode)
         for (unsigned phase=0;phase<5;++phase) transfer_native(path,mode,phase);

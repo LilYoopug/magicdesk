@@ -26,7 +26,11 @@ int md_control_epoll_descriptor(const struct md_control_epoll *);
  * ADD weakly observes identity, so the subscription cannot keep its target
  * alive. Collector calls borrow a strong reference before touching provider.
  * MOD/DEL use the exact identity.
- * Unsupported exclusive/wakeup policies fail before changing an interest. */
+ * Unsupported exclusive/wakeup policies fail before changing an interest.
+ * First ADD excludes pending native exports (EBUSY). After an actual native
+ * export, virtual admission returns EOPNOTSUPP: external aliases cannot acquire
+ * this authority. Failed sends release their reservations without that latch.
+ * Once virtual, the authority requires local typed transfer, even after DEL. */
 int md_control_epoll_ctl(struct md_control_epoll *,int operation,int fd,
     struct md_fd_object *,struct md_control_file,const struct epoll_event *);
 /* Nonblocking, allocation-free. At most one bounded ready-list turn per call.

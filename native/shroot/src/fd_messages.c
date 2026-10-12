@@ -21,6 +21,8 @@ struct md_fd_message {
     uint64_t cookie;
     atomic_uint references;
     unsigned count, published;
+    unsigned export_prepared;
+    uint64_t native_exports[(MD_FD_RECEIPT_MAX+63)/64];
     int monitor;
     struct md_fd_object *origins[];
 };
@@ -50,12 +52,36 @@ struct md_fd_message *md_fd_message_retain(struct md_fd_message *p) {
 }
 void md_fd_message_release(struct md_fd_message *p) {
     if (!p || atomic_fetch_sub_explicit(&p->references,1,memory_order_acq_rel)!=1) return;
+    md_fd_message_export_end(p,0);
     for (unsigned i=0;i<p->count;++i) md_fd_object_release(p->origins[i]);
     md_ipc_binding_release(&p->source);
     free(p);
 }
 unsigned md_fd_message_count(const struct md_fd_message *p) { return p ? p->count : 0; }
 struct md_fd_object *const *md_fd_message_origins(const struct md_fd_message *p) { return p ? p->origins : NULL; }
+int md_fd_message_exports_native(const struct md_fd_message *p, unsigned index) {
+    return p && index<p->count && !!(p->native_exports[index/64]&(UINT64_C(1)<<(index%64)));
+}
+void md_fd_message_export_end(struct md_fd_message *p, int escaped) {
+    if (!p || !p->export_prepared) return;
+    for (unsigned i=0;i<p->count;++i)
+        if (md_fd_message_exports_native(p,i)) p->origins[i]->type->export_end(p->origins[i],escaped);
+    memset(p->native_exports,0,sizeof(p->native_exports)); p->export_prepared=0;
+}
+int md_fd_message_export_begin(struct md_fd_message *p) {
+    if (!p) return 0;
+    if (p->export_prepared) return -EBUSY;
+    p->export_prepared=1;
+    for (unsigned i=0;i<p->count;++i) {
+        struct md_fd_object *o=p->origins[i];
+        if (!o || !o->type->export_begin) continue;
+        int error=o->type->export_begin(o);
+        if (error==-EOPNOTSUPP) continue;
+        if (error) { md_fd_message_export_end(p,0); return error; }
+        p->native_exports[i/64]|=UINT64_C(1)<<(i%64);
+    }
+    return 0;
+}
 int md_fd_message_bind(struct md_fd_message *p, const struct md_ipc_binding *source, const char *id) {
     if (!p || !source || !source->scope || source->connection.side>1
             || !id || strlen(id)!=32 || strspn(id,"0123456789abcdef")!=32) return -EINVAL;

@@ -17,7 +17,10 @@ int md_ipc_origins_new(struct md_fs_worker *, const char *launch_id, struct md_i
 void md_ipc_origins_destroy(struct md_ipc_origins *);
 /* Both operations borrow immutable, already captured custody. Slot zero is the
  * actual application socket, never a reusable caller FD number. Admission pins
- * all inputs; caller may release its references immediately after success.
+ * all inputs. The sender retains its message through actual send completion
+ * and calls md_fd_message_export_end with the observed/uncertain outcome;
+ * cancellation before send releases it without committing a native escape.
+ * Other input references may be released immediately after admission.
  * Preparation requires the matching source-table snapshot and slots [1,count)
  * as its actual data rights. Each snapshot is single-use, including failure.
  * Receive expects exactly [socket, carrier], from one selected message. */

@@ -11,6 +11,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -51,6 +52,105 @@ static struct md_fd_object *expect(struct md_fd_origins *files,int fd,
     struct md_fd_object *actual=md_fd_origins_object(files,fd,&actual_flags);
     assert(actual==object && actual_flags==flags);
     md_fd_object_release(actual); return object;
+}
+static struct md_fd_message *capture(struct md_fd_object *const *objects,unsigned count) {
+    struct md_fd_origins *files=md_fd_origins_new(); assert(files);
+    int fds[253]; struct md_fd_origin_update updates[253];
+    for (unsigned i=0;i<count;++i) fds[i]=(int)i+10;
+    assert(!md_fd_origins_prepare_batch(files,objects,0,count,updates));
+    assert(!md_fd_origins_finish_batch(updates,count,fds,count));
+    struct md_fd_message *message=NULL;
+    assert(!md_fd_message_capture(files,fds,count,&message));
+    md_fd_origins_release(files); return message;
+}
+static void no_destroy(struct md_fd_object *object) { (void)object; }
+static int export_failure(struct md_fd_object *object) { (void)object; return -ENOMEM; }
+static void unexpected_export_end(struct md_fd_object *object,int escaped) {
+    (void)object; (void)escaped; assert(0);
+}
+static const struct md_fd_object_type failing_export={
+    .destroy=no_destroy,.export_begin=export_failure,.export_end=unexpected_export_end};
+struct export_race {
+    pthread_barrier_t gate;
+    struct md_fd_object *object;
+    int result;
+};
+static void *export_worker(void *context) {
+    struct export_race *race=context;
+    for (unsigned n=0;n<1000;++n) {
+        pthread_barrier_wait(&race->gate);
+        race->result=race->object->type->export_begin(race->object);
+        pthread_barrier_wait(&race->gate);
+        if (!race->result) race->object->type->export_end(race->object,0);
+        pthread_barrier_wait(&race->gate);
+    }
+    return NULL;
+}
+static void export_admission(int *budget) {
+    unsigned before=descriptors();
+    struct md_identity id=md_identity_new(0,0);
+    struct md_uts_namespace *uts=md_uts_namespace_new(); assert(uts);
+    struct md_control_file provider=md_proc_sysctl_new(MD_PROC_FILE_HOSTNAME,NULL,uts); assert(provider.ops);
+    struct md_proc_file *source=md_proc_file_open_control(provider.ops,provider.context,&id,O_RDONLY);
+    md_control_file_release(provider); assert(source);
+    struct md_fd_object *target=md_proc_file_object(source);
+    provider=md_proc_file_control(source);
+    struct epoll_event event={.events=EPOLLPRI};
+    for (unsigned mode=0;mode<4;++mode) {
+        struct md_control_epoll *q=md_control_epoll_new(); assert(q);
+        struct md_fd_object *objects[253];
+        for (unsigned i=0;i<253;++i) objects[i]=i%2 ? NULL : md_control_epoll_object(q);
+        struct md_fd_message *a=capture(objects,253),*b=capture(objects,253);
+        *budget=0;
+        assert(!md_fd_message_export_begin(a) && !md_fd_message_export_begin(b));
+        assert(md_fd_message_export_begin(a)==-EBUSY);
+        for (unsigned i=0;i<253;++i) assert(md_fd_message_exports_native(a,i)==!(i%2));
+        assert(!md_fd_message_exports_native(a,253));
+        assert(md_control_epoll_ctl(q,EPOLL_CTL_ADD,7,target,provider,&event)==-EBUSY);
+        md_fd_message_export_end(a,mode==1);
+        md_fd_message_release(a);
+        assert(md_control_epoll_ctl(q,EPOLL_CTL_ADD,7,target,provider,&event)
+            ==(mode==1 ? -EOPNOTSUPP : -EBUSY));
+        if (mode!=3) md_fd_message_export_end(b,mode==2);
+        md_fd_message_release(b); /* mode 3: implicit cancellation */
+        *budget=-1;
+        int result=md_control_epoll_ctl(q,EPOLL_CTL_ADD,7,target,provider,&event);
+        assert(result==((mode==1 || mode==2) ? -EOPNOTSUPP : 0));
+        if (!result) {
+            struct md_fd_object *object=md_control_epoll_object(q);
+            a=capture(&object,1);
+            assert(!md_fd_message_export_begin(a) && !md_fd_message_exports_native(a,0));
+            md_fd_message_export_end(a,1); md_fd_message_release(a);
+            assert(!md_control_epoll_ctl(q,EPOLL_CTL_DEL,7,target,provider,NULL));
+            assert(object->type->export_begin(object)==-EOPNOTSUPP);
+        }
+        md_control_epoll_release(q);
+    }
+    struct md_control_epoll *q=md_control_epoll_new(); assert(q);
+    struct md_fd_object failure; md_fd_object_init(&failure,&failing_export);
+    struct md_fd_object *objects[]={md_control_epoll_object(q),&failure};
+    struct md_fd_message *message=capture(objects,2);
+    assert(md_fd_message_export_begin(message)==-ENOMEM);
+    assert(!md_fd_message_exports_native(message,0));
+    assert(!md_control_epoll_ctl(q,EPOLL_CTL_ADD,7,target,provider,&event));
+    md_fd_message_release(message); md_fd_object_release(&failure); md_control_epoll_release(q);
+    struct export_race race={0}; pthread_t worker;
+    assert(!pthread_barrier_init(&race.gate,NULL,2));
+    assert(!pthread_create(&worker,NULL,export_worker,&race));
+    for (unsigned n=0;n<1000;++n) {
+        q=md_control_epoll_new(); assert(q); race.object=md_control_epoll_object(q);
+        pthread_barrier_wait(&race.gate);
+        int result=md_control_epoll_ctl(q,EPOLL_CTL_ADD,7,target,provider,&event);
+        pthread_barrier_wait(&race.gate);
+        assert((result==-EBUSY && !race.result) || (!result && race.result==-EOPNOTSUPP));
+        pthread_barrier_wait(&race.gate);
+        if (result) assert(!md_control_epoll_ctl(q,EPOLL_CTL_ADD,7,target,provider,&event));
+        md_control_epoll_release(q);
+    }
+    assert(!pthread_join(worker,NULL)); pthread_barrier_destroy(&race.gate);
+    md_proc_file_release(source); md_uts_namespace_release(uts); md_identity_release(&id);
+    assert(descriptors()==before);
+    puts("PASS epoll export: rollback, concurrent sends, duplicate rights, lifetime latch and activation races");
 }
 static void target_retirement(int *budget) {
     unsigned before=descriptors();
@@ -98,6 +198,7 @@ static void target_retirement(int *budget) {
     puts("PASS watched target custody: dup/fork/exec, queued transfer and automatic final retirement");
 }
 void test_epoll_owner(int *budget) {
+    export_admission(budget);
     target_retirement(budget);
     unsigned before=descriptors();
     for (int limit=0;limit<3;++limit) {

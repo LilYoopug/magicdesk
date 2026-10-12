@@ -1268,6 +1268,16 @@ launch receive the exact objects; another launch cannot import those private
 owners and receives an explicit error. Serializable views retain portable
 cross-launch custody. Queue discard and receiver release use the same lifetime
 tracking for both forms.
+Epoll creation records a typed authority under the ordinary file-table turn;
+dup, fork and exec use that same ownership. The authority retains no duplicate
+of the application's kernel epoll and allocates no wake transport until virtual
+admission. Ordinary epoll control and wait calls remain native.
+Optional native export is reserved before message serialization and completed
+from the actual send outcome. Failed sends release the reservation; successful
+or unobserved terminal sends prevent later virtual activation through an
+untracked external alias. Passive epolls remain transferable to native and
+independent guest receivers, including mixed vectors with typed file origins.
+The virtual-interest collector is not yet connected to guest epoll calls.
 Application-filtered IO captures exact inputs through the table-owned channel,
 without requiring another guest thread. Ordinary IO reuses an already admitted,
 unambiguous channel under the same file-table turn. Without one, it retains

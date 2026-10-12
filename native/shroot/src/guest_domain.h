@@ -11,7 +11,7 @@
 
 /* Kernel descriptor operations with ordered provenance publication. Their
  * observation does not grant pathname access or additional kernel authority. */
-#define MD_DOMAIN_FD_CALLS(X) X(close) X(dup) X(dup3) X(close_range)
+#define MD_DOMAIN_FD_CALLS(X) X(close) X(dup) X(dup3) X(close_range) X(epoll_create1)
 #define MD_DOMAIN_FD_ARGUMENTS(X) \
     X(fcntl, 1, F_SETFD) X(fcntl, 1, F_DUPFD) X(fcntl, 1, F_DUPFD_CLOEXEC)
 
@@ -19,7 +19,7 @@
  * seccomp so these kernel operations need no userspace policy round trip. */
 #define MD_DOMAIN_KERNEL_CALLS(X) \
     X(shutdown) X(waitid) \
-    X(ppoll) X(pselect6) X(epoll_pwait) X(epoll_pwait2) X(epoll_ctl) X(epoll_create1) \
+    X(ppoll) X(pselect6) X(epoll_pwait) X(epoll_pwait2) X(epoll_ctl) \
     X(sysinfo) X(sched_yield) X(sched_getaffinity) \
     X(getrusage) X(getrlimit) X(gettimeofday)
 #define MD_DOMAIN_KERNEL_ARGUMENTS(X) \

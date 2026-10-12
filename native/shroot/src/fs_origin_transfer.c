@@ -117,7 +117,11 @@ int md_fs_origin_export_entries(const struct md_fd_message *message, struct md_f
     unsigned rights=1;
     for (unsigned i=0;i<data.count;++i) {
         struct md_fs_anchor *a=md_fs_anchor_from_object(entries[i]);
-        if (!a) { if (entries[i]) return -EOPNOTSUPP; continue; }
+        if (!a) {
+            if (entries[i] && !(entries[i]==md_fd_message_origins(message)[i]
+                    && md_fd_message_exports_native(message,i))) return -EOPNOTSUPP;
+            continue;
+        }
         /* Native provider anchors carry no namespace semantics. The receiver
          * gets the native description, subject to the kernel's FD checks. */
         if (!a->view) continue;

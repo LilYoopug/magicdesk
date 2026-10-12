@@ -11,6 +11,12 @@ void md_fd_weak_retire(struct md_fd_weak *);
 struct md_fd_object_type {
     void (*destroy)(struct md_fd_object *);
     unsigned selectors;
+    /* Optional metadata whose native OFD can escape without this authority.
+     * Reserve against virtual activation, then finish after actual send.
+     * A committed/uncertain escape must remain native for its whole lifetime.
+     * Both callbacks run with a retained object and may cross worker handoff. */
+    int (*export_begin)(struct md_fd_object *);
+    void (*export_end)(struct md_fd_object *, int escaped);
 };
 struct md_fd_object {
     atomic_uint references;

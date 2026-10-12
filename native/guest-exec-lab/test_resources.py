@@ -402,7 +402,8 @@ def main():
                 check("guest wait fast paths " + str(filtered), root + "/libmagicdesk_guest_run.so --statistics --store "
                       + root + "/wait-store --deadline-seconds 30 -- /bin/waits " + str(filtered),
                       "PASS native wait fast paths",
-                      absent_patterns=(r"MD_SYSCALL nr=(?:20|21|22|72|73|441) ",))
+                      patterns=(r"MD_SYSCALL nr=20 trace=2 notification=0",),
+                      absent_patterns=(r"MD_SYSCALL nr=(?:21|22|72|73|441) ",))
             if args.case == "control-event":
                 return
         if args.case == "all":

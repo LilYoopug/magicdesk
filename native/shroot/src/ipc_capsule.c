@@ -119,7 +119,7 @@ int md_ipc_capsules_publish(struct md_ipc_capsules *s, const struct md_ipc_bindi
                 if (!md_fs_anchor_portable(anchor)) local=1;
             }
             else if (md_descriptor_inode_is(origins[i])) anonymous=1;
-            else local=1;
+            else if (!md_fd_message_exports_native(message,i)) local=1;
         }
     }
     int pair[2]={-1,-1}, rights[CUSTODY_FDS]={-1,-1,-1,-1};

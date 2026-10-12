@@ -28,6 +28,16 @@ void md_fd_message_release(struct md_fd_message *);
 unsigned md_fd_message_count(const struct md_fd_message *);
 struct md_fd_object *const *md_fd_message_origins(const struct md_fd_message *);
 
+/* Reserve optional native exports before serializing a message. Other typed
+ * authorities keep their existing local/portable policy. EOPNOTSUPP leaves
+ * that entry local; other failures roll back the whole reservation set.
+ * Preparation belongs to one worker, completion to the sending owner after
+ * worker handoff. No allocation. End is idempotent; final release aborts.
+ * escaped includes an unobserved terminal send, not just confirmed success. */
+int md_fd_message_export_begin(struct md_fd_message *);
+int md_fd_message_exports_native(const struct md_fd_message *, unsigned index);
+void md_fd_message_export_end(struct md_fd_message *, int escaped);
+
 /* Bind an unpublished vector to its captured ORIGINS_V1 sending connection. The trusted
  * owner supplies its registered launch ID, not an application-supplied label.
  * Pins epoch/store, not socket/SQLite; one random nonce per message, no allocation.

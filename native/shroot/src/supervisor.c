@@ -16,6 +16,7 @@
 #include "network_route.h"
 #include "network_io.h"
 #include "fd_mutation.h"
+#include "control_epoll.h"
 #include "descriptor_inode.h"
 #include "descriptor_calls.h"
 #include "fd_exchange.h"
@@ -545,6 +546,9 @@ static void outgoing_release(struct outgoing_owner *owner) {
     if (owner->io_waiting && owner->prepared)
         epoll_ctl(socket_events,EPOLL_CTL_DEL,owner->prepared->fds[0],NULL);
     md_ipc_io_release(&owner->io);
+    /* A terminal send without its result can already have published rights.
+     * Known completion ends this reservation before reaching cleanup. */
+    if (owner->stage==OUTGOING_SEND) md_fd_message_export_end(owner->message,1);
     md_fd_capture_cancel(&owner->capture);
     if (owner->files.table && md_fd_order_cancel(&owner->files)==1)
         CHECK(!md_fd_order_complete(&owner->files));
@@ -2378,6 +2382,12 @@ static void fd_native_start(struct thread *t) {
     for (unsigned i=0;i<6;++i) args[i]=r->regs[i];
     int error=0;
     if (!error) error=md_fd_mutation_prepare(t->resources.files,r->regs[8],args,&t->fd_mutation);
+    if (!error && r->regs[8]==SYS_epoll_create1) {
+        struct md_control_epoll *queue=md_control_epoll_new();
+        error=queue ? md_fd_origins_prepare_object(t->resources.files,md_control_epoll_object(queue),
+            r->regs[0]&EPOLL_CLOEXEC ? FD_CLOEXEC : 0,&t->fd_mutation.update) : -ENOMEM;
+        md_control_epoll_release(queue);
+    }
     if (!error && r->regs[8]==SYS_pidfd_open) {
         struct thread *target=find_thread((pid_t)r->regs[0]);
         if (target && target->resources.pid) {
@@ -2622,6 +2632,8 @@ static void outgoing_complete(void *context, struct md_task_helper_result result
     struct outgoing_owner *owner=context;
     struct thread *t=owner->caller ? find_thread(owner->caller) : NULL;
     CHECK(result.descriptor<0 && !result.received);
+    md_fd_message_export_end(owner->message,owner->stage==OUTGOING_SEND
+        && (result.value>=0 || result.value==-ECANCELED));
     if (t && t->outgoing==owner) {
         t->outgoing=NULL; t->kernel_stopped=1; t->buffer_registers=owner->continuation;
         buffer_reply_signal(t,result.value,result.signal.si_signo ? &result.signal : NULL);
@@ -2662,7 +2674,6 @@ static void outgoing_exported(void *context, struct md_task_helper_result result
     if (!error) error=md_ipc_origins_send(origin_service,owner->message,result.received,
         &owner->context,&owner->options,outgoing_prepared,owner,&owner->preparation);
     md_received_fds_release(result.received);
-    md_fd_message_release(owner->message); owner->message=NULL;
     if (error) outgoing_complete(owner,(struct md_task_helper_result){.value=error,.descriptor=-1});
     else owner->stage=OUTGOING_PREPARE;
 }

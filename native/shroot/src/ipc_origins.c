@@ -174,11 +174,13 @@ static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
         }
     }
     int framed=r->transport==MD_IPC_TRANSPORT_ORIGINS_V1;
+    if (!error && r->kind==PREPARE) error=md_fd_message_export_begin(r->message);
     if (!error && !framed && r->kind==PREPARE && r->message) {
         struct md_fd_object *const *objects=md_fd_message_origins(r->message);
         for (unsigned i=0;i<md_fd_message_count(r->message);++i)
             if (objects[i] && !md_fs_anchor_from_object(objects[i])
-                    && !md_descriptor_inode_is(objects[i])) { error=-EOPNOTSUPP; break; }
+                    && !md_descriptor_inode_is(objects[i])
+                    && !md_fd_message_exports_native(r->message,i)) { error=-EOPNOTSUPP; break; }
     }
     if (!error && r->kind==RECEIVE && !framed) error=-ENOTSUP;
     if (!error && r->kind==PREPARE && !bound && r->source->count>1) {
