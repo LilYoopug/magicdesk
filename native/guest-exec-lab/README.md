@@ -59,6 +59,14 @@ The mount-API fixture also checks nosymfollow on detached/native/proc mounts,
 per-alias remount, retained origins and namespace copies. Initial-root remount
 and propagation use identical pathname/proc-FD assertions; a chroot into an
 ordinary directory must not turn that directory into a mount root.
+Removed-mountpoint cases synchronize independent namespace views, remove and
+recreate a covered directory, then read mountinfo, recursively clone or copy the
+namespace. Nested mounts disappear while retained root/child FDs remain usable.
+Graph tests also check native/logical deletion, rename, independent store writers,
+foreign-reader authority, published revisions and exact descriptor cleanup.
+Storage fixtures exhaust the native FD table during database open, journal
+creation and mount copying; they require EMFILE, rollback and recovery after
+descriptors are released, not a generic IO error or a partially published view.
 Filesystem-attribute ioctl checks cover regular files, directories, bind aliases,
 detached tmpfs, dup/fork/SCM_RIGHTS and a seccomp-filtered caller, without exposing
 Android storage attributes. Native readonly attachments and pipe ioctls retain

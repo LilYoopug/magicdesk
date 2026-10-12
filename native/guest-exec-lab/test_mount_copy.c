@@ -43,7 +43,9 @@ static void rollback(struct md_filesystem *fs, const struct md_fs_location *root
         for (unsigned i=0; i<budget; ++i) close(held[--count]);
         struct md_mount_namespace *copy=NULL;
         struct md_fs_location selected={.mount=UINT32_MAX,.object="unchanged"};
-        assert(md_fs_mounts_copy(fs,root,&copy,&selected)==-EMFILE);
+        int error=md_fs_mounts_copy(fs,root,&copy,&selected);
+        if (error!=-EMFILE) fprintf(stderr,"mount copy FD budget=%u: %d\n",budget,error);
+        assert(error==-EMFILE);
         assert(!copy && selected.mount==UINT32_MAX && !strcmp(selected.object,"unchanged"));
         while (count) close(held[--count]);
         assert(!setrlimit(RLIMIT_NOFILE,&original));
@@ -153,7 +155,7 @@ void test_mount_copy(const char *base) {
     assert(read(fd,bytes,5)==5 && !memcmp(bytes,"value",5)); close(fd);
     int table=md_fs_mount_table(&copy,1,O_RDONLY); assert(table>=0);
     ssize_t size=read(table,bytes,sizeof(bytes)-1); assert(size>0); bytes[size]=0; close(table);
-    assert(strstr(bytes," / ro - none attachment ro") && strstr(bytes," /child rw - none attachment rw"));
+    assert(strstr(bytes," / ro - none attachment rw") && strstr(bytes," /child rw - none attachment rw"));
     assert(!strstr(bytes,"/tree") && !strstr(bytes,base));
     md_fs_mounts_close(&copy);
 

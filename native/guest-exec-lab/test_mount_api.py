@@ -280,6 +280,64 @@ def guest():
         assert os.waitpid(child, 0)[1] == 0
         print('PASS mount root identity: pathname, proc FD, remount and chroot rejection', flush=True)
 
+    def removed_mountpoint(root, first):
+        target = root / 'retired'
+        target.mkdir()
+        call(40, 'tmpfs', str(target), 'tmpfs', 0, 0)
+        (target / 'retained').write_text('original')
+        (target / 'nested').mkdir()
+        call(40, 'tmpfs', str(target / 'nested'), 'tmpfs', 0, 0)
+        (target / 'nested' / 'retained').write_text('child')
+        left, right = socket.socketpair()
+        child = os.fork()
+        if child == 0:
+            left.close()
+            try:
+                call(97, 0x00020000)
+                retained = os.open(target, os.O_PATH | os.O_DIRECTORY)
+                nested = os.open(target / 'nested', os.O_PATH | os.O_DIRECTORY)
+                right.sendall(b'R')
+                # EVENT_WAIT: parent removes the covered directory; launch deadline bounds failure.
+                assert right.recv(1) == b'D'
+                if first == 'clone':
+                    clone = call(428, -100, str(root), 1 | os.O_CLOEXEC | 0x8000)
+                    os.close(clone)
+                elif first == 'copy':
+                    call(97, 0x00020000)
+                mounts = Path('/proc/self/mountinfo').read_text()
+                assert not any(line.split()[4] == str(target)
+                               or line.split()[4].startswith(str(target) + '/')
+                               for line in mounts.splitlines())
+                fd = os.open('retained', os.O_RDONLY, dir_fd=retained)
+                assert os.read(fd, 16) == b'original'
+                os.close(fd)
+                fd = os.open('retained', os.O_RDONLY, dir_fd=nested)
+                assert os.read(fd, 16) == b'child'
+                os.close(fd)
+                clone = call(428, -100, str(root), 1 | os.O_CLOEXEC | 0x8000)
+                os.close(clone)
+                assert not (target / 'retained').exists(), 'recreated name resurrected a retired mount'
+                os.close(retained)
+                os.close(nested)
+                os._exit(0)
+            except BaseException:
+                import traceback
+                traceback.print_exc()
+                os._exit(1)
+        right.close()
+        try:
+            # EVENT_WAIT: child owns a private mount view and retained root.
+            assert left.recv(1) == b'R'
+            call(39, str(target), 2)
+            target.rmdir()
+            target.mkdir()
+            left.sendall(b'D')
+            assert os.waitpid(child, 0)[1] == 0
+        finally:
+            left.close()
+            target.rmdir()
+        print('PASS removed mountpoint: ' + first + ', subtree and retained origins', flush=True)
+
     # The launch enters a child user/mount namespace but retains its parent's
     # cgroup namespace. fsopen must not acquire the authority of a later unshare.
     old_context = call(430, 'cgroup2', 1)
@@ -291,6 +349,8 @@ def guest():
     with tempfile.TemporaryDirectory(prefix='md-fsopen-') as directory:
         root = Path(directory)
         root_operands(root)
+        for first in ('table', 'clone', 'copy'):
+            removed_mountpoint(root, first)
         filesystem_ioctls(root)
         nosymfollow(root)
         mount_root('/')

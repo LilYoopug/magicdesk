@@ -150,7 +150,8 @@ static void nested_mounts(const char *base) {
     r=call(&fs,MD_FS_OPEN,-1,"/proc/self/status",O_RDONLY,0,bytes,sizeof(bytes)); assert(r.error==-ENOENT && !r.host_path);
     r=call(&fs,MD_FS_MOUNT_TABLE,-1,NULL,O_RDONLY,1,NULL,0); assert(!r.error);
     count=read(r.fd,bytes,sizeof(bytes)-1); assert(count>0); bytes[count]=0; close(r.fd);
-    assert(strstr(bytes," / ro - none attachment ro") && strstr(bytes," /child rw - none attachment rw"));
+    /* A readonly bind does not change its backing superblock. */
+    assert(strstr(bytes," / ro - none attachment rw") && strstr(bytes," /child rw - none attachment rw"));
     assert(!strstr(bytes,"/tree") && !strstr(bytes,"/proc") && !strstr(bytes,base));
     md_task_registry_destroy(fs.tasks); fs.tasks=NULL;
     md_identity_release(&identity); md_domain_release(context);

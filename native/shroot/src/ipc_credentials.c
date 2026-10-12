@@ -30,10 +30,10 @@ struct md_ipc_credentials {
 struct snapshot { struct md_ipc_identity ids; uint32_t process_count; uint32_t groups[]; };
 static int sql(int rc) { return md_database_result(rc); }
 static int statement(struct md_ipc_credentials *s, const char *text, sqlite3_stmt **q) {
-    return sql(sqlite3_prepare_v2(s->db, text, -1, q, NULL));
+    return md_database_error(s->db,sqlite3_prepare_v2(s->db, text, -1, q, NULL));
 }
 static int execute(struct md_ipc_credentials *s, const char *text) {
-    return sql(sqlite3_exec(s->db, text, NULL, NULL, NULL));
+    return md_database_error(s->db,sqlite3_exec(s->db, text, NULL, NULL, NULL));
 }
 void md_ipc_credentials_close(struct md_ipc_credentials *s) {
     if (!s) return;

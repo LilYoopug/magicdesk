@@ -178,6 +178,15 @@ existing references. Detached entries are collected during later mount admission
 when no origin, selected root or child placement retains them. Collection drops
 their object-cache records, policies and backing custody before slot reuse.
 A slot generation prevents stale snapshots from referring to its replacement.
+Before topology changes, copying or table construction, covered objects are
+checked for removal through other namespaces. Logical link membership, or native
+link count for native targets, determines disconnection; rename retains the
+same target identity. A disconnected placement and its descendants use the
+common detach transaction without releasing live origins. Graph readers may
+derive that disconnection from retained backing custody but cannot publish an
+owner's graph or request an unmount. Ordinary file IO has no whole-tree scan.
+Cross-namespace deletion does not yet push notifications to already-open mount
+tables; reconciliation occurs at these topology observation boundaries.
 
 `pivot_root` accepts the initial base root or an attached selected root and an
 attached new root below it. The base is a stable mount instance, not a missing

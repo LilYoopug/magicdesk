@@ -362,7 +362,8 @@ int md_fs_mounts_copy(struct md_filesystem *fs, const struct md_fs_location *roo
         struct md_mount_namespace **out, struct md_fs_location *copied_root) {
     if (!fs->mounts || !root || !out || !copied_root) return -EINVAL;
     unsigned order[MD_FS_MOUNTS_MAX+1];
-    int valid=md_view_topology_order(fs->mounts,order);
+    int valid=md_view_mount_reconcile(fs);
+    if (!valid) valid=md_view_topology_order(fs->mounts,order);
     if (valid) return valid;
     struct md_view_object *origin=NULL;
     if (root->mount) {

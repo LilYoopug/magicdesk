@@ -124,6 +124,7 @@ static const char *filesystem_options(const struct md_view_mount *mount) {
 int md_fs_mount_table(struct md_filesystem *fs, unsigned info, unsigned flags) {
     if (info>1 || (flags&~(O_PATH|O_CLOEXEC))) return -EINVAL;
     int r=ensure_view(fs);
+    if (!r) r=md_view_mount_reconcile(fs);
     if (r) return r;
     int fd=md_inode_temporary(fs->store);
     if (fd<0) return fd;

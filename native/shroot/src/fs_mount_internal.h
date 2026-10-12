@@ -138,6 +138,11 @@ int md_view_backing_path(struct md_filesystem *, int fd, const struct md_view_mo
 int md_view_attach_source(struct md_filesystem *, const struct md_mount_source *,
         const struct md_view_location *target, struct md_view_mount **);
 int md_view_mount_collect(struct md_filesystem *);
+/* Cold topology boundaries reconcile targets removed in another namespace.
+ * Detachment preserves mount identities and retained origins until collection;
+ * ordinary file data IO does not scan or reconstruct the mount tree. */
+int md_view_mount_reconcile(struct md_filesystem *);
+int md_view_mount_detach(struct md_filesystem *, const struct md_view_mount *);
 struct md_view_object *md_view_object(struct md_filesystem *, const char *id);
 /* Internal lookup opt-in: report task-owned proc traversal to the adapter
  * before executing an operation. Never admitted as an openat2 resolve flag. */

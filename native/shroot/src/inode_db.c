@@ -21,7 +21,7 @@ int mdi_sql(struct md_inode_store *s, const char *text) {
     mdi_cache_invalidate(s);
     struct md_cost *cost = s->statistics ? &s->statistics->transaction : NULL;
     int64_t begin = md_cost_begin(cost);
-    int result = mdi_sql_error(sqlite3_exec(s->db, text, NULL, NULL, NULL));
+    int result = md_database_error(s->db, sqlite3_exec(s->db, text, NULL, NULL, NULL));
     md_cost_end(cost, begin); return result;
 }
 int mdi_sql_failure(int rc) {
@@ -31,14 +31,14 @@ int mdi_sql_failure(int rc) {
 int mdi_prepare(struct md_inode_store *s, const char *text, sqlite3_stmt **out) {
     struct md_cost *cost = s->statistics ? &s->statistics->prepare : NULL;
     int64_t begin = md_cost_begin(cost);
-    int result = mdi_sql_error(sqlite3_prepare_v2(s->db, text, -1, out, NULL));
+    int result = md_database_error(s->db, sqlite3_prepare_v2(s->db, text, -1, out, NULL));
     md_cost_end(cost, begin); return result;
 }
 int mdi_step(struct md_inode_store *s, sqlite3_stmt *q) {
     struct md_cost *cost = s->statistics ? &s->statistics->step : NULL;
     uint64_t before=cost ? cost->nanoseconds : 0;
     int64_t begin = md_cost_begin(cost);
-    int result = sqlite3_step(q);
+    int result = md_database_step(q);
     md_cost_end(cost, begin);
     if (s->statistics) {
         struct md_cost *kind=q==s->queries[MDI_DATA_VERSION] ? &s->statistics->version

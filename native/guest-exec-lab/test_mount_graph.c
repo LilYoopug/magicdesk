@@ -676,10 +676,58 @@ static void initial_pivot(const char *base) {
     assert(descriptors()==before);
     puts("PASS initial-root graph: rollback, live peer, old base FD/pin, copy/forward, recursive bind, move and child-busy detach");
 }
+static void removed_points(const char *base) {
+    unsigned before=descriptors();
+    char fixture[PATH_MAX], covered[PATH_MAX], renamed[PATH_MAX], store[PATH_MAX];
+    path(fixture,base,"removed-points"); assert(!mkdir(fixture,0700));
+    struct md_filesystem fs=filesystem(fixture,1), peer=filesystem(fixture,0);
+    struct md_mount_graph_parcel parcel={0};
+    assert(!md_mount_graph_export(fs.mounts,fs.store->lifetime->root,&parcel));
+    assert(!md_mount_graph_import(&parcel,&peer.mounts));
+    struct md_fs_anchor *held=NULL;
+    struct md_fs_result opened=open_file(&peer,"/outer/nested",O_PATH|O_DIRECTORY,NULL,&held);
+    assert(!opened.error && held); close(opened.fd);
+    unsigned retained_id=held->mount->id;
+    path(covered,fixture,"host0/nested"); path(renamed,fixture,"host0/moved");
+    assert(!rename(covered,renamed));
+    assert(!md_view_mount_reconcile(&peer) && !held->mount->detached);
+    contents(&peer,"/outer/moved/value",NULL,"value");
+    assert(!rmdir(renamed));
+    int table=md_fs_mount_table(&peer,1,0); assert(table>=0); close(table);
+    assert(held->mount->detached && held->mount->id==retained_id);
+    assert(!fs.mounts->tree->mounts[1].detached);
+    assert(md_view_mount_detach(&peer,&peer.mounts->tree->mounts[2])==-EPERM);
+    contents(&peer,"value",held,"value");
+    assert(!md_view_mount_reconcile(&fs) && fs.mounts->tree->mounts[1].detached);
+    assert(!md_mount_graph_sync(peer.mounts));
+    assert(held->mount->detached && held->mount->id==retained_id);
+    assert(!mkdir(renamed,0700));
+    opened=open_file(&peer,"/outer/moved/value",O_RDONLY,NULL,NULL);
+    assert(opened.error==-ENOENT);
+
+    /* Another connection removes the covered logical root. Native st_nlink
+     * still describes its backing file, not its logical namespace membership. */
+    path(store,fixture,"store"); struct md_inode_store *writer=NULL;
+    assert(!md_inode_store_open(store,0,&writer));
+    assert(!md_inode_unlink(writer,-1,"/outer",AT_REMOVEDIR));
+    md_inode_store_close(writer);
+    assert(!md_view_mount_reconcile(&peer));
+    assert(peer.mounts->tree->mounts[0].detached && held->mount->detached);
+    assert(!peer.mounts->tree->mounts[2].detached);
+    contents(&peer,"/alias/value",NULL,"value");
+    contents(&peer,"value",held,"value");
+    assert(!md_inode_mkdir(fs.store,-1,"/outer",0700));
+    assert(!md_view_mount_reconcile(&fs) && !md_mount_graph_sync(peer.mounts));
+    assert(held->mount->detached && held->mount->id==retained_id);
+    md_fs_anchor_release(held);
+    close_filesystem(&peer); close_filesystem(&fs);
+    assert(descriptors()==before);
+    puts("PASS removed mountpoints: native/logical targets, rename, foreign views, retained origins and cleanup");
+}
 void test_mount_graph(const char *base) {
     alarm(60); char model[PATH_MAX], peers[PATH_MAX];
     path(model,base,"graph-model"); path(peers,base,"graph-peers");
     assert(!mkdir(model,0700) && !mkdir(peers,0700));
     models(model); sizes(base); unordered(base); updates(base); private_publication(base);
-    retirement(base,0); retirement(base,1); processes(peers); initial_pivot(base); alarm(0);
+    retirement(base,0); retirement(base,1); processes(peers); initial_pivot(base); removed_points(base); alarm(0);
 }

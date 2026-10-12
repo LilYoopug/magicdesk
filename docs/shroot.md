@@ -49,6 +49,9 @@ ordinary internal transaction contention to guest syscalls. There is no polling
 or transaction replay; data IO through opened descriptors stays native. An
 external database writer that bypasses this gate still produces an explicit error.
 Inode and IPC databases share retained-directory opening and error conversion.
+Database admission and inode queries capture native IO/open errors before
+SQLite statement cleanup, preserving resource failures such as EMFILE instead
+of collapsing them into EIO. Failed transactions retain rollback semantics.
 SQLite protects its process-global state across the supervisor and namespace
 worker; individual connections remain thread-confined and use no connection mutex.
 Persistent stores use a retained rollback journal and synchronous publication.
@@ -1073,6 +1076,11 @@ views publish immutable revisions through a retained single-writer stream;
 receivers preserve their local object identities while applying topology updates.
 Detached entries are reclaimed on subsequent mount admission only after their
 origins, roots and children are released. Reused slots carry a new generation.
+Topology changes, namespace copies and mount-table construction reconcile
+covered objects removed through another namespace. Disconnected targets detach
+their subtree through the same lifecycle as lazy unmount, preserving retained
+origins and identities. Inode providers use logical link membership rather than
+the backing file's native link count. Ordinary file IO does not scan this graph.
 `fsopen`/`fsconfig`/`fsmount`/`move_mount` use those same filesystem providers
 and mount graph. A typed context retains opening credentials and provider
 namespace ownership; CREATE prepares the filesystem before placement. The
@@ -1433,8 +1441,7 @@ diagnostic observer, not a replacement target. Debian 13, Ubuntu 24.04, Arch and
 Fedora 44 have default-boot coverage, but those runs remain degraded or fail to
 complete; this is not a passing distro boot. Outstanding runtime boundaries
 include shared mount propagation, proc `hidepid`, journald's hostname poll/error
-notification and datagram FD-store transfer. Early Arch service setup also has
-an unresolved intermittent ENOENT in mountinfo/proc-FD mount-target lookup.
+notification and datagram FD-store transfer.
 The OpenRC mode boots Alpine 3.23's real `openrc-init` as PID 1 using its stock
 container service policy and private runlevel configuration. It checks default
 runlevel services, restart and stop, then cancels the exact registered launch

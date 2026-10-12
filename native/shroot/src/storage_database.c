@@ -67,6 +67,7 @@ static void initialize(void) {
     status=sqlite3_vfs_register(&anchored,0);
 }
 int md_database_result(int rc) {
+    if (rc<0) return rc;
     if (rc==SQLITE_CONSTRAINT_PRIMARYKEY || rc==SQLITE_CONSTRAINT_UNIQUE) return -EEXIST;
     switch (rc&255) {
     case SQLITE_OK: case SQLITE_ROW: case SQLITE_DONE: return 0;
@@ -77,6 +78,17 @@ int md_database_result(int rc) {
     default: return -EIO;
     }
 }
+int md_database_error(sqlite3 *db, int rc) {
+    if (db && rc>=0 && ((rc&255)==SQLITE_IOERR || (rc&255)==SQLITE_CANTOPEN)) {
+        int error=sqlite3_system_errno(db);
+        if (error>0) return -error;
+    }
+    return md_database_result(rc);
+}
+int md_database_step(sqlite3_stmt *query) {
+    int rc=sqlite3_step(query);
+    return rc==SQLITE_ROW || rc==SQLITE_DONE ? rc : md_database_error(sqlite3_db_handle(query),rc);
+}
 int md_database_open(int root, const char *name, int create, sqlite3 **out) {
     if (!out) return -EINVAL;
     *out=NULL;
@@ -84,9 +96,10 @@ int md_database_open(int root, const char *name, int create, sqlite3 **out) {
     pthread_once(&initialized,initialize);
     if (status!=SQLITE_OK) return md_database_result(status);
     char path[NAME_MAX+64]; snprintf(path,sizeof(path),"/proc/self/fd/%d/%s",root,name);
-    int r=md_database_result(sqlite3_open_v2(path,out,
+    int rc=sqlite3_open_v2(path,out,
         SQLITE_OPEN_READWRITE|SQLITE_OPEN_NOMUTEX|SQLITE_OPEN_NOFOLLOW
-            | (create ? SQLITE_OPEN_CREATE : 0),anchored.zName));
+            | (create ? SQLITE_OPEN_CREATE : 0),anchored.zName);
+    int r=md_database_error(*out,rc);
     if (r) { sqlite3_close(*out); *out=NULL; }
     return r;
 }

@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -80,11 +81,42 @@ static void concurrent(void) {
     assert(!pthread_barrier_destroy(&start)); close(root);
     assert(!md_private_tree_discard(AT_FDCWD,path));
 }
+static void exhausted(void) {
+    char path[]="database-fds-XXXXXX"; assert(mkdtemp(path));
+    int root=open(path,O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(root>=0);
+    sqlite3 *db=NULL;
+    assert(!md_database_open(root,"state.db",1,&db));
+    execute(db,"PRAGMA journal_mode=DELETE;CREATE TABLE test(value);INSERT INTO test VALUES(1)");
+    sqlite3_stmt *query=NULL;
+    assert(sqlite3_prepare_v2(db,"UPDATE test SET value=2",-1,&query,NULL)==SQLITE_OK);
+    struct rlimit saved; assert(!getrlimit(RLIMIT_NOFILE,&saved));
+    struct rlimit limit=saved; if (limit.rlim_cur>256) limit.rlim_cur=256;
+    assert(!setrlimit(RLIMIT_NOFILE,&limit));
+    int held[256]; unsigned count=0;
+    for (;;) {
+        int fd=open("/dev/null",O_RDONLY|O_CLOEXEC);
+        if (fd<0) { assert(errno==EMFILE); break; }
+        assert(count<256); held[count++]=fd;
+    }
+    sqlite3 *failed=NULL;
+    assert(md_database_open(root,"unopened.db",1,&failed)==-EMFILE && !failed);
+    assert(md_database_step(query)==-EMFILE);
+    while (count) close(held[--count]);
+    assert(!setrlimit(RLIMIT_NOFILE,&saved));
+    sqlite3_reset(query);
+    assert(value(db)==1);
+    assert(md_database_step(query)==SQLITE_DONE);
+    assert(sqlite3_finalize(query)==SQLITE_OK && value(db)==2);
+    assert(sqlite3_close(db)==SQLITE_OK); close(root);
+    assert(!md_private_tree_discard(AT_FDCWD,path));
+}
 void test_storage_database(void) {
     assert(sqlite3_threadsafe()!=0);
     concurrent();
     retained("PRAGMA journal_mode=WAL");
     retained("PRAGMA journal_mode=PERSIST");
+    exhausted();
+    assert(md_database_result(-EMFILE)==-EMFILE);
     assert(md_database_result(SQLITE_NOMEM)==-ENOMEM);
     assert(md_database_result(SQLITE_FULL)==-ENOSPC);
     assert(md_database_result(SQLITE_READONLY)==-EROFS);

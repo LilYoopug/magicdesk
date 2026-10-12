@@ -143,7 +143,8 @@ int md_view_mount_collect(struct md_filesystem *fs) {
     unsigned retire[MD_FS_MOUNTS_MAX+1]={0}, order[MD_FS_MOUNTS_MAX+1];
     int leases[MD_FS_MOUNTS_MAX];
     for (unsigned i=0;i<MD_FS_MOUNTS_MAX;++i) leases[i]=-1;
-    int r=md_view_topology_order(fs->mounts,order);
+    int r=md_view_mount_reconcile(fs);
+    if (!r) r=md_view_topology_order(fs->mounts,order);
     if (r) return r;
     for (unsigned i=0;i<tree->count;++i) {
         struct md_view_mount *m=&tree->mounts[i];
@@ -423,17 +424,7 @@ static int unmount(struct md_filesystem *fs, const struct md_fs_request *q,
         int r=md_mount_graph_exclude(fs->mounts,target->mount,&lease);
         if (r) return r;
     }
-    struct md_view_mount next[MD_FS_MOUNTS_MAX];
-    memcpy(next,tree->mounts,tree->count*sizeof(*next));
-    for (unsigned i=0;i<tree->count;++i)
-        if (descendant(&tree->mounts[i],target->mount)) next[i].detached=1;
-    struct md_view_mount base=fs->mounts->base;
-    if (descendant(&base,target->mount) || target->mount==&fs->mounts->base) base.detached=1;
-    struct md_mount_layout l={.base=&base,.entries=next,.count=tree->count,.root=fs->mounts->root};
-    int r=md_mount_graph_update(fs->mounts,&l);
-    if (!r) fs->mounts->base.detached=base.detached;
-    if (!r) for (unsigned i=0;i<tree->count;++i)
-        if (descendant(&tree->mounts[i],target->mount)) tree->mounts[i].detached=1;
+    int r=md_view_mount_detach(fs,target->mount);
     if (lease>=0) close(lease);
     return r;
 }
@@ -596,7 +587,7 @@ int md_fs_mount_change(struct md_filesystem *fs, struct md_guest_domain *context
             || q->mode==MD_FS_MOUNT_PROC || q->mode==MD_FS_MOUNT_DEVPTS
             || q->mode==MD_FS_MOUNT_CGROUP || q->mode==MD_FS_MOUNT_CGROUP2 || q->mode==MD_FS_MOUNT_SYSFS
             || q->mode==MD_FS_MOUNT_MQUEUE)
-        ? md_view_mount_collect(fs) : 0;
+        ? md_view_mount_collect(fs) : md_view_mount_reconcile(fs);
     struct md_view_location target={.fd=-1,.parent=-1};
     if (!r) r=operand(fs,q,0,&target);
     if (!r && target.view!=fs->mounts) r=-EINVAL;
