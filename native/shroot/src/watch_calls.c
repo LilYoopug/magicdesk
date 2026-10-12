@@ -4,11 +4,8 @@
 #include "raw.h"
 #include "interception.h"
 #include "fd_filter.h"
-#include "proc_control.h"
 #include <errno.h>
 #include <fcntl.h>
-#include <linux/filter.h>
-#include <linux/seccomp.h>
 #include <sys/inotify.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -21,7 +18,7 @@ static long request(const struct md_fs *fs, unsigned operation, int first, int s
     long r = md_fs_call(fs->endpoint, 5000, &q, out);
     return r ? r : out->result.error;
 }
-static long watched(const struct md_fs *fs, int fd) {
+long md_watch_contains(const struct md_fs *fs, int fd) {
     if (fd < 0 || !*fs->endpoint) return 0;
     struct stat st;
     long r = RAW2(fstat, fd, &st);
@@ -33,19 +30,12 @@ static long watched(const struct md_fs *fs, int fd) {
     r = request(fs, MD_FS_WATCH_CONTAINS, fd, -1, 0, &out);
     return r ? r : (long)out.result.position;
 }
-static long arm(int fd) { return md_fd_filter_arm(MD_FD_SELECTOR_WATCH,fd); }
-long md_watch_arm(const struct md_fs *fs, int fd) {
-    long control=md_proc_control_known(fd);
-    if (control) return control<0 ? control : md_fd_filter_arm(MD_FD_SELECTOR_PROC,fd);
-    long r = watched(fs, fd);
-    return r > 0 ? arm(fd) : r;
-}
 static int local_copy(void *output, const void *data, size_t size) {
     return (int)md_write_memory(output, data, size);
 }
 long md_watch_read_local(const struct md_fs *fs, long nr, const unsigned long *a) {
     int fd = (int)a[nr == SYS_sendfile ? 1 : 0];
-    long r = watched(fs, fd);
+    long r = md_watch_contains(fs, fd);
     if (r <= 0) return r ? r : MD_WATCH_NATIVE;
     struct md_fs_response out;
     if (nr == SYS_ioctl) {
@@ -100,29 +90,12 @@ long md_watch_call(const struct md_fs *fs, long nr, const unsigned long *a) {
         r = request(fs, MD_FS_WATCH_CREATE, -1, -1, (unsigned)a[0], &out);
         if (r) return r;
         int fd = out.result.fd;
-        r = md_watch_arm(fs, fd);
+        r = md_fd_filter_arm(MD_FD_SELECTOR_WATCH,fd);
         if (!r && !(a[0] & IN_CLOEXEC)) r = RAW3(fcntl, fd, F_SETFD, 0);
         if (r) { RAW1(close, fd); return r; }
         return fd;
     }
     if (nr == SYS_inotify_rm_watch)
         return request(fs, MD_FS_WATCH_REMOVE, (int)a[0], -1, (unsigned)a[1], &out);
-    if (nr == SYS_dup3 && (int)a[1] >= 0 && (int)a[0] != (int)a[1]
-            && !((unsigned)a[2] & ~O_CLOEXEC)) {
-        r=md_proc_control_known((int)a[0]);
-        if (r<0) return r;
-        if (r && (r=md_fd_filter_arm(MD_FD_SELECTOR_PROC,(int)a[1]))) return r;
-        r = watched(fs, (int)a[0]);
-        if (r < 0) return r;
-        /* The destination is known before publication. Activation failure must
-         * not close or replace the caller's previous destination descriptor. */
-        if (r && (r = arm((int)a[1]))) return r;
-    }
-    r = md_raw(nr, a[0], a[1], a[2], a[3], a[4], a[5]);
-    if (r < 0) return r;
-    if (nr == SYS_dup3) return r;
-    if (nr == SYS_fcntl && a[1] != F_DUPFD && a[1] != F_DUPFD_CLOEXEC) return r;
-    long activation = md_watch_arm(fs, (int)r);
-    if (activation) { RAW1(close, r); return activation; }
-    return r;
+    return -ENOSYS;
 }

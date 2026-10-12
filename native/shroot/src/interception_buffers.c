@@ -12,13 +12,16 @@ struct slot { uint64_t generation; unsigned references; };
 struct md_interception_buffers {
     void *memory;
     size_t size, stride, capacity, clear_prefix;
-    unsigned slots, references, next;
+    unsigned slots, ordinary, references, next, next_reserved;
     uint64_t generation;
     int fd;
     struct slot slot[];
 };
-int md_buffers_create(unsigned slots, size_t capacity, size_t clear_prefix, struct md_interception_buffers **out) {
+int md_buffers_create(unsigned slots, size_t capacity, size_t clear_prefix,
+        unsigned reserved, struct md_interception_buffers **out) {
     if (!out || !slots || !capacity || clear_prefix>capacity) return -EINVAL;
+    if (reserved>UINT_MAX-slots) return -EOVERFLOW;
+    unsigned ordinary=slots; slots+=reserved;
     size_t page=(size_t)getpagesize();
     if (capacity>SIZE_MAX-(page-1)) return -EOVERFLOW;
     size_t stride=(capacity+page-1)/page*page;
@@ -28,7 +31,7 @@ int md_buffers_create(unsigned slots, size_t capacity, size_t clear_prefix, stru
             || __builtin_add_overflow(bytes,sizeof(struct md_interception_buffers),&bytes)) return -EOVERFLOW;
     struct md_interception_buffers *p=calloc(1,bytes);
     if (!p) return -ENOMEM;
-    p->fd=-1; p->slots=slots; p->capacity=capacity; p->clear_prefix=clear_prefix;
+    p->fd=-1; p->slots=slots; p->ordinary=ordinary; p->capacity=capacity; p->clear_prefix=clear_prefix;
     p->stride=stride; p->size=stride*slots; p->references=1;
     p->fd=memfd_create("guest-request-buffers",MFD_CLOEXEC|MFD_ALLOW_SEALING);
     int error=0;
@@ -64,20 +67,29 @@ static int valid(const struct md_interception_buffer *b) {
     return b->index<p->slots && b->generation && p->slot[b->index].generation==b->generation
         && p->slot[b->index].references ? 0 : -ESTALE;
 }
-int md_buffers_take(struct md_interception_buffers *p, struct md_interception_buffer *out) {
+static int take(struct md_interception_buffers *p, struct md_interception_buffer *out, int reserved) {
     if (!p || !out) return -EINVAL;
     if (out->pool) return -EBUSY;
     if (p->generation==UINT64_MAX || p->references==UINT_MAX) return -EOVERFLOW;
-    for (unsigned n=0;n<p->slots;++n) {
-        unsigned i=(unsigned)(((uint64_t)p->next+n)%p->slots);
+    unsigned base=reserved ? p->ordinary : 0, count=reserved ? p->slots-p->ordinary : p->ordinary;
+    if (!count) return -ENOTSUP;
+    unsigned *next=reserved ? &p->next_reserved : &p->next;
+    for (unsigned n=0;n<count;++n) {
+        unsigned i=base+(unsigned)(((uint64_t)*next+n)%count);
         if (p->slot[i].references) continue;
         p->slot[i]=(struct slot){.generation=++p->generation,.references=1};
-        ++p->references; p->next=(i+1)%p->slots;
-        memset((char *)p->memory+i*p->stride,0,p->clear_prefix);
+        ++p->references; *next=(i-base+1)%count;
+        if (!reserved) memset((char *)p->memory+i*p->stride,0,p->clear_prefix);
         *out=(struct md_interception_buffer){.pool=p,.index=i,.generation=p->generation};
         return 0;
     }
     return -EAGAIN;
+}
+int md_buffers_take(struct md_interception_buffers *p, struct md_interception_buffer *out) {
+    return take(p,out,0);
+}
+int md_buffers_take_reserved(struct md_interception_buffers *p, struct md_interception_buffer *out) {
+    return take(p,out,1);
 }
 int md_buffer_pin(const struct md_interception_buffer *b, struct md_interception_buffer *out) {
     if (!out) return -EINVAL;

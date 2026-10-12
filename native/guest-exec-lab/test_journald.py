@@ -66,12 +66,15 @@ def main():
     parser.add_argument('--build', type=Path, required=True)
     parser.add_argument('--probe-only', action='store_true')
     parser.add_argument('--trace', action='store_true')
+    parser.add_argument('--diagnostics', action='store_true')
     parser.add_argument('--output', type=Path, default=Path('build/journald-results'))
     args = parser.parse_args()
     suite = Suite(args.output, args.build)
     target = '/md-journal-' + suite.report['id']
     label = 'journald-' + suite.report['id']
     prefix = [suite.runner, '--store', args.store, '--user', '0:0', '--network', 'routed']
+    if args.diagnostics:
+        prefix.append('--diagnostics')
     created = False
     suite.report['probeOnly'] = args.probe_only
     try:
@@ -88,17 +91,20 @@ def main():
                     '-o', target + '/trace.log'] + boot
         # EVENT_WAIT: PID1 returns after the service job; the deadline cancels
         # a stalled launch, never substitutes for service readiness.
-        suite.command(prefix + ['--env', 'MAGICDESK_GUEST_LABEL=' + label,
-                                '--bind', suite.base, target, '--deadline-seconds', '90', '--',
-                                '/usr/bin/script', '-q', '-e', '-c', shlex.join(boot), '/dev/null'],
-                      timeout=110)
+        command = prefix + ['--env', 'MAGICDESK_GUEST_LABEL=' + label,
+                            '--bind', suite.base, target, '--deadline-seconds', '90', '--',
+                            '/usr/bin/script', '-q', '-e', '-c', shlex.join(boot), '/dev/null']
+        suite.command(['/system/bin/sh', '-c', 'log=$1; shift; exec "$@" >"$log" 2>&1',
+                       'journal-boot', suite.base + '/boot.log', *command], timeout=110)
         assert suite.command(['cat', suite.base + '/result']).strip() == '0'
         suite.report['passed'] = True
     finally:
         try:
-            for name in ('driver.log', 'journald.log', 'result'):
+            for name in ('driver.log', 'journald.log', 'result', 'boot.log'):
                 suite.command(['/system/bin/sh', '-c', 'test ! -f "$1" || tail -100 "$1"',
                                'journal-log', suite.base + '/' + name])
+            suite.transport.download(suite.client, suite.base + '/boot.log',
+                                     args.output / (suite.report['id'] + '.boot.log'))
             if args.trace:
                 suite.transport.download(suite.client, suite.base + '/trace.log',
                                          args.output / (suite.report['id'] + '.trace'))

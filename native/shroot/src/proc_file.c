@@ -49,7 +49,12 @@ static void destroy(struct md_fd_object *object) {
     if (f->process_state) md_identity_release(&f->process_identity);
     md_user_namespace_release(f->target); md_identity_release(&f->opener); free(f->directory); free(f);
 }
-static const struct md_fd_object_type type={.destroy=destroy,.selectors=1U<<MD_FD_SELECTOR_PROC};
+static unsigned selectors(const struct md_fd_object *object) {
+    const struct md_proc_file *f=(const void *)object;
+    return f->control && f->control->poll && !(atomic_load_explicit(&f->flags,memory_order_relaxed)&O_PATH)
+        ? 1U<<MD_FD_SELECTOR_EPOLL_TARGET : 0;
+}
+static const struct md_fd_object_type type={.destroy=destroy,.selectors=1U<<MD_FD_SELECTOR_PROC,.selector_mask=selectors};
 struct md_fd_object *md_proc_file_object(struct md_proc_file *f) {
     return f ? &f->object : NULL;
 }

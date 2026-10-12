@@ -66,6 +66,7 @@ struct md_task_helpers *md_task_helpers_new(const struct md_task_helper_callback
 /* Every helper must be reaped before destruction. */
 void md_task_helpers_destroy(struct md_task_helpers *);
 unsigned md_task_helpers_count(const struct md_task_helpers *);
+int md_task_helpers_group_busy(const struct md_task_helpers *,pid_t group);
 /* Snapshot for a supervisor-owned writer barrier: task, stopped, resume request.
  * A zero request waits for an externally owned stop, including initial birth;
  * the barrier must preserve it for this helper's event handler. */

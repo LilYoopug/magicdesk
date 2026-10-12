@@ -133,6 +133,8 @@ static void event_loop(void) {
 int main(void) {
     extern void test_control_epoll(void);
     extern void test_fd_weak(void);
+    extern void test_fd_filter_program(void);
+    test_fd_filter_program();
     independent_opens(); publication_races(); event_loop();
     test_control_epoll();
     test_fd_weak();

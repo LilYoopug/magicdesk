@@ -62,7 +62,7 @@ guest_executable(bootstrap ${src}/bootstrap.c ${src}/elf.c ${src}/exec.c ${src}/
     ${src}/file_calls.c ${src}/fs.c ${src}/proc_paths.c ${src}/proc_image.c ${src}/proc_control.c ${src}/program_files.c ${src}/task_status.c
     ${src}/namespace.c ${src}/namespace_proc.c ${src}/namespace_mount.c ${src}/namespace_mount_fd.c ${src}/namespace_bpf.c ${src}/namespace_landlock.c ${src}/socket_calls.c ${src}/socket_namespace.c ${src}/socket_identity.c ${src}/socket_ancillary.c ${src}/socket_routes.c ${src}/fd_metadata.c
     ${src}/task_receive.c ${src}/fs_client.c ${src}/fs_buffer_client.c ${src}/adapter_buffer.c ${src}/file_open.c ${wire} ${src}/raw.c ${src}/raw.S)
-target_sources(bootstrap PRIVATE ${src}/descriptor_calls.c)
+target_sources(bootstrap PRIVATE ${src}/descriptor_calls.c ${src}/epoll_calls.c ${src}/descriptor_capture.c)
 guest_freestanding(bootstrap)
 target_compile_options(bootstrap PRIVATE -mgeneral-regs-only)
 target_link_options(bootstrap PRIVATE -Wl,--image-base=0x2000000000)
@@ -79,7 +79,7 @@ target_compile_definitions(supervisor PRIVATE MD_NO_START MD_USE_LIBC)
 target_sources(bootstrap PRIVATE ${src}/network_calls.c)
 target_sources(supervisor PRIVATE ${capsules})
 target_sources(supervisor PRIVATE ${src}/task_wait.c ${src}/pending.c)
-target_sources(supervisor PRIVATE ${src}/control_epoll.c)
+target_sources(supervisor PRIVATE ${src}/control_epoll.c ${src}/fd_admission.c ${src}/task_call.c ${src}/task_filter.c ${src}/fd_filter_program.c ${src}/epoll_wait.c)
 target_sources(supervisor PRIVATE ${src}/input_session.c ${src}/input_devices.c ${src}/input_uinput.c)
 target_link_libraries(supervisor PRIVATE guest-sqlite guest-sha256 m)
 
@@ -107,8 +107,11 @@ install(TARGETS bootstrap supervisor run service image RUNTIME DESTINATION lib)
 
 option(MAGICDESK_GUEST_FIXTURES "Build standalone native fixtures" OFF)
 if(MAGICDESK_GUEST_FIXTURES)
+    guest_executable(fd_filter_remote ../guest-exec-lab/test_fd_filter_remote.c ${src}/fd_filter_program.c ${src}/task_call.c ${src}/task_filter.c ${src}/task_quiesce.c)
+    target_compile_options(fd_filter_remote PRIVATE -iquote ${src} -UNDEBUG)
     guest_executable(control_event ../guest-exec-lab/test_control_event.c
         ../guest-exec-lab/test_control_epoll.c ../guest-exec-lab/test_fd_weak.c
+        ../guest-exec-lab/test_fd_filter_program.c ${src}/fd_filter_program.c
         ${src}/control_event.c ${src}/control_epoll.c)
     target_compile_options(control_event PRIVATE -iquote ${src} -UNDEBUG)
     target_link_options(control_event PRIVATE -Wl,--wrap=malloc -Wl,--wrap=calloc)
@@ -152,7 +155,8 @@ if(MAGICDESK_GUEST_FIXTURES)
         ${src}/task_receive.c ${src}/event_wait.c ${raw})
     target_compile_definitions(test_task_resources PRIVATE MD_NO_START MD_USE_LIBC)
     target_sources(test_task_resources PRIVATE ../guest-exec-lab/test_user_namespace.c ${src}/proc_file.c ${src}/proc_sysctl.c ${src}/proc_namespace.c ${src}/fd_selector.c)
-    target_sources(test_task_resources PRIVATE ../guest-exec-lab/test_control_poll.c ../guest-exec-lab/test_epoll_owner.c ${src}/control_epoll.c)
+    target_sources(test_task_resources PRIVATE ../guest-exec-lab/test_control_poll.c ../guest-exec-lab/test_epoll_owner.c ../guest-exec-lab/test_fd_admission.c ${src}/control_epoll.c ${src}/fd_admission.c)
+    target_sources(test_task_resources PRIVATE ../guest-exec-lab/test_fd_admission_live.c ${src}/task_call.c ${src}/task_filter.c ${src}/task_quiesce.c ${src}/fd_filter_program.c)
     target_sources(test_task_resources PRIVATE ${src}/descriptor_inode.c ../guest-exec-lab/test_descriptor_inode.c)
     target_sources(test_task_resources PRIVATE ../guest-exec-lab/test_network_model.c ../guest-exec-lab/test_network_route.c ../guest-exec-lab/test_network_endpoint.c)
     target_compile_options(test_task_resources PRIVATE -iquote ${src} -UNDEBUG)
@@ -188,7 +192,7 @@ if(MAGICDESK_GUEST_FIXTURES)
     target_compile_options(task_helper_fd PRIVATE -iquote ${src} -UNDEBUG)
     target_compile_definitions(task_helper_fd PRIVATE MD_NO_START MD_USE_LIBC)
     target_link_libraries(task_helper_fd PRIVATE guest-sqlite m)
-    guest_executable(test_interception_buffers ../guest-exec-lab/test_interception_buffers.c ${src}/interception_buffers.c ${src}/interception_memory.c ${src}/resource_order.c)
+    guest_executable(test_interception_buffers ../guest-exec-lab/test_interception_buffers.c ${src}/interception_buffers.c ${src}/interception_memory.c ${src}/resource_order.c ${src}/fd_filter_program.c)
     target_compile_options(test_interception_buffers PRIVATE -iquote ${src} -UNDEBUG)
     target_link_options(test_interception_buffers PRIVATE -Wl,--wrap=calloc -Wl,--wrap=malloc -Wl,--wrap=realloc)
     guest_executable(fs_dispatch ../guest-exec-lab/test_fs_dispatch.c ../guest-exec-lab/test_ipc_peer_worker.c ../guest-exec-lab/test_namespace_broker.c ../guest-exec-lab/test_fd_lifecycle.S

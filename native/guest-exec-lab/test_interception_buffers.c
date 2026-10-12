@@ -1,10 +1,13 @@
 #define _GNU_SOURCE
 #include "interception_buffers.h"
 #include "interception_memory.h"
+#include "adapter_frame.h"
+#include "fd_filter_program.h"
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,7 +40,7 @@ static unsigned descriptors(void) {
 }
 static void slots(void) {
     struct md_interception_buffers *p=NULL;
-    assert(!md_buffers_create(3,8193,8193,&p));
+    assert(!md_buffers_create(3,8193,8193,0,&p));
     int fd=md_buffers_fd(p), seals=F_SEAL_SHRINK|F_SEAL_GROW|F_SEAL_SEAL;
     assert((fcntl(fd,F_GETFD)&FD_CLOEXEC) && fcntl(fd,F_GET_SEALS)==seals);
     assert(ftruncate(fd,1)==-1 && errno==EPERM);
@@ -73,9 +76,47 @@ static void slots(void) {
     md_buffers_release(p);
     puts("PASS request buffers: bounded slots, exact spans, sealed size, retained ownership, stale generation and allocation-free reuse");
 }
+static void filter_payload(void) {
+    struct md_interception_buffers *pool=NULL;
+    assert(!md_buffers_create(1,sizeof(union md_adapter_frame),64,1,&pool));
+    struct md_interception_buffer caller={0},filter={0},extra={0};
+    assert(!md_buffers_take(pool,&caller));
+    struct md_buffer_span span; assert(!md_buffer_span(&caller,&span));
+    unsigned char *payload=span.data;
+    size_t bytes=span.size;
+    memset(payload,0x7b,bytes);
+    fail_allocation=1;
+    unsigned before=allocations;
+    assert(md_buffers_take(pool,&extra)==-EAGAIN);
+    assert(!md_buffers_take_reserved(pool,&filter));
+    assert(md_buffers_take_reserved(pool,&extra)==-EAGAIN);
+    assert(!md_buffer_span(&filter,&span));
+    assert(span.offset>=bytes && span.size>=sizeof(struct md_task_filter_image));
+    struct md_task_filter_image *image=span.data;
+    struct md_fd_filter_gates gates={0x100000,0x200000,0x300000};
+    for (unsigned kind=0;kind<MD_FD_SELECTOR_KINDS;++kind) {
+        assert(!md_fd_filter_build(kind,123,&gates,&image->code));
+        image->program=(struct sock_fprog){image->code.count,image->code.code};
+        for (size_t i=0;i<bytes;++i) assert(payload[i]==0x7b);
+    }
+    assert(!md_buffer_release(&caller));
+    assert(!md_buffers_take(pool,&caller));
+    assert(image->program.len==image->code.count && image->program.len);
+    assert(md_buffers_take(pool,&extra)==-EAGAIN);
+    assert(!md_buffer_pin(&filter,&extra) && !md_buffer_release(&filter));
+    assert(md_buffers_take_reserved(pool,&filter)==-EAGAIN);
+    assert(!md_buffer_span(&extra,&span) && span.data==image);
+    assert(!md_buffer_release(&extra));
+    assert(!md_buffers_take_reserved(pool,&filter));
+    assert(image->program.len==image->code.count && image->program.len);
+    assert(!md_buffer_release(&filter) && !md_buffer_release(&caller));
+    assert(allocations==before); fail_allocation=0;
+    md_buffers_release(pool);
+    puts("PASS selector payload: independent control reserve, full IO pool, preserved payload, pin/reuse and no allocation");
+}
 static void owner_lifetime(void) {
     struct md_interception_buffers *old=NULL,*next=NULL;
-    assert(!md_buffers_create(1,65536,65536,&old));
+    assert(!md_buffers_create(1,65536,65536,0,&old));
     struct md_interception_buffers *fork_owner=md_buffers_retain(old); assert(fork_owner==old);
     struct md_interception_buffer task={0},worker={0},blocked={0};
     assert(!md_buffers_take(old,&task) && !md_buffer_pin(&task,&worker));
@@ -86,7 +127,7 @@ static void owner_lifetime(void) {
     assert(!md_buffer_release(&task));
     assert(md_buffers_take(fork_owner,&blocked)==-EAGAIN);
     md_buffers_release(fork_owner);
-    assert(!md_buffers_create(1,65536,65536,&next));
+    assert(!md_buffers_create(1,65536,65536,0,&next));
     assert(!md_buffers_take(next,&task));
     struct md_buffer_span b; assert(!md_buffer_span(&task,&b));
     assert(b.data!=a.data && !((unsigned char *)b.data)[0]);
@@ -99,19 +140,20 @@ static void owner_lifetime(void) {
 }
 static void failures(void) {
     struct md_interception_buffers *p=NULL;
-    assert(md_buffers_create(0,1,1,&p)==-EINVAL && !p);
-    assert(md_buffers_create(1,0,0,&p)==-EINVAL && !p);
-    assert(md_buffers_create(1,SIZE_MAX,SIZE_MAX,&p)==-EOVERFLOW && !p);
-    assert(md_buffers_create(2,PTRDIFF_MAX,PTRDIFF_MAX,&p)==-EOVERFLOW && !p);
+    assert(md_buffers_create(0,1,1,0,&p)==-EINVAL && !p);
+    assert(md_buffers_create(1,0,0,0,&p)==-EINVAL && !p);
+    assert(md_buffers_create(1,SIZE_MAX,SIZE_MAX,0,&p)==-EOVERFLOW && !p);
+    assert(md_buffers_create(2,PTRDIFF_MAX,PTRDIFF_MAX,0,&p)==-EOVERFLOW && !p);
+    assert(md_buffers_create(1,4096,0,UINT_MAX,&p)==-EOVERFLOW && !p);
     fail_allocation=1;
-    assert(md_buffers_create(1,4096,4096,&p)==-ENOMEM && !p);
+    assert(md_buffers_create(1,4096,4096,0,&p)==-ENOMEM && !p);
     fail_allocation=0;
     struct rlimit saved; assert(!getrlimit(RLIMIT_NOFILE,&saved) && saved.rlim_max>=64);
     struct rlimit limit=saved; limit.rlim_cur=64; assert(!setrlimit(RLIMIT_NOFILE,&limit));
     int fds[64],n=0,fd;
     while ((fd=fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,0))>=0) { assert(n<64); fds[n++]=fd; }
     assert(errno==EMFILE && n);
-    assert(md_buffers_create(1,4096,4096,&p)==-EMFILE && !p);
+    assert(md_buffers_create(1,4096,4096,0,&p)==-EMFILE && !p);
     for (int i=0;i<n;++i) assert(!close(fds[i]));
     assert(!setrlimit(RLIMIT_NOFILE,&saved));
     puts("PASS request buffers: invalid sizes, allocation failure and exhausted provider FD table leave no pool");
@@ -119,10 +161,10 @@ static void failures(void) {
 static void address_spaces(void) {
     struct md_interception_memory *parent=md_memory_new(); assert(parent);
     fail_allocation=1;
-    assert(md_memory_buffers_prepare(parent,2,5000,5000)==-ENOMEM && !md_memory_buffers(parent));
+    assert(md_memory_buffers_prepare(parent,2,5000,5000,0)==-ENOMEM && !md_memory_buffers(parent));
     fail_allocation=0;
-    assert(!md_memory_buffers_prepare(parent,2,5000,5000));
-    assert(md_memory_buffers_prepare(parent,2,5000,5000)==-EALREADY);
+    assert(!md_memory_buffers_prepare(parent,2,5000,5000,0));
+    assert(md_memory_buffers_prepare(parent,2,5000,5000,0)==-EALREADY);
     struct md_interception_buffers *pool=md_memory_buffers(parent);
     size_t size=md_buffers_size(pool);
     struct md_interception_buffer a={0},b={0},worker={0},extra={0};
@@ -160,7 +202,7 @@ static void address_spaces(void) {
     assert(fcntl(fd,F_GETFD)>=0);
     struct md_interception_memory *exec=md_memory_new(); assert(exec);
     assert(!md_memory_buffers(exec) && !md_memory_buffer_address(exec,&worker));
-    assert(!md_memory_buffers_prepare(exec,1,4096,4096));
+    assert(!md_memory_buffers_prepare(exec,1,4096,4096,0));
     assert(md_memory_buffers(exec)!=worker.pool);
     md_memory_release(exec);
     assert(!md_buffer_release(&worker) && fcntl(fd,F_GETFD)==-1 && errno==EBADF);
@@ -168,8 +210,8 @@ static void address_spaces(void) {
 }
 static void payload_reuse(void) {
     struct md_interception_buffers *pool=NULL;
-    assert(md_buffers_create(1,64,65,&pool)==-EINVAL && !pool);
-    assert(!md_buffers_create(1,65536,64,&pool));
+    assert(md_buffers_create(1,64,65,0,&pool)==-EINVAL && !pool);
+    assert(!md_buffers_create(1,65536,64,0,&pool));
     struct md_interception_buffer slot={0}; struct md_buffer_span span;
     assert(!md_buffers_take(pool,&slot) && !md_buffer_span(&slot,&span));
     memset(span.data,0x7a,span.size);
@@ -456,7 +498,7 @@ static void memory_access_protected_child(void) {
 int main(void) {
     alarm(30);
     unsigned before=descriptors();
-    slots(); owner_lifetime(); failures(); address_spaces(); payload_reuse(); mapping_policy(); file_views(); file_view_failures();
+    slots(); filter_payload(); owner_lifetime(); failures(); address_spaces(); payload_reuse(); mapping_policy(); file_views(); file_view_failures();
     file_backing_lifetime(); memory_access_lifetime(); memory_access_capture(); memory_access_protected_child();
     assert(descriptors()==before);
     puts("PASS shared request buffer ownership");

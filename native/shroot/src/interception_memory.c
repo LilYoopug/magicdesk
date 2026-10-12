@@ -155,10 +155,11 @@ void md_memory_stack_return(struct md_interception_memory *s, uintptr_t top) {
     for (struct slot *p = s->slots; p; p = p->next)
         if (p->top == top) { p->used = 0; return; }
 }
-int md_memory_buffers_prepare(struct md_interception_memory *s, unsigned slots, size_t capacity, size_t clear_prefix) {
+int md_memory_buffers_prepare(struct md_interception_memory *s, unsigned slots, size_t capacity,
+        size_t clear_prefix, unsigned reserved) {
     if (!s) return -EINVAL;
     if (s->buffers) return -EALREADY;
-    return md_buffers_create(slots,capacity,clear_prefix,&s->buffers);
+    return md_buffers_create(slots,capacity,clear_prefix,reserved,&s->buffers);
 }
 struct md_interception_buffers *md_memory_buffers(struct md_interception_memory *s) {
     return s ? s->buffers : NULL;

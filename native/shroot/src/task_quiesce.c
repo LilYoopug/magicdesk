@@ -11,7 +11,7 @@
 struct participant {
     struct participant *next, *indexed;
     pid_t pid;
-    int stopped, resume, interrupted, synthetic;
+    int stopped, resume, interrupted, synthetic, borrowed;
 };
 struct deferred {
     struct deferred *next;
@@ -23,7 +23,7 @@ enum { PARTICIPANT_BUCKETS=257 };
 struct md_task_quiesce {
     struct participant *participants;
     struct participant *index[PARTICIPANT_BUCKETS];
-    unsigned waiting;
+    unsigned waiting, borrowed;
     struct deferred *first, *last;
     long (*trace)(int,pid_t,void *,void *);
 };
@@ -55,6 +55,7 @@ static void stopped(struct md_task_quiesce *q,struct participant *p,int value) {
 }
 int md_task_quiesce_add(struct md_task_quiesce *q,pid_t pid,int is_stopped,int request) {
     struct participant *p=find(q,pid);
+    if (p && p->borrowed) return -EBUSY;
     if (!p) {
         p=calloc(1,sizeof(*p)); if (!p) return -ENOMEM;
         unsigned bucket=(unsigned)pid%PARTICIPANT_BUCKETS;
@@ -77,7 +78,7 @@ int md_task_quiesce_stop(struct md_task_quiesce *q) {
     return 0;
 }
 int md_task_quiesce_ready(const struct md_task_quiesce *q) {
-    return !q->waiting;
+    return !q->waiting && !q->borrowed;
 }
 void md_task_quiesce_describe(const struct md_task_quiesce *q,int fd) {
     for (const struct participant *p=q->participants;p;p=p->next) if (!p->stopped)
@@ -86,6 +87,7 @@ void md_task_quiesce_describe(const struct md_task_quiesce *q,int fd) {
 }
 int md_task_quiesce_event(struct md_task_quiesce *q,pid_t pid,int status,const struct rusage *usage) {
     struct participant *p=find(q,pid);
+    if (p && p->borrowed) return -EBUSY;
     if (!p) { int e=md_task_quiesce_add(q,pid,0,0); if (e) return e; p=find(q,pid); }
     unsigned event=(unsigned)status>>16;
     if (!p->stopped && p->interrupted && event==PTRACE_EVENT_STOP && WSTOPSIG(status)==SIGTRAP) {
@@ -103,7 +105,28 @@ int md_task_quiesce_event(struct md_task_quiesce *q,pid_t pid,int status,const s
     }
     return 0;
 }
+int md_task_quiesce_borrow(struct md_task_quiesce *q,pid_t pid,struct md_task_quiesce_stop *out) {
+    struct participant *p=find(q,pid);
+    if (!p || !out) return -EINVAL;
+    if (!md_task_quiesce_ready(q)) return -EBUSY;
+    struct md_task_quiesce_stop boundary={.kind=p->synthetic
+        ? MD_TASK_QUIESCE_SYNTHETIC : MD_TASK_QUIESCE_HELD};
+    for (struct deferred *d=q->first;d;d=d->next) if (d->pid==pid) {
+        boundary.kind=MD_TASK_QUIESCE_EVENT; boundary.status=d->status;
+        if (!WIFSTOPPED(d->status)) return -ESRCH;
+        break;
+    }
+    p->borrowed=1; ++q->borrowed; *out=boundary;
+    return 0;
+}
+int md_task_quiesce_return(struct md_task_quiesce *q,pid_t pid) {
+    struct participant *p=find(q,pid);
+    if (!p || !p->borrowed) return -EINVAL;
+    p->borrowed=0; --q->borrowed;
+    return 0;
+}
 int md_task_quiesce_release(struct md_task_quiesce *q) {
+    if (q->borrowed) return -EBUSY;
     int error=0;
     memset(q->index,0,sizeof(q->index)); q->waiting=0;
     while (q->participants) {
@@ -114,12 +137,14 @@ int md_task_quiesce_release(struct md_task_quiesce *q) {
     return error;
 }
 pid_t md_task_quiesce_take(struct md_task_quiesce *q,int *status,struct rusage *usage) {
-    if (!q || !q->first) return 0;
+    if (!q || !q->first || q->borrowed) return 0;
     struct deferred *d=q->first; q->first=d->next; if (!q->first) q->last=NULL;
     pid_t pid=d->pid; *status=d->status; if (usage) *usage=d->usage; free(d); return pid;
 }
 int md_task_quiesce_newborn(struct md_task_quiesce *q,pid_t pid) {
     if (!q) return 0;
+    struct participant *p=find(q,pid);
+    if (p && p->borrowed) return -EBUSY;
     struct deferred **at=&q->first,*previous=NULL;
     while (*at && (*at)->pid!=pid) { previous=*at; at=&(*at)->next; }
     if (!*at) return 0;

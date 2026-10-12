@@ -59,11 +59,37 @@ void *__wrap_calloc(size_t count, size_t size) {
     }
     return __real_calloc(count,size);
 }
+void md_test_prepare_libc_descriptors(void) {
+    /* Bionic lazily retains a trace_marker FD on mutex contention when tracing
+     * is enabled. Initialize it before measuring the runtime's FD ownership. */
+    pthread_mutex_t mutex=PTHREAD_MUTEX_INITIALIZER;
+    assert(!pthread_mutex_lock(&mutex));
+    /* EVENT_WAIT: an already expired deadline exercises contention without a delay. */
+    const struct timespec expired={0};
+    assert(pthread_mutex_timedlock(&mutex,&expired)==ETIMEDOUT);
+    assert(!pthread_mutex_unlock(&mutex) && !pthread_mutex_destroy(&mutex));
+}
 static unsigned descriptors(void) {
     DIR *dir=opendir("/proc/self/fd"); assert(dir);
     unsigned n=0; struct dirent *entry;
     while ((entry=readdir(dir))) if (entry->d_name[0]!='.') ++n;
     assert(!closedir(dir)); return n;
+}
+static void descriptor_balance(unsigned before,const char *scenario,unsigned mode,unsigned protected) {
+    unsigned after=descriptors();
+    if (after!=before) {
+        fprintf(stderr,"FD balance %s mode=%u protected=%u before=%u after=%u\n",scenario,mode,protected,before,after);
+        DIR *dir=opendir("/proc/self/fd"); assert(dir);
+        struct dirent *entry;
+        while ((entry=readdir(dir))) if (entry->d_name[0]!='.') {
+            char target[PATH_MAX];
+            ssize_t size=readlinkat(dirfd(dir),entry->d_name,target,sizeof(target)-1);
+            if (size>=0) { target[size]=0; fprintf(stderr,"FD %s %s%s\n",entry->d_name,target,
+                atoi(entry->d_name)==dirfd(dir) ? " (diagnostic directory)" : ""); }
+        }
+        closedir(dir);
+    }
+    assert(after==before);
 }
 static void pulse(int fd) { uint64_t one=1; assert(write(fd,&one,sizeof(one))==sizeof(one)); }
 static void await(int fd) {
@@ -690,7 +716,7 @@ static void transfer_addressed(const char *path, unsigned mode) {
     assert(recv(mode==2 ? app[1] : other,&byte,1,MSG_DONTWAIT)==-1 && errno==EAGAIN);
     md_fs_close_rights(&received); md_received_fds_release(out.received);
     close(directory); close(other); close(app[0]); close(app[1]);
-    owner_close(&o); md_ipc_origins_destroy(service); assert(descriptors()==before);
+    owner_close(&o); md_ipc_origins_destroy(service); descriptor_balance(before,"addressed",mode,0);
     printf("PASS addressed peer mode=%u: resolved destination selects capsule and credentials, exact cleanup\n",mode);
 }
 static void transfer_failures(const char *path, unsigned mode) {
@@ -960,7 +986,7 @@ static void transfer_inspection(const char *path, unsigned mode) {
     struct md_fs_buffer_service *service=md_fs_buffer_service_new(f.owner[1].worker,tasks,token,inspected_ready);
     assert(service);
     struct md_interception_buffers *pool=NULL;
-    assert(!md_buffers_create(1,sizeof(struct md_fs_buffer_frame),sizeof(struct md_fs_buffer_frame),&pool));
+    assert(!md_buffers_create(1,sizeof(struct md_fs_buffer_frame),sizeof(struct md_fs_buffer_frame),0,&pool));
     struct md_interception_buffer buffer={0}; assert(!md_buffers_take(pool,&buffer));
     struct md_buffer_span span; assert(!md_buffer_span(&buffer,&span));
     struct md_fs_buffer_frame *frame=span.data;
@@ -1069,7 +1095,7 @@ static void transfer_guest_send(const char *path, const char *runner, unsigned m
         md_received_fds_release(r.received);
     }
     char byte; assert(!recv(application[1],&byte,1,MSG_DONTWAIT)); close(application[1]);
-    owner_close(&o); md_ipc_origins_destroy(service); assert(descriptors()==before);
+    owner_close(&o); md_ipc_origins_destroy(service); descriptor_balance(before,"guest send",mode,protected);
     int maintenance=open(path,O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(maintenance>=0);
     assert(!flock(maintenance,LOCK_EX|LOCK_NB)); close(maintenance);
     printf("PASS guest capsule send mode=%u protected=%u: captured origins, task-local send and exact release\n",mode,protected);

@@ -464,6 +464,11 @@ void md_task_helpers_destroy(struct md_task_helpers *manager) {
     free(manager);
 }
 unsigned md_task_helpers_count(const struct md_task_helpers *manager) { return manager ? manager->count : 0; }
+int md_task_helpers_group_busy(const struct md_task_helpers *manager,pid_t group) {
+    for (const struct helper *h=manager ? manager->first : NULL;h;h=h->next)
+        if (h->group==group) return 1;
+    return 0;
+}
 int md_task_helper_begin(struct md_task_helpers *manager, pid_t owner, pid_t group,
         const struct user_pt_regs *regs, const struct md_interception_abi *abi,
         struct md_interception_memory *memory, const struct md_interception_buffer *buffer,

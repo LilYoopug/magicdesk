@@ -396,7 +396,7 @@ static void path_request(const char *store, unsigned kind, int protected, int sl
     struct md_interception_buffers *pool=NULL;
     struct md_interception_buffer task={0},blocked={0};
     struct md_buffer_span span;
-    assert(!md_buffers_create(1,sizeof(struct payload),sizeof(struct payload),&pool));
+    assert(!md_buffers_create(1,sizeof(struct payload),sizeof(struct payload),0,&pool));
     assert(!md_buffers_take(pool,&task) && !md_buffer_span(&task,&span));
     uint64_t generation=task.generation;
     struct payload *data=span.data;
@@ -1173,7 +1173,7 @@ static void buffer_directory_delivery(struct md_fs_buffer_service *service,
     char path[64]; snprintf(path,sizeof(path),"/proc/self/fd/%d",md_fs_anchor_fd(base));
     int fd=open(path,O_RDONLY|O_DIRECTORY|O_CLOEXEC), independent=open(path,O_RDONLY|O_DIRECTORY|O_CLOEXEC);
     int alias=dup(fd); assert(fd>=0 && independent>=0 && alias>=0);
-    struct md_interception_buffers *pool=NULL; assert(!md_buffers_create(3,sizeof(struct md_fs_buffer_frame),sizeof(struct md_fs_buffer_frame),&pool));
+    struct md_interception_buffers *pool=NULL; assert(!md_buffers_create(3,sizeof(struct md_fs_buffer_frame),sizeof(struct md_fs_buffer_frame),0,&pool));
     struct md_interception_buffer buffers[3]={{0}};
     struct md_fs_buffer_frame *frames[3];
     for (unsigned i=0;i<3;++i) {
@@ -1393,7 +1393,7 @@ static void buffer_service_lifetime(const char *store, unsigned cancelled_operat
     int wake=eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK); assert(wake>=0);
     struct md_resource_wakeup *token=NULL; assert(!md_resource_wakeup_create(wake,&token));
     struct md_fs_buffer_service *service=md_fs_buffer_service_new(worker,tasks,token,buffer_completed); assert(service);
-    struct md_interception_buffers *pool=NULL; assert(!md_buffers_create(1,sizeof(struct md_fs_buffer_frame),sizeof(struct md_fs_buffer_frame),&pool));
+    struct md_interception_buffers *pool=NULL; assert(!md_buffers_create(1,sizeof(struct md_fs_buffer_frame),sizeof(struct md_fs_buffer_frame),0,&pool));
     struct md_interception_buffer task={0},next={0};
     assert(!md_buffers_take(pool,&task));
     struct md_buffer_span span; assert(!md_buffer_span(&task,&span));
@@ -1626,7 +1626,7 @@ static void buffer_export_lifetime(const char *store) {
         struct md_resource_wakeup *token=NULL; assert(!md_resource_wakeup_create(wake,&token));
         struct md_fs_buffer_service *service=md_fs_buffer_service_new(worker,tasks,token,export_completed);
         struct md_interception_buffers *pool=NULL;
-        assert(service && !md_buffers_create(1,sizeof(struct md_fs_buffer_frame),sizeof(struct md_fs_buffer_frame),&pool));
+        assert(service && !md_buffers_create(1,sizeof(struct md_fs_buffer_frame),sizeof(struct md_fs_buffer_frame),0,&pool));
         struct md_interception_buffer buffer={0}; struct md_buffer_span span;
         assert(!md_buffers_take(pool,&buffer) && !md_buffer_span(&buffer,&span));
         struct md_fs_buffer_frame *frame=span.data;
@@ -1674,6 +1674,8 @@ void md_test_namespace_broker(const char *);
 void md_test_input_session(const char *);
 void md_test_mount_copy_service(const char *);
 int main(int argc, char **argv) {
+    extern void md_test_prepare_libc_descriptors(void);
+    md_test_prepare_libc_descriptors();
     if (argc==3 && !strcmp(argv[1],"--input")) { md_test_input_session(argv[2]); return 0; }
     if (argc==3 && !strcmp(argv[1],"--worker-pause")) {
         alarm(30); setbuf(stdout,NULL);

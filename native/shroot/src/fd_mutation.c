@@ -53,5 +53,6 @@ int md_fd_mutation_abandon(struct md_fd_mutation *op, struct md_fd_origins *file
         error=md_fd_origins_abandon_range(files,(unsigned)op->args[1],(unsigned)op->args[1]);
     else if (op->nr==SYS_close_range && (unsigned)op->args[0]<=(unsigned)op->args[1])
         error=md_fd_origins_abandon_range(files,(unsigned)op->args[0],(unsigned)op->args[1]);
+    md_fd_origins_abandon(&op->update);
     md_fd_mutation_discard(op); return error;
 }

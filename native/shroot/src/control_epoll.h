@@ -21,6 +21,16 @@ struct md_control_epoll *md_control_epoll_from_object(struct md_fd_object *);
  * stays valid until owner release, including after the last interest's DEL.
  * A wake can be stale, and need not yield an application event. */
 int md_control_epoll_descriptor(const struct md_control_epoll *);
+/* Alternate bounded native/virtual collection for small result buffers. */
+int md_control_epoll_turn(struct md_control_epoll *);
+/* Cold activation reservation, before installing selectors in all holders.
+ * 1: caller owns the reservation; 0: already admitted; negative: cannot admit.
+ * While preparing, newly delivered aliases require the same selector, native
+ * export is excluded and ctl cannot publish an interest. finish consumes only
+ * an owned reservation. A failed admission leaves installed filters harmless;
+ * no readiness transport or virtual subscription has been published. */
+int md_control_epoll_admit_begin(struct md_control_epoll *);
+int md_control_epoll_admit_finish(struct md_control_epoll *,int commit);
 /* Linux interest identity is (open description, registering FD), not data.u64.
  * The caller retains identity during ctl; provider is owned by that identity.
  * ADD weakly observes identity, so the subscription cannot keep its target

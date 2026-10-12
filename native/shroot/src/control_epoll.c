@@ -2,6 +2,7 @@
 #include "control_epoll.h"
 #include "event_signal.h"
 #include "fd_weak.h"
+#include "fd_selector.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
@@ -17,16 +18,21 @@ struct interest {
 struct md_control_epoll {
     struct md_fd_object object;
     atomic_uint admission;
-    int events,ready,signalled;
+    int events,ready,signalled,next_virtual;
     unsigned pending;
     struct interest *first,*head,*tail;
 };
-enum { NATIVE=1U<<30, VIRTUAL=1U<<31, EXPORTS=NATIVE-1 };
+enum { UNCERTAIN=1U<<28, PREPARING=1U<<29, NATIVE=1U<<30, VIRTUAL=1U<<31, EXPORTS=UNCERTAIN-1 };
+static void alias_lost(struct md_fd_object *object) {
+    struct md_control_epoll *q=(void *)object;
+    unsigned previous=atomic_fetch_or_explicit(&q->admission,UNCERTAIN,memory_order_release);
+    if (!(previous&UNCERTAIN) && q->ready>=0) md_event_signal(q->ready);
+}
 static int export_begin(struct md_fd_object *object) {
     struct md_control_epoll *q=(void *)object;
     unsigned state=atomic_load_explicit(&q->admission,memory_order_acquire);
     for (;;) {
-        if (state&VIRTUAL) return -EOPNOTSUPP;
+        if (state&(VIRTUAL|PREPARING)) return -EOPNOTSUPP;
         if ((state&EXPORTS)==EXPORTS) return -EOVERFLOW;
         if (atomic_compare_exchange_weak_explicit(&q->admission,&state,state+1,
                 memory_order_acq_rel,memory_order_acquire)) return 0;
@@ -104,7 +110,13 @@ static void destroy(struct md_fd_object *object) {
     while (q->first) discard(q,q->first);
     transport_close(q); free(q);
 }
-static const struct md_fd_object_type type={.destroy=destroy,.export_begin=export_begin,.export_end=export_end};
+static unsigned selectors(const struct md_fd_object *object) {
+    const struct md_control_epoll *q=(const void *)object;
+    return atomic_load_explicit(&q->admission,memory_order_acquire)&(VIRTUAL|PREPARING)
+        ? (1U<<MD_FD_SELECTOR_EPOLL)|(1U<<MD_FD_SELECTOR_EPOLL_TARGET) : 0;
+}
+static const struct md_fd_object_type type={.destroy=destroy,.selector_mask=selectors,
+    .export_begin=export_begin,.export_end=export_end,.alias_lost=alias_lost};
 struct md_control_epoll *md_control_epoll_new(void) {
     struct md_control_epoll *q=calloc(1,sizeof(*q));
     if (!q) return NULL;
@@ -124,6 +136,30 @@ void md_control_epoll_release(struct md_control_epoll *q) {
 }
 int md_control_epoll_descriptor(const struct md_control_epoll *q) {
     return q ? q->events : -EINVAL;
+}
+int md_control_epoll_turn(struct md_control_epoll *q) {
+    q->next_virtual=!q->next_virtual; return q->next_virtual;
+}
+int md_control_epoll_admit_begin(struct md_control_epoll *q) {
+    if (!q) return -EINVAL;
+    unsigned state=0;
+    if (atomic_compare_exchange_strong_explicit(&q->admission,&state,PREPARING,
+            memory_order_acq_rel,memory_order_acquire)) return 1;
+    return state&UNCERTAIN ? -ESTALE : state&VIRTUAL ? 0 : state&NATIVE ? -EOPNOTSUPP : -EBUSY;
+}
+int md_control_epoll_admit_finish(struct md_control_epoll *q,int commit) {
+    if (!q) return -EINVAL;
+    unsigned state=atomic_load_explicit(&q->admission,memory_order_acquire);
+    if (!(state&PREPARING)) return -EINVAL;
+    int error=commit && !(state&UNCERTAIN) ? transport_open(q) : 0;
+    if (error) commit=0;
+    for (;;) {
+        if (!(state&PREPARING)) return -EINVAL;
+        unsigned next=state&~PREPARING;
+        if (commit && !(state&UNCERTAIN)) next|=VIRTUAL;
+        if (atomic_compare_exchange_weak_explicit(&q->admission,&state,next,
+                memory_order_acq_rel,memory_order_acquire)) return error ? error : commit && (state&UNCERTAIN) ? -ESTALE : 0;
+    }
 }
 static struct interest *find(struct md_control_epoll *q,int fd,const struct md_fd_object *identity) {
     struct md_fd_weak *weak=atomic_load_explicit(&identity->weak,memory_order_acquire);
@@ -220,22 +256,27 @@ static int control(struct md_control_epoll *q,int operation,int fd,
 int md_control_epoll_ctl(struct md_control_epoll *q,int operation,int fd,
         struct md_fd_object *identity,struct md_control_file provider,const struct epoll_event *event) {
     if (!q) return -EINVAL;
+    if (atomic_load_explicit(&q->admission,memory_order_acquire)&UNCERTAIN) return -ESTALE;
     int admitted=0;
     if (operation==EPOLL_CTL_ADD) {
-        unsigned state=0;
-        admitted=atomic_compare_exchange_strong_explicit(&q->admission,&state,VIRTUAL,
-            memory_order_acq_rel,memory_order_acquire);
-        if (!admitted && !(state&VIRTUAL)) return state&NATIVE ? -EOPNOTSUPP : -EBUSY;
+        admitted=md_control_epoll_admit_begin(q);
+        if (admitted<0) return admitted;
+    } else if (atomic_load_explicit(&q->admission,memory_order_acquire)&PREPARING) {
+        return -EBUSY;
     }
     int error=control(q,operation,fd,identity,provider,event);
     /* A failed first subscription publishes no virtual state. Native send
      * reservations and activation exclude one another, including worker races. */
-    if (error && admitted) atomic_store_explicit(&q->admission,0,memory_order_release);
+    if (admitted) {
+        int finished=md_control_epoll_admit_finish(q,!error);
+        if (!error) error=finished;
+    }
     return error;
 }
 int md_control_epoll_collect(struct md_control_epoll *q,struct epoll_event *out,int capacity) {
     if (!q || capacity<=0) return -EINVAL;
     if (!out) return -EFAULT;
+    if (atomic_load_explicit(&q->admission,memory_order_acquire)&UNCERTAIN) return -ESTALE;
     if (q->events<0) return 0;
     int observed=harvest(q);
     if (observed) return observed;

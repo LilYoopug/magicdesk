@@ -170,6 +170,28 @@ Selector synchronization waits for the terminal event of an exact retiring
 private helper when that helper rejects TSYNC. Already-departed TIDs allow a
 fresh kernel synchronization attempt; incompatible live filters remain errors.
 The selector is published only after successful kernel synchronization.
+Descriptor-filter installation is supervisor-owned: the adapter requests a
+selector, and a task-affine call returns the actual kernel TSYNC result before
+publishing its metadata. Already-admitted selectors use the same single control
+call without allocating an operation. Cold installation borrows a reserved
+control slot in the existing shared mapping, independently of ordinary IO
+capacity. This avoids waiting on requests blocked by a retained table turn;
+no filesystem or IPC payload is overwritten and no guest FD is added. Task exit
+and exec retire that loan through normal adapter cleanup. Application filter
+denials remain kernel errors, not permission to bypass the filter.
+Open, receive and duplication use the typed descriptor owner's interception
+requirements, independently of proc-file classification. The common descriptor
+adapter handles dup, dup3 and fcntl duplication; watch-specific discovery remains
+with the filesystem provider. Its snapshot is revalidated under the file-table
+turn before use, including replacement of unannotated slots. A changed generation
+repeats discovery before any duplicate or filter side effect. Typed requirements
+are read again under that turn, which spans admission, the native mutation and
+publication. A known dup3 destination is admitted before it is replaced, and
+failed admission of a newly allocated duplicate closes that result under the same
+turn. Ordinary reads and writes acquire no generation snapshot or new trap.
+Typed owners can publish state-dependent selector requirements; opening,
+duplication and received-origin inspection use the same accessor. BPF construction
+is independent of installation and uses explicit task gate addresses.
 Interrupted queued FD installations retire their
 expired notification independently of queue readiness; a restarted proc request
 releases the old unpublished carrier before creating another admission.
@@ -1277,7 +1299,43 @@ from the actual send outcome. Failed sends release the reservation; successful
 or unobserved terminal sends prevent later virtual activation through an
 untracked external alias. Passive epolls remain transferable to native and
 independent guest receivers, including mixed vectors with typed file origins.
-The virtual-interest collector is not yet connected to guest epoll calls.
+Virtual activation has a separate reservation: it excludes native export and
+publishes selector requirements to retained aliases before interest publication.
+Cancellation restores passive requirements; committed admission is irreversible
+for that authority. Successful admission allocates its stable wake transport;
+cancelled preparation leaves no transport. Tracked alias
+snapshots require the file-table turn and copy only descriptor numbers, without
+retaining native descriptions or allocating memory.
+Cold selector admission inventories file-table/thread-group pairs, retains their
+turns through installation and publishes only successful kernel acknowledgements.
+The owner rescan precedes sealing: a fork completed while waiting can introduce
+another table or group. Partial failures preserve confirmed filters and release
+the uncommitted reservation. Unobserved terminal mutations invalidate an epoll's
+alias inventory, including a duplicate whose new number is unknown. This yields
+an explicit stale-state error and wakes an active collector instead of assuming
+that the remaining annotations cover every alias.
+The task-affine filter installer uses the common short-call executor and a
+borrowed shared span, without an extra guest FD or helper thread. Syscall-entry and seccomp
+continuations are replayed before execution; completed exits recover the exit
+boundary without repeating their side effect. Internal restart exits defer
+installation rather than guessing the kernel-private original argument.
+Cold task calls borrow a stopped participant from the shared quiescence owner.
+That owner retains the original event and resume policy; release and event replay
+are blocked until the borrower restores its continuation. Borrowing neither
+consumes a pending event nor transfers automatic resume ownership.
+If seccomp TSYNC is denied, PR_SET_SECCOMP is attempted only for a verified
+single-task group without private helpers. Its actual kernel result remains
+authoritative; no application filter is removed.
+Selected guest epolls combine virtual interests with native queues. A caller
+that exclusively owns its file table waits on its unchanged native descriptor
+in its own signal context. Virtual readiness interrupts that native wait;
+signalfd, temporary masks and native events stay kernel-owned. No extra guest
+descriptor is needed: the sole sleeping owner cannot replace the slot or create
+another CLONE_FILES holder. The table turn ends before blocking.
+Shared-table waits retain captured native queues and a host collector, which
+does not correctly observe caller-local signalfd state. Passive queues keep
+their native control/wait path. Mixed readiness is not complete coverage of
+service-manager boot.
 Application-filtered IO captures exact inputs through the table-owned channel,
 without requiring another guest thread. Ordinary IO reuses an already admitted,
 unambiguous channel under the same file-table turn. Without one, it retains

@@ -11,7 +11,8 @@ static int unrecognized(int error) {
 static int selectors(struct md_fs_context *context, const struct md_received_fds *source,
         unsigned index, unsigned *out) {
     struct md_fd_object *origin=source->origins ? source->origins[index] : NULL;
-    if (origin && origin->type->selectors) { *out=origin->type->selectors; return 0; }
+    unsigned mask=md_fd_object_selectors(origin);
+    if (mask) { *out=mask; return 0; }
     struct md_fs_request q={.actor=context->actor,.peer=context->peer,
         .operation=MD_FS_WATCH_CONTAINS,.directory={source->fds[index],-1}};
     struct md_fs_result result;

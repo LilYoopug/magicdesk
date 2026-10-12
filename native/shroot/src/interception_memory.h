@@ -22,7 +22,8 @@ int md_memory_exposed(const struct md_interception_memory *);
 uintptr_t md_memory_stack_take(struct md_interception_memory *);
 int md_memory_stack_add(struct md_interception_memory *, uintptr_t);
 void md_memory_stack_return(struct md_interception_memory *, uintptr_t);
-int md_memory_buffers_prepare(struct md_interception_memory *, unsigned slots, size_t capacity, size_t clear_prefix);
+int md_memory_buffers_prepare(struct md_interception_memory *, unsigned slots, size_t capacity,
+    size_t clear_prefix, unsigned reserved);
 struct md_interception_buffers *md_memory_buffers(struct md_interception_memory *);
 int md_memory_buffers_mapped(struct md_interception_memory *, uintptr_t base, size_t size);
 uintptr_t md_memory_buffer_address(struct md_interception_memory *, const struct md_interception_buffer *);

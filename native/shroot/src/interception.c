@@ -15,6 +15,7 @@
 #include "watch_calls.h"
 #include "fd_client.h"
 #include "fd_filter.h"
+#include "descriptor_calls.h"
 #include "fs_buffer.h"
 #include "adapter_buffer.h"
 #include <errno.h>
@@ -78,16 +79,18 @@ extern void md_guest_store_groups(void), md_guest_stored_groups(void);
 extern char md_guest_copy_begin[], md_guest_copy_end[];
 extern char md_guest_watch_gate[], md_guest_watch_return[];
 extern char md_guest_ipc_wait[];
-extern long md_guest_fd_control(unsigned, uint64_t, long, long);
+extern struct md_fd_observation md_guest_fd_control(unsigned, uint64_t, long, long);
 extern char md_guest_anchor_return[];
 extern long md_guest_buffer_control(unsigned, unsigned long, unsigned long);
 extern char md_guest_task_control[], md_guest_task_call[], md_guest_task_return[];
 extern char md_guest_task_abort[], md_guest_task_abort_return[];
 extern char md_guest_task_collect[], md_guest_task_collected[];
 extern char md_guest_buffer_admitted[];
+#include "epoll_calls.h"
 static long dispatch_files(const struct md_fs *fs, long nr, unsigned long a0, unsigned long a1, unsigned long a2,
         unsigned long a3, unsigned long a4, unsigned long a5) {
     unsigned long args[] = {a0, a1, a2, a3, a4, a5};
+    if (nr==SYS_epoll_ctl || nr==SYS_epoll_pwait || nr==SYS_epoll_pwait2) return md_epoll_call(nr,args);
     if (nr==SYS_seccomp || nr==SYS_prctl) return md_fd_filter_prepare_sandbox();
     if (nr==SYS_unshare || nr==SYS_clone || nr==SYS_setns) return md_pid_filter_install();
     if (nr==SYS_kill && (int)a0<=0) return md_pid_signal_group((int)a0,(int)a1);
@@ -122,8 +125,9 @@ static long dispatch_files(const struct md_fs *fs, long nr, unsigned long a0, un
         return md_ipc_dispatch(nr,args);
     if (nr == SYS_read || nr == SYS_readv || nr == SYS_ioctl || nr == SYS_splice
             || nr == SYS_tee || nr == SYS_sendfile) return md_watch_read_local(fs, nr, args);
-    if (nr == SYS_inotify_init1 || nr == SYS_inotify_rm_watch
-            || nr == SYS_dup || nr == SYS_dup3 || nr == SYS_fcntl)
+    if (nr==SYS_dup || nr==SYS_dup3 || nr==SYS_fcntl)
+        return md_descriptor_duplicate(fs,nr,args);
+    if (nr == SYS_inotify_init1 || nr == SYS_inotify_rm_watch)
         return md_watch_call(fs, nr, args);
     if (nr == SYS_recvmmsg) return md_socket_ancillary_batch(fs, args);
     switch (nr) {

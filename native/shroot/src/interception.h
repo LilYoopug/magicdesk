@@ -41,7 +41,8 @@ enum md_interception_kind {
     MD_INTERCEPT_CAPTURE = 50,
     MD_INTERCEPT_TASK = 51,
     MD_INTERCEPT_PROC = 52,
-    MD_INTERCEPT_PROCESS = 53
+    MD_INTERCEPT_PROCESS = 53,
+    MD_INTERCEPT_READINESS = 54
 };
 
 /* Bootstrap-owned entry points, published before entering guest code. The

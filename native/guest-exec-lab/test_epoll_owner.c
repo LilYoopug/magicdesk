@@ -3,6 +3,7 @@
 #include "fd_messages.h"
 #include "fd_mutation.h"
 #include "fd_weak.h"
+#include "fd_selector.h"
 #include "proc_file.h"
 #include "proc_sysctl.h"
 #include "uts_namespace.h"
@@ -11,6 +12,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <sys/syscall.h>
@@ -52,6 +54,33 @@ static struct md_fd_object *expect(struct md_fd_origins *files,int fd,
     struct md_fd_object *actual=md_fd_origins_object(files,fd,&actual_flags);
     assert(actual==object && actual_flags==flags);
     md_fd_object_release(actual); return object;
+}
+static void aliases(struct md_fd_origins *files,struct md_fd_object *object,
+        const int *expected,unsigned expected_count,int *budget) {
+    struct md_fd_order turn={0},waiting={0};
+    unsigned count=UINT_MAX; int output[16];
+    assert(expected_count<=16);
+    assert(md_fd_origins_aliases(&turn,object,NULL,0,&count)==-EINVAL);
+    assert(md_fd_order_begin(files,&turn,NULL)==1);
+    assert(md_fd_origins_aliases(&turn,object,NULL,0,&count)==-EBUSY);
+    assert(!md_fd_order_start(&turn));
+    assert(!md_fd_order_begin(files,&waiting,NULL));
+    assert(md_fd_origins_aliases(&waiting,object,NULL,0,&count)==-EBUSY);
+    *budget=0;
+    assert(!md_fd_origins_aliases(&turn,object,NULL,0,&count) && count==expected_count);
+    if (count) {
+        output[0]=-1;
+        assert(md_fd_origins_aliases(&turn,object,output,count-1,&count)==-ENOSPC
+            && count==expected_count && output[0]==-1);
+    }
+    assert(!md_fd_origins_aliases(&turn,object,output,16,&count) && count==expected_count);
+    for (unsigned i=0;i<count;++i) {
+        unsigned matches=0;
+        for (unsigned j=0;j<count;++j) matches+=output[j]==expected[i];
+        assert(matches==1);
+    }
+    assert(!md_fd_order_cancel(&waiting) && !md_fd_order_complete(&turn));
+    *budget=-1;
 }
 static struct md_fd_message *capture(struct md_fd_object *const *objects,unsigned count) {
     struct md_fd_origins *files=md_fd_origins_new(); assert(files);
@@ -197,7 +226,163 @@ static void target_retirement(int *budget) {
     assert(descriptors()==before);
     puts("PASS watched target custody: dup/fork/exec, queued transfer and automatic final retirement");
 }
+static void staged_admission(int *budget) {
+    unsigned before=descriptors();
+    struct md_control_epoll *q=md_control_epoll_new(); assert(q);
+    struct md_fd_object *object=md_control_epoll_object(q);
+    struct md_fd_message *message=capture(&object,1);
+    *budget=0;
+    assert(!md_fd_object_selectors(object));
+    assert(md_control_epoll_admit_finish(q,1)==-EINVAL);
+    assert(md_control_epoll_admit_begin(q)==1);
+    assert(md_control_epoll_admit_begin(q)==-EBUSY);
+    assert(md_control_epoll_descriptor(q)==-1);
+    assert(md_fd_object_selectors(object)==((1U<<MD_FD_SELECTOR_EPOLL)|(1U<<MD_FD_SELECTOR_EPOLL_TARGET)));
+    assert(md_fd_object_selectors(md_fd_message_origins(message)[0])==((1U<<MD_FD_SELECTOR_EPOLL)|(1U<<MD_FD_SELECTOR_EPOLL_TARGET)));
+    assert(!md_fd_message_export_begin(message) && !md_fd_message_exports_native(message,0));
+    md_fd_message_export_end(message,0);
+    assert(md_control_epoll_ctl(q,EPOLL_CTL_ADD,8,object,(struct md_control_file){0},NULL)==-EBUSY);
+    assert(!md_control_epoll_admit_finish(q,0));
+    assert(!md_fd_object_selectors(object));
+    assert(md_control_epoll_descriptor(q)==-1);
+    assert(!md_fd_message_export_begin(message) && md_fd_message_exports_native(message,0));
+    assert(md_control_epoll_admit_begin(q)==-EBUSY);
+    md_fd_message_export_end(message,0);
+    assert(md_control_epoll_admit_begin(q)==1);
+    assert(!md_control_epoll_admit_finish(q,1));
+    assert(md_control_epoll_admit_begin(q)==0);
+    assert(md_control_epoll_admit_finish(q,0)==-EINVAL);
+    assert(md_fd_object_selectors(object)==((1U<<MD_FD_SELECTOR_EPOLL)|(1U<<MD_FD_SELECTOR_EPOLL_TARGET)));
+    assert(!md_fd_message_export_begin(message) && !md_fd_message_exports_native(message,0));
+    md_fd_message_export_end(message,1);
+    md_fd_message_release(message); md_control_epoll_release(q);
+    *budget=-1;
+    assert(descriptors()==before);
+    puts("PASS staged epoll admission: dynamic alias requirements, export exclusion, rollback and no allocation");
+}
+static void uncertain_aliases(int *budget) {
+    for (int state=0;state<3;++state) for (int mutation=0;mutation<4;++mutation) {
+        struct md_control_epoll *q=md_control_epoll_new(),*replaced=md_control_epoll_new();
+        struct md_fd_origins *files=md_fd_origins_new(); assert(q && replaced && files);
+        struct md_fd_object *object=md_control_epoll_object(q);
+        struct md_fd_origin_update updates[2];
+        assert(!md_fd_origins_prepare_batch(files,(struct md_fd_object *[]){object,md_control_epoll_object(replaced)},0,2,updates));
+        assert(!md_fd_origins_finish_batch(updates,2,(int[]){10,11},2));
+        if (state) assert(md_control_epoll_admit_begin(q)==1);
+        if (state==2) assert(!md_control_epoll_admit_finish(q,1));
+        struct md_fd_order turn={0};
+        assert(md_fd_order_begin(files,&turn,NULL)==1 && !md_fd_order_start(&turn));
+        struct md_fd_mutation op;
+        long nr=mutation==0 ? SYS_close : mutation==1 ? SYS_dup3 : mutation==2 ? SYS_dup : SYS_fcntl;
+        unsigned long args[6]={10,mutation==3 ? F_DUPFD_CLOEXEC : 11};
+        assert(!md_fd_mutation_prepare(files,nr,args,&op));
+        *budget=0;
+        assert(!md_fd_mutation_abandon(&op,files));
+        assert(!md_fd_order_complete(&turn));
+        assert(md_control_epoll_admit_begin(q)==-ESTALE);
+        if (state==1) assert(md_control_epoll_admit_finish(q,1)==-ESTALE);
+        assert(md_control_epoll_admit_begin(q)==-ESTALE);
+        struct epoll_event event;
+        assert(md_control_epoll_collect(q,&event,1)==-ESTALE);
+        assert(md_control_epoll_ctl(q,EPOLL_CTL_DEL,99,NULL,(struct md_control_file){0},NULL)==-ESTALE);
+        if (mutation==1) assert(md_control_epoll_admit_begin(replaced)==-ESTALE);
+        else { assert(md_control_epoll_admit_begin(replaced)==1); assert(!md_control_epoll_admit_finish(replaced,0)); }
+        md_fd_origins_release(files); md_control_epoll_release(q); md_control_epoll_release(replaced);
+        *budget=-1;
+    }
+    puts("PASS epoll uncertain mutation: close, dup replacement and unknown new aliases invalidate admission without allocation");
+}
+static void uncertain_wakeup(int *budget) {
+    unsigned before=descriptors();
+    struct md_control_epoll *q=md_control_epoll_new();
+    struct md_fd_origins *files=md_fd_origins_new(); assert(q && files);
+    struct md_identity id=md_identity_new(0,0);
+    struct md_uts_namespace *uts=md_uts_namespace_new(); assert(uts);
+    struct md_control_file provider=md_proc_sysctl_new(MD_PROC_FILE_HOSTNAME,NULL,uts); assert(provider.ops);
+    struct md_proc_file *source=md_proc_file_open_control(provider.ops,provider.context,&id,O_RDONLY);
+    md_control_file_release(provider); assert(source);
+    struct md_fd_origin_update update;
+    assert(!md_fd_origins_prepare_object(files,md_control_epoll_object(q),0,&update));
+    md_fd_origins_finish(&update,10);
+    struct epoll_event event={.events=0};
+    assert(!md_control_epoll_ctl(q,EPOLL_CTL_ADD,20,md_proc_file_object(source),md_proc_file_control(source),&event));
+    assert(!md_control_epoll_collect(q,&event,1));
+    struct pollfd wake={md_control_epoll_descriptor(q),POLLIN,0};
+    assert(!poll(&wake,1,0));
+    mutation(files,SYS_dup,10,0,0,-EMFILE,budget);
+    assert(!md_control_epoll_admit_begin(q));
+    struct md_fd_order turn={0};
+    assert(md_fd_order_begin(files,&turn,NULL)==1 && !md_fd_order_start(&turn));
+    struct md_fd_mutation op;
+    assert(!md_fd_mutation_prepare(files,SYS_dup,(unsigned long[]){10,0,0,0,0,0},&op));
+    *budget=0;
+    assert(!md_fd_mutation_abandon(&op,files) && !md_fd_order_complete(&turn));
+    assert(poll(&wake,1,0)==1 && (wake.revents&POLLIN));
+    assert(md_control_epoll_collect(q,&event,1)==-ESTALE);
+    md_proc_file_release(source); md_uts_namespace_release(uts); md_identity_release(&id);
+    md_fd_origins_release(files); md_control_epoll_release(q); *budget=-1;
+    assert(descriptors()==before);
+    puts("PASS uncertain epoll wakes retained waiters with an error; observed failed dup preserves admission");
+}
+static void temporary_slots(int *budget) {
+    unsigned before=descriptors();
+    for (int mode=0;mode<5;++mode) {
+        struct md_fd_origins *files=md_fd_origins_new(); assert(files);
+        struct md_fd_loan *loan=md_fd_loan_new(files); assert(loan);
+        struct md_fd_origin_update update;
+        assert(!prepare(files,FD_CLOEXEC,&update));
+        assert(!md_fd_origins_prepare_loan(&update,loan));
+        assert(md_fd_origins_prepare_loan(&update,loan)==-EINVAL);
+        *budget=0; md_fd_origins_finish(&update,23); *budget=-1;
+        assert(md_fd_origins_has_loans(files));
+        struct md_fd_origins *copy=md_fd_origins_fork(files,0); assert(copy);
+        struct md_fd_origins *shared=md_fd_origins_fork(files,1); assert(shared==files);
+        struct md_fd_order turn={0}; int number;
+        assert(md_fd_origins_loan_next(&turn,&number)==-EINVAL);
+        assert(md_fd_order_begin(files,&turn,NULL)==1);
+        assert(md_fd_origins_loan_next(&turn,&number)==-EBUSY);
+        assert(!md_fd_order_start(&turn));
+        *budget=0;
+        assert(!md_fd_origins_loan_next(&turn,&number) && number==-1);
+        assert(!md_fd_order_complete(&turn)); *budget=-1;
+        mutation(files,SYS_dup,23,0,0,24,budget);
+        if (mode==1) mutation(files,SYS_close,23,0,0,0,budget);
+        if (mode==2) publish(files,23,FD_CLOEXEC,budget);
+        if (mode==3) md_fd_origins_exec(files);
+        if (mode==4) assert(!md_fd_origins_abandon_range(files,23,23));
+        for (int child=1;child>=0;--child) {
+            struct md_fd_origins *table=child ? copy : files;
+            if (!child) md_fd_loan_end(loan);
+            assert(md_fd_order_begin(table,&turn,NULL)==1 && !md_fd_order_start(&turn));
+            *budget=0;
+            int found=md_fd_origins_loan_next(&turn,&number);
+            assert(found==(child || !mode ? 1 : mode==4 ? -ESTALE : 0));
+            if (found==1) {
+                assert(number==23);
+                assert(!md_fd_origins_close_range(table,23,23,0));
+                assert(!md_fd_origins_loan_next(&turn,&number));
+            }
+            assert(!md_fd_order_complete(&turn)); *budget=-1;
+        }
+        struct md_fd_object *alias=md_fd_origins_object(files,24,NULL); assert(alias);
+        md_fd_object_release(alias);
+        *budget=0;
+        md_fd_loan_release(loan);
+        md_fd_origins_release(copy); md_fd_origins_release(shared); md_fd_origins_release(files);
+        *budget=-1;
+        assert(descriptors()==before);
+    }
+    puts("PASS operation FD loans: shared ownership, copied-table retirement, explicit dup, close/reuse/exec and uncertain cancellation");
+}
 void test_epoll_owner(int *budget) {
+    temporary_slots(budget);
+    extern void test_fd_admission(int *);
+    extern void test_fd_admission_live(void);
+    test_fd_admission(budget);
+    test_fd_admission_live();
+    uncertain_aliases(budget);
+    uncertain_wakeup(budget);
+    staged_admission(budget);
     export_admission(budget);
     target_retirement(budget);
     unsigned before=descriptors();
@@ -223,18 +408,25 @@ void test_epoll_owner(int *budget) {
     mutation(files,SYS_fcntl,11,F_DUPFD_CLOEXEC,0,13,budget);
     struct md_fd_origins *child=md_fd_origins_fork(files,0); assert(child);
     struct md_fd_origins *shared=md_fd_origins_fork(files,1); assert(shared==files);
+    aliases(files,object,(int[]){10,11,12,13},4,budget);
+    aliases(child,object,(int[]){10,11,12,13},4,budget);
     mutation(files,SYS_close,10,0,0,0,budget);
     expect(files,10,NULL,0); expect(child,10,object,FD_CLOEXEC);
     *budget=0; md_fd_origins_exec(child); *budget=-1;
     expect(child,10,NULL,0); expect(child,12,NULL,0); expect(child,13,NULL,0);
     expect(child,11,object,0); expect(shared,12,object,FD_CLOEXEC);
+    aliases(files,object,(int[]){11,12,13},3,budget);
+    aliases(child,object,(int[]){11},1,budget);
     struct md_fd_origins *private=md_fd_origins_unshare_prepare(shared); assert(private && private!=files);
     mutation(files,SYS_dup3,999,11,0,11,budget);
     expect(files,11,NULL,0); expect(private,11,object,0);
+    aliases(files,object,(int[]){12,13},2,budget);
+    aliases(private,object,(int[]){11,12,13},3,budget);
     publish(files,11,0,budget);
     struct md_fd_object *replacement=md_fd_origins_object(files,11,NULL);
     assert(replacement && replacement!=object && md_control_epoll_from_object(replacement));
     md_fd_object_release(replacement);
+    aliases(files,object,(int[]){12,13},2,budget);
 
     struct md_identity id=md_identity_new(0,0);
     struct md_uts_namespace *uts=md_uts_namespace_new(); assert(uts);

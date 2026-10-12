@@ -3,6 +3,8 @@
 #include "file_metadata.h"
 #include "adapter_buffer.h"
 #include "fd_client.h"
+#include "fd_filter.h"
+#include "watch_calls.h"
 #include "interception.h"
 #include "proc_control.h"
 #include "raw.h"
@@ -13,6 +15,40 @@
 
 long md_descriptor_kind(int fd) {
     return md_fd_control(MD_FD_KIND,0,fd,0);
+}
+long md_descriptor_duplicate(const struct md_fs *fs, long nr, const unsigned long *a) {
+    unsigned command=(unsigned)a[1];
+    if (nr==SYS_fcntl && command!=F_DUPFD && command!=F_DUPFD_CLOEXEC)
+        return md_raw(nr,a[0],a[1],a[2],a[3],a[4],a[5]);
+    unsigned required;
+    for (;;) {
+        struct md_fd_observation view=md_fd_observe((int)a[0]);
+        if (view.selectors<0) return view.selectors;
+        long watched=view.selectors ? 0 : md_watch_contains(fs,(int)a[0]);
+        /* Provider discovery captures its own FD inputs. Do not nest it under
+         * the mutation turn. A changed table retries discovery before any
+         * duplicate/filter side effect; once admitted, the turn spans both. */
+        long current=md_fd_control(MD_FD_DUPLICATE_BEGIN,view.generation,0,0);
+        if (current==-EAGAIN) continue;
+        if (current<0) return current;
+        if (watched<0) {
+            md_fd_control(MD_FD_DUPLICATE_END,0,0,0); return watched;
+        }
+        required=(unsigned)current|(watched>0 ? 1U<<MD_FD_SELECTOR_WATCH : 0);
+        break;
+    }
+    long result=0;
+    if (nr==SYS_dup3 && (int)a[1]>=0 && (int)a[0]!=(int)a[1] && !((unsigned)a[2]&~O_CLOEXEC)) {
+        /* Admission failure must not replace the caller's destination. */
+        result=md_fd_filter_arm_mask(required,(int)a[1]);
+    }
+    if (!result) result=md_raw(nr,a[0],a[1],a[2],a[3],a[4],a[5]);
+    if (result>=0 && nr!=SYS_dup3) {
+        long activation=md_fd_filter_arm_mask(required,(int)result);
+        if (activation) { RAW1(close,result); result=activation; }
+    }
+    long released=md_fd_control(MD_FD_DUPLICATE_END,0,0,0);
+    return result<0 ? result : released<0 ? released : result;
 }
 long md_descriptor_pair(long nr, const unsigned long *a) {
     int ends[2]={-1,-1};

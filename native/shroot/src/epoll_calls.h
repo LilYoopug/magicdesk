@@ -1,0 +1,19 @@
+#ifndef MD_EPOLL_CALLS_H
+#define MD_EPOLL_CALLS_H
+#include "fd_capture.h"
+#include <sys/epoll.h>
+#include <time.h>
+
+enum { MD_EPOLL_EVENTS=256, MD_EPOLL_NATIVE=0x50000001, MD_EPOLL_CAPTURED=0x50000002 };
+struct md_epoll_frame {
+    struct md_fd_capture_frame capture;
+    struct epoll_event event;
+    struct timespec timeout;
+    uint64_t mask;
+    int capacity, timed, masked;
+    struct epoll_event events[MD_EPOLL_EVENTS];
+};
+#ifndef MD_USE_LIBC
+long md_epoll_call(long,const unsigned long *);
+#endif
+#endif

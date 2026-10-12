@@ -112,7 +112,7 @@ UTS sysctl files use the same lazy descriptor-selector mechanism as map files.
 Their internal notification model uses baseline eventfd, epoll, atomic references
 and a source mutex; it requires no kernel change above 5.15. Independent opens
 own generation cursors and lazy wake descriptors. The virtual-interest collector
-has native fixture coverage, not guest syscall integration. Native `epoll_pwait2`
+is connected to selected guest epoll queues. Native `epoll_pwait2`
 (Linux 5.11) shares the direct wait policy; unsupported or denied native calls
 retain their kernel error. No notification thread or periodic sampling is added.
 Weak descriptor authorities use lazy eventfd notifications and userspace mutexes
@@ -128,6 +128,37 @@ They add no post-5.15 dependency, retained native epoll duplicate or kernel
 nesting level. `control-event` requires zero interception of ordinary control
 and wait calls (creation alone is observed); `ofd-order` covers export rollback
 and activation races, and `ipc-origins` covers independent receiver custody.
+Selector construction and staged epoll activation add no kernel API. The cold
+remote-admission fixture uses baseline ptrace register/signal-mask access and
+seccomp TSYNC, preserving the application's filter decision. It compares native
+interrupt/restart behavior under dumpable and protected tasks; production
+cross-owner admission also has guest coverage with protected foreign readers.
+The common task-call executor also uses baseline `PTRACE_GET_SYSCALL_INFO` and
+`NT_ARM_SYSTEM_CALL` to restore syscall entry/seccomp/exit boundaries without
+repeating side effects. Restart-code exits defer admission without changing
+the tracee. Native UID-2000 fixtures cover both dumpable and protected tasks.
+Production proc/watch selector installation uses this task-affine owner through
+the mapped adapter frame, without guest FDs or ptrace writes to application
+memory. Its payload uses reserved control capacity in the same mapping so IO
+pool exhaustion cannot create a table-turn dependency cycle.
+Guest selector/proc, Chromium sandbox, private-memory and native-wait fixtures
+exercise that path. Single-task admission can fall back from denied seccomp
+TSYNC to baseline PR_SET_SECCOMP, only after excluding siblings and private
+helpers. Native fixtures cover that application-filtered path at all supported
+continuation boundaries. The inventory/admission modules add no kernel API.
+Mixed-queue native waiting preserves the caller's signalfd and temporary
+signal-mask context when the caller exclusively owns its file table. This uses
+the existing ptrace syscall boundary and exact native descriptor, not a new
+kernel operation or a guest FD. Guest tests cover pending/process signals,
+virtual wakeups, equal event data and filtered cross-owner queue activation.
+Shared-table waits still use the host collector and lack that signal-context
+coverage. PTRACE_SETSIGMASK clears pending kernel saved-mask restoration,
+so it cannot be used blindly at an interrupted epoll/ppoll exit. This semantic
+requirement is part of the 5.15 baseline, not a reason to raise the minimum.
+The live inventory fixture combines those baseline operations with CLONE_FILES
+and fork, covering distinct thread groups over shared/copied tables and rollback
+after one group's application filter denies seccomp. Quiescence loans retain
+existing ptrace event/rusage and resume ownership without another kernel API.
 Offline IPv4 sysctls use the shared typed-control transport and retained mount
 anchors; numeric values and permissions are launch-owned state, not host sysctl
 writes. They add no post-5.15 interface. Foreign proc executable selection reuses

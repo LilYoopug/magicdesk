@@ -9,6 +9,8 @@
 struct md_fd_origins;
 struct md_fd_channel;
 struct md_fd_origin_entry;
+struct md_fd_observation;
+struct md_fd_loan;
 struct md_fd_origin_update {
     struct md_fd_origins *table;
     struct md_fd_origin_entry *entry;
@@ -45,6 +47,12 @@ void md_fd_origins_unpin(struct md_fd_origins *);
 /* A retained origin, or NULL for an untracked descriptor, not proof of EBADF. */
 struct md_fs_anchor *md_fd_origins_get(struct md_fd_origins *, int fd, unsigned *flags);
 struct md_fd_object *md_fd_origins_object(struct md_fd_origins *, int fd, unsigned *flags);
+/* Optimistic discovery outside a table turn. Before using provider discovery
+ * made from this snapshot, acquire the turn and validate its generation.
+ * Metadata-free replacement and uncertain terminal mutations also invalidate
+ * it. This is not an FD identity or a count of operations. */
+int md_fd_origins_observe(struct md_fd_origins *,int fd,struct md_fd_observation *);
+int md_fd_origins_validate(const struct md_fd_order *,uint64_t generation);
 /* Caller-owned vector of retained origins, captured under one metadata lock.
  * -1 and unannotated FDs produce NULL, not a guessed mount. Repeated source
  * numbers retain independent references. The caller holds the source table
@@ -53,6 +61,12 @@ int md_fd_origins_capture(struct md_fd_origins *, const int *fds, unsigned count
         struct md_fs_anchor **origins);
 int md_fd_origins_capture_objects(struct md_fd_origins *, const int *fds, unsigned count,
         struct md_fd_object **);
+/* Cold snapshot of one authority's tracked aliases. Requires a running table
+ * turn through use of the result. No allocation, retained kernel descriptors,
+ * callbacks or assumed global owner. Count-only calls use capacity zero/NULL;
+ * ENOSPC reports the required count without writing a partial vector. */
+int md_fd_origins_aliases(const struct md_fd_order *,const struct md_fd_object *,
+        int *numbers,unsigned capacity,unsigned *count);
 /* Prepare before a kernel mutation; finish is allocation-free. A negative
  * result discards it. NULL origin removes any prior destination annotation.
  * The caller orders kernel mutations; this lock alone cannot order syscalls. */
@@ -66,6 +80,22 @@ int md_fd_origins_prepare_copy(struct md_fd_origins *, int source, unsigned flag
         struct md_fd_origin_update *);
 int md_fd_origins_prepare_channel(struct md_fd_origins *, struct md_fd_channel *, unsigned flags,
         struct md_fd_origin_update *);
+/* Operation-owned CLOEXEC slots. A loan owns no kernel FD or table reference;
+ * the operation retains its home table through end(). Fork-copied slots are
+ * immediately collectable in the child; explicit dup creates an application
+ * alias without loan ownership. Kernel receipts publish loans like any origin. */
+struct md_fd_loan *md_fd_loan_new(struct md_fd_origins *);
+void md_fd_loan_end(struct md_fd_loan *);
+void md_fd_loan_release(struct md_fd_loan *);
+int md_fd_origins_prepare_loan(struct md_fd_origin_update *,struct md_fd_loan *);
+/* Under a RUNNING table turn: 1 selects an expired loan, 0 means none.
+ * Keep that turn through native close and close_range metadata retirement.
+ * Ambiguous terminal mutations return ESTALE, never an assumed identity. */
+int md_fd_origins_loan_next(const struct md_fd_order *,int *number);
+int md_fd_origins_has_loans(struct md_fd_origins *);
+/* Supervisor task ownership, queried under a running table turn. A sole
+ * sleeping owner cannot create another CLONE_FILES holder or replace a slot. */
+int md_fd_origins_exclusive(const struct md_fd_order *);
 /* No entry yields NULL/-1; ambiguous terminal mutations fail with ESTALE,
  * rather than creating another potentially orphaned infrastructure slot. */
 int md_fd_origins_channel(struct md_fd_origins *, int *number, struct md_fd_channel **);
@@ -75,6 +105,9 @@ int md_fd_origins_channel_candidate(struct md_fd_origins *, int *number, struct 
 /* same==0 retires metadata only, never the guest slot. No allocations. */
 int md_fd_origins_channel_resolve(struct md_fd_origins *, int number, struct md_fd_channel *, int same, unsigned flags);
 void md_fd_origins_finish(struct md_fd_origin_update *, int result_fd);
+/* Terminal mutation with no trustworthy result may have installed an alias.
+ * Notify inventory-dependent owners before discarding unpublished metadata. */
+void md_fd_origins_abandon(struct md_fd_origin_update *);
 /* Prepare a complete delivery before the kernel receive. Failure cancels all
  * prepared entries. A retained origin vector can prepare several independent
  * deliveries (MSG_PEEK); it is never consumed by preparation or publication. */

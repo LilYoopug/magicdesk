@@ -79,6 +79,36 @@ int main(void) {
     assert(md_task_quiesce_take(q,&status,&usage)==8);
     assert(status==stop(SIGTRAP,PTRACE_EVENT_STOP) && usage.ru_maxrss==123);
     assert(!md_task_quiesce_take(q,&status,NULL));
+    /* Cold task calls lend a continuation, not its event or resume ownership. */
+    for (unsigned kind=MD_TASK_QUIESCE_HELD;kind<=MD_TASK_QUIESCE_EVENT;++kind) {
+        int start=resumes, events=stop(SIGTRAP,PTRACE_EVENT_SECCOMP);
+        struct md_task_quiesce_stop boundary;
+        assert(!md_task_quiesce_add(q,9,kind==MD_TASK_QUIESCE_HELD,PTRACE_CONT));
+        assert(!md_task_quiesce_stop(q));
+        if (kind!=MD_TASK_QUIESCE_HELD) {
+            assert(md_task_quiesce_borrow(q,9,&boundary)==-EBUSY);
+            assert(!md_task_quiesce_event(q,9,kind==MD_TASK_QUIESCE_EVENT
+                ? events : stop(SIGTRAP,PTRACE_EVENT_STOP),&saved));
+        }
+        assert(md_task_quiesce_ready(q) && !md_task_quiesce_borrow(q,9,&boundary));
+        assert(boundary.kind==kind && boundary.status==(kind==MD_TASK_QUIESCE_EVENT ? events : 0));
+        assert(!md_task_quiesce_ready(q) && md_task_quiesce_release(q)==-EBUSY);
+        assert(md_task_quiesce_borrow(q,9,&boundary)==-EBUSY);
+        assert(md_task_quiesce_add(q,9,1,0)==-EBUSY);
+        assert(md_task_quiesce_event(q,9,events,NULL)==-EBUSY);
+        assert(md_task_quiesce_newborn(q,9)==-EBUSY && !md_task_quiesce_take(q,&status,NULL));
+        assert(!md_task_quiesce_return(q,9) && md_task_quiesce_return(q,9)==-EINVAL);
+        assert(md_task_quiesce_ready(q) && !md_task_quiesce_release(q));
+        assert(resumes==start+(kind==MD_TASK_QUIESCE_SYNTHETIC));
+        if (kind==MD_TASK_QUIESCE_EVENT)
+            assert(md_task_quiesce_take(q,&status,&usage)==9 && status==events && usage.ru_maxrss==123);
+        assert(!md_task_quiesce_take(q,&status,NULL));
+    }
+    assert(!md_task_quiesce_add(q,9,0,PTRACE_CONT) && !md_task_quiesce_stop(q));
+    assert(!md_task_quiesce_event(q,9,0,NULL));
+    struct md_task_quiesce_stop boundary;
+    assert(md_task_quiesce_borrow(q,9,&boundary)==-ESRCH);
+    assert(!md_task_quiesce_release(q) && md_task_quiesce_take(q,&status,NULL)==9 && status==0);
     for (unsigned round=0;round<3;++round) {
         enum { COUNT=4096 };
         int start=resumes;

@@ -533,7 +533,7 @@ static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
     if (!reply->result.error && r->opened.fd>=0 && r->control_descriptor>=0) {
         close(r->opened.fd); r->opened.fd=r->control_descriptor; r->control_descriptor=-1;
     }
-    if (r->opened.object) reply->result.selectors=r->opened.object->type->selectors;
+    reply->result.selectors=md_fd_object_selectors(r->opened.object);
     r->opened.completion=reply->result.open_completion;
     reply->result.open_completion=(struct md_open_completion){0};
     if (r->opened.fd>=0) {
@@ -542,7 +542,7 @@ static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
             md_fd_object_release(r->opened.object);
             r->opened.object=md_fd_object_retain(r->reopened);
         }
-        if (r->opened.object) reply->result.selectors=r->opened.object->type->selectors;
+        reply->result.selectors=md_fd_object_selectors(r->opened.object);
         if (r->request.operation==MD_FS_TASK_PATH) {
             if (r->opened.completion.kind) { r->error=-EPROTO; return; }
             r->opened.task_path=r->request.mode;

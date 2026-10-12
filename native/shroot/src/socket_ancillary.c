@@ -14,6 +14,7 @@
 #include "task_outgoing.h"
 #include "interception.h"
 #include "raw.h"
+#include "descriptor_capture.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -40,39 +41,9 @@ static void *buffer(size_t size, void *local, size_t capacity) {
 static void release(void *p, void *local, size_t size) { if (p && p != local) RAW2(munmap,p,size); }
 extern long md_guest_buffer_control(unsigned, unsigned long, unsigned long);
 long md_socket_capture_inputs(long state, struct md_fd_capture_frame *f, const int *numbers, unsigned count) {
-    while (state>0 && state!=MD_IPC_TASK_IO) {
-        if (state==MD_FD_CAPTURE_ADMIT) {
-            /* Admission must not turn an originally invalid source slot into
-             * the infrastructure endpoint. The source-table turn is held. */
-            for (unsigned i=0;i<count;++i) {
-                long valid=RAW2(fcntl,numbers[i],F_GETFD);
-                if (valid<0) return md_guest_buffer_control(MD_FS_BUFFER_IPC_CAPTURE_SENT,valid,0);
-            }
-            long fd=md_guest_buffer_admit(MD_FS_BUFFER_IPC_ADMIT);
-            if (fd<0) return md_guest_buffer_control(MD_FS_BUFFER_IPC_CAPTURE_SENT,fd,0);
-            state=md_guest_buffer_control(MD_FS_BUFFER_IPC_CAPTURE_READY,0,0);
-        } else if (state==MD_FD_CAPTURE_CHECK) {
-            struct md_fd_channel_observation *o=&f->observation;
-            *o=(struct md_fd_channel_observation){.length=sizeof(o->cookie)};
-            long flags=RAW2(fcntl,f->endpoint,F_GETFD);
-            o->error=flags<0 ? (int)flags : (int)RAW5(getsockopt,f->endpoint,SOL_SOCKET,SO_COOKIE,&o->cookie,&o->length);
-            if (flags>=0) o->flags=(unsigned)flags;
-            state=md_guest_buffer_control(MD_FS_BUFFER_IPC_CAPTURE_OBSERVED,0,0);
-        } else if (state==MD_FD_CAPTURE_SEND) {
-            if (!f->count || f->count>253 || f->offset>count || f->count>count-f->offset) return -EPROTO;
-            _Alignas(struct cmsghdr) char control[CMSG_SPACE(253*sizeof(int))];
-            struct iovec data={&f->token,sizeof(f->token)};
-            struct msghdr m={.msg_iov=&data,.msg_iovlen=1,.msg_control=control,
-                .msg_controllen=CMSG_SPACE(f->count*sizeof(int))};
-            memset(control,0,m.msg_controllen);
-            struct cmsghdr *h=CMSG_FIRSTHDR(&m);
-            *h=(struct cmsghdr){.cmsg_len=CMSG_LEN(f->count*sizeof(int)),.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_RIGHTS};
-            memcpy(CMSG_DATA(h),numbers+f->offset,f->count*sizeof(int));
-            long sent=RAW3(sendmsg,f->endpoint,&m,MSG_DONTWAIT|MSG_NOSIGNAL);
-            state=md_guest_buffer_control(MD_FS_BUFFER_IPC_CAPTURE_SENT,sent,0);
-        } else return -EPROTO;
-    }
-    return state;
+    static const struct md_descriptor_capture_protocol p={MD_FS_BUFFER_IPC_ADMIT,MD_FS_BUFFER_IPC_CAPTURE_READY,
+        MD_FS_BUFFER_IPC_CAPTURE_SENT,MD_FS_BUFFER_IPC_CAPTURE_OBSERVED,MD_IPC_TASK_IO};
+    return md_descriptor_capture_inputs(state,f,numbers,count,&p);
 }
 static long io_transfer(struct md_ipc_io_message *io, void *memory, size_t size,
         size_t offset, int control, int reading, int large) {

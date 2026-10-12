@@ -1,0 +1,27 @@
+#ifndef MD_EPOLL_WAIT_H
+#define MD_EPOLL_WAIT_H
+#include "control_epoll.h"
+#include "epoll_calls.h"
+#include "ipc_io_job.h"
+#include "task_call.h"
+#include <poll.h>
+
+/* Operation-scoped borrow of the native queue. No hidden registration is
+ * inserted into it, and no native OFD is retained by the virtual authority. */
+struct md_epoll_wait {
+    struct md_ipc_io_job job;
+    struct pollfd sources[2];
+    int64_t deadline;
+    int initialized;
+    int task_started, virtual_count, blocking;
+};
+/* 1 means event-driven wait on job.event; 0 publishes a result. */
+int md_epoll_wait_progress(struct md_epoll_wait *,struct md_control_epoll *,int native,
+    struct md_epoll_frame *,long *result);
+void md_epoll_wait_cancel(struct md_epoll_wait *);
+/* Prepare/consume a caller-context native wait. The owner retains the exact
+ * caller slot through the operation; completed native output is in frame. */
+int md_epoll_wait_task(struct md_epoll_wait *,struct md_control_epoll *,
+    struct md_epoll_frame *,uintptr_t address,long number,int descriptor,
+    int completed,long native_result,struct md_task_call_arguments *,long *result);
+#endif

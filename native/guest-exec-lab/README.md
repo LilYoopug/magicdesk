@@ -54,11 +54,34 @@ Mixed native/virtual collection performs 100,000 rounds with allocation guards
 and exact FD cleanup. This is an internal collector test, not a guest epoll
 notification test. The same case runs real native and Shroot wait loops and
 requires zero interception counters for `ppoll`, `pselect6`, `epoll_pwait`,
-`epoll_pwait2`, creation and registration, both before and after an application
+`epoll_pwait2` and registration, both before and after an application
 filter denies further seccomp installation. Timings are diagnostic, not a
 stable performance benchmark. Native and guest runs also retain epoll identity
 through dup, forked registration changes and queued SCM_RIGHTS after all source
 aliases close; both received aliases observe the same kernel interest set.
+Epoll creation alone retains its expected observation count. A BPF interpreter
+checks selector classes, FD argument positions, collisions, gate addresses and
+native wait decisions. The native remote-admission fixture installs that same
+filter through a stopped task and compares its continuation with an unmodified
+ptrace-interrupt baseline, for dumpable/protected processes and allowed/denied
+seccomp. Pipe reads restart; epoll reports the kernel's EINTR. Signal masks and
+application filter errors must survive either outcome. This proves the cold
+syscall mechanism, not guest readiness or admission across all owners. Two-thread
+checks require successful TSYNC to reach both callers, and an incompatible
+sibling to reject synchronization without changing either caller's filter.
+The same task-filter module additionally runs at syscall-entry, seccomp and
+completed-exit stops: the original pipe write must execute exactly once, with
+the restored syscall-info boundary. Restart-code exits must reject admission
+without changing registers or signal masks, then complete native signal restart.
+Real task-filter calls borrow their stop from the common quiescence owner;
+synthetic interruption and deferred syscall events retain separate resume
+ownership. Model checks reject premature release, event replay and double return,
+and preserve the original event's rusage.
+Production proc/watch installation also uses this supervisor-owned task-filter
+call. The buffer fixture fills its IO pool while admitting a reserved control
+loan in the same mapping. Filter construction leaves delivery bytes unchanged;
+pin/release and reuse allocate no memory or extra guest descriptor. Guest selector
+regressions exercise this path through opens, dup and prepared sandbox filters.
 The `ofd-order` case checks typed sysctl masks, read independence, independent
 opens/shared references, UTS copies, constant providers and concurrent lazy
 carrier publication. It also exercises the typed epoll authority through the
@@ -67,6 +90,16 @@ fork/unshare, exec CLOEXEC, transfer after source-table teardown and final
 transport cleanup. Empty authorities have no wake FDs; completion and retirement
 run under allocation-failure guards. Watched targets also traverse dup/fork,
 queued transfer and final CLOEXEC release without manual collector retirement.
+The cold admission inventory checks shared/copied tables and thread groups,
+masked-selector collisions, late owners from an in-flight fork, queued table
+mutations, allocation failure, positive TSYNC rejection and partial-installation
+retry. Unobserved close/dup outcomes must invalidate virtual admission, including
+unknown duplicate numbers, and wake a retained collector with an explicit error.
+The live fixture joins that inventory to the task-filter and quiescence modules:
+three real processes share one epoll through two aliases, with CLONE_FILES and
+forked tables. Dumpable and protected variants require installation in every
+holder. Partial application denial must abort virtual activation, retain only
+confirmed selectors and allow native waits through those residual filters.
 These checks do not whitelist default-boot
 failures or establish guest virtual-subscription admission.
 
@@ -229,6 +262,10 @@ stat/statx/readlink cover sockets, pipes, deleted files, namespace handles,
 close/reuse and target exit; cwd and executable metadata select guest objects.
 It runs with
 implicit proc and with stock `unshare --pid --fork --mount-proc`.
+Its selector fixture checks proc/watch/native reuse in both filter orders,
+fork/exec retention, and typed netlink duplication through dup, dup3 and both
+fcntl commands. Independent child cases check flags, source closure, inherited
+aliases, native-width command decoding and actual netlink response readiness.
 
 `test_thread_identity_runtime.py BUILD STORE FIXTURE --debuggers` uses the glibc
 `md-thread_identity-fixture` built by `build-libc-fixtures.sh`. Ordinary and
