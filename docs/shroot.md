@@ -340,8 +340,15 @@ UID 2000's shell home is `/data/local/tmp/magicdesk/`; root consoles use
 `/data/local/tmp/magicdesk-root/home`. Release tags retain their exact
 installer, for example
 [`v2.0.2/scripts/install_linux.sh`](https://raw.githubusercontent.com/mekhontsev/magicdesk/v2.0.2/scripts/install_linux.sh).
-An older APK may lack commands required by a newer installer; use a matching
-release tag when keeping an older MagicDesk version.
+The current installer requires MagicDesk 2.1 or newer (`versionCode` 219).
+Before questions, downloads or environment access, including `--resume`, it
+checks the running app with `magicdesk get_state --field data.app.versionCode`.
+An older version, unavailable CLI or invalid response stops installation without
+changing Linux environments. Update MagicDesk and open a new Shell console,
+or use the matching release-tag installer when keeping an older APK.
+`--help`, `--list` and embedded-script/patch exports work without MagicDesk.
+The minimum follows required APK behavior, not every installer revision;
+development builds within one version cycle share the same version code.
 
 The script itself asks for the distribution, independent environment name,
 GUI profile, graphics driver, locale, timezone and fonts. Additional questions

@@ -3,6 +3,7 @@ import errno
 import json
 import os
 from pathlib import Path
+import re
 import selectors
 import shlex
 import shutil
@@ -14,6 +15,9 @@ import unittest
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "install_linux.sh"
+MIN_VERSION_CODE = int(re.search(r"^MIN_MAGICDESK_VERSION_CODE=(\d+)$", SCRIPT.read_text(), re.M).group(1))
+MIN_VERSION_NAME = re.search(r"^MIN_MAGICDESK_VERSION_NAME=([\d.]+)$", SCRIPT.read_text(), re.M).group(1)
+VERSION_QUERY = ["get_state", "--field", "data.app.versionCode"]
 
 
 class InstallLinuxTest(unittest.TestCase):
@@ -22,6 +26,7 @@ class InstallLinuxTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.directory = Path(self.temp.name)
         self.log = self.directory / "calls.jsonl"
+        self.version_log = self.directory / "version.jsonl"
         self.payload = self.directory / "guest.sh"
         stub = self.directory / "shroot"
         stub.write_text("#!" + sys.executable + r'''
@@ -31,6 +36,13 @@ if Path(sys.argv[0]).name == "id":
     print(os.environ.get("TEST_UID", "2000"))
     sys.exit(0)
 args = sys.argv[1:]
+if Path(sys.argv[0]).name == "magicdesk" and args and args[0] == "get_state":
+    with open(os.environ["TEST_VERSION_LOG"], "a") as log:
+        log.write(json.dumps(args) + "\n")
+    if args != ["get_state", "--field", "data.app.versionCode"]:
+        sys.exit(2)
+    print(os.environ["TEST_VERSION_CODE"])
+    sys.exit(int(os.environ.get("TEST_VERSION_STATUS", "0")))
 with open(os.environ["TEST_LOG"], "a") as log:
     log.write(json.dumps(args) + "\n")
 stage = args[0]
@@ -65,7 +77,8 @@ if os.environ.get("TEST_FAIL") == stage:
         shutil.copyfile(stub, self.directory / "magicdesk")
         (self.directory / "magicdesk").chmod(0o755)
         self.environment = dict(os.environ, PATH=str(self.directory) + os.pathsep + os.environ["PATH"],
-                                TEST_LOG=str(self.log), TEST_PAYLOAD=str(self.payload), TMPDIR=str(self.directory))
+                                TEST_LOG=str(self.log), TEST_PAYLOAD=str(self.payload), TMPDIR=str(self.directory),
+                                TEST_VERSION_LOG=str(self.version_log), TEST_VERSION_CODE=str(MIN_VERSION_CODE))
 
     def run_script(self, *args, **environment):
         # EVENT_WAIT: installer exit; timeout fails a stuck subprocess.
@@ -74,6 +87,72 @@ if os.environ.get("TEST_FAIL") == stage:
 
     def calls(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
+
+    def version_calls(self):
+        return [json.loads(line) for line in self.version_log.read_text().splitlines()] if self.version_log.exists() else []
+
+    def test_minimum_and_newer_versions_are_accepted_with_one_query(self):
+        for version in (MIN_VERSION_CODE, MIN_VERSION_CODE + 1, 2147483647):
+            with self.subTest(version=version):
+                self.version_log.unlink(missing_ok=True)
+                result = self.run_script("--yes", TEST_VERSION_CODE=str(version))
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual([VERSION_QUERY], self.version_calls())
+
+    def test_old_versions_stop_before_questions_resume_or_recovery_work(self):
+        for args in ((), ("--yes",), ("--yes", "--resume", "--name", "existing"),
+                     ("--yes", "--distro", "steamos")):
+            with self.subTest(args=args):
+                self.version_log.unlink(missing_ok=True)
+                result = self.run_script(*args, TEST_VERSION_CODE=str(MIN_VERSION_CODE - 1))
+                self.assertEqual(1, result.returncode, result.stderr)
+                self.assertIn("requires MagicDesk " + MIN_VERSION_NAME, result.stderr)
+                self.assertIn("installed " + str(MIN_VERSION_CODE - 1), result.stderr)
+                self.assertIn("Update MagicDesk", result.stderr)
+                self.assertNotIn("Interactive input", result.stderr)
+                self.assertEqual([VERSION_QUERY], self.version_calls())
+                self.assertEqual([], self.calls())
+                self.assertFalse(self.payload.exists())
+
+    def test_unknown_or_failed_version_query_never_runs_shroot(self):
+        for version, status in (("", "0"), ("null", "0"), ("2.0.3", "0"), ("218-dev", "0"),
+                                ("218\n219", "0"), ("-1", "0"), ("+218", "0"),
+                                (" 218", "0"), ("9" * 100, "0"), ("2147483648", "0"),
+                                (str(MIN_VERSION_CODE), "1"), (str(MIN_VERSION_CODE), "3")):
+            with self.subTest(version=version, status=status):
+                result = self.run_script("--yes", TEST_VERSION_CODE=version, TEST_VERSION_STATUS=status)
+                self.assertEqual(1, result.returncode, result.stderr)
+                self.assertIn("MagicDesk version", result.stderr)
+                self.assertEqual([], self.calls())
+                self.assertFalse(self.payload.exists())
+
+    def test_missing_magicdesk_fails_but_offline_commands_still_work(self):
+        (self.directory / "magicdesk").unlink()
+        # Restrict PATH after the host shell (including launcher wrappers) starts.
+        # EVENT_WAIT: installer rejection; timeout fails a stuck subprocess.
+        result = subprocess.run(["sh", "-c", 'PATH=$1; script=$2; shift 2; . "$script"',
+                                 "installer-test", str(self.directory), str(SCRIPT), "--yes"],
+                                input="", text=True, capture_output=True, env=self.environment, timeout=15)
+        self.assertEqual(1, result.returncode, result.stderr)
+        self.assertIn("magicdesk is unavailable", result.stderr)
+        for option in ("--help", "--list", "--print-mesa-patch", "--print-kwin-patch",
+                       "--print-recovery-reader", "--print-desktop-session", "--print-audio-session", "--print-steam-game"):
+            with self.subTest(option=option):
+                result = self.run_script(option, TEST_UID="10001", TEST_VERSION_STATUS="3")
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertTrue(result.stdout)
+        self.assertEqual([], self.version_calls())
+        self.assertEqual([], self.calls())
+
+    def test_version_floor_does_not_exceed_this_apk(self):
+        properties = dict(line.split("=", 1) for line in (SCRIPT.parents[1] / "gradle.properties").read_text().splitlines()
+                          if "=" in line and not line.startswith("#"))
+        self.assertLessEqual(MIN_VERSION_CODE, int(properties["magicDeskVersionCode"]))
+        if MIN_VERSION_CODE == int(properties["magicDeskVersionCode"]):
+            self.assertEqual(properties["magicDeskVersionName"], MIN_VERSION_NAME)
+        result = self.run_script("--help")
+        self.assertIn("Requires MagicDesk " + MIN_VERSION_NAME, result.stdout)
+        self.assertIn("versionCode " + str(MIN_VERSION_CODE), result.stdout)
 
     def test_apps_install_uses_existing_commands_and_keeps_guest_setup_on_stdin(self):
         result = self.run_script("--yes", "--name", "work")

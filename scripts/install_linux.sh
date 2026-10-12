@@ -2,6 +2,11 @@
 # Run from a saved file in MagicDesk's Shell console; stdin is used for questions.
 set -eu
 
+# Raise this floor only when recipes require newer APK behavior.
+MIN_MAGICDESK_VERSION_CODE=219
+MIN_MAGICDESK_VERSION_NAME=2.1
+readonly MIN_MAGICDESK_VERSION_CODE MIN_MAGICDESK_VERSION_NAME
+
 usage() {
     cat <<'HELP'
 Usage: sh install_linux.sh [--distro debian|ubuntu|alpine|fedora|arch|steamos] [OPTIONS]
@@ -58,6 +63,8 @@ SteamOS retains its supplied applications, fonts and system drivers. The default
 It needs about 35 GB free during conversion, not a booted recovery/VR session.
 Its packages are updated from the image's configured repositories before first use.
 HELP
+    printf '\nRequires MagicDesk %s or newer (versionCode %s).\n' \
+        "$MIN_MAGICDESK_VERSION_NAME" "$MIN_MAGICDESK_VERSION_CODE"
 }
 
 configurations() {
@@ -2609,6 +2616,19 @@ prepare_recovery() {
 }
 
 fail() { printf '%s\n' "$*" >&2; exit 1; }
+require_magicdesk_version() {
+    command -v magicdesk >/dev/null 2>&1 || fail 'magicdesk is unavailable. Open a MagicDesk Shell console first.'
+    installed_magicdesk_version_code=$(magicdesk get_state --field data.app.versionCode) || \
+        fail "Cannot determine MagicDesk version. Use MagicDesk $MIN_MAGICDESK_VERSION_NAME or newer and open a new Shell console."
+    case "$installed_magicdesk_version_code" in
+        ''|*[!0-9]*) fail 'Invalid MagicDesk versionCode; expected a non-negative Android version code.' ;;
+    esac
+    if [ "${#installed_magicdesk_version_code}" -gt 10 ] || [ "$installed_magicdesk_version_code" -gt 2147483647 ]; then
+        fail 'Invalid MagicDesk versionCode; expected a non-negative Android version code.'
+    fi
+    [ "$installed_magicdesk_version_code" -ge "$MIN_MAGICDESK_VERSION_CODE" ] || \
+        fail "This installer requires MagicDesk $MIN_MAGICDESK_VERSION_NAME or newer (versionCode $MIN_MAGICDESK_VERSION_CODE; installed $installed_magicdesk_version_code). Update MagicDesk, open a new Shell console and try again."
+}
 ask() {
     printf '%s [%s]: ' "$1" "$2"
     IFS= read -r answer || fail 'Input closed.'
@@ -2683,6 +2703,7 @@ fi
 
 command -v shroot >/dev/null 2>&1 || fail 'Open a MagicDesk Shell console with shell access first.'
 case "$(id -u)" in 2000|0) ;; *) fail 'Shroot requires the selected Android shell (UID 2000) or root executor.' ;; esac
+require_magicdesk_version
 if [ "$yes" = no ]; then
     [ -t 0 ] || fail 'Interactive input is unavailable. Save the script before running it, or use --yes.'
     if [ "$resume" = no ]; then
