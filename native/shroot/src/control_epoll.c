@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "control_epoll.h"
 #include "event_signal.h"
+#include "fd_weak.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
@@ -8,10 +9,10 @@
 
 struct interest {
     struct interest *next,*previous,*ready_next,*ready_previous;
-    struct md_fd_object *identity;
+    struct md_fd_weak *identity;
     struct md_control_file provider;
     struct epoll_event event;
-    int fd,wake,armed,queued,disabled;
+    int fd,wake,lifetime,armed,lifetime_armed,queued,disabled;
 };
 struct md_control_epoll {
     struct md_fd_object object;
@@ -27,7 +28,7 @@ static int ready_signal(struct md_control_epoll *q) {
     return error;
 }
 static void enqueue(struct md_control_epoll *q,struct interest *i) {
-    if (i->queued || i->disabled) return;
+    if (i->queued || (i->disabled && !md_fd_weak_expired(i->identity))) return;
     i->ready_previous=q->tail; i->ready_next=NULL;
     if (q->tail) q->tail->ready_next=i; else q->head=i;
     q->tail=i; i->queued=1; ++q->pending;
@@ -56,9 +57,13 @@ static void discard(struct md_control_epoll *q,struct interest *i) {
          * this source's OFD, so closing this descriptor alone is insufficient. */
         disarm(q,i); close(i->wake);
     }
+    if (i->lifetime>=0) {
+        if (i->lifetime_armed) epoll_ctl(q->events,EPOLL_CTL_DEL,i->lifetime,NULL);
+        close(i->lifetime);
+    }
     if (i->previous) i->previous->next=i->next; else q->first=i->next;
     if (i->next) i->next->previous=i->previous;
-    md_control_file_release(i->provider); md_fd_object_release(i->identity); free(i);
+    md_fd_weak_release(i->identity); free(i);
 }
 static void transport_close(struct md_control_epoll *q) {
     if (q->ready>=0) close(q->ready);
@@ -103,9 +108,26 @@ int md_control_epoll_descriptor(const struct md_control_epoll *q) {
     return q ? q->events : -EINVAL;
 }
 static struct interest *find(struct md_control_epoll *q,int fd,const struct md_fd_object *identity) {
+    struct md_fd_weak *weak=atomic_load_explicit(&identity->weak,memory_order_acquire);
     for (struct interest *i=q->first;i;i=i->next)
-        if (i->fd==fd && i->identity==identity) return i;
+        if (i->fd==fd && i->identity==weak) return i;
     return NULL;
+}
+static int harvest(struct md_control_epoll *q) {
+    if (q->events<0) return 0;
+    struct epoll_event wakes[32];
+    int count=epoll_wait(q->events,wakes,32,0);
+    if (count<0) return -errno;
+    /* Several entries can refer to one interest (source and retirement).
+     * Queue the complete batch before freeing any interest. */
+    for (int n=0;n<count;++n) if (wakes[n].data.ptr) enqueue(q,wakes[n].data.ptr);
+    return 0;
+}
+static void reap(struct md_control_epoll *q) {
+    for (struct interest *i=q->head,*next;i;i=next) {
+        next=i->ready_next;
+        if (md_fd_weak_expired(i->identity)) discard(q,i);
+    }
 }
 static uint32_t requested(const struct epoll_event *e) {
     return (e->events&~(EPOLLET|EPOLLONESHOT))|EPOLLERR|EPOLLHUP;
@@ -117,6 +139,11 @@ int md_control_epoll_ctl(struct md_control_epoll *q,int operation,int fd,
     if (operation!=EPOLL_CTL_DEL && !event) return -EFAULT;
     /* These policies need a distinct owner; do not silently approximate them. */
     if (event && operation!=EPOLL_CTL_DEL && (event->events&(EPOLLEXCLUSIVE|EPOLLWAKEUP))) return -EOPNOTSUPP;
+    int observed=harvest(q);
+    if (observed) return observed;
+    reap(q);
+    observed=ready_signal(q);
+    if (observed) return observed;
     struct interest *i=find(q,fd,identity);
     if (operation==EPOLL_CTL_DEL) {
         if (!i) return -ENOENT;
@@ -140,8 +167,9 @@ int md_control_epoll_ctl(struct md_control_epoll *q,int operation,int fd,
     int cold=q->events<0;
     i=calloc(1,sizeof(*i));
     if (!i) return -ENOMEM;
-    i->wake=-1; i->fd=fd; i->event=*event;
-    i->identity=md_fd_object_retain(identity); i->provider=md_control_file_retain(provider);
+    i->wake=i->lifetime=-1; i->fd=fd; i->event=*event;
+    i->identity=md_fd_weak_observe(identity); i->provider=provider;
+    if (!i->identity) { int error=-errno; free(i); return error; }
     i->next=q->first; if (q->first) q->first->previous=i; q->first=i;
     int descriptor=-1;
     int error=provider.ops->poll_descriptor ? provider.ops->poll_descriptor(provider.context,&descriptor) : 0;
@@ -149,7 +177,16 @@ int md_control_epoll_ctl(struct md_control_epoll *q,int operation,int fd,
         i->wake=fcntl(descriptor,F_DUPFD_CLOEXEC,3);
         if (i->wake<0) error=-errno;
     }
+    if (!error) {
+        i->lifetime=fcntl(md_fd_weak_descriptor(i->identity),F_DUPFD_CLOEXEC,3);
+        if (i->lifetime<0) error=-errno;
+    }
     if (!error) error=transport_open(q);
+    if (!error) {
+        struct epoll_event expiry={.events=EPOLLIN|EPOLLET,.data.ptr=i};
+        if (epoll_ctl(q->events,EPOLL_CTL_ADD,i->lifetime,&expiry)) error=-errno;
+        else i->lifetime_armed=1;
+    }
     if (!error) error=arm(q,i);
     long mask=error ? error : provider.ops->poll(provider.context);
     if (mask<0) {
@@ -166,10 +203,8 @@ int md_control_epoll_collect(struct md_control_epoll *q,struct epoll_event *out,
     if (!q || capacity<=0) return -EINVAL;
     if (!out) return -EFAULT;
     if (q->events<0) return 0;
-    struct epoll_event wakes[32];
-    int count=epoll_wait(q->events,wakes,32,0);
-    if (count<0) return -errno;
-    for (int n=0;n<count;++n) if (wakes[n].data.ptr) enqueue(q,wakes[n].data.ptr);
+    int observed=harvest(q);
+    if (observed) return observed;
     /* A bounded ready-list turn prevents level-ready entries from appearing
      * twice in one result and preserves fair rotation across small buffers. */
     unsigned turn=q->pending;
@@ -177,7 +212,10 @@ int md_control_epoll_collect(struct md_control_epoll *q,struct epoll_event *out,
     while (turn-- && q->head && delivered<capacity) {
         struct interest *i=q->head;
         dequeue(q,i);
+        struct md_fd_object *owner=md_fd_weak_lock(i->identity);
+        if (!owner) { discard(q,i); continue; }
         long mask=i->provider.ops->poll(i->provider.context);
+        md_fd_object_release(owner);
         if (mask<0) { enqueue(q,i); error=(int)mask; break; }
         uint32_t events=(uint32_t)mask&requested(&i->event);
         if (!events) continue;
@@ -190,12 +228,4 @@ int md_control_epoll_collect(struct md_control_epoll *q,struct epoll_event *out,
     }
     int signal_error=ready_signal(q);
     return delivered ? delivered : error ? error : signal_error;
-}
-void md_control_epoll_retire(struct md_control_epoll *q,const struct md_fd_object *identity) {
-    if (!q || !identity) return;
-    for (struct interest *i=q->first,*next;i;i=next) {
-        next=i->next;
-        if (i->identity==identity) discard(q,i);
-    }
-    ready_signal(q);
 }

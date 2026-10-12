@@ -2,6 +2,7 @@
 #include "control_epoll.h"
 #include "fd_messages.h"
 #include "fd_mutation.h"
+#include "fd_weak.h"
 #include "proc_file.h"
 #include "proc_sysctl.h"
 #include "uts_namespace.h"
@@ -51,7 +52,53 @@ static struct md_fd_object *expect(struct md_fd_origins *files,int fd,
     assert(actual==object && actual_flags==flags);
     md_fd_object_release(actual); return object;
 }
+static void target_retirement(int *budget) {
+    unsigned before=descriptors();
+    struct md_identity id=md_identity_new(0,0);
+    struct md_uts_namespace *uts=md_uts_namespace_new(); assert(uts);
+    struct md_control_file provider=md_proc_sysctl_new(MD_PROC_FILE_HOSTNAME,NULL,uts); assert(provider.ops);
+    struct md_proc_file *source=md_proc_file_open_control(provider.ops,provider.context,&id,O_RDONLY);
+    md_control_file_release(provider); assert(source);
+    struct md_fd_origins *files=md_fd_origins_new(); assert(files);
+    struct md_fd_origin_update update;
+    assert(!md_fd_origins_prepare_object(files,md_proc_file_object(source),FD_CLOEXEC,&update));
+    md_fd_origins_finish(&update,40);
+    mutation(files,SYS_dup,40,0,0,41,budget);
+    struct md_fd_origins *child=md_fd_origins_fork(files,0); assert(child);
+    struct md_control_epoll *q=md_control_epoll_new(); assert(q);
+    struct epoll_event event={.events=0,.data.u64=42},out;
+    assert(!md_control_epoll_ctl(q,EPOLL_CTL_ADD,40,md_proc_file_object(source),md_proc_file_control(source),&event));
+    struct md_fd_weak *weak=md_fd_weak_observe(md_proc_file_object(source)); assert(weak);
+    md_proc_file_release(source);
+    mutation(files,SYS_close,40,0,0,0,budget);
+    md_fd_origins_exec(child);
+    struct md_fd_message *queued=NULL; int number=41;
+    assert(!md_fd_message_capture(child,&number,1,&queued));
+    md_fd_origins_release(files); md_fd_origins_release(child);
+    assert(!md_fd_weak_expired(weak));
+    assert(!md_uts_namespace_set(uts,0,"queued-target",13));
+    assert(md_control_epoll_collect(q,&out,1)==1 && out.events==EPOLLERR && out.data.u64==42);
+    files=md_fd_origins_new(); assert(files);
+    assert(!md_fd_origins_prepare_batch(files,md_fd_message_origins(queued),FD_CLOEXEC,1,&update));
+    int received=40;
+    assert(!md_fd_origins_finish_batch(&update,1,&received,1));
+    md_fd_message_release(queued);
+    assert(!md_fd_weak_expired(weak));
+    *budget=0;
+    md_fd_origins_exec(files);
+    *budget=-1;
+    assert(md_fd_weak_expired(weak));
+    /* The collector owns no provider reference that could keep this target
+     * alive, including an unread notification racing the final close. */
+    assert(!md_uts_namespace_set(uts,0,"retired",7));
+    assert(!md_control_epoll_collect(q,&out,1));
+    md_fd_origins_release(files); md_fd_weak_release(weak); md_control_epoll_release(q);
+    md_uts_namespace_release(uts); md_identity_release(&id);
+    assert(descriptors()==before);
+    puts("PASS watched target custody: dup/fork/exec, queued transfer and automatic final retirement");
+}
 void test_epoll_owner(int *budget) {
+    target_retirement(budget);
     unsigned before=descriptors();
     for (int limit=0;limit<3;++limit) {
         struct md_fd_origins *files=md_fd_origins_new(); assert(files);

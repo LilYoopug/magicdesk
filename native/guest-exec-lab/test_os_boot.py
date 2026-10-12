@@ -145,7 +145,7 @@ def main():
     parser.add_argument('--store', required=True)
     parser.add_argument('--build', type=Path)
     parser.add_argument('--diagnostic-console', action='store_true')
-    parser.add_argument('--trace', action='store_true', help='Trace filesystem and mount setup; requires strace')
+    parser.add_argument('--trace', action='store_true', help='Trace filesystem, sandbox and readiness setup; requires strace')
     parser.add_argument('--init', choices=('systemd', 'openrc'), default='systemd')
     parser.add_argument('--output', type=Path, default=Path('build/os-boot-results'))
     args = parser.parse_args()

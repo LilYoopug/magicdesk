@@ -24,6 +24,7 @@
 #include <sys/prctl.h>
 #include <sys/ptrace.h>
 #include <sys/resource.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/file.h>
 #include <sys/ioctl.h>
@@ -441,6 +442,61 @@ static int import_fd_from(int endpoint, int discard, pid_t peer) {
 static int import_fd(int endpoint, int discard) {
     return import_fd_from(endpoint,discard,0);
 }
+static long epoll_target(int observer,int number,int candidate) {
+    struct kcmp_epoll_slot slot={.efd=observer,.tfd=number};
+    long result=syscall(SYS_kcmp,getpid(),getpid(),KCMP_EPOLL_TFD,candidate,&slot);
+    return result<0 ? -errno : result;
+}
+static int epoll_depth(void) {
+    int chain[16],count=1;
+    chain[0]=epoll_create1(EPOLL_CLOEXEC); assert(chain[0]>=0);
+    struct epoll_event event={0};
+    for (;count<16;++count) {
+        chain[count]=epoll_create1(EPOLL_CLOEXEC); assert(chain[count]>=0);
+        if (epoll_ctl(chain[count],EPOLL_CTL_ADD,chain[count-1],&event)) {
+            assert(errno==ELOOP); close(chain[count]); break;
+        }
+    }
+    assert(count<16);
+    int observer=epoll_create1(EPOLL_CLOEXEC); assert(observer>=0);
+    assert(epoll_ctl(observer,EPOLL_CTL_ADD,chain[count-1],&event)==-1 && errno==ELOOP);
+    for (int i=count-1;i>=0;--i) close(chain[i]);
+    close(observer);
+    return count;
+}
+static void epoll_weak_identity(void) {
+    unsigned before=count_low_fds();
+    int observer=epoll_create1(EPOLL_CLOEXEC),fd=epoll_create1(EPOLL_CLOEXEC);
+    int other=epoll_create1(EPOLL_CLOEXEC); assert(observer>=0 && fd>=0 && other>=0);
+    int duplicate=fcntl(fd,F_DUPFD_CLOEXEC,0); assert(duplicate>=0);
+    struct epoll_event event={0};
+    assert(!epoll_ctl(observer,EPOLL_CTL_ADD,fd,&event));
+    long result=epoll_target(observer,fd,duplicate);
+    if (result<0) printf("LIMIT native epoll target comparison errno=%ld\n",-result);
+    else {
+        assert(!result && epoll_target(observer,fd,other)>0);
+        int number=fd;
+        assert(!close(fd) && !epoll_target(observer,number,duplicate));
+        int pair[2]; assert(!socketpair(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC,0,pair));
+        export_fd(pair[0],duplicate); close(duplicate); duplicate=-1;
+        assert(epoll_target(observer,number,other)>0);
+        int received=import_fd(pair[1],0);
+        assert(!epoll_target(observer,number,received));
+        close(received);
+        assert(epoll_target(observer,number,other)==-ENOENT);
+        close(pair[0]); close(pair[1]);
+        assert(dup3(other,number,O_CLOEXEC)==number);
+        assert(epoll_target(observer,number,number)==-ENOENT);
+        close(number); fd=-1;
+        puts("PASS native weak epoll identity: aliases, queued SCM_RIGHTS, final retirement and FD reuse");
+    }
+    if (fd>=0) close(fd);
+    if (duplicate>=0) close(duplicate);
+    close(other); close(observer);
+    int depth=epoll_depth();
+    printf("LIMIT weak epoll observation: valid native depth=%d rejects observer with ELOOP\n",depth);
+    assert(count_low_fds()==before);
+}
 static void reject_forged_peer(int endpoint, pid_t other) {
     char byte='x'; struct iovec vector={&byte,1};
     union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(struct ucred))]; } control={0};
@@ -850,6 +906,9 @@ static void owned_receive(int cancel, int slots) {
     int status=wait_child(child); assert(WIFEXITED(status) && !WEXITSTATUS(status));
 }
 int main(int argc, char **argv) {
+    if (argc==2 && !strcmp(argv[1],"--epoll-identity")) {
+        setbuf(stdout,NULL); alarm(30); epoll_weak_identity(); return 0;
+    }
     if (argc==3 && !strcmp(argv[1],"--closed-on-exec")) {
         int fd=atoi(argv[2]); assert(fd>=3 && fcntl(fd,F_GETFD)==-1 && errno==EBADF);
         return 0;
@@ -876,6 +935,7 @@ int main(int argc, char **argv) {
                 helper_boundary(protected,deny_clone,deny_close);
     socket_peer_boundary();
     description_identity(argv[1]);
+    epoll_weak_identity();
     const int socket_types[]={SOCK_STREAM,SOCK_DGRAM,SOCK_SEQPACKET};
     for (unsigned i=0;i<sizeof(socket_types)/sizeof(*socket_types);++i) queue_retirement(socket_types[i]);
     for (int cancel=0;cancel<4;++cancel)

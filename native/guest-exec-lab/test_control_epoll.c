@@ -2,6 +2,7 @@
 #include "control_epoll.h"
 #include "control_event.h"
 #include "event_signal.h"
+#include "fd_weak.h"
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -89,10 +90,10 @@ static void identities(void) {
     assert(!md_control_event_publish(source));
     assert(md_control_epoll_collect(q,out,4)==2);
     assert((out[0].data.u64==99 || out[1].data.u64==99));
-    md_control_epoll_retire(q,&a->identity);
+    release(a); a=NULL;
     assert(!md_control_event_publish(source));
     assert(md_control_epoll_collect(q,out,4)==1 && out[0].data.u64==UINT64_MAX);
-    md_control_epoll_retire(q,&b->identity); empty(q);
+    release(b); b=NULL; empty(q);
     md_control_epoll_release(q); release(a); release(b); md_control_event_release(source);
     assert(descriptors()==before);
     puts("PASS virtual epoll identity: duplicate data, dup consumption, FD reuse and final retirement");
@@ -169,7 +170,7 @@ static void batch_retirement(void) {
     }
     assert(!md_control_event_publish(source));
     /* Remove pending kernel events before the pointer can be freed/reused. */
-    for (unsigned i=0;i<97;i+=2) { md_control_epoll_retire(q,&items[i]->identity); release(items[i]); items[i]=NULL; }
+    for (unsigned i=0;i<97;i+=2) { release(items[i]); items[i]=NULL; }
     unsigned seen[97]={0},total=0;
     for (unsigned round=0;round<97 && total<48;++round) {
         struct epoll_event events[7];
@@ -197,6 +198,11 @@ static void admission_failure(void) {
     assert(ctl(q,EPOLL_CTL_ADD,9,s,EPOLLIN,9)==-ENOMEM);
     control_fail_allocation(0); empty(q);
     assert(md_control_epoll_descriptor(q)==-1);
+    control_fail_allocation(2);
+    assert(ctl(q,EPOLL_CTL_ADD,9,s,EPOLLIN,9)==-ENOMEM);
+    control_fail_allocation(0);
+    assert(!atomic_load(&s->identity.weak));
+    assert(md_control_epoll_descriptor(q)==-1);
     unsigned references=atomic_load(&s->identity.references);
     s->error=-EIO;
     assert(ctl(q,EPOLL_CTL_ADD,9,s,EPOLLIN,9)==-EIO);
@@ -216,9 +222,9 @@ static void admission_failure(void) {
     struct md_control_epoll *metadata=md_control_epoll_new();
     assert(metadata && md_control_epoll_descriptor(metadata)==-1);
     md_control_epoll_release(metadata);
-    /* Fail at each cold transport acquisition: source duplicate, internal
-     * epoll, then ready eventfd. No failed prefix publishes a wake handle. */
-    for (unsigned available=0;available<3;++available) {
+    /* Fail at each cold transport acquisition: source and lifetime duplicates,
+     * internal epoll, then ready eventfd. No failed prefix publishes a wake. */
+    for (unsigned available=0;available<4;++available) {
         assert(ctl(q,EPOLL_CTL_ADD,9,s,EPOLLIN,9)==-EMFILE);
         assert(atomic_load(&s->identity.references)==references);
         assert(md_control_epoll_descriptor(q)==-1 && count>0);
@@ -233,6 +239,28 @@ static void admission_failure(void) {
     assert(descriptors()==before);
     puts("PASS virtual epoll admission: ENOMEM, provider failure and EMFILE rollback/recovery");
 }
+static void retired_oneshot(void) {
+    unsigned before=descriptors();
+    struct md_control_event *source=md_control_event_new(); assert(source);
+    struct sample *s=sample(source,EPOLLIN);
+    struct md_control_epoll *q=md_control_epoll_new(); assert(q);
+    assert(!ctl(q,EPOLL_CTL_ADD,9,s,EPOLLIN|EPOLLONESHOT,12));
+    struct epoll_event out;
+    assert(md_control_epoll_collect(q,&out,1)==1 && out.data.u64==12);
+    empty(q);
+    struct md_fd_weak *weak=md_fd_weak_observe(&s->identity); assert(weak);
+    release(s);
+    assert(md_fd_weak_expired(weak));
+    assert(!md_fd_weak_lock(weak));
+    struct pollfd p={md_control_epoll_descriptor(q),POLLIN,0};
+    assert(poll(&p,1,0)==1);
+    /* Retirement wakes cleanup even when the source is disabled. It does not
+     * fabricate an application HUP or rearm the one-shot subscription. */
+    empty(q);
+    md_fd_weak_release(weak); md_control_epoll_release(q); md_control_event_release(source);
+    assert(descriptors()==before);
+    puts("PASS final release wakes one-shot retirement without a fabricated event");
+}
 void test_control_epoll(void) {
-    identities(); policies(); mixed(); batch_retirement(); admission_failure();
+    identities(); policies(); mixed(); batch_retirement(); admission_failure(); retired_oneshot();
 }

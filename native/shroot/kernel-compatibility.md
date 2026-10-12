@@ -115,6 +115,13 @@ own generation cursors and lazy wake descriptors. The virtual-interest collector
 has native fixture coverage, not guest syscall integration. Native `epoll_pwait2`
 (Linux 5.11) shares the direct wait policy; unsupported or denied native calls
 retain their kernel error. No notification thread or periodic sampling is added.
+Weak descriptor authorities use lazy eventfd notifications and userspace mutexes
+within the same baseline. Subscriptions borrow a strong reference only while
+accessing the provider; final release publishes expiry before destruction.
+`control-event` covers acquisition/retirement races and failed admission;
+`ofd-order` covers table and queued-transfer custody. No native epoll nesting,
+kernel OFD reference-count inspection or newer syscall is required for this
+internal lifetime mechanism.
 Offline IPv4 sysctls use the shared typed-control transport and retained mount
 anchors; numeric values and permissions are launch-owned state, not host sysctl
 writes. They add no post-5.15 interface. Foreign proc executable selection reuses

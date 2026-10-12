@@ -22,15 +22,14 @@ struct md_control_epoll *md_control_epoll_from_object(struct md_fd_object *);
  * A wake can be stale, and need not yield an application event. */
 int md_control_epoll_descriptor(const struct md_control_epoll *);
 /* Linux interest identity is (open description, registering FD), not data.u64.
- * ADD retains both the identity and provider; MOD/DEL use the exact identity.
+ * The caller retains identity during ctl; provider is owned by that identity.
+ * ADD weakly observes identity, so the subscription cannot keep its target
+ * alive. Collector calls borrow a strong reference before touching provider.
+ * MOD/DEL use the exact identity.
  * Unsupported exclusive/wakeup policies fail before changing an interest. */
 int md_control_epoll_ctl(struct md_control_epoll *,int operation,int fd,
     struct md_fd_object *,struct md_control_file,const struct epoll_event *);
 /* Nonblocking, allocation-free. At most one bounded ready-list turn per call.
  * Caller provides a separate result slice from native epoll_wait output. */
 int md_control_epoll_collect(struct md_control_epoll *,struct epoll_event *,int capacity);
-/* Confirmed monitored OFD retirement, not close of an arbitrary dup or a
- * provider reference-count transition. The descriptor custodian owns that
- * decision, including queued transfers and kernel aliases. */
-void md_control_epoll_retire(struct md_control_epoll *,const struct md_fd_object *);
 #endif

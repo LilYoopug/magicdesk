@@ -34,7 +34,8 @@ and asserts a non-degraded result. Its observer waits for systemd's startup
 jobs and collects only this invocation's journal, failed units and service state.
 Debian, Ubuntu, Arch and Fedora default boots currently fail or remain degraded;
 the fixture does not whitelist them. `--trace` includes pathname lookup, metadata,
-both mount APIs and epoll registration, using the same syscall set as the manager
+both mount APIs, process/exec boundaries, application seccomp installation and
+epoll creation/registration/waits, using the same syscall set as the manager
 fixture. `--init openrc` uses Alpine's real
 `openrc-init`, stock container service policy and a private runlevel selection.
 It checks the default services, restart/stop and exact launch-registry cleanup.
@@ -46,6 +47,9 @@ in-guest observer does not import host-side transport dependencies.
 model fixtures as UID 2000. They cover generation coalescing, concurrent
 publication/subscription/retirement, duplicate event data, open-description
 identity, level/edge/one-shot delivery, bounded fairness and failed admission.
+Weak authority checks race final release against temporary acquisition for
+10,000 rounds. Expiry remains observable without retaining the target, and
+disabled one-shot interests retire without inventing an application event.
 Mixed native/virtual collection performs 100,000 rounds with allocation guards
 and exact FD cleanup. This is an internal collector test, not a guest epoll
 notification test. The same case runs real native and Shroot wait loops and
@@ -61,8 +65,25 @@ carrier publication. It also exercises the typed epoll authority through the
 actual file-table and queued-message owners: publication failure, dup/reuse,
 fork/unshare, exec CLOEXEC, transfer after source-table teardown and final
 transport cleanup. Empty authorities have no wake FDs; completion and retirement
-run under allocation-failure guards. These checks do not whitelist default-boot
+run under allocation-failure guards. Watched targets also traverse dup/fork,
+queued transfer and final CLOEXEC release without manual collector retirement.
+These checks do not whitelist default-boot
 failures or establish guest virtual-subscription admission.
+
+`test_journald.py --build BUILD --store STORE --probe-only --trace` starts a
+private systemd target and runs a selective TSYNC-filter probe in the same
+process that execs stock journald. The service retains its distribution security
+policy. The probe changes only an invalid epoll descriptor's error result;
+successful native waits remain native. Probe-only success establishes filter
+admission, not journald readiness. Without `--probe-only`, a failed journal
+service fails the fixture. Trace output uses the shared init syscall set.
+
+The native `fd-lifecycle` case checks `KCMP_EPOLL_TFD` identity across duplicate
+descriptors and queued SCM_RIGHTS, automatic removal after final release and FD
+reuse. Its private observer does not retain the target OFD, but adds a nesting
+level: a valid maximally nested application epoll rejects it with ELOOP. This
+is a diagnostic boundary, not a production ownership mechanism. The fixture
+discovers the native depth rather than requiring a particular kernel's limit.
 
 `test_openrc.py --build BUILD --store STORE` needs an Alpine store with openrc
 and util-linux. It runs stock sysinit/boot initialization and dedicated runlevels
