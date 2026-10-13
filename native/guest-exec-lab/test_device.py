@@ -105,6 +105,9 @@ def main():
               contains=["PASS namespace exec preserves cwd, real umask and open-unlinked FD",
                         "PASS namespace syscalls: atomic open, hard links, stat/statx, mmap/flock, symlinks and directory cursors"])
         for backend, prefix in [("direct", launch), ("namespace", namespace)]:
+            check(backend + " large exec vectors and proc image", "timeout 120 " + prefix
+                  + "/usr/bin/md-arguments-fixture",
+                  contains=["PASS 32768 arguments", "PASS exec limits"])
             check(backend + " proc descriptor aliases", "timeout 60 " + prefix
                   + "/usr/bin/md-proc-fixture /tmp/md-proc-" + backend + " " + backend,
                   contains=["PASS proc: file aliases", "PASS proc: posix_spawn", "PASS proc: renamed directory",

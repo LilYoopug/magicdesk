@@ -92,7 +92,7 @@ long md_guest_execat(const struct md_fs *fs, int base, const char *program, char
         struct md_command_recipe recipe;
         r=prepare_retained(fs,base,path,flags,inaccessible,&recipe);
         if (!r) { loader=recipe.loader; r=md_command_apply_recipe(&c,&recipe); }
-        if (r<0) { md_fs_buffer_exec_cancel(); return r; }
+        if (r<0) { md_fs_buffer_exec_cancel(); md_command_close(&c); return r; }
     } else {
         struct md_program input;
         r=!*path ? md_program_capture(fs,base,identity,&input)
@@ -108,7 +108,7 @@ long md_guest_execat(const struct md_fs *fs, int base, const char *program, char
     if (r < 0) { md_command_close(&c); return r; }
     char number[24]; md_decimal(number, (unsigned)c.fd);
     char interpreter_number[24];
-    char *next[MD_ARG_MAX + 24 + MD_SOCKET_ROUTES_MAX * 3];
+    char *next[24 + MD_SOCKET_ROUTES_MAX * 3];
     next[0] = md_bootstrap;
     next[1] = "--resume";
     unsigned n=2;
@@ -137,8 +137,12 @@ long md_guest_execat(const struct md_fs *fs, int base, const char *program, char
     if(fs->endpoint[0]) { next[n++]="--namespace"; next[n++]=(char *)fs->endpoint; }
     else next[n++]=(char *)fs->root;
     next[n++]=c.path;
-    for (unsigned i = 0; i <= c.argc; ++i) next[n+i] = c.argv[i];
-    r = RAW3(execve, md_bootstrap, next, env);
+    r=md_arguments_reserve(&c.args,n+c.args.count+1);
+    if (!r) {
+        memmove(c.args.values+n,c.args.values,(c.args.count+1)*sizeof(char *));
+        memcpy(c.args.values,next,n*sizeof(char *));
+        r=RAW3(execve,md_bootstrap,c.args.values,env);
+    }
     if (retained) md_fs_buffer_exec_cancel();
     md_command_close(&c);
     return r;

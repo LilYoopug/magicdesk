@@ -1,14 +1,13 @@
 #ifndef MD_COMMAND_H
 #define MD_COMMAND_H
 #include "command_image.h"
-#define MD_ARG_MAX 1024
+#include "arguments.h"
 /* Storage remains live until the loader takes ownership of argv strings. */
 struct md_command {
     char path[PATH_MAX], object[33];
     char scripts[MD_SCRIPT_DEPTH][PATH_MAX];
     char lines[MD_SCRIPT_DEPTH][MD_SCRIPT_HEADER];
-    char *argv[MD_ARG_MAX+16];
-    unsigned argc;
+    struct md_arguments args;
     int fd, interpreter_fd;
 };
 int md_command_arguments(struct md_command *, const char *, char *const []);

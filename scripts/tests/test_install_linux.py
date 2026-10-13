@@ -1,6 +1,8 @@
 """Installer orchestration without modifying the host or downloading packages."""
 import errno
+import gzip
 import json
+import lzma
 import os
 from pathlib import Path
 import re
@@ -172,6 +174,16 @@ if os.environ.get("TEST_FAIL") == stage:
         self.assertNotIn("/data/local/tmp", payload)
         self.assertEqual(0, subprocess.run(["sh", "-n", str(self.payload)]).returncode)
 
+    def test_explicit_xbps_network_preference_reaches_each_setup_stage(self):
+        result = self.run_script('--yes', '--distro', 'void', '--image', 'example/void:test',
+                                 '--gpu', 'turnip', FORCE_IPV4='1')
+        self.assertEqual(0, result.returncode, result.stderr)
+        stages = [call for call in self.calls() if call[0] == 'exec' and '-s' in call]
+        self.assertEqual(3, len(stages))
+        for call in stages:
+            self.assertIn('FORCE_IPV4=1', call)
+        self.assertNotIn('FORCE_IPV4=1', next(call for call in self.calls() if call[0] == 'install'))
+
     def test_xfce_profile_and_root_executor(self):
         result = self.run_script("--yes", "--gui", "xfce", TEST_UID="0")
         self.assertEqual(0, result.returncode, result.stderr)
@@ -244,19 +256,42 @@ if os.environ.get("TEST_FAIL") == stage:
                     'sdl2-compat', 'systemd-libs', 'libdecor'},
             'pacman': {'pipewire-pulse', 'wireplumber', 'pipewire-alsa', 'libpulse',
                        'sdl2', 'systemd-libs', 'libdecor'},
+            'zypper': {'pipewire-pulseaudio', 'pipewire-tools', 'wireplumber', 'pipewire-alsa',
+                       'libSDL2-2_0-0', 'libudev1', 'libdecor'},
+            'xbps': {'pipewire', 'wireplumber', 'alsa-pipewire', 'SDL2', 'eudev-libudev', 'libdecor'},
         }
         expected['recovery'] = expected['pacman']
         for family, libraries in expected.items():
             with self.subTest(family=family):
-                command = 'family=' + family + '\npackages() { printf "%s\\n" "$@"; }\n' + setup[start:end]
+                command = 'ID=arch\nfamily=' + family + '\npackages() { printf "%s\\n" "$@"; }\n' + setup[start:end]
                 # EVENT_WAIT: distribution dependency selection must exit without host changes.
                 result = subprocess.run(['sh', '-eu', '-c', command], capture_output=True, text=True, timeout=5)
                 self.assertEqual(0, result.returncode, result.stderr)
                 self.assertTrue(libraries <= set(result.stdout.splitlines()), result.stdout)
+        command = 'ID=artix\nfamily=pacman\npackages() { printf "%s\\n" "$@"; }\n' + setup[start:end]
+        result = subprocess.run(['sh', '-eu', '-c', command], capture_output=True, text=True, timeout=5)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn('libudev', result.stdout.splitlines())
+        self.assertIn('sdl2-compat', result.stdout.splitlines())
+        self.assertNotIn('systemd-libs', result.stdout.splitlines())
         self.assertNotIn('SDL_JOYSTICK_HIDAPI=', setup)
         self.assertNotIn('SDL_AUDIODRIVER=', setup)
         self.assertNotIn('QML_DISABLE', setup)
         self.assertNotIn('KWIN_NO_TIMER_QUERY', setup)
+
+    def test_new_package_families_use_their_mesa_tool_names(self):
+        self.assertEqual(0, self.run_script('--yes', '--gpu', 'turnip').returncode)
+        setup = Path(str(self.payload) + '.gpu').read_text()
+        start = setup.index('    case "$family" in\n    apt) packages build-essential')
+        end = setup.index('\n    esac', start) + len('\n    esac')
+        for family, required in [('zypper', {'glslang-devel', 'python3-Mako', 'vulkan-tools'}),
+                                 ('xbps', {'glslang', 'python3-Mako', 'Vulkan-Headers', 'Vulkan-Tools'})]:
+            with self.subTest(family=family):
+                command = 'family=' + family + '\npackages() { printf "%s\\n" "$@"; }\n' + setup[start:end]
+                # EVENT_WAIT: dependency selection exits without installing host packages.
+                result = subprocess.run(['sh', '-eu', '-c', command], capture_output=True, text=True, timeout=5)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertTrue(required <= set(result.stdout.splitlines()), result.stdout)
 
     def test_desktop_entry_refresh_preserves_selection_and_distribution_entries(self):
         self.assertEqual(0, self.run_script('--yes').returncode)
@@ -388,7 +423,7 @@ if os.environ.get("TEST_FAIL") == stage:
     def test_mixer_dependencies_refresh_for_existing_desktops(self):
         self.assertEqual(0, self.run_script('--yes').returncode)
         setup = self.payload.read_text()
-        start = setup.index('    [ "$family" = recovery ] || packages pavucontrol')
+        start = setup.index('    case "$ID" in\n        steamos) ;;')
         end = setup.index('\nfi\n', start)
         applications = self.directory / 'apps'
         applications.mkdir()
@@ -402,7 +437,7 @@ if os.environ.get("TEST_FAIL") == stage:
                 (applications / f'magicdesk-{mode}.desktop').touch()
             # EVENT_WAIT: dependency selection exits without starting a package manager.
             result = subprocess.run(['sh', '-eu', '-c', command],
-                                    env=dict(self.environment, gui=gui, family='apt'),
+                                    env=dict(self.environment, gui=gui, family='apt', ID='debian'),
                                     capture_output=True, text=True, timeout=5)
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertEqual(expected, set(result.stdout.splitlines()))
@@ -483,7 +518,7 @@ if os.environ.get("TEST_FAIL") == stage:
         self.assertLess(setup_index, steam_index)
         self.assertIn(['remove', 'unpack'], calls)
         self.assertEqual(['prune'], calls[-1])
-        self.assertFalse(list(self.directory.glob('magicdesk-steamos-*')))
+        self.assertFalse(list(self.directory.glob('magicdesk-import-*')))
 
     def steam_game_fixture(self):
         helper = self.directory / 'steam-game.py'
@@ -670,7 +705,7 @@ if os.environ.get("TEST_FAIL") == stage:
         self.assertIn('Environment retained', result.stderr)
         self.assertIn(['remove', 'unpack'], self.calls())
         self.assertEqual(['prune'], self.calls()[-1])
-        self.assertFalse(list(self.directory.glob('magicdesk-steamos-*')))
+        self.assertFalse(list(self.directory.glob('magicdesk-import-*')))
 
     def test_steamos_existing_name_is_rejected_before_fetching(self):
         result = self.run_script('--yes', '--distro', 'steamos', TEST_ENVIRONMENTS='steamos\tsource\t/store')
@@ -815,7 +850,9 @@ if os.environ.get("TEST_FAIL") == stage:
 
     def test_distribution_profiles_share_setup_and_selected_image(self):
         images = {"debian": "debian:trixie-slim", "ubuntu": "ubuntu:24.04", "alpine": "alpine:3.23",
-                  "fedora": "registry.fedoraproject.org/fedora:44", "arch": "menci/archlinuxarm:base"}
+                  "fedora": "registry.fedoraproject.org/fedora:44", "arch": "menci/archlinuxarm:base",
+                  "opensuse": "opensuse/tumbleweed:latest", "openkylin": "openkylin/openkylin:latest",
+                  "deepin": "linuxdeepin/deepin:crimson-arm64"}
         for distro, source in images.items():
             for gui in ("none", "apps", "xfce", "weston"):
                 with self.subTest(distro=distro, gui=gui):
@@ -825,6 +862,70 @@ if os.environ.get("TEST_FAIL") == stage:
                     self.assertEqual(["install", source, "--name", distro, "--dns", "system"], self.calls()[1])
                     self.assertEqual(gui, self.calls()[-1][-8])
                     self.assertEqual(0, subprocess.run(["sh", "-n", str(self.payload)]).returncode)
+
+    def test_official_rootfs_sources_are_verified_and_share_setup(self):
+        for distro in ('manjaro', 'void', 'armtix'):
+            with self.subTest(distro=distro):
+                self.log.unlink(missing_ok=True)
+                result = self.run_script('--yes', '--distro', distro, '--gui', 'weston',
+                                         '--downloads', str(self.directory / 'downloads'))
+                self.assertEqual(0, result.returncode, result.stderr)
+                calls = self.calls()
+                downloads = [c for c in calls if c[0] == 'download']
+                self.assertEqual(1, len(downloads))
+                self.assertEqual('--sha256', downloads[0][-2])
+                self.assertRegex(downloads[0][-1], r'^[0-9a-f]{64}$')
+                install = next(c for c in calls if '--rootfs' in c)
+                self.assertEqual(['--rootfs', '--name', distro, '--dns', 'system'], install[2:])
+                self.assertIn('weston', next(c for c in calls if '-s' in c))
+                if distro == 'manjaro':
+                    self.assertFalse(any(c[0] == 'exec' and c[1] == 'unpack' for c in calls))
+                    self.assertEqual(downloads[0][2], install[1])
+                else:
+                    helper = next(c for c in calls if c[0] == 'install' and '--rootfs' not in c)
+                    self.assertTrue(helper[1].startswith('python@sha256:'))
+                    converter = next(c for c in calls if c[:2] == ['exec', 'unpack'])
+                    self.assertIn('--bind-ro', converter)
+                    self.assertIn('/mnt/rootfs.tar.gz', converter)
+                    self.assertEqual([['remove', 'unpack'], ['prune']], calls[-2:])
+                self.assertFalse(list(self.directory.glob('magicdesk-import-*')))
+
+    def test_rootfs_converter_preserves_uncompressed_tar_bytes(self):
+        result = self.run_script('--yes', '--distro', 'void', '--downloads', str(self.directory / 'downloads'))
+        self.assertEqual(0, result.returncode, result.stderr)
+        converter = next(c for c in self.calls() if c[:2] == ['exec', 'unpack'])
+        code = converter[converter.index('-c') + 1]
+        original = bytes(range(256)) * 5000
+        source, target = self.directory / 'source.xz', self.directory / 'target.gz'
+        source.write_bytes(lzma.compress(original))
+        # EVENT_WAIT: streaming decompressor exits; timeout fails the conversion test.
+        converted = subprocess.run([sys.executable, '-c', code, str(source), str(target)], timeout=10)
+        self.assertEqual(0, converted.returncode)
+        self.assertEqual(original, gzip.decompress(target.read_bytes()))
+
+    def test_rootfs_failure_retains_conversion_but_does_not_import_partial_output(self):
+        result = self.run_script('--yes', '--distro', 'void', '--downloads', str(self.directory / 'downloads'),
+                                 TEST_FAIL='converter')
+        self.assertEqual(23, result.returncode)
+        self.assertIn('work retained', result.stderr)
+        self.assertFalse(any('--rootfs' in c or c[0] == 'remove' for c in self.calls()))
+
+    def test_rootfs_recipes_accept_explicit_oci_override_without_converter(self):
+        result = self.run_script('--yes', '--distro', 'void', '--image', 'example/void:custom')
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(['install', 'example/void:custom', '--name', 'void', '--dns', 'system'], self.calls()[1])
+        self.assertFalse(any(c[0] == 'download' for c in self.calls()))
+
+    def test_resume_normalizes_distribution_ids_without_downloading(self):
+        for os_id, recipe in (('opensuse-tumbleweed', 'opensuse'), ('openkylin', 'openkylin'),
+                              ('deepin', 'deepin'), ('manjaro-arm', 'manjaro'), ('void', 'void'), ('artix', 'armtix')):
+            with self.subTest(os_id=os_id):
+                self.log.unlink(missing_ok=True)
+                result = self.run_script('--yes', '--resume', '--name', 'existing', '--distro', recipe,
+                                         TEST_DISTRO=os_id)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual(recipe, self.calls()[2][-2])
+                self.assertFalse(any(c[0] in ('download', 'install') for c in self.calls()))
 
     def test_settings_are_literal_arguments_and_additional_packages_accumulate(self):
         result = self.run_script("--yes", "--distro", "ubuntu", "--protocol", "wayland", "--locale", "ru_RU.UTF-8",

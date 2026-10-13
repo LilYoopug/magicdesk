@@ -45,8 +45,8 @@ int main(int argc, char **argv) {
     if (status) fprintf(stderr, "prepare: %s (%d)\n", strerror(-status), status);
     assert(!status);
     assert(command.fd >= 0 && command.interpreter_fd >= 0 && command.fd != command.interpreter_fd);
-    assert(!strcmp(command.path, "/program") && command.argc == 2);
-    assert(!strcmp(command.argv[0], args[0]) && !strcmp(command.argv[1], args[1]));
+    assert(!strcmp(command.path, "/program") && command.args.count == 2);
+    assert(!strcmp(command.args.values[0], args[0]) && !strcmp(command.args.values[1], args[1]));
     assert(fcntl(command.fd, F_GETFD) == FD_CLOEXEC && fcntl(command.interpreter_fd, F_GETFD) == FD_CLOEXEC);
     struct md_program relative;
     assert(!md_program_acquire(&md_files, directory, "alias", 0, &relative));

@@ -7,6 +7,7 @@
 #include "interception.h"
 #include "proc_control.h"
 #include "raw.h"
+#include "arguments.h"
 #include <errno.h>
 #include <fcntl.h>
 
@@ -29,15 +30,11 @@ long md_proc_executable_open(const struct md_fs *fs, const char *path, int flags
     }
     return result.result.fd;
 }
-void md_proc_image_init(struct md_process_image *image, unsigned argc,
-        char *const *argv, const void *auxv, size_t bytes) {
-    if (argc > sizeof(image->arg_lengths) / sizeof(image->arg_lengths[0]) || bytes > sizeof(image->auxv))
+void md_proc_image_init(struct md_process_image *image, const void *arguments,
+        size_t argument_bytes, const void *auxv, size_t bytes) {
+    if (argument_bytes>MD_EXEC_BYTES || bytes>sizeof(image->auxv))
         md_die("process image bounds", -E2BIG);
-    image->argc = argc;
-    for (unsigned i = 0; i < argc; ++i) {
-        image->argv[i] = (uintptr_t)argv[i];
-        image->arg_lengths[i] = md_length(argv[i]) + 1;
-    }
+    image->arguments=arguments; image->argument_bytes=argument_bytes;
     memcpy(image->auxv, auxv, bytes); image->auxv_bytes = bytes;
 }
 static long append_bytes(int fd, const void *data, size_t size) {
@@ -52,33 +49,20 @@ static long append_bytes(int fd, const void *data, size_t size) {
 struct image_snapshot {
     const struct md_process_image *image;
     enum md_proc_kind kind;
-    unsigned argument;
     size_t offset;
 };
 static long snapshot_bytes(void *context, void *out, size_t capacity) {
     struct image_snapshot *s=context;
     const struct md_process_image *image=s->image;
-    size_t copied=0;
-    while (copied<capacity) {
-        const void *data;
-        size_t size;
-        if (s->kind==MD_PROC_AUXV) {
-            data=image->auxv; size=image->auxv_bytes;
-        } else {
-            if (s->argument==image->argc) break;
-            data=(void *)image->argv[s->argument]; size=image->arg_lengths[s->argument];
-        }
-        if (s->offset==size) {
-            if (s->kind==MD_PROC_AUXV) break;
-            ++s->argument; s->offset=0; continue;
-        }
-        size_t n=size-s->offset;
-        if (n>capacity-copied) n=capacity-copied;
-        long error=md_read_memory((char *)out+copied,(const char *)data+s->offset,n);
-        if (error<0) return error;
-        copied+=n; s->offset+=n;
-    }
-    return (long)copied;
+    const void *data=s->kind==MD_PROC_AUXV ? image->auxv : image->arguments;
+    size_t size=s->kind==MD_PROC_AUXV ? image->auxv_bytes : image->argument_bytes;
+    size_t n=size-s->offset;
+    if (n>capacity) n=capacity;
+    if (!n) return 0;
+    long error=md_read_memory(out,(const char *)data+s->offset,n);
+    if (error<0) return error;
+    s->offset+=n;
+    return (long)n;
 }
 long md_proc_image_open(const struct md_fs *fs, enum md_proc_kind kind, int flags) {
     const struct md_process_image *image = fs->image;

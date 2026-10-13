@@ -8,6 +8,7 @@
 #include "guest_accounts.h"
 #include "host_identity.h"
 #include "socket_routes.h"
+#include "arguments.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -208,7 +209,10 @@ int md_image_launch(enum md_image_command kind, int argc, char **argv) {
     char *login[] = {(char *)shell, "-l"};
     if (kind == MD_IMAGE_LOGIN && position == argc) { command = login; command_count = 2; }
     size_t total = entry_count + explicit_count + command_count;
-    if (!r && (!total || total + 2*(env_count+override_count) + 3*(attachment_count+routes.count) + 32 > 1000)) r = -E2BIG;
+    size_t launch_count=3+commands+2+2+2*!!network+2*!!gamepad_endpoint+4*guest_user
+        +3*(attachment_count+routes.count)+8+8*(kind==MD_IMAGE_LOGIN)
+        +2*(env_count+override_count)+1+total+1;
+    if (!r && (!total || launch_count>MD_EXEC_POINTERS)) r = -E2BIG;
     const char *search = md_image_environment_value(overrides, override_count, "PATH");
     if (!search) search = md_image_environment_value(env, env_count, "PATH");
     char executable[PATH_MAX], runner[PATH_MAX];
@@ -224,7 +228,7 @@ int md_image_launch(enum md_image_command kind, int argc, char **argv) {
             else strcpy(last, "/libmagicdesk_guest_run.so");
         }
     }
-    char **launch = !r ? calloc(1001, sizeof(*launch)) : NULL;
+    char **launch = !r ? calloc(launch_count, sizeof(*launch)) : NULL;
     if (!r && !launch) r = -ENOMEM;
     char user_env[1040], logname_env[1040], shell_env[PATH_MAX+8], home_env[PATH_MAX+8];
     if (!r) {

@@ -9,7 +9,7 @@ readonly MIN_MAGICDESK_VERSION_CODE MIN_MAGICDESK_VERSION_NAME
 
 usage() {
     cat <<'HELP'
-Usage: sh install_linux.sh [--distro debian|ubuntu|alpine|fedora|arch|steamos] [OPTIONS]
+Usage: sh install_linux.sh [--distro ID] [OPTIONS]
 
 Install an ARM64 Linux userspace in Shroot. Choose applications or a desktop
 independently of the distribution. Installation output stays in this console.
@@ -17,10 +17,11 @@ New environments use software rendering unless Turnip is selected; SteamOS
 defaults to automatic Turnip detection and a Wayland Plasma desktop.
 
   --distro ID   Debian 13 (default), Ubuntu 24.04, Alpine 3.23, Fedora 44,
-                rolling Arch Linux ARM, or SteamOS ARM64 (official recovery image)
+                Arch Linux ARM, openSUSE Tumbleweed, openKylin 3.0, Deepin 25,
+                Manjaro ARM, Void (glibc), Armtix (runit), or SteamOS ARM64
   --name NAME   Independent environment name (default: distribution name)
   --image REF   Alternative OCI reference for the SAME distribution/version
-  --downloads DIR  Recovery archive/wheel cache (default: $HOME/downloads)
+  --downloads DIR  Verified archive/wheel cache (default: $HOME/downloads)
   --gui MODE    none, apps (default), xfce, weston, plasma (Debian 13/SteamOS),
                 gnome (Fedora devkit), keep
                 apps: Mousepad, Thunar, Xfce Terminal; xfce: X11 desktop;
@@ -52,6 +53,7 @@ Turnip builds inside Linux, needs several GB of free space and can take a while.
 The source version and SHA-256 are pinned; no Android or distribution drivers are replaced.
 Failed builds retain the previous profile and can be resumed. New launches use
 the selected profile; already running programs are not restarted.
+Void: set FORCE_IPV4=1 before this command if the network has no working IPv6.
 
 No Termux or Android root is required. Use trusted images: Shroot is not a
 security sandbox. The current shell/root identity is never changed.
@@ -74,6 +76,12 @@ configurations() {
         'alpine        3.23        alpine:3.23                               none/apps/xfce/weston' \
         'fedora        44          registry.fedoraproject.org/fedora:44       none/apps/xfce/weston/gnome' \
         'arch          rolling     menci/archlinuxarm:base (community)        none/apps/xfce/weston' \
+        'opensuse      Tumbleweed  opensuse/tumbleweed:latest                 none/apps/xfce/weston' \
+        'openkylin     3.0         openkylin/openkylin:latest                 none/apps/xfce/weston' \
+        'deepin        25          linuxdeepin/deepin:crimson-arm64            none/apps/xfce/weston' \
+        'manjaro       rolling     Manjaro ARM official rootfs               none/apps/xfce/weston' \
+        'void          rolling     Void official glibc rootfs                none/apps/xfce/weston' \
+        'armtix        rolling     Armtix official runit rootfs              none/apps/xfce/weston' \
         'steamos       0.3.0       Valve Steam Frame recovery                plasma/keep (supplied applications)'
     printf '%s\n' 'GUI profiles include Android audio and gamepad client libraries.' \
         'GNOME devkit requires a Linux system bus.'
@@ -86,10 +94,12 @@ set -eu
 umask 022
 . /etc/os-release
 case "$ID" in
-    debian|ubuntu) family=apt ;;
+    debian|ubuntu|openkylin|deepin) family=apt ;;
     alpine) family=apk ;;
     fedora) family=dnf ;;
-    arch|archarm) family=pacman ;;
+    arch|archarm|manjaro-arm|manjaro|artix) family=pacman ;;
+    opensuse-tumbleweed) family=zypper ;;
+    void) family=xbps ;;
     steamos) family=recovery ;;
     *) echo "Unsupported distribution: $ID" >&2; exit 1 ;;
 esac
@@ -98,6 +108,8 @@ packages() {
         apt) apt-get install -y --no-install-recommends "$@" </dev/null ;;
         apk) apk add "$@" </dev/null ;;
         dnf) dnf -y --setopt=install_weak_deps=False install "$@" </dev/null ;;
+        zypper) zypper --non-interactive install --no-recommends "$@" </dev/null ;;
+        xbps) xbps-install -y "$@" </dev/null ;;
         pacman|recovery) pacman -S --needed --noconfirm "$@" </dev/null ;;
         *) echo 'Package setup is unavailable for this image.' >&2; exit 1 ;;
     esac
@@ -1663,6 +1675,14 @@ MESA_PATCH
     pacman|recovery) packages base-devel meson ninja pkgconf python-mako python-yaml python-ply bison flex \
         patch curl xz glslang libdrm expat zstd zlib libelf wayland wayland-protocols libglvnd vulkan-headers \
         vulkan-tools libx11 libxext libxfixes libxxf86vm libxrandr libxshmfence libxcb ;;
+    zypper) packages gcc gcc-c++ make meson ninja pkgconf-pkg-config python3-Mako python3-PyYAML \
+        python3-ply bison flex patch curl xz glslang-devel libdrm-devel libexpat-devel libzstd-devel zlib-devel \
+        libelf-devel wayland-devel wayland-protocols-devel libglvnd-devel vulkan-headers vulkan-tools \
+        libX11-devel libXext-devel libXfixes-devel libXxf86vm-devel libXrandr-devel libxshmfence-devel libxcb-devel ;;
+    xbps) packages base-devel meson ninja pkg-config python3-Mako python3-yaml python3-ply bison flex \
+        patch curl xz glslang libdrm-devel expat-devel libzstd-devel zlib-devel elfutils-devel \
+        wayland-devel wayland-protocols libglvnd-devel Vulkan-Headers Vulkan-Tools \
+        libX11-devel libXext-devel libXfixes-devel libXxf86vm-devel libXrandr-devel libxshmfence-devel libxcb-devel ;;
     esac
     if [ ! -f "$prefix/.complete" ]; then
         mkdir -p /var/cache/magicdesk/mesa/downloads
@@ -2118,12 +2138,24 @@ case "$family" in
         apk update </dev/null
         packages ca-certificates bash coreutils util-linux tzdata musl-locales musl-locales-lang lang shadow ;;
     dnf) packages ca-certificates bash coreutils util-linux tzdata glibc-langpack-en shadow-utils ;;
+    zypper)
+        zypper --non-interactive refresh </dev/null
+        packages ca-certificates bash coreutils util-linux timezone glibc-locale glibc-i18ndata shadow ;;
+    xbps)
+        # XBPS must upgrade itself before the rest of a rolling rootfs.
+        xbps-install -Suy xbps </dev/null
+        xbps-install -uy </dev/null
+        packages ca-certificates bash coreutils util-linux tzdata glibc-locales shadow ;;
     pacman)
         pacman-key --init </dev/null
-        pacman-key --populate archlinuxarm </dev/null
+        case "$ID" in
+            manjaro|manjaro-arm) pacman-key --populate archlinuxarm manjaro manjaro-arm </dev/null ;;
+            artix) pacman-key --populate artix </dev/null ;;
+            *) pacman-key --populate archlinuxarm </dev/null ;;
+        esac
         # Rolling repositories require a complete userspace upgrade, not pacman -Sy.
         pacman -Syu --noconfirm </dev/null
-        packages ca-certificates bash coreutils util-linux tzdata ;;
+        packages ca-certificates bash coreutils util-linux tzdata gzip ;;
     recovery)
         # Keep the image's repository branch, keyring and signature policy.
         # This updates userspace packages, not Android or SteamOS A/B partitions.
@@ -2154,7 +2186,7 @@ if [ "$locale_name" != keep ]; then
     if [ "$locale_name" != C.UTF-8 ]; then
         language=${locale_name%%_*}
         case "$family" in
-            apt|pacman|recovery) localedef -i "${locale_name%.UTF-8}" -f UTF-8 "$locale_name" ;;
+            apt|pacman|recovery|zypper|xbps) localedef -i "${locale_name%.UTF-8}" -f UTF-8 "$locale_name" ;;
             dnf) packages "glibc-langpack-$language" ;;
             apk)
                 MUSL_LOCPATH=/usr/share/i18n/locales/musl locale -a | grep -Fqx "${locale_name%.UTF-8}" || {
@@ -2188,12 +2220,23 @@ if { [ "$gui" != none ] && [ "$gui" != keep ]; } || [ -x /usr/local/bin/magicdes
             sdl2 eudev-libs libdecor ;;
         dnf) packages pipewire pipewire-pulseaudio pipewire-utils wireplumber pipewire-alsa pulseaudio-utils \
             sdl2-compat systemd-libs libdecor ;;
-        pacman|recovery) packages pipewire pipewire-pulse wireplumber pipewire-alsa libpulse \
-            sdl2 systemd-libs libdecor ;;
+        pacman|recovery)
+            udev_package=systemd-libs
+            sdl_package=sdl2
+            if [ "$ID" = artix ]; then udev_package=libudev; sdl_package=sdl2-compat; fi
+            packages pipewire pipewire-pulse wireplumber pipewire-alsa libpulse \
+                "$sdl_package" "$udev_package" libdecor ;;
+        zypper) packages pipewire pipewire-pulseaudio pipewire-tools wireplumber pipewire-alsa pulseaudio-utils \
+            libSDL2-2_0-0 libudev1 libdecor ;;
+        xbps) packages pipewire wireplumber alsa-pipewire pulseaudio-utils SDL2 eudev-libudev libdecor ;;
     esac
     install_audio_session
     install_desktop_session
-    [ "$family" = recovery ] || packages pavucontrol
+    case "$ID" in
+        steamos) ;;
+        openkylin) packages pavucontrol-qt ;;
+        *) packages pavucontrol ;;
+    esac
     if [ "$gui" = xfce ] || [ -f /usr/local/share/applications/magicdesk-xfce.desktop ]; then
         packages xfce4-pulseaudio-plugin
     fi
@@ -2210,15 +2253,21 @@ if [ "$gui" != none ] && [ "$gui" != keep ]; then
         dnf) packages dbus-daemon dbus-x11 xkeyboard-config adwaita-icon-theme mousepad Thunar xfce4-terminal \
             mesa-dri-drivers mesa-libEGL mesa-libGL ;;
         pacman) packages dbus xkeyboard-config adwaita-icon-theme mousepad thunar xfce4-terminal mesa ;;
+        zypper) packages dbus-1-daemon dbus-1-tools xkeyboard-config adwaita-icon-theme mousepad thunar xfce4-terminal \
+            Mesa-dri Mesa-libEGL1 Mesa-libGL1 ;;
+        xbps) packages dbus xkeyboard-config adwaita-icon-theme mousepad Thunar xfce4-terminal \
+            mesa-dri mesa ;;
     esac
     dbus-uuidgen --ensure
     case "$gui:$family" in
         xfce:apt|xfce:apk|xfce:pacman) packages xfce4 ;;
-        xfce:dnf) packages xfce4-session xfce4-panel xfce4-settings xfce4-appfinder xfdesktop xfwm4 ;;
+        xfce:dnf|xfce:zypper|xfce:xbps) packages xfce4-session xfce4-panel xfce4-settings xfce4-appfinder xfdesktop xfwm4 ;;
         weston:apk) packages weston weston-shell-desktop weston-backend-wayland weston-clients weston-xwayland xwayland ;;
         weston:apt) packages weston xwayland ;;
         weston:dnf) packages weston xorg-x11-server-Xwayland ;;
         weston:pacman) packages weston xorg-xwayland ;;
+        weston:zypper) packages weston xwayland ;;
+        weston:xbps) packages weston xorg-server-xwayland ;;
         plasma:apt) packages plasma-desktop plasma-workspace kwin-wayland kwin-x11 \
             dolphin konsole kdialog breeze xwayland qml6-module-qtquick-controls \
             qml6-module-qtquick-layouts qml6-module-qtquick-window ;;
@@ -2303,6 +2352,8 @@ if [ "$fonts" != keep ]; then
         apk) packages font-dejavu; [ "$fonts" != cjk ] || packages font-noto-cjk ;;
         dnf) packages dejavu-sans-fonts; [ "$fonts" != cjk ] || packages google-noto-sans-cjk-fonts ;;
         pacman) packages ttf-dejavu; [ "$fonts" != cjk ] || packages noto-fonts-cjk ;;
+        zypper) packages dejavu-fonts; [ "$fonts" != cjk ] || packages google-noto-sans-cjk-fonts ;;
+        xbps) packages dejavu-fonts-ttf; [ "$fonts" != cjk ] || packages noto-fonts-cjk ;;
     esac
 fi
 # Names were validated before any image mutation; no evaluation of package text.
@@ -2317,6 +2368,8 @@ if [ "$cache" = clean ]; then
         apk) rm -f /var/cache/apk/*.apk ;;
         dnf) dnf clean packages ;;
         pacman) pacman -Sc --noconfirm </dev/null ;;
+        zypper) zypper --non-interactive clean ;;
+        xbps) xbps-remove -Oy ;;
     esac
 fi
 SETUP
@@ -2569,7 +2622,7 @@ if __name__ == '__main__':
 READER
 }
 
-recovery_download() {
+download_verified() {
     file="$downloads/${1##*/}"
     if [ -f "$file" ] && [ ! -L "$file" ]; then
         actual=$(sha256sum "$file"); actual=${actual%% *}
@@ -2578,10 +2631,9 @@ recovery_download() {
     magicdesk download "$1" "$file" --sha256 "$2"
 }
 
-recovery_helper() { MAGICDESK_GUEST_HOME="$recovery_work/library" shroot "$@"; }
+import_helper() { MAGICDESK_GUEST_HOME="$import_work/library" shroot "$@"; }
 
-prepare_recovery() {
-    command -v magicdesk >/dev/null 2>&1 || fail 'magicdesk download is required for recovery images.'
+prepare_downloads() {
     environments=$(shroot list)
     if printf '%s\n' "$environments" | cut -f1 | grep -Fxq "$name"; then
         fail "Environment $name already exists; use --resume to continue setup."
@@ -2589,30 +2641,58 @@ prepare_recovery() {
     downloads=${downloads:-${HOME:?}/downloads}
     mkdir -p "$downloads"
     downloads=$(cd "$downloads" && pwd -P)
+}
+
+prepare_import_helper() {
     work_parent=${TMPDIR:-$HOME/.cache}
     mkdir -p "$work_parent"
     work_parent=$(cd "$work_parent" && pwd -P)
     case "$work_parent/" in "$downloads/"*) fail 'Temporary work must be outside the read-only download cache.' ;; esac
-    recovery_work=$(mktemp -d "$work_parent/magicdesk-steamos-XXXXXX")
-    mkdir "$recovery_work/exchange"
+    import_work=$(mktemp -d "$work_parent/magicdesk-import-XXXXXX")
+    mkdir "$import_work/exchange"
     # Validate the selected DNS policy before fetching the multi-GB recovery archive.
     stage='preparing the temporary Python environment'
-    recovery_helper install 'python@sha256:fe368aeff9df1995b57f0aa9bbced949a2a98fb3e6dfd92568e5f6acea6220f7' --name unpack --dns "$dns"
+    import_helper install 'python@sha256:fe368aeff9df1995b57f0aa9bbced949a2a98fb3e6dfd92568e5f6acea6220f7' --name unpack --dns "$dns"
+}
+
+prepare_rootfs() {
+    prepare_downloads
+    stage="downloading the official $distro rootfs"
+    download_verified "$source" "$source_sha"
+    image="$downloads/${source##*/}"
+    case "$source" in
+        *.xz)
+            prepare_import_helper
+            stage='decompressing the rootfs archive'
+            # Only change compression. Native import owns tar validation and metadata.
+            import_helper exec unpack --bind "$import_work/exchange" /mnt --bind-ro "$downloads" /media \
+                -- /usr/local/bin/python3 -c '
+import gzip, lzma, shutil, sys
+with lzma.open(sys.argv[1], "rb") as source, gzip.open(sys.argv[2], "wb", compresslevel=1) as target:
+    shutil.copyfileobj(source, target, 1024 * 1024)
+' "/media/${source##*/}" /mnt/rootfs.tar.gz
+            image="$import_work/exchange/rootfs.tar.gz" ;;
+    esac
+}
+
+prepare_recovery() {
+    prepare_downloads
+    prepare_import_helper
     stage='downloading the official SteamOS recovery image'
-    recovery_download "$source" '3a4a077f1b1f40688ab3279affcb56776bd97c54db1573e7c65fc52a97106676'
+    download_verified "$source" '3a4a077f1b1f40688ab3279affcb56776bd97c54db1573e7c65fc52a97106676'
     stage='downloading pinned filesystem readers'
-    recovery_download 'https://files.pythonhosted.org/packages/a8/24/717afae59efd76fb85d882af52eeea827207776dd8bfdcd24916a0de5288/dissect_btrfs-1.10-py3-none-any.whl' '22569fba43c1740aa998544998beee09b599ff95f45d4fe3e05a47fac689d938'
-    recovery_download 'https://files.pythonhosted.org/packages/37/1c/dc626b1b0e477546c8e80d8cb028442ef4602af276c405f7a5ccc85b0b5a/dissect_cstruct-4.7-py3-none-any.whl' '0427621ce67baa3106df2dc63a320d0a7f5c2da88ba3faf2ef5886a1a6b458fd'
-    recovery_download 'https://files.pythonhosted.org/packages/cd/09/926cbb3fed29f762e676fb6a8d62b68c6bf536f817892cd35e89145e30e7/dissect_util-3.24-cp310-abi3-musllinux_1_2_aarch64.whl' 'df4130e896201c44e6b3d8ec1c022b586915abaedd1552f9c1b878bd343ae696'
+    download_verified 'https://files.pythonhosted.org/packages/a8/24/717afae59efd76fb85d882af52eeea827207776dd8bfdcd24916a0de5288/dissect_btrfs-1.10-py3-none-any.whl' '22569fba43c1740aa998544998beee09b599ff95f45d4fe3e05a47fac689d938'
+    download_verified 'https://files.pythonhosted.org/packages/37/1c/dc626b1b0e477546c8e80d8cb028442ef4602af276c405f7a5ccc85b0b5a/dissect_cstruct-4.7-py3-none-any.whl' '0427621ce67baa3106df2dc63a320d0a7f5c2da88ba3faf2ef5886a1a6b458fd'
+    download_verified 'https://files.pythonhosted.org/packages/cd/09/926cbb3fed29f762e676fb6a8d62b68c6bf536f817892cd35e89145e30e7/dissect_util-3.24-cp310-abi3-musllinux_1_2_aarch64.whl' 'df4130e896201c44e6b3d8ec1c022b586915abaedd1552f9c1b878bd343ae696'
     stage='installing the verified filesystem readers'
-    recovery_helper exec unpack --bind-ro "$downloads" /mnt -- /usr/local/bin/python3 -m pip install \
+    import_helper exec unpack --bind-ro "$downloads" /mnt -- /usr/local/bin/python3 -m pip install \
         --no-index --no-deps --only-binary=:all: --no-cache-dir --root-user-action=ignore \
         /mnt/dissect_btrfs-1.10-py3-none-any.whl /mnt/dissect_cstruct-4.7-py3-none-any.whl \
         /mnt/dissect_util-3.24-cp310-abi3-musllinux_1_2_aarch64.whl
     stage='converting SteamOS to a local Linux image'
-    recovery_reader | recovery_helper exec unpack --bind "$recovery_work/exchange" /mnt \
+    recovery_reader | import_helper exec unpack --bind "$import_work/exchange" /mnt \
         --bind-ro "$downloads" /media -- /usr/local/bin/python3 - "/media/${source##*/}" /mnt
-    image="$recovery_work/exchange/oci"
+    image="$import_work/exchange/oci"
 }
 
 fail() { printf '%s\n' "$*" >&2; exit 1; }
@@ -2635,14 +2715,40 @@ ask() {
     answer=${answer:-$2}
 }
 recipe_defaults() {
+    source_kind=oci
+    source_sha=
     case "$distro" in
         debian) source=debian:trixie-slim; version=13 ;;
         ubuntu) source=ubuntu:24.04; version=24.04 ;;
         alpine) source=alpine:3.23; version=3.23 ;;
         fedora) source=registry.fedoraproject.org/fedora:44; version=44 ;;
         arch) source=menci/archlinuxarm:base; version=rolling ;;
-        steamos) source=https://steamdeck-images.steamos.cloud/recovery/steamframe-oobe-repair-20260922.5153644-0.3.0.img.bz2; version=0.3.0 ;;
-        *) fail 'Distribution must be debian, ubuntu, alpine, fedora, arch or steamos.' ;;
+        opensuse) source=opensuse/tumbleweed:latest; version=Tumbleweed ;;
+        openkylin) source=openkylin/openkylin:latest; version=3.0 ;;
+        deepin) source=linuxdeepin/deepin:crimson-arm64; version=25 ;;
+        manjaro)
+            source=https://github.com/manjaro-arm/rootfs/releases/download/20261012/Manjaro-ARM-aarch64-latest.tar.gz
+            source_sha=1ae540a80e21e1ca55e0576df9618fd2865cf4596b8204d20780f225aca5164a
+            source_kind=rootfs; version=rolling ;;
+        void)
+            source=https://repo-default.voidlinux.org/live/20250202/void-aarch64-ROOTFS-20250202.tar.xz
+            source_sha=01a30f17ae06d4d5b322cd579ca971bc479e02cc284ec1e5a4255bea6bac3ce6
+            source_kind=rootfs; version=rolling ;;
+        armtix)
+            source=https://armtix.artixlinux.org/images/armtix-runit-20260921.tar.xz
+            source_sha=8e1de041c64cb8bd8c1766d8f9048e75544de1c162769c02a626ce484aad4465
+            source_kind=rootfs; version=rolling ;;
+        steamos) source=https://steamdeck-images.steamos.cloud/recovery/steamframe-oobe-repair-20260922.5153644-0.3.0.img.bz2; version=0.3.0; source_kind=recovery ;;
+        *) fail 'Unsupported distribution; use --list for available recipes.' ;;
+    esac
+}
+distribution_id() {
+    case "$1" in
+        archarm) printf 'arch\n' ;;
+        opensuse-tumbleweed) printf 'opensuse\n' ;;
+        manjaro-arm) printf 'manjaro\n' ;;
+        artix) printf 'armtix\n' ;;
+        *) printf '%s\n' "$1" ;;
     esac
 }
 gui_notice() {
@@ -2675,7 +2781,7 @@ yes=no
 resume=no
 dns=
 downloads=
-recovery_work=
+import_work=
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --distro|--name|--image|--downloads|--gui|--protocol|--gpu|--jobs|--locale|--timezone|--create-user|--fonts|--cache|--package|--dns)
@@ -2787,7 +2893,7 @@ fi
 # Read-only validation precedes every existing-environment mutation.
 if [ "$resume" = yes ]; then
     detected=$(shroot exec "$name" --user root -- /bin/sh -c '. /etc/os-release; printf "%s\n" "$ID"')
-    case "$detected" in archarm) detected=arch ;; esac
+    detected=$(distribution_id "$detected")
     [ -z "$distro" ] || [ "$distro" = "$detected" ] || fail 'Selected distribution does not match the existing environment.'
     distro=$detected
 else
@@ -2799,7 +2905,7 @@ if [ "$distro" = steamos ]; then
     { [ "$gui" = keep ] || [ "$gui" = plasma ]; } && [ "$fonts" = keep ] && [ -z "$extras" ] \
         && [ "$cache" = keep ] || fail 'SteamOS supports plasma/keep with supplied applications and fonts.'
 fi
-[ -n "$image" ] || image=$source
+if [ -n "$image" ]; then source_kind=oci; else image=$source; fi
 [ "$gui" != gnome ] || [ "$distro" = fedora ] || fail 'The GNOME devkit recipe currently requires Fedora 44. Use apps, Xfce or Weston on other distributions.'
 [ "$gui" != plasma ] || [ "$distro" = debian ] || [ "$distro" = steamos ] || fail 'The Plasma recipe requires Debian 13 or SteamOS 0.3.0.'
 [ "$gui" != none ] || [ "$gpu" = keep ] || fail 'Choose a GUI profile before installing graphics; use --gui keep for an existing GUI.'
@@ -2811,6 +2917,7 @@ printf 'Guest account=%s | extra packages=%s | package cache=%s\n' "${new_user:-
 if [ "$resume" = yes ]; then printf 'Continue the existing environment without replacing user data.\n'
 else printf 'Source: %s\nGuest DNS: %s\n' "$image" "$dns"; fi
 [ "$distro" != arch ] || printf 'Arch uses a community OCI image. Trust its publisher before continuing.\n'
+[ "$distro" != armtix ] || printf 'Armtix retains its upstream repository signature policy (the supplied rootfs disables package signatures).\n'
 [ "$gui" != gnome ] || printf 'GNOME development kit is experimental; it is not a booted systemd/GDM desktop.\n'
 gui_notice
 if [ "$yes" = no ]; then
@@ -2822,15 +2929,15 @@ stage='checking Shroot'
 ready=no
 finish() {
     status=$?
-    if [ -n "$recovery_work" ]; then
+    if [ -n "$import_work" ]; then
         if [ "$status" -eq 0 ] || [ "$ready" = yes ]; then
-            if recovery_helper remove unpack && recovery_helper prune; then
-                rm -rf "$recovery_work"
+            if import_helper remove unpack && import_helper prune; then
+                rm -rf "$import_work"
             else
-                printf 'Temporary converter retained: %s\n' "$recovery_work" >&2
+                printf 'Temporary converter retained: %s\n' "$import_work" >&2
             fi
         else
-            printf 'Recovery conversion work retained for inspection: %s\n' "$recovery_work" >&2
+            printf 'Image conversion work retained for inspection: %s\n' "$import_work" >&2
         fi
     fi
     if [ "$status" -ne 0 ]; then
@@ -2849,13 +2956,16 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 shroot --probe
 if [ "$resume" = no ]; then
-    [ "$distro" != steamos ] || prepare_recovery
+    case "$source_kind" in
+        recovery) prepare_recovery ;;
+        rootfs) prepare_rootfs ;;
+    esac
     stage='installing the Linux image'
-    if [ "$distro" = steamos ]; then
-        shroot install "$image" --oci --name "$name" --dns "$dns"
-    else
-        shroot install "$image" --name "$name" --dns "$dns"
-    fi
+    case "$source_kind" in
+        recovery) shroot install "$image" --oci --name "$name" --dns "$dns" ;;
+        rootfs) shroot install "$image" --rootfs --name "$name" --dns "$dns" ;;
+        oci) shroot install "$image" --name "$name" --dns "$dns" ;;
+    esac
     if [ "$dns" != preserve ]; then
         stage='applying selected DNS to the new environment'
         shroot dns "$name" "$dns" --replace
@@ -2865,19 +2975,27 @@ stage='validating the selected environment'
 shroot exec "$name" --user root -- /bin/sh -c '
     set -eu
     . /etc/os-release
-    case "$ID" in archarm) ID=arch ;; esac
+    case "$ID" in archarm) ID=arch ;; opensuse-tumbleweed) ID=opensuse ;; manjaro-arm) ID=manjaro ;; artix) ID=armtix ;; esac
     [ "$ID" = "$1" ] || exit 1
     case "$ID" in
-        debian|ubuntu) [ "$VERSION_ID" = "$2" ] && [ "$(dpkg --print-architecture)" = arm64 ] ;;
+        debian|ubuntu|openkylin|deepin) [ "$VERSION_ID" = "$2" ] && [ "$(dpkg --print-architecture)" = arm64 ] ;;
         alpine) case "$VERSION_ID" in "$2".*) ;; *) exit 1 ;; esac; [ "$(apk --print-arch)" = aarch64 ] ;;
         fedora) [ "$VERSION_ID" = "$2" ] && [ "$(rpm --eval "%{_arch}")" = aarch64 ] ;;
-        arch) [ "$(uname -m)" = aarch64 ] ;;
+        opensuse) [ "$(rpm --eval "%{_arch}")" = aarch64 ] ;;
+        arch|manjaro|armtix) [ "$(uname -m)" = aarch64 ] ;;
+        void) [ "$(xbps-uhelper arch)" = aarch64 ] ;;
         steamos) [ "$VERSION_ID" = "$2" ] && [ "$(uname -m)" = aarch64 ] ;;
     esac || { echo "Unexpected distribution version or architecture; setup was not applied." >&2; exit 1; }
 ' sh "$distro" "$version"
 ready=yes
+setup_exec() {
+    set -- -- /bin/sh -s -- "$@"
+    # Explicit XBPS network preference; never inherit the whole Android environment.
+    [ "${FORCE_IPV4:-}" != 1 ] || set -- --env FORCE_IPV4=1 "$@"
+    shroot exec "$name" --user root --env DEBIAN_FRONTEND=noninteractive "$@"
+}
 stage='installing packages and guest settings'
-system_setup | shroot exec "$name" --user root --env DEBIAN_FRONTEND=noninteractive -- /bin/sh -s -- \
+system_setup | setup_exec \
     "$gui" "$protocol" "$locale_name" "$zone" "$new_user" "$fonts" "$cache" "$extras"
 
 if [ "$distro" = steamos ]; then
@@ -2917,16 +3035,14 @@ if [ "$gpu" != keep ]; then
     stage="preparing the $gpu graphics profile"
     recipe=$(graphics_setup | sha256sum)
     recipe=${recipe%% *}
-    graphics_setup | shroot exec "$name" --user root --env DEBIAN_FRONTEND=noninteractive \
-        -- /bin/sh -s -- "$gpu" "$jobs" "$recipe"
+    graphics_setup | setup_exec "$gpu" "$jobs" "$recipe"
 fi
 
 if [ "$gui" = plasma ] || [ "$gpu" != keep ]; then
     stage='preparing the nested Plasma compositor'
     recipe=$(plasma_setup | sha256sum)
     recipe=${recipe%% *}
-    plasma_setup | shroot exec "$name" --user root --env DEBIAN_FRONTEND=noninteractive \
-        -- /bin/sh -s -- "$jobs" "$recipe"
+    plasma_setup | setup_exec "$jobs" "$recipe"
 fi
 
 stage=complete

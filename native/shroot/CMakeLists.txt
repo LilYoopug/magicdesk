@@ -64,6 +64,7 @@ guest_executable(bootstrap ${src}/bootstrap.c ${src}/elf.c ${src}/exec.c ${src}/
     ${src}/task_receive.c ${src}/fs_client.c ${src}/fs_buffer_client.c ${src}/adapter_buffer.c ${src}/file_open.c ${wire} ${src}/raw.c ${src}/raw.S)
 target_sources(bootstrap PRIVATE ${src}/descriptor_calls.c ${src}/epoll_calls.c ${src}/descriptor_capture.c)
 guest_freestanding(bootstrap)
+target_sources(bootstrap PRIVATE ${src}/arguments.c)
 target_compile_options(bootstrap PRIVATE -mgeneral-regs-only)
 target_link_options(bootstrap PRIVATE -Wl,--image-base=0x2000000000)
 
@@ -85,6 +86,7 @@ target_link_libraries(supervisor PRIVATE guest-sqlite guest-sha256 m)
 
 guest_executable(run ${src}/namespace_run.c ${src}/process_owner.c ${src}/launch_environment.c ${src}/socket_routes.c ${src}/event_wait.c ${raw})
 guest_freestanding(run)
+target_sources(run PRIVATE ${src}/arguments.c)
 
 
 guest_executable(service ${src}/service_main.c ${src}/fs_service.c ${namespace_engine} ${src}/image_catalogue.c
@@ -107,6 +109,12 @@ install(TARGETS bootstrap supervisor run service image RUNTIME DESTINATION lib)
 
 option(MAGICDESK_GUEST_FIXTURES "Build standalone native fixtures" OFF)
 if(MAGICDESK_GUEST_FIXTURES)
+    guest_executable(test_image_arguments ../guest-exec-lab/test_image_arguments.c ${src}/image_json.c)
+    target_compile_options(test_image_arguments PRIVATE -iquote ${src} -UNDEBUG)
+    target_link_libraries(test_image_arguments PRIVATE guest-sqlite)
+    guest_executable(test_argument_vector ../guest-exec-lab/test_argument_vector.c ${src}/arguments.c ${raw})
+    target_compile_definitions(test_argument_vector PRIVATE MD_NO_START MD_USE_LIBC)
+    target_compile_options(test_argument_vector PRIVATE -iquote ${src} -UNDEBUG)
     guest_executable(fd_filter_remote ../guest-exec-lab/test_fd_filter_remote.c ${src}/fd_filter_program.c ${src}/task_call.c ${src}/task_filter.c ${src}/task_quiesce.c)
     target_compile_options(fd_filter_remote PRIVATE -iquote ${src} -UNDEBUG)
     guest_executable(control_event ../guest-exec-lab/test_control_event.c

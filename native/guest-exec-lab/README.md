@@ -11,7 +11,7 @@ under actual UID 2000. The disposable Debian-like store needs systemd, bash and
 util-linux including `script`; optional `--trace` also needs strace. It creates private namespaces,
 proc, `/run`, a private `/dev` with a PTY console, sysfs and cgroup2, then boots a dedicated target without distro
 hardware units. Assertions cover system/user managers, oneshot/notify services,
-TCP socket activation, stop and normal manager exit. The supervised deadline
+TCP socket and timer activation, stop and normal manager exit. The supervised deadline
 bounds failures; it never invokes a host reboot or shutdown target. This is not
 a default-target boot or GNOME login test.
 `--property KEY=VALUE` extends the tested oneshot's service restrictions.
@@ -31,15 +31,23 @@ after task retirement, with exact descriptor cleanup.
 
 `test_os_boot.py --build BUILD --store STORE` boots the packaged default target
 and asserts a non-degraded result. Its observer waits for systemd's startup
-jobs and collects only this invocation's journal, failed units and service state.
-Debian, Ubuntu, Arch and Fedora default boots currently fail or remain degraded;
-the fixture does not whitelist them. `--trace` includes pathname lookup, metadata,
+jobs, checks journal write/readback, system D-Bus and logind restart, and collects
+this invocation's failed units and service state. Ubuntu, Arch and Fedora pass
+default boot; Debian needs an explicit `--drop-capability sys_module` container
+policy. Degraded boots are failures, never whitelisted. The
+[extended matrix](init-matrix.md) records additional userspaces, source identity,
+init policy and the distinction between manager checks and stock default boot.
+`--trace` includes pathname lookup, metadata,
 both mount APIs, process/exec boundaries, application seccomp installation and
 epoll creation/registration/waits, using the same syscall set as the manager
 fixture. `--init openrc` uses Alpine's real
 `openrc-init`, stock container service policy and a private runlevel selection.
 It checks the default services, restart/stop and exact launch-registry cleanup.
 The device transport is closed only after that launch has terminated.
+`--init runit` retains the distribution's stock stages and default runsvdir.
+A private service checks start/restart/stop with a generation-aware readiness
+hook and exact PID retirement. Default hardware service status is diagnostic,
+separate from the asserted init/service lifecycle.
 `init_fixture.py` owns the shared private-filesystem/console setup; OpenRC's
 in-guest observer does not import host-side transport dependencies.
 
@@ -593,6 +601,25 @@ Termux app domain, whose syscall restrictions differ from the guest executor.
 
 ## Libc, IPC And Desktop Checks
 
+`test_argument_vector` covers inline/growing argument storage, readable-page
+boundaries, bad pointers, allocation bounds and cleanup. `test_image_arguments`
+covers long OCI command arrays and typed/bounded JSON decoding. Both are CMake
+fixtures. `test_arguments.c`, built for glibc and musl, covers execveat, shebang,
+spawn, self/foreign proc snapshots, long strings, failed-exec resource lifetime,
+kernel E2BIG/EFAULT and stack limits. It includes a 650000-empty-argument launch
+with an enlarged soft stack limit (requiring a sufficient host hard limit).
+
+```sh
+python native/guest-exec-lab/test_arguments.py --store DISPOSABLE_HOST_STORE \
+  --fixtures LIBC_FIXTURE_DIRECTORY [--build NATIVE_BUILD_DIRECTORY]
+```
+
+The device workflow also checks initial/OCI launch vectors and coreutils cp/rm
+with 4096 operands, matching mkinitcpio's compressed-file move. That part needs
+bash and coreutils; it is not a complete kernel-image maintenance test. Omitting
+`--build` selects the installed runtime. `test_abi.py` includes the libc argument
+fixture without requiring those package tools.
+
 `build-libc-fixtures.sh glibc|musl SYSROOT OUTPUT` builds the same execution,
 thread/signal and IPC tests against the selected libc, without libc-specific
 runtime branches. The musl fixture uses the official Alpine 3.23 ARM64 minirootfs
@@ -872,6 +899,8 @@ timezone, an ordinary guest account and settings persistence across resume.
 GUI checks verify shared launcher syntax, PipeWire tools and SDL/libudev libraries.
 The named test environment is retained. `--resume` continues that fixture.
 `--library PATH` isolates its stores and cached images from other test environments.
+Use separate libraries for concurrent imports; publication locks a library.
+`--ipv4` selects XBPS's `FORCE_IPV4` setting on networks without usable IPv6.
 The test uses explicit guest DNS, not Android's encrypted resolver.
 
 `test_installer_audio.py --names TEST_NAME ... [--library PATH]` starts the

@@ -91,7 +91,7 @@ adapter_fixture() {
 }
 adapter_fixture -DMD_SOCKET_DRIVER "$src/test_sockets.c" -o "$work/bundle/md-sockets-test"
 adapter_fixture --target=aarch64-linux-android34 -fno-termux-rpath -static -DMD_USE_LIBC \
-    "$src/test_command.c" "$runtime/command.c" "$runtime/command_image.c" "$runtime/elf.c" "$runtime/program_files.c" -o "$work/bundle/md-command-test"
+    "$src/test_command.c" "$runtime/command.c" "$runtime/arguments.c" "$runtime/command_image.c" "$runtime/elf.c" "$runtime/program_files.c" -o "$work/bundle/md-command-test"
 socketroot=$(mktemp -d "$work/path-test/sockets.XXXXXX")
 timeout 45 "$work/bundle/md-sockets-test" native "$socketroot"
 timeout 45 "$work/bundle/md-sockets-test" adapter "$socketroot"
@@ -191,6 +191,7 @@ cp "$work/md-proc-fixture" "$work/bundle/rootfs/usr/bin/"
 cp "$work/md-socket-fixture" "$work/bundle/rootfs/usr/bin/"
 cp "$work/md-exec-fixture" "$work/bundle/rootfs/usr/bin/"
 cp "$work/md-execfd-fixture" "$work/bundle/rootfs/usr/bin/"
+cp "$work/md-arguments-fixture" "$work/bundle/rootfs/usr/bin/"
 cp "$work/md-ipc-fixture" "$work/bundle/rootfs/usr/bin/"
 cp "$work/md-files-fixture" "$work/bundle/rootfs/usr/bin/"
 cp "$work/md-inodes-fixture" "$work/bundle/rootfs/usr/bin/"

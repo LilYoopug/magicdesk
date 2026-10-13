@@ -169,13 +169,11 @@ void md_boot(uintptr_t *kernel_stack) {
         if (program_fd < 0 || program_fd == interpreter_fd) md_die("invalid prepared images", -EINVAL);
         if ((!namespace && *object) || (namespace && !*object && !retained))
             md_die("missing prepared object identity", -EINVAL);
+        r=md_command_arguments(&command,argv[root_arg+1],argv+root_arg+2);
+        if (r<0) md_die("guest arguments",r);
         memset(command.object, 0, sizeof(command.object));
         md_copy(command.object, sizeof(command.object), object);
         command.fd = program_fd; command.interpreter_fd = interpreter_fd;
-        command.argc = argc - root_arg - 2;
-        if (command.argc >= MD_ARG_MAX) md_die("guest arguments", -E2BIG);
-        memcpy(command.argv, argv + root_arg + 2, (command.argc + 1) * sizeof(char *));
-        r = md_copy(command.path, sizeof(command.path), argv[root_arg + 1]);
     } else r = md_command_prepare(&md_files, &command, argv[root_arg + 1], argv + root_arg + 1, NULL, 0);
     if (r < 0) md_die("prepare guest program", r);
     r = md_copy(md_executable, sizeof(md_executable), command.path);
@@ -193,6 +191,7 @@ void md_boot(uintptr_t *kernel_stack) {
     r = md_interception_map_image((int)fd, 0);
     if (!r) r = md_elf_load((int)fd, 0, &program);
     RAW1(close, fd);
+    command.fd=-1;
     if (r < 0) md_die("map guest program", r);
     struct md_image image = {.entry = program.entry};
     if (command.interpreter_fd >= 0) {
@@ -200,6 +199,7 @@ void md_boot(uintptr_t *kernel_stack) {
         r = md_interception_map_image((int)fd, 1);
         if (!r) r = md_elf_load((int)fd, 1, &image);
         RAW1(close, fd);
+        command.interpreter_fd=-1;
         if (r < 0) md_die("map stock loader", r);
     }
 
@@ -211,13 +211,26 @@ void md_boot(uintptr_t *kernel_stack) {
     if (stack < 0) md_die("reserve guest stack", stack);
     r = RAW3(mprotect, stack + md_page_size, stack_size, PROT_READ | PROT_WRITE);
     if (r < 0) md_die("map guest stack", r);
-    size_t guest_argc = command.argc;
+    size_t guest_argc = command.args.count, argument_bytes=0;
+    for (size_t i=0;i<guest_argc;++i) {
+        size_t bytes=md_length(command.args.values[i])+1;
+        if (bytes>MD_EXEC_BYTES-argument_bytes) md_die("guest arguments",-E2BIG);
+        argument_bytes+=bytes;
+    }
     size_t words = 1 + guest_argc + 1 + envc + 1 + 2 * (auxc + 1);
-    if (words * sizeof(uintptr_t) > stack_size / 2) md_die("guest arguments", -E2BIG);
-    uintptr_t *sp = (uintptr_t *)(((uintptr_t)stack + md_page_size + stack_size - words * sizeof(uintptr_t)) & ~15UL);
+    if (words*sizeof(uintptr_t)+argument_bytes+md_page_size>stack_size) md_die("guest arguments",-E2BIG);
+    char *arguments=(char *)((uintptr_t)stack+md_page_size+stack_size-argument_bytes);
+    uintptr_t *sp = (uintptr_t *)(((uintptr_t)arguments - words * sizeof(uintptr_t)) & ~15UL);
     uintptr_t *p = sp;
     *p++ = guest_argc;
-    for (unsigned i = 0; i < command.argc; ++i) *p++ = (uintptr_t)command.argv[i];
+    /* Like Linux arg_start/arg_end, /proc observes the string storage, not a
+     * mutable argv vector. Flatten shebang arguments into that same span. */
+    char *destination=arguments;
+    for (size_t i=0;i<guest_argc;++i) {
+        size_t bytes=md_length(command.args.values[i])+1;
+        memcpy(destination,command.args.values[i],bytes);
+        *p++=(uintptr_t)destination; destination+=bytes;
+    }
     *p++ = 0;
     for (size_t i = 0; i < envc; ++i) *p++ = (uintptr_t)env[i];
     *p++ = 0;
@@ -235,6 +248,7 @@ void md_boot(uintptr_t *kernel_stack) {
     }
     r = md_interception_enter_image(guest_aux, (unsigned)auxc);
     if (r < 0) md_die("enter guest image", r);
-    md_proc_image_init(&process_image, command.argc, command.argv, guest_aux, (auxc + 1) * sizeof(*guest_aux));
+    md_proc_image_init(&process_image, arguments, argument_bytes, guest_aux, (auxc + 1) * sizeof(*guest_aux));
+    md_command_close(&command);
     md_enter(image.entry, (uintptr_t)sp, &process_image);
 }

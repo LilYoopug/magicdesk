@@ -214,6 +214,14 @@ the kernel has separated its file table. Death during preparation, failed exec
 and task teardown release the leases without leaving temporary image descriptors
 in a surviving CLONE_FILES peer. Initial loading and worker preparation share
 the same ELF and shebang parser.
+Argument vectors use bounded, growable storage with an inline path for short
+commands. Launch, nested exec and shebang expansion share that ownership;
+failed preparation or kernel exec releases the vector and prepared images.
+The kernel enforces the actual argv/environment and per-string limits, including
+`RLIMIT_STACK`; bootstrap metadata also consumes that budget. Guest argument
+strings occupy one contiguous stack span. Both self and foreign `/proc/PID/cmdline`
+read that span, independently of later changes to argv pointers, without an
+argument-count or 4 KiB per-argument snapshot limit.
 Foreign `/proc/PID/exe` execution resolves the selected task image through that
 same worker preparation. The supervisor captures its executable identity after
 the process-access check; anonymous images retain their readable description.
@@ -398,6 +406,12 @@ are command-line options; `--yes` suppresses questions. `--list` is read-only.
 | Alpine 3.23 | `alpine:3.23` | apps, Xfce, Weston |
 | Fedora 44 | `registry.fedoraproject.org/fedora:44` | apps, Xfce, Weston, experimental GNOME devkit |
 | Arch Linux ARM | `menci/archlinuxarm:base` (community image) | apps, Xfce, Weston |
+| openSUSE Tumbleweed | `opensuse/tumbleweed:latest` | apps, Xfce, Weston |
+| openKylin 3.0 | `openkylin/openkylin:latest` | apps, Xfce, Weston |
+| Deepin 25 | `linuxdeepin/deepin:crimson-arm64` | apps, Xfce, Weston |
+| Manjaro ARM | Official dated Manjaro ARM rootfs | apps, Xfce, Weston |
+| Void (glibc) | Official dated aarch64 rootfs | apps, Xfce, Weston |
+| Armtix (runit) | Official dated Armtix rootfs | apps, Xfce, Weston |
 | SteamOS ARM64 0.3.0 | Official Valve Steam Frame recovery archive | supplied applications, Plasma 6 |
 
 `none` installs console tools only. `apps` supplies Mousepad, Thunar and Xfce
@@ -425,8 +439,23 @@ Images and repository packages are trusted executable inputs, not sandboxed
 content. `--image REF` selects another OCI source of the same distribution and
 version; the guest architecture and OS are checked before package setup. Arch
 uses a community publisher and performs a complete rolling userspace upgrade.
-Package signing and pacman's default filesystem sandbox remain enabled.
+The installer preserves upstream repository signature policy and pacman's default
+filesystem sandbox. Armtix's supplied rootfs disables repository signatures;
+the installer warns about this and does not silently change that policy.
 Package output and errors stay in the console.
+
+Official rootfs archives have pinned URLs and SHA-256 digests. `--downloads DIR`
+selects their reusable verified cache. Gzip archives go directly to Shroot's
+native importer. XZ archives use the same isolated, digest-pinned Python OCI
+helper as the recovery converter, only to change compression; tar entries,
+ownership and hardlinks remain untouched. This requires neither Python nor
+Termux on Android. The temporary helper is removed after successful import/setup;
+failed conversion work is retained with its exact location. `--resume` never
+downloads or replaces a rootfs. These recipes launch applications and desktops
+directly; they do not switch the distribution's init system or boot PID 1.
+On networks without working IPv6, `FORCE_IPV4=1 sh install_linux.sh --distro void`
+selects XBPS's IPv4-only downloads. This explicit setting also applies to resume
+and optional graphics setup, without changing Android networking.
 
 Package setup uses the guest root account, without granting Android root or
 changing the executor UID. `--create-user developer` creates a password-locked
@@ -1488,7 +1517,7 @@ actual UID 2000, in private PID/mount/UTS/IPC/cgroup namespaces with proc, tmpfs
 `/run`, a private `/dev` with a real PTY console, sysfs and the logical cgroup2
 provider. Debian 257, Ubuntu 255, Arch 262, Fedora 259 and SteamOS checks cover both the system manager and a
 `systemd --user` manager. Both report `SystemState=running`. The check starts/stops
-oneshot and `Type=notify` services, activates a service through a TCP socket,
+oneshot and `Type=notify` services, activates services through a TCP socket and timer,
 and restores a memfd and a queued Unix socket from FD-store after a service
 restart. The sender identity includes the original PIDFD when SO_PASSPIDFD is
 available. Both managers exit normally. It uses a dedicated target without distro
@@ -1528,10 +1557,19 @@ diagnostic observer, not a replacement target. Ubuntu 255, Fedora 259 and Arch
 drop. SteamOS starts its core userspace services, including NetworkManager,
 but remains degraded on physical-device units and unsupported network/hardware
 operations. These results do not certify hardware boot or a graphical login.
+The extended matrix adds openSUSE 261.2, Deepin 255.2 and Manjaro ARM 255.3
+default-target passes; openKylin 259.5 passes with the explicit CAP_SYS_MODULE
+drop. All four also pass journal write/readback, system D-Bus, logind restart
+and the focused manager test with StateDirectory/SetCredential and restricted
+proc. Source identity and test scope are listed in the
+[init matrix](../native/guest-exec-lab/init-matrix.md).
 The OpenRC mode boots Alpine 3.23's real `openrc-init` as PID 1 using its stock
 container service policy and private runlevel configuration. It checks default
 runlevel services, restart and stop, then cancels the exact registered launch
 and verifies retirement. It does not boot hardware services or reboot Android.
+The runit mode retains stock boot stages and default services, supplementing
+them with a private lifecycle probe. A successful probe is not a claim that
+every hardware service is usable in the container.
 
 The Fedora 44 GNOME 50.5 devkit fixture runs stock GNOME Shell/Mutter with a
 private PID namespace, proc mount and `/run`, a system D-Bus daemon, and a

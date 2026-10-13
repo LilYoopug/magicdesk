@@ -16,6 +16,7 @@ def main():
     parser.add_argument('--name', required=True, help='Dedicated fixture name; retained for graphics checks')
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--library', help='Dedicated shell-owned library, isolated from existing image caches')
+    parser.add_argument('--ipv4', action='store_true', help='Set XBPS FORCE_IPV4 for networks without working IPv6')
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
     spec = importlib.util.spec_from_file_location('transport', repo / 'scripts/mcp-client.py')
@@ -27,6 +28,7 @@ def main():
     state = client.call('get_state')
     assert state['shell']['uid'] == 2000
     report = {'app': state['app'], 'distro': args.distro, 'gui': args.gui, 'name': args.name, 'library': args.library,
+              'ipv4': args.ipv4,
               'checks': [], 'passed': False}
     console = client.call('console.open', {'directory': '/data/local/tmp/magicdesk'})['sessionId']
     try:
@@ -40,13 +42,15 @@ def main():
 
         if args.library:
             command(['export', 'MAGICDESK_GUEST_HOME=' + args.library])
+        if args.ipv4:
+            command(['export', 'FORCE_IPV4=1'])
         source = repo / 'scripts/install_linux.sh'
         digest = hashlib.sha256(source.read_bytes()).hexdigest()
         script = '/data/local/tmp/magicdesk/installer-test-' + args.name + '-' + digest + '.sh'
         report['upload'] = transport.upload(client, source, script, overwrite=True)
         invocation = ['sh', script, '--yes', '--name', args.name, '--distro', args.distro,
                       '--gui', args.gui, '--locale', 'ru_RU.UTF-8', '--timezone', 'Asia/Krasnoyarsk',
-                      '--create-user', 'mdtester', '--package', 'jq']
+                      '--create-user', 'mdtester', '--fonts', 'basic', '--package', 'jq']
         invocation += ['--resume'] if args.resume else ['--dns', '1.1.1.1,1.0.0.1']
         command(invocation)
         inspect = command(['shroot', 'inspect', args.name])

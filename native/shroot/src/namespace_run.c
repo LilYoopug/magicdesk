@@ -7,6 +7,7 @@
 #include "socket_routes.h"
 #include "fs_mounts.h"
 #include "host_identity.h"
+#include "arguments.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -21,7 +22,7 @@ void md_boot(uintptr_t *stack) {
     char **argv = (char **)(stack + 1), **env = argv + argc + 1;
     if (!md_launch_identity(RAW0(getuid), RAW0(geteuid), RAW0(getgid), RAW0(getegid)))
         md_die("guest runtime requires the selected shell or root identity", -EACCES);
-    if (argc < 5 || argc > 1000)
+    if (argc < 5)
         md_die("usage: guest-run --store HOST_PATH [--cwd GUEST_PATH] -- PROGRAM [ARGS]", -EINVAL);
     const char *store = NULL, *cwd = "/", *home = "/tmp", *admit = NULL, *run_deadline = NULL;
     int diagnostics = 0, statistics = 0, commands = 0;
@@ -119,7 +120,12 @@ void md_boot(uintptr_t *stack) {
     long guard = RAW5(clone, SIGCHLD, 0, 0, 0, 0);
     if (guard < 0) md_die("start guest guardian", guard);
     if (!guard) {
-        char *args[1044 + MD_SOCKET_ROUTES_MAX * 3 + MD_FS_MOUNTS_MAX * 3] = {supervisor};
+        struct md_arguments arguments;
+        md_arguments_init(&arguments);
+        long error=md_arguments_reserve(&arguments,argc-program+32+3*(md_connections.count+attachment_count));
+        if (error<0) md_die("launch arguments",error);
+        char **args=arguments.values;
+        args[0]=supervisor;
         unsigned n = 1;
         if (diagnostics) args[n++] = "--diagnostics";
         if (statistics) args[n++] = "--statistics";
@@ -147,6 +153,7 @@ void md_boot(uintptr_t *stack) {
         args[n++] = "--namespace"; args[n++] = endpoint;
         for (size_t i = program; i <= argc; ++i) args[n + i - program] = argv[i];
         long status = md_process_guard(owner, supervisor, args, guest_environment.values, &signals);
+        md_arguments_close(&arguments);
         RAW1(exit_group, status);
     }
     long guard_fd = RAW2(pidfd_open, guard, 0);

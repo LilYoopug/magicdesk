@@ -38,15 +38,14 @@ struct md_proc_path md_proc_path_for(const char *, int tid, int tgid);
 int md_proc_task_path(const char *, char *, size_t);
 /* An image belongs to one address space, not to the syscall transport. */
 struct md_process_image {
-    unsigned argc;
-    uintptr_t argv[1040];
-    size_t arg_lengths[1040];
+    const void *arguments;
+    size_t argument_bytes;
     unsigned char auxv[4096];
     size_t auxv_bytes;
     char executable_object[33];
     const char *executable_path;
 };
-void md_proc_image_init(struct md_process_image *, unsigned argc, char *const *argv,
+void md_proc_image_init(struct md_process_image *, const void *arguments, size_t argument_bytes,
         const void *auxv, size_t auxv_bytes);
 struct md_fs;
 long md_proc_executable_open(const struct md_fs *, const char *path, int flags);

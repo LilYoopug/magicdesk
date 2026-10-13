@@ -4,6 +4,7 @@
 #include "fs_rpc.h"
 #include "control_file.h"
 #include "program_files.h"
+#include "arguments.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -102,7 +103,7 @@ int md_process_image_view(pid_t pid, uintptr_t image, unsigned kind, unsigned fl
     struct md_process_image *view=malloc(sizeof(*view));
     if (!view) return -ENOMEM;
     int r=copy(pid,image,view,sizeof(*view));
-    if (!r && (view->argc>1040 || view->auxv_bytes>sizeof(view->auxv) || view->executable_object[32])) r=-EPROTO;
+    if (!r && (view->argument_bytes>MD_EXEC_BYTES || view->auxv_bytes>sizeof(view->auxv) || view->executable_object[32])) r=-EPROTO;
     struct md_fs_request q={.actor=caller,.operation=kind==MD_PROC_EXE ? MD_FS_OPEN_OBJECT : MD_FS_TEMPORARY,
         .directory={-1,-1},.path={view->executable_object,NULL}};
     if (q.operation==MD_FS_TEMPORARY) q.path[0]=NULL;
@@ -116,12 +117,14 @@ int md_process_image_view(pid_t pid, uintptr_t image, unsigned kind, unsigned fl
             if (write(fd,view->auxv,view->auxv_bytes)!=(ssize_t)view->auxv_bytes) r=-EIO;
         } else {
             char bytes[4096];
-            for (unsigned i=0; !r && i<view->argc; ++i) {
-                uintptr_t address=view->argv[i];
-                size_t count=view->arg_lengths[i];
-                if (count>sizeof(bytes)) { r=-E2BIG; break; }
-                r=copy(pid,address,bytes,count);
+            for (size_t offset=0; !r && offset<view->argument_bytes;) {
+                size_t count=view->argument_bytes-offset;
+                if (count>sizeof(bytes)) count=sizeof(bytes);
+                uintptr_t address=(uintptr_t)view->arguments;
+                if (address>UINTPTR_MAX-offset) { r=-EFAULT; break; }
+                r=copy(pid,address+offset,bytes,count);
                 if (!r && write(fd,bytes,count)!=(ssize_t)count) r=-EIO;
+                offset+=count;
             }
         }
         if (!r) {

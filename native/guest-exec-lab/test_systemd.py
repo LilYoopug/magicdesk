@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stock systemd PID 1, service/notify/socket activation under actual shell UID.
+"""Stock systemd PID 1, service/notify/socket/timer activation under shell UID.
 
 Requires a disposable Debian-like Shroot store with systemd, util-linux and bash.
 No distro units, host devices, reboot or shutdown targets are started.
@@ -116,6 +116,20 @@ StandardInput=socket
 StandardOutput=socket
 StandardError=null
 EOF
+cat > /run/systemd/system/md-timer.timer <<EOF
+[Unit]
+DefaultDependencies=no
+[Timer]
+OnActiveSec=100ms
+AccuracySec=1ms
+EOF
+cat > /run/systemd/system/md-timer.service <<EOF
+[Unit]
+DefaultDependencies=no
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'printf "timer-activated\\n" > /run/md-timer-result'
+EOF
 cat > "$1/driver.sh" <<'EOF'
 set -eux
 trap 'code=$?; if test "$code" != 0; then systemctl status --no-pager md-oneshot.service || :; systemctl exit "$code"; fi' EXIT
@@ -143,8 +157,18 @@ printf 'socket-activated\n' >&3
 IFS= read -r -t 10 response <&3
 test "$response" = socket-activated
 exec 3>&-
+mkfifo /run/md-timer-result
+exec 4<>/run/md-timer-result
+systemctl start md-timer.timer
+# EVENT_WAIT: the timer-activated service writes its result into the FIFO.
+# The read deadline fails missing activation; timer duration is not readiness.
+IFS= read -r -t 10 response <&4
+test "$response" = timer-activated
+systemctl stop md-timer.timer md-timer.service
+exec 4>&-
+rm /run/md-timer-result
 systemctl stop md-echo.socket md-oneshot.service md-notify.service md-user.service md-fdstore.service
-printf 'PASS systemd PID1, notify, oneshot, user manager and socket activation\n' > "$1/result"
+printf 'PASS systemd PID1, notify, oneshot, user manager, socket and timer activation\n' > "$1/result"
 systemctl exit 0
 EOF
 exec /usr/lib/systemd/systemd --system --unit=md-test.target --show-status=no --crash-shell=no --crash-reboot=no
@@ -161,6 +185,8 @@ def main():
                         help='Additional service property for the hardened oneshot')
     args = parser.parse_args()
     suite = Suite(args.output, args.build)
+    suite.report['store'] = args.store
+    suite.report['serviceProperties'] = args.property
     target = '/tmp/md-systemd-' + suite.report['id']
     prefix = [suite.runner, '--store', args.store, '--user', '0:0', '--network', 'routed']
     created = False

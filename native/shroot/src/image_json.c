@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "image_json.h"
+#include "arguments.h"
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -61,17 +62,21 @@ int md_json_array(sqlite3 *db, const char *document, const char *path, char ***o
     if (r || absent) return r;
     if (!r) r = md_json_query(db, document, "SELECT type,value FROM json_each(?1,?2)", &q);
     if (!r) sqlite3_bind_text(q, 2, path, -1, SQLITE_STATIC);
-    size_t bytes = 0;
+    size_t bytes = 0, capacity=0;
     while (!r) {
         int rc = sqlite3_step(q);
         if (rc == SQLITE_DONE) break;
         if (rc != SQLITE_ROW || strcmp((const char *)sqlite3_column_text(q, 0), "text")) { r = -EINVAL; break; }
         const char *text = (const char *)sqlite3_column_text(q, 1);
         bytes += strlen(text) + 1;
-        if (*count == 900 || bytes > 65536) { r = -E2BIG; break; }
-        char **more = realloc(*out, (*count + 2) * sizeof(**out));
-        if (!more) { r = -ENOMEM; break; }
-        *out = more;
+        if (bytes+(*count+2)*sizeof(char *)>MD_EXEC_BYTES) { r = -E2BIG; break; }
+        if (*count+2>capacity) {
+            size_t next=capacity ? capacity*2 : 64;
+            char **more=realloc(*out,next*sizeof(**out));
+            if (!more) { r=-ENOMEM; break; }
+            *out=more; capacity=next;
+        }
+        char **more=*out;
         more[*count] = strdup(text);
         if (!more[*count]) { r = -ENOMEM; break; }
         more[++*count] = NULL;

@@ -46,6 +46,28 @@ systemctl list-jobs --no-pager
 systemctl status --no-pager
 journalctl -b --since="@$(cat "$1/started")" -p warning --no-pager > "$1/journal.log"
 systemctl show -p ActiveState -p SubState systemd-journald.service dbus.service systemd-logind.service
+# Check real service IO, not merely an ActiveState reported by the manager.
+if test "$code" = 0; then
+    # A separate shell retains errexit even though its status is tested by if.
+    if /bin/sh -es -- "$1" > "$1/services.log" 2>&1 <<'CHECK'
+        systemctl is-active systemd-journald.service dbus.service
+        busctl --system call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ListNames
+        marker="md-boot-${1##*/}"
+        printf '%s\n' "$marker" | systemd-cat -t md-boot-test
+        # EVENT_WAIT: journal sync acknowledgement commits preceding log data.
+        # The outer launch deadline fails a stalled journal, never implies success.
+        journalctl --sync
+        journalctl -t md-boot-test --no-pager -o cat | grep -Fx "$marker"
+        systemctl restart systemd-logind.service
+        systemctl is-active systemd-logind.service
+        test "$(systemctl is-system-running)" = running
+CHECK
+    then
+        echo 'PASS boot service IO and restart'
+    else
+        code=1
+    fi
+fi
 printf '%s\n' "$code" > "$1/result"
 systemctl exit "$code"
 EOF
@@ -71,6 +93,58 @@ mkdir -p /run/openrc
 printf '#!/bin/sh\nexec /usr/bin/python3 %s/observer.py --openrc-observer %s\n' "$1" "$1" > /etc/local.d/observer.start
 chmod 755 /etc/local.d/observer.start
 exec /sbin/openrc-init
+'''
+
+RUNIT = r'''
+# Keep the distribution's stages and default services. Only the observer and
+# disposable service definitions live in private configuration mounts.
+cp -a /etc/runit /run/md-runit
+mount --bind /run/md-runit /etc/runit
+mkdir -p /run/md-runit-services/observer /run/md-runit-services/lifecycle
+cat > /run/md-runit-services/lifecycle/run <<'EOF'
+#!/bin/sh
+cp requested started
+exec sleep 86400
+EOF
+cat > /run/md-runit-services/lifecycle/check <<'EOF'
+#!/bin/sh
+cmp -s requested started
+EOF
+printf '1\n' > /run/md-runit-services/lifecycle/requested
+cat > /run/md-runit-services/observer/run <<EOF
+#!/bin/sh
+/bin/sh $1/observe-runit.sh $1
+exec sleep 86400
+EOF
+chmod 755 /run/md-runit-services/*/run
+chmod 755 /run/md-runit-services/lifecycle/check
+ln -s /run/md-runit-services/lifecycle /etc/runit/runsvdir/default/md-lifecycle
+ln -s /run/md-runit-services/observer /etc/runit/runsvdir/default/md-observer
+cat > "$1/observe-runit.sh" <<'EOF'
+set -eu
+exec > "$1/boot.log" 2>&1
+trap 'code=$?; printf "%s\n" "$code" > "$1/result"; if test "$code" = 0; then echo "PASS runit stock PID1 boot and service lifecycle"; else echo "FAIL runit stock PID1 boot and service lifecycle"; fi > /dev/console' EXIT
+test "$(basename "$(readlink /proc/1/exe)")" = runit
+service=/run/md-runit-services/lifecycle
+# EVENT_WAIT: sv waits for the supervised service's requested state; its
+# deadline is failure, not a fixed initialization delay.
+sv -w 10 start "$service"
+before=$(sv status "$service" | sed -n 's/.*(pid \([0-9]*\)).*/\1/p')
+test -n "$before"
+# runit's timestamp acknowledgement has one-second precision. Its check hook
+# additionally requires the next instance to publish the requested generation.
+printf '2\n' > "$service/requested"
+sv -w 10 restart "$service"
+after=$(sv status "$service" | sed -n 's/.*(pid \([0-9]*\)).*/\1/p')
+test -n "$after"
+test "$before" != "$after"
+test ! -e "/proc/$before"
+sv -w 10 stop "$service"
+test ! -e "/proc/$after"
+# Record stock service failures separately from the lifecycle probe.
+sv status /etc/runit/runsvdir/default/* > "$1/stock-services.log" || :
+EOF
+exec runit
 '''
 
 
@@ -147,16 +221,17 @@ def main():
     parser.add_argument('--build', type=Path)
     parser.add_argument('--diagnostic-console', action='store_true')
     parser.add_argument('--trace', action='store_true', help='Trace filesystem, sandbox and readiness setup; requires strace')
-    parser.add_argument('--init', choices=('systemd', 'openrc'), default='systemd')
+    parser.add_argument('--init', choices=('systemd', 'openrc', 'runit'), default='systemd')
     parser.add_argument('--drop-capability', action='append', default=[],
                         help='Explicit container capability policy, applied by stock setpriv before PID1')
     parser.add_argument('--output', type=Path, default=Path('build/os-boot-results'))
     args = parser.parse_args()
     if any(not re.fullmatch('[a-z][a-z0-9_]*', cap) for cap in args.drop_capability):
         parser.error('capability names must use setpriv lowercase spelling without CAP_')
-    if args.init == 'openrc' and args.trace:
+    if args.init != 'systemd' and args.trace:
         parser.error('--trace is currently a systemd diagnostic')
     suite = Suite(args.output, args.build)
+    suite.report['store'] = args.store
     suite.report['bootPolicy'] = {'init': args.init, 'dropCapabilities': args.drop_capability}
     target = '/md-boot-' + suite.report['id']
     prefix = [suite.runner, '--store', args.store, '--user', '0:0', '--network', 'routed']
@@ -167,8 +242,9 @@ def main():
         created = True
         if args.init == 'openrc':
             suite.transport.upload(suite.client, Path(__file__), suite.base + '/observer.py')
+        program = {'systemd': SYSTEMD, 'openrc': OPENRC, 'runit': RUNIT}[args.init]
         boot = ['/usr/bin/unshare', '--mount', '--pid', '--fork', '--mount-proc',
-                '--uts', '--ipc', '--cgroup', '/bin/sh', '-ec', PREPARE + (SYSTEMD if args.init == 'systemd' else OPENRC), 'boot-test', target,
+                '--uts', '--ipc', '--cgroup', '/bin/sh', '-ec', PREPARE + program, 'boot-test', target,
                 'diagnostic' if args.diagnostic_console else 'normal']
         if args.drop_capability:
             boot = ['/usr/bin/setpriv', '--bounding-set=' + ','.join('-' + cap for cap in args.drop_capability),
@@ -186,7 +262,10 @@ def main():
         else:
             server = Server(suite, command)
             try:
-                server.ready('OpenRC stock PID1 boot and service lifecycle', timeout=120)
+                manager = 'OpenRC' if args.init == 'openrc' else 'runit'
+                # Either verdict ends observation; only the result file below
+                # can establish success after exact launch cleanup.
+                server.ready(manager + ' stock PID1 boot and service lifecycle', timeout=120)
             finally:
                 try:
                     # The registry pins the exact supervisor with pidfd. Closing
@@ -214,7 +293,7 @@ def main():
         suite.report['passed'] = True
     finally:
         try:
-            for name in ('boot.log', 'journal.log', 'journald.log', 'state', 'result'):
+            for name in ('boot.log', 'services.log', 'stock-services.log', 'journal.log', 'journald.log', 'state', 'result'):
                 suite.command(['/system/bin/sh', '-c', 'test ! -f "$1" || tail -200 "$1"',
                                'boot-log', suite.base + '/' + name])
             if args.trace:
