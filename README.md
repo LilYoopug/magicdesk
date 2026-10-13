@@ -51,9 +51,9 @@ MagicDesk's strength is how its parts work together:
   keeps its apps on a virtual display while you disconnect or change monitors.
 - **Linux graphical apps join the workspace.** Launch installed Termux apps
   such as GIMP and Firefox from Start into separate windows alongside Android
-  apps. Use Shroot to install Linux without Termux or root, or connect a configured
-  proot/chroot environment. Applications and whole Linux desktops use the built-in
-  X11 and Wayland servers; no separate Termux:X11 APK or
+  apps. Use [Shroot](#linux-with-shroot) to install Linux without Termux or root,
+  or connect a configured proot/chroot environment. Applications and whole Linux
+  desktops use the built-in X11 and Wayland servers; no separate Termux:X11 APK or
   companion display server is needed.
 - **A terminal worth using on its own.** Run Android shell, root shell or
   Termux tools in independent windows with a bundled Nerd Font, clickable
@@ -411,16 +411,61 @@ prepared chroot without Termux at all: the same Console, individual Linux window
 or whole Linux desktop. Provide an entry script and, for graphics, the guest's
 XKB data path. See [chroot setup](docs/x11.md#chroot-without-termux).
 
-**[Shroot](docs/shroot.md)** is MagicDesk's experimental Linux runtime for
-the authorized shell executor (UID 2000), without root, Termux or PRoot. It runs
-prepared ARM64 glibc/musl distributions and OCI images through the same terminal,
-X11 and Wayland services. `shroot` installs and manages independent
-environments, shared image data and explicit directory attachments. Shroot is not
-a container security boundary or Docker Engine; guest programs retain the selected
-executor's authority. Required kernel capabilities are checked at launch, without
-affecting ordinary MagicDesk tools on unsupported kernels. Its minimum supported
-kernel is **Linux 5.15**; [kernel-specific requirements and coverage](native/shroot/kernel-compatibility.md)
-are separate from MagicDesk's Android minimum.
+### Linux With Shroot
+
+**[Shroot](docs/shroot.md) runs ARM64 Linux userspace on Android's existing
+kernel, without Android root, a virtual machine, Termux or PRoot.** It uses the
+authorized Android shell service (UID 2000), supplied by Shizuku or Shevery.
+Its scope includes service managers, container engines and development tools,
+as well as individual graphical applications and whole Linux desktops.
+
+Shroot adapts selected Linux system calls and implements guest filesystem,
+credential and namespace models in userspace. This lets programs use supported
+Linux interfaces even when Android's kernel configuration or shell policy does
+not provide their native equivalents. It does not install a guest kernel or
+require kernel modules or SELinux changes.
+
+Verified workflows under UID 2000 include:
+
+- **Distributions and packages:** glibc and musl userspaces, package managers,
+  multiple independent environments, shared OCI image layers, copy-on-write
+  storage and explicit host-directory attachments.
+- **Init and services:** systemd as guest PID 1, user managers, socket/timer
+  activation and service restarts; OpenRC and runit also have boot and lifecycle
+  coverage. This is guest userspace, not Android hardware management.
+- **Docker Engine and Podman:** actual engines running inside Shroot, separately
+  from its own OCI image launcher. Docker supports concurrent containers,
+  outbound DNS/HTTP and ordinary TCP/UDP `docker run -p` publication with the
+  documented daemon configuration. Podman is verified with overlay storage,
+  host networking and application seccomp enabled; its default bridge networking
+  remains unsupported. See [container setup and limits](docs/shroot.md#services-and-containers).
+- **Browser and application sandboxes:** stock Chromium executes JavaScript and
+  renders pages without `--no-sandbox`, retaining its installed seccomp filters.
+  Stock Bubblewrap also has namespace and application workflow coverage.
+  Successful execution does not establish full native-Linux sandbox isolation.
+- **Landlock filesystem policy:** supported access restrictions are enforced
+  in Shroot even without host-kernel Landlock. Arch pacman's default filesystem
+  sandbox uses this path. Rules retain their scope across fork/exec and policy
+  stacking; support is limited to filesystem ABI 1, not the full Linux LSM.
+- **Development:** compilers, GDB, LLDB, gdbserver and strace, including debugger
+  attachment within the same supervised launch. Linux applications use
+  MagicDesk's terminals, X11/Wayland windows, clipboard, file exchange, audio and
+  gamepad services without requiring a MagicDesk Desktop session.
+
+**Isolation and security.** Guest filesystem permissions, read-only
+and no-exec mounts, supported Landlock rules and separate process/IPC views apply
+real restrictions within Shroot. Application seccomp filters remain in the
+kernel. However, unadapted calls and inherited descriptors retain host authority;
+cgroups provide membership and compatibility, not resource-limit enforcement.
+Shroot remains experimental and is **not a security boundary for untrusted
+code**. Use trusted images and programs. [Coverage and limits](docs/shroot.md#coverage-and-limits)
+distinguish working scenarios from complete distribution or sandbox compatibility.
+
+The minimum supported kernel is **Linux 5.15**. Required operations are probed
+under the selected executor at launch; a kernel version alone does not guarantee
+support. [Kernel requirements](native/shroot/kernel-compatibility.md) are separate
+from MagicDesk's Android minimum and do not affect ordinary tools when Shroot
+is unavailable.
 
 To install Linux, open a MagicDesk **Shell** console and run:
 

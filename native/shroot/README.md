@@ -1,130 +1,226 @@
 # Shroot Native Runtime
 
-Native-only ARM64 Linux execution for MagicDesk's already-authorized shell or
-root executor. The APK packages standalone executables; none are loaded into
-ART. Kernel capabilities are probed only for explicit guest operations.
-Shroot is experimental, **not a security sandbox or a complete Linux ABI**.
-Programs retain the selected executor's host authority.
+Shroot is a native ARM64 Linux userspace runtime for MagicDesk's already-authorized
+shell or root executor. Shell UID 2000 is the unrooted baseline. The APK packages
+standalone executables, not libraries loaded into ART. Guest-only capabilities
+are probed on explicit use and never become prerequisites for other services.
 
-Installation, named environments, OCI images and user-facing launch recipes
-belong in the [application guide](../../docs/shroot.md).
+Start with the [user guide](../../docs/shroot.md) for installation, named
+environments, Docker/Podman, init systems and supported application workflows.
+This file is the architecture map; focused contracts below own implementation
+invariants. [Fixture instructions](../guest-exec-lab/README.md) own test setup
+and evidence, rather than installation recipes.
+
+## Runtime Model
+
+The bootstrap maps an ARM64 ELF and its optional interpreter, constructs its
+initial stack/auxv, and enters the distribution's stock glibc/musl loader. Static
+ELF and raw SVC programs use the same path. No preload library, patched libc,
+PRoot process, external container manager or SELinux change is required.
+
+One supervisor owns each process tree. Selective seccomp TRACE/USER_NOTIF directs
+operations needing adaptation to either a task-affine adapter or a filesystem
+worker. The supervisor is the sole kernel ptracer. Ordinary unselected data IO,
+memory, futex and signal operations retain native execution; features such as
+guest debugging, routed networking and virtual descriptor readiness activate
+only for their owning resources.
+
+The runtime supplies logical Linux resources where native shell operations are
+insufficient: inode-backed filesystems, guest credentials, namespaces, mounts,
+IPC and selected control files. This supports real init systems, container
+engines and sandbox-using applications, rather than only a translated root path.
+It is not a full Linux ABI or an isolation boundary for hostile code.
+
+```text
+MagicDesk launch services
+  | selected identity, store, argv, PTY and optional connections
+  v
+native runner -> supervisor -> bootstrap -> stock ELF / libc loader
+                    |                         |
+                    |<-- selected syscalls ---|
+                    |
+                    +-- task/resource owners and task-affine calls
+                    +-- filesystem worker -> inode/native/mounted providers
+                    +-- IPC, network and descriptor readiness owners
+
+Android kernel: actual task lifetime, descriptors, data IO and native checks
+```
 
 ## Ownership
 
-The freestanding bootstrap maps ARM64 ELF and its optional interpreter, supplies
-the initial stack, and hands execution to the stock glibc/musl loader. Static
-ELF uses the same entry path. No preload library, custom libc dynamic linker,
-PRoot tracer, external container manager or SELinux modification is used.
+| Owner | Responsibility | Does not own |
+| --- | --- | --- |
+| Application services | Authorization, catalog/registry downloads, launch recipes, immutable helper staging, PTY, graphics/audio/input connections | Guest syscall policy or native resource lifetime |
+| `namespace_run.c` | Explicit launch configuration and native process owner | Global current distribution or automatic privilege switching |
+| `bootstrap.c`, `elf.c`, `exec.c` | ELF admission/mapping, stack and exec reentry | Distribution-specific loader or libc policy |
+| `supervisor.c` and task owners | Kernel tracing, continuations, guest identity, cancellation and terminal cleanup | Android windows or a second kernel scheduler |
+| `fs_worker.c`, `namespace_broker.c`, `fs_engine.c` | Captured filesystem requests and provider dispatch | Application IO through ordinary open data descriptions |
+| Inode/image owners | SQLite namespace, metadata, shared bodies, overlays, import and maintenance | Android mount privileges or kernel hardlinks |
+| Guest adapter | Task-affine operations and protected-memory copying | SQLite, a libc dependency or app-side services |
 
-One native supervisor owns each launched tree. Seccomp TRACE/USER_NOTIF selects
-operations requiring adaptation; ordinary data IO, memory, futexes and signals
-stay native. A separate namespace worker owns SQLite and filesystem requests.
-The syscall adapter has no SQLite or libc dependency. Reusable guarded scratch
-stacks belong to address-space lifetime, not individual syscalls.
+`GuestEnvironmentLibrary` and `GuestOciRegistry` are app-side management, not
+part of this native module. Their Java command helper is short-lived; the
+original shell execs the native runner to retain its PTY and graphical FDs.
+The native `image` utility owns validated import, snapshots, backup, maintenance
+and launch data. Standalone `service` and offline clients reuse the filesystem
+engine rather than a separate filesystem implementation.
 
-Named Shroot environments use the inode namespace. The direct-rootfs backend
-remains a low-level fixture/control path, never an automatic fallback for a
-failed namespace operation. Renderer, Android windows, authorization, PTYs and
-distribution-management UI belong to the existing application services.
+Named environments use the inode backend. A direct-rootfs backend remains a
+low-level fixture/control path, never a fallback after a namespace error.
+Each launch captures its identity and environment. Separate launches may share
+a store, but each retains its own supervisor and process tree. Persistent store
+lifetime is independent of launch lifetime.
+
+### Process and resource lifetime
+
+Kernel tasks and open descriptions are not replaced by simulated processes or
+file data. Logical owners follow their own sharing rules: address space,
+`CLONE_FILES`, `CLONE_FS`, namespace membership and `CLONE_SYSVSEM` are distinct.
+Fork, unshare and exec prepare changes before native execution and publish only
+confirmed results. Native rejection preserves prior ownership.
+
+The event loop services ptrace, worker and descriptor completions together.
+Resource-specific queues avoid repeatedly scanning every guest thread. Readiness
+or completion events, not settling delays, resume work; cancellation and optional
+deadlines share exact tree cleanup. A request can outlive its caller, so task exit
+does not authorize releasing worker storage or an unobserved descriptor result.
+
+See [process lifetime](process-lifetime.md), [interception](interception.md)
+and [process resources](process-resources.md) for scheduler, cancellation,
+quiescence and ownership rules.
+
+### Filesystem and descriptors
+
+SQLite records guest names, inode identity, permissions and layer relationships;
+native backing objects carry file data. One inode can have several names without
+native hardlink permission. Open data IO, mmap and file locks stay in the kernel.
+Metadata transactions, copy-up and watch publication share the namespace owner.
+Workers cache metadata within explicit snapshot/invalidation rules, not caller
+permissions or reusable FD numbers.
+
+A file-table turn captures exact input descriptions and orders close/dup/result
+publication. Stateful inputs are never replaced by reopening a pathname. Results
+use retained sources and confirmed kernel publication; cancellation releases
+unpublished resources without closing an application's installed or reused FD.
+No SQLite transaction or file-table turn may span an application readiness wait.
+Mixed poll/epoll keeps native waiting in the calling guest's signal context.
+
+The [inode store](inode-store.md), [filesystem service](filesystem-service.md),
+[descriptor contracts](process-resources.md#descriptor-and-cwd-annotations) and
+[ancillary transport](ipc-credentials.md#application-ancillary-transport) specify
+cache validity, publication, cross-launch custody and output-fault limits.
+
+### Guest policy
+
+Guest users, groups, capability sets and namespace owners are inputs to shared
+filesystem, IPC and process checks. They never become Android credentials.
+Readonly/noexec mount policy, DAC/ACLs and supported Landlock rules enforce
+actual guest access restrictions. Landlock filesystem ABI 1 works independently
+of host Landlock support; it is not full native-LSM or ptrace-domain confinement.
+
+Logical user/PID/mount/UTS/IPC/network/cgroup namespaces and private devpts views
+support nested Linux workloads without requiring their host kernel equivalents.
+Ordinary networking remains native; routed IPv4 is explicit and has its own
+port/endpoint ownership. Cgroups are intentionally permissive compatibility
+providers, not enforcement of CPU, memory, pids or device limits. Missing network,
+mount or device operations fail explicitly.
+
+The supervisor preserves application seccomp filters. Stock Chromium runs with
+installed filters and without `--no-sandbox`, and guest debuggers use a virtual
+trace relationship under the same supervisor. These execution results do not
+establish native-Linux sandbox equivalence. Unadapted syscalls, inherited host
+descriptors and the same-UID broker retain authority outside guest policy;
+interpreter/library admission and complete descriptor/root confinement remain
+incomplete. Use trusted inputs.
+
+See [guest credentials and Landlock](../../docs/shroot.md#guest-credentials),
+[namespace providers](process-resources.md) and
+[image admission](interception.md#image-admission-and-logical-credentials).
+
+## Application Integration
+
+Graphics, audio, gamepads, files and command access are connections supplied by
+existing MagicDesk services. The native runtime does not acquire Desktop, HOME,
+an Android display or input ownership. Renderers stay under the app UID even
+when the selected executor is root.
+
+For X11/Wayland, exact pathname/abstract socket routes select an executor-owned
+admission endpoint. Android authenticates the executor and transfers the connected
+FD to the protocol server; protocol bytes and SCM_RIGHTS then travel directly,
+without a stream proxy. X11 still requires its cookie, and independent Wayland
+clients open independent connections. See [graphical connections](../../docs/shroot.md#graphical-connections).
+
+General guest pathname sockets instead use inode names backed by unique abstract
+kernel endpoints. Bind publication and peer identity use the filesystem/IPC
+owners; established payloads remain native. Explicit abstract addresses retain
+host namespace semantics. These sockets are not the graphics admission service.
+Direct-backend pathname bind remains unsupported on the tested shell domain.
+
+File exchange uses a helper inside the selected guest identity and filesystem,
+never guessed paths to inode backing files. XKB export uses the store-derived
+`guest:/absolute/store` source. Guest `.desktop` declarations cannot override
+host storage identity or admission routes. Distribution session D-Bus comes from
+the guest; the APK ships no D-Bus daemon.
+
+Optional `--magicdesk` access is explicit launch-scoped delegation through the
+[command client](../command-client/README.md), shared with PRoot/native Termux.
+It is not an implicit consequence of guest root and is separate from syscall
+adaptation.
 
 ## Contracts
 
-- [Syscall interception](interception.md): scheduling, fast paths, protected
-  processes, guest credentials, application filters and image admission.
-- [Namespace execution](namespace-execution.md): paths, descriptors, cwd,
-  metadata and proc object identity.
-- [Inode store](inode-store.md) and [filesystem service](filesystem-service.md):
-  transactions, native backing, request delivery and uncertain outcomes.
-- [Images and views](images.md): OCI layers, copy-on-write, rootfs archives,
-  attachments and backup.
-- [Process lifetime](process-lifetime.md) and [debugging](debugging.md):
-  supervision, nested GDB/LLDB/strace workflows and explicit limitations.
-- [Process resources](process-resources.md): clone/unshare/exec ownership,
-  filesystem context, task-owned mount views, descriptor-origin annotations and semaphore undo.
-- [Watches](watches.md), [named pipes](fifos.md),
-  [Unix credentials](ipc-credentials.md), [shared memory](shared-memory.md) and
-  [SysV IPC](sysv-ipc.md): independent ownership and validation boundaries.
-- [Command client](../command-client/README.md): explicit launch-scoped
-  delegation to MagicDesk, separate from guest execution.
+| Contract | Responsibility |
+| --- | --- |
+| [Interception](interception.md) | Selectors, task-affine calls, protected processes, exec, application filters and private-memory repair |
+| [Process lifetime](process-lifetime.md) | Launch ownership, cancellation, reaping and teardown |
+| [Process resources](process-resources.md) | Sharing, mounts, namespace providers, descriptor custody, network, terminals and cgroups |
+| [Namespace execution](namespace-execution.md) | Path/FD dispatch, cwd, metadata and proc object identity |
+| [Inode store](inode-store.md) | Transactions, backing objects, logical metadata and cache invalidation |
+| [Filesystem service](filesystem-service.md) | Request transport, worker ownership, cancellation and uncertain outcomes |
+| [Images and views](images.md) | OCI/rootfs import, shared layers, copy-on-write, attachments and backup |
+| [Watches](watches.md) and [pipes](fifos.md) | Namespace/data events, readiness, queue and rendezvous lifetime |
+| [Unix IPC](ipc-credentials.md) | Peer identity, authenticated FD origins and batch publication |
+| [Shared memory](shared-memory.md) and [SysV IPC](sysv-ipc.md) | Namespace scope, mappings, semaphore undo, messages and waits |
+| [Debugging](debugging.md) | Same-launch GDB/LLDB/gdbserver/strace and supported trace operations |
+| [Kernel compatibility](kernel-compatibility.md) | Linux 5.15 baseline, newer dependencies, probes and fallbacks |
 
 ## Execution Policy
 
-The minimum supported kernel is Linux 5.15. Newer optional interfaces, native
-passthrough limits and actual device coverage are tracked separately in
-[kernel compatibility](kernel-compatibility.md). This is not a minimum kernel
-for other MagicDesk services.
+Minimum supported Linux is **5.15**, independently of the APK's API 34 and
+Desktop's API 35. Record every dependency newer than 5.15 in
+[kernel compatibility](kernel-compatibility.md), including flags and semantics.
+An available header or kernel version does not establish firmware permission.
+Guest probe failure leaves independent MagicDesk services available.
 
-The selected executor must be allowed to execute the bootstrap and map guest
-code. The mapper uses private RW mappings followed by final segment protections,
-never simultaneous RWX. Hardened policies forbidding RW-to-RX transitions can
-still reject execution. Fixed images use MAP_FIXED_NOREPLACE with returned-address
-validation; conflicts with the runtime mapping fail before replacement.
-
-The app stages immutable content-addressed helper bundles. A running process
-tree keeps its exact bootstrap and gate addresses across APK updates. Exec carries
-configuration explicitly, not through environment variables the guest must retain.
-The internal resume entry is not an authorization boundary.
+The selected identity must be allowed to execute helpers and map guest code.
+ELF segments use private RW mappings followed by final protections, never RWX.
+Fixed images use `MAP_FIXED_NOREPLACE` and returned-address validation; conflicts
+fail before replacement. Hardened policies may still deny RW-to-RX transitions.
 
 Program admission checks X_OK and rejects actual host set-ID executables.
 Explicit sealed-image admission controls logical guest set-ID separately.
-X_OK does not reproduce all kernel execution/LSM checks. The adapter rejects
-`AT_EXECVE_CHECK`, rather than stripping it or reporting success; see the
-[kernel execution-check contract](https://kernel.org/doc/html/next/userspace-api/check_exec.html).
-Supporting a caller of that interface requires validating the actual kernel ABI
-and routing checks to the backing FD under the existing identity.
-
-Unselected syscalls retain host semantics. Logical mount namespaces, overlay and
-private devpts views, guest namespace identities, routed IPv4 and permissive
-cgroup membership implement the bounded contracts in
-[process resources](process-resources.md); they do not create host kernel
-namespaces or enforce host cgroup resource limits. Not every Linux syscall is
-virtualized. Guest seccomp filters remain installed; browser execution does not
-establish native-Linux sandbox equivalence. Permission denials never authorize fallback to root.
-Missing guest capabilities leave other MagicDesk services available.
-
-## Unix Client Transport
-
-Pathname sockets in the inode namespace have logical names and unique abstract
-kernel endpoints. Bind publication is transactional; connected payloads and mmap
-use native kernel objects. Adapted ancillary transfers preserve descriptor origins
-through authenticated capsules; native peers retain native transport. Store-scoped
-Unix credentials follow the [credential authority](ipc-credentials.md).
-Direct-backend pathname bind is unsupported on the tested shell domain.
-
-Explicit socket routes translate selected addresses to the executor's graphical
-admission endpoint without proxying payloads or changing descriptor identity.
-The [application connection owner](../../docs/shroot.md#graphical-connections)
-authenticates clients and transfers connections to X11/Wayland servers. An inherited
-Wayland FD supplies one connection; independent child clients need a routed endpoint.
+X_OK is not every kernel/LSM execution check. `AT_EXECVE_CHECK` is rejected, not
+stripped or reported as successful. Helper bundles are immutable; exec carries
+configuration explicitly and retains exact images rather than reopening names.
+The internal resume entry is not an authorization boundary.
 
 ## Build And Verification
 
-`CMakeLists.txt` builds API-34 executables with the Android toolchain and pinned,
-hash-verified SQLite/image dependencies. The application packages those helpers
-and their license notices. Guest libc, desktop packages and GPU drivers are not
-APK dependencies.
+`CMakeLists.txt` builds API-34 executables with pinned, hash-verified native
+dependencies. SQLite belongs to the namespace owners, not ART or the freestanding
+adapter. Image archive/compression dependencies are declared in
+[image-dependencies.cmake](image-dependencies.cmake). The APK packages helpers and
+license notices; guest libc, desktop packages and GPU drivers remain guest-owned.
 
 ```sh
 ./gradlew :app:assembleDebug
 ```
 
-The [fixture guide](../guest-exec-lab/README.md) lists host prerequisites,
-prepared Debian/musl inputs and device commands. Kernel, filesystem, package,
-debugger, browser and GPU workflows are separate checks; Desktop self-tests do
-not replace them. Lab preparation does not configure user distributions.
-
-Device coverage and limits are recorded in the
-[application guide](../../docs/shroot.md#coverage-and-limits).
-API 34, other firmware, 16 KiB pages and actual root execution require their own
-device verification. Build success or synthetic checks do not supply that coverage.
-
-## Software GUI
-
-Graphics fixtures use the installed APK's shell/PTY and X11/Wayland services.
-Compositors stay under the app UID; Shroot supplies client programs, not an
-elevated renderer. Readiness, visible Android pixels, input, file exchange and
-process exit are separate assertions.
-
-The fixture guide covers GTK/Qt, glibc/musl userspaces, Xfce, LibreOffice, GIMP,
-browser filters and guest-owned Turnip. Each result applies to its stated
-scenario and device, not every desktop environment or driver.
+`MAGICDESK_GUEST_FIXTURES` enables native fixture targets. The
+[fixture guide](../guest-exec-lab/README.md) supplies preparation and device
+commands. Kernel/ABI, filesystem, packages, browsers, debugger, init, container
+and GUI/GPU workflows are separate checks; Desktop self-tests do not replace them.
+Read [coverage and limits](../../docs/shroot.md#coverage-and-limits), the
+[init matrix](../guest-exec-lab/init-matrix.md), and the Docker/Podman fixtures
+before extending a compatibility claim. UI pixels, actual IO, access denials,
+process exit and resource cleanup are distinct assertions.

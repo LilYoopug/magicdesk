@@ -132,7 +132,7 @@ creating filesystem nodes; independent X11 and Wayland GTK clients use this path
 Native credentials
 and SCM_RIGHTS are retained. Returned addresses restore the original bound name;
 Unix sendmmsg shares this translation with partial-batch and short-stream semantics. See the
-[transport coverage and native shell restriction](README.md#unix-client-transport).
+[transport and native shell restriction](README.md#application-integration).
 
 RPC deadlines bound failure, not kernel IO duration or remote cancellation.
 An error after transmission can leave a committed mutation or advanced directory
@@ -255,8 +255,8 @@ broader GTK/Qt workflows, exact hardlink-dentry notifications, object reclamatio
 power loss and API 34/16 KiB coverage retain their documented limits. Execution-policy checks described in the main
 README still apply; X_OK is not a replacement for full kernel execution policy.
 
-The [software GUI fixture](README.md#software-gui) also runs from the imported
-namespace. Its Wayland connection survives the service/guardian/guest launch
+The [software GUI fixture](../guest-exec-lab/README.md#prepared-runtime-fixtures)
+also runs from the imported namespace. Its Wayland connection survives the service/guardian/guest launch
 boundary without extra copies retained by those supervisors. Both a native
 memfd and an unlinked namespace file supply wl_shm pixels to MagicDesk's app-UID
 compositor. Android pixel inspection, pointer/key delivery and protocol close
