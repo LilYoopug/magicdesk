@@ -80,7 +80,9 @@ int md_reopen_file(int fd, int flags, struct md_open_completion *completion) {
     char path[64]; descriptor_path(path,fd);
     return (int)C(openat,AT_FDCWD,path,(flags&~O_NOFOLLOW)|O_CLOEXEC,0,0,0);
 }
-int md_complete_open(int pin, int flags, struct md_open_completion completion) {
+int md_complete_open_observed(int pin, int flags, struct md_open_completion completion,
+        struct md_open_observation *observation) {
+    if (observation) *observation=(struct md_open_observation){0};
     if (pin < 0 || completion.kind == MD_OPEN_READY) return pin;
     if (completion.kind==MD_OPEN_DEVICE) {
         struct md_open_completion next;
@@ -117,6 +119,8 @@ int md_complete_open(int pin, int flags, struct md_open_completion completion) {
         if (ready < 0) r = ready;
     }
     int absent = mode == O_RDONLY ? !!(state.revents & POLLHUP) : !!(state.revents & POLLERR);
+    if (!r && observation && mode==O_RDONLY && absent && (flags&O_NONBLOCK))
+        *observation=(struct md_open_observation){.initial_reader=1,.writers=before};
     if (!r && mode == O_WRONLY && absent && (flags & O_NONBLOCK)) r = -ENXIO;
     if (!r) {
         for (unsigned side = 0; side < 2; side++) {
@@ -140,4 +144,7 @@ int md_complete_open(int pin, int flags, struct md_open_completion completion) {
     C(close, pin, 0, 0, 0, 0, 0);
     if (r && fd >= 0) C(close, fd, 0, 0, 0, 0, 0);
     return r ? (int)r : fd;
+}
+int md_complete_open(int pin,int flags,struct md_open_completion completion) {
+    return md_complete_open_observed(pin,flags,completion,NULL);
 }

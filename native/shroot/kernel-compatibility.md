@@ -150,16 +150,25 @@ Mixed-queue native waiting preserves the caller's signalfd and temporary
 signal-mask context when the caller exclusively owns its file table. This uses
 the existing ptrace syscall boundary and exact native descriptor, not a new
 kernel operation or a guest FD. Guest tests cover pending/process signals,
-virtual wakeups, equal event data and filtered cross-owner queue activation.
+virtual wakeups, simultaneous ready events/signals, equal event data and filtered
+cross-owner queue activation.
 Shared-table waits still use the host collector and lack that signal-context
 coverage. PTRACE_SETSIGMASK clears pending kernel saved-mask restoration,
 so it cannot be used blindly at an interrupted epoll/ppoll exit. This semantic
 requirement is part of the 5.15 baseline, not a reason to raise the minimum.
+Named-FIFO readiness uses baseline epoll, shared read-only mappings and the
+existing rendezvous generation file. Poll/select native waits reuse that
+task-affine ptrace boundary even for shared file tables; provider helpers never
+wait on the application's ordinary descriptors. Channel rejoining uses existing
+O_PATH pins, flock leases and authenticated origin parcels. These paths add no
+post-5.15 requirement. `test_fifo_runtime.py` covers initial hangup suppression,
+signalfd, temporary masks/EINTR and transfer across sender exit and receiver exec;
+`fs-buffer` covers contiguous mapped loans and terminal cleanup.
 The live inventory fixture combines those baseline operations with CLONE_FILES
 and fork, covering distinct thread groups over shared/copied tables and rollback
 after one group's application filter denies seccomp. Quiescence loans retain
 existing ptrace event/rusage and resume ownership without another kernel API.
-Offline IPv4 sysctls use the shared typed-control transport and retained mount
+Logical IPv4 sysctls, including forwarding policy, use the shared typed-control transport and retained mount
 anchors; numeric values and permissions are launch-owned state, not host sysctl
 writes. They add no post-5.15 interface. Foreign proc executable selection reuses
 the existing process-image inspection, worker preparation and anonymous-image

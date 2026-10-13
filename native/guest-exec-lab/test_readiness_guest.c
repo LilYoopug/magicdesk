@@ -41,6 +41,22 @@ static void signal_wait(int ep) {
     assert(!sigprocmask(SIG_SETMASK,&saved,NULL));
     puts("PASS mixed epoll: atomic signal mask, EINTR and restoration");
 }
+static void signal_ready(int ep) {
+    sigset_t blocked,saved,after;
+    sigemptyset(&blocked); sigaddset(&blocked,SIGUSR1);
+    assert(!sigprocmask(SIG_BLOCK,&blocked,&saved));
+    signalled=0;
+    for (unsigned i=0;i<2;++i) {
+        assert(!sethostname(i ? "ready-signal-b" : "ready-signal-a",14));
+        assert(!raise(SIGUSR1));
+        struct epoll_event out={0};
+        assert(epoll_pwait(ep,&out,1,1000,&saved)==1 && out.data.u64==42 && (out.events&EPOLLERR));
+        assert(!sigprocmask(SIG_SETMASK,NULL,&after) && sigismember(&after,SIGUSR1)==1);
+        assert(!epoll_wait(ep,&out,1,0));
+    }
+    assert(!sigprocmask(SIG_SETMASK,&saved,NULL) && signalled);
+    puts("PASS mixed epoll: ready virtual event with pending signal, single consumption and mask restoration");
+}
 static void signal_descriptor(int ep) {
     sigset_t blocked,saved;
     sigemptyset(&blocked); sigaddset(&blocked,SIGUSR2);
@@ -70,8 +86,13 @@ static void virtual_wake(int ep) {
     pid_t child=fork(); assert(child>=0);
     if (!child) { byte_read(go[0]); assert(!sethostname("wake-virtual",12)); _exit(0); }
     byte_write(go[1]);
-    struct epoll_event out;
-    assert(epoll_wait(ep,&out,1,3000)==1 && out.data.u64==42 && (out.events&EPOLLERR));
+    struct epoll_event out={0};
+    errno=0;
+    int result=epoll_wait(ep,&out,1,3000),error=errno;
+    if (result!=1 || out.data.u64!=42 || !(out.events&EPOLLERR))
+        fprintf(stderr,"virtual wake: result=%d errno=%d events=%#x data=%llu\n",result,error,
+            out.events,(unsigned long long)out.data.u64);
+    assert(result==1 && out.data.u64==42 && (out.events&EPOLLERR));
     int status; assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
     close(go[0]); close(go[1]);
     assert(!epoll_wait(ep,&out,1,0));
@@ -144,6 +165,7 @@ static void mixed(int filtered) {
         && ((out[0].events|out[1].events)&(EPOLLIN|EPOLLERR))==(EPOLLIN|EPOLLERR));
     assert(read(event,&one,sizeof(one))==sizeof(one));
     signal_wait(ep);
+    signal_ready(ep);
     signal_descriptor(ep);
     assert(!epoll_ctl(ep,EPOLL_CTL_DEL,fd,NULL));
     assert(!epoll_ctl(ep,EPOLL_CTL_DEL,event,NULL));

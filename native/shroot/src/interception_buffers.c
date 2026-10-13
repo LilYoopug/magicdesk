@@ -8,7 +8,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-struct slot { uint64_t generation; unsigned references; };
+struct slot { uint64_t generation; unsigned references,extent; };
 struct md_interception_buffers {
     void *memory;
     size_t size, stride, capacity, clear_prefix;
@@ -64,21 +64,27 @@ size_t md_buffers_size(const struct md_interception_buffers *p) { return p ? p->
 static int valid(const struct md_interception_buffer *b) {
     if (!b || !b->pool) return -EINVAL;
     const struct md_interception_buffers *p=b->pool;
-    return b->index<p->slots && b->generation && p->slot[b->index].generation==b->generation
+    return b->index<p->slots && b->generation && p->slot[b->index].extent && p->slot[b->index].generation==b->generation
         && p->slot[b->index].references ? 0 : -ESTALE;
 }
-static int take(struct md_interception_buffers *p, struct md_interception_buffer *out, int reserved) {
+static int take(struct md_interception_buffers *p, struct md_interception_buffer *out, int reserved,size_t capacity) {
     if (!p || !out) return -EINVAL;
     if (out->pool) return -EBUSY;
     if (p->generation==UINT64_MAX || p->references==UINT_MAX) return -EOVERFLOW;
     unsigned base=reserved ? p->ordinary : 0, count=reserved ? p->slots-p->ordinary : p->ordinary;
     if (!count) return -ENOTSUP;
+    if (capacity>(count-1)*p->stride+p->capacity) return -ENOMEM;
+    unsigned extent=capacity>p->capacity ? (unsigned)((capacity-p->capacity-1)/p->stride+2) : 1;
     unsigned *next=reserved ? &p->next_reserved : &p->next;
     for (unsigned n=0;n<count;++n) {
         unsigned i=base+(unsigned)(((uint64_t)*next+n)%count);
-        if (p->slot[i].references) continue;
-        p->slot[i]=(struct slot){.generation=++p->generation,.references=1};
-        ++p->references; *next=(i-base+1)%count;
+        if (extent>base+count-i) continue;
+        unsigned j=0; while (j<extent && !p->slot[i+j].references) ++j;
+        if (j!=extent) continue;
+        ++p->generation;
+        for (j=0;j<extent;++j) p->slot[i+j]=(struct slot){.generation=p->generation,.references=1};
+        p->slot[i].extent=extent;
+        ++p->references; *next=(i-base+extent)%count;
         if (!reserved) memset((char *)p->memory+i*p->stride,0,p->clear_prefix);
         *out=(struct md_interception_buffer){.pool=p,.index=i,.generation=p->generation};
         return 0;
@@ -86,10 +92,13 @@ static int take(struct md_interception_buffers *p, struct md_interception_buffer
     return -EAGAIN;
 }
 int md_buffers_take(struct md_interception_buffers *p, struct md_interception_buffer *out) {
-    return take(p,out,0);
+    return take(p,out,0,0);
+}
+int md_buffers_take_sized(struct md_interception_buffers *p,size_t size,struct md_interception_buffer *out) {
+    return take(p,out,0,size);
 }
 int md_buffers_take_reserved(struct md_interception_buffers *p, struct md_interception_buffer *out) {
-    return take(p,out,1);
+    return take(p,out,1,0);
 }
 int md_buffer_pin(const struct md_interception_buffer *b, struct md_interception_buffer *out) {
     if (!out) return -EINVAL;
@@ -105,7 +114,7 @@ int md_buffer_span(const struct md_interception_buffer *b, struct md_buffer_span
     int error=valid(b); if (error) return error;
     struct md_interception_buffers *p=b->pool;
     *out=(struct md_buffer_span){.data=(char *)p->memory+b->index*p->stride,
-        .size=p->capacity,.offset=b->index*p->stride};
+        .size=(p->slot[b->index].extent-1)*p->stride+p->capacity,.offset=b->index*p->stride};
     return 0;
 }
 int md_buffer_release(struct md_interception_buffer *b) {
@@ -113,7 +122,10 @@ int md_buffer_release(struct md_interception_buffer *b) {
     if (!b->pool) return 0;
     int error=valid(b); if (error) return error;
     struct md_interception_buffers *p=b->pool;
-    --p->slot[b->index].references;
+    if (!--p->slot[b->index].references) {
+        unsigned extent=p->slot[b->index].extent;
+        for (unsigned i=1;i<extent;++i) p->slot[b->index+i].references=0;
+    }
     *b=(struct md_interception_buffer){0};
     md_buffers_release(p);
     return 0;

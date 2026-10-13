@@ -43,6 +43,12 @@ def guest():
         return result
 
     port, ping, local = 'ip_unprivileged_port_start', 'ping_group_range', 'ip_local_port_range'
+    assert read('ip_forward') == ['0']
+    write('ip_forward', '1\n')
+    assert read('ip_forward') == ['1']
+    for text in ('-1', '2', '1 2', 'garbage'):
+        denied(lambda: write('ip_forward', text), errno.EINVAL)
+        assert read('ip_forward') == ['1']
     assert read(port) == ['1024']
     write(port, '0\n')
     write(ping, '0 2147483647\n')
@@ -65,15 +71,18 @@ def guest():
         libc = ctypes.CDLL(None, use_errno=True)
         assert libc.unshare(0x40000000) == 0, ctypes.get_errno()
         assert read(port) == ['1024']
+        assert read('ip_forward') == ['0']
         write(port, '42')
         assert read(port) == ['42'] and os.pread(fd, 32, 0) == b'10000\n'
         os.setgid(1234)
         os.setuid(1234)
         denied(lambda: write(port, '0'), errno.EACCES)
+        denied(lambda: write('ip_forward', '1'), errno.EACCES)
         denied(lambda: os.write(fd, b'0'), errno.EACCES)
         os._exit(0)
     assert os.waitpid(child, 0) == (child, 0)
     assert read(port) == ['10000']
+    assert read('ip_forward') == ['1']
     os.close(fd)
     print('PASS network namespace isolation, retained descriptors and writer authority', flush=True)
     fd = os.open(BASE + port, os.O_RDWR | os.O_CLOEXEC)

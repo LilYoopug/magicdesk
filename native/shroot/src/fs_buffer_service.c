@@ -9,6 +9,7 @@
 #include "inode_watch.h"
 #include "ofd_order.h"
 #include "file_open_job.h"
+#include "fifo_description.h"
 #include "exec_prepare.h"
 #include "file_snapshot.h"
 #include "ipc_credentials.h"
@@ -56,6 +57,7 @@ struct md_fs_buffer_request {
     struct md_fs_request request;
     struct md_fs_buffer_open opened;
     struct md_open_job opening;
+    int fifo_control;
     struct md_command_images images;
     struct md_program *proc_image;
     struct md_file_snapshot snapshot;
@@ -108,6 +110,7 @@ int md_fs_buffer_open_take(struct md_fs_buffer_request *r, struct md_fs_buffer_o
     *out=r->opened; r->opened=(struct md_fs_buffer_open){.fd=-1}; return 1;
 }
 static void dispose(struct md_fs_buffer_request *r) {
+    if (r->fifo_control>=0) close(r->fifo_control);
     if (r->control_descriptor>=0) close(r->control_descriptor);
     md_landlock_release(r->landlock);
     struct md_fs_buffer_request **p=&r->service->requests;
@@ -239,7 +242,7 @@ static int complete(struct md_fs_work *work) {
         int error=md_open_job_start(&r->opening,r->opened.fd,r->request.flags,r->opened.completion);
         if (!error) {
             close(r->opened.fd); r->opened.fd=-1;
-            if (r->opened.completion.kind==MD_OPEN_PIPE) close(r->opened.completion.control);
+            if (r->opened.completion.kind==MD_OPEN_PIPE) r->fifo_control=r->opened.completion.control;
             r->opened.completion=(struct md_open_completion){0};
             return 0;
         }
@@ -270,9 +273,19 @@ int md_fs_buffer_child(struct md_fs_buffer_service *s, pid_t pid, int status) {
     while (r && r->opening.pid!=pid) r=r->next;
     if (!r) return 0;
     if (!WIFEXITED(status) && !WIFSIGNALED(status)) return -EPROTO;
-    int result=md_open_job_finish(&r->opening,status);
-    if (result>=0) r->opened.fd=result;
-    else {
+    struct md_open_observation observation={0};
+    int result=md_open_job_finish(&r->opening,status,&observation);
+    if (result>=0) {
+        r->opened.fd=result;
+        if (!r->cancelled && observation.initial_reader) {
+            r->opened.object=md_fifo_description_new(r->opened.origin,result,r->fifo_control,observation.writers);
+            if (!r->opened.object) result=-errno;
+            else r->output->reply.result.selectors=md_fd_object_selectors(r->opened.object);
+        }
+    }
+    if (r->fifo_control>=0) { close(r->fifo_control); r->fifo_control=-1; }
+    if (result<0) {
+        if (r->opened.fd>=0) { close(r->opened.fd); r->opened.fd=-1; }
         r->output->reply.result.error=result;
         r->output->transfer=MD_FS_BUFFER_NO_FD;
     }
@@ -656,7 +669,7 @@ static int begin(struct md_fs_buffer_service *s, pid_t actor, struct md_guest_do
     struct md_fs_buffer_request *r=calloc(1,sizeof(*r)+lengths[0]+lengths[1]+q.value_size+object_bytes+capture_bytes
         +(snapshot ? sizeof(input->snapshot.data) : 0));
     if (!r) return -ENOMEM;
-    r->service=s; r->actor=actor; r->opened.fd=r->control_descriptor=-1;
+    r->service=s; r->actor=actor; r->opened.fd=r->control_descriptor=r->fifo_control=-1;
     r->images=(struct md_command_images){.program=-1,.loader=-1}; r->executable=executable;
     r->snapshot=(struct md_file_snapshot){.fd=-1,.flags=snapshot_flags};
     r->snapshot_phase=snapshot ? SNAPSHOT_BEGIN : SNAPSHOT_NONE;
@@ -724,7 +737,7 @@ int md_fs_buffer_inspect_begin(struct md_fs_buffer_service *s, pid_t actor, stru
     if (!count || count>253) return -EINVAL;
     struct md_fs_buffer_request *r=calloc(1,sizeof(*r)+count*sizeof(int));
     if (!r) return -ENOMEM;
-    r->service=s; r->actor=actor; r->output=frame; r->opened.fd=r->control_descriptor=-1;
+    r->service=s; r->actor=actor; r->output=frame; r->opened.fd=r->control_descriptor=r->fifo_control=-1;
     r->images=(struct md_command_images){.program=-1,.loader=-1};
     r->snapshot.fd=-1; r->captured[0]=r->captured[1]=-1;
     r->received=md_received_fds_retain(sources); r->received_count=count;

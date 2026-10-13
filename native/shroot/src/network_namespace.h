@@ -18,7 +18,8 @@ void md_network_namespace_release(struct md_network_namespace *);
 uint64_t md_network_namespace_inode(const struct md_network_namespace *);
 const struct md_user_namespace *md_network_namespace_owner(const struct md_network_namespace *);
 int md_network_namespace_managed(const struct md_network_namespace *);
-enum md_network_parameter { MD_NET_UNPRIVILEGED_PORT, MD_NET_PING_GROUPS, MD_NET_LOCAL_PORTS };
+enum md_network_parameter { MD_NET_UNPRIVILEGED_PORT, MD_NET_PING_GROUPS, MD_NET_LOCAL_PORTS,
+    MD_NET_IPV4_FORWARD };
 /* Policy state belongs to the selected managed namespace, never Android. */
 int md_network_parameter_get(struct md_network_namespace *,enum md_network_parameter,uint32_t values[2]);
 int md_network_parameter_set(struct md_network_namespace *,enum md_network_parameter,const uint32_t values[2]);

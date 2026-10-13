@@ -30,6 +30,9 @@ static unsigned evaluate(const struct md_fd_filter_program *p,const struct secco
     assert(!"FD filter did not terminate"); return 0;
 }
 static unsigned expected(unsigned kind,int fd,const struct seccomp_data *d) {
+    if (kind==MD_FD_SELECTOR_POLL)
+        return d->nr==SYS_ppoll || d->nr==SYS_pselect6
+            ? SECCOMP_RET_TRACE|MD_INTERCEPT_DISPATCH : SECCOMP_RET_ALLOW;
     if (d->nr==SYS_dup || d->nr==SYS_dup3 || (d->nr==SYS_fcntl
             && ((unsigned)d->args[1]==F_DUPFD || (unsigned)d->args[1]==F_DUPFD_CLOEXEC)))
         return SECCOMP_RET_TRACE|MD_INTERCEPT_DISPATCH;

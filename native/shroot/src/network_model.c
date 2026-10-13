@@ -129,6 +129,7 @@ static struct md_network_namespace *create(struct md_user_namespace *owner,enum 
     atomic_init(&n->references,1);
     n->unprivileged_port=1024; n->ping_groups[0]=1;
     n->local_ports[0]=32768; n->local_ports[1]=60999;
+    n->ipv4_forward=mode==MD_NETWORK_ROUTED;
     pthread_mutex_lock(&fabric->lock);
     unsigned loopback=0;
     error=md_network_interface_add(n,MD_LINK_LOOPBACK,"lo",&loopback);

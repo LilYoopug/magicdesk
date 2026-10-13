@@ -17,6 +17,9 @@ struct network_sysctl {
     enum md_network_parameter parameter;
     struct md_fs_anchor *origin;
 };
+static unsigned value_count(enum md_network_parameter p) {
+    return p==MD_NET_PING_GROUPS || p==MD_NET_LOCAL_PORTS ? 2 : 1;
+}
 static void *retain(void *context) {
     struct network_sysctl *f=context;
     atomic_fetch_add_explicit(&f->references,1,memory_order_relaxed); return f;
@@ -53,7 +56,7 @@ static long read_value(void *context,const struct md_control_actor *actor,void *
     if (f->parameter==MD_NET_PING_GROUPS) for (unsigned i=0;i<2;++i)
         value[i]=md_identity_visible_id(actor->identity,1,value[i]);
     char text[32];
-    int count=f->parameter==MD_NET_UNPRIVILEGED_PORT ? snprintf(text,sizeof(text),"%u\n",value[0])
+    int count=value_count(f->parameter)==1 ? snprintf(text,sizeof(text),"%u\n",value[0])
         : snprintf(text,sizeof(text),"%u\t%u\n",value[0],value[1]);
     if ((uint64_t)offset>=(unsigned)count) return 0;
     size_t n=(size_t)count-(size_t)offset;
@@ -71,7 +74,7 @@ static long write_value(void *context,const struct md_control_actor *actor,const
     if (size>128) return -E2BIG;
     const unsigned char *p=data,*end=p+size;
     uint32_t value[2]={0};
-    unsigned count=f->parameter==MD_NET_UNPRIVILEGED_PORT ? 1 : 2;
+    unsigned count=value_count(f->parameter);
     for (unsigned i=0;i<count;++i) {
         while (p<end && isspace(*p)) ++p;
         if (p==end || !isdigit(*p)) return -EINVAL;

@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "file_open_job.h"
 #include "event_wait.h"
+#include "fifo_readiness.h"
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -31,7 +32,7 @@ static int wait_child(pid_t child) {
     return status;
 }
 static int reap(struct md_open_job *job) {
-    return md_open_job_finish(job,wait_child(job->pid));
+    return md_open_job_finish(job,wait_child(job->pid),NULL);
 }
 static int pin_pipe(int *control) {
     int pipefd[2]; assert(!pipe2(pipefd,O_CLOEXEC));
@@ -82,9 +83,44 @@ static void owner_death(void) {
     assert((WIFSIGNALED(status) && WTERMSIG(status)==SIGKILL) || (WIFEXITED(status) && WEXITSTATUS(status)==125));
     assert(!close(control) && !close(pin) && !close(message[0]) && !close(message[1]));
 }
+static void initial_readiness(void) {
+    int control,pin=pin_pipe(&control);
+    struct md_open_completion completion={.kind=MD_OPEN_PIPE,.control=control};
+    struct md_open_job job={0};
+    assert(!start(&job,pin,O_RDONLY|O_NONBLOCK,completion));
+    struct md_open_observation opened={0};
+    int reader=md_open_job_finish(&job,wait_child(job.pid),&opened);
+    assert(reader>=0 && opened.initial_reader);
+    struct md_fifo_readiness *gate=md_fifo_readiness_new(control,opened.writers);
+    assert(gate && !md_fifo_readiness_attach(gate,reader));
+    struct md_control_file file=md_fifo_readiness_control(gate);
+    int wake=-1; assert(!file.ops->poll_descriptor(file.context,&wake));
+    assert(file.ops->poll(file.context)==0);
+    struct pollfd poller={wake,POLLIN,0};
+    assert(poll(&poller,1,0)==0);
+    assert(!start(&job,pin,O_WRONLY|O_NONBLOCK,completion));
+    int writer=reap(&job); assert(writer>=0);
+    assert(file.ops->poll(file.context)==0);
+    assert(write(writer,"x",1)==1);
+    /* EVENT_WAIT: real pipe data/closure, never elapsed time as readiness. */
+    assert(md_event_wait_fd(wake,POLLIN,md_event_now()+5000000000LL)>=0);
+    assert(file.ops->poll(file.context)&POLLIN);
+    char byte; assert(read(reader,&byte,1)==1 && byte=='x');
+    assert(file.ops->poll(file.context)==0);
+    assert(!close(writer));
+    assert(md_event_wait_fd(wake,POLLIN,md_event_now()+5000000000LL)>=0);
+    assert(file.ops->poll(file.context)&POLLHUP);
+    assert(read(reader,&byte,1)==0 && !close(reader));
+    assert(!start(&job,pin,O_WRONLY|O_NONBLOCK,completion));
+    assert(reap(&job)==-ENXIO);
+    md_fifo_readiness_free(gate);
+    assert(!close(control) && !close(pin));
+    puts("PASS FIFO readiness: initial HUP suppression, writer, data, EOF, no retained reader");
+}
 int main(void) {
     setbuf(stdout,NULL); alarm(60);
     int before=fds();
+    initial_readiness(); assert(fds()==before);
     owner_death(); assert(fds()==before);
     for (unsigned round=0;round<32;++round) {
         if (round==16) missing_close_range();

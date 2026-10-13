@@ -17,6 +17,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/epoll.h>
+#include <sys/signalfd.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
@@ -157,9 +159,7 @@ static void fifos(const char *directory) {
     errno=0; assert(open(path,O_WRONLY|O_NONBLOCK)==-1 && errno==ENXIO);
     int reader=open(path,O_RDONLY|O_NONBLOCK|O_CLOEXEC); assert(reader>=0);
     struct pollfd initial={.fd=reader,.events=POLLIN};
-    int initial_ready=poll(&initial,1,0); assert(initial_ready>=0);
-    if (initial.revents&POLLHUP)
-        puts("LIMIT FIFO nonblocking reader reports initial POLLHUP before first writer");
+    int initial_ready=poll(&initial,1,0); assert(initial_ready==0 && !initial.revents);
     char data[16]; assert(read(reader,data,sizeof(data))==0);
     int writer=open(path,O_WRONLY|O_NONBLOCK); assert(writer>=0);
     errno=0; assert(read(reader,data,sizeof(data))==-1 && errno==EAGAIN);
@@ -201,6 +201,105 @@ static void fifos(const char *directory) {
     }
     assert(!unlink(path));
     printf("PASS FIFO %s: modes, nonblocking errors, poll, peer open, hardlinks, rename, unlinked reopen and name reuse\n",directory);
+}
+static void fifo_ready(int fd,int expected) {
+    struct pollfd items[300];
+    for (unsigned i=0;i<300;++i) items[i]=(struct pollfd){fd,POLLIN,0};
+    assert(poll(items,300,0)==(expected ? 300 : 0));
+    for (unsigned i=0;i<300;++i) assert(items[i].revents==expected);
+    fd_set set; FD_ZERO(&set); FD_SET(fd,&set);
+    struct timespec zero={0};
+    assert(pselect(fd+1,&set,NULL,NULL,&zero,NULL)==!!expected);
+    assert(!!FD_ISSET(fd,&set)==!!expected);
+}
+static volatile sig_atomic_t fifo_signals;
+static void fifo_signal(int signal) { assert(signal==SIGUSR2); ++fifo_signals; }
+static void fifo_interruption(int fd) {
+    struct sigaction action={.sa_handler=fifo_signal},previous_action;
+    sigemptyset(&action.sa_mask);
+    assert(!sigaction(SIGUSR2,&action,&previous_action));
+    sigset_t blocked,previous,current;
+    sigemptyset(&blocked); sigaddset(&blocked,SIGUSR2);
+    assert(!sigprocmask(SIG_BLOCK,&blocked,&previous));
+    sigset_t temporary=previous; sigdelset(&temporary,SIGUSR2);
+    for (unsigned select=0;select<2;++select) {
+        assert(!kill(getpid(),SIGUSR2));
+        struct pollfd item={fd,POLLIN,0};
+        fd_set set; FD_ZERO(&set); FD_SET(fd,&set);
+        struct timespec timeout={1,0};
+        errno=0;
+        int result=select ? pselect(fd+1,&set,NULL,NULL,&timeout,&temporary)
+            : ppoll(&item,1,&timeout,&temporary);
+        assert(result==-1 && errno==EINTR && fifo_signals==(sig_atomic_t)select+1);
+        assert(!sigprocmask(SIG_SETMASK,NULL,&current) && sigismember(&current,SIGUSR2));
+        fifo_ready(fd,0);
+    }
+    assert(!sigprocmask(SIG_SETMASK,&previous,NULL));
+    assert(!sigaction(SIGUSR2,&previous_action,NULL));
+}
+static void fifo_readiness(void) {
+    char path[128]; snprintf(path,sizeof(path),"/tmp/md-fifo-readiness-%d",getpid());
+    assert(!mkfifo(path,0600));
+    /* EVENT_WAIT: all peer and readiness checks have an alarm deadlock bound. */
+    alarm(30);
+    for (unsigned mode=0;mode<3;++mode) {
+        int fd=open(path,O_RDONLY|O_NONBLOCK); assert(fd>=0);
+        int copy=dup(fd); assert(copy>=0); close(fd); fd=copy;
+        fifo_ready(fd,0);
+        pid_t child=fork(); assert(child>=0);
+        if (!child) { fifo_ready(fd,0); _exit(0); }
+        child_ok(child);
+        int queue=epoll_create1(EPOLL_CLOEXEC); assert(queue>=0);
+        struct epoll_event event={.events=EPOLLIN|(mode==1 ? EPOLLET : mode==2 ? EPOLLONESHOT : 0),.data.u64=37},out;
+        assert(!epoll_ctl(queue,EPOLL_CTL_ADD,fd,&event));
+        assert(epoll_wait(queue,&out,1,0)==0);
+        struct pollfd initial={fd,POLLIN,0};
+        assert(poll(&initial,1,10)==0 && !initial.revents);
+        int writer=open(path,O_WRONLY|O_NONBLOCK); assert(writer>=0);
+        fifo_ready(fd,0);
+        assert(write(writer,"a",1)==1);
+        struct pollfd ignored={fd,0,0};
+        assert(poll(&ignored,1,10)==0 && !ignored.revents);
+        assert(epoll_wait(queue,&out,1,1000)==1 && out.events==EPOLLIN && out.data.u64==37);
+        fifo_ready(fd,POLLIN);
+        assert(epoll_wait(queue,&out,1,0)==(mode ? 0 : 1));
+        char c; assert(read(fd,&c,1)==1 && c=='a');
+        assert(epoll_wait(queue,&out,1,0)==0);
+        if (mode==2) assert(!epoll_ctl(queue,EPOLL_CTL_MOD,fd,&event));
+        assert(write(writer,"b",1)==1);
+        assert(epoll_wait(queue,&out,1,1000)==1 && out.events==EPOLLIN);
+        assert(read(fd,&c,1)==1 && c=='b');
+        if (mode==2) assert(!epoll_ctl(queue,EPOLL_CTL_MOD,fd,&event));
+        close(writer);
+        assert(epoll_wait(queue,&out,1,1000)==1 && out.events==EPOLLHUP);
+        fifo_ready(fd,POLLHUP);
+        assert(read(fd,&c,1)==0);
+        close(queue); close(fd);
+        fd=open(path,O_RDONLY|O_NONBLOCK); assert(fd>=0);
+        fifo_ready(fd,0);
+        writer=open(path,O_WRONLY|O_NONBLOCK); assert(writer>=0); close(writer);
+        fifo_ready(fd,POLLHUP); close(fd);
+    }
+    sigset_t mask,previous;
+    sigemptyset(&mask); sigaddset(&mask,SIGUSR1); sigaddset(&mask,SIGCHLD);
+    assert(!sigprocmask(SIG_BLOCK,&mask,&previous));
+    int signal=signalfd(-1,&mask,SFD_NONBLOCK|SFD_CLOEXEC); assert(signal>=0);
+    int fd=open(path,O_RDONLY|O_NONBLOCK); assert(fd>=0);
+    fifo_interruption(fd);
+    struct pollfd mixed[]={{fd,POLLIN,0},{signal,POLLIN,0}};
+    assert(poll(mixed,2,10)==0);
+    assert(!kill(getpid(),SIGUSR1));
+    assert(poll(mixed,2,1000)==1 && !mixed[0].revents && mixed[1].revents==POLLIN);
+    struct signalfd_siginfo info;
+    assert(read(signal,&info,sizeof(info))==sizeof(info) && info.ssi_signo==SIGUSR1);
+    int writer=open(path,O_WRONLY|O_NONBLOCK); assert(writer>=0);
+    assert(write(writer,"c",1)==1);
+    assert(poll(mixed,2,1000)==1 && mixed[0].revents==POLLIN && !mixed[1].revents);
+    char c; assert(read(fd,&c,1)==1 && c=='c');
+    close(writer); close(fd); close(signal);
+    assert(!sigprocmask(SIG_SETMASK,&previous,NULL));
+    assert(!unlink(path)); alarm(0);
+    puts("PASS FIFO readiness: dup/fork, 300-entry poll, select, epoll LT/ET/oneshot, reconnect, EOF and task-affine signalfd");
 }
 static void caps_read(struct __user_cap_data_struct data[2]) {
     struct __user_cap_header_struct h={.version=_LINUX_CAPABILITY_VERSION_3};
@@ -477,6 +576,7 @@ int main(int argc,char **argv) {
     assert(getuid()==0);
     if (!strcmp(argv[1],"creation-modes")) { creation_modes(); return 0; }
     if (!strcmp(argv[1],"fifo")) { fifos(argc>2 ? argv[2] : "/tmp"); return 0; }
+    if (!strcmp(argv[1],"fifo-readiness")) { fifo_readiness(); return 0; }
     if (!strcmp(argv[1],"all")) { mount_identity(); stack_boundary(); descriptors(); creation_modes(); fifos("/tmp"); descriptor_paths(argv[0]); copy_attributes(); access_lists(); capabilities(argv[0]); file_capabilities(argv[0]); memory(argv[0]); return 0; }
     assert(argc==3); int key=atoi(argv[2]);
     if (!strcmp(argv[1],"publish")) {

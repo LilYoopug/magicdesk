@@ -10,5 +10,5 @@ int md_open_job_start(struct md_open_job *, int pin, int flags, struct md_open_c
 /* SIGKILL cancels even native FIFO open/flock. Keep the PID until reap. */
 int md_open_job_cancel(struct md_open_job *);
 /* Consume an observed terminal wait status, transferring one result FD or errno. */
-int md_open_job_finish(struct md_open_job *, int status);
+int md_open_job_finish(struct md_open_job *, int status, struct md_open_observation *);
 #endif

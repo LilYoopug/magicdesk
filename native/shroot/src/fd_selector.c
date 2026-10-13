@@ -27,6 +27,7 @@ void md_fd_selector_release(struct md_fd_selector *a) {
 }
 int md_fd_selector_has(struct md_fd_selector *a, unsigned kind, int fd) {
     if (!a || kind>=MD_FD_SELECTOR_KINDS || fd< -1) return -EINVAL;
+    if (kind==MD_FD_SELECTOR_POLL) fd=-1;
     if (a->all&(1U<<kind)) return 1;
     if (fd==-1) return 0;
     fd &= MD_FD_SELECTOR_MASK;
@@ -36,6 +37,7 @@ int md_fd_selector_has(struct md_fd_selector *a, unsigned kind, int fd) {
 }
 int md_fd_selector_mark(struct md_fd_selector *a, unsigned kind, int fd) {
     if (!a || kind>=MD_FD_SELECTOR_KINDS || fd< -1) return -EINVAL;
+    if (kind==MD_FD_SELECTOR_POLL) fd=-1;
     if (fd==-1) {
         a->all|=1U<<kind;
         if (kind==MD_FD_SELECTOR_PROC) a->all|=1U<<MD_FD_SELECTOR_WATCH;

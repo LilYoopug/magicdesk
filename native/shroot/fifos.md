@@ -33,7 +33,12 @@ a live owner's proc descriptor. Persisted routes include native device/inode
 identity and a random owner lease protected by a kernel lock; PID existence alone
 does not authorize reuse. Each participating worker retains its own pin until
 its supervised launch ends. Dead leases are ignored. Clean closure removes its
-routes. No live descriptor number is meaningful across a runtime restart.
+routes. Portable origins carry the stable channel identity. On receipt they
+rejoin that channel with path-only custody, independently of the sender's worker
+and SQLite connection; conflicting live stream identities fail with ESTALE.
+Final imported-origin release closes its pins and lease without a database
+operation. The next channel acquisition collects stale routes. No live
+descriptor number is meaningful across a runtime restart.
 
 Opening returns an authorized pin and a separate rendezvous descriptor through
 the typed filesystem result. The mapped transport retains both in the supervisor;
@@ -55,13 +60,37 @@ writer without readers receives ENXIO; O_RDWR does not wait for another endpoint
 Ordinary files do not allocate this state or acquire rendezvous locks. Internal
 bookkeeping lives outside watched backing objects and is not published as guest IO.
 
+## Readiness
+
+An initially unpaired nonblocking reader retains the writer generation observed
+during open. Its typed description suppresses initial POLLHUP until a writer
+connects. Dup, fork, exec and authenticated SCM_RIGHTS retain that baseline.
+Read/write, EOF and SIGPIPE stay native: observation retains no data endpoint.
+The observer uses native epoll subscriptions and a read-only mapping of the
+rendezvous generations, not periodic sampling or another pipe implementation.
+
+Selected `poll/select` calls use the same task-affine native-wait owner as mixed
+epoll. Ordinary descriptors, including signalfd, are waited on in the calling
+guest thread, with its temporary signal mask. A helper observes only provider
+wake sources. Typed metadata is captured under the descriptor-table turn, which
+is released before blocking. After the first writer, the original FIFO descriptor
+itself supplies native poll readiness; ignored data does not cause virtual-wake
+spinning. Mixed epoll preserves level, edge and one-shot subscriptions.
+The poll selector is admitted only in processes acquiring an initial-reader
+description; other processes retain their ordinary syscall path. Variable-size
+poll vectors borrow contiguous capacity from the existing shared request mapping.
+No extra guest FD or per-request mmap is needed; exhausted mapping capacity is
+an explicit allocation error.
+
 ## Limits
 
-The anonymous-pipe backing does not reproduce every named-FIFO readiness rule.
-A newly opened nonblocking reader can receive POLLHUP before its first writer
-connects. Native named FIFOs suppress that initial hangup; poll/epoll adaptation
-of this per-open-description state is not implemented. This is a compatibility
-limit, not a peer-connect notification or proof of a broken stream.
+Queued rights retain the pipe endpoint, but cannot publish a proc pin route after
+every channel owner exits and before a receiver imports the message. Another
+launch opening the name during that gap can establish a conflicting stream;
+later import rejects it rather than silently connecting the wrong channel.
+Preserving name rendezvous throughout that gap needs shared channel custody.
+Raw ppoll/pselect timeout writeback on signal interruption does not yet cover
+the direct signal-delivery return path; libc wrappers hide that timeout mutation.
 
 Directory/name inotify events use namespace transactions. FIFO data/open/close
 events are not synthesized from the anonymous pipe. Do not infer complete FIFO
@@ -72,8 +101,11 @@ guest launches is not a supported pin-lifetime contract.
 
 `test_service_runtime.c` exercises permissions, nonblocking open errors, data
 readiness, EOF, blocking peer rendezvous, O_RDWR, hardlinks, rename, unlink/reopen
-and name reuse under actual shell UID 2000. `test_fifo_runtime.py` exchanges data
-between independent launches and repeats after both owners exit.
+and name reuse under actual shell UID 2000. It also covers 300-entry poll vectors,
+select, LT/ET/oneshot epoll, ignored interests, temporary signal masks/EINTR and
+mixed native signalfd. `test_fifo_runtime.py` exchanges data between independent
+launches, repeats after both owners exit, and transfers a reader between protected
+processes after sender exit and across receiver exec.
 `test_open_job` checks endpoint exchange, ENXIO/EOF, cancellation before and after
 result queuing, descriptor counts and exclusion of unrelated inherited FDs.
 Production resource checks forbid guest RPC syscalls, fill the guest descriptor

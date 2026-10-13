@@ -301,6 +301,7 @@ def main():
     target = '/tmp/md-docker-probe-' + suite.report['id']
     prefix = [suite.runner, '--store', args.store, '--user', '0:0']
     observer = None
+    created = False
     try:
         suite.transport.upload(suite.client, Path(__file__), suite.base + '/probe.py')
         if args.exercise_ports:
@@ -309,6 +310,7 @@ def main():
             suite.transport.upload(suite.client, Path(__file__).with_name('docker_network_fixture.py'),
                                    suite.base + '/docker_network_fixture.py')
         suite.command(prefix + ['--', '/bin/mkdir', target])
+        created = True
         deadline = 1800 if observer else 900
         runner = prefix + ['--bind-ro', suite.base, target, '--deadline-seconds', str(deadline), '--']
         if args.profile == 'routed':
@@ -347,7 +349,8 @@ def main():
             observer.close()
             suite.report['externalPortChecks'] = observer.records
         try:
-            suite.command(prefix + ['--', '/bin/rmdir', target])
+            if created:
+                suite.command(prefix + ['--', '/bin/rmdir', target])
         finally:
             suite.finish()
 

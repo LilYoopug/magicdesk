@@ -1,6 +1,7 @@
 #ifndef MD_FD_OBJECT_H
 #define MD_FD_OBJECT_H
 #include <stdatomic.h>
+#include "control_file.h"
 
 /* Embedded in the descriptor's typed authority, never a second allocation.
  * It owns provenance/lifetime, not a duplicate of the application's data OFD. */
@@ -24,12 +25,19 @@ struct md_fd_object_type {
      * under the source table turn, after its metadata lock is released. Owners
      * requiring a complete alias inventory must invalidate that assumption. */
     void (*alias_lost)(struct md_fd_object *);
+    /* Borrowed provenance and readiness are independent of data IO. A typed
+     * open description may retain an ordinary filesystem anchor. */
+    struct md_fs_anchor *(*origin)(struct md_fd_object *);
+    struct md_control_file (*readiness)(struct md_fd_object *);
 };
 struct md_fd_object {
     atomic_uint references;
     const struct md_fd_object_type *type;
     _Atomic(struct md_fd_weak *) weak;
 };
+static inline struct md_control_file md_fd_object_readiness(struct md_fd_object *o) {
+    return o && o->type->readiness ? o->type->readiness(o) : (struct md_control_file){0};
+}
 static inline unsigned md_fd_object_selectors(const struct md_fd_object *o) {
     return o ? o->type->selectors|(o->type->selector_mask ? o->type->selector_mask(o) : 0) : 0;
 }

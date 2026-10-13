@@ -106,6 +106,10 @@ int md_fd_filter_build(enum md_fd_selector_kind kind,int fd,
         CONTROL(epoll_pwait2,0,MD_INTERCEPT_READINESS)
         DUPLICATES
     );
+    if (kind==MD_FD_SELECTOR_POLL) COPY_PROGRAM(
+        PREFIX ADAPT(ppoll) ADAPT(pselect6)
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
+    );
     return -EINVAL;
 #undef COPY_PROGRAM
 #undef PROC

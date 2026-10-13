@@ -76,9 +76,9 @@ static int task_relative(struct md_filesystem *fs, const char *path,
          * Typed proc/control carriers must still go through their provider. */
         if (md_fd_order_begin(task.files,order,NULL)==1 && !md_fd_order_start(order)) {
             struct md_fd_object *object=md_fd_origins_object(task.files,ref.descriptor,NULL);
-            *origin=md_fs_anchor_from_object(object);
+            *origin=md_fs_anchor_retain(md_fs_anchor_from_object(object));
             relative=object && !*origin;
-            if (!*origin) md_fd_object_release(object);
+            md_fd_object_release(object);
         }
     }
     md_task_snapshot_release(&task);

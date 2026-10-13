@@ -30,7 +30,7 @@ struct md_network_namespace {
     unsigned default_interface;
     uint32_t default_gateway;
     uint32_t unprivileged_port, ping_groups[2], local_ports[2];
-    uint32_t next_port;
+    uint32_t next_port, ipv4_forward;
     struct md_network_listener *listeners;
 };
 /* Weak listeners are removed under the fabric lock before final FD release.

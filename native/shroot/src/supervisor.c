@@ -17,6 +17,7 @@
 #include "network_io.h"
 #include "fd_mutation.h"
 #include "control_epoll.h"
+#include "poll_wait.h"
 #include "fd_admission.h"
 #include "epoll_wait.h"
 #include "descriptor_inode.h"
@@ -233,6 +234,8 @@ struct readiness_owner {
     struct md_fd_admission *admission;
     struct md_fd_admission_request request;
     struct md_epoll_wait wait;
+    struct md_poll_wait *poll;
+    unsigned poll_count,poll_loaded;
     struct user_pt_regs continuation;
     struct epoll_event event;
     struct md_task_call_arguments native_call;
@@ -2970,6 +2973,7 @@ static void readiness_release(struct thread *t) {
     if (!o) return;
     readiness_unwatch(t);
     md_epoll_wait_cancel(&o->wait);
+    md_poll_wait_free(o->poll);
     md_fd_capture_cancel(&o->capture);
     md_received_fds_release(o->received);
     readiness_admission_release(o,0);
@@ -3019,12 +3023,21 @@ static void readiness_start(struct thread *t) {
         if (error) { readiness_reply(t,error); return; }
         if (md_fd_order_state(&o->files)!=MD_RESOURCE_ORDER_READY) { retry_wait(t,RETRY_READINESS); return; }
         CHECK(!md_fd_order_start(&o->files));
+        if (o->poll) {
+            struct md_buffer_span span;
+            error=md_buffer_span(&t->buffer,&span);
+            if (error) { readiness_reply(t,error); return; }
+            struct md_poll_frame *f=span.data;
+            f->offset=0; f->count=o->poll_count>MD_POLL_CHUNK ? MD_POLL_CHUNK : o->poll_count;
+            o->classified=1;
+            buffer_reply(t,MD_POLL_LOAD); return;
+        }
         o->queue=md_fd_origins_object(t->resources.files,(int)t->original.regs[0],NULL);
         queue=md_control_epoll_from_object(o->queue);
         o->classified=1;
         if (o->operation) {
             o->target=md_fd_origins_object(t->resources.files,o->number,NULL);
-            struct md_control_file provider=md_proc_file_control(md_proc_file_from_object(o->target));
+            struct md_control_file provider=md_fd_object_readiness(o->target);
             if (md_control_epoll_from_object(o->target)
                     && md_fd_object_selectors(o->target)) { readiness_reply(t,-EOPNOTSUPP); return; }
             if (!provider.ops || !provider.ops->poll) { readiness_reply(t,MD_EPOLL_NATIVE); return; }
@@ -3086,7 +3099,7 @@ static void readiness_start(struct thread *t) {
         if (error) { readiness_reply(t,error); return; }
         readiness_admission_release(o,0);
     }
-    struct md_control_file provider=md_proc_file_control(md_proc_file_from_object(o->target));
+    struct md_control_file provider=md_fd_object_readiness(o->target);
     readiness_reply(t,md_control_epoll_ctl(queue,o->operation,o->number,o->target,provider,&o->event));
 }
 static void readiness_capture(struct thread *t,unsigned command,long value) {
@@ -3114,6 +3127,15 @@ static void readiness_begin(struct thread *t,const struct user_pt_regs *r) {
     if (!error && !o) error=-ENOMEM;
     if (error) { buffer_reply(t,error); return; }
     o->continuation=*r;
+    if (t->original.regs[8]==SYS_ppoll || t->original.regs[8]==SYS_pselect6) {
+        struct md_poll_frame *f=span.data;
+        o->poll_count=f->total;
+        if (md_poll_bytes(f->total)>span.size) error=-EINVAL;
+        else {
+            o->poll=md_poll_wait_new(f->total,f->select);
+            if (!o->poll) error=-ENOMEM;
+        }
+    }
     if (t->original.regs[8]==SYS_epoll_ctl) {
         o->operation=(int)t->original.regs[1]; o->number=(int)t->original.regs[2];
         o->event=((struct md_epoll_frame *)span.data)->event;
@@ -3121,6 +3143,24 @@ static void readiness_begin(struct thread *t,const struct user_pt_regs *r) {
     }
     t->readiness=o;
     if (error) readiness_reply(t,error); else readiness_start(t);
+}
+static void readiness_poll_load(struct thread *t) {
+    struct readiness_owner *o=t->readiness;
+    struct md_buffer_span span;
+    int error=md_buffer_span(&t->buffer,&span);
+    struct md_poll_frame *f=error ? NULL : span.data;
+    if (!error) error=md_poll_wait_load(o->poll,o->files.table,f);
+    if (error) { readiness_reply(t,error); return; }
+    o->poll_loaded+=f->count;
+    if (o->poll_loaded<o->poll_count) {
+        f->offset=o->poll_loaded; f->count=o->poll_count-o->poll_loaded;
+        if (f->count>MD_POLL_CHUNK) f->count=MD_POLL_CHUNK;
+        buffer_reply(t,MD_POLL_LOAD); return;
+    }
+    if (!md_poll_wait_virtual(o->poll)) { readiness_reply(t,MD_EPOLL_NATIVE); return; }
+    o->native_caller=1;
+    CHECK(!md_fd_order_complete(&o->files));
+    buffer_reply(t,MD_EPOLL_CAPTURED);
 }
 static void control_progress(struct thread *t) {
     retry_clear(t,RETRY_CONTROL);
@@ -3449,9 +3489,11 @@ static void readiness_task_progress(struct thread *t,int completed,long value) {
     struct readiness_owner *o=t->readiness;
     struct md_buffer_span span;
     long result=md_buffer_span(&t->buffer,&span);
-    int waiting=!result && md_epoll_wait_task(&o->wait,md_control_epoll_from_object(o->queue),
-        span.data,md_memory_buffer_address(t->memory,&t->buffer),t->original.regs[8],
-        (int)t->original.regs[0],completed,value,&o->native_call,&result);
+    uintptr_t address=md_memory_buffer_address(t->memory,&t->buffer);
+    int waiting=!result && (o->poll ? md_poll_wait_task(o->poll,&o->wait,span.data,address,
+            completed,value,&o->native_call,&result)
+        : md_epoll_wait_task(&o->wait,md_control_epoll_from_object(o->queue),span.data,address,
+            t->original.regs[8],(int)t->original.regs[0],completed,value,&o->native_call,&result));
     if (!waiting) { readiness_reply(t,result); return; }
     struct user_pt_regs regs=o->continuation;
     regs.pc=abi.task_call; regs.regs[8]=o->native_call.number;
@@ -3634,7 +3676,7 @@ static void buffer_complete(struct md_fs_buffer_request *request, pid_t pid, int
 }
 static void buffer_take(struct thread *t) {
     retry_clear(t,RETRY_BUFFER);
-    int error=md_buffers_take(md_memory_buffers(t->memory),&t->buffer);
+    int error=md_buffers_take_sized(md_memory_buffers(t->memory),t->buffer_registers.regs[1],&t->buffer);
     if (error==-EAGAIN) { retry_wait(t,RETRY_BUFFER); return; }
     t->buffer_waiting=0;
     uintptr_t address=error ? 0 : md_memory_buffer_address(t->memory,&t->buffer);
@@ -3841,7 +3883,7 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
             && r->regs[0]!=MD_BUFFER_PID_NUMBER && r->regs[0]!=MD_BUFFER_DESCRIPTOR_META && r->regs[0]!=MD_BUFFER_PIDFD_NAMESPACE
             && r->regs[0]!=MD_BUFFER_CONTROL_IOCTL_SPEC && r->regs[0]!=MD_BUFFER_CONTROL_IOCTL
             && r->regs[0]!=MD_BUFFER_NETWORK_OPEN && r->regs[0]!=MD_BUFFER_NETWORK_CALL && r->regs[0]!=MD_BUFFER_NETWORK_DATA
-            && !(r->regs[0]>=MD_BUFFER_EPOLL_BEGIN && r->regs[0]<=MD_BUFFER_EPOLL_WAIT)
+            && !(r->regs[0]>=MD_BUFFER_EPOLL_BEGIN && r->regs[0]<=MD_BUFFER_POLL_COPY)
             && r->regs[0]!=MD_FS_BUFFER_RIGHTS_BEGIN) {
         buffer_reply(t,-ENOTSUP); return;
     }
@@ -3868,6 +3910,23 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
         buffer_reply(t,-EBUSY); return;
     }
     switch (r->regs[0]) {
+    case MD_BUFFER_POLL_BEGIN:
+        if (t->phase!=DISPATCHING || t->readiness || r->regs[1] || r->regs[2]
+                || (t->original.regs[8]!=SYS_ppoll && t->original.regs[8]!=SYS_pselect6)) break;
+        readiness_begin(t,r); return;
+    case MD_BUFFER_POLL_LOAD:
+        if (t->phase!=DISPATCHING || !t->readiness || !t->readiness->poll || t->readiness->done
+                || r->regs[1] || r->regs[2]
+                || md_fd_order_state(&t->readiness->files)!=MD_RESOURCE_ORDER_RUNNING) break;
+        t->readiness->continuation=*r; readiness_poll_load(t); return;
+    case MD_BUFFER_POLL_COPY: {
+        if (!t->readiness || !t->readiness->poll || !t->readiness->done || r->regs[2]
+                || r->regs[1]>t->readiness->poll_count) break;
+        struct md_buffer_span span;
+        int error=md_buffer_span(&t->buffer,&span);
+        if (!error) error=md_poll_wait_copy(t->readiness->poll,span.data,(unsigned)r->regs[1]);
+        buffer_reply(t,error); return;
+    }
     case MD_BUFFER_EPOLL_BEGIN:
         if (t->phase!=DISPATCHING || t->readiness || r->regs[1] || r->regs[2]
                 || (t->original.regs[8]!=SYS_epoll_ctl && t->original.regs[8]!=SYS_epoll_pwait
@@ -4001,7 +4060,7 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
         TRACE("PROBE buffer-mapping pid=%d bytes=%llu result=%ld\n",t->pid,r->regs[2],result);
         break;
     case MD_BUFFER_TAKE:
-        if (t->buffer.pool || r->regs[1] || r->regs[2]) break;
+        if (t->buffer.pool || r->regs[2]) break;
         t->buffer_waiting=1; buffer_take(t);
         /* EVENT_WAIT: a task or worker releases a mapped slot. Owned process
          * cancellation ends the wait; no polling or guest retry is required. */
@@ -5126,9 +5185,28 @@ static int readiness_native_event(struct thread *t,int status) {
     long value=(long)regs.regs[0];
     int restart=value<=-512 && value>=-516;
     int waking=t->socket_waking; t->socket_waking=0;
+    TRACE("PROBE readiness-return pid=%d value=%ld waking=%d virtual=%d blocking=%d\n",
+        t->pid,value,waking,t->readiness->wait.virtual_count,t->readiness->wait.blocking);
     socket_unwatch(t);
     md_epoll_wait_cancel(&t->readiness->wait);
-    if ((restart || value==-EINTR) && !waking && !t->readiness->wait.virtual_count) {
+    if ((restart || value==-EINTR) && !waking) {
+        struct readiness_owner *o=t->readiness;
+        long ready=o->wait.virtual_count;
+        if (!ready) {
+            struct md_buffer_span span;
+            ready=md_buffer_span(&t->buffer,&span);
+            if (!ready) {
+                struct md_epoll_frame *frame=span.data;
+                ready=o->poll ? md_poll_wait_interrupted(o->poll)
+                    : md_control_epoll_collect(md_control_epoll_from_object(o->queue),frame->events,frame->capacity);
+            }
+        }
+        /* Virtual readiness may arrive alongside a guest signal. Consume it
+         * once, without inspecting task-affine native descriptors here. */
+        if (ready>0) {
+            if (shield(t)) readiness_reply(t,ready);
+            return 1;
+        }
         /* Preserve the kernel-owned temporary mask through signal delivery. */
         readiness_release(t); CHECK(!md_buffer_release(&t->buffer));
         regs=t->original; regs.regs[0]=(uint64_t)-EINTR;

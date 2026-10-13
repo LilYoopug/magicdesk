@@ -17,6 +17,8 @@ struct md_open_completion {
 };
 int md_open_device(unsigned mode, uint64_t device, int flags, struct md_open_completion *);
 int md_complete_open(int, int, struct md_open_completion);
+struct md_open_observation { uint32_t initial_reader, writers; };
+int md_complete_open_observed(int, int, struct md_open_completion, struct md_open_observation *);
 /* Reopen one retained native object; FIFO completion remains deferred. */
 int md_reopen_file(int fd, int flags, struct md_open_completion *);
 static inline int md_open_endpoint_flags(int flags) {

@@ -15,6 +15,7 @@ struct md_epoll_wait {
     int initialized;
     int task_started, virtual_count, blocking;
 };
+void md_epoll_wait_initialize(struct md_epoll_wait *,const struct md_epoll_frame *);
 /* 1 means event-driven wait on job.event; 0 publishes a result. */
 int md_epoll_wait_progress(struct md_epoll_wait *,struct md_control_epoll *,int native,
     struct md_epoll_frame *,long *result);

@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "fs_mount_internal.h"
 #include "inode_lifetime.h"
+#include "inode_fifo.h"
 #include "mount_graph.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -12,6 +13,7 @@ static void destroy(struct md_fd_object *object) {
     struct md_fs_anchor *p=(void *)object;
     close(p->fd);
     if (p->mount_pin>=0) close(p->mount_pin);
+    md_inode_fifo_release(p->fifo_custody);
     if (p->mount) atomic_fetch_sub_explicit(&p->mount->anchors,1,memory_order_relaxed);
     md_mount_namespace_release(p->view);
     md_inode_lifetime_release(p->lifetime); free(p);
@@ -19,7 +21,7 @@ static void destroy(struct md_fd_object *object) {
 static const struct md_fd_object_type type={.destroy=destroy};
 struct md_fd_object *md_fs_anchor_object(struct md_fs_anchor *p) { return p ? &p->object : NULL; }
 struct md_fs_anchor *md_fs_anchor_from_object(struct md_fd_object *p) {
-    return p && p->type==&type ? (void *)p : NULL;
+    return !p ? NULL : p->type==&type ? (void *)p : p->type->origin ? p->type->origin(p) : NULL;
 }
 struct md_fs_anchor *md_fs_anchor_retain(struct md_fs_anchor *p) {
     md_fd_object_retain(md_fs_anchor_object(p)); return p;

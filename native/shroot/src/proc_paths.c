@@ -64,6 +64,7 @@ struct md_proc_path md_proc_path_for(const char *path,int tid,int tgid) {
                 if (word(&p,"ip_unprivileged_port_start")) out.kind=MD_PROC_NET_UNPRIVILEGED_PORT;
                 else if (word(&p,"ping_group_range")) out.kind=MD_PROC_NET_PING_GROUPS;
                 else if (word(&p,"ip_local_port_range")) out.kind=MD_PROC_NET_LOCAL_PORTS;
+                else if (word(&p,"ip_forward")) out.kind=MD_PROC_NET_IPV4_FORWARD;
                 else return out;
                 out.process=tid;
                 out.tail=p; out.anchor_length=(size_t)(p-path); return out;

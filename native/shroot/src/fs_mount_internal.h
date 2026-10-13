@@ -129,6 +129,7 @@ struct md_fs_anchor {
     /* Optional native data endpoint of a logical device inode. The retained
      * path descriptor above remains authoritative for metadata and names. */
     struct md_fd_identity endpoint;
+    struct mdi_fifo_owner *fifo_custody;
 };
 int md_view_same(const struct stat *, const struct stat *);
 struct md_view_mount *md_view_root_mount(struct md_filesystem *);

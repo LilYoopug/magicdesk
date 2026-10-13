@@ -1050,8 +1050,7 @@ have no carrier FD. Concurrent captures of one open publish a single sealed
 carrier, while independent opens retain different carrier identities.
 
 `control_epoll` is a typed open-description authority and virtual-interest
-collector, currently exercised by native fixtures rather than guest syscall
-dispatch. Existing file tables, duplication, copied/shared tables and queued
+collector used by selected guest queues. Existing file tables, duplication, copied/shared tables and queued
 local message vectors retain that same authority; it has no parallel alias
 registry and retains no duplicate of the application's native epoll descriptor.
 Its constructor allocates metadata only. The first successful virtual ADD
@@ -1065,10 +1064,18 @@ bounded ready queue. Level, edge and one-shot interests share provider readiness
 exclusive and wake-lock requests return an explicit unsupported error.
 The enclosing descriptor custodian supplies confirmed OFD retirement, including
 aliases and queued transfers. Registration references alone cannot determine it.
-This model does not establish guest poll/epoll notification support or fix
-journald. Guest wait interception, shared-epoll admission and terminal custody
-are not connected to the collector. Ordinary native waits, including
-`epoll_pwait2`, use the shared kernel-call policy without supervisor stops.
+Cross-owner admission installs the selected queue's filters before activating
+virtual interests. Exclusive-table mixed epoll and selected FIFO poll/select
+reuse the task-affine native-wait owner, including signal delivery and cancellation;
+the provider helper observes only virtual wake descriptors. Poll vectors borrow
+contiguous slots from the existing mapped-buffer pool, while the file-table turn
+ends before blocking. Native-only processes retain ordinary waits, including
+`epoll_pwait2`, without supervisor stops. Shared-table epoll still uses its captured
+host collector; it does not yet have equivalent caller-context signal coverage.
+An interrupted caller-context wait collects already-ready virtual events before
+returning EINTR. Collected events are delivered once; if none exist, signal
+delivery retains the kernel-owned temporary mask without a ptrace mask rewrite.
+The [FIFO contract](fifos.md) covers initial hangup suppression and transfer.
 
 `ipc_namespace` independently owns lazy SysV semaphore/message and shared-memory
 authorities. The initial namespace is store-scoped across launches; NEWIPC has a
@@ -1425,13 +1432,19 @@ silently dropping their annotations.
 ## Namespace-Owned Sysctls
 
 `network_sysctl` supplies the managed namespace's
-`ip_unprivileged_port_start`, `ping_group_range` and `ip_local_port_range`.
+`ip_unprivileged_port_start`, `ping_group_range`, `ip_local_port_range` and
+`ip_forward`.
 Validated updates share one namespace lock, including overlapping port bounds.
 Opening captures the network owner; subsequent setns does not retarget that FD.
 Writes require CAP_NET_ADMIN in its user owner, without touching host sysctls.
 Host-network views retain native access and errors. Logical unprivileged-port
 and ephemeral-range settings also govern routed endpoint allocation. Ping group
 configuration does not imply an ICMP transport.
+Forwarding starts enabled only in the explicitly selected routed launch root.
+New/copied network namespaces default to zero. The boolean gates external
+destination selection through a different routing owner, without blocking that
+owner's own connections or intercepting data IO on established streams.
+Per-interface sysctls and netfilter remain unsupported.
 
 Mounted proc controls are selected on the filesystem worker and retain a live
 mount anchor. Readonly policy applies to future opens and already opened writers,

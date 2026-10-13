@@ -76,6 +76,31 @@ static void slots(void) {
     md_buffers_release(p);
     puts("PASS request buffers: bounded slots, exact spans, sealed size, retained ownership, stale generation and allocation-free reuse");
 }
+static void spans(void) {
+    struct md_interception_buffers *p=NULL;
+    size_t page=(size_t)getpagesize(),capacity=page+1;
+    assert(!md_buffers_create(4,capacity,64,1,&p));
+    struct md_interception_buffer wide={0},pin={0},next={0},control={0};
+    struct md_buffer_span span;
+    fail_allocation=1;
+    assert(md_buffers_take_sized(p,7*page+2,&wide)==-ENOMEM);
+    assert(!md_buffers_take_sized(p,5*page+2,&wide));
+    assert(!md_buffer_span(&wide,&span) && span.size==7*page+1);
+    memset(span.data,13,span.size);
+    struct md_interception_buffer interior=wide; ++interior.index;
+    assert(md_buffer_span(&interior,&span)==-ESTALE);
+    assert(md_buffers_take(p,&next)==-EAGAIN);
+    assert(!md_buffers_take_reserved(p,&control));
+    assert(!md_buffer_pin(&wide,&pin) && !md_buffer_release(&wide));
+    assert(md_buffers_take(p,&next)==-EAGAIN);
+    assert(!md_buffer_span(&pin,&span) && ((char *)span.data)[span.size-1]==13);
+    assert(!md_buffer_release(&pin));
+    assert(!md_buffers_take_sized(p,3*page+1,&wide));
+    assert(!md_buffers_take_sized(p,3*page+1,&next));
+    assert(!md_buffer_release(&wide) && !md_buffer_release(&next) && !md_buffer_release(&control));
+    fail_allocation=0; md_buffers_release(p);
+    puts("PASS contiguous request spans: alignment, pinning, reserve, exhaustion and allocation-free release");
+}
 static void filter_payload(void) {
     struct md_interception_buffers *pool=NULL;
     assert(!md_buffers_create(1,sizeof(union md_adapter_frame),64,1,&pool));
@@ -498,7 +523,7 @@ static void memory_access_protected_child(void) {
 int main(void) {
     alarm(30);
     unsigned before=descriptors();
-    slots(); filter_payload(); owner_lifetime(); failures(); address_spaces(); payload_reuse(); mapping_policy(); file_views(); file_view_failures();
+    slots(); spans(); filter_payload(); owner_lifetime(); failures(); address_spaces(); payload_reuse(); mapping_policy(); file_views(); file_view_failures();
     file_backing_lifetime(); memory_access_lifetime(); memory_access_capture(); memory_access_protected_child();
     assert(descriptors()==before);
     puts("PASS shared request buffer ownership");

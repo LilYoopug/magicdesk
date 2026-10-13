@@ -54,7 +54,11 @@ static unsigned selectors(const struct md_fd_object *object) {
     return f->control && f->control->poll && !(atomic_load_explicit(&f->flags,memory_order_relaxed)&O_PATH)
         ? 1U<<MD_FD_SELECTOR_EPOLL_TARGET : 0;
 }
-static const struct md_fd_object_type type={.destroy=destroy,.selectors=1U<<MD_FD_SELECTOR_PROC,.selector_mask=selectors};
+static struct md_control_file readiness(struct md_fd_object *object) {
+    return md_proc_file_control((void *)object);
+}
+static const struct md_fd_object_type type={.destroy=destroy,.selectors=1U<<MD_FD_SELECTOR_PROC,
+    .selector_mask=selectors,.readiness=readiness};
 struct md_fd_object *md_proc_file_object(struct md_proc_file *f) {
     return f ? &f->object : NULL;
 }

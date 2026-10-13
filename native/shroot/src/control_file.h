@@ -69,6 +69,9 @@ struct md_control_file_ops {
      * Negative return values are errors, never application event masks. */
     int (*poll_descriptor)(void *,int *descriptor);
     long (*poll)(void *);
+    /* True when the original application descriptor now supplies equivalent
+     * native readiness. Existing virtual epoll subscriptions remain valid. */
+    int (*poll_native)(void *);
 };
 static inline struct md_control_file md_control_file_retain(struct md_control_file f) {
     if (f.ops) f.context=f.ops->retain(f.context);

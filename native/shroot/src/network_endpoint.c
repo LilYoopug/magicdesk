@@ -169,7 +169,8 @@ int md_network_endpoint_destination(struct md_fd_object *o,const struct sockaddr
         struct md_network_interface *outgoing=md_network_route_find(n,logical.sin_addr.s_addr,NULL);
         struct md_network_namespace *owner=NULL;
         outgoing=outgoing ? attachment(n,outgoing,&owner) : NULL;
-        if (!outgoing || !owner || owner->mode!=MD_NETWORK_ROUTED) error=-ENETUNREACH;
+        if (!outgoing || !owner || owner->mode!=MD_NETWORK_ROUTED
+                || (owner!=n && !owner->ipv4_forward)) error=-ENETUNREACH;
         /* Link-local multicast and broadcast need a packet backend, not an
          * accidental submission to Android's physical network. */
         else if ((ntohl(logical.sin_addr.s_addr)>>28)==14 || logical.sin_addr.s_addr==INADDR_BROADCAST)

@@ -41,6 +41,28 @@ void test_network_endpoint(void) {
     assert(!memcmp(&logical,&internet,sizeof(internet)));
     struct sockaddr_in remote={.sin_family=AF_INET,.sin_port=htons(443),.sin_addr.s_addr=htonl(0x01010101)};
     assert(md_network_endpoint_destination(first,(void *)&remote,sizeof(remote),&logical,&length)==-ENETUNREACH);
+    unsigned bridge,inside,outside;
+    assert(!md_network_interface_add(root,MD_LINK_BRIDGE,"forward-bridge",&bridge));
+    assert(!md_network_interface_add(root,MD_LINK_VETH,"forward-out",&outside));
+    assert(!md_network_interface_add(a,MD_LINK_VETH,"forward-in",&inside));
+    struct md_network_interface *in=md_network_interface_find(a,inside,NULL);
+    struct md_network_interface *out=md_network_interface_find(root,outside,NULL);
+    in->info.flags|=IFF_UP; out->info.flags|=IFF_UP;
+    in->ipv4=htonl(0x0a580002); in->prefix=16;
+    in->peer=outside; out->peer=inside; out->master=bridge;
+    md_network_interface_find(root,bridge,NULL)->info.flags|=IFF_UP;
+    a->default_interface=inside;
+    assert(!md_network_endpoint_destination(first,(void *)&remote,sizeof(remote),&logical,&length));
+    uint32_t forward[2]={0};
+    assert(!md_network_parameter_set(root,MD_NET_IPV4_FORWARD,forward));
+    assert(md_network_endpoint_destination(first,(void *)&remote,sizeof(remote),&logical,&length)==-ENETUNREACH);
+    struct md_fd_object *host=NULL; int hostfd=-1;
+    assert(!md_network_endpoint_open(root,AF_INET,SOCK_STREAM,0,&host,&hostfd));
+    assert(!md_network_endpoint_destination(host,(void *)&remote,sizeof(remote),&logical,&length));
+    close(hostfd); md_fd_object_release(host);
+    forward[0]=1;
+    assert(!md_network_parameter_set(root,MD_NET_IPV4_FORWARD,forward));
+    assert(!md_network_endpoint_destination(first,(void *)&remote,sizeof(remote),&logical,&length));
     /* Retaining provenance does not retain the application's OFD. */
     close(f); close(s); close(c);
     assert(fcntl(f,F_GETFD)==-1 && errno==EBADF);

@@ -9,6 +9,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+struct open_result { int error; struct md_open_observation observation; };
+
 static int isolate_proc(const unsigned *keep, unsigned count) {
     long directory=RAW4(openat,AT_FDCWD,"/proc/self/fd",O_RDONLY|O_DIRECTORY|O_CLOEXEC,0);
     if (directory<0) return (int)directory;
@@ -69,12 +71,13 @@ int md_open_job_start(struct md_open_job *job, int pin, int flags, struct md_ope
         long r=RAW2(prctl,PR_SET_PDEATHSIG,SIGKILL);
         if (!r && RAW0(getppid)!=parent) r=-ECANCELED;
         if (!r) r=isolate(pin,completion.kind==MD_OPEN_PIPE ? completion.control : -1,pair[1]);
-        if (!r) r=md_complete_open(pin,flags|O_CLOEXEC,completion);
+        struct open_result result={0};
+        if (!r) r=md_complete_open_observed(pin,flags|O_CLOEXEC,completion,&result.observation);
         struct md_fs_rights rights={0};
-        int error=r<0 ? (int)r : 0;
-        if (!error) { rights.count=1; rights.fd[0]=(int)r; }
-        long sent=md_fs_send(pair[1],&error,sizeof(error),&rights);
-        RAW1(exit_group,sent==sizeof(error) ? 0 : 125);
+        result.error=r<0 ? (int)r : 0;
+        if (!result.error) { rights.count=1; rights.fd[0]=(int)r; }
+        long sent=md_fs_send(pair[1],&result,sizeof(result),&rights);
+        RAW1(exit_group,sent==sizeof(result) ? 0 : 125);
         __builtin_unreachable();
     }
     int error=child<0 ? -errno : 0;
@@ -90,18 +93,19 @@ int md_open_job_cancel(struct md_open_job *job) {
     close(job->channel); job->channel=-1;
     return 0;
 }
-int md_open_job_finish(struct md_open_job *job, int status) {
+int md_open_job_finish(struct md_open_job *job, int status,struct md_open_observation *observation) {
     if (!job || !job->pid || (!WIFEXITED(status) && !WIFSIGNALED(status))) return -EINVAL;
     int result=-ECANCELED;
     if (!job->cancelled) {
         struct md_fs_rights rights={0};
-        int error=0;
-        long received=md_fs_receive(job->channel,&error,sizeof(error),&rights);
+        struct open_result reply={0};
+        long received=md_fs_receive(job->channel,&reply,sizeof(reply),&rights);
         if (!WIFEXITED(status) || WEXITSTATUS(status)) result=-EIO;
-        else if (received!=sizeof(error) || error>0 || error < -4095
-                || rights.count!=(unsigned)!error) result=-EPROTO;
-        else if (error) result=error;
-        else { result=rights.fd[0]; rights.count=0; }
+        else if (received!=sizeof(reply) || reply.error>0 || reply.error < -4095
+                || reply.observation.initial_reader>1
+                || rights.count!=(unsigned)!reply.error) result=-EPROTO;
+        else if (reply.error) result=reply.error;
+        else { result=rights.fd[0]; rights.count=0; if (observation) *observation=reply.observation; }
         md_fs_close_rights(&rights); close(job->channel);
     }
     *job=(struct md_open_job){0}; return result;

@@ -3,6 +3,7 @@
 #include "fs_mount_internal.h"
 #include "inode_internal.h"
 #include "inode_custody.h"
+#include "inode_fifo.h"
 #include "mount_graph.h"
 #include "sealed_manifest.h"
 #include "fd_receipt.h"
@@ -12,10 +13,10 @@
 #include <string.h>
 #include <unistd.h>
 
-enum { MAGIC=0x4d444f56U, VERSION=5, MAX=MD_FD_RECEIPT_MAX };
+enum { MAGIC=0x4d444f56U, VERSION=6, MAX=MD_FD_RECEIPT_MAX };
 struct span { uint32_t start, count; struct md_fd_identity identity; };
 struct origin { uint32_t view, owner, mount, descriptor; struct md_fd_identity identity; uint64_t generation;
-    struct md_fd_identity endpoint; };
+    struct md_fd_identity endpoint; char fifo_channel[32]; };
 struct manifest {
     uint32_t magic, version, count, origins, views, owners, rights, reserved;
     struct md_fd_message_route route;
@@ -24,7 +25,7 @@ struct manifest {
     struct origin origin[MAX];
     struct span view[MAX], owner[MAX];
 };
-_Static_assert(sizeof(struct span)==24 && sizeof(struct origin)==56, "origin wire records");
+_Static_assert(sizeof(struct span)==24 && sizeof(struct origin)==88, "origin wire records");
 _Static_assert(offsetof(struct manifest,index)==136, "origin wire header");
 struct cached_view {
     struct cached_view *next;
@@ -90,6 +91,17 @@ static int path_identity(int fd, struct md_fd_identity *out) {
     if (!(flags&O_PATH)) return -EPROTO;
     return identity(fd,out);
 }
+static int fifo_channel(const struct md_fs_anchor *a,char channel[32]) {
+    struct stat st;
+    if (fstat(a->fd,&st)) return -errno;
+    if (!S_ISFIFO(st.st_mode)) return 0;
+    struct md_inode_store *store=NULL;
+    int r=md_inode_store_reconnect(a->lifetime,&store);
+    char id[33]={0};
+    if (!r) r=md_inode_fifo_channel(store,a->fd,id);
+    if (!r) memcpy(channel,id,32);
+    md_inode_store_close(store); return r;
+}
 static unsigned view_slot(const struct md_fs_anchor *a) {
     if (md_view_base(a->view,a->mount)) return 0;
     if (a->view->tree) for (unsigned i=0;i<a->view->tree->count;++i)
@@ -135,6 +147,8 @@ int md_fs_origin_export_entries(const struct md_fd_message *message, struct md_f
         struct origin *o=&data.origin[n];
         o->identity=(struct md_fd_identity){a->device,a->inode}; o->mount=view_slot(a);
         o->endpoint=a->endpoint;
+        r=fifo_channel(a,o->fifo_channel);
+        if (r) return r;
         o->generation=a->mount->generation;
         if (o->mount==UINT_MAX) return -ESTALE;
         unsigned v=0; while (v<data.views && views[v]!=a->view) ++v;
@@ -344,6 +358,13 @@ static int import(struct md_fs_origin_imports *s, const struct md_fd_message_rou
         take(p,o->descriptor);
         take(p,o->descriptor+1);
         anchors[i]=a;
+        if (o->fifo_channel[0]) {
+            char channel[33]={0}; memcpy(channel,o->fifo_channel,32);
+            r=md_inode_fifo_adopt(a->lifetime,channel,a->fd,&a->fifo_custody);
+        } else {
+            for (unsigned j=1;j<sizeof(o->fifo_channel);++j)
+                if (o->fifo_channel[j]) { r=-EPROTO; break; }
+        }
     }
     if (!r) {
         for (unsigned i=0;i<m.count;++i) if (m.index[i]) v->entries[i]=md_fs_anchor_retain(anchors[m.index[i]-1]);

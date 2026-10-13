@@ -29,6 +29,7 @@ int md_network_parameter_get(struct md_network_namespace *n,enum md_network_para
     case MD_NET_UNPRIVILEGED_PORT: out[0]=n->unprivileged_port; out[1]=0; break;
     case MD_NET_PING_GROUPS: memcpy(out,n->ping_groups,sizeof(n->ping_groups)); break;
     case MD_NET_LOCAL_PORTS: memcpy(out,n->local_ports,sizeof(n->local_ports)); break;
+    case MD_NET_IPV4_FORWARD: out[0]=n->ipv4_forward; out[1]=0; break;
     default: error=-EINVAL;
     }
     pthread_mutex_unlock(&n->fabric->lock); return error;
@@ -50,6 +51,10 @@ int md_network_parameter_set(struct md_network_namespace *n,enum md_network_para
     case MD_NET_LOCAL_PORTS:
         if (!in[0] || in[0]>in[1] || in[1]>65535 || in[0]<n->unprivileged_port) error=-EINVAL;
         else memcpy(n->local_ports,in,sizeof(n->local_ports));
+        break;
+    case MD_NET_IPV4_FORWARD:
+        if (in[0]>1) error=-EINVAL;
+        else n->ipv4_forward=in[0];
         break;
     default: error=-EINVAL;
     }

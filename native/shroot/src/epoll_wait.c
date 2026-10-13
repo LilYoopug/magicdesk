@@ -9,7 +9,7 @@ static int native_collect(int fd,struct epoll_event *out,int count) {
     int result=epoll_wait(fd,out,count,0);
     return result<0 ? -errno : result;
 }
-static void initialize(struct md_epoll_wait *w,const struct md_epoll_frame *frame) {
+void md_epoll_wait_initialize(struct md_epoll_wait *w,const struct md_epoll_frame *frame) {
     if (w->initialized) return;
     w->initialized=1; w->deadline=INT64_MAX;
     if (frame->timed) {
@@ -24,7 +24,7 @@ int md_epoll_wait_progress(struct md_epoll_wait *w,struct md_control_epoll *q,in
         long result=md_ipc_io_job_finish(&w->job,0);
         if (result<0) { *out=result; return 0; }
     }
-    initialize(w,frame);
+    md_epoll_wait_initialize(w,frame);
     int capacity=frame->capacity;
     if (capacity<=0 || capacity>MD_EPOLL_EVENTS) { *out=-EINVAL; return 0; }
     int virtual_first=md_control_epoll_turn(q);
@@ -50,7 +50,7 @@ void md_epoll_wait_cancel(struct md_epoll_wait *w) {
 int md_epoll_wait_task(struct md_epoll_wait *w,struct md_control_epoll *q,
         struct md_epoll_frame *frame,uintptr_t address,long number,int descriptor,
         int completed,long native_result,struct md_task_call_arguments *call,long *out) {
-    initialize(w,frame);
+    md_epoll_wait_initialize(w,frame);
     int capacity=frame->capacity;
     if (capacity<=0 || capacity>MD_EPOLL_EVENTS) { *out=-EINVAL; return 0; }
     if (completed) {

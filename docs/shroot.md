@@ -202,6 +202,13 @@ table. A short-lived supervisor child completes the blocking open without holdin
 the filesystem worker or table turns. It closes unrelated inherited descriptors,
 returns one endpoint and is reaped through the existing SIGCHLD loop. Cancellation
 kills the exact child and releases queued results; ordinary files create no child.
+Initially unpaired nonblocking FIFO readers use a typed readiness description
+to suppress premature hangup. Mixed poll/select leaves native descriptors in the
+calling guest thread, preserving signalfd and temporary signal masks. Dup, fork,
+exec and portable transfer retain the writer-generation baseline; received
+origins reacquire channel custody without retaining a reader/writer or SQLite
+connection. The [FIFO contract](../native/shroot/fifos.md) records queued-name
+rendezvous and raw interrupted-timeout limits separately from data IO.
 Guest-root changes retain the CLONE_FS turn through worker publication.
 The guest adapter has no filesystem RPC client; native host clients retain RPC
 for their own engine access. Other temporary adapter descriptors still require
@@ -974,11 +981,14 @@ facilities and network hooks remain unsupported. Arbitrary unattached
 native roots remain unsupported. See the
 [process resource contract](../native/shroot/process-resources.md).
 
-Logical IPv4 sysctls for unprivileged ports, ping groups and local port ranges
+Logical IPv4 sysctls for unprivileged ports, ping groups, local port ranges and forwarding
 belong to the selected network namespace. Their ordinary proc IO uses the shared
 typed descriptor transport, with namespace authority, retained mount policy and
 explicit unsupported operations. These settings do not implement packet transport
-or change Android's network settings. Namespace-mounted proc omits host-global
+or change Android's network settings. `ip_forward` governs new external
+connections routed through that namespace; it does not revoke existing native
+streams. The explicit routed launch starts with forwarding enabled, while new
+child namespaces start with it disabled. Namespace-mounted proc omits host-global
 `sysrq-trigger`, `kcore`, `kmsg` and `keys`, which have no guest provider.
 
 Logical sysfs mounts retain their opening network namespace. The offline view

@@ -136,8 +136,8 @@ struct md_fd_object *md_fd_origins_object(struct md_fd_origins *t, int fd, unsig
 }
 struct md_fs_anchor *md_fd_origins_get(struct md_fd_origins *t, int fd, unsigned *flags) {
     struct md_fd_object *object=md_fd_origins_object(t,fd,flags);
-    struct md_fs_anchor *anchor=md_fs_anchor_from_object(object);
-    if (!anchor) md_fd_object_release(object);
+    struct md_fs_anchor *anchor=md_fs_anchor_retain(md_fs_anchor_from_object(object));
+    md_fd_object_release(object);
     return anchor;
 }
 int md_fd_origins_capture(struct md_fd_origins *t, const int *fds, unsigned count,

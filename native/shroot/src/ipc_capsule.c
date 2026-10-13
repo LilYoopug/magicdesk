@@ -4,6 +4,7 @@
 #include "fd_bundle.h"
 #include "fs_origin_transfer.h"
 #include "descriptor_inode.h"
+#include "fifo_description.h"
 #include "descriptor_parcel.h"
 #include "fs_wire.h"
 #include <errno.h>
@@ -113,6 +114,7 @@ int md_ipc_capsules_publish(struct md_ipc_capsules *s, const struct md_ipc_bindi
     for (unsigned i=0;!error && i<count;++i) {
         if (fds[i]<0) error=-EBADF;
         else if (origins[i]) {
+            if (md_fifo_description_is(origins[i])) anonymous=1;
             struct md_fs_anchor *anchor=md_fs_anchor_from_object(origins[i]);
             if (anchor) {
                 error=md_fs_anchor_check_fd(anchor,fds[i]);

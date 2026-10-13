@@ -27,6 +27,9 @@ size_t md_buffers_size(const struct md_interception_buffers *);
  * Acquisition clears its declared header prefix, never unused payload pages;
  * callers initialize all published payload bytes. No per-request allocation or mmap. */
 int md_buffers_take(struct md_interception_buffers *, struct md_interception_buffer *);
+/* A contiguous loan from the same mapping, with the same cancellation/pinning
+ * lifetime. Requests larger than ordinary capacity return ENOMEM. */
+int md_buffers_take_sized(struct md_interception_buffers *, size_t, struct md_interception_buffer *);
 /* Separate control capacity within the same backing/mapping. These loans must
  * not wait on ordinary IO/resource turns while held. Payload is not cleared:
  * the control owner publishes its initialized bytes before resuming the task. */
