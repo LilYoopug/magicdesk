@@ -5,6 +5,14 @@ filesystem or mount namespace**. It represents shared-inode links under the
 shell SELinux hard-link restriction without copying data, claiming host links,
 changing identity or special-casing dpkg.
 
+- [Ownership](#ownership)
+- [Paths And Directories](#paths-and-directories)
+- [Directory Cursors](#directory-cursors)
+- [Offline Import](#offline-import)
+- [Transactions](#transactions)
+- [Checks](#checks)
+- [Limits](#limits)
+
 ## Ownership
 
 Each object has a current ordinary native file, empty directory or symlink backing.

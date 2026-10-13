@@ -106,7 +106,7 @@ No SQLite transaction or file-table turn may span an application readiness wait.
 Mixed poll/epoll keeps native waiting in the calling guest's signal context.
 
 The [inode store](inode-store.md), [filesystem service](filesystem-service.md),
-[descriptor contracts](process-resources.md#descriptor-and-cwd-annotations) and
+[descriptor contracts](descriptor-origins.md#descriptor-and-cwd-annotations) and
 [ancillary transport](ipc-credentials.md#application-ancillary-transport) specify
 cache validity, publication, cross-launch custody and output-fault limits.
 

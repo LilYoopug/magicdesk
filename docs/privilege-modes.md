@@ -4,6 +4,16 @@ The APK baseline is Android 14; managed Desktop requires Android 15. Ordinary
 UI, shared services, Desktop ownership and client authorization are separate
 boundaries. A missing Desktop capability does not disable an independent tool.
 
+- [Identities And Prerequisites](#identities-and-prerequisites)
+- [Shell Service](#shell-service)
+- [Content And Launch Authorization](#content-and-launch-authorization)
+- [Appearance Resources](#appearance-resources)
+- [Input And HOME Ownership](#input-and-home-ownership)
+- [MCP Access](#mcp-access)
+- [Persistent Setup Versus Session State](#persistent-setup-versus-session-state)
+- [Optional Phone Power And Hardware](#optional-phone-power-and-hardware)
+- [Artifact Trust](#artifact-trust)
+
 ## Identities And Prerequisites
 
 | Boundary | Identity and authority |

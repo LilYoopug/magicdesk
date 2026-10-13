@@ -6,6 +6,12 @@ operations, selected watch reads and the image-entry protocol. It never attaches
 The guest retains the selected real UID; neither the supervisor nor the filesystem
 service changes SELinux policy or acquires root.
 
+- [Execution And State](#execution-and-state)
+- [Guest Kernel Interfaces](#guest-kernel-interfaces)
+- [Protected Metadata](#protected-metadata)
+- [Image Admission And Logical Credentials](#image-admission-and-logical-credentials)
+- [Lifetimes And Availability](#lifetimes-and-availability)
+
 ## Execution And State
 
 The bootstrap publishes a private, size-checked ABI containing its gate addresses
@@ -289,7 +295,7 @@ the file-table turn. A killed call may retain either ABI spelling of AT_FDCWD;
 neither is an installed FD. Unrecognized terminal state remains unknown. This
 adds one option update on first capture and an exit event for participating
 tasks, not additional per-IO stops or cleanup injection into a dying task.
-See [publication ordering](process-resources.md#publication-ordering) for lifetime
+See [publication ordering](descriptor-origins.md#publication-ordering) for lifetime
 rules, inherited/native provenance limits and adapted SCM_RIGHTS origin transport.
 Directory reads validate and enumerate through one namespace operation without a
 preliminary metadata RPC. A reusable 64 KiB worker buffer bounds output independently
@@ -404,7 +410,7 @@ guest DAC and path selection, not seccomp-domain confinement.
 The proc-root model handles the restricted self/fd or fdinfo roots used by the
 tested helper, with CLONE_FS ownership and irreversible narrowing. Ordinary
 inode-backed guest chroot uses the same resource owner and the filesystem engine;
-its limits are in [process resources](process-resources.md#guest-roots).
+its limits are in [process resources](mount-views.md#guest-roots).
 Neither chroot mechanism creates a mount namespace. Guest `CLONE_NEWNS` separately
 copies the worker-owned mount view and FS context before publication; it does
 not create a host kernel namespace or change the selected Android identity.

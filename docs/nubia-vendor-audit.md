@@ -19,6 +19,17 @@ implements it, and what enables it. A successful run with a compatibility
 option enabled does not prove that the option is necessary. Source inspection
 of one firmware does not establish behavior on every Nubia device.
 
+- [Firmware Scope](#firmware-scope)
+- [Selection And Ownership](#selection-and-ownership)
+- [Active Vendor Interfaces](#active-vendor-interfaces)
+- [Desktop Provisioning](#desktop-provisioning)
+- [Input](#input)
+- [Physical Output And Caption Control](#physical-output-and-caption-control)
+- [Phone Screen Power](#phone-screen-power)
+- [Stock Cooling Policy](#stock-cooling-policy)
+- [Optional Integrations](#optional-integrations)
+- [Diagnostics And Debug Probe](#diagnostics-and-debug-probe)
+
 ## Firmware Scope
 
 The maintainer device is RedMagic 11 Pro, `NX809J`, Android 16 / API 36,
@@ -276,7 +287,7 @@ on the maintainer firmware and the community Z80 profile. A stable permission
 denial is cached and appears as a diagnostic observation. Fallback selection
 uses the independently owned Qualcomm `SocDisplayModeBackend`, then Android
 display modes. Qualcomm Binder behavior is SoC-specific, not a Nubia API.
-Production does not require root. See [Output Timing](architecture.md#output-timing).
+Production does not require root. See [Output Timing](architecture-displays.md#output-timing).
 
 The vendor compositor uses option `1100` for wireless privacy and `1102` for
 wired privacy. On the inspected firmware, value `1` hides external layers

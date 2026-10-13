@@ -80,6 +80,17 @@ and is not part of theme JSON or bundles.
 The phone touchpad keeps a black input surface and high-contrast toolbar,
 independently of shell themes; its help panel uses the normal dialog palette.
 
+- [Ownership And Scope](#ownership-and-scope)
+- [Document](#document)
+- [Backdrops](#backdrops)
+- [Palette Sources](#palette-sources)
+- [Control Styles](#control-styles)
+- [Panels And Components](#panels-and-components)
+- [Resources](#resources)
+- [Feedback And Motion](#feedback-and-motion)
+- [Tool Layouts](#tool-layouts)
+- [Automation](#automation)
+
 ## Ownership And Scope
 
 `ShellAppearance` is an immutable density-independent model: semantic palette,

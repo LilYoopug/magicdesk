@@ -80,6 +80,12 @@ kernels, 16 KiB pages and actual root execution. Installer GUI/Turnip recipes
 also need separate validation for each distribution/toolchain; a recipe's
 presence is not a passed desktop or GPU test.
 
+- [ ] Complete [installer acceptance](../native/guest-exec-lab/README.md#installer-acceptance)
+  with the packaged APK and default environment library: download the script,
+  configure it interactively, install, Refresh Apps, search in Start and launch.
+  Cover individual applications and whole desktops separately. Test-library
+  or staged-helper success must not substitute for this path.
+
 Run these without Desktop; managed Desktop self-tests cannot prove isolation:
 
 - [ ] On actual API 34, verify cold app/MCP startup and early Desktop/self-test

@@ -6,6 +6,14 @@ directories opened in built-in Files. It supports a bounded subset of the
 for folder links, web links, Android applications, Android-shell commands,
 Termux commands and Linux launch recipes.
 
+- [Command entries](#command-entries)
+- [Recent Launches](#recent-launches)
+- [Execution Status](#execution-status)
+- [Android applications](#android-applications)
+- [Android Launcher Exports](#android-launcher-exports)
+- [Window modes](#window-modes)
+- [Launch precedence](#launch-precedence)
+
 ## Command entries
 
 The smallest executable entry is:

@@ -1,5 +1,14 @@
 # Fullscreen transitions
 
+- [Workspace Boundaries](#workspace-boundaries)
+- [System HOME Instances](#system-home-instances)
+- [Fullscreen Transactions](#fullscreen-transactions)
+- [Native Caption Maximize](#native-caption-maximize)
+- [Submission Constraints](#submission-constraints)
+- [Window transition ownership](#window-transition-ownership)
+- [Activate and demote](#activate-and-demote)
+- [Constraints](#constraints)
+
 ## Workspace Boundaries
 
 Each logical display has its own workspace, task observer, transition gateway
@@ -11,7 +20,7 @@ Unassigned HOME displays use the shared ordinary Start host without a Desktop
 observer. The last workspace releases HOME. An optional viewer can present an
 owned virtual workspace on another display. Switching or detaching that viewer
 does not change task ownership or these workspace bindings; see
-[Display presentations](architecture.md#display-presentations).
+[Display presentations](architecture-displays.md#display-presentations).
 
 ## System HOME Instances
 

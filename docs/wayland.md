@@ -1,5 +1,13 @@
 # Embedded Wayland Runtime
 
+- [Overview](#overview)
+- [Boundaries](#boundaries)
+- [Host Interaction](#host-interaction)
+- [Native Shell Surfaces](#native-shell-surfaces)
+- [Session Controls](#session-controls)
+- [Build](#build)
+- [Verification](#verification)
+
 ## Overview
 
 The `wayland-runtime` module supplies the embedded per-toplevel compositor and

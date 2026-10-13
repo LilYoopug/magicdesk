@@ -107,7 +107,9 @@ Chromium's three-profile JavaScript/PNG workflows establish execution, not
 arbitrary browsing, network/GPU compatibility or confinement.
 
 Protected metadata uses task-affine descriptor export, notification ADDFD and
-original-site replay without relaxing dumpability. A second tracer cannot attach.
+original-site replay without relaxing dumpability. A second native kernel tracer
+cannot attach; guest GDB/strace use the supervisor's
+[virtual debugging contract](../../shroot/debugging.md).
 The logical proc-root restriction is not general chroot. Interpreter/library
 admission, mapped-code protection, full descriptor/root confinement and
 domain-authenticated filesystem authorization remain unverified or incomplete.

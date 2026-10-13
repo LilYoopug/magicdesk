@@ -28,7 +28,7 @@ delivery cleanup, including identity, filesystem owner, root, cwd origin, mount
 view and file-table handle. Dispatch does not repeat the task lookup. The worker
 borrows the captured view during execution; it cannot substitute its initial
 attachments when a task has no view. Task lifetime and sharing follow
-[process resources](process-resources.md#mount-views), independently of SQLite
+[process resources](mount-views.md#mount-views), independently of SQLite
 connection ownership.
 
 `namespace.c` is the freestanding syscall adapter. `namespace_proc.c` owns
@@ -73,7 +73,7 @@ its separate provenance requirements.
   attachment. The authenticated task snapshot supplies its mount view and root
   to this same walker as a mount/object location. Absolute paths/symlinks, `..` and getcwd
   share that selection; existing cwd and descriptors are retained. See
-  [process resources](process-resources.md#guest-roots) for inheritance and limits.
+  [process resources](mount-views.md#guest-roots) for inheritance and limits.
 - fstat/newfstatat/statx publish namespace link counts and logical owners/modes
   with native data attributes.
   Directory read/seek uses the shared open-file-description cursor. Host pipe,

@@ -1,5 +1,14 @@
 # Shell Layout
 
+- [Ownership](#ownership)
+- [Model](#model)
+- [Reservations](#reservations)
+- [Android Adapter](#android-adapter)
+- [Application-Relative Surfaces](#application-relative-surfaces)
+- [Protocol Adapters](#protocol-adapters)
+- [Workspace Tasks](#workspace-tasks)
+- [Verification](#verification)
+
 ## Ownership
 
 `ShellLayout` is a protocol-neutral geometry owner for one Desktop workspace or

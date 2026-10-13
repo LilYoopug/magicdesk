@@ -144,6 +144,11 @@ default pacman sandbox uses Shroot's Landlock filesystem policy, independently
 of host kernel Landlock availability. Missing operations are not bypassed by
 silently disabling sandboxes.
 
+Desktop launcher names include the distribution's `NAME` from `/etc/os-release`
+(or `ID` when absent). MagicDesk adds the independent environment name, for
+example `Alpine Linux - Xfce Desktop (work)`. Resume refreshes installer-owned
+desktop entries; distribution and user-provided entries remain unchanged.
+
 Every GUI profile installs PipeWire/Pulse client support, the ALSA plugin,
 SDL2, libudev and Wayland window decorations. Android audio and gamepads are
 provided by the shared Shroot launch services, without raw host input-device
@@ -202,6 +207,18 @@ profile is added or rewrite distribution/user launchers. After an
 interrupted image installation, inspect `shroot list` before choosing a
 new installation or resuming. A package failure leaves the environment available
 for diagnosis and retry.
+
+New installs validate DNS with the other settings, before final confirmation
+or image work. The interactive installer explains an unavailable
+policy and asks for a replacement; invalid addresses repeat only the DNS question.
+The default response cancels. With `--yes`, failure stops before image downloads
+and setup. `shroot dns --check system|preserve|IP[,IP...]` uses the same validation
+without changing a resolver; it does not test server reachability.
+
+If package setup fails, the interactive installer offers retry, changing DNS
+and retrying, or cancellation. It retains the installed environment and all
+other choices. An unattended `--yes` run stops with the original failure code
+and a resume hint. A package error is not automatically classified as DNS failure.
 
 New installs default to system DNS. Private DNS/VPN requires an explicit
 `--dns IP[,IP...]` choice or a prepared image resolver with `--dns preserve`;
@@ -542,10 +559,19 @@ Import and backup need no execution probe; launching does. See
 #### Apps, terminals and automation
 
 Start, the shortcut editor and the terminal environment picker use the same
-catalog as the CLI. Refresh Apps after changing installed packages; discovery
+default-library catalog as an ordinary Shell CLI invocation. An explicit
+`MAGICDESK_GUEST_HOME` selects another library for that command; it does not
+register that library with Android's application catalog. Use the default library
+for applications intended to appear in Start.
+
+Refresh Apps after changing installed packages; discovery
 does not run guest programs or refresh on every menu opening. Identities include
 the immutable environment ID, so identically named apps remain independent.
 Artwork uses the shared asynchronous icon service.
+
+Installer-owned `.desktop` entries live inside the environment's
+`/usr/local/share/applications`; they are not separately copied Android Desktop
+shortcuts. A whole-desktop recipe and an `apps` recipe publish different launchers.
 
 Terminal, X11 and Wayland entries share launch recipes and optional user
 selection. An empty terminal command opens a login shell. XKB is resolved from
@@ -581,7 +607,7 @@ views, not Android's init system. Starting `/sbin/init` in an ordinary applicati
 shell is not an equivalent setup.
 
 See the [init matrix](../native/guest-exec-lab/init-matrix.md) and
-[init fixtures](../native/guest-exec-lab/README.md#namespace-clients) for setup
+[init fixtures](../native/guest-exec-lab/namespaces.md#namespace-clients) for setup
 and exact assertions. Kernel-module loading and unavailable hardware services
 need container-appropriate configuration; Debian/openKylin default-target checks
 explicitly drop `CAP_SYS_MODULE`. SteamOS's default boot remains degraded on
@@ -615,7 +641,7 @@ This is not full network isolation. Backing ports remain reachable, inherited
 native descriptors retain access, and IPv6, raw packets, packet counters,
 multicast/broadcast and device-bound sockets are unsupported. Routed `recvmmsg`
 and packet ancillary metadata also have explicit limits. See
-[network contracts](../native/shroot/process-resources.md#network-namespaces).
+[network contracts](../native/shroot/networking.md#network-namespaces).
 
 ### Docker Engine
 
@@ -659,7 +685,7 @@ The [Podman fixture](../native/guest-exec-lab/probe_podman_runtime.py) runs insi
 a routed Shroot launch. No `--network host` bypass or Podman-specific runtime
 branch supplies bridge connectivity. This does not certify arbitrary nftables
 rules or general rootless-Podman configurations; supported operations and flow
-semantics are described in the [network contracts](../native/shroot/process-resources.md#nftables-and-flow-forwarding).
+semantics are described in the [network contracts](../native/shroot/networking.md#nftables-and-flow-forwarding).
 
 For both engines, guest root is still real Android UID 2000. Enabled cgroups
 provide logical membership and permissive settings, not enforced resource or
@@ -833,19 +859,19 @@ application, init or isolation test.
 | --- | --- | --- |
 | ELF and libc | Debian glibc, Alpine musl, static PIE/ET_EXEC, raw SVC, threads, signals, fork/vfork and exec | [Runtime fixtures](../native/guest-exec-lab/README.md#prepared-runtime-fixtures) |
 | Files and IPC | Hardlinks, copy-on-write, overlays, watches, FIFOs, shared memory, SysV IPC and authenticated D-Bus | [Native contracts](../native/shroot/README.md#contracts) include failure and lifetime checks |
-| Packages and development | APT, APK, DNF, pacman; accounts, compiler builds, Git/SSH, npm and Python environments | [Packages](../native/guest-exec-lab/README.md#distribution-packages-and-applications) and [developer workflows](../native/guest-exec-lab/README.md#developer-workflows) |
+| Packages and development | APT, APK, DNF, pacman; accounts, compiler builds, Git/SSH, npm and Python environments | [Packages](../native/guest-exec-lab/desktop-workflows.md#distribution-packages-and-applications) and [developer workflows](../native/guest-exec-lab/developer-workflows.md#developer-workflows) |
 | Systemd managers | Debian 257, Ubuntu 255, Fedora 259, Arch 262 and SteamOS; system/user managers and service activation | Focused targets are distinct from default-target boot |
 | Distribution boot | Ubuntu, Fedora, Arch, openSUSE, Deepin and Manjaro default targets; Debian/openKylin with explicit module-capability drop | [Init matrix](../native/guest-exec-lab/init-matrix.md); SteamOS hardware units remain degraded |
 | OpenRC and runit | Alpine PID 1, default runlevel and restart/stop; Void/Armtix stock stages and supervised services | Userspace service lifecycle, not complete hardware initialization |
 | Docker Engine | Docker 26.1.5, containerd 1.7.24, runc 1.1.15; VFS/overlay2, TCP/UDP publishing and outbound/peer traffic | [Required daemon configuration](#docker-engine), not the default firewall backend |
 | Podman | Podman 5.8.7, crun 1.28, conmon 2.2.1; overlay, nftables bridge, TCP/UDP publication, DNS/HTTP, named peers and cleanup | [Routed launch and inherited limits](#podman); cgroups and application seccomp enabled |
 | Browser sandboxes | Stock Chromium JavaScript/DOM/PNG with installed filters, Firefox screenshot, Electron/VS Code workflow | [Browser contract](#application-filters-and-browsers), not complete security isolation |
-| Landlock and Bubblewrap | Positive/negative filesystem access, stacked domains and inheritance; pacman, Glycin and stock Bubblewrap workflows | [Filesystem policy](#filesystem-restrictions) and [namespace fixtures](../native/guest-exec-lab/README.md#namespace-clients) |
+| Landlock and Bubblewrap | Positive/negative filesystem access, stacked domains and inheritance; pacman, Glycin and stock Bubblewrap workflows | [Filesystem policy](#filesystem-restrictions) and [namespace fixtures](../native/guest-exec-lab/namespaces.md#namespace-clients) |
 | Debugging | GDB/LLDB breakpoints, stepping and locals; attach/seize, gdbserver and strace workflows | [Same-launch ownership and request limits](../native/shroot/debugging.md) |
-| GUI and content | Debian/Ubuntu/Alpine editors through X11 and Wayland, input, clipboard, save/readback and actual process exit; GIMP and LibreOffice checks | [Application fixtures](../native/guest-exec-lab/README.md#distribution-packages-and-applications) |
+| GUI and content | Debian/Ubuntu/Alpine editors through X11 and Wayland, input, clipboard, save/readback and actual process exit; GIMP and LibreOffice checks | [Application fixtures](../native/guest-exec-lab/desktop-workflows.md#distribution-packages-and-applications) |
 | Desktops | Xfce in a retained X11 viewer, Weston, Plasma; Fedora GNOME devkit with private services | GNOME is llvmpipe/devkit coverage, not GDM login or GPU certification |
-| GPU | Turnip Vulkan on Adreno 840 through X11/Wayland, GTK GLArea, X11 Blender, private KWin Wayland composition | [GPU fixtures](../native/guest-exec-lab/README.md#linux-gpu-fixture) and [installer profiles](#graphics-drivers) |
-| SteamOS | Nested Plasma, Steam client and selected FEX game workflows; private-memory/JIT and audio-continuity checks | [Steam fixtures](../native/guest-exec-lab/README.md#holo-arm64-userspace); not arbitrary game compatibility |
+| GPU | Turnip Vulkan on Adreno 840 through X11/Wayland, GTK GLArea, X11 Blender, private KWin Wayland composition | [GPU fixtures](../native/guest-exec-lab/desktop-workflows.md#linux-gpu-fixture) and [installer profiles](#graphics-drivers) |
+| SteamOS | Nested Plasma, Steam client and selected FEX game workflows; private-memory/JIT and audio-continuity checks | [Steam fixtures](../native/guest-exec-lab/desktop-workflows.md#holo-arm64-userspace); not arbitrary game compatibility |
 | Application integration | Concurrent named environments, catalog identities/icons, retained PTY, CLI/MCP cancellation, file helpers, backup/restore and interrupted publication | [Environment workflows](../native/guest-exec-lab/README.md#named-environment-workflows); no Desktop required |
 
 ### Known workflow limits

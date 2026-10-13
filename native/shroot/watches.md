@@ -155,7 +155,7 @@ launch modifies the open document; Mousepad notifies and reloads the exact text.
 Thunar observes an externally created file, renames its visible selection, and
 returns to the parent when the viewed directory moves. Independent readback and
 zero process exit are required. This is not arbitrary GUI certification.
-See [fixture commands](../guest-exec-lab/README.md#production-watch-checks).
+See [fixture commands](../guest-exec-lab/filesystem-workflows.md#production-watch-checks).
 
 ## Limits
 

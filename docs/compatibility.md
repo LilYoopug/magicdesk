@@ -136,6 +136,14 @@ the framework's standard display-0 desktop path on some ROMs, while vendor or
 shell windowing paths can remain usable. The phone self-test is the behavioral
 source of truth; simulated and secondary-display support is unaffected.
 
+- [Support levels](#support-levels)
+- [Tested firmware](#tested-firmware)
+- [Known Limitations](#known-limitations)
+- [Error behavior](#error-behavior)
+- [Creating a report](#creating-a-report)
+- [Onboarding a new firmware](#onboarding-a-new-firmware)
+- [Useful issue boundaries](#useful-issue-boundaries)
+
 ## Support levels
 
 - **Maintainer-verified** means the complete build fingerprint is in the tested

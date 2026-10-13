@@ -56,6 +56,22 @@ never travel inline in the MCP configuration document.
 permission; current, committed, preview and staged resources remain protected by
 the shared appearance store. It returns removed digests and count.
 
+- [Local MCP Server](#local-mcp-server)
+- [Permissions](#permissions)
+- [Built-In CLI](#built-in-cli)
+- [Script Dialogs And Notifications](#script-dialogs-and-notifications)
+- [Result Contract](#result-contract)
+- [State and Observation](#state-and-observation)
+- [Display Preparation](#display-preparation)
+- [Control And Tool Commands](#control-and-tool-commands)
+- [Android UI Automation](#android-ui-automation)
+- [File Transfers and Updates](#file-transfers-and-updates)
+- [Android Integration](#android-integration)
+- [Events and Waits](#events-and-waits)
+- [Security Boundary](#security-boundary)
+- [Android App Functions](#android-app-functions)
+- [Self-Tests](#self-tests)
+
 ## Local MCP Server
 
 The MCP server is disabled by default. Enable **Local MCP automation server**

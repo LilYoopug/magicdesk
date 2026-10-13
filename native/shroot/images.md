@@ -8,12 +8,20 @@ change. The app-side [named-environment manager](../../docs/shroot.md#commands)
 supplies HTTPS acquisition, names and dependency-aware cleanup using this same API.
 This is image execution, not OCI runtime-spec or Docker Engine compatibility.
 
+- [Commands](#commands)
+- [Import Boundary](#import-boundary)
+- [Sharing And Copy-On-Write](#sharing-and-copy-on-write)
+- [Rootfs Archives And Backup](#rootfs-archives-and-backup)
+- [Attached Directories](#attached-directories)
+- [Checks](#checks)
+
 ## Commands
 
 ```sh
 shroot image import /host/layout /host/image --preserve-ownership
 shroot image create /host/image /host/instance
 shroot image inspect /host/instance
+shroot image format
 shroot image run /host/instance -- /bin/sh
 shroot image run /host/instance --user 1000:1000 -- /bin/sh
 shroot image run /host/instance --bind /host/project /mnt -- /bin/sh
@@ -26,6 +34,11 @@ shroot image restore /host/backup.tar.zst /host/restored-instance
 Destinations must not exist. `--reference TAG` selects an index annotation;
 ambiguous or incompatible selections fail. `inspect` returns the image config,
 instance/image kind and retained immutable source directory identities.
+`format` returns the namespace format implemented by this native tool. The
+named-environment manager includes it in derived image cache keys, so an image
+with the same OCI digest or rootfs archive is re-imported when the store format
+changes. Downloaded blobs and raw layer bodies remain reusable. Existing
+instances and their bases are not migrated, replaced or deleted by installation.
 `run` combines Entrypoint and Cmd; arguments after `--` replace Cmd.
 `exec` requires an explicit command and ignores Entrypoint/Cmd. `login` uses the
 selected account's home directory and login shell, or the explicit command after
@@ -50,7 +63,7 @@ This changes guest uname's nodename, not Android's hostname or network namespace
 `--network routed` selects the launch-owned logical IPv4 transport for run,
 exec and login; its absence preserves native networking. The ordinary store
 runner accepts the same option. No Android network namespace or interface is
-modified. See [network ownership](process-resources.md#network-namespaces).
+modified. See [network ownership](networking.md#network-namespaces).
 
 An instance is a normal guest store. Existing shell, PTY and graphical recipes
 can use it through `--store`, including their explicit graphics routes and

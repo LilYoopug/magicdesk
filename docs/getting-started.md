@@ -6,6 +6,20 @@ build. See [Compatibility](compatibility.md) for tested devices and
 [runtime API levels](runtime-api-levels.md) for per-service coverage and remaining
 device checks.
 
+- [Install](#install)
+- [Open Tools](#open-tools)
+- [Open Linux Applications](#open-linux-applications)
+- [Install Linux With Shroot](#install-linux-with-shroot)
+- [Choose Or Create A Display](#choose-or-create-a-display)
+- [Control Display Input](#control-display-input)
+- [Prepare And Start Desktop](#prepare-and-start-desktop)
+- [Customize Appearance](#customize-appearance)
+- [Close, Exit And Recovery](#close-exit-and-recovery)
+- [Scale And Output](#scale-and-output)
+- [Automation](#automation)
+- [Updates And Removal](#updates-and-removal)
+- [Problems](#problems)
+
 ## Install
 
 Install the [stable APK](https://github.com/mekhontsev/magicdesk/releases/latest)

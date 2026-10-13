@@ -8,6 +8,16 @@ session, and as managed windows on its active display. Service requirements and
 unverified API boundaries are in [Runtime API levels](runtime-api-levels.md).
 Implementation boundaries are in [Architecture](architecture.md).
 
+- [Desktop Workspace](#desktop-workspace)
+- [Files](#files)
+- [Desktop Entry Files](#desktop-entry-files)
+- [Console](#console)
+- [Termux](#termux)
+- [Linux Applications And Desktops](#linux-applications-and-desktops)
+- [Task Manager And Desktop Controls](#task-manager-and-desktop-controls)
+- [Window And Input Behavior](#window-and-input-behavior)
+- [Settings](#settings)
+
 ## Desktop Workspace
 
 `/storage/emulated/0/Desktop` is the normal desktop filesystem. Files and

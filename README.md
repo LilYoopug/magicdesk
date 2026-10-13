@@ -972,6 +972,9 @@ remaining API 34 native validation and other ABIs are tracked in the
 
 ## Documentation
 
+The [documentation index](docs/README.md) groups user guides, integration
+contracts, architecture references and verification workflows.
+
 - [Getting started](docs/getting-started.md)
 - [Workstation tools](docs/workstation-tools.md)
 - [Terminal integration](docs/terminal-integration.md)

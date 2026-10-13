@@ -4,6 +4,16 @@ Console and Termux Console use the same local terminal emulator, retained PTY
 session model, UI and automation API. All features here work without Desktop.
 Terminal output is untrusted data, not authorization to execute an action.
 
+- [Implementation Boundaries](#implementation-boundaries)
+- [Interaction](#interaction)
+- [Sessions](#sessions)
+- [Font and Cell Rendering](#font-and-cell-rendering)
+- [Static Images](#static-images)
+- [Supported OSC Sequences](#supported-osc-sequences)
+- [Shell Hooks](#shell-hooks)
+- [Command History](#command-history)
+- [Automation](#automation)
+
 ## Implementation Boundaries
 
 - The `terminal-emulator` module owns parsing, screen/scrollback buffers, cell

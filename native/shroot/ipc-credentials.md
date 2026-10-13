@@ -6,6 +6,12 @@ messages. Both use the authenticated namespace request path and the same
 `guest_identity` snapshots as filesystem permissions. There is no D-Bus-specific
 authentication bypass, payload proxy or second process-identity model.
 
+- [Connection Identity](#connection-identity)
+- [Application Ancillary Transport](#application-ancillary-transport)
+- [Private Peer Agreement](#private-peer-agreement)
+- [Explicit Credential Messages](#explicit-credential-messages)
+- [D-Bus And Coverage](#d-bus-and-coverage)
+
 ## Connection Identity
 
 Pathname bind/connect use the filesystem namespace's task-affine proc-path
@@ -133,7 +139,7 @@ worker. Inherited native sockets and sockets exported through a native connectio
 are latched native-only by cookie. Exporting an already adapted socket to such a
 consumer fails with EXDEV before sending. This prevents an unadapted process from
 receiving private capsule framing. Sender-independent capsule
-coverage is described in [process resources](process-resources.md#self-contained-origin-custody).
+coverage is described in [process resources](mount-views.md#self-contained-origin-custody).
 `--case fd-messages` covers 29 transport scenarios across stream,
 seqpacket and paired datagram sockets: mixed offers, both publication orders,
 independent sender exit, listener revisions, aliases and transaction rollback.
@@ -322,7 +328,7 @@ pending inputs/results; repeated receive preserves the kernel queues and data
 offsets. Independent exec checks receive after sender exit and reclaim untaken
 results after receiver death. Source-slot reuse, bounded concurrent requests,
 allocation/quota failures and protected partial publication also run under shell.
-See [authenticated origin transfer](process-resources.md#authenticated-origin-transfer).
+See [authenticated origin transfer](mount-views.md#authenticated-origin-transfer).
 
 The guest receive adapter uses `ipc_received` to resolve that captured binding,
 separate identity capabilities and expand one carrier into annotated custody.

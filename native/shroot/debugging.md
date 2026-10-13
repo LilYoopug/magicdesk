@@ -1,5 +1,15 @@
 # Guest Debugging
 
+- [Ownership And Admission](#ownership-and-admission)
+- [Stops And Events](#stops-and-events)
+- [Waits And Process Identity](#waits-and-process-identity)
+- [Native Observation And Cleanup](#native-observation-and-cleanup)
+- [Limitations](#limitations)
+- [Regression Coverage](#regression-coverage)
+- [Tool Compatibility](#tool-compatibility)
+
+## Ownership And Admission
+
 The launch supervisor remains the only kernel ptracer. `guest_debugger` models
 an explicitly requested guest debugger/inferior relationship inside that launch;
 it never attaches to Android processes or transfers the supervisor's authority
@@ -25,6 +35,8 @@ Executable readlink returns bounded bytes in the existing mapped response slot,
 not a temporary guest file. Full descriptor tables and protected callers retain
 the same output truncation and rejected-copy behavior.
 
+## Stops And Events
+
 Supported requests include register sets, memory peek/poke, signal information
 and masks, continue, single step, syscall entry/exit information, interrupt,
 listen, detach, kill, event messages and fork/vfork/clone/exec/exit options.
@@ -45,6 +57,8 @@ TID in the exec event while transferring the relationship to the surviving PID.
 Descriptor-operation completion during ELF bootstrap remains internal. A traced
 guest exec publishes its image-entry event before its syscall-exit stop; loader
 FD operations cannot complete that pending guest call.
+
+## Waits And Process Identity
 
 Guest wait4 and waitid deliver queued trace stops in event order, with rusage
 and waitid WNOWAIT support. Mixed traced/untraced waits first check the native
@@ -89,6 +103,8 @@ Debugger exit notifications and real-parent reaping have separate ownership.
 The debugger retains its visible number until its own notification is consumed;
 consuming that notification does not remove the real parent's pending result.
 
+## Native Observation And Cleanup
+
 The kernel TRACEEXIT option serves two independent owners: requested inferior
 events and runtime terminal descriptor publication. A task's first internal
 O_PATH capture enables the latter once for its lifetime; debugger detach cannot
@@ -107,12 +123,16 @@ until completion; task ownership ends at the actual exit/exec event. Fatal
 supervisor cleanup also continues owned terminal stops after SIGKILL, rather
 than waiting indefinitely for an exit that still needs ptrace continuation.
 
+## Limitations
+
 This is a bounded nested-debugging implementation, not complete ptrace emulation.
 Attach cannot cross supervised launches or target Android processes. TRACESECCOMP,
 pidfd-based virtual waits and __WNOTHREAD wait selection are not implemented.
 Non-leader debugger exec, as distinct from inferior exec, needs dedicated lifecycle coverage.
 Unsupported ptrace requests remain explicit errors; the supervisor never
 relinquishes its physical tracing ownership.
+
+## Regression Coverage
 
 The development fixture runs stock Ubuntu GDB 15.1 with breakpoints, source
 stepping, locals, backtraces, a thread breakpoint, signal delivery, fork detachment,
@@ -167,6 +187,8 @@ lost stop, without treating that scheduling-dependent race as exhaustive coverag
 Separate parked-group cases require the supervisor's deadline failure and
 completed cleanup for both ordinary and protected callers. The outer timeout
 must not fire; a fixture timeout is not accepted as successful reaping.
+
+## Tool Compatibility
 
 On the tested NX809J/API 36 kernel 6.12, Shroot under UID 2000 passes these
 workflows with Ubuntu GDB 15.1, LLDB 18.1.3, strace 6.8 and Valgrind 3.22.
