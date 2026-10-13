@@ -191,6 +191,10 @@ void test_network_route(void) {
     peer_info->rta_len=(char *)h+h->nlmsg_len-(char *)peer_info;
     attr(h,IFLA_IFNAME,"eth1",5);
     attr(h,IFLA_NET_NS_FD,&fd,sizeof(fd));
+    uint32_t peer_mtu=1400;
+    const unsigned char peer_mac[6]={2,1,2,3,4,5};
+    attr(h,IFLA_MTU,&peer_mtu,sizeof(peer_mtu));
+    attr(h,IFLA_ADDRESS,peer_mac,sizeof(peer_mac));
     peer->rta_len=(char *)h+h->nlmsg_len-(char *)peer;
     data->rta_len=(char *)h+h->nlmsg_len-(char *)data;
     info->rta_len=(char *)h+h->nlmsg_len-(char *)info;
@@ -205,6 +209,7 @@ void test_network_route(void) {
     struct md_network_interface *direct=md_network_interface_find(child,0,"eth1");
     assert(generated && direct && generated->peer==direct->info.index && direct->peer==generated->info.index);
     assert(generated->master==bridge);
+    assert(direct->info.mtu==peer_mtu && !memcmp(direct->info.address,peer_mac,sizeof(peer_mac)));
     unsigned generated_index=generated->info.index;
     assert(ack(n,&root,h,&target)==-EEXIST);
     assert(n->count==before+1 && child->count==child_before+1);
@@ -236,6 +241,30 @@ void test_network_route(void) {
             }
     }
     assert(metrics==1);
+    for (unsigned selection=0;selection<6;++selection) {
+        dump_header=request(&dump_packet,RTM_GETROUTE,NLM_F_DUMP);
+        dump_header->nlmsg_len=NLMSG_LENGTH(sizeof(struct rtmsg));
+        uint32_t table=selection==1 ? 1234 : RT_TABLE_MAIN;
+        struct rtattr *chosen=attr(dump_header,RTA_TABLE,&table,sizeof(table));
+        if (selection==2) chosen->rta_len=RTA_LENGTH(1);
+        if (selection==3) chosen->rta_type=RTA_OIF;
+        if (selection==4) ((struct rtmsg *)NLMSG_DATA(dump_header))->rtm_tos=1;
+        if (selection==5) ((struct rtmsg *)NLMSG_DATA(dump_header))->rtm_table=RT_TABLE_DEFAULT;
+        length=md_network_route(child,&root,dump_header,dump_header->nlmsg_len,91,MD_NETWORK_ROUTE_STRICT,
+            NULL,reply.bytes,sizeof(reply),NULL);
+        assert(length>0);
+        if (selection>=2 && selection<=4) {
+            assert(reply.align.nlmsg_type==NLMSG_ERROR);
+            assert(((struct nlmsgerr *)NLMSG_DATA(&reply.align))->error==(selection==2 ? -EINVAL : -EOPNOTSUPP));
+        } else {
+            unsigned routes=0;
+            for (struct nlmsghdr *item=&reply.align;NLMSG_OK(item,length);item=NLMSG_NEXT(item,length)) {
+                assert(item->nlmsg_type==RTM_NEWROUTE || item->nlmsg_type==NLMSG_DONE);
+                routes+=item->nlmsg_type==RTM_NEWROUTE;
+            }
+            assert(selection==1 ? routes==0 : routes==2);
+        }
+    }
     uint32_t wrong_metric=99; memcpy(RTA_DATA(priority),&wrong_metric,4);
     assert(ack(child,&root,h,NULL)==-EOPNOTSUPP && child->default_metric==100);
     h->nlmsg_type=RTM_DELROUTE;

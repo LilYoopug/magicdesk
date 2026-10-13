@@ -268,6 +268,7 @@ static void landlock_resources(void) {
 void test_network_model(void);
 void test_network_route(void);
 void test_network_endpoint(void);
+void test_network_nft(void);
 void test_task_registry_exit(void);
 int main(void) {
     alarm(60);
@@ -276,6 +277,7 @@ int main(void) {
     test_network_model();
     test_network_route();
     test_network_endpoint();
+    test_network_nft();
     struct md_identity identity=md_identity_new(0,0);
     struct md_task_resources r; assert(!md_resources_init(&r,NULL));
     struct md_resource_change change;

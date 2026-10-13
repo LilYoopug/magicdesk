@@ -3,14 +3,48 @@ import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
+import queue
 import secrets
 import socket
 import socketserver
+import struct
+import subprocess
 import sys
 import threading
+import time
+import urllib.request
 
 
-def exchange(host, port, token):
+def wait_service(command):
+    logs = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    ready = queue.Queue()
+    def read_ready():
+        try:
+            for line in logs.stdout:
+                if 'DOCKER_PORTS_READY' in line:
+                    ready.put(True)
+                    return
+        finally:
+            ready.put(False)
+    waiter = threading.Thread(target=read_ready)
+    waiter.start()
+    try:
+        # EVENT_WAIT: service announces both bound sockets; timeout fails readiness.
+        assert ready.get(timeout=30), 'Service exited before binding: ' + repr(command)
+    finally:
+        logs.terminate()
+        logs.wait(timeout=10)
+        waiter.join(10)
+        logs.stdout.close()
+        assert not waiter.is_alive()
+
+
+def exchange(host, port, token, repeats=1):
+    if repeats > 1:
+        for _ in range(repeats):
+            exchange(host, port, token)
+        return
+    host = socket.gethostbyname(host)
     with socket.create_connection((host, port), timeout=10) as connection:
         connection.sendall(b'PING')
         assert connection.recv(100).decode() == token
@@ -42,11 +76,54 @@ def container_service(token):
         tcp.serve_forever()
 
 
+def diagnose_dns():
+    config = open('/etc/resolv.conf').read()
+    print('DNS_CONFIG', config, flush=True)
+    servers = [line.split()[1] for line in config.splitlines()
+               if line.split()[:1] == ['nameserver']]
+    for server in servers:
+        for kind in (1, 28):
+            query = struct.pack('!6H', 0x4d44, 0x100, 1, 0, 0, 0)
+            query += b'\x07example\x03com\0' + struct.pack('!2H', kind, 1)
+            start = time.monotonic()
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as connection:
+                    connection.settimeout(5)
+                    connection.sendto(query, (server, 53))
+                    data, peer = connection.recvfrom(4096)
+                result = {'peer': peer, 'header': struct.unpack('!6H', data[:12]),
+                          'bytes': len(data)}
+            except Exception as error:
+                result = {'error': repr(error)}
+            print('DNS_DIAGNOSTIC', json.dumps(dict(result, server=server, kind=kind,
+                  seconds=time.monotonic()-start)), flush=True)
+
+
+def internet():
+    timings = []
+    for index in range(20):
+        start = time.monotonic()
+        try:
+            addresses = socket.getaddrinfo('example.com', 80)
+            assert any(item[0] == socket.AF_INET for item in addresses), addresses
+        except Exception:
+            print('DNS_FAILURE', index, flush=True)
+            diagnose_dns()
+            raise
+        timings.append(time.monotonic() - start)
+    with urllib.request.urlopen('http://example.com', timeout=15) as response:
+        assert response.status == 200
+        size = len(response.read())
+        assert size
+    print('CONTAINER_INTERNET_OK', json.dumps({'dnsSeconds': timings, 'httpBytes': size}), flush=True)
+
+
 class Observer:
     """Runs as Termux's own UID, outside the guest and its namespace fabric."""
     def __init__(self):
         self.token = secrets.token_hex(24)
         self.records = []
+        self.reservations = []
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -65,13 +142,29 @@ class Observer:
                 result = {'request': item, 'uid': os.getuid()}
                 try:
                     port = int(item['port'])
-                    if item['operation'] == 'released':
+                    if item['operation'] == 'occupy':
+                        connection = socket.socket()
+                        connection.bind(('127.0.0.1', port))
+                        connection.listen()
+                        owner.reservations.append(connection)
+                    elif item['operation'] == 'released':
                         for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
                             with socket.socket(socket.AF_INET, kind) as connection:
                                 connection.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                                 connection.bind(('127.0.0.1', port))
+                    elif item['operation'] == 'denied':
+                        for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
+                            with socket.socket(socket.AF_INET, kind) as connection:
+                                connection.settimeout(0.5)
+                                try:
+                                    connection.connect(('127.0.0.1', port))
+                                    connection.send(b'PING')
+                                    data = connection.recv(100)
+                                    assert not data, ('denied payload received', data)
+                                except (TimeoutError, ConnectionRefusedError, ConnectionResetError):
+                                    pass
                     else:
-                        exchange('127.0.0.1', port, item['token'])
+                        exchange('127.0.0.1', port, item['token'], item.get('repeats', 1))
                     result['passed'] = True
                 except Exception as error:
                     result.update(passed=False, error=repr(error))
@@ -92,6 +185,8 @@ class Observer:
         self.server.server_close()
         self.thread.join(10)
         assert not self.thread.is_alive()
+        for connection in self.reservations:
+            connection.close()
 
 
 def observe(address, **request):
@@ -109,8 +204,10 @@ def observe(address, **request):
 
 
 if __name__ == '__main__':
-    if sys.argv[1] == '--client':
-        exchange(sys.argv[2], int(sys.argv[3]), sys.argv[4])
+    if sys.argv[1] == '--internet':
+        internet()
+    elif sys.argv[1] == '--client':
+        exchange(sys.argv[2], int(sys.argv[3]), sys.argv[4], int(sys.argv[5]) if len(sys.argv)>5 else 1)
         print('DOCKER_PEER_EXCHANGE_OK', flush=True)
     else:
         container_service(sys.argv[1])

@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import resource
+import selectors
 import subprocess
 import sys
 
@@ -20,7 +21,7 @@ def guest(options):
     report = {'options': options, 'commands': [], 'passed': False}
     base = Path(options['directory'])
     base.mkdir(parents=True, exist_ok=True)
-    prefix = ['podman', '--log-level', 'debug', '--root', options['cache'],
+    prefix = ['podman', '--log-level', 'info', '--root', options['cache'],
               '--runroot', options['cache'] + '-run', '--storage-driver', options['storage']]
     limits = ['--cgroups', options['cgroups']]
     report['inheritedLimits'] = {}
@@ -36,6 +37,9 @@ def guest(options):
 
     def run(argv, timeout=90, required=True):
         print('RUN ' + repr(argv), flush=True)
+        if options['trace'] and argv[:len(prefix)] == prefix and argv[len(prefix):len(prefix)+1] in (['rm'], ['exec']):
+            argv = ['strace', '-f', '-tt', '-T', '-s', '4096', '-e', 'trace=%network,%signal,%file,read,close,poll,ppoll,epoll_wait,epoll_pwait,pidfd_open,pidfd_send_signal',
+                    '-o', str(base / f'trace-{len(report["commands"]):03d}.log'), *argv]
         try:
             # EVENT_WAIT: exact child exit. The deadline fails the command.
             result = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -45,10 +49,94 @@ def guest(options):
             item = {'argv': argv, 'timeout': True,
                     'output': (error.stdout or b'').decode(errors='replace')}
         report['commands'].append(item)
+        (base / 'progress.json').write_text(json.dumps(report))
         print(item['output'], end='', flush=True)
         if required:
             assert item.get('exitCode') == 0, item
         return item
+
+    def trace_dns():
+        for entry in Path('/proc').iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                args = (entry / 'cmdline').read_bytes().split(b'\0')
+            except OSError:
+                continue
+            if b'/usr/libexec/podman/aardvark-dns' not in args:
+                continue
+            process = subprocess.Popen(['strace', '-f', '-tt', '-T', '-s', '2048', '-e',
+                       'trace=%network,close,poll,ppoll,epoll_wait,epoll_pwait',
+                       '-o', str(base / 'trace-dns.log'), '-p', entry.name],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            try:
+                with selectors.DefaultSelector() as selector:
+                    selector.register(process.stderr, selectors.EVENT_READ)
+                    # EVENT_WAIT: tracer attachment diagnostic, not a settling delay.
+                    assert selector.select(10), 'DNS tracer did not attach'
+                    line = process.stderr.readline()
+                    assert b'attached' in line, line
+                return process
+            except BaseException:
+                process.terminate()
+                process.communicate(timeout=10)
+                raise
+        raise AssertionError('DNS service not found')
+
+    def exercise_ports():
+        from docker_network_fixture import observe, wait_service
+        network = 'md-podman-ports'
+        names = ('md-podman-first', 'md-podman-second')
+        ports = (39881, 39882)
+        image = 'docker.io/library/python:3.13-alpine'
+        run(prefix + ['pull', image], timeout=180)
+        if run(prefix + ['network', 'exists', network], required=False).get('exitCode') == 0:
+            run(prefix + ['network', 'rm', '-f', network])
+        run(prefix + ['network', 'create', '--subnet', '10.92.0.0/24', network])
+        tracer = None
+        try:
+            for name, port in zip(names, ports):
+                run(prefix + ['run', '-d', '--name', name, '--log-driver', 'k8s-file', '--network', network, *limits,
+                              '-p', f'127.0.0.1:{port}:8080/tcp', '-p', f'127.0.0.1:{port}:8080/udp',
+                              '--mount', 'type=bind,src=' + str(Path(__file__).with_name('docker_network_fixture.py'))
+                              + ',dst=/fixture.py,readonly', image, 'python3', '/fixture.py', name])
+                wait_service(prefix + ['logs', '-f', name])
+                if options['trace'] and tracer is None:
+                    tracer = trace_dns()
+                report.setdefault('portChecks', []).append(observe(options['observer'], operation='exchange', port=port, token=name, repeats=20))
+            for source, target in (names, tuple(reversed(names))):
+                run(prefix + ['exec', source, 'python3', '/fixture.py', '--client', target, '8080', target, '20'])
+            report['namedPeerExchangePassed'] = True
+            for name in names:
+                run(prefix + ['exec', name, 'python3', '/fixture.py', '--internet'])
+            conflict = run(prefix + ['run', '--rm', '--name', 'md-podman-conflict', '--network', network,
+                                    *limits, '-p', '127.0.0.1:39881:8080', image, '/bin/true'], required=False)
+            assert conflict.get('exitCode') != 0 and ('already allocated' in conflict['output']
+                    or 'address already in use' in conflict['output'].lower()), conflict
+        except Exception as error:
+            report['portFailure'] = repr(error)
+            run(['nft', 'list', 'ruleset'], required=False)
+            run(['cat', '/etc/resolv.conf'], required=False)
+            raise
+        finally:
+            try:
+                removed = run(prefix + ['rm', '-f', '--ignore', *names, 'md-podman-conflict'], required=False)
+                network_removed = run(prefix + ['network', 'rm', network], required=False)
+            finally:
+                if tracer:
+                    try:
+                        # EVENT_WAIT: DNS service exit drains its tracer too.
+                        tracer.communicate(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        tracer.kill()
+                        tracer.communicate(timeout=10)
+                        report['traceShutdownFailure'] = 'Tracer survived network teardown'
+            if 'portFailure' not in report:
+                assert removed.get('exitCode') == 0 and network_removed.get('exitCode') == 0, 'Network cleanup failed'
+                assert 'traceShutdownFailure' not in report, report['traceShutdownFailure']
+        for port in ports:
+            report['portChecks'].append(observe(options['observer'], operation='released', port=port))
+        report['portPublicationPassed'] = True
 
     try:
         run(['mount', '-t', 'sysfs', 'sysfs', '/sys'])
@@ -59,9 +147,6 @@ def guest(options):
         command = prefix + ['run', '--rm', '--name', name, '--log-driver', 'k8s-file',
                             '--network', options['network'], *limits, options['image'],
                             '/bin/sh', '-ec', 'id; echo PODMAN_CONTAINER_OK']
-        if options['trace']:
-            command = ['strace', '-f', '-s', '180', '-e', 'trace=%file,%process,%network,%desc,prctl,seccomp,mount_setattr,prlimit64',
-                       '-o', str(base / 'trace.log'), *command]
         result = run(command)
         assert 'PODMAN_CONTAINER_OK' in result['output'].splitlines(), result
         if options['network'] != 'none':
@@ -69,6 +154,8 @@ def guest(options):
                           '--network', options['network'], *limits, options['image'], '/bin/sh', '-ec',
                           'wget -T 15 -qO /tmp/page http://example.com; test -s /tmp/page; echo PODMAN_INTERNET_OK'])
             assert 'PODMAN_INTERNET_OK' in result['output'].splitlines(), result
+        if options['observer']:
+            exercise_ports()
         report['passed'] = True
     except Exception as error:
         report['failure'] = repr(error)
@@ -76,11 +163,15 @@ def guest(options):
         if created:
             cleanup = run(prefix + ['rm', '-f', '--ignore', name], required=False)
             report['passed'] &= cleanup.get('exitCode') == 0
-        trace = base / 'trace.log'
-        if trace.exists():
+        report['traceErrors'] = []
+        for trace in sorted(base.glob('trace-*.log')):
+            report['traceErrors'] += [trace.name + ': ' + line for line in trace.read_text(errors='replace').splitlines()
+                                     if 'EOPNOTSUPP' in line or 'operation not supported' in line.lower()
+                                     or '\\241\\377' in line or '\\352\\377' in line or 'error=-' in line]
             with trace.open(errors='replace') as source:
                 report['traceTail'] = list(collections.deque(source, maxlen=120))
         print('PODMAN_REPORT ' + json.dumps(report), flush=True)
+        (base / 'progress.json').write_text(json.dumps(report))
 
 
 def main():
@@ -95,29 +186,41 @@ def main():
     parser.add_argument('--image', default='docker.io/library/alpine:3.23')
     parser.add_argument('--cache', default='', help='Owned disposable Podman image cache')
     parser.add_argument('--trace', action='store_true')
+    parser.add_argument('--exercise-ports', action='store_true')
     parser.add_argument('--host-limits', action='store_true', help='Set nofile/nproc explicitly to inherited shell limits')
     parser.add_argument('--unlimited-pids', action='store_true', help='Explicitly disable the optional pids-controller limit')
     args = parser.parse_args()
+    if args.exercise_ports and args.network != 'bridge':
+        parser.error('--exercise-ports requires bridge')
     suite = Suite(Path('build/podman-results'), args.build)
+    from docker_network_fixture import Observer
+    observer = Observer() if args.exercise_ports else None
     target = '/tmp/md-podman-probe-' + suite.report['id']
     runner = [suite.runner, '--store', args.store, '--user', '0:0', '--network', 'routed']
     created = False
     try:
         suite.transport.upload(suite.client, Path(__file__), suite.base + '/probe.py')
+        suite.transport.upload(suite.client, Path(__file__).with_name('docker_network_fixture.py'),
+                               suite.base + '/docker_network_fixture.py')
         suite.command(runner + ['--', '/bin/mkdir', target]); created = True
         options = {'directory': '/tmp/md-podman-' + suite.report['id'],
                    'cache': args.cache or '/tmp/md-podman-cache-' + suite.report['id'],
                    'storage': args.storage, 'network': args.network, 'image': args.image,
                    'cgroups': args.cgroups,
-                   'trace': args.trace, 'hostLimits': args.host_limits, 'unlimitedPids': args.unlimited_pids}
-        output = suite.command(runner + ['--bind-ro', suite.base, target, '--deadline-seconds', '300', '--',
-                                        '/usr/bin/python3', target + '/probe.py', '--guest', json.dumps(options)], timeout=320)
+                   'trace': args.trace, 'hostLimits': args.host_limits, 'unlimitedPids': args.unlimited_pids,
+                   'observer': observer.address if observer else ''}
+        deadline = 900 if observer else 300
+        output = suite.command(runner + ['--bind-ro', suite.base, target, '--deadline-seconds', str(deadline), '--',
+                                        '/usr/bin/python3', target + '/probe.py', '--guest', json.dumps(options)], timeout=deadline+20)
         reports = [line.removeprefix('PODMAN_REPORT ') for line in output.splitlines() if line.startswith('PODMAN_REPORT ')]
         assert len(reports) == 1, output[-2000:]
         report = json.loads(reports[0]); suite.report['podman'] = report
         assert report['passed'], report.get('failure', 'container cleanup failed')
         suite.report['passed'] = True
     finally:
+        if observer:
+            observer.close()
+            suite.report['externalPortChecks'] = observer.records
         try:
             if created:
                 suite.command(runner + ['--', '/bin/rmdir', target])

@@ -231,6 +231,32 @@ iproute2: bridge/veth topology, namespace-FD moves, routes, TCP/UDP, addressed
 messages and teardown. The native resource-owner tests cover atomic netlink
 mutation/ACK rollback, port conflicts, credentials and endpoint ownership.
 
+`probe_nft_runtime.py BUILD STORE` exercises stock nft from a prepared Linux
+store with Python, util-linux and nftables. It checks tables, chains, rules, sets,
+expression encoding, referenced-chain deletion, private namespaces, atomic
+rollback and a 150-table batch larger than 4 KiB. Unsupported expressions must
+fail without committing earlier changes.
+`test_network_nft`, included in `test_task_resources`, additionally covers
+generation conflicts, response-publication failure, insufficient buffers,
+permissions, malformed attributes, control-socket framing, hook validation,
+jump/return semantics, reverse-direction bypass eligibility and finite NAT publication.
+
+`probe_nft_traffic.py BUILD STORE` adds actual TCP/UDP filtering, established-flow
+policy changes, addressed UDP state, source-conditional DNAT and published-port
+rollback/cleanup observed from another Android UID. It checks atomic `EBUSY`
+when attempting to revoke direct native IO. Five-sample loopback direct/filter/
+NAT benchmarks report TCP echo throughput and addressed UDP round trips; run
+without concurrent suites for meaningful timing, not as a fixed performance gate.
+
+`probe_podman_runtime.py BUILD STORE --host-limits --exercise-ports` runs stock
+Podman/crun/conmon/netavark with overlay, bridge/nftables, logical cgroups and
+application seccomp. It checks DNS/HTTP, two named peers, repeated TCP/UDP port
+publication, collisions and cleanup. `--host-limits` explicitly sets nofile/nproc
+to inherited shell ceilings, not a runtime fallback. The store needs these
+packages plus Python and nftables. Optional `--trace` records exec, DNS-service
+and removal calls; its tracer drains after network teardown.
+`--cache` reuses only the fixture's disposable image storage.
+
 `probe_docker_runtime.py BUILD STORE --profile routed --cgroup v2
 --storage-driver overlay2 --image python:3.13-alpine --exercise-ports` runs stock
 Docker/containerd/runc under the selected executor. It requires those packages
@@ -239,6 +265,10 @@ internal ports, bidirectional peer exchange, outbound DNS/HTTP, TCP/UDP `-p`
 publication from an observer outside Shroot, conflict rejection, port release
 and daemon shutdown. VFS is selectable independently. Diagnostic profiles
 without `--exercise-ports` record capabilities, not passing port coverage.
+Both engine fixtures perform twenty resolver queries per container and record
+their timings. A failed query retains the failure and adds raw A/AAAA diagnostics;
+it is not retried into a passing result. Internet DNS/HTTP requires a working
+external network, separately from local port and peer-exchange checks.
 
 `test_proc_mount_policy.py BUILD STORE` checks omission of unsupported host-kernel
 controls in namespace-mounted proc, consistent lookup/enumeration, ordinary proc

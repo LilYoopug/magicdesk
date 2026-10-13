@@ -68,7 +68,7 @@ stop another launch. Persistent stores outlive those processes.
 | Processes | Nested PID views, proc visibility, translated waits/signals and guest PID 1 lifetime | Not a host kernel PID namespace |
 | Credentials | Guest users, groups, capabilities, drops and namespace ownership | Guest root never grants Android root or kernel capabilities |
 | IPC and terminals | Separate SysV IPC owners, store-scoped pathname sockets, private devpts views | Inherited connections retain authority; explicit abstract Unix sockets share the host namespace |
-| Network | Offline child namespaces or explicitly routed IPv4 with private ports | Native backing ports remain reachable; not a firewall or full Linux network isolation |
+| Network | Offline child namespaces or routed IPv4, private ports, supported nftables flow filtering and NAT | Native backing ports remain reachable; not a host firewall or full Linux network isolation |
 | Resource controls | Logical cgroup membership, controller settings and device-filter bookkeeping | CPU, memory, pids and device limits are not enforced by those settings |
 | Application filters | Installed seccomp filters and their denial actions remain active | The filesystem broker is not itself confined by every caller's filter domain |
 
@@ -598,11 +598,21 @@ be configured before they can communicate.
 The routed backend provides logical bridges, veth pairs, addresses and routes.
 Private TCP/UDP ports map to native ephemeral ports, so containers can reuse the
 same internal port. Root-fabric binds can publish real ports. Android interfaces,
-routes and firewall rules are not changed; ordinary connected stream IO remains
-native.
+routes and firewall rules are not changed. Supported nftables chains apply
+IPv4 TCP/UDP filtering, DNAT, SNAT and masquerading to logical flows. Rules and
+published ports commit atomically; unsupported expressions fail explicitly.
+Unfiltered internal/outbound streams retain native data IO. Filtered/NAT flows
+use an event-driven relay with cached decisions, not syscall-by-syscall packet
+interpretation. Root-fabric published ports also use this relay.
+
+Changes apply to existing relayed flows. A rule that would deny an already-open
+direct native flow is rejected atomically with `EBUSY`; Shroot cannot insert a
+relay into that kernel connection retroactively. Close such connections before
+installing the restrictive policy. Addressed UDP retains its mapping until
+socket closure or relay idle expiry.
 
 This is not full network isolation. Backing ports remain reachable, inherited
-native descriptors retain access, and IPv6, raw packets, netfilter,
+native descriptors retain access, and IPv6, raw packets, packet counters,
 multicast/broadcast and device-bound sockets are unsupported. Routed `recvmmsg`
 and packet ancillary metadata also have explicit limits. See
 [network contracts](../native/shroot/process-resources.md#network-namespaces).
@@ -637,18 +647,19 @@ than silently successful operations.
 ### Podman
 
 Stock Podman with crun/conmon is checked separately, not inferred from Docker
-success. The passing workflow uses overlay storage, `--network host`, enabled
-logical cgroups and the original application seccomp policy. It pulls an OCI
-image, runs its command, accesses HTTP from a container and removes the container.
+success. The passing workflow uses overlay storage, ordinary bridge networking,
+netavark's nftables driver, enabled logical cgroups and the original application
+seccomp policy. Coverage includes image pull, TCP/UDP `podman run -p`, outbound
+DNS/HTTP, bidirectional peer connections by container name, occupied-port
+rejection and removal of containers, network rules and published ports.
 Its `nofile`/`nproc` limits are explicitly set to inherited shell limits, rather
 than attempting to raise Android hard limits.
 
 The [Podman fixture](../native/guest-exec-lab/probe_podman_runtime.py) runs inside
-a routed Shroot launch. Here `--network host` shares the enclosing launch's
-network view; it does not create a separate container bridge. Default bridge
-networking is blocked by missing `NETLINK_NETFILTER` support. Podman port
-publication and general rootless-Podman configurations are not certified by this
-host-network check.
+a routed Shroot launch. No `--network host` bypass or Podman-specific runtime
+branch supplies bridge connectivity. This does not certify arbitrary nftables
+rules or general rootless-Podman configurations; supported operations and flow
+semantics are described in the [network contracts](../native/shroot/process-resources.md#nftables-and-flow-forwarding).
 
 For both engines, guest root is still real Android UID 2000. Enabled cgroups
 provide logical membership and permissive settings, not enforced resource or
@@ -827,7 +838,7 @@ application, init or isolation test.
 | Distribution boot | Ubuntu, Fedora, Arch, openSUSE, Deepin and Manjaro default targets; Debian/openKylin with explicit module-capability drop | [Init matrix](../native/guest-exec-lab/init-matrix.md); SteamOS hardware units remain degraded |
 | OpenRC and runit | Alpine PID 1, default runlevel and restart/stop; Void/Armtix stock stages and supervised services | Userspace service lifecycle, not complete hardware initialization |
 | Docker Engine | Docker 26.1.5, containerd 1.7.24, runc 1.1.15; VFS/overlay2, TCP/UDP publishing and outbound/peer traffic | [Required daemon configuration](#docker-engine), not the default firewall backend |
-| Podman | Podman 5.8.7, crun 1.28, conmon 2.2.1; image pull, overlay container execution, HTTP and cleanup | [Host network and inherited limits](#podman); cgroups and application seccomp enabled |
+| Podman | Podman 5.8.7, crun 1.28, conmon 2.2.1; overlay, nftables bridge, TCP/UDP publication, DNS/HTTP, named peers and cleanup | [Routed launch and inherited limits](#podman); cgroups and application seccomp enabled |
 | Browser sandboxes | Stock Chromium JavaScript/DOM/PNG with installed filters, Firefox screenshot, Electron/VS Code workflow | [Browser contract](#application-filters-and-browsers), not complete security isolation |
 | Landlock and Bubblewrap | Positive/negative filesystem access, stacked domains and inheritance; pacman, Glycin and stock Bubblewrap workflows | [Filesystem policy](#filesystem-restrictions) and [namespace fixtures](../native/guest-exec-lab/README.md#namespace-clients) |
 | Debugging | GDB/LLDB breakpoints, stepping and locals; attach/seize, gdbserver and strace workflows | [Same-launch ownership and request limits](../native/shroot/debugging.md) |

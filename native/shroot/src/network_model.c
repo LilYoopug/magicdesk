@@ -1,5 +1,7 @@
 #define _GNU_SOURCE
 #include "network_internal.h"
+#include "network_filter.h"
+#include "network_forward.h"
 #include "namespace_identity.h"
 #include <errno.h>
 #include <limits.h>
@@ -168,6 +170,7 @@ void md_network_namespace_release(struct md_network_namespace *n) {
     if (!n || atomic_fetch_sub_explicit(&n->references,1,memory_order_acq_rel)!=1) return;
     struct md_network_fabric *f=n->fabric;
     pthread_mutex_lock(&f->lock);
+    md_network_forward_retire(n);
     for (unsigned i=0;i<n->count;++i) {
         struct md_network_namespace *peer=md_network_interface_owner(f,n->links[i].peer);
         if (peer && peer!=n) remove_one(peer,n->links[i].peer);
@@ -177,8 +180,10 @@ void md_network_namespace_release(struct md_network_namespace *n) {
     if (*at) *at=n->next;
     pthread_mutex_unlock(&f->lock);
     if (atomic_fetch_sub_explicit(&f->references,1,memory_order_acq_rel)==1) {
+        md_network_forward_shutdown(f);
         pthread_mutex_destroy(&f->lock); free(f);
     }
+    md_network_filter_free(n->filter);
     md_user_namespace_release(n->owner); free(n->links); free(n);
 }
 uint64_t md_network_namespace_inode(const struct md_network_namespace *n) { return n->inode; }

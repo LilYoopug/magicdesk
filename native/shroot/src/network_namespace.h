@@ -3,6 +3,7 @@
 #include "fd_object.h"
 #include "user_namespace.h"
 #include "control_file.h"
+#include "network_packet.h"
 struct md_identity;
 struct md_network_target;
 
@@ -44,5 +45,4 @@ int md_network_socket_open(struct md_network_namespace *, int family, int type, 
     struct md_fd_object **, int *fd);
 long md_network_socket_call(struct md_fd_object *, const struct md_identity *, long nr,
     const unsigned long *, void *data, size_t capacity, size_t size, pid_t pid,const struct md_network_target *);
-#define MD_NETWORK_BUFFER_SIZE 4096
 #endif

@@ -2,6 +2,7 @@
 #include "network_route.h"
 #include "network_message.h"
 #include "network_internal.h"
+#include "network_forward.h"
 #include "guest_identity.h"
 #include <errno.h>
 #include <linux/if_link.h>
@@ -76,9 +77,10 @@ struct link_change {
     const char *name,*peer_name;
     char name_storage[IFNAMSIZ],peer_storage[IFNAMSIZ];
     enum md_network_link_kind kind;
-    unsigned index,master,mtu,change,flags,tx_queue_length,peer_tx_queue_length;
+    unsigned index,master,mtu,change,flags,tx_queue_length,peer_tx_queue_length,peer_mtu;
     int has_master,has_mtu,has_address,namespace_fd,peer_namespace_fd,has_tx_queue_length,has_peer_tx_queue_length;
-    unsigned char address[6];
+    int has_peer_mtu,has_peer_address;
+    unsigned char address[6],peer_address[6];
 };
 static int parse_link(const struct nlmsghdr *h,struct link_change *change,struct attrs *a) {
     if (h->nlmsg_len<NLMSG_LENGTH(sizeof(struct ifinfomsg))) return -EINVAL;
@@ -140,6 +142,14 @@ static int parse_link(const struct nlmsghdr *h,struct link_change *change,struct
             error=number(peer_attrs.v[i],&change->peer_tx_queue_length);
             if (error) return error;
             change->has_peer_tx_queue_length=1;
+        } else if (i==IFLA_MTU) {
+            error=number(peer_attrs.v[i],&change->peer_mtu);
+            if (error) return error;
+            change->has_peer_mtu=1;
+        } else if (i==IFLA_ADDRESS) {
+            if (RTA_PAYLOAD(peer_attrs.v[i])!=6) return -EINVAL;
+            memcpy(change->peer_address,RTA_DATA(peer_attrs.v[i]),6);
+            change->has_peer_address=1;
         } else if (i==IFLA_NET_NS_FD) {
             uint32_t fd=0; error=number(peer_attrs.v[i],&fd);
             if (error) return error;
@@ -170,6 +180,7 @@ static int change_link(struct md_network_namespace *n,const struct nlmsghdr *h,c
     struct md_network_interface *link=md_network_interface_find(n,c->index,c->name);
     if (h->nlmsg_type==RTM_DELLINK) return link ? md_network_interface_remove(n,link->info.index) : -ENODEV;
     if (c->change&~IFF_UP || (c->has_mtu && (c->mtu<68 || c->mtu>65535))) return -EOPNOTSUPP;
+    if (c->has_peer_mtu && (c->peer_mtu<68 || c->peer_mtu>65535)) return -EINVAL;
     if (c->has_master && c->master) {
         struct md_network_interface *master=md_network_interface_find(n,c->master,NULL);
         if (!master || master->kind!=MD_LINK_BRIDGE) return -EINVAL;
@@ -198,9 +209,12 @@ static int change_link(struct md_network_namespace *n,const struct nlmsghdr *h,c
         if (c->kind==MD_LINK_VETH) {
             error=md_network_interface_add(peer_space,MD_LINK_VETH,c->peer_name,&peer);
             if (error) { md_network_interface_remove(n,index); return error; }
-            md_network_interface_find(peer_space,peer,NULL)->peer=index;
+            struct md_network_interface *peer_link=md_network_interface_find(peer_space,peer,NULL);
+            peer_link->peer=index;
             if (c->has_peer_tx_queue_length)
-                md_network_interface_find(peer_space,peer,NULL)->info.tx_queue_length=c->peer_tx_queue_length;
+                peer_link->info.tx_queue_length=c->peer_tx_queue_length;
+            if (c->has_peer_mtu) peer_link->info.mtu=c->peer_mtu;
+            if (c->has_peer_address) memcpy(peer_link->info.address,c->peer_address,6);
         }
         link=md_network_interface_find(n,index,NULL); link->peer=peer;
     } else if (peer_target || (c->kind && c->kind!=link->kind)) return -EOPNOTSUPP;
@@ -301,13 +315,29 @@ static int route_lookup(struct md_network_namespace *n,const struct nlmsghdr *h,
     if (!link || (index && index!=link->info.index)) return -ENETUNREACH;
     return route_reply(o,h,port,0,link,gateway,gateway ? n->default_metric : 0,&destination);
 }
+static int route_dump_table(const struct nlmsghdr *h,uint32_t *table) {
+    const struct rtmsg *m=NLMSG_DATA(h);
+    if (m->rtm_dst_len || m->rtm_src_len || m->rtm_tos || m->rtm_protocol || m->rtm_scope
+            || m->rtm_type || m->rtm_flags) return -EOPNOTSUPP;
+    *table=m->rtm_table;
+    struct attrs a;
+    int error=attributes(RTM_RTA(m),h->nlmsg_len-NLMSG_LENGTH(sizeof(*m)),&a,RTA_MAX);
+    for (unsigned i=1;!error && i<=RTA_MAX;++i) if (a.v[i]) {
+        if (i!=RTA_TABLE) error=-EOPNOTSUPP;
+        else error=number(a.v[i],table);
+    }
+    return error;
+}
 static int routes(struct md_network_namespace *n,const struct nlmsghdr *h,uint32_t port,int dump,struct md_network_message *o) {
     if (h->nlmsg_len<NLMSG_LENGTH(sizeof(struct rtmsg))) return -EINVAL;
     const struct rtmsg *m=NLMSG_DATA(h);
     if (m->rtm_family!=AF_UNSPEC && m->rtm_family!=AF_INET) return h->nlmsg_type==RTM_GETROUTE && dump ? 0 : -EAFNOSUPPORT;
     if (h->nlmsg_type==RTM_GETROUTE) {
         if (!dump) return route_lookup(n,h,port,o);
-        if (m->rtm_table && m->rtm_table!=RT_TABLE_MAIN) return 0;
+        uint32_t table=0;
+        int selected=route_dump_table(h,&table);
+        if (selected) return selected;
+        if (table && table!=RT_TABLE_MAIN) return 0;
         for (unsigned i=0;i<n->count;++i) if (n->links[i].ipv4) {
             int error=route_reply(o,h,port,1,&n->links[i],0,0,NULL); if (error) return error;
             if (n->links[i].info.index==n->default_interface) {
@@ -470,8 +500,12 @@ static int strict_query(const struct nlmsghdr *h,int dump) {
             struct attrs attrs;
             int r=attributes(IFLA_RTA(m),h->nlmsg_len-NLMSG_LENGTH(body),&attrs,IFLA_MAX);
             if (r) return r;
-            for (unsigned i=1;i<=IFLA_MAX;++i) if (attrs.v[i] && i!=IFLA_EXT_MASK) return -EOPNOTSUPP;
+            for (unsigned i=1;i<=IFLA_MAX;++i)
+                if (attrs.v[i] && i!=IFLA_EXT_MASK && i!=IFLA_MASTER) return -EOPNOTSUPP;
         }
+    } else if (dump && h->nlmsg_type==RTM_GETROUTE) {
+        /* routes() validates the header and typed table selector together. */
+        return 0;
     } else if (dump) {
         /* These catalogues currently support family selection only. Preserve
          * an explicit unsupported result for richer selection predicates. */
@@ -539,7 +573,9 @@ long md_network_route(struct md_network_namespace *n,const struct md_identity *i
     if (!error) {
         if (h->nlmsg_type==RTM_GETLINK) {
             if (dump) {
-                for (unsigned i=0;!error && i<n->count;++i) error=link_reply(&out,h,port,1,&n->links[i]);
+                for (unsigned i=0;!error && i<n->count;++i)
+                    if (!change.master || n->links[i].master==change.master)
+                        error=link_reply(&out,h,port,1,&n->links[i]);
             } else {
                 struct md_network_interface *found=md_network_interface_find(n,change.index,change.name);
                 error=found ? link_reply(&out,h,port,0,found) : -ENODEV;
@@ -557,7 +593,10 @@ long md_network_route(struct md_network_namespace *n,const struct md_identity *i
     if (!encoded && out.size && publication)
         encoded=publication->publish(publication->context,out.data,out.size);
     int commit=!error && !encoded;
-    if (commit && !query) for (unsigned i=0;i<2;++i) notify_changes(&saved[i]);
+    if (commit && !query) {
+        for (unsigned i=0;i<2;++i) notify_changes(&saved[i]);
+        md_network_forward_changed(n->fabric);
+    }
     for (unsigned i=0;i<2;++i) checkpoint_finish(&saved[i],commit);
     if (!query && !commit) n->fabric->next_index=next_index;
     pthread_mutex_unlock(&n->fabric->lock);

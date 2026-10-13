@@ -437,8 +437,9 @@ Verified workflows under UID 2000 include:
   from its own OCI image launcher. Docker supports concurrent containers,
   outbound DNS/HTTP and ordinary TCP/UDP `docker run -p` publication with the
   documented daemon configuration. Podman is verified with overlay storage,
-  host networking and application seccomp enabled; its default bridge networking
-  remains unsupported. See [container setup and limits](docs/shroot.md#services-and-containers).
+  nftables bridge networking, TCP/UDP publication, named container peers and
+  application seccomp enabled. Both use an explicit routed launch and inherited
+  Android resource ceilings. See [container setup and limits](docs/shroot.md#services-and-containers).
 - **Browser and application sandboxes:** stock Chromium executes JavaScript and
   renders pages without `--no-sandbox`, retaining its installed seccomp filters.
   Stock Bubblewrap also has namespace and application workflow coverage.

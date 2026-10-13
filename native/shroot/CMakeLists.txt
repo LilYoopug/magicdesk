@@ -34,6 +34,8 @@ list(APPEND origins ${src}/native_mounts.c ${src}/devpts_view.c ${src}/cgroup.c 
     ${src}/mount_stream.c ${src}/mount_pin.c ${src}/mount_propagation.c ${src}/temporary_directory.c ${src}/private_tree.c
     ${src}/provider_tree.c ${src}/device_events.c ${src}/identity_snapshot.c ${src}/proc_sysctl.c ${src}/uts_namespace.c ${src}/control_event.c)
 list(APPEND origins ${fifo_descriptions})
+list(APPEND origins ${src}/network_filter.c ${src}/network_filter_program.c ${src}/network_nft.c ${src}/network_nft_expression.c ${src}/network_nft_objects.c)
+list(APPEND origins ${src}/network_flow.c ${src}/network_filter_ports.c ${src}/network_forward.c)
 set(mounts ${src}/fs_mounts.c ${src}/fs_mount_path.c ${src}/fs_mount_operations.c ${src}/fs_mount_table.c ${src}/fs_mount_change.c ${src}/fs_mount_lifecycle.c ${src}/fs_temporary.c ${src}/fs_overlay.c ${src}/fs_storage.c)
 list(APPEND mounts ${src}/proc_paths.c ${src}/procfs_view.c ${src}/proc_fdinfo.c ${src}/fs_proc.c ${src}/fs_cgroup.c ${src}/fs_bpf.c ${src}/fs_sysfs.c ${src}/fs_mqueue.c ${src}/fs_mount_file.c ${src}/mount_source.c ${src}/fs_context.c
     ${src}/fs_landlock.c ${src}/fs_provider.c ${src}/fs_control.c ${src}/fs_mount_propagation.c)
@@ -173,6 +175,7 @@ if(MAGICDESK_GUEST_FIXTURES)
     target_sources(test_task_resources PRIVATE ../guest-exec-lab/test_fd_admission_live.c ${src}/task_call.c ${src}/task_filter.c ${src}/task_quiesce.c ${src}/fd_filter_program.c)
     target_sources(test_task_resources PRIVATE ${src}/descriptor_inode.c ../guest-exec-lab/test_descriptor_inode.c)
     target_sources(test_task_resources PRIVATE ../guest-exec-lab/test_network_model.c ../guest-exec-lab/test_network_route.c ../guest-exec-lab/test_network_endpoint.c)
+    target_sources(test_task_resources PRIVATE ../guest-exec-lab/test_network_nft.c)
     target_compile_options(test_task_resources PRIVATE -iquote ${src} -UNDEBUG)
     target_sources(test_task_resources PRIVATE ../guest-exec-lab/test_ipc_database.c ../guest-exec-lab/test_storage_database.c)
     target_link_libraries(test_task_resources PRIVATE guest-sqlite m)

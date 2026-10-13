@@ -23,6 +23,15 @@ int md_network_message_attribute(struct md_network_message *o,unsigned type,cons
     append(o,&h,sizeof(h)); append(o,data,size);
     o->message->nlmsg_len+=RTA_SPACE(size); return 0;
 }
+int md_network_message_nest(struct md_network_message *o,unsigned type,size_t *offset) {
+    *offset=o->size;
+    return md_network_message_attribute(o,type|NLA_F_NESTED,NULL,0);
+}
+int md_network_message_end_nest(struct md_network_message *o,size_t offset) {
+    if (offset>o->size || o->size-offset<sizeof(struct nlattr) || o->size-offset>UINT16_MAX) return -EMSGSIZE;
+    struct nlattr *a=(void *)(o->data+offset);
+    a->nla_len=(uint16_t)(o->size-offset); return 0;
+}
 int md_network_message_done(struct md_network_message *o,const struct nlmsghdr *request,
         uint32_t port,int error,int dump,int capped) {
     if (dump && !error) {

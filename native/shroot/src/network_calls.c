@@ -19,7 +19,6 @@
 #include <sys/ioctl.h>
 #include <sys/uio.h>
 
-enum { BUFFER_SIZE=4096 };
 long md_network_open(const unsigned long *a) {
     long memory=md_adapter_buffer_take(); if (memory<0) return memory;
     long result=md_guest_buffer_control(MD_BUFFER_NETWORK_OPEN,0,0);
@@ -253,7 +252,7 @@ static long control_call(long nr,const unsigned long *a,int events) {
         }
         error=md_read_memory(vectors,message.msg_iov,message.msg_iovlen*sizeof(*vectors)); if (error) return error;
         for (size_t i=0;i<message.msg_iovlen;++i) {
-            if (vectors[i].iov_len>BUFFER_SIZE-size) return -EMSGSIZE;
+            if (vectors[i].iov_len>MD_NETWORK_BUFFER_SIZE-size) return -EMSGSIZE;
             size+=vectors[i].iov_len;
         }
     }
@@ -272,7 +271,7 @@ static long control_call(long nr,const unsigned long *a,int events) {
         }
     } else if (nr==SYS_setsockopt) { size=a[4]; input=(void *)a[3]; }
     else if (nr!=SYS_getsockname && nr!=SYS_getpeername && nr!=SYS_getsockopt) return -EOPNOTSUPP;
-    if (size>BUFFER_SIZE) return -EMSGSIZE;
+    if (size>MD_NETWORK_BUFFER_SIZE) return -EMSGSIZE;
     long memory=md_adapter_buffer_take(); if (memory<0) return memory;
     long result=0;
     if (nr==SYS_sendmsg) {

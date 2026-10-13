@@ -36,7 +36,7 @@ int md_network_io_progress(struct md_network_io *n,struct md_ipc_io *io,struct m
     if (nr==SYS_listen) {
         struct sockaddr_in any={.sin_family=AF_INET};
         *result=md_network_endpoint_autobind(n->endpoint,fd,n->identity,(void *)&any,sizeof(any));
-        if (!*result && listen(fd,(int)n->args[1])) *result=-errno;
+        if (!*result) *result=md_network_endpoint_listen(n->endpoint,fd,(int)n->args[1]);
         return 0;
     }
     if (nr==SYS_sendto || nr==SYS_recvfrom || nr==SYS_sendmsg || nr==SYS_recvmsg) {
@@ -44,10 +44,10 @@ int md_network_io_progress(struct md_network_io *n,struct md_ipc_io *io,struct m
         if (!n->started) {
             int error=0;
             if (sending && message->address_size) {
-                error=md_network_endpoint_destination(n->endpoint,(void *)&message->address,message->address_size,
-                    &n->destination,&n->length);
-                if (!error) error=md_network_endpoint_autobind(n->endpoint,fd,n->identity,
+                error=md_network_endpoint_autobind(n->endpoint,fd,n->identity,
                     (void *)&message->address,message->address_size);
+                if (!error) error=md_network_endpoint_destination(n->endpoint,(void *)&message->address,message->address_size,
+                    &n->destination,&n->length);
                 if (!error) { message->address=n->destination; message->address_size=n->length; }
             }
             if (!error && !io->initialized) error=md_ipc_io_prepare(io,message,fd,flags,sending);
@@ -67,10 +67,10 @@ int md_network_io_progress(struct md_network_io *n,struct md_ipc_io *io,struct m
         int error=0;
         long args[5]={fd,0,0,0,0};
         if (nr==SYS_connect) {
-            error=md_network_endpoint_destination(n->endpoint,(void *)&message->address,message->address_size,
-                &n->destination,&n->length);
-            if (!error) error=md_network_endpoint_autobind(n->endpoint,fd,n->identity,
+            error=md_network_endpoint_autobind(n->endpoint,fd,n->identity,
                 (void *)&message->address,message->address_size);
+            if (!error) error=md_network_endpoint_destination(n->endpoint,(void *)&message->address,message->address_size,
+                &n->destination,&n->length);
             args[1]=(long)&n->destination; args[2]=n->length;
         } else {
             args[3]=(nr==SYS_accept4 ? n->args[3] : 0)|SOCK_CLOEXEC;

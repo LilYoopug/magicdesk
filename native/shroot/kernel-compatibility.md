@@ -16,6 +16,18 @@ subscription is required. The exported input ioctls predate 5.15. Unsupported
 device classes fail explicitly. `test_input_devices`, `test_input_uinput`,
 `fs_dispatch --input` and the guest/SDL fixtures cover these boundaries.
 
+The namespace-local nftables adapter implements a supported subset of the
+[Linux 5.15 nfnetlink ABI](https://github.com/torvalds/linux/blob/v5.15/include/uapi/linux/netfilter/nfnetlink.h)
+over the existing Unix datagram carrier. Generation, tables/chains/rules/sets and
+atomic batches require neither host NETLINK_NETFILTER permission nor CONFIG_NF_TABLES.
+`network_flow` and `network_forward` apply IPv4 TCP/UDP flow filtering and NAT
+using ordinary sockets, epoll, eventfd and nonblocking IO, all predating 5.15.
+Unsupported expressions fail before publication; direct-flow revocation returns
+`EBUSY`, and native backing ports are not kernel-firewall isolated.
+`test_network_nft`, `probe_nft_runtime.py`, `probe_nft_traffic.py` and the stock
+Podman/Docker fixtures cover protocol, atomicity, traffic and cleanup. No
+post-5.15 host primitive or new shared-startup requirement is added.
+
 Admission uses actual operations under the selected executor identity, not an
 Android-version inference or `uname`-only capability check. Kernel configuration,
 SELinux, application filters and vendor backports affect availability. Headers

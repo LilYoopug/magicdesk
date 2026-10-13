@@ -7,6 +7,7 @@
 #include "task_outgoing.h"
 #include "epoll_calls.h"
 #include "poll_calls.h"
+#include "network_packet.h"
 
 /* Protocol views share capacity, never live ownership. Callers publish only
  * initialized bytes; the common allocator owns no filesystem or IPC policy. */
@@ -16,6 +17,7 @@ union md_adapter_frame {
     struct md_epoll_frame epoll;
     struct md_poll_frame poll;
     struct shmid64_ds shm;
+    _Alignas(uint64_t) unsigned char network[MD_NETWORK_BUFFER_SIZE];
     _Alignas(struct md_ipc_packet) unsigned char ipc[offsetof(struct md_ipc_packet,data)+MD_IPC_VALUE_MAX];
 };
 #endif

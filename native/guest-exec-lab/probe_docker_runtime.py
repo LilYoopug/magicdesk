@@ -136,7 +136,7 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
         return item.get('exitCode') == 0
 
     def exercise_ports():
-        from docker_network_fixture import observe
+        from docker_network_fixture import observe, wait_service
         names = ('md-port-first', 'md-port-second')
         ports = (39871, 39872)
         try:
@@ -146,37 +146,13 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
                               '--cgroupns', cgroupns, '--mount',
                               'type=bind,src=' + str(Path(__file__).with_name('docker_network_fixture.py'))
                               + ',dst=/fixture.py,readonly', image, 'python3', '/fixture.py', name)
-                logs = subprocess.Popen(['docker', '--host', endpoint, 'logs', '-f', name],
-                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-                ready = queue.Queue()
-                def read_ready():
-                    try:
-                        for line in logs.stdout:
-                            if 'DOCKER_PORTS_READY' in line:
-                                ready.put(True)
-                                return
-                    finally:
-                        ready.put(False)
-                waiter = threading.Thread(target=read_ready)
-                waiter.start()
-                try:
-                    # EVENT_WAIT: service's post-bind readiness record, not a settling delay.
-                    assert ready.get(timeout=30), name + ' exited before binding'
-                finally:
-                    logs.terminate()
-                    logs.wait(timeout=10)
-                    waiter.join(10)
-                    logs.stdout.close()
-                    assert not waiter.is_alive()
-                report.setdefault('portChecks', []).append(observe(observer, operation='exchange', port=port, token=name))
-                assert client('exec', name, 'python3', '-c',
-                              'import socket,urllib.request; print(socket.getaddrinfo("example.com",80)); '
-                              'r=urllib.request.urlopen("http://example.com",timeout=15); '
-                              'assert r.status==200; print("DOCKER_INTERNET_OK",len(r.read()))')
+                wait_service(['docker', '--host', endpoint, 'logs', '-f', name])
+                report.setdefault('portChecks', []).append(observe(observer, operation='exchange', port=port, token=name, repeats=20))
+                assert client('exec', name, 'python3', '/fixture.py', '--internet')
             for source, target in (names, tuple(reversed(names))):
                 assert client('inspect', '--format', '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}', target)
                 address = str(ipaddress.IPv4Address(report['commands'][-1]['output'].strip()))
-                assert client('exec', source, 'python3', '/fixture.py', '--client', address, '8080', target)
+                assert client('exec', source, 'python3', '/fixture.py', '--client', address, '8080', target, '20')
             report['containerPeerExchangePassed'] = True
             assert not client('run', '--rm', '--name', 'md-port-conflict', '--network', 'bridge',
                               '-p', '127.0.0.1:39871:8080', image, '/bin/true')

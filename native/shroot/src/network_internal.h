@@ -20,6 +20,8 @@ struct md_network_fabric {
     struct md_network_namespace *spaces;
     struct md_network_endpoint *endpoints;
     int routed;
+    uint64_t policy_generation;
+    struct md_network_forward *forward;
 };
 struct md_network_namespace {
     atomic_uint references;
@@ -36,6 +38,7 @@ struct md_network_namespace {
     uint32_t next_port, ipv4_forward;
     struct md_network_ipv4_policy all, defaults;
     struct md_network_listener *listeners;
+    struct md_network_filter *filter;
 };
 /* Weak listeners are removed under the fabric lock before final FD release.
  * Only committed topology changes are broadcast. Delivery never blocks. */

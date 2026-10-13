@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "network_endpoint.h"
 #include "network_internal.h"
+#include "network_forward.h"
 #include "fd_selector.h"
 #include "guest_identity.h"
 #include <errno.h>
@@ -9,6 +10,7 @@
 #include <string.h>
 #include <unistd.h>
 
+struct direct_path { struct direct_path *next; struct md_network_flow_path path; };
 struct md_network_endpoint {
     struct md_fd_object object;
     struct md_network_namespace *space;
@@ -16,6 +18,8 @@ struct md_network_endpoint {
     int type, protocol, bound, connected, accepted;
     uint32_t source;
     struct sockaddr_in local, native, peer;
+    struct direct_path *direct;
+    unsigned direct_count;
 };
 static void destroy(struct md_fd_object *object) {
     struct md_network_endpoint *e=(void *)object;
@@ -24,8 +28,30 @@ static void destroy(struct md_fd_object *object) {
     struct md_network_endpoint **at=&f->endpoints;
     while (*at && *at!=e) at=&(*at)->next;
     if (*at) *at=e->next;
+    md_network_forward_endpoint_closed(e->space,e);
+    while (e->direct) { struct direct_path *p=e->direct; e->direct=p->next; free(p); }
     pthread_mutex_unlock(&f->lock);
     md_network_namespace_release(e->space); free(e);
+}
+static int direct_path(struct md_network_endpoint *e,const struct md_network_flow_path *path) {
+    for (struct direct_path *p=e->direct;p;p=p->next)
+        if (p->path.original.destination==path->original.destination
+                && p->path.original.destination_port==path->original.destination_port) return 0;
+    if (e->direct_count==1024) return -ENOSPC;
+    struct direct_path *p=malloc(sizeof(*p));
+    if (!p) return -ENOMEM;
+    p->path=*path; p->next=e->direct; e->direct=p; ++e->direct_count; return 0;
+}
+int md_network_endpoint_filter_update(struct md_network_namespace *n,struct md_network_filter *filter) {
+    /* Direct kernel streams cannot be moved into a relay after connect. Reject
+     * a revoking transaction atomically rather than retain a stale allowance.
+     * No per-read/write broker call is added to the ordinary data path. */
+    for (struct md_network_endpoint *e=n->fabric->endpoints;e;e=e->next)
+        for (struct direct_path *p=e->direct;p;p=p->next) {
+            int error=md_network_flow_admits(n,filter,&p->path);
+            if (error) return error==-EACCES ? -EBUSY : error;
+        }
+    return 0;
 }
 static const struct md_fd_object_type endpoint_type={.destroy=destroy,.selectors=1U<<MD_FD_SELECTOR_PROC};
 int md_network_endpoint_is(const struct md_fd_object *o) { return o && o->type==&endpoint_type; }
@@ -64,11 +90,7 @@ static struct md_network_interface *local_interface(struct md_network_namespace 
     /* Logical peers resolve the live catalogue directly. arp_notify needs no
      * gratuitous packet: there is no neighbor cache to invalidate on link or
      * address changes, and no announcement is sent onto Android's network. */
-    for (unsigned i=0;i<n->count;++i) {
-        struct md_network_interface *l=&n->links[i];
-        if ((!up || (l->info.flags&IFF_UP)) && (l->ipv4==ip || (l->kind==MD_LINK_LOOPBACK && loopback(ip)))) return l;
-    }
-    return NULL;
+    return md_network_local_interface(n,ip,up);
 }
 static int conflicts(struct md_network_endpoint *e,const struct sockaddr_in *a) {
     for (struct md_network_endpoint *other=e->space->fabric->endpoints;other;other=other->next)
@@ -77,8 +99,8 @@ static int conflicts(struct md_network_endpoint *e,const struct sockaddr_in *a) 
                     || !a->sin_addr.s_addr || other->local.sin_addr.s_addr==a->sin_addr.s_addr)) return 1;
     return 0;
 }
-int md_network_endpoint_bind(struct md_fd_object *o,int fd,const struct md_identity *identity,
-        const struct sockaddr *a,socklen_t length) {
+static int bind_endpoint(struct md_fd_object *o,int fd,const struct md_identity *identity,
+        const struct sockaddr *a,socklen_t length,int external) {
     if (!md_network_endpoint_is(o)) return -EBADF;
     struct md_network_endpoint *e=(void *)o;
     struct sockaddr_in logical;
@@ -91,6 +113,11 @@ int md_network_endpoint_bind(struct md_fd_object *o,int fd,const struct md_ident
             && !md_identity_capable_in(identity,n->owner,CAP_NET_BIND_SERVICE)) error=-EACCES;
     else if (logical.sin_port && conflicts(e,&logical)) error=-EADDRINUSE;
     struct sockaddr_in native=logical;
+    struct md_network_port_reservation *reservation=NULL;
+    struct md_network_interface *bound_link=local_interface(n,logical.sin_addr.s_addr,0);
+    int internal=logical.sin_addr.s_addr && !loopback(logical.sin_addr.s_addr)
+        && bound_link && bound_link->kind!=MD_LINK_UPLINK;
+    int published=external && n->mode==MD_NETWORK_ROUTED && !internal;
     if (!error) {
         native.sin_addr.s_addr=loopback(logical.sin_addr.s_addr) ? htonl(INADDR_LOOPBACK) : INADDR_ANY;
         /* bind/getsockname are nonblocking. Publication and conflict checking
@@ -104,9 +131,14 @@ int md_network_endpoint_bind(struct md_fd_object *o,int fd,const struct md_ident
                 logical.sin_port=htons((uint16_t)n->next_port++);
                 if (conflicts(e,&logical)) continue;
             }
-            native.sin_port=n->mode==MD_NETWORK_PRIVATE ? 0 : logical.sin_port;
+            if (published) {
+                error=md_network_forward_bind(n,e,e->type,&logical,&reservation);
+                if (error) { if (automatic && error==-EADDRINUSE) continue; break; }
+            }
+            native.sin_port=0;
             if (!bind(fd,(void *)&native,sizeof(native))) { error=0; break; }
             error=-errno;
+            md_network_forward_bound(reservation,0); reservation=NULL;
             if (!automatic || error!=-EADDRINUSE) break;
         }
         if (!error) {
@@ -117,32 +149,39 @@ int md_network_endpoint_bind(struct md_fd_object *o,int fd,const struct md_ident
             }
         }
     }
+    md_network_forward_bound(reservation,!error);
     pthread_mutex_unlock(&n->fabric->lock); return error;
 }
-/* A veth attachment must reach an UP bridge or its peer. Namespaces with only
- * a loopback interface never acquire connectivity merely by existing. */
-static struct md_network_interface *attachment(struct md_network_namespace *n,struct md_network_interface *l,
-        struct md_network_namespace **owner) {
-    if (!(l->info.flags&IFF_UP)) return NULL;
-    if (l->kind==MD_LINK_UPLINK || l->kind==MD_LINK_BRIDGE) { *owner=n; return l; }
-    if (l->kind!=MD_LINK_VETH) return NULL;
-    struct md_network_namespace *other=md_network_interface_owner(n->fabric,l->peer);
-    struct md_network_interface *peer=other ? md_network_interface_find(other,l->peer,NULL) : NULL;
-    if (!peer || !(peer->info.flags&IFF_UP)) return NULL;
-    struct md_network_interface *master=peer->master ? md_network_interface_find(other,peer->master,NULL) : peer;
-    if (!master || !(master->info.flags&IFF_UP)) return NULL;
-    *owner=other; return master;
+int md_network_endpoint_bind(struct md_fd_object *o,int fd,const struct md_identity *identity,
+        const struct sockaddr *a,socklen_t length) {
+    return bind_endpoint(o,fd,identity,a,length,1);
 }
-static int reachable(struct md_network_namespace *from,struct md_network_namespace *to,uint32_t source,uint32_t ip) {
-    if (from==to) return local_interface(to,ip,1)!=NULL;
-    struct md_network_interface *out=md_network_route_find(from,ip,NULL), *in=local_interface(to,ip,1);
-    struct md_network_interface *arrival=in;
-    if (!source && out) source=out->ipv4;
-    struct md_network_namespace *a=NULL,*b=NULL;
-    out=out ? attachment(from,out,&a) : NULL;
-    in=in ? attachment(to,in,&b) : NULL;
-    return out && in && a==b && out->info.index==in->info.index
-        && !md_network_ingress(a,out,source,ip) && !md_network_ingress(to,arrival,source,ip);
+int md_network_endpoint_listen(struct md_fd_object *o,int fd,int backlog) {
+    if (!md_network_endpoint_is(o)) return -EBADF;
+    struct md_network_endpoint *e=(void *)o;
+    pthread_mutex_lock(&e->space->fabric->lock);
+    struct md_network_port_reservation *reservation=NULL;
+    struct md_network_interface *link=local_interface(e->space,e->local.sin_addr.s_addr,0);
+    int external=e->space->mode==MD_NETWORK_ROUTED && (!e->local.sin_addr.s_addr
+        || loopback(e->local.sin_addr.s_addr) || (link && link->kind==MD_LINK_UPLINK));
+    int error=external ? md_network_forward_bind(e->space,e,e->type,&e->local,&reservation) : 0;
+    if (!error) error=listen(fd,backlog) ? -errno : md_network_forward_listen(e->space,e,backlog);
+    md_network_forward_bound(reservation,!error);
+    pthread_mutex_unlock(&e->space->fabric->lock); return error;
+}
+int md_network_endpoint_resolve(struct md_network_fabric *f,uint64_t destination,int type,
+        const struct sockaddr_in *logical,struct sockaddr_in *native) {
+    *native=*logical;
+    if (!destination) return 0;
+    struct md_network_namespace *n=md_network_space_find(f,destination);
+    if (!n) return -ENETUNREACH;
+    for (struct md_network_endpoint *e=f->endpoints;e;e=e->next)
+        if (e->space==n && e->type==type && e->bound && !e->accepted
+                && e->local.sin_port==logical->sin_port && (!e->local.sin_addr.s_addr
+                    || e->local.sin_addr.s_addr==logical->sin_addr.s_addr)) {
+            *native=e->native; native->sin_addr.s_addr=htonl(INADDR_LOOPBACK); return 0;
+        }
+    return n->mode==MD_NETWORK_ROUTED && loopback(logical->sin_addr.s_addr) ? 0 : -ECONNREFUSED;
 }
 int md_network_endpoint_destination(struct md_fd_object *o,const struct sockaddr *a,socklen_t length,
         struct sockaddr_storage *out,socklen_t *out_length) {
@@ -150,39 +189,20 @@ int md_network_endpoint_destination(struct md_fd_object *o,const struct sockaddr
     struct md_network_endpoint *e=(void *)o;
     struct sockaddr_in logical;
     int error=address(a,length,&logical); if (error) return error;
-    struct md_network_namespace *n=e->space, *destination=NULL;
+    struct md_network_namespace *n=e->space;
     pthread_mutex_lock(&n->fabric->lock);
-    if (loopback(logical.sin_addr.s_addr)) destination=n;
-    else for (struct md_network_namespace *s=n->fabric->spaces;s;s=s->next)
-        if (local_interface(s,logical.sin_addr.s_addr,0)) { destination=s; break; }
     struct sockaddr_in native=logical;
-    if (destination) {
-        if (!reachable(n,destination,e->local.sin_addr.s_addr,logical.sin_addr.s_addr)) error=-ENETUNREACH;
-        else {
-            error=-ECONNREFUSED;
-            for (struct md_network_endpoint *other=n->fabric->endpoints;other;other=other->next)
-                if (other->space==destination && other->type==e->type && other->bound && !other->accepted
-                        && other->local.sin_port==logical.sin_port && (!other->local.sin_addr.s_addr
-                            || other->local.sin_addr.s_addr==logical.sin_addr.s_addr)) {
-                    native=other->native; native.sin_addr.s_addr=htonl(INADDR_LOOPBACK); error=0; break;
-                }
-            /* The initial routed namespace includes Android's loopback services.
-             * Private namespaces never fall through to that host address space. */
-            if (error==-ECONNREFUSED && n->mode==MD_NETWORK_ROUTED && destination==n
-                    && loopback(logical.sin_addr.s_addr)) error=0;
-        }
-    } else {
-        struct md_network_interface *outgoing=md_network_route_find(n,logical.sin_addr.s_addr,NULL);
-        uint32_t source=e->local.sin_addr.s_addr ? e->local.sin_addr.s_addr : outgoing ? outgoing->ipv4 : 0;
-        struct md_network_namespace *owner=NULL;
-        outgoing=outgoing ? attachment(n,outgoing,&owner) : NULL;
-        if (!outgoing || !owner || owner->mode!=MD_NETWORK_ROUTED
-                || (owner!=n && !owner->ipv4_forward)) error=-ENETUNREACH;
-        else if (owner!=n && md_network_ingress(owner,outgoing,source,logical.sin_addr.s_addr)) error=-ENETUNREACH;
-        /* Link-local multicast and broadcast need a packet backend, not an
-         * accidental submission to Android's physical network. */
-        else if ((ntohl(logical.sin_addr.s_addr)>>28)==14 || logical.sin_addr.s_addr==INADDR_BROADCAST)
-            error=-EOPNOTSUPP;
+    if (!md_network_forward_destination(n,e,e->type,&e->local,&logical,&native)) {
+        struct md_filter_packet packet={.source=e->local.sin_addr.s_addr,.source_port=e->local.sin_port,
+            .destination=logical.sin_addr.s_addr,.destination_port=logical.sin_port,.protocol=e->protocol,.state=8};
+        struct md_network_flow_path path;
+        error=md_network_flow_route(n,&packet,0,&path);
+        struct sockaddr_in translated={.sin_family=AF_INET,.sin_addr.s_addr=packet.destination,.sin_port=packet.destination_port};
+        if (!error) error=md_network_endpoint_resolve(n->fabric,path.destination,e->type,&translated,&native);
+        if (!error && path.mediated) {
+            struct sockaddr_in target=native;
+            error=md_network_forward_route(n,e,e->type,&e->native,&target,&path,&native);
+        } else if (!error) error=direct_path(e,&path);
     }
     if (!error) { memcpy(out,&native,sizeof(native)); *out_length=sizeof(native); }
     pthread_mutex_unlock(&n->fabric->lock); return error;
@@ -203,7 +223,7 @@ int md_network_endpoint_autobind(struct md_fd_object *o,int fd,const struct md_i
     pthread_mutex_unlock(&e->space->fabric->lock);
     if (!bound) {
         struct sockaddr_in any={.sin_family=AF_INET};
-        error=md_network_endpoint_bind(o,fd,identity,(void *)&any,sizeof(any));
+        error=bind_endpoint(o,fd,identity,(void *)&any,sizeof(any),0);
         /* Another operation on the same OFD may have completed autobind. */
         if (error==-EINVAL) {
             pthread_mutex_lock(&e->space->fabric->lock); bound=e->bound; pthread_mutex_unlock(&e->space->fabric->lock);
@@ -245,6 +265,9 @@ int md_network_endpoint_source(struct md_fd_object *o,struct sockaddr_storage *a
      * An internet peer sharing a local ephemeral port is still that peer. */
     if (!loopback(a->sin_addr.s_addr)) return 0;
     pthread_mutex_lock(&e->space->fabric->lock);
+    if (md_network_forward_source(e->space,e->type,a)) {
+        pthread_mutex_unlock(&e->space->fabric->lock); return 0;
+    }
     for (struct md_network_endpoint *other=e->space->fabric->endpoints;other;other=other->next)
         if (other->bound && !other->accepted && other->type==e->type && other->native.sin_port==a->sin_port
                 && (!other->native.sin_addr.s_addr || other->native.sin_addr.s_addr==a->sin_addr.s_addr)) {
@@ -266,6 +289,13 @@ int md_network_endpoint_accept(struct md_fd_object *o,int fd,struct md_fd_object
     pthread_mutex_lock(&parent->space->fabric->lock);
     e->local=parent->local; e->native=parent->native; e->bound=e->connected=e->accepted=1;
     memcpy(&e->peer,&peer,sizeof(e->peer));
+    for (struct md_network_endpoint *client=parent->space->fabric->endpoints;client && !error;client=client->next)
+        if (client!=e && client->type==SOCK_STREAM)
+            for (struct direct_path *p=client->direct;p && !error;p=p->next)
+                if (p->path.destination==parent->space->inode
+                        && p->path.original.source==e->peer.sin_addr.s_addr && p->path.original.source_port==e->peer.sin_port
+                        && p->path.translated.destination_port==e->local.sin_port) error=direct_path(e,&p->path);
     pthread_mutex_unlock(&parent->space->fabric->lock);
+    if (error) { md_fd_object_release(&e->object); return error; }
     *out=&e->object; return 0;
 }

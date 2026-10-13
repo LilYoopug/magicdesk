@@ -2,7 +2,9 @@
 #include "network_internal.h"
 #include "network_route.h"
 #include "network_generic.h"
+#include "network_nft.h"
 #include "network_endpoint.h"
+#include "network_forward.h"
 #include "network_packet.h"
 #include "guest_identity.h"
 #include "fd_selector.h"
@@ -94,6 +96,7 @@ int md_network_parameter_write(struct md_network_namespace *n,enum md_network_pa
     }
     default: error=-EINVAL;
     }
+    if (!error && kind>=MD_NET_IPV4_FORWARD) md_network_forward_changed(n->fabric);
     pthread_mutex_unlock(&n->fabric->lock); return error;
 }
 struct network_socket {
@@ -149,7 +152,7 @@ int md_network_socket_open(struct md_network_namespace *n, int family, int type,
         return md_network_endpoint_open(n,family,type,protocol,out,fd);
     int base=type&15;
     if (family==AF_NETLINK) {
-        if (protocol!=NETLINK_ROUTE && protocol!=NETLINK_GENERIC) return -EPROTONOSUPPORT;
+        if (protocol!=NETLINK_ROUTE && protocol!=NETLINK_GENERIC && protocol!=NETLINK_NETFILTER) return -EPROTONOSUPPORT;
         if (base!=SOCK_RAW && base!=SOCK_DGRAM) return -ESOCKTNOSUPPORT;
     } else if (family==AF_UNIX || family==AF_INET || family==AF_INET6) {
         if (base!=SOCK_DGRAM || protocol) return -EPROTONOSUPPORT;
@@ -191,6 +194,7 @@ void md_network_broadcast(struct md_network_namespace *n,unsigned group,const vo
         }
 }
 static uint32_t supported_groups(const struct network_socket *s) {
+    if (s->protocol==NETLINK_NETFILTER) return 0;
     if (s->protocol==NETLINK_GENERIC) return 1U<<(MD_NETWORK_GENERIC_NOTIFY-1);
     return RTMGRP_LINK|RTMGRP_IPV4_IFADDR|RTMGRP_IPV6_IFADDR|RTMGRP_IPV4_ROUTE|RTMGRP_IPV6_ROUTE
         | RTMGRP_NEIGH|RTMGRP_TC|RTMGRP_IPV4_RULE|(1U<<(RTNLGRP_IPV6_RULE-1));
@@ -322,13 +326,21 @@ long md_network_socket_call(struct md_fd_object *object, const struct md_identit
     }
     if (nr==SYS_sendto || nr==SYS_sendmsg || nr==SYS_write) {
         if (size<sizeof(struct nlmsghdr)) return -EINVAL;
+        if (s->protocol==NETLINK_NETFILTER) {
+            void *reply=malloc(MD_NETWORK_PACKET_MAX);
+            if (!reply) return -ENOMEM;
+            struct md_network_publication publication={.context=s,.publish=publish_response};
+            long result=md_network_nft(s->space,identity,data,size,s->port ? s->port : (uint32_t)pid,
+                s->capped_ack,reply,MD_NETWORK_PACKET_MAX,&publication);
+            free(reply); return result<0 ? result : (long)size;
+        }
         const struct nlmsghdr *h=data;
         /* Kernel-backed response queue supplies poll/epoll readiness; no
          * request or interface mutation is submitted to Android netlink. */
         long remaining=(long)size;
         if (!NLMSG_OK(h,remaining)) return -EINVAL;
         for (;NLMSG_OK(h,remaining);h=NLMSG_NEXT(h,remaining)) {
-            union { struct nlmsghdr align; unsigned char bytes[MD_NETWORK_BUFFER_SIZE+sizeof(struct nlmsgerr)]; } small;
+            union { struct nlmsghdr align; unsigned char bytes[4096+sizeof(struct nlmsgerr)]; } small;
             int query=s->protocol==NETLINK_ROUTE && md_network_route_query(h->nlmsg_type);
             size_t limit=query ? MD_NETWORK_PACKET_MAX : sizeof(small);
             unsigned char *reply=query ? malloc(limit) : small.bytes; if (!reply) return -ENOMEM;

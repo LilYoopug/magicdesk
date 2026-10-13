@@ -121,7 +121,12 @@ of host Landlock support; it is not full native-LSM or ptrace-domain confinement
 Logical user/PID/mount/UTS/IPC/network/cgroup namespaces and private devpts views
 support nested Linux workloads without requiring their host kernel equivalents.
 Ordinary networking remains native; routed IPv4 is explicit and has its own
-port/endpoint ownership. Cgroups are intentionally permissive compatibility
+port/endpoint ownership. Namespace-owned nftables rules, logical flow routing
+and event-driven forwarding are separate owners: atomic rule/port publication
+does not put an interpreter on ordinary stream reads/writes. Supported filtered
+and NAT flows use cached decisions and bounded relay queues. Native backing
+ports are not host-firewall isolated; unsupported rule operations fail explicitly.
+Cgroups are intentionally permissive compatibility
 providers, not enforcement of CPU, memory, pids or device limits. Missing network,
 mount or device operations fail explicitly.
 
