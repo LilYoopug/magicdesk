@@ -141,6 +141,18 @@ class Images(unittest.TestCase):
         self.run_import(self.layout())
         self.assertEqual(self.object('hello').read_bytes(), b'world')
 
+    def test_format_matches_created_namespace_and_old_schema_is_not_modified(self):
+        version = int(self.command('format').stdout)
+        self.assertGreater(version, 1)
+        self.run_import(self.layout())
+        with sqlite3.connect(self.destination / 'namespace.db') as db:
+            self.assertEqual(version, db.execute('PRAGMA user_version').fetchone()[0])
+            db.execute('PRAGMA user_version=' + str(version - 1))
+        result = self.command('inspect', self.destination, success=False)
+        self.assertIn('errno=' + str(errno.EPROTONOSUPPORT), result.stderr)
+        with sqlite3.connect(self.destination / 'namespace.db') as db:
+            self.assertEqual(version - 1, db.execute('PRAGMA user_version').fetchone()[0])
+
     def interrupt_publication(self, *arguments):
         libc = ctypes.CDLL(None, use_errno=True)
         watch = libc.inotify_init1(os.O_CLOEXEC | os.O_NONBLOCK)

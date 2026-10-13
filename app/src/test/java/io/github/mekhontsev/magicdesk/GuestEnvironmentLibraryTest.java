@@ -25,8 +25,10 @@ public class GuestEnvironmentLibraryTest {
         final Map<Path, String> applications = new HashMap<>();
         final Map<String, String> icons = new HashMap<>();
         boolean busy;
+        String format = "14";
         @Override public String invoke(String... args) throws Exception {
             commands.add(List.of(args));
+            if (args[0].equals("format")) return format;
             Path path = Path.of(args[1]);
             switch (args[0]) {
                 case "applications" -> {
@@ -82,6 +84,39 @@ public class GuestEnvironmentLibraryTest {
         var c = library.install(archive.toString(), GuestEnvironmentLibrary.SourceKind.ROOTFS, "work");
         assertNotEquals(a.store(), c.store());
         assertEquals(b, library.resolve("other"));
+    }
+
+    @Test public void imageCacheUsesNativeFormatWithoutReusingOrRemovingOldStores() throws Exception {
+        Path root = temporary.newFolder().toPath(), archive = temporary.newFile().toPath();
+        Files.writeString(archive, "rootfs input");
+        Images images = new Images(); var library = library(root, images);
+        Path legacy = Files.createDirectory(root.resolve("images/rootfs-" + GuestImageFiles.digest(archive)));
+        images.format = "12";
+        var old = library.install(archive.toString(), GuestEnvironmentLibrary.SourceKind.ROOTFS, "old");
+        images.format = "14";
+        var current = library.install(archive.toString(), GuestEnvironmentLibrary.SourceKind.ROOTFS, "current");
+        var shared = library.install(archive.toString(), GuestEnvironmentLibrary.SourceKind.ROOTFS, "shared");
+        assertNotEquals(old.image(), current.image());
+        assertEquals(current.image(), shared.image());
+        assertTrue(current.image().startsWith("v14-rootfs-"));
+        assertEquals(old, library.resolve("old"));
+        assertTrue(Files.isDirectory(legacy));
+        assertTrue(Files.isDirectory(old.store()));
+        assertEquals(2, images.commands.stream().filter(c -> c.get(0).equals("rootfs")).count());
+        assertFalse(images.commands.stream().anyMatch(c -> c.get(0).startsWith("remove")));
+        assertFalse(images.commands.stream().anyMatch(c -> c.contains(legacy.toString())));
+    }
+
+    @Test public void invalidNativeFormatStopsBeforeImageOrInstanceCreation() throws Exception {
+        Path root = temporary.newFolder().toPath(), archive = temporary.newFile().toPath();
+        Images images = new Images(); var library = library(root, images);
+        for (String format : List.of("", "0", "../14", "14\n15", "99999999999999999999")) {
+            images.format = format; images.commands.clear();
+            assertThrows(IOException.class, () -> library.install(archive.toString(),
+                    GuestEnvironmentLibrary.SourceKind.ROOTFS, "work"));
+            assertEquals(List.of(List.of("format")), images.commands);
+            assertTrue(library.list().isEmpty());
+        }
     }
 
     @Test public void failedOrBusyRemovalKeepsNameAndPruneKeepsDependencies() throws Exception {

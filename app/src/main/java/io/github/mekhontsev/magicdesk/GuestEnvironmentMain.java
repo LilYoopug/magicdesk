@@ -9,11 +9,13 @@ public final class GuestEnvironmentMain {
         try {
             GuestLaunchPlan.requireIdentity(android.system.Os.getuid());
             if (arguments.length < 3) throw new IllegalArgumentException("Expected bundle, library and command");
+            String[] command = Arrays.copyOfRange(arguments, 2, arguments.length);
+            if (checkDns(command)) return;
             Path root = Path.of(arguments[1]);
             var library = new GuestEnvironmentLibrary(root,
                     new GuestImageTool(Path.of(arguments[0]), root.resolve("work")),
                     new GuestOciRegistry(System.err::println), System.err::println);
-            execute(library, Arrays.copyOfRange(arguments, 2, arguments.length));
+            execute(library, command);
         } catch (Exception error) {
             System.err.println("Shroot environment: " + error.getMessage());
             System.exit(1);
@@ -39,6 +41,7 @@ public final class GuestEnvironmentMain {
                     shroot restore ARCHIVE --name NAME
                     shroot remove NAME | prune
                     shroot dns NAME system|preserve|IP[,IP...] [--replace]
+                    shroot dns --check system|preserve|IP[,IP...]
 
                     Launch options: --bind HOST GUEST, --bind-ro HOST GUEST,
                       --user USER[:GROUP], --cwd /PATH, --env KEY=VALUE, --hostname NAME,
@@ -49,6 +52,7 @@ public final class GuestEnvironmentMain {
                     login uses the guest account home and shell unless explicitly overridden.
                     install accepts --dns system (default), preserve, or IP[,IP...]. Existing DNS is retained.
                     dns changes an inactive environment; --replace explicitly replaces existing configuration.
+                    dns --check validates the policy without creating or changing an environment; it does not test reachability.
                     Bind directories must exist; access is limited by the actual shell/root identity.
                     prune removes unused library resources and the download cache; busy resources fail.
                     MAGICDESK_GUEST_HOME selects a separate library. Only public HTTPS registries are supported.
@@ -105,6 +109,13 @@ public final class GuestEnvironmentMain {
             library.remove(arguments[1]); System.out.println("Removed " + arguments[1]);
         } else if (command.equals("prune") && arguments.length == 1) library.prune();
         else throw new IllegalArgumentException("Invalid command. See shroot --help");
+    }
+
+    static boolean checkDns(String[] arguments) throws Exception {
+        if (arguments.length < 2 || !arguments[0].equals("dns") || !arguments[1].equals("--check")) return false;
+        if (arguments.length != 3) throw new IllegalArgumentException("dns --check system|preserve|IP[,IP...]");
+        resolver(arguments[2]);
+        return true;
     }
 
     private static String resolver(String policy) throws Exception {

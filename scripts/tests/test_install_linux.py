@@ -29,6 +29,7 @@ class InstallLinuxTest(unittest.TestCase):
         self.directory = Path(self.temp.name)
         self.log = self.directory / "calls.jsonl"
         self.version_log = self.directory / "version.jsonl"
+        self.dns_log = self.directory / "dns.jsonl"
         self.payload = self.directory / "guest.sh"
         stub = self.directory / "shroot"
         stub.write_text("#!" + sys.executable + r'''
@@ -45,6 +46,25 @@ if Path(sys.argv[0]).name == "magicdesk" and args and args[0] == "get_state":
         sys.exit(2)
     print(os.environ["TEST_VERSION_CODE"])
     sys.exit(int(os.environ.get("TEST_VERSION_STATUS", "0")))
+if args[:2] == ["dns", "--check"]:
+    import ipaddress
+    with open(os.environ["TEST_DNS_LOG"], "a") as log:
+        log.write(json.dumps(args) + "\n")
+    if args[2] == "system":
+        error = os.environ.get("TEST_DNS_ERROR", "")
+        if error:
+            print(error, file=sys.stderr)
+            sys.exit(1)
+    elif args[2] != "preserve":
+        try:
+            addresses = args[2].split(",")
+            assert 1 <= len(addresses) <= 3
+            for address in addresses:
+                ipaddress.ip_address(address)
+        except (ValueError, AssertionError):
+            print("Invalid DNS server addresses", file=sys.stderr)
+            sys.exit(1)
+    sys.exit(0)
 with open(os.environ["TEST_LOG"], "a") as log:
     log.write(json.dumps(args) + "\n")
 stage = args[0]
@@ -69,6 +89,13 @@ if stage == "exec":
             stage = "kwin"
         suffix = {"graphics": ".gpu", "kwin": ".kwin"}.get(stage, "")
         Path(os.environ["TEST_PAYLOAD"] + suffix).write_text(payload)
+        if stage == "setup" and os.environ.get("TEST_SETUP_FAILURES"):
+            attempts = Path(os.environ["TEST_PAYLOAD"] + ".attempts")
+            count = int(attempts.read_text()) + 1 if attempts.exists() else 1
+            attempts.write_text(str(count))
+            if count <= int(os.environ["TEST_SETUP_FAILURES"]):
+                print("test package download failure", file=sys.stderr)
+                sys.exit(23)
 if os.environ.get("TEST_FAIL") == stage:
     print("test failure: " + stage, file=sys.stderr)
     sys.exit(23)
@@ -80,6 +107,7 @@ if os.environ.get("TEST_FAIL") == stage:
         (self.directory / "magicdesk").chmod(0o755)
         self.environment = dict(os.environ, PATH=str(self.directory) + os.pathsep + os.environ["PATH"],
                                 TEST_LOG=str(self.log), TEST_PAYLOAD=str(self.payload), TMPDIR=str(self.directory),
+                                TEST_DNS_LOG=str(self.dns_log),
                                 TEST_VERSION_LOG=str(self.version_log), TEST_VERSION_CODE=str(MIN_VERSION_CODE))
 
     def run_script(self, *args, **environment):
@@ -92,6 +120,83 @@ if os.environ.get("TEST_FAIL") == stage:
 
     def version_calls(self):
         return [json.loads(line) for line in self.version_log.read_text().splitlines()] if self.version_log.exists() else []
+
+    def dns_checks(self):
+        return [json.loads(line) for line in self.dns_log.read_text().splitlines()] if self.dns_log.exists() else []
+
+    def test_dns_failure_stops_unattended_install_before_any_image_work(self):
+        for distro in ('alpine', 'steamos', 'void'):
+            with self.subTest(distro=distro):
+                result = self.run_script('--yes', '--distro', distro, TEST_DNS_ERROR='Android VPN is active')
+                self.assertEqual(1, result.returncode)
+                self.assertIn('Android VPN is active', result.stderr)
+                self.assertIn('Retry with --dns', result.stderr)
+                self.assertNotIn('GUI=', result.stdout)
+                self.assertEqual([], self.calls())
+
+    def test_invalid_explicit_dns_is_checked_without_touching_an_image(self):
+        result = self.run_script('--yes', '--dns', 'invalid')
+        self.assertEqual(1, result.returncode)
+        self.assertEqual([['dns', '--check', 'invalid']], self.dns_checks())
+        self.assertEqual([], self.calls())
+
+    def test_resume_keeps_resolver_without_requiring_android_network(self):
+        result = self.run_script('--yes', '--resume', '--name', 'work', TEST_DNS_ERROR='offline')
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual([], self.dns_checks())
+
+    @unittest.skipUnless(hasattr(os, 'openpty'), 'PTY required')
+    def test_interactive_dns_repair_follows_configuration_and_retries_only_dns(self):
+        output = self.questions(b'alpine\nwork\nxfce\nsoftware\nkeep\nkeep\nbasic\nn\nsystem\ninvalid\n192.0.2.1\ny\n',
+                                TEST_DNS_ERROR='Android VPN is active')
+        self.assertGreater(output.index('Cannot prepare guest DNS'), output.index('Additional settings ('))
+        self.assertEqual(1, output.count('Distribution ['))
+        self.assertEqual([['dns', '--check', value] for value in ('system', 'system', 'invalid', '192.0.2.1')], self.dns_checks())
+        self.assertEqual(['install', 'alpine:3.23', '--name', 'work', '--dns', '192.0.2.1'], self.calls()[1])
+        self.assertIn('Linux is ready: work', output)
+
+    @unittest.skipUnless(hasattr(os, 'openpty'), 'PTY required')
+    def test_unavailable_dns_can_be_cancelled_without_installing(self):
+        output = self.questions(b'alpine\nwork\nxfce\nsoftware\nkeep\nkeep\nbasic\nn\n\n',
+                                TEST_DNS_ERROR='Android Private DNS is active')
+        self.assertIn('Cancelled.', output)
+        self.assertIn('Distribution [', output)
+        self.assertEqual([], self.calls())
+
+    @unittest.skipUnless(hasattr(os, 'openpty'), 'PTY required')
+    def test_advanced_invalid_dns_retains_other_answers(self):
+        output = self.questions(b'alpine\nwork\nxfce\nsoftware\nkeep\nkeep\nbasic\ny\n\nboth\n\ninvalid\nkeep\npreserve\ny\n')
+        self.assertEqual([['dns', '--check', value] for value in ('invalid', 'preserve')], self.dns_checks())
+        self.assertEqual(1, output.count('Distribution ['))
+        self.assertEqual(['install', 'alpine:3.23', '--name', 'work', '--dns', 'preserve'], self.calls()[1])
+
+    @unittest.skipUnless(hasattr(os, 'openpty'), 'PTY required')
+    def test_package_failure_can_change_dns_without_reinstalling_or_repeating_answers(self):
+        output = self.questions(b'alpine\nwork\nxfce\nsoftware\nkeep\nkeep\nbasic\nn\ny\ndns\ninvalid\n192.0.2.1\n',
+                                TEST_SETUP_FAILURES='1')
+        self.assertIn('test package download failure', output)
+        self.assertIn('Linux is ready: work', output)
+        self.assertEqual(1, output.count('Distribution ['))
+        self.assertEqual(1, sum(c[0] == 'install' for c in self.calls()))
+        self.assertIn(['dns', 'work', '192.0.2.1', '--replace'], self.calls())
+        setups = [c for c in self.calls() if c[0] == 'exec' and '-s' in c and c[-8] == 'xfce']
+        self.assertEqual(2, len(setups))
+        self.assertEqual(setups[0], setups[1])
+
+    @unittest.skipUnless(hasattr(os, 'openpty'), 'PTY required')
+    def test_package_retry_and_cancel_keep_the_environment(self):
+        output = self.questions(b'alpine\nwork\nxfce\nsoftware\nkeep\nkeep\nbasic\nn\ny\ninvalid\nretry\n\n',
+                                expected_exit=23, TEST_SETUP_FAILURES='2')
+        self.assertIn('Environment retained.', output)
+        self.assertEqual(1, sum(c[0] == 'install' for c in self.calls()))
+        self.assertFalse(any(c[0] == 'remove' for c in self.calls()))
+
+    def test_unattended_package_failure_never_retries(self):
+        result = self.run_script('--yes', '--distro', 'alpine', TEST_SETUP_FAILURES='1')
+        self.assertEqual(23, result.returncode)
+        self.assertIn('--resume', result.stderr)
+        self.assertEqual('1', Path(str(self.payload) + '.attempts').read_text())
+        self.assertNotIn('Package setup: retry', result.stdout)
 
     def test_minimum_and_newer_versions_are_accepted_with_one_query(self):
         for version in (MIN_VERSION_CODE, MIN_VERSION_CODE + 1, 2147483647):
@@ -309,11 +414,14 @@ if os.environ.get("TEST_FAIL") == stage:
         custom = applications / 'user.desktop'
         custom.write_text('user entry')
         command = setup[start:end].replace('/usr/local/', str(self.directory / 'local') + '/')
+        titles = {'xfce': 'Xfce Desktop', 'weston': 'Weston Desktop', 'gnome': 'GNOME Shell (development kit)',
+                  'plasma-x11': 'Plasma Desktop (x11)', 'plasma-wayland': 'Plasma Desktop (wayland)'}
         for gui, modes in [('keep', ['xfce']), ('plasma', ['xfce', 'plasma-x11', 'plasma-wayland']),
-                           ('weston', ['xfce', 'plasma-x11', 'plasma-wayland', 'weston'])]:
+                           ('weston', ['xfce', 'plasma-x11', 'plasma-wayland', 'weston']),
+                           ('gnome', list(titles))]:
             # EVENT_WAIT: entry refresh must exit and preserve unrelated files.
             result = subprocess.run(['sh', '-eu', '-c', command],
-                                    env=dict(self.environment, gui=gui, gui_services='yes'),
+                                    env=dict(self.environment, gui=gui, gui_services='yes', NAME='Alpine Linux', ID='alpine'),
                                     capture_output=True, text=True, timeout=5)
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertEqual('user entry', custom.read_text())
@@ -321,8 +429,25 @@ if os.environ.get("TEST_FAIL") == stage:
                              {p.name for p in applications.glob('magicdesk-*.desktop')})
             for mode in modes:
                 entry = (applications / f'magicdesk-{mode}.desktop').read_text()
+                self.assertIn(f'Name=Alpine Linux - {titles[mode]}\n', entry)
                 self.assertIn('Exec=magicdesk-desktop-session ' + mode + '\n', entry)
                 self.assertIn('X-MagicDesk-GraphicsMode=desktop\n', entry)
+        # Repeated refresh reads OS identity, not the previous label or the instance name.
+        for name in ('Debian GNU/Linux', 'Ubuntu', 'Fedora Linux', 'Arch Linux ARM',
+                     'openSUSE Tumbleweed', 'openKylin', 'Deepin', 'Manjaro ARM',
+                     'Void', 'Armtix', 'SteamOS', '', None):
+            with self.subTest(os_name=name):
+                environment = dict(self.environment, gui='keep', gui_services='yes', ID='alpine')
+                environment.pop('NAME', None)
+                if name is not None:
+                    environment['NAME'] = name
+                result = subprocess.run(['sh', '-eu', '-c', command], env=environment,
+                                        capture_output=True, text=True, timeout=5)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual('user entry', custom.read_text())
+                for mode, title in titles.items():
+                    entry = (applications / f'magicdesk-{mode}.desktop').read_text()
+                    self.assertIn(f'Name={name or "alpine"} - {title}\n', entry)
 
     def test_desktop_launch_owns_audio_and_preserves_gamepad_for_each_protocol(self):
         audio = self.directory / 'magicdesk-audio-session'
@@ -1175,11 +1300,11 @@ if os.environ.get("TEST_FAIL") == stage:
                          self.calls()[-3][-8:])
         self.assertIn("Guest account=developer | extra packages=git gdb", output)
 
-    def questions(self, answers):
+    def questions(self, answers, expected_exit=0, **environment):
         master, slave = os.openpty()
         self.addCleanup(os.close, master)
         process = subprocess.Popen(["sh", str(SCRIPT)], stdin=slave, stdout=slave, stderr=slave,
-                                   env=self.environment)
+                                   env=dict(self.environment, **environment))
         os.close(slave)
         def cleanup():
             if process.poll() is None:
@@ -1203,7 +1328,7 @@ if os.environ.get("TEST_FAIL") == stage:
                 if not data:
                     break
                 output.extend(data)
-        self.assertEqual(0, process.wait(timeout=5), output.decode())
+        self.assertEqual(expected_exit, process.wait(timeout=5), output.decode())
         return output.decode()
 
 

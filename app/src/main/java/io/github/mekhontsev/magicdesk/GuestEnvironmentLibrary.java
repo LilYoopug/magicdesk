@@ -53,6 +53,8 @@ final class GuestEnvironmentLibrary {
         validateName(name);
         try (Lock ignored = lock()) {
             requireNew(name);
+            String format = images.invoke("format").trim();
+            if (!format.matches("[1-9][0-9]{0,8}")) throw new IOException("Invalid native image format: " + format);
             Path work = Files.createTempDirectory(root.resolve("work"), "install-");
             try {
                 Path input;
@@ -73,6 +75,7 @@ final class GuestEnvironmentLibrary {
                     // Local layouts may have several tagged manifests; native selection owns validation.
                     image = "local-" + UUID.randomUUID();
                 }
+                image = "v" + format + "-" + image;
                 Path base = root.resolve("images").resolve(image);
                 if (!Files.exists(base, LinkOption.NOFOLLOW_LINKS)) {
                     progress.accept("Importing " + source);
@@ -357,7 +360,7 @@ final class GuestEnvironmentLibrary {
         if (record.getInt("format") != 1 || !name.equals(record.getString("name"))) throw new IOException("Invalid environment record");
         String id = record.getString("id"), image = record.getString("image");
         if (!UUID.fromString(id).toString().equals(id) || !(image.isEmpty()
-                || image.matches("(?:oci|rootfs)-[0-9a-f]{64}") || image.matches("local-[0-9a-f-]{36}")))
+                || image.matches("(?:v[1-9][0-9]{0,8}-)?(?:(?:oci|rootfs)-[0-9a-f]{64}|local-[0-9a-f-]{36})")))
             throw new IOException("Invalid environment storage identity");
         return new Environment(name, id, image, record.getString("source"), root.resolve("instances").resolve(id));
     }

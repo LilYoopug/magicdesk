@@ -14,6 +14,9 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+static const int store_format = 14;
+int md_inode_store_format(void) { return store_format; }
+
 int mdi_sql_error(int rc) {
     return md_database_result(rc);
 }
@@ -650,8 +653,10 @@ static int store_open(const char *directory, int create, int exclusive,
             "CREATE TRIGGER acl_removed AFTER DELETE ON inode_acls BEGIN "
                 "UPDATE objects SET acl_mask=acl_mask&~OLD.type WHERE object=OLD.object; END;"
             "CREATE TABLE events(sequence INTEGER PRIMARY KEY AUTOINCREMENT, parent TEXT NOT NULL,"
-                "object TEXT NOT NULL,name BLOB NOT NULL,mask INTEGER NOT NULL,cookie INTEGER NOT NULL) STRICT;"
-            "PRAGMA user_version=14;");
+            "object TEXT NOT NULL,name BLOB NOT NULL,mask INTEGER NOT NULL,cookie INTEGER NOT NULL) STRICT;");
+        char version_sql[64];
+        snprintf(version_sql, sizeof(version_sql), "PRAGMA user_version=%d", store_format);
+        if (!r) r = mdi_sql(s, version_sql);
         struct mdi_node node; int fd;
         if (!r) r = make_object(s, MDI_ROOT, S_IFDIR, 0700, 0, NULL, MDI_ROOT, &node, &fd);
         if (!r) r = mdi_sql(s,"INSERT INTO inode_views(scope,kind) VALUES('" MDI_ROOT "',0)");
@@ -663,7 +668,7 @@ static int store_open(const char *directory, int create, int exclusive,
     if (!r) {
         int rc = mdi_step(s, q);
         if (rc != SQLITE_ROW) r = mdi_sql_failure(rc);
-        else if (sqlite3_column_int(q, 0) != 14) r = -EPROTONOSUPPORT;
+        else if (sqlite3_column_int(q, 0) != store_format) r = -EPROTONOSUPPORT;
     }
     sqlite3_finalize(q); q = NULL;
     if (!r && (!retained || create)) r=prepare_lookup_indexes(s);

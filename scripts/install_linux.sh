@@ -42,6 +42,7 @@ defaults to automatic Turnip detection and a Wayland Plasma desktop.
   --package P   Additional repository package (repeatable)
   --cache C     keep (default), clean (package downloads only, not Mesa work)
   --dns POLICY  New image DNS: system (default), preserve, or IP[,IP...]
+                VPN/Private DNS needs an explicit choice during configuration
   --yes         Accept the selected configuration without questions
   --resume      Continue in --name NAME; detect distribution, preserve GUI by default
   --list        Show available distribution/profile combinations
@@ -2340,8 +2341,8 @@ if [ "$gui_services" = yes ]; then
             plasma-*) backend=${desktop#plasma-}; title="Plasma Desktop ($backend)"; icon=preferences-desktop; program=startplasma-$backend ;;
         esac
         command -v "$program"
-        printf '[Desktop Entry]\nType=Application\nName=%s\nExec=magicdesk-desktop-session %s\nIcon=%s\nTerminal=false\nCategories=System;\nX-MagicDesk-Graphics=%s\nX-MagicDesk-GraphicsMode=desktop\n' \
-            "$title" "$desktop" "$icon" "$backend" > "$entry"
+        printf '[Desktop Entry]\nType=Application\nName=%s - %s\nExec=magicdesk-desktop-session %s\nIcon=%s\nTerminal=false\nCategories=System;\nX-MagicDesk-Graphics=%s\nX-MagicDesk-GraphicsMode=desktop\n' \
+            "${NAME:-$ID}" "$title" "$desktop" "$icon" "$backend" > "$entry"
     done
     rm -f /usr/local/bin/magicdesk-plasma /usr/local/bin/magicdesk-weston
 fi
@@ -2714,6 +2715,21 @@ ask() {
     IFS= read -r answer || fail 'Input closed.'
     answer=${answer:-$2}
 }
+check_dns() {
+    while ! dns_error=$(shroot dns --check "${dns:-system}" 2>&1); do
+        printf '\nCannot prepare guest DNS.\n%s\n' "$dns_error" >&2
+        printf '%s\n' \
+            'Choose 1-3 numeric DNS server addresses (comma-separated) for ordinary Linux DNS.' \
+            'This does not reproduce Android Private DNS; traffic follows Android routing/VPN policy.' \
+            'Use preserve only if the image already contains a working resolver.' >&2
+        [ "$yes" = no ] || fail 'Retry with --dns IP[,IP...] or --dns preserve. No image has been installed.'
+        ask 'Guest DNS: IP[,IP...], preserve, system (retry), or cancel' cancel
+        case "$answer" in
+            cancel) printf 'Cancelled.\n'; exit 0 ;;
+            *) dns=$answer ;;
+        esac
+    done
+}
 recipe_defaults() {
     source_kind=oci
     source_sha=
@@ -2848,7 +2864,7 @@ if [ "$yes" = no ]; then
                 ask 'Additional repository packages (space-separated)' "$extras"; extras=$answer
             fi
             if [ "$resume" = no ] && [ -z "$dns" ]; then
-                ask 'DNS: system; Private DNS/VPN needs explicit IPs (plain guest DNS)' system; dns=$answer
+                ask 'Guest DNS: system, preserve, or IP[,IP...]' system; dns=$answer
             fi
             if [ "$distro" != steamos ]; then ask 'Downloaded package cache: keep/clean' "$cache"; cache=$answer; fi
             ;;
@@ -2909,6 +2925,7 @@ if [ -n "$image" ]; then source_kind=oci; else image=$source; fi
 [ "$gui" != gnome ] || [ "$distro" = fedora ] || fail 'The GNOME devkit recipe currently requires Fedora 44. Use apps, Xfce or Weston on other distributions.'
 [ "$gui" != plasma ] || [ "$distro" = debian ] || [ "$distro" = steamos ] || fail 'The Plasma recipe requires Debian 13 or SteamOS 0.3.0.'
 [ "$gui" != none ] || [ "$gpu" = keep ] || fail 'Choose a GUI profile before installing graphics; use --gui keep for an existing GUI.'
+[ "$resume" = yes ] || check_dns
 
 printf '\n%s %s ARM64 | %s | GUI=%s | graphics=%s\n' "$distro" "$version" "$name" "$gui" "$gpu"
 printf 'Locale=%s | timezone=%s | fonts=%s | application entries=%s\n' "$locale_name" "$zone" "$fonts" "$protocol"
@@ -2995,8 +3012,31 @@ setup_exec() {
     shroot exec "$name" --user root --env DEBIAN_FRONTEND=noninteractive "$@"
 }
 stage='installing packages and guest settings'
-system_setup | setup_exec \
-    "$gui" "$protocol" "$locale_name" "$zone" "$new_user" "$fonts" "$cache" "$extras"
+while :; do
+    if system_setup | setup_exec \
+            "$gui" "$protocol" "$locale_name" "$zone" "$new_user" "$fonts" "$cache" "$extras"; then
+        break
+    else
+        setup_status=$?
+    fi
+    [ "$yes" = no ] || exit "$setup_status"
+    printf '\nPackage setup failed (exit %s). The environment and your choices are retained.\n' "$setup_status" >&2
+    printf 'Review the error above. Changing DNS only helps resolver problems.\n' >&2
+    while :; do
+        ask 'Package setup: retry, dns (change resolver and retry), or cancel' cancel
+        case "$answer" in
+            retry) break ;;
+            dns)
+                ask 'Guest DNS: system, preserve (keep current resolver), or IP[,IP...]' "$dns"
+                dns=$answer
+                check_dns
+                [ "$dns" = preserve ] || shroot dns "$name" "$dns" --replace
+                break ;;
+            cancel) exit "$setup_status" ;;
+            *) printf 'Choose retry, dns, or cancel.\n' >&2 ;;
+        esac
+    done
+done
 
 if [ "$distro" = steamos ]; then
     stage='preparing the supplied Steam client'
@@ -3068,10 +3108,10 @@ case "$gui" in
         done
         case "$gui" in
             apps) printf 'The apps profile adds individual applications, not a whole Linux desktop.\n' ;;
-            xfce) printf 'Whole desktop: open Xfce Desktop from the same list (X11).\n' ;;
-            weston) printf 'Whole desktop: open Weston Desktop from the same list (Wayland).\n' ;;
-            plasma) printf 'Whole desktop: open Plasma Desktop (x11) or Plasma Desktop (wayland).\n' ;;
-            gnome) printf 'Experimental desktop: GNOME Shell (development kit); requires a Linux system bus.\n' ;;
+            xfce) printf 'Whole desktop: search for Xfce Desktop (X11), environment %s.\n' "$name" ;;
+            weston) printf 'Whole desktop: search for Weston Desktop (Wayland), environment %s.\n' "$name" ;;
+            plasma) printf 'Whole desktop: search for Plasma Desktop (x11) or Plasma Desktop (wayland), environment %s.\n' "$name" ;;
+            gnome) printf 'Experimental desktop: search for GNOME Shell (development kit), environment %s; requires a Linux system bus.\n' "$name" ;;
         esac ;;
 esac
 printf 'Terminal: Terminal sessions > New session > Shroot environments > %s > New session.\n' "$name"

@@ -16,8 +16,10 @@ final class GuestAndroidNetwork {
         var capabilities = manager.getNetworkCapabilities(network);
         if (properties == null || properties.getDnsServers().isEmpty())
             throw new IOException("No active-network DNS servers; choose --dns preserve or explicit addresses");
-        if (properties.isPrivateDnsActive() || capabilities != null && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN))
-            throw new IOException("Private DNS/VPN cannot be copied into resolv.conf; choose --dns preserve or explicit addresses");
+        if (properties.isPrivateDnsActive())
+            throw new IOException("Android Private DNS is active; copying server addresses would not preserve its encrypted DNS policy");
+        if (capabilities != null && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN))
+            throw new IOException("Android VPN is active; its DNS policy cannot be reproduced by copying server addresses");
         return GuestDnsConfiguration.servers(properties.getDnsServers().stream()
                 .limit(3).map(java.net.InetAddress::getHostAddress).toList());
     }

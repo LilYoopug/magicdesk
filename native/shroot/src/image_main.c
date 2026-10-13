@@ -144,7 +144,8 @@ int main(int argc, char **argv) {
             else return 2;
         }
         r = import(argv[2], argv[3], reference, !strcmp(argv[4], "--preserve-ownership"), pool, blobs);
-    } else if (argc == 4 && !strcmp(argv[1], "create")) r = create(argv[2], argv[3]);
+    } else if (argc == 2 && !strcmp(argv[1], "format")) { printf("%d\n", md_inode_store_format()); r = 0; }
+    else if (argc == 4 && !strcmp(argv[1], "create")) r = create(argv[2], argv[3]);
     else if (argc == 4 && !strcmp(argv[1], "backup")) r = md_image_backup(argv[2], argv[3]);
     else if (argc == 4 && !strcmp(argv[1], "restore")) r = md_image_archive_import(argv[2], argv[3], 1);
     else if (argc == 4 && !strcmp(argv[1], "rootfs")) r = md_image_archive_import(argv[2], argv[3], 0);
@@ -169,6 +170,7 @@ int main(int argc, char **argv) {
         "       image restore ARCHIVE NEW_INSTANCE\n"
         "       image remove STORE | remove-layer LAYER (caller verifies persistent dependents)\n"
         "       image inspect IMAGE_OR_INSTANCE\n"
+        "       image format (persistent namespace format for derived image cache keys)\n"
         "       image exec INSTANCE [OPTIONS] -- COMMAND... | login INSTANCE [OPTIONS] [-- SHELL...]\n"
         "       image run INSTANCE [--user current|UID[:GID]|NAME[:GROUP]] [--cwd PATH] [--entrypoint PROGRAM] [--env KEY=VALUE]\n"
         "             [--hostname NAME] [--network routed] [--bind HOST GUEST] [--bind-ro HOST GUEST] [--magicdesk] [-- COMMAND...]\n");

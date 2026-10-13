@@ -15,6 +15,8 @@
  * EIO during commit has an unknown outcome; reopen and inspect before replay.
  * Files are native descriptors. No object is reclaimed while clients may exist. */
 struct md_inode_store;
+/* Persistent namespace format, owned by the native store implementation. */
+int md_inode_store_format(void);
 struct md_inode_statistics {
     struct md_cost prepare, step, transaction, lock;
     struct md_cost version, descriptor, path;

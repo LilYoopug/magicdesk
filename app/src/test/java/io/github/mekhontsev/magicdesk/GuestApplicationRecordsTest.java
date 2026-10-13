@@ -42,6 +42,20 @@ public class GuestApplicationRecordsTest {
         assertEquals("bad: Unreadable environment", result.error());
     }
 
+    @Test public void desktopLabelsKeepDistributionAndIndependentInstanceNames() throws Exception {
+        var records = new JSONArray();
+        String text = "Name=Alpine Linux - Xfce Desktop\nExec=magicdesk-desktop-session xfce\n"
+                + "X-MagicDesk-Graphics=x11\nX-MagicDesk-GraphicsMode=desktop\n";
+        records.put(entry(A, "work", "/usr/local/share/applications/magicdesk-xfce.desktop", text));
+        records.put(entry(B, "personal", "/usr/local/share/applications/magicdesk-xfce.desktop", text));
+        var entries = GuestApplicationRecords.parse(records.toString()).entries();
+        assertEquals("Alpine Linux - Xfce Desktop (work)", entries.get(0).shortcut.name);
+        assertEquals("Alpine Linux - Xfce Desktop (personal)", entries.get(1).shortcut.name);
+        assertNotEquals(entries.get(0).desktopFilePath, entries.get(1).desktopFilePath);
+        assertTrue(entries.get(0).shortcut.graphics.desktop());
+        assertTrue(entries.get(1).shortcut.graphics.desktop());
+    }
+
     @Test public void hiddenUserEntryMasksSystemEntryAndTerminalKeepsItsPresentation() throws Exception {
         var records = new JSONArray().put(entry(A, "work", "/root/.local/share/applications/editor.desktop", "Hidden=true\n"))
                 .put(entry(A, "work", "/usr/share/applications/editor.desktop", "Name=Editor\nExec=editor\n"))
