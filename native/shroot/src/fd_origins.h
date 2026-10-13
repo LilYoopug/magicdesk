@@ -92,6 +92,13 @@ int md_fd_origins_prepare_loan(struct md_fd_origin_update *,struct md_fd_loan *)
  * Keep that turn through native close and close_range metadata retirement.
  * Ambiguous terminal mutations return ESTALE, never an assumed identity. */
 int md_fd_origins_loan_next(const struct md_fd_order *,int *number);
+/* A retained operation owner for a slot in this range. The RUNNING turn must
+ * cover any decision made from this result. No kernel FD is captured here.
+ * Only loan entries are visited; ordinary origin inventory is not scanned.
+ * A replaced slot no longer belongs to its previous operation. */
+int md_fd_origins_loan_range(const struct md_fd_order *,unsigned first,unsigned last,
+        int *number,struct md_fd_loan **);
+int md_fd_origins_loan_matches(const struct md_fd_order *,int number,const struct md_fd_loan *);
 int md_fd_origins_has_loans(struct md_fd_origins *);
 /* Supervisor task ownership, queried under a running table turn. A sole
  * sleeping owner cannot create another CLONE_FILES holder or replace a slot. */

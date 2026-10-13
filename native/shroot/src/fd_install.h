@@ -12,6 +12,7 @@ enum { MD_FD_INSTALL_WAIT=-4096, MD_FD_INSTALL_CANCELLED=-4097 };
 struct md_fd_install {
     struct md_fd_order files;
     struct md_fd_object *origin;
+    struct md_fd_loan *loan;
     uint64_t notification;
     int listener, source;
     int retire_error;
@@ -31,4 +32,6 @@ int md_fd_install_begin(struct md_fd_install *, struct md_fd_origins *,
  * replace a committed kernel result or authorize a second notification reply. */
 int md_fd_install_progress(struct md_fd_install *);
 int md_fd_install_cancel(struct md_fd_install *);
+/* Set before progress while the caller retains the operation loan. */
+int md_fd_install_loan(struct md_fd_install *,struct md_fd_loan *);
 #endif

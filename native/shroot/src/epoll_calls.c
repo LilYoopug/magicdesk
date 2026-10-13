@@ -3,6 +3,7 @@
 #include "fs_buffer.h"
 #include "raw.h"
 #include "descriptor_capture.h"
+#include "interception.h"
 #include <errno.h>
 #include <limits.h>
 
@@ -37,7 +38,13 @@ long md_epoll_call(long nr,const unsigned long *a) {
             MD_BUFFER_EPOLL_CAPTURE_SENT,MD_BUFFER_EPOLL_CAPTURE_OBSERVED,MD_EPOLL_CAPTURED};
         result=md_descriptor_capture_inputs(result,&f->capture,&fd,1,&p);
     }
-    if (result==MD_EPOLL_CAPTURED) result=md_guest_buffer_control(MD_BUFFER_EPOLL_WAIT,0,0);
+    while (result==MD_EPOLL_CAPTURED || result==MD_EPOLL_LOAN) {
+        if (result==MD_EPOLL_LOAN) {
+            result=md_guest_buffer_admit(MD_FS_BUFFER_EPOLL_LOAN);
+            if (result<0) break;
+        }
+        result=md_guest_buffer_control(MD_BUFFER_EPOLL_WAIT,0,0);
+    }
     if (result>0 && result!=MD_EPOLL_NATIVE && nr!=SYS_epoll_ctl) {
         if (result>f->capacity) result=-EPROTO;
         else if (md_write_memory((void *)a[1],f->events,(size_t)result*sizeof(*f->events))) result=-EFAULT;

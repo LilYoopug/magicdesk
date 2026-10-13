@@ -3,6 +3,7 @@
 #include "fd_selector.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -14,11 +15,16 @@ struct md_fd_loan {
     atomic_int active;
     const struct md_fd_origins *home;
 };
+struct md_fd_loan_slot {
+    struct md_fd_loan_slot *next,*previous;
+    struct md_fd_origin_entry *entry;
+    struct md_fd_loan *owner;
+};
 struct md_fd_origin_entry {
     struct md_fd_origin_entry *next;
     struct md_fd_object *object;
     struct md_fd_channel *channel;
-    struct md_fd_loan *loan;
+    struct md_fd_loan_slot *loan;
     int fd;
     unsigned flags;
     int uncertain;
@@ -30,8 +36,26 @@ struct md_fd_origins {
     struct md_fd_origin_entry **buckets;
     struct md_resource_queue order;
     uint64_t generation;
-    unsigned loans;
+    atomic_uint loans;
+    struct md_fd_loan_slot *loan_head;
 };
+static void loan_link(struct md_fd_origins *t,struct md_fd_origin_entry *e) {
+    if (!e->loan) return;
+    struct md_fd_loan_slot *slot=e->loan;
+    slot->entry=e; slot->previous=NULL; slot->next=t->loan_head;
+    if (t->loan_head) t->loan_head->previous=slot;
+    t->loan_head=slot;
+    atomic_fetch_add_explicit(&t->loans,1,memory_order_release);
+}
+static void loan_unlink(struct md_fd_origins *t,struct md_fd_origin_entry *e) {
+    if (!e->loan) return;
+    struct md_fd_loan_slot *slot=e->loan;
+    if (slot->previous) slot->previous->next=slot->next;
+    else t->loan_head=slot->next;
+    if (slot->next) slot->next->previous=slot->previous;
+    slot->next=slot->previous=NULL;
+    atomic_fetch_sub_explicit(&t->loans,1,memory_order_release);
+}
 struct md_fd_loan *md_fd_loan_new(struct md_fd_origins *home) {
     if (!home) { errno=EINVAL; return NULL; }
     struct md_fd_loan *loan=calloc(1,sizeof(*loan));
@@ -48,11 +72,17 @@ void md_fd_loan_end(struct md_fd_loan *loan) {
 void md_fd_loan_release(struct md_fd_loan *loan) {
     if (loan && atomic_fetch_sub_explicit(&loan->refs,1,memory_order_acq_rel)==1) free(loan);
 }
+static struct md_fd_loan_slot *loan_slot_new(struct md_fd_loan *owner) {
+    struct md_fd_loan_slot *slot=calloc(1,sizeof(*slot));
+    if (slot) slot->owner=loan_retain(owner);
+    return slot;
+}
 static void dispose(struct md_fd_origin_entry *entry) {
     while (entry) {
         struct md_fd_origin_entry *next=entry->next;
         md_fd_object_release(entry->object); md_fd_channel_release(entry->channel);
-        md_fd_loan_release(entry->loan); free(entry); entry=next;
+        if (entry->loan) { md_fd_loan_release(entry->loan->owner); free(entry->loan); }
+        free(entry); entry=next;
     }
 }
 struct md_fd_origins *md_fd_origins_new(void) {
@@ -60,7 +90,7 @@ struct md_fd_origins *md_fd_origins_new(void) {
     if (!t) return NULL;
     if (pthread_mutex_init(&t->lock,NULL)) { free(t); return NULL; }
     if (md_resource_queue_init(&t->order)) { pthread_mutex_destroy(&t->lock); free(t); return NULL; }
-    atomic_init(&t->refs,1); t->owners=1; t->generation=1;
+    atomic_init(&t->refs,1); atomic_init(&t->loans,0); t->owners=1; t->generation=1;
     return t;
 }
 struct md_fd_origins *md_fd_origins_pin(struct md_fd_origins *t) {
@@ -89,7 +119,11 @@ struct md_fd_origins *md_fd_origins_fork(struct md_fd_origins *t, int shared) {
             if (!entry) { error=-ENOMEM; break; }
             *entry=*p; entry->object=md_fd_object_retain(p->object);
             entry->channel=md_fd_channel_retain(p->channel);
-            entry->loan=loan_retain(p->loan); copy->loans+=entry->loan!=NULL;
+            entry->loan=p->loan ? loan_slot_new(p->loan->owner) : NULL;
+            if (p->loan && !entry->loan) {
+                entry->next=NULL; dispose(entry); error=-ENOMEM; break;
+            }
+            loan_link(copy,entry);
             entry->next=copy->buckets[i]; copy->buckets[i]=entry;
         }
     }
@@ -219,31 +253,52 @@ int md_fd_origins_prepare_loan(struct md_fd_origin_update *update,struct md_fd_l
     if (!update || !loan || update->table!=loan->home || !update->entry
             || update->entry->loan || !(update->entry->flags&FD_CLOEXEC)
             || !atomic_load_explicit(&loan->active,memory_order_acquire)) return -EINVAL;
-    update->entry->loan=loan_retain(loan); return 0;
+    update->entry->loan=loan_slot_new(loan);
+    return update->entry->loan ? 0 : -ENOMEM;
 }
 int md_fd_origins_has_loans(struct md_fd_origins *t) {
-    if (!t) return 0;
-    pthread_mutex_lock(&t->lock); int found=t->loans!=0;
-    pthread_mutex_unlock(&t->lock); return found;
+    return t && atomic_load_explicit(&t->loans,memory_order_acquire)!=0;
 }
 int md_fd_origins_exclusive(const struct md_fd_order *turn) {
     return turn && turn->table && md_fd_order_state(turn)==MD_RESOURCE_ORDER_RUNNING
         && turn->table->owners==1;
 }
-int md_fd_origins_loan_next(const struct md_fd_order *turn,int *number) {
-    if (!turn || !turn->table || !number) return -EINVAL;
+static int loan_find(const struct md_fd_order *turn,unsigned first,unsigned last,
+        int expired,int *number,struct md_fd_loan **owner) {
+    if (!turn || !turn->table || !number || first>last || (owner && *owner)) return -EINVAL;
     if (md_fd_order_state(turn)!=MD_RESOURCE_ORDER_RUNNING) return -EBUSY;
     struct md_fd_origins *t=turn->table;
     int result=0; *number=-1;
     pthread_mutex_lock(&t->lock);
-    if (t->loans) for (unsigned i=0;i<BUCKETS && !result;++i)
-        for (struct md_fd_origin_entry *e=t->buckets[i];e;e=e->next) {
-            if (!e->loan || (atomic_load_explicit(&e->loan->active,memory_order_acquire)
-                    && e->loan->home==t)) continue;
-            result=e->uncertain ? -ESTALE : 1;
-            if (result==1) *number=e->fd;
-            break;
+    for (struct md_fd_loan_slot *slot=t->loan_head;slot;slot=slot->next) {
+        struct md_fd_origin_entry *e=slot->entry;
+        if ((unsigned)e->fd<first || (unsigned)e->fd>last) continue;
+        if (expired && atomic_load_explicit(&slot->owner->active,memory_order_acquire)
+                && slot->owner->home==t) continue;
+        result=e->uncertain ? -ESTALE : 1;
+        if (result==1) {
+            *number=e->fd;
+            if (owner) *owner=loan_retain(slot->owner);
         }
+        break;
+    }
+    pthread_mutex_unlock(&t->lock); return result;
+}
+int md_fd_origins_loan_next(const struct md_fd_order *turn,int *number) {
+    return loan_find(turn,0,UINT_MAX,1,number,NULL);
+}
+int md_fd_origins_loan_range(const struct md_fd_order *turn,unsigned first,unsigned last,
+        int *number,struct md_fd_loan **owner) {
+    if (!owner) return -EINVAL;
+    return loan_find(turn,first,last,0,number,owner);
+}
+int md_fd_origins_loan_matches(const struct md_fd_order *turn,int number,const struct md_fd_loan *loan) {
+    if (!turn || !turn->table || !loan || number<0) return -EINVAL;
+    if (md_fd_order_state(turn)!=MD_RESOURCE_ORDER_RUNNING) return -EBUSY;
+    struct md_fd_origins *t=turn->table;
+    pthread_mutex_lock(&t->lock);
+    struct md_fd_origin_entry *e=t->buckets ? *slot(t,number) : NULL;
+    int result=!e || !e->loan || e->loan->owner!=loan ? 0 : e->uncertain ? -ESTALE : 1;
     pthread_mutex_unlock(&t->lock); return result;
 }
 int md_fd_origins_prepare_copy(struct md_fd_origins *t, int source, unsigned flags,
@@ -278,8 +333,8 @@ static struct md_fd_origin_entry *install(struct md_fd_origins *t,
     changed(t);
     if (!t->buckets) return NULL;
     struct md_fd_origin_entry **p=slot(t,fd), *retired=*p;
-    t->loans+=(entry && entry->loan)!=0;
-    t->loans-=(retired && retired->loan)!=0;
+    if (retired) loan_unlink(t,retired);
+    if (entry) loan_link(t,entry);
     if (entry) {
         entry->fd=fd; entry->next=retired ? retired->next : NULL; *p=entry;
     } else if (retired) *p=retired->next;
@@ -387,7 +442,7 @@ static void remove_entries(struct md_fd_origins *t, unsigned first, unsigned las
             int selected=exec ? !e->uncertain && !!(e->flags & FD_CLOEXEC) : (unsigned)e->fd>=first && (unsigned)e->fd<=last;
             if (selected && action==RETIRE_UNCERTAIN && (e->channel || e->loan)) { e->uncertain=1; p=&e->next; continue; }
             if (selected && action!=RETIRE_CLOEXEC) {
-                t->loans-=e->loan!=NULL; *p=e->next; e->next=retired; retired=e;
+                loan_unlink(t,e); *p=e->next; e->next=retired; retired=e;
             }
             else { if (selected) e->flags|=FD_CLOEXEC; p=&e->next; }
         }

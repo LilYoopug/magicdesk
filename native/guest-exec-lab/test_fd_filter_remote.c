@@ -341,7 +341,7 @@ static void task_context(int protected) {
     close(start[0]); close(start[1]); assert(!munmap(shared,sizeof(*shared)));
 }
 static void caught_signal(int signal) { assert(signal==SIGUSR2); }
-static void restart_exit(int protected) {
+static void restart_exit(int protected,int interrupted) {
     struct shared *shared=mmap(NULL,sizeof(*shared),PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS,-1,0);
     assert(shared!=MAP_FAILED);
     int start[2],data[2]; assert(!pipe2(start,O_CLOEXEC) && !pipe2(data,O_CLOEXEC));
@@ -365,25 +365,40 @@ static void restart_exit(int protected) {
         if (shared->waiting && info.op==PTRACE_SYSCALL_INFO_ENTRY
                 && info.entry.nr==SYS_read && (int)info.entry.args[0]==data[0]) break;
     }
-    assert(!kill(pid,SIGUSR2));
+    if (interrupted) assert(!ptrace(PTRACE_INTERRUPT,pid,0,0));
+    else assert(!kill(pid,SIGUSR2));
     assert(!ptrace(PTRACE_SYSCALL,pid,0,0));
     int status=stop(pid); assert(WIFSTOPPED(status) && WSTOPSIG(status)==(SIGTRAP|0x80));
     struct user_pt_regs saved=get(pid);
     assert((long)saved.regs[0]==-512);
     uint64_t before,after;
     assert(!ptrace(PTRACE_GETSIGMASK,pid,(void *)sizeof(before),&before));
-    struct md_task_filter call={0};
-    struct md_fd_filter_gates gates={(uintptr_t)remote_return,0,0};
-    assert(md_task_filter_begin(&call,trace,pid,MD_TASK_CALL_EXIT,&saved,
-        (uintptr_t)remote_call,(uintptr_t)remote_return,&shared->image,(uintptr_t)&shared->image,
-        MD_FD_SELECTOR_PROC,data[0],&gates)==-EAGAIN && !call.task.stage);
+    struct md_task_call call={0};
+    struct md_task_call_arguments args={.number=SYS_getpid};
+    assert(!md_task_call_begin(&call,trace,pid,MD_TASK_CALL_EXIT,&saved,
+        (uintptr_t)remote_call,(uintptr_t)remote_return,&args));
+    int done=0;
+    while (!done) { done=md_task_call_event(&call,stop(pid)); assert(done>=0); }
+    assert(call.result==pid);
+    assert(!md_task_call_again(&call,&args));
+    do { done=md_task_call_event(&call,stop(pid)); assert(done>=0); } while (!done);
+    assert(call.result==pid);
     struct user_pt_regs unchanged=get(pid); assert(!memcmp(&saved,&unchanged,sizeof(saved)));
     assert(!ptrace(PTRACE_GETSIGMASK,pid,(void *)sizeof(after),&after) && before==after);
+    if (interrupted) assert(write(data[1],"q",1)==1);
     assert(!ptrace(PTRACE_CONT,pid,0,0));
-    status=stop(pid); assert(WIFSTOPPED(status) && WSTOPSIG(status)==SIGUSR2);
-    assert(write(data[1],"q",1)==1);
-    assert(!ptrace(PTRACE_CONT,pid,0,SIGUSR2));
-    status=stop(pid); assert(WIFEXITED(status) && !WEXITSTATUS(status) && shared->completed);
+    status=stop(pid);
+    if ((unsigned)status>>16==PTRACE_EVENT_STOP) {
+        assert(WSTOPSIG(status)==SIGTRAP && !ptrace(PTRACE_CONT,pid,0,0));
+        status=stop(pid);
+    }
+    if (!interrupted) {
+        assert(WIFSTOPPED(status) && WSTOPSIG(status)==SIGUSR2);
+        assert(write(data[1],"q",1)==1);
+        assert(!ptrace(PTRACE_CONT,pid,0,SIGUSR2));
+        status=stop(pid);
+    }
+    assert(WIFEXITED(status) && !WEXITSTATUS(status) && shared->completed);
     close(start[0]); close(start[1]); close(data[0]); close(data[1]);
     assert(!munmap(shared,sizeof(*shared)));
 }
@@ -401,12 +416,13 @@ int main(void) {
     for (int protected=0;protected<2;++protected) for (int denied=0;denied<3;++denied)
         for (int boundary=PTRACE_SYSCALL_INFO_ENTRY;boundary<=PTRACE_SYSCALL_INFO_SECCOMP;++boundary)
             pending_call(boundary,denied,protected);
-    for (int protected=0;protected<2;++protected) restart_exit(protected);
+    for (int protected=0;protected<2;++protected)
+        for (int interrupted=0;interrupted<2;++interrupted) restart_exit(protected,interrupted);
     for (int protected=0;protected<2;++protected) task_context(protected);
     puts("PASS remote FD filter: protected tasks, native interrupt/restart, signal masks and seccomp policy");
     puts("PASS group FD filter: TSYNC reaches every sibling; incompatible filter leaves both unchanged");
     puts("PASS FD filter continuation: syscall entry, seccomp and exit execute the original write exactly once");
-    puts("PASS restart-exit admission: unchanged registers/mask, deferred installation and native signal restart");
+    puts("PASS restart-exit calls: recovered kernel arguments, restored registers/mask and native signal restart");
     puts("PASS task-context call: protected signalfd readiness, repeated syscall and exact register/mask restoration");
     return 0;
 }

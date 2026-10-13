@@ -9,6 +9,12 @@ struct md_fd_mutation {
     long nr;
     unsigned long args[3];
 };
+/* Cold admission for a mutation that can remove or change an operation-owned
+ * slot in this exact table. 1 retains the conflicting loan; 0 does not require
+ * rendezvous. Copy-on-unshare/exec affect another table, not its live waiters.
+ * The caller owns a RUNNING table turn through this query and the mutation. */
+int md_fd_mutation_loan(const struct md_fd_order *,long nr,const unsigned long args[6],
+        int *number,struct md_fd_loan **);
 int md_fd_mutation_prepare(struct md_fd_origins *, long nr,
         const unsigned long args[6], struct md_fd_mutation *);
 int md_fd_mutation_finish(struct md_fd_mutation *, struct md_fd_origins *, long result);

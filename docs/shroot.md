@@ -1368,11 +1368,13 @@ the uncommitted reservation. Unobserved terminal mutations invalidate an epoll's
 alias inventory, including a duplicate whose new number is unknown. This yields
 an explicit stale-state error and wakes an active collector instead of assuming
 that the remaining annotations cover every alias.
-The task-affine filter installer uses the common short-call executor and a
+Task-affine filter installation and temporary-FD retirement share one actor and
+quiescence scheduler. The filter installer uses the common short-call executor and a
 borrowed shared span, without an extra guest FD or helper thread. Syscall-entry and seccomp
 continuations are replayed before execution; completed exits recover the exit
-boundary without repeating their side effect. Internal restart exits defer
-installation rather than guessing the kernel-private original argument.
+boundary without repeating their side effect. Restart exits recover the original
+arguments at a kernel-restarted entry before executing it. Restoring that exit
+rearms kernel interrupt work so internal restart codes cannot escape to libc.
 Cold task calls borrow a stopped participant from the shared quiescence owner.
 That owner retains the original event and resume policy; release and event replay
 are blocked until the borrower restores its continuation. Borrowing neither
@@ -1386,10 +1388,20 @@ in its own signal context. Virtual readiness interrupts that native wait;
 signalfd, temporary masks and native events stay kernel-owned. No extra guest
 descriptor is needed: the sole sleeping owner cannot replace the slot or create
 another CLONE_FILES holder. The table turn ends before blocking.
-Shared-table waits retain captured native queues and a host collector, which
-does not correctly observe caller-local signalfd state. Passive queues keep
-their native control/wait path. Mixed readiness is not complete coverage of
-service-manager boot.
+Shared-table waits capture the exact native queue and publish a CLOEXEC loan
+through atomic ADDFD_SEND. The calling thread waits on that loan; no table turn
+is held during blocking. Destructive mutations revoke the borrowing wait before
+closing its loan; it reacquires the retained queue without resetting its deadline
+or losing collected events. Fork and file-table unshare retire loans before
+copying the table. A completed or dead caller transfers retirement to the common
+short-call owner, which can borrow a surviving table holder independently of
+future application FD mutations. Exact loan identity protects reused numbers.
+Loan queries visit a separate per-table index; ordinary FD entries do not grow.
+Denied close can use an exact single-slot close_range under the same turn. If
+policy rejects retirement, the launch fails and kernel teardown closes its FDs;
+the runtime does not forget an unclosed loan or weaken the application filter.
+Passive queues keep their native control/wait path. Mixed readiness is not
+complete coverage of service-manager boot.
 Application-filtered IO captures exact inputs through the table-owned channel,
 without requiring another guest thread. Ordinary IO reuses an already admitted,
 unambiguous channel under the same file-table turn. Without one, it retains

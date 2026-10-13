@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "ipc_credentials.h"
+#include "fd_bundle.h"
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -555,16 +556,27 @@ void test_ipc_connections(const char *directory) {
     assert(!request(first,MD_IPC_PAIR,sockets[0],sockets[1],NULL,0).error);
     struct md_ipc_connection before=connection(first,sockets[0]);
     int value=token(first,sockets[0]);
+    /* Retain the sealed identity, but not the epoch leases, for a stale replay. */
+    int rights[4], stale=-1;
+    assert(!md_fd_bundle_peek(value,4,rights));
+    int snapshot[]={rights[0],rights[1],rights[0],rights[0]};
+    assert(!md_fd_bundle_pack(snapshot,4,&stale));
+    for (unsigned i=0;i<4;++i) assert(!close(rights[i]));
     md_ipc_credentials_close(first);
     same(before,connection(second,sockets[0]),0);
     md_ipc_credentials_close(second);
+    assert(!md_ipc_credentials_open(directory,MD_IPC_TRANSPORT_NATIVE,&first));
+    same(before,connection(first,sockets[0]),0);
+    token_check(first,sockets[1],value,getpid(),0);
+    assert(!close(value));
+    md_ipc_credentials_close(first);
     assert(!md_ipc_credentials_open(directory,MD_IPC_TRANSPORT_NATIVE,&first));
     unavailable(first,sockets[0],-ENODATA);
     assert(!request(first,MD_IPC_PAIR,sockets[0],sockets[1],NULL,0).error);
     struct md_ipc_connection after=connection(first,sockets[0]);
     assert(memcmp(before.link,after.link,sizeof(before.link)));
-    token_check(first,sockets[1],value,0,-ENODATA);
-    assert(!close(value) && !close(sockets[0]) && !close(sockets[1]));
+    token_check(first,sockets[1],stale,0,-ENODATA);
+    assert(!close(stale) && !close(sockets[0]) && !close(sockets[1]));
     md_ipc_credentials_close(first); md_ipc_credentials_close(foreign);
     test_ipc_store_cleanup(directory); test_ipc_store_cleanup(foreign_path); assert(!rmdir(foreign_path));
     puts("PASS IPC connection authority: native bypass, revision rejection and last-owner epoch retirement");

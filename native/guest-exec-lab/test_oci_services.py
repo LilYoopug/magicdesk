@@ -151,7 +151,7 @@ class Suite:
                                      self.config['http_headers']['Authorization'].removeprefix('Bearer '),
                                      timeout=270, request_timeout=240)
 
-    def command(self, argv, quiet=False, timeout=180):
+    def command(self, argv, quiet=False, timeout=180, expected=0):
         text = shlex.join(['timeout', '-k', '15', str(timeout), *map(str, argv)])
         self.client.request_timeout = timeout + 30
         result = self.client.call('console.execute', {'sessionId': self.console, 'command': text},
@@ -159,7 +159,7 @@ class Suite:
         self.report['commands'].append({'command': text, **result})
         if not quiet:
             print(result['output'], end='', flush=True)
-        assert result['exitCode'] == 0, result
+        assert result['exitCode'] == expected, result
         return result['output']
 
     def prepare(self, name, layout):

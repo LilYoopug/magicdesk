@@ -212,8 +212,8 @@ struct receive_owner {
     struct md_ipc_io io;
     struct md_network_io network;
 };
-struct selector_owner {
-    struct md_task_filter call;
+struct task_action {
+    union { struct md_task_filter filter; struct md_task_call native; };
     struct md_interception_buffer buffer;
     struct user_pt_regs continuation;
     enum md_fd_selector_kind kind;
@@ -225,7 +225,17 @@ struct selector_owner {
     struct md_fd_order files;
     pid_t rejected_group, rejected_task;
     int borrowed, remote, synthetic;
+    /* A short native close uses the same actor/quiescence owner as filter
+     * installation. The table pin survives the originating task's death. */
+    struct md_fd_loan *loan;
+    struct md_fd_origins *loan_table;
+    struct md_fd_order *loan_turn;
+    struct task_action *next;
+    pid_t loan_waiter;
 };
+static struct md_task_call *task_action_call(struct task_action *action) {
+    return action->loan ? &action->native : &action->filter.task;
+}
 struct readiness_owner {
     struct md_fd_order files;
     struct md_fd_capture capture;
@@ -240,10 +250,14 @@ struct readiness_owner {
     struct epoll_event event;
     struct md_task_call_arguments native_call;
     int native_caller;
+    struct md_fd_install delivery;
+    struct task_action *retirement;
+    int loan_number, evicting, parked, finishing;
+    long finish_result;
     int operation,number,reserved,sealed,classified,done,io_waiting;
 };
 enum retry_kind {
-    RETRY_SELECTOR=1u<<0, RETRY_MAPPING=1u<<1, RETRY_MEMORY=1u<<2,
+    RETRY_TASK_ACTION=1u<<0, RETRY_MAPPING=1u<<1, RETRY_MEMORY=1u<<2,
     RETRY_BUFFER=1u<<3, RETRY_DESCRIPTOR=1u<<4, RETRY_RECEIVE=1u<<5,
     RETRY_OUTGOING=1u<<6, RETRY_DELIVERY=1u<<7, RETRY_PROC_DELIVERY=1u<<8,
     RETRY_RETURN=1u<<9,
@@ -288,7 +302,7 @@ struct thread {
     int buffer_waiting;
     struct md_fd_selector *fd_selector;
     struct md_fd_selector *fork_selector;
-    struct selector_owner *selector;
+    struct task_action *action;
     struct readiness_owner *readiness;
     pid_t selector_exit;
     pid_t pid, tgid, parent;
@@ -366,18 +380,26 @@ struct thread {
     uint64_t ipc_event;
 };
 static struct thread *threads;
-static unsigned selector_calls;
-static struct selector_owner *selector_execution;
-static struct md_task_quiesce *selector_barrier;
-static int selector_releasing;
+static unsigned task_action_calls;
+static struct task_action *task_action_execution;
+static struct task_action *loan_retirements;
+static struct md_task_quiesce *task_action_barrier;
+static int task_action_releasing;
 static struct readiness_owner *readiness_activation;
 static void readiness_start(struct thread *);
 static void readiness_release(struct thread *);
 static void readiness_capture(struct thread *,unsigned,long);
 static void readiness_progress(struct thread *);
 static int readiness_native_event(struct thread *,int);
-static void selector_schedule(void);
-static void selector_discard(struct thread *);
+static void readiness_deliver(struct thread *);
+static void readiness_loan_closed(pid_t,long);
+static int readiness_evict(struct thread *,struct md_fd_loan *);
+static int fd_loans_ready(struct thread *);
+static void loan_start(struct task_action *);
+static void task_action_schedule(void);
+static void task_action_discard(struct thread *);
+static void task_action_cleanup(void);
+static void cancel_tree(int);
 static struct md_pending_queue retry_queues[2];
 static void retry_clear(struct thread *t, enum retry_kind kind) {
     struct retry_owner *owner=&t->retries[kind>=RETRY_FD];
@@ -523,6 +545,7 @@ static void cleanup(void) {
     }
     md_task_helpers_destroy(helpers); helpers=NULL;
     memory_discard();
+    task_action_cleanup();
     while (threads) {
         struct thread *next = threads->next;
         exec_images_release(threads);
@@ -543,6 +566,7 @@ static void cleanup(void) {
         free(threads->identity_buffer);
         free(threads); threads = next;
     }
+    task_action_cleanup();
     md_admission_close(&admission);
     md_debugger_destroy(debugger); debugger = NULL;
     if (ipc_events>=0) close(ipc_events);
@@ -557,7 +581,7 @@ static void cleanup(void) {
     md_launch_unregister(&registration);
     md_broker_destroy(broker); broker = NULL;
     md_task_quiesce_destroy(memory_barrier); memory_barrier=NULL;
-    md_task_quiesce_destroy(selector_barrier); selector_barrier=NULL;
+    md_task_quiesce_destroy(task_action_barrier); task_action_barrier=NULL;
     md_task_registry_destroy(tasks); tasks = NULL;
     md_fd_exchanges_destroy(fd_exchanges); fd_exchanges=NULL;
     md_identity_release(&launch_identity);
@@ -619,7 +643,7 @@ static void adapter_discard(struct thread *t) {
         t->retries[i].mask=0;
     }
     t->selector_exit=0;
-    selector_discard(t);
+    task_action_discard(t);
     readiness_release(t);
     if (t->control_pending) { t->control_pending->dispose(t->control_pending); t->control_pending=NULL; }
     if (t->proc_lookup.table) CHECK(!md_fd_order_cancel(&t->proc_lookup));
@@ -739,7 +763,7 @@ static void release_thread(struct thread *t) {
         t->pid_birth_child->pid_birth_parent=NULL;
         t->pid_birth_child=NULL;
     }
-    int buffered=t->buffer.pool || t->buffer_call || t->buffer_waiting || t->selector;
+    int buffered=t->buffer.pool || t->buffer_call || t->buffer_waiting || t->action;
     fd_discard(t);
     adapter_discard(t);
     exec_images_release(t);
@@ -1781,6 +1805,13 @@ static void handle_notification(const struct seccomp_notif *request) {
             } else if (q.data.args[0]==MD_FS_BUFFER_EPOLL_ADMIT && t->readiness
                     && md_fd_order_state(&t->readiness->files)==MD_RESOURCE_ORDER_RUNNING) {
                 value=md_fd_capture_admit(&t->readiness->capture,t->readiness->files.table,listener,q.id);
+            } else if (q.data.args[0]==MD_FS_BUFFER_EPOLL_LOAN && t->readiness
+                    && t->readiness->retirement && t->readiness->loan_number<0) {
+                struct readiness_owner *o=t->readiness;
+                value=md_fd_install_begin(&o->delivery,t->resources.files,listener,q.id,
+                    o->received->fds[0],o->queue,O_CLOEXEC,fd_wakeup);
+                if (!value) value=md_fd_install_loan(&o->delivery,o->retirement->loan);
+                if (!value) { readiness_deliver(t); return; }
             }
         }
         if (value<0) {
@@ -2357,6 +2388,7 @@ static void fd_start(struct thread *t) {
     }
     if (md_fd_order_state(&t->fd_order)==MD_RESOURCE_ORDER_READY)
         CHECK(!md_fd_order_start(&t->fd_order));
+    if ((!t->fd_job || t->fd_job==MD_FD_DUPLICATE_BEGIN) && !fd_loans_ready(t)) return;
     struct user_pt_regs *r=&t->fd_registers;
     int needs_fs=t->fd_job==MD_FD_INPUT ? (int)r->regs[2]==AT_FDCWD || (int)r->regs[3]==AT_FDCWD
         : !t->fd_job && (t->fd_cwd || r->regs[8]==SYS_clone || r->regs[8]==SYS_setns
@@ -2568,21 +2600,45 @@ static void fd_begin(struct thread *t, const struct user_pt_regs *r, unsigned op
     /* EVENT_WAIT: another operation owns this file table. fd_ready signals its
      * exact completion; the launch deadline cancels the owned process tree. */
 }
-static void selector_release(struct selector_owner *owner) {
-    CHECK(owner!=selector_execution);
+static void task_action_release(struct task_action *owner) {
+    CHECK(owner!=task_action_execution);
     CHECK(!md_buffer_release(&owner->buffer));
     md_fd_selector_release(owner->group);
     md_fd_selector_release(owner->selected_group);
     if (owner->files.table && md_fd_order_cancel(&owner->files)==1)
         CHECK(!md_fd_order_complete(&owner->files));
-    CHECK(selector_calls); --selector_calls; free(owner);
+    if (owner->loan) {
+        struct task_action **link=&loan_retirements;
+        while (*link && *link!=owner) link=&(*link)->next;
+        CHECK(*link==owner); *link=owner->next;
+        md_fd_loan_release(owner->loan);
+        md_fd_origins_unpin(owner->loan_table);
+    }
+    CHECK(task_action_calls); --task_action_calls; free(owner);
 }
-static void selector_finish(struct selector_owner *owner,long result) {
+static void task_action_cleanup(void) {
+    /* Tracees have been reaped; only metadata pins and borrowed spans remain. */
+    struct task_action *active=task_action_execution;
+    if (active) {
+        if (active->requester) active->requester->action=NULL;
+        if (active->borrowed) CHECK(!md_task_quiesce_return(task_action_barrier,active->actor->pid));
+        if (task_action_barrier) CHECK(!md_task_quiesce_release(task_action_barrier));
+        task_action_execution=NULL;
+        task_action_release(active);
+    }
+    while (loan_retirements) {
+        if (loan_retirements->requester) loan_retirements->requester->action=NULL;
+        task_action_release(loan_retirements);
+    }
+}
+static void task_action_finish(struct task_action *owner,long result) {
     struct thread *t=owner->requester;
     void (*complete)(struct thread *,long)=owner->complete;
     struct user_pt_regs r=owner->continuation;
-    if (t) { retry_clear(t,RETRY_SELECTOR); t->selector=NULL; }
-    selector_release(owner);
+    pid_t waiter=owner->loan_waiter;
+    if (t) { retry_clear(t,RETRY_TASK_ACTION); t->action=NULL; }
+    task_action_release(owner);
+    if (waiter) readiness_loan_closed(waiter,result);
     if (t) {
         if (complete) complete(t,result);
         else {
@@ -2592,15 +2648,16 @@ static void selector_finish(struct selector_owner *owner,long result) {
     }
     adapter_progress();
 }
-static void selector_discard(struct thread *t) {
-    struct selector_owner *owner=t->selector;
+static void task_action_discard(struct thread *t) {
+    struct task_action *owner=t->action;
     if (!owner) return;
-    t->selector=NULL; owner->requester=NULL;
+    t->action=NULL; owner->requester=NULL;
+    if (owner->loan) { owner->loan_turn=NULL; return; }
     /* A foreign actor can still be using this payload. Its exact completion
      * retires the detached request, independently of requester death. */
-    if (owner!=selector_execution) selector_release(owner);
+    if (owner!=task_action_execution) task_action_release(owner);
 }
-static void selector_unpark(void) {
+static void task_action_unpark(void) {
     for (struct thread *peer=threads;peer;peer=peer->next) if (peer->pid) {
         if (peer->memory_notification) {
             struct seccomp_notif *n=peer->memory_notification; peer->memory_notification=NULL;
@@ -2612,39 +2669,65 @@ static void selector_unpark(void) {
         }
     }
 }
-static void selector_call_complete(long result,int retry) {
-    struct selector_owner *owner=selector_execution;
+static void loan_failed(struct task_action *owner,long result) {
+    /* Retain custody until kernel teardown when retirement cannot be verified. */
+    if (cancelling) return;
+    fprintf(stderr,"Shroot: cannot retire temporary FD %d: %s\n",owner->number,strerror((int)-result));
+    cancel_tree(125);
+}
+static void task_action_call_complete(long result,int retry) {
+    struct task_action *owner=task_action_execution;
     struct thread *actor=owner->actor;
-    if (!result && !retry) result=md_fd_selector_mark(owner->group,owner->kind,owner->number);
-    if (owner->borrowed) CHECK(!md_task_quiesce_return(selector_barrier,actor->pid));
-    if (selector_barrier) CHECK(!md_task_quiesce_release(selector_barrier));
+    if (owner->loan) {
+        if (!retry && result!=-ESRCH) {
+            struct md_fd_mutation close={.nr=owner->native.arguments.number,
+                .args={owner->native.arguments.value[0],owner->native.arguments.value[1],owner->native.arguments.value[2]}};
+            CHECK(!md_fd_mutation_finish(&close,owner->loan_table,result));
+            struct md_fd_order *turn=owner->loan_turn ? owner->loan_turn : &owner->files;
+            int remaining=md_fd_origins_loan_matches(turn,owner->number,owner->loan);
+            if (remaining<0) result=remaining;
+            else if (!remaining) result=0;
+            else if (result==-EBADF)
+                result=md_fd_origins_close_range(owner->loan_table,owner->number,owner->number,0);
+        }
+    } else if (!result && !retry) result=md_fd_selector_mark(owner->group,owner->kind,owner->number);
+    if (owner->borrowed) CHECK(!md_task_quiesce_return(task_action_barrier,actor->pid));
+    if (task_action_barrier) CHECK(!md_task_quiesce_release(task_action_barrier));
     if (owner->synthetic) actor->kernel_stopped=0;
     CHECK(!md_buffer_release(&owner->buffer));
     md_fd_selector_release(owner->group); owner->group=NULL;
-    owner->actor=NULL; owner->borrowed=owner->synthetic=0; owner->call=(struct md_task_filter){0};
-    selector_releasing=1;
-    selector_execution=NULL;
-    selector_unpark();
-    selector_releasing=0;
-    if (!owner->requester || (result<0 && !retry)) selector_finish(owner,result);
+    owner->actor=NULL; owner->borrowed=owner->synthetic=0; owner->filter=(struct md_task_filter){0};
+    task_action_releasing=1;
+    task_action_execution=NULL;
+    task_action_unpark();
+    task_action_releasing=0;
+    if (owner->loan) {
+        if (retry || result==-ESRCH) return;
+        if (result<0) {
+            loan_failed(owner,result);
+            return;
+        }
+        task_action_finish(owner,result); return;
+    }
+    if (!owner->requester || (result<0 && !retry)) task_action_finish(owner,result);
     else if (result>0) {
-        if (!owner->remote && !owner->selected_group) selector_finish(owner,result);
+        if (!owner->remote && !owner->selected_group) task_action_finish(owner,result);
         else {
             owner->rejected_group=actor->tgid; owner->rejected_task=(pid_t)result;
-            retry_wait(owner->requester,RETRY_SELECTOR);
+            retry_wait(owner->requester,RETRY_TASK_ACTION);
         }
-    } else if (owner->selected_group && !retry) selector_finish(owner,0);
-    else retry_wait(owner->requester,RETRY_SELECTOR);
+    } else if (owner->selected_group && !retry) task_action_finish(owner,0);
+    else retry_wait(owner->requester,RETRY_TASK_ACTION);
 }
-static void selector_call_start(struct selector_owner *owner) {
+static void task_action_call_start(struct task_action *owner) {
     struct thread *actor=owner->actor;
     struct user_pt_regs saved=owner->continuation;
     enum md_task_call_boundary boundary=MD_TASK_CALL_USER;
     if (owner->remote) {
-        if (!md_task_quiesce_ready(selector_barrier)) return;
+        if (!md_task_quiesce_ready(task_action_barrier)) return;
         struct md_task_quiesce_stop stop;
-        int error=md_task_quiesce_borrow(selector_barrier,actor->pid,&stop);
-        if (error) { selector_call_complete(error,error==-ESRCH); return; }
+        int error=md_task_quiesce_borrow(task_action_barrier,actor->pid,&stop);
+        if (error) { task_action_call_complete(error,error==-ESRCH); return; }
         owner->borrowed=1;
         owner->synthetic=stop.kind==MD_TASK_QUIESCE_SYNTHETIC;
         if (stop.kind==MD_TASK_QUIESCE_EVENT) {
@@ -2652,19 +2735,27 @@ static void selector_call_start(struct selector_owner *owner) {
             /* Lifecycle and signal delivery belong to the normal dispatcher.
              * Replay them before selecting another exact task boundary. */
             if (event!=PTRACE_EVENT_SECCOMP && (event || WSTOPSIG(stop.status)!=(SIGTRAP|0x80))) {
-                selector_call_complete(0,1); return;
+                task_action_call_complete(0,1); return;
             }
         }
         struct ptrace_syscall_info info={0};
-        if (!registers(actor->pid,&saved)) { selector_call_complete(-ESRCH,1); return; }
+        if (!registers(actor->pid,&saved)) { task_action_call_complete(-ESRCH,1); return; }
         if (native_trace(PTRACE_GET_SYSCALL_INFO,actor->pid,(void *)sizeof(info),&info)<0) {
-            selector_call_complete(-errno,0); return;
+            task_action_call_complete(-errno,0); return;
         }
         boundary=(enum md_task_call_boundary)info.op;
     }
     TRACE("PROBE selector-start requester=%d actor=%d remote=%d synthetic=%d boundary=%d pc=%llx nr=%llu value=%lld\n",
         owner->requester ? owner->requester->pid : 0,actor->pid,owner->remote,owner->synthetic,boundary,
         (unsigned long long)saved.pc,(unsigned long long)saved.regs[8],(long long)saved.regs[0]);
+    if (owner->loan) {
+        struct md_task_call_arguments args={.number=SYS_close,.value={(unsigned long)owner->number}};
+        int error=md_task_call_begin(&owner->native,native_trace,actor->pid,boundary,
+            &saved,abi.task_call,abi.task_return,&args);
+        if (error && owner->native.stage) { CHECK(error==-ESRCH); actor->resume_lost=1; return; }
+        if (error) { task_action_call_complete(error,error==-EAGAIN); return; }
+        actor->kernel_stopped=0; return;
+    }
     int error=md_buffers_take_reserved(md_memory_buffers(actor->memory),&owner->buffer);
     struct md_buffer_span span;
     if (!error) error=md_buffer_span(&owner->buffer,&span);
@@ -2672,13 +2763,13 @@ static void selector_call_start(struct selector_owner *owner) {
     if (!error && (!address || span.size<sizeof(struct md_task_filter_image))) error=-EINVAL;
     if (!error) {
         struct md_fd_filter_gates gates={RAW_GATE,abi.watch_gate,abi.task_return};
-        error=md_task_filter_begin(&owner->call,native_trace,actor->pid,boundary,
+        error=md_task_filter_begin(&owner->filter,native_trace,actor->pid,boundary,
             &saved,abi.task_call,abi.task_return,span.data,address,owner->kind,owner->number,&gates);
     }
-    if (error && owner->call.task.stage) {
+    if (error && owner->filter.task.stage) {
         CHECK(error==-ESRCH); actor->resume_lost=1; return;
     }
-    if (error) { selector_call_complete(error,error==-EAGAIN); return; }
+    if (error) { task_action_call_complete(error,error==-EAGAIN); return; }
     actor->kernel_stopped=0;
 }
 static int selector_has(struct thread *t,unsigned kind,int number) {
@@ -2692,17 +2783,31 @@ static int selector_has(struct thread *t,unsigned kind,int number) {
         }
     return 1;
 }
-static void selector_start(struct thread *t) {
-    retry_clear(t,RETRY_SELECTOR);
-    struct selector_owner *owner=t->selector;
-    CHECK(owner && !owner->call.task.stage);
-    if (selector_execution || selector_releasing || memory_execution) { retry_wait(t,RETRY_SELECTOR); return; }
+static int task_action_borrowable(struct thread *p) {
+    /* A queued table user is stopped before its operation. Other candidates
+     * retain their exact kernel continuation. Never borrow an active worker,
+     * debugger, mutation or newborn awaiting its first stop. */
+    int waiter=p->kernel_stopped && (p->retries[1].mask==RETRY_FD
+        || (p->phase==PROC_LOOKUP && md_fd_order_state(&p->proc_lookup)==MD_RESOURCE_ORDER_QUEUED)
+        || (p->action && !task_action_call(p->action)->stage));
+    return p->ready && !birth_stop_pending(p) && !p->resume_lost && !p->terminal_stop
+        && !p->listening && !p->vfork_child && !p->interrupt_pending
+        && !p->mapping && !p->memory_capture && !p->fd_running && !md_debugger_traced(debugger,p->pid)
+        && (waiter || (!p->kernel_stopped && (p->phase==IDLE || p->phase==DISPATCHING
+            || p->phase==WATCH_READ || p->phase==EPOLL_WAIT || p->phase==PROCESS_OBSERVING)));
+}
+static void task_action_start(struct thread *t) {
+    retry_clear(t,RETRY_TASK_ACTION);
+    struct task_action *owner=t->action;
+    CHECK(owner && !task_action_call(owner)->stage);
+    if (owner->loan) { loan_start(owner); return; }
+    if (task_action_execution || task_action_releasing || memory_execution) { retry_wait(t,RETRY_TASK_ACTION); return; }
     if (owner->rejected_task) {
         if (md_task_helper_retiring(helpers,owner->rejected_group,owner->rejected_task)) {
-            retry_wait(t,RETRY_SELECTOR); return;
+            retry_wait(t,RETRY_TASK_ACTION); return;
         }
         if (!syscall(SYS_tgkill,owner->rejected_group,owner->rejected_task,0) || errno!=ESRCH) {
-            selector_finish(owner,-ENOTSUP); return;
+            task_action_finish(owner,-ENOTSUP); return;
         }
         owner->rejected_task=0;
     }
@@ -2713,77 +2818,102 @@ static void selector_start(struct thread *t) {
             && md_fd_order_state(&t->buffer_return.files)!=MD_RESOURCE_ORDER_RUNNING) {
         if (!owner->files.table) {
             int ready=md_fd_order_begin(t->resources.files,&owner->files,fd_wakeup);
-            if (ready<0) { selector_finish(owner,ready); return; }
+            if (ready<0) { task_action_finish(owner,ready); return; }
         }
         if (md_fd_order_state(&owner->files)==MD_RESOURCE_ORDER_QUEUED) {
-            retry_wait(t,RETRY_SELECTOR); return;
+            retry_wait(t,RETRY_TASK_ACTION); return;
         }
         if (md_fd_order_state(&owner->files)==MD_RESOURCE_ORDER_READY)
             CHECK(!md_fd_order_start(&owner->files));
     }
     struct thread *candidate=NULL;
     int ready=md_fd_selector_has(owner->selected_group ? owner->selected_group : t->fd_selector,owner->kind,owner->number);
-    if (ready<0) { selector_finish(owner,ready); return; }
-    if (ready && owner->selected_group) { selector_finish(owner,0); return; }
+    if (ready<0) { task_action_finish(owner,ready); return; }
+    if (ready && owner->selected_group) { task_action_finish(owner,0); return; }
     if (!ready && (!owner->selected_group || owner->selected_group==t->fd_selector)) candidate=t;
     int pending=0;
     for (struct thread *peer=threads;!candidate && owner->number>=0 && peer;peer=peer->next)
         if (peer->pid && peer->born && (owner->selected_group
                 ? peer->fd_selector==owner->selected_group : peer->resources.files==t->resources.files)) {
             ready=md_fd_selector_has(peer->fd_selector,owner->kind,owner->number);
-            if (ready<0) { selector_finish(owner,ready); return; }
+            if (ready<0) { task_action_finish(owner,ready); return; }
             if (ready) continue;
             pending=1;
-            /* Do not borrow a worker's or debugger's active continuation.
-             * Guest adapter code may be blocked in native IO too. The reserved
-             * span is independent of that adapter's frame, and the task call
-             * restores its exact registers/mask before resuming it. A table
-             * waiter is stable too: this request owns its table turn. */
-            int waiter=peer->kernel_stopped && (peer->retries[1].mask==RETRY_FD
-                || (peer->phase==PROC_LOOKUP
-                    && md_fd_order_state(&peer->proc_lookup)==MD_RESOURCE_ORDER_QUEUED)
-                || (peer->selector && !peer->selector->call.task.stage));
-            TRACE("PROBE selector-peer pid=%d phase=%d stopped=%d ready=%d initial=%d lost=%d terminal=%d listen=%d vfork=%d interrupt=%d mapping=%d memory=%d fd=%d debugger=%d waiter=%d\n",
-                peer->pid,peer->phase,peer->kernel_stopped,peer->ready,peer->initial_stop,peer->resume_lost,
-                peer->terminal_stop,peer->listening,peer->vfork_child,peer->interrupt_pending,
-                peer->mapping!=NULL,peer->memory_capture!=NULL,peer->fd_running,
-                md_debugger_traced(debugger,peer->pid),waiter);
-            if (peer->ready && peer->initial_stop && !peer->resume_lost && !peer->terminal_stop
-                    && !peer->listening && !peer->vfork_child && !peer->interrupt_pending
-                    && !peer->mapping && !peer->memory_capture
-                    && !peer->fd_running && !md_debugger_traced(debugger,peer->pid)
-                    && (waiter || ((peer->phase==IDLE || peer->phase==DISPATCHING || peer->phase==WATCH_READ
-                            || peer->phase==EPOLL_WAIT)
-                        && !peer->kernel_stopped))) candidate=peer;
+            if (task_action_borrowable(peer)) candidate=peer;
         }
     if (!candidate) {
-        if (pending) retry_wait(t,RETRY_SELECTOR);
-        else selector_finish(owner,owner->selected_group ? -ESRCH : 0);
+        if (pending) retry_wait(t,RETRY_TASK_ACTION);
+        else task_action_finish(owner,owner->selected_group ? -ESRCH : 0);
         return;
     }
     owner->actor=candidate; owner->remote=candidate!=t;
     owner->group=md_fd_selector_fork(candidate->fd_selector,1);
-    selector_execution=owner;
+    task_action_execution=owner;
     if (owner->remote) {
-        if (!selector_barrier) { selector_barrier=md_task_quiesce_new(native_trace); CHECK(selector_barrier); }
-        CHECK(!md_task_quiesce_add(selector_barrier,candidate->pid,candidate->kernel_stopped,candidate->kernel_resume));
-        CHECK(!md_task_quiesce_stop(selector_barrier));
+        if (!task_action_barrier) { task_action_barrier=md_task_quiesce_new(native_trace); CHECK(task_action_barrier); }
+        CHECK(!md_task_quiesce_add(task_action_barrier,candidate->pid,candidate->kernel_stopped,candidate->kernel_resume));
+        CHECK(!md_task_quiesce_stop(task_action_barrier));
     }
-    selector_call_start(owner);
+    task_action_call_start(owner);
 }
-static void selector_schedule(void) {
-    if (!selector_calls || memory_execution) return;
-    if (selector_execution) {
-        if (!selector_execution->call.task.stage) selector_call_start(selector_execution);
+static void task_action_schedule(void) {
+    if (!task_action_calls || memory_execution) return;
+    if (task_action_execution) {
+        if (!task_action_call(task_action_execution)->stage) task_action_call_start(task_action_execution);
         return;
     }
-    for (struct thread *t=threads;t;t=t->next) if (t->pid && t->selector) {
-        selector_start(t);
-        if (selector_execution) return;
+    for (struct task_action *s=loan_retirements,*next;s;s=next) {
+        next=s->next; loan_start(s);
+        if (task_action_execution) return;
+    }
+    for (struct thread *t=threads;t;t=t->next) if (t->pid && t->action) {
+        task_action_start(t);
+        if (task_action_execution) return;
     }
 }
-static int selector_event(pid_t pid,int status,const struct rusage *usage) {
-    struct selector_owner *owner=selector_execution;
+static void loan_start(struct task_action *owner) {
+    if (cancelling || task_action_execution || task_action_releasing || memory_execution) return;
+    struct md_fd_order *turn=owner->loan_turn ? owner->loan_turn : &owner->files;
+    if (!turn->table) {
+        int error=md_fd_order_begin(owner->loan_table,turn,fd_wakeup);
+        if (error<0) { loan_failed(owner,error); return; }
+    }
+    if (md_fd_order_state(turn)==MD_RESOURCE_ORDER_QUEUED) return;
+    if (md_fd_order_state(turn)==MD_RESOURCE_ORDER_READY) CHECK(!md_fd_order_start(turn));
+    int exists=md_fd_origins_loan_matches(turn,owner->number,owner->loan);
+    if (exists<0) { loan_failed(owner,exists); return; }
+    if (!exists) { task_action_finish(owner,0); return; }
+    struct thread *candidate=owner->requester;
+    if (candidate && (!candidate->pid || candidate->terminal_stop || candidate->resume_lost)) candidate=NULL;
+    int alive=0;
+    for (struct thread *p=threads;!candidate && p;p=p->next) {
+        if (!p->pid || p->resources.files!=owner->loan_table || p->terminal_stop || p->resume_lost) continue;
+        alive=1;
+        if (task_action_borrowable(p)) candidate=p;
+    }
+    if (!candidate) {
+        /* No task can retain the kernel table. A metadata pin is not an owner. */
+        if (!alive) task_action_finish(owner,0);
+        return;
+    }
+    owner->actor=candidate; owner->remote=1;
+    task_action_execution=owner;
+    if (!task_action_barrier) { task_action_barrier=md_task_quiesce_new(native_trace); CHECK(task_action_barrier); }
+    CHECK(!md_task_quiesce_add(task_action_barrier,candidate->pid,candidate->kernel_stopped,candidate->kernel_resume));
+    CHECK(!md_task_quiesce_stop(task_action_barrier));
+    task_action_call_start(owner);
+}
+static void loan_retire(struct task_action *owner,struct thread *requester,
+        struct md_fd_order *turn,void (*complete)(struct thread *,long)) {
+    md_fd_loan_end(owner->loan);
+    owner->requester=requester; owner->loan_turn=turn; owner->complete=complete;
+    owner->next=loan_retirements; loan_retirements=owner; ++task_action_calls;
+    if (requester) { CHECK(!requester->action); requester->action=owner; }
+    if (!turn) CHECK(md_fd_order_begin(owner->loan_table,&owner->files,fd_wakeup)>=0);
+    CHECK(!md_event_signal(fd_ready));
+}
+static int task_action_event(pid_t pid,int status,const struct rusage *usage) {
+    struct task_action *owner=task_action_execution;
     if (!owner) return 0;
     struct thread *t=find_thread(pid);
     unsigned event=(unsigned)status>>16;
@@ -2793,45 +2923,56 @@ static int selector_event(pid_t pid,int status,const struct rusage *usage) {
         if (t && WIFSTOPPED(status) && !event && WSTOPSIG(status)==(SIGTRAP|0x80)
                 && t->phase==OBSERVING && t->memory_action==MEMORY_KERNEL
                 && t->original.regs[8]==SYS_mprotect) {
-            if (!selector_barrier) { selector_barrier=md_task_quiesce_new(native_trace); CHECK(selector_barrier); }
-            CHECK(!md_task_quiesce_event(selector_barrier,pid,status,usage)); return 1;
+            if (!task_action_barrier) { task_action_barrier=md_task_quiesce_new(native_trace); CHECK(task_action_barrier); }
+            CHECK(!md_task_quiesce_event(task_action_barrier,pid,status,usage)); return 1;
         }
         return 0;
     }
-    if (!owner->call.task.stage) {
+    struct md_task_call *call=task_action_call(owner);
+    if (!call->stage) {
         TRACE("PROBE selector-stop pid=%d status=%x\n",pid,status);
-        CHECK(owner->remote && !md_task_quiesce_event(selector_barrier,pid,status,usage)); return 1;
+        CHECK(owner->remote && !md_task_quiesce_event(task_action_barrier,pid,status,usage)); return 1;
     }
     if (!WIFSTOPPED(status) || event==PTRACE_EVENT_EXIT || event==PTRACE_EVENT_EXEC) {
-        if (!owner->remote) { t->selector=NULL; owner->requester=NULL; }
-        selector_call_complete(-ESRCH,0); return 0;
+        if (!owner->remote) { t->action=NULL; owner->requester=NULL; }
+        task_action_call_complete(-ESRCH,0); return 0;
     }
-    if (event==PTRACE_EVENT_STOP && WSTOPSIG(status)==SIGTRAP) {
+    if (event==PTRACE_EVENT_STOP && WSTOPSIG(status)==SIGTRAP && !call->restart_pending) {
         if (statistics) ++statistics->stops;
         if (tracee_request(t,PTRACE_CONT,NULL,NULL,"selector-interrupt")) {
             t->kernel_stopped=0; t->interrupt_pending=0;
         }
         return 1;
     }
-    if (event!=PTRACE_EVENT_SECCOMP && (event || (WSTOPSIG(status)!=SIGTRAP && WSTOPSIG(status)!=(SIGTRAP|0x80)))) return 0;
+    if (event!=PTRACE_EVENT_SECCOMP && !(event==PTRACE_EVENT_STOP && call->restart_pending)
+            && (event || (WSTOPSIG(status)!=SIGTRAP && WSTOPSIG(status)!=(SIGTRAP|0x80)))) return 0;
     if (statistics) ++statistics->stops;
-    int result=md_task_filter_event(&owner->call,status);
-    TRACE("PROBE selector-event pid=%d status=%x stage=%u boundary=%d thread=%u ready=%d result=%ld\n",
-        pid,status,owner->call.task.stage,owner->call.task.boundary,owner->call.thread_only,result,owner->call.task.result);
+    int result=md_task_call_event(call,status);
+    TRACE("PROBE task-action pid=%d status=%x stage=%u boundary=%d loan=%d ready=%d result=%ld\n",
+        pid,status,call->stage,call->boundary,owner->loan!=NULL,result,call->result);
     if (result<0) { CHECK(result==-ESRCH); t->resume_lost=1; return 1; }
     if (result) {
         t->kernel_stopped=1;
-        int single=!md_task_helpers_group_busy(helpers,t->tgid);
-        for (struct thread *peer=threads;single && peer;peer=peer->next)
-            if (peer!=t && peer->pid && peer->tgid==t->tgid) single=0;
-        if (owner->call.task.result==-EPERM && !owner->call.thread_only && single) {
-            TRACE("PROBE selector-thread-retry pid=%d boundary=%d\n",pid,owner->call.task.boundary);
-            result=md_task_filter_retry_thread(&owner->call);
+        if (owner->loan && call->arguments.number==SYS_close
+                && (call->result==-EPERM || call->result==-EACCES || call->result==-ENOSYS)) {
+            struct md_task_call_arguments args={SYS_close_range,
+                {(unsigned long)owner->number,(unsigned long)owner->number,0}};
+            result=md_task_call_again(call,&args);
             if (result) { CHECK(result==-ESRCH); t->resume_lost=1; }
             else t->kernel_stopped=0;
             return 1;
         }
-        selector_call_complete(owner->call.task.result,0);
+        int single=!md_task_helpers_group_busy(helpers,t->tgid);
+        for (struct thread *peer=threads;single && peer;peer=peer->next)
+            if (peer!=t && peer->pid && peer->tgid==t->tgid) single=0;
+        if (!owner->loan && call->result==-EPERM && !owner->filter.thread_only && single) {
+            TRACE("PROBE selector-thread-retry pid=%d boundary=%d\n",pid,call->boundary);
+            result=md_task_filter_retry_thread(&owner->filter);
+            if (result) { CHECK(result==-ESRCH); t->resume_lost=1; }
+            else t->kernel_stopped=0;
+            return 1;
+        }
+        task_action_call_complete(call->result,0);
     }
     return 1;
 }
@@ -2882,7 +3023,7 @@ static void fd_control(struct thread *t, struct user_pt_regs *r) {
             /* EVENT_WAIT: the exact helper's terminal wait event releases
              * this caller. The launch deadline bounds failure/cancellation. */
             t->selector_exit=(pid_t)id;
-            retry_wait(t,RETRY_SELECTOR);
+            retry_wait(t,RETRY_TASK_ACTION);
             TRACE("PROBE selector exit wait pid=%d helper=%d\n",t->pid,t->selector_exit);
             return;
         } else if (syscall(SYS_tgkill,t->tgid,(pid_t)id,0)==-1 && errno==ESRCH) {
@@ -2896,15 +3037,15 @@ static void fd_control(struct thread *t, struct user_pt_regs *r) {
             result=selector_has(t,(unsigned)id,(int)r->regs[2]);
             if (operation==MD_FD_SELECTOR_INSTALL && result>=0) {
                 if (result) result=0;
-                else if (t->selector) result=-EBUSY;
-                else if (!(t->selector=calloc(1,sizeof(*t->selector)))) result=-ENOMEM;
+                else if (t->action) result=-EBUSY;
+                else if (!(t->action=calloc(1,sizeof(*t->action)))) result=-ENOMEM;
                 else {
-                    ++selector_calls;
-                    t->selector->requester=t;
-                    t->selector->continuation=*r; t->selector->continuation.pc+=4;
-                    t->selector->kind=(enum md_fd_selector_kind)id;
-                    t->selector->number=(int)r->regs[2];
-                    selector_start(t); return;
+                    ++task_action_calls;
+                    t->action->requester=t;
+                    t->action->continuation=*r; t->action->continuation.pc+=4;
+                    t->action->kind=(enum md_fd_selector_kind)id;
+                    t->action->number=(int)r->regs[2];
+                    task_action_start(t); return;
                 }
             }
         }
@@ -2982,6 +3123,17 @@ static void readiness_admission_release(struct readiness_owner *o,int commit) {
 static void readiness_release(struct thread *t) {
     struct readiness_owner *o=t->readiness;
     if (!o) return;
+    CHECK(!md_fd_install_cancel(&o->delivery));
+    if (o->retirement) {
+        if (o->loan_number>=0) loan_retire(o->retirement,NULL,NULL,NULL);
+        else {
+            md_fd_loan_end(o->retirement->loan);
+            md_fd_loan_release(o->retirement->loan);
+            md_fd_origins_unpin(o->retirement->loan_table);
+            free(o->retirement);
+        }
+        o->retirement=NULL;
+    }
     readiness_unwatch(t);
     md_epoll_wait_cancel(&o->wait);
     md_poll_wait_free(o->poll);
@@ -2992,13 +3144,109 @@ static void readiness_release(struct thread *t) {
     md_fd_object_release(o->target); md_fd_object_release(o->queue);
     free(o); t->readiness=NULL;
 }
+static void readiness_reply(struct thread *t,long result);
+static void readiness_retired(struct thread *t,long result) {
+    struct readiness_owner *o=t->readiness;
+    readiness_reply(t,result ? result : o->finish_result);
+}
 static void readiness_reply(struct thread *t,long result) {
     struct readiness_owner *o=t->readiness;
+    if (o->retirement && o->loan_number>=0) {
+        o->finishing=1; o->finish_result=result;
+        struct task_action *retirement=o->retirement;
+        o->retirement=NULL; o->loan_number=-1;
+        loan_retire(retirement,t,NULL,readiness_retired); return;
+    }
     retry_clear(t,RETRY_READINESS);
     readiness_admission_release(o,0);
     if (o->files.table && md_fd_order_cancel(&o->files)==1) CHECK(!md_fd_order_complete(&o->files));
     o->done=1; t->phase=DISPATCHING; t->buffer_registers=o->continuation;
     buffer_reply(t,result);
+}
+static void readiness_deliver(struct thread *t) {
+    struct readiness_owner *o=t->readiness;
+    retry_clear(t,RETRY_READINESS);
+    int installed=md_fd_install_progress(&o->delivery);
+    if (installed==MD_FD_INSTALL_WAIT) { retry_wait(t,RETRY_READINESS); return; }
+    CHECK(!o->delivery.retire_error);
+    if (installed==MD_FD_INSTALL_CANCELLED) return;
+    if (installed<0) {
+        struct seccomp_notif_resp reply={.id=o->delivery.notification,.error=installed};
+        CHECK(!ioctl(listener,SECCOMP_IOCTL_NOTIF_SEND,&reply) || errno==ENOENT);
+    } else o->retirement->number=o->loan_number=installed;
+}
+static void readiness_request_loan(struct thread *t) {
+    struct readiness_owner *o=t->readiness;
+    if (!o->retirement) {
+        struct task_action *s=calloc(1,sizeof(*s));
+        if (!s) { readiness_reply(t,-ENOMEM); return; }
+        s->loan=md_fd_loan_new(t->resources.files);
+        if (!s->loan) { free(s); readiness_reply(t,-ENOMEM); return; }
+        s->loan_table=md_fd_origins_pin(t->resources.files);
+        s->number=-1; o->retirement=s;
+    }
+    t->phase=DISPATCHING; t->buffer_registers=o->continuation;
+    buffer_reply(t,MD_EPOLL_LOAN);
+}
+static void readiness_loan_closed(pid_t pid,long result) {
+    struct thread *waiter=find_thread(pid);
+    if (waiter && waiter->readiness && waiter->readiness->parked) {
+        struct readiness_owner *o=waiter->readiness;
+        o->evicting=o->parked=0;
+        if (result || o->finishing) readiness_reply(waiter,result ? result : o->finish_result);
+        else readiness_request_loan(waiter);
+    }
+}
+static void fd_loan_closed(struct thread *t,long result) {
+    if (result) { fd_discard(t); return_value(t,&t->fd_registers,result); }
+    else fd_start(t);
+}
+static int readiness_evict(struct thread *mutator,struct md_fd_loan *loan) {
+    for (struct thread *p=threads;p;p=p->next) {
+        struct readiness_owner *o=p->readiness;
+        if (!p->pid || !o || !o->retirement || o->retirement->loan!=loan) continue;
+        o->evicting=1;
+        if (!o->parked) {
+            /* EVENT_WAIT: the calling thread leaves its exact native wait
+             * before a destructive table mutation. No table lock spans IO. */
+            if (p->phase==EPOLL_WAIT && !p->socket_waking) {
+                p->socket_waking=1;
+                tracee_request(p,PTRACE_INTERRUPT,NULL,NULL,"epoll-loan-revoke");
+            }
+            retry_wait(mutator,RETRY_FD); return 0;
+        }
+        struct task_action *retirement=o->retirement;
+        o->retirement=NULL; o->loan_number=-1;
+        retirement->loan_waiter=p->pid;
+        loan_retire(retirement,mutator,&mutator->fd_order,fd_loan_closed);
+        return 0;
+    }
+    /* An already finished wait queued its own retirement. Yield this not-yet
+     * executed mutation behind that close instead of holding up its owner. */
+    for (struct task_action *s=loan_retirements;s;s=s->next) if (s->loan==loan) {
+        CHECK(!md_fd_order_complete(&mutator->fd_order));
+        CHECK(md_fd_order_begin(mutator->resources.files,&mutator->fd_order,fd_wakeup)>=0);
+        retry_wait(mutator,RETRY_FD); return 0;
+    }
+    CHECK(0); return 0;
+}
+static int fd_loans_ready(struct thread *t) {
+    if (!md_fd_origins_has_loans(t->resources.files)) return 1;
+    const struct user_pt_regs *r=t->fd_job==MD_FD_DUPLICATE_BEGIN ? &t->original : &t->fd_registers;
+    unsigned long a[6]; for (unsigned i=0;i<6;++i) a[i]=r->regs[i];
+    long nr=r->regs[8];
+    int copying=(nr==SYS_clone && !(a[0]&CLONE_FILES))
+        || (nr==SYS_unshare && (a[0]&CLONE_FILES))
+        || (nr==SYS_close_range && (a[2]&CLOSE_RANGE_UNSHARE));
+    struct md_fd_loan *loan=NULL;
+    int number=-1;
+    int result=copying ? md_fd_origins_loan_range(&t->fd_order,0,UINT_MAX,&number,&loan)
+        : md_fd_mutation_loan(&t->fd_order,nr,a,&number,&loan);
+    if (result<0) { fd_discard(t); return_value(t,&t->fd_registers,result); return 0; }
+    if (!result) return 1;
+    int ready=readiness_evict(t,loan);
+    md_fd_loan_release(loan);
+    return ready;
 }
 static void readiness_selected(struct thread *t,long result) {
     struct readiness_owner *o=t->readiness;
@@ -3022,6 +3270,7 @@ static int readiness_inventory(struct readiness_owner *o) {
 static void readiness_start(struct thread *t) {
     retry_clear(t,RETRY_READINESS);
     struct readiness_owner *o=t->readiness;
+    if (o->delivery.files.table) { readiness_deliver(t); return; }
     TRACE("PROBE readiness-start pid=%d classified=%d admission=%d sealed=%d\n",t->pid,o->classified,o->admission!=NULL,o->sealed);
     if (readiness_activation && readiness_activation!=o) { retry_wait(t,RETRY_READINESS); return; }
     int error=0;
@@ -3096,14 +3345,14 @@ static void readiness_start(struct thread *t) {
         error=md_fd_admission_next(o->admission,&o->request);
         TRACE("PROBE readiness-selector pid=%d result=%d fd=%d kind=%d\n",t->pid,error,o->request.number,o->request.kind);
         if (error==1) {
-            CHECK(!t->selector);
-            struct selector_owner *s=calloc(1,sizeof(*s));
+            CHECK(!t->action);
+            struct task_action *s=calloc(1,sizeof(*s));
             if (!s) { readiness_reply(t,-ENOMEM); return; }
-            ++selector_calls; t->selector=s;
+            ++task_action_calls; t->action=s;
             s->requester=t; s->continuation=o->continuation; s->continuation.pc+=4;
             s->kind=o->request.kind; s->number=o->request.number;
             s->selected_group=md_fd_selector_fork(o->request.group,1); s->complete=readiness_selected;
-            selector_start(t); return;
+            task_action_start(t); return;
         }
         if (error!=2) { readiness_reply(t,error); return; }
         error=md_control_epoll_admit_finish(queue,1); o->reserved=0;
@@ -3129,6 +3378,7 @@ static void readiness_capture(struct thread *t,unsigned command,long value) {
     }
     if (error) { readiness_reply(t,error); return; }
     CHECK(!md_fd_order_complete(&o->files));
+    o->native_caller=1;
     buffer_reply(t,MD_EPOLL_CAPTURED);
 }
 static void readiness_begin(struct thread *t,const struct user_pt_regs *r) {
@@ -3138,6 +3388,7 @@ static void readiness_begin(struct thread *t,const struct user_pt_regs *r) {
     if (!error && !o) error=-ENOMEM;
     if (error) { buffer_reply(t,error); return; }
     o->continuation=*r;
+    o->loan_number=-1;
     if (t->original.regs[8]==SYS_ppoll || t->original.regs[8]==SYS_pselect6) {
         struct md_poll_frame *f=span.data;
         o->poll_count=f->total;
@@ -3504,7 +3755,14 @@ static void readiness_task_progress(struct thread *t,int completed,long value) {
     int waiting=!result && (o->poll ? md_poll_wait_task(o->poll,&o->wait,span.data,address,
             completed,value,&o->native_call,&result)
         : md_epoll_wait_task(&o->wait,md_control_epoll_from_object(o->queue),span.data,address,
-            t->original.regs[8],(int)t->original.regs[0],completed,value,&o->native_call,&result));
+            t->original.regs[8],o->received ? o->loan_number : (int)t->original.regs[0],
+            completed,value,&o->native_call,&result));
+    if (o->evicting) {
+        md_epoll_wait_cancel(&o->wait);
+        o->parked=1; t->phase=DISPATCHING;
+        if (!waiting) { o->finishing=1; o->finish_result=result; }
+        CHECK(!md_event_signal(fd_ready)); return;
+    }
     if (!waiting) { readiness_reply(t,result); return; }
     struct user_pt_regs regs=o->continuation;
     regs.pc=abi.task_call; regs.regs[8]=o->native_call.number;
@@ -3514,14 +3772,9 @@ static void readiness_task_progress(struct thread *t,int completed,long value) {
 static void readiness_progress(struct thread *t) {
     socket_unwatch(t);
     struct readiness_owner *o=t->readiness;
-    if (o->native_caller) { readiness_task_progress(t,0,0); return; }
-    struct md_buffer_span span;
-    long result=md_buffer_span(&t->buffer,&span);
-    int waiting=0;
-    if (!result) waiting=md_epoll_wait_progress(&o->wait,md_control_epoll_from_object(o->queue),
-        o->received->fds[0],span.data,&result);
-    if (waiting) operation_park(t,o->continuation,o->wait.deadline);
-    else readiness_reply(t,result);
+    if (o->received && o->loan_number<0) { readiness_request_loan(t); return; }
+    CHECK(o->native_caller);
+    readiness_task_progress(t,0,0);
 }
 static void socket_io_progress(struct thread *t) {
     if (t->readiness) { readiness_progress(t); return; }
@@ -3755,9 +4008,9 @@ static int receive_return(struct thread *t, const struct md_received_fds *source
     return receive_return_begin(t,count,1);
 }
 static void selector_progress(struct thread *t) {
-    retry_clear(t,RETRY_SELECTOR);
-    if (t->selector) { selector_start(t); return; }
-    if (md_task_helper_retiring(helpers,t->tgid,t->selector_exit)) { retry_wait(t,RETRY_SELECTOR); return; }
+    retry_clear(t,RETRY_TASK_ACTION);
+    if (t->action) { task_action_start(t); return; }
+    if (md_task_helper_retiring(helpers,t->tgid,t->selector_exit)) { retry_wait(t,RETRY_TASK_ACTION); return; }
     struct user_pt_regs r;
     t->selector_exit=0;
     if (registers(t->pid,&r)) {
@@ -3777,7 +4030,7 @@ static void retry_progress(struct md_pending_node *node,void *context) {
     /* A continuation can cancel another wait. New waits join the next round;
      * no runnable task or in-flight worker operation enters this registry. */
 #define RETRY(kind, call) if (mask & owner->mask & (kind)) call(t)
-    RETRY(RETRY_SELECTOR,selector_progress);
+    RETRY(RETRY_TASK_ACTION,selector_progress);
     RETRY(RETRY_READINESS,readiness_start);
     RETRY(RETRY_MAPPING,mapping_start);
     RETRY(RETRY_MEMORY,memory_start);
@@ -4705,9 +4958,9 @@ static void resume(pid_t pid, int sig) {
     if (!memory_available(pid)) {
         CHECK(!t->memory_resume || !sig || sig==t->memory_signal);
         t->memory_resume=1; if (sig) t->memory_signal=sig;
-        struct md_task_quiesce *barrier=memory_execution ? memory_barrier : selector_barrier;
+        struct md_task_quiesce *barrier=memory_execution ? memory_barrier : task_action_barrier;
         /* A lent actor has a separate resume owner until its registers return. */
-        if (!selector_execution || selector_execution->actor!=t || !selector_execution->borrowed)
+        if (!task_action_execution || task_action_execution->actor!=t || !task_action_execution->borrowed)
             CHECK(!md_task_quiesce_add(barrier,pid,1,0));
         return;
     }
@@ -5181,6 +5434,14 @@ static int readiness_native_event(struct thread *t,int status) {
         CHECK(cookie==MD_INTERCEPT_TASK && regs.pc==abi.task_return
             && regs.regs[8]==(unsigned long)o->native_call.number
             && !memcmp(regs.regs,o->native_call.value,sizeof(o->native_call.value)));
+        if (o->evicting) {
+            if (skip(t->pid)) {
+                md_epoll_wait_cancel(&o->wait);
+                o->parked=1; t->phase=DISPATCHING;
+                CHECK(!md_event_signal(fd_ready));
+            }
+            return 1;
+        }
         int error=o->wait.blocking ? socket_watch(t) : 0;
         if (error) {
             if (skip(t->pid)) { md_epoll_wait_cancel(&o->wait); readiness_reply(t,error); }
@@ -5337,12 +5598,12 @@ static void event_sources(struct pollfd events[EVENT_SOURCES]) {
 }
 static pid_t deferred_event(int *status,struct rusage *usage) {
     pid_t pid=memory_execution ? 0 : md_task_quiesce_take(memory_barrier,status,usage);
-    return pid ? pid : selector_execution ? 0 : md_task_quiesce_take(selector_barrier,status,usage);
+    return pid ? pid : task_action_execution ? 0 : md_task_quiesce_take(task_action_barrier,status,usage);
 }
 static pid_t wait_event(int *status, struct rusage *usage) {
     for (;;) {
         memory_progress();
-        selector_schedule();
+        task_action_schedule();
         if (memory_completions_pending && !memory_execution) {
             memory_completions_pending=0;
             CHECK(!md_fs_worker_dispatch(filesystem)); fd_progress();
@@ -5431,7 +5692,7 @@ static void memory_discard(void) {
 }
 static int memory_available(pid_t pid) {
     return (!memory_execution || !md_task_quiesce_contains(memory_barrier,pid))
-        && (!selector_execution || !md_task_quiesce_contains(selector_barrier,pid));
+        && (!task_action_execution || !md_task_quiesce_contains(task_action_barrier,pid));
 }
 static int memory_runnable(void) {
     struct memory_execution *execution=memory_execution;
@@ -5896,7 +6157,7 @@ int main(int argc, char **argv) {
         pid_collect();
         int status; struct rusage usage; pid_t pid = wait_event(&status, &usage);
         if (memory_event(pid,status,&usage)) continue;
-        if (selector_event(pid,status,&usage)) continue;
+        if (task_action_event(pid,status,&usage)) continue;
         int opened=md_fs_buffer_child(buffer_service,pid,status);
         CHECK(opened>=0);
         if (opened) continue;

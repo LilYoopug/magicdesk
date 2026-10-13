@@ -135,8 +135,11 @@ interrupt/restart behavior under dumpable and protected tasks; production
 cross-owner admission also has guest coverage with protected foreign readers.
 The common task-call executor also uses baseline `PTRACE_GET_SYSCALL_INFO` and
 `NT_ARM_SYSTEM_CALL` to restore syscall entry/seccomp/exit boundaries without
-repeating side effects. Restart-code exits defer admission without changing
-the tracee. Native UID-2000 fixtures cover both dumpable and protected tasks.
+repeating side effects. Restart-code exits use the kernel-restarted entry to
+recover the private original argument, then rearm baseline PTRACE_INTERRUPT when
+restoring the exit. This preserves restart processing without a pending real
+signal. Native UID-2000 fixtures cover both dumpable and protected tasks,
+signal-induced and synthetic-interrupt restarts, and IP-scoped TRACE filters.
 Production proc/watch selector installation uses this task-affine owner through
 the mapped adapter frame, without guest FDs or ptrace writes to application
 memory. Its payload uses reserved control capacity in the same mapping so IO
@@ -152,8 +155,13 @@ the existing ptrace syscall boundary and exact native descriptor, not a new
 kernel operation or a guest FD. Guest tests cover pending/process signals,
 virtual wakeups, simultaneous ready events/signals, equal event data and filtered
 cross-owner queue activation.
-Shared-table waits still use the host collector and lack that signal-context
-coverage. PTRACE_SETSIGMASK clears pending kernel saved-mask restoration,
+Shared-table waits use the same caller context with an atomic ADDFD_SEND loan
+of the captured queue. Loan retirement reuses baseline close/close_range and the
+common short-call/quiescence owner. Regression coverage includes exact-number
+reuse, close_range, fork/unshare while waiting, retained CLOEXEC, denied close,
+policy-rejected retirement and terminal cleanup through a surviving owner. No new kernel API, nested epoll
+or post-5.15 dependency is introduced.
+PTRACE_SETSIGMASK clears pending kernel saved-mask restoration,
 so it cannot be used blindly at an interrupted epoll/ppoll exit. This semantic
 requirement is part of the 5.15 baseline, not a reason to raise the minimum.
 Named-FIFO readiness uses baseline epoll, shared read-only mappings and the

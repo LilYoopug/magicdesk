@@ -5,10 +5,6 @@
 #include <limits.h>
 #include <sys/syscall.h>
 
-static int native_collect(int fd,struct epoll_event *out,int count) {
-    int result=epoll_wait(fd,out,count,0);
-    return result<0 ? -errno : result;
-}
 void md_epoll_wait_initialize(struct md_epoll_wait *w,const struct md_epoll_frame *frame) {
     if (w->initialized) return;
     w->initialized=1; w->deadline=INT64_MAX;
@@ -17,32 +13,6 @@ void md_epoll_wait_initialize(struct md_epoll_wait *w,const struct md_epoll_fram
         if (frame->timeout.tv_sec<(INT64_MAX-now-frame->timeout.tv_nsec)/1000000000LL)
             w->deadline=now+frame->timeout.tv_sec*1000000000LL+frame->timeout.tv_nsec;
     }
-}
-int md_epoll_wait_progress(struct md_epoll_wait *w,struct md_control_epoll *q,int native,
-        struct md_epoll_frame *frame,long *out) {
-    if (w->job.started) {
-        long result=md_ipc_io_job_finish(&w->job,0);
-        if (result<0) { *out=result; return 0; }
-    }
-    md_epoll_wait_initialize(w,frame);
-    int capacity=frame->capacity;
-    if (capacity<=0 || capacity>MD_EPOLL_EVENTS) { *out=-EINVAL; return 0; }
-    int virtual_first=md_control_epoll_turn(q);
-    int half=(capacity+1)/2;
-    int first=virtual_first ? md_control_epoll_collect(q,frame->events,half)
-        : native_collect(native,frame->events,half);
-    if (first<0) { *out=first; return 0; }
-    int second=0;
-    if (first<capacity) second=virtual_first ? native_collect(native,frame->events+first,capacity-first)
-        : md_control_epoll_collect(q,frame->events+first,capacity-first);
-    if (first || second) { *out=first>0 ? first+(second>0 ? second : 0) : second; return 0; }
-    if (md_event_now()>=w->deadline) { *out=0; return 0; }
-    w->sources[0]=(struct pollfd){native,POLLIN,0};
-    w->sources[1]=(struct pollfd){md_control_epoll_descriptor(q),POLLIN,0};
-    long args[5]={(long)w->sources,2,0,0,8};
-    int error=md_ipc_io_job_start(&w->job,SYS_ppoll,args);
-    if (error) { *out=error; return 0; }
-    return 1;
 }
 void md_epoll_wait_cancel(struct md_epoll_wait *w) {
     if (w->job.started) md_ipc_io_job_finish(&w->job,1);

@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <linux/close_range.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -374,8 +375,125 @@ static void temporary_slots(int *budget) {
     }
     puts("PASS operation FD loans: shared ownership, copied-table retirement, explicit dup, close/reuse/exec and uncertain cancellation");
 }
+static void loan_conflicts(int *budget) {
+    struct md_fd_origins *files=md_fd_origins_new(); assert(files);
+    struct md_fd_loan *loan=md_fd_loan_new(files); assert(loan);
+    struct md_fd_origin_update update;
+    assert(!prepare(files,FD_CLOEXEC,&update));
+    assert(!md_fd_origins_prepare_loan(&update,loan));
+    md_fd_origins_finish(&update,23);
+    struct md_fd_order turn={0};
+    assert(md_fd_order_begin(files,&turn,NULL)==1 && !md_fd_order_start(&turn));
+    static const struct { long nr; unsigned long args[6]; int conflict; } cases[]={
+        {SYS_close,{23},1}, {SYS_close,{24},0}, {SYS_close,{ULONG_MAX},0},
+        {SYS_dup3,{24,23,O_CLOEXEC},1}, {SYS_dup3,{23,24,0},0},
+        {SYS_dup3,{24,23,(1UL<<32)|O_CLOEXEC},1},
+        {SYS_dup3,{23,23,0},0}, {SYS_dup3,{24,23,O_NONBLOCK},0},
+        {SYS_dup,{23},0}, {SYS_fcntl,{23,F_DUPFD_CLOEXEC,0},0},
+        {SYS_fcntl,{23,F_SETFD,0},1}, {SYS_fcntl,{23,F_SETFD,FD_CLOEXEC},0},
+        {SYS_close_range,{0,UINT_MAX,0},1}, {SYS_close_range,{23,23,0},1},
+        {SYS_close_range,{24,UINT_MAX,0},0}, {SYS_close_range,{24,23,0},0},
+        {SYS_close_range,{0,UINT_MAX,CLOSE_RANGE_CLOEXEC},0},
+        {SYS_close_range,{0,UINT_MAX,CLOSE_RANGE_UNSHARE},0},
+        {SYS_close_range,{0,UINT_MAX,UINT_MAX},0}, {SYS_execve,{0},0},
+        {SYS_unshare,{0},0}, {SYS_clone,{0},0}, {SYS_openat,{0},0}
+    };
+    *budget=0;
+    for (unsigned i=0;i<sizeof(cases)/sizeof(*cases);++i) {
+        struct md_fd_loan *found=NULL; int number=-1;
+        assert(md_fd_mutation_loan(&turn,cases[i].nr,cases[i].args,&number,&found)==cases[i].conflict);
+        assert(number==(cases[i].conflict ? 23 : -1));
+        assert(found==(cases[i].conflict ? loan : NULL));
+        md_fd_loan_release(found);
+    }
+    assert(md_fd_origins_loan_matches(&turn,23,loan)==1);
+    assert(!md_fd_origins_loan_matches(&turn,24,loan));
+    assert(!md_fd_origins_abandon_range(files,23,23));
+    assert(md_fd_origins_loan_matches(&turn,23,loan)==-ESTALE);
+    struct md_fd_loan *found=NULL; int number=-1;
+    assert(md_fd_mutation_loan(&turn,SYS_close,(unsigned long[]){23,0,0,0,0,0},&number,&found)==-ESTALE);
+    assert(number==-1 && !found);
+    assert(!md_fd_order_complete(&turn)); *budget=-1;
+    /* Reusing the same number with the same origin is still another loan. */
+    struct md_fd_loan *replacement=md_fd_loan_new(files); assert(replacement);
+    assert(!prepare(files,FD_CLOEXEC,&update));
+    assert(!md_fd_origins_prepare_loan(&update,replacement));
+    md_fd_origins_finish(&update,23);
+    assert(md_fd_order_begin(files,&turn,NULL)==1 && !md_fd_order_start(&turn));
+    *budget=0;
+    assert(!md_fd_origins_loan_matches(&turn,23,loan));
+    assert(md_fd_origins_loan_matches(&turn,23,replacement)==1);
+    md_fd_loan_end(loan);
+    assert(!md_fd_origins_loan_next(&turn,&number));
+    md_fd_loan_end(replacement);
+    assert(md_fd_origins_loan_next(&turn,&number)==1 && number==23);
+    assert(!md_fd_origins_close_range(files,23,23,0));
+    assert(!md_fd_origins_has_loans(files));
+    assert(!md_fd_order_complete(&turn));
+    md_fd_loan_release(loan); md_fd_loan_release(replacement); md_fd_origins_release(files);
+    *budget=-1;
+    puts("PASS allocation-free loan conflicts: exact identity, destructive range, copy-on-unshare and stale/reused slots");
+}
+static void loan_inventory(int *budget) {
+    unsigned before=descriptors();
+    struct md_fd_origins *files=md_fd_origins_new(); assert(files);
+    struct md_fd_loan *loans[3];
+    int numbers[]={23,84,145};
+    for (unsigned i=0;i<3;++i) {
+        loans[i]=md_fd_loan_new(files); assert(loans[i]);
+        struct md_fd_origin_update update;
+        assert(!prepare(files,FD_CLOEXEC,&update));
+        *budget=0;
+        assert(md_fd_origins_prepare_loan(&update,loans[i])==-ENOMEM);
+        *budget=-1;
+        assert(!md_fd_origins_prepare_loan(&update,loans[i]));
+        *budget=0; md_fd_origins_finish(&update,numbers[i]); *budget=-1;
+    }
+    /* A failed copied table must not retain links into its source index. */
+    unsigned failures=0,successes=0;
+    for (int limit=0;limit<16;++limit) {
+        *budget=limit;
+        struct md_fd_origins *copy=md_fd_origins_fork(files,0);
+        *budget=-1;
+        if (!copy) { ++failures; continue; }
+        ++successes;
+        struct md_fd_order turn={0};
+        assert(md_fd_order_begin(copy,&turn,NULL)==1 && !md_fd_order_start(&turn));
+        *budget=0;
+        for (unsigned i=0;i<3;++i) {
+            int number=-1;
+            assert(md_fd_origins_loan_next(&turn,&number)==1);
+            assert(number==23 || number==84 || number==145);
+            assert(!md_fd_origins_close_range(copy,number,number,0));
+        }
+        assert(!md_fd_origins_has_loans(copy));
+        assert(!md_fd_order_complete(&turn));
+        md_fd_origins_release(copy); *budget=-1;
+    }
+    assert(failures && successes);
+    /* Retire middle, head, tail in the loan index, all in one hash bucket. */
+    int order[]={1,2,0};
+    for (unsigned i=0;i<3;++i) {
+        struct md_fd_order turn={0};
+        assert(md_fd_order_begin(files,&turn,NULL)==1 && !md_fd_order_start(&turn));
+        *budget=0;
+        int number=-1,index=order[i]; struct md_fd_loan *found=NULL;
+        assert(md_fd_origins_loan_range(&turn,numbers[index],numbers[index],&number,&found)==1);
+        assert(number==numbers[index] && found==loans[index]);
+        md_fd_loan_release(found);
+        assert(!md_fd_origins_close_range(files,number,number,0));
+        assert(!md_fd_origins_loan_matches(&turn,number,loans[index]));
+        assert(md_fd_origins_has_loans(files)==(i<2));
+        assert(!md_fd_order_complete(&turn)); *budget=-1;
+    }
+    for (unsigned i=0;i<3;++i) { md_fd_loan_end(loans[i]); md_fd_loan_release(loans[i]); }
+    md_fd_origins_release(files); assert(descriptors()==before);
+    puts("PASS independent loan index: sparse ranges, multiple owners, fork allocation rollback and arbitrary retirement order");
+}
 void test_epoll_owner(int *budget) {
     temporary_slots(budget);
+    loan_conflicts(budget);
+    loan_inventory(budget);
     extern void test_fd_admission(int *);
     extern void test_fd_admission_live(void);
     test_fd_admission(budget);

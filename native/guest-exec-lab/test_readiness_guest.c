@@ -3,9 +3,11 @@
 #include <errno.h>
 #include <limits.h>
 #include <linux/filter.h>
+#include <linux/close_range.h>
 #include <linux/seccomp.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/prctl.h>
@@ -18,11 +20,13 @@
 #include <signal.h>
 #include <sys/wait.h>
 #include <sys/mount.h>
+#include <time.h>
 
 static void byte_read(int fd) {
     char c;
     ssize_t n;
     do n=read(fd,&c,1); while (n<0 && errno==EINTR);
+    if (n!=1) fprintf(stderr,"byte read fd=%d result=%zd errno=%d\n",fd,n,errno);
     assert(n==1);
 }
 static void byte_write(int fd) { assert(write(fd,"x",1)==1); }
@@ -132,7 +136,105 @@ static void deny_seccomp(void) {
     assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
     assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
 }
-static void mixed(int filtered) {
+struct table_holder_context { int fd; pid_t parent; };
+static int table_holder(void *context) {
+    const struct table_holder_context *owner=context;
+    assert(!prctl(PR_SET_PDEATHSIG,SIGKILL));
+    if (getppid()!=owner->parent) return 0;
+    /* EVENT_WAIT: parent finishes its assertions; parent death kills the
+     * keeper so a failed test does not wait for the outer launch deadline. */
+    byte_read(owner->fd);
+    return 0;
+}
+static int64_t now_ms(void) {
+    struct timespec t; assert(!clock_gettime(CLOCK_MONOTONIC,&t));
+    return (int64_t)t.tv_sec*1000+t.tv_nsec/1000000;
+}
+static int loan_slot(int ep,int other) {
+    char path[64],name[128];
+    for (int fd=3;fd<128;++fd) if (fd!=ep && fd!=other) {
+        snprintf(path,sizeof(path),"/proc/self/fd/%d",fd);
+        ssize_t n=readlink(path,name,sizeof(name)-1);
+        if (n<0) continue;
+        name[n]=0;
+        if (!strcmp(name,"anon_inode:[eventpoll]")) return fd;
+    }
+    return -1;
+}
+static int await_loan(int ep,int other,int present) {
+    int64_t end=now_ms()+5000;
+    /* EVENT_WAIT: observe an actual installed/retired epoll alias, not a
+     * guessed settling delay. The deadline fails an absent lifecycle event. */
+    do {
+        int fd=loan_slot(ep,other);
+        if ((fd>=0)==present) return fd;
+        sched_yield();
+    } while (now_ms()<end);
+    assert(!"epoll loan lifecycle deadline"); return -1;
+}
+struct race_context { int ep,event,other,ready,mode; pid_t parent; };
+static int race_mutator(void *opaque) {
+    struct race_context *c=opaque;
+    assert(!prctl(PR_SET_PDEATHSIG,SIGKILL));
+    if (getppid()!=c->parent) return 0;
+    int slot=await_loan(c->ep,c->other,1);
+    if (c->mode==0) assert(dup3(c->event,slot,O_CLOEXEC)==slot);
+    if (c->mode==1) assert(!syscall(SYS_close_range,slot,slot,0));
+    if (c->mode==2) assert(dup3(c->other,c->ep,O_CLOEXEC)==c->ep);
+    if (c->mode==3) {
+        pid_t child=fork(); assert(child>=0);
+        if (!child) { assert(loan_slot(c->ep,c->other)<0); _exit(0); }
+        int status; assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
+    }
+    if (c->mode==5) {
+        assert(!unshare(CLONE_FILES));
+        assert(loan_slot(c->ep,c->other)<0);
+    }
+    if (c->mode==6) assert(!syscall(SYS_close_range,slot,slot,CLOSE_RANGE_CLOEXEC));
+    assert(write(c->ready,&slot,sizeof(slot))==sizeof(slot));
+    uint64_t one=1; assert(write(c->event,&one,sizeof(one))==sizeof(one));
+    return 0;
+}
+static int race_waiter(void *opaque) {
+    struct race_context *c=opaque;
+    struct epoll_event out;
+    assert(!prctl(PR_SET_PDEATHSIG,SIGKILL));
+    if (getppid()!=c->parent) return 0;
+    byte_write(c->ready);
+    epoll_wait(c->ep,&out,1,-1);
+    assert(!"killed waiter returned"); return 0;
+}
+static void shared_races(int fd) {
+    for (int mode=0;mode<7;++mode) {
+        int ep=epoll_create1(EPOLL_CLOEXEC),event=eventfd(0,EFD_CLOEXEC),other=epoll_create1(EPOLL_CLOEXEC);
+        int ready[2]; assert(ep>=0 && event>=0 && other>=0 && !pipe2(ready,O_CLOEXEC));
+        struct epoll_event e={.events=0,.data.u64=42},out;
+        assert(!epoll_ctl(ep,EPOLL_CTL_ADD,fd,&e));
+        e=(struct epoll_event){.events=EPOLLIN,.data.u64=43};
+        assert(!epoll_ctl(ep,EPOLL_CTL_ADD,event,&e));
+        void *stack=malloc(65536); assert(stack);
+        struct race_context c={ep,event,other,ready[1],mode,getpid()};
+        pid_t child=clone(mode==4 ? race_waiter : race_mutator,(char *)stack+65536,CLONE_FILES|SIGCHLD,&c);
+        assert(child>0);
+        if (mode==4) {
+            byte_read(ready[0]);
+            await_loan(ep,other,1);
+            assert(!kill(child,SIGKILL));
+        } else {
+            int count=epoll_wait(ep,&out,1,10000);
+            if (count!=1) fprintf(stderr,"race mode=%d count=%d errno=%d\n",mode,count,errno);
+            assert(count==1 && out.data.u64==43);
+            int slot; assert(read(ready[0],&slot,sizeof(slot))==sizeof(slot));
+            if (!mode) { assert(fcntl(slot,F_GETFD)==FD_CLOEXEC); close(slot); }
+        }
+        int status; assert(waitpid(child,&status,0)==child);
+        assert(mode==4 ? WIFSIGNALED(status) && WTERMSIG(status)==SIGKILL : WIFEXITED(status) && !WEXITSTATUS(status));
+        await_loan(ep,other,0);
+        free(stack); close(ep); close(event); close(other); close(ready[0]); close(ready[1]);
+        printf("PASS shared epoll custody mode=%d: exact queue and no retained alias\n",mode);
+    }
+}
+static void mixed(int filtered,int shared) {
     assert(!unshare(CLONE_NEWNS|CLONE_NEWUTS));
     assert(!mount("proc","/proc","proc",0,NULL));
     if (filtered) deny_seccomp();
@@ -144,6 +246,15 @@ static void mixed(int filtered) {
     puts("READY virtual ADD completed");
     e=(struct epoll_event){.events=EPOLLIN,.data.u64=43};
     assert(!epoll_ctl(ep,EPOLL_CTL_ADD,event,&e));
+    int holder_pipe[2]={-1,-1}; void *holder_stack=NULL; pid_t holder=0;
+    struct table_holder_context holder_context={0};
+    if (shared) {
+        assert(!pipe2(holder_pipe,O_CLOEXEC));
+        holder_stack=malloc(65536); assert(holder_stack);
+        holder_context=(struct table_holder_context){holder_pipe[0],getpid()};
+        holder=clone(table_holder,(char *)holder_stack+65536,CLONE_FILES|SIGCHLD,&holder_context);
+        assert(holder>0);
+    }
     assert(!epoll_wait(ep,out,4,0));
     uint64_t one=1; assert(write(event,&one,sizeof(one))==sizeof(one));
     assert(epoll_wait(ep,out,4,0)==1 && out[0].data.u64==43);
@@ -167,11 +278,53 @@ static void mixed(int filtered) {
     signal_wait(ep);
     signal_ready(ep);
     signal_descriptor(ep);
-    assert(!epoll_ctl(ep,EPOLL_CTL_DEL,fd,NULL));
-    assert(!epoll_ctl(ep,EPOLL_CTL_DEL,event,NULL));
+    if (shared) {
+        byte_write(holder_pipe[1]);
+        assert(waitpid(holder,&status,0)==holder && WIFEXITED(status) && !WEXITSTATUS(status));
+        close(holder_pipe[0]); close(holder_pipe[1]); free(holder_stack);
+        /* The following scenarios own their epoll queues independently. */
+        close(ep); ep=-1; close(event); event=-1;
+        shared_races(fd);
+    }
+    if (ep>=0) {
+        assert(!epoll_ctl(ep,EPOLL_CTL_DEL,fd,NULL));
+        assert(!epoll_ctl(ep,EPOLL_CTL_DEL,event,NULL));
+    }
     close(ep); close(fd); close(event);
     puts("PASS mixed epoll: virtual hostname, native eventfd, fork, blocking wait and timeout");
     shared_owner(0); shared_owner(1);
+}
+static void close_filtered(int retirement_denied) {
+    assert(!unshare(CLONE_NEWNS|CLONE_NEWUTS));
+    assert(!mount("proc","/proc","proc",0,NULL));
+    int fd=open("/proc/sys/kernel/hostname",O_RDONLY|O_CLOEXEC),ep=epoll_create1(EPOLL_CLOEXEC);
+    int release[2]; assert(fd>=0 && ep>=0 && !pipe2(release,O_CLOEXEC));
+    struct epoll_event e={.data.u64=42},out;
+    assert(!epoll_ctl(ep,EPOLL_CTL_ADD,fd,&e));
+    struct sock_filter code[]={
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_close,0,1),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EPERM),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_close_range,0,1),
+        BPF_STMT(BPF_RET|BPF_K,retirement_denied ? SECCOMP_RET_ERRNO|EPERM : SECCOMP_RET_ALLOW),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
+    };
+    struct sock_fprog policy={sizeof(code)/sizeof(*code),code};
+    assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+    assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&policy));
+    void *stack=malloc(65536); assert(stack);
+    struct table_holder_context c={release[0],getpid()};
+    pid_t peer=clone(table_holder,(char *)stack+65536,CLONE_FILES|SIGCHLD,&c); assert(peer>0);
+    assert(!epoll_wait(ep,&out,1,0));
+    assert(!retirement_denied);
+    assert(!sethostname("close-policy",12));
+    assert(epoll_wait(ep,&out,1,0)==1 && out.data.u64==42);
+    assert(loan_slot(ep,-1)<0);
+    assert(close(ep)==-1 && errno==EPERM);
+    byte_write(release[1]);
+    int status; assert(waitpid(peer,&status,0)==peer && WIFEXITED(status) && !WEXITSTATUS(status));
+    free(stack);
+    puts("PASS mixed epoll: denied close retains application policy; exact close_range retirement");
 }
 
 static int filter_probe(void) {
@@ -203,8 +356,12 @@ static int filter_probe(void) {
 }
 int main(int argc,char **argv) {
     setbuf(stdout,NULL);
-    if (argc==2 && !strcmp(argv[1],"--mixed")) { mixed(0); return 0; }
-    if (argc==2 && !strcmp(argv[1],"--filtered")) { mixed(1); return 0; }
+    if (argc==2 && !strcmp(argv[1],"--mixed")) { mixed(0,0); return 0; }
+    if (argc==2 && !strcmp(argv[1],"--filtered")) { mixed(1,0); return 0; }
+    if (argc==2 && !strcmp(argv[1],"--shared")) { mixed(0,1); return 0; }
+    if (argc==2 && !strcmp(argv[1],"--shared-filtered")) { mixed(1,1); return 0; }
+    if (argc==2 && !strcmp(argv[1],"--close-filtered")) { close_filtered(0); return 0; }
+    if (argc==2 && !strcmp(argv[1],"--retire-filtered")) { close_filtered(1); return 0; }
     assert(argc>=2 && !strcmp(argv[1],"--filter"));
     int result=filter_probe();
     if (result || argc==2) return result;

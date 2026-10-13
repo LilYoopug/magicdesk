@@ -4,7 +4,8 @@
 #include <sys/epoll.h>
 #include <time.h>
 
-enum { MD_EPOLL_EVENTS=256, MD_EPOLL_NATIVE=0x50000001, MD_EPOLL_CAPTURED=0x50000002 };
+enum { MD_EPOLL_EVENTS=256, MD_EPOLL_NATIVE=0x50000001, MD_EPOLL_CAPTURED=0x50000002,
+    MD_EPOLL_LOAN=0x50000003 };
 struct md_epoll_frame {
     struct md_fd_capture_frame capture;
     struct epoll_event event;

@@ -24,6 +24,11 @@ int md_fd_install_begin(struct md_fd_install *p, struct md_fd_origins *files,
     if (result<0) { md_fd_object_release(p->origin); p->origin=NULL; }
     return result<0 ? result : 0;
 }
+int md_fd_install_loan(struct md_fd_install *p,struct md_fd_loan *loan) {
+    if (!p || !p->files.table || !loan || p->loan || !(p->flags&O_CLOEXEC)) return -EINVAL;
+    p->loan=loan;
+    return 0;
+}
 int md_fd_install_progress(struct md_fd_install *p) {
     if (!p || !p->files.table) return -EINVAL;
     if (md_fd_order_state(&p->files)!=MD_RESOURCE_ORDER_READY) {
@@ -40,6 +45,7 @@ int md_fd_install_progress(struct md_fd_install *p) {
     if (result) return result;
     struct md_fd_origin_update update={0};
     result=md_fd_origins_prepare_object(p->files.table,p->origin,p->flags&O_CLOEXEC ? FD_CLOEXEC : 0,&update);
+    if (!result && p->loan) result=md_fd_origins_prepare_loan(&update,p->loan);
     if (!result) {
         struct seccomp_notif_addfd add={.id=p->notification,.flags=SECCOMP_ADDFD_FLAG_SEND,
             .srcfd=p->source,.newfd_flags=p->flags};
