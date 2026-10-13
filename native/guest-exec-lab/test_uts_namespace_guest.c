@@ -47,8 +47,23 @@ static void overflow_ids(void) {
         close(fd);
     }
 }
+static void capability_limit(void) {
+    const char *path="/proc/sys/kernel/cap_last_cap";
+    int fd=open(path,O_RDONLY|O_CLOEXEC); assert(fd>=0);
+    char text[32]={0};
+    ssize_t size=read(fd,text,sizeof(text)-1); assert(size>1);
+    char *end; long last=strtol(text,&end,10);
+    assert(last>0 && last<64 && !strcmp(end,"\n"));
+    for (int i=0;i<=last;++i) assert(prctl(PR_CAPBSET_READ,i,0,0,0)>=0);
+    assert(prctl(PR_CAPBSET_READ,last+1,0,0,0)<0 && errno==EINVAL);
+    assert(open(path,O_WRONLY)<0 && errno==EACCES);
+    struct stat a,b; assert(!fstat(fd,&a) && !stat(path,&b) && a.st_ino==b.st_ino);
+    assert((a.st_mode&0777)==0444);
+    close(fd);
+}
 static void proc_files(void) {
     overflow_ids();
+    capability_limit();
     const char *path="/proc/sys/kernel/hostname";
     int fd=open(path,O_RDWR|O_CLOEXEC);
     if (fd<0) perror("open guest UTS sysctl");
@@ -92,6 +107,7 @@ static void proc_files(void) {
         assert(!setuid(1000));
         assert(!unshare(CLONE_NEWUSER|CLONE_NEWUTS));
         overflow_ids();
+        capability_limit();
         assert(!sethostname("scoped-capability",17));
         assert(pwrite(fd,"denied",6,0)<0 && errno==EPERM);
         assert(open(path,O_WRONLY)<0 && errno==EACCES);

@@ -1,7 +1,9 @@
 #define _GNU_SOURCE
 #include "network_internal.h"
 #include "network_route.h"
+#include "network_generic.h"
 #include "network_endpoint.h"
+#include "network_packet.h"
 #include "guest_identity.h"
 #include "fd_selector.h"
 #include <errno.h>
@@ -59,9 +61,18 @@ struct network_socket {
     int peer, family, type, protocol, bound;
     uint32_t port;
     int capped_ack;
+    int packet_info, pass_credentials, extended_ack, strict_check;
+    struct md_network_listener listener;
 };
 static void socket_destroy(struct md_fd_object *object) {
     struct network_socket *socket=(void *)object;
+    if (socket->family==AF_NETLINK) {
+        pthread_mutex_lock(&socket->space->fabric->lock);
+        struct md_network_listener **at=&socket->space->listeners;
+        while (*at && *at!=&socket->listener) at=&(*at)->next;
+        if (*at) *at=(*at)->next;
+        pthread_mutex_unlock(&socket->space->fabric->lock);
+    }
     if (socket->peer>=0) close(socket->peer);
     md_network_namespace_release(socket->space); free(socket);
 }
@@ -97,7 +108,7 @@ int md_network_socket_open(struct md_network_namespace *n, int family, int type,
         return md_network_endpoint_open(n,family,type,protocol,out,fd);
     int base=type&15;
     if (family==AF_NETLINK) {
-        if (protocol!=NETLINK_ROUTE) return -EPROTONOSUPPORT;
+        if (protocol!=NETLINK_ROUTE && protocol!=NETLINK_GENERIC) return -EPROTONOSUPPORT;
         if (base!=SOCK_RAW && base!=SOCK_DGRAM) return -ESOCKTNOSUPPORT;
     } else if (family==AF_UNIX || family==AF_INET || family==AF_INET6) {
         if (base!=SOCK_DGRAM || protocol) return -EPROTONOSUPPORT;
@@ -110,20 +121,52 @@ int md_network_socket_open(struct md_network_namespace *n, int family, int type,
     }
     md_fd_object_init(&s->object,&control_type); s->space=md_network_namespace_retain(n);
     s->peer=pair[1]; s->family=family; s->type=base; s->protocol=protocol;
+    if (family==AF_NETLINK) {
+        s->listener.peer=s->peer; s->listener.protocol=protocol;
+        pthread_mutex_lock(&n->fabric->lock);
+        s->listener.next=n->listeners; n->listeners=&s->listener;
+        pthread_mutex_unlock(&n->fabric->lock);
+    }
     *out=&s->object; *fd=pair[0]; return 0;
 }
 static unsigned link_flags(const struct md_network_link *link) {
     return link->flags | ((link->flags&IFF_UP) ? IFF_RUNNING|IFF_LOWER_UP : 0);
 }
+static int packet(int peer,unsigned group,const void *data,size_t size) {
+    struct md_network_packet header={group};
+    struct iovec vector[]={{&header,sizeof(header)},{(void *)data,size}};
+    struct msghdr message={.msg_iov=vector,.msg_iovlen=2};
+    return sendmsg(peer,&message,MSG_DONTWAIT|MSG_NOSIGNAL)<0 ? -errno : 0;
+}
 static int publish_response(void *context,const void *data,size_t size) {
     struct network_socket *s=context;
-    return send(s->peer,data,size,MSG_DONTWAIT|MSG_NOSIGNAL)<0 ? -errno : 0;
+    return packet(s->peer,0,data,size);
+}
+void md_network_broadcast(struct md_network_namespace *n,unsigned group,const void *data,size_t size) {
+    for (struct md_network_listener *s=n->listeners;s;s=s->next)
+        if (s->protocol==NETLINK_ROUTE && (s->groups&(1U<<(group-1)))) {
+            int r=packet(s->peer,group,data,size);
+            if (r && r!=-ECONNREFUSED) s->overflow=1;
+        }
+}
+static uint32_t supported_groups(const struct network_socket *s) {
+    if (s->protocol==NETLINK_GENERIC) return 1U<<(MD_NETWORK_GENERIC_NOTIFY-1);
+    return RTMGRP_LINK|RTMGRP_IPV4_IFADDR|RTMGRP_IPV6_IFADDR|RTMGRP_IPV4_ROUTE|RTMGRP_IPV6_ROUTE
+        | RTMGRP_NEIGH|RTMGRP_TC|RTMGRP_IPV4_RULE|(1U<<(RTNLGRP_IPV6_RULE-1));
 }
 long md_network_socket_call(struct md_fd_object *object, const struct md_identity *identity,
         long nr, const unsigned long *a, void *data, size_t capacity, size_t size, pid_t pid,
         const struct md_network_target *resolver) {
     if (!md_network_socket_control(object)) return -EBADF;
     struct network_socket *s=(void *)object;
+    if (nr==SYS_read || nr==SYS_readv || nr==SYS_recvfrom || nr==SYS_recvmsg) {
+        pthread_mutex_lock(&s->space->fabric->lock);
+        int result=s->listener.overflow ? -ENOBUFS : (s->packet_info ? MD_NETWORK_PACKET_INFO : 0)
+            | (s->pass_credentials ? MD_NETWORK_PACKET_CREDENTIALS : 0);
+        s->listener.overflow=0;
+        pthread_mutex_unlock(&s->space->fabric->lock);
+        return result;
+    }
     if (nr==SYS_ioctl) {
         if (size!=sizeof(struct ifreq)) return -EINVAL;
         struct ifreq *r=data;
@@ -146,37 +189,94 @@ long md_network_socket_call(struct md_fd_object *object, const struct md_identit
         return 0;
     }
     if (nr==SYS_getsockopt) {
-        if (a[1]!=SOL_SOCKET || capacity<sizeof(int)) return -EOPNOTSUPP;
+        if (capacity<sizeof(int)) return -EINVAL;
         int value;
+        if (a[1]==SOL_NETLINK && s->family==AF_NETLINK) {
+            pthread_mutex_lock(&s->space->fabric->lock);
+            switch (a[2]) {
+            case NETLINK_PKTINFO: value=s->packet_info; break;
+            case NETLINK_CAP_ACK: value=s->capped_ack; break;
+            case NETLINK_EXT_ACK: value=s->extended_ack; break;
+            case NETLINK_GET_STRICT_CHK: value=s->strict_check; break;
+            case NETLINK_LIST_MEMBERSHIPS: value=(int)s->listener.groups; break;
+            default: pthread_mutex_unlock(&s->space->fabric->lock); return -ENOPROTOOPT;
+            }
+            pthread_mutex_unlock(&s->space->fabric->lock);
+            memcpy(data,&value,sizeof(value)); return sizeof(value);
+        }
+        if (a[1]!=SOL_SOCKET) return -EOPNOTSUPP;
         switch (a[2]) {
         case SO_DOMAIN: value=s->family; break;
         case SO_TYPE: value=s->type; break;
         case SO_PROTOCOL: value=s->protocol; break;
-        case SO_ERROR: value=0; break;
+        case SO_PASSCRED:
+            pthread_mutex_lock(&s->space->fabric->lock);
+            value=s->pass_credentials;
+            pthread_mutex_unlock(&s->space->fabric->lock); break;
+        case SO_ERROR:
+            pthread_mutex_lock(&s->space->fabric->lock);
+            value=s->listener.overflow ? ENOBUFS : 0; s->listener.overflow=0;
+            pthread_mutex_unlock(&s->space->fabric->lock); break;
         default: return -EOPNOTSUPP;
         }
         memcpy(data,&value,sizeof(value)); return sizeof(value);
     }
     if (s->family!=AF_NETLINK) return -EOPNOTSUPP;
-    if (nr==SYS_setsockopt && a[1]==SOL_NETLINK) {
-        if (size!=sizeof(int)) return -EINVAL;
+    if (nr==SYS_setsockopt && a[1]==SOL_SOCKET && a[2]==SO_PASSCRED) {
+        if (size<sizeof(int)) return -EINVAL;
         int value; memcpy(&value,data,sizeof(value));
-        if (value!=0 && value!=1) return -EINVAL;
-        if (a[2]==NETLINK_EXT_ACK) return 0;
-        if (a[2]==NETLINK_CAP_ACK) { s->capped_ack=value; return 0; }
-        return -ENOPROTOOPT;
+        pthread_mutex_lock(&s->space->fabric->lock);
+        s->pass_credentials=!!value;
+        pthread_mutex_unlock(&s->space->fabric->lock); return 0;
+    }
+    if (nr==SYS_setsockopt && a[1]==SOL_NETLINK) {
+        if (size<sizeof(int)) return -EINVAL;
+        int value; memcpy(&value,data,sizeof(value));
+        int result=0;
+        pthread_mutex_lock(&s->space->fabric->lock);
+        if (a[2]==NETLINK_ADD_MEMBERSHIP || a[2]==NETLINK_DROP_MEMBERSHIP) {
+            if (value<=0 || value>32) result=-EINVAL;
+            else if (!(supported_groups(s)&(1U<<(value-1)))) result=-EOPNOTSUPP;
+            else if (a[2]==NETLINK_ADD_MEMBERSHIP) s->listener.groups|=1U<<(value-1);
+            else s->listener.groups&=~(1U<<(value-1));
+        } else if (a[2]==NETLINK_PKTINFO) s->packet_info=!!value;
+        else if (a[2]==NETLINK_EXT_ACK) s->extended_ack=!!value;
+        else if (a[2]==NETLINK_CAP_ACK) s->capped_ack=!!value;
+        else if (a[2]==NETLINK_GET_STRICT_CHK) s->strict_check=!!value;
+        else result=-ENOPROTOOPT;
+        pthread_mutex_unlock(&s->space->fabric->lock);
+        return result;
+    }
+    if (nr==SYS_connect) {
+        if (size<sizeof(sa_family_t) || size>sizeof(struct sockaddr_storage)) return -EINVAL;
+        const struct sockaddr_nl *address=data;
+        if (address->nl_family==AF_UNSPEC) return 0;
+        if (address->nl_family!=AF_NETLINK) return -EAFNOSUPPORT;
+        if (size<sizeof(*address)) return -EINVAL;
+        /* Only the namespace's kernel catalogue is an addressable peer.
+         * Unconnected sends already use this default destination. */
+        if (address->nl_pid || address->nl_groups) return -EOPNOTSUPP;
+        pthread_mutex_lock(&s->space->fabric->lock);
+        if (!s->bound) { s->port=(uint32_t)pid; s->bound=1; }
+        pthread_mutex_unlock(&s->space->fabric->lock); return 0;
     }
     if (nr==SYS_bind) {
-        if (size!=sizeof(struct sockaddr_nl)) return -EINVAL;
+        if (size<sizeof(struct sockaddr_nl) || size>sizeof(struct sockaddr_storage)) return -EINVAL;
         const struct sockaddr_nl *address=data;
         if (address->nl_family!=AF_NETLINK) return -EAFNOSUPPORT;
-        if (address->nl_groups) return -EOPNOTSUPP;
+        if (address->nl_groups&~supported_groups(s)) return -EOPNOTSUPP;
         if (s->bound) return -EINVAL;
-        s->port=address->nl_pid ? address->nl_pid : (uint32_t)pid; s->bound=1; return 0;
+        pthread_mutex_lock(&s->space->fabric->lock);
+        s->listener.groups=address->nl_groups;
+        s->port=address->nl_pid ? address->nl_pid : (uint32_t)pid; s->bound=1;
+        pthread_mutex_unlock(&s->space->fabric->lock); return 0;
     }
-    if (nr==SYS_getsockname) {
+    if (nr==SYS_getsockname || nr==SYS_getpeername) {
         if (capacity<sizeof(struct sockaddr_nl)) return -EINVAL;
-        struct sockaddr_nl address={.nl_family=AF_NETLINK,.nl_pid=s->port};
+        pthread_mutex_lock(&s->space->fabric->lock);
+        struct sockaddr_nl address={.nl_family=AF_NETLINK,
+            .nl_pid=nr==SYS_getsockname ? s->port : 0,.nl_groups=nr==SYS_getsockname ? s->listener.groups : 0};
+        pthread_mutex_unlock(&s->space->fabric->lock);
         memcpy(data,&address,sizeof(address)); return sizeof(address);
     }
     if (nr==SYS_sendto || nr==SYS_sendmsg || nr==SYS_write) {
@@ -188,12 +288,18 @@ long md_network_socket_call(struct md_fd_object *object, const struct md_identit
         if (!NLMSG_OK(h,remaining)) return -EINVAL;
         for (;NLMSG_OK(h,remaining);h=NLMSG_NEXT(h,remaining)) {
             union { struct nlmsghdr align; unsigned char bytes[MD_NETWORK_BUFFER_SIZE+sizeof(struct nlmsgerr)]; } small;
-            int query=h->nlmsg_type==RTM_GETLINK || h->nlmsg_type==RTM_GETADDR || h->nlmsg_type==RTM_GETROUTE;
-            size_t limit=query ? 65536 : sizeof(small);
+            int query=s->protocol==NETLINK_ROUTE && md_network_route_query(h->nlmsg_type);
+            size_t limit=query ? MD_NETWORK_PACKET_MAX : sizeof(small);
             unsigned char *reply=query ? malloc(limit) : small.bytes; if (!reply) return -ENOMEM;
             struct md_network_publication publication={.context=s,.publish=publish_response};
-            long result=md_network_route(s->space,identity,h,h->nlmsg_len,s->port ? s->port : (uint32_t)pid,
-                s->capped_ack,resolver,reply,limit,&publication);
+            uint32_t port=s->port ? s->port : (uint32_t)pid;
+            long result;
+            if (s->protocol==NETLINK_GENERIC) {
+                result=md_network_generic(h,h->nlmsg_len,port,s->capped_ack,reply,limit);
+                if (result>0) result=publish_response(s,reply,(size_t)result);
+            } else result=md_network_route(s->space,identity,h,h->nlmsg_len,port,
+                (s->capped_ack ? MD_NETWORK_ROUTE_CAPPED_ACK : 0)
+                    | (s->strict_check ? MD_NETWORK_ROUTE_STRICT : 0),resolver,reply,limit,&publication);
             if (query) free(reply);
             if (result<0) return result;
         }

@@ -71,6 +71,19 @@ ExecStart=/usr/lib/systemd/systemd --user --unit=md-user.target
 StandardOutput=append:$1/user.log
 StandardError=inherit
 EOF
+cat > /run/systemd/system/md-fdstore.service <<EOF
+[Unit]
+DefaultDependencies=no
+[Service]
+Type=notify
+NotifyAccess=main
+FileDescriptorStoreMax=4
+TimeoutStartSec=10
+TimeoutStopSec=5
+ExecStart=$1/notify-guest $1
+StandardOutput=append:$1/fdstore.log
+StandardError=inherit
+EOF
 cat > /run/md-user-units/md-user.target <<EOF
 [Unit]
 DefaultDependencies=no
@@ -110,6 +123,10 @@ test "$(systemctl show -p SystemState --value)" = running
 systemctl show -p Version -p SystemState
 systemctl start md-notify.service
 test "$(systemctl show -p ActiveState --value md-notify.service)" = active
+systemctl start md-fdstore.service
+test "$(systemctl show -p NFileDescriptorStore --value md-fdstore.service)" = 2
+systemctl restart md-fdstore.service
+grep -q 'PASS descriptor store restart' "$1/fdstore-restored"
 systemctl start md-oneshot.service
 test "$(cat "$1/oneshot")" = oneshot
 test "$(systemctl show -p ActiveState --value md-oneshot.service)" = active
@@ -126,7 +143,7 @@ printf 'socket-activated\n' >&3
 IFS= read -r -t 10 response <&3
 test "$response" = socket-activated
 exec 3>&-
-systemctl stop md-echo.socket md-oneshot.service md-notify.service md-user.service
+systemctl stop md-echo.socket md-oneshot.service md-notify.service md-user.service md-fdstore.service
 printf 'PASS systemd PID1, notify, oneshot, user manager and socket activation\n' > "$1/result"
 systemctl exit 0
 EOF
@@ -148,6 +165,10 @@ def main():
     prefix = [suite.runner, '--store', args.store, '--user', '0:0', '--network', 'routed']
     created = False
     try:
+        build = args.build or Path('app/build/shroot')
+        suite.transport.upload(suite.client, build / 'libmagicdesk_guest_notify_guest.so',
+                               suite.base + '/notify-guest')
+        suite.command(['chmod', '700', suite.base + '/notify-guest'])
         with socket.socket() as reservation:
             reservation.bind(('127.0.0.1', 0))
             port = str(reservation.getsockname()[1])
@@ -171,7 +192,7 @@ def main():
         suite.report['passed'] = True
     finally:
         try:
-            for name in ('services.log', 'oneshot.log', 'notify.log', 'user.log', 'user-service.log', 'result'):
+            for name in ('services.log', 'oneshot.log', 'notify.log', 'fdstore.log', 'fdstore-restored', 'user.log', 'user-service.log', 'result'):
                 suite.command(['/system/bin/sh', '-c', 'test ! -f "$1" || tail -100 "$1"',
                                'systemd-log', suite.base + '/' + name])
             if args.trace:

@@ -625,12 +625,14 @@ def guest():
         attributes(root, set_bits=0x100000, error=errno.EOPNOTSUPP)  # IDMAP
         attributes(root, set_bits=0x200000, error=errno.EINVAL)  # Not a mount root.
         attributes(root, propagation=(1 << 18) | (1 << 19), error=errno.EINVAL)
-        attributes(root, propagation=1 << 20, error=errno.EOPNOTSUPP)  # SHARED
+        attributes(root, propagation=1 << 20, error=errno.EINVAL)  # Not a mount root.
         context = create()
         mount = call(432, context, 1, 0)
         os.close(context)
         attributes(fd=mount, set_bits=1, error=errno.ENOENT)
         attributes(fd=mount, flags=0x1000, set_bits=1, tail=0)
+        attributes(fd=mount, flags=0x1000, propagation=1 << 20)  # SHARED
+        attributes(fd=mount, flags=0x1000, propagation=1 << 18)  # PRIVATE
         try:
             os.open('blocked', os.O_CREAT | os.O_WRONLY, 0o600, dir_fd=mount)
             raise AssertionError('detached readonly mount accepted a write')

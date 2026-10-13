@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "network_calls.h"
+#include "network_packet.h"
 #include "adapter_buffer.h"
 #include "fs_buffer.h"
 #include "fd_filter.h"
@@ -195,9 +196,17 @@ static long control_call(long nr,const unsigned long *a,int events) {
     if (events && (nr==SYS_setsockopt || nr==SYS_getsockopt) && a[1]==SOL_SOCKET
             && (a[2]==SO_PASSCRED || a[2]==SO_ATTACH_FILTER || a[2]==SO_DETACH_FILTER || a[2]==SO_RCVBUFFORCE))
         return md_raw(nr,a[0],a[1],a[2],a[3],a[4],a[5]);
+    if (!events && nr==SYS_ioctl && a[1]==FIONREAD) {
+        int bytes=0;
+        long error=RAW3(ioctl,a[0],a[1],&bytes);
+        if (error) return error;
+        if (bytes>=(int)sizeof(struct md_network_packet)) bytes-=sizeof(struct md_network_packet);
+        return md_write_memory((void *)a[2],&bytes,sizeof(bytes));
+    }
     if (nr==SYS_ioctl && (a[1]==FIONBIO || a[1]==FIONREAD || a[1]==TIOCOUTQ))
         return RAW3(ioctl,a[0],a[1],a[2]);
     if (nr==SYS_read || nr==SYS_readv || nr==SYS_recvfrom || nr==SYS_recvmsg || nr==SYS_recvmmsg) {
+        if (!events) return md_network_packet_receive(nr,a);
         if (events) { long error=device_receive_ready(); if (error) return error; }
         if (nr==SYS_recvfrom && a[4]) {
             long result=RAW6(recvfrom,a[0],a[1],a[2],a[3],0,0);
@@ -238,7 +247,7 @@ static long control_call(long nr,const unsigned long *a,int events) {
         if (message.msg_iovlen>64) return -EMSGSIZE;
         if (message.msg_name) {
             struct sockaddr_nl address;
-            if (message.msg_namelen!=sizeof(address)) return -EINVAL;
+            if (message.msg_namelen<sizeof(address) || message.msg_namelen>sizeof(struct sockaddr_storage)) return -EINVAL;
             error=md_read_memory(&address,message.msg_name,sizeof(address)); if (error) return error;
             if (address.nl_family!=AF_NETLINK || address.nl_pid || address.nl_groups) return -EOPNOTSUPP;
         }
@@ -249,20 +258,20 @@ static long control_call(long nr,const unsigned long *a,int events) {
         }
     }
     else if (nr==SYS_ioctl) { size=sizeof(struct ifreq); input=(void *)a[2]; }
-    else if (nr==SYS_bind) { size=a[2]; input=(void *)a[1]; }
+    else if (nr==SYS_bind || nr==SYS_connect) { size=a[2]; input=(void *)a[1]; }
     else if (nr==SYS_write || nr==SYS_sendto) {
         size=a[2]; input=(void *)a[1];
         if (nr==SYS_sendto) {
             if (a[3]&~(MSG_DONTWAIT|MSG_NOSIGNAL)) return -EOPNOTSUPP;
             if (a[4]) {
                 struct sockaddr_nl address;
-                if (a[5]!=sizeof(address)) return -EINVAL;
+                if (a[5]<sizeof(address) || a[5]>sizeof(struct sockaddr_storage)) return -EINVAL;
                 long error=md_read_memory(&address,(void *)a[4],sizeof(address)); if (error) return error;
                 if (address.nl_family!=AF_NETLINK || address.nl_pid || address.nl_groups) return -EOPNOTSUPP;
             }
         }
     } else if (nr==SYS_setsockopt) { size=a[4]; input=(void *)a[3]; }
-    else if (nr!=SYS_getsockname && nr!=SYS_getsockopt) return -EOPNOTSUPP;
+    else if (nr!=SYS_getsockname && nr!=SYS_getpeername && nr!=SYS_getsockopt) return -EOPNOTSUPP;
     if (size>BUFFER_SIZE) return -EMSGSIZE;
     long memory=md_adapter_buffer_take(); if (memory<0) return memory;
     long result=0;
@@ -275,8 +284,8 @@ static long control_call(long nr,const unsigned long *a,int events) {
     } else if (size) result=md_read_memory((void *)memory,input,size);
     if (!result) result=md_guest_buffer_control(MD_BUFFER_NETWORK_CALL,size,0);
     if (!result && nr==SYS_ioctl) result=md_write_memory((void *)a[2],(void *)memory,size);
-    else if (result>=0 && (nr==SYS_getsockname || nr==SYS_getsockopt))
-        result=output((void *)a[nr==SYS_getsockname ? 1 : 3],(void *)a[nr==SYS_getsockname ? 2 : 4],(void *)memory,result);
+    else if (result>=0 && (nr==SYS_getsockname || nr==SYS_getpeername || nr==SYS_getsockopt))
+        result=output((void *)a[nr==SYS_getsockopt ? 3 : 1],(void *)a[nr==SYS_getsockopt ? 4 : 2],(void *)memory,result);
     long released=md_adapter_buffer_release(); return result ? result : released;
 }
 long md_network_call(long nr,const unsigned long *a) { return control_call(nr,a,0); }

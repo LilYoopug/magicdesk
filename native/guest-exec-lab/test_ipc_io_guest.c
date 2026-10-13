@@ -103,6 +103,9 @@ static void io_pidfd(unsigned filtered) {
         puts("SKIP optional SO_PASSPIDFD: kernel does not supply ancillary pidfds"); return;
     }
     if (filtered) { io_filter(); CHECK(!prctl(PR_SET_DUMPABLE,0)); }
+    int self=(int)syscall(SYS_pidfd_open,getpid(),0); CHECK(self>=0);
+    struct stat identity; CHECK(!fstat(self,&identity));
+    CHECK(!close(self));
     unsigned before=io_fd_count();
     for (unsigned pass=0;pass<8;++pass) {
         int pipes[2]; CHECK(!pipe2(pipes,O_CLOEXEC|O_NONBLOCK));
@@ -147,6 +150,10 @@ static void io_pidfd(unsigned filtered) {
                         memcpy(&fd,CMSG_DATA(h),sizeof(fd));
                         CHECK(fd>=0 && (fcntl(fd,F_GETFD)&FD_CLOEXEC));
                         CHECK(!syscall(SYS_pidfd_send_signal,fd,0,NULL,0));
+                        /* Compare the kernel PID object, not merely a live PIDFD.
+                         * This does not need permission to inspect proc fdinfo. */
+                        struct stat actual; CHECK(!fstat(fd,&actual));
+                        CHECK(actual.st_dev==identity.st_dev && actual.st_ino==identity.st_ino);
                         CHECK(!close(fd)); ++pidfds;
                     }
                 }

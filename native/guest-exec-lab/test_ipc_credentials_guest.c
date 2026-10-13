@@ -68,6 +68,43 @@ static void stream(int abstract) {
     peer(copy,child,1234,2345);
     close(copy); close(server); close(ready[0]); if (!abstract) CHECK(!unlink(a.sun_path));
 }
+static void socket_paths(void) {
+    CHECK(!mkdir("/tmp/socket-paths",0700));
+    int dir=open("/tmp/socket-paths",O_PATH|O_DIRECTORY|O_CLOEXEC); CHECK(dir>=0);
+    CHECK(!rename("/tmp/socket-paths","/tmp/socket-moved"));
+    pid_t parent=getpid();
+    for (unsigned foreign=0;foreign<2;++foreign) {
+        pid_t child=foreign ? fork() : 0; CHECK(child>=0);
+        if (!child) {
+            struct sockaddr_un a={.sun_family=AF_UNIX};
+            if (foreign) snprintf(a.sun_path,sizeof(a.sun_path),"/proc/%d/fd/%d/attach",parent,dir);
+            else snprintf(a.sun_path,sizeof(a.sun_path),"/proc/thread-self/fd/%d/attach",dir);
+            printf("socket path %s\n",a.sun_path);
+            int server=socket(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC,0); CHECK(server>=0);
+            CHECK(!bind(server,(void *)&a,sizeof(a)) && !listen(server,1));
+            struct sockaddr_un observed={0}; socklen_t size=sizeof(observed);
+            CHECK(!getsockname(server,(void *)&observed,&size));
+            CHECK(size==offsetof(struct sockaddr_un,sun_path)+strlen(a.sun_path)+1
+                && !strcmp(a.sun_path,observed.sun_path));
+            int client=socket(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC,0); CHECK(client>=0);
+            CHECK(!connect(client,(void *)&a,sizeof(a)));
+            int accepted=accept4(server,NULL,NULL,SOCK_CLOEXEC); CHECK(accepted>=0);
+            char value; CHECK(write(client,"s",1)==1 && read(accepted,&value,1)==1 && value=='s');
+            CHECK(!unlinkat(dir,"attach",0));
+            CHECK(!close(accepted) && !close(client) && !close(server));
+            if (foreign) _exit(0);
+        }
+        if (foreign) done(child);
+    }
+    struct sockaddr_un a={.sun_family=AF_UNIX};
+    snprintf(a.sun_path,sizeof(a.sun_path),"/proc/self/fd/%d/attach",dir);
+    CHECK(!close(dir));
+    int server=socket(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC,0); CHECK(server>=0);
+    /* The reused FD is a socket, never the former directory. */
+    CHECK(bind(server,(void *)&a,sizeof(a))<0 && (errno==ENOTDIR || errno==ENOENT || errno==EBADF));
+    CHECK(!close(server) && !rmdir("/tmp/socket-moved"));
+    puts("PASS socket paths: retained and foreign proc-FD directories, rename, original names and closed/reused descriptors");
+}
 static void send_identity(int fd, uid_t uid, int right, int success) {
     char data='m'; struct iovec io={&data,1};
     union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(struct ucred))+CMSG_SPACE(sizeof(int))]; } c={0};
@@ -1091,6 +1128,7 @@ int main(int argc,char **argv) {
         custody(!strcmp(argv[1],"--custody"),atoi(argv[2]),atoi(argv[3])); return 0;
     }
     CHECK(getuid()==0);
+    if (argc==2 && !strcmp(argv[1],"--socket-paths")) { alarm(30); socket_paths(); return 0; }
     if (argc==4 && !strcmp(argv[1],"--boundary")) { boundary_guest(atoi(argv[2]),atoi(argv[3])); return 0; }
     if (argc==4 && !strcmp(argv[1],"--origin-receive")) { origin_receive((unsigned)atoi(argv[2]),atoi(argv[3])); return 0; }
     if (argc==4 && !strcmp(argv[1],"--origin-send")) { origin_send((unsigned)atoi(argv[2]),atoi(argv[3])); return 0; }
@@ -1102,6 +1140,7 @@ int main(int argc,char **argv) {
         done(child); puts("PASS native peers across PID namespace with protected memory and prctl denied"); return 0;
     }
     CHECK(argc==1);
+    socket_paths();
     send_contract();
     for (int protected=0;protected<2;++protected) for (int cancel=0;cancel<2;++cancel)
         receive_lifetime(protected,cancel);

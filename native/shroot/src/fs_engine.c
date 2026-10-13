@@ -461,7 +461,7 @@ static void inode_execute(struct md_filesystem *fs,
         if (!r) out->size = 33;
         break;
     case MD_FS_OPEN_OBJECT: r = md_catalogue_open_object(images, s, a, (int)q->flags); goto opened;
-    case MD_FS_SOCKET_BIND: r = md_inode_socket_bind(s, first, a, q->mode, second); break;
+    case MD_FS_SOCKET_BIND: r = md_inode_socket_bind(s, first, a, *b ? b : a, q->mode, second); break;
     case MD_FS_SOCKET_ADDRESS: case MD_FS_SOCKET_NAME:
         r = q->operation == MD_FS_SOCKET_ADDRESS
             ? md_inode_socket_address(s, first, q->path[0], data, capacity)

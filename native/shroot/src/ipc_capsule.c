@@ -191,6 +191,10 @@ int md_ipc_capsules_receive(struct md_ipc_capsules *s, const struct md_ipc_bindi
     struct msghdr msg={.msg_iov=&io,.msg_iovlen=1};
     /* No FD installation before authenticating the outer kernel identity. */
     ssize_t n=recvmsg(carrier,&msg,MSG_PEEK|MSG_DONTWAIT);
+    /* Named datagram endpoints also accept independent native senders. Only
+     * a recognized capsule enters authentication; arbitrary rights stay data. */
+    if (b->receive_only && ((n<0 && (errno==ENOTSOCK || errno==EAGAIN || errno==EINVAL))
+            || (n>=0 && (n<(ssize_t)sizeof(p.magic) || p.magic!=MAGIC)))) return -ENODATA;
     if (n<0) return -errno;
     if (n!=sizeof(p) || (msg.msg_flags&MSG_TRUNC)) return -EPROTO;
     error=verify(s,b,carrier,&p);

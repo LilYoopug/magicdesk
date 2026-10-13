@@ -10,6 +10,10 @@ inferior in the same supervised launch. Requests validate launch membership,
 guest real/effective/saved UID and GID, the debugger's domain and the kernel's
 remote-memory permissions. A traced image cannot gain admitted set-ID credentials
 on exec. Register and memory access requires a stopped, owned inferior.
+An established relationship survives the inferior's UID/GID changes: register
+inspection, continuation and detach check the existing owner, not new-attach
+permission. Memory peek/poke retains its independent permission check and
+native kernel access ceiling.
 
 The supervisor retains interception, image admission and process lifetime.
 Guest stops and kernel stops are distinct: bootstrap setup and adapter instructions

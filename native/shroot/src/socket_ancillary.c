@@ -242,7 +242,10 @@ long md_socket_ancillary_sendto(const struct md_fs *fs, const char *exe, const u
     struct iovec payload={(void *)a[1],a[2]};
     struct msghdr message={.msg_name=(void *)a[4],.msg_namelen=(unsigned)a[5],.msg_iov=&payload,.msg_iovlen=1};
     unsigned long args[6]={a[0],(uintptr_t)&message,a[3]};
-    return send_captured(&message,args,NULL,0,&payload);
+    /* A brokered datagram to an adapted endpoint carries the original
+     * sender's identity. The application still supplies no ancillary data. */
+    _Alignas(struct cmsghdr) char control[CMSG_SPACE(sizeof(int))];
+    return send_captured(&message,args,control,sizeof(control),&payload);
 }
 static size_t append(void *out, size_t used, size_t capacity, int type, int level,
         const void *data, size_t size, int *flags) {
@@ -269,7 +272,7 @@ static long publish_rights(enum md_received_source source, void *out, size_t use
 static long publish(const struct md_fs *fs, int socket, const struct msghdr *original,
         struct msghdr m, void *destination, unsigned receive_flags) {
     size_t capacity=original->msg_control?original->msg_controllen:0;
-    struct ucred claimed={0}; int have_claim=0;
+    struct ucred claimed={0}; int have_claim=0, sender=-1;
     int indices[253]; struct md_received_message plan; unsigned entries=0;
     plan.count=0;
     for (struct cmsghdr *h=CMSG_FIRSTHDR(&m);h;h=next_header(&m,h)) {
@@ -288,7 +291,7 @@ static long publish(const struct md_fs *fs, int socket, const struct msghdr *ori
     /* Identify capabilities before rebuilding headers: the kernel can coalesce
      * ordinary descriptors and the identity descriptor into one SCM_RIGHTS. */
     for (unsigned i=0;i<plan.count;++i) if (plan.entries[i].flags&MD_RECEIVED_CREDENTIALS) {
-        claimed=plan.entries[i].credentials; have_claim=1;
+        claimed=plan.entries[i].credentials; have_claim=1; sender=plan.entries[i].index;
     }
     unsigned entry=0;
     void *out=original->msg_control; size_t used=0;
@@ -310,7 +313,12 @@ static long publish(const struct md_fs *fs, int socket, const struct msghdr *ori
                 continue;
             }
             const unsigned char selector=0;
-            long published=publish_rights(MD_RECEIVED_KERNEL,out,used,capacity,&index,&selector,1,&m.msg_flags,
+            if (have_claim) {
+                if (sender<0) return -EPROTO;
+                index=sender;
+            }
+            long published=publish_rights(have_claim ? MD_RECEIVED_APPLICATION : MD_RECEIVED_KERNEL,
+                out,used,capacity,&index,&selector,1,&m.msg_flags,
                 receive_flags|MSG_CMSG_CLOEXEC);
             if (published<0) return published;
             if ((size_t)published>used) {

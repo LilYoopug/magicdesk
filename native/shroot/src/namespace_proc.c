@@ -105,21 +105,21 @@ int md_namespace_proc_borrow(const struct md_proc_path *ref, int *fd) {
     else return 0;
     return 1;
 }
-long md_namespace_paths_request(const struct md_fs *fs,struct md_fs_request *q) {
-    struct md_fs_response out;
+long md_namespace_paths_resolve(const struct md_fs *fs,const struct md_fs_request *input,
+        struct md_fs_response *out) {
+    struct md_fs_request request=*input, *q=&request;
     char selected[2][PATH_MAX], relative[2][PATH_MAX];
     unsigned captured=0;
-    int entries=q->operation==MD_FS_LINK || q->operation==MD_FS_RENAME;
+    int entries=q->operation==MD_FS_LINK || q->operation==MD_FS_RENAME || q->operation==MD_FS_SOCKET_BIND;
     for (;;) {
-        long r=md_namespace_request(fs,q,&out);
-        if (r!=-EREMOTE) return r<0 || q->operation!=MD_FS_OPEN_TREE ? r
-            : md_namespace_open_result(&out.result,q->flags);
-        unsigned index=out.result.host_path-1;
+        long r=md_namespace_request(fs,q,out);
+        if (r!=-EREMOTE) return r;
+        unsigned index=out->result.host_path-1;
         if (index>1 || (captured&(1U<<index))) return -ELOOP;
         captured|=1U<<index;
         /* A delegated lookup has not executed the mutation. Resolve its input
          * through the same table-owned capture used by mount operations. */
-        struct md_proc_path ref=md_proc_path(out.data);
+        struct md_proc_path ref=md_proc_path(out->data);
         enum md_proc_kind kind=ref.kind==MD_PROC_FOREIGN ? ref.foreign_kind : ref.kind;
         int bind_source=(q->operation==MD_FS_MOUNT && index==1 && q->mode==MD_FS_MOUNT_BIND)
             || (q->operation==MD_FS_OPEN_TREE && index==0);
@@ -146,17 +146,25 @@ long md_namespace_paths_request(const struct md_fs *fs,struct md_fs_request *q) 
             if (r<0) return r;
             q->directory[index]=AT_FDCWD; q->path[index]=relative[index];
         } else {
-            const char *tail=entries ? ref.tail : "";
+            int directory=entries || ((kind==MD_PROC_FD || kind==MD_PROC_CWD || kind==MD_PROC_ROOT)
+                && ref.tail && *ref.tail);
+            const char *tail=directory ? ref.tail : "";
             while (*tail=='/') ++tail;
-            r=md_copy(relative[index],sizeof(relative[index]),entries ? (*tail ? tail : ".") : "");
+            r=md_copy(relative[index],sizeof(relative[index]),directory ? (*tail ? tail : ".") : "");
             if (r<0) return r;
-            if (entries) out.data[ref.anchor_length]=0;
-            r=md_proc_task_path(out.data,selected[index],sizeof(selected[index]));
+            if (directory) out->data[ref.anchor_length]=0;
+            r=md_proc_task_path(out->data,selected[index],sizeof(selected[index]));
             if (r<0) return r;
             q->directory[index]=-1; q->path[index]=relative[index];
-            q->capture[index]=(struct md_fs_task_capture){selected[index],O_PATH|(entries ? O_DIRECTORY : 0)};
+            q->capture[index]=(struct md_fs_task_capture){selected[index],O_PATH|(directory ? O_DIRECTORY : 0)};
         }
+        if (q->operation==MD_FS_SOCKET_ADDRESS && !*q->path[index]) q->path[index]=NULL;
     }
+}
+long md_namespace_paths_request(const struct md_fs *fs,struct md_fs_request *q) {
+    struct md_fs_response out;
+    long r=md_namespace_paths_resolve(fs,q,&out);
+    return r<0 || q->operation!=MD_FS_OPEN_TREE ? r : md_namespace_open_result(&out.result,q->flags);
 }
 static long host_readlink(const struct md_fs *fs, const struct md_proc_path *ref,
         const char *path, const unsigned long *a) {

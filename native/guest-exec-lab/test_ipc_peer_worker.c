@@ -1,6 +1,8 @@
 #define _GNU_SOURCE
 #include "ipc_peer_service.h"
 #include "ipc_origins.h"
+#include "ipc_received.h"
+#include "ipc_capsule.h"
 #include "launch_peer.h"
 #include "fs_wire.h"
 #include "fs_worker.h"
@@ -101,12 +103,13 @@ static void owner_close(struct owner *o) {
     assert(!md_fs_worker_stop(o->worker)); o->worker=NULL;
     md_ipc_peer_service_destroy(o->service); o->service=NULL;
 }
-enum operation { MARK, PAIR, STALL, ALLOCATION, ANNOTATION, LOCK_NOTICE, ORIGINS, DECLARE, PAIR_NATIVE, SEND_FAILURE, MESSAGE, READ_MESSAGE, DATAGRAM_NAME };
+enum operation { MARK, PAIR, STALL, ALLOCATION, ANNOTATION, LOCK_NOTICE, ORIGINS, DECLARE, PAIR_NATIVE, SEND_FAILURE, MESSAGE, READ_MESSAGE, DATAGRAM_NAME, DATAGRAM_BIND, NATIVE_DATAGRAM };
 struct work {
     struct md_fs_work work;
     enum operation operation;
     int done, fds[2], sender_identity;
     const char *name;
+    struct md_received_fds *received;
     struct md_fs_anchor *anchors[70];
 };
 static void run(struct md_fs_work *base, struct md_filesystem *fs, int error) {
@@ -114,18 +117,37 @@ static void run(struct md_fs_work *base, struct md_filesystem *fs, int error) {
     if (error) return;
     if (w->operation==DECLARE) {
         assert(!fs->ipc && !md_ipc_credentials_open(fs->ipc_store,MD_IPC_TRANSPORT_ORIGINS_V1,&fs->ipc));
-    } else if (w->operation==PAIR || w->operation==PAIR_NATIVE) {
+    } else if (w->operation==PAIR || w->operation==PAIR_NATIVE || w->operation==DATAGRAM_BIND) {
         struct md_ipc_credentials *ipc=NULL;
         if (w->operation==PAIR_NATIVE)
             assert(!md_ipc_credentials_open(fs->ipc_store,MD_IPC_TRANSPORT_NATIVE,&ipc));
         else assert(!md_fs_ipc_authority(fs,&ipc));
         struct md_identity identity=md_identity_new(0,0);
-        struct md_fs_request q={.operation=MD_FS_IPC,.flags=MD_IPC_PAIR,
+        struct md_fs_request q={.operation=MD_FS_IPC,.flags=w->operation==DATAGRAM_BIND ? MD_IPC_BIND : MD_IPC_PAIR,
             .directory={w->fds[0],w->fds[1]},.peer=getpid()};
         struct md_fs_result result;
         md_ipc_credentials_execute(ipc,&identity,NULL,&q,&result,NULL);
         md_identity_release(&identity); assert(!result.error);
         if (w->operation==PAIR_NATIVE) md_ipc_credentials_close(ipc);
+    } else if (w->operation==NATIVE_DATAGRAM) {
+        struct md_fs_context context;
+        assert(!md_fs_context_begin(fs,0,getpid(),&context));
+        struct md_ipc_capsules *cache=NULL;
+        struct md_received_fds *data=NULL;
+        struct md_received_message plan;
+        unsigned count=w->received->count-1;
+        int indices[253];
+        for (unsigned i=0;i<count;++i) indices[i]=(int)i+1;
+        assert(!md_ipc_received_message(&cache,&context,w->received,indices,count,&plan,&data));
+        assert(data && data->count==count && plan.count==count);
+        for (unsigned i=0;i<count;++i) {
+            struct stat original,delivered;
+            assert(!plan.entries[i].flags && plan.entries[i].index==(int)i
+                && plan.first[i]==i && plan.first[i+1]==i+1);
+            assert(!fstat(w->received->fds[i+1],&original) && !fstat(data->fds[i],&delivered)
+                && original.st_dev==delivered.st_dev && original.st_ino==delivered.st_ino);
+        }
+        md_received_fds_release(data); md_ipc_capsules_free(cache); md_fs_context_end(&context);
     } else if (w->operation==DATAGRAM_NAME) {
         struct md_fs_request q={.operation=MD_FS_SOCKET_BIND,.directory={AT_FDCWD,w->fds[0]},
             .path={w->name,NULL},.mode=0600};
@@ -140,8 +162,11 @@ static void run(struct md_fs_work *base, struct md_filesystem *fs, int error) {
         md_ipc_credentials_execute(ipc,&identity,NULL,&q,&result,NULL);
         md_identity_release(&identity); assert(!result.error);
         if (w->operation==MESSAGE) { assert(result.fd>=0); w->fds[1]=result.fd; }
-        else assert(result.position>0 && result.info.uid==(w->sender_identity ? 0U : 1234U)
-            && result.info.gid==(w->sender_identity ? 0U : 2345U));
+        else {
+            assert(result.fd>=0 && result.position>0 && result.info.uid==(w->sender_identity ? 0U : 1234U)
+                && result.info.gid==(w->sender_identity ? 0U : 2345U));
+            close(result.fd);
+        }
     } else if (w->operation==STALL) {
         pulse(w->fds[0]); await(w->fds[1]); uint64_t value;
         assert(read(w->fds[1],&value,sizeof(value))==sizeof(value));
@@ -653,20 +678,36 @@ static void transfer_native(const char *path, unsigned mode, unsigned phase) {
 static void transfer_addressed(const char *path, unsigned mode) {
     unsigned before=descriptors(); struct owner o=owner_new(path);
     struct md_ipc_origins *service=NULL; assert(!md_ipc_origins_new(o.worker,launch_id,&service));
-    int app[2]; assert(!socketpair(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK,0,app));
-    struct work pair_work={.operation=PAIR,.fds={app[0],app[1]}};
-    submit(&o,&pair_work); finish(&o,&pair_work);
+    int app[2];
+    if (mode<4) {
+        assert(!socketpair(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK,0,app));
+        struct work pair_work={.operation=PAIR,.fds={app[0],app[1]}};
+        submit(&o,&pair_work); finish(&o,&pair_work);
+    } else {
+        for (unsigned i=0;i<2;++i) { app[i]=socket(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK,0); assert(app[i]>=0); }
+    }
     char name[80]; snprintf(name,sizeof(name),"/addressed-peer-%d-%u",getpid(),mode);
     struct sockaddr_un peer={.sun_family=AF_UNIX}; socklen_t length;
-    if (mode==1) {
+    if (mode==1 || mode==5) {
         struct work w={.operation=DATAGRAM_NAME,.fds={app[1],-1},.name=name};
         submit(&o,&w); finish(&o,&w);
-        length=sizeof(peer); assert(!getpeername(app[0],(void *)&peer,&length));
+        length=sizeof(peer); assert(!getsockname(app[1],(void *)&peer,&length));
     } else {
         memcpy(peer.sun_path+1,name,strlen(name));
         length=offsetof(struct sockaddr_un,sun_path)+strlen(name)+3;
         peer.sun_path[strlen(name)+2]='z'; /* binary abstract name */
         assert(!bind(app[1],(void *)&peer,length));
+    }
+    if (mode>=4) {
+        struct work w={.operation=DATAGRAM_BIND,.fds={app[1],-1}};
+        submit(&o,&w); finish(&o,&w);
+        if (mode>=7) {
+            struct sockaddr_un local=peer; local.sun_path[1]='s';
+            assert(!bind(app[0],(void *)&local,length));
+            w=(struct work){.operation=DATAGRAM_BIND,.fds={app[0],-1}};
+            submit(&o,&w); finish(&o,&w);
+        }
+        if (mode==6 || mode==8) assert(!connect(app[0],(void *)&peer,length));
     }
     int other=socket(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK,0); assert(other>=0);
     struct sockaddr_un alternate=peer; alternate.sun_path[1]='x';
@@ -675,10 +716,11 @@ static void transfer_addressed(const char *path, unsigned mode) {
     int input[]={app[0],directory}; struct md_received_fds *source=captured(input,2);
     struct md_fs_anchor *origins[]={NULL}; struct md_fd_message *message=message_snapshot(origins,1);
     struct md_fs_context task={.peer=getpid(),.task={.identity=md_identity_new(0,0)}};
-    struct md_ipc_send_options options={.addressed=mode!=3,.length=mode==3 ? 0 : length,
+    int addressed=mode!=3 && mode!=6 && mode!=8;
+    struct md_ipc_send_options options={.addressed=addressed,.length=addressed ? length : 0,
         .credentials=1,.claimed={getpid(),1234,2345}};
     memcpy(&options.address,mode==2 ? &alternate : &peer,length);
-    if (mode==1) {
+    if (mode==1 || mode==5) {
         struct sockaddr_un *guest=(void *)&options.address;
         *guest=(struct sockaddr_un){.sun_family=AF_UNIX}; strcpy(guest->sun_path,name);
         options.length=offsetof(struct sockaddr_un,sun_path)+strlen(name)+1;
@@ -694,7 +736,7 @@ static void transfer_addressed(const char *path, unsigned mode) {
     assert(transport==(framed ? MD_IPC_TRANSPORT_ORIGINS_V1 : MD_IPC_TRANSPORT_NATIVE)
         && destination.anchor==-1 && destination.credentials==(unsigned)framed
         && out.received->count==(framed ? 3U : 2U));
-    if (mode!=3) assert(destination.length==length
+    if (addressed) assert(destination.length==length
         && !memcmp(&destination.address,mode==2 ? &alternate : &peer,length));
     char byte='d'; struct iovec io={&byte,1};
     union { struct cmsghdr align; char bytes[CMSG_SPACE(2*sizeof(int))]; } control={0};
@@ -702,13 +744,23 @@ static void transfer_addressed(const char *path, unsigned mode) {
     control.align=(struct cmsghdr){.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_RIGHTS,.cmsg_len=CMSG_LEN(count*sizeof(int))};
     memcpy(CMSG_DATA(&control.align),out.received->fds+1,count*sizeof(int));
     struct msghdr msg={.msg_iov=&io,.msg_iovlen=1,.msg_control=&control,.msg_controllen=CMSG_SPACE(count*sizeof(int)),
-        .msg_name=mode==3 ? NULL : &destination.address,.msg_namelen=mode==3 ? 0 : destination.length};
+        .msg_name=addressed ? &destination.address : NULL,.msg_namelen=addressed ? destination.length : 0};
     assert(sendmsg(out.received->fds[0],&msg,MSG_NOSIGNAL)==1);
     struct md_fs_rights received={0};
     assert(md_fs_receive(mode==2 ? other : app[1],&byte,1,&received)==1 && byte=='d' && received.count==count);
     if (framed) {
         struct work w={.operation=READ_MESSAGE,.fds={app[1],received.fd[1]}};
         submit(&o,&w); finish(&o,&w);
+        struct transfer_result restored={.owner=pthread_self()};
+        int fds[]={app[1],received.fd[0]};
+        struct md_received_fds *input=captured(fds,2);
+        assert(!md_ipc_origins_receive(service,input,transfer_ready,&restored,&restored.request));
+        md_received_fds_release(input); transfer_wait(&o,&restored);
+        assert(!restored.error && !md_ipc_origins_take(&restored.request,&restored.received,NULL));
+        struct stat a,b;
+        assert(restored.received->count==1 && !fstat(directory,&a) && !fstat(restored.received->fds[0],&b)
+            && a.st_dev==b.st_dev && a.st_ino==b.st_ino);
+        md_received_fds_release(restored.received);
     } else {
         struct stat a,b; assert(!fstat(directory,&a) && !fstat(received.fd[0],&b)
             && a.st_dev==b.st_dev && a.st_ino==b.st_ino);
@@ -718,6 +770,35 @@ static void transfer_addressed(const char *path, unsigned mode) {
     close(directory); close(other); close(app[0]); close(app[1]);
     owner_close(&o); md_ipc_origins_destroy(service); descriptor_balance(before,"addressed",mode,0);
     printf("PASS addressed peer mode=%u: resolved destination selects capsule and credentials, exact cleanup\n",mode);
+}
+static void transfer_native_datagram(const char *path) {
+    unsigned before=descriptors(); struct owner o=owner_new(path);
+    int receiver=socket(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK,0); assert(receiver>=0);
+    struct sockaddr_un address={.sun_family=AF_UNIX};
+    snprintf(address.sun_path+1,sizeof(address.sun_path)-1,"md-native-dgram-%d",getpid());
+    assert(!bind(receiver,(void *)&address,sizeof(address)));
+    struct work bound={.operation=DATAGRAM_BIND,.fds={receiver,-1}};
+    submit(&o,&bound); finish(&o,&bound);
+    int sockets[2],pipefd[2];
+    assert(!socketpair(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK,0,sockets));
+    assert(!pipe2(pipefd,O_NONBLOCK|O_CLOEXEC));
+    int directory=open(path,O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(directory>=0);
+    const char bytes[]="native queued data";
+    assert(write(sockets[0],bytes,sizeof(bytes))==sizeof(bytes));
+    int native[]={directory,pipefd[0],sockets[0],sockets[1]};
+    int numbers[254]={receiver};
+    for (unsigned pass=0;pass<2;++pass) {
+        unsigned count=pass ? 253 : 4;
+        for (unsigned i=0;i<count;++i) numbers[i+1]=native[i%4];
+        struct md_received_fds *source=captured(numbers,count+1);
+        struct work inspect={.operation=NATIVE_DATAGRAM,.received=source};
+        submit(&o,&inspect); finish(&o,&inspect); md_received_fds_release(source);
+    }
+    char out[sizeof(bytes)];
+    assert(read(sockets[1],out,sizeof(out))==sizeof(out) && !memcmp(out,bytes,sizeof(out)));
+    close(directory); close(pipefd[0]); close(pipefd[1]); close(sockets[0]); close(sockets[1]); close(receiver);
+    owner_close(&o); descriptor_balance(before,"native datagram",0,0);
+    puts("PASS native datagram rights: ordinary files, pipes, empty and queued sockets, exact cleanup");
 }
 static void transfer_failures(const char *path, unsigned mode) {
     unsigned before=descriptors(); struct transfer_fixture f; transfer_new(&f,path);
@@ -1036,7 +1117,8 @@ void md_test_ipc_origins(const char *path) {
     for (unsigned mode=0;mode<3;++mode)
         for (unsigned phase=0;phase<5;++phase) transfer_native(path,mode,phase);
     transfer_native(path,3,0);
-    for (unsigned mode=0;mode<4;++mode) transfer_addressed(path,mode);
+    for (unsigned mode=0;mode<9;++mode) transfer_addressed(path,mode);
+    transfer_native_datagram(path);
     for (unsigned i=0;i<9;++i) transfer_publication(path,i);
     for (unsigned kind=0;kind<2;++kind) {
         for (unsigned phase=0;phase<4;++phase) transfer_cancel(path,kind,phase);

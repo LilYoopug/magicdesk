@@ -89,7 +89,15 @@ static void binding(void) {
     assert(!mkdir("/tmp/source",0755)); assert(!mkdir("/tmp/target",0755));
     int value=open("/tmp/source/value",O_CREAT|O_WRONLY,0644); assert(value>=0);
     assert(write(value,"data",4)==4); close(value);
-    assert(!mount("/tmp/source","/tmp/target",NULL,MS_BIND,NULL));
+    assert(mount("/tmp/source","/tmp/target",NULL,MS_BIND|(1U<<31),NULL)<0 && errno==EINVAL);
+    assert(!mount("/tmp/source","/tmp/target",NULL,MS_BIND|MS_SHARED|MS_PRIVATE|MS_RDONLY|MS_MOVE,NULL));
+    value=open("/tmp/target/value",O_RDWR); assert(value>=0); close(value);
+    FILE *mounts=fopen("/proc/self/mountinfo","re"); assert(mounts);
+    char mountline[2048]; int found=0;
+    while (fgets(mountline,sizeof(mountline),mounts)) if (strstr(mountline," /tmp/target ")) {
+        assert(!strstr(mountline," shared:") && !strstr(mountline," master:")); ++found;
+    }
+    assert(!ferror(mounts) && found==1); fclose(mounts);
     not_a_link("/tmp/target");
     not_a_link("/tmp/target/.");
     not_a_link("/tmp/target/value");
@@ -155,6 +163,11 @@ static void descriptor_bind(void) {
     assert(!umount2("/tmp/proc-copy",MNT_DETACH));
     close(source); close(target);
     assert(!rmdir("/tmp/proc-copy"));
+    assert(!mkdir("/tmp/new-rec",0700));
+    uint64_t prior=id(AT_FDCWD,"/tmp/new-rec");
+    assert(!mount("tmpfs","/tmp/new-rec","tmpfs",MS_REC,NULL));
+    assert(id(AT_FDCWD,"/tmp/new-rec")!=prior);
+    assert(!umount2("/tmp/new-rec",0) && !rmdir("/tmp/new-rec"));
     assert(mount("","/tmp/fd-target",NULL,MS_BIND,NULL)<0 && errno==ENOENT);
     assert(mount("/tmp/source","",NULL,MS_BIND,NULL)<0 && errno==ENOENT);
     puts("PASS mount proc descriptors: exact directory/file inputs, mounted proc aliases and detached readonly provenance");
@@ -414,8 +427,9 @@ void test_mount_namespace_guest(void) {
     assert(!mount(NULL,"/",NULL,MS_PRIVATE,NULL));
     assert(id(AT_FDCWD,"/")==root);
     assert(mount(NULL,"/",NULL,MS_PRIVATE|MS_SLAVE,NULL)<0 && errno==EINVAL);
-    assert(mount(NULL,"/",NULL,MS_SHARED,NULL)<0 && errno==ENOTSUP);
-    assert(mount(NULL,"/",NULL,MS_UNBINDABLE,NULL)<0 && errno==ENOTSUP);
+    assert(!mount(NULL,"/",NULL,MS_SHARED,NULL));
+    assert(!mount(NULL,"/",NULL,MS_UNBINDABLE,NULL));
+    assert(!mount(NULL,"/",NULL,MS_PRIVATE,NULL));
     assert(mount(NULL,"/tmp",NULL,MS_SLAVE,NULL)<0 && errno==EINVAL);
     assert(!mkdir("/tmp/proc-copy",0755));
     assert(!mount("/proc","/tmp/proc-copy",NULL,MS_BIND|MS_REC|MS_MGC_VAL|MS_SILENT,NULL));

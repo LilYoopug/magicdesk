@@ -48,8 +48,9 @@ static int token(struct md_ipc_credentials *owner, int fd) {
 }
 static void token_check(struct md_ipc_credentials *owner, int fd, int value, pid_t pid, int error) {
     struct md_fs_result out=request(owner,MD_IPC_MESSAGE_READ,fd,value,NULL,0);
-    assert(out.error==error && out.fd==-1);
-    if (!error) assert(out.position==pid && !out.info.uid && !out.info.gid);
+    assert(out.error==error);
+    if (!error) { assert(out.fd>=0 && out.position==pid && !out.info.uid && !out.info.gid); close(out.fd); }
+    else assert(out.fd==-1);
 }
 static void send_token(int socket, int value) {
     union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(int))]; } control={0};
@@ -104,8 +105,10 @@ static void user_namespaces(struct md_ipc_credentials *owner) {
     q.flags=MD_IPC_MESSAGE_READ; q.directory[0]=pair[1]; q.directory[1]=token;
     md_ipc_credentials_execute(owner,&parent,NULL,&q,&out,NULL);
     assert(!out.error && out.info.uid==1000 && out.info.gid==2000);
+    close(out.fd);
     md_ipc_credentials_execute(owner,&child,NULL,&q,&out,NULL);
     assert(!out.error && !out.info.uid && !out.info.gid);
+    close(out.fd);
     q.flags=MD_IPC_MESSAGE_CREATE; q.directory[0]=pair[0]; q.attributes.uid=2;
     md_ipc_credentials_execute(owner,&child,NULL,&q,&out,NULL); assert(out.error==-EINVAL && out.fd==-1);
     q.attributes.uid=1; child.caps.effective=0;
@@ -120,8 +123,10 @@ static void user_namespaces(struct md_ipc_credentials *owner) {
     q.flags=MD_IPC_MESSAGE_READ; q.directory[0]=pair[1]; q.directory[1]=implicit;
     md_ipc_credentials_execute(owner,&parent,NULL,&q,&out,NULL);
     assert(!out.error && out.info.uid==1000 && out.info.gid==2000);
+    close(out.fd);
     md_ipc_credentials_execute(owner,&unmapped,NULL,&q,&out,NULL);
     assert(!out.error && out.info.uid==65534 && out.info.gid==65534);
+    close(out.fd);
     close(implicit); md_identity_release(&unmapped);
     close(token); close(pair[0]); close(pair[1]);
     md_identity_release(&parent); md_identity_release(&child);
@@ -166,6 +171,7 @@ static void pid_namespaces(struct md_ipc_credentials *owner) {
         q.directory[0]=pair[1]; q.directory[1]=token;
         md_ipc_credentials_execute(owner,&identity,viewers[i],&q,&out,NULL);
         assert(!out.error && out.position==expected[i]);
+        close(out.fd);
     }
     close(token); close(pair[0]); close(pair[1]);
     md_pid_identity_release(sender);

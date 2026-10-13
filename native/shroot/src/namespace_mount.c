@@ -24,6 +24,7 @@ long md_namespace_mount(const struct md_fs *fs, long nr, const unsigned long *a)
          * policy. Normalize once at the syscall ABI, before selecting a verb. */
         if ((q.flags&MS_MGC_MSK)==MS_MGC_VAL) q.flags&=~MS_MGC_MSK;
         q.flags&=~MS_SILENT;
+        if (q.flags&(1U<<31)) return -EINVAL; /* Kernel-private MS_NOUSER. */
         if (q.flags&MS_REMOUNT) {
             q.mode=MD_FS_MOUNT_REMOUNT;
             if (!(q.flags&MS_BIND) && a[4]) {
@@ -33,12 +34,18 @@ long md_namespace_mount(const struct md_fs *fs, long nr, const unsigned long *a)
         }
         else if (q.flags&MS_BIND) {
             q.mode=MD_FS_MOUNT_BIND;
+            /* path_mount selects bind before propagation and passes only REC.
+             * A bind inherits source policy, not these ignored caller flags. */
+            q.flags&=MS_BIND|MS_REC;
             r=md_read_string(source,sizeof(source),(const char *)a[0]);
         } else if (q.flags&(MS_PRIVATE|MS_SLAVE|MS_SHARED|MS_UNBINDABLE)) q.mode=MD_FS_MOUNT_PROPAGATION;
         else if (q.flags&MS_MOVE) {
             q.mode=MD_FS_MOUNT_MOVE;
             r=md_read_string(source,sizeof(source),(const char *)a[0]);
         } else {
+            /* REC belongs to bind/propagation, not a new superblock. Linux
+             * discards it before invoking the filesystem's mount operation. */
+            q.flags&=~MS_REC;
             char type[32];
             r=md_read_string(type,sizeof(type),(const char *)a[2]);
             if (r<0) return r;

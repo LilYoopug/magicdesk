@@ -238,9 +238,9 @@ a detached construction root. Readonly/nosuid/nodev/noexec/nosymfollow changes u
 policy as legacy remount. Recursive changes preflight every selected mount's
 writer authority, locked attributes and backing writability before publication
 on the filesystem worker. Failure leaves all policies unchanged. Atime settings
-are validated compatibility hints, not timestamp enforcement. Private/slave
-propagation preserves the private graph; peer groups and ID mapping are
-explicitly unsupported. Nosymfollow is mount-local, not a store setting: the
+are validated compatibility hints, not timestamp enforcement. Propagation uses
+the same shared/private/slave/unbindable relationships as legacy mount calls;
+ID mapping is explicitly unsupported. Nosymfollow is mount-local, not a store setting: the
 component walker checks the selected mount before following a link. Bind aliases
 can have different policies; retained dirfds follow their original mount's live
 policy. Linux's user-namespace locks cover readonly/nosuid/nodev/noexec, not
@@ -1306,9 +1306,18 @@ file does not substitute its parent directory. Named readlink on a non-link
 returns EINVAL, including bind roots; empty-path descriptor readlink retains
 ENOENT. A mount-root path is reconstructed from its covered dentry, independently
 of ambiguous hardlink names in the backing store. Native proc/dev sources use the
-task-local capture path. PRIVATE and SLAVE propagation requests retain the
-private topology: there are no shared peers or masters. SHARED and UNBINDABLE
-remain unsupported, rather than pretending to propagate later mount changes.
+task-local capture path. `mount_propagation` owns weak namespace-family
+membership and retained peer/master ancestry. `fs_mount_propagation` prepares
+attach/detach/move changes across peers and downstream slaves before publishing
+them through the common topology stream transaction. Private changes do not
+propagate upstream; unbindable mounts reject bind cloning. Namespace copies
+retain or downgrade relationships according to user-namespace authority.
+Local mountinfo resolves live masters through family membership. Foreign graph
+snapshots still need complete master retirement after the last peer disappears.
+Bind dispatch ignores unrelated mount flags rather than interpreting them as a
+second propagation/remount operation; bind policy derives from the source.
+New filesystem mounts discard `MS_REC` at the syscall boundary; recursive
+semantics remain specific to bind and propagation operations.
 
 Overlay builds an unpublished merged metadata index bottom-to-top.
 Regular-file bodies retain source custody without copying. Names, hardlinks,
@@ -1372,6 +1381,16 @@ completion. Interface state and ACK publication share a fabric turn and mutation
 journal; allocation, encoding or queue failure rolls back all affected namespaces.
 The journal exists only for mutations, not queries or data IO. Netlink carriers
 provide kernel readiness and queue options without changing Android interfaces.
+`network_message` supplies common bounded replies and ACKs; `network_generic`
+publishes the nlctrl family catalogue without claiming absent kernel families.
+Route rule queries expose the IPv4 local/main/default policy; neighbor and
+traffic-control dumps are empty and their unsupported mutations fail explicitly.
+Strict queries validate complete headers and reject unsupported filters instead
+of silently ignoring them. Kernel-peer connect/getpeername retain netlink
+address semantics; non-kernel destinations are unsupported.
+`network_packet` owns queued datagram framing and translates requested packet
+information and kernel SCM_CREDENTIALS, including ancillary truncation. Protocol
+membership and multicast delivery stay separate from native socketpair carriers.
 Control descriptor selection joins the close/dup table turn, including capture
 of a namespace FD, and ends before guest output copying.
 

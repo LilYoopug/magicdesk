@@ -368,6 +368,14 @@ protocols return explicit errors. `test_network_{model,route,endpoint}.c`,
 --exercise-ports` cover mutation rollback, namespace moves, TCP/UDP, independent
 port observation, outbound DNS/HTTP and cleanup under actual UID 2000.
 
+Managed netlink control also implements the baseline nlctrl family catalogue,
+strict route query validation, kernel-peer connect, policy-rule queries and
+SO_PASSCRED/NETLINK_PKTINFO reply metadata. These are userspace protocol owners;
+they do not open privileged host netlink sockets or require newer kernel APIs.
+`--case mount-namespace` and `--case ofd-order` cover validation, duplication,
+ancillary metadata, membership and unsupported operations. Default systemd boot
+and the Podman probe exercise stock NetworkManager and netavark clients.
+
 Namespace-handle bind mounts use retained typed providers, baseline sealed
 memfd carriers, O_PATH and descriptor duplication. They do not call host mount
 or setns and introduce no post-5.15 dependency. Carrier reads are never reopened
@@ -454,7 +462,7 @@ retain native errors; arbitrary new guest syscalls are not runtime requirements.
 | `SECCOMP_IOCTL_NOTIF_SET_FLAGS` / `SECCOMP_USER_NOTIF_FD_SYNC_WAKE_UP` | 6.6 | `namespace_broker.c`: optional notification scheduling hint. | Failed ioctl leaves normal notification wakeups enabled; no permission or affinity change. |
 | `fchmodat2` | 6.5; `AT_EMPTY_PATH` in 6.6 | `namespace.c` translates store metadata through the worker. `file_calls.c` also has a native direct-backend path. | Logical store metadata does not require this host syscall. Native passthrough retains ENOSYS/flag errors; no fake success or unconditional startup requirement. |
 | `SO_PEERPIDFD` | 6.5 | `test_proc_root_guest.py`: optional coverage of native peer-pidfd fields in logical fdinfo. | ENOPROTOOPT/EINVAL/ENOSYS skips only this optional acquisition; baseline pidfd_open and fdinfo assertions still run. This is not a runtime prerequisite. |
-| `SO_PASSPIDFD` / `SCM_PIDFD` | 6.5 | `socket_control.h`, `ipc_io_host.c`, `task_receive.c` and `socket_ancillary.c`: receive, custody, CLOEXEC publication and cleanup of kernel-generated pidfds. `ipc-ancillary` compares native/guest scalar, batch, peek, truncation and filtered receives; `test_systemd.py` covers notify delivery. | The socket option retains native ENOPROTOOPT/EINVAL when unavailable; no synthetic support or startup requirement. The optional pidfd fixture reports that absence; ordinary credential and rights tests still run. Negative pidfd payloads remain errno values, not owned descriptors. |
+| `SO_PASSPIDFD` / `SCM_PIDFD` | 6.5 | `socket_control.h`, `ipc_io_host.c`, `task_receive.c` and `socket_ancillary.c`: receive, custody, CLOEXEC publication and cleanup of kernel-generated pidfds. An authenticated brokered sender carries its original flags-zero pidfd (baseline 5.3), never substitutes the broker's PIDFD. `ipc-ancillary` compares native/guest scalar, batch, peek, truncation, filtered receives and exact sender identity; `test_systemd.py` covers notify and FD-store restart. | The socket option retains native ENOPROTOOPT/EINVAL when unavailable; no synthetic support or startup requirement. The optional pidfd fixture reports that absence; ordinary credential and rights tests still run. Negative pidfd payloads remain errno values, not owned descriptors. |
 | `PIDFD_GET_*_NAMESPACE` | 6.11 | `pid_calls.c`, `supervisor.c` and `namespace_proc.c`: guest pidfds return retained logical namespace handles through the common FD-publication path. `--case mount-namespace` and systemd directory setup cover the ABI. | No host namespace ioctl is required for managed pidfds. Time namespaces remain EOPNOTSUPP; unowned native pidfds retain native errors. |
 | `STATX_MNT_ID_UNIQUE` | 6.8 | `namespace_proc.c`: distinguishes globally unique mount IDs from the runtime's ordinary mount-ID namespace. | The adapter strips the UNIQUE request and asks for `STATX_MNT_ID` (5.8); returned masks do not claim UNIQUE support. |
 | `PROCMAP_QUERY` | 6.11 | `test_mapping_task.c`: optional binary mapping-observation experiment. | Production `mapping_observation.c` reads a retained maps file. The fixture records unavailable ioctl access separately and verifies the text path. |

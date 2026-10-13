@@ -34,6 +34,8 @@ struct md_mount_layout {
     unsigned count;
 };
 int md_mount_graph_update(struct md_mount_namespace *, const struct md_mount_layout *);
+struct md_mount_graph_change { struct md_mount_namespace *view; struct md_mount_layout layout; };
+int md_mount_graph_update_many(const struct md_mount_graph_change *,unsigned);
 int md_mount_graph_sync(struct md_mount_namespace *);
 /* Always consumes the parcel. An empty destination receives a fully validated
  * view with local mount IDs; an existing destination must name the same stream.

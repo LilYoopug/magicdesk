@@ -109,8 +109,11 @@ static void *run(void *context) {
         .cursors=w->cursors,.ipc_store=w->store};
     if (!error) error = md_fs_mounts_open(&fs, w->attachments, w->attachment_count);
     struct md_input_session *input=NULL;
-    if (!error) error=md_input_session_start(&fs,w->input,&input);
-    if (!error) w->device_events=md_device_events_retain(md_input_session_events(input));
+    if (!error) {
+        w->device_events=md_device_events_new();
+        if (!w->device_events) error=-errno;
+    }
+    if (!error) error=md_input_session_start(&fs,w->input,w->device_events,&input);
     w->input=NULL;
     if (!error && w->inherited && w->inherited->count) {
         struct md_ipc_credentials *authority=NULL;
@@ -141,6 +144,7 @@ static void *run(void *context) {
     }
     if (listener >= 0) close(listener);
     md_input_session_stop(input);
+    md_device_events_stop(w->device_events);
     md_fs_mounts_close(&fs);
     md_fs_storage_close(&storage);
     md_ipc_credentials_close(fs.ipc);

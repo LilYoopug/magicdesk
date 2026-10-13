@@ -6,6 +6,8 @@
 #include <linux/magic.h>
 #include <linux/nsfs.h>
 #include <linux/netlink.h>
+#include <linux/genetlink.h>
+#include <linux/fib_rules.h>
 #include <linux/rtnetlink.h>
 #include <sched.h>
 #include <stdio.h>
@@ -165,7 +167,7 @@ static void namespace_mounts(void) {
     fd=open(alias,O_CREAT|O_EXCL|O_RDWR,0600); assert(fd>=0); close(fd);
     struct stat before,after;
     assert(!stat("/proc/self/ns/net",&before));
-    assert(!mount("/proc/thread-self/ns/net",target,NULL,MS_BIND,NULL));
+    assert(!mount("/proc/thread-self/ns/net",target,NULL,MS_BIND|MS_REC|MS_SHARED,NULL));
     assert(!stat(target,&after) && S_ISREG(after.st_mode)
         && before.st_ino==after.st_ino && before.st_dev==after.st_dev);
     struct statfs fs; assert(!statfs(target,&fs) && fs.f_type==NSFS_MAGIC);
@@ -357,11 +359,119 @@ static void loopback_query(int fd,unsigned flags,int index,const char *name,int 
         : (links==1 && done==((flags&NLM_F_DUMP)==NLM_F_DUMP)
             && acks==(!(flags&NLM_F_DUMP) && !!(flags&NLM_F_ACK))));
 }
+static void generic_network(void) {
+    int fd=socket(AF_NETLINK,SOCK_RAW|SOCK_CLOEXEC|SOCK_NONBLOCK,NETLINK_GENERIC); assert(fd>=0);
+    struct sockaddr_nl kernel={.nl_family=AF_NETLINK};
+    assert(!bind(fd,(void *)&kernel,sizeof(kernel)));
+    int protocol=-1; socklen_t size=sizeof(protocol);
+    assert(!getsockopt(fd,SOL_SOCKET,SO_PROTOCOL,&protocol,&size) && protocol==NETLINK_GENERIC);
+    assert(!connect(fd,(void *)&kernel,sizeof(kernel)));
+    struct sockaddr_nl remote; size=sizeof(remote);
+    assert(!getpeername(fd,(void *)&remote,&size) && size==sizeof(remote)
+        && remote.nl_family==AF_NETLINK && !remote.nl_pid && !remote.nl_groups);
+    struct sockaddr_nl unsupported={.nl_family=AF_NETLINK,.nl_pid=123};
+    assert(connect(fd,(void *)&unsupported,sizeof(unsupported))<0 && errno==EOPNOTSUPP);
+    unsupported.nl_family=AF_UNSPEC;
+    assert(!connect(fd,(void *)&unsupported,sizeof(sa_family_t)));
+    for (unsigned attempt=0;attempt<5;++attempt) {
+        union { struct nlmsghdr align; unsigned char bytes[512]; } request={0},response;
+        struct nlmsghdr *h=&request.align;
+        *h=(struct nlmsghdr){.nlmsg_len=NLMSG_LENGTH(GENL_HDRLEN),.nlmsg_type=GENL_ID_CTRL,
+            .nlmsg_flags=NLM_F_REQUEST|NLM_F_ACK,.nlmsg_seq=44};
+        struct genlmsghdr *g=NLMSG_DATA(h); g->cmd=CTRL_CMD_GETFAMILY; g->version=2;
+        if (attempt==0) h->nlmsg_flags|=NLM_F_DUMP;
+        else if (attempt==4) g->cmd=CTRL_CMD_NEWFAMILY;
+        else {
+            struct rtattr *a=(void *)(request.bytes+h->nlmsg_len);
+            if (attempt==2) {
+                uint16_t id=GENL_ID_CTRL;
+                a->rta_type=CTRL_ATTR_FAMILY_ID; a->rta_len=RTA_LENGTH(sizeof(id));
+                memcpy(RTA_DATA(a),&id,sizeof(id));
+            } else {
+                const char *name=attempt==1 ? "nlctrl" : "nl80211";
+                a->rta_type=CTRL_ATTR_FAMILY_NAME; a->rta_len=RTA_LENGTH(strlen(name)+1);
+                memcpy(RTA_DATA(a),name,strlen(name)+1);
+            }
+            h->nlmsg_len+=RTA_ALIGN(a->rta_len);
+        }
+        assert(sendto(fd,h,h->nlmsg_len,0,(void *)&kernel,sizeof(kernel))==h->nlmsg_len);
+        ssize_t length=recv(fd,response.bytes,sizeof(response.bytes),0); assert(length>0);
+        unsigned remaining=(unsigned)length; int found=0,acks=0,done=0;
+        for (struct nlmsghdr *r=&response.align;NLMSG_OK(r,remaining);r=NLMSG_NEXT(r,remaining)) {
+            assert(r->nlmsg_seq==44);
+            if (r->nlmsg_type==NLMSG_ERROR) {
+                int error=((struct nlmsgerr *)NLMSG_DATA(r))->error;
+                assert(error==(attempt==3 ? -ENOENT : attempt==4 ? -EOPNOTSUPP : 0)); ++acks;
+            } else if (r->nlmsg_type==NLMSG_DONE) { assert(attempt==0); ++done; }
+            else {
+                assert(attempt<3 && r->nlmsg_type==GENL_ID_CTRL);
+                g=NLMSG_DATA(r); assert(g->cmd==CTRL_CMD_NEWFAMILY && g->version==2);
+                int bytes=(int)r->nlmsg_len-(int)NLMSG_LENGTH(GENL_HDRLEN),named=0;
+                for (struct rtattr *a=(void *)((char *)g+GENL_HDRLEN);RTA_OK(a,bytes);a=RTA_NEXT(a,bytes))
+                    if (a->rta_type==CTRL_ATTR_FAMILY_NAME) {
+                        assert(RTA_PAYLOAD(a)==7 && !memcmp(RTA_DATA(a),"nlctrl",7)); ++named;
+                    }
+                assert(!bytes && named==1); ++found;
+            }
+        }
+        assert(!remaining && found==(attempt<3) && acks==(attempt!=0) && done==(attempt==0));
+    }
+    int group=16;
+    assert(!setsockopt(fd,SOL_NETLINK,NETLINK_ADD_MEMBERSHIP,&group,sizeof(group)));
+    group=RTNLGRP_LINK;
+    assert(setsockopt(fd,SOL_NETLINK,NETLINK_ADD_MEMBERSHIP,&group,sizeof(group))<0 && errno==EOPNOTSUPP);
+    close(fd);
+}
+static void routing_policy(int fd) {
+    const unsigned queries[]={RTM_GETRULE,RTM_GETNEIGH,RTM_GETQDISC,RTM_GETTCLASS,RTM_GETTFILTER};
+    const unsigned groups[]={RTNLGRP_IPV4_RULE,RTNLGRP_IPV6_RULE,RTNLGRP_NEIGH,RTNLGRP_TC};
+    const unsigned families[]={AF_INET,AF_INET6,AF_UNSPEC};
+    for (unsigned i=0;i<sizeof(groups)/sizeof(*groups);++i) {
+        assert(!setsockopt(fd,SOL_NETLINK,NETLINK_ADD_MEMBERSHIP,&groups[i],sizeof(groups[i])));
+        assert(!setsockopt(fd,SOL_NETLINK,NETLINK_DROP_MEMBERSHIP,&groups[i],sizeof(groups[i])));
+    }
+    struct sockaddr_nl kernel={.nl_family=AF_NETLINK};
+    for (unsigned i=0;i<sizeof(queries)/sizeof(*queries);++i)
+        for (unsigned family=0;family<sizeof(families)/sizeof(*families);++family) {
+            struct { struct nlmsghdr header; struct rtgenmsg body; } query={
+                .header={.nlmsg_len=NLMSG_LENGTH(sizeof(struct rtgenmsg)),.nlmsg_type=queries[i],
+                    .nlmsg_flags=NLM_F_REQUEST|NLM_F_DUMP,.nlmsg_seq=67},.body={.rtgen_family=families[family]}};
+            assert(sendto(fd,&query,query.header.nlmsg_len,0,(void *)&kernel,sizeof(kernel))==query.header.nlmsg_len);
+            union { struct nlmsghdr align; unsigned char bytes[1024]; } answer;
+            ssize_t count=recv(fd,answer.bytes,sizeof(answer.bytes),0); assert(count>0);
+            unsigned remaining=(unsigned)count,rules=0,done=0;
+            for (struct nlmsghdr *h=&answer.align;NLMSG_OK(h,remaining);h=NLMSG_NEXT(h,remaining)) {
+                assert(h->nlmsg_seq==67);
+                if (h->nlmsg_type==NLMSG_DONE) { ++done; continue; }
+                assert(h->nlmsg_type==RTM_NEWRULE && !i && families[family]!=AF_INET6 && rules<3);
+                const struct fib_rule_hdr *rule=NLMSG_DATA(h);
+                const unsigned tables[]={RT_TABLE_LOCAL,RT_TABLE_MAIN,RT_TABLE_DEFAULT};
+                const unsigned priorities[]={0,32766,32767};
+                assert(rule->family==AF_INET && rule->table==tables[rules] && rule->action==FR_ACT_TO_TBL);
+                unsigned priority=0;
+                int size=(int)h->nlmsg_len-(int)NLMSG_LENGTH(sizeof(*rule));
+                for (struct rtattr *a=(void *)((char *)rule+NLMSG_ALIGN(sizeof(*rule)));RTA_OK(a,size);a=RTA_NEXT(a,size))
+                    if (a->rta_type==FRA_PRIORITY) {
+                        assert(RTA_PAYLOAD(a)==sizeof(priority)); memcpy(&priority,RTA_DATA(a),sizeof(priority));
+                    }
+                assert(!size && priority==priorities[rules]); ++rules;
+            }
+            assert(!remaining && done==1 && rules==(!i && families[family]!=AF_INET6 ? 3U : 0U));
+        }
+    struct { struct nlmsghdr header; struct fib_rule_hdr body; } change={
+        .header={.nlmsg_len=sizeof(change),.nlmsg_type=RTM_NEWRULE,.nlmsg_flags=NLM_F_REQUEST|NLM_F_ACK},
+        .body={.family=AF_INET,.table=RT_TABLE_MAIN,.action=FR_ACT_TO_TBL}};
+    assert(sendto(fd,&change,sizeof(change),0,(void *)&kernel,sizeof(kernel))==sizeof(change));
+    union { struct nlmsghdr align; char bytes[256]; } answer;
+    assert(recv(fd,answer.bytes,sizeof(answer.bytes),0)>=(ssize_t)NLMSG_LENGTH(sizeof(struct nlmsgerr)));
+    assert(answer.align.nlmsg_type==NLMSG_ERROR && ((struct nlmsgerr *)NLMSG_DATA(&answer.align))->error==-EOPNOTSUPP);
+}
 static void offline_network(void) {
     int host=open("/proc/self/ns/net",O_RDONLY|O_CLOEXEC); assert(host>=0);
     struct stat before,after; assert(!fstat(host,&before));
     int inherited[2]; assert(!socketpair(AF_UNIX,SOCK_STREAM,0,inherited));
     assert(!unshare(CLONE_NEWNET));
+    generic_network();
     assert(!stat("/proc/self/ns/net",&after) && before.st_ino!=after.st_ino);
     assert(socket(AF_INET,SOCK_STREAM,0)<0 && errno==EPROTONOSUPPORT);
     int route=socket(AF_NETLINK,SOCK_RAW|SOCK_CLOEXEC,NETLINK_ROUTE); assert(route>=0);
@@ -385,19 +495,87 @@ static void offline_network(void) {
     length=sizeof(bytes); bytes=0;
     assert(!getsockopt(route_copy,SOL_SOCKET,SO_RCVBUF,&bytes,&length) && bytes>=65536);
     assert(setsockopt(route,SOL_SOCKET,SO_BINDTODEVICE,"wlan0",6)<0 && errno==EOPNOTSUPP);
-    struct sockaddr_nl bound={.nl_family=AF_NETLINK};
-    assert(!bind(route,(void *)&bound,sizeof(bound)));
+    union { struct sockaddr_nl nl; struct sockaddr_storage storage; } padded={.nl.nl_family=AF_NETLINK};
+    assert(!bind(route,(void *)&padded,sizeof(padded)));
     loopback_query(route,NLM_F_ACK,0,"lo",0);
     loopback_query(route,0,1,NULL,0);
     loopback_query(route,NLM_F_DUMP,0,NULL,0);
     loopback_query(route,0,0,"wlan0",-ENODEV);
     loopback_query(route,0,2,NULL,-ENODEV);
+    routing_policy(route);
+    int strict=1;
+    assert(!setsockopt(route,SOL_NETLINK,NETLINK_GET_STRICT_CHK,&strict,sizeof(strict)));
+    length=sizeof(strict); strict=0;
+    assert(!getsockopt(route_copy,SOL_NETLINK,NETLINK_GET_STRICT_CHK,&strict,&length) && strict==1);
+    loopback_query(route,NLM_F_DUMP,0,NULL,0);
+    loopback_query(route,NLM_F_DUMP,1,NULL,-EINVAL);
+    strict=0;
+    assert(!setsockopt(route_copy,SOL_NETLINK,NETLINK_GET_STRICT_CHK,&strict,sizeof(strict)));
+    int monitor=socket(AF_NETLINK,SOCK_RAW|SOCK_CLOEXEC|SOCK_NONBLOCK,NETLINK_ROUTE); assert(monitor>=0);
+    int enabled_info=1,group=RTNLGRP_LINK,observed=0;
+    assert(!setsockopt(monitor,SOL_NETLINK,NETLINK_PKTINFO,&enabled_info,sizeof(enabled_info)));
+    assert(!setsockopt(monitor,SOL_NETLINK,NETLINK_ADD_MEMBERSHIP,&group,sizeof(group)));
+    length=sizeof(observed);
+    assert(!getsockopt(monitor,SOL_NETLINK,NETLINK_LIST_MEMBERSHIPS,&observed,&length));
+    assert(observed==RTMGRP_LINK && length==sizeof(observed));
     struct { struct nlmsghdr header; struct ifinfomsg link; } up={
         .header={.nlmsg_len=sizeof(up),.nlmsg_type=RTM_NEWLINK,.nlmsg_flags=NLM_F_REQUEST|NLM_F_ACK},
         .link={.ifi_index=1,.ifi_flags=IFF_UP,.ifi_change=IFF_UP}};
-    assert(sendto(route,&up,sizeof(up),0,(void *)&bound,sizeof(bound))==sizeof(up));
+    assert(sendto(route,&up,sizeof(up),0,(void *)&padded,sizeof(padded))==sizeof(up));
     struct { struct nlmsghdr header; struct nlmsgerr result; } ack;
     assert(recv(route,&ack,sizeof(ack),0)==sizeof(ack) && !ack.result.error);
+    const size_t capacities[]={CMSG_SPACE(sizeof(struct nl_pktinfo)),CMSG_SPACE(sizeof(struct nl_pktinfo)),0,8,16,19,CMSG_SPACE(sizeof(struct nl_pktinfo))};
+    for (unsigned attempt=0;attempt<sizeof(capacities)/sizeof(capacities[0]);++attempt) {
+        char bytes[2048];
+        union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(struct nl_pktinfo))]; } ancillary;
+        struct sockaddr_nl source={0};
+        struct iovec vector={bytes,attempt ? sizeof(bytes) : 1},many[1024];
+        for (unsigned i=0;i<1024;++i) many[i]=(struct iovec){bytes+i,1};
+        struct msghdr message={.msg_name=&source,.msg_namelen=sizeof(source),.msg_iov=&vector,.msg_iovlen=1,
+            .msg_control=ancillary.bytes,.msg_controllen=capacities[attempt]};
+        if (attempt==1) { message.msg_iov=many; message.msg_iovlen=1024; }
+        int available=0; assert(!ioctl(monitor,FIONREAD,&available));
+        ssize_t n=recvmsg(monitor,&message,attempt==6 ? 0 : MSG_PEEK|(attempt ? 0 : MSG_TRUNC));
+        assert(n>(ssize_t)sizeof(struct nlmsghdr));
+        assert(n==available);
+        assert(source.nl_family==AF_NETLINK && !source.nl_pid && source.nl_groups==RTMGRP_LINK);
+        size_t capacity=capacities[attempt];
+        assert(message.msg_namelen==sizeof(source));
+        assert(message.msg_controllen==(capacity<sizeof(struct cmsghdr) ? 0 : capacity));
+        assert(!!(message.msg_flags&MSG_TRUNC)==!attempt);
+        assert(!!(message.msg_flags&MSG_CTRUNC)==(capacity<CMSG_LEN(sizeof(struct nl_pktinfo))));
+        struct cmsghdr *c=CMSG_FIRSTHDR(&message);
+        if (capacity>=sizeof(struct cmsghdr)) {
+            assert(c && c->cmsg_level==SOL_NETLINK && c->cmsg_type==NETLINK_PKTINFO);
+            size_t expected=CMSG_LEN(sizeof(struct nl_pktinfo));
+            assert(c->cmsg_len==(capacity<expected ? capacity : expected));
+            if (capacity>=expected) assert(((struct nl_pktinfo *)CMSG_DATA(c))->group==RTNLGRP_LINK);
+        } else assert(!c);
+        if (attempt) {
+            const struct nlmsghdr *h=(void *)bytes;
+            assert(h->nlmsg_type==RTM_NEWLINK && !h->nlmsg_pid && !h->nlmsg_seq);
+            assert(((const struct ifinfomsg *)NLMSG_DATA(h))->ifi_flags&IFF_UP);
+        }
+    }
+    assert(recv(monitor,packet,sizeof(packet),0)<0 && errno==EAGAIN);
+    assert(!setsockopt(monitor,SOL_NETLINK,NETLINK_DROP_MEMBERSHIP,&group,sizeof(group)));
+    length=sizeof(observed);
+    assert(!getsockopt(monitor,SOL_NETLINK,NETLINK_LIST_MEMBERSHIPS,&observed,&length) && !observed);
+    close(monitor);
+    int pass=1;
+    assert(!setsockopt(route,SOL_SOCKET,SO_PASSCRED,&pass,sizeof(pass)));
+    length=sizeof(pass); pass=0;
+    assert(!getsockopt(route,SOL_SOCKET,SO_PASSCRED,&pass,&length) && pass==1);
+    assert(sendto(route,&up,sizeof(up),0,(void *)&padded,sizeof(padded))==sizeof(up));
+    union { struct cmsghdr alignment; char bytes[CMSG_SPACE(sizeof(struct ucred))]; } credentials;
+    struct iovec payload={&ack,sizeof(ack)};
+    struct msghdr message={.msg_iov=&payload,.msg_iovlen=1,.msg_control=&credentials,.msg_controllen=sizeof(credentials)};
+    assert(recvmsg(route,&message,0)==sizeof(ack) && !ack.result.error && !(message.msg_flags&MSG_CTRUNC));
+    struct cmsghdr *header=CMSG_FIRSTHDR(&message);
+    assert(header && header->cmsg_level==SOL_SOCKET && header->cmsg_type==SCM_CREDENTIALS
+        && header->cmsg_len==CMSG_LEN(sizeof(struct ucred)));
+    struct ucred *cred=(void *)CMSG_DATA(header);
+    assert(!cred->pid && !cred->uid && !cred->gid);
     loopback_query(route,0,1,NULL,0);
     close(route_copy); close(route);
     int control=socket(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC,0); assert(control>=0);

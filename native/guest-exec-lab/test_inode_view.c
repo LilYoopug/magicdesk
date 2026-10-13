@@ -400,7 +400,7 @@ static void channel_views(struct md_inode_store *s,const char *base) {
     assert(!md_inode_mkfifo(source,-1,"/fifo",0600));
     int fifo=md_inode_open(source,-1,"/fifo",O_RDWR|O_NONBLOCK,0); assert(fifo>=0);
     int socket_fd=socket(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC,0); assert(socket_fd>=0);
-    assert(!md_inode_socket_bind(source,-1,"/socket",0600,socket_fd));
+    assert(!md_inode_socket_bind(source,-1,"/socket","/socket",0600,socket_fd));
     int root=md_inode_open(source,-1,"/",O_RDONLY|O_DIRECTORY,0); assert(root>=0);
     assert(!md_inode_mkdir(s,-1,"/cu",0700) && !md_inode_mkdir(s,-1,"/cw",0700));
     int upper=md_inode_open(s,-1,"/cu",O_RDONLY|O_DIRECTORY,0);
@@ -425,7 +425,7 @@ static void channel_views(struct md_inode_store *s,const char *base) {
     int created=md_inode_open(view,-1,"/created",O_RDWR|O_NONBLOCK,0); assert(created>=0);
     int keeper=md_inode_open(s,upper,"created",O_RDWR|O_NONBLOCK,0); assert(keeper>=0);
     int retained=socket(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC,0); assert(retained>=0);
-    assert(!md_inode_socket_bind(view,-1,"/created-socket",0600,retained));
+    assert(!md_inode_socket_bind(view,-1,"/created-socket","/created-socket",0600,retained));
     socket_message(s,"/cu/created-socket",retained);
     close(other); md_inode_store_close(view); view=NULL; collect(s);
     assert(!md_inode_view_create(s,MD_FILESYSTEM_OVERLAY,&view));

@@ -107,7 +107,8 @@ static int address(struct md_ipc_origin_request *r) {
     r->destination.length=offsetof(struct sockaddr_un,sun_path)+result.size;
     return 0;
 }
-static int credentials(struct md_ipc_origin_request *r, struct md_ipc_credentials *authority) {
+static int credentials(struct md_ipc_origin_request *r, struct md_ipc_credentials *authority,
+        const struct md_ipc_binding *binding) {
     if (!r->options.credentials) return 0;
     struct md_fs_request q={.operation=MD_FS_IPC,
         .flags=r->implicit_credentials ? MD_IPC_MESSAGE_SENDER : MD_IPC_MESSAGE_CREATE,
@@ -115,8 +116,8 @@ static int credentials(struct md_ipc_origin_request *r, struct md_ipc_credential
         .offset=r->options.claimed.pid,
         .attributes={.uid=r->options.claimed.uid,.gid=r->options.claimed.gid}};
     struct md_fs_result result;
-    md_ipc_credentials_execute(authority,&r->task.task.identity,r->task.task.pid_group,&q,&result,NULL);
-    if (result.error) return result.error;
+    int issued=md_ipc_credentials_message(authority,binding,&r->task.task.identity,r->task.task.pid_group,&q,&result);
+    if (issued) return issued;
     if (result.fd<0) return -EPROTO;
     int error=0;
     unsigned count=r->result ? r->result->count : r->source->count;
@@ -148,19 +149,33 @@ static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
     if (!error && r->kind==PREPARE) error=address(r);
     /* A datagram destination can override a connected peer. It must not carry
      * that peer's capsule or identity capability to a different receiver. */
-    int bound=binding.scope!=NULL;
-    if (!error && r->options.addressed && r->options.length && bound) {
+    int bound=binding.scope!=NULL && (r->kind==RECEIVE || !binding.receive_only);
+    if (!error && r->kind==PREPARE && r->options.addressed && r->options.length && bound) {
         int type=0; socklen_t length=sizeof(type);
         if (getsockopt(r->source->fds[0],SOL_SOCKET,SO_TYPE,&type,&length)) error=-errno;
         if (!error && type==SOCK_DGRAM) {
             struct sockaddr_storage peer={0}; length=sizeof(peer);
             if (r->destination.anchor>=0) {
-                /* A retained inode has no authenticated connection identity.
-                 * Do not leak capabilities or silently downgrade a framed peer. */
-                if (binding.transport==MD_IPC_TRANSPORT_ORIGINS_V1) error=-EOPNOTSUPP;
                 bound=0;
             } else if (getpeername(r->source->fds[0],(void *)&peer,&length)
                     || length!=r->destination.length || memcmp(&peer,&r->destination.address,length)) bound=0;
+        }
+    }
+    if (!error && r->kind==PREPARE && !bound) {
+        int type=0; socklen_t size=sizeof(type);
+        if (getsockopt(r->source->fds[0],SOL_SOCKET,SO_TYPE,&type,&size)) error=-errno;
+        if (!error && type==SOCK_DGRAM) {
+            struct sockaddr_un peer={0}; socklen_t length=sizeof(peer);
+            if (r->options.addressed) {
+                length=r->destination.length;
+                if (length<=sizeof(peer)) memcpy(&peer,&r->destination.address,length);
+            } else if (getpeername(r->source->fds[0],(void *)&peer,&length)) length=0;
+            if (length>offsetof(struct sockaddr_un,sun_path) && length<=sizeof(peer) && peer.sun_family==AF_UNIX) {
+                md_ipc_binding_release(&binding);
+                error=md_ipc_credentials_destination(authority,&peer,length,r->destination.anchor,&binding);
+                if (error==-ENODATA) error=0;
+                else if (!error) bound=1;
+            }
         }
     }
     r->transport=bound ? binding.transport : MD_IPC_TRANSPORT_NATIVE;
@@ -195,7 +210,7 @@ static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
         if (r->kind==RECEIVE) error=md_ipc_capsules_receive(s->capsules,&binding,r->source->fds[1],&r->result);
         else if (r->source->count>1) error=prepare(r,&binding);
     }
-    if (!error && r->kind==PREPARE && bound) error=credentials(r,authority);
+    if (!error && r->kind==PREPARE && bound) error=credentials(r,authority,&binding);
     if (!error && r->kind==PREPARE && !bound && r->options.credentials) {
         uint32_t uid,gid;
         error=md_ipc_credentials_claim(&r->task.task.identity,r->task.task.pid_group,

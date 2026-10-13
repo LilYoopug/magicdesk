@@ -11,15 +11,14 @@ long md_namespace_socket_bind(const struct md_fs *fs, int socket, const char *pa
     long mode = md_namespace_creation_mode(fs,0777);
     if (mode < 0) return mode;
     struct md_fs_request q = {.operation = MD_FS_SOCKET_BIND, .directory = {AT_FDCWD, socket},
-        .path = {path, NULL}, .mode = 0777, .attributes.creation_mask = 0777U ^ (unsigned)mode};
-    struct md_fs_response out;
-    return md_namespace_request(fs, &q, &out);
+        .path = {path, path}, .mode = 0777, .attributes.creation_mask = 0777U ^ (unsigned)mode};
+    return md_namespace_paths_request(fs, &q);
 }
 long md_namespace_socket_address(const struct md_fs *fs, const char *path, struct sockaddr_un *address, unsigned *length) {
     struct md_fs_request q = {.operation = MD_FS_SOCKET_ADDRESS,
         .directory = {AT_FDCWD, -1}, .path = {path, NULL}};
     struct md_fs_response out;
-    long r = md_namespace_request(fs, &q, &out);
+    long r = md_namespace_paths_resolve(fs, &q, &out);
     if (r < 0) return r;
     if (out.result.size > sizeof(address->sun_path) || out.result.size < 2) return -EPROTO;
     *address = (struct sockaddr_un){.sun_family = AF_UNIX};

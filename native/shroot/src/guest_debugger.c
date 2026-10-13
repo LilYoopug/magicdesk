@@ -216,10 +216,6 @@ pid_t md_debugger_owner(struct md_debugger *d,pid_t pid) {
     struct inferior *p=find(d,pid);
     return p && !p->terminal ? p->owner : 0;
 }
-int md_debugger_owns(struct md_debugger *d, pid_t owner, pid_t pid) {
-    struct inferior *p=find(d,pid);
-    return p && p->owner==owner && d->host.allowed(owner,pid);
-}
 int md_debugger_active(struct md_debugger *d) { return d->inferiors!=NULL || d->waiters!=NULL; }
 int md_debugger_newborn(struct md_debugger *d, pid_t pid) {
     struct inferior *p=find(d,pid);
@@ -386,7 +382,9 @@ static long control(struct md_debugger *d, pid_t caller, const struct user_pt_re
         return error;
     }
     struct inferior *p=find(d,pid);
-    if (!p || p->terminal || p->owner!=caller || !d->host.allowed(caller,pid)) return -ESRCH;
+    /* Admission establishes the relationship. A later UID/GID or domain
+     * change does not revoke continuation or detach; memory access is separate. */
+    if (!p || p->terminal || p->owner!=caller) return -ESRCH;
     if (op==PTRACE_INTERRUPT) {
         if (!p->seized) return -EIO;
         if (p->stopped) return 0;
@@ -458,12 +456,14 @@ static long control(struct md_debugger *d, pid_t caller, const struct user_pt_re
         return error;
     }
     case PTRACE_PEEKTEXT: case PTRACE_PEEKDATA: {
+        if (!d->host.allowed(caller,pid)) return -EIO;
         /* The raw Linux syscall writes through data; libc returns the word. */
         errno=0; long word=ptrace(op,pid,(void *)address,NULL);
         if (word==-1 && errno) return -errno;
         return transfer(caller,data,&word,sizeof(word),1);
     }
-    case PTRACE_POKETEXT: case PTRACE_POKEDATA: return request(op,pid,address,(void *)data);
+    case PTRACE_POKETEXT: case PTRACE_POKEDATA:
+        return d->host.allowed(caller,pid) ? request(op,pid,address,(void *)data) : -EIO;
     case PTRACE_CONT: case PTRACE_SINGLESTEP: case PTRACE_SYSCALL: case PTRACE_DETACH:
         if (data>64) return -EIO;
         p->stopped=0; p->sequence=0; p->step=op==PTRACE_SINGLESTEP;

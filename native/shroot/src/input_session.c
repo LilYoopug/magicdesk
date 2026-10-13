@@ -325,8 +325,10 @@ static int mount_devices(struct md_filesystem *fs,struct md_input_session *s) {
     if (!error) error=md_view_attach_source(fs,&source,&target,NULL);
     md_view_location_close(&target); md_view_location_close(&shm); return error;
 }
-int md_input_session_start(struct md_filesystem *fs,const struct md_input_launch *launch,struct md_input_session **out) {
+int md_input_session_start(struct md_filesystem *fs,const struct md_input_launch *launch,
+        struct md_device_events *events,struct md_input_session **out) {
     if (!launch || !launch->endpoint) return 0;
+    if (!events) return -EINVAL;
     size_t length=strlen(launch->endpoint);
     struct sockaddr_un address={.sun_family=AF_UNIX};
     if (!length || length>=sizeof(address.sun_path)-1) return -EINVAL;
@@ -344,7 +346,7 @@ int md_input_session_start(struct md_filesystem *fs,const struct md_input_launch
     s->wake=eventfd(0,EFD_NONBLOCK|EFD_CLOEXEC); s->ready=eventfd(0,EFD_NONBLOCK|EFD_CLOEXEC);
     if (s->wake<0 || s->ready<0) { error=-errno; goto failed; }
     error=md_input_bus_new(launch->wake_fd,feedback,s,&s->bus); if (error) goto failed;
-    s->events=md_device_events_new(); if (!s->events) { error=-errno; goto failed; }
+    s->events=md_device_events_retain(events);
     int parent=md_fs_private_mounts_parent(fs->store);
     if (parent<0) { error=parent; goto failed; }
     int lower=open("/dev",O_PATH|O_DIRECTORY|O_CLOEXEC);
@@ -404,7 +406,6 @@ void md_input_session_stop(struct md_input_session *s) {
     if (s->wake>=0) md_event_signal(s->wake);
     if (s->started) pthread_join(s->thread,NULL);
     md_uinput_stop(s->uinput);
-    md_device_events_stop(s->events);
     md_input_disconnect(s->bus);
     md_provider_tree_release(s->dev); md_provider_tree_release(s->sys); md_provider_tree_release(s->udev);
     if (s->nodes) release_nodes(s->nodes);
@@ -416,4 +417,3 @@ void md_input_session_stop(struct md_input_session *s) {
     if (s->ready>=0) close(s->ready);
     pthread_mutex_destroy(&s->lock); free(s);
 }
-struct md_device_events *md_input_session_events(struct md_input_session *s) { return s ? s->events : NULL; }

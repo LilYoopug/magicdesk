@@ -24,7 +24,7 @@ def guest():
         mount('proc', directory, 'proc', 2 | 4 | 8)
         try:
             entries = os.listdir(directory)
-            for name in ('sysrq-trigger', 'kcore', 'kmsg', 'keys'):
+            for name in ('sysrq-trigger', 'kcore', 'kmsg', 'keys', 'asound', 'kallsyms'):
                 assert name not in entries, name
                 for lookup in (os.stat, lambda p: os.open(p, os.O_PATH)):
                     try:

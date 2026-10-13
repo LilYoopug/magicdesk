@@ -13,10 +13,11 @@
 #include <string.h>
 #include <unistd.h>
 
-enum { MAGIC=0x4d444d47U, VERSION=12, HEADER=128 };
+enum { MAGIC=0x4d444d47U, VERSION=13, HEADER=144 };
 enum { INODE=1, DETACHED=2, RETIRED=4, LOCKED=8, PROC=16, PARENTLESS=32, ROOT_PROVIDERS=64 };
 struct entry { uint32_t parent, flags; struct md_fd_identity source, target, policy;
-    uint32_t storage, descriptor; uint64_t generation, proc_namespace; };
+    uint32_t storage, descriptor; uint64_t generation, proc_namespace;
+    uint32_t shared, master, unbindable, reserved; };
 struct storage { struct md_fd_identity root; uint32_t start, count; };
 struct manifest {
     uint32_t magic, version, count, storages;
@@ -25,16 +26,17 @@ struct manifest {
     uint64_t revision, unavailable;
     struct md_fd_identity base_source, base_target;
     uint32_t root, base_parent, base_flags, base_descriptor;
+    uint32_t shared, master, unbindable, reserved;
     struct entry entries[MD_FS_MOUNTS_MAX];
     struct storage storage[MD_FS_MOUNTS_MAX];
 };
 struct md_mount_graph {
     int fd, reader, writer, pin;
-    uint64_t revision;
+    uint64_t revision, observed;
     struct md_fd_identity identity;
 };
-_Static_assert(sizeof(struct entry)==80 && sizeof(struct storage)==24,"mount graph entry layout");
-_Static_assert(sizeof(struct manifest)==HEADER+104*MD_FS_MOUNTS_MAX,"mount graph layout");
+_Static_assert(sizeof(struct entry)==96 && sizeof(struct storage)==24,"mount graph entry layout");
+_Static_assert(sizeof(struct manifest)==HEADER+120*MD_FS_MOUNTS_MAX,"mount graph layout");
 
 static struct md_mount_graph *create(void) {
     struct md_mount_graph *g=calloc(1,sizeof(*g));
@@ -154,6 +156,8 @@ static int path_object(int fd, struct md_fd_identity expected, struct stat *st, 
     return md_fd_identity_same(md_fd_identity(st),expected) ? 0 : -EPROTO;
 }
 static int topology(const struct manifest *m) {
+    if (m->reserved || m->unbindable>1 || (m->unbindable && (m->shared || m->master))
+            || (m->shared && m->shared==m->master)) return -EPROTO;
     if (m->root>m->count || m->base_parent>m->count || (m->base_flags&~(DETACHED|LOCKED|ROOT_PROVIDERS))) return -EPROTO;
     if (m->root ? (!m->base_descriptor || !m->base_parent) : (m->base_parent || (m->base_flags&DETACHED))) return -EPROTO;
     if (m->base_parent && (m->entries[m->base_parent-1].flags&RETIRED)) return -EPROTO;
@@ -162,6 +166,8 @@ static int topology(const struct manifest *m) {
     parents[0]=m->root ? m->base_parent+1 : 0;
     for (unsigned i=0;i<m->count;++i) {
         const struct entry *e=&m->entries[i];
+        if (e->reserved || e->unbindable>1 || (e->unbindable && (e->shared || e->master))
+                || (e->shared && e->shared==e->master)) return -EPROTO;
         if ((e->flags&PARENTLESS) && (e->parent || !(e->flags&DETACHED) || m->root==i+1)) return -EPROTO;
         parents[i+1]=(e->flags&(RETIRED|PARENTLESS)) || m->root==i+1 ? 0 : e->parent+1;
     }
@@ -259,6 +265,9 @@ static int describe(struct md_mount_namespace *view, const struct md_mount_layou
     int root_slot=mount_slot(view,l->root,count), base_parent=mount_slot(view,l->base->parent,count);
     if (root_slot<0 || base_parent<0) return -EINVAL;
     out->root=(unsigned)root_slot; out->base_parent=(unsigned)base_parent;
+    out->shared=md_mount_group_id(l->base->links.shared);
+    out->master=md_mount_group_id(l->base->links.master);
+    out->unbindable=l->base->links.unbindable;
     out->base_flags=(l->base->detached ? DETACHED : 0) | (l->base->locked ? LOCKED : 0);
     if (l->base->root_providers) out->base_flags|=ROOT_PROVIDERS;
     if (l->base->source>=0) {
@@ -283,6 +292,9 @@ static int describe(struct md_mount_namespace *view, const struct md_mount_layou
         if (!m->generation) return -EINVAL;
         e->generation=m->generation;
         if (!m->id) { e->flags=DETACHED|RETIRED; continue; }
+        e->shared=md_mount_group_id(m->links.shared);
+        e->master=md_mount_group_id(m->links.master);
+        e->unbindable=m->links.unbindable;
         /* A private device view cannot be flattened into a native attachment. */
         if (!mount_portable(m)) return -EOPNOTSUPP;
         e->descriptor=next; next+=3;
@@ -349,8 +361,8 @@ static int parcel(const struct manifest *data, int *fds, struct md_inode_lifetim
     else *out=candidate;
     return r;
 }
-int md_mount_graph_update(struct md_mount_namespace *view, const struct md_mount_layout *l) {
-    if (!view || !view->graph) return 0;
+struct prepared { int manifest; struct md_mount_graph_parcel parcel; struct md_mount_stream_change stream; };
+static int prepare_update(struct md_mount_namespace *view,const struct md_mount_layout *l,struct prepared *out) {
     struct md_mount_graph *g=view->graph;
     if (g->writer<0) return -EPERM;
     if (g->revision==UINT64_MAX) return -EOVERFLOW;
@@ -372,16 +384,45 @@ int md_mount_graph_update(struct md_mount_namespace *view, const struct md_mount
     int fd=md_sealed_manifest_create("shroot-mount-graph",bytes,size,&id);
     if (fd<0) return fd;
     fds[0]=fd;
-    struct md_mount_graph_parcel p={0};
-    if (data.unavailable) r=md_mount_stream_publish(g->reader,g->writer,g->revision,&fd,1);
-    else {
-        r=parcel(&data,fds,owners,&p);
-        if (!r) r=md_mount_stream_publish(g->reader,g->writer,g->revision,p.fd,p.count);
-    }
-    md_mount_graph_parcel_close(&p);
-    if (r) close(fd);
-    else { if (g->fd>=0) close(g->fd); g->fd=fd; ++g->revision; }
+    out->manifest=fd;
+    if (!data.unavailable) r=parcel(&data,fds,owners,&out->parcel);
+    if (!r) out->stream=(struct md_mount_stream_change){g->reader,g->writer,g->revision,
+        data.unavailable ? &out->manifest : out->parcel.fd,data.unavailable ? 1 : out->parcel.count};
     return r;
+}
+int md_mount_graph_update_many(const struct md_mount_graph_change *changes,unsigned count) {
+    if (count && !changes) return -EINVAL;
+    unsigned used=0;
+    for (unsigned i=0;i<count;++i) used+=changes[i].view && changes[i].view->graph;
+    if (!used) return 0;
+    struct prepared *p=calloc(used,sizeof(*p));
+    struct md_mount_stream_change *streams=calloc(used,sizeof(*streams));
+    if (!p || !streams) { free(p); free(streams); return -ENOMEM; }
+    for (unsigned i=0;i<used;++i) p[i].manifest=-1;
+    int r=0; unsigned n=0;
+    for (unsigned i=0;i<count && !r;++i) {
+        if (!changes[i].view || !changes[i].view->graph) continue;
+        r=prepare_update(changes[i].view,&changes[i].layout,p+n);
+        if (!r) streams[n]=p[n].stream;
+        ++n;
+    }
+    if (!r) r=md_mount_stream_publish_many(streams,used);
+    n=0;
+    for (unsigned i=0;i<count && !r;++i) {
+        struct md_mount_graph *g=changes[i].view ? changes[i].view->graph : NULL;
+        if (!g) continue;
+        if (g->fd>=0) close(g->fd);
+        g->fd=p[n].manifest; p[n++].manifest=-1; ++g->revision;
+    }
+    for (unsigned i=0;i<used;++i) {
+        if (p[i].manifest>=0) close(p[i].manifest);
+        md_mount_graph_parcel_close(&p[i].parcel);
+    }
+    free(streams); free(p); return r;
+}
+int md_mount_graph_update(struct md_mount_namespace *view,const struct md_mount_layout *layout) {
+    const struct md_mount_graph_change change={view,*layout};
+    return md_mount_graph_update_many(&change,1);
 }
 int md_mount_graph_export(struct md_mount_namespace *view, int root, struct md_mount_graph_parcel *out) {
     if (!view || !out || out->count || out->fd) return -EINVAL;
@@ -480,6 +521,8 @@ static int merge(struct md_mount_namespace *view, struct md_mount_namespace *nex
             a->guest=b->guest; a->detached=b->detached;
             a->locked=b->locked;
             a->root_providers=b->root_providers;
+            md_mount_links_release(&a->links); a->links=b->links;
+            b->links=(struct md_mount_links){0};
         }
         a->parent=a->id && after.root!=i+1 && !(after.entries[i].flags&PARENTLESS)
             ? (parent ? &view->tree->mounts[parent-1] : &view->base) : NULL;
@@ -492,6 +535,8 @@ static int merge(struct md_mount_namespace *view, struct md_mount_namespace *nex
     view->base.detached=next->base.detached;
     view->base.locked=next->base.locked;
     view->base.root_providers=next->base.root_providers;
+    md_mount_links_release(&view->base.links); view->base.links=next->base.links;
+    next->base.links=(struct md_mount_links){0};
     view->base.parent=after.base_parent ? &view->tree->mounts[after.base_parent-1] : NULL;
     view->root=after.root ? &view->tree->mounts[after.root-1] : &view->base;
     if (view->tree) view->tree->count=after.count;
@@ -573,6 +618,7 @@ static int import(struct md_mount_graph_parcel *p, struct md_mount_namespace **o
     view->graph->pin=take(p,2);
     r=md_mount_policy_import(&view->base.policy,p->fd[1]);
     if (!r) take(p,1);
+    if (!r) r=md_mount_links_observe(data.shared,data.master,data.unbindable,&view->base.links);
     if (data.count) {
         view->tree=calloc(1,sizeof(*view->tree));
         if (!view->tree) r=-ENOMEM;
@@ -583,6 +629,8 @@ static int import(struct md_mount_graph_parcel *p, struct md_mount_namespace **o
         m->source=m->target=-1; m->generation=e->generation;
         ++view->tree->count;
         if (e->flags&RETIRED) { m->detached=1; continue; }
+        r=md_mount_links_observe(e->shared,e->master,e->unbindable,&m->links);
+        if (r) break;
         m->backing=(e->flags&INODE) ? MD_MOUNT_INODE : e->flags&PROC ? MD_MOUNT_PROC : MD_MOUNT_NATIVE;
         if ((e->flags&PROC) && e->proc_namespace!=md_pid_namespace_inode(NULL)) {
             m->pid_namespace=md_pid_namespace_by_inode(e->proc_namespace);
@@ -624,13 +672,16 @@ int md_mount_graph_import(struct md_mount_graph_parcel *p, struct md_mount_names
 }
 int md_mount_graph_sync(struct md_mount_namespace *view) {
     if (!view || !view->graph || view->graph->writer>=0) return 0;
-    uint64_t revision;
-    int r=md_mount_stream_revision(view->graph->reader,&revision);
-    if (r || revision==view->graph->revision) return r;
-    if (revision<view->graph->revision) return -ESTALE;
+    uint64_t sequence,revision=0;
+    int r=md_mount_stream_revision(view->graph->reader,&sequence);
+    if (r || sequence==view->graph->observed) return r;
+    if (sequence<view->graph->observed) return -ESTALE;
     struct md_mount_graph_parcel p={0};
-    r=md_mount_stream_read(view->graph->reader,&revision,&p.fd,&p.count);
-    if (!r) {
+    int settled=0;
+    r=md_mount_stream_read(view->graph->reader,&revision,&p.fd,&p.count,&settled);
+    if (!r && revision<view->graph->revision) r=-ESTALE;
+    int changed=!r && revision!=view->graph->revision;
+    if (changed) {
         int *grown=realloc(p.fd,(p.count+1)*sizeof(int));
         if (!grown) r=-ENOMEM;
         else {
@@ -639,7 +690,8 @@ int md_mount_graph_sync(struct md_mount_namespace *view) {
             if (fd<0) r=-errno; else p.fd[p.count++]=fd;
         }
     }
-    if (!r) r=import(&p,&view);
+    if (!r && changed) r=import(&p,&view);
+    if (!r && settled) view->graph->observed=sequence;
     md_mount_graph_parcel_close(&p);
     return r;
 }

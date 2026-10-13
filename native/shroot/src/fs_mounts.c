@@ -365,6 +365,8 @@ int md_fs_mounts_copy(struct md_filesystem *fs, const struct md_fs_location *roo
     int valid=md_view_mount_reconcile(fs);
     if (!valid) valid=md_view_topology_order(fs->mounts,order);
     if (valid) return valid;
+    for (unsigned i=0;i<=(fs->mounts->tree ? fs->mounts->tree->count : 0);++i)
+        if (md_mount_links_foreign(&md_view_mount_node(fs->mounts,i)->links)) return -EXDEV;
     struct md_view_object *origin=NULL;
     if (root->mount) {
         origin=md_view_object(fs,root->object);
@@ -377,6 +379,7 @@ int md_fs_mounts_copy(struct md_filesystem *fs, const struct md_fs_location *roo
     copy->base.policy.local=md_mount_policy_flags(&fs->mounts->base.policy);
     copy->base.locked=fs->mounts->base.locked;
     copy->base.root_providers=fs->mounts->base.root_providers;
+    copy->base.links=md_mount_links_copy(&fs->mounts->base.links);
     struct md_fs_mounts *source=fs->mounts->tree;
     int r=0;
     if (source && source->count) {
@@ -400,6 +403,7 @@ int md_fs_mounts_copy(struct md_filesystem *fs, const struct md_fs_location *roo
         *b=(struct md_view_mount){.source=-1,.target=-1,
             .backing=a->backing,.detached=a->detached,.locked=a->locked,.generation=a->generation,
             .root_providers=a->root_providers,
+            .links=md_mount_links_copy(&a->links),
             .storage=md_inode_lifetime_retain(a->storage),
             .pid_namespace=md_pid_namespace_retain(a->pid_namespace),
             .devpts=md_devpts_retain(a->devpts),
@@ -440,6 +444,6 @@ int md_fs_mounts_copy(struct md_filesystem *fs, const struct md_fs_location *roo
         }
     }
     if (r) md_mount_namespace_release(copy);
-    else { *out=copy; *copied_root=selected; }
+    else { md_mount_family_join(copy,fs->mounts); *out=copy; *copied_root=selected; }
     return r;
 }

@@ -100,7 +100,7 @@ int md_inode_landlock_fd(struct md_inode_store *,int fd,int flags);
 int md_inode_descriptor_source(struct md_inode_store *, int, char *, size_t);
 /* Pathname socket identity belongs to the namespace; data, credentials, buffer
  * passing and listener lifetime remain kernel Unix-socket operations. */
-int md_inode_socket_bind(struct md_inode_store *, int dirfd, const char *path, mode_t, int socket);
+int md_inode_socket_bind(struct md_inode_store *, int dirfd, const char *path, const char *name, mode_t, int socket);
 int md_inode_socket_address(struct md_inode_store *, int dirfd, const char *path, char *, size_t);
 int md_inode_socket_name(struct md_inode_store *, const char *endpoint, char *, size_t);
 

@@ -6,6 +6,7 @@
 #include "namespace_identity.h"
 #include "native_mounts.h"
 #include <errno.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <unistd.h>
 
@@ -66,6 +67,8 @@ struct md_mount_namespace *md_mount_namespace_new(void) {
         if (r) { pthread_mutex_destroy(&n->domains_lock); free(n); errno=-r; return NULL; }
         atomic_init(&n->refs,1);
         atomic_init(&n->managed_paths,0);
+        r=md_mount_family_new(n);
+        if (r) { md_mount_namespace_release(n); errno=-r; return NULL; }
     }
     return n;
 }
@@ -80,16 +83,24 @@ void md_mount_namespace_set_owner(struct md_mount_namespace *n, struct md_user_n
     n->owner=md_user_namespace_retain(owner); md_user_namespace_release(old);
 }
 int md_mount_namespace_lock_inherited(struct md_mount_namespace *n) {
-    int error=md_mount_policy_lock(&n->base.policy);
-    n->base.locked=1;
-    for (unsigned i=0;!error && n->tree && i<n->tree->count;++i)
-        if (n->tree->mounts[i].id) {
-            n->tree->mounts[i].locked=1;
-            error=md_mount_policy_lock(&n->tree->mounts[i].policy);
+    struct md_mount_members members={0};
+    int error=md_mount_family_capture(n,&members);
+    unsigned count=n->tree ? n->tree->count : 0;
+    for (unsigned i=0;!error && i<=count;++i) {
+        struct md_view_mount *m=md_view_mount_node(n,i);
+        if (!m->id) continue;
+        m->locked=1; error=md_mount_policy_lock(&m->policy);
+        if (!error && m->links.shared) {
+            struct md_mount_links links={0};
+            error=md_mount_links_change(&members,&m->links,MS_SLAVE,&links);
+            if (!error) { md_mount_links_release(&m->links); m->links=links; }
         }
+    }
+    md_mount_members_release(&members);
     return error;
 }
 void md_view_mount_close(struct md_view_mount *mount) {
+    md_mount_links_release(&mount->links);
     md_mount_policy_close(&mount->policy);
     md_inode_lifetime_release(mount->storage);
     md_pid_namespace_release(mount->pid_namespace);
@@ -102,6 +113,27 @@ void md_view_mount_close(struct md_view_mount *mount) {
     if (mount->source>=0) close(mount->source);
     if (mount->target>=0) close(mount->target);
     *mount=(struct md_view_mount){.source=-1,.target=-1,.detached=1,.generation=mount->generation};
+}
+int md_view_mount_clone(struct md_view_mount *out,const struct md_view_mount *source,int target,
+        struct md_view_mount *parent) {
+    uint64_t generation=out->generation;
+    *out=(struct md_view_mount){.source=-1,.target=-1,.generation=generation+1,
+        .parent=parent,.backing=source->backing,.locked=source->locked,
+        .root_providers=source->root_providers,
+        .links=md_mount_links_copy(&source->links),
+        .storage=md_inode_lifetime_retain(source->storage),
+        .pid_namespace=md_pid_namespace_retain(source->pid_namespace),
+        .devpts=md_devpts_retain(source->devpts),.cgroup=md_cgroup_retain(source->cgroup),
+        .sysfs=md_sysfs_retain(source->sysfs),.provider=md_provider_tree_retain(source->provider),
+        .ipc_namespace=md_ipc_namespace_retain(source->ipc_namespace),
+        .file=md_control_file_retain(source->file),
+        .policy={.local=md_mount_policy_flags(&source->policy)}};
+    atomic_init(&out->anchors,0);
+    int r=generation==UINT64_MAX ? -EOVERFLOW : md_mount_id_allocate(&out->id);
+    if (!r && (out->source=fcntl(source->source,F_DUPFD_CLOEXEC,3))<0) r=-errno;
+    if (!r && (out->target=fcntl(target,F_DUPFD_CLOEXEC,3))<0) r=-errno;
+    if (!r && (fstat(out->source,&out->native) || fstat(out->target,&out->guest))) r=-errno;
+    return r;
 }
 void md_view_mount_forget(struct md_fs_mounts *tree, struct md_view_mount *mount) {
     for (unsigned i=0;i<MD_VIEW_BUCKETS;++i) {
@@ -123,6 +155,7 @@ void md_view_mount_forget(struct md_fs_mounts *tree, struct md_view_mount *mount
 }
 void md_mount_namespace_release(struct md_mount_namespace *n) {
     if (!n || atomic_fetch_sub_explicit(&n->refs,1,memory_order_acq_rel)!=1) return;
+    md_mount_family_leave(n);
     struct md_fs_mounts *m=n->tree;
     if (m) {
         for (unsigned i=0;i<MD_VIEW_BUCKETS;++i) {

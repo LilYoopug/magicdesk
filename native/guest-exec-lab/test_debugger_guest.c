@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include <assert.h>
+#include <asm/ptrace.h>
 #include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -177,6 +178,47 @@ static void syscall_test(void) {
     }
     assert(entries >= 6 && exits == entries - 1 && opening == 1 && exiting == 1);
     assert(closing==2 && duplicating==1 && replacing==1 && controlling==2 && ranging==1);
+}
+static void credential_transition_test(void) {
+    assert(!getuid());
+    for (unsigned detach=0;detach<2;++detach) {
+        pid_t child=fork(); assert(child>=0);
+        if (!child) {
+            assert(!ptrace(PTRACE_TRACEME,0,0,0)); raise(SIGSTOP);
+            assert(!setresgid(81,81,81));
+            assert(!setresuid(81,81,81));
+            assert(getuid()==81 && getgid()==81);
+            raise(SIGSTOP);
+            _exit(7);
+        }
+        assert(WSTOPSIG(stop(child))==SIGSTOP);
+        assert(!ptrace(PTRACE_SETOPTIONS,child,0,PTRACE_O_TRACESYSGOOD));
+        unsigned changed=0,entry=0;
+        long number=-1;
+        for (;;) {
+            assert(!ptrace(PTRACE_SYSCALL,child,0,0));
+            int status=stop(child);
+            if (WSTOPSIG(status)==SIGSTOP) break;
+            assert(WSTOPSIG(status)==(SIGTRAP|0x80));
+            struct ptrace_syscall_info info={0};
+            assert(ptrace(PTRACE_GET_SYSCALL_INFO,child,sizeof(info),&info)>0);
+            if (info.op==PTRACE_SYSCALL_INFO_ENTRY) {
+                assert(!entry); entry=1; number=(long)info.entry.nr;
+            } else {
+                assert(entry && info.op==PTRACE_SYSCALL_INFO_EXIT); entry=0;
+                if (number==SYS_setresgid || number==SYS_setresuid) {
+                    assert(!info.exit.rval); ++changed;
+                }
+            }
+        }
+        assert(changed==2);
+        struct user_pt_regs regs;
+        struct iovec io={&regs,sizeof(regs)};
+        assert(!ptrace(PTRACE_GETREGSET,child,NT_PRSTATUS,&io));
+        assert(!ptrace(PTRACE_SETOPTIONS,child,0,0));
+        assert(!ptrace(detach ? PTRACE_DETACH : PTRACE_CONT,child,0,0));
+        exited(child,7);
+    }
 }
 static void mixed_test(void) {
     int release[2]; assert(!pipe(release));
@@ -426,6 +468,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "seize")) attach_test(1, 0);
     else if (!strcmp(argv[1], "trace-exit")) attach_test(1, 1);
     else if (!strcmp(argv[1], "syscall")) syscall_test();
+    else if (!strcmp(argv[1], "credential-transition")) credential_transition_test();
     else if (!strcmp(argv[1], "syscall-exec")) syscall_exec_test();
     else if (!strcmp(argv[1], "mixed")) mixed_test();
     else if (!strcmp(argv[1], "kill-stopped")) kill_stopped_test();

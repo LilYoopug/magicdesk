@@ -69,8 +69,10 @@ void md_test_input_session(const char *path) {
     int wake=eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK); assert(wake>=0);
     struct md_input_launch launch={.endpoint=name,.wake_fd=wake};
     struct md_input_session *session=NULL;
+    struct md_device_events *bus=md_device_events_new(); assert(bus);
+    assert(!md_input_session_start(&fs,NULL,bus,&session) && !session);
     fs.tasks=md_task_registry_create(); assert(fs.tasks);
-    int error=md_input_session_start(&fs,&launch,&session);
+    int error=md_input_session_start(&fs,&launch,bus,&session);
     md_task_registry_destroy(fs.tasks); fs.tasks=NULL;
     if (error) fprintf(stderr,"input startup: %d (%s)\n",error,strerror(-error));
     assert(!error); assert(!pthread_join(server.thread,NULL));
@@ -115,7 +117,6 @@ void md_test_input_session(const char *path) {
     /* Release the independently captured open description below. */
     assert(!js.error); close(js.fd);
     md_control_file_release(file); md_fs_anchor_release(origin);
-    struct md_device_events *bus=md_input_session_events(session);
     struct md_fd_object *monitor=NULL; int monitor_fd=-1;
     assert(!md_device_events_socket(bus,SOCK_RAW|SOCK_NONBLOCK,&monitor,&monitor_fd));
     struct sockaddr_nl address_nl={.nl_family=AF_NETLINK,.nl_groups=2};
@@ -132,6 +133,12 @@ void md_test_input_session(const char *path) {
     assert(address_nl.nl_groups==2 && address_nl.nl_pid==(unsigned)getpid());
     close(server.connection); close(server.listener); close(server.ready);
     md_input_session_stop(session); close(wake);
+    while (recv(monitor_fd,notification,sizeof(notification),MSG_DONTWAIT)>0) {}
+    assert(errno==EAGAIN);
+    assert(!md_device_events_publish(bus,"change","/devices/virtual/test","test",NULL,0));
+    n=recv(monitor_fd,notification,sizeof(notification),MSG_DONTWAIT);
+    assert(n>40 && memmem(notification,(size_t)n,"SUBSYSTEM=test",15));
+    md_device_events_stop(bus); md_device_events_release(bus);
     close(monitor_fd); md_fd_object_release(monitor);
     md_fs_mounts_close(&fs); md_fs_storage_close(&storage); md_inode_store_close(store);
     puts("PASS input transport, discovery, controlled opens, sysfs composition and cleanup");

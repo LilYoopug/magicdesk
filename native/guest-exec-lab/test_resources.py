@@ -18,7 +18,7 @@ def main():
     parser.add_argument("--server", default="magicdesk")
     parser.add_argument("--keep", action="store_true")
     parser.add_argument("--diagnostics", action="store_true")
-    parser.add_argument("--case", choices=("all", "control-event", "launch-cancel", "event-fairness", "kernel-baseline", "mapping-task", "private-memory", "pidfd-table", "fd-observation", "proc-custody", "exec-custody", "open-job", "ofd-order", "fd-handoff", "fd-parcel", "fd-messages", "ipc-peer", "ipc-origins", "ipc-origin-guest", "ipc-ancillary", "mount-policy", "mount-graph", "mount-namespace", "inode-custody", "origin-transfer", "transient-store", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fd-lifecycle", "restricted-descriptors", "fs-dispatch", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture", "rpc", "stores"), default="all",
+    parser.add_argument("--case", choices=("all", "control-event", "launch-cancel", "event-fairness", "kernel-baseline", "mapping-task", "private-memory", "pidfd-table", "fd-observation", "proc-custody", "exec-custody", "open-job", "ofd-order", "fd-handoff", "fd-parcel", "fd-messages", "ipc-peer", "ipc-origins", "ipc-origin-guest", "ipc-paths", "ipc-ancillary", "mount-policy", "mount-graph", "mount-namespace", "inode-custody", "origin-transfer", "transient-store", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fd-lifecycle", "restricted-descriptors", "fs-dispatch", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture", "input-session", "rpc", "stores"), default="all",
                         help="Run resource regressions, FD handoff/parcel, terminal RPC custody, native FD lifecycle, or worker transport")
     parser.add_argument("--compare-installed", action="store_true",
                         help="Compare identical metadata/spawn fixtures with the installed runtime")
@@ -319,6 +319,9 @@ def main():
                "--user", "0:0", "--deadline-seconds", "90", "--", "/bin/test"]
         if args.diagnostics:
             run.insert(1, "--diagnostics")
+        if args.case == "ipc-paths":
+            check("guest socket paths", shlex.join(run + ["--socket-paths"]), "PASS socket paths:")
+            return
         for mode in range(32):
             for guest in (False, True):
                 check(f"filtered socket IO {mode} guest={guest}",
@@ -361,7 +364,7 @@ def main():
             names += ("fd_filter_remote",)
         if args.case == "fd-observation":
             names = ("fd_observation", "task_helper_fd")
-        if args.case in ("ipc-ancillary", "ipc-origin-guest"):
+        if args.case in ("ipc-ancillary", "ipc-origin-guest", "ipc-paths"):
             names = ("bootstrap", "supervisor", "run", "service", "ipc_credentials_guest", "ipc_io_job", "fs_dispatch")
         if args.case in ("all", "kernel-baseline"):
             names += ("kernel_baseline", "capabilities")
@@ -375,6 +378,8 @@ def main():
             names = ("bootstrap", "supervisor", "run", "service", "jit_memory", "task_quiesce", "test_interception_buffers", "fs_dispatch")
         if args.case == "fs-dispatch":
             names = ("fs_dispatch", "test_interception_buffers")
+        if args.case == "input-session":
+            names = ("fs_dispatch",)
         if args.case == "rpc":
             names = ("test_rpc",)
         if args.case == "stores":
@@ -488,6 +493,11 @@ def main():
         if args.case in ("all", "fs-dispatch", "fs-directory"):
             check("broker directory notification ownership", root + "/libmagicdesk_guest_fs_dispatch.so --broker-directory "
                   + root + "/broker-directory", "PASS broker directory notification ownership")
+        if args.case in ("all", "input-session"):
+            check("device events and input lifetime", root + "/libmagicdesk_guest_fs_dispatch.so --input "
+                  + root + "/input-store", "PASS input transport, discovery")
+            if args.case == "input-session":
+                return
         if args.case in ("mount-namespace", "restricted-descriptors"):
             check("fixture directories", "mkdir -p " + root + "/source/tmp " + root + "/source/bin " + root + "/source/attached")
             check("stage guest image", "cp " + root + "/libmagicdesk_guest_resource_guest.so " + root + "/source/bin/test")
@@ -509,11 +519,11 @@ def main():
         if args.case == "ipc-origin-guest":
             check_ancillary(origins_only=True)
             return
-        if args.case in ("all", "ipc-ancillary"):
+        if args.case in ("all", "ipc-ancillary", "ipc-paths"):
             check("native IO interruption and custody", root + "/libmagicdesk_guest_ipc_io_job.so",
                   "PASS native IO interruption, completion race and FD custody")
             check_ancillary()
-            if args.case == "ipc-ancillary":
+            if args.case in ("ipc-ancillary", "ipc-paths"):
                 return
         if args.case == "mount-policy":
             check("shared mount policy", root + "/libmagicdesk_guest_test_mounts.so --mount-policy " + root + "/policy",

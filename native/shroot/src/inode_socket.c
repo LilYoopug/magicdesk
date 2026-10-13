@@ -14,9 +14,9 @@ static int endpoint(struct md_inode_store *s,const struct mdi_node *node, char *
     strcpy(out, SOCKET_PREFIX);
     return mdi_channel(s,node,out+sizeof(SOCKET_PREFIX)-1,NULL);
 }
-int md_inode_socket_bind(struct md_inode_store *s, int dirfd, const char *path, mode_t mode, int socket) {
+int md_inode_socket_bind(struct md_inode_store *s, int dirfd, const char *path, const char *name, mode_t mode, int socket) {
     if (mode & ~0777) return -EINVAL;
-    if (!path || !*path || strlen(path) > sizeof(((struct sockaddr_un *)0)->sun_path))
+    if (!path || !*path || !name || !*name || strlen(name) > sizeof(((struct sockaddr_un *)0)->sun_path))
         return -ENAMETOOLONG;
     int r = mdi_begin(s, 1);
     if (r) return r;
@@ -33,7 +33,7 @@ int md_inode_socket_bind(struct md_inode_store *s, int dirfd, const char *path, 
     sqlite3_stmt *query = NULL;
     if (!r) r = mdi_prepare(s, "INSERT INTO sockets(object,address) VALUES(?1,?2)", &query);
     if (!r) r = mdi_bind_id(query, 1, node.id);
-    if (!r) r = mdi_sql_error(sqlite3_bind_text(query, 2, path, -1, SQLITE_TRANSIENT));
+    if (!r) r = mdi_sql_error(sqlite3_bind_text(query, 2, name, -1, SQLITE_TRANSIENT));
     if (!r) r = mdi_sql_error(mdi_step(s, query));
     sqlite3_finalize(query);
     if (!r) r = mdi_add_name(s, loc.parent.id, loc.name, node.id);
@@ -52,7 +52,7 @@ int md_inode_socket_address(struct md_inode_store *s, int dirfd, const char *pat
     if (r) return r;
     struct mdi_location loc;
     /* A bind-mounted endpoint is already selected, including after unlink. */
-    r = path ? mdi_walk(s, dirfd, path, MDI_FOLLOW, 0, &loc) : mdi_fd(s, dirfd, &loc.node);
+    r = path && *path ? mdi_walk(s, dirfd, path, MDI_FOLLOW, 0, &loc) : mdi_fd(s, dirfd, &loc.node);
     if (!r && loc.node.kind != S_IFSOCK) r = -ECONNREFUSED;
     struct stat st;
     if (!r) r = mdi_stat(s, &loc.node, &st);

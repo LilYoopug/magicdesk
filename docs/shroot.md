@@ -1134,8 +1134,11 @@ in the common mount walker, including retained dirfds, bind aliases and typed
 proc links. Reading/statting the link itself and O_PATH|O_NOFOLLOW remain allowed.
 Unknown task-affine suffixes fail explicitly instead of losing mount policy on
 delegation. Mountinfo and statfs report the selected mount's policy.
-ID-mapped mounts and shared propagation
-are not implemented.
+Shared/private/slave/unbindable relationships govern mount attach, detach and
+move across copied namespaces. Publication preflights all affected trees and
+their topology streams. Mountinfo exposes peer/master IDs. Foreign stream views
+still need complete master retirement when the last local peer disappears.
+ID-mapped mounts are not implemented.
 Independent mounted inode stores retain their
 backing leases across namespace copies and authenticated FD transfer, including
 publisher exit and backing-directory rename. A watch instance can observe multiple
@@ -1483,10 +1486,12 @@ it is not a complete booted Linux system or a GNOME certification.
 `test_systemd.py` starts unmodified systemd as guest PID 1 under
 actual UID 2000, in private PID/mount/UTS/IPC/cgroup namespaces with proc, tmpfs
 `/run`, a private `/dev` with a real PTY console, sysfs and the logical cgroup2
-provider. Debian 257, Arch 262 and Fedora 259 checks cover both the system manager and a
+provider. Debian 257, Ubuntu 255, Arch 262, Fedora 259 and SteamOS checks cover both the system manager and a
 `systemd --user` manager. Both report `SystemState=running`. The check starts/stops
 oneshot and `Type=notify` services, activates a service through a TCP socket,
-and exits both managers normally. It uses a dedicated target without distro
+and restores a memfd and a queued Unix socket from FD-store after a service
+restart. The sender identity includes the original PIDFD when SO_PASSPIDFD is
+available. Both managers exit normally. It uses a dedicated target without distro
 hardware services; this is manager/service coverage, not a complete default
 boot, GDM/logind session or hardware-management guarantee. Guest cgroups retain
 their documented logical, non-enforcing resource policy. Android's init and
@@ -1518,11 +1523,11 @@ Alpine hardware boot sequence. Direct application launch does not require either
 OpenRC or systemd.
 
 `test_os_boot.py` instead starts each distribution's default target with a
-diagnostic observer, not a replacement target. Debian 13, Ubuntu 24.04, Arch and
-Fedora 44 have default-boot coverage, but those runs remain degraded or fail to
-complete; this is not a passing distro boot. Outstanding runtime boundaries
-include shared mount propagation, journald's hostname poll/error
-notification and datagram FD-store transfer.
+diagnostic observer, not a replacement target. Ubuntu 255, Fedora 259 and Arch
+262 pass default-target boot; Debian 13 passes with an explicit CAP_SYS_MODULE
+drop. SteamOS starts its core userspace services, including NetworkManager,
+but remains degraded on physical-device units and unsupported network/hardware
+operations. These results do not certify hardware boot or a graphical login.
 The OpenRC mode boots Alpine 3.23's real `openrc-init` as PID 1 using its stock
 container service policy and private runlevel configuration. It checks default
 runlevel services, restart and stop, then cancels the exact registered launch

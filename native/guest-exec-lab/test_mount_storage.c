@@ -112,7 +112,7 @@ static void socket_binds(const char *base) {
     assert(!md_inode_store_open(path,1,&store));
     struct md_identity root=md_identity_new(0,0); store->identity=&root;
     int server=socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0); assert(server>=0);
-    assert(!md_inode_socket_bind(store,-1,"/socket",0600,server));
+    assert(!md_inode_socket_bind(store,-1,"/socket","/socket",0600,server));
     assert(!listen(server,1));
     assert(!md_inode_link(store,-1,"/socket",-1,"/socket-alias",0));
     put(store,"/mounted","target"); put(store,"/plain","plain");

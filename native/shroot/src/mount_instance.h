@@ -1,6 +1,7 @@
 #ifndef MD_MOUNT_INSTANCE_H
 #define MD_MOUNT_INSTANCE_H
 #include "mount_policy.h"
+#include "mount_propagation.h"
 #include "control_file.h"
 #include <stdatomic.h>
 #include <stdint.h>
@@ -12,6 +13,7 @@ enum md_mount_backing { MD_MOUNT_NATIVE, MD_MOUNT_INODE, MD_MOUNT_PROC, MD_MOUNT
 struct md_view_mount {
     int source, target;
     struct md_mount_policy policy;
+    struct md_mount_links links;
     unsigned id;
     uint64_t generation;
     enum md_mount_backing backing;
@@ -33,4 +35,7 @@ struct md_view_mount {
 /* Caller has retired all anchors and placement references. Also accepts a
  * partially prepared instance; preserve its generation when retiring a slot. */
 void md_view_mount_close(struct md_view_mount *);
+/* Independent instance and policy; providers and propagation retain identity.
+ * Failure leaves a closeable candidate and never changes the source. */
+int md_view_mount_clone(struct md_view_mount *,const struct md_view_mount *,int target,struct md_view_mount *parent);
 #endif

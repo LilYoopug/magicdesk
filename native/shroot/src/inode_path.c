@@ -55,6 +55,11 @@ int mdi_walk_resolved(struct md_inode_store *s, int dirfd, const char *path,
     struct mdi_node current;
     int r = (path[0] == '/' && !(resolve & RESOLVE_IN_ROOT)) || dirfd == MD_INODE_ROOT
         ? mdi_node(s, mdi_root(s), &current) : mdi_fd(s, dirfd, &current);
+    if (r==-EXDEV) {
+        struct stat native;
+        if (fstat(dirfd,&native)) return -errno;
+        if (!S_ISDIR(native.st_mode)) return -ENOTDIR;
+    }
     if (r) return r;
     if (current.kind != S_IFDIR) return -ENOTDIR;
     struct mdi_node boundary = current;

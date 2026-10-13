@@ -31,7 +31,17 @@ struct md_network_namespace {
     uint32_t default_gateway;
     uint32_t unprivileged_port, ping_groups[2], local_ports[2];
     uint32_t next_port;
+    struct md_network_listener *listeners;
 };
+/* Weak listeners are removed under the fabric lock before final FD release.
+ * Only committed topology changes are broadcast. Delivery never blocks. */
+struct md_network_listener {
+    struct md_network_listener *next;
+    int peer, protocol;
+    uint32_t groups;
+    int overflow;
+};
+void md_network_broadcast(struct md_network_namespace *,unsigned,const void *,size_t);
 /* Mutators below run under the fabric lock. No guest IO or blocking syscall
  * may span that lock. Namespaces are weakly listed and unlink before release. */
 struct md_network_interface *md_network_interface_find(struct md_network_namespace *,unsigned,const char *);

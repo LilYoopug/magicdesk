@@ -87,14 +87,24 @@ static void escaped(FILE *stream, const char *text) {
     }
 }
 static void entry(FILE *stream, unsigned info, unsigned id, unsigned parent, dev_t device,
-        const char *path, const char *type, const char *source, unsigned policy,int super_readonly,const char *super_options) {
+        const char *path, const char *type, const char *source, unsigned policy,int super_readonly,const char *super_options,
+        const struct md_mount_links *links,const struct md_mount_members *members) {
     char options[64];
     snprintf(options,sizeof(options),"%s%s%s%s%s",policy&MD_MOUNT_READONLY ? "ro" : "rw",
         policy&MD_MOUNT_NOSUID ? ",nosuid" : "",policy&MD_MOUNT_NODEV ? ",nodev" : "",
         policy&MD_MOUNT_NOEXEC ? ",noexec" : "",policy&MD_MOUNT_NOSYMFOLLOW ? ",nosymfollow" : "");
     if (info) {
         fprintf(stream,"%u %u %u:%u / ",id,parent,major(device),minor(device)); escaped(stream,path);
-        fprintf(stream," %s - %s %s %s%s\n",options,type,source,super_readonly ? "ro" : "rw",super_options);
+        fprintf(stream," %s",options);
+        if (links) {
+            unsigned shared=md_mount_group_id(links->shared);
+            struct md_mount_group *master=links->master;
+            if (!md_mount_links_foreign(links)) master=md_mount_group_live(members,master,NULL);
+            if (shared) fprintf(stream," shared:%u",shared);
+            if (master) fprintf(stream," master:%u",md_mount_group_id(master));
+            if (links->unbindable) fputs(" unbindable",stream);
+        }
+        fprintf(stream," - %s %s %s%s\n",type,source,super_readonly ? "ro" : "rw",super_options);
     } else {
         if (super_readonly) memcpy(options,"ro",2);
         fprintf(stream,"%s ",source); escaped(stream,path); fprintf(stream," %s %s%s 0 0\n",type,options,super_options);
@@ -133,6 +143,9 @@ int md_fs_mount_table(struct md_filesystem *fs, unsigned info, unsigned flags) {
     if (fd<0) return fd;
     FILE *stream=fdopen(fd,"w+");
     if (!stream) { int error=-errno; close(fd); return error; }
+    struct md_mount_members members={0};
+    r=md_mount_family_capture(fs->mounts,&members);
+    if (r) { fclose(stream); return r; }
     struct stat root;
     int root_fd=md_view_root_fd(fs);
     r=root_fd<0 ? root_fd : fstat(root_fd,&root) ? -errno : 0;
@@ -147,12 +160,12 @@ int md_fs_mount_table(struct md_filesystem *fs, unsigned info, unsigned flags) {
             char options[128]; r=filesystem_options(fs,m,options,sizeof(options));
             if (!r) entry(stream,info,m->id,m->parent ? m->parent->id : m->id,
                 root.st_dev,"/",filesystem_type(m),
-                md_view_inode(m) ? "guest" : "attachment",md_mount_policy_flags(&m->policy),readonly,options);
+                md_view_inode(m) ? "guest" : "attachment",md_mount_policy_flags(&m->policy),readonly,options,&m->links,&members);
         } else entry(stream,info,fs->mounts->base.id,fs->mounts->base.id,root.st_dev,"/","guestfs","guest",
-            md_mount_policy_flags(&fs->mounts->base.policy),readonly,"");
+            md_mount_policy_flags(&fs->mounts->base.policy),readonly,"",&fs->mounts->base.links,&members);
         if (!fs->store->root_id && !fs->native_root && selected==&fs->mounts->base) {
             r=native_entries(fs,stream,info,&dev_id);
-            if (!r) entry(stream,info,fs->mounts->shm_id,dev_id,root.st_dev,"/dev/shm","guestfs","guest",0,readonly,"");
+            if (!r) entry(stream,info,fs->mounts->shm_id,dev_id,root.st_dev,"/dev/shm","guestfs","guest",0,readonly,"",NULL,&members);
         }
     }
     struct md_fs_mounts *tree=fs->mounts ? fs->mounts->tree : NULL;
@@ -168,7 +181,7 @@ int md_fs_mount_table(struct md_filesystem *fs, unsigned info, unsigned flags) {
         if (!r) r=filesystem_options(fs,m,options,sizeof(options));
         if (!r) entry(stream,info,m->id,m->parent ? m->parent->id : fs->mounts->base.id,
             st.st_dev,path,filesystem_type(m),
-            md_view_inode(m) ? "guest" : "attachment",md_mount_policy_flags(&m->policy),readonly,options);
+            md_view_inode(m) ? "guest" : "attachment",md_mount_policy_flags(&m->policy),readonly,options,&m->links,&members);
     }
     if (!r && (fflush(stream) || ferror(stream))) r=-EIO;
     int readable=-1;
@@ -178,6 +191,7 @@ int md_fs_mount_table(struct md_filesystem *fs, unsigned info, unsigned flags) {
         if (readable<0) r=-errno;
     }
     if (fclose(stream) && !r) r=-errno;
+    md_mount_members_release(&members);
     if (r && readable>=0) close(readable);
     return r ? r : readable;
 }

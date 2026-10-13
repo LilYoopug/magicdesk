@@ -16,15 +16,21 @@ static int detach(struct md_filesystem *fs, const unsigned *removed) {
     struct md_view_mount base=view->base, next[MD_FS_MOUNTS_MAX];
     unsigned count=tree ? tree->count : 0;
     if (count) memcpy(next,tree->mounts,count*sizeof(*next));
-    if (removed[0]) base.detached=1;
-    for (unsigned i=0;i<count;++i) if (removed[i+1]) next[i].detached=1;
+    if (removed[0]) { base.detached=1; base.links=(struct md_mount_links){0}; }
+    for (unsigned i=0;i<count;++i) if (removed[i+1]) {
+        next[i].detached=1; next[i].links=(struct md_mount_links){0};
+    }
     struct md_mount_layout layout={.base=&base,.root=view->root,.entries=next,.count=count};
     /* Foreign readers can derive deletion from the same retained store. They
      * cannot publish topology, and never gain authority over the owner graph. */
     int r=md_mount_graph_foreign(view) ? 0 : md_mount_graph_update(view,&layout);
     if (!r) {
         view->base.detached=base.detached;
-        for (unsigned i=0;i<count;++i) tree->mounts[i].detached=next[i].detached;
+        if (removed[0]) md_mount_links_release(&view->base.links);
+        for (unsigned i=0;i<count;++i) {
+            tree->mounts[i].detached=next[i].detached;
+            if (removed[i+1]) md_mount_links_release(&tree->mounts[i].links);
+        }
     }
     return r;
 }

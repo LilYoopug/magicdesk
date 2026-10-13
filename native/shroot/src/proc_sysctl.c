@@ -26,6 +26,7 @@ const char *md_proc_sysctl_name(enum md_proc_file_kind kind) {
     case MD_PROC_FILE_VERSION: return "version";
     case MD_PROC_FILE_OVERFLOWUID: return "overflowuid";
     case MD_PROC_FILE_OVERFLOWGID: return "overflowgid";
+    case MD_PROC_FILE_CAP_LAST: return "cap_last_cap";
     default: return NULL;
     }
 }
@@ -55,8 +56,8 @@ long md_proc_sysctl_read(const struct md_uts_namespace *uts, enum md_proc_file_k
     struct utsname names;
     char scalar[16];
     const char *text;
-    if (kind==MD_PROC_FILE_OVERFLOWUID || kind==MD_PROC_FILE_OVERFLOWGID) {
-        snprintf(scalar,sizeof(scalar),"%u",MD_USER_OVERFLOW_ID);
+    if (kind==MD_PROC_FILE_OVERFLOWUID || kind==MD_PROC_FILE_OVERFLOWGID || kind==MD_PROC_FILE_CAP_LAST) {
+        snprintf(scalar,sizeof(scalar),"%u",kind==MD_PROC_FILE_CAP_LAST ? MD_CAP_LAST : MD_USER_OVERFLOW_ID);
         text=scalar;
     } else {
         if (!uts) return -EINVAL;

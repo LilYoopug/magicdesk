@@ -8,6 +8,7 @@ import argparse
 import ctypes
 import json
 import os
+import re
 from pathlib import Path
 import select
 import shlex
@@ -147,11 +148,16 @@ def main():
     parser.add_argument('--diagnostic-console', action='store_true')
     parser.add_argument('--trace', action='store_true', help='Trace filesystem, sandbox and readiness setup; requires strace')
     parser.add_argument('--init', choices=('systemd', 'openrc'), default='systemd')
+    parser.add_argument('--drop-capability', action='append', default=[],
+                        help='Explicit container capability policy, applied by stock setpriv before PID1')
     parser.add_argument('--output', type=Path, default=Path('build/os-boot-results'))
     args = parser.parse_args()
+    if any(not re.fullmatch('[a-z][a-z0-9_]*', cap) for cap in args.drop_capability):
+        parser.error('capability names must use setpriv lowercase spelling without CAP_')
     if args.init == 'openrc' and args.trace:
         parser.error('--trace is currently a systemd diagnostic')
     suite = Suite(args.output, args.build)
+    suite.report['bootPolicy'] = {'init': args.init, 'dropCapabilities': args.drop_capability}
     target = '/md-boot-' + suite.report['id']
     prefix = [suite.runner, '--store', args.store, '--user', '0:0', '--network', 'routed']
     label = 'os-boot-' + suite.report['id']
@@ -164,6 +170,9 @@ def main():
         boot = ['/usr/bin/unshare', '--mount', '--pid', '--fork', '--mount-proc',
                 '--uts', '--ipc', '--cgroup', '/bin/sh', '-ec', PREPARE + (SYSTEMD if args.init == 'systemd' else OPENRC), 'boot-test', target,
                 'diagnostic' if args.diagnostic_console else 'normal']
+        if args.drop_capability:
+            boot = ['/usr/bin/setpriv', '--bounding-set=' + ','.join('-' + cap for cap in args.drop_capability),
+                    '--', *boot]
         if args.trace:
             boot = ['/usr/bin/strace', '-f', '-s', '256', '-e',
                     'trace=' + TRACE_SYSCALLS,

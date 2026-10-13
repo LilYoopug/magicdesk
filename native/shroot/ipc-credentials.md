@@ -8,6 +8,14 @@ authentication bypass, payload proxy or second process-identity model.
 
 ## Connection Identity
 
+Pathname bind/connect use the filesystem namespace's task-affine proc-path
+resolver. Retained and foreign `/proc/PID/fd/DIR/name` operands capture the
+directory before walking the guest suffix, including after rename. They do not
+interpret the worker's FD table or traverse logical names on a backing directory.
+Bind stores its original socket name independently of the resolved dentry;
+getsockname and accepted peer addresses preserve that name. Closed or reused
+directory descriptors cannot select a previously held directory.
+
 `ipc_credentials` is a lazy, store-scoped metadata authority owned by each
 namespace worker. Workers sharing a store serialize metadata operations with a
 kernel file lock. They never hold this lock across guest connect, accept or IO.
@@ -96,6 +104,14 @@ including one already confirmed by accept, retains its selection through later
 listener changes. Re-registration cannot rewrite it. Dup, inherited descriptors
 and SCM_RIGHTS aliases resolve the same cookie-bound record; opening another
 authority with a different offer does not upgrade existing sockets.
+
+Named datagram receivers register their actual bound socket cookie, binary
+address and transport offer. Each send resolves its destination independently;
+the sender's own bound address does not select its receive association. Logical
+pathname resolution retains the existing socket inode or native path anchor.
+Connected and addressed sends share this lookup. An unknown destination keeps
+native transport; a registered receiver also accepts ordinary native rights.
+Recognized capsules still require their destination binding and authentication.
 
 `md_ipc_binding` captures this selection with the directional identity under the
 same metadata gate and retains it after SQLite closes. Unregistered, pending,
@@ -321,8 +337,9 @@ application filters that forbid private helper creation.
 Kernel-generated `SCM_PIDFD` also transfers descriptor ownership. The common
 ancillary classifier includes it in capture, cancellation and release, with
 capacity for 253 application rights plus one pidfd per message. Publication
-selects raw kernel custody explicitly, independently of expanded application
-capsules; both use the same descriptor delivery/receipt mechanism. Pidfds retain
+selects raw kernel custody for native senders. A validated sender capability
+instead supplies its retained original-sender PIDFD, so brokered IO does not
+publish the broker's identity. Both use the same descriptor delivery/receipt mechanism. Pidfds retain
 CLOEXEC even without MSG_CMSG_CLOEXEC. Negative kernel pidfd results remain
 ordinary error payloads and never enter custody.
 
@@ -356,13 +373,14 @@ SCM_CREDENTIALS validates the claimed guest IDs against the sending task. PID
 must identify that task's process in its active PID namespace; virtual root may
 select guest UID/GID, while
 other users may select only their real/effective/saved IDs. On adapted connections the kernel receives
-the actual Android credentials, plus a sealed memfd capability as one extra
-SCM_RIGHTS descriptor. Its random nonce, connection identity, kernel file identity
+the actual Android credentials, plus an identity bundle as one extra
+SCM_RIGHTS descriptor. The bundle retains a sealed identity record, the original
+sender PIDFD, and the IPC epoch/store leases. Its random nonce, connection identity, kernel file identity
 and sending side are recorded by the metadata authority. Only the
 opposite side of the same connection can validate it; replay toward the sender,
 another connection or another store does not translate the token. The receiving
 adapter removes that descriptor and publishes the validated guest credentials instead.
-The token records the sender's immutable PID-number snapshot at send time.
+The token also binds the retained PIDFD's kernel identity and records the sender's immutable PID-number snapshot at send time.
 Queued messages and peeks retain those numbers after sender exit/reaping, even
 if the native PID has been assigned to another process.
 
@@ -482,9 +500,9 @@ Current limits are explicit:
   they do not have native per-word copy/consumption timing. This includes payload
   faults, not only the batch-header publication boundary below. No memory
   preflight is presented as equivalent to actual kernel publication.
-- Kernel-generated SO_PASSCRED messages without an explicit SCM_CREDENTIALS
-  send retain native credentials. Unconnected datagram addressing is not
-  virtually authenticated; registered socketpairs are supported.
+- Task-affine SO_PASSCRED messages without an explicit SCM_CREDENTIALS send
+  retain native credentials. Brokered sends to registered destinations carry
+  the sending task's identity, including unconnected datagrams and sendto.
 - The private capability consumes one kernel descriptor slot per explicit
   credential message. It does not remove kernel ancillary/FD limits.
 - The private receiver and return channel consume infrastructure resources.

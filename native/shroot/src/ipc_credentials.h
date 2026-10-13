@@ -8,6 +8,7 @@
  * lifetimes; this authority owns connection-time identity/format snapshots. */
 struct md_ipc_credentials;
 struct ucred;
+struct sockaddr_un;
 int md_ipc_credentials_claim(const struct md_identity *, const struct md_pid_identity *,
     pid_t peer, const struct ucred *, uint32_t *uid, uint32_t *gid);
 /* Immutable application ancillary format, selected at socketpair/connect from
@@ -29,8 +30,15 @@ struct md_ipc_binding {
     struct md_ipc_connection connection;
     struct md_ipc_scope *scope;
     enum md_ipc_ancillary_transport transport;
+    int receive_only;
 };
 int md_ipc_credentials_bind(struct md_ipc_credentials *, int socket, struct md_ipc_binding *);
+/* An addressed datagram selects the receiving endpoint, not the sender's
+ * connected peer. A pathname anchor names the exact bound inode. */
+int md_ipc_credentials_destination(struct md_ipc_credentials *,const struct sockaddr_un *,
+    socklen_t,int anchor,struct md_ipc_binding *);
+int md_ipc_credentials_message(struct md_ipc_credentials *,const struct md_ipc_binding *,
+    const struct md_identity *,const struct md_pid_identity *,const struct md_fs_request *,struct md_fs_result *);
 /* Crossing an unadapted boundary latches actual UNIX socket cookies native-only.
  * Already adapted connections/listeners fail EXDEV before any send. A failed
  * or cancelled send cannot undo exposure. No descriptors are retained. */
@@ -50,7 +58,7 @@ void md_ipc_binding_release(struct md_ipc_binding *);
 enum md_ipc_operation {
     MD_IPC_LISTEN_BEGIN = 1, MD_IPC_LISTEN_END, MD_IPC_CONNECT_BEGIN,
     MD_IPC_CONNECT_END, MD_IPC_ACCEPT, MD_IPC_PAIR, MD_IPC_NAME,
-    MD_IPC_MESSAGE_CREATE, MD_IPC_MESSAGE_READ, MD_IPC_MESSAGE_SENDER
+    MD_IPC_MESSAGE_CREATE, MD_IPC_MESSAGE_READ, MD_IPC_MESSAGE_SENDER, MD_IPC_BIND
 };
 /* Offer applies only to new listeners/connections/pairs; opening another owner
  * cannot upgrade an existing connection. NATIVE adds no data-path work.

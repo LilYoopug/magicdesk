@@ -64,6 +64,8 @@ int test_cgroup_guest(int pid_namespace) {
     assert(!mkdir("/tmp/cgv2",0700) && !mkdir("/tmp/cgv1",0700));
     int r=mount("none","/tmp/cgv2","cgroup2",MS_NOSUID|MS_NOEXEC|MS_NODEV,NULL);
     if (r) perror("cgroup2 mount"); assert(!r);
+    assert(!umount2("/tmp/cgv2",0));
+    assert(!mount("none","/tmp/cgv2","cgroup2",MS_NOSUID|MS_NOEXEC|MS_NODEV|MS_REC|MS_RELATIME,NULL));
     assert(!mount("none","/tmp/cgv1","cgroup",MS_NOSUID|MS_NOEXEC|MS_NODEV,"devices"));
     struct statfs st; assert(!statfs("/tmp/cgv2",&st) && st.f_type==CGROUP2_SUPER_MAGIC);
     assert(!statfs("/tmp/cgv1",&st) && st.f_type==CGROUP_SUPER_MAGIC);

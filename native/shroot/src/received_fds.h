@@ -11,6 +11,9 @@ struct md_received_fds {
     int fds[];
 };
 int md_received_fds_reserve(struct md_received_fds **, unsigned capacity);
+/* Join two exclusively owned custody vectors, including annotations. Success
+ * consumes the tail; failure changes neither vector nor descriptor ownership. */
+int md_received_fds_join(struct md_received_fds **, struct md_received_fds **);
 /* Bind a complete, authenticated vector before sharing. NULL entries remain
  * unknown. Known origins freeze growth and are retained independently of their
  * importer; an all-unknown vector allocates nothing. */

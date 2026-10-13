@@ -82,7 +82,7 @@ struct md_provider_tree *md_procfs_new(int parent,const char *text,const struct 
     if (!tree) { free(p); errno=error; return NULL; }
     int root=md_provider_tree_root(tree);
     if (mkdirat(root,"sys",0755) || mkdirat(root,"sys/kernel",0755)) error=errno;
-    for (unsigned i=MD_PROC_FILE_HOSTNAME;!error && i<=MD_PROC_FILE_OVERFLOWGID;++i) {
+    for (unsigned i=MD_PROC_FILE_HOSTNAME;!error && i<=MD_PROC_FILE_CAP_LAST;++i) {
         char path[64]; snprintf(path,sizeof(path),"sys/kernel/%s",md_proc_sysctl_name(i));
         int fd=openat(root,path,O_CREAT|O_EXCL|O_WRONLY|O_CLOEXEC,0600);
         if (fd<0) error=errno; else close(fd);
@@ -183,11 +183,13 @@ static int control(const char *path,const char *name) {
         || (!strcmp(path,"/proc") && !strcmp(name,"cgroups"));
 }
 static int kernel_global(const char *name) {
-    /* A mounted guest proc has no host reboot, raw kernel memory, kernel log
-     * or global key inventory provider. Keep lookup and enumeration consistent;
+    /* A mounted guest proc has no host reboot, raw kernel memory, kernel log,
+     * kernel symbols, ALSA hardware or global key inventory provider.
+     * Keep lookup and enumeration consistent;
      * never turn unrelated native permission failures into missing files. */
     return !strcmp(name,"sysrq-trigger") || !strcmp(name,"kcore")
-        || !strcmp(name,"kmsg") || !strcmp(name,"keys");
+        || !strcmp(name,"kmsg") || !strcmp(name,"keys") || !strcmp(name,"asound")
+        || !strcmp(name,"kallsyms");
 }
 static int omitted(const struct proc_policy *p,const char *name) {
     return kernel_global(name) || (p && p->pidonly && !decimal(name,NULL)

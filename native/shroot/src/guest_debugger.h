@@ -40,7 +40,6 @@ void md_debugger_exit(struct md_debugger *, pid_t, int);
 int md_debugger_step(struct md_debugger *, pid_t);
 int md_debugger_traced(struct md_debugger *, pid_t);
 pid_t md_debugger_owner(struct md_debugger *, pid_t);
-int md_debugger_owns(struct md_debugger *, pid_t, pid_t);
 int md_debugger_active(struct md_debugger *);
 int md_debugger_boundary(struct md_debugger *, pid_t);
 int md_debugger_newborn(struct md_debugger *, pid_t);

@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "ipc_credentials.h"
 #include "fd_messages.h"
+#include "fd_bundle.h"
 #include "ipc_scope.h"
 #include "storage_database.h"
 #include <dirent.h>
@@ -84,7 +85,7 @@ int md_ipc_credentials_open(const char *store, enum md_ipc_ancillary_transport o
     if (!r && !first && errno != EWOULDBLOCK) r = -errno;
     s->directory=dir;
     if (!r) r=md_database_open(dir,"credentials.db",1,&s->db);
-    if (!r && first) r = execute(s, "DROP TABLE IF EXISTS endpoints;DROP TABLE IF EXISTS connections;DROP TABLE IF EXISTS messages;DROP TABLE IF EXISTS native_sockets;");
+    if (!r && first) r = execute(s, "DROP TABLE IF EXISTS endpoints;DROP TABLE IF EXISTS connections;DROP TABLE IF EXISTS messages;DROP TABLE IF EXISTS native_sockets;DROP TABLE IF EXISTS datagrams;");
     if (!r && first && unlinkat(dir,"auth",0) && errno!=ENOENT) r=-errno;
     if (!r && first && unlinkat(dir,"auth.pending",0) && errno!=ENOENT) r=-errno;
     if (!r) r = execute(s, "PRAGMA journal_mode=WAL;PRAGMA synchronous=NORMAL;"
@@ -93,6 +94,7 @@ int md_ipc_credentials_open(const char *store, enum md_ipc_ancillary_transport o
         "CREATE INDEX IF NOT EXISTS connection_name ON connections(name);"
         "CREATE INDEX IF NOT EXISTS connection_link ON connections(link,side);"
         "CREATE INDEX IF NOT EXISTS endpoint_cookie ON endpoints(cookie);"
+        "CREATE TABLE IF NOT EXISTS datagrams(name BLOB PRIMARY KEY,cookie INTEGER UNIQUE,device INTEGER,inode INTEGER,link BLOB,transport INTEGER NOT NULL);"
         "CREATE TABLE IF NOT EXISTS native_sockets(cookie INTEGER PRIMARY KEY);"
         "CREATE TABLE IF NOT EXISTS messages(nonce BLOB PRIMARY KEY,link BLOB,device INTEGER,inode INTEGER,pid INTEGER,uid INTEGER,gid INTEGER,side INTEGER,process BLOB);");
     /* The first live owner discards stale metadata, including cookies from an
@@ -141,7 +143,8 @@ static int expose(struct md_ipc_credentials *s, const uint64_t *keys, unsigned c
     int r=execute(s,"BEGIN IMMEDIATE");
     sqlite3_stmt *known=NULL,*mark=NULL;
     if (!r) r=statement(s,"SELECT 1 FROM connections WHERE cookie=?1 AND valid>=0 "
-        "UNION ALL SELECT 1 FROM endpoints WHERE cookie=?1 LIMIT 1",&known);
+        "UNION ALL SELECT 1 FROM endpoints WHERE cookie=?1 "
+        "UNION ALL SELECT 1 FROM datagrams WHERE cookie=?1 LIMIT 1",&known);
     if (!r) r=statement(s,"INSERT OR IGNORE INTO native_sockets VALUES(?1)",&mark);
     for (unsigned i=0;!r && i<count;++i) {
         sqlite3_bind_int64(known,1,(sqlite3_int64)keys[i]);
@@ -504,11 +507,13 @@ static int peer_snapshot(struct md_ipc_credentials *s, const struct md_identity 
     sqlite3_finalize(q); return r;
 }
 static int connection_key(struct md_ipc_credentials *s, uint64_t key, struct md_ipc_connection *out,
-        enum md_ipc_ancillary_transport *transport) {
+        enum md_ipc_ancillary_transport *transport, int *receive_only) {
     sqlite3_stmt *q = NULL;
     struct md_ipc_connection connection={0};
-    int r = statement(s, "SELECT link,valid,side,transport FROM connections WHERE cookie=?1", &q);
+    int r = statement(s, "SELECT link,valid,side,transport,0 FROM connections WHERE cookie=?1 "
+        "UNION ALL SELECT link,1,1,transport,1 FROM datagrams WHERE cookie=?1 LIMIT 1", &q);
     enum md_ipc_ancillary_transport selected=MD_IPC_TRANSPORT_NATIVE;
+    int endpoint=0;
     if (!r) {
         sqlite3_bind_int64(q, 1, (sqlite3_int64)key);
         int step = sqlite3_step(q);
@@ -523,14 +528,19 @@ static int connection_key(struct md_ipc_credentials *s, uint64_t key, struct md_
             memcpy(connection.link, sqlite3_column_blob(q, 0), sizeof(connection.link));
             connection.side=(unsigned)sqlite3_column_int(q, 2);
             selected=(enum md_ipc_ancillary_transport)sqlite3_column_int(q,3);
+            endpoint=sqlite3_column_int(q,4);
         }
     }
     sqlite3_finalize(q);
-    if (!r) { *out=connection; if (transport) *transport=selected; }
+    if (!r) {
+        *out=connection;
+        if (transport) *transport=selected;
+        if (receive_only) *receive_only=endpoint;
+    }
     return r;
 }
 static int connection_snapshot(struct md_ipc_credentials *s, int fd, struct md_ipc_connection *out,
-        enum md_ipc_ancillary_transport *transport) {
+        enum md_ipc_ancillary_transport *transport, int *receive_only) {
     if (!s) return -ENOTSUP;
     if (!out) return -EINVAL;
     uint64_t key;
@@ -539,25 +549,88 @@ static int connection_snapshot(struct md_ipc_credentials *s, int fd, struct md_i
      * publishing a connection or running any application IO. */
     if (!r && flock(s->gate,LOCK_EX)) r=-errno;
     if (r) return r;
-    r=connection_key(s,key,out,transport);
+    r=connection_key(s,key,out,transport,receive_only);
     flock(s->gate,LOCK_UN);
     return r;
 }
 int md_ipc_credentials_connection(struct md_ipc_credentials *s, int fd, struct md_ipc_connection *out) {
-    return connection_snapshot(s,fd,out,NULL);
+    return connection_snapshot(s,fd,out,NULL,NULL);
 }
 int md_ipc_credentials_bind(struct md_ipc_credentials *s, int fd, struct md_ipc_binding *out) {
     if (!out || out->scope) return -EINVAL;
     struct md_ipc_connection connection;
     enum md_ipc_ancillary_transport transport;
-    int r=connection_snapshot(s,fd,&connection,&transport);
+    int receive_only=0;
+    int r=connection_snapshot(s,fd,&connection,&transport,&receive_only);
     if (!r) {
         atomic_fetch_add_explicit(&s->scope->refs,1,memory_order_relaxed);
-        *out=(struct md_ipc_binding){.connection=connection,.scope=s->scope,.transport=transport};
+        *out=(struct md_ipc_binding){.connection=connection,.scope=s->scope,.transport=transport,
+            .receive_only=receive_only};
     }
     return r;
 }
-struct message_token { uint64_t magic; unsigned char nonce[16]; };
+static int datagram_bind(struct md_ipc_credentials *s,int fd,uint64_t key) {
+    int type=0; socklen_t size=sizeof(type);
+    if (getsockopt(fd,SOL_SOCKET,SO_TYPE,&type,&size)) return -errno;
+    if (type!=SOCK_DGRAM) return 0;
+    int native=native_socket(s,key);
+    if (native) return native<0 ? native : 0;
+    struct md_ipc_connection existing;
+    int r=connection_key(s,key,&existing,NULL,NULL);
+    if (!r) return 0; /* A named socketpair keeps its existing agreement. */
+    if (r!=-ENODATA) return r;
+    struct sockaddr_un name; int length;
+    r=address(fd,0,&name,&length);
+    if (r || !length) return r ? r : -EINVAL;
+    struct stat st={0};
+    if (name.sun_path[0] && (length>=(int)sizeof(name.sun_path) || stat(name.sun_path,&st)))
+        return length>=(int)sizeof(name.sun_path) ? -ENAMETOOLONG : -errno;
+    unsigned char link[16];
+    if (getrandom(link,sizeof(link),0)!=sizeof(link)) return -EIO;
+    sqlite3_stmt *q=NULL;
+    r=statement(s,"INSERT INTO datagrams VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(name) DO UPDATE SET "
+        "cookie=excluded.cookie,device=excluded.device,inode=excluded.inode,link=excluded.link,transport=excluded.transport",&q);
+    if (!r) {
+        sqlite3_bind_blob(q,1,name.sun_path,length,SQLITE_STATIC);
+        sqlite3_bind_int64(q,2,(sqlite3_int64)key);
+        sqlite3_bind_int64(q,3,st.st_dev); sqlite3_bind_int64(q,4,st.st_ino);
+        sqlite3_bind_blob(q,5,link,sizeof(link),SQLITE_STATIC); sqlite3_bind_int(q,6,s->offer);
+        r=sql(sqlite3_step(q));
+    }
+    sqlite3_finalize(q); return r;
+}
+int md_ipc_credentials_destination(struct md_ipc_credentials *s,const struct sockaddr_un *name,
+        socklen_t length,int anchor,struct md_ipc_binding *out) {
+    if (!s || !out || out->scope || !name || name->sun_family!=AF_UNIX
+            || length<=offsetof(struct sockaddr_un,sun_path) || length>sizeof(*name)) return -EINVAL;
+    struct stat st={0};
+    if (anchor>=0 && fstat(anchor,&st)) return -errno;
+    /* EVENT_WAIT: the endpoint metadata transaction. No application send is
+     * performed while this gate is held; interruption fails preparation. */
+    if (flock(s->gate,LOCK_EX)) return -errno;
+    sqlite3_stmt *q=NULL;
+    int r=statement(s,anchor>=0
+        ? "SELECT link,transport FROM datagrams WHERE device=?1 AND inode=?2"
+        : "SELECT link,transport FROM datagrams WHERE name=?1",&q);
+    struct md_ipc_connection route={0}; int transport=0;
+    if (!r) {
+        if (anchor>=0) { sqlite3_bind_int64(q,1,st.st_dev); sqlite3_bind_int64(q,2,st.st_ino); }
+        else sqlite3_bind_blob(q,1,name->sun_path,(int)(length - offsetof(struct sockaddr_un,sun_path)),SQLITE_STATIC);
+        int step=sqlite3_step(q);
+        if (step!=SQLITE_ROW) r=step==SQLITE_DONE ? -ENODATA : -EIO;
+        else if (sqlite3_column_bytes(q,0)!=sizeof(route.link)
+                || (unsigned)(transport=sqlite3_column_int(q,1))>MD_IPC_TRANSPORT_ORIGINS_V1) r=-EPROTO;
+        else memcpy(route.link,sqlite3_column_blob(q,0),sizeof(route.link));
+    }
+    sqlite3_finalize(q); flock(s->gate,LOCK_UN);
+    if (!r) {
+        atomic_fetch_add_explicit(&s->scope->refs,1,memory_order_relaxed);
+        *out=(struct md_ipc_binding){.connection=route,.scope=s->scope,
+            .transport=(unsigned)transport==s->offer ? s->offer : MD_IPC_TRANSPORT_NATIVE};
+    }
+    return r;
+}
+struct message_token { uint64_t magic; unsigned char nonce[16]; uint64_t sender_device, sender_inode; };
 #define MESSAGE_MAGIC UINT64_C(0x4d44495043494431)
 int md_ipc_credentials_claim(const struct md_identity *id, const struct md_pid_identity *process,
         pid_t peer, const struct ucred *claim, uint32_t *uid, uint32_t *gid) {
@@ -572,21 +645,22 @@ int md_ipc_credentials_claim(const struct md_identity *id, const struct md_pid_i
                 && *gid!=id->gid.effective && *gid!=id->gid.saved)) return -EPERM;
     return 0;
 }
-static int message_identity(struct md_ipc_credentials *s, const struct md_identity *id, const struct md_pid_identity *process,
-        const struct md_fs_request *req, uint64_t key, struct md_fs_result *out) {
-    struct md_ipc_connection connection;
-    int r=connection_key(s,key,&connection,NULL);
-    if (r) return r;
+static int message_record(struct md_ipc_credentials *s, const struct md_identity *id, const struct md_pid_identity *process,
+        const struct md_fs_request *req, struct md_ipc_connection connection, int sender, struct md_fs_result *out) {
+    int r=0;
     sqlite3_stmt *q=NULL;
     struct message_token token = {.magic=MESSAGE_MAGIC};
     struct stat st;
     int fd = -1;
+    struct stat sender_stat;
+    if (fstat(sender,&sender_stat)) return -errno;
     if (req->flags == MD_IPC_MESSAGE_CREATE || req->flags == MD_IPC_MESSAGE_SENDER) {
         int implicit=req->flags==MD_IPC_MESSAGE_SENDER;
         uint32_t uid=id->uid.effective, gid=id->gid.effective;
         struct ucred claim={(pid_t)req->offset,req->attributes.uid,req->attributes.gid};
         if (!implicit && (r=md_ipc_credentials_claim(id,process,req->peer,&claim,&uid,&gid))) return r;
         if (getrandom(token.nonce, sizeof(token.nonce), 0) != sizeof(token.nonce)) return -EIO;
+        token.sender_device=sender_stat.st_dev; token.sender_inode=sender_stat.st_ino;
         fd = (int)syscall(SYS_memfd_create, "guest-ipc-message", MFD_CLOEXEC | MFD_ALLOW_SEALING);
         if (fd < 0) return -errno;
         if (write(fd, &token, sizeof(token)) != sizeof(token)) r = -EIO;
@@ -610,6 +684,8 @@ static int message_identity(struct md_ipc_credentials *s, const struct md_identi
         int seals = fcntl(fd, F_GET_SEALS), required = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
         if (seals < 0 || (seals & required) != required || fstat(fd, &st) || st.st_size != sizeof(token)
                 || pread(fd, &token, sizeof(token), 0) != sizeof(token) || token.magic != MESSAGE_MAGIC) return -ENODATA;
+        if (token.sender_device!=(uint64_t)sender_stat.st_dev || token.sender_inode!=(uint64_t)sender_stat.st_ino)
+            return -EXDEV;
         r = statement(s, "SELECT pid,uid,gid,process FROM messages WHERE nonce=?1 AND link=?2 AND device=?3 AND inode=?4 AND side=?5", &q);
         if (!r) {
             sqlite3_bind_blob(q, 1, token.nonce, sizeof(token.nonce), SQLITE_STATIC);
@@ -629,6 +705,40 @@ static int message_identity(struct md_ipc_credentials *s, const struct md_identi
         }
     }
     sqlite3_finalize(q); return r;
+}
+static int message_identity(struct md_ipc_credentials *s,const struct md_identity *id,const struct md_pid_identity *process,
+        const struct md_fs_request *req,struct md_ipc_connection connection,struct md_fs_result *out) {
+    if (req->flags!=MD_IPC_MESSAGE_READ) {
+        int sender=(int)syscall(SYS_pidfd_open,req->peer,0);
+        if (sender<0) return -errno;
+        int error=message_record(s,id,process,req,connection,sender,out);
+        if (!error) {
+            int token=out->fd, bundle=-1;
+            int rights[]={token,sender,s->scope->lease,s->scope->root};
+            error=md_fd_bundle_pack(rights,4,&bundle);
+            close(token); out->fd=bundle;
+        }
+        close(sender); return error;
+    }
+    int rights[4];
+    int error=md_fd_bundle_peek(req->directory[1],4,rights);
+    if (error) return error==-ENOMEM || error==-EMFILE || error==-ENFILE ? error : -ENODATA;
+    struct md_fs_request q=*req; q.directory[1]=rights[0];
+    error=message_record(s,id,process,&q,connection,rights[1],out);
+    if (!error) { out->fd=rights[1]; rights[1]=-1; }
+    for (unsigned i=0;i<4;++i) if (rights[i]>=0) close(rights[i]);
+    return error;
+}
+int md_ipc_credentials_message(struct md_ipc_credentials *s,const struct md_ipc_binding *binding,
+        const struct md_identity *id,const struct md_pid_identity *process,
+        const struct md_fs_request *request,struct md_fs_result *out) {
+    *out=(struct md_fs_result){.fd=-1};
+    if (!s || !binding || binding->scope!=s->scope
+            || (request->flags!=MD_IPC_MESSAGE_CREATE && request->flags!=MD_IPC_MESSAGE_SENDER)) return -EINVAL;
+    /* EVENT_WAIT: credential metadata gate; no message publication on interruption. */
+    if (flock(s->gate,LOCK_EX)) return -errno;
+    int error=message_identity(s,id,process,request,binding->connection,out);
+    flock(s->gate,LOCK_UN); return error;
 }
 void md_ipc_credentials_execute(struct md_ipc_credentials *s, const struct md_identity *identity, const struct md_pid_identity *process,
         const struct md_fs_request *q, struct md_fs_result *out, const struct md_fs_output *output) {
@@ -651,6 +761,7 @@ void md_ipc_credentials_execute(struct md_ipc_credentials *s, const struct md_id
     int transaction=q->flags==MD_IPC_CONNECT_BEGIN || q->flags==MD_IPC_ACCEPT || q->flags==MD_IPC_PAIR;
     if (!r && transaction) r=execute(s,"BEGIN IMMEDIATE");
     if (!r) switch (q->flags) {
+    case MD_IPC_BIND: r=datagram_bind(s,q->directory[0],key); break;
     case MD_IPC_LISTEN_BEGIN: case MD_IPC_LISTEN_END: r = listen_update(s, q, key, self, bytes); break;
     case MD_IPC_CONNECT_BEGIN: r = connect_begin(s, q, key, self, bytes, out); break;
     case MD_IPC_CONNECT_END: r = connect_end(s, q, key); break;
@@ -670,8 +781,12 @@ void md_ipc_credentials_execute(struct md_ipc_credentials *s, const struct md_id
         if (!r) r = save_connection(s, other, NULL, 0, self, bytes, self, bytes, NULL, 0, 0, 0, 1, &connection,s->offer);
         break;
     }
-    case MD_IPC_MESSAGE_CREATE: case MD_IPC_MESSAGE_SENDER: case MD_IPC_MESSAGE_READ:
-        r = message_identity(s, identity, process, q, key, out); break;
+    case MD_IPC_MESSAGE_CREATE: case MD_IPC_MESSAGE_SENDER: case MD_IPC_MESSAGE_READ: {
+        struct md_ipc_connection connection;
+        r=connection_key(s,key,&connection,NULL,NULL);
+        if (!r) r=message_identity(s,identity,process,q,connection,out);
+        break;
+    }
     case MD_IPC_NAME: {
         struct sockaddr_un name; int n;
         r = decode_name(q->path[0], &name, &n);

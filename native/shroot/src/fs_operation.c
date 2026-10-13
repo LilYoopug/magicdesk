@@ -165,7 +165,8 @@ int md_fs_request_validate(const struct md_fs_request *q) {
         return descriptors!=1 || *a || *b || q->flags || q->mode>1 || q->capacity || q->offset ? -EINVAL : 0;
     if (q->operation == MD_FS_IPC)
         return (descriptors != 1 && !((q->flags == MD_IPC_PAIR || q->flags == MD_IPC_MESSAGE_READ) && descriptors == 3))
-            || *b || q->mode || q->capacity || q->flags < MD_IPC_LISTEN_BEGIN || q->flags > MD_IPC_MESSAGE_READ ? -EINVAL : 0;
+            || *b || q->mode || q->capacity || q->flags < MD_IPC_LISTEN_BEGIN
+            || (q->flags > MD_IPC_MESSAGE_READ && q->flags!=MD_IPC_BIND) ? -EINVAL : 0;
     if (q->operation == MD_FS_GETCAP || q->operation == MD_FS_SETCAP || q->operation == MD_FS_REMOVECAP)
         return descriptors != 1 || *a || *b || q->mode || q->offset
             || (q->operation != MD_FS_SETCAP && (q->capacity || q->flags))
@@ -200,8 +201,10 @@ int md_fs_request_validate(const struct md_fs_request *q) {
             : (q->flags == SEEK_SET || q->flags == SEEK_CUR ? 0 : -EINVAL);
     }
     if (q->operation == MD_FS_SOCKET_BIND)
-        return !(descriptors & 2) || !*a || *b || q->flags || (q->mode & ~0777) ? -EINVAL : 0;
-    if (q->operation == MD_FS_SOCKET_ADDRESS || q->operation == MD_FS_SOCKET_NAME)
+        return !(descriptors & 2) || !*a || q->flags || (q->mode & ~0777) ? -EINVAL : 0;
+    if (q->operation == MD_FS_SOCKET_ADDRESS)
+        return (descriptors & 2) || (!*a && !(descriptors & 1)) || *b || q->flags || q->mode ? -EINVAL : 0;
+    if (q->operation == MD_FS_SOCKET_NAME)
         return (descriptors & 2) || !*a || *b || q->flags || q->mode
             || (q->operation == MD_FS_SOCKET_NAME && descriptors) ? -EINVAL : 0;
     int binary = q->operation == MD_FS_LINK || q->operation == MD_FS_RENAME;

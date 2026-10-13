@@ -76,6 +76,7 @@ struct md_proc_path md_proc_path_for(const char *path,int tid,int tgid) {
             else if (word(&p,"version")) out.kind=MD_PROC_VERSION;
             else if (word(&p,"overflowuid")) out.kind=MD_PROC_OVERFLOWUID;
             else if (word(&p,"overflowgid")) out.kind=MD_PROC_OVERFLOWGID;
+            else if (word(&p,"cap_last_cap")) out.kind=MD_PROC_CAP_LAST;
             else return out;
             out.process=tid;
             out.tail=p; out.anchor_length=(size_t)(p-path); return out;

@@ -172,9 +172,9 @@ long md_socket_address_call(const struct md_fs *fs, const char *exe, long nr, co
     memcpy(path, address.sun_path, size);
     path[size] = 0;
     if (nr == SYS_bind)
-        return fs->endpoint[0] && !md_fs_host_path(fs, path) ? md_namespace_socket_bind(fs, (int)a[0], path) : -ENOTSUP;
+        return fs->endpoint[0] ? md_namespace_socket_bind(fs, (int)a[0], path) : -ENOTSUP;
     long fd = -1;
-    if (fs->endpoint[0] && !md_fs_host_path(fs, path)) {
+    if (fs->endpoint[0] && (!md_fs_host_path(fs, path) || md_proc_path(path).kind)) {
         r = md_namespace_socket_address(fs, path, &address, &length);
         if (r < 0) return r;
     } else {
@@ -207,6 +207,10 @@ long md_socket_call(const struct md_fs *fs, const char *exe, long nr, const unsi
         : nr == SYS_sendto ? md_socket_ancillary_sendto(fs,exe,a)
         : nr == SYS_recvmsg ? md_socket_ancillary_receive(fs, exe, a)
         : md_socket_address_call(fs, exe, nr, a);
+    if (!r && nr==SYS_bind && fs->endpoint[0] && domain((int)a[0])==AF_UNIX) {
+        long error=md_socket_identity_call(fs,MD_IPC_BIND,(int)a[0],-1,0,NULL,0);
+        if (error<0) r=error;
+    }
     if (r >= 0 && (nr == SYS_accept || nr == SYS_accept4) && fs->endpoint[0]) {
         long error = md_socket_identity_call(fs, MD_IPC_ACCEPT, (int)r, -1, 0, NULL, 0);
         if (error < 0 && error != -EAFNOSUPPORT && error != -EPROTOTYPE) { RAW1(close, r); return error; }

@@ -51,7 +51,13 @@ void test_network_route(void) {
     struct md_network_namespace *child=md_network_namespace_copy(n,NULL);
     struct md_identity root=md_identity_new(0,0),user=md_identity_new(1000,1000);
     struct packet p;
-    struct nlmsghdr *h=request(&p,RTM_NEWLINK,NLM_F_CREATE|NLM_F_EXCL);
+    struct nlmsghdr *h=request(&p,RTM_SETLINK,NLM_F_CREATE|NLM_F_EXCL);
+    struct ifinfomsg *loopback=NLMSG_DATA(h);
+    loopback->ifi_index=1; loopback->ifi_flags=loopback->ifi_change=IFF_UP;
+    assert(!ack(n,&root,h,NULL) && n->count==2);
+    loopback->ifi_index=999;
+    assert(ack(n,&root,h,NULL)==-ENODEV && n->count==2);
+    h=request(&p,RTM_NEWLINK,NLM_F_CREATE|NLM_F_EXCL);
     attr(h,IFLA_IFNAME,"br-test",8);
     struct rtattr *info=attr(h,IFLA_LINKINFO|NLA_F_NESTED,NULL,0);
     attr(h,IFLA_INFO_KIND,"bridge",6);
@@ -124,6 +130,26 @@ void test_network_route(void) {
         else { assert(item->nlmsg_type==NLMSG_DONE); ++done; }
     }
     assert(!length && links==4 && done==1 && bridges==1);
+    for (unsigned bad=0;bad<4;++bad) {
+        h=request(&p,RTM_GETLINK,NLM_F_DUMP);
+        struct ifinfomsg *body=NLMSG_DATA(h);
+        if (bad==0) h->nlmsg_len=NLMSG_LENGTH(sizeof(struct rtgenmsg));
+        if (bad==1) body->ifi_index=1;
+        if (bad==2) body->__ifi_pad=1;
+        if (bad==3) attr(h,IFLA_IFNAME,"lo",3);
+        length=md_network_route(n,&user,h,h->nlmsg_len,91,MD_NETWORK_ROUTE_STRICT,NULL,reply.bytes,sizeof(reply),NULL);
+        assert(length>=(long)NLMSG_LENGTH(sizeof(struct nlmsgerr)));
+        assert(reply.align.nlmsg_type==NLMSG_ERROR);
+        assert(((struct nlmsgerr *)NLMSG_DATA(&reply.align))->error==(bad==3 ? -EOPNOTSUPP : -EINVAL));
+    }
+    h=request(&p,RTM_GETLINK,NLM_F_DUMP);
+    length=md_network_route(n,&user,h,h->nlmsg_len,91,MD_NETWORK_ROUTE_STRICT,NULL,reply.bytes,sizeof(reply),NULL);
+    assert(length>0); links=done=0;
+    for (struct nlmsghdr *item=&reply.align;NLMSG_OK(item,length);item=NLMSG_NEXT(item,length)) {
+        assert(item->nlmsg_type==RTM_NEWLINK || item->nlmsg_type==NLMSG_DONE);
+        if (item->nlmsg_type==RTM_NEWLINK) ++links; else ++done;
+    }
+    assert(!length && links==4 && done==1);
     const unsigned queries[]={RTM_GETLINK,RTM_GETADDR,RTM_GETROUTE};
     for (unsigned q=0;q<3;++q) for (unsigned padding=1;padding<=4;padding*=4) {
         h=request(&p,queries[q],NLM_F_DUMP);

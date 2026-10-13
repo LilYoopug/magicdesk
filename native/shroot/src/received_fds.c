@@ -3,6 +3,7 @@
 #include "socket_control.h"
 #include <errno.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 int md_received_fds_reserve(struct md_received_fds **owner, unsigned needed) {
@@ -29,6 +30,27 @@ int md_received_fds_annotate(struct md_received_fds *p, struct md_fd_object *con
     for (unsigned i=0;i<count;++i) next[i]=md_fd_object_retain(origins[i]);
     p->origins=next;
     return 0;
+}
+int md_received_fds_join(struct md_received_fds **owner,struct md_received_fds **tail) {
+    if (!owner || !tail || owner==tail || !*tail || *owner==*tail) return -EINVAL;
+    struct md_received_fds *a=*owner,*b=*tail;
+    if ((a && a->references!=1) || b->references!=1) return -EBUSY;
+    if (!a) { *owner=b; *tail=NULL; return 0; }
+    unsigned count=a->count+b->count;
+    if (count<a->count || count>MD_SOCKET_RECEIVED_FDS*1024U+1) return -EOVERFLOW;
+    struct md_received_fds *next=malloc(sizeof(*next)+count*sizeof(int));
+    if (!next) return -ENOMEM;
+    *next=(struct md_received_fds){.references=1,.count=count,.capacity=count};
+    if (a->origins || b->origins) {
+        next->origins=calloc(count,sizeof(*next->origins));
+        if (!next->origins) { free(next); return -ENOMEM; }
+        if (a->origins) memcpy(next->origins,a->origins,a->count*sizeof(*a->origins));
+        if (b->origins) memcpy(next->origins+a->count,b->origins,b->count*sizeof(*b->origins));
+    }
+    memcpy(next->fds,a->fds,a->count*sizeof(int));
+    memcpy(next->fds+a->count,b->fds,b->count*sizeof(int));
+    free(a->origins); free(a); free(b->origins); free(b);
+    *owner=next; *tail=NULL; return 0;
 }
 int md_received_fds_select(const struct md_received_fds *p, const int *indices, unsigned count,
         int *fds, struct md_fd_object **origins) {

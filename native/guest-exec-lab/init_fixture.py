@@ -1,6 +1,6 @@
 """Private API filesystems and a real console for userspace init tests."""
 
-TRACE_SYSCALLS = ('%file,%process,ioctl,mount_setattr,open_tree,move_mount,fsopen,fsconfig,fsmount,'
+TRACE_SYSCALLS = ('%file,%process,%network,ioctl,mount_setattr,open_tree,move_mount,fsopen,fsconfig,fsmount,'
                   'prctl,seccomp,epoll_create1,epoll_ctl,epoll_pwait,epoll_pwait2')
 
 PREPARE = r'''set -eux

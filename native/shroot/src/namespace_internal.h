@@ -24,6 +24,7 @@ long md_namespace_mount_fd(const struct md_fs *, long, const unsigned long *);
 long md_namespace_bpf(const struct md_fs *,const unsigned long *);
 long md_namespace_landlock(const struct md_fs *,long,const unsigned long *);
 long md_namespace_paths_request(const struct md_fs *,struct md_fs_request *);
+long md_namespace_paths_resolve(const struct md_fs *,const struct md_fs_request *,struct md_fs_response *);
 long md_namespace_xattr(const struct md_fs *, long, struct md_namespace_operand, const char *, const unsigned long *);
 long md_namespace_proc_reopen(const struct md_fs *, int, int flags);
 long md_namespace_path_call(const struct md_fs *, long, const unsigned long *, struct md_namespace_operand, const char *);

@@ -28,13 +28,13 @@ target_compile_options(guest-parcels PRIVATE -O2 -Wall -Wextra -Werror -fno-pie)
 add_library(guest-objects STATIC ${src}/fd_weak.c)
 target_compile_options(guest-objects PRIVATE -std=c17 -O2 -Wall -Wextra -Werror -fno-pie)
 set(origins ${src}/fs_anchor.c ${src}/fs_origin_transfer.c ${src}/inode_lifetime.c ${src}/inode_custody.c ${src}/sealed_manifest.c ${src}/ipc_scope.c ${src}/mount_policy.c ${src}/mount_graph.c ${src}/resource_order.c ${src}/ofd_order.c ${src}/fd_origins.c ${src}/fd_channel.c ${src}/fd_mutation.c ${src}/fd_delivery.c ${src}/fd_table_observation.c ${src}/fd_return.c ${src}/fd_exchange.c ${src}/received_fds.c ${src}/fd_messages.c ${src}/task_descriptor.c ${src}/task_lifetime.c)
-list(APPEND origins ${src}/native_mounts.c ${src}/devpts_view.c ${src}/cgroup.c ${src}/cgroup_program.c ${src}/sysfs_view.c ${src}/network_namespace.c ${src}/network_model.c ${src}/network_route.c ${src}/network_endpoint.c ${src}/network_sysctl.c
+list(APPEND origins ${src}/native_mounts.c ${src}/devpts_view.c ${src}/cgroup.c ${src}/cgroup_program.c ${src}/sysfs_view.c ${src}/network_namespace.c ${src}/network_model.c ${src}/network_route.c ${src}/network_message.c ${src}/network_generic.c ${src}/network_endpoint.c ${src}/network_sysctl.c
     ${src}/ipc_namespace.c ${src}/mqueue_view.c ${src}/landlock_policy.c ${src}/landlock_file.c
-    ${src}/mount_stream.c ${src}/mount_pin.c ${src}/temporary_directory.c ${src}/private_tree.c
+    ${src}/mount_stream.c ${src}/mount_pin.c ${src}/mount_propagation.c ${src}/temporary_directory.c ${src}/private_tree.c
     ${src}/provider_tree.c ${src}/device_events.c ${src}/identity_snapshot.c ${src}/proc_sysctl.c ${src}/uts_namespace.c ${src}/control_event.c)
 set(mounts ${src}/fs_mounts.c ${src}/fs_mount_path.c ${src}/fs_mount_operations.c ${src}/fs_mount_table.c ${src}/fs_mount_change.c ${src}/fs_mount_lifecycle.c ${src}/fs_temporary.c ${src}/fs_overlay.c ${src}/fs_storage.c)
 list(APPEND mounts ${src}/proc_paths.c ${src}/procfs_view.c ${src}/proc_fdinfo.c ${src}/fs_proc.c ${src}/fs_cgroup.c ${src}/fs_bpf.c ${src}/fs_sysfs.c ${src}/fs_mqueue.c ${src}/fs_mount_file.c ${src}/mount_source.c ${src}/fs_context.c
-    ${src}/fs_landlock.c ${src}/fs_provider.c ${src}/fs_control.c)
+    ${src}/fs_landlock.c ${src}/fs_provider.c ${src}/fs_control.c ${src}/fs_mount_propagation.c)
 set(inodes ${src}/inode_store.c ${src}/inode_db.c ${src}/inode_super.c ${src}/inode_cache.c ${src}/inode_events.c ${src}/inode_watch.c ${src}/watch_queue.c ${src}/inode_path.c
     ${src}/inode_directory.c ${src}/inode_import.c ${src}/inode_socket.c ${src}/inode_backing.c ${src}/inode_snapshot.c ${src}/inode_view.c ${src}/inode_maintenance.c ${src}/inode_fifo.c ${src}/inode_channel.c ${src}/file_open.c
     ${identity} ${src}/task_registry.c ${src}/guest_domain.c ${src}/mount_namespace.c ${origins} ${src}/inode_metadata.c ${src}/inode_xattr.c ${src}/inode_capability.c ${src}/inode_acl.c ${src}/posix_acl.c
@@ -76,7 +76,7 @@ guest_executable(supervisor ${src}/supervisor.c ${src}/task_resources.c ${src}/c
     ${src}/fs_worker.c ${src}/fs_service.c ${src}/ipc_peer_service.c ${src}/ipc_origins.c ${src}/fs_buffer_service.c ${src}/file_open_job.c ${src}/file_snapshot.c ${src}/command_image.c ${src}/exec_prepare.c ${namespace_engine} ${src}/image_catalogue.c ${inodes} ${mounts}
     ${src}/namespace_broker.c ${src}/watch_broker.c ${src}/proc_paths.c)
 target_compile_definitions(supervisor PRIVATE MD_NO_START MD_USE_LIBC)
-target_sources(bootstrap PRIVATE ${src}/network_calls.c)
+target_sources(bootstrap PRIVATE ${src}/network_calls.c ${src}/network_packet.c)
 target_sources(supervisor PRIVATE ${capsules})
 target_sources(supervisor PRIVATE ${src}/task_wait.c ${src}/pending.c)
 target_sources(supervisor PRIVATE ${src}/control_epoll.c ${src}/fd_admission.c ${src}/task_call.c ${src}/task_filter.c ${src}/fd_filter_program.c ${src}/epoll_wait.c)
@@ -119,6 +119,8 @@ if(MAGICDESK_GUEST_FIXTURES)
     target_compile_options(wait_guest PRIVATE -UNDEBUG)
     guest_executable(readiness_guest ../guest-exec-lab/test_readiness_guest.c)
     target_compile_options(readiness_guest PRIVATE -UNDEBUG)
+    guest_executable(notify_guest ../guest-exec-lab/test_notify_guest.c)
+    target_compile_options(notify_guest PRIVATE -UNDEBUG)
     guest_executable(event_signal ../guest-exec-lab/test_event_signal.c)
     target_compile_options(event_signal PRIVATE -iquote ${src} -UNDEBUG)
     target_link_options(event_signal PRIVATE -Wl,--wrap=read -Wl,--wrap=write)

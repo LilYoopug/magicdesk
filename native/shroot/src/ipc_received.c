@@ -3,7 +3,9 @@
 #include "fs_engine.h"
 #include "fd_selector.h"
 #include <errno.h>
+#include <fcntl.h>
 #include <string.h>
+#include <unistd.h>
 
 static int unrecognized(int error) {
     return error==-ENODATA || error==-ENOTSUP || error==-EAFNOSUPPORT || error==-EPROTOTYPE;
@@ -19,6 +21,22 @@ static int selectors(struct md_fs_context *context, const struct md_received_fds
     md_fs_context_execute(context,&q,&result,NULL);
     if (!result.error && result.position) *out|=1U<<MD_FD_SELECTOR_WATCH;
     return result.error;
+}
+static int native_entry(struct md_fs_context *context,const struct md_received_fds *source,
+        unsigned index,int adapted,struct md_received_info *entry,struct md_received_fds **data) {
+    entry->index=(int)index;
+    int error=selectors(context,source,index,&entry->selectors);
+    if (error || !adapted) return error;
+    struct md_received_fds *payload=NULL;
+    error=md_received_fds_reserve(&payload,1);
+    if (!error) {
+        int copy=fcntl(source->fds[index],F_DUPFD_CLOEXEC,0);
+        if (copy<0) error=-errno; else payload->fds[payload->count++]=copy;
+    }
+    if (!error && source->origins) error=md_received_fds_annotate(payload,source->origins+index,1);
+    entry->index=*data ? (int)(*data)->count : 0;
+    if (!error) error=md_received_fds_join(data,&payload);
+    md_received_fds_release(payload); return error;
 }
 int md_ipc_received_message(struct md_ipc_capsules **cache, struct md_fs_context *context,
         const struct md_received_fds *source, const int *indices, unsigned count,
@@ -41,6 +59,7 @@ int md_ipc_received_message(struct md_ipc_capsules **cache, struct md_fs_context
     }
     struct md_received_message plan={0};
     struct md_received_fds *data=NULL;
+    int have_capsule=0;
     for (unsigned i=0;i<count && !error;++i) {
         int fd=source->fds[indices[i]];
         plan.first[i]=plan.count;
@@ -49,23 +68,38 @@ int md_ipc_received_message(struct md_ipc_capsules **cache, struct md_fs_context
         struct md_fs_result result;
         md_fs_context_execute(context,&q,&result,NULL);
         if (!result.error) {
-            if (plan.count==254) { error=-EOVERFLOW; break; }
-            plan.entries[plan.count++]=(struct md_received_info){.index=-1,.flags=MD_RECEIVED_CREDENTIALS,
+            struct md_received_fds *sender=NULL;
+            error=plan.count==254 ? -EOVERFLOW : md_received_fds_reserve(&sender,1);
+            if (error) { if (result.fd>=0) close(result.fd); break; }
+            if (result.fd<0) { md_received_fds_release(sender); error=-EPROTO; break; }
+            sender->fds[sender->count++]=result.fd;
+            unsigned index=data ? data->count : 0;
+            error=md_received_fds_join(&data,&sender); md_received_fds_release(sender);
+            if (error) break;
+            plan.entries[plan.count++]=(struct md_received_info){.index=(int)index,.flags=MD_RECEIVED_CREDENTIALS,
                 .credentials={(pid_t)result.position,result.info.uid,result.info.gid}};
         } else if (!unrecognized(result.error)) error=result.error;
         else if (framed) {
-            if (data || count>2) { error=-EPROTO; break; }
             if (!*cache) error=md_ipc_capsules_new(&binding,cache);
-            if (!error) error=md_ipc_capsules_receive(*cache,&binding,fd,&data);
-            if (!error && data->count>254-plan.count) error=-EOVERFLOW;
-            for (unsigned j=0;data && j<data->count && !error;++j) {
-                struct md_received_info *entry=&plan.entries[plan.count++];
-                entry->index=(int)j;
-                error=selectors(context,data,j,&entry->selectors);
+            struct md_received_fds *payload=NULL;
+            if (!error) error=md_ipc_capsules_receive(*cache,&binding,fd,&payload);
+            if (error==-ENODATA && binding.receive_only) {
+                error=native_entry(context,source,(unsigned)indices[i],adapted,&plan.entries[plan.count++],&data);
+                continue;
             }
+            if (!error && (have_capsule || count>2)) error=-EPROTO;
+            if (!error && payload->count>254-plan.count) error=-EOVERFLOW;
+            unsigned offset=data ? data->count : 0;
+            for (unsigned j=0;payload && j<payload->count && !error;++j) {
+                struct md_received_info *entry=&plan.entries[plan.count++];
+                entry->index=(int)(offset+j);
+                error=selectors(context,payload,j,&entry->selectors);
+            }
+            if (!error) error=md_received_fds_join(&data,&payload);
+            md_received_fds_release(payload); have_capsule=1;
         } else {
             struct md_received_info *entry=&plan.entries[plan.count++];
-            entry->index=indices[i]; error=selectors(context,source,(unsigned)indices[i],&entry->selectors);
+            error=native_entry(context,source,(unsigned)indices[i],adapted,entry,&data);
         }
     }
     md_ipc_binding_release(&binding);

@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "mount_graph.h"
+#include "mount_stream.h"
 #include "fs_mount_internal.h"
 #include "fs_wire.h"
 #include "event_wait.h"
@@ -171,8 +172,8 @@ static void failures(struct md_filesystem *source) {
         case 1: duplicate_manifest(&p,1,UINT32_MAX,seals,0); break;
         case 2: duplicate_manifest(&p,2,MD_FS_MOUNTS_MAX+1,seals,0); break;
         case 3: duplicate_manifest(&p,3,1,seals,0); break;
-        case 4: duplicate_manifest(&p,32,1,seals,0); break;
-        case 5: duplicate_manifest(&p,33,UINT32_MAX,seals,0); break;
+        case 4: duplicate_manifest(&p,36,1,seals,0); break;
+        case 5: duplicate_manifest(&p,37,UINT32_MAX,seals,0); break;
         case 6: duplicate_manifest(&p,1,7,seals,1); break;
         case 7: duplicate_manifest(&p,1,7,seals&~F_SEAL_WRITE,0); break;
         case 8: { int fd=p.fd[2]; p.fd[2]=p.fd[3]; p.fd[3]=fd; break; }
@@ -180,7 +181,7 @@ static void failures(struct md_filesystem *source) {
         case 10: close(p.fd[--p.count]); break;
         case 11: assert(!fcntl(p.fd[1],F_SETFD,0)); break;
         case 12: close(p.fd[2]); p.fd[2]=p.fd[1]; break;
-        case 13: duplicate_manifest(&p,32,2,seals,0); break;
+        case 13: duplicate_manifest(&p,36,2,seals,0); break;
         }
         struct md_mount_namespace *view=NULL;
         assert(md_mount_graph_import(&p,&view)<0 && !view && !p.count);
@@ -388,6 +389,8 @@ static void updates(const char *base) {
         fail_allocation=-1;
         if (!r) committed=1;
         else {
+            if (r!=-ENOMEM || descriptors()!=stable)
+                fprintf(stderr,"mount publication allocation=%d error=%d descriptors=%u expected=%u\n",i,r,descriptors(),stable);
             assert(r==-ENOMEM && descriptors()==stable);
             contents(&peer,"/outer/nested/value",NULL,"value");
             assert(origin->mount->id==id);
@@ -430,6 +433,7 @@ static void private_publication(const char *base) {
     next[2].file=md_proc_sysctl_new(MD_PROC_FILE_HOSTNAME,NULL,NULL); assert(next[2].file.ops);
     struct md_mount_layout layout={.base=&fs.mounts->base,.root=fs.mounts->root,
         .entries=next,.count=fs.mounts->tree->count};
+    contents(&peer,"/outer/nested/value",NULL,"value");
     unsigned stable=descriptors(); int committed=0;
     for (int i=0;i<16 && !committed;++i) {
         fail_allocation=i;
@@ -437,6 +441,8 @@ static void private_publication(const char *base) {
         fail_allocation=-1;
         if (!r) committed=1;
         else {
+            if (r!=-ENOMEM || descriptors()!=stable)
+                fprintf(stderr,"private publication allocation=%d error=%d descriptors=%u expected=%u\n",i,r,descriptors(),stable);
             assert(r==-ENOMEM && descriptors()==stable);
             contents(&peer,"/outer/nested/value",NULL,"value");
         }
@@ -661,9 +667,28 @@ static void initial_pivot(const char *base) {
     path(old,fixture,"host0/holder"); assert(!mkdir(old,0700));
     path(old,fixture,"host0/holder/old"); assert(!mkdir(old,0700));
     assert(!mutation(&fs,MD_FS_MOUNT_BIND,MS_BIND,"/holder","/holder"));
-    assert(!mutation(&fs,MD_FS_MOUNT_MOVE,MS_MOVE,"/old","/holder/old"));
+    assert(!mutation(&fs,MD_FS_MOUNT_PROPAGATION,MS_SHARED,NULL,"/holder"));
+    struct md_filesystem shared={.store=fs.store};
+    assert(!md_fs_mounts_copy(&fs,&(struct md_fs_location){0},&shared.mounts,&copied));
+    complete=0;
+    for (int n=0;n<160 && !complete;++n) {
+        fail_allocation=n;
+        int r=mutation(&fs,MD_FS_MOUNT_MOVE,MS_MOVE,"/old","/holder/old");
+        fail_allocation=-1;
+        if (!r) { complete=1; break; }
+        assert(r==-ENOMEM);
+        contents(&peer,"/old/parent",NULL,"guest");
+        opened=open_file(&shared,"/holder/old/parent",O_RDONLY,NULL,NULL);
+        assert(opened.error==-ENOENT);
+    }
+    assert(complete);
     contents(&peer,"/holder/old/parent",NULL,"guest");
+    contents(&shared,"/holder/old/parent",NULL,"guest");
+    contents(&shared,"/old/parent",NULL,"guest");
     assert(mutation(&fs,MD_FS_MOUNT_UMOUNT,0,NULL,"/holder")==-EBUSY);
+    assert(mutation(&fs,MD_FS_MOUNT_MOVE,MS_MOVE,"/holder/old","/old")==-EINVAL);
+    assert(!mutation(&fs,MD_FS_MOUNT_PROPAGATION,MS_PRIVATE,NULL,"/holder"));
+    md_fs_mounts_close(&shared);
     assert(!mutation(&fs,MD_FS_MOUNT_MOVE,MS_MOVE,"/holder/old","/old"));
     assert(!mutation(&fs,MD_FS_MOUNT_UMOUNT,0,NULL,"/holder"));
     assert(mutation(&fs,MD_FS_MOUNT_UMOUNT,0,NULL,"/old")==-EBUSY);
@@ -724,10 +749,131 @@ static void removed_points(const char *base) {
     assert(descriptors()==before);
     puts("PASS removed mountpoints: native/logical targets, rename, foreign views, retained origins and cleanup");
 }
+static void stream_value(int reader,uint64_t expected,int value) {
+    uint64_t revision=0; int *rights=NULL,settled=0; unsigned count=0;
+    assert(!md_mount_stream_read(reader,&revision,&rights,&count,&settled)
+        && settled && revision==expected && count==1);
+    int actual=-1; assert(pread(rights[0],&actual,sizeof(actual),0)==sizeof(actual) && actual==value);
+    close(rights[0]); free(rights);
+}
+static void stream_transactions(void) {
+    unsigned before=descriptors();
+    int values[2],readers[2],writers[2];
+    for (int i=0;i<2;++i) {
+        values[i]=memfd_create("mount-value",MFD_CLOEXEC); assert(values[i]>=0);
+        assert(write(values[i],&i,sizeof(i))==sizeof(i));
+        assert(!md_mount_stream_new(readers+i,writers+i));
+        assert(!md_mount_stream_publish(readers[i],writers[i],0,values,1));
+    }
+    struct md_mount_stream_change changes[2];
+    for (unsigned i=0;i<2;++i) changes[i]=(struct md_mount_stream_change){readers[i],writers[i],1,values+1,1};
+    assert(!md_mount_stream_publish_many(changes,2));
+    for (unsigned i=0;i<2;++i) {
+        stream_value(readers[i],2,1); changes[i].previous=2; changes[i].rights=values;
+    }
+    /* A later writer cannot enqueue. The already staged first stream must
+     * still select its old snapshot, and remain usable for the next commit. */
+    int saved=writers[1];
+    changes[1].writer=readers[1];
+    /* A read endpoint is a valid socket, but its peer's receive direction is
+     * shut down; preparation succeeds and the second send fails with EPIPE. */
+    assert(!shutdown(writers[1],SHUT_RD));
+    assert(md_mount_stream_publish_many(changes,2)==-EPIPE);
+    for (unsigned i=0;i<2;++i) stream_value(readers[i],2,1);
+    changes[1].writer=saved;
+    assert(!md_mount_stream_publish_many(changes,2));
+    for (unsigned i=0;i<2;++i) {
+        stream_value(readers[i],3,0);
+        close(readers[i]); close(writers[i]); close(values[i]);
+    }
+    assert(descriptors()==before);
+    puts("PASS mount stream transaction: two-view commit, late staging failure, retry and exact cleanup");
+}
+static void propagation(const char *base) {
+    unsigned before=descriptors();
+    char dir[PATH_MAX],name[PATH_MAX]; path(dir,base,"propagation"); assert(!mkdir(dir,0700));
+    struct md_filesystem fs=filesystem(dir,1),peer=filesystem(dir,0),slave=filesystem(dir,0),foreign=filesystem(dir,0);
+    path(name,dir,"host0/fresh"); assert(!mkdir(name,0700));
+    path(name,dir,"host0/local"); assert(!mkdir(name,0700));
+    assert(!mutation(&fs,MD_FS_MOUNT_PROPAGATION,MS_SHARED,NULL,"/outer"));
+    struct md_fs_location root={0},selected;
+    assert(!md_fs_mounts_copy(&fs,&root,&peer.mounts,&selected));
+    assert(!md_fs_mounts_copy(&fs,&root,&slave.mounts,&selected));
+    assert(!mutation(&slave,MD_FS_MOUNT_PROPAGATION,MS_SLAVE,NULL,"/outer"));
+    assert(!mutation(&slave,MD_FS_MOUNT_PROPAGATION,MS_SHARED,NULL,"/outer"));
+    struct md_view_mount *a=&fs.mounts->tree->mounts[0],*b=&peer.mounts->tree->mounts[0],*c=&slave.mounts->tree->mounts[0];
+    assert(a->links.shared && a->links.shared==b->links.shared && c->links.shared!=a->links.shared
+        && c->links.master==a->links.shared);
+    struct md_mount_graph_parcel parcel={0};
+    assert(!md_mount_graph_export(fs.mounts,fs.store->lifetime->root,&parcel));
+    assert(!md_mount_graph_import(&parcel,&foreign.mounts));
+    assert(md_mount_group_id(foreign.mounts->tree->mounts[0].links.shared)==md_mount_group_id(a->links.shared));
+    assert(!md_mount_graph_export(peer.mounts,peer.store->lifetime->root,&parcel)); md_mount_graph_parcel_close(&parcel);
+    assert(!md_mount_graph_export(slave.mounts,slave.store->lifetime->root,&parcel)); md_mount_graph_parcel_close(&parcel);
+    struct md_identity identity=md_identity_new(0,0); fs.store->identity=&identity;
+    struct md_fs_request q={.operation=MD_FS_MOUNT,.mode=MD_FS_MOUNT_BIND,.flags=MS_BIND,
+        .directory={-1,-1},.path={"/outer/fresh","/alias"}};
+    int complete=0;
+    for (int n=0;n<160 && !complete;++n) {
+        fail_allocation=n; int r=md_fs_mount_change(&fs,NULL,&q); fail_allocation=-1;
+        if (!r) { complete=1; break; }
+        if (r!=-ENOMEM) fprintf(stderr,"propagation allocation %d: %d\n",n,r);
+        assert(r==-ENOMEM);
+        struct md_filesystem *views[]={&fs,&peer,&slave,&foreign};
+        for (unsigned i=0;i<4;++i) {
+            struct md_fs_result out=open_file(views[i],"/outer/fresh/value",O_RDONLY,NULL,NULL);
+            assert(out.error==-ENOENT && out.fd<0);
+        }
+    }
+    fs.store->identity=NULL; md_identity_release(&identity); assert(complete);
+    contents(&fs,"/outer/fresh/value",NULL,"value"); contents(&peer,"/outer/fresh/value",NULL,"value");
+    contents(&slave,"/outer/fresh/value",NULL,"value"); contents(&foreign,"/outer/fresh/value",NULL,"value");
+    assert(!mutation(&slave,MD_FS_MOUNT_BIND,MS_BIND,"/alias","/outer/local"));
+    contents(&slave,"/outer/local/value",NULL,"value");
+    struct md_fs_result absent=open_file(&fs,"/outer/local/value",O_RDONLY,NULL,NULL); assert(absent.error==-ENOENT);
+    assert(!mutation(&peer,MD_FS_MOUNT_UMOUNT,0,NULL,"/outer/fresh"));
+    struct md_filesystem *views[]={&fs,&peer,&slave,&foreign};
+    for (unsigned i=0;i<4;++i) {
+        absent=open_file(views[i],"/outer/fresh/value",O_RDONLY,NULL,NULL); assert(absent.error==-ENOENT);
+    }
+    assert(!mutation(&peer,MD_FS_MOUNT_PROPAGATION,MS_PRIVATE,NULL,"/outer"));
+    assert(!mutation(&fs,MD_FS_MOUNT_BIND,MS_BIND,"/alias","/outer/fresh"));
+    absent=open_file(&peer,"/outer/fresh/value",O_RDONLY,NULL,NULL); assert(absent.error==-ENOENT);
+    contents(&slave,"/outer/fresh/value",NULL,"value");
+    int table=md_fs_mount_table(&slave,1,0); assert(table>=0);
+    char bytes[32768]; ssize_t n=read(table,bytes,sizeof(bytes)-1); assert(n>0); bytes[n]=0; close(table);
+    char master[32]; snprintf(master,sizeof(master),"master:%u",md_mount_group_id(a->links.shared));
+    assert(strstr(bytes,"shared:") && strstr(bytes,master));
+    assert(!mutation(&fs,MD_FS_MOUNT_UMOUNT,0,NULL,"/outer/fresh"));
+    /* A moved instance preserves its old origin while gaining the destination
+     * propagation policy; a later lazy detach preserves only that origin. */
+    struct md_fs_anchor *held=NULL;
+    struct md_fs_result opened=open_file(&fs,"/alias",O_PATH|O_DIRECTORY,NULL,&held);
+    assert(!opened.error); close(opened.fd); unsigned old_id=held->mount->id;
+    assert(!mutation(&fs,MD_FS_MOUNT_MOVE,MS_MOVE,"/alias","/outer/fresh"));
+    assert(held->mount->id==old_id);
+    contents(&slave,"/outer/fresh/value",NULL,"value");
+    assert(mutation(&fs,MD_FS_MOUNT_MOVE,MS_MOVE,"/outer/fresh","/alias")==-EINVAL);
+    assert(mutation(&fs,MD_FS_MOUNT_UMOUNT,0,NULL,"/outer/fresh")==-EBUSY);
+    assert(!mutation(&fs,MD_FS_MOUNT_UMOUNT,MNT_DETACH,NULL,"/outer/fresh"));
+    contents(&fs,"value",held,"value"); md_fs_anchor_release(held);
+    absent=open_file(&slave,"/outer/fresh/value",O_RDONLY,NULL,NULL); assert(absent.error==-ENOENT);
+    /* Recursive binds prune unbindable children instead of accepting aliases
+     * to them. The original mount remains accessible in its namespace. */
+    assert(!mutation(&fs,MD_FS_MOUNT_PROPAGATION,MS_UNBINDABLE,NULL,"/outer/nested"));
+    assert(mutation(&fs,MD_FS_MOUNT_BIND,MS_BIND,"/outer/nested","/alias")==-EINVAL);
+    assert(!mutation(&fs,MD_FS_MOUNT_BIND,MS_BIND|MS_REC,"/outer","/alias"));
+    absent=open_file(&fs,"/alias/nested/value",O_RDONLY,NULL,NULL); assert(absent.error==-ENOENT);
+    contents(&fs,"/outer/nested/value",NULL,"value");
+    close_filesystem(&foreign); close_filesystem(&slave); close_filesystem(&peer); close_filesystem(&fs);
+    assert(descriptors()==before);
+    puts("PASS mount propagation: peer/slave attach and detach, private isolation, graph publication and allocation rollback");
+}
 void test_mount_graph(const char *base) {
+    stream_transactions();
     alarm(60); char model[PATH_MAX], peers[PATH_MAX];
     path(model,base,"graph-model"); path(peers,base,"graph-peers");
     assert(!mkdir(model,0700) && !mkdir(peers,0700));
     models(model); sizes(base); unordered(base); updates(base); private_publication(base);
-    retirement(base,0); retirement(base,1); processes(peers); initial_pivot(base); removed_points(base); alarm(0);
+    retirement(base,0); retirement(base,1); processes(peers); initial_pivot(base); removed_points(base); propagation(base); alarm(0);
 }

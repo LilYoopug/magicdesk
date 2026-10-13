@@ -284,7 +284,9 @@ the inode store's logical hardlink emulation does not apply to host volumes.
 Guest mount operations, logical OverlayFS and the supported proc/devpts/sysfs,
 mqueue and cgroup providers compose into this same namespace-owned view.
 They do not grant native Android mount authority or filesystem confinement.
-Shared mount propagation and FUSE remain unsupported.
+Shared mount propagation uses the common peer/slave topology. Foreign graph
+views still need complete master retirement after the last peer disappears.
+FUSE remains unsupported.
 
 ## Checks
 
