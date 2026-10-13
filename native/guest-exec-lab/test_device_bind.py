@@ -32,14 +32,16 @@ def guest():
 
     with tempfile.TemporaryDirectory(prefix='md-devices-') as directory, ExitStack() as cleanup:
         root = Path(directory)
-        # PR_CAPBSET_READ: device creation has no logical or native capability grant.
-        assert call(167, 23, 27, 0, 0, 0) == 0
+        # CAP_MKNOD authorizes guest metadata, never Android device creation.
+        assert call(167, 23, 27, 0, 0, 0) == 1
         for kind, device in ((stat.S_IFCHR, os.makedev(1, 3)),
                              (stat.S_IFBLK, os.makedev(7, 0))):
-            path = root / 'forbidden'
-            denied(lambda: os.mknod(path, kind | 0o600, device), errno.EPERM)
-            assert not path.exists()
-        print('PASS missing CAP_MKNOD returns EPERM without creating a placeholder', flush=True)
+            path = root / 'logical'
+            os.mknod(path, kind | 0o600, device)
+            node = path.stat()
+            assert stat.S_IFMT(node.st_mode) == kind and node.st_rdev == device
+            path.unlink()
+        print('PASS logical device creation preserves kind and rdev', flush=True)
 
         for name in ('full', 'null', 'zero', 'random', 'urandom', 'tty'):
             source, target = Path('/dev') / name, root / name
@@ -54,7 +56,6 @@ def guest():
                     read_denied = True
                 else:
                     os.close(check)
-            denied(lambda: os.mknod(target, stat.S_IFCHR | 0o666, native.st_rdev), errno.EPERM)
             target.touch()
             descriptor = os.open(target, os.O_PATH)
             try:
@@ -105,6 +106,7 @@ def guest():
         os.mknod(regular, stat.S_IFREG | 0o600)
         os.mknod(fifo, stat.S_IFIFO | 0o600)
         assert stat.S_ISREG(regular.stat().st_mode) and stat.S_ISFIFO(fifo.stat().st_mode)
+        root.chmod(0o777)
         child = os.fork()
         if child == 0:
             try:

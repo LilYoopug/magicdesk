@@ -145,9 +145,10 @@ int md_fs_request_validate(const struct md_fs_request *q) {
             || (q->mode!=MD_FS_TASK_TRUNCATE && q->offset)
             || (q->mode==MD_FS_TASK_FCHDIR && (q->directory[0]<0 || *a || q->object[0])) ? -EINVAL : 0;
     if (q->operation==MD_FS_MKNOD)
-        return (descriptors&2) || !*a || *b || q->flags || q->capacity || q->offset
+        return (descriptors&2) || !*a || *b || q->flags || q->capacity || q->offset<0 || q->offset>UINT32_MAX
             || (q->mode&~(S_IFMT|07777U))
-            || ((q->mode&S_IFMT)!=S_IFREG && (q->mode&S_IFMT)!=S_IFIFO) ? -EINVAL : 0;
+            || ((q->mode&S_IFMT)!=S_IFREG && (q->mode&S_IFMT)!=S_IFIFO
+                && (q->mode&S_IFMT)!=S_IFCHR && (q->mode&S_IFMT)!=S_IFBLK) ? -EINVAL : 0;
     if (q->operation==MD_FS_MOUNT_TABLE)
         return descriptors || *a || *b || (q->flags&~(O_PATH|O_CLOEXEC)) || q->mode>1
             || q->capacity || q->offset || q->resolve ? -EINVAL : 0;

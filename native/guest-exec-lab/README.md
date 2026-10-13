@@ -204,8 +204,8 @@ readonly policy, detached descriptors and explicit unsupported queue operations.
 It requires Python, util-linux and strace, but no compiler or host mqueue support.
 The native resource-owner fixture separately checks final-owner tree/FD cleanup.
 
-`test_device_bind.py BUILD STORE` checks EPERM for device creation without
-CAP_MKNOD, proc-FD bind targets, native rdev/IO, nodev and detached FD lifetime.
+`test_device_bind.py BUILD STORE` checks logical character/block-device creation,
+proc-FD bind targets, native rdev/IO, nodev and detached FD lifetime.
 Regular-file/FIFO creation and non-root denial remain covered. It requires
 Python and util-linux. `/dev/full` binding and metadata are required even when
 Android denies data access; the bound path must preserve that denial.
@@ -1679,8 +1679,8 @@ Android. A process deadline kills a hung emulator. This control is a reference
 Linux implementation, not a Shroot pass or a new runtime kernel requirement.
 
 XZ rootfs archives are transcoded without changing tar contents, including device
-entries. The production importer owns omission/reporting for native `/dev` and
-rejection of unsupported objects elsewhere. Verify source signatures before
+entries. The production importer retains logical device metadata and rejects
+unsupported objects. Verify source signatures before
 conversion; wrapping or transcoding alone does not authenticate a rootfs.
 The QEMU fixture checks an x86-64 program's file IO and fork/wait through the
 distribution's user-mode emulator, not KVM or full-system virtualization.
@@ -1693,9 +1693,12 @@ authentication claim. `test_gentoo_runtime.py` checks stage3 userspace and GCC;
 `--packages` adds repository synchronization and a GNU hello source-build,
 installation and removal without disabling Portage's sandbox FEATURES.
 `test_rootfs_oci_fixture.py` checks conversion digests, exact unfiltered tar content
-and hardlinks without running an image. `test_oci.py` checks native-device omission,
+and hardlinks without running an image. `test_oci.py` checks logical device import/backup,
 lower-layer replacement, guest SHM, strict path/metadata handling and concurrent
 inspection while another participant writes the same store.
+Its helper-owner-death control needs a native FIFO: hosts denying native mkfifo
+report that one fixture unavailable, not passed. Logical guest FIFO and device
+checks remain required under the actual shell runtime.
 
 ## Guest Credential Checks
 

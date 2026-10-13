@@ -58,7 +58,7 @@ def guest(options):
                             '--network', options['network'], *limits, options['image'],
                             '/bin/sh', '-ec', 'id; echo PODMAN_CONTAINER_OK']
         if options['trace']:
-            command = ['strace', '-f', '-s', '180', '-e', 'trace=%file,%process,%network,mount_setattr,prlimit64',
+            command = ['strace', '-f', '-s', '180', '-e', 'trace=%file,%process,%network,%desc,prctl,seccomp,mount_setattr,prlimit64',
                        '-o', str(base / 'trace.log'), *command]
         result = run(command)
         assert 'PODMAN_CONTAINER_OK' in result['output'].splitlines(), result

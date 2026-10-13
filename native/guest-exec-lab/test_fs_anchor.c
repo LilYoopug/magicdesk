@@ -65,7 +65,7 @@ static void capture_failure(struct md_filesystem *fs) {
     }
     struct md_fs_anchor *p=NULL;
     struct md_fs_output output={.origin=&p};
-    struct md_fs_result out={.fd=pin,.open_completion={MD_OPEN_PIPE,control}};
+    struct md_fs_result out={.fd=pin,.open_completion={.kind=MD_OPEN_PIPE,.control=control}};
     md_view_capture(fs,fs->mounts,NULL,&out,&output);
     assert(out.error==-EMFILE && out.fd==-1 && !p && out.open_completion.kind==MD_OPEN_READY);
     assert(fcntl(pin,F_GETFD)<0 && errno==EBADF);

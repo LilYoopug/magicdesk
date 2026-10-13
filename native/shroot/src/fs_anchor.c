@@ -43,7 +43,9 @@ int md_fs_anchor_check_fd(const struct md_fs_anchor *p, int fd) {
     if (!p || fd<0) return -EINVAL;
     struct stat st;
     if (fstat(fd,&st)) return -errno;
-    return st.st_dev==p->device && st.st_ino==p->inode ? 0 : -ESTALE;
+    return (st.st_dev==p->device && st.st_ino==p->inode)
+        || (p->endpoint.inode && st.st_dev==p->endpoint.device && st.st_ino==p->endpoint.inode)
+        ? 0 : -ESTALE;
 }
 static struct md_fs_anchor *create(struct md_inode_lifetime *lifetime,
         struct md_mount_namespace *view, struct md_view_mount *mount, int fd, int pin, dev_t device, ino_t inode) {

@@ -49,7 +49,7 @@ int md_inode_open_object(struct md_inode_store *s, const char *id, int flags) {
 }
 
 static int create_node(struct md_inode_store *s, int dirfd, const char *path,
-        mode_t kind, mode_t mode, const char *target) {
+        mode_t kind, mode_t mode, const char *target, dev_t device) {
     if (mode & ~(s->identity ? 07777 : 01777)) return -ENOTSUP;
     int r = mdi_begin(s, 0);
     if (r) return r;
@@ -60,12 +60,15 @@ static int create_node(struct md_inode_store *s, int dirfd, const char *path,
     if (!r && loc.trailing && kind != S_IFDIR) r = -ENOENT;
     if (!r && mdi_readonly(s)) r=-EROFS;
     if (!r) r = mdi_parent_writable(s, &loc.parent);
+    if (!r && (kind==S_IFCHR || kind==S_IFBLK) && s->identity
+            && !md_identity_capable(s->identity,CAP_MKNOD)) r=-EPERM;
     if (!r) r=mdi_landlock(s,&loc.parent,NULL,md_landlock_make_access(kind));
     if (!r) r=mdi_write(s);
     struct mdi_node node;
     int fd = -1;
     if (!r) r = mdi_allocate(s, kind, mode, O_RDWR, target,
         loc.parent.id, &node, &fd);
+    if (!r && (kind==S_IFCHR || kind==S_IFBLK)) r=mdi_device_number(s,&node,device);
     if (!r) r = mdi_add_name(s, loc.parent.id, loc.name, node.id);
     if (!r) r = mdi_event(s, loc.parent.id, &node, loc.name, IN_CREATE, NULL);
     r = mdi_commit(s, r);
@@ -78,18 +81,36 @@ int md_inode_create(struct md_inode_store *s, int dirfd, const char *path, mode_
     return md_inode_open(s, dirfd, path, O_CREAT | O_EXCL | O_RDWR, mode);
 }
 int md_inode_mkdir(struct md_inode_store *s, int dirfd, const char *path, mode_t mode) {
-    return create_node(s, dirfd, path, S_IFDIR, mode, NULL);
+    return create_node(s, dirfd, path, S_IFDIR, mode, NULL, 0);
 }
 int md_inode_mkfifo(struct md_inode_store *s, int dirfd, const char *path, mode_t mode) {
-    int r = create_node(s, dirfd, path, S_IFIFO, mode, NULL);
+    int r = create_node(s, dirfd, path, S_IFIFO, mode, NULL, 0);
     if (r >= 0) { close(r); return 0; }
+    return r;
+}
+int mdi_device_number(struct md_inode_store *s,struct mdi_node *node,dev_t device) {
+    if (node->kind!=S_IFCHR && node->kind!=S_IFBLK) return device ? -EINVAL : 0;
+    sqlite3_stmt *q=NULL;
+    int r=mdi_prepare(s,"UPDATE objects SET rdev=?1 WHERE object=?2",&q);
+    if (!r) r=mdi_sql_error(sqlite3_bind_int64(q,1,(sqlite3_int64)device));
+    if (!r) r=mdi_bind_id(q,2,node->id);
+    if (!r) r=mdi_sql_error(mdi_step(s,q));
+    sqlite3_finalize(q);
+    if (!r) node->rdev=device;
+    return r;
+}
+int md_inode_mknod(struct md_inode_store *s,int dirfd,const char *path,mode_t mode,dev_t device) {
+    mode_t kind=mode&S_IFMT;
+    if (kind!=S_IFREG && kind!=S_IFIFO && kind!=S_IFCHR && kind!=S_IFBLK) return -EINVAL;
+    int r=create_node(s,dirfd,path,kind,mode&07777,NULL,device);
+    if (r>=0) { close(r); return 0; }
     return r;
 }
 int md_inode_symlink(struct md_inode_store *s, const char *target, int dirfd, const char *path) {
     if (!target) return -EFAULT;
     if (!*target) return -ENOENT;
     if (strnlen(target, PATH_MAX) == PATH_MAX) return -ENAMETOOLONG;
-    return create_node(s, dirfd, path, S_IFLNK, 0777, target);
+    return create_node(s, dirfd, path, S_IFLNK, 0777, target, 0);
 }
 ssize_t md_inode_readlink(struct md_inode_store *s, int dirfd, const char *path, char *out, size_t size) {
     if (!out) return -EFAULT;
@@ -164,12 +185,14 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
     if (!r && loc.node.kind == S_IFLNK && !(flags & O_PATH)) r = -ELOOP;
     if (!r && loc.node.kind == S_IFSOCK && !(flags & O_PATH)) r = -ENXIO;
     if (!r && loc.node.kind == S_IFDIR && (flags & (O_WRONLY | O_RDWR | O_TRUNC | O_CREAT))) r = -EISDIR;
-    if (!r && mdi_readonly(s) && (flags&(O_WRONLY|O_RDWR|O_TRUNC))) r=-EROFS;
+    if (!r && loc.node.kind==S_IFREG && mdi_readonly(s) && (flags&(O_WRONLY|O_RDWR|O_TRUNC))) r=-EROFS;
     if (!r && image && loc.node.kind != S_IFREG) r = -EACCES;
+    int device=!r && (loc.node.kind==S_IFCHR || loc.node.kind==S_IFBLK) && !(flags&O_PATH);
+    if (device && s->nodev) r=-EACCES;
     if (!r) r = mdi_open_permission(s, &loc.node, flags);
     if (!r && image) r = mdi_permission(s, &loc.node, X_OK, 0);
     if (!r) r=mdi_landlock(s,&loc.node,&loc.parent,image ? MD_LL_EXECUTE : md_landlock_open_access(flags,loc.node.kind));
-    if (!r && (flags&(O_WRONLY|O_RDWR|O_TRUNC)) && (loc.node.shared || s->overlay)) {
+    if (!r && !device && (flags&(O_WRONLY|O_RDWR|O_TRUNC)) && (loc.node.shared || s->overlay)) {
         r=mdi_write(s);
         if (!r) r=mdi_copy_up(s,&loc.node);
     }
@@ -178,7 +201,7 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
     int directory = r ? -1 : mdi_backing_directory(s, &loc.node);
     if (!r && directory < 0) r = directory;
     int deferred = !r && loc.node.kind == S_IFIFO && !(flags & O_PATH);
-    int native_flags = deferred ? O_PATH : flags & ~(O_CREAT | O_EXCL);
+    int native_flags = deferred || device ? O_PATH : flags & ~(O_CREAT | O_EXCL);
     if (!r && (fd = openat(directory, loc.node.backing, native_flags | O_CLOEXEC | O_NOFOLLOW)) < 0) r = -errno;
     if (!r && image) {
         struct stat opened;
@@ -190,6 +213,8 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
     r = mdi_finish(s, r);
     if (r) { if (fd >= 0) close(fd); return r; }
     if (deferred) return mdi_fifo_prepare(s, fd, completion);
+    if (device) *completion=(struct md_open_completion){.kind=MD_OPEN_DEVICE,
+        .device=loc.node.rdev,.mode=loc.node.kind};
     return fd;
 }
 int md_inode_link(struct md_inode_store *s, int sourcefd, const char *source,

@@ -12,9 +12,10 @@
 #include <string.h>
 #include <unistd.h>
 
-enum { MAGIC=0x4d444f56U, VERSION=4, MAX=MD_FD_RECEIPT_MAX };
+enum { MAGIC=0x4d444f56U, VERSION=5, MAX=MD_FD_RECEIPT_MAX };
 struct span { uint32_t start, count; struct md_fd_identity identity; };
-struct origin { uint32_t view, owner, mount, descriptor; struct md_fd_identity identity; uint64_t generation; };
+struct origin { uint32_t view, owner, mount, descriptor; struct md_fd_identity identity; uint64_t generation;
+    struct md_fd_identity endpoint; };
 struct manifest {
     uint32_t magic, version, count, origins, views, owners, rights, reserved;
     struct md_fd_message_route route;
@@ -23,7 +24,7 @@ struct manifest {
     struct origin origin[MAX];
     struct span view[MAX], owner[MAX];
 };
-_Static_assert(sizeof(struct span)==24 && sizeof(struct origin)==40, "origin wire records");
+_Static_assert(sizeof(struct span)==24 && sizeof(struct origin)==56, "origin wire records");
 _Static_assert(offsetof(struct manifest,index)==136, "origin wire header");
 struct cached_view {
     struct cached_view *next;
@@ -133,6 +134,7 @@ int md_fs_origin_export_entries(const struct md_fd_message *message, struct md_f
         anchors[data.origins++]=a; rights+=2;
         struct origin *o=&data.origin[n];
         o->identity=(struct md_fd_identity){a->device,a->inode}; o->mount=view_slot(a);
+        o->endpoint=a->endpoint;
         o->generation=a->mount->generation;
         if (o->mount==UINT_MAX) return -ESTALE;
         unsigned v=0; while (v<data.views && views[v]!=a->view) ++v;
@@ -338,6 +340,7 @@ static int import(struct md_fs_origin_imports *s, const struct md_fd_message_rou
             mount,p->fd[o->descriptor],p->fd[o->descriptor+1],
             o->identity.device,o->identity.inode);
         if (!a) { r=-errno; break; }
+        a->endpoint=o->endpoint;
         take(p,o->descriptor);
         take(p,o->descriptor+1);
         anchors[i]=a;

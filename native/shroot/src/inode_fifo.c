@@ -171,7 +171,7 @@ int mdi_fifo_prepare(struct md_inode_store *s, int original, struct md_open_comp
     if (!r && (out = fcntl(pin, F_DUPFD_CLOEXEC, 0)) < 0) r = -errno;
     close(original);
     if (r) { if (control >= 0) close(control); if (out >= 0) close(out); return r; }
-    *completion = (struct md_open_completion){MD_OPEN_PIPE, control};
+    *completion = (struct md_open_completion){.kind=MD_OPEN_PIPE, .control=control};
     return out;
 }
 void mdi_fifo_close(struct md_inode_store *s) {

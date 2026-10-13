@@ -267,11 +267,13 @@ int md_inode_prepare_reopen(struct md_inode_store *s, int original, int flags, i
     if ((flags & O_TRUNC) && !(flags & O_ACCMODE)) return -EINVAL;
     if (flags & O_PATH) flags &= O_PATH | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW;
     int write = mutable || (flags & (O_WRONLY | O_RDWR | O_TRUNC));
-    int r = mdi_begin(s, write);
+    int r = mdi_begin(s, 0);
     if (r) return r;
     struct mdi_node node;
     r = mdi_fd(s, original, &node);
     if (!r && (flags & O_DIRECTORY) && node.kind != S_IFDIR) r = -ENOTDIR;
+    int device=!r && (node.kind==S_IFCHR || node.kind==S_IFBLK) && !(flags&O_PATH);
+    if (device && s->nodev) r=-EACCES;
     if (!r) r = mdi_open_permission(s, &node, flags);
     if (!r) r=mdi_landlock_object(s,&node,s->landlock_execute ? MD_LL_EXECUTE : md_landlock_open_access(flags,node.kind));
     if (!r && mutable && (flags & O_PATH) && s->identity) {
@@ -280,14 +282,16 @@ int md_inode_prepare_reopen(struct md_inode_store *s, int original, int flags, i
         if (!r && st.st_uid != s->identity->uid.fs
                 && !md_identity_file_capable(s->identity,st.st_uid,st.st_gid,CAP_FOWNER)) r = -EPERM;
     }
-    if (!r && write) r = mdi_copy_up(s, &node);
+    if (!r && write && (mutable || node.kind==S_IFREG)) r=mdi_write(s);
+    if (!r && write && (mutable || node.kind==S_IFREG)) r=mdi_copy_up(s,&node);
     int fd = -1;
     int directory = r ? -1 : mdi_backing_directory(s, &node);
     if (!r && directory < 0) r = directory;
     int deferred = !r && node.kind == S_IFIFO && !(flags & O_PATH);
-    if (!r && (fd = openat(directory, node.backing, (deferred ? O_PATH : flags) | O_NOFOLLOW | O_CLOEXEC)) < 0) r = -errno;
+    if (!r && (fd = openat(directory, node.backing, (deferred || device ? O_PATH : flags) | O_NOFOLLOW | O_CLOEXEC)) < 0) r = -errno;
     r = mdi_commit(s, r);
     if (r && fd >= 0) close(fd);
     if (!r && deferred) return mdi_fifo_prepare(s, fd, completion);
+    if (!r && device) *completion=(struct md_open_completion){.kind=MD_OPEN_DEVICE,.device=node.rdev,.mode=node.kind};
     return r ? r : fd;
 }

@@ -113,14 +113,15 @@ payload must be empty. See [named pipes](fifos.md) for execution limits.
 ACL/capability-bearing inputs require preserved ownership.
 General set-ID metadata does not grant execution admission.
 
-Character/block-device entries under native `/dev` are omitted with their path,
-type and major/minor numbers reported. The same runtime path classifier excludes
-guest-owned `/dev/shm`. Omission removes an older-layer placeholder but creates no
-host device, guest inode or ordinary-file substitute. Archive paths, duplicates,
-links and supported metadata are still validated; symlink ancestors cannot redirect
-device omission into another directory. Devices outside that native subtree remain
-unsupported, as do ACL/capability-bearing device entries. At execution, `/dev/null`
-is Android's real device; unavailable `/dev/console` retains the kernel error.
+Character/block-device entries retain logical type, major/minor, owners, modes
+and hardlinks in regular metadata carriers. They create no native device and
+contain no archive payload. Ordinary path, duplicate, ownership and attribute
+validation applies; symlink parents resolve only within the image namespace.
+Layers, snapshots and backup/restore preserve these entries. The initial native
+`/dev` provider still covers image entries unless the guest mounts its own tree.
+Supported logical character numbers open explicit Android endpoints with their
+real permissions; unsupported devices return ENXIO on data open, not a regular
+file substitute. Unavailable native `/dev/console` retains the kernel error.
 Interactive terminals use their existing PTY, not an invented system console.
 
 The prepared userspace remains responsible for NSS, DNS and CA certificates.
@@ -214,7 +215,7 @@ snapshot before parsing; observed source mutation rejects publication.
 `backup` requires exclusive store ownership. It emits a self-contained zstd PAX
 archive, including lower file bodies, image configuration and guest-user launch
 policy. `restore` publishes a new writable store with no lower dependencies.
-Names, hardlink relationships, symlinks, FIFO metadata, guest UID/GID/mode,
+Names, hardlink relationships, symlinks, FIFO and device metadata, guest UID/GID/mode,
 access/default ACLs, file capabilities, user xattrs and file atime/mtime are
 retained. The format carries guest mode independently of libarchive's ACL mode
 representation. Native Android SELinux labels are not exported; unsupported
@@ -383,8 +384,8 @@ writing its result to stdout; a slow reader cannot hold a filesystem transaction
 
 The Gentoo ARM64 OpenRC stage3 checks use an independently signature- and
 SHA-512-verified official archive. The OCI wrapper preserves tar contents; the
-production importer reports omission of `/dev/console` and `/dev/null`, supplied
-by native `/dev` at execution.
+production importer preserves `/dev/console` and `/dev/null` as logical metadata,
+covered by native `/dev` at execution unless the guest replaces that mount.
 The prepared userspace passes GCC compilation, pthreads, fork/exec and file IO,
 and runs Python and Portage's information command. `emerge-webrsync` downloads
 the repository snapshot and successfully verifies its OpenPGP signature with

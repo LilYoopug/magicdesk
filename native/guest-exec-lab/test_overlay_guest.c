@@ -7,6 +7,7 @@
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <sys/vfs.h>
 #include <sys/xattr.h>
 #include <sys/wait.h>
@@ -43,6 +44,14 @@ static void writable(void) {
     assert(S_ISDIR(work_stat.st_mode) && !(work_stat.st_mode&07777));
     assert(!chown("/tmp/overlay/work/work",0,0));
     int root=open("/tmp/overlay/merged",O_RDONLY|O_DIRECTORY); assert(root>=0);
+    struct stat lower;
+    assert(!stat("/tmp/overlay/lower/null",&lower));
+    int device=openat(root,"null",O_RDWR); assert(device>=0);
+    assert(!fchmod(device,0640) && write(device,"x",1)==1); close(device);
+    struct stat node;
+    assert(!stat("/tmp/overlay/writable/null",&node) && S_ISCHR(node.st_mode)
+        && node.st_rdev==makedev(1,3) && (node.st_mode&0777)==0640);
+    assert(!stat("/tmp/overlay/lower/null",&node) && node.st_mode==lower.st_mode);
     int old=openat(root,"original",O_RDONLY); assert(old>=0);
     int writable_file=openat(root,"original",O_RDWR); assert(writable_file>=0);
     assert(pwrite(writable_file,"upper",5,0)==5 && !ftruncate(writable_file,5));
@@ -78,6 +87,8 @@ static void writable(void) {
     assert(!mounted);
     contents(AT_FDCWD,"/tmp/overlay/merged/moved","upper");
     contents(AT_FDCWD,"/tmp/overlay/merged/new-link","upper");
+    assert(!stat("/tmp/overlay/merged/null",&node) && S_ISCHR(node.st_mode)
+        && node.st_rdev==makedev(1,3) && (node.st_mode&0777)==0640);
     missing("/tmp/overlay/merged/original"); missing("/tmp/overlay/merged/deleted");
     missing("/tmp/overlay/merged/sub/low");
     assert(!umount2("/tmp/overlay/merged",0));
@@ -107,6 +118,10 @@ void test_overlay_guest(void) {
     file("/tmp/overlay/lower/common","low"); file("/tmp/overlay/top/common","high");
     file("/tmp/overlay/lower/deleted","hidden"); file("/tmp/overlay/top/deleted","");
     assert(!setxattr("/tmp/overlay/top/deleted","user.overlay.whiteout","",0,0));
+    file("/tmp/overlay/lower/device-deleted","hidden");
+    assert(!mknod("/tmp/overlay/top/device-deleted",S_IFCHR|0600,0));
+    assert(!mknod("/tmp/overlay/top/absent-whiteout",S_IFCHR|0600,0));
+    assert(!mknod("/tmp/overlay/lower/null",S_IFCHR|0666,makedev(1,3)));
     file("/tmp/overlay/top/not-whiteout","nonempty");
     assert(!setxattr("/tmp/overlay/top/not-whiteout","user.overlay.whiteout","",0,0));
     directory("/tmp/overlay/lower/sub"); directory("/tmp/overlay/top/sub");
@@ -135,6 +150,11 @@ void test_overlay_guest(void) {
     contents(root,"not-whiteout","nonempty"); contents(root,"opaque/shown","shown child");
     missing("/tmp/overlay/merged/deleted"); missing("/tmp/overlay/merged/opaque/hidden");
     missing("/tmp/overlay/merged/covered");
+    missing("/tmp/overlay/merged/device-deleted"); missing("/tmp/overlay/merged/absent-whiteout");
+    int null=openat(root,"null",O_RDWR); assert(null>=0);
+    struct stat device;
+    assert(!fstat(null,&device) && S_ISCHR(device.st_mode) && device.st_rdev==makedev(1,3));
+    assert(write(null,"x",1)==1); close(null);
     struct stat a,b;
     assert(!fstatat(root,"original",&a,0) && !fstatat(root,"alias",&b,0));
     assert(a.st_ino==b.st_ino && a.st_dev==b.st_dev && a.st_nlink==2);
@@ -152,8 +172,9 @@ void test_overlay_guest(void) {
     for (struct dirent *e; (e=readdir(entries));) {
         common+=!strcmp(e->d_name,"common"); ++count;
         assert(strcmp(e->d_name,"deleted") && strcmp(e->d_name,"covered"));
+        assert(strcmp(e->d_name,"device-deleted") && strcmp(e->d_name,"absent-whiteout"));
     }
-    assert(common==1 && count==9); closedir(entries);
+    assert(common==1 && count==10); closedir(entries);
     assert(!umount2("/tmp/overlay/merged",MNT_DETACH));
     contents(root,"common","high"); contents(root,"alias","shared body");
     contents(AT_FDCWD,"/tmp/overlay/merged/covered","base");

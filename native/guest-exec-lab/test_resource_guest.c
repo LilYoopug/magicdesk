@@ -1987,6 +1987,7 @@ int test_namespace_mounts_pid_guest(void);
 int test_devpts_guest(int);
 int test_cgroup_guest(int);
 int test_cgroup_namespace_guest(void);
+int test_device_nodes_guest(void);
 int test_keyring_guest(int, char **);
 int test_native_metadata_guest(void);
 int test_mutation_signal_guest(const char *, int, int);
@@ -2010,6 +2011,7 @@ int main(int argc, char **argv) {
     if (argc>=2 && !strcmp(argv[1],"devpts")) return test_devpts_guest(0);
     if (argc>=2 && !strcmp(argv[1],"devpts-pid")) return test_devpts_guest(1);
     if (argc==2 && !strcmp(argv[1],"cgroup")) return test_cgroup_guest(0);
+    if (argc==2 && !strcmp(argv[1],"device-nodes")) return test_device_nodes_guest();
     if (argc==2 && !strcmp(argv[1],"cgroup-pid")) return test_cgroup_guest(1);
     if (argc==2 && !strcmp(argv[1],"cgroup-namespace")) return test_cgroup_namespace_guest();
     if (argc==2 && !strcmp(argv[1],"native-metadata")) return test_native_metadata_guest();

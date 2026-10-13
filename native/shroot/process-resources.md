@@ -1277,8 +1277,12 @@ pivot_root; unrelated directory aliases remain ordinary guest dentries. Nested
 Bubblewrap can therefore construct a new root with `--proc /proc` and
 `--dev-bind /dev /dev`, without borrowing host mount authority. `/dev` uses the
 selected native devices and their real permissions, not a private device manager.
-Guest device-node creation returns EPERM: CAP_MKNOD is not advertised and there
-is no device-creation authority. Regular-file and FIFO mknod remain supported.
+Guest device-node creation requires logical CAP_MKNOD and stores type/rdev in
+the inode provider without native mknod. Supported character numbers use explicit
+native endpoints; unknown numbers remain metadata-only and return ENXIO on data
+open. Native attached directories reject device creation with EPERM.
+The origin retains the logical carrier separately from endpoint identity, so
+fstat, chmod/chown, reopen and transferred descriptors use guest metadata.
 Callers may bind an existing native device onto a regular placeholder, including
 through a retained proc-FD target. Native rdev, IO and access checks are preserved;
 nodev rejects new opens without invalidating already-open descriptions.
@@ -1526,12 +1530,18 @@ daemon or periodic task scan is involved. Removal rejects populated groups and
 releases backing directory descriptors; retired logical metadata remains until
 the launch world is released, allowing open controls to return ENODEV.
 
-The v2 controller list is empty; membership, events and domain type are real
-logical state, but CPU/memory/IO limits and freezing are not enforced. The v1
+The v2 hierarchy advertises pids. Subtree control enables child pids files,
+respects the no-internal-process rule and refuses disabling a controller still
+enabled below. Removed controls invalidate retained FDs even after re-enabling.
+`pids.max` retains a nonnegative integer or max; `pids.current` counts live threads
+recursively on read; `pids.events` reports max 0. These values are permissive
+compatibility state, not enforced limits. Fork/exit retain the existing membership
+bookkeeping without a second counter or periodic scan. CPU/memory/IO limits and
+freezing remain unavailable. The v1
 devices list is always `a *:* rwm`; all-device allowance is accepted, restrictive
 rules are rejected. Unsupported controller enabling, freezes and release agents
 return EOPNOTSUPP. This interface never accesses Android's cgroup hierarchy or
-claims that a resource/security limit was installed. Controller delegation and
+provides a resource/security boundary. Administrative delegation and
 independent-supervisor hierarchy transfer are not implemented.
 
 `cgroup_program` owns launch-local logical BPF program IDs, descriptors and
@@ -2110,7 +2120,7 @@ proc-FD opens capture the original descriptor under the table turn and perform
 reopening on the worker, with no private guest anchor or repeated guest-number
 lookup. Native object reopening and attachment reopening use the same primitive;
 attachment policy is checked before execution and FIFO completion remains deferred.
-Regular-file and FIFO mknod likewise keep creation resources on the worker.
+Regular-file, FIFO and logical-device mknod likewise keep creation resources on the worker.
 Chdir/truncate use a retained worker target and a task-affine path syscall through
 its proc descriptor lease. No guest slot is installed; the final syscall retains
 the caller's fs_struct, RLIMIT_FSIZE, SIGXFSZ and filter admission. The source

@@ -113,6 +113,7 @@ static int write_tree(struct md_inode_store *s, struct archive *ar) {
         char name[PATH_MAX]; snprintf(name, sizeof(name), "rootfs/%s", *path ? path+1 : ".");
         archive_entry_set_pathname(e, name); archive_entry_set_mode(e, st.st_mode);
         archive_entry_set_uid(e, st.st_uid); archive_entry_set_gid(e, st.st_gid);
+        archive_entry_set_rdev(e,st.st_rdev);
         archive_entry_set_mtime(e, st.st_mtim.tv_sec, st.st_mtim.tv_nsec);
         archive_entry_set_atime(e, st.st_atim.tv_sec, st.st_atim.tv_nsec);
         archive_entry_set_size(e, 0);

@@ -25,7 +25,7 @@ void md_cgroup_member_release(struct md_cgroup_member *);
 void md_cgroup_member_publish(struct md_cgroup_member *,pid_t,pid_t,struct md_pid_identity *,struct md_pid_identity *);
 void md_cgroup_member_depart(struct md_cgroup_member *,pid_t);
 /* One hierarchy of each kind per launch; mounts and open files retain it.
- * devices=0 is cgroup v2 with no resource controllers, devices=1 is the
+ * devices=0 is cgroup v2 with logical, non-enforcing pids policy, devices=1 is the
  * permissive v1 devices hierarchy. Android cgroups are never opened. */
 struct md_cgroup_view *md_cgroup_mount(struct md_cgroup_member *,int parent,int devices,
     const struct md_identity *);

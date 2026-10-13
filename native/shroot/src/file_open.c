@@ -9,6 +9,7 @@
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 #if __STDC_HOSTED__
 static long call(long nr, long a, long b, long c, long d, long e, long f) {
@@ -20,6 +21,33 @@ static long call(long nr, long a, long b, long c, long d, long e, long f) {
 #define call md_raw
 #endif
 #define C(n,a,b,c,d,e,f) call(SYS_##n,(long)(a),(long)(b),(long)(c),(long)(d),(long)(e),(long)(f))
+
+int md_open_device(unsigned mode,uint64_t device,int flags,struct md_open_completion *completion) {
+    *completion=(struct md_open_completion){0};
+    if (!S_ISCHR(mode)) return -ENXIO;
+    /* Only explicitly supported native endpoints. Metadata-only nodes do not
+     * grant arbitrary host device access, even under a root executor. */
+    static const struct { unsigned major,minor; const char *path; int caller; } devices[]={
+        {1,3,"/dev/null",0},{1,5,"/dev/zero",0},{1,7,"/dev/full",0},
+        {1,8,"/dev/random",0},{1,9,"/dev/urandom",0},{5,0,"/dev/tty",1}
+    };
+    for (unsigned i=0;i<sizeof(devices)/sizeof(*devices);++i) {
+        if (major(device)!=devices[i].major || minor(device)!=devices[i].minor) continue;
+        long fd=C(openat,AT_FDCWD,devices[i].path,O_PATH|O_CLOEXEC|O_NOFOLLOW,0,0,0);
+        if (fd<0) return (int)fd;
+        struct stat st;
+        long r=C(fstat,fd,&st,0,0,0,0);
+        if (!r && (!S_ISCHR(st.st_mode) || st.st_rdev!=device)) r=-ENXIO;
+        if (!r && devices[i].caller) {
+            completion->kind=MD_OPEN_CALLER; return (int)fd;
+        }
+        struct md_open_completion opened;
+        if (!r) r=md_reopen_file((int)fd,md_open_endpoint_flags(flags),&opened);
+        C(close,fd,0,0,0,0,0);
+        return (int)r;
+    }
+    return -ENXIO;
+}
 
 static void descriptor_path(char path[64], int fd) {
     const char prefix[] = "/proc/self/fd/";
@@ -54,6 +82,12 @@ int md_reopen_file(int fd, int flags, struct md_open_completion *completion) {
 }
 int md_complete_open(int pin, int flags, struct md_open_completion completion) {
     if (pin < 0 || completion.kind == MD_OPEN_READY) return pin;
+    if (completion.kind==MD_OPEN_DEVICE) {
+        struct md_open_completion next;
+        int fd=md_open_device(completion.mode,completion.device,flags,&next);
+        C(close,pin,0,0,0,0,0);
+        return md_complete_open(fd,flags,next);
+    }
     char path[64]; descriptor_path(path, pin);
     flags = md_open_endpoint_flags(flags);
     if (completion.kind == MD_OPEN_FIFO || completion.kind==MD_OPEN_CALLER) {

@@ -32,7 +32,7 @@ static int clone_node(struct md_inode_store *source, struct md_inode_store *targ
         if (!r) r=mdi_sync(target,fd);
         close(fd);
         if (r) return r;
-    } else if (node->kind == S_IFIFO) {
+    } else if (node->kind == S_IFIFO || node->kind == S_IFCHR || node->kind == S_IFBLK) {
         int fd = openat(target->objects, node->backing, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
         if (fd < 0) return -errno;
         struct timespec times[2] = {st.st_atim, st.st_mtim};

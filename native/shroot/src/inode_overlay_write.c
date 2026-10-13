@@ -63,6 +63,7 @@ static int metadata(struct md_inode_store *s,const struct mdi_node *from,struct 
     struct stat st={0};
     int r=mdi_stat(s,from,&st);
     if (!r) r=mdi_metadata(u,to,st.st_uid,st.st_gid,st.st_mode&07777);
+    if (!r) r=mdi_device_number(u,to,from->rdev);
     if (!r && from->kind!=S_IFLNK) r=mdi_acl_store(u,to,MD_ACL_ACCESS,NULL,0);
     if (!r && from->kind==S_IFDIR) r=mdi_acl_store(u,to,MD_ACL_DEFAULT,NULL,0);
     if (!r) r=mdi_file_capability(u,to,NULL,0);
@@ -167,7 +168,8 @@ static int promote(struct md_inode_store *s,const char *id,struct mdi_node *uppe
         if (node.kind==S_IFREG) {
             r=mdi_import_shared(u,0,node.backing,upper);
             if (!r) r=bind_body(s,&node,upper);
-        } else if (node.kind==S_IFDIR || node.kind==S_IFLNK || node.kind==S_IFIFO || node.kind==S_IFSOCK) {
+        } else if (node.kind==S_IFDIR || node.kind==S_IFLNK || node.kind==S_IFIFO || node.kind==S_IFSOCK
+                || node.kind==S_IFCHR || node.kind==S_IFBLK) {
             char target[PATH_MAX];
             if (node.kind==S_IFLNK) {
                 ssize_t n=readlinkat(s->objects,node.backing,target,sizeof(target));

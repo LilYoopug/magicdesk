@@ -486,7 +486,8 @@ static void native(struct md_filesystem *fs, const struct md_fs_request *q,
     }
     case MD_FS_MKDIR: if (mkdirat(a->parent, a->name, q->mode&~q->attributes.creation_mask)) r = -errno; break;
     case MD_FS_MKNOD:
-        if (mknodat(a->parent,a->name,q->mode&~q->attributes.creation_mask,0)) r=-errno;
+        if ((q->mode&S_IFMT)==S_IFCHR || (q->mode&S_IFMT)==S_IFBLK) r=-EPERM;
+        else if (mknodat(a->parent,a->name,q->mode&~q->attributes.creation_mask,0)) r=-errno;
         break;
     case MD_FS_SYMLINK: if (symlinkat(q->path[1], a->parent, a->name)) r = -errno; break;
     case MD_FS_UNLINK: if (unlinkat(a->parent, a->name, (int)q->flags)) r = -errno; break;
@@ -618,7 +619,16 @@ void md_fs_mounts_execute(struct md_filesystem *fs, const struct md_fs_request *
             || q->operation==MD_FS_SYMLINK || q->operation==MD_FS_CREATE
             || (q->operation==MD_FS_OPEN && !(q->flags&O_PATH)
                 && (q->flags&(O_CREAT|O_EXCL))==(O_CREAT|O_EXCL)))) r=-EEXIST;
-    if (!r && mutates(q,&a) && a.mount && md_view_readonly(a.mount)) r = -EROFS;
+    if (!r && mutates(q,&a) && a.mount && md_view_readonly(a.mount)) {
+        r=-EROFS;
+        if (q->operation==MD_FS_OPEN && a.fd>=0 && md_view_inode(a.mount)) {
+            struct md_fs_request stat={.operation=MD_FS_FSTAT,.directory={a.fd,-1}};
+            struct md_fs_result result;
+            inode(fs,a.view,a.mount,&stat,&result,NULL);
+            if (result.error) r=result.error;
+            else if (S_ISCHR(result.info.mode) || S_ISBLK(result.info.mode) || S_ISFIFO(result.info.mode)) r=0;
+        }
+    }
     /* Data opens are authorized by the selected typed provider below. Only
      * namespace mutations must be rejected before that provider dispatch. */
     if (!r && mutates(q,&a) && q->operation!=MD_FS_OPEN && q->operation!=MD_FS_REOPEN

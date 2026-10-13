@@ -68,7 +68,7 @@ static void owner_death(void) {
     pid_t owner=fork(); assert(owner>=0);
     if (!owner) {
         struct md_open_job job={0};
-        assert(!start(&job,pin,O_RDONLY,(struct md_open_completion){MD_OPEN_PIPE,control}));
+        assert(!start(&job,pin,O_RDONLY,(struct md_open_completion){.kind=MD_OPEN_PIPE,.control=control}));
         assert(write(message[1],&job.pid,sizeof(job.pid))==sizeof(job.pid));
         for (;;) pause();
     }
@@ -89,7 +89,7 @@ int main(void) {
     for (unsigned round=0;round<32;++round) {
         if (round==16) missing_close_range();
         int control, pin=pin_pipe(&control);
-        struct md_open_completion completion={MD_OPEN_PIPE,control};
+        struct md_open_completion completion={.kind=MD_OPEN_PIPE,.control=control};
         struct md_open_job reader={0},writer={0};
         assert(!start(&writer,pin,O_WRONLY|O_NONBLOCK,completion));
         int absent=reap(&writer);
@@ -117,7 +117,7 @@ int main(void) {
     int control,pin=pin_pipe(&control),unrelated[2];
     assert(!pipe2(unrelated,O_CLOEXEC|O_NONBLOCK));
     struct md_open_job parked={0};
-    assert(!start(&parked,pin,O_RDONLY,(struct md_open_completion){MD_OPEN_PIPE,control}));
+    assert(!start(&parked,pin,O_RDONLY,(struct md_open_completion){.kind=MD_OPEN_PIPE,.control=control}));
     assert(!close(unrelated[1]));
     assert(md_event_wait_fd(unrelated[0],POLLIN|POLLHUP,md_event_now()+5000000000LL)>=0);
     char byte; assert(read(unrelated[0],&byte,1)==0);

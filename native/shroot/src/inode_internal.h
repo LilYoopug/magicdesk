@@ -44,7 +44,7 @@ struct mdi_stat_location {
 struct md_inode_store {
     sqlite3 *db;
     int objects, watch_presence, locked, recording, readonly, reflink_unavailable;
-    int super_readonly, super_checked;
+    int super_readonly, super_checked, nodev;
     sqlite3_int64 super_version;
     struct md_inode_lifetime *lifetime;
     const struct md_identity *identity;
@@ -78,7 +78,7 @@ static inline const char *mdi_root(const struct md_inode_store *s) {
 struct mdi_node {
     char id[33], parent[33], backing[33], scope[33];
     mode_t kind;
-    dev_t device, logical_device;
+    dev_t device, logical_device, rdev;
     ino_t inode, logical_inode;
     nlink_t links;
     int attached, shared, source;
@@ -140,6 +140,7 @@ int mdi_open_permission(struct md_inode_store *, const struct mdi_node *, int fl
 int mdi_sticky(struct md_inode_store *, const struct mdi_location *);
 int mdi_sticky_as(struct md_inode_store *, const struct mdi_location *, const struct md_identity *);
 int mdi_metadata(struct md_inode_store *, const struct mdi_node *, uint32_t, uint32_t, mode_t);
+int mdi_device_number(struct md_inode_store *, struct mdi_node *, dev_t);
 int mdi_file_capability(struct md_inode_store *, const struct mdi_node *, const void *, size_t);
 int mdi_acl_store(struct md_inode_store *, const struct mdi_node *, unsigned, const void *, size_t);
 int mdi_acl_permission(struct md_inode_store *, const struct mdi_node *, const struct md_identity *, unsigned);

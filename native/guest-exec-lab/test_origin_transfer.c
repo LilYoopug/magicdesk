@@ -24,6 +24,7 @@
 #include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
+#include <sys/sysmacros.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -246,7 +247,7 @@ static void failures(const char *base) {
         int seals=F_SEAL_WRITE|F_SEAL_SEAL|F_SEAL_SHRINK|F_SEAL_GROW;
         switch (n) {
         case 0: mutate(&p,0,0,seals); break;
-        case 1: mutate(&p,1,5,seals); break;
+        case 1: mutate(&p,1,UINT_MAX,seals); break;
         case 2: mutate(&p,2,254,seals); break;
         case 3: mutate(&p,3,254,seals); break;
         case 4: mutate(&p,7,1,seals); break;
@@ -836,17 +837,50 @@ static void mount_pins(const char *base) {
     assert(descriptors()==before);
     puts("PASS mount busy lifetime: queued rights, imported and derived origins, final close and exact cleanup");
 }
+static void device_origin(const char *base) {
+    unsigned before=descriptors(); struct source s=source(base,1);
+    message_close(&s); s.message=NULL; s.messages=NULL;
+    assert(!md_inode_mknod(s.fs.store,-1,"/null",S_IFCHR|0600,makedev(1,3)));
+    struct md_fs_anchor *a=NULL;
+    struct md_fs_result opened=request(&s.fs,NULL,MD_FS_OPEN,"/null",O_RDWR,&a);
+    assert(!opened.error && opened.fd>=0 && a && a->endpoint.inode);
+    struct md_fs_result expected=request(&s.fs,a,MD_FS_FSTAT,NULL,0,NULL);
+    assert(!expected.error && S_ISCHR(expected.info.mode));
+    char store[PATH_MAX]; path(store,base,"store");
+    publish(&s,store,&a,1);
+    struct md_fs_origin_parcel p={0}; assert(!md_fs_origin_export(s.message,&p));
+    struct md_fd_message_route route=s.route;
+    assert(!md_inode_unlink(s.fs.store,-1,"/null",0));
+    md_fs_anchor_release(a); source_close(&s);
+    struct md_fs_origin_imports *i=imports(base); struct md_fs_origin_vector *v=NULL;
+    assert(!md_fs_origin_import(i,&route,&p,&v));
+    a=md_fs_origin_vector_entries(v)[0];
+    struct md_filesystem fs={0};
+    assert(!md_inode_store_open(store,0,&fs.store) && !md_fs_mounts_open(&fs,NULL,0));
+    struct md_fs_request q={.operation=MD_FS_FSTAT,.origin={a,NULL},.directory={opened.fd,-1}};
+    struct md_fs_result st; md_fs_execute(&fs,&q,&st,NULL);
+    assert(!st.error && st.info.mode==expected.info.mode && st.info.inode==expected.info.inode
+        && st.info.rdev==makedev(1,3) && !st.info.links);
+    assert(write(opened.fd,"x",1)==1);
+    struct md_fs_result again=request(&fs,a,MD_FS_REOPEN,NULL,O_RDWR,NULL);
+    assert(!again.error && again.fd>=0 && write(again.fd,"x",1)==1); close(again.fd);
+    md_fs_mounts_close(&fs); md_inode_store_close(fs.store);
+    md_fs_origin_vector_free(v); md_fs_origin_imports_free(i); close(opened.fd);
+    assert(descriptors()==before);
+    puts("PASS device origin: cold import after sender teardown, unlinked metadata, native IO and reopen");
+}
 void test_origin_transfer(const char *base) {
     alarm(120); bundles();
     const char *names[]={"origin-local","origin-faults","origin-processes","origin-unknown",
         "origin-capsules","origin-capsules-unknown","origin-capsules-discard","origin-storage","origin-mount-pins",
-        "origin-typed-capsules","origin-anonymous-capsules","origin-private-view-capsules"}; char name[PATH_MAX];
-    for (unsigned n=0;n<12;++n) {
+        "origin-typed-capsules","origin-anonymous-capsules","origin-private-view-capsules","origin-device"}; char name[PATH_MAX];
+    for (unsigned n=0;n<sizeof(names)/sizeof(*names);++n) {
         path(name,base,names[n]); assert(!mkdir(name,0700));
         if (!n) local(name); else if (n==1) failures(name); else if (n==2) processes(name);
         else if (n==3) unknown(name); else if (n==7) storage_process(name);
         else if (n==8) mount_pins(name); else if (n==9) typed_capsules(name,0);
         else if (n==10) anonymous_capsules(name); else if (n==11) typed_capsules(name,1);
+        else if (n==12) device_origin(name);
         else capsules(name,(int)n-4);
     }
     alarm(0); puts("PASS portable message origins");

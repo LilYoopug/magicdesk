@@ -47,9 +47,9 @@ exclusive maintenance or before a store is published.
 Their private contract is in
 `inode_internal.h`. Callers use the explicit dirfd-based `inode_store.h` API.
 The internal database format is versioned and incompatible formats are rejected,
-not migrated. Format 13 includes scoped namespace views, logical owners/modes, POSIX ACLs, file capabilities,
+not migrated. Format 14 includes scoped namespace views, logical owners/modes, POSIX ACLs, file capabilities,
 unambiguous file-path history, stable identities, backing history,
-immutable sources, socket addresses, FIFO ownership, transactional namespace
+immutable sources, socket addresses, FIFO ownership, device type/rdev, transactional namespace
 counters and the [watch event journal](watches.md). Incompatible stores require a separately prepared store; opening
 one never rewrites or deletes it. Bind retains a name until
 unlink, including stale listeners; existing connections survive unlink/rebind.
@@ -79,6 +79,8 @@ tombstones that mask native attributes. Ordinary xattr operations and logical
 ACL/capability attributes execute through the same typed inode operation; backing
 FDs do not escape for a second, detached xattr mutation. Overlay views hide private
 control attributes. Directory attributes come from the selected layer.
+Character-device `0:0` whiteouts and regular-file whiteout xattrs use the same
+merge policy. They hide lower names and are not exposed by merged enumeration.
 
 An overlay retains the mounting identity, supplementary groups and owning user
 namespace independently of the mounting task. Access checks apply both caller
@@ -97,6 +99,18 @@ opens publish their local inode association without holding two store transactio
 Snapshots create fresh FIFO channels. Regular files do not use channel lookup.
 Successful upper-name publication emits the same committed directory events as
 ordinary inode operations; rollback does not notify an uncommitted name.
+
+Character/block devices use regular metadata carriers, never host `mknod`.
+Guest CAP_MKNOD authorizes creation; ordinary permissions, Landlock and mount
+policy apply. Snapshot, overlay copy-up, hardlinks and archive backup retain
+type/rdev. Metadata refers to the logical carrier even after data open returns
+a native endpoint. A retained origin carries both identities through dup,
+proc-FD reopen and cold SCM transfer, including after unlink or sender exit.
+`file_open` maps supported character-device numbers to explicit Android
+endpoints: null, zero, full, random, urandom and the caller's controlling tty.
+Unknown devices return ENXIO on data open; O_PATH and stat remain available.
+Native access denials remain errors, and nodev denies new data opens without
+invalidating existing IO. Readonly mounts protect metadata, not device IO.
 
 ## Paths And Directories
 

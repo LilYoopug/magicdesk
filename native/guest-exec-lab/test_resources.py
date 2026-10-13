@@ -57,6 +57,8 @@ def main():
         return value
 
     def check_namespaces():
+        check("guest device nodes", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
+              + root + "/store --deadline-seconds 90 -- /bin/test device-nodes", "PASS guest device nodes:")
         check("guest keyring absence", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
               + root + "/store --deadline-seconds 90 -- /bin/test keyring", "PASS guest keyring absence:")
         check("native memfd metadata", root + "/libmagicdesk_guest_resource_guest.so native-metadata", "PASS native metadata:")

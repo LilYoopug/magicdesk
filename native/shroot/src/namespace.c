@@ -145,9 +145,6 @@ static long descriptor_call(const struct md_fs *fs, long nr, const unsigned long
         if (released<0) return released;
         if (!delegated) return value;
     }
-    long native = md_namespace_native_descriptor((int)a[0]);
-    if (native < 0) return native;
-    if (native && !fs->managed_paths) return md_raw(nr, a[0], a[1], a[2], a[3], a[4], a[5]);
     struct md_fs_response out;
     struct stat st;
     if (nr==SYS_fstatfs) {
@@ -217,11 +214,6 @@ long md_namespace_xattr(const struct md_fs *fs, long nr, struct md_namespace_ope
 static long metadata_request(const struct md_fs *fs, long nr, struct md_namespace_operand operand, const char *path,
         unsigned long mode, unsigned long extra, int flags, struct md_fs_response *out) {
     int fd=operand.descriptor;
-    if ((!path || !*path) && fd!=MD_NAMESPACE_EXECUTABLE && !operand.capture.path) {
-        long native = md_namespace_native_descriptor(fd);
-        if (native < 0) return native;
-        if (native) return -EXDEV;
-    }
     struct md_fs_request q = {.directory = {fd, -1}, .capture={operand.capture}, .path={path,NULL}, .flags = (unsigned)flags};
     switch (nr) {
     case SYS_fchmod: case SYS_fchmodat: case SYS_fchmodat2:
@@ -355,14 +347,12 @@ long md_namespace_path_call(const struct md_fs *fs, long nr, const unsigned long
     case SYS_mknodat: {
         unsigned mode = (unsigned)a[2];
         if (!(mode&S_IFMT)) mode|=S_IFREG;
-        /* Device creation has no guest authority (CAP_MKNOD is not advertised).
-         * Existing devices may be bound, subject to native open permissions. */
-        if ((mode&S_IFMT)==S_IFCHR || (mode&S_IFMT)==S_IFBLK) return -EPERM;
-        if ((mode&S_IFMT)!=S_IFIFO && (mode&S_IFMT)!=S_IFREG) return -ENOTSUP;
+        if ((mode&S_IFMT)!=S_IFIFO && (mode&S_IFMT)!=S_IFREG
+                && (mode&S_IFMT)!=S_IFCHR && (mode&S_IFMT)!=S_IFBLK) return -EINVAL;
         long masked=md_namespace_creation_mode(fs,0777);
         if (masked<0) return masked;
         struct md_fs_request q={.operation=MD_FS_MKNOD,.directory={base,-1}, .capture={operand.capture},
-            .path={first,NULL},.mode=mode&(S_IFMT|07777),
+            .path={first,NULL},.mode=mode&(S_IFMT|07777),.offset=(uint32_t)a[3],
             .attributes.creation_mask=0777U^(unsigned)masked};
         struct md_fs_response out;
         long r=md_namespace_request(fs,&q,&out);
@@ -407,14 +397,6 @@ __attribute__((noinline)) static long path_metadata(const struct md_fs *fs, long
             return -EINVAL;
         if (nr == SYS_statx)
             flags &= ~(AT_STATX_FORCE_SYNC | AT_STATX_DONT_SYNC);
-        if (!*first && (flags & AT_EMPTY_PATH) && base!=MD_NAMESPACE_EXECUTABLE && !operand.capture.path) {
-            /* Native boundary FDs need no namespace ownership lookup. Some LSM
-             * policies allow local stat but reject SCM_RIGHTS for these FDs. */
-            r=md_namespace_native_descriptor(base);
-            if (r<0) return r;
-            if (r) return nr==SYS_statx ? md_namespace_native_statx(fs,a)
-                : md_raw(nr,a[0],a[1],a[2],a[3],a[4],a[5]);
-        }
         r = md_namespace_inspect(fs, operand, first, flags, nr==SYS_statx ? MD_FS_STAT_MOUNT : 0, &out);
         if (r==-EREMOTE) return md_namespace_host_call(fs,fs->image ? fs->image->executable_path : "",nr,a,1,out.data,out.result.proc_namespace);
         if (r == -EXDEV && !operand.capture.path && !*first && (flags & AT_EMPTY_PATH))

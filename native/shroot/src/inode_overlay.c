@@ -218,7 +218,8 @@ static int copy_node(struct merge *m, const struct mdi_node *source,
         if (!r) r=mdi_sources_open(m->index);
         if (!r) r=mdi_import_shared(m->index,layer,source->backing,target);
         if (r==-EEXIST) r=shared_alias(m,source,parent,target);
-    } else if (source->kind==S_IFDIR || source->kind==S_IFLNK || source->kind==S_IFIFO || source->kind==S_IFSOCK) {
+    } else if (source->kind==S_IFDIR || source->kind==S_IFLNK || source->kind==S_IFIFO || source->kind==S_IFSOCK
+            || source->kind==S_IFCHR || source->kind==S_IFBLK) {
         char link[PATH_MAX];
         r=0;
         if (source->kind==S_IFLNK) {
@@ -230,6 +231,7 @@ static int copy_node(struct merge *m, const struct mdi_node *source,
         if (!r) r=mdi_allocate(m->index,source->kind,0700,O_RDWR,
             source->kind==S_IFLNK ? link : NULL,parent->id,target,&fd);
     } else return -EOPNOTSUPP;
+    if (!r) r=mdi_device_number(m->index,target,source->rdev);
     if (!r) r=properties(m,source,target);
     if (!r && source->kind!=S_IFDIR) r=alias(m,source,target,1);
     if (fd>=0) close(fd);
@@ -276,7 +278,7 @@ static int merge_directory(struct merge *m, const struct mdi_node *from,
         r=mdi_node(m->source,(const char *)sqlite3_column_text(q,1),&source);
         int found=r ? r : mdi_lookup(m->index,to->id,name,&existing);
         if (found && found!=-ENOENT) { r=found; break; }
-        int whiteout=0;
+        int whiteout=source.kind==S_IFCHR && !source.rdev;
         struct stat st;
         if (!r && source.kind==S_IFREG) {
             r=mdi_stat(m->source,&source,&st);

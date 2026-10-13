@@ -26,6 +26,13 @@
 
 void md_fs_view_execute(struct md_filesystem *fs, const struct md_fs_request *q,
         struct md_fs_result *out, const struct md_fs_output *output) {
+    struct md_fs_request logical;
+    for (unsigned i=0;i<2;++i) if (q->origin[i] && q->origin[i]->endpoint.inode) {
+        int error=md_fs_anchor_check_fd(q->origin[i],q->directory[i]);
+        if (error) { *out=(struct md_fs_result){.fd=-1,.error=error}; return; }
+        if (q!=&logical) { logical=*q; q=&logical; }
+        logical.directory[i]=md_fs_anchor_fd(q->origin[i]);
+    }
     int native=q->origin[0] && !q->origin[0]->view
         && (!q->path[0] || q->path[0][0]!='/' || (q->resolve&RESOLVE_IN_ROOT));
     if (native) *out=(struct md_fs_result){.fd=-1,
@@ -472,11 +479,7 @@ static void inode_execute(struct md_filesystem *fs,
     case MD_FS_OPEN: r = md_catalogue_open(images, s, first, a, (int)q->flags, q->mode, q->resolve, &out->open_completion); goto opened;
     case MD_FS_MKDIR: r = md_inode_mkdir(s, first, a, q->mode); break;
     case MD_FS_MKNOD:
-        if ((q->mode&S_IFMT)==S_IFIFO) r=md_inode_mkfifo(s,first,a,q->mode&07777);
-        else {
-            r=md_inode_create(s,first,a,q->mode&07777);
-            if (r>=0) { close(r); r=0; }
-        }
+        r=md_inode_mknod(s,first,a,q->mode,(dev_t)q->offset);
         break;
     case MD_FS_SYMLINK: r = md_inode_symlink(s, b, first, a); break;
     case MD_FS_LINK: r = md_inode_link(s, first, a, second, b, (int)q->flags); break;
@@ -571,14 +574,34 @@ opened:
     else {
         out->fd = r;
         md_view_capture(fs,fs->mounts,fs->inode_mount,out,output);
+        if (!out->error && out->open_completion.kind==MD_OPEN_DEVICE) {
+            struct md_open_completion device=out->open_completion;
+            int fd=md_open_device(device.mode,device.device,(int)q->flags,&out->open_completion);
+            if (fd>=0 && output && output->origin && *output->origin) {
+                struct stat st;
+                if (fstat(fd,&st)) { int error=-errno; close(fd); fd=error; }
+                else (*output->origin)->endpoint=md_fd_identity(&st);
+            }
+            close(out->fd); out->fd=fd<0 ? -1 : fd;
+            if (fd<0) {
+                out->error=fd; out->open_completion=(struct md_open_completion){0};
+                if (output && output->origin) {
+                    md_fs_anchor_release(*output->origin); *output->origin=NULL;
+                }
+            }
+        }
     }
 }
 void md_fs_inode_execute(struct md_filesystem *fs, const struct md_fs_request *q,
         struct md_fs_result *out, const struct md_fs_output *output) {
     struct md_inode_store *store=fs->selected_store ? fs->selected_store : fs->store;
     int readonly=store->readonly;
+    int nodev=store->nodev;
+    if (fs->mounts) store->nodev=!!(md_mount_policy_flags(fs->inode_mount
+        ? &fs->inode_mount->policy : &fs->mounts->base.policy)&MD_MOUNT_NODEV);
     if (fs->mounts && (fs->inode_mount ? md_view_readonly(fs->inode_mount)
             : (md_mount_policy_flags(&fs->mounts->base.policy)&MD_MOUNT_READONLY))) store->readonly=1;
     inode_execute(fs,q,out,output);
     store->readonly=readonly;
+    store->nodev=nodev;
 }

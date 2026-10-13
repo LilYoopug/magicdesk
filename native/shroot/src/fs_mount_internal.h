@@ -12,6 +12,7 @@
 #include "mqueue_view.h"
 #include "mount_source.h"
 #include "proc_namespace.h"
+#include "sealed_manifest.h"
 #include <limits.h>
 #include <stdatomic.h>
 #include <sys/mount.h>
@@ -125,6 +126,9 @@ struct md_fs_anchor {
     int fd, mount_pin;
     dev_t device;
     ino_t inode;
+    /* Optional native data endpoint of a logical device inode. The retained
+     * path descriptor above remains authoritative for metadata and names. */
+    struct md_fd_identity endpoint;
 };
 int md_view_same(const struct stat *, const struct stat *);
 struct md_view_mount *md_view_root_mount(struct md_filesystem *);

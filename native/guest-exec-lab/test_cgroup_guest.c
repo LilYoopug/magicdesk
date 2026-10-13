@@ -40,6 +40,7 @@ static void *thread_membership(void *unused) {
     char *first=strstr(text,pid); assert(first && !strstr(first+strlen(pid),pid));
     read_text("/tmp/cgv2/child/cgroup.threads",text,sizeof(text));
     assert(strstr(text,pid) && strstr(text,tid));
+    read_text("/tmp/cgv2/child/pids.current",text,sizeof(text)); assert(atoi(text)==2);
     return NULL;
 }
 int test_cgroup_guest(int pid_namespace) {
@@ -69,18 +70,31 @@ int test_cgroup_guest(int pid_namespace) {
     assert(!mount("none","/tmp/cgv1","cgroup",MS_NOSUID|MS_NOEXEC|MS_NODEV,"devices"));
     struct statfs st; assert(!statfs("/tmp/cgv2",&st) && st.f_type==CGROUP2_SUPER_MAGIC);
     assert(!statfs("/tmp/cgv1",&st) && st.f_type==CGROUP_SUPER_MAGIC);
-    char text[8192]; read_text("/tmp/cgv2/cgroup.controllers",text,sizeof(text)); assert(!strcmp(text,"\n"));
+    char text[8192]; read_text("/tmp/cgv2/cgroup.controllers",text,sizeof(text)); assert(!strcmp(text,"pids\n"));
     read_text("/tmp/cgv1/devices.list",text,sizeof(text)); assert(!strcmp(text,"a *:* rwm\n"));
     assert(writing("/tmp/cgv1/devices.allow","a *:* rwm")==9);
     assert(writing("/tmp/cgv1/devices.deny","a")<0 && errno==EOPNOTSUPP);
     assert(!mkdir("/tmp/cgv2/child",0700));
+    assert(access("/tmp/cgv2/child/pids.max",F_OK)<0 && errno==ENOENT);
+    assert(writing("/tmp/cgv2/child/cgroup.subtree_control","+pids")<0 && errno==ENOENT);
+    assert(writing("/tmp/cgv2/cgroup.subtree_control","+pids")==5);
+    read_text("/tmp/cgv2/child/pids.max",text,sizeof(text)); assert(!strcmp(text,"max\n"));
+    assert(writing("/tmp/cgv2/child/pids.max","0")==1);
+    read_text("/tmp/cgv2/child/pids.max",text,sizeof(text)); assert(!strcmp(text,"0\n"));
+    assert(writing("/tmp/cgv2/child/pids.max","-1")<0 && errno==EINVAL);
+    assert(writing("/tmp/cgv2/child/pids.max","18446744073709551616")<0 && errno==ERANGE);
+    assert(writing("/tmp/cgv2/cgroup.subtree_control","-pids +memory")<0 && errno==EOPNOTSUPP);
+    read_text("/tmp/cgv2/cgroup.subtree_control",text,sizeof(text)); assert(!strcmp(text,"pids\n"));
     assert(writing("/tmp/cgv2/child/cgroup.procs","0")==1);
+    read_text("/tmp/cgv2/child/pids.current",text,sizeof(text)); assert(!strcmp(text,"1\n"));
+    assert(writing("/tmp/cgv2/child/cgroup.subtree_control","+pids")<0 && errno==EBUSY);
     read_text("/proc/self/cgroup",text,sizeof(text)); assert(strstr(text,"0::/child\n"));
     read_text("/tmp/cgv2/child/cgroup.procs",text,sizeof(text));
     char pid[32]; snprintf(pid,sizeof(pid),"%d\n",getpid()); assert(strstr(text,pid));
     pthread_t worker;
     assert(!pthread_create(&worker,NULL,thread_membership,NULL));
     assert(!pthread_join(worker,NULL));
+    read_text("/tmp/cgv2/child/pids.events",text,sizeof(text)); assert(!strcmp(text,"max 0\n"));
     assert(open("/tmp/cgv2/child/cgroup.procs",O_RDWR|O_CREAT|O_EXCL,0600)<0 && errno==EEXIST);
     int fd=open("/tmp/cgv2/child/cgroup.procs",O_RDWR|O_CLOEXEC); assert(fd>=0);
     assert(!fstatfs(fd,&st) && st.f_type==CGROUP2_SUPER_MAGIC);
@@ -115,6 +129,19 @@ int test_cgroup_guest(int pid_namespace) {
     assert(!mount(NULL,"/tmp/cgv2",NULL,MS_BIND|MS_REMOUNT,NULL));
     close(copy); close(fd);
     assert(writing("/tmp/cgv2/cgroup.procs","0")==1);
+    assert(writing("/tmp/cgv2/child/cgroup.subtree_control","+pids")==5);
+    assert(!mkdir("/tmp/cgv2/child/nested",0700));
+    assert(writing("/tmp/cgv2/cgroup.subtree_control","-pids")<0 && errno==EBUSY);
+    assert(writing("/tmp/cgv2/child/nested/pids.max","123")==3);
+    read_text("/tmp/cgv2/child/nested/pids.max",text,sizeof(text)); assert(!strcmp(text,"123\n"));
+    int retired_pids=open("/tmp/cgv2/child/nested/pids.max",O_RDONLY); assert(retired_pids>=0);
+    assert(writing("/tmp/cgv2/child/cgroup.subtree_control","-pids")==5);
+    assert(read(retired_pids,text,sizeof(text))<0 && errno==ENODEV);
+    assert(access("/tmp/cgv2/child/nested/pids.max",F_OK)<0 && errno==ENOENT);
+    assert(writing("/tmp/cgv2/child/cgroup.subtree_control","+pids")==5);
+    assert(read(retired_pids,text,sizeof(text))<0 && errno==ENODEV); close(retired_pids);
+    read_text("/tmp/cgv2/child/nested/pids.max",text,sizeof(text)); assert(!strcmp(text,"max\n"));
+    assert(!rmdir("/tmp/cgv2/child/nested"));
     assert(!rmdir("/tmp/cgv2/child"));
     for (unsigned i=0;i<32;++i) {
         assert(!mkdir("/tmp/cgv2/reused",0700));
@@ -127,7 +154,7 @@ int test_cgroup_guest(int pid_namespace) {
     read_text("/proc/cgroups",text,sizeof(text)); assert(strstr(text,"devices\t1\t1\t1"));
     assert(!umount2("/tmp/cgv2",0) && !umount2("/tmp/cgv1",0));
     assert(!rmdir("/tmp/cgv2") && !rmdir("/tmp/cgv1"));
-    puts("PASS guest cgroup: membership, fork, typed IO, readonly and permissive devices"); return 0;
+    puts("PASS guest cgroup: membership, fork, typed IO, readonly, permissive pids and devices"); return 0;
 }
 static void expect_membership(int fd,const char *v2,const char *v1) {
     char text[8192],expected[8192];

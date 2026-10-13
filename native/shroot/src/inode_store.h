@@ -63,6 +63,7 @@ int md_inode_prepare_reopen(struct md_inode_store *, int, int, int, struct md_op
 int md_inode_create(struct md_inode_store *, int dirfd, const char *path, mode_t mode);
 int md_inode_mkdir(struct md_inode_store *, int dirfd, const char *path, mode_t mode);
 int md_inode_mkfifo(struct md_inode_store *, int dirfd, const char *path, mode_t mode);
+int md_inode_mknod(struct md_inode_store *, int dirfd, const char *path, mode_t mode, dev_t);
 int md_inode_symlink(struct md_inode_store *, const char *target, int dirfd, const char *path);
 ssize_t md_inode_readlink(struct md_inode_store *, int dirfd, const char *path, char *, size_t);
 int md_inode_open(struct md_inode_store *, int dirfd, const char *path, int flags, mode_t mode);

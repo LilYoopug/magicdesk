@@ -259,12 +259,15 @@ Filesystem attribute ioctls (`FS_IOC_GETFLAGS`/`SETFLAGS`, inode-version and
 `ENOTTY` for unsupported attributes instead of exposing Android backing-inode
 flags or permission failures. Native attachments retain kernel behavior and
 readonly mount checks. Invalid and `O_PATH` descriptors return `EBADF`.
-Regular-file/FIFO creation keeps its intermediate descriptors on the worker.
+Regular-file, FIFO and logical-device creation keep intermediate descriptors on the worker.
 Guest capability sets retain Linux 5.15's credential bits independently of
 backend availability. Dropping or inheriting them changes guest authority only;
 no capability is added to the Android process. Each operation still checks its
-namespace ownership, implementation and native access. Creating character/block
-devices returns EPERM because native device creation is not authorized.
+namespace ownership, implementation and native access. CAP_MKNOD permits logical
+character/block-device metadata, not native device creation. Supported character
+numbers open explicit Android endpoints with their real permissions; unsupported
+numbers return ENXIO on data open. Metadata, aliases and descriptor transfer retain
+the guest inode rather than changing the Android node.
 Existing native devices can be bind-mounted with their real
 access permissions and per-mount nodev policy; no device-creation rights are granted.
 Path chdir and truncate retain the selected object there; the caller executes
@@ -958,8 +961,11 @@ Ordinary launches retain native networking. Explicit `--network routed` selects
 the logical IPv4 backend described below. Anonymous Unix socketpairs and
 inherited descriptors retain their IO authority. Private devpts views expose only
 their allocated terminals, with native terminal IO and caller-owned controlling
-sessions. Launch-local cgroup2 membership and permissive cgroup v1 devices views
-do not enforce resource limits or modify Android cgroups. Cgroup namespaces
+sessions. Launch-local cgroup2 membership, its permissive pids controller and
+cgroup v1 devices views do not enforce resource limits or modify Android cgroups.
+The pids controller retains max values and reports live thread counts; subtree
+enable/disable and stale descriptors follow the logical hierarchy. It adds no
+fork-path accounting or periodic scan. Cgroup namespaces
 retain roots independently of membership; proc paths and new mounts use that
 view, while existing mounts keep their roots. Cgroup2 device-BPF program IDs,
 FDs and attachments have logical lifetime and query support, but the permissive
@@ -1419,7 +1425,7 @@ reads use lazily armed descriptor classes and retained kernel-object identity.
 Protected readers copy in their own task without changing dumpability; queue
 delivery is acknowledged before consumption is confirmed. See the
 [watch contract](../native/shroot/watches.md) for descriptor, hardlink,
-protected-copy and kernel limits. The current store format is 13;
+protected-copy and kernel limits. The current store format is 14;
 older stores are rejected, not migrated or deleted.
 
 ## Optional Kernel Support
@@ -1612,7 +1618,7 @@ on a host without Landlock through the guest filesystem policy.
 Minimal Astra ARM64 userspace and Docker inside a QEMU TCG virtual machine have
 separate checks; neither establishes booted-distribution compatibility on Android.
 Gentoo ARM64 stage3 passes userspace and GCC/pthread/fork/file checks. Image import
-reports omitted native `/dev` nodes instead of creating devices. Its signed repository download
+preserves device entries as logical metadata without creating host nodes. Its signed repository download
 passes; complete Portage synchronization and package builds remain unverified.
 
 Official ARM64 VS Code with its Electron sandbox flags retained and Microsoft

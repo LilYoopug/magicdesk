@@ -8,6 +8,7 @@
 #include "namespace_identity.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <linux/magic.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -17,7 +18,7 @@
 #include <unistd.h>
 
 enum { PROCS, THREADS, EVENTS, CONTROLLERS, SUBTREE, TYPE, FREEZE,
-    ALLOW, DENY, LIST, TASKS, NOTIFY, RELEASE, FILES };
+    ALLOW, DENY, LIST, TASKS, NOTIFY, RELEASE, PIDS_MAX, PIDS_CURRENT, PIDS_EVENTS, FILES };
 struct control { const char *name; mode_t mode; unsigned views; };
 static const struct control controls[FILES]={
     [PROCS]={"cgroup.procs",0644,3}, [THREADS]={"cgroup.threads",0644,1},
@@ -26,7 +27,9 @@ static const struct control controls[FILES]={
     [FREEZE]={"cgroup.freeze",0644,1}, [ALLOW]={"devices.allow",0200,2},
     [DENY]={"devices.deny",0200,2}, [LIST]={"devices.list",0444,2},
     [TASKS]={"tasks",0644,2}, [NOTIFY]={"notify_on_release",0644,2},
-    [RELEASE]={"release_agent",0644,2}
+    [RELEASE]={"release_agent",0644,2},
+    [PIDS_MAX]={"pids.max",0644,1}, [PIDS_CURRENT]={"pids.current",0444,1},
+    [PIDS_EVENTS]={"pids.events",0444,1}
 };
 struct group {
     struct group *next,*parent;
@@ -36,6 +39,8 @@ struct group {
     char name[256];
     struct md_cgroup_program **programs;
     unsigned program_count,program_flags;
+    unsigned subtree;
+    uint64_t pids_max;
 };
 struct world {
     atomic_uint refs;
@@ -72,6 +77,7 @@ struct opened {
     struct md_cgroup_view *view;
     struct group *group;
     unsigned file;
+    struct stat stat;
     struct md_fs_anchor *origin;
 };
 static struct world *retain(struct world *w) { atomic_fetch_add(&w->refs,1); return w; }
@@ -162,12 +168,25 @@ void md_cgroup_member_depart(struct md_cgroup_member *m,pid_t tid) {
     if (m->tid==tid) { m->tid=0; m->departed=1; }
     pthread_mutex_unlock(&m->world->lock);
 }
+enum { CONTROLLER_PIDS=1 };
+static unsigned available(const struct group *g) {
+    return g->parent ? g->parent->subtree : CONTROLLER_PIDS;
+}
+static int enabled(const struct group *g,unsigned file) {
+    return file<PIDS_MAX || (g->parent && (available(g)&CONTROLLER_PIDS));
+}
+static int control_create(struct group *g,unsigned i) {
+    int fd=openat(g->fd,controls[i].name,O_CREAT|O_EXCL|O_RDWR|O_CLOEXEC,0600);
+    if (fd<0) return -errno;
+    int error=fstat(fd,&g->files[i]) ? -errno : 0; close(fd);
+    if (error) unlinkat(g->fd,controls[i].name,0);
+    return error;
+}
 static int populate(struct md_cgroup_view *v,struct group *g) {
+    g->pids_max=UINT64_MAX;
     for (unsigned i=0;i<FILES;++i) if (controls[i].views&(1U<<v->devices)) {
-        if (i==RELEASE && g->parent) continue;
-        int fd=openat(g->fd,controls[i].name,O_CREAT|O_EXCL|O_RDWR|O_CLOEXEC,0600);
-        if (fd<0) return -errno;
-        int error=fstat(fd,&g->files[i]) ? -errno : 0; close(fd); if (error) return error;
+        if ((i==RELEASE && g->parent) || !enabled(g,i)) continue;
+        int error=control_create(g,i); if (error) return error;
     }
     return fstat(g->fd,&g->identity) ? -errno : 0;
 }
@@ -336,16 +355,63 @@ static void opened_release(void *ctx) {
         md_fs_anchor_release(o->origin); md_cgroup_release(o->view); free(o);
     }
 }
+static int retired(const struct opened *o) {
+    return o->group->removed || o->stat.st_ino!=o->group->files[o->file].st_ino || !enabled(o->group,o->file);
+}
 static int opened_stat(void *ctx,struct stat *st) {
     struct opened *o=ctx; struct world *w=o->view->world; pthread_mutex_lock(&w->lock);
-    *st=o->group->files[o->file]; st->st_mode=S_IFREG|controls[o->file].mode;
+    *st=o->stat; st->st_mode=S_IFREG|controls[o->file].mode;
     st->st_uid=o->group->uid; st->st_gid=o->group->gid; st->st_size=0; st->st_blocks=0;
-    if (o->group->removed) st->st_nlink=0;
+    if (retired(o)) st->st_nlink=0;
     pthread_mutex_unlock(&w->lock); return 0;
 }
 static int below(struct group *g,struct group *parent) {
     for (;g;g=g->parent) if (g==parent) return 1;
     return 0;
+}
+static int subtree_write(struct md_cgroup_view *v,struct group *g,char *text) {
+    unsigned next=g->subtree;
+    char *cursor=NULL;
+    for (char *word=strtok_r(text," \t\n",&cursor);word;word=strtok_r(NULL," \t\n",&cursor)) {
+        if ((*word!='+' && *word!='-') || !word[1]) return -EINVAL;
+        if (strcmp(word+1,"pids")) return -EOPNOTSUPP;
+        if (*word=='+') next|=CONTROLLER_PIDS; else next&=~CONTROLLER_PIDS;
+    }
+    if (next&~available(g)) return -ENOENT;
+    if (next==g->subtree) return 0;
+    if (next) {
+        if (g->parent) for (struct md_cgroup_member *m=v->world->members;m;m=m->next)
+            if (m->tid && m->groups[0]==g) return -EBUSY;
+        int error=0;
+        struct group *failed=NULL;
+        unsigned last=PIDS_MAX;
+        for (struct group *c=v->groups;c && !error;c=c->next) if (!c->removed && c->parent==g) {
+            for (unsigned i=PIDS_MAX;i<FILES;++i) {
+                error=control_create(c,i);
+                if (error) { failed=c; last=i; break; }
+            }
+        }
+        if (error) {
+            for (struct group *c=v->groups;c;c=c->next) if (!c->removed && c->parent==g) {
+                for (unsigned i=PIDS_MAX;i<(c==failed ? last : FILES);++i) {
+                    unlinkat(c->fd,controls[i].name,0); c->files[i]=(struct stat){0};
+                }
+                if (c==failed) break;
+            }
+            return error;
+        }
+    } else {
+        for (struct group *c=v->groups;c;c=c->next)
+            if (!c->removed && c->parent==g && c->subtree) return -EBUSY;
+        for (struct group *c=v->groups;c;c=c->next) if (!c->removed && c->parent==g) {
+            for (unsigned i=PIDS_MAX;i<FILES;++i) {
+                if (unlinkat(c->fd,controls[i].name,0)) return -errno;
+                c->files[i]=(struct stat){0};
+            }
+            c->pids_max=UINT64_MAX;
+        }
+    }
+    g->subtree=next; return 0;
 }
 static int opened_access(void *ctx,const struct md_identity *id,unsigned mode) {
     struct opened *o=ctx; struct stat st;
@@ -357,7 +423,7 @@ static long control_read(void *ctx,const struct md_control_actor *actor,void *da
     if (offset<0 || !actor || !actor->resources) return -EINVAL;
     struct opened *o=ctx; struct md_cgroup_view *v=o->view;
     pthread_mutex_lock(&v->world->lock);
-    if (o->group->removed) { pthread_mutex_unlock(&v->world->lock); return -ENODEV; }
+    if (retired(o)) { pthread_mutex_unlock(&v->world->lock); return -ENODEV; }
     char *text=NULL; size_t length=0;
     FILE *stream=open_memstream(&text,&length);
     if (!stream) { pthread_mutex_unlock(&v->world->lock); return -errno; }
@@ -386,7 +452,21 @@ static long control_read(void *ctx,const struct md_control_actor *actor,void *da
         fprintf(stream,"populated %d\nfrozen 0\n",populated); break;
     }
     case TYPE: fputs("domain\n",stream); break;
-    case CONTROLLERS: case SUBTREE: case RELEASE: fputc('\n',stream); break;
+    case CONTROLLERS: case SUBTREE:
+        fputs((o->file==CONTROLLERS ? available(o->group) : o->group->subtree)&CONTROLLER_PIDS
+            ? "pids\n" : "\n",stream); break;
+    case RELEASE: fputc('\n',stream); break;
+    case PIDS_MAX:
+        if (o->group->pids_max==UINT64_MAX) fputs("max\n",stream);
+        else fprintf(stream,"%" PRIu64 "\n",o->group->pids_max);
+        break;
+    case PIDS_CURRENT: {
+        uint64_t count=0;
+        for (struct md_cgroup_member *m=v->world->members;m;m=m->next)
+            if (m->tid && below(m->groups[0],o->group)) ++count;
+        fprintf(stream,"%" PRIu64 "\n",count); break;
+    }
+    case PIDS_EVENTS: fputs("max 0\n",stream); break;
     case FREEZE: case NOTIFY: fputs("0\n",stream); break;
     case LIST: fputs("a *:* rwm\n",stream); break;
     default: error=-EACCES; break;
@@ -410,7 +490,7 @@ static long control_write(void *ctx,const struct md_control_actor *actor,const v
     if (memchr(text,0,size)) return -EINVAL;
     size_t n=size; while (n && (text[n-1]==' ' || text[n-1]=='\n' || text[n-1]=='\t')) text[--n]=0;
     pthread_mutex_lock(&v->world->lock);
-    int r=o->group->removed ? -ENODEV : !capable(actor->identity,o->group) ? -EACCES : 0;
+    int r=retired(o) ? -ENODEV : !capable(actor->identity,o->group) ? -EACCES : 0;
     if (!r) switch (o->file) {
     case PROCS: case THREADS: case TASKS: {
         if (!n || strspn(text,"0123456789")!=n) { r=-EINVAL; break; }
@@ -425,13 +505,23 @@ static long control_write(void *ctx,const struct md_control_actor *actor,const v
                 target=m; break;
             }
         if (!target) { r=-ESRCH; break; }
+        if (!v->devices && o->group->parent && o->group->subtree) { r=-EBUSY; break; }
         for (struct md_cgroup_member *m=v->world->members;m;m=m->next)
             if (m==target || (o->file==PROCS && m->tgid==target->tgid)) m->groups[v->devices]=o->group;
         break;
     }
-    /* No controllers are advertised. Never acknowledge an enforced limit,
-     * freeze or release-agent execution that this backend cannot provide. */
-    case SUBTREE: r=n ? -EOPNOTSUPP : 0; break;
+    /* Resource values are retained compatibility policy, not host enforcement.
+     * No fork-path accounting or Android cgroup mutation is introduced. */
+    case SUBTREE: r=subtree_write(v,o->group,text); break;
+    case PIDS_MAX:
+        if (!strcmp(text,"max")) o->group->pids_max=UINT64_MAX;
+        else if (!n || strspn(text,"0123456789")!=n) r=-EINVAL;
+        else {
+            errno=0; unsigned long long value=strtoull(text,NULL,10);
+            if (errno || value>INT64_MAX) r=-ERANGE;
+            else o->group->pids_max=value;
+        }
+        break;
     case TYPE: r=strcmp(text,"domain") ? -EOPNOTSUPP : 0; break;
     case FREEZE: case NOTIFY: r=strcmp(text,"0") ? -EOPNOTSUPP : 0; break;
     case RELEASE: r=n ? -EOPNOTSUPP : 0; break;
@@ -467,6 +557,7 @@ int md_cgroup_open(struct md_cgroup_view *v,int fd,int flags,const struct md_ide
             if (!o) r=-ENOMEM;
             else {
                 atomic_init(&o->refs,1); o->view=md_cgroup_retain(v); o->group=g; o->file=file;
+                o->stat=st;
                 o->origin=md_fs_anchor_retain(origin); *out=&ops[v->devices]; *context=o;
             }
         }
@@ -516,7 +607,11 @@ long md_cgroup_controllers_text(struct md_cgroup_member *m,char *text,size_t cap
     pthread_mutex_lock(&m->world->lock);
     struct md_cgroup_view *v=m->world->views[1]; unsigned count=0;
     for (struct group *g=v ? v->groups : NULL;g;g=g->next) if (!g->removed) ++count;
-    int n=snprintf(text,capacity,"#subsys_name\thierarchy\tnum_cgroups\tenabled\ndevices\t%u\t%u\t1\n",v ? 1 : 0,count ? count : 1);
+    unsigned unified=0;
+    for (struct group *g=m->world->views[0] ? m->world->views[0]->groups : NULL;g;g=g->next)
+        if (!g->removed) ++unified;
+    int n=snprintf(text,capacity,"#subsys_name\thierarchy\tnum_cgroups\tenabled\ndevices\t%u\t%u\t1\npids\t0\t%u\t1\n",
+        v ? 1 : 0,count ? count : 1,unified ? unified : 1);
     pthread_mutex_unlock(&m->world->lock);
     return n<0 ? -EIO : (size_t)n>=capacity ? -ERANGE : n;
 }
