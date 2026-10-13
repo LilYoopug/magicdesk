@@ -59,6 +59,7 @@ struct md_fs_buffer_request {
     struct md_open_job opening;
     int fifo_control;
     struct md_command_images images;
+    struct md_fs_anchor *image_origin;
     struct md_program *proc_image;
     struct md_file_snapshot snapshot;
     enum { SNAPSHOT_NONE, SNAPSHOT_BEGIN, SNAPSHOT_APPEND, SNAPSHOT_FINISH } snapshot_phase;
@@ -138,6 +139,7 @@ static void dispose(struct md_fs_buffer_request *r) {
     md_fd_channel_release(r->export);
     md_fs_buffer_open_release(&r->opened);
     md_command_images_close(&r->images);
+    md_fs_anchor_release(r->image_origin);
     if (r->proc_image) {
         if (r->proc_image->fd>=0) close(r->proc_image->fd);
         free(r->proc_image);
@@ -505,7 +507,8 @@ static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
     if (r->error) return;
     if (r->received) { r->error=inspect_received(r); return; }
     if (r->executable) {
-        r->error=md_fs_command_prepare(&r->context,&r->request,&r->proc_image,&r->output->command,&r->images);
+        r->error=md_fs_command_prepare(&r->context,&r->request,&r->proc_image,&r->output->command,&r->images,
+            &r->image_origin);
         return;
     }
     struct md_fs_response *reply=&r->output->reply;
@@ -771,13 +774,15 @@ struct md_landlock_policy *md_fs_buffer_landlock_take(struct md_fs_buffer_reques
     struct md_landlock_policy *policy=r->landlock;
     r->landlock=NULL; return policy;
 }
-int md_fs_buffer_exec_take(struct md_fs_buffer_request *r, int out[2], unsigned *mount_flags, int *anonymous) {
-    if (!r || !out || !mount_flags || !anonymous) return -EINVAL;
+int md_fs_buffer_exec_take(struct md_fs_buffer_request *r, int out[2], unsigned *mount_flags, int *anonymous,
+        struct md_fs_anchor **origin) {
+    if (!r || !out || !mount_flags || !anonymous || !origin || *origin) return -EINVAL;
     if (!r->executable) return 0;
     if (r->error || r->images.program<0 || out[0]>=0 || out[1]>=0) return -EINVAL;
     out[0]=r->images.program; out[1]=r->images.loader;
     *mount_flags=r->images.mount_flags;
     *anonymous=r->images.anonymous;
+    *origin=r->image_origin; r->image_origin=NULL;
     r->images=(struct md_command_images){.program=-1,.loader=-1}; return 1;
 }
 static struct md_fs_anchor *capture_origin(struct md_fs_buffer_request *r,unsigned index) {

@@ -335,6 +335,7 @@ struct thread {
     struct md_exec_identity pending_identity;
     int exec_images[2];
     struct md_process_executable *executable, *prepared_executable;
+    struct md_fs_anchor *executable_origin, *prepared_executable_origin;
     int exec_images_ready;
     unsigned exec_mount_flags;
     int mapped_image, entered;
@@ -484,6 +485,7 @@ static const unsigned long trace_options = PTRACE_O_TRACESECCOMP | PTRACE_O_TRAC
 static void release_operation(struct thread *t);
 static void exec_images_release(struct thread *t) {
     md_process_executable_release(t->prepared_executable); t->prepared_executable=NULL;
+    md_fs_anchor_release(t->prepared_executable_origin); t->prepared_executable_origin=NULL;
     for (unsigned i=0;i<2;++i) {
         if (t->exec_images[i]>=0) close(t->exec_images[i]);
         t->exec_images[i]=-1;
@@ -550,6 +552,7 @@ static void cleanup(void) {
         struct thread *next = threads->next;
         exec_images_release(threads);
         md_process_executable_release(threads->executable);
+        md_fs_anchor_release(threads->executable_origin);
         fd_discard(threads);
         adapter_discard(threads);
         md_memory_release(threads->memory);
@@ -768,6 +771,7 @@ static void release_thread(struct thread *t) {
     adapter_discard(t);
     exec_images_release(t);
     md_process_executable_release(t->executable); t->executable=NULL;
+    md_fs_anchor_release(t->executable_origin); t->executable_origin=NULL;
     md_task_registry_forget(tasks, t->pid);
     md_identity_release(&t->identity);
     CHECK(!md_shm_space_release(t->shm_space)); t->shm_space = NULL;
@@ -3927,7 +3931,8 @@ static void buffer_complete(struct md_fs_buffer_request *request, pid_t pid, int
             t->receive->expanded=expanded;
         }
         int anonymous=0;
-        CHECK(md_fs_buffer_exec_take(request,t->exec_images,&t->exec_mount_flags,&anonymous)>=0);
+        CHECK(md_fs_buffer_exec_take(request,t->exec_images,&t->exec_mount_flags,&anonymous,
+            &t->prepared_executable_origin)>=0);
         if (anonymous) {
             CHECK(!t->prepared_executable);
             t->prepared_executable=md_process_executable_new(t->exec_images[0]);
@@ -6254,6 +6259,8 @@ int main(int argc, char **argv) {
                     exec_images_release(t);
                     memcpy(t->exec_images,former->exec_images,sizeof(t->exec_images));
                     t->prepared_executable=former->prepared_executable; former->prepared_executable=NULL;
+                    t->prepared_executable_origin=former->prepared_executable_origin;
+                    former->prepared_executable_origin=NULL;
                     t->exec_mount_flags=former->exec_mount_flags;
                     former->exec_images[0]=former->exec_images[1]=-1;
                     md_identity_release(&t->identity);
@@ -6269,6 +6276,8 @@ int main(int argc, char **argv) {
             t->exec_images_ready=t->exec_images[0]>=0;
             md_process_executable_release(t->executable);
             t->executable=t->prepared_executable; t->prepared_executable=NULL;
+            md_fs_anchor_release(t->executable_origin);
+            t->executable_origin=t->prepared_executable_origin; t->prepared_executable_origin=NULL;
             md_memory_stack_return(t->memory, t->stack);
             CHECK(!md_shm_space_release(t->shm_space));
             t->shm_space = md_shm_space_new(); CHECK(t->shm_space);
@@ -6295,6 +6304,7 @@ int main(int argc, char **argv) {
             c->parent=t->cloning&(CLONE_PARENT|CLONE_THREAD) ? t->parent : t->tgid; c->entered=t->entered;
             c->process_image=t->process_image;
             c->executable=md_process_executable_retain(t->executable);
+            c->executable_origin=md_fs_anchor_retain(t->executable_origin);
             /* A newborn has no syscall entry of its own. Adapter setup must
              * not publish the parent's pending clone exit as a child stop. */
             c->debug_call_active=0;

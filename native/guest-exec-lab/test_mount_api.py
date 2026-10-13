@@ -31,6 +31,39 @@ def guest():
     def config(fd, key, value=None):
         return call(431, fd, 0 if value is None else 1, key, 0 if value is None else value, 0)
 
+    # Exec closes the construction FD, but the running image must keep its
+    # detached mount alive across later mount collection, including in a peer.
+    image_check = '''
+import ctypes, os, sys
+libc = ctypes.CDLL(None, use_errno=True)
+libc.syscall.restype = ctypes.c_long
+for _ in range(8):
+    fd = libc.syscall(ctypes.c_long(428), ctypes.c_long(-100),
+                      ctypes.c_char_p(b'/usr/bin/true'), ctypes.c_long(1 | os.O_CLOEXEC))
+    assert fd >= 0, ctypes.get_errno()
+    os.close(fd)
+with open('/proc/self/exe', 'rb') as image:
+    assert image.read(4) == b'\\x7fELF'
+if sys.argv[-1] == '0':
+    os.execve('/proc/self/exe', [sys.executable, '-c', sys.argv[1], sys.argv[1], '1'], os.environ)
+'''
+    children = []
+    for _ in range(4):
+        child = os.fork()
+        if not child:
+            try:
+                image = call(428, -100, '/proc/self/exe', 1 | os.O_CLOEXEC)
+                os.execve(image, [sys.executable, '-c', image_check, image_check, '0'], os.environ)
+            except BaseException:
+                import traceback
+                traceback.print_exc()
+                os._exit(1)
+        children.append(child)
+    # EVENT_WAIT: every re-executed child must finish; suite deadline bounds a hang.
+    statuses = [os.waitpid(child, 0)[1] for child in children]
+    assert statuses == [0] * len(children), statuses
+    print('PASS detached executable mount survives CLOEXEC and concurrent collection', flush=True)
+
     def create(kind='tmpfs', **options):
         fd = call(430, kind, 1)
         for key, value in options.items():

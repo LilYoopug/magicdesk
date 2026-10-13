@@ -262,6 +262,14 @@ rollback, source cancellation and stock
 Debian util-linux mounts. The native transient-store suite additionally checks
 namespace copy, detached graph import/export and exact final FD counts.
 
+Exec preparation retains the selected executable's mount origin, independently
+of the construction FD and its CLOEXEC flag. Commit transfers that origin to the
+process image; fork shares it, replacement/exit releases it, and cancellation
+releases only the prepared candidate. Loaders and intermediate shebang images
+are not pinned. This keeps detached `open_tree` executables and `/proc/self/exe`
+valid during concurrent mount collection. The mount fixture exercises this
+across descriptor exec, proc-image re-exec and parallel children.
+
 Mounted inode filesystems retain backing custody separately from their placement.
 Bind and namespace copies share that custody, not a SQLite connection or mount
 policy. A worker-local storage cache opens an additional connection only on first
