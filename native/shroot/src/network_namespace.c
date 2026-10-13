@@ -21,7 +21,30 @@
 #include <netinet/in.h>
 #include <pthread.h>
 
-int md_network_parameter_get(struct md_network_namespace *n,enum md_network_parameter kind,uint32_t out[2]) {
+int md_network_parameter_scope(struct md_network_namespace *n,enum md_network_parameter kind,
+        const char *name,uint64_t *out) {
+    if (!md_network_namespace_managed(n)) return -EXDEV;
+    *out=0;
+    if (kind<MD_NET_ROUTE_LOCALNET || kind>MD_NET_ARP_NOTIFY) return name && *name ? -EINVAL : 0;
+    if (!name || !*name) return -EINVAL;
+    if (!strcmp(name,"all")) { *out=MD_NET_SCOPE_ALL; return 0; }
+    if (!strcmp(name,"default")) { *out=MD_NET_SCOPE_DEFAULT; return 0; }
+    pthread_mutex_lock(&n->fabric->lock);
+    struct md_network_interface *link=md_network_interface_find(n,0,name);
+    if (link) *out=link->policy_id;
+    pthread_mutex_unlock(&n->fabric->lock);
+    return *out ? 0 : -ENOENT;
+}
+static uint32_t *scoped_value(struct md_network_namespace *n,enum md_network_parameter kind,uint64_t scope) {
+    struct md_network_ipv4_policy *policy=NULL;
+    if (scope==MD_NET_SCOPE_ALL) policy=&n->all;
+    else if (scope==MD_NET_SCOPE_DEFAULT) policy=&n->defaults;
+    else for (unsigned i=0;i<n->count;++i)
+        if (n->links[i].policy_id==scope) { policy=&n->links[i].policy; break; }
+    return !policy ? NULL : kind==MD_NET_ROUTE_LOCALNET ? &policy->route_localnet
+        : kind==MD_NET_RP_FILTER ? &policy->rp_filter : &policy->arp_notify;
+}
+int md_network_parameter_read(struct md_network_namespace *n,enum md_network_parameter kind,uint64_t scope,uint32_t out[2]) {
     if (!md_network_namespace_managed(n)) return -EXDEV;
     pthread_mutex_lock(&n->fabric->lock);
     int error=0;
@@ -30,11 +53,17 @@ int md_network_parameter_get(struct md_network_namespace *n,enum md_network_para
     case MD_NET_PING_GROUPS: memcpy(out,n->ping_groups,sizeof(n->ping_groups)); break;
     case MD_NET_LOCAL_PORTS: memcpy(out,n->local_ports,sizeof(n->local_ports)); break;
     case MD_NET_IPV4_FORWARD: out[0]=n->ipv4_forward; out[1]=0; break;
+    case MD_NET_ROUTE_LOCALNET: case MD_NET_RP_FILTER: case MD_NET_ARP_NOTIFY: {
+        uint32_t *value=scoped_value(n,kind,scope);
+        if (!value) error=-ENODEV;
+        else { out[0]=*value; out[1]=0; }
+        break;
+    }
     default: error=-EINVAL;
     }
     pthread_mutex_unlock(&n->fabric->lock); return error;
 }
-int md_network_parameter_set(struct md_network_namespace *n,enum md_network_parameter kind,const uint32_t in[2]) {
+int md_network_parameter_write(struct md_network_namespace *n,enum md_network_parameter kind,uint64_t scope,const uint32_t in[2]) {
     if (!md_network_namespace_managed(n)) return -EXDEV;
     pthread_mutex_lock(&n->fabric->lock);
     int error=0;
@@ -56,6 +85,13 @@ int md_network_parameter_set(struct md_network_namespace *n,enum md_network_para
         if (in[0]>1) error=-EINVAL;
         else n->ipv4_forward=in[0];
         break;
+    case MD_NET_ROUTE_LOCALNET: case MD_NET_RP_FILTER: case MD_NET_ARP_NOTIFY: {
+        uint32_t *value=scoped_value(n,kind,scope);
+        if (!value) error=-ENODEV;
+        else if (in[0]>(kind==MD_NET_RP_FILTER ? 2U : 1U)) error=-EINVAL;
+        else *value=in[0];
+        break;
+    }
     default: error=-EINVAL;
     }
     pthread_mutex_unlock(&n->fabric->lock); return error;

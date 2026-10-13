@@ -31,15 +31,14 @@ static inline int md_proc_io_decode(long nr, const unsigned long *a, struct md_p
     return out->positional && out->offset<0 ? -EINVAL : 0;
 }
 enum { MD_PROC_FILE_OPEN=1, MD_PROC_FILE_REOPEN, MD_PROC_FILE_NAMESPACE_QUERY, MD_PROC_FILE_PIDFD_NAMESPACE };
-struct md_proc_metadata_request { int32_t process, descriptor; uint32_t kind, access, effective, nofollow; };
+struct md_proc_metadata_request { int32_t process, descriptor; uint32_t kind, access, effective, nofollow; char interface[16]; };
 struct md_proc_metadata_result { struct md_fs_info value; uint32_t kind; unsigned long filesystem; };
 static inline int md_proc_control_kind(enum md_proc_kind kind) {
     return (kind>=MD_PROC_UID_MAP && kind<=MD_PROC_NS_UNSUPPORTED) || md_proc_network_sysctl(kind);
 }
-long md_proc_control_open(int process, enum md_proc_kind, int flags);
-long md_proc_control_open_view(int process, enum md_proc_kind, int flags, uint64_t view);
+long md_proc_control_open(const struct md_proc_path *, int flags, uint64_t view);
 long md_proc_control_known(int fd);
 long md_proc_control_reopen(int process, int fd, int flags);
-long md_proc_control_metadata(int process, enum md_proc_kind, int fd, long nr, const unsigned long *);
+long md_proc_control_metadata(const struct md_proc_path *, long nr, const unsigned long *);
 long md_proc_control_call(long nr, const unsigned long *);
 #endif

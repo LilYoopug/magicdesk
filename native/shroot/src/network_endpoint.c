@@ -61,6 +61,9 @@ static int address(const struct sockaddr *a,socklen_t length,struct sockaddr_in 
 }
 static int loopback(uint32_t ip) { return (ntohl(ip)>>24)==127; }
 static struct md_network_interface *local_interface(struct md_network_namespace *n,uint32_t ip,int up) {
+    /* Logical peers resolve the live catalogue directly. arp_notify needs no
+     * gratuitous packet: there is no neighbor cache to invalidate on link or
+     * address changes, and no announcement is sent onto Android's network. */
     for (unsigned i=0;i<n->count;++i) {
         struct md_network_interface *l=&n->links[i];
         if ((!up || (l->info.flags&IFF_UP)) && (l->ipv4==ip || (l->kind==MD_LINK_LOOPBACK && loopback(ip)))) return l;
@@ -130,13 +133,16 @@ static struct md_network_interface *attachment(struct md_network_namespace *n,st
     if (!master || !(master->info.flags&IFF_UP)) return NULL;
     *owner=other; return master;
 }
-static int reachable(struct md_network_namespace *from,struct md_network_namespace *to,uint32_t ip) {
+static int reachable(struct md_network_namespace *from,struct md_network_namespace *to,uint32_t source,uint32_t ip) {
     if (from==to) return local_interface(to,ip,1)!=NULL;
     struct md_network_interface *out=md_network_route_find(from,ip,NULL), *in=local_interface(to,ip,1);
+    struct md_network_interface *arrival=in;
+    if (!source && out) source=out->ipv4;
     struct md_network_namespace *a=NULL,*b=NULL;
     out=out ? attachment(from,out,&a) : NULL;
     in=in ? attachment(to,in,&b) : NULL;
-    return out && in && a==b && out->info.index==in->info.index;
+    return out && in && a==b && out->info.index==in->info.index
+        && !md_network_ingress(a,out,source,ip) && !md_network_ingress(to,arrival,source,ip);
 }
 int md_network_endpoint_destination(struct md_fd_object *o,const struct sockaddr *a,socklen_t length,
         struct sockaddr_storage *out,socklen_t *out_length) {
@@ -151,7 +157,7 @@ int md_network_endpoint_destination(struct md_fd_object *o,const struct sockaddr
         if (local_interface(s,logical.sin_addr.s_addr,0)) { destination=s; break; }
     struct sockaddr_in native=logical;
     if (destination) {
-        if (!reachable(n,destination,logical.sin_addr.s_addr)) error=-ENETUNREACH;
+        if (!reachable(n,destination,e->local.sin_addr.s_addr,logical.sin_addr.s_addr)) error=-ENETUNREACH;
         else {
             error=-ECONNREFUSED;
             for (struct md_network_endpoint *other=n->fabric->endpoints;other;other=other->next)
@@ -167,10 +173,12 @@ int md_network_endpoint_destination(struct md_fd_object *o,const struct sockaddr
         }
     } else {
         struct md_network_interface *outgoing=md_network_route_find(n,logical.sin_addr.s_addr,NULL);
+        uint32_t source=e->local.sin_addr.s_addr ? e->local.sin_addr.s_addr : outgoing ? outgoing->ipv4 : 0;
         struct md_network_namespace *owner=NULL;
         outgoing=outgoing ? attachment(n,outgoing,&owner) : NULL;
         if (!outgoing || !owner || owner->mode!=MD_NETWORK_ROUTED
                 || (owner!=n && !owner->ipv4_forward)) error=-ENETUNREACH;
+        else if (owner!=n && md_network_ingress(owner,outgoing,source,logical.sin_addr.s_addr)) error=-ENETUNREACH;
         /* Link-local multicast and broadcast need a packet backend, not an
          * accidental submission to Android's physical network. */
         else if ((ntohl(logical.sin_addr.s_addr)>>28)==14 || logical.sin_addr.s_addr==INADDR_BROADCAST)

@@ -1433,7 +1433,7 @@ silently dropping their annotations.
 
 `network_sysctl` supplies the managed namespace's
 `ip_unprivileged_port_start`, `ping_group_range`, `ip_local_port_range` and
-`ip_forward`.
+`ip_forward`, plus per-interface `route_localnet`, `rp_filter` and `arp_notify`.
 Validated updates share one namespace lock, including overlapping port bounds.
 Opening captures the network owner; subsequent setns does not retarget that FD.
 Writes require CAP_NET_ADMIN in its user owner, without touching host sysctls.
@@ -1444,7 +1444,30 @@ Forwarding starts enabled only in the explicitly selected routed launch root.
 New/copied network namespaces default to zero. The boolean gates external
 destination selection through a different routing owner, without blocking that
 owner's own connections or intercepting data IO on established streams.
-Per-interface sysctls and netfilter remain unsupported.
+Interface controls resolve a name once to a namespace-local policy lifetime.
+Rename retains the open description; deletion or movement out of its owner
+yields ENODEV even after the same interface returns. Name reuse cannot redirect
+it. Topology rollback restores the prior policy lifetime alongside its values.
+`conf/default` initializes newly created interfaces;
+`conf/all` participates in ingress policy. Strict and loose reverse-path checks
+and loopback-source/destination policy apply at logical routing boundaries.
+The fabric resolves live addresses directly, without an ARP neighbor cache;
+`arp_notify` does not emit packets onto Android's physical network.
+Mounted proc enumerates only the selected namespace's interfaces and supported
+controls. Unknown controls and netfilter are not implemented.
+
+Rtnetlink veth creation can assign a generated local name and create its peer
+directly in a namespace selected by an owned namespace FD. Both endpoints share
+one topology transaction, including rollback when response publication fails.
+Renaming is independent of cross-namespace move support. The single supported
+IPv4 default route retains its metric for queries, notifications and matching
+deletion; multiple default routes and policy routing remain unsupported.
+
+Native rlimits retain the launch identity's real kernel ceilings. Virtual root
+does not grant Android CAP_SYS_RESOURCE: requests exceeding a hard limit keep
+the kernel's EPERM instead of reporting a fictitious successful increase.
+Container launch limits must fit the inherited ceilings; the Podman fixture
+records those ceilings and offers an explicit inherited-limit diagnostic mode.
 
 Mounted proc controls are selected on the filesystem worker and retain a live
 mount anchor. Readonly policy applies to future opens and already opened writers,

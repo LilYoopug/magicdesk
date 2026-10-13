@@ -56,12 +56,12 @@ static int valid_name(const char *name) {
 int md_network_interface_add(struct md_network_namespace *n,enum md_network_link_kind kind,const char *name,unsigned *index) {
     if (!valid_name(name)) return -EINVAL;
     if (md_network_interface_find(n,0,name)) return -EEXIST;
-    if (n->fabric->next_index==INT_MAX) return -ENOSPC;
+    if (n->fabric->next_index==INT_MAX || n->next_policy==MD_NET_SCOPE_DEFAULT-1) return -ENOSPC;
     int error=md_network_interface_reserve(n,1);
     if (error) return error;
     unsigned id=kind==MD_LINK_LOOPBACK ? 1 : n->fabric->next_index++;
     struct md_network_interface *link=&n->links[n->count++];
-    *link=(struct md_network_interface){.kind=kind,.info={.index=id,
+    *link=(struct md_network_interface){.kind=kind,.policy=n->defaults,.policy_id=++n->next_policy,.info={.index=id,
         .flags=kind==MD_LINK_LOOPBACK ? IFF_LOOPBACK : IFF_BROADCAST|IFF_MULTICAST,
         .mtu=kind==MD_LINK_LOOPBACK ? 65536 : 1500,
         .type=kind==MD_LINK_LOOPBACK ? ARPHRD_LOOPBACK : ARPHRD_ETHER,.state=IF_OPER_DOWN}};
@@ -82,7 +82,7 @@ static void remove_one(struct md_network_namespace *n,unsigned index) {
             --n->count; --i;
         }
     }
-    if (n->default_interface==index) n->default_interface=n->default_gateway=0;
+    if (n->default_interface==index) n->default_interface=n->default_gateway=n->default_metric=0;
 }
 int md_network_interface_remove(struct md_network_namespace *n,unsigned index) {
     struct md_network_interface *link=md_network_interface_find(n,index,NULL);
@@ -98,16 +98,19 @@ int md_network_interface_move(struct md_network_namespace *from,unsigned index,s
     if (from->fabric!=to->fabric) return -EXDEV;
     struct md_network_interface *link=md_network_interface_find(from,index,NULL);
     if (!link) return -ENODEV;
-    if (link->kind!=MD_LINK_VETH) return -EOPNOTSUPP;
+    if (from!=to && link->kind!=MD_LINK_VETH) return -EOPNOTSUPP;
     if (!name) name=link->info.name;
     if (!valid_name(name)) return -EINVAL;
     struct md_network_interface *collision=md_network_interface_find(to,0,name);
     if (collision && collision!=link) return -EEXIST;
     char renamed[IFNAMSIZ]={0}; memcpy(renamed,name,strlen(name));
     if (from==to) { memcpy(link->info.name,renamed,IFNAMSIZ); return 0; }
+    if (to->next_policy==MD_NET_SCOPE_DEFAULT-1) return -ENOSPC;
     int error=md_network_interface_reserve(to,1);
     if (error) return error;
     struct md_network_interface moved=*link;
+    moved.policy=to->defaults;
+    moved.policy_id=++to->next_policy;
     moved.master=0; memcpy(moved.info.name,renamed,IFNAMSIZ);
     remove_one(from,index); to->links[to->count++]=moved;
     return 0;
@@ -191,4 +194,22 @@ int md_network_link_info(const struct md_network_namespace *n,unsigned index,str
     }
     pthread_mutex_unlock(&n->fabric->lock);
     return link ? 0 : -ENODEV;
+}
+int md_network_link_list(struct md_network_namespace *n,struct md_network_link *out,unsigned capacity) {
+    if (!md_network_namespace_managed(n)) return -EXDEV;
+    pthread_mutex_lock(&n->fabric->lock);
+    int result=n->count>capacity ? -ENOSPC : (int)n->count;
+    if (result>=0) for (unsigned i=0;i<n->count;++i) out[i]=n->links[i].info;
+    pthread_mutex_unlock(&n->fabric->lock); return result;
+}
+int md_network_ingress(struct md_network_namespace *n,const struct md_network_interface *in,uint32_t source,uint32_t destination) {
+    if (!in) return -ENETUNREACH;
+    if (in->kind!=MD_LINK_LOOPBACK && !n->all.route_localnet && !in->policy.route_localnet
+            && ((ntohl(source)>>24)==127 || (ntohl(destination)>>24)==127)) return -ENETUNREACH;
+    unsigned filter=n->all.rp_filter>in->policy.rp_filter ? n->all.rp_filter : in->policy.rp_filter;
+    if (filter) {
+        struct md_network_interface *reverse=md_network_route_find(n,source,NULL);
+        if (!reverse || (filter==1 && reverse->info.index!=in->info.index)) return -ENETUNREACH;
+    }
+    return 0;
 }

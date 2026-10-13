@@ -1343,8 +1343,9 @@ static int proc_node_metadata(struct thread *t, const struct md_proc_metadata_re
     *out=(struct md_proc_metadata_result){0};
     struct stat st={0}, *value=&st;
     if (md_proc_network_sysctl(q->kind)) {
+        if (!memchr(q->interface,0,sizeof(q->interface))) return -EINVAL;
         struct md_control_file view=md_network_sysctl_new(t->resources.network,
-            (enum md_network_parameter)(q->kind-MD_PROC_NET_UNPRIVILEGED_PORT),NULL);
+            (enum md_network_parameter)(q->kind-MD_PROC_NET_UNPRIVILEGED_PORT),q->interface,NULL);
         if (!view.ops) return -errno;
         int error=view.ops->stat(view.context,value);
         struct md_identity actor=md_identity_access(&t->identity,q->effective);
@@ -1583,10 +1584,20 @@ static void proc_file_request(struct thread *t, const struct seccomp_notif *q) {
         else reply.error=-ENOTTY;
     } else if (operation==MD_PROC_FILE_OPEN && md_proc_network_sysctl(q->data.args[3])) {
         int flags=(int)q->data.args[4];
-        struct md_control_file view=md_network_sysctl_new(t->resources.network,
-            (enum md_network_parameter)(q->data.args[3]-MD_PROC_NET_UNPRIVILEGED_PORT),NULL);
+        char interface[16]={0};
+        if (md_proc_network_interface(q->data.args[3])) {
+            struct md_buffer_span span;
+            reply.error=md_buffer_span(&t->buffer,&span);
+            if (!reply.error) {
+                memcpy(interface,span.data,sizeof(interface));
+                if (!memchr(interface,0,sizeof(interface))) reply.error=-EINVAL;
+            }
+        }
+        struct md_control_file view={0};
+        if (!reply.error) view=md_network_sysctl_new(t->resources.network,
+            (enum md_network_parameter)(q->data.args[3]-MD_PROC_NET_UNPRIVILEGED_PORT),interface,NULL);
         struct md_proc_file *file=NULL;
-        if (!view.ops) reply.error=-errno;
+        if (!view.ops) { if (!reply.error) reply.error=-errno; }
         else {
             file=md_proc_file_open_control(view.ops,view.context,&t->identity,flags);
             if (!file) reply.error=-errno;

@@ -7,6 +7,7 @@
 #include <linux/rtnetlink.h>
 #include <linux/veth.h>
 #include <net/if.h>
+#include <netinet/in.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -90,6 +91,12 @@ void test_network_route(void) {
     assert(!ack(n,&root,h,NULL) && n->count==5);
     unsigned endpoint=md_network_interface_find(n,0,"veth-guest")->info.index;
     assert(md_network_interface_find(n,endpoint,NULL)->info.tx_queue_length==77);
+    struct md_control_file sysctl=md_network_sysctl_new(n,MD_NET_RP_FILTER,"veth-guest",NULL);
+    assert(sysctl.ops);
+    struct md_control_actor actor={.identity=&root};
+    char value[8]; struct stat original_policy,current_policy;
+    assert(!sysctl.ops->stat(sysctl.context,&original_policy));
+    assert(sysctl.ops->write(sysctl.context,&actor,"2",1,0)==1);
     h=request(&p,RTM_NEWLINK,0);
     ((struct ifinfomsg *)NLMSG_DATA(h))->ifi_index=endpoint;
     attr(h,IFLA_IFNAME,"eth0",4); unsigned fd=7;
@@ -97,9 +104,20 @@ void test_network_route(void) {
     struct md_network_target target={.context=child,.resolve=resolve};
     assert(md_network_route(n,&root,h,h->nlmsg_len,91,0,&target,rejected.bytes,sizeof(rejected),&refusal)==-EAGAIN);
     assert(md_network_interface_find(n,endpoint,NULL) && !md_network_interface_find(child,endpoint,NULL));
+    assert(sysctl.ops->read(sysctl.context,&actor,value,sizeof(value),0)==2 && !memcmp(value,"2\n",2));
     assert(!ack(n,&root,h,&target));
     assert(!md_network_interface_find(n,endpoint,NULL));
     assert(md_network_interface_find(child,endpoint,NULL));
+    assert(sysctl.ops->read(sysctl.context,&actor,value,sizeof(value),0)==-ENODEV);
+    assert(!md_network_interface_move(child,endpoint,n,"veth-guest"));
+    assert(sysctl.ops->read(sysctl.context,&actor,value,sizeof(value),0)==-ENODEV);
+    assert(sysctl.ops->write(sysctl.context,&actor,"1",1,0)==-ENODEV);
+    struct md_control_file reopened=md_network_sysctl_new(n,MD_NET_RP_FILTER,"veth-guest",NULL);
+    assert(reopened.ops && !reopened.ops->stat(reopened.context,&current_policy));
+    assert(current_policy.st_ino!=original_policy.st_ino);
+    assert(reopened.ops->read(reopened.context,&actor,value,sizeof(value),0)==2 && !memcmp(value,"0\n",2));
+    md_control_file_release(reopened); md_control_file_release(sysctl);
+    assert(!ack(n,&root,h,&target));
     h=request(&p,RTM_NEWLINK,0);
     struct ifinfomsg *link=NLMSG_DATA(h);
     link->ifi_index=endpoint; link->ifi_change=IFF_UP; link->ifi_flags=IFF_UP;
@@ -163,6 +181,71 @@ void test_network_route(void) {
         }
         assert(!length && done==1);
     }
+    h=request(&p,RTM_NEWLINK,NLM_F_CREATE|NLM_F_EXCL);
+    info=attr(h,IFLA_LINKINFO,NULL,0);
+    attr(h,IFLA_INFO_KIND,"veth",5);
+    data=attr(h,IFLA_INFO_DATA,NULL,0);
+    peer=attr(h,VETH_INFO_PEER,&zero,sizeof(zero));
+    struct rtattr *peer_info=attr(h,IFLA_LINKINFO,NULL,0);
+    attr(h,IFLA_INFO_KIND,"veth",5);
+    peer_info->rta_len=(char *)h+h->nlmsg_len-(char *)peer_info;
+    attr(h,IFLA_IFNAME,"eth1",5);
+    attr(h,IFLA_NET_NS_FD,&fd,sizeof(fd));
+    peer->rta_len=(char *)h+h->nlmsg_len-(char *)peer;
+    data->rta_len=(char *)h+h->nlmsg_len-(char *)data;
+    info->rta_len=(char *)h+h->nlmsg_len-(char *)info;
+    attr(h,IFLA_MASTER,&bridge,sizeof(bridge));
+    unsigned before=n->count,child_before=child->count;
+    original_index=n->fabric->next_index;
+    assert(md_network_route(n,&root,h,h->nlmsg_len,91,0,&target,rejected.bytes,sizeof(rejected),&refusal)==-EAGAIN);
+    assert(n->count==before && child->count==child_before && n->fabric->next_index==original_index);
+    assert(!md_network_interface_find(child,0,"eth1"));
+    assert(!ack(n,&root,h,&target));
+    struct md_network_interface *generated=md_network_interface_find(n,0,"veth0");
+    struct md_network_interface *direct=md_network_interface_find(child,0,"eth1");
+    assert(generated && direct && generated->peer==direct->info.index && direct->peer==generated->info.index);
+    assert(generated->master==bridge);
+    unsigned generated_index=generated->info.index;
+    assert(ack(n,&root,h,&target)==-EEXIST);
+    assert(n->count==before+1 && child->count==child_before+1);
+    direct=md_network_interface_find(child,0,"eth1"); assert(direct);
+    direct->ipv4=htonl(0x0a590002); direct->prefix=24; direct->info.flags|=IFF_UP;
+    h=request(&p,RTM_NEWROUTE,NLM_F_CREATE|NLM_F_EXCL);
+    h->nlmsg_len=NLMSG_LENGTH(sizeof(struct rtmsg));
+    *(struct rtmsg *)NLMSG_DATA(h)=(struct rtmsg){.rtm_family=AF_INET,.rtm_table=RT_TABLE_MAIN,
+        .rtm_type=RTN_UNICAST,.rtm_protocol=RTPROT_BOOT,.rtm_scope=RT_SCOPE_UNIVERSE};
+    uint32_t gateway=htonl(0x0a590001),metric=100;
+    attr(h,RTA_GATEWAY,&gateway,sizeof(gateway));
+    struct rtattr *priority=attr(h,RTA_PRIORITY,&metric,sizeof(metric));
+    assert(md_network_route(child,&root,h,h->nlmsg_len,91,0,NULL,rejected.bytes,sizeof(rejected),&refusal)==-EAGAIN);
+    assert(!child->default_interface && !child->default_metric);
+    assert(!ack(child,&root,h,NULL) && child->default_metric==100);
+    struct packet dump_packet;
+    struct nlmsghdr *dump_header=request(&dump_packet,RTM_GETROUTE,NLM_F_DUMP);
+    dump_header->nlmsg_len=NLMSG_LENGTH(sizeof(struct rtmsg));
+    length=md_network_route(child,&root,dump_header,dump_header->nlmsg_len,91,0,NULL,reply.bytes,sizeof(reply),NULL);
+    assert(length>0);
+    unsigned metrics=0;
+    for (struct nlmsghdr *item=(void *)reply.bytes;NLMSG_OK(item,length);item=NLMSG_NEXT(item,length)) {
+        if (item->nlmsg_type!=RTM_NEWROUTE) continue;
+        const struct rtmsg *body=NLMSG_DATA(item);
+        int left=RTM_PAYLOAD(item);
+        for (const struct rtattr *a=RTM_RTA(body);RTA_OK(a,left);a=RTA_NEXT(a,left))
+            if (a->rta_type==RTA_PRIORITY) {
+                assert(RTA_PAYLOAD(a)==4 && !memcmp(RTA_DATA(a),&metric,4)); ++metrics;
+            }
+    }
+    assert(metrics==1);
+    uint32_t wrong_metric=99; memcpy(RTA_DATA(priority),&wrong_metric,4);
+    assert(ack(child,&root,h,NULL)==-EOPNOTSUPP && child->default_metric==100);
+    h->nlmsg_type=RTM_DELROUTE;
+    assert(ack(child,&root,h,NULL)==-ESRCH && child->default_metric==100);
+    memcpy(RTA_DATA(priority),&metric,4);
+    assert(!ack(child,&root,h,NULL) && !child->default_metric);
+    h=request(&p,RTM_DELLINK,0);
+    ((struct ifinfomsg *)NLMSG_DATA(h))->ifi_index=generated_index;
+    assert(!ack(n,&root,h,NULL));
+    assert(n->count==before && child->count==child_before);
     h=request(&p,RTM_DELLINK,0);
     ((struct ifinfomsg *)NLMSG_DATA(h))->ifi_index=bridge;
     assert(!ack(n,&root,h,NULL));

@@ -990,6 +990,12 @@ connections routed through that namespace; it does not revoke existing native
 streams. The explicit routed launch starts with forwarding enabled, while new
 child namespaces start with it disabled. Namespace-mounted proc omits host-global
 `sysrq-trigger`, `kcore`, `kmsg` and `keys`, which have no guest provider.
+Per-interface `route_localnet`, `rp_filter` and `arp_notify` share the same
+provider. Open controls follow a policy lifetime across rename, not name reuse;
+moving an interface between namespaces retires its old controls permanently.
+Reverse-path and loopback policy apply to logical ingress; address resolution
+uses the live fabric catalogue, without sending ARP announcements to Android.
+Veth pairs can be created with a peer directly in another logical namespace.
 
 Logical sysfs mounts retain their opening network namespace. The offline view
 exposes `class/net/lo`, its device attributes and a mountpoint for cgroups,

@@ -70,7 +70,7 @@ static long open_extended(const struct md_fs *fs, const char *exe, const unsigne
             long checked=RAW4(openat2,a[0],path,&probe,sizeof(probe));
             if (checked<0) return checked;
             RAW1(close,checked);
-            long result=md_proc_control_open(ref.process,kind,(int)how.flags);
+            long result=md_proc_control_open(&ref,(int)how.flags,0);
             return result==-EXDEV && md_proc_network_sysctl(kind)
                 ? RAW4(openat2,a[0],a[1],&how,sizeof(how)) : result;
         }
@@ -127,7 +127,7 @@ long md_file_call(const struct md_fs *fs, const char *exe, long nr, const unsign
         if (known<0) return known;
         if (known==MD_DESCRIPTOR_ANONYMOUS) return md_descriptor_metadata((int)a[0],nr,a);
         if (known) return nr==SYS_getdents64 ? md_proc_control_call(nr,a)
-            : md_proc_control_metadata((int)RAW0(gettid),MD_PROC_NONE,(int)a[0],nr,a);
+            : md_proc_control_metadata(&(struct md_proc_path){.process=(int)RAW0(gettid),.descriptor=(int)a[0]},nr,a);
     }
     if (fs->endpoint[0]) return md_namespace_call(fs,exe,nr,a);
     char first[PATH_MAX], second[PATH_MAX];
@@ -150,7 +150,7 @@ long md_file_call(const struct md_fs *fs, const char *exe, long nr, const unsign
             if (r<0) return r;
         }
         if (md_proc_control_kind(control)) {
-            long result=*image.tail ? -ENOTDIR : md_proc_control_open(image.process,control,flags);
+            long result=*image.tail ? -ENOTDIR : md_proc_control_open(&image,flags,0);
             if (result!=-EXDEV || !md_proc_network_sysctl(control)) return result;
         }
         if (image.kind == MD_PROC_CMDLINE || image.kind == MD_PROC_AUXV)
@@ -167,7 +167,7 @@ long md_file_call(const struct md_fs *fs, const char *exe, long nr, const unsign
             struct md_proc_path ref=md_proc_path(first);
             enum md_proc_kind kind=ref.kind==MD_PROC_FOREIGN ? ref.foreign_kind : ref.kind;
             if (md_proc_control_kind(kind)) {
-                long result=*ref.tail ? -ENOTDIR : md_proc_control_metadata(ref.process,kind,-1,nr,a);
+                long result=*ref.tail ? -ENOTDIR : md_proc_control_metadata(&ref,nr,a);
                 if (result!=-EXDEV || !md_proc_network_sysctl(kind)) return result;
             }
         }

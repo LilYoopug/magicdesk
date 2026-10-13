@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/magic.h>
+#include <string.h>
 #include <unistd.h>
 
 int md_fs_proc_operation(struct md_filesystem *fs,struct md_mount_namespace *view,
@@ -33,13 +34,22 @@ int md_fs_proc_operation(struct md_filesystem *fs,struct md_mount_namespace *vie
         r=md_procfs_check(fs,mount,path,minimum);
         if (r) { out->error=r; return 1; }
     }
-    if (!sysctl && (q->operation==MD_FS_STAT || q->operation==MD_FS_FSTAT)
+    int network=md_network_namespace_managed(fs->actor->network);
+    int network_control=network && md_proc_network_sysctl(ref.kind);
+    if (!sysctl && !network_control && (q->operation==MD_FS_STAT || q->operation==MD_FS_FSTAT)
             && mount->provider) {
         int private=md_provider_tree_private(mount->provider,fd);
         if (private<0) { out->error=private; return 1; }
         if (private) {
             struct stat st;
-            r=stat(path,&st) ? -errno : 0;
+            int netdir=network && !strncmp(path,"/proc/sys/net",13)
+                && (!path[13] || path[13]=='/');
+            r=(netdir ? fstat(fd,&st) : stat(path,&st)) ? -errno : 0;
+            if (!r && netdir) {
+                st.st_uid=md_user_namespace_into(md_network_namespace_owner(fs->actor->network),0,0);
+                st.st_gid=md_user_namespace_into(md_network_namespace_owner(fs->actor->network),1,0);
+                st.st_mode=S_IFDIR|0555;
+            }
             if (!r) { md_fs_stat_info(&st,&out->info); out->info.mount_id=mount->id; }
             else out->error=r;
             return 1;
@@ -69,7 +79,7 @@ int md_fs_proc_operation(struct md_filesystem *fs,struct md_mount_namespace *vie
     struct md_control_file file={0};
     if (!r) {
         file=sysctl ? md_proc_sysctl_new(kind,origin,fs->actor->uts) : md_network_sysctl_new(fs->actor->network,
-            (enum md_network_parameter)(ref.kind-MD_PROC_NET_UNPRIVILEGED_PORT),origin);
+            (enum md_network_parameter)(ref.kind-MD_PROC_NET_UNPRIVILEGED_PORT),ref.interface,origin);
         if (!file.ops) r=-errno;
     }
     const struct md_identity *id=fs->store->identity;

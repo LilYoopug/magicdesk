@@ -23,9 +23,11 @@ def guest(options):
     prefix = ['podman', '--log-level', 'debug', '--root', options['cache'],
               '--runroot', options['cache'] + '-run', '--storage-driver', options['storage']]
     limits = ['--cgroups', options['cgroups']]
-    if options['hostLimits']:
-        for name, kind in (('nofile', resource.RLIMIT_NOFILE), ('nproc', resource.RLIMIT_NPROC)):
-            soft, hard = resource.getrlimit(kind)
+    report['inheritedLimits'] = {}
+    for name, kind in (('nofile', resource.RLIMIT_NOFILE), ('nproc', resource.RLIMIT_NPROC)):
+        soft, hard = resource.getrlimit(kind)
+        report['inheritedLimits'][name] = {'soft': soft, 'hard': hard}
+        if options['hostLimits']:
             limits += ['--ulimit', f'{name}={soft}:{hard}']
     if options['unlimitedPids']:
         limits += ['--pids-limit', '-1']

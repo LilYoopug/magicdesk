@@ -65,6 +65,18 @@ struct md_proc_path md_proc_path_for(const char *path,int tid,int tgid) {
                 else if (word(&p,"ping_group_range")) out.kind=MD_PROC_NET_PING_GROUPS;
                 else if (word(&p,"ip_local_port_range")) out.kind=MD_PROC_NET_LOCAL_PORTS;
                 else if (word(&p,"ip_forward")) out.kind=MD_PROC_NET_IPV4_FORWARD;
+                else if (word(&p,"conf")) {
+                    const char *name=component(p);
+                    size_t length=0;
+                    while (name[length] && name[length]!='/') ++length;
+                    if (!length || length>=sizeof(out.interface)) return out;
+                    p=name+length;
+                    if (word(&p,"route_localnet")) out.kind=MD_PROC_NET_ROUTE_LOCALNET;
+                    else if (word(&p,"rp_filter")) out.kind=MD_PROC_NET_RP_FILTER;
+                    else if (word(&p,"arp_notify")) out.kind=MD_PROC_NET_ARP_NOTIFY;
+                    else return out;
+                    memcpy(out.interface,name,length);
+                }
                 else return out;
                 out.process=tid;
                 out.tail=p; out.anchor_length=(size_t)(p-path); return out;

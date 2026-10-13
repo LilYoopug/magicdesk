@@ -19,11 +19,16 @@ uint64_t md_network_namespace_inode(const struct md_network_namespace *);
 const struct md_user_namespace *md_network_namespace_owner(const struct md_network_namespace *);
 int md_network_namespace_managed(const struct md_network_namespace *);
 enum md_network_parameter { MD_NET_UNPRIVILEGED_PORT, MD_NET_PING_GROUPS, MD_NET_LOCAL_PORTS,
-    MD_NET_IPV4_FORWARD };
+    MD_NET_IPV4_FORWARD, MD_NET_ROUTE_LOCALNET, MD_NET_RP_FILTER, MD_NET_ARP_NOTIFY };
+#define MD_NET_SCOPE_ALL UINT64_MAX
+#define MD_NET_SCOPE_DEFAULT (UINT64_MAX-1)
+/* Resolve a policy lifetime once at open. Rename retains it; namespace moves
+ * and deletion retire it even if the same interface later returns. */
+int md_network_parameter_scope(struct md_network_namespace *,enum md_network_parameter,const char *,uint64_t *);
+int md_network_parameter_read(struct md_network_namespace *,enum md_network_parameter,uint64_t,uint32_t values[2]);
+int md_network_parameter_write(struct md_network_namespace *,enum md_network_parameter,uint64_t,const uint32_t values[2]);
 /* Policy state belongs to the selected managed namespace, never Android. */
-int md_network_parameter_get(struct md_network_namespace *,enum md_network_parameter,uint32_t values[2]);
-int md_network_parameter_set(struct md_network_namespace *,enum md_network_parameter,const uint32_t values[2]);
-struct md_control_file md_network_sysctl_new(struct md_network_namespace *,enum md_network_parameter,struct md_fs_anchor *);
+struct md_control_file md_network_sysctl_new(struct md_network_namespace *,enum md_network_parameter,const char *,struct md_fs_anchor *);
 struct md_network_link {
     unsigned index, flags, mtu, type, state, tx_queue_length;
     char name[16];
@@ -31,6 +36,7 @@ struct md_network_link {
 };
 /* One control-plane snapshot for ioctl, netlink and namespace-mounted sysfs. */
 int md_network_link_info(const struct md_network_namespace *, unsigned, struct md_network_link *);
+int md_network_link_list(struct md_network_namespace *,struct md_network_link *,unsigned capacity);
 struct md_fd_object *md_network_socket_new(struct md_network_namespace *);
 int md_network_socket_offline(const struct md_fd_object *);
 int md_network_socket_control(const struct md_fd_object *);

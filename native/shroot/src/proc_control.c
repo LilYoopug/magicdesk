@@ -27,43 +27,46 @@ long md_proc_control_known(int fd) {
     return kind==MD_DESCRIPTOR_ANONYMOUS ? 0 : kind;
 #endif
 }
-static long control_open(unsigned operation, int process, int selector, int flags, uint64_t view) {
+static long control_open(unsigned operation, int process, int selector, int flags, uint64_t view,const char *interface) {
     long memory=0;
 #ifndef MD_USE_LIBC
-    if (flags&O_PATH) {
+    if ((flags&O_PATH) || interface) {
         memory=md_adapter_buffer_take();
         if (memory<0) return memory;
+        if (interface) memcpy((void *)memory,interface,16);
     }
 #endif
     long fd=RAW6(prctl,MD_GUEST_PROC_FILE,operation,process,selector,flags,view);
 #ifndef MD_USE_LIBC
     if (memory) {
-        if (fd>=0) fd=md_adapter_receive_fd((void *)memory,(unsigned)flags,MD_BUFFER_PROC_RIGHTS);
+        if (fd>=0 && (flags&O_PATH)) fd=md_adapter_receive_fd((void *)memory,(unsigned)flags,MD_BUFFER_PROC_RIGHTS);
         long released=md_adapter_buffer_release();
         if (released<0) { if (fd>=0) RAW1(close,fd); return released; }
     }
 #else
-    (void)memory;
+    (void)memory; (void)interface;
 #endif
     if (fd<0) return fd;
     long result=md_fd_filter_arm(MD_FD_SELECTOR_PROC,(int)fd);
     if (result<0) { RAW1(close,fd); return result; }
     return fd;
 }
-long md_proc_control_open(int process, enum md_proc_kind kind, int flags) {
-    return control_open(MD_PROC_FILE_OPEN,process,kind,flags,0);
-}
-long md_proc_control_open_view(int process, enum md_proc_kind kind, int flags, uint64_t view) {
-    return control_open(MD_PROC_FILE_OPEN,process,kind,flags,view);
+long md_proc_control_open(const struct md_proc_path *ref, int flags, uint64_t view) {
+    enum md_proc_kind kind=ref->kind==MD_PROC_FOREIGN ? ref->foreign_kind : ref->kind;
+    return control_open(MD_PROC_FILE_OPEN,ref->process,kind,flags,view,
+        md_proc_network_interface(kind) ? ref->interface : NULL);
 }
 long md_proc_control_reopen(int process, int fd, int flags) {
-    return control_open(MD_PROC_FILE_REOPEN,process,fd,flags,0);
+    return control_open(MD_PROC_FILE_REOPEN,process,fd,flags,0,NULL);
 }
-long md_proc_control_metadata(int process, enum md_proc_kind kind, int fd, long nr, const unsigned long *a) {
+long md_proc_control_metadata(const struct md_proc_path *ref, long nr, const unsigned long *a) {
 #ifdef MD_USE_LIBC
-    (void)process; (void)kind; (void)fd; (void)nr; (void)a; return -ENOTSUP;
+    (void)ref; (void)nr; (void)a; return -ENOTSUP;
 #else
+    int process=ref->process, fd=ref->descriptor;
+    enum md_proc_kind kind=ref->kind==MD_PROC_FOREIGN ? ref->foreign_kind : ref->kind;
     struct md_proc_metadata_request query={.process=process,.descriptor=fd,.kind=kind,.effective=1};
+    memcpy(query.interface,ref->interface,sizeof(query.interface));
     int access=nr==SYS_faccessat || nr==SYS_faccessat2;
     if (access) {
         if ((unsigned)a[2]&~7U || (nr==SYS_faccessat2 && (unsigned)a[3]&~(MD_AT_EACCESS|AT_EMPTY_PATH|AT_SYMLINK_NOFOLLOW))) return -EINVAL;

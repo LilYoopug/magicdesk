@@ -13,7 +13,7 @@
 
 long md_proc_executable_open(const struct md_fs *fs, const char *path, int flags) {
     if (fs->image && fs->endpoint[0] && !fs->image->executable_object[0])
-        return md_proc_control_open((int)RAW0(gettid),MD_PROC_EXE,flags);
+        return md_proc_control_open(&(struct md_proc_path){.process=(int)RAW0(gettid),.kind=MD_PROC_EXE},flags,0);
     if (!fs->image || !fs->image->executable_object[0])
         return md_namespace_open(fs, AT_FDCWD, path, flags, 0);
     if (!(flags & O_PATH) && ((flags & O_ACCMODE) != O_RDONLY || (flags & O_TRUNC))) return -ETXTBSY;

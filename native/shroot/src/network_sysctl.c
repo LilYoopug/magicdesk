@@ -15,6 +15,7 @@ struct network_sysctl {
     atomic_uint references;
     struct md_network_namespace *network;
     enum md_network_parameter parameter;
+    uint64_t scope;
     struct md_fs_anchor *origin;
 };
 static unsigned value_count(enum md_network_parameter p) {
@@ -33,7 +34,7 @@ static int metadata(void *context,struct stat *out) {
     struct network_sysctl *f=context;
     const struct md_user_namespace *owner=md_network_namespace_owner(f->network);
     *out=(struct stat){.st_dev=UINT32_C(0xfffd0000)+(unsigned)f->parameter,
-        .st_ino=md_network_namespace_inode(f->network),.st_mode=S_IFREG|0644,
+        .st_ino=md_network_namespace_inode(f->network)^f->scope,.st_mode=S_IFREG|0644,
         .st_nlink=1,.st_blksize=getpagesize(),
         .st_uid=md_user_namespace_into(owner,0,0),.st_gid=md_user_namespace_into(owner,1,0)};
     return 0;
@@ -51,7 +52,7 @@ static long read_value(void *context,const struct md_control_actor *actor,void *
     struct network_sysctl *f=context;
     if (offset<0) return -EINVAL;
     uint32_t value[2];
-    int error=md_network_parameter_get(f->network,f->parameter,value);
+    int error=md_network_parameter_read(f->network,f->parameter,f->scope,value);
     if (error) return error;
     if (f->parameter==MD_NET_PING_GROUPS) for (unsigned i=0;i<2;++i)
         value[i]=md_identity_visible_id(actor->identity,1,value[i]);
@@ -91,19 +92,22 @@ static long write_value(void *context,const struct md_control_actor *actor,const
         if (value[i]>INT_MAX) return -EINVAL;
         value[i]=md_user_namespace_into(actor->identity->user_namespace,1,value[i]);
     }
-    error=md_network_parameter_set(f->network,f->parameter,value);
+    error=md_network_parameter_write(f->network,f->parameter,f->scope,value);
     return error ? error : (long)size;
 }
 static const struct md_control_file_ops ops={.retain=retain,.release=release,.stat=metadata,
     .access=file_access,.read=read_value,.write=write_value,.filesystem=PROC_SUPER_MAGIC};
 struct md_control_file md_network_sysctl_new(struct md_network_namespace *network,enum md_network_parameter parameter,
-        struct md_fs_anchor *origin) {
+        const char *name,struct md_fs_anchor *origin) {
     uint32_t values[2];
-    int error=md_network_parameter_get(network,parameter,values);
+    uint64_t scope;
+    int error=md_network_parameter_scope(network,parameter,name,&scope);
+    if (!error) error=md_network_parameter_read(network,parameter,scope,values);
     if (error) { errno=-error; return (struct md_control_file){0}; }
     struct network_sysctl *f=calloc(1,sizeof(*f));
     if (!f) return (struct md_control_file){0};
     atomic_init(&f->references,1); f->network=md_network_namespace_retain(network); f->parameter=parameter;
+    f->scope=scope;
     f->origin=md_fs_anchor_retain(origin);
     return (struct md_control_file){&ops,f};
 }

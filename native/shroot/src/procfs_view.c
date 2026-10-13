@@ -179,7 +179,7 @@ static int control(const char *path,const char *name) {
             || !strcmp(name,"auxv") || !strcmp(name,"fd") || !strcmp(name,"fdinfo")
             || !strcmp(name,"root") || !strcmp(name,"cwd") || !strcmp(name,"mounts")
             || !strcmp(name,"mountinfo") || !strcmp(name,"cgroup");
-    return !strcmp(path,"/proc/sys/kernel") || !strcmp(path,"/proc/sys/net/ipv4")
+    return !strcmp(path,"/proc/sys/kernel") || (!strcmp(path,"/proc/sys/net/ipv4") && strcmp(name,"conf"))
         || (!strcmp(path,"/proc") && !strcmp(name,"cgroups"));
 }
 static int kernel_global(const char *name) {
@@ -195,11 +195,58 @@ static int omitted(const struct proc_policy *p,const char *name) {
     return kernel_global(name) || (p && p->pidonly && !decimal(name,NULL)
         && strcmp(name,".") && strcmp(name,"..") && strcmp(name,"self") && strcmp(name,"thread-self"));
 }
+static const char network_conf[]="/proc/sys/net/ipv4/conf";
+static int network_directory(struct md_filesystem *fs,const char *path) {
+    if (!fs->actor || !md_network_namespace_managed(fs->actor->network)) return 0;
+    size_t length=sizeof(network_conf)-1;
+    return !strcmp(path,network_conf) ? 1 : !strncmp(path,network_conf,length) && path[length]=='/' ? 2 : 0;
+}
+static int network_entry(struct md_filesystem *fs,const char *path,const char *name) {
+    if (!strcmp(name,".") || !strcmp(name,"..")) return 1;
+    int directory=network_directory(fs,path);
+    if (!directory) return 1;
+    uint64_t scope;
+    const char *interface=directory==1 ? name : path+sizeof(network_conf);
+    int r=md_network_parameter_scope(fs->actor->network,MD_NET_ROUTE_LOCALNET,interface,&scope);
+    return r==-ENOENT ? 0 : r ? r : directory==1 || !strcmp(name,"route_localnet")
+        || !strcmp(name,"rp_filter") || !strcmp(name,"arp_notify");
+}
+static int network_nodes(const struct md_view_mount *mount,const char *interface) {
+    if (!mount->provider) return -EOPNOTSUPP;
+    int root=md_provider_tree_root(mount->provider);
+    const char *dirs[]={"sys/net","sys/net/ipv4","sys/net/ipv4/conf"};
+    for (unsigned i=0;i<sizeof(dirs)/sizeof(*dirs);++i)
+        if (mkdirat(root,dirs[i],0755) && errno!=EEXIST) return -errno;
+    if (!interface) return 0;
+    char path[96];
+    snprintf(path,sizeof(path),"sys/net/ipv4/conf/%s",interface);
+    if (mkdirat(root,path,0755) && errno!=EEXIST) return -errno;
+    const char *names[]={"route_localnet","rp_filter","arp_notify"};
+    for (unsigned i=0;i<sizeof(names)/sizeof(*names);++i) {
+        snprintf(path,sizeof(path),"sys/net/ipv4/conf/%s/%s",interface,names[i]);
+        int fd=openat(root,path,O_CREAT|O_EXCL|O_WRONLY|O_CLOEXEC,0600);
+        if (fd>=0) close(fd);
+        else if (errno!=EEXIST) return -errno;
+    }
+    return 0;
+}
 int md_procfs_step(struct md_filesystem *fs,struct md_view_mount *mount,int fd,
         const char *name,const char *tail,int follow_final,uint64_t resolve) {
     char path[PATH_MAX], mapped[32];
     int r=md_procfs_path(mount,fd,path,sizeof(path));
     if (r) return r;
+    if (network_directory(fs,path)) {
+        r=network_entry(fs,path,name);
+        if (r<=0) return r ? r : -ENOENT;
+        if (network_directory(fs,path)==1 && strcmp(name,".") && strcmp(name,"..")) {
+            r=network_nodes(mount,name);
+            if (r) return r;
+        }
+    } else if (!strcmp(path,"/proc/sys/net/ipv4") && !strcmp(name,"conf")
+            && fs->actor && md_network_namespace_managed(fs->actor->network)) {
+        r=network_nodes(mount,NULL);
+        if (r) return r;
+    }
     r=md_procfs_check(fs,mount,path,1);
     if (r) return r;
     pid_t group=directory(path);
@@ -277,7 +324,17 @@ ssize_t md_procfs_getdents(struct md_filesystem *fs,const struct md_view_mount *
     if (error) return error;
     const struct proc_policy *p=policy(mount);
     pid_t group=directory(path);
-    if (!group || (group>0 && !mount->pid_namespace)) {
+    int net=network_directory(fs,path);
+    if (net==1) {
+        struct md_network_link links[256];
+        int count=md_network_link_list(fs->actor->network,links,256);
+        if (count<0) return count;
+        for (int i=-2;i<count;++i) {
+            error=network_nodes(mount,i==-2 ? "all" : i==-1 ? "default" : links[i].name);
+            if (error) return error;
+        }
+    }
+    if ((!group || (group>0 && !mount->pid_namespace)) && !net) {
         if (mount->provider) return md_provider_tree_getdents(mount->provider,fd,data,capacity);
         ssize_t n=syscall(SYS_getdents64,fd,data,capacity);
         return n<0 ? -errno : n;
@@ -300,7 +357,7 @@ ssize_t md_procfs_getdents(struct md_filesystem *fs,const struct md_view_mount *
             size_t length=entry->d_reclen;
             char mapped[32]; const char *name=entry->d_name;
             pid_t native=decimal(entry->d_name,NULL), number=native;
-            if (native && mount->pid_namespace) {
+            if (!net && native && mount->pid_namespace) {
                 number=0;
                 struct md_pid_identity *id=md_pid_namespace_find(mount->pid_namespace,native);
                 if (md_pid_identity_group(id)==(group>0 ? group : native))
@@ -310,7 +367,7 @@ ssize_t md_procfs_getdents(struct md_filesystem *fs,const struct md_view_mount *
                     snprintf(mapped,sizeof(mapped),"%d",number); name=mapped;
                 }
             }
-            int allowed=native && number ? permitted(fs,p,native,2) : 1;
+            int allowed=net ? network_entry(fs,path,name) : native && number ? permitted(fs,p,native,2) : 1;
             if (allowed<0) return allowed;
             if (allowed && (!native || number) && !(group==-1 && omitted(p,name))) {
                 size_t bytes=strlen(name)+1;

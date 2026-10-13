@@ -269,8 +269,8 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
         int process_watch=nr==SYS_inotify_add_watch && (control==MD_PROC_PROCESS_DIRECTORY
             || control==MD_PROC_STATUS || control==MD_PROC_STAT);
         long result=process_watch ? -EXDEV
-            : nr==SYS_openat ? md_proc_control_open_view(ref.process,control,(int)a[2],proc_namespace)
-            : md_proc_control_metadata(ref.process,control,-1,nr,a);
+            : nr==SYS_openat ? md_proc_control_open(&ref,(int)a[2],proc_namespace)
+            : md_proc_control_metadata(&ref,nr,a);
         if (result!=-EXDEV || (control!=MD_PROC_PROCESS_DIRECTORY && control!=MD_PROC_STATUS
                 && control!=MD_PROC_STAT && !md_proc_network_sysctl(control))) return result;
         ref.kind=MD_PROC_NONE;
@@ -321,7 +321,7 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
         if (ref.foreign_kind==MD_PROC_FD || ref.foreign_kind==MD_PROC_CWD
                 || (ref.foreign_kind==MD_PROC_EXE && (nr==SYS_newfstatat || nr==SYS_statx))) {
             if (nr!=SYS_newfstatat && nr!=SYS_statx && nr!=SYS_readlinkat) return -ENOTSUP;
-            long result=md_proc_control_metadata(ref.process,ref.foreign_kind,ref.descriptor,nr,a);
+            long result=md_proc_control_metadata(&ref,nr,a);
             if (result!=-EXDEV) return result;
             /* Reuse the retained-object path below, without treating another
              * process's descriptor number or executable as caller-owned. */
@@ -337,7 +337,7 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
         if (nr==SYS_readlinkat)
             return md_fs_buffer_proc_link(ref.process,(void *)a[2],a[3]);
         if (ref.foreign_kind==MD_PROC_EXE) {
-            long fd=md_proc_control_open(ref.process,MD_PROC_EXE,(int)a[2]);
+            long fd=md_proc_control_open(&ref,(int)a[2],0);
             if (fd!=-EXDEV) return fd;
         }
         return RAW5(prctl,MD_GUEST_PROC_IMAGE,ref.process,ref.foreign_kind,a[2],0);
@@ -365,7 +365,7 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
             if (tail) return -ENOTDIR;
             if (nr==SYS_openat) return md_proc_control_reopen(ref.process,ref.descriptor,(int)a[2]&~(O_CREAT|O_EXCL));
             if (nr!=SYS_readlinkat || md_proc_file_namespace((enum md_proc_file_kind)(known-1)))
-                return md_proc_control_metadata(ref.process,MD_PROC_NONE,ref.descriptor,nr,a);
+                return md_proc_control_metadata(&(struct md_proc_path){.process=ref.process,.descriptor=ref.descriptor},nr,a);
         }
     }
     if (nr == SYS_readlinkat && !tail) {
