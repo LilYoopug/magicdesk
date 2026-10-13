@@ -206,6 +206,10 @@ issue a host mount. No PIDFD_THREAD, PIDFD_SIGNAL_THREAD or newer pidfd ioctl is
 required. `--case mount-namespace`, stock Bubblewrap/GDB and Chromium's automatic
 user/PID route cover these paths under actual UID 2000; the APK's other services
 do not acquire these prerequisites.
+Nested debugger waits use baseline ppoll, PTRACE_INTERRUPT and ptrace register/
+signal-mask operations. Kernel-owned syscall restart is shared with socket IO;
+there is no new kernel requirement or permanent helper. Native-versus-guest
+wait4/waitid signal tests and stock strace's 41-thread SIGINT detach cover it.
 Mounted proc visibility policies use the Linux 5.15 `hidepid`/`gid`/`subset`
 semantics in `procfs_view`, without host mount authority or newer syscalls.
 Live peer inspection uses `/proc/PID/io`'s READ_FSCREDS check, including native

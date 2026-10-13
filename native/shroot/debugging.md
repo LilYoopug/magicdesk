@@ -49,10 +49,18 @@ FD operations cannot complete that pending guest call.
 Guest wait4 and waitid deliver queued trace stops in event order, with rusage
 and waitid WNOWAIT support. Mixed traced/untraced waits first check the native
 child queue without blocking. Only that short probe defers asynchronous handlers;
-it must not mistake a handler's syscall for the requested wait. If no virtual
+it must not mistake a handler's syscall for the requested wait. With no ready
+result, the calling guest thread waits in an interruptible empty native poll,
+not a ptrace stop. Inferior events interrupt that exact wait before register or
+event consumption; a wake racing poll entry cancels entry instead. No polling
+timer, helper thread or additional descriptor is allocated. Guest signals use
+the shared syscall-restart path: the original wait number, arguments and kernel
+orig_x0 are restored before the kernel decides EINTR or SA_RESTART. The old wait
+record is released before a handler can issue another wait. If no virtual
 children remain, a blocking wait returns to the kernel with ordinary signal
-semantics. Kernel parenthood
-retains real-child exit reaping; traced nonchildren have supervisor-owned exit
+semantics. The debugger's own syscall filters also apply to the wait carrier;
+a denied operation remains an error. Kernel parenthood retains real-child exit
+reaping; traced nonchildren have supervisor-owned exit
 records. Event waits end on a trace event, owned child exit or launch cancellation,
 not a settling delay. Nonleader thread termination belongs to the virtual trace
 relationship: the native parent cannot reap it as an ordinary child of the
@@ -101,9 +109,8 @@ than waiting indefinitely for an exit that still needs ptrace continuation.
 
 This is a bounded nested-debugging implementation, not complete ptrace emulation.
 Attach cannot cross supervised launches or target Android processes. TRACESECCOMP,
-pidfd-based virtual waits, __WNOTHREAD wait selection and interruption of a parked
-virtual wait by an arbitrary signal are not implemented. Non-leader debugger
-exec, as distinct from inferior exec, needs dedicated lifecycle coverage.
+pidfd-based virtual waits and __WNOTHREAD wait selection are not implemented.
+Non-leader debugger exec, as distinct from inferior exec, needs dedicated lifecycle coverage.
 Unsupported ptrace requests remain explicit errors; the supervisor never
 relinquishes its physical tracing ownership.
 
@@ -130,6 +137,9 @@ function output and Callgrind instruction counts.
 The `syscall-exec` case requires paired entry/exit stops with the exec event
 between them and a successful exec result. The strace workflow checks decoded
 open arguments and child creation, and rejects stray exec-event recovery.
+The `strace-detach` case attaches to 41 idle threads, observes a stable wait,
+sends SIGINT and requires prompt tracer exit without killing the target. The
+target must then accept input, release its workers and exit normally.
 The perf capability check opens a task-clock event and requires a positive
 counter; a kernel permission denial is recorded as unavailable, not a successful
 profile or a runtime workaround.
@@ -137,7 +147,8 @@ profile or a runtime workaround.
 `test_kernel_contract.py` runs one static binary directly under shell and inside
 Shroot on the same kernel. It compares waitid WNOWAIT, invalid waits, late TRACEME
 while the parent or another parent thread is in a native wait, ptrace
-option errors, syscall-info sizing and signal suppression/replacement, alongside
+option errors, syscall-info sizing and signal suppression/replacement,
+wait4/waitid signal interruption and SA_RESTART with SIGCHLD masked, plus
 descriptor lifetimes and scoped pathname resolution under concurrent rename.
 Unavailable native hardlink creation is reported separately; the guest must
 execute that subcheck, not silently omit it. ELF fixtures independently check

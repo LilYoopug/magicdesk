@@ -1285,7 +1285,12 @@ selected disposable store. See the [debugger contract and measured coverage](../
 --instance STORE [--build BUILD]` compares normalized observations from the same
 static executable directly under shell and inside Shroot. Cases cover wait and
 ptrace contracts, signal delivery, descriptor lifetime, openat2 and concurrent
-rename confinement. The ancillary cases cover SCM_RIGHTS peek, truncation,
+rename confinement. The `debug-wait{4,id}-{signal,restart}` cases compare EINTR
+and SA_RESTART for idle inferiors with SIGCHLD masked. The debugger fixture's
+`--case strace-detach` checks SIGINT detach from 41 idle threads and subsequent
+target input/exit; `probe_podman_runtime.py --trace --exercise-ports` also detaches
+from live aardvark-dns and repeats named-container exchanges before cleanup.
+The ancillary cases cover SCM_RIGHTS peek, truncation,
 253 descriptors, batch delivery, source addresses and partial publication faults;
 pipe EOF checks descriptor cleanup. `rights-socket-error` covers a kernel
 payload-copy fault, poll/epoll readiness and shared one-shot error consumption

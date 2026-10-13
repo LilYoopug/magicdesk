@@ -7,6 +7,7 @@ from pathlib import Path
 from test_oci_services import Suite
 
 CASES = ('waitid-peek', 'wait-errors', 'traceme-late-wait4', 'traceme-late-waitid',
+         'debug-wait4-signal', 'debug-waitid-signal', 'debug-wait4-restart', 'debug-waitid-restart',
          'traceme-thread-wait4', 'traceme-thread-waitid', 'ptrace-options', 'syscall-info',
          'signal-delivery', 'file-lifetime', 'resolution', 'resolution-race', 'proc-owners',
          'rights-peek', 'rights-truncate', 'rights-limit', 'rights-batch', 'rights-fault',

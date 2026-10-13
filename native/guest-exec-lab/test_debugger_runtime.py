@@ -12,6 +12,57 @@ from test_proot_debugger import run
 from test_development_runtime import development_sources
 
 TARGET = '/tmp/md-debugger-tests'
+STRACE_DETACH = r'''
+import selectors
+from pathlib import Path
+import signal
+import subprocess
+import time
+child = subprocess.Popen(['/tmp/md-debugger-tests', 'strace-target'], stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, text=True)
+tracer = None
+try:
+    assert child.stdout.readline().strip() == 'READY'
+    tracer = subprocess.Popen(['strace', '-f', '-o', '/tmp/md-strace-detach.log',
+                               '-p', str(child.pid)], stderr=subprocess.PIPE)
+    with selectors.DefaultSelector() as selector:
+        selector.register(tracer.stderr, selectors.EVENT_READ)
+        messages = b''
+        deadline = time.monotonic() + 10
+        # EVENT_WAIT: strace acknowledges attachment; expiry fails the workflow.
+        while b'attached' not in messages:
+            assert selector.select(max(0, deadline-time.monotonic())), messages
+            data = tracer.stderr.read1(4096)
+            assert data, messages
+            messages += data
+    print(messages.decode(), end='', flush=True)
+    deadline = time.monotonic() + 10
+    previous, since = None, time.monotonic()
+    # Bounded observation: syscall 260 is ARM64 wait4, 73 is its interruptible
+    # runtime carrier. Signal the waiting tracer, not its attachment setup.
+    while True:
+        current = Path('/proc/'+str(tracer.pid)+'/syscall').read_text().split()
+        if current != previous:
+            previous, since = current, time.monotonic()
+        # Repeated identical observations exclude a transient attachment probe.
+        if current and current[0] in ('260', '73') and time.monotonic()-since >= 0.05:
+            break
+        assert time.monotonic() < deadline, current
+        time.sleep(0.001)
+    tracer.send_signal(signal.SIGINT)
+    # EVENT_WAIT: SIGINT must detach from idle tracees, without target activity.
+    _, errors = tracer.communicate(timeout=10)
+    print(errors.decode(), end='', flush=True)
+    assert tracer.returncode in (0, -signal.SIGINT), tracer.returncode
+    output, _ = child.communicate('x', timeout=10)
+    assert child.returncode == 0 and 'PASS strace-target' in output, output
+    print('PASS strace-detach')
+finally:
+    for process in (tracer, child):
+        if process is not None:
+            if process.poll() is None: process.kill()
+            process.wait(timeout=10)
+'''
 GDB_ATTACH = r'''
 import subprocess
 import sys
@@ -142,6 +193,7 @@ print('PASS gdb-jit')
 def commands():
     cases = [(name, [TARGET, name]) for name in ('attach', 'seize', 'trace-exit', 'syscall', 'syscall-exec', 'credential-transition', 'mixed',
                                                'kill-stopped', 'owner-exit', 'exitkill', 'thread-exec', 'clone-untraced', 'perf-event')]
+    cases.append(('strace-detach', ['python3', '-c', STRACE_DETACH]))
     cases.append(('gdb-attach', ['python3', '-c', GDB_ATTACH]))
     cases.append(('gdb-attach-threads', ['python3', '-c', GDB_ATTACH, 'gdb-thread-target']))
     cases.append(('gdb-active-io', ['python3', '-c', GDB_IO]))

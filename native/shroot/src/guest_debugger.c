@@ -151,22 +151,16 @@ static int wait_result(struct md_debugger *d, pid_t owner, struct user_pt_regs *
     return 1;
 }
 static void wake(struct md_debugger *d, pid_t owner) {
-    struct waiting **at=&d->waiters;
-    while (*at) {
-        struct waiting *w=*at;
-        int children;
+    int waiting=0;
+    for (struct waiting *w=d->waiters; w; w=w->next) {
         if (d->host.group(w->pid)==d->host.group(owner)) {
+            waiting=1;
             if (w->probing) w->retry=1;
-            else if (wait_result(d,w->pid,&w->registers,&children)) {
-                *at=w->next; free(w); return;
-            } else {
-                w->probing=1; d->host.wait_probe(w->pid,&w->registers,MD_DEBUG_WAIT_REPROBE);
-            }
+            else d->host.wait_wake(w->pid);
         }
-        at=&w->next;
     }
     /* The debugger may use a SIGCHLD self-pipe instead of a blocking wait. */
-    kill(owner,SIGCHLD);
+    if (!waiting) kill(owner,SIGCHLD);
 }
 int md_debugger_stop(struct md_debugger *d, pid_t pid, int status, const siginfo_t *info, unsigned long message) {
     struct inferior *p=find(d,pid);
@@ -495,7 +489,7 @@ int md_debugger_call(struct md_debugger *d, pid_t pid, struct user_pt_regs *r) {
     struct waiting *w=malloc(sizeof(*w));
     if (!w) { d->host.complete(pid,r,-ENOMEM); return 1; }
     *w=(struct waiting){.next=d->waiters,.pid=pid,.registers=*r,.probing=1}; d->waiters=w;
-    d->host.wait_probe(pid,r,MD_DEBUG_WAIT_PROBE);
+    d->host.wait(pid,r,MD_DEBUG_WAIT_PROBE);
     /* EVENT_WAIT: a guest trace stop or actual child exit resumes this wait.
      * Launch cancellation/timeout still owns both debugger and inferior. */
     return 1;
@@ -539,15 +533,36 @@ void md_debugger_wait_complete(struct md_debugger *d, pid_t pid, long value) {
          * Once no virtual children remain, let the real parent reap normally. */
         struct user_pt_regs registers=w->registers;
         *at=w->next; free(w);
-        d->host.wait_probe(pid,&registers,MD_DEBUG_WAIT_NATIVE); return;
+        d->host.wait(pid,&registers,MD_DEBUG_WAIT_NATIVE); return;
     } else if (!children || (wait_options(&w->registers)&WNOHANG)) {
         d->host.complete(pid,&w->registers,children ? 0 : value);
     } else {
         w->probing=0;
         if (w->retry) {
-            w->retry=0; w->probing=1; d->host.wait_probe(pid,&w->registers,MD_DEBUG_WAIT_REPROBE);
-        }
+            w->retry=0; w->probing=1; d->host.wait(pid,&w->registers,MD_DEBUG_WAIT_REPROBE);
+        } else d->host.wait(pid,&w->registers,MD_DEBUG_WAIT_PARK);
         return;
     }
     *at=w->next; free(w);
+}
+void md_debugger_wait_resumed(struct md_debugger *d, pid_t pid, long error) {
+    struct waiting **at=&d->waiters;
+    while (*at && (*at)->pid!=pid) at=&(*at)->next;
+    if (!*at) return;
+    struct waiting *w=*at;
+    if (!error) {
+        int children;
+        if (wait_result(d,pid,&w->registers,&children)) {
+            *at=w->next; free(w); return;
+        }
+        w->probing=1; w->retry=0;
+        d->host.wait(pid,&w->registers,MD_DEBUG_WAIT_REPROBE);
+        return;
+    }
+    struct user_pt_regs registers=w->registers;
+    *at=w->next; free(w);
+    /* The kernel signal disposition, including SA_RESTART, owns interruption.
+     * Forget the old wait before a handler can issue another wait itself. */
+    if (error==-512) d->host.wait(pid,&registers,MD_DEBUG_WAIT_RESTART);
+    else d->host.complete(pid,&registers,error);
 }

@@ -6,7 +6,10 @@
 #include <sys/resource.h>
 
 struct md_debugger;
-enum md_debugger_wait_action { MD_DEBUG_WAIT_PROBE, MD_DEBUG_WAIT_REPROBE, MD_DEBUG_WAIT_NATIVE };
+enum md_debugger_wait_action {
+    MD_DEBUG_WAIT_PROBE, MD_DEBUG_WAIT_REPROBE, MD_DEBUG_WAIT_NATIVE,
+    MD_DEBUG_WAIT_PARK, MD_DEBUG_WAIT_RESTART
+};
 struct md_debugger_host {
     pid_t (*visible_pid)(pid_t observer, pid_t native);
     pid_t (*native_pid)(pid_t observer, pid_t visible);
@@ -21,7 +24,8 @@ struct md_debugger_host {
     int (*options)(pid_t, unsigned long);
     int (*listen)(pid_t);
     void (*usage)(pid_t, struct rusage *);
-    void (*wait_probe)(pid_t, const struct user_pt_regs *, enum md_debugger_wait_action);
+    void (*wait)(pid_t, const struct user_pt_regs *, enum md_debugger_wait_action);
+    void (*wait_wake)(pid_t);
     void (*complete)(pid_t, struct user_pt_regs *, long);
     void (*resume)(pid_t, int);
     void (*reaped)(pid_t, int native_wait);
@@ -47,5 +51,7 @@ int md_debugger_observing(struct md_debugger *, pid_t);
 int md_debugger_syscall_mode(struct md_debugger *, pid_t);
 int md_debugger_syscall(struct md_debugger *, pid_t, const struct user_pt_regs *, int);
 void md_debugger_wait_complete(struct md_debugger *, pid_t, long);
+/* Zero means event wake; -512 requests kernel-owned restart/signal delivery. */
+void md_debugger_wait_resumed(struct md_debugger *, pid_t, long);
 void md_debugger_rekey(struct md_debugger *, pid_t, pid_t);
 #endif

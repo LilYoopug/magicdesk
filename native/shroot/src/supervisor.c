@@ -129,9 +129,10 @@ enum phase { IDLE, ALLOCATING, DISPATCHING, EXECUTING, OBSERVING,
     EXPORT_CANCEL, EXPORTING, EXPORT_ENTRY, EXPORT_NOTIFY, EXPORT_RETURN, STORING,
     DELEGATE_CANCEL, LOADING_PATH, PROC_CANCEL, PROC_OPENING, STORING_IDS, DOMAIN_PATH,
     WATCH_CANCEL, WATCH_ENTRY, WATCH_READ, IPC_WAIT_ENTRY, IPC_WAITING,
-    SOCKET_WAIT_ENTRY, SOCKET_WAITING, SOCKET_RESTART_ENTRY, SOCKET_RESTART_EXIT,
+    SOCKET_WAIT_ENTRY, SOCKET_WAITING, CALL_RESTART_ENTRY, CALL_RESTART_EXIT,
     EPOLL_CALL, EPOLL_WAIT,
-    IDENTITY_COPY, DEBUG_WAIT_ENTRY, DEBUG_WAIT_EXIT, MEMORY_WAIT, PROCESS_OBSERVING, PROCESS_TID_STORE,
+    IDENTITY_COPY, DEBUG_WAIT_ENTRY, DEBUG_WAIT_EXIT, DEBUG_PARK_ENTRY, DEBUG_PARK_EXIT,
+    MEMORY_WAIT, PROCESS_OBSERVING, PROCESS_TID_STORE,
     PROCESS_INFO_LOAD, PROCESS_INFO_STORE, PROCESS_VALUE_STORE, PROCESS_INIT_ENTRY, PROCESS_INIT_EXIT, PROC_LOOKUP };
 enum memory_action { MEMORY_NONE, MEMORY_KERNEL, MEMORY_DETACH, MEMORY_FORK };
 struct metadata_operation {
@@ -346,6 +347,7 @@ struct thread {
     int terminal_observation;
     unsigned long debug_options;
     uint64_t debug_wait_mask;
+    int debug_wait_waking;
     struct rusage usage;
     uintptr_t process_image;
     int watch_wait;
@@ -2067,10 +2069,41 @@ static int debugger_listen(pid_t pid) {
     t->listening=1; t->kernel_stopped=0;
     return 0;
 }
-static void debugger_wait_probe(pid_t pid, const struct user_pt_regs *original, enum md_debugger_wait_action action) {
+static void restart_call(struct thread *t,const struct user_pt_regs *original,uint64_t mask) {
+    t->original=*original; t->mask=mask;
+    if (!shield(t)) return;
+    struct user_pt_regs regs=*original;
+    regs.pc=RAW_GATE-4; regs.regs[8]=SYS_gettid;
+    if (!set_registers(t->pid,&regs)) return;
+    t->phase=CALL_RESTART_ENTRY; resume(t->pid,0);
+}
+static void debugger_wait_wake(pid_t pid) {
+    struct thread *t=find_thread(pid);
+    if (!t || t->debug_wait_waking) return;
+    CHECK(t->phase==DEBUG_PARK_ENTRY || t->phase==DEBUG_PARK_EXIT);
+    t->debug_wait_waking=1;
+    /* EVENT_WAIT: the exact native poll stop must precede register changes.
+     * An event before poll entry is consumed there without entering the wait. */
+    if (t->phase==DEBUG_PARK_EXIT && !t->listening) {
+        int error=debugger_interrupt(pid); CHECK(!error || error==-ESRCH);
+    }
+}
+static void debugger_wait(pid_t pid, const struct user_pt_regs *original, enum md_debugger_wait_action action) {
     struct thread *t=find_thread(pid);
     if (!t) return;
     struct user_pt_regs regs=*original;
+    if (action==MD_DEBUG_WAIT_RESTART) { restart_call(t,original,t->debug_wait_mask); return; }
+    if (action==MD_DEBUG_WAIT_PARK) {
+        /* EVENT_WAIT: native interruptible poll delivers arbitrary guest
+         * signals. Inferior events cancel it with INTERRUPT; no periodic wake
+         * or descriptor is needed, and ordinary execution never enters here. */
+        t->original=*original; t->debug_wait_waking=0;
+        if (!shield(t)) return;
+        regs.pc=RAW_GATE-4; regs.regs[8]=SYS_ppoll;
+        for (unsigned i=0;i<6;i++) regs.regs[i]=0;
+        if (set_registers(pid,&regs)) { t->phase=DEBUG_PARK_ENTRY; resume(pid,0); }
+        return;
+    }
     unsigned index=regs.regs[8]==SYS_waitid ? 1 : 0;
     if (action!=MD_DEBUG_WAIT_NATIVE
             && (regs.regs[8]==SYS_wait4 || regs.regs[0]==P_PID || regs.regs[0]==P_PGID) && (pid_t)regs.regs[index]>0) {
@@ -5041,8 +5074,9 @@ static void resume(pid_t pid, int sig) {
             || phase==PROCESS_INIT_ENTRY || phase==PROCESS_INIT_EXIT || phase == EXPORT_ENTRY || phase == EXPORT_NOTIFY
             || phase == EXPORT_RETURN || phase == EXECUTING || phase == WATCH_CANCEL
             || phase == WATCH_ENTRY || phase == WATCH_READ || phase==DEBUG_WAIT_ENTRY || phase==DEBUG_WAIT_EXIT
+            || phase==DEBUG_PARK_ENTRY || phase==DEBUG_PARK_EXIT
             || phase==IPC_WAIT_ENTRY || phase==IPC_WAITING || phase==SOCKET_WAIT_ENTRY || phase==SOCKET_WAITING
-            || phase==SOCKET_RESTART_ENTRY || phase==SOCKET_RESTART_EXIT || phase==EPOLL_WAIT
+            || phase==CALL_RESTART_ENTRY || phase==CALL_RESTART_EXIT || phase==EPOLL_WAIT
             || (phase==IDLE && t->entered && t->process_image
                 && (md_debugger_syscall_mode(debugger,pid) || md_debugger_observing(debugger,pid))) ? PTRACE_SYSCALL
                 : phase==IDLE && t->entered && md_debugger_step(debugger,pid) ? PTRACE_SINGLESTEP : PTRACE_CONT;
@@ -5385,6 +5419,19 @@ static void ipc_wait_complete(struct thread *t) {
     t->ipc_waking=0;
     dispatch_with_stack(t);
 }
+static void debugger_park_complete(struct thread *t) {
+    struct user_pt_regs regs;
+    if (!registers(t->pid,&regs)) return;
+    long value=(long)regs.regs[0];
+    int waking=t->debug_wait_waking; t->debug_wait_waking=0;
+    int interrupted=value<=-512 && value>=-516;
+    TRACE("PROBE debugger park pid=%d value=%ld waking=%d\n",t->pid,value,waking);
+    t->phase=IDLE;
+    if (!tracee_request(t,PTRACE_SETSIGMASK,(void *)sizeof(t->debug_wait_mask),
+            &t->debug_wait_mask,"debug-park-unmask")) return;
+    md_debugger_wait_resumed(debugger,t->pid,waking && (interrupted || value==-ENOSYS || !value) ? 0
+        : interrupted ? -512 : value<0 ? value : -EIO);
+}
 static void socket_wait_complete(struct thread *t) {
     struct user_pt_regs regs;
     if (!registers(t->pid,&regs)) return;
@@ -5503,6 +5550,7 @@ static int interrupted_operation(struct thread *t) {
     if (t->phase==PROC_CANCEL) { proc_query_start(t); return 1; }
     if (t->phase==IPC_WAITING && t->ipc_waking) { ipc_wait_complete(t); return 1; }
     if (t->phase==SOCKET_WAITING && t->socket_waking) { socket_wait_complete(t); return 1; }
+    if (t->phase==DEBUG_PARK_EXIT && t->debug_wait_waking) { debugger_park_complete(t); return 1; }
     if (t->phase!=DELEGATE_CANCEL) return 0;
     const struct seccomp_notif *q=&t->metadata.request;
     CHECK(ioctl(listener,SECCOMP_IOCTL_NOTIF_ID_VALID,&q->id)==-1 && errno==ENOENT);
@@ -5986,7 +6034,7 @@ int main(int argc, char **argv) {
     struct md_debugger_host debug_host={.parent=debugger_parent,.group=debugger_group,.uid=debugger_uid,.allowed=debugger_allowed,
         .visible_pid=debugger_visible_pid,.native_pid=debugger_native_pid,.visible_uid=debugger_visible_uid,.reaped=debugger_reaped,
         .attachable=debugger_attachable,.observe=debugger_observe,.interrupt=debugger_interrupt,.options=debugger_options,
-        .listen=debugger_listen,.usage=debugger_usage,.wait_probe=debugger_wait_probe,
+        .listen=debugger_listen,.usage=debugger_usage,.wait=debugger_wait,.wait_wake=debugger_wait_wake,
         .complete=debugger_complete,.resume=resume};
     debugger=md_debugger_create(&debug_host); CHECK(debugger);
     if (argument < argc && !strcmp(argv[argument], "--admit-elf")) {
@@ -6590,6 +6638,14 @@ int main(int argc, char **argv) {
                 t->phase=IDLE;
                 md_debugger_wait_complete(debugger,pid,(long)regs.regs[0]); continue;
             }
+            if (t->phase==DEBUG_PARK_ENTRY) {
+                if (t->debug_wait_waking) {
+                    if (!skip(pid)) continue;
+                } else if (!tracee_request(t,PTRACE_SETSIGMASK,(void *)sizeof(t->debug_wait_mask),
+                        &t->debug_wait_mask,"debug-park-unmask")) continue;
+                t->phase=DEBUG_PARK_EXIT; resume(pid,0); continue;
+            }
+            if (t->phase==DEBUG_PARK_EXIT) { debugger_park_complete(t); continue; }
             if (t->phase==IDLE) {
                 struct ptrace_syscall_info info;
                 struct user_pt_regs regs;
@@ -6615,19 +6671,19 @@ int main(int argc, char **argv) {
                 if (!restore_mask(t)) continue;
                 t->phase = WATCH_READ; resume(pid, 0); continue;
             }
-            if (t->phase==SOCKET_RESTART_ENTRY) {
-                TRACE("PROBE socket-restart-entry pid=%d\n",pid);
+            if (t->phase==CALL_RESTART_ENTRY) {
+                TRACE("PROBE call-restart-entry pid=%d\n",pid);
                 if (!skip(pid)) continue;
-                t->phase=SOCKET_RESTART_EXIT; resume(pid,0); continue;
+                t->phase=CALL_RESTART_EXIT; resume(pid,0); continue;
             }
-            if (t->phase==SOCKET_RESTART_EXIT) {
-                TRACE("PROBE socket-restart-exit pid=%d nr=%llu\n",pid,t->original.regs[8]);
+            if (t->phase==CALL_RESTART_EXIT) {
+                TRACE("PROBE call-restart-exit pid=%d nr=%llu\n",pid,t->original.regs[8]);
                 /* Give signal delivery the original syscall context, including
                  * the kernel's orig_x0. Kernel SA_RESTART handling, not a guessed
                  * userspace action table, decides whether to restart it. */
                 struct user_pt_regs regs=t->original; regs.regs[0]=(uint64_t)-512;
                 int nr=(int)t->original.regs[8]; struct iovec number={&nr,sizeof(nr)};
-                if (!tracee_request(t,PTRACE_SETREGSET,(void *)NT_ARM_SYSTEM_CALL,&number,"socket-restart-syscall")
+                if (!tracee_request(t,PTRACE_SETREGSET,(void *)NT_ARM_SYSTEM_CALL,&number,"call-restart-syscall")
                         || !set_registers(pid,&regs) || !restore_mask(t)) continue;
                 md_memory_stack_return(t->memory,t->stack); t->stack=0;
                 t->phase=IDLE; resume(pid,0); continue;
@@ -6897,9 +6953,7 @@ int main(int argc, char **argv) {
                     t->phase=IDLE; resume(pid,0); continue;
                 }
                 if (value==MD_IPC_IO_RESTART) {
-                    regs=t->original; regs.pc=RAW_GATE-4; regs.regs[8]=SYS_gettid;
-                    if (!set_registers(pid,&regs)) continue;
-                    t->phase=SOCKET_RESTART_ENTRY; resume(pid,0); continue;
+                    restart_call(t,&t->original,t->mask); continue;
                 }
                 if (t->memory_action==MEMORY_DETACH) {
                     CHECK(!md_resource_order_complete(&t->memory_order)); t->memory_action=0;

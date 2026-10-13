@@ -479,6 +479,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "perf-event")) { if (!perf_test()) return 0; }
     else if (!strcmp(argv[1], "gdb-target")) gdb_target(0);
     else if (!strcmp(argv[1], "gdb-thread-target")) gdb_target(1);
+    else if (!strcmp(argv[1], "strace-target")) { magic_value=43; gdb_target(1); }
     else if (!strcmp(argv[1], "gdb-io-target")) gdb_io_target();
     else if (!strcmp(argv[1], "shm-target")) shm_target();
     else if (!strcmp(argv[1], "jit-target")) jit_target();

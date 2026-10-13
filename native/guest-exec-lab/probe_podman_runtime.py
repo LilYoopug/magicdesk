@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import resource
 import selectors
+import signal
 import subprocess
 import sys
 
@@ -107,6 +108,15 @@ def guest(options):
             for source, target in (names, tuple(reversed(names))):
                 run(prefix + ['exec', source, 'python3', '/fixture.py', '--client', target, '8080', target, '20'])
             report['namedPeerExchangePassed'] = True
+            if tracer:
+                tracer.send_signal(signal.SIGINT)
+                # EVENT_WAIT: detach while the multithreaded resolver remains
+                # alive; its eventual shutdown cannot hide a lost interrupt.
+                _, errors = tracer.communicate(timeout=10)
+                assert tracer.returncode in (0, -signal.SIGINT), errors.decode(errors='replace')
+                report['traceDetachPassed'] = True
+                for source, target in (names, tuple(reversed(names))):
+                    run(prefix + ['exec', source, 'python3', '/fixture.py', '--client', target, '8080', target, '20'])
             for name in names:
                 run(prefix + ['exec', name, 'python3', '/fixture.py', '--internet'])
             conflict = run(prefix + ['run', '--rm', '--name', 'md-podman-conflict', '--network', network,

@@ -87,6 +87,52 @@ static void wait_errors(void) {
     assert(!kill(pid, SIGKILL));
     assert(waitpid(pid, &status, __WALL) == pid && WIFSIGNALED(status));
 }
+static volatile sig_atomic_t wait_signal_seen, wait_signal_target;
+static void wait_signal_handler(int signal) {
+    (void)signal;
+    wait_signal_seen=1;
+    if (wait_signal_target) kill(wait_signal_target,SIGUSR1);
+}
+static void debugger_wait_signal(int id,int restart) {
+    pid_t pid=child();
+    if (!pid) {
+        assert(!ptrace(PTRACE_TRACEME,0,0,0)); raise(SIGSTOP);
+        for (;;) pause();
+    }
+    assert(WSTOPSIG(stopped(pid))==SIGSTOP);
+    struct sigaction action={.sa_handler=wait_signal_handler,.sa_flags=restart ? SA_RESTART : 0}, previous;
+    sigemptyset(&action.sa_mask);
+    assert(!sigaction(SIGALRM,&action,&previous));
+    sigset_t blocked, saved;
+    sigemptyset(&blocked); sigaddset(&blocked,SIGCHLD);
+    assert(!sigprocmask(SIG_BLOCK,&blocked,&saved));
+    wait_signal_seen=0; wait_signal_target=restart ? pid : 0;
+    assert(!ptrace(PTRACE_CONT,pid,0,0));
+    /* EVENT_WAIT: the alarm is the signal stimulus, not readiness evidence.
+     * No inferior event can release the wait before this handler runs. The
+     * outer supervisor deadline bounds a signal that cannot be delivered. */
+    alarm(1);
+    siginfo_t info={0}; int status=0;
+    errno=0;
+    int result=id ? waitid(P_PID,pid,&info,WSTOPPED) : waitpid(pid,&status,__WALL);
+    int error=errno;
+    assert(wait_signal_seen);
+    if (restart) {
+        assert(result==(id ? 0 : pid));
+        assert(id ? info.si_pid==pid && info.si_code==CLD_TRAPPED && info.si_status==SIGUSR1
+                  : WIFSTOPPED(status) && WSTOPSIG(status)==SIGUSR1);
+    } else {
+        assert(result==-1 && error==EINTR);
+        assert(!kill(pid,SIGUSR1));
+        assert(WSTOPSIG(stopped(pid))==SIGUSR1);
+    }
+    assert(!sigaction(SIGALRM,&previous,NULL)); alarm(20);
+    assert(!sigprocmask(SIG_SETMASK,&saved,NULL));
+    assert(!ptrace(PTRACE_DETACH,pid,0,0));
+    assert(!kill(pid,SIGKILL));
+    assert(waitpid(pid,&status,0)==pid && WIFSIGNALED(status) && WTERMSIG(status)==SIGKILL);
+    printf("OBS debugger-wait id=%d restart=%d signal=1 detached=1\n",id,restart);
+}
 static void await_native_wait(pid_t parent, int syscall_number) {
     char path[64], bytes[512];
     snprintf(path, sizeof(path), "/proc/%d/syscall", parent);
@@ -418,6 +464,10 @@ int main(int argc, char **argv) {
     alarm(20);
     if (!strcmp(argv[1], "waitid-peek")) waitid_peek();
     else if (!strcmp(argv[1], "wait-errors")) wait_errors();
+    else if (!strcmp(argv[1], "debug-wait4-signal")) debugger_wait_signal(0,0);
+    else if (!strcmp(argv[1], "debug-waitid-signal")) debugger_wait_signal(1,0);
+    else if (!strcmp(argv[1], "debug-wait4-restart")) debugger_wait_signal(0,1);
+    else if (!strcmp(argv[1], "debug-waitid-restart")) debugger_wait_signal(1,1);
     else if (!strcmp(argv[1], "traceme-late-wait4")) traceme_late_wait(0, 0);
     else if (!strcmp(argv[1], "traceme-late-waitid")) traceme_late_wait(1, 0);
     else if (!strcmp(argv[1], "traceme-thread-wait4")) traceme_late_wait(0, 1);
