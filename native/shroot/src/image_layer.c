@@ -421,6 +421,11 @@ int md_image_layers_finish(struct md_inode_store *s, int preserve) {
             "WHERE objects.source=sources.id AND objects.scope=sources.scope) "
             "AND NOT EXISTS(SELECT 1 FROM inode_channels c WHERE c.source=sources.id AND c.scope=sources.scope);"
         "DROP TABLE image_live");
-    if (!r) r = mdi_discard_untracked_backings(s);
-    return mdi_commit(s, r);
+    s->sync_requested=1;
+    r=mdi_commit(s,r);
+    if (!r) {
+        r=mdi_begin(s,0);
+        if (!r) r=mdi_finish(s,mdi_discard_untracked_backings(s));
+    }
+    return r;
 }

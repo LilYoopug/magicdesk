@@ -80,7 +80,7 @@ int md_inode_snapshot(struct md_inode_store *source, struct md_inode_store *targ
     if (!r) {
         r = mdi_begin(target, 1);
         if (!r) {
-            r = mdi_sql(target, "DELETE FROM backings; DELETE FROM events; DELETE FROM sockets; DELETE FROM fifo_pins; "
+            r = mdi_sql(target, "DELETE FROM allocation_reserve; DELETE FROM backings; DELETE FROM events; DELETE FROM sockets; DELETE FROM fifo_pins; "
                 "UPDATE inode_channels SET channel=lower(hex(randomblob(16))),source=0; "
                 "UPDATE properties SET value=0 WHERE key='sealed'");
             int origin = 0;
@@ -108,6 +108,7 @@ int md_inode_snapshot(struct md_inode_store *source, struct md_inode_store *targ
                 "(SELECT 1 FROM objects WHERE objects.source=sources.id AND objects.scope=sources.scope) "
                 "AND NOT EXISTS(SELECT 1 FROM inode_channels c WHERE c.source=sources.id AND c.scope=sources.scope)");
             if (!r) r=mdi_sync(target,target->objects);
+            target->sync_requested=1;
             r = mdi_commit(target, r);
         }
     }

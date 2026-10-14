@@ -31,7 +31,8 @@ void md_fs_view_execute(struct md_filesystem *fs, const struct md_fs_request *q,
         int error=md_fs_anchor_check_fd(q->origin[i],q->directory[i]);
         if (error) { *out=(struct md_fs_result){.fd=-1,.error=error}; return; }
         if (q!=&logical) { logical=*q; q=&logical; }
-        logical.directory[i]=md_fs_anchor_fd(q->origin[i]);
+        if (!(md_fs_operation_data_inputs(q->operation)&(1U<<i)))
+            logical.directory[i]=md_fs_anchor_fd(q->origin[i]);
     }
     int native=q->origin[0] && !q->origin[0]->view
         && (!q->path[0] || q->path[0][0]!='/' || (q->resolve&RESOLVE_IN_ROOT));
@@ -514,6 +515,7 @@ static void inode_execute(struct md_filesystem *fs,
         }
         break;
     }
+    case MD_FS_SYNC: r=md_inode_sync(s,first,(enum md_inode_sync_mode)q->mode); break;
     case MD_FS_IOCTL: {
         struct stat st;
         r=md_inode_fstat(s,first,&st);

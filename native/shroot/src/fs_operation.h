@@ -24,7 +24,7 @@ enum md_fs_operation {
     MD_FS_CHROOT, MD_FS_UMASK, MD_FS_STATFS, MD_FS_WATCH_PATH,
     MD_FS_TASK_PATH, MD_FS_XATTR, MD_FS_FXATTR, MD_FS_IPC_PEER, MD_FS_MOUNT,
     MD_FS_FSOPEN, MD_FS_FSCONFIG, MD_FS_FSMOUNT, MD_FS_BPF, MD_FS_FDINFO,
-    MD_FS_LANDLOCK, MD_FS_OPEN_TREE, MD_FS_IOCTL, MD_FS_LAST = MD_FS_IOCTL
+    MD_FS_LANDLOCK, MD_FS_OPEN_TREE, MD_FS_IOCTL, MD_FS_SYNC, MD_FS_LAST = MD_FS_SYNC
 };
 /* Both transports carry the complete operation contract. */
 static inline int md_fs_operation_valid(unsigned operation) {
@@ -60,7 +60,7 @@ static inline int md_fs_operation_has_origin(unsigned operation) {
 static inline unsigned md_fs_operation_data_inputs(unsigned operation) {
     switch (operation) {
     case MD_FS_SOCKET_BIND: case MD_FS_WATCH_PATH: return 2;
-    case MD_FS_FXATTR: case MD_FS_IPC_PEER: return 1;
+    case MD_FS_FXATTR: case MD_FS_IPC_PEER: case MD_FS_SYNC: return 1;
     case MD_FS_GETDENTS: case MD_FS_SEEKDIR:
     case MD_FS_WATCH_ADD: case MD_FS_WATCH_REMOVE: case MD_FS_WATCH_BYTES:
     case MD_FS_WATCH_CONTAINS: case MD_FS_WATCH_READ: return 1;

@@ -177,6 +177,7 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
         if (!r) r = mdi_allocate(s, S_IFREG, mode, flags, NULL, loc.parent.id, &loc.node, &fd);
         if (!r) r = mdi_add_name(s, loc.parent.id, loc.name, loc.node.id);
         if (!r) r = mdi_event(s, loc.parent.id, &loc.node, loc.name, IN_CREATE, NULL);
+        if (!r && (flags&O_DSYNC)) s->sync_requested=1;
         r = mdi_commit(s, r);
         if (r && fd >= 0) close(fd);
         return r ? r : fd;
@@ -210,6 +211,7 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
         if (!r) r = mdi_location_path(s, &loc, image->path, sizeof(image->path));
         if (!r) memcpy(image->object, loc.node.id, sizeof(image->object));
     }
+    if (!r && (flags&O_DSYNC)) s->sync_requested=1;
     r = mdi_finish(s, r);
     if (r) { if (fd >= 0) close(fd); return r; }
     if (deferred) return mdi_fifo_prepare(s, fd, completion);

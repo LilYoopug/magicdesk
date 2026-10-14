@@ -458,6 +458,13 @@ Do not edit its backing files as a normal rootfs: names, hardlinks, metadata and
 shared image ownership belong to the inode store. Use guest commands, explicit
 attachments or backup/restore.
 
+Namespace changes become visible atomically. Ordinary writes and closes are not
+durability barriers: `fsync`, `fdatasync` and `syncfs` synchronize native data and
+the corresponding committed namespace metadata. Imports, image sealing and
+snapshot publication also request explicit barriers. Unsynced changes may be
+lost on power failure; process-crash tests do not establish hardware power-loss
+guarantees. See [inode-store transactions](../native/shroot/inode-store.md#transactions).
+
 `backup` requires an inactive store and includes its shared data; a restored
 instance has no lower dependencies. `remove` also requires an inactive store.
 Explicit `prune` checks dependencies and lifetime locks before removing unused

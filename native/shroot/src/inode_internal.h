@@ -33,7 +33,7 @@ enum mdi_query { MDI_NODE, MDI_FD, MDI_LOOKUP, MDI_DIRECTORY_NAME, MDI_READDIR,
     MDI_BEGIN, MDI_BEGIN_WRITE, MDI_COMMIT, MDI_ROLLBACK, MDI_EVENT, MDI_EVENT_TRIM,
     MDI_EVENT_END, MDI_EVENT_SCAN, MDI_EVENT_NAMES, MDI_BACKING_OBJECT, MDI_FILE_PATH, MDI_ACL,
     MDI_OVERLAY_LINK, MDI_DATA_VERSION, MDI_ADD_NAME, MDI_DELETE_NAME, MDI_REPARENT,
-    MDI_EMPTY, MDI_CREATE_OBJECT, MDI_METADATA, MDI_QUERY_COUNT };
+    MDI_EMPTY, MDI_CREATE_OBJECT, MDI_METADATA, MDI_RESERVE_FIRST, MDI_RESERVE_ADD, MDI_RESERVE_TAKE, MDI_QUERY_COUNT };
 struct mdi_read_cache;
 struct mdi_stat_location {
     char path[PATH_MAX];
@@ -59,6 +59,7 @@ struct md_inode_store {
     struct md_inode_statistics *statistics;
     struct mdi_overlay_writer *overlay;
     int write_transaction;
+    int sync_requested;
     struct mdi_read_cache *read_cache;
     int cache_checked;
     unsigned read_depth;
@@ -114,6 +115,12 @@ int mdi_sql(struct md_inode_store *, const char *);
 /* Publication durability follows the destination lifetime. Transient mounts
  * retain transaction rollback, but have no power-loss persistence contract. */
 int mdi_sync(struct md_inode_store *, int fd);
+/* The caller holds the store gate, outside a SQLite transaction. */
+int mdi_checkpoint(struct md_inode_store *);
+enum { MDI_RESERVE_BATCH = 32 };
+/* Claims one durable, previously unpublished physical file in this transaction.
+ * No live backing is recycled. The caller still syncs its final attributes. */
+int mdi_reserve_file(struct md_inode_store *, char id[33], int flags, mode_t mode);
 int mdi_begin(struct md_inode_store *, int write);
 /* Promote the sole read snapshot under its already-held exclusive store gate.
  * Never releases the gate, re-resolves the pathname, or replays an operation. */

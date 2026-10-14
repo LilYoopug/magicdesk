@@ -165,7 +165,7 @@ int mdi_views_maintain(struct md_inode_store *s) {
     int r=0;
     if (!s->readonly) {
         r=mdi_begin(s,1);
-        if (!r) r=mdi_commit(s,mdi_views_collect(s));
+        if (!r) { s->sync_requested=1; r=mdi_commit(s,mdi_views_collect(s)); }
     }
     if (!r) {
         r=mdi_begin(s,0);

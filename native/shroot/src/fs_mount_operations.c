@@ -191,6 +191,7 @@ static int descriptor(struct md_filesystem *fs, const struct md_fs_request *q,
          * The adapter handles EXDEV through the same readonly-aware reopen. */
         r = md_view_readonly(p->mount) ? -EROFS : -EXDEV; break;
     case MD_FS_GETCAP: case MD_FS_GETACL: r = -EXDEV; break;
+    case MD_FS_SYNC: r=-EXDEV; break;
     case MD_FS_IOCTL:
         r=md_view_readonly(p->mount) && md_filesystem_ioctl_writes(q->mode) ? -EROFS : -EXDEV; break;
     case MD_FS_ACCESS:
@@ -571,7 +572,7 @@ void md_fs_mounts_execute(struct md_filesystem *fs, const struct md_fs_request *
             }
         }
         switch (q->operation) {
-        case MD_FS_FSTAT: case MD_FS_STATFS: case MD_FS_IOCTL: case MD_FS_PATH: case MD_FS_REOPEN: case MD_FS_GETDENTS: case MD_FS_READLINK:
+        case MD_FS_FSTAT: case MD_FS_STATFS: case MD_FS_SYNC: case MD_FS_IOCTL: case MD_FS_PATH: case MD_FS_REOPEN: case MD_FS_GETDENTS: case MD_FS_READLINK:
         case MD_FS_CHMOD: case MD_FS_CHOWN: case MD_FS_ACCESS: case MD_FS_UTIMENS:
         case MD_FS_GETCAP: case MD_FS_SETCAP: case MD_FS_REMOVECAP:
         case MD_FS_GETACL: case MD_FS_SETACL: case MD_FS_REMOVEACL: case MD_FS_XATTR_OBJECT:

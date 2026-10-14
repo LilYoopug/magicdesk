@@ -15,7 +15,8 @@ int mdi_discard_untracked_backings(struct md_inode_store *s) {
     /* Cleanup spans all scopes. Index its snapshot once rather than scanning
      * the scope-keyed backing table for every native directory entry. */
     int r=mdi_sql(s,"CREATE TEMP TABLE maintenance_backings(backing TEXT PRIMARY KEY) WITHOUT ROWID;"
-        "INSERT OR IGNORE INTO maintenance_backings SELECT backing FROM backings WHERE source=0");
+        "INSERT OR IGNORE INTO maintenance_backings SELECT backing FROM backings WHERE source=0;"
+        "INSERT OR IGNORE INTO maintenance_backings SELECT backing FROM allocation_reserve");
     if (!r) r=mdi_prepare(s,"SELECT 1 FROM temp.maintenance_backings WHERE backing=?1",&q);
     while (!r) {
         errno=0;

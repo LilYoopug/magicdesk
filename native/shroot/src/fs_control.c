@@ -45,6 +45,7 @@ int md_fs_control_operation(struct md_filesystem *fs,struct md_mount_namespace *
         const struct md_fs_request *q,struct md_fs_result *out,const struct md_fs_output *output) {
     int r=0;
     switch (q->operation) {
+    case MD_FS_SYNC: r=q->mode==MD_INODE_SYNC_FILESYSTEM ? 0 : -EINVAL; break;
     case MD_FS_STAT: case MD_FS_FSTAT: {
         struct stat st; r=source->stat(source->context,fd,&st);
         if (!r) { md_fs_stat_info(&st,&out->info); out->info.mount_id=mount->id; }

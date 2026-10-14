@@ -5,6 +5,7 @@
 #include "bpf_request.h"
 #include "proc_paths.h"
 #include "filesystem_ioctl.h"
+#include "inode_store.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/limits.h>
@@ -88,6 +89,9 @@ int md_fs_request_validate(const struct md_fs_request *q) {
     if (q->operation==MD_FS_IOCTL)
         return descriptors!=1 || q->directory[0]<0 || *a || *b || q->flags
             || q->capacity || q->offset || !md_filesystem_ioctl_command(q->mode) ? -EINVAL : 0;
+    if (q->operation==MD_FS_SYNC)
+        return descriptors!=1 || q->directory[0]<0 || *a || *b || q->flags
+            || q->capacity || q->offset || q->mode>MD_INODE_SYNC_FILESYSTEM ? -EINVAL : 0;
     if (q->operation==MD_FS_OPEN_TREE)
         return (!*a && !(descriptors&1)) || *b || (descriptors&2)
             || q->flags&~(O_PATH|O_CLOEXEC) || !(q->flags&O_PATH)

@@ -98,6 +98,12 @@ Use `--guest-statistics --modes guest` for a separately labelled diagnostic run
 with aggregate syscall/ptrace/stop counters, filesystem/SQLite elapsed costs,
 broker handling/delegation counts, supervisor readiness polls/blocking waits and
 supervisor/namespace-worker CPU usage.
+Store costs distinguish object sync, directory sync, commit and explicit
+checkpoint. Commit includes automatic checkpoints and overlaps transaction/step
+cost; these totals must not be added as independent time. Compare equivalent
+durability workloads: a create/write/close loop without fsync is not a durable
+write benchmark. Explicit file, directory and filesystem barriers have separate
+correctness coverage in `test_resources.py BUILD --case durability`.
 The worker's thread CPU is included in the supervisor process total; do not add
 them together. Clock sampling is enabled only in that diagnostic mode.
 Keep it separate from ordinary timing series. Frequency caps

@@ -11,7 +11,7 @@
 
 struct fifo_pin { char channel[33]; int fd; struct fifo_pin *next; };
 struct fifo_source { int source; struct md_inode_store *store; struct mdi_fifo_owner *custody; struct fifo_source *next; };
-struct mdi_fifo_owner { char id[33]; int lease; struct md_inode_lifetime *lifetime;
+struct mdi_fifo_owner { char id[33]; int lease, detached; struct md_inode_lifetime *lifetime;
     struct fifo_pin *pins; struct fifo_source *sources; };
 
 static int owner(struct md_inode_store *s) {
@@ -25,7 +25,9 @@ static int owner(struct md_inode_store *s) {
         r = -errno;
     if (!r && flock(o->lease, LOCK_EX | LOCK_NB)) r = -errno;
     if (r) { if (o->lease >= 0) { close(o->lease); unlinkat(s->lifetime->root, name, 0); } free(o); }
-    else { o->lifetime=md_inode_lifetime_retain(s->lifetime); s->fifos = o; }
+    /* Attached custody borrows its owning store. Retaining it here would make
+     * an idle storage cache keep its own mounted view alive indefinitely. */
+    else { o->lifetime=s->lifetime; s->fifos = o; }
     return r;
 }
 /* A live kernel lock, not a PID alone, authorizes a persisted pin route. */
@@ -220,6 +222,7 @@ int mdi_fifo_prepare(struct md_inode_store *s, int original, struct md_open_comp
 static struct mdi_fifo_owner *detach(struct md_inode_store *s) {
     struct mdi_fifo_owner *o=s->fifos;
     s->fifos=NULL;
+    if (o) { md_inode_lifetime_retain(o->lifetime); o->detached=1; }
     if (o) for (struct fifo_source *p=o->sources;p;p=p->next) {
         p->custody=detach(p->store); md_inode_store_close(p->store); p->store=NULL;
     }
@@ -262,7 +265,8 @@ void md_inode_fifo_release(struct mdi_fifo_owner *o) {
     }
     char name[48]; snprintf(name,sizeof(name),"fifo-%s",o->id);
     unlinkat(o->lifetime->root,name,0); close(o->lease);
-    md_inode_lifetime_release(o->lifetime); free(o);
+    if (o->detached) md_inode_lifetime_release(o->lifetime);
+    free(o);
 }
 void mdi_fifo_close(struct md_inode_store *s) {
     struct mdi_fifo_owner *o = s->fifos;

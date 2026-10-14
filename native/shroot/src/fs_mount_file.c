@@ -15,6 +15,7 @@ int md_fs_mount_file_operation(struct md_filesystem *fs,struct md_mount_namespac
     const struct md_identity *id=fs->store->identity;
     int r=0;
     switch (q->operation) {
+    case MD_FS_SYNC: r=q->mode==MD_INODE_SYNC_FILESYSTEM ? 0 : -EINVAL; break;
     case MD_FS_STAT: case MD_FS_FSTAT: {
         struct stat st; r=file.ops->stat(file.context,&st);
         if (!r) { md_fs_stat_info(&st,&out->info); out->info.mount_id=mount->id; }

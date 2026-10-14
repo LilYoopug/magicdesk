@@ -248,7 +248,9 @@ int md_inode_store_seal(struct md_inode_store *s) {
     if (r) return r;
     r=mdi_views_collect(s);
     if (!r) r=mdi_views_busy(s);
+    if (!r && !s->lifetime->temporary && syncfs(s->objects)) r=-errno;
     if (!r) r = mdi_sql(s, "UPDATE properties SET value=1 WHERE key='sealed'");
+    s->sync_requested=1;
     r = mdi_commit(s, r);
     if (!r) s->readonly = 1;
     return r;
@@ -289,6 +291,7 @@ int md_inode_prepare_reopen(struct md_inode_store *s, int original, int flags, i
     if (!r && directory < 0) r = directory;
     int deferred = !r && node.kind == S_IFIFO && !(flags & O_PATH);
     if (!r && (fd = openat(directory, node.backing, (deferred || device ? O_PATH : flags) | O_NOFOLLOW | O_CLOEXEC)) < 0) r = -errno;
+    if (!r && (flags&O_DSYNC)) s->sync_requested=1;
     r = mdi_commit(s, r);
     if (r && fd >= 0) close(fd);
     if (!r && deferred) return mdi_fifo_prepare(s, fd, completion);

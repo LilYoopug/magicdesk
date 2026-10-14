@@ -14,7 +14,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
-static const int store_format = 15;
+static const int store_format = 16;
 int md_inode_store_format(void) { return store_format; }
 
 int mdi_sql_error(int rc) {
@@ -99,10 +99,13 @@ static int store_unlock(struct md_inode_store *s, int result) {
 static int transaction(struct md_inode_store *s, enum mdi_query slot) {
     struct md_cost *cost = s->statistics ? &s->statistics->transaction : NULL;
     int64_t begin = md_cost_begin(cost);
+    struct md_cost *commit = s->statistics && slot == MDI_COMMIT ? &s->statistics->commit : NULL;
+    int64_t commit_begin = md_cost_begin(commit);
     sqlite3_stmt *q = NULL;
     int r = mdi_query_acquire(s, slot, &q);
     if (!r) { int rc = mdi_step(s, q); r = rc == SQLITE_DONE ? 0 : mdi_sql_failure(rc); }
     r = mdi_query_release(q, r);
+    md_cost_end(commit, commit_begin);
     md_cost_end(cost, begin);
     return r;
 }
@@ -160,6 +163,8 @@ int mdi_finish(struct md_inode_store *s, int result) {
     if (!result && s->write_transaction && s->overlay) result=mdi_overlay_flush(s);
     if (!result) result = transaction(s, MDI_COMMIT);
     if (result) transaction(s, MDI_ROLLBACK);
+    if (!result && s->sync_requested) result=mdi_checkpoint(s);
+    s->sync_requested=0;
     s->write_transaction=0;
     return store_unlock(s, result);
 }
@@ -257,7 +262,10 @@ int mdi_query_acquire(struct md_inode_store *s, enum mdi_query slot, sqlite3_stm
         [MDI_CREATE_OBJECT] = "INSERT INTO objects(object,kind,device,inode,parent,backing,logical_inode,logical_device,mode,uid,gid,scope) "
             "VALUES(?1,?2,?3,?4,?5,?1,?4,?3,?6,?7,?8,?9)",
         [MDI_METADATA] = "UPDATE objects SET uid=?1,gid=?2,mode=?3 WHERE object=?4 "
-            "AND (uid!=?1 OR gid!=?2 OR mode!=?3)"
+            "AND (uid!=?1 OR gid!=?2 OR mode!=?3)",
+        [MDI_RESERVE_FIRST] = "SELECT backing FROM allocation_reserve ORDER BY backing LIMIT 1",
+        [MDI_RESERVE_ADD] = "INSERT INTO allocation_reserve(backing) VALUES(?1)",
+        [MDI_RESERVE_TAKE] = "DELETE FROM allocation_reserve WHERE backing=?1"
     };
 #undef NODE_COLUMNS
     int result = 0;
@@ -424,7 +432,7 @@ int mdi_parent_writable(struct md_inode_store *s, const struct mdi_node *node) {
     if (!r && !node->attached) r = -ENOENT;
     return r;
 }
-static int make_object(struct md_inode_store *s, const char *id, mode_t kind, mode_t mode, int flags,
+static int make_object(struct md_inode_store *s, char id[33], mode_t kind, mode_t mode, int flags,
         const char *target, const char *parent, struct mdi_node *node, int *fd) {
     uint32_t uid = s->identity ? s->identity->uid.fs : (uint32_t)geteuid();
     uint32_t gid = s->identity ? s->identity->gid.fs : (uint32_t)getegid();
@@ -443,7 +451,15 @@ static int make_object(struct md_inode_store *s, const char *id, mode_t kind, mo
     mode_t native = s->identity ? (kind == S_IFDIR ? 0700 : 0600 | ((mode & 0111) ? 0100 : 0)) : mode;
     *fd = -1;
     if (kind == S_IFIFO || kind == S_IFCHR || kind == S_IFBLK) native = 0600;
-    if (kind == S_IFREG || kind == S_IFSOCK || kind == S_IFIFO || kind == S_IFCHR || kind == S_IFBLK) {
+    /* Directory observers can resolve queued native preparation events after
+     * commit. Keep their single-open publication path; reserve IO is private
+     * only while the store's existing watch-presence gate excludes observers. */
+    int reserved=kind==S_IFREG && s->identity && !s->lifetime->temporary && !s->recording;
+    if (!reserved && !*id) { int r=mdi_random_id(id); if (r) return r; }
+    if (reserved) {
+        *fd=mdi_reserve_file(s,id,flags,native);
+        if (*fd<0) return *fd;
+    } else if (kind == S_IFREG || kind == S_IFSOCK || kind == S_IFIFO || kind == S_IFCHR || kind == S_IFBLK) {
         *fd = openat(s->objects, id, O_CREAT | O_EXCL | flags | O_CLOEXEC | O_NOFOLLOW, native);
         if (*fd < 0) return -errno;
     } else if (kind == S_IFDIR) {
@@ -452,7 +468,7 @@ static int make_object(struct md_inode_store *s, const char *id, mode_t kind, mo
     struct stat st;
     int r = fstatat(s->objects, id, &st, AT_SYMLINK_NOFOLLOW) ? -errno : 0;
     if (!r && *fd >= 0) r = mdi_sync(s,*fd);
-    if (!r) r = mdi_sync(s,s->objects);
+    if (!r && !reserved) r = mdi_sync(s,s->objects);
     if (!r) r = checkpoint(s, MD_OBJECT_SYNCED);
     sqlite3_stmt *q = NULL;
     if (!r) r = mdi_query_acquire(s, MDI_CREATE_OBJECT, &q);
@@ -489,13 +505,13 @@ int mdi_random_id(char id[33]) {
 }
 int mdi_allocate(struct md_inode_store *s, mode_t kind, mode_t mode, int flags, const char *target,
         const char *parent, struct mdi_node *node, int *fd) {
-    char id[33];
-    int r = mdi_random_id(id);
-    return r ? r : make_object(s, id, kind, mode, flags, target, parent, node, fd);
+    char id[33]={0};
+    return make_object(s, id, kind, mode, flags, target, parent, node, fd);
 }
 int mdi_allocate_root(struct md_inode_store *s, struct mdi_node *node) {
     int fd;
-    return make_object(s,s->lifetime->scope,S_IFDIR,0700,0,NULL,s->lifetime->scope,node,&fd);
+    char id[33]; memcpy(id,s->lifetime->scope,sizeof(id));
+    return make_object(s,id,S_IFDIR,0700,0,NULL,s->lifetime->scope,node,&fd);
 }
 static int prepare_lookup_indexes(struct md_inode_store *s) {
     /* Foreign-key checks run per removed parent. All child lookups must be
@@ -512,9 +528,6 @@ static int prepare_lookup_indexes(struct md_inode_store *s) {
         "COMMIT;");
     if (r) mdi_sql(s,"ROLLBACK");
     return r;
-}
-int mdi_sync(struct md_inode_store *s, int fd) {
-    return s->lifetime->temporary || !fsync(fd) ? 0 : -errno;
 }
 static int journal_mode(struct md_inode_store *s, const char *sql, const char *expected) {
     sqlite3_stmt *q=NULL;
@@ -559,14 +572,15 @@ static int store_open(const char *directory, int create, int exclusive,
     if (!r) r = store_lock(s);
     if (!r) r = md_database_open(root,"namespace.db",create,&s->db);
     if (!r) r = mdi_sql_error(sqlite3_extended_result_codes(s->db, 1));
-    /* WAL publishes each operation with one durable append, rather than
-     * rewriting and syncing the database and rollback journal on every call. */
+    /* WAL publication is atomic visibility; explicit barriers and bounded
+     * checkpoints own durability. Backing names are durable before WAL rows. */
     if (!r) r = journal_mode(s,create ? "PRAGMA journal_mode=WAL" : "PRAGMA journal_mode","wal");
     if (!r) r = mdi_sql(s, "PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF");
-    if (!r) r = mdi_sql(s,s->lifetime->temporary ? "PRAGMA synchronous=OFF" : "PRAGMA synchronous=FULL");
-    if (!r) r = mdi_sql(s,"PRAGMA wal_autocheckpoint=256; PRAGMA journal_size_limit=1048576");
+    if (!r) r = mdi_sql(s,s->lifetime->temporary ? "PRAGMA synchronous=OFF" : "PRAGMA synchronous=NORMAL");
+    if (!r) r = mdi_sql(s,"PRAGMA wal_autocheckpoint=1024; PRAGMA journal_size_limit=4194304");
     if (!r && create) {
         r = mdi_sql(s, "BEGIN IMMEDIATE;"
+            "CREATE TABLE allocation_reserve(backing TEXT PRIMARY KEY CHECK(length(backing)=32)) STRICT;"
             "CREATE TABLE objects(object TEXT PRIMARY KEY CHECK(length(object)=32),kind INTEGER NOT NULL,"
                 "device INTEGER NOT NULL,inode INTEGER NOT NULL,parent TEXT REFERENCES objects,"
                 "name_count INTEGER NOT NULL DEFAULT 0 CHECK(name_count>=0),"
@@ -657,10 +671,12 @@ static int store_open(const char *directory, int create, int exclusive,
         snprintf(version_sql, sizeof(version_sql), "PRAGMA user_version=%d", store_format);
         if (!r) r = mdi_sql(s, version_sql);
         struct mdi_node node; int fd;
-        if (!r) r = make_object(s, MDI_ROOT, S_IFDIR, 0700, 0, NULL, MDI_ROOT, &node, &fd);
+        char id[33]=MDI_ROOT;
+        if (!r) r = make_object(s, id, S_IFDIR, 0700, 0, NULL, MDI_ROOT, &node, &fd);
         if (!r) r = mdi_sql(s,"INSERT INTO inode_views(scope,kind) VALUES('" MDI_ROOT "',0)");
         if (!r) r = mdi_sql(s, "COMMIT");
         if (r) mdi_sql(s, "ROLLBACK");
+        if (!r) r=mdi_checkpoint(s);
     }
     sqlite3_stmt *q = NULL;
     if (!r) r = mdi_prepare(s, "PRAGMA user_version", &q);
@@ -801,7 +817,8 @@ int md_inode_audit(struct md_inode_store *s, struct md_inode_audit *audit) {
         if (!entry) { if (errno) r = -errno; break; }
         if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
         sqlite3_stmt *backing = NULL;
-        r = mdi_prepare(s,"SELECT object FROM backings WHERE backing=?1 AND source=?2 LIMIT 1",&backing);
+        r = mdi_prepare(s,"SELECT object FROM backings WHERE backing=?1 AND source=?2 "
+            "UNION ALL SELECT backing FROM allocation_reserve WHERE backing=?1 LIMIT 1",&backing);
         if (!r) r = mdi_bind_id(backing, 1, entry->d_name);
         if (!r) r = mdi_sql_error(sqlite3_bind_int(backing, 2, 0));
         if (!r) {

@@ -5314,6 +5314,7 @@ static void proc_lookup_start(struct thread *t) {
      * Ordinary directory cursors and filesystem metadata still need their
      * filesystem adapter, including after the pre-sandbox all-FD selector. */
     int filesystem=!file && (nr==SYS_lseek || nr==SYS_getdents64 || nr==SYS_fstatfs
+        || nr==SYS_fsync || nr==SYS_fdatasync || nr==SYS_syncfs
         || (nr==SYS_ioctl && md_filesystem_ioctl_command((unsigned)regs.regs[1])));
     if (nr==SYS_mmap) {
         md_proc_file_release(file);

@@ -268,6 +268,7 @@ int md_inode_import_tree(struct md_inode_store *s, int source_fd,
     }
     while (stack) pop(&stack);
     if (!r) r = mdi_sql(s, "DROP TABLE temp.imported");
+    s->sync_requested=1;
     r = mdi_commit(s, r);
     if (!r) *out = i->result;
     free(i); return r;

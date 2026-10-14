@@ -49,6 +49,14 @@ Anonymous Landlock/BPF/fscontext descriptors and proc fdinfo use the same
 publication contract without a mount origin. Providers retain their own access,
 readonly and IO semantics.
 
+`MD_FS_SYNC` carries a validated real data/directory FD and an explicit
+file/data/filesystem barrier mode. Origin metadata still selects the owning
+mount/store, but never replaces a data operand with its path-only anchor.
+Inode providers synchronize data before checkpointing committed namespace
+metadata; native attachments delegate to the original syscall. Virtual control
+files reject file/data barriers with EINVAL and have no persistent filesystem
+state to synchronize. Ordinary reads, writes and mappings retain native IO.
+
 Host readiness uses `event_signal.h` for owned nonblocking eventfds. Signals
 coalesce; one acknowledgement consumes a burst without draining a concurrent
 producer indefinitely. Queue/state remains authoritative, not the event counter.

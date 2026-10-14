@@ -32,7 +32,7 @@ static struct md_inode_store *store(const char *name, int create) {
     CHECK(md_inode_store_open(p, create, &s) == 0);
     sqlite3_stmt *q=NULL;
     CHECK(sqlite3_prepare_v2(s->db,"PRAGMA synchronous",-1,&q,NULL)==SQLITE_OK);
-    CHECK(sqlite3_step(q)==SQLITE_ROW && sqlite3_column_int(q,0)==2);
+    CHECK(sqlite3_step(q)==SQLITE_ROW && sqlite3_column_int(q,0)==1);
     sqlite3_finalize(q);
     CHECK(mdi_sync(s,-1)==-EBADF);
     return s;
@@ -1004,6 +1004,15 @@ static void retained_journal(void) {
     char journal[PATH_MAX]; path(journal,"journal/namespace.db-wal");
     struct stat first, next;
     CHECK(!stat(journal,&first) && first.st_size>0);
+    sqlite3_stmt *settings=NULL;
+    CHECK(sqlite3_prepare_v2(a->db,"PRAGMA page_size",-1,&settings,NULL)==SQLITE_OK);
+    CHECK(sqlite3_step(settings)==SQLITE_ROW);
+    int page_size=sqlite3_column_int(settings,0);
+    sqlite3_finalize(settings);
+    CHECK(sqlite3_prepare_v2(a->db,"PRAGMA wal_autocheckpoint",-1,&settings,NULL)==SQLITE_OK);
+    CHECK(sqlite3_step(settings)==SQLITE_ROW && sqlite3_column_int(settings,0)==1024);
+    sqlite3_finalize(settings);
+    unsigned restarts=0; unsigned char salt[8]={0};
     for (unsigned i=0;i<256;i++) {
         struct md_inode_store *s=i&1 ? a : b;
         CHECK(!md_inode_link(s,MD_INODE_ROOT,"file",MD_INODE_ROOT,"link",0));
@@ -1012,14 +1021,17 @@ static void retained_journal(void) {
         /* These small commits cross repeated automatic checkpoints. Large
          * transactions may exceed the threshold, but ordinary commits must
          * reuse the WAL rather than growing it indefinitely. */
-        CHECK(next.st_size>32 && next.st_size<2*1024*1024);
+        CHECK(next.st_size>32 && next.st_size<32+(off_t)(1024+32)*(page_size+24));
         fd=open(journal,O_RDONLY|O_CLOEXEC); CHECK(fd>=0);
         unsigned char header[32];
         CHECK(read(fd,header,sizeof(header))==sizeof(header)); close(fd);
         CHECK(header[0]==0x37 && header[1]==0x7f && header[2]==0x06);
         CHECK(header[3]==0x82 || header[3]==0x83);
+        if (i && memcmp(salt,header+16,sizeof(salt))) ++restarts;
+        memcpy(salt,header+16,sizeof(salt));
         CHECK(state(s,"file",1).st_size==0);
     }
+    CHECK(restarts>=2);
     char before[PATH_MAX], moved[PATH_MAX];
     path(before,"journal"); path(moved,"journal-moved");
     CHECK(!rename(before,moved));

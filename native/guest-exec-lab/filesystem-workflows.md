@@ -13,11 +13,21 @@ OCI images, mount views, storage semantics and file-watch workflows. Use disposa
 Transient-store checks retain a journal across SIGKILL at object publication,
 namespace staging and commit. Reconnect and transferred custody preserve the
 temporary durability policy and exact final cleanup. Persistent-store checks
-assert WAL with synchronous FULL independently; retained-directory journal access also
+assert WAL with synchronous NORMAL and explicit durability barriers independently; retained-directory journal access also
 survives renaming the store while two connections remain open.
 Checks include pre-checkpoint wakeup for namespace-only changes, bounded WAL
 reuse, descriptor-cache admission across foreign writes, and bounded SQLite FD
 retention with exact release after the final connection.
+
+`test_resources.py BUILD --case durability` runs inode-owner and real guest
+checks under the selected shell UID. It covers data/WAL sync failures, allocation
+reserve publication and reuse, four concurrent writers, directory-watch events,
+snapshot-local inventory and modeled loss of uncheckpointed WAL. Guest calls run
+with ordinary and nondumpable/seccomp-filtered processes, including retained
+unlinked FDs, O_SYNC, tmpfs, writable-overlay remounts and native attachment
+barriers. Native attachments do not acquire guest hardlink/FIFO permissions.
+The same checks run in `--case all`; `--case stores` includes the inode-owner
+part. Process kills and the WAL-loss model do not simulate physical power loss.
 
 `test_resources.py BUILD --case mount-policy` checks the attachment-policy owner
 without running Desktop or replacing the APK. Local policy creates no descriptor;

@@ -5,6 +5,7 @@
 #include "fd_metadata.h"
 #include "fd_client.h"
 #include "linux_abi.h"
+#include "inode_store.h"
 #include "raw.h"
 #include "task_status.h"
 #include <errno.h>
@@ -236,6 +237,16 @@ static long metadata_request(const struct md_fs *fs, long nr, struct md_namespac
     return md_namespace_request(fs, &q, out);
 }
 long md_namespace_call(const struct md_fs *fs, const char *exe, long nr, const unsigned long *a) {
+    if (nr==SYS_fsync || nr==SYS_fdatasync || nr==SYS_syncfs) {
+        long flags=RAW3(fcntl,a[0],F_GETFL,0);
+        if (flags<0) return flags;
+        if (flags&O_PATH) return -EBADF;
+        struct md_fs_request q={.operation=MD_FS_SYNC,.directory={(int)a[0],-1},
+            .mode=nr==SYS_syncfs ? MD_INODE_SYNC_FILESYSTEM : nr==SYS_fdatasync ? MD_INODE_SYNC_DATA : MD_INODE_SYNC_FILE};
+        struct md_fs_response out;
+        long result=md_namespace_request(fs,&q,&out);
+        return result==-EXDEV ? md_raw(nr,a[0],0,0,0,0,0) : result;
+    }
     if (nr==SYS_ioctl) {
         long flags=RAW3(fcntl,a[0],F_GETFL,0);
         if (flags<0) return flags;

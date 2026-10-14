@@ -20,6 +20,7 @@ int md_inode_store_format(void);
 struct md_inode_statistics {
     struct md_cost prepare, step, transaction, lock;
     struct md_cost version, descriptor, path;
+    struct md_cost sync_object, sync_directory, commit, checkpoint;
     uint64_t query_reuses;
     uint64_t link_count_queries, membership_queries;
     uint64_t metadata_cache_hits, metadata_cache_misses;
@@ -49,6 +50,10 @@ int md_inode_store_initialize(struct md_inode_lifetime *, struct md_inode_store 
 struct md_user_namespace;
 int md_inode_store_transient(int parent, struct md_user_namespace *, struct md_inode_store **out);
 void md_inode_store_close(struct md_inode_store *);
+enum md_inode_sync_mode { MD_INODE_SYNC_FILE, MD_INODE_SYNC_DATA, MD_INODE_SYNC_FILESYSTEM };
+/* Native data first, then all committed namespace metadata under the same gate.
+ * FILE/DATA require a real descriptor. FILESYSTEM also accepts the root sentinel. */
+int md_inode_sync(struct md_inode_store *, int fd, enum md_inode_sync_mode);
 int md_inode_store_seal(struct md_inode_store *);
 /* Mutable superblock policy for transient tmpfs; independent of per-mount
  * restrictions and immutable image sealing. Negative errno on unavailable IO. */

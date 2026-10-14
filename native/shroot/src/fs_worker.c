@@ -151,8 +151,9 @@ static void *run(void *context) {
     md_image_catalogue_close(images); md_inode_store_close(store);
     if (w->statistics) {
         const struct md_cost *costs[] = {&stats.prepare, &stats.step, &stats.transaction, &stats.lock,
-            &stats.version,&stats.descriptor,&stats.path};
-        const char *names[] = {"prepare", "step", "transaction", "lock", "version", "descriptor", "path"};
+            &stats.version,&stats.descriptor,&stats.path,&stats.sync_object,&stats.sync_directory,&stats.commit,&stats.checkpoint};
+        const char *names[] = {"prepare", "step", "transaction", "lock", "version", "descriptor", "path",
+            "syncObject", "syncDirectory", "commit", "checkpoint"};
         for (unsigned i = 0; i < sizeof(costs)/sizeof(costs[0]); ++i) fprintf(stderr, "MD_STORE phase=%s calls=%llu ns=%llu\n", names[i],
             (unsigned long long)costs[i]->calls, (unsigned long long)costs[i]->nanoseconds);
         fprintf(stderr, "MD_STORE queryReuses=%llu\n", (unsigned long long)stats.query_reuses);

@@ -49,13 +49,16 @@ lookup, `inode_metadata.c` owns guest permissions and metadata mutations, and
 `inode_acl.c` and `inode_capability.c` own logical security attributes;
 `inode_import.c` imports prepared trees. `inode_snapshot.c` owns
 immutable-source snapshots; `inode_backing.c` owns source validation and copy-up.
+`inode_reserve.c` owns durable allocation inventory; `inode_durability.c` owns
+native data barriers and the metadata checkpoint boundary.
 `inode_view.c` owns retained namespace projections within one store transaction
 domain; `inode_maintenance.c` collects untracked backing objects only under
 exclusive maintenance or before a store is published.
 Their private contract is in
 `inode_internal.h`. Callers use the explicit dirfd-based `inode_store.h` API.
 The internal database format is versioned and incompatible formats are rejected,
-not migrated. Format 15 uses WAL and includes scoped namespace views, logical owners/modes, POSIX ACLs, file capabilities,
+not migrated. Format 16 uses WAL and includes durable allocation inventory,
+scoped namespace views, logical owners/modes, POSIX ACLs, file capabilities,
 unambiguous file-path history, stable identities, backing history,
 immutable sources, socket addresses, FIFO ownership, device type/rdev, transactional namespace
 counters and the [watch event journal](watches.md). Incompatible stores require a separately prepared store; opening
@@ -70,7 +73,7 @@ gate. There is no second database journal for projection publication.
 Projection roots carry independent kernel leases through local references and
 SCM custody. Collection removes an unleased projection's metadata; native bodies
 remain while other stores may retain source leases. Exclusive maintenance
-collects bodies only after metadata retirement has committed. Normal open/stat
+collects bodies only after metadata retirement has committed and checkpointed. Normal open/stat
 does not run collection or allocate a view selector. Writable overlay uses a
 connection-local mutation journal to publish its merged and upper names within
 the same transaction. Upper/work reservations remain held by detached views
@@ -104,6 +107,8 @@ FIFO and pathname-socket channels have identities separate from a view's logical
 inode. Copy-up and remount retain the channel, including a lower from another
 store. FIFO pin custody and rendezvous remain with the creating store; projected
 opens publish their local inode association without holding two store transactions.
+Attached FIFO custody borrows its store's lifetime. Only detached custody retains
+an independent lease, so an idle connection cannot keep its own overlay mounted.
 Snapshots create fresh FIFO channels. Regular files do not use channel lookup.
 Successful upper-name publication emits the same committed directory events as
 ordinary inode operations; rollback does not notify an uncommitted name.
@@ -272,10 +277,18 @@ independent of OCI parsing and launch-local directory attachments.
   change is needed. Creation, copy-up and overlay publication promote that
   sole snapshot under its retained exclusive store gate. Nested read snapshots
   cannot promote. No pathname is re-resolved and no mutation is replayed.
-- Create allocates a randomly named native object, syncs regular-file data and
-  its containing directory before publishing a reference. A collision fails
-  without truncation. Symlink data and directory metadata retain filesystem
-  durability semantics; power-loss recovery is not established by these tests.
+- Guest regular-file creation claims a preallocated backing from a batch of 32.
+  All backing files and their containing directory are synced before inventory
+  rows enter the WAL. Claim removal and logical-object publication share one
+  transaction. No live or unlinked object is recycled. A claim restored by loss
+  of unsynced WAL has its data, guest xattrs and timestamps reset before reuse;
+  the host SELinux label remains untouched. Final native metadata is synced
+  before publication. Failed refills leave only unreachable objects.
+  Active directory watches retain the single-open allocation path, avoiding
+  exposure of internal preparation events. Trusted operations without virtual
+  credentials preserve native umask semantics and also allocate directly.
+  Other types sync their containing directory before publishing a reference.
+  Snapshots do not copy a source's allocation inventory.
 - Link, unlink, rename, replacement and exchange each use one database transaction.
   Names are byte strings, not UTF-8 text or concatenated SQL. A same-inode rename
   preserves both names; NOREPLACE rejects an existing target.
@@ -299,10 +312,10 @@ independent of OCI parsing and launch-local directory attachments.
   and lock waiting do not promise bounded service completion; the caller's RPC
   deadline bounds observation, not cancellation of an accepted request. Offline
   import must not contend with live clients.
-- Connections use SQLite WAL with `synchronous=FULL` for persistent stores.
-  Each operation appends a durable commit; database pages are checkpointed
-  instead of rewritten on every commit. Automatic checkpoints start at 256
-  pages, with a 1 MiB retained-WAL limit on reset. A large transaction or pinned
+- Connections use SQLite WAL with `synchronous=NORMAL` for persistent stores.
+  Each operation commits atomic visibility, not a synchronous storage barrier.
+  Ordinary unsynced operations may be lost after power failure. Automatic
+  checkpoints start at 1024 pages, with a 4 MiB retained-WAL limit on reset. A large transaction or pinned
   external reader can exceed that threshold; it is not a storage quota.
   Temporary mounts retain transactional rollback but use `synchronous=OFF`.
   Watch wakeups observe the WAL, not checkpoint writes to the main database.
@@ -315,6 +328,17 @@ independent of OCI parsing and launch-local directory attachments.
   automatic replay is installed. An external SQLite writer bypassing the store
   gate still returns EAGAIN. An IO error during commit can have an unknown
   outcome: inspect before replaying a mutation.
+- `fsync` and `fdatasync` first synchronize the actual data FD, then checkpoint
+  committed metadata under the store gate. `syncfs` synchronizes backing storage
+  before the same metadata barrier. The SQLite transaction ends before the full
+  checkpoint, while the gate remains held. Other connections' committed metadata
+  is included. Open-unlinked FDs and mounted/overlay stores retain their selected
+  identity; O_PATH and invalid descriptors are rejected. Native attachments
+  retain native barrier semantics. O_SYNC/O_DSYNC creation and reopening publish
+  a metadata barrier before returning the data FD; subsequent data IO stays
+  native. Imports, snapshot publication, sealing and exclusive metadata retirement
+  also request explicit barriers. Data or checkpoint errors propagate; they are
+  not converted into successful durability acknowledgements.
 - Detached objects and uncommitted allocations are retained and audited separately.
   There is no live garbage collector for ordinary detached objects. Removing metadata while another process
   holds an FD would break descriptor lookup. Long-lived stores can therefore
@@ -323,10 +347,21 @@ independent of OCI parsing and launch-local directory attachments.
 SQLite supplies database transactions, not Linux filesystem semantics. References:
 [atomic commit](https://www.sqlite.org/atomiccommit.html),
 [isolation](https://www.sqlite.org/isolation.html),
+[WAL synchronization](https://www.sqlite.org/pragma.html#pragma_synchronous),
+[checkpoint completion](https://www.sqlite.org/c3ref/wal_checkpoint_v2.html),
 [kernel lock ownership](https://man7.org/linux/man-pages/man2/flock.2.html), and
 [Linux rename](https://man7.org/linux/man-pages/man2/rename.2.html).
 
 ## Checks
+
+`test_durability` checks data and WAL failures, directory-sync failure before
+reserve publication, concurrent reserve claims, watch-event transparency,
+hardlinks/rename/unlinked descriptors and snapshot-local inventory. A modeled
+power-loss test kills a writer and discards uncheckpointed WAL, checking both
+recovery to the old namespace and preservation after an explicit barrier.
+This is not a physical power-cut test. `durability_guest` exercises actual syscall
+routing with plain and nondumpable/filtered callers, tmpfs, overlay remounts and
+native attachments. `test_resources.py BUILD --case durability` runs both.
 
 `test_inodes.c` runs on the Termux build host and as a Debian/glibc process under
 real shell UID 2000 in `u:r:shell:s0` on NX809J / API 36 / Linux 6.12.23 / 4 KiB:

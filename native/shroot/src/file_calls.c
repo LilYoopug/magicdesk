@@ -110,6 +110,8 @@ static long path_at(const struct md_fs *fs, const char *exe, int fd,
 
 long md_file_call(const struct md_fs *fs, const char *exe, long nr, const unsigned long *a) {
     if (nr==SYS_pipe2) return md_descriptor_pair(nr,a);
+    if (nr==SYS_fsync || nr==SYS_fdatasync || nr==SYS_syncfs)
+        return fs->endpoint[0] ? md_namespace_call(fs,exe,nr,a) : md_raw(nr,a[0],0,0,0,0,0);
     if (nr == SYS_openat2) return open_extended(fs, exe, a);
     int descriptor=nr==SYS_fstat || nr==SYS_fstatfs || nr==SYS_fchown || nr==SYS_fchmod
         || nr==SYS_getdents64 || nr==SYS_fchdir || (nr==SYS_utimensat && !a[1]);

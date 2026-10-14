@@ -77,6 +77,9 @@ int main(int argc, char **argv) {
     if (statistics) {
         cost("prepare", &database.prepare); cost("step", &database.step);
         cost("transaction", &database.transaction); cost("lock", &database.lock);
+        cost("syncObject", &database.sync_object); cost("syncDirectory", &database.sync_directory);
+        cost("commit", &database.commit);
+        cost("checkpoint", &database.checkpoint);
         fprintf(stderr, "MD_STORE queryReuses=%llu\n", (unsigned long long)database.query_reuses);
         fprintf(stderr,"MD_STORE walkComponents=%llu walkMaterializations=%llu writeAdmissions=%llu\n",
             (unsigned long long)database.walk_components,(unsigned long long)database.walk_materializations,

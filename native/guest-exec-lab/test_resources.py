@@ -18,7 +18,7 @@ def main():
     parser.add_argument("--server", default="magicdesk")
     parser.add_argument("--keep", action="store_true")
     parser.add_argument("--diagnostics", action="store_true")
-    parser.add_argument("--case", choices=("all", "control-event", "launch-cancel", "event-fairness", "kernel-baseline", "mapping-task", "private-memory", "pidfd-table", "fd-observation", "proc-custody", "exec-custody", "open-job", "ofd-order", "fd-handoff", "fd-parcel", "fd-messages", "ipc-peer", "ipc-origins", "ipc-origin-guest", "ipc-paths", "ipc-ancillary", "mount-policy", "mount-graph", "mount-namespace", "inode-custody", "origin-transfer", "transient-store", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fd-lifecycle", "restricted-descriptors", "fs-dispatch", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture", "input-session", "rpc", "stores"), default="all",
+    parser.add_argument("--case", choices=("all", "control-event", "launch-cancel", "event-fairness", "kernel-baseline", "mapping-task", "private-memory", "pidfd-table", "fd-observation", "proc-custody", "exec-custody", "open-job", "ofd-order", "fd-handoff", "fd-parcel", "fd-messages", "ipc-peer", "ipc-origins", "ipc-origin-guest", "ipc-paths", "ipc-ancillary", "mount-policy", "mount-graph", "mount-namespace", "inode-custody", "origin-transfer", "transient-store", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fd-lifecycle", "restricted-descriptors", "fs-dispatch", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture", "input-session", "rpc", "stores", "durability"), default="all",
                         help="Run resource regressions, FD handoff/parcel, terminal RPC custody, native FD lifecycle, or worker transport")
     parser.add_argument("--compare-installed", action="store_true",
                         help="Compare identical metadata/spawn fixtures with the installed runtime")
@@ -385,7 +385,11 @@ def main():
         if args.case == "rpc":
             names = ("test_rpc",)
         if args.case == "stores":
-            names = ("test_mounts", "test_inodes", "test_snapshot", "test_native_mounts")
+            names = ("test_mounts", "test_inodes", "test_snapshot", "test_native_mounts", "test_durability")
+        if args.case == "durability":
+            names = ("bootstrap", "supervisor", "run", "service")
+        if args.case in ("all", "durability"):
+            names += ("test_durability", "durability_guest")
         if args.case in ("mount-policy", "mount-graph", "inode-custody", "origin-transfer", "transient-store"):
             names = ("test_mounts",)
         if args.case == "ipc-peer":
@@ -404,6 +408,23 @@ def main():
             file = "libmagicdesk_guest_" + name + ".so"
             transport.upload(client, args.build / file, root + "/" + file)
         check("prepare fixtures", "chmod 700 " + root + "/*.so")
+        if args.case in ("all", "stores", "durability"):
+            check("storage durability", root + "/libmagicdesk_guest_test_durability.so " + root + "/durability-unit",
+                  "PASS sealed image durability and snapshot-local allocation reserve")
+        if args.case in ("all", "durability"):
+            check("durability source", "mkdir -p " + root + "/durability-source/bin "
+                  + root + "/durability-source/tmp " + root + "/durability-source/attached " + root + "/durability-attached")
+            check("durability image", "cp " + root + "/libmagicdesk_guest_durability_guest.so "
+                  + root + "/durability-source/bin/test")
+            for mode in ("plain", "protected"):
+                store = root + "/durability-" + mode
+                check("durability import " + mode, root + "/libmagicdesk_guest_service.so --import "
+                      + root + "/durability-source " + store)
+                check("guest durability " + mode, shlex.join([root + "/libmagicdesk_guest_run.so", "--user", "0:0",
+                      "--bind", root + "/durability-attached", "/attached", "--store", store,
+                      "--deadline-seconds", "90", "--", "/bin/test", mode]), "PASS guest durability calls:")
+            if args.case == "durability":
+                return
         if args.case in ("all", "control-event"):
             check("remote FD filter admission", "timeout -k 5 40 " + root + "/libmagicdesk_guest_fd_filter_remote.so",
                   "PASS remote FD filter:")
