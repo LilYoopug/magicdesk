@@ -86,6 +86,38 @@ class VersionChannelTest(unittest.TestCase):
         self.write_version("2.10.0", 231)
         self.assertIn("baseline v2.9", versions.verify(self.repo, "develop"))
 
+    def test_revision_release_and_next_cycle(self):
+        self.write_version("2.1.0.1", 220)
+        self.commit()
+        self.git("tag", "v2.1.0.1")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.assertIn("baseline v2.1", versions.verify(self.repo, "release", "v2.1.0.1"))
+        self.assertIn("main: 2.1.0.1 (220)", versions.verify(self.repo, "main"))
+        self.git("switch", "-qc", "develop")
+        result = self.run_next_version("2.1.0.2", "221")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("baseline v2.1.0.1 (220)", versions.verify(self.repo, "develop"))
+
+    def test_revision_versions_compare_numerically(self):
+        self.write_version("2.1.0.9", 220)
+        self.commit()
+        self.git("tag", "v2.1.0.9")
+        for name in ("2.1.0.10", "2.1.1"):
+            with self.subTest(name=name):
+                self.write_version(name, 221)
+                self.assertIn("baseline v2.1.0.9", versions.verify(self.repo, "develop"))
+        self.write_version("2.1.0.8", 221)
+        with self.assertRaisesRegex(ValueError, "must be newer"):
+            versions.verify(self.repo, "develop")
+
+    def test_omitted_zero_components_do_not_advance_version(self):
+        for name in ("2.1.0", "2.1.0.0"):
+            with self.subTest(name=name):
+                self.write_version(name, 219)
+                self.assertIn("baseline v2.1", versions.verify(self.repo, "main"))
+                with self.assertRaisesRegex(ValueError, "must be newer"):
+                    versions.verify(self.repo, "develop")
+
     def test_release_tag_on_main(self):
         self.prepare_release()
         self.assertIn("baseline v2.1", versions.verify(self.repo, "release", "v2.1.1"))
@@ -129,7 +161,8 @@ class VersionChannelTest(unittest.TestCase):
             versions.verify(self.repo, "main")
 
     def test_invalid_properties(self):
-        for name, code in (("bad", 220), ("2.1.1", 0), ("2.1.1", 2147483648)):
+        for name, code in (("bad", 220), ("2.1.0.1.1", 220), ("2.1.0.", 220),
+                           ("2.1.1", 0), ("2.1.1", 2147483648)):
             with self.subTest(name=name, code=code):
                 self.write_version(name, code)
                 with self.assertRaises(ValueError):
@@ -141,11 +174,11 @@ class VersionChannelTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requires the release channel"):
             versions.verify(self.repo, "main", "v2.1")
 
-    def run_next_version(self):
+    def run_next_version(self, name="2.1.1", code="220"):
         scripts = self.repo / "scripts"
         scripts.mkdir(exist_ok=True)
         shutil.copyfile(ROOT / "scripts/start-next-version.sh", scripts / "start-next-version.sh")
-        return subprocess.run(["sh", str(scripts / "start-next-version.sh"), "2.1.1", "220"],
+        return subprocess.run(["sh", str(scripts / "start-next-version.sh"), name, code],
                               text=True, capture_output=True, check=False)
 
     def test_next_cycle_only_changes_develop(self):

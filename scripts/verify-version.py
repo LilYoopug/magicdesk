@@ -7,7 +7,7 @@ import re
 import subprocess
 
 
-VERSION = re.compile(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?")
+VERSION = re.compile(r"[0-9]+(?:\.[0-9]+){1,3}")
 
 
 def git(repo, *arguments):
@@ -20,7 +20,7 @@ def version_key(name):
     if not VERSION.fullmatch(name):
         raise ValueError(f"Invalid numbered version: {name}")
     parts = tuple(map(int, name.split(".")))
-    return parts + (0,) * (3 - len(parts))
+    return parts + (0,) * (4 - len(parts))
 
 
 def properties(text):
