@@ -80,16 +80,11 @@ public final class DesktopWindowTransitionControllerTest {
 
     @Test
     public void restoreCanTargetAFullscreenTaskDirectly() {
-        assertTrue(DesktopWindowTransitionController.supportsFullscreenTask(
-                DesktopWindowTransitionController.SHORTCUT_RESTORE));
-        assertTrue(DesktopWindowTransitionController.supportsFullscreenTask(
-                DesktopWindowTransitionController.SHORTCUT_SNAP_TOP_LEFT));
-        assertTrue(DesktopWindowTransitionController.supportsFullscreenTask(
-                DesktopWindowTransitionController.SHORTCUT_SNAP_TOP_RIGHT));
-        assertTrue(DesktopWindowTransitionController.supportsFullscreenTask(
-                DesktopWindowTransitionController.SHORTCUT_SNAP_BOTTOM_LEFT));
-        assertTrue(DesktopWindowTransitionController.supportsFullscreenTask(
-                DesktopWindowTransitionController.SHORTCUT_SNAP_BOTTOM_RIGHT));
+        assertTrue(DesktopWindowAction.RESTORE.supportsFullscreenTask());
+        assertTrue(DesktopWindowAction.SNAP_TOP_LEFT.supportsFullscreenTask());
+        assertTrue(DesktopWindowAction.SNAP_TOP_RIGHT.supportsFullscreenTask());
+        assertTrue(DesktopWindowAction.SNAP_BOTTOM_LEFT.supportsFullscreenTask());
+        assertTrue(DesktopWindowAction.SNAP_BOTTOM_RIGHT.supportsFullscreenTask());
     }
 
     @Test

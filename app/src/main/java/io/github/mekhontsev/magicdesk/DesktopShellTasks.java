@@ -55,7 +55,7 @@ final class DesktopShellTasks implements AutoCloseable {
             case FULLSCREEN -> { if (!task.isFullscreen()) MagicDeskRuntime.makeTaskFullscreen(task, completed); }
             case UNMAXIMIZE -> MagicDeskRuntime.setMaximized(display, task.taskId,
                     io.github.mekhontsev.magicdesk.hosted.HostedMaximization.NONE, completed);
-            case UNFULLSCREEN -> { if (task.isFullscreen()) MagicDeskRuntime.arrangeTask(display, task.taskId, DesktopTaskController.SHORTCUT_RESTORE); }
+            case UNFULLSCREEN -> { if (task.isFullscreen()) MagicDeskRuntime.arrangeTask(display, task.taskId, DesktopWindowAction.RESTORE); }
         }
     }
 

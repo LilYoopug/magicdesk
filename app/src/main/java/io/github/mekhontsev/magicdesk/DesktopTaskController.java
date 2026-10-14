@@ -35,26 +35,6 @@ final class DesktopTaskController implements DesktopTaskRuntime {
     private static final String MAGICDESK_PACKAGE = "io.github.mekhontsev.magicdesk";
     private static final long EVENT_DEBOUNCE_MILLIS = 120;
     private static final long WATCHER_RESTART_MILLIS = 1000;
-    static final int SHORTCUT_FULLSCREEN =
-            DesktopWindowTransitionController.SHORTCUT_FULLSCREEN;
-    static final int SHORTCUT_MAXIMIZE = DesktopWindowTransitionController.SHORTCUT_MAXIMIZE;
-    static final int SHORTCUT_UNMAXIMIZE = DesktopWindowTransitionController.SHORTCUT_UNMAXIMIZE;
-    static final int SHORTCUT_RESTORE =
-            DesktopWindowTransitionController.SHORTCUT_RESTORE;
-    static final int SHORTCUT_SNAP_LEFT =
-            DesktopWindowTransitionController.SHORTCUT_SNAP_LEFT;
-    static final int SHORTCUT_SNAP_RIGHT =
-            DesktopWindowTransitionController.SHORTCUT_SNAP_RIGHT;
-    static final int SHORTCUT_SNAP_TOP_LEFT =
-            DesktopWindowTransitionController.SHORTCUT_SNAP_TOP_LEFT;
-    static final int SHORTCUT_SNAP_TOP_RIGHT =
-            DesktopWindowTransitionController.SHORTCUT_SNAP_TOP_RIGHT;
-    static final int SHORTCUT_SNAP_BOTTOM_LEFT =
-            DesktopWindowTransitionController.SHORTCUT_SNAP_BOTTOM_LEFT;
-    static final int SHORTCUT_SNAP_BOTTOM_RIGHT =
-            DesktopWindowTransitionController.SHORTCUT_SNAP_BOTTOM_RIGHT;
-    static final int SHORTCUT_CLOSE =
-            DesktopWindowTransitionController.SHORTCUT_CLOSE;
     private final Context mApplicationContext;
     private final int mObserverDisplayId;
     private final Handler mHandler;
@@ -68,7 +48,6 @@ final class DesktopTaskController implements DesktopTaskRuntime {
     private final NativeWindowBoundsController mNativeWindowBounds;
     private final DesktopWindowLayoutController mWindowLayout;
     private boolean mLayoutRefreshQueued;
-    private WindowLayoutPolicy.Workspace mLastLayoutObservation;
     private final DesktopWindowTransitionController mWindowTransitions;
     private final AppWindowStateTracker mAppWindowStates;
     private final AppPresentationRuntimeController mAppPresentations;
@@ -509,7 +488,7 @@ final class DesktopTaskController implements DesktopTaskRuntime {
         mWindowTransitions.cancelPendingTransitions("desktop task runtime stopped");
         mWorkspaceQueue.cancelAll("desktop task runtime stopped");
         mLayoutRefreshQueued = false;
-        mLastLayoutObservation = null;
+        mWindowLayout.clearObservation();
         mHandler.removeCallbacks(mRefreshRunnable);
         mRefreshDueUptimeMillis = -1;
         mTaskWatcher.setPhoneTouchpadRequested(false);
@@ -1318,7 +1297,6 @@ final class DesktopTaskController implements DesktopTaskRuntime {
                     if (!completion.isCurrent()) return;
                     if (result.success) {
                         mWindowLayout.replacePolicy(policy);
-                        mLastLayoutObservation = null;
                         scheduleRefresh(0);
                     }
                     completion.onComplete(result);
@@ -1362,8 +1340,7 @@ final class DesktopTaskController implements DesktopTaskRuntime {
                 || !mWindowLayout.observesWorkspace()) return;
         WindowLayoutPolicy.Request request = WindowLayoutPolicy.Request.observe();
         WindowLayoutPolicy.Workspace observed = layoutWorkspace(snapshot);
-        if (observed.equals(mLastLayoutObservation)) return;
-        mLastLayoutObservation = observed;
+        if (!mWindowLayout.acceptObservation(observed)) return;
         try {
             if (mWindowLayout.plan(observed, request).isEmpty()) return;
         } catch (RuntimeException error) {
@@ -1575,7 +1552,7 @@ final class DesktopTaskController implements DesktopTaskRuntime {
     }
 
     @Override
-    public boolean handleActiveTaskShortcut(final int shortcut) {
+    public boolean handleActiveTaskShortcut(final DesktopWindowAction shortcut) {
         if (!mRunning) {
             return false;
         }
@@ -1586,7 +1563,7 @@ final class DesktopTaskController implements DesktopTaskRuntime {
     }
 
     @Override
-    public boolean arrangeTask(final int taskId, final int shortcut) {
+    public boolean arrangeTask(final int taskId, final DesktopWindowAction shortcut) {
         if (!mRunning || taskId < 0) {
             return false;
         }
@@ -1612,7 +1589,7 @@ final class DesktopTaskController implements DesktopTaskRuntime {
             if (task == null) {
                 return;
             }
-            mWindowTransitions.applyShortcut(task, shortcut);
+            mWindowTransitions.applyAction(task, shortcut);
         }));
         return true;
     }
@@ -1814,19 +1791,17 @@ final class DesktopTaskController implements DesktopTaskRuntime {
     }
 
     private void handleActiveTaskShortcutInternal(
-            final int shortcut,
+            final DesktopWindowAction shortcut,
             final int activeTaskId) {
         handleNativeTaskShortcut(shortcut, activeTaskId);
     }
 
     private void handleNativeTaskShortcut(
-            final int shortcut,
+            final DesktopWindowAction shortcut,
             final int activeTaskId) {
         final int displayId = mDisplayId;
         final int generation = mGeneration;
-        final boolean supportsFullscreenTask =
-                DesktopWindowTransitionController
-                        .supportsFullscreenTask(shortcut);
+        final boolean supportsFullscreenTask = shortcut.supportsFullscreenTask();
         final List<TaskRepository.TaskEntry> latestTasks = mLatestTasks;
         final TaskRepository.TaskEntry latestActiveTask =
                 findKnownShortcutTask(
@@ -1849,10 +1824,10 @@ final class DesktopTaskController implements DesktopTaskRuntime {
                     activeTaskId,
                     !supportsFullscreenTask);
             if (task == null) {
-                if (activeTaskId < 0 && shortcut == SHORTCUT_RESTORE) {
+                if (activeTaskId < 0 && shortcut == DesktopWindowAction.RESTORE) {
                     mWindowTransitions.restoreTopFullscreenTask();
                 } else {
-                    Log.w(TAG, "no active task for shortcut=" + shortcut
+                    Log.w(TAG, "no active task for shortcut=" + shortcut.diagnosticId()
                             + " display=" + displayId);
                 }
                 return;
@@ -1862,11 +1837,11 @@ final class DesktopTaskController implements DesktopTaskRuntime {
     }
 
     private void applyNativeTaskShortcut(
-            final int shortcut,
+            final DesktopWindowAction shortcut,
             final TaskRepository.TaskEntry task) {
         recordFocusEvent("shortcut_target", mDisplayId, task.taskId,
-                true, "shortcut=" + shortcut);
-        mWindowTransitions.applyShortcut(task, shortcut);
+                true, "shortcut=" + shortcut.diagnosticId());
+        mWindowTransitions.applyAction(task, shortcut);
     }
 
     static TaskRepository.TaskEntry selectShortcutTask(

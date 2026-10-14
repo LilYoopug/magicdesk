@@ -518,6 +518,7 @@ public final class NativeWindowBoundsReconciliationTest {
                 "correctNativeCaptionSnapBounds", "sameBounds", "rect", "requestBounds"),
                 java.nio.file.Path.of("../hosted-runtime/src/main/java/io/github/mekhontsev/magicdesk/hosted/HostedMaximization.java").toAbsolutePath().toString(),
                 java.nio.file.Path.of("src/main/java/io/github/mekhontsev/magicdesk/WindowLayoutPolicy.java").toAbsolutePath().toString(),
+                java.nio.file.Path.of("src/main/java/io/github/mekhontsev/magicdesk/WindowLayoutSession.java").toAbsolutePath().toString(),
                 java.nio.file.Path.of("src/main/java/io/github/mekhontsev/magicdesk/WindowLayoutOwnership.java").toAbsolutePath().toString(),
                 java.nio.file.Path.of("src/main/java/io/github/mekhontsev/magicdesk/FloatingWindowLayoutPolicy.java").toAbsolutePath().toString());
     }

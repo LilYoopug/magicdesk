@@ -93,7 +93,7 @@ final class AppTaskController {
         return mInteractionActiveTask;
     }
 
-    void arrangeTask(final TaskRepository.TaskEntry task, final int arrangement) {
+    void arrangeTask(final TaskRepository.TaskEntry task, final DesktopWindowAction arrangement) {
         clearInteractionStack();
         if (task == null || task.displayId != mActivity.getCurrentDisplayId()
                 || !MagicDeskRuntime.arrangeTask(task.displayId, task.taskId, arrangement)) {

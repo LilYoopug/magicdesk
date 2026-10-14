@@ -30,8 +30,8 @@ public final class PointerWindowCommandsTest {
 
     @Test public void arrangingUsesTheExactMenuTask() throws Exception {
         verify("""
-                arrangeTask(new TaskRepository.TaskEntry(2, 17), 8);
-                check(MagicDeskRuntime.target == 17 && MagicDeskRuntime.arrangement == 8, "arranged another task");
+                arrangeTask(new TaskRepository.TaskEntry(2, 17), DesktopWindowAction.SNAP_BOTTOM_LEFT);
+                check(MagicDeskRuntime.target == 17 && MagicDeskRuntime.arrangement == DesktopWindowAction.SNAP_BOTTOM_LEFT, "arranged another task");
                 """);
     }
 
@@ -59,7 +59,8 @@ public final class PointerWindowCommandsTest {
                     void setStatus(String value) { status = value; }
                 }
                 static class MagicDeskRuntime {
-                    static int target = -1, arrangement = -1;
+                    static int target = -1;
+                    static DesktopWindowAction arrangement;
                     static TaskRepository.ActionCallback pending;
                     static void focusDesktopTask(int display, int task, TaskRepository.ActionCallback callback) {
                         target = task; pending = callback;
@@ -67,7 +68,7 @@ public final class PointerWindowCommandsTest {
                     static void complete(boolean success) {
                         pending.onComplete(new TaskRepository.ActionResult(success, success ? "" : "unavailable"));
                     }
-                    static boolean arrangeTask(int display, int task, int action) { target = task; arrangement = action; return true; }
+                    static boolean arrangeTask(int display, int task, DesktopWindowAction action) { target = task; arrangement = action; return true; }
                 }
                 static Activity mActivity = new Activity();
                 static void clearInteractionStack() {}
@@ -75,6 +76,6 @@ public final class PointerWindowCommandsTest {
                 static class Controller {
                 void run() throws Exception {
                 """ + scenario + "}\n" + RuntimeSourceFixture.methods("AppTaskController",
-                        "arrangeTask", "backToTask", "reportBackResult") + "}");
+                        "arrangeTask", "backToTask", "reportBackResult") + "}", "DesktopWindowAction");
     }
 }

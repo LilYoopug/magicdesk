@@ -1928,7 +1928,7 @@ final class DesktopSelfTestWindowSuite {
                 require(result, prefix + "-RESTORE",
                         "Restore native fullscreen through Win+Down", () ->
                         arrangeTaskAndWaitForHierarchy(displayId, taskId,
-                                DesktopTaskController.SHORTCUT_RESTORE,
+                                DesktopWindowAction.RESTORE,
                                 WINDOWING_MODE_FREEFORM, null, initialArea));
                 require(result, prefix + "-PEER",
                         "Keep the neighboring window above HOME after restore", () ->
@@ -2017,7 +2017,7 @@ final class DesktopSelfTestWindowSuite {
                 () -> arrangeTaskAndWaitForHierarchy(
                         displayId,
                         taskId,
-                        DesktopTaskController.SHORTCUT_FULLSCREEN,
+                        DesktopWindowAction.FULLSCREEN,
                         WINDOWING_MODE_FULLSCREEN,
                         null,
                         null));
@@ -2028,7 +2028,7 @@ final class DesktopSelfTestWindowSuite {
                 () -> arrangeTaskAndWaitForHierarchy(
                         displayId,
                         taskId,
-                        DesktopTaskController.SHORTCUT_RESTORE,
+                        DesktopWindowAction.RESTORE,
                         WINDOWING_MODE_FREEFORM,
                         restoreBounds,
                         Integer.valueOf(initial.featureId)));
@@ -2044,7 +2044,7 @@ final class DesktopSelfTestWindowSuite {
                             arrangeTaskAndWaitForHierarchy(
                                     displayId,
                                     taskId,
-                                    DesktopTaskController.SHORTCUT_FULLSCREEN,
+                                    DesktopWindowAction.FULLSCREEN,
                                     WINDOWING_MODE_FULLSCREEN,
                                     null,
                                     null);
@@ -2054,7 +2054,7 @@ final class DesktopSelfTestWindowSuite {
                             arrangeTaskAndWaitForHierarchy(
                                     displayId,
                                     taskId,
-                                    DesktopTaskController.SHORTCUT_RESTORE,
+                                    DesktopWindowAction.RESTORE,
                                     WINDOWING_MODE_FREEFORM,
                                     restoreBounds,
                                     Integer.valueOf(initial.featureId));
@@ -2084,7 +2084,7 @@ final class DesktopSelfTestWindowSuite {
             arrangeTaskAndWaitForHierarchy(
                     final int displayId,
                     final int taskId,
-                    final int shortcut,
+                    final DesktopWindowAction shortcut,
                     final int expectedMode,
                     final Rect expectedBounds,
                     final Integer expectedFeatureId) throws IOException {

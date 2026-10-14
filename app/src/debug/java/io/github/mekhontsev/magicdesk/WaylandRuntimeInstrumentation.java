@@ -347,7 +347,7 @@ public final class WaylandRuntimeInstrumentation extends Instrumentation {
             } finally {
                 runOnMainSync(() -> activity.panels().hideAll());
                 if (restore) awaitTop(true, () -> {
-                    if (!MagicDeskRuntime.arrangeTask(workspaceDisplay, policyTask, DesktopTaskController.SHORTCUT_RESTORE))
+                    if (!MagicDeskRuntime.arrangeTask(workspaceDisplay, policyTask, DesktopWindowAction.RESTORE))
                         throw new IllegalStateException("Restore gateway declined the fixture task");
                 });
             }

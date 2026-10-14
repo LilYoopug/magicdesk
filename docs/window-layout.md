@@ -15,6 +15,12 @@ carry an immutable policy continuation. Planning must not mutate policy state:
 the queue can recompute a plan from a fresher snapshot. A continuation becomes
 current only after successful submission, never after cancellation or failure.
 
+`WindowLayoutSession` owns the current policy, observation deduplication and
+continuation acknowledgement without Android dependencies. The workspace
+dispatcher serializes access to it. Layout release uses the core floating policy,
+not the selected policy, so restoration does not depend on that policy's planner.
+Replacing a policy clears its consumed observation; a continuation retains it.
+
 `FloatingWindowLayoutPolicy` preserves native floating behavior. Explicit
 resize, snap and maximize requests use its placement plan; ordinary activation
 needs no geometry change. Floating policy does not request periodic layout
@@ -27,6 +33,15 @@ placement, policy replacement and reveal preparation in `DesktopWorkspaceQueue`.
 Each queued operation reads its live ownership-filtered workspace before
 planning. Taskbar, Alt+Tab, overview and MCP activation share reveal preparation,
 then use the unchanged z-order-only focus gateway.
+
+`DesktopWindowAction` is the typed command vocabulary shared by keyboard input,
+touchpad controls, task menus, Linux panels and automation. Input adapters map
+their own keys or protocol values to these commands; numeric identifiers are
+used only in diagnostics. Fullscreen eligibility belongs to the command, while
+live target selection and ownership checks remain in `DesktopTaskController`.
+`DesktopWindowTransitionController` executes the selected action through the
+existing geometry and fullscreen owners. A layout plan cannot issue these
+actions or acquire their authority implicitly.
 
 The complete plan is validated before acquiring geometry ownership. Missing,
 foreign and non-freeform targets reject the plan. `TaskWindowingCommand`

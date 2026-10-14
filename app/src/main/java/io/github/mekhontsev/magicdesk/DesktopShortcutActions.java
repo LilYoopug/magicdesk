@@ -23,7 +23,7 @@ final class DesktopShortcutActions {
                 break;
             case CLOSE:
                 DesktopOperations.manageActiveWindow(
-                        DesktopTaskController.SHORTCUT_CLOSE);
+                        DesktopWindowAction.CLOSE);
                 break;
             case BACK:
                 DesktopOperations.sendSystemBack();
@@ -42,35 +42,35 @@ final class DesktopShortcutActions {
                 break;
             case FULLSCREEN:
                 DesktopOperations.manageActiveWindow(
-                        DesktopTaskController.SHORTCUT_FULLSCREEN);
+                        DesktopWindowAction.FULLSCREEN);
                 break;
             case RESTORE:
                 DesktopOperations.manageActiveWindow(
-                        DesktopTaskController.SHORTCUT_RESTORE);
+                        DesktopWindowAction.RESTORE);
                 break;
             case SNAP_LEFT:
                 DesktopOperations.manageActiveWindow(
-                        DesktopTaskController.SHORTCUT_SNAP_LEFT);
+                        DesktopWindowAction.SNAP_LEFT);
                 break;
             case SNAP_RIGHT:
                 DesktopOperations.manageActiveWindow(
-                        DesktopTaskController.SHORTCUT_SNAP_RIGHT);
+                        DesktopWindowAction.SNAP_RIGHT);
                 break;
             case SNAP_TOP_LEFT:
                 DesktopOperations.manageActiveWindow(
-                        DesktopTaskController.SHORTCUT_SNAP_TOP_LEFT);
+                        DesktopWindowAction.SNAP_TOP_LEFT);
                 break;
             case SNAP_TOP_RIGHT:
                 DesktopOperations.manageActiveWindow(
-                        DesktopTaskController.SHORTCUT_SNAP_TOP_RIGHT);
+                        DesktopWindowAction.SNAP_TOP_RIGHT);
                 break;
             case SNAP_BOTTOM_LEFT:
                 DesktopOperations.manageActiveWindow(
-                        DesktopTaskController.SHORTCUT_SNAP_BOTTOM_LEFT);
+                        DesktopWindowAction.SNAP_BOTTOM_LEFT);
                 break;
             case SNAP_BOTTOM_RIGHT:
                 DesktopOperations.manageActiveWindow(
-                        DesktopTaskController.SHORTCUT_SNAP_BOTTOM_RIGHT);
+                        DesktopWindowAction.SNAP_BOTTOM_RIGHT);
                 break;
             case SHOW_DESKTOP:
                 DesktopOperations.toggleDesktopWorkspace();

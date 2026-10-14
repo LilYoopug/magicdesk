@@ -839,7 +839,7 @@ if (RuntimeLimits.active().termux() && TermuxIntegration.isInstalled(mActivity))
                 && (state.destination == null || DesktopRuntimeBridge.hasWorkspace(state.destination.displayId()));
         if (state.task != null && windowControl) {
             addAction(R.string.action_restore_window, UiColor.SURFACE,
-                    true, view -> mActivity.arrangeTask(state.task, DesktopTaskController.SHORTCUT_RESTORE));
+                    true, view -> mActivity.arrangeTask(state.task, DesktopWindowAction.RESTORE));
             addSubmenuAction(R.string.action_arrange_window, view -> showArrangeMenu(state));
         }
         if (state.app.canFloat && windowControl) {
@@ -889,24 +889,24 @@ if (RuntimeLimits.active().termux() && TermuxIntegration.isInstalled(mActivity))
                 view -> showWindowMenu(state));
         final GridLayout grid = new GridLayout(mActivity);
         grid.setColumnCount(2);
-        addArrangement(grid, state, DesktopTaskController.SHORTCUT_SNAP_LEFT,
+        addArrangement(grid, state, DesktopWindowAction.SNAP_LEFT,
                 R.drawable.ic_snap_left, R.string.arrange_left);
-        addArrangement(grid, state, DesktopTaskController.SHORTCUT_SNAP_RIGHT,
+        addArrangement(grid, state, DesktopWindowAction.SNAP_RIGHT,
                 R.drawable.ic_snap_right, R.string.arrange_right);
-        addArrangement(grid, state, DesktopTaskController.SHORTCUT_SNAP_TOP_LEFT,
+        addArrangement(grid, state, DesktopWindowAction.SNAP_TOP_LEFT,
                 R.drawable.ic_snap_top_left, R.string.arrange_top_left);
-        addArrangement(grid, state, DesktopTaskController.SHORTCUT_SNAP_TOP_RIGHT,
+        addArrangement(grid, state, DesktopWindowAction.SNAP_TOP_RIGHT,
                 R.drawable.ic_snap_top_right, R.string.arrange_top_right);
-        addArrangement(grid, state, DesktopTaskController.SHORTCUT_SNAP_BOTTOM_LEFT,
+        addArrangement(grid, state, DesktopWindowAction.SNAP_BOTTOM_LEFT,
                 R.drawable.ic_snap_bottom_left, R.string.arrange_bottom_left);
-        addArrangement(grid, state, DesktopTaskController.SHORTCUT_SNAP_BOTTOM_RIGHT,
+        addArrangement(grid, state, DesktopWindowAction.SNAP_BOTTOM_RIGHT,
                 R.drawable.ic_snap_bottom_right, R.string.arrange_bottom_right);
         mPanel.addView(grid, new LinearLayout.LayoutParams(-1, -2));
         positionAndShow(state.x, state.y);
     }
 
     private void addArrangement(final GridLayout grid, final AppMenuState state,
-            final int arrangement, final int icon, final int label) {
+            final DesktopWindowAction arrangement, final int icon, final int label) {
         final ImageButton button = mUi.menuIconButton(icon, label);
         button.setTooltipText(mActivity.getString(label));
         button.setOnClickListener(view -> {

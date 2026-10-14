@@ -905,31 +905,31 @@ final class DesktopAutomationController {
         }
         final String arrangement = requiredString(args, "arrangement")
                 .toLowerCase(Locale.ROOT);
-        final int shortcut;
+        final DesktopWindowAction shortcut;
         switch (arrangement) {
             case "left":
-                shortcut = DesktopTaskController.SHORTCUT_SNAP_LEFT;
+                shortcut = DesktopWindowAction.SNAP_LEFT;
                 break;
             case "right":
-                shortcut = DesktopTaskController.SHORTCUT_SNAP_RIGHT;
+                shortcut = DesktopWindowAction.SNAP_RIGHT;
                 break;
             case "top_left":
-                shortcut = DesktopTaskController.SHORTCUT_SNAP_TOP_LEFT;
+                shortcut = DesktopWindowAction.SNAP_TOP_LEFT;
                 break;
             case "top_right":
-                shortcut = DesktopTaskController.SHORTCUT_SNAP_TOP_RIGHT;
+                shortcut = DesktopWindowAction.SNAP_TOP_RIGHT;
                 break;
             case "bottom_left":
-                shortcut = DesktopTaskController.SHORTCUT_SNAP_BOTTOM_LEFT;
+                shortcut = DesktopWindowAction.SNAP_BOTTOM_LEFT;
                 break;
             case "bottom_right":
-                shortcut = DesktopTaskController.SHORTCUT_SNAP_BOTTOM_RIGHT;
+                shortcut = DesktopWindowAction.SNAP_BOTTOM_RIGHT;
                 break;
             case "maximize":
-                shortcut = DesktopTaskController.SHORTCUT_FULLSCREEN;
+                shortcut = DesktopWindowAction.FULLSCREEN;
                 break;
             case "restore":
-                shortcut = DesktopTaskController.SHORTCUT_RESTORE;
+                shortcut = DesktopWindowAction.RESTORE;
                 break;
             default:
                 throw new IllegalArgumentException(

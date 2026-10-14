@@ -313,7 +313,7 @@ public final class MagicDeskTouchpadActivity extends Activity {
                 R.drawable.ic_arrow_up,
                 R.string.touchpad_fullscreen_current_window,
                 view -> manageActiveWindow(
-                        DesktopTaskController.SHORTCUT_FULLSCREEN));
+                        DesktopWindowAction.FULLSCREEN));
         mDesktopActions.add(fullscreen);
         header.addView(fullscreen, headerButtonParams(ui));
 
@@ -321,7 +321,7 @@ public final class MagicDeskTouchpadActivity extends Activity {
                 R.drawable.ic_arrow_down,
                 R.string.touchpad_restore_current_window,
                 view -> manageActiveWindow(
-                        DesktopTaskController.SHORTCUT_RESTORE));
+                        DesktopWindowAction.RESTORE));
         mDesktopActions.add(restore);
         header.addView(restore, headerButtonParams(ui));
 
@@ -410,7 +410,7 @@ public final class MagicDeskTouchpadActivity extends Activity {
                 new int[] {0xff777777, 0xff80caff, Color.WHITE}));
     }
 
-    private void manageActiveWindow(final int shortcut) {
+    private void manageActiveWindow(final DesktopWindowAction shortcut) {
         if (DesktopRuntimeBridge.getDesktopTarget(mTargetDisplayId) == null) { return; }
         hideHelp();
         DesktopOperations.manageActiveWindow(shortcut);

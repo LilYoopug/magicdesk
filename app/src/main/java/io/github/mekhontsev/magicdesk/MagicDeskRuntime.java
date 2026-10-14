@@ -875,7 +875,7 @@ public final class MagicDeskRuntime {
         tasks.toggleTaskbarTask(displayId, taskId, callback);
     }
 
-    static boolean handleActiveTaskShortcut(final int shortcut) {
+    static boolean handleActiveTaskShortcut(final DesktopWindowAction shortcut) {
         final DesktopTaskRuntime tasks = desktopTasks(inputDisplayId());
         return tasks != null && tasks.handleActiveTaskShortcut(shortcut);
     }
@@ -891,7 +891,7 @@ public final class MagicDeskRuntime {
         return tasks != null && tasks.isTaskConcealed(displayId, taskId);
     }
 
-    static boolean arrangeTask(final int displayId, final int taskId, final int shortcut) {
+    static boolean arrangeTask(final int displayId, final int taskId, final DesktopWindowAction shortcut) {
         final DesktopTaskRuntime tasks = desktopTasks(displayId);
         return tasks != null && tasks.arrangeTask(taskId, shortcut);
     }

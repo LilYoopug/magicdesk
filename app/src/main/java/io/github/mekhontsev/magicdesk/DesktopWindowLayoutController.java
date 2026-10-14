@@ -20,18 +20,18 @@ final class DesktopWindowLayoutController {
     private final DesktopTaskRuntimeRegistry mStates;
     private final Executor mDispatcher;
     private final Backend mBackend;
-    private WindowLayoutPolicy mPolicy;
+    private final WindowLayoutSession mSession;
 
     DesktopWindowLayoutController(DesktopTaskRuntimeRegistry states, Executor dispatcher,
             Backend backend, WindowLayoutPolicy policy) {
         mStates = states;
         mDispatcher = dispatcher;
         mBackend = backend;
-        mPolicy = policy;
+        mSession = new WindowLayoutSession(policy);
     }
 
     void replacePolicy(WindowLayoutPolicy policy) {
-        mPolicy = java.util.Objects.requireNonNull(policy);
+        mSession.replacePolicy(policy);
         // Fullscreen residency is not a layout placement. Keep its plane and
         // change only the restore destination when the old policy is released.
         for (DesktopTaskRuntimeState state : mStates.snapshot()) {
@@ -43,7 +43,13 @@ final class DesktopWindowLayoutController {
         }
     }
 
-    boolean observesWorkspace() { return mPolicy.observesWorkspace(); }
+    boolean observesWorkspace() { return mSession.observesWorkspace(); }
+
+    boolean acceptObservation(WindowLayoutPolicy.Workspace workspace) {
+        return mSession.acceptObservation(workspace);
+    }
+
+    void clearObservation() { mSession.clearObservation(); }
 
     WindowLayoutPolicy.Workspace workspace(int displayId, Rect workArea,
             List<TaskRepository.TaskEntry> tasks, Set<Integer> concealed, int focusedTaskId) {
@@ -62,11 +68,7 @@ final class DesktopWindowLayoutController {
 
     WindowLayoutPolicy.Plan plan(WindowLayoutPolicy.Workspace workspace,
             WindowLayoutPolicy.Request request) {
-        WindowLayoutPolicy.Plan plan = request.event() == WindowLayoutPolicy.Event.RELEASE
-                ? new FloatingWindowLayoutPolicy().plan(workspace, request)
-                : mPolicy.plan(workspace, request);
-        plan.validate(workspace);
-        return plan;
+        return mSession.plan(workspace, request);
     }
 
     void execute(WindowLayoutPolicy.Workspace workspace, WindowLayoutPolicy.Plan plan,
@@ -78,7 +80,7 @@ final class DesktopWindowLayoutController {
             return;
         }
         if (plan.placements().isEmpty()) {
-            if (plan.continuation() != null) mPolicy = plan.continuation();
+            mSession.acknowledge(plan);
             callback.onComplete(new TaskRepository.ActionResult(true, "unchanged"));
             return;
         }
@@ -134,8 +136,8 @@ final class DesktopWindowLayoutController {
             }
             // Acknowledgement releases the command, not a promise of exact geometry.
             // Native minimum-size constraints are observed by the existing task observer.
-            if (allCurrent && result.success && plan.continuation() != null) {
-                mPolicy = plan.continuation();
+            if (allCurrent && result.success) {
+                mSession.acknowledge(plan);
             }
             callback.onComplete(allCurrent ? result : new TaskRepository.ActionResult(
                     false, "layout operation cancelled"));

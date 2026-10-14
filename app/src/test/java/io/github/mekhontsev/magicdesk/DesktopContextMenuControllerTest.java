@@ -132,7 +132,7 @@ public final class DesktopContextMenuControllerTest {
         final String window = between(source, "private void showWindowMenu(", "private void launchApp(");
         for (final String name : new String[] {"RESTORE", "SNAP_LEFT", "SNAP_RIGHT", "SNAP_TOP_LEFT",
                 "SNAP_TOP_RIGHT", "SNAP_BOTTOM_LEFT", "SNAP_BOTTOM_RIGHT"}) {
-            assertTrue(window.contains("DesktopTaskController.SHORTCUT_" + name));
+            assertTrue(window.contains("DesktopWindowAction." + name));
         }
         assertTrue(window.contains("mActivity.arrangeTask(state.task, arrangement)"));
         assertTrue(window.contains("button.setTooltipText("));

@@ -125,13 +125,13 @@ interface DesktopTaskRuntime {
             int taskId,
             TaskRepository.ActionCallback callback);
 
-    boolean handleActiveTaskShortcut(int shortcut);
+    boolean handleActiveTaskShortcut(DesktopWindowAction shortcut);
 
     void concealTask(int displayId, int taskId, TaskRepository.ActionCallback callback);
 
     boolean isTaskConcealed(int displayId, int taskId);
 
-    boolean arrangeTask(int taskId, int shortcut);
+    boolean arrangeTask(int taskId, DesktopWindowAction shortcut);
 
     void setMaximized(int displayId, int taskId, io.github.mekhontsev.magicdesk.hosted.HostedMaximization maximized, TaskRepository.ActionCallback callback);
 

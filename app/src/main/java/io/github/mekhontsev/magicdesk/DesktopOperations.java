@@ -240,9 +240,9 @@ public final class DesktopOperations {
         });
     }
 
-    static void manageActiveWindow(final int shortcut) {
+    static void manageActiveWindow(final DesktopWindowAction shortcut) {
         if (!MagicDeskRuntime.handleActiveTaskShortcut(shortcut)) {
-            Log.w(TAG, "window shortcut unavailable action=" + shortcut);
+            Log.w(TAG, "window shortcut unavailable action=" + shortcut.diagnosticId());
         }
     }
 

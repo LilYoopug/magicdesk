@@ -31,17 +31,6 @@ final class DesktopWindowTransitionController {
         DEMOTE
     }
 
-    static final int SHORTCUT_FULLSCREEN = 1;
-    static final int SHORTCUT_RESTORE = 2;
-    static final int SHORTCUT_SNAP_LEFT = 3;
-    static final int SHORTCUT_SNAP_RIGHT = 4;
-    static final int SHORTCUT_CLOSE = 5;
-    static final int SHORTCUT_SNAP_TOP_LEFT = 6;
-    static final int SHORTCUT_SNAP_TOP_RIGHT = 7;
-    static final int SHORTCUT_SNAP_BOTTOM_LEFT = 8;
-    static final int SHORTCUT_SNAP_BOTTOM_RIGHT = 9;
-    static final int SHORTCUT_MAXIMIZE = 10;
-    static final int SHORTCUT_UNMAXIMIZE = 11;
     private static final int WINDOWING_MODE_FULLSCREEN = 1;
     private static final int WINDOWING_MODE_FREEFORM = 5;
     private static final long STARTUP_IMMERSIVE_SETTLE_MILLIS = 1_000L;
@@ -127,18 +116,6 @@ final class DesktopWindowTransitionController {
                 && !appRequested;
     }
 
-    static boolean supportsFullscreenTask(final int shortcut) {
-        return shortcut == SHORTCUT_CLOSE
-                || shortcut == SHORTCUT_MAXIMIZE
-                || shortcut == SHORTCUT_RESTORE
-                || shortcut == SHORTCUT_SNAP_LEFT
-                || shortcut == SHORTCUT_SNAP_RIGHT
-                || shortcut == SHORTCUT_SNAP_TOP_LEFT
-                || shortcut == SHORTCUT_SNAP_TOP_RIGHT
-                || shortcut == SHORTCUT_SNAP_BOTTOM_LEFT
-                || shortcut == SHORTCUT_SNAP_BOTTOM_RIGHT;
-    }
-
     static RestoreShortcutAction classifyRestoreShortcut(
             final boolean fullscreen,
             final boolean hasWindowRestoreBounds) {
@@ -150,48 +127,46 @@ final class DesktopWindowTransitionController {
                 : RestoreShortcutAction.DEMOTE;
     }
 
-    void applyShortcut(
+    void applyAction(
             final TaskRepository.TaskEntry task,
-            final int shortcut) {
-        switch (shortcut) {
-            case SHORTCUT_FULLSCREEN:
+            final DesktopWindowAction action) {
+        switch (action) {
+            case FULLSCREEN:
                 makeFullscreen(task, false);
                 break;
-            case SHORTCUT_RESTORE:
+            case RESTORE:
                 applyRestoreShortcut(task);
                 break;
-            case SHORTCUT_SNAP_LEFT:
+            case SNAP_LEFT:
                 snap(task, true, 0);
                 break;
-            case SHORTCUT_SNAP_RIGHT:
+            case SNAP_RIGHT:
                 snap(task, false, 0);
                 break;
-            case SHORTCUT_SNAP_TOP_LEFT:
+            case SNAP_TOP_LEFT:
                 snap(task, true, -1);
                 break;
-            case SHORTCUT_SNAP_TOP_RIGHT:
+            case SNAP_TOP_RIGHT:
                 snap(task, false, -1);
                 break;
-            case SHORTCUT_SNAP_BOTTOM_LEFT:
+            case SNAP_BOTTOM_LEFT:
                 snap(task, true, 1);
                 break;
-            case SHORTCUT_SNAP_BOTTOM_RIGHT:
+            case SNAP_BOTTOM_RIGHT:
                 snap(task, false, 1);
                 break;
-            case SHORTCUT_CLOSE:
+            case CLOSE:
                 close(task);
                 break;
-            case SHORTCUT_MAXIMIZE:
+            case MAXIMIZE:
                 arrange(task, mNativeWindowBounds.getTaskbarMaximizedBounds());
                 break;
-            case SHORTCUT_UNMAXIMIZE:
+            case UNMAXIMIZE:
                 if (task.isFreeform()) {
                     mNativeWindowBounds.rememberRestoreBounds(task);
                     applyRestoreShortcut(task);
                 }
                 break;
-            default:
-                Log.w(TAG, "unknown native window shortcut=" + shortcut);
         }
     }
 

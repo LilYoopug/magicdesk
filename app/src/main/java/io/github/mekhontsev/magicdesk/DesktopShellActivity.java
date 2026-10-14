@@ -1790,7 +1790,7 @@ public abstract class DesktopShellActivity extends Activity
         return mAppTasks.interactionActiveTask();
     }
 
-    void arrangeTask(final TaskRepository.TaskEntry task, final int arrangement) {
+    void arrangeTask(final TaskRepository.TaskEntry task, final DesktopWindowAction arrangement) {
         mAppTasks.arrangeTask(task, arrangement);
     }
 

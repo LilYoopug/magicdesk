@@ -1312,7 +1312,7 @@ final class DesktopSelfTestInputSuite {
         try {
             inspectFullscreenPair(displayId, secondTaskId, firstTaskId);
             if (!MagicDeskRuntime.handleActiveTaskShortcut(
-                    DesktopTaskController.SHORTCUT_RESTORE)) {
+                    DesktopWindowAction.RESTORE)) {
                 throw new IOException(
                         "MagicDesk fullscreen restore is unavailable");
             }
@@ -1358,7 +1358,7 @@ final class DesktopSelfTestInputSuite {
                     secondTaskId,
                     "4");
             if (!MagicDeskRuntime.handleActiveTaskShortcut(
-                    DesktopTaskController.SHORTCUT_CLOSE)) {
+                    DesktopWindowAction.CLOSE)) {
                 throw new IOException(
                         "MagicDesk fullscreen close is unavailable");
             }
@@ -1596,7 +1596,7 @@ final class DesktopSelfTestInputSuite {
         waitForFrontTask(displayId, taskId);
         waitForTaskInputFocus(displayId, taskId);
         if (!MagicDeskRuntime.handleActiveTaskShortcut(
-                DesktopTaskController.SHORTCUT_FULLSCREEN)) {
+                DesktopWindowAction.FULLSCREEN)) {
             throw new IOException(
                     "MagicDesk fullscreen shortcut is unavailable");
         }
@@ -1767,7 +1767,7 @@ final class DesktopSelfTestInputSuite {
                     + task.windowingMode);
         }
         if (!MagicDeskRuntime.arrangeTask(
-                displayId,                 taskId, DesktopTaskController.SHORTCUT_RESTORE)) {
+                displayId,                 taskId, DesktopWindowAction.RESTORE)) {
             throw new IOException(
                     "MagicDesk fullscreen restore is unavailable");
         }

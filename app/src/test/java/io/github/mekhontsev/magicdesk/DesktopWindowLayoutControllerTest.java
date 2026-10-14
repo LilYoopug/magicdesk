@@ -113,6 +113,52 @@ public final class DesktopWindowLayoutControllerTest {
         assertTrue(controller.observesWorkspace());
     }
 
+    @Test public void cancelledMetadataOnlyPlanCannotCommitContinuation() {
+        var tasks = List.of(task(10, "freeform"));
+        var workspace = controller.workspace(3, AREA, tasks, Set.of(), 10);
+        var plan = new WindowLayoutPolicy.Plan(List.of(),
+                (nextWorkspace, request) -> WindowLayoutPolicy.Plan.EMPTY);
+        current = false;
+        controller.execute(workspace, plan, tasks, () -> current, result -> results.add(result.success));
+        assertEquals(List.of(false), results);
+        assertFalse(controller.observesWorkspace());
+        assertTrue(submissions.isEmpty());
+    }
+
+    @Test public void lateCallbackCannotCommitContinuationForAReusedTaskId() {
+        var tasks = List.of(task(10, "freeform"));
+        var workspace = controller.workspace(3, AREA, tasks, Set.of(), 10);
+        var plan = new WindowLayoutPolicy.Plan(List.of(new WindowLayoutPolicy.Placement(
+                10, TILE, WindowLayoutPolicy.Retention.LAYOUT)),
+                (nextWorkspace, request) -> WindowLayoutPolicy.Plan.EMPTY);
+        controller.execute(workspace, plan, tasks, () -> current, result -> results.add(result.success));
+        var previous = states.state(10);
+        states.clear();
+        var replacement = states.state(10);
+        submissions.get(0).onComplete(new TaskRepository.ActionResult(true, "late"));
+        assertEquals(List.of(false), results);
+        assertNotSame(previous, replacement);
+        assertFalse(replacement.layoutOwnership().isOwned());
+        assertNull(replacement.boundsTransition());
+        assertFalse(controller.observesWorkspace());
+    }
+
+    @Test public void duplicateCallbackCannotRestoreAReplacedPolicy() {
+        var tasks = List.of(task(10, "freeform"));
+        var workspace = controller.workspace(3, AREA, tasks, Set.of(), 10);
+        var plan = new WindowLayoutPolicy.Plan(List.of(new WindowLayoutPolicy.Placement(
+                10, TILE, WindowLayoutPolicy.Retention.LAYOUT)),
+                (nextWorkspace, request) -> WindowLayoutPolicy.Plan.EMPTY);
+        controller.execute(workspace, plan, tasks, () -> current, result -> results.add(result.success));
+        submissions.get(0).onComplete(new TaskRepository.ActionResult(true, "submitted"));
+        assertTrue(controller.observesWorkspace());
+        controller.replacePolicy(new FloatingWindowLayoutPolicy());
+        submissions.get(0).onComplete(new TaskRepository.ActionResult(true, "duplicate"));
+        assertFalse(controller.observesWorkspace());
+        assertEquals(List.of(true), results);
+        assertFalse(states.state(10).layoutOwnership().isOwned());
+    }
+
     @Test public void releasingLayoutRetainsNativeMaximizeRestoreHistory() {
         var tasks = List.of(task(10, "freeform"));
         states.state(10).setWindowRestoreBounds(DesktopWindowLayoutController.rect(ORIGINAL));
