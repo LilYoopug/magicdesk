@@ -148,4 +148,28 @@ public final class CompatibilityDiagnosticsTest {
                 CompatibilityDiagnostics.formatAutomationEvents(
                         events, newEvent.length()));
     }
+
+    @Test
+    public void retainsOnlyEightRecentProcessFailuresWithoutDroppingOtherEvents() {
+        StringBuilder events = new StringBuilder();
+        for (int i = 0; i < 12; i++) {
+            events.append("2026-10-15 | DESKTOP-PROCESS-CRASH-001 | Crash | pid=").append(i)
+                    .append("\n at example.Main.run(Main.java:1)\n");
+        }
+        events.append("2026-10-15 | PANEL-004 | Panel failed\n");
+        String selected = CompatibilityDiagnostics.selectRecentRecordedEvents(events.toString(), 64_000);
+        assertEquals(8, selected.split("DESKTOP-PROCESS-CRASH-001", -1).length - 1);
+        assertFalse(selected.contains("pid=3\n"));
+        assertTrue(selected.contains("pid=4\n"));
+        assertTrue(selected.contains("pid=11\n"));
+        assertTrue(selected.contains("PANEL-004"));
+    }
+
+    @Test
+    public void preservesCrashStackAsOneEventEvenWithSeparatorInMessage() {
+        String event = "2026-10-15 | DESKTOP-PROCESS-CRASH-001 | Crash\n"
+                + " message: a | b | c\n at example.Main.run(Main.java:1)\n";
+        assertEquals(event, CompatibilityDiagnostics.selectRecentRecordedEvents(event, event.length()));
+        assertEquals("", CompatibilityDiagnostics.selectRecentRecordedEvents(event, event.length() - 1));
+    }
 }

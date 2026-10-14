@@ -24,7 +24,7 @@ public final class ShellProcessFailureTrackerTest {
         final ShellProcessFailureTracker tracker = tracker(listener);
 
         tracker.onProcessCrashed(
-                APP_PACKAGE + ":renderer", 123, "Illegal state");
+                APP_PACKAGE + ":renderer", 123, "Illegal state", "Detail", "at example.Main.run(Main.java:1)");
 
         assertEquals(DesktopProcessFailure.CRASH, listener.type);
         assertEquals(APP_PACKAGE + ":renderer", listener.processName);
@@ -34,6 +34,9 @@ public final class ShellProcessFailureTrackerTest {
         assertEquals(WINDOWING_MODE_FREEFORM, listener.windowingMode);
         assertEquals("", listener.topActivity);
         assertEquals("Illegal state", listener.reason);
+        assertEquals("Detail", listener.failure.message);
+        assertEquals("at example.Main.run(Main.java:1)", listener.failure.stackTrace);
+        assertEquals(APP_PACKAGE, listener.failure.packageName());
     }
 
     @Test
@@ -48,7 +51,7 @@ public final class ShellProcessFailureTrackerTest {
                         PERMISSION_PACKAGE)));
 
         tracker.onProcessCrashed(
-                PERMISSION_PACKAGE, 321, "Permission UI failed");
+                PERMISSION_PACKAGE, 321, "Permission UI failed", "", "");
 
         assertEquals(TASK_ID, listener.taskId);
         assertEquals("", listener.topActivity);
@@ -59,7 +62,7 @@ public final class ShellProcessFailureTrackerTest {
         final RecordingListener listener = new RecordingListener();
         final ShellProcessFailureTracker tracker = tracker(listener);
 
-        tracker.onProcessCrashed("com.example.other", 123, "Failure");
+        tracker.onProcessCrashed("com.example.other", 123, "Failure", "", "");
 
         assertNull(listener.processName);
     }
@@ -157,25 +160,20 @@ public final class ShellProcessFailureTrackerTest {
         int windowingMode;
         String topActivity;
         String reason;
+        DesktopProcessFailureEvent failure;
 
         @Override
         public void onDesktopProcessFailure(
-                final int failureType,
-                final String failedProcessName,
-                final int failedPid,
-                final int failedTaskId,
-                final int failedDisplayId,
-                final int failedWindowingMode,
-                final String failedTopActivity,
-                final String failureReason) {
-            type = failureType;
-            processName = failedProcessName;
-            pid = failedPid;
-            taskId = failedTaskId;
-            displayId = failedDisplayId;
-            windowingMode = failedWindowingMode;
-            topActivity = failedTopActivity;
-            reason = failureReason;
+                final DesktopProcessFailureEvent event) {
+            failure = event;
+            type = event.type;
+            processName = event.processName;
+            pid = event.pid;
+            taskId = event.taskId;
+            displayId = event.displayId;
+            windowingMode = event.windowingMode;
+            topActivity = event.topActivity;
+            reason = event.reason;
         }
     }
 }

@@ -152,7 +152,7 @@ while keeping another app's text and controls larger. Other applications and
 the taskbar keep their own scale. This changes the app's Android density, not
 the monitor resolution or just the zoom of one web page.
 
-Open an app's context menu in Desktop and choose **Application settings**.
+Open an app's context menu in Desktop and choose **App scale**.
 Select **Custom** and adjust **Interface scale** from **50% to 200%** of the
 display's density. Lower values make the interface smaller; higher values make
 it larger. **System** removes the app-specific override. Saved custom profiles

@@ -35,7 +35,12 @@ Shared command, observation and diagnostic ownership. For the public tool contra
 - `DesktopWindowTransitionProvenance` correlates semantic MagicDesk requests,
   application immersive callbacks, and activity-handoff corrections with those
   existing mode-change events. Uncorrelated supported mode changes are labeled
-  `framework-external`; no stack trace, timer, or additional observer is used.
+  `unattributed`, not attributed to firmware. Evidence distinguishes a matching
+  recorded operation from an observed application request; neither is a framework
+  transaction-token acknowledgement. Mode events include previous geometry,
+  Activity, density, visibility and focus, and the last immersive observation with
+  its age and policy disposition. Unknown observations remain unknown. The bounded
+  history uses existing callbacks, without a timer or additional observer.
 - `DesktopAutomationUiRegistry` is populated by the controllers that own live
   desktop `View` objects. `DesktopUiGateway` is still the only bridge to the
   Activity and marshals snapshots and semantic actions onto the UI thread.

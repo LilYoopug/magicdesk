@@ -215,6 +215,8 @@ final class DesktopWindowTransitionController {
             // focus is unreliable for organizer children, so the shell observer
             // reports the actual focused input window.
             state.clearImmersiveRequested();
+            DesktopWindowTransitionProvenance.noteImmersiveObservation(taskId,
+                    requestingImmersive, initialSample, foreground, "ignored-background-exit", state);
             return;
         }
         final Boolean previous =
@@ -228,6 +230,8 @@ final class DesktopWindowTransitionController {
                     requestingImmersive,
                     SystemClock.uptimeMillis(),
                     STARTUP_IMMERSIVE_SETTLE_MILLIS);
+            DesktopWindowTransitionProvenance.noteImmersiveObservation(taskId,
+                    requestingImmersive, initialSample, foreground, "initial-sample", state);
             if (shouldReconcileInitialImmersiveSample(
                     previous,
                     requestingImmersive,
@@ -247,6 +251,9 @@ final class DesktopWindowTransitionController {
         } else if (startupWindowedRequest) {
             Log.i(TAG, "kept startup task windowed task=" + taskId);
         }
+        DesktopWindowTransitionProvenance.noteImmersiveObservation(taskId,
+                requestingImmersive, initialSample, foreground,
+                startupWindowedRequest ? "kept-startup-windowed" : "reconcile", state);
         mRuntimeState.scheduleRefresh();
     }
 
@@ -373,6 +380,10 @@ final class DesktopWindowTransitionController {
             // Local application intent is authoritative even on API 35 firmware
             // without TaskInfo requested-insets publication. No extra task poll.
             state.updateImmersiveObservation(request.requested(), request.foreground());
+            if (previous == null || previous != request.version()) {
+                DesktopWindowTransitionProvenance.noteImmersiveObservation(task.taskId,
+                        request.requested(), previous == null, request.foreground(), "hosted-request", state);
+            }
         }
         for (Integer taskId : mHostedImmersiveVersions.keySet()) {
             if (live.contains(taskId)) continue;
@@ -504,6 +515,7 @@ final class DesktopWindowTransitionController {
                         targetBounds,
                         densityFor(task),
                         "native-window-snap-shortcut");
+        DesktopWindowTransitionProvenance.noteDecision(task, request);
         submitRequired(request, callback);
     }
 
@@ -629,6 +641,7 @@ final class DesktopWindowTransitionController {
                         taskId,
                         densityFor(task),
                         "native-window-fullscreen-shortcut");
+        DesktopWindowTransitionProvenance.noteDecision(task, request);
         submitRequired(request, callback);
     }
 
@@ -675,6 +688,7 @@ final class DesktopWindowTransitionController {
                         userRequested
                                 ? "native-window-restore-shortcut"
                                 : "application-immersive-reconciliation");
+        DesktopWindowTransitionProvenance.noteDecision(task, request);
         submitRequired(request, callback);
     }
 
@@ -688,6 +702,7 @@ final class DesktopWindowTransitionController {
             final TaskRepository.ActionCallback callback) {
         DesktopWindowTransitionProvenance.noteMagicDeskCommand(request);
         final boolean accepted = mGateway.submit(request, callback);
+        if (!accepted) DesktopWindowTransitionProvenance.rejectCommand(request.taskId);
         DesktopWindowTransitionDiagnostics.recordSubmission(
                 request, accepted);
         return accepted;

@@ -335,6 +335,16 @@ Fatal uncaught exceptions are stored as `[CRASH-001]` before Android terminates
 the process. Open Diagnostics after restarting MagicDesk to include that crash
 in the next report.
 
+Desktop application failures retain the framework-supplied exception message
+and stack, correlated task/user identity, and the installed package version
+when accessible. The shell sends a bounded typed event; metadata lookup and
+persistent recording run outside the framework callback and UI thread. Messages
+are capped at 1,024 characters and stacks at 12,000, with explicit truncation.
+The size-bounded journal survives process restart; reports include at most eight
+recent process failures within the existing 64,000-character event section.
+Updating MagicDesk starts a fresh journal. Missing stacks or package versions
+remain unavailable rather than being inferred.
+
 ## Creating a report
 
 1. Reproduce the problem once.
@@ -375,8 +385,10 @@ The report includes:
   providers, typed capability observations, window-transition routing, and the
   manual compatibility checklist.
 
-The report excludes notification title/body text, user files, account data,
-clipboard contents, and the installed-app list. MagicDesk-only logs can still
+The report does not collect notification title/body text, user files, account
+data, clipboard contents, or the installed-app list. Application exception
+messages and stacks can contain app-supplied paths, URLs or other sensitive
+values; review them before sharing. MagicDesk-only logs can still
 contain package names, task ids, display ids, and filenames involved in a
 failed operation. Review the text before publishing it.
 

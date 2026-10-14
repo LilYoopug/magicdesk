@@ -150,30 +150,8 @@ final class ShellTaskObserver extends TaskStackListener implements Closeable {
                                 mCallback.onPhoneTaskNormalized(taskId));
                     }
                 });
-        mProcessFailureTracker = new ShellProcessFailureTracker(
-                new ShellProcessFailureTracker.Listener() {
-                    @Override
-                    public void onDesktopProcessFailure(
-                            final int type,
-                            final String processName,
-                            final int pid,
-                            final int taskId,
-                            final int displayId,
-                            final int windowingMode,
-                            final String topActivity,
-                            final String reason) {
-                        callCallback(() ->
-                                mCallback.onDesktopProcessFailure(
-                                        type,
-                                        processName,
-                                        pid,
-                                        taskId,
-                                        displayId,
-                                        windowingMode,
-                                        topActivity,
-                                        reason));
-                    }
-                });
+        mProcessFailureTracker = new ShellProcessFailureTracker(failure ->
+                callCallback(() -> mCallback.onDesktopProcessFailure(failure)));
         mPhoneOverviewRouter = new ShellPhoneOverviewRouter(
                 context,
                 mService,

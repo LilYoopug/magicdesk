@@ -114,6 +114,9 @@ public final class WindowCompletionRegressionTest {
                     static DesktopWindowTransitionRequest enterAppFullscreen(int display, int task, Rect bounds, int density, String reason) { return new DesktopWindowTransitionRequest(); }
                     static DesktopWindowTransitionRequest enterFullscreen(int display, int task, int density, String reason) { return new DesktopWindowTransitionRequest(); }
                 }
+                static class DesktopWindowTransitionProvenance {
+                    static void noteDecision(TaskRepository.TaskEntry task, DesktopWindowTransitionRequest request) {}
+                }
                 final States mTaskStates = new States();
                 final RuntimeState mRuntimeState = new RuntimeState();
                 final NativeBounds mNativeWindowBounds = new NativeBounds();

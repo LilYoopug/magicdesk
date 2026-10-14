@@ -870,7 +870,7 @@
     <string name="settings_mcp_status_waiting">Enabled; waiting for the MagicDesk runtime at %1$s</string>
     <string name="settings_mcp_status_disabled">Disabled; endpoint %1$s</string>
     <string name="settings_save_failed">Could not save MagicDesk settings</string>
-    <string name="action_app_presentation_settings">Application settings</string>
+    <string name="action_app_presentation_settings">App scale</string>
     <string name="app_presentation_title">Application settings</string>
     <string name="app_presentation_profiles_title">Application profiles</string>
     <string name="app_presentation_profiles_empty">No custom application profiles</string>

@@ -14,15 +14,7 @@ final class ShellProcessFailureTracker implements
     static final int MAX_PENDING_ANRS = 64;
 
     interface Listener {
-        void onDesktopProcessFailure(
-                int type,
-                String processName,
-                int pid,
-                int taskId,
-                int displayId,
-                int windowingMode,
-                String topActivity,
-                String reason);
+        void onDesktopProcessFailure(DesktopProcessFailureEvent failure);
     }
 
     private final Listener mListener;
@@ -69,8 +61,10 @@ final class ShellProcessFailureTracker implements
     public void onProcessCrashed(
             final String processName,
             final int pid,
-            final String shortMessage) {
-        final Failure failure;
+            final String shortMessage,
+            final String longMessage,
+            final String stackTrace) {
+        final DesktopProcessFailureEvent failure;
         synchronized (this) {
             final ProcessIdentity identity =
                     new ProcessIdentity(processName, pid);
@@ -80,6 +74,8 @@ final class ShellProcessFailureTracker implements
                     processName,
                     pid,
                     shortMessage,
+                    longMessage,
+                    stackTrace,
                     null);
         }
         report(failure);
@@ -109,7 +105,7 @@ final class ShellProcessFailureTracker implements
     public void onProcessNotResponding(
             final String processName,
             final int pid) {
-        final Failure failure;
+        final DesktopProcessFailureEvent failure;
         synchronized (this) {
             final ProcessIdentity identity =
                     new ProcessIdentity(processName, pid);
@@ -119,28 +115,32 @@ final class ShellProcessFailureTracker implements
                     processName,
                     pid,
                     pending == null ? "" : pending.annotation,
+                    "",
+                    "",
                     pending == null ? null : pending.task);
         }
         report(failure);
     }
 
-    private Failure createFailure(
+    private DesktopProcessFailureEvent createFailure(
             final int type,
             final String processName,
             final int pid,
             final String reason,
+            final String message,
+            final String stackTrace,
             final TaskContext capturedTask) {
         final TaskContext task = capturedTask == null
                 ? findTask(processName) : capturedTask;
         if (task == null) {
             return null;
         }
-        return new Failure(
+        return new DesktopProcessFailureEvent(
                 type,
                 processName,
                 pid,
-                task,
-                DesktopProcessFailure.compactReason(reason));
+                task.taskId, task.userId, task.displayId, task.windowingMode,
+                task.topActivity, reason, message, stackTrace);
     }
 
     private TaskContext findTask(final String processName) {
@@ -164,7 +164,7 @@ final class ShellProcessFailureTracker implements
         return rootMatch;
     }
 
-    private void report(final Failure failure) {
+    private void report(final DesktopProcessFailureEvent failure) {
         if (failure == null || mListener == null) {
             return;
         }
@@ -176,28 +176,12 @@ final class ShellProcessFailureTracker implements
                     operation,
                     false,
                     failure.processName,
-                    new org.json.JSONObject()
-                            .put("process", failure.processName)
-                            .put("pid", failure.pid)
-                            .put("taskId", failure.task.taskId)
-                            .put("displayId", failure.task.displayId)
-                            .put("windowingMode",
-                                    failure.task.windowingMode)
-                            .put("topActivity", failure.task.topActivity)
-                            .put("reason", failure.reason));
+                    failure.summary());
         } catch (org.json.JSONException ignored) {
             DesktopAutomationEventJournal.record(
                     "process", operation, false, failure.processName);
         }
-        mListener.onDesktopProcessFailure(
-                failure.type,
-                failure.processName,
-                failure.pid,
-                failure.task.taskId,
-                failure.task.displayId,
-                failure.task.windowingMode,
-                failure.task.topActivity,
-                failure.reason);
+        mListener.onDesktopProcessFailure(failure);
     }
 
     private static String packageFromProcessName(final String processName) {
@@ -211,6 +195,7 @@ final class ShellProcessFailureTracker implements
 
     private static final class TaskContext {
         final int taskId;
+        final int userId;
         final int displayId;
         final int windowingMode;
         final String packageName;
@@ -221,6 +206,7 @@ final class ShellProcessFailureTracker implements
                 final FrameworkTaskSnapshot task,
                 final int observedDisplayId) {
             taskId = task.taskId;
+            userId = task.userId;
             displayId = observedDisplayId;
             windowingMode = task.windowingMode;
             packageName = task.packageName;
@@ -240,27 +226,6 @@ final class ShellProcessFailureTracker implements
                 final String detail) {
             task = capturedTask;
             annotation = detail;
-        }
-    }
-
-    private static final class Failure {
-        final int type;
-        final String processName;
-        final int pid;
-        final TaskContext task;
-        final String reason;
-
-        Failure(
-                final int failureType,
-                final String failedProcessName,
-                final int failedPid,
-                final TaskContext failedTask,
-                final String failureReason) {
-            type = failureType;
-            processName = failedProcessName;
-            pid = failedPid;
-            task = failedTask;
-            reason = failureReason;
         }
     }
 

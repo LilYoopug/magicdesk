@@ -29,7 +29,8 @@ final class ShellActivityStartController implements AutoCloseable {
 
     interface ProcessFailureListener {
         void onProcessCrashed(
-                String processName, int pid, String shortMessage);
+                String processName, int pid, String shortMessage,
+                String longMessage, String stackTrace);
         void onProcessEarlyNotResponding(
                 String processName, int pid, String annotation);
         void onProcessNotResponding(String processName, int pid);
@@ -143,7 +144,7 @@ final class ShellActivityStartController implements AutoCloseable {
                         final String stackTrace) {
                     notifyProcessFailure(() ->
                             mProcessFailureListener.onProcessCrashed(
-                                    processName, pid, shortMessage));
+                                    processName, pid, shortMessage, longMessage, stackTrace));
                     return true;
                 }
 

@@ -48,6 +48,8 @@ public final class CompatibilityDiagnostics {
     private static final String EVENT_FILE = "compatibility-events.log";
     private static final long MAX_EVENT_FILE_BYTES = 128 * 1024;
     private static final int MAX_EVENT_DETAIL_CHARS = 2_000;
+    private static final int MAX_PROCESS_FAILURE_CHARS = 16_000;
+    private static final int MAX_REPORTED_PROCESS_FAILURES = 8;
     private static final int MAX_REPORTED_EVENT_CHARS = 64_000;
     private static final int MAX_LOGCAT_CHARS = 48_000;
     private static final int MAX_AUTOMATION_EVENT_COUNT = 64;
@@ -82,6 +84,29 @@ public final class CompatibilityDiagnostics {
 
     public static void record(final String code, final String userMessage,
             final String technicalDetail, final Throwable error) {
+        record(code, userMessage, technicalDetail, error, MAX_EVENT_DETAIL_CHARS);
+    }
+
+    static void recordProcessFailure(final DesktopProcessFailureEvent failure) {
+        final Context context = sApplicationContext;
+        if (context == null) return;
+        String version = "unavailable";
+        try {
+            // Do not resolve a different profile's package as the current user's installation.
+            Context userContext = AppProfile.current(context).owns(failure.userId)
+                    ? context : FrameworkUserApi.contextForUser(context, failure.userId);
+            PackageInfo info = userContext.getPackageManager().getPackageInfo(
+                    failure.packageName(), PackageManager.PackageInfoFlags.of(0));
+            version = info.versionName + " (" + info.getLongVersionCode() + ")";
+        } catch (PackageManager.NameNotFoundException | RuntimeException ignored) {
+            // Missing package metadata must not discard the crash itself.
+        }
+        record(DesktopProcessFailure.code(failure.type), DesktopProcessFailure.message(failure.type),
+                failure.technicalDetail(version), null, MAX_PROCESS_FAILURE_CHARS);
+    }
+
+    private static void record(final String code, final String userMessage,
+            final String technicalDetail, final Throwable error, final int detailLimit) {
         final Context context = sApplicationContext;
         if (context == null) {
             return;
@@ -89,7 +114,7 @@ public final class CompatibilityDiagnostics {
         final String cleanedCode = cleanSingleLine(code, 80);
         final String cleanedMessage = cleanSingleLine(userMessage, 400);
         final String cleanedDetail = cleanMultiline(
-                technicalDetail, MAX_EVENT_DETAIL_CHARS);
+                technicalDetail, detailLimit);
         final String signature = cleanedCode
                 + '\n' + cleanedMessage
                 + '\n' + cleanedDetail;
@@ -187,9 +212,11 @@ public final class CompatibilityDiagnostics {
                 .append(snapshot.machineReadableJson())
                 .append("\n```\n");
         report.append("\n## Privacy note\n")
-                .append("This report omits notification contents, user files, account data, ")
-                .append("and the installed-app list. It may contain Android package names ")
-                .append("and task/display identifiers from MagicDesk diagnostics.\n");
+                .append("This report does not collect notification contents, user files, ")
+                .append("or the installed-app list. It includes package names, versions, ")
+                .append("task/display identifiers and bounded application crash messages/stacks. ")
+                .append("Messages supplied by applications may contain private data; ")
+                .append("review the report before sharing.\n");
         return report.toString();
     }
 
@@ -761,6 +788,7 @@ public final class CompatibilityDiagnostics {
         final List<String> selected = new ArrayList<>();
         final Set<String> seen = new HashSet<>();
         int selectedChars = 0;
+        int processFailures = 0;
         for (int index = blocks.size() - 1; index >= 0; index--) {
             final String event = blocks.get(index);
             if (isStaticAuditEvent(event)) {
@@ -772,6 +800,9 @@ public final class CompatibilityDiagnostics {
             if (!seen.add(signature)) {
                 continue;
             }
+            if ((event.contains(" | DESKTOP-PROCESS-CRASH-001 | ")
+                    || event.contains(" | DESKTOP-PROCESS-ANR-001 | "))
+                    && ++processFailures > MAX_REPORTED_PROCESS_FAILURES) continue;
             if (selectedChars + event.length() > maxChars) {
                 break;
             }
@@ -807,7 +838,8 @@ public final class CompatibilityDiagnostics {
 
     private static boolean isEventHeader(final String line) {
         final int firstSeparator = line.indexOf(" | ");
-        return firstSeparator > 0
+        return !line.isEmpty() && !Character.isWhitespace(line.charAt(0))
+                && firstSeparator > 0
                 && line.indexOf(" | ", firstSeparator + 3)
                         > firstSeparator + 3;
     }

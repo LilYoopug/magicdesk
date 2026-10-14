@@ -179,6 +179,8 @@ public final class ImmersiveRequestStateTest {
                 static class Log { static void i(String tag, String message) {} }
                 static class DesktopWindowTransitionProvenance {
                     static void noteApplicationRequest(int task, boolean requested) {}
+                    static void noteImmersiveObservation(int task, boolean requested,
+                            boolean initial, boolean foreground, String decision, DesktopTaskRuntimeState state) {}
                 }
                 static class RuntimeState { void scheduleRefresh() {} }
                 static class DesktopTaskRuntimeState {

@@ -468,6 +468,9 @@ public final class NativeWindowBoundsReconciliationTest {
                         return new DesktopWindowTransitionRequest(bounds);
                     }
                 }
+                static class DesktopWindowTransitionProvenance {
+                    static void noteDecision(TaskRepository.TaskEntry task, DesktopWindowTransitionRequest request) {}
+                }
                 static final String TAG = "fixture";
                 final States mTaskStates = new States();
                 final RuntimeState mRuntimeState = new RuntimeState();

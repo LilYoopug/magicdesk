@@ -1020,59 +1020,37 @@ final class DesktopTaskWatcher {
 
     private void onDesktopProcessFailure(
             final int generation,
-            final int type,
-            final String processName,
-            final int pid,
-            final int taskId,
-            final int displayId,
-            final int windowingMode,
-            final String topActivity,
-            final String reason) {
+            final DesktopProcessFailureEvent failure) {
+        if (failure == null) return;
         postIfActive(generation, () -> {
             DesktopProcessHealthRegistry.record(
-                    type,
-                    processName,
-                    pid,
-                    taskId,
-                    displayId,
-                    reason);
-            final String code = DesktopProcessFailure.code(type);
-            final String message = DesktopProcessFailure.message(type);
+                    failure.type, failure.processName, failure.pid,
+                    failure.taskId, failure.displayId, failure.reason);
+            final String code = DesktopProcessFailure.code(failure.type);
+            final String message = DesktopProcessFailure.message(failure.type);
             if (code.isEmpty() || message.isEmpty()) {
-                Log.w(TAG, "ignored unknown process failure type=" + type);
+                Log.w(TAG, "ignored unknown process failure type=" + failure.type);
                 return;
             }
-            CompatibilityDiagnostics.record(
-                    code,
-                    message,
-                    DesktopProcessFailure.technicalDetail(
-                            processName,
-                            pid,
-                            taskId,
-                            displayId,
-                            windowingMode,
-                            topActivity,
-                            reason));
+            // Package metadata and disk I/O stay outside the framework callback and UI thread.
+            try {
+                mExecutor.execute(() -> CompatibilityDiagnostics.recordProcessFailure(failure));
+            } catch (RejectedExecutionException error) {
+                Log.w(TAG, "process failure arrived after observer shutdown", error);
+            }
             try {
                 DesktopAutomationEventJournal.record(
                         "process",
-                        type == DesktopProcessFailure.ANR ? "anr" : "crash",
+                        failure.type == DesktopProcessFailure.ANR ? "anr" : "crash",
                         false,
-                        processName,
-                        new org.json.JSONObject()
-                                .put("process", processName)
-                                .put("pid", pid)
-                                .put("taskId", taskId)
-                                .put("displayId", displayId)
-                                .put("windowingMode", windowingMode)
-                                .put("topActivity", topActivity)
-                                .put("reason", reason));
+                        failure.processName,
+                        failure.summary());
             } catch (org.json.JSONException ignored) {
                 DesktopAutomationEventJournal.record(
                         "process",
-                        type == DesktopProcessFailure.ANR ? "anr" : "crash",
+                        failure.type == DesktopProcessFailure.ANR ? "anr" : "crash",
                         false,
-                        processName);
+                        failure.processName);
             }
         });
     }
@@ -1261,24 +1239,8 @@ final class DesktopTaskWatcher {
 
         @Override
         public void onDesktopProcessFailure(
-                final int type,
-                final String processName,
-                final int pid,
-                final int taskId,
-                final int displayId,
-                final int windowingMode,
-                final String topActivity,
-                final String reason) throws RemoteException {
-            mOwner.onDesktopProcessFailure(
-                    mGeneration,
-                    type,
-                    processName,
-                    pid,
-                    taskId,
-                    displayId,
-                    windowingMode,
-                    topActivity,
-                    reason);
+                final DesktopProcessFailureEvent failure) throws RemoteException {
+            mOwner.onDesktopProcessFailure(mGeneration, failure);
         }
 
         @Override

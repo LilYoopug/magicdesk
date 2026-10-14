@@ -861,7 +861,7 @@
     <string name="settings_mcp_status_waiting">有効。%1$s で MagicDesk の実行環境を待機中</string>
     <string name="settings_mcp_status_disabled">無効。エンドポイント %1$s</string>
     <string name="settings_save_failed">MagicDesk の設定を保存できませんでした</string>
-    <string name="action_app_presentation_settings">アプリの設定</string>
+    <string name="action_app_presentation_settings">アプリの表示倍率</string>
     <string name="app_presentation_title">アプリの設定</string>
     <string name="app_presentation_profiles_title">アプリのプロファイル</string>
     <string name="app_presentation_profiles_empty">カスタムアプリプロファイルがありません</string>

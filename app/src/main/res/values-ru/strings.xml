@@ -891,7 +891,7 @@
     <string name="settings_mcp_status_waiting">Включён; ожидание среды MagicDesk на %1$s</string>
     <string name="settings_mcp_status_disabled">Отключён; адрес %1$s</string>
     <string name="settings_save_failed">Не удалось сохранить настройки MagicDesk</string>
-    <string name="action_app_presentation_settings">Настройки приложений</string>
+    <string name="action_app_presentation_settings">Масштаб приложения</string>
     <string name="app_presentation_title">Настройки приложения</string>
     <string name="app_presentation_profiles_title">Профили приложений</string>
     <string name="app_presentation_profiles_empty">Нет пользовательских профилей приложений</string>

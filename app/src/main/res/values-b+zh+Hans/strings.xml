@@ -861,7 +861,7 @@
     <string name="settings_mcp_status_waiting">已启用；等待 MagicDesk 运行环境，地址 %1$s</string>
     <string name="settings_mcp_status_disabled">已禁用；端点 %1$s</string>
     <string name="settings_save_failed">无法保存 MagicDesk 设置</string>
-    <string name="action_app_presentation_settings">应用设置</string>
+    <string name="action_app_presentation_settings">应用缩放</string>
     <string name="app_presentation_title">应用设置</string>
     <string name="app_presentation_profiles_title">应用配置</string>
     <string name="app_presentation_profiles_empty">没有自定义应用配置</string>

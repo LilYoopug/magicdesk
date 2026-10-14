@@ -438,7 +438,7 @@ platform/SoC capabilities.
 **System/native** relinquishes MagicDesk's forced output selection.
 
 Application-specific interface scale is independent of display density.
-Open the app's context menu in Desktop, choose **Application settings**, then
+Open the app's context menu in Desktop, choose **App scale**, then
 **Custom** and adjust **Interface scale** (50%-200%). Lower values make its UI
 more compact; higher values enlarge it. **System** restores inherited density.
 Use **Settings > Application profiles** to revisit saved custom profiles.

@@ -2,6 +2,7 @@ package io.github.mekhontsev.magicdesk;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
@@ -53,5 +54,30 @@ public final class DesktopProcessFailureTest {
             result.append(character);
         }
         return result.toString();
+    }
+
+    @Test
+    public void carriesBoundedMultilineEvidenceAndVersion() throws Exception {
+        var failure = new DesktopProcessFailureEvent(1, "com.example:renderer", 12,
+                42, 10, 4, 5, "com.example/.Main", "IndexOutOfBoundsException",
+                "index=7", "at example.Main.go(Main.java:1)\nCaused by: test\n" + "x".repeat(20_000));
+        assertEquals("com.example", failure.packageName());
+        assertTrue(failure.stackTrace.length() < 12_100);
+        assertTrue(failure.stackTrace.endsWith("[truncated]"));
+        String detail = failure.technicalDetail("1.2 (12)");
+        assertTrue(detail.contains("packageVersion=1.2 (12)"));
+        assertTrue(detail.contains("user=10"));
+        assertTrue(detail.contains("\n Caused by: test"));
+        assertTrue(failure.summary().getBoolean("stackCaptured"));
+        assertFalse(failure.summary().has("stackTrace"));
+    }
+
+    @Test
+    public void missingStackRemainsMissingAndTruncationPreservesUnicode() {
+        var failure = new DesktopProcessFailureEvent(1, null, 1, 2, -1, 0, 5,
+                null, null, null, null);
+        assertEquals("", failure.stackTrace);
+        assertFalse(failure.technicalDetail("unavailable").contains("stack:"));
+        assertEquals("a\n[truncated]", DesktopProcessFailureEvent.bounded("a\uD83D\uDE00b", 2));
     }
 }

@@ -1,6 +1,7 @@
 package io.github.mekhontsev.magicdesk;
 
 import io.github.mekhontsev.magicdesk.FrameworkTaskSnapshot;
+import io.github.mekhontsev.magicdesk.DesktopProcessFailureEvent;
 
 oneway interface ITaskObserverCallback {
     void onTasksChanged() = 1;
@@ -28,10 +29,7 @@ oneway interface ITaskObserverCallback {
     void onTaskActivityModeCorrected(
         int taskId, String activityName, String restoredMode) = 11;
 
-    void onDesktopProcessFailure(
-        int type, String processName, int pid, int taskId,
-        int displayId, int windowingMode, String topActivity,
-        String reason) = 12;
+    void onDesktopProcessFailure(in DesktopProcessFailureEvent failure) = 12;
 
     void onDesktopTaskOwnershipChanged(
         int displayId, in int[] taskIds) = 13;

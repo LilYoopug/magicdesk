@@ -881,7 +881,7 @@
     <string name="settings_mcp_status_waiting">Ativado; aguardando o ambiente MagicDesk em %1$s</string>
     <string name="settings_mcp_status_disabled">Desativado; endpoint %1$s</string>
     <string name="settings_save_failed">Não foi possível salvar as configurações do MagicDesk</string>
-    <string name="action_app_presentation_settings">Configurações de aplicativos</string>
+    <string name="action_app_presentation_settings">Escala do aplicativo</string>
     <string name="app_presentation_title">Configurações de aplicativos</string>
     <string name="app_presentation_profiles_title">Perfis de aplicativos</string>
     <string name="app_presentation_profiles_empty">Nenhum perfil personalizado de aplicativo</string>

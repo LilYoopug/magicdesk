@@ -881,7 +881,7 @@
     <string name="settings_mcp_status_waiting">Activé ; en attente de l\'environnement MagicDesk sur %1$s</string>
     <string name="settings_mcp_status_disabled">Désactivé ; adresse %1$s</string>
     <string name="settings_save_failed">Impossible d\'enregistrer les paramètres de MagicDesk</string>
-    <string name="action_app_presentation_settings">Paramètres des applications</string>
+    <string name="action_app_presentation_settings">Échelle de l’application</string>
     <string name="app_presentation_title">Paramètres des applications</string>
     <string name="app_presentation_profiles_title">Profils d\'applications</string>
     <string name="app_presentation_profiles_empty">Aucun profil d\'application personnalisé</string>

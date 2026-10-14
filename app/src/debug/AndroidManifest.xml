@@ -1,5 +1,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application>
+        <activity
+            android:name=".DebugCrashActivity"
+            android:label="Diagnostic crash fixture"
+            android:exported="true"
+            android:permission="android.permission.MANAGE_ACTIVITY_TASKS"
+            android:process=":diagnostic-crash"
+            android:taskAffinity="io.github.mekhontsev.magicdesk.debug.crash" />
         <service android:name=".HostedFixtureIme" android:exported="true"
             android:permission="android.permission.BIND_INPUT_METHOD" android:label="MagicDesk IME verification">
             <intent-filter><action android:name="android.view.InputMethod" /></intent-filter>

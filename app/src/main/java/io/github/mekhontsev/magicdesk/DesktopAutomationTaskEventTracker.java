@@ -69,9 +69,16 @@ final class DesktopAutomationTaskEventTracker {
                                 next.windowingMode);
                 record("window_mode_changed", taskId, next.toJson()
                         .put("previousWindowingMode", previous.windowingMode)
+                        .put("previousBounds", rectJson(previous.bounds))
+                        .put("previousTopActivity", previous.topActivity)
+                        .put("previousDensityDpi", previous.densityDpi)
+                        .put("previousVisible", previous.visible)
+                        .put("previousActive", previous.active)
                         .put("transitionSource", provenance.source.wireName)
+                        .put("transitionEvidence", provenance.evidence())
                         .put("transitionDetail", provenance.detail)
-                        .put("transitionAgeMs", provenance.ageMillis),
+                        .put("transitionAgeMs", provenance.ageMillis)
+                        .put("lastImmersive", DesktopWindowTransitionProvenance.lastImmersive(taskId)),
                         previous.windowingMode + " -> " + next.windowingMode);
             }
             if (!sameBounds(previous.bounds, next.bounds)) {
@@ -97,6 +104,7 @@ final class DesktopAutomationTaskEventTracker {
             if (!current.containsKey(entry.getKey())) {
                 record("removed", entry.getKey().intValue(),
                         entry.getValue().toJson(), entry.getValue().packageName);
+                DesktopWindowTransitionProvenance.forgetTask(entry.getKey());
             }
         }
         mPrevious.clear();
@@ -133,7 +141,11 @@ final class DesktopAutomationTaskEventTracker {
         }
     }
 
-    private static JSONObject rectJson(final Rect rect) throws JSONException {
+    static JSONObject describe(final TaskRepository.TaskEntry task) throws JSONException {
+        return new State(task).toJson();
+    }
+
+    static JSONObject rectJson(final Rect rect) throws JSONException {
         return new JSONObject()
                 .put("left", rect.left)
                 .put("top", rect.top)
@@ -150,6 +162,8 @@ final class DesktopAutomationTaskEventTracker {
 
     private static final class State {
         final int displayId;
+        final int densityDpi;
+        final int userId;
         final String windowingMode;
         final Rect bounds;
         final String packageName;
@@ -159,6 +173,8 @@ final class DesktopAutomationTaskEventTracker {
 
         State(final TaskRepository.TaskEntry task) {
             displayId = task.displayId;
+            densityDpi = task.densityDpi;
+            userId = task.userId;
             windowingMode = task.windowingMode;
             bounds = new Rect(task.bounds);
             packageName = task.packageName;
@@ -171,6 +187,8 @@ final class DesktopAutomationTaskEventTracker {
         JSONObject toJson() throws JSONException {
             return new JSONObject()
                     .put("displayId", displayId)
+                    .put("densityDpi", densityDpi)
+                    .put("userId", userId)
                     .put("windowingMode", windowingMode)
                     .put("mode", windowingMode)
                     .put("bounds", rectJson(bounds))

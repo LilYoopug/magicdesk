@@ -283,7 +283,9 @@ final class StartMenuContent {
                             LinearLayout.LayoutParams.WRAP_CONTENT);
             searchParams.setMargins(0, dp(10), 0, 0);
             mContent.addView(mSearchRow, searchParams);
-            mContent.addView(mLaunchControls.view(), new LinearLayout.LayoutParams(-1, dp(52)));
+            final var launchParams = new LinearLayout.LayoutParams(-1, dp(52));
+            launchParams.topMargin = dp(8);
+            mContent.addView(mLaunchControls.view(), launchParams);
         }
 
         mBody = new LinearLayout(mActivity);

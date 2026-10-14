@@ -871,7 +871,7 @@
     <string name="settings_mcp_status_waiting">Aktiviert; wartet auf MagicDesk-Laufzeit unter %1$s</string>
     <string name="settings_mcp_status_disabled">Deaktiviert; Endpunkt %1$s</string>
     <string name="settings_save_failed">MagicDesk-Einstellungen konnten nicht gespeichert werden</string>
-    <string name="action_app_presentation_settings">Anwendungseinstellungen</string>
+    <string name="action_app_presentation_settings">App-Skalierung</string>
     <string name="app_presentation_title">Anwendungseinstellungen</string>
     <string name="app_presentation_profiles_title">Anwendungsprofile</string>
     <string name="app_presentation_profiles_empty">Keine eigenen Anwendungsprofile</string>

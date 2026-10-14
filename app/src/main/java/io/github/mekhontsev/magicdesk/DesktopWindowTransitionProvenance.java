@@ -5,6 +5,7 @@ import org.json.JSONObject;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.function.LongSupplier;
 
 /** Correlates existing transition callbacks without adding background work. */
 final class DesktopWindowTransitionProvenance {
@@ -12,7 +13,7 @@ final class DesktopWindowTransitionProvenance {
         MAGICDESK_COMMAND("magicdesk-command"),
         ACTIVITY_HANDOFF_GUARD("activity-handoff-guard"),
         APPLICATION_REQUEST("application-request"),
-        FRAMEWORK_EXTERNAL("framework-external"),
+        UNATTRIBUTED("unattributed"),
         UNKNOWN("unknown");
 
         final String wireName;
@@ -26,11 +27,13 @@ final class DesktopWindowTransitionProvenance {
     private static final long MAX_CAUSE_AGE_MILLIS = 15_000L;
     private static final LinkedHashMap<Integer, Cause> PENDING =
             new LinkedHashMap<>();
+    private static final LinkedHashMap<Integer, JSONObject> IMMERSIVE = new LinkedHashMap<>();
     private static final long[] COUNTS = new long[Source.values().length];
 
     private static Source sLastSource = Source.UNKNOWN;
     private static String sLastDetail = "none";
     private static int sLastTaskId = -1;
+    private static LongSupplier sUptimeMillis = android.os.SystemClock::uptimeMillis;
 
     private DesktopWindowTransitionProvenance() {
     }
@@ -73,7 +76,7 @@ final class DesktopWindowTransitionProvenance {
             final int taskId,
             final String previousMode,
             final String currentMode) {
-        final long now = System.currentTimeMillis();
+        final long now = sUptimeMillis.getAsLong();
         final Cause cause = PENDING.remove(Integer.valueOf(taskId));
         final Source source;
         final String detail;
@@ -85,7 +88,7 @@ final class DesktopWindowTransitionProvenance {
             detail = cause.detail;
             ageMillis = Math.max(0L, now - cause.timestampMillis);
         } else if (isKnownMode(previousMode) && isKnownMode(currentMode)) {
-            source = Source.FRAMEWORK_EXTERNAL;
+            source = Source.UNATTRIBUTED;
             detail = cause == null
                     ? "no-matching-magicdesk-cause"
                     : "unmatched-cause/" + cause.detail;
@@ -111,8 +114,8 @@ final class DesktopWindowTransitionProvenance {
                 .append(COUNTS[Source.ACTIVITY_HANDOFF_GUARD.ordinal()])
                 .append(", application=")
                 .append(COUNTS[Source.APPLICATION_REQUEST.ordinal()])
-                .append(", frameworkExternal=")
-                .append(COUNTS[Source.FRAMEWORK_EXTERNAL.ordinal()])
+                .append(", unattributed=")
+                .append(COUNTS[Source.UNATTRIBUTED.ordinal()])
                 .append(", unknown=")
                 .append(COUNTS[Source.UNKNOWN.ordinal()])
                 .append('\n')
@@ -131,8 +134,8 @@ final class DesktopWindowTransitionProvenance {
                         COUNTS[Source.ACTIVITY_HANDOFF_GUARD.ordinal()])
                 .put("applicationRequest",
                         COUNTS[Source.APPLICATION_REQUEST.ordinal()])
-                .put("frameworkExternal",
-                        COUNTS[Source.FRAMEWORK_EXTERNAL.ordinal()])
+                .put("unattributed",
+                        COUNTS[Source.UNATTRIBUTED.ordinal()])
                 .put("unknown", COUNTS[Source.UNKNOWN.ordinal()])
                 .put("lastSource", sLastSource.wireName)
                 .put("lastTaskId", sLastTaskId)
@@ -140,7 +143,13 @@ final class DesktopWindowTransitionProvenance {
     }
 
     static synchronized void resetForTests() {
+        resetForTests(android.os.SystemClock::uptimeMillis);
+    }
+
+    static synchronized void resetForTests(final LongSupplier uptimeMillis) {
+        sUptimeMillis = uptimeMillis;
         PENDING.clear();
+        IMMERSIVE.clear();
         for (int index = 0; index < COUNTS.length; index++) {
             COUNTS[index] = 0L;
         }
@@ -164,7 +173,7 @@ final class DesktopWindowTransitionProvenance {
                         source,
                         expectedMode,
                         clean(detail),
-                        System.currentTimeMillis()));
+                        sUptimeMillis.getAsLong()));
         while (PENDING.size() > MAX_PENDING_TASKS) {
             final Map.Entry<Integer, Cause> oldest =
                     PENDING.entrySet().iterator().next();
@@ -183,6 +192,51 @@ final class DesktopWindowTransitionProvenance {
             default:
                 return null;
         }
+    }
+
+    static synchronized void forgetTask(int taskId) {
+        PENDING.remove(taskId);
+        IMMERSIVE.remove(taskId);
+    }
+
+    static synchronized void rejectCommand(int taskId) { PENDING.remove(taskId); }
+
+    static synchronized void noteImmersiveObservation(int taskId, boolean requesting,
+            boolean initial, boolean foreground, String decision, DesktopTaskRuntimeState state) {
+        try {
+            JSONObject data = new JSONObject().put("taskId", taskId)
+                    .put("requesting", requesting).put("initialSample", initial)
+                    .put("foreground", foreground).put("decision", decision)
+                    .put("effectiveRequest", state.immersiveRequested() == null
+                            ? JSONObject.NULL : state.immersiveRequested())
+                    .put("manualOverride", state.hasManualImmersiveOverride())
+                    .put("appRequestedFullscreen", state.isAppRequestedFullscreen())
+                    .put("observedUptimeMillis", sUptimeMillis.getAsLong());
+            IMMERSIVE.remove(taskId);
+            IMMERSIVE.put(taskId, data);
+            while (IMMERSIVE.size() > MAX_PENDING_TASKS) IMMERSIVE.remove(IMMERSIVE.keySet().iterator().next());
+            DesktopAutomationEventJournal.record("task", "immersive_observed", true, decision, data);
+        } catch (JSONException ignored) { }
+    }
+
+    static synchronized JSONObject lastImmersive(int taskId) throws JSONException {
+        JSONObject retained = IMMERSIVE.get(taskId);
+        if (retained == null) return null;
+        return new JSONObject(retained.toString()).put("ageMillis",
+                Math.max(0L, sUptimeMillis.getAsLong()
+                        - retained.getLong("observedUptimeMillis")));
+    }
+
+    static void noteDecision(TaskRepository.TaskEntry task, DesktopWindowTransitionRequest request) {
+        try {
+            JSONObject data = DesktopAutomationTaskEventTracker.describe(task)
+                    .put("taskId", task.taskId).put("operation", request.operation.wireName)
+                    .put("origin", request.origin).put("targetDensityDpi", request.densityDpi)
+                    .put("requestedBounds", request.bounds() == null ? JSONObject.NULL
+                            : DesktopAutomationTaskEventTracker.rectJson(request.bounds()))
+                    .put("lastImmersive", lastImmersive(task.taskId));
+            DesktopAutomationEventJournal.record("task", "transition_requested", true, request.origin, data);
+        } catch (JSONException ignored) { }
     }
 
     private static String normalizedMode(final String mode) {
@@ -204,6 +258,14 @@ final class DesktopWindowTransitionProvenance {
         final Source source;
         final String detail;
         final long ageMillis;
+
+        String evidence() {
+            return switch (source) {
+                case MAGICDESK_COMMAND, ACTIVITY_HANDOFF_GUARD -> "matching-recorded-operation";
+                case APPLICATION_REQUEST -> "matching-observed-request";
+                default -> "source-not-established";
+            };
+        }
 
         Observation(
                 final Source observedSource,
