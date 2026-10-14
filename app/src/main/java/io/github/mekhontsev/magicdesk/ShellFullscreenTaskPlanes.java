@@ -313,15 +313,19 @@ final class ShellFullscreenTaskPlanes implements AutoCloseable {
         final Integer home = Integer.valueOf(homeRootTaskId);
         final Integer target = Integer.valueOf(entering.taskId);
         if (!before.contains(home) || !before.contains(target)) return current;
-        // Recognize only WMShell's exact HOME-then-target promotion. Different
-        // roots or a later user focus/order change must retain their live order.
+        // Recognize only WMShell's exact HOME-then-target promotion within the
+        // known foreground. The bounded observer may omit old background roots;
+        // retain that deeper prefix verbatim, never an intervening unknown root.
         final List<Integer> nativeExit = new ArrayList<>(before);
         nativeExit.remove(home);
         nativeExit.remove(target);
         nativeExit.add(home);
         nativeExit.add(target);
-        if (!nativeExit.equals(current)) return current;
-        final List<Integer> retained = new ArrayList<>(before);
+        final int backgroundCount = current.size() - nativeExit.size();
+        if (backgroundCount < 0
+                || !current.subList(backgroundCount, current.size()).equals(nativeExit)) return current;
+        final List<Integer> retained = new ArrayList<>(current.subList(0, backgroundCount));
+        retained.addAll(before);
         retained.remove(target);
         retained.add(target);
         return retained;

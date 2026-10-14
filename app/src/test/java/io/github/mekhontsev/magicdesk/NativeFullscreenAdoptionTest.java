@@ -17,6 +17,32 @@ public final class NativeFullscreenAdoptionTest {
     }
 
     @Test
+    public void boundedHistoryRetainsKnownPeersAboveHomeWithoutMovingUnobservedBackground() throws Exception {
+        verify("""
+                FrameworkTaskSnapshot windowed = task(42, 1);
+                windowed.windowingMode = 5;
+                f.previousTasks = List.of(windowed, task(50, 1), task(10, 1), task(60, 1));
+                f.tasks = List.of(f.target, task(10, 1), task(50, 1), task(60, 1), task(70, 1), task(80, 1));
+                f.adopt();
+                check(f.order.equals(List.of(80, 70, 60, 10, 50, 100)),
+                        "truncated background history concealed a known visible peer");
+                """);
+    }
+
+    @Test
+    public void unobservedInterveningRootDoesNotReplayOldHomePosition() throws Exception {
+        verify("""
+                FrameworkTaskSnapshot windowed = task(42, 1);
+                windowed.windowingMode = 5;
+                f.previousTasks = List.of(windowed, task(50, 1), task(10, 1), task(60, 1));
+                f.tasks = List.of(f.target, task(10, 1), task(70, 1), task(50, 1), task(60, 1));
+                f.adopt();
+                check(f.order.equals(List.of(60, 50, 70, 10, 100)),
+                        "unobserved intervening root was reordered");
+                """);
+    }
+
+    @Test
     public void laterPeerReorderingIsNotOverwritten() throws Exception {
         verify("""
                 FrameworkTaskSnapshot windowed = task(42, 1);

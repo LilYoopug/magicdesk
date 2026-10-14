@@ -109,6 +109,10 @@ HOME's preceding position in the same transaction, keeping visible freeform
 peers above it and concealed tasks below it. Different roots, reordered peers
 or changed foreground selection retain their live order; no later focus repair
 replays the snapshot.
+The bounded preceding snapshot may omit old background roots. A deeper prefix
+present only in the live order is preserved verbatim; the entire known foreground
+must still match the native HOME-then-target promotion. Missing known roots or
+unknown roots interleaved with that foreground reject restoration of the old order.
 HOME's position comes from its typed root identity, which can differ from the
 registered HOME Activity's task ID. An ownership failure is reported without
 discarding the observed mode event or its captured caption source, so caption
