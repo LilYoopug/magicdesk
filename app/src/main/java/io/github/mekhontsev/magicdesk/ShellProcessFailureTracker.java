@@ -151,6 +151,13 @@ final class ShellProcessFailureTracker implements
         if (packageName.isEmpty()) {
             return null;
         }
+        // Several independent UI processes can share a package. Prefer the
+        // process identity already published by the task observer; no new query.
+        for (final TaskContext task : mTasks) {
+            if (processName.equals(task.topProcessName)) {
+                return task;
+            }
+        }
         TaskContext rootMatch = null;
         for (final TaskContext task : mTasks) {
             if (packageName.equals(task.topPackage)) {
@@ -200,6 +207,7 @@ final class ShellProcessFailureTracker implements
         final int windowingMode;
         final String packageName;
         final String topPackage;
+        final String topProcessName;
         final String topActivity;
 
         TaskContext(
@@ -211,6 +219,7 @@ final class ShellProcessFailureTracker implements
             windowingMode = task.windowingMode;
             packageName = task.packageName;
             topPackage = task.topPackage;
+            topProcessName = task.topProcessName;
             final ComponentName component = task.topComponent;
             topActivity = component == null
                     ? "" : component.flattenToShortString();

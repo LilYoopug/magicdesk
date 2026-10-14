@@ -9,6 +9,7 @@ import android.graphics.Rect;
 import org.junit.Test;
 
 import java.util.Collections;
+import java.util.List;
 
 public final class ShellProcessFailureTrackerTest {
     private static final int DISPLAY_ID = 2;
@@ -65,6 +66,22 @@ public final class ShellProcessFailureTrackerTest {
         tracker.onProcessCrashed("com.example.other", 123, "Failure", "", "");
 
         assertNull(listener.processName);
+    }
+
+    @Test
+    public void matchesExactUiProcessBeforeEarlierWindowFromTheSamePackage() {
+        final RecordingListener listener = new RecordingListener();
+        final ShellProcessFailureTracker tracker = emptyTracker(listener);
+        tracker.configure(DISPLAY_ID);
+        tracker.observeTasks(DISPLAY_ID, List.of(
+                task(APP_PACKAGE, APP_PACKAGE, 41, APP_PACKAGE),
+                task(APP_PACKAGE, APP_PACKAGE, 42, APP_PACKAGE + ":editor")));
+        tracker.onProcessCrashed(APP_PACKAGE + ":editor", 123, "Failure", "", "stack");
+        assertEquals(42, listener.taskId);
+        tracker.onProcessEarlyNotResponding(APP_PACKAGE + ":editor", 123, "ANR");
+        tracker.observeTasks(DISPLAY_ID, Collections.emptyList());
+        tracker.onProcessNotResponding(APP_PACKAGE + ":editor", 123);
+        assertEquals(42, listener.taskId);
     }
 
     @Test
@@ -128,10 +145,16 @@ public final class ShellProcessFailureTrackerTest {
     private static FrameworkTaskSnapshot task(
             final String packageName,
             final String topPackage) {
+        return task(packageName, topPackage, TASK_ID, null);
+    }
+
+    private static FrameworkTaskSnapshot task(
+            final String packageName, final String topPackage,
+            final int taskId, final String processName) {
         return new FrameworkTaskSnapshot(
                 null,
-                TASK_ID,
-                TASK_ID,
+                taskId,
+                taskId,
                 DISPLAY_ID,
                 1,
                 WINDOWING_MODE_FREEFORM,
@@ -143,7 +166,7 @@ public final class ShellProcessFailureTrackerTest {
                 packageName,
                 topPackage,
                 -1,
-                null,
+                processName,
                 new Rect(10, 20, 800, 600),
                 true,
                 false,
