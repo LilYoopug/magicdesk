@@ -11,6 +11,12 @@ version_code=$2
 project_dir=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 properties="$project_dir/gradle.properties"
 
+branch=$(git -C "$project_dir" symbolic-ref --quiet --short HEAD || true)
+if [ "$branch" != develop ]; then
+    printf 'Start the next version on develop, not %s.\n' "${branch:-detached HEAD}" >&2
+    exit 1
+fi
+
 if ! printf '%s\n' "$version" \
         | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
     printf 'Version must use major.minor.patch format: %s\n' "$version" >&2

@@ -171,6 +171,7 @@ the script only after a successful transfer, without changing installed Linux
 environments. Under shell UID 2000, `~` is `/data/local/tmp/magicdesk/`; root
 consoles use `/data/local/tmp/magicdesk-root/home`. Download before executing
 so the script can read your answers from the terminal; do not pipe it into `sh`.
+For unreleased installer changes, use `develop` with the development APK.
 For the script shipped with a specific release, replace `main` with its tag,
 for example `v2.0.2`.
 

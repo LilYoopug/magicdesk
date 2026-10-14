@@ -35,7 +35,8 @@ that a coding agent or maintainer can turn into fixtures and capability probes.
 
 Use this track when the device owner can clone and build the repository. Follow
 the evidence-only steps first, then reproduce the failure on the current
-`main` branch before changing code.
+`develop` branch before changing code. Record the commit and compare with the
+released build when investigating a regression.
 
 The AI should read these files in order:
 
@@ -249,7 +250,7 @@ Observed result:
 Available test targets:
 phone=..., simulated=..., wired=..., wireless=...
 
-First establish the current-main baseline and classify the owning architecture
+First establish the current-develop baseline and classify the owning architecture
 boundary. Do not change code until the failure is reproduced or the missing
 evidence is identified. Keep one APK and avoid model checks, fixed delays,
 coordinate-based runtime actions, and device-specific forks.

@@ -4,6 +4,44 @@ MagicDesk uses Gradle as its project definition. Open the repository root in
 Android Studio, IntelliJ IDEA, or another Gradle-aware editor; do not open the
 `app` directory as a standalone project.
 
+## Branches And Releases
+
+The repository uses two permanent branches:
+
+- `main` is the verified, release-ready line and remains the default branch.
+- `develop` is the integration line for everyday changes and external pull
+  requests. Base contributions on `develop` and select it as the PR target.
+
+Maintainers can commit directly to `develop`; per-task branches are not required.
+Keep changes reviewable and separate no-functional-change (NFC) refactoring from
+new behavior. CI verifies both branches and their pull requests, including
+documentation-only changes so required checks always complete. Linux `build`
+and `windows-smoke` checks are required before updating `main`. Both branches
+reject force pushes and deletion; no second reviewer is required.
+
+Only a successful `develop` push updates the release-signed development APK.
+The rolling prerelease keeps its existing `development` tag and download URL;
+it is not a third branch. PR builds do not receive signing credentials. Changes
+must pass both Linux and Windows jobs before the development APK is published.
+
+To release, merge `develop` into `main` with an ordinary merge, verify that exact
+`main` commit in CI and complete the device checks required by the changed
+subsystems. Tag it `vVERSION`, matching `magicDeskVersionName`. The release
+workflow checks tag/version identity, ancestry in `main`, versionCode and a
+successful main CI run for that exact commit before signing. Manual signed
+release builds must also run on `main`.
+
+After publishing, merge `main` back into `develop`, then run
+`scripts/start-next-version.sh VERSION VERSION_CODE` there and publish the
+version-bump commit. `main` keeps the released version; `develop` must have a
+newer version and versionCode. Ordinary pushes do not bump either value.
+CI adds a unique suffix to signed branch artifacts.
+
+Urgent fixes may start on `main`, but must be merged back into `develop`.
+Preserve common ancestry between permanent branches: do not squash their merges,
+rewrite published history, or move numbered release tags. The stable installer
+URL stays on `main`; use the script from `develop` when testing unreleased changes.
+
 ## Compatibility Direction
 
 The APK minimum is Android 14 / API 34; managed Desktop requires Android 15 /

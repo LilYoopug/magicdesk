@@ -31,7 +31,7 @@ including Samsung DeX, with Linux graphical applications and Termux terminals.
 [Telegram](https://t.me/magicdesk_android)** |
 [Support bot](https://t.me/MagicDeskSupportBot)
 
-This documentation describes the current development code. The stable APK may
+This documentation describes the code in the selected branch. The stable APK may
 not yet include every feature below.
 
 **[Watch the demo on YouTube (1080p60)](https://youtu.be/zAHU_0M1ShU)**:
@@ -725,11 +725,14 @@ limitations apply; the rest of this README may also describe features still in
 development.
 
 **[Development APK](https://github.com/mekhontsev/magicdesk/releases/download/development/MagicDesk-development.apk)**
-is the rolling build of `main`, published after its required CI checks pass.
+is the rolling build of `develop`, published after its required CI checks pass.
 Use it to try unreleased features and fixes before the next numbered release.
 It uses the regular MagicDesk package and release signing certificate, not the
 separate MagicDeskTest identity, and may be less stable than a numbered release.
 Include its full version from Diagnostics when reporting a problem.
+
+`main` is the verified release line; ongoing work and external pull requests use
+`develop`. See [the contribution workflow](CONTRIBUTING.md#branches-and-releases).
 
 ## Requirements And Setup
 

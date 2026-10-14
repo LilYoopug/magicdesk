@@ -4,6 +4,21 @@ Re-read this file after context compaction or session recovery before continuing
 repository work. Preserve unrelated uncommitted changes; Git history changes
 require the user's authorization.
 
+## Branch Workflow
+
+Use two permanent branches: `develop` for daily work and external pull requests,
+and `main` for verified release-ready code. No per-task branch is required.
+Preserve shared ancestry with ordinary merges between these branches; do not
+squash or rebase their published history. A hotfix on `main` must be merged back
+into `develop`. Keep NFC refactoring separate from behavior changes in commits
+and verification. Creating commits, publishing changes and merging PRs still
+require the user's authorization.
+
+CI verifies both branches and PRs targeting either one. Only successful pushes
+to `develop` update the rolling `development` prerelease; that tag is not a
+branch. `main` requires the Linux `build` and `windows-smoke` checks. `develop`
+accepts direct commits; failed CI prevents publication, not further fixes.
+
 ## Device Support Work
 
 The MagicDesk APK targets Android 14 / API 34 and newer. Managed Desktop
@@ -91,7 +106,7 @@ read `CONTRIBUTING.md`, `docs/ai-assisted-device-porting.md`, and the relevant
 sections of `docs/architecture.md`, `docs/compatibility.md`, and
 `docs/automation.md`.
 
-Establish a current-`main` baseline from a complete compatibility report and an
+Establish a current-`develop` baseline from a complete compatibility report and an
 exact reproduction before editing. Classify the owning boundary first. Keep one
 APK and one codebase: prefer shared Android behavior and runtime capabilities;
 isolate genuine firmware behavior in a focused `PlatformExtension`, SoC
@@ -207,13 +222,17 @@ masking Android 15 semantics on a newer phone does not emulate Android 14.
 When the user asks to publish a MagicDesk release, treat the release tag and
 the next development cycle as one task.
 
-1. Verify that the tag matches `magicDeskVersionName` in `gradle.properties`.
-2. Build, test, tag, push, and verify the signed GitHub release.
+1. Merge the verified `develop` state into `main` without squashing. Verify the
+   resulting `main` commit in CI and run the required device checks.
+2. Verify that the tag matches `magicDeskVersionName` in `gradle.properties`,
+   then tag that `main` commit, push, and verify the signed GitHub release.
 3. Choose the next development version with the user if it was not already
    specified.
-4. Run `scripts/start-next-version.sh VERSION VERSION_CODE`, commit the version
-   change, and push it.
+4. Merge `main` back into `develop`, run
+   `scripts/start-next-version.sh VERSION VERSION_CODE` on `develop`, commit
+   the version change, and push it.
 
-Do not report the release task complete while the version on `main` still
-matches the newest release tag. Do not increment the version for ordinary
-pushes; CI adds a unique development-build suffix automatically.
+`main` retains the released version. Do not report the release task complete
+until `develop` has the next version and a higher versionCode. Do not increment
+the version for ordinary pushes; CI adds a unique development-build suffix
+automatically.
