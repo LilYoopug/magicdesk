@@ -433,8 +433,9 @@ def main():
                   "PASS task event selection")
             check("live task event collection", root + "/libmagicdesk_guest_task_wait_live.so",
                   "PASS live wait collection")
-            check("native event fairness", root + "/libmagicdesk_guest_event_fairness.so",
-                  "PASS worker completions under continuous ptrace stops")
+            for workload in ("", "descriptors"):
+                check("native event fairness " + workload, root + "/libmagicdesk_guest_event_fairness.so " + workload,
+                      "PASS worker completions under continuous ptrace stops")
             check("event fairness source", "mkdir -p " + root + "/fair-source/bin " + root + "/fair-source/tmp")
             check("event fairness image", "cp " + root + "/libmagicdesk_guest_event_fairness.so " + root + "/fair-source/bin/test")
             check("event fairness access", "chmod 755 " + root + "/fair-source "
@@ -443,10 +444,11 @@ def main():
             check("event fairness import", root + "/libmagicdesk_guest_service.so --import "
                   + root + "/fair-source " + root + "/fair-store --preserve-ownership")
             for user in ("0:0", "1000:1000"):
-                check("guest event fairness " + user, "timeout -k 5 25 " + root
-                      + "/libmagicdesk_guest_run.so --user " + user + " --store "
-                      + root + "/fair-store --deadline-seconds 20 -- /bin/test",
-                      "PASS worker completions under continuous ptrace stops")
+                for workload in ("", "descriptors"):
+                    check("guest event fairness " + user + " " + workload, "timeout -k 5 25 " + root
+                          + "/libmagicdesk_guest_run.so --user " + user + " --store "
+                          + root + "/fair-store --deadline-seconds 20 -- /bin/test " + workload,
+                          "PASS worker completions under continuous ptrace stops")
             if args.case == "event-fairness":
                 return
         if args.case == "private-memory":

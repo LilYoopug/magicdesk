@@ -1,9 +1,11 @@
 #define _GNU_SOURCE
 #include <assert.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -15,7 +17,9 @@ static void expired(int signal) {
     atomic_store(state, 2);
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    int descriptors=argc==2 && !strcmp(argv[1],"descriptors");
+    assert(argc==1 || descriptors);
     enum { WORKERS = 16 };
     state = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     assert(state != MAP_FAILED);
@@ -37,8 +41,12 @@ int main(void) {
             close(gate[0]);
             alarm(10);
             while (!atomic_load(state)) {
-                uid_t real, effective, saved;
-                assert(!syscall(SYS_getresuid, &real, &effective, &saved));
+                if (descriptors) {
+                    assert(syscall(SYS_close,-1)==-1 && errno==EBADF);
+                } else {
+                    uid_t real, effective, saved;
+                    assert(!syscall(SYS_getresuid, &real, &effective, &saved));
+                }
             }
             _exit(0);
         }

@@ -96,7 +96,8 @@ GNU time's output resolution; do not infer precise ratios from those values.
 
 Use `--guest-statistics --modes guest` for a separately labelled diagnostic run
 with aggregate syscall/ptrace/stop counters, filesystem/SQLite elapsed costs,
-broker handling/delegation counts and supervisor/namespace-worker CPU usage.
+broker handling/delegation counts, supervisor readiness polls/blocking waits and
+supervisor/namespace-worker CPU usage.
 The worker's thread CPU is included in the supervisor process total; do not add
 them together. Clock sampling is enabled only in that diagnostic mode.
 Keep it separate from ordinary timing series. Frequency caps

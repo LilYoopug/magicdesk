@@ -179,6 +179,49 @@ static void syscall_test(void) {
     assert(entries >= 6 && exits == entries - 1 && opening == 1 && exiting == 1);
     assert(closing==2 && duplicating==1 && replacing==1 && controlling==2 && ranging==1);
 }
+static void syscall_edit_close_test(void) {
+    for (int detach=0;detach<2;++detach) {
+        pid_t child=fork(); assert(child>=0);
+        if (!child) {
+            int watched=(int)syscall(SYS_inotify_init1,O_NONBLOCK|O_CLOEXEC);
+            int file=open("/etc/passwd",O_RDONLY|O_CLOEXEC);
+            assert(watched>=0 && file>=0);
+            char path[64],before[128],after[128];
+            snprintf(path,sizeof(path),"/proc/self/fd/%d",watched);
+            ssize_t size=readlink(path,before,sizeof(before)); assert(size>0);
+            assert(!ptrace(PTRACE_TRACEME,0,0,0)); raise(SIGSTOP);
+            assert(!syscall(SYS_close,watched,file));
+            assert(fcntl(file,F_GETFD)==-1 && errno==EBADF);
+            assert(fcntl(watched,F_GETFD)==FD_CLOEXEC);
+            assert(readlink(path,after,sizeof(after))==size && !memcmp(before,after,(size_t)size));
+            assert(!close(watched)); _exit(0);
+        }
+        stop(child);
+        assert(!ptrace(PTRACE_SETOPTIONS,child,0,PTRACE_O_TRACESYSGOOD));
+        int edited=0;
+        /* EVENT_WAIT: exact syscall/exit stops; the runner bounds failed progress. */
+        for (;;) {
+            assert(!ptrace(PTRACE_SYSCALL,child,0,0));
+            int status; assert(waitpid(child,&status,__WALL)==child);
+            if (WIFEXITED(status)) { assert(!WEXITSTATUS(status) && edited); break; }
+            assert(WIFSTOPPED(status) && WSTOPSIG(status)==(SIGTRAP|0x80));
+            struct ptrace_syscall_info info={0};
+            assert(ptrace(PTRACE_GET_SYSCALL_INFO,child,sizeof(info),&info)>0);
+            if (!edited && info.op==PTRACE_SYSCALL_INFO_ENTRY && info.entry.nr==SYS_close) {
+                struct user_pt_regs regs;
+                struct iovec io={&regs,sizeof(regs)};
+                assert(!ptrace(PTRACE_GETREGSET,child,NT_PRSTATUS,&io));
+                assert(regs.regs[0]!=regs.regs[1]);
+                regs.regs[0]=regs.regs[1];
+                assert(!ptrace(PTRACE_SETREGSET,child,NT_PRSTATUS,&io));
+                edited=1;
+                if (detach) {
+                    assert(!ptrace(PTRACE_DETACH,child,0,0)); exited(child,0); break;
+                }
+            }
+        }
+    }
+}
 static void credential_transition_test(void) {
     assert(!getuid());
     for (unsigned detach=0;detach<2;++detach) {
@@ -468,6 +511,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "seize")) attach_test(1, 0);
     else if (!strcmp(argv[1], "trace-exit")) attach_test(1, 1);
     else if (!strcmp(argv[1], "syscall")) syscall_test();
+    else if (!strcmp(argv[1], "syscall-edit-close")) syscall_edit_close_test();
     else if (!strcmp(argv[1], "credential-transition")) credential_transition_test();
     else if (!strcmp(argv[1], "syscall-exec")) syscall_exec_test();
     else if (!strcmp(argv[1], "mixed")) mixed_test();

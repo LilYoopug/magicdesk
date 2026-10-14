@@ -80,6 +80,9 @@ Fork, unshare and exec prepare changes before native execution and publish only
 confirmed results. Native rejection preserves prior ownership.
 
 The event loop services ptrace, worker and descriptor completions together.
+Task and memory progress uses bounded event-count batches between readiness
+checks. An idle task queue enters the shared blocking wait immediately; its
+readiness dispatch also satisfies the next check. No timer delays accumulate work.
 Resource-specific queues avoid repeatedly scanning every guest thread. Readiness
 or completion events, not settling delays, resume work; cancellation and optional
 deadlines share exact tree cleanup. A request can outlive its caller, so task exit

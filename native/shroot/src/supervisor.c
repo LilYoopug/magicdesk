@@ -120,6 +120,7 @@ static struct md_interception_abi abi;
 static int diagnostics;
 struct interception_statistics {
     uint64_t ptrace_requests, unknown, native_seeks, stops;
+    uint64_t event_polls, event_waits;
     struct md_cost rpc;
     struct { uint64_t trace, notification; } calls[512];
 };
@@ -5654,6 +5655,8 @@ static pid_t deferred_event(int *status,struct rusage *usage) {
     return pid ? pid : task_action_execution ? 0 : md_task_quiesce_take(task_action_barrier,status,usage);
 }
 static pid_t wait_event(int *status, struct rusage *usage) {
+    enum { PROGRESS_BATCH=8 };
+    static unsigned progress_budget;
     for (;;) {
         memory_progress();
         task_action_schedule();
@@ -5662,12 +5665,18 @@ static pid_t wait_event(int *status, struct rusage *usage) {
             CHECK(!md_fs_worker_dispatch(filesystem)); fd_progress();
         }
         struct pollfd events[EVENT_SOURCES];
-        event_sources(events);
-        /* A continuously runnable tracee must not starve worker completions,
-         * socket readiness or cancellation. Service both sources each turn. */
-        long ready = md_event_poll(events, EVENT_SOURCES);
-        CHECK(ready >= 0);
-        if (ready) progress_events(events);
+        /* Bound task/memory progress so runnable work cannot starve other sources.
+         * No readiness is inferred: an empty task queue immediately enters the
+         * shared event wait, which also replenishes this event-count budget. */
+        if (!progress_budget) {
+            event_sources(events);
+            if (statistics) ++statistics->event_polls;
+            long ready = md_event_poll(events, EVENT_SOURCES);
+            CHECK(ready >= 0);
+            if (ready) progress_events(events);
+            progress_budget=PROGRESS_BATCH;
+        }
+        --progress_budget;
         /* Progress can return a borrowed stop without generating SIGCHLD.
          * Drain that local event before trusting the kernel's empty queue. */
         pid_t held=deferred_event(status,usage);
@@ -5687,6 +5696,7 @@ static pid_t wait_event(int *status, struct rusage *usage) {
         /* Dispatch may retire a source, notably bootstrap's listener on HUP.
          * A readiness snapshot cannot outlive its callbacks' descriptor owners. */
         event_sources(events);
+        if (statistics) ++statistics->event_waits;
         long outcome = md_event_wait(events, EVENT_SOURCES, bound);
         if (outcome==-ETIMEDOUT && bound==control_bound) {
             for (struct thread *t=threads;t;t=t->next) if (t->pid) control_progress(t);
@@ -5704,6 +5714,7 @@ static pid_t wait_event(int *status, struct rusage *usage) {
         }
         CHECK(outcome >= 0);
         progress_events(events);
+        progress_budget=PROGRESS_BATCH;
     }
 }
 enum memory_stage { MEMORY_WRITERS, MEMORY_WORKER, MEMORY_VALIDATE, MEMORY_MAP, MEMORY_COPY,
@@ -7150,6 +7161,8 @@ static void report_statistics(void) {
         fprintf(stderr, "MD_INTERCEPTION ptraceRequests=%llu unknown=%llu nativeSeeks=%llu\n",
             (unsigned long long)statistics->ptrace_requests, (unsigned long long)statistics->unknown,
             (unsigned long long)statistics->native_seeks);
+        fprintf(stderr, "MD_EVENT_LOOP polls=%llu waits=%llu\n",
+            (unsigned long long)statistics->event_polls, (unsigned long long)statistics->event_waits);
         for (unsigned nr = 0; nr < 512; nr++)
             if (statistics->calls[nr].trace || statistics->calls[nr].notification)
                 fprintf(stderr, "MD_SYSCALL nr=%u trace=%llu notification=%llu\n", nr,

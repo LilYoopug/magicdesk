@@ -311,7 +311,10 @@ detach and normal target exit. `gdb-active-io` requires repeated breakpoints and
 normal exit while eight peer threads create, write, read, reopen, rename and
 unlink files, exercising
 all-stop delivery across internal adapter operations. `syscall-exec` checks image-entry ordering and
-paired syscall stops across exec; strace checks decoded arguments and fork
+paired syscall stops across exec. `syscall-edit-close` changes the descriptor
+argument at a syscall-entry stop, with continued tracing and immediate detach;
+native close and virtual FD ownership must both follow the changed argument.
+Strace checks decoded arguments and fork
 events without stray-exec recovery. The prepared
 userspace needs GCC, Python 3, GDB, LLDB, gdbserver, binutils, strace and Valgrind.
 No package is installed by the test. `--diagnostics` enables supervisor diagnostics
@@ -401,7 +404,8 @@ atomic installation. Signal handshakes also force live syscall restart before
 and after retirement of the expired installation turn. No installed result is
 reclaimed by guessing a guest FD.
 
-`--case event-fairness` runs sixteen continuous identity-syscall producers beside
+`--case event-fairness` runs sixteen continuous identity-syscall or native
+descriptor-mutation producers beside
 task-affine proc reads that need worker completion. The reads must finish before
 the producers' failure deadline, not after they stop. Native, virtual-root and
 ordinary guest-user cases use the selected shell identity. The default resource
