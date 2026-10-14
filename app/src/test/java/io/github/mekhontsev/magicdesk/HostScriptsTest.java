@@ -107,6 +107,18 @@ public final class HostScriptsTest {
     }
 
     @Test
+    public void nextVersionRejectsMainWithoutWriting() throws Exception {
+        final Path project = versionProject();
+        git(project, "symbolic-ref", "HEAD", "refs/heads/main");
+        final Path properties = project.resolve("gradle.properties");
+        final String original = Files.readString(properties);
+        final var result = nextVersion(project, "194");
+        assertEquals(result.output, 1, result.exitCode);
+        assertTrue(result.output.contains("on develop, not main"));
+        assertEquals(original, Files.readString(properties));
+    }
+
+    @Test
     public void nativeVerifierRunsEveryFixtureAndCleansTemporaryOutput() throws Exception {
         assumeTrue("Linux".equals(System.getProperty("os.name")));
         final var fixture = nativeVerifierFixture();
@@ -241,7 +253,16 @@ public final class HostScriptsTest {
         Files.writeString(project.resolve("gradle.properties"),
                 "# retained\nmagicDeskVersionName=1.9.3\n"
                         + "magicDeskVersionCode=193\nandroid.useAndroidX=true\n");
+        git(project, "init", "--quiet", "--initial-branch=develop");
         return project;
+    }
+
+    private static void git(final Path project, final String... arguments) throws Exception {
+        final var command = new ArrayList<>(List.of("git", "-C", project.toString()));
+        command.addAll(List.of(arguments));
+        final var result = BoundedProcessRunner.run(
+                new ProcessBuilder(command).redirectErrorStream(true).start(), 3_000L, 8_192);
+        assertEquals(result.output, 0, result.exitCode);
     }
 
     private BoundedProcessRunner.Result nextVersion(final Path project, final String code)
