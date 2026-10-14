@@ -128,7 +128,7 @@ static void recovery(int parent) {
         assert(read(ready[0],&byte,1)==1 && byte=='r');
         if (points[i]==MD_NAMESPACE_STAGED) {
             struct stat st;
-            assert(!fstatat(owner->root,"namespace.db-journal",&st,0) && st.st_size>0);
+            assert(!fstatat(owner->root,"namespace.db-wal",&st,0) && st.st_size>0);
         }
         assert(!kill(child,SIGKILL)); int status;
         assert(waitpid(child,&status,0)==child && WIFSIGNALED(status) && WTERMSIG(status)==SIGKILL);

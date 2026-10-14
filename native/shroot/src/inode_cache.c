@@ -97,17 +97,21 @@ static uint64_t key_hash(const struct md_inode_store *s, const struct mdi_cache_
     if (key->name) hash=hash_bytes(hash,key->name,strlen(key->name));
     return hash;
 }
+static int matches(const struct mdi_cache_entry *entry, const struct md_inode_store *s,
+        const struct mdi_cache_key *key, uint64_t hash) {
+    return entry->valid && entry->hash==hash && entry->query==key->query
+        && entry->device==key->device && entry->inode==key->inode
+        && !strcmp(entry->scope,s->lifetime->scope)
+        && !strcmp(entry->id,key->id ? key->id : "")
+        && !strcmp(entry->name,key->name ? key->name : "");
+}
 static struct mdi_cache_entry *get(struct md_inode_store *s, const struct mdi_cache_key *key) {
     if (!s->locked || s->cache_checked!=1) return NULL;
     uint64_t hash=key_hash(s,key);
     struct mdi_cache_entry *set=&s->read_cache->entries[(hash%CACHE_SETS)*CACHE_WAYS];
     for (unsigned i=0;i<CACHE_WAYS;++i) {
         struct mdi_cache_entry *entry=&set[i];
-        if (!entry->valid || entry->hash!=hash || entry->query!=key->query
-            || entry->device!=key->device || entry->inode!=key->inode
-            || strcmp(entry->scope,s->lifetime->scope)
-            || strcmp(entry->id,key->id ? key->id : "")
-            || strcmp(entry->name,key->name ? key->name : "")) continue;
+        if (!matches(entry,s,key,hash)) continue;
         if (s->statistics) ++s->statistics->metadata_cache_hits;
         entry->used=++s->read_cache->clock;
         return entry;
@@ -120,8 +124,10 @@ static struct mdi_cache_entry *put(struct md_inode_store *s, const struct mdi_ca
     if ((key->id && strlen(key->id)>32) || (key->name && strlen(key->name)>NAME_MAX)) return NULL;
     uint64_t hash=key_hash(s,key);
     struct mdi_cache_entry *set=&s->read_cache->entries[(hash%CACHE_SETS)*CACHE_WAYS], *entry=set;
-    for (unsigned i=1;i<CACHE_WAYS;++i)
+    for (unsigned i=0;i<CACHE_WAYS;++i) {
+        if (matches(&set[i],s,key,hash)) { entry=&set[i]; break; }
         if (set[i].used<entry->used) entry=&set[i];
+    }
     *entry=(struct mdi_cache_entry){.hash=hash,.device=key->device,.inode=key->inode,
         .query=key->query,.result=result,.valid=1,.used=++s->read_cache->clock};
     strcpy(entry->scope,s->lifetime->scope);
@@ -140,7 +146,17 @@ int mdi_cache_get(struct md_inode_store *s, const struct mdi_cache_key *key,
 void mdi_cache_put(struct md_inode_store *s, const struct mdi_cache_key *key,
         const struct mdi_node *node, int result) {
     struct mdi_cache_entry *entry=put(s,key,result);
-    if (entry && !result) entry->value.node=*node;
+    if (!entry || result) return;
+    entry->value.node=*node;
+    /* A resolved object also identifies its current backing. Prime the same
+     * versioned descriptor lookup; fstat still verifies the actual description
+     * and obtains native attributes. Never alias a node from another view. */
+    if ((key->query==MDI_NODE || key->query==MDI_LOOKUP)
+            && !strcmp(node->scope,s->lifetime->scope)) {
+        const struct mdi_cache_key backing={.query=MDI_FD,.device=node->device,.inode=node->inode};
+        entry=put(s,&backing,0);
+        if (entry) entry->value.node=*node;
+    }
 }
 int mdi_cache_name_get(struct md_inode_store *s, const struct mdi_cache_key *key,
         struct mdi_path_name *name) {

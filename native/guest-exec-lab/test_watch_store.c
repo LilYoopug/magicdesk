@@ -3,6 +3,7 @@
 #include "inode_watch.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,6 +42,17 @@ int main(int argc, char **argv) {
     CHECK(md_inode_watch_read(s, reader, bytes, sizeof(bytes), NULL, NULL) == 32);
     struct inotify_event *e = (void *)bytes;
     CHECK(e->wd == wd && e->mask == IN_CREATE);
+    CHECK(!md_inode_watch_pump(s));
+    struct pollfd ready={.fd=md_inode_watch_pollfd(s),.events=POLLIN};
+    CHECK(!poll(&ready,1,0));
+    /* A logical hardlink changes only the namespace journal, not the backing
+     * directory. The worker must wake on its WAL write before a checkpoint. */
+    CHECK(!md_inode_link(writer,-1,"/observed",-1,"/alias",0));
+    /* EVENT_WAIT: committed WAL event; the timeout fails missing wakeup. */
+    CHECK(poll(&ready,1,5000)==1 && (ready.revents&POLLIN));
+    CHECK(md_inode_watch_read(s,reader,bytes,sizeof(bytes),NULL,NULL)==32);
+    e=(void *)bytes;
+    CHECK(e->wd==wd && e->mask==IN_CREATE && !strcmp(e->name,"alias"));
     pid_t pid = fork(); CHECK(pid >= 0);
     if (!pid) {
         struct md_inode_store *other;
@@ -51,14 +63,14 @@ int main(int argc, char **argv) {
     }
     int status; CHECK(waitpid(pid, &status, 0) == pid && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
     CHECK(!md_inode_watch_pump(s));
-    CHECK(md_inode_watch_bytes(s, reader) == 0 && count(s) == 1);
+    CHECK(md_inode_watch_bytes(s, reader) == 0 && count(s) == 3);
     struct stat st; CHECK(md_inode_stat(s, -1, "/rolled-back", 0, &st) == -ENOENT);
     puts("PASS watcher sees committed namespace only after writer SIGKILL rollback");
     int alias = dup(reader); CHECK(alias >= 0); close(reader);
     CHECK(!md_inode_watch_pump(s)); CHECK(md_inode_watch_pollfd(s) >= 0);
     close(alias); CHECK(!md_inode_watch_pump(s)); CHECK(md_inode_watch_pollfd(s) == -1);
     file = md_inode_create(writer, -1, "/after-close", 0600); CHECK(file >= 0); close(file);
-    CHECK(count(s) == 1);
+    CHECK(count(s) == 3);
     puts("PASS kernel last-reader lifetime releases subscriptions and disables journal production");
     reader = md_inode_watch_create(s, IN_NONBLOCK); CHECK(reader >= 0);
     CHECK(md_inode_watch_add(s, reader, root, IN_CREATE) > 0);

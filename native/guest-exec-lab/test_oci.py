@@ -3,6 +3,7 @@
 import argparse
 import base64
 import ctypes
+from contextlib import closing, contextmanager
 import errno
 import fcntl
 import gzip
@@ -26,6 +27,15 @@ import unittest
 ROOT = '0' * 32
 OCI = 'application/vnd.oci.image.'
 BINARY = None
+
+
+@contextmanager
+def database(path, **options):
+    # A connection context commits/rolls back but does not close SQLite. WAL
+    # checks need deterministic connection and native-lock retirement.
+    with closing(sqlite3.connect(path, **options)) as connection:
+        with connection:
+            yield connection
 
 
 def encoded(value):
@@ -126,7 +136,7 @@ class Images(unittest.TestCase):
         return result
 
     def object(self, path):
-        with sqlite3.connect(self.destination / 'namespace.db') as db:
+        with database(self.destination / 'namespace.db') as db:
             parent = ROOT
             for name in path.split('/'):
                 if not name:
@@ -145,12 +155,12 @@ class Images(unittest.TestCase):
         version = int(self.command('format').stdout)
         self.assertGreater(version, 1)
         self.run_import(self.layout())
-        with sqlite3.connect(self.destination / 'namespace.db') as db:
+        with database(self.destination / 'namespace.db') as db:
             self.assertEqual(version, db.execute('PRAGMA user_version').fetchone()[0])
             db.execute('PRAGMA user_version=' + str(version - 1))
         result = self.command('inspect', self.destination, success=False)
         self.assertIn('errno=' + str(errno.EPROTONOSUPPORT), result.stderr)
-        with sqlite3.connect(self.destination / 'namespace.db') as db:
+        with database(self.destination / 'namespace.db') as db:
             self.assertEqual(version - 1, db.execute('PRAGMA user_version').fetchone()[0])
 
     def interrupt_publication(self, *arguments):
@@ -275,7 +285,7 @@ sys.stdin.read()
         def writer():
             lock = os.open(instance / 'objects', os.O_RDONLY | os.O_DIRECTORY)
             try:
-                with sqlite3.connect(instance / 'namespace.db', timeout=0) as db:
+                with database(instance / 'namespace.db', timeout=0) as db:
                     while not stop.is_set():
                         # EVENT_WAIT: the same kernel gate used by namespace writers;
                         # the test completion bound fails a stuck participant.
@@ -322,7 +332,7 @@ sys.stdin.read()
                     'd/link': (789, 987, 0o777)}
         for path, metadata in expected.items():
             backing = self.object(path)
-            with sqlite3.connect(self.destination / 'namespace.db') as db:
+            with database(self.destination / 'namespace.db') as db:
                 actual = db.execute('SELECT uid,gid,mode FROM objects WHERE object=?',
                                     (backing.name,)).fetchone()
             self.assertEqual(actual, metadata)
@@ -332,7 +342,7 @@ sys.stdin.read()
         instance = self.root / 'instance'
         subprocess.run([BINARY, 'create', str(self.destination), str(instance)], check=True,
                        capture_output=True, timeout=60)
-        with sqlite3.connect(instance / 'namespace.db') as db:
+        with database(instance / 'namespace.db') as db:
             self.assertEqual(db.execute('SELECT uid,gid,mode FROM objects WHERE object=?',
                                         (self.object('d/a').name,)).fetchone(), expected['d/a'])
         info = json.loads(subprocess.check_output([BINARY, 'inspect', str(instance)]))
@@ -358,12 +368,12 @@ sys.stdin.read()
         libc.getxattr.restype = ctypes.c_ssize_t
         self.assertEqual(libc.getxattr(os.fsencode(backing), b'security.capability', None, 0), -1)
         self.assertEqual(ctypes.get_errno(), errno.ENODATA)
-        with sqlite3.connect(self.destination / 'namespace.db') as db:
+        with database(self.destination / 'namespace.db') as db:
             self.assertEqual(db.execute('SELECT value FROM file_capabilities WHERE object=?',
                                         (backing.name,)).fetchone(), (value,))
         instance = self.root / 'instance'
         subprocess.run([BINARY, 'create', str(self.destination), str(instance)], check=True, capture_output=True)
-        with sqlite3.connect(instance / 'namespace.db') as db:
+        with database(instance / 'namespace.db') as db:
             self.assertEqual(db.execute('SELECT value FROM file_capabilities WHERE object=?',
                                         (backing.name,)).fetchone(), (value,))
 
@@ -377,7 +387,7 @@ sys.stdin.read()
                               {'security.capability': value},
                               {'SCHILY.xattr.security.capability': value.decode('ascii')})]])
         self.run_import(layout, preserve=True)
-        with sqlite3.connect(self.destination / 'namespace.db') as db:
+        with database(self.destination / 'namespace.db') as db:
             self.assertEqual(db.execute('SELECT value FROM file_capabilities').fetchone(), (value,))
 
     def test_acl_import_snapshot_and_replacement(self):
@@ -388,7 +398,7 @@ sys.stdin.read()
              ('program', 'file', b'old', 0o750, 0, 0, {}, {'SCHILY.acl.access': acl}),
              ('alias', 'hard', 'program')], [('program', 'file', b'new')]])
         self.run_import(layout, preserve=True)
-        with sqlite3.connect(self.destination / 'namespace.db') as db:
+        with database(self.destination / 'namespace.db') as db:
             self.assertEqual(db.execute('SELECT acl_mask FROM objects WHERE object=?',
                                         (self.object('folder').name,)).fetchone(), (3,))
             self.assertEqual(db.execute('SELECT acl_mask FROM objects WHERE object=?',
@@ -398,7 +408,7 @@ sys.stdin.read()
             expected = db.execute('SELECT object,type,value FROM inode_acls ORDER BY object,type').fetchall()
         instance = self.root / 'instance'
         subprocess.run([BINARY, 'create', self.destination, instance], check=True, capture_output=True)
-        with sqlite3.connect(instance / 'namespace.db') as db:
+        with database(instance / 'namespace.db') as db:
             self.assertEqual(db.execute('SELECT object,type,value FROM inode_acls ORDER BY object,type').fetchall(), expected)
 
     def test_acl_requires_ownership_policy(self):
@@ -481,7 +491,7 @@ sys.stdin.read()
         self.run_import(self.layout([
             [('app', 'file', b'old', 0o755, 0, 0, {'security.capability': capability}),
              ('alias', 'hard', 'app')], [('app', 'file', b'new')]]), preserve=True)
-        with sqlite3.connect(self.destination / 'namespace.db') as db:
+        with database(self.destination / 'namespace.db') as db:
             self.assertIsNone(db.execute('SELECT value FROM file_capabilities WHERE object=?',
                                          (self.object('app').name,)).fetchone())
             self.assertEqual(db.execute('SELECT value FROM file_capabilities WHERE object=?',
@@ -525,19 +535,19 @@ sys.stdin.read()
                                      ('block', 'block', '')]]))
         self.assertEqual(self.object('device'), self.object('alias'))
         self.assertTrue(self.object('device').is_file())
-        with sqlite3.connect(self.destination / 'namespace.db') as db:
+        with database(self.destination / 'namespace.db') as db:
             self.assertEqual(db.execute('SELECT kind,rdev FROM objects WHERE rdev!=0 ORDER BY kind').fetchall(),
                              [(stat.S_IFCHR, os.makedev(1, 3)), (stat.S_IFBLK, os.makedev(8, 0))])
         instance = self.root / 'instance'
         self.command('create', self.destination, instance)
-        with sqlite3.connect(instance / 'namespace.db') as db:
+        with database(instance / 'namespace.db') as db:
             self.assertEqual(db.execute('SELECT kind,rdev FROM objects WHERE rdev!=0 ORDER BY kind').fetchall(),
                              [(stat.S_IFCHR, os.makedev(1, 3)), (stat.S_IFBLK, os.makedev(8, 0))])
         archive = self.root / 'backup.tar.zst'
         self.command('backup', self.destination, archive)
         restored = self.root / 'restored'
         self.command('restore', archive, restored)
-        with sqlite3.connect(restored / 'namespace.db') as db:
+        with database(restored / 'namespace.db') as db:
             self.assertEqual(db.execute('SELECT kind,rdev FROM objects WHERE rdev!=0 ORDER BY kind').fetchall(),
                              [(stat.S_IFCHR, os.makedev(1, 3)), (stat.S_IFBLK, os.makedev(8, 0))])
 
@@ -593,7 +603,7 @@ sys.stdin.read()
         original = self.object('pipe')
         # FIFO names persist as metadata; live streams belong to kernel pipes.
         self.assertTrue(stat.S_ISREG(original.stat().st_mode))
-        with sqlite3.connect(self.destination / 'namespace.db') as db:
+        with database(self.destination / 'namespace.db') as db:
             self.assertEqual(db.execute('SELECT kind,mode,uid,gid FROM objects WHERE object=?',
                                        (original.name,)).fetchone(), (stat.S_IFIFO, 0o640, 123, 456))
         self.assertEqual(original, self.object('alias'))
@@ -609,7 +619,7 @@ sys.stdin.read()
             self.assertEqual(fifo.stat().st_size, 0)
         self.assertNotEqual(instances[0].stat().st_ino, instances[1].stat().st_ino)
         for name in ('one', 'two'):
-            with sqlite3.connect(self.root / name / 'namespace.db') as db:
+            with database(self.root / name / 'namespace.db') as db:
                 self.assertEqual(db.execute('SELECT count(*) FROM fifo_pins').fetchone()[0], 0)
 
     def test_layer_digest(self):
@@ -710,7 +720,7 @@ sys.stdin.read()
 
     def body(self, path, store=None):
         store = store or self.destination
-        with sqlite3.connect(store / 'namespace.db') as db:
+        with database(store / 'namespace.db') as db:
             object_id = ROOT
             for name in path.strip('/').split('/'):
                 row = db.execute('SELECT object FROM names WHERE parent=? AND name=?',
@@ -743,7 +753,7 @@ sys.stdin.read()
         self.assertEqual(len(list(pool.iterdir())), 2)
         self.assertFalse(list(pool.rglob('namespace.db')))
         for image in (self.destination, sibling):
-            with sqlite3.connect(image / 'namespace.db') as db:
+            with database(image / 'namespace.db') as db:
                 self.assertEqual(db.execute('SELECT count(*) FROM objects WHERE kind=32768 AND source=0').fetchone(), (0,))
         instance = self.root / 'instance'
         self.command('create', self.destination, instance)
@@ -768,7 +778,7 @@ sys.stdin.read()
                           (f'd{i}/link', 'sym', 'body')])
         self.pool_import(self.layout([lower, upper]))
         self.assertIsNone(self.body('old'))
-        with sqlite3.connect(self.destination / 'namespace.db') as db:
+        with database(self.destination / 'namespace.db') as db:
             expected = {row[0] for row in db.execute('SELECT backing FROM backings WHERE source=0')}
         actual = {p.name for p in (self.destination / 'objects').iterdir()}
         self.assertEqual(expected, actual)
@@ -830,7 +840,7 @@ sys.stdin.read()
         self.assertEqual(len(info['sources']), 1)
         self.assertIn(layout.config['rootfs']['diff_ids'][1][7:], info['sources'][0]['path'])
         self.assertEqual(len(list((self.destination / 'objects').iterdir())), 1)
-        with sqlite3.connect(self.destination / 'namespace.db') as db:
+        with database(self.destination / 'namespace.db') as db:
             self.assertEqual(db.execute('SELECT count(*) FROM objects').fetchone(), (2,))
 
     def test_pool_attribute_corruption_is_not_repaired_in_place(self):
@@ -861,7 +871,7 @@ sys.stdin.read()
                                ('b', 'hard', 'a'), ('link', 'sym', 'a'), ('pipe', 'fifo', '')]])
         pool = self.pool_import(layout)
         backup = self.root / 'backup.tar.zst'
-        with sqlite3.connect(self.destination / 'namespace.db') as db:
+        with database(self.destination / 'namespace.db') as db:
             # Offline fixture represents metadata after a guest chmod, independently
             # of libarchive's mapping of tar ACL entries into its mode field.
             db.execute('UPDATE objects SET mode=? WHERE kind=32768', (0o4700,))
@@ -872,7 +882,7 @@ sys.stdin.read()
         self.assertEqual(self.body('a').read_bytes(), b'content')
         self.assertEqual(self.body('a'), self.body('b'))
         self.assertEqual(os.readlink(self.body('link')), 'a')
-        with sqlite3.connect(self.destination / 'namespace.db') as db:
+        with database(self.destination / 'namespace.db') as db:
             self.assertEqual(db.execute('SELECT count(*) FROM sources').fetchone(), (0,))
             self.assertEqual(db.execute('SELECT value FROM file_capabilities').fetchone(), (capability,))
             self.assertEqual(db.execute('SELECT count(*) FROM inode_acls').fetchone(), (1,))
@@ -974,18 +984,18 @@ sys.stdin.read()
         instance = self.root / 'instance'
         self.command('create', self.destination, instance)
         for store in (self.destination, instance):
-            with sqlite3.connect(store / 'namespace.db') as db:
+            with database(store / 'namespace.db') as db:
                 self.assertEqual(db.execute('SELECT name,value FROM overlay_attributes ORDER BY name').fetchall(),
                                  [(2, b'y'), (3, b'')])
         body = self.body('upper', instance)
         self.assertEqual(ctypes.CDLL(None).setxattr(os.fsencode(body), b'user.overlay.opaque', b'y', 1, 0), 0)
-        with sqlite3.connect(instance / 'namespace.db') as db:
+        with database(instance / 'namespace.db') as db:
             db.execute('UPDATE overlay_attributes SET value=NULL WHERE name=2')
         archive = self.root / 'backup.tar.zst'
         restored = self.root / 'restored'
         self.command('backup', instance, archive)
         self.command('restore', archive, restored)
-        with sqlite3.connect(restored / 'namespace.db') as db:
+        with database(restored / 'namespace.db') as db:
             self.assertEqual(db.execute('SELECT name,value FROM overlay_attributes').fetchall(), [(3, b'')])
         libc = ctypes.CDLL(None, use_errno=True)
         libc.getxattr.restype = ctypes.c_ssize_t

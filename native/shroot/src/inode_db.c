@@ -14,7 +14,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
-static const int store_format = 14;
+static const int store_format = 15;
 int md_inode_store_format(void) { return store_format; }
 
 int mdi_sql_error(int rc) {
@@ -169,7 +169,7 @@ enum { MD_OBJECT_SYNCED, MD_NAMESPACE_STAGED, MD_NAMESPACE_COMMITTED };
 static int checkpoint(struct md_inode_store *s, int point) {
 #ifdef MD_INODE_TESTING
     if (s->observe) {
-        /* Force a real rollback journal before the deterministic kill point. */
+        /* Spill uncommitted pages before the deterministic kill point. */
         if (point == MD_NAMESPACE_STAGED) {
             int r = mdi_sql_error(sqlite3_db_cacheflush(s->db));
             if (r) return r;
@@ -559,13 +559,12 @@ static int store_open(const char *directory, int create, int exclusive,
     if (!r) r = store_lock(s);
     if (!r) r = md_database_open(root,"namespace.db",create,&s->db);
     if (!r) r = mdi_sql_error(sqlite3_extended_result_codes(s->db, 1));
-    /* Every store retains rollback and interprocess isolation. Only persistent
-     * lifetimes require power-loss durability, including retained reconnects. */
-    if (!r) r = journal_mode(s,"PRAGMA journal_mode","delete");
-    if (!r) r = journal_mode(s,"PRAGMA journal_mode=PERSIST","persist");
+    /* WAL publishes each operation with one durable append, rather than
+     * rewriting and syncing the database and rollback journal on every call. */
+    if (!r) r = journal_mode(s,create ? "PRAGMA journal_mode=WAL" : "PRAGMA journal_mode","wal");
     if (!r) r = mdi_sql(s, "PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF");
-    if (!r) r = mdi_sql(s,s->lifetime->temporary ? "PRAGMA synchronous=OFF" : "PRAGMA synchronous=EXTRA");
-    if (!r) r = mdi_sql(s,"PRAGMA journal_size_limit=1048576");
+    if (!r) r = mdi_sql(s,s->lifetime->temporary ? "PRAGMA synchronous=OFF" : "PRAGMA synchronous=FULL");
+    if (!r) r = mdi_sql(s,"PRAGMA wal_autocheckpoint=256; PRAGMA journal_size_limit=1048576");
     if (!r && create) {
         r = mdi_sql(s, "BEGIN IMMEDIATE;"
             "CREATE TABLE objects(object TEXT PRIMARY KEY CHECK(length(object)=32),kind INTEGER NOT NULL,"
@@ -710,7 +709,14 @@ void md_inode_store_close(struct md_inode_store *s) {
     md_inode_watch_close(s);
     mdi_fifo_close(s);
     for (unsigned i = 0; i < MDI_QUERY_COUNT; i++) sqlite3_finalize(s->queries[i]);
-    if (s->db) sqlite3_close(s->db);
+    if (s->db) {
+        /* The last WAL connection checkpoints and removes its sidecars. Keep
+         * that lifecycle inside the same gate as admission and transactions. */
+        int r;
+        do { r=store_lock(s); } while (r==-EINTR);
+        sqlite3_close(s->db);
+        store_unlock(s,0);
+    }
     if (s->objects >= 0) close(s->objects);
     if (s->watch_presence >= 0) close(s->watch_presence);
     md_inode_lifetime_release(s->lifetime);

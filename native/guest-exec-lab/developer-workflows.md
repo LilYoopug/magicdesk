@@ -104,6 +104,22 @@ and scheduling groups can differ between these executor
 identities even without changing the power source; retain the individual samples
 and ranges rather than attributing every wall-time difference to interception.
 
+Affinity is a diagnostic control, not the default execution policy. Compare the
+whole guest/helper chain with the same allowed CPUs; pinning only its helpers
+is a different experiment. A serial request chain distributed across CPUs can
+look lightly loaded to the governor even while it saturates end-to-end execution.
+Record actual per-thread execution frequencies, runnable delay and remote
+wakeups before attributing a pinned speedup to cache locality or fewer switches.
+Scheduler traces must include executable-name changes and have no dropped or
+overwritten records. Keep tracing runs separate from ordinary timing samples.
+
+For a power-policy control, change only disposable test tasks, never the global
+governor or a live application. A privileged clamp experiment does not establish
+shell availability. An accepted Android performance-hint session or seccomp
+synchronous-wakeup flag does not establish an effective scheduling improvement.
+Verify the outcome. Private affinity masks must not become an implicit policy
+for every guest: they can reduce parallel throughput and alter CPU discovery.
+
 Configure the native CMake build with `-DMAGICDESK_GUEST_FIXTURES=ON` to build
 `libmagicdesk_guest_benchmark_namespace.so`. Run it under the same shell identity
 with the prepared benchmark store as its sole argument. It executes the metadata

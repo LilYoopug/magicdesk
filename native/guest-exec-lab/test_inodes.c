@@ -32,7 +32,7 @@ static struct md_inode_store *store(const char *name, int create) {
     CHECK(md_inode_store_open(p, create, &s) == 0);
     sqlite3_stmt *q=NULL;
     CHECK(sqlite3_prepare_v2(s->db,"PRAGMA synchronous",-1,&q,NULL)==SQLITE_OK);
-    CHECK(sqlite3_step(q)==SQLITE_ROW && sqlite3_column_int(q,0)==3);
+    CHECK(sqlite3_step(q)==SQLITE_ROW && sqlite3_column_int(q,0)==2);
     sqlite3_finalize(q);
     CHECK(mdi_sync(s,-1)==-EBADF);
     return s;
@@ -212,7 +212,7 @@ static void killed_transaction(const char *name, enum operation op, enum md_inod
     CHECK(event(ready[0]) == 'R');
     if (point == MD_NAMESPACE_STAGED) {
         char journal[PATH_MAX];
-        CHECK(snprintf(journal, sizeof(journal), "%s/%s/namespace.db-journal", root, name) < PATH_MAX);
+        CHECK(snprintf(journal, sizeof(journal), "%s/%s/namespace.db-wal", root, name) < PATH_MAX);
         struct stat st; CHECK(stat(journal, &st) == 0 && st.st_size > 0);
     }
     CHECK(kill(child, SIGKILL) == 0); joined(child, SIGKILL);
@@ -700,8 +700,9 @@ static void scoped_paths(void) {
 static void reused_queries(void) {
     struct md_inode_store *s = store("queries", 1), *writer = store("queries", 0);
     int fd = md_inode_create(writer, MD_INODE_ROOT, "value", 0600); CHECK(fd >= 0);
-    struct stat original = state(s, "value", 1), st;
+    struct stat st;
     CHECK(!md_inode_fstat(s, fd, &st));
+    struct stat original = state(s, "value", 1);
     /* Warm both commit and rollback programs before measuring reuse. */
     CHECK(md_inode_stat(s, MD_INODE_ROOT, "absent", 0, &st) == -ENOENT);
     struct md_inode_statistics statistics = {0};
@@ -777,9 +778,10 @@ static void directory_publication(void) {
 static void metadata_queries(void) {
     struct md_inode_store *s = store("metadata", 1), *writer = store("metadata", 0);
     int fd = md_inode_create(writer, MD_INODE_ROOT, "value", 0600); CHECK(fd >= 0);
+    struct stat st;
+    CHECK(!md_inode_fstat(s, fd, &st));
     int dir = md_inode_open(s, MD_INODE_ROOT, "/", O_RDONLY | O_DIRECTORY, 0); CHECK(dir >= 0);
     int opened = md_inode_open(s, dir, "value", O_RDONLY, 0); CHECK(opened >= 0); close(opened);
-    struct stat st;
     CHECK(!md_inode_fstat(s, fd, &st));
     char entries[1024];
     CHECK(md_inode_getdents(s, dir, entries, sizeof(entries)) > 0);
@@ -810,6 +812,28 @@ static void metadata_queries(void) {
     md_inode_measure(s, NULL);
     close(next); close(dir); close(fd); md_inode_store_close(writer); md_inode_store_close(s);
     puts("PASS metadata programs: minimal open/fstat queries, live FD attributes and fresh directory batches");
+}
+static void backing_cache(void) {
+    struct md_inode_store *s=store("backing-cache",1), *writer=store("backing-cache",0);
+    int fd=md_inode_create(writer,-1,"value",0600); CHECK(fd>=0);
+    struct md_inode_statistics stats={0}; md_inode_measure(s,&stats);
+    struct stat named, opened;
+    CHECK(!md_inode_stat(s,-1,"value",0,&named));
+    uint64_t steps=stats.step.calls;
+    CHECK(!md_inode_fstat(s,fd,&opened) && named.st_ino==opened.st_ino);
+    CHECK(stats.step.calls==steps+3 && !stats.descriptor.calls);
+    CHECK(!ftruncate(fd,123) && !md_inode_fstat(s,fd,&opened) && opened.st_size==123);
+    CHECK(!md_inode_link(writer,-1,"value",-1,"alias",0));
+    CHECK(!md_inode_fstat(s,fd,&opened) && opened.st_nlink==2);
+    CHECK(!md_inode_unlink(writer,-1,"value",0));
+    CHECK(!md_inode_unlink(writer,-1,"alias",0));
+    int replacement=md_inode_create(writer,-1,"value",0600); CHECK(replacement>=0);
+    CHECK(!md_inode_stat(s,-1,"value",0,&named));
+    CHECK(!md_inode_fstat(s,fd,&opened) && opened.st_nlink==0 && opened.st_ino!=named.st_ino);
+    CHECK(!md_inode_fstat(s,replacement,&opened) && opened.st_nlink==1 && opened.st_ino==named.st_ino);
+    md_inode_measure(s,NULL); close(replacement); close(fd);
+    md_inode_store_close(writer); md_inode_store_close(s);
+    puts("PASS name-to-backing cache: no duplicate FD lookup, native attributes, foreign links and open-unlinked identity");
 }
 static void mutation_cache(void) {
     struct md_inode_store *s=store("mutation-cache",1);
@@ -977,19 +1001,23 @@ static void retained_journal(void) {
     int fd=md_inode_create(a,MD_INODE_ROOT,"file",0600);
     CHECK(fd>=0); close(fd);
     struct md_inode_store *b=store("journal",0);
-    char journal[PATH_MAX]; path(journal,"journal/namespace.db-journal");
+    char journal[PATH_MAX]; path(journal,"journal/namespace.db-wal");
     struct stat first, next;
     CHECK(!stat(journal,&first) && first.st_size>0);
-    for (unsigned i=0;i<16;i++) {
+    for (unsigned i=0;i<256;i++) {
         struct md_inode_store *s=i&1 ? a : b;
         CHECK(!md_inode_link(s,MD_INODE_ROOT,"file",MD_INODE_ROOT,"link",0));
         CHECK(!md_inode_unlink(s,MD_INODE_ROOT,"link",0));
         CHECK(!stat(journal,&next) && first.st_ino==next.st_ino && first.st_dev==next.st_dev);
-        CHECK(next.st_size>0 && next.st_size<=1048576);
+        /* These small commits cross repeated automatic checkpoints. Large
+         * transactions may exceed the threshold, but ordinary commits must
+         * reuse the WAL rather than growing it indefinitely. */
+        CHECK(next.st_size>32 && next.st_size<2*1024*1024);
         fd=open(journal,O_RDONLY|O_CLOEXEC); CHECK(fd>=0);
-        unsigned char header[28];
+        unsigned char header[32];
         CHECK(read(fd,header,sizeof(header))==sizeof(header)); close(fd);
-        for (unsigned j=0;j<sizeof(header);j++) CHECK(!header[j]);
+        CHECK(header[0]==0x37 && header[1]==0x7f && header[2]==0x06);
+        CHECK(header[3]==0x82 || header[3]==0x83);
         CHECK(state(s,"file",1).st_size==0);
     }
     char before[PATH_MAX], moved[PATH_MAX];
@@ -1007,15 +1035,15 @@ static void retained_journal(void) {
     char database[PATH_MAX], directory[PATH_MAX];
     path(database,"journal/namespace.db"); path(directory,"journal");
     sqlite3 *db; CHECK(sqlite3_open(database,&db)==SQLITE_OK);
-    CHECK(sqlite3_exec(db,"PRAGMA journal_mode=WAL",NULL,NULL,NULL)==SQLITE_OK);
+    CHECK(sqlite3_exec(db,"PRAGMA journal_mode=DELETE",NULL,NULL,NULL)==SQLITE_OK);
     CHECK(sqlite3_close(db)==SQLITE_OK);
     CHECK(md_inode_store_open(directory,0,&a)==-ENOTSUP && !a);
     CHECK(sqlite3_open(database,&db)==SQLITE_OK);
     sqlite3_stmt *q;
     CHECK(sqlite3_prepare_v2(db,"PRAGMA journal_mode",-1,&q,NULL)==SQLITE_OK);
-    CHECK(sqlite3_step(q)==SQLITE_ROW && !strcmp((const char *)sqlite3_column_text(q,0),"wal"));
+    CHECK(sqlite3_step(q)==SQLITE_ROW && !strcmp((const char *)sqlite3_column_text(q,0),"delete"));
     sqlite3_finalize(q); CHECK(sqlite3_close(db)==SQLITE_OK);
-    puts("PASS retained rollback journal: shared connections, stable inode, invalidated header and non-mutating WAL rejection");
+    puts("PASS WAL journal: shared connections, bounded checkpoint reuse, stable inode, committed visibility and non-mutating foreign journal rejection");
 }
 int main(int argc, char **argv) {
     CHECK(argc == 2 || argc == 3);
@@ -1024,7 +1052,7 @@ int main(int argc, char **argv) {
     CHECK(mkdir(root, 0700) == 0);
     descriptors(); namespace(); contention(); multiple_stores(); across_exec(argv[0]);
     hierarchy(); symlinks(); permissions(); kernel_reference(); scoped_paths(); reused_queries(); metadata_queries(); cached_path_names();
-    mutation_cache(); directory_publication(); membership_queries(); counter_audit(); retained_journal();
+    backing_cache(); mutation_cache(); directory_publication(); membership_queries(); counter_audit(); retained_journal();
     unsigned serial = 0;
     recovery(CREATE, MD_OBJECT_SYNCED, serial++);
     for (enum operation op = CREATE; op <= EXCHANGE; ++op) {

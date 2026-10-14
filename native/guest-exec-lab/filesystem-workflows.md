@@ -13,8 +13,11 @@ OCI images, mount views, storage semantics and file-watch workflows. Use disposa
 Transient-store checks retain a journal across SIGKILL at object publication,
 namespace staging and commit. Reconnect and transferred custody preserve the
 temporary durability policy and exact final cleanup. Persistent-store checks
-assert synchronous EXTRA independently; retained-directory journal access also
+assert WAL with synchronous FULL independently; retained-directory journal access also
 survives renaming the store while two connections remain open.
+Checks include pre-checkpoint wakeup for namespace-only changes, bounded WAL
+reuse, descriptor-cache admission across foreign writes, and bounded SQLite FD
+retention with exact release after the final connection.
 
 `test_resources.py BUILD --case mount-policy` checks the attachment-policy owner
 without running Desktop or replacing the APK. Local policy creates no descriptor;

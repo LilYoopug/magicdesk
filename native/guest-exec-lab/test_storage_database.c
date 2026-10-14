@@ -2,6 +2,7 @@
 #include "storage_database.h"
 #include "private_tree.h"
 #include <assert.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -11,6 +12,12 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+static unsigned descriptors(void) {
+    DIR *dir=opendir("/proc/self/fd"); assert(dir);
+    unsigned count=0; struct dirent *entry;
+    while ((entry=readdir(dir))) if (entry->d_name[0]!='.') ++count;
+    assert(!closedir(dir)); return count;
+}
 static void execute(sqlite3 *db,const char *sql) {
     int r=sqlite3_exec(db,sql,NULL,NULL,NULL);
     if (r!=SQLITE_OK) fprintf(stderr,"database: %s: %s\n",sql,sqlite3_errmsg(db));
@@ -24,6 +31,7 @@ static int value(sqlite3 *db) {
     assert(sqlite3_finalize(q)==SQLITE_OK); return n;
 }
 static void retained(const char *journal) {
+    unsigned initial=descriptors();
     char path[]="storage-database-XXXXXX"; assert(mkdtemp(path));
     int parent=open(path,O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(parent>=0);
     assert(!mkdirat(parent,"original",0700));
@@ -41,6 +49,22 @@ static void retained(const char *journal) {
     execute(first,"COMMIT"); assert(value(second)==2);
     execute(second,"BEGIN IMMEDIATE;UPDATE test SET value=3;ROLLBACK");
     assert(value(first)==2);
+    unsigned live=descriptors(), retained_fds=0;
+    for (unsigned round=0;round<32;++round) {
+        sqlite3 *peers[2];
+        for (unsigned i=0;i<2;++i) {
+            assert(!md_database_open(alias,"state.db",0,&peers[i]));
+            assert(value(peers[i])==2);
+        }
+        for (unsigned i=0;i<2;++i) assert(sqlite3_close(peers[i])==SQLITE_OK);
+        /* WAL keeps POSIX locks until the last connection closes. Its Unix
+         * VFS defers DB close and reuses those FDs; this is a high-water mark,
+         * not one retained descriptor per reconnect. */
+        unsigned current=descriptors();
+        assert(current>=live && current<=live+2);
+        if (!round) retained_fds=current;
+        else assert(current==retained_fds);
+    }
     assert(sqlite3_close(first)==SQLITE_OK); close(root);
     execute(second,"UPDATE test SET value=4");
     assert(sqlite3_close(second)==SQLITE_OK);
@@ -51,6 +75,7 @@ static void retained(const char *journal) {
     assert(md_database_open(alias,"../state.db",1,&first)==-EINVAL && !first);
     assert(md_database_open(alias,"missing.db",0,&first)<0 && !first);
     close(alias); close(parent); assert(!md_private_tree_discard(AT_FDCWD,path));
+    assert(descriptors()==initial);
 }
 struct concurrent { int directory; const char *name; pthread_barrier_t *start; };
 static void *connections(void *context) {

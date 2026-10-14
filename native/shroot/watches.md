@@ -24,7 +24,7 @@ retires its instance; process death releases presence through kernel FD lifetime
 No persisted subscriber counter, heartbeat or timer cleans up stale owners.
 Old formats are rejected without migration or deletion.
 
-Native inotify on the database wakes the worker; it reads only committed journal
+Native inotify on the database WAL wakes the worker; it reads only committed journal
 rows after acquiring store admission. The journal retains 65,536 entries plus at
 most one 255-entry trimming batch. A missing range produces `IN_Q_OVERFLOW`.
 Native data events come from retained backing inodes and the flat object directory;

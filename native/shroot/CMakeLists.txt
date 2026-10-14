@@ -3,8 +3,8 @@ project(MagicDeskShroot LANGUAGES C ASM)
 
 include(FetchContent)
 FetchContent_Declare(sqlite
-    URL https://www.sqlite.org/2025/sqlite-amalgamation-3500400.zip
-    URL_HASH SHA256=1d3049dd0f830a025a53105fc79fd2ab9431aea99e137809d064d8ee8356b032
+    URL https://www.sqlite.org/2026/sqlite-amalgamation-3510300.zip
+    URL_HASH SHA256=acb1e6f5d832484bf6d32b681e858c38add8b2acdfd42ac5df24b8afb46552b4
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
 FetchContent_MakeAvailable(sqlite)
 add_library(guest-sqlite STATIC ${sqlite_SOURCE_DIR}/sqlite3.c)

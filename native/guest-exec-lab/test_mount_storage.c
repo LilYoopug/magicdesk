@@ -157,6 +157,12 @@ static int subscribe(struct md_filesystem *fs, int reader, const char *path) {
     assert(!r.error); return (int)r.position;
 }
 static void watches(struct md_filesystem *fs, const char *extra) {
+    /* The Unix WAL VFS retains closed DB FDs while a peer holds POSIX locks.
+     * Prime its two-peer high-water mark; the checks below still require exact
+     * cleanup, and test_mount_storage checks release after the last owner. */
+    struct md_inode_store *peers[2];
+    for (unsigned i=0;i<2;++i) assert(!md_inode_store_open(extra,0,&peers[i]));
+    for (unsigned i=0;i<2;++i) md_inode_store_close(peers[i]);
     unsigned before=descriptors();
     int reader=md_inode_watch_create(fs->store,IN_CLOEXEC|IN_NONBLOCK); assert(reader>=0);
     int base=subscribe(fs,reader,"/"), mounted=subscribe(fs,reader,"/volume");

@@ -55,7 +55,7 @@ exclusive maintenance or before a store is published.
 Their private contract is in
 `inode_internal.h`. Callers use the explicit dirfd-based `inode_store.h` API.
 The internal database format is versioned and incompatible formats are rejected,
-not migrated. Format 14 includes scoped namespace views, logical owners/modes, POSIX ACLs, file capabilities,
+not migrated. Format 15 uses WAL and includes scoped namespace views, logical owners/modes, POSIX ACLs, file capabilities,
 unambiguous file-path history, stable identities, backing history,
 immutable sources, socket addresses, FIFO ownership, device type/rdev, transactional namespace
 counters and the [watch event journal](watches.md). Incompatible stores require a separately prepared store; opening
@@ -249,6 +249,11 @@ independent of OCI parsing and launch-local directory attachments.
   mutations discards speculative records; read-only failure does not clear them.
   Other writers invalidate the cache on the next admission. Native attributes
   and permission decisions are not cached.
+  Resolved nodes in the current view also prime the descriptor index by backing
+  device/inode, avoiding a second SQL lookup after open. Actual FD identity and
+  native attributes still come from the kernel; old copy-up backings retain their
+  independent lookup. Cache insertion replaces existing keys rather than
+  consuming another slot for an alias.
   Statements are finalized with their owning connection.
 - Each object stores its name count and child-directory count. Insert/delete
   triggers maintain them in the same transaction as namespace changes, including
@@ -277,7 +282,7 @@ independent of OCI parsing and launch-local directory attachments.
   Directory moves/exchanges change parent edges in the same transaction as names.
 - Reads resolve names in a snapshot. They cannot see half an exchange. Contents
   are not transactional: writes through returned FDs follow kernel IO semantics.
-- Store opening and each metadata operation take an exclusive kernel `flock`
+- Store opening, connection close and each metadata operation take an exclusive kernel `flock`
   on their private object-directory description before entering SQLite.
   Independent services for one store therefore serialize metadata, including
   reads; separate stores do not share a lock. The gate is released after commit
@@ -294,13 +299,19 @@ independent of OCI parsing and launch-local directory attachments.
   and lock waiting do not promise bounded service completion; the caller's RPC
   deadline bounds observation, not cancellation of an accepted request. Offline
   import must not contend with live clients.
-- Connections use a retained `PERSIST` rollback journal with
-  `synchronous=EXTRA`. Commit invalidates the journal header instead of
-  unlinking/recreating the journal and synchronizing its directory each time.
-  The retained journal has a 1 MiB post-transaction size limit; transactions
-  can still grow it as needed. Every operation retains its own synchronous
-  commit and recovery boundary; foreign WAL databases are rejected without
-  converting their journal mode. No SQLite busy timeout or
+- Connections use SQLite WAL with `synchronous=FULL` for persistent stores.
+  Each operation appends a durable commit; database pages are checkpointed
+  instead of rewritten on every commit. Automatic checkpoints start at 256
+  pages, with a 1 MiB retained-WAL limit on reset. A large transaction or pinned
+  external reader can exceed that threshold; it is not a storage quota.
+  Temporary mounts retain transactional rollback but use `synchronous=OFF`.
+  Watch wakeups observe the WAL, not checkpoint writes to the main database.
+  Last-connection checkpoint/sidecar removal uses the same admission gate as
+  opening and ordinary operations. SQLite's Unix VFS may retain closed main-DB
+  FDs while a same-process peer holds POSIX locks; subsequent opens reuse this
+  bounded concurrency high-water mark, and last-owner close releases it.
+  Incompatible store formats and journal modes are rejected without conversion.
+  No SQLite busy timeout or
   automatic replay is installed. An external SQLite writer bypassing the store
   gate still returns EAGAIN. An IO error during commit can have an unknown
   outcome: inspect before replaying a mutation.
@@ -355,11 +366,13 @@ real shell UID 2000 in `u:r:shell:s0` on NX809J / API 36 / Linux 6.12.23 / 4 KiB
 - Eleven deterministic SIGKILL boundaries: create after object sync, and
   create/link/unlink/rename/exchange before and after namespace commit.
   Precommit checkpoints flush actual dirty database pages and verify a nonempty
-  rollback journal. Reopening checks names, inode identity, database integrity,
+  WAL. Reopening checks names, inode identity, database integrity,
   foreign keys and orphan accounting.
-- Retained rollback journals keep their inode across alternating writers,
-  invalidate their header after commit and respect the post-commit size limit.
-  Reopening audits the namespace; a foreign WAL store is rejected without
+- WAL journals keep their inode across alternating writers and repeated automatic
+  checkpoints. Small commits reuse bounded space; a logical hardlink wakes a
+  watcher before checkpointing. Repeated connections retain a bounded native-FD
+  high-water mark and release all descriptors after the final owner closes.
+  Reopening audits the namespace; a foreign rollback-journal store is rejected without
   changing its journal mode.
 - Twelve additional hierarchy SIGKILL boundaries: mkdir/symlink after object
   sync, and mkdir/symlink/directory move/exchange/rmdir before and after commit.

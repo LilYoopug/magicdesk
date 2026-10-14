@@ -143,7 +143,7 @@ static int source_get(struct md_inode_store *owner, struct md_inode_store *store
     if (!r && flock(p->presence,LOCK_SH|LOCK_NB)) r=-errno;
     if (!r && (p->native=inotify_init1(IN_NONBLOCK|IN_CLOEXEC))<0) r=-errno;
     if (!r) r=epoll_add(w->epoll,p->native,EPOLLIN);
-    if (!r && (p->database=watch_path(p->native,s->lifetime->root,"/namespace.db",IN_MODIFY))<0) r=p->database;
+    if (!r && (p->database=watch_path(p->native,s->lifetime->root,"/namespace.db-wal",IN_MODIFY))<0) r=p->database;
     if (!r && (p->objects=watch_path(p->native,s->objects,"",DATA_EVENTS))<0) r=p->objects;
     p->sources[0]=p->objects;
     for (unsigned i = 1; !r && i < MDI_SOURCES; ++i) if (s->lifetime->sources[i] >= 0) {
