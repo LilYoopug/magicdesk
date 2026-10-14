@@ -18,9 +18,10 @@ ExternalProject_Add(scanner
     INSTALL_COMMAND ${MESON} install -C <BINARY_DIR>)
 
 function(mdw_meson name url hash)
-    cmake_parse_arguments(DEP "" "" "DEPENDS;OPTIONS;TARGETS" ${ARGN})
+    cmake_parse_arguments(DEP "" "" "DEPENDS;OPTIONS;TARGETS;MIRRORS" ${ARGN})
     ExternalProject_Add(${name}
-        URL ${url} URL_HASH SHA256=${hash} DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        URL ${url} ${DEP_MIRRORS} URL_HASH SHA256=${hash} DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        TIMEOUT 120 INACTIVITY_TIMEOUT 30
         DEPENDS scanner ${DEP_DEPENDS}
         CONFIGURE_COMMAND ${build_environment} ${MESON} setup --clearcache --reconfigure <BINARY_DIR> <SOURCE_DIR>
             ${meson_cross}
@@ -60,6 +61,7 @@ mdw_meson(pixman
 mdw_meson(drm
     https://dri.freedesktop.org/libdrm/libdrm-2.4.134.tar.xz
     ac5e74d157830eb8bee44c6a6bf3ad49774ef0dd2a72bdad74a8f20308b52a95
+    MIRRORS https://deb.debian.org/debian/pool/main/libd/libdrm/libdrm_2.4.134.orig.tar.xz
     OPTIONS -Dtests=false)
 mdw_meson(xkbcommon
     https://github.com/xkbcommon/libxkbcommon/archive/refs/tags/xkbcommon-1.13.2.tar.gz
