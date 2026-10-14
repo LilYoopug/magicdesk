@@ -1988,7 +1988,8 @@ public abstract class DesktopShellActivity extends Activity
                 isUsingFallbackDesktopWallpaper(),
                 mTaskbarHost == null ? List.of() : mTaskbarHost.panels().stream()
                         .map(panel -> new DesktopUiSnapshot.Panel(panel.id(), panel.edge(),
-                                panel.content(), panel.paint(), panel.output())).toList());
+                                panel.content(), panel.paint(), panel.output())).toList(),
+                mDesktopLayout.shellLayout().observe());
     }
 
     List<PanelPixelReference.Point> getPanelRenderReference(boolean popup) {

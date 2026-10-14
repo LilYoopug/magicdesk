@@ -9,7 +9,7 @@ import java.util.Objects;
 final class DesktopUiSnapshot {
     static final DesktopUiSnapshot UNAVAILABLE = new DesktopUiSnapshot(
             false, -1, false, null, false, false, null, "",
-            false, false, List.of());
+            false, false, List.of(), null);
 
     record Panel(String id, ShellPanel.Edge edge, Rect bounds, Rect paintBounds, Rect outputBounds) {
         Panel {
@@ -29,6 +29,7 @@ final class DesktopUiSnapshot {
     final boolean taskbarVisible;
     final Rect taskbarBounds;
     final List<Panel> panels;
+    final DesktopShellLayout.Observation shellLayout;
     final boolean startVisible;
     final boolean popupVisible;
     final Rect popupBounds;
@@ -47,12 +48,14 @@ final class DesktopUiSnapshot {
             final String popupTitle,
             final boolean wallpaperRendered,
             final boolean fallbackWallpaper,
-            final List<Panel> panels) {
+            final List<Panel> panels,
+            final DesktopShellLayout.Observation shellLayout) {
         this.available = available;
         this.displayId = displayId;
         this.taskbarVisible = taskbarVisible;
         this.taskbarBounds = copy(taskbarBounds);
         this.panels = List.copyOf(panels);
+        this.shellLayout = shellLayout;
         this.startVisible = startVisible;
         this.popupVisible = popupVisible;
         this.popupBounds = copy(popupBounds);

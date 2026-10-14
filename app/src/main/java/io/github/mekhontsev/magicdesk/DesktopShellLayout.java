@@ -6,6 +6,11 @@ import java.util.List;
 
 /** Desktop shell policy expressed as layout intents; contains no Android window operations. */
 final class DesktopShellLayout {
+    record NativePanel(String id, ShellPanel.Edge edge, ShellLayout.Surface surface) { }
+    record Observation(ShellLayout.Snapshot layout, List<NativePanel> panels) {
+        Observation { panels = List.copyOf(panels); }
+    }
+
     private final ShellLayoutScope mScope = new ShellLayoutScope();
     private ShellLayoutScope.Binding mNative = mScope.bind();
     private List<PanelGeometry> mPanels = List.of();
@@ -31,6 +36,11 @@ final class DesktopShellLayout {
     }
 
     ShellLayout.Snapshot snapshot() { return mScope.snapshot(); }
+    Observation observe() {
+        return new Observation(snapshot(), mPanels.stream().map(geometry ->
+                new NativePanel(geometry.panel().id(), geometry.panel().edge(),
+                        panel(geometry.panel().id()))).toList());
+    }
     ShellLayoutScope scope() { return mScope; }
     ShellLayout.Surface panel(final String id) { return mNative.surface(id); }
     ShellLayout.Surface panelFor(final ShellComposition.Kind component) {

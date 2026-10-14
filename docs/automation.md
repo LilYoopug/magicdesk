@@ -1843,6 +1843,13 @@ has started the uncovered Activity. This bounded
 event wait neither opens nor repairs the touchpad; failure to return remains a
 test failure.
 
+`DESKTOP-003` compares every native panel's identity, edge, content and paint
+bounds with the committed shared `ShellLayout`, and verifies the same model's
+work area against the desktop host. It supports panels on any edge, floating
+docks, multiple panels, auto-hide reservations and stable system insets.
+Fullscreen concealment checks sample every panel and its reveal edge in one
+capture, excluding system bars; visibility flags alone do not prove concealment.
+
 Window fixtures retain ordinary task lifetime and are not excluded from Android
 Recents. An excluded task staged behind HOME can be removed by Android's idle
 Recents trimming before its first reveal (`recent-task-trimmed`), independently

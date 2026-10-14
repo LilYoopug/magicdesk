@@ -1006,7 +1006,7 @@ final class DesktopSelfTestInputSuite {
                     freeformSampleY,
                     DesktopSelfTestFixtureAppearance.PRIMARY);
             final int concealedTaskbarColor =
-                    awaitFullscreenColorInTaskbarArea(
+                    awaitFullscreenColorInPanelAreas(
                             displayId,
                             captureSource,
                             DesktopSelfTestFixtureAppearance.PRIMARY);
@@ -1216,33 +1216,47 @@ final class DesktopSelfTestInputSuite {
             final DisplayCaptureSource captureSource,
             final DesktopSelfTestFixtureAppearance fixture) throws IOException {
         waitForTaskbarVisibility(displayId, false);
-        final int color = awaitFullscreenColorInTaskbarArea(
+        final int color = awaitFullscreenColorInPanelAreas(
                 displayId, captureSource, fixture);
         return "chrome=concealed, color="
                 + DesktopTransitionSurfaceProbe.formatColor(color);
     }
 
-    private static int awaitFullscreenColorInTaskbarArea(
+    private static int awaitFullscreenColorInPanelAreas(
             final int displayId,
             final DisplayCaptureSource captureSource,
             final DesktopSelfTestFixtureAppearance fixture) throws IOException {
-        final DesktopUiSnapshot ui =
-                DesktopRuntimeBridge.getAutomationUiSnapshot(displayId);
-        if (ui == null || !ui.available || ui.taskbarBounds.isEmpty()) {
-            throw new IOException("taskbar bounds are unavailable");
-        }
-        final Rect taskbar = ui.taskbarBounds;
-        final int x = taskbar.left + Math.min(
-                taskbar.width() - 1,
-                Math.max(1, taskbar.width() / 8));
-        final int y = taskbar.top + Math.min(
-                taskbar.height() - 1,
-                Math.max(1, taskbar.height() / 4));
-        final int color = awaitFixtureColor(captureSource, x, y, fixture);
-        // A collapsed reveal panel can cover only the last content rows while
-        // the larger taskbar area is already clear. Exclude system navigation.
-        awaitFixtureColor(captureSource, x, taskbar.bottom - 1, fixture);
-        return color;
+        final long deadline = SystemClock.uptimeMillis() + STEP_TIMEOUT_MILLIS;
+        String detail = "panel bounds unavailable";
+        do {
+            DesktopSelfTestRunState.checkpoint();
+            final DesktopUiSnapshot ui = DesktopRuntimeBridge.getAutomationUiSnapshot(displayId);
+            final DesktopViewport viewport = DesktopRuntimeBridge.getDesktopViewport(displayId);
+            final Rect workArea = DesktopRuntimeBridge.getDesktopWorkAreaBounds(displayId);
+            if (ui != null && ui.available && ui.displayId == displayId && viewport != null && workArea != null) {
+                detail = DesktopSelfTestShellProbe.mismatch(viewport, workArea, ui);
+                if (detail == null) {
+                    final var points = DesktopSelfTestShellProbe.concealedSamples(
+                            DesktopSelfTestShellProbe.panels(ui), viewport.contentGeometry());
+                    final int[] colors = ShellAccess.captureDisplayPixels(captureSource,
+                            points.stream().mapToInt(DesktopSelfTestShellProbe.Point::x).toArray(),
+                            points.stream().mapToInt(DesktopSelfTestShellProbe.Point::y).toArray());
+                    boolean matched = colors.length == points.size();
+                    detail = "capture sample count differs";
+                    for (int i = 0; i < colors.length && i < points.size(); i++) {
+                        if (!fixture.matchesRenderedColor(colors[i])) {
+                            matched = false;
+                            detail = "sample=" + points.get(i) + ", color="
+                                    + DesktopTransitionSurfaceProbe.formatColor(colors[i]);
+                            break;
+                        }
+                    }
+                    if (matched) return colors[0];
+                }
+            }
+            BoundedStateAwaiter.pause(BoundedStateAwaiter.Reason.DISPLAY_STATE, POLL_MILLIS);
+        } while (SystemClock.uptimeMillis() < deadline);
+        throw new IOException("fullscreen did not cover all shell panels: " + detail);
     }
 
     private static void waitForTaskbarVisibility(

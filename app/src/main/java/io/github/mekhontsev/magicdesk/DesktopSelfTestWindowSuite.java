@@ -1391,7 +1391,7 @@ final class DesktopSelfTestWindowSuite {
             throws AbortSelfTest {
         return require(result,
                 "DESKTOP-003",
-                "Verify desktop viewport and taskbar",
+                "Verify desktop viewport and shell panels",
                 () -> {
             final long deadline = SystemClock.uptimeMillis() + STEP_TIMEOUT_MILLIS;
             String lastDetail = "desktop runtime state unavailable";
@@ -1404,7 +1404,7 @@ final class DesktopSelfTestWindowSuite {
                         DesktopRuntimeBridge.getAutomationUiSnapshot(displayId);
                 if (viewport != null && workArea != null && ui != null) {
                     final Rect display = viewport.displayBounds();
-                    final Rect taskbar = ui.taskbarBounds;
+                    final String mismatch = DesktopSelfTestShellProbe.mismatch(viewport, workArea, ui);
                     final int densityDpi = displayDensity(context, displayId);
                     final int rotation = displayRotation(context, displayId);
                     lastDetail = "display="
@@ -1418,8 +1418,8 @@ final class DesktopSelfTestWindowSuite {
                             + "," + viewport.insetBottom()
                             + ", work="
                             + DesktopSelfTestGeometry.format(workArea)
-                            + ", taskbar="
-                            + DesktopSelfTestGeometry.format(taskbar)
+                            + ", panels=" + ui.panels
+                            + ", layout=" + (mismatch == null ? "matched" : mismatch)
                             + ", uiAvailable=" + ui.available
                             + ", uiVisible=" + ui.taskbarVisible
                             + ", density=" + densityDpi
@@ -1427,17 +1427,9 @@ final class DesktopSelfTestWindowSuite {
                     if (display.width() > 0
                             && display.height() > 0
                             && ui.available
+                            && ui.displayId == displayId
                             && ui.taskbarVisible
-                            && taskbar != null
-                            && !taskbar.isEmpty()
-                            && display.contains(taskbar)
-                            && taskbar.left == viewport.contentLeft()
-                            && taskbar.right == viewport.contentRight()
-                            && taskbar.bottom == viewport.contentBottom()
-                            && workArea.left == viewport.contentLeft()
-                            && workArea.right == viewport.contentRight()
-                            && workArea.top == viewport.contentTop()
-                            && workArea.bottom == taskbar.top
+                            && mismatch == null
                             && densityDpi > 0
                             && rotation >= 0) {
                         return DesktopSelfTestViewportProbe.withCaptureOutput(

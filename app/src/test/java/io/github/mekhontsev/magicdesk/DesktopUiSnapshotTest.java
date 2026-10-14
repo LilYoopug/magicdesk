@@ -12,6 +12,16 @@ public final class DesktopUiSnapshotTest {
                     Rect(Rect r){this(r.left,r.top,r.right,r.bottom);}
                 }
                 static class ShellPanel { enum Edge { TOP,BOTTOM,LEFT,RIGHT } }
+                static class DesktopShellLayout {
+                    record Observation() {}
+                    final Observation state = new Observation();
+                    Observation observe(){return state;}
+                }
+                static class DesktopLayoutController {
+                    final DesktopShellLayout layout = new DesktopShellLayout();
+                    DesktopShellLayout shellLayout(){return layout;}
+                }
+                DesktopLayoutController mDesktopLayout = new DesktopLayoutController();
                 static class DesktopTaskbarHost {
                     record Panel(String id,ShellPanel.Edge edge,Rect content,Rect paint,Rect output){}
                     List<Panel> values;
@@ -53,6 +63,7 @@ public final class DesktopUiSnapshotTest {
                     }
                     f.mTaskbarHost.values=panels;
                     var snapshot=f.getAutomationUiSnapshot();
+                    check(snapshot.shellLayout==f.mDesktopLayout.shellLayout().observe(),"layout observation lost");
                     check(snapshot.panels.size()==4,"panel list was flattened");
                     panels.get(0).content().left=999;
                     panels.get(0).paint().left=999;
