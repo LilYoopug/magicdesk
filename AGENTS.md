@@ -88,6 +88,12 @@ solely for backward compatibility unless explicitly requested. Remove replaced
 paths instead of adding migration layers; this does not relax the supported
 Android release boundaries.
 
+Shroot persistent storage is an explicit exception starting with format 17.
+Preserve installed environments, identities and shared sources across subsequent
+updates through the native schema-admission owner. Formats 14-16 remain unsupported.
+Do not bump the storage family or image import identity for runtime tuning,
+rebuildable indexes or metadata revisions; keep upgrades out of syscall paths.
+
 `RuntimeCapabilities` owns service prerequisites, separately from MCP client
 grants. Keep the full MCP tool catalog discoverable; unavailable operations
 must fail explicitly without disabling independent services or changing system

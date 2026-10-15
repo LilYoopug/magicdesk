@@ -386,6 +386,8 @@ def main():
             names = ("test_rpc",)
         if args.case == "stores":
             names = ("test_mounts", "test_inodes", "test_snapshot", "test_native_mounts", "test_durability")
+        if args.case in ("all", "stores"):
+            names += ("test_schema",)
         if args.case == "durability":
             names = ("bootstrap", "supervisor", "run", "service")
         if args.case in ("all", "durability"):
@@ -408,6 +410,9 @@ def main():
             file = "libmagicdesk_guest_" + name + ".so"
             transport.upload(client, args.build / file, root + "/" + file)
         check("prepare fixtures", "chmod 700 " + root + "/*.so")
+        if args.case in ("all", "stores"):
+            check("storage schema", root + "/libmagicdesk_guest_test_schema.so " + root + "/schema-unit",
+                  "PASS concurrent preparation fails busy")
         if args.case in ("all", "stores", "durability"):
             check("storage durability", root + "/libmagicdesk_guest_test_durability.so " + root + "/durability-unit",
                   "PASS sealed image durability and snapshot-local allocation reserve")

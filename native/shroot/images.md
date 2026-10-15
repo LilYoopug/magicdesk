@@ -22,6 +22,8 @@ shroot image import /host/layout /host/image --preserve-ownership
 shroot image create /host/image /host/instance
 shroot image inspect /host/instance
 shroot image format
+shroot image import-version
+shroot image prepare /host/instance
 shroot image run /host/instance -- /bin/sh
 shroot image run /host/instance --user 1000:1000 -- /bin/sh
 shroot image run /host/instance --bind /host/project /mnt -- /bin/sh
@@ -34,11 +36,22 @@ shroot image restore /host/backup.tar.zst /host/restored-instance
 Destinations must not exist. `--reference TAG` selects an index annotation;
 ambiguous or incompatible selections fail. `inspect` returns the image config,
 instance/image kind and retained immutable source directory identities.
-`format` returns the namespace format implemented by this native tool. The
-named-environment manager includes it in derived image cache keys, so an image
-with the same OCI digest or rootfs archive is re-imported when the store format
-changes. Downloaded blobs and raw layer bodies remain reusable. Existing
-instances and their bases are not migrated, replaced or deleted by installation.
+`format` returns the stable namespace family (17); `inspect` also publishes its
+independent `schemaRevision`. `import-version` identifies import semantics (1),
+not SQLite schema, journal policy or the APK build. The named-environment manager
+keys prepared images by `import-v1-` plus source identity. Metadata upgrades reuse
+the same base and leave existing instance paths and dependency records intact.
+Changing import semantics affects new imports only; it never retargets existing
+instances. Raw `layer-v1-` bodies and downloaded digest blobs have independent
+contracts and do not depend on the namespace schema.
+`prepare` performs supported metadata upgrades under exclusive lifetime admission;
+ordinary launches and instance creation use that same preparation path. Inspecting
+images or scanning applications never initiates upgrades. Resolving a named
+environment returns its fixed path without pre-opening SQLite, so it does not
+block launch-time preparation or the control of an older running launch.
+Formats before 17 and
+unknown future revisions are rejected without deletion. See
+[storage evolution](inode-store.md#storage-evolution).
 `run` combines Entrypoint and Cmd; arguments after `--` replace Cmd.
 `exec` requires an explicit command and ignores Entrypoint/Cmd. `login` uses the
 selected account's home directory and login shell, or the explicit command after

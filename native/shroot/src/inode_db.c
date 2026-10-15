@@ -4,6 +4,7 @@
 #include "inode_view.h"
 #include "inode_overlay.h"
 #include "storage_database.h"
+#include "inode_schema.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -13,9 +14,6 @@
 #include <sys/file.h>
 #include <sys/syscall.h>
 #include <unistd.h>
-
-static const int store_format = 16;
-int md_inode_store_format(void) { return store_format; }
 
 int mdi_sql_error(int rc) {
     return md_database_result(rc);
@@ -513,36 +511,7 @@ int mdi_allocate_root(struct md_inode_store *s, struct mdi_node *node) {
     char id[33]; memcpy(id,s->lifetime->scope,sizeof(id));
     return make_object(s,id,S_IFDIR,0700,0,NULL,s->lifetime->scope,node,&fd);
 }
-static int prepare_lookup_indexes(struct md_inode_store *s) {
-    /* Foreign-key checks run per removed parent. All child lookups must be
-     * indexed; otherwise collecting a view repeatedly scans the whole store.
-     * This is cold admission work, not part of retained worker reconnects. */
-    int r=mdi_sql(s,"BEGIN IMMEDIATE;"
-        "CREATE INDEX IF NOT EXISTS objects_parent ON objects(parent);"
-        "CREATE INDEX IF NOT EXISTS backings_object ON backings(object);"
-        "CREATE INDEX IF NOT EXISTS inode_views_upper ON inode_views(upper);"
-        "CREATE INDEX IF NOT EXISTS inode_views_work ON inode_views(work);"
-        "CREATE INDEX IF NOT EXISTS overlay_origins_object ON overlay_origins(object);"
-        "CREATE INDEX IF NOT EXISTS overlay_links_upper ON overlay_links(upper);"
-        "CREATE INDEX IF NOT EXISTS file_paths_parent ON file_paths(parent);"
-        "COMMIT;");
-    if (r) mdi_sql(s,"ROLLBACK");
-    return r;
-}
-static int journal_mode(struct md_inode_store *s, const char *sql, const char *expected) {
-    sqlite3_stmt *q=NULL;
-    int r=mdi_prepare(s,sql,&q);
-    if (!r) {
-        int rc=mdi_step(s,q);
-        if (rc!=SQLITE_ROW) r=mdi_sql_failure(rc);
-        else {
-            const char *mode=(const char *)sqlite3_column_text(q,0);
-            if (!mode || strcmp(mode,expected)) r=-ENOTSUP;
-        }
-    }
-    sqlite3_finalize(q); return r;
-}
-static int store_open(const char *directory, int create, int exclusive,
+static int store_open(const char *directory, int create, int exclusive, int prepare,
         struct md_inode_lifetime *retained, struct md_inode_store **out) {
     if (!out) return -EFAULT;
     *out = NULL;
@@ -572,104 +541,11 @@ static int store_open(const char *directory, int create, int exclusive,
     if (!r) r = store_lock(s);
     if (!r) r = md_database_open(root,"namespace.db",create,&s->db);
     if (!r) r = mdi_sql_error(sqlite3_extended_result_codes(s->db, 1));
-    /* WAL publication is atomic visibility; explicit barriers and bounded
-     * checkpoints own durability. Backing names are durable before WAL rows. */
-    if (!r) r = journal_mode(s,create ? "PRAGMA journal_mode=WAL" : "PRAGMA journal_mode","wal");
     if (!r) r = mdi_sql(s, "PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF");
-    if (!r) r = mdi_sql(s,s->lifetime->temporary ? "PRAGMA synchronous=OFF" : "PRAGMA synchronous=NORMAL");
-    if (!r) r = mdi_sql(s,"PRAGMA wal_autocheckpoint=1024; PRAGMA journal_size_limit=4194304");
+    if (!r && !create) r=mdi_schema_admit(s,prepare && !retained,exclusive,&mdi_schema_current);
+    if (!r) r=mdi_schema_configure(s,create);
     if (!r && create) {
-        r = mdi_sql(s, "BEGIN IMMEDIATE;"
-            "CREATE TABLE allocation_reserve(backing TEXT PRIMARY KEY CHECK(length(backing)=32)) STRICT;"
-            "CREATE TABLE objects(object TEXT PRIMARY KEY CHECK(length(object)=32),kind INTEGER NOT NULL,"
-                "device INTEGER NOT NULL,inode INTEGER NOT NULL,parent TEXT REFERENCES objects,"
-                "name_count INTEGER NOT NULL DEFAULT 0 CHECK(name_count>=0),"
-                "directory_count INTEGER NOT NULL DEFAULT 0 CHECK(directory_count>=0),"
-                "backing TEXT NOT NULL CHECK(length(backing)=32),shared INTEGER NOT NULL DEFAULT 0 CHECK(shared IN (0,1)),"
-                "logical_inode INTEGER NOT NULL,logical_device INTEGER NOT NULL,"
-                "source INTEGER NOT NULL DEFAULT 0 CHECK(source>=0 AND source<256),"
-                "mode INTEGER NOT NULL DEFAULT -1 CHECK(mode>=-1 AND mode<=4095),"
-                "uid INTEGER NOT NULL DEFAULT 0 CHECK(uid>=0 AND uid<4294967295),"
-                "gid INTEGER NOT NULL DEFAULT 0 CHECK(gid>=0 AND gid<4294967295),"
-                "acl_mask INTEGER NOT NULL DEFAULT 0 CHECK(acl_mask>=0 AND acl_mask<=3),"
-                "scope TEXT NOT NULL CHECK(length(scope)=32),"
-                "rdev INTEGER NOT NULL DEFAULT 0 CHECK(rdev>=0),"
-                "UNIQUE(scope,device,inode),CHECK(kind IN (32768,16384,40960,49152,4096,8192,24576)),"
-                "CHECK((kind=16384)=(parent IS NOT NULL))) STRICT;"
-            "CREATE TABLE sources(id INTEGER NOT NULL,path TEXT NOT NULL,device INTEGER NOT NULL,inode INTEGER NOT NULL,"
-                "scope TEXT NOT NULL CHECK(length(scope)=32),PRIMARY KEY(scope,id),"
-                "UNIQUE(scope,device,inode),CHECK(id>0 AND id<256)) STRICT;"
-            "CREATE TABLE backings(backing TEXT NOT NULL,object TEXT NOT NULL REFERENCES objects,"
-                "device INTEGER NOT NULL,inode INTEGER NOT NULL,source INTEGER NOT NULL,"
-                "scope TEXT NOT NULL CHECK(length(scope)=32),"
-                "UNIQUE(scope,device,inode),PRIMARY KEY(scope,backing,source)) STRICT;"
-            "CREATE TRIGGER objects_added AFTER INSERT ON objects BEGIN "
-                "INSERT INTO backings VALUES(NEW.backing,NEW.object,NEW.device,NEW.inode,NEW.source,NEW.scope); END;"
-            "CREATE TRIGGER objects_copied AFTER UPDATE OF backing ON objects WHEN NEW.backing!=OLD.backing BEGIN "
-                "INSERT INTO backings VALUES(NEW.backing,NEW.object,NEW.device,NEW.inode,NEW.source,NEW.scope); END;"
-            "CREATE TABLE inode_views(scope TEXT PRIMARY KEY REFERENCES objects,kind INTEGER NOT NULL,"
-                "upper TEXT REFERENCES objects,work TEXT REFERENCES objects,"
-                "writable INTEGER NOT NULL DEFAULT 0 CHECK(writable IN (0,1)),"
-                "user_xattr INTEGER NOT NULL DEFAULT 0 CHECK(user_xattr IN (0,1)),"
-                "CHECK(length(scope)=32)) STRICT;"
-            "CREATE TABLE overlay_origins(scope TEXT NOT NULL,device INTEGER NOT NULL,inode INTEGER NOT NULL,"
-                "origin TEXT NOT NULL,object TEXT NOT NULL REFERENCES objects ON DELETE CASCADE,"
-                "PRIMARY KEY(scope,device,inode,origin)) WITHOUT ROWID;"
-            "CREATE TABLE overlay_links(object TEXT PRIMARY KEY REFERENCES objects ON DELETE CASCADE,"
-                "upper TEXT REFERENCES objects,lower INTEGER NOT NULL CHECK(lower IN (0,1))) STRICT;"
-            "CREATE TABLE overlay_lower_names(parent TEXT NOT NULL REFERENCES objects ON DELETE CASCADE,"
-                "name BLOB NOT NULL,PRIMARY KEY(parent,name)) WITHOUT ROWID;"
-            "CREATE TABLE overlay_attributes(object TEXT NOT NULL REFERENCES objects ON DELETE CASCADE,"
-                "name INTEGER NOT NULL CHECK(name BETWEEN 1 AND 4),value BLOB CHECK(length(value)<=65536),"
-                "PRIMARY KEY(object,name)) STRICT;"
-            "CREATE TABLE properties(key TEXT PRIMARY KEY,value INTEGER NOT NULL) STRICT;"
-            "INSERT INTO properties VALUES('sealed',0);"
-            "CREATE TABLE names(cookie INTEGER PRIMARY KEY AUTOINCREMENT,"
-                "parent TEXT NOT NULL REFERENCES objects,name BLOB NOT NULL,"
-                "object TEXT NOT NULL REFERENCES objects,UNIQUE(parent,name),"
-                "CHECK(cookie>0 AND cookie<9223372036854775805)) STRICT;"
-            "CREATE INDEX names_object ON names(object);"
-            "CREATE INDEX names_cursor ON names(parent,cookie);"
-            "CREATE TABLE file_paths(object TEXT PRIMARY KEY REFERENCES objects,"
-                "parent TEXT NOT NULL REFERENCES objects,name BLOB NOT NULL,"
-                "ambiguous INTEGER NOT NULL CHECK(ambiguous IN (0,1))) STRICT;"
-            "CREATE TRIGGER names_added AFTER INSERT ON names BEGIN "
-                "UPDATE objects SET name_count=name_count+1 WHERE object=NEW.object;"
-                "INSERT INTO file_paths SELECT NEW.object,NEW.parent,NEW.name,name_count>1 "
-                    "FROM objects WHERE object=NEW.object AND kind!=16384 "
-                    "ON CONFLICT(object) DO UPDATE SET parent=excluded.parent,name=excluded.name,"
-                    "ambiguous=max(file_paths.ambiguous,excluded.ambiguous);"
-                "UPDATE objects SET directory_count=directory_count+1 WHERE object=NEW.parent "
-                    "AND (SELECT kind FROM objects WHERE object=NEW.object)=16384; END;"
-            "CREATE TRIGGER names_removed AFTER DELETE ON names BEGIN "
-                "UPDATE objects SET name_count=name_count-1 WHERE object=OLD.object;"
-                "UPDATE objects SET directory_count=directory_count-1 WHERE object=OLD.parent "
-                    "AND (SELECT kind FROM objects WHERE object=OLD.object)=16384; END;"
-            "CREATE TRIGGER names_immutable BEFORE UPDATE ON names BEGIN "
-                "SELECT RAISE(ABORT,'replace namespace entries with delete and insert'); END;"
-            "CREATE TABLE sockets(object TEXT PRIMARY KEY REFERENCES objects, address TEXT NOT NULL) STRICT;"
-            "CREATE TABLE inode_channels(object TEXT PRIMARY KEY REFERENCES objects ON DELETE CASCADE,"
-                "scope TEXT NOT NULL CHECK(length(scope)=32),channel TEXT NOT NULL CHECK(length(channel)=32),"
-                "source INTEGER NOT NULL DEFAULT 0 CHECK(source>=0 AND source<256),UNIQUE(scope,channel)) STRICT;"
-            "CREATE TRIGGER channel_added AFTER INSERT ON objects WHEN NEW.kind IN (4096,49152) BEGIN "
-                "INSERT INTO inode_channels(object,scope,channel) VALUES(NEW.object,NEW.scope,NEW.object); END;"
-            "CREATE TABLE fifo_pins(channel TEXT NOT NULL CHECK(length(channel)=32),owner TEXT NOT NULL CHECK(length(owner)=32),"
-                "pid INTEGER NOT NULL,descriptor INTEGER NOT NULL,device INTEGER NOT NULL,inode INTEGER NOT NULL,"
-                "PRIMARY KEY(channel,owner)) STRICT;"
-            "CREATE INDEX fifo_identity ON fifo_pins(device,inode);"
-            "CREATE TABLE file_capabilities(object TEXT PRIMARY KEY REFERENCES objects, value BLOB NOT NULL "
-                "CHECK(length(value) IN (12,20,24))) STRICT;"
-            "CREATE TABLE inode_acls(object TEXT NOT NULL REFERENCES objects,type INTEGER NOT NULL CHECK(type IN (1,2)),"
-                "value BLOB NOT NULL CHECK(length(value)>=28 AND length(value)<=65532),PRIMARY KEY(object,type)) STRICT;"
-            "CREATE TRIGGER acl_added AFTER INSERT ON inode_acls BEGIN "
-                "UPDATE objects SET acl_mask=acl_mask|NEW.type WHERE object=NEW.object; END;"
-            "CREATE TRIGGER acl_removed AFTER DELETE ON inode_acls BEGIN "
-                "UPDATE objects SET acl_mask=acl_mask&~OLD.type WHERE object=OLD.object; END;"
-            "CREATE TABLE events(sequence INTEGER PRIMARY KEY AUTOINCREMENT, parent TEXT NOT NULL,"
-            "object TEXT NOT NULL,name BLOB NOT NULL,mask INTEGER NOT NULL,cookie INTEGER NOT NULL) STRICT;");
-        char version_sql[64];
-        snprintf(version_sql, sizeof(version_sql), "PRAGMA user_version=%d", store_format);
-        if (!r) r = mdi_sql(s, version_sql);
+        r = mdi_schema_begin_create(s);
         struct mdi_node node; int fd;
         char id[33]=MDI_ROOT;
         if (!r) r = make_object(s, id, S_IFDIR, 0700, 0, NULL, MDI_ROOT, &node, &fd);
@@ -679,14 +555,7 @@ static int store_open(const char *directory, int create, int exclusive,
         if (!r) r=mdi_checkpoint(s);
     }
     sqlite3_stmt *q = NULL;
-    if (!r) r = mdi_prepare(s, "PRAGMA user_version", &q);
-    if (!r) {
-        int rc = mdi_step(s, q);
-        if (rc != SQLITE_ROW) r = mdi_sql_failure(rc);
-        else if (sqlite3_column_int(q, 0) != store_format) r = -EPROTONOSUPPORT;
-    }
-    sqlite3_finalize(q); q = NULL;
-    if (!r && (!retained || create)) r=prepare_lookup_indexes(s);
+    if (!r && (create || (prepare && !retained))) r=mdi_schema_indexes(s);
     if (!r) r = mdi_prepare(s, "SELECT value FROM properties WHERE key='sealed'", &q);
     if (!r) {
         int rc = mdi_step(s, q);
@@ -706,18 +575,21 @@ static int store_open(const char *directory, int create, int exclusive,
     return r;
 }
 int md_inode_store_open(const char *directory, int create, struct md_inode_store **out) {
-    return store_open(directory, create, 0, NULL, out);
+    return store_open(directory, create, 0, 1, NULL, out);
+}
+int md_inode_store_open_inspect(const char *directory, struct md_inode_store **out) {
+    return store_open(directory, 0, 0, 0, NULL, out);
 }
 int md_inode_store_open_exclusive(const char *directory, struct md_inode_store **out) {
-    return store_open(directory, 0, 1, NULL, out);
+    return store_open(directory, 0, 1, 1, NULL, out);
 }
 int md_inode_store_reconnect(struct md_inode_lifetime *owner, struct md_inode_store **out) {
     if (!owner) return -EINVAL;
-    return store_open(NULL,0,0,owner,out);
+    return store_open(NULL,0,0,0,owner,out);
 }
 int md_inode_store_initialize(struct md_inode_lifetime *owner, struct md_inode_store **out) {
     if (!owner) return -EINVAL;
-    return store_open(NULL,1,0,owner,out);
+    return store_open(NULL,1,0,1,owner,out);
 }
 void md_inode_store_close(struct md_inode_store *s) {
     if (!s) return;

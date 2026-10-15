@@ -16,7 +16,7 @@ inode_compile() {
         # Termux's dynamic libc stub may predate the APIs exposed by its headers.
         case "$($cc -dumpmachine)" in *android*) set -- --target=aarch64-linux-android34 -L/system/lib64 "$@" ;; esac
     fi
-    "$compiler" "$runtime/inode_store.c" "$runtime/inode_db.c" "$runtime/inode_events.c" \
+    "$compiler" "$runtime/inode_store.c" "$runtime/inode_db.c" "$runtime/inode_schema.c" "$runtime/inode_events.c" \
         "$runtime/inode_watch.c" "$runtime/watch_queue.c" "$runtime/inode_path.c" \
         "$runtime/inode_directory.c" "$runtime/inode_import.c" "$runtime/inode_socket.c" \
         "$runtime/inode_backing.c" "$runtime/inode_snapshot.c" "$runtime/inode_view.c" "$runtime/inode_overlay_write.c" "$runtime/inode_overlay_policy.c" "$runtime/identity_snapshot.c" "$runtime/inode_maintenance.c" "$runtime/inode_fifo.c" "$runtime/inode_channel.c" "$runtime/file_open.c" "$runtime/guest_identity.c" \

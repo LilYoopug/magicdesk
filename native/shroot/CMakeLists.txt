@@ -39,7 +39,7 @@ list(APPEND origins ${src}/network_flow.c ${src}/network_filter_ports.c ${src}/n
 set(mounts ${src}/fs_mounts.c ${src}/fs_mount_path.c ${src}/fs_mount_operations.c ${src}/fs_mount_table.c ${src}/fs_mount_change.c ${src}/fs_mount_lifecycle.c ${src}/fs_temporary.c ${src}/fs_overlay.c ${src}/fs_storage.c)
 list(APPEND mounts ${src}/proc_paths.c ${src}/procfs_view.c ${src}/proc_fdinfo.c ${src}/fs_proc.c ${src}/fs_cgroup.c ${src}/fs_bpf.c ${src}/fs_sysfs.c ${src}/fs_mqueue.c ${src}/fs_mount_file.c ${src}/mount_source.c ${src}/fs_context.c
     ${src}/fs_landlock.c ${src}/fs_provider.c ${src}/fs_control.c ${src}/fs_mount_propagation.c)
-set(inodes ${src}/inode_store.c ${src}/inode_db.c ${src}/inode_super.c ${src}/inode_cache.c ${src}/inode_events.c ${src}/inode_watch.c ${src}/watch_queue.c ${src}/inode_path.c
+set(inodes ${src}/inode_store.c ${src}/inode_db.c ${src}/inode_schema.c ${src}/inode_super.c ${src}/inode_cache.c ${src}/inode_events.c ${src}/inode_watch.c ${src}/watch_queue.c ${src}/inode_path.c
     ${src}/inode_directory.c ${src}/inode_import.c ${src}/inode_socket.c ${src}/inode_backing.c ${src}/inode_snapshot.c ${src}/inode_view.c ${src}/inode_maintenance.c ${src}/inode_fifo.c ${src}/inode_channel.c ${src}/file_open.c
     ${identity} ${src}/task_registry.c ${src}/guest_domain.c ${src}/mount_namespace.c ${origins} ${src}/inode_metadata.c ${src}/inode_xattr.c ${src}/inode_capability.c ${src}/inode_acl.c ${src}/posix_acl.c
     ${src}/inode_overlay_policy.c ${src}/inode_landlock.c ${src}/inode_transient.c ${src}/inode_overlay.c ${src}/inode_overlay_write.c)
@@ -266,13 +266,14 @@ if(MAGICDESK_GUEST_FIXTURES)
     target_link_options(test_native_mounts PRIVATE -Wl,--wrap=fopen -Wl,--wrap=fseek -Wl,--wrap=poll)
     target_compile_options(test_launch_registry PRIVATE -iquote ${src} -UNDEBUG)
     target_compile_definitions(image PRIVATE MD_INODE_TESTING)
-    foreach(name inodes durability import rpc snapshot mounts credentials)
+    foreach(name inodes schema durability import rpc snapshot mounts credentials)
         guest_executable(test_${name} ../guest-exec-lab/test_${name}.c ${inodes})
         target_compile_options(test_${name} PRIVATE -iquote ${src} -UNDEBUG)
         target_compile_definitions(test_${name} PRIVATE MD_INODE_TESTING)
         target_link_libraries(test_${name} PRIVATE guest-sqlite m)
     endforeach()
     target_link_options(test_durability PRIVATE -Wl,--wrap=fsync -Wl,--wrap=fdatasync)
+    target_link_options(test_schema PRIVATE -Wl,--wrap=mdi_schema_admit)
     guest_executable(durability_guest ../guest-exec-lab/test_durability_guest.c)
     target_compile_options(durability_guest PRIVATE -UNDEBUG)
     target_sources(test_credentials PRIVATE ${src}/guest_accounts.c ${namespace_engine} ${mounts}

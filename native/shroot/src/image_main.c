@@ -145,6 +145,14 @@ int main(int argc, char **argv) {
         }
         r = import(argv[2], argv[3], reference, !strcmp(argv[4], "--preserve-ownership"), pool, blobs);
     } else if (argc == 2 && !strcmp(argv[1], "format")) { printf("%d\n", md_inode_store_format()); r = 0; }
+    /* Import semantics, not the SQLite layout or runtime build. Keep this key
+     * stable across metadata upgrades so installed sources retain identity. */
+    else if (argc == 2 && !strcmp(argv[1], "import-version")) { puts("1"); r = 0; }
+    else if (argc == 3 && !strcmp(argv[1], "prepare")) {
+        struct md_inode_store *store=NULL;
+        r=md_inode_store_open(argv[2],0,&store);
+        md_inode_store_close(store);
+    }
     else if (argc == 4 && !strcmp(argv[1], "create")) r = create(argv[2], argv[3]);
     else if (argc == 4 && !strcmp(argv[1], "backup")) r = md_image_backup(argv[2], argv[3]);
     else if (argc == 4 && !strcmp(argv[1], "restore")) r = md_image_archive_import(argv[2], argv[3], 1);
@@ -170,7 +178,9 @@ int main(int argc, char **argv) {
         "       image restore ARCHIVE NEW_INSTANCE\n"
         "       image remove STORE | remove-layer LAYER (caller verifies persistent dependents)\n"
         "       image inspect IMAGE_OR_INSTANCE\n"
-        "       image format (persistent namespace format for derived image cache keys)\n"
+        "       image format (stable persistent namespace format)\n"
+        "       image import-version (import semantics for derived image cache keys)\n"
+        "       image prepare STORE (update supported metadata before use; busy stores are retained)\n"
         "       image exec INSTANCE [OPTIONS] -- COMMAND... | login INSTANCE [OPTIONS] [-- SHELL...]\n"
         "       image run INSTANCE [--user current|UID[:GID]|NAME[:GROUP]] [--cwd PATH] [--entrypoint PROGRAM] [--env KEY=VALUE]\n"
         "             [--hostname NAME] [--network routed] [--bind HOST GUEST] [--bind-ro HOST GUEST] [--magicdesk] [-- COMMAND...]\n");

@@ -1049,13 +1049,18 @@ static void retained_journal(void) {
     sqlite3 *db; CHECK(sqlite3_open(database,&db)==SQLITE_OK);
     CHECK(sqlite3_exec(db,"PRAGMA journal_mode=DELETE",NULL,NULL,NULL)==SQLITE_OK);
     CHECK(sqlite3_close(db)==SQLITE_OK);
-    CHECK(md_inode_store_open(directory,0,&a)==-ENOTSUP && !a);
+    CHECK(md_inode_store_open_inspect(directory,&a)==-EPROTONOSUPPORT && !a);
     CHECK(sqlite3_open(database,&db)==SQLITE_OK);
     sqlite3_stmt *q;
     CHECK(sqlite3_prepare_v2(db,"PRAGMA journal_mode",-1,&q,NULL)==SQLITE_OK);
     CHECK(sqlite3_step(q)==SQLITE_ROW && !strcmp((const char *)sqlite3_column_text(q,0),"delete"));
     sqlite3_finalize(q); CHECK(sqlite3_close(db)==SQLITE_OK);
-    puts("PASS WAL journal: shared connections, bounded checkpoint reuse, stable inode, committed visibility and non-mutating foreign journal rejection");
+    CHECK(!md_inode_store_open(directory,0,&a));
+    CHECK(state(a,"file",1).st_size==0);
+    CHECK(sqlite3_prepare_v2(a->db,"PRAGMA journal_mode",-1,&q,NULL)==SQLITE_OK);
+    CHECK(sqlite3_step(q)==SQLITE_ROW && !strcmp((const char *)sqlite3_column_text(q,0),"wal"));
+    sqlite3_finalize(q); md_inode_store_close(a);
+    puts("PASS WAL journal: shared connections, bounded checkpoint reuse, stable inode, non-mutating inspection and explicit journal preparation");
 }
 int main(int argc, char **argv) {
     CHECK(argc == 2 || argc == 3);

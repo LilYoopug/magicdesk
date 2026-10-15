@@ -53,8 +53,8 @@ final class GuestEnvironmentLibrary {
         validateName(name);
         try (Lock ignored = lock()) {
             requireNew(name);
-            String format = images.invoke("format").trim();
-            if (!format.matches("[1-9][0-9]{0,8}")) throw new IOException("Invalid native image format: " + format);
+            String importer = images.invoke("import-version").trim();
+            if (!importer.matches("[1-9][0-9]{0,8}")) throw new IOException("Invalid native import version: " + importer);
             Path work = Files.createTempDirectory(root.resolve("work"), "install-");
             try {
                 Path input;
@@ -75,7 +75,7 @@ final class GuestEnvironmentLibrary {
                     // Local layouts may have several tagged manifests; native selection owns validation.
                     image = "local-" + UUID.randomUUID();
                 }
-                image = "v" + format + "-" + image;
+                image = "import-v" + importer + "-" + image;
                 Path base = root.resolve("images").resolve(image);
                 if (!Files.exists(base, LinkOption.NOFOLLOW_LINKS)) {
                     progress.accept("Importing " + source);
@@ -84,7 +84,10 @@ final class GuestEnvironmentLibrary {
                             "--layers", root.resolve("layers").toString(), "--blobs", root.resolve("cache").toString());
                     else images.invoke("import", input.toString(), base.toString(), "--preserve-ownership",
                             "--layers", root.resolve("layers").toString());
-                } else requireKind(base, "image");
+                } else {
+                    images.invoke("prepare", base.toString());
+                    requireKind(base, "image");
+                }
                 String id = UUID.randomUUID().toString();
                 Path store = root.resolve("instances").resolve(id);
                 images.invoke("create", base.toString(), store.toString());
@@ -221,7 +224,10 @@ final class GuestEnvironmentLibrary {
 
     Environment resolve(String name) throws Exception {
         Environment environment = read(name);
-        requireKind(environment.store(), "instance");
+        // Resolve identity without opening SQLite. The selected native operation
+        // owns schema admission; inspection here would prevent future upgrades.
+        if (!Files.isDirectory(environment.store(), LinkOption.NOFOLLOW_LINKS))
+            throw new IOException("Missing environment storage: " + environment.store());
         return environment;
     }
 
@@ -240,7 +246,7 @@ final class GuestEnvironmentLibrary {
 
     JSONObject inspect(String name) throws Exception {
         Environment environment = resolve(name);
-        return new JSONObject(images.invoke("inspect", environment.store().toString()))
+        return requireKind(environment.store(), "instance")
                 .put("name", environment.name()).put("store", environment.store().toString())
                 .put("source", environment.source()).put("image", environment.image())
                 .put("launches", launches(environment));
@@ -359,15 +365,19 @@ final class GuestEnvironmentLibrary {
         JSONObject record = new JSONObject(GuestImageFiles.read(recordPath(name)));
         if (record.getInt("format") != 1 || !name.equals(record.getString("name"))) throw new IOException("Invalid environment record");
         String id = record.getString("id"), image = record.getString("image");
+        // An opaque resource key, not a schema/version selector. Its contents
+        // are admitted by the native store; records retain their exact paths.
         if (!UUID.fromString(id).toString().equals(id) || !(image.isEmpty()
-                || image.matches("(?:v[1-9][0-9]{0,8}-)?(?:(?:oci|rootfs)-[0-9a-f]{64}|local-[0-9a-f-]{36})")))
+                || image.matches("[a-z0-9][a-z0-9-]{0,127}")))
             throw new IOException("Invalid environment storage identity");
         return new Environment(name, id, image, record.getString("source"), root.resolve("instances").resolve(id));
     }
 
-    private void requireKind(Path store, String expected) throws Exception {
-        if (!expected.equals(new JSONObject(images.invoke("inspect", store.toString())).getString("kind")))
+    private JSONObject requireKind(Path store, String expected) throws Exception {
+        JSONObject information = new JSONObject(images.invoke("inspect", store.toString()));
+        if (!expected.equals(information.getString("kind")))
             throw new IOException("Expected guest " + expected + ": " + store);
+        return information;
     }
 
     private void requireNew(String name) throws IOException {

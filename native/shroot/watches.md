@@ -22,7 +22,8 @@ holds a shared kernel lock; mutators check its presence inside store admission.
 Without observers, mutations append no event rows. The last reader's closure
 retires its instance; process death releases presence through kernel FD lifetime.
 No persisted subscriber counter, heartbeat or timer cleans up stale owners.
-Old formats are rejected without migration or deletion.
+Storage admission and version handling belong to the shared
+[schema owner](inode-store.md#storage-evolution), not the watch subsystem.
 
 Native inotify on the database WAL wakes the worker; it reads only committed journal
 rows after acquiring store admission. The journal retains 65,536 entries plus at

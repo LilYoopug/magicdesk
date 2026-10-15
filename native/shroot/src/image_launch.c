@@ -27,7 +27,7 @@ static int config(struct md_inode_store *s, char **json) {
 }
 int md_image_inspect(const char *path) {
     struct md_inode_store *s = NULL;
-    int r = md_inode_store_open(path, 0, &s);
+    int r = md_inode_store_open_inspect(path, &s);
     char *json = NULL, *result = NULL;
     if (!r) r = mdi_begin(s, 0);
     if (!r) {
@@ -35,9 +35,11 @@ int md_image_inspect(const char *path) {
         sqlite3_stmt *q = NULL;
         if (!r) r = md_json_query(s->db, json, "SELECT json_object('kind',?2,'config',json(?1),'sources',"
             "(SELECT json_group_array(json_object('path',path,'device',device,'inode',inode)) FROM sources WHERE scope=?3),"
-            "'guestUsers',(SELECT value FROM properties WHERE key='image-users'))", &q);
+            "'guestUsers',(SELECT value FROM properties WHERE key='image-users'),"
+            "'format',?4,'schemaRevision',(SELECT value FROM properties WHERE key='schema-revision'))", &q);
         if (!r) sqlite3_bind_text(q, 2, s->readonly ? "image" : "instance", -1, SQLITE_STATIC);
         if (!r) r=mdi_bind_id(q,3,s->lifetime->scope);
+        if (!r) r=mdi_sql_error(sqlite3_bind_int(q,4,md_inode_store_format()));
         if (!r) {
             int rc = sqlite3_step(q);
             if (rc != SQLITE_ROW) r = mdi_sql_failure(rc);

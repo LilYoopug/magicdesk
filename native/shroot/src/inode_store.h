@@ -15,8 +15,9 @@
  * EIO during commit has an unknown outcome; reopen and inspect before replay.
  * Files are native descriptors. No object is reclaimed while clients may exist. */
 struct md_inode_store;
-/* Persistent namespace format, owned by the native store implementation. */
+/* Stable format family and independently evolving metadata schema revision. */
 int md_inode_store_format(void);
+int md_inode_store_revision(void);
 struct md_inode_statistics {
     struct md_cost prepare, step, transaction, lock;
     struct md_cost version, descriptor, path;
@@ -33,6 +34,9 @@ void md_inode_measure(struct md_inode_store *, struct md_inode_statistics *);
  * store. Absolute paths ignore dirfd. Data/directory FDs are real kernel FDs. */
 #define MD_INODE_ROOT (-1)
 int md_inode_store_open(const char *directory, int create, struct md_inode_store **out);
+/* No schema/journal updates or index preparation. Unknown/newer schemas fail
+ * before namespace queries; callers must not treat that as an empty store. */
+int md_inode_store_open_inspect(const char *directory, struct md_inode_store **out);
 /* Offline maintenance fails with EBUSY while a connection or path origin retains
  * the store. Store close releases SQLite and transaction resources immediately;
  * retained origins keep the existing backing/source maintenance leases. */

@@ -151,17 +151,72 @@ class Images(unittest.TestCase):
         self.run_import(self.layout())
         self.assertEqual(self.object('hello').read_bytes(), b'world')
 
-    def test_format_matches_created_namespace_and_old_schema_is_not_modified(self):
+    def test_format_and_revision_are_independent_of_import_identity(self):
         version = int(self.command('format').stdout)
-        self.assertGreater(version, 1)
+        self.assertEqual(version, 17)
+        self.assertEqual(self.command('import-version').stdout.strip(), '1')
         self.run_import(self.layout())
         with database(self.destination / 'namespace.db') as db:
             self.assertEqual(version, db.execute('PRAGMA user_version').fetchone()[0])
-            db.execute('PRAGMA user_version=' + str(version - 1))
-        result = self.command('inspect', self.destination, success=False)
-        self.assertIn('errno=' + str(errno.EPROTONOSUPPORT), result.stderr)
+            self.assertEqual(0x53485254, db.execute('PRAGMA application_id').fetchone()[0])
+            revision = db.execute("SELECT value FROM properties WHERE key='schema-revision'").fetchone()[0]
+        result = json.loads(self.command('inspect', self.destination).stdout)
+        self.assertEqual(result['format'], version)
+        self.assertEqual(result['schemaRevision'], revision)
+
+    def test_unsupported_format_is_never_updated_or_deleted(self):
+        self.run_import(self.layout())
+        for version in (14, 15, 16, 18):
+            with self.subTest(version=version):
+                with database(self.destination / 'namespace.db') as db:
+                    db.execute('PRAGMA user_version=' + str(version))
+                    db.execute('PRAGMA journal_mode=DELETE')
+                for command in ('inspect', 'prepare'):
+                    result = self.command(command, self.destination, success=False)
+                    self.assertIn('errno=' + str(errno.EPROTONOSUPPORT), result.stderr)
+                with database(self.destination / 'namespace.db') as db:
+                    self.assertEqual(version, db.execute('PRAGMA user_version').fetchone()[0])
+                    self.assertEqual('delete', db.execute('PRAGMA journal_mode').fetchone()[0])
+                self.assertEqual(self.object('hello').read_bytes(), b'world')
+
+    def test_wrong_application_and_unknown_revision_fail_before_updates(self):
+        self.run_import(self.layout())
+        for sql in ('PRAGMA application_id=0',
+                    "UPDATE properties SET value=2147483647 WHERE key='schema-revision'"):
+            with self.subTest(sql=sql):
+                with database(self.destination / 'namespace.db') as db:
+                    db.execute(sql)
+                for command in ('inspect', 'prepare'):
+                    result = self.command(command, self.destination, success=False)
+                    self.assertIn('errno=' + str(errno.EPROTONOSUPPORT), result.stderr)
+                with database(self.destination / 'namespace.db') as db:
+                    db.execute('PRAGMA application_id=1397248596')
+
+    def test_journal_policy_and_indexes_do_not_change_store_identity(self):
+        self.run_import(self.layout())
+        path = self.destination / 'namespace.db'
+        identity = self.destination.stat().st_ino, self.object('hello').stat().st_ino
+        with database(path) as db:
+            db.execute('DROP INDEX objects_parent')
+        self.command('inspect', self.destination)
+        with database(path) as db:
+            self.assertFalse(db.execute("SELECT 1 FROM sqlite_schema WHERE name='objects_parent'").fetchone())
+            db.execute('PRAGMA journal_mode=DELETE')
+        self.command('inspect', self.destination, success=False)
+        fd = os.open(self.destination, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            result = self.command('prepare', self.destination, success=False)
+            self.assertIn('errno=' + str(errno.EBUSY), result.stderr)
+        finally:
+            os.close(fd)
+        self.command('prepare', self.destination)
+        self.command('prepare', self.destination)
+        self.assertEqual(identity, (self.destination.stat().st_ino, self.object('hello').stat().st_ino))
         with database(self.destination / 'namespace.db') as db:
-            self.assertEqual(version - 1, db.execute('PRAGMA user_version').fetchone()[0])
+            self.assertEqual(17, db.execute('PRAGMA user_version').fetchone()[0])
+            self.assertEqual('wal', db.execute('PRAGMA journal_mode').fetchone()[0])
+            self.assertTrue(db.execute("SELECT 1 FROM sqlite_schema WHERE name='objects_parent'").fetchone())
 
     def interrupt_publication(self, *arguments):
         libc = ctypes.CDLL(None, use_errno=True)

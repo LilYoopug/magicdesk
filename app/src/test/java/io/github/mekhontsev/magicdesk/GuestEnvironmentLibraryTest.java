@@ -25,10 +25,11 @@ public class GuestEnvironmentLibraryTest {
         final Map<Path, String> applications = new HashMap<>();
         final Map<String, String> icons = new HashMap<>();
         boolean busy;
-        String format = "14";
+        String importer = "1";
+        String schema = "1";
         @Override public String invoke(String... args) throws Exception {
             commands.add(List.of(args));
-            if (args[0].equals("format")) return format;
+            if (args[0].equals("import-version")) return importer;
             Path path = Path.of(args[1]);
             switch (args[0]) {
                 case "applications" -> {
@@ -41,10 +42,14 @@ public class GuestEnvironmentLibraryTest {
                     return icons.getOrDefault(path + ":" + args[2], "");
                 }
                 case "recover-staging", "launches" -> { }
+                case "prepare" -> {
+                    if (busy) throw new IOException("Busy");
+                    stores.get(path).put("schemaRevision", schema);
+                }
                 case "rootfs", "import", "restore" -> {
                     Path target = Path.of(args[2]); Files.createDirectory(target);
                     stores.put(target, new JSONObject().put("kind", args[0].equals("restore") ? "instance" : "image")
-                            .put("sources", new JSONArray()));
+                            .put("schemaRevision", schema).put("sources", new JSONArray()));
                 }
                 case "create" -> {
                     Path target = Path.of(args[2]); Files.createDirectory(target);
@@ -86,37 +91,95 @@ public class GuestEnvironmentLibraryTest {
         assertEquals(b, library.resolve("other"));
     }
 
-    @Test public void imageCacheUsesNativeFormatWithoutReusingOrRemovingOldStores() throws Exception {
+    @Test public void schemaUpgradeReusesImageWithoutRetargetingExistingInstances() throws Exception {
         Path root = temporary.newFolder().toPath(), archive = temporary.newFile().toPath();
         Files.writeString(archive, "rootfs input");
         Images images = new Images(); var library = library(root, images);
-        Path legacy = Files.createDirectory(root.resolve("images/rootfs-" + GuestImageFiles.digest(archive)));
-        images.format = "12";
+        Path legacy = Files.createDirectory(root.resolve("images/v16-rootfs-" + GuestImageFiles.digest(archive)));
         var old = library.install(archive.toString(), GuestEnvironmentLibrary.SourceKind.ROOTFS, "old");
-        images.format = "14";
+        images.schema = "2";
         var current = library.install(archive.toString(), GuestEnvironmentLibrary.SourceKind.ROOTFS, "current");
         var shared = library.install(archive.toString(), GuestEnvironmentLibrary.SourceKind.ROOTFS, "shared");
-        assertNotEquals(old.image(), current.image());
+        assertEquals(old.image(), current.image());
         assertEquals(current.image(), shared.image());
-        assertTrue(current.image().startsWith("v14-rootfs-"));
+        assertTrue(current.image().startsWith("import-v1-rootfs-"));
+        Path base = root.resolve("images").resolve(old.image());
+        assertEquals("2", images.stores.get(base).getString("schemaRevision"));
         assertEquals(old, library.resolve("old"));
         assertTrue(Files.isDirectory(legacy));
         assertTrue(Files.isDirectory(old.store()));
-        assertEquals(2, images.commands.stream().filter(c -> c.get(0).equals("rootfs")).count());
+        assertEquals(1, images.commands.stream().filter(c -> c.get(0).equals("rootfs")).count());
         assertFalse(images.commands.stream().anyMatch(c -> c.get(0).startsWith("remove")));
         assertFalse(images.commands.stream().anyMatch(c -> c.contains(legacy.toString())));
     }
 
-    @Test public void invalidNativeFormatStopsBeforeImageOrInstanceCreation() throws Exception {
+    @Test public void importerChangeAffectsOnlyNewImagesAndBusyUpgradeDoesNotPublishAnInstance() throws Exception {
         Path root = temporary.newFolder().toPath(), archive = temporary.newFile().toPath();
         Images images = new Images(); var library = library(root, images);
-        for (String format : List.of("", "0", "../14", "14\n15", "99999999999999999999")) {
-            images.format = format; images.commands.clear();
+        var old = library.install(archive.toString(), GuestEnvironmentLibrary.SourceKind.ROOTFS, "old");
+        images.busy = true;
+        assertThrows(IOException.class, () -> library.install(archive.toString(),
+                GuestEnvironmentLibrary.SourceKind.ROOTFS, "blocked"));
+        assertEquals(List.of(old), library.list());
+        images.busy = false; images.importer = "2";
+        var current = library.install(archive.toString(), GuestEnvironmentLibrary.SourceKind.ROOTFS, "new");
+        assertNotEquals(old.image(), current.image());
+        assertTrue(current.image().startsWith("import-v2-rootfs-"));
+        assertEquals(old, library.resolve("old"));
+        assertEquals(2, images.commands.stream().filter(c -> c.get(0).equals("rootfs")).count());
+    }
+
+    @Test public void invalidNativeImportVersionStopsBeforeImageOrInstanceCreation() throws Exception {
+        Path root = temporary.newFolder().toPath(), archive = temporary.newFile().toPath();
+        Images images = new Images(); var library = library(root, images);
+        for (String importer : List.of("", "0", "../1", "1\n2", "99999999999999999999")) {
+            images.importer = importer; images.commands.clear();
             assertThrows(IOException.class, () -> library.install(archive.toString(),
                     GuestEnvironmentLibrary.SourceKind.ROOTFS, "work"));
-            assertEquals(List.of(List.of("format")), images.commands);
+            assertEquals(List.of(List.of("import-version")), images.commands);
             assertTrue(library.list().isEmpty());
         }
+    }
+
+    @Test public void opaqueImageIdentityPreservesPathsButRejectsTraversal() throws Exception {
+        Path root = temporary.newFolder().toPath(), archive = temporary.newFile().toPath();
+        Images images = new Images(); var library = library(root, images);
+        var environment = library.install(archive.toString(), GuestEnvironmentLibrary.SourceKind.ROOTFS, "work");
+        Path path = root.resolve("names/work.json");
+        JSONObject record = new JSONObject(Files.readString(path));
+        images.commands.clear();
+        for (String key : List.of("future-image-key", "a".repeat(128))) {
+            Files.writeString(path, record.put("image", key).toString());
+            var resolved = library.resolve("work");
+            assertEquals(key, resolved.image());
+            assertEquals(environment.id(), resolved.id());
+            assertEquals(environment.store(), resolved.store());
+        }
+        for (String key : List.of("..", "../instances", "/other", "image/other", "image\\other",
+                "image\n", "a".repeat(129))) {
+            Files.writeString(path, record.put("image", key).toString());
+            assertThrows(IOException.class, () -> library.resolve("work"));
+        }
+        assertTrue(images.commands.isEmpty());
+        assertTrue(Files.isDirectory(environment.store()));
+    }
+
+    @Test public void resolutionDoesNotBlockNativeUpgradeOrStoppingOlderLaunches() throws Exception {
+        Path root = temporary.newFolder().toPath(), archive = temporary.newFile().toPath();
+        Images images = new Images(); var library = library(root, images);
+        var environment = library.restore(archive, "work");
+        images.stores.remove(environment.store()); // Native inspection is unavailable.
+        images.commands.clear();
+        assertEquals(environment, library.resolve("work"));
+        assertEquals(List.of(environment), library.list());
+        assertTrue(images.commands.isEmpty());
+        assertEquals(0, library.launches("work").length());
+        assertEquals(List.of(List.of("launches", environment.store().toString())), images.commands);
+        assertThrows(IOException.class, () -> library.inspect("work"));
+        Files.delete(environment.store());
+        assertThrows(IOException.class, () -> library.resolve("work"));
+        Files.createSymbolicLink(environment.store(), root);
+        assertThrows(IOException.class, () -> library.resolve("work"));
     }
 
     @Test public void failedOrBusyRemovalKeepsNameAndPruneKeepsDependencies() throws Exception {

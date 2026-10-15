@@ -477,8 +477,19 @@ Catalog mutations report busy rather than wait behind another operation.
 Listing and launch resolution do not wait for downloads. Interrupted publication
 does not expose a partial environment; recognized abandoned staging is reclaimed
 by subsequent publication or explicit recovery. Inspect the catalog before
-retrying an operation whose result was lost. Internal store formats are versioned;
-incompatible stores are rejected, not silently migrated or deleted.
+retrying an operation whose result was lost.
+
+Format **17** is the persistent-storage compatibility baseline. Formats 14-16
+are not upgraded; export needed files with their matching runtime before
+recreating those environments. They are never automatically deleted.
+From format 17 onward, supported metadata revisions are prepared in place before
+use, preserving environment paths, files, identities and shared sources. An update
+requiring exclusive access reports busy while another launch or dependent store
+retains the storage; stop those launches and retry. Listing and application
+catalog inspection do not initiate schema updates. `shroot image prepare STORE`
+explicitly prepares a store without launching it. A newer, unknown revision is
+rejected; downgrading an APK does not downgrade its storage.
+See [storage evolution](../native/shroot/inode-store.md#storage-evolution).
 
 #### Launches and directory attachments
 

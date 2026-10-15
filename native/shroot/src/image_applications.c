@@ -81,7 +81,7 @@ static int icon(struct md_inode_store *s, const char *path) {
 }
 int md_image_applications(const char *store, const char *name) {
     struct md_inode_store *s = NULL;
-    int r = md_inode_store_open(store, 0, &s), guest = 0;
+    int r = md_inode_store_open_inspect(store, &s), guest = 0;
     struct md_filesystem fs = {.store=s};
     struct md_identity identity = {0}; struct md_guest_account account = {0};
     char *json = NULL;

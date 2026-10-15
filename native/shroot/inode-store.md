@@ -6,6 +6,7 @@ shell SELinux hard-link restriction without copying data, claiming host links,
 changing identity or special-casing dpkg.
 
 - [Ownership](#ownership)
+- [Storage Evolution](#storage-evolution)
 - [Paths And Directories](#paths-and-directories)
 - [Directory Cursors](#directory-cursors)
 - [Offline Import](#offline-import)
@@ -41,6 +42,8 @@ native FD transfer and bounded reentrant client waits. The explicit
 a timeout is not cancellation of a committed operation.
 
 `inode_db.c` owns transactions, allocation, identities and metadata queries;
+`inode_schema.c` owns creation, format/revision admission, metadata upgrades,
+connection journal policy and rebuildable lookup indexes;
 `inode_path.c` resolves paths and reconstructs directory paths;
 `inode_cache.c` owns bounded metadata caching and row-dependency invalidation;
 `inode_store.c` defines namespace operations, `inode_directory.c` implements
@@ -56,14 +59,68 @@ domain; `inode_maintenance.c` collects untracked backing objects only under
 exclusive maintenance or before a store is published.
 Their private contract is in
 `inode_internal.h`. Callers use the explicit dirfd-based `inode_store.h` API.
-The internal database format is versioned and incompatible formats are rejected,
-not migrated. Format 16 uses WAL and includes durable allocation inventory,
+Format 17 uses WAL and includes durable allocation inventory,
 scoped namespace views, logical owners/modes, POSIX ACLs, file capabilities,
 unambiguous file-path history, stable identities, backing history,
 immutable sources, socket addresses, FIFO ownership, device type/rdev, transactional namespace
-counters and the [watch event journal](watches.md). Incompatible stores require a separately prepared store; opening
-one never rewrites or deletes it. Bind retains a name until
+counters and the [watch event journal](watches.md). Formats before 17 require a separately prepared store;
+opening one never rewrites or deletes it. Bind retains a name until
 unlink, including stale listeners; existing connections survive unlink/rebind.
+
+## Storage Evolution
+
+Format 17 is the compatibility baseline. SQLite `application_id=0x53485254`
+identifies Shroot, `user_version=17` identifies the storage family, and the
+`properties` row `schema-revision` identifies the metadata revision (initially 1).
+Admission validates those markers before current-schema namespace queries or
+journal changes. Unknown families, missing markers and newer revisions fail;
+there is no reader/writer implementation for formats 14-16 or automatic deletion.
+
+Ordinary admission does not run `integrity_check`, `quick_check`,
+`foreign_key_check`, a namespace-wide audit or file-content hashing. Full audit
+is an explicit diagnostic/test operation, not a launch prerequisite. SQLite may
+check affected tables internally during a schema change; that belongs to the
+one-time upgrade, not to normal opens or filesystem operations.
+
+Append metadata-only SQL steps to `mdi_schema_current` when the schema evolves;
+each step and its next revision commit together with full synchronization. Update
+the current creation SQL in the same change and verify that fresh and upgraded
+stores have equivalent schemas. Fresh stores publish the current revision in
+their creation transaction; no old-schema runtime is needed to initialize a root.
+Upgrade SQL cannot control transactions, journal pragmas or attached databases.
+Never include native backing IO in a step. Changes requiring backing
+transformation need a separately reviewed recovery protocol, not an unsafe SQL
+callback. Keep fixtures for every supported revision from this baseline onward.
+
+Ordinary cold admission prepares supported revisions before exposing the store.
+An update converts the root lifetime lease to exclusive, nonblocking admission;
+another process, retained origin or dependent store holding the lease produces
+EBUSY. Failed flock conversion may drop the shared lease, so failure closes the
+unpublished connection rather than returning a partially admitted owner. Retained
+worker reconnects and `md_inode_store_open_inspect` cannot update. Inspection also
+skips index preparation. There is no per-syscall schema branch or update check.
+
+WAL configuration is a storage policy, not a schema revision. Conversion from a
+rollback journal uses the same exclusive admission but occurs outside the schema
+transaction; either journal mode with the prior revision is a valid retry state.
+Committed steps are not replayed after interruption; failed steps roll back their
+revision with their metadata. Checkpoint and directory-sync errors propagate.
+This recovery contract is tested with process death and injected errors, not a
+claim of physical power-loss testing. Concurrent preparation reports busy instead
+of racing another owner. Current WAL/revision stores retain shared admission.
+
+Guest names, stable object IDs, ownership/ACLs, file-path ambiguity history,
+backing/source references, allocation inventory and namespace counters are
+authoritative metadata. In particular, inventory and backing history are not
+discardable caches: collection uses them to decide which native bodies survive.
+Lookup indexes are rebuildable and do not require a schema bump. Connection-local
+query/metadata caches and checkpoint thresholds are runtime details. Image import
+identity is independent as documented in [images](images.md#commands).
+
+An upgrade must retain root/source directory identities, guest contents and
+existing instance paths. Forward upgrades are the supported direction; an older
+runtime rejects a newer revision rather than guessing compatibility. Storage
+compatibility does not require preserving obsolete internal APIs or wire formats.
 
 Each retained view selects its own root and physical-to-logical inode mapping.
 Different views can share a native body without aliasing their logical metadata;
@@ -323,7 +380,8 @@ independent of OCI parsing and launch-local directory attachments.
   opening and ordinary operations. SQLite's Unix VFS may retain closed main-DB
   FDs while a same-process peer holds POSIX locks; subsequent opens reuse this
   bounded concurrency high-water mark, and last-owner close releases it.
-  Incompatible store formats and journal modes are rejected without conversion.
+  Unsupported storage families/revisions are rejected; supported metadata and
+  journal changes use the offline admission described above.
   No SQLite busy timeout or
   automatic replay is installed. An external SQLite writer bypassing the store
   gate still returns EAGAIN. An IO error during commit can have an unknown
@@ -353,6 +411,17 @@ SQLite supplies database transactions, not Linux filesystem semantics. Reference
 [Linux rename](https://man7.org/linux/man-pages/man2/rename.2.html).
 
 ## Checks
+
+`test_schema` drives real cold admission with prospective revision steps: stable
+file/hardlink identity, inspection and downgrade rejection, busy live owners,
+concurrent updates, injected ENOSPC, and SIGKILL before/after commits including
+rollback-to-WAL preparation. It rejects transaction/journal control in upgrade
+SQL and checks dependent source leases, shared bodies and COW across revisions.
+An authorizer fixture rejects full-audit pragmas during ordinary admission,
+inspection, retained reconnects and file operations. File operations must not
+reenter schema admission. `test_oci.py` checks unsupported families, wrong application
+identity, unknown revisions, journal preparation and rebuildable indexes along
+with the image/snapshot/backup workflows. These tests do not add old-format support.
 
 `test_durability` checks data and WAL failures, directory-sync failure before
 reserve publication, concurrent reserve claims, watch-event transparency,
