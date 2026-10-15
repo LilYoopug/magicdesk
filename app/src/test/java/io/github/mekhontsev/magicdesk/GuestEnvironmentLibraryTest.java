@@ -92,7 +92,8 @@ public class GuestEnvironmentLibraryTest {
     }
 
     @Test public void schemaUpgradeReusesImageWithoutRetargetingExistingInstances() throws Exception {
-        Path root = temporary.newFolder().toPath(), archive = temporary.newFile().toPath();
+        // Exercise canonical library paths even without Windows temporary-directory aliases.
+        Path root = temporary.newFolder().toPath().resolve("."), archive = temporary.newFile().toPath();
         Files.writeString(archive, "rootfs input");
         Images images = new Images(); var library = library(root, images);
         Path legacy = Files.createDirectory(root.resolve("images/v16-rootfs-" + GuestImageFiles.digest(archive)));
@@ -103,7 +104,7 @@ public class GuestEnvironmentLibraryTest {
         assertEquals(old.image(), current.image());
         assertEquals(current.image(), shared.image());
         assertTrue(current.image().startsWith("import-v1-rootfs-"));
-        Path base = root.resolve("images").resolve(old.image());
+        Path base = root.resolve("images").resolve(old.image()).toRealPath();
         assertEquals("2", images.stores.get(base).getString("schemaRevision"));
         assertEquals(old, library.resolve("old"));
         assertTrue(Files.isDirectory(legacy));
