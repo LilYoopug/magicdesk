@@ -59,6 +59,17 @@ static struct md_control_file readiness(struct md_fd_object *object) {
 }
 static const struct md_fd_object_type type={.destroy=destroy,.selectors=1U<<MD_FD_SELECTOR_PROC,
     .selector_mask=selectors,.readiness=readiness};
+struct md_fd_object *md_proc_file_control_object(const struct md_control_file_ops *ops,void *context,
+        const struct md_identity *id,int flags,int *descriptor) {
+    struct md_proc_file *file=md_proc_file_open_control(ops,context,id,flags);
+    if (!file) return NULL;
+    if (ops->descriptor && !(flags&O_PATH)) {
+        int fd=md_proc_file_descriptor(file);
+        if (fd<0) { md_proc_file_release(file); errno=-fd; return NULL; }
+        *descriptor=fd;
+    }
+    return md_proc_file_object(file);
+}
 struct md_fd_object *md_proc_file_object(struct md_proc_file *f) {
     return f ? &f->object : NULL;
 }

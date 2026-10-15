@@ -12,6 +12,7 @@
 #include "fd_channel.h"
 #include "received_fds.h"
 #include "ipc_credentials.h"
+#include "proc_file.h"
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -1393,6 +1394,7 @@ static void buffer_service_lifetime(const char *store, unsigned cancelled_operat
     int wake=eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK); assert(wake>=0);
     struct md_resource_wakeup *token=NULL; assert(!md_resource_wakeup_create(wake,&token));
     struct md_fs_buffer_service *service=md_fs_buffer_service_new(worker,tasks,token,buffer_completed); assert(service);
+    md_fs_buffer_control_factory(service,md_proc_file_control_object);
     struct md_interception_buffers *pool=NULL; assert(!md_buffers_create(1,sizeof(struct md_fs_buffer_frame),sizeof(struct md_fs_buffer_frame),0,&pool));
     struct md_interception_buffer task={0},next={0};
     assert(!md_buffers_take(pool,&task));
@@ -1526,7 +1528,15 @@ static void buffer_service_lifetime(const char *store, unsigned cancelled_operat
         assert(!buffer_error && frame->reply.delivery==MD_FS_REPLIED && !frame->reply.result.error
             && frame->reply.result.fd==-1 && frame->transfer==MD_FS_BUFFER_ADDFD && !frame->source[0]);
         assert(buffered_open.fd>=0 && !(fcntl(buffered_open.fd,F_GETFL)&O_PATH));
-        assert(!fstat(buffered_open.fd,&st) && S_ISREG(st.st_mode));
+        if (operations[i]==MD_FS_MOUNT_TABLE) {
+            struct md_proc_file *file=md_proc_file_from_object(buffered_open.object);
+            assert(file && !md_proc_file_control_stat(file,&st) && S_ISREG(st.st_mode));
+            struct md_control_file control=md_proc_file_control(file);
+            char data[4096]; struct md_control_actor actor={.pid=getpid(),.identity=&identity,.resources=&resources};
+            long bytes=control.ops->read(control.context,&actor,data,sizeof(data)-1,0);
+            assert(bytes>0); data[bytes]=0; assert(strstr(data," / "));
+            assert(frame->reply.result.selectors==md_fd_object_selectors(buffered_open.object));
+        } else assert(!fstat(buffered_open.fd,&st) && S_ISREG(st.st_mode));
         md_fs_buffer_open_release(&buffered_open);
     }
     int callbacks=buffer_callbacks;

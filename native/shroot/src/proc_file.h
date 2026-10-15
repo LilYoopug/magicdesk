@@ -26,6 +26,10 @@ static inline int md_proc_file_cgroup_kind(enum md_proc_file_kind kind) {
 int md_proc_file_control_access(const struct md_proc_file *,const struct md_identity *,unsigned);
 struct md_proc_file *md_proc_file_open_control(const struct md_control_file_ops *,void *,
     const struct md_identity *,int flags);
+/* Retained typed authority and optional per-open carrier for filesystem
+ * publication. On failure neither ownership is transferred. */
+struct md_fd_object *md_proc_file_control_object(const struct md_control_file_ops *,void *,
+    const struct md_identity *,int flags,int *descriptor);
 int md_proc_file_control_stat(const struct md_proc_file *,struct stat *);
 struct md_control_file md_proc_file_control(const struct md_proc_file *);
 unsigned long md_proc_file_filesystem(const struct md_proc_file *);

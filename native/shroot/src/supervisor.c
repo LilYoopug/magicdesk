@@ -1471,17 +1471,6 @@ static int proc_file_publish(struct thread *t, const struct seccomp_notif *q,
     }
     return error;
 }
-static struct md_fd_object *control_file_create(const struct md_control_file_ops *ops,void *context,
-        const struct md_identity *id,int flags,int *descriptor) {
-    struct md_proc_file *file=md_proc_file_open_control(ops,context,id,flags);
-    if (!file) return NULL;
-    if (ops->descriptor && !(flags&O_PATH)) {
-        int fd=md_proc_file_descriptor(file);
-        if (fd<0) { md_proc_file_release(file); errno=-fd; return NULL; }
-        *descriptor=fd;
-    }
-    return md_proc_file_object(file);
-}
 static int control_file_query(struct md_fd_object *object,unsigned operation,struct md_control_file *out) {
     struct md_proc_file *file=md_proc_file_from_object(object);
     if (!file) return 0;
@@ -6169,7 +6158,7 @@ int main(int argc, char **argv) {
         broker = md_broker_create(filesystem, statistics != NULL, delegated_notification); CHECK(broker);
         buffer_service=md_fs_buffer_service_new(filesystem,tasks,fd_wakeup,buffer_complete); CHECK(buffer_service);
         md_fs_buffer_admission(buffer_service,memory_available);
-        md_fs_buffer_control_factory(buffer_service,control_file_create);
+        md_fs_buffer_control_factory(buffer_service,md_proc_file_control_object);
         md_fs_buffer_control_query(buffer_service,control_file_query);
         md_fs_buffer_control_capture(buffer_service,control_file_capture);
         md_fs_buffer_exec_capture(buffer_service,executable_capture);
