@@ -247,7 +247,7 @@ proc-capture FD exhaustion. Direct source capture uses the existing task-descrip
 adapter, falling back to the existing private-table SCM_RIGHTS capture. Denied
 capture leaves native mmap intact without reopening a source by pathname or
 changing dumpability. The namespace
-worker's acknowledged pause uses existing eventfds and pthread synchronization,
+worker's acknowledged pause uses its pipe-backed queue signals and pthread synchronization,
 with no newer kernel dependency. The replacement transaction uses baseline mmap/munmap and
 fixed mremap, retaining the original VMA separately through commit or rollback.
 A failed fixed move does not prove that its destination remains mapped; see
@@ -294,7 +294,7 @@ native descriptor, in-flight and Unix graph-depth limits remain errors.
 repeated/concurrent peeks, authentication rejection, partial FD limits and final
 queue/epoch/backing release. It adds no post-5.15 dependency.
 
-The `ipc_origins` service uses the same capsule primitives and existing eventfd
+The `ipc_origins` service uses the same capsule primitives and existing pipe-backed
 worker queue. It adds no kernel interface, private listener or live-source RPC.
 `--case ipc-origins` covers exact captured sockets after slot reuse, worker
 cancellation/join, bounded admission, allocation/in-flight quota failures,

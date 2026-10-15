@@ -7,13 +7,13 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-struct md_resource_wakeup { atomic_uint refs; int fd; };
+struct md_resource_wakeup { atomic_uint refs; int fd, reader; };
 int md_resource_queue_init(struct md_resource_queue *q) {
     *q=(struct md_resource_queue){0};
     return -pthread_mutex_init(&q->lock,NULL);
 }
 void md_resource_queue_destroy(struct md_resource_queue *q) { pthread_mutex_destroy(&q->lock); }
-int md_resource_wakeup_create(int fd, struct md_resource_wakeup **out) {
+static int create_wakeup(int reader, int fd, struct md_resource_wakeup **out) {
     if (!out) return -EINVAL;
     *out=NULL;
     int flags=fcntl(fd,F_GETFL);
@@ -21,17 +21,29 @@ int md_resource_wakeup_create(int fd, struct md_resource_wakeup **out) {
     if (!(flags&O_NONBLOCK)) return -EINVAL;
     struct md_resource_wakeup *wake=malloc(sizeof(*wake));
     if (!wake) return -ENOMEM;
+    wake->reader=-1;
     wake->fd=fcntl(fd,F_DUPFD_CLOEXEC,0);
     if (wake->fd<0) { int error=-errno; free(wake); return error; }
+    if (reader>=0) {
+        wake->reader=fcntl(reader,F_DUPFD_CLOEXEC,0);
+        if (wake->reader<0) { int error=-errno; close(wake->fd); free(wake); return error; }
+    }
     atomic_init(&wake->refs,1); *out=wake; return 0;
 }
-static struct md_resource_wakeup *retain(struct md_resource_wakeup *wake) {
+int md_resource_wakeup_create(int fd, struct md_resource_wakeup **out) { return create_wakeup(-1,fd,out); }
+int md_resource_wakeup_create_pipe(int reader, int writer, struct md_resource_wakeup **out) {
+    if (reader<0) return -EINVAL;
+    return create_wakeup(reader,writer,out);
+}
+struct md_resource_wakeup *md_resource_wakeup_retain(struct md_resource_wakeup *wake) {
     if (wake) atomic_fetch_add_explicit(&wake->refs,1,memory_order_relaxed);
     return wake;
 }
 void md_resource_wakeup_release(struct md_resource_wakeup *wake) {
     if (!wake || atomic_fetch_sub_explicit(&wake->refs,1,memory_order_acq_rel)!=1) return;
-    close(wake->fd); free(wake);
+    close(wake->fd);
+    if (wake->reader>=0) close(wake->reader);
+    free(wake);
 }
 static int signal_ready(struct md_resource_wakeup *wake) {
     return wake ? md_event_signal(wake->fd) : 0;
@@ -39,7 +51,7 @@ static int signal_ready(struct md_resource_wakeup *wake) {
 int md_resource_order_begin(struct md_resource_queue *q, struct md_resource_order *op, struct md_resource_wakeup *wake) {
     if (!q || !op) return -EINVAL;
     if (op->state!=MD_RESOURCE_ORDER_IDLE || op->queue || op->previous || op->next) return -EBUSY;
-    op->queue=q; op->wakeup=retain(wake);
+    op->queue=q; op->wakeup=md_resource_wakeup_retain(wake);
     pthread_mutex_lock(&q->lock);
     op->previous=q->last;
     if (q->last) q->last->next=op; else q->first=op;
@@ -72,7 +84,7 @@ static int retire(struct md_resource_order *op) {
     *op=(struct md_resource_order){0};
     if (first && q->first) {
         q->first->state=MD_RESOURCE_ORDER_READY;
-        next=retain(q->first->wakeup);
+        next=md_resource_wakeup_retain(q->first->wakeup);
     }
     pthread_mutex_unlock(&q->lock);
     int error=signal_ready(next);

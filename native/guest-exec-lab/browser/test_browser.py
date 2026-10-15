@@ -90,7 +90,9 @@ def main():
             if rejected:
                 assert result.returncode == run["exitCode"] == 134 and not run["workloadCompleted"]
                 assert run["admittedElf"] is None and run["expectedOutput"]["found"]
-                assert "Zygote process exited prematurely with exit code 1" in output
+                # Chromium versions differ in the parent diagnostic; require
+                # the actual child failure as well as the helper's denial.
+                assert re.search(r"PROBE exit pid=\d+ status=1 ready=1\b", output)
                 assert "PROBE proc-root domain=1 changes=0" in output
                 assert "PROBE identity admittedImages=0" in output
                 assert "PROBE installed-filter" not in output

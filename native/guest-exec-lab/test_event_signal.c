@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "event_signal.h"
+#include "queue_signal.h"
 #include <assert.h>
 #include <stdio.h>
 #include <sys/eventfd.h>
@@ -32,6 +33,17 @@ int main(void) {
     assert(!md_event_acknowledge(fd));
     close(fd);
     assert(md_event_signal(fd)==-EBADF && md_event_acknowledge(fd)==-EBADF);
+    struct md_queue_signal queue;
+    assert(!md_queue_signal_open(&queue));
+    write_interrupt=1;
+    assert(!md_queue_signal_send(&queue) && !write_interrupt);
+    read_interrupt=1;
+    assert(!md_queue_signal_acknowledge(&queue) && !read_interrupt);
+    assert(!md_queue_signal_acknowledge(&queue));
+    assert(!close(queue.writer)); queue.writer=-1;
+    assert(md_queue_signal_acknowledge(&queue)==-EIO);
+    md_queue_signal_close(&queue);
+    assert(md_queue_signal_send(&queue)==-EBADF && md_queue_signal_acknowledge(&queue)==-EBADF);
     puts("PASS event signal: coalescing, saturation, interrupted IO, acknowledgement and invalid lifetime");
     return 0;
 }

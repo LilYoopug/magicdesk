@@ -7,6 +7,7 @@ struct md_image_catalogue;
 int md_fs_listen(const char *abstract_name);
 struct md_fs_work_source {
     int fd;
+    struct md_resource_wakeup *wakeup;
     void *context;
     void (*ready)(void *, struct md_filesystem *);
     int (*notification_fd)(void *);

@@ -347,7 +347,9 @@ int md_domain_open_retained(int directory, pid_t caller, const char *path, int f
 }
 int md_domain_proc_fd_query(int directory, const char *path, int flags) {
     struct stat held, proc;
-    return flags == (O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    const int allowed = O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
+        | O_LARGEFILE | O_NOCTTY | O_PATH;
+    return !(flags & ~allowed)
         && (!strcmp(path, "self/fd") || !strcmp(path, "self/fd/"))
         && !fstat(directory, &held) && !stat("/proc", &proc)
         && held.st_dev == proc.st_dev && held.st_ino == proc.st_ino;

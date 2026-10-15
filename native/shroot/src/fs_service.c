@@ -293,7 +293,10 @@ int md_fs_serve(struct md_filesystem *fs, int listener, int stop_fd,
         fds[6].fd=eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK);
         if (fds[6].fd<0) error=-errno;
     }
-    if (!error) error=md_resource_wakeup_create(work ? work->fd : fds[6].fd,&cursor_wake);
+    if (!error && work) {
+        cursor_wake=md_resource_wakeup_retain(work->wakeup);
+        if (!cursor_wake) error=-EINVAL;
+    } else if (!error) error=md_resource_wakeup_create(fds[6].fd,&cursor_wake);
     if (error) {
         if (fds[6].fd>=0) close(fds[6].fd);
         if (owned) { fs->cursors=NULL; md_ofd_orders_release(owned); }

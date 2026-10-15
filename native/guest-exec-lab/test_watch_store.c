@@ -25,6 +25,72 @@ static void crash(enum md_inode_checkpoint stage, void *context) {
     (void)context;
     if (stage == MD_NAMESPACE_STAGED) kill(getpid(), SIGKILL);
 }
+static void expect_record(int reader, struct md_inode_store *s, int wd, unsigned mask, const char *name) {
+    union { struct inotify_event align; char bytes[1024]; } bytes;
+    ssize_t n=md_inode_watch_read(s,reader,bytes.bytes,sizeof(bytes.bytes),NULL,NULL);
+    CHECK(n==(ssize_t)(sizeof(bytes.align)+bytes.align.len));
+    CHECK(bytes.align.wd==wd && bytes.align.mask==mask);
+    CHECK(name ? bytes.align.len && !strcmp(bytes.align.name,name) : !bytes.align.len);
+}
+static void physical_create(int parent,const char *name) {
+    int fd=openat(parent,name,O_CREAT|O_EXCL|O_RDWR|O_CLOEXEC,0600); CHECK(fd>=0); close(fd);
+}
+static void logical_create(struct md_inode_store *s,const char *path) {
+    int fd=md_inode_create(s,-1,path,0600); CHECK(fd>=0); close(fd);
+}
+static void native_transitions(const char *base) {
+    char path[PATH_MAX];
+    snprintf(path,sizeof(path),"%s/mixed",base);
+    struct md_inode_store *s,*writer;
+    CHECK(!md_inode_store_open(path,1,&s) && !md_inode_store_open(path,0,&writer));
+    snprintf(path,sizeof(path),"%s/native",base); CHECK(!mkdir(path,0700));
+    int native=open(path,O_RDONLY|O_DIRECTORY|O_CLOEXEC); CHECK(native>=0);
+    int root=md_inode_open(s,-1,"/",O_PATH|O_DIRECTORY,0); CHECK(root>=0);
+    int reader=md_inode_watch_create(s,IN_NONBLOCK|IN_CLOEXEC); CHECK(reader>=0);
+    int native_wd=md_inode_watch_add(s,reader,native,IN_CREATE); CHECK(native_wd>0);
+    struct md_inode_statistics stats={0}; md_inode_measure(s,&stats);
+    physical_create(native,"before"); expect_record(reader,s,native_wd,IN_CREATE,"before");
+    CHECK(!stats.step.calls && !stats.transaction.calls);
+    logical_create(writer,"/unsubscribed");
+    CHECK(!mdi_begin(writer,1));
+    CHECK(!mdi_sql(writer,"UPDATE events SET sequence=sequence+70000"));
+    CHECK(!mdi_finish(writer,0));
+    CHECK(md_inode_watch_read(s,reader,path,sizeof(path),NULL,NULL)==-EAGAIN);
+    int logical_wd=md_inode_watch_add(s,reader,root,IN_CREATE); CHECK(logical_wd>0);
+    CHECK(md_inode_watch_read(s,reader,path,sizeof(path),NULL,NULL)==-EAGAIN);
+    logical_create(writer,"/mixed"); expect_record(reader,s,logical_wd,IN_CREATE,"mixed");
+    physical_create(native,"mixed"); expect_record(reader,s,native_wd,IN_CREATE,"mixed");
+    int second=md_inode_watch_create(s,IN_NONBLOCK|IN_CLOEXEC); CHECK(second>=0);
+    int second_wd=md_inode_watch_add(s,second,root,IN_CREATE); CHECK(second_wd>0);
+    CHECK(!md_inode_watch_remove(s,reader,logical_wd));
+    expect_record(reader,s,logical_wd,IN_IGNORED,NULL);
+    logical_create(writer,"/second"); expect_record(second,s,second_wd,IN_CREATE,"second");
+    CHECK(md_inode_watch_read(s,reader,path,sizeof(path),NULL,NULL)==-EAGAIN);
+    close(second); CHECK(!md_inode_watch_pump(s));
+    physical_create(native,"after-close"); expect_record(reader,s,native_wd,IN_CREATE,"after-close");
+    logical_create(writer,"/before-oneshot");
+    logical_wd=md_inode_watch_add(s,reader,root,IN_CREATE|IN_ONESHOT); CHECK(logical_wd>0);
+    logical_create(writer,"/oneshot");
+    union { struct inotify_event align; char bytes[1024]; } bytes;
+    ssize_t n=md_inode_watch_read(s,reader,bytes.bytes,sizeof(bytes.bytes),NULL,NULL); CHECK(n==48);
+    CHECK(bytes.align.wd==logical_wd && bytes.align.mask==IN_CREATE && !strcmp(bytes.align.name,"oneshot"));
+    struct inotify_event *ignored=(void *)(bytes.bytes+32);
+    CHECK(ignored->wd==logical_wd && ignored->mask==IN_IGNORED);
+    uint64_t steps=stats.step.calls, transactions=stats.transaction.calls;
+    physical_create(native,"after-oneshot"); expect_record(reader,s,native_wd,IN_CREATE,"after-oneshot");
+    CHECK(stats.step.calls==steps && stats.transaction.calls==transactions);
+    logical_create(writer,"/between");
+    logical_wd=md_inode_watch_add(s,reader,root,IN_CREATE); CHECK(logical_wd>0);
+    CHECK(md_inode_watch_read(s,reader,path,sizeof(path),NULL,NULL)==-EAGAIN);
+    CHECK(!md_inode_link(writer,-1,"/between",-1,"/alias",0));
+    struct pollfd ready={.fd=md_inode_watch_pollfd(s),.events=POLLIN};
+    /* EVENT_WAIT: independent writer's WAL notification; timeout fails. */
+    CHECK(poll(&ready,1,5000)==1 && (ready.revents&POLLIN));
+    expect_record(reader,s,logical_wd,IN_CREATE,"alias");
+    close(reader); CHECK(!md_inode_watch_pump(s) && md_inode_watch_pollfd(s)==-1);
+    close(root); close(native); md_inode_store_close(writer); md_inode_store_close(s);
+    puts("PASS native/logical transitions, mixed observers, remove/close/oneshot, late cursor, independent hardlink wakeup");
+}
 int main(int argc, char **argv) {
     CHECK(argc == 2);
     sigset_t mask; sigemptyset(&mask); sigaddset(&mask, SIGPIPE); CHECK(!sigprocmask(SIG_BLOCK, &mask, NULL));
@@ -85,5 +151,6 @@ int main(int argc, char **argv) {
     puts("PASS a missing journal range publishes IN_Q_OVERFLOW");
     close(reader); close(root);
     md_inode_store_close(writer); md_inode_store_close(s);
+    native_transitions(argv[1]);
     return 0;
 }

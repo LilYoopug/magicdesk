@@ -40,6 +40,7 @@ struct watch_source {
     int owned, native, presence, database, objects;
     int sources[MDI_SOURCES];
     int64_t cursor;
+    unsigned logical_subscriptions;
 };
 struct md_inode_watches {
     struct instance *instances;
@@ -88,6 +89,7 @@ static void free_instance(struct md_inode_watches *w, struct instance *i) {
         struct subscription *next = i->subscriptions->next;
         int wd = i->subscriptions->native;
         struct watch_source *source=i->subscriptions->source;
+        if (*i->subscriptions->object) --source->logical_subscriptions;
         free(i->subscriptions); i->subscriptions = next; --w->subscription_count;
         retire_native(w, source, wd);
     }
@@ -196,6 +198,7 @@ static int remove_subscription(struct md_inode_watches *w, struct instance *i, s
     int r = md_watch_queue_emit(i->queue, p->wd, IN_IGNORED, 0, NULL);
     int native = p->native;
     struct watch_source *source=p->source;
+    if (*p->object) --source->logical_subscriptions;
     *link = p->next; free(p); --w->subscription_count;
     retire_native(w, source, native);
     return r == -EPIPE ? 0 : r;
@@ -259,6 +262,7 @@ static int native_event(struct md_inode_watches *w, struct watch_source *backend
     int source = -1;
     for (unsigned i = 0; i < MDI_SOURCES; ++i) if (event->wd == backend->sources[i]) { source = (int)i; break; }
     if (source >= 0) {
+        if (!backend->logical_subscriptions) return 0;
         if (!event->len || strlen(event->name) != 32) return 0;
         sqlite3_stmt *object = NULL;
         r = mdi_query_acquire(s, MDI_BACKING_OBJECT, &object);
@@ -348,6 +352,11 @@ int md_inode_watch_pump(struct md_inode_store *s) {
     }
     if (!w->instances) { md_inode_watch_close(s); return 0; }
     for (struct watch_source *p=w->sources;p;p=p->next) {
+        if (!p->logical_subscriptions) {
+            int r=drain_native(w,p,4*65536);
+            if (r) return r;
+            continue;
+        }
         int r=mdi_begin(p->store,0);
         if (r) return r;
         r=journal(w,p);
@@ -425,6 +434,12 @@ static int add(struct md_inode_store *owner, struct md_inode_store *selected,
     }
     r = mdi_finish(s, r);
     if (r) { free(p); return r; }
+    if (*p->object) {
+        /* No logical subscriber could consume the skipped journal interval.
+         * Admit the first one at its registration snapshot, not old history. */
+        if (!source->logical_subscriptions) source->cursor=p->after;
+        ++source->logical_subscriptions;
+    }
     p->mask = mask; p->device = st.st_dev; p->inode = st.st_ino; p->source=source;
     p->wd = ++i->last_wd;
     p->next = i->subscriptions; i->subscriptions = p; ++w->subscription_count;

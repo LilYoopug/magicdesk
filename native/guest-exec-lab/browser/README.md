@@ -2,7 +2,7 @@
 
 These fixtures build and test the production native runtime in
 `native/shroot`. They do not contain a second syscall implementation.
-Use a prepared disposable Debian store with matching browsers, libraries, fonts
+Use a prepared disposable Debian or Alpine store with matching browsers, libraries, fonts
 and helper fixtures, never a personal browser profile.
 
 The runtime supports application filters but is **not a complete security
@@ -105,6 +105,15 @@ Device coverage is NX809J, Android 16, Linux 6.12.23, 4 KiB pages, actual
 UID 2000 in the shell SELinux domain. Firefox's headless screenshot and
 Chromium's three-profile JavaScript/PNG workflows establish execution, not
 arbitrary browsing, network/GPU compatibility or confinement.
+
+Alpine 3.23.6 with Chromium 149.0.7827.53-r0 passes both automatic namespace and
+explicit set-ID routes. The latter exercises retained proc directory opens with
+musl's `O_LARGEFILE`; the runtime preserves read-only open flags instead of
+requiring one libc-specific combination. The matching native/guest metadata
+fixtures also check nofollow, nonblocking, CLOEXEC on/off, O_PATH, one available
+FD slot and flag-specific seccomp denial. The negative browser control requires
+the helper's denial and actual child exit status, not version-specific wording
+from the parent zygote diagnostic.
 
 Protected metadata uses task-affine descriptor export, notification ADDFD and
 original-site replay without relaxing dumpability. A second native kernel tracer

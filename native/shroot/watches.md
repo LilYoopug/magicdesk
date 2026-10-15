@@ -33,6 +33,13 @@ ordinary guest file reads/writes remain native. Native event batches are bounded
 so a continuous writer cannot monopolize namespace admission. SQL programs are
 prepared lazily and reused; namespace rows and aliases are not cached.
 
+Each source tracks its live logical subscriptions, including removal, oneshot
+delivery and last-reader closure. With only native subscriptions it drains native
+events without a SQLite transaction or backing-object lookup. The first new
+logical subscription resumes at its registration snapshot, not the skipped
+journal interval. Mixed subscriptions retain journal/alias resolution and normal
+overflow reporting. Presence locking and persistent storage are unchanged.
+
 Subscriptions identify logical objects, independently of current backing names.
 Owners observe local and retained immutable-source directories. Copy-up prepares
 and closes data outside those watched directories before publication, so internal

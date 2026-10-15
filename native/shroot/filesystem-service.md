@@ -57,11 +57,15 @@ metadata; native attachments delegate to the original syscall. Virtual control
 files reject file/data barriers with EINVAL and have no persistent filesystem
 state to synchronize. Ordinary reads, writes and mappings retain native IO.
 
-Host readiness uses `event_signal.h` for owned nonblocking eventfds. Signals
-coalesce; one acknowledgement consumes a burst without draining a concurrent
-producer indefinitely. Queue/state remains authoritative, not the event counter.
-EINTR retries the same syscall; an empty acknowledgement or saturated signal
-is harmless. Socket payloads and semaphore counters do not use this contract.
+Host readiness uses nonblocking eventfds for state signals and `queue_signal.h`
+pipe pairs for the filesystem worker's request/completion queues. The latter
+retain ordinary pipe wakeup scheduling without CPU affinity or spinning.
+Acknowledgements are bounded; queue/state remains authoritative, not the signal
+count. EINTR retries the same syscall; an empty acknowledgement or saturated
+signal is harmless. Cross-owner resource wakeups retain both pipe ends, so a late
+retirement after loop shutdown cannot signal a reused FD or raise SIGPIPE.
+Startup/shutdown controls remain eventfds. Socket payloads and semaphore counters
+do not use this contract.
 
 The abstract Unix SOCK_SEQPACKET endpoint has no filesystem path to translate.
 Both ends check SO_PEERCRED against their effective UID. Device fixtures require

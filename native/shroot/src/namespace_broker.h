@@ -14,5 +14,13 @@ void md_broker_listen(struct md_namespace_broker *, int listener);
 /* Publish before resuming a tracee; forget retires its eligibility. */
 int md_broker_task(struct md_namespace_broker *, int pid, int eligible, uintptr_t raw_gate, uintptr_t watch_gate);
 void md_broker_forget(struct md_namespace_broker *, int pid);
+struct md_fd_origins;
+struct md_fd_object;
+/* Publish one already completed open before resuming its receiver. The caller
+ * retains source until clear (also on cancellation); the broker pins the table
+ * and origin, and only admits RESULT_ADMIT at the exact task/gate. */
+int md_broker_result_begin(struct md_namespace_broker *, int pid, uintptr_t gate,
+        struct md_fd_origins *, int source, struct md_fd_object *, unsigned flags);
+int md_broker_result_clear(struct md_namespace_broker *, int pid);
 void md_broker_destroy(struct md_namespace_broker *);
 #endif

@@ -4,8 +4,9 @@
 #include <stdint.h>
 #include <unistd.h>
 
-/* Coalesced readiness on an owned, nonblocking, non-semaphore eventfd.
- * The queue/state is authoritative; this counter carries no payload. */
+/* Coalesced readiness on a nonblocking eventfd or queue-signal pipe writer.
+ * The queue/state is authoritative, not the counter. A pipe caller must retain
+ * its reader through every write, including delayed cross-owner wakeups. */
 static inline int md_event_signal(int fd) {
     const uint64_t one=1;
     ssize_t n;
@@ -13,6 +14,7 @@ static inline int md_event_signal(int fd) {
     return n==sizeof(one) || (n<0 && errno==EAGAIN) ? 0 : n<0 ? -errno : -EIO;
 }
 static inline int md_event_acknowledge(int fd) {
+    /* Only a non-semaphore eventfd: pipes use the bounded queue drain. */
     uint64_t value;
     ssize_t n;
     /* One read consumes a burst. Do not drain a concurrent producer forever. */

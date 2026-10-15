@@ -64,8 +64,8 @@ long md_guest_export(int descriptor) {
     return result;
 }
 static const char proc_fds_path[]="self/fd/";
-static long md_guest_open_proc_fds(int directory) {
-    return RAW4(openat,directory,proc_fds_path,O_RDONLY|O_DIRECTORY|O_CLOEXEC,0);
+static long md_guest_open_proc_fds(int directory, unsigned long flags) {
+    return RAW4(openat,directory,proc_fds_path,flags,0);
 }
 
 extern void md_guest_ready(int, const char *, uint64_t, const struct md_interception_abi *);

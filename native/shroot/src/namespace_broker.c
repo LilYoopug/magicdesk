@@ -4,6 +4,8 @@
 #include "watch_broker.h"
 #include "task_descriptor.h"
 #include "ofd_order.h"
+#include "fd_install.h"
+#include "fs_buffer.h"
 #include <errno.h>
 #include <fcntl.h>
 #include "linux_abi.h"
@@ -45,10 +47,12 @@ struct md_namespace_broker {
     struct operation *waiting;
     struct task *tasks;
     struct task *task_index[TASK_BUCKETS];
+    struct task *result_waiting;
     pthread_mutex_t lock;
     int listener;
     struct counters { uint64_t received, handled, delegated; } *counts;
     int synchronous_wake;
+    uint64_t result_deliveries, result_waits, result_cancelled;
     struct md_watch_broker *watches;
     /* One synchronous worker owns this buffer; delegated operations retain no
      * bytes in it. Allocation is per broker, never per syscall or directory. */
@@ -59,7 +63,63 @@ struct task {
     struct task *indexed;
     int pid, eligible, process, borrowed;
     uintptr_t gate, watch_gate;
+    struct {
+        struct md_fd_origins *files;
+        struct md_fd_object *origin;
+        struct md_fd_install install;
+        uintptr_t gate;
+        int source, delivered, queued;
+        unsigned flags;
+        struct task *next;
+    } result;
 };
+/* Broker lock protects admission against supervisor cancellation. No guest
+ * memory, filesystem mutation or supervisor round trip occurs here. */
+static int result_progress(struct md_namespace_broker *b, struct task *t) {
+    int installed=md_fd_install_progress(&t->result.install);
+    if (installed==MD_FD_INSTALL_WAIT) { ++b->result_waits; return 1; }
+    if (t->result.install.retire_error) return t->result.install.retire_error;
+    if (installed==MD_FD_INSTALL_CANCELLED) { ++b->result_cancelled; return 0; }
+    if (installed<0) {
+        struct seccomp_notif_resp reply={.id=t->result.install.notification,.error=installed};
+        if (ioctl(b->listener,SECCOMP_IOCTL_NOTIF_SEND,&reply)) return errno==ENOENT ? 0 : -errno;
+    }
+    t->result.delivered=1; ++b->result_deliveries;
+    return 0;
+}
+static void result_unqueue(struct md_namespace_broker *b, struct task *t) {
+    if (!t->result.queued) return;
+    struct task **p=&b->result_waiting;
+    while (*p && *p!=t) p=&(*p)->result.next;
+    if (*p) *p=t->result.next;
+    t->result.queued=0; t->result.next=NULL;
+}
+static int result_clear(struct md_namespace_broker *b, struct task *t) {
+    int error=md_fd_install_cancel(&t->result.install);
+    if (error) return error;
+    result_unqueue(b,t);
+    md_fd_origins_unpin(t->result.files);
+    md_fd_object_release(t->result.origin);
+    memset(&t->result,0,sizeof(t->result));
+    return 0;
+}
+static int result_receive(struct md_namespace_broker *b, struct task *t, const struct seccomp_notif *q) {
+    if (!t || !t->result.files || q->data.nr!=SYS_gettid
+            || q->data.instruction_pointer!=t->result.gate || q->data.args[0]!=MD_FS_BUFFER_RESULT_ADMIT) return 0;
+    int error=t->result.delivered || q->data.args[1] || q->data.args[2] || q->data.args[3]
+        || q->data.args[4] || q->data.args[5] ? -EPERM : 0;
+    if (!error) error=md_fd_install_begin(&t->result.install,t->result.files,b->listener,q->id,
+        t->result.source,t->result.origin,t->result.flags,b->wakeup);
+    if (error) {
+        struct seccomp_notif_resp reply={.id=q->id,.error=error};
+        return ioctl(b->listener,SECCOMP_IOCTL_NOTIF_SEND,&reply) && errno!=ENOENT ? -errno : 1;
+    }
+    int progress=result_progress(b,t);
+    if (progress==1 && !t->result.queued) {
+        t->result.next=b->result_waiting; b->result_waiting=t; t->result.queued=1;
+    } else if (progress<=0) result_unqueue(b,t);
+    return progress<0 ? progress : 1;
+}
 static int valid(struct operation *op) {
     return !ioctl(op->listener, SECCOMP_IOCTL_NOTIF_ID_VALID, &op->notification.id);
 }
@@ -106,7 +166,8 @@ struct md_namespace_broker *md_broker_create(struct md_fs_worker *worker, int st
     if (b) {
         b->worker = worker; b->listener = -1; b->delegate=delegate;
         if (pthread_mutex_init(&b->lock, NULL)) { free(b); return NULL; }
-        if (md_resource_wakeup_create(md_fs_worker_wake_fd(worker),&b->wakeup)) {
+        b->wakeup=md_resource_wakeup_retain(md_fs_worker_wakeup(worker));
+        if (!b->wakeup) {
             pthread_mutex_destroy(&b->lock); free(b); return NULL;
         }
         if (statistics && !(b->counts = calloc(512, sizeof(*b->counts)))) {
@@ -268,6 +329,26 @@ static struct task *find_task(struct md_namespace_broker *b, int pid) {
         if (t->pid == pid) return t;
     return NULL;
 }
+int md_broker_result_begin(struct md_namespace_broker *b, int pid, uintptr_t gate,
+        struct md_fd_origins *files, int source, struct md_fd_object *origin, unsigned flags) {
+    if (!b || !gate || !files || source<0 || flags&~O_CLOEXEC) return -EINVAL;
+    pthread_mutex_lock(&b->lock);
+    struct task *t=find_task(b,pid);
+    int error=!t ? -ESRCH : t->result.files ? -EBUSY : 0;
+    if (!error) {
+        t->result.files=md_fd_origins_pin(files);
+        t->result.origin=md_fd_object_retain(origin);
+        t->result.gate=gate; t->result.source=source; t->result.flags=flags;
+    }
+    pthread_mutex_unlock(&b->lock); return error;
+}
+int md_broker_result_clear(struct md_namespace_broker *b, int pid) {
+    if (!b) return 0;
+    pthread_mutex_lock(&b->lock);
+    struct task *t=find_task(b,pid);
+    int error=t ? result_clear(b,t) : 0;
+    pthread_mutex_unlock(&b->lock); return error;
+}
 int md_broker_task(struct md_namespace_broker *b, int pid, int eligible, uintptr_t raw_gate, uintptr_t watch_gate) {
     if (pid <= 0) return -EINVAL;
     pthread_mutex_lock(&b->lock);
@@ -291,6 +372,7 @@ void md_broker_forget(struct md_namespace_broker *b, int pid) {
     while (*slot && (*slot)->pid != pid) slot = &(*slot)->indexed;
     struct task *t = *slot;
     if (t) {
+        if (result_clear(b,t)) abort();
         *slot = t->indexed; t->indexed = NULL;
         t->pid = 0;
         if (!t->borrowed && t->process >= 0) { close(t->process); t->process = -1; }
@@ -364,6 +446,18 @@ static int perform(struct md_namespace_broker *b, struct operation *op, int prep
     return 0;
 }
 static int progress(struct md_namespace_broker *b) {
+    pthread_mutex_lock(&b->lock);
+    int result=0;
+    struct task **pending=&b->result_waiting;
+    while (*pending) {
+        struct task *t=*pending;
+        result=result_progress(b,t);
+        if (result<0) break;
+        if (result) { pending=&t->result.next; continue; }
+        *pending=t->result.next; t->result.next=NULL; t->result.queued=0;
+    }
+    pthread_mutex_unlock(&b->lock);
+    if (result<0) return result;
     struct operation **at=&b->waiting;
     while (*at) {
         struct operation *op=*at;
@@ -405,6 +499,12 @@ static int receive(void *context, struct md_filesystem *fs, short events) {
     pthread_mutex_lock(&b->lock);
     int eligible = 0, watch = 0;
     struct task *task = find_task(b, (int)q.pid);
+    int delivered=result_receive(b,task,&q);
+    if (delivered) {
+        pthread_mutex_unlock(&b->lock);
+        if (count && delivered>0) count->handled++;
+        return delivered<0 ? delivered : 0;
+    }
     if (task) {
         eligible = task->eligible && q.data.instruction_pointer != task->gate;
         watch = q.data.instruction_pointer == task->watch_gate;
@@ -465,6 +565,9 @@ void md_broker_destroy(struct md_namespace_broker *b) {
     md_watch_broker_destroy(b->watches);
     /* The worker must have joined before operation storage is released. */
     if (b->counts) {
+        fprintf(stderr,"MD_BROKER resultDeliveries=%llu resultWaits=%llu resultCancelled=%llu\n",
+            (unsigned long long)b->result_deliveries,(unsigned long long)b->result_waits,
+            (unsigned long long)b->result_cancelled);
         fprintf(stderr, "MD_BROKER synchronousWake=%d\n", b->synchronous_wake);
         for (unsigned i = 0; i < 512; ++i) if (b->counts[i].received)
             fprintf(stderr, "MD_BROKER nr=%u notifications=%llu handled=%llu delegated=%llu\n", i,
@@ -493,6 +596,7 @@ void md_broker_destroy(struct md_namespace_broker *b) {
     }
     while (b->tasks) {
         struct task *t = b->tasks; b->tasks = t->next;
+        if (result_clear(b,t)) abort();
         if (t->process >= 0) close(t->process);
         free(t);
     }

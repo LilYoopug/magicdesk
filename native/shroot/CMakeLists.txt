@@ -191,6 +191,7 @@ if(MAGICDESK_GUEST_FIXTURES)
     target_sources(resource_guest PRIVATE ../guest-exec-lab/test_keyring_guest.c)
     target_sources(resource_guest PRIVATE ../guest-exec-lab/test_native_metadata_guest.c)
     target_sources(resource_guest PRIVATE ../guest-exec-lab/test_mutation_signal_guest.c)
+    target_sources(resource_guest PRIVATE ../guest-exec-lab/test_fd_result_guest.c)
     target_sources(resource_guest PRIVATE ../guest-exec-lab/test_pid_namespace_guest.c)
     target_sources(resource_guest PRIVATE ../guest-exec-lab/test_proc_exec_guest.c)
     guest_executable(test_open_job ../guest-exec-lab/test_open_job.c ${src}/fifo_readiness.c ${src}/file_open_job.c ${src}/file_open.c ${wire} ${raw})
@@ -215,7 +216,7 @@ if(MAGICDESK_GUEST_FIXTURES)
     target_compile_options(test_interception_buffers PRIVATE -iquote ${src} -UNDEBUG)
     target_link_options(test_interception_buffers PRIVATE -Wl,--wrap=calloc -Wl,--wrap=malloc -Wl,--wrap=realloc)
     guest_executable(fs_dispatch ../guest-exec-lab/test_fs_dispatch.c ../guest-exec-lab/test_ipc_peer_worker.c ../guest-exec-lab/test_namespace_broker.c ../guest-exec-lab/test_fd_lifecycle.S
-        ${src}/namespace_broker.c ${src}/watch_broker.c
+        ${src}/namespace_broker.c ${src}/watch_broker.c ${src}/fd_install.c
         ${src}/interception_buffers.c ${src}/fs_buffer_service.c ${src}/file_open_job.c ${src}/file_snapshot.c ${src}/command_image.c ${src}/exec_prepare.c ${src}/proc_paths.c
         ${src}/fs_worker.c ${src}/fs_service.c ${src}/ipc_peer_service.c ${src}/ipc_origins.c ${src}/launch_registry.c ${src}/launch_peer.c ${namespace_engine} ${mounts} ${inodes}
         ${src}/image_catalogue.c ${src}/elf_admission.c ${src}/elf.c ${src}/fs_client.c ${wire} ${raw})

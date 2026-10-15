@@ -36,8 +36,8 @@ int md_fs_worker_start(const char *store, const char *endpoint, const char *admi
         const struct md_fs_attachment *, unsigned attachment_count, int statistics,
         const struct md_ipc_inherited *, const struct md_input_launch *, struct md_fs_worker **out);
 int md_fs_worker_fd(struct md_fs_worker *);
-/* Borrowed nonblocking eventfd for cross-owner readiness, valid until stop. */
-int md_fs_worker_wake_fd(struct md_fs_worker *);
+/* Borrowed wake owner; retained resource turns may outlive worker shutdown. */
+struct md_resource_wakeup *md_fs_worker_wakeup(struct md_fs_worker *);
 /* Borrowed until worker_stop; initialized before startup acknowledges readiness. */
 struct md_mount_namespace *md_fs_worker_mounts(struct md_fs_worker *);
 struct md_device_events *md_fs_worker_device_events(struct md_fs_worker *);

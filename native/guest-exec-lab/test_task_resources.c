@@ -27,6 +27,28 @@ static int descriptors(void) {
     while (readdir(dir)) count++;
     closedir(dir); return count;
 }
+static void retained_proc_query(void) {
+    int proc=open("/proc",O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+    int other=open("/dev",O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+    assert(proc>=0 && other>=0);
+    const int flags[]={0,O_DIRECTORY,O_CLOEXEC,O_NOFOLLOW,O_NONBLOCK,O_LARGEFILE,O_NOCTTY,O_PATH};
+    for (unsigned i=0;i<sizeof(flags)/sizeof(*flags);++i) {
+        int value=O_RDONLY|O_DIRECTORY|flags[i];
+        assert(md_domain_proc_fd_query(proc,"self/fd/",value));
+        assert(md_domain_proc_fd_query(proc,"self/fd",value));
+        assert(!md_domain_proc_fd_query(other,"self/fd/",value));
+        assert(!md_domain_proc_fd_query(proc,"/proc/self/fd",value));
+        assert(!md_domain_proc_fd_query(proc,"self/fd/0",value));
+        assert(!md_domain_proc_fd_query(proc,"self/fd/../root",value));
+        assert(!md_domain_proc_fd_query(proc,"self/fd",value|O_RDWR));
+        assert(!md_domain_proc_fd_query(proc,"self/fd",value|O_WRONLY));
+        assert(!md_domain_proc_fd_query(proc,"self/fd",value|O_CREAT));
+        assert(!md_domain_proc_fd_query(proc,"self/fd",value|O_TRUNC));
+        assert(!md_domain_proc_fd_query(proc,"self/fd",value|O_TMPFILE));
+        assert(!md_domain_proc_fd_query(proc,"self/fd",value|(1U<<31)));
+    }
+    assert(!close(proc) && !close(other));
+}
 struct root_thread {
     pthread_mutex_t mutex;
     pthread_cond_t condition;
@@ -320,6 +342,7 @@ int main(void) {
     assert(md_resources_unshare_prepare(&r, 1UL << 63,NULL,&change) == -EINVAL);
     assert(!md_resources_release(&r));
     int before = descriptors();
+    retained_proc_query();
     landlock_resources();
     for (unsigned i = 0; i < 100; i++) contract();
     for (unsigned i = 0; i < 100; i++) pending_root_relocation();

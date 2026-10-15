@@ -261,10 +261,9 @@ struct readiness_owner {
 enum retry_kind {
     RETRY_TASK_ACTION=1u<<0, RETRY_MAPPING=1u<<1, RETRY_MEMORY=1u<<2,
     RETRY_BUFFER=1u<<3, RETRY_DESCRIPTOR=1u<<4, RETRY_RECEIVE=1u<<5,
-    RETRY_OUTGOING=1u<<6, RETRY_DELIVERY=1u<<7, RETRY_PROC_DELIVERY=1u<<8,
-    RETRY_RETURN=1u<<9,
-    RETRY_FD=1u<<10, RETRY_EXPORT=1u<<11, RETRY_CONTROL=1u<<12,
-    RETRY_PROC_IO=1u<<13, RETRY_PROC_LOOKUP=1u<<14, RETRY_READINESS=1u<<15
+    RETRY_OUTGOING=1u<<6, RETRY_PROC_DELIVERY=1u<<7, RETRY_RETURN=1u<<8,
+    RETRY_FD=1u<<9, RETRY_EXPORT=1u<<10, RETRY_CONTROL=1u<<11,
+    RETRY_PROC_IO=1u<<12, RETRY_PROC_LOOKUP=1u<<13, RETRY_READINESS=1u<<14
 };
 struct retry_owner {
     struct md_pending_node node;
@@ -287,7 +286,7 @@ struct thread {
     struct receive_owner *receive;
     struct md_fs_buffer_open buffer_open;
     struct user_pt_regs buffer_registers;
-    struct md_fd_install buffer_delivery, proc_delivery;
+    struct md_fd_install proc_delivery;
     int proc_image_fd;
     struct md_proc_file *proc_file;
     struct md_proc_file_io proc_io;
@@ -300,7 +299,7 @@ struct thread {
     size_t control_size;
     struct md_fd_return buffer_return;
     int buffer_return_waiting;
-    int buffer_delivered;
+    int buffer_rights_delivered;
     int buffer_waiting;
     struct md_fd_selector *fd_selector;
     struct md_fd_selector *fork_selector;
@@ -691,7 +690,7 @@ static void adapter_discard(struct thread *t) {
         else receive_release(owner);
     }
     t->buffer_return_waiting=0;
-    CHECK(!md_fd_install_cancel(&t->buffer_delivery));
+    CHECK(!md_broker_result_clear(broker,t->pid));
     CHECK(!md_fd_install_cancel(&t->proc_delivery));
     if (t->proc_image_fd>=0) { close(t->proc_image_fd); t->proc_image_fd=-1; }
     md_fs_buffer_cancel(&t->buffer_call);
@@ -703,7 +702,7 @@ static void adapter_discard(struct thread *t) {
     md_ipc_transport_close(&t->ipc_transport);
     CHECK(!md_buffer_release(&t->buffer));
     t->buffer_waiting=0;
-    t->buffer_delivered=0;
+    t->buffer_rights_delivered=0;
 }
 static long native_trace(int request, pid_t pid, void *address, void *data) {
     if (statistics) statistics->ptrace_requests++;
@@ -997,6 +996,7 @@ static void proc_query_start(struct thread *t) {
     struct user_pt_regs regs = op->saved;
     regs.pc = op->task_open ? abi.proc_open : EXPORT; regs.regs[30] = EXPORTED;
     regs.regs[0] = op->proc_directory;
+    if (op->task_open) regs.regs[1] = op->request.data.args[2];
     if (!set_registers(t->pid, &regs)) return;
     t->phase = PROC_OPENING; resume(t->pid, 0);
 }
@@ -1009,12 +1009,14 @@ static void retained_result(struct thread *t, const struct seccomp_notif *q) {
             if (q->data.args[3] & ~(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT)) op->error = -ENOTSUP;
             if (q->data.args[3] & AT_SYMLINK_NOFOLLOW) flags |= O_NOFOLLOW;
         }
+        if (!op->error && !op->proc_attempted && q->data.nr == SYS_openat
+                && md_domain_proc_fd_query(op->descriptor, op->path, flags)) {
+            /* Self access belongs to the caller, including O_PATH results
+             * which cannot be delivered through notification ADDFD. */
+            proc_query_begin(t,q,-1); return;
+        }
         if (!op->error) {
             fd = md_domain_open_retained(op->descriptor, t->pid, op->path, flags);
-        }
-        if (fd == -EACCES && !op->proc_attempted && q->data.nr == SYS_openat
-                && md_domain_proc_fd_query(op->descriptor, op->path, flags)) {
-            proc_query_begin(t,q,-1); return;
         }
         if ((fd == -EACCES || fd == -ELOOP) && !op->proc_attempted
                 && q->data.nr == SYS_newfstatat && !q->data.args[3]) {
@@ -1026,8 +1028,9 @@ static void retained_result(struct thread *t, const struct seccomp_notif *q) {
     }
     retained_calls++;
     if (op->error) retained_errors++;
-    TRACE("PROBE retained pid=%d nr=%d fd=%llu path=%s result=%d\n",
-        t->pid, q->data.nr, q->data.args[0], op->path, op->error);
+    TRACE("PROBE retained pid=%d nr=%d fd=%llu path=%s result=%d flags=%#llx\n",
+        t->pid, q->data.nr, q->data.args[0], op->path, op->error,
+        q->data.args[q->data.nr == SYS_openat ? 2 : 3]);
     if (!op->error && q->data.nr == SYS_openat) {
         struct seccomp_notif_addfd add = {.id = q->id, .srcfd = fd,
             .newfd_flags = (unsigned)q->data.args[2] & O_CLOEXEC,
@@ -1251,27 +1254,6 @@ static void buffer_setup(struct thread *t, const struct seccomp_notif *q) {
         reply.error=-errno;
     }
     CHECK(!ioctl(listener,SECCOMP_IOCTL_NOTIF_SEND,&reply) || errno==ENOENT);
-}
-static void buffer_deliver(struct thread *t) {
-    retry_clear(t,RETRY_DELIVERY);
-    if (!t->buffer_delivery.files.table) return;
-    int installed=md_fd_install_progress(&t->buffer_delivery);
-    if (installed==MD_FD_INSTALL_WAIT) { retry_wait(t,RETRY_DELIVERY); return; }
-    CHECK(!t->buffer_delivery.retire_error);
-    if (installed==MD_FD_INSTALL_CANCELLED) {
-        /* EVENT_WAIT: a restarted admission or task teardown owns the retained
-         * open result. The filesystem operation itself must not be replayed. */
-        TRACE("PROBE buffer-delivery cancelled pid=%d notification=%llu\n",t->pid,
-            (unsigned long long)t->buffer_delivery.notification);
-        return;
-    }
-    if (installed<0) {
-        struct seccomp_notif_resp reply={.id=t->buffer_delivery.notification,.error=installed};
-        if (ioctl(listener,SECCOMP_IOCTL_NOTIF_SEND,&reply)) {
-            CHECK(errno==ENOENT); return;
-        }
-    }
-    t->buffer_delivered=1;
 }
 static void proc_deliver(struct thread *t) {
     retry_clear(t,RETRY_PROC_DELIVERY);
@@ -1745,27 +1727,6 @@ static void proc_file_request(struct thread *t, const struct seccomp_notif *q) {
         t->pid,operation,(long long)reply.val,reply.error);
     CHECK(!ioctl(listener,SECCOMP_IOCTL_NOTIF_SEND,&reply) || errno==ENOENT);
 }
-static void buffer_receive(struct thread *t, const struct seccomp_notif *q) {
-    int error=0;
-    if (!t->ready || q->data.instruction_pointer!=abi.buffer_admit || q->data.nr!=SYS_gettid
-            || q->data.args[1] || q->data.args[2] || q->data.args[3] || q->data.args[4] || q->data.args[5]
-            || !t->buffer.pool || t->buffer_call || t->buffer_open.fd<0 || t->buffer_open.task_path
-            || t->buffer_delivered) error=-EPERM;
-    else {
-        error=md_fd_install_begin(&t->buffer_delivery,t->resources.files,listener,q->id,
-            t->buffer_open.fd,md_fs_buffer_open_object(&t->buffer_open),t->buffer_open.flags&O_CLOEXEC,fd_wakeup);
-        if (!error) {
-            /* EVENT_WAIT: the destination file table's preceding mutation.
-             * Task cancellation retires this record before descriptor delivery. */
-            buffer_deliver(t); return;
-        }
-    }
-    TRACE("PROBE buffer-receive rejected pid=%d error=%d delivered=%d pending=%d old=%llu new=%llu fd=%d\n",
-        t->pid,error,t->buffer_delivered,t->buffer_delivery.files.table!=NULL,
-        (unsigned long long)t->buffer_delivery.notification,(unsigned long long)q->id,t->buffer_open.fd);
-    struct seccomp_notif_resp reply={.id=q->id,.error=error};
-    CHECK(!ioctl(listener,SECCOMP_IOCTL_NOTIF_SEND,&reply) || errno==ENOENT);
-}
 static void handle_notification(const struct seccomp_notif *request) {
     if (ioctl(listener,SECCOMP_IOCTL_NOTIF_ID_VALID,&request->id)) {
         CHECK(errno==ENOENT); return;
@@ -1796,9 +1757,6 @@ static void handle_notification(const struct seccomp_notif *request) {
                 value=md_fd_return_install(&t->buffer_return,listener,q.id);
             else if (q.data.args[0]==MD_FS_BUFFER_EXPORT)
                 value=md_fs_buffer_export_install(t->buffer_call,listener,q.id);
-            else if (q.data.args[0]==MD_FS_BUFFER_RESULT_ADMIT) {
-                buffer_receive(t,&q); return;
-            }
             else if (q.data.args[0]==MD_FS_BUFFER_IPC_ADMIT) {
                 struct md_fd_capture *capture=NULL;
                 struct md_fd_order *order=NULL;
@@ -3974,6 +3932,14 @@ static void buffer_complete(struct md_fs_buffer_request *request, pid_t pid, int
         }
         if (!md_fs_buffer_task_pending(request)) CHECK(md_fs_buffer_open_take(request,&t->buffer_open)>=0);
     }
+    if (!error && t->buffer_open.fd>=0 && !t->buffer_open.task_path) {
+        struct md_buffer_span span;
+        CHECK(!md_buffer_span(&t->buffer,&span));
+        const struct md_fs_buffer_frame *frame=span.data;
+        if (frame->transfer==MD_FS_BUFFER_ADDFD)
+            CHECK(!md_broker_result_begin(broker,t->pid,abi.buffer_admit,t->resources.files,
+                t->buffer_open.fd,md_fs_buffer_open_object(&t->buffer_open),t->buffer_open.flags&O_CLOEXEC));
+    }
     TRACE("PROBE buffer-call pid=%d operation=%llu error=%d descriptor=%d\n",pid,t->buffer_registers.regs[1],error,t->buffer_open.fd>=0);
     buffer_reply(t,error);
 }
@@ -4077,7 +4043,6 @@ static void retry_progress(struct md_pending_node *node,void *context) {
     RETRY(RETRY_DESCRIPTOR,buffer_descriptor_start);
     RETRY(RETRY_RECEIVE,receive_start);
     RETRY(RETRY_OUTGOING,outgoing_start);
-    RETRY(RETRY_DELIVERY,buffer_deliver);
     RETRY(RETRY_PROC_DELIVERY,proc_deliver);
     RETRY(RETRY_RETURN,buffer_return_progress);
     RETRY(RETRY_FD,fd_start);
@@ -4425,10 +4390,11 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
             outgoing_release(t->outgoing); t->outgoing=NULL;
         }
         md_fs_buffer_cancel(&t->buffer_call);
+        CHECK(!md_broker_result_clear(broker,t->pid));
         md_fs_buffer_open_release(&t->buffer_open);
         md_ipc_transport_close(&t->ipc_transport);
         if (t->proc_image_fd>=0) { close(t->proc_image_fd); t->proc_image_fd=-1; }
-        t->buffer_delivered=0;
+        t->buffer_rights_delivered=0;
         result=md_buffer_release(&t->buffer); break;
     case MD_FS_BUFFER_TASK_DONE:
         if (r->regs[2] || t->fd_running) break;
@@ -4613,7 +4579,7 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
     case MD_BUFFER_PROC_RIGHTS:
     case MD_FS_BUFFER_RIGHTS_BEGIN: {
         int proc=r->regs[0]==MD_BUFFER_PROC_RIGHTS;
-        if (!t->buffer.pool || r->regs[1] || r->regs[2] || t->buffer_delivered || t->buffer_delivery.files.table) break;
+        if (!t->buffer.pool || r->regs[1] || r->regs[2] || t->buffer_rights_delivered) break;
         if (proc ? !t->proc_file || t->proc_image_fd<0
                 : t->buffer_open.fd<0) break;
         struct md_buffer_span span;
@@ -4643,7 +4609,7 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
         const struct md_fs_buffer_frame *frame=span.data;
         result=!t->buffer_return.files.table && (long)r->regs[1]<0 ? (long)r->regs[1]
             : md_fd_return_finish(&t->buffer_return,(long)r->regs[1],frame->receive.token);
-        t->buffer_delivered=1;
+        t->buffer_rights_delivered=1;
         break;
     }
     }
@@ -4933,7 +4899,8 @@ static int domain_call(struct thread *t, struct user_pt_regs *r, unsigned long c
     if (cookie==MD_INTERCEPT_PROC || cookie==MD_INTERCEPT_WATCH) return 0;
     if (t->phase==PROC_OPENING && t->metadata.task_open && cookie==MD_INTERCEPT_NATIVE
             && nr==SYS_openat && (int)r->regs[0]==t->metadata.proc_directory
-            && r->regs[1]==abi.proc_open_path && r->regs[2]==(O_RDONLY|O_DIRECTORY|O_CLOEXEC)
+            && r->regs[1]==abi.proc_open_path && r->regs[2]==t->metadata.request.data.args[2]
+            && !r->regs[3]
             && md_fd_order_state(&t->metadata.files)==MD_RESOURCE_ORDER_RUNNING) {
         resume(t->pid,0); return 1;
     }

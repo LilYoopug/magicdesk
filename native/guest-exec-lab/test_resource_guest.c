@@ -1097,6 +1097,32 @@ static int metadata_export_child(void *argument) {
     assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
     struct stat st; assert(!fstat(file,&st)); return 0;
 }
+static void retained_proc_filter(int proc) {
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        struct sock_filter code[]={
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_openat,0,3),
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[2])),
+            BPF_JUMP(BPF_JMP|BPF_JSET|BPF_K,O_NONBLOCK,0,1),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EBUSY),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
+        };
+        struct sock_fprog program={sizeof(code)/sizeof(*code),code};
+        assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+        int flags=O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW|O_LARGEFILE;
+        unsigned before=export_fds(NULL);
+        assert(syscall(SYS_openat,proc,"self/fd/",flags|O_NONBLOCK,0)==-1 && errno==EBUSY);
+        assert(export_fds(NULL)==before);
+        int fd=syscall(SYS_openat,proc,"self/fd/",flags,0); assert(fd>=0);
+        assert(fcntl(fd,F_GETFD)==FD_CLOEXEC && !close(fd));
+        assert(!prctl(PR_GET_DUMPABLE));
+        assert(export_fds(NULL)==before);
+        _exit(0);
+    }
+    /* EVENT_WAIT: exact filtered child exit; the fixture alarm bounds failure. */
+    reap(child);
+}
 static void metadata_export(int guest) {
     int file=open("metadata-export",O_RDWR|O_CREAT|O_CLOEXEC,0600);
     int proc=open("/proc",O_RDONLY|O_DIRECTORY|O_CLOEXEC);
@@ -1125,13 +1151,31 @@ static void metadata_export(int guest) {
     assert(errno==EMFILE && count);
     for (unsigned i=0;i<16;++i) assert(!fstat(file,&st) && st.st_size==1);
     assert(!close(filled[--count]));
-    for (unsigned i=0;i<16;++i) {
-        fd=openat(proc,"self/fd/",O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(fd>=0);
+    const int open_flags[]={
+        O_RDONLY|O_DIRECTORY|O_CLOEXEC,
+        O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW,
+        O_RDONLY|O_DIRECTORY|O_NOFOLLOW,
+        O_RDONLY|O_DIRECTORY|O_NONBLOCK|O_CLOEXEC,
+        O_RDONLY|O_NOFOLLOW|O_NONBLOCK,
+        O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_LARGEFILE,
+        O_RDONLY|O_DIRECTORY|O_LARGEFILE|O_NOCTTY,
+        O_PATH|O_DIRECTORY|O_CLOEXEC,
+        O_PATH|O_NOFOLLOW
+    };
+    for (unsigned i=0;i<sizeof(open_flags)/sizeof(*open_flags);++i) {
+        int flags=open_flags[i];
+        fd=syscall(SYS_openat,proc,"self/fd/",flags,0);
+        if (fd<0) fprintf(stderr,"retained proc open flags=%#x errno=%d\n",flags,errno);
+        assert(fd>=0);
+        assert(fcntl(fd,F_GETFD)==((flags&O_CLOEXEC) ? FD_CLOEXEC : 0));
+        int actual=fcntl(fd,F_GETFL); assert(actual>=0);
+        assert((actual&(O_PATH|O_NONBLOCK|O_NOFOLLOW))==(flags&(O_PATH|O_NONBLOCK|O_NOFOLLOW)));
         char name[32]; snprintf(name,sizeof(name),"%d",file);
         assert(!fstatat(fd,name,&st,0) && st.st_size==1);
         assert(!close(fd));
     }
     for (int i=0;i<count;++i) assert(!close(filled[i]));
+    retained_proc_filter(proc);
     void *stack=malloc(1024*1024); assert(stack);
     for (unsigned i=0;i<16;++i) {
         pid_t pid=clone(metadata_export_child,(char *)stack+1024*1024,CLONE_FILES|SIGCHLD,&file);
@@ -1148,7 +1192,7 @@ static void metadata_export(int guest) {
         if (!before[i] && fcntl((int)i,F_GETFD)>=0) assert(!close((int)i));
     assert(export_fds(NULL)==baseline);
     assert(!close(proc) && !close(file));
-    puts("PASS metadata export custody: cold EMFILE, admitted full table, proc open result only, shared-table sender death and bounded infrastructure");
+    puts("PASS metadata export custody: cold EMFILE, admitted full table, proc open flags/filter/result only, shared-table sender death and bounded infrastructure");
 }
 static const char *return_paths[2];
 static int return_child(void *unused) {
@@ -1991,7 +2035,10 @@ int test_device_nodes_guest(void);
 int test_keyring_guest(int, char **);
 int test_native_metadata_guest(void);
 int test_mutation_signal_guest(const char *, int, int);
+int test_fd_result_guest(const char *, int);
 int main(int argc, char **argv) {
+    if (argc==4 && !strcmp(argv[1],"result-custody"))
+        return test_fd_result_guest(argv[2],atoi(argv[3]));
     if (argc>=2 && !strcmp(argv[1],"keyring")) return test_keyring_guest(argc,argv);
     if (argc==5 && !strcmp(argv[1],"mutation-signal"))
         return test_mutation_signal_guest(argv[2],atoi(argv[3]),atoi(argv[4]));

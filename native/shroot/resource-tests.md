@@ -53,6 +53,25 @@ rejection, mixed explicit/cwd bases, two retained cwd bases and allocation rollb
 Shared delivery checks also force receipt creation to fail under RLIMIT_NOFILE,
 retry empty receipts, release the task owner before publication, and dispose
 partial deliveries without closing the installed application descriptors.
+
+Pipe-backed worker readiness is covered by `test_ofd_order` within
+`test_task_resources`: empty/bounded drains, saturation, signal-after-drain and
+retained cross-owner wakeups after both original descriptor numbers are reused.
+`watch_store` checks native-only zero-SQL pumping, mixed/independent observers,
+last-reader and oneshot retirement, late journal cursors and hardlink wakeups.
+
+`test_resources.py BUILD --case fs-results` additionally exercises ready-result
+custody with four concurrent threads and 32 killed children, both natively and
+under Shroot. Each runs normally, nondumpable, with an installed application
+filter and with both restrictions. It checks CLOEXEC, shared open descriptions,
+unlink-while-open, exact errors, no guest FD growth and positive broker delivery
+counters. The existing result tests retain O_PATH, exhausted tables, FIFO and
+protected-caller assertions. `--case launch-cancel` separately verifies exact
+process-tree reaping for idle/busy and ordinary/protected callers.
+`--case fd-handoff` exercises the shared atomic installer with interrupted and
+restarted notifications, blocked table turns, dead recipients and exact FD
+balance. The real-application counterpart is `browser/test_browser.py`, retaining
+Chromium's sandbox and checking rendered JavaScript, a PNG and installed filters.
 Vector tests cover source-owner loss, repeated/unknown origins, partial delivery,
 duplicate or invalid result numbers, wrong destination owners, cancellation and
 allocation-free unknown delivery. Concurrent vector readers cannot observe a
@@ -178,8 +197,12 @@ per-request socket or intermediate result is installed into the guest table.
 
 The production metadata custody fixture covers cold EMFILE, repeated protected
 fstat with a full table, proc-FD directory opens with exactly one free slot,
-relative metadata on that directory, and sixteen shared-table deaths during
-export. Native controls and the guest path require exact descriptor counts.
+read-only open flag combinations (including musl's `O_LARGEFILE`, nofollow,
+nonblocking, CLOEXEC on/off and O_PATH), relative metadata on that directory,
+flag-specific seccomp rejection without changing dumpability, and sixteen
+shared-table deaths during export. Native controls and the guest path require
+exact descriptor counts. The resource model rejects write/create/truncate,
+unknown flags, foreign directory anchors and non-admitted paths.
 
 `--case fs-export` exercises the production adapter with a nondumpable caller,
 socket/connect/recvmsg forbidden by real filters, cold EMFILE, repeated exports

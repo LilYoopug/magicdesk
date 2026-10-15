@@ -146,6 +146,20 @@ allocation-free origin publication; it does not cover worker execution or guest
 data IO. A cancelled notification installs nothing, while a successful ioctl
 publishes even if the receiving task dies immediately. Delivery consumes only the
 result slot and does not add a guest service FD.
+
+Before resuming that receiver, the supervisor registers its completed result in
+the broker's indexed task record. The namespace worker admits the exact task,
+adapter gate and result-purpose notification directly through `md_fd_install`;
+no second worker-to-supervisor handoff or per-open record allocation is needed.
+The supervisor has no parallel result-delivery record or retry path; an
+unregistered result-purpose notification is rejected.
+Only table-blocked admissions enter the readiness list. The broker pins the
+table/origin and borrows the completed source until synchronous retirement,
+which precedes provider release on acknowledgement, cancellation and exec.
+Interrupted admissions retry delivery of that same result, never the filesystem
+operation. Nondumpable and application-filtered callers use the same contract;
+O_PATH/SCM_RIGHTS and task-affine results retain their respective transport.
+
 Mapped watch reads use the same engine reservation as RPC. The supervisor offers
 the shared reply, then queues commit/rejection on the filesystem worker after the
 adapter acknowledges its copy. No file-table or filesystem turn is held while
@@ -225,6 +239,11 @@ adapter continuation. The table turn covers source capture and original-site
 replay; terminal cancellation releases the lease, not a guessed guest FD.
 Restricted `/proc/self/fd` directory opens borrow the verified original proc-root
 FD under that turn and execute a fixed bootstrap pathname after admission. The
+read-only flag allowlist preserves the caller's flags, including `O_LARGEFILE`,
+`O_NOFOLLOW`, `O_NONBLOCK`, optional `O_CLOEXEC` and `O_PATH`. Validation is not
+an exact libc-specific flag match. These opens run directly in the caller,
+without a supervisor-side proc permission probe or an O_PATH ADDFD attempt;
+the original-site and continuation seccomp checks both remain active. The
 kernel result belongs directly to the application. There is no temporary proc
 root or result FD to export/close, and no second read of an application pathname
 after it has been validated.

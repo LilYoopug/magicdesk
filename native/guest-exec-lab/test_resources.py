@@ -108,6 +108,12 @@ def main():
             check("guest without thread pidfds " + case, runner + case + " /tmp", message)
 
     def check_buffer_descriptors():
+        for mode in range(4):
+            check(f"native result custody mode={mode}", root + "/libmagicdesk_guest_resource_guest.so result-custody "
+                  + root + f"/native {mode}", "PASS cancellation stress:")
+            check(f"guest result custody mode={mode}", root + "/libmagicdesk_guest_run.so --statistics --store "
+                  + root + f"/store --deadline-seconds 90 -- /bin/test result-custody /tmp {mode}",
+                  "PASS cancellation stress:", patterns=(r"MD_BROKER resultDeliveries=[1-9]\d*",))
         check("native xattr with full table", root + "/libmagicdesk_guest_resource_guest.so xattr-slots-native "
               + root + "/native", "PASS xattr without private FDs")
         check("guest xattr with full table", root + "/libmagicdesk_guest_run.so --diagnostics --store " + root
