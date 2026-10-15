@@ -51,6 +51,7 @@ struct md_fs_buffer_request {
     struct md_fs_order order;
     struct md_ofd_order cursor;
     int cursor_waiting;
+    int captured_only;
     int64_t position;
     struct md_fs_context context;
     struct md_fs_buffer_frame *output;
@@ -730,6 +731,12 @@ int md_fs_buffer_begin(struct md_fs_buffer_service *s, pid_t actor, struct md_gu
         const struct md_interception_buffer *buffer, struct md_fs_buffer_request **out) {
     return begin(s,actor,fs,operation,buffer,out,0,0,0);
 }
+int md_fs_buffer_invoke(struct md_fs_buffer_service *s,pid_t actor,struct md_guest_domain *fs,unsigned operation,
+        const struct md_interception_buffer *buffer,struct md_fs_buffer_request **out) {
+    int error=begin(s,actor,fs,operation,buffer,out,0,0,0);
+    if (!error) (*out)->captured_only=1;
+    return error;
+}
 int md_fs_buffer_inspect_begin(struct md_fs_buffer_service *s, pid_t actor, struct md_guest_domain *fs,
         const struct md_interception_buffer *buffer, struct md_received_fds *sources,
         struct md_fs_buffer_request **out) {
@@ -918,6 +925,8 @@ int md_fs_buffer_progress(struct md_fs_buffer_service *s) {
                 r->request.origin[i]=r->input[i];
                 if (r->input[i] && !(data&(1U<<i))) {
                     r->request.directory[i]=md_fs_anchor_fd(r->input[i]);
+                } else if (r->captured_only) {
+                    error=MD_FS_BUFFER_NEEDS_TASK;
                 } else if (base>=0) {
                     int fd=md_task_descriptor_copy(r->actor,base,&process);
                     if (fd>=0) r->request.directory[i]=r->captured[i]=fd;
@@ -932,6 +941,7 @@ int md_fs_buffer_progress(struct md_fs_buffer_service *s) {
         }
         if (process>=0) close(process);
         r->context.actor=r->actor; r->context.authenticated=r->context.has_identity=1;
+        if (!error && r->captured_only && (r->capture_mask || r->export_mask)) error=MD_FS_BUFFER_NEEDS_TASK;
         if (!error && r->capture_mask) {
             /* EVENT_WAIT: private-table cwd capture and exact helper reaping.
              * Cancellation retains both turns until helper completion. */

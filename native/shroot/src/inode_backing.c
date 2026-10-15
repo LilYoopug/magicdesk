@@ -41,7 +41,7 @@ int mdi_backing_open(struct md_inode_store *s,const struct mdi_node *node,int fl
     }
     return fd<0 ? -errno : fd;
 }
-int md_inode_descriptor_source(struct md_inode_store *s, int fd, char *out, size_t capacity) {
+static int descriptor_source(struct md_inode_store *s, int fd, char *out, size_t capacity) {
     struct stat opened, named;
     if (fstat(fd,&opened)) return -errno;
     char proc[64], path[PATH_MAX];
@@ -64,6 +64,21 @@ int md_inode_descriptor_source(struct md_inode_store *s, int fd, char *out, size
         return length<0 ? -EIO : (size_t)length>=capacity ? -ERANGE : 0;
     }
     return -EXDEV;
+}
+int md_inode_descriptor_source(struct md_inode_store *s, int fd, char *out, size_t capacity) {
+    int r=descriptor_source(s,fd,out,capacity);
+    if (r!=-EXDEV) return r;
+    r=mdi_begin(s,0);
+    if (r) return r;
+    struct mdi_node node;
+    r=mdi_fd(s,fd,&node);
+    if (r==-ENOENT) r=-EXDEV;
+    if (!r && node.native && !node.attached) r=-EXDEV;
+    /* A mutable native name cannot be exported for a later kernel reopen. */
+    if (!r && node.native) r=mdi_leaf_promote(s,&node);
+    r=mdi_finish(s,r);
+    if (r==-EROFS) r=-EXDEV;
+    return r ? r : descriptor_source(s,fd,out,capacity);
 }
 int mdi_sources_open(struct md_inode_store *s) {
     sqlite3_stmt *q = NULL;

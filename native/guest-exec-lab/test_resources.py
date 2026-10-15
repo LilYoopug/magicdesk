@@ -157,6 +157,11 @@ def main():
               + "/store --deadline-seconds 90 -- /bin/test watch-slots /tmp", "PASS watch paths without private FDs")
 
     def check_buffers():
+        check("native path invocation", root + "/libmagicdesk_guest_resource_guest.so path-invocation "
+              + root + "/native", "PASS path invocation:")
+        check("guest path invocation", root + "/libmagicdesk_guest_run.so --statistics --store "
+              + root + "/store --deadline-seconds 90 -- /bin/test path-invocation /tmp", "PASS path invocation:",
+              patterns=(r"MD_DIRECT status=[1-9]\d* open=[1-9]\d* fallback=\d+ admit=[1-9]\d*",))
         check_mutation_signals()
         check_captures()
         check("adapter address-space ownership", root + "/libmagicdesk_guest_test_interception_buffers.so",

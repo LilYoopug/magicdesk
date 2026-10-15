@@ -954,6 +954,16 @@ static void request_contract(void) {
     struct md_fs_request open={.operation=MD_FS_OPEN,.directory={-1,-1},
         .path={"/",NULL},.flags=O_PATH,.resolve=1};
     CHECK(!md_fs_request_validate(&open));
+    open.flags=O_CREAT|O_RDWR; open.mode=0644; open.attributes.creation_mask=MD_FS_CAPTURE_UMASK;
+    CHECK(!md_fs_request_validate(&open));
+    open.flags|=O_PATH; CHECK(md_fs_request_validate(&open)==-EINVAL);
+    open.flags=O_RDONLY; CHECK(md_fs_request_validate(&open)==-EINVAL);
+    open.operation=MD_FS_MKDIR; open.resolve=0; CHECK(!md_fs_request_validate(&open));
+    open.attributes.creation_mask=01000; CHECK(md_fs_request_validate(&open)==-EINVAL);
+    open.attributes.creation_mask=MD_FS_CAPTURE_UMASK;
+    open.operation=MD_FS_CREATE; CHECK(md_fs_request_validate(&open)==-EINVAL);
+    struct md_fs_request unlink={.operation=MD_FS_UNLINK,.directory={-1,-1},.path={"/missing",NULL},.flags=1};
+    CHECK(md_fs_request_validate(&unlink)==-EINVAL);
     struct md_fs_request value={.operation=MD_FS_XATTR,.directory={-1,-1},.path={"/x","user.test"},
         .mode=MD_FS_XATTR_SET,.capacity=1,.value_size=1,.value="x"};
     CHECK(!md_fs_request_validate(&value));

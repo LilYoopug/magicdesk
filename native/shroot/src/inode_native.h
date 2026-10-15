@@ -17,6 +17,10 @@ int mdi_native_create(int directory, const char *name, int flags,
         uint32_t uid, uint32_t gid, mode_t mode);
 int mdi_native_create_in(int objects,const char *parent,const char *name,int flags,
         uint32_t uid,uint32_t gid,mode_t mode);
+/* Prepare exceptional metadata under a private, unpublished staging name.
+ * The caller publishes by rename only after this succeeds. */
+int mdi_native_prepare(int objects,const char *name,int flags,
+        uint32_t uid,uint32_t gid,mode_t mode);
 /* Borrow a validated leaf FD, including O_PATH and unlinked descriptions. */
 int mdi_native_stat(int fd, struct stat *);
 int mdi_native_info(int fd, struct stat *, unsigned *acl);

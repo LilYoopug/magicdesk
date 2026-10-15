@@ -3,6 +3,7 @@
 #include "fs_wire.h"
 #include "interception.h"
 #include "fd_filter.h"
+#include "namespace_internal.h"
 #include "raw.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -102,6 +103,14 @@ static long receive_result(struct md_fs_buffer_frame *frame, const struct md_fs_
         else if (out->result.size>sizeof(out->data)) result=-EOVERFLOW;
     }
     return result;
+}
+long md_guest_buffer_result(unsigned flags,unsigned mode,struct md_fs_buffer_frame *frame) {
+    struct md_fs_request q={.operation=MD_FS_OPEN,.directory={-1,-1},.flags=flags,.mode=mode};
+    struct md_fs_response out={0};
+    long result=receive_result(frame,&q,&out,NULL,NULL);
+    if (result) return result;
+    if (out.result.error) return out.result.error;
+    return md_namespace_open_result(&out.result,(int)flags);
 }
 static long exchange(const struct md_fs_request *q, struct md_fs_response *out,
         int (*deliver)(void *, const void *, size_t), void *context, unsigned command,

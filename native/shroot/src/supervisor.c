@@ -98,6 +98,9 @@
 #include <unistd.h>
 #include "task_wait.h"
 #include "pending.h"
+#include "fs_path_call.h"
+#include "task_memory.h"
+#include "proc_paths.h"
 
 /* One supervisor owns one launched tree. It never attaches to Android tasks. */
 static struct md_interception_abi abi;
@@ -121,6 +124,7 @@ static int diagnostics;
 struct interception_statistics {
     uint64_t ptrace_requests, unknown, native_seeks, stops;
     uint64_t event_polls, event_waits;
+    uint64_t direct_status, direct_open, direct_fallback, direct_admit;
     struct md_cost rpc;
     struct { uint64_t trace, notification; } calls[512];
 };
@@ -280,6 +284,7 @@ struct thread {
     struct seccomp_notif *memory_notification;
     struct md_interception_buffer buffer;
     struct md_fs_buffer_request *buffer_call;
+    enum { DIRECT_NONE, DIRECT_STATUS, DIRECT_OPEN, DIRECT_RESULT } direct;
     struct capture_owner *capture;
     struct probe_owner *probe;
     struct outgoing_owner *outgoing;
@@ -473,6 +478,8 @@ static void memory_start(struct thread *);
 static void proc_lookup_start(struct thread *);
 static void buffer_descriptor_start(struct thread *);
 static void dispatch(struct thread *t);
+static void direct_complete(struct thread *,int);
+static int buffer_cleanup(struct thread *);
 static void report_statistics(void);
 static int debugger_allowed(pid_t, pid_t);
 static pid_t visible_pid(struct thread *,pid_t);
@@ -703,6 +710,7 @@ static void adapter_discard(struct thread *t) {
     CHECK(!md_buffer_release(&t->buffer));
     t->buffer_waiting=0;
     t->buffer_rights_delivered=0;
+    t->direct=DIRECT_NONE;
 }
 static long native_trace(int request, pid_t pid, void *address, void *data) {
     if (statistics) statistics->ptrace_requests++;
@@ -807,14 +815,7 @@ static int duplicate_fd(pid_t pid, int descriptor) {
     return fd;
 }
 static int read_string(pid_t pid, uintptr_t address, char *text, size_t capacity) {
-    for (size_t i = 0; i < capacity; i++) {
-        if (address > UINTPTR_MAX - i) return -EFAULT;
-        struct iovec local = {text + i, 1}, remote = {(void *)(address + i), 1};
-        ssize_t n = process_vm_readv(pid, &local, 1, &remote, 1, 0);
-        if (n != 1) return n < 0 ? -errno : -EFAULT;
-        if (!text[i]) return 0;
-    }
-    return -ENAMETOOLONG;
+    return md_task_read_string(pid,address,text,capacity,md_page_size);
 }
 static int descriptor_stat(struct thread *t, int fd, struct stat *st, int native) {
     /* Internal loader validation inspects the actual descriptor. Only the guest
@@ -3898,6 +3899,10 @@ static void capture_start(struct thread *t, struct md_fs_buffer_request *request
         CHECK(!md_fs_buffer_capture_finish(request,-1,error));
     } else { t->capture=owner; t->kernel_stopped=0; }
 }
+static int direct_addfd(const struct thread *t, const struct md_fs_buffer_frame *frame) {
+    return t->direct==DIRECT_OPEN && frame->transfer==MD_FS_BUFFER_ADDFD
+        && !frame->reply.result.selectors && t->buffer_open.completion.kind==MD_OPEN_READY;
+}
 static void buffer_complete(struct md_fs_buffer_request *request, pid_t pid, int error) {
     struct thread *t=find_thread(pid);
     CHECK(t && t->buffer_call==request);
@@ -3932,12 +3937,29 @@ static void buffer_complete(struct md_fs_buffer_request *request, pid_t pid, int
         struct md_buffer_span span;
         CHECK(!md_buffer_span(&t->buffer,&span));
         const struct md_fs_buffer_frame *frame=span.data;
+        unsigned flags=direct_addfd(t,frame) ? t->original.regs[2] : t->buffer_open.flags;
         if (frame->transfer==MD_FS_BUFFER_ADDFD)
             CHECK(!md_broker_result_begin(broker,t->pid,abi.buffer_admit,t->resources.files,
-                t->buffer_open.fd,md_fs_buffer_open_object(&t->buffer_open),t->buffer_open.flags&O_CLOEXEC));
+                t->buffer_open.fd,md_fs_buffer_open_object(&t->buffer_open),flags&O_CLOEXEC));
     }
     TRACE("PROBE buffer-call pid=%d operation=%llu error=%d descriptor=%d\n",pid,t->buffer_registers.regs[1],error,t->buffer_open.fd>=0);
+    if (t->direct==DIRECT_STATUS || t->direct==DIRECT_OPEN) { direct_complete(t,error); return; }
     buffer_reply(t,error);
+}
+static int buffer_cleanup(struct thread *t) {
+    readiness_release(t);
+    if (t->outgoing) {
+        if (t->outgoing->stage!=OUTGOING_READY
+                && !(t->outgoing->brokered && t->outgoing->stage==OUTGOING_CAPTURE)) return -EBUSY;
+        outgoing_release(t->outgoing); t->outgoing=NULL;
+    }
+    md_fs_buffer_cancel(&t->buffer_call);
+    CHECK(!md_broker_result_clear(broker,t->pid));
+    md_fs_buffer_open_release(&t->buffer_open);
+    md_ipc_transport_close(&t->ipc_transport);
+    if (t->proc_image_fd>=0) { close(t->proc_image_fd); t->proc_image_fd=-1; }
+    t->buffer_rights_delivered=0;
+    return md_buffer_release(&t->buffer);
 }
 static void buffer_take(struct thread *t) {
     retry_clear(t,RETRY_BUFFER);
@@ -4377,21 +4399,7 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
         break;
     case MD_BUFFER_RELEASE:
         if (r->regs[1] || r->regs[2]) break;
-        readiness_release(t);
-        if (t->outgoing) {
-            if (t->outgoing->stage!=OUTGOING_READY
-                    && !(t->outgoing->brokered && t->outgoing->stage==OUTGOING_CAPTURE)) {
-                result=-EBUSY; break;
-            }
-            outgoing_release(t->outgoing); t->outgoing=NULL;
-        }
-        md_fs_buffer_cancel(&t->buffer_call);
-        CHECK(!md_broker_result_clear(broker,t->pid));
-        md_fs_buffer_open_release(&t->buffer_open);
-        md_ipc_transport_close(&t->ipc_transport);
-        if (t->proc_image_fd>=0) { close(t->proc_image_fd); t->proc_image_fd=-1; }
-        t->buffer_rights_delivered=0;
-        result=md_buffer_release(&t->buffer); break;
+        result=buffer_cleanup(t); break;
     case MD_FS_BUFFER_TASK_DONE:
         if (r->regs[2] || t->fd_running) break;
         result=md_fs_buffer_task_finish(&t->buffer_call,(long)r->regs[1]);
@@ -5061,7 +5069,99 @@ static int shield(struct thread *t) {
 static int restore_mask(struct thread *t) {
     return tracee_request(t, PTRACE_SETSIGMASK, (void *)sizeof(t->mask), &t->mask, "restore-mask");
 }
+static int direct_begin(struct thread *t,int status) {
+    long nr=t->original.regs[8];
+    if (!t->endpoint[0] || t->direct || t->buffer.pool || t->application_filter
+            || t->debug_options || t->debug_call_active || t->debug_step_call
+            || (status ? nr!=SYS_unlinkat && nr!=SYS_renameat && nr!=SYS_renameat2
+                && nr!=SYS_linkat && nr!=SYS_mkdirat : nr!=SYS_openat)) return 0;
+    if (md_buffers_take(md_memory_buffers(t->memory),&t->buffer)) return 0;
+    struct md_buffer_span span;
+    CHECK(!md_buffer_span(&t->buffer,&span));
+    struct md_fs_buffer_frame *frame=span.data;
+    memset(&frame->input,0,offsetof(struct md_fs_buffer_input,path));
+    memset(frame->input.capture_length,0,sizeof(frame->input.capture_length));
+    memset(frame->input.capture_flags,0,sizeof(frame->input.capture_flags));
+    frame->input.base[0]=frame->input.base[1]=-1;
+    unsigned long args[6];
+    for (unsigned i=0;i<6;++i) args[i]=t->original.regs[i];
+    struct md_fs_request q={.directory={-1,-1}};
+    unsigned paths=md_fs_path_call(&q,nr,args);
+    CHECK(paths);
+    for (unsigned i=0;i<paths;++i) {
+        char *path=frame->input.path[i];
+        if (read_string(t->pid,args[i ? 3 : 1],path,PATH_MAX)) {
+            CHECK(!md_buffer_release(&t->buffer)); return 0;
+        }
+        if (*path!='/') {
+            int base=(int)args[i ? 2 : 0];
+            if (base<0 && base!=AT_FDCWD) { CHECK(!md_buffer_release(&t->buffer)); return 0; }
+            frame->input.base[i]=base;
+        }
+        frame->input.length[i]=strlen(path)+1;
+    }
+    int managed=md_domain_scoped(t->resources.fs)
+        || md_mount_namespace_managed_paths(t->resources.mounts) || t->resources.landlock;
+    if (paths==1 && !managed && md_host_path(frame->input.path[0])) {
+        CHECK(!md_buffer_release(&t->buffer)); return 0;
+    }
+    frame->input.flags=q.flags; frame->input.mode=q.mode; frame->input.attributes=q.attributes;
+    int error=md_fs_buffer_invoke(buffer_service,t->pid,t->resources.fs,q.operation,&t->buffer,&t->buffer_call);
+    if (error) { CHECK(!md_buffer_release(&t->buffer)); return 0; }
+    if (status && !skip(t->pid)) { CHECK(!buffer_cleanup(t)); return 1; }
+    t->direct=status ? DIRECT_STATUS : DIRECT_OPEN; t->phase=DISPATCHING;
+    t->buffer_registers=t->original; t->buffer_registers.regs[1]=q.operation;
+    if (statistics) {
+        if (status) ++statistics->direct_status;
+        else ++statistics->direct_open;
+    }
+    /* EVENT_WAIT: worker completion or task death owns the captured request.
+     * No guest instruction runs before completion; mutations are never replayed. */
+    adapter_progress(); return 1;
+}
+static void direct_complete(struct thread *t,int error) {
+    CHECK(!t->buffer_call && t->kernel_stopped);
+    struct md_buffer_span span;
+    CHECK(!md_buffer_span(&t->buffer,&span));
+    const struct md_fs_buffer_frame *frame=span.data;
+    int status=t->direct==DIRECT_STATUS;
+    int delegate=error==MD_FS_BUFFER_NEEDS_TASK || (!error && frame->reply.result.host_path);
+    long value=error ? error : frame->reply.result.error;
+    if (!status && !error && !delegate && !value) {
+        struct user_pt_regs regs=t->original;
+        regs.pc=abi.buffer_result; regs.sp=t->stack; regs.regs[30]=DONE;
+        regs.regs[0]=(unsigned)t->original.regs[2]; regs.regs[1]=t->original.regs[3]&07777U;
+        regs.regs[2]=md_memory_buffer_address(t->memory,&t->buffer);
+        CHECK(regs.regs[2]);
+        if (direct_addfd(t,frame)) {
+            regs.pc=abi.buffer_enter; regs.regs[0]=MD_FS_BUFFER_RESULT_ADMIT;
+            if (statistics) ++statistics->direct_admit;
+        }
+        t->direct=DIRECT_RESULT;
+        if (set_registers(t->pid,&regs)) resume(t->pid,0);
+        return;
+    }
+    CHECK(!buffer_cleanup(t)); t->direct=DIRECT_NONE;
+    if (delegate) {
+        if (statistics) ++statistics->direct_fallback;
+        if (status) {
+            if (!tracee_request(t,PTRACE_GETSIGMASK,(void *)sizeof(t->mask),&t->mask,"direct-fallback-mask")
+                    || !shield(t)) return;
+            dispatch_with_stack(t);
+        } else {
+            /* The host boundary is explicitly unexecuted. Suppress recapture
+             * while entering the task-affine path, not after a mutation. */
+            t->direct=DIRECT_RESULT; dispatch(t); t->direct=DIRECT_NONE;
+        }
+        return;
+    }
+    struct user_pt_regs regs=t->original; regs.regs[0]=value;
+    if (!set_registers(t->pid,&regs) || (!status && !restore_mask(t))) return;
+    if (t->stack) { md_memory_stack_return(t->memory,t->stack); t->stack=0; }
+    t->phase=IDLE; resume(t->pid,0);
+}
 static void dispatch(struct thread *t) {
+    if (direct_begin(t,0)) return;
     struct user_pt_regs regs = t->original;
     regs.pc = DISPATCH; regs.sp = t->stack; regs.regs[30] = DONE;
     regs.regs[0] = t->original.regs[8];
@@ -6534,6 +6634,7 @@ int main(int argc, char **argv) {
             t->original = regs; calls++; t->calls++;
             t->debug_step_call=md_debugger_step(debugger,pid);
             if (regs.regs[8]==SYS_shmdt) { memory_begin(t,&regs,MEMORY_DETACH); continue; }
+            if (direct_begin(t,1)) continue;
             if (!tracee_request(t, PTRACE_GETSIGMASK, (void *)sizeof(t->mask), &t->mask, "get-mask")
                     || !shield(t) || !skip(pid)) continue;
             dispatch_with_stack(t);
@@ -6903,6 +7004,9 @@ int main(int argc, char **argv) {
                 t->stack = regs.regs[0]; CHECK(!md_memory_stack_add(t->memory, t->stack)); dispatch(t);
             } else if (regs.pc == DONE && t->phase == DISPATCHING) {
                 CHECK(!t->control_pending);
+                if (t->direct==DIRECT_RESULT) {
+                    CHECK(!buffer_cleanup(t)); t->direct=DIRECT_NONE;
+                }
                 /* Terminal acknowledgement owns the remaining socket custody.
                  * Intermediate publication still releases/reacquires its buffer;
                  * no extra stop is needed after the final userspace copy. */
@@ -7127,6 +7231,9 @@ static void report_statistics(void) {
             (unsigned long long)statistics->native_seeks);
         fprintf(stderr, "MD_EVENT_LOOP polls=%llu waits=%llu\n",
             (unsigned long long)statistics->event_polls, (unsigned long long)statistics->event_waits);
+        fprintf(stderr,"MD_DIRECT status=%llu open=%llu fallback=%llu admit=%llu\n",
+            (unsigned long long)statistics->direct_status,(unsigned long long)statistics->direct_open,
+            (unsigned long long)statistics->direct_fallback,(unsigned long long)statistics->direct_admit);
         for (unsigned nr = 0; nr < 512; nr++)
             if (statistics->calls[nr].trace || statistics->calls[nr].notification)
                 fprintf(stderr, "MD_SYSCALL nr=%u trace=%llu notification=%llu\n", nr,

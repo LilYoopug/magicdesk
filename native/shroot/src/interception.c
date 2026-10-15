@@ -191,6 +191,8 @@ static const struct md_interception_abi abi = {
     .task_collect=(uintptr_t)md_guest_task_collect, .task_collected=(uintptr_t)md_guest_task_collected,
     .buffer_control=(uintptr_t)md_guest_buffer_control,
     .buffer_admit=(uintptr_t)md_guest_buffer_admitted,
+    .buffer_result=(uintptr_t)md_guest_buffer_result,
+    .buffer_enter=(uintptr_t)md_guest_buffer_admit,
     .fd_control=(uintptr_t)md_guest_fd_control,
     .capture_gate=(uintptr_t)md_guest_anchor_return,
     .ipc_wait = (uintptr_t)md_guest_ipc_wait,
@@ -409,8 +411,15 @@ int md_interception_install(int inherited) {
 #undef IDENTITY
             OBSERVE(unshare) OBSERVE(setns)
             OBSERVE(seccomp)
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_openat, 0, 1),
+            /* O_PATH ignores creation flags and retains the metadata admission
+             * path, including protected proc descriptors outside a new root. */
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_openat, 0, 6),
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[2])),
+            BPF_JUMP(BPF_JMP|BPF_JSET|BPF_K,O_PATH,2,0),
+            BPF_JUMP(BPF_JMP|BPF_JSET|BPF_K,O_CREAT|O_TRUNC|__O_TMPFILE,0,1),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_DISPATCH),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_newfstatat, 0, 1),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_getdents64, 0, 1),

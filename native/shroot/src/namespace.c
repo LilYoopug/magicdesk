@@ -2,6 +2,7 @@
 #include "namespace_internal.h"
 #include "proc_paths.h"
 #include "fs_rpc.h"
+#include "fs_path_call.h"
 #include "fd_metadata.h"
 #include "fd_client.h"
 #include "linux_abi.h"
@@ -86,18 +87,8 @@ static long open_operand(const struct md_fs *fs, struct md_namespace_operand ope
     int base=operand.descriptor;
     int flags = (int)how->flags;
     unsigned mode = (unsigned)how->mode;
-    unsigned mask=0;
-    if ((flags & O_CREAT) && !(flags & O_PATH)) {
-        long masked = md_namespace_creation_mode(fs,0777);
-        if (masked < 0)
-            return masked;
-        mask = 0777U ^ (unsigned)masked;
-    }
-    struct md_fs_request q = {.operation = MD_FS_OPEN,
-                              .directory = {base, -1}, .capture={operand.capture},
-                              .path = {path, NULL},
-                              .flags = (uint32_t)flags,
-                              .mode = mode, .resolve = how->resolve, .attributes.creation_mask=mask};
+    struct md_fs_request q = {.directory = {base, -1}, .capture={operand.capture}, .path = {path, NULL}};
+    md_fs_open_parameters(&q,(unsigned)flags,mode,how->resolve);
     struct md_fs_response out;
     long r = md_namespace_request(fs, &q, &out);
     if (r==-EREMOTE) {
@@ -425,16 +416,8 @@ __attribute__((noinline)) static long path_metadata(const struct md_fs *fs, long
         return md_write_memory((void *)a[4], &st, sizeof(st));
     }
     case SYS_mkdirat:
-        r = md_namespace_creation_mode(fs,0777);
-        if (r < 0)
-            return r;
-        q.operation = MD_FS_MKDIR;
-        q.mode = (uint32_t)a[2] & 07777U;
-        q.attributes.creation_mask=0777U^(unsigned)r;
-        break;
     case SYS_unlinkat:
-        q.operation = MD_FS_UNLINK;
-        q.flags = (uint32_t)a[2];
+        md_fs_path_call(&q,nr,a);
         break;
     case SYS_readlinkat:
         if (!a[3])
@@ -465,10 +448,8 @@ __attribute__((noinline)) static long path_metadata(const struct md_fs *fs, long
         r = md_namespace_relative_mount(fs, (int)a[2], second);
         if (r < 0)
             return r;
-        q.operation = nr == SYS_linkat ? MD_FS_LINK : MD_FS_RENAME;
-        q.directory[1] = (int)a[2];
+        md_fs_path_call(&q,nr,a);
         q.path[1] = second;
-        q.flags = nr == SYS_renameat ? 0 : (uint32_t)a[4];
         return md_namespace_paths_request(fs,&q);
     case SYS_faccessat:
     case SYS_faccessat2: {

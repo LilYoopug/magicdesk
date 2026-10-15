@@ -224,7 +224,9 @@ No APK install, root switch, SELinux change or Desktop self-test is involved.
 
 The namespace adapter covers cwd, directory read/seek, stat/statx, atomic
 open/create and exec. Its native owner uses umask zero after guest fork; requests
-carry the caller-masked creation mode. The underlying model API itself retains
+carry the guest mode and creation mask. Open/create and mkdir can request authenticated
+actor-mask capture in the worker, avoiding a preliminary umask RPC; unauthenticated
+requests cannot select it. The underlying model API itself retains
 normal calling-process umask semantics. Real identity is unchanged; guest inode
 permissions use the supervisor's explicit credential model. The offline prepared-rootfs
 import does not implement live promotion, object reclamation or notifications.

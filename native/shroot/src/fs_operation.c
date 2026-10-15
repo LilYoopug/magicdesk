@@ -36,6 +36,7 @@ const char *md_fs_operation_name(unsigned operation) {
 
 int md_fs_request_validate(const struct md_fs_request *q) {
     if (!q) return -EINVAL;
+    if (q->operation==MD_FS_UNLINK && (q->flags&~AT_REMOVEDIR)) return -EINVAL;
     unsigned descriptors=0;
     for (unsigned i=0;i<2;++i) {
         if (q->capture[i].path) {
@@ -61,7 +62,10 @@ int md_fs_request_validate(const struct md_fs_request *q) {
     }
     const char *a=q->path[0] ? q->path[0] : "", *b=q->path[1] ? q->path[1] : "";
     if (!md_fs_operation_valid(q->operation)) return -ENOTSUP;
-    if (q->attributes.creation_mask & ~0777U) return -EINVAL;
+    if ((q->attributes.creation_mask & ~0777U)
+            && !(q->attributes.creation_mask==MD_FS_CAPTURE_UMASK
+                && (q->operation==MD_FS_MKDIR || (q->operation==MD_FS_OPEN
+                    && (q->flags&O_CREAT) && !(q->flags&O_PATH))))) return -EINVAL;
     if (q->resolve && q->operation != MD_FS_OPEN) return -EINVAL;
     if (q->value_size>MD_FS_VALUE_MAX || (q->value_size && !q->value)
             || (q->value_size && q->operation!=MD_FS_XATTR && q->operation!=MD_FS_FXATTR && q->operation!=MD_FS_XATTR_OBJECT

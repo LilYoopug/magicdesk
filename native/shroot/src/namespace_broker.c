@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "task_memory.h"
 #include "namespace_broker.h"
 #include "fs_engine.h"
 #include "watch_broker.h"
@@ -129,18 +130,7 @@ static int duplicate(struct task *task, pid_t pid, int number) {
     return md_task_descriptor_copy(pid,number,&task->process);
 }
 static int pathname(pid_t pid, uintptr_t address, char *out, size_t capacity) {
-    size_t page = (size_t)sysconf(_SC_PAGESIZE), copied = 0;
-    while (copied < capacity) {
-        if (address > UINTPTR_MAX - copied) return -EFAULT;
-        size_t size = page - ((address + copied) % page);
-        if (size > capacity - copied) size = capacity - copied;
-        struct iovec local = {out + copied, size}, remote = {(void *)(address + copied), size};
-        ssize_t n = process_vm_readv(pid, &local, 1, &remote, 1, 0);
-        if (n <= 0) return n < 0 ? -errno : -EFAULT;
-        if (memchr(out + copied, 0, (size_t)n)) return 0;
-        copied += (size_t)n;
-    }
-    return -ENAMETOOLONG;
+    return md_task_read_string(pid,address,out,capacity,(size_t)sysconf(_SC_PAGESIZE));
 }
 static int deliver_bytes(struct operation *op, uintptr_t pointer, const void *data, size_t size) {
     if (!valid(op)) return -ECANCELED;

@@ -47,6 +47,9 @@ static long descriptor_path(int base, char *host) {
         char link[64] = "/proc/thread-self/fd/";
         md_decimal(link + md_length(link), (unsigned)base);
         n = RAW4(readlinkat, AT_FDCWD, link, host, PATH_MAX - 1);
+        /* A missing proc link is not a missing relative pathname. Preserve
+         * EBADF for a closed dirfd without probing valid descriptors twice. */
+        if (n == -ENOENT && RAW3(fcntl, base, F_GETFD, 0) == -EBADF) return -EBADF;
         if (n < 0) return n;
         if (n == PATH_MAX - 1) return -ENAMETOOLONG;
         host[n] = 0;

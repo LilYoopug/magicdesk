@@ -36,8 +36,10 @@ part. Process kills and the WAL-loss model do not simulate physical power loss.
 publication owners. These checks use the default representation, not a feature
 flag or an alternate provider. Ordinary eligible creation under a guest-owned
 virtual-permission directory must perform zero SQL writes, xattr operations and
-forced synchronization. Physical-permission import directories, non-root
-creation, default ACLs and overlay projections retain catalogue allocation.
+forced synchronization. Non-root creation and exceptional initial modes use
+native names with one synced sparse-metadata preparation before publication,
+still without SQL writes. Physical-permission import directories, default ACLs
+and overlay projections retain catalogue allocation.
 
 The matrix covers mixed directory enumeration and transferable offsets, retained
 and unlinked FDs, O_PATH metadata, ACL/capability updates, Landlock inode pins,
@@ -45,7 +47,10 @@ native and mixed watch streams, hardlink promotion, sealing, snapshot COW,
 overlay admission and portable backup/restore. Publication tests interrupt each
 durable phase and recovery itself, inject IO errors, and check both cold and
 already-open owners. Sparse-metadata transitions get separate interruption and
-error injection. Format-17 revision admission must preserve existing data and
+error injection, including private preparation before publishing non-root names.
+Stable O_PATH nofollow sources must preserve the same inode after guest
+rename/unlink; the buffered-open runtime fixture uses a guest-created parent
+and forbids hidden socket RPC. Format-17 revision admission must preserve existing data and
 reject a metadata upgrade while another owner holds the old revision.
 
 `test_execfd.c`, built by `build-libc-fixtures.sh`, additionally copies a fresh
@@ -54,13 +59,25 @@ inherited descriptors and reads the image through local and foreign proc paths.
 It checks metadata, inode identity, writable-open rejection and proc-image
 reexec. `test_landlock_guest.c` denies execution of attached and unlinked fresh
 copies through preopened descriptors. Run both as guest `0:0` and `2000:2000`;
-the latter is the catalogue control. These run under the same real shell UID,
+both exercise native-name allocation. These run under the same real shell UID,
 not Android root. The fixture executable must belong to the selected guest user
 for its sticky-directory link/unlink controls.
 
 These are process-death and injected-error checks, not physical power-loss tests.
 Chromium's separate browser workflow verifies the application-filter path with
 its sandbox enabled; it is not replaced by filesystem component assertions.
+
+`--case fs-buffer` also compares stopped-task path invocation with native control:
+ordinary/nondumpable tasks, installed application filters, guard-page path strings,
+invalid unlink flags, file/directory umask, descriptor flags and native host delegation.
+It covers relative cwd and explicit dirfd, mixed rename operands, renamed directory
+anchors, close/reuse, closed-dirfd EBADF and absolute names ignoring an invalid dirfd.
+Component invocation tests require missing origins to decline before execution and
+release both ordering turns; an already captured anchor survives descriptor reuse.
+The worker transport fixture installs the production typed-control factory and
+checks live mount-table contents and logical metadata, not the carrier inode type.
+Diagnostics must show successful direct open, status delivery and assembly-gate
+FD admission, not only fallback execution.
 
 `test_resources.py BUILD --case mount-policy` checks the attachment-policy owner
 without running Desktop or replacing the APK. Local policy creates no descriptor;

@@ -42,6 +42,7 @@ struct watch_source {
     int sources[MDI_SOURCES];
     int64_t cursor;
     unsigned logical_subscriptions;
+    unsigned birth_cookie;
 };
 struct md_inode_watches {
     struct instance *instances;
@@ -147,7 +148,7 @@ static int source_get(struct md_inode_store *owner, struct md_inode_store *store
     if (!r && (p->native=inotify_init1(IN_NONBLOCK|IN_CLOEXEC))<0) r=-errno;
     if (!r) r=epoll_add(w->epoll,p->native,EPOLLIN);
     if (!r && (p->database=watch_path(p->native,s->lifetime->root,"/namespace.db-wal",IN_MODIFY))<0) r=p->database;
-    if (!r && (p->objects=watch_path(p->native,s->objects,"",DATA_EVENTS|IN_CREATE))<0) r=p->objects;
+    if (!r && (p->objects=watch_path(p->native,s->objects,"",DATA_EVENTS|IN_CREATE|IN_MOVED_FROM))<0) r=p->objects;
     if (!r && (p->control=watch_path(p->native,s->lifetime->root,"",IN_CREATE))<0) r=p->control;
     p->sources[0]=p->objects;
     for (unsigned i = 1; !r && i < MDI_SOURCES; ++i) if (s->lifetime->sources[i] >= 0) {
@@ -259,7 +260,7 @@ static int journal(struct md_inode_watches *w, struct watch_source *source,int64
 }
 static int native_event(struct md_inode_watches *w, struct watch_source *backend, const struct inotify_event *event) {
     struct md_inode_store *s=backend->store;
-    if (event->mask & IN_Q_OVERFLOW) { backend->publishing=0; return overflow(w); }
+    if (event->mask & IN_Q_OVERFLOW) { backend->publishing=0; backend->birth_cookie=0; return overflow(w); }
     if (event->wd==backend->control) {
         if (event->len && !strcmp(event->name,"publication-v1.begin")) backend->publishing=1;
         if (event->len && !strcmp(event->name,"publication-v1.end")) backend->publishing=0;
@@ -271,6 +272,12 @@ static int native_event(struct md_inode_watches *w, struct watch_source *backend
         return 0;
     }
     if (event->wd == backend->database) return 0;
+    if (event->wd==backend->objects && (event->mask&IN_MOVED_FROM)) {
+        backend->birth_cookie=event->cookie;
+        return 0;
+    }
+    int birth=(event->mask&IN_MOVED_TO) && event->cookie && event->cookie==backend->birth_cookie;
+    if (event->mask&(IN_MOVED_FROM|IN_MOVED_TO)) backend->birth_cookie=0;
     int r = 0;
     int source = -1;
     for (unsigned i = 0; i < MDI_SOURCES; ++i) if (event->wd == backend->sources[i]) { source = (int)i; break; }
@@ -354,7 +361,10 @@ static int native_event(struct md_inode_watches *w, struct watch_source *backend
                     if (!event->len) mask=0;
                     else if (backend->publishing) mask&=~(IN_CREATE|IN_DELETE|IN_MOVED_FROM|IN_MOVED_TO);
                 }
-                if (mask) r=publish(w,i,link,mask,event->cookie,event->len ? event->name : NULL);
+                if (mask && birth && *p->object) {
+                    r=publish(w,i,link,IN_CREATE,0,event->name);
+                    if (!r && *link==p) r=publish(w,i,link,IN_OPEN,0,event->name);
+                } else if (mask) r=publish(w,i,link,mask,event->cookie,event->len ? event->name : NULL);
             }
             if (*link == p) link = &p->next;
         }

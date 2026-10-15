@@ -235,6 +235,12 @@ static void context_execute(struct md_fs_context *context,
     if (!fs || context->actor!=q->actor || context->peer!=q->peer) {
         *out=(struct md_fs_result){.fd=-1,.error=fs ? -EPERM : -EINVAL}; return;
     }
+    struct md_fs_request captured;
+    if (q->attributes.creation_mask==MD_FS_CAPTURE_UMASK) {
+        long mask=context->authenticated ? md_task_umask(context->actor) : -EPERM;
+        if (mask<0) { *out=(struct md_fs_result){.fd=-1,.error=(int)mask}; return; }
+        captured=*q; captured.attributes.creation_mask=(unsigned)mask; q=&captured;
+    }
     if (output && output->origin) {
         if (!md_fs_operation_has_origin(q->operation)) {
             *out=(struct md_fs_result){.fd=-1,.error=-EINVAL}; return;

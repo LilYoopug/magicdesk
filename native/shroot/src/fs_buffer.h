@@ -62,6 +62,7 @@ struct md_fs_buffer_frame {
 };
 /* Bootstrap-only FD setup; ordinary calls exchange registers and mapped bytes. */
 #ifndef MD_USE_LIBC
+long md_guest_buffer_result(unsigned flags,unsigned mode,struct md_fs_buffer_frame *);
 int md_fs_buffer_accepts(const struct md_fs_request *);
 long md_fs_buffer_exec_prepare(const struct md_fs_request *, struct md_command_recipe *);
 void md_fs_buffer_exec_cancel(void);

@@ -208,8 +208,14 @@ and directories created with guest credentials use virtual permissions.
 An eligible private regular leaf (logical UID/GID zero, owner-readable/writable,
 no sticky or set-ID bits) uses its native name and mode. Create, stat, ordinary
 chmod, rename and unlink need no SQL writes, metadata xattr or forced synchronization.
-Ineligible creates stay with the catalogue allocator. This is a storage mechanism,
-not a permission bypass: the provider must still resolve the parent and enforce
+Other ownership/modes use the same native-name representation with sparse
+metadata. Creation prepares a private backing, installs its selector and complete
+metadata, syncs it once, then atomically publishes the name with
+`RENAME_NOREPLACE`. Interrupted preparation leaves only an untracked backing for
+existing maintenance to collect, never a visible file with incomplete permissions.
+These creates also need no SQL writes. Parents with default ACLs, physical
+permissions or overlay projections still use the catalogue allocator.
+This is a storage mechanism, not a permission bypass: the provider must resolve the parent and enforce
 identity, ACL, mount, readonly and Landlock policy under the existing store gate.
 The executor's process umask is zero; creation receives the already-masked guest
 mode. These helpers must never interpret arbitrary native-bind files as leaves.
@@ -244,14 +250,23 @@ the validated leaf by the metadata owner, not supplied by its caller.
 Promotion changes representation,
 not the guest namespace: the enclosing operation owns its logical events.
 
-Hardlinks, mixed native/catalogue rename, pathname-based execution and attached file-watch
-registration promote before consuming catalogue identity. Sealing, backup and
+Hardlinks, mixed native/catalogue rename, pathname-based execution, attached file-watch
+registration and stable `O_PATH|O_NOFOLLOW` reopen sources promote before consuming
+catalogue identity. The latter cannot export a mutable native pathname; an
+unlinked native FD or a read-only store that cannot promote retains descriptor-transfer delivery.
+Sealing, backup and
 overlay admission materialize the selected namespace before existing SQL-based
 snapshot/COW logic runs. Moving into a physical-permission directory promotes too.
 The source is not copied and no kernel hardlink permission is needed. Open native
 FDs resolve through their actual proc alias, including deletion; after promotion
 they resolve through the catalogue's device/inode association. Landlock file rules
 pin the original FD so host inode-number reuse cannot reassign a grant.
+
+For staged births, the watch owner pairs the move out of the backing root with
+the exact kernel cookie at the guest parent and emits CREATE then OPEN, not a
+guest rename. Subsequent data/close events follow the retained inode. Ordinary
+native renames keep their original paired move events. No per-file SQL journal
+entry or publication-marker transaction is needed for native creation.
 
 Descriptor execution retains the exact image origin instead of promoting a name.
 The filesystem owner rechecks logical execute permission, Landlock and mount

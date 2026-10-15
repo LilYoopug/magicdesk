@@ -69,6 +69,19 @@ static int sync_metadata(int fd) {
     int r=fsync(copy) ? -errno : 0;
     close(copy); return r;
 }
+int mdi_native_prepare(int objects,const char *name,int flags,uint32_t uid,uint32_t gid,mode_t mode) {
+    if (uid==UINT32_MAX || gid==UINT32_MAX || (mode&~07777)) return -EINVAL;
+    int fd=mdi_native_create(objects,name,flags,0,0,0600);
+    if (fd<0) return fd;
+    struct metadata record={.magic=htole32(METADATA_MAGIC),.uid=htole32(uid),.gid=htole32(gid),.mode=htole32(mode)};
+    int r=change_mode(fd,METADATA_MODE);
+    if (!r) r=set(fd,&record);
+    /* A crash before publication leaves only an untracked staging backing.
+     * After publication, both selector and complete metadata are durable. */
+    if (!r) r=sync_metadata(fd);
+    if (r) { close(fd); unlinkat(objects,name,0); }
+    return r ? r : fd;
+}
 static int physical(int fd,struct stat *st) {
     if (fstat(fd,st)) return -errno;
     if (!S_ISREG(st->st_mode) || st->st_nlink>1) return -EINVAL;

@@ -74,6 +74,7 @@ struct md_fs_attributes {
     unsigned char capability[MD_FILE_CAPABILITY_MAX];
     uint32_t creation_mask;
 };
+#define MD_FS_CAPTURE_UMASK (1U<<31)
 struct md_fs_task_capture { const char *path; unsigned flags; };
 /* Paths and descriptors are borrowed. Transports resolve AT_FDCWD to a captured
  * descriptor before entering the engine. Root is explicit (-1), never the

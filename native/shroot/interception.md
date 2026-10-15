@@ -97,9 +97,9 @@ clear only their bounded header, not the entire payload capacity. SysV calls
 return their slot before blocking; their inotify watcher remains supervisor-owned.
 
 All guest filesystem operations, including opens/reopens and root changes, use this
-transport before admission when their inputs can be captured. An immutable BRK gate
-leases a slot, submits the request and releases it after the adapter copies the
-result. No temporary guest FD, socket, mmap or pool allocation is needed per
+transport before admission when their inputs can be captured. The task-local
+path uses immutable BRK gates to lease, submit and release a slot after copying
+the result. No temporary guest FD, socket, mmap or pool allocation is needed per
 call. Each admitted request owns one host allocation, a pinned output slot and a
 captured filesystem context. Requests copy both validated paths, scalar fields
 and attributes before submission; getcwd needs no pathname allocation. Input
@@ -124,6 +124,24 @@ transfer when no stable reopen source exists, before publishing any descriptor.
 Transport framing is checked separately from
 the common typed request and result contracts.
 
+Open, unlink, rename, link and mkdir can capture their request directly while
+the task is ptrace-stopped, using the same scalar decoder, buffer pool, context
+admission and worker as the task-local path. Status-only calls need no guest
+stack or signal-mask transition. Relative paths retain cwd/dirfd anchors under
+the same ordered FS/file-table capture, not a pathname cache. Missing provenance
+declines before worker execution and selects task-local capture.
+Ordinary ADDFD results enter the existing assembly admission gate directly with
+the caller's CLOEXEC, without a C wrapper or follow-up fcntl. Results needing
+selectors, caller-side opening or anchor transfer retain the full delivery adapter;
+both paths release their lease at the terminal acknowledgement.
+Creation captures the authenticated actor's umask in the worker instead of a
+separate RPC. Bounded page-aware string reads replace byte-at-a-time capture.
+Inaccessible task memory, application filters and debugging
+retain task-local admission; an explicitly unexecuted host delegation may also
+fall back. Executed mutations are never replayed. Creation/truncation opens
+enter through TRACE directly, while O_PATH ignores creation flags and remains on
+metadata notification admission. Ordinary data IO keeps its native path.
+
 For O_PATH results the worker transfers a retained source FD and origin to the
 receiving task's supervisor record. The adapter reopens `/proc/PID/fd/N` through
 the existing capture gate, preserving O_DIRECTORY and caller-selected CLOEXEC.
@@ -134,6 +152,8 @@ only the provider reference; no private service FD is left in the guest table.
 For O_NOFOLLOW, directories use `/proc/PID/fd/N/.`; inode-backed objects use their
 immutable physical basename below a retained objects directory. The provider
 checks device/inode identity, not a logical path that copy-up or rename can change.
+An attached native-name file is promoted without copying to obtain that stable
+source, preserving nofollow flags even when the application forbids socket RPC.
 Store/source leases retain that name through delivery. The adapter passes the
 actual flag to the kernel; fcntl is not emulated. Other native non-directory and
 anonymous nofollow sources return the retained result through SCM_RIGHTS on the

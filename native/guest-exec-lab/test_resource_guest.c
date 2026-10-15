@@ -603,6 +603,7 @@ static void buffer_open_calls(const char *path, int flags, int protected, int sl
     }
 }
 static void buffer_open(void) {
+    assert(!mkdir("buffer-native-parent",0700) && !chdir("buffer-native-parent"));
     char path[202]; memset(path,'p',sizeof(path)-1); path[sizeof(path)-1]=0;
     int fd=open(path,O_CREAT|O_EXCL|O_WRONLY|O_CLOEXEC,0600); assert(fd>=0);
     put(fd); assert(!close(fd) && !mkdir("buffer-directory",0700) && !symlink(path,"buffer-link"));
@@ -625,10 +626,16 @@ static void buffer_open(void) {
                 } else strcpy(selected,names[kind]);
                 pid_t child=fork(); assert(child>=0);
                 if (!child) { buffer_open_calls(selected,cloexec ? flags : flags&~O_CLOEXEC,protected,slots); _exit(0); }
-                reap(child);
+                int status; pid_t waited;
+                do waited=waitpid(child,&status,0); while (waited<0 && errno==EINTR);
+                if (waited!=child || status)
+                    fprintf(stderr,"buffer-open protected=%d kind=%u absolute=%d slots=%d cloexec=%d child=%d waited=%d status=%#x\n",
+                        protected,kind,absolute,slots,cloexec,child,waited,status);
+                assert(waited==child && WIFEXITED(status) && !WEXITSTATUS(status));
             }
     }
     assert(!unlink("buffer-link") && !rmdir("buffer-directory") && !unlink(path));
+    assert(!chdir("..") && !rmdir("buffer-native-parent"));
     puts("PASS buffered O_PATH: absolute/cwd, long names, file/directory/symlink, protected, exact 0/1 FD slots and forbidden RPC");
 }
 static int import_descriptor(int original) {
@@ -1963,6 +1970,97 @@ static void buffer_paths(int protected) {
     assert(!fstat(fd,&named) && named.st_nlink==0 && !close(fd) && !close(base));
     puts("PASS buffered paths: two paths, attributes, protected inputs, zero FD slots, output fault and forbidden RPC");
 }
+static void path_invocation(void) {
+    char cwd[PATH_MAX]; assert(getcwd(cwd,sizeof(cwd)));
+    size_t page=(size_t)sysconf(_SC_PAGESIZE);
+    char *memory=mmap(NULL,page*2,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    assert(memory!=MAP_FAILED && !mprotect(memory+page,page,PROT_NONE));
+    for (unsigned kind=0;kind<4;++kind) {
+        pid_t child=fork(); assert(child>=0);
+        if (!child) {
+            if (kind&1) assert(!prctl(PR_SET_DUMPABLE,0));
+            if (kind&2) {
+                struct sock_filter code[]={
+                    BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+                    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_unlinkat,0,3),
+                    BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[2])),
+                    BPF_JUMP(BPF_JMP|BPF_JSET|BPF_K,1,0,1),
+                    BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EPERM),
+                    BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
+                };
+                struct sock_fprog program={sizeof(code)/sizeof(*code),code};
+                assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+                assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+            }
+            char name[PATH_MAX],other[PATH_MAX];
+            int n=snprintf(name,sizeof(name),"%s/invocation",cwd); assert(n>0 && (size_t)n<sizeof(name));
+            n=snprintf(other,sizeof(other),"%s/invocation-renamed",cwd); assert(n>0 && (size_t)n<sizeof(other));
+            size_t size=strlen(name)+1; assert(size<page);
+            char *edge=memory+page-size; memcpy(edge,name,size);
+            umask(0077);
+            int fd=(int)syscall(SYS_openat,AT_FDCWD,edge,O_CREAT|O_EXCL|O_RDWR|O_CLOEXEC,0666);
+            assert(fd>=0 && fcntl(fd,F_GETFD)==FD_CLOEXEC);
+            struct stat st,renamed;
+            assert(!fstat(fd,&st) && (st.st_mode&0777)==0600 && st.st_nlink==1);
+            assert(write(fd,"body",4)==4);
+            assert(syscall(SYS_unlinkat,AT_FDCWD,edge,1)==-1 && errno==((kind&2) ? EPERM : EINVAL));
+            assert(!stat(edge,&renamed) && renamed.st_ino==st.st_ino);
+            assert(syscall(SYS_renameat2,AT_FDCWD,edge,AT_FDCWD,other,1)==0);
+            assert(!stat(other,&renamed) && renamed.st_ino==st.st_ino);
+            assert(syscall(SYS_openat,AT_FDCWD,memory+page,O_RDONLY,0)==-1 && errno==EFAULT);
+            assert(syscall(SYS_unlinkat,AT_FDCWD,memory+page,0)==-1 && errno==EFAULT);
+            assert(syscall(SYS_renameat2,AT_FDCWD,other,AT_FDCWD,memory+page,0)==-1 && errno==EFAULT);
+            assert(!stat(other,&renamed) && renamed.st_size==4);
+            int retained=(int)syscall(SYS_openat,AT_FDCWD,other,O_PATH,0);
+            assert(retained>=0 && !fcntl(retained,F_GETFD));
+            assert(!syscall(SYS_unlinkat,AT_FDCWD,other,0));
+            assert(!fstat(retained,&renamed) && !renamed.st_nlink && renamed.st_ino==st.st_ino);
+            assert(!close(retained) && !close(fd));
+            assert(!symlink("/dev/null",name));
+            fd=(int)syscall(SYS_openat,AT_FDCWD,name,O_RDWR|O_CLOEXEC,0);
+            assert(fd>=0 && fcntl(fd,F_GETFD)==FD_CLOEXEC);
+            assert(write(fd,"x",1)==1 && read(fd,memory,1)==0);
+            assert(!close(fd) && !unlink(name));
+            assert(!mkdir("invocation-dir",0777) && !mkdir("invocation-peer",0777));
+            assert(!stat("invocation-dir",&st) && (st.st_mode&0777)==0700);
+            int base=open("invocation-dir",O_PATH|O_DIRECTORY|O_CLOEXEC);
+            int peer=open("invocation-peer",O_PATH|O_DIRECTORY|O_CLOEXEC);
+            assert(base>=0 && peer>=0 && !chdir("invocation-peer"));
+            fd=openat(base,"relative",O_CREAT|O_EXCL|O_RDWR,0666);
+            assert(fd>=0 && !fcntl(fd,F_GETFD));
+            assert(!fstat(fd,&st) && (st.st_mode&0777)==0600 && !close(fd));
+            assert(!renameat(base,"relative",AT_FDCWD,"cwd"));
+            assert(!fstatat(peer,"cwd",&renamed,0) && renamed.st_ino==st.st_ino);
+            assert(!renameat(AT_FDCWD,"cwd",base,"relative"));
+            assert(!chdir(cwd) && !rename("invocation-dir","invocation-moved"));
+            assert(!fchdir(base));
+            assert(!renameat(AT_FDCWD,"relative",peer,"renamed") && !unlinkat(peer,"renamed",0));
+            assert(!chdir(cwd) && !close(base));
+            assert(dup2(peer,base)==base);
+            fd=openat(base,"reused",O_CREAT|O_EXCL|O_RDWR|O_CLOEXEC,0600);
+            assert(fd>=0 && fcntl(fd,F_GETFD)==FD_CLOEXEC && !close(fd));
+            assert(!fstatat(peer,"reused",&st,0) && !unlinkat(base,"reused",0));
+            assert(openat(base,"",O_RDONLY)==-1 && errno==ENOENT);
+            assert(unlinkat(base,"",0)==-1 && errno==ENOENT);
+            assert(!close(base) && !close(peer));
+            fd=openat(base,"invalid",O_CREAT|O_RDWR,0600);
+            if (fd!=-1 || errno!=EBADF) fprintf(stderr,"closed dirfd=%d result=%d errno=%d kind=%u\n",base,fd,errno,kind);
+            assert(fd==-1 && errno==EBADF);
+            assert(openat(-1,"invalid",O_CREAT|O_RDWR,0600)==-1 && errno==EBADF);
+            fd=openat(-1,name,O_CREAT|O_EXCL|O_RDWR,0600);
+            assert(fd>=0 && !fcntl(fd,F_GETFD) && !close(fd) && !unlinkat(-1,name,0));
+            assert(!rmdir("invocation-moved") && !rmdir("invocation-peer"));
+            base=open("/dev",O_PATH|O_DIRECTORY); assert(base>=0);
+            fd=openat(base,"null",O_RDWR|O_CLOEXEC);
+            assert(fd>=0 && write(fd,"x",1)==1 && read(fd,memory,1)==0);
+            assert(!close(fd) && !close(base));
+            _exit(0);
+        }
+        reap(child);
+    }
+    assert(!munmap(memory,page*2));
+    puts("PASS path invocation: protected memory/filter, page edges, umask, CLOEXEC, cwd/dirfd, rename, FD reuse and host boundary");
+}
 struct buffer_exit_peer { int ready, parked; };
 static int buffer_exit_busy(void *argument) {
     const struct buffer_exit_peer *c=argument;
@@ -2117,6 +2215,7 @@ int main(int argc, char **argv) {
         capture_terminal(!strcmp(argv[1],"capture-terminal")); return 0;
     }
     if (!strcmp(argv[1],"buffer-open")) { buffer_open(); return 0; }
+    if (!strcmp(argv[1],"path-invocation")) { path_invocation(); return 0; }
     if (!strcmp(argv[1],"buffer-import")) { buffer_import(); return 0; }
     if (!strcmp(argv[1],"buffer-data")) { buffer_data(); return 0; }
     if (!strcmp(argv[1],"buffer-directory")) { buffer_directory(); return 0; }

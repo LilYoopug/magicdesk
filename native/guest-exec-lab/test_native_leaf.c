@@ -129,6 +129,30 @@ static void interrupted(int directory,int point,int error) {
     reset(); assert(!mdi_native_metadata(fd,42,43,0000)); metadata(fd,42,43,0000,1);
     close(fd); assert(!unlinkat(directory,name,0));
 }
+static void staged(int directory) {
+    for (int point=1;point<=3;++point) for (int error=0;error<2;++error) {
+        reset();
+        if (error) {
+            fail_at=point;
+            assert(mdi_native_prepare(directory,"staged",O_RDWR,42,43,0400)==-EIO);
+            fail_at=0;
+            struct stat st; assert(fstatat(directory,"staged",&st,0)<0 && errno==ENOENT);
+        } else {
+            pid_t child=fork(); assert(child>=0);
+            if (!child) { kill_after=point; (void)mdi_native_prepare(directory,"staged",O_RDWR,42,43,0400); _exit(98); }
+            int status; assert(waitpid(child,&status,0)==child && WIFSIGNALED(status) && WTERMSIG(status)==SIGKILL);
+            assert(!unlinkat(directory,"staged",0));
+        }
+    }
+    reset();
+    int fd=mdi_native_prepare(directory,"staged",O_WRONLY,42,43,0400); assert(fd>=0);
+    assert(syncs==1 && sets==1);
+    assert(!renameat2(directory,"staged",directory,"published",RENAME_NOREPLACE));
+    metadata(fd,42,43,0400,1); close(fd);
+    fd=openat(directory,"published",O_PATH); assert(fd>=0); metadata(fd,42,43,0400,1); close(fd);
+    assert(!unlinkat(directory,"published",0));
+    puts("PASS staged ownership: SIGKILL/IO faults before publication; complete metadata after atomic rename");
+}
 static void malformed(int directory) {
     int fd=mdi_native_create(directory,"malformed",O_RDWR,0,0,0600); assert(fd>=0);
     assert(!fchmod(fd,01700));
@@ -235,12 +259,34 @@ static int native_node(struct md_inode_store *s,int fd) {
 static int reject_delivery(void *context,const void *data,size_t size) {
     (void)context; (void)data; (void)size; return -EFAULT;
 }
+static void stable_source(struct md_inode_store *s,int dir) {
+    int fd=md_inode_create(s,dir,"stable-source",0644); assert(fd>=0 && native_node(s,fd));
+    struct stat before,after; assert(!fstat(fd,&before));
+    char source[PATH_MAX];
+    s->readonly=1;
+    assert(md_inode_descriptor_source(s,fd,source,sizeof(source))==-EXDEV && native_node(s,fd));
+    s->readonly=0;
+    assert(!md_inode_descriptor_source(s,fd,source,sizeof(source)));
+    assert(!native_node(s,fd));
+    assert(!md_inode_rename(s,dir,"stable-source",dir,"renamed-source",0));
+    assert(!md_inode_unlink(s,dir,"renamed-source",0));
+    int reopened=open(source,O_PATH|O_NOFOLLOW|O_CLOEXEC); assert(reopened>=0);
+    assert(fcntl(reopened,F_GETFL)==(O_PATH|O_NOFOLLOW));
+    assert(!fstat(reopened,&after) && before.st_dev==after.st_dev && before.st_ino==after.st_ino);
+    close(reopened); close(fd);
+    fd=md_inode_create(s,dir,"unlinked-source",0644); assert(fd>=0);
+    assert(!md_inode_unlink(s,dir,"unlinked-source",0));
+    assert(md_inode_descriptor_source(s,fd,source,sizeof(source))==-EXDEV); close(fd);
+    puts("PASS stable O_PATH source promotes the same inode and survives guest rename/unlink");
+}
 static void creation_events(struct md_inode_store *s,int dir) {
     int observer=md_inode_watch_create(s,IN_NONBLOCK); assert(observer>=0);
     assert(md_inode_watch_add(s,observer,dir,IN_CREATE|IN_OPEN|IN_CLOSE_WRITE)>0);
-    for (unsigned variant=0;variant<2;++variant) {
-        const char *name=variant ? "catalogue-events" : "native-events";
-        int fd=md_inode_create(s,dir,name,variant ? 0400 : 0644); assert(fd>=0); close(fd);
+    for (unsigned variant=0;variant<3;++variant) {
+        const char *name=variant==2 ? "catalogue-events" : variant ? "staged-events" : "native-events";
+        s->native_files=variant!=2;
+        int fd=md_inode_create(s,dir,name,variant==1 ? 0400 : 0644); assert(fd>=0); close(fd);
+        s->native_files=1;
         union { struct inotify_event align; char data[4096]; } events;
         ssize_t count=md_inode_watch_read(s,observer,events.data,sizeof(events.data),NULL,NULL); assert(count>0);
         unsigned n=0; const unsigned expected[]={IN_CREATE,IN_OPEN,IN_CLOSE_WRITE};
@@ -254,7 +300,30 @@ static void creation_events(struct md_inode_store *s,int dir) {
         assert(!md_inode_unlink(s,dir,name,0));
     }
     close(observer);
-    puts("PASS CREATE precedes OPEN and CLOSE for native and catalogue allocation");
+    puts("PASS CREATE precedes OPEN and CLOSE for direct-native, staged-native and catalogue allocation");
+}
+static void user_leaves(struct md_inode_store *s) {
+    assert(!md_inode_mkdir(s,-1,"users",0777));
+    int dir=md_inode_open(s,-1,"users",O_RDONLY|O_DIRECTORY,0); assert(dir>=0);
+    const struct md_identity *original=s->identity;
+    struct md_identity ids=md_identity_new(42,43); s->identity=&ids;
+    s->creation_mask=0027;
+    sqlite3_int64 writes=sqlite3_total_changes64(s->db);
+    int fd=md_inode_create(s,dir,"private",0666); assert(fd>=0 && native_node(s,fd));
+    metadata(fd,42,43,0640,1);
+    assert(sqlite3_total_changes64(s->db)==writes);
+    assert(!md_inode_rename(s,dir,"private",dir,"renamed",0));
+    struct md_inode_store *cold; assert(!md_inode_store_reconnect(s->lifetime,&cold)); cold->identity=&ids;
+    struct stat st; assert(!md_inode_stat(cold,dir,"renamed",0,&st) && st.st_uid==42 && st.st_gid==43 && (st.st_mode&07777)==0640);
+    assert(!md_inode_link(cold,dir,"renamed",dir,"alias",0));
+    assert(!native_node(cold,fd));
+    assert(!md_inode_fstat(cold,fd,&st) && st.st_nlink==2 && st.st_uid==42);
+    assert(!md_inode_unlink(cold,dir,"alias",0) && !md_inode_unlink(cold,dir,"renamed",0));
+    close(fd); md_inode_store_close(cold);
+    s->creation_mask=0;
+    creation_events(s,dir);
+    s->identity=original; md_identity_release(&ids); close(dir);
+    puts("PASS guest user native birth: umask, zero SQL writes, cold reopen, hardlink promotion and watch ordering");
 }
 static unsigned descriptors(void) {
     DIR *dir=opendir("/proc/self/fd"); assert(dir);
@@ -293,6 +362,7 @@ static void hybrid(const char *path) {
     assert(s->native_files);
     assert(!md_inode_mkdir(s,-1,"work",0755));
     int dir=md_inode_open(s,-1,"work",O_RDONLY|O_DIRECTORY,0); assert(dir>=0);
+    stable_source(s,dir);
     int managed=md_inode_create(s,dir,"trusted-metadata",0644); assert(managed>=0 && native_node(s,managed));
     assert(!md_inode_unlink(s,dir,"trusted-metadata",0));
     s->identity=NULL;
@@ -401,6 +471,7 @@ static void hybrid(const char *path) {
     puts("PASS promotion preserves native identity, ACL and overlay attributes across virtual hardlinks");
     pinned_rule(s,dir);
     creation_events(s,dir);
+    user_leaves(s);
     close(regular); close(observer); close(dir); md_inode_store_close(s); md_identity_release(&ids);
 }
 static void contents(struct md_inode_store *s,const char *path,const char *text) {
@@ -471,7 +542,7 @@ int main(int argc,char **argv) {
     if (argc==3 && !strcmp(argv[1],"--check-hybrid-backup")) { restored_hybrid(argv[2]); return 0; }
     assert(argc==2 && argv[1][0]=='/' && !mkdir(argv[1],0700)); umask(0);
     int directory=open(argv[1],O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(directory>=0);
-    ordinary(directory); detached(directory);
+    ordinary(directory); detached(directory); staged(directory);
     for (int point=1;point<=4;++point) for (int error=0;error<2;++error) interrupted(directory,point,error);
     puts("PASS SIGKILL and IO failures at all four metadata transition steps retain old-or-new logical permissions");
     reset(); malformed(directory); watch(directory); close(directory);

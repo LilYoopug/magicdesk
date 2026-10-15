@@ -1402,6 +1402,21 @@ static void buffer_service_lifetime(const char *store, unsigned cancelled_operat
     struct md_fs_buffer_frame *frame=span.data;
     *frame=(struct md_fs_buffer_frame){.input={.base={AT_FDCWD,-1}}};
     struct md_fs_buffer_request *request=NULL;
+    /* Stopped-task admission must decline before execution when obtaining an
+     * origin would require code in the task. Both ordering turns are released. */
+    for (unsigned i=0;i<2;++i) {
+        *frame=(struct md_fs_buffer_frame){.input={.base={i ? 123 : AT_FDCWD,-1},
+            .flags=O_CREAT|O_EXCL|O_RDWR,.mode=0600,.length={17,0},.path={"not-yet-executed"}}};
+        frame->input.length[0]=strlen(frame->input.path[0])+1;
+        assert(!md_fs_buffer_invoke(service,getpid(),resources.fs,MD_FS_OPEN,&task,&request));
+        assert(!md_fs_buffer_progress(service)); request=NULL;
+        assert(buffer_error==MD_FS_BUFFER_NEEDS_TASK && !buffer_pending && buffered_open.fd==-1);
+        struct md_fd_order files={0}; struct md_fs_order fs={0};
+        assert(md_fd_order_begin(resources.files,&files,token)==1 && !md_fd_order_start(&files));
+        assert(md_fs_order_begin(resources.fs,&fs,token)==1 && !md_fs_order_start(&fs));
+        assert(!md_fs_order_complete(&fs) && !md_fd_order_complete(&files));
+    }
+    *frame=(struct md_fs_buffer_frame){.input={.base={AT_FDCWD,-1}}};
     buffer_callbacks=0;
     assert(!md_fs_buffer_begin(service,getpid(),resources.fs,MD_FS_PATH,&task,&request));
     assert(!md_fs_buffer_progress(service));
@@ -1469,7 +1484,7 @@ static void buffer_service_lifetime(const char *store, unsigned cancelled_operat
     assert(!md_fs_buffer_progress(service)); request=NULL;
     assert(buffer_callbacks==4 && buffer_error==-EBADF && buffered_open.fd==-1);
     assert(!md_fd_origins_prepare(resources.files,base,0,&update)); md_fd_origins_finish(&update,123);
-    assert(!md_fs_buffer_begin(service,getpid(),resources.fs,MD_FS_OPEN,&task,&request));
+    assert(!md_fs_buffer_invoke(service,getpid(),resources.fs,MD_FS_OPEN,&task,&request));
     assert(!md_fs_buffer_progress(service));
     /* The completed capture releases the table before worker IO. Reusing the
      * number and replacing the registry cannot change the admitted base. */

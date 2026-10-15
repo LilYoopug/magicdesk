@@ -8,6 +8,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <linux/fs.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,9 +30,24 @@ int mdi_leaf_create(struct md_inode_store *s,const struct mdi_node *parent,const
             || (parent->acl_mask&MD_ACL_DEFAULT)) return -EOPNOTSUPP;
     uint32_t uid=s->identity->uid.fs,gid=s->identity->gid.fs;
     if (parent->mode&S_ISGID) gid=parent->gid;
+    if ((mode&S_ISGID) && !md_identity_file_capable(s->identity,parent->uid,parent->gid,CAP_FSETID)
+            && !md_identity_in_group(s->identity,gid)) mode&=~S_ISGID;
     mode&=~s->creation_mask;
-    return mdi_native_create_in(s->objects,parent->backing,name,
-        flags&~(O_CREAT|O_EXCL|O_TRUNC|O_NOFOLLOW|O_NOCTTY),uid,gid,mode);
+    flags&=~(O_CREAT|O_EXCL|O_TRUNC|O_NOFOLLOW|O_NOCTTY);
+    if (mdi_native_eligible(uid,gid,mode))
+        return mdi_native_create_in(s->objects,parent->backing,name,flags,uid,gid,mode);
+    char stage[33],target[NAME_MAX+34];
+    int r=mdi_name_valid(name);
+    if (!r) r=mdi_random_id(stage);
+    if (r) return r;
+    int fd=mdi_native_prepare(s->objects,stage,flags,uid,gid,mode);
+    if (fd<0) return fd;
+    snprintf(target,sizeof(target),"%s/%s",parent->backing,name);
+    /* Only unpublished native births move out of the backing root. The watch
+     * owner uses this exact kernel move cookie to publish CREATE then OPEN. */
+    if (renameat2(s->objects,stage,s->objects,target,RENAME_NOREPLACE)) r=-errno;
+    if (r) { close(fd); unlinkat(s->objects,stage,0); }
+    return r ? r : fd;
 }
 
 void mdi_leaf_id(const struct stat *st,char out[33]) {
