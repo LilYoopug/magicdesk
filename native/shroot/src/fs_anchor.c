@@ -43,6 +43,9 @@ int md_fs_anchor_same(const struct md_fs_anchor *a, const struct md_fs_anchor *b
 }
 int md_fs_anchor_check_fd(const struct md_fs_anchor *p, int fd) {
     if (!p || fd<0) return -EINVAL;
+    /* The retained anchor owns this descriptor until its final release. Only
+     * a separately supplied descriptor needs a kernel identity check. */
+    if (fd==p->fd) return 0;
     struct stat st;
     if (fstat(fd,&st)) return -errno;
     return (st.st_dev==p->device && st.st_ino==p->inode)

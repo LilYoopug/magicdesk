@@ -339,7 +339,7 @@ static int layer(struct md_inode_store *index, struct md_inode_store *source,
     if (shared && !r) { borrow_scope(&borrowed,index,source); source=&borrowed; }
     if (!r) r=mdi_fd(source,directory,&from);
     if (!r && from.kind!=S_IFDIR) r=-ENOTDIR;
-    if (!r && !source->readonly) r=mdi_leaf_materialize(source);
+    if (!r && !source->readonly) r=mdi_leaf_materialize_tree(source,&from);
     if (!r && !shared) { r=mdi_begin(index,1); begun=!r; }
     if (!r) r=mdi_node(index,mdi_root(index),&to);
     struct merge m={.index=index,.source=source,.user_xattr=!!user_xattr,.upper=upper};
@@ -408,7 +408,7 @@ int md_inode_overlay_prepare_upper(struct md_inode_store *index, struct md_inode
         if (!overlap) overlap=mdi_ancestor(&borrowed,work.id,upper.id);
         if (overlap) r=overlap<0 ? overlap : -EINVAL;
     }
-    if (!r) r=mdi_leaf_materialize(&borrowed);
+    if (!r) r=mdi_leaf_materialize_directory(&borrowed,&work);
     if (!r) r=mdi_views_collect(index);
     sqlite3_stmt *q=NULL;
     if (!r) r=mdi_prepare(index,"SELECT 1 FROM inode_views WHERE upper IN (?1,?2) OR work IN (?1,?2)",&q);

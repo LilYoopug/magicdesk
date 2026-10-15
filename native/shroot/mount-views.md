@@ -46,6 +46,11 @@ maps. The object cache is not copied: only the selected native root is registere
 so copy cost depends on mount count, not the number of previously opened files.
 Only O_PATH references are retained; FIFO reader/writer counts and flock/OFD-lock
 lifetime remain with application descriptions.
+Captured native opens retain their own anchor instead of registering a second,
+view-lifetime object pin. Explicit object/image IDs and root locations register
+lazily; anonymous transports still register because they carry no anchor.
+Closing ordinary captured opens therefore releases their last backing pin even
+while the mount view remains alive.
 
 Guest clone/unshare with `CLONE_NEWNS` prepares the candidate asynchronously on
 the filesystem worker, under the caller's file-table and FS-context turns.
@@ -609,6 +614,10 @@ Device/inode validation rejects a mismatched object; it cannot distinguish two
 opens of the same inode through different mounts. An O_PATH pin alone is not an
 open-file-description identity. There is no mirror of ordinary data descriptions;
 read/write stays native and close is observed at its kernel completion.
+The anchor's own descriptor needs no repeated identity syscall: its owner keeps
+that slot alive until final release. Separately supplied descriptors still require
+validation. Scoped walks retain a separate boundary pin only for `RESOLVE_BENEATH`
+or `RESOLVE_IN_ROOT`; ordinary walks do not allocate an unused boundary descriptor.
 
 General application SCM_RIGHTS provenance is not inferred from a successful
 syscall return or a post-receive acknowledgement. Ancillary delivery can publish

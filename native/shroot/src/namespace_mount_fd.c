@@ -1,4 +1,5 @@
 #include "namespace_internal.h"
+#include "fs_path_call.h"
 #include "raw.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -58,10 +59,10 @@ long md_namespace_mount_fd(const struct md_fs *fs,long nr,const unsigned long *a
         return md_namespace_paths_request(fs,&q);
     }
     if (nr==SYS_fsopen) {
-        if ((unsigned)a[1]&~FSOPEN_CLOEXEC) return -EINVAL;
+        r=md_fs_fsopen_parameters(&q,(unsigned)a[1]);
+        if (r<0) return r;
         r=md_read_string(key,sizeof(key),(const char *)a[0]);
-        q.operation=MD_FS_FSOPEN; q.path[0]=key;
-        q.flags=O_RDWR|((a[1]&FSOPEN_CLOEXEC) ? O_CLOEXEC : 0);
+        q.path[0]=key;
     } else if (nr==SYS_fsmount) {
         if ((unsigned)a[1]&~FSMOUNT_CLOEXEC) return -EINVAL;
         q.operation=MD_FS_FSMOUNT; q.directory[0]=(int)a[0]; q.mode=(unsigned)a[2];

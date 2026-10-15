@@ -25,10 +25,16 @@ after the stop. Notification cancellation, ordinary
 seccomp entry and debugger syscall stepping share this entry contract.
 Before task-affine admission, a signal-delivery stop retires an unexecuted
 notification if it wins the race with the requested ptrace interruption.
-The kernel retains EINTR and SA_RESTART semantics; a restarted call is a fresh
-notification. The later interrupt cannot reuse the signal handler's registers
-to execute the retired request. Adapter-owned, already-shielded operations
-retain their existing completion and cancellation ownership.
+Blocking calls retain kernel EINTR and SA_RESTART semantics. For nonblocking
+metadata (`fstat`, `newfstatat`, `readlinkat`), a notification wait must not add
+spurious EINTR to the underlying operation. A signal can cancel that wait even
+before NOTIF_RECV. The cold recovery path checks the stopped instruction,
+reenters the original SVC under the existing signal shield, and observes its
+actual exit or task-affine completion. Application filters still run at the
+original PC with all arguments intact. The saved signal, siginfo, registers and
+mask are restored at an owned trap, never in a handler's replacement context.
+No additional stop, ticket or ioctl is added to uninterrupted metadata reads.
+Directory cursors and mutating operations cannot use this replay path.
 
 `command_image` owns ELF/shebang inspection and returns retained program/loader
 descriptors plus a pointer-free recipe. `command` assembles argv in its caller's
@@ -130,17 +136,24 @@ admission and worker as the task-local path. Status-only calls need no guest
 stack or signal-mask transition. Relative paths retain cwd/dirfd anchors under
 the same ordered FS/file-table capture, not a pathname cache. Missing provenance
 declines before worker execution and selects task-local capture.
-Ordinary ADDFD results reuse the stopped syscall: the supervisor selects the
-existing admission site and gettid, then observes its syscall exit. Seccomp's
-post-TRACE recheck delivers the notification; no guest instruction, adapter
-stack or signal-mask change is needed. ARM64 retains orig_x0, so the broker binds
-the expected first argument as well as the exact task and admission site.
-The application register context is restored before any signal delivery.
+Ordinary ADDFD results reuse the stopped syscall: only NT_ARM_SYSTEM_CALL changes
+to fstat, whose existing notification route carries the pending result. Seccomp's
+post-TRACE recheck delivers it without executing fstat or interpreting its
+arguments as a metadata request. The broker first matches the exact task,
+architecture, syscall, original PC and all six original arguments, including
+ARM64's preserved orig_x0. The application's general registers, PC, stack and
+flags remain untouched; no guest instruction or signal-mask change is needed.
+The syscall-exit stop remains the completion boundary. A confirmed broker reply
+supplies its result without another register read or restoration. Unconfirmed
+delivery reads the stopped kernel result instead. This removes three ptrace
+requests per successful direct open, not the exit stop or table-order barrier.
 Cancelled admission retries only the retained FD through the signal-shielded
 gate, never the completed mutation. Final CLOEXEC belongs to atomic ADDFD_SEND;
 there is no follow-up fcntl. Results needing
 selectors, caller-side opening or anchor transfer retain the full delivery adapter;
 both paths release their lease at the terminal acknowledgement.
+The broker's per-syscall notification counts include this fstat carrier;
+`resultDeliveries` distinguishes completed-result delivery from filesystem work.
 Creation captures the authenticated actor's umask in the worker instead of a
 separate RPC. Bounded page-aware string reads replace byte-at-a-time capture.
 Inaccessible task memory, application filters and debugging
@@ -299,13 +312,21 @@ Directory seeks enter the namespace engine through mapped requests when the
 real description can be captured; no preliminary path anchor substitutes for
 its shared kernel position. Enumeration retains a separate delivery contract.
 
-`namespace_broker.c` handles ordinary openat/newfstatat/fstat/getdents64 notifications in the
+`namespace_broker.c` handles ordinary openat/fsopen/newfstatat/fstat/readlinkat/getdents64 notifications in the
 namespace worker, alongside adapter RPC. The worker alone owns SQLite and the
 sealed-image catalogue; `fs_engine.c` also dispatches shared-buffer requests. Eligible notifications
 copy paths page by page, retain exact-task descriptors and validate notification
 IDs before execution and result publication. Successful opens use atomic ADDFD
 plus response. The optional kernel synchronous-wakeup hint changes scheduling
 only; unsupported kernels retain normal notification delivery.
+Eligible opens, including create/truncate and fsopen, retain their completed
+result through atomic publication. If notification cancellation wins, the
+supervisor adopts the same FD, origin and provider completion without repeating
+the operation. A kernel restart can occur without a signal-delivery stop in that
+thread; the broker therefore retains a handoff barrier until the stopped receiver
+acknowledges custody. Repeated notifications delegate to that retained result,
+not another execution. Scalar mutations still complete under the task-affine
+signal shield: successful NOTIF_SEND alone is not a consumption acknowledgement.
 Directory reads use the engine's deferred-position contract. Their existing
 file-table/OFD turn spans output copying, notification reply and cursor commit.
 An invalid notification, rejected kernel reply or failed/partial copy cannot
@@ -317,8 +338,9 @@ supervisor state excludes restricted domains and adapter continuations from the
 ordinary path. A shared-root restriction revokes every CLONE_FS member before
 its caller resumes, including members not returning through a ptrace stop.
 ADDFD rejects O_PATH. Eligible adapter requests use retained proc reopening;
-uncaptured inputs and nofollow sources without a stable backing use SCM_RIGHTS. Mutating opens and directory
-seeks retain the task-affine adapter and its no-replay contract.
+uncaptured inputs and nofollow sources without a stable backing use SCM_RIGHTS.
+Protected or filtered opens and directory seeks retain the task-affine adapter
+and its no-replay contract.
 Filesystem transports order descriptor capture and publication with native
 table mutations. RPC control uses an immutable bootstrap BRK entry point,
 not a new syscall subject to an application's seccomp syscall allowlist.

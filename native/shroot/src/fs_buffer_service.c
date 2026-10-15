@@ -52,6 +52,7 @@ struct md_fs_buffer_request {
     struct md_ofd_order cursor;
     int cursor_waiting;
     int captured_only;
+    int adopted;
     int64_t position;
     struct md_fs_context context;
     struct md_fs_buffer_frame *output;
@@ -494,10 +495,15 @@ static int resolve_proc_objects(struct md_fs_buffer_request *r) {
     }
     return 0;
 }
+static void prepare_open(struct md_fs_buffer_request *,struct md_filesystem *);
 static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
     struct md_fs_buffer_request *r=(void *)work;
     r->error=error;
     if (error) return;
+    if (r->adopted) {
+        r->adopted=0;
+        prepare_open(r,fs); return;
+    }
     if (r->finishing) {
         if (r->request.operation==MD_FS_GETDENTS) {
             if (r->delivered && lseek(r->captured[0],r->position,SEEK_SET)!=r->position)
@@ -556,6 +562,10 @@ static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
     reply->result.selectors=md_fd_object_selectors(r->opened.object);
     r->opened.completion=reply->result.open_completion;
     reply->result.open_completion=(struct md_open_completion){0};
+    prepare_open(r,fs);
+}
+static void prepare_open(struct md_fs_buffer_request *r,struct md_filesystem *fs) {
+    struct md_fs_response *reply=&r->output->reply;
     if (r->opened.fd>=0) {
         if (r->reopened) {
             md_fs_anchor_release(r->opened.origin); r->opened.origin=NULL;
@@ -736,6 +746,37 @@ int md_fs_buffer_invoke(struct md_fs_buffer_service *s,pid_t actor,struct md_gue
     int error=begin(s,actor,fs,operation,buffer,out,0,0,0);
     if (!error) (*out)->captured_only=1;
     return error;
+}
+int md_fs_buffer_adopt(struct md_fs_buffer_service *s,pid_t actor,struct md_guest_domain *fs,unsigned operation,unsigned flags,
+        const struct md_interception_buffer *buffer,struct md_fs_result *result,struct md_fs_buffer_open *opened,
+        struct md_fs_buffer_request **out) {
+    if (!s || !out || *out || !opened || opened->fd<0 || !result || result->error || result->host_path) return -EINVAL;
+    struct md_buffer_span span;
+    int error=md_buffer_span(buffer,&span);
+    if (error) return error;
+    if (span.size<sizeof(struct md_fs_buffer_frame)) return -EINVAL;
+    struct md_fs_buffer_request *r=calloc(1,sizeof(*r));
+    if (!r) return -ENOMEM;
+    r->service=s; r->actor=actor; r->output=span.data;
+    r->opened.fd=r->control_descriptor=r->fifo_control=r->snapshot.fd=-1;
+    r->images=(struct md_command_images){.program=-1,.loader=-1};
+    r->captured[0]=r->captured[1]=-1;
+    r->request=(struct md_fs_request){.actor=actor,.operation=operation,.flags=flags,.directory={-1,-1}};
+    error=md_buffer_pin(buffer,&r->buffer);
+    if (!error) error=md_task_registry_read(s->tasks,actor,0,&r->context.task);
+    if (!error && r->context.task.fs!=fs) error=-ESTALE;
+    if (error) { dispose(r); return error; }
+    r->output->reply.result=*result; r->output->reply.result.fd=-1;
+    r->output->reply.result.open_completion=(struct md_open_completion){0};
+    r->output->reply.result.selectors=md_fd_object_selectors(opened->object);
+    r->output->transfer=MD_FS_BUFFER_NO_FD; memset(r->output->source,0,sizeof(r->output->source));
+    r->opened=*opened; r->adopted=1;
+    r->work=(struct md_fs_work){.run=run,.complete=complete,.ready=ready};
+    r->next=s->requests; s->requests=r;
+    error=md_fs_worker_submit(s->worker,&r->work);
+    if (error) { r->opened=(struct md_fs_buffer_open){.fd=-1}; dispose(r); return error; }
+    *opened=(struct md_fs_buffer_open){.fd=-1};
+    r->submitted=1; *out=r; return 0;
 }
 int md_fs_buffer_inspect_begin(struct md_fs_buffer_service *s, pid_t actor, struct md_guest_domain *fs,
         const struct md_interception_buffer *buffer, struct md_received_fds *sources,

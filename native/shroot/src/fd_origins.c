@@ -435,7 +435,12 @@ static void remove_entries(struct md_fd_origins *t, unsigned first, unsigned las
     struct md_fd_origin_entry *retired=NULL;
     pthread_mutex_lock(&t->lock);
     changed(t);
-    if (t->buckets) for (unsigned i=0;i<BUCKETS;++i) {
+    /* Short ranges touch only their hash buckets; exec and wide ranges still
+     * visit every entry. Collision filtering and retirement remain shared. */
+    unsigned count=!exec && last-first<BUCKETS ? last-first+1 : BUCKETS;
+    unsigned start=count<BUCKETS ? first%BUCKETS : 0;
+    if (t->buckets) for (unsigned n=0;n<count;++n) {
+        unsigned i=(start+n)%BUCKETS;
         struct md_fd_origin_entry **p=&t->buckets[i];
         while (*p) {
             struct md_fd_origin_entry *e=*p;

@@ -48,10 +48,11 @@ static void result_stat(struct md_fs_result *out, int fd, const struct md_view_m
         out->info.mount_id=mount->id;
     }
 }
-static int record(struct md_filesystem *fs, int fd, struct md_view_mount *mount, struct md_fs_result *out) {
+static int record(struct md_filesystem *fs, int fd, struct md_view_mount *mount,
+        struct md_fs_result *out, int named) {
     if (fd < 0) return -errno;
     struct md_view_object *object;
-    int r = md_view_record(fs, fd, mount, &object);
+    int r = named ? md_view_record(fs, fd, mount, &object) : 0;
     if (r) close(fd); else out->fd = fd;
     return r;
 }
@@ -443,7 +444,11 @@ static void native(struct md_filesystem *fs, const struct md_fs_request *q,
         int fd=selected ? md_reopen_file(a->fd,(flags&~(O_CREAT|O_EXCL))|O_CLOEXEC,&out->open_completion)
             : deferred ? fcntl(a->fd, F_DUPFD_CLOEXEC, 3)
             : openat(a->parent, a->name, flags | O_NOFOLLOW | O_CLOEXEC, q->mode&~q->attributes.creation_mask);
-        r=selected && fd<0 ? fd : record(&owner,fd,a->mount,out);
+        /* Captured opens retain mount identity in their lifetime-bound anchor.
+         * Only anonymous transports and explicit object/image IDs need a
+         * view-lifetime registry pin. Image admission records its ID below. */
+        int named=q->operation!=MD_FS_OPEN_IMAGE && (!output || !output->origin);
+        r=selected && fd<0 ? fd : record(&owner,fd,a->mount,out,named);
         if (!r && deferred) out->open_completion.kind = MD_OPEN_FIFO;
         if (!r && q->operation == MD_FS_OPEN_IMAGE) {
             struct stat st;

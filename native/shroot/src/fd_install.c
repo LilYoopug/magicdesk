@@ -51,6 +51,14 @@ int md_fd_install_progress(struct md_fd_install *p) {
             .srcfd=p->source,.newfd_flags=p->flags};
         result=ioctl(p->listener,SECCOMP_IOCTL_NOTIF_ADDFD,&add);
         if (result<0) result=errno==ENOENT ? MD_FD_INSTALL_CANCELLED : -errno;
+        if (result==-ESRCH) {
+            /* Cancellation after queuing ADDFD reports ESRCH when the receiver
+             * discards that queue. Confirm expiry instead of exposing it as an
+             * open failure after the provider already performed a mutation. */
+            int valid;
+            do { valid=ioctl(p->listener,SECCOMP_IOCTL_NOTIF_ID_VALID,&p->notification); } while (valid<0 && errno==EINTR);
+            if (valid<0 && errno==ENOENT) result=MD_FD_INSTALL_CANCELLED;
+        }
     }
     md_fd_origins_finish(&update,result);
     p->retire_error=md_fd_order_complete(&p->files);

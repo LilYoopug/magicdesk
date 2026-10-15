@@ -534,6 +534,9 @@ static void overlay_events(struct md_inode_store *base,int upper,struct md_inode
 static void overlays(const char *path) {
     struct md_inode_store *s,*view=NULL; assert(!md_inode_store_open(path,1,&s));
     struct md_identity ids=md_identity_new(0,0); s->identity=&ids;
+    assert(!md_inode_mkdir(s,-1,"unrelated",0755));
+    int unrelated=md_inode_create(s,-1,"unrelated/native",0644);
+    assert(unrelated>=0 && native_node(s,unrelated));
     const char *names[]={"lower","upper","work"}; int dirs[3];
     for (unsigned i=0;i<3;++i) {
         assert(!md_inode_mkdir(s,-1,names[i],0755));
@@ -542,17 +545,27 @@ static void overlays(const char *path) {
         assert(write(fd,names[i],strlen(names[i]))==(ssize_t)strlen(names[i])); close(fd);
     }
     assert(!md_inode_view_create(s,MD_FILESYSTEM_OVERLAY,&view));
-    assert(!md_inode_overlay_layer(view,s,dirs[0],1));
+    int layer_error=md_inode_overlay_layer(view,s,dirs[0],1);
+    if (layer_error) fprintf(stderr,"overlay lower materialization: %d\n",layer_error);
+    assert(!layer_error);
+    assert(native_node(s,unrelated));
     assert(md_inode_overlay_prepare_upper(view,s,dirs[1],dirs[2],1)==-ENOTEMPTY);
     md_inode_store_close(view); view=NULL;
     assert(!md_inode_unlink(s,dirs[2],"file",0));
     int fd=md_inode_create(s,dirs[0],"cow",0644); assert(fd>=0 && native_node(s,fd));
     assert(write(fd,"lower",5)==5); close(fd);
+    assert(!md_inode_mkdir(s,dirs[0],"nested",0755));
+    fd=md_inode_create(s,dirs[0],"nested/file",0644); assert(fd>=0 && native_node(s,fd));
+    assert(write(fd,"nested",6)==6); close(fd);
     assert(!md_inode_view_create(s,MD_FILESYSTEM_OVERLAY,&view));
-    assert(!md_inode_overlay_layer(view,s,dirs[0],1));
+    layer_error=md_inode_overlay_layer(view,s,dirs[0],1);
+    if (layer_error) fprintf(stderr,"overlay nested lower materialization: %d\n",layer_error);
+    assert(!layer_error);
     assert(!md_inode_overlay_prepare_upper(view,s,dirs[1],dirs[2],1));
     assert(!md_inode_overlay_activate(view) && !md_inode_overlay_stash(view,&ids));
+    assert(native_node(s,unrelated));
     view->identity=&ids;
+    contents(view,"nested/file","nested");
     struct md_inode_store *peer=NULL;
     assert(!md_inode_store_reconnect(view->lifetime,&peer)); peer->identity=&ids;
     contents(peer,"file","upper"); md_inode_store_close(peer);
@@ -593,6 +606,7 @@ static void overlays(const char *path) {
     close(root);
     contents(s,"upper/newdir/file","dir");
     for (unsigned i=0;i<3;++i) close(dirs[i]);
+    assert(native_node(s,unrelated)); close(unrelated);
     md_inode_store_close(s); md_identity_release(&ids);
     puts("PASS native overlay upper ownership, scoped promotion, retained FDs, whiteouts and transactional copy-up");
 }

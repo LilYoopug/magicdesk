@@ -76,16 +76,35 @@ result. `CLOSE_RANGE_CLOEXEC` is available since 5.11. Both fit the 5.15 baselin
 See the [seccomp notification contract](https://man7.org/linux/man-pages/man2/seccomp_unotify.2.html)
 and [close_range flags](https://man7.org/linux/man-pages/man2/close_range.2.html).
 
-Ready open results may reuse a ptrace-stopped syscall as the existing gettid
-admission notification. The owner is `supervisor.c`, with `namespace_broker.c`
+Ready open results may reuse a ptrace-stopped syscall through the existing fstat
+notification route without changing application registers or its return PC.
+The owner is `supervisor.c`, with `namespace_broker.c`
 and `fd_install.c` retaining FD custody. This uses the
 [5.15 post-TRACE seccomp recheck](https://github.com/torvalds/linux/blob/v5.15/kernel/seccomp.c),
 NT_ARM_SYSTEM_CALL and syscall-exit observation, not a newer notification flag.
-The broker matches ARM64's preserved orig_x0. Interrupted notification delivery
+The broker matches the complete original call context, including ARM64's
+preserved orig_x0, before normal fstat decoding. Confirmed replies avoid another
+register read at the retained syscall-exit stop. Interrupted notification delivery
 retains the completed result and uses the existing shielded task-affine gate;
 protected inputs, application filters and debuggers keep their existing route.
 `test_resources.py --case fs-buffer` covers these branches, masks, CLOEXEC,
-mutation signals, file-table pressure and group termination.
+mutation signals, preserved registers/NZCV, file-table pressure and group termination.
+`--case fs-dispatch` also checks both carriers' exact argument matching, rejected
+replay, confirmed results and FD cleanup.
+
+Direct worker FD replies use the same baseline ADDFD_SEND primitive. Cancellation
+can report ENOENT, or ESRCH after the receiver discards an already queued ADDFD;
+the latter is accepted as cancellation only after ID_VALID confirms expiry.
+`notification_result.c` retains the result; `namespace_broker.c` prevents another
+execution during supervisor handoff, including kernel restarts without a delivered
+signal. Nonblocking metadata recovery in `supervisor.c` uses baseline ptrace
+register/signal-mask access and GET_SYSCALL_INFO (5.3), not WAIT_KILLABLE_RECV
+(5.19). It rechecks the original SVC through kernel seccomp before completing
+the read and restoring the real signal. `--case fs-buffer` compares native and
+guest shared-memory creation under frequent signals, with and without SA_RESTART,
+protected callers, preserved registers/NZCV and masks, application ERRNO/TRAP
+filters, and concurrent SIGSTOP/SIGCONT cycles. ARM64's temporary x7 marker at
+syscall stops is never copied back into the application context.
 
 Private launch rendezvous reuses the registry's flags-zero pidfd, proc-descriptor
 identity and file locks, plus Unix seqpacket/SO_PEERCRED and nonblocking IO. It
@@ -384,7 +403,7 @@ Production annotated return uses the existing mapped kernel receipt and
 SCM_RIGHTS, including O_PATH, without proc-table capture or ADDFD_SETFD. Filtered
 input capture reuses table-owned channels and atomic ADDFD_SEND only for channel
 admission. The exact gettid notification gate still evaluates application
-filters. Mapped export-channel admission, direct ADDFD results and private-helper
+filters. Mapped export-channel admission, task-affine ADDFD results and private-helper
 admissions use the same gettid mechanism rather than depending on application
 prctl policy. A protected PID-namespace fixture denies prctl and verifies cold
 metadata export, a returned mount-table FD and bidirectional native-peer

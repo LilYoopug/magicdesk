@@ -231,12 +231,12 @@ int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *
         if (r == -EXDEV) r = 0;
     }
     if (!r && from_root && !fs->native_root) r = enter(view, &current, &mount, resolve);
-    int boundary_fd = !r ? duplicate(current.fd) : -1;
+    int scoped=resolve&(RESOLVE_BENEATH|RESOLVE_IN_ROOT);
+    int boundary_fd = !r && scoped ? duplicate(current.fd) : -1;
     struct md_view_mount *boundary_mount = mount;
     struct md_mount_namespace *boundary_view = view;
-    if (!r && boundary_fd < 0) r = boundary_fd;
-    struct stat boundary;
-    if (!r && fstat(boundary_fd, &boundary)) r = -errno;
+    if (!r && scoped && boundary_fd < 0) r = boundary_fd;
+    struct stat boundary=current.identity;
     unsigned links = 0;
     while (!r) {
         r=walk_select(&walk,view,mount);

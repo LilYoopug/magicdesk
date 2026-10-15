@@ -8,6 +8,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/audit.h>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
 #include <signal.h>
@@ -53,10 +54,10 @@ static unsigned descriptors(void) {
         if (strcmp(entry->d_name,".") && strcmp(entry->d_name,"..")) ++count;
     assert(!closedir(dir)); return count;
 }
-static int listener(void) {
+static int listener(int nr) {
     struct sock_filter code[]={
         BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
-        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_getdents64,0,1),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,nr,0,1),
         BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_USER_NOTIF),
         BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
     };
@@ -94,7 +95,7 @@ static void reader(int socket,int directory,int cancel,pid_t parent) {
     alarm(25);
     struct sigaction action={.sa_handler=interrupted};
     sigemptyset(&action.sa_mask); assert(!sigaction(SIGUSR1,&action,NULL));
-    int fd=listener(); send_listener(socket,fd); assert(!close(fd));
+    int fd=listener(SYS_getdents64); send_listener(socket,fd); assert(!close(fd));
     char byte;
     /* EVENT_WAIT: parent publishes registry and broker before directory reads. */
     assert(read(socket,&byte,1)==1 && byte=='r');
@@ -166,6 +167,67 @@ static void run(const char *store,const char *native,int directory,int cancel) {
     assert(!atomic_load(&cancel_pid) && descriptors()==before);
     assert(WIFEXITED(status) && !WEXITSTATUS(status));
     printf("PASS broker directory publication: native=%d cancelledAfterCopy=%d faultAndPartialCopy=1 complete=96 noDescriptorLeak=1\n",native!=NULL,cancel);
+}
+extern char result_return[];
+extern long result_call(unsigned long,unsigned long,unsigned long,unsigned long,unsigned long,unsigned long,long);
+__asm__(".text\n.balign 4\n.global result_call\nresult_call:\n"
+    "mov x8,x6\nsvc #0\n.global result_return\nresult_return:\nret\n");
+static void completed_result(const char *store,int nr) {
+    unsigned before=descriptors();
+    struct seccomp_data call={.nr=nr,.arch=AUDIT_ARCH_AARCH64,.instruction_pointer=(uintptr_t)result_return,
+        .args={6,11,22,33,44,55}};
+    if (nr==SYS_gettid) memset(call.args+1,0,5*sizeof(call.args[0]));
+    int source=open("/dev/null",O_RDONLY|O_CLOEXEC); assert(source>=0);
+    int channel[2]; assert(!socketpair(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC,0,channel));
+    pid_t parent=getpid(),child=fork(); assert(child>=0);
+    if (!child) {
+        assert(!prctl(PR_SET_PDEATHSIG,SIGKILL));
+        if (getppid()!=parent) _exit(99);
+        alarm(25); close(channel[0]); close(source);
+        int fd=listener(nr); send_listener(channel[1],fd); close(fd);
+        char byte;
+        /* EVENT_WAIT: parent publishes this exact result before admission. */
+        assert(read(channel[1],&byte,1)==1 && byte=='r');
+        for (unsigned i=0;i<6;++i) {
+            call.args[i]^=1;
+            assert(result_call(call.args[0],call.args[1],call.args[2],call.args[3],call.args[4],call.args[5],nr)==-EPERM);
+            call.args[i]^=1;
+        }
+        long result=result_call(call.args[0],call.args[1],call.args[2],call.args[3],call.args[4],call.args[5],nr);
+        assert(result>=0 && fcntl(result,F_GETFD)==FD_CLOEXEC && read(result,&byte,1)==0);
+        assert(result_call(call.args[0],call.args[1],call.args[2],call.args[3],call.args[4],call.args[5],nr)==-EPERM);
+        assert(write(channel[1],&result,sizeof(result))==sizeof(result));
+        /* EVENT_WAIT: result retirement is acknowledged before receiver exit. */
+        assert(read(channel[1],&byte,1)==1 && byte=='f');
+        assert(!close(result)); _exit(0);
+    }
+    close(channel[1]);
+    int fd=receive_listener(channel[0]);
+    struct md_task_registry *tasks=md_task_registry_create(); assert(tasks);
+    struct md_fs_worker *worker=NULL;
+    char endpoint[80]; snprintf(endpoint,sizeof(endpoint),"md-result-broker-%d-%d",parent,child);
+    assert(!md_fs_worker_start(store,endpoint,NULL,tasks,NULL,NULL,0,0,NULL,NULL,&worker));
+    struct md_fd_origins *files=md_fd_origins_new(); assert(files);
+    struct md_namespace_broker *broker=md_broker_create(worker,1,unexpected_delegate); assert(broker);
+    assert(!md_broker_task(broker,child,0,0,0));
+    long value=-123;
+    assert(!md_broker_result_finish(broker,child,&value) && value==-123);
+    assert(!md_broker_result_begin(broker,child,&call,files,source,NULL,O_CLOEXEC));
+    assert(md_broker_result_begin(broker,child,&call,files,source,NULL,O_CLOEXEC)==-EBUSY);
+    md_broker_listen(broker,fd);
+    assert(write(channel[0],"r",1)==1);
+    long result;
+    /* EVENT_WAIT: child confirms successful admission and rejected replay. */
+    assert(read(channel[0],&result,sizeof(result))==sizeof(result));
+    assert(md_broker_result_finish(broker,child,&value)==1 && value==result);
+    value=-123; assert(!md_broker_result_finish(broker,child,&value) && value==-123);
+    assert(write(channel[0],"f",1)==1);
+    int status; assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
+    assert(!md_fs_worker_error(worker)); md_broker_forget(broker,child);
+    assert(!md_fs_worker_stop(worker)); md_broker_destroy(broker);
+    md_task_registry_destroy(tasks); md_fd_origins_release(files);
+    assert(!close(source) && !close(fd) && !close(channel[0]) && descriptors()==before);
+    printf("PASS completed FD result: carrier=%d exact arguments, rejected replay, confirmed result and no FD leak\n",nr);
 }
 static unsigned native_provider_released;
 static void native_provider_release(struct md_fd_object *object) {
@@ -246,6 +308,8 @@ static void managed_proc_reads(const char *store) {
 }
 void md_test_namespace_broker(const char *root) {
     setbuf(stdout,NULL); alarm(60);
+    extern void md_test_notification_result(void);
+    md_test_notification_result();
     assert(!mkdir(root,0700));
     char store[4096],native[4096];
     snprintf(store,sizeof(store),"%s/store",root); snprintf(native,sizeof(native),"%s/native",root);
@@ -270,6 +334,7 @@ void md_test_namespace_broker(const char *root) {
         run(store,NULL,attached,cancelled);
     }
     assert(!close(directory) && !close(attached));
+    completed_result(store,SYS_fstat); completed_result(store,SYS_gettid);
     managed_proc_reads(store); alarm(0);
     puts("PASS broker directory notification ownership");
 }

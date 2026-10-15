@@ -411,20 +411,15 @@ int md_interception_install(int inherited) {
 #undef IDENTITY
             OBSERVE(unshare) OBSERVE(setns)
             OBSERVE(seccomp)
-            /* O_PATH ignores creation flags and retains the metadata admission
-             * path, including protected proc descriptors outside a new root. */
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_openat, 0, 6),
-            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[2])),
-            BPF_JUMP(BPF_JMP|BPF_JSET|BPF_K,O_PATH,2,0),
-            BPF_JUMP(BPF_JMP|BPF_JSET|BPF_K,O_CREAT|O_TRUNC|__O_TMPFILE,0,1),
-            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_DISPATCH),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_openat, 0, 1),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
-            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_newfstatat, 0, 1),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_getdents64, 0, 1),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_readlinkat, 0, 1),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_fsopen, 0, 1),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_prctl, 0, 5),
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])),

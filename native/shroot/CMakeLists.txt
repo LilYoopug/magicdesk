@@ -81,7 +81,7 @@ guest_executable(supervisor ${src}/supervisor.c ${src}/task_resources.c ${src}/c
     ${ipc}
     ${identity} ${src}/guest_accounts.c ${src}/elf_admission.c ${src}/elf.c ${src}/fs_client.c ${wire} ${raw}
     ${src}/fs_worker.c ${src}/fs_service.c ${src}/ipc_peer_service.c ${src}/ipc_origins.c ${src}/fs_buffer_service.c ${src}/file_open_job.c ${src}/file_snapshot.c ${src}/command_image.c ${src}/exec_prepare.c ${namespace_engine} ${src}/image_catalogue.c ${inodes} ${mounts}
-    ${src}/namespace_broker.c ${src}/watch_broker.c ${src}/proc_paths.c)
+    ${src}/namespace_broker.c ${src}/notification_result.c ${src}/watch_broker.c ${src}/proc_paths.c)
 target_compile_definitions(supervisor PRIVATE MD_NO_START MD_USE_LIBC)
 target_sources(bootstrap PRIVATE ${src}/network_calls.c ${src}/network_packet.c)
 target_sources(supervisor PRIVATE ${capsules})
@@ -192,6 +192,7 @@ if(MAGICDESK_GUEST_FIXTURES)
     target_sources(resource_guest PRIVATE ../guest-exec-lab/test_keyring_guest.c)
     target_sources(resource_guest PRIVATE ../guest-exec-lab/test_native_metadata_guest.c)
     target_sources(resource_guest PRIVATE ../guest-exec-lab/test_mutation_signal_guest.c)
+    target_sources(resource_guest PRIVATE ../guest-exec-lab/test_shared_memory_guest.c)
     target_sources(resource_guest PRIVATE ../guest-exec-lab/test_fd_result_guest.c)
     target_sources(resource_guest PRIVATE ../guest-exec-lab/test_pid_namespace_guest.c)
     target_sources(resource_guest PRIVATE ../guest-exec-lab/test_proc_exec_guest.c)
@@ -217,7 +218,7 @@ if(MAGICDESK_GUEST_FIXTURES)
     target_compile_options(test_interception_buffers PRIVATE -iquote ${src} -UNDEBUG)
     target_link_options(test_interception_buffers PRIVATE -Wl,--wrap=calloc -Wl,--wrap=malloc -Wl,--wrap=realloc)
     guest_executable(fs_dispatch ../guest-exec-lab/test_fs_dispatch.c ../guest-exec-lab/test_ipc_peer_worker.c ../guest-exec-lab/test_namespace_broker.c ../guest-exec-lab/test_fd_lifecycle.S
-        ${src}/namespace_broker.c ${src}/watch_broker.c ${src}/fd_install.c
+        ${src}/namespace_broker.c ${src}/notification_result.c ${src}/watch_broker.c ${src}/fd_install.c
         ${src}/interception_buffers.c ${src}/fs_buffer_service.c ${src}/file_open_job.c ${src}/file_snapshot.c ${src}/command_image.c ${src}/exec_prepare.c ${src}/proc_paths.c
         ${src}/fs_worker.c ${src}/fs_service.c ${src}/ipc_peer_service.c ${src}/ipc_origins.c ${src}/launch_registry.c ${src}/launch_peer.c ${namespace_engine} ${mounts} ${inodes}
         ${src}/image_catalogue.c ${src}/elf_admission.c ${src}/elf.c ${src}/fs_client.c ${wire} ${raw})
@@ -228,9 +229,10 @@ if(MAGICDESK_GUEST_FIXTURES)
     target_sources(fs_dispatch PRIVATE ${src}/proc_file.c ${src}/proc_sysctl.c ${src}/proc_namespace.c)
     target_sources(fs_dispatch PRIVATE ${src}/input_session.c ${src}/input_devices.c ${src}/input_uinput.c)
     target_sources(fs_dispatch PRIVATE ../guest-exec-lab/test_input_session.c)
+    target_sources(fs_dispatch PRIVATE ../guest-exec-lab/test_notification_result.c)
     target_sources(fs_dispatch PRIVATE ../guest-exec-lab/test_mount_copy_service.c ${src}/mount_copy_service.c)
     target_link_libraries(fs_dispatch PRIVATE guest-sqlite guest-sha256 m)
-    target_link_options(fs_dispatch PRIVATE -Wl,--wrap=calloc -Wl,--wrap=flock -Wl,--wrap=md_fs_send_fds -Wl,--wrap=process_vm_writev)
+    target_link_options(fs_dispatch PRIVATE -Wl,--wrap=calloc -Wl,--wrap=flock -Wl,--wrap=md_fs_send_fds -Wl,--wrap=process_vm_writev -Wl,--wrap=ioctl)
     guest_executable(fd_handoff ../guest-exec-lab/test_fd_handoff.c ../guest-exec-lab/test_ipc_connections.c
         ${origins} ${src}/fd_install.c ${src}/mount_namespace.c ${src}/ipc_credentials.c ${identity})
     target_compile_options(fd_handoff PRIVATE -iquote ${src} -UNDEBUG)

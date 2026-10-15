@@ -12,6 +12,8 @@ int mdi_leaf_attribute_set(struct md_inode_store *,const struct mdi_node *,int c
 int mdi_leaf_import_attributes(struct md_inode_store *,const struct mdi_node *,int fd);
 int mdi_leaf_list(struct md_inode_store *,const struct mdi_node *,int (*)(const char *,void *),void *);
 int mdi_leaf_materialize(struct md_inode_store *);
+int mdi_leaf_materialize_directory(struct md_inode_store *,const struct mdi_node *);
+int mdi_leaf_materialize_tree(struct md_inode_store *,const struct mdi_node *);
 void mdi_leaf_admit(struct md_inode_store *);
 int mdi_leaf_create(struct md_inode_store *,const struct mdi_node *,const char *,int flags,mode_t);
 #endif

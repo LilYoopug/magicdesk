@@ -22,6 +22,11 @@ leaves the old entry intact. Replacing a destination with an unknown origin
 clears its previous annotation. Range closure, close-on-exec marking and exec
 cleanup operate on existing entries without per-FD allocation. Locks cover only
 metadata; removed anchors are released outside them.
+Single-FD retirement and short close/mark/abandon ranges visit only the hash
+buckets intersecting that range. Collisions still check the full descriptor
+number; wide ranges and exec scan the table. Publication generations, loans,
+uncertain channels and last-reference callbacks use the same retirement path.
+This changes lookup cost, not the kernel-completion requirement for native close.
 
 Origin vectors separate source capture from destination publication. Capture
 retains the exact ordered origins under one metadata lock, including repeated

@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "fd_selector.h"
 #include "fs_mount_internal.h"
 #include "task_resources.h"
 #include "task_registry.h"
@@ -123,6 +124,30 @@ static void expect(struct md_fd_origins *table, int fd, struct md_fs_anchor *exp
     unsigned actual=UINT_MAX;
     struct md_fs_anchor *origin=md_fd_origins_get(table,fd,&actual);
     assert(origin==expected && actual==flags); md_fs_anchor_release(origin);
+}
+static void bounded_retirement(struct md_fs_anchor *anchor) {
+    const unsigned ranges[][2]={{10,10},{60,63},{120,180},{120,181},{INT_MAX,INT_MAX},{UINT_MAX,UINT_MAX}};
+    for (unsigned kind=0;kind<3;++kind) for (unsigned r=0;r<sizeof(ranges)/sizeof(*ranges);++r) {
+        struct md_fd_origins *table=md_fd_origins_new(); assert(table);
+        for (int fd=0;fd<256;++fd) put(table,fd,anchor,0);
+        put(table,INT_MAX,anchor,0);
+        struct md_fd_observation observation;
+        assert(!md_fd_origins_observe(table,0,&observation));
+        unsigned first=ranges[r][0],last=ranges[r][1];
+        allocation_budget=0;
+        assert(!(kind==2 ? md_fd_origins_abandon_range(table,first,last)
+            : md_fd_origins_close_range(table,first,last,kind)));
+        allocation_budget=-1;
+        struct md_fd_observation after;
+        assert(!md_fd_origins_observe(table,0,&after) && after.generation!=observation.generation);
+        for (unsigned i=0;i<=256;++i) {
+            int fd=i==256 ? INT_MAX : (int)i;
+            int selected=(unsigned)fd>=first && (unsigned)fd<=last;
+            expect(table,fd,selected && kind!=1 ? NULL : anchor,selected && kind==1 ? FD_CLOEXEC : 0);
+        }
+        md_fd_origins_release(table);
+    }
+    puts("PASS bounded FD retirement: collisions, wrapped/whole buckets, high ranges, flags, uncertain removal and generation");
 }
 static void copy_slot(struct md_fd_origins *table, int from, int to, unsigned flags) {
     struct md_fs_anchor *origin=md_fd_origins_get(table,from,NULL);
@@ -1377,6 +1402,7 @@ void test_fd_origins(void) {
     assert(first && second);
     struct md_fs_anchor *a=capture(first,open("/",O_PATH|O_CLOEXEC));
     struct md_fs_anchor *b=capture(second,open("/",O_PATH|O_CLOEXEC));
+    bounded_retirement(a);
     received_origins(a,b); vector_preparation(a,b,0); vector_preparation(a,b,1);
     observed_delivery(a,b); observed_return_failure(a);
     message_custody(a,b); message_batches(a);

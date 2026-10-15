@@ -25,6 +25,30 @@ static struct md_fs_result call(struct md_filesystem *fs, unsigned op, const cha
     struct md_fs_result r;
     md_fs_execute(fs,&q,&r,&output); return r;
 }
+static void captured_lifetime(struct md_filesystem *fs, const char *parent) {
+    unsigned before=descriptors(), objects=fs->mounts->tree->objects;
+    char path[PATH_MAX]; snprintf(path,sizeof(path),"%s/transient",parent);
+    for (unsigned i=0;i<1024;++i) {
+        struct md_fs_anchor *origin=NULL;
+        struct md_fs_request q={.operation=MD_FS_OPEN,.directory={-1,-1},
+            .path={"/rw/transient",NULL},.flags=O_RDWR|O_CREAT|O_EXCL,.mode=0600};
+        struct md_fs_result r;
+        md_fs_execute(fs,&q,&r,&(struct md_fs_output){.origin=&origin});
+        assert(!r.error && r.fd>=0 && origin);
+        assert(fs->mounts->tree->objects==objects && descriptors()==before+2);
+        assert(!md_fs_anchor_check_fd(origin,md_fs_anchor_fd(origin)));
+        assert(!md_fs_anchor_check_fd(origin,r.fd));
+        assert(md_fs_anchor_check_fd(origin,fs->mounts->tree->mounts[0].source)==-ESTALE);
+        assert(!write(r.fd,"",0) && !unlink(path));
+        int fd=r.fd;
+        r=call(fs,MD_FS_FSTAT,NULL,fd,origin,0,NULL,0,NULL);
+        assert(!r.error && !r.info.links && r.info.mount_id==fs->mounts->tree->mounts[0].id);
+        r=call(fs,MD_FS_REOPEN,NULL,fd,origin,O_RDWR,NULL,0,NULL);
+        assert(!r.error && r.fd>=0); close(r.fd);
+        close(fd); md_fs_anchor_release(origin);
+        assert(fs->mounts->tree->objects==objects && descriptors()==before);
+    }
+}
 static void file_aliases(struct md_filesystem *fs, const char *path, int reverse) {
     int created=open(path,O_CREAT|O_WRONLY|O_CLOEXEC,0600); assert(created>=0);
     assert(write(created,"value",5)==5); close(created);
@@ -137,9 +161,11 @@ void test_mount_alias(const char *base) {
     struct md_view_mount *rw=&fs.mounts->tree->mounts[0], *ro=&fs.mounts->tree->mounts[1];
     close(ro->source); ro->source=fcntl(rw->source,F_DUPFD_CLOEXEC,3); assert(ro->source>=0);
     ro->native=rw->native;
+    captured_lifetime(&fs,host[0]);
     file_aliases(&fs,files[0],0); file_aliases(&fs,files[0],1); root_aliases(&fs);
     md_fs_mounts_close(&fs); md_inode_store_close(s);
     assert(descriptors()==before);
     puts("PASS per-mount native object IDs, readonly aliases, image identity and open-unlinked lifetime");
     puts("PASS ambiguous unannotated FDs fail explicitly; captured roots and copied trees retain exact mount policy");
+    puts("PASS captured opens retain no view-lifetime object pins; unlinked origins and FD checks remain valid");
 }

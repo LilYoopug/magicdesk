@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "test_syscall_registers.h"
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -41,7 +42,7 @@ int test_mutation_signal_guest(const char *root, int protected, int restart) {
     for (unsigned i=0;i<2000;++i) {
         char path[544]; assert(snprintf(path,sizeof(path),"%s/%u",directory,i)<(int)sizeof(path));
         int fd;
-        do { fd=open(path,O_CREAT|O_EXCL|O_WRONLY|O_CLOEXEC,0600); } while (fd<0 && errno==EINTR);
+        do { fd=test_open_registers(AT_FDCWD,path,O_CREAT|O_EXCL|O_WRONLY|O_CLOEXEC,0600); } while (fd<0 && errno==EINTR);
         if (fd<0) { fprintf(stderr,"create %u: errno=%d signals=%d\n",i,errno,delivered); return 1; }
         assert(fcntl(fd,F_GETFD)==FD_CLOEXEC);
         ssize_t written;
@@ -53,6 +54,7 @@ int test_mutation_signal_guest(const char *root, int protected, int restart) {
         do { result=fstat(native,&st); } while (result<0 && errno==EINTR);
         assert(!result && S_ISCHR(st.st_mode));
         do { result=unlink(path); } while (result<0 && errno==EINTR);
+        if (result) fprintf(stderr,"unlink %u: result=%d errno=%d signals=%d\n",i,result,errno,delivered);
         assert(!result);
     }
     timer=(struct itimerval){0}; assert(!setitimer(ITIMER_REAL,&timer,NULL));

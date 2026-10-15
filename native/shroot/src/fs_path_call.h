@@ -2,6 +2,8 @@
 #define MD_FS_PATH_CALL_H
 #include "fs_operation.h"
 #include <fcntl.h>
+#include <errno.h>
+#include <linux/mount.h>
 #include <sys/syscall.h>
 
 /* Scalar decoding is shared by stopped-task capture and the task-local adapter.
@@ -9,6 +11,11 @@
 static inline void md_fs_open_parameters(struct md_fs_request *q,unsigned flags,unsigned mode,uint64_t resolve) {
     q->operation=MD_FS_OPEN; q->flags=flags; q->mode=mode; q->resolve=resolve;
     q->attributes.creation_mask=(flags&O_CREAT) && !(flags&O_PATH) ? MD_FS_CAPTURE_UMASK : 0;
+}
+static inline int md_fs_fsopen_parameters(struct md_fs_request *q,unsigned flags) {
+    if (flags&~FSOPEN_CLOEXEC) return -EINVAL;
+    q->operation=MD_FS_FSOPEN; q->flags=O_RDWR|((flags&FSOPEN_CLOEXEC) ? O_CLOEXEC : 0);
+    return 0;
 }
 static inline unsigned md_fs_path_call(struct md_fs_request *q,long nr,const unsigned long *args) {
     switch (nr) {

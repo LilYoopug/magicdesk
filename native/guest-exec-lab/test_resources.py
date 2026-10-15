@@ -161,7 +161,8 @@ def main():
               + root + "/native", "PASS path invocation:")
         check("guest path invocation", root + "/libmagicdesk_guest_run.so --statistics --store "
               + root + "/store --deadline-seconds 90 -- /bin/test path-invocation /tmp", "PASS path invocation:",
-              patterns=(r"MD_DIRECT status=[1-9]\d* open=[1-9]\d* fallback=\d+ admit=[1-9]\d*",))
+              patterns=(r"MD_DIRECT status=[1-9]\d* open=0 fallback=0 admit=0 retry=0",
+                        r"MD_BROKER nr=56 notifications=\d+ handled=[1-9]\d* delegated=\d+"))
         check_mutation_signals()
         check_captures()
         check("adapter address-space ownership", root + "/libmagicdesk_guest_test_interception_buffers.so",
@@ -234,6 +235,16 @@ def main():
                     check(f"mutation signals protected={protected} restart={restart} guest={guest}",
                           "timeout -k 5 105 " + command + f" {protected} {restart}",
                           "PASS mutation under signals:")
+        for protected in range(2):
+            for restart in (0, 1, 2, 3, 4, 6):
+                for guest in (False, True):
+                    command = (root + "/libmagicdesk_guest_run.so --store " + root
+                               + "/store --deadline-seconds 90 -- /bin/test shared-memory /tmp"
+                               if guest else root + "/libmagicdesk_guest_resource_guest.so shared-memory " + root + "/native")
+                    # EVENT_WAIT: fixed shared-memory stress, bounded by the launch deadline.
+                    check(f"shared memory signals protected={protected} mode={restart} guest={guest}",
+                          "timeout -k 5 105 " + command + f" {protected} {restart}",
+                          "PASS shared memory under signals:")
 
     def check_exec_custody():
         check("native foreign executable", root + "/libmagicdesk_guest_resource_guest.so proc-exec direct " + root + "/native",

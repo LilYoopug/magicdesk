@@ -230,6 +230,42 @@ static int promote_name(const char *name,void *data) {
     int r=mdi_leaf_lookup(m->store,m->parent->id,name,&node);
     return r ? r : mdi_leaf_promote(m->store,&node);
 }
+int mdi_leaf_materialize_directory(struct md_inode_store *s,const struct mdi_node *parent) {
+    struct materialize m={s,parent};
+    return parent->attached ? mdi_leaf_list(s,parent,promote_name,&m) : 0;
+}
+int mdi_leaf_materialize_tree(struct md_inode_store *s,const struct mdi_node *root) {
+    sqlite3_stmt *q=NULL;
+    int r=mdi_prepare(s,"WITH RECURSIVE dirs(object) AS (SELECT ?1 UNION "
+        "SELECT n.object FROM names n JOIN dirs d ON n.parent=d.object "
+        "JOIN objects o ON o.object=n.object WHERE o.kind=16384) SELECT object FROM dirs",&q);
+    if (!r) r=mdi_bind_id(q,1,root->id);
+    char (*ids)[33]=NULL;
+    size_t count=0,capacity=0;
+    while (!r) {
+        int next=mdi_step(s,q);
+        if (next==SQLITE_DONE) break;
+        if (next!=SQLITE_ROW) { r=mdi_sql_failure(next); break; }
+        if (sqlite3_column_bytes(q,0)!=32) { r=-EIO; break; }
+        if (count==capacity) {
+            if (capacity>SIZE_MAX/2/sizeof(*ids)) { r=-ENOMEM; break; }
+            size_t size=capacity ? capacity*2 : 16;
+            void *grown=realloc(ids,size*sizeof(*ids));
+            if (!grown) { r=-ENOMEM; break; }
+            ids=grown; capacity=size;
+        }
+        memcpy(ids[count++],sqlite3_column_text(q,0),33);
+    }
+    sqlite3_finalize(q);
+    /* Promotion temporarily commits its recovery journal. Snapshot directory
+     * identities and close the cursor before crossing that transaction boundary. */
+    for (size_t i=0;!r && i<count;++i) {
+        struct mdi_node parent;
+        r=mdi_node(s,ids[i],&parent);
+        if (!r) r=mdi_leaf_materialize_directory(s,&parent);
+    }
+    free(ids); return r;
+}
 int mdi_leaf_materialize(struct md_inode_store *s) {
     char after[33]="";
     int r=0;
@@ -248,8 +284,7 @@ int mdi_leaf_materialize(struct md_inode_store *s) {
         if (r || !found) break;
         struct mdi_node parent;
         r=mdi_node(s,after,&parent);
-        struct materialize m={s,&parent};
-        if (!r && parent.attached) r=mdi_leaf_list(s,&parent,promote_name,&m);
+        if (!r) r=mdi_leaf_materialize_directory(s,&parent);
     }
     return r;
 }

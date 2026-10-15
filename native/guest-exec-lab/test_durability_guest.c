@@ -32,7 +32,9 @@ static void files(const char *directory) {
     fd=open("sync",O_CREAT|O_EXCL|O_RDWR|O_SYNC,0600); assert(fd>=0);
     assert(write(fd,"s",1)==1); close(fd); assert(!unlink("sync"));
     assert(!mkfifo("fifo",0600)); fd=open("fifo",O_RDWR|O_NONBLOCK); assert(fd>=0);
-    assert(fsync(fd)<0 && errno==EINVAL); close(fd); assert(!unlink("fifo"));
+    int sync_result=fsync(fd);
+    if (sync_result>=0 || errno!=EINVAL) fprintf(stderr,"FIFO sync: directory=%s result=%d errno=%d fd=%d\n",directory,sync_result,errno,fd);
+    assert(sync_result<0 && errno==EINVAL); close(fd); assert(!unlink("fifo"));
     int pair[2]; assert(!pipe(pair)); assert(fsync(pair[0])<0 && errno==EINVAL); close(pair[0]); close(pair[1]);
     assert(!fsync(dir)); close(dir);
 }

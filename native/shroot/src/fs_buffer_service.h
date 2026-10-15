@@ -77,6 +77,11 @@ int md_fs_buffer_begin(struct md_fs_buffer_service *, pid_t, struct md_guest_dom
 enum { MD_FS_BUFFER_NEEDS_TASK=1 };
 int md_fs_buffer_invoke(struct md_fs_buffer_service *, pid_t, struct md_guest_domain *, unsigned operation,
         const struct md_interception_buffer *, struct md_fs_buffer_request **);
+/* Continue delivery of an already executed open. On accepted submission, moves
+ * opened into the request; no path lookup or mutation is repeated. */
+struct md_fs_result;
+int md_fs_buffer_adopt(struct md_fs_buffer_service *,pid_t,struct md_guest_domain *,unsigned operation,unsigned flags,
+    const struct md_interception_buffer *,struct md_fs_result *,struct md_fs_buffer_open *,struct md_fs_buffer_request **);
 /* Inspect one captured rights vector using a shared custody reference. No
  * application table/FS turn or per-descriptor duplication is needed. */
 struct md_received_fds;

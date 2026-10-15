@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "test_syscall_registers.h"
 #include <sys/mman.h>
 #include "fs_buffer.h"
 #include "posix_acl.h"
@@ -1998,7 +1999,7 @@ static void path_invocation(void) {
             size_t size=strlen(name)+1; assert(size<page);
             char *edge=memory+page-size; memcpy(edge,name,size);
             umask(0077);
-            int fd=(int)syscall(SYS_openat,AT_FDCWD,edge,O_CREAT|O_EXCL|O_RDWR|O_CLOEXEC,0666);
+            int fd=test_open_registers(AT_FDCWD,edge,O_CREAT|O_EXCL|O_RDWR|O_CLOEXEC,0666);
             assert(fd>=0 && fcntl(fd,F_GETFD)==FD_CLOEXEC);
             struct stat st,renamed;
             assert(!fstat(fd,&st) && (st.st_mode&0777)==0600 && st.st_nlink==1);
@@ -2026,7 +2027,7 @@ static void path_invocation(void) {
             int base=open("invocation-dir",O_PATH|O_DIRECTORY|O_CLOEXEC);
             int peer=open("invocation-peer",O_PATH|O_DIRECTORY|O_CLOEXEC);
             assert(base>=0 && peer>=0 && !chdir("invocation-peer"));
-            fd=openat(base,"relative",O_CREAT|O_EXCL|O_RDWR,0666);
+            fd=test_open_registers(base,"relative",O_CREAT|O_EXCL|O_RDWR,0666);
             assert(fd>=0 && !fcntl(fd,F_GETFD));
             assert(!fstat(fd,&st) && (st.st_mode&0777)==0600 && !close(fd));
             assert(!renameat(base,"relative",AT_FDCWD,"cwd"));
@@ -2133,6 +2134,7 @@ int test_device_nodes_guest(void);
 int test_keyring_guest(int, char **);
 int test_native_metadata_guest(void);
 int test_mutation_signal_guest(const char *, int, int);
+int test_shared_memory_guest(const char *, int, int);
 int test_fd_result_guest(const char *, int);
 int main(int argc, char **argv) {
     if (argc==4 && !strcmp(argv[1],"result-custody"))
@@ -2140,6 +2142,8 @@ int main(int argc, char **argv) {
     if (argc>=2 && !strcmp(argv[1],"keyring")) return test_keyring_guest(argc,argv);
     if (argc==5 && !strcmp(argv[1],"mutation-signal"))
         return test_mutation_signal_guest(argv[2],atoi(argv[3]),atoi(argv[4]));
+    if (argc==5 && !strcmp(argv[1],"shared-memory"))
+        return test_shared_memory_guest(argv[2],atoi(argv[3]),atoi(argv[4]));
     if (argc==2 && !strcmp(argv[1],"tmpfs")) { test_tmpfs_guest(); return 0; }
     if (argc==2 && !strcmp(argv[1],"overlay")) { test_overlay_guest(); return 0; }
     if (argc==2 && !strcmp(argv[1],"setns")) { test_setns_guest(); return 0; }
