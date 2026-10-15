@@ -64,6 +64,8 @@ pending-publication hint used by independently running owners.
 including retained O_PATH and open-unlinked descriptions.
 `inode_leaf.c` connects those leaves to path/FD resolution, admission and
 materialization at shared-source boundaries. Native leaf nodes are not cached.
+`inode_overlay_native.c` owns writable-upper eligibility and atomic publication
+of shared native leaves into their upper/merged catalogue projections.
 `inode_view.c` owns retained namespace projections within one store transaction
 domain; `inode_maintenance.c` collects untracked backing objects only under
 exclusive maintenance or before a store is published.
@@ -148,6 +150,9 @@ does not run collection or allocate a view selector. Writable overlay uses a
 connection-local mutation journal to publish its merged and upper names within
 the same transaction. Upper/work reservations remain held by detached views
 until their last descriptor or origin releases custody.
+The initial root backing owns that lease for the entire view lifetime; selecting
+an upper directory body does not move it. Validation resolves the retained lease
+through backing history, while collection uses its original scope basename.
 Each view has its own bounded lower-source catalogue. Retiring a view releases
 that catalogue instead of consuming source slots in the persistent instance.
 Upper/work reservations share the metadata transaction and retained projection
@@ -198,7 +203,7 @@ invalidating existing IO. Readonly mounts protect metadata, not device IO.
 ## Native Publication
 
 Eligible guest creation uses native leaves by default, without an experimental
-flag. The parent must be attached, local, outside an overlay projection, have
+flag. The parent must be attached, local, have
 virtual permissions and no default ACL. The store probes user-xattr metadata on
 an unnamed temporary file during admission/reconnection; failure retains the
 catalogue allocator. Inspection does not probe or mutate. Trusted tree imports
@@ -213,8 +218,17 @@ metadata. Creation prepares a private backing, installs its selector and complet
 metadata, syncs it once, then atomically publishes the name with
 `RENAME_NOREPLACE`. Interrupted preparation leaves only an untracked backing for
 existing maintenance to collect, never a visible file with incomplete permissions.
-These creates also need no SQL writes. Parents with default ACLs, physical
-permissions or overlay projections still use the catalogue allocator.
+These creates also need no SQL writes. Parents with default ACLs or physical
+permissions still use the catalogue allocator.
+
+Writable overlays share admitted upper-directory bodies with their merged
+projection. `inode_overlay_native.c` admits native births and renames only when
+that upper ownership is already published and the name has no lower-name or
+catalogued-upper conflict. Lower-only directories, whiteout replacement and
+copy-up retain transactional catalogue publication. Ordinary upper-only native
+create/rename/unlink changes the single physical name, visible through both
+projections, without per-file SQL writes. External mutation of a mounted upper
+is not a coherent alternative interface to the merged namespace.
 This is a storage mechanism, not a permission bypass: the provider must resolve the parent and enforce
 identity, ACL, mount, readonly and Landlock policy under the existing store gate.
 The executor's process umask is zero; creation receives the already-masked guest
@@ -249,6 +263,13 @@ operation snapshot without releasing the gate. Ownership and mode are read from
 the validated leaf by the metadata owner, not supplied by its caller.
 Promotion changes representation,
 not the guest namespace: the enclosing operation owns its logical events.
+
+Native identities are scope-qualified; root-scope identities are unchanged.
+For shared upper/merged directories, the same promotion transaction publishes
+each scope's object and name and their overlay link before deleting the intent.
+Recovery derives these projections from retained directory ownership, not a
+runtime-only writer callback. Open FDs and Landlock keys keep their original
+scope-qualified identity. No second journal or storage revision is needed.
 
 Hardlinks, mixed native/catalogue rename, pathname-based execution, attached file-watch
 registration and stable `O_PATH|O_NOFOLLOW` reopen sources promote before consuming
@@ -299,6 +320,9 @@ retained FD/mmap/flock identity, hardlinks and unlink, transition into the
 existing shared-source snapshot/COW path, cold and already-open recovery,
 process death during recovery itself, sync/move/catalogue failures, conflicting
 native identity, admission rejection and zero steady-state journal queries.
+Sixteen additional overlay SIGKILL cases cross four publication boundaries,
+upper/merged initiation and live/cold recovery; they verify retained identities,
+both projections and absence of false namespace events.
 `test_native_leaf` covers 1024 ordinary native cycles with zero xattr/sync calls,
 FD/mmap identity after deletion and pathname reuse, O_PATH metadata, returning to
 implicit metadata, four SIGKILL points and four IO-failure points in the first
@@ -308,7 +332,8 @@ and checks ownership, visible user attributes and absence of private records.
 The integrated fixture also checks zero-write production namespace cycles, mixed
 catalogue/native enumeration and notifications, CREATE/OPEN/CLOSE order, cold
 descriptor recovery, ACL/capability promotion, Landlock pin lifetime, sealing,
-snapshot COW and overlay lower/upper admission. These are not power-loss tests or
+snapshot COW, overlay lower/upper admission, simultaneous upper/merged native
+watchers and paired rename cookies. These are not power-loss tests or
 proof of complete mixed watch semantics; see the [watch limits](watches.md#limits).
 
 ## Paths And Directories

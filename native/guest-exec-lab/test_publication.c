@@ -3,6 +3,8 @@
 #include "inode_publication.h"
 #include "inode_native.h"
 #include "inode_watch.h"
+#include "inode_overlay.h"
+#include "inode_view.h"
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -238,6 +240,56 @@ static void admission(const char *path) {
     close(fd); close(directory); md_inode_store_close(s);
     puts("PASS nested/dirty transaction, unsafe name and stale inode are rejected before intent publication");
 }
+static void overlay_killed(const char *path,int point,int upper,int cold) {
+    struct md_inode_store *s=NULL,*view=NULL;
+    assert(!md_inode_store_open(path,1,&s));
+    struct md_identity ids=md_identity_new(0,0); s->identity=&ids;
+    const char *names[]={"lower","upper","work"}; int directories[3];
+    for (unsigned i=0;i<3;++i) {
+        assert(!md_inode_mkdir(s,-1,names[i],0755));
+        directories[i]=md_inode_open(s,-1,names[i],O_RDONLY|O_DIRECTORY,0); assert(directories[i]>=0);
+    }
+    assert(!md_inode_view_create(s,MD_FILESYSTEM_OVERLAY,&view));
+    assert(!md_inode_overlay_layer(view,s,directories[0],1));
+    assert(!md_inode_overlay_prepare_upper(view,s,directories[1],directories[2],1));
+    assert(!md_inode_overlay_activate(view) && !md_inode_overlay_stash(view,&ids)); view->identity=&ids;
+    int fd=md_inode_create(view,-1,"file",0644); assert(fd>=0 && write(fd,"overlay",7)==7);
+    int original=md_inode_open(s,directories[1],"file",O_RDONLY,0); assert(original>=0);
+    char a[33],b[33],after[33];
+    assert(!md_inode_object_id(view,fd,a) && !md_inode_object_id(s,original,b) && strcmp(a,b));
+    int merged=md_inode_open(view,-1,"/",O_RDONLY|O_DIRECTORY,0); assert(merged>=0);
+    int watchers[2]={md_inode_watch_create(s,IN_NONBLOCK),md_inode_watch_create(view,IN_NONBLOCK)};
+    assert(watchers[0]>=0 && watchers[1]>=0);
+    unsigned mask=IN_CREATE|IN_DELETE|IN_MOVED_FROM|IN_MOVED_TO;
+    assert(md_inode_watch_add(s,watchers[0],directories[1],mask)>0);
+    assert(md_inode_watch_add(view,watchers[1],merged,mask)>0);
+    pid_t pid=fork(); assert(pid>=0);
+    if (!pid) {
+        struct md_inode_store *child=NULL;
+        assert(!md_inode_store_reconnect(upper ? s->lifetime : view->lifetime,&child)); child->identity=&ids;
+        kill_point=point; md_inode_observe(child,checkpoint,NULL);
+        (void)md_inode_link(child,upper ? directories[1] : -1,"file",upper ? directories[1] : -1,"alias",0);
+        _exit(96);
+    }
+    int status; assert(waitpid(pid,&status,0)==pid && WIFSIGNALED(status) && WTERMSIG(status)==SIGKILL);
+    if (cold) {
+        close(watchers[0]); close(watchers[1]); md_inode_store_close(view); view=NULL;
+        md_inode_store_close(s); s=NULL; assert(!md_inode_store_open(path,0,&s)); s->identity=&ids;
+    }
+    struct stat st;
+    assert(!md_inode_stat(s,directories[1],"file",0,&st) && st.st_size==7 && st.st_nlink==1);
+    assert(!md_inode_object_id(s,original,after) && !strcmp(b,after));
+    if (!cold) {
+        assert(!md_inode_stat(view,-1,"file",0,&st) && st.st_size==7 && st.st_nlink==1);
+        assert(!md_inode_object_id(view,fd,after) && !strcmp(a,after));
+        assert(md_inode_watch_bytes(s,watchers[0])==0 && md_inode_watch_bytes(view,watchers[1])==0);
+        close(watchers[0]); close(watchers[1]); md_inode_store_close(view);
+    }
+    close(fd); close(original); close(merged);
+    for (unsigned i=0;i<3;++i) close(directories[i]);
+    md_inode_store_close(s); md_identity_release(&ids);
+    printf("PASS overlay SIGKILL at %d upper=%d cold=%d: both projections, identity and no false namespace events\n",point,upper,cold);
+}
 int main(int argc,char **argv) {
     assert(argc==2 && argv[1][0]=='/' && !mkdir(argv[1],0700));
     char path[PATH_MAX];
@@ -245,6 +297,9 @@ int main(int argc,char **argv) {
     const int points[]={MD_PUBLICATION_INTENT,MD_PUBLICATION_MOVED,MD_PUBLICATION_STAGED,MD_PUBLICATION_CATALOGUED};
     for (unsigned i=0;i<sizeof(points)/sizeof(*points);++i) for (int cold=0;cold<2;++cold) {
         snprintf(path,sizeof(path),"%s/kill-%u-%d",argv[1],i,cold); killed(path,points[i],cold);
+    }
+    for (unsigned i=0;i<sizeof(points)/sizeof(*points);++i) for (int upper=0;upper<2;++upper) for (int cold=0;cold<2;++cold) {
+        snprintf(path,sizeof(path),"%s/overlay-%u-%d-%d",argv[1],i,upper,cold); overlay_killed(path,points[i],upper,cold);
     }
     for (int i=0;i<4;++i) {
         snprintf(path,sizeof(path),"%s/error-%d",argv[1],i); errors(path,i);

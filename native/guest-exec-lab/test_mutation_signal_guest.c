@@ -31,6 +31,9 @@ int test_mutation_signal_guest(const char *root, int protected, int restart) {
     if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
     struct sigaction action={.sa_handler=interrupted,.sa_flags=restart ? SA_RESTART : 0};
     assert(!sigaction(SIGALRM,&action,NULL));
+    sigset_t blocked,before,after;
+    assert(!sigemptyset(&blocked) && !sigaddset(&blocked,SIGUSR1));
+    assert(!sigprocmask(SIG_BLOCK,&blocked,&before));
     /* Periodic signals stress mutation interruption; they are not readiness
      * or settling waits. The runner deadline bounds the complete fixture. */
     struct itimerval timer={.it_interval={0,1000},.it_value={0,1000}};
@@ -40,6 +43,7 @@ int test_mutation_signal_guest(const char *root, int protected, int restart) {
         int fd;
         do { fd=open(path,O_CREAT|O_EXCL|O_WRONLY|O_CLOEXEC,0600); } while (fd<0 && errno==EINTR);
         if (fd<0) { fprintf(stderr,"create %u: errno=%d signals=%d\n",i,errno,delivered); return 1; }
+        assert(fcntl(fd,F_GETFD)==FD_CLOEXEC);
         ssize_t written;
         do { written=write(fd,"x",1); } while (written<0 && errno==EINTR);
         assert(written==1 && !close(fd));
@@ -52,6 +56,10 @@ int test_mutation_signal_guest(const char *root, int protected, int restart) {
         assert(!result);
     }
     timer=(struct itimerval){0}; assert(!setitimer(ITIMER_REAL,&timer,NULL));
+    assert(!sigprocmask(SIG_SETMASK,NULL,&after));
+    for (int signal=1;signal<NSIG;++signal)
+        assert(sigismember(&after,signal)==(signal==SIGUSR1 ? 1 : sigismember(&before,signal)));
+    assert(!sigprocmask(SIG_SETMASK,&before,NULL));
     assert(delivered>0 && !rmdir(directory) && !close(native));
     printf("PASS mutation under signals: protected=%d restart=%d delivered=%d\n",protected,restart,delivered);
     return 0;

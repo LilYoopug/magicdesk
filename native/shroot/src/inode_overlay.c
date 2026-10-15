@@ -33,6 +33,10 @@ static int node_origin(struct merge *m, const struct mdi_node *source, const str
         if (!r) r=mdi_sql_error(mdi_step(m->index,q));
         sqlite3_finalize(q);
     }
+    if (!r && m->upper && source->kind==S_IFDIR) {
+        struct mdi_node shared=*target;
+        r=mdi_bind_body(m->index,source,&shared);
+    }
     return r;
 }
 static int lower_name(struct merge *m, const struct mdi_node *parent, const char *name, int visible) {

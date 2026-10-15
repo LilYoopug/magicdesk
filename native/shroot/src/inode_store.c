@@ -213,7 +213,7 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
     if (!r) r = mdi_open_permission(s, &loc.node, flags);
     if (!r && image) r = mdi_permission(s, &loc.node, X_OK, 0);
     if (!r) r=mdi_landlock(s,&loc.node,&loc.parent,image ? MD_LL_EXECUTE : md_landlock_open_access(flags,loc.node.kind));
-    if (!r && !device && (flags&(O_WRONLY|O_RDWR|O_TRUNC)) && (loc.node.shared || s->overlay)) {
+    if (!r && !device && (flags&(O_WRONLY|O_RDWR|O_TRUNC)) && (loc.node.shared || (s->overlay && !loc.node.native))) {
         r=mdi_write(s);
         if (!r) r=mdi_copy_up(s,&loc.node);
     }
@@ -319,7 +319,6 @@ int md_inode_rename(struct md_inode_store *s, int sourcefd, const char *source,
         | (flags==RENAME_EXCHANGE ? md_landlock_make_access(b.node.kind) : 0));
     /* Kernel rename between two names of the same inode preserves both names. */
     if (!r && b.exists && !strcmp(a.node.id, b.node.id)) return mdi_finish(s, 0);
-    if (!r && s->overlay) r=mdi_write(s);
     if (!r && s->overlay) r=mdi_overlay_rename_directory(s,&a.node);
     if (!r && s->overlay && flags==RENAME_EXCHANGE) r=mdi_overlay_rename_directory(s,&b.node);
     if (!r && b.exists && flags != RENAME_EXCHANGE) {
@@ -342,7 +341,9 @@ int md_inode_rename(struct md_inode_store *s, int sourcefd, const char *source,
     if (!r) r = mdi_parent_writable(s, &b.parent);
     if (!r) r = mdi_sticky(s, &a);
     if (!r && b.exists) r = mdi_sticky(s, &b);
-    if (!r && a.node.native && b.parent.mode>=0 && !b.parent.source
+    int native_name=!r && a.node.native ? mdi_overlay_native_name(s,&b.parent,b.name) : -EOPNOTSUPP;
+    if (!r && native_name && native_name!=-EOPNOTSUPP) r=native_name;
+    if (!r && a.node.native && !native_name && b.parent.mode>=0 && !b.parent.source
             && b.parent.attached && (!b.exists || b.node.native)) {
         char target[NAME_MAX+34];
         int n=snprintf(target,sizeof(target),"%s/%s",b.parent.backing,b.name);

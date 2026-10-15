@@ -458,9 +458,11 @@ Do not edit its backing files as a normal rootfs: names, hardlinks, metadata and
 shared image ownership belong to the inode store. Use guest commands, explicit
 attachments or backup/restore.
 
-Eligible private root-owned regular files use native names by default, without
-per-file SQLite writes for creation, rename or deletion. Other files retain the
-catalogue path. Hardlinks and shared image operations promote native files into
+Eligible private regular files use native names by default, with sparse metadata
+for non-root ownership. Creation, rename and deletion avoid per-file SQLite
+writes; this also applies to conflict-free names in admitted writable-overlay
+upper directories. Copy-up and whiteouts retain catalogue transactions.
+Hardlinks and shared image operations promote native files into
 the same inode model without copying their data or invalidating open descriptors.
 This optimization does not bypass guest permissions, mounts or Landlock.
 

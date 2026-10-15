@@ -45,6 +45,7 @@ struct md_fs_worker {
     int (*notification)(void *, struct md_filesystem *, short);
     struct md_fs_worker_pause *pause;
     atomic_int pause_requested;
+    struct md_cost queued, execution, delivery, completion;
 };
 static struct md_fs_work *take_submitted(struct md_fs_worker *w, int *stopping) {
     pthread_mutex_lock(&w->lock);
@@ -67,7 +68,10 @@ static void run_ready(void *context, struct md_filesystem *fs) {
         int stopping;
         struct md_fs_work *work=take_submitted(w,&stopping);
         if (!work) return;
+        if (w->statistics) md_cost_end(&w->queued,work->queued_at);
+        int64_t start=md_cost_begin(w->statistics ? &w->execution : NULL);
         work->run(work,stopping ? NULL : fs,stopping ? -ESHUTDOWN : 0);
+        if (w->statistics) md_cost_end(&w->execution,start);
         md_fs_worker_publish(w,work);
     }
     pthread_mutex_lock(&w->lock); int more=w->submitted && !w->pause; pthread_mutex_unlock(&w->lock);
@@ -279,12 +283,14 @@ void md_fs_worker_notifications(struct md_fs_worker *w, int fd, void *context,
 }
 void md_fs_worker_publish(struct md_fs_worker *w, struct md_fs_work *work) {
     work->next = NULL;
+    work->published_at=md_cost_begin(w->statistics ? &w->delivery : NULL);
     pthread_mutex_lock(&w->lock);
     *w->completed_tail = work; w->completed_tail = &work->next;
     pthread_mutex_unlock(&w->lock); md_queue_signal_send(&w->done);
 }
 int md_fs_worker_submit(struct md_fs_worker *w, struct md_fs_work *work) {
     if (!w || !work || !work->run || !work->complete) return -EINVAL;
+    work->queued_at=md_cost_begin(w->statistics ? &w->queued : NULL);
     pthread_mutex_lock(&w->lock);
     int error=w->stopping ? -ESHUTDOWN : w->error;
     if (!error) {
@@ -311,7 +317,10 @@ int md_fs_worker_dispatch(struct md_fs_worker *w) {
             pthread_mutex_unlock(&w->lock);
             continue;
         }
+        if (w->statistics) md_cost_end(&w->delivery,work->published_at);
+        int64_t start=md_cost_begin(w->statistics ? &w->completion : NULL);
         int result=work->complete(work);
+        if (w->statistics) md_cost_end(&w->completion,start);
         if (!error) error=result;
     }
     return error ? error : md_fs_worker_error(w);
@@ -331,6 +340,12 @@ int md_fs_worker_stop(struct md_fs_worker *w) {
         md_queue_signal_acknowledge(&w->done);
     }
     int error = pthread_join(w->thread, NULL);
+    if (!error && w->statistics) {
+        const struct md_cost *costs[]={&w->queued,&w->execution,&w->delivery,&w->completion};
+        const char *names[]={"queue","execute","delivery","complete"};
+        for (unsigned i=0;i<4;++i) fprintf(stderr,"MD_WORKER phase=%s calls=%llu ns=%llu\n",names[i],
+            (unsigned long long)costs[i]->calls,(unsigned long long)costs[i]->nanoseconds);
+    }
     if (!error && w->error != -ESHUTDOWN) error = -w->error;
     if (w->pause) *w->pause=(struct md_fs_worker_pause){0};
     md_resource_wakeup_release(w->wakeup);

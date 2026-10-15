@@ -18,8 +18,9 @@ struct md_fd_origins;
 struct md_fd_object;
 /* Publish one already completed open before resuming its receiver. The caller
  * retains source until clear (also on cancellation); the broker pins the table
- * and origin, and only admits RESULT_ADMIT at the exact task/gate. */
-int md_broker_result_begin(struct md_namespace_broker *, int pid, uintptr_t gate,
+ * and origin, and admits only the exact task/gate/argument. A rewritten ARM64
+ * syscall retains the kernel's orig_x0; a task-affine gate uses RESULT_ADMIT. */
+int md_broker_result_begin(struct md_namespace_broker *, int pid, uintptr_t gate, uint64_t argument,
         struct md_fd_origins *, int source, struct md_fd_object *, unsigned flags);
 int md_broker_result_clear(struct md_namespace_broker *, int pid);
 void md_broker_destroy(struct md_namespace_broker *);

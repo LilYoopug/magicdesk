@@ -26,8 +26,10 @@ void mdi_leaf_admit(struct md_inode_store *s) {
     close(fd);
 }
 int mdi_leaf_create(struct md_inode_store *s,const struct mdi_node *parent,const char *name,int flags,mode_t mode) {
-    if (!s->native_files || !s->identity || s->overlay || parent->mode<0 || !parent->attached || parent->source
+    if (!s->native_files || !s->identity || parent->mode<0 || !parent->attached || parent->source
             || (parent->acl_mask&MD_ACL_DEFAULT)) return -EOPNOTSUPP;
+    int allowed=mdi_overlay_native_name(s,parent,name);
+    if (allowed) return allowed;
     uint32_t uid=s->identity->uid.fs,gid=s->identity->gid.fs;
     if (parent->mode&S_ISGID) gid=parent->gid;
     if ((mode&S_ISGID) && !md_identity_file_capable(s->identity,parent->uid,parent->gid,CAP_FSETID)
@@ -50,8 +52,18 @@ int mdi_leaf_create(struct md_inode_store *s,const struct mdi_node *parent,const
     return r ? r : fd;
 }
 
-void mdi_leaf_id(const struct stat *st,char out[33]) {
+int mdi_leaf_id(const struct stat *st,const char scope[33],char out[33]) {
     snprintf(out,33,"%016" PRIx64 "%016" PRIx64,(uint64_t)st->st_dev,(uint64_t)st->st_ino);
+    if (!strcmp(scope,MDI_ROOT)) return 0;
+    /* A backing can be visible in both upper and merged scopes. Preserve the
+     * root identity and derive each view's stable identity before promotion. */
+    static const char hex[]="0123456789abcdef";
+    for (unsigned i=0;i<32;++i) {
+        const char *digit=strchr(hex,scope[i]);
+        if (!scope[i] || !digit) return -EIO;
+        out[i]=hex[(strchr(hex,out[i])-hex)^(digit-hex)];
+    }
+    return 0;
 }
 static int leaf(struct md_inode_store *s,const struct mdi_node *parent,const char *name,
         int descriptor,const struct stat *physical,struct mdi_node *out) {
@@ -60,7 +72,8 @@ static int leaf(struct md_inode_store *s,const struct mdi_node *parent,const cha
         .kind=S_IFREG,.device=physical->st_dev,.inode=physical->st_ino,
         .logical_device=physical->st_dev,.logical_inode=physical->st_ino,
         .links=physical->st_nlink,.attached=!!physical->st_nlink};
-    mdi_leaf_id(physical,node.id);
+    int id=mdi_leaf_id(physical,parent->scope,node.id);
+    if (id) return id;
     strcpy(node.parent,parent->id); strcpy(node.scope,parent->scope);
     int n=snprintf(node.backing,sizeof(node.backing),"%s/%s",parent->backing,name);
     if (n<0 || (size_t)n>=sizeof(node.backing)) return -ENAMETOOLONG;
@@ -119,7 +132,23 @@ int mdi_leaf_descriptor(struct md_inode_store *s,int fd,const struct stat *st,st
     if (mdi_name_valid(name)) return -EXDEV;
     struct mdi_node directory;
     r=mdi_node(s,parent,&directory);
+    if (!r && !strcmp(directory.scope,s->lifetime->scope) && !strcmp(directory.backing,parent))
+        goto selected;
+    if (r && r!=-ENOENT) return r;
+    sqlite3_stmt *q=NULL;
+    r=mdi_query_acquire(s,MDI_BACKING_OBJECT,&q);
+    if (!r) r=mdi_bind_id(q,1,parent);
+    if (!r) r=mdi_sql_error(sqlite3_bind_int(q,2,0));
+    char id[33];
+    if (!r) {
+        int next=mdi_step(s,q);
+        if (next==SQLITE_ROW && sqlite3_column_bytes(q,0)==32) memcpy(id,sqlite3_column_text(q,0),33);
+        else r=next==SQLITE_DONE ? -ENOENT : -EIO;
+    }
+    r=mdi_query_release(q,r);
+    if (!r) r=mdi_node(s,id,&directory);
     if (r) return r==-ENOENT ? -EXDEV : r;
+selected:
     if (directory.kind!=S_IFDIR || directory.source || strcmp(directory.scope,s->lifetime->scope)
             || strcmp(directory.backing,parent)) return -EXDEV;
     struct stat actual;

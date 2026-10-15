@@ -76,6 +76,17 @@ result. `CLOSE_RANGE_CLOEXEC` is available since 5.11. Both fit the 5.15 baselin
 See the [seccomp notification contract](https://man7.org/linux/man-pages/man2/seccomp_unotify.2.html)
 and [close_range flags](https://man7.org/linux/man-pages/man2/close_range.2.html).
 
+Ready open results may reuse a ptrace-stopped syscall as the existing gettid
+admission notification. The owner is `supervisor.c`, with `namespace_broker.c`
+and `fd_install.c` retaining FD custody. This uses the
+[5.15 post-TRACE seccomp recheck](https://github.com/torvalds/linux/blob/v5.15/kernel/seccomp.c),
+NT_ARM_SYSTEM_CALL and syscall-exit observation, not a newer notification flag.
+The broker matches ARM64's preserved orig_x0. Interrupted notification delivery
+retains the completed result and uses the existing shielded task-affine gate;
+protected inputs, application filters and debuggers keep their existing route.
+`test_resources.py --case fs-buffer` covers these branches, masks, CLOEXEC,
+mutation signals, file-table pressure and group termination.
+
 Private launch rendezvous reuses the registry's flags-zero pidfd, proc-descriptor
 identity and file locks, plus Unix seqpacket/SO_PEERCRED and nonblocking IO. It
 adds no newer-kernel primitive or shared-startup requirement. Discovery failure

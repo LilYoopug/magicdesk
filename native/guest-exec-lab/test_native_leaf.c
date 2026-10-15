@@ -157,6 +157,11 @@ static void malformed(int directory) {
     int fd=mdi_native_create(directory,"malformed",O_RDWR,0,0,0600); assert(fd>=0);
     assert(!fchmod(fd,01700));
     struct stat st;
+    char id[33],scope[33];
+    assert(!fstat(fd,&st) && !mdi_leaf_id(&st,MDI_ROOT,id));
+    strcpy(scope,MDI_ROOT); scope[12]='g';
+    assert(mdi_leaf_id(&st,scope,id)==-EIO);
+    scope[12]=0; assert(mdi_leaf_id(&st,scope,id)==-EIO);
     assert(mdi_native_stat(fd,&st)==-EIO);
     assert(mdi_native_metadata(fd,1,2,0000)==-EIO);
     assert(!fsetxattr(fd,MDI_NATIVE_METADATA,"bad",3,0));
@@ -234,6 +239,8 @@ static void catalogue(const char *path) {
     assert(fgetxattr(copy,MDI_NATIVE_METADATA,names,sizeof(names))==11 && !memcmp(names,"destination",11));
     assert(!mdi_overlay_replace_attributes(fd,copy));
     assert(fgetxattr(copy,MDI_NATIVE_METADATA,names,sizeof(names))==11 && !memcmp(names,"destination",11));
+    assert(!mdi_replace_attributes(copy,copy) && !mdi_overlay_replace_attributes(copy,copy));
+    assert(fgetxattr(copy,"user.visible",names,sizeof(names))==3 && !memcmp(names,"yes",3));
     close(copy); close(fd); close(directory); md_inode_store_close(s);
     puts("PASS promotion captures native metadata; guest/export/COW hide private attributes and preserve destination ownership");
 }
@@ -498,6 +505,32 @@ static void sealing(const char *path) {
     close(fd); md_inode_store_close(copy); md_inode_store_close(s); md_identity_release(&ids);
     puts("PASS automatic native materialization at seal preserves identity, snapshot isolation and COW");
 }
+static void overlay_events(struct md_inode_store *base,int upper,struct md_inode_store *view,int merged) {
+    struct md_inode_store *stores[]={base,view}; int directories[]={upper,merged},observers[2],watches[2];
+    unsigned mask=IN_CREATE|IN_MOVED_FROM|IN_MOVED_TO|IN_DELETE;
+    for (unsigned i=0;i<2;++i) {
+        observers[i]=md_inode_watch_create(stores[i],IN_NONBLOCK); assert(observers[i]>=0);
+        watches[i]=md_inode_watch_add(stores[i],observers[i],directories[i],mask); assert(watches[i]>0);
+    }
+    int fd=md_inode_create(view,merged,"before",0644); assert(fd>=0 && native_node(view,fd)); close(fd);
+    assert(!md_inode_rename(view,merged,"before",merged,"after",0));
+    assert(!md_inode_unlink(view,merged,"after",0));
+    for (unsigned i=0;i<2;++i) {
+        union { struct inotify_event align; char data[4096]; } events;
+        ssize_t count=md_inode_watch_read(stores[i],observers[i],events.data,sizeof(events.data),NULL,NULL); assert(count>0);
+        const unsigned masks[]={IN_CREATE,IN_MOVED_FROM,IN_MOVED_TO,IN_DELETE};
+        const char *names[]={"before","before","after","after"}; unsigned n=0,cookie=0;
+        for (size_t at=0;at<(size_t)count;) {
+            struct inotify_event *e=(void *)(events.data+at); at+=sizeof(*e)+e->len;
+            assert(n<4 && e->wd==watches[i] && e->mask==masks[n] && e->len && !strcmp(e->name,names[n]));
+            if (n==1) { cookie=e->cookie; assert(cookie); }
+            else assert(e->cookie==(n==2 ? cookie : 0));
+            ++n;
+        }
+        assert(n==4 && md_inode_watch_bytes(stores[i],observers[i])==0); close(observers[i]);
+    }
+    puts("PASS upper and merged native watchers retain exact create/rename/unlink events and paired cookies");
+}
 static void overlays(const char *path) {
     struct md_inode_store *s,*view=NULL; assert(!md_inode_store_open(path,1,&s));
     struct md_identity ids=md_identity_new(0,0); s->identity=&ids;
@@ -520,14 +553,48 @@ static void overlays(const char *path) {
     assert(!md_inode_overlay_prepare_upper(view,s,dirs[1],dirs[2],1));
     assert(!md_inode_overlay_activate(view) && !md_inode_overlay_stash(view,&ids));
     view->identity=&ids;
+    struct md_inode_store *peer=NULL;
+    assert(!md_inode_store_reconnect(view->lifetime,&peer)); peer->identity=&ids;
+    contents(peer,"file","upper"); md_inode_store_close(peer);
+    int root=md_inode_open(view,-1,"/",O_RDONLY|O_DIRECTORY,0); assert(root>=0);
+    overlay_events(s,dirs[1],view,root);
+    creation_events(view,root); pinned_rule(view,root); user_leaves(view);
     contents(view,"file","upper"); contents(view,"cow","lower");
     fd=md_inode_open(view,-1,"cow",O_RDWR,0); assert(fd>=0);
     assert(pwrite(fd,"upper",5,0)==5); close(fd);
     contents(view,"cow","upper"); contents(s,"lower/cow","lower"); contents(s,"upper/cow","upper");
+    int native=md_inode_create(view,-1,"native",0644); assert(native>=0 && native_node(view,native));
+    assert(write(native,"new",3)==3);
+    contents(s,"upper/native","new");
+    int original=md_inode_open(s,dirs[1],"native",O_RDONLY,0); assert(original>=0 && native_node(s,original));
+    char merged_id[33],upper_id[33],after[33];
+    assert(!md_inode_object_id(view,native,merged_id) && !md_inode_object_id(s,original,upper_id));
+    assert(strcmp(merged_id,upper_id));
+    assert(!md_inode_rename(view,-1,"native",-1,"moved",0));
+    contents(s,"upper/moved","new");
+    assert(!md_inode_link(view,-1,"moved",-1,"hardlink",0));
+    assert(!native_node(view,native) && !native_node(s,original));
+    assert(!md_inode_object_id(view,native,after) && !strcmp(merged_id,after));
+    assert(!md_inode_object_id(s,original,after) && !strcmp(upper_id,after));
+    contents(s,"upper/hardlink","new");
+    assert(!md_inode_unlink(view,-1,"moved",0) && !md_inode_unlink(view,-1,"hardlink",0));
+    struct stat gone; assert(!md_inode_fstat(view,native,&gone) && !gone.st_nlink);
+    assert(!md_inode_fstat(s,original,&gone) && !gone.st_nlink);
+    close(native); close(original);
+    assert(!md_inode_mkdir(view,-1,"newdir",0755));
+    native=md_inode_create(view,-1,"newdir/file",0644); assert(native>=0 && native_node(view,native));
+    assert(write(native,"dir",3)==3); close(native);
+    contents(s,"upper/newdir/file","dir");
+    assert(!md_inode_unlink(view,-1,"cow",0));
+    native=md_inode_create(view,-1,"cow",0644); assert(native>=0 && !native_node(view,native));
+    close(native);
+    assert(!md_inode_unlink(view,-1,"cow",0));
     md_inode_store_close(view);
+    close(root);
+    contents(s,"upper/newdir/file","dir");
     for (unsigned i=0;i<3;++i) close(dirs[i]);
     md_inode_store_close(s); md_identity_release(&ids);
-    puts("PASS native overlay lower/upper admission, occupied workdir rejection and transactional copy-up");
+    puts("PASS native overlay upper ownership, scoped promotion, retained FDs, whiteouts and transactional copy-up");
 }
 static void restored_hybrid(const char *path) {
     struct md_inode_store *s; assert(!md_inode_store_open_inspect(path,&s));

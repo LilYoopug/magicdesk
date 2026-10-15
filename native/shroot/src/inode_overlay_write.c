@@ -34,6 +34,7 @@ static int link_info(struct md_inode_store *s,const struct mdi_node *node,char u
 int mdi_overlay_upper(struct md_inode_store *s,const struct mdi_node *node,
         struct md_inode_store **store,struct mdi_node *out) {
     if (!s->overlay) return 0;
+    if (node->native) { *store=&s->overlay->upper; *out=*node; return 1; }
     char mapped[33]; int lower=0;
     int r=link_info(s,node,mapped,&lower);
     if (r || !*mapped) return r;
@@ -49,7 +50,7 @@ int mdi_overlay_rename_directory(struct md_inode_store *s,const struct mdi_node 
 }
 int mdi_overlay_touch(struct md_inode_store *s,const struct mdi_node *node) {
     struct mdi_overlay_writer *w=s->overlay;
-    if (!w || w->flushing) return 0;
+    if (!w || w->flushing || node->native) return 0;
     char upper[33]; int lower=0;
     int r=s->lifetime->overlay_identity ? link_info(s,node,upper,&lower) : 0;
     if (!r && s->lifetime->overlay_identity && lower && !*upper && node->kind==S_IFREG)
@@ -80,7 +81,7 @@ static int metadata(struct md_inode_store *s,const struct mdi_node *from,struct 
         r=type==4 ? mdi_file_capability(u,to,value,size) : mdi_acl_store(u,to,(unsigned)type,value,size);
     }
     sqlite3_finalize(q);
-    if (!r && from->kind!=S_IFREG) {
+    if (!r && from->kind!=S_IFREG && (from->device!=to->device || from->inode!=to->inode)) {
         struct timespec times[2]={st.st_atim,st.st_mtim};
         if (!r && utimensat(u->objects,to->backing,times,AT_SYMLINK_NOFOLLOW)) r=-errno;
         if (!r && from->kind==S_IFDIR) {
@@ -94,18 +95,6 @@ static int metadata(struct md_inode_store *s,const struct mdi_node *from,struct 
     }
     if (!r) r=mdi_channel_copy(u,to,s,from);
     return r;
-}
-static int bind_body(struct md_inode_store *s,const struct mdi_node *from,struct mdi_node *to) {
-    if (from->source || from->shared) return -EIO;
-    sqlite3_stmt *q=NULL;
-    int r=mdi_prepare(s,"UPDATE objects SET backing=?1,device=?2,inode=?3,source=0,shared=0 WHERE object=?4",&q);
-    if (!r) r=mdi_bind_id(q,1,from->backing);
-    if (!r) r=mdi_sql_error(sqlite3_bind_int64(q,2,(sqlite3_int64)from->device));
-    if (!r) r=mdi_sql_error(sqlite3_bind_int64(q,3,(sqlite3_int64)from->inode));
-    if (!r) r=mdi_bind_id(q,4,to->id);
-    if (!r) r=mdi_sql_error(mdi_step(s,q));
-    sqlite3_finalize(q);
-    return r ? r : mdi_node(s,to->id,to);
 }
 static int clear_detached_directory(struct md_inode_store *s,const struct mdi_node *old) {
     if (old->kind!=S_IFDIR) return 0;
@@ -167,7 +156,7 @@ static int promote(struct md_inode_store *s,const char *id,struct mdi_node *uppe
     if (!r && !*mapped) {
         if (node.kind==S_IFREG) {
             r=mdi_import_shared(u,0,node.backing,upper);
-            if (!r) r=bind_body(s,&node,upper);
+            if (!r) r=mdi_bind_body(s,&node,upper);
         } else if (node.kind==S_IFDIR || node.kind==S_IFLNK || node.kind==S_IFIFO || node.kind==S_IFSOCK
                 || node.kind==S_IFCHR || node.kind==S_IFBLK) {
             char target[PATH_MAX];
@@ -181,6 +170,7 @@ static int promote(struct md_inode_store *s,const char *id,struct mdi_node *uppe
             if (!r) r=mdi_allocate(u,node.kind,0700,O_RDWR,node.kind==S_IFLNK ? target : NULL,
                 mdi_root(u),upper,&fd);
             if (fd>=0) close(fd);
+            if (!r && node.kind==S_IFDIR) r=mdi_bind_body(s,&node,upper);
             if (!r && node.kind==S_IFDIR && !lower) r=mdi_overlay_attribute_set(u,upper,
                 s->overlay->user_xattr ? "user.overlay.opaque" : "trusted.overlay.opaque","y",1);
         } else r=-EOPNOTSUPP;
@@ -191,7 +181,7 @@ static int promote(struct md_inode_store *s,const char *id,struct mdi_node *uppe
         if (!r) r=mdi_bind_id(q,2,upper->id);
         if (!r) r=mdi_sql_error(mdi_step(s,q));
         sqlite3_finalize(q);
-    } else if (!r && node.kind==S_IFREG) r=bind_body(s,&node,upper);
+    } else if (!r && node.kind==S_IFREG) r=mdi_bind_body(s,&node,upper);
     if (!r) r=metadata(s,&node,upper);
     sqlite3_stmt *q=NULL;
     if (!r) r=mdi_prepare(s,"SELECT parent,name FROM names WHERE object=?1",&q);

@@ -32,7 +32,7 @@ struct md_inode_lifetime *mdi_lifetime_new(int root, const struct stat *);
 enum mdi_query { MDI_NODE, MDI_FD, MDI_LOOKUP, MDI_DIRECTORY_NAME, MDI_READDIR,
     MDI_BEGIN, MDI_BEGIN_WRITE, MDI_COMMIT, MDI_ROLLBACK, MDI_EVENT, MDI_EVENT_TRIM,
     MDI_EVENT_END, MDI_EVENT_SCAN, MDI_EVENT_BIRTH, MDI_EVENT_NAMES, MDI_BACKING_OBJECT, MDI_FILE_PATH, MDI_ACL,
-    MDI_OVERLAY_LINK, MDI_DATA_VERSION, MDI_ADD_NAME, MDI_DELETE_NAME, MDI_REPARENT,
+    MDI_OVERLAY_LINK, MDI_OVERLAY_NATIVE_NAME, MDI_DATA_VERSION, MDI_ADD_NAME, MDI_DELETE_NAME, MDI_REPARENT,
     MDI_EMPTY, MDI_CREATE_OBJECT, MDI_METADATA, MDI_RESERVE_FIRST, MDI_RESERVE_ADD, MDI_RESERVE_TAKE, MDI_QUERY_COUNT };
 struct mdi_read_cache;
 struct mdi_stat_location {
@@ -99,6 +99,9 @@ struct mdi_location {
     char name[NAME_MAX+1];
     int exists, special, trailing;
 };
+int mdi_overlay_native_name(struct md_inode_store *,const struct mdi_node *,const char *);
+int mdi_overlay_publish_leaf(struct md_inode_store *,const struct mdi_node *,const struct mdi_node *,const char *);
+int mdi_bind_body(struct md_inode_store *,const struct mdi_node *,struct mdi_node *);
 struct mdi_cache_key {
     enum mdi_query query;
     uint64_t device, inode;

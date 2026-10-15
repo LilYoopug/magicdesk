@@ -97,7 +97,10 @@ quiescence and ownership rules.
 SQLite records directories, shared guest names, inode identity, permissions and
 layer relationships. Eligible private regular files keep native names and need
 no catalogue writes for create/rename/unlink; exceptional metadata stays with the
-inode. Hardlink, pathname-based execution and shared-source boundaries promote
+inode. Writable overlays admit conflict-free native names in already-published
+upper directories; upper and merged projections share one physical body.
+Lower-name conflicts, whiteouts and copy-up retain transactional publication.
+Hardlink, pathname-based execution and shared-source boundaries promote
 the same native inode through a recoverable publication owner. Descriptor
 execution instead retains its exact process-owned image origin. Native backing
 objects carry file data. One inode can have several names without

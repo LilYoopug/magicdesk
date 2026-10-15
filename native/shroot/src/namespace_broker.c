@@ -69,6 +69,7 @@ struct task {
         struct md_fd_object *origin;
         struct md_fd_install install;
         uintptr_t gate;
+        uint64_t argument;
         int source, delivered, queued;
         unsigned flags;
         struct task *next;
@@ -106,7 +107,7 @@ static int result_clear(struct md_namespace_broker *b, struct task *t) {
 }
 static int result_receive(struct md_namespace_broker *b, struct task *t, const struct seccomp_notif *q) {
     if (!t || !t->result.files || q->data.nr!=SYS_gettid
-            || q->data.instruction_pointer!=t->result.gate || q->data.args[0]!=MD_FS_BUFFER_RESULT_ADMIT) return 0;
+            || q->data.instruction_pointer!=t->result.gate || q->data.args[0]!=t->result.argument) return 0;
     int error=t->result.delivered || q->data.args[1] || q->data.args[2] || q->data.args[3]
         || q->data.args[4] || q->data.args[5] ? -EPERM : 0;
     if (!error) error=md_fd_install_begin(&t->result.install,t->result.files,b->listener,q->id,
@@ -319,7 +320,7 @@ static struct task *find_task(struct md_namespace_broker *b, int pid) {
         if (t->pid == pid) return t;
     return NULL;
 }
-int md_broker_result_begin(struct md_namespace_broker *b, int pid, uintptr_t gate,
+int md_broker_result_begin(struct md_namespace_broker *b, int pid, uintptr_t gate, uint64_t argument,
         struct md_fd_origins *files, int source, struct md_fd_object *origin, unsigned flags) {
     if (!b || !gate || !files || source<0 || flags&~O_CLOEXEC) return -EINVAL;
     pthread_mutex_lock(&b->lock);
@@ -328,7 +329,7 @@ int md_broker_result_begin(struct md_namespace_broker *b, int pid, uintptr_t gat
     if (!error) {
         t->result.files=md_fd_origins_pin(files);
         t->result.origin=md_fd_object_retain(origin);
-        t->result.gate=gate; t->result.source=source; t->result.flags=flags;
+        t->result.gate=gate; t->result.argument=argument; t->result.source=source; t->result.flags=flags;
     }
     pthread_mutex_unlock(&b->lock); return error;
 }

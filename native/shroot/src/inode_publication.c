@@ -128,6 +128,11 @@ static int publish(struct md_inode_store *s,const struct intent *p) {
         if (fd>=0) close(fd);
     }
     if (!r) r=mdi_add_name(s,p->parent,p->name,p->object);
+    if (!r) {
+        struct mdi_node node;
+        r=mdi_node(s,p->object,&node);
+        if (!r) r=mdi_overlay_publish_leaf(s,&parent,&node,p->name);
+    }
     if (!r) r=mdi_sql(s,"DELETE FROM native_publication WHERE slot=1");
     if (!r) observed(s,MD_PUBLICATION_STAGED);
     r=commit(s,r);
@@ -196,7 +201,7 @@ int mdi_publication_promote(struct md_inode_store *s,const struct mdi_node *pare
             || !S_ISREG(expected->st_mode) || expected->st_nlink!=1) return -EINVAL;
     int r=mdi_name_valid(name);
     struct intent p={.device=expected->st_dev,.inode=expected->st_ino};
-    if (!r) mdi_leaf_id(expected,p.object);
+    if (!r) r=mdi_leaf_id(expected,parent->scope,p.object);
     if (r) return r;
     strcpy(p.parent,parent->id); strcpy(p.name,name);
     struct mdi_node ignored;

@@ -124,7 +124,7 @@ static int diagnostics;
 struct interception_statistics {
     uint64_t ptrace_requests, unknown, native_seeks, stops;
     uint64_t event_polls, event_waits;
-    uint64_t direct_status, direct_open, direct_fallback, direct_admit;
+    uint64_t direct_status, direct_open, direct_fallback, direct_admit, direct_retry;
     struct md_cost rpc;
     struct { uint64_t trace, notification; } calls[512];
 };
@@ -284,7 +284,7 @@ struct thread {
     struct seccomp_notif *memory_notification;
     struct md_interception_buffer buffer;
     struct md_fs_buffer_request *buffer_call;
-    enum { DIRECT_NONE, DIRECT_STATUS, DIRECT_OPEN, DIRECT_RESULT } direct;
+    enum { DIRECT_NONE, DIRECT_STATUS, DIRECT_OPEN, DIRECT_PREPARE_RESULT, DIRECT_ADMIT, DIRECT_RESULT } direct;
     struct capture_owner *capture;
     struct probe_owner *probe;
     struct outgoing_owner *outgoing;
@@ -3900,7 +3900,7 @@ static void capture_start(struct thread *t, struct md_fs_buffer_request *request
     } else { t->capture=owner; t->kernel_stopped=0; }
 }
 static int direct_addfd(const struct thread *t, const struct md_fs_buffer_frame *frame) {
-    return t->direct==DIRECT_OPEN && frame->transfer==MD_FS_BUFFER_ADDFD
+    return (t->direct==DIRECT_OPEN || t->direct==DIRECT_PREPARE_RESULT) && frame->transfer==MD_FS_BUFFER_ADDFD
         && !frame->reply.result.selectors && t->buffer_open.completion.kind==MD_OPEN_READY;
 }
 static void buffer_complete(struct md_fs_buffer_request *request, pid_t pid, int error) {
@@ -3938,8 +3938,9 @@ static void buffer_complete(struct md_fs_buffer_request *request, pid_t pid, int
         CHECK(!md_buffer_span(&t->buffer,&span));
         const struct md_fs_buffer_frame *frame=span.data;
         unsigned flags=direct_addfd(t,frame) ? t->original.regs[2] : t->buffer_open.flags;
+        uint64_t argument=direct_addfd(t,frame) ? t->original.regs[0] : MD_FS_BUFFER_RESULT_ADMIT;
         if (frame->transfer==MD_FS_BUFFER_ADDFD)
-            CHECK(!md_broker_result_begin(broker,t->pid,abi.buffer_admit,t->resources.files,
+            CHECK(!md_broker_result_begin(broker,t->pid,abi.buffer_admit,argument,t->resources.files,
                 t->buffer_open.fd,md_fs_buffer_open_object(&t->buffer_open),flags&O_CLOEXEC));
     }
     TRACE("PROBE buffer-call pid=%d operation=%llu error=%d descriptor=%d\n",pid,t->buffer_registers.regs[1],error,t->buffer_open.fd>=0);
@@ -5042,7 +5043,7 @@ static void resume(pid_t pid, int sig) {
     }
     if (broker) CHECK(!md_broker_task(broker, pid,
         t->ready && phase == IDLE && t->endpoint[0] && !md_domain_restricted(t->resources.fs), RAW_GATE, abi.watch_gate + 4));
-    t->kernel_resume=t->fd_running || phase == OBSERVING || phase==PROCESS_OBSERVING
+    t->kernel_resume=t->direct==DIRECT_ADMIT || t->fd_running || phase == OBSERVING || phase==PROCESS_OBSERVING
             || phase==PROCESS_INIT_ENTRY || phase==PROCESS_INIT_EXIT || phase == EXPORT_ENTRY || phase == EXPORT_NOTIFY
             || phase == EXPORT_RETURN || phase == EXECUTING || phase == WATCH_CANCEL
             || phase == WATCH_ENTRY || phase == WATCH_READ || phase==DEBUG_WAIT_ENTRY || phase==DEBUG_WAIT_EXIT
@@ -5069,8 +5070,9 @@ static int shield(struct thread *t) {
 static int restore_mask(struct thread *t) {
     return tracee_request(t, PTRACE_SETSIGMASK, (void *)sizeof(t->mask), &t->mask, "restore-mask");
 }
-static int direct_begin(struct thread *t,int status) {
+static int direct_begin(struct thread *t) {
     long nr=t->original.regs[8];
+    int status=nr!=SYS_openat;
     if (!t->endpoint[0] || t->direct || t->buffer.pool || t->application_filter
             || t->debug_options || t->debug_call_active || t->debug_step_call
             || (status ? nr!=SYS_unlinkat && nr!=SYS_renameat && nr!=SYS_renameat2
@@ -5128,40 +5130,53 @@ static void direct_complete(struct thread *t,int error) {
     int delegate=error==MD_FS_BUFFER_NEEDS_TASK || (!error && frame->reply.result.host_path);
     long value=error ? error : frame->reply.result.error;
     if (!status && !error && !delegate && !value) {
-        struct user_pt_regs regs=t->original;
-        regs.pc=abi.buffer_result; regs.sp=t->stack; regs.regs[30]=DONE;
-        regs.regs[0]=(unsigned)t->original.regs[2]; regs.regs[1]=t->original.regs[3]&07777U;
-        regs.regs[2]=md_memory_buffer_address(t->memory,&t->buffer);
-        CHECK(regs.regs[2]);
         if (direct_addfd(t,frame)) {
-            regs.pc=abi.buffer_enter; regs.regs[0]=MD_FS_BUFFER_RESULT_ADMIT;
+            /* Seccomp rechecks changed syscalls before returning to userspace.
+             * Observe the exit and restore the application context before any
+             * instruction or signal handler can see the admission gate. */
+            struct user_pt_regs regs=t->original;
+            regs.pc=abi.buffer_admit; regs.regs[8]=SYS_gettid;
+            regs.regs[0]=MD_FS_BUFFER_RESULT_ADMIT;
+            for (unsigned i=1;i<6;++i) regs.regs[i]=0;
+            int nr=SYS_gettid; struct iovec number={&nr,sizeof(nr)};
+            if (!tracee_request(t,PTRACE_SETREGSET,(void *)NT_ARM_SYSTEM_CALL,&number,"direct-admit-syscall")
+                    || !set_registers(t->pid,&regs)) return;
+            t->direct=DIRECT_ADMIT;
             if (statistics) ++statistics->direct_admit;
+            resume(t->pid,0); return;
         }
-        t->direct=DIRECT_RESULT;
-        if (set_registers(t->pid,&regs)) resume(t->pid,0);
+        t->direct=DIRECT_PREPARE_RESULT;
+        if (tracee_request(t,PTRACE_GETSIGMASK,(void *)sizeof(t->mask),&t->mask,"direct-result-mask")
+                && shield(t) && skip(t->pid)) dispatch_with_stack(t);
         return;
     }
     CHECK(!buffer_cleanup(t)); t->direct=DIRECT_NONE;
     if (delegate) {
         if (statistics) ++statistics->direct_fallback;
-        if (status) {
-            if (!tracee_request(t,PTRACE_GETSIGMASK,(void *)sizeof(t->mask),&t->mask,"direct-fallback-mask")
-                    || !shield(t)) return;
-            dispatch_with_stack(t);
-        } else {
-            /* The host boundary is explicitly unexecuted. Suppress recapture
-             * while entering the task-affine path, not after a mutation. */
-            t->direct=DIRECT_RESULT; dispatch(t); t->direct=DIRECT_NONE;
-        }
+        if (tracee_request(t,PTRACE_GETSIGMASK,(void *)sizeof(t->mask),&t->mask,"direct-fallback-mask")
+                && shield(t) && (status || skip(t->pid))) dispatch_with_stack(t);
         return;
     }
     struct user_pt_regs regs=t->original; regs.regs[0]=value;
-    if (!set_registers(t->pid,&regs) || (!status && !restore_mask(t))) return;
-    if (t->stack) { md_memory_stack_return(t->memory,t->stack); t->stack=0; }
+    if ((!status && !skip(t->pid)) || !set_registers(t->pid,&regs)) return;
     t->phase=IDLE; resume(t->pid,0);
 }
 static void dispatch(struct thread *t) {
-    if (direct_begin(t,0)) return;
+    if (t->direct==DIRECT_PREPARE_RESULT) {
+        struct md_buffer_span span;
+        CHECK(!md_buffer_span(&t->buffer,&span));
+        struct user_pt_regs regs=t->original;
+        regs.pc=abi.buffer_result; regs.sp=t->stack; regs.regs[30]=DONE;
+        regs.regs[0]=(unsigned)t->original.regs[2]; regs.regs[1]=t->original.regs[3]&07777U;
+        regs.regs[2]=md_memory_buffer_address(t->memory,&t->buffer);
+        CHECK(regs.regs[2]);
+        if (direct_addfd(t,span.data)) {
+            regs.pc=abi.buffer_enter; regs.regs[0]=MD_FS_BUFFER_RESULT_ADMIT;
+        }
+        t->direct=DIRECT_RESULT; t->phase=DISPATCHING;
+        if (set_registers(t->pid,&regs)) resume(t->pid,0);
+        return;
+    }
     struct user_pt_regs regs = t->original;
     regs.pc = DISPATCH; regs.sp = t->stack; regs.regs[30] = DONE;
     regs.regs[0] = t->original.regs[8];
@@ -6634,11 +6649,32 @@ int main(int argc, char **argv) {
             t->original = regs; calls++; t->calls++;
             t->debug_step_call=md_debugger_step(debugger,pid);
             if (regs.regs[8]==SYS_shmdt) { memory_begin(t,&regs,MEMORY_DETACH); continue; }
-            if (direct_begin(t,1)) continue;
+            if (direct_begin(t)) continue;
             if (!tracee_request(t, PTRACE_GETSIGMASK, (void *)sizeof(t->mask), &t->mask, "get-mask")
                     || !shield(t) || !skip(pid)) continue;
             dispatch_with_stack(t);
         } else if (!event && sig == (SIGTRAP | 0x80)) {
+            if (t->direct==DIRECT_ADMIT) {
+                struct user_pt_regs regs;
+                if (!registers(pid,&regs)) continue;
+                long value=(long)regs.regs[0];
+                if (value==-EINTR || value==-512 || value==-513 || value==-514 || value==-516) {
+                    if (statistics) ++statistics->direct_retry;
+                    /* The mutation is complete. Retry only its cancelled FD
+                     * admission under the existing task-affine signal shield. */
+                    CHECK(!md_broker_result_clear(broker,pid));
+                    CHECK(!md_broker_result_begin(broker,pid,abi.buffer_admit,MD_FS_BUFFER_RESULT_ADMIT,t->resources.files,
+                        t->buffer_open.fd,md_fs_buffer_open_object(&t->buffer_open),t->original.regs[2]&O_CLOEXEC));
+                    t->direct=DIRECT_PREPARE_RESULT;
+                    if (tracee_request(t,PTRACE_GETSIGMASK,(void *)sizeof(t->mask),&t->mask,"direct-retry-mask")
+                            && shield(t) && skip(pid)) dispatch_with_stack(t);
+                    continue;
+                }
+                CHECK(!buffer_cleanup(t)); t->direct=DIRECT_NONE;
+                regs=t->original; regs.regs[0]=value;
+                if (!set_registers(pid,&regs)) continue;
+                t->phase=IDLE; resume(pid,0); continue;
+            }
             if (t->phase==PROCESS_INIT_ENTRY) {
                 struct ptrace_syscall_info info;
                 if (!tracee_request(t,PTRACE_GET_SYSCALL_INFO,(void *)sizeof(info),&info,"pid-init-entry")) continue;
@@ -7231,9 +7267,10 @@ static void report_statistics(void) {
             (unsigned long long)statistics->native_seeks);
         fprintf(stderr, "MD_EVENT_LOOP polls=%llu waits=%llu\n",
             (unsigned long long)statistics->event_polls, (unsigned long long)statistics->event_waits);
-        fprintf(stderr,"MD_DIRECT status=%llu open=%llu fallback=%llu admit=%llu\n",
+        fprintf(stderr,"MD_DIRECT status=%llu open=%llu fallback=%llu admit=%llu retry=%llu\n",
             (unsigned long long)statistics->direct_status,(unsigned long long)statistics->direct_open,
-            (unsigned long long)statistics->direct_fallback,(unsigned long long)statistics->direct_admit);
+            (unsigned long long)statistics->direct_fallback,(unsigned long long)statistics->direct_admit,
+            (unsigned long long)statistics->direct_retry);
         for (unsigned nr = 0; nr < 512; nr++)
             if (statistics->calls[nr].trace || statistics->calls[nr].notification)
                 fprintf(stderr, "MD_SYSCALL nr=%u trace=%llu notification=%llu\n", nr,

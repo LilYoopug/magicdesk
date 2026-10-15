@@ -130,8 +130,15 @@ admission and worker as the task-local path. Status-only calls need no guest
 stack or signal-mask transition. Relative paths retain cwd/dirfd anchors under
 the same ordered FS/file-table capture, not a pathname cache. Missing provenance
 declines before worker execution and selects task-local capture.
-Ordinary ADDFD results enter the existing assembly admission gate directly with
-the caller's CLOEXEC, without a C wrapper or follow-up fcntl. Results needing
+Ordinary ADDFD results reuse the stopped syscall: the supervisor selects the
+existing admission site and gettid, then observes its syscall exit. Seccomp's
+post-TRACE recheck delivers the notification; no guest instruction, adapter
+stack or signal-mask change is needed. ARM64 retains orig_x0, so the broker binds
+the expected first argument as well as the exact task and admission site.
+The application register context is restored before any signal delivery.
+Cancelled admission retries only the retained FD through the signal-shielded
+gate, never the completed mutation. Final CLOEXEC belongs to atomic ADDFD_SEND;
+there is no follow-up fcntl. Results needing
 selectors, caller-side opening or anchor transfer retain the full delivery adapter;
 both paths release their lease at the terminal acknowledgement.
 Creation captures the authenticated actor's umask in the worker instead of a
@@ -348,7 +355,11 @@ descriptor-read policy, and application seccomp filters still apply.
 
 `shroot --statistics --store STORE -- PROGRAM` enables aggregate
 syscall/ptrace/stop counters, broker handling/delegation counts, engine operation
-times, SQLite costs and CPU usage, printed once on completion. Namespace-worker
+times, SQLite costs and CPU usage, printed once on completion. `MD_WORKER`
+separates queue wait, execution, completion-delivery wait and supervisor
+completion; execution overlaps engine/SQLite times and is not an extra cost.
+`MD_DIRECT` also counts cancelled fast admissions retried at the shielded gate.
+Namespace-worker
 CPU is a subset of supervisor process CPU, not an additional cost. Collection and clock
 sampling are opt-in; there are no per-call logs. Engine counters cover direct,
 mapped and RPC execution; transport selection does not hide filesystem work.

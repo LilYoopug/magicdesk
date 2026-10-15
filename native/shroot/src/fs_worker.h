@@ -14,6 +14,7 @@ struct md_input_launch;
 struct md_device_events;
 struct md_fs_work {
     struct md_fs_work *next;
+    int64_t queued_at, published_at;
     /* Worker callback never blocks on the requesting task. A nonzero error
      * retires accepted work during shutdown, with no filesystem access. */
     void (*run)(struct md_fs_work *, struct md_filesystem *, int error);

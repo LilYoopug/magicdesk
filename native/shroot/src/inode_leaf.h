@@ -3,7 +3,7 @@
 #include <sys/stat.h>
 struct md_inode_store;
 struct mdi_node;
-void mdi_leaf_id(const struct stat *,char out[33]);
+int mdi_leaf_id(const struct stat *,const char scope[33],char out[33]);
 int mdi_leaf_lookup(struct md_inode_store *,const char *parent,const char *name,struct mdi_node *);
 int mdi_leaf_descriptor(struct md_inode_store *,int,const struct stat *,struct mdi_node *);
 int mdi_leaf_promote(struct md_inode_store *,struct mdi_node *);

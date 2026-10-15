@@ -264,6 +264,10 @@ int mdi_query_acquire(struct md_inode_store *s, enum mdi_query slot, sqlite3_stm
         [MDI_FILE_PATH] = "SELECT parent,name,ambiguous FROM file_paths WHERE object=?1",
         [MDI_ACL] = "SELECT value FROM inode_acls WHERE object=?1 AND type=?2",
         [MDI_OVERLAY_LINK] = "SELECT upper,lower FROM overlay_links WHERE object=?1",
+        [MDI_OVERLAY_NATIVE_NAME] = "SELECT 1 FROM overlay_links l JOIN objects u ON u.object=l.upper "
+            "WHERE l.object=?1 AND u.backing=?2 AND u.source=0 "
+            "AND NOT EXISTS(SELECT 1 FROM overlay_lower_names WHERE parent=?1 AND name=?3) "
+            "AND NOT EXISTS(SELECT 1 FROM names WHERE parent=u.object AND name=?3)",
         [MDI_DATA_VERSION] = "PRAGMA main.data_version",
         [MDI_ADD_NAME] = "INSERT INTO names(parent,name,object) VALUES(?1,?2,?3)",
         [MDI_DELETE_NAME] = "DELETE FROM names WHERE parent=?1 AND name=?2",

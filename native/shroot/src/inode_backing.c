@@ -186,6 +186,9 @@ static int copy_attributes(int source, int destination,int overlay) {
 }
 int mdi_copy_attributes(int source,int destination) { return copy_attributes(source,destination,0); }
 static int replace_attributes(int source, int destination,int overlay) {
+    struct stat a,b;
+    if (fstat(source,&a) || fstat(destination,&b)) return -errno;
+    if (a.st_dev==b.st_dev && a.st_ino==b.st_ino) return 0;
     ssize_t size=flistxattr(destination,NULL,0);
     if (size<0) return -errno;
     if (size>65536) return -E2BIG;
@@ -278,6 +281,18 @@ int mdi_copy_up(struct md_inode_store *s, struct mdi_node *node) {
     /* Both backing names survive a failed/uncertain commit. A preexisting read
      * descriptor keeps its lower snapshot, as with overlayfs copy-up. */
     return r;
+}
+int mdi_bind_body(struct md_inode_store *s,const struct mdi_node *from,struct mdi_node *to) {
+    if (from->source || from->shared) return -EIO;
+    sqlite3_stmt *q=NULL;
+    int r=mdi_prepare(s,"UPDATE objects SET backing=?1,device=?2,inode=?3,source=0,shared=0 WHERE object=?4",&q);
+    if (!r) r=mdi_bind_id(q,1,from->backing);
+    if (!r) r=mdi_sql_error(sqlite3_bind_int64(q,2,(sqlite3_int64)from->device));
+    if (!r) r=mdi_sql_error(sqlite3_bind_int64(q,3,(sqlite3_int64)from->inode));
+    if (!r) r=mdi_bind_id(q,4,to->id);
+    if (!r) r=mdi_sql_error(mdi_step(s,q));
+    sqlite3_finalize(q);
+    return r ? r : mdi_node(s,to->id,to);
 }
 int md_inode_store_seal(struct md_inode_store *s) {
     if (strcmp(s->lifetime->scope,MDI_ROOT)) return -EINVAL;

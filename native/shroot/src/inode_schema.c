@@ -31,6 +31,7 @@ int mdi_schema_indexes(struct md_inode_store *s) {
      * This is cold admission work, not part of retained worker reconnects. */
     int r=mdi_sql(s,"BEGIN IMMEDIATE;"
         "CREATE INDEX IF NOT EXISTS objects_parent ON objects(parent);"
+        "CREATE INDEX IF NOT EXISTS objects_backing ON objects(backing);"
         "CREATE INDEX IF NOT EXISTS backings_object ON backings(object);"
         "CREATE INDEX IF NOT EXISTS inode_views_upper ON inode_views(upper);"
         "CREATE INDEX IF NOT EXISTS inode_views_work ON inode_views(work);"

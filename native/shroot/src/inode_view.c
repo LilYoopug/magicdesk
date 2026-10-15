@@ -35,12 +35,14 @@ int md_inode_view_validate(struct md_inode_store *s) {
     if (!strcmp(s->lifetime->scope,MDI_ROOT)) return s->lifetime->scope_lease<0 ? 0 : -EPROTO;
     if (s->lifetime->scope_lease<0) return -ESTALE;
     struct mdi_node root;
-    int r=mdi_node(s,s->lifetime->scope,&root);
+    /* The initial root body owns the lease even when a writable overlay
+     * projects another directory. Backing history retains this identity. */
+    int r=mdi_fd(s,s->lifetime->scope_lease,&root);
     struct stat st;
     if (!r && fstat(s->lifetime->scope_lease,&st)) r=-errno;
     if (!r && (root.kind!=S_IFDIR || !S_ISDIR(st.st_mode)
-            || root.device!=st.st_dev || root.inode!=st.st_ino
-            || strcmp(root.parent,root.id) || strcmp(root.scope,s->lifetime->scope))) r=-ESTALE;
+            || strcmp(root.id,s->lifetime->scope) || strcmp(root.parent,root.id)
+            || strcmp(root.scope,s->lifetime->scope))) r=-ESTALE;
     sqlite3_stmt *q=NULL;
     if (!r) r=mdi_prepare(s,"SELECT kind FROM inode_views WHERE scope=?1",&q);
     if (!r) r=mdi_bind_id(q,1,s->lifetime->scope);
@@ -126,27 +128,26 @@ static int views(struct md_inode_store *s, int collect) {
     while (!r) {
         sqlite3_stmt *q=NULL;
         r=mdi_prepare(s,collect
-            ? "SELECT v.scope,o.backing FROM inode_views v JOIN objects o ON o.object=v.scope "
+            ? "SELECT v.scope FROM inode_views v JOIN objects o ON o.object=v.scope "
               "WHERE v.scope>?1 AND NOT EXISTS(SELECT 1 FROM inode_views c JOIN objects u "
               "ON u.object IN(c.upper,c.work) WHERE u.scope=v.scope AND c.scope!=v.scope) "
               "AND NOT EXISTS(SELECT 1 FROM overlay_links l JOIN objects u ON u.object=l.upper "
               "JOIN objects c ON c.object=l.object WHERE u.scope=v.scope AND c.scope!=v.scope) "
               "ORDER BY v.scope LIMIT 1"
-            : "SELECT v.scope,o.backing FROM inode_views v "
+            : "SELECT v.scope FROM inode_views v "
               "JOIN objects o ON o.object=v.scope WHERE v.scope>?1 ORDER BY v.scope LIMIT 1",&q);
         if (!r) r=mdi_bind_id(q,1,after);
         int next=r ? SQLITE_ERROR : mdi_step(s,q);
-        char scope[33],name[33];
+        char scope[33];
         if (!r && next==SQLITE_ROW) {
             const char *id=(const char *)sqlite3_column_text(q,0);
-            const char *backing=(const char *)sqlite3_column_text(q,1);
-            if (!id || strlen(id)!=32 || !backing || strlen(backing)!=32) r=-EIO;
-            else { memcpy(scope,id,sizeof(scope)); memcpy(name,backing,sizeof(name)); }
+            if (!id || strlen(id)!=32) r=-EIO;
+            else memcpy(scope,id,sizeof(scope));
         } else if (!r && next!=SQLITE_DONE) r=mdi_sql_failure(next);
         sqlite3_finalize(q);
         if (r || next==SQLITE_DONE) break;
         memcpy(after,scope,sizeof(after));
-        int lease=openat(s->objects,name,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
+        int lease=openat(s->objects,scope,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
         if (lease<0) { r=-errno; break; }
         if (flock(lease,LOCK_EX|LOCK_NB)) {
             if (errno!=EWOULDBLOCK) r=-errno;

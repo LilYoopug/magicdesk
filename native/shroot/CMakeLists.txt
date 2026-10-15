@@ -42,7 +42,8 @@ list(APPEND mounts ${src}/proc_paths.c ${src}/procfs_view.c ${src}/proc_fdinfo.c
 set(inodes ${src}/inode_store.c ${src}/inode_db.c ${src}/inode_schema.c ${src}/inode_super.c ${src}/inode_cache.c ${src}/inode_events.c ${src}/inode_watch.c ${src}/watch_queue.c ${src}/inode_path.c
     ${src}/inode_directory.c ${src}/inode_import.c ${src}/inode_socket.c ${src}/inode_backing.c ${src}/inode_snapshot.c ${src}/inode_view.c ${src}/inode_maintenance.c ${src}/inode_fifo.c ${src}/inode_channel.c ${src}/file_open.c
     ${identity} ${src}/task_registry.c ${src}/guest_domain.c ${src}/mount_namespace.c ${origins} ${src}/inode_metadata.c ${src}/inode_xattr.c ${src}/inode_capability.c ${src}/inode_acl.c ${src}/posix_acl.c
-    ${src}/inode_overlay_policy.c ${src}/inode_landlock.c ${src}/inode_transient.c ${src}/inode_overlay.c ${src}/inode_overlay_write.c)
+    ${src}/inode_overlay_policy.c ${src}/inode_landlock.c ${src}/inode_transient.c ${src}/inode_overlay.c ${src}/inode_overlay_write.c
+    ${src}/inode_overlay_native.c)
 list(APPEND inodes ${src}/inode_reserve.c ${src}/inode_durability.c ${src}/inode_publication.c ${src}/inode_native.c ${src}/inode_leaf.c)
 set(namespace_engine ${src}/fs_engine.c ${src}/fs_native.c ${src}/fs_xattr.c ${src}/fs_operation.c ${src}/task_status.c ${src}/ipc_credentials.c ${src}/ipc_peer.c)
 set(ipc ${src}/sysv_ipc.c ${src}/sysv_ipc_db.c ${src}/sysv_sem.c ${src}/sysv_msg.c ${src}/sysv_ipc_transport.c ${src}/ipc_storage.c ${src}/ipc_database.c ${src}/ipc_permissions.c)
