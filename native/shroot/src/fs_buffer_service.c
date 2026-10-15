@@ -127,6 +127,7 @@ static void dispose(struct md_fs_buffer_request *r) {
         if (r->root[i]) { md_task_snapshot_release(r->root[i]); free(r->root[i]); }
         if (r->proc_object[i]) {
             if (r->proc_object[i]->fd>=0) close(r->proc_object[i]->fd);
+            md_fs_anchor_release(r->proc_object[i]->origin);
             free(r->proc_object[i]);
         }
         if (r->captured[i]>=0) close(r->captured[i]);
@@ -142,6 +143,7 @@ static void dispose(struct md_fs_buffer_request *r) {
     md_fs_anchor_release(r->image_origin);
     if (r->proc_image) {
         if (r->proc_image->fd>=0) close(r->proc_image->fd);
+        md_fs_anchor_release(r->proc_image->origin);
         free(r->proc_image);
     }
     md_file_snapshot_close(&r->snapshot);
@@ -458,6 +460,7 @@ static int resolve_proc_objects(struct md_fs_buffer_request *r) {
         struct md_program *image=r->proc_object[i];
         if (image->fd>=0) {
             r->captured[i]=image->fd; image->fd=-1;
+            r->input[i]=image->origin; image->origin=NULL;
         } else {
             struct md_fs_request q={.actor=r->context.actor,.peer=r->context.peer,.operation=MD_FS_OPEN_OBJECT,
                 .directory={-1,-1},.path={image->identity.object,NULL},.flags=O_PATH|O_CLOEXEC};

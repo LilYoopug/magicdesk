@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "inode_internal.h"
 #include "inode_overlay.h"
+#include "inode_leaf.h"
 #include "fs_operation.h"
 #include <errno.h>
 #include <stdlib.h>
@@ -21,6 +22,17 @@ static int select_acl(struct md_inode_store *s,const struct mdi_node *node,unsig
     return r;
 }
 static int copy_acl(struct md_inode_store *s,const struct mdi_node *node,unsigned type,struct md_acl **out,size_t *size) {
+    if (node->native) {
+        *out=NULL;
+        if (type!=MD_ACL_ACCESS) return -ENODATA;
+        ssize_t n=mdi_leaf_attribute(s,node,0,NULL,0);
+        if (n<0) return (int)n;
+        *size=(size_t)n; *out=malloc(*size);
+        if (!*out) return -ENOMEM;
+        n=mdi_leaf_attribute(s,node,0,*out,*size);
+        if (n!=(ssize_t)*size) { free(*out); *out=NULL; return n<0 ? (int)n : -ESTALE; }
+        return 0;
+    }
     sqlite3_stmt *q=NULL;
     int r=select_acl(s,node,type,&q);
     *out=NULL;
@@ -36,6 +48,7 @@ int mdi_acl_store(struct md_inode_store *s,const struct mdi_node *node,unsigned 
     if(value && !md_acl_valid(value,size)) return -EINVAL;
     if(size==4 || (type==MD_ACL_ACCESS && size==28)) value=NULL;
     if(type==MD_ACL_DEFAULT && node->kind!=S_IFDIR) return value ? -EACCES : 0;
+    if(node->native) return mdi_leaf_attribute_set(s,node,0,value,value ? size : 0,node->mode);
     sqlite3_stmt *q=NULL;
     int r=mdi_prepare(s,value ? "INSERT INTO inode_acls VALUES(?1,?2,?3) ON CONFLICT(object,type) DO UPDATE SET value=excluded.value"
         : "DELETE FROM inode_acls WHERE object=?1 AND type=?2",&q);
@@ -47,12 +60,19 @@ int mdi_acl_store(struct md_inode_store *s,const struct mdi_node *node,unsigned 
     return r;
 }
 int mdi_acl_permission(struct md_inode_store *s,const struct mdi_node *node,const struct md_identity *ids,unsigned mode) {
+    if(node->native) {
+        struct md_acl *acl=NULL; size_t size=0;
+        int r=copy_acl(s,node,MD_ACL_ACCESS,&acl,&size);
+        if(!r) r=md_acl_permission(acl,size,ids,node->uid,node->gid,mode);
+        free(acl); return r== -ENODATA ? -EIO : r;
+    }
     sqlite3_stmt *q=NULL;
     int r=select_acl(s,node,MD_ACL_ACCESS,&q);
     if(!r) r=md_acl_permission(sqlite3_column_blob(q,0),sqlite3_column_bytes(q,0),ids,node->uid,node->gid,mode);
     return mdi_query_release(q,r== -ENODATA ? -EIO : r);
 }
 int mdi_acl_chmod(struct md_inode_store *s,const struct mdi_node *node,unsigned mode) {
+    if(node->native) return 0; /* The native metadata record publishes both atomically. */
     if(!(node->acl_mask&MD_ACL_ACCESS)) return 0;
     struct md_acl *acl=NULL; size_t size=0;
     int r=copy_acl(s,node,MD_ACL_ACCESS,&acl,&size);
@@ -73,12 +93,14 @@ int mdi_acl_inherit(struct md_inode_store *s,const struct mdi_node *parent,const
 void md_inode_acl(struct md_inode_store *s,const struct md_fs_request *request,struct md_fs_result *out,
         const struct md_fs_output *output) {
     int write=request->operation!=MD_FS_GETACL;
-    int r=mdi_begin(s,write);
+    int r=mdi_begin(s,0);
     if(r) { out->error=r; return; }
     struct mdi_node node;
-    r=mdi_fd(s,request->directory[0],&node);
+    if(write && mdi_readonly(s)) r=-EROFS;
+    if(!r) r=mdi_fd(s,request->directory[0],&node);
     const struct md_identity *ids=s->identity;
     if(!r && write) r=mdi_setattr_permission(s,&node,request,ids);
+    if(!r && write && !node.native) r=mdi_write(s);
     if(!r && write) r=mdi_overlay_setattr(s,&node,request);
     if(!r && write && !ids) r=-ENOTSUP;
     int present=!r && (node.acl_mask&request->mode);
@@ -105,11 +127,16 @@ void md_inode_acl(struct md_inode_store *s,const struct md_fs_request *request,s
             }
         }
         if(!r) r=mdi_copy_up(s,&node);
-        if(!r) r=mdi_acl_store(s,&node,request->mode,acl,size);
+        unsigned mode=node.mode;
         if(!r && acl && size>4 && request->mode==MD_ACL_ACCESS) {
-            unsigned mode=md_acl_mode(acl,size,node.mode);
+            mode=md_acl_mode(acl,size,node.mode);
             if(ids && !md_identity_file_capable(ids,node.uid,node.gid,CAP_FSETID) && !md_identity_in_group(ids,node.gid)) mode&=~S_ISGID;
-            r=mdi_metadata(s,&node,node.uid,node.gid,mode);
+        }
+        if(!r && node.native && request->mode==MD_ACL_ACCESS)
+            r=mdi_leaf_attribute_set(s,&node,0,size>28 ? acl : NULL,acl && size>28 ? size : 0,mode);
+        else if(!r) {
+            r=mdi_acl_store(s,&node,request->mode,acl,size);
+            if(!r && acl && size>4 && request->mode==MD_ACL_ACCESS) r=mdi_metadata(s,&node,node.uid,node.gid,mode);
         }
         if(!r) r=mdi_event(s,NULL,&node,NULL,IN_ATTRIB,NULL);
     }
@@ -121,10 +148,15 @@ void md_inode_acl(struct md_inode_store *s,const struct md_fs_request *request,s
 int mdi_attributes(struct md_inode_store *s,const struct mdi_node *node,void *data,size_t capacity) {
     int r=0;
     sqlite3_stmt *q=NULL;
-    if(!r) r=mdi_prepare(s,"SELECT 1 FROM file_capabilities WHERE object=?1",&q);
-    if(!r) r=mdi_bind_id(q,1,node->id);
     int cap=0;
-    if(!r) { int rc=mdi_step(s,q); cap=rc==SQLITE_ROW; if(rc!=SQLITE_ROW && rc!=SQLITE_DONE) r=mdi_sql_failure(rc); }
+    if(node->native) {
+        ssize_t n=mdi_leaf_attribute(s,node,1,NULL,0);
+        cap=n>=0; if(n<0 && n!=-ENODATA) r=(int)n;
+    } else {
+        r=mdi_prepare(s,"SELECT 1 FROM file_capabilities WHERE object=?1",&q);
+        if(!r) r=mdi_bind_id(q,1,node->id);
+        if(!r) { int rc=mdi_step(s,q); cap=rc==SQLITE_ROW; if(rc!=SQLITE_ROW && rc!=SQLITE_DONE) r=mdi_sql_failure(rc); }
+    }
     sqlite3_finalize(q);
     const char *names[]={MD_FILE_CAPABILITY_NAME,MD_ACL_ACCESS_NAME,MD_ACL_DEFAULT_NAME};
     unsigned bits=r ? 0 : (unsigned)cap|(node->acl_mask<<1); size_t length=0;

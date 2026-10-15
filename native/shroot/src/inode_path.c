@@ -142,6 +142,11 @@ int mdi_ancestor(struct md_inode_store *s, const char *ancestor, const char *chi
 }
 
 static int path_name(struct md_inode_store *s, const struct mdi_node *node, struct mdi_path_name *name) {
+    if (node->native) {
+        strcpy(name->parent,node->parent);
+        strcpy(name->name,strchr(node->backing,'/')+1);
+        name->ambiguous=0; return 0;
+    }
     int directory=node->kind==S_IFDIR;
     struct mdi_cache_key key={.query=directory ? MDI_DIRECTORY_NAME : MDI_FILE_PATH,
         .id=node->id,.name=directory ? node->parent : NULL};

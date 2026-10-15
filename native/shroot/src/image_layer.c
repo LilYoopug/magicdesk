@@ -4,6 +4,7 @@
 #include "image_pool.h"
 #include "inode_internal.h"
 #include "inode_xattr.h"
+#include "inode_native.h"
 #include "image_io.h"
 #include "file_capability.h"
 #include "proc_paths.h"
@@ -119,6 +120,7 @@ static int entry_file(struct md_inode_store *s, struct archive *ar, struct archi
     int mode_seen = 0;
     archive_entry_xattr_reset(entry);
     while (!archive_entry_xattr_next(entry,&name,&value,&length)) {
+        if (mdi_native_private_attribute(name)) return -EPERM;
         if (backup && !strcmp(name, "magicdesk.backup.mode")) {
             if (length != 2) return -EINVAL;
             const unsigned char *b = value;

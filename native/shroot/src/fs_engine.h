@@ -9,6 +9,7 @@ struct md_fd_exchanges;
 struct md_ofd_orders;
 struct md_fs_storage_cache;
 struct md_fs_statistics { struct md_cost operation[MD_FS_LAST + 1]; };
+void md_fs_statistics_report(int fd, const struct md_fs_statistics *);
 /* The worker borrows its store/images and retains an initial mount view.
  * Authenticated task requests borrow their own retained view for dispatch. */
 struct md_filesystem {

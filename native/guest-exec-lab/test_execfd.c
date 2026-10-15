@@ -33,8 +33,69 @@ static void execute(int fd, const char *path, int flags, int expected) {
     }
     wait_child(child, expected);
 }
+static void native_image(int detached) {
+    const char *path="/tmp/md-native-exec";
+    int source=open("/usr/bin/md-execfd-fixture",O_RDONLY|O_CLOEXEC);
+    int output=open(path,O_CREAT|O_EXCL|O_WRONLY|O_CLOEXEC,0700);
+    assert(source>=0 && output>=0);
+    char bytes[65536]; ssize_t n;
+    while ((n=read(source,bytes,sizeof(bytes)))>0) assert(write(output,bytes,(size_t)n)==n);
+    assert(n==0); close(source); close(output);
+    int fd=open(path,O_PATH|O_CLOEXEC); assert(fd>=0);
+    if (detached) assert(unlink(path)==0);
+    int metadata;
+    char proc[64]; snprintf(proc,sizeof(proc),"/proc/self/fd/%d",fd);
+    metadata=open(proc,O_RDONLY|O_CLOEXEC); assert(metadata>=0);
+    assert(fchmod(metadata,0600)==0);
+    char *denied[]={"md-execfd-fixture",NULL};
+    assert(syscall(SYS_execveat,fd,"",denied,environ,AT_EMPTY_PATH)==-1 && errno==EACCES);
+    if (!getuid()) assert(fchown(metadata,42,43)==0);
+    assert(fchmod(metadata,0755)==0); close(metadata);
+    struct stat st; assert(fstat(fd,&st)==0);
+    char device[32],inode[32],links[32];
+    snprintf(device,sizeof(device),"%llu",(unsigned long long)st.st_dev);
+    snprintf(inode,sizeof(inode),"%llu",(unsigned long long)st.st_ino);
+    snprintf(links,sizeof(links),"%llu",(unsigned long long)st.st_nlink);
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        char *args[]={"md-execfd-fixture","native-child",device,inode,links,NULL};
+        syscall(SYS_execveat,fd,"",args,environ,AT_EMPTY_PATH);
+        perror("native execveat"); _exit(90);
+    }
+    wait_child(child,41); close(fd);
+    if (!detached) assert(unlink(path)==0);
+}
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
+    if (argc==5 && (!strcmp(argv[1],"native-child") || !strcmp(argv[1],"native-again"))) {
+        assert(syscall(SYS_close_range,3U,~0U,0)==0);
+        int fd=open("/proc/self/exe",O_RDONLY|O_CLOEXEC); assert(fd>=0);
+        struct stat st; assert(fstat(fd,&st)==0);
+        assert(st.st_dev==(dev_t)strtoull(argv[2],NULL,10));
+        assert(st.st_ino==(ino_t)strtoull(argv[3],NULL,10));
+        assert(st.st_nlink==(nlink_t)strtoull(argv[4],NULL,10));
+        assert((st.st_mode&07777)==0755);
+        if (!getuid()) assert(st.st_uid==42 && st.st_gid==43);
+        char magic[4]; assert(read(fd,magic,4)==4 && !memcmp(magic,"\177ELF",4));
+        close(fd);
+        assert(stat("/proc/self/exe",&st)==0 && st.st_ino==(ino_t)strtoull(argv[3],NULL,10));
+        assert(open("/proc/self/exe",O_WRONLY)<0 && errno==ETXTBSY);
+        pid_t observer=fork(); assert(observer>=0);
+        if (!observer) {
+            char path[64]; snprintf(path,sizeof(path),"/proc/%d/exe",getppid());
+            int image=open(path,O_RDONLY|O_CLOEXEC); assert(image>=0);
+            assert(fstat(image,&st)==0 && st.st_ino==(ino_t)strtoull(argv[3],NULL,10));
+            assert(read(image,magic,4)==4 && !memcmp(magic,"\177ELF",4));
+            close(image); _exit(0);
+        }
+        wait_child(observer,0);
+        if (!strcmp(argv[1],"native-child")) {
+            argv[1]="native-again";
+            execve("/proc/self/exe",argv,environ);
+            perror("native proc execve"); return 90;
+        }
+        return 41;
+    }
     for (int i = 1; i + 1 < argc; ++i) if (!strcmp(argv[i], "child")) {
         assert(!strcmp((const char *)getauxval(AT_EXECFN), argv[i + 1]));
         assert(syscall(SYS_close_range, 3U, ~0U, 0) == 0);
@@ -71,6 +132,9 @@ int main(int argc, char **argv) {
     execute(fd, "", AT_EMPTY_PATH, 41);
     close(fd);
     puts("PASS open-unlinked ELF and /proc/self/exe survive exec and close_range");
+
+    native_image(0); native_image(1);
+    puts("PASS copied and open-unlinked native ELF retain proc identity across close_range and re-exec");
 
     assert(link("/usr/bin/md-execfd-fixture", "/tmp/md-replaced-exec") == 0);
     fd = open("/tmp/md-replaced-exec", O_PATH | O_CLOEXEC); assert(fd >= 0);

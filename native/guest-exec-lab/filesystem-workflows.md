@@ -5,6 +5,7 @@
 OCI images, mount views, storage semantics and file-watch workflows. Use disposable environments for mutation and failure-injection tests.
 
 - [OCI And Filesystem View Checks](#oci-and-filesystem-view-checks)
+- [Native Names And Publication](#native-names-and-publication)
 - [Watch Transport Controls](#watch-transport-controls)
 - [Production Watch Checks](#production-watch-checks)
 
@@ -28,6 +29,38 @@ unlinked FDs, O_SYNC, tmpfs, writable-overlay remounts and native attachment
 barriers. Native attachments do not acquire guest hardlink/FIFO permissions.
 The same checks run in `--case all`; `--case stores` includes the inode-owner
 part. Process kills and the WAL-loss model do not simulate physical power loss.
+
+### Native Names And Publication
+
+`test_resources.py BUILD --case stores` includes the production native-leaf and
+publication owners. These checks use the default representation, not a feature
+flag or an alternate provider. Ordinary eligible creation under a guest-owned
+virtual-permission directory must perform zero SQL writes, xattr operations and
+forced synchronization. Physical-permission import directories, non-root
+creation, default ACLs and overlay projections retain catalogue allocation.
+
+The matrix covers mixed directory enumeration and transferable offsets, retained
+and unlinked FDs, O_PATH metadata, ACL/capability updates, Landlock inode pins,
+native and mixed watch streams, hardlink promotion, sealing, snapshot COW,
+overlay admission and portable backup/restore. Publication tests interrupt each
+durable phase and recovery itself, inject IO errors, and check both cold and
+already-open owners. Sparse-metadata transitions get separate interruption and
+error injection. Format-17 revision admission must preserve existing data and
+reject a metadata upgrade while another owner holds the old revision.
+
+`test_execfd.c`, built by `build-libc-fixtures.sh`, additionally copies a fresh
+ELF, executes its O_PATH/CLOEXEC descriptor before and after unlink, closes all
+inherited descriptors and reads the image through local and foreign proc paths.
+It checks metadata, inode identity, writable-open rejection and proc-image
+reexec. `test_landlock_guest.c` denies execution of attached and unlinked fresh
+copies through preopened descriptors. Run both as guest `0:0` and `2000:2000`;
+the latter is the catalogue control. These run under the same real shell UID,
+not Android root. The fixture executable must belong to the selected guest user
+for its sticky-directory link/unlink controls.
+
+These are process-death and injected-error checks, not physical power-loss tests.
+Chromium's separate browser workflow verifies the application-filter path with
+its sandbox enabled; it is not replaced by filesystem component assertions.
 
 `test_resources.py BUILD --case mount-policy` checks the attachment-policy owner
 without running Desktop or replacing the APK. Local policy creates no descriptor;
@@ -845,14 +878,21 @@ Configure `native/shroot` with `-DMAGICDESK_GUEST_FIXTURES=ON`, then build
 through the configured MCP server, requires actual shell UID 2000, imports a
 fresh disposable store and checks real guest libc inotify calls.
 It neither installs an APK nor changes Desktop or access settings.
+`--user 0:0` selects guest root, including the independent watcher/writer
+launches, so newly created regular files exercise native names. The default
+`--user 2000:2000` is the non-root catalogue control; neither changes Android UID.
 
 The suite covers directory/name events, rename cookies, file-data events,
 read/readv/FIONREAD boundaries, concurrent readers, dup/fcntl, queued SCM_RIGHTS
 through recvmsg/recvmmsg, descriptor reuse, EINTR/SA_RESTART and 64 execs with
 constant filter count. The complete glibc/musl suite runs again with dumpability
-disabled. `receive-denied` rejects watch-filter installation and checks that the
-published FD prefix stays live while unpublished FDs are released, using pipe
-EOF and the receiver's descriptor count. Churn checks 7,680 distinct duplicate targets without unbounded filter
+disabled. The filter-count observer retains its own proc FD across exec, avoiding
+new selectors introduced by the measurement itself. `receive-filtered` forbids
+further seccomp installation and rejects MSG_PEEK with an application filter:
+the denial must preserve both the queued message and descriptor table. An allowed
+receive then publishes all three rights with no filter growth, checks watch/pipe
+IO, closes every alias and verifies pipe EOF and exact retained-channel ownership.
+Churn checks 7,680 distinct duplicate targets without unbounded filter
 growth. An aggregate interception counter detects accidental ordinary-read tracing
 in the unsaturated case. Two independent observers receive a third launch's
 mutations. Store controls verify rollback after SIGKILL, last-reader retirement
@@ -868,7 +908,11 @@ Host-policy exclusions in the import fixture remain reported as LIMIT.
 The GIO fixture links the stock Linux library and requires its inotify backend,
 not a fallback poller. Its readiness follows successful registration; a separate
 writer creates, renames and deletes the file. The D-Bus check registers ordinary
-session-config watches and completes a bus request. Build-only prepared inputs:
+session-config watches and completes a bus request. It checks the named
+`WATCH_PATH` counter, not a hardcoded operation number. The prepared NSS files
+contain both guest users. A guest-root D-Bus warning about raising the host hard
+FD limit to 65536 is retained as an explicit report limit; watch and bus failures
+are not ignored. Build-only prepared inputs:
 
 ```sh
 node native/guest-exec-lab/prepare.mjs build/watch-gio-sysroot --package libglib2.0-dev

@@ -43,30 +43,40 @@ static struct inotify_event *one(int fd, unsigned mask, const char *name) {
 static void create(const char *name) {
     int fd = open(name, O_CREAT | O_EXCL | O_RDWR, 0600); CHECK(fd >= 0); CHECK(!close(fd));
 }
-static int filters(void) {
-    FILE *status = fopen("/proc/self/status", "r"); CHECK(status);
+static int filter_count(FILE *status) {
+    rewind(status);
     char line[256]; int count = -1;
     while (fgets(line, sizeof(line), status)) if (sscanf(line, "Seccomp_filters: %d", &count) == 1) break;
-    CHECK(!fclose(status) && count > 0); return count;
+    CHECK(!ferror(status) && count > 0); return count;
 }
-static int exec_watch(int fd, int round, int expected) {
+static int filters(void) {
+    FILE *status = fopen("/proc/self/status", "r"); CHECK(status);
+    int count=filter_count(status);
+    CHECK(!fclose(status)); return count;
+}
+static int exec_watch(int fd, int status_fd, int round, int expected) {
     one(fd, IN_CREATE, "exec-event");
     CHECK(!unlink("exec-event"));
     /* Exec may close infrastructure and change the lowest free slot. Reuse an
      * exact selector to test filter retention, not the incidental FD layout. */
     int transient = fcntl(fd,F_DUPFD_CLOEXEC,64); CHECK(transient == 64);
     CHECK(!close(transient));
-    int count = filters();
+    /* The observer is a typed proc FD too. Retain it across exec so measuring
+     * filter growth cannot itself activate a different descriptor class. */
+    CHECK(fcntl(status_fd,F_GETFD)==0);
+    FILE *status=fdopen(status_fd,"r"); CHECK(status);
+    int count=filter_count(status);
     if (expected && count!=expected)
         fprintf(stderr,"watch exec round=%d filters=%d expected=%d transient=%d\n",round,count,expected,transient);
     if (expected) CHECK(count == expected);
-    if (!round) { CHECK(!close(fd)); puts("PASS inherited watch and stable filters across 64 execs"); return 0; }
+    if (!round) { CHECK(!fclose(status) && !close(fd)); puts("PASS inherited watch and stable filters across 64 execs"); return 0; }
     create("exec-event");
-    char descriptor[24], remaining[24], installed[24];
+    char descriptor[24], observer[24], remaining[24], installed[24];
     snprintf(descriptor, sizeof(descriptor), "%d", fd);
+    snprintf(observer, sizeof(observer), "%d", status_fd);
     snprintf(remaining, sizeof(remaining), "%d", round - 1);
     snprintf(installed, sizeof(installed), "%d", count);
-    execl("/bin/watch", "watch", "exec", descriptor, remaining, installed, (char *)NULL);
+    execl("/bin/watch", "watch", "exec", descriptor, observer, remaining, installed, (char *)NULL);
     CHECK(0); return 1;
 }
 static volatile sig_atomic_t interrupted;
@@ -114,7 +124,7 @@ static unsigned descriptor_count(void) {
         if (entry->d_name[0]!='.') ++count;
     CHECK(!closedir(directory)); return count;
 }
-static int receive_denied(void) {
+static int receive_filtered(void) {
     unsigned before=descriptor_count();
     int sockets[2],pipefd[2];
     CHECK(!socketpair(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC,0,sockets) && !pipe2(pipefd,O_NONBLOCK|O_CLOEXEC));
@@ -130,20 +140,39 @@ static int receive_denied(void) {
         BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
         BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_seccomp,0,1),
         BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EPERM),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_recvmsg,0,3),
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[2])),
+        BPF_JUMP(BPF_JMP|BPF_JSET|BPF_K,MSG_PEEK,0,1),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EACCES),
         BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
     };
     struct sock_fprog program={sizeof(code)/sizeof(*code),code};
     CHECK(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
     CHECK(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+    int installed=filters();
+    CHECK(syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program)==-1 && errno==EPERM);
     union { struct cmsghdr align; char bytes[CMSG_SPACE(3*sizeof(int))]; } control={0};
     int fds[]={-1,-1,-1}; memcpy(CMSG_DATA(&control.align),fds,sizeof(fds));
     char byte=0; struct iovec vector={&byte,1};
     struct msghdr message={.msg_iov=&vector,.msg_iovlen=1,.msg_control=control.bytes,.msg_controllen=sizeof(control)};
     int previous[1024];
     for (unsigned i=0;i<1024;++i) previous[i]=fcntl((int)i,F_GETFD);
-    errno=0; CHECK(recvmsg(sockets[1],&message,MSG_CMSG_CLOEXEC)==-1 && errno==EPERM && byte==1);
+    errno=0; CHECK(recvmsg(sockets[1],&message,MSG_CMSG_CLOEXEC|MSG_PEEK)==-1 && errno==EACCES && !byte);
     memcpy(fds,CMSG_DATA(&control.align),sizeof(fds));
     CHECK(fds[0]==-1 && fds[1]==-1 && fds[2]==-1);
+    for (unsigned i=0;i<1024;++i) CHECK(fcntl((int)i,F_GETFD)==previous[i]);
+    CHECK(recvmsg(sockets[1],&message,MSG_CMSG_CLOEXEC)==1 && byte==1 && !(message.msg_flags&MSG_CTRUNC));
+    struct cmsghdr *header=CMSG_FIRSTHDR(&message);
+    CHECK(header && header->cmsg_level==SOL_SOCKET && header->cmsg_type==SCM_RIGHTS
+        && header->cmsg_len==CMSG_LEN(sizeof(fds)) && message.msg_controllen==CMSG_SPACE(sizeof(fds)));
+    memcpy(fds,CMSG_DATA(header),sizeof(fds));
+    for (unsigned i=0;i<3;++i) CHECK(fds[i]>=0 && fcntl(fds[i],F_GETFD)==FD_CLOEXEC);
+    CHECK(fds[0]!=fds[1] && fds[0]!=fds[2] && fds[1]!=fds[2]);
+    CHECK(read(fds[1],buffer.bytes,sizeof(buffer.bytes))==-1 && errno==EAGAIN);
+    CHECK(write(fds[0],"a",1)==1 && write(fds[2],"b",1)==1);
+    char payload[2]; CHECK(read(pipefd[0],payload,sizeof(payload))==2 && !memcmp(payload,"ab",2));
+    for (unsigned i=0;i<3;++i) CHECK(!close(fds[i]));
+    CHECK(filters()==installed);
     unsigned channels=0;
     for (unsigned i=0;i<1024;++i) {
         int flags=fcntl((int)i,F_GETFD);
@@ -157,7 +186,7 @@ static int receive_denied(void) {
     int status; CHECK(waitpid(sender,&status,0)==sender && WIFEXITED(status) && !WEXITSTATUS(status));
     CHECK(read(pipefd[0],&byte,1)==0 && !close(pipefd[0]));
     CHECK(descriptor_count()==before+channels);
-    puts("PASS denied receive activation: no application FD installed, one owned channel, queued rights released");
+    puts("PASS sandboxed receive: denied peek preserves queue and FDs, prepared rights need no new filter, final pipe EOF");
     return 0;
 }
 static int shared(const char *mode, const char *directory) {
@@ -217,13 +246,14 @@ static int alias_history(const char *directory) {
     return 0;
 }
 int main(int argc, char **argv) {
-    if (argc == 2 && !strcmp(argv[1], "receive-denied")) return receive_denied();
+    if (argc == 2 && !strcmp(argv[1], "receive-filtered")) return receive_filtered();
     if (argc == 3 && !strcmp(argv[1], "aliases")) return alias_history(argv[2]);
     if (argc == 3 && !strcmp(argv[1], "protected-all")) {
         CHECK(!prctl(PR_SET_DUMPABLE, 0));
         argv[1] = argv[2]; argc = 2;
     }
-    if (argc == 5 && !strcmp(argv[1], "exec")) return exec_watch(atoi(argv[2]), atoi(argv[3]), atoi(argv[4]));
+    if (argc == 6 && !strcmp(argv[1], "exec"))
+        return exec_watch(atoi(argv[2]), atoi(argv[3]), atoi(argv[4]), atoi(argv[5]));
     if (argc == 4 && !strcmp(argv[1], "shared")) return shared(argv[2], argv[3]);
     if (argc == 3 && !strcmp(argv[1], "protected")) {
         CHECK(!mkdir(argv[2], 0700) && !chdir(argv[2]));
@@ -387,7 +417,8 @@ int main(int argc, char **argv) {
         fd = inotify_init1(IN_NONBLOCK); CHECK(fd >= 0);
         CHECK(inotify_add_watch(fd, ".", IN_CREATE) > 0);
         create("exec-event");
-        return exec_watch(fd, 64, 0);
+        int observer=open("/proc/self/status",O_RDONLY); CHECK(observer>=0);
+        return exec_watch(fd, observer, 64, 0);
     }
     CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && !WEXITSTATUS(status));
     return 0;

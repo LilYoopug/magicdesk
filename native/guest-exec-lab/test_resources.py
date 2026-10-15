@@ -393,7 +393,7 @@ def main():
         if args.case == "stores":
             names = ("test_mounts", "test_inodes", "test_snapshot", "test_native_mounts", "test_durability")
         if args.case in ("all", "stores"):
-            names += ("test_schema",)
+            names += ("test_schema", "test_publication", "test_native_leaf", "image")
         if args.case == "durability":
             names = ("bootstrap", "supervisor", "run", "service")
         if args.case in ("all", "durability"):
@@ -419,6 +419,24 @@ def main():
         if args.case in ("all", "stores"):
             check("storage schema", root + "/libmagicdesk_guest_test_schema.so " + root + "/schema-unit",
                   "PASS concurrent preparation fails busy")
+            check("native inode publication", "timeout -k 5 90 " + root
+                  + "/libmagicdesk_guest_test_publication.so " + root + "/publication-unit",
+                  "PASS promoted body enters existing shared-source snapshots and COW")
+            check("native leaf ownership", "timeout -k 5 90 " + root
+                  + "/libmagicdesk_guest_test_native_leaf.so " + root + "/native-leaf-unit",
+                  "PASS promotion captures native metadata")
+            check("native metadata backup", root + "/libmagicdesk_guest_image.so backup "
+                  + root + "/native-leaf-unit/store " + root + "/native-leaf.tar.zst")
+            check("native metadata restore", root + "/libmagicdesk_guest_image.so restore "
+                  + root + "/native-leaf.tar.zst " + root + "/native-leaf-restored")
+            check("native metadata portable archive", root + "/libmagicdesk_guest_test_native_leaf.so --check-backup "
+                  + root + "/native-leaf-restored", "PASS real backup/restore retains logical ownership")
+            check("hybrid namespace backup", root + "/libmagicdesk_guest_image.so backup "
+                  + root + "/native-leaf-unit/hybrid " + root + "/hybrid.tar.zst")
+            check("hybrid namespace restore", root + "/libmagicdesk_guest_image.so restore "
+                  + root + "/hybrid.tar.zst " + root + "/hybrid-restored")
+            check("hybrid namespace portable archive", root + "/libmagicdesk_guest_test_native_leaf.so --check-hybrid-backup "
+                  + root + "/hybrid-restored", "PASS backup materializes unpromoted native names")
         if args.case in ("all", "stores", "durability"):
             check("storage durability", root + "/libmagicdesk_guest_test_durability.so " + root + "/durability-unit",
                   "PASS sealed image durability and snapshot-local allocation reserve")

@@ -105,6 +105,7 @@ struct md_fs_request {
 };
 /* Validated, adapter-owned strings; descriptor capture remains transport-owned. */
 int md_fs_request_validate(const struct md_fs_request *);
+const char *md_fs_operation_name(unsigned);
 static inline int md_fs_object_id_valid(const char *id) {
     if (!id) return 0;
     for (unsigned i=0;i<32;++i)

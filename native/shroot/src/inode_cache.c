@@ -145,6 +145,7 @@ int mdi_cache_get(struct md_inode_store *s, const struct mdi_cache_key *key,
 }
 void mdi_cache_put(struct md_inode_store *s, const struct mdi_cache_key *key,
         const struct mdi_node *node, int result) {
+    if (!result && node->native) return;
     struct mdi_cache_entry *entry=put(s,key,result);
     if (!entry || result) return;
     entry->value.node=*node;

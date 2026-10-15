@@ -8,12 +8,27 @@
 #include "proc_control.h"
 #include "raw.h"
 #include "arguments.h"
+#include "namespace_internal.h"
 #include <errno.h>
 #include <fcntl.h>
 
+long md_proc_executable_capture(const struct md_fs *fs,int process,int flags) {
+    if (!(flags&O_PATH) && ((flags&O_ACCMODE)!=O_RDONLY || (flags&O_TRUNC))) return -ETXTBSY;
+    if ((flags&(O_CREAT|O_EXCL))==(O_CREAT|O_EXCL)) return -EEXIST;
+    long fd=md_proc_control_open(&(struct md_proc_path){.process=process,.kind=MD_PROC_EXE},flags,0);
+    if (fd!=-EXDEV) return fd;
+    char selected[64]="/proc/";
+    md_decimal(selected+md_length(selected),(unsigned)process);
+    md_append(selected,sizeof(selected),"/exe");
+    struct md_fs_request q={.operation=MD_FS_REOPEN,.directory={-1,-1},
+        .capture={{selected,O_PATH}},.flags=(unsigned)flags&~(O_CREAT|O_EXCL|O_NOFOLLOW)};
+    struct md_fs_response out;
+    long error=md_namespace_request(fs,&q,&out);
+    return error<0 ? error : md_namespace_open_result(&out.result,q.flags);
+}
 long md_proc_executable_open(const struct md_fs *fs, const char *path, int flags) {
     if (fs->image && fs->endpoint[0] && !fs->image->executable_object[0])
-        return md_proc_control_open(&(struct md_proc_path){.process=(int)RAW0(gettid),.kind=MD_PROC_EXE},flags,0);
+        return md_proc_executable_capture(fs,(int)RAW0(gettid),flags);
     if (!fs->image || !fs->image->executable_object[0])
         return md_namespace_open(fs, AT_FDCWD, path, flags, 0);
     if (!(flags & O_PATH) && ((flags & O_ACCMODE) != O_RDONLY || (flags & O_TRUNC))) return -ETXTBSY;

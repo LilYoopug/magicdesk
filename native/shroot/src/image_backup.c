@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "inode_leaf.h"
 #include "image_backup.h"
 #include "image_publish.h"
 #include "image_layer.h"
@@ -170,6 +171,11 @@ int md_image_backup(const char *store, const char *destination) {
     struct md_inode_store *s = NULL;
     int r = md_inode_store_open_exclusive(store, &s);
     if (r) return r;
+    if (!s->readonly) {
+        r=mdi_begin(s,0);
+        if (!r) r=mdi_finish(s,mdi_leaf_materialize(s));
+        if (r) { md_inode_store_close(s); return r; }
+    }
     char *config = NULL, *metadata = NULL;
     r = config_read(s, &config);
     sqlite3_stmt *q = NULL;

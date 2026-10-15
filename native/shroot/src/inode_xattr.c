@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "inode_internal.h"
 #include "inode_xattr.h"
+#include "inode_native.h"
 #include "fs_operation.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -18,15 +19,20 @@ int mdi_overlay_attribute(const char *name) {
         if (!strcmp(name,controls[i])) return (int)i+1;
     return 0;
 }
-static int private_name(const char *name) {
+int mdi_overlay_private_attribute(const char *name) {
     return !strncmp(name,"user.overlay.",13) || !strncmp(name,"trusted.overlay.",16);
 }
-static int path(struct md_inode_store *s,const struct mdi_node *node,char out[96]) {
-    int dir=mdi_backing_directory(s,node);
-    if (dir<0) return dir;
-    snprintf(out,96,"/proc/self/fd/%d/%s",dir,node->backing); return 0;
+static void native_control(int key,char name[32]) {
+    snprintf(name,32,"user.shroot.overlay.%d",key);
 }
 static ssize_t control_get(struct md_inode_store *s,const struct mdi_node *node,int key,void *out,size_t capacity) {
+    if (node->native) {
+        char name[32],path[NAME_MAX+96]; native_control(key,name);
+        int r=mdi_backing_path(s,node,path,sizeof(path));
+        if (r) return r;
+        ssize_t n=node->descriptor ? getxattr(path,name,out,capacity) : lgetxattr(path,name,out,capacity);
+        return n<0 ? -errno : n;
+    }
     sqlite3_stmt *q=NULL;
     int r=mdi_prepare(s,"SELECT value FROM overlay_attributes WHERE object=?1 AND name=?2",&q);
     if (!r) r=mdi_bind_id(q,1,node->id);
@@ -49,6 +55,14 @@ int mdi_overlay_attribute_set(struct md_inode_store *s,const struct mdi_node *no
         const char *name,const void *value,size_t size) {
     int key=mdi_overlay_attribute(name);
     if (!key || size>MD_FS_VALUE_MAX || (!value && size)) return -EINVAL;
+    if (node->native) {
+        char attribute[32],path[NAME_MAX+96]; native_control(key,attribute);
+        int r=mdi_backing_path(s,node,path,sizeof(path));
+        if (r) return r;
+        r=node->descriptor ? (value ? setxattr(path,attribute,value,size,0) : removexattr(path,attribute))
+            : (value ? lsetxattr(path,attribute,value,size,0) : lremovexattr(path,attribute));
+        return r ? -errno : 0;
+    }
     sqlite3_stmt *q=NULL;
     int r=mdi_prepare(s,"INSERT INTO overlay_attributes(object,name,value) VALUES(?1,?2,?3) "
         "ON CONFLICT(object,name) DO UPDATE SET value=excluded.value",&q);
@@ -61,19 +75,33 @@ int mdi_overlay_attribute_set(struct md_inode_store *s,const struct mdi_node *no
 ssize_t mdi_xattr_get(struct md_inode_store *s,const struct mdi_node *node,
         const char *name,void *out,size_t capacity) {
     /* Android labels protect the physical backing, not the guest inode. */
-    if (!strcmp(name,"security.selinux")) return -ENODATA;
+    if (!strcmp(name,"security.selinux") || mdi_native_private_attribute(name)) return -ENODATA;
     int key=mdi_overlay_attribute(name);
     if (key) {
         ssize_t r=control_get(s,node,key,out,capacity);
         if (r!=-ENOENT) return r;
     }
-    char target[96]; int r=path(s,node,target);
+    char target[NAME_MAX+96]; int r=mdi_backing_path(s,node,target,sizeof(target));
     if (r) return r;
-    ssize_t size=lgetxattr(target,name,out,capacity);
+    ssize_t size=node->descriptor ? getxattr(target,name,out,capacity) : lgetxattr(target,name,out,capacity);
     return size<0 ? -errno : size;
 }
 int mdi_overlay_attributes_copy(struct md_inode_store *target,const struct mdi_node *to,
         struct md_inode_store *source,const struct mdi_node *from) {
+    if (from->native) {
+        for (int key=1;key<=4;++key) {
+            ssize_t n=control_get(source,from,key,NULL,0);
+            if (n==-ENODATA) continue;
+            if (n<0) return (int)n;
+            void *value=malloc(n ? (size_t)n : 1);
+            if (!value) return -ENOMEM;
+            ssize_t got=control_get(source,from,key,value,n ? (size_t)n : 1);
+            int r=got!=n ? (got<0 ? (int)got : -ESTALE)
+                : mdi_overlay_attribute_set(target,to,controls[key-1],value,(size_t)n);
+            free(value); if (r) return r;
+        }
+        return 0;
+    }
     sqlite3_stmt *q=NULL;
     int r=mdi_prepare(target,"DELETE FROM overlay_attributes WHERE object=?1",&q);
     if (!r) r=mdi_bind_id(q,1,to->id);
@@ -93,10 +121,10 @@ int mdi_overlay_attributes_copy(struct md_inode_store *target,const struct mdi_n
     sqlite3_finalize(q); return r;
 }
 static int visible(struct md_inode_store *s,const char *name,int internal) {
-    if (!strcmp(name,"security.selinux") || !strcmp(name,MD_FILE_CAPABILITY_NAME) || !strcmp(name,MD_ACL_ACCESS_NAME)
+    if (mdi_native_private_attribute(name) || !strcmp(name,"security.selinux") || !strcmp(name,MD_FILE_CAPABILITY_NAME) || !strcmp(name,MD_ACL_ACCESS_NAME)
             || !strcmp(name,MD_ACL_DEFAULT_NAME)) return 0;
     if (internal) return 1;
-    if (s->lifetime->filesystem_kind==MD_FILESYSTEM_OVERLAY && private_name(name)) return 0;
+    if (s->lifetime->filesystem_kind==MD_FILESYSTEM_OVERLAY && mdi_overlay_private_attribute(name)) return 0;
     return strncmp(name,"trusted.",8) || !s->identity || md_identity_capable_in(s->identity,NULL,CAP_SYS_ADMIN);
 }
 static int append(void *out,size_t capacity,size_t *length,const char *name) {
@@ -124,15 +152,21 @@ ssize_t mdi_xattr_names(struct md_inode_store *s,const struct mdi_node *node,
         if (sqlite3_column_int(q,1)) present|=1U<<(key-1);
     }
     sqlite3_finalize(q);
-    char target[96]; if (!r) r=path(s,node,target);
-    ssize_t bytes=r ? 0 : llistxattr(target,NULL,0);
+    if (!r && node->native) for (int key=1;key<=4;++key) {
+        ssize_t n=control_get(s,node,key,NULL,0);
+        if (n>=0) present|=1U<<(key-1);
+        else if (n!=-ENODATA) { r=(int)n; break; }
+    }
+    char target[NAME_MAX+96]; if (!r) r=mdi_backing_path(s,node,target,sizeof(target));
+    ssize_t bytes=r ? 0 : node->descriptor ? listxattr(target,NULL,0) : llistxattr(target,NULL,0);
     if (bytes<0) r=-errno;
     else if (bytes>MD_FS_VALUE_MAX) r=-E2BIG;
     char *names=NULL;
     if (!r && bytes) {
         names=malloc((size_t)bytes);
         if (!names) r=-ENOMEM;
-        else if ((bytes=llistxattr(target,names,(size_t)bytes))<0) r=-errno;
+        else if ((bytes=node->descriptor ? listxattr(target,names,(size_t)bytes)
+                : llistxattr(target,names,(size_t)bytes))<0) r=-errno;
     }
     size_t length=0;
     for (size_t at=0;!r && at<(size_t)bytes;) {
@@ -156,7 +190,8 @@ void md_inode_xattr(struct md_inode_store *s,const struct md_fs_request *q,
     if (r) { out->error=r; return; }
     struct mdi_node node;
     r=mdi_fd(s,q->directory[0],&node);
-    if (!r && !list && s->lifetime->filesystem_kind==MD_FILESYSTEM_OVERLAY && private_name(name))
+    if (!r && !list && mdi_native_private_attribute(name)) r=write ? -EPERM : -ENODATA;
+    if (!r && !list && s->lifetime->filesystem_kind==MD_FILESYSTEM_OVERLAY && mdi_overlay_private_attribute(name))
         r=write ? -EPERM : -ENODATA;
     if (!r) r=mdi_xattr_permission(s,&node,name,list ? F_OK : write ? W_OK : R_OK);
     if (!r && !list && !strcmp(name,"security.selinux")) r=set ? -EOPNOTSUPP : -ENODATA;
@@ -190,9 +225,10 @@ void md_inode_xattr(struct md_inode_store *s,const struct md_fs_request *q,
             if (!r) r=mdi_overlay_attribute_set(s,&node,name,remove ? NULL : q->value_size ? q->value : "",q->value_size);
         } else if (!r) {
             r=mdi_copy_up(s,&node);
-            char target[96]; if (!r) r=path(s,&node,target);
-            if (!r && (set ? lsetxattr(target,name,q->value,q->value_size,q->flags)
-                    : lremovexattr(target,name))) r=-errno;
+            char target[NAME_MAX+96]; if (!r) r=mdi_backing_path(s,&node,target,sizeof(target));
+            if (!r && (node.descriptor ? (set ? setxattr(target,name,q->value,q->value_size,q->flags)
+                    : removexattr(target,name)) : (set ? lsetxattr(target,name,q->value,q->value_size,q->flags)
+                    : lremovexattr(target,name)))) r=-errno;
         }
         if (!r) r=mdi_event(s,NULL,&node,NULL,IN_ATTRIB,NULL);
     }

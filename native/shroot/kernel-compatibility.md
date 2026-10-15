@@ -8,6 +8,19 @@ Android 14 / API 34 and managed Desktop remains Android 15 / API 35; neither
 acquires Shroot's kernel requirements. Shell tools, Termux, prepared chroot and
 graphics services remain independent when guest execution is unavailable.
 
+Native-leaf storage uses baseline openat/fstat/fchmod, user xattrs, proc FD magic
+links and fsync. `inode_native.c` uses the retained proc alias for O_PATH metadata,
+not fchmodat2/AT_EMPTY_PATH. `inode_publication.c` uses renameat2 with
+RENAME_NOREPLACE and a shared lock-free 32-bit atomic hint; unsupported native
+filesystem operations return their errors. These primitives add no post-5.15
+dependency or shared startup probe. Store admission tests O_TMPFILE and user
+xattrs before enabling eligible native creation; denial keeps the catalogue
+allocator. Mixed directory enumeration uses getdents64 and bounded OFD cookies,
+with persistent mappings for large filesystem cookies. None requires a newer
+kernel. `test_native_leaf`, `test_publication` and the stores
+runner cover UID-2000 operations, process interruption, error propagation and
+portable backup/restore; they do not establish physical power-cut durability.
+
 The optional gamepad bus uses baseline Unix stream/datagram socketpairs,
 eventfd, poll/epoll, SCM credentials and the existing typed descriptor transport.
 Evdev/joydev/uinput and udev discovery are guest providers; no native uinput

@@ -6,6 +6,23 @@
 #include <string.h>
 #include <unistd.h>
 
+static int discard_leaves(int objects,const char *name) {
+    int fd=openat(objects,name,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+    if (fd<0) return -errno;
+    DIR *dir=fdopendir(fd);
+    if (!dir) { int r=-errno; close(fd); return r; }
+    int r=0;
+    while (!r) {
+        errno=0; struct dirent *entry=readdir(dir);
+        if (!entry) { if (errno) r=-errno; break; }
+        if (!strcmp(entry->d_name,".") || !strcmp(entry->d_name,"..")) continue;
+        struct stat st;
+        if (fstatat(fd,entry->d_name,&st,AT_SYMLINK_NOFOLLOW)) r=-errno;
+        else if (!S_ISREG(st.st_mode) || st.st_nlink!=1) r=-EIO;
+        else if (unlinkat(fd,entry->d_name,0)) r=-errno;
+    }
+    closedir(dir); return r;
+}
 int mdi_discard_untracked_backings(struct md_inode_store *s) {
     int fd=openat(s->objects,".",O_RDONLY|O_DIRECTORY|O_CLOEXEC);
     if (fd<0) return -errno;
@@ -28,8 +45,9 @@ int mdi_discard_untracked_backings(struct md_inode_store *s) {
         int next=r ? SQLITE_ERROR : mdi_step(s,q);
         if (!r && next==SQLITE_DONE) {
             struct stat st;
-            if (fstatat(fd,entry->d_name,&st,AT_SYMLINK_NOFOLLOW)
-                    || unlinkat(fd,entry->d_name,S_ISDIR(st.st_mode) ? AT_REMOVEDIR : 0)) r=-errno;
+            if (fstatat(fd,entry->d_name,&st,AT_SYMLINK_NOFOLLOW)) r=-errno;
+            if (!r && S_ISDIR(st.st_mode)) r=discard_leaves(fd,entry->d_name);
+            if (!r && unlinkat(fd,entry->d_name,S_ISDIR(st.st_mode) ? AT_REMOVEDIR : 0)) r=-errno;
         } else if (!r && next!=SQLITE_ROW) r=mdi_sql_failure(next);
         int reset=mdi_sql_error(sqlite3_reset(q));
         if (!r) r=reset;

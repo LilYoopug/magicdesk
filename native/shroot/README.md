@@ -94,8 +94,13 @@ quiescence and ownership rules.
 
 ### Filesystem and descriptors
 
-SQLite records guest names, inode identity, permissions and layer relationships;
-native backing objects carry file data. One inode can have several names without
+SQLite records directories, shared guest names, inode identity, permissions and
+layer relationships. Eligible private regular files keep native names and need
+no catalogue writes for create/rename/unlink; exceptional metadata stays with the
+inode. Hardlink, pathname-based execution and shared-source boundaries promote
+the same native inode through a recoverable publication owner. Descriptor
+execution instead retains its exact process-owned image origin. Native backing
+objects carry file data. One inode can have several names without
 native hardlink permission. Open data IO, mmap and file locks stay in the kernel.
 Metadata transactions, copy-up and watch publication share the namespace owner.
 Workers cache metadata within explicit snapshot/invalidation rules, not caller

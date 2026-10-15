@@ -2,6 +2,9 @@
 #include "inode_internal.h"
 #include "inode_view.h"
 #include "inode_overlay.h"
+#include "inode_native.h"
+#include "inode_leaf.h"
+#include "inode_xattr.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/fs.h>
@@ -16,6 +19,27 @@
 int mdi_backing_directory(struct md_inode_store *s, const struct mdi_node *node) {
     int fd = node->source ? s->lifetime->sources[node->source] : s->objects;
     return fd < 0 ? -ESTALE : fd;
+}
+int mdi_backing_path(struct md_inode_store *s,const struct mdi_node *node,char *out,size_t size) {
+    int dir=node->descriptor ? node->descriptor-1 : mdi_backing_directory(s,node);
+    if (dir<0) return dir;
+    int n=node->descriptor ? snprintf(out,size,"/proc/self/fd/%d",dir)
+        : snprintf(out,size,"/proc/self/fd/%d/%s",dir,node->backing);
+    return n<0 ? -EIO : (size_t)n>=size ? -ERANGE : 0;
+}
+int mdi_backing_open(struct md_inode_store *s,const struct mdi_node *node,int flags) {
+    int fd;
+    if (node->descriptor) {
+        char path[64];
+        int r=mdi_backing_path(s,node,path,sizeof(path));
+        if (r) return r;
+        fd=open(path,(flags&~O_NOFOLLOW)|O_CLOEXEC);
+    } else {
+        int dir=mdi_backing_directory(s,node);
+        if (dir<0) return dir;
+        fd=openat(dir,node->backing,flags|O_NOFOLLOW|O_CLOEXEC);
+    }
+    return fd<0 ? -errno : fd;
 }
 int md_inode_descriptor_source(struct md_inode_store *s, int fd, char *out, size_t capacity) {
     struct stat opened, named;
@@ -120,9 +144,6 @@ int mdi_import_shared(struct md_inode_store *s, int source, const char *backing,
     return r;
 }
 
-static int private_attribute(const char *name) {
-    return !strncmp(name,"user.overlay.",13) || !strncmp(name,"trusted.overlay.",16);
-}
 static int copy_attributes(int source, int destination,int overlay) {
     ssize_t size = flistxattr(source, NULL, 0);
     if (size < 0) return -errno;
@@ -136,7 +157,8 @@ static int copy_attributes(int source, int destination,int overlay) {
         size_t length = strnlen(name, (size_t)size-at);
         if (length == (size_t)size-at) { r = -EIO; break; }
         at += length+1;
-        if (!strcmp(name, "security.selinux") || (overlay && private_attribute(name))) continue;
+        if (!strcmp(name, "security.selinux") || mdi_native_private_attribute(name)
+                || (overlay && mdi_overlay_private_attribute(name))) continue;
         ssize_t count = fgetxattr(source, name, NULL, 0);
         if (count < 0 || count > 65536) { r = count < 0 ? -errno : -E2BIG; break; }
         void *value = malloc(count ? (size_t)count : 1);
@@ -160,7 +182,8 @@ static int replace_attributes(int source, int destination,int overlay) {
         size_t length=strnlen(name,(size_t)size-at);
         if (length==(size_t)size-at) { r=-EIO; break; }
         at+=length+1;
-        if (strcmp(name,"security.selinux") && !(overlay && private_attribute(name))
+        if (strcmp(name,"security.selinux") && !mdi_native_private_attribute(name)
+                && !(overlay && mdi_overlay_private_attribute(name))
                 && fremovexattr(destination,name)) r=-errno;
     }
     free(names);
@@ -246,7 +269,8 @@ int md_inode_store_seal(struct md_inode_store *s) {
     if (s->readonly) return 0;
     int r = mdi_begin(s, 1);
     if (r) return r;
-    r=mdi_views_collect(s);
+    r=mdi_leaf_materialize(s);
+    if (!r) r=mdi_views_collect(s);
     if (!r) r=mdi_views_busy(s);
     if (!r && !s->lifetime->temporary && syncfs(s->objects)) r=-errno;
     if (!r) r = mdi_sql(s, "UPDATE properties SET value=1 WHERE key='sealed'");
@@ -277,6 +301,7 @@ int md_inode_prepare_reopen(struct md_inode_store *s, int original, int flags, i
     int device=!r && (node.kind==S_IFCHR || node.kind==S_IFBLK) && !(flags&O_PATH);
     if (device && s->nodev) r=-EACCES;
     if (!r) r = mdi_open_permission(s, &node, flags);
+    if (!r && s->landlock_execute) r=mdi_permission(s,&node,X_OK,0);
     if (!r) r=mdi_landlock_object(s,&node,s->landlock_execute ? MD_LL_EXECUTE : md_landlock_open_access(flags,node.kind));
     if (!r && mutable && (flags & O_PATH) && s->identity) {
         struct stat st;
@@ -290,7 +315,7 @@ int md_inode_prepare_reopen(struct md_inode_store *s, int original, int flags, i
     int directory = r ? -1 : mdi_backing_directory(s, &node);
     if (!r && directory < 0) r = directory;
     int deferred = !r && node.kind == S_IFIFO && !(flags & O_PATH);
-    if (!r && (fd = openat(directory, node.backing, (deferred || device ? O_PATH : flags) | O_NOFOLLOW | O_CLOEXEC)) < 0) r = -errno;
+    if (!r && (fd=mdi_backing_open(s,&node,deferred || device ? O_PATH : flags))<0) r=fd;
     if (!r && (flags&O_DSYNC)) s->sync_requested=1;
     r = mdi_commit(s, r);
     if (r && fd >= 0) close(fd);

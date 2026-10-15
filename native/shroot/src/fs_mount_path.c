@@ -112,10 +112,8 @@ static int point_fd(struct path_walk *w,struct path_point *p) {
     if (p->fd>=0) return 0;
     struct md_inode_store *s=w->scope.store;
     if (!s || !p->logical) return -EIO;
-    int directory=mdi_backing_directory(s,&p->node);
-    if (directory<0) return directory;
-    int fd=openat(directory,p->node.backing,O_PATH|O_NOFOLLOW|O_CLOEXEC);
-    if (fd<0) return -errno;
+    int fd=mdi_backing_open(s,&p->node,O_PATH);
+    if (fd<0) return fd;
     struct stat st;
     int r=fstat(fd,&st) ? -errno : !md_view_same(&st,&p->identity) ? -EIO : 0;
     if (r) { close(fd); return r; }

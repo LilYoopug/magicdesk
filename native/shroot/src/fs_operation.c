@@ -14,6 +14,26 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+const char *md_fs_operation_name(unsigned operation) {
+    static const char *const names[MD_FS_LAST+1]={
+#define NAME(n) [MD_FS_##n]=#n
+        NAME(CREATE), NAME(OPEN), NAME(MKDIR), NAME(SYMLINK), NAME(READLINK),
+        NAME(LINK), NAME(UNLINK), NAME(RENAME), NAME(STAT), NAME(FSTAT), NAME(PATH),
+        NAME(GETDENTS), NAME(SEEKDIR), NAME(SOCKET_BIND), NAME(SOCKET_ADDRESS), NAME(SOCKET_NAME),
+        NAME(REALPATH), NAME(TEMPORARY), NAME(OBJECT_ID), NAME(OPEN_OBJECT), NAME(OPEN_IMAGE),
+        NAME(WATCH_CREATE), NAME(WATCH_ADD), NAME(WATCH_REMOVE), NAME(WATCH_BYTES),
+        NAME(WATCH_CONTAINS), NAME(WATCH_READ), NAME(REOPEN), NAME(CHMOD), NAME(CHOWN),
+        NAME(ACCESS), NAME(UTIMENS), NAME(IPC), NAME(GETCAP), NAME(SETCAP), NAME(REMOVECAP),
+        NAME(GETACL), NAME(SETACL), NAME(REMOVEACL), NAME(XATTR_OBJECT), NAME(MOUNT_TABLE),
+        NAME(NATIVE_MOUNT), NAME(MKNOD), NAME(CHROOT), NAME(UMASK), NAME(STATFS), NAME(WATCH_PATH),
+        NAME(TASK_PATH), NAME(XATTR), NAME(FXATTR), NAME(IPC_PEER), NAME(MOUNT), NAME(FSOPEN),
+        NAME(FSCONFIG), NAME(FSMOUNT), NAME(BPF), NAME(FDINFO), NAME(LANDLOCK), NAME(OPEN_TREE),
+        NAME(IOCTL), NAME(SYNC)
+#undef NAME
+    };
+    return md_fs_operation_valid(operation) ? names[operation] : NULL;
+}
+
 int md_fs_request_validate(const struct md_fs_request *q) {
     if (!q) return -EINVAL;
     unsigned descriptors=0;

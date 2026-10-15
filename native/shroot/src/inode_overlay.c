@@ -3,6 +3,7 @@
 #include "inode_internal.h"
 #include "inode_view.h"
 #include "inode_xattr.h"
+#include "inode_leaf.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
@@ -304,6 +305,21 @@ static int merge_directory(struct merge *m, const struct mdi_node *from,
     if (!r) r=properties(m,from,to);
     return r;
 }
+/* Borrow another scope on the transaction owner's connection and cache. Only
+ * the owner may commit/unlock; both projections use the same row invalidation. */
+static void borrow_scope(struct md_inode_store *out,struct md_inode_store *owner,struct md_inode_store *scope) {
+    *out=*scope; out->db=owner->db; out->locked=1;
+    out->read_depth=owner->read_depth; out->write_transaction=owner->write_transaction;
+    out->recording=owner->recording; out->operation_changes=owner->operation_changes;
+    out->event_sequence=owner->event_sequence;
+    out->read_cache=owner->read_cache; out->cache_checked=owner->cache_checked;
+    memset(out->queries,0,sizeof(out->queries));
+}
+static void release_scope(struct md_inode_store *borrowed,struct md_inode_store *owner) {
+    for (unsigned i=0;i<MDI_QUERY_COUNT;++i) sqlite3_finalize(borrowed->queries[i]);
+    owner->operation_changes=borrowed->operation_changes;
+    if (owner->event_sequence<borrowed->event_sequence) owner->event_sequence=borrowed->event_sequence;
+}
 static int layer(struct md_inode_store *index, struct md_inode_store *source,
         int directory, int user_xattr, int upper) {
     if (!index || !source || index->readonly || index->overlay || md_inode_lifetime_same(index->lifetime,source->lifetime))
@@ -313,23 +329,20 @@ static int layer(struct md_inode_store *index, struct md_inode_store *source,
     int r=shared ? 0 : mdi_begin(source,0);
     if (r) return r;
     struct md_inode_store borrowed;
-    if (shared) {
-        borrowed=*source; borrowed.db=index->db;
-        memset(borrowed.queries,0,sizeof(borrowed.queries));
-        source=&borrowed;
-    }
     struct mdi_node from, to;
     int begun=0;
     if (shared) { r=mdi_begin(index,1); begun=!r; }
+    if (shared && !r) { borrow_scope(&borrowed,index,source); source=&borrowed; }
     if (!r) r=mdi_fd(source,directory,&from);
     if (!r && from.kind!=S_IFDIR) r=-ENOTDIR;
+    if (!r && !source->readonly) r=mdi_leaf_materialize(source);
     if (!r && !shared) { r=mdi_begin(index,1); begun=!r; }
     if (!r) r=mdi_node(index,mdi_root(index),&to);
     struct merge m={.index=index,.source=source,.user_xattr=!!user_xattr,.upper=upper};
     if (!r) r=merge_directory(&m,&from,&to,0);
+    if (shared && begun) release_scope(&borrowed,index);
     if (begun) r=mdi_commit(index,r);
     if (!shared) return mdi_finish(source,r);
-    for (unsigned i=0; i<MDI_QUERY_COUNT; ++i) sqlite3_finalize(borrowed.queries[i]);
     return r;
 }
 int md_inode_overlay_layer(struct md_inode_store *index, struct md_inode_store *source,
@@ -378,8 +391,8 @@ int md_inode_overlay_prepare_upper(struct md_inode_store *index, struct md_inode
     if (source->readonly || index->readonly) return -EROFS;
     int r=mdi_begin(index,1);
     if (r) return r;
-    struct md_inode_store borrowed=*source;
-    borrowed.db=index->db; memset(borrowed.queries,0,sizeof(borrowed.queries));
+    struct md_inode_store borrowed;
+    borrow_scope(&borrowed,index,source);
     struct mdi_node upper,work;
     r=mdi_fd(&borrowed,upper_fd,&upper);
     if (!r) r=mdi_fd(&borrowed,work_fd,&work);
@@ -391,6 +404,7 @@ int md_inode_overlay_prepare_upper(struct md_inode_store *index, struct md_inode
         if (!overlap) overlap=mdi_ancestor(&borrowed,work.id,upper.id);
         if (overlap) r=overlap<0 ? overlap : -EINVAL;
     }
+    if (!r) r=mdi_leaf_materialize(&borrowed);
     if (!r) r=mdi_views_collect(index);
     sqlite3_stmt *q=NULL;
     if (!r) r=mdi_prepare(index,"SELECT 1 FROM inode_views WHERE upper IN (?1,?2) OR work IN (?1,?2)",&q);
@@ -412,7 +426,7 @@ int md_inode_overlay_prepare_upper(struct md_inode_store *index, struct md_inode
     if (!r) r=mdi_sql_error(mdi_step(index,q));
     if (!r && sqlite3_changes(index->db)!=1) r=-EALREADY;
     sqlite3_finalize(q);
-    for (unsigned i=0; i<MDI_QUERY_COUNT; ++i) sqlite3_finalize(borrowed.queries[i]);
+    release_scope(&borrowed,index);
     r=mdi_commit(index,r);
     return r ? r : layer(index,source,upper_fd,user_xattr,1);
 }

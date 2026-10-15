@@ -68,6 +68,45 @@ static long acquire_at(struct md_fs_context *context, int base, const struct md_
     }
     return 0;
 }
+static int acquire_fd(struct md_fs_context *context,int fd,const struct md_fs_anchor *origin,
+        const char *path,struct md_program *program,struct md_fs_anchor **image_origin) {
+    *program=(struct md_program){.fd=-1};
+    struct stat st;
+    if (fstat(fd,&st)) return -errno;
+    if (S_ISLNK(st.st_mode)) return -ELOOP;
+    if (!S_ISREG(st.st_mode)) return -EACCES;
+    struct md_fs_request q={.actor=context->actor,.peer=context->peer,.operation=MD_FS_REOPEN,
+        .directory={fd,-1},.origin={origin,NULL},.flags=O_RDONLY|O_CLOEXEC,
+        .mode=MD_FS_REOPEN_EXECUTE};
+    struct md_fs_result result;
+    struct md_fs_output output={.origin=image_origin};
+    md_fs_context_execute(context,&q,&result,&output);
+    int error=result.error;
+    if (error==-EXDEV && !origin) {
+        /* Only anonymous kernel images may bypass the managed filesystem.
+         * Ordinary unlinked files still retain logical permissions and origin. */
+        if (!st.st_nlink && fcntl(fd,F_GET_SEALS)>=0) {
+            result.fd=fcntl(fd,F_DUPFD_CLOEXEC,0);
+            error=result.fd<0 ? -errno : 0;
+        }
+    }
+    if (!error && (result.fd<0 || result.host_path || result.open_completion.kind)) error=-EPROTO;
+    if (!error) error=md_copy(program->identity.path,sizeof(program->identity.path),path);
+    if (!error && !*image_origin) {
+        char link[64]; snprintf(link,sizeof(link),"/proc/self/fd/%d",fd);
+        ssize_t n=readlink(link,program->identity.path,sizeof(program->identity.path)-1);
+        if (n<0) error=-errno;
+        else program->identity.path[n]=0;
+    }
+    if (error) {
+        if (result.fd>=0) close(result.fd);
+        md_fs_anchor_release(*image_origin); *image_origin=NULL;
+        return error;
+    }
+    program->fd=result.fd;
+    program->mount_flags=md_fs_anchor_policy(*image_origin);
+    return 0;
+}
 struct image_selection {
     struct md_fs_context *context;
     struct { struct md_fs_anchor *origin; char object[33]; } entries[MD_SCRIPT_DEPTH+2];
@@ -95,37 +134,20 @@ int md_fs_command_prepare(struct md_fs_context *context, const struct md_fs_requ
     int error;
     int owned=0;
     if (*proc_image) {
-        if ((*proc_image)->fd>=0) { first=**proc_image; error=0; }
+        if ((*proc_image)->fd>=0) {
+            error=acquire_fd(context,(*proc_image)->fd,(*proc_image)->origin,
+                (*proc_image)->identity.path,&first,&selection.entries[0].origin);
+            owned=1;
+        }
         else if ((*proc_image)->identity.object[0]) {
             error=(int)acquire_at(context,-1,NULL,(*proc_image)->identity.path,0,
                 (*proc_image)->identity.object,&first,&selection.entries[0].origin);
             owned=1;
         } else error=-EPROTO;
     } else if (!*q->path[0]) {
-        first.fd=q->directory[0];
-        first.mount_flags=md_fs_anchor_policy(q->origin[0]);
-        selection.entries[0].origin=md_fs_anchor_retain((struct md_fs_anchor *)q->origin[0]);
-        snprintf(first.identity.path,sizeof(first.identity.path),"/dev/fd/%lld",(long long)q->offset);
-        struct md_fs_request object={.actor=context->actor,.peer=context->peer,
-            .operation=MD_FS_OBJECT_ID,.directory={first.fd,-1},.origin={q->origin[0],NULL}};
-        struct md_fs_result result;
-        struct md_fs_output out={.data=first.identity.object,.capacity=sizeof(first.identity.object)};
-        md_fs_context_execute(context,&object,&result,&out);
-        error=result.error;
-        if (error==-EXDEV && !q->origin[0]) {
-            struct stat st;
-            /* An anonymous kernel image has no inode-store key. Retain the
-             * actual description; normal ELF, execute and noexec checks still
-             * apply. Never reinterpret a failed managed-object lookup. */
-            if (!fstat(first.fd,&st) && S_ISREG(st.st_mode) && !st.st_nlink
-                    && fcntl(first.fd,F_GET_SEALS)>=0) {
-                char link[64];
-                snprintf(link,sizeof(link),"/proc/self/fd/%d",first.fd);
-                ssize_t n=readlink(link,first.identity.path,sizeof(first.identity.path)-1);
-                if (n<0) error=-errno;
-                else { first.identity.path[n]=0; error=0; }
-            }
-        }
+        char path[64]; snprintf(path,sizeof(path),"/dev/fd/%lld",(long long)q->offset);
+        error=acquire_fd(context,q->directory[0],q->origin[0],path,&first,&selection.entries[0].origin);
+        owned=1;
     } else {
         error=(int)acquire_at(context,q->directory[0],q->origin[0],q->path[0],q->flags,
             q->mode&MD_EXEC_OBJECT ? q->path[1] : NULL,&first,&selection.entries[0].origin);
@@ -138,18 +160,13 @@ int md_fs_command_prepare(struct md_fs_context *context, const struct md_fs_requ
             return error;
         }
     }
-    if (!error && !owned && first.identity.object[0] && context->task.landlock) {
-        struct md_program checked;
-        error=(int)acquire_at(context,-1,NULL,first.identity.path,0,first.identity.object,&checked,NULL);
-        if (!error) close(checked.fd);
-    }
     memcpy(selection.entries[0].object,first.identity.object,33);
     if (!error) error=md_command_images_prepare(recipe,images,&first,
         q->mode&MD_EXEC_INACCESSIBLE,acquire,&selection);
-    /* A mount-local executable key outlives CLOEXEC only while its origin is
-     * pinned. Keep the selected image, not the loader or shebang intermediates. */
+    /* FD images need no catalogue key: their origin pins the exact inode and
+     * mount across CLOEXEC/unlink. Keep the image, not shebang intermediates. */
     for (unsigned i=0;i<selection.count;++i) {
-        if (!error && !*image_origin && recipe->image.object[0]
+        if (!error && !*image_origin
                 && !strcmp(selection.entries[i].object,recipe->image.object)) {
             *image_origin=selection.entries[i].origin;
             selection.entries[i].origin=NULL;

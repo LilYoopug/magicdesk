@@ -22,6 +22,10 @@ int mdi_landlock_object(struct md_inode_store *s,const struct mdi_node *node,uin
     if (!s->landlock || !access) return 0;
     struct mdi_node parent;
     if (node->kind==S_IFDIR) return mdi_landlock(s,node,NULL,access);
+    if (node->native) {
+        int r=node->attached ? mdi_node(s,node->parent,&parent) : 0;
+        return r ? r : mdi_landlock(s,node,node->attached ? &parent : NULL,access);
+    }
     /* Without retained dentry provenance, a unique attached name is enough.
      * Ambiguous aliases fail closed instead of selecting a more permissive one. */
     sqlite3_stmt *q=NULL;

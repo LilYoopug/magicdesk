@@ -10,7 +10,19 @@
 
 /* Format 17 is the compatibility baseline, not a performance/cache revision. */
 int md_inode_store_format(void) { return 17; }
-const struct mdi_schema_plan mdi_schema_current = {0};
+#define PUBLICATION_SCHEMA \
+    "CREATE TABLE native_publication(slot INTEGER PRIMARY KEY CHECK(slot=1)," \
+    "object TEXT NOT NULL CHECK(length(object)=32),parent TEXT NOT NULL REFERENCES objects," \
+    "name BLOB NOT NULL CHECK(length(name) BETWEEN 1 AND 255)," \
+    "device INTEGER NOT NULL,inode INTEGER NOT NULL," \
+    "uid INTEGER NOT NULL CHECK(uid>=0 AND uid<4294967295)," \
+    "gid INTEGER NOT NULL CHECK(gid>=0 AND gid<4294967295)," \
+    "mode INTEGER NOT NULL CHECK(mode>=0 AND mode<=4095)) STRICT;" \
+    "CREATE TABLE native_cookies(cookie INTEGER PRIMARY KEY AUTOINCREMENT," \
+    "parent TEXT NOT NULL REFERENCES objects ON DELETE CASCADE,position INTEGER NOT NULL," \
+    "UNIQUE(parent,position)) STRICT;"
+static const char *const revisions[]={PUBLICATION_SCHEMA};
+const struct mdi_schema_plan mdi_schema_current = {revisions,sizeof(revisions)/sizeof(*revisions)};
 int md_inode_store_revision(void) { return 1 + (int)mdi_schema_current.count; }
 
 int mdi_schema_indexes(struct md_inode_store *s) {
@@ -25,6 +37,8 @@ int mdi_schema_indexes(struct md_inode_store *s) {
         "CREATE INDEX IF NOT EXISTS overlay_origins_object ON overlay_origins(object);"
         "CREATE INDEX IF NOT EXISTS overlay_links_upper ON overlay_links(upper);"
         "CREATE INDEX IF NOT EXISTS file_paths_parent ON file_paths(parent);"
+        "CREATE INDEX IF NOT EXISTS native_publication_parent ON native_publication(parent);"
+        "CREATE INDEX IF NOT EXISTS events_object ON events(object,sequence);"
         "COMMIT;");
     if (r) mdi_sql(s,"ROLLBACK");
     return r;
@@ -218,6 +232,7 @@ int mdi_schema_begin_create(struct md_inode_store *s) {
                 "UPDATE objects SET acl_mask=acl_mask&~OLD.type WHERE object=OLD.object; END;"
             "CREATE TABLE events(sequence INTEGER PRIMARY KEY AUTOINCREMENT, parent TEXT NOT NULL,"
             "object TEXT NOT NULL,name BLOB NOT NULL,mask INTEGER NOT NULL,cookie INTEGER NOT NULL) STRICT;");
+    if (!r) r=mdi_sql(s,PUBLICATION_SCHEMA);
     if (!r) r=set_revision(s,md_inode_store_revision());
     return r;
 }

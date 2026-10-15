@@ -104,6 +104,7 @@ static int scope_delete(struct md_inode_store *s, const char *scope) {
         "DELETE FROM sockets WHERE object IN (SELECT object FROM objects WHERE scope=?1)",
         "DELETE FROM file_capabilities WHERE object IN (SELECT object FROM objects WHERE scope=?1)",
         "DELETE FROM inode_acls WHERE object IN (SELECT object FROM objects WHERE scope=?1)",
+        "DELETE FROM native_cookies WHERE parent IN (SELECT object FROM objects WHERE scope=?1)",
         "DELETE FROM backings WHERE scope=?1",
         "DELETE FROM inode_views WHERE scope=?1",
         "DELETE FROM objects WHERE scope=?1",

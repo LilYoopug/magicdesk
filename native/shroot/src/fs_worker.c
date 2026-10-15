@@ -167,10 +167,7 @@ static void *run(void *context) {
             (unsigned long long)stats.metadata_cache_hits,(unsigned long long)stats.metadata_cache_misses);
         fprintf(stderr, "MD_STORE linkCountQueries=%llu membershipQueries=%llu\n",
             (unsigned long long)stats.link_count_queries, (unsigned long long)stats.membership_queries);
-        for (unsigned i = 0; i <= MD_FS_LAST; ++i) if (rpc.operation[i].calls)
-            fprintf(stderr, "MD_FS operation=%u calls=%llu ns=%llu\n", i,
-                (unsigned long long)rpc.operation[i].calls,
-                (unsigned long long)rpc.operation[i].nanoseconds);
+        md_fs_statistics_report(STDERR_FILENO,&rpc);
         struct rusage usage;
         if (!getrusage(RUSAGE_THREAD, &usage)) fprintf(stderr, "MD_CPU namespaceWorker userUs=%llu systemUs=%llu\n",
             (unsigned long long)usage.ru_utime.tv_sec * 1000000 + usage.ru_utime.tv_usec,

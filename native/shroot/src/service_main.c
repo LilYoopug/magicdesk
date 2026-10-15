@@ -84,10 +84,7 @@ int main(int argc, char **argv) {
         fprintf(stderr,"MD_STORE walkComponents=%llu walkMaterializations=%llu writeAdmissions=%llu\n",
             (unsigned long long)database.walk_components,(unsigned long long)database.walk_materializations,
             (unsigned long long)database.write_admissions);
-        for (unsigned i = 0; i <= MD_FS_LAST; i++) if (filesystem.operation[i].calls)
-            fprintf(stderr, "MD_FS operation=%u calls=%llu ns=%llu\n", i,
-                (unsigned long long)filesystem.operation[i].calls,
-                (unsigned long long)filesystem.operation[i].nanoseconds);
+        md_fs_statistics_report(STDERR_FILENO,&filesystem);
         struct rusage usage;
         if (!getrusage(RUSAGE_SELF, &usage)) fprintf(stderr, "MD_CPU service userUs=%llu systemUs=%llu\n",
             (unsigned long long)usage.ru_utime.tv_sec * 1000000 + usage.ru_utime.tv_usec,

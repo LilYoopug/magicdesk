@@ -141,6 +141,27 @@ static void exec_descriptor(void) {
     assert(!close(fd));
     puts("PASS landlock execveat rechecks a preopened executable");
 }
+static void exec_native_descriptor(void) {
+    int input=open("/proc/self/exe",O_RDONLY|O_CLOEXEC); assert(input>=0);
+    int output=open("allowed/executable",O_CREAT|O_EXCL|O_WRONLY|O_CLOEXEC,0700); assert(output>=0);
+    char bytes[65536]; ssize_t n;
+    while ((n=read(input,bytes,sizeof(bytes)))>0) assert(write(output,bytes,(size_t)n)==n);
+    assert(!n); close(input); close(output);
+    int fd=open("allowed/executable",O_PATH|O_CLOEXEC); assert(fd>=0);
+    for (int detached=0;detached<2;++detached) {
+        if (detached) assert(!unlink("allowed/executable"));
+        pid_t pid=fork(); assert(pid>=0);
+        if (!pid) {
+            int set=ruleset(); add(set,"/",READ_RIGHTS); restrict_to(set); close(set);
+            char *args[]={"landlock-contract",NULL}; char *env[]={NULL};
+            expect_error(syscall(SYS_execveat,fd,"",args,env,AT_EMPTY_PATH),EACCES);
+            _exit(0);
+        }
+        reaped(pid,0);
+    }
+    close(fd);
+    puts("PASS landlock denies copied and open-unlinked native executable FDs");
+}
 static void read_denial(void) {
     struct landlock_ruleset_attr attr={.handled_access_fs=READ_RIGHTS};
     int set=syscall(SYS_landlock_create_ruleset,&attr,sizeof(attr),0); assert(set>=0);
@@ -249,7 +270,7 @@ int main(int argc, char **argv) {
     int parent = open(".", O_PATH | O_DIRECTORY); assert(parent >= 0);
     assert(!chdir(directory)); prepare();
     if (!setup_only) {
-        run(validation); run(basic); run(exec_descriptor); run(read_denial);
+        run(validation); run(basic); run(exec_descriptor); run(exec_native_descriptor); run(read_denial);
         run(stacking); run(threads); run(exec_inheritance); run(object_identity);
         assert(!unlink("allowed/file")); assert(!rmdir("allowed")); assert(!rename("moved", "allowed"));
     }

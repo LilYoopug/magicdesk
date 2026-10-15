@@ -8,7 +8,9 @@ launches watching one store observe each other's committed mutations.
 ## Namespace Events
 
 `inode_events.c` records create, link, unlink, rename/exchange and socket-name
-publication in the same SQLite transaction as the corresponding name change.
+publication for catalogue entries in the same SQLite transaction as the
+corresponding name change. Eligible native leaves emit ordinary kernel events
+from their parent's backing directory, without SQL journal rows.
 Move pairs share a nonzero cookie; directory events retain `IN_ISDIR`. Rollback
 cannot expose a name event. Registration establishes its journal cursor while
 holding the store admission lock. A finite native backlog is drained before
@@ -26,7 +28,13 @@ Storage admission and version handling belong to the shared
 [schema owner](inode-store.md#storage-evolution), not the watch subsystem.
 
 Native inotify on the database WAL wakes the worker; it reads only committed journal
-rows after acquiring store admission. The journal retains 65,536 entries plus at
+rows after acquiring store admission. Store-root commit markers carry journal
+sequence boundaries in the same kernel event stream as native names. The reader
+drains the journal through each boundary before continuing native delivery, then
+catches up after draining the native queue in case an owner died before emitting
+its marker. A bounded drain never catches up ahead of an unconsumed native backlog.
+Physical catalogue-object creation also publishes the corresponding committed
+CREATE before following native OPEN/CLOSE records. The journal retains 65,536 entries plus at
 most one 255-entry trimming batch. A missing range produces `IN_Q_OVERFLOW`.
 Native data events come from retained backing inodes and the flat object directory;
 ordinary guest file reads/writes remain native. Native event batches are bounded
@@ -46,6 +54,13 @@ and closes data outside those watched directories before publication, so interna
 copying does not appear as application modification. Native attached directories
 use the existing foreign-object watch path. Lower-backed data events are not
 isolated from other instances sharing those same kernel inodes.
+
+Native-to-catalogue promotion brackets its internal namespace moves with control
+markers under the same store gate. Readers suppress those moves, not application
+data IO through retained FDs. Registration of an attached file watch promotes
+that file first, retaining a stable catalogue identity across later hardlinks;
+ordinary directory watches do not promote their children. Queue overflow clears
+partial promotion state and reports IN_Q_OVERFLOW instead of guessing.
 
 ## Descriptors And Delivery
 
@@ -141,9 +156,13 @@ descriptor reuse and unrelated native reads. Separate store tests kill a writer
 before commit, retire the final reader and inject a journal gap.
 The native/guest `rights-watch-fault` comparison starts each receiver without
 inherited watch filters and checks delivery despite readonly message headers,
-control headers, source addresses and timeout output. A separate guest check
-denies filter installation and verifies explicit failure, the usable published
-prefix, pipe EOF and absence of leaked descriptors.
+control headers, source addresses and timeout output.
+The filter-count observer keeps its proc FD across exec, so a changed lowest
+free slot cannot make the measurement install another proc selector. Prepared
+receivers retain watch/pipe SCM_RIGHTS after an application forbids further
+seccomp installation. An application-denied MSG_PEEK leaves the queued rights
+and descriptor table unchanged; a subsequent allowed receive verifies IO,
+constant filter count, final pipe EOF and exact channel ownership.
 The same glibc/musl suite also runs with dumpability disabled, including faulted
 buffers, concurrent readers and signal restart. Descriptor churn covers 7,680
 distinct dup/fcntl targets with bounded filter count. RPC controls reject a copy
@@ -171,6 +190,9 @@ See [fixture commands](../guest-exec-lab/filesystem-workflows.md#production-watc
   Directory projection reports its currently linked aliases, including multiple
   hardlink names. Delayed IO around rename/unlink is not exact Linux dentry history.
   Namespace-driven ctime/parent-mtime updates remain incomplete.
+- Representation promotion can produce native OPEN/CLOSE data notifications from
+  internal body synchronization. Its hidden namespace moves are suppressed, but
+  this is not complete kernel-equivalent data-event provenance.
 - Final logical unlink emits DELETE_SELF without tracking all open references;
   native Linux may defer that notification until the last reference is gone.
 - FD activation is not atomic publication to arbitrary concurrent CLONE_FILES

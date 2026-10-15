@@ -29,7 +29,8 @@ struct md_landlock_policy;
 struct md_landlock_ruleset *md_landlock_ruleset_new(uint64_t handled);
 struct md_landlock_ruleset *md_landlock_ruleset_retain(struct md_landlock_ruleset *);
 void md_landlock_ruleset_release(struct md_landlock_ruleset *);
-int md_landlock_rule_add(struct md_landlock_ruleset *,const struct md_landlock_key *,uint64_t);
+/* A nonnegative native FD is borrowed and retained by the immutable rule pin. */
+int md_landlock_rule_add(struct md_landlock_ruleset *,const struct md_landlock_key *,uint64_t,int native_fd);
 struct md_landlock_policy *md_landlock_restrict(const struct md_landlock_policy *,const struct md_landlock_ruleset *);
 struct md_landlock_policy *md_landlock_retain(struct md_landlock_policy *);
 void md_landlock_release(struct md_landlock_policy *);

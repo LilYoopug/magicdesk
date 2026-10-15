@@ -20,7 +20,8 @@ static const char *const upgrades[]={
     "ALTER TABLE future_metadata ADD COLUMN generation INTEGER NOT NULL DEFAULT 2;"
     "SELECT schema_fault();"
 };
-static const struct mdi_schema_plan future={upgrades,2};
+static const char *future_steps[32];
+static struct mdi_schema_plan future;
 static const struct mdi_schema_plan *selected;
 static int fault, commit_count, notify_fd=-1, continue_fd=-1, admissions;
 static int reject_audits, audit_attempts;
@@ -79,7 +80,7 @@ static void initialize(const char *path) {
     assert(!md_inode_store_open(path,1,&s));
     assert(scalar(s,"PRAGMA user_version")==17);
     assert(scalar(s,"PRAGMA application_id")==0x53485254);
-    assert(scalar(s,"SELECT value FROM properties WHERE key='schema-revision'")==1);
+    assert(scalar(s,"SELECT value FROM properties WHERE key='schema-revision'")==md_inode_store_revision());
     int fd=md_inode_create(s,-1,"file",0640); assert(fd>=0);
     assert(write(fd,"contents",8)==8);
     assert(!md_inode_link(s,-1,"file",-1,"alias",0));
@@ -94,6 +95,26 @@ static void check(struct md_inode_store *s) {
     int fd=md_inode_open(s,-1,"alias",O_RDONLY,0); assert(fd>=0);
     char text[9]={0}; assert(read(fd,text,8)==8 && !strcmp(text,"contents")); close(fd);
     struct md_inode_audit audit; assert(!md_inode_audit(s,&audit));
+}
+static void baseline(const char *path) {
+    initialize(path);
+    struct md_inode_store *s=NULL,*other=NULL;
+    assert(!md_inode_store_open(path,0,&s));
+    struct stat before,after; assert(!md_inode_stat(s,-1,"file",0,&before));
+    /* Revision 2 adds only this table. Remove that exact DDL addition, not just
+     * its version marker, to reconstruct the supported revision-1 schema. */
+    assert(sqlite3_exec(s->db,"DROP TABLE native_publication;DROP TABLE native_cookies;"
+        "UPDATE properties SET value=1 WHERE key='schema-revision'",NULL,NULL,NULL)==SQLITE_OK);
+    assert(md_inode_store_open_inspect(path,&other)==-EPROTONOSUPPORT && !other);
+    assert(md_inode_store_open(path,0,&other)==-EBUSY && !other);
+    md_inode_store_close(s);
+    assert(!md_inode_store_open(path,0,&s)); check(s);
+    assert(!md_inode_stat(s,-1,"file",0,&after));
+    assert(before.st_dev==after.st_dev && before.st_ino==after.st_ino);
+    assert(scalar(s,"SELECT value FROM properties WHERE key='schema-revision'")==md_inode_store_revision());
+    assert(scalar(s,"SELECT count(*) FROM native_publication")==0);
+    md_inode_store_close(s);
+    puts("PASS format-17 revision-1 admission preserves installed contents and identities");
 }
 static void lightweight(const char *path) {
     initialize(path);
@@ -128,10 +149,10 @@ static void update(const char *path) {
     selected=&future;
     assert(md_inode_store_open_inspect(path,&other)==-EPROTONOSUPPORT && !other);
     assert(md_inode_store_open(path,0,&other)==-EBUSY && !other);
-    assert(scalar(s,"SELECT value FROM properties WHERE key='schema-revision'")==1);
+    assert(scalar(s,"SELECT value FROM properties WHERE key='schema-revision'")==md_inode_store_revision());
     md_inode_store_close(s);
     assert(!md_inode_store_open(path,0,&s));
-    assert(scalar(s,"SELECT value FROM properties WHERE key='schema-revision'")==3);
+    assert(scalar(s,"SELECT value FROM properties WHERE key='schema-revision'")==md_inode_store_revision()+2);
     assert(scalar(s,"SELECT generation FROM future_metadata")==2);
     assert(!md_inode_stat(s,-1,"file",0,&after));
     assert(before.st_ino==after.st_ino && before.st_dev==after.st_dev);
@@ -180,7 +201,7 @@ static void interrupted(const char *path,int point,int rollback) {
     }
     selected=&future;
     assert(!md_inode_store_open(path,0,&s)); check(s);
-    assert(scalar(s,"SELECT value FROM properties WHERE key='schema-revision'")==3);
+    assert(scalar(s,"SELECT value FROM properties WHERE key='schema-revision'")==md_inode_store_revision()+2);
     md_inode_store_close(s);
     puts("PASS process death before/after schema commit resumes without reapplying completed steps");
 }
@@ -213,13 +234,16 @@ static void invalid_steps(const char *path) {
     for (unsigned i=0;i<sizeof(forbidden)/sizeof(*forbidden);++i) {
         char sql[160];
         snprintf(sql,sizeof(sql),"CREATE TABLE forbidden(value); %s;",forbidden[i]);
-        const char *steps[]={sql};
-        const struct mdi_schema_plan plan={steps,1}; selected=&plan;
+        const char *steps[32];
+        assert(mdi_schema_current.count+1<sizeof(steps)/sizeof(*steps));
+        memcpy(steps,mdi_schema_current.steps,mdi_schema_current.count*sizeof(*steps));
+        steps[mdi_schema_current.count]=sql;
+        const struct mdi_schema_plan plan={steps,mdi_schema_current.count+1}; selected=&plan;
         assert(md_inode_store_open(path,0,&s)==-EIO && !s);
         selected=NULL;
         assert(!md_inode_store_open(path,0,&s)); check(s);
         assert(scalar(s,"PRAGMA user_version")==17);
-        assert(scalar(s,"SELECT value FROM properties WHERE key='schema-revision'")==1);
+        assert(scalar(s,"SELECT value FROM properties WHERE key='schema-revision'")==md_inode_store_revision());
         assert(!scalar(s,"SELECT count(*) FROM sqlite_schema WHERE name='forbidden'"));
         md_inode_store_close(s);
     }
@@ -250,7 +274,12 @@ static void shared_source(const char *path,const char *instance) {
 }
 int main(int argc,char **argv) {
     assert(argc==2 && !mkdir(argv[1],0700));
+    assert(mdi_schema_current.count+2<sizeof(future_steps)/sizeof(*future_steps));
+    memcpy(future_steps,mdi_schema_current.steps,mdi_schema_current.count*sizeof(*future_steps));
+    memcpy(future_steps+mdi_schema_current.count,upgrades,sizeof(upgrades));
+    future=(struct mdi_schema_plan){future_steps,mdi_schema_current.count+2};
     char path[PATH_MAX];
+    snprintf(path,sizeof(path),"%s/baseline",argv[1]); baseline(path);
     snprintf(path,sizeof(path),"%s/lightweight",argv[1]); lightweight(path);
     snprintf(path,sizeof(path),"%s/update",argv[1]); update(path);
     snprintf(path,sizeof(path),"%s/full",argv[1]); full(path);

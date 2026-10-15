@@ -931,6 +931,11 @@ static void value_transport(void) {
     puts("PASS RPC values: maximum ACL, exact lengths, size query, rejected output and no payload descriptors");
 }
 static void request_contract(void) {
+    CHECK(!md_fs_operation_name(0) && !md_fs_operation_name(MD_FS_LAST+1));
+    for (unsigned i=MD_FS_CREATE;i<=MD_FS_LAST;++i) {
+        const char *name=md_fs_operation_name(i); CHECK(name && *name);
+        for (unsigned j=MD_FS_CREATE;j<i;++j) CHECK(strcmp(name,md_fs_operation_name(j)));
+    }
     const struct md_fs_request requests[]={
         {.operation=MD_FS_XATTR_OBJECT,.directory={3,-1},.mode=MD_FS_XATTR_LIST},
         {.operation=MD_FS_GETACL,.directory={3,-1},.mode=MD_ACL_ACCESS},

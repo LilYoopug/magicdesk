@@ -337,8 +337,7 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
         if (nr==SYS_readlinkat)
             return md_fs_buffer_proc_link(ref.process,(void *)a[2],a[3]);
         if (ref.foreign_kind==MD_PROC_EXE) {
-            long fd=md_proc_control_open(&ref,(int)a[2],0);
-            if (fd!=-EXDEV) return fd;
+            return md_proc_executable_capture(fs,ref.process,(int)a[2]);
         }
         return RAW5(prctl,MD_GUEST_PROC_IMAGE,ref.process,ref.foreign_kind,a[2],0);
     }

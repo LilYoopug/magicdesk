@@ -5,8 +5,13 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
-struct rule { struct md_landlock_key key; uint64_t allowed; };
+struct inode_pin { atomic_uint refs; int fd; };
+struct rule { struct md_landlock_key key; uint64_t allowed; struct inode_pin *pin; };
+static void pin_release(struct inode_pin *pin) {
+    if (pin && atomic_fetch_sub(&pin->refs,1)==1) { close(pin->fd); free(pin); }
+}
 struct md_landlock_ruleset {
     atomic_uint refs;
     uint64_t handled;
@@ -30,10 +35,12 @@ struct md_landlock_ruleset *md_landlock_ruleset_retain(struct md_landlock_rulese
 }
 void md_landlock_ruleset_release(struct md_landlock_ruleset *r) {
     if (!r || atomic_fetch_sub(&r->refs,1)!=1) return;
-    for (size_t i=0;i<r->count;++i) md_inode_lifetime_release(r->rules[i].key.store);
+    for (size_t i=0;i<r->count;++i) {
+        md_inode_lifetime_release(r->rules[i].key.store); pin_release(r->rules[i].pin);
+    }
     free(r->rules); free(r);
 }
-int md_landlock_rule_add(struct md_landlock_ruleset *r,const struct md_landlock_key *key,uint64_t allowed) {
+int md_landlock_rule_add(struct md_landlock_ruleset *r,const struct md_landlock_key *key,uint64_t allowed,int native_fd) {
     if (!allowed) return -ENOMSG;
     if (allowed&~r->handled) return -EINVAL;
     for (size_t i=0;i<r->count;++i) {
@@ -43,10 +50,17 @@ int md_landlock_rule_add(struct md_landlock_ruleset *r,const struct md_landlock_
         }
     }
     if (r->count>=SIZE_MAX/sizeof(struct rule)-1) return -ENOMEM;
+    struct inode_pin *pin=NULL;
+    if (native_fd>=0) {
+        pin=malloc(sizeof(*pin));
+        if (!pin) return -ENOMEM;
+        pin->fd=fcntl(native_fd,F_DUPFD_CLOEXEC,3); atomic_init(&pin->refs,1);
+        if (pin->fd<0) { int error=-errno; free(pin); return error; }
+    }
     struct rule *next=realloc(r->rules,(r->count+1)*sizeof(*next));
-    if (!next) return -ENOMEM;
+    if (!next) { pin_release(pin); return -ENOMEM; }
     r->rules=next;
-    next[r->count]=(struct rule){.key=*key,.allowed=allowed};
+    next[r->count]=(struct rule){.key=*key,.allowed=allowed,.pin=pin};
     next[r->count++].key.store=md_inode_lifetime_retain(key->store);
     return 0;
 }
@@ -71,7 +85,10 @@ struct md_landlock_policy *md_landlock_restrict(const struct md_landlock_policy 
         p->rules->rules=malloc(r->count*sizeof(struct rule));
         if (!p->rules->rules) { md_landlock_release(p); return NULL; }
         memcpy(p->rules->rules,r->rules,r->count*sizeof(struct rule));
-        for (size_t i=0;i<r->count;++i) md_inode_lifetime_retain(r->rules[i].key.store);
+        for (size_t i=0;i<r->count;++i) {
+            md_inode_lifetime_retain(r->rules[i].key.store);
+            if (r->rules[i].pin) atomic_fetch_add(&r->rules[i].pin->refs,1);
+        }
         p->rules->count=r->count;
     }
     p->parent=md_landlock_retain((struct md_landlock_policy *)parent);

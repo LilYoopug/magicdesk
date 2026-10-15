@@ -458,9 +458,16 @@ Do not edit its backing files as a normal rootfs: names, hardlinks, metadata and
 shared image ownership belong to the inode store. Use guest commands, explicit
 attachments or backup/restore.
 
+Eligible private root-owned regular files use native names by default, without
+per-file SQLite writes for creation, rename or deletion. Other files retain the
+catalogue path. Hardlinks and shared image operations promote native files into
+the same inode model without copying their data or invalidating open descriptors.
+This optimization does not bypass guest permissions, mounts or Landlock.
+
 Namespace changes become visible atomically. Ordinary writes and closes are not
 durability barriers: `fsync`, `fdatasync` and `syncfs` synchronize native data and
-the corresponding committed namespace metadata. Imports, image sealing and
+the corresponding committed catalogue metadata. Native-name directory entries
+require directory fsync or syncfs for durability, as on Linux. Imports, image sealing and
 snapshot publication also request explicit barriers. Unsynced changes may be
 lost on power failure; process-crash tests do not establish hardware power-loss
 guarantees. See [inode-store transactions](../native/shroot/inode-store.md#transactions).

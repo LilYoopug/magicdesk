@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "inode_watch.h"
 #include "inode_internal.h"
+#include "inode_leaf.h"
 #include "watch_queue.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -37,7 +38,7 @@ struct instance {
 struct watch_source {
     struct watch_source *next;
     struct md_inode_store *store;
-    int owned, native, presence, database, objects;
+    int owned, native, presence, database, objects, control, publishing;
     int sources[MDI_SOURCES];
     int64_t cursor;
     unsigned logical_subscriptions;
@@ -82,7 +83,7 @@ static void retire_native(struct md_inode_watches *w, struct watch_source *sourc
         for (struct subscription *p = i->subscriptions; p; p = p->next)
             if (p->source==source && p->native == wd) return;
     for (unsigned n = 0; n < MDI_SOURCES; ++n) if (source->sources[n] == wd) return;
-    if (wd >= 0 && wd != source->database) inotify_rm_watch(source->native, wd);
+    if (wd >= 0 && wd != source->database && wd != source->control) inotify_rm_watch(source->native, wd);
 }
 static void free_instance(struct md_inode_watches *w, struct instance *i) {
     while (i->subscriptions) {
@@ -146,7 +147,8 @@ static int source_get(struct md_inode_store *owner, struct md_inode_store *store
     if (!r && (p->native=inotify_init1(IN_NONBLOCK|IN_CLOEXEC))<0) r=-errno;
     if (!r) r=epoll_add(w->epoll,p->native,EPOLLIN);
     if (!r && (p->database=watch_path(p->native,s->lifetime->root,"/namespace.db-wal",IN_MODIFY))<0) r=p->database;
-    if (!r && (p->objects=watch_path(p->native,s->objects,"",DATA_EVENTS))<0) r=p->objects;
+    if (!r && (p->objects=watch_path(p->native,s->objects,"",DATA_EVENTS|IN_CREATE))<0) r=p->objects;
+    if (!r && (p->control=watch_path(p->native,s->lifetime->root,"",IN_CREATE))<0) r=p->control;
     p->sources[0]=p->objects;
     for (unsigned i = 1; !r && i < MDI_SOURCES; ++i) if (s->lifetime->sources[i] >= 0) {
         p->sources[i] = watch_path(p->native, s->lifetime->sources[i], "", DATA_EVENTS);
@@ -221,7 +223,7 @@ static int overflow(struct md_inode_watches *w) {
     }
     return 0;
 }
-static int journal(struct md_inode_watches *w, struct watch_source *source) {
+static int journal(struct md_inode_watches *w, struct watch_source *source,int64_t through) {
     struct md_inode_store *s=source->store;
     sqlite3_stmt *q = NULL;
     int r = mdi_query_acquire(s, MDI_EVENT_SCAN, &q);
@@ -230,6 +232,7 @@ static int journal(struct md_inode_watches *w, struct watch_source *source) {
         int rc = mdi_step(s, q);
         if (rc != SQLITE_ROW) { r = mdi_sql_error(rc); break; }
         int64_t sequence = sqlite3_column_int64(q, 0);
+        if (sequence>through) break;
         if (sequence != source->cursor + 1) r = overflow(w);
         const char *parent = (const char *)sqlite3_column_text(q, 1);
         const char *object = (const char *)sqlite3_column_text(q, 2);
@@ -256,7 +259,17 @@ static int journal(struct md_inode_watches *w, struct watch_source *source) {
 }
 static int native_event(struct md_inode_watches *w, struct watch_source *backend, const struct inotify_event *event) {
     struct md_inode_store *s=backend->store;
-    if (event->mask & IN_Q_OVERFLOW) return overflow(w);
+    if (event->mask & IN_Q_OVERFLOW) { backend->publishing=0; return overflow(w); }
+    if (event->wd==backend->control) {
+        if (event->len && !strcmp(event->name,"publication-v1.begin")) backend->publishing=1;
+        if (event->len && !strcmp(event->name,"publication-v1.end")) backend->publishing=0;
+        if (backend->logical_subscriptions && event->len && !strncmp(event->name,"events.",7)) {
+            char *end; errno=0;
+            long long sequence=strtoll(event->name+7,&end,10);
+            if (!errno && !*end && sequence>0) return journal(w,backend,sequence);
+        }
+        return 0;
+    }
     if (event->wd == backend->database) return 0;
     int r = 0;
     int source = -1;
@@ -277,6 +290,23 @@ static int native_event(struct md_inode_watches *w, struct watch_source *backend
         }
         r = mdi_query_release(object, r);
         if (r || !*id) return r;
+        if (event->mask&IN_CREATE) {
+            /* Allocation opens its backing before catalogue commit. Publish
+             * the committed birth at this position, before that native OPEN,
+             * without draining later mutations ahead of native names. */
+            sqlite3_stmt *birth=NULL;
+            r=mdi_query_acquire(s,MDI_EVENT_BIRTH,&birth);
+            if (!r) r=mdi_bind_id(birth,1,id);
+            if (!r) r=mdi_sql_error(sqlite3_bind_int64(birth,2,backend->cursor));
+            int64_t sequence=0;
+            if (!r) {
+                int next=mdi_step(s,birth);
+                if (next==SQLITE_ROW) sequence=sqlite3_column_int64(birth,0);
+                else if (next!=SQLITE_DONE) r=mdi_sql_failure(next);
+            }
+            r=mdi_query_release(birth,r);
+            return !r && sequence ? journal(w,backend,sequence) : r;
+        }
         /* Virtual subscriptions follow logical objects across copy-up. Watching
          * the retained backing directory observes the first write even before
          * another namespace owner processes the publication commit. */
@@ -316,8 +346,16 @@ static int native_event(struct md_inode_watches *w, struct watch_source *backend
         struct subscription **link = &i->subscriptions;
         while (*link && !r) {
             struct subscription *p = *link;
-            if (p->source==backend && p->native == event->wd) r = publish(w, i, link, event->mask, event->cookie,
-                event->len ? event->name : NULL);
+            if (p->source==backend && p->native == event->wd) {
+                /* The gate serializes namespace writers, not retained-FD IO.
+                 * Publication hides its physical move but never guest data IO. */
+                unsigned mask=event->mask;
+                if (*p->object) {
+                    if (!event->len) mask=0;
+                    else if (backend->publishing) mask&=~(IN_CREATE|IN_DELETE|IN_MOVED_FROM|IN_MOVED_TO);
+                }
+                if (mask) r=publish(w,i,link,mask,event->cookie,event->len ? event->name : NULL);
+            }
             if (*link == p) link = &p->next;
         }
     }
@@ -359,10 +397,14 @@ int md_inode_watch_pump(struct md_inode_store *s) {
         }
         int r=mdi_begin(p->store,0);
         if (r) return r;
-        r=journal(w,p);
         /* Level-triggered readiness retains the remainder; transactions never
          * span another backing store or an unbounded native writer burst. */
-        if (!r) r=drain_native(w,p,4*65536);
+        r=drain_native(w,p,4*65536);
+        int backlog=0;
+        if (!r && ioctl(p->native,FIONREAD,&backlog)) r=-errno;
+        /* An owner may die after COMMIT but before its stream marker. Only
+         * catch up once earlier queued native events have been consumed. */
+        if (!r && !backlog) r=journal(w,p,INT64_MAX);
         r=mdi_finish(p->store,r);
         if (r) return r;
     }
@@ -394,8 +436,9 @@ static int add(struct md_inode_store *owner, struct md_inode_store *selected,
     const struct md_identity *previous=s->identity;
     s->identity=selected->identity;
     if (!r) r = mdi_permission(s, &watched, R_OK, 0);
+    if (!r && watched.native && watched.attached) r=mdi_leaf_promote(s,&watched);
     s->identity=previous;
-    if (!r) memcpy(identity, watched.id, sizeof(identity));
+    if (!r && !watched.native) memcpy(identity, watched.id, sizeof(identity));
     r = mdi_finish(s, r);
     if (r && r != -EXDEV) return r;
     struct subscription *p = i->subscriptions;
@@ -421,11 +464,11 @@ static int add(struct md_inode_store *owner, struct md_inode_store *selected,
     if (!r) r = drain_native(w, source, (size_t)backlog);
     struct mdi_node node;
     if (!r) r = mdi_fd(s, object, &node);
-    if (!r) memcpy(p->object, node.id, sizeof(p->object));
+    if (!r && !node.native) memcpy(p->object, node.id, sizeof(p->object));
     else if (r == -EXDEV) r = 0;
     if (!r) r = journal_end(s, &p->after);
     if (!r) {
-        if (*p->object) {
+        if (*p->object && node.kind!=S_IFDIR) {
             p->native = -1;
         } else {
             p->native = watch_path(source->native, object, "", IN_ALL_EVENTS | IN_MASK_ADD);

@@ -1,9 +1,12 @@
 #define _GNU_SOURCE
 #include "inode_internal.h"
 #include "inode_overlay.h"
+#include "inode_leaf.h"
+#include "inode_native.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/fs.h>
+#include <stdio.h>
 #include <sys/inotify.h>
 #include <string.h>
 #include <unistd.h>
@@ -42,7 +45,7 @@ int md_inode_open_object(struct md_inode_store *s, const char *id, int flags) {
     int fd = -1;
     int directory = r ? -1 : mdi_backing_directory(s, &node);
     if (!r && directory < 0) r = directory;
-    if (!r && (fd = openat(directory, node.backing, flags | O_NOFOLLOW | O_CLOEXEC)) < 0) r = -errno;
+    if (!r && (fd=mdi_backing_open(s,&node,flags))<0) r=fd;
     r = mdi_finish(s, r);
     if (r && fd >= 0) close(fd);
     return r ? r : fd;
@@ -63,6 +66,14 @@ static int create_node(struct md_inode_store *s, int dirfd, const char *path,
     if (!r && (kind==S_IFCHR || kind==S_IFBLK) && s->identity
             && !md_identity_capable(s->identity,CAP_MKNOD)) r=-EPERM;
     if (!r) r=mdi_landlock(s,&loc.parent,NULL,md_landlock_make_access(kind));
+    if (!r && kind==S_IFREG) {
+        int fd=mdi_leaf_create(s,&loc.parent,loc.name,O_RDWR,mode);
+        if (fd!=-EOPNOTSUPP) {
+            r=mdi_finish(s,fd<0 ? fd : 0);
+            if (r && fd>=0) close(fd);
+            return r ? r : fd;
+        }
+    }
     if (!r) r=mdi_write(s);
     struct mdi_node node;
     int fd = -1;
@@ -173,6 +184,15 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
         if (!r && mdi_readonly(s)) r=-EROFS;
         if (!r) r = mdi_parent_writable(s, &loc.parent);
         if (!r) r=mdi_landlock(s,&loc.parent,NULL,MD_LL_MAKE_REG|md_landlock_open_access(flags,S_IFREG));
+        if (!r) {
+            fd=mdi_leaf_create(s,&loc.parent,loc.name,flags,mode);
+            if (fd!=-EOPNOTSUPP) {
+                r=mdi_finish(s,fd<0 ? fd : 0);
+                if (r && fd>=0) close(fd);
+                return r ? r : fd;
+            }
+            fd=-1;
+        }
         if (!r) r=mdi_write(s);
         if (!r) r = mdi_allocate(s, S_IFREG, mode, flags, NULL, loc.parent.id, &loc.node, &fd);
         if (!r) r = mdi_add_name(s, loc.parent.id, loc.name, loc.node.id);
@@ -203,7 +223,8 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
     if (!r && directory < 0) r = directory;
     int deferred = !r && loc.node.kind == S_IFIFO && !(flags & O_PATH);
     int native_flags = deferred || device ? O_PATH : flags & ~(O_CREAT | O_EXCL);
-    if (!r && (fd = openat(directory, loc.node.backing, native_flags | O_CLOEXEC | O_NOFOLLOW)) < 0) r = -errno;
+    if (!r && image) r=mdi_leaf_promote(s,&loc.node);
+    if (!r && (fd=mdi_backing_open(s,&loc.node,native_flags))<0) r=fd;
     if (!r && image) {
         struct stat opened;
         if (fstat(fd, &opened)) r = -errno;
@@ -236,6 +257,7 @@ int md_inode_link(struct md_inode_store *s, int sourcefd, const char *source,
     if (!r) r = mdi_parent_writable(s, &b.parent);
     if (!r && s->landlock && strcmp(a.parent.id,b.parent.id)) r=-EXDEV;
     if (!r) r=mdi_landlock(s,&b.parent,NULL,md_landlock_make_access(a.node.kind));
+    if (!r) r=mdi_leaf_promote(s,&a.node);
     if (!r) r = mdi_add_name(s, b.parent.id, b.name, a.node.id);
     if (!r) r = mdi_event(s, b.parent.id, &a.node, b.name, IN_CREATE, NULL);
     if (!r) r = mdi_event(s, NULL, &a.node, NULL, IN_ATTRIB, NULL);
@@ -243,8 +265,9 @@ int md_inode_link(struct md_inode_store *s, int sourcefd, const char *source,
 }
 int md_inode_unlink(struct md_inode_store *s, int dirfd, const char *path, int flags) {
     if (flags & ~AT_REMOVEDIR) return -EINVAL;
-    int r = mdi_begin(s, 1);
+    int r = mdi_begin(s, 0);
     if (r) return r;
+    if (mdi_readonly(s)) return mdi_finish(s,-EROFS);
     struct mdi_location loc;
     r = mdi_walk(s, dirfd, path, MDI_ENTRY, 0, &loc);
     if (!r && loc.special) {
@@ -262,6 +285,11 @@ int md_inode_unlink(struct md_inode_store *s, int dirfd, const char *path, int f
     if (!r) r = mdi_parent_writable(s, &loc.parent);
     if (!r) r = mdi_sticky(s, &loc);
     if (!r) r=mdi_landlock(s,&loc.parent,NULL,loc.node.kind==S_IFDIR ? MD_LL_REMOVE_DIR : MD_LL_REMOVE_FILE);
+    if (!r && loc.node.native) {
+        r=unlinkat(s->objects,loc.node.backing,0) ? -errno : 0;
+        return mdi_finish(s,r);
+    }
+    if (!r) r=mdi_write(s);
     if (!r) r = mdi_delete_name(s, loc.parent.id, loc.name);
     if (!r) r = mdi_removed_event(s, &loc, 1);
     return mdi_commit(s, r);
@@ -269,8 +297,9 @@ int md_inode_unlink(struct md_inode_store *s, int dirfd, const char *path, int f
 int md_inode_rename(struct md_inode_store *s, int sourcefd, const char *source,
         int targetfd, const char *target, unsigned flags) {
     if (flags != 0 && flags != RENAME_NOREPLACE && flags != RENAME_EXCHANGE) return -EINVAL;
-    int r = mdi_begin(s, 1);
+    int r = mdi_begin(s, 0);
     if (r) return r;
+    if (mdi_readonly(s)) return mdi_finish(s,-EROFS);
     struct mdi_location a, b;
     r = mdi_walk(s, sourcefd, source, MDI_ENTRY, 0, &a);
     if (!r) {
@@ -290,6 +319,7 @@ int md_inode_rename(struct md_inode_store *s, int sourcefd, const char *source,
         | (flags==RENAME_EXCHANGE ? md_landlock_make_access(b.node.kind) : 0));
     /* Kernel rename between two names of the same inode preserves both names. */
     if (!r && b.exists && !strcmp(a.node.id, b.node.id)) return mdi_finish(s, 0);
+    if (!r && s->overlay) r=mdi_write(s);
     if (!r && s->overlay) r=mdi_overlay_rename_directory(s,&a.node);
     if (!r && s->overlay && flags==RENAME_EXCHANGE) r=mdi_overlay_rename_directory(s,&b.node);
     if (!r && b.exists && flags != RENAME_EXCHANGE) {
@@ -312,6 +342,17 @@ int md_inode_rename(struct md_inode_store *s, int sourcefd, const char *source,
     if (!r) r = mdi_parent_writable(s, &b.parent);
     if (!r) r = mdi_sticky(s, &a);
     if (!r && b.exists) r = mdi_sticky(s, &b);
+    if (!r && a.node.native && b.parent.mode>=0 && !b.parent.source
+            && b.parent.attached && (!b.exists || b.node.native)) {
+        char target[NAME_MAX+34];
+        int n=snprintf(target,sizeof(target),"%s/%s",b.parent.backing,b.name);
+        if (n<0 || (size_t)n>=sizeof(target)) r=-ENAMETOOLONG;
+        else if (renameat2(s->objects,a.node.backing,s->objects,target,flags)) r=-errno;
+        return mdi_finish(s,r);
+    }
+    if (!r) r=mdi_leaf_promote(s,&a.node);
+    if (!r && b.exists) r=mdi_leaf_promote(s,&b.node);
+    if (!r) r=mdi_write(s);
     if (!r) r = mdi_delete_name(s, a.parent.id, a.name);
     if (!r && b.exists) r = mdi_delete_name(s, b.parent.id, b.name);
     if (!r) r = mdi_add_name(s, b.parent.id, b.name, a.node.id);
@@ -381,5 +422,6 @@ int md_inode_list(struct md_inode_store *s, int dirfd, const char *path,
         r = visit(name, context);
     }
     sqlite3_finalize(q);
+    if (!r) r=mdi_leaf_list(s,&loc.node,visit,context);
     return mdi_finish(s, r);
 }

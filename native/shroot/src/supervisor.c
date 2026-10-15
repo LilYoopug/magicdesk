@@ -1547,7 +1547,13 @@ static int executable_capture(pid_t actor,struct md_program *image) {
         int fd=view.ops->descriptor(view.context,O_RDONLY|O_CLOEXEC);
         if (fd<0) return fd;
         image->fd=fd;
-    } else if (!image->identity.object[0]) return -ENOENT;
+    } else if (!image->identity.object[0]) {
+        if (!target->executable_origin) return -ENOENT;
+        int fd=fcntl(md_fs_anchor_fd(target->executable_origin),F_DUPFD_CLOEXEC,0);
+        if (fd<0) return -errno;
+        image->fd=fd;
+        image->origin=md_fs_anchor_retain(target->executable_origin);
+    }
     return 0;
 }
 static int root_capture(pid_t actor,pid_t process,struct md_task_snapshot *snapshot) {
@@ -2741,8 +2747,9 @@ static void task_action_call_start(struct task_action *owner) {
         }
         boundary=(enum md_task_call_boundary)info.op;
     }
-    TRACE("PROBE selector-start requester=%d actor=%d remote=%d synthetic=%d boundary=%d pc=%llx nr=%llu value=%lld\n",
-        owner->requester ? owner->requester->pid : 0,actor->pid,owner->remote,owner->synthetic,boundary,
+    TRACE("PROBE selector-start requester=%d actor=%d remote=%d synthetic=%d kind=%u fd=%d boundary=%d pc=%llx nr=%llu value=%lld\n",
+        owner->requester ? owner->requester->pid : 0,actor->pid,owner->remote,owner->synthetic,
+        (unsigned)owner->kind,owner->number,boundary,
         (unsigned long long)saved.pc,(unsigned long long)saved.regs[8],(long long)saved.regs[0]);
     if (owner->loan) {
         struct md_task_call_arguments args={.number=SYS_close,.value={(unsigned long)owner->number}};
@@ -3925,7 +3932,7 @@ static void buffer_complete(struct md_fs_buffer_request *request, pid_t pid, int
         int anonymous=0;
         CHECK(md_fs_buffer_exec_take(request,t->exec_images,&t->exec_mount_flags,&anonymous,
             &t->prepared_executable_origin)>=0);
-        if (anonymous) {
+        if (anonymous && !t->prepared_executable_origin) {
             CHECK(!t->prepared_executable);
             t->prepared_executable=md_process_executable_new(t->exec_images[0]);
             if (!t->prepared_executable) { error=-errno; exec_images_release(t); }

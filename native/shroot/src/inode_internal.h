@@ -31,7 +31,7 @@ struct md_inode_lifetime {
 struct md_inode_lifetime *mdi_lifetime_new(int root, const struct stat *);
 enum mdi_query { MDI_NODE, MDI_FD, MDI_LOOKUP, MDI_DIRECTORY_NAME, MDI_READDIR,
     MDI_BEGIN, MDI_BEGIN_WRITE, MDI_COMMIT, MDI_ROLLBACK, MDI_EVENT, MDI_EVENT_TRIM,
-    MDI_EVENT_END, MDI_EVENT_SCAN, MDI_EVENT_NAMES, MDI_BACKING_OBJECT, MDI_FILE_PATH, MDI_ACL,
+    MDI_EVENT_END, MDI_EVENT_SCAN, MDI_EVENT_BIRTH, MDI_EVENT_NAMES, MDI_BACKING_OBJECT, MDI_FILE_PATH, MDI_ACL,
     MDI_OVERLAY_LINK, MDI_DATA_VERSION, MDI_ADD_NAME, MDI_DELETE_NAME, MDI_REPARENT,
     MDI_EMPTY, MDI_CREATE_OBJECT, MDI_METADATA, MDI_RESERVE_FIRST, MDI_RESERVE_ADD, MDI_RESERVE_TAKE, MDI_QUERY_COUNT };
 struct mdi_read_cache;
@@ -45,6 +45,7 @@ struct md_inode_store {
     sqlite3 *db;
     int objects, watch_presence, locked, recording, readonly, reflink_unavailable;
     int super_readonly, super_checked, nodev;
+    int native_files;
     sqlite3_int64 super_version;
     struct md_inode_lifetime *lifetime;
     const struct md_identity *identity;
@@ -64,6 +65,9 @@ struct md_inode_store {
     int cache_checked;
     unsigned read_depth;
     sqlite3_stmt *queries[MDI_QUERY_COUNT];
+    struct mdi_publication *publication;
+    sqlite3_int64 operation_changes;
+    sqlite3_int64 event_sequence;
 #ifdef MD_INODE_TESTING
     void (*observe)(enum md_inode_checkpoint, void *);
     void *context;
@@ -77,7 +81,7 @@ static inline const char *mdi_root(const struct md_inode_store *s) {
     return s->root_id ? s->root_id : s->lifetime->scope;
 }
 struct mdi_node {
-    char id[33], parent[33], backing[33], scope[33];
+    char id[33], parent[33], backing[NAME_MAX+34], scope[33];
     mode_t kind;
     dev_t device, logical_device, rdev;
     ino_t inode, logical_inode;
@@ -86,6 +90,9 @@ struct mdi_node {
     int mode;
     uint32_t uid, gid;
     unsigned acl_mask;
+    /* Native leaves are never cached. A positive descriptor borrows fd+1 only
+     * for the enclosing operation, including after unlink or pathname reuse. */
+    int native, descriptor;
 };
 struct mdi_location {
     struct mdi_node node, parent;
@@ -137,6 +144,7 @@ int mdi_node(struct md_inode_store *, const char *, struct mdi_node *);
 int mdi_fd(struct md_inode_store *, int, struct mdi_node *);
 int mdi_fd_membership(struct md_inode_store *, int, struct mdi_node *, int *attached);
 int mdi_lookup(struct md_inode_store *, const char *parent, const char *, struct mdi_node *);
+int mdi_catalogue_lookup(struct md_inode_store *, const char *parent, const char *, struct mdi_node *);
 int mdi_stat(struct md_inode_store *, const struct mdi_node *, struct stat *);
 int mdi_backing_stat(struct md_inode_store *, const struct mdi_node *, struct stat *);
 int mdi_fstat(struct md_inode_store *, int, struct mdi_node *, struct stat *);
@@ -192,6 +200,8 @@ int mdi_discard_untracked_backings(struct md_inode_store *);
 int mdi_source_register(struct md_inode_store *, int objects, int *source);
 int mdi_import_shared(struct md_inode_store *, int source, const char *backing, struct mdi_node *);
 int mdi_backing_directory(struct md_inode_store *, const struct mdi_node *);
+int mdi_backing_open(struct md_inode_store *, const struct mdi_node *, int flags);
+int mdi_backing_path(struct md_inode_store *, const struct mdi_node *, char *, size_t);
 int mdi_fifo_prepare(struct md_inode_store *, int, struct md_open_completion *);
 int mdi_channel(struct md_inode_store *, const struct mdi_node *, char [33], int *source);
 int mdi_channel_copy(struct md_inode_store *, const struct mdi_node *, struct md_inode_store *, const struct mdi_node *);
@@ -200,4 +210,6 @@ void mdi_fifo_close(struct md_inode_store *);
 int mdi_event(struct md_inode_store *, const char *parent, const struct mdi_node *,
         const char *name, unsigned mask, unsigned *cookie);
 int mdi_removed_event(struct md_inode_store *, const struct mdi_location *, int parent_event);
+int mdi_watch_marker(struct md_inode_store *,const char *);
+int mdi_events_committed(struct md_inode_store *);
 #endif

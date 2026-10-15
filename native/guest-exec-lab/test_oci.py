@@ -1020,6 +1020,36 @@ sys.stdin.read()
         self.assertEqual(body.stat().st_atime_ns, 123456789000000123)
         self.assertEqual(json.loads(self.command('inspect', restored).stdout)['guestUsers'], 0)
 
+    def test_backup_omits_private_native_metadata(self):
+        self.run_import(self.layout(), preserve=True)
+        body = self.body('hello')
+        libc = ctypes.CDLL(None, use_errno=True)
+        private = b'user.shroot.metadata'
+        self.assertEqual(libc.setxattr(os.fsencode(body), private, b'private', 7, 0), 0)
+        backup = self.root / 'backup.tar.zst'
+        self.command('backup', self.destination, backup)
+        restored = self.root / 'restored'
+        self.command('restore', backup, restored)
+        libc.getxattr.restype = ctypes.c_ssize_t
+        self.assertEqual(libc.getxattr(os.fsencode(self.body('hello', restored)), private, None, 0), -1)
+        self.assertEqual(ctypes.get_errno(), errno.ENODATA)
+        with database(self.destination / 'namespace.db') as original, database(restored / 'namespace.db') as copy:
+            query = "SELECT mode,uid,gid FROM objects WHERE kind=32768 ORDER BY mode,uid,gid"
+            self.assertEqual(original.execute(query).fetchall(), copy.execute(query).fetchall())
+
+    def test_restore_rejects_private_native_metadata(self):
+        header = encoded({'format': 1, 'guestUsers': 1, 'imageConfig': {}})
+        archive = self.root / 'private.tar'
+        archive.write_bytes(tar([
+            ('magicdesk-backup.json', 'file', header),
+            ('rootfs/file', 'file', b'body', 0o644, 0, 0,
+             {'magicdesk.backup.mode': (0o644).to_bytes(2, 'little'), 'user.shroot.metadata': b'forged'}),
+        ]))
+        result = self.command('restore', archive, self.destination, success=False)
+        self.assertIn(os.strerror(errno.EPERM), result.stderr)
+        self.assertFalse(self.destination.exists())
+        self.assertFalse(list(self.root.glob('.md-image-*')))
+
     def test_rootfs_archive_preserves_whiteout_names(self):
         source = self.root / 'rootfs.tar.gz'
         source.write_bytes(gzip.compress(tar([('.wh.user-file', 'file', b'ordinary')])) )

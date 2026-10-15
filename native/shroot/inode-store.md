@@ -7,6 +7,7 @@ changing identity or special-casing dpkg.
 
 - [Ownership](#ownership)
 - [Storage Evolution](#storage-evolution)
+- [Native Publication](#native-publication)
 - [Paths And Directories](#paths-and-directories)
 - [Directory Cursors](#directory-cursors)
 - [Offline Import](#offline-import)
@@ -16,10 +17,13 @@ changing identity or special-casing dpkg.
 
 ## Ownership
 
-Each object has a current ordinary native file, empty directory or symlink backing.
+Each object has a current ordinary native file, directory or symlink backing.
 Immutable image bodies can be shared through explicitly retained source directories;
-writable instances promote regular files on mutation. Names and directory parent edges refer to objects through
-SQLite. Adding a name does not copy or move the object.
+writable instances copy up shared regular files on mutation. SQLite owns directory
+parent edges, shared objects and aliases. Eligible private regular files instead
+keep their ordinary names inside the backing of their catalogued parent. They
+enter the catalogue when an operation needs shared identity; later adding an
+alias neither copies nor moves the object.
 Within one current backing, descriptors opened before and after linking share the actual kernel device/inode,
 data, mappings and file locks. Data IO, mmap and descriptor duplication stay native.
 
@@ -54,6 +58,12 @@ lookup, `inode_metadata.c` owns guest permissions and metadata mutations, and
 immutable-source snapshots; `inode_backing.c` owns source validation and copy-up.
 `inode_reserve.c` owns durable allocation inventory; `inode_durability.c` owns
 native data barriers and the metadata checkpoint boundary.
+`inode_publication.c` owns recoverable native-leaf promotion and the shared
+pending-publication hint used by independently running owners.
+`inode_native.c` owns native regular-leaf creation and sparse logical metadata,
+including retained O_PATH and open-unlinked descriptions.
+`inode_leaf.c` connects those leaves to path/FD resolution, admission and
+materialization at shared-source boundaries. Native leaf nodes are not cached.
 `inode_view.c` owns retained namespace projections within one store transaction
 domain; `inode_maintenance.c` collects untracked backing objects only under
 exclusive maintenance or before a store is published.
@@ -71,7 +81,10 @@ unlink, including stale listeners; existing connections survive unlink/rebind.
 
 Format 17 is the compatibility baseline. SQLite `application_id=0x53485254`
 identifies Shroot, `user_version=17` identifies the storage family, and the
-`properties` row `schema-revision` identifies the metadata revision (initially 1).
+`properties` row `schema-revision` identifies the metadata revision (initially 1,
+currently 2). Revision 2 adds native-publication intents and large directory-cookie
+mappings; it does not
+move installed data or change image import identity.
 Admission validates those markers before current-schema namespace queries or
 journal changes. Unknown families, missing markers and newer revisions fail;
 there is no reader/writer implementation for formats 14-16 or automatic deletion.
@@ -182,6 +195,107 @@ Unknown devices return ENXIO on data open; O_PATH and stat remain available.
 Native access denials remain errors, and nodev denies new data opens without
 invalidating existing IO. Readonly mounts protect metadata, not device IO.
 
+## Native Publication
+
+Eligible guest creation uses native leaves by default, without an experimental
+flag. The parent must be attached, local, outside an overlay projection, have
+virtual permissions and no default ACL. The store probes user-xattr metadata on
+an unnamed temporary file during admission/reconnection; failure retains the
+catalogue allocator. Inspection does not probe or mutate. Trusted tree imports
+using physical permissions retain their previous allocation path; OCI metadata
+and directories created with guest credentials use virtual permissions.
+
+An eligible private regular leaf (logical UID/GID zero, owner-readable/writable,
+no sticky or set-ID bits) uses its native name and mode. Create, stat, ordinary
+chmod, rename and unlink need no SQL writes, metadata xattr or forced synchronization.
+Ineligible creates stay with the catalogue allocator. This is a storage mechanism,
+not a permission bypass: the provider must still resolve the parent and enforce
+identity, ACL, mount, readonly and Landlock policy under the existing store gate.
+The executor's process umask is zero; creation receives the already-masked guest
+mode. These helpers must never interpret arbitrary native-bind files as leaves.
+
+Exceptional ownership/modes, access ACLs and file capabilities use a fixed,
+little-endian `user.shroot.metadata` record. Physical mode 01700 is its selector,
+not guest permission or a kernel
+set-ID grant. The first transition writes and syncs the **old** logical state,
+switches the selector, then atomically replaces the record with the new state.
+Interruption/failure leaves old or new logical permissions, never widened backing
+permissions interpreted as guest state. Later record updates require no barrier.
+Returning to an eligible root-owned state is one native chmod; the old xattr
+becomes inert, so subsequent stat again avoids xattr lookup. Missing or malformed
+selected metadata fails explicitly. This requires usable native user xattrs before
+enabling leaf creation in a store; capability denial must not be inferred away.
+
+Metadata operations use the retained FD, with its proc magic link for O_PATH,
+including after rename/unlink. They never reopen the former guest pathname.
+The shared xattr boundary hides/rejects the reserved `user.shroot.` namespace.
+Attribute copying for COW and overlay does not import a source's private record
+or erase a destination's record. Portable backups export logical ownership and
+permissions, omit private records and reject forged private records on restore.
+
+Promotion retains the same physical regular inode, including existing FDs,
+mappings, locks and data. The caller borrows the existing store gate and must
+have one unchanged operation snapshot. The owner syncs the native body and
+parent, commits an intent with FULL WAL synchronization, moves the body with
+`RENAME_NOREPLACE`, syncs both directories, then publishes its object/name rows
+and removes the intent in one FULL transaction. It resumes the original
+operation snapshot without releasing the gate. Ownership and mode are read from
+the validated leaf by the metadata owner, not supplied by its caller.
+Promotion changes representation,
+not the guest namespace: the enclosing operation owns its logical events.
+
+Hardlinks, mixed native/catalogue rename, pathname-based execution and attached file-watch
+registration promote before consuming catalogue identity. Sealing, backup and
+overlay admission materialize the selected namespace before existing SQL-based
+snapshot/COW logic runs. Moving into a physical-permission directory promotes too.
+The source is not copied and no kernel hardlink permission is needed. Open native
+FDs resolve through their actual proc alias, including deletion; after promotion
+they resolve through the catalogue's device/inode association. Landlock file rules
+pin the original FD so host inode-number reuse cannot reassign a grant.
+
+Descriptor execution retains the exact image origin instead of promoting a name.
+The filesystem owner rechecks logical execute permission, Landlock and mount
+policy, including for an unlinked image with sparse metadata. The existing
+process-owned origin survives CLOEXEC, fork and `/proc/self/exe` reexec; local
+and foreign `/proc/PID/exe` reads use the same captured origin. Reexec or final
+process release retires it. This adds no permanent native-object registry or
+retained descriptor to unrelated files. Anonymous memfd execution keeps its
+separate kernel-image owner and cannot substitute for failed managed admission.
+
+`publication-v1.state` is a four-byte, shared atomic hint, not authoritative
+storage. It is set before the intent can commit and cleared only after catalogue
+publication. Existing owners inspect that memory under the store gate before
+starting a transaction; an interrupted writer therefore cannot leave another
+live owner reading a half-published namespace. The ordinary path adds no journal
+query, file probe, sync or descriptor allocation. Cold admission always checks
+the durable intent, independently of the hint's persisted contents. Inspection
+reports EBUSY instead of completing a pending mutation.
+
+Recovery checks the expected source/destination identities and completes the
+same representation transition. Conflicting files are not overwritten, copied
+or discarded. A pending IO failure remains an error until recovery succeeds;
+it is not permission to replay the guest syscall. FULL synchronization applies
+only to exceptional publication; normal connections retain their existing
+NORMAL/temporary-OFF policy. This is not a second general-purpose namespace
+database or a per-syscall schema migration.
+
+`test_publication`, included in `test_resources.py BUILD --case stores`, covers
+retained FD/mmap/flock identity, hardlinks and unlink, transition into the
+existing shared-source snapshot/COW path, cold and already-open recovery,
+process death during recovery itself, sync/move/catalogue failures, conflicting
+native identity, admission rejection and zero steady-state journal queries.
+`test_native_leaf` covers 1024 ordinary native cycles with zero xattr/sync calls,
+FD/mmap identity after deletion and pathname reuse, O_PATH metadata, returning to
+implicit metadata, four SIGKILL points and four IO-failure points in the first
+metadata transition, malformed records, native namespace events, promotion and
+attribute-copy filtering. The stores runner also executes real backup/restore
+and checks ownership, visible user attributes and absence of private records.
+The integrated fixture also checks zero-write production namespace cycles, mixed
+catalogue/native enumeration and notifications, CREATE/OPEN/CLOSE order, cold
+descriptor recovery, ACL/capability promotion, Landlock pin lifetime, sealing,
+snapshot COW and overlay lower/upper admission. These are not power-loss tests or
+proof of complete mixed watch semantics; see the [watch limits](watches.md#limits).
+
 ## Paths And Directories
 
 Absolute paths start at the model's root; relative paths use an explicit root
@@ -222,7 +336,8 @@ the original descriptor dentry is ambiguous even after all but one alias is remo
 readlink returns ENOTSUP instead of guessing. Data and descriptor operations still work.
 
 POSIX access/default ACLs are canonical Linux xattr values in `inode_acls`, shared
-by every alias and copied with image metadata. A transactional `acl_mask` on the
+by every alias and copied with image metadata. Native leaves keep access ACLs in
+their private metadata record until promotion. A transactional `acl_mask` on the
 object avoids extra lookups for ordinary mode-only access. Named users/groups,
 the ACL mask, chmod and default inheritance use the caller's guest credentials.
 Creation carries both the requested mode and kernel umask: a default ACL is
@@ -240,10 +355,16 @@ attribute restrictions. Attribute listing does not require file-read access.
 ## Directory Cursors
 
 `md_inode_getdents` emits aligned Linux getdents64 records with logical inode
-numbers and types, `.`/`..`, and opaque monotonic cookies. Committed name cookies
+numbers and types, `.`/`..`, and opaque cookies. Committed catalogue name cookies
 are not reused after deletion. Enumeration uses an indexed database read snapshot
 per batch; changes between batches have ordinary non-snapshot traversal semantics.
 An undersized first-record buffer fails without advancing the cursor.
+Enumeration visits catalogue names, then native leaves using a separate temporary
+directory description. Large host cookies use persistent store-wide mappings;
+small cookies encode directly. Published offsets stay below INT32_MAX for F2FS
+directory-seek compatibility; exhausted cookie ranges fail with EOVERFLOW. These
+mappings preserve saved positions across reconnect and cold SCM transfer, rather
+than keeping a process-local iterator. Native-phase order is filesystem-defined.
 An optional synchronous delivery callback runs after the read transaction and
 before cursor advancement. Rejected or cancelled delivery leaves the offset
 unchanged; successful delivery precedes the native seek. The namespace owner
@@ -334,7 +455,7 @@ independent of OCI parsing and launch-local directory attachments.
   change is needed. Creation, copy-up and overlay publication promote that
   sole snapshot under its retained exclusive store gate. Nested read snapshots
   cannot promote. No pathname is re-resolved and no mutation is replayed.
-- Guest regular-file creation claims a preallocated backing from a batch of 32.
+- Catalogue-backed guest regular-file creation claims a preallocated backing from a batch of 32.
   All backing files and their containing directory are synced before inventory
   rows enter the WAL. Claim removal and logical-object publication share one
   transaction. No live or unlinked object is recycled. A claim restored by loss
@@ -346,10 +467,16 @@ independent of OCI parsing and launch-local directory attachments.
   credentials preserve native umask semantics and also allocate directly.
   Other types sync their containing directory before publishing a reference.
   Snapshots do not copy a source's allocation inventory.
-- Link, unlink, rename, replacement and exchange each use one database transaction.
+- Catalogue link, unlink, rename, replacement and exchange each use one database transaction.
   Names are byte strings, not UTF-8 text or concatenated SQL. A same-inode rename
   preserves both names; NOREPLACE rejects an existing target.
   Directory moves/exchanges change parent edges in the same transaction as names.
+- Eligible native creation, rename and unlink use kernel namespace operations
+  under the same gate and a read snapshot, without catalogue writes. Native
+  file fsync synchronizes the body; durability of its directory entry requires
+  directory fsync or syncfs, as with ordinary Linux files. Native metadata/data
+  changes are not rolled back by a later SQLite/read-delivery failure. Uncertain
+  outcomes must not be replayed automatically.
 - Reads resolve names in a snapshot. They cannot see half an exchange. Contents
   are not transactional: writes through returned FDs follow kernel IO semantics.
 - Store opening, connection close and each metadata operation take an exclusive kernel `flock`

@@ -17,12 +17,20 @@
 #include <fcntl.h>
 #include <linux/openat2.h>
 #include <linux/mount.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/inotify.h>
 #include <sys/syscall.h>
 #include <sys/vfs.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
+
+void md_fs_statistics_report(int fd,const struct md_fs_statistics *stats) {
+    for (unsigned i=MD_FS_CREATE;i<=MD_FS_LAST;++i) if (stats->operation[i].calls)
+        dprintf(fd,"MD_FS operation=%u calls=%llu ns=%llu name=%s\n",i,
+            (unsigned long long)stats->operation[i].calls,
+            (unsigned long long)stats->operation[i].nanoseconds,md_fs_operation_name(i));
+}
 
 void md_fs_view_execute(struct md_filesystem *fs, const struct md_fs_request *q,
         struct md_fs_result *out, const struct md_fs_output *output) {

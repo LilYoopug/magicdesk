@@ -34,8 +34,9 @@ def main():
             pending.append(dependency)
     files["lib/ld-linux-aarch64.so.1"] = (root / "lib/ld-linux-aarch64.so.1").read_bytes()
     files["usr/share/dbus-1/session.conf"] = (root / "usr/share/dbus-1/session.conf").read_bytes()
-    files["etc/passwd"] = b"shell:x:2000:2000:Guest fixture:/tmp:/bin/sh\n"
-    files["etc/group"] = b"shell:x:2000:\n"
+    files["etc/passwd"] = (b"root:x:0:0:Guest root fixture:/tmp:/bin/sh\n"
+                           b"shell:x:2000:2000:Guest fixture:/tmp:/bin/sh\n")
+    files["etc/group"] = b"root:x:0:\nshell:x:2000:\n"
     files["etc/nsswitch.conf"] = b"passwd: files\ngroup: files\nhosts: files dns\n"
     files["etc/machine-id"] = (uuid.uuid4().hex + "\n").encode()
     directories = {"tmp", "etc/dbus-1/session.d", "usr/share/dbus-1/session.d", "usr/share/dbus-1/services"}

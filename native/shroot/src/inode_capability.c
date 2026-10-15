@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "inode_internal.h"
 #include "inode_overlay.h"
+#include "inode_leaf.h"
 #include "fs_operation.h"
 #include <errno.h>
 #include <string.h>
@@ -10,6 +11,7 @@
 int mdi_file_capability(struct md_inode_store *s, const struct mdi_node *node,
         const void *value, size_t size) {
     if (value && (!md_file_capability_valid(value, size) || node->kind != S_IFREG)) return -EINVAL;
+    if (node->native) return mdi_leaf_attribute_set(s,node,1,value,value ? size : 0,node->mode);
     sqlite3_stmt *q = NULL;
     int r = mdi_prepare(s, value ? "INSERT OR REPLACE INTO file_capabilities VALUES(?1,?2)"
         : "DELETE FROM file_capabilities WHERE object=?1", &q);
@@ -23,17 +25,25 @@ int md_inode_capability(struct md_inode_store *s, const struct md_fs_request *re
     int write = request->operation != MD_FS_GETCAP;
     if (request->flags & ~(XATTR_CREATE | XATTR_REPLACE)) return -EINVAL;
     if (request->operation != MD_FS_SETCAP && request->flags) return -EINVAL;
-    int r = mdi_begin(s, write);
+    int r = mdi_begin(s, 0);
     if (r) return r;
     struct mdi_node node;
-    r = mdi_fd(s, request->directory[0], &node);
+    if (write && mdi_readonly(s)) r=-EROFS;
+    if (!r) r = mdi_fd(s, request->directory[0], &node);
     if (!r && write) r=mdi_setattr_permission(s,&node,request,s->identity);
+    if (!r && write && !node.native) r=mdi_write(s);
     if (!r && write) r=mdi_overlay_setattr(s,&node,request);
     sqlite3_stmt *q = NULL;
-    if (!r) r = mdi_prepare(s, "SELECT value FROM file_capabilities WHERE object=?1", &q);
-    if (!r) r = mdi_bind_id(q, 1, node.id);
     int present = 0, size = 0;
-    if (!r) {
+    if (!r && node.native) {
+        ssize_t n=mdi_leaf_attribute(s,&node,1,!write ? data : NULL,!write ? capacity : 0);
+        if (n>=0) { present=1; size=(int)n; if (!write && (!data || capacity<(size_t)n)) r=-ERANGE; }
+        else if (n!=-ENODATA) r=(int)n;
+    } else if (!r) {
+        r=mdi_prepare(s,"SELECT value FROM file_capabilities WHERE object=?1",&q);
+        if (!r) r=mdi_bind_id(q,1,node.id);
+    }
+    if (!r && q) {
         int rc = mdi_step(s, q);
         if (rc == SQLITE_ROW) {
             present = 1; size = sqlite3_column_bytes(q, 0);

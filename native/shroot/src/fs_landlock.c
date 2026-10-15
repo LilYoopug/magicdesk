@@ -120,7 +120,7 @@ void md_fs_landlock(struct md_filesystem *fs,const struct md_fs_request *q,
                 if (!r) {
                     struct md_landlock_key key={.store=s->lifetime};
                     memcpy(key.object,node.id,sizeof(key.object));
-                    r=md_landlock_rule_add(rules,&key,access);
+                    r=md_landlock_rule_add(rules,&key,access,node.native ? loc.fd : -1);
                 }
                 r=mdi_finish(s,r);
             }

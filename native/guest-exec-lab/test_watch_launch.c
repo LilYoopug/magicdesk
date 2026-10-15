@@ -10,6 +10,7 @@
 
 static pid_t children[8];
 static unsigned count;
+static const char *user = "2000:2000";
 static void cleanup(void) {
     for (unsigned i = 0; i < count; ++i) if (children[i] > 0) kill(children[i], SIGTERM);
     while (waitpid(-1, NULL, 0) > 0 || errno == EINTR) { }
@@ -21,11 +22,11 @@ static pid_t launch(const char *run, const char *store, const char *mode, int *o
     if (!pid) {
         close(p[0]); CHECK(dup2(p[1], STDOUT_FILENO) == STDOUT_FILENO); close(p[1]);
         if (!strcmp(mode, "gio")) {
-            execl(run, run, "--statistics", "--store", store, "--home", "/tmp", "--cwd", "/", "--",
+            execl(run, run, "--statistics", "--user", user, "--store", store, "--home", "/tmp", "--cwd", "/", "--",
                 "/bin/watch-gio", "/tmp/shared", (char *)NULL);
             _exit(127);
         }
-        execl(run, run, "--store", store, "--home", "/tmp", "--cwd", "/", "--", "/bin/watch", "shared", mode,
+        execl(run, run, "--user", user, "--store", store, "--home", "/tmp", "--cwd", "/", "--", "/bin/watch", "shared", mode,
             "/tmp/shared", (char *)NULL);
         _exit(127);
     }
@@ -49,10 +50,16 @@ static void ready(int output) {
     }
 }
 int main(int argc, char **argv) {
-    CHECK(argc == 3 || (argc == 4 && !strcmp(argv[3], "gio"))); CHECK(!atexit(cleanup));
+    CHECK(argc >= 3);
+    int gio_mode=0;
+    for (int i=3;i<argc;++i) {
+        if (!strcmp(argv[i],"--user")) { CHECK(i+1<argc); user=argv[++i]; }
+        else { CHECK(!strcmp(argv[i],"gio") && !gio_mode); gio_mode=1; }
+    }
+    CHECK(!atexit(cleanup));
     int output;
     pid_t pid;
-    if (argc == 4) {
+    if (gio_mode) {
         int monitor;
         pid_t gio = launch(argv[1], argv[2], "gio", &monitor); ready(monitor);
         pid = launch(argv[1], argv[2], "writer", &output); complete(pid, output);

@@ -5,6 +5,8 @@
 #include "inode_overlay.h"
 #include "storage_database.h"
 #include "inode_schema.h"
+#include "inode_publication.h"
+#include "inode_leaf.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -132,7 +134,12 @@ int mdi_begin(struct md_inode_store *s, int write) {
     }
     int r = store_lock(s);
     if (r) return r;
+    if (mdi_publication_pending(s)) {
+        r=mdi_publication_recover(s);
+        if (r) return store_unlock(s,r);
+    }
     s->recording = 0;
+    s->event_sequence=0;
     s->write_transaction=!!write;
     s->cache_checked=0;
     if (write) r=watch_writes(s);
@@ -151,7 +158,10 @@ int mdi_begin(struct md_inode_store *s, int write) {
         if (!r) r=mdi_super_refresh(s,version);
         if (!r && write && s->super_readonly) r=-EROFS;
         if (r) transaction(s,MDI_ROLLBACK);
-        else if (!write) s->read_depth=1;
+        else {
+            if (!write) s->read_depth=1;
+            s->operation_changes=sqlite3_total_changes64(s->db);
+        }
     }
     return r ? store_unlock(s, r) : 0;
 }
@@ -161,6 +171,7 @@ int mdi_finish(struct md_inode_store *s, int result) {
     if (!result && s->write_transaction && s->overlay) result=mdi_overlay_flush(s);
     if (!result) result = transaction(s, MDI_COMMIT);
     if (result) transaction(s, MDI_ROLLBACK);
+    else result=mdi_events_committed(s);
     if (!result && s->sync_requested) result=mdi_checkpoint(s);
     s->sync_requested=0;
     s->write_transaction=0;
@@ -247,6 +258,7 @@ int mdi_query_acquire(struct md_inode_store *s, enum mdi_query slot, sqlite3_stm
         [MDI_EVENT_TRIM] = "DELETE FROM events WHERE sequence<=?1-65536",
         [MDI_EVENT_END] = "SELECT coalesce(max(sequence),0) FROM events",
         [MDI_EVENT_SCAN] = "SELECT sequence,parent,object,name,mask,cookie FROM events WHERE sequence>?1 ORDER BY sequence",
+        [MDI_EVENT_BIRTH] = "SELECT sequence FROM events WHERE object=?1 AND sequence>?2 AND (mask&256)!=0 ORDER BY sequence LIMIT 1",
         [MDI_EVENT_NAMES] = "SELECT n.parent,n.name FROM names n JOIN backings b ON b.object=n.object WHERE b.backing=?1 AND b.source=?2 AND b.scope=?3",
         [MDI_BACKING_OBJECT] = "SELECT object FROM backings WHERE backing=?1 AND source=?2 AND scope=?3",
         [MDI_FILE_PATH] = "SELECT parent,name,ambiguous FROM file_paths WHERE object=?1",
@@ -314,9 +326,11 @@ static int descriptor_node(struct md_inode_store *s, const struct stat *st,
 }
 int mdi_fd(struct md_inode_store *s, int fd, struct mdi_node *node) {
     struct stat st;
-    return fstat(fd, &st) ? -errno : descriptor_node(s, &st, node);
+    if (fstat(fd,&st)) return -errno;
+    int r=descriptor_node(s,&st,node);
+    return r==-EXDEV ? mdi_leaf_descriptor(s,fd,&st,node) : r;
 }
-int mdi_lookup(struct md_inode_store *s, const char *parent, const char *name, struct mdi_node *node) {
+int mdi_catalogue_lookup(struct md_inode_store *s, const char *parent, const char *name, struct mdi_node *node) {
     char selected[33];
     int cacheable=strnlen(parent,sizeof(selected))<sizeof(selected);
     if (cacheable) strcpy(selected,parent);
@@ -331,6 +345,10 @@ int mdi_lookup(struct md_inode_store *s, const char *parent, const char *name, s
     r=mdi_query_release(q,r);
     if (cacheable) mdi_cache_put(s,&key,node,r);
     return r;
+}
+int mdi_lookup(struct md_inode_store *s,const char *parent,const char *name,struct mdi_node *node) {
+    int r=mdi_catalogue_lookup(s,parent,name,node);
+    return r==-ENOENT ? mdi_leaf_lookup(s,parent,name,node) : r;
 }
 int mdi_add_name(struct md_inode_store *s, const char *parent, const char *name, const char *object) {
     sqlite3_stmt *q = NULL;
@@ -359,6 +377,7 @@ int mdi_reparent(struct md_inode_store *s, const struct mdi_node *node, const ch
     if (!r) r = mdi_sql_error(mdi_step(s, q));
     return mdi_query_release(q,r);
 }
+static int not_empty(const char *name,void *context) { (void)name; (void)context; return 1; }
 int mdi_empty(struct md_inode_store *s, const struct mdi_node *node) {
     sqlite3_stmt *q = NULL;
     int r = mdi_query_acquire(s, MDI_EMPTY, &q);
@@ -367,7 +386,9 @@ int mdi_empty(struct md_inode_store *s, const struct mdi_node *node) {
         int rc = mdi_step(s, q);
         r = rc == SQLITE_ROW ? sqlite3_column_int(q, 0) : mdi_sql_failure(rc);
     }
-    return mdi_query_release(q,r);
+    r=mdi_query_release(q,r);
+    if (r==1) { int native=mdi_leaf_list(s,node,not_empty,NULL); r=native<0 ? native : !native; }
+    return r;
 }
 static int backing_identity(const struct mdi_node *node, struct stat *st) {
     mode_t backing = node->kind == S_IFSOCK || node->kind == S_IFIFO
@@ -380,6 +401,7 @@ static int backing_identity(const struct mdi_node *node, struct stat *st) {
     return 0;
 }
 int mdi_backing_stat(struct md_inode_store *s, const struct mdi_node *node, struct stat *st) {
+    if (node->descriptor) return fstat(node->descriptor-1,st) ? -errno : backing_identity(node,st);
     int directory = mdi_backing_directory(s, node);
     return directory < 0 ? directory : fstatat(directory, node->backing, st, AT_SYMLINK_NOFOLLOW) ? -errno : backing_identity(node, st);
 }
@@ -388,6 +410,7 @@ int mdi_fd_membership(struct md_inode_store *s, int fd, struct mdi_node *node, i
     if (fstat(fd, &st)) return -errno;
     if (s->statistics) s->statistics->membership_queries++;
     int r = descriptor_node(s, &st, node);
+    if (r==-EXDEV) r=mdi_leaf_descriptor(s,fd,&st,node);
     if (!r && (st.st_mode & S_IFMT) != (node->kind == S_IFSOCK ? S_IFREG : node->kind)
             && !((node->kind == S_IFIFO || node->kind == S_IFCHR || node->kind == S_IFBLK)
                 && S_ISREG(st.st_mode))) r = -EIO;
@@ -398,6 +421,7 @@ int mdi_fstat(struct md_inode_store *s, int fd, struct mdi_node *node, struct st
     if (fstat(fd, st)) return -errno;
     if (s->statistics) s->statistics->link_count_queries++;
     int r = descriptor_node(s, st, node);
+    if (r==-EXDEV) r=mdi_leaf_descriptor(s,fd,st,node);
     if (!r && (st->st_mode & S_IFMT) != (node->kind == S_IFSOCK ? S_IFREG : node->kind)
             && !((node->kind == S_IFIFO || node->kind == S_IFCHR || node->kind == S_IFBLK)
                 && S_ISREG(st->st_mode))) r = -EIO;
@@ -556,6 +580,7 @@ static int store_open(const char *directory, int create, int exclusive, int prep
     }
     sqlite3_stmt *q = NULL;
     if (!r && (create || (prepare && !retained))) r=mdi_schema_indexes(s);
+    if (!r) r=mdi_publication_open(s,create || prepare || retained);
     if (!r) r = mdi_prepare(s, "SELECT value FROM properties WHERE key='sealed'", &q);
     if (!r) {
         int rc = mdi_step(s, q);
@@ -569,6 +594,7 @@ static int store_open(const char *directory, int create, int exclusive, int prep
     if (!r) r = mdi_sources_open(s);
     if (!r) r = md_inode_view_validate(s);
     if (!r) r = mdi_overlay_writer_open(s);
+    if (!r && (prepare || retained)) mdi_leaf_admit(s);
     r = store_unlock(s, r);
     if (!r && exclusive) r=mdi_views_maintain(s);
     if (r) md_inode_store_close(s); else *out = s;
@@ -596,6 +622,7 @@ void md_inode_store_close(struct md_inode_store *s) {
     mdi_overlay_writer_close(s);
     md_inode_watch_close(s);
     mdi_fifo_close(s);
+    mdi_publication_close(s);
     for (unsigned i = 0; i < MDI_QUERY_COUNT; i++) sqlite3_finalize(s->queries[i]);
     if (s->db) {
         /* The last WAL connection checkpoints and removes its sidecars. Keep

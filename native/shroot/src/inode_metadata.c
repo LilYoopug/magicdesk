@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "inode_internal.h"
 #include "inode_overlay.h"
+#include "inode_native.h"
 #include "fs_operation.h"
 #include "linux_abi.h"
 #include "file_permissions.h"
@@ -146,6 +147,12 @@ int mdi_setattr_permission(struct md_inode_store *s, const struct mdi_node *node
 }
 int mdi_metadata(struct md_inode_store *s, const struct mdi_node *node, uint32_t uid, uint32_t gid, mode_t mode) {
     if (uid == UINT32_MAX || gid == UINT32_MAX || (mode & ~07777)) return -EINVAL;
+    if (node->native) {
+        int fd=mdi_backing_open(s,node,O_PATH);
+        if (fd<0) return fd;
+        int r=mdi_native_metadata(fd,uid,gid,mode);
+        close(fd); return r;
+    }
     sqlite3_stmt *q = NULL;
     int r = mdi_query_acquire(s, MDI_METADATA, &q);
     if (!r) r = mdi_sql_error(sqlite3_bind_int64(q, 1, uid));
@@ -174,8 +181,9 @@ int md_inode_import_metadata(struct md_inode_store *s, int fd, uint32_t uid, uin
 int md_inode_metadata(struct md_inode_store *s, const struct md_fs_request *q) {
     if (q->flags & ~(AT_SYMLINK_NOFOLLOW | MD_AT_EACCESS)) return -EINVAL;
     if (q->flags & MD_AT_EACCESS && q->operation != MD_FS_ACCESS) return -EINVAL;
-    int r = mdi_begin(s, q->operation != MD_FS_ACCESS);
+    int r = mdi_begin(s, 0);
     if (r) return r;
+    if (q->operation!=MD_FS_ACCESS && mdi_readonly(s)) return mdi_finish(s,-EROFS);
     struct mdi_node node;
     struct stat st = {0};
     if (q->path[0] && *q->path[0]) {
@@ -190,18 +198,19 @@ int md_inode_metadata(struct md_inode_store *s, const struct md_fs_request *q) {
     if (!r) r=mdi_setattr_permission(s,&node,q,ids);
     if (!r && q->operation==MD_FS_UTIMENS && q->attributes.nanos[0]==UTIME_OMIT
             && q->attributes.nanos[1]==UTIME_OMIT) return mdi_finish(s,0);
+    if (!r && !node.native) r=mdi_write(s);
     if (!r) r=mdi_overlay_setattr(s,&node,q);
     uint32_t uid = st.st_uid, gid = st.st_gid;
     mode_t mode = st.st_mode & 07777;
     struct timespec times[2] = {{q->attributes.seconds[0], q->attributes.nanos[0]},
         {q->attributes.seconds[1], q->attributes.nanos[1]}};
-    if (!r && ids) {
+    if (!r && (ids || node.native)) {
         switch (q->operation) {
         case MD_FS_CHMOD:
             if (node.kind == S_IFLNK) r = -EOPNOTSUPP;
             else {
                 mode = q->mode & 07777;
-                if (!md_identity_file_capable(ids,st.st_uid,st.st_gid,CAP_FSETID) && !md_identity_in_group(ids, gid)) mode &= ~S_ISGID;
+                if (ids && !md_identity_file_capable(ids,st.st_uid,st.st_gid,CAP_FSETID) && !md_identity_in_group(ids, gid)) mode &= ~S_ISGID;
             }
             break;
         case MD_FS_CHOWN:
@@ -216,7 +225,11 @@ int md_inode_metadata(struct md_inode_store *s, const struct md_fs_request *q) {
     if (!r) r = mdi_copy_up(s, &node);
     int dir = r ? -1 : mdi_backing_directory(s, &node);
     if (!r && dir < 0) r = dir;
-    if (!r && ids && q->operation != MD_FS_UTIMENS) r = mdi_metadata(s, &node, uid, gid, mode);
+    if (!r && node.native && q->operation==MD_FS_CHOWN) {
+        int fd=mdi_backing_open(s,&node,O_PATH);
+        r=fd<0 ? fd : mdi_native_chown(fd,uid,gid,mode);
+        if (fd>=0) close(fd);
+    } else if (!r && (ids || node.native) && q->operation != MD_FS_UTIMENS) r = mdi_metadata(s, &node, uid, gid, mode);
     else if (!r && q->operation == MD_FS_CHMOD) {
         if (node.kind == S_IFLNK) r = -EOPNOTSUPP;
         else if (q->mode & 06000) r = -ENOTSUP;
@@ -224,9 +237,12 @@ int md_inode_metadata(struct md_inode_store *s, const struct md_fs_request *q) {
     } else if (!r && q->operation == MD_FS_CHOWN) {
         if (fchownat(dir, node.backing, q->attributes.uid, q->attributes.gid, AT_SYMLINK_NOFOLLOW)) r = -errno;
     } else if (!r && q->operation == MD_FS_UTIMENS) {
-        if (utimensat(dir, node.backing, times, AT_SYMLINK_NOFOLLOW)) r = -errno;
+        if (node.descriptor) {
+            char path[64]; r=mdi_backing_path(s,&node,path,sizeof(path));
+            if (!r && utimensat(AT_FDCWD,path,times,0)) r=-errno;
+        } else if (utimensat(dir, node.backing, times, AT_SYMLINK_NOFOLLOW)) r = -errno;
     }
-    if (!r && q->operation == MD_FS_CHOWN) r = mdi_file_capability(s, &node, NULL, 0);
+    if (!r && q->operation == MD_FS_CHOWN && !node.native) r = mdi_file_capability(s, &node, NULL, 0);
     if (!r && q->operation == MD_FS_CHMOD) r = mdi_acl_chmod(s,&node,mode);
     if (!r) r = mdi_event(s, NULL, &node, NULL, IN_ATTRIB, NULL);
     return mdi_commit(s, r);
