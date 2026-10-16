@@ -92,7 +92,8 @@ static long receive_result(struct md_fs_buffer_frame *frame, const struct md_fs_
         result=md_fd_filter_arm_mask(out->result.selectors,out->result.fd);
         if (result) { RAW1(close,out->result.fd); out->result.fd=-1; }
     }
-    if ((q->operation==MD_FS_WATCH_READ || q->operation==MD_FS_GETDENTS) && !out->result.error) {
+    if ((q->operation==MD_FS_WATCH_READ || q->operation==MD_FS_GETDENTS)
+            && !out->result.error && !out->result.host_path) {
         int copied=result ? (int)result : deliver ? deliver(context,out->data,out->result.size) : 0;
         long committed=md_guest_buffer_control(MD_FS_BUFFER_ACK,(unsigned long)(long)copied,0);
         if (committed) out->delivery=MD_FS_UNCONFIRMED;

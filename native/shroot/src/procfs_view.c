@@ -191,11 +191,21 @@ int md_procfs_noatime(struct md_filesystem *fs,int fd,const char *path) {
 }
 static int control(const char *path,const char *name) {
     if (process_directory(path))
-        return !strcmp(name,"ns") || !strcmp(name,"uid_map") || !strcmp(name,"gid_map")
+        return !strcmp(name,"uid_map") || !strcmp(name,"gid_map")
             || !strcmp(name,"setgroups") || !strcmp(name,"exe") || !strcmp(name,"cmdline")
-            || !strcmp(name,"auxv") || !strcmp(name,"fd") || !strcmp(name,"fdinfo")
+            || !strcmp(name,"auxv")
             || !strcmp(name,"root") || !strcmp(name,"cwd") || !strcmp(name,"mounts")
             || !strcmp(name,"mountinfo") || !strcmp(name,"cgroup");
+    const char *last=strrchr(path,'/');
+    if (last && (!strcmp(last,"/fd") || !strcmp(last,"/fdinfo") || !strcmp(last,"/ns"))) {
+        char parent[PATH_MAX];
+        size_t size=(size_t)(last-path);
+        memcpy(parent,path,size); parent[size]=0;
+        /* Walk these directories inside the selected proc mount. Only their
+         * entries need caller-side FD/control resolution; delegating the
+         * whole suffix would lose openat2's traversal boundary. */
+        if (process_directory(parent)) return strcmp(name,".") && strcmp(name,"..");
+    }
     return !strcmp(path,"/proc/sys/kernel") || (!strcmp(path,"/proc/sys/net/ipv4") && strcmp(name,"conf"))
         || (!strcmp(path,"/proc") && !strcmp(name,"cgroups"));
 }
@@ -246,6 +256,10 @@ static int network_nodes(const struct md_view_mount *mount,const char *interface
         else if (errno!=EEXIST) return -errno;
     }
     return 0;
+}
+static int magic_link(enum md_proc_kind kind) {
+    return kind==MD_PROC_FD || kind==MD_PROC_ROOT || kind==MD_PROC_CWD || kind==MD_PROC_EXE
+        || (kind>=MD_PROC_NS_USER && kind<=MD_PROC_NS_CGROUP) || kind==MD_PROC_NS_UNSUPPORTED;
 }
 int md_procfs_step(struct md_filesystem *fs,struct md_view_mount *mount,int fd,
         const char *name,const char *tail,int follow_final,uint64_t resolve) {
@@ -301,15 +315,26 @@ int md_procfs_step(struct md_filesystem *fs,struct md_view_mount *mount,int fd,
         struct md_proc_path selected=md_proc_path_for(boundary->path,0,0);
         enum md_proc_kind kind=selected.kind==MD_PROC_FOREIGN ? selected.foreign_kind : selected.kind;
         if (no_links || (resolve&RESOLVE_NO_MAGICLINKS)) {
-            int link=kind==MD_PROC_FD || kind==MD_PROC_ROOT || kind==MD_PROC_CWD || kind==MD_PROC_EXE
-                || (kind>=MD_PROC_NS_USER && kind<=MD_PROC_NS_CGROUP) || kind==MD_PROC_NS_UNSUPPORTED;
-            if (link && (follow_final || (selected.tail && *selected.tail))) return -ELOOP;
+            if (magic_link(kind) && (follow_final || (selected.tail && *selected.tail))) return -ELOOP;
             /* Unclassified task-affine suffixes cannot discard the selected
              * mount's traversal policy when delegated to a native provider. */
             if (kind==MD_PROC_NONE && *tail) return -EOPNOTSUPP;
         }
         int sysctl=md_proc_file_sysctl((enum md_proc_file_kind)(kind-MD_PROC_UID_MAP));
-        if (!sysctl && (!fs->actor || !md_network_namespace_managed(fs->actor->network)
+        int link_inode=magic_link(kind) && !follow_final && selected.tail && !*selected.tail;
+        boundary->proc_link_mount=link_inode ? mount->id : 0;
+        if (link_inode && boundary->proc_link_descriptor) {
+            int captured=(int)(boundary->proc_link_descriptor-1);
+            char actual[PATH_MAX];
+            int error=md_view_fdpath(captured,actual,sizeof(actual));
+            if (error) return error;
+            struct stat st;
+            if (fstat(captured,&st)) return -errno;
+            if (!S_ISLNK(st.st_mode) || strcmp(actual,boundary->path)) return -ESTALE;
+            int copy=fcntl(captured,F_DUPFD_CLOEXEC,3);
+            return copy<0 ? -errno : copy;
+        }
+        if (!link_inode && !sysctl && (!fs->actor || !md_network_namespace_managed(fs->actor->network)
                 || !md_proc_network_sysctl(kind))) return -EREMOTE;
     }
     if (mount->provider) return md_provider_tree_step(mount->provider,fd,name);
@@ -322,6 +347,18 @@ ssize_t md_procfs_readlink(struct md_filesystem *fs,const struct md_view_mount *
     int r=md_procfs_path(mount,fd,path,sizeof(path));
     if (r) return r;
     if (strcmp(path,"/proc/self") && strcmp(path,"/proc/thread-self")) {
+        struct md_proc_path ref=md_proc_path_for(path,0,0);
+        enum md_proc_kind kind=ref.kind==MD_PROC_FOREIGN ? ref.foreign_kind : ref.kind;
+        struct md_inode_boundary *boundary=fs->store->boundary;
+        if (magic_link(kind) && boundary && boundary->path) {
+            /* The link inode retains this mount for stat/open(NO_FOLLOW).
+             * Only its target text needs the caller's virtual FD/namespace. */
+            size_t length=strlen(path)+1;
+            if (length>boundary->capacity) return -ENAMETOOLONG;
+            memcpy(boundary->path,path,length);
+            boundary->proc_namespace=md_pid_namespace_inode(mount->pid_namespace);
+            return -EREMOTE;
+        }
         ssize_t n=readlinkat(fd,"",data,capacity); return n<0 ? -errno : n;
     }
     if (!fs->actor) return -ESRCH;
@@ -352,9 +389,20 @@ ssize_t md_procfs_getdents(struct md_filesystem *fs,const struct md_view_mount *
         }
     }
     if ((!group || (group>0 && !mount->pid_namespace)) && !net) {
-        if (mount->provider) return md_provider_tree_getdents(mount->provider,fd,data,capacity);
-        ssize_t n=syscall(SYS_getdents64,fd,data,capacity);
-        return n<0 ? -errno : n;
+        ssize_t n=mount->provider ? md_provider_tree_getdents(mount->provider,fd,data,capacity)
+            : syscall(SYS_getdents64,fd,data,capacity);
+        if (n<0 && !mount->provider) n=-errno;
+        struct md_inode_boundary *boundary=fs->store->boundary;
+        if ((n==-EACCES || n==-EPERM) && boundary && boundary->path) {
+            /* No namespace remapping or filtering is needed here. The native
+             * cursor and access check belong to the actual reading task. */
+            size_t length=strlen(path)+1;
+            if (length>boundary->capacity) return -ENAMETOOLONG;
+            memcpy(boundary->path,path,length);
+            boundary->proc_namespace=md_pid_namespace_inode(mount->pid_namespace);
+            return -EREMOTE;
+        }
+        return n;
     }
     /* Repack into caller storage: a namespace number may have more digits
      * than its native PID. The existing OFD turn owns cursor publication. */

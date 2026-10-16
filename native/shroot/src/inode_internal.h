@@ -11,7 +11,12 @@
 #include "landlock_policy.h"
 struct md_fs_result;
 struct md_fs_output;
-struct md_inode_boundary { char *path; size_t capacity; unsigned operand; int mount_root, native_directory; uint64_t proc_namespace; };
+struct md_inode_boundary {
+    char *path; size_t capacity; unsigned operand;
+    int mount_root, native_directory;
+    uint64_t proc_namespace, proc_link_mount;
+    unsigned proc_link_descriptor; /* Optional caller-captured no-follow FD + 1. */
+};
 
 #define MDI_ROOT "00000000000000000000000000000000"
 #define MDI_SOURCES 256
@@ -145,6 +150,7 @@ int mdi_bind_name(sqlite3_stmt *, int, const char *);
 int mdi_finish(struct md_inode_store *, int);
 int mdi_name_valid(const char *);
 int mdi_node(struct md_inode_store *, const char *, struct mdi_node *);
+int mdi_super_preserve_writer(struct md_inode_store *,struct mdi_node *);
 int mdi_fd(struct md_inode_store *, int, struct mdi_node *);
 int mdi_fd_membership(struct md_inode_store *, int, struct mdi_node *, int *attached);
 int mdi_lookup(struct md_inode_store *, const char *parent, const char *, struct mdi_node *);

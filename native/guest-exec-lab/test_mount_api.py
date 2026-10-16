@@ -285,17 +285,23 @@ if sys.argv[-1] == '0':
         print('PASS nosymfollow: detached/native/proc, alias, remount, retained FD and namespace locks', flush=True)
 
     def root_operands(root):
+        nested = root / 'remount-child'
+        nested.mkdir()
+        call(40, 'none', str(nested), 'tmpfs', 0, 0)
         descriptor = os.open('/', os.O_PATH | os.O_DIRECTORY)
         reference = '/proc/self/fd/' + str(descriptor)
         for path in ('/', reference):
             call(40, 0, path, 0, (1 << 19) | 16384, 0)  # MS_SLAVE | MS_REC
-            call(40, 0, path, 0, 4096 | 32 | 2, 0)  # Bind remount NOSUID.
+            call(40, 0, path, 0, 4096 | 32 | 2 | 16384, 0)  # REC is ignored on legacy remount.
             assert os.statvfs('/').f_flag & os.ST_NOSUID
+            assert not os.statvfs(nested).f_flag & os.ST_NOSUID
             call(40, 0, path, 0, 4096 | 32, 0)
         ordinary = os.open(root, os.O_PATH | os.O_DIRECTORY)
         call(40, 0, '/proc/self/fd/' + str(ordinary), 0, 1 << 19, 0, error=errno.EINVAL)
         os.close(ordinary)
         os.close(descriptor)
+        call(39, str(nested), 0)
+        nested.rmdir()
         child = os.fork()
         if child == 0:
             try:
@@ -577,6 +583,12 @@ if sys.argv[-1] == '0':
         os.unlink(root / 'unlinked')
         call(431, context, 7, 0, 0, 0, error=errno.EBUSY)
         os.close(data)
+        replaced = os.open(root / 'replaced', os.O_CREAT | os.O_RDWR, 0o600)
+        (root / 'replacement').write_bytes(b'new')
+        os.replace(root / 'replacement', root / 'replaced')
+        assert os.fstat(replaced).st_nlink == 0
+        call(431, context, 7, 0, 0, 0, error=errno.EBUSY)
+        os.close(replaced)
         call(431, context, 7, 0, 0, 0)
         for path in (root, alias):
             write_denied(path / 'blocked')

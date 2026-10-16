@@ -70,7 +70,8 @@ int md_fs_result_valid(const struct md_fs_request *request, const struct md_fs_r
                 && operation != MD_FS_GETACL && operation != MD_FS_UMASK
                 && operation != MD_FS_XATTR && operation != MD_FS_FXATTR && operation != MD_FS_XATTR_OBJECT) || reply->error)) || reply->position < 0
             || (operation==MD_FS_UMASK && reply->position>0777)
-            || (operation == MD_FS_GETDENTS && (reply->size > request->capacity || !valid_entries(data, reply->size)))
+            || (operation == MD_FS_GETDENTS && !reply->host_path
+                && (reply->size > request->capacity || !valid_entries(data, reply->size)))
             || (operation == MD_FS_WATCH_READ && reply->size > request->capacity)) return 0;
     if (operation==MD_FS_IPC_PEER) {
         if (reply->host_path) return 0;
@@ -287,7 +288,8 @@ long md_fs_call_deliver(const char *name, unsigned timeout_ms,
         }
         break;
     }
-    if (!r && !out->result.error && (request->operation == MD_FS_WATCH_READ || request->operation==MD_FS_GETDENTS)) {
+    if (!r && !out->result.error && !out->result.host_path
+            && (request->operation == MD_FS_WATCH_READ || request->operation==MD_FS_GETDENTS)) {
         int copied = deliver ? deliver(context, out->data, out->result.size) : 0;
         struct md_fs_rights none = {0};
         long sent;

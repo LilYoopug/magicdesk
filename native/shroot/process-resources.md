@@ -192,6 +192,11 @@ Proc mounts are selected process views, not a complete virtual kernel procfs.
 Lookup and directory enumeration omit host-global `sysrq-trigger`, `kcore`,
 `kmsg` and `keys`: no guest kernel-control, raw-memory, kernel-log or global-key
 provider exists. Other native permission errors remain errors, not missing files.
+Protected self-proc access is completed in the actual caller after the walker
+admits the selected mount and path. Final no-follow magic-link metadata and
+O_PATH capture retain their mount identity and openat2 restrictions. Only an
+unfiltered native directory may delegate getdents to its caller; logical PID
+filtering is not bypassed. None of these paths changes dumpability.
 Native proc descriptors outside these mounted views are unchanged.
 Foreign `/proc/PID/mem` and signalfd sender translation remain outside this contract.
 Inherited native proc descriptors retain their original view. Internal helper

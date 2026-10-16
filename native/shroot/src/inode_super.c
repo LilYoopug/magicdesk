@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "inode_internal.h"
+#include "inode_leaf.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -45,29 +46,40 @@ static int writer_check(int directory,const char *name,pid_t tid) {
     if (close(fd) && !r) r=-errno;
     return r;
 }
-static int writers_check(struct md_inode_store *s) {
-    int fd=openat(s->objects,".",O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+static int directory_writers(int parent,const char *name,pid_t tid,unsigned depth) {
+    int fd=openat(parent,name,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
     if (fd<0) return -errno;
     DIR *directory=fdopendir(fd);
     if (!directory) { int r=-errno; close(fd); return r; }
+    int r=0;
+    while (!r) {
+        errno=0;
+        struct dirent *entry=readdir(directory);
+        if (!entry) { r=-errno; break; }
+        if (!strcmp(entry->d_name,".") || !strcmp(entry->d_name,"..")) continue;
+        struct stat st;
+        if (fstatat(fd,entry->d_name,&st,AT_SYMLINK_NOFOLLOW)) r=-errno;
+        else if (S_ISDIR(st.st_mode)) {
+            /* Native leaves live one level below object directories, not in
+             * the flat promoted-object catalogue. The same gate owns both. */
+            r=depth ? -EIO : directory_writers(fd,entry->d_name,tid,depth+1);
+        } else r=writer_check(fd,entry->d_name,tid);
+    }
+    if (closedir(directory) && !r) r=-errno;
+    return r;
+}
+static int writers_check(struct md_inode_store *s,const char *backing) {
     sigset_t signals,previous,pending;
     sigemptyset(&signals); sigaddset(&signals,SIGIO);
     int error=pthread_sigmask(SIG_BLOCK,&signals,&previous);
-    if (error) { closedir(directory); return -error; }
+    if (error) return -error;
     int r=sigpending(&pending) ? -errno : 0;
     /* Do not consume another owner's pending signal. Leases target this worker
      * TID only; a native caller outside the guest gate cannot kill the service. */
     if (!r && sigismember(&pending,SIGIO)) r=-EBUSY;
     int drain=!r;
     pid_t tid=(pid_t)syscall(SYS_gettid);
-    while (!r) {
-        errno=0;
-        struct dirent *entry=readdir(directory);
-        if (!entry) { r=-errno; break; }
-        if (!strcmp(entry->d_name,".") || !strcmp(entry->d_name,"..")) continue;
-        r=writer_check(fd,entry->d_name,tid);
-    }
-    if (closedir(directory) && !r) r=-errno;
+    if (!r) r=backing ? writer_check(s->objects,backing,tid) : directory_writers(s->objects,".",tid,0);
     if (drain) {
         /* Nonblocking consumption after all leases are closed. A break attempt
          * means the backing escaped the gate; do not publish read-only then. */
@@ -77,13 +89,21 @@ static int writers_check(struct md_inode_store *s) {
     error=pthread_sigmask(SIG_SETMASK,&previous,NULL);
     return r ? r : -error;
 }
+int mdi_super_preserve_writer(struct md_inode_store *s,struct mdi_node *node) {
+    if (!node->native || !s->lifetime->temporary || s->lifetime->filesystem_kind!=MD_FILESYSTEM_TMPFS) return 0;
+    /* Only tmpfs superblocks can be reconfigured. Keep a writer's final
+     * backing reachable by that rare scan, including after rename-overwrite.
+     * Persistent files and unreferenced tmpfs leaves keep native deletion. */
+    int r=writers_check(s,node->backing);
+    return r==-EBUSY ? mdi_leaf_promote(s,node) : r;
+}
 int md_inode_store_reconfigure(struct md_inode_store *s,int readonly) {
     if (!s->lifetime->temporary || s->lifetime->filesystem_kind!=MD_FILESYSTEM_TMPFS
             || strcmp(s->lifetime->scope,MDI_ROOT)) return -EOPNOTSUPP;
     if (s->readonly) return -EROFS;
     int r=mdi_begin(s,0);
     if (r) return r;
-    if (readonly && !s->super_readonly) r=writers_check(s);
+    if (readonly && !s->super_readonly) r=writers_check(s,NULL);
     /* Policy is metadata, not a guest write: changing it back to writable must
      * be possible under the same gate even while ordinary mutations are denied.
      * Retained and unlinked bodies remain until exclusive store maintenance. */

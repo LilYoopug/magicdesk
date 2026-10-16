@@ -130,7 +130,8 @@ static int directory_progress(struct peer *peer) {
         struct md_fs_result result;
         md_fs_context_execute(&peer->context,&peer->directory,&result,&output);
         peer->reply.error=result.error; peer->reply.size=result.size; peer->reply.position=result.position;
-        peer->directory_reserved=output.directory_position && !result.error;
+        peer->reply.host_path=result.host_path; peer->reply.proc_namespace=result.proc_namespace;
+        peer->directory_reserved=output.directory_position && !result.error && !result.host_path;
         const struct md_fs_packet observed={.operation=peer->directory.operation};
         OBSERVE(MD_FS_AFTER_DISPATCH,&observed);
         (void)observed;

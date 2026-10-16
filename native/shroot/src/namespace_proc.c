@@ -19,6 +19,21 @@
 #define STATX_MNT_ID_UNIQUE 0x4000U
 #endif
 
+long md_namespace_proc_link_metadata(long nr,const unsigned long *a,const char *path,uint64_t mount) {
+    /* The worker supplies a fully resolved no-follow proc dentry and its
+     * selected mount. Kernel checks run under the actual caller, never under
+     * the worker's identity or by making the caller dumpable. */
+    if (nr==SYS_newfstatat)
+        return RAW4(newfstatat,AT_FDCWD,path,a[2],a[3]);
+    if (nr!=SYS_statx || !(a[2]&AT_SYMLINK_NOFOLLOW)) return -EINVAL;
+    struct statx st;
+    long r=RAW5(statx,AT_FDCWD,path,a[2],(a[3]&~(unsigned long)STATX_MNT_ID_UNIQUE)|STATX_MNT_ID,&st);
+    if (r<0) return r;
+    st.stx_mask|=STATX_MNT_ID; st.stx_mnt_id=mount;
+    st.stx_attributes_mask|=STATX_ATTR_MOUNT_ROOT;
+    st.stx_attributes&=~(uint64_t)STATX_ATTR_MOUNT_ROOT;
+    return md_write_memory((void *)a[4],&st,sizeof(st));
+}
 long md_namespace_native_statx(const struct md_fs *fs, const unsigned long *args) {
     struct statx st;
     /* Publish ordinary mount IDs, never claim the kernel-global UNIQUE space. */

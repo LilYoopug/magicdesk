@@ -38,7 +38,16 @@ static int reopen(struct md_view_object *p, int flags, int mutable,
     if (fstat(p->fd,&st)) return -errno;
     int error=device_open(p->mount,flags,st.st_mode);
     if (error) return error;
-    return md_reopen_file(p->fd,flags,completion);
+    int opened=md_reopen_file(p->fd,flags,completion);
+    if ((opened==-EACCES || opened==-EPERM) && p->mount->backing==MD_MOUNT_PROC) {
+        /* Proc access depends on the caller's task and dumpability. Retain
+         * the admitted object and mount; complete the kernel open in that
+         * caller, through the same ownership path as controlling terminals. */
+        opened=fcntl(p->fd,F_DUPFD_CLOEXEC,3);
+        if (opened<0) return -errno;
+        completion->kind=MD_OPEN_CALLER;
+    }
+    return opened;
 }
 static void result_stat(struct md_fs_result *out, int fd, const struct md_view_mount *mount) {
     struct stat st;

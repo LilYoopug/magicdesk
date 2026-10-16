@@ -91,6 +91,14 @@ static long open_operand(const struct md_fs *fs, struct md_namespace_operand ope
     md_fs_open_parameters(&q,(unsigned)flags,mode,how->resolve);
     struct md_fs_response out;
     long r = md_namespace_request(fs, &q, &out);
+    if (r==-EREMOTE && out.result.info.mount_id && (flags&(O_PATH|O_NOFOLLOW))==(O_PATH|O_NOFOLLOW)) {
+        char captured[PATH_MAX];
+        r=md_copy(captured,sizeof(captured),out.data);
+        if (r<0) return r;
+        q.capture[1]=(struct md_fs_task_capture){captured,O_PATH|O_NOFOLLOW};
+        r=md_namespace_request(fs,&q,&out);
+        if (r==-EREMOTE) return -EACCES;
+    }
     if (r==-EREMOTE) {
         unsigned long args[6]={(unsigned long)AT_FDCWD,(unsigned long)out.data,(unsigned)flags,mode,0,0};
         return md_namespace_host_call(fs,fs->image ? fs->image->executable_path : "",SYS_openat,args,1,out.data,out.result.proc_namespace);
@@ -152,7 +160,7 @@ static long descriptor_call(const struct md_fs *fs, long nr, const unsigned long
             .capacity = a[2] > PATH_MAX ? PATH_MAX : (uint32_t)a[2]};
         long r = md_fs_call_deliver(fs->endpoint,5000,&q,&out,copy_directory,(void *)a[1]);
         if (!r) r=out.result.host_path ? -EREMOTE : out.result.error;
-        if (r == -EXDEV) return md_raw(nr, a[0], a[1], a[2], 0, 0, 0);
+        if (r == -EXDEV || r == -EREMOTE) return md_raw(nr, a[0], a[1], a[2], 0, 0, 0);
         if (r < 0) return r;
         return out.result.size;
     }
@@ -400,6 +408,8 @@ __attribute__((noinline)) static long path_metadata(const struct md_fs *fs, long
         if (nr == SYS_statx)
             flags &= ~(AT_STATX_FORCE_SYNC | AT_STATX_DONT_SYNC);
         r = md_namespace_inspect(fs, operand, first, flags, nr==SYS_statx ? MD_FS_STAT_MOUNT : 0, &out);
+        if (r==-EREMOTE && out.result.info.mount_id)
+            return md_namespace_proc_link_metadata(nr,a,out.data,out.result.info.mount_id);
         if (r==-EREMOTE) return md_namespace_host_call(fs,fs->image ? fs->image->executable_path : "",nr,a,1,out.data,out.result.proc_namespace);
         if (r == -EXDEV && !operand.capture.path && !*first && (flags & AT_EMPTY_PATH))
             return nr==SYS_statx ? md_namespace_native_statx(fs,a)

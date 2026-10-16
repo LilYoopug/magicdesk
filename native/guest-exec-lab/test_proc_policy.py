@@ -8,12 +8,81 @@ import fcntl
 import os
 from pathlib import Path
 import socket
+import struct
 import sys
 import tempfile
 import traceback
 
 
+def detached_proc():
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall.restype = ctypes.c_long
+
+    def call(nr, *args, error=0):
+        values = [ctypes.c_char_p(a.encode()) if isinstance(a, str) else ctypes.c_long(a) for a in args]
+        value = libc.syscall(ctypes.c_long(nr), *values)
+        actual = ctypes.get_errno() if value < 0 else 0
+        assert actual == error, (nr, args, value, actual, error)
+        return value
+
+    class OpenHow(ctypes.Structure):
+        _fields_ = [('flags', ctypes.c_uint64), ('mode', ctypes.c_uint64),
+                    ('resolve', ctypes.c_uint64)]
+
+    with ExitStack() as cleanup:
+        context = call(430, 'proc', 1)
+        cleanup.callback(os.close, context)
+        call(431, context, 6, 0, 0, 0)
+        root = call(432, context, 1, 0)
+        cleanup.callback(os.close, root)
+        def mount_id(fd, path=''):
+            value = ctypes.create_string_buffer(256)
+            call(291, fd, path, 0x100 if path else 0x1000, 0x17ff, ctypes.addressof(value))
+            assert struct.unpack_from('I', value)[0] & 0x1000
+            return struct.unpack_from('Q', value, 144)[0]
+        identity = mount_id(root)
+        # NO_XDEV | NO_MAGICLINKS | BENEATH: directories are not magic links.
+        how = OpenHow(os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC, 0, 0xb)
+        for path in ['thread-self/fd/', 'self/fd', 'thread-self/fdinfo/', 'self/ns/']:
+            fd = call(437, root, path, ctypes.addressof(how), ctypes.sizeof(how))
+            assert mount_id(fd) == identity, path
+            if '/fd' in path and '/fdinfo' not in path:
+                assert mount_id(fd, str(root)) == identity, 'magic link lost its mount'
+                link = os.open(str(root), os.O_PATH | os.O_NOFOLLOW, dir_fd=fd)
+                assert mount_id(link) == identity
+                os.close(link)
+                dumpable = libc.prctl(3, 0, 0, 0, 0)
+                assert dumpable >= 0
+                try:
+                    assert libc.prctl(4, 0, 0, 0, 0) == 0
+                    assert mount_id(fd, str(root)) == identity, 'protected proc link lost its mount'
+                    assert os.stat(str(root), dir_fd=fd, follow_symlinks=False).st_mode & 0o170000 == 0o120000
+                    link = os.open(str(root), os.O_PATH | os.O_NOFOLLOW, dir_fd=fd)
+                    assert mount_id(link) == identity, 'protected O_PATH link lost its mount'
+                    os.close(link)
+                    leaf_how = OpenHow(os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, 0, 0xb)
+                    link = call(437, fd, str(root), ctypes.addressof(leaf_how), ctypes.sizeof(leaf_how))
+                    assert mount_id(link) == identity, 'protected openat2 link lost its mount'
+                    os.close(link)
+                    reopened = os.open('/proc/self/fd/' + str(fd), os.O_RDONLY | os.O_DIRECTORY)
+                    assert mount_id(reopened) == identity, 'protected reopen lost its mount'
+                    assert str(root) in os.listdir(reopened)
+                    os.close(reopened)
+                    assert libc.prctl(3, 0, 0, 0, 0) == 0, 'metadata changed dumpability'
+                finally:
+                    assert libc.prctl(4, dumpable, 0, 0, 0) == 0
+            os.close(fd)
+        for path in ['thread-self/fd/0', 'thread-self/root/', 'thread-self/cwd/',
+                     'thread-self/ns/mnt']:
+            call(437, root, path, ctypes.addressof(how), ctypes.sizeof(how), error=errno.ELOOP)
+        call(437, root, '../', ctypes.addressof(how), ctypes.sizeof(how), error=errno.EXDEV)
+        how.resolve |= 4  # NO_SYMLINKS rejects even the ordinary self symlink.
+        call(437, root, 'thread-self/fd/', ctypes.addressof(how), ctypes.sizeof(how), error=errno.ELOOP)
+    print('PASS detached proc: scoped directories and rejected magic-link/parent escapes', flush=True)
+
+
 def guest():
+    detached_proc()
     libc = ctypes.CDLL(None, use_errno=True)
     libc.syscall.restype = ctypes.c_long
 
@@ -242,5 +311,7 @@ def main():
 if __name__ == '__main__':
     if sys.argv[1:] == ['--guest']:
         guest()
+    elif sys.argv[1:] == ['--guest-detached']:
+        detached_proc()
     else:
         main()

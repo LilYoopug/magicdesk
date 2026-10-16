@@ -307,6 +307,11 @@ by aliases and frozen by less-privileged namespace copies.
 Existing-name creation errors precede readonly rejection: mkdir on an existing
 directory returns EEXIST, and a read-only O_CREAT open can select an existing
 file without gaining write authority.
+Read-only tmpfs superblock reconfiguration checks writers in both promoted
+objects and native-leaf directories. Removing or overwriting a native leaf with
+an open writer promotes its retained backing before unlink, so a later remount
+cannot overlook it. This lease-based check is confined to temporary tmpfs stores;
+persistent-file deletion keeps its native fast path.
 
 Bind operands can be exact retained files or directories, including proc-FD
 aliases. Their mount provenance survives detach/rebind; selecting a regular
@@ -324,7 +329,7 @@ Local mountinfo resolves live masters through family membership. Foreign graph
 snapshots still need complete master retirement after the last peer disappears.
 Bind dispatch ignores unrelated mount flags rather than interpreting them as a
 second propagation/remount operation; bind policy derives from the source.
-New filesystem mounts discard `MS_REC` at the syscall boundary; recursive
+New filesystem mounts and legacy remounts discard `MS_REC` at the syscall boundary; recursive
 semantics remain specific to bind and propagation operations.
 
 Overlay builds an unpublished merged metadata index bottom-to-top.

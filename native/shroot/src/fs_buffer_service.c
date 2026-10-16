@@ -564,7 +564,8 @@ static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
         md_fs_context_capture_result(&r->context,&reply->result,&r->opened.origin);
         r->request.flags=r->snapshot.flags;
     } else md_fs_context_execute(&r->context,&r->request,&reply->result,&output);
-    r->reserved=(output.reserve_watch || output.directory_position) && !reply->result.error;
+    r->reserved=(output.reserve_watch || output.directory_position)
+        && !reply->result.error && !reply->result.host_path;
     r->opened.fd=reply->result.fd; reply->result.fd=-1;
     if (!reply->result.error && r->opened.fd>=0 && r->control_descriptor>=0) {
         close(r->opened.fd); r->opened.fd=r->control_descriptor; r->control_descriptor=-1;

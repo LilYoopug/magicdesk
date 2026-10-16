@@ -239,7 +239,8 @@ int md_fs_request_validate(const struct md_fs_request *q) {
         return (descriptors & 2) || !*a || *b || q->flags || q->mode
             || (q->operation == MD_FS_SOCKET_NAME && descriptors) ? -EINVAL : 0;
     int binary = q->operation == MD_FS_LINK || q->operation == MD_FS_RENAME;
-    if ((!binary && (descriptors & 2))
+    int proc_leaf=q->operation==MD_FS_OPEN && (q->flags&(O_PATH|O_NOFOLLOW))==(O_PATH|O_NOFOLLOW);
+    if ((!binary && !proc_leaf && (descriptors & 2))
             || (!binary && q->operation != MD_FS_SYMLINK && *b)
             || (q->mode && q->operation != MD_FS_CREATE && q->operation != MD_FS_MKDIR && q->operation != MD_FS_OPEN
                 && !((q->operation==MD_FS_STAT || q->operation==MD_FS_FSTAT) && q->mode==MD_FS_STAT_MOUNT)

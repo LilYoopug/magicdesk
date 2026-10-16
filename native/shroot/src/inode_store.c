@@ -285,6 +285,7 @@ int md_inode_unlink(struct md_inode_store *s, int dirfd, const char *path, int f
     if (!r) r = mdi_parent_writable(s, &loc.parent);
     if (!r) r = mdi_sticky(s, &loc);
     if (!r) r=mdi_landlock(s,&loc.parent,NULL,loc.node.kind==S_IFDIR ? MD_LL_REMOVE_DIR : MD_LL_REMOVE_FILE);
+    if (!r) r=mdi_super_preserve_writer(s,&loc.node);
     if (!r && loc.node.native) {
         r=unlinkat(s->objects,loc.node.backing,0) ? -errno : 0;
         return mdi_finish(s,r);
@@ -341,6 +342,7 @@ int md_inode_rename(struct md_inode_store *s, int sourcefd, const char *source,
     if (!r) r = mdi_parent_writable(s, &b.parent);
     if (!r) r = mdi_sticky(s, &a);
     if (!r && b.exists) r = mdi_sticky(s, &b);
+    if (!r && b.exists && flags!=RENAME_EXCHANGE) r=mdi_super_preserve_writer(s,&b.node);
     int native_name=!r && a.node.native ? mdi_overlay_native_name(s,&b.parent,b.name) : -EOPNOTSUPP;
     if (!r && native_name && native_name!=-EOPNOTSUPP) r=native_name;
     if (!r && a.node.native && !native_name && b.parent.mode>=0 && !b.parent.source

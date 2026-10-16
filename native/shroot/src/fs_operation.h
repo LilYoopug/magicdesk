@@ -82,6 +82,8 @@ struct md_fs_task_capture { const char *path; unsigned flags; };
 struct md_fs_request {
     int actor, peer;
     uint32_t operation, flags, mode;
+    /* OPEN(O_PATH|O_NOFOLLOW) may use operand 1 for a caller-captured proc
+     * link on a protected-path retry. The walker verifies its exact leaf. */
     int directory[2];
     /* Optional store-local object operand, mutually exclusive with a descriptor.
      * The filesystem owner opens/releases it; no temporary guest FD is needed. */

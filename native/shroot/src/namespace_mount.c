@@ -27,6 +27,9 @@ long md_namespace_mount(const struct md_fs *fs, long nr, const unsigned long *a)
         if (q.flags&(1U<<31)) return -EINVAL; /* Kernel-private MS_NOUSER. */
         if (q.flags&MS_REMOUNT) {
             q.mode=MD_FS_MOUNT_REMOUNT;
+            /* Legacy remount changes one mount, even when REC is present.
+             * Recursive policy changes belong to mount_setattr instead. */
+            q.flags&=~MS_REC;
             if (!(q.flags&MS_BIND) && a[4]) {
                 r=md_read_string(data,sizeof(data),(const char *)a[4]);
                 if (r>=0) { q.value=data; q.value_size=(uint32_t)md_length(data)+1; }

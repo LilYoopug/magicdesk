@@ -294,6 +294,8 @@ static void context_execute(struct md_fs_context *context,
             root_error=md_mount_graph_sync(q->origin[i]->view);
     if (!root_error && context->authenticated) root_error=md_fs_root_select(fs,&task->root);
     struct md_inode_boundary boundary={.path=output ? output->data : NULL,.capacity=output ? output->capacity : 0};
+    if (q->operation==MD_FS_OPEN && (q->flags&(O_PATH|O_NOFOLLOW))==(O_PATH|O_NOFOLLOW)
+            && q->directory[1]>=0) boundary.proc_link_descriptor=(unsigned)q->directory[1]+1;
     struct md_inode_boundary *previous_boundary=fs->store->boundary;
     fs->store->boundary=&boundary;
     fs->store->creation_mask=q->attributes.creation_mask;
@@ -318,6 +320,14 @@ static void context_execute(struct md_fs_context *context,
     else if (q->operation == MD_FS_TASK_PATH) task_path(fs,q,out,output);
     else if (q->operation==MD_FS_XATTR || q->operation==MD_FS_FXATTR) md_fs_xattr(fs,q,out,output);
     else md_fs_view_execute(fs,q,out,output);
+    /* A no-follow proc inode can be inspected by its own protected task even
+     * when the worker cannot traverse its fd directory. The walker first
+     * admits the complete path and proc policy; an O_PATH retry captures the
+     * exact leaf in the caller without delegating the mount traversal. */
+    int proc_link_delegated=(out->error==-EACCES || out->error==-EPERM) && boundary.proc_link_mount
+        && ((q->operation==MD_FS_STAT && (q->flags&AT_SYMLINK_NOFOLLOW))
+            || (q->operation==MD_FS_OPEN && (q->flags&(O_PATH|O_NOFOLLOW))==(O_PATH|O_NOFOLLOW)));
+    if (proc_link_delegated) out->error=-EREMOTE;
     if (out->error==-EREMOTE && fs->store->landlock) {
         int error=md_fs_landlock_delegate(fs,q,boundary.path ? boundary.path : "");
         if (error) out->error=error;
@@ -355,6 +365,7 @@ static void context_execute(struct md_fs_context *context,
         else if (boundary.path && boundary.capacity) {
             out->error=0; out->host_path=boundary.operand+1; out->size=strlen(boundary.path)+1;
             out->proc_namespace=boundary.proc_namespace;
+            if (proc_link_delegated) out->info.mount_id=boundary.proc_link_mount;
         }
     }
     if (!out->error && (q->operation==MD_FS_MOUNT || (q->operation==MD_FS_FSCONFIG
