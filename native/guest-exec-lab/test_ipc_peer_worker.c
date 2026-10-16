@@ -387,7 +387,7 @@ static void unavailable(const char *store) {
     unsigned before=descriptors(); struct owner o=owner_new(store);
     int app[2], ctl[2]; pair(&o,app); control(ctl);
     int error=eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK); assert(error>=0);
-    md_fs_worker_notifications(o.worker,error,NULL,worker_failed); pulse(error);
+    md_fs_worker_notifications(o.worker,error,NULL,worker_failed,NULL); pulse(error);
     /* EVENT_WAIT: injected worker failure publishes its terminal state. */
     int64_t deadline=md_event_now()+5000000000LL;
     while (!md_fs_worker_error(o.worker)) {

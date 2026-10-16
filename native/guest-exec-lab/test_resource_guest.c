@@ -779,7 +779,14 @@ static void *proc_thread(void *argument) {
     snprintf(local,sizeof(local),"/proc/thread-self/fd/%d/item",c->first);
     for (unsigned i=0;i<8;++i) {
         struct stat st;
-        assert(!stat(parent,&st) && st.st_ino==c->expected.st_ino && st.st_dev==c->expected.st_dev);
+        int result=stat(parent,&st);
+        if (result) fprintf(stderr,"proc capture path=%s iteration=%u errno=%d\n",parent,i,errno);
+        assert(!result);
+        if (st.st_ino!=c->expected.st_ino || st.st_dev!=c->expected.st_dev)
+            fprintf(stderr,"proc capture path=%s inode=%llu/%llu expected=%llu/%llu\n",parent,
+                (unsigned long long)st.st_dev,(unsigned long long)st.st_ino,
+                (unsigned long long)c->expected.st_dev,(unsigned long long)c->expected.st_ino);
+        assert(st.st_ino==c->expected.st_ino && st.st_dev==c->expected.st_dev);
         assert(!stat(nested,&st) && st.st_size==1);
         assert(!chmod(nested,0600|(i&1 ? 0100 : 0)));
         assert(!stat(nested,&st) && (st.st_mode&0777)==(0600|(i&1 ? 0100 : 0)));

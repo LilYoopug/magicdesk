@@ -19,6 +19,10 @@ struct md_notification_result {
 };
 enum { MD_NOTIFICATION_WAIT=1, MD_NOTIFICATION_DELIVERED, MD_NOTIFICATION_CANCELLED,
     MD_NOTIFICATION_STATUS };
+int md_notification_same_call(const struct seccomp_data *,const struct seccomp_data *);
+/* A stopped-task admission owner may replace an expired token for the exact
+ * restarted call. No operation, descriptor delivery or output is repeated. */
+int md_notification_rebind(int,struct seccomp_notif *,const struct seccomp_notif *);
 int md_notification_result_status(struct md_notification_result *,const struct seccomp_data *,long);
 int md_notification_result_fd(struct md_notification_result *,const struct seccomp_data *,
     struct md_fd_origins *,int,struct md_fd_object *,unsigned);

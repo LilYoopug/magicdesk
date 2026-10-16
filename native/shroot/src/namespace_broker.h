@@ -18,7 +18,11 @@ struct md_broker_completion {
     struct md_fs_buffer_open opened;
 };
 struct md_namespace_broker;
-enum { MD_BROKER_READ=1, MD_BROKER_OPEN=2 };
+enum { MD_BROKER_READ=1, MD_BROKER_OPEN=2, MD_BROKER_COOPERATIVE=4 };
+struct md_entry_channel;
+/* Mapping lifetime belongs to the stopped task. Forget precedes its release. */
+int md_broker_cooperative_bind(struct md_namespace_broker *,pid_t,struct md_entry_channel *,uintptr_t wake_gate);
+void md_broker_cooperative_revoke(struct md_namespace_broker *,pid_t);
 struct md_namespace_broker *md_broker_create(struct md_fs_worker *, int statistics,
         void (*delegate)(const struct seccomp_notif *));
 void md_broker_listen(struct md_namespace_broker *, int listener);
@@ -29,6 +33,10 @@ void md_broker_completion_handler(struct md_namespace_broker *,void (*)(pid_t,st
  * a kernel restart delegates without executing the operation a second time. */
 void md_broker_completion_taken(struct md_namespace_broker *,pid_t);
 void md_broker_control_factory(struct md_namespace_broker *,md_control_factory);
+struct md_entry_native;
+/* Only the supervisor reads/changes stopped registers. The worker retains
+ * resource ownership until the native journal has an authoritative result. */
+void md_broker_native_observer(struct md_namespace_broker *,int (*)(pid_t,struct md_entry_native *));
 /* Retain a real kernel event while its admitted worker operation retires.
  * No synchronous worker wait or filesystem IO occurs on the supervisor. */
 int md_broker_hold_event(struct md_namespace_broker *,pid_t,int,const struct rusage *);

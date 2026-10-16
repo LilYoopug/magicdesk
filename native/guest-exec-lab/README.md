@@ -13,6 +13,7 @@ fixtures do not define a separate runtime or installation interface.
 | SteamOS, X11/Wayland desktops, audio and GPU | [Desktop workflows](desktop-workflows.md) |
 | OCI images, mounts, filesystem operations and watches | [Filesystem workflows](filesystem-workflows.md) |
 | GDB, strace and matched performance measurements | [Developer workflows](developer-workflows.md) |
+| Opt-in syscall entry, isolated musl integration, captured-request experiments and handoff benchmarks | [Cooperative entry](cooperative-entry.md), [runtime contract](../shroot/cooperative-entry.md) |
 | Init systems and distribution boot | [Init matrix](init-matrix.md) |
 | Browser workload and sandbox evidence | [Browser fixtures](browser/README.md) |
 | Kernel seccomp/ptrace controls | [Sandbox controls](sandbox-research.md) |

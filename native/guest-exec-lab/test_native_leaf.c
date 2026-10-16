@@ -12,6 +12,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <dirent.h>
 #include <linux/fs.h>
 #include <signal.h>
@@ -25,6 +26,13 @@
 #include <unistd.h>
 
 static int gets,sets,syncs,changes,kill_after,fail_at;
+static unsigned leaf_stats;
+int __real_fstatat(int,const char *,struct stat *,int);
+int __wrap_fstatat(int fd,const char *path,struct stat *st,int flags) {
+    const char *name=strrchr(path,'/');
+    if (!strcmp(name ? name+1 : path,"stat-observed")) ++leaf_stats;
+    return __real_fstatat(fd,path,st,flags);
+}
 static void after_change(void) {
     if (++changes==kill_after) { kill(getpid(),SIGKILL); _exit(99); }
 }
@@ -62,6 +70,23 @@ static void metadata(int fd,uint32_t uid,uint32_t gid,mode_t mode,nlink_t links)
     struct stat st;
     assert(!mdi_native_stat(fd,&st));
     assert(st.st_uid==uid && st.st_gid==gid && (st.st_mode&07777)==mode && st.st_nlink==links);
+}
+static void identities(void) {
+    uint64_t bits=UINT64_C(0x123456789abcdef0);
+    for (unsigned i=0;i<4096;++i) {
+        bits^=bits<<13; bits^=bits>>7; bits^=bits<<17;
+        struct stat st={.st_dev=(dev_t)bits,.st_ino=(ino_t)~bits};
+        char expected[33],actual[33];
+        snprintf(expected,sizeof(expected),"%016" PRIx64 "%016" PRIx64,(uint64_t)st.st_dev,(uint64_t)st.st_ino);
+        assert(!mdi_leaf_id(&st,MDI_ROOT,actual) && !strcmp(actual,expected));
+    }
+    struct stat st={.st_dev=UINT64_C(0x0123456789abcdef),.st_ino=UINT64_C(0xfedcba9876543210)};
+    char id[33];
+    assert(!mdi_leaf_id(&st,"ffffffffffffffffffffffffffffffff",id));
+    assert(!strcmp(id,"fedcba98765432100123456789abcdef"));
+    assert(mdi_leaf_id(&st,"g0000000000000000000000000000000",id)==-EIO);
+    assert(mdi_leaf_id(&st,"",id)==-EIO);
+    puts("PASS native identity encoding: stable format-17 IDs and scoped projection");
 }
 static void ordinary(int directory) {
     reset();
@@ -394,12 +419,56 @@ static void catalogue_absence(struct md_inode_store *s,int dir) {
     close(fd); md_inode_store_close(writer);
     puts("PASS catalogue absence: unique native names skip SQL lookup; foreign insert/promotion and local rollback invalidate the proof");
 }
+static void stat_observation(struct md_inode_store *s,int dir,const char *path) {
+    int fd=md_inode_create(s,dir,"stat-observed",0644); assert(fd>=0 && native_node(s,fd));
+    assert(!ftruncate(fd,11));
+    struct stat first,st;
+    leaf_stats=0;
+    assert(!md_inode_stat(s,-1,"/work/stat-observed",0,&first) && first.st_size==11);
+    assert(leaf_stats==1 && first.st_uid==0 && first.st_gid==0 && (first.st_mode&07777)==0644);
+    assert(!ftruncate(fd,37));
+    leaf_stats=0;
+    assert(!md_inode_stat(s,dir,"stat-observed",0,&st) && st.st_size==37 && st.st_ino==first.st_ino);
+    assert(leaf_stats==1);
+    struct md_inode_store *writer; assert(!md_inode_store_open(path,0,&writer)); writer->identity=s->identity;
+    struct md_fs_request change={.operation=MD_FS_CHOWN,.directory={fd},.attributes={.uid=42,.gid=43}};
+    assert(!md_inode_metadata(writer,&change));
+    change.operation=MD_FS_CHMOD; change.mode=0400;
+    assert(!md_inode_metadata(writer,&change));
+    assert(!md_inode_stat(s,dir,"stat-observed",0,&st) && st.st_uid==42 && st.st_gid==43
+        && (st.st_mode&07777)==0400 && st.st_size==37 && st.st_ino==first.st_ino);
+    assert(!md_inode_symlink(s,"stat-observed",dir,"stat-link"));
+    assert(!md_inode_stat(s,dir,"stat-link",0,&st) && st.st_ino==first.st_ino && st.st_uid==42);
+    assert(!md_inode_stat(s,dir,"stat-link",AT_SYMLINK_NOFOLLOW,&st) && S_ISLNK(st.st_mode));
+    assert(md_inode_stat(s,dir,"stat-observed/",0,&st)==-ENOTDIR);
+    struct md_identity user=md_identity_new(1000,1000);
+    change=(struct md_fs_request){.operation=MD_FS_CHMOD,.directory={dir},.mode=0700};
+    assert(!md_inode_metadata(writer,&change)); s->identity=&user;
+    assert(md_inode_stat(s,-1,"/work/stat-observed",0,&st)==-EACCES);
+    s->identity=writer->identity; md_identity_release(&user);
+    change.mode=0755; assert(!md_inode_metadata(writer,&change));
+    assert(!md_inode_rename(writer,dir,"stat-observed",dir,"stat-old",0));
+    assert(md_inode_stat(s,dir,"stat-observed",0,&st)==-ENOENT);
+    int replacement=md_inode_create(writer,dir,"stat-observed",0600); assert(replacement>=0);
+    assert(!ftruncate(replacement,99));
+    assert(!md_inode_stat(s,dir,"stat-observed",0,&st) && st.st_size==99 && st.st_ino!=first.st_ino && st.st_uid==0);
+    assert(!md_inode_stat(s,dir,"stat-old",0,&st) && st.st_ino==first.st_ino && st.st_uid==42);
+    assert(!md_inode_link(writer,dir,"stat-observed",dir,"stat-alias",0));
+    assert(!md_inode_stat(s,dir,"stat-observed",0,&st) && st.st_nlink==2 && st.st_size==99);
+    assert(!md_inode_unlink(writer,dir,"stat-observed",0));
+    assert(md_inode_stat(s,dir,"stat-observed",0,&st)==-ENOENT);
+    assert(!md_inode_unlink(writer,dir,"stat-alias",0));
+    assert(!md_inode_unlink(writer,dir,"stat-old",0) && !md_inode_unlink(writer,dir,"stat-link",0));
+    close(replacement); close(fd); md_inode_store_close(writer);
+    puts("PASS stat observation: one leaf lookup, fresh data and foreign metadata/rename/replacement/promotion, symlinks and search permission");
+}
 static void hybrid(const char *path) {
     struct md_inode_store *s; assert(!md_inode_store_open(path,1,&s));
     struct md_identity ids=md_identity_new(0,0); s->identity=&ids;
     assert(s->native_files);
     assert(!md_inode_mkdir(s,-1,"work",0755));
     int dir=md_inode_open(s,-1,"work",O_RDONLY|O_DIRECTORY,0); assert(dir>=0);
+    stat_observation(s,dir,path);
     stable_source(s,dir);
     int managed=md_inode_create(s,dir,"trusted-metadata",0644); assert(managed>=0 && native_node(s,managed));
     assert(!md_inode_unlink(s,dir,"trusted-metadata",0));
@@ -659,7 +728,7 @@ int main(int argc,char **argv) {
     if (argc==3 && !strcmp(argv[1],"--check-hybrid-backup")) { restored_hybrid(argv[2]); return 0; }
     assert(argc==2 && argv[1][0]=='/' && !mkdir(argv[1],0700)); umask(0);
     int directory=open(argv[1],O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(directory>=0);
-    ordinary(directory); detached(directory); staged(directory);
+    identities(); ordinary(directory); detached(directory); staged(directory);
     for (int point=1;point<=4;++point) for (int error=0;error<2;++error) interrupted(directory,point,error);
     puts("PASS SIGKILL and IO failures at all four metadata transition steps retain old-or-new logical permissions");
     reset(); malformed(directory); watch(directory); close(directory);

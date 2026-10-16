@@ -134,7 +134,8 @@ int test_shared_memory_guest(const char *root,int protected,int restart) {
     }
     /* Signals stress syscall completion, not readiness or settling. The
      * launch deadline bounds the entire fixture and all its peers. */
-    struct itimerval timer={.it_interval={0,1000},.it_value={0,1000}};
+    unsigned interval=restart&8 ? 100 : 1000;
+    struct itimerval timer={.it_interval={0,interval},.it_value={0,interval}};
     assert(!setitimer(ITIMER_REAL,&timer,NULL));
     struct shared_memory_case cases[2]={{directory,0,restart&2},{directory,1,restart&2}};
     pthread_t peer; assert(!pthread_create(&peer,NULL,shared_memory,&cases[1]));

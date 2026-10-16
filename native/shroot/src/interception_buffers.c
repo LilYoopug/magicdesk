@@ -12,7 +12,7 @@ struct slot { uint64_t generation; unsigned references,extent; };
 struct md_interception_buffers {
     void *memory;
     size_t size, stride, capacity, clear_prefix;
-    unsigned slots, ordinary, references, next, next_reserved;
+    unsigned slots, ordinary, channels, references, next, next_reserved, next_channel;
     uint64_t generation;
     int fd;
     struct slot slot[];
@@ -71,11 +71,12 @@ static int take(struct md_interception_buffers *p, struct md_interception_buffer
     if (!p || !out) return -EINVAL;
     if (out->pool) return -EBUSY;
     if (p->generation==UINT64_MAX || p->references==UINT_MAX) return -EOVERFLOW;
-    unsigned base=reserved ? p->ordinary : 0, count=reserved ? p->slots-p->ordinary : p->ordinary;
+    unsigned base=reserved==2 ? p->ordinary-p->channels : reserved ? p->ordinary : 0;
+    unsigned count=reserved==2 ? p->channels : reserved ? p->slots-p->ordinary : p->ordinary-p->channels;
     if (!count) return -ENOTSUP;
     if (capacity>(count-1)*p->stride+p->capacity) return -ENOMEM;
     unsigned extent=capacity>p->capacity ? (unsigned)((capacity-p->capacity-1)/p->stride+2) : 1;
-    unsigned *next=reserved ? &p->next_reserved : &p->next;
+    unsigned *next=reserved==2 ? &p->next_channel : reserved ? &p->next_reserved : &p->next;
     for (unsigned n=0;n<count;++n) {
         unsigned i=base+(unsigned)(((uint64_t)*next+n)%count);
         if (extent>base+count-i) continue;
@@ -99,6 +100,14 @@ int md_buffers_take_sized(struct md_interception_buffers *p,size_t size,struct m
 }
 int md_buffers_take_reserved(struct md_interception_buffers *p, struct md_interception_buffer *out) {
     return take(p,out,1,0);
+}
+int md_buffers_partition_channels(struct md_interception_buffers *p,unsigned count) {
+    if (!p || count>=p->ordinary) return -EINVAL;
+    if (p->generation || p->channels) return -EBUSY;
+    p->channels=count; return 0;
+}
+int md_buffers_take_channel(struct md_interception_buffers *p,struct md_interception_buffer *out) {
+    return take(p,out,2,0);
 }
 int md_buffer_pin(const struct md_interception_buffer *b, struct md_interception_buffer *out) {
     if (!out) return -EINVAL;

@@ -42,6 +42,9 @@ struct md_fs_context {
 };
 int md_fs_context_begin(struct md_filesystem *, int actor, int peer, struct md_fs_context *);
 void md_fs_context_end(struct md_fs_context *);
+/* Optional provider-owned read reuse. NULL requires closing any previous
+ * window; mount/provider transitions must not inherit another store's lock. */
+struct md_inode_store *md_fs_context_read_scope(const struct md_fs_context *,const struct md_fs_request *,int native_plan);
 void md_fs_context_execute(struct md_fs_context *,
         const struct md_fs_request *, struct md_fs_result *, const struct md_fs_output *);
 /* Worker-created snapshots use the same retained path provenance as opens.

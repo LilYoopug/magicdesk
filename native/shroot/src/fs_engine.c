@@ -203,6 +203,25 @@ void md_fs_context_end(struct md_fs_context *context) {
     md_task_snapshot_release(&context->task);
     *context=(struct md_fs_context){0};
 }
+struct md_inode_store *md_fs_context_read_scope(const struct md_fs_context *c,const struct md_fs_request *q,int native_plan) {
+    if (!c->filesystem || (q->operation!=MD_FS_STAT
+            && !(q->operation==MD_FS_OPEN && (md_open_readonly_plan(q->flags)
+                || (native_plan && md_open_native_plan(q->flags))))) || !q->path[0] || !q->path[0][0]
+            || q->object[0] || q->control.ops) return NULL;
+    const struct md_mount_namespace *mounts=c->authenticated ? c->task.mounts : c->filesystem->mounts;
+    if (q->path[0][0]!='/') {
+        const struct md_fs_anchor *origin=q->origin[0];
+        /* Capture under the cwd/file-table owner precedes this admission.
+         * A foreign or detached anchor may enter another provider/store. */
+        if (!origin || !mounts || origin->view!=mounts || origin->mount!=&mounts->base
+                || q->directory[0]!=md_fs_anchor_fd(origin)) return NULL;
+    } else if (q->origin[0]) return NULL;
+    /* Nested stores/overlay/providers retain their own locking contracts. A
+     * later provider may opt in only after defining cross-store release order. */
+    if (md_mount_namespace_attached(mounts) || md_mount_namespace_managed_paths(mounts)
+            || (c->authenticated && md_domain_restricted(c->task.fs))) return NULL;
+    return c->filesystem->store;
+}
 void md_fs_context_capture_result(struct md_fs_context *context, struct md_fs_result *result,
         struct md_fs_anchor **origin) {
     struct md_fs_output output={.origin=origin};
@@ -238,7 +257,10 @@ static void context_execute(struct md_fs_context *context,
     }
     struct md_fs_request captured;
     if (q->attributes.creation_mask==MD_FS_CAPTURE_UMASK) {
-        long mask=context->authenticated ? md_task_umask(context->actor) : -EPERM;
+        /* A native plan only pins an existing object; a missing name declines
+         * before birth. Capture the live umask only in the creating carrier. */
+        int pin_only=q->operation==MD_FS_OPEN && output && output->native_open_plan;
+        long mask=context->authenticated ? (pin_only ? 0 : md_task_umask(context->actor)) : -EPERM;
         if (mask<0) { *out=(struct md_fs_result){.fd=-1,.error=(int)mask}; return; }
         captured=*q; captured.attributes.creation_mask=(unsigned)mask; q=&captured;
     }
@@ -508,7 +530,8 @@ static void inode_execute(struct md_filesystem *fs,
         if (!r) out->size = strlen(data) + 1;
         break;
     case MD_FS_CREATE: r = md_inode_create(s, first, a, q->mode); goto opened;
-    case MD_FS_OPEN: r = md_catalogue_open(images, s, first, a, (int)q->flags, q->mode, q->resolve, &out->open_completion); goto opened;
+    case MD_FS_OPEN: r = md_catalogue_open(images, s, first, a, (int)q->flags, q->mode, q->resolve,
+        &out->open_completion,output && output->origin && output->native_open_plan); goto opened;
     case MD_FS_MKDIR: r = md_inode_mkdir(s, first, a, q->mode); break;
     case MD_FS_MKNOD:
         r=md_inode_mknod(s,first,a,q->mode,(dev_t)q->offset);

@@ -46,6 +46,14 @@ struct mdi_stat_location {
     ino_t inode;
     int root;
 };
+/* Physical directory identity only, valid within one locked operation. Logical
+ * permissions are taken from the current node and are never memoized here. */
+struct mdi_directory_check {
+    dev_t device;
+    ino_t inode;
+    int objects;
+    char backing[33];
+};
 struct md_inode_store {
     sqlite3 *db;
     int objects, watch_presence, locked, recording, readonly, reflink_unavailable;
@@ -69,6 +77,8 @@ struct md_inode_store {
     struct mdi_read_cache *read_cache;
     int cache_checked;
     unsigned read_depth;
+    unsigned directory_check_count;
+    struct mdi_directory_check directory_checks[4];
     sqlite3_stmt *queries[MDI_QUERY_COUNT];
     struct mdi_publication *publication;
     sqlite3_int64 operation_changes;
@@ -153,14 +163,17 @@ int mdi_node(struct md_inode_store *, const char *, struct mdi_node *);
 int mdi_super_preserve_writer(struct md_inode_store *,struct mdi_node *);
 int mdi_fd(struct md_inode_store *, int, struct mdi_node *);
 int mdi_fd_membership(struct md_inode_store *, int, struct mdi_node *, int *attached);
-int mdi_lookup(struct md_inode_store *, const char *parent, const char *, struct mdi_node *);
+int mdi_lookup(struct md_inode_store *, const struct mdi_node *parent, const char *, struct mdi_node *, struct stat *);
 int mdi_catalogue_lookup(struct md_inode_store *, const char *parent, const char *, struct mdi_node *);
 int mdi_stat(struct md_inode_store *, const struct mdi_node *, struct stat *);
+void mdi_stat_project(const struct mdi_node *, struct stat *);
 int mdi_backing_stat(struct md_inode_store *, const struct mdi_node *, struct stat *);
+int mdi_backing_fstat(const struct mdi_node *, int, struct stat *);
 int mdi_fstat(struct md_inode_store *, int, struct mdi_node *, struct stat *);
 int mdi_access(struct md_inode_store *, const struct mdi_node *, int);
 int mdi_permission(struct md_inode_store *, const struct mdi_node *, int, int real);
 int mdi_permission_as(struct md_inode_store *, const struct mdi_node *, int, const struct md_identity *);
+int mdi_permission_stat(struct md_inode_store *, const struct mdi_node *, struct stat *);
 int mdi_open_permission(struct md_inode_store *, const struct mdi_node *, int flags);
 int mdi_sticky(struct md_inode_store *, const struct mdi_location *);
 int mdi_sticky_as(struct md_inode_store *, const struct mdi_location *, const struct md_identity *);
@@ -178,8 +191,9 @@ int mdi_xattr_permission_as(struct md_inode_store *, const struct mdi_node *, co
 int mdi_setattr_permission(struct md_inode_store *, const struct mdi_node *, const struct md_fs_request *, const struct md_identity *);
 void md_inode_xattr(struct md_inode_store *, const struct md_fs_request *, struct md_fs_result *, const struct md_fs_output *);
 int mdi_walk(struct md_inode_store *, int, const char *, enum mdi_follow, int missing, struct mdi_location *);
+int mdi_walk_stat(struct md_inode_store *, int, const char *, enum mdi_follow, struct mdi_location *, struct stat *);
 int mdi_path_step(struct md_inode_store *, const struct mdi_node *, const char *,
-        const char *tail, uint64_t resolve, struct mdi_node *);
+        const char *tail, uint64_t resolve, struct mdi_node *, struct stat *);
 int mdi_host_boundary(struct md_inode_store *, const char *parent, const char *name, const char *tail, uint64_t resolve);
 int mdi_walk_resolved(struct md_inode_store *, int, const char *, enum mdi_follow, int missing,
         uint64_t resolve, struct mdi_location *);

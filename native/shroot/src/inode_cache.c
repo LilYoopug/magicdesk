@@ -86,6 +86,14 @@ void mdi_cache_snapshot(struct md_inode_store *s, sqlite3_int64 version) {
 }
 static uint64_t hash_bytes(uint64_t hash, const void *data, size_t length) {
     const unsigned char *bytes=data;
+    /* Connection-local bucket selection only; full keys decide identity. Mix
+     * words rather than serializing a multiply for every byte of each ID. */
+    while (length>=sizeof(uint64_t)) {
+        uint64_t word; memcpy(&word,bytes,sizeof(word));
+        hash=(hash^word)*UINT64_C(0x9e3779b185ebca87);
+        hash^=hash>>32;
+        bytes+=sizeof(word); length-=sizeof(word);
+    }
     for (size_t i=0;i<length;++i) hash=(hash^bytes[i])*UINT64_C(1099511628211);
     return hash;
 }
@@ -96,7 +104,7 @@ static uint64_t key_hash(const struct md_inode_store *s, const struct mdi_cache_
     hash=hash_bytes(hash,s->lifetime->scope,32);
     if (key->id) hash=hash_bytes(hash,key->id,strlen(key->id));
     if (key->name) hash=hash_bytes(hash,key->name,strlen(key->name));
-    return hash;
+    return hash^(hash>>32);
 }
 static int matches(const struct mdi_cache_entry *entry, const struct md_inode_store *s,
         const struct mdi_cache_key *key, uint64_t hash) {

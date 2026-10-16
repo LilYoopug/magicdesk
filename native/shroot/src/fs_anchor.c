@@ -102,10 +102,15 @@ void md_view_capture(struct md_filesystem *fs, struct md_mount_namespace *view,
     if (out->error || out->fd<0 || !output || !output->origin) return;
     int r=0;
     if (!view && mount) r=-EINVAL;
-    struct stat st;
-    if (!r && fstat(out->fd,&st)) r=-errno;
+    int transfer=out->open_completion.kind==MD_OPEN_PLAN;
+    struct stat st={0};
+    if (transfer) {
+        st.st_dev=out->open_completion.backing_device;
+        st.st_ino=out->open_completion.backing_inode;
+    } else if (!r && fstat(out->fd,&st)) r=-errno;
     int fd=-1;
-    if (!r) {
+    if (!r && transfer) fd=out->fd;
+    else if (!r) {
         char proc[64]; snprintf(proc,sizeof(proc),"/proc/self/fd/%d",out->fd);
         fd=open(proc,O_PATH|O_CLOEXEC);
         if (fd<0) r=-errno;
@@ -114,11 +119,12 @@ void md_view_capture(struct md_filesystem *fs, struct md_mount_namespace *view,
         view,mount,fd,st.st_dev,st.st_ino);
     if (!r && !p) r=-errno;
     if (r) {
-        if (fd>=0) close(fd);
+        if (fd>=0 && !transfer) close(fd);
         close(out->fd); out->fd=-1; out->error=r;
         if (out->open_completion.kind==MD_OPEN_PIPE) close(out->open_completion.control);
         out->open_completion=(struct md_open_completion){0};
         return;
     }
     *output->origin=p;
+    if (transfer) out->fd=-1;
 }

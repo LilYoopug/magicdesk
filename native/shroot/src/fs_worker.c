@@ -45,6 +45,7 @@ struct md_fs_worker {
     int notification_fd, exited;
     void *notification_context;
     int (*notification)(void *, struct md_filesystem *, short);
+    int (*prepare_wait)(void *);
     struct md_fs_worker_pause *pause;
     atomic_int pause_requested;
     struct md_cost queued, execution, delivery, completion;
@@ -103,6 +104,14 @@ static int notification(void *context, struct md_filesystem *fs, short events) {
     pthread_mutex_unlock(&w->lock);
     return ready(owner, fs, events);
 }
+static int prepare_wait(void *context) {
+    struct md_fs_worker *w=context;
+    pthread_mutex_lock(&w->lock);
+    void *owner=w->notification_context;
+    int (*prepare)(void *)=w->prepare_wait;
+    pthread_mutex_unlock(&w->lock);
+    return prepare ? prepare(owner) : 0;
+}
 static void *run(void *context) {
     struct md_fs_worker *w = context;
     sigset_t mask;
@@ -145,7 +154,8 @@ static void *run(void *context) {
     if (!error) {
         if (w->statistics) md_inode_measure(store, &stats);
         struct md_fs_work_source source = {.fd = w->wake.reader, .wakeup=w->wakeup, .context = w, .ready = run_ready,
-            .notification_fd = notification_fd, .notification = notification, .paused=paused};
+            .notification_fd = notification_fd, .notification = notification,
+            .prepare_wait=prepare_wait, .paused=paused};
         error = md_fs_serve(&fs, listener, w->stop, 5000, w->statistics ? &rpc : NULL, &source);
     }
     pthread_mutex_lock(&w->lock); w->stopping=1; pthread_mutex_unlock(&w->lock);
@@ -284,9 +294,10 @@ int md_fs_worker_error(struct md_fs_worker *w) {
     return error;
 }
 void md_fs_worker_notifications(struct md_fs_worker *w, int fd, void *context,
-        int (*ready)(void *, struct md_filesystem *, short)) {
+        int (*ready)(void *, struct md_filesystem *, short),int (*prepare)(void *)) {
     pthread_mutex_lock(&w->lock);
     w->notification_fd = fd; w->notification_context = context; w->notification = ready;
+    w->prepare_wait=prepare;
     pthread_mutex_unlock(&w->lock); md_queue_signal_send(&w->wake);
 }
 void md_fs_worker_publish(struct md_fs_worker *w, struct md_fs_work *work) {

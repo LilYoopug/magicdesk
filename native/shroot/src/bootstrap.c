@@ -9,6 +9,7 @@
 #include "proc_paths.h"
 #include "interception.h"
 #include "adapter_buffer.h"
+#include "cooperative_channel.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -38,12 +39,15 @@ void md_boot(uintptr_t *kernel_stack) {
     size_t envc = 0; while (env[envc]) ++envc;
     Elf64_auxv_t *aux = (Elf64_auxv_t *)(env + envc + 1);
     size_t auxc = 0;
+    const void *vdso=NULL;
     while (aux[auxc].a_type) {
         if (aux[auxc].a_type == AT_PAGESZ) md_page_size = aux[auxc].a_un.a_val;
+        if (aux[auxc].a_type == AT_SYSINFO_EHDR) vdso=(const void *)aux[auxc].a_un.a_val;
         ++auxc;
     }
     if (md_page_size < 4096 || md_page_size > 65536 || (md_page_size & (md_page_size - 1)))
         md_die("invalid page size", -EINVAL);
+    md_cooperative_init(vdso,md_page_size);
     if (!md_launch_identity(RAW0(getuid), RAW0(geteuid), RAW0(getgid), RAW0(getegid)))
         md_die("guest runtime requires the selected shell or root identity", -EACCES);
     if (argc == 2 && md_equal(argv[1], "--probe")) {
@@ -217,7 +221,7 @@ void md_boot(uintptr_t *kernel_stack) {
         if (bytes>MD_EXEC_BYTES-argument_bytes) md_die("guest arguments",-E2BIG);
         argument_bytes+=bytes;
     }
-    size_t words = 1 + guest_argc + 1 + envc + 1 + 2 * (auxc + 1);
+    size_t words = 1 + guest_argc + 1 + envc + 1 + 2 * (auxc + 2);
     if (words*sizeof(uintptr_t)+argument_bytes+md_page_size>stack_size) md_die("guest arguments",-E2BIG);
     char *arguments=(char *)((uintptr_t)stack+md_page_size+stack_size-argument_bytes);
     uintptr_t *sp = (uintptr_t *)(((uintptr_t)arguments - words * sizeof(uintptr_t)) & ~15UL);
@@ -236,6 +240,8 @@ void md_boot(uintptr_t *kernel_stack) {
     *p++ = 0;
     Elf64_auxv_t *guest_aux = (Elf64_auxv_t *)p;
     memcpy(guest_aux, aux, (auxc + 1) * sizeof(*aux));
+    guest_aux[auxc++]=(Elf64_auxv_t){.a_type=MD_AT_COOPERATIVE,.a_un.a_val=(uintptr_t)&md_cooperative_entry};
+    guest_aux[auxc]=(Elf64_auxv_t){0};
     for (size_t i = 0; i < auxc; ++i) {
         switch (guest_aux[i].a_type) {
         case AT_PHDR: guest_aux[i].a_un.a_val = program.phdr; break;

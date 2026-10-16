@@ -328,6 +328,7 @@ static void inode(struct md_filesystem *fs, struct md_mount_namespace *view, str
 }
 static void inode_selected(struct md_filesystem *fs, const struct md_fs_request *q,
         const struct md_view_location *a, struct md_fs_result *out, const struct md_fs_output *output) {
+    if (output && output->native_open_plan) { out->error=-EXDEV; return; }
     struct md_fs_request local=*q;
     local.directory[0]=a->fd; local.path[0]=NULL; local.origin[0]=NULL;
     local.directory[1]=-1; local.path[1]=NULL; local.origin[1]=NULL; local.resolve=0;
@@ -625,6 +626,9 @@ void md_fs_mounts_execute(struct md_filesystem *fs, const struct md_fs_request *
      * Never resolve self/fd against the filesystem worker's descriptor table. */
     uint64_t resolve=q->resolve|MD_VIEW_TASK_PATH;
     int r = md_view_walk(fs, q->directory[0], q->origin[0], q->path[0], follow(q), missing(q), resolve, &a);
+    /* Only the inode provider currently produces a side-effect-free open plan.
+     * Do not open a device/control endpoint and then decline its result. */
+    if (!r && output && output->native_open_plan && !md_view_inode(a.mount)) r=-EXDEV;
     if (!r && pair) {
         r = md_view_walk(fs, q->directory[1], q->origin[1], q->path[1], -1, 1, MD_VIEW_TASK_PATH, &b);
         if (r==-EREMOTE && fs->store->boundary) fs->store->boundary->operand=1;

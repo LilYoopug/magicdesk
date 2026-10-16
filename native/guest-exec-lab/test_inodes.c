@@ -717,6 +717,43 @@ static void read_admission_failure(void) {
     md_inode_store_close(s);
     puts("PASS lazy catalogue admission: failed version read releases the gate; write admission and rollback own the transaction");
 }
+static void permission_snapshot(void) {
+    struct md_inode_store *s=store("permission-snapshot",1);
+    struct md_identity owner=md_identity_new(0,0),user=md_identity_new(1000,1000);
+    s->identity=&owner;
+    CHECK(!md_inode_mkdir(s,-1,"/directory",0755));
+    struct mdi_location location;
+    CHECK(!mdi_begin(s,0));
+    CHECK(!mdi_walk(s,-1,"/directory",MDI_FOLLOW,0,&location));
+    CHECK(!mdi_finish(s,0));
+    struct md_inode_statistics statistics={0}; md_inode_measure(s,&statistics);
+    CHECK(!mdi_begin(s,0));
+    CHECK(!mdi_permission_as(s,&location.node,X_OK,&user));
+    CHECK(!mdi_permission_as(s,&location.node,X_OK,&user));
+    CHECK(statistics.directory_check_misses==1 && statistics.directory_check_hits==1);
+    struct mdi_node restricted=location.node; restricted.mode=0700;
+    CHECK(mdi_permission_as(s,&restricted,X_OK,&user)==-EACCES);
+    CHECK(!mdi_permission_as(s,&restricted,X_OK,&owner));
+    CHECK(!mdi_write(s) && !s->directory_check_count);
+    CHECK(!mdi_permission_as(s,&location.node,X_OK,&user));
+    CHECK(statistics.directory_check_misses==2);
+    CHECK(!mdi_finish(s,0));
+    /* Replacing the backing between operations must not reuse a successful
+     * identity check from the previous operation, even for the same node. */
+    CHECK(!renameat(s->objects,location.node.backing,s->objects,"saved-directory"));
+    CHECK(!mkdirat(s->objects,location.node.backing,0700));
+    CHECK(!mdi_begin(s,0));
+    CHECK(mdi_permission_as(s,&location.node,X_OK,&user)<0);
+    CHECK(!mdi_finish(s,0));
+    CHECK(!unlinkat(s->objects,location.node.backing,AT_REMOVEDIR));
+    CHECK(!renameat(s->objects,"saved-directory",s->objects,location.node.backing));
+    CHECK(!mdi_begin(s,0));
+    CHECK(!mdi_permission_as(s,&location.node,X_OK,&user));
+    CHECK(!mdi_finish(s,0));
+    md_inode_measure(s,NULL); s->identity=NULL;
+    md_identity_release(&owner); md_identity_release(&user); md_inode_store_close(s);
+    puts("PASS permission snapshot: same-operation directory validation only; credentials, mode, write admission and backing replacement rechecked");
+}
 static void reused_queries(void) {
     struct md_inode_store *s = store("queries", 1), *writer = store("queries", 0);
     int fd = md_inode_create(writer, MD_INODE_ROOT, "value", 0600); CHECK(fd >= 0);
@@ -880,11 +917,11 @@ static void mutation_cache(void) {
     CHECK(!mdi_begin(s,1));
     struct mdi_node root, value, absent;
     CHECK(!mdi_node(s,mdi_root(s),&root));
-    CHECK(mdi_lookup(s,root.id,"alias",&absent)==-ENOENT);
+    CHECK(mdi_lookup(s,&root,"alias",&absent,NULL)==-ENOENT);
     struct mdi_location loc;
     CHECK(!mdi_walk(s,-1,"/stable/value",MDI_FOLLOW,0,&loc));
     CHECK(!mdi_add_name(s,root.id,"alias",loc.node.id));
-    CHECK(!mdi_lookup(s,root.id,"alias",&value) && value.links==2);
+    CHECK(!mdi_lookup(s,&root,"alias",&value,NULL) && value.links==2);
     CHECK(!mdi_node(s,loc.node.id,&value) && value.links==2);
     CHECK(mdi_finish(s,-ECANCELED)==-ECANCELED);
     CHECK(md_inode_stat(s,-1,"/alias",0,&st)==-ENOENT);
@@ -1082,14 +1119,79 @@ static void retained_journal(void) {
     sqlite3_finalize(q); md_inode_store_close(a);
     puts("PASS WAL journal: shared connections, bounded checkpoint reuse, stable inode, non-mutating inspection and explicit journal preparation");
 }
+static void native_plans(void) {
+    struct md_inode_store *s=store("native-plans",1);
+    struct md_open_completion completion;
+    int fd=md_inode_create(s,-1,"value",0600); CHECK(fd>=0); put(fd,"old"); close(fd);
+    CHECK(!md_inode_mkdir(s,-1,"directory",0700));
+    CHECK(!md_inode_mknod(s,-1,"fifo",S_IFIFO|0600,0));
+    CHECK(!md_inode_symlink(s,"value",-1,"link"));
+    const unsigned rejected[]={O_CREAT|O_EXCL,O_PATH,O_DIRECTORY};
+    for (unsigned i=0;i<sizeof(rejected)/sizeof(*rejected);++i)
+        CHECK(md_inode_plan_open(s,-1,"missing",rejected[i],0600,0,&completion,1)==-EXDEV);
+    struct stat st; CHECK(md_inode_stat(s,-1,"missing",0,&st)==-ENOENT);
+    CHECK(md_inode_plan_open(s,-1,"missing",O_CREAT|O_RDWR,0600,0,&completion,1)==-EXDEV);
+    CHECK(md_inode_stat(s,-1,"missing",0,&st)==-ENOENT);
+    CHECK(md_inode_plan_open(s,-1,"value",O_TRUNC,0,0,&completion,1)==-EINVAL);
+    CHECK(md_inode_plan_open(s,-1,"directory",O_RDONLY,0,0,&completion,1)==-EXDEV);
+    CHECK(md_inode_plan_open(s,-1,"fifo",O_RDONLY,0,0,&completion,1)==-EXDEV);
+    CHECK(md_inode_plan_open(s,-1,"link",O_RDONLY|O_NOFOLLOW,0,0,&completion,1)==-ELOOP);
+    CHECK(md_inode_plan_open(s,-1,"missing",O_RDONLY,0,0,&completion,1)==-ENOENT);
+    int pin=md_inode_plan_open(s,-1,"link",O_RDONLY|O_CLOEXEC,0,0,&completion,1);
+    CHECK(pin>=0 && completion.kind==MD_OPEN_PLAN && (fcntl(pin,F_GETFL)&O_PATH));
+    CHECK(!md_inode_rename(s,-1,"value",-1,"renamed",0));
+    CHECK(!md_inode_unlink(s,-1,"renamed",0));
+    fd=md_inode_create(s,-1,"value",0600); CHECK(fd>=0); put(fd,"replacement"); close(fd);
+    char proc[64]; snprintf(proc,sizeof(proc),"/proc/self/fd/%d",pin);
+    fd=open(proc,O_RDONLY|O_CLOEXEC); CHECK(fd>=0); content(fd,"old"); close(fd); close(pin);
+    const unsigned writable[]={O_WRONLY,O_RDWR|O_APPEND|O_CREAT,O_WRONLY|O_TRUNC};
+    for (unsigned i=0;i<sizeof(writable)/sizeof(*writable);++i) {
+        pin=md_inode_plan_open(s,-1,"value",writable[i],0,0,&completion,1);
+        CHECK(pin>=0 && completion.kind==MD_OPEN_PLAN && (fcntl(pin,F_GETFL)&O_PATH));
+        CHECK(!md_inode_stat(s,-1,"value",0,&st) && st.st_size==11+(i==2));
+        snprintf(proc,sizeof(proc),"/proc/self/fd/%d",pin);
+        fd=open(proc,writable[i]|O_CLOEXEC); CHECK(fd>=0);
+        if (i==2) CHECK(!fstat(fd,&st) && st.st_size==0);
+        CHECK(write(fd,"x",1)==1); close(fd); close(pin);
+    }
+    s->readonly=1;
+    CHECK(md_inode_plan_open(s,-1,"value",O_WRONLY|O_TRUNC,0,0,&completion,1)==-EROFS);
+    s->readonly=0;
+    struct md_identity user=md_identity_new(1000,1000); s->identity=&user;
+    CHECK(md_inode_plan_open(s,-1,"value",O_RDONLY,0,0,&completion,1)==-EACCES);
+    s->identity=NULL; md_identity_release(&user); md_inode_store_close(s);
+    struct md_inode_store *source=store("native-plan-source",1),*copy=store("native-plan-copy",1);
+    fd=md_inode_create(source,-1,"shared",0600); CHECK(fd>=0); put(fd,"source"); close(fd);
+    CHECK(!md_inode_link(source,-1,"shared",-1,"alias",0));
+    CHECK(!md_inode_store_seal(source));
+    CHECK(!md_inode_snapshot(source,copy));
+    CHECK(!md_inode_read_scope_begin(copy));
+    CHECK(md_inode_plan_open(copy,-1,"alias",O_CREAT|O_WRONLY|O_TRUNC,0600,0,&completion,1)==-EAGAIN);
+    CHECK(completion.kind==MD_OPEN_NEEDS_WRITE && copy->read_depth==1 && !copy->write_transaction);
+    CHECK(!md_inode_read_scope_end(copy));
+    pin=md_inode_plan_open(copy,-1,"alias",O_CREAT|O_WRONLY|O_TRUNC,0600,0,&completion,1);
+    CHECK(pin>=0 && completion.kind==MD_OPEN_PLAN);
+    CHECK(!md_inode_stat(copy,-1,"shared",0,&st) && st.st_size==6 && st.st_nlink==2);
+    snprintf(proc,sizeof(proc),"/proc/self/fd/%d",pin);
+    fd=open(proc,O_WRONLY|O_TRUNC|O_CLOEXEC); CHECK(fd>=0); put(fd,"new"); close(fd); close(pin);
+    fd=md_inode_open(copy,-1,"shared",O_RDONLY,0); CHECK(fd>=0); content(fd,"new"); close(fd);
+    fd=md_inode_open(source,-1,"shared",O_RDONLY,0); CHECK(fd>=0); content(fd,"source"); close(fd);
+    CHECK(!md_inode_read_scope_begin(copy));
+    pin=md_inode_plan_open(copy,-1,"shared",O_WRONLY|O_APPEND,0,0,&completion,1);
+    CHECK(pin>=0 && completion.kind==MD_OPEN_PLAN && copy->read_depth==1 && !copy->write_transaction);
+    close(pin); CHECK(!md_inode_read_scope_end(copy));
+    md_inode_store_close(copy); md_inode_store_close(source);
+    puts("PASS native open plans: pin identity, deferred write/append/truncate, readonly policy, permissions and pre-effect decline");
+}
 int main(int argc, char **argv) {
     CHECK(argc == 2 || argc == 3);
     CHECK(argv[1][0] == '/' && strlen(argv[1]) < sizeof(root)); strcpy(root, argv[1]);
     if (argc == 3) { CHECK(!strcmp(argv[2], "exec-child")); exec_child("exec"); return 0; }
     CHECK(mkdir(root, 0700) == 0);
     descriptors(); namespace(); contention(); multiple_stores(); across_exec(argv[0]);
+    native_plans();
     hierarchy(); symlinks(); permissions(); kernel_reference(); scoped_paths(); read_admission_failure();
-    reused_queries(); metadata_queries(); cached_path_names();
+    permission_snapshot(); reused_queries(); metadata_queries(); cached_path_names();
     backing_cache(); mutation_cache(); directory_publication(); membership_queries(); counter_audit(); retained_journal();
     unsigned serial = 0;
     recovery(CREATE, MD_OBJECT_SYNCED, serial++);

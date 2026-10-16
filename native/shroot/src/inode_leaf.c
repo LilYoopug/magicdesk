@@ -7,7 +7,6 @@
 #include <errno.h>
 #include <dirent.h>
 #include <fcntl.h>
-#include <inttypes.h>
 #include <linux/fs.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -53,11 +52,14 @@ int mdi_leaf_create(struct md_inode_store *s,const struct mdi_node *parent,const
 }
 
 int mdi_leaf_id(const struct stat *st,const char scope[33],char out[33]) {
-    snprintf(out,33,"%016" PRIx64 "%016" PRIx64,(uint64_t)st->st_dev,(uint64_t)st->st_ino);
+    static const char hex[]="0123456789abcdef";
+    const uint64_t values[]={(uint64_t)st->st_dev,(uint64_t)st->st_ino};
+    for (unsigned part=0;part<2;++part) for (unsigned i=0;i<16;++i)
+        out[part*16+i]=hex[(values[part]>>(60-4*i))&15];
+    out[32]=0;
     if (!strcmp(scope,MDI_ROOT)) return 0;
     /* A backing can be visible in both upper and merged scopes. Preserve the
      * root identity and derive each view's stable identity before promotion. */
-    static const char hex[]="0123456789abcdef";
     for (unsigned i=0;i<32;++i) {
         const char *digit=strchr(hex,scope[i]);
         if (!scope[i] || !digit) return -EIO;
@@ -65,8 +67,8 @@ int mdi_leaf_id(const struct stat *st,const char scope[33],char out[33]) {
     }
     return 0;
 }
-static int leaf(struct md_inode_store *s,const struct mdi_node *parent,const char *name,
-        int descriptor,const struct stat *physical,struct mdi_node *out) {
+static int leaf(struct md_inode_store *s,const struct mdi_node *parent,
+        const char *backing,int descriptor,const struct stat *physical,struct mdi_node *out,struct stat *attributes) {
     if (!S_ISREG(physical->st_mode) || physical->st_nlink>1) return -EXDEV;
     struct mdi_node node={.native=1,.descriptor=descriptor<0 ? 0 : descriptor+1,
         .kind=S_IFREG,.device=physical->st_dev,.inode=physical->st_ino,
@@ -75,8 +77,7 @@ static int leaf(struct md_inode_store *s,const struct mdi_node *parent,const cha
     int id=mdi_leaf_id(physical,parent->scope,node.id);
     if (id) return id;
     strcpy(node.parent,parent->id); strcpy(node.scope,parent->scope);
-    int n=snprintf(node.backing,sizeof(node.backing),"%s/%s",parent->backing,name);
-    if (n<0 || (size_t)n>=sizeof(node.backing)) return -ENAMETOOLONG;
+    strcpy(node.backing,backing);
     struct stat logical=*physical;
     if (physical->st_mode&S_ISVTX) {
         int fd=descriptor>=0 ? descriptor : mdi_backing_open(s,&node,O_PATH);
@@ -90,19 +91,20 @@ static int leaf(struct md_inode_store *s,const struct mdi_node *parent,const cha
         logical.st_uid=logical.st_gid=0;
     }
     node.mode=logical.st_mode&07777; node.uid=logical.st_uid; node.gid=logical.st_gid;
+    /* Return this lookup's observation, not a second pathname lookup which can
+     * select a different object. Nothing survives the enclosing operation. */
+    if (attributes) { *attributes=logical; mdi_stat_project(&node,attributes); }
     *out=node; return 0;
 }
-int mdi_leaf_lookup(struct md_inode_store *s,const char *id,const char *name,struct mdi_node *out) {
-    struct mdi_node parent;
-    int r=mdi_node(s,id,&parent);
-    if (r) return r;
-    if (parent.kind!=S_IFDIR || parent.source || !parent.attached) return -ENOENT;
+int mdi_leaf_lookup(struct md_inode_store *s,const struct mdi_node *parent,const char *name,struct mdi_node *out,struct stat *attributes) {
+    if (parent->kind!=S_IFDIR || parent->source || !parent->attached) return -ENOENT;
     char path[NAME_MAX+34];
-    int n=snprintf(path,sizeof(path),"%s/%s",parent.backing,name);
-    if (n<0 || (size_t)n>=sizeof(path)) return -ENAMETOOLONG;
+    size_t prefix=strlen(parent->backing),length=strlen(name);
+    if (prefix+length+1>=sizeof(path)) return -ENAMETOOLONG;
+    memcpy(path,parent->backing,prefix); path[prefix]='/'; memcpy(path+prefix+1,name,length+1);
     struct stat st;
     if (fstatat(s->objects,path,&st,AT_SYMLINK_NOFOLLOW)) return -errno;
-    return leaf(s,&parent,name,-1,&st,out);
+    return leaf(s,parent,path,-1,&st,out,attributes);
 }
 static int fdpath(int fd,char *out,size_t size) {
     char proc[64]; snprintf(proc,sizeof(proc),"/proc/self/fd/%d",fd);
@@ -154,12 +156,12 @@ selected:
     struct stat actual;
     r=mdi_backing_stat(s,&directory,&actual);
     if (r) return r;
+    char selected[NAME_MAX+34]; snprintf(selected,sizeof(selected),"%s/%s",parent,name);
     if (st->st_nlink) {
-        char selected[NAME_MAX+34]; snprintf(selected,sizeof(selected),"%s/%s",parent,name);
         if (fstatat(s->objects,selected,&actual,AT_SYMLINK_NOFOLLOW)) return -errno;
         if (st->st_dev!=actual.st_dev || st->st_ino!=actual.st_ino) return -ESTALE;
     }
-    return leaf(s,&directory,name,fd,st,out);
+    return leaf(s,&directory,selected,fd,st,out,NULL);
 }
 int mdi_leaf_promote(struct md_inode_store *s,struct mdi_node *node) {
     if (!node->native) return 0;
@@ -227,7 +229,7 @@ struct materialize { struct md_inode_store *store; const struct mdi_node *parent
 static int promote_name(const char *name,void *data) {
     struct materialize *m=data;
     struct mdi_node node;
-    int r=mdi_leaf_lookup(m->store,m->parent->id,name,&node);
+    int r=mdi_leaf_lookup(m->store,m->parent,name,&node,NULL);
     return r ? r : mdi_leaf_promote(m->store,&node);
 }
 int mdi_leaf_materialize_directory(struct md_inode_store *s,const struct mdi_node *parent) {

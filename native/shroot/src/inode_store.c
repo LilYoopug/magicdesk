@@ -139,13 +139,13 @@ ssize_t md_inode_readlink(struct md_inode_store *s, int dirfd, const char *path,
     return r ? r : n;
 }
 static int open_resolved(struct md_inode_store *, int, const char *, int, mode_t, uint64_t,
-        struct md_image_identity *, struct md_open_completion *);
+        struct md_image_identity *, struct md_open_completion *, int);
 int md_inode_open_image(struct md_inode_store *s, int dirfd, const char *path, int flags,
         struct md_image_identity *image) {
     if (!image) return -EFAULT;
     if (flags & ~O_NOFOLLOW) return -EINVAL;
     struct md_open_completion completion;
-    return open_resolved(s, dirfd, path, flags | O_RDONLY | O_CLOEXEC, 0, 0, image, &completion);
+    return open_resolved(s, dirfd, path, flags | O_RDONLY | O_CLOEXEC, 0, 0, image, &completion, 0);
 }
 int md_inode_open(struct md_inode_store *s, int dirfd, const char *path, int flags, mode_t mode) {
     return md_inode_open_resolved(s, dirfd, path, flags, mode, 0);
@@ -158,11 +158,16 @@ int md_inode_open_resolved(struct md_inode_store *s, int dirfd, const char *path
 }
 int md_inode_prepare_open(struct md_inode_store *s, int dirfd, const char *path, int flags, mode_t mode,
         uint64_t resolve, struct md_open_completion *completion) {
-    return open_resolved(s, dirfd, path, flags, mode, resolve, NULL, completion);
+    return md_inode_plan_open(s,dirfd,path,flags,mode,resolve,completion,0);
+}
+int md_inode_plan_open(struct md_inode_store *s,int dirfd,const char *path,int flags,mode_t mode,
+        uint64_t resolve,struct md_open_completion *completion,int native_plan) {
+    return open_resolved(s, dirfd, path, flags, mode, resolve, NULL, completion, native_plan);
 }
 static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, int flags, mode_t mode,
-        uint64_t resolve, struct md_image_identity *image, struct md_open_completion *completion) {
+        uint64_t resolve, struct md_image_identity *image, struct md_open_completion *completion, int native_plan) {
     *completion = (struct md_open_completion){0};
+    if (native_plan && !md_open_native_plan(flags)) return -EXDEV;
     if (flags & ~(O_ACCMODE | O_CLOEXEC | O_APPEND | O_TRUNC | O_NOFOLLOW | O_DIRECTORY | O_PATH
             | O_CREAT | O_EXCL | O_NONBLOCK | O_NOCTTY | O_NOATIME | O_LARGEFILE | O_SYNC | O_DSYNC | O_DIRECT)) return -ENOTSUP;
     if ((flags & O_ACCMODE) == O_ACCMODE) return -EINVAL;
@@ -180,6 +185,9 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
     if (!r && create && loc.trailing) r = -EISDIR;
     if (!r && create && (flags & O_EXCL) && loc.exists) r = -EEXIST;
     if (!r && !loc.exists) {
+        /* No name or inode has been created. Transfer to the notification
+         * owner, which retains one opened result across cancellation/restart. */
+        if (native_plan) return mdi_finish(s,-EXDEV);
         if (loc.trailing) r = -EISDIR;
         if (!r && mdi_readonly(s)) r=-EROFS;
         if (!r) r = mdi_parent_writable(s, &loc.parent);
@@ -213,18 +221,29 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
     if (!r) r = mdi_open_permission(s, &loc.node, flags);
     if (!r && image) r = mdi_permission(s, &loc.node, X_OK, 0);
     if (!r) r=mdi_landlock(s,&loc.node,&loc.parent,image ? MD_LL_EXECUTE : md_landlock_open_access(flags,loc.node.kind));
+    /* Decline special endpoints before copy-up or any data-open effect. */
+    if (!r && native_plan && loc.node.kind!=S_IFREG) r=-EXDEV;
     if (!r && !device && (flags&(O_WRONLY|O_RDWR|O_TRUNC)) && (loc.node.shared || (s->overlay && !loc.node.native))) {
+        if (native_plan && s->read_depth>1) {
+            /* Release the outer preparation window before COW. This is a
+             * pre-effect admission result, never a completed open to replay. */
+            completion->kind=MD_OPEN_NEEDS_WRITE;
+            return mdi_finish(s,-EAGAIN);
+        }
         r=mdi_write(s);
         if (!r) r=mdi_copy_up(s,&loc.node);
     }
+    int plan=!r && native_plan;
     struct stat st;
-    if (!r) r = mdi_backing_stat(s, &loc.node, &st);
+    if (!r && !plan) r = mdi_backing_stat(s, &loc.node, &st);
     int directory = r ? -1 : mdi_backing_directory(s, &loc.node);
     if (!r && directory < 0) r = directory;
     int deferred = !r && loc.node.kind == S_IFIFO && !(flags & O_PATH);
     int native_flags = deferred || device ? O_PATH : flags & ~(O_CREAT | O_EXCL);
+    if (plan) native_flags=O_PATH;
     if (!r && image) r=mdi_leaf_promote(s,&loc.node);
     if (!r && (fd=mdi_backing_open(s,&loc.node,native_flags))<0) r=fd;
+    if (!r && plan) r=mdi_backing_fstat(&loc.node,fd,&st);
     if (!r && image) {
         struct stat opened;
         if (fstat(fd, &opened)) r = -errno;
@@ -232,10 +251,12 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
         if (!r) r = mdi_location_path(s, &loc, image->path, sizeof(image->path));
         if (!r) memcpy(image->object, loc.node.id, sizeof(image->object));
     }
-    if (!r && (flags&O_DSYNC)) s->sync_requested=1;
+    if (!r && (flags&O_DSYNC) && (!plan || s->write_transaction)) s->sync_requested=1;
     r = mdi_finish(s, r);
     if (r) { if (fd >= 0) close(fd); return r; }
     if (deferred) return mdi_fifo_prepare(s, fd, completion);
+    if (plan) *completion=(struct md_open_completion){.kind=MD_OPEN_PLAN,
+        .backing_device=st.st_dev,.backing_inode=st.st_ino};
     if (device) *completion=(struct md_open_completion){.kind=MD_OPEN_DEVICE,
         .device=loc.node.rdev,.mode=loc.node.kind};
     return fd;
@@ -379,8 +400,7 @@ int md_inode_stat(struct md_inode_store *s, int dirfd, const char *path, int fla
     int r = mdi_begin(s, 0);
     if (r) return r;
     struct mdi_location loc;
-    r = mdi_walk(s, dirfd, path, flags & AT_SYMLINK_NOFOLLOW ? MDI_NOFOLLOW : MDI_FOLLOW, 0, &loc);
-    if (!r) r = mdi_stat(s, &loc.node, st);
+    r = mdi_walk_stat(s, dirfd, path, flags & AT_SYMLINK_NOFOLLOW ? MDI_NOFOLLOW : MDI_FOLLOW, &loc, st);
     if (!r && s->stat_location) {
         struct mdi_stat_location *p=s->stat_location;
         p->device=loc.node.device; p->inode=loc.node.inode;

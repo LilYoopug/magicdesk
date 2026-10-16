@@ -1,5 +1,18 @@
 #include <asm/unistd.h>
 .text
+.global md_guest_entry_kernel
+.type md_guest_entry_kernel, %function
+md_guest_entry_kernel:
+    /* This is an application syscall site, never the raw adapter gate.
+     * Kernel seccomp sees the real number and all six original arguments. */
+    mov x8, x0
+    mov x9, x1
+    ldp x0, x1, [x9]
+    ldp x2, x3, [x9, #16]
+    ldp x4, x5, [x9, #32]
+    svc #0
+    ret
+.size md_guest_entry_kernel, .-md_guest_entry_kernel
 .global md_guest_dispatch_entry
 .type md_guest_dispatch_entry, %function
 md_guest_dispatch_entry:

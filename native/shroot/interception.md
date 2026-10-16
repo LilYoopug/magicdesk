@@ -18,6 +18,9 @@ The bootstrap publishes a private, size-checked ABI containing its gate addresse
 at an explicit readiness stop. The supervisor reads it before resuming the guest;
 exec republishes the same immutable bundle's ABI. No generated address header,
 Java class name or environment-variable switch selects an implementation.
+The bootstrap also publishes an optional [cooperative entry](cooperative-entry.md)
+for source-level callers. It reuses the same worker and execution context;
+unmodified and filtered code retain their original SVC paths.
 The dispatch gate receives policy in x9 and moves it to the C argument register
 in userspace. It does not rely on changing x7 at an ARM64 syscall stop: the
 [kernel restores that register](https://github.com/torvalds/linux/blob/v5.15/arch/arm64/kernel/ptrace.c#L1694-L1726)
@@ -104,6 +107,8 @@ allocator and inherited mapping, preventing overlapping leases between parent
 and child. Exec creates an independent pool; outstanding workers retain old
 storage until completion. The pool has 32 page-rounded response slots, allocated
 only for namespace execution, not direct-rootfs launches.
+Eight separate persistent cooperative-channel slots cannot consume response or
+control capacity. They are leased lazily and returned on task retirement.
 `adapter_buffer` owns the lease controls, while `adapter_frame` defines the
 filesystem, SysV packet and shared-memory metadata views. Filesystem requests
 clear only their bounded header, not the entire payload capacity. SysV calls
@@ -231,6 +236,10 @@ only the completed endpoint reaches the guest. No worker or resource turn spans
 peer rendezvous. The existing SIGCHLD loop owns reaping, including cancelled
 operations. Ordinary opens create no child. The guest build contains no
 filesystem RPC-client fallback; native host clients retain their RPC contract.
+While the child waits, the guest is parked in interruptible native ppoll, not
+held at a ptrace stop. Signals can therefore cancel the open or request kernel
+restart, including libc cancellation regions. Completion interrupts that exact
+wait; cancellation retains the helper and its request buffer through reaping.
 Proc-image snapshots share this worker lifecycle. Task-local copying fills the
 mapped slot; captured chunks build a worker-owned file. Only the completed
 read-only/O_PATH result is delivered. Rejected copying and terminal loss retire
@@ -334,6 +343,15 @@ thread; the broker therefore retains a handoff barrier until the stopped receive
 acknowledges custody. Repeated notifications delegate to that retained result,
 not another execution. Scalar mutations still complete under the task-affine
 signal shield: successful NOTIF_SEND alone is not a consumption acknowledgement.
+The same restart can precede an outstanding delegation/export INTERRUPT, before
+any operation runs. An exact syscall/site/argument match replaces only the
+cancelled notification token; the existing stop owner completes admission.
+`MD_NOTIFICATION rebounds` records this rare transition under `--statistics`.
+A restarted notification can also begin delegation while the original worker
+still owns its completed open. At the shared stop, the retained result takes
+precedence over that exact, unexecuted admission; only the duplicate admission is
+retired. `MD_NOTIFICATION readmissionsRetired` counts this ordering. The completed
+FD and its effects are neither discarded nor repeated.
 Directory reads use the engine's deferred-position contract. Their existing
 file-table/OFD turn spans output copying, notification reply and cursor commit.
 An invalid notification, rejected kernel reply or failed/partial copy cannot

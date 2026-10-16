@@ -3,6 +3,8 @@
 #include "interception_memory.h"
 #include "adapter_frame.h"
 #include "fd_filter_program.h"
+#include "execution_window.h"
+#include "spin_policy.h"
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -37,6 +39,50 @@ static unsigned descriptors(void) {
     unsigned n=0; struct dirent *e;
     while ((e=readdir(d))) if (strcmp(e->d_name,".") && strcmp(e->d_name,"..")) ++n;
     assert(!closedir(d)); return n;
+}
+struct scope_probe { unsigned acquired, released; int failure; };
+static int scope_acquire(void *owner) {
+    struct scope_probe *p=owner; ++p->acquired; return p->failure;
+}
+static int scope_release(void *owner) {
+    struct scope_probe *p=owner; ++p->released; return p->failure;
+}
+static void execution_windows(void) {
+    struct md_execution_window window={0};
+    struct scope_probe a={0},b={0};
+    assert(!md_execution_window_admit(&window,&a,scope_acquire,scope_release,10,2,10));
+    assert(!md_execution_window_admit(&window,&a,scope_acquire,scope_release,11,2,10));
+    assert(a.acquired==1 && !a.released);
+    assert(!md_execution_window_admit(&window,&a,scope_acquire,scope_release,12,2,10));
+    assert(a.acquired==2 && a.released==1);
+    assert(!md_execution_window_admit(&window,&a,scope_acquire,scope_release,22,2,10));
+    assert(a.acquired==3 && a.released==2);
+    assert(!md_execution_window_admit(&window,&b,scope_acquire,scope_release,23,2,10));
+    assert(a.released==3 && b.acquired==1);
+    assert(!md_execution_window_admit(&window,NULL,NULL,NULL,24,0,0));
+    assert(!window.owner && b.released==1);
+    b.failure=-EIO;
+    assert(md_execution_window_admit(&window,&b,scope_acquire,scope_release,25,2,10)==-EIO);
+    assert(!window.owner && b.released==1);
+    assert(!md_execution_window_admit(&window,&a,scope_acquire,scope_release,26,2,10));
+    a.failure=-EIO;
+    assert(md_execution_window_end(&window)==-EIO && !window.owner);
+    assert(!md_execution_window_end(&window));
+    assert(md_execution_window_admit(&window,&a,scope_acquire,scope_release,UINT64_MAX,2,10)==-EINVAL);
+    assert(md_execution_window_admit(&window,&a,NULL,scope_release,0,2,10)==-EINVAL);
+    assert(md_execution_window_admit(&window,&a,scope_acquire,NULL,0,2,10)==-EINVAL);
+    assert(md_execution_window_admit(&window,&a,scope_acquire,scope_release,0,0,10)==-EINVAL);
+    struct md_spin_policy spin={0};
+    for (unsigned i=0;i<4;++i) { assert(md_spin_budget(&spin,25000)==25000); md_spin_result(&spin,0); }
+    for (unsigned i=0;i<128;++i) assert(!md_spin_budget(&spin,25000));
+    assert(md_spin_budget(&spin,25000)==25000);
+    md_spin_result(&spin,0); md_spin_result(&spin,1); assert(!spin.misses && !spin.cooldown);
+    md_spin_observed(&spin,1,0,200); assert(spin.misses==1);
+    md_spin_observed(&spin,1,201,200); assert(spin.misses==2);
+    md_spin_observed(&spin,1,200,200); assert(spin.misses==3);
+    md_spin_observed(&spin,1,199,200); assert(!spin.misses);
+    md_spin_observed(&spin,0,100,200); assert(spin.misses==1);
+    puts("PASS execution windows: provider/count/time boundaries, failed acquire/release, teardown, invalid bounds and adaptive parking");
 }
 static void slots(void) {
     struct md_interception_buffers *p=NULL;
@@ -100,6 +146,23 @@ static void spans(void) {
     assert(!md_buffer_release(&wide) && !md_buffer_release(&next) && !md_buffer_release(&control));
     fail_allocation=0; md_buffers_release(p);
     puts("PASS contiguous request spans: alignment, pinning, reserve, exhaustion and allocation-free release");
+}
+static void channels(void) {
+    struct md_interception_buffers *pool=NULL;
+    assert(!md_buffers_create(5,4096,64,1,&pool));
+    assert(!md_buffers_partition_channels(pool,2));
+    assert(md_buffers_partition_channels(pool,1)==-EBUSY);
+    struct md_interception_buffer ordinary[3]={0},channel[2]={0},control={0},extra={0};
+    for (unsigned i=0;i<2;++i) assert(!md_buffers_take_channel(pool,&channel[i]));
+    assert(md_buffers_take_channel(pool,&extra)==-EAGAIN);
+    for (unsigned i=0;i<3;++i) assert(!md_buffers_take(pool,&ordinary[i]));
+    assert(md_buffers_take(pool,&extra)==-EAGAIN);
+    assert(!md_buffers_take_reserved(pool,&control));
+    for (unsigned i=0;i<2;++i) assert(!md_buffer_release(&channel[i]));
+    assert(md_buffers_take(pool,&extra)==-EAGAIN);
+    for (unsigned i=0;i<3;++i) assert(!md_buffer_release(&ordinary[i]));
+    assert(!md_buffer_release(&control)); md_buffers_release(pool);
+    puts("PASS persistent channels: separate capacity, ordinary and control reserve, exact release");
 }
 static void filter_payload(void) {
     struct md_interception_buffers *pool=NULL;
@@ -523,7 +586,7 @@ static void memory_access_protected_child(void) {
 int main(void) {
     alarm(30);
     unsigned before=descriptors();
-    slots(); spans(); filter_payload(); owner_lifetime(); failures(); address_spaces(); payload_reuse(); mapping_policy(); file_views(); file_view_failures();
+    execution_windows(); slots(); spans(); channels(); filter_payload(); owner_lifetime(); failures(); address_spaces(); payload_reuse(); mapping_policy(); file_views(); file_view_failures();
     file_backing_lifetime(); memory_access_lifetime(); memory_access_capture(); memory_access_protected_child();
     assert(descriptors()==before);
     puts("PASS shared request buffer ownership");

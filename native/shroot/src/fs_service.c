@@ -309,6 +309,7 @@ int md_fs_serve(struct md_filesystem *fs, int listener, int stop_fd,
     for (unsigned i = BASE; i < BASE+SLOTS; ++i) fds[i].fd = -1;
     for (;;) {
         if (work && work->paused && work->paused(work->context)) {
+            if (work->prepare_wait) work->prepare_wait(work->context);
             struct pollfd control[]={{stop_fd,POLLIN,0},{work->fd,POLLIN,0}};
             /* EVENT_WAIT: explicit worker-pause release or shutdown; the
              * supervisor's operation deadline owns cancellation. No namespace
@@ -351,7 +352,9 @@ int md_fs_serve(struct md_filesystem *fs, int listener, int stop_fd,
         fds[4] = (struct pollfd){.fd = md_inode_watch_pollfd(s), .events = POLLIN};
         fds[7].fd=md_ipc_credentials_pollfd(fs->ipc);
         fds[8].fd=md_shm_bridge_pollfd(fs->shm_bridge);
-        int r = ppoll(fds, BASE+SLOTS, nearest == INT64_MAX ? NULL : &timeout, NULL);
+        int shared_ready=work && work->prepare_wait && work->prepare_wait(work->context);
+        if (shared_ready) timeout=(struct timespec){0};
+        int r = ppoll(fds, BASE+SLOTS, !shared_ready && nearest == INT64_MAX ? NULL : &timeout, NULL);
         if (r < 0) { if (errno == EINTR) continue; error = -errno; break; }
         if (fds[1].revents) break;
         if (fds[8].revents) {
@@ -411,7 +414,7 @@ int md_fs_serve(struct md_filesystem *fs, int listener, int stop_fd,
          * commits signal the native journal watch; unrelated stat/open traffic
          * must not rescan every pending reader. */
         if (work && work->notification && fds[3].fd >= 0
-                && (fds[4].revents || fds[2].revents || serviced_request)) {
+                && (shared_ready || fds[4].revents || fds[2].revents || serviced_request)) {
             error = work->notification(work->context, fs, 0);
             if (error) break;
         }

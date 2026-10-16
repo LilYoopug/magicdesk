@@ -18,7 +18,7 @@ def main():
     parser.add_argument("--server", default="magicdesk")
     parser.add_argument("--keep", action="store_true")
     parser.add_argument("--diagnostics", action="store_true")
-    parser.add_argument("--case", choices=("all", "control-event", "launch-cancel", "event-fairness", "kernel-baseline", "mapping-task", "private-memory", "pidfd-table", "fd-observation", "proc-custody", "exec-custody", "open-job", "ofd-order", "fd-handoff", "fd-parcel", "fd-messages", "ipc-peer", "ipc-origins", "ipc-origin-guest", "ipc-paths", "ipc-ancillary", "mount-policy", "mount-graph", "mount-namespace", "inode-custody", "origin-transfer", "transient-store", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fd-lifecycle", "restricted-descriptors", "fs-dispatch", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture", "input-session", "rpc", "stores", "durability"), default="all",
+    parser.add_argument("--case", choices=("all", "control-event", "launch-cancel", "event-fairness", "kernel-baseline", "mapping-task", "private-memory", "pidfd-table", "fd-observation", "proc-custody", "exec-custody", "open-job", "ofd-order", "fd-handoff", "fd-parcel", "fd-messages", "ipc-peer", "ipc-origins", "ipc-origin-guest", "ipc-paths", "ipc-ancillary", "mount-policy", "mount-graph", "mount-namespace", "inode-custody", "origin-transfer", "transient-store", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fd-lifecycle", "restricted-descriptors", "fs-dispatch", "fs-buffer", "fs-signals", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture", "input-session", "rpc", "stores", "durability"), default="all",
                         help="Run resource regressions, FD handoff/parcel, terminal RPC custody, native FD lifecycle, or worker transport")
     parser.add_argument("--compare-installed", action="store_true",
                         help="Compare identical metadata/spawn fixtures with the installed runtime")
@@ -236,9 +236,9 @@ def main():
                           "timeout -k 5 105 " + command + f" {protected} {restart}",
                           "PASS mutation under signals:")
         for protected in range(2):
-            for restart in (0, 1, 2, 3, 4, 6):
+            for restart in (0, 1, 2, 3, 4, 6, 8, 14):
                 for guest in (False, True):
-                    command = (root + "/libmagicdesk_guest_run.so --store " + root
+                    command = (root + "/libmagicdesk_guest_run.so --statistics --store " + root
                                + "/store --deadline-seconds 90 -- /bin/test shared-memory /tmp"
                                if guest else root + "/libmagicdesk_guest_resource_guest.so shared-memory " + root + "/native")
                     # EVENT_WAIT: fixed shared-memory stress, bounded by the launch deadline.
@@ -371,7 +371,7 @@ def main():
         names = ("fd_handoff",) if args.case in ("fd-handoff", "fd-parcel", "fd-messages") else (
             "bootstrap", "supervisor", "run", "service", "resource_guest", "root_guest",
             "test_task_resources", "test_inodes", "test_mounts", "test_credentials", "test_rpc", "test_snapshot", "fd_handoff", "test_ipc_peer")
-        if args.case in ("launch-cancel", "mount-namespace", "proc-custody", "exec-custody", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture"):
+        if args.case in ("launch-cancel", "mount-namespace", "proc-custody", "exec-custody", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fs-buffer", "fs-signals", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture"):
             names = ("bootstrap", "supervisor", "run", "service", "resource_guest")
         if args.case == "restricted-descriptors":
             names = ("bootstrap", "supervisor", "run", "service", "resource_guest")
@@ -716,7 +716,7 @@ def main():
                 "unobserved": [line.removeprefix("UNOBSERVED ") for line in value["output"].splitlines()
                                if line.startswith("UNOBSERVED ")]})
             return
-        if args.case in ("launch-cancel", "proc-custody", "exec-custody", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fs-buffer", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture"):
+        if args.case in ("launch-cancel", "proc-custody", "exec-custody", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fs-buffer", "fs-signals", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture"):
             check("fixture directories", "mkdir -p " + root + "/native " + root + "/source/tmp "
                   + root + "/source/bin " + root + "/source/attached")
             check("stage guest image", "cp " + root + "/libmagicdesk_guest_resource_guest.so " + root + "/source/bin/test")
@@ -732,6 +732,9 @@ def main():
                 return
             if args.case == "fs-capture":
                 check_captures()
+                return
+            if args.case == "fs-signals":
+                check_mutation_signals()
                 return
             if args.case == "fs-buffer":
                 check_buffers()

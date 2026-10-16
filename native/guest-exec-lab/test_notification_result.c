@@ -8,13 +8,15 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
-static int listener=-1, install_error, expired, sends, installs, released;
+static int listener=-1, install_error, valid_error, interrupted, expired, sends, installs, released;
 int __real_ioctl(int,unsigned long,...);
 int __wrap_ioctl(int fd,unsigned long request,...) {
     va_list args; va_start(args,request);
     void *argument=va_arg(args,void *); va_end(args);
     if (fd!=listener) return __real_ioctl(fd,request,argument);
     if (request==SECCOMP_IOCTL_NOTIF_ID_VALID) {
+        if (interrupted) { --interrupted; errno=EINTR; return -1; }
+        if (valid_error) { errno=valid_error; return -1; }
         errno=ENOENT; return expired ? -1 : 0;
     }
     if (request==SECCOMP_IOCTL_NOTIF_ADDFD) {
@@ -35,6 +37,27 @@ void md_test_notification_result(void) {
     int source=open("/dev/null",O_RDONLY|O_CLOEXEC); assert(source>=0);
     listener=dup(source); assert(listener>=0);
     struct seccomp_data call={.nr=SYS_openat,.instruction_pointer=0x1000,.args={1,2,3,4,5,6}};
+    struct seccomp_notif pending={.id=17,.pid=42,.data=call},next=pending;
+    next.id=18;
+    assert(md_notification_rebind(listener,&pending,&next)==-EBUSY && pending.id==17);
+    valid_error=EBADF;
+    assert(md_notification_rebind(listener,&pending,&next)==-EBADF && pending.id==17);
+    valid_error=0;
+    expired=1;
+    for (unsigned i=0;i<10;++i) {
+        struct seccomp_notif wrong=next;
+        if (i<6) wrong.data.args[i]^=1;
+        else if (i==6) ++wrong.pid;
+        else if (i==7) ++wrong.data.nr;
+        else if (i==8) ++wrong.data.arch;
+        else ++wrong.data.instruction_pointer;
+        assert(md_notification_rebind(listener,&pending,&wrong)==-EINVAL && pending.id==17);
+    }
+    assert(md_notification_rebind(listener,&pending,&pending)==-EINVAL && pending.id==17);
+    interrupted=1;
+    assert(!md_notification_rebind(listener,&pending,&next) && pending.id==18 && !sends && !installs);
+    assert(!interrupted);
+    expired=0;
     struct md_notification_result result={0};
     assert(!md_notification_result_fd(&result,&call,files,source,&origin,O_CLOEXEC));
     assert(md_notification_result_matches(&result,&call));
@@ -78,5 +101,5 @@ void md_test_notification_result(void) {
     md_fd_object_release(&origin); assert(released==1);
     md_fd_origins_release(files);
     assert(!close(listener) && !close(source)); listener=-1;
-    puts("PASS notification result: queued ESRCH cancellation, retained FD, explicit scalar reply, retry and ownership");
+    puts("PASS notification result: exact cancelled-token replacement, queued ESRCH cancellation, retained FD, explicit scalar reply, retry and ownership");
 }

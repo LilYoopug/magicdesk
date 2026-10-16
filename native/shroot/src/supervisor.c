@@ -13,6 +13,8 @@
 #include "command_access.h"
 #include "fs_mounts.h"
 #include "namespace_broker.h"
+#include "notification_result.h"
+#include "cooperative_channel.h"
 #include "guest_domain.h"
 #include "task_resources.h"
 #include "network_route.h"
@@ -127,6 +129,7 @@ static int diagnostics;
 struct interception_statistics {
     uint64_t ptrace_requests, unknown, native_seeks, stops;
     uint64_t event_polls, event_waits;
+    uint64_t notification_rebounds, notification_readmissions_retired;
     uint64_t direct_status, direct_open, direct_fallback, direct_admit, direct_retry, compact_close;
     struct md_cost rpc;
     struct { uint64_t trace, notification; } calls[512];
@@ -138,6 +141,7 @@ enum phase { IDLE, ALLOCATING, DISPATCHING, EXECUTING, OBSERVING,
     DELEGATE_CANCEL, LOADING_PATH, PROC_CANCEL, PROC_OPENING, STORING_IDS, DOMAIN_PATH,
     WATCH_CANCEL, WATCH_ENTRY, WATCH_READ, IPC_WAIT_ENTRY, IPC_WAITING,
     SOCKET_WAIT_ENTRY, SOCKET_WAITING, CALL_RESTART_ENTRY, CALL_RESTART_EXIT,
+    FILE_WAIT_ENTRY, FILE_WAITING,
     EPOLL_CALL, EPOLL_WAIT,
     IDENTITY_COPY, DEBUG_WAIT_ENTRY, DEBUG_WAIT_EXIT, DEBUG_PARK_ENTRY, DEBUG_PARK_EXIT,
     MEMORY_WAIT, PROCESS_OBSERVING, PROCESS_TID_STORE,
@@ -297,6 +301,8 @@ struct thread {
     int metadata_signal_restored;
     struct thread *broker_next;
     struct md_interception_buffer buffer;
+    struct md_interception_buffer cooperative_buffer;
+    int cooperative_blocked;
     struct md_fs_buffer_request *buffer_call;
     enum { DIRECT_NONE, DIRECT_STATUS, DIRECT_OPEN, DIRECT_PREPARE_RESULT, DIRECT_ADMIT, DIRECT_RESULT } direct;
     unsigned direct_flags, direct_mode;
@@ -828,6 +834,7 @@ static void release_thread(struct thread *t) {
     CHECK(!md_resources_release(&t->resources));
     free(t->identity_buffer); t->identity_buffer = NULL;
     md_broker_forget(broker, t->pid);
+    CHECK(!md_buffer_release(&t->cooperative_buffer));
     release_operation(t);
     md_memory_stack_return(t->memory, t->stack);
     md_memory_release(t->memory); t->memory = NULL;
@@ -1288,13 +1295,14 @@ static void notification_interrupted(struct thread *t) {
 static void buffer_setup(struct thread *t, const struct seccomp_notif *q) {
     size_t page=(size_t)getpagesize();
     size_t size=(sizeof(union md_adapter_frame)+page-1)/page*page
-        *(MD_ADAPTER_BUFFER_SLOTS+MD_ADAPTER_CONTROL_SLOTS);
+        *(MD_ADAPTER_BUFFER_SLOTS+MD_ADAPTER_CONTROL_SLOTS+MD_ADAPTER_CHANNEL_SLOTS);
     struct seccomp_notif_resp reply={.id=q->id};
     if (!t->ready || t->entered || t->phase!=IDLE
             || q->data.instruction_pointer!=RAW_GATE || q->data.args[1]!=size
             || q->data.args[2] || q->data.args[3] || q->data.args[4] || q->data.args[5]) reply.error=-EPERM;
-    else reply.error=md_memory_buffers_prepare(t->memory,MD_ADAPTER_BUFFER_SLOTS,sizeof(union md_adapter_frame),
+    else reply.error=md_memory_buffers_prepare(t->memory,MD_ADAPTER_BUFFER_SLOTS+MD_ADAPTER_CHANNEL_SLOTS,sizeof(union md_adapter_frame),
         offsetof(struct md_fs_buffer_frame,value),MD_ADAPTER_CONTROL_SLOTS);
+    if (!reply.error) reply.error=md_buffers_partition_channels(md_memory_buffers(t->memory),MD_ADAPTER_CHANNEL_SLOTS);
     if (!reply.error) {
         struct seccomp_notif_addfd add={.id=q->id,.flags=SECCOMP_ADDFD_FLAG_SEND,
             .srcfd=md_buffers_fd(md_memory_buffers(t->memory)),.newfd_flags=O_CLOEXEC};
@@ -1784,6 +1792,16 @@ static void handle_notification(const struct seccomp_notif *request) {
     CHECK(md_broker_filesystem_call(q.data.nr) || q.data.nr==SYS_prctl || q.data.nr==SYS_gettid);
     struct thread *t = find_thread((pid_t)q.pid);
     CHECK(t && t->born);
+    if (t->phase==DELEGATE_CANCEL || t->phase==EXPORT_CANCEL || t->phase==PROC_CANCEL) {
+        /* A process-directed signal can cancel USER_NOTIF yet be consumed by
+         * a peer. The kernel restarts this SVC without a delivery stop here.
+         * The pending INTERRUPT still owns admission; replace only its token,
+         * never start another export or replay a filesystem operation. */
+        CHECK(!md_notification_rebind(listener,&t->metadata.request,&q));
+        if (statistics) ++statistics->notification_rebounds;
+        TRACE("PROBE notification rebound pid=%d phase=%d nr=%d\n",t->pid,t->phase,q.data.nr);
+        return;
+    }
     if (t->broker_completion) {
         const struct seccomp_data *call=&t->broker_completion->call;
         CHECK(t->phase==IDLE && q.data.nr==call->nr && q.data.arch==call->arch
@@ -2089,6 +2107,24 @@ static int completed_notification_event(struct thread *t,int status,const struct
         if (event==PTRACE_EVENT_STOP && signal!=SIGTRAP) return 0;
         struct user_pt_regs regs;
         if (!registers(t->pid,&regs)) return 1;
+        if (t->phase==DELEGATE_CANCEL || (t->phase==EXPORT_CANCEL && t->metadata.previous==IDLE)) {
+            /* A restarted notification may request admission before the
+             * original worker publishes its retained result. Its pending stop
+             * has executed nothing; retire only that exact duplicate request
+             * and use this stop for the completed operation, never replay it. */
+            CHECK(md_notification_same_call(&t->metadata.request.data,&result->call));
+            notification_interrupted(t);
+            if (statistics) ++statistics->notification_readmissions_retired;
+        }
+        if (!event && signal!=(SIGTRAP|0x80)
+                && (result->opened.completion.kind==MD_OPEN_PIPE || result->opened.completion.kind==MD_OPEN_FIFO)) {
+            /* No open endpoint was completed. Preserve the kernel's original
+             * interrupted syscall frame and restart decision for this signal. */
+            md_fs_buffer_open_release(&result->opened);
+            md_broker_completion_taken(broker,t->pid);
+            free(result); t->broker_completion=NULL;
+            return 0;
+        }
         regs.pc=result->call.instruction_pointer; regs.regs[8]=result->call.nr;
         for (unsigned i=0;i<6;++i) regs.regs[i]=result->call.args[i];
         if (result->opened.fd>=0) {
@@ -2142,6 +2178,26 @@ static int set_registers(pid_t pid, struct user_pt_regs *regs) {
 static int skip(pid_t pid) {
     int nr = -1; struct iovec iov = {&nr, sizeof(nr)};
     return tracee_request(thread(pid), PTRACE_SETREGSET, (void *)NT_ARM_SYSTEM_CALL, &iov, "skip-syscall");
+}
+static int cooperative_native_observe(pid_t pid,struct md_entry_native *native) {
+    unsigned state=atomic_load_explicit(&native->state,memory_order_acquire);
+    if (state==MD_NATIVE_DONE || state==MD_NATIVE_CANCELLED) return 0;
+    struct user_pt_regs regs={0};
+    if (state==MD_NATIVE_RUNNING) {
+        if (!registers(pid,&regs)) return -ESRCH;
+    }
+    long value=(long)regs.regs[0],result=native->result;
+    /* A terminal stop may retain openat's zero-extended input register. */
+    if (native->number==SYS_openat && (unsigned long)value==(unsigned)AT_FDCWD) value=-512;
+    int completed=md_native_stopped(state,regs.pc,value,abi.native_begin,abi.native_call,abi.native_end,&result);
+    if (completed<0) return completed;
+    if (state==MD_NATIVE_RUNNING) {
+        regs.regs[0]=result; regs.pc=abi.native_end;
+        if (!set_registers(pid,&regs)) return -ESRCH;
+    }
+    native->result=result;
+    atomic_store_explicit(&native->state,completed,memory_order_release);
+    return 0;
 }
 static void return_value(struct thread *t, struct user_pt_regs *regs, long value) {
     if (!skip(t->pid)) return;
@@ -4220,6 +4276,24 @@ static void buffer_result_begin(struct thread *t,int direct) {
 static void buffer_complete(struct md_fs_buffer_request *request, pid_t pid, int error) {
     struct thread *t=find_thread(pid);
     CHECK(t && t->buffer_call==request);
+    if (md_fs_buffer_open_waiting(request)) {
+        if (md_fs_buffer_open_ready(request)) {
+            if (t->phase==FILE_WAITING && !t->listening)
+                tracee_request(t,PTRACE_INTERRUPT,NULL,NULL,"open-ready");
+            return;
+        }
+        CHECK(t->kernel_stopped);
+        if (t->direct==DIRECT_OPEN && !tracee_request(t,PTRACE_GETSIGMASK,
+                (void *)sizeof(t->mask),&t->mask,"open-wait-mask")) return;
+        if (!shield(t)) return;
+        struct user_pt_regs regs=t->original;
+        regs.pc=RAW_GATE-4; regs.regs[8]=SYS_ppoll;
+        for (unsigned i=0;i<5;++i) regs.regs[i]=0;
+        /* EVENT_WAIT: child completion interrupts this empty native poll;
+         * guest signals cancel the owned open and retain kernel SA_RESTART. */
+        if (set_registers(pid,&regs)) { t->phase=FILE_WAIT_ENTRY; resume(pid,0); }
+        return;
+    }
     if (t->direct==DIRECT_STATUS) {
         const struct md_fs_result *result=md_fs_buffer_status_result(request);
         CHECK(result);
@@ -4516,6 +4590,20 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
         buffer_reply(t,-EBUSY); return;
     }
     switch (r->regs[0]) {
+    case MD_BUFFER_COOPERATIVE: {
+        result=-EOPNOTSUPP;
+        if (!broker || !t->entered || t->phase!=IDLE || t->cooperative_buffer.pool
+                || t->application_filter || t->cooperative_blocked || r->regs[1] || r->regs[2]) break;
+        result=md_buffers_take_channel(md_memory_buffers(t->memory),&t->cooperative_buffer);
+        if (result) break;
+        struct md_buffer_span span;
+        result=md_buffer_span(&t->cooperative_buffer,&span);
+        if (!result && span.size<sizeof(struct md_entry_channel)) result=-ENOBUFS;
+        if (!result) result=md_broker_cooperative_bind(broker,t->pid,span.data,abi.buffer_admit);
+        if (result) CHECK(!md_buffer_release(&t->cooperative_buffer));
+        else result=(long)md_memory_buffer_address(t->memory,&t->cooperative_buffer);
+        break;
+    }
     case MD_BUFFER_POLL_BEGIN:
         if (t->phase!=DISPATCHING || t->readiness || r->regs[1] || r->regs[2]
                 || (t->original.regs[8]!=SYS_ppoll && t->original.regs[8]!=SYS_pselect6)) break;
@@ -5159,6 +5247,19 @@ static int network_descriptor_call(long nr) {
 }
 static int domain_call(struct thread *t, struct user_pt_regs *r, unsigned long cookie) {
     long nr = r->regs[8];
+    if (t->ready && t->entered && t->phase==IDLE && cookie==MD_INTERCEPT_OBSERVE && r->pc!=RAW_GATE
+            && ((nr==SYS_seccomp && (unsigned)r->regs[0]==SECCOMP_SET_MODE_FILTER)
+                || (nr==SYS_prctl && (unsigned)r->regs[0]==PR_SET_SECCOMP))) {
+        /* Admission precedes the actual filter commit, including TSYNC. Calls
+         * already admitted may finish, exactly like in-flight kernel syscalls.
+         * A failed installation conservatively leaves direct entry disabled. */
+        int group=nr==SYS_seccomp && (r->regs[1]&SECCOMP_FILTER_FLAG_TSYNC);
+        for (struct thread *peer=threads;peer;peer=peer->next) if (peer->pid
+                && (peer==t || (group && peer->tgid==t->tgid))) {
+            peer->cooperative_blocked=1;
+            md_broker_cooperative_revoke(broker,peer->pid);
+        }
+    }
     if (t->ready && t->phase==IDLE && cookie==MD_INTERCEPT_OBSERVE && r->pc!=RAW_GATE
             && ((nr==SYS_seccomp && (unsigned)r->regs[0]==SECCOMP_SET_MODE_FILTER)
                 || (nr==SYS_prctl && (unsigned)r->regs[0]==PR_SET_SECCOMP
@@ -5410,7 +5511,8 @@ static void resume(pid_t pid, int sig) {
         int eligible=t->ready && phase==IDLE && t->endpoint[0] && !md_domain_restricted(t->resources.fs);
         int opens=eligible && !t->application_filter && !t->debug_options
             && !t->debug_call_active && !t->debug_step_call && !md_debugger_traced(debugger,pid);
-        CHECK(!md_broker_task(broker,pid,eligible ? MD_BROKER_READ|(opens ? MD_BROKER_OPEN : 0) : 0,
+        CHECK(!md_broker_task(broker,pid,eligible ? MD_BROKER_READ|(opens ? MD_BROKER_OPEN : 0)
+            |(opens && !t->cooperative_blocked ? MD_BROKER_COOPERATIVE : 0) : 0,
             RAW_GATE,abi.watch_gate+4));
     }
     t->kernel_resume=(t->metadata_restart && phase==IDLE
@@ -5422,6 +5524,7 @@ static void resume(pid_t pid, int sig) {
             || phase==DEBUG_PARK_ENTRY || phase==DEBUG_PARK_EXIT
             || phase==IPC_WAIT_ENTRY || phase==IPC_WAITING || phase==SOCKET_WAIT_ENTRY || phase==SOCKET_WAITING
             || phase==CALL_RESTART_ENTRY || phase==CALL_RESTART_EXIT || phase==EPOLL_WAIT
+            || phase==FILE_WAIT_ENTRY || phase==FILE_WAITING
             || (phase==IDLE && t->entered && t->process_image
                 && (md_debugger_syscall_mode(debugger,pid) || md_debugger_observing(debugger,pid))) ? PTRACE_SYSCALL
                 : phase==IDLE && t->entered && md_debugger_step(debugger,pid) ? PTRACE_SINGLESTEP : PTRACE_CONT;
@@ -6022,6 +6125,32 @@ static int readiness_native_event(struct thread *t,int status) {
     if (waking && (restart || value==-EINTR)) value=0;
     readiness_task_progress(t,1,value); return 1;
 }
+static void file_wait_complete(struct thread *t) {
+    struct user_pt_regs returned;
+    if (!registers(t->pid,&returned)) return;
+    if (!shield(t)) return;
+    t->phase=DISPATCHING;
+    if (md_fs_buffer_open_ready(t->buffer_call)) {
+        /* Direct publication captures its own shield. Do not let it mistake
+         * this wait's temporary mask for the application's saved mask. */
+        if (t->direct==DIRECT_OPEN && !restore_mask(t)) return;
+        CHECK(!md_fs_buffer_open_resume(t->buffer_call));
+        return;
+    }
+    /* The request independently retains its buffer until its child is reaped.
+     * No descriptor has entered the guest table and no pathname is replayed
+     * by the adapter. The kernel owns any application-requested restart. */
+    CHECK(!buffer_cleanup(t)); t->direct=DIRECT_NONE;
+    t->broker_event.held=0;
+    long value=(long)returned.regs[0];
+    if (value==-EINTR || (value<=-512 && value>=-516)) restart_call(t,&t->original,t->mask);
+    else {
+        struct user_pt_regs regs=t->original; regs.regs[0]=value<0 ? value : -EIO;
+        if (!set_registers(t->pid,&regs) || !restore_mask(t)) return;
+        md_memory_stack_return(t->memory,t->stack); t->stack=0;
+        t->phase=IDLE; resume(t->pid,0);
+    }
+}
 static int interrupted_operation(struct thread *t) {
     if (t->phase==MEMORY_WAIT || t->phase==PROC_LOOKUP || t->mapping) return 1;
     /* EVENT_WAIT: INTERRUPT cancels the exact notification. Under SYSCALL the
@@ -6030,6 +6159,7 @@ static int interrupted_operation(struct thread *t) {
     if (t->phase==PROC_CANCEL) { proc_query_start(t); return 1; }
     if (t->phase==IPC_WAITING && t->ipc_waking) { ipc_wait_complete(t); return 1; }
     if (t->phase==SOCKET_WAITING && t->socket_waking) { socket_wait_complete(t); return 1; }
+    if (t->phase==FILE_WAITING && md_fs_buffer_open_ready(t->buffer_call)) { file_wait_complete(t); return 1; }
     if (t->phase==DEBUG_PARK_EXIT && t->debug_wait_waking) { debugger_park_complete(t); return 1; }
     if (t->phase!=DELEGATE_CANCEL) return 0;
     const struct seccomp_notif *q=&t->metadata.request;
@@ -6692,6 +6822,7 @@ int main(int argc, char **argv) {
         broker = md_broker_create(filesystem, statistics != NULL, delegated_notification); CHECK(broker);
         md_broker_completion_handler(broker,completed_notification);
         md_broker_control_factory(broker,md_proc_file_control_object);
+        md_broker_native_observer(broker,cooperative_native_observe);
         buffer_service=md_fs_buffer_service_new(filesystem,tasks,fd_wakeup,buffer_complete); CHECK(buffer_service);
         md_fs_buffer_admission(buffer_service,memory_available);
         md_fs_buffer_control_factory(buffer_service,md_proc_file_control_object);
@@ -6799,6 +6930,7 @@ int main(int argc, char **argv) {
         } else if (event == PTRACE_EVENT_EXEC) {
             /* A non-leader exec replaces the task behind the leader's PID. */
             md_broker_forget(broker, pid);
+            CHECK(!md_buffer_release(&t->cooperative_buffer));
             completed_event_discard(t);
             unsigned long old; CHECK(!native_trace(PTRACE_GETEVENTMSG, pid, NULL, &old));
             t->debug_exec_old=(pid_t)old;
@@ -6881,6 +7013,7 @@ int main(int argc, char **argv) {
             c->shm_filter = t->shm_filter;
             c->pid_filter=t->pid_filter;
             c->application_filter=t->application_filter;
+            c->cooperative_blocked=t->cooperative_blocked;
             md_identity_release(&c->identity);
             c->identity = md_identity_copy(&t->identity);
             c->tgid = t->cloning & CLONE_THREAD ? t->tgid : c->pid;
@@ -7239,6 +7372,15 @@ int main(int argc, char **argv) {
                 md_memory_stack_return(t->memory,t->stack); t->stack=0;
                 t->phase=IDLE; resume(pid,0); continue;
             }
+            if (t->phase==FILE_WAIT_ENTRY) {
+                if (md_fs_buffer_open_ready(t->buffer_call)) {
+                    if (skip(pid)) file_wait_complete(t);
+                    continue;
+                }
+                if (!restore_mask(t)) continue;
+                t->phase=FILE_WAITING; resume(pid,0); continue;
+            }
+            if (t->phase==FILE_WAITING) { file_wait_complete(t); continue; }
             if (t->phase==SOCKET_WAIT_ENTRY) {
                 if (t->socket_waking) {
                     t->socket_waking=0;
@@ -7686,6 +7828,9 @@ static void report_statistics(void) {
             (unsigned long long)statistics->native_seeks);
         fprintf(stderr, "MD_EVENT_LOOP polls=%llu waits=%llu\n",
             (unsigned long long)statistics->event_polls, (unsigned long long)statistics->event_waits);
+        fprintf(stderr,"MD_NOTIFICATION rebounds=%llu readmissionsRetired=%llu\n",
+            (unsigned long long)statistics->notification_rebounds,
+            (unsigned long long)statistics->notification_readmissions_retired);
         fprintf(stderr,"MD_DIRECT status=%llu open=%llu fallback=%llu admit=%llu retry=%llu compactClose=%llu\n",
             (unsigned long long)statistics->direct_status,(unsigned long long)statistics->direct_open,
             (unsigned long long)statistics->direct_fallback,(unsigned long long)statistics->direct_admit,

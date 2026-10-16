@@ -4,6 +4,20 @@
 #include <string.h>
 #include <sys/ioctl.h>
 
+int md_notification_same_call(const struct seccomp_data *a,const struct seccomp_data *b) {
+    return a->nr==b->nr && a->arch==b->arch && a->instruction_pointer==b->instruction_pointer
+        && !memcmp(a->args,b->args,sizeof(a->args));
+}
+int md_notification_rebind(int listener,struct seccomp_notif *old,const struct seccomp_notif *next) {
+    if (!old || !next || old->id==next->id || old->pid!=next->pid || !md_notification_same_call(&old->data,&next->data))
+        return -EINVAL;
+    int valid;
+    do { valid=ioctl(listener,SECCOMP_IOCTL_NOTIF_ID_VALID,&old->id); } while (valid<0 && errno==EINTR);
+    if (!valid) return -EBUSY;
+    if (errno!=ENOENT) return -errno;
+    *old=*next;
+    return 0;
+}
 int md_notification_result_status(struct md_notification_result *r,const struct seccomp_data *call,long value) {
     if (!r || !call || r->active) return -EINVAL;
     *r=(struct md_notification_result){.call=*call,.source=-1,.active=1,.value=value};
@@ -19,9 +33,7 @@ int md_notification_result_fd(struct md_notification_result *r,const struct secc
     return 0;
 }
 int md_notification_result_matches(const struct md_notification_result *r,const struct seccomp_data *call) {
-    return r && r->active && call && r->call.nr==call->nr && r->call.arch==call->arch
-        && r->call.instruction_pointer==call->instruction_pointer
-        && !memcmp(r->call.args,call->args,sizeof(call->args));
+    return r && r->active && call && md_notification_same_call(&r->call,call);
 }
 int md_notification_result_progress(struct md_notification_result *r) {
     if (!r || !r->active || !r->pending || r->delivered) return -EINVAL;

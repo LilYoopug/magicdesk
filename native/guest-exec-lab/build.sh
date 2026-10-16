@@ -48,6 +48,12 @@ testroot=$(mktemp -d "$work/path-test/run.XXXXXX")
 "$cc" -iquote "$runtime" -std=c17 -O2 -Wall -Wextra -Werror -UNDEBUG -fno-builtin -DMD_NO_START \
     "$src/test_elf.c" "$runtime/elf.c" "$runtime/raw.c" "$runtime/memory.c" "$runtime/raw.S" -o "$work/test-elf"
 "$work/test-elf" "$testroot/elf"
+"$cc" -iquote "$runtime" -std=c17 -O2 -Wall -Wextra -Werror -UNDEBUG \
+    "$src/test_vdso.c" "$runtime/vdso.c" -o "$work/test-vdso"
+"$work/test-vdso"
+"$cc" -iquote "$runtime" -std=c17 -O2 -Wall -Wextra -Werror -UNDEBUG \
+    "$src/test_cooperative_native.c" "$runtime/cooperative_native.S" -o "$work/test-cooperative-native"
+"$work/test-cooperative-native"
 inode_compile "$cc" -iquote "$runtime" -std=c17 -O2 -g -Wall -Wextra -Werror -DMD_INODE_TESTING \
     "$src/test_inodes.c" -lsqlite3 -o "$work/test-inodes"
 inoderoot=$(mktemp -d "$work/path-test/inodes.XXXXXX")

@@ -1,0 +1,72 @@
+#ifndef MD_COOPERATIVE_CHANNEL_H
+#define MD_COOPERATIVE_CHANNEL_H
+#include "cooperative_entry.h"
+#include "cooperative_native.h"
+#include "entry_route.h"
+#include "spin_policy.h"
+#include <stdatomic.h>
+#include <sys/syscall.h>
+#include <stddef.h>
+#include <fcntl.h>
+
+static inline int md_entry_native_fd(int number,const uint64_t args[6]) {
+    return number==SYS_close || (number==SYS_fcntl && ((unsigned)args[1]==F_SETFD || (unsigned)args[1]==F_GETFD));
+}
+
+/* Bootstrap-only initialization, before any guest thread exists. */
+void md_cooperative_init(const void *vdso,size_t first_page);
+
+/* Private interpretation of the fixed libc handle. Progress/feedback lives in
+ * the runtime-owned channel, so adding transport state never grows libc TLS. */
+enum { MD_ENTRY_CLIENT_CHANNEL, MD_ENTRY_CLIENT_OWNER, MD_ENTRY_CLIENT_CONTROL };
+/* The control word's low bit guards reentry; the rest holds registration backoff. */
+enum { MD_ENTRY_CLIENT_BUSY = 1 };
+
+_Static_assert(ATOMIC_INT_LOCK_FREE==2,"shared channel state must be lock-free");
+_Static_assert(sizeof(atomic_uint)==4,"Linux futex word size");
+
+enum md_entry_state { MD_ENTRY_IDLE, MD_ENTRY_REQUEST, MD_ENTRY_FD_REQUEST, MD_ENTRY_RUNNING,
+    MD_ENTRY_RESPONSE, MD_ENTRY_CLOSED, MD_ENTRY_NATIVE, MD_ENTRY_RETIRING };
+enum { MD_ENTRY_WAKE = 0x434f4f50 };
+struct md_entry_channel {
+    _Alignas(64) atomic_uint state;
+    atomic_uint enabled, awake, sleeping;
+    int32_t owner;
+    struct md_spin_policy feedback;
+    /* Caller-owned hint only; never a cached pathname or authorization. */
+    unsigned create_cooldown;
+    uint64_t sequence;
+    struct md_entry_call call;
+    _Alignas(64) uint64_t receipt;
+    enum md_entry_outcome outcome;
+    int64_t result;
+    struct md_entry_native native;
+    char native_path[64];
+};
+enum { MD_ENTRY_PENDING_CALL=1, MD_ENTRY_PENDING_NATIVE=2 };
+/* Pair with the producer's publication/fence/awake check. Either this sees
+ * the work or that producer requests a kernel wake; neither may miss both. */
+static inline unsigned md_entry_prepare_wait(struct md_entry_channel *c) {
+    atomic_store_explicit(&c->awake,0,memory_order_seq_cst);
+    unsigned pending=atomic_load_explicit(&c->state,memory_order_seq_cst)==MD_ENTRY_REQUEST
+        ? MD_ENTRY_PENDING_CALL : 0;
+    unsigned state=atomic_load_explicit(&c->native.state,memory_order_seq_cst);
+    if (state==MD_NATIVE_DONE || state==MD_NATIVE_CANCELLED || state==MD_NATIVE_UNKNOWN)
+        pending|=MD_ENTRY_PENDING_NATIVE;
+    return pending;
+}
+/* Only the worker publishes receipts. A caller which claimed RETIRING already
+ * owns the native result and may have queued its next request in call. */
+static inline int md_entry_native_retire(struct md_entry_channel *c,uint64_t sequence,
+        enum md_entry_outcome outcome,long result) {
+    c->receipt=sequence; c->result=result; c->outcome=outcome;
+    unsigned offered=MD_ENTRY_NATIVE;
+    if (atomic_compare_exchange_strong_explicit(&c->state,&offered,MD_ENTRY_RESPONSE,
+            memory_order_seq_cst,memory_order_acquire)) return 1;
+    if (offered!=MD_ENTRY_RETIRING && offered!=MD_ENTRY_REQUEST && offered!=MD_ENTRY_FD_REQUEST) return -EPROTO;
+    unsigned retiring=MD_ENTRY_RETIRING;
+    atomic_compare_exchange_strong_explicit(&c->state,&retiring,MD_ENTRY_IDLE,
+        memory_order_release,memory_order_relaxed);
+    return 0;
+}
+#endif

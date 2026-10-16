@@ -130,7 +130,7 @@ static int component(struct path_walk *w,struct md_mount_namespace *view,
         r=point_logical(w,current);
         struct md_inode_boundary *boundary=s->boundary;
         if (covered) s->boundary=NULL;
-        if (!r) r=mdi_path_step(s,&current->node,name,tail,0,&next->node);
+        if (!r) r=mdi_path_step(s,&current->node,name,tail,0,&next->node,NULL);
         s->boundary=boundary;
         if (!r) r=mdi_backing_stat(s,&next->node,&next->identity);
         if (!r) {

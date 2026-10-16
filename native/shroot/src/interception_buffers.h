@@ -34,6 +34,10 @@ int md_buffers_take_sized(struct md_interception_buffers *, size_t, struct md_in
  * not wait on ordinary IO/resource turns while held. Payload is not cleared:
  * the control owner publishes its initialized bytes before resuming the task. */
 int md_buffers_take_reserved(struct md_interception_buffers *, struct md_interception_buffer *);
+/* Partition the ordinary range once, before issuing loans. Long-lived channels
+ * cannot consume capacity needed by an ordinary syscall or its control path. */
+int md_buffers_partition_channels(struct md_interception_buffers *, unsigned);
+int md_buffers_take_channel(struct md_interception_buffers *, struct md_interception_buffer *);
 /* Independent owner, e.g. a submitted request outliving its initiating task.
  * Copy handles only through pin; a released handle is invalid. */
 int md_buffer_pin(const struct md_interception_buffer *, struct md_interception_buffer *);

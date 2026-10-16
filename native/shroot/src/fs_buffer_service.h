@@ -119,6 +119,11 @@ int md_fs_buffer_progress(struct md_fs_buffer_service *);
  * A cancelled request retains its child record until the exact terminal event. */
 int md_fs_buffer_children(const struct md_fs_buffer_service *);
 int md_fs_buffer_child(struct md_fs_buffer_service *, pid_t, int status);
+/* The completion callback announces an isolated blocking open twice: waiting,
+ * then ready. The owner resumes publication only at its stopped-task boundary. */
+int md_fs_buffer_open_waiting(const struct md_fs_buffer_request *);
+int md_fs_buffer_open_ready(const struct md_fs_buffer_request *);
+int md_fs_buffer_open_resume(struct md_fs_buffer_request *);
 void md_fs_buffer_cancel(struct md_fs_buffer_request **);
 /* Supervisor-thread diagnostics at a failed wait boundary, never polling. */
 void md_fs_buffer_describe(struct md_fs_buffer_service *, int fd);

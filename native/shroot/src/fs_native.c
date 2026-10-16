@@ -118,6 +118,7 @@ static void native_link(struct md_filesystem *fs, const char *path, int fd, mode
 
 void md_fs_native_boundary(struct md_filesystem *fs, const struct md_inode_boundary *boundary,
         const struct md_fs_request *q, struct md_fs_result *out, const struct md_fs_output *output) {
+    if (output && output->native_open_plan) return;
     if (!fs->actor || boundary->proc_namespace || boundary->operand || !boundary->path
             || q->resolve) return;
     if (q->operation!=MD_FS_STAT && q->operation!=MD_FS_READLINK && q->operation!=MD_FS_OPEN) return;

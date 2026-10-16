@@ -63,7 +63,7 @@ int md_fs_worker_submit(struct md_fs_worker *, struct md_fs_work *);
 int md_fs_worker_dispatch(struct md_fs_worker *);
 void md_fs_worker_publish(struct md_fs_worker *, struct md_fs_work *);
 void md_fs_worker_notifications(struct md_fs_worker *, int, void *,
-        int (*)(void *, struct md_filesystem *, short));
+        int (*)(void *, struct md_filesystem *, short), int (*prepare_wait)(void *));
 int md_fs_worker_error(struct md_fs_worker *);
 int md_fs_worker_stop(struct md_fs_worker *);
 #endif

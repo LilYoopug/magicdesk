@@ -61,6 +61,7 @@ struct md_fs_buffer_request {
     struct md_fs_request request;
     struct md_fs_buffer_open opened;
     struct md_open_job opening;
+    int opening_wait;
     int fifo_control;
     struct md_command_images images;
     struct md_fs_anchor *image_origin;
@@ -252,6 +253,8 @@ static int complete(struct md_fs_work *work) {
             close(r->opened.fd); r->opened.fd=-1;
             if (r->opened.completion.kind==MD_OPEN_PIPE) r->fifo_control=r->opened.completion.control;
             r->opened.completion=(struct md_open_completion){0};
+            r->opening_wait=1;
+            r->service->complete(r,r->actor,0);
             return 0;
         }
         r->error=error;
@@ -275,6 +278,17 @@ int md_fs_buffer_children(const struct md_fs_buffer_service *s) {
         if (r->opening.pid) return 1;
     return 0;
 }
+int md_fs_buffer_open_waiting(const struct md_fs_buffer_request *r) {
+    return r && r->opening_wait;
+}
+int md_fs_buffer_open_ready(const struct md_fs_buffer_request *r) {
+    return md_fs_buffer_open_waiting(r) && !r->opening.pid;
+}
+int md_fs_buffer_open_resume(struct md_fs_buffer_request *r) {
+    if (!md_fs_buffer_open_ready(r)) return -EINVAL;
+    r->opening_wait=0;
+    return complete(&r->work);
+}
 int md_fs_buffer_child(struct md_fs_buffer_service *s, pid_t pid, int status) {
     if (!s) return 0;
     struct md_fs_buffer_request *r=s->requests;
@@ -297,7 +311,9 @@ int md_fs_buffer_child(struct md_fs_buffer_service *s, pid_t pid, int status) {
         r->output->reply.result.error=result;
         r->output->transfer=MD_FS_BUFFER_NO_FD;
     }
-    complete(&r->work); return 1;
+    if (r->opening_wait && !r->cancelled) r->service->complete(r,r->actor,0);
+    else complete(&r->work);
+    return 1;
 }
 static void submit(struct md_fs_buffer_request *r, int error) {
     if (r->files.table && !retains_context(r)) {

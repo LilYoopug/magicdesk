@@ -595,6 +595,14 @@ also inspecting a native descriptor, with and without SA_RESTART and with both
 ordinary and nondumpable callers. Native controls use the same fixture. A
 cancelled notification must not execute after entering the signal handler or
 turn a restarted exclusive creation into EEXIST.
+`--case fs-signals` isolates those checks, including shared-memory file cycles,
+real filter denials and group stops. The shared-memory fixture also runs at a
+100-us signal period to stress notification replacement before the requested
+ptrace stop. Its `MD_NOTIFICATION rebounds` counter records actual replacements,
+and `readmissionsRetired` records a completed open taking precedence over its
+duplicate, unexecuted admission. A successful run with a zero counter does not
+exercise that branch.
+The report is `resource-fs-signals-results.json`.
 Known-cwd getcwd must succeed at EMFILE while real KILL_THREAD filters deny
 socket/connect/sendmsg/recvmsg, including nondumpable processes, fork, exec and
 48 simultaneous callers. Output-error checks require ERANGE/EFAULT without cwd

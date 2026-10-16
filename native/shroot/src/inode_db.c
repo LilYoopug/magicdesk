@@ -119,6 +119,7 @@ int mdi_write(struct md_inode_store *s) {
     if (mdi_readonly(s)) return -EROFS;
     if (s->write_transaction) return 0;
     if (!s->locked || s->read_depth!=1) return -EDEADLK;
+    s->directory_check_count=0;
     int r=watch_writes(s);
     if (!r && sqlite3_get_autocommit(s->db)) r=transaction(s,MDI_BEGIN_WRITE);
     if (!r) {
@@ -135,6 +136,7 @@ int mdi_begin(struct md_inode_store *s, int write) {
     }
     int r = store_lock(s);
     if (r) return r;
+    s->directory_check_count=0;
     if (mdi_publication_pending(s)) {
         r=mdi_publication_recover(s);
         if (r) return store_unlock(s,r);
@@ -172,6 +174,8 @@ int mdi_begin(struct md_inode_store *s, int write) {
     }
     return 0;
 }
+int md_inode_read_scope_begin(void *store) { return mdi_begin(store,0); }
+int md_inode_read_scope_end(void *store) { return mdi_finish(store,0); }
 int mdi_finish(struct md_inode_store *s, int result) {
     if (s->read_depth && --s->read_depth) return result;
     s->cache_checked=0;
@@ -383,9 +387,10 @@ int mdi_catalogue_lookup(struct md_inode_store *s, const char *parent, const cha
     if (cacheable) mdi_cache_put(s,&key,node,r);
     return r;
 }
-int mdi_lookup(struct md_inode_store *s,const char *parent,const char *name,struct mdi_node *node) {
-    int r=mdi_catalogue_lookup(s,parent,name,node);
-    return r==-ENOENT ? mdi_leaf_lookup(s,parent,name,node) : r;
+int mdi_lookup(struct md_inode_store *s,const struct mdi_node *parent,const char *name,struct mdi_node *node,struct stat *attributes) {
+    int r=mdi_catalogue_lookup(s,parent->id,name,node);
+    if (r==-ENOENT) return mdi_leaf_lookup(s,parent,name,node,attributes);
+    return !r && attributes ? mdi_stat(s,node,attributes) : r;
 }
 int mdi_add_name(struct md_inode_store *s, const char *parent, const char *name, const char *object) {
     sqlite3_stmt *q = NULL;
@@ -430,8 +435,11 @@ static int backing_identity(const struct mdi_node *node, struct stat *st) {
     st->st_rdev = node->rdev;
     return 0;
 }
+int mdi_backing_fstat(const struct mdi_node *node,int fd,struct stat *st) {
+    return fstat(fd,st) ? -errno : backing_identity(node,st);
+}
 int mdi_backing_stat(struct md_inode_store *s, const struct mdi_node *node, struct stat *st) {
-    if (node->descriptor) return fstat(node->descriptor-1,st) ? -errno : backing_identity(node,st);
+    if (node->descriptor) return mdi_backing_fstat(node,node->descriptor-1,st);
     int directory = mdi_backing_directory(s, node);
     return directory < 0 ? directory : fstatat(directory, node->backing, st, AT_SYMLINK_NOFOLLOW) ? -errno : backing_identity(node, st);
 }
@@ -455,22 +463,20 @@ int mdi_fstat(struct md_inode_store *s, int fd, struct mdi_node *node, struct st
     if (!r && (st->st_mode & S_IFMT) != (node->kind == S_IFSOCK ? S_IFREG : node->kind)
             && !((node->kind == S_IFIFO || node->kind == S_IFCHR || node->kind == S_IFBLK)
                 && S_ISREG(st->st_mode))) r = -EIO;
-    if (!r) {
-        st->st_mode = (st->st_mode & ~S_IFMT) | node->kind;
-        if (node->kind == S_IFIFO || node->kind == S_IFCHR || node->kind == S_IFBLK)
-            st->st_size = st->st_blocks = 0;
-        st->st_rdev = node->rdev;
-        if (node->mode >= 0) { st->st_mode = node->kind | node->mode; st->st_uid = node->uid; st->st_gid = node->gid; }
-        st->st_nlink = node->links; st->st_ino = node->logical_inode; st->st_dev = node->logical_device;
-    }
+    if (!r) mdi_stat_project(node,st);
     return r;
+}
+void mdi_stat_project(const struct mdi_node *node,struct stat *st) {
+    st->st_mode = (st->st_mode & ~S_IFMT) | node->kind;
+    if (node->kind == S_IFIFO || node->kind == S_IFCHR || node->kind == S_IFBLK)
+        st->st_size = st->st_blocks = 0;
+    st->st_rdev = node->rdev;
+    if (node->mode >= 0) { st->st_mode = node->kind | node->mode; st->st_uid = node->uid; st->st_gid = node->gid; }
+    st->st_nlink = node->links; st->st_ino = node->logical_inode; st->st_dev = node->logical_device;
 }
 int mdi_stat(struct md_inode_store *s, const struct mdi_node *node, struct stat *st) {
     int r = mdi_backing_stat(s, node, st);
-    if (!r) {
-        st->st_nlink = node->links; st->st_ino = node->logical_inode; st->st_dev = node->logical_device;
-        if (node->mode >= 0) { st->st_mode = node->kind | node->mode; st->st_uid = node->uid; st->st_gid = node->gid; }
-    }
+    if (!r) mdi_stat_project(node,st);
     return r;
 }
 int mdi_access(struct md_inode_store *s, const struct mdi_node *node, int mode) {
@@ -480,7 +486,7 @@ int mdi_access(struct md_inode_store *s, const struct mdi_node *node, int mode) 
 int mdi_parent_writable(struct md_inode_store *s, const struct mdi_node *node) {
     int r = mdi_access(s, node, W_OK | X_OK);
     struct stat st;
-    if (!r) r = mdi_backing_stat(s, node, &st);
+    if (!r) r = mdi_permission_stat(s, node, &st);
     if (!r && !node->attached) r = -ENOENT;
     return r;
 }

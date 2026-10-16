@@ -15,6 +15,10 @@
  * EIO during commit has an unknown outcome; reopen and inspect before replay.
  * Files are native descriptors. No object is reclaimed while clients may exist. */
 struct md_inode_store;
+/* Worker-only read scope. Every nested operation still resolves permissions
+ * and observes current native attributes. Never retain across a blocking wait. */
+int md_inode_read_scope_begin(void *store);
+int md_inode_read_scope_end(void *store);
 /* Stable format family and independently evolving metadata schema revision. */
 int md_inode_store_format(void);
 int md_inode_store_revision(void);
@@ -27,6 +31,7 @@ struct md_inode_statistics {
     uint64_t metadata_cache_hits, metadata_cache_misses;
     uint64_t walk_components, walk_materializations;
     uint64_t write_admissions;
+    uint64_t directory_check_hits, directory_check_misses;
 };
 /* Caller-owned diagnostic counters; NULL disables clock sampling. */
 void md_inode_measure(struct md_inode_store *, struct md_inode_statistics *);
@@ -81,6 +86,8 @@ int md_inode_open(struct md_inode_store *, int dirfd, const char *path, int flag
 int md_inode_open_resolved(struct md_inode_store *, int, const char *, int, mode_t, uint64_t);
 int md_inode_prepare_open(struct md_inode_store *, int, const char *, int, mode_t, uint64_t,
         struct md_open_completion *);
+int md_inode_plan_open(struct md_inode_store *, int, const char *, int, mode_t, uint64_t,
+        struct md_open_completion *, int native_plan);
 /* Read-only image open and identity from one namespace snapshot. */
 int md_inode_open_image(struct md_inode_store *, int, const char *, int, struct md_image_identity *);
 int md_inode_link(struct md_inode_store *, int sourcefd, const char *source,

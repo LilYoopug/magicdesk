@@ -150,6 +150,9 @@ struct md_fs_output {
     /* Optional owned path anchor from a successful file open/reopen. No origin
      * allocation occurs when omitted; caller releases a returned anchor. */
     struct md_fs_anchor **origin;
+    /* Opt-in: a checked existing regular file may return one owned O_PATH
+     * anchor instead of a data FD. Completion is explicitly MD_OPEN_PLAN. */
+    int native_open_plan;
     int (*control)(void *,const struct md_control_file_ops *,void *,const struct md_identity *,int);
     void *control_context;
     struct md_landlock_policy **landlock;

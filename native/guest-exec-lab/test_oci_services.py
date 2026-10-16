@@ -127,21 +127,25 @@ class Suite:
         self.runner = None
         self.image = None
         if build:
-            hashes = {}
-            for target in ('bootstrap', 'supervisor', 'run', 'image'):
-                filename = 'libmagicdesk_guest_' + target + '.so'
-                with (build / filename).open('rb') as source:
-                    hashes[filename] = hashlib.file_digest(source, 'sha256').hexdigest()
-                self.transport.upload(self.client, build / filename, self.base + '/' + filename)
-                actual = self.command(['sha256sum', self.base + '/' + filename], quiet=True).split()[0]
-                assert actual == hashes[filename], (filename, actual, hashes[filename])
-                self.command(['chmod', '700', self.base + '/' + filename])
+            hashes = self.stage_runtime(build, self.base)
             self.runner = self.base + '/libmagicdesk_guest_run.so'
             self.image = self.base + '/libmagicdesk_guest_image.so'
             self.report['nativeBuild'] = str(build)
             self.report['nativeHashes'] = hashes
         else:
             self.runner = self.command(['/system/bin/sh', '-c', 'command -v shroot']).strip()
+
+    def stage_runtime(self, build, directory):
+        hashes = {}
+        for target in ('bootstrap', 'supervisor', 'run', 'image'):
+            filename = 'libmagicdesk_guest_' + target + '.so'
+            with (build / filename).open('rb') as source:
+                hashes[filename] = hashlib.file_digest(source, 'sha256').hexdigest()
+            self.transport.upload(self.client, build / filename, directory + '/' + filename)
+            actual = self.command(['sha256sum', directory + '/' + filename], quiet=True).split()[0]
+            assert actual == hashes[filename], (filename, actual, hashes[filename])
+            self.command(['chmod', '700', directory + '/' + filename])
+        return hashes
 
     def image_command(self, *args):
         return [self.image, *args] if self.image else [self.runner, 'image', *args]

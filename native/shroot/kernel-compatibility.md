@@ -45,6 +45,15 @@ DNAT/SNAT adapters, bridge hairpin control, netlink credential snapshots and
 IPv4 IP_PKTINFO use baseline userspace wire formats
 and existing socket/relay owners. They introduce no newer host dependency.
 
+Cooperative-entry spin timing optionally uses the arm64
+[`__kernel_clock_gettime@LINUX_2.6.39` vDSO ABI](https://man7.org/linux/man-pages/man7/vdso.7.html).
+`vdso.c` resolves its versioned export from the kernel's `AT_SYSINFO_EHDR`;
+`cooperative_entry.c` falls back to the existing clock syscall when unavailable
+or unsuccessful. Both predate 5.15. `test_vdso` covers bounded symbol/version
+lookup, absent/unsupported layouts and a live monotonic-clock comparison;
+cooperative runtime/libc fixtures cover execution, cancellation and filter
+fallback. This optional optimization adds no shared-service prerequisite.
+
 Admission uses actual operations under the selected executor identity, not an
 Android-version inference or `uname`-only capability check. Kernel configuration,
 SELinux, application filters and vendor backports affect availability. Headers
@@ -87,6 +96,33 @@ cancellation between them can leave an installed descriptor without a confirmed
 result. `CLOSE_RANGE_CLOEXEC` is available since 5.11. Both fit the 5.15 baseline.
 See the [seccomp notification contract](https://man7.org/linux/man-pages/man2/seccomp_unotify.2.html)
 and [close_range flags](https://man7.org/linux/man-pages/man2/close_range.2.html).
+
+Optional `cooperative_entry.c` / `namespace_broker.c` communication uses the
+existing shared memfd, ordinary shared `FUTEX_WAIT`/`FUTEX_WAKE`, monotonic clock,
+checked process-memory copying and notification wake gate. It adds no post-5.15
+kernel primitive. Runtime admission failure selects the caller-owned SVC
+continuation; installed application filters do not acquire an unfiltered direct
+route. Kernel-carried `openat`/`fsopen` records retire at exact notification
+admission; new-file creation reuses the existing publication protocol.
+Existing regular-file plans, including writable/append/truncate opens, retain
+one engine-owned O_PATH pin and use
+a native guest `openat` through `/proc/SUPERVISOR/fd/PIN`, with exact-PC admission
+in Shroot's filter. `close` and FD flags use the same file-table owner and native
+result journal. Stop recovery uses existing GET/SETREGSET on AArch64; cancellation
+preflight uses zero-count `FUTEX_WAKE_PRIVATE`. None requires a post-5.15 kernel
+operation. Denied native reopens return their real errno; unsupported providers
+decline before a data-open effect, not after it. A 64-boundary instruction-stop
+fixture checks actual open/close/flag results under shell UID 2000. Deferred
+FIFO completion uses the existing `ppoll`, ptrace interruption/restart and
+owned-child reaping, not a new cancellation syscall or polling timer.
+`test_cooperative_runtime.py` covers admission, exhausted pools, signals,
+fork/exec, protected pointers, namespace changes, signal-handler memory
+abandonment, argument/IP filter policy and TSYNC revocation. The isolated musl
+integration additionally checks real libc threads, cancellation and exec,
+cwd/dirfd replacement, FIFO signals/restarts and exact FD retirement.
+The version-4 libc boundary adds only a bounded userspace offer-table lookup and
+a fixed opaque handle. Runtime progress/feedback reuse the existing channel;
+there is no new allocation syscall, loader dependency or kernel capability.
 
 Ready open results may reuse a ptrace-stopped syscall through the existing fstat
 notification route without changing application registers or its return PC.
@@ -635,3 +671,42 @@ but the tested shell policy returns EACCES. This probe is not a runtime dependen
 denial remains unknown liveness, never permission to discard provenance. The
 separate queued-pipe lifetime candidate uses baseline pipe/socket and poll/epoll
 operations and does not depend on socket diagnostics.
+
+The separate [cooperative-entry fixture](../guest-exec-lab/cooperative-entry.md)
+uses shared anonymous mmap, classic shared FUTEX_WAIT/FUTEX_WAKE, Unix
+SOCK_SEQPACKET and SCM_RIGHTS with the existing receiver's close-on-exec handling.
+It introduces no post-5.15 dependency and does not participate in runtime
+admission. Its bounded-spin mode is a userspace experiment, not a requirement
+for ordinary Shroot or a substitute for application seccomp admission.
+
+Its optional private-engine FD experiments use baseline `clone(CLONE_FILES)`
+without CLONE_VM for the guest, and a pthread executor with
+`unshare(CLONE_FILES)`. Flags-zero `pidfd_open` (5.3) and `pidfd_getfd` (5.6)
+copy from the engine/thread-group leader into its same-process helper's private
+table. They do not require PIDFD_THREAD or permission to export from a protected
+guest process. The explicit `test-pidfd` fixture checks shared open-file offsets,
+sockets, pipes, CLOEXEC and exact death retirement under shell UID 2000. A denied
+probe fails that optional experiment; SCM_RIGHTS remains a separate control,
+not an untested implicit fallback. `/proc/thread-self/fd` inventories the helper
+table, whereas engine backing paths deliberately refer to the leader's table.
+The ordinary-file `/proc/self/fd` reopen control creates a fresh open description
+and is not a generic substitute for FD transfer. None changes runtime admission.
+
+The same fixture's optional readonly open plans use baseline `O_PATH` pins and
+proc FD links. The helper control opens through `/proc/self/fd`; the direct guest
+control uses `/proc/<engine-pid>/fd`. The latter requires actual host permission
+to access that engine's proc descriptor, and the guest's own seccomp policy must
+permit the native open. It is not a way to bypass those policies. Deterministic
+replacement/unlink and denied-open checks cover object pinning and cancellation
+without publishing an origin or leaking pins. Readonly plans add no post-5.15
+interface; creation still uses the separately probed pidfd control. These lab
+checks do not make the mechanism a production capability or prove admission for
+every sandbox.
+
+The follow-up single-pin and queued-completion controls use the same interfaces.
+Native guest close reports its actual result through a bounded shared-memory
+queue; classic futex waits handle backpressure and explicit draining. Tests
+cover a full queue, index wraparound, denied close and controlled guest death.
+The optional bounded read window is userspace engine admission, not a new kernel
+requirement. Arbitrary death between a native operation and completion posting,
+concurrent FD users and production filter admission remain integration work.

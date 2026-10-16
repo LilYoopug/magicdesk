@@ -486,6 +486,14 @@ independent of OCI parsing and launch-local directory attachments.
   can make a catalogue entry visible.
   Other writers invalidate the cache on the next admission. Native attributes
   and permission decisions are not cached.
+  Within one locked operation, permission checks may reuse validation of up to
+  four local logical directories' physical identities. This avoids repeated
+  backing `stat` calls during path search, parent-write and sticky checks.
+  Every check still evaluates the current node and caller; ACL, Landlock and
+  overlay policy remain independent. Admission and promotion to a catalogue
+  write clear this validation set. Native leaves, source directories, retained
+  descriptors, physical-permission directories and user-visible stat bypass it.
+  No permission result or physical attribute snapshot survives the operation.
   Resolved nodes in the current view also prime the descriptor index by backing
   device/inode, avoiding a second SQL lookup after open. Actual FD identity and
   native attributes still come from the kernel; old copy-up backings retain their
@@ -502,6 +510,13 @@ independent of OCI parsing and launch-local directory attachments.
   and parent mutation checks use that same membership model. Root is always attached;
   detached directories report zero links and reject enumeration and new entries.
   No pathname reopening or cached native attribute snapshot substitutes for an FD.
+  Final native-leaf resolution returns its fresh `fstatat` observation to stat,
+  avoiding a second lookup of the same pathname. The resolved parent is passed
+  to leaf lookup rather than fetched again. All stat paths share the logical
+  attribute projection; native data attributes are never cached across calls.
+  Fixed-width leaf-ID encoding preserves the existing format-17 bytes. Word-wise
+  hashing selects connection-local cache buckets only; full keys still decide
+  identity, with unchanged generation checks and invalidation.
 - Image opening returns one retained FD, its object identity and canonical dentry
   path under one store admission. Ordinary opens do not reconstruct unused paths.
   Reconstructing a directory path uses versioned parent-name records.

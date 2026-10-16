@@ -562,7 +562,7 @@ static void queue_failure(const char *store) {
     int gate=eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK),started=eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK);
     int failed=eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK);
     assert(gate>=0 && started>=0 && failed>=0);
-    md_fs_worker_notifications(w,failed,NULL,fail_worker);
+    md_fs_worker_notifications(w,failed,NULL,fail_worker,NULL);
     struct queued jobs[96]={0};
     for (unsigned i=0;i<96;++i) {
         jobs[i]=(struct queued){.work={.run=queued_run,.complete=queued_complete},

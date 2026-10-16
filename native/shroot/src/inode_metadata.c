@@ -31,6 +31,32 @@ int md_inode_runtime_prepare(struct md_inode_store *s) {
     return mdi_commit(s,r);
 }
 
+int mdi_permission_stat(struct md_inode_store *s,const struct mdi_node *node,struct stat *st) {
+    if (!s->locked || node->native || node->source || node->descriptor
+            || node->kind!=S_IFDIR || node->mode<0 || strlen(node->backing)!=32)
+        return mdi_stat(s,node,st);
+    unsigned slot=0;
+    for (;slot<s->directory_check_count;++slot) {
+        const struct mdi_directory_check *check=&s->directory_checks[slot];
+        if (check->objects==s->objects && check->device==node->device && check->inode==node->inode
+                && !strcmp(check->backing,node->backing)) break;
+    }
+    if (slot==s->directory_check_count) {
+        int error=mdi_backing_stat(s,node,st);
+        if (error) return error;
+        if (s->statistics) ++s->statistics->directory_check_misses;
+        if (slot<sizeof(s->directory_checks)/sizeof(s->directory_checks[0])) {
+            struct mdi_directory_check *check=&s->directory_checks[s->directory_check_count++];
+            *check=(struct mdi_directory_check){.objects=s->objects,.device=node->device,.inode=node->inode};
+            memcpy(check->backing,node->backing,sizeof(check->backing));
+        }
+    } else if (s->statistics) ++s->statistics->directory_check_hits;
+    /* Only permission callers use this projection. User-visible stat, native
+     * attributes and ordinary file IO always take their own current snapshot. */
+    *st=(struct stat){.st_mode=node->kind|node->mode,.st_uid=node->uid,.st_gid=node->gid,
+        .st_nlink=node->links,.st_dev=node->logical_device,.st_ino=node->logical_inode};
+    return 0;
+}
 int mdi_permission_as(struct md_inode_store *s, const struct mdi_node *node, int mode, const struct md_identity *identity) {
     if (mode & ~(R_OK | W_OK | X_OK)) return -EINVAL;
     if (!identity) {
@@ -39,7 +65,7 @@ int mdi_permission_as(struct md_inode_store *s, const struct mdi_node *node, int
             mode, MD_AT_EACCESS) ? -errno : 0;
     }
     struct stat st;
-    int error = mdi_stat(s, node, &st);
+    int error = mdi_permission_stat(s, node, &st);
     if (error || !mode) return error;
     if (md_file_dac_override(&st,mode,identity)) return 0;
     if (node->acl_mask&MD_ACL_ACCESS) return mdi_acl_permission(s,node,identity,mode);
@@ -73,7 +99,7 @@ int mdi_open_permission(struct md_inode_store *s, const struct mdi_node *node, i
 int mdi_sticky_as(struct md_inode_store *s, const struct mdi_location *loc, const struct md_identity *identity) {
     if (!identity) return 0;
     struct stat parent, child;
-    int r = mdi_stat(s, &loc->parent, &parent);
+    int r = mdi_permission_stat(s, &loc->parent, &parent);
     if (!r && (parent.st_mode & S_ISVTX) && parent.st_uid != identity->uid.fs) {
         r = mdi_stat(s, &loc->node, &child);
         if (!r && child.st_uid != identity->uid.fs

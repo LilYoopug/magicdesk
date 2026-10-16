@@ -187,7 +187,12 @@ long md_guest_dispatch(long nr, unsigned long a0, unsigned long a1, unsigned lon
     return (scoped&MD_DISPATCH_PATHS) ? dispatch_scoped(nr,a0,a1,a2,a3,a4,a5)
         : dispatch_files(&md_files,nr,a0,a1,a2,a3,a4,a5);
 }
+#include "cooperative_native.h"
 static const struct md_interception_abi abi = {
+    .native_begin=(uintptr_t)md_cooperative_native,
+    .native_call=(uintptr_t)md_cooperative_native_call,
+    .native_return=(uintptr_t)md_cooperative_native_return,
+    .native_end=(uintptr_t)md_cooperative_native_end,
     .task_control=(uintptr_t)md_guest_task_control, .task_call=(uintptr_t)md_guest_task_call,
     .task_return=(uintptr_t)md_guest_task_return, .task_abort=(uintptr_t)md_guest_task_abort,
     .task_collect=(uintptr_t)md_guest_task_collect, .task_collected=(uintptr_t)md_guest_task_collected,
@@ -234,6 +239,7 @@ int md_interception_install(int inherited) {
         uintptr_t capture = (uintptr_t)md_guest_anchor_return;
         uintptr_t task=(uintptr_t)md_guest_task_return, abort_task=(uintptr_t)md_guest_task_abort_return;
         uintptr_t admit=(uintptr_t)md_guest_buffer_admitted;
+        uintptr_t native=(uintptr_t)md_cooperative_native_return;
 #define COUNT(name) + 1
         enum { transport_instructions = 2 * (1 MD_GATE_TRANSPORT_CALLS(COUNT)) };
 #undef COUNT
@@ -249,6 +255,14 @@ int md_interception_install(int inherited) {
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_AARCH64, 1, 0),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
+            /* An admitted native effect retains its table turn and journal.
+             * Application filters are still evaluated by the kernel. */
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)+4),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)(native>>32),0,9),
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)native,0,7),
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+            NATIVE(openat) NATIVE(close) NATIVE(fcntl)
             /* Descriptor admission has no dependency on application prctl
              * policy. Its exact site still runs every application filter. */
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)+4),

@@ -12,6 +12,9 @@ struct md_fs_work_source {
     void (*ready)(void *, struct md_filesystem *);
     int (*notification_fd)(void *);
     int (*notification)(void *, struct md_filesystem *, short);
+    /* Revoke shared-memory awake publication and recheck pending work. A true
+     * result uses a zero-time FD poll, preserving fairness before dispatch. */
+    int (*prepare_wait)(void *);
     /* A confirmed pause admits only work-control and stop readiness. No peer,
      * watch, notification or filesystem callback runs until it is released. */
     int (*paused)(void *);

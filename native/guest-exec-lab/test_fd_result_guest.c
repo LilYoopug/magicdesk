@@ -26,6 +26,20 @@ static unsigned descriptors(void) {
     for (struct dirent *e;(e=readdir(d));) if (e->d_name[0]!='.') ++n;
     CHECK(!closedir(d)); return n;
 }
+static void descriptor_balance(unsigned expected) {
+    unsigned actual=descriptors();
+    if (actual!=expected) {
+        fprintf(stderr,"result-custody descriptors expected=%u actual=%u\n",expected,actual);
+        DIR *d=opendir("/proc/self/fd"); CHECK(d);
+        for (struct dirent *e;(e=readdir(d));) if (e->d_name[0]!='.') {
+            char target[PATH_MAX];
+            ssize_t n=readlinkat(dirfd(d),e->d_name,target,sizeof(target)-1);
+            if (n>=0) { target[n]=0; fprintf(stderr,"result-custody fd=%s target=%s\n",e->d_name,target); }
+        }
+        CHECK(!closedir(d));
+    }
+    CHECK(actual==expected);
+}
 static void cycle(unsigned owner,unsigned round) {
     char path[512],renamed[512],data[64],readback[64]={0};
     CHECK(snprintf(path,sizeof(path),"%s/%u-file",directory,owner)<(int)sizeof(path));
@@ -80,7 +94,7 @@ int test_fd_result_guest(const char *base,int mode) {
     for (uintptr_t i=0;i<4;++i) CHECK(!pthread_create(&threads[i],NULL,thread,(void *)i));
     for (unsigned i=0;i<4;++i) CHECK(!pthread_join(threads[i],NULL));
     CHECK(!pthread_barrier_destroy(&start));
-    CHECK(descriptors()==before);
+    descriptor_balance(before);
     puts("PASS shared FD table: concurrent opens, CLOEXEC, duplicate OFD, unlink, exact errors"); fflush(stdout);
     for (unsigned round=0;round<32;++round) {
         int ready[2]; CHECK(!pipe2(ready,O_CLOEXEC));
@@ -99,7 +113,8 @@ int test_fd_result_guest(const char *base,int mode) {
         for (unsigned i=0;i<round%16;++i) sched_yield();
         CHECK(!kill(child,SIGKILL)); reap(child,1); cleanup();
     }
-    CHECK(descriptors()==before && !rmdir(directory));
+    descriptor_balance(before);
+    CHECK(!rmdir(directory));
     puts("PASS cancellation stress: 32 killed children, no guest FD growth");
     return 0;
 }
