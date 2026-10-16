@@ -3,8 +3,8 @@
 set -eu
 
 # Raise this floor only when recipes require newer APK behavior.
-MIN_MAGICDESK_VERSION_CODE=219
-MIN_MAGICDESK_VERSION_NAME=2.1
+MIN_MAGICDESK_VERSION_CODE=224
+MIN_MAGICDESK_VERSION_NAME=2.1.2
 readonly MIN_MAGICDESK_VERSION_CODE MIN_MAGICDESK_VERSION_NAME
 
 usage() {
@@ -46,6 +46,8 @@ defaults to automatic Turnip detection and a Wayland Plasma desktop.
   --yes         Accept the selected configuration without questions
   --resume      Continue in --name NAME; detect distribution, preserve GUI by default
   --list        Show available distribution/profile combinations
+  --print-system-setup  Print the guest setup script without running it
+  --print-graphics-setup  Print the guest graphics setup script without running it
   --print-mesa-patch  Print the embedded patch without running the installer
   --print-kwin-patch [6.3.6|6.2.5]  Print the matching embedded KWin patch
   --print-recovery-reader  Print the embedded SteamOS image converter
@@ -72,12 +74,12 @@ HELP
 
 configurations() {
     printf '%s\n' 'Distribution  Version     Source                                   GUI' \
-        'debian        13          debian:trixie-slim                        none/apps/xfce/weston/plasma' \
-        'ubuntu        24.04       ubuntu:24.04                              none/apps/xfce/weston' \
-        'alpine        3.23        alpine:3.23                               none/apps/xfce/weston' \
+        'debian        13          Debian official slim rootfs               none/apps/xfce/weston/plasma' \
+        'ubuntu        24.04       Ubuntu Base official rootfs               none/apps/xfce/weston' \
+        'alpine        3.23        Alpine official minirootfs                none/apps/xfce/weston' \
         'fedora        44          registry.fedoraproject.org/fedora:44       none/apps/xfce/weston/gnome' \
-        'arch          rolling     menci/archlinuxarm:base (community)        none/apps/xfce/weston' \
-        'opensuse      Tumbleweed  opensuse/tumbleweed:latest                 none/apps/xfce/weston' \
+        'arch          rolling     Arch Linux ARM official rootfs            none/apps/xfce/weston' \
+        'opensuse      Tumbleweed  openSUSE official LXC rootfs               none/apps/xfce/weston' \
         'openkylin     3.0         openkylin/openkylin:latest                 none/apps/xfce/weston' \
         'deepin        25          linuxdeepin/deepin:crimson-arm64            none/apps/xfce/weston' \
         'manjaro       rolling     Manjaro ARM official rootfs               none/apps/xfce/weston' \
@@ -1763,6 +1765,7 @@ if [ -n "${MAGICDESK_MESA_PREFIX:-}" ]; then
 fi
 unset MAGICDESK_MESA_PREFIX LIBGL_ALWAYS_SOFTWARE GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE
 unset LIBGL_DRIVERS_PATH LIBGL_KOPPER_DRI2 __EGL_VENDOR_LIBRARY_FILENAMES VK_DRIVER_FILES VK_ICD_FILENAMES
+unset MESA_VK_WSI_DEBUG
 PROFILE
 }
 reset_profile > "$candidate"
@@ -1799,7 +1802,32 @@ PROFILE
     fi
 fi
 if [ "$gpu" = software ]; then
-    printf 'export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe\n' >> "$candidate"
+    if [ "$ID" = steamos ]; then
+        # Valve's Mesa supplies Zink, not a swrast Gallium driver. Its older
+        # Lavapipe package needs LLVM 17 alongside the image's newer LLVM.
+        packages vulkan-swrast llvm17-libs vulkan-tools mesa-utils
+        cat >> "$candidate" <<'PROFILE'
+export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=zink MESA_LOADER_DRIVER_OVERRIDE=zink
+export LIBGL_KOPPER_DRI2=true
+export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.aarch64.json
+PROFILE
+        work=/var/cache/magicdesk/software
+        mkdir -p "$work"
+        # EVENT_WAIT: Vulkan/EGL probes exit; expiry rejects the candidate profile.
+        probe_status=0
+        /bin/sh -c '. "$1"; unset DISPLAY WAYLAND_DISPLAY; exec timeout 30 /bin/sh -ec \
+            "vulkaninfo --summary; eglinfo -B -p surfaceless"' sh "$candidate" \
+            > "$work/probe.log" 2>&1 || probe_status=$?
+        cat "$work/probe.log"
+        if [ "$probe_status" -ne 0 ] \
+                || ! grep -q 'DRIVER_ID_MESA_LLVMPIPE' "$work/probe.log" \
+                || ! grep -Eq 'OpenGL core profile renderer:.*zink.*llvmpipe' "$work/probe.log"; then
+            echo 'Lavapipe/Zink could not initialize; the graphics profile is unchanged.' >&2
+            exit 1
+        fi
+    else
+        printf 'export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe\n' >> "$candidate"
+    fi
 fi
 chmod 644 "$candidate"
 mv -f "$candidate" "$profile"
@@ -1815,6 +1843,11 @@ desktop=${1:?Expected xfce, weston, gnome, plasma-x11 or plasma-wayland}
 shift
 [ ! -r /etc/profile.d/magicdesk-graphics.sh ] || . /etc/profile.d/magicdesk-graphics.sh
 [ ! -r /etc/profile.d/magicdesk-applications.sh ] || . /etc/profile.d/magicdesk-applications.sh
+# Root needs no authentication agent. Keep packaged and user autostart files
+# intact; this profile applies only to explicitly launched root desktops.
+if [ "$(id -u)" = 0 ]; then
+    export XDG_CONFIG_DIRS="/etc/magicdesk/root-session:${XDG_CONFIG_DIRS:-/etc/xdg}"
+fi
 case "$desktop" in
     xfce)
         unset WAYLAND_DISPLAY WAYLAND_SOCKET
@@ -1838,6 +1871,9 @@ case "$desktop" in
         if [ "$desktop" = plasma-x11 ]; then
             unset WAYLAND_DISPLAY
             export XDG_SESSION_TYPE=x11 QT_QPA_PLATFORM=xcb
+            if [ "${LIBGL_ALWAYS_SOFTWARE:-}" = 1 ]; then
+                export QT_QUICK_BACKEND=software
+            fi
             set -- startplasma-x11 "$@"
         else
             unset DISPLAY
@@ -2094,7 +2130,21 @@ system_setup() {
     distribution_support
     printf "install_desktop_session() {\ncat > /usr/local/bin/magicdesk-desktop-session <<'MD_DESKTOP_SESSION'\n"
     desktop_session
-    printf 'MD_DESKTOP_SESSION\nchmod 755 /usr/local/bin/magicdesk-desktop-session\n}\n'
+    cat <<'MD_DESKTOP_INSTALL'
+MD_DESKTOP_SESSION
+chmod 755 /usr/local/bin/magicdesk-desktop-session
+# Normally created by tmpfiles at boot; direct non-root desktop launches need
+# the same root-owned shared socket directories without booting the OS.
+install -d -o root -g root -m 1777 /tmp/.X11-unix /tmp/.ICE-unix
+mkdir -p /etc/magicdesk/root-session/autostart
+cat > /etc/magicdesk/root-session/autostart/xfce-polkit.desktop <<'MD_ROOT_AGENT'
+[Desktop Entry]
+Type=Application
+Name=XFCE PolKit
+Hidden=true
+MD_ROOT_AGENT
+}
+MD_DESKTOP_INSTALL
     printf "install_audio_session() {\ncat > /usr/local/bin/magicdesk-audio-session <<'MD_AUDIO_SESSION'\n"
     audio_session
     printf 'MD_AUDIO_SESSION\nchmod 755 /usr/local/bin/magicdesk-audio-session\n}\n'
@@ -2734,12 +2784,28 @@ recipe_defaults() {
     source_kind=oci
     source_sha=
     case "$distro" in
-        debian) source=debian:trixie-slim; version=13 ;;
-        ubuntu) source=ubuntu:24.04; version=24.04 ;;
-        alpine) source=alpine:3.23; version=3.23 ;;
+        debian)
+            source=https://raw.githubusercontent.com/debuerreotype/docker-debian-artifacts/cf1f4a45447842b45e9952e0f018ae734a7341c7/trixie/slim/oci/blobs/rootfs.tar.gz
+            source_sha=bbeda6b4abb749f743f4547ef5a28070a14de8caef211daa5afb78d5b5fa21ba
+            source_kind=rootfs; version=13 ;;
+        ubuntu)
+            source=https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.5-base-arm64.tar.gz
+            source_sha=a91d5a93010193712d346d761372b7c9db6dfcf093893161c64ca107f05914f2
+            source_kind=rootfs; version=24.04 ;;
+        alpine)
+            source=https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/aarch64/alpine-minirootfs-3.23.6-aarch64.tar.gz
+            source_sha=b17a57958e29735ff0e6e64254d958e65903687a70ca30cc430b33a965ad49d7
+            source_kind=rootfs; version=3.23 ;;
         fedora) source=registry.fedoraproject.org/fedora:44; version=44 ;;
-        arch) source=menci/archlinuxarm:base; version=rolling ;;
-        opensuse) source=opensuse/tumbleweed:latest; version=Tumbleweed ;;
+        arch)
+            # Official mirror with working TLS; archive authenticated with upstream's build key.
+            source=https://de3.mirror.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
+            source_sha=42a4eeaa038994ffd31fa173256ef2f0ef511358eeb41b9ea1f8626391b9b319
+            source_kind=rootfs; version=rolling ;;
+        opensuse)
+            source=https://download.opensuse.org/ports/aarch64/tumbleweed/appliances/opensuse-tumbleweed-image.aarch64-1.0.0-lxc-Snapshot20261011.tar.xz
+            source_sha=a7b97cc9dfc056d7383b74a549b34572e57bfcfff8067a41e48db79a07e2b179
+            source_kind=rootfs; version=Tumbleweed ;;
         openkylin) source=openkylin/openkylin:latest; version=3.0 ;;
         deepin) source=linuxdeepin/deepin:crimson-arm64; version=25 ;;
         manjaro)
@@ -2771,6 +2837,8 @@ gui_notice() {
     [ "$gui" != gnome ] || printf 'GNOME devkit also needs a Linux system bus; this recipe does not boot one.\n'
 }
 if [ "$#" = 1 ] && [ "$1" = --print-mesa-patch ]; then mesa_patch; exit 0; fi
+if [ "$#" = 1 ] && [ "$1" = --print-system-setup ]; then system_setup; exit 0; fi
+if [ "$#" = 1 ] && [ "$1" = --print-graphics-setup ]; then graphics_setup; exit 0; fi
 if [ "$#" = 1 ] && [ "$1" = --print-desktop-session ]; then desktop_session; exit 0; fi
 if [ "$#" = 1 ] && [ "$1" = --print-audio-session ]; then audio_session; exit 0; fi
 if [ "$#" = 1 ] && [ "$1" = --print-steam-game ]; then steam_game; exit 0; fi
@@ -2933,7 +3001,6 @@ printf 'Guest account=%s | extra packages=%s | package cache=%s\n' "${new_user:-
 [ "$gpu" != turnip ] || printf 'Mesa compiler jobs: %s\n' "$jobs"
 if [ "$resume" = yes ]; then printf 'Continue the existing environment without replacing user data.\n'
 else printf 'Source: %s\nGuest DNS: %s\n' "$image" "$dns"; fi
-[ "$distro" != arch ] || printf 'Arch uses a community OCI image. Trust its publisher before continuing.\n'
 [ "$distro" != armtix ] || printf 'Armtix retains its upstream repository signature policy (the supplied rootfs disables package signatures).\n'
 [ "$gui" != gnome ] || printf 'GNOME development kit is experimental; it is not a booted systemd/GDM desktop.\n'
 gui_notice
@@ -3009,7 +3076,9 @@ setup_exec() {
     set -- -- /bin/sh -s -- "$@"
     # Explicit XBPS network preference; never inherit the whole Android environment.
     [ "${FORCE_IPV4:-}" != 1 ] || set -- --env FORCE_IPV4=1 "$@"
-    shroot exec "$name" --user root --env DEBIAN_FRONTEND=noninteractive "$@"
+    # Only these setup processes run in an unbooted rootfs. Do not persist this
+    # hint in login profiles: an eventual systemd boot must discover its own state.
+    shroot exec "$name" --user root --env DEBIAN_FRONTEND=noninteractive --env SYSTEMD_IN_CHROOT=1 "$@"
 }
 stage='installing packages and guest settings'
 while :; do

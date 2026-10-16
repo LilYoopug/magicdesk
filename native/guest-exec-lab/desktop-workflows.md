@@ -124,9 +124,19 @@ cleanup with ordinary/protected receivers and both CLOEXEC modes.
 
 ### Steam Client
 
-`test_steamos_runtime.py BUILD STORE [--archive HOST_TAR]` imports a prepared
-Holo rootfs into a new store and checks guest identity, SysV IPC, FIFO,
-user/PID/mount namespaces and HTTPS as `steamlab`. Archive ownership is retained;
+`test_steamos_install.py` exercises the complete current `install_linux.sh`
+against Valve's official recovery archive, retaining the named test environment
+`steamos-recipe-check`. It uses the installed APK's CLI, verified download cache,
+the recipe's package update and supplied Steam bootstrap. The default test
+selects Plasma with software rendering, avoiding a Mesa/KWin build. Use
+`--gpu auto|turnip` for the separate hardware-build workflow, or `--resume` to
+continue setup in the retained environment. The report records the exact
+installer hash and store path.
+
+`test_steamos_runtime.py BUILD STORE [--archive HOST_TAR]` checks that store with
+the selected native runtime build: guest identity, SysV IPC, FIFO,
+user/PID/mount namespaces and HTTPS as `steamos` (`--user` overrides it).
+The optional archive imports a prepared rootfs; archive ownership is retained;
 the executor must be UID 2000. It does not boot SteamOS or alter Android partitions.
 `--socket-owner` checks stock `lsof` discovery for a loopback listener and an
 established connection between parent and child. Queries by the client's port
@@ -136,19 +146,39 @@ replaced. Small-fixture success does not establish discovery latency in a
 large graphical process tree.
 
 `test_steamos_graphics.py BUILD STORE --client steam|glx|vulkan|gles` uses ordinary
-shell graphics sessions and private virtual displays. The prepared store needs
-the ARM Steam bootstrap in `/home/steamlab/client`, XKB data in
-`/usr/share/xkeyboard-config-2`, Turnip in `/opt/mesa`, and the glibc-compatible
-Freedreno bundle in `/opt/mesa-debian`. Steam also needs its Holo GUI dependencies
-and the ARM64 GTK2 libraries from Valve's Steam Runtime in `/opt/steam-gtk2`;
-Holo's `gtk2-compat` package provides build metadata, not those shared libraries.
-The build directory supplies
-`recipe-classes` from `GraphicalRecipe.java` and the `md-await-exit` completion
-fixture. `--timeout` bounds the entire launch, including Steam's own updates;
+shell graphics sessions and private virtual displays. The store must have the
+installer's Steam bootstrap, GUI dependencies and selected graphics profile;
+the fixture calls `/usr/bin/steam` as `steamos` with `/home/steamos`. GPU probes
+use that same installed profile rather than injecting laboratory driver paths.
+The default `--renderer turnip` requires a hardware profile and rejects software
+rendering. `--renderer lavapipe` requires the installer's SteamOS software profile:
+Vulkan must identify Mesa llvmpipe, and GLX/GLES must identify Zink over llvmpipe.
+It does not substitute renderer environment variables for the installed profile.
+The fixture compiles the production Java graphical recipe; the build
+directory also supplies the `md-await-exit` completion fixture.
+`--timeout` bounds the entire launch, including Steam's own updates;
 no sandbox-disable flags are supplied. `--window-title` requires an exact native
 window title so an updater cannot stand in for the login UI. Bounded pixel
 observation rejects a blank frame and Steam's small initial loading indicator;
 visually inspect the captured form. GPU probes capture changing frames.
+Verbose native tracing is opt-in with `--diagnostics`, rather than part of the
+normal graphical workload. Use `test_installer_setup.py BUILD STORE --gui keep
+--gpu software` to execute the actual graphics payload before these checks;
+the report records its hash. The SteamOS recipe probes Vulkan/EGL before publishing
+the profile, while these separate window tests verify presentation too.
+On the ARM64 0.3.0 recovery image, installed Lavapipe 24.0.6 with LLVM 17 and
+the image's Zink 26.3 passes Vulkan/Wayland, GLES/Wayland and GLX/X11 changing-frame
+checks. GLX/X11 also passes with `--require-shm`, which rejects the `noshm`
+bypass; the embedded server attaches guest SysV segments through Shroot's scoped
+resource channel. `test_x11_shm.py BUILD STORE` separately verifies real pixel
+readback, private IPC rejection, permissions, `IPC_RMID` and shared-pixmap
+lifetime. It also covers modern AttachFd/CreateSegment with resource admission
+and ordinary X11 streams, swapped-client replay and abrupt connection loss,
+without Desktop or a viewer. Both fixtures accept `--installed` to exercise
+the APK's shell launcher and native-helper staging instead of uploading runtime
+binaries. This does not certify the full Plasma session: its separate
+recipe checks still fail X11 desktop-component startup and Wayland PolicyKit
+session identification. Do not discard those assertions to report a GUI pass.
 Steam mapping/capture is reported separately and is not a successful login,
 game execution or complete SteamOS session. Cleanup cancels the owned runtime
 and observes its exit before releasing the graphics session and display.

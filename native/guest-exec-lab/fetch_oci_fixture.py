@@ -23,7 +23,8 @@ def main():
     parser.add_argument('reference', help='Explicit tag or sha256 digest')
     parser.add_argument('destination', type=Path)
     parser.add_argument('--registry', default='registry-1.docker.io',
-                        choices=('registry-1.docker.io', 'mcr.microsoft.com', 'quay.io'))
+                        choices=('registry-1.docker.io', 'mcr.microsoft.com', 'quay.io',
+                                 'registry.fedoraproject.org'))
     parser.add_argument('--resume', action='store_true', help='Reuse only size/digest-verified downloaded blobs')
     args = parser.parse_args()
     args.destination.mkdir(parents=True, exist_ok=args.resume)

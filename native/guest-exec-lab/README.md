@@ -58,6 +58,62 @@ automatically registered in the Android default-library catalog. Test
 `--gui apps` and a whole-desktop profile separately; installing application
 packages does not verify a desktop-session launcher.
 
+`test_installer_setup.py BUILD STORE [--dns ADDRESS]` runs the actual guest
+payload emitted by `install_linux.sh --print-system-setup` in a disposable store.
+It records the payload hash, uses the production offline resolver owner when DNS
+is explicitly selected, and retains the recipe's package/keyring cleanup.
+It defaults to `--gui none`; `--gui xfce|weston|apps` and `--fonts basic`
+exercise package setup for GUI profiles, not rendered GUI acceptance or an init boot.
+`--extra-packages` exercises the installer's extra-package argument. The GUI
+fixture requires `pidof` and `timeout`; minimal Fedora needs
+`--extra-packages procps-ng` for its component-readiness check.
+`test_recipe_graphics.py BUILD STORE` then reads those installed desktop entries
+and executes their commands through the production routed graphical recipe using
+the selected native build. It checks X11/Wayland Mousepad input and saved-file
+readback, Xfce/Weston pixels, and retained whole-desktop viewers on an isolated
+display. Use `--entry` to select a case and `--lease` to retain an existing phone
+wake lease. Plasma entries are `plasma-x11` and `plasma-wayland`; use
+`--user steamos --home /home/steamos` for the SteamOS recipe. The store must be idle and disposable; the fixture stops its own
+launches and removes its display. This does not verify named-catalog registration,
+audio output or Turnip. Keep at most one long foreground package-setup request
+running beside GUI observation so MCP's request workers remain available.
+`test_arch_runtime.py BUILD STORE --install-package` separately checks pacman's
+unmodified sandbox, Landlock denials, synchronization, package installation,
+reinstallation, file verification and removal of a fixture-installed package.
+
+The Docker and Podman network probes allocate paired TCP/UDP ports through an
+observer outside Shroot, then check publication, collision rejection, and port
+release. They do not assume fixed test ports are unused. Docker diagnostic
+profiles use a private empty daemon config so their explicit flags do not collide
+with `/etc/docker/daemon.json` written by the installer. This does not validate
+that system daemon's service-unit startup. Host-side observer ownership checks:
+`python native/guest-exec-lab/test_network_observer.py`.
+The Docker probe selects a Python image automatically for `--exercise-ports`;
+an explicit `--image` must also provide Python for that scenario.
+
+`test_nproc.py BUILD STORE` verifies per-real-UID process/thread quotas, shared
+thread limits, fork copies, unreaped children, UID-change/exec admission,
+protected memory, seccomp denial and `/proc/*/limits`, both directly and in a
+private PID/mount namespace. `test_rtkit.py BUILD STORE` starts the distribution's
+unmodified RTKit daemon with its original chroot, identity and NPROC limit,
+checks the canary/watchdog threads and D-Bus responses, then releases the owned
+processes. `test_os_boot.py --build BUILD --store STORE --rtkit` additionally checks the
+packaged service unit through a real systemd boot, restart and stop. RTKit's
+ability to obtain native realtime scheduling is a separate Android permission,
+not a success implied by daemon readiness.
+
+`test_readonly_exec.py BUILD STORE` creates fresh executable leaves, then checks
+first exec, `/proc/self/exe` reexec, file-watch registration and mutation denials
+on the base mount, a bind, a tmpfs bind and a read-only tmpfs superblock. This
+guards systemd generator sandboxes against representation changes being mistaken
+for guest writes. `test_os_boot.py` also rejects generator failures even when
+systemd reaches its default target.
+
+Root desktop recipes use an owned XDG autostart profile to omit the unnecessary
+XFCE authentication agent. Packaged files and user overrides remain intact;
+ordinary-user sessions retain their distribution configuration. GUI checks reject
+the known empty PolicyKit error dialog as well as lost X11 authorization.
+
 ## Named Environment Workflows
 
 `test_environment_workflows.py --tag NAME --stage all` installs fresh public

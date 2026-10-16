@@ -11,7 +11,7 @@ def main():
     parser.add_argument('build', type=Path)
     parser.add_argument('store')
     parser.add_argument('--archive', help='Host rootfs tar; import into a new store')
-    parser.add_argument('--user', default='steamlab')
+    parser.add_argument('--user', default='steamos')
     parser.add_argument('--socket-owner', action='store_true',
                         help='Also require Python/lsof TCP owner discovery used by Steam UI authentication')
     args = parser.parse_args()

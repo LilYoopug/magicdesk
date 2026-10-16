@@ -69,7 +69,7 @@ stop another launch. Persistent stores outlive those processes.
 | Credentials | Guest users, groups, capabilities, drops and namespace ownership | Guest root never grants Android root or kernel capabilities |
 | IPC and terminals | Separate SysV IPC owners, store-scoped pathname sockets, private devpts views | Inherited connections retain authority; explicit abstract Unix sockets share the host namespace |
 | Network | Offline child namespaces or routed IPv4, private ports, supported nftables flow filtering and NAT | Native backing ports remain reachable; not a host firewall or full Linux network isolation |
-| Resource controls | Logical cgroup membership, controller settings and device-filter bookkeeping | CPU, memory, pids and device limits are not enforced by those settings |
+| Resource controls | Launch-local real-UID `RLIMIT_NPROC`; logical cgroup membership, controller settings and device-filter bookkeeping | Cgroup CPU, memory, pids and device limits are not enforced; other resource limits remain native |
 | Application filters | Installed seccomp filters and their denial actions remain active | The filesystem broker is not itself confined by every caller's filter domain |
 
 Use trusted images and programs. Logical separation prevents many accidental
@@ -100,7 +100,8 @@ replacing the APK; download again to atomically replace `~/install_linux.sh`.
 UID 2000's shell home is `/data/local/tmp/magicdesk/`; root consoles use
 `/data/local/tmp/magicdesk-root/home`. Release tags retain the installer matching
 that release.
-The current installer requires MagicDesk 2.1 or newer (`versionCode` 219).
+The current installer requires MagicDesk 2.1.2 or newer (`versionCode` 224),
+including the X11 SysV shared-memory bridge used by its software graphics profile.
 Before questions, downloads or environment access, including `--resume`, it
 checks the running app with `magicdesk get_state --field data.app.versionCode`.
 An older version, unavailable CLI or invalid response stops installation without
@@ -118,12 +119,12 @@ are command-line options; `--yes` suppresses questions. `--list` is read-only.
 
 | Distribution | Source | GUI recipes |
 | --- | --- | --- |
-| Debian 13 | `debian:trixie-slim` | apps, Xfce, Weston, Plasma 6 |
-| Ubuntu 24.04 | `ubuntu:24.04` | apps, Xfce, Weston |
-| Alpine 3.23 | `alpine:3.23` | apps, Xfce, Weston |
+| Debian 13 | Official debuerreotype ARM64 slim rootfs | apps, Xfce, Weston, Plasma 6 |
+| Ubuntu 24.04 | Official Ubuntu Base ARM64 rootfs | apps, Xfce, Weston |
+| Alpine 3.23 | Official aarch64 minirootfs | apps, Xfce, Weston |
 | Fedora 44 | `registry.fedoraproject.org/fedora:44` | apps, Xfce, Weston, experimental GNOME devkit |
-| Arch Linux ARM | `menci/archlinuxarm:base` (community image) | apps, Xfce, Weston |
-| openSUSE Tumbleweed | `opensuse/tumbleweed:latest` | apps, Xfce, Weston |
+| Arch Linux ARM | Official generic aarch64 rootfs | apps, Xfce, Weston |
+| openSUSE Tumbleweed | Official dated aarch64 LXC rootfs | apps, Xfce, Weston |
 | openKylin 3.0 | `openkylin/openkylin:latest` | apps, Xfce, Weston |
 | Deepin 25 | `linuxdeepin/deepin:crimson-arm64` | apps, Xfce, Weston |
 | Manjaro ARM | Official dated Manjaro ARM rootfs | apps, Xfce, Weston |
@@ -160,14 +161,26 @@ to Android's audio service. See [audio](audio.md) and [gamepads](gamepads.md).
 Images and repository packages are trusted executable inputs, not sandboxed
 content. `--image REF` selects another OCI source of the same distribution and
 version; the guest architecture and OS are checked before package setup. Arch
-uses a community publisher and performs a complete rolling userspace upgrade.
+uses the distribution's rootfs and performs a complete rolling userspace upgrade.
 The installer preserves upstream repository signature policy and pacman's default
 filesystem sandbox. Armtix's supplied rootfs disables repository signatures;
 the installer warns about this and does not silently change that policy.
 Package output and errors stay in the console.
 
-Official rootfs archives have pinned URLs and SHA-256 digests. `--downloads DIR`
-selects their reusable verified cache. Gzip archives go directly to Shroot's
+Recipes prefer official generic ARM64 rootfs archives when available. Disk images,
+ISOs and OCI-layout archives are not interchangeable with a rootfs tarball; the
+other distributions retain their OCI sources. Upstream sources include
+[Debian's official image artifacts](https://docker.debian.net/),
+[Ubuntu Base](https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/),
+[Alpine](https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/aarch64/),
+[Arch Linux ARM](https://archlinuxarm.org/about/downloads) and
+[openSUSE](https://download.opensuse.org/ports/aarch64/tumbleweed/appliances/).
+
+Official rootfs archives have pinned URLs and SHA-256 digests. Arch's upstream
+`latest` URL is mutable: replacing that archive requires a verified recipe pin
+update, never accepting a checksum mismatch. Its pinned bytes were verified with
+the upstream build-signing key; users need no separate GPG installation.
+`--downloads DIR` selects their reusable verified cache. Gzip archives go directly to Shroot's
 native importer. XZ archives use the same isolated, digest-pinned Python OCI
 helper as the recovery converter, only to change compression; tar entries,
 ownership and hardlinks remain untouched. This requires neither Python nor
@@ -180,7 +193,11 @@ selects XBPS's IPv4-only downloads. This explicit setting also applies to resume
 and optional graphics setup, without changing Android networking.
 
 Package setup uses the guest root account, without granting Android root or
-changing the executor UID. `--create-user developer` creates a password-locked
+changing the executor UID. Setup processes explicitly declare `SYSTEMD_IN_CHROOT=1`
+to package hooks because these recipes do not boot the OS. This is not persisted
+in login profiles or applied to subsequent init-system launches. GUI setup creates
+root-owned, sticky X11/ICE socket directories for direct non-root desktop sessions.
+`--create-user developer` creates a password-locked
 ordinary account; choose it with `login --user developer` or a shortcut's User
 field. It does not change the image's default account. `--locale ru_RU.UTF-8`
 prepares guest locale data; `--timezone system` snapshots Android's IANA zone.
@@ -233,8 +250,9 @@ command; `preserve` leaves it alone. Resume retains existing DNS.
 sh ~/install_linux.sh --distro steamos --name steamos --yes
 ```
 
-The installer downloads the pinned Valve ARM64 recovery archive with SHA-256
-verification. A temporary, digest-pinned official `python:3.14-alpine3.23` OCI
+The installer downloads Valve's [Steam Frame ARM64 recovery 0.3.0](https://steamdeck-images.steamos.cloud/recovery/steamframe-oobe-repair-20260922.5153644-0.3.0.img.bz2)
+with pinned SHA-256 verification, not the x86 Steam Deck recovery image.
+A temporary, digest-pinned official `python:3.14-alpine3.23` OCI
 environment reads the GPT/Btrfs image without mounting it. Pinned binary wheels
 for Dissect Btrfs, cstruct and util are downloaded and verified by
 `magicdesk download`; neither Python nor a compiler is required on Android.
@@ -344,6 +362,14 @@ existing programs are not restarted. This suitability check is not proof that
 every OpenGL application renders correctly. Build/render checks cover Debian
 and SteamOS configurations; other toolchains and GPUs require separate validation.
 Software fallback uses the distribution's unchanged libraries.
+SteamOS's supplied Mesa contains Zink but no Gallium llvmpipe driver. Its software
+profile installs the official `vulkan-swrast` and matching `llvm17-libs` packages
+alongside the image's newer LLVM, then runs Zink over Lavapipe. Vulkan and
+surfaceless EGL probes must succeed before the profile is replaced. No Mesa
+build is required. Legacy X11 MIT-SHM attaches guest SysV segments through a
+namespace-scoped FD bridge to the app-UID server, so the profile no longer needs
+`MESA_VK_WSI_DEBUG=noshm`. Pixel data stays in shared mappings. This is CPU
+rendering, not Turnip or hardware acceleration.
 Neither profile replaces Android libraries, distribution
 drivers or the APK renderer, and no privileged identity switch is performed.
 `--gpu auto` first checks access to KGSL, then builds and probes Turnip when it
@@ -707,6 +733,9 @@ DNS/HTTP, bidirectional peer connections by container name, occupied-port
 rejection and removal of containers, network rules and published ports.
 Its `nofile`/`nproc` limits are explicitly set to inherited shell limits, rather
 than attempting to raise Android hard limits.
+`nproc` is now enforced against guest real UIDs within the launch; `nofile`
+and the physical Android task ceiling remain native. The fixture retains its
+explicit limits so its resource policy is reproducible.
 
 The [Podman fixture](../native/guest-exec-lab/probe_podman_runtime.py) runs inside
 a routed Shroot launch. No `--network host` bypass or Podman-specific runtime
@@ -837,15 +866,24 @@ Explicit `--socket-path SOURCE ENDPOINT` and `--socket-abstract SOURCE ENDPOINT`
 arguments map exact guest connect addresses to that endpoint. Routes survive
 fork/exec and environment replacement. The syscall adapter preserves the original
 socket descriptor and kernel open-file description; no socket-node fabrication,
-per-syscall allocation or descriptor registry is involved. Other destinations
+per-data-operation allocation or descriptor registry is involved. Other destinations
 retain their normal permission checks. General guest pathname sockets use the
 inode namespace described below, independently of graphical routes.
 
 Wayland clients receive an absolute `WAYLAND_DISPLAY` and may establish separate
 connections, rather than share one inherited stream. X11 maps both the pathname
-and abstract display address. Its normal MIT-MAGIC-COOKIE-1 handshake remains
+and abstract display address using `--socket-resource-path` and
+`--socket-resource-abstract`. These routes add a bounded attachment channel,
+capturing the connecting task's guest credentials and IPC namespace. The embedded
+server resolves legacy MIT-SHM IDs through that capability and receives real
+backing and lifetime-lease FDs; it does not open the guest store or require host
+SysV IPC. Read-only permissions, `IPC_RMID`, shared pixmaps and process death use
+the common [shared-memory ownership](../native/shroot/shared-memory.md#embedded-x11-attachments).
+Ordinary X11 and modern `ShmAttachFd` remain independent of this channel.
+Its normal MIT-MAGIC-COOKIE-1 handshake remains
 mandatory. Each guest launch writes the supplied authority into its private
-runtime directory; session cookies are not persisted in `.desktop` recipes.
+runtime directory before starting D-Bus, so activated services inherit the same
+authority. Session cookies are not persisted in `.desktop` recipes.
 
 ## Gamepad Input
 
@@ -905,6 +943,10 @@ application, init or isolation test.
 
 - The installer launches applications and desktops directly; successful systemd
   or OpenRC fixtures do not mean the installer boots those managers.
+- Packaged RTKit starts with its original chroot, credentials, process limit and
+  watchdog threads, but real RT-priority requests can still return Android's
+  `EPERM`. The PipeWire recipe does not require this privilege. See
+  [process limits](../native/shroot/process-resources.md#process-limits).
 - Qt 6.8.2's strict Wayland surrounding-text correction check can fail because
   the client omits the final text-input-v3 commit. Other tested IME, clipboard
   and dialog operations pass. See [Wayland coverage](wayland.md).

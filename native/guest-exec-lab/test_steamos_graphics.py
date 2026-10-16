@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Prepared Holo ARM64 clients through shell Shroot and ordinary graphics hosts."""
+"""Installed SteamOS clients using their recipe identity and graphics profile."""
 import argparse
 import base64
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import tempfile
@@ -17,18 +18,26 @@ def main():
     parser.add_argument('store')
     parser.add_argument('--client', choices=['steam', 'glx', 'vulkan', 'gles'], required=True)
     parser.add_argument('--trace', action='store_true')
+    parser.add_argument('--diagnostics', action='store_true', help='Enable verbose native diagnostics')
+    parser.add_argument('--require-shm', action='store_true', help='Reject a profile disabling MIT-SHM')
+    parser.add_argument('--installed', action='store_true', help='Use the installed APK runtime and shell launcher')
+    parser.add_argument('--renderer', choices=['turnip', 'lavapipe'], default='turnip',
+                        help='Require this installed graphics profile, never inject driver overrides')
     parser.add_argument('--timeout', type=int, default=180, help='Owned launch deadline, including client downloads')
     parser.add_argument('--window-title', help='Exact expected client window, rather than an updater or splash')
+    parser.add_argument('--user', default='steamos')
+    parser.add_argument('--home', default='/home/steamos')
     args = parser.parse_args()
     if not 1 <= args.timeout <= 1800:
         parser.error('--timeout must be between 1 and 1800 seconds')
-    suite = Suite(args.build, args.build)
+    suite = Suite(args.build, None if args.installed else args.build)
     client = suite.client
     protocol = 'x11' if args.client in ('steam', 'glx') else 'wayland'
     session = display = None
+    owned_executable = suite.runner
     log, receipt, pidfile = [suite.base + '/' + n for n in ('client.log', 'exit', 'pid')]
     suite.report.update(store=args.store, probe='steamos-' + args.client,
-                        protocol=protocol, sandboxFlagsDisabled=False)
+                        protocol=protocol, renderer=args.renderer, sandboxFlagsDisabled=False)
     print('Fixture:', suite.base, flush=True)
 
     def wait(condition, **selection):
@@ -48,48 +57,52 @@ def main():
     try:
         before = client.call('get_state')
         assert before['readiness']['interactive'] and not before['readiness']['deviceLocked']
-        suite.command([suite.image, 'export-tree', args.store, '/usr/share/xkeyboard-config-2', suite.base + '/xkb'])
+        if args.installed:
+            # Resolve the immutable native executable through the same APK
+            # preparation owner as the launcher, for exact cleanup identity.
+            runtime = suite.command(['/system/bin/sh', '-ec',
+                'CLASSPATH="$MAGICDESK_COMMAND_APK" /system/bin/app_process / '
+                'io.github.mekhontsev.magicdesk.GuestRuntimeMain "$MAGICDESK_GUEST_LIBRARIES" '
+                '"$MAGICDESK_RUNTIME/guest-runtime"'], quiet=True).strip()
+            owned_executable = runtime + '/libmagicdesk_guest_run.so'
+        classes = args.build / 'recipe-classes'
+        classes.mkdir(parents=True, exist_ok=True)
+        repo = Path(__file__).resolve().parents[2]
+        names = ['LinuxGraphicalEnvironment', 'GuestGraphicalConnection', 'GuestLaunchPlan',
+                 'GuestEnvironment', 'GraphicalProtocol', 'ShellCommandLine']
+        sources = [repo / 'native/guest-exec-lab/GraphicalRecipe.java',
+                   *(repo / ('app/src/main/java/io/github/mekhontsev/magicdesk/' + name + '.java') for name in names)]
+        subprocess.run(['javac', '-d', str(classes), *map(str, sources)], check=True, timeout=30)
+        suite.command(suite.image_command('export-tree', args.store, '/usr/share/X11/xkb', suite.base + '/xkb'))
         with tempfile.TemporaryDirectory() as temporary:
             wrapper = Path(temporary) / 'shroot'
             wrapper.write_text('#!/system/bin/sh\nprintf "%s\\n" "$$" > ' + shlex.quote(pidfile)
                                + '\nexec ' + shlex.quote(suite.runner)
-                               + ' --diagnostics --deadline-seconds ' + str(args.timeout) + ' "$@"\n')
+                               + (' --diagnostics' if args.diagnostics else '')
+                               + ' --deadline-seconds ' + str(args.timeout) + ' "$@"\n')
             suite.transport.upload(client, wrapper, suite.base + '/shroot')
         suite.transport.upload(client, args.build / 'md-await-exit', suite.base + '/md-await-exit')
         suite.command(['chmod', '700', suite.base + '/shroot', suite.base + '/md-await-exit'])
         display = client.call('create_display', dict(type='virtual', width=1280, height=800, densityDpi=160))
         session = client.call('graphics.start', dict(protocol=protocol, backend='shell', connection='routed',
-            name='Holo ARM64 ' + args.client, keyboardDirectory=suite.base + '/xkb'))['sessionId']
+            name='SteamOS ARM64 ' + args.client, keyboardDirectory=suite.base + '/xkb'))['sessionId']
         suite.report['sessionId'] = session
         state = wait('graphics_ready', sessionId=session)['session']
         assert state['executorUid'] == 2000 and state['serverUid'] not in (0, 2000)
         programs = {
-            'steam': 'mkdir -p "$HOME/.steam"; '
-                     'ln -sfn "$HOME/client" "$HOME/.steam/steam"; '
-                     'ln -sfn "$HOME/client" "$HOME/.steam/root"; '
-                     'for spec in bin32:ubuntu12_32 bin64:ubuntu12_64 sdk32:linux32 '
-                     'sdk64:linux64 sdkarm64:linuxarm64 binarm64:steamrtarm64; do '
-                     'name=${spec%%:*}; directory=${spec#*:}; '
-                     'if test -d "$HOME/client/$directory"; then '
-                     'ln -sfn "$HOME/client/$directory" "$HOME/.steam/$name"; fi; done; '
-                     'export LD_LIBRARY_PATH=/opt/steam-gtk2; '
-                     'cd /home/steamlab/client; exec ./steamrtarm64/steam',
-            'glx': 'export LD_LIBRARY_PATH=/opt/mesa-debian/usr/lib/aarch64-linux-gnu; '
-                   'export LIBGL_DRIVERS_PATH=$LD_LIBRARY_PATH/dri MESA_LOADER_DRIVER_OVERRIDE=kgsl; '
-                   'glxinfo -B; exec glxgears -info',
-            'vulkan': 'export LD_LIBRARY_PATH=/opt/mesa/usr/lib VK_DRIVER_FILES=/opt/mesa/turnip.json; '
-                      'vulkaninfo --summary; exec vkcube --wsi wayland --width 640 --height 480 --c 1800',
-            'gles': 'export LD_LIBRARY_PATH=/opt/mesa-debian/usr/lib/aarch64-linux-gnu; '
-                    'export LIBGL_DRIVERS_PATH=$LD_LIBRARY_PATH/dri MESA_LOADER_DRIVER_OVERRIDE=kgsl; '
-                    'export __EGL_VENDOR_LIBRARY_FILENAMES=/opt/mesa-debian/usr/share/glvnd/egl_vendor.d/50_mesa.json; '
-                    'eglinfo -B -p wayland; exec es2gears_wayland -info',
+            'steam': 'exec /usr/bin/steam',
+            'glx': 'glxinfo -B; exec glxgears -info',
+            'vulkan': 'vulkaninfo --summary; exec vkcube --wsi wayland --width 640 --height 480 --c 1800',
+            'gles': 'eglinfo -B -p wayland; exec es2gears_wayland -info',
         }
         program = programs[args.client]
+        if args.require_shm:
+            program = 'case ",${MESA_VK_WSI_DEBUG-}," in *,noshm,*) exit 98;; esac; ' + program
         if args.trace:
             program = 'exec strace -f -tt -s 160 -o /tmp/md-steamos.trace /bin/sh -ec ' + shlex.quote(program)
         recipe = subprocess.check_output(['java', '-cp', str(args.build / 'recipe-classes'),
             'io.github.mekhontsev.magicdesk.GraphicalRecipe', 'routed', protocol, args.store,
-            '/home/steamlab', program, 'steamlab'], text=True, timeout=20)
+            args.home, program, args.user], text=True, timeout=20)
         launch = ('{ env PATH=' + shlex.quote(suite.base + ':/system/bin')
                   + ' /system/bin/sh -c ' + shlex.quote(recipe)
                   + '; r=$?; printf "%s\\n" "$r" > ' + shlex.quote(receipt)
@@ -130,10 +143,16 @@ def main():
         suite.report['mappedAndCaptured'] = True
         if args.client != 'steam':
             output = suite.command(['cat', log], quiet=True)
-            expected = {'vulkan': 'DRIVER_ID_MESA_TURNIP',
-                        'glx': 'GL_RENDERER   = Adreno',
-                        'gles': 'OpenGL ES profile renderer: Adreno'}[args.client]
-            assert expected in output and 'supervisor failure' not in output, 'No confirmed hardware renderer'
+            if args.client == 'vulkan':
+                renderer = ('DRIVER_ID_MESA_TURNIP' if args.renderer == 'turnip'
+                            else 'DRIVER_ID_MESA_LLVMPIPE') in output
+            else:
+                renderers = re.findall(r'(?im)^.*(?:GL_RENDERER|OpenGL.*renderer)\s*[:=]\s*(.+)$', output)
+                renderer = any((re.search(r'(?i)\b(?:Adreno|Turnip)\b', value)
+                                and not re.search(r'(?i)llvmpipe|softpipe', value))
+                               if args.renderer == 'turnip' else
+                               re.search(r'(?i)zink.*llvmpipe', value) for value in renderers)
+            assert renderer and 'supervisor failure' not in output, 'No confirmed ' + args.renderer + ' renderer'
         after = client.call('get_state')
         assert before['homeLease'] == after['homeLease'] and before['workspaces'] == after['workspaces']
         suite.report['passed'] = args.client != 'steam' or bool(args.window_title)
@@ -153,7 +172,7 @@ if test -f "$1"; then
     fi
     timeout 200 "$3" "$4" || test -s "$4"
 fi
-''', 'fixture', pidfile, suite.runner, suite.base + '/md-await-exit', receipt], timeout=210)
+''', 'fixture', pidfile, owned_executable, suite.base + '/md-await-exit', receipt], timeout=210)
             local_log = args.build / ('steamos-' + args.client + '-' + suite.report['id'] + '.log')
             suite.transport.download(client, log, local_log, overwrite=True)
             suite.report['logFile'] = str(local_log)

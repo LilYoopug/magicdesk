@@ -3,8 +3,9 @@
 
 Use a disposable prepared Arch Linux ARM instance with initialized package keys
 and DNS. Synchronization updates its package databases, not installed packages.
-An optional package check installs/runs tree, removing it only when this
-fixture installed it. Failure remains failure; the report retains full output.
+An optional package check installs, reinstalls and verifies tree, removing it
+only when this fixture installed it. Failure remains failure; the report
+retains full output.
 """
 import argparse
 import hashlib
@@ -81,11 +82,18 @@ def main():
                 suite.command(base + ['/usr/bin/pacman', '-S', '--needed', '--noconfirm', 'tree'], timeout=200)
                 assert 'tree v' in suite.command(base + ['/usr/bin/tree', '--version'])
                 suite.report['cases'].append({'name': 'stock-pacman-install-run', 'passed': True})
+                suite.command(base + ['/usr/bin/pacman', '-S', '--noconfirm', 'tree'], timeout=200)
+                suite.command(base + ['/usr/bin/pacman', '-Qkk', 'tree'])
+                assert 'tree v' in suite.command(base + ['/usr/bin/tree', '--version'])
+                suite.report['cases'].append({'name': 'stock-pacman-reinstall-verify', 'passed': True})
             finally:
                 if not installed:
                     present = observe(suite, base + ['/usr/bin/pacman', '-Q', 'tree'])['exitCode'] == 0
                     if present:
                         suite.command(base + ['/usr/bin/pacman', '-R', '--noconfirm', 'tree'])
+                        suite.command(base + ['/usr/bin/pacman', '-Q', 'tree'], expected=1)
+                        suite.command(base + ['/bin/sh', '-ec', 'test ! -e /usr/bin/tree'])
+                        suite.report['cases'].append({'name': 'stock-pacman-remove', 'passed': True})
         suite.report['passed'] = all(case['passed'] for case in suite.report['cases'])
     except Exception as error:
         suite.report['failure'] = repr(error)

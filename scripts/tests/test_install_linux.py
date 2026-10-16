@@ -69,6 +69,9 @@ with open(os.environ["TEST_LOG"], "a") as log:
     log.write(json.dumps(args) + "\n")
 stage = args[0]
 if Path(sys.argv[0]).name == "magicdesk":
+    if os.environ.get("TEST_FAIL") == "download":
+        print("test download/checksum failure", file=sys.stderr)
+        sys.exit(23)
     Path(args[2]).write_bytes(b"test download")
     sys.exit(0)
 if stage == "list":
@@ -105,7 +108,7 @@ if os.environ.get("TEST_FAIL") == stage:
         (self.directory / "id").chmod(0o755)
         shutil.copyfile(stub, self.directory / "magicdesk")
         (self.directory / "magicdesk").chmod(0o755)
-        self.environment = dict(os.environ, PATH=str(self.directory) + os.pathsep + os.environ["PATH"],
+        self.environment = dict(os.environ, HOME=str(self.directory), PATH=str(self.directory) + os.pathsep + os.environ["PATH"],
                                 TEST_LOG=str(self.log), TEST_PAYLOAD=str(self.payload), TMPDIR=str(self.directory),
                                 TEST_DNS_LOG=str(self.dns_log),
                                 TEST_VERSION_LOG=str(self.version_log), TEST_VERSION_CODE=str(MIN_VERSION_CODE))
@@ -152,7 +155,8 @@ if os.environ.get("TEST_FAIL") == stage:
         self.assertGreater(output.index('Cannot prepare guest DNS'), output.index('Additional settings ('))
         self.assertEqual(1, output.count('Distribution ['))
         self.assertEqual([['dns', '--check', value] for value in ('system', 'system', 'invalid', '192.0.2.1')], self.dns_checks())
-        self.assertEqual(['install', 'alpine:3.23', '--name', 'work', '--dns', '192.0.2.1'], self.calls()[1])
+        install = next(c for c in self.calls() if c[0] == 'install')
+        self.assertEqual(['--rootfs', '--name', 'work', '--dns', '192.0.2.1'], install[2:])
         self.assertIn('Linux is ready: work', output)
 
     @unittest.skipUnless(hasattr(os, 'openpty'), 'PTY required')
@@ -168,7 +172,8 @@ if os.environ.get("TEST_FAIL") == stage:
         output = self.questions(b'alpine\nwork\nxfce\nsoftware\nkeep\nkeep\nbasic\ny\n\nboth\n\ninvalid\nkeep\npreserve\ny\n')
         self.assertEqual([['dns', '--check', value] for value in ('invalid', 'preserve')], self.dns_checks())
         self.assertEqual(1, output.count('Distribution ['))
-        self.assertEqual(['install', 'alpine:3.23', '--name', 'work', '--dns', 'preserve'], self.calls()[1])
+        install = next(c for c in self.calls() if c[0] == 'install')
+        self.assertEqual(['--rootfs', '--name', 'work', '--dns', 'preserve'], install[2:])
 
     @unittest.skipUnless(hasattr(os, 'openpty'), 'PTY required')
     def test_package_failure_can_change_dns_without_reinstalling_or_repeating_answers(self):
@@ -243,6 +248,7 @@ if os.environ.get("TEST_FAIL") == stage:
         self.assertEqual(1, result.returncode, result.stderr)
         self.assertIn("magicdesk is unavailable", result.stderr)
         for option in ("--help", "--list", "--print-mesa-patch", "--print-kwin-patch",
+                       "--print-system-setup", "--print-graphics-setup",
                        "--print-recovery-reader", "--print-desktop-session", "--print-audio-session", "--print-steam-game"):
             with self.subTest(option=option):
                 result = self.run_script(option, TEST_UID="10001", TEST_VERSION_STATUS="3")
@@ -265,9 +271,11 @@ if os.environ.get("TEST_FAIL") == stage:
         result = self.run_script("--yes", "--name", "work")
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual(["--probe"], self.calls()[0])
-        self.assertEqual(["install", "debian:trixie-slim", "--name", "work", "--dns", "system"], self.calls()[1])
-        self.assertEqual(["dns", "work", "system", "--replace"], self.calls()[2])
+        install = next(c for c in self.calls() if c[0] == 'install')
+        self.assertEqual(['--rootfs', '--name', 'work', '--dns', 'system'], install[2:])
+        self.assertIn(["dns", "work", "system", "--replace"], self.calls())
         self.assertEqual(["exec", "work", "--user", "root", "--env", "DEBIAN_FRONTEND=noninteractive",
+                          "--env", "SYSTEMD_IN_CHROOT=1",
                           "--", "/bin/sh", "-s", "--", "apps", "both", "keep", "keep", "", "basic", "keep", ""], self.calls()[-1])
         self.assertIn("Linux is ready: work", result.stdout)
         payload = self.payload.read_text()
@@ -288,6 +296,15 @@ if os.environ.get("TEST_FAIL") == stage:
         for call in stages:
             self.assertIn('FORCE_IPV4=1', call)
         self.assertNotIn('FORCE_IPV4=1', next(call for call in self.calls() if call[0] == 'install'))
+
+    def test_print_system_setup_matches_installed_payload_without_host_operations(self):
+        printed = self.run_script('--print-system-setup')
+        self.assertEqual(0, printed.returncode, printed.stderr)
+        self.assertEqual([], self.calls())
+        self.assertEqual([], self.version_calls())
+        installed = self.run_script('--yes', '--gui', 'none')
+        self.assertEqual(0, installed.returncode, installed.stderr)
+        self.assertEqual(self.payload.read_text(), printed.stdout)
 
     def test_xfce_profile_and_root_executor(self):
         result = self.run_script("--yes", "--gui", "xfce", TEST_UID="0")
@@ -490,6 +507,38 @@ if os.environ.get("TEST_FAIL") == stage:
                     self.assertEqual('unix:path=/existing-bus' if inherited else 'unix:path=/test-bus',
                                      captured['env']['DBUS_SESSION_BUS_ADDRESS'])
 
+    def test_root_desktop_autostart_preserves_user_and_distribution_settings(self):
+        setup = self.run_script('--print-system-setup').stdout
+        start = setup.index('mkdir -p /etc/magicdesk/root-session/autostart')
+        end = setup.index('\n}\n', start)
+        profile = self.directory / 'root-session'
+        command = setup[start:end].replace('/etc/magicdesk/root-session', str(profile))
+        subprocess.run(['sh', '-eu', '-c', command], check=True, timeout=5)
+        entry = (profile / 'autostart/xfce-polkit.desktop').read_text()
+        self.assertIn('Hidden=true\n', entry)
+        launcher = self.run_script('--print-desktop-session').stdout
+        launcher = launcher.replace('/etc/profile.d/', str(self.directory / 'profiles') + '/')
+        capture = self.directory / 'magicdesk-audio-session'
+        capture.write_text('#!' + sys.executable + '\nimport json, os\nprint(json.dumps(dict(os.environ)))\n')
+        capture.chmod(0o755)
+        identity = self.directory / 'id'
+        for uid in (0, 1000):
+            identity.write_text('#!/bin/sh\nprintf "%s\\n" ' + str(uid) + '\n')
+            identity.chmod(0o755)
+            for directories in (None, '/custom/xdg:/etc/xdg'):
+                environment = dict(self.environment, DBUS_SESSION_BUS_ADDRESS='unix:path=/existing-bus',
+                                   XDG_CONFIG_HOME='/user/config')
+                environment.pop('XDG_CONFIG_DIRS', None)
+                if directories is not None:
+                    environment['XDG_CONFIG_DIRS'] = directories
+                result = subprocess.run(['sh', '-c', launcher, 'desktop', 'xfce'],
+                                        env=environment, capture_output=True, text=True, timeout=5)
+                self.assertEqual(0, result.returncode, result.stderr)
+                values = json.loads(result.stdout)
+                self.assertEqual('/user/config', values['XDG_CONFIG_HOME'])
+                expected = '/etc/magicdesk/root-session:' + (directories or '/etc/xdg') if uid == 0 else directories
+                self.assertEqual(expected, values.get('XDG_CONFIG_DIRS'))
+
     def test_desktop_profile_selects_renderer_and_private_kwin_without_driver_overrides(self):
         capture = self.directory / 'magicdesk-audio-session'
         capture.write_text('#!' + sys.executable + '\nimport json, os, sys\n'
@@ -532,6 +581,9 @@ if os.environ.get("TEST_FAIL") == stage:
                     elif mode == 'plasma-wayland' and gpu == 'software':
                         self.assertEqual('Q', env['KWIN_COMPOSE'])
                         self.assertEqual('software', env['QT_QUICK_BACKEND'])
+                    elif mode == 'plasma-x11' and gpu == 'software':
+                        self.assertNotIn('KWIN_COMPOSE', env)
+                        self.assertEqual('software', env['QT_QUICK_BACKEND'])
                     else:
                         self.assertNotIn('KWIN_COMPOSE', env)
                         self.assertNotIn('QT_QUICK_BACKEND', env)
@@ -544,6 +596,51 @@ if os.environ.get("TEST_FAIL") == stage:
                                   env=environment, capture_output=True, text=True, timeout=5)
         self.assertNotEqual(0, rejected.returncode)
         self.assertIn('Complete Plasma Turnip setup', rejected.stderr)
+
+    def test_software_profile_uses_verified_lavapipe_on_steamos_only(self):
+        payload = self.run_script('--print-graphics-setup', TEST_UID='10001').stdout
+        root = self.directory / 'graphics-root'
+        root.mkdir()
+        release = root / 'os-release'
+        payload = payload.replace('/etc/os-release', str(release))
+        for original, name in (('/etc/profile.d', 'profiles'), ('/var/lib/magicdesk', 'state'),
+                               ('/var/cache/magicdesk', 'cache')):
+            payload = payload.replace(original, str(root / name))
+        package_log = root / 'packages'
+        for name, body in {
+            'pacman': 'printf "%s\\n" "$*" >> ' + shlex.quote(str(package_log)),
+            'gpgconf': 'exit 0',
+            'vulkaninfo': 'test "${TEST_PROBE:-}" != fail; echo DRIVER_ID_MESA_LLVMPIPE',
+            'eglinfo': ('test "$GALLIUM_DRIVER" = zink; test "$LIBGL_ALWAYS_SOFTWARE" = 1; '
+                        'test "${MESA_VK_WSI_DEBUG-unset}" = unset; '
+                        'test "$VK_DRIVER_FILES" = /usr/share/vulkan/icd.d/lvp_icd.aarch64.json; '
+                        'test "${TEST_PROBE:-}" != wrong || { echo "OpenGL core profile renderer: hardware"; exit 0; }; '
+                        'echo "OpenGL core profile renderer: zink Vulkan 1.3(llvmpipe)"'),
+        }.items():
+            script = self.directory / name
+            script.write_text('#!/bin/sh\nset -eu\n' + body + '\n')
+            script.chmod(0o755)
+        profile = root / 'profiles/magicdesk-graphics.sh'
+        for distro, outcome in (('steamos', 'pass'), ('steamos', 'fail'),
+                                 ('steamos', 'wrong'), ('debian', 'pass')):
+            with self.subTest(distro=distro, outcome=outcome):
+                release.write_text('ID=' + distro + '\n')
+                profile.parent.mkdir(exist_ok=True)
+                profile.write_text('original profile\n')
+                package_log.write_text('')
+                result = subprocess.run(['sh', '-c', payload, 'graphics', 'software', '1', 'fixture'],
+                                        env=dict(self.environment, TEST_PROBE=outcome),
+                                        capture_output=True, text=True, timeout=5)
+                if outcome != 'pass':
+                    self.assertNotEqual(0, result.returncode, result.stdout)
+                    self.assertEqual('original profile\n', profile.read_text())
+                    self.assertIn('profile is unchanged', result.stderr)
+                else:
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    self.assertIn('GALLIUM_DRIVER=' + ('zink' if distro == 'steamos' else 'llvmpipe'),
+                                  profile.read_text())
+                self.assertEqual(distro == 'steamos', 'vulkan-swrast llvm17-libs' in package_log.read_text())
+                self.assertFalse(profile.with_name(profile.name + '.new').exists())
 
     def test_mixer_dependencies_refresh_for_existing_desktops(self):
         self.assertEqual(0, self.run_script('--yes').returncode)
@@ -753,6 +850,21 @@ if os.environ.get("TEST_FAIL") == stage:
         self.assertIn('retained for inspection', result.stderr)
         self.assertEqual(1, len([c for c in self.calls() if c[0] == 'install']))
         self.assertNotIn(['prune'], self.calls())
+
+    def test_setup_marks_only_package_processes_as_unbooted(self):
+        result = self.run_script('--yes', '--resume', '--name', 'steam',
+                                 '--gui', 'plasma', '--gpu', 'software', TEST_DISTRO='steamos')
+        self.assertEqual(0, result.returncode, result.stderr)
+        executions = [call for call in self.calls() if call[0] == 'exec']
+        self.assertTrue(any('-s' in call for call in executions))
+        self.assertTrue(any('-s' not in call for call in executions))
+        for call in executions:
+            self.assertEqual('-s' in call, 'SYSTEMD_IN_CHROOT=1' in call)
+        for export in ('--print-system-setup', '--print-graphics-setup',
+                       '--print-desktop-session', '--print-audio-session'):
+            self.assertNotIn('SYSTEMD_IN_CHROOT', self.run_script(export).stdout)
+        setup = self.run_script('--print-system-setup').stdout
+        self.assertIn('install -d -o root -g root -m 1777 /tmp/.X11-unix /tmp/.ICE-unix', setup)
 
     def test_steamos_resume_does_not_download_or_convert(self):
         result = self.run_script('--yes', '--resume', '--name', 'steam', TEST_DISTRO='steamos')
@@ -974,9 +1086,7 @@ if os.environ.get("TEST_FAIL") == stage:
         self.assertIn("Console: shroot login existing\n", hints)
 
     def test_distribution_profiles_share_setup_and_selected_image(self):
-        images = {"debian": "debian:trixie-slim", "ubuntu": "ubuntu:24.04", "alpine": "alpine:3.23",
-                  "fedora": "registry.fedoraproject.org/fedora:44", "arch": "menci/archlinuxarm:base",
-                  "opensuse": "opensuse/tumbleweed:latest", "openkylin": "openkylin/openkylin:latest",
+        images = {"fedora": "registry.fedoraproject.org/fedora:44", "openkylin": "openkylin/openkylin:latest",
                   "deepin": "linuxdeepin/deepin:crimson-arm64"}
         for distro, source in images.items():
             for gui in ("none", "apps", "xfce", "weston"):
@@ -989,21 +1099,26 @@ if os.environ.get("TEST_FAIL") == stage:
                     self.assertEqual(0, subprocess.run(["sh", "-n", str(self.payload)]).returncode)
 
     def test_official_rootfs_sources_are_verified_and_share_setup(self):
-        for distro in ('manjaro', 'void', 'armtix'):
-            with self.subTest(distro=distro):
+        profiles = ((distro, gui)
+                    for distro in ('debian', 'ubuntu', 'alpine', 'arch', 'opensuse', 'manjaro', 'void', 'armtix')
+                    for gui in ('none', 'apps', 'xfce', 'weston'))
+        for distro, gui in profiles:
+            with self.subTest(distro=distro, gui=gui):
                 self.log.unlink(missing_ok=True)
-                result = self.run_script('--yes', '--distro', distro, '--gui', 'weston',
+                result = self.run_script('--yes', '--distro', distro, '--gui', gui,
                                          '--downloads', str(self.directory / 'downloads'))
                 self.assertEqual(0, result.returncode, result.stderr)
                 calls = self.calls()
                 downloads = [c for c in calls if c[0] == 'download']
                 self.assertEqual(1, len(downloads))
+                self.assertTrue(downloads[0][1].startswith('https://'))
                 self.assertEqual('--sha256', downloads[0][-2])
                 self.assertRegex(downloads[0][-1], r'^[0-9a-f]{64}$')
                 install = next(c for c in calls if '--rootfs' in c)
                 self.assertEqual(['--rootfs', '--name', distro, '--dns', 'system'], install[2:])
-                self.assertIn('weston', next(c for c in calls if '-s' in c))
-                if distro == 'manjaro':
+                self.assertEqual(gui, next(c for c in calls if '-s' in c)[-8])
+                self.assertEqual(0, subprocess.run(['sh', '-n', str(self.payload)]).returncode)
+                if distro in ('debian', 'ubuntu', 'alpine', 'arch', 'manjaro'):
                     self.assertFalse(any(c[0] == 'exec' and c[1] == 'unpack' for c in calls))
                     self.assertEqual(downloads[0][2], install[1])
                 else:
@@ -1028,6 +1143,25 @@ if os.environ.get("TEST_FAIL") == stage:
         self.assertEqual(0, converted.returncode)
         self.assertEqual(original, gzip.decompress(target.read_bytes()))
 
+    def test_rootfs_download_failure_never_imports_or_starts_converter(self):
+        for distro in ('debian', 'arch', 'opensuse'):
+            with self.subTest(distro=distro):
+                self.log.unlink(missing_ok=True)
+                result = self.run_script('--yes', '--distro', distro, TEST_FAIL='download')
+                self.assertEqual(23, result.returncode)
+                self.assertIn('test download/checksum failure', result.stderr)
+                self.assertNotIn('Linux is ready', result.stdout)
+                self.assertEqual(['--probe', 'list', 'download'], [c[0] for c in self.calls()])
+
+    def test_rootfs_cache_with_wrong_digest_is_not_imported(self):
+        cache = self.directory / 'downloads'
+        cache.mkdir()
+        (cache / 'rootfs.tar.gz').write_bytes(b'corrupt cached rootfs')
+        result = self.run_script('--yes', TEST_FAIL='download')
+        self.assertEqual(23, result.returncode)
+        self.assertTrue(any(c[0] == 'download' for c in self.calls()))
+        self.assertFalse(any(c[0] == 'install' for c in self.calls()))
+
     def test_rootfs_failure_retains_conversion_but_does_not_import_partial_output(self):
         result = self.run_script('--yes', '--distro', 'void', '--downloads', str(self.directory / 'downloads'),
                                  TEST_FAIL='converter')
@@ -1036,13 +1170,18 @@ if os.environ.get("TEST_FAIL") == stage:
         self.assertFalse(any('--rootfs' in c or c[0] == 'remove' for c in self.calls()))
 
     def test_rootfs_recipes_accept_explicit_oci_override_without_converter(self):
-        result = self.run_script('--yes', '--distro', 'void', '--image', 'example/void:custom')
-        self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual(['install', 'example/void:custom', '--name', 'void', '--dns', 'system'], self.calls()[1])
-        self.assertFalse(any(c[0] == 'download' for c in self.calls()))
+        for distro in ('debian', 'ubuntu', 'alpine', 'arch', 'opensuse', 'manjaro', 'void', 'armtix'):
+            with self.subTest(distro=distro):
+                self.log.unlink(missing_ok=True)
+                source = 'example/' + distro + ':custom'
+                result = self.run_script('--yes', '--distro', distro, '--image', source)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual(['install', source, '--name', distro, '--dns', 'system'], self.calls()[1])
+                self.assertFalse(any(c[0] == 'download' for c in self.calls()))
 
     def test_resume_normalizes_distribution_ids_without_downloading(self):
-        for os_id, recipe in (('opensuse-tumbleweed', 'opensuse'), ('openkylin', 'openkylin'),
+        for os_id, recipe in (('ubuntu', 'ubuntu'), ('alpine', 'alpine'), ('archarm', 'arch'),
+                              ('opensuse-tumbleweed', 'opensuse'), ('openkylin', 'openkylin'),
                               ('deepin', 'deepin'), ('manjaro-arm', 'manjaro'), ('void', 'void'), ('artix', 'armtix')):
             with self.subTest(os_id=os_id):
                 self.log.unlink(missing_ok=True)
@@ -1096,15 +1235,17 @@ if os.environ.get("TEST_FAIL") == stage:
     def test_list_is_read_only_and_names_all_sources(self):
         result = self.run_script("--list", TEST_UID="10001")
         self.assertEqual(0, result.returncode)
-        self.assertIn("menci/archlinuxarm:base (community)", result.stdout)
+        self.assertIn("Arch Linux ARM official rootfs", result.stdout)
+        self.assertNotIn("menci/archlinuxarm", result.stdout)
         self.assertIn("registry.fedoraproject.org/fedora:44", result.stdout)
         self.assertEqual([], self.calls())
 
     def test_dns_is_explicit_and_resume_does_not_replace_it(self):
         result = self.run_script("--yes", "--dns", "192.0.2.1,192.0.2.2")
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual(["--dns", "192.0.2.1,192.0.2.2"], self.calls()[1][-2:])
-        self.assertEqual(["dns", "debian", "192.0.2.1,192.0.2.2", "--replace"], self.calls()[2])
+        install = next(c for c in self.calls() if c[0] == 'install')
+        self.assertEqual(["--dns", "192.0.2.1,192.0.2.2"], install[-2:])
+        self.assertIn(["dns", "debian", "192.0.2.1,192.0.2.2", "--replace"], self.calls())
         self.log.unlink()
         result = self.run_script("--yes", "--name", "work", "--resume", "--dns", "192.0.2.1")
         self.assertNotEqual(0, result.returncode)
@@ -1114,7 +1255,7 @@ if os.environ.get("TEST_FAIL") == stage:
         self.assertNotIn("dns", [a[0] for a in self.calls()])
 
     def test_failure_is_not_reported_as_success_or_followed_by_more_work(self):
-        for stage, count in [("--probe", 1), ("install", 2), ("dns", 3), ("validate", 4), ("setup", 5)]:
+        for stage, count in [("--probe", 1), ("download", 3), ("install", 4), ("dns", 5), ("validate", 6), ("setup", 7)]:
             with self.subTest(stage=stage):
                 self.log.unlink(missing_ok=True)
                 self.payload.unlink(missing_ok=True)
@@ -1217,7 +1358,8 @@ if os.environ.get("TEST_FAIL") == stage:
                 probe.write_text("#!/bin/sh\n" + body + "\n")
                 probe.chmod(0o755)
                 profile.write_text("previous profile\n")
-                environment = dict(self.environment, gpu="turnip", prefix="/opt/magicdesk/mesa/test",
+                environment = dict(self.environment, gpu="turnip", ID="debian", automatic="no",
+                                   prefix="/opt/magicdesk/mesa/test",
                                    candidate=str(profile) + ".new", profile=str(profile), work=str(self.directory))
                 result = subprocess.run(["sh", "-eu", "-c", recipe], env=environment,
                                         capture_output=True, text=True, timeout=5)
@@ -1238,17 +1380,20 @@ if os.environ.get("TEST_FAIL") == stage:
     def test_software_profile_removes_only_previous_mesa_library_path(self):
         recipe = self.profile_recipe()
         profile = self.directory / "software.sh"
-        environment = dict(self.environment, gpu="software", candidate=str(profile) + ".new", profile=str(profile))
+        environment = dict(self.environment, gpu="software", ID="debian",
+                           candidate=str(profile) + ".new", profile=str(profile))
         subprocess.run(["sh", "-eu", "-c", recipe], env=environment, check=True,
                        capture_output=True, timeout=5)
         environment.update(MAGICDESK_MESA_PREFIX="/opt/old", LD_LIBRARY_PATH="/custom:/opt/old/lib:/other",
-                           VK_DRIVER_FILES="/old/icd.json", MESA_LOADER_DRIVER_OVERRIDE="zink")
-        result = subprocess.run(["sh", "-eu", "-c", '. "$1"; . "$1"; printf "%s|%s|%s|%s|%s" '
+                           VK_DRIVER_FILES="/old/icd.json", MESA_LOADER_DRIVER_OVERRIDE="zink",
+                           MESA_VK_WSI_DEBUG="noshm")
+        result = subprocess.run(["sh", "-eu", "-c", '. "$1"; . "$1"; printf "%s|%s|%s|%s|%s|%s" '
                                  '"$LD_LIBRARY_PATH" "$LIBGL_ALWAYS_SOFTWARE" "$GALLIUM_DRIVER" '
-                                 '"${VK_DRIVER_FILES-unset}" "${MAGICDESK_MESA_PREFIX-unset}"', "sh", str(profile)],
+                                 '"${VK_DRIVER_FILES-unset}" "${MAGICDESK_MESA_PREFIX-unset}" '
+                                 '"${MESA_VK_WSI_DEBUG-unset}"', "sh", str(profile)],
                                 env=environment, capture_output=True, text=True, timeout=5)
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual("/custom:/other|1|llvmpipe|unset|unset", result.stdout)
+        self.assertEqual("/custom:/other|1|llvmpipe|unset|unset|unset", result.stdout)
 
     def test_fex_graphics_defaults_preserve_overrides_and_follow_profile(self):
         recipe = self.profile_recipe()
@@ -1261,7 +1406,8 @@ if os.environ.get("TEST_FAIL") == stage:
         profiles = []
         for gpu in ('turnip', 'software'):
             profile = self.directory / (gpu + '.sh')
-            env = dict(self.environment, gpu=gpu, prefix='/opt/magicdesk/mesa/test',
+            env = dict(self.environment, gpu=gpu, ID='debian', automatic='no',
+                       prefix='/opt/magicdesk/mesa/test',
                        candidate=str(profile) + '.new', profile=str(profile), work=str(self.directory))
             subprocess.run(['sh', '-eu', '-c', recipe], env=env, capture_output=True,
                            check=True, timeout=5)
@@ -1288,14 +1434,16 @@ if os.environ.get("TEST_FAIL") == stage:
     @unittest.skipUnless(hasattr(os, "openpty"), "PTY required")
     def test_questions_use_saved_script_stdin(self):
         self.questions(b"debian\ninteractive\nxfce\nkeep\nkeep\nkeep\nbasic\nn\ny\n")
-        self.assertEqual(["install", "debian:trixie-slim", "--name", "interactive", "--dns", "system"], self.calls()[1])
+        install = next(c for c in self.calls() if c[0] == 'install')
+        self.assertEqual(['--rootfs', '--name', 'interactive', '--dns', 'system'], install[2:])
         self.assertEqual("xfce", self.calls()[-1][-8])
 
     @unittest.skipUnless(hasattr(os, "openpty"), "PTY required")
     def test_advanced_questions_select_real_options_without_command_flags(self):
         output = self.questions(b"ubuntu\ninteractive\napps\nsoftware\nru_RU.UTF-8\nAsia/Krasnoyarsk\ncjk\ny\n"
                                 b"developer\nwayland\ngit gdb\n192.0.2.1\nclean\ny\n")
-        self.assertEqual(["install", "ubuntu:24.04", "--name", "interactive", "--dns", "192.0.2.1"], self.calls()[1])
+        install = next(c for c in self.calls() if c[0] == 'install')
+        self.assertEqual(['--rootfs', '--name', 'interactive', '--dns', '192.0.2.1'], install[2:])
         self.assertEqual(["apps", "wayland", "ru_RU.UTF-8", "Asia/Krasnoyarsk", "developer", "cjk", "clean", "git gdb"],
                          self.calls()[-3][-8:])
         self.assertIn("Guest account=developer | extra packages=git gdb", output)
