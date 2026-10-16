@@ -16,5 +16,8 @@ void md_ipc_namespace_release(struct md_ipc_namespace *);
 int md_ipc_namespace_bind(struct md_ipc_namespace *, const char *store);
 int md_ipc_namespace_semaphores(struct md_ipc_namespace *, struct md_ipc **);
 int md_ipc_namespace_memory(struct md_ipc_namespace *, struct md_shm **);
+/* Independent, caller-owned connection for a retained namespace. It never
+ * accesses the supervisor's lazy connection or changes namespace services. */
+int md_ipc_namespace_open_memory(const struct md_ipc_namespace *,struct md_shm **);
 struct md_ipc *md_ipc_namespace_active(const struct md_ipc_namespace *);
 #endif

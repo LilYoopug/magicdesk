@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <sqlite3.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,7 +15,7 @@
 #include <time.h>
 #include <unistd.h>
 
-struct md_shm { struct md_ipc_database database; uint64_t namespace_id; unsigned references;
+struct md_shm { struct md_ipc_database database; uint64_t namespace_id; atomic_uint references;
     struct md_user_namespace *user_namespace; };
 struct md_shm_mapping {
     struct md_shm_mapping *next;
@@ -53,6 +54,12 @@ static int load(struct md_shm *s, int id, struct shmid64_ds *out) {
         else { memcpy(out,sqlite3_column_blob(q,0),sizeof(*out)); out->shm_nattch = sqlite3_column_int64(q,1); }
     }
     sqlite3_finalize(q); return r;
+}
+static int load_live(struct md_shm *s,int id,struct shmid64_ds *out) {
+    int error=load(s,id,out);
+    /* Removal after a dead external lease is already effective, even if the
+     * next maintenance transaction has not collected its backing file yet. */
+    return !error && (out->shm_perm.mode&01000) && !out->shm_nattch ? -EINVAL : error;
 }
 static int save(struct md_shm *s, int id, const struct shmid64_ds *info) {
     sqlite3_stmt *q = NULL;
@@ -139,7 +146,7 @@ int md_shm_open(const char *store, uint64_t namespace_id, struct md_user_namespa
     *out = NULL;
     struct md_shm *s = calloc(1,sizeof(*s));
     if (!s) return -ENOMEM;
-    s->references=1; s->namespace_id=namespace_id;
+    atomic_init(&s->references,1); s->namespace_id=namespace_id;
     s->user_namespace=md_user_namespace_retain(owner);
     int r=md_ipc_database_open(&s->database,store,"shm","segments.db");
     if (!r) r = exec_sql(s,
@@ -166,12 +173,17 @@ int md_shm_open(const char *store, uint64_t namespace_id, struct md_user_namespa
     if (!r) s->database.admitted=1;
     if (!r) r = collect_bodies(s);
     if (!r) r = collect_orphans(s);
+    if (!r) r = md_ipc_database_sweep_leases(&s->database,"SELECT 1 FROM owners WHERE owner=?1");
     md_ipc_database_unlock(&s->database);
     if (r) md_shm_close(s); else *out = s;
     return r;
 }
+struct md_shm *md_shm_retain(struct md_shm *s) {
+    if (s) atomic_fetch_add_explicit(&s->references,1,memory_order_relaxed);
+    return s;
+}
 void md_shm_close(struct md_shm *s) {
-    if (!s || --s->references) return;
+    if (!s || atomic_fetch_sub_explicit(&s->references,1,memory_order_acq_rel)!=1) return;
     if (s->database.admitted && !begin(s)) finish(s,remove_owner(s,s->database.owner));
     md_ipc_database_close(&s->database);
     md_user_namespace_release(s->user_namespace);
@@ -207,7 +219,7 @@ struct md_shm_space *md_shm_space_fork(struct md_shm_space *old, int shared) {
         while (*link) {
             struct md_shm_mapping *p=*link;
             if (p->authority!=s) { link=&p->next; continue; }
-            *link=p->next; p->next=m->maps; m->maps=p; ++s->references;
+            *link=p->next; p->next=m->maps; m->maps=p; md_shm_retain(s);
         }
     }
     while (pending) { struct md_shm_mapping *next=pending->next; free(pending); pending=next; }
@@ -221,7 +233,7 @@ int md_shm_space_release(struct md_shm_space *m) {
     int r = 0;
     while (m->maps) {
         struct md_shm *s=m->maps->authority;
-        ++s->references;
+        md_shm_retain(s);
         int error=begin(s);
         if (!error) {
             sqlite3_stmt *q=NULL;
@@ -287,7 +299,7 @@ int md_shm_unmapped(struct md_shm_space *m, uintptr_t address, size_t size, pid_
         }
         r=finish(s,r);
         if (r) { free(right); break; }
-        if (right) { p->size=address-p->address; p->next=right; ++s->references; link=&right->next; }
+        if (right) { p->size=address-p->address; p->next=right; md_shm_retain(s); link=&right->next; }
         else if (released) { *link=p->next; free(p); md_shm_close(s); }
         else if (p->address<address) { p->size=address-p->address; link=&p->next; }
         else { p->address=end; p->size=stop-end; link=&p->next; }
@@ -296,6 +308,43 @@ int md_shm_unmapped(struct md_shm_space *m, uintptr_t address, size_t size, pid_
 }
 static int permission(const struct md_shm *s, const struct md_identity *id, const struct shmid64_ds *st, unsigned mode) {
     return md_ipc_perm_access(s->user_namespace,id,&st->shm_perm,mode);
+}
+int md_shm_export(struct md_shm *s,const struct md_identity *id,pid_t pid,int segment,
+        int readonly,int descriptors[2],uint64_t *size) {
+    descriptors[0]=descriptors[1]=-1; *size=0;
+    if (readonly!=0 && readonly!=1) return -EINVAL;
+    int error=begin(s),data=-1,lease=-1;
+    int64_t owner=0;
+    if (error) return error;
+    struct shmid64_ds st={0};
+    error=load_live(s,segment,&st);
+    if (!error) error=permission(s,id,&st,readonly ? 4 : 6);
+    if (!error) {
+        char name[64]; body(name,sizeof(name),segment);
+        data=openat(s->database.directory,name,(readonly ? O_RDONLY : O_RDWR)|O_CLOEXEC|O_NOFOLLOW);
+        if (data<0) error=-errno;
+    }
+    if (!error) {
+        lease=md_ipc_database_lease(&s->database,&owner);
+        if (lease<0) error=lease;
+    }
+    sqlite3_stmt *q=NULL;
+    if (!error) error=query(s,"INSERT INTO owners VALUES(?1,?2)",&q);
+    if (!error) {
+        sqlite3_bind_int64(q,1,owner); sqlite3_bind_int64(q,2,s->namespace_id);
+        error=sql(sqlite3_step(q));
+    }
+    sqlite3_finalize(q);
+    if (!error) error=refs(s,owner,0,segment,1);
+    if (!error) { st.shm_atime=time(NULL); st.shm_lpid=pid; error=save(s,segment,&st); }
+    error=finish(s,error);
+    if (error) {
+        if (data>=0) close(data);
+        md_ipc_database_discard_lease(&s->database,owner,lease);
+    } else {
+        descriptors[0]=data; descriptors[1]=lease; *size=st.shm_segsz;
+    }
+    return error;
 }
 long md_shm_call(struct md_shm *s, struct md_shm_space *m, struct md_shm_mapping **pending,
         const struct md_identity *id, pid_t pid, unsigned op, const unsigned long a[4], struct shmid64_ds *info) {
@@ -360,7 +409,7 @@ long md_shm_call(struct md_shm *s, struct md_shm_space *m, struct md_shm_mapping
         }
         result = segment;
     } else {
-        r = load(s,segment,&st);
+        r = load_live(s,segment,&st);
         if (!r && op == MD_SHM_OPEN) {
             if (*pending) r = -EBUSY;
             if (!r) r = permission(s,id,&st,(a[1]&SHM_RDONLY)?4:6);
@@ -394,7 +443,7 @@ long md_shm_call(struct md_shm *s, struct md_shm_space *m, struct md_shm_mapping
     r = finish(s,r);
     if (op == MD_SHM_OPEN && *pending) {
         if (r) { free(*pending); *pending=NULL; }
-        else ++s->references;
+        else md_shm_retain(s);
     }
     if (r && fd >= 0) close(fd);
     return r ? r : result;

@@ -119,7 +119,7 @@ void md_boot(uintptr_t *kernel_stack) {
         root_arg += 2;
         if (cwd[0] != '/') md_die("guest cwd must be absolute", -EINVAL);
     }
-    while (root_arg < argc && (md_equal(argv[root_arg], "--socket-path") || md_equal(argv[root_arg], "--socket-abstract"))) {
+    while (root_arg < argc && md_socket_route_option_valid(argv[root_arg])) {
         if (root_arg + 2 >= argc) md_die("missing socket route", -EINVAL);
         long result = md_socket_route_add(&connections, argv[root_arg], argv[root_arg + 1], argv[root_arg + 2]);
         if (result < 0) md_die("invalid socket route", result);

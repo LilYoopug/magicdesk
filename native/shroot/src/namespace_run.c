@@ -45,7 +45,7 @@ void md_boot(uintptr_t *stack) {
                 .target=argv[program+2], .readonly=md_equal(argv[program], "--bind-ro")};
             program += 3; continue;
         }
-        if (md_equal(argv[program], "--socket-path") || md_equal(argv[program], "--socket-abstract")) {
+        if (md_socket_route_option_valid(argv[program])) {
             if (program + 2 >= argc) md_die("missing socket route", -EINVAL);
             long r = md_socket_route_add(&md_connections, argv[program], argv[program + 1], argv[program + 2]);
             if (r < 0) md_die("invalid socket route", r);
@@ -147,7 +147,7 @@ void md_boot(uintptr_t *stack) {
         args[n++] = "--cwd"; args[n++] = (char *)cwd;
         for (unsigned i = 0; i < md_connections.count; i++) {
             struct md_socket_route *route = &md_connections.entries[i];
-            args[n++] = route->abstract ? "--socket-abstract" : "--socket-path";
+            args[n++] = (char *)md_socket_route_option(route);
             args[n++] = route->source; args[n++] = route->destination;
         }
         args[n++] = "--namespace"; args[n++] = endpoint;

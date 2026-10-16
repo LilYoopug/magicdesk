@@ -140,7 +140,7 @@ int md_image_launch(enum md_image_command kind, int argc, char **argv) {
     int position = 1, commands = 0;
     while (position < argc && strcmp(argv[position], "--")) {
         if (!strcmp(argv[position], "--magicdesk") && !commands) { commands = 1; position++; continue; }
-        if (!strcmp(argv[position], "--socket-path") || !strcmp(argv[position], "--socket-abstract")) {
+        if (md_socket_route_option_valid(argv[position])) {
             if (position + 2 >= argc) return -EINVAL;
             int r = md_socket_route_add(&routes, argv[position], argv[position+1], argv[position+2]);
             if (r) return r;
@@ -248,7 +248,7 @@ int md_image_launch(enum md_image_command kind, int argc, char **argv) {
         if (network) { launch[n++]="--network"; launch[n++]=(char *)network; }
         if (gamepad_endpoint) { launch[n++]="--gamepad-endpoint"; launch[n++]=(char *)gamepad_endpoint; }
         for (unsigned i = 0; i < routes.count; ++i) {
-            launch[n++] = routes.entries[i].abstract ? "--socket-abstract" : "--socket-path";
+            launch[n++] = (char *)md_socket_route_option(&routes.entries[i]);
             launch[n++] = routes.entries[i].source; launch[n++] = routes.entries[i].destination;
         }
         if (guest_user) {

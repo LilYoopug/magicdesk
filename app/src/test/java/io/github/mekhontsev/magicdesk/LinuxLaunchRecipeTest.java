@@ -226,8 +226,8 @@ public final class LinuxLaunchRecipeTest {
             if (!app.terminal) {
                 assertFalse(app.graphics.fileEnvironment().isEmpty());
                 assertEquals(GraphicalConnectionMode.ROUTED, app.graphics.connectionMode());
-                assertTrue(app.exec.contains("--socket-path"));
-                assertEquals(protocol == GraphicalProtocol.X11, app.exec.contains("--socket-abstract"));
+                assertTrue(app.exec.contains(protocol == GraphicalProtocol.X11 ? "--socket-resource-path" : "--socket-path"));
+                assertEquals(protocol == GraphicalProtocol.X11, app.exec.contains("--socket-resource-abstract"));
             }
         }
         for (String user : List.of("root", "1000:100", "nobody:nogroup")) {

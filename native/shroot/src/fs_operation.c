@@ -28,7 +28,7 @@ const char *md_fs_operation_name(unsigned operation) {
         NAME(NATIVE_MOUNT), NAME(MKNOD), NAME(CHROOT), NAME(UMASK), NAME(STATFS), NAME(WATCH_PATH),
         NAME(TASK_PATH), NAME(XATTR), NAME(FXATTR), NAME(IPC_PEER), NAME(MOUNT), NAME(FSOPEN),
         NAME(FSCONFIG), NAME(FSMOUNT), NAME(BPF), NAME(FDINFO), NAME(LANDLOCK), NAME(OPEN_TREE),
-        NAME(IOCTL), NAME(SYNC)
+        NAME(IOCTL), NAME(SYNC), NAME(SHM_CHANNEL)
 #undef NAME
     };
     return md_fs_operation_valid(operation) ? names[operation] : NULL;
@@ -162,6 +162,8 @@ int md_fs_request_validate(const struct md_fs_request *q) {
             || (q->mode==MD_FS_XATTR_REMOVE && q->capacity) ? -EINVAL : 0;
     }
     if (q->operation==MD_FS_UMASK)
+        return descriptors || *a || *b || q->flags || q->mode || q->capacity || q->offset ? -EINVAL : 0;
+    if (q->operation==MD_FS_SHM_CHANNEL)
         return descriptors || *a || *b || q->flags || q->mode || q->capacity || q->offset ? -EINVAL : 0;
     if (q->operation==MD_FS_STATFS)
         return (descriptors&2) || (!*a && descriptors!=1) || *b || q->flags || q->mode || q->capacity || q->offset ? -EINVAL : 0;

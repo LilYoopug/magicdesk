@@ -9,6 +9,8 @@
 #include "descriptor_calls.h"
 #include "proc_paths.h"
 #include "raw.h"
+#include "fs_wire.h"
+#include "resource_protocol.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -24,6 +26,27 @@ static long domain(int fd) {
 }
 static long invoke(long nr, const unsigned long *a) {
     return md_raw(nr, a[0], a[1], a[2], a[3], a[4], a[5]);
+}
+static long resource_connect(const struct md_fs *fs,int fd,const struct sockaddr_un *address,unsigned length) {
+    if (!fs->endpoint[0]) return -ENOTSUP;
+    int type=0; unsigned size=sizeof(type);
+    long r=RAW5(getsockopt,fd,SOL_SOCKET,SO_TYPE,&type,&size);
+    if (r<0) return r;
+    if (type!=SOCK_STREAM) return -EPROTOTYPE;
+    struct md_fs_request q={.operation=MD_FS_SHM_CHANNEL,.directory={-1,-1}};
+    struct md_fs_response response;
+    r=md_fs_call(fs->endpoint,5000,&q,&response);
+    if (!r) r=response.result.error;
+    if (r<0) return r;
+    int channel=response.result.fd;
+    r=RAW3(connect,fd,address,length);
+    if (!r) {
+        char hello=LORIE_RESOURCE_HELLO;
+        do { r=md_fs_send_fds(fd,&hello,1,&channel,1); } while (r==-EINTR);
+        if (r==1) r=0;
+        else { RAW2(shutdown,fd,SHUT_RDWR); if (r>=0) r=-EIO; }
+    }
+    RAW1(close,channel); return r;
 }
 long md_socket_pair(const struct md_fs *fs, const unsigned long *a, int offline) {
     if (offline && (int)a[0]!=AF_UNIX) return -EAFNOSUPPORT;
@@ -154,11 +177,12 @@ long md_socket_address_call(const struct md_fs *fs, const char *exe, long nr, co
     struct sockaddr_un address;
     r = md_read_memory(&address, pointer, length);
     if (r < 0) return r;
-    if (nr == SYS_connect && md_socket_route_apply(fs->connections, &address, &length)) {
+    int route=nr==SYS_connect ? md_socket_route_apply(fs->connections,&address,&length) : 0;
+    if (route) {
         r = domain((int)a[0]);
         if (r < 0) return r;
         if (r != AF_UNIX) return invoke(nr, a);
-        return RAW3(connect, a[0], &address, length);
+        return route==2 ? resource_connect(fs,(int)a[0],&address,length) : RAW3(connect,a[0],&address,length);
     }
     /* Abstract addresses are binary names, including every supplied zero byte.
      * Family-only bind is the kernel's autobind request. Neither is a pathname. */

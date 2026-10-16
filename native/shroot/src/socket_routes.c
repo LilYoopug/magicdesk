@@ -4,10 +4,19 @@
 #include <stddef.h>
 #include <sys/socket.h>
 
+int md_socket_route_option_valid(const char *option) {
+    return md_equal(option,"--socket-path") || md_equal(option,"--socket-abstract")
+        || md_equal(option,"--socket-resource-path") || md_equal(option,"--socket-resource-abstract");
+}
+const char *md_socket_route_option(const struct md_socket_route *route) {
+    return route->resources ? (route->abstract ? "--socket-resource-abstract" : "--socket-resource-path")
+        : (route->abstract ? "--socket-abstract" : "--socket-path");
+}
+
 int md_socket_route_add(struct md_socket_routes *routes, const char *option,
                         const char *source, const char *destination) {
-    int abstract = md_equal(option, "--socket-abstract");
-    if (!abstract && !md_equal(option, "--socket-path")) return -EINVAL;
+    int abstract = md_equal(option, "--socket-abstract") || md_equal(option,"--socket-resource-abstract");
+    if (!md_socket_route_option_valid(option)) return -EINVAL;
     size_t n = md_length(source), d = md_length(destination);
     if (!n || n >= 108 || !d || d >= 108 || (!abstract && source[0] != '/')) return -EINVAL;
     for (unsigned i = 0; i < routes->count; i++)
@@ -17,6 +26,7 @@ int md_socket_route_add(struct md_socket_routes *routes, const char *option,
     md_copy(route->source, sizeof(route->source), source);
     md_copy(route->destination, sizeof(route->destination), destination);
     route->abstract = abstract;
+    route->resources=md_equal(option,"--socket-resource-path") || md_equal(option,"--socket-resource-abstract");
     return 0;
 }
 
@@ -42,7 +52,7 @@ int md_socket_route_apply(const struct md_socket_routes *routes, struct sockaddr
         memset(address->sun_path, 0, sizeof(address->sun_path));
         memcpy(address->sun_path + 1, route->destination, n);
         *length = (unsigned)(prefix + 1 + n);
-        return 1;
+        return route->resources ? 2 : 1;
     }
     return 0;
 }

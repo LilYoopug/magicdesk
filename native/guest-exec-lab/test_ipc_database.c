@@ -10,10 +10,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/random.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <sys/file.h>
+#include <signal.h>
+#include <pthread.h>
 #include <unistd.h>
 
 static int fixed_owner;
 void test_storage_database(void);
+void test_shm_bridge(const char *);
 ssize_t __real_getrandom(void *,size_t,unsigned);
 ssize_t __wrap_getrandom(void *data,size_t size,unsigned flags) {
     if (!fixed_owner || size!=sizeof(uint64_t)) return __real_getrandom(data,size,flags);
@@ -31,9 +37,97 @@ static unsigned descriptors(void) {
     while (readdir(d)) ++count;
     closedir(d); return count;
 }
+static void *retain_shm(void *authority) {
+    struct md_shm *s=authority;
+    for (unsigned i=0;i<100000;++i) md_shm_close(md_shm_retain(s));
+    md_shm_close(s);
+    return NULL;
+}
+static void shared_authority_lifetime(const char *root) {
+    unsigned before=descriptors();
+    struct md_shm *s=NULL; assert(!md_shm_open(root,0,NULL,&s));
+    pthread_t threads[4];
+    for (unsigned i=0;i<4;++i)
+        assert(!pthread_create(&threads[i],NULL,retain_shm,md_shm_retain(s)));
+    md_shm_close(s);
+    for (unsigned i=0;i<4;++i) assert(!pthread_join(threads[i],NULL));
+    assert(descriptors()==before);
+    puts("PASS SHM authority lifetime: concurrent namespace/mapping pins and once-only final close");
+}
+static void exported_shm(const char *root) {
+    unsigned before=descriptors();
+    struct md_identity user=md_identity_new(1000,1000),other=md_identity_new(1001,1001);
+    struct md_shm *s=NULL,*foreign=NULL;
+    assert(!md_shm_open(root,42,NULL,&s));
+    assert(!md_shm_open(root,43,NULL,&foreign));
+    struct md_shm_space *space=md_shm_space_new(); assert(space);
+    struct md_shm_mapping *pending=NULL;
+    unsigned long a[4]={IPC_PRIVATE,4096,IPC_CREAT|0600,0};
+    int id=(int)md_shm_call(s,space,&pending,&user,getpid(),MD_SHM_GET,a,NULL); assert(id>0);
+    int fds[2]; uint64_t size=0;
+    assert(md_shm_export(foreign,&user,getpid(),id,0,fds,&size)==-EINVAL);
+    assert(fds[0]==-1 && fds[1]==-1 && !size);
+    assert(md_shm_export(s,&other,getpid(),id,0,fds,&size)==-EACCES);
+    assert(md_shm_export(s,&user,getpid(),id,2,fds,&size)==-EINVAL);
+    assert(!md_shm_export(s,&user,getpid(),id,1,fds,&size) && size==4096);
+    assert((fcntl(fds[0],F_GETFL)&O_ACCMODE)==O_RDONLY);
+    assert(pwrite(fds[0],"bad",3,0)==-1 && errno==EBADF);
+    assert(mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_SHARED,fds[0],0)==MAP_FAILED);
+    close(fds[0]); close(fds[1]);
+    assert(!md_shm_export(s,&user,getpid(),id,0,fds,&size));
+    char *map=mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_SHARED,fds[0],0); assert(map!=MAP_FAILED);
+    strcpy(map,"shared");
+    a[0]=id;
+    struct shmid64_ds info;
+    assert(!md_shm_call(s,space,&pending,&user,getpid(),MD_SHM_STAT,a,&info));
+    assert(info.shm_nattch==1);
+    assert(!md_shm_call(s,space,&pending,&user,getpid(),MD_SHM_REMOVE,a,NULL));
+    md_shm_close(s); s=NULL;
+    /* Only the external descriptor owns this removed segment now. */
+    assert(!md_shm_open(root,42,NULL,&s));
+    assert(!md_shm_call(s,space,&pending,&user,getpid(),MD_SHM_STAT,a,&info));
+    assert(info.shm_nattch==1);
+    int second[2];
+    assert(!md_shm_export(s,&user,getpid(),id,1,second,&size));
+    char bytes[8]={0}; assert(pread(second[0],bytes,6,0)==6 && !strcmp(bytes,"shared"));
+    close(second[0]); close(second[1]);
+    int duplicate=dup(fds[1]); assert(duplicate>=0);
+    close(fds[0]); close(fds[1]); munmap(map,4096);
+    assert(!md_shm_call(s,space,&pending,&user,getpid(),MD_SHM_STAT,a,&info));
+    assert(info.shm_nattch==1);
+    close(duplicate);
+    /* A dead external lease cannot resurrect an already removed segment. */
+    assert(md_shm_call(s,space,&pending,&user,getpid(),MD_SHM_STAT,a,&info)==-EINVAL);
+    assert(md_shm_export(s,&user,getpid(),id,0,fds,&size)==-EINVAL);
+    a[0]=IPC_PRIVATE; a[1]=4096; a[2]=IPC_CREAT|0600;
+    id=(int)md_shm_call(s,space,&pending,&user,getpid(),MD_SHM_GET,a,NULL); assert(id>0);
+    assert(!md_shm_export(s,&user,getpid(),id,0,fds,&size));
+    a[0]=id;
+    assert(!md_shm_call(s,space,&pending,&user,getpid(),MD_SHM_REMOVE,a,NULL));
+    int barrier[2]; assert(!pipe2(barrier,O_CLOEXEC));
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        close(barrier[0]);
+        assert(write(barrier[1],"R",1)==1);
+        for (;;) pause();
+    }
+    close(barrier[1]); close(fds[0]); close(fds[1]);
+    char ready; assert(read(barrier[0],&ready,1)==1); close(barrier[0]);
+    assert(!md_shm_call(s,space,&pending,&user,getpid(),MD_SHM_STAT,a,&info));
+    assert(info.shm_nattch==1);
+    assert(!kill(child,SIGKILL)); int status; assert(waitpid(child,&status,0)==child && WIFSIGNALED(status));
+    assert(md_shm_call(s,space,&pending,&user,getpid(),MD_SHM_STAT,a,&info)==-EINVAL);
+    md_shm_space_release(space); md_shm_close(s); md_shm_close(foreign);
+    md_identity_release(&user); md_identity_release(&other);
+    assert(descriptors()==before);
+    puts("PASS shared-memory exports: namespace, permissions, readonly FD, RMID, creator exit, dup lifetime, cleanup");
+}
 void test_ipc_database(void) {
     test_storage_database();
     char root[]="ipc-database-XXXXXX"; assert(mkdtemp(root));
+    shared_authority_lifetime(root);
+    exported_shm(root);
+    test_shm_bridge(root);
     struct md_ipc *ipc=NULL,*rejected=NULL;
     fixed_owner=1;
     assert(!md_ipc_open(root,0,NULL,&ipc));
@@ -54,6 +148,14 @@ void test_ipc_database(void) {
     fixed_owner=0;
     md_shm_close(shm);
     assert(owners(db)==0); assert(sqlite3_close(db)==SQLITE_OK);
+    char orphan[256]; snprintf(orphan,sizeof(orphan),"%s/ipc/v2/shm/owner-0000000000000011",root);
+    int lease=open(orphan,O_CREAT|O_EXCL|O_RDWR|O_CLOEXEC,0600); assert(lease>=0);
+    assert(!flock(lease,LOCK_EX|LOCK_NB));
+    assert(!md_shm_open(root,0,NULL,&shm));
+    assert(!access(orphan,F_OK)); md_shm_close(shm);
+    close(lease);
+    assert(!md_shm_open(root,0,NULL,&shm));
+    assert(access(orphan,F_OK)==-1 && errno==ENOENT); md_shm_close(shm);
     assert(sqlite3_open(path,&db)==SQLITE_OK);
     assert(sqlite3_exec(db,"UPDATE metadata SET value=NULL WHERE name='boot'",NULL,NULL,NULL)==SQLITE_OK);
     assert(sqlite3_close(db)==SQLITE_OK);

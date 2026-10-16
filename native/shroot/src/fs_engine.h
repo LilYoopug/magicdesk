@@ -24,6 +24,7 @@ struct md_filesystem {
     struct md_fd_exchanges *exchanges;
     struct md_ofd_orders *cursors;
     struct md_ipc_credentials *ipc;
+    struct md_shm_bridge *shm_bridge;
     const char *ipc_store;
     struct md_fs_statistics *statistics;
     const struct md_task_snapshot *actor;

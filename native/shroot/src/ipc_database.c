@@ -3,6 +3,7 @@
 #include "ipc_storage.h"
 #include "storage_database.h"
 #include <errno.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
@@ -19,6 +20,53 @@ int md_ipc_database_query(struct md_ipc_database *d,const char *text,sqlite3_stm
     return md_database_error(d->handle,sqlite3_prepare_v2(d->handle,text,-1,q,NULL));
 }
 static void owner_name(char name[64],int64_t id) { snprintf(name,64,"owner-%016llx",(long long)id); }
+int md_ipc_database_lease(struct md_ipc_database *d,int64_t *owner) {
+    if (!d->locked) return -EINVAL;
+    ssize_t n=getrandom(owner,sizeof(*owner),0);
+    if (n!=sizeof(*owner)) return n<0 ? -errno : -EIO;
+    *owner&=INT64_MAX;
+    char name[64]; owner_name(name,*owner);
+    int fd=openat(d->directory,name,O_CREAT|O_EXCL|O_RDWR|O_CLOEXEC|O_NOFOLLOW,0600);
+    if (fd<0) return -errno;
+    if (flock(fd,LOCK_EX|LOCK_NB)) {
+        int error=-errno;
+        md_ipc_database_discard_lease(d,*owner,fd); return error;
+    }
+    return fd;
+}
+void md_ipc_database_discard_lease(struct md_ipc_database *d,int64_t owner,int fd) {
+    if (fd<0) return;
+    char name[64]; owner_name(name,owner);
+    unlinkat(d->directory,name,0); close(fd);
+}
+int md_ipc_database_sweep_leases(struct md_ipc_database *d,const char *select) {
+    if (!d->locked) return -EINVAL;
+    int fd=openat(d->directory,".",O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+    if (fd<0) return -errno;
+    DIR *dir=fdopendir(fd);
+    if (!dir) { int error=-errno; close(fd); return error; }
+    sqlite3_stmt *q=NULL;
+    int error=md_ipc_database_query(d,select,&q);
+    while (!error) {
+        errno=0; struct dirent *entry=readdir(dir);
+        if (!entry) { if (errno) error=-errno; break; }
+        unsigned long long owner; char tail;
+        if (sscanf(entry->d_name,"owner-%16llx%c",&owner,&tail)!=1 || owner>INT64_MAX) continue;
+        char name[64]; owner_name(name,(int64_t)owner);
+        if (strcmp(name,entry->d_name)) continue;
+        sqlite3_bind_int64(q,1,(int64_t)owner);
+        int step=md_database_step(q); sqlite3_reset(q);
+        if (step==SQLITE_ROW) continue;
+        if (step!=SQLITE_DONE) { error=md_database_result(step); break; }
+        int lease=openat(d->directory,name,O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+        if (lease<0) { if (errno!=ENOENT) error=-errno; continue; }
+        if (!flock(lease,LOCK_EX|LOCK_NB)) {
+            if (unlinkat(d->directory,name,0) && errno!=ENOENT) error=-errno;
+        } else if (errno!=EWOULDBLOCK) error=-errno;
+        close(lease);
+    }
+    sqlite3_finalize(q); closedir(dir); return error;
+}
 static int lock(struct md_ipc_database *d) {
     if (d->locked) return -EBUSY;
     /* EVENT_WAIT: the preceding authority releases its transaction gate;
@@ -47,15 +95,11 @@ int md_ipc_database_open(struct md_ipc_database *d,const char *store,const char 
     d->directory=md_ipc_storage_open(store,kind);
     int r=d->directory<0 ? d->directory : 0;
     if (!r && (d->gate=openat(d->directory,"gate",O_CREAT|O_RDWR|O_CLOEXEC|O_NOFOLLOW,0600))<0) r=-errno;
-    if (!r) {
-        ssize_t n=getrandom(&d->owner,sizeof(d->owner),0);
-        if (n!=sizeof(d->owner)) r=n<0 ? -errno : -EIO;
-        d->owner&=INT64_MAX;
-    }
-    char lease[64]; owner_name(lease,d->owner);
-    if (!r && (d->lease=openat(d->directory,lease,O_CREAT|O_EXCL|O_RDWR|O_CLOEXEC|O_NOFOLLOW,0600))<0) r=-errno;
-    if (!r && flock(d->lease,LOCK_EX|LOCK_NB)) r=-errno;
     if (!r) r=lock(d);
+    if (!r) {
+        int fd=md_ipc_database_lease(d,&d->owner);
+        if (fd<0) r=fd; else d->lease=fd;
+    }
     if (!r) r=md_database_open(d->directory,name,1,&d->handle);
     if (!r) r=md_ipc_database_exec(d,"PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;"
         "CREATE TABLE IF NOT EXISTS metadata(name TEXT PRIMARY KEY,value TEXT);");

@@ -80,6 +80,49 @@ is not a virtualized thread list.
 Namespace-scoped [SysV semaphores and message queues](sysv-ipc.md) have their own
 authority and task-affine argument transport.
 
+## Embedded X11 Attachments
+
+Legacy MIT-SHM carries a SysV segment ID, not an FD. The app-UID X server cannot
+resolve that ID in Shroot's virtual IPC namespace. Explicit
+`--socket-resource-path` and `--socket-resource-abstract` routes therefore attach
+one private resource channel before the normal X11 authorization handshake.
+`GuestGraphicalConnection` selects these routes for Shroot X11 launches; ordinary
+routes, Termux and Wayland do not acquire this channel.
+
+The authenticated filesystem request captures the connecting task's IPC namespace
+and guest credentials. `shm_bridge` retains that capability for the connection;
+requests cannot select another namespace, store or identity. A later credential
+or namespace change does not rewrite an already established connection's grant.
+The filesystem worker services bounded batches on its existing event loop and
+opens a separate SHM database connection lazily, only for an actual attachment.
+It never shares a supervisor-thread SQLite connection or inspects X11 traffic.
+Namespace and SHM-authority lifetime pins are atomic: the last namespace holder
+may be the worker after `unshare`, while mappings retain their original authority.
+That does not authorize concurrent SQLite operations on one connection.
+
+Each accepted attachment exports the real backing FD plus an independent owner
+lease. Read-only requests receive an `O_RDONLY` FD; guest permissions are checked
+before export. An OFD `flock` on the lease retains the logical attachment through
+SCM_RIGHTS, dup and process death. The X server closes it when the last segment or
+shared-pixmap reference disappears, not merely on `ShmDetach`. Creator or broker
+exit does not invalidate an existing mapping. `IPC_RMID` removes the name while
+retaining live attachments; a dead final lease cannot resurrect a removed ID.
+Existing transactional reaping collects dead owners on subsequent authority work;
+admission also removes unlocked lease files left before database registration.
+Creation and recovery share the database gate, including the initial file lock.
+
+The embedded server waits asynchronously for the attachment reply, suspending
+only that X client. A five-second deadline fails the operation, not a global
+server wait. Malformed packets, extra rights and closed channels release pending
+FDs. Failure never falls back to a native SysV ID in another namespace. Modern
+`ShmAttachFd` and `ShmCreateSegment` retain their existing FD protocol and share
+the server's mapping/lifetime implementation with bridged attachments.
+
+Pixel reads and writes use the shared mapping, with no per-frame broker request,
+SQLite work, Binder copy or X11 stream proxy. All mechanisms used here predate
+Linux 5.15. The renderer remains app-UID; no host SysV support, root or new
+persistent storage family is required.
+
 ## Checks
 
 `test_service_runtime.c` checks bytes shared across fork and independent launches,
@@ -87,6 +130,20 @@ store separation, permissions, read-only faults, fork/exec/exit, IPC_RMID, parti
 munmap and unrelated mappings in holes. `test_oci_services.py` runs stock PostgreSQL
 initdb, SQL traffic, shutdown and fresh-process readback. Device scope is recorded
 in [guest coverage](../../docs/shroot.md#coverage-and-limits).
+
+`test_ipc_database.c` and `test_shm_bridge.c` check namespace/credential capture,
+read-only enforcement, invalid requests, malformed/extra ancillary FDs, queued
+response cancellation, `IPC_RMID`, creator/broker/consumer death, duplicate leases,
+orphan-file recovery and descriptor balance. `test_x11_shm.py BUILD STORE` uses
+stock libX11/libXext/libxcb against the app-UID server: real pixel readback,
+private IPC rejection, read-only rejection, shared-pixmap retention, swapped
+request replay, abrupt client teardown, and modern
+AttachFd/CreateSegment with both resource and ordinary X11 admission. The guest
+needs Python 3, util-linux and these X libraries; no compiler is required.
+`--installed` tests the APK's actual shell launcher and immutable helper staging,
+rather than uploading a separate native runtime build.
+`test_steamos_graphics.py --client glx --renderer lavapipe --require-shm` verifies
+changing frames using the installed software profile without the `noshm` bypass.
 
 `test_sysv_runtime.py --case shm-slots --case shm-denied` checks repeated zero-slot
 and one-slot attachment/detachment and rejected mmap, with ordinary and

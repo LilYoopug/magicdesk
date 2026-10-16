@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "fs_engine.h"
+#include "shm_bridge.h"
 #include "fs_native.h"
 #include "proc_fdinfo.h"
 #include "fs_context.h"
@@ -253,6 +254,11 @@ static void context_execute(struct md_fs_context *context,
         return;
     }
     const struct md_task_snapshot *task=&context->task;
+    if (q->operation==MD_FS_SHM_CHANNEL) {
+        int fd=context->authenticated ? md_shm_bridge_connect(&fs->shm_bridge,task) : -EACCES;
+        *out=(struct md_fs_result){.fd=fd<0 ? -1 : fd,.error=fd<0 ? fd : 0};
+        return;
+    }
     struct md_identity identity=task->identity;
     const struct md_identity *previous = fs->store->identity;
     const struct md_landlock_policy *previous_landlock=fs->store->landlock;

@@ -200,8 +200,8 @@ public class GuestRuntimeTest {
             assertEquals(0, process.waitFor());
             var expected = new java.util.ArrayList<>(plan.launcherArguments().subList(1, plan.launcherArguments().size()));
             String source = protocol == GraphicalProtocol.X11 ? "/tmp/.X11-unix/X37" : GuestGraphicalConnection.WAYLAND_PATH;
-            expected.addAll(List.of("--socket-path", source, "opaque ' endpoint"));
-            if (protocol == GraphicalProtocol.X11) expected.addAll(List.of("--socket-abstract", source, "opaque ' endpoint"));
+            expected.addAll(List.of(protocol == GraphicalProtocol.X11 ? "--socket-resource-path" : "--socket-path", source, "opaque ' endpoint"));
+            if (protocol == GraphicalProtocol.X11) expected.addAll(List.of("--socket-resource-abstract", source, "opaque ' endpoint"));
             expected.add("--"); expected.addAll(plan.command());
             assertEquals(expected, List.of(arguments));
         }

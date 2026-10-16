@@ -22,6 +22,14 @@ int md_ipc_database_begin(struct md_ipc_database *);
 int md_ipc_database_commit(struct md_ipc_database *,int error);
 void md_ipc_database_unlock(struct md_ipc_database *);
 int md_ipc_database_boot(struct md_ipc_database *,const char *reset);
+/* An exported lease is an OFD lock: SCM_RIGHTS/dup retain ownership until the
+ * final descriptor closes. Caller holds the database gate from creation through
+ * registration, so recovery cannot collect a not-yet-locked owner file. */
+int md_ipc_database_lease(struct md_ipc_database *,int64_t *owner);
+void md_ipc_database_discard_lease(struct md_ipc_database *,int64_t owner,int fd);
+/* Admission-only recovery of a crash between lease creation and registration.
+ * Caller holds the gate; select_owner binds ?1 and returns a row for live metadata. */
+int md_ipc_database_sweep_leases(struct md_ipc_database *,const char *select_owner);
 int md_ipc_database_reap(struct md_ipc_database *,const char *select_owners,
     int (*remove)(void *,int64_t),void *context);
 #endif

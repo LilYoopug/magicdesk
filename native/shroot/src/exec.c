@@ -130,7 +130,7 @@ long md_guest_execat(const struct md_fs *fs, int base, const char *program, char
     const struct md_socket_routes *routes = fs->connections;
     for (unsigned i = 0; routes && i < routes->count; i++) {
         const struct md_socket_route *route = &routes->entries[i];
-        next[n++] = route->abstract ? "--socket-abstract" : "--socket-path";
+        next[n++] = (char *)md_socket_route_option(route);
         next[n++] = (char *)route->source;
         next[n++] = (char *)route->destination;
     }

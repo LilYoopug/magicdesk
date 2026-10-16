@@ -8,10 +8,9 @@ final class GuestGraphicalConnection {
 
     static GuestLaunchPlan plan(GuestEnvironment environment, String directory, String command,
             GraphicalProtocol protocol) {
-        String client = client(protocol, "/bin/sh -lc " + ShellCommandLine.quote(command));
         return new GuestLaunchPlan(environment, directory, List.of(
                 "/tmp/magicdesk-helpers/libmagicdesk_guest_files.so", "--", "/bin/sh", "-lc",
-                LinuxGraphicalEnvironment.wrap(protocol, "/bin/sh -c " + ShellCommandLine.quote(client))));
+                session(protocol, "/bin/sh -lc " + ShellCommandLine.quote(command))));
     }
 
     static String invocation(GuestLaunchPlan plan, GraphicalProtocol protocol) {
@@ -27,16 +26,19 @@ final class GuestGraphicalConnection {
         String fileOptions = files ? " --bind-ro \"${MAGICDESK_GUEST_LIBRARIES:?Missing helpers}\" /tmp/magicdesk-helpers"
                 + " --env \"MAGICDESK_GUEST_FILES_SOCKET=$MAGICDESK_GUEST_FILES_SOCKET\""
                 + " --env \"MAGICDESK_GUEST_FILES_TOKEN=$MAGICDESK_GUEST_FILES_TOKEN\"" : "";
-        return "set -eu; " + prepare + "exec " + quoted(plan.launcherArguments()) + fileOptions + " --socket-path " + source + " " + endpoint
-                + (protocol == GraphicalProtocol.X11 ? " --socket-abstract " + source + " " + endpoint : "")
+        return "set -eu; " + prepare + "exec " + quoted(plan.launcherArguments()) + fileOptions
+                + (protocol == GraphicalProtocol.X11 ? " --socket-resource-path " : " --socket-path ") + source + " " + endpoint
+                + (protocol == GraphicalProtocol.X11 ? " --socket-resource-abstract " + source + " " + endpoint : "")
                 + " -- " + quoted(plan.command());
     }
 
-    static String client(GraphicalProtocol protocol, String command) {
-        if (protocol != GraphicalProtocol.X11) return command;
-        return "set -eu; export XAUTHORITY=\"$XDG_RUNTIME_DIR/Xauthority\"; "
-                + "printf '%s' \"${MAGICDESK_X11_AUTHORITY:?Missing X11 authority}\" | base64 -d > \"$XAUTHORITY\"; "
-                + "unset MAGICDESK_X11_AUTHORITY; " + command;
+    static String session(GraphicalProtocol protocol, String command) {
+        // Activated D-Bus services must inherit the same authority as the client.
+        String prepare = protocol != GraphicalProtocol.X11 ? "" : ": \"${MAGICDESK_X11_AUTHORITY:?Missing X11 authority}\"; "
+                + "export XAUTHORITY=\"$XDG_RUNTIME_DIR/Xauthority\"; "
+                + "printf '%s' \"$MAGICDESK_X11_AUTHORITY\" | base64 -d > \"$XAUTHORITY\"; "
+                + "unset MAGICDESK_X11_AUTHORITY; ";
+        return LinuxGraphicalEnvironment.wrap(protocol, prepare, command);
     }
 
     private static String quoted(List<String> arguments) {

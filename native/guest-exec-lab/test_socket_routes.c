@@ -33,6 +33,17 @@ int main(void) {
     unsigned original_length = length;
     assert(md_socket_route_apply(&routes, &binary, &length) == 0);
     assert(!memcmp(&before, &binary, sizeof(binary)) && original_length == length);
+    for (int abstract=0;abstract<2;++abstract) {
+        const char *option=abstract ? "--socket-resource-abstract" : "--socket-resource-path";
+        assert(md_socket_route_option_valid(option));
+        assert(!md_socket_route_add(&routes,option,"/tmp/.X11-unix/X7","md-resources"));
+        assert(!strcmp(md_socket_route_option(&routes.entries[routes.count-1]),option));
+        struct sockaddr_un address={.sun_family=AF_UNIX};
+        strcpy(address.sun_path+abstract,"/tmp/.X11-unix/X7");
+        length=offsetof(struct sockaddr_un,sun_path)+abstract+strlen("/tmp/.X11-unix/X7")+!abstract;
+        assert(md_socket_route_apply(&routes,&address,&length)==2);
+        assert(!strcmp(address.sun_path+1,"md-resources"));
+    }
     for (unsigned i = routes.count; i < MD_SOCKET_ROUTES_MAX; i++) {
         char name[32]; snprintf(name, sizeof(name), "extra-%u", i);
         assert(md_socket_route_add(&routes, "--socket-abstract", name, "target") == 0);

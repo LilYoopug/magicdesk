@@ -12,10 +12,9 @@ public final class GraphicalRecipe {
         }
         if ((args.length == 5 || args.length == 6) && args[0].equals("routed")) {
             var protocol = GraphicalProtocol.parse(args[1]);
-            String client = GuestGraphicalConnection.client(protocol, "/bin/sh -lc " + ShellCommandLine.quote(args[4]));
             var plan = new GuestLaunchPlan(new GuestEnvironment(args[2], args[3], args.length == 6 ? args[5] : ""), "/",
-                    java.util.List.of("/bin/sh", "-c", LinuxGraphicalEnvironment.wrap(protocol,
-                            "/bin/sh -c " + ShellCommandLine.quote(client))));
+                    java.util.List.of("/bin/sh", "-lc", GuestGraphicalConnection.session(protocol,
+                            "/bin/sh -lc " + ShellCommandLine.quote(args[4]))));
             System.out.print(GuestGraphicalConnection.invocation(plan, protocol));
             return;
         }

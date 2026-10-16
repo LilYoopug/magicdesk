@@ -84,7 +84,8 @@ case "$($cc -dumpmachine)" in *android*) spawn_lib=-landroid-spawn ;; esac
 procroot=$(mktemp -d "$work/path-test/proc.XXXXXX")
 timeout 30 "$work/test-proc" "$procroot/files" native
 adapter_fixture() {
-"$cc" -iquote "$runtime" -std=c17 -O2 -g -Wall -Wextra -Werror -UNDEBUG -fno-builtin -DMD_NO_START -DMD_USE_LIBC "$@" \
+"$cc" -iquote "$runtime" -iquote "$src/../../vendor/magicdesk-x11/lorie/src/main/cpp/lorie" \
+    -std=c17 -O2 -g -Wall -Wextra -Werror -UNDEBUG -fno-builtin -DMD_NO_START -DMD_USE_LIBC "$@" \
     "$runtime/socket_calls.c" "$runtime/socket_namespace.c" "$runtime/socket_identity.c" "$runtime/socket_ancillary.c" "$runtime/socket_routes.c" "$runtime/file_calls.c" "$runtime/fs.c" "$runtime/proc_paths.c" \
     "$runtime/namespace.c" "$runtime/namespace_proc.c" "$runtime/proc_image.c" "$runtime/fd_metadata.c" "$runtime/fd_client.c" "$runtime/fs_client.c" "$runtime/fs_wire.c" "$runtime/file_open.c" \
     "$runtime/event_wait.c" "$runtime/task_status.c" "$runtime/watch_calls.c" "$runtime/fd_filter.c" "$runtime/proc_control.c" "$runtime/raw.c" "$runtime/memory.c" "$runtime/raw.S"
