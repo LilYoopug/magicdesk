@@ -1,5 +1,6 @@
 """External port observer and a tiny container service for Docker networking tests."""
 import http.client
+import errno
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -141,8 +142,16 @@ class Observer:
                 item = json.loads(self.rfile.read(size))
                 result = {'request': item, 'uid': os.getuid()}
                 try:
-                    port = int(item['port'])
-                    if item['operation'] == 'occupy':
+                    port = int(item.get('port', 0))
+                    if item['operation'] == 'allocate':
+                        result['port'] = owner.allocate_port()
+                    elif item['operation'] == 'handoff':
+                        connections = [s for s in owner.reservations if s.getsockname()[1] == port]
+                        assert len(connections) == 2, 'No paired TCP/UDP reservation'
+                        for connection in connections:
+                            owner.reservations.remove(connection)
+                            connection.close()
+                    elif item['operation'] == 'occupy':
                         connection = socket.socket()
                         connection.bind(('127.0.0.1', port))
                         connection.listen()
@@ -163,8 +172,10 @@ class Observer:
                                     assert not data, ('denied payload received', data)
                                 except (TimeoutError, ConnectionRefusedError, ConnectionResetError):
                                     pass
-                    else:
+                    elif item['operation'] == 'exchange':
                         exchange('127.0.0.1', port, item['token'], item.get('repeats', 1))
+                    else:
+                        raise ValueError('Unknown observer operation')
                     result['passed'] = True
                 except Exception as error:
                     result.update(passed=False, error=repr(error))
@@ -179,6 +190,27 @@ class Observer:
         self.thread = threading.Thread(target=self.server.serve_forever)
         self.thread.start()
         self.address = f"{self.server.server_port}/{self.token}"
+
+    def allocate_port(self):
+        # Reserve both protocols outside Shroot; release just before publication.
+        # Only allocation races are retried, never a failed container publication.
+        for _ in range(32):
+            tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                tcp.bind(('127.0.0.1', 0))
+                port = tcp.getsockname()[1]
+                udp.bind(('127.0.0.1', port))
+                tcp.listen()
+            except OSError as error:
+                tcp.close()
+                udp.close()
+                if error.errno != errno.EADDRINUSE:
+                    raise
+            else:
+                self.reservations.extend((tcp, udp))
+                return port
+        raise OSError(errno.EADDRINUSE, 'No free paired TCP/UDP port')
 
     def close(self):
         self.server.shutdown()

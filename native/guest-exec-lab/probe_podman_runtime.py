@@ -88,7 +88,7 @@ def guest(options):
         from docker_network_fixture import observe, wait_service
         network = 'md-podman-ports'
         names = ('md-podman-first', 'md-podman-second')
-        ports = (39881, 39882)
+        ports = []
         image = 'docker.io/library/python:3.13-alpine'
         run(prefix + ['pull', image], timeout=180)
         if run(prefix + ['network', 'exists', network], required=False).get('exitCode') == 0:
@@ -96,7 +96,10 @@ def guest(options):
         run(prefix + ['network', 'create', '--subnet', '10.92.0.0/24', network])
         tracer = None
         try:
-            for name, port in zip(names, ports):
+            for name in names:
+                port = observe(options['observer'], operation='allocate')['port']
+                ports.append(port)
+                observe(options['observer'], operation='handoff', port=port)
                 run(prefix + ['run', '-d', '--name', name, '--log-driver', 'k8s-file', '--network', network, *limits,
                               '-p', f'127.0.0.1:{port}:8080/tcp', '-p', f'127.0.0.1:{port}:8080/udp',
                               '--mount', 'type=bind,src=' + str(Path(__file__).with_name('docker_network_fixture.py'))
@@ -120,7 +123,7 @@ def guest(options):
             for name in names:
                 run(prefix + ['exec', name, 'python3', '/fixture.py', '--internet'])
             conflict = run(prefix + ['run', '--rm', '--name', 'md-podman-conflict', '--network', network,
-                                    *limits, '-p', '127.0.0.1:39881:8080', image, '/bin/true'], required=False)
+                                    *limits, '-p', f'127.0.0.1:{ports[0]}:8080', image, '/bin/true'], required=False)
             assert conflict.get('exitCode') != 0 and ('already allocated' in conflict['output']
                     or 'address already in use' in conflict['output'].lower()), conflict
         except Exception as error:

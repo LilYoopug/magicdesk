@@ -48,8 +48,11 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
             (root / 'devices').mkdir()
             mount('-t', 'cgroup', '-o', 'devices', 'none', str(root / 'devices'))
     base = Path(tempfile.mkdtemp(prefix='md-docker-'))
+    # Probe profiles must not collide with the installer's system daemon config.
+    config = base / 'daemon.json'
+    config.write_text('{}\n')
     endpoint = 'unix://' + str(base / 'docker.sock')
-    argv = ['dockerd', '--debug', '--host', endpoint,
+    argv = ['dockerd', '--config-file', str(config), '--debug', '--host', endpoint,
             '--pidfile', str(base / 'docker.pid'), '--data-root', data_root or str(base / 'data'),
             '--exec-root', str(base / 'run')]
     if profile in ROOTLESS_PROFILES:
@@ -138,9 +141,12 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
     def exercise_ports():
         from docker_network_fixture import observe, wait_service
         names = ('md-port-first', 'md-port-second')
-        ports = (39871, 39872)
+        ports = []
         try:
-            for name, port in zip(names, ports):
+            for name in names:
+                port = observe(observer, operation='allocate')['port']
+                ports.append(port)
+                observe(observer, operation='handoff', port=port)
                 assert client('run', '-d', '--name', name, '--network', 'bridge',
                               '-p', f'127.0.0.1:{port}:8080/tcp', '-p', f'127.0.0.1:{port}:8080/udp',
                               '--cgroupns', cgroupns, '--mount',
@@ -155,7 +161,7 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
                 assert client('exec', source, 'python3', '/fixture.py', '--client', address, '8080', target, '20')
             report['containerPeerExchangePassed'] = True
             assert not client('run', '--rm', '--name', 'md-port-conflict', '--network', 'bridge',
-                              '-p', '127.0.0.1:39871:8080', image, '/bin/true')
+                              '-p', f'127.0.0.1:{ports[0]}:8080', image, '/bin/true')
             assert 'already allocated' in report['commands'][-1]['output'] \
                 or 'address already in use' in report['commands'][-1]['output'], report['commands'][-1]
             report['portPublicationTested'] = True
@@ -251,7 +257,7 @@ def main():
     parser.add_argument('build', type=Path)
     parser.add_argument('store')
     parser.add_argument('--profile', choices=PROFILES, default='rootless-no-network')
-    parser.add_argument('--image', default='busybox:1.37.0')
+    parser.add_argument('--image', help='Defaults to Python for port tests, BusyBox otherwise')
     parser.add_argument('--storage-driver', choices=('vfs', 'overlay2'), default='vfs')
     parser.add_argument('--data-root', default='', help='Reuse this disposable daemon image cache')
     tracing = parser.add_mutually_exclusive_group()
@@ -271,6 +277,8 @@ def main():
     args = parser.parse_args()
     if args.exercise_ports and args.profile != 'routed':
         parser.error('--exercise-ports requires --profile routed')
+    if args.image is None:
+        args.image = 'python:3.14-alpine' if args.exercise_ports else 'busybox:1.37.0'
     from test_oci_services import Suite
     suite = Suite(args.build, args.build)
     suite.report.update(store=args.store, probe=True, profile=args.profile, cgroup=args.cgroup)
