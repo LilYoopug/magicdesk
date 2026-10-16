@@ -11,6 +11,7 @@
 #include "ofd_order.h"
 #include "input_session.h"
 #include "device_events.h"
+#include "network_resolver.h"
 #include <errno.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -36,6 +37,7 @@ struct md_fs_worker {
     unsigned attachment_count;
     const struct md_ipc_inherited *inherited;
     const struct md_input_launch *input;
+    const struct md_network_profile *network;
     struct md_device_events *device_events;
     struct md_fs_work *completed, **completed_tail;
     struct md_fs_work *submitted, **submitted_tail;
@@ -115,6 +117,11 @@ static void *run(void *context) {
     struct md_filesystem fs = {.store=store, .storage=&storage, .images=images, .tasks=w->tasks, .exchanges=w->exchanges,
         .cursors=w->cursors,.ipc_store=w->store};
     if (!error) error = md_fs_mounts_open(&fs, w->attachments, w->attachment_count);
+    if (!error) {
+        error=md_network_resolver_prepare(&fs,w->network);
+        if (error) fprintf(stderr,"Shroot resolver: %s; supply --dns IPv4 or prepare /etc/resolv.conf\n",strerror(-error));
+    }
+    w->network=NULL;
     struct md_input_session *input=NULL;
     if (!error) {
         w->device_events=md_device_events_new();
@@ -185,20 +192,21 @@ static void *run(void *context) {
     return NULL;
 }
 int md_fs_worker_start(const char *store, const char *endpoint, const char *admit, struct md_task_registry *tasks, struct md_fd_exchanges *exchanges,
-        const struct md_fs_attachment *attachments, unsigned attachment_count, int statistics,
-        const struct md_ipc_inherited *inherited, const struct md_input_launch *input, struct md_fs_worker **out) {
+        const struct md_fs_worker_launch *launch, struct md_fs_worker **out) {
     struct md_fs_worker *w = calloc(1, sizeof(*w));
     if (!w) return -ENOMEM;
     w->wake=w->done=(struct md_queue_signal){-1,-1};
     w->stop = w->ready = -1;
     w->notification_fd = -1;
     atomic_init(&w->pause_requested,0);
-    w->store = store; w->endpoint = endpoint; w->admit = admit; w->statistics = statistics;
+    w->store = store; w->endpoint = endpoint; w->admit = admit;
     w->tasks = tasks;
     w->exchanges=exchanges;
-    w->attachments = attachments; w->attachment_count = attachment_count;
-    w->inherited=inherited;
-    w->input=input;
+    if (launch) {
+        w->statistics=launch->statistics;
+        w->attachments=launch->attachments; w->attachment_count=launch->attachment_count;
+        w->inherited=launch->inherited; w->input=launch->input; w->network=launch->network;
+    }
     w->completed_tail = &w->completed;
     w->submitted_tail = &w->submitted;
     int *fds[] = {&w->stop, &w->ready};

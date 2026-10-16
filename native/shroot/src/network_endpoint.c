@@ -55,7 +55,7 @@ int md_network_endpoint_filter_update(struct md_network_namespace *n,struct md_n
 }
 static const struct md_fd_object_type endpoint_type={.destroy=destroy,.selectors=1U<<MD_FD_SELECTOR_PROC};
 int md_network_endpoint_is(const struct md_fd_object *o) { return o && o->type==&endpoint_type; }
-int md_network_endpoint_enabled(const struct md_network_namespace *n) { return n && n->fabric->routed; }
+int md_network_endpoint_enabled(const struct md_network_namespace *n) { return n && n->fabric->endpoints_enabled; }
 static struct md_network_endpoint *create(struct md_network_namespace *n,int type,int protocol) {
     struct md_network_endpoint *e=calloc(1,sizeof(*e));
     if (!e) return NULL;

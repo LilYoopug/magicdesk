@@ -144,8 +144,8 @@ static void run(const char *store,const char *native,int directory,int cancel) {
     struct md_fs_worker *worker=NULL;
     char endpoint[80]; snprintf(endpoint,sizeof(endpoint),"md-dir-broker-%d-%d",parent,child);
     struct md_fs_attachment attachment={.source=native,.target="/native"};
-    assert(!md_fs_worker_start(store,endpoint,NULL,tasks,NULL,native ? &attachment : NULL,
-        native ? 1 : 0,0,NULL,NULL,&worker));
+    struct md_fs_worker_launch launch={.attachments=native ? &attachment : NULL,.attachment_count=native ? 1 : 0};
+    assert(!md_fs_worker_start(store,endpoint,NULL,tasks,NULL,&launch,&worker));
     struct md_task_resources resources={.fs=md_domain_new(),.files=md_fd_origins_new(),
         .mounts=md_fs_worker_mounts(worker)};
     assert(resources.fs && resources.files);
@@ -206,7 +206,7 @@ static void completed_result(const char *store,int nr) {
     struct md_task_registry *tasks=md_task_registry_create(); assert(tasks);
     struct md_fs_worker *worker=NULL;
     char endpoint[80]; snprintf(endpoint,sizeof(endpoint),"md-result-broker-%d-%d",parent,child);
-    assert(!md_fs_worker_start(store,endpoint,NULL,tasks,NULL,NULL,0,0,NULL,NULL,&worker));
+    assert(!md_fs_worker_start(store,endpoint,NULL,tasks,NULL,NULL,&worker));
     struct md_fd_origins *files=md_fd_origins_new(); assert(files);
     struct md_namespace_broker *broker=md_broker_create(worker,1,unexpected_delegate); assert(broker);
     assert(!md_broker_task(broker,child,0,0,0));

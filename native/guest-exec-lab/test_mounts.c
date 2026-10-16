@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 void test_mount_copy(const char *base);
+void test_network_resolver(const char *base);
 void test_fs_control(const char *base);
 void test_path_walk(const char *base);
 void test_mount_storage(const char *base);
@@ -504,6 +505,7 @@ int main(int argc, char **argv) {
     test_path_walk(argv[1]);
     task_mount_views(argv[1]);
     test_mount_copy(argv[1]);
+    test_network_resolver(argv[1]);
     test_fs_control(argv[1]);
     test_mount_storage(argv[1]);
     test_transient_store(argv[1]);

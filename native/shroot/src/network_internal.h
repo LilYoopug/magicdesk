@@ -19,7 +19,7 @@ struct md_network_fabric {
     unsigned next_index;
     struct md_network_namespace *spaces;
     struct md_network_endpoint *endpoints;
-    int routed;
+    int endpoints_enabled;
     uint64_t policy_generation;
     struct md_network_forward *forward;
 };

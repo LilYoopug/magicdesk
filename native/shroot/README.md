@@ -132,7 +132,10 @@ of host Landlock support; it is not full native-LSM or ptrace-domain confinement
 Logical user/PID/mount/UTS/IPC/network/cgroup namespaces and private devpts views
 support nested Linux workloads without requiring their host kernel equivalents.
 Ordinary networking remains native; routed IPv4 is explicit and has its own
-port/endpoint ownership. Namespace-owned nftables rules, logical flow routing
+port/endpoint ownership. Shared [launch profiles](networking.md#launch-profiles)
+prepare host, offline or bridge policy and optional TCP/UDP publications/DNS;
+the low-level routed mode remains available for guest-managed topology.
+Namespace-owned nftables rules, logical flow routing
 and event-driven forwarding are separate owners: atomic rule/port publication
 does not put an interpreter on ordinary stream reads/writes. Supported filtered
 and NAT flows use cached decisions and bounded relay queues. Native backing

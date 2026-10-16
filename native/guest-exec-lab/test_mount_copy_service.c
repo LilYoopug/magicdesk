@@ -24,7 +24,7 @@ void md_test_mount_copy_service(const char *store) {
     for (unsigned cancel=0;cancel<2;++cancel) {
         char endpoint[80]; snprintf(endpoint,sizeof(endpoint),"md-mount-copy-%d-%u",getpid(),cancel);
         struct md_fs_worker *worker=NULL;
-        assert(!md_fs_worker_start(store,endpoint,NULL,NULL,NULL,NULL,0,0,NULL,NULL,&worker));
+        assert(!md_fs_worker_start(store,endpoint,NULL,NULL,NULL,NULL,&worker));
         struct md_fs_worker_pause pause={0};
         assert(!md_fs_worker_pause_begin(worker,&pause));
         int64_t deadline=md_event_now()+5000000000LL;

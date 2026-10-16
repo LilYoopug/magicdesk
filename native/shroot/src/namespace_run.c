@@ -8,6 +8,7 @@
 #include "fs_mounts.h"
 #include "host_identity.h"
 #include "arguments.h"
+#include "network_profile.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -29,7 +30,7 @@ void md_boot(uintptr_t *stack) {
     const char *user = NULL;
     const char *groups = NULL;
     const char *hostname = NULL;
-    const char *network = NULL;
+    struct md_network_profile network = {0};
     const char *gamepad_endpoint = NULL;
     char *overrides[128]; unsigned override_count = 0;
     struct md_fs_attachment attachments[MD_FS_MOUNTS_MAX]; unsigned attachment_count = 0;
@@ -56,9 +57,9 @@ void md_boot(uintptr_t *stack) {
         else if (md_equal(argv[program], "--cwd")) cwd = argv[program + 1];
         else if (md_equal(argv[program], "--home")) home = argv[program + 1];
         else if (md_equal(argv[program], "--gamepad-endpoint") && !gamepad_endpoint) gamepad_endpoint=argv[program+1];
-        else if (md_equal(argv[program], "--network") && !network) {
-            network=argv[program+1];
-            if (!md_equal(network,"routed")) md_die("unsupported network backend",-EINVAL);
+        else if (md_network_profile_option(argv[program])) {
+            int error=md_network_profile_add(&network,argv[program],argv[program+1]);
+            if (error) md_die("invalid network option",error);
         }
         else if (md_equal(argv[program], "--hostname") && !hostname) {
             hostname=argv[program+1];
@@ -81,6 +82,8 @@ void md_boot(uintptr_t *stack) {
     if (++program >= argc || !store || store[0] != '/' || cwd[0] != '/' || home[0] != '/')
         md_die("invalid guest launch plan", -EINVAL);
     if (groups && !user) md_die("guest groups require an explicit guest user", -EINVAL);
+    int network_error=md_network_profile_validate(&network);
+    if (network_error) md_die("incompatible network options",network_error);
     struct md_launch_environment guest_environment;
     long environment_result = md_launch_environment(&guest_environment, home, env);
     if (environment_result < 0) md_die("guest environment", environment_result);
@@ -122,7 +125,8 @@ void md_boot(uintptr_t *stack) {
     if (!guard) {
         struct md_arguments arguments;
         md_arguments_init(&arguments);
-        long error=md_arguments_reserve(&arguments,argc-program+32+3*(md_connections.count+attachment_count));
+        long error=md_arguments_reserve(&arguments,argc-program+32+3*(md_connections.count+attachment_count)
+            +md_network_profile_arguments(&network,NULL));
         if (error<0) md_die("launch arguments",error);
         char **args=arguments.values;
         args[0]=supervisor;
@@ -135,7 +139,7 @@ void md_boot(uintptr_t *stack) {
         if (user) { args[n++] = "--user"; args[n++] = (char *)user; }
         if (groups) { args[n++] = "--groups"; args[n++] = (char *)groups; }
         if (hostname) { args[n++]="--hostname"; args[n++]=(char *)hostname; }
-        if (network) { args[n++]="--network"; args[n++]=(char *)network; }
+        n+=md_network_profile_arguments(&network,args+n);
         if (gamepad_endpoint) { args[n++]="--gamepad-endpoint"; args[n++]=(char *)gamepad_endpoint; }
         for (unsigned i = 0; i < attachment_count; ++i) {
             args[n++] = attachments[i].readonly ? "--bind-ro" : "--bind";

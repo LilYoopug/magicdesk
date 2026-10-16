@@ -223,6 +223,8 @@ def main():
     parser.add_argument('--trace', action='store_true', help='Trace filesystem, sandbox and readiness setup; requires strace')
     parser.add_argument('--rtkit', action='store_true', help='Verify packaged RTKit unit, D-Bus and restart; requires RTKit')
     parser.add_argument('--init', choices=('systemd', 'openrc', 'runit'), default='systemd')
+    parser.add_argument('--network', choices=('host', 'none', 'bridge', 'routed'), default='routed')
+    parser.add_argument('--dns', action='append', default=[], help='Per-launch resolver IPv4 address')
     parser.add_argument('--drop-capability', action='append', default=[],
                         help='Explicit container capability policy, applied by stock setpriv before PID1')
     parser.add_argument('--output', type=Path, default=Path('build/os-boot-results'))
@@ -235,9 +237,12 @@ def main():
         parser.error('--rtkit requires systemd')
     suite = Suite(args.output, args.build)
     suite.report['store'] = args.store
-    suite.report['bootPolicy'] = {'init': args.init, 'dropCapabilities': args.drop_capability, 'rtkit': args.rtkit}
+    suite.report['bootPolicy'] = {'init': args.init, 'dropCapabilities': args.drop_capability,
+                                'rtkit': args.rtkit, 'network': args.network, 'dns': args.dns}
     target = '/md-boot-' + suite.report['id']
-    prefix = [suite.runner, '--store', args.store, '--user', '0:0', '--network', 'routed']
+    prefix = [suite.runner, '--store', args.store, '--user', '0:0', '--network', args.network]
+    for address in args.dns:
+        prefix += ['--dns', address]
     label = 'os-boot-' + suite.report['id']
     created = False
     try:

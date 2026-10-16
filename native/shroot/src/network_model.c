@@ -128,7 +128,7 @@ static struct md_network_namespace *create(struct md_user_namespace *owner,enum 
         error=pthread_mutex_init(&fabric->lock,NULL);
         if (error) { free(n); free(fabric); errno=error; return NULL; }
         atomic_init(&fabric->references,1); fabric->next_index=2;
-        fabric->routed=mode==MD_NETWORK_ROUTED;
+        fabric->endpoints_enabled=mode==MD_NETWORK_ROUTED;
     } else atomic_fetch_add_explicit(&fabric->references,1,memory_order_relaxed);
     n->fabric=fabric; n->mode=mode; n->owner=md_user_namespace_retain(owner);
     atomic_init(&n->references,1);

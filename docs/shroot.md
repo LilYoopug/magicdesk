@@ -540,7 +540,8 @@ See [storage evolution](../native/shroot/inode-store.md#storage-evolution).
 accept user, environment, cwd, hostname and directory-attachment options.
 `--bind HOST GUEST` and `--bind-ro HOST GUEST` attach existing directories to
 one launch. Declare nested targets parent first; each retains its own read-only
-policy. Explicit `--network routed` selects the [routed IPv4 backend](#network-modes).
+policy. The same [network profile](#network-modes) is accepted by run, exec,
+login and the low-level `--store` runner, including launches that start an OS init.
 
 Login uses `/etc/passwd` for home and shell. Numeric users absent from that file
 use `/`, `/bin/sh` and a numeric username; no account is created. Image launches
@@ -566,6 +567,13 @@ The manager retains nonempty or symlinked `/etc/resolv.conf`.
 environment; without `--replace` the preservation rule applies. The installer
 uses replacement for a new environment with system/explicit DNS, while resume
 retains existing DNS. Restore preserves the backed-up configuration.
+
+Launch-time `--dns IPv4` is a different, temporary policy: repeat it for up to
+three servers. It mounts a read-only `/etc/resolv.conf` for that launch only;
+other launches and the stored configuration are unchanged. The file must already
+exist (a symlink to an existing regular file is accepted). Missing or dangling
+targets fail before the application starts. Preparing an image's resolver is an
+installation operation, not an implicit persistent mutation during launch.
 
 #### Android command access
 
@@ -669,12 +677,44 @@ manager, graphical login or hardware boot.
 
 ### Network modes
 
-Ordinary launches use native Android networking. A new guest network namespace
-starts with down loopback and no external connectivity. `--network routed`
-instead creates a launch-owned IPv4 fabric with an uplink; child namespaces must
-be configured before they can communicate.
+Networking belongs to one supervised process tree, not to its persistent store.
+The same store can have independent simultaneous launches with different policies.
 
-The routed backend provides logical bridges, veth pairs, addresses and routes.
+| Launch option | Policy |
+| --- | --- |
+| Omitted or `--network host` | Native Android networking; no virtual network or relay is allocated |
+| `--network none` | Private network with working loopback and no external route |
+| `--network bridge` | Prepared private IPv4 network, bridge/uplink, outbound access and optional published ports |
+| `--network routed` | Low-level routed backend for guests such as Docker/Podman that configure their own network topology |
+
+`routed` remains supported, not deprecated or an alias for `bridge`.
+An application-created network namespace starts with down loopback and no
+external connectivity, even when its parent has a prepared network.
+
+```sh
+shroot exec work --network bridge -p 127.0.0.1:8080:80 -- /usr/sbin/nginx -g 'daemon off;'
+shroot exec work --network bridge -p 127.0.0.1:5353:53/udp -- /path/to/dns-server
+shroot login work --network none
+```
+
+Repeated `-p` / `--publish` accepts `[IPv4:]HOST:GUEST[/tcp|/udp]`, with TCP as
+the default. Omitted IPv4 binds all host IPv4 addresses; use `127.0.0.1` for local
+access only. Ports must be 1-65535; ranges and automatic port selection are not
+supported. At most 128 publications are accepted. Publication requires `bridge`;
+host, none and routed reject it. OCI EXPOSE never publishes a port automatically.
+Port reservation and rules commit before guest execution. Conflicts or any
+preparation error roll back the entire setup, including earlier reservations.
+Cancellation, ordinary exit and abnormal guest exit release the launch's ports.
+
+Bridge DNS defaults to the installed resolver's usable non-loopback IPv4
+servers, retaining search/options lines in a private read-only view. Loopback
+stubs in another launch are not reachable. With no usable server, startup fails
+explicitly; use repeated `--dns IPv4` or prepare the stored resolver first.
+No public resolver is silently substituted. Explicit launch DNS also works with
+host/routed; none rejects it. This snapshot is not an Android Private DNS/VPN
+proxy. See [DNS](#dns) for its distinction from persistent installation policy.
+
+Bridge and routed use the same backend for logical bridges, veth pairs, addresses and routes.
 Private TCP/UDP ports map to native ephemeral ports, so containers can reuse the
 same internal port. Root-fabric binds can publish real ports. Android interfaces,
 routes and firewall rules are not changed. Supported nftables chains apply

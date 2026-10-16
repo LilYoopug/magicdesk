@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "file_permissions.h"
 #include "host_identity.h"
+#include "network_launch.h"
 #include "event_wait.h"
 #include "fs_rpc.h"
 #include "fs_worker.h"
@@ -553,6 +554,7 @@ static void describe_process(pid_t pid, uint64_t pc) {
         fclose(file);
     }
 }
+static struct md_network_launch launch_network;
 static void cleanup(void) {
     report_statistics();
     if (cancellation_timer>=0) { close(cancellation_timer); cancellation_timer=-1; }
@@ -604,6 +606,7 @@ static void cleanup(void) {
     }
     task_action_cleanup();
     md_admission_close(&admission);
+    md_network_launch_close(&launch_network);
     md_debugger_destroy(debugger); debugger = NULL;
     if (ipc_events>=0) close(ipc_events);
     ipc_events=-1;
@@ -6515,11 +6518,15 @@ int main(int argc, char **argv) {
         CHECK(argument+2 < argc && md_hostname_valid(argv[argument+1]));
         selected_hostname=argv[argument+1]; argument+=2;
     }
-    enum md_network_mode network_mode=MD_NETWORK_NATIVE;
-    if (argument < argc && !strcmp(argv[argument],"--network")) {
-        CHECK(argument+2<argc && !strcmp(argv[argument+1],"routed"));
-        network_mode=MD_NETWORK_ROUTED; argument+=2;
+    struct md_network_profile network_profile={0};
+    while (argument<argc && md_network_profile_option(argv[argument])) {
+        CHECK(argument+2<argc);
+        int error=md_network_profile_add(&network_profile,argv[argument],argv[argument+1]);
+        if (error) { errno=-error; perror("Shroot network option"); return 125; }
+        argument+=2;
     }
+    int network_error=md_network_profile_validate(&network_profile);
+    if (network_error) { errno=-network_error; perror("Shroot network profile"); return 125; }
     unsigned attachment_count = 0;
     const char *gamepad_endpoint=NULL;
     if (argument<argc && !strcmp(argv[argument],"--gamepad-endpoint")) {
@@ -6619,7 +6626,9 @@ int main(int argc, char **argv) {
         umask(0);
         CHECK(!md_task_registry_publish(tasks, leader, leader, &thread(leader)->identity, NULL));
         struct md_input_launch input={.endpoint=gamepad_endpoint,.wake_fd=fd_ready};
-        int startup = md_fs_worker_start(store, endpoint, admitted_path, tasks, fd_exchanges, attachments, attachment_count, statistics != NULL, &inherited_ipc, &input, &filesystem);
+        struct md_fs_worker_launch fs_launch={.attachments=attachments,.attachment_count=attachment_count,
+            .statistics=statistics!=NULL,.inherited=&inherited_ipc,.input=&input,.network=&network_profile};
+        int startup = md_fs_worker_start(store, endpoint, admitted_path, tasks, fd_exchanges, &fs_launch, &filesystem);
         md_ipc_inherited_release(&inherited_ipc);
         if (startup) errno = -startup;
         CHECK(!startup);
@@ -6651,12 +6660,13 @@ int main(int argc, char **argv) {
     CHECK(!getrlimit(RLIMIT_NPROC,&nproc));
     thread(leader)->resources.process=md_process_member_new(&thread(leader)->identity,&nproc);
     CHECK(thread(leader)->resources.process);
-    if (network_mode!=MD_NETWORK_NATIVE) {
-        struct md_network_namespace *network=md_network_namespace_new(launch_identity.user_namespace,network_mode);
-        CHECK(network);
+    network_error=md_network_launch_open(&network_profile,launch_identity.user_namespace,&launch_network);
+    if (network_error) { errno=-network_error; perror("Shroot network preparation"); return 125; }
+    if (launch_network.space) {
         md_network_namespace_release(thread(leader)->resources.network);
-        thread(leader)->resources.network=network;
+        thread(leader)->resources.network=md_network_namespace_retain(launch_network.space);
     }
+    CHECK(!md_task_registry_publish(tasks,leader,leader,&thread(leader)->identity,&thread(leader)->resources));
     if (selected_hostname) CHECK(!md_uts_namespace_set(thread(leader)->resources.uts,0,
         selected_hostname,strlen(selected_hostname)));
     byte = 'g'; CHECK(write(channel[0], &byte, 1) == 1); close(channel[0]);

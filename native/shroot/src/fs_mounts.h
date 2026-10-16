@@ -10,6 +10,9 @@ struct md_fs_attachment { const char *source, *target; int readonly; };
 /* Explicit native directories, scoped to one launch. No mount syscall, identity
  * change, source creation or persisted configuration is performed here. */
 int md_fs_mounts_open(struct md_filesystem *, const struct md_fs_attachment *, unsigned count);
+/* Immutable per-launch file, attached over an existing regular guest file.
+ * Contents and lifetime belong to the mount, never the persistent store. */
+int md_fs_mount_contents(struct md_filesystem *,const char *target,const void *,size_t);
 /* Worker-only candidate construction. Copies topology and rebases one explicit
  * root, not open descriptions, cwd or the task registry. Outputs change only on
  * success. Guest namespace publication additionally requires FD provenance. */

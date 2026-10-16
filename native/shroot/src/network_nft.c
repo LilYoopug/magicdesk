@@ -1,5 +1,6 @@
 #include "network_nft.h"
 #include "network_filter.h"
+#include "network_filter_update.h"
 #include "network_internal.h"
 #include "network_nft_attr.h"
 #include "network_nft_objects.h"
@@ -183,9 +184,7 @@ long md_network_nft(struct md_network_namespace *n,const struct md_identity *ide
                 }
             if (!used && (next->sets[i].flags&NFT_SET_ANONYMOUS)) md_filter_set_delete(next,i); else ++i;
         }
-        error=md_filter_validate(next);
-        if (!error) error=md_network_endpoint_filter_update(n,next);
-        if (!error) error=md_network_forward_prepare(n,next,&forward);
+        error=md_network_filter_prepare(n,next,&forward);
         if (error) failed=last_operation;
     }
     if (error) {
@@ -199,12 +198,7 @@ long md_network_nft(struct md_network_namespace *n,const struct md_identity *ide
     }
     long result=publication && out.size ? publication->publish(publication->context,out.data,out.size) : (long)out.size;
     if (!error && result>=0 && batch) {
-        for (size_t i=0;i<next->chain_count;++i) next->chains[i].id=0;
-        for (size_t i=0;i<next->rule_count;++i) next->rules[i].id=0;
-        for (size_t i=0;i<next->set_count;++i) next->sets[i].id=0;
-        struct md_network_filter *old=n->filter; n->filter=next; next=old;
-        md_network_forward_changed(n->fabric);
-        md_network_forward_commit(forward); forward=NULL;
+        next=md_network_filter_commit(n,next,forward); forward=NULL;
     }
     md_network_forward_abort(forward);
     md_network_filter_free(next);

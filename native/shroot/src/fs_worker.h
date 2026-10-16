@@ -11,6 +11,7 @@ struct md_fd_exchanges;
 struct md_ofd_orders;
 struct md_ipc_inherited;
 struct md_input_launch;
+struct md_network_profile;
 struct md_device_events;
 struct md_fs_work {
     struct md_fs_work *next;
@@ -33,9 +34,16 @@ int md_fs_worker_pause_state(const struct md_fs_worker_pause *);
 int md_fs_worker_pause_end(struct md_fs_worker_pause *);
 /* One worker owns the namespace, image catalogue and both request transports.
  * Published work transfers to the supervisor. Queue locks never cover IO. */
+struct md_fs_worker_launch {
+    const struct md_fs_attachment *attachments;
+    unsigned attachment_count;
+    int statistics;
+    const struct md_ipc_inherited *inherited;
+    const struct md_input_launch *input;
+    const struct md_network_profile *network;
+};
 int md_fs_worker_start(const char *store, const char *endpoint, const char *admit, struct md_task_registry *, struct md_fd_exchanges *,
-        const struct md_fs_attachment *, unsigned attachment_count, int statistics,
-        const struct md_ipc_inherited *, const struct md_input_launch *, struct md_fs_worker **out);
+        const struct md_fs_worker_launch *, struct md_fs_worker **out);
 int md_fs_worker_fd(struct md_fs_worker *);
 /* Borrowed wake owner; retained resource turns may outlive worker shutdown. */
 struct md_resource_wakeup *md_fs_worker_wakeup(struct md_fs_worker *);

@@ -365,9 +365,11 @@ int md_view_attach_source(struct md_filesystem *fs, const struct md_mount_source
     struct stat st;
     int r=md_view_mount_collect(fs);
     if (!r && fstat(source->fd,&st)) r=-errno;
-    if (!r && !S_ISDIR(st.st_mode)) r=-ENOTDIR;
+    int directory=!r && S_ISDIR(st.st_mode);
+    if (!r && !directory && !S_ISREG(st.st_mode)) r=-EOPNOTSUPP;
     if (!r && target && fstat(target->fd,&st)) r=-errno;
-    if (!r && !S_ISDIR(st.st_mode)) r=-ENOTDIR;
+    if (!r && directory!=!!S_ISDIR(st.st_mode)) r=directory ? -ENOTDIR : -EISDIR;
+    if (!r && !directory && !S_ISREG(st.st_mode)) r=-EINVAL;
     if (r) return r;
     if (!r && !fs->mounts->tree) {
         fs->mounts->tree=calloc(1,sizeof(*fs->mounts->tree));

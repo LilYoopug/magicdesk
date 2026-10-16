@@ -196,12 +196,60 @@ static int u32(struct md_network_message *o,unsigned type,uint32_t value) {
     value=htonl(value); return md_network_message_attribute(o,type,&value,4);
 }
 static unsigned wire_register(unsigned offset) { return NFT_REG32_00+offset/4; }
+static int emit_value(struct md_network_message *o,unsigned type,const void *value,unsigned size) {
+    size_t nest=0;
+    int error=md_network_message_nest(o,type,&nest);
+    if (!error) error=md_network_message_attribute(o,NFTA_DATA_VALUE,value,size);
+    if (!error) error=md_network_message_end_nest(o,nest);
+    return error;
+}
+/* Launch policies build typed expressions directly. Keep their nft dump
+ * round-trippable without manufacturing a netlink request to configure them. */
+static int emit_typed(const struct md_filter_expression *e,struct md_network_message *o) {
+    const char *name;
+    switch (e->code) {
+    case MD_FILTER_IMMEDIATE: name="immediate"; break;
+    case MD_FILTER_META: name="meta"; break;
+    case MD_FILTER_PAYLOAD: name="payload"; break;
+    case MD_FILTER_COMPARE: name="cmp"; break;
+    case MD_FILTER_NAT: name="nat"; break;
+    default: return -EOPNOTSUPP;
+    }
+    size_t entry=0,data=0;
+    int error=md_network_message_nest(o,NFTA_LIST_ELEM,&entry);
+#define PUT(call) do { if (!error) error=(call); } while (0)
+    PUT(md_network_message_attribute(o,NFTA_EXPR_NAME,name,strlen(name)+1));
+    PUT(md_network_message_nest(o,NFTA_EXPR_DATA,&data));
+    switch (e->code) {
+    case MD_FILTER_IMMEDIATE:
+        PUT(u32(o,NFTA_IMMEDIATE_DREG,wire_register(e->dst)));
+        PUT(emit_value(o,NFTA_IMMEDIATE_DATA,e->value,e->size)); break;
+    case MD_FILTER_META:
+        PUT(u32(o,NFTA_META_KEY,e->key)); PUT(u32(o,NFTA_META_DREG,wire_register(e->dst))); break;
+    case MD_FILTER_PAYLOAD:
+        PUT(u32(o,NFTA_PAYLOAD_BASE,e->key)); PUT(u32(o,NFTA_PAYLOAD_OFFSET,e->aux));
+        PUT(u32(o,NFTA_PAYLOAD_LEN,e->size)); PUT(u32(o,NFTA_PAYLOAD_DREG,wire_register(e->dst))); break;
+    case MD_FILTER_COMPARE:
+        PUT(u32(o,NFTA_CMP_SREG,wire_register(e->src))); PUT(u32(o,NFTA_CMP_OP,e->operation));
+        PUT(emit_value(o,NFTA_CMP_DATA,e->value,e->size)); break;
+    case MD_FILTER_NAT:
+        PUT(u32(o,NFTA_NAT_TYPE,e->operation)); PUT(u32(o,NFTA_NAT_FAMILY,NFPROTO_IPV4));
+        if (e->key) PUT(u32(o,NFTA_NAT_REG_ADDR_MIN,wire_register(e->dst)));
+        if (e->aux) PUT(u32(o,NFTA_NAT_REG_PROTO_MIN,wire_register(e->src)));
+        break;
+    default: break;
+    }
+    PUT(md_network_message_end_nest(o,data)); PUT(md_network_message_end_nest(o,entry));
+    return error;
+#undef PUT
+}
 int md_nft_emit_expressions(struct md_network_filter *f,const struct md_filter_rule *r,struct md_network_message *o) {
     size_t list=0,offset=0;
     int error=md_network_message_nest(o,NFTA_RULE_EXPRESSIONS,&list);
 #define PUT(call) do { if (!error) error=(call); } while (0)
     for (unsigned i=0;!error && i<r->count;++i) {
         const struct md_filter_expression *e=&r->expressions[i];
+        if (!r->wire) { error=emit_typed(e,o); continue; }
         const struct nlattr *item=(const void *)((const char *)r->wire+offset);
         struct attribute a[NFTA_EXPR_MAX+1];
         error=fields(item+1,item->nla_len-sizeof(*item),BIT(NFTA_EXPR_NAME)|BIT(NFTA_EXPR_DATA),a,NFTA_EXPR_MAX+1);

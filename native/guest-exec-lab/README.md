@@ -81,6 +81,17 @@ running beside GUI observation so MCP's request workers remain available.
 unmodified sandbox, Landlock denials, synchronization, package installation,
 reinstallation, file verification and removal of a fixture-installed package.
 
+`test_launch_network.py --store STORE --build BUILD` checks the common launch
+network profile under UID 2000: run/exec/login/low-level entrypoints, offline
+loopback, isolated DNS views, concurrent bridge TCP/UDP publications, outgoing
+TCP/UDP, a real libc DNS query, conflicts, cancellation and abnormal exit.
+The store needs Python 3 and an installed resolver; `--cli-only` needs only a
+shell and cat (also tested on Alpine). `--native-tests` includes the resource,
+mount and filesystem-worker suites, including partial port-reservation rollback.
+Traffic assertions use local native peers, independently of internet stability.
+`test_os_boot.py --network bridge --dns IPv4` applies the same profile to stock
+init boot; its default remains routed. Reports identify the native binaries.
+
 The Docker and Podman network probes allocate paired TCP/UDP ports through an
 observer outside Shroot, then check publication, collision rejection, and port
 release. They do not assume fixed test ports are unused. Docker diagnostic

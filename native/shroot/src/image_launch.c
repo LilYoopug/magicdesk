@@ -9,6 +9,7 @@
 #include "host_identity.h"
 #include "socket_routes.h"
 #include "arguments.h"
+#include "network_profile.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -135,7 +136,7 @@ int md_image_launch(enum md_image_command kind, int argc, char **argv) {
     struct md_socket_routes routes = {0};
     const char *selected_user = NULL;
     const char *hostname_override = NULL;
-    const char *network = NULL;
+    struct md_network_profile network = {0};
     const char *gamepad_endpoint = NULL;
     int position = 1, commands = 0;
     while (position < argc && strcmp(argv[position], "--")) {
@@ -154,15 +155,20 @@ int md_image_launch(enum md_image_command kind, int argc, char **argv) {
         }
         if (position+1 >= argc) return -EINVAL;
         const char *option = argv[position++]; char *value = argv[position++];
-        if (!strcmp(option, "--user") && !selected_user && *value) selected_user = value;
+        if (md_network_profile_option(option)) {
+            int error=md_network_profile_add(&network,option,value);
+            if (error) return error;
+        }
+        else if (!strcmp(option, "--user") && !selected_user && *value) selected_user = value;
         else if (!strcmp(option, "--cwd") && value[0] == '/') cwd_override = value;
         else if (!strcmp(option, "--entrypoint") && kind == MD_IMAGE_RUN) entry_override = value;
         else if (!strcmp(option, "--hostname") && !hostname_override && md_hostname_valid(value)) hostname_override = value;
-        else if (!strcmp(option, "--network") && !network && !strcmp(value,"routed")) network = value;
         else if (!strcmp(option, "--gamepad-endpoint") && !gamepad_endpoint && *value) gamepad_endpoint=value;
         else if (!strcmp(option, "--env") && override_count < 128) overrides[override_count++] = value;
         else return -EINVAL;
     }
+    int network_error=md_network_profile_validate(&network);
+    if (network_error) return network_error;
     if (position < argc) ++position;
     if (kind == MD_IMAGE_EXEC && position == argc) return -EINVAL;
     if (kind != MD_IMAGE_RUN) entry_override = "";
@@ -211,7 +217,7 @@ int md_image_launch(enum md_image_command kind, int argc, char **argv) {
     char *login[] = {(char *)shell, "-l"};
     if (kind == MD_IMAGE_LOGIN && position == argc) { command = login; command_count = 2; }
     size_t total = entry_count + explicit_count + command_count;
-    size_t launch_count=3+commands+2+2+2*!!network+2*!!gamepad_endpoint+4*guest_user
+    size_t launch_count=3+commands+2+2+md_network_profile_arguments(&network,NULL)+2*!!gamepad_endpoint+4*guest_user
         +3*(attachment_count+routes.count)+8+8*(kind==MD_IMAGE_LOGIN)
         +2*(env_count+override_count)+1+total+1;
     if (!r && (!total || launch_count>MD_EXEC_POINTERS)) r = -E2BIG;
@@ -245,7 +251,7 @@ int md_image_launch(enum md_image_command kind, int argc, char **argv) {
         if (commands) launch[n++] = "--magicdesk";
         launch[n++] = "--cwd"; launch[n++] = (char *)working;
         launch[n++] = "--hostname"; launch[n++] = (char *)(hostname_override ? hostname_override : hostname);
-        if (network) { launch[n++]="--network"; launch[n++]=(char *)network; }
+        n+=md_network_profile_arguments(&network,launch+n);
         if (gamepad_endpoint) { launch[n++]="--gamepad-endpoint"; launch[n++]=(char *)gamepad_endpoint; }
         for (unsigned i = 0; i < routes.count; ++i) {
             launch[n++] = (char *)md_socket_route_option(&routes.entries[i]);

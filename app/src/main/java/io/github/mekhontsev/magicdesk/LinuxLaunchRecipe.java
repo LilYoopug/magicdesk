@@ -134,7 +134,7 @@ final class LinuxLaunchRecipe {
         var plan = graphical ? GuestGraphicalConnection.plan(identity, cwd, command, protocol)
                 : new GuestLaunchPlan(identity, cwd, command.isEmpty()
                         ? managed ? List.of() : List.of("/bin/sh", "-l") : List.of("/bin/sh", "-lc", command));
-        plan = new GuestLaunchPlan(plan.environment(), plan.directory(), plan.command(), environment.magicDesk());
+        plan = new GuestLaunchPlan(plan.environment(), plan.directory(), plan.command(), environment.magicDesk(), plan.network());
         String exec = DesktopExecTemplate.encodeArguments(graphical
                 ? List.of("env", "MAGICDESK_GUEST_LABEL=" + name, "sh", "-c",
                         GuestGraphicalConnection.invocation(plan, protocol, true)) : plan.arguments());

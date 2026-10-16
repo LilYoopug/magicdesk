@@ -4,9 +4,50 @@
 
 Namespace-local network configuration, supported nftables flow filtering and NAT. This is not an Android firewall or native-kernel isolation.
 
+- [Launch Profiles](#launch-profiles)
 - [Network Namespaces](#network-namespaces)
 - [Namespace-Owned Sysctls](#namespace-owned-sysctls)
 - [Namespace-Owned Sysfs](#namespace-owned-sysfs)
+
+## Launch Profiles
+
+`network_profile` owns the bounded native argument contract shared by image
+run/exec/login, the low-level runner and supervisor: host (default), none,
+bridge, the advanced routed backend, publications and DNS. Java's
+`GuestNetworkProfile` only carries immutable launch arguments; native code owns
+syntax, preparation and lifetime. MCP and shell CLI use that same runner. OS
+boot inherits the profile through its ordinary launch and namespace setup.
+
+`network_launch` prepares topology before guest execution. Host is a no-op.
+None enables private loopback without an uplink. Bridge retains a routed gateway
+and a private guest namespace in one fabric: gateway bridge `10.88.0.1/24`, guest
+`eth0` `10.88.0.2/24`, loopback and a default route. Independent launches reuse
+these logical addresses without sharing ports or owners. The supervisor owns
+both namespaces; the fabric's peer list remains weak, avoiding a reference cycle.
+Routed remains a supported low-level mode, not an obsolete bridge alias.
+
+Published TCP/UDP ports become typed PREROUTING DNAT rules on the gateway;
+private guest binds do not automatically publish. `network_filter_update`
+shares validation, direct-flow compatibility, frontend reservation and commit
+with the nftables adapter. It prepares all resources before state replacement;
+the netlink adapter still publishes its ACK before committing. Failure aborts
+all reservations. Teardown joins the existing forwarding owner and releases
+ports on cancellation, guest failure or normal completion. No second proxy or
+network thread is created for native/unfiltered data IO.
+
+`network_resolver` runs once in filesystem-worker preparation. Explicit servers,
+or bridge's filtered snapshot of the installed resolver, become a private
+read-only file mount. Missing targets and unusable stub-only configurations fail
+explicitly. `md_fs_mount_contents` uses an anonymous O_TMPFILE from the existing
+store backend and the ordinary mount-view owner: no persistent name, inode
+catalog entry, control FD or per-read resolver work. Last-FD closure reclaims the
+backing file even after abrupt process exit. Persistent DNS installation and
+launch-local resolver configuration remain separate operations.
+
+The public [CLI contract](../../docs/shroot.md#network-modes) records limits and
+isolation caveats. `test_launch_network.py` exercises independent native clients,
+TCP/UDP publication, real resolver IO, outbound traffic and cleanup; native model
+tests also cover partial reservation rollback and typed nft round trips.
 
 ## Network Namespaces
 

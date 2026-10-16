@@ -5,14 +5,19 @@ import java.util.List;
 import java.util.Objects;
 
 /** Argument-only contract shared by terminal, background and graphical launch adapters. */
-public record GuestLaunchPlan(GuestEnvironment environment, String directory, List<String> command, boolean magicDesk) {
+public record GuestLaunchPlan(GuestEnvironment environment, String directory, List<String> command, boolean magicDesk,
+        GuestNetworkProfile network) {
     public static final String TOOL = "shroot";
     public GuestLaunchPlan(GuestEnvironment environment, String directory, List<String> command) {
         this(environment, directory, command, false);
     }
+    public GuestLaunchPlan(GuestEnvironment environment, String directory, List<String> command, boolean magicDesk) {
+        this(environment, directory, command, magicDesk, GuestNetworkProfile.HOST);
+    }
 
     public GuestLaunchPlan {
         Objects.requireNonNull(environment, "environment");
+        Objects.requireNonNull(network, "network");
         directory = environment.image() && (directory == null || directory.isEmpty()) ? ""
                 : GuestEnvironment.absolute(directory, "guest directory");
         command = List.copyOf(command);
@@ -40,6 +45,7 @@ public record GuestLaunchPlan(GuestEnvironment environment, String directory, Li
         if (environment.image() && !environment.home().isEmpty()) result.addAll(List.of("--env", "HOME=" + environment.home()));
         if (!environment.user().isEmpty()) result.addAll(List.of("--user", environment.user()));
         if (magicDesk) result.add("--magicdesk");
+        result.addAll(network.arguments());
         return List.copyOf(result);
     }
 

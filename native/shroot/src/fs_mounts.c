@@ -4,6 +4,7 @@
 #include "linux_abi.h"
 #include "mount_topology.h"
 #include "fs_storage.h"
+#include "mount_source.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -285,6 +286,31 @@ void md_fs_mounts_close(struct md_filesystem *fs) {
     md_mount_namespace_release(fs->mounts);
     fs->mounts = NULL; fs->native_root = NULL;
     md_fs_storage_prune(fs->storage);
+}
+int md_fs_mount_contents(struct md_filesystem *fs,const char *path,const void *bytes,size_t size) {
+    if (!path || path[0]!='/' || !bytes || !size) return -EINVAL;
+    struct md_view_location target;
+    int error=md_view_walk(fs,MD_INODE_ROOT,NULL,path,1,0,0,&target);
+    if (error) return error;
+    /* O_TMPFILE is reopenable under Android's shell policy, unlike a memfd.
+     * No name or inode record survives this launch, including an abrupt exit. */
+    int fd=md_inode_temporary(fs->store);
+    if (fd<0) error=fd;
+    size_t written=0;
+    while (!error && written<size) {
+        ssize_t count=pwrite(fd,(const char *)bytes+written,size-written,(off_t)written);
+        if (count<0 && errno==EINTR) continue;
+        if (count<=0) error=count<0 ? -errno : -EIO;
+        else written+=(size_t)count;
+    }
+    if (!error && fchmod(fd,0444)) error=-errno;
+    if (!error) {
+        struct md_mount_source source={.fd=fd,.policy=MD_MOUNT_READONLY|MD_MOUNT_NOEXEC|MD_MOUNT_NOSUID|MD_MOUNT_NODEV};
+        error=md_view_attach_source(fs,&source,&target,NULL);
+    }
+    if (fd>=0) close(fd);
+    md_view_location_close(&target);
+    return error;
 }
 int md_fs_mounts_open(struct md_filesystem *fs, const struct md_fs_attachment *entries, unsigned count) {
     if (fs->mounts || count > MD_FS_MOUNTS_MAX) return -EINVAL;
