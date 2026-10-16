@@ -18,6 +18,8 @@ import java.util.List;
 
 /** Immutable content-addressed helpers; no collection while guest processes may still exec. */
 public final class GuestRuntimeArtifacts {
+    // Static helpers can retain debug information in development APKs.
+    static final int MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
     public static final List<String> FILES = List.of("libmagicdesk_guest_bootstrap.so",
             "libmagicdesk_guest_supervisor.so", "libmagicdesk_guest_run.so", "libmagicdesk_guest_service.so",
             "libmagicdesk_guest_image.so", "libmagicdesk_command_client.so");
@@ -49,7 +51,7 @@ public final class GuestRuntimeArtifacts {
                     var bytes = new byte[32768];
                     int total = 0;
                     for (int n; (n = input.read(bytes)) >= 0;) {
-                        if ((total += n) > 16777216) throw new IOException("Runtime artifact grew during preparation");
+                        if ((total += n) > MAX_ARTIFACT_BYTES) throw new IOException("Runtime artifact grew beyond the size limit during preparation");
                         var buffer = java.nio.ByteBuffer.wrap(bytes, 0, n);
                         while (buffer.hasRemaining()) output.write(buffer);
                     }
@@ -87,8 +89,10 @@ public final class GuestRuntimeArtifacts {
     }
 
     private static InputStream open(Path file) throws IOException {
-        if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS) || Files.size(file) > 16777216)
+        if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
             throw new IOException("Invalid guest runtime artifact: " + file);
+        if (Files.size(file) > MAX_ARTIFACT_BYTES)
+            throw new IOException("Guest runtime artifact exceeds " + MAX_ARTIFACT_BYTES + " bytes: " + file);
         return Channels.newInputStream(Files.newByteChannel(file, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS));
     }
 
@@ -98,7 +102,7 @@ public final class GuestRuntimeArtifacts {
             byte[] bytes = new byte[32768];
             int total = 0;
             for (int n; (n = stream.read(bytes)) >= 0;) {
-                if ((total += n) > 16777216) throw new IOException("Runtime artifact grew during preparation");
+                if ((total += n) > MAX_ARTIFACT_BYTES) throw new IOException("Runtime artifact grew beyond the size limit during preparation");
                 digest.update(bytes, 0, n);
             }
         }

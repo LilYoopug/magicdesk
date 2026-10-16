@@ -125,6 +125,23 @@ public class GuestRuntimeTest {
         assertThrows(IOException.class, () -> GuestRuntimeArtifacts.prepare(source, root));
     }
 
+    @Test public void preparesLargeDebugHelpersButBoundsArtifactSize() throws Exception {
+        Path source = source(), root = temporary.newFolder().toPath();
+        Path helper = source.resolve("libmagicdesk_guest_image.so");
+        try (var file = new java.io.RandomAccessFile(helper.toFile(), "rw")) {
+            file.setLength(17 * 1024 * 1024);
+        }
+        Path bundle = GuestRuntimeArtifacts.prepare(source, root);
+        assertEquals(Files.size(helper), Files.size(bundle.resolve(helper.getFileName())));
+        assertEquals(bundle, GuestRuntimeArtifacts.prepare(source, root));
+        try (var file = new java.io.RandomAccessFile(helper.toFile(), "rw")) {
+            file.setLength((long) GuestRuntimeArtifacts.MAX_ARTIFACT_BYTES + 1);
+        }
+        assertTrue(assertThrows(IOException.class, () -> GuestRuntimeArtifacts.prepare(source, root))
+                .getMessage().contains("exceeds"));
+        try (var paths = Files.list(root)) { assertEquals(1, paths.count()); }
+    }
+
     @Test public void preparationDoesNotConsumeInheritedGraphicsConnection() {
         assertTrue(GuestRuntimeCommand.SCRIPT.contains("md_guest=$(CLASSPATH="));
         assertTrue(GuestRuntimeCommand.SCRIPT.contains("exec \"$md_guest/libmagicdesk_guest_run.so\" \"$@\""));
