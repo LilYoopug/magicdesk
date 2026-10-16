@@ -5,12 +5,35 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <grp.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 static pthread_mutex_t mutex;
+static pthread_barrier_t ready, done;
+static void *credential_worker(void *unused) {
+    (void)unused;
+    pthread_barrier_wait(&ready);
+    pthread_barrier_wait(&done);
+    assert(getuid()==0 && getgid()==0);
+    return NULL;
+}
+static void credentials(void) {
+    pthread_t workers[3];
+    assert(!pthread_barrier_init(&ready,NULL,4));
+    assert(!pthread_barrier_init(&done,NULL,4));
+    for (unsigned i=0;i<3;++i) assert(!pthread_create(&workers[i],NULL,credential_worker,NULL));
+    pthread_barrier_wait(&ready);
+    assert(!setgroups(0,NULL));
+    assert(!setgid(0));
+    assert(!setuid(0));
+    pthread_barrier_wait(&done);
+    for (unsigned i=0;i<3;++i) assert(!pthread_join(workers[i],NULL));
+    assert(!pthread_barrier_destroy(&ready));
+    assert(!pthread_barrier_destroy(&done));
+}
 static volatile pid_t parent_tid, child_tid;
 static int clone_child(void *unused) {
     (void)unused;
@@ -54,8 +77,10 @@ static void threads(void) {
     free(stack);
 }
 int main(void) {
+    credentials();
     threads();
     assert(!prctl(PR_SET_DUMPABLE,0));
+    credentials();
     threads();
     puts("PASS thread identity: recursive mutex ownership is stable from first instruction");
     return 0;

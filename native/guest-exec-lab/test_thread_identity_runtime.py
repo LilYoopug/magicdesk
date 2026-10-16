@@ -24,6 +24,13 @@ def main():
                           + wrapper + [target + '/thread'], timeout=30)
         if args.debuggers:
             namespace = ['/usr/bin/unshare', '--pid', '--fork', '--mount-proc']
+            trace = ['/usr/bin/strace', '-f', '-qq', '-o', '/dev/null']
+            # Trace from the parent namespace as well: the tracer and signal
+            # recipient must not share the same siginfo PID translation.
+            for wrapper in (trace, trace + namespace):
+                output = suite.command(base + ['--bind-ro', suite.base, target, '--deadline-seconds', '60', '--']
+                                       + wrapper + [target + '/thread'], timeout=70)
+                assert 'PASS thread identity:' in output, output
             for debugger in (['/usr/bin/strace', '-f', '-qq', '-o', '/dev/null'],
                              ['/usr/bin/gdb', '-nx', '-batch',
                               '-ex', 'set debuginfod enabled off', '-ex', 'set disable-randomization off',

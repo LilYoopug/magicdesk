@@ -45,6 +45,12 @@ An inferior's unmaskable SIGSTOP also waits for that boundary, after its interna
 file-table and filesystem turns finish. Its original siginfo belongs to the
 debugger relationship; suppressing the stop does not group-stop the application
 or expose adapter registers. Untraced processes retain kernel job control.
+Stop siginfo remains native while the debugger owns the stop. Both ordinary
+continuation and debugger continuation use the same final-delivery owner for
+recipient PID/UID translation and PID-1 signal policy. Debugger observation uses
+the debugger's view separately. This preserves libc's thread-directed set-ID
+handshake under strace across PID namespaces, including nondumpable targets;
+signal-free resumes do not add a siginfo query.
 Admitting a trace relationship activates observation in the owner's whole thread
 group. A native wait entered before that relationship is interrupted and restarted
 through the same debugger-aware wait path. This also covers a child requesting

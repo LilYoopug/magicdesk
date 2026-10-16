@@ -4966,6 +4966,33 @@ static int signal_allowed(const struct thread *from,const struct thread *to,int 
 static int namespace_init(const struct thread *t) {
     return md_pid_identity_number(t->resources.pid_group,md_pid_identity_namespace(t->resources.pid))==1;
 }
+/* Keep stop information native while a guest debugger owns it. Translate only
+ * on actual delivery, in the recipient's namespaces rather than the tracer's. */
+static void resume_signal(pid_t pid,int sig) {
+    struct thread *t=thread(pid);
+    if (sig && t->resources.pid) {
+        siginfo_t info;
+        if (!tracee_request(t,PTRACE_GETSIGINFO,NULL,&info,"pid-signal-info")) return;
+        int fault=info.si_code>0 && (sig==SIGSEGV || sig==SIGBUS || sig==SIGILL
+            || sig==SIGFPE || sig==SIGSYS || sig==SIGTRAP);
+        if (namespace_init(t) && sig!=SIGKILL && sig!=SIGSTOP && !fault) {
+            uint64_t caught=0;
+            long error=md_task_signal_handlers(t->pid,&caught);
+            if (error) {
+                fprintf(stderr,"Shroot: cannot observe PID init signal disposition: %ld\n",error);
+                syscall(SYS_tgkill,t->tgid,t->pid,SIGKILL);
+                resume(pid,0); return;
+            }
+            if (!(caught&(UINT64_C(1)<<(sig-1)))) { resume(pid,0); return; }
+        }
+        if (info.si_signo==SIGCHLD || info.si_code==SI_USER || info.si_code==SI_TKILL) {
+            info.si_uid=process_signal_uid(t,info.si_pid,info.si_uid);
+            info.si_pid=visible_pid(t,info.si_pid);
+            if (!tracee_request(t,PTRACE_SETSIGINFO,NULL,&info,"pid-signal-sender")) return;
+        }
+    }
+    resume(pid,sig);
+}
 static int init_signal_suppressed(const struct thread *from,const struct thread *to,int signal) {
     if ((signal!=SIGKILL && signal!=SIGSTOP) || !namespace_init(to)) return 0;
     /* Kernel-only signals may force a child init only from an ancestor PID
@@ -6487,7 +6514,7 @@ int main(int argc, char **argv) {
         .visible_pid=debugger_visible_pid,.native_pid=debugger_native_pid,.visible_uid=debugger_visible_uid,.reaped=debugger_reaped,
         .attachable=debugger_attachable,.observe=debugger_observe,.interrupt=debugger_interrupt,.options=debugger_options,
         .listen=debugger_listen,.usage=debugger_usage,.wait=debugger_wait,.wait_wake=debugger_wait_wake,
-        .complete=debugger_complete,.resume=resume};
+        .complete=debugger_complete,.resume=resume_signal};
     debugger=md_debugger_create(&debug_host); CHECK(debugger);
     if (argument < argc && !strcmp(argv[argument], "--admit-elf")) {
         CHECK(argument + 2 < argc);
@@ -7602,28 +7629,7 @@ int main(int argc, char **argv) {
                 if (sig == SIGSYS)
                     TRACE("PROBE application SIGSYS syscall=%d cookie=%d call=%p\n", info.si_syscall, info.si_errno, info.si_call_addr);
             }
-            if (t->resources.pid) {
-                siginfo_t info;
-                if (!tracee_request(t,PTRACE_GETSIGINFO,NULL,&info,"pid-signal-info")) continue;
-                int fault=info.si_code>0 && (sig==SIGSEGV || sig==SIGBUS || sig==SIGILL
-                    || sig==SIGFPE || sig==SIGSYS || sig==SIGTRAP);
-                if (namespace_init(t) && sig!=SIGKILL && sig!=SIGSTOP && !fault) {
-                    uint64_t caught=0;
-                    long error=md_task_signal_handlers(t->pid,&caught);
-                    if (error) {
-                        fprintf(stderr,"Shroot: cannot observe PID init signal disposition: %ld\n",error);
-                        syscall(SYS_tgkill,t->tgid,t->pid,SIGKILL);
-                        resume(pid,0); continue;
-                    }
-                    if (!(caught&(UINT64_C(1)<<(sig-1)))) { resume(pid,0); continue; }
-                }
-                if (info.si_signo==SIGCHLD || info.si_code==SI_USER || info.si_code==SI_TKILL) {
-                    info.si_uid=process_signal_uid(t,info.si_pid,info.si_uid);
-                    info.si_pid=visible_pid(t,info.si_pid);
-                    if (!tracee_request(t,PTRACE_SETSIGINFO,NULL,&info,"pid-signal-sender")) continue;
-                }
-            }
-            resume(pid, sig);
+            resume_signal(pid, sig);
         }
     }
     for (unsigned i = 0; i < 64 && denials[i].count; i++)
