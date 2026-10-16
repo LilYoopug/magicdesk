@@ -33,6 +33,13 @@ separate from successful namespace package-lifecycle checks.
   Image-open replies additionally carry a bounded object ID and canonical path,
   captured with the descriptor in one namespace transaction.
 
+Stopped-task unlink/rename/link/mkdir use request-owned operands and a scalar
+receipt in `fs_buffer_service`, without a guest-mapped reply or FD-publication
+protocol. They share the existing context capture, worker dispatch and
+cancellation owners. The task remains stopped until the supervisor writes the
+completed result. Missing capture authority delegates before execution; accepted
+mutations are never replayed after cancellation or signals.
+
 `file_metadata.h` owns conversion between native stat, fixed-width metadata and
 guest stat/statx, including device identity, allocated blocks and timestamps.
 Only known mount IDs are advertised. Access checks use a borrowed

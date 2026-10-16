@@ -464,12 +464,22 @@ their [backing and lifetime contract](images.md#sharing-and-copy-on-write) is
 independent of OCI parsing and launch-local directory attachments.
 
 - Each connection reuses compiled inode, descriptor, name and directory queries,
-  plus BEGIN/BEGIN IMMEDIATE/COMMIT/ROLLBACK programs. Every use resets the statement and clears all bindings
+  plus BEGIN IMMEDIATE/COMMIT/ROLLBACK programs. Every use resets the statement and clears all bindings
   before leaving the operation. A bounded metadata cache is admitted against
   SQLite's current data version; no read snapshot survives the operation.
+  The exclusive store gate, not a read-only SQLite transaction, keeps catalogue
+  observations consistent across the operation. Read scopes and native-name
+  create/rename/unlink therefore issue no BEGIN/COMMIT. Catalogue mutation admits
+  BEGIN IMMEDIATE before its first write; rollback and durable promotion keep
+  their existing atomicity. The version check and interprocess gate are retained.
   Local preupdate hooks invalidate dependent object/name/backing/path rows,
   including trigger changes, without running SQL from the hook. Rollback of
   mutations discards speculative records; read-only failure does not clear them.
+  A versioned empty-catalogue fact lets native-name directories skip per-name
+  SQL absence lookups. It does not cache native directory contents or imply
+  that the directory itself is empty. Name-row hooks, external data-version
+  changes and rollback retire that fact before hardlink/overlay publication
+  can make a catalogue entry visible.
   Other writers invalidate the cache on the next admission. Native attributes
   and permission decisions are not cached.
   Resolved nodes in the current view also prime the descriptor index by backing
@@ -489,7 +499,7 @@ independent of OCI parsing and launch-local directory attachments.
   detached directories report zero links and reject enumeration and new entries.
   No pathname reopening or cached native attribute snapshot substitutes for an FD.
 - Image opening returns one retained FD, its object identity and canonical dentry
-  path in one read transaction. Ordinary opens do not reconstruct unused paths.
+  path under one store admission. Ordinary opens do not reconstruct unused paths.
   Reconstructing a directory path uses versioned parent-name records.
 - Ordinary writable opens retain read admission when no namespace or backing
   change is needed. Creation, copy-up and overlay publication promote that

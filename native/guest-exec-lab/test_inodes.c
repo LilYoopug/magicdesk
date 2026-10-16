@@ -697,13 +697,33 @@ static void scoped_paths(void) {
     close(dir); md_inode_store_close(s);
     puts("PASS scoped open paths: beneath, in-root, symlinks, cache-only and creation");
 }
+static int deny_version(void *context,int operation,const char *first,const char *second,
+        const char *database,const char *trigger) {
+    (void)context; (void)second; (void)database; (void)trigger;
+    return operation==SQLITE_PRAGMA && first && !strcmp(first,"data_version") ? SQLITE_DENY : SQLITE_OK;
+}
+static void read_admission_failure(void) {
+    struct md_inode_store *s=store("read-admission",1);
+    struct stat st;
+    CHECK(!md_inode_stat(s,-1,"/",0,&st));
+    CHECK(sqlite3_set_authorizer(s->db,deny_version,NULL)==SQLITE_OK);
+    CHECK(md_inode_stat(s,-1,"/",0,&st)<0);
+    CHECK(!s->locked && !s->read_depth && !s->write_transaction && sqlite3_get_autocommit(s->db));
+    CHECK(sqlite3_set_authorizer(s->db,NULL,NULL)==SQLITE_OK);
+    CHECK(!md_inode_stat(s,-1,"/",0,&st));
+    CHECK(!mdi_begin(s,0) && sqlite3_get_autocommit(s->db));
+    CHECK(!mdi_write(s) && !sqlite3_get_autocommit(s->db));
+    CHECK(mdi_finish(s,-ECANCELED)==-ECANCELED && sqlite3_get_autocommit(s->db));
+    md_inode_store_close(s);
+    puts("PASS lazy catalogue admission: failed version read releases the gate; write admission and rollback own the transaction");
+}
 static void reused_queries(void) {
     struct md_inode_store *s = store("queries", 1), *writer = store("queries", 0);
     int fd = md_inode_create(writer, MD_INODE_ROOT, "value", 0600); CHECK(fd >= 0);
     struct stat st;
     CHECK(!md_inode_fstat(s, fd, &st));
     struct stat original = state(s, "value", 1);
-    /* Warm both commit and rollback programs before measuring reuse. */
+    /* Reads retain store admission and external-version checks, not a SQL transaction. */
     CHECK(md_inode_stat(s, MD_INODE_ROOT, "absent", 0, &st) == -ENOENT);
     struct md_inode_statistics statistics = {0};
     md_inode_measure(s, &statistics);
@@ -721,7 +741,7 @@ static void reused_queries(void) {
     CHECK(state(s, "value", 1).st_ino != original.st_ino);
     CHECK(!md_inode_fstat(s, fd, &st) && st.st_nlink == 0 && st.st_ino == original.st_ino);
     CHECK(statistics.query_reuses > 100 && statistics.prepare.calls == 0);
-    CHECK(statistics.step.calls && statistics.transaction.calls && statistics.lock.calls);
+    CHECK(statistics.step.calls && !statistics.transaction.calls && statistics.lock.calls);
     CHECK(statistics.metadata_cache_hits && statistics.metadata_cache_misses);
     /* Local mutations and native content changes invalidate different things:
      * namespace attributes must refresh; file sizes always come from the FD. */
@@ -789,14 +809,14 @@ static void metadata_queries(void) {
     struct md_inode_statistics statistics = {0};
     md_inode_measure(s, &statistics);
     opened = md_inode_open(s, dir, "value", O_RDONLY, 0); CHECK(opened >= 0); close(opened);
-    /* BEGIN/version/COMMIT; warm directory/name rows require no SQL lookup. */
-    CHECK(statistics.step.calls == 3);
+    /* Only version admission; warm rows need neither SQL lookup nor BEGIN/COMMIT. */
+    CHECK(statistics.step.calls == 1 && !statistics.transaction.calls);
     uint64_t before = statistics.step.calls;
     CHECK(!md_inode_fstat(s, fd, &st) && st.st_nlink == 1);
-    CHECK(statistics.step.calls - before == 3);
+    CHECK(statistics.step.calls - before == 1);
     before = statistics.step.calls;
     CHECK(!md_inode_stat(s, dir, "value", 0, &st) && st.st_nlink == 1);
-    CHECK(statistics.step.calls - before == 3);
+    CHECK(statistics.step.calls - before == 1);
     uint64_t links = statistics.link_count_queries;
     CHECK(md_inode_getdents(s, dir, entries, sizeof(entries)) > 0);
     CHECK(md_inode_getdents(s, dir, entries, sizeof(entries)) == 0);
@@ -821,7 +841,7 @@ static void backing_cache(void) {
     CHECK(!md_inode_stat(s,-1,"value",0,&named));
     uint64_t steps=stats.step.calls;
     CHECK(!md_inode_fstat(s,fd,&opened) && named.st_ino==opened.st_ino);
-    CHECK(stats.step.calls==steps+3 && !stats.descriptor.calls);
+    CHECK(stats.step.calls==steps+1 && !stats.descriptor.calls && !stats.transaction.calls);
     CHECK(!ftruncate(fd,123) && !md_inode_fstat(s,fd,&opened) && opened.st_size==123);
     CHECK(!md_inode_link(writer,-1,"value",-1,"alias",0));
     CHECK(!md_inode_fstat(s,fd,&opened) && opened.st_nlink==2);
@@ -846,12 +866,12 @@ static void mutation_cache(void) {
     for (unsigned i=0;i<16;++i) {
         fd=md_inode_open(s,-1,"/stable/value",O_RDWR|O_CREAT,0600); CHECK(fd>=0); close(fd);
     }
-    CHECK(!stats.write_admissions && stats.step.calls==16*3);
+    CHECK(!stats.write_admissions && stats.step.calls==16 && !stats.transaction.calls);
     for (unsigned i=0;i<16;++i) {
         fd=md_inode_create(s,-1,"/busy/changed",0600); CHECK(fd>=0); close(fd);
         uint64_t before=stats.step.calls;
         CHECK(!md_inode_stat(s,-1,"/stable/value",0,&st));
-        CHECK(stats.step.calls-before==3);
+        CHECK(stats.step.calls-before==1);
         CHECK(!md_inode_unlink(s,-1,"/busy/changed",0));
     }
     CHECK(stats.write_admissions==32);
@@ -1068,7 +1088,8 @@ int main(int argc, char **argv) {
     if (argc == 3) { CHECK(!strcmp(argv[2], "exec-child")); exec_child("exec"); return 0; }
     CHECK(mkdir(root, 0700) == 0);
     descriptors(); namespace(); contention(); multiple_stores(); across_exec(argv[0]);
-    hierarchy(); symlinks(); permissions(); kernel_reference(); scoped_paths(); reused_queries(); metadata_queries(); cached_path_names();
+    hierarchy(); symlinks(); permissions(); kernel_reference(); scoped_paths(); read_admission_failure();
+    reused_queries(); metadata_queries(); cached_path_names();
     backing_cache(); mutation_cache(); directory_publication(); membership_queries(); counter_audit(); retained_journal();
     unsigned serial = 0;
     recovery(CREATE, MD_OBJECT_SYNCED, serial++);

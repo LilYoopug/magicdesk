@@ -30,7 +30,7 @@ struct md_inode_lifetime {
 /* Consumes the validated root/lease FD only on success. */
 struct md_inode_lifetime *mdi_lifetime_new(int root, const struct stat *);
 enum mdi_query { MDI_NODE, MDI_FD, MDI_LOOKUP, MDI_DIRECTORY_NAME, MDI_READDIR,
-    MDI_BEGIN, MDI_BEGIN_WRITE, MDI_COMMIT, MDI_ROLLBACK, MDI_EVENT, MDI_EVENT_TRIM,
+    MDI_BEGIN_WRITE, MDI_COMMIT, MDI_ROLLBACK, MDI_EVENT, MDI_EVENT_TRIM,
     MDI_EVENT_END, MDI_EVENT_SCAN, MDI_EVENT_BIRTH, MDI_EVENT_NAMES, MDI_BACKING_OBJECT, MDI_FILE_PATH, MDI_ACL,
     MDI_OVERLAY_LINK, MDI_OVERLAY_NATIVE_NAME, MDI_DATA_VERSION, MDI_ADD_NAME, MDI_DELETE_NAME, MDI_REPARENT,
     MDI_EMPTY, MDI_CREATE_OBJECT, MDI_METADATA, MDI_RESERVE_FIRST, MDI_RESERVE_ADD, MDI_RESERVE_TAKE, MDI_QUERY_COUNT };
@@ -110,6 +110,7 @@ struct mdi_cache_key {
 struct mdi_path_name { char parent[33], name[NAME_MAX+1]; int ambiguous; };
 int mdi_cache_name_get(struct md_inode_store *, const struct mdi_cache_key *, struct mdi_path_name *);
 void mdi_cache_name_put(struct md_inode_store *, const struct mdi_cache_key *, const struct mdi_path_name *);
+/* A NULL node stores/reads only the query's result, e.g. catalogue emptiness. */
 int mdi_cache_get(struct md_inode_store *, const struct mdi_cache_key *, struct mdi_node *, int *result);
 void mdi_cache_put(struct md_inode_store *, const struct mdi_cache_key *, const struct mdi_node *, int result);
 void mdi_cache_invalidate(struct md_inode_store *);

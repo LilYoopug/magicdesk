@@ -19,6 +19,20 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+static int fork_gate=-1;
+pid_t __real_fork(void);
+pid_t __wrap_fork(void) {
+    pid_t child=__real_fork();
+    if (!child && fork_gate>=0) {
+        /* EVENT_WAIT: the test releases this child only after its owner dies.
+         * The outer alarm bounds a missing acknowledgement. */
+        char byte;
+        ssize_t count;
+        do { count=read(fork_gate,&byte,1); } while (count<0 && errno==EINTR);
+        if (count!=1) _exit(124);
+    }
+    return child;
+}
 static int fds(void) {
     DIR *d=opendir("/proc/self/fd"); assert(d);
     int n=0; while (readdir(d)) ++n;
@@ -63,11 +77,13 @@ static void missing_close_range(void) {
     assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
     assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
 }
-static void owner_death(void) {
+static void owner_death(int before_admission) {
     assert(!prctl(PR_SET_CHILD_SUBREAPER,1));
-    int control,pin=pin_pipe(&control),message[2]; assert(!pipe2(message,O_CLOEXEC));
+    int control,pin=pin_pipe(&control),message[2],gate[2];
+    assert(!pipe2(message,O_CLOEXEC) && !pipe2(gate,O_CLOEXEC));
     pid_t owner=fork(); assert(owner>=0);
     if (!owner) {
+        if (before_admission) fork_gate=gate[0];
         struct md_open_job job={0};
         assert(!start(&job,pin,O_RDONLY,(struct md_open_completion){.kind=MD_OPEN_PIPE,.control=control}));
         assert(write(message[1],&job.pid,sizeof(job.pid))==sizeof(job.pid));
@@ -79,9 +95,12 @@ static void owner_death(void) {
     assert(read(message[0],&helper,sizeof(helper))==sizeof(helper) && helper>0);
     assert(!kill(owner,SIGKILL));
     int status=wait_child(owner); assert(WIFSIGNALED(status) && WTERMSIG(status)==SIGKILL);
+    if (before_admission) assert(write(gate[1],"x",1)==1);
     status=wait_child(helper);
     assert((WIFSIGNALED(status) && WTERMSIG(status)==SIGKILL) || (WIFEXITED(status) && WEXITSTATUS(status)==125));
-    assert(!close(control) && !close(pin) && !close(message[0]) && !close(message[1]));
+    if (before_admission) assert(WIFEXITED(status) && WEXITSTATUS(status)==125);
+    assert(!close(control) && !close(pin) && !close(message[0]) && !close(message[1])
+        && !close(gate[0]) && !close(gate[1]));
 }
 static void initial_readiness(void) {
     int control,pin=pin_pipe(&control);
@@ -121,7 +140,7 @@ int main(void) {
     setbuf(stdout,NULL); alarm(60);
     int before=fds();
     initial_readiness(); assert(fds()==before);
-    owner_death(); assert(fds()==before);
+    owner_death(0); owner_death(1); assert(fds()==before);
     for (unsigned round=0;round<32;++round) {
         if (round==16) missing_close_range();
         int control, pin=pin_pipe(&control);
@@ -159,7 +178,7 @@ int main(void) {
     char byte; assert(read(unrelated[0],&byte,1)==0);
     assert(!md_open_job_cancel(&parked) && reap(&parked)==-ECANCELED);
     assert(!close(unrelated[0]) && !close(control) && !close(pin) && fds()==before);
-    owner_death(); assert(fds()==before);
+    owner_death(0); owner_death(1); assert(fds()==before);
     puts("PASS deferred open ownership: paired FIFO, ENXIO, EOF, cancellation before/after delivery, owner death, close_range fallback, no inherited FD retention");
     return 0;
 }

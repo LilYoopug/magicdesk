@@ -363,6 +363,37 @@ static void pinned_rule(struct md_inode_store *s,int dir) {
     close(fd); assert(!md_inode_unlink(s,dir,"pinned",0));
     puts("PASS Landlock native inode pin: unlink/replacement isolation, immutable sharing and final FD release");
 }
+static void catalogue_absence(struct md_inode_store *s,int dir) {
+    struct stat st;
+    assert(md_inode_stat(s,dir,"absent-warm",0,&st)==-ENOENT);
+    struct md_inode_statistics costs={0};
+    md_inode_measure(s,&costs);
+    for (unsigned i=0;i<128;++i) {
+        char name[40]; snprintf(name,sizeof(name),"unique-absent-%u",i);
+        assert(md_inode_stat(s,dir,name,0,&st)==-ENOENT);
+    }
+    assert(costs.version.calls==128 && costs.step.calls==128 && !costs.transaction.calls);
+    md_inode_measure(s,NULL);
+    struct md_inode_store *writer;
+    assert(!md_inode_store_reconnect(s->lifetime,&writer));
+    int fd=md_inode_create(writer,dir,"catalogued",0644); assert(fd>=0);
+    assert(!md_inode_stat(s,dir,"catalogued",0,&st) && st.st_nlink==1);
+    assert(!md_inode_unlink(s,dir,"catalogued",0)); close(fd);
+    assert(md_inode_stat(s,dir,"absent-again",0,&st)==-ENOENT);
+    fd=md_inode_create(s,dir,"promoted",0644); assert(fd>=0 && native_node(s,fd));
+    assert(!md_inode_link(writer,dir,"promoted",dir,"promoted-alias",0));
+    assert(!md_inode_stat(s,dir,"promoted-alias",0,&st) && st.st_nlink==2);
+    char parent[33]; assert(!md_inode_object_id(s,dir,parent));
+    assert(!mdi_begin(s,1));
+    assert(!mdi_delete_name(s,parent,"promoted") && !mdi_delete_name(s,parent,"promoted-alias"));
+    struct mdi_node node;
+    assert(mdi_catalogue_lookup(s,parent,"promoted-alias",&node)==-ENOENT);
+    assert(mdi_finish(s,-ECANCELED)==-ECANCELED);
+    assert(!md_inode_stat(s,dir,"promoted-alias",0,&st) && st.st_nlink==2);
+    assert(!md_inode_unlink(s,dir,"promoted",0) && !md_inode_unlink(s,dir,"promoted-alias",0));
+    close(fd); md_inode_store_close(writer);
+    puts("PASS catalogue absence: unique native names skip SQL lookup; foreign insert/promotion and local rollback invalidate the proof");
+}
 static void hybrid(const char *path) {
     struct md_inode_store *s; assert(!md_inode_store_open(path,1,&s));
     struct md_identity ids=md_identity_new(0,0); s->identity=&ids;
@@ -381,10 +412,13 @@ static void hybrid(const char *path) {
     metadata(managed,42,43,0000,0);
     s->identity=&ids; close(managed);
     puts("PASS trusted metadata updates preserve native logical permissions after unlink");
+    catalogue_absence(s,dir);
     sqlite3_int64 objects=scalar(s,"SELECT count(*) FROM objects"),names=scalar(s,"SELECT count(*) FROM names");
     int observer=md_inode_watch_create(s,IN_NONBLOCK); assert(observer>=0);
     int wd=md_inode_watch_add(s,observer,dir,IN_CREATE|IN_DELETE|IN_MOVED_FROM|IN_MOVED_TO); assert(wd>0);
     sqlite3_int64 changes_before=sqlite3_total_changes64(s->db);
+    struct md_inode_statistics costs={0};
+    md_inode_measure(s,&costs);
     for (unsigned i=0;i<128;++i) {
         int fd=md_inode_create(s,dir,"a",0644); assert(fd>=0 && native_node(s,fd));
         struct stat st; assert(!md_inode_fstat(s,fd,&st) && st.st_uid==0 && (st.st_mode&07777)==0644);
@@ -393,6 +427,8 @@ static void hybrid(const char *path) {
         assert(!md_inode_fstat(s,fd,&st) && !st.st_nlink); close(fd);
     }
     assert(sqlite3_total_changes64(s->db)==changes_before);
+    assert(!costs.transaction.calls && !costs.write_admissions && costs.version.calls);
+    md_inode_measure(s,NULL);
     assert(scalar(s,"SELECT count(*) FROM objects")==objects && scalar(s,"SELECT count(*) FROM names")==names);
     union { struct inotify_event align; char data[32768]; } events;
     ssize_t count=md_inode_watch_read(s,observer,events.data,sizeof(events.data),NULL,NULL); assert(count>0);

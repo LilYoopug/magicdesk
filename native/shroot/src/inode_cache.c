@@ -48,6 +48,7 @@ static void changed_row(struct md_inode_store *s,sqlite3 *db,const char *table,i
         int affected=object && ((node_query && !e->result && equals(id,e->value.node.id))
             || (e->query!=MDI_FD && equals(id,e->id)));
         if (names) affected=(e->query==MDI_LOOKUP && equals(parent,e->id) && equals(name,e->name))
+            || (e->query==MDI_EMPTY && equals(parent,e->id))
             || ((e->query==MDI_DIRECTORY_NAME || e->query==MDI_FILE_PATH) && equals(id,e->id));
         if (backing) affected=e->query==MDI_FD && e->device==(uint64_t)sqlite3_value_int64(device)
             && e->inode==(uint64_t)sqlite3_value_int64(inode);
@@ -140,14 +141,14 @@ int mdi_cache_get(struct md_inode_store *s, const struct mdi_cache_key *key,
     struct mdi_cache_entry *entry=get(s,key);
     if (!entry) return 0;
     *result=entry->result;
-    if (!*result) *node=entry->value.node;
+    if (!*result && node) *node=entry->value.node;
     return 1;
 }
 void mdi_cache_put(struct md_inode_store *s, const struct mdi_cache_key *key,
         const struct mdi_node *node, int result) {
-    if (!result && node->native) return;
+    if (!result && node && node->native) return;
     struct mdi_cache_entry *entry=put(s,key,result);
-    if (!entry || result) return;
+    if (!entry || result || !node) return;
     entry->value.node=*node;
     /* A resolved object also identifies its current backing. Prime the same
      * versioned descriptor lookup; fstat still verifies the actual description

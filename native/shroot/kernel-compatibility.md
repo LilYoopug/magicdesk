@@ -195,6 +195,12 @@ recover the private original argument, then rearm baseline PTRACE_INTERRUPT when
 restoring the exit. This preserves restart processing without a pending real
 signal. Native UID-2000 fixtures cover both dumpable and protected tasks,
 signal-induced and synthetic-interrupt restarts, and IP-scoped TRACE filters.
+The bootstrap's classic seccomp program can encode an ordinary close's low-int
+FD in TRACE's 16-bit data, read through baseline PTRACE_GETEVENTMSG. Large and
+negative descriptors retain full capture. Ordinary close skips an entry register
+read but retains actual syscall-exit observation and table ownership. Scalar
+filesystem receipts use the existing stopped-task result publication, with no
+new seccomp flag, ioctl or post-5.15 dependency.
 Production proc/watch selector installation uses this task-affine owner through
 the mapped adapter frame, without guest FDs or ptrace writes to application
 memory. Its payload uses reserved control capacity in the same mapping so IO

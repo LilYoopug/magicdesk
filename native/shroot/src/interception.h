@@ -44,6 +44,9 @@ enum md_interception_kind {
     MD_INTERCEPT_PROCESS = 53,
     MD_INTERCEPT_READINESS = 54
 };
+/* Low descriptor numbers fit in TRACE's data alongside an explicit close tag.
+ * Larger/negative numbers retain the full descriptor-observation path. */
+enum { MD_INTERCEPT_CLOSE=0x8000, MD_INTERCEPT_CLOSE_MAX=0x7fff };
 
 /* Bootstrap-owned entry points, published before entering guest code. The
  * supervisor reads this descriptor at each image handshake, not linker symbols. */

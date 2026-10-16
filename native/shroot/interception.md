@@ -70,6 +70,13 @@ is normalized to the kernel's 32-bit argument. Close, dup/dup3, close_range and
 F_SETFD/F_DUPFD/F_DUPFD_CLOEXEC complete in the kernel; the supervisor publishes
 metadata at the syscall-exit event. These capabilities remain available after
 the admitted proc-root restriction, with application filters still in force.
+An ordinary unfiltered close with an immediately available table turn obtains
+its low-int FD directly from a tagged seccomp event cookie. It needs no entry
+register snapshot or rewrite; other calls retain their ordinary event decoding.
+The turn still spans the native exit:
+shared-table reuse, EBADF, late IO errors and terminal abandonment retain their
+existing semantics. Numbers above 32767, loans, contention and debugger/filter
+paths use full capture. This encoding is not an FD limit or a kernel permission.
 Application filters still evaluate kernel-fast-path calls. Logical credentials,
 root changes, filter installation and dumpability changes retain their observers.
 Watch descriptors install bounded FD-class read selectors lazily; reads in

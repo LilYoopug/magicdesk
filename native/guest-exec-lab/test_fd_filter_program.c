@@ -20,10 +20,13 @@ static unsigned evaluate(const struct md_fd_filter_program *p,const struct secco
             assert(i->k<=sizeof(*d)-sizeof(a) && !(i->k&3));
             memcpy(&a,(const char *)d+i->k,sizeof(a)); break;
         case BPF_ALU|BPF_AND|BPF_K: a&=i->k; break;
+        case BPF_ALU|BPF_OR|BPF_K: a|=i->k; break;
         case BPF_JMP|BPF_JEQ|BPF_K: pc+=a==i->k ? i->jt : i->jf; break;
+        case BPF_JMP|BPF_JGT|BPF_K: pc+=a>i->k ? i->jt : i->jf; break;
         case BPF_JMP|BPF_JSET|BPF_K: pc+=a&i->k ? i->jt : i->jf; break;
         case BPF_JMP|BPF_JA: pc+=i->k; break;
         case BPF_RET|BPF_K: return i->k;
+        case BPF_RET|BPF_A: return a;
         default: assert(!"unexpected FD filter instruction");
         }
     }
@@ -69,6 +72,22 @@ static unsigned expected(unsigned kind,int fd,const struct seccomp_data *d) {
     return SECCOMP_RET_ALLOW;
 }
 void test_fd_filter_program(void) {
+    const struct sock_filter close_code[]={
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        MD_FD_CLOSE_FILTER,
+        BPF_STMT(BPF_RET|BPF_A,0)
+    };
+    struct md_fd_filter_program close_filter={.count=sizeof(close_code)/sizeof(*close_code)};
+    memcpy(close_filter.code,close_code,sizeof(close_code));
+    const uint64_t numbers[]={0,3,511,32767,32768,UINT32_MAX,UINT64_C(1)<<32,(UINT64_C(1)<<32)|511};
+    for (unsigned nr=0;nr<512;++nr) for (unsigned n=0;n<sizeof(numbers)/sizeof(*numbers);++n) {
+        struct seccomp_data d={.nr=(int)nr,.args={numbers[n],UINT64_MAX,123}};
+        unsigned fd=(unsigned)numbers[n];
+        unsigned want=nr!=SYS_close ? nr : SECCOMP_RET_TRACE|(fd<=MD_INTERCEPT_CLOSE_MAX
+            ? MD_INTERCEPT_CLOSE|fd : MD_INTERCEPT_FD);
+        assert(evaluate(&close_filter,&d)==want);
+    }
+    puts("PASS compact close cookies: exact low-int FD, boundary/negative fallback, other syscall accumulator preserved");
     const struct md_fd_filter_gates gates={0x1112345678,0x2212345678,0x3312345678};
     const uintptr_t exempt[]={gates.raw,gates.watch,gates.task};
     const int fds[]={0,190,511,512,1024*1024,-1};

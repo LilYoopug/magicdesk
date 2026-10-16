@@ -120,6 +120,7 @@ int mdi_write(struct md_inode_store *s) {
     if (s->write_transaction) return 0;
     if (!s->locked || s->read_depth!=1) return -EDEADLK;
     int r=watch_writes(s);
+    if (!r && sqlite3_get_autocommit(s->db)) r=transaction(s,MDI_BEGIN_WRITE);
     if (!r) {
         s->write_transaction=1; s->read_depth=0;
         if (s->statistics) ++s->statistics->write_admissions;
@@ -143,7 +144,9 @@ int mdi_begin(struct md_inode_store *s, int write) {
     s->write_transaction=!!write;
     s->cache_checked=0;
     if (write) r=watch_writes(s);
-    if (!r) r=transaction(s,write ? MDI_BEGIN_WRITE : MDI_BEGIN);
+    /* The store lock serializes all catalogue owners. Read-only scopes need
+     * no SQLite transaction; promotion admits one before the first write. */
+    if (!r && write) r=transaction(s,MDI_BEGIN_WRITE);
     if (!r && write && s->statistics) ++s->statistics->write_admissions;
     if (!r) {
         sqlite3_stmt *query=NULL;
@@ -157,20 +160,24 @@ int mdi_begin(struct md_inode_store *s, int write) {
         r=mdi_query_release(query,r);
         if (!r) r=mdi_super_refresh(s,version);
         if (!r && write && s->super_readonly) r=-EROFS;
-        if (r) transaction(s,MDI_ROLLBACK);
+        if (r) { if (!sqlite3_get_autocommit(s->db)) transaction(s,MDI_ROLLBACK); }
         else {
             if (!write) s->read_depth=1;
             s->operation_changes=sqlite3_total_changes64(s->db);
         }
     }
-    return r ? store_unlock(s, r) : 0;
+    if (r) {
+        s->read_depth=s->write_transaction=s->cache_checked=0;
+        return store_unlock(s,r);
+    }
+    return 0;
 }
 int mdi_finish(struct md_inode_store *s, int result) {
     if (s->read_depth && --s->read_depth) return result;
     s->cache_checked=0;
     if (!result && s->write_transaction && s->overlay) result=mdi_overlay_flush(s);
-    if (!result) result = transaction(s, MDI_COMMIT);
-    if (result) transaction(s, MDI_ROLLBACK);
+    if (!result && !sqlite3_get_autocommit(s->db)) result = transaction(s, MDI_COMMIT);
+    if (result) { if (!sqlite3_get_autocommit(s->db)) transaction(s, MDI_ROLLBACK); }
     else result=mdi_events_committed(s);
     if (!result && s->sync_requested) result=mdi_checkpoint(s);
     s->sync_requested=0;
@@ -252,7 +259,7 @@ int mdi_query_acquire(struct md_inode_store *s, enum mdi_query slot, sqlite3_stm
         [MDI_DIRECTORY_NAME] = "SELECT name FROM names WHERE parent=?1 AND object=?2",
         [MDI_READDIR] = ("SELECT n.cookie,n.name,o.logical_inode,o.kind FROM names n JOIN objects o ON o.object=n.object "
             "WHERE n.parent=?1 AND n.cookie>?2 ORDER BY n.cookie"),
-        [MDI_BEGIN] = "BEGIN", [MDI_BEGIN_WRITE] = "BEGIN IMMEDIATE",
+        [MDI_BEGIN_WRITE] = "BEGIN IMMEDIATE",
         [MDI_COMMIT] = "COMMIT", [MDI_ROLLBACK] = "ROLLBACK",
         [MDI_EVENT] = "INSERT INTO events(parent,object,name,mask,cookie) VALUES(?1,?2,?3,?4,?5)",
         [MDI_EVENT_TRIM] = "DELETE FROM events WHERE sequence<=?1-65536",
@@ -334,6 +341,21 @@ int mdi_fd(struct md_inode_store *s, int fd, struct mdi_node *node) {
     int r=descriptor_node(s,&st,node);
     return r==-EXDEV ? mdi_leaf_descriptor(s,fd,&st,node) : r;
 }
+static int catalogue_empty(struct md_inode_store *s,const char *parent) {
+    const struct mdi_cache_key key={.query=MDI_EMPTY,.id=parent};
+    int cached;
+    if (mdi_cache_get(s,&key,NULL,&cached)) return cached==-ENOENT;
+    sqlite3_stmt *q=NULL;
+    int r=mdi_query_acquire(s,MDI_EMPTY,&q);
+    if (!r) r=mdi_bind_id(q,1,parent);
+    if (!r) {
+        int rc=mdi_step(s,q);
+        r=rc==SQLITE_ROW ? sqlite3_column_int(q,0) : mdi_sql_failure(rc);
+    }
+    r=mdi_query_release(q,r);
+    if (r>=0) mdi_cache_put(s,&key,NULL,r ? -ENOENT : 0);
+    return r;
+}
 int mdi_catalogue_lookup(struct md_inode_store *s, const char *parent, const char *name, struct mdi_node *node) {
     char selected[33];
     int cacheable=strnlen(parent,sizeof(selected))<sizeof(selected);
@@ -341,12 +363,23 @@ int mdi_catalogue_lookup(struct md_inode_store *s, const char *parent, const cha
     const struct mdi_cache_key key={.query=MDI_LOOKUP,.id=selected,.name=name};
     int cached;
     if (cacheable && mdi_cache_get(s,&key,node,&cached)) return cached;
+    const struct mdi_cache_key empty_key={.query=MDI_EMPTY,.id=selected};
+    int use_empty=cacheable && s->native_files;
+    int known_empty=use_empty && mdi_cache_get(s,&empty_key,NULL,&cached);
+    if (known_empty && cached==-ENOENT) return -ENOENT;
     sqlite3_stmt *q = NULL;
     int r = mdi_query_acquire(s, MDI_LOOKUP, &q);
     if (!r) r = mdi_bind_id(q, 1, parent);
     if (!r) r = mdi_bind_name(q, 2, name);
     if (!r) r = read_node(s, q, node);
     r=mdi_query_release(q,r);
+    if (use_empty) {
+        if (!r) mdi_cache_put(s,&empty_key,NULL,0);
+        else if (r==-ENOENT && !known_empty) {
+            int empty=catalogue_empty(s,parent);
+            if (empty<0) r=empty;
+        }
+    }
     if (cacheable) mdi_cache_put(s,&key,node,r);
     return r;
 }
@@ -383,14 +416,7 @@ int mdi_reparent(struct md_inode_store *s, const struct mdi_node *node, const ch
 }
 static int not_empty(const char *name,void *context) { (void)name; (void)context; return 1; }
 int mdi_empty(struct md_inode_store *s, const struct mdi_node *node) {
-    sqlite3_stmt *q = NULL;
-    int r = mdi_query_acquire(s, MDI_EMPTY, &q);
-    if (!r) r = mdi_bind_id(q, 1, node->id);
-    if (!r) {
-        int rc = mdi_step(s, q);
-        r = rc == SQLITE_ROW ? sqlite3_column_int(q, 0) : mdi_sql_failure(rc);
-    }
-    r=mdi_query_release(q,r);
+    int r=catalogue_empty(s,node->id);
     if (r==1) { int native=mdi_leaf_list(s,node,not_empty,NULL); r=native<0 ? native : !native; }
     return r;
 }

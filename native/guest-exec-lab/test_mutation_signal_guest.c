@@ -47,13 +47,20 @@ int test_mutation_signal_guest(const char *root, int protected, int restart) {
         assert(fcntl(fd,F_GETFD)==FD_CLOEXEC);
         ssize_t written;
         do { written=write(fd,"x",1); } while (written<0 && errno==EINTR);
-        assert(written==1 && !close(fd));
+        assert(written==1 && !test_syscall_registers(SYS_close,(UINT64_C(1)<<32)|(unsigned)fd,0x123,0x456,0x789));
+        assert(test_syscall_registers(SYS_close,fd,0x123,0x456,0x789)==-1 && errno==EBADF);
+        char renamed[552]; assert(snprintf(renamed,sizeof(renamed),"%s.moved",path)<(int)sizeof(renamed));
+        int moved;
+        do { moved=(int)test_syscall_registers(SYS_renameat,AT_FDCWD,(unsigned long)path,
+            AT_FDCWD,(unsigned long)renamed); } while (moved<0 && errno==EINTR);
+        assert(!moved);
         struct stat st; int result;
-        do { result=stat(path,&st); } while (result<0 && errno==EINTR);
+        do { result=stat(renamed,&st); } while (result<0 && errno==EINTR);
         assert(!result && st.st_size==1);
         do { result=fstat(native,&st); } while (result<0 && errno==EINTR);
         assert(!result && S_ISCHR(st.st_mode));
-        do { result=unlink(path); } while (result<0 && errno==EINTR);
+        do { result=(int)test_syscall_registers(SYS_unlinkat,AT_FDCWD,(unsigned long)renamed,0,0x789); }
+            while (result<0 && errno==EINTR);
         if (result) fprintf(stderr,"unlink %u: result=%d errno=%d signals=%d\n",i,result,errno,delivered);
         assert(!result);
     }

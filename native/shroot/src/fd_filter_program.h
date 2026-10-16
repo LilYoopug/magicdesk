@@ -1,8 +1,22 @@
 #ifndef MD_FD_FILTER_PROGRAM_H
 #define MD_FD_FILTER_PROGRAM_H
 #include "fd_selector.h"
+#include "interception.h"
 #include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <stddef.h>
 #include <stdint.h>
+#include <sys/syscall.h>
+
+/* Enter with the syscall number in A; leave it unchanged for other calls.
+ * Linux close consumes the low unsigned-int argument, not its upper 32 bits. */
+#define MD_FD_CLOSE_FILTER \
+    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_close,0,5), \
+    BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[0])), \
+    BPF_JUMP(BPF_JMP|BPF_JGT|BPF_K,MD_INTERCEPT_CLOSE_MAX,2,0), \
+    BPF_STMT(BPF_ALU|BPF_OR|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_CLOSE), \
+    BPF_STMT(BPF_RET|BPF_A,0), \
+    BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_FD)
 
 struct md_fd_filter_gates { uintptr_t raw,watch,task; };
 enum { MD_FD_FILTER_INSTRUCTIONS=256 };

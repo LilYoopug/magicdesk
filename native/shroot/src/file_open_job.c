@@ -69,7 +69,11 @@ int md_open_job_start(struct md_open_job *job, int pin, int flags, struct md_ope
         /* After fork from a multithreaded supervisor, only raw syscalls and
          * stack-only helpers run; no allocator, SQLite, pthread or logging. */
         long r=RAW2(prctl,PR_SET_PDEATHSIG,SIGKILL);
-        if (!r && RAW0(getppid)!=parent) r=-ECANCELED;
+        if (!r && RAW0(getppid)!=parent) {
+            /* The owner died before death-signal admission. Do not publish to
+             * the receive endpoint still inherited by this unisolated child. */
+            RAW1(exit_group,125); __builtin_unreachable();
+        }
         if (!r) r=isolate(pin,completion.kind==MD_OPEN_PIPE ? completion.control : -1,pair[1]);
         struct open_result result={0};
         if (!r) r=md_complete_open_observed(pin,flags|O_CLOEXEC,completion,&result.observation);

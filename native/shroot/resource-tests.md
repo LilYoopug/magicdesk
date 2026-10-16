@@ -87,6 +87,18 @@ all task owners exit, with allocation failure enabled.
 failed-unshare rollback, close_range splitting/marking and exec inheritance. Guest-only cases check proc-root
 sharing, native descriptor mutation after proc-root restriction, 32-bit fcntl
 command semantics and semaphore-undo splitting, final-owner cleanup and exec retention.
+Mutation-under-signal cases also verify close/EBADF and rename/unlink register
+preservation with ordinary and nondumpable callers, with and without SA_RESTART.
+`--case fs-dispatch` checks scalar mutation receipts without mapped output:
+owned operands, exact errors, cancellation before/after admission and FD balance.
+Mount-namespace cases retain mutation coverage through `/proc/self/fd` aliases.
+Store fixtures require zero SQL transactions for native-name mutation and warm
+read scopes, while preserving external-writer visibility, lazy write rollback,
+hardlink/overlay promotion, exact watch events and SIGKILL recovery.
+Unique-name probes in native-only directories require only version checks;
+foreign catalogue insert/promotion and rollback must invalidate cached absence.
+The shared close-filter program checks 32-bit argument normalization, encoded
+FD boundaries and preservation of unrelated syscall decisions.
 Pipe acknowledgements order observations; an alarm is only a failure bound.
 Concurrent cwd cases alternate successful and failed fchdir while peers perform
 relative ordinary/O_PATH opens and getcwd. Both shared and independent descriptor

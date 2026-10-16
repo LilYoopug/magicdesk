@@ -15,6 +15,7 @@
 #include "watch_calls.h"
 #include "fd_client.h"
 #include "fd_filter.h"
+#include "fd_filter_program.h"
 #include "descriptor_calls.h"
 #include "fs_buffer.h"
 #include "adapter_buffer.h"
@@ -302,6 +303,7 @@ int md_interception_install(int inherited) {
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
             DESCRIPTOR(clone) OBSERVE(clone3) OBSERVE(chroot)
+            MD_FD_CLOSE_FILTER,
             MD_DOMAIN_FD_CALLS(DESCRIPTOR)
             /* Descriptor commands use the kernel's unsigned-int argument. */
 #define FD_ARGUMENT(n, index, value) \

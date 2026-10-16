@@ -125,7 +125,7 @@ static int diagnostics;
 struct interception_statistics {
     uint64_t ptrace_requests, unknown, native_seeks, stops;
     uint64_t event_polls, event_waits;
-    uint64_t direct_status, direct_open, direct_fallback, direct_admit, direct_retry;
+    uint64_t direct_status, direct_open, direct_fallback, direct_admit, direct_retry, compact_close;
     struct md_cost rpc;
     struct { uint64_t trace, notification; } calls[512];
 };
@@ -493,6 +493,7 @@ static void proc_lookup_start(struct thread *);
 static void buffer_descriptor_start(struct thread *);
 static void dispatch(struct thread *t);
 static void direct_complete(struct thread *,int);
+static void direct_status_complete(struct thread *,const struct md_fs_result *,int);
 static int buffer_cleanup(struct thread *);
 static void report_statistics(void);
 static int debugger_allowed(pid_t, pid_t);
@@ -2805,6 +2806,26 @@ static void fd_begin(struct thread *t, const struct user_pt_regs *r, unsigned op
     /* EVENT_WAIT: another operation owns this file table. fd_ready signals its
      * exact completion; the launch deadline cancels the owned process tree. */
 }
+static int fd_close_compact(struct thread *t,unsigned long cookie) {
+    if (!(cookie&MD_INTERCEPT_CLOSE) || t->phase!=IDLE || t->fd_job || t->fd_running || t->fd_order.table
+            || t->fs_order.fs || !t->resources.files || t->application_filter
+            || t->debug_options || t->debug_call_active || t->debug_step_call
+            || md_debugger_traced(debugger,t->pid) || md_fd_origins_has_loans(t->resources.files)) return 0;
+    int ready=md_fd_order_begin(t->resources.files,&t->fd_order,fd_wakeup);
+    CHECK(ready>=0);
+    if (!ready) { CHECK(!md_fd_order_cancel(&t->fd_order)); return 0; }
+    CHECK(!md_fd_order_start(&t->fd_order));
+    /* No register rewrite or helper is needed. Keep the same table turn until
+     * the actual close result, including EBADF and late writeback errors. */
+    t->fd_registers=(struct user_pt_regs){0};
+    t->fd_registers.regs[8]=SYS_close;
+    t->fd_registers.regs[0]=cookie&MD_INTERCEPT_CLOSE_MAX;
+    unsigned long args[6]={t->fd_registers.regs[0]};
+    CHECK(!md_fd_mutation_prepare(t->resources.files,SYS_close,args,&t->fd_mutation));
+    t->fd_cwd=t->fd_capture=0; t->fd_running=1;
+    if (statistics) { ++statistics->compact_close; ++statistics->calls[SYS_close].trace; }
+    resume(t->pid,0); return 1;
+}
 static void task_action_release(struct task_action *owner) {
     CHECK(owner!=task_action_execution);
     CHECK(!md_buffer_release(&owner->buffer));
@@ -4128,6 +4149,12 @@ static void buffer_result_begin(struct thread *t,int direct) {
 static void buffer_complete(struct md_fs_buffer_request *request, pid_t pid, int error) {
     struct thread *t=find_thread(pid);
     CHECK(t && t->buffer_call==request);
+    if (t->direct==DIRECT_STATUS) {
+        const struct md_fs_result *result=md_fs_buffer_status_result(request);
+        CHECK(result);
+        t->buffer_call=NULL;
+        direct_status_complete(t,result,error); return;
+    }
     if (md_fs_buffer_capture_pending(request)) { capture_start(t,request); return; }
     if (!md_fs_buffer_ack_pending(request) && !md_fs_buffer_export_pending(request)
             && !md_fs_buffer_snapshot_pending(request) && !md_fs_buffer_task_pending(request)) t->buffer_call=NULL;
@@ -4163,7 +4190,7 @@ static void buffer_complete(struct md_fs_buffer_request *request, pid_t pid, int
             buffer_result_begin(t,direct_addfd(t,frame));
     }
     TRACE("PROBE buffer-call pid=%d operation=%llu error=%d descriptor=%d\n",pid,t->buffer_registers.regs[1],error,t->buffer_open.fd>=0);
-    if (t->direct==DIRECT_STATUS || t->direct==DIRECT_OPEN) { direct_complete(t,error); return; }
+    if (t->direct==DIRECT_OPEN) { direct_complete(t,error); return; }
     buffer_reply(t,error);
 }
 static int buffer_cleanup(struct thread *t) {
@@ -5303,40 +5330,44 @@ static int direct_begin(struct thread *t) {
             || t->debug_options || t->debug_call_active || t->debug_step_call
             || (status ? nr!=SYS_unlinkat && nr!=SYS_renameat && nr!=SYS_renameat2
                 && nr!=SYS_linkat && nr!=SYS_mkdirat : nr!=SYS_openat)) return 0;
-    if (md_buffers_take(md_memory_buffers(t->memory),&t->buffer)) return 0;
-    struct md_buffer_span span;
-    CHECK(!md_buffer_span(&t->buffer,&span));
-    struct md_fs_buffer_frame *frame=span.data;
-    memset(&frame->input,0,offsetof(struct md_fs_buffer_input,path));
-    memset(frame->input.capture_length,0,sizeof(frame->input.capture_length));
-    memset(frame->input.capture_flags,0,sizeof(frame->input.capture_flags));
-    frame->input.base[0]=frame->input.base[1]=-1;
     unsigned long args[6];
     for (unsigned i=0;i<6;++i) args[i]=t->original.regs[i];
     struct md_fs_request q={.directory={-1,-1}};
     unsigned paths=md_fs_path_call(&q,nr,args);
     CHECK(paths);
+    char captured[2][PATH_MAX];
     for (unsigned i=0;i<paths;++i) {
-        char *path=frame->input.path[i];
-        if (read_string(t->pid,args[i ? 3 : 1],path,PATH_MAX)) {
-            CHECK(!md_buffer_release(&t->buffer)); return 0;
-        }
+        char *path=captured[i];
+        if (read_string(t->pid,args[i ? 3 : 1],path,PATH_MAX)) return 0;
+        q.path[i]=path; q.directory[i]=-1;
         if (*path!='/') {
             int base=(int)args[i ? 2 : 0];
-            if (base<0 && base!=AT_FDCWD) { CHECK(!md_buffer_release(&t->buffer)); return 0; }
-            frame->input.base[i]=base;
+            if (base<0 && base!=AT_FDCWD) return 0;
+            q.directory[i]=base;
         }
-        frame->input.length[i]=strlen(path)+1;
     }
     int managed=md_domain_scoped(t->resources.fs)
         || md_mount_namespace_managed_paths(t->resources.mounts) || t->resources.landlock;
-    if (paths==1 && !managed && md_host_path(frame->input.path[0])) {
-        CHECK(!md_buffer_release(&t->buffer)); return 0;
+    if (paths==1 && !managed && md_host_path(q.path[0])) return 0;
+    int error;
+    if (status) {
+        error=md_fs_buffer_invoke_status(buffer_service,t->pid,t->resources.fs,&q,&t->buffer_call);
+    } else {
+        if (md_buffers_take(md_memory_buffers(t->memory),&t->buffer)) return 0;
+        struct md_buffer_span span;
+        CHECK(!md_buffer_span(&t->buffer,&span));
+        struct md_fs_buffer_frame *frame=span.data;
+        memset(&frame->input,0,offsetof(struct md_fs_buffer_input,path));
+        memset(frame->input.capture_length,0,sizeof(frame->input.capture_length));
+        memset(frame->input.capture_flags,0,sizeof(frame->input.capture_flags));
+        frame->input.base[0]=q.directory[0]; frame->input.base[1]=-1;
+        frame->input.length[0]=strlen(q.path[0])+1;
+        memcpy(frame->input.path[0],q.path[0],frame->input.length[0]);
+        frame->input.flags=q.flags; frame->input.mode=q.mode; frame->input.attributes=q.attributes;
+        error=md_fs_buffer_invoke(buffer_service,t->pid,t->resources.fs,q.operation,&t->buffer,&t->buffer_call);
     }
-    frame->input.flags=q.flags; frame->input.mode=q.mode; frame->input.attributes=q.attributes;
-    int error=md_fs_buffer_invoke(buffer_service,t->pid,t->resources.fs,q.operation,&t->buffer,&t->buffer_call);
     if (error) { CHECK(!md_buffer_release(&t->buffer)); return 0; }
-    if (status && !skip(t->pid)) { CHECK(!buffer_cleanup(t)); return 1; }
+    if (status && !skip(t->pid)) { md_fs_buffer_cancel(&t->buffer_call); return 1; }
     t->direct=status ? DIRECT_STATUS : DIRECT_OPEN; t->phase=DISPATCHING;
     t->direct_flags=q.flags; t->direct_mode=q.mode;
     t->buffer_registers=t->original; t->buffer_registers.regs[1]=q.operation;
@@ -5348,15 +5379,30 @@ static int direct_begin(struct thread *t) {
      * No guest instruction runs before completion; mutations are never replayed. */
     adapter_progress(); return 1;
 }
+static void direct_status_complete(struct thread *t,const struct md_fs_result *result,int error) {
+    CHECK(!t->buffer_call && !t->buffer.pool && t->kernel_stopped);
+    int delegate=error==MD_FS_BUFFER_NEEDS_TASK || (!error && result->host_path);
+    long value=error ? error : result->error;
+    t->direct=DIRECT_NONE;
+    if (delegate) {
+        if (statistics) ++statistics->direct_fallback;
+        if (tracee_request(t,PTRACE_GETSIGMASK,(void *)sizeof(t->mask),&t->mask,"direct-fallback-mask")
+                && shield(t)) dispatch_with_stack(t);
+        return;
+    }
+    struct user_pt_regs regs=t->original; regs.regs[0]=value;
+    if (!set_registers(t->pid,&regs)) return;
+    t->phase=IDLE;
+    if (!completed_event_resume(t)) resume(t->pid,0);
+}
 static void direct_complete(struct thread *t,int error) {
     CHECK(!t->buffer_call && t->kernel_stopped);
     struct md_buffer_span span;
     CHECK(!md_buffer_span(&t->buffer,&span));
     const struct md_fs_buffer_frame *frame=span.data;
-    int status=t->direct==DIRECT_STATUS;
     int delegate=error==MD_FS_BUFFER_NEEDS_TASK || (!error && frame->reply.result.host_path);
     long value=error ? error : frame->reply.result.error;
-    if (!status && !error && !delegate && !value) {
+    if (!error && !delegate && !value) {
         if (direct_addfd(t,frame)) {
             /* Only the kernel's syscall selector changes. The existing fstat
              * listener admits the exact pending result before normal decoding;
@@ -5377,11 +5423,11 @@ static void direct_complete(struct thread *t,int error) {
     if (delegate) {
         if (statistics) ++statistics->direct_fallback;
         if (tracee_request(t,PTRACE_GETSIGMASK,(void *)sizeof(t->mask),&t->mask,"direct-fallback-mask")
-                && shield(t) && (status || skip(t->pid))) dispatch_with_stack(t);
+                && shield(t) && skip(t->pid)) dispatch_with_stack(t);
         return;
     }
     struct user_pt_regs regs=t->original; regs.regs[0]=value;
-    if ((!status && !skip(t->pid)) || !set_registers(t->pid,&regs)) return;
+    if (!skip(t->pid) || !set_registers(t->pid,&regs)) return;
     t->phase=IDLE;
     if (!completed_event_resume(t)) resume(t->pid,0);
 }
@@ -6772,7 +6818,9 @@ int main(int argc, char **argv) {
         }
         else if (event == PTRACE_EVENT_SECCOMP) {
             unsigned long cookie;
-            if (!tracee_request(t, PTRACE_GETEVENTMSG, NULL, &cookie, "seccomp-event")) continue;
+            if (!tracee_request(t,PTRACE_GETEVENTMSG,NULL,&cookie,"seccomp-event")) continue;
+            if (fd_close_compact(t,cookie)) continue;
+            if (cookie&MD_INTERCEPT_CLOSE) cookie=MD_INTERCEPT_FD;
             struct user_pt_regs regs;
             if (!registers(pid, &regs)) continue;
             if (cookie==MD_INTERCEPT_TASK) { return_value(t,&regs,-EPERM); continue; }
@@ -7512,10 +7560,10 @@ static void report_statistics(void) {
             (unsigned long long)statistics->native_seeks);
         fprintf(stderr, "MD_EVENT_LOOP polls=%llu waits=%llu\n",
             (unsigned long long)statistics->event_polls, (unsigned long long)statistics->event_waits);
-        fprintf(stderr,"MD_DIRECT status=%llu open=%llu fallback=%llu admit=%llu retry=%llu\n",
+        fprintf(stderr,"MD_DIRECT status=%llu open=%llu fallback=%llu admit=%llu retry=%llu compactClose=%llu\n",
             (unsigned long long)statistics->direct_status,(unsigned long long)statistics->direct_open,
             (unsigned long long)statistics->direct_fallback,(unsigned long long)statistics->direct_admit,
-            (unsigned long long)statistics->direct_retry);
+            (unsigned long long)statistics->direct_retry,(unsigned long long)statistics->compact_close);
         for (unsigned nr = 0; nr < 512; nr++)
             if (statistics->calls[nr].trace || statistics->calls[nr].notification)
                 fprintf(stderr, "MD_SYSCALL nr=%u trace=%llu notification=%llu\n", nr,

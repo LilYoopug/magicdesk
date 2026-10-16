@@ -52,6 +52,8 @@ struct md_fs_buffer_request {
     struct md_ofd_order cursor;
     int cursor_waiting;
     int captured_only;
+    int status_only;
+    struct md_fs_result status_result;
     int adopted;
     int64_t position;
     struct md_fs_context context;
@@ -516,6 +518,14 @@ static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
     r->error=resolve_proc_objects(r);
     if (r->error) return;
     if (r->received) { r->error=inspect_received(r); return; }
+    if (r->status_only) {
+        /* The walker still needs scratch space to report an unexecuted
+         * provider boundary. Only its delegation marker leaves this worker. */
+        char boundary[PATH_MAX];
+        struct md_fs_output output={.data=boundary,.capacity=sizeof(boundary)};
+        md_fs_context_execute(&r->context,&r->request,&r->status_result,&output);
+        return;
+    }
     if (r->executable) {
         r->error=md_fs_command_prepare(&r->context,&r->request,&r->proc_image,&r->output->command,&r->images,
             &r->image_origin);
@@ -634,6 +644,55 @@ void md_fs_buffer_service_destroy(struct md_fs_buffer_service *s) {
     md_ipc_capsules_free(s->capsules);
     free(s);
 }
+static struct md_fs_buffer_request *request_new(struct md_fs_buffer_service *s,pid_t actor,size_t extra) {
+    struct md_fs_buffer_request *r=calloc(1,sizeof(*r)+extra);
+    if (!r) return NULL;
+    r->service=s; r->actor=actor; r->opened.fd=r->control_descriptor=r->fifo_control=-1;
+    r->images=(struct md_command_images){.program=-1,.loader=-1};
+    r->snapshot.fd=-1; r->captured[0]=r->captured[1]=-1;
+    return r;
+}
+static int request_admit(struct md_fs_buffer_request *r,struct md_guest_domain *fs,
+        struct md_fs_buffer_request **out) {
+    struct md_fs_buffer_service *s=r->service;
+    int error=md_task_registry_read(s->tasks,r->actor,0,&r->context.task);
+    if (!error) r->request.peer=r->context.peer=r->context.task.tgid;
+    if (!error && r->context.task.fs!=fs) error=-ESTALE;
+    if (!error) {
+        error=md_fd_order_begin(r->context.task.files,&r->files,s->wake);
+        if (error>0) error=0;
+    }
+    if (error) { dispose(r); return error; }
+    r->work=(struct md_fs_work){.run=run,.complete=complete,.ready=ready};
+    r->next=s->requests; s->requests=r; *out=r;
+    return 0;
+}
+int md_fs_buffer_invoke_status(struct md_fs_buffer_service *s,pid_t actor,struct md_guest_domain *fs,
+        const struct md_fs_request *q,struct md_fs_buffer_request **out) {
+    if (!s || !out || *out || !q || (q->operation!=MD_FS_UNLINK && q->operation!=MD_FS_RENAME
+            && q->operation!=MD_FS_LINK && q->operation!=MD_FS_MKDIR)) return -EINVAL;
+    size_t lengths[2]={0};
+    for (unsigned i=0;i<2;++i) if (q->path[i]) {
+        lengths[i]=strnlen(q->path[i],PATH_MAX)+1;
+        if (lengths[i]>PATH_MAX) return -ENAMETOOLONG;
+    }
+    struct md_fs_buffer_request *r=request_new(s,actor,lengths[0]+lengths[1]);
+    if (!r) return -ENOMEM;
+    r->captured_only=r->status_only=1;
+    r->request=(struct md_fs_request){.actor=actor,.operation=q->operation,.flags=q->flags,
+        .mode=q->mode,.directory={q->directory[0],q->directory[1]},.attributes=q->attributes};
+    size_t offset=0;
+    for (unsigned i=0;i<2;++i) if (lengths[i]) {
+        memcpy(r->path+offset,q->path[i],lengths[i]);
+        r->request.path[i]=r->path+offset; offset+=lengths[i];
+    }
+    int error=md_fs_request_validate(&r->request);
+    if (error) { dispose(r); return error; }
+    return request_admit(r,fs,out);
+}
+const struct md_fs_result *md_fs_buffer_status_result(const struct md_fs_buffer_request *r) {
+    return r && r->status_only ? &r->status_result : NULL;
+}
 static int begin(struct md_fs_buffer_service *s, pid_t actor, struct md_guest_domain *fs, unsigned operation,
         const struct md_interception_buffer *buffer, struct md_fs_buffer_request **out, int executable,
         int snapshot, unsigned snapshot_flags) {
@@ -683,14 +742,12 @@ static int begin(struct md_fs_buffer_service *s, pid_t actor, struct md_guest_do
         if ((md_fs_operation_data_inputs(operation)&(1U<<i)) && q.directory[i]==AT_FDCWD)
             return -EBADF;
     if (q.value_size>MD_FS_VALUE_MAX || (q.value_size && !md_fs_operation_value(operation))) return -EINVAL;
-    struct md_fs_buffer_request *r=calloc(1,sizeof(*r)+lengths[0]+lengths[1]+q.value_size+object_bytes+capture_bytes
+    struct md_fs_buffer_request *r=request_new(s,actor,lengths[0]+lengths[1]+q.value_size+object_bytes+capture_bytes
         +(snapshot ? sizeof(input->snapshot.data) : 0));
     if (!r) return -ENOMEM;
-    r->service=s; r->actor=actor; r->opened.fd=r->control_descriptor=r->fifo_control=-1;
-    r->images=(struct md_command_images){.program=-1,.loader=-1}; r->executable=executable;
+    r->executable=executable;
     r->snapshot=(struct md_file_snapshot){.fd=-1,.flags=snapshot_flags};
     r->snapshot_phase=snapshot ? SNAPSHOT_BEGIN : SNAPSHOT_NONE;
-    r->captured[0]=r->captured[1]=-1;
     r->request=q;
     r->task_descriptor=q.directory[0];
     error=md_buffer_pin(buffer,&r->buffer);
@@ -724,18 +781,9 @@ static int begin(struct md_fs_buffer_service *s, pid_t actor, struct md_guest_do
             if ((!*r->request.path[0] && q.directory[0]<0)
                     || ((q.mode&MD_EXEC_OBJECT) && strlen(r->request.path[1])!=32)) error=-EINVAL;
         } else if (!error) error=md_fs_request_validate(&r->request);
-        if (!error) error=md_task_registry_read(s->tasks,actor,0,&r->context.task);
-        if (!error) r->request.peer=r->context.peer=r->context.task.tgid;
-        if (!error && r->context.task.fs!=fs) error=-ESTALE;
-        if (!error) {
-            error=md_fd_order_begin(r->context.task.files,&r->files,s->wake);
-            if (error>0) error=0;
-        }
     }
     if (error) { dispose(r); return error; }
-    r->work=(struct md_fs_work){.run=run,.complete=complete,.ready=ready};
-    r->next=s->requests; s->requests=r; *out=r;
-    return 0;
+    return request_admit(r,fs,out);
 }
 int md_fs_buffer_begin(struct md_fs_buffer_service *s, pid_t actor, struct md_guest_domain *fs, unsigned operation,
         const struct md_interception_buffer *buffer, struct md_fs_buffer_request **out) {

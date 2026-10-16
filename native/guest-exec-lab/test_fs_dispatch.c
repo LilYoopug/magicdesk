@@ -723,17 +723,85 @@ static int buffer_callbacks,buffer_error;
 static pid_t buffer_actor;
 static struct md_fs_buffer_request *buffer_pending;
 static struct md_fs_buffer_open buffered_open={.fd=-1};
+static struct md_fs_result status_result;
 static void buffer_completed(struct md_fs_buffer_request *request, pid_t actor, int error) {
     assert(request && actor==(buffer_actor ? buffer_actor : getpid())); ++buffer_callbacks; buffer_error=error;
     buffer_pending=md_fs_buffer_ack_pending(request) || md_fs_buffer_snapshot_pending(request)
         || md_fs_buffer_export_pending(request) || md_fs_buffer_task_pending(request)
         || md_fs_buffer_capture_pending(request) ? request : NULL;
+    const struct md_fs_result *status=md_fs_buffer_status_result(request);
+    if (status) { status_result=*status; return; }
     if (!error) assert(md_fs_buffer_open_take(request,&buffered_open)>=0);
 }
 static void worker_event(struct md_fs_worker *w) {
     /* EVENT_WAIT: exact completion on the retained worker; timeout fails. */
     assert(md_event_wait_fd(md_fs_worker_fd(w),POLLIN,md_event_now()+5000000000LL)>=0);
     assert(!md_fs_worker_dispatch(w));
+}
+static long status_call(struct md_fs_buffer_service *service,struct md_fs_worker *worker,
+        struct md_guest_domain *fs,const struct md_fs_request *q) {
+    int callbacks=buffer_callbacks;
+    struct md_fs_buffer_request *r=NULL;
+    assert(!md_fs_buffer_invoke_status(service,getpid(),fs,q,&r));
+    assert(!md_fs_buffer_progress(service));
+    while (buffer_callbacks==callbacks) worker_event(worker);
+    assert(!buffer_pending && buffered_open.fd==-1);
+    if (!buffer_error) assert(status_result.fd==-1 && !status_result.host_path);
+    return buffer_error ? buffer_error : status_result.error;
+}
+static void status_delivery(struct md_fs_buffer_service *service,struct md_fs_worker *worker,
+        struct md_task_resources *resources,struct md_resource_wakeup *token) {
+    unsigned before=all_fds();
+    char path[64]="/scalar-owned";
+    struct md_fs_request q={.operation=MD_FS_MKDIR,.directory={-1,-1},.path={path},.mode=0700};
+    struct md_fs_buffer_request *r=NULL;
+    q.operation=MD_FS_OPEN;
+    assert(md_fs_buffer_invoke_status(service,getpid(),resources->fs,&q,&r)==-EINVAL && !r);
+    q.operation=MD_FS_MKDIR;
+    for (unsigned cancelled=0;cancelled<2;++cancelled) {
+        struct md_fd_order held={0};
+        assert(md_fd_order_begin(resources->files,&held,token)==1 && !md_fd_order_start(&held));
+        int callbacks=buffer_callbacks;
+        assert(!md_fs_buffer_invoke_status(service,getpid(),resources->fs,&q,&r));
+        strcpy(path,"/scalar-replaced");
+        assert(!md_fs_buffer_progress(service) && buffer_callbacks==callbacks);
+        if (cancelled) md_fs_buffer_cancel(&r);
+        assert(!md_fd_order_complete(&held));
+        assert(!md_fs_buffer_progress(service));
+        if (!cancelled) {
+            while (buffer_callbacks==callbacks) worker_event(worker);
+            assert(!buffer_error && !status_result.error && status_result.fd==-1);
+            r=NULL;
+        } else assert(!r && buffer_callbacks==callbacks);
+        strcpy(path,"/scalar-owned");
+    }
+    assert(status_call(service,worker,resources->fs,&q)==-EEXIST);
+    q.operation=MD_FS_RENAME; q.path[1]="/scalar-moved"; q.mode=0;
+    assert(!status_call(service,worker,resources->fs,&q));
+    assert(status_call(service,worker,resources->fs,&q)==-ENOENT);
+    q.operation=MD_FS_UNLINK; q.path[0]="/scalar-replaced"; q.path[1]=NULL; q.flags=AT_REMOVEDIR;
+    assert(status_call(service,worker,resources->fs,&q)==-ENOENT);
+    q.path[0]="/scalar-moved";
+    int gate=eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK),started=eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK);
+    assert(gate>=0 && started>=0);
+    struct queued blocked={.work={.run=queued_run,.complete=queued_complete},.gate=gate,.started=started};
+    assert(!md_fs_worker_submit(worker,&blocked.work));
+    /* EVENT_WAIT: worker acknowledges the gate before accepted mutation cancellation. */
+    assert(md_event_wait_fd(started,POLLIN,md_event_now()+5000000000LL)>=0);
+    int callbacks=buffer_callbacks;
+    assert(!md_fs_buffer_invoke_status(service,getpid(),resources->fs,&q,&r));
+    assert(!md_fs_buffer_progress(service)); md_fs_buffer_cancel(&r);
+    struct queued sentinel={.work={.run=queued_run,.complete=queued_complete},.gate=-1,.started=-1};
+    assert(!md_fs_worker_submit(worker,&sentinel.work));
+    uint64_t one=1; assert(write(gate,&one,sizeof(one))==sizeof(one));
+    while (!sentinel.completed) worker_event(worker);
+    assert(blocked.completed && buffer_callbacks==callbacks && !r);
+    assert(!close(gate) && !close(started));
+    assert(status_call(service,worker,resources->fs,&q)==-ENOENT);
+    q.path[0]="relative"; q.directory[0]=123;
+    assert(status_call(service,worker,resources->fs,&q)==MD_FS_BUFFER_NEEDS_TASK);
+    assert(all_fds()==before);
+    puts("PASS scalar receipts: owned operands, exact errno, queued capture, cancellation before/after admission, no replay or mapped buffer");
 }
 static struct md_fs_buffer_request *buffer_request(struct md_fs_buffer_service *service,
         struct md_fs_worker *worker, struct md_guest_domain *fs,
@@ -1520,6 +1588,7 @@ static void buffer_service_lifetime(const char *store, unsigned cancelled_operat
         assert(blocked.completed && !close(fd) && !close(gate) && !close(started));
     }
     buffer_reopen_delivery(service,worker,resources.fs,&task,frame);
+    status_delivery(service,worker,&resources,token);
     buffer_cwd_delivery(service,worker,&resources,&task,frame,base,token);
     buffer_cwd_capture(service,worker,&resources,&task,frame,base,token);
     buffer_kernel_capture(service,worker,&resources,&task,frame,base,token);
