@@ -42,6 +42,13 @@ static int may_translate(struct md_network_filter *f,const struct md_filter_chai
                 memset(k+size,1,padded-size);
             }
             switch (e->code) {
+            case MD_FILTER_TRANSPORT: {
+                const struct md_filter_transport *t=&e->transport;
+                int unrestricted=t->destination[0]==0 && t->destination[1]==UINT16_MAX;
+                possible=protocol==t->protocol && (unknown_port ? unrestricted!=!!(t->inversion&MD_FILTER_INVERT_DESTINATION)
+                    : md_filter_port_matches(ntohs(port),t->destination,t->inversion&MD_FILTER_INVERT_DESTINATION));
+                uncertain=1; break;
+            }
             case MD_FILTER_IMMEDIATE: memcpy(value,e->value,size); memset(k,1,size); break;
             case MD_FILTER_META:
                 if (e->key==NFT_META_NFPROTO || e->key==NFT_META_L4PROTO) {
@@ -52,7 +59,9 @@ static int may_translate(struct md_network_filter *f,const struct md_filter_chai
             case MD_FILTER_CT:
                 if (e->key==NFT_CT_STATE) { number=8; memcpy(value,&number,4); memset(k,1,4); }
                 break;
-            case MD_FILTER_FIB: number=RTN_LOCAL; memcpy(value,&number,4); memset(k,1,4); break;
+            case MD_FILTER_FIB:
+                if (e->operation!=NFTA_FIB_F_SADDR) { number=RTN_LOCAL; memcpy(value,&number,4); memset(k,1,4); }
+                break;
             case MD_FILTER_PAYLOAD:
                 for (unsigned b=0;b<size;++b) {
                     unsigned offset=e->aux+b;
@@ -104,6 +113,23 @@ static int may_translate(struct md_network_filter *f,const struct md_filter_chai
                 break;
             case MD_FILTER_NAT: if (e->operation==NFT_NAT_DNAT) return 1; possible=0; break;
             case MD_FILTER_MASQUERADE: possible=0; break;
+            case MD_FILTER_VERDICT_MAP: {
+                struct md_filter_set *s=md_filter_set_find(f,chain->table,NULL,e->target,0);
+                if (!s) return -ENOENT;
+                int known_key=all(known+e->src,size,1);
+                for (size_t b=0;b<s->count;++b) {
+                    if (!*budget) return -E2BIG;
+                    --*budget;
+                    if (known_key && memcmp(values+e->src,s->elements[b].key,size)) continue;
+                    struct md_filter_verdict v=s->elements[b].verdict;
+                    if ((int)v.operation!=NFT_JUMP && (int)v.operation!=NFT_GOTO) continue;
+                    struct md_filter_chain *target=md_filter_chain_find(f,chain->table,NULL,v.target,0);
+                    if (!target) return -ENOENT;
+                    int found=may_translate(f,target,address,port,protocol,unknown_port,budget,depth+1);
+                    if (found) return found;
+                }
+                uncertain=1; break;
+            }
             case MD_FILTER_VERDICT:
                 if ((int)e->operation==NFT_JUMP || (int)e->operation==NFT_GOTO) {
                     struct md_filter_chain *target=md_filter_chain_find(f,0,NULL,e->target,0);
@@ -116,7 +142,7 @@ static int may_translate(struct md_network_filter *f,const struct md_filter_chai
                     possible=0;
                 }
                 break;
-            case MD_FILTER_META_SET: case MD_FILTER_CT_SET: break;
+            case MD_FILTER_META_SET: case MD_FILTER_CT_SET: case MD_FILTER_COUNTER: break;
             }
         }
     }
@@ -135,14 +161,23 @@ int md_filter_ports(struct md_network_filter *f,uint32_t uplink,struct md_filter
     size_t nc=0,na=2; int dnat=0;
     *count=0;
     if (!f) return 0;
+    for (size_t i=0;i<f->rule_count;++i) for (unsigned j=0;j<f->rules[i].count;++j) {
+        const struct md_filter_expression *e=&f->rules[i].expressions[j];
+        if (e->code==MD_FILTER_NAT && e->operation==NFT_NAT_DNAT) dnat=1;
+    }
+    if (!dnat) return 0;
     for (size_t i=0;i<f->rule_count;++i) {
         const struct md_filter_rule *r=&f->rules[i];
         unsigned char tags[64]={0};
         for (unsigned j=0;j<r->count;++j) {
             const struct md_filter_expression *e=&r->expressions[j];
-            if (e->code==MD_FILTER_NAT && e->operation==NFT_NAT_DNAT) dnat=1;
             unsigned size=e->size;
-            if (e->code==MD_FILTER_PAYLOAD) {
+            if (e->code==MD_FILTER_TRANSPORT && !(e->transport.inversion&MD_FILTER_INVERT_DESTINATION)) {
+                if (!e->transport.destination[0] && e->transport.destination[1]==UINT16_MAX) continue;
+                for (unsigned p=e->transport.destination[0];p<=e->transport.destination[1];++p) {
+                    int error=unique(candidates,&nc,1024,htons((uint16_t)p)); if (error) return error;
+                }
+            } else if (e->code==MD_FILTER_PAYLOAD) {
                 memset(tags+e->dst,0,size);
                 if (e->key==NFT_PAYLOAD_TRANSPORT_HEADER && e->aux<=2 && e->aux+size>=4) {
                     tags[e->dst+2-e->aux]=1; tags[e->dst+3-e->aux]=1;
@@ -171,7 +206,6 @@ int md_filter_ports(struct md_network_filter *f,uint32_t uplink,struct md_filter
                     || e->code==MD_FILTER_FIB || e->code==MD_FILTER_BITWISE) memset(tags+e->dst,0,size);
         }
     }
-    if (!dnat) return 0;
     /* Native publication needs a finite listener set. Unbounded port matching
      * cannot silently claim a host-wide packet interception facility. */
     unsigned budget=4000000;

@@ -4,6 +4,7 @@
 #include "network_internal.h"
 #include "network_nft_attr.h"
 #include "network_nft_objects.h"
+#include "network_nft_expression.h"
 #include "network_forward.h"
 #include "network_endpoint.h"
 #include "guest_identity.h"
@@ -11,6 +12,7 @@
 #include <endian.h>
 #include <linux/netfilter.h>
 #include <linux/netfilter/nf_tables.h>
+#include <linux/netfilter/nf_tables_compat.h>
 #include <linux/netfilter/nfnetlink.h>
 #include <netinet/in.h>
 #include <stdlib.h>
@@ -110,6 +112,26 @@ static int empty_dump(struct md_network_filter *f,const struct nlmsghdr *h) {
     if (table && (!family || !md_network_filter_find(f,family,table,0))) return -ENOENT;
     return (h->nlmsg_flags&NLM_F_DUMP)==NLM_F_DUMP ? 0 : -EOPNOTSUPP;
 }
+static int compat_query(const struct nlmsghdr *h,uint32_t port,struct md_network_message *out) {
+    if (NFNL_MSG_TYPE(h->nlmsg_type)!=NFNL_MSG_COMPAT_GET) return -EOPNOTSUPP;
+    struct attribute a[NFTA_COMPAT_MAX+1];
+    int error=attributes(h,BIT(NFTA_COMPAT_NAME)|BIT(NFTA_COMPAT_REV)|BIT(NFTA_COMPAT_TYPE),a,NFTA_COMPAT_MAX+1);
+    const char *name=NULL; uint32_t revision=0,type=0;
+    if (!error) error=string(&a[NFTA_COMPAT_NAME],&name);
+    if (!error) error=required_number(&a[NFTA_COMPAT_REV],&revision);
+    if (!error) error=required_number(&a[NFTA_COMPAT_TYPE],&type);
+    if (!error && (!name || strlen(name)>=NFT_COMPAT_NAME_MAX || type>1)) error=-EINVAL;
+    const struct nfgenmsg *nf=NLMSG_DATA(h);
+    if (!error && !md_nft_compat_supported(nf->nfgen_family,name,revision,type)) error=-ENOENT;
+    if (error) return error;
+    struct nfgenmsg reply={.nfgen_family=nf->nfgen_family,.version=NFNETLINK_V0};
+    error=md_network_message_begin(out,h,port,h->nlmsg_type,1,&reply,sizeof(reply));
+    if (!error) error=md_network_message_attribute(out,NFTA_COMPAT_NAME,name,strlen(name)+1);
+    revision=htonl(revision); type=htonl(type);
+    if (!error) error=md_network_message_attribute(out,NFTA_COMPAT_REV,&revision,sizeof(revision));
+    if (!error) error=md_network_message_attribute(out,NFTA_COMPAT_TYPE,&type,sizeof(type));
+    return error;
+}
 static int dispatch(struct md_network_filter *f,const struct nlmsghdr *h,uint32_t port,struct md_network_message *out) {
     if (NFNL_SUBSYS_ID(h->nlmsg_type)!=NFNL_SUBSYS_NFTABLES) return -EOPNOTSUPP;
     switch (NFNL_MSG_TYPE(h->nlmsg_type)) {
@@ -164,7 +186,8 @@ long md_network_nft(struct md_network_namespace *n,const struct md_identity *ide
             ended=1; continue;
         }
         last_operation=h;
-        if (NFNL_SUBSYS_ID(h->nlmsg_type)!=NFNL_SUBSYS_NFTABLES) error=-EOPNOTSUPP;
+        if (!batch && NFNL_SUBSYS_ID(h->nlmsg_type)==NFNL_SUBSYS_NFT_COMPAT) error=compat_query(h,port,&out);
+        else if (NFNL_SUBSYS_ID(h->nlmsg_type)!=NFNL_SUBSYS_NFTABLES) error=-EOPNOTSUPP;
         else if (batch==query(NFNL_MSG_TYPE(h->nlmsg_type))) error=-EINVAL;
         else error=dispatch(batch ? next : n->filter,h,port,&out);
         if (error) break;
@@ -180,7 +203,8 @@ long md_network_nft(struct md_network_namespace *n,const struct md_identity *ide
             for (size_t j=0;j<next->rule_count && !used;++j)
                 for (unsigned k=0;k<next->rules[j].count;++k) {
                     const struct md_filter_expression *e=&next->rules[j].expressions[k];
-                    if (e->code==MD_FILTER_LOOKUP && e->target==next->sets[i].handle) used=1;
+                    if ((e->code==MD_FILTER_LOOKUP || e->code==MD_FILTER_VERDICT_MAP)
+                            && e->target==next->sets[i].handle) used=1;
                 }
             if (!used && (next->sets[i].flags&NFT_SET_ANONYMOUS)) md_filter_set_delete(next,i); else ++i;
         }

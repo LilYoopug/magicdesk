@@ -40,6 +40,10 @@ Unsupported expressions fail before publication; direct-flow revocation returns
 `test_network_nft`, `probe_nft_runtime.py`, `probe_nft_traffic.py` and the stock
 Podman/Docker fixtures cover protocol, atomicity, traffic and cleanup. No
 post-5.15 host primitive or new shared-startup requirement is added.
+Verdict maps, rule/base-chain logical counters, revision-zero xt TCP/UDP and
+DNAT/SNAT adapters, bridge hairpin control, netlink credential snapshots and
+IPv4 IP_PKTINFO use baseline userspace wire formats
+and existing socket/relay owners. They introduce no newer host dependency.
 
 Admission uses actual operations under the selected executor identity, not an
 Android-version inference or `uname`-only capability check. Kernel configuration,
@@ -508,6 +512,19 @@ blocking and pending-signal preservation. Policy lives in the retained store,
 not a new per-write syscall adapter. `test_mount_api.py` and the native
 transient-store fixture cover writers, unlinked files, mappings, aliases,
 cross-process snapshots and release. This does not require a post-5.15 kernel.
+Native-leaf tmpfs writer discovery uses this same lease probe before unlink or
+overwrite; a busy leaf is promoted so an unlinked writer still blocks read-only
+remount until its description/mapping is released. Persistent-store mutation
+does not acquire this tmpfs-only probe.
+
+Protected proc final-link capture uses caller-side O_PATH|O_NOFOLLOW and the
+existing exact-description transport. The filesystem walker verifies the captured
+link and retains its original mount policy; it never changes dumpability or
+requires pidfd_getfd permission. `test_proc_policy.py` covers protected metadata,
+reopening, directory reads and no-follow link identity. Signal delivery after
+guest ptrace uses the existing GETSIGINFO/SETSIGINFO primitives and target PID
+view; `test_thread_identity_runtime.py --debuggers` covers libc's set-ID signal
+handshake across debugger/target namespace boundaries.
 
 `open_tree` and `STATX_ATTR_MOUNT_ROOT` use the same logical mount identity and
 detached-origin lifetime; neither requires host mount privilege. Mounted proc

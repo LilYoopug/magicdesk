@@ -731,9 +731,11 @@ installing the restrictive policy. Addressed UDP retains its mapping until
 socket closure or relay idle expiry.
 
 This is not full network isolation. Backing ports remain reachable, inherited
-native descriptors retain access, and IPv6, raw packets, packet counters,
+native descriptors retain access, and IPv6, raw packets,
 multicast/broadcast and device-bound sockets are unsupported. Routed `recvmmsg`
-and packet ancillary metadata also have explicit limits. See
+and ancillary types other than supported IPv4 packet information/TTL/TOS also
+have explicit limits. Anonymous nftables counters count logical data transfers
+and payload bytes, not physical network packets. See
 [network contracts](../native/shroot/networking.md#network-namespaces).
 
 ### Docker Engine
@@ -742,7 +744,17 @@ Shroot can run stock Docker Engine, containerd and runc inside a guest-root
 launch with `--network routed`. This is separate from `shroot install/run`,
 which executes OCI image contents without a Docker daemon.
 
-The tested daemon configuration uses its ordinary userland proxy:
+Docker 29's nftables backend is checked with overlay2, logical cgroup v2 and
+without a userland proxy:
+
+```text
+--firewall-backend=nftables
+--ip6tables=false
+--userland-proxy=false
+```
+
+The older explicitly firewall-disabled profile remains a separate supported
+configuration using Docker's ordinary userland proxy:
 
 ```text
 --iptables=false
@@ -759,8 +771,9 @@ VFS and overlay2 checks cover concurrent containers, ordinary
 outbound DNS/HTTP, occupied-port rejection and port release. Overlay2 also covers
 bidirectional inter-container TCP/UDP.
 
-This is not an unconfigured Docker host: kernel firewall management and native
-cgroup resource limits are not supplied. Missing subsystems remain errors rather
+This is not an unconfigured Docker host: nftables is Shroot's supported logical
+flow model, not Android kernel firewall management. Native cgroup resource
+limits are not supplied. Missing subsystems remain errors rather
 than silently successful operations.
 
 ### Podman
@@ -968,7 +981,7 @@ application, init or isolation test.
 | Systemd managers | Debian 257, Ubuntu 255, Fedora 259, Arch 262 and SteamOS; system/user managers and service activation | Focused targets are distinct from default-target boot |
 | Distribution boot | Ubuntu, Fedora, Arch, openSUSE, Deepin and Manjaro default targets; Debian/openKylin with explicit module-capability drop | [Init matrix](../native/guest-exec-lab/init-matrix.md); SteamOS hardware units remain degraded |
 | OpenRC and runit | Alpine PID 1, default runlevel and restart/stop; Void/Armtix stock stages and supervised services | Userspace service lifecycle, not complete hardware initialization |
-| Docker Engine | Docker 26.1.5, containerd 1.7.24, runc 1.1.15; VFS/overlay2, TCP/UDP publishing and outbound/peer traffic | [Required daemon configuration](#docker-engine), not the default firewall backend |
+| Docker Engine | Docker 29.9.1, containerd 2.4.2, runc 1.5.2; overlay2, nftables bridge and TCP/UDP publication without userland proxy; older VFS/proxy profile retained | [Explicit daemon configuration](#docker-engine), logical IPv4 flow filtering, not Android firewall management |
 | Podman | Podman 5.8.7, crun 1.28, conmon 2.2.1; overlay, nftables bridge, TCP/UDP publication, DNS/HTTP, named peers and cleanup | [Routed launch and inherited limits](#podman); cgroups and application seccomp enabled |
 | Browser sandboxes | Stock Chromium JavaScript/DOM/PNG with installed filters, Firefox screenshot, Electron/VS Code workflow | [Browser contract](#application-filters-and-browsers), not complete security isolation |
 | Landlock and Bubblewrap | Positive/negative filesystem access, stacked domains and inheritance; pacman, Glycin and stock Bubblewrap workflows | [Filesystem policy](#filesystem-restrictions) and [namespace fixtures](../native/guest-exec-lab/namespaces.md#namespace-clients) |

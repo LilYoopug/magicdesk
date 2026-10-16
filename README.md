@@ -436,7 +436,8 @@ Verified workflows under UID 2000 include:
 - **Docker Engine and Podman:** actual engines running inside Shroot, separately
   from its own OCI image launcher. Docker supports concurrent containers,
   outbound DNS/HTTP and ordinary TCP/UDP `docker run -p` publication with the
-  documented daemon configuration. Podman is verified with overlay storage,
+  documented daemon configuration, including Docker 29's nftables backend
+  without a userland proxy. Podman is verified with overlay storage,
   nftables bridge networking, TCP/UDP publication, named container peers and
   application seccomp enabled. Both use an explicit routed launch and inherited
   Android resource ceilings. See [container setup and limits](docs/shroot.md#services-and-containers).

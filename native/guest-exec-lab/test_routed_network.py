@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise Shroot's network backend through stock Linux tools as UID 2000."""
 import ctypes
+import errno
 import json
 import os
 from pathlib import Path
@@ -32,6 +33,55 @@ def send_batch(udp, address):
     assert [m.length for m in messages] == [5, 6]
 
 
+def receive_info_without_name(udp, capacity):
+    class Vector(ctypes.Structure):
+        _fields_ = [('base', ctypes.c_void_p), ('length', ctypes.c_size_t)]
+    class Header(ctypes.Structure):
+        _fields_ = [('name', ctypes.c_void_p), ('namelen', ctypes.c_uint),
+                    ('iov', ctypes.POINTER(Vector)), ('count', ctypes.c_size_t),
+                    ('control', ctypes.c_void_p), ('control_size', ctypes.c_size_t), ('flags', ctypes.c_int)]
+    data, control = ctypes.create_string_buffer(100), ctypes.create_string_buffer(capacity)
+    vector = Vector(ctypes.addressof(data), 100)
+    message = Header(None, 0, ctypes.pointer(vector), 1, ctypes.addressof(control), capacity, 0)
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.recvmsg.argtypes = [ctypes.c_int, ctypes.POINTER(Header), ctypes.c_int]
+    result = libc.recvmsg(udp.fileno(), ctypes.byref(message), 0)
+    assert result == 7 and data.raw[:result] == b'NONAME!', (result, ctypes.get_errno())
+    assert message.namelen == 0
+    length, level, kind = struct.unpack_from('=Qii', control.raw)
+    assert (level, kind) == (socket.IPPROTO_IP, 8)
+    expected = struct.pack('=i4s4s', socket.if_nametoindex('eth0'),
+                           socket.inet_aton('172.18.0.2'), socket.inet_aton('172.18.0.2'))
+    assert control.raw[16:length] == expected[:length-16], (control.raw, expected)
+    assert message.flags == (socket.MSG_CTRUNC if capacity < socket.CMSG_LEN(12) else 0)
+
+
+def datagram_lifetime():
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as receiver:
+        receiver.bind(('127.0.0.1', 0))
+        receiver.settimeout(5)
+        address = receiver.getsockname()
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
+            sender.bind(('127.0.0.1', 0))
+            source = sender.getsockname()
+            sender.sendto(b'QUEUED', address)
+            # EVENT_WAIT: datagram has reached the receiver before sender close.
+            assert select.select([receiver], [], [], 5)[0], 'No queued datagram'
+        assert receiver.recvfrom(100) == (b'QUEUED', source)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
+        sender.settimeout(5)
+        for payload in (b'FIRST_OWNER', b'REBOUND_OWNER'):
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as receiver:
+                receiver.settimeout(5)
+                receiver.bind(address)
+                sender.sendto(payload, address)
+                data, peer = receiver.recvfrom(100)
+                assert data == payload
+                receiver.sendto(payload, peer)
+                assert sender.recvfrom(100) == (payload, address)
+    print('PASS private UDP lifetime: queued source after close, receiver rebind and fresh reply mapping', flush=True)
+
+
 def guest():
     def run(*args):
         # EVENT_WAIT: tool completion; timeout fails a stalled netlink exchange.
@@ -49,8 +99,10 @@ def guest():
     assert any(route.get('gateway') == '10.0.2.2' for route in routes), routes
     lookup = json.loads(run('ip', '-j', 'route', 'get', '1.1.1.1'))
     assert lookup[0]['dev'] == 'eth0' and lookup[0]['gateway'] == '10.0.2.2', lookup
+    datagram_lifetime()
     # glibc resolves the address and dumps interfaces to order its candidates.
-    run('timeout', '20', 'getent', 'ahostsv4', 'example.com')
+    if '--internet' in sys.argv:
+        run('timeout', '20', 'getent', 'ahostsv4', 'example.com')
     run('ip', 'link', 'add', 'br-test', 'type', 'bridge')
     run('ip', 'addr', 'add', '172.18.0.1/16', 'dev', 'br-test')
     run('ip', 'link', 'set', 'br-test', 'up')
@@ -103,6 +155,25 @@ def guest():
                 assert udp.recvfrom(100)[0] == b'FIRST'
                 assert udp.recvfrom(100)[0] == b'SECOND'
                 udp.sendto(b'BATCH', peer)
+                udp.setsockopt(socket.IPPROTO_IP, 8, 1)  # IP_PKTINFO
+                for capacity in (socket.CMSG_SPACE(12), socket.CMSG_LEN(5)):
+                    receive_info_without_name(udp, capacity)
+                    udp.sendto(b'NONAME_OK', peer)
+                payload, ancillary, flags, peer = udp.recvmsg(100, socket.CMSG_SPACE(12))
+                assert payload == b'PKTINFO' and not flags
+                info = next(data for level, kind, data in ancillary if level == socket.IPPROTO_IP and kind == 8)
+                interface, local, destination = struct.unpack('=i4s4s', info)
+                assert interface == socket.if_nametoindex('eth0')
+                assert local == destination == socket.inet_aton('172.18.0.2'), info
+                for invalid, code in [(struct.pack('=i4s4s', 999999, local, destination), errno.ENODEV),
+                                      (struct.pack('=i4s4s', 0, socket.inet_aton('203.0.113.44'), destination), errno.EADDRNOTAVAIL)]:
+                    try:
+                        udp.sendmsg([b'INVALID'], [(socket.IPPROTO_IP, 8, invalid)], 0, peer)
+                    except OSError as error:
+                        assert error.errno == code, error
+                    else:
+                        raise AssertionError('Invalid source accepted')
+                assert udp.sendmsg([b'INFO'], [(socket.IPPROTO_IP, 8, info)], 0, peer) == 4
             assert select.select([child_read], [], [], 15)[0], 'No namespace teardown acknowledgement'
             assert os.read(child_read, 1) == b'X'
             os._exit(0)
@@ -149,6 +220,12 @@ def guest():
             assert data == b'REPLY' and peer == ('172.18.0.2', 18080) and not ancillary and not flags
             send_batch(udp, ('172.18.0.2', 18080))
             assert udp.recvfrom(100)[0] == b'BATCH'
+            for _ in range(2):
+                udp.sendto(b'NONAME!', ('172.18.0.2', 18080))
+                assert udp.recvfrom(100) == (b'NONAME_OK', ('172.18.0.2', 18080))
+            udp.sendto(b'PKTINFO', ('172.18.0.2', 18080))
+            reply = udp.recvfrom(100)
+            assert reply == (b'INFO', ('172.18.0.2', 18080)), reply
         print('PASS private UDP endpoint: addressed datagrams and logical reply ports', flush=True)
         run('ip', 'link', 'del', 'veth-host')
         os.write(to_child, b'X')
@@ -180,7 +257,8 @@ def main():
         suite.transport.upload(suite.client, Path(__file__), suite.base + '/test.py')
         suite.command(prefix + ['--', '/bin/mkdir', target])
         suite.command(prefix + ['--network', 'routed', '--bind-ro', suite.base, target,
-                                '--deadline-seconds', '120', '--', '/usr/bin/python3', target + '/test.py', '--guest'])
+                                '--deadline-seconds', '120', '--', '/usr/bin/python3', target + '/test.py', '--guest']
+                      + (['--internet'] if '--internet' in sys.argv else []))
         suite.report['passed'] = True
     finally:
         try:
@@ -190,4 +268,4 @@ def main():
 
 
 if __name__ == '__main__':
-    guest() if sys.argv[1:] == ['--guest'] else main()
+    guest() if '--guest' in sys.argv else main()

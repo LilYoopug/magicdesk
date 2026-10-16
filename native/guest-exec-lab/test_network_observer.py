@@ -3,11 +3,22 @@
 import errno
 import socket
 import unittest
+import urllib.request
 
 from docker_network_fixture import Observer, observe
 
 
 class PortOwnershipTest(unittest.TestCase):
+    def test_outbound_has_exact_native_reply(self):
+        observer = Observer()
+        try:
+            url = observe(observer.address, operation='outbound')['url']
+            with urllib.request.urlopen(url, timeout=5) as response:
+                self.assertEqual(response.read().decode(), observer.token)
+            self.assertTrue(any(item.get('operation') == 'outbound-request' for item in observer.records))
+        finally:
+            observer.close()
+
     def test_handoff_retains_both_protocols_until_requested(self):
         observer = Observer()
         try:

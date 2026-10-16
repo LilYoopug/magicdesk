@@ -1,6 +1,8 @@
 #define _GNU_SOURCE
 #include "network_nft.h"
 #include "network_filter.h"
+#include "network_nft_expression.h"
+#include "network_nft_objects.h"
 #include "network_flow.h"
 #include "network_internal.h"
 #include "guest_identity.h"
@@ -9,6 +11,8 @@
 #include <linux/netfilter.h>
 #include <linux/netfilter/nf_tables.h>
 #include <linux/netfilter/nfnetlink.h>
+#include <linux/netfilter/nf_tables_compat.h>
+#include <linux/netfilter/xt_tcpudp.h>
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -74,6 +78,64 @@ static void reverse_policy(void) {
     md_network_namespace_release(n);
     puts("PASS nft reply policy: outbound native bypass requires both directions to allow IO");
 }
+static void nat_hook_order(void) {
+    struct md_network_namespace *n=md_network_namespace_new(NULL,MD_NETWORK_ROUTED);
+    assert(n);
+    uint32_t private=htonl(0x0a5c0002),uplink=htonl(0x0a000264);
+    struct md_filter_chain chains[4]={
+        {.table=1,.handle=2,.hook=NF_INET_POST_ROUTING,.priority=100,.nat=1,.policy=NF_ACCEPT},
+        {.table=1,.handle=3,.hook=NF_INET_PRE_ROUTING,.priority=-300,.policy=NF_ACCEPT},
+        {.table=1,.handle=4,.hook=NF_INET_PRE_ROUTING,.priority=0,.policy=NF_DROP},
+        {.table=1,.handle=5,.hook=NF_INET_POST_ROUTING,.priority=200,.policy=NF_DROP}};
+    struct md_filter_rule rules[4]={
+        {.chain=2,.count=1,.expressions={{.code=MD_FILTER_MASQUERADE}}},
+        {.chain=3,.count=3}, {.chain=4,.count=3}, {.chain=5,.count=3}};
+    for (unsigned i=1;i<4;++i) {
+        rules[i].expressions[0]=(struct md_filter_expression){.code=MD_FILTER_PAYLOAD,
+            .key=NFT_PAYLOAD_NETWORK_HEADER,.aux=i==3 ? 12 : 16,.size=4};
+        rules[i].expressions[1]=(struct md_filter_expression){.code=MD_FILTER_COMPARE,.operation=NFT_CMP_EQ,.size=4};
+        memcpy(rules[i].expressions[1].value,i==3 ? &uplink : &private,4);
+        rules[i].expressions[2]=(struct md_filter_expression){.code=MD_FILTER_VERDICT,.operation=i==1 ? NF_DROP : NF_ACCEPT};
+    }
+    struct md_network_filter f={.chains=chains,.chain_count=4,.rules=rules,.rule_count=4};
+    n->filter=&f;
+    for (unsigned transport=0;transport<2;++transport) {
+        struct md_filter_packet p={.source=private,.destination=htonl(0xc0000201),.source_port=htons(32000),
+            .destination_port=htons(80),.protocol=transport ? IPPROTO_UDP : IPPROTO_TCP,.state=8};
+        struct md_network_flow_path path;
+        assert(!md_network_flow_route(n,&p,0,&path) && p.snat && p.source==uplink);
+        assert(!md_network_flow_check(n->fabric,&path,0));
+        assert(!md_network_flow_check(n->fabric,&path,1));
+        /* Raw rules must see the real incoming tuple and remain enforceable. */
+        memcpy(rules[1].expressions[1].value,&uplink,4);
+        assert(md_network_flow_check(n->fabric,&path,1)==-EACCES);
+        memcpy(rules[1].expressions[1].value,&private,4);
+        /* Even removal of the allocating NAT chain retains this connection's mapping. */
+        chains[0].hook=-1;
+        ++n->fabric->policy_generation;
+        assert(!md_network_flow_check(n->fabric,&path,0));
+        assert(!md_network_flow_check(n->fabric,&path,1));
+        struct md_filter_accounting accounting={0};
+        assert(!md_network_flow_accounting(n->fabric,&path,0,1,&accounting));
+        free(accounting.cells);
+        chains[0].hook=NF_INET_POST_ROUTING;
+        /* Adding NAT after admission cannot retarget the first payload either. */
+        chains[0].hook=chains[3].hook=-1;
+        p=(struct md_filter_packet){.source=private,.destination=htonl(0xc0000201),
+            .source_port=htons(32000),.destination_port=htons(80),
+            .protocol=transport ? IPPROTO_UDP : IPPROTO_TCP,.state=8};
+        assert(!md_network_flow_route(n,&p,0,&path) && !p.snat);
+        chains[0].hook=chains[3].hook=NF_INET_POST_ROUTING;
+        memcpy(rules[3].expressions[1].value,&private,4);
+        ++n->fabric->policy_generation;
+        accounting=(struct md_filter_accounting){0};
+        assert(!md_network_flow_accounting(n->fabric,&path,0,1,&accounting));
+        free(accounting.cells);
+        memcpy(rules[3].expressions[1].value,&uplink,4);
+    }
+    n->filter=NULL; md_network_namespace_release(n);
+    puts("PASS retained NAT hook order: raw wire tuple, reverse translation, post-NAT filter, TCP/UDP and policy changes before first payload");
+}
 static void program(void) {
     struct md_network_filter_table table={.handle=1,.family=NFPROTO_IPV4};
     struct md_filter_chain chains[2]={
@@ -127,9 +189,142 @@ static void program(void) {
     assert(md_filter_evaluate(&f,NF_INET_PRE_ROUTING,&packet)==-EACCES);
     puts("PASS nft program: transitive hook validation, cycle rejection, source-dependent finite publication and real tuple evaluation");
 }
+static void verdict_maps(void) {
+    struct md_network_filter_table table={.handle=1,.family=NFPROTO_IPV4};
+    struct md_filter_chain chains[2]={
+        {.table=1,.handle=2,.hook=NF_INET_LOCAL_IN,.policy=NF_ACCEPT},
+        {.table=1,.handle=3,.hook=-1}};
+    struct md_filter_element elements[2]={
+        {.key="lo",.verdict={NFT_JUMP,3}},
+        {.key="eth0",.verdict={NF_DROP,0}}};
+    struct md_filter_set set={.table=1,.handle=4,.flags=NFT_SET_MAP,.key_size=16,.data_type=NFT_DATA_VERDICT,
+        .elements=elements,.count=2};
+    struct md_filter_rule rules[2]={
+        {.chain=2,.count=2,.expressions={{.code=MD_FILTER_META,.key=NFT_META_IIFNAME,.size=16},
+            {.code=MD_FILTER_VERDICT_MAP,.target=4,.size=16}}},
+        {.chain=3,.count=2,.expressions={{.code=MD_FILTER_COUNTER},
+            {.code=MD_FILTER_VERDICT,.operation=NFT_RETURN}}}};
+    struct md_network_filter f={.tables=&table,.count=1,.chains=chains,.chain_count=2,
+        .rules=rules,.rule_count=2,.sets=&set,.set_count=1};
+    assert(!md_filter_validate(&f));
+    struct md_filter_accounting accounting={0};
+    struct md_filter_packet p={.input_name="lo",.state=8,.accounting=&accounting};
+    assert(!md_filter_evaluate(&f,NF_INET_LOCAL_IN,&p) && accounting.count==1);
+    assert(!rules[1].expressions[0].counter.packets);
+    md_filter_account(&accounting,123);
+    assert(rules[1].expressions[0].counter.packets==1 && rules[1].expressions[0].counter.bytes==123);
+    strcpy(p.input_name,"eth0"); accounting.count=0;
+    assert(md_filter_evaluate(&f,NF_INET_LOCAL_IN,&p)==-EACCES && !accounting.count);
+    strcpy(p.input_name,"missing"); assert(!md_filter_evaluate(&f,NF_INET_LOCAL_IN,&p));
+    rules[1].expressions[1]=(struct md_filter_expression){.code=MD_FILTER_VERDICT_MAP,.target=4,.size=16};
+    assert(md_filter_validate(&f)==-ELOOP);
+    rules[1].expressions[1]=(struct md_filter_expression){.code=MD_FILTER_MASQUERADE};
+    assert(md_filter_validate(&f)==-EOPNOTSUPP);
+    free(accounting.cells);
+    puts("PASS verdict maps: return, denial, miss, cycle and transitive NAT rejection; explicit counter accounting");
+}
+static void policy_counters(void) {
+    struct md_filter_chain chains[2]={
+        {.table=1,.handle=2,.hook=NF_INET_LOCAL_OUT,.policy=NF_ACCEPT,.counters=1},
+        {.table=1,.handle=3,.hook=-1}};
+    struct md_filter_rule rule={.chain=2,.count=1,.expressions={
+        {.code=MD_FILTER_VERDICT,.operation=NFT_GOTO,.target=3}}};
+    struct md_network_filter f={.chains=chains,.chain_count=2,.rules=&rule,.rule_count=1};
+    struct md_filter_accounting a={0};
+    struct md_filter_packet p={.state=8,.accounting=&a};
+    assert(!md_filter_evaluate(&f,NF_INET_LOCAL_OUT,&p) && a.count==1);
+    md_filter_account(&a,123);
+    assert(chains[0].counter.packets==1 && chains[0].counter.bytes==123);
+    a.count=0; rule.expressions[0].operation=NF_ACCEPT;
+    assert(!md_filter_evaluate(&f,NF_INET_LOCAL_OUT,&p) && !a.count);
+    rule.expressions[0].operation=NFT_RETURN;
+    chains[0].policy=NF_DROP;
+    assert(md_filter_evaluate(&f,NF_INET_LOCAL_OUT,&p)==-EACCES && a.count==1);
+    md_filter_account(&a,456);
+    assert(chains[0].counter.packets==2 && chains[0].counter.bytes==579);
+    a.count=0; rule.expressions[0].operation=NF_DROP;
+    assert(md_filter_evaluate(&f,NF_INET_LOCAL_OUT,&p)==-EACCES && !a.count);
+    chains[0].nat=1; p.state=2; a.count=0;
+    assert(!md_filter_evaluate(&f,NF_INET_LOCAL_OUT,&p) && !a.count);
+    free(a.cells);
+    puts("PASS base-chain counters: policy fallthrough, goto/return, explicit verdict exclusion and NAT established bypass");
+}
+static int parse_transport(struct md_network_filter *f,struct md_filter_rule *r,int tcp,unsigned inversion,unsigned flags) {
+    struct packet p;
+    struct md_network_message o={.data=p.data,.capacity=sizeof(p.data)};
+    add(&o,(NFNL_SUBSYS_NFTABLES<<8)|NFT_MSG_NEWRULE,0,NFPROTO_IPV4);
+    size_t start=o.size;
+    size_t entry,data;
+    assert(!md_network_message_nest(&o,NFTA_LIST_ELEM,&entry));
+    assert(!md_network_message_attribute(&o,NFTA_EXPR_NAME,"match",6));
+    assert(!md_network_message_nest(&o,NFTA_EXPR_DATA,&data));
+    assert(!md_network_message_attribute(&o,NFTA_MATCH_NAME,tcp ? "tcp" : "udp",4));
+    uint32_t revision=0;
+    assert(!md_network_message_attribute(&o,NFTA_MATCH_REV,&revision,4));
+    unsigned char info[16]={0};
+    if (tcp) {
+        struct xt_tcp value={.spts={1000,2000},.dpts={4000,4001},.invflags=inversion,.flg_mask=flags};
+        memcpy(info,&value,sizeof(value));
+    } else {
+        struct xt_udp value={.spts={1000,2000},.dpts={4000,4001},.invflags=inversion};
+        memcpy(info,&value,sizeof(value));
+    }
+    assert(!md_network_message_attribute(&o,NFTA_MATCH_INFO,info,sizeof(info)));
+    assert(!md_network_message_end_nest(&o,data));
+    assert(!md_network_message_end_nest(&o,entry));
+    return md_nft_expressions(f,1,r,o.data+start,o.size-start);
+}
+static void compat_transport(void) {
+    struct md_network_filter_table table={.handle=1,.family=NFPROTO_IPV4};
+    struct md_filter_chain chain={.table=1,.handle=2,.hook=NF_INET_PRE_ROUTING,.policy=NF_ACCEPT,.nat=1};
+    struct md_filter_rule rule={.chain=2};
+    struct md_network_filter f={.tables=&table,.count=1,.chains=&chain,.chain_count=1,.rules=&rule,.rule_count=1};
+    for (unsigned tcp=0;tcp<2;++tcp) for (unsigned invert=0;invert<4;++invert) {
+        assert(md_nft_compat_supported(NFPROTO_IPV4,tcp ? "tcp" : "udp",0,0));
+        assert(!parse_transport(&f,&rule,tcp,invert,0) && rule.count==1);
+        struct packet dump;
+        struct md_network_message out={.data=dump.data,.capacity=sizeof(dump.data)};
+        add(&out,(NFNL_SUBSYS_NFTABLES<<8)|NFT_MSG_NEWRULE,0,NFPROTO_IPV4);
+        size_t start=out.size;
+        assert(!md_nft_emit_expressions(&f,&rule,&out));
+        assert(out.size==start+NLA_HDRLEN+rule.wire_size && !memcmp(dump.data+start+NLA_HDRLEN,rule.wire,rule.wire_size));
+        free(rule.wire); rule.wire=NULL;
+        rule.expressions[1]=(struct md_filter_expression){.code=MD_FILTER_NAT,.operation=NFT_NAT_DNAT,
+            .constant=1,.aux=1,.value={0,0,0,0,0x13,0x88}};
+        rule.count=2;
+        for (unsigned src=0;src<2;++src) for (unsigned dst=0;dst<2;++dst) {
+            struct md_filter_packet p={.protocol=tcp ? IPPROTO_TCP : IPPROTO_UDP,.state=8,
+                .source_port=htons(src ? 1500 : 999),.destination_port=htons(dst ? 4000 : 4002)};
+            unsigned match=(src!=!!(invert&1)) && (dst!=!!(invert&2));
+            assert(!md_filter_evaluate(&f,NF_INET_PRE_ROUTING,&p) && p.dnat==match);
+            if (match) assert(p.destination_port==htons(5000));
+            p.protocol=tcp ? IPPROTO_UDP : IPPROTO_TCP; p.dnat=0;
+            assert(!md_filter_evaluate(&f,NF_INET_PRE_ROUTING,&p) && !p.dnat);
+        }
+        struct md_filter_port ports[4]; size_t count=0;
+        int error=md_filter_ports(&f,0,ports,4,&count);
+        if (invert&2) assert(error==-EOPNOTSUPP);
+        else {
+            assert(!error && count==2);
+            assert(ports[0].protocol==(tcp ? IPPROTO_TCP : IPPROTO_UDP));
+            assert(ports[0].port==htons(4000) && ports[1].port==htons(4001));
+        }
+        memset(&rule,0,sizeof(rule)); rule.chain=2;
+    }
+    assert(parse_transport(&f,&rule,1,0,2)==-EOPNOTSUPP);
+    assert(parse_transport(&f,&rule,0,4,0)==-EOPNOTSUPP);
+    assert(!md_nft_compat_supported(NFPROTO_IPV6,"tcp",0,0));
+    assert(!md_nft_compat_supported(NFPROTO_IPV4,"udp",1,0));
+    assert(!md_nft_compat_supported(NFPROTO_IPV4,"udp",0,1));
+    puts("PASS xt TCP/UDP: raw ABI, dump roundtrip, source/destination ranges and inversion, NAT publication and explicit feature rejection");
+}
 void test_network_nft(void) {
+    compat_transport();
     program();
+    verdict_maps();
+    policy_counters();
     reverse_policy();
+    nat_hook_order();
     struct md_network_namespace *n=md_network_namespace_new(NULL,MD_NETWORK_ROUTED);
     struct md_network_namespace *child=md_network_namespace_copy(n,NULL);
     struct md_identity root=md_identity_new(0,0),user=md_identity_new(1000,1000);
@@ -237,7 +432,7 @@ void test_network_nft(void) {
     assert(!md_network_socket_open(child,AF_NETLINK,SOCK_RAW,NETLINK_NETFILTER,&socket,&fd));
     o.size=0; add(&o,(NFNL_SUBSYS_NFTABLES<<8)|NFT_MSG_GETGEN,0,AF_UNSPEC);
     unsigned long args[6]={0};
-    assert(md_network_socket_call(socket,&root,SYS_sendto,args,o.data,o.capacity,o.size,92,NULL)==(long)o.size);
+    assert(md_network_socket_call(socket,&root,SYS_sendto,args,o.data,o.capacity,o.size,92,0,NULL,NULL)==(long)o.size);
     struct { struct md_network_packet envelope; struct packet payload; } received;
     /* EVENT_WAIT: the queued response must arrive within the fixture alarm. */
     assert(read(fd,&received,sizeof(received))>0 && !received.envelope.group);

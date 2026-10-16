@@ -213,6 +213,47 @@ void test_network_route(void) {
     unsigned generated_index=generated->info.index;
     assert(ack(n,&root,h,&target)==-EEXIST);
     assert(n->count==before+1 && child->count==child_before+1);
+    h=request(&p,RTM_SETLINK,0);
+    *(struct ifinfomsg *)NLMSG_DATA(h)=(struct ifinfomsg){.ifi_family=AF_BRIDGE,.ifi_index=generated_index};
+    struct rtattr *prot=attr(h,IFLA_PROTINFO|NLA_F_NESTED,NULL,0);
+    unsigned char enabled=1;
+    struct rtattr *mode=attr(h,IFLA_BRPORT_MODE,&enabled,1);
+    prot->rta_len=(char *)h+h->nlmsg_len-(char *)prot;
+    assert(ack(n,&user,h,NULL)==-EPERM);
+    assert(md_network_route(n,&root,h,h->nlmsg_len,91,0,NULL,rejected.bytes,sizeof(rejected),&refusal)==-EAGAIN);
+    assert(!md_network_interface_find(n,generated_index,NULL)->hairpin);
+    assert(!ack(n,&root,h,NULL));
+    assert(md_network_interface_find(n,generated_index,NULL)->hairpin);
+    h=request(&p,RTM_GETLINK,NLM_F_DUMP);
+    ((struct ifinfomsg *)NLMSG_DATA(h))->ifi_family=AF_BRIDGE;
+    length=md_network_route(n,&user,h,h->nlmsg_len,91,0,NULL,reply.bytes,sizeof(reply),NULL);
+    assert(length>0); links=done=0;
+    for (struct nlmsghdr *item=&reply.align;NLMSG_OK(item,length);item=NLMSG_NEXT(item,length)) {
+        if (item->nlmsg_type==NLMSG_DONE) { ++done; continue; }
+        assert(item->nlmsg_type==RTM_NEWLINK);
+        const struct ifinfomsg *m=NLMSG_DATA(item);
+        assert(m->ifi_family==AF_BRIDGE && (unsigned)m->ifi_index==generated_index);
+        int left=IFLA_PAYLOAD(item), found=0;
+        for (const struct rtattr *a=IFLA_RTA(m);RTA_OK(a,left);a=RTA_NEXT(a,left))
+            if ((a->rta_type&NLA_TYPE_MASK)==IFLA_PROTINFO) {
+                const struct rtattr *mode=RTA_DATA(a);
+                assert(mode->rta_type==IFLA_BRPORT_MODE && RTA_PAYLOAD(mode)==1);
+                assert(*(const unsigned char *)RTA_DATA(mode)==1); ++found;
+            }
+        assert(found==1); ++links;
+    }
+    assert(!length && links==1 && done==1);
+    h=request(&p,RTM_GETLINK,0);
+    *(struct ifinfomsg *)NLMSG_DATA(h)=(struct ifinfomsg){.ifi_family=AF_BRIDGE,.ifi_index=1};
+    assert(ack(n,&user,h,NULL)==-ENODEV);
+    h=request(&p,RTM_SETLINK,0);
+    *(struct ifinfomsg *)NLMSG_DATA(h)=(struct ifinfomsg){.ifi_family=AF_BRIDGE,.ifi_index=generated_index};
+    prot=attr(h,IFLA_PROTINFO|NLA_F_NESTED,NULL,0);
+    mode=attr(h,IFLA_BRPORT_MODE,&enabled,1);
+    prot->rta_len=(char *)h+h->nlmsg_len-(char *)prot;
+    *(unsigned char *)RTA_DATA(mode)=2;
+    assert(ack(n,&root,h,NULL)==-EINVAL);
+    assert(md_network_interface_find(n,generated_index,NULL)->hairpin);
     direct=md_network_interface_find(child,0,"eth1"); assert(direct);
     direct->ipv4=htonl(0x0a590002); direct->prefix=24; direct->info.flags|=IFF_UP;
     h=request(&p,RTM_NEWROUTE,NLM_F_CREATE|NLM_F_EXCL);

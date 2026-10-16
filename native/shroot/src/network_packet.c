@@ -17,8 +17,18 @@ static long receive_state(void) {
     long result=md_guest_buffer_control(MD_BUFFER_NETWORK_CALL,0,0);
     long released=md_adapter_buffer_release(); return result<0 ? result : released ? released : result;
 }
-static long address(void *target,socklen_t capacity,void *length,unsigned group) {
-    struct sockaddr_nl source={.nl_family=AF_NETLINK,.nl_groups=group ? 1U<<(group-1) : 0};
+static long receive_credentials(struct md_network_packet *packet) {
+    long memory=md_adapter_buffer_take();
+    if (memory<0) return memory;
+    memcpy((void *)memory,packet,sizeof(*packet));
+    long result=md_guest_buffer_control(MD_BUFFER_NETWORK_CREDENTIALS,0,0);
+    if (!result) memcpy(packet,(void *)memory,sizeof(*packet));
+    long released=md_adapter_buffer_release();
+    return result ? result : released;
+}
+static long address(void *target,socklen_t capacity,void *length,const struct md_network_packet *packet) {
+    struct sockaddr_nl source={.nl_family=AF_NETLINK,.nl_pid=packet->port,
+        .nl_groups=packet->group ? 1U<<(packet->group-1) : 0};
     long error=md_write_memory(target,&source,capacity<sizeof(source) ? capacity : sizeof(source));
     socklen_t size=sizeof(source);
     return error ? error : md_write_memory(length,&size,sizeof(size));
@@ -106,7 +116,7 @@ long md_network_packet_receive(long nr,const unsigned long *a) {
     result-=sizeof(packet);
     if (original.msg_name) {
         void *length=nr==SYS_recvmsg ? (char *)a[1]+offsetof(struct msghdr,msg_namelen) : (void *)a[5];
-        error=address(original.msg_name,original.msg_namelen,length,packet.group);
+        error=address(original.msg_name,original.msg_namelen,length,&packet);
     }
     if (!error && nr==SYS_recvmsg) {
         original.msg_flags=native.msg_flags;
@@ -116,8 +126,11 @@ long md_network_packet_receive(long nr,const unsigned long *a) {
             error=control_item(&original,&used,SOL_NETLINK,NETLINK_PKTINFO,&info,sizeof(info));
         }
         if (!error && (options&MD_NETWORK_PACKET_CREDENTIALS)) {
-            const struct ucred kernel={0};
-            error=control_item(&original,&used,SOL_SOCKET,SCM_CREDENTIALS,&kernel,sizeof(kernel));
+            error=receive_credentials(&packet);
+            if (!error) {
+                const struct ucred sender={packet.pid,packet.uid,packet.gid};
+                error=control_item(&original,&used,SOL_SOCKET,SCM_CREDENTIALS,&sender,sizeof(sender));
+            }
         }
         original.msg_controllen=used;
         if (!error) error=md_write_memory((char *)a[1]+offsetof(struct msghdr,msg_controllen),

@@ -8,7 +8,7 @@ struct md_network_ipv4_policy { uint32_t route_localnet, rp_filter, arp_notify; 
 struct md_network_interface {
     struct md_network_link info;
     enum md_network_link_kind kind;
-    unsigned master, peer, prefix;
+    unsigned master, peer, prefix, hairpin;
     uint32_t ipv4;
     uint64_t policy_id;
     struct md_network_ipv4_policy policy;
@@ -45,7 +45,7 @@ struct md_network_namespace {
 struct md_network_listener {
     struct md_network_listener *next;
     int peer, protocol;
-    uint32_t groups;
+    uint32_t groups, port;
     int overflow;
 };
 void md_network_broadcast(struct md_network_namespace *,unsigned,const void *,size_t);

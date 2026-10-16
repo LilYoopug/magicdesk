@@ -2,9 +2,9 @@
 """Probe stock Docker Engine in a prepared disposable Debian Shroot store.
 
 Diagnostic profiles record missing capabilities rather than assert compatibility.
-The routed --exercise-ports mode requires TCP/UDP publication, internet access,
-peer exchange and cleanup. Reduced-network profiles do not validate -p.
-Install docker.io and docker-cli in the store before running this probe.
+The routed/nftables --exercise-ports modes require TCP/UDP publication, peer
+exchange and cleanup. --internet adds external availability checks separately.
+Install Docker Engine in the store before running this probe (29+ for nftables).
 """
 import argparse
 import collections
@@ -13,19 +13,22 @@ import json
 import os
 from pathlib import Path
 import queue
+import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import traceback
 
 
 ROOTLESS_PROFILES = ('rootless', 'rootless-no-firewall', 'rootless-no-network')
-PROFILES = ('default', 'no-network', 'routed', *ROOTLESS_PROFILES)
+NETWORK_PROFILES = ('routed', 'nftables')
+PROFILES = ('default', 'no-network', *NETWORK_PROFILES, *ROOTLESS_PROFILES)
 
 
 def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_runtime=False,
           no_new_keyring=False, trace_filesystem=False, create_count=0, trace_network=False, observer='',
-          storage_driver='vfs', data_root=''):
+          storage_driver='vfs', data_root='', userland_proxy=True, internet=False):
     os.environ['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
     preparation = []
     def mount(*args):
@@ -62,8 +65,11 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
                  '--ip-masq=false']
     if profile in ('no-network', 'rootless-no-network'):
         argv += ['--bridge=none', '--storage-driver=' + storage_driver]
-    if profile == 'routed':
-        argv += ['--storage-driver=' + storage_driver, '--userland-proxy=true']
+    if profile in NETWORK_PROFILES:
+        argv += ['--storage-driver=' + storage_driver,
+                 '--userland-proxy=' + str(userland_proxy).lower()]
+    if profile == 'nftables':
+        argv += ['--firewall-backend=nftables', '--ip6tables=false']
     if trace_runtime or no_new_keyring:
         wrapper = base / 'runc-trace'
         wrapper.write_text('#!/usr/bin/python3\nimport os, sys\n'
@@ -72,7 +78,7 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
                               '    if arg in ("create", "run"):\n'
                               '        args.insert(i + 1, "--no-new-keyring")\n'
                               '        break\n' if no_new_keyring else '')
-                           + 'command = ["/usr/sbin/runc", *args]\n'
+                           + 'command = [' + repr(shutil.which('runc')) + ', *args]\n'
                            + ('command = ["/usr/bin/strace", "-D", "-f", "-s", "256", "-e", '
                               '"trace=%process,%file,%signal,%network,prctl,capget,capset,read,write,keyctl", "-o", '
                               + repr(str(base / 'runc-')) + ' + str(os.getpid()) + ".log", *command]\n'
@@ -141,32 +147,48 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
     def exercise_ports():
         from docker_network_fixture import observe, wait_service
         names = ('md-port-first', 'md-port-second')
+        network = 'md-network-ports'
         ports = []
+        assert client('network', 'create', '--subnet', '10.92.0.0/24', network)
         try:
             for name in names:
                 port = observe(observer, operation='allocate')['port']
                 ports.append(port)
                 observe(observer, operation='handoff', port=port)
-                assert client('run', '-d', '--name', name, '--network', 'bridge',
+                assert client('run', '-d', '--name', name, '--network', network,
                               '-p', f'127.0.0.1:{port}:8080/tcp', '-p', f'127.0.0.1:{port}:8080/udp',
                               '--cgroupns', cgroupns, '--mount',
                               'type=bind,src=' + str(Path(__file__).with_name('docker_network_fixture.py'))
                               + ',dst=/fixture.py,readonly', image, 'python3', '/fixture.py', name)
                 wait_service(['docker', '--host', endpoint, 'logs', '-f', name])
                 report.setdefault('portChecks', []).append(observe(observer, operation='exchange', port=port, token=name, repeats=20))
-                assert client('exec', name, 'python3', '/fixture.py', '--internet')
             for source, target in (names, tuple(reversed(names))):
                 assert client('inspect', '--format', '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}', target)
                 address = str(ipaddress.IPv4Address(report['commands'][-1]['output'].strip()))
                 assert client('exec', source, 'python3', '/fixture.py', '--client', address, '8080', target, '20')
+                assert client('exec', source, 'python3', '/fixture.py', '--client', target, '8080', target, '20')
             report['containerPeerExchangePassed'] = True
-            assert not client('run', '--rm', '--name', 'md-port-conflict', '--network', 'bridge',
+            report['namedPeerExchangePassed'] = True
+            outbound = observe(observer, operation='outbound')['url']
+            for name in names:
+                assert client('exec', name, 'python3', '/fixture.py', '--http', outbound)
+            report['localOutboundPassed'] = True
+            assert not client('run', '--rm', '--name', 'md-port-conflict', '--network', network,
                               '-p', f'127.0.0.1:{ports[0]}:8080', image, '/bin/true')
             assert 'already allocated' in report['commands'][-1]['output'] \
                 or 'address already in use' in report['commands'][-1]['output'], report['commands'][-1]
             report['portPublicationTested'] = True
+            if internet:
+                report['internetResults'] = [client('exec', name, 'python3', '/fixture.py', '--internet') for name in names]
+                report['internetPassed'] = all(report['internetResults'])
+        except Exception:
+            report['networkRules'] = subprocess.run(['nft', '-a', 'list', 'ruleset'], capture_output=True,
+                                                    text=True, timeout=15).stdout
+            raise
         finally:
-            assert client('rm', '-f', *names, 'md-port-conflict'), report['commands'][-1]
+            removed = client('rm', '-f', *names, 'md-port-conflict')
+            network_removed = client('network', 'rm', network)
+            assert removed and network_removed, report['commands'][-2:]
         for port in ports:
             report['portChecks'].append(observe(observer, operation='released', port=port))
         report['portPublicationPassed'] = True
@@ -178,7 +200,7 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
             report['apiReady'] = client('version', '--format', '{{json .Server}}')
             client('info', '--format', 'driver={{.Driver}} cgroup={{.CgroupDriver}} '
                    'memoryLimit={{.MemoryLimit}}')
-            if report['apiReady'] and client('pull', image):
+            if report['apiReady'] and (client('image', 'inspect', image) or client('pull', image)):
                 for number in range(create_count):
                     name = 'md-copy-' + str(number)
                     if not client('create', '--name', name, '--network', 'none', '--cgroupns',
@@ -189,17 +211,20 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
                 for network in ('host', 'none'):
                     client('run', '--rm', '--network', network, '--cgroupns', cgroupns, image,
                            '/bin/sh', '-c', 'echo DOCKER_CONTAINER_EXECUTED; id')
-                if profile == 'routed':
+                if profile in NETWORK_PROFILES:
                     if observer:
                         exercise_ports()
                     else:
                         client('run', '--rm', '--network', 'bridge', '-p', '127.0.0.1:39871:80',
                            '--cgroupns', cgroupns, image, '/bin/sh', '-c',
-                           'echo DOCKER_BRIDGE_EXECUTED; id; wget -T 15 -qO- http://example.com')
+                           'echo DOCKER_BRIDGE_EXECUTED; id' +
+                           ('; wget -T 15 -qO- http://example.com' if internet else ''))
         else:
             report['startupEnded'] = True
     except queue.Empty:
         report['startupTimeout'] = True
+    except Exception:
+        report['failure'] = traceback.format_exc()
     finally:
         if process.poll() is None:
             process.terminate()
@@ -260,6 +285,8 @@ def main():
     parser.add_argument('--image', help='Defaults to Python for port tests, BusyBox otherwise')
     parser.add_argument('--storage-driver', choices=('vfs', 'overlay2'), default='vfs')
     parser.add_argument('--data-root', default='', help='Reuse this disposable daemon image cache')
+    parser.add_argument('--userland-proxy', action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument('--internet', action='store_true', help='Also require external DNS and HTTP')
     tracing = parser.add_mutually_exclusive_group()
     tracing.add_argument('--trace', action='store_true')
     tracing.add_argument('--trace-runtime', action='store_true')
@@ -275,8 +302,8 @@ def main():
     parser.add_argument('--exercise-ports', action='store_true',
                         help='Verify TCP/UDP publication from outside Shroot; use a Python image')
     args = parser.parse_args()
-    if args.exercise_ports and args.profile != 'routed':
-        parser.error('--exercise-ports requires --profile routed')
+    if args.exercise_ports and args.profile not in NETWORK_PROFILES:
+        parser.error('--exercise-ports requires --profile routed or nftables')
     if args.image is None:
         args.image = 'python:3.14-alpine' if args.exercise_ports else 'busybox:1.37.0'
     from test_oci_services import Suite
@@ -297,10 +324,10 @@ def main():
         created = True
         deadline = 1800 if observer else 900
         runner = prefix + ['--bind-ro', suite.base, target, '--deadline-seconds', str(deadline), '--']
-        if args.profile == 'routed':
+        if args.profile in NETWORK_PROFILES:
             runner = prefix + ['--network', 'routed', *runner[len(prefix):]]
-        suite.report['packages'] = suite.command(runner + ['/usr/bin/dpkg-query', '-W',
-                                                          'docker.io', 'docker-cli', 'containerd', 'runc'])
+        suite.report['versions'] = suite.command(runner + ['/bin/sh', '-ec',
+            'dockerd --version; docker --version; containerd --version; runc --version'])
         if args.profile in ROOTLESS_PROFILES:
             runner += ['/usr/bin/unshare', '--user', '--map-users=0:0:65536',
                        '--map-groups=0:0:65536', '--mount']
@@ -313,18 +340,23 @@ def main():
                                         args.cgroupns, str(int(args.trace_runtime)), str(int(args.no_new_keyring)),
                                         str(int(args.trace_filesystem)), str(args.create_count),
                                         str(int(args.trace_network)), observer.address if observer else '',
-                                        args.storage_driver, args.data_root],
+                                        args.storage_driver, args.data_root,
+                                        str(int(args.userland_proxy)), str(int(args.internet))],
                                quiet=True, timeout=deadline + 30)
         suite.report['probeResult'] = json.loads(output)
         print(json.dumps({key: value for key, value in suite.report['probeResult'].items()
                           if key != 'log'}, indent=2), flush=True)
         if observer:
-            assert suite.report['probeResult'].get('portPublicationPassed'), suite.report['probeResult']
+            assert suite.report['probeResult'].get('portPublicationPassed'), 'Port matrix failed; see ' + str(suite.output)
             assert suite.report['probeResult'].get('containerPeerExchangePassed'), suite.report['probeResult']
             assert suite.report['probeResult']['daemonExitCode'] == 0, suite.report['probeResult']
             assert suite.report['probeResult']['readerDrained'], suite.report['probeResult']
+            if args.internet:
+                assert suite.report['probeResult'].get('internetPassed'), 'External DNS/HTTP failed; local matrix is recorded separately'
             for item in suite.report['probeResult']['commands']:
                 if 'md-port-conflict' in item['command'] and 'run' in item['command']:
+                    continue
+                if item['command'][3:5] == ['image', 'inspect']:
                     continue
                 assert item.get('exitCode') == 0, item
             suite.report['passed'] = True
@@ -344,6 +376,8 @@ if __name__ == '__main__':
         guest(sys.argv[2], sys.argv[3], bool(int(sys.argv[4])), sys.argv[5], sys.argv[6],
               bool(int(sys.argv[7])), bool(int(sys.argv[8])), bool(int(sys.argv[9])), int(sys.argv[10]), bool(int(sys.argv[11])),
               sys.argv[12] if len(sys.argv)>12 else '', sys.argv[13] if len(sys.argv)>13 else 'vfs',
-              sys.argv[14] if len(sys.argv)>14 else '')
+              sys.argv[14] if len(sys.argv)>14 else '',
+              bool(int(sys.argv[15])) if len(sys.argv)>15 else True,
+              bool(int(sys.argv[16])) if len(sys.argv)>16 else False)
     else:
         main()

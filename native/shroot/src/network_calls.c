@@ -55,7 +55,7 @@ static long data_message(long nr,const unsigned long *a) {
     if (header) {
         result=md_read_memory(&message,(void *)a[1],sizeof(message));
         if (result) return result;
-        if (sending && message.msg_controllen) return -EOPNOTSUPP;
+        if (message.msg_controllen>MD_IPC_IO_CONTROL) return -EMSGSIZE;
         result=md_socket_vectors_open(&vectors,&message);
         if (result) return result;
     } else if (a[4]) {
@@ -73,6 +73,7 @@ static long data_message(long nr,const unsigned long *a) {
         if (!result) result=md_guest_buffer_control(MD_FS_BUFFER_IPC_RECEIVE,0,0);
         if (!sending && result>=0) {
             result=md_socket_payload_scatter(&frame->io,&message,result,0);
+            if (!message.msg_name) message.msg_namelen=0;
             long error=0;
             if (result>=0 && header) {
                 error=md_write_memory((char *)a[1]+offsetof(struct msghdr,msg_namelen),
@@ -238,6 +239,7 @@ static long control_call(long nr,const unsigned long *a,int events) {
         return md_raw(nr,a[0],a[1],a[2],a[3],a[4],a[5]);
     }
     size_t size=0; const void *input=NULL;
+    uint32_t groups=0;
     struct msghdr message={0};
     struct iovec vectors[64];
     if (nr==SYS_sendmsg) {
@@ -248,7 +250,8 @@ static long control_call(long nr,const unsigned long *a,int events) {
             struct sockaddr_nl address;
             if (message.msg_namelen<sizeof(address) || message.msg_namelen>sizeof(struct sockaddr_storage)) return -EINVAL;
             error=md_read_memory(&address,message.msg_name,sizeof(address)); if (error) return error;
-            if (address.nl_family!=AF_NETLINK || address.nl_pid || address.nl_groups) return -EOPNOTSUPP;
+            if (address.nl_family!=AF_NETLINK || address.nl_pid) return -EOPNOTSUPP;
+            groups=address.nl_groups;
         }
         error=md_read_memory(vectors,message.msg_iov,message.msg_iovlen*sizeof(*vectors)); if (error) return error;
         for (size_t i=0;i<message.msg_iovlen;++i) {
@@ -266,7 +269,8 @@ static long control_call(long nr,const unsigned long *a,int events) {
                 struct sockaddr_nl address;
                 if (a[5]<sizeof(address) || a[5]>sizeof(struct sockaddr_storage)) return -EINVAL;
                 long error=md_read_memory(&address,(void *)a[4],sizeof(address)); if (error) return error;
-                if (address.nl_family!=AF_NETLINK || address.nl_pid || address.nl_groups) return -EOPNOTSUPP;
+                if (address.nl_family!=AF_NETLINK || address.nl_pid) return -EOPNOTSUPP;
+                groups=address.nl_groups;
             }
         }
     } else if (nr==SYS_setsockopt) { size=a[4]; input=(void *)a[3]; }
@@ -281,7 +285,7 @@ static long control_call(long nr,const unsigned long *a,int events) {
             offset+=vectors[i].iov_len;
         }
     } else if (size) result=md_read_memory((void *)memory,input,size);
-    if (!result) result=md_guest_buffer_control(MD_BUFFER_NETWORK_CALL,size,0);
+    if (!result) result=md_guest_buffer_control(MD_BUFFER_NETWORK_CALL,size,groups);
     if (!result && nr==SYS_ioctl) result=md_write_memory((void *)a[2],(void *)memory,size);
     else if (result>=0 && (nr==SYS_getsockname || nr==SYS_getpeername || nr==SYS_getsockopt))
         result=output((void *)a[nr==SYS_getsockopt ? 3 : 1],(void *)a[nr==SYS_getsockopt ? 4 : 2],(void *)memory,result);

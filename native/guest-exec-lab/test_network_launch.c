@@ -116,6 +116,25 @@ static void ports(void) {
     md_network_launch_close(&a);
     assert(!md_network_launch_open(&p,NULL,&b));
     md_network_launch_close(&b);
+    p=bridge();
+    snprintf(text,sizeof(text),"0.0.0.0:%u:80/tcp",number);
+    assert(!md_network_profile_add(&p,"-p",text));
+    assert(!md_network_launch_open(&p,NULL,&a));
+    struct md_network_interface *inside=md_network_interface_find(a.space,0,"eth0");
+    struct md_network_interface *port=md_network_interface_find(a.gateway,inside->peer,NULL);
+    struct md_filter_packet reflect={.source=htonl(0x0a580002),.source_port=htons(40000),
+        .destination=htonl(0x0a580001),.destination_port=htons(number),.protocol=6,.state=8};
+    packet=reflect;
+    assert(md_network_flow_route(a.space,&packet,0,&path)==-EACCES);
+    port->hairpin=1; packet=reflect;
+    assert(!md_network_flow_route(a.space,&packet,0,&path));
+    assert(path.mediated && path.destination==a.space->inode);
+    assert(!md_network_flow_check(a.space->fabric,&path,0));
+    assert(!md_network_flow_check(a.space->fabric,&path,1));
+    port->hairpin=0;
+    assert(md_network_flow_check(a.space->fabric,&path,0)==-EACCES);
+    assert(md_network_flow_check(a.space->fabric,&path,1)==-EACCES);
+    md_network_launch_close(&a);
     puts("PASS launch NAT, typed nft round trip, occupied-port rollback and release");
 }
 static void partial_rollback(void) {

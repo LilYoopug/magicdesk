@@ -55,6 +55,7 @@ int md_network_parameter_read(struct md_network_namespace *n,enum md_network_par
     case MD_NET_PING_GROUPS: memcpy(out,n->ping_groups,sizeof(n->ping_groups)); break;
     case MD_NET_LOCAL_PORTS: memcpy(out,n->local_ports,sizeof(n->local_ports)); break;
     case MD_NET_IPV4_FORWARD: out[0]=n->ipv4_forward; out[1]=0; break;
+    case MD_NET_BRIDGE_FILTER: out[0]=1; out[1]=0; break;
     case MD_NET_ROUTE_LOCALNET: case MD_NET_RP_FILTER: case MD_NET_ARP_NOTIFY: {
         uint32_t *value=scoped_value(n,kind,scope);
         if (!value) error=-ENODEV;
@@ -87,6 +88,12 @@ int md_network_parameter_write(struct md_network_namespace *n,enum md_network_pa
         if (in[0]>1) error=-EINVAL;
         else n->ipv4_forward=in[0];
         break;
+    case MD_NET_BRIDGE_FILTER:
+        /* The logical bridge always traverses IPv4 hooks. Disabling them is
+         * not implemented; do not acknowledge an ineffective policy change. */
+        if (in[0]>1) error=-EINVAL;
+        else if (!in[0]) error=-EOPNOTSUPP;
+        break;
     case MD_NET_ROUTE_LOCALNET: case MD_NET_RP_FILTER: case MD_NET_ARP_NOTIFY: {
         uint32_t *value=scoped_value(n,kind,scope);
         if (!value) error=-ENODEV;
@@ -103,7 +110,6 @@ struct network_socket {
     struct md_fd_object object;
     struct md_network_namespace *space;
     int peer, family, type, protocol, bound;
-    uint32_t port;
     int capped_ack;
     int packet_info, pass_credentials, extended_ack, strict_check;
     struct md_network_listener listener;
@@ -139,6 +145,14 @@ int md_network_socket_offline(const struct md_fd_object *object) {
 int md_network_socket_control(const struct md_fd_object *object) {
     return object && object->type==&control_type;
 }
+struct md_network_namespace *md_network_socket_namespace(const struct md_fd_object *object) {
+    if (object && (object->type==&control_type || object->type==&socket_type))
+        return ((const struct network_socket *)object)->space;
+    return md_network_endpoint_namespace(object);
+}
+int md_network_interface_ioctl(unsigned long command) {
+    return command==SIOCGIFNAME || command==SIOCGIFINDEX || command==SIOCGIFFLAGS || command==SIOCGIFMTU;
+}
 int md_network_socket_open(struct md_network_namespace *n, int family, int type, int protocol,
         struct md_fd_object **out, int *fd) {
     if (!md_network_namespace_managed(n)) return -EINVAL;
@@ -146,7 +160,9 @@ int md_network_socket_open(struct md_network_namespace *n, int family, int type,
     if (family==AF_UNIX && md_network_endpoint_enabled(n)) {
         int native=socket(family,type|SOCK_CLOEXEC,protocol);
         if (native<0) return -errno;
-        *out=NULL; *fd=native; return 0;
+        struct md_fd_object *object=md_network_socket_new(n);
+        if (!object) { int error=-errno; close(native); return error; }
+        *out=object; *fd=native; return 0;
     }
     if ((family==AF_INET || family==AF_INET6) && md_network_endpoint_enabled(n))
         return md_network_endpoint_open(n,family,type,protocol,out,fd);
@@ -176,11 +192,14 @@ int md_network_socket_open(struct md_network_namespace *n, int family, int type,
 static unsigned link_flags(const struct md_network_link *link) {
     return link->flags | ((link->flags&IFF_UP) ? IFF_RUNNING|IFF_LOWER_UP : 0);
 }
-static int packet(int peer,unsigned group,const void *data,size_t size) {
-    struct md_network_packet header={group};
-    struct iovec vector[]={{&header,sizeof(header)},{(void *)data,size}};
+static int packet_from(int peer,const struct md_network_packet *header,const void *data,size_t size) {
+    struct iovec vector[]={{(void *)header,sizeof(*header)},{(void *)data,size}};
     struct msghdr message={.msg_iov=vector,.msg_iovlen=2};
     return sendmsg(peer,&message,MSG_DONTWAIT|MSG_NOSIGNAL)<0 ? -errno : 0;
+}
+static int packet(int peer,unsigned group,const void *data,size_t size) {
+    const struct md_network_packet header={.group=group};
+    return packet_from(peer,&header,data,size);
 }
 static int publish_response(void *context,const void *data,size_t size) {
     struct network_socket *s=context;
@@ -199,10 +218,28 @@ static uint32_t supported_groups(const struct network_socket *s) {
     return RTMGRP_LINK|RTMGRP_IPV4_IFADDR|RTMGRP_IPV6_IFADDR|RTMGRP_IPV4_ROUTE|RTMGRP_IPV6_ROUTE
         | RTMGRP_NEIGH|RTMGRP_TC|RTMGRP_IPV4_RULE|(1U<<(RTNLGRP_IPV6_RULE-1));
 }
+/* Port identity is protocol/namespace scoped and lives with the socket OFD.
+ * Dup, fork and SCM_RIGHTS retain it; final release removes its listener. */
+static int bind_port(struct network_socket *s,uint32_t requested,pid_t pid) {
+    if (s->bound) return requested && requested!=s->listener.port ? -EINVAL : 0;
+    uint32_t port=requested ? requested : (uint32_t)pid;
+    if (!port) port=UINT32_MAX;
+    for (;;) {
+        struct md_network_listener *p=s->space->listeners;
+        while (p && (p==&s->listener || p->protocol!=s->protocol || p->port!=port)) p=p->next;
+        if (!p) break;
+        if (requested) return -EADDRINUSE;
+        port=port==(uint32_t)pid ? UINT32_MAX : port-1;
+        if (!port) return -EADDRINUSE;
+    }
+    s->listener.port=port; s->bound=1; return 0;
+}
 long md_network_socket_call(struct md_fd_object *object, const struct md_identity *identity,
-        long nr, const unsigned long *a, void *data, size_t capacity, size_t size, pid_t pid,
+        long nr, const unsigned long *a, void *data, size_t capacity, size_t size, pid_t pid,uint32_t groups,
+        const struct md_pid_identity *process,
         const struct md_network_target *resolver) {
-    if (!md_network_socket_control(object)) return -EBADF;
+    struct md_network_namespace *space=md_network_socket_namespace(object);
+    if (!space || (!md_network_socket_control(object) && nr!=SYS_ioctl)) return -EBADF;
     struct network_socket *s=(void *)object;
     if (nr==SYS_read || nr==SYS_readv || nr==SYS_recvfrom || nr==SYS_recvmsg) {
         pthread_mutex_lock(&s->space->fabric->lock);
@@ -217,12 +254,12 @@ long md_network_socket_call(struct md_fd_object *object, const struct md_identit
         struct ifreq *r=data;
         if (a[1]!=SIOCGIFNAME && !memchr(r->ifr_name,0,IFNAMSIZ)) return -ENODEV;
         struct md_network_link info;
-        pthread_mutex_lock(&s->space->fabric->lock);
-        struct md_network_interface *link=md_network_interface_find(s->space,
+        pthread_mutex_lock(&space->fabric->lock);
+        struct md_network_interface *link=md_network_interface_find(space,
             a[1]==SIOCGIFNAME ? (unsigned)r->ifr_ifindex : 0,
             a[1]==SIOCGIFNAME ? NULL : r->ifr_name);
         if (link) info=link->info;
-        pthread_mutex_unlock(&s->space->fabric->lock);
+        pthread_mutex_unlock(&space->fabric->lock);
         if (!link) return -ENODEV;
         if (a[1]==SIOCGIFNAME) {
             memcpy(r->ifr_name,info.name,IFNAMSIZ); return 0;
@@ -302,35 +339,58 @@ long md_network_socket_call(struct md_fd_object *object, const struct md_identit
          * Unconnected sends already use this default destination. */
         if (address->nl_pid || address->nl_groups) return -EOPNOTSUPP;
         pthread_mutex_lock(&s->space->fabric->lock);
-        if (!s->bound) { s->port=(uint32_t)pid; s->bound=1; }
-        pthread_mutex_unlock(&s->space->fabric->lock); return 0;
+        int error=bind_port(s,0,pid);
+        pthread_mutex_unlock(&s->space->fabric->lock); return error;
     }
     if (nr==SYS_bind) {
         if (size<sizeof(struct sockaddr_nl) || size>sizeof(struct sockaddr_storage)) return -EINVAL;
         const struct sockaddr_nl *address=data;
         if (address->nl_family!=AF_NETLINK) return -EAFNOSUPPORT;
         if (address->nl_groups&~supported_groups(s)) return -EOPNOTSUPP;
-        if (s->bound) return -EINVAL;
         pthread_mutex_lock(&s->space->fabric->lock);
-        s->listener.groups=address->nl_groups;
-        s->port=address->nl_pid ? address->nl_pid : (uint32_t)pid; s->bound=1;
-        pthread_mutex_unlock(&s->space->fabric->lock); return 0;
+        int error=bind_port(s,address->nl_pid,pid);
+        if (!error) s->listener.groups=address->nl_groups;
+        pthread_mutex_unlock(&s->space->fabric->lock); return error;
     }
     if (nr==SYS_getsockname || nr==SYS_getpeername) {
         if (capacity<sizeof(struct sockaddr_nl)) return -EINVAL;
         pthread_mutex_lock(&s->space->fabric->lock);
         struct sockaddr_nl address={.nl_family=AF_NETLINK,
-            .nl_pid=nr==SYS_getsockname ? s->port : 0,.nl_groups=nr==SYS_getsockname ? s->listener.groups : 0};
+            .nl_pid=nr==SYS_getsockname ? s->listener.port : 0,.nl_groups=nr==SYS_getsockname ? s->listener.groups : 0};
         pthread_mutex_unlock(&s->space->fabric->lock);
         memcpy(data,&address,sizeof(address)); return sizeof(address);
     }
     if (nr==SYS_sendto || nr==SYS_sendmsg || nr==SYS_write) {
         if (size<sizeof(struct nlmsghdr)) return -EINVAL;
+        pthread_mutex_lock(&s->space->fabric->lock);
+        int error=bind_port(s,0,pid);
+        uint32_t port=s->listener.port;
+        pthread_mutex_unlock(&s->space->fabric->lock);
+        if (error) return error;
+        if (groups) {
+            if (!md_identity_capable_in(identity,s->space->owner,CAP_NET_ADMIN)) return -EPERM;
+            unsigned group=(unsigned)__builtin_ctz(groups)+1;
+            if (!(supported_groups(s)&(1U<<(group-1)))) return -EOPNOTSUPP;
+            struct md_network_packet header={.group=group,.port=port,
+                .pid=process ? md_pid_identity_native(process) : pid,
+                .uid=identity->uid.real,.gid=identity->gid.real};
+            header.pid_count=md_pid_identity_export(process,header.pids);
+            /* A multicast destination also addresses the namespace's kernel.
+             * User messages keep their source identity and exclude the sender;
+             * they must never masquerade as committed topology notifications. */
+            pthread_mutex_lock(&s->space->fabric->lock);
+            for (struct md_network_listener *p=s->space->listeners;p;p=p->next)
+                if (p!=&s->listener && p->protocol==s->protocol && (p->groups&(1U<<(group-1)))) {
+                    int r=packet_from(p->peer,&header,data,size);
+                    if (r && r!=-ECONNREFUSED) p->overflow=1;
+                }
+            pthread_mutex_unlock(&s->space->fabric->lock);
+        }
         if (s->protocol==NETLINK_NETFILTER) {
             void *reply=malloc(MD_NETWORK_PACKET_MAX);
             if (!reply) return -ENOMEM;
             struct md_network_publication publication={.context=s,.publish=publish_response};
-            long result=md_network_nft(s->space,identity,data,size,s->port ? s->port : (uint32_t)pid,
+            long result=md_network_nft(s->space,identity,data,size,port,
                 s->capped_ack,reply,MD_NETWORK_PACKET_MAX,&publication);
             free(reply); return result<0 ? result : (long)size;
         }
@@ -345,7 +405,6 @@ long md_network_socket_call(struct md_fd_object *object, const struct md_identit
             size_t limit=query ? MD_NETWORK_PACKET_MAX : sizeof(small);
             unsigned char *reply=query ? malloc(limit) : small.bytes; if (!reply) return -ENOMEM;
             struct md_network_publication publication={.context=s,.publish=publish_response};
-            uint32_t port=s->port ? s->port : (uint32_t)pid;
             long result;
             if (s->protocol==NETLINK_GENERIC) {
                 result=md_network_generic(h,h->nlmsg_len,port,s->capped_ack,reply,limit);

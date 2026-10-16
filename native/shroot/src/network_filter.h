@@ -17,13 +17,31 @@ enum md_filter_opcode {
     MD_FILTER_IMMEDIATE, MD_FILTER_VERDICT, MD_FILTER_META, MD_FILTER_META_SET,
     MD_FILTER_PAYLOAD, MD_FILTER_COMPARE, MD_FILTER_RANGE, MD_FILTER_BITWISE,
     MD_FILTER_CT, MD_FILTER_CT_SET, MD_FILTER_FIB, MD_FILTER_LOOKUP,
-    MD_FILTER_NAT, MD_FILTER_MASQUERADE
+    MD_FILTER_NAT, MD_FILTER_MASQUERADE, MD_FILTER_VERDICT_MAP, MD_FILTER_COUNTER,
+    MD_FILTER_TRANSPORT
 };
+struct md_filter_counter { uint64_t packets, bytes; };
+enum { MD_FILTER_INVERT_SOURCE=1, MD_FILTER_INVERT_DESTINATION=2 };
+struct md_filter_transport {
+    uint16_t source[2], destination[2]; /* Inclusive host-order port bounds. */
+    unsigned protocol, inversion;
+};
+static inline int md_filter_port_matches(unsigned port,const uint16_t bounds[2],int invert) {
+    return (port>=bounds[0] && port<=bounds[1])!=!!invert;
+}
+/* Borrowed counter cells are valid only under the fabric lock and until the
+ * policy generation changes. Flow owners rebuild this plan before using it. */
+struct md_filter_accounting { struct md_filter_counter **cells; size_t count, capacity; };
 struct md_filter_expression {
     enum md_filter_opcode code;
     unsigned src, dst, size, key, operation, aux;
+    unsigned constant; /* NAT address/port in value instead of registers. */
     uint64_t target;
     unsigned char value[16], mask[16];
+    union {
+        struct md_filter_counter counter;
+        struct md_filter_transport transport;
+    };
 };
 struct md_filter_chain {
     uint64_t table, handle;
@@ -31,6 +49,8 @@ struct md_filter_chain {
     char name[256];
     int hook, priority, nat;
     unsigned policy;
+    unsigned counters;
+    struct md_filter_counter counter;
     size_t userdata_size;
     unsigned char userdata[256];
 };
@@ -43,10 +63,11 @@ struct md_filter_rule {
     size_t wire_size, userdata_size;
     unsigned char userdata[256];
 };
-struct md_filter_element { unsigned char key[16]; };
+struct md_filter_verdict { unsigned operation; uint64_t target; };
+struct md_filter_element { unsigned char key[16]; struct md_filter_verdict verdict; };
 struct md_filter_set {
     uint64_t table, handle;
-    uint32_t id, flags, key_type, key_size;
+    uint32_t id, flags, key_type, key_size, data_type;
     char name[256];
     struct md_filter_element *elements;
     size_t count, capacity, userdata_size;
@@ -58,10 +79,16 @@ struct md_filter_packet {
     uint32_t source, destination;
     uint16_t source_port, destination_port;
     unsigned protocol, state, mark, ctmark, status;
-    unsigned input, output, fib_type;
+    unsigned input, output, fib_type, source_fib_type;
     char input_name[16], output_name[16];
     unsigned snat, dnat, masquerade;
     uint32_t masquerade_address;
+    struct md_filter_accounting *accounting;
+};
+struct md_filter_rewrite {
+    uint32_t source, destination, fib_type, source_fib_type;
+    uint16_t source_port, destination_port;
+    int priority;
 };
 struct md_filter_port { uint32_t address; uint16_t port; unsigned protocol; };
 struct md_network_filter {
@@ -90,6 +117,11 @@ void md_filter_rule_delete(struct md_network_filter *,size_t);
 void md_filter_chain_delete(struct md_network_filter *,size_t);
 void md_filter_set_delete(struct md_network_filter *,size_t);
 int md_filter_validate(const struct md_network_filter *);
+size_t md_filter_verdict_count(const struct md_network_filter *,const struct md_filter_expression *);
+struct md_filter_verdict md_filter_verdict_at(const struct md_network_filter *,const struct md_filter_expression *,size_t);
 int md_filter_evaluate(struct md_network_filter *,unsigned,struct md_filter_packet *);
+int md_filter_evaluate_transition(struct md_network_filter *,unsigned,struct md_filter_packet *,
+    const struct md_filter_rewrite *,int *);
+void md_filter_account(struct md_filter_accounting *,size_t);
 int md_filter_ports(struct md_network_filter *,uint32_t,struct md_filter_port *,size_t,size_t *);
 #endif

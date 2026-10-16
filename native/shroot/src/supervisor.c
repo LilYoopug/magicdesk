@@ -314,6 +314,7 @@ struct thread {
     struct md_fd_order buffer_descriptor_order;
     unsigned buffer_descriptor_operation;
     unsigned long buffer_descriptor_argument;
+    uint32_t buffer_network_groups;
     int proc_waiting;
     struct md_control_pending *control_pending;
     size_t control_size;
@@ -4440,9 +4441,10 @@ static void buffer_descriptor_start(struct thread *t) {
         unsigned long args[6]; for (unsigned i=0;i<6;++i) args[i]=t->original.regs[i];
         struct md_network_target resolver={.context=t,.resolve=network_namespace_capture};
         result=md_device_events_is(object)
-            ? md_device_events_call(object,nr,args,span.data,span.size,t->buffer_descriptor_argument,visible_pid(t,t->tgid))
+            ? t->buffer_network_groups ? -EOPNOTSUPP
+                : md_device_events_call(object,nr,args,span.data,span.size,t->buffer_descriptor_argument,visible_pid(t,t->tgid))
             : md_network_socket_call(object,&t->identity,nr,args,span.data,span.size,
-                t->buffer_descriptor_argument,visible_pid(t,t->tgid),&resolver);
+                t->buffer_descriptor_argument,visible_pid(t,t->tgid),t->buffer_network_groups,t->resources.pid_group,&resolver);
     } else if (!result) {
         if (!md_descriptor_inode_is(object)) result=-EBADF;
         else if (nr==SYS_fchown || nr==SYS_fchownat) {
@@ -4486,6 +4488,7 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
             && r->regs[0]!=MD_BUFFER_PID_NUMBER && r->regs[0]!=MD_BUFFER_DESCRIPTOR_META && r->regs[0]!=MD_BUFFER_PIDFD_NAMESPACE
             && r->regs[0]!=MD_BUFFER_CONTROL_IOCTL_SPEC && r->regs[0]!=MD_BUFFER_CONTROL_IOCTL
             && r->regs[0]!=MD_BUFFER_NETWORK_OPEN && r->regs[0]!=MD_BUFFER_NETWORK_CALL && r->regs[0]!=MD_BUFFER_NETWORK_DATA
+            && r->regs[0]!=MD_BUFFER_NETWORK_CREDENTIALS
             && !(r->regs[0]>=MD_BUFFER_EPOLL_BEGIN && r->regs[0]<=MD_BUFFER_POLL_COPY)
             && r->regs[0]!=MD_FS_BUFFER_RIGHTS_BEGIN) {
         buffer_reply(t,-ENOTSUP); return;
@@ -4752,8 +4755,26 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
         break;
     }
     case MD_BUFFER_NETWORK_CALL: {
-        if (t->phase!=DISPATCHING || !t->buffer.pool || r->regs[1]>MD_NETWORK_BUFFER_SIZE || r->regs[2]) break;
+        if (t->phase!=DISPATCHING || !t->buffer.pool || r->regs[1]>MD_NETWORK_BUFFER_SIZE
+                || r->regs[2]>UINT32_MAX || (r->regs[2] && t->original.regs[8]!=SYS_sendto
+                    && t->original.regs[8]!=SYS_sendmsg)) break;
+        t->buffer_network_groups=(uint32_t)r->regs[2];
         buffer_descriptor_begin(t,r); return;
+    }
+    case MD_BUFFER_NETWORK_CREDENTIALS: {
+        if (t->phase!=DISPATCHING || !t->buffer.pool || r->regs[1] || r->regs[2]
+                || t->original.regs[8]!=SYS_recvmsg) break;
+        struct md_buffer_span span;
+        result=md_buffer_span(&t->buffer,&span);
+        if (result) break;
+        struct md_network_packet *packet=span.data;
+        if (span.size<sizeof(*packet) || packet->pid_count>MD_PID_LEVELS) { result=-EINVAL; break; }
+        packet->pid=md_pid_numbers_visible(packet->pids,packet->pid_count*sizeof(*packet->pids),
+            md_pid_identity_namespace(t->resources.pid),packet->pid);
+        if (packet->pid<0) { result=packet->pid; break; }
+        packet->uid=md_identity_visible_id(&t->identity,0,packet->uid);
+        packet->gid=md_identity_visible_id(&t->identity,1,packet->gid);
+        break;
     }
     case MD_BUFFER_DESCRIPTOR_META: {
         if (t->phase!=DISPATCHING || !t->buffer.pool || r->regs[2]!=t->original.regs[8]) break;
@@ -5169,7 +5190,8 @@ static int domain_call(struct thread *t, struct user_pt_regs *r, unsigned long c
     if (t->ready && t->phase==IDLE) {
         struct md_fd_object *object=network_descriptor_call(nr)
             ? md_fd_origins_object(t->resources.files,(int)r->regs[0],NULL) : NULL;
-        int control=md_network_socket_control(object) || md_network_endpoint_is(object) || md_device_events_is(object);
+        int control=md_network_socket_control(object) || md_network_endpoint_is(object) || md_device_events_is(object)
+            || (nr==SYS_ioctl && md_network_interface_ioctl(r->regs[1]) && md_network_socket_namespace(object));
         md_fd_object_release(object);
         int devices=nr==SYS_socket && r->regs[0]==AF_NETLINK && r->regs[2]==NETLINK_KOBJECT_UEVENT
             && md_fs_worker_device_events(filesystem);
@@ -5557,8 +5579,10 @@ static void dispatch(struct thread *t) {
     if (network_descriptor_call(t->original.regs[8])) {
         struct md_fd_object *object=md_fd_origins_object(t->resources.files,(int)t->original.regs[0],NULL);
         if (md_network_socket_offline(object)) policy|=MD_DISPATCH_OFFLINE_SOCKET;
-        if (md_network_socket_control(object)) policy|=MD_DISPATCH_NETWORK_CONTROL;
-        if (md_network_endpoint_is(object)) policy|=MD_DISPATCH_NETWORK_DATA;
+        int interface_ioctl=t->original.regs[8]==SYS_ioctl && md_network_interface_ioctl(t->original.regs[1])
+            && md_network_socket_namespace(object);
+        if (md_network_socket_control(object) || interface_ioctl) policy|=MD_DISPATCH_NETWORK_CONTROL;
+        if (md_network_endpoint_is(object) && !interface_ioctl) policy|=MD_DISPATCH_NETWORK_DATA;
         if (md_device_events_is(object)) policy|=MD_DISPATCH_DEVICE_EVENTS;
         md_fd_object_release(object);
     }

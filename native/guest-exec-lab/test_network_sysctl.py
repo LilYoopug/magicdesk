@@ -5,6 +5,8 @@ from contextlib import ExitStack
 import ctypes
 import errno
 import os
+import socket
+import struct
 import subprocess
 from pathlib import Path
 import sys
@@ -36,6 +38,87 @@ def write(name, text):
 
 def guest():
     os.environ['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+    with ExitStack() as sockets:
+        def netlink(protocol=0):
+            return sockets.enter_context(socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, protocol))
+        first, second, duplicate = netlink(), netlink(), netlink()
+        first.bind((0, 0))
+        second.bind((0, 0))
+        a, b = first.getsockname()[0], second.getsockname()[0]
+        assert a and b and a != b, (a, b)
+        denied(lambda: duplicate.bind((a, 0)), errno.EADDRINUSE)
+        independent = netlink(16)
+        independent.bind((a, 0))
+        first.close()
+        duplicate.bind((a, 0))
+        assert duplicate.getsockname()[0] == a
+    print('PASS protocol-scoped netlink ports, collision, autobind and reuse', flush=True)
+    with socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 0) as sender, \
+            socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 0) as monitor:
+        sender.bind((12345, 1))
+        monitor.bind((12346, 1))
+        sender.settimeout(5)
+        monitor.settimeout(5)
+        monitor.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+        for sequence in (1, 2):
+            request = struct.pack('=IHHII', 32, 18, 0x301, sequence, 0) + bytes(16)
+            # A subscribed socket may reuse its multicast address for the
+            # initial RTM_GETLINK dump. This also multicasts the user request.
+            if sequence == 1:
+                assert sender.sendto(request, (0, 1)) == len(request)
+            else:
+                assert sender.sendmsg([request[:16], request[16:]], [], 0, (0, 1)) == len(request)
+            data, ancillary, flags, source = monitor.recvmsg(4096, socket.CMSG_SPACE(12))
+            assert data == request and source == (12345, 1) and not flags, (data, source, flags)
+            credentials = next(value for level, kind, value in ancillary
+                               if level == socket.SOL_SOCKET and kind == socket.SCM_CREDENTIALS)
+            assert struct.unpack('=iii', credentials) == (os.getpid(), os.getuid(), os.getgid())
+            complete = False
+            while not complete:
+                data, source = sender.recvfrom(65536)
+                assert source == (0, 0), source
+                offset = 0
+                while offset < len(data):
+                    size, kind, _, seq, _ = struct.unpack_from('=IHHII', data, offset)
+                    assert size >= 16 and seq == sequence and kind in (3, 16)
+                    complete |= kind == 3
+                    offset += (size + 3) & ~3
+        child = os.fork()
+        if not child:
+            os.setuid(1234)
+            denied(lambda: sender.sendto(request, (0, 1)), errno.EPERM)
+            os._exit(0)
+        assert os.waitpid(child, 0) == (child, 0)
+        child = os.fork()
+        if not child:
+            assert sender.sendto(request, (0, 1)) == len(request)
+            os._exit(0)
+        assert os.waitpid(child, 0) == (child, 0)
+        data, ancillary, flags, source = monitor.recvmsg(4096, socket.CMSG_SPACE(12))
+        credentials = next(value for level, kind, value in ancillary
+                           if level == socket.SOL_SOCKET and kind == socket.SCM_CREDENTIALS)
+        assert data == request and source == (12345, 1) and not flags
+        assert struct.unpack('=iii', credentials) == (child, os.getuid(), os.getgid()), credentials
+        assert sender.sendto(request, (0, 1)) == len(request)
+        child = os.fork()
+        if not child:
+            libc = ctypes.CDLL(None, use_errno=True)
+            assert libc.unshare(0x10000000 | 0x20000000) == 0, ctypes.get_errno()
+            Path('/proc/self/uid_map').write_text('1234 0 1\n')
+            Path('/proc/self/setgroups').write_text('deny\n')
+            Path('/proc/self/gid_map').write_text('1234 0 1\n')
+            receiver = os.fork()
+            if not receiver:
+                data, ancillary, flags, source = monitor.recvmsg(4096, socket.CMSG_SPACE(12))
+                credentials = next(value for level, kind, value in ancillary
+                                   if level == socket.SOL_SOCKET and kind == socket.SCM_CREDENTIALS)
+                assert data == request and source == (12345, 1) and not flags
+                assert struct.unpack('=iii', credentials) == (0, 1234, 1234), credentials
+                os._exit(0)
+            assert os.waitpid(receiver, 0) == (receiver, 0)
+            os._exit(0)
+        assert os.waitpid(child, 0) == (child, 0)
+    print('PASS netlink subscribed dumps, multicast source, credentials and sender authority', flush=True)
     def descriptors():
         result = {}
         for name in os.listdir('/proc/self/fd'):
@@ -46,6 +129,12 @@ def guest():
         return result
 
     port, ping, local = 'ip_unprivileged_port_start', 'ping_group_range', 'ip_local_port_range'
+    bridge = Path(BASE).parent / 'bridge/bridge-nf-call-iptables'
+    assert bridge.read_text() == '1\n'
+    bridge.write_text('1')
+    denied(lambda: bridge.write_text('0'), errno.EOPNOTSUPP)
+    denied(lambda: bridge.write_text('2'), errno.EINVAL)
+    assert bridge.read_text() == '1\n'
     def link(*args):
         subprocess.run(['ip', 'link', *args], check=True, timeout=10)
 

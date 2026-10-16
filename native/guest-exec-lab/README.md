@@ -101,6 +101,28 @@ that system daemon's service-unit startup. Host-side observer ownership checks:
 `python native/guest-exec-lab/test_network_observer.py`.
 The Docker probe selects a Python image automatically for `--exercise-ports`;
 an explicit `--image` must also provide Python for that scenario.
+`--profile nftables --no-userland-proxy` requires Docker 29+ and checks the
+same local matrix as `--profile routed`, which retains the older proxy profile.
+Both engine probes keep internet checks opt-in (`--internet`); local TCP/UDP,
+container-name DNS, conflicts and cleanup must pass independently. A token-scoped
+HTTP endpoint on the native host interface also verifies outbound request and
+response routing without a public server. This catches reverse-NAT/raw-chain
+ordering failures independently of external connectivity. Podman uses
+`--host-limits` to retain the inherited Android hard limits, not claim that
+guest root can raise them.
+`test_routed_network.py` adds libc interface lookup, IPv4 packet information
+with absent/truncated receive buffers, a datagram queued before sender close,
+and receiver-close/rebind without reusing stale reply mappings.
+`benchmark_network.py BUILD STORE --sysroot GLIBC_SYSROOT` compares one static
+binary under shell/native, host, routed, filtered and NAT modes with rotated
+rounds. It reports application CPU separately from whole-invocation CPU;
+the latter includes startup, rule preparation and cleanup.
+
+`test_thread_identity_runtime.py BUILD STORE FIXTURE --debuggers` checks libc
+thread identities and multi-threaded setuid/setgid/setgroups, including strace
+both inside and outside a PID namespace. The store must contain strace and GDB.
+Signal information remains native while stopped and is translated separately
+for debugger observation and delivery to the target.
 
 `test_nproc.py BUILD STORE` verifies per-real-UID process/thread quotas, shared
 thread limits, fork copies, unreaped children, UID-change/exec admission,

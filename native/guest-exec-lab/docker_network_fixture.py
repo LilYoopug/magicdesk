@@ -112,6 +112,7 @@ def internet():
             diagnose_dns()
             raise
         timings.append(time.monotonic() - start)
+    print('CONTAINER_DNS_OK', json.dumps({'dnsSeconds': timings}), flush=True)
     with urllib.request.urlopen('http://example.com', timeout=15) as response:
         assert response.status == 200
         size = len(response.read())
@@ -131,6 +132,17 @@ class Observer:
             def log_message(self, *_):
                 pass
 
+            def do_GET(self):
+                if self.path != '/' + owner.token + '/outbound':
+                    self.send_error(404)
+                    return
+                owner.records.append({'operation': 'outbound-request', 'peer': self.client_address})
+                body = owner.token.encode()
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
             def do_POST(self):
                 if self.path != '/' + owner.token:
                     self.send_error(404)
@@ -145,6 +157,11 @@ class Observer:
                     port = int(item.get('port', 0))
                     if item['operation'] == 'allocate':
                         result['port'] = owner.allocate_port()
+                    elif item['operation'] == 'outbound':
+                        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
+                            route.connect(('192.0.2.1', 9))
+                            host = route.getsockname()[0]
+                        result['url'] = f'http://{host}:{owner.server.server_port}/{owner.token}/outbound'
                     elif item['operation'] == 'handoff':
                         connections = [s for s in owner.reservations if s.getsockname()[1] == port]
                         assert len(connections) == 2, 'No paired TCP/UDP reservation'
@@ -186,7 +203,9 @@ class Observer:
                 self.end_headers()
                 self.wfile.write(body)
 
-        self.server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        # The token-scoped fixture also accepts container egress through the
+        # host's real interface, without depending on a public web service.
+        self.server = ThreadingHTTPServer(('0.0.0.0', 0), Handler)
         self.thread = threading.Thread(target=self.server.serve_forever)
         self.thread.start()
         self.address = f"{self.server.server_port}/{self.token}"
@@ -236,7 +255,12 @@ def observe(address, **request):
 
 
 if __name__ == '__main__':
-    if sys.argv[1] == '--internet':
+    if sys.argv[1] == '--http':
+        with urllib.request.urlopen(sys.argv[2], timeout=5) as response:
+            assert response.status == 200
+            assert response.read().decode() == sys.argv[2].split('/')[-2]
+        print('CONTAINER_OUTBOUND_OK', flush=True)
+    elif sys.argv[1] == '--internet':
         internet()
     elif sys.argv[1] == '--client':
         exchange(sys.argv[2], int(sys.argv[3]), sys.argv[4], int(sys.argv[5]) if len(sys.argv)>5 else 1)

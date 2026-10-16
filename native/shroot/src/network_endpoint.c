@@ -55,6 +55,9 @@ int md_network_endpoint_filter_update(struct md_network_namespace *n,struct md_n
 }
 static const struct md_fd_object_type endpoint_type={.destroy=destroy,.selectors=1U<<MD_FD_SELECTOR_PROC};
 int md_network_endpoint_is(const struct md_fd_object *o) { return o && o->type==&endpoint_type; }
+struct md_network_namespace *md_network_endpoint_namespace(const struct md_fd_object *o) {
+    return md_network_endpoint_is(o) ? ((const struct md_network_endpoint *)o)->space : NULL;
+}
 int md_network_endpoint_enabled(const struct md_network_namespace *n) { return n && n->fabric->endpoints_enabled; }
 static struct md_network_endpoint *create(struct md_network_namespace *n,int type,int protocol) {
     struct md_network_endpoint *e=calloc(1,sizeof(*e));
@@ -170,8 +173,9 @@ int md_network_endpoint_listen(struct md_fd_object *o,int fd,int backlog) {
     pthread_mutex_unlock(&e->space->fabric->lock); return error;
 }
 int md_network_endpoint_resolve(struct md_network_fabric *f,uint64_t destination,int type,
-        const struct sockaddr_in *logical,struct sockaddr_in *native) {
+        const struct sockaddr_in *logical,struct sockaddr_in *native,const void **endpoint) {
     *native=*logical;
+    if (endpoint) *endpoint=NULL;
     if (!destination) return 0;
     struct md_network_namespace *n=md_network_space_find(f,destination);
     if (!n) return -ENETUNREACH;
@@ -179,12 +183,17 @@ int md_network_endpoint_resolve(struct md_network_fabric *f,uint64_t destination
         if (e->space==n && e->type==type && e->bound && !e->accepted
                 && e->local.sin_port==logical->sin_port && (!e->local.sin_addr.s_addr
                     || e->local.sin_addr.s_addr==logical->sin_addr.s_addr)) {
+            if (endpoint) *endpoint=e;
             *native=e->native; native->sin_addr.s_addr=htonl(INADDR_LOOPBACK); return 0;
         }
     return n->mode==MD_NETWORK_ROUTED && loopback(logical->sin_addr.s_addr) ? 0 : -ECONNREFUSED;
 }
 int md_network_endpoint_destination(struct md_fd_object *o,const struct sockaddr *a,socklen_t length,
         struct sockaddr_storage *out,socklen_t *out_length) {
+    return md_network_endpoint_destination_info(o,a,length,NULL,out,out_length);
+}
+int md_network_endpoint_destination_info(struct md_fd_object *o,const struct sockaddr *a,socklen_t length,
+        struct in_pktinfo *info,struct sockaddr_storage *out,socklen_t *out_length) {
     if (!md_network_endpoint_is(o)) return -EBADF;
     struct md_network_endpoint *e=(void *)o;
     struct sockaddr_in logical;
@@ -192,19 +201,42 @@ int md_network_endpoint_destination(struct md_fd_object *o,const struct sockaddr
     struct md_network_namespace *n=e->space;
     pthread_mutex_lock(&n->fabric->lock);
     struct sockaddr_in native=logical;
-    if (!md_network_forward_destination(n,e,e->type,&e->local,&logical,&native)) {
-        struct md_filter_packet packet={.source=e->local.sin_addr.s_addr,.source_port=e->local.sin_port,
+    struct sockaddr_in local=e->local;
+    if (info) {
+        struct md_network_interface *link=info->ipi_ifindex
+            ? md_network_interface_find(n,(unsigned)info->ipi_ifindex,NULL) : NULL;
+        if (info->ipi_ifindex && !link) error=-ENODEV;
+        else if (info->ipi_spec_dst.s_addr && !local_interface(n,info->ipi_spec_dst.s_addr,0)) error=-EADDRNOTAVAIL;
+        else if (link && info->ipi_spec_dst.s_addr
+                && local_interface(n,info->ipi_spec_dst.s_addr,0)!=link) error=-EINVAL;
+        if (!error) local.sin_addr.s_addr=info->ipi_spec_dst.s_addr
+            ? info->ipi_spec_dst.s_addr : link ? link->ipv4 : local.sin_addr.s_addr;
+    }
+    if (!error && !md_network_forward_destination(n,e,e->type,&local,&logical,&native)) {
+        struct md_filter_packet packet={.source=local.sin_addr.s_addr,.source_port=local.sin_port,
             .destination=logical.sin_addr.s_addr,.destination_port=logical.sin_port,.protocol=e->protocol,.state=8};
         struct md_network_flow_path path;
         error=md_network_flow_route(n,&packet,0,&path);
+        /* Interface selection must agree with the supported route. Do not
+         * silently accept policy routing which the logical fabric cannot do. */
+        if (!error && info && info->ipi_ifindex) {
+            struct md_network_interface *route=md_network_route_find(n,logical.sin_addr.s_addr,NULL);
+            if (!route || route->info.index!=(unsigned)info->ipi_ifindex) error=-EOPNOTSUPP;
+        }
         struct sockaddr_in translated={.sin_family=AF_INET,.sin_addr.s_addr=packet.destination,.sin_port=packet.destination_port};
-        if (!error) error=md_network_endpoint_resolve(n->fabric,path.destination,e->type,&translated,&native);
+        if (!error) error=md_network_endpoint_resolve(n->fabric,path.destination,e->type,&translated,&native,NULL);
+        /* A private datagram's queued source must outlive the sending socket.
+         * The existing bounded flow owner retains both logical directions. */
+        if (!error && e->type==SOCK_DGRAM && path.destination) path.mediated=1;
         if (!error && path.mediated) {
             struct sockaddr_in target=native;
             error=md_network_forward_route(n,e,e->type,&e->native,&target,&path,&native);
         } else if (!error) error=direct_path(e,&path);
     }
-    if (!error) { memcpy(out,&native,sizeof(native)); *out_length=sizeof(native); }
+    if (!error) {
+        memcpy(out,&native,sizeof(native)); *out_length=sizeof(native);
+        if (info) *info=(struct in_pktinfo){.ipi_spec_dst=e->native.sin_addr};
+    }
     pthread_mutex_unlock(&n->fabric->lock); return error;
 }
 static uint32_t source_address(struct md_network_namespace *n,uint32_t target) {
@@ -257,25 +289,38 @@ int md_network_endpoint_name(struct md_fd_object *o,int fd,int peer,struct socka
     pthread_mutex_unlock(&e->space->fabric->lock); return 0;
 }
 int md_network_endpoint_source(struct md_fd_object *o,struct sockaddr_storage *address,socklen_t *length) {
+    return md_network_endpoint_source_info(o,address,length,NULL);
+}
+int md_network_endpoint_source_info(struct md_fd_object *o,struct sockaddr_storage *address,socklen_t *length,
+        struct in_pktinfo *info) {
     if (!md_network_endpoint_is(o)) return -EBADF;
     if (*length!=sizeof(struct sockaddr_in) || address->ss_family!=AF_INET) return -EAFNOSUPPORT;
     struct md_network_endpoint *e=(void *)o;
     struct sockaddr_in *a=(void *)address;
     /* Logical inter-namespace traffic is transported over native loopback.
      * An internet peer sharing a local ephemeral port is still that peer. */
-    if (!loopback(a->sin_addr.s_addr)) return 0;
     pthread_mutex_lock(&e->space->fabric->lock);
-    if (md_network_forward_source(e->space,e->type,a)) {
-        pthread_mutex_unlock(&e->space->fabric->lock); return 0;
-    }
-    for (struct md_network_endpoint *other=e->space->fabric->endpoints;other;other=other->next)
+    uint32_t local=e->local.sin_addr.s_addr;
+    if (loopback(a->sin_addr.s_addr) && !md_network_forward_source(e->space,e->type,a,&local))
+      for (struct md_network_endpoint *other=e->space->fabric->endpoints;other;other=other->next)
         if (other->bound && !other->accepted && other->type==e->type && other->native.sin_port==a->sin_port
                 && (!other->native.sin_addr.s_addr || other->native.sin_addr.s_addr==a->sin_addr.s_addr)) {
             *a=other->local;
             if (!a->sin_addr.s_addr) a->sin_addr.s_addr=other->source ? other->source
                 : source_address(other->space,e->local.sin_addr.s_addr);
+            if (!local) for (struct direct_path *p=other->direct;p;p=p->next)
+                if (p->path.destination==e->space->inode
+                        && p->path.translated.destination_port==e->local.sin_port) {
+                    local=p->path.translated.destination; break;
+                }
             break;
         }
+    if (info) {
+        if (!local) local=source_address(e->space,a->sin_addr.s_addr);
+        struct md_network_interface *link=local_interface(e->space,local,0);
+        *info=(struct in_pktinfo){.ipi_ifindex=link ? (int)link->info.index : 0,
+            .ipi_spec_dst.s_addr=local,.ipi_addr.s_addr=local};
+    }
     pthread_mutex_unlock(&e->space->fabric->lock); return 0;
 }
 int md_network_endpoint_accept(struct md_fd_object *o,int fd,struct md_fd_object **out) {

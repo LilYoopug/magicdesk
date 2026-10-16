@@ -106,6 +106,40 @@ def guest(observer):
             nft('delete table inet autoport\n')
             observe(observer, operation='exchange', port=port, token='nft-ports')
             report['checks'].append('automatic-port-input-filter')
+            nft('add table ip accounting\n'
+                'add chain ip accounting output { type filter hook output priority 0; policy accept; }\n'
+                'add chain ip accounting local\n'
+                'add map ip accounting interfaces { type ifname : verdict; elements = { "lo" : jump local }; }\n'
+                'add rule ip accounting output oifname vmap @interfaces\n'
+                'add rule ip accounting local udp dport 38981 counter accept\n'
+                'add rule ip accounting local tcp dport 38981 counter accept\n')
+
+            def counters():
+                output = subprocess.check_output(['nft', '-j', 'list', 'table', 'ip', 'accounting'], text=True)
+                return [expr['counter'] for item in json.loads(output)['nftables']
+                        for expr in item.get('rule', {}).get('expr', []) if 'counter' in expr]
+
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as connection:
+                connection.settimeout(5)
+                for _ in range(5):
+                    connection.sendto(b'c' * 64, ('127.0.0.1', 38981))
+                    assert connection.recv(128) == b'c' * 64
+                before = counters()
+                assert before[0] == {'packets': 5, 'bytes': 320}, before
+                assert counters() == before, 'query counted as traffic'
+                nft('add table ip unrelated\n')
+                connection.sendto(b'd' * 64, ('127.0.0.1', 38981))
+                assert connection.recv(128) == b'd' * 64
+                after = counters()
+                assert after[0] == {'packets': 6, 'bytes': 384}, after
+                nft('delete table ip unrelated\n')
+            with socket.create_connection(('127.0.0.1', 38981), timeout=5) as connection:
+                connection.sendall(b't' * 4096)
+                receive(connection, b't' * 4096)
+                totals = counters()
+                assert totals[1]['bytes'] == 4096 and totals[1]['packets'] >= 1, totals
+            nft('delete table ip accounting\n')
+            report['checks'].append('verdict-map-traffic-and-generation-safe-counters')
             report['direct'] = benchmark(38981)
             with socket.create_connection(('127.0.0.1', 38981), timeout=5) as connection:
                 nft('add table inet mdrollback\n'

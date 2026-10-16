@@ -129,3 +129,17 @@ void md_filter_set_delete(struct md_network_filter *f,size_t index) {
     free(f->sets[index].elements);
     memmove(f->sets+index,f->sets+index+1,(f->set_count-index-1)*sizeof(*f->sets)); --f->set_count;
 }
+size_t md_filter_verdict_count(const struct md_network_filter *f,const struct md_filter_expression *e) {
+    if (e->code==MD_FILTER_VERDICT) return 1;
+    if (e->code==MD_FILTER_VERDICT_MAP)
+        for (size_t i=0;i<f->set_count;++i) if (f->sets[i].handle==e->target) return f->sets[i].count;
+    return 0;
+}
+struct md_filter_verdict md_filter_verdict_at(const struct md_network_filter *f,const struct md_filter_expression *e,size_t at) {
+    if (e->code==MD_FILTER_VERDICT) return (struct md_filter_verdict){e->operation,e->target};
+    for (size_t i=0;i<f->set_count;++i) if (f->sets[i].handle==e->target) return f->sets[i].elements[at].verdict;
+    return (struct md_filter_verdict){0};
+}
+void md_filter_account(struct md_filter_accounting *a,size_t bytes) {
+    for (size_t i=0;i<a->count;++i) { ++a->cells[i]->packets; a->cells[i]->bytes+=bytes; }
+}

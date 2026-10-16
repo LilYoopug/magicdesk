@@ -138,7 +138,9 @@ the low-level routed mode remains available for guest-managed topology.
 Namespace-owned nftables rules, logical flow routing
 and event-driven forwarding are separate owners: atomic rule/port publication
 does not put an interpreter on ordinary stream reads/writes. Supported filtered
-and NAT flows use cached decisions and bounded relay queues. Native backing
+and NAT flows use cached decisions and bounded relay queues. Private UDP retains
+queued source identity through the same relay; unfiltered TCP and ordinary host
+network IO keep their native data path. Native backing
 ports are not host-firewall isolated; unsupported rule operations fail explicitly.
 Cgroups are intentionally permissive compatibility
 providers, not enforcement of CPU, memory, pids or device limits. Missing network,

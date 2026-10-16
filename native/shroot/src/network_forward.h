@@ -15,7 +15,7 @@ void md_network_forward_retire(struct md_network_namespace *);
 void md_network_forward_shutdown(struct md_network_fabric *);
 int md_network_forward_route(struct md_network_namespace *,const void *,int,const struct sockaddr_in *,
     const struct sockaddr_in *,struct md_network_flow_path *,struct sockaddr_in *);
-int md_network_forward_source(struct md_network_namespace *,int,struct sockaddr_in *);
+int md_network_forward_source(struct md_network_namespace *,int,struct sockaddr_in *,uint32_t *);
 int md_network_forward_destination(struct md_network_namespace *,const void *,int,const struct sockaddr_in *,
     const struct sockaddr_in *,struct sockaddr_in *);
 void md_network_forward_endpoint_closed(struct md_network_namespace *,const void *);
@@ -24,5 +24,5 @@ int md_network_forward_bind(struct md_network_namespace *,const void *,int,const
 void md_network_forward_bound(struct md_network_port_reservation *,int);
 int md_network_forward_listen(struct md_network_namespace *,const void *,int);
 /* Resolve a logical destination to its current socket, without retaining it. */
-int md_network_endpoint_resolve(struct md_network_fabric *,uint64_t,int,const struct sockaddr_in *,struct sockaddr_in *);
+int md_network_endpoint_resolve(struct md_network_fabric *,uint64_t,int,const struct sockaddr_in *,struct sockaddr_in *,const void **);
 #endif

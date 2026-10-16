@@ -60,6 +60,10 @@ struct md_proc_path md_proc_path_for(const char *path,int tid,int tgid) {
         }
         if (word(&p,"sys")) {
             if (word(&p,"net")) {
+                if (word(&p,"bridge")) {
+                    if (word(&p,"bridge-nf-call-iptables")) out.kind=MD_PROC_NET_BRIDGE_FILTER;
+                    out.process=tid; out.tail=p; out.anchor_length=(size_t)(p-path); return out;
+                }
                 if (!word(&p,"ipv4")) return out;
                 if (word(&p,"ip_unprivileged_port_start")) out.kind=MD_PROC_NET_UNPRIVILEGED_PORT;
                 else if (word(&p,"ping_group_range")) out.kind=MD_PROC_NET_PING_GROUPS;

@@ -20,7 +20,8 @@ uint64_t md_network_namespace_inode(const struct md_network_namespace *);
 const struct md_user_namespace *md_network_namespace_owner(const struct md_network_namespace *);
 int md_network_namespace_managed(const struct md_network_namespace *);
 enum md_network_parameter { MD_NET_UNPRIVILEGED_PORT, MD_NET_PING_GROUPS, MD_NET_LOCAL_PORTS,
-    MD_NET_IPV4_FORWARD, MD_NET_ROUTE_LOCALNET, MD_NET_RP_FILTER, MD_NET_ARP_NOTIFY };
+    MD_NET_IPV4_FORWARD, MD_NET_ROUTE_LOCALNET, MD_NET_RP_FILTER, MD_NET_ARP_NOTIFY,
+    MD_NET_BRIDGE_FILTER };
 #define MD_NET_SCOPE_ALL UINT64_MAX
 #define MD_NET_SCOPE_DEFAULT (UINT64_MAX-1)
 /* Resolve a policy lifetime once at open. Rename retains it; namespace moves
@@ -41,8 +42,12 @@ int md_network_link_list(struct md_network_namespace *,struct md_network_link *,
 struct md_fd_object *md_network_socket_new(struct md_network_namespace *);
 int md_network_socket_offline(const struct md_fd_object *);
 int md_network_socket_control(const struct md_fd_object *);
+struct md_network_namespace *md_network_socket_namespace(const struct md_fd_object *);
+int md_network_interface_ioctl(unsigned long);
 int md_network_socket_open(struct md_network_namespace *, int family, int type, int protocol,
     struct md_fd_object **, int *fd);
 long md_network_socket_call(struct md_fd_object *, const struct md_identity *, long nr,
-    const unsigned long *, void *data, size_t capacity, size_t size, pid_t pid,const struct md_network_target *);
+    const unsigned long *, void *data, size_t capacity, size_t size, pid_t pid,uint32_t groups,
+    const struct md_pid_identity *,
+    const struct md_network_target *);
 #endif

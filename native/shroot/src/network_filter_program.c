@@ -20,14 +20,17 @@ static int validate_chain(const struct md_network_filter *f,size_t chain,unsigne
         const struct md_filter_rule *r=&f->rules[i];
         for (unsigned j=0;j<r->count;++j) {
             const struct md_filter_expression *e=&r->expressions[j];
-            if (e->code==MD_FILTER_VERDICT && ((int)e->operation==NFT_JUMP || (int)e->operation==NFT_GOTO)) {
-                int target=chain_index(f,e->target);
+            for (size_t k=0;k<md_filter_verdict_count(f,e);++k) {
+                struct md_filter_verdict v=md_filter_verdict_at(f,e,k);
+                if ((int)v.operation!=NFT_JUMP && (int)v.operation!=NFT_GOTO) continue;
+                int target=chain_index(f,v.target);
                 if (target<0) return -ENOENT;
                 if (f->chains[target].table!=c->table || f->chains[target].hook>=0) return -EOPNOTSUPP;
                 int error=validate_chain(f,(size_t)target,state,height,depth+1);
                 if (error) return error;
                 if (height[target]+1>height[chain]) height[chain]=height[target]+1;
-            } else if (e->code==MD_FILTER_LOOKUP) {
+            }
+            if (e->code==MD_FILTER_LOOKUP || e->code==MD_FILTER_VERDICT_MAP) {
                 int found=0;
                 for (size_t k=0;k<f->set_count;++k)
                     if (f->sets[k].handle==e->target && f->sets[k].table==c->table) found=1;
@@ -56,10 +59,13 @@ int md_filter_validate(const struct md_network_filter *f) {
             if (source<0) return -ENOENT;
             for (unsigned j=0;j<r->count;++j) {
                 const struct md_filter_expression *e=&r->expressions[j];
-                if (e->code!=MD_FILTER_VERDICT || ((int)e->operation!=NFT_JUMP && (int)e->operation!=NFT_GOTO)) continue;
-                int target=chain_index(f,e->target);
-                unsigned added=contexts[source]&~contexts[target];
-                contexts[target]|=added; changed|=added;
+                for (size_t k=0;k<md_filter_verdict_count(f,e);++k) {
+                    struct md_filter_verdict v=md_filter_verdict_at(f,e,k);
+                    if ((int)v.operation!=NFT_JUMP && (int)v.operation!=NFT_GOTO) continue;
+                    int target=chain_index(f,v.target);
+                    unsigned added=contexts[source]&~contexts[target];
+                    contexts[target]|=added; changed|=added;
+                }
             }
         }
     }
@@ -79,6 +85,13 @@ int md_filter_validate(const struct md_network_filter *f) {
     }
     return 0;
 }
+static int account_counter(struct md_filter_packet *p,struct md_filter_counter *counter) {
+    struct md_filter_accounting *a=p->accounting;
+    if (!a) return 0;
+    int error=md_filter_reserve((void **)&a->cells,&a->capacity,a->count+1,sizeof(*a->cells),1024);
+    if (!error) a->cells[a->count++]=counter;
+    return error;
+}
 static int evaluate_chain(struct md_network_filter *f,const struct md_filter_chain *c,
         struct md_filter_packet *p,unsigned depth) {
     if (depth>16) return -ELOOP;
@@ -92,6 +105,18 @@ static int evaluate_chain(struct md_network_filter *f,const struct md_filter_cha
             unsigned char *src=registers+e->src,*dst=registers+e->dst;
             uint32_t value=0;
             switch (e->code) {
+            case MD_FILTER_TRANSPORT: {
+                const struct md_filter_transport *t=&e->transport;
+                match=p->protocol==t->protocol
+                    && md_filter_port_matches(ntohs(p->source_port),t->source,t->inversion&MD_FILTER_INVERT_SOURCE)
+                    && md_filter_port_matches(ntohs(p->destination_port),t->destination,t->inversion&MD_FILTER_INVERT_DESTINATION);
+                break;
+            }
+            case MD_FILTER_COUNTER: {
+                int error=account_counter(p,&e->counter);
+                if (error) return error;
+                break;
+            }
             case MD_FILTER_IMMEDIATE:
                 memset(dst,0,(e->size+3)&~3U); memcpy(dst,e->value,e->size); break;
             case MD_FILTER_COMPARE: {
@@ -134,7 +159,9 @@ static int evaluate_chain(struct md_network_filter *f,const struct md_filter_cha
                 value=e->key==NFT_CT_STATE ? p->state : e->key==NFT_CT_MARK ? p->ctmark : p->status;
                 memcpy(dst,&value,4); break;
             case MD_FILTER_CT_SET: memcpy(&p->ctmark,src,4); break;
-            case MD_FILTER_FIB: memcpy(dst,&p->fib_type,4); break;
+            case MD_FILTER_FIB:
+                value=e->operation==NFTA_FIB_F_SADDR ? p->source_fib_type : p->fib_type;
+                memcpy(dst,&value,4); break;
             case MD_FILTER_LOOKUP: {
                 struct md_filter_set *s=md_filter_set_find(f,c->table,NULL,e->target,0);
                 int found=0;
@@ -144,52 +171,82 @@ static int evaluate_chain(struct md_network_filter *f,const struct md_filter_cha
             }
             case MD_FILTER_NAT:
                 if (e->operation==NFT_NAT_DNAT) {
-                    if (e->key) memcpy(&p->destination,registers+e->dst,4);
-                    if (e->aux) memcpy(&p->destination_port,registers+e->src,2);
+                    if (e->key) memcpy(&p->destination,e->constant ? e->value : registers+e->dst,4);
+                    if (e->aux) memcpy(&p->destination_port,e->constant ? e->value+4 : registers+e->src,2);
                     p->dnat=1; p->status|=1U<<5;
                 } else {
-                    if (e->key) memcpy(&p->source,registers+e->dst,4);
-                    if (e->aux) memcpy(&p->source_port,registers+e->src,2);
+                    if (e->key) memcpy(&p->source,e->constant ? e->value : registers+e->dst,4);
+                    if (e->aux) memcpy(&p->source_port,e->constant ? e->value+4 : registers+e->src,2);
                     p->snat=1; p->status|=1U<<4;
                 }
                 return NF_ACCEPT;
             case MD_FILTER_MASQUERADE:
                 p->source=p->masquerade_address; p->snat=p->masquerade=1; p->status|=1U<<4;
                 return NF_ACCEPT;
-            case MD_FILTER_VERDICT:
-                if ((int)e->operation==NFT_JUMP || (int)e->operation==NFT_GOTO) {
-                    struct md_filter_chain *target=md_filter_chain_find(f,c->table,NULL,e->target,0);
+            case MD_FILTER_VERDICT_MAP:
+            case MD_FILTER_VERDICT: {
+                struct md_filter_verdict v={e->operation,e->target};
+                if (e->code==MD_FILTER_VERDICT_MAP) {
+                    struct md_filter_set *s=md_filter_set_find(f,c->table,NULL,e->target,0);
+                    if (!s) return -ENOENT;
+                    size_t k=0;
+                    while (k<s->count && memcmp(src,s->elements[k].key,s->key_size)) ++k;
+                    if (k==s->count) { match=0; break; }
+                    v=s->elements[k].verdict;
+                }
+                if ((int)v.operation==NFT_JUMP || (int)v.operation==NFT_GOTO) {
+                    struct md_filter_chain *target=md_filter_chain_find(f,c->table,NULL,v.target,0);
                     if (!target) return -ENOENT;
                     int verdict=evaluate_chain(f,target,p,depth+1);
-                    if (verdict!=NFT_RETURN || (int)e->operation==NFT_GOTO) return verdict;
-                } else if ((int)e->operation==NFT_BREAK) match=0;
-                else if ((int)e->operation!=NFT_CONTINUE) return (int)e->operation;
+                    if (verdict!=NFT_RETURN || (int)v.operation==NFT_GOTO) return verdict;
+                } else if ((int)v.operation==NFT_BREAK) match=0;
+                else if ((int)v.operation!=NFT_CONTINUE) return (int)v.operation;
                 break;
+            }
             }
         }
     }
-    return c->hook>=0 ? (int)c->policy : NFT_RETURN;
+    return NFT_RETURN;
 }
 int md_filter_evaluate(struct md_network_filter *f,unsigned hook,struct md_filter_packet *p) {
-    if (!f || !f->chain_count) return 0;
+    return md_filter_evaluate_transition(f,hook,p,NULL,NULL);
+}
+int md_filter_evaluate_transition(struct md_network_filter *f,unsigned hook,struct md_filter_packet *p,
+        const struct md_filter_rewrite *rewrite,int *nat_priority) {
     /* Order is stable for equal priorities. NF_ACCEPT ends a chain, not the
      * hook: a later base chain may still deny the flow. */
     int previous_priority=INT32_MIN;
     size_t previous_index=0;
-    int started=0;
+    int started=0,retained=rewrite!=NULL;
     for (;;) {
-        size_t selected=f->chain_count;
-        for (size_t i=0;i<f->chain_count;++i) {
+        size_t count=f ? f->chain_count : 0,selected=count;
+        for (size_t i=0;i<count;++i) {
             struct md_filter_chain *c=&f->chains[i];
             if (c->hook!=(int)hook || (started && (c->priority<previous_priority
                     || (c->priority==previous_priority && i<=previous_index)))) continue;
-            if (selected==f->chain_count || c->priority<f->chains[selected].priority) selected=i;
+            if (selected==count || c->priority<f->chains[selected].priority) selected=i;
         }
-        if (selected==f->chain_count) return 0;
+        /* Retained conntrack translation is a hook-stage operation, not an
+         * already-rewritten input tuple. Early raw rules see the wire address;
+         * later filters see the translated destination/source. */
+        if (rewrite && (selected==count || f->chains[selected].priority>=rewrite->priority)) {
+            p->source=rewrite->source; p->destination=rewrite->destination;
+            p->source_port=rewrite->source_port; p->destination_port=rewrite->destination_port;
+            p->fib_type=rewrite->fib_type; p->source_fib_type=rewrite->source_fib_type;
+            rewrite=NULL;
+        }
+        if (selected==count) return 0;
         struct md_filter_chain *c=&f->chains[selected];
         int mapped=(hook==NF_INET_PRE_ROUTING || hook==NF_INET_LOCAL_OUT) ? p->dnat : p->snat;
-        int verdict=c->nat && (p->state!=8 || mapped) ? NF_ACCEPT : evaluate_chain(f,c,p,0);
-        if (verdict==NFT_RETURN) verdict=(int)c->policy;
+        int verdict=c->nat && (retained || p->state!=8 || mapped) ? NF_ACCEPT : evaluate_chain(f,c,p,0);
+        if (nat_priority && c->nat && !mapped && (p->dnat || p->snat)) *nat_priority=c->priority;
+        if (verdict==NFT_RETURN) {
+            if (c->counters) {
+                int error=account_counter(p,&c->counter);
+                if (error) return error;
+            }
+            verdict=(int)c->policy;
+        }
         if (verdict!=NF_ACCEPT) return verdict==NF_DROP ? -EACCES : verdict<0 ? verdict : -EOPNOTSUPP;
         previous_priority=c->priority; previous_index=selected; started=1;
     }

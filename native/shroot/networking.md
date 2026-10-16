@@ -79,6 +79,12 @@ address semantics; non-kernel destinations are unsupported.
 `network_packet` owns queued datagram framing and translates requested packet
 information and kernel SCM_CREDENTIALS, including ancillary truncation. Protocol
 membership and multicast delivery stay separate from native socketpair carriers.
+Port identities are unique within each namespace/protocol until the last socket
+description closes. User multicast snapshots sender credentials and PID ancestry
+at enqueue, so delivery after sender exit cannot adopt a reused PID. Receivers
+translate that snapshot in their own PID/user namespaces. Interface name/index,
+flags and MTU ioctls use the socket's creation namespace, including the AF_UNIX
+control sockets used by libc's `if_nametoindex`.
 Control descriptor selection joins the close/dup table turn, including capture
 of a namespace FD, and ends before guest output copying.
 
@@ -101,9 +107,13 @@ accepted FD. Ordinary stream IO remains native. Shared payload/vector helpers
 serve both Unix ancillary transport and routed message IO; native networking
 does not allocate these routed owners.
 
-IPv6, raw packets, multicast subscriptions/broadcast,
-device-bound sockets and routed recvmmsg return explicit errors. Outgoing
-network ancillary data is rejected; incoming packet metadata is not translated.
+IPv4 `IP_PKTINFO` uses logical interface and destination addresses on receive,
+including a missing `msg_name` and truncated ancillary buffers. Send accepts
+local source/interface selection consistent with the supported route; unknown
+interfaces, nonlocal sources and unsupported routing return explicit errors.
+Native TTL/TOS ancillary settings remain available. IPv6, raw packets, multicast
+subscriptions/broadcast, device-bound sockets, routed recvmmsg and other outgoing
+ancillary types are unsupported.
 This is not packet-level isolation: native ephemeral backing ports remain
 reachable, and inherited native descriptions retain authority. Independent
 supervisor transfer of these typed network owners is unsupported rather than
@@ -118,7 +128,7 @@ namespace. No operation opens Android's netfilter socket or changes its firewall
 Queries and mutations require CAP_NET_ADMIN in the namespace's user owner.
 
 The implemented ABI covers generation queries, tables, base/regular chains,
-rules and exact-key sets, including dumps, deletion, userdata and handles.
+rules, exact-key sets and verdict maps, including dumps, deletion, userdata and handles.
 `network_nft_objects` owns object operations; `network_nft_expression` validates
 register use and translates the supported expression ABI to typed operations.
 Complete begin/end batches use a private
@@ -136,15 +146,39 @@ NAT placement in incompatible hooks are rejected before commit.
 
 `network_filter_program` evaluates immediate/verdict, metadata, supported IPv4
 address/protocol and TCP/UDP port payload, compare/range/bitwise, conntrack
-state/mark/status, local-route classification, exact-set lookup, single-target
+state/mark/status, local/source-route classification, exact-set and verdict-map lookup, single-target
 DNAT/SNAT and masquerade operations. ACCEPT ends a chain, not a hook; later
-base chains may deny it. RETURN applies the base policy. Packet counters,
-logging, queues, dynamic/interval sets, flowtables, unsupported table flags,
+base chains may deny it. RETURN applies the base policy. Rule counters and
+optional base-chain policy counters retain their values in transactional
+snapshots. Cached flow decisions retain counter references for one generation,
+without walking rules for each transfer. A base-chain counter applies only when
+evaluation reaches its policy, not an explicit ACCEPT/DROP rule. Counters measure
+logical UDP datagrams/TCP chunks and payload bytes, not kernel packets, headers,
+retransmissions or connection attempts rejected before relay admission.
+Logging, queues, dynamic/interval sets, flowtables, unsupported table flags,
 monitoring groups and other netfilter subsystems return errors, not fake success.
+The iptables-nft rule-compat attribute is validation metadata, not a packet
+predicate; expressions still supply the matches. IPv4 revision-zero TCP/UDP
+matches become typed transport predicates with inclusive source/destination
+port ranges and inversion, without altering nft registers. DNAT/SNAT targets
+translate a single address/port into the same typed NAT operation. Revision
+queries advertise these supported adapters; TCP flags/options, NAT address/port
+ranges, randomization and other xtables extensions are rejected. Rule/chain deletion accepts their dumped metadata but
+uses the live handle/reference graph, never the caller's stale use count.
 
 `network_flow` records logical OUTPUT/PREROUTING/FORWARD/POSTROUTING/INPUT steps,
 original/translated tuples and reverse established traffic through bridge/veth
-topology. `network_forward` owns real frontend ports and a lazy epoll reactor,
+topology. Each translating step retains its before/after tuple and hook priority.
+Revalidation replays the retained mapping between base chains, not before the
+entire hook: early raw rules see wire addresses, later filters see translated
+addresses. Reverse translation uses the corresponding destination/source NAT
+hook priority. A retained flow does not reselect NAT after an allocating rule
+changes; filtering still uses the current ruleset. Removing a publication or
+namespace still closes the flows owned by it. The admission generation
+also preserves a binding, including no NAT, when rules change before the first
+payload. This is flow-level conntrack, not emulation of kernel packet queues or
+TCP state tracking.
+`network_forward` owns real frontend ports and a lazy epoll reactor,
 separately from namespace/ruleset storage. It never retains a guest data OFD.
 NAT publications are inferred from finite port predicates by abstract evaluation,
 not a trial packet with guessed source fields. Unbounded publication is rejected.
@@ -152,13 +186,16 @@ Every real flow still evaluates the full predicates, including source addresses.
 Port reservations are prepared before ACK; failed encoding/publication rolls
 them back. Podman reservations and NAT share the same frontend lifetime.
 
-Direct unfiltered internal/outgoing flows keep native connected IO only when
+Direct unfiltered TCP and outgoing native UDP keep native connected IO only when
 neither direction has potentially denying hooks. Installing a policy that
 revokes one returns atomic `EBUSY`; it cannot retroactively move
 a kernel stream into a relay. Direct path records are bounded per endpoint and
 retained until socket close, including accepted stream owners. Relayed flows
 cache decisions by fabric policy generation and revalidate in both directions
-after rules/topology changes. Addressed UDP reuses its established translation
+after rules/topology changes. Private UDP uses the same relay even without
+filter rules: its queued source identity must survive sending-socket closure.
+The retained tuple does not authorize delivery to a reused native port; closed
+peers cannot receive new traffic. Addressed UDP reuses its established translation
 instead of interpreting NEW/NAT for each send. Removed/down interfaces and
 disabled forwarding stop mediated traffic; established direct native IO is not
 intercepted by such topology updates.
@@ -166,7 +203,9 @@ intercepted by such topology updates.
 The reactor handles nonblocking native sockets, backpressure and TCP half-close.
 TCP has two 64 KiB buffers per mediated flow. UDP preserves datagrams, queues
 temporary EAGAIN up to 64 datagrams/256 KiB per direction, and expires idle
-mappings after 30 seconds. Queue exhaustion drops datagrams, never reports a
+mappings after 30 seconds, including retained identity for unread queued data.
+This is a bounded flow lifetime, not indefinite native datagram metadata retention.
+Queue exhaustion drops datagrams, never reports a
 fake protocol reply. Limits are 512 listeners and 1024 mediated flows per fabric.
 Idle listeners have no polling timer. Weak namespace/event identities avoid
 ownership cycles and stale FD-reuse events; namespace/endpoint teardown and
@@ -176,8 +215,11 @@ This is flow-level compatibility, not native packet conntrack or a host firewall
 Backing ports remain reachable outside the logical policy. There is no Android
 firewall mutation, guest daemon, external library or shared-startup prerequisite.
 The native model tests, stock nft traffic fixture and Podman bridge fixture
-separately verify rules, data IO and lifecycle; Docker is also checked with its
-explicit iptables-disabled userland-proxy profile.
+separately verify rules, data IO and lifecycle. Docker 29's nftables backend runs
+through these same operations with userland-proxy disabled; its explicit
+iptables-disabled userland-proxy profile remains a separate comparison.
+`AF_BRIDGE` link queries expose bridge ports and their hairpin state. Hairpin
+forwarding uses that state, not an engine-specific exemption.
 
 ## Namespace-Owned Sysctls
 
@@ -190,6 +232,8 @@ Writes require CAP_NET_ADMIN in its user owner, without touching host sysctls.
 Host-network views retain native access and errors. Logical unprivileged-port
 and ephemeral-range settings also govern routed endpoint allocation. Ping group
 configuration does not imply an ICMP transport.
+`bridge-nf-call-iptables=1` describes the shared IPv4 bridge filtering path;
+disabling this separate hook model is unsupported, not silently accepted.
 Forwarding starts enabled only in the explicitly selected routed launch root.
 New/copied network namespaces default to zero. The boolean gates external
 destination selection through a different routing owner, without blocking that

@@ -67,14 +67,22 @@ static int emit_chain(struct md_network_filter *f,const struct md_filter_chain *
         PUT(md_network_message_end_nest(o,nesting));
     }
     if (c->userdata_size) PUT(md_network_message_attribute(o,NFTA_CHAIN_USERDATA,c->userdata,c->userdata_size));
+    if (c->counters) {
+        size_t nesting=0;
+        PUT(md_network_message_nest(o,NFTA_CHAIN_COUNTERS,&nesting));
+        PUT(u64(o,NFTA_COUNTER_PACKETS,c->counter.packets));
+        PUT(u64(o,NFTA_COUNTER_BYTES,c->counter.bytes));
+        PUT(md_network_message_end_nest(o,nesting));
+    }
     return error;
 }
 static int chains(struct md_network_filter *f,const struct nlmsghdr *h,uint32_t port,struct md_network_message *o) {
     unsigned operation=NFNL_MSG_TYPE(h->nlmsg_type);
     int query=operation==NFT_MSG_GETCHAIN,dump=query && (h->nlmsg_flags&NLM_F_DUMP)==NLM_F_DUMP;
     uint64_t allowed=BIT(NFTA_CHAIN_TABLE)|BIT(NFTA_CHAIN_NAME)|BIT(NFTA_CHAIN_HANDLE);
+    if (operation==NFT_MSG_DELCHAIN) allowed|=BIT(NFTA_CHAIN_USE);
     if (operation==NFT_MSG_NEWCHAIN) allowed|=BIT(NFTA_CHAIN_HOOK)|BIT(NFTA_CHAIN_TYPE)|BIT(NFTA_CHAIN_POLICY)
-        |BIT(NFTA_CHAIN_FLAGS)|BIT(NFTA_CHAIN_ID)|BIT(NFTA_CHAIN_USERDATA);
+        |BIT(NFTA_CHAIN_FLAGS)|BIT(NFTA_CHAIN_ID)|BIT(NFTA_CHAIN_USERDATA)|BIT(NFTA_CHAIN_COUNTERS);
     struct attribute a[NFTA_CHAIN_MAX+1];
     int error=attributes(h,allowed,a,NFTA_CHAIN_MAX+1);
     struct md_network_filter_table *t=NULL;
@@ -95,6 +103,10 @@ static int chains(struct md_network_filter *f,const struct nlmsghdr *h,uint32_t 
     struct md_filter_chain *existing=md_filter_chain_find(f,t->handle,name,handle,0);
     if (operation==NFT_MSG_DELCHAIN) {
         if (!existing) return -ENOENT;
+        uint64_t use=0;
+        error=number(&a[NFTA_CHAIN_USE],&use,0);
+        if (error) return error;
+        /* The caller's dumped use count may be stale; inspect the live graph. */
         for (size_t i=0;i<f->rule_count;++i) {
             const struct md_filter_rule *r=&f->rules[i];
             if (r->chain==existing->handle) {
@@ -105,6 +117,9 @@ static int chains(struct md_network_filter *f,const struct nlmsghdr *h,uint32_t 
                 if (r->expressions[j].code==MD_FILTER_VERDICT && r->expressions[j].target==existing->handle)
                     return -EBUSY;
         }
+        for (size_t i=0;i<f->set_count;++i)
+            for (size_t j=0;j<f->sets[i].count;++j)
+                if (f->sets[i].elements[j].verdict.target==existing->handle) return -EBUSY;
         md_filter_chain_delete(f,(size_t)(existing-f->chains)); return 0;
     }
     if (!name || (h->nlmsg_flags&NLM_F_REPLACE)) return -EOPNOTSUPP;
@@ -133,6 +148,16 @@ static int chains(struct md_network_filter *f,const struct nlmsghdr *h,uint32_t 
         if (c.nat && hook==NF_INET_FORWARD) return -EOPNOTSUPP;
         if (existing && (c.hook!=existing->hook || c.nat!=existing->nat || c.priority!=existing->priority)) return -EOPNOTSUPP;
     } else if (a[NFTA_CHAIN_TYPE].data || (!existing && (flags || a[NFTA_CHAIN_POLICY].data))) return -EINVAL;
+    if (a[NFTA_CHAIN_COUNTERS].data) {
+        if (c.hook<0) return -EOPNOTSUPP;
+        struct attribute b[NFTA_COUNTER_MAX+1];
+        error=nested(&a[NFTA_CHAIN_COUNTERS],BIT(NFTA_COUNTER_PACKETS)|BIT(NFTA_COUNTER_BYTES),b,NFTA_COUNTER_MAX+1);
+        if (!error && (!b[NFTA_COUNTER_PACKETS].data || !b[NFTA_COUNTER_BYTES].data)) error=-EINVAL;
+        if (!error) error=number(&b[NFTA_COUNTER_PACKETS],&c.counter.packets,1);
+        if (!error) error=number(&b[NFTA_COUNTER_BYTES],&c.counter.bytes,1);
+        if (error) return error;
+        c.counters=1;
+    }
     if (a[NFTA_CHAIN_USERDATA].data) error=blob(&a[NFTA_CHAIN_USERDATA],c.userdata,&c.userdata_size);
     if (error) return error;
     if (existing) *existing=c;
@@ -160,8 +185,11 @@ static int rules(struct md_network_filter *f,const struct nlmsghdr *h,uint32_t p
     unsigned operation=NFNL_MSG_TYPE(h->nlmsg_type);
     int query=operation==NFT_MSG_GETRULE,dump=query && (h->nlmsg_flags&NLM_F_DUMP)==NLM_F_DUMP;
     uint64_t allowed=BIT(NFTA_RULE_TABLE)|BIT(NFTA_RULE_CHAIN)|BIT(NFTA_RULE_HANDLE)|BIT(NFTA_RULE_CHAIN_ID);
+    /* iptables-nft resends the dumped rule when deleting by handle. These
+     * attributes do not select a rule; the handle remains authoritative. */
+    if (operation==NFT_MSG_DELRULE) allowed|=BIT(NFTA_RULE_EXPRESSIONS)|BIT(NFTA_RULE_USERDATA);
     if (operation==NFT_MSG_NEWRULE) allowed|=BIT(NFTA_RULE_EXPRESSIONS)|BIT(NFTA_RULE_USERDATA)
-        |BIT(NFTA_RULE_POSITION)|BIT(NFTA_RULE_ID)|BIT(NFTA_RULE_POSITION_ID);
+        |BIT(NFTA_RULE_POSITION)|BIT(NFTA_RULE_ID)|BIT(NFTA_RULE_POSITION_ID)|BIT(NFTA_RULE_COMPAT);
     struct attribute a[NFTA_RULE_MAX+1];
     int error=attributes(h,allowed,a,NFTA_RULE_MAX+1);
     struct md_network_filter_table *t=NULL;
@@ -170,6 +198,7 @@ static int rules(struct md_network_filter *f,const struct nlmsghdr *h,uint32_t p
     if (!error) error=string(&a[NFTA_RULE_CHAIN],&name);
     if (!error) error=number(&a[NFTA_RULE_HANDLE],&handle,1);
     if (!error) error=number(&a[NFTA_RULE_CHAIN_ID],&id,0);
+    if (!error && a[NFTA_RULE_EXPRESSIONS].data && (a[NFTA_RULE_EXPRESSIONS].flags&~NLA_F_NESTED)) error=-EINVAL;
     if (error) return error;
     struct md_filter_chain *c=(name || id) && t ? md_filter_chain_find(f,t->handle,name,0,(uint32_t)id) : NULL;
     if ((name || id) && !c) return -ENOENT;
@@ -186,6 +215,17 @@ static int rules(struct md_network_filter *f,const struct nlmsghdr *h,uint32_t p
         return error ? error : !found && handle ? -ENOENT : 0;
     }
     if (!c || !a[NFTA_RULE_EXPRESSIONS].data || (a[NFTA_RULE_EXPRESSIONS].flags&~NLA_F_NESTED)) return -EINVAL;
+    if (a[NFTA_RULE_COMPAT].data) {
+        /* This is xt extension validation context, not a packet predicate.
+         * Expressions implement matches; supported targets validate their ABI. */
+        struct attribute b[NFTA_RULE_COMPAT_MAX+1];
+        uint32_t protocol=0,flags=0;
+        error=nested(&a[NFTA_RULE_COMPAT],BIT(NFTA_RULE_COMPAT_PROTO)|BIT(NFTA_RULE_COMPAT_FLAGS),b,NFTA_RULE_COMPAT_MAX+1);
+        if (!error) error=required_number(&b[NFTA_RULE_COMPAT_PROTO],&protocol);
+        if (!error) error=required_number(&b[NFTA_RULE_COMPAT_FLAGS],&flags);
+        if (!error && (protocol>UINT16_MAX || (flags&~NFT_RULE_COMPAT_F_MASK))) error=-EINVAL;
+        if (error) return error;
+    }
     uint64_t position=0,position_id=0,rule_id=0;
     error=number(&a[NFTA_RULE_POSITION],&position,1);
     if (!error) error=number(&a[NFTA_RULE_POSITION_ID],&position_id,0);
@@ -225,6 +265,7 @@ static int emit_set(struct md_network_filter *f,const struct md_filter_set *s,co
     PUT(text(o,NFTA_SET_TABLE,t->name)); PUT(text(o,NFTA_SET_NAME,s->name));
     PUT(u64(o,NFTA_SET_HANDLE,s->handle)); PUT(u32(o,NFTA_SET_FLAGS,s->flags));
     PUT(u32(o,NFTA_SET_KEY_TYPE,s->key_type)); PUT(u32(o,NFTA_SET_KEY_LEN,s->key_size));
+    if (s->flags&NFT_SET_MAP) PUT(u32(o,NFTA_SET_DATA_TYPE,s->data_type));
     if (s->userdata_size) PUT(md_network_message_attribute(o,NFTA_SET_USERDATA,s->userdata,s->userdata_size));
     return error;
 }
@@ -233,7 +274,7 @@ static int sets(struct md_network_filter *f,const struct nlmsghdr *h,uint32_t po
     int query=operation==NFT_MSG_GETSET,dump=query && (h->nlmsg_flags&NLM_F_DUMP)==NLM_F_DUMP;
     uint64_t allowed=BIT(NFTA_SET_TABLE)|BIT(NFTA_SET_NAME)|BIT(NFTA_SET_HANDLE)|BIT(NFTA_SET_ID);
     if (operation==NFT_MSG_NEWSET) allowed|=BIT(NFTA_SET_FLAGS)|BIT(NFTA_SET_KEY_TYPE)|BIT(NFTA_SET_KEY_LEN)
-        |BIT(NFTA_SET_POLICY)|BIT(NFTA_SET_DESC)|BIT(NFTA_SET_USERDATA);
+        |BIT(NFTA_SET_POLICY)|BIT(NFTA_SET_DESC)|BIT(NFTA_SET_USERDATA)|BIT(NFTA_SET_DATA_TYPE)|BIT(NFTA_SET_DATA_LEN);
     struct attribute a[NFTA_SET_MAX+1];
     int error=attributes(h,allowed,a,NFTA_SET_MAX+1);
     struct md_network_filter_table *t=NULL;
@@ -255,6 +296,10 @@ static int sets(struct md_network_filter *f,const struct nlmsghdr *h,uint32_t po
     struct md_filter_set *s=md_filter_set_find(f,t->handle,name,handle,(uint32_t)id);
     if (operation==NFT_MSG_DELSET) {
         if (!s) return -ENOENT;
+        for (size_t i=0;i<f->rule_count;++i) for (unsigned j=0;j<f->rules[i].count;++j) {
+            const struct md_filter_expression *e=&f->rules[i].expressions[j];
+            if ((e->code==MD_FILTER_LOOKUP || e->code==MD_FILTER_VERDICT_MAP) && e->target==s->handle) return -EBUSY;
+        }
         md_filter_set_delete(f,(size_t)(s-f->sets)); return 0;
     }
     if (!name || handle || (h->nlmsg_flags&NLM_F_REPLACE)) return -EINVAL;
@@ -265,7 +310,14 @@ static int sets(struct md_network_filter *f,const struct nlmsghdr *h,uint32_t po
     if (!error) error=required_number(&a[NFTA_SET_KEY_LEN],&value.key_size);
     if (!error) error=blob(&a[NFTA_SET_USERDATA],value.userdata,&value.userdata_size);
     if (error) return error;
-    if (value.flags&~(NFT_SET_ANONYMOUS|NFT_SET_CONSTANT) || !value.key_size || value.key_size>16) return -EOPNOTSUPP;
+    if (value.flags&~(NFT_SET_ANONYMOUS|NFT_SET_CONSTANT|NFT_SET_MAP) || !value.key_size || value.key_size>16) return -EOPNOTSUPP;
+    if (value.flags&NFT_SET_MAP) {
+        uint64_t length=0;
+        error=required_number(&a[NFTA_SET_DATA_TYPE],&value.data_type);
+        if (!error) error=number(&a[NFTA_SET_DATA_LEN],&length,0);
+        if (error) return error;
+        if (value.data_type!=NFT_DATA_VERDICT || length) return -EOPNOTSUPP;
+    } else if (a[NFTA_SET_DATA_TYPE].data || a[NFTA_SET_DATA_LEN].data) return -EINVAL;
     if (a[NFTA_SET_DESC].data) {
         struct attribute b[NFTA_SET_DESC_MAX+1]; uint64_t hint=0;
         error=nested(&a[NFTA_SET_DESC],BIT(NFTA_SET_DESC_SIZE),b,NFTA_SET_DESC_MAX+1);
@@ -296,9 +348,22 @@ static int emit_elements(struct md_network_filter *f,struct md_filter_set *s,con
         PUT(md_network_message_nest(o,NFTA_LIST_ELEM,&item));
         PUT(md_network_message_nest(o,NFTA_SET_ELEM_KEY,&key));
         PUT(md_network_message_attribute(o,NFTA_DATA_VALUE,s->elements[i].key,s->key_size));
-        PUT(md_network_message_end_nest(o,key)); PUT(md_network_message_end_nest(o,item));
+        PUT(md_network_message_end_nest(o,key));
+        if (s->flags&NFT_SET_MAP) {
+            size_t data=0;
+            PUT(md_network_message_nest(o,NFTA_SET_ELEM_DATA,&data));
+            PUT(md_nft_emit_verdict(f,s->table,&s->elements[i].verdict,o));
+            PUT(md_network_message_end_nest(o,data));
+        }
+        PUT(md_network_message_end_nest(o,item));
     }
     PUT(md_network_message_end_nest(o,list)); return error;
+}
+struct md_filter_set *md_nft_set(struct md_network_filter *f,uint64_t table,const char *name,uint32_t id) {
+    /* Named sets survive transactions; IDs only resolve sets created in this
+     * batch (including anonymous sets whose generated name is not yet known). */
+    struct md_filter_set *set=name ? md_filter_set_find(f,table,name,0,0) : NULL;
+    return set ? set : id ? md_filter_set_find(f,table,NULL,0,id) : NULL;
 }
 static int elements(struct md_network_filter *f,const struct nlmsghdr *h,uint32_t port,struct md_network_message *o) {
     unsigned operation=NFNL_MSG_TYPE(h->nlmsg_type);
@@ -310,7 +375,7 @@ static int elements(struct md_network_filter *f,const struct nlmsghdr *h,uint32_
     if (!error) error=string(&a[NFTA_SET_ELEM_LIST_SET],&name);
     if (!error) error=number(&a[NFTA_SET_ELEM_LIST_SET_ID],&id,0);
     if (error) return error;
-    struct md_filter_set *s=md_filter_set_find(f,t->handle,id ? NULL : name,0,(uint32_t)id);
+    struct md_filter_set *s=md_nft_set(f,t->handle,name,(uint32_t)id);
     if (!s) return -ENOENT;
     if (operation==NFT_MSG_GETSETELEM) {
         if (a[NFTA_SET_ELEM_LIST_ELEMENTS].data) return -EOPNOTSUPP;
@@ -328,12 +393,18 @@ static int elements(struct md_network_filter *f,const struct nlmsghdr *h,uint32_
         if (item->nla_len<sizeof(*item) || NLA_ALIGN(item->nla_len)>list->size-offset
                 || (item->nla_type&~(NLA_TYPE_MASK|NLA_F_NESTED))) return -EINVAL;
         struct attribute b[NFTA_SET_ELEM_MAX+1],key[NFTA_DATA_MAX+1]; uint64_t flags=0;
-        error=fields(item+1,item->nla_len-sizeof(*item),BIT(NFTA_SET_ELEM_KEY)|BIT(NFTA_SET_ELEM_FLAGS),b,NFTA_SET_ELEM_MAX+1);
+        error=fields(item+1,item->nla_len-sizeof(*item),BIT(NFTA_SET_ELEM_KEY)|BIT(NFTA_SET_ELEM_FLAGS)|BIT(NFTA_SET_ELEM_DATA),b,NFTA_SET_ELEM_MAX+1);
         if (!error) error=number(&b[NFTA_SET_ELEM_FLAGS],&flags,0);
         if (!error) error=nested(&b[NFTA_SET_ELEM_KEY],BIT(NFTA_DATA_VALUE),key,NFTA_DATA_MAX+1);
         if (error) return error;
         if (flags) return -EOPNOTSUPP;
         if (!key[NFTA_DATA_VALUE].data || key[NFTA_DATA_VALUE].flags || key[NFTA_DATA_VALUE].size!=s->key_size) return -EINVAL;
+        struct md_filter_element element={0};
+        memcpy(element.key,key[NFTA_DATA_VALUE].data,s->key_size);
+        if (operation!=NFT_MSG_DELSETELEM && (s->flags&NFT_SET_MAP)) {
+            error=md_nft_verdict(f,s->table,&b[NFTA_SET_ELEM_DATA],&element.verdict);
+            if (error) return error;
+        } else if (b[NFTA_SET_ELEM_DATA].data) return -EINVAL;
         size_t index=0;
         while (index<s->count && memcmp(key[NFTA_DATA_VALUE].data,s->elements[index].key,s->key_size)) ++index;
         if (operation==NFT_MSG_DELSETELEM) {
@@ -341,11 +412,11 @@ static int elements(struct md_network_filter *f,const struct nlmsghdr *h,uint32_
             memmove(s->elements+index,s->elements+index+1,(s->count-index-1)*sizeof(*s->elements)); --s->count;
         } else if (index<s->count) {
             if (h->nlmsg_flags&NLM_F_EXCL) return -EEXIST;
+            s->elements[index]=element;
         } else {
             error=md_filter_reserve((void **)&s->elements,&s->capacity,s->count+1,sizeof(*s->elements),1024);
             if (error) return error;
-            memset(&s->elements[s->count],0,sizeof(*s->elements));
-            memcpy(s->elements[s->count++].key,key[NFTA_DATA_VALUE].data,s->key_size);
+            s->elements[s->count++]=element;
         }
         offset+=NLA_ALIGN(item->nla_len);
     }

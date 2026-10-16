@@ -89,8 +89,9 @@ def guest(options):
         network = 'md-podman-ports'
         names = ('md-podman-first', 'md-podman-second')
         ports = []
-        image = 'docker.io/library/python:3.13-alpine'
-        run(prefix + ['pull', image], timeout=180)
+        image = options['portsImage']
+        if run(prefix + ['image', 'exists', image], required=False).get('exitCode') != 0:
+            run(prefix + ['pull', image], timeout=180)
         if run(prefix + ['network', 'exists', network], required=False).get('exitCode') == 0:
             run(prefix + ['network', 'rm', '-f', network])
         run(prefix + ['network', 'create', '--subnet', '10.92.0.0/24', network])
@@ -111,6 +112,10 @@ def guest(options):
             for source, target in (names, tuple(reversed(names))):
                 run(prefix + ['exec', source, 'python3', '/fixture.py', '--client', target, '8080', target, '20'])
             report['namedPeerExchangePassed'] = True
+            outbound = observe(options['observer'], operation='outbound')['url']
+            for name in names:
+                run(prefix + ['exec', name, 'python3', '/fixture.py', '--http', outbound])
+            report['localOutboundPassed'] = True
             if tracer:
                 tracer.send_signal(signal.SIGINT)
                 # EVENT_WAIT: detach while the multithreaded resolver remains
@@ -120,12 +125,14 @@ def guest(options):
                 report['traceDetachPassed'] = True
                 for source, target in (names, tuple(reversed(names))):
                     run(prefix + ['exec', source, 'python3', '/fixture.py', '--client', target, '8080', target, '20'])
-            for name in names:
-                run(prefix + ['exec', name, 'python3', '/fixture.py', '--internet'])
             conflict = run(prefix + ['run', '--rm', '--name', 'md-podman-conflict', '--network', network,
                                     *limits, '-p', f'127.0.0.1:{ports[0]}:8080', image, '/bin/true'], required=False)
             assert conflict.get('exitCode') != 0 and ('already allocated' in conflict['output']
                     or 'address already in use' in conflict['output'].lower()), conflict
+            if options['internet']:
+                report['internetResults'] = [run(prefix + ['exec', name, 'python3', '/fixture.py', '--internet'],
+                                                   required=False) for name in names]
+                report['internetPassed'] = all(item.get('exitCode') == 0 for item in report['internetResults'])
         except Exception as error:
             report['portFailure'] = repr(error)
             run(['nft', 'list', 'ruleset'], required=False)
@@ -155,20 +162,23 @@ def guest(options):
         run(['mount', '-t', 'sysfs', 'sysfs', '/sys'])
         run(['mount', '-t', 'cgroup2', 'none', '/sys/fs/cgroup'])
         run(prefix + ['info', '--format', 'json'])
-        run(prefix + ['pull', options['image']], timeout=180)
+        if run(prefix + ['image', 'exists', options['image']], required=False).get('exitCode') != 0:
+            run(prefix + ['pull', options['image']], timeout=180)
         created = True
         command = prefix + ['run', '--rm', '--name', name, '--log-driver', 'k8s-file',
                             '--network', options['network'], *limits, options['image'],
                             '/bin/sh', '-ec', 'id; echo PODMAN_CONTAINER_OK']
         result = run(command)
         assert 'PODMAN_CONTAINER_OK' in result['output'].splitlines(), result
-        if options['network'] != 'none':
+        if options['observer']:
+            exercise_ports()
+        if options['network'] != 'none' and options['internet']:
             result = run(prefix + ['run', '--rm', '--name', name, '--log-driver', 'k8s-file',
                           '--network', options['network'], *limits, options['image'], '/bin/sh', '-ec',
                           'wget -T 15 -qO /tmp/page http://example.com; test -s /tmp/page; echo PODMAN_INTERNET_OK'])
             assert 'PODMAN_INTERNET_OK' in result['output'].splitlines(), result
-        if options['observer']:
-            exercise_ports()
+        if options['observer'] and options['internet']:
+            assert report.get('internetPassed'), 'External DNS/HTTP failed; local matrix is recorded separately'
         report['passed'] = True
     except Exception as error:
         report['failure'] = repr(error)
@@ -200,6 +210,8 @@ def main():
     parser.add_argument('--cache', default='', help='Owned disposable Podman image cache')
     parser.add_argument('--trace', action='store_true')
     parser.add_argument('--exercise-ports', action='store_true')
+    parser.add_argument('--ports-image', default='docker.io/library/python:3.14-alpine')
+    parser.add_argument('--internet', action='store_true', help='Also require external DNS and HTTP')
     parser.add_argument('--host-limits', action='store_true', help='Set nofile/nproc explicitly to inherited shell limits')
     parser.add_argument('--unlimited-pids', action='store_true', help='Explicitly disable the optional pids-controller limit')
     args = parser.parse_args()
@@ -220,6 +232,7 @@ def main():
                    'cache': args.cache or '/tmp/md-podman-cache-' + suite.report['id'],
                    'storage': args.storage, 'network': args.network, 'image': args.image,
                    'cgroups': args.cgroups,
+                   'internet': args.internet, 'portsImage': args.ports_image,
                    'trace': args.trace, 'hostLimits': args.host_limits, 'unlimitedPids': args.unlimited_pids,
                    'observer': observer.address if observer else ''}
         deadline = 900 if observer else 300

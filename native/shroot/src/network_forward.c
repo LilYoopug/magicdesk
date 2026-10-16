@@ -26,12 +26,14 @@ struct datagram_queue { struct datagram *head, *tail; size_t bytes, count; };
 struct flow {
     struct flow *next;
     uint64_t id, listener, space, checked[2];
-    const void *endpoint;
-    int fd[2], borrowed, type, connecting, eof[2], denied[2];
+    const void *endpoint, *receiver;
+    int fd[2], borrowed, type, connecting, eof[2], denied[2], receiver_closed;
     struct sockaddr_in client, remote, gateway;
     struct md_network_flow_path path;
     struct stream_buffer *buffer;
     struct datagram_queue datagrams[2];
+    struct md_filter_accounting accounting[2];
+    unsigned started;
     int64_t deadline;
 };
 struct md_network_forward {
@@ -87,6 +89,7 @@ static void drop_flow(struct md_network_forward *f,struct flow *c) {
         c->datagrams[i].head=d->next; free(d);
     }
     if (c->borrowed) listener_interests(f,c->listener);
+    free(c->accounting[0].cells); free(c->accounting[1].cells);
     free(c->buffer); free(c);
 }
 static void drop_listener(struct md_network_forward *f,struct listener *l) {
@@ -110,16 +113,20 @@ static int socket_bound(int type,struct sockaddr_in *address) {
 static int endpoint_target(struct md_network_fabric *f,const struct md_network_flow_path *path,int type,struct sockaddr_in *target) {
     struct sockaddr_in logical={.sin_family=AF_INET,.sin_addr.s_addr=path->translated.destination,
         .sin_port=path->translated.destination_port};
-    return md_network_endpoint_resolve(f,path->destination,type,&logical,target);
+    return md_network_endpoint_resolve(f,path->destination,type,&logical,target,NULL);
 }
 static int check(struct md_network_forward *f,struct flow *c,unsigned direction) {
     if (c->checked[direction]!=f->fabric->policy_generation) {
         unsigned mark=c->path.translated.ctmark;
-        c->denied[direction]=md_network_flow_check(f->fabric,&c->path,direction)!=0;
+        c->denied[direction]=md_network_flow_accounting(f->fabric,&c->path,direction,!c->started,&c->accounting[direction])!=0;
         if (mark!=c->path.translated.ctmark) c->checked[1-direction]=0;
         c->checked[direction]=f->fabric->policy_generation;
     }
     return c->denied[direction];
+}
+static void account(struct flow *c,unsigned direction,size_t bytes) {
+    md_filter_account(&c->accounting[direction],bytes);
+    if (!direction && !c->started) { c->started=1; c->checked[0]=0; }
 }
 static int interests(struct md_network_forward *f,struct flow *c) {
     for (unsigned leg=0;leg<2;++leg) {
@@ -147,6 +154,12 @@ static struct flow *new_flow(struct md_network_forward *f,struct listener *l,int
     c->fd[0]=front; c->fd[1]=-1; c->type=l->type; c->borrowed=l->external && l->type==SOCK_DGRAM;
     c->listener=l->external ? l->id : 0; c->space=l->space; c->endpoint=l->external ? NULL : l->endpoint;
     c->client=*client; c->path=*path; c->gateway=l->address;
+    if (c->type==SOCK_DGRAM && path->destination) {
+        struct sockaddr_in logical={.sin_family=AF_INET,.sin_addr.s_addr=path->translated.destination,
+            .sin_port=path->translated.destination_port}, ignored;
+        int error=md_network_endpoint_resolve(f->fabric,path->destination,c->type,&logical,&ignored,&c->receiver);
+        if (error) { free(c); errno=-error; return NULL; }
+    }
     c->id=++f->next_id;
     c->remote=(struct sockaddr_in){.sin_family=AF_INET};
     c->fd[1]=socket_bound(c->type,&c->remote);
@@ -204,6 +217,10 @@ static void tcp_accept(struct md_network_forward *f,struct listener *l) {
     }
 }
 static int datagram_send(struct flow *c,unsigned direction,const void *data,size_t size) {
+    /* A retained tuple describes queued packets, not authority to deliver to a
+     * new socket which happens to reuse the closed peer's native port. */
+    if ((!direction && c->receiver_closed)
+            || (direction && !c->borrowed && !c->endpoint)) return -ECONNREFUSED;
     ssize_t sent=direction ? sendto(c->fd[0],data,size,MSG_DONTWAIT|MSG_NOSIGNAL,(void *)&c->client,sizeof(c->client))
         : send(c->fd[1],data,size,MSG_DONTWAIT|MSG_NOSIGNAL);
     return sent<0 ? -errno : (size_t)sent==size ? 0 : -EIO;
@@ -217,7 +234,9 @@ static void listener_interests(struct md_network_forward *f,uint64_t id) {
     watch(f,EPOLL_CTL_MOD,l->fd,l->id,2,events);
 }
 static void datagram_submit(struct md_network_forward *f,struct flow *c,unsigned direction,const void *data,size_t size) {
-    if (check(f,c,direction)) return;
+    int denied=check(f,c,direction);
+    account(c,direction,size);
+    if (denied) return;
     struct datagram_queue *q=&c->datagrams[direction];
     if (!q->head) {
         int error=datagram_send(c,direction,data,size);
@@ -274,6 +293,7 @@ static void udp_accept(struct md_network_forward *f,struct listener *l) {
             }
         struct flow *c=f->connections;
         while (c && !(c->listener==l->id && same(&c->client,&client) && c->path.original.destination==local.sin_addr.s_addr)) c=c->next;
+        if (c && c->receiver_closed) { drop_flow(f,c); c=NULL; }
         if (!c) {
             struct md_network_flow_path path; struct sockaddr_in target;
             if (incoming_path(f,l,&client,&local,&path,&target)) continue;
@@ -296,7 +316,7 @@ static int stream_event(struct md_network_forward *f,struct flow *c,unsigned leg
             if (events&(EPOLLRDHUP|EPOLLHUP)) return -ECONNRESET;
         } else {
             ssize_t bytes=recv(c->fd[leg],c->buffer[leg].data,sizeof(c->buffer[leg].data),MSG_DONTWAIT);
-            if (bytes>0) c->buffer[leg].end=(size_t)bytes;
+            if (bytes>0) { c->buffer[leg].end=(size_t)bytes; account(c,leg,(size_t)bytes); }
             else if (!bytes) { c->eof[leg]=1; shutdown(c->fd[1-leg],SHUT_WR); }
             else if (errno!=EAGAIN && errno!=EWOULDBLOCK && errno!=EINTR) return -errno;
         }
@@ -378,7 +398,7 @@ static int ensure(struct md_network_fabric *fabric) {
     if (!error) error=watch(f,EPOLL_CTL_ADD,f->wake,0,0,EPOLLIN);
     if (!error) error=-pthread_create(&f->thread,NULL,run,f);
     if (error) { if (f->wake>=0) close(f->wake); if (f->epoll>=0) close(f->epoll); free(f); return error; }
-    fabric->forward=f; if (!fabric->policy_generation) fabric->policy_generation=1; return 0;
+    fabric->forward=f; return 0;
 }
 static struct listener *new_listener(struct md_network_forward *f,uint64_t space,int type,struct sockaddr_in address,int external,int listening) {
     if (f->listeners==512 || f->next_id>UINT64_MAX/4) { errno=ENOSPC; return NULL; }
@@ -507,15 +527,17 @@ int md_network_forward_route(struct md_network_namespace *n,const void *endpoint
     }
     wake(f); return 0;
 }
-int md_network_forward_source(struct md_network_namespace *n,int type,struct sockaddr_in *address) {
+int md_network_forward_source(struct md_network_namespace *n,int type,struct sockaddr_in *address,uint32_t *local) {
     struct md_network_forward *f=n->fabric->forward;
     if (!f || (ntohl(address->sin_addr.s_addr)>>24)!=127) return 0;
     for (struct flow *c=f->connections;c;c=c->next) {
         if (c->type!=type) continue;
         if (c->remote.sin_port==address->sin_port && c->path.destination==n->inode) {
+            if (local) *local=c->path.translated.destination;
             address->sin_addr.s_addr=c->path.translated.source; address->sin_port=c->path.translated.source_port; return 1;
         }
         if (c->gateway.sin_port==address->sin_port && c->space==n->inode && !c->borrowed) {
+            if (local) *local=c->path.original.source;
             address->sin_addr.s_addr=c->path.original.destination; address->sin_port=c->path.original.destination_port; return 1;
         }
     }
@@ -530,11 +552,14 @@ int md_network_forward_destination(struct md_network_namespace *n,const void *en
         /* Addressed UDP keeps the established mapping too. The relay checks
          * the current generation; sendto must not re-run NEW/NAT each time. */
         if (type==SOCK_DGRAM && c->endpoint==endpoint
+                && !c->receiver_closed
+                && (!local->sin_addr.s_addr || local->sin_addr.s_addr==c->path.original.source)
                 && c->path.original.destination==destination->sin_addr.s_addr
                 && c->path.original.destination_port==destination->sin_port) {
             *native=c->gateway; return 1;
         }
         if (c->path.destination==n->inode
+                && (type!=SOCK_DGRAM || c->receiver==endpoint)
                 && local->sin_port==c->path.translated.destination_port
                 && (!local->sin_addr.s_addr || local->sin_addr.s_addr==c->path.translated.destination)
                 && destination->sin_addr.s_addr==c->path.translated.source && destination->sin_port==c->path.translated.source_port) {
@@ -555,7 +580,18 @@ void md_network_forward_endpoint_closed(struct md_network_namespace *n,const voi
         l=next;
     }
     struct flow *c=f->connections;
-    while (c) { struct flow *next=c->next; if (c->endpoint==endpoint) drop_flow(f,c); c=next; }
+    while (c) {
+        struct flow *next=c->next;
+        int sender=c->endpoint==endpoint, receiver=c->receiver==endpoint;
+        if (sender) c->endpoint=NULL;
+        if (receiver) { c->receiver=NULL; c->receiver_closed=1; }
+        if ((sender || receiver) && (c->type!=SOCK_DGRAM || (!c->endpoint && !c->receiver && !c->borrowed)))
+            drop_flow(f,c);
+        /* A surviving private peer may still receive already queued data.
+         * Keep its tuple until that peer closes or the existing UDP idle bound;
+         * published listeners above are released immediately. */
+        c=next;
+    }
     wake(f);
 }
 void md_network_forward_retire(struct md_network_namespace *n) {

@@ -206,7 +206,8 @@ static int control(const char *path,const char *name) {
          * whole suffix would lose openat2's traversal boundary. */
         if (process_directory(parent)) return strcmp(name,".") && strcmp(name,"..");
     }
-    return !strcmp(path,"/proc/sys/kernel") || (!strcmp(path,"/proc/sys/net/ipv4") && strcmp(name,"conf"))
+    return !strcmp(path,"/proc/sys/kernel") || !strcmp(path,"/proc/sys/net/bridge")
+        || (!strcmp(path,"/proc/sys/net/ipv4") && strcmp(name,"conf"))
         || (!strcmp(path,"/proc") && !strcmp(name,"cgroups"));
 }
 static int kernel_global(const char *name) {
@@ -225,6 +226,7 @@ static int omitted(const struct proc_policy *p,const char *name) {
 static const char network_conf[]="/proc/sys/net/ipv4/conf";
 static int network_directory(struct md_filesystem *fs,const char *path) {
     if (!fs->actor || !md_network_namespace_managed(fs->actor->network)) return 0;
+    if (!strcmp(path,"/proc/sys/net/bridge")) return 3;
     size_t length=sizeof(network_conf)-1;
     return !strcmp(path,network_conf) ? 1 : !strncmp(path,network_conf,length) && path[length]=='/' ? 2 : 0;
 }
@@ -232,11 +234,24 @@ static int network_entry(struct md_filesystem *fs,const char *path,const char *n
     if (!strcmp(name,".") || !strcmp(name,"..")) return 1;
     int directory=network_directory(fs,path);
     if (!directory) return 1;
+    if (directory==3) return !strcmp(name,"bridge-nf-call-iptables");
     uint64_t scope;
     const char *interface=directory==1 ? name : path+sizeof(network_conf);
     int r=md_network_parameter_scope(fs->actor->network,MD_NET_ROUTE_LOCALNET,interface,&scope);
     return r==-ENOENT ? 0 : r ? r : directory==1 || !strcmp(name,"route_localnet")
         || !strcmp(name,"rp_filter") || !strcmp(name,"arp_notify");
+}
+static int network_file(int root,const char *path) {
+    int fd=openat(root,path,O_CREAT|O_EXCL|O_WRONLY|O_CLOEXEC,0600);
+    if (fd>=0) close(fd);
+    else if (errno!=EEXIST) return -errno;
+    return 0;
+}
+static int network_bridge_nodes(const struct md_view_mount *mount) {
+    if (!mount->provider) return -EOPNOTSUPP;
+    int root=md_provider_tree_root(mount->provider);
+    if (mkdirat(root,"sys/net/bridge",0755) && errno!=EEXIST) return -errno;
+    return network_file(root,"sys/net/bridge/bridge-nf-call-iptables");
 }
 static int network_nodes(const struct md_view_mount *mount,const char *interface) {
     if (!mount->provider) return -EOPNOTSUPP;
@@ -251,9 +266,8 @@ static int network_nodes(const struct md_view_mount *mount,const char *interface
     const char *names[]={"route_localnet","rp_filter","arp_notify"};
     for (unsigned i=0;i<sizeof(names)/sizeof(*names);++i) {
         snprintf(path,sizeof(path),"sys/net/ipv4/conf/%s/%s",interface,names[i]);
-        int fd=openat(root,path,O_CREAT|O_EXCL|O_WRONLY|O_CLOEXEC,0600);
-        if (fd>=0) close(fd);
-        else if (errno!=EEXIST) return -errno;
+        int error=network_file(root,path);
+        if (error) return error;
     }
     return 0;
 }
@@ -273,6 +287,10 @@ int md_procfs_step(struct md_filesystem *fs,struct md_view_mount *mount,int fd,
             r=network_nodes(mount,name);
             if (r) return r;
         }
+    } else if (!strcmp(path,"/proc/sys/net") && !strcmp(name,"bridge")
+            && fs->actor && md_network_namespace_managed(fs->actor->network)) {
+        r=network_bridge_nodes(mount);
+        if (r) return r;
     } else if (!strcmp(path,"/proc/sys/net/ipv4") && !strcmp(name,"conf")
             && fs->actor && md_network_namespace_managed(fs->actor->network)) {
         r=network_nodes(mount,NULL);
@@ -379,6 +397,10 @@ ssize_t md_procfs_getdents(struct md_filesystem *fs,const struct md_view_mount *
     const struct proc_policy *p=policy(mount);
     pid_t group=directory(path);
     int net=network_directory(fs,path);
+    if (!strcmp(path,"/proc/sys/net") && fs->actor && md_network_namespace_managed(fs->actor->network)) {
+        error=network_bridge_nodes(mount);
+        if (error) return error;
+    }
     if (net==1) {
         struct md_network_link links[256];
         int count=md_network_link_list(fs->actor->network,links,256);
