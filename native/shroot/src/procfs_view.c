@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "file_permissions.h"
 #include "procfs_view.h"
 #include "fs_mount_internal.h"
 #include "inode_internal.h"
@@ -172,6 +173,22 @@ static int process_directory(const char *path) {
     if (!*end) return 1;
     return !strncmp(end,"/task/",6) && decimal(end+6,&end) && !*end;
 }
+int md_procfs_noatime(struct md_filesystem *fs,int fd,const char *path) {
+    struct stat st;
+    if (fstat(fd,&st)) return -errno;
+    if (process_directory(path)) {
+        struct md_task_credentials task;
+        struct md_proc_path ref=md_proc_path_for(path,0,0);
+        int error=md_task_registry_credentials(fs->tasks,ref.process,&task);
+        if (error && error!=-ESRCH) return error;
+        if (!error) {
+            st.st_uid=task.identity.uid.effective;
+            st.st_gid=task.identity.gid.effective;
+            md_identity_release(&task.identity);
+        }
+    }
+    return md_file_noatime(&st,fs->store->identity);
+}
 static int control(const char *path,const char *name) {
     if (process_directory(path))
         return !strcmp(name,"ns") || !strcmp(name,"uid_map") || !strcmp(name,"gid_map")
@@ -274,7 +291,7 @@ int md_procfs_step(struct md_filesystem *fs,struct md_view_mount *mount,int fd,
         if (allowed<=0) return allowed ? allowed : -ENOENT;
     }
     struct md_inode_boundary *boundary=fs->store->boundary;
-    int content=process_directory(path) && (!strcmp(name,"status") || !strcmp(name,"stat"));
+    int content=process_directory(path) && (!strcmp(name,"status") || !strcmp(name,"stat") || !strcmp(name,"limits"));
     if ((control(path,name) || content) && boundary && boundary->path) {
         boundary->proc_namespace=md_pid_namespace_inode(mount->pid_namespace);
         int n=snprintf(boundary->path,boundary->capacity,"%s/%s%s",path,name,tail);

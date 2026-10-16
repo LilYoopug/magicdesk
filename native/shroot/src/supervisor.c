@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "file_permissions.h"
 #include "host_identity.h"
 #include "event_wait.h"
 #include "fs_rpc.h"
@@ -384,6 +385,7 @@ struct thread {
     int shm_filter;
     int pid_filter, pid_preflight, filter_preflight, debug_replay_entry;
     struct md_pid_identity *pid_reservation;
+    struct md_process_member *process_reservation;
     long pid_result;
     struct { uintptr_t address; pid_t value; } pid_stores[2];
     unsigned pid_store_count;
@@ -437,6 +439,7 @@ enum { THREAD_BUCKETS = 257 };
 static struct thread *thread_index[THREAD_BUCKETS];
 static struct md_task_wait task_wait;
 static int pid_collection_pending;
+static int pid_gone(pid_t);
 static struct md_debugger *debugger;
 static pid_t leader;
 static unsigned live, total, calls, images, signals, copy_faults, fstat_failures;
@@ -1321,13 +1324,14 @@ struct proc_owner {
     const struct md_task_resources *resources;
     struct md_pid_namespace *pid_namespace;
     struct md_cgroup_member *cgroup;
+    struct md_process_member *process;
 };
 static struct proc_owner proc_owner(pid_t pid) {
     struct thread *t=find_thread(pid);
     if (t && t->born) return (struct proc_owner){pid,&t->identity,&t->resources,
-        md_pid_identity_namespace(t->resources.pid),t->resources.cgroup};
+        md_pid_identity_namespace(t->resources.pid),t->resources.cgroup,t->resources.process};
     struct md_task_retired_view retired=md_task_registry_retired(tasks,pid);
-    return (struct proc_owner){pid,retired.identity,NULL,md_pid_identity_namespace(retired.pid),retired.cgroup};
+    return (struct proc_owner){pid,retired.identity,NULL,md_pid_identity_namespace(retired.pid),retired.cgroup,retired.process};
 }
 static uid_t process_signal_uid(struct thread *observer,pid_t sender,uid_t fallback) {
     const struct md_identity *identity=proc_owner(sender).identity;
@@ -1360,7 +1364,7 @@ static int proc_node_stat(struct proc_owner target, enum md_proc_file_kind kind,
         *node=(struct md_proc_file_node){value->st_dev,value->st_ino,0};
         return 0;
     }
-    snprintf(path,sizeof(path),"/proc/%d/%s",target.pid,kind==MD_PROC_FILE_STAT ? "stat" : "status");
+    snprintf(path,sizeof(path),"/proc/%d/%s",target.pid,md_proc_file_process_name(kind));
     if (stat(path,value)) return -errno;
     *node=(struct md_proc_file_node){value->st_dev,value->st_ino,target.pid};
     int protected=value->st_uid!=getuid();
@@ -1435,7 +1439,7 @@ static int proc_node_metadata(struct thread *t, const struct md_proc_metadata_re
         if (!md_proc_control_kind(q->kind)) return -EINVAL;
         if (q->kind==MD_PROC_NS_UNSUPPORTED) return -ENOENT;
         if (!target.identity) return q->kind==MD_PROC_PROCESS_DIRECTORY
-            || q->kind==MD_PROC_STATUS || q->kind==MD_PROC_STAT ? -EXDEV : -ENOENT;
+            || q->kind==MD_PROC_STATUS || q->kind==MD_PROC_STAT || q->kind==MD_PROC_LIMITS ? -EXDEV : -ENOENT;
         kind=(enum md_proc_file_kind)(q->kind-MD_PROC_UID_MAP);
     } else {
         if (q->process!=t->pid) return -EPERM;
@@ -1690,7 +1694,7 @@ static void proc_file_request(struct thread *t, const struct seccomp_notif *q) {
             ? proc_file_capture(target,(int)q->data.args[3]) : NULL;
         if (source) kind=(enum md_proc_kind)(MD_PROC_UID_MAP+md_proc_file_kind(source));
         if (!selected.identity) reply.error=operation==MD_PROC_FILE_OPEN && (kind==MD_PROC_PROCESS_DIRECTORY
-            || kind==MD_PROC_STATUS || kind==MD_PROC_STAT) ? -EXDEV : -ENOENT;
+            || kind==MD_PROC_STATUS || kind==MD_PROC_STAT || kind==MD_PROC_LIMITS) ? -EXDEV : -ENOENT;
         else if (operation==MD_PROC_FILE_REOPEN && !source) reply.error=-EBADF;
         else if (!source && kind==MD_PROC_NS_UNSUPPORTED) reply.error=-ENOENT;
         else if ((!source && !md_proc_control_kind(kind)) || t->proc_image_fd>=0) reply.error=-EINVAL;
@@ -1718,6 +1722,7 @@ static void proc_file_request(struct thread *t, const struct seccomp_notif *q) {
                 : namespace || md_proc_file_cgroup_kind(file_kind) ? mode==W_OK ? -EACCES : 0
                 : sysctl ? md_proc_sysctl_access(file_kind,&t->identity,mode,1)
                 : proc_node_access(&t->identity,&st,mode,1);
+            if (!error && (flags&O_NOATIME) && !(flags&O_PATH)) error=md_file_noatime(&st,&t->identity);
             struct md_proc_file *file=NULL;
             if (!error && source) file=md_proc_file_reopen(source,&t->identity,flags);
             else if (!error && namespace) {
@@ -2293,11 +2298,33 @@ static void debugger_wait(pid_t pid, const struct user_pt_regs *original, enum m
     }
     if (set_registers(pid,&regs)) resume(pid,0);
 }
-enum { COPY_GROUPS, COPY_CAP_HEADER, COPY_CAP_DATA, COPY_CAP_VERSION };
+enum { COPY_GROUPS, COPY_CAP_HEADER, COPY_CAP_DATA, COPY_CAP_VERSION, COPY_NPROC_INPUT, COPY_NPROC_OUTPUT };
 static void identity_copy_next(struct thread *t);
+static int nproc_apply(struct thread *t,const struct rlimit *next,struct rlimit *old) {
+    pid_t pid=t->original.regs[8]==SYS_prlimit64 ? (pid_t)t->original.regs[0] : 0;
+    if (pid) pid=native_pid(t,pid);
+    else pid=t->pid;
+    struct thread *target=find_thread(pid);
+    struct md_task_retired_view retired=md_task_registry_retired(tasks,pid);
+    const struct md_identity *id=target ? &target->identity : retired.identity;
+    if (!id) return -ESRCH;
+    return md_process_nproc(target ? target->resources.process : retired.process,
+        &t->identity,id,target && target->tgid==t->tgid,next,old);
+}
 static void identity_copy_finish(struct thread *t, int error) {
     struct user_pt_regs r = t->original;
-    if (!error && t->identity_stage == COPY_CAP_HEADER) {
+    if (!error && t->identity_stage==COPY_NPROC_INPUT) {
+        struct rlimit next,old;
+        memcpy(&next,t->identity_buffer,sizeof(next));
+        error=nproc_apply(t,t->identity_count ? &next : NULL,&old);
+        uintptr_t output=r.regs[8]==SYS_prlimit64 ? r.regs[3] : r.regs[8]==SYS_getrlimit ? r.regs[1] : 0;
+        if (!error && (output || r.regs[8]==SYS_getrlimit)) {
+            memcpy(t->identity_buffer,&old,sizeof(old));
+            t->identity_stage=COPY_NPROC_OUTPUT; t->identity_loading=0;
+            t->identity_address=output; t->identity_count=sizeof(old)/sizeof(uint32_t); t->identity_copied=0;
+            identity_copy_next(t); return;
+        }
+    } else if (!error && t->identity_stage == COPY_CAP_HEADER) {
         uint32_t version = t->identity_buffer[0];
         int pid = (int)t->identity_buffer[1];
         if (pid>0 && t->resources.pid) {
@@ -2389,6 +2416,24 @@ static void identity_groups_call(struct thread *t, struct user_pt_regs *r) {
     if (!tracee_request(t, PTRACE_GETSIGMASK, (void *)sizeof(t->mask), &t->mask, "get-mask")
             || !shield(t) || !skip(t->pid)) return;
     identity_copy_next(t);
+}
+static int process_limit_call(struct thread *t,struct user_pt_regs *r) {
+    if (r->pc == RAW_GATE) return 0;
+    long nr=r->regs[8];
+    if (t->phase==IDLE && t->ready
+            && ((nr==SYS_prlimit64 && (unsigned)r->regs[1]==RLIMIT_NPROC)
+                || ((nr==SYS_getrlimit || nr==SYS_setrlimit) && (unsigned)r->regs[0]==RLIMIT_NPROC))) {
+        t->identity_buffer=calloc(1,sizeof(struct rlimit));
+        if (!t->identity_buffer) { return_value(t,r,-ENOMEM); return 1; }
+        t->original=*r; t->identity_stage=COPY_NPROC_INPUT;
+        t->identity_address=nr==SYS_prlimit64 ? r->regs[2] : nr==SYS_setrlimit ? r->regs[1] : 0;
+        t->identity_count=t->identity_address || nr==SYS_setrlimit ? sizeof(struct rlimit)/sizeof(uint32_t) : 0;
+        t->identity_loading=1; t->identity_copied=0;
+        if (tracee_request(t,PTRACE_GETSIGMASK,(void *)sizeof(t->mask),&t->mask,"nproc-copy")
+                && shield(t) && skip(t->pid)) identity_copy_next(t);
+        return 1;
+    }
+    return 0;
 }
 static int identity_call(struct thread *t, struct user_pt_regs *r, unsigned long cookie) {
     if (r->pc == RAW_GATE) return 0;
@@ -2514,6 +2559,7 @@ static void domain_path_call(struct thread *t, struct user_pt_regs *r) {
     domain_path_load(t);
 }
 static void fd_discard(struct thread *t) {
+    md_process_member_release(t->process_reservation); t->process_reservation=NULL;
     retry_clear(t,RETRY_FD);
     md_fd_selector_release(t->fork_selector); t->fork_selector=NULL;
     for (unsigned i=0;i<2;++i) md_fd_origins_finish(&t->pair_updates[i],-1);
@@ -2560,6 +2606,7 @@ static void fd_finish(struct thread *t, long result) {
     if (nr==SYS_clone && t->resource_change.namespaces)
         CHECK(!md_resources_unshare_finish(&t->resources,&t->identity,&t->resource_change,-ECANCELED));
     if (nr==SYS_clone) {
+        md_process_member_release(t->process_reservation); t->process_reservation=NULL;
         md_pid_identity_release(t->pid_reservation); t->pid_reservation=NULL;
         md_fd_selector_release(t->fork_selector); t->fork_selector=NULL;
     }
@@ -2685,6 +2732,25 @@ static void fd_start(struct thread *t) {
 }
 static void fd_native_start(struct thread *t) {
     struct user_pt_regs *r=&t->fd_registers;
+    int admission=0;
+    if (r->regs[8]==SYS_clone && !t->process_reservation) {
+        admission=md_process_member_fork(t->resources.process,&t->identity,r->regs[0],&t->process_reservation);
+        if (admission==-EAGAIN && md_task_registry_has_retired(tasks)) {
+            md_task_registry_collect_limits(tasks,pid_gone);
+            admission=md_process_member_fork(t->resources.process,&t->identity,r->regs[0],&t->process_reservation);
+        }
+    }
+    else if (r->regs[8]==SYS_execve || r->regs[8]==SYS_execveat) {
+        admission=md_process_member_exec(t->resources.process);
+        if (admission==-EAGAIN && md_task_registry_has_retired(tasks)) {
+            md_task_registry_collect_limits(tasks,pid_gone);
+            admission=md_process_member_exec(t->resources.process);
+        }
+    }
+    if (admission) {
+        md_resources_unshare_finish(&t->resources,&t->identity,&t->resource_change,admission);
+        fd_discard(t); return_value(t,r,admission); return;
+    }
     if (r->regs[8]==SYS_clone && !t->pid_reservation) {
         struct md_pid_namespace *space=t->resource_change.next.pid_children
             ? t->resource_change.next.pid_children : t->resources.pid_children;
@@ -3681,8 +3747,9 @@ static void proc_io_progress(struct thread *t) {
     if (!result) {
         struct md_proc_file_node node=md_proc_file_get_node(t->proc_io.file);
         struct proc_owner owner=proc_owner(node.process);
+        struct rlimit nproc=owner.process ? md_process_nproc_value(owner.process) : (struct rlimit){0};
         if (owner.identity) md_proc_file_process_state(t->proc_io.file,owner.identity,owner.pid_namespace,
-            md_debugger_owner(debugger,owner.pid));
+            md_debugger_owner(debugger,owner.pid),owner.process ? &nproc : NULL);
         t->proc_io.actor=(struct md_control_actor){t->pid,&t->identity,&t->resources};
         result=md_proc_file_io_execute(&t->proc_io,&t->identity,t->resources.uts,span.data,span.size,(size_t)getpagesize());
     }
@@ -5670,7 +5737,16 @@ static void proc_lookup_start(struct thread *t) {
     }
     if (file && nr==SYS_fcntl) {
         long result=0;
-        int handled=md_proc_file_fcntl(file,(int)regs.regs[1],regs.regs[2],&result);
+        if (regs.regs[1]==F_SETFL && (regs.regs[2]&O_NOATIME)
+                && !(md_proc_file_flags(file)&(O_NOATIME|O_PATH))) {
+            struct stat st;
+            struct md_proc_file_node node=md_proc_file_get_node(file);
+            struct proc_owner owner=proc_owner(node.process);
+            result=md_proc_file_control(file).ops ? md_proc_file_control_stat(file,&st)
+                : !owner.identity ? -ESRCH : proc_node_stat(owner,md_proc_file_kind(file),&node,&st);
+            if (!result) result=md_file_noatime(&st,&t->identity);
+        }
+        int handled=result ? 1 : md_proc_file_fcntl(file,(int)regs.regs[1],regs.regs[2],&result);
         md_proc_file_release(file);
         if (handled) return_value(t,&regs,result); else resume(t->pid,0);
         return;
@@ -6571,6 +6647,10 @@ int main(int argc, char **argv) {
         }
         CHECK(!md_launch_register(&registration, store, program, cwd, launch_identity.uid.effective));
     } else CHECK(!md_resources_init(&thread(leader)->resources,NULL));
+    struct rlimit nproc;
+    CHECK(!getrlimit(RLIMIT_NPROC,&nproc));
+    thread(leader)->resources.process=md_process_member_new(&thread(leader)->identity,&nproc);
+    CHECK(thread(leader)->resources.process);
     if (network_mode!=MD_NETWORK_NATIVE) {
         struct md_network_namespace *network=md_network_namespace_new(launch_identity.user_namespace,network_mode);
         CHECK(network);
@@ -6747,6 +6827,9 @@ int main(int argc, char **argv) {
             c->shm_space = md_shm_space_fork(t->shm_space,!!(t->cloning & CLONE_VM)); CHECK(c->shm_space);
             CHECK(!md_resources_release(&c->resources));
             if (t->resources.fs) CHECK(!md_resources_fork(&t->resources, t->cloning, &c->resources));
+            CHECK(t->process_reservation);
+            c->resources.process=t->process_reservation; t->process_reservation=NULL;
+            md_process_member_forked(t->resources.process);
             if (t->resource_change.namespaces)
                 CHECK(!md_resources_unshare_finish(&c->resources,&c->identity,&t->resource_change,0));
             md_pid_identity_release(c->resources.pid);
@@ -6874,6 +6957,9 @@ int main(int argc, char **argv) {
                 md_fd_object_release(object);
                 return_value(t,&regs,value); continue;
             }
+            /* Owned limits translate their target themselves. A newer PID
+             * selector must not replay them against Android's shared UID. */
+            if (process_limit_call(t,&regs)) continue;
             if (process_call(t,&regs,&cookie)) continue;
             if (identity_call(t, &regs, cookie)) continue;
             if (domain_call(t, &regs, cookie)) continue;

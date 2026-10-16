@@ -44,7 +44,7 @@ struct mdi_stat_location {
 struct md_inode_store {
     sqlite3 *db;
     int objects, watch_presence, locked, recording, readonly, reflink_unavailable;
-    int super_readonly, super_checked, nodev;
+    int mount_readonly, super_readonly, super_checked, nodev;
     int native_files;
     sqlite3_int64 super_version;
     struct md_inode_lifetime *lifetime;
@@ -74,7 +74,7 @@ struct md_inode_store {
 #endif
 };
 static inline int mdi_readonly(const struct md_inode_store *s) {
-    return s->readonly || s->super_readonly;
+    return s->readonly || s->mount_readonly || s->super_readonly;
 }
 int mdi_super_refresh(struct md_inode_store *, sqlite3_int64 version);
 static inline const char *mdi_root(const struct md_inode_store *s) {

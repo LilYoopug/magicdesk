@@ -128,7 +128,7 @@ int mdi_write(struct md_inode_store *s) {
     return r;
 }
 int mdi_begin(struct md_inode_store *s, int write) {
-    if (write && s->readonly) return -EROFS;
+    if (write && (s->readonly || s->mount_readonly)) return -EROFS;
     if (s->read_depth) {
         if (write) return -EDEADLK;
         ++s->read_depth; return 0;

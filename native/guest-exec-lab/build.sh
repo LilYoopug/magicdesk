@@ -20,7 +20,7 @@ inode_compile() {
         "$runtime/inode_watch.c" "$runtime/watch_queue.c" "$runtime/inode_path.c" \
         "$runtime/inode_directory.c" "$runtime/inode_import.c" "$runtime/inode_socket.c" \
         "$runtime/inode_backing.c" "$runtime/inode_snapshot.c" "$runtime/inode_view.c" "$runtime/inode_overlay_write.c" "$runtime/inode_overlay_policy.c" "$runtime/identity_snapshot.c" "$runtime/inode_maintenance.c" "$runtime/inode_fifo.c" "$runtime/inode_channel.c" "$runtime/file_open.c" "$runtime/guest_identity.c" \
-        "$runtime/task_registry.c" "$runtime/guest_domain.c" "$runtime/mount_namespace.c" "$runtime/fs_anchor.c" "$runtime/resource_order.c" "$runtime/ofd_order.c" "$runtime/fd_origins.c" "$runtime/fd_channel.c" "$runtime/fd_delivery.c" "$runtime/fd_exchange.c" "$runtime/inode_metadata.c" "$runtime/inode_xattr.c" \
+        "$runtime/task_registry.c" "$runtime/process_limits.c" "$runtime/guest_domain.c" "$runtime/mount_namespace.c" "$runtime/fs_anchor.c" "$runtime/resource_order.c" "$runtime/ofd_order.c" "$runtime/fd_origins.c" "$runtime/fd_channel.c" "$runtime/fd_delivery.c" "$runtime/fd_exchange.c" "$runtime/inode_metadata.c" "$runtime/inode_xattr.c" \
         "$runtime/inode_capability.c" "$runtime/inode_acl.c" "$runtime/posix_acl.c" "$runtime/task_descriptor.c" "$runtime/task_lifetime.c" "$@"
 }
 node "$src/test_signature.mjs" "$work"

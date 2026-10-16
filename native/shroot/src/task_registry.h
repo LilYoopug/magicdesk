@@ -36,12 +36,16 @@ struct md_task_retired_view {
     const struct md_identity *identity;
     struct md_pid_identity *pid;
     struct md_cgroup_member *cgroup;
+    struct md_process_member *process;
 };
 /* Borrowed on the writer thread, only until its next registry mutation. */
 struct md_task_retired_view md_task_registry_retired(const struct md_task_registry *,pid_t);
 int md_task_registry_has_retired(const struct md_task_registry *);
 void md_task_registry_reap(struct md_task_registry *,pid_t);
 void md_task_registry_collect(struct md_task_registry *,int (*gone)(pid_t));
+/* Quota pressure may collect kernel-reaped charges while a wait still retains
+ * the identity for translation. This does not retire that observation. */
+void md_task_registry_collect_limits(struct md_task_registry *,int (*gone)(pid_t));
 /* peer==0 is a kernel-notification/internal caller. RPC callers must own the
  * TID's thread group; the supervisor may request on behalf of its tracee. */
 /* A successful read retains identity groups, filesystem owner, mount view, file-table handle and

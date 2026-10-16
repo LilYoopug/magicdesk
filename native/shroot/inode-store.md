@@ -263,6 +263,10 @@ operation snapshot without releasing the gate. Ownership and mode are read from
 the validated leaf by the metadata owner, not supplied by its caller.
 Promotion changes representation,
 not the guest namespace: the enclosing operation owns its logical events.
+Guest mount/superblock read-only policy is separate from sealed-store admission.
+Exec and watch registration can publish a leaf in a writable backing store even
+through a read-only guest view. Ordinary mutations still reject that view with
+`EROFS`; sealed sources and inspection handles never admit publication.
 
 Native identities are scope-qualified; root-scope identities are unchanged.
 For shared upper/merged directories, the same promotion transaction publishes
@@ -274,7 +278,7 @@ scope-qualified identity. No second journal or storage revision is needed.
 Hardlinks, mixed native/catalogue rename, pathname-based execution, attached file-watch
 registration and stable `O_PATH|O_NOFOLLOW` reopen sources promote before consuming
 catalogue identity. The latter cannot export a mutable native pathname; an
-unlinked native FD or a read-only store that cannot promote retains descriptor-transfer delivery.
+unlinked native FD or a sealed store that cannot promote retains descriptor-transfer delivery.
 Sealing, backup and
 overlay admission materialize the selected namespace before existing SQL-based
 snapshot/COW logic runs. Moving into a physical-permission directory promotes too.

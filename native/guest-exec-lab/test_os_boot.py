@@ -221,6 +221,7 @@ def main():
     parser.add_argument('--build', type=Path)
     parser.add_argument('--diagnostic-console', action='store_true')
     parser.add_argument('--trace', action='store_true', help='Trace filesystem, sandbox and readiness setup; requires strace')
+    parser.add_argument('--rtkit', action='store_true', help='Verify packaged RTKit unit, D-Bus and restart; requires RTKit')
     parser.add_argument('--init', choices=('systemd', 'openrc', 'runit'), default='systemd')
     parser.add_argument('--drop-capability', action='append', default=[],
                         help='Explicit container capability policy, applied by stock setpriv before PID1')
@@ -230,9 +231,11 @@ def main():
         parser.error('capability names must use setpriv lowercase spelling without CAP_')
     if args.init != 'systemd' and args.trace:
         parser.error('--trace is currently a systemd diagnostic')
+    if args.rtkit and args.init != 'systemd':
+        parser.error('--rtkit requires systemd')
     suite = Suite(args.output, args.build)
     suite.report['store'] = args.store
-    suite.report['bootPolicy'] = {'init': args.init, 'dropCapabilities': args.drop_capability}
+    suite.report['bootPolicy'] = {'init': args.init, 'dropCapabilities': args.drop_capability, 'rtkit': args.rtkit}
     target = '/md-boot-' + suite.report['id']
     prefix = [suite.runner, '--store', args.store, '--user', '0:0', '--network', 'routed']
     label = 'os-boot-' + suite.report['id']
@@ -243,6 +246,17 @@ def main():
         if args.init == 'openrc':
             suite.transport.upload(suite.client, Path(__file__), suite.base + '/observer.py')
         program = {'systemd': SYSTEMD, 'openrc': OPENRC, 'runit': RUNIT}[args.init]
+        if args.rtkit:
+            checks = '''
+        systemctl start rtkit-daemon.service
+        systemctl is-active rtkit-daemon.service
+        busctl --system get-property org.freedesktop.RealtimeKit1 /org/freedesktop/RealtimeKit1 org.freedesktop.RealtimeKit1 MaxRealtimePriority
+        systemctl restart rtkit-daemon.service
+        busctl --system call org.freedesktop.RealtimeKit1 /org/freedesktop/RealtimeKit1 org.freedesktop.DBus.Peer Ping
+        systemctl stop rtkit-daemon.service
+'''
+            program = program.replace('        systemctl restart systemd-logind.service',
+                                      checks + '        systemctl restart systemd-logind.service')
         boot = ['/usr/bin/unshare', '--mount', '--pid', '--fork', '--mount-proc',
                 '--uts', '--ipc', '--cgroup', '/bin/sh', '-ec', PREPARE + program, 'boot-test', target,
                 'diagnostic' if args.diagnostic_console else 'normal']
@@ -258,7 +272,9 @@ def main():
                             '--bind', suite.base, target, '--deadline-seconds', '180', '--',
                             '/usr/bin/script', '-q', '-e', '-c', shlex.join(boot), '/dev/null']
         if args.init == 'systemd':
-            suite.command(command, timeout=205)
+            boot_log = suite.command(command, timeout=205)
+            assert not re.search(r'generator.*(?:failed|exit(?:ed)? (?:with )?(?:code|status))',
+                                 boot_log, re.IGNORECASE), boot_log
         else:
             server = Server(suite, command)
             try:

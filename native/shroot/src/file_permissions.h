@@ -18,4 +18,8 @@ static inline int md_file_permissions(const struct stat *st,unsigned mode,const 
     if (!id || mode&~7U) return -EINVAL;
     return md_file_mode_allows(st,mode,id) || md_file_dac_override(st,mode,id) ? 0 : -EACCES;
 }
+static inline int md_file_noatime(const struct stat *st,const struct md_identity *id) {
+    return st->st_uid==id->uid.fs || md_identity_file_capable(id,st->st_uid,st->st_gid,CAP_FOWNER)
+        ? 0 : -EPERM;
+}
 #endif

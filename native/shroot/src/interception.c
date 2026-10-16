@@ -26,6 +26,7 @@
 #include <linux/seccomp.h>
 #include <sched.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
@@ -351,6 +352,16 @@ int md_interception_install(int inherited) {
             NATIVE(clock_nanosleep) NATIVE(nanosleep)
             NATIVE(eventfd2) NATIVE(timerfd_create) NATIVE(timerfd_settime) NATIVE(timerfd_gettime)
             NATIVE(exit) NATIVE(exit_group) NATIVE(set_tid_address)
+            /* Only UID-accounted limits need adaptation; all other limits keep
+             * their native behavior and application seccomp still takes precedence. */
+#define NPROC(n, index) \
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_##n,0,4), \
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[index])), \
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,RLIMIT_NPROC,0,1), \
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_IDENTITY), \
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+            NPROC(getrlimit,0) NPROC(setrlimit,0) NPROC(prlimit64,1)
+#undef NPROC
             MD_DOMAIN_KERNEL_CALLS(NATIVE)
             /* Compare the full policy argument, not only its low kernel int. */
 #define NATIVE_ARGUMENT(n, index, value) \

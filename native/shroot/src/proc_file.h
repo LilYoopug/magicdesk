@@ -6,6 +6,7 @@
 #include "control_file.h"
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/resource.h>
 
 enum md_proc_file_kind { MD_PROC_FILE_UID_MAP, MD_PROC_FILE_GID_MAP, MD_PROC_FILE_SETGROUPS,
     MD_PROC_FILE_HOSTNAME, MD_PROC_FILE_DOMAINNAME, MD_PROC_FILE_OSTYPE,
@@ -13,7 +14,7 @@ enum md_proc_file_kind { MD_PROC_FILE_UID_MAP, MD_PROC_FILE_GID_MAP, MD_PROC_FIL
     MD_PROC_FILE_OVERFLOWUID, MD_PROC_FILE_OVERFLOWGID, MD_PROC_FILE_CAP_LAST,
     MD_PROC_FILE_NS_USER, MD_PROC_FILE_NS_MOUNT, MD_PROC_FILE_NS_UTS, MD_PROC_FILE_NS_IPC,
     MD_PROC_FILE_NS_PID, MD_PROC_FILE_NS_PID_CHILDREN, MD_PROC_FILE_NS_NETWORK, MD_PROC_FILE_NS_CGROUP,
-    MD_PROC_FILE_NS_DIRECTORY, MD_PROC_FILE_PROCESS_DIRECTORY, MD_PROC_FILE_STATUS, MD_PROC_FILE_STAT,
+    MD_PROC_FILE_NS_DIRECTORY, MD_PROC_FILE_PROCESS_DIRECTORY, MD_PROC_FILE_STATUS, MD_PROC_FILE_STAT, MD_PROC_FILE_LIMITS,
     MD_PROC_FILE_CGROUP, MD_PROC_FILE_CGROUPS,
     MD_PROC_FILE_CONTROL };
 struct md_proc_file;
@@ -36,12 +37,16 @@ unsigned long md_proc_file_filesystem(const struct md_proc_file *);
 int md_proc_file_mapping(const struct md_proc_file *,unsigned protection,unsigned flags);
 int md_proc_file_fcntl(struct md_proc_file *,int command,unsigned long argument,long *result);
 static inline int md_proc_file_process(enum md_proc_file_kind kind) {
-    return kind==MD_PROC_FILE_STATUS || kind==MD_PROC_FILE_STAT;
+    return kind==MD_PROC_FILE_STATUS || kind==MD_PROC_FILE_STAT || kind==MD_PROC_FILE_LIMITS;
+}
+static inline const char *md_proc_file_process_name(enum md_proc_file_kind kind) {
+    return kind==MD_PROC_FILE_STAT ? "stat" : kind==MD_PROC_FILE_LIMITS ? "limits" : "status";
 }
 struct md_pid_namespace;
 struct md_proc_file;
 void md_proc_file_pid_view(struct md_proc_file *,struct md_pid_namespace *);
-void md_proc_file_process_state(struct md_proc_file *,const struct md_identity *,struct md_pid_namespace *,pid_t tracer);
+void md_proc_file_process_state(struct md_proc_file *,const struct md_identity *,struct md_pid_namespace *,pid_t tracer,
+    const struct rlimit *nproc);
 static inline int md_proc_file_directory(enum md_proc_file_kind kind) {
     return kind==MD_PROC_FILE_NS_DIRECTORY || kind==MD_PROC_FILE_PROCESS_DIRECTORY;
 }

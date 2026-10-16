@@ -58,6 +58,8 @@ void test_task_registry_exit(void) {
     assert(!md_pid_identity_publish(resources.pid,20003,20003));
     struct md_pid_identity *pid=md_pid_identity_retain(resources.pid);
     struct md_identity id=md_identity_new(2000,2000);
+    struct md_process_member *account=md_process_member_new(&id,&(struct rlimit){2,2}), *child=NULL;
+    assert(account && !md_process_member_fork(account,&id,0,&resources.process));
     assert(!md_task_registry_publish(registry,20003,20003,&id,&resources));
     struct md_task_credentials observed;
     allocation_budget=0;
@@ -80,8 +82,17 @@ void test_task_registry_exit(void) {
     assert(!md_task_registry_credentials(registry,20003,&observed));
     assert(observed.group==20003 && observed.retired && observed.identity.uid.effective==1234);
     md_identity_release(&observed.identity);
-    assert(!md_resources_release(&resources)); md_identity_release(&id);
+    assert(!md_resources_release(&resources));
     assert(md_task_registry_has_retired(registry));
+    assert(md_process_member_fork(account,&id,0,&child)==-EAGAIN);
+    md_task_registry_collect_limits(registry,retired_gone);
+    assert(md_task_registry_retired(registry,20003).identity);
+    assert(!md_task_registry_retired(registry,20003).process);
+    allocation_budget=-1;
+    assert(!md_process_member_fork(account,&id,0,&child));
+    md_process_member_release(child); md_process_member_release(account);
+    md_identity_release(&id);
+    allocation_budget=0;
     md_task_registry_collect(registry,retired_gone);
     assert(!md_task_registry_has_retired(registry));
     assert(!md_task_registry_retired(registry,20003).identity);

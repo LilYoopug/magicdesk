@@ -258,6 +258,15 @@ retained filesystem origin add its mount ID and mount-root attribute without
 restatting their inert carrier or resolving a path. This applies to ordinary and
 O_PATH descriptions, including dup and local SCM_RIGHTS transfer.
 
+`O_NOATIME` on typed proc/control files is checked against the guest inode owner
+or logical CAP_FOWNER, not the owner of an inert native descriptor. Open, reopen,
+and F_SETFL retain that check; F_GETFL exposes the logical flags. Process
+directories in explicit proc mounts use the same guest identity. Native attached
+files retain native access checks. No additional ownership lookup is performed
+for ordinary opens without O_NOATIME. `test_proc_policy.py` covers own/foreign
+processes, inherited descriptors, mounted proc, and flag changes; this also
+permits procps-ng versions that request O_NOATIME for ordinary process scans.
+
 Current-process `fdinfo` captures the actual proc file in a private-table helper,
 not a copy of the described application FD. Seeking to zero refreshes native
 position, flags and close/reuse state. PID fields translate through the selected

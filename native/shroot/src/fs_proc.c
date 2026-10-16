@@ -36,6 +36,11 @@ int md_fs_proc_operation(struct md_filesystem *fs,struct md_mount_namespace *vie
     }
     int network=md_network_namespace_managed(fs->actor->network);
     int network_control=network && md_proc_network_sysctl(ref.kind);
+    if (!sysctl && !network_control && (q->operation==MD_FS_OPEN || q->operation==MD_FS_REOPEN)
+            && (q->flags&O_NOATIME) && !(q->flags&O_PATH)) {
+        r=md_procfs_noatime(fs,fd,path);
+        if (r) { out->error=r; return 1; }
+    }
     if (!sysctl && !network_control && (q->operation==MD_FS_STAT || q->operation==MD_FS_FSTAT)
             && mount->provider) {
         int private=md_provider_tree_private(mount->provider,fd);
@@ -101,7 +106,7 @@ int md_fs_proc_operation(struct md_filesystem *fs,struct md_mount_namespace *vie
         break;
     case MD_FS_OPEN: case MD_FS_REOPEN: {
         if (q->flags&O_DIRECTORY) { r=-ENOTDIR; break; }
-        if (q->flags&~(O_ACCMODE|O_CLOEXEC|O_APPEND|O_TRUNC|O_NONBLOCK|O_NOCTTY|O_NOFOLLOW|O_PATH|O_CREAT|O_EXCL|O_LARGEFILE)) {
+        if (q->flags&~(O_ACCMODE|O_CLOEXEC|O_APPEND|O_TRUNC|O_NONBLOCK|O_NOCTTY|O_NOFOLLOW|O_PATH|O_CREAT|O_EXCL|O_LARGEFILE|O_NOATIME)) {
             r=-EOPNOTSUPP; break;
         }
         if (q->operation==MD_FS_REOPEN && (q->mode&MD_FS_REOPEN_MUTABLE)) { r=-EOPNOTSUPP; break; }
@@ -110,7 +115,7 @@ int md_fs_proc_operation(struct md_filesystem *fs,struct md_mount_namespace *vie
          * Android sysctl for read/write merely to supply a carrier. */
         int carrier;
         if (file.ops->descriptor) carrier=file.ops->descriptor(file.context,(int)q->flags);
-        else { carrier=open("/dev/null",O_CLOEXEC|(q->flags&~(O_CREAT|O_EXCL|O_TRUNC))); if (carrier<0) carrier=-errno; }
+        else { carrier=open("/dev/null",O_CLOEXEC|(q->flags&~(O_CREAT|O_EXCL|O_TRUNC|O_NOATIME))); if (carrier<0) carrier=-errno; }
         r=md_fs_control_publish(carrier,file,origin,id,(int)q->flags,out,output);
         break;
     }

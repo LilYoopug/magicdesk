@@ -4,6 +4,7 @@ import argparse
 import ctypes
 from contextlib import ExitStack
 import errno
+import fcntl
 import os
 from pathlib import Path
 import socket
@@ -47,6 +48,29 @@ def guest():
         os.setgid(1000)
         os.setuid(1000)
 
+    def noatime():
+        for path in ('/proc/self', '/proc/self/stat', '/proc/self/status',
+                     '/proc/self/uid_map', '/proc/self/cgroup'):
+            fd = os.open(path, os.O_RDONLY | os.O_NOATIME)
+            try:
+                assert fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_NOATIME, path
+                reopened = os.open('/proc/self/fd/' + str(fd), os.O_RDONLY | os.O_NOATIME)
+                os.close(reopened)
+                fcntl.fcntl(fd, fcntl.F_SETFL, 0)
+                assert not fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_NOATIME
+                fcntl.fcntl(fd, fcntl.F_SETFL, os.O_NOATIME)
+                assert fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_NOATIME
+                if path == '/proc/self':
+                    relative = os.open('stat', os.O_RDONLY | os.O_NOATIME, dir_fd=fd)
+                    assert os.read(relative, 4096)
+                    os.close(relative)
+                else:
+                    assert os.read(fd, 4096)
+            finally:
+                os.close(fd)
+
+    noatime()
+
     call(97, 0x20000)  # Own mount namespace; no host proc changes.
     with tempfile.TemporaryDirectory(prefix='md-proc-policy-') as tmp, ExitStack() as cleanup:
         root = Path(tmp)
@@ -79,9 +103,16 @@ def guest():
         mounts['api'] = invalid
         parent = str(os.getpid())
         held = os.open(mounts['two'] / parent, os.O_RDONLY | os.O_DIRECTORY)
+        inherited = os.open(mounts['off'] / parent / 'stat', os.O_RDONLY)
 
         def restricted():
             user()
+            noatime()
+            for suffix in ('', '/stat', '/status', '/uid_map', '/cgroup'):
+                path = str(mounts['off'] / parent) + suffix
+                denied(lambda: os.open(path, os.O_RDONLY | os.O_NOATIME), errno.EPERM)
+            denied(lambda: fcntl.fcntl(inherited, fcntl.F_SETFL, os.O_NOATIME), errno.EPERM)
+            assert not fcntl.fcntl(inherited, fcntl.F_GETFL) & os.O_NOATIME
             for key in ['off', 'one', 'two', 'four', 'group', 'strict', 'api']:
                 path = mounts[key]
                 names = os.listdir(path)
@@ -103,6 +134,7 @@ def guest():
 
         child(restricted)
         os.close(held)
+        os.close(inherited)
         def group_access():
             os.setgroups([1000])
             os.setgid(1001)
@@ -180,7 +212,7 @@ def guest():
             user()
             denied(lambda: os.stat(alias / parent), errno.ENOENT)
         child(copied)
-    print('PASS proc: hidepid modes/gid, retained FD, credentials/dumpability, subset, fsconfig, bind and namespace copy', flush=True)
+    print('PASS proc: O_NOATIME ownership/reopen/fcntl, hidepid modes/gid, retained FD, credentials/dumpability, subset, fsconfig, bind and namespace copy', flush=True)
 
 
 def main():

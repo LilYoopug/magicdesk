@@ -14,6 +14,7 @@ Android Activities, named environments or launcher configuration.
 | SysV IPC namespace | Shared; `CLONE_NEWIPC` creates an empty namespace | `CLONE_NEWIPC` creates an empty namespace and separates semaphore undo | Retained |
 | User namespace | `CLONE_NEWUSER` creates a nested owner | Nested owner with immutable ID maps | Retained |
 | PID identities and child namespace | New TID, shared TGID for threads; `CLONE_NEWPID` selects a new child namespace | Changes only future child admission | Retain TGID; retire former TID on nonleader exec |
+| Process limit | `RLIMIT_NPROC` shared by `CLONE_THREAD`, copied otherwise; each task has one UID charge | User-namespace accounting follows the selected identity | Retained; pending real-UID quota checked before exec |
 
 The kernel owns cwd, umask, descriptor tables and open-file descriptions.
 The filesystem context owns guest root selection, optional cwd provenance and the admitted proc-root
@@ -36,6 +37,30 @@ See [namespace execution](namespace-execution.md) for the launch filesystem and
 | Namespace Providers | [namespace-providers.md](namespace-providers.md) |
 | Guest Networking | [networking.md](networking.md) |
 | Resource Ownership Verification | [resource-tests.md](resource-tests.md) |
+
+## Process Limits
+
+`process_limits` owns `RLIMIT_NPROC` and real-UID/user-namespace task counters
+within one supervised launch. It reserves a charge before native clone, transfers
+it only to the confirmed child and releases it on failure or task disposal.
+Threads share the process limit; independent processes inherit a copy. Registry
+custody retains unreaped zombies. A quota-pressure check can release kernel-reaped
+charges without discarding identities still needed by a pending translated wait.
+Normal file/socket IO does not inspect counters or scan tasks.
+
+`getrlimit`, `setrlimit`, `prlimit64` and typed proc `limits` agree. Foreign target
+authorization uses guest credentials; raising the hard limit requires initial
+user-namespace `CAP_SYS_RESOURCE`. Root/capability fork exceptions and deferred
+exec rejection after a real-UID change follow the Linux model. Application
+seccomp denial still wins. Task-affine memory copies preserve protected-process
+and `EFAULT` behavior; a failed old-limit copy does not undo an applied update.
+
+This is not a host-wide quota or a cgroup pids controller. Separate launches have
+separate counters, even if they share a store. Other resource limits, Android's
+physical task ceiling and real-time scheduling permissions remain native. A
+logical capability does not grant Android `CAP_SYS_NICE` or raise host hard limits.
+Coverage: `test_nproc.py`, `test_process_limits`, packaged `test_rtkit.py`, and
+Fedora `test_os_boot.py --rtkit` with the original service sandbox.
 
 ## Request Context
 

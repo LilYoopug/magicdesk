@@ -33,7 +33,9 @@ static int control_open(struct md_filesystem *fs,struct md_mount_namespace *view
     error=open(context,fd,flags,identity,origin,&file);
     if (!error && file.ops && (!output || !output->control)) { out->requires_control=1; error=-EOPNOTSUPP; }
     if (!error) {
-        int carrier=md_reopen_file(fd,(flags&~(O_CREAT|O_EXCL|O_TRUNC))|O_CLOEXEC,&out->open_completion);
+        int native_flags=flags&~(O_CREAT|O_EXCL|O_TRUNC);
+        if (file.ops) native_flags&=~O_NOATIME;
+        int carrier=md_reopen_file(fd,native_flags|O_CLOEXEC,&out->open_completion);
         error=md_fs_control_publish(carrier,file,origin,identity,flags,out,output);
     }
     md_control_file_release(file);
@@ -71,7 +73,7 @@ int md_fs_control_operation(struct md_filesystem *fs,struct md_mount_namespace *
         break;
     case MD_FS_OPEN: case MD_FS_REOPEN:
         if (fd<0) { r=-ENOENT; break; }
-        if (q->flags&~(O_ACCMODE|O_CLOEXEC|O_APPEND|O_TRUNC|O_NONBLOCK|O_NOCTTY|O_NOFOLLOW|O_DIRECTORY|O_PATH|O_CREAT|O_EXCL|O_LARGEFILE)) {
+        if (q->flags&~(O_ACCMODE|O_CLOEXEC|O_APPEND|O_TRUNC|O_NONBLOCK|O_NOCTTY|O_NOFOLLOW|O_DIRECTORY|O_PATH|O_CREAT|O_EXCL|O_LARGEFILE|O_NOATIME)) {
             r=-EOPNOTSUPP; break;
         }
         if ((q->flags&O_ACCMODE)==O_ACCMODE) { r=-EINVAL; break; }

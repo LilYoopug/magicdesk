@@ -195,7 +195,10 @@ int mdi_publication_promote(struct md_inode_store *s,const struct mdi_node *pare
         const char *name,const struct stat *expected,struct mdi_node *out) {
     if (!s->publication || !s->locked
             || s->read_depth>1 || sqlite3_total_changes64(s->db)!=s->operation_changes) return -EDEADLK;
-    if (mdi_readonly(s) || s->publication->inspect) return -EROFS;
+    /* Publication preserves the guest inode, contents and names. Exec and
+     * watches may need it on read-only mounts/superblocks; only a sealed
+     * backing store or an inspection owner forbids representation changes. */
+    if (s->readonly || s->publication->inspect) return -EROFS;
     if (!parent || !expected || !out || parent->kind!=S_IFDIR || parent->source
             || !parent->attached || strcmp(parent->scope,s->lifetime->scope)
             || !S_ISREG(expected->st_mode) || expected->st_nlink!=1) return -EINVAL;

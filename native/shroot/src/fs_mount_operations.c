@@ -420,7 +420,7 @@ static void native(struct md_filesystem *fs, const struct md_fs_request *q,
         int flags = q->operation == MD_FS_CREATE ? O_RDWR | O_CREAT | O_EXCL
             : q->operation == MD_FS_OPEN_IMAGE ? O_RDONLY : (int)q->flags;
         if (flags & ~(O_ACCMODE | O_CLOEXEC | O_APPEND | O_TRUNC | O_NOFOLLOW | O_DIRECTORY | O_PATH
-                | O_CREAT | O_EXCL | O_NONBLOCK | O_NOCTTY | O_LARGEFILE | O_SYNC | O_DSYNC | O_DIRECT)) { r = -ENOTSUP; break; }
+                | O_CREAT | O_EXCL | O_NONBLOCK | O_NOCTTY | O_LARGEFILE | O_SYNC | O_DSYNC | O_DIRECT | O_NOATIME)) { r = -ENOTSUP; break; }
         if ((flags & O_ACCMODE) == O_ACCMODE) { r = -EINVAL; break; }
         if (q->operation == MD_FS_OPEN_IMAGE && (!data || capacity < sizeof(struct md_image_identity))) { r = -ERANGE; break; }
         if (flags & O_PATH) flags &= O_PATH | O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC;

@@ -46,6 +46,14 @@ Android-version inference or `uname`-only capability check. Kernel configuration
 SELinux, application filters and vendor backports affect availability. Headers
 merely allow compiling an operation; they do not make it available at runtime.
 
+`process_limits` implements launch-local `RLIMIT_NPROC` accounting using the
+existing clone/identity/exit events, task-affine ABI copies and typed proc files.
+Its user-namespace accounting follows Linux 5.15 semantics and introduces no new
+host syscall, kernel feature or shared-startup probe. `test_nproc.py` covers
+native and PID-scoped guest views, protected copies, quota/reaping and seccomp.
+Native real-time scheduling and other host resource ceilings remain authoritative;
+the packaged RTKit fixture records scheduler `EPERM` rather than masking it.
+
 Launch cancellation uses baseline `timerfd_create(CLOCK_MONOTONIC)` and
 `timerfd_settime` in the supervisor's existing poll loop. The descriptor is lazy
 for unbounded launches; admission errors fail that launch, never shared services.

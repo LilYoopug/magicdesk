@@ -66,8 +66,7 @@ int mdi_open_permission(struct md_inode_store *s, const struct mdi_node *node, i
     if (!r && (flags & O_NOATIME) && s->identity) {
         struct stat st;
         r = mdi_stat(s, node, &st);
-        if (!r && st.st_uid != s->identity->uid.fs
-                && !md_identity_file_capable(s->identity,st.st_uid,st.st_gid,CAP_FOWNER)) r = -EPERM;
+        if (!r) r = md_file_noatime(&st,s->identity);
     }
     return r;
 }

@@ -6,6 +6,7 @@
 #include "fd_selector.h"
 #include "cgroup.h"
 #include "task_resources.h"
+#include "file_permissions.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -24,6 +25,8 @@ struct md_proc_file {
     struct md_identity process_identity;
     pid_t tracer;
     int process_state;
+    struct rlimit nproc;
+    int nproc_valid;
     enum md_proc_file_kind kind;
     atomic_int flags;
     int64_t position;
@@ -107,6 +110,11 @@ struct md_proc_file *md_proc_file_open_control(const struct md_control_file_ops 
         : (flags&O_ACCMODE)==O_WRONLY ? W_OK : R_OK;
     if (!(flags&O_PATH) && (flags&O_TRUNC)) mode|=W_OK;
     int error=!ops || !context ? -EINVAL : ops->access(context,id,(unsigned)mode);
+    if (!error && (flags&O_NOATIME) && !(flags&O_PATH)) {
+        struct stat st;
+        error=ops->stat(context,&st);
+        if (!error) error=md_file_noatime(&st,id);
+    }
     if (error) { errno=-error; return NULL; }
     const struct md_namespace_reference *ref=ops->namespace_reference ? ops->namespace_reference(context) : NULL;
     struct md_proc_file *f=md_proc_file_open(NULL,ref
@@ -136,11 +144,11 @@ int md_proc_file_mapping(const struct md_proc_file *f,unsigned protection,unsign
     return (flags&MAP_SHARED) && (protection&PROT_WRITE) ? -EACCES : 0;
 }
 int md_proc_file_fcntl(struct md_proc_file *f,int command,unsigned long argument,long *out) {
-    if (!f || !f->control || !f->control->descriptor) return 0;
+    if (!f) return 0;
     int flags=atomic_load_explicit(&f->flags,memory_order_relaxed);
     if (command==F_GETFL) *out=flags&~(O_CLOEXEC|O_CREAT|O_EXCL|O_TRUNC);
     else if (flags&O_PATH) *out=-EBADF;
-    else if (command==F_GET_SEALS) *out=f->control->seals ? f->control->seals(f->control_context) : -EINVAL;
+    else if (command==F_GET_SEALS) *out=f->control && f->control->seals ? f->control->seals(f->control_context) : -EINVAL;
     else if (command==F_SETFL) {
         unsigned mutable=O_APPEND|O_NONBLOCK|O_NOATIME;
         if (argument&(O_DIRECT|O_ASYNC)) *out=-EOPNOTSUPP;
@@ -177,10 +185,12 @@ void md_proc_file_pid_view(struct md_proc_file *f, struct md_pid_namespace *view
     f->pid_view=md_pid_namespace_retain(view); md_pid_namespace_release(old);
 }
 void md_proc_file_process_state(struct md_proc_file *f,const struct md_identity *identity,
-        struct md_pid_namespace *space,pid_t tracer) {
+        struct md_pid_namespace *space,pid_t tracer,const struct rlimit *nproc) {
     if (!md_proc_file_process(f->kind) || f->content) return;
     if (f->process_state) md_identity_release(&f->process_identity);
     f->process_identity=md_identity_copy(identity); f->process_state=1; f->tracer=tracer;
+    f->nproc_valid=nproc!=NULL;
+    if (nproc) f->nproc=*nproc;
     struct md_pid_namespace *old=f->process_pid_namespace;
     f->process_pid_namespace=md_pid_namespace_retain(space); md_pid_namespace_release(old);
 }
@@ -203,7 +213,7 @@ int md_proc_file_descriptor(const struct md_proc_file *f) {
     if (md_proc_file_directory(f->kind)) {
         char path[64]; snprintf(path,sizeof(path),"/proc/%d%s",f->node.process,
             f->kind==MD_PROC_FILE_NS_DIRECTORY ? "/ns" : "");
-        int fd=open(path,O_CLOEXEC|(f->flags&~(O_CREAT|O_EXCL|O_TRUNC)));
+        int fd=open(path,O_CLOEXEC|(f->flags&~(O_CREAT|O_EXCL|O_TRUNC|O_NOATIME)));
         if (fd<0) return -errno;
         struct stat st;
         int error=fstat(fd,&st) ? -errno : st.st_dev!=f->node.device || st.st_ino!=f->node.inode ? -ENOENT : 0;
@@ -211,8 +221,9 @@ int md_proc_file_descriptor(const struct md_proc_file *f) {
         return error ? error : fd;
     }
     /* An inert native carrier supplies access modes without requiring host
-     * CONFIG_USER_NS or executable tmpfs access. All file semantics are typed. */
-    int fd=open("/dev/null",O_CLOEXEC|(f->flags&~(O_CREAT|O_EXCL|O_TRUNC)));
+     * CONFIG_USER_NS or executable tmpfs access. O_NOATIME belongs to the
+     * checked guest inode, not this root-owned carrier. */
+    int fd=open("/dev/null",O_CLOEXEC|(f->flags&~(O_CREAT|O_EXCL|O_TRUNC|O_NOATIME)));
     return fd<0 ? -errno : fd;
 }
 int md_proc_file_access(const struct md_proc_file *f, enum md_proc_file_operation operation) {
@@ -293,7 +304,7 @@ static void process_status_line(struct md_proc_file *f, FILE *out, const char *l
 }
 static int process_content(struct md_proc_file *f) {
     char path[64];
-    snprintf(path,sizeof(path),"/proc/%d/%s",f->node.process,f->kind==MD_PROC_FILE_STAT ? "stat" : "status");
+    snprintf(path,sizeof(path),"/proc/%d/%s",f->node.process,md_proc_file_process_name(f->kind));
     int fd=open(path,O_RDONLY|O_CLOEXEC);
     if (fd<0) return -errno;
     struct stat st;
@@ -312,7 +323,22 @@ static int process_content(struct md_proc_file *f) {
     char *data=NULL; size_t length=0;
     FILE *out=open_memstream(&data,&length);
     if (!out) return -errno;
-    if (f->kind==MD_PROC_FILE_STATUS) {
+    if (f->kind==MD_PROC_FILE_LIMITS) {
+        char *line=source;
+        while (*line) {
+            char *end=strchr(line,'\n');
+            if (!end) { error=-EIO; break; }
+            if (f->nproc_valid && !strncmp(line,"Max processes ",14)) {
+                char soft[32],hard[32];
+                if (f->nproc.rlim_cur==RLIM_INFINITY) strcpy(soft,"unlimited");
+                else snprintf(soft,sizeof(soft),"%llu",(unsigned long long)f->nproc.rlim_cur);
+                if (f->nproc.rlim_max==RLIM_INFINITY) strcpy(hard,"unlimited");
+                else snprintf(hard,sizeof(hard),"%llu",(unsigned long long)f->nproc.rlim_max);
+                fprintf(out,"%-25s %-20s %-20s %-10s\n","Max processes",soft,hard,"processes");
+            } else fwrite(line,1,end+1-line,out);
+            line=end+1;
+        }
+    } else if (f->kind==MD_PROC_FILE_STATUS) {
         int have_namespace_fields=strstr(source,"\nNSpid:")!=NULL;
         char *tgid_line=strstr(source,"\nTgid:");
         pid_t tgid=tgid_line ? (pid_t)strtol(tgid_line+6,NULL,10) : f->node.process;

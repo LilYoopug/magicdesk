@@ -11,10 +11,12 @@
 #include "network_namespace.h"
 #include "cgroup.h"
 #include "landlock_policy.h"
+#include "process_limits.h"
 
 /* Linux owns the real FD table, cwd/umask and open descriptions. Optional path
  * annotations share their lifetimes without retaining data descriptions. */
 struct md_task_resources {
+    struct md_process_member *process;
     struct md_guest_domain *fs;
     struct md_mount_namespace *mounts;
     struct md_fd_origins *files;

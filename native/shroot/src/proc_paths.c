@@ -127,6 +127,7 @@ struct md_proc_path md_proc_path_for(const char *path,int tid,int tgid) {
         else if (word(&p, "mem")) out.kind = MD_PROC_MEMORY;
         else if (word(&p,"status")) out.kind=MD_PROC_STATUS;
         else if (word(&p,"stat")) out.kind=MD_PROC_STAT;
+        else if (word(&p,"limits")) out.kind=MD_PROC_LIMITS;
         else if (word(&p,"cgroup")) out.kind=MD_PROC_CGROUP;
         else if (word(&p, "mounts")) out.kind = MD_PROC_MOUNTS;
         else if (word(&p, "mountinfo")) out.kind = MD_PROC_MOUNTINFO;

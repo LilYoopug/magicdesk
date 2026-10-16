@@ -611,13 +611,13 @@ opened:
 void md_fs_inode_execute(struct md_filesystem *fs, const struct md_fs_request *q,
         struct md_fs_result *out, const struct md_fs_output *output) {
     struct md_inode_store *store=fs->selected_store ? fs->selected_store : fs->store;
-    int readonly=store->readonly;
+    int readonly=store->mount_readonly;
     int nodev=store->nodev;
     if (fs->mounts) store->nodev=!!(md_mount_policy_flags(fs->inode_mount
         ? &fs->inode_mount->policy : &fs->mounts->base.policy)&MD_MOUNT_NODEV);
     if (fs->mounts && (fs->inode_mount ? md_view_readonly(fs->inode_mount)
-            : (md_mount_policy_flags(&fs->mounts->base.policy)&MD_MOUNT_READONLY))) store->readonly=1;
+            : (md_mount_policy_flags(&fs->mounts->base.policy)&MD_MOUNT_READONLY))) store->mount_readonly=1;
     inode_execute(fs,q,out,output);
-    store->readonly=readonly;
+    store->mount_readonly=readonly;
     store->nodev=nodev;
 }

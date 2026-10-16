@@ -270,12 +270,12 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
         /* Process text is virtualized, but its inode and watch lifetime still
          * belong to procfs. Capture the native target under caller authority. */
         int process_watch=nr==SYS_inotify_add_watch && (control==MD_PROC_PROCESS_DIRECTORY
-            || control==MD_PROC_STATUS || control==MD_PROC_STAT);
+            || control==MD_PROC_STATUS || control==MD_PROC_STAT || control==MD_PROC_LIMITS);
         long result=process_watch ? -EXDEV
             : nr==SYS_openat ? md_proc_control_open(&ref,(int)a[2],proc_namespace)
             : md_proc_control_metadata(&ref,nr,a);
         if (result!=-EXDEV || (control!=MD_PROC_PROCESS_DIRECTORY && control!=MD_PROC_STATUS
-                && control!=MD_PROC_STAT && !md_proc_network_sysctl(control))) return result;
+                && control!=MD_PROC_STAT && control!=MD_PROC_LIMITS && !md_proc_network_sysctl(control))) return result;
         ref.kind=MD_PROC_NONE;
     }
     if (ref.kind==MD_PROC_MOUNTS || ref.kind==MD_PROC_MOUNTINFO) {

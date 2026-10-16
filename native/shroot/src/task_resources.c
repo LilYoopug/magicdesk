@@ -15,6 +15,7 @@ int md_resources_init(struct md_task_resources *r, struct md_mount_namespace *mo
     md_resources_release(r); return -ENOMEM;
 }
 int md_resources_release(struct md_task_resources *r) {
+    md_process_member_release(r->process);
     md_domain_release(r->fs);
     md_mount_namespace_release(r->mounts);
     md_fd_origins_release(r->files);
