@@ -1,11 +1,13 @@
 /* Compiled inside musl, not linked with Bionic or loaded into ART. */
 #include "pthread_impl.h"
+
 #include "cooperative_entry.h"
 #include "atomic.h"
 #include <stdlib.h>
 
 hidden const struct md_entry_api *__shroot_entry;
 static int enabled;
+unsigned shroot_libc_entry_abi(void) { return MD_ENTRY_VERSION; }
 hidden long __syscall_cp_asm(volatile void *,long,long,long,long,long,long,long);
 hidden void __testcancel(void);
 

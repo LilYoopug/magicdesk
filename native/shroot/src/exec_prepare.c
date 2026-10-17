@@ -112,11 +112,27 @@ struct image_selection {
     struct { struct md_fs_anchor *origin; char object[33]; } entries[MD_SCRIPT_DEPTH+2];
     unsigned count;
 };
-static long acquire(void *owner, const char *path, struct md_program *program) {
+static long acquire(void *owner, const char *path, struct md_program *program, enum md_command_file kind) {
     struct image_selection *selection=owner;
     struct md_fs_context *context=selection->context;
     const struct md_fs_anchor *cwd=context->task.cwd;
     if (*path!='/' && !cwd) return -ENODATA;
+    if (kind==MD_COMMAND_INTERPRETER) {
+        struct md_fs_request q={.actor=context->actor,.peer=context->peer,.operation=MD_FS_OPEN_IMAGE,
+            .directory={-1,-1},.path={path,NULL},.mode=MD_FS_IMAGE_INTERPRETER};
+        struct md_fs_anchor *origin=NULL;
+        struct md_fs_output output={.data=&program->identity,.capacity=sizeof(program->identity),.origin=&origin};
+        struct md_fs_result result;
+        *program=(struct md_program){.fd=-1};
+        md_fs_context_execute(context,&q,&result,&output);
+        program->mount_flags=md_fs_anchor_policy(origin);
+        md_fs_anchor_release(origin);
+        if (result.error || result.host_path || result.open_completion.kind || result.fd<0) {
+            if (result.fd>=0) close(result.fd);
+            return result.error ? result.error : -EOPNOTSUPP;
+        }
+        program->fd=result.fd; return 0;
+    }
     if (selection->count==MD_SCRIPT_DEPTH+2) return -ELOOP;
     unsigned index=selection->count++;
     long result=acquire_at(context,*path=='/' ? -1 : md_fs_anchor_fd(cwd),

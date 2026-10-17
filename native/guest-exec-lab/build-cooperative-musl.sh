@@ -3,6 +3,7 @@
 set -eu
 test "$#" = 1
 scripts=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+libc=$scripts/../shroot/libc
 mkdir -p "$1"
 out=$(CDPATH= cd -- "$1" && pwd)
 archive=$out/musl-1.2.5.tar.gz
@@ -12,10 +13,12 @@ if [ ! -f "$archive" ]; then
     mv "$archive.part" "$archive"
 fi
 printf '%s  %s\n' a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4 "$archive" | sha256sum -c -
-integration=$(sha256sum "$scripts/integrate_musl.py")
+integration=$(sha256sum "$libc/integrate_musl.py" "$libc/source_integration.py" "$libc/musl.patch")
 if [ ! -f "$out/integration-stamp" ] || [ "$(cat "$out/integration-stamp")" != "$integration" ]; then
+    # Added integration files must not survive a fresh source generation.
+    rm -rf "$out/musl-1.2.5"
     tar -xzf "$archive" -C "$out"
-    python "$scripts/integrate_musl.py" "$out/musl-1.2.5"
+    python "$libc/integrate_musl.py" "$out/musl-1.2.5"
     printf '%s\n' "$integration" > "$out/integration-stamp"
 fi
 # Remove only headers installed by the previous laboratory integration.
@@ -25,8 +28,8 @@ for header in cooperative_entry.h; do
     destination=$out/musl-1.2.5/src/internal/$header
     cmp -s "$origin" "$destination" || cp "$origin" "$destination"
 done
-cmp -s "$scripts/musl_entry.c" "$out/musl-1.2.5/src/thread/aarch64/shroot.c" || \
-    cp "$scripts/musl_entry.c" "$out/musl-1.2.5/src/thread/aarch64/shroot.c"
+cmp -s "$libc/musl_entry.c" "$out/musl-1.2.5/src/thread/aarch64/shroot.c" || \
+    cp "$libc/musl_entry.c" "$out/musl-1.2.5/src/thread/aarch64/shroot.c"
 cc=${CC:-clang}
 resource=$("$cc" -print-resource-dir)
 builtins=${COMPILER_BUILTINS:-$resource/lib/linux/libclang_rt.builtins-aarch64-android.a}

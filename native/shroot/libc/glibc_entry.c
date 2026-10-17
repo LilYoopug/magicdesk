@@ -1,16 +1,18 @@
-/* Isolated glibc source integration, never loaded into Android's libc or ART. */
+/* Guest glibc source integration, never loaded into Android's libc or ART. */
 #define SHROOT_RAW_SYSCALLS 1
 #include <pthreadP.h>
 #include <cooperative_entry.h>
 #include <elf.h>
 #include <stddef.h>
 #include <string.h>
+#include <shroot-cancellation.h>
 
 _Static_assert(offsetof(struct md_entry_api, offers) == 16, "assembly offer offset");
 _Static_assert(offsetof(struct md_entry_api, syscall_count) == 24, "assembly count offset");
 
 const struct md_entry_api *__shroot_entry attribute_hidden;
 static int enabled;
+unsigned shroot_libc_entry_abi(void) { return MD_ENTRY_VERSION; }
 
 __attribute__((noinline)) static long
 kernel_call(long nr, const uint64_t *args)
@@ -18,6 +20,7 @@ kernel_call(long nr, const uint64_t *args)
   return INTERNAL_SYSCALL_NCS_CALL(nr, args[0], args[1], args[2], args[3], args[4], args[5]);
 }
 
+#if SHROOT_MODERN_CANCEL
 static long
 cancellation_kernel(long nr, const uint64_t *args)
 {
@@ -28,6 +31,7 @@ cancellation_kernel(long nr, const uint64_t *args)
   return __syscall_cancel_arch(&self->cancelhandling, nr,
                               args[0], args[1], args[2], args[3], args[4], args[5]);
 }
+#endif
 
 void attribute_hidden
 __shroot_init(char **environment)
@@ -50,7 +54,7 @@ static long
 invoke(long nr, const uint64_t *args, md_entry_kernel_fn kernel, void (*cancel)(void))
 {
   struct pthread *self = THREAD_SELF;
-  if (!enabled || cancel_async_enabled(atomic_load_relaxed(&self->cancelhandling)))
+  if (!enabled || (atomic_load_relaxed(&self->cancelhandling) & CANCELTYPE_BITMASK))
     return kernel(nr, args);
   struct md_entry_call call = {.number = nr, .kernel = kernel, .cancel = cancel};
   memcpy(call.args, args, sizeof(call.args));
@@ -65,6 +69,7 @@ __shroot_syscall(long nr, const uint64_t *args)
   return invoke(nr, args, kernel_call, NULL);
 }
 
+#if SHROOT_MODERN_CANCEL
 int attribute_hidden
 __shroot_cp_try(long nr, const uint64_t *args, long *result)
 {
@@ -75,3 +80,4 @@ __shroot_cp_try(long nr, const uint64_t *args, long *result)
     : invoke(nr, args, cancellation_kernel, __pthread_testcancel);
   return 1;
 }
+#endif

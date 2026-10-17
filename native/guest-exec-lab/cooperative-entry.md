@@ -1435,7 +1435,10 @@ checks, now including cancellation cleanup handlers, passed in
 
 ## glibc Fixture
 
-`integrate_glibc.py` applies checked source boundaries to official glibc 2.41.
+`native/shroot/libc/integrate_glibc.py` applies checked wrapper transformations
+and exact-context lifecycle patches to official glibc 2.41. The shared source
+owner, embedded installer payload and source-only checks are documented in
+[`native/shroot/libc/README.md`](../shroot/libc/README.md).
 `build_cooperative_glibc.py` builds it in a disposable Debian toolchain under
 shell Shroot, with a checksum-pinned source and `--enable-kernel=5.15`.
 It exports a separate sysroot and static/dynamic probes; it does not replace any

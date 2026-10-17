@@ -10,7 +10,8 @@ struct md_command_recipe {
     char lines[MD_SCRIPT_DEPTH][MD_SCRIPT_HEADER];
 };
 struct md_command_images { int program, loader, anonymous; unsigned mount_flags; };
-typedef long (*md_command_acquire)(void *, const char *, struct md_program *);
+enum md_command_file { MD_COMMAND_EXECUTABLE, MD_COMMAND_INTERPRETER };
+typedef long (*md_command_acquire)(void *, const char *, struct md_program *, enum md_command_file);
 /* Borrows first; owns output images on success, none on failure. */
 int md_command_images_prepare(struct md_command_recipe *, struct md_command_images *,
     const struct md_program *first, int inaccessible, md_command_acquire, void *);

@@ -1,0 +1,57 @@
+--- a/csu/libc-start.c
++++ b/csu/libc-start.c
+@@ -332,6 +332,9 @@
+     __libc_check_standard_fds ();
+ #endif /* !SHARED */
+ 
++  extern void __shroot_init (char **) attribute_hidden;
++  __shroot_init (&argv[argc + 1]);
++
+   /* Call the initializer of the program, if any.  */
+ #ifdef SHARED
+   if (__builtin_expect (GLRO(dl_debug_mask) & DL_DEBUG_IMPCALLS, 0))
+--- a/elf/Versions
++++ b/elf/Versions
+@@ -31,3 +31,4 @@
+   GLIBC_PRIVATE {
++    shroot_libc_entry_abi;
+     # functions used in other libraries
+     __libc_early_init;
+--- a/nptl/allocatestack.c
++++ b/nptl/allocatestack.c
+@@ -518,6 +518,7 @@
+   /* Initialize the lock.  We have to do this unconditionally since the
+      stillborn thread could be canceled while the lock is taken.  */
+   pd->lock = LLL_LOCK_INITIALIZER;
++  pd->shroot_client = (struct md_entry_client){0};
+ 
+   /* The robust mutex lists also need to be initialized
+      unconditionally because the cleanup for the previous stack owner
+--- a/nptl/descr.h
++++ b/nptl/descr.h
+@@ -25,6 +25,7 @@
+ #include <sys/types.h>
+ #include <hp-timing.h>
+ #include <list_t.h>
++#include <cooperative_entry.h>
+ #include <lowlevellock.h>
+ #include <pthreaddef.h>
+ #include <dl-sysdep.h>
+@@ -167,6 +168,7 @@
+   /* This descriptor's link on the GL (dl_stack_used) or
+      GL (dl_stack_user) list.  */
+   list_t list;
++  struct md_entry_client shroot_client;
+ 
+   /* Thread ID - which is also a 'is this thread descriptor (and
+      therefore stack) used' flag.  */
+--- a/sysdeps/nptl/_Fork.c
++++ b/sysdeps/nptl/_Fork.c
+@@ -34,6 +34,7 @@
+   if (pid == 0)
+     {
+       struct pthread *self = THREAD_SELF;
++      self->shroot_client = (struct md_entry_client){0};
+ 
+       /* Initialize the robust mutex list setting in the kernel which has
+ 	 been reset during the fork.  We do not check for errors because if

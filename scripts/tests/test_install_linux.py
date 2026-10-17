@@ -68,6 +68,22 @@ if args[:2] == ["dns", "--check"]:
 with open(os.environ["TEST_LOG"], "a") as log:
     log.write(json.dumps(args) + "\n")
 stage = args[0]
+if stage == "--probe":
+    print(os.environ.get("TEST_RUNTIME_FEATURES", "libc-registry=1"))
+if args[:2] == ["libc", "path"]:
+    print(str(Path(os.environ["HOME"]) / "libc/artifacts"))
+    sys.exit(0)
+if stage == "path":
+    if os.environ.get("TEST_IMAGE_ONLY") and not args[1].startswith("libc-build-"):
+        sys.exit(1)
+    print(str(Path(os.environ["HOME"]) / "source-store"))
+    sys.exit(0)
+if args[:2] == ["image", "backup"] and os.environ.get("TEST_FAIL") == "snapshot":
+    print("Guest image: Device or resource busy", file=sys.stderr)
+    sys.exit(23)
+if args[:2] == ["image", "exec"]:
+    args = args[1:]
+    stage = "exec"
 if Path(sys.argv[0]).name == "magicdesk":
     if os.environ.get("TEST_FAIL") == "download":
         print("test download/checksum failure", file=sys.stderr)
@@ -86,12 +102,31 @@ if stage == "exec":
         print(os.environ.get("TEST_DISTRO", "debian"))
     if stage == "setup":
         payload = sys.stdin.read()
+        if args[-3] == "identify":
+            manifest = "fixture target manifest\n"
+            print(manifest, end="")
+            if os.environ.get("TEST_LIBC_CACHED"):
+                import hashlib
+                key = hashlib.sha256(manifest.encode()).hexdigest()
+                artifact = Path(os.environ["HOME"]) / "libc/artifacts" / key
+                artifact.mkdir(parents=True, exist_ok=True)
+                (artifact / "manifest").write_text(manifest)
+            sys.exit(0)
         if args[-3] in ("turnip", "software", "auto"):
             stage = "graphics"
         if "version=6.3.6" in payload:
             stage = "kwin"
-        suffix = {"graphics": ".gpu", "kwin": ".kwin"}.get(stage, "")
+        if args[-3] in ("shroot", "base"):
+            stage = "libc"
+        suffix = {"graphics": ".gpu", "kwin": ".kwin", "libc": ".libc"}.get(stage, "")
         Path(os.environ["TEST_PAYLOAD"] + suffix).write_text(payload)
+        if stage == "libc" and "--bind" in args and os.environ.get("TEST_FAIL") != "libc":
+            work = Path(args[args.index("--bind") + 1])
+            key = "a" * 64
+            (work / "result").write_text(key + "\n")
+            artifact = Path(os.environ["HOME"]) / "libc/artifacts" / key
+            artifact.mkdir(parents=True, exist_ok=True)
+            (artifact / "manifest").write_text("cached fixture\n")
         if stage == "setup" and os.environ.get("TEST_SETUP_FAILURES"):
             attempts = Path(os.environ["TEST_PAYLOAD"] + ".attempts")
             count = int(attempts.read_text()) + 1 if attempts.exists() else 1
@@ -148,6 +183,149 @@ if os.environ.get("TEST_FAIL") == stage:
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual([], self.dns_checks())
 
+    def test_libc_keep_does_not_run_the_build_recipe(self):
+        result = self.run_script('--yes', '--resume', '--name', 'work')
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertFalse(Path(str(self.payload) + '.libc').exists())
+
+    def test_libc_recipe_is_exported_without_android_access(self):
+        result = self.run_script('--print-libc-setup', TEST_UID='10001', TEST_VERSION_STATUS='3')
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn('integrate_musl.py', result.stdout)
+        self.assertIn('integrate_glibc.py', result.stdout)
+        self.assertEqual([], self.calls())
+        self.assertEqual([], self.version_calls())
+        subprocess.run(['sh', '-n'], input=result.stdout, text=True, check=True)
+
+    def test_libc_missing_runtime_capability_precedes_environment_mutation(self):
+        result = self.run_script('--yes', '--distro', 'alpine', '--libc', 'shroot',
+                                 TEST_RUNTIME_FEATURES='')
+        self.assertEqual(1, result.returncode)
+        self.assertIn('shared libc registry is unavailable', result.stderr)
+        self.assertEqual([['--probe']], self.calls())
+        self.assertFalse(self.payload.exists())
+
+    def test_private_glibc_keeps_locale_data_and_exports_its_own_iconv_modules(self):
+        script = self.run_script('--print-libc-setup').stdout
+        self.assertIn('complocaledir = /usr/lib/locale', script)
+        self.assertIn('zonedir = /usr/share/zoneinfo', script)
+        self.assertIn('cp -RL "$work/stage$prefix/lib/gconv" candidate/lib/', script)
+        self.assertNotIn('getconf GNU_LIBC_VERSION', script)
+
+    def test_libc_build_dependencies_use_shared_repository_preparation(self):
+        script = self.run_script('--print-libc-setup').stdout
+        functions = '\n'.join(re.search(r'^' + name + r'\(\) \{\n.*?^\}', script,
+                                         re.M | re.S).group(0)
+                              for name in ('refresh_packages', 'install_libc_tools'))
+        stubs = 'packages() { printf \'packages %s\\n\' "$*"; }\n'
+        command = self.directory / 'package-command'
+        command.write_text('#!' + shutil.which('sh') + '\nprintf \'%s %s\\n\' "${0##*/}" "$*"\n')
+        command.chmod(0o755)
+        for name in ('apt-get', 'apk', 'pacman', 'pacman-key', 'xbps-install', 'zypper'):
+            (self.directory / name).symlink_to(command)
+        for family, distro, expected in (
+                ('apt', 'debian', ['apt-get update']),
+                ('apk', 'alpine', ['apk update']),
+                ('dnf', 'fedora', []),
+                ('zypper', 'opensuse-tumbleweed', ['zypper --non-interactive refresh']),
+                ('xbps', 'void', ['xbps-install -Suy xbps', 'xbps-install -uy']),
+                ('pacman', 'arch', ['pacman-key --init', 'pacman-key --populate archlinuxarm',
+                                    'pacman -Syu --noconfirm']),
+                ('pacman', 'manjaro', ['pacman-key --init',
+                                       'pacman-key --populate archlinuxarm manjaro manjaro-arm',
+                                       'pacman -Syu --noconfirm']),
+                ('pacman', 'artix', ['pacman-key --init', 'pacman-key --populate artix',
+                                     'pacman -Syu --noconfirm']),
+                ('pacman', 'custom', ['pacman -Syu --noconfirm']),
+                ('recovery', 'steamos', ['pacman -Syu --noconfirm'])):
+            with self.subTest(family=family, distro=distro):
+                result = subprocess.run(['sh', '-ec', stubs + functions + '\ninstall_libc_tools'],
+                                        env={**os.environ, 'family': family, 'ID': distro,
+                                             'PATH': str(self.directory) + os.pathsep + os.environ['PATH']},
+                                        text=True, capture_output=True)
+                self.assertEqual(0, result.returncode, result.stderr)
+                lines = result.stdout.splitlines()
+                commands = [line for line in lines if line.startswith(('apt-get ', 'apk ',
+                            'zypper ', 'xbps-install ', 'pacman ', 'pacman-key '))]
+                self.assertEqual(expected, commands)
+                self.assertTrue(lines[-1].startswith('packages ca-certificates '), lines)
+
+    def test_libc_build_package_cleanup_retains_failure_status(self):
+        script = self.run_script('--print-libc-setup').stdout
+        start = script.index("trap 'status=$?; package_cleanup;")
+        end = script.index('extract_integration\n', start)
+        for status in (0, 23):
+            with self.subTest(status=status):
+                stubs = f'''set -eu
+package_cleanup() {{ printf 'cleaned\\n'; }}
+install_libc_tools() {{ return {status}; }}
+'''
+                result = subprocess.run(['sh', '-c', stubs + script[start:end]],
+                                        text=True, capture_output=True)
+                self.assertEqual(status, result.returncode, result.stderr)
+                self.assertEqual('cleaned\n', result.stdout)
+
+    def test_libc_recipe_accepts_all_installer_distributions(self):
+        for distro in ('fedora', 'ubuntu', 'arch', 'steamos', 'void', 'opensuse'):
+            with self.subTest(distro=distro):
+                result = self.run_script('--yes', '--resume', '--distro', distro, '--name', 'work', '--libc', 'shroot', TEST_DISTRO=distro)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertTrue(any(c[:2] == ['image', 'backup'] for c in self.calls()))
+                self.assertTrue(any(c[:2] == ['image', 'restore'] for c in self.calls()))
+
+    def test_libc_mode_and_recipe_identity_reach_guest(self):
+        import hashlib
+        script = self.run_script('--print-libc-setup').stdout
+        digest = hashlib.sha256(script.encode()).hexdigest()
+        for mode in ('shroot', 'base'):
+            with self.subTest(mode=mode):
+                result = self.run_script('--yes', '--resume', '--name', 'work', '--libc', mode, '--jobs', '3')
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertTrue(any(c[-3:] == [mode, '3', digest] for c in self.calls()))
+                self.assertEqual(script, Path(str(self.payload) + '.libc').read_text())
+                self.assertFalse(any(c[0] in ('install', 'remove') for c in self.calls()))
+
+    def test_libc_prepare_oci_uses_temporary_environment_and_retains_original_image(self):
+        result = self.run_script('--prepare-libc', 'alpine:3.23', '--jobs', '1', TEST_IMAGE_ONLY='1')
+        self.assertEqual(0, result.returncode, result.stderr)
+        install = next(c for c in self.calls() if c[0] == 'install')
+        self.assertEqual('alpine:3.23', install[1])
+        self.assertIn(['remove', install[-1]], self.calls())
+
+    def test_libc_build_failure_keeps_isolated_copy_and_does_not_enable_target(self):
+        result = self.run_script('--prepare-libc', 'work', TEST_FAIL='libc')
+        self.assertEqual(1, result.returncode)
+        self.assertIn('original libc retained', result.stderr)
+        self.assertFalse(any(c[:2] == ['image', 'remove'] for c in self.calls()))
+        self.assertFalse(any('rm -f /etc/shroot/libc-base' in arg for c in self.calls() for arg in c))
+
+    def test_libc_cache_hit_skips_snapshot_and_build(self):
+        result = self.run_script('--prepare-libc', 'work', TEST_LIBC_CACHED='1')
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn('Reusing Shroot libc:', result.stdout)
+        self.assertFalse(any(c[0] == 'image' for c in self.calls()))
+        self.assertTrue(any('rm -f /etc/shroot/libc-base' in arg for c in self.calls() for arg in c))
+
+    def test_libc_busy_snapshot_never_restores_or_enables_target(self):
+        result = self.run_script('--prepare-libc', 'work', TEST_FAIL='snapshot')
+        self.assertEqual(1, result.returncode)
+        self.assertIn('idle environment', result.stderr)
+        self.assertFalse(any(c[:2] == ['image', 'restore'] for c in self.calls()))
+        self.assertFalse(any('rm -f /etc/shroot/libc-base' in arg for c in self.calls() for arg in c))
+
+    def test_libc_failure_preserves_environment_and_reports_mode(self):
+        result = self.run_script('--yes', '--resume', '--name', 'work', '--libc', 'shroot', TEST_FAIL='libc')
+        self.assertEqual(23, result.returncode)
+        self.assertIn('Environment retained', result.stderr)
+        self.assertIn('--resume', result.stderr)
+        self.assertIn('libc=shroot', result.stderr)
+        self.assertFalse(any(c[0] in ('install', 'remove') for c in self.calls()))
+
+    def test_libc_invalid_mode_does_not_reach_guest(self):
+        result = self.run_script('--yes', '--libc', 'automatic')
+        self.assertEqual(1, result.returncode)
+        self.assertEqual([], self.calls())
+
     @unittest.skipUnless(hasattr(os, 'openpty'), 'PTY required')
     def test_interactive_dns_repair_follows_configuration_and_retries_only_dns(self):
         output = self.questions(b'alpine\nwork\nxfce\nsoftware\nkeep\nkeep\nbasic\nn\nsystem\ninvalid\n192.0.2.1\ny\n',
@@ -169,7 +347,7 @@ if os.environ.get("TEST_FAIL") == stage:
 
     @unittest.skipUnless(hasattr(os, 'openpty'), 'PTY required')
     def test_advanced_invalid_dns_retains_other_answers(self):
-        output = self.questions(b'alpine\nwork\nxfce\nsoftware\nkeep\nkeep\nbasic\ny\n\nboth\n\ninvalid\nkeep\npreserve\ny\n')
+        output = self.questions(b'alpine\nwork\nxfce\nsoftware\nkeep\nkeep\nbasic\ny\nkeep\n\nboth\n\ninvalid\nkeep\npreserve\ny\n')
         self.assertEqual([['dns', '--check', value] for value in ('invalid', 'preserve')], self.dns_checks())
         self.assertEqual(1, output.count('Distribution ['))
         install = next(c for c in self.calls() if c[0] == 'install')
@@ -248,7 +426,7 @@ if os.environ.get("TEST_FAIL") == stage:
         self.assertEqual(1, result.returncode, result.stderr)
         self.assertIn("magicdesk is unavailable", result.stderr)
         for option in ("--help", "--list", "--print-mesa-patch", "--print-kwin-patch",
-                       "--print-system-setup", "--print-graphics-setup",
+                       "--print-system-setup", "--print-graphics-setup", "--print-libc-setup",
                        "--print-recovery-reader", "--print-desktop-session", "--print-audio-session", "--print-steam-game"):
             with self.subTest(option=option):
                 result = self.run_script(option, TEST_UID="10001", TEST_VERSION_STATUS="3")
@@ -1442,7 +1620,7 @@ if os.environ.get("TEST_FAIL") == stage:
     @unittest.skipUnless(hasattr(os, "openpty"), "PTY required")
     def test_advanced_questions_select_real_options_without_command_flags(self):
         output = self.questions(b"ubuntu\ninteractive\napps\nsoftware\nru_RU.UTF-8\nAsia/Krasnoyarsk\ncjk\ny\n"
-                                b"developer\nwayland\ngit gdb\n192.0.2.1\nclean\ny\n")
+                            b"keep\ndeveloper\nwayland\ngit gdb\n192.0.2.1\nclean\ny\n")
         install = next(c for c in self.calls() if c[0] == 'install')
         self.assertEqual(['--rootfs', '--name', 'interactive', '--dns', '192.0.2.1'], install[2:])
         self.assertEqual(["apps", "wayland", "ru_RU.UTF-8", "Asia/Krasnoyarsk", "developer", "cjk", "clean", "git gdb"],

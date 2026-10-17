@@ -1,0 +1,31 @@
+--- a/elf/dl-load.c
++++ b/elf/dl-load.c
+@@ -1975,9 +1975,27 @@
+ 
+       fd = -1;
+ 
++#ifdef SHARED
++# include <shroot-library-path.h>
++      /* The loader and its libc must come from one build, even when the
++         application supplies an RPATH pointing at the original libc. Only
++         this build's runtime libraries exist in the private directory. */
++      char *shroot_name = malloc (sizeof (SHROOT_LIBC_PATH) + namelen);
++      if (shroot_name == NULL)
++        _dl_signal_error (ENOMEM, name, NULL, N_("cannot allocate library path"));
++      strcpy (shroot_name, SHROOT_LIBC_PATH "/");
++      strcat (shroot_name, name);
++      fd = open_verify (shroot_name, -1, &fb,
++                        loader ?: GL(dl_ns)[nsid]._ns_loaded,
++                        LA_SER_LIBPATH, mode, &found_other_class, false);
++      if (fd != -1)
++        realname = shroot_name;
++      else
++        free (shroot_name);
++#endif
+       /* When the object has the RUNPATH information we don't use any
+ 	 RPATHs.  */
+-      if (loader == NULL || loader->l_info[DT_RUNPATH] == NULL)
++      if (fd == -1 && (loader == NULL || loader->l_info[DT_RUNPATH] == NULL))
+ 	{
+ 	  /* This is the executable's map (if there is one).  Make sure that
+ 	     we do not look at it twice.  */

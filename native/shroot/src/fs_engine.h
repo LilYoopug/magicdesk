@@ -25,6 +25,7 @@ struct md_filesystem {
     struct md_ofd_orders *cursors;
     struct md_ipc_credentials *ipc;
     struct md_shm_bridge *shm_bridge;
+    struct md_libc_registry *libc_registry;
     const char *ipc_store;
     struct md_fs_statistics *statistics;
     const struct md_task_snapshot *actor;

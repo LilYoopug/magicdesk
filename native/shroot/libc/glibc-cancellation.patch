@@ -1,0 +1,20 @@
+--- a/nptl/cancellation.c
++++ b/nptl/cancellation.c
+@@ -31,6 +31,9 @@
+   long int result;
+   struct pthread *pd = THREAD_SELF;
+ 
++  const uint64_t shroot_args[6] = {a1, a2, a3, a4, a5, a6};
++  if (__shroot_cp_try (nr, shroot_args, &result)) goto shroot_completed;
++
+   /* If cancellation is not enabled, call the syscall directly and also
+      for thread terminatation to avoid call __syscall_do_cancel while
+      executing cleanup handlers.  */
+@@ -49,6 +52,7 @@
+   result = __syscall_cancel_arch (&pd->cancelhandling, nr, a1, a2, a3, a4, a5,
+ 			          a6 __SYSCALL_CANCEL7_ARCH_ARG7);
+ 
++shroot_completed:
+   /* If the cancellable syscall was interrupted by SIGCANCEL and it has no
+      side-effect, cancel the thread if cancellation is enabled.  */
+   ch = atomic_load_relaxed (&pd->cancelhandling);

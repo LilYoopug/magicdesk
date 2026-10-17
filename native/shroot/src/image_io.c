@@ -39,6 +39,18 @@ int md_image_digest_valid(const char *digest) {
     return digest && strlen(digest) == 71 && !memcmp(digest, "sha256:", 7)
         && strspn(digest + 7, "0123456789abcdef") == 64;
 }
+static void digest_text(const unsigned char digest[32],char out[65]) {
+    for (unsigned i=0;i<32;++i) {
+        out[i*2]="0123456789abcdef"[digest[i]>>4];
+        out[i*2+1]="0123456789abcdef"[digest[i]&15];
+    }
+    out[64]=0;
+}
+int md_image_hash_bytes(const void *data,size_t size,char out[65]) {
+    unsigned char digest[32];
+    if (mbedtls_sha256(data,size,digest,0)) return -EIO;
+    digest_text(digest,out); return 0;
+}
 int md_image_hash(int fd, uint64_t size, char out[65]) {
     mbedtls_sha256_context hash;
     mbedtls_sha256_init(&hash);
@@ -55,13 +67,7 @@ int md_image_hash(int fd, uint64_t size, char out[65]) {
     }
     if (!r && mbedtls_sha256_finish(&hash, digest)) r = -EIO;
     mbedtls_sha256_free(&hash);
-    if (!r) {
-        for (unsigned i = 0; i < 32; ++i) {
-            out[i * 2] = "0123456789abcdef"[digest[i] >> 4];
-            out[i * 2 + 1] = "0123456789abcdef"[digest[i] & 15];
-        }
-        out[64] = 0;
-    }
+    if (!r) digest_text(digest,out);
     return r;
 }
 int md_image_snapshot(int fd, int scratch, uint64_t limit, int *out) {

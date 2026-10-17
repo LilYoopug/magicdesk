@@ -2,6 +2,7 @@
 #include "fs_engine.h"
 #include "shm_bridge.h"
 #include "fs_native.h"
+#include "libc_selection.h"
 #include "proc_fdinfo.h"
 #include "fs_context.h"
 #include "image_catalogue.h"
@@ -407,6 +408,8 @@ static void context_execute(struct md_fs_context *context,
     }
     if (!out->error && (q->operation==MD_FS_MOUNT || (q->operation==MD_FS_FSCONFIG
             && q->mode==FSCONFIG_CMD_RECONFIGURE))) md_fs_mount_table_changed(fs);
+    if (q->operation==MD_FS_OPEN_IMAGE && q->mode==MD_FS_IMAGE_INTERPRETER)
+        md_libc_select(fs,q,out,output);
     fs->store->creation_mask=previous_mask;
     fs->store->root_id=previous_root;
     fs->native_root=previous_native_root;

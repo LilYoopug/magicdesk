@@ -60,8 +60,8 @@ long md_program_capture(const struct md_fs *fs, int fd, const char *path, struct
     }
     return r;
 }
-long md_program_acquire(const struct md_fs *fs, int base, const char *path, int flags,
-        struct md_program *program) {
+static long acquire(const struct md_fs *fs, int base, const char *path, int flags,
+        struct md_program *program,unsigned mode) {
     *program=(struct md_program){.fd=-1};
     memset(program->identity.object, 0, sizeof(program->identity.object));
     char routed[PATH_MAX];
@@ -73,7 +73,7 @@ long md_program_acquire(const struct md_fs *fs, int base, const char *path, int 
     }
     if (fs->endpoint[0] && !md_fs_host_path(fs, path)) {
         struct md_fs_request q = {.operation = MD_FS_OPEN_IMAGE, .directory = {base, -1},
-            .path = {path, NULL}, .flags = (unsigned)flags};
+            .path = {path, NULL}, .flags = (unsigned)flags,.mode=mode};
         struct md_fs_response out;
         long r = md_namespace_request(fs, &q, &out);
         if (r < 0) return r;
@@ -93,4 +93,10 @@ long md_program_acquire(const struct md_fs *fs, int base, const char *path, int 
     if (!r) r = object_identity(fs, program);
     if (r < 0) { RAW1(close, program->fd); program->fd = -1; }
     return r;
+}
+long md_program_acquire(const struct md_fs *fs,int base,const char *path,int flags,struct md_program *program) {
+    return acquire(fs,base,path,flags,program,0);
+}
+long md_program_interpreter(const struct md_fs *fs,const char *path,struct md_program *program) {
+    return acquire(fs,AT_FDCWD,path,0,program,MD_FS_IMAGE_INTERPRETER);
 }

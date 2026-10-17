@@ -80,7 +80,7 @@ void md_boot(uintptr_t *kernel_stack) {
         long released=md_adapter_buffer_release();
         if (check<0) md_die("probe private-table helper",check);
         if (released<0) md_die("probe mapped request release",released);
-        const char message[] = "guest-runtime: aarch64 shell syscall adapter ready\n";
+        const char message[] = "guest-runtime: aarch64 shell syscall adapter ready\nlibc-registry=1\n";
         RAW3(write, 1, message, sizeof(message) - 1);
         RAW1(exit_group, 0);
     }

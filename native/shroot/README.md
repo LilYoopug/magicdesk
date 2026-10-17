@@ -15,8 +15,15 @@ and evidence, rather than installation recipes.
 
 The bootstrap maps an ARM64 ELF and its optional interpreter, constructs its
 initial stack/auxv, and enters the distribution's stock glibc/musl loader. Static
-ELF and raw SVC programs use the same path. No preload library, patched libc,
+ELF and raw SVC programs use the same Base path. No preload library, patched libc,
 PRoot process, external container manager or SELinux change is required.
+
+An explicitly prepared [local libc registry](libc/README.md) can substitute a
+matching source-built interpreter at ordinary exec, including inside nested
+roots. Its libc enters the common [cooperative protocol](cooperative-entry.md).
+Absent or inadmissible artifacts keep the stock loader. Builds are offline,
+explicit installer work; neither the syscall path nor Android startup builds
+or downloads them.
 
 One supervisor owns each process tree. Selective seccomp TRACE/USER_NOTIF directs
 operations needing adaptation to either a task-affine adapter or a filesystem
@@ -53,6 +60,7 @@ Android kernel: actual task lifetime, descriptors, data IO and native checks
 | Application services | Authorization, catalog/registry downloads, launch recipes, immutable helper staging, PTY, graphics/audio/input connections | Guest syscall policy or native resource lifetime |
 | `namespace_run.c` | Explicit launch configuration and native process owner | Global current distribution or automatic privilege switching |
 | `bootstrap.c`, `elf.c`, `exec.c` | ELF admission/mapping, stack and exec reentry | Distribution-specific loader or libc policy |
+| `libc_registry.c`, `libc_selection.c` | Local artifact publication/leases and interpreter selection in the captured guest filesystem context | Package installation, OCI rewriting or a separate permission model |
 | `supervisor.c` and task owners | Kernel tracing, continuations, guest identity, cancellation and terminal cleanup | Android windows or a second kernel scheduler |
 | `fs_worker.c`, `namespace_broker.c`, `fs_engine.c` | Captured filesystem requests and provider dispatch | Application IO through ordinary open data descriptions |
 | Inode/image owners | SQLite namespace, metadata, shared bodies, overlays, import and maintenance | Android mount privileges or kernel hardlinks |

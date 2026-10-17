@@ -225,7 +225,7 @@ int md_fs_request_validate(const struct md_fs_request *q) {
     if (q->operation == MD_FS_OPEN_OBJECT)
         return descriptors || !*a || *b || (q->mode&~MD_FS_OBJECT_EXECUTE) ? -EINVAL : 0;
     if (q->operation == MD_FS_OPEN_IMAGE)
-        return (descriptors & 2) || !*a || *b || q->mode || (q->flags & ~O_NOFOLLOW) ? -EINVAL : 0;
+        return (descriptors & 2) || !*a || *b || (q->mode&~MD_FS_IMAGE_INTERPRETER) || (q->flags & ~O_NOFOLLOW) ? -EINVAL : 0;
     if (q->operation == MD_FS_GETDENTS || q->operation == MD_FS_SEEKDIR) {
         if (descriptors != 1 || *a || *b || q->mode) return -EINVAL;
         return q->operation == MD_FS_GETDENTS ? (q->flags ? -EINVAL : 0)

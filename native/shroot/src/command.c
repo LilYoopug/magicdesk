@@ -39,7 +39,8 @@ int md_command_apply_recipe(struct md_command *c, const struct md_command_recipe
     memcpy(c->object,recipe->image.object,sizeof(c->object));
     return 0;
 }
-static long acquire(void *context, const char *path, struct md_program *program) {
+static long acquire(void *context, const char *path, struct md_program *program, enum md_command_file kind) {
+    if (kind==MD_COMMAND_INTERPRETER) return md_program_interpreter(context,path,program);
     return md_program_acquire(context,AT_FDCWD,path,0,program);
 }
 int md_command_prepare(const struct md_fs *fs, struct md_command *c, const char *program, char *const argv[],
@@ -48,7 +49,7 @@ int md_command_prepare(const struct md_fs *fs, struct md_command *c, const char 
     if (error) return error;
     struct md_program first;
     if (!input) {
-        error=(int)acquire((void *)fs,c->path,&first);
+        error=(int)acquire((void *)fs,c->path,&first,MD_COMMAND_EXECUTABLE);
         if (error) { md_command_close(c); return error; }
         input=&first;
     }

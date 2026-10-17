@@ -144,7 +144,11 @@ public class GuestRuntimeTest {
 
     @Test public void preparationDoesNotConsumeInheritedGraphicsConnection() {
         assertTrue(GuestRuntimeCommand.SCRIPT.contains("md_guest=$(CLASSPATH="));
-        assertTrue(GuestRuntimeCommand.SCRIPT.contains("exec \"$md_guest/libmagicdesk_guest_run.so\" \"$@\""));
+        assertTrue(GuestRuntimeCommand.SCRIPT.contains("exec \"$md_guest/libmagicdesk_guest_run.so\" --libc-registry \"$md_libc\" \"$@\""));
+        assertTrue(GuestRuntimeCommand.SCRIPT.contains("--prepare-libc"));
+        assertTrue(GuestRuntimeCommand.SCRIPT.contains("\"libc-$1\" \"$md_libc\""));
+        assertTrue(GuestRuntimeCommand.SCRIPT.contains("Optional libc registry unavailable; using Shroot Base."));
+        assertFalse(GuestRuntimeCommand.SCRIPT.contains("mkdir -p \"$md_libc\" || exit"));
         assertFalse(GuestRuntimeCommand.SCRIPT.contains("exec /system/bin/app_process"));
         assertTrue(GuestRuntimeCommand.SCRIPT.contains("--probe >/dev/null || exit $?"));
         assertTrue(GuestRuntimeArtifacts.FILES.contains("libmagicdesk_guest_supervisor.so"));

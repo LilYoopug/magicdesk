@@ -33,13 +33,20 @@ def main():
     if args.probes_only and not args.resume:
         parser.error('--probes-only requires --resume')
     lab = Path(__file__).resolve().parent
+    integration = lab.parent / 'shroot/libc'
+    structural = hashlib.sha256()
+    for name in ('integrate_glibc.py', 'source_integration.py', 'glibc.patch', 'glibc-cancellation.patch', 'glibc_syscall.h'):
+        structural.update(name.encode() + b'\0' + (integration / name).read_bytes() + b'\0')
+    source_generation = structural.hexdigest()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     if args.resume:
         receipts = [json.loads(p.read_text()) for p in (output / 'receipts').glob('*.json')]
         if not re.fullmatch(r'/data/local/tmp/md-oci-services-[0-9a-f]{32}', args.resume) or not any(
-                r.get('directory') == args.resume and r.get('sourceSha256') == SHA256 for r in receipts):
-            parser.error('--resume must match this fixture\'s retained, verified receipt')
+                r.get('directory') == args.resume and r.get('sourceSha256') == SHA256
+                and r.get('sourceIntegrationSha256') == source_generation for r in receipts):
+            parser.error('--resume must match this fixture\'s verified source and integration; '
+                         'changed structural patches require a fresh build')
     archive = args.toolchain / f'glibc-{VERSION}.tar.xz'
     if not archive.exists():
         subprocess.run(['curl', '-fL', '--connect-timeout', '20', '--max-time', '180',
@@ -51,7 +58,7 @@ def main():
         raise RuntimeError('Use a fresh output; do not mix modified source generations')
     if not args.resume:
         subprocess.run(['tar', '-xJf', str(archive), '-C', str(output)], check=True)
-        subprocess.run(['python', str(lab / 'integrate_glibc.py'), str(source)], check=True)
+        subprocess.run(['python', str(integration / 'integrate_glibc.py'), str(source)], check=True)
     root_archive = output / 'toolchain.tar'
     source_archive = output / 'source.tar'
     if not args.resume:
@@ -68,6 +75,7 @@ def main():
     suite = Suite(output / 'receipts', args.build)
     try:
         suite.report['sourceSha256'] = SHA256
+        suite.report['sourceIntegrationSha256'] = source_generation
         workspace = args.resume or suite.base
         suite.report['workspace'] = workspace
         if not args.resume:
@@ -89,8 +97,9 @@ def main():
         for source_file, destination in (
                 (lab / '../shroot/src/cooperative_entry.h', 'cooperative_entry.h'),
                 (lab / '../shroot/src/cooperative_entry.h', 'source/include/cooperative_entry.h'),
-                (lab / 'glibc_entry.c', 'source/sysdeps/unix/sysv/linux/aarch64/shroot-entry.c'),
-                (lab / 'glibc_entry_asm.S', 'source/sysdeps/unix/sysv/linux/aarch64/shroot-entry-asm.S')):
+                (integration / 'glibc_entry.c', 'source/sysdeps/unix/sysv/linux/aarch64/shroot-entry.c'),
+                (integration / 'glibc_syscall.h', 'source/sysdeps/unix/sysv/linux/aarch64/shroot-syscall.h'),
+                (integration / 'glibc_entry_asm.S', 'source/sysdeps/unix/sysv/linux/aarch64/shroot-entry-asm.S')):
             suite.transport.upload(suite.client, source_file, workspace + '/work/' + destination, overwrite=True)
         configure = '''set -eu
 mkdir -p /tmp /work/objects

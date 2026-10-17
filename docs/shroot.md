@@ -14,6 +14,7 @@ describes how those contracts are tested.
 - [Requirements](#requirements) and [isolation boundaries](#boundaries)
 - [Installer](#linux-installer), [SteamOS](#steamos-recovery-image) and [GPU setup](#graphics-drivers)
 - [Environments and commands](#named-environments)
+- [Optional libc acceleration](#optional-libc-acceleration)
 - [Systemd, OpenRC, Docker and Podman](#services-and-containers)
 - [Guest credentials](#guest-credentials), [Landlock](#filesystem-restrictions) and [browser sandboxes](#application-filters-and-browsers)
 - [Graphics integration](#graphical-connections) and [coverage](#coverage-and-limits)
@@ -81,6 +82,67 @@ Android permissions and SELinux remain the host ceiling.
 
 `shroot` manages Linux environments and launches programs. Standalone downloads
 use `magicdesk download`; no Linux environment is required.
+
+### Optional Libc Acceleration
+
+Shroot can optionally use a locally built musl/glibc with direct syscall entry.
+**Shroot Base** uses the distribution's unmodified libc and remains the fallback.
+The feature is experimental and opt-in; it does not replace Android's libc or
+overwrite package-owned files in Linux.
+
+The same downloaded installer contains all MagicDesk source hooks and patches.
+To prepare an installed environment, or a libc for an OCI image:
+
+```sh
+sh ~/install_linux.sh --prepare-libc work --jobs 1
+sh ~/install_linux.sh --prepare-libc alpine:3.23 --jobs 1
+```
+
+The first preparation saves the installer as the local recipe. Subsequently:
+
+```sh
+shroot libc prepare work --jobs 1
+shroot libc prepare alpine:3.23 --jobs 1
+shroot libc list
+shroot libc prune
+```
+
+Preparation installs build dependencies in an isolated copy and compiles on
+the device, with progress in the console. Python/compiler tools belong to that
+copy, not Android or Termux. A compatible cached build is reused before package
+installation or copying. A cache miss needs enough temporary space for a backup
+and build copy; stop that environment's active launches before this snapshot.
+Successful temporary work is removed; failures retain its location
+and leave the original libc installed. Preparing again with a freshly downloaded
+installer updates the saved recipe; ordinary launches never fetch or compile anything.
+
+Normal `shroot run/exec/login` commands do not change. Nested Docker/Podman
+processes can select compatible registry entries too, without rebuilding OCI
+layers or wrapping `docker run`. Matching uses exact original interpreter/libc
+hashes and the entry ABI, not merely a distribution name or version. A package
+update that changes those files uses Base until a corresponding build is ready.
+Running processes retain their current mappings.
+
+The registry is shared within the selected executor's environment library,
+not between shell and root identities. Selected files are mounted readonly at
+`/opt/shroot/libc/KEY`; installed source images remain unchanged. New readonly
+or non-root container roots may need prepared empty attachment directories;
+restricted roots which cannot admit the attachment use Base. Static executables
+and calls bypassing the integrated libc also retain Base interception.
+
+`prune` removes builds not held by active launches/mounts, including builds for
+stopped environments; their next launch may use Base. To explicitly disable
+selection in an environment without deleting shared builds:
+
+```sh
+sh ~/install_linux.sh --yes --resume --name work --libc base
+```
+
+The installer's `--libc shroot` prepares/enables this path; `--libc keep` is the
+default and preserves existing selection. Exact matching prevents accidental
+cross-version reuse, but is not proof that an upstream rebuilt libc preserves
+every distribution-specific private ABI. See the [integration contract and
+coverage](../native/shroot/libc/README.md) before enabling it for important work.
 
 ### Linux installer
 

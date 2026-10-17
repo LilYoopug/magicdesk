@@ -72,7 +72,7 @@ int md_command_images_prepare(struct md_command_recipe *recipe, struct md_comman
             r=md_elf_interpreter(current.fd,interpreter);
             if (!r && *interpreter) {
                 struct md_program loader;
-                r=acquire(context,interpreter,&loader);
+                r=acquire(context,interpreter,&loader,MD_COMMAND_INTERPRETER);
                 if (!r) {
                     images->loader=loader.fd;
                     r=loader.mount_flags&MD_MOUNT_NOEXEC ? -EACCES
@@ -97,7 +97,7 @@ int md_command_images_prepare(struct md_command_recipe *recipe, struct md_comman
         r=md_command_script(header,&name,&option);
         if (r<0) break;
         RAW1(close,images->program); images->program=-1;
-        r=acquire(context,name,&current);
+        r=acquire(context,name,&current,MD_COMMAND_EXECUTABLE);
         if (r<0) break;
     }
     md_command_images_close(images);

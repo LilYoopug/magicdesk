@@ -138,6 +138,7 @@ int md_image_launch(enum md_image_command kind, int argc, char **argv) {
     const char *hostname_override = NULL;
     struct md_network_profile network = {0};
     const char *gamepad_endpoint = NULL;
+    const char *libc_registry = NULL;
     int position = 1, commands = 0;
     while (position < argc && strcmp(argv[position], "--")) {
         if (!strcmp(argv[position], "--magicdesk") && !commands) { commands = 1; position++; continue; }
@@ -164,6 +165,7 @@ int md_image_launch(enum md_image_command kind, int argc, char **argv) {
         else if (!strcmp(option, "--entrypoint") && kind == MD_IMAGE_RUN) entry_override = value;
         else if (!strcmp(option, "--hostname") && !hostname_override && md_hostname_valid(value)) hostname_override = value;
         else if (!strcmp(option, "--gamepad-endpoint") && !gamepad_endpoint && *value) gamepad_endpoint=value;
+        else if (!strcmp(option,"--libc-registry") && !libc_registry && *value=='/') libc_registry=value;
         else if (!strcmp(option, "--env") && override_count < 128) overrides[override_count++] = value;
         else return -EINVAL;
     }
@@ -217,7 +219,7 @@ int md_image_launch(enum md_image_command kind, int argc, char **argv) {
     char *login[] = {(char *)shell, "-l"};
     if (kind == MD_IMAGE_LOGIN && position == argc) { command = login; command_count = 2; }
     size_t total = entry_count + explicit_count + command_count;
-    size_t launch_count=3+commands+2+2+md_network_profile_arguments(&network,NULL)+2*!!gamepad_endpoint+4*guest_user
+    size_t launch_count=3+commands+2+2+md_network_profile_arguments(&network,NULL)+2*!!gamepad_endpoint+2*!!libc_registry+4*guest_user
         +3*(attachment_count+routes.count)+8+8*(kind==MD_IMAGE_LOGIN)
         +2*(env_count+override_count)+1+total+1;
     if (!r && (!total || launch_count>MD_EXEC_POINTERS)) r = -E2BIG;
@@ -253,6 +255,7 @@ int md_image_launch(enum md_image_command kind, int argc, char **argv) {
         launch[n++] = "--hostname"; launch[n++] = (char *)(hostname_override ? hostname_override : hostname);
         n+=md_network_profile_arguments(&network,launch+n);
         if (gamepad_endpoint) { launch[n++]="--gamepad-endpoint"; launch[n++]=(char *)gamepad_endpoint; }
+        if (libc_registry) { launch[n++]="--libc-registry"; launch[n++]=(char *)libc_registry; }
         for (unsigned i = 0; i < routes.count; ++i) {
             launch[n++] = (char *)md_socket_route_option(&routes.entries[i]);
             launch[n++] = routes.entries[i].source; launch[n++] = routes.entries[i].destination;

@@ -48,6 +48,7 @@ enum { MD_FS_STAT_MOUNT = 1 };
 enum { MD_FS_PATH_DISPLAY = 1 };
 enum { MD_FS_REOPEN_MUTABLE=1, MD_FS_REOPEN_NATIVE=2, MD_FS_REOPEN_EXECUTE=4 };
 enum { MD_FS_OBJECT_EXECUTE=1 };
+enum { MD_FS_IMAGE_INTERPRETER=1 };
 enum md_fs_task_path { MD_FS_TASK_CHDIR=1, MD_FS_TASK_TRUNCATE, MD_FS_TASK_FCHDIR };
 static inline int md_fs_operation_has_origin(unsigned operation) {
     return operation==MD_FS_OPEN || operation==MD_FS_CREATE || operation==MD_FS_REOPEN

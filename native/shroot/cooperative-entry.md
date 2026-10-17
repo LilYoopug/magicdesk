@@ -2,9 +2,11 @@
 
 The namespace bootstrap exposes an opt-in, libc-independent entry descriptor
 through the private `MD_AT_COOPERATIVE` auxiliary vector entry. Unmodified
-programs ignore it and retain their syscall route. This is an internal versioned
-contract, not an installer option. Isolated source-built musl and glibc fixtures
-exercise it without replacing the libc of any installed distribution.
+programs ignore it and retain their Base syscall route. This is an internal
+versioned contract. The optional [source integration and local registry](libc/README.md)
+deploy matching builds through ordinary interpreter admission, without replacing
+package-owned libc files. Isolated musl/glibc fixtures test the entry protocol
+independently of that deployment mechanism.
 
 ## Call Contract
 
@@ -401,8 +403,12 @@ pending-loan and conflicting-owner cases retain the full path.
 
 `native/guest-exec-lab/build-cooperative-musl.sh OUTPUT` downloads checksum-pinned
 official musl 1.2.5 sources and builds an isolated AArch64 sysroot, static probe
-and dynamic probe. `integrate_musl.py` checks each source boundary before editing;
-it is not a patch assumed to apply to arbitrary future releases.
+and dynamic probe. The canonical adapters, hooks and patches now live in
+[`libc/`](libc/README.md), shared with the installer's embedded source payload.
+Checked structural transformations handle repeated syscall wrappers; ordinary
+zero-fuzz patches handle lifecycle and build boundaries. The complete change is
+validated in staging before source publication. This is not a semantic parser
+or a patch assumed to apply to arbitrary future releases.
 
 The seven ordinary AArch64 syscall wrappers check runtime offers before binding
 syscall registers. Native operations do not enter the handler or register a
