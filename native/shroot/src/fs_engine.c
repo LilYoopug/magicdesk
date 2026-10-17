@@ -271,10 +271,11 @@ static void context_execute(struct md_fs_context *context,
     }
     struct md_fs_request captured;
     if (q->attributes.creation_mask==MD_FS_CAPTURE_UMASK) {
-        /* Existing-object pins have no creation mode. Every possible birth
-         * reads the caller's live mask, including a staged native creation. */
-        int pin_only=q->operation==MD_FS_OPEN && !(q->flags&O_CREAT) && output && output->native_open_plan;
-        long mask=context->authenticated ? (pin_only ? 0 : md_task_snapshot_umask(&context->task)) : -EPERM;
+        /* Only creation consumes umask. This applies equally to a caller-side
+         * pin and an ordinary worker open; neither may read /proc for it. */
+        int existing=q->operation==MD_FS_OPEN && !(q->flags&O_CREAT)
+            && (q->flags&O_TMPFILE)!=O_TMPFILE;
+        long mask=context->authenticated ? (existing ? 0 : md_task_snapshot_umask(&context->task)) : -EPERM;
         if (mask<0) { *out=(struct md_fs_result){.fd=-1,.error=(int)mask}; return; }
         captured=*q; captured.attributes.creation_mask=(unsigned)mask; q=&captured;
     }
@@ -487,7 +488,7 @@ static void inode_execute(struct md_filesystem *fs,
     size_t capacity = output ? output->capacity : 0;
     const char *a = q->path[0] ? q->path[0] : "", *b = q->path[1] ? q->path[1] : "";
     int first = q->directory[0], second = q->directory[1];
-    int r = -ENOTSUP; struct stat st;
+    int r = -ENOTSUP, local_plan=0; struct stat st;
     switch (q->operation) {
     case MD_FS_GETACL: case MD_FS_SETACL: case MD_FS_REMOVEACL:
         md_inode_acl(s,q,out,output); return;
@@ -545,9 +546,20 @@ static void inode_execute(struct md_filesystem *fs,
         break;
     case MD_FS_CREATE: r = md_inode_create(s, first, a, q->mode); goto opened;
     case MD_FS_OPEN:
+        /* Reuse the provider's verified pin for both entry and ordinary opens.
+         * Do not speculate on creation: its publication belongs to the actual
+         * opener. Special endpoints decline before effects and retain their
+         * deferred FIFO/device completion path. */
+        local_plan=output && output->origin && !output->native_open_plan
+            && !(q->flags&O_CREAT) && md_open_native_plan(q->flags,0);
         r=md_catalogue_open(images,s,first,a,(int)q->flags,q->mode,q->resolve,
-            &out->open_completion,output && output->origin && output->native_open_plan,
+            &out->open_completion,local_plan || (output && output->origin && output->native_open_plan),
             output && output->origin && output->native_open_plan ? output->birth : NULL);
+        if (local_plan && r==-EXDEV) {
+            local_plan=0;
+            r=md_catalogue_open(images,s,first,a,(int)q->flags,q->mode,q->resolve,
+                &out->open_completion,0,NULL);
+        }
         goto opened;
     case MD_FS_MKDIR: r = md_inode_mkdir(s, first, a, q->mode); break;
     case MD_FS_MKNOD:
@@ -647,6 +659,15 @@ opened:
     else {
         out->fd = r;
         md_view_capture(fs,fs->mounts,fs->inode_mount,out,output);
+        if (local_plan && !out->error) {
+            int fd=md_open_pinned(md_fs_anchor_fd(*output->origin),(int)q->flags);
+            out->open_completion=(struct md_open_completion){0};
+            out->fd=fd<0 ? -1 : fd;
+            if (fd<0) {
+                out->error=fd;
+                md_fs_anchor_release(*output->origin); *output->origin=NULL;
+            }
+        }
         if (!out->error && out->open_completion.kind==MD_OPEN_DEVICE) {
             struct md_open_completion device=out->open_completion;
             int fd=md_open_device(device.mode,device.device,(int)q->flags,&out->open_completion);

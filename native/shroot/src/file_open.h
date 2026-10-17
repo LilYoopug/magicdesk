@@ -41,6 +41,11 @@ struct md_open_observation { uint32_t initial_reader, writers; };
 int md_complete_open_observed(int, int, struct md_open_completion, struct md_open_observation *);
 /* Reopen one retained native object; FIFO completion remains deferred. */
 int md_reopen_file(int fd, int flags, struct md_open_completion *);
+/* Already authorized regular/directory pin; the caller retains its ownership.
+ * Flags and kind were validated by the provider, not inferred from a pathname. */
+int md_open_pinned(int fd, int flags);
+/* Positive pid selects another process; zero names the calling process. */
+void md_descriptor_path(char path[64], unsigned pid, unsigned fd);
 static inline int md_open_endpoint_flags(int flags) {
     return flags & ~(O_CREAT | O_EXCL | O_NOFOLLOW);
 }

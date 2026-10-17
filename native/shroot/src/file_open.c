@@ -49,14 +49,24 @@ int md_open_device(unsigned mode,uint64_t device,int flags,struct md_open_comple
     return -ENXIO;
 }
 
-static void descriptor_path(char path[64], int fd) {
-    const char prefix[] = "/proc/self/fd/";
-    unsigned at = 0, n = (unsigned)fd, digits = 0;
+static char *decimal(char *path, unsigned n) {
+    unsigned digits = 0;
     char reversed[16];
-    while (prefix[at]) { path[at] = prefix[at]; at++; }
     do { reversed[digits++] = (char)('0' + n % 10); n /= 10; } while (n);
-    while (digits) path[at++] = reversed[--digits];
-    path[at] = 0;
+    while (digits) *path++ = reversed[--digits];
+    return path;
+}
+void md_descriptor_path(char path[64], unsigned pid, unsigned fd) {
+    const char *prefix="/proc/";
+    while (*prefix) *path++=*prefix++;
+    if (pid) path=decimal(path,pid);
+    else { prefix="self"; while (*prefix) *path++=*prefix++; }
+    prefix="/fd/"; while (*prefix) *path++=*prefix++;
+    *decimal(path,fd)=0;
+}
+int md_open_pinned(int fd,int flags) {
+    char path[64]; md_descriptor_path(path,0,(unsigned)fd);
+    return (int)C(openat,AT_FDCWD,path,md_open_endpoint_flags(flags)|O_CLOEXEC,0,0,0);
 }
 int md_reopen_file(int fd, int flags, struct md_open_completion *completion) {
     *completion=(struct md_open_completion){0};
@@ -77,8 +87,7 @@ int md_reopen_file(int fd, int flags, struct md_open_completion *completion) {
         if (!(flags&O_PATH) || !(flags&O_NOFOLLOW)) return -ELOOP;
         return (int)C(fcntl,fd,F_DUPFD_CLOEXEC,3,0,0,0);
     }
-    char path[64]; descriptor_path(path,fd);
-    return (int)C(openat,AT_FDCWD,path,(flags&~O_NOFOLLOW)|O_CLOEXEC,0,0,0);
+    return md_open_pinned(fd,flags);
 }
 int md_complete_open_observed(int pin, int flags, struct md_open_completion completion,
         struct md_open_observation *observation) {
@@ -90,7 +99,7 @@ int md_complete_open_observed(int pin, int flags, struct md_open_completion comp
         C(close,pin,0,0,0,0,0);
         return md_complete_open(fd,flags,next);
     }
-    char path[64]; descriptor_path(path, pin);
+    char path[64]; md_descriptor_path(path,0,(unsigned)pin);
     flags = md_open_endpoint_flags(flags);
     if (completion.kind == MD_OPEN_FIFO || completion.kind==MD_OPEN_CALLER) {
         /* EVENT_WAIT: native FIFO peer rendezvous or terminal open; a caller

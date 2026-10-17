@@ -23,6 +23,7 @@ def main():
                                   ('test_guest_copy', suite.base + '/guest-copy'),
                                   ('test_task_resources', suite.base + '/task-resources'),
                                   ('test_inodes', suite.base + '/inodes'),
+                                  ('test_mounts', suite.base + '/mounts'),
                                   ('test_publication', suite.base + '/publication'),
                                   ('test_native_leaf', suite.base + '/native-leaf'),
                                   ('test_interception_buffers', suite.base + '/buffers'),
@@ -34,6 +35,7 @@ def main():
             suite.command(['timeout', '45', suite.base + '/native-journal'])
             suite.command(['timeout', '90', suite.base + '/task-resources'])
             suite.command(['timeout', '60', suite.base + '/inodes', suite.base + '/inode-store'])
+            suite.command(['timeout', '120', suite.base + '/mounts', suite.base + '/mount-store'])
             suite.command(['timeout', '120', suite.base + '/publication', suite.base + '/publication-store'])
             suite.command(['timeout', '120', suite.base + '/native-leaf', suite.base + '/leaf-store'])
             suite.command(['timeout', '10', suite.base + '/vdso'])
@@ -54,6 +56,7 @@ def main():
         assert 'PASS native FD watches: exactly one open and one close event' in output
         assert 'PASS native writable plans:' in output
         assert 'PASS native create admission:' in output
+        assert 'PASS filtered close: actual syscall FD' in output
         assert 'PASS native open exhaustion:' in output
         assert 'PASS execution bursts:' in output
         for key, minimum in (('nativeOpen', 1000), ('nativeClose', 990), ('nativeFlags', 576),

@@ -101,10 +101,53 @@ static void backing_sources(struct md_inode_store *s) {
     close(native); assert(descriptors()==before);
     puts("PASS backing-source lease preserves object/type/status after guest rename and unlink, without descriptor allocation");
 }
+static void pinned_opens(struct md_filesystem *fs) {
+    unsigned before=descriptors();
+    int fd=md_inode_create(fs->store,-1,"/pinned-open",0600); assert(fd>=0);
+    assert(write(fd,"value",5)==5 && !close(fd));
+    struct md_fs_anchor *origin=NULL;
+    struct md_fs_result r=request(fs,NULL,-1,MD_FS_OPEN,"/pinned-open",O_RDONLY,0,&origin);
+    assert(!r.error && r.fd>=0 && origin && r.open_completion.kind==MD_OPEN_READY);
+    assert(!md_fs_anchor_check_fd(origin,r.fd));
+    assert((fcntl(md_fs_anchor_fd(origin),F_GETFL)&O_PATH) && !(fcntl(r.fd,F_GETFL)&O_PATH));
+    assert(!md_inode_unlink(fs->store,-1,"/pinned-open",0));
+    char data[5]; assert(read(r.fd,data,5)==5 && !memcmp(data,"value",5));
+    int probe=md_open_pinned(md_fs_anchor_fd(origin),O_RDONLY);
+    assert(probe>=0 && read(probe,data,5)==5 && !memcmp(data,"value",5));
+    close(probe); close(r.fd); md_fs_anchor_release(origin); origin=NULL;
+    fd=md_inode_create(fs->store,-1,"/pinned-open",0600); assert(fd>=0); close(fd);
+    r=request(fs,NULL,-1,MD_FS_OPEN,"/pinned-open",O_WRONLY|O_TRUNC,0,&origin);
+    assert(!r.error && r.fd>=0 && origin && r.open_completion.kind==MD_OPEN_READY);
+    assert((fcntl(r.fd,F_GETFL)&O_ACCMODE)==O_WRONLY && write(r.fd,"value",5)==5);
+    close(r.fd); md_fs_anchor_release(origin); origin=NULL;
+    r=request(fs,NULL,-1,MD_FS_OPEN,"/pinned-open",O_WRONLY|O_APPEND,0,&origin);
+    assert(!r.error && r.fd>=0 && origin && (fcntl(r.fd,F_GETFL)&O_APPEND));
+    assert(write(r.fd,"!",1)==1); close(r.fd); md_fs_anchor_release(origin); origin=NULL;
+    struct rlimit original; assert(!getrlimit(RLIMIT_NOFILE,&original));
+    struct rlimit limited=original; if (limited.rlim_cur>256) limited.rlim_cur=256;
+    assert(!setrlimit(RLIMIT_NOFILE,&limited));
+    int held[256]; unsigned count=0;
+    for (;;) {
+        fd=open("/dev/null",O_RDONLY|O_CLOEXEC);
+        if (fd<0) { assert(errno==EMFILE); break; }
+        assert(count<256); held[count++]=fd;
+    }
+    assert(count); close(held[--count]);
+    r=request(fs,NULL,-1,MD_FS_OPEN,"/pinned-open",O_WRONLY|O_TRUNC,0,&origin);
+    assert(r.error==-EMFILE && r.fd==-1 && !origin);
+    fd=open("/dev/null",O_RDONLY|O_CLOEXEC); assert(fd>=0); close(fd);
+    while (count) close(held[--count]);
+    assert(!setrlimit(RLIMIT_NOFILE,&original));
+    struct stat st; assert(!md_inode_stat(fs->store,-1,"/pinned-open",0,&st) && st.st_size==6);
+    assert(!md_inode_unlink(fs->store,-1,"/pinned-open",0));
+    assert(descriptors()==before);
+    puts("PASS shared pinned open: one identity, independent data OFD, write/append/truncate, open-unlinked and pre-effect EMFILE cleanup");
+}
 static void empty_views(struct md_inode_store *s) {
     struct md_filesystem fs={.store=s}, copy={.store=s};
     struct md_fs_location root={0}, selected;
     assert(!md_fs_mounts_open(&fs,NULL,0));
+    pinned_opens(&fs);
     assert(!md_fs_mounts_copy(&fs,&root,&copy.mounts,&selected));
     struct md_fs_anchor *base=anchor(&fs,"/"), *fifo=NULL, *second=NULL;
     struct md_inode_statistics costs[2]={0};

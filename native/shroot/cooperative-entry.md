@@ -148,6 +148,13 @@ walk owns that descriptor until transfer or failure cleanup. Unpinned metadata
 lookups still compare identity after opening an encoded-metadata file: a prior
 pathname stat is not proof that the later descriptor names the same object.
 
+Ordinary interception reuses this provider pin for eligible existing-file opens
+too: the engine transfers it to the origin and opens the data OFD from that exact
+pin, without another identity query or origin capture. Write/append/truncate use
+the same authorization and COW preparation. Failure to allocate the data FD
+releases the origin and precedes truncation. Creation keeps its existing
+publication path; special endpoints decline the pin plan before effects.
+
 A leaf assembly gate executes `openat`, ordinary-file `close`, `dup`, `dup3`,
 regular-file `lseek` or admitted `fcntl` commands and
 publishes a native-result journal. Shroot's filter admits those numbers only at
@@ -160,6 +167,12 @@ F_DUPFD/F_DUPFD_CLOEXEC use the common FD-mutation owner. Directory seeks retain
 their acknowledged cursor path. Selector-owned descriptors and active FD loans
 retain existing handling. FD-only operations pin only the authenticated live
 task's file table, not unrelated namespace resources.
+
+Native FD admission reads a value-only kind/flags snapshot under the running
+table turn, without temporary object references or a data-OFD capture. Unknown,
+uncertain, provisional, channel and typed-wrapper slots are not native authority;
+regular IO additionally requires a known regular-file kind. A dup3 destination
+must also have an unambiguous selector observation.
 
 The original file-table turn owns the operation until result bookkeeping and pin
 retirement complete. The journal distinguishes not-started, executing, completed,
@@ -377,6 +390,12 @@ kernel helper calls already in flight. A client-writable flag is an optimization
 not authority or a security boundary; shared memory is cooperative transport for
 trusted guest code, not authentication against hostile writers in an inherited
 mapping. Shroot's documented isolation limits remain in force.
+
+Kernel-admitted close uses compact bookkeeping even with an application filter:
+PTRACE_GET_SYSCALL_INFO supplies the actual syscall and descriptor, never an
+application-controlled TRACE cookie. The existing table turn and observed exit
+result still own retirement. Filter denials do not retire a slot; debugger,
+pending-loan and conflicting-owner cases retain the full path.
 
 ## Source-Level Libc Integration
 

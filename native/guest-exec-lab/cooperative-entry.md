@@ -11,6 +11,7 @@ to ordinary Shroot execution.
 The [FD delivery experiments](#fd-delivery-experiments) below are historical lab
 prototypes, distinct from the current caller-owned open/close implementation.
 For the current ABI-6 result, see
+[shared FD admission](#shared-fd-admission-and-ordinary-pinned-opens),
 [final paired measurements](#final-paired-baseline-and-filtered-routes) and
 [final regression coverage](#final-regression-coverage). Earlier receipts retain
 their original build boundaries; their fastest samples are not current guarantees.
@@ -1938,3 +1939,55 @@ removed; no test process remains. Kernel minimum 5.15, storage family 17 and
 entry ABI 6 are unchanged. Installed environments' libc and the APK were not
 replaced. This closes the implementation and regression checks for this stage,
 not the outstanding 1.5x performance target or end-user libc deployment.
+
+## Shared FD Admission And Ordinary Pinned Opens
+
+The shared engine now reuses verified O_PATH pins for ordinary existing-file
+opens, including write/append/truncate. FD-only native entry uses a value snapshot
+under the running table turn instead of temporary object references. Filtered
+close reads the actual syscall descriptor and retains the original retirement
+owner; application TRACE data is not authority. See the
+[production contract](../shroot/cooperative-entry.md#native-fd-plans).
+
+Ten balanced uninstrumented rounds at scale 2, CPU mask `3`, shell UID 2000,
+against preserved `892d419a`, without concurrent builds/tests:
+`build/cooperative-musl-results/oci-services-ce188c850fe445b6839f8e31baa8b4dc.json`.
+Final supervisor SHA-256:
+`57b3bd844c17fea08880ef3573d2c0c715aea447533876d280fd54e26c6624ae`.
+
+| Workload | Native ms | HEAD entry ms | New entry ms | Paired entry/HEAD | Paired ordinary/HEAD |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 8192 readonly open/close pairs | 14.96 | 90.61 | 89.17 | 1.020 | 0.926 |
+| 8192 writable open/close pairs | 14.35 | 84.27 | 100.31 | 1.031 | 0.964 |
+| 4096 exclusive file cycles | 100.81 | 353.42 | 345.20 | 0.999 | 1.032 |
+| 4096 nonexclusive file cycles | 101.91 | 343.29 | 334.21 | 0.933 | 0.979 |
+| 65536 stat calls | 48.28 | 231.02 | 223.98 | 0.988 | 0.979 |
+
+Ratios are medians of paired rounds, not ratios of the displayed medians.
+Ordinary opens benefit; entry opens do not demonstrate a gain. Writable entry
+opens include a 220.73 ms outlier and a higher median, so this is not evidence of
+uniform non-regression. File-cycle improvement remains modest and the 1.5x target
+is still open. Earlier four-round controls also did not show a broad improvement.
+
+Filtered correctness/statistics receipt
+`build/cooperative-musl-results/oci-services-4fa6a597e3d7426284811ed98e0c8860.json`
+verifies compact close on every file loop and native IO admission. For 4096
+filtered open/close pairs it records 16645 ptrace requests, versus 20745 for the
+preserved HEAD in `oci-services-0809536a8e024b7399ab5209a9963c50.json`. The real
+kernel filter and stop count remain; fewer ptrace requests are not a claim of
+direct-entry speed inside a sandbox.
+
+Final runtime/models (including shared pinned-open EMFILE/truncate cleanup and
+forged TRACE cookies), watch/contracts, and glibc receipts:
+`oci-services-a48a1f29c3a04194bf9683f76f407d8e.json`,
+`watch-runtime-e7993e7340bd46d18db164f0f4e6ecc7.json`,
+`oci-services-5b95241b58ba4523ac6fb0b96af1c333.json`.
+Stock Chromium automatic and forced set-ID routes pass 4/4 each:
+`browser-stage-results-48e64691fdd24d64aa6196c1d9017cc0.json`,
+`browser-stage-results-2012262737624959b4a1fa48d16bcb25.json`.
+These are sandbox/JS/PNG checks, not GPU acceleration checks. Kernel minimum,
+storage family, entry ABI and installed libc/APK remain unchanged.
+Protected proc/FD custody also passes all 25 checks in
+`app/build/shroot/resource-proc-custody-results.json`, staging ID
+`3d827dff583e46cda3ef2e617ca47fb0`. The eight browser profiles, PNGs and owned
+staging directories are removed; no process from these test runs remains.

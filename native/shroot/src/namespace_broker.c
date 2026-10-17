@@ -7,6 +7,7 @@
 #include "ofd_order.h"
 #include "fd_install.h"
 #include "fd_mutation.h"
+#include "fd_selector.h"
 #include "notification_result.h"
 #include "fs_buffer.h"
 #include "fs_path_call.h"
@@ -94,6 +95,7 @@ struct md_namespace_broker {
     struct task *event_ready;
     pthread_mutex_t lock;
     int listener;
+    unsigned process;
     struct counters { uint64_t received, handled, delegated; } *counts;
     int synchronous_wake;
     atomic_uint cooperative_count;
@@ -380,6 +382,7 @@ struct md_namespace_broker *md_broker_create(struct md_fs_worker *worker, int st
         atomic_init(&b->cooperative_descriptors,0);
         atomic_init(&b->cooperative_native_yields,0);
         b->worker = worker; b->listener = -1; b->delegate=delegate;
+        b->process=(unsigned)getpid();
         if (pthread_mutex_init(&b->lock, NULL)) { free(b); return NULL; }
         b->wakeup=md_resource_wakeup_retain(md_fs_worker_wakeup(worker));
         if (!b->wakeup) {
@@ -607,7 +610,7 @@ static int native_offer(struct operation *op) {
             error=op->custody ? md_fd_origins_prepare_custody(&op->update,op->custody,&op->order) : -ENOMEM;
             if (error) return error;
         }
-        snprintf(c->native_path,sizeof(c->native_path),"/proc/%d/fd/%d",getpid(),md_fs_anchor_fd(op->output_origin));
+        md_descriptor_path(c->native_path,op->owner->process,(unsigned)md_fs_anchor_fd(op->output_origin));
         n->args[0]=(uint64_t)(int64_t)AT_FDCWD;
         unsigned flags=op->request.flags;
         if (flags&O_PATH) flags&=O_PATH|O_CLOEXEC|O_DIRECTORY|O_NOFOLLOW;
@@ -635,30 +638,26 @@ static int native_offer(struct operation *op) {
 }
 static int native_descriptor(struct operation *op) {
     int number=(int)op->notification.data.args[0];
-    unsigned flags=0;
-    struct md_fd_object *object=md_fd_origins_object(op->context.task.files,number,&flags);
-    struct md_fs_anchor *anchor=md_fs_anchor_from_object(object);
-    int allowed=anchor && !md_fd_object_selectors(object) && !md_fd_origins_has_loans(op->context.task.files);
+    struct md_fd_native native={0};
+    int allowed=!md_fd_origins_has_loans(op->context.task.files)
+        && md_fd_origins_native(&op->order,number,&native);
     if (allowed && op->notification.data.nr==SYS_lseek) {
         /* Directory offsets belong to the acknowledged directory cursor.
          * Only ordinary data OFDs keep their native kernel offset here. */
-        struct stat st;
-        unsigned kind=md_fs_anchor_kind(anchor);
-        allowed=kind ? kind==S_IFREG : !fstat(md_fs_anchor_fd(anchor),&st) && S_ISREG(st.st_mode);
+        allowed=native.kind==S_IFREG;
     }
-    md_fd_object_release(object);
     if (allowed && op->notification.data.nr==SYS_dup3) {
-        object=md_fd_origins_object(op->context.task.files,(int)op->notification.data.args[1],NULL);
-        allowed=!md_fd_object_selectors(object);
-        md_fd_object_release(object);
+        struct md_fd_observation target;
+        allowed=!md_fd_origins_observe(op->context.task.files,(int)op->notification.data.args[1],&target)
+            && !target.selectors;
     }
     if (!allowed) return 0;
     unsigned command=(unsigned)op->notification.data.args[1];
     if (op->notification.data.nr==SYS_fcntl && (command==F_GETFD
-            || (command==F_SETFD && (op->notification.data.args[2]&FD_CLOEXEC)==flags))) {
+            || (command==F_SETFD && (op->notification.data.args[2]&FD_CLOEXEC)==native.flags))) {
         /* The table turn owns a live kernel slot with authoritative flags.
          * Reading them or setting the same value needs no native effect. */
-        cooperative_reply(op,MD_ENTRY_COMPLETED,command==F_GETFD ? flags : 0);
+        cooperative_reply(op,MD_ENTRY_COMPLETED,command==F_GETFD ? native.flags : 0);
         if (op->owner->counts) ++op->owner->native_flags;
         return 1;
     }

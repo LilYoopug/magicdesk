@@ -2,6 +2,7 @@
 #include "cooperative_entry.h"
 #include "../shroot/src/cooperative_channel.h"
 #include "../shroot/src/posix_acl.h"
+#include "../shroot/src/interception.h"
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -1105,6 +1106,34 @@ static void *protected_copy(void *unused) {
     assert(channel && channel->input.sequence==channel->sequence && channel->output.sequence==channel->sequence);
     return NULL;
 }
+static void filtered_close(void) {
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        int fd=open(path,O_RDONLY); assert(fd>=0 && fd<190);
+        assert(dup2(fd,190)==190 && dup2(fd,191)==191 && !close(fd));
+        struct sock_filter instructions[]={
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_close,0,4),
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[0])),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,191,0,1),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EPERM),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_CLOSE|191),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
+        };
+        struct sock_fprog program={sizeof(instructions)/sizeof(*instructions),instructions};
+        assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+        assert(!prctl(PR_SET_SECCOMP,SECCOMP_MODE_FILTER,&program));
+        assert(!close(190));
+        assert(close(191)==-1 && errno==EPERM);
+        struct stat st;
+        assert(fstat(190,&st)==-1 && errno==EBADF);
+        assert(!fstat(191,&st) && st.st_size==7);
+        assert(close(-1)==-1 && errno==EBADF);
+        _exit(0);
+    }
+    reap(child);
+    puts("PASS filtered close: actual syscall FD, forged TRACE cookie, kernel denial and EBADF preserve slot ownership");
+}
 static void contracts(const char *executable) {
     assert(sizeof(struct md_entry_client)==3*sizeof(uintptr_t));
     struct md_entry_api invalid=*api;
@@ -1138,6 +1167,7 @@ static void contracts(const char *executable) {
     task_completion(); create_admission(); birth_retirement();
     for (unsigned acl=0;acl<2;++acl) { native_open_exhaustion(acl); birth_watches(acl); }
     native_xattr_pins();
+    filtered_close();
     filter_arguments(); filter_instruction();
     struct stat st,native; long result;
     enum md_entry_outcome first=stat_try(&client,&st,&result);

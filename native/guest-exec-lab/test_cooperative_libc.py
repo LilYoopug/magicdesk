@@ -177,6 +177,9 @@ def main():
                     record.update(mode=mode, round=round_number)
                     if args.sample_statistics:
                         record['statistics'] = [line for line in output.splitlines() if line.startswith('MD_')]
+                        if args.sandbox and workload in ('opens', 'files', 'files-create') and mode in ('kernel', 'entry'):
+                            closes = re.search(r'compactClose=(\d+)', output)
+                            assert closes and int(closes[1]) >= count, 'filtered close lost actual-syscall admission'
                         if args.sandbox and workload.startswith('native') and mode in ('kernel', 'entry'):
                             admitted = re.search(r'nativeIO=(\d+)', output)
                             assert admitted and int(admitted[1]) >= count * 2, 'ordinary IO did not exercise ordered native admission'

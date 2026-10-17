@@ -2943,11 +2943,23 @@ static void fd_begin(struct thread *t, const struct user_pt_regs *r, unsigned op
     /* EVENT_WAIT: another operation owns this file table. fd_ready signals its
      * exact completion; the launch deadline cancels the owned process tree. */
 }
-static int fd_close_compact(struct thread *t,unsigned long cookie) {
-    if (!(cookie&MD_INTERCEPT_CLOSE) || t->phase!=IDLE || t->fd_job || t->fd_running || t->fd_order.table
-            || t->fs_order.fs || !t->resources.files || t->application_filter
+static int fd_close_compact(struct thread *t,unsigned long cookie,const struct ptrace_syscall_info *info) {
+    if ((!(cookie&MD_INTERCEPT_CLOSE) && cookie!=MD_INTERCEPT_FD)
+            || t->phase!=IDLE || t->fd_job || t->fd_running || t->fd_order.table
+            || t->fs_order.fs || !t->resources.files
             || t->debug_options || t->debug_call_active || t->debug_step_call
             || md_debugger_traced(debugger,t->pid) || md_fd_origins_has_loans(t->resources.files)) return 0;
+    int number;
+    if (info) {
+        if (info->op!=PTRACE_SYSCALL_INFO_SECCOMP || info->arch!=AUDIT_ARCH_AARCH64
+                || info->seccomp.nr!=SYS_close) return 0;
+        number=(int)info->seccomp.args[0];
+    } else {
+        /* Only our own filter can encode the descriptor. An application TRACE
+         * cookie is not authority, even if it happens to match this encoding. */
+        if (t->application_filter || !(cookie&MD_INTERCEPT_CLOSE)) return 0;
+        number=(int)(cookie&MD_INTERCEPT_CLOSE_MAX);
+    }
     int ready=md_fd_order_begin(t->resources.files,&t->fd_order,fd_wakeup);
     CHECK(ready>=0);
     if (!ready) { CHECK(!md_fd_order_cancel(&t->fd_order)); return 0; }
@@ -2956,7 +2968,7 @@ static int fd_close_compact(struct thread *t,unsigned long cookie) {
      * the actual close result, including EBADF and late writeback errors. */
     t->fd_registers=(struct user_pt_regs){0};
     t->fd_registers.regs[8]=SYS_close;
-    t->fd_registers.regs[0]=cookie&MD_INTERCEPT_CLOSE_MAX;
+    t->fd_registers.regs[0]=(uint64_t)(int64_t)number;
     unsigned long args[6]={t->fd_registers.regs[0]};
     CHECK(!md_fd_mutation_prepare(t->resources.files,SYS_close,args,&t->fd_mutation));
     t->fd_cwd=t->fd_capture=0; t->fd_running=1;
@@ -7163,16 +7175,18 @@ int main(int argc, char **argv) {
         }
         else if (event == PTRACE_EVENT_SECCOMP) {
             unsigned long cookie;
+            struct ptrace_syscall_info info={0};
+            const struct ptrace_syscall_info *observed=NULL;
             if (t->phase==IDLE && t->ready && t->resources.files
-                    && md_fd_selector_has(t->fd_selector,MD_FD_SELECTOR_PROC,-1)>0) {
-                struct ptrace_syscall_info info={0};
+                    && (t->application_filter || md_fd_selector_has(t->fd_selector,MD_FD_SELECTOR_PROC,-1)>0)) {
                 if (!tracee_request(t,PTRACE_GET_SYSCALL_INFO,(void *)sizeof(info),&info,"seccomp-call")) continue;
                 if (info.op==PTRACE_SYSCALL_INFO_SECCOMP) {
                     cookie=info.seccomp.ret_data;
+                    observed=&info;
                     if (fd_native_io(t,&info)) continue;
                 } else if (!tracee_request(t,PTRACE_GETEVENTMSG,NULL,&cookie,"seccomp-event")) continue;
             } else if (!tracee_request(t,PTRACE_GETEVENTMSG,NULL,&cookie,"seccomp-event")) continue;
-            if (fd_close_compact(t,cookie)) continue;
+            if (fd_close_compact(t,cookie,observed)) continue;
             if (cookie&MD_INTERCEPT_CLOSE) cookie=MD_INTERCEPT_FD;
             struct user_pt_regs regs;
             if (!registers(pid, &regs)) continue;
