@@ -117,6 +117,35 @@ packages() {
         *) echo 'Package setup is unavailable for this image.' >&2; exit 1 ;;
     esac
 }
+refresh_packages() {
+    case "$family" in
+        apt) apt-get update </dev/null ;;
+        apk) apk update </dev/null ;;
+        zypper) zypper --non-interactive refresh </dev/null ;;
+        xbps)
+            # XBPS must upgrade itself before the rest of a rolling rootfs.
+            xbps-install -Suy xbps </dev/null
+            xbps-install -uy </dev/null ;;
+        pacman)
+            case "$ID" in
+                manjaro|manjaro-arm) keyrings='archlinuxarm manjaro manjaro-arm' ;;
+                artix) keyrings=artix ;;
+                arch|archarm) keyrings=archlinuxarm ;;
+                *) keyrings= ;;
+            esac
+            if [ -n "$keyrings" ]; then
+                pacman-key --init </dev/null
+                pacman-key --populate $keyrings </dev/null
+            fi
+            # Rolling repositories require a complete userspace upgrade.
+            pacman -Syu --noconfirm </dev/null ;;
+        recovery)
+            # Retain the image repository branch, keyring and signature policy.
+            printf 'Updating SteamOS packages from the image repositories...\n'
+            printf 'Kernel/service hooks may warn about the non-booted environment. Android is not updated.\n'
+            pacman -Syu --noconfirm </dev/null ;;
+    esac
+}
 package_cleanup() {
     # pacman-key's service is scoped to the package keyring, not a user's GPG home.
     if { [ "$family" = pacman ] || [ "$family" = recovery ]; } && command -v gpgconf >/dev/null 2>&1; then
@@ -2183,36 +2212,23 @@ case "$family" in
             chmod 755 /usr/sbin/policy-rc.d
         fi
         dpkg --configure -a </dev/null
-        apt-get update </dev/null
+        refresh_packages
         packages ca-certificates bash coreutils util-linux tzdata locales passwd ;;
     apk)
-        apk update </dev/null
+        refresh_packages
         packages ca-certificates bash coreutils util-linux tzdata musl-locales musl-locales-lang lang shadow ;;
     dnf) packages ca-certificates bash coreutils util-linux tzdata glibc-langpack-en shadow-utils ;;
     zypper)
-        zypper --non-interactive refresh </dev/null
+        refresh_packages
         packages ca-certificates bash coreutils util-linux timezone glibc-locale glibc-i18ndata shadow ;;
     xbps)
-        # XBPS must upgrade itself before the rest of a rolling rootfs.
-        xbps-install -Suy xbps </dev/null
-        xbps-install -uy </dev/null
+        refresh_packages
         packages ca-certificates bash coreutils util-linux tzdata glibc-locales shadow ;;
     pacman)
-        pacman-key --init </dev/null
-        case "$ID" in
-            manjaro|manjaro-arm) pacman-key --populate archlinuxarm manjaro manjaro-arm </dev/null ;;
-            artix) pacman-key --populate artix </dev/null ;;
-            *) pacman-key --populate archlinuxarm </dev/null ;;
-        esac
-        # Rolling repositories require a complete userspace upgrade, not pacman -Sy.
-        pacman -Syu --noconfirm </dev/null
+        refresh_packages
         packages ca-certificates bash coreutils util-linux tzdata gzip ;;
     recovery)
-        # Keep the image's repository branch, keyring and signature policy.
-        # This updates userspace packages, not Android or SteamOS A/B partitions.
-        printf 'Updating SteamOS packages from the image repositories...\n'
-        printf 'Kernel/service hooks may warn about the non-booted environment. Android is not updated.\n'
-        pacman -Syu --noconfirm </dev/null
+        refresh_packages
         dbus-uuidgen --ensure ;;
 esac
 mkdir -p /var/lib/magicdesk /etc/profile.d /usr/local/bin /usr/local/share/applications
