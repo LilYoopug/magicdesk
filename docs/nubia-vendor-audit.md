@@ -178,7 +178,7 @@ remain mandatory even for app-accessible methods.
 
 | Interface | Access used by MagicDesk | Production owner and purpose |
 | --- | --- | --- |
-| `redmagic.app.manager` property methods | Ordinary app UID | `NubiaDesktopPropertyManager`: two allowlisted desktop setup properties. |
+| `redmagic.app.manager` property setter | Shell | `NubiaWindowingDriver`: writer for the two allowlisted AOSP desktop setup properties; shared validation/readback in `DesktopWindowingProperties`. |
 | `edid_modes` / `hpd` | Shell, only when accessible | `NubiaHdmiModeController`: advertised physical HDMI timing selection. |
 | `IInputManager.getMousePosition` | Shell | `NubiaDesktopPointerDriver`: read-only global cursor observation; display identity is unknown. |
 | `SurfaceControl.setSFOption(1100/1102, ...)` | App-UID helper | `NubiaCaptionVisibilityManager`: lifecycle-owned external privacy/caption visibility. |
@@ -190,11 +190,23 @@ remain mandatory even for app-accessible methods.
 
 ## Desktop Provisioning
 
-`NubiaWindowingDriver` uses `NubiaDesktopPropertyManager` for
-`getSystemProperties(String, String)` and
-`setSystemProperties(String, String)` on `RedMagicAppManagerService`.
-The inspected service clears calling identity and directly accesses
-`SystemProperties`, without a key allowlist or permission check.
+The property names and meanings are AOSP behavior, not Nubia-specific settings.
+`DesktopWindowingProperties` owns their validation and verified readback through
+`getprop`. `NubiaWindowingDriver` supplies the firmware-specific write transport:
+`setSystemProperties(String, String)` on `RedMagicAppManagerService`, invoked
+through the already-authorized shell command service. It does not use direct
+`setprop`, grant permissions to the APK, start another privilege transport or
+retry under root.
+
+The originally inspected firmware allowed this Binder call from the app UID.
+The reporter of [issue #18](https://github.com/mekhontsev/magicdesk/issues/18)
+found that REDMAGICOS11.5.8MR1_GB checks `WRITE_SECURE_SETTINGS` before clearing
+Binder identity, and confirmed the setter works from UID 2000 while direct
+`setprop` is denied. This is community evidence, not maintainer verification of
+that firmware. AOSP's SELinux policy grants shell writes to `persist.wm.debug.*`
+only in `userdebug`/`eng` builds; a standard property does not imply a portable
+shell writer. The vendor service supplies the additional access on supported
+Nubia firmware. See the [AOSP shell property policy](https://android.googlesource.com/platform/system/sepolicy/+/refs/heads/android16-qpr2-release/private/shell.te).
 
 MagicDesk confines that capability to:
 
@@ -203,7 +215,9 @@ MagicDesk confines that capability to:
 
 Setup recommends and attempts `false`; Restore defaults attempts to clear both
 overrides. Neither property gates Desktop startup. The wrapper validates
-boolean/absent values and verifies writes. Each property failure is recorded
+boolean/absent values and verifies writes. A zero command exit with a Binder
+exception is not accepted as success; failed readback retains the bounded reply
+in diagnostics. Each property failure is recorded
 without preventing the other operation; only a verified optional change can
 add a reboot requirement. Diagnostics retains the raw property values rather
 than interpreting an empty value as a disabled restriction. Shared setup also enables
@@ -403,8 +417,8 @@ interfaces, settings, physical output and hardware state. A discovered method
 or node is not by itself an enabled production control or a passed workflow.
 
 `NubiaVendorProbeInstrumentation` is a debug-only explicit experiment.
-Its default run is read-only apart from attempting a same-value Settings.Global
-write that is expected to fail before mutation:
+Its default run is read-only; property, caption and Settings.Global mutation
+checks are skipped:
 
 ```sh
 am instrument -w --user 0 \
@@ -412,7 +426,8 @@ am instrument -w --user 0 \
 ```
 
 The optional mutation test requires `-e allow_mutation true`. It tests only
-the allowlisted eligibility property, restores its original value in
+the allowlisted eligibility property through the connected authorized shell
+service and records that writer's identity, restores its original value in
 `finally`, verifies restoration, and exercises wired/wireless caption
 visibility through the lifecycle-owned production wrapper. It must not become
 a generic mutation tool.

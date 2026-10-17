@@ -1,7 +1,10 @@
 package io.github.mekhontsev.magicdesk.platform.nubia;
 
 import io.github.mekhontsev.magicdesk.CompatibilityDiagnostics;
+import io.github.mekhontsev.magicdesk.DesktopWindowingProperties;
 import io.github.mekhontsev.magicdesk.PlatformWindowingDriver;
+import io.github.mekhontsev.magicdesk.ShellAccess;
+import io.github.mekhontsev.magicdesk.ShellCommandLine;
 
 import java.io.IOException;
 import java.util.function.BiConsumer;
@@ -10,34 +13,35 @@ import java.util.function.BiConsumer;
 final class NubiaWindowingDriver implements PlatformWindowingDriver {
     @FunctionalInterface
     interface PropertyWriter {
-        boolean write(NubiaDesktopPropertyManager.Property property, String value)
+        boolean write(DesktopWindowingProperties.Property property, String value)
                 throws IOException;
     }
 
     private final PropertyWriter mWriter;
-    private final BiConsumer<NubiaDesktopPropertyManager.Property, Exception> mWarning;
+    private final BiConsumer<DesktopWindowingProperties.Property, Exception> mWarning;
 
     NubiaWindowingDriver() {
-        this(NubiaDesktopPropertyManager::write, (property, error) ->
+        this((property, value) -> DesktopWindowingProperties.write(
+                property, value, NubiaWindowingDriver::writeProperty), (property, error) ->
                 CompatibilityDiagnostics.record("NUBIA-SETUP-001",
                         "Could not apply optional desktop property",
                         property.key + ": " + error.getMessage(), error));
     }
 
     NubiaWindowingDriver(final PropertyWriter writer,
-            final BiConsumer<NubiaDesktopPropertyManager.Property, Exception> warning) {
+            final BiConsumer<DesktopWindowingProperties.Property, Exception> warning) {
         mWriter = writer;
         mWarning = warning;
     }
 
     @Override
     public String restrictionsPropertyKey() {
-        return NubiaDesktopPropertyManager.Property.DEVICE_RESTRICTIONS.key;
+        return DesktopWindowingProperties.Property.DEVICE_RESTRICTIONS.key;
     }
 
     @Override
     public String roundedCornersPropertyKey() {
-        return NubiaDesktopPropertyManager.Property.ROUNDED_CORNERS.key;
+        return DesktopWindowingProperties.Property.ROUNDED_CORNERS.key;
     }
 
     @Override
@@ -45,13 +49,13 @@ final class NubiaWindowingDriver implements PlatformWindowingDriver {
 
     @Override
     public boolean deviceRestrictionsEnabled() throws IOException {
-        return !"false".equals(NubiaDesktopPropertyManager.read(
-                NubiaDesktopPropertyManager.Property.DEVICE_RESTRICTIONS));
+        return !"false".equals(DesktopWindowingProperties.read(
+                DesktopWindowingProperties.Property.DEVICE_RESTRICTIONS));
     }
 
     @Override
     public void setDeviceRestrictionsEnabled(final boolean enabled) throws IOException {
-        mWriter.write(NubiaDesktopPropertyManager.Property.DEVICE_RESTRICTIONS,
+        mWriter.write(DesktopWindowingProperties.Property.DEVICE_RESTRICTIONS,
                 Boolean.toString(enabled));
     }
 
@@ -62,12 +66,12 @@ final class NubiaWindowingDriver implements PlatformWindowingDriver {
         boolean changed = false;
         if (!restrictionsDisabled) {
             changed = writeOptional(
-                    NubiaDesktopPropertyManager.Property.DEVICE_RESTRICTIONS,
+                    DesktopWindowingProperties.Property.DEVICE_RESTRICTIONS,
                     "false");
         }
         if (!roundedCornersDisabled) {
             changed |= writeOptional(
-                    NubiaDesktopPropertyManager.Property.ROUNDED_CORNERS,
+                    DesktopWindowingProperties.Property.ROUNDED_CORNERS,
                     "false");
         }
         return changed;
@@ -75,13 +79,13 @@ final class NubiaWindowingDriver implements PlatformWindowingDriver {
 
     @Override
     public void restoreDefaults() {
-        for (final NubiaDesktopPropertyManager.Property property
-                : NubiaDesktopPropertyManager.Property.values()) {
+        for (final DesktopWindowingProperties.Property property
+                : DesktopWindowingProperties.Property.values()) {
             writeOptional(property, "");
         }
     }
 
-    private boolean writeOptional(final NubiaDesktopPropertyManager.Property property,
+    private boolean writeOptional(final DesktopWindowingProperties.Property property,
             final String value) {
         try {
             return mWriter.write(property, value);
@@ -89,5 +93,18 @@ final class NubiaWindowingDriver implements PlatformWindowingDriver {
             mWarning.accept(property, error);
             return false;
         }
+    }
+
+    private static String writeProperty(final DesktopWindowingProperties.Property property,
+            final String value) throws IOException {
+        // Newer firmware checks WRITE_SECURE_SETTINGS before clearing Binder identity.
+        // Use the selected command service, never an app-UID process or a root retry.
+        return ShellAccess.run(propertyWriteCommand(property, value));
+    }
+
+    static String propertyWriteCommand(final DesktopWindowingProperties.Property property,
+            final String value) {
+        return "/system/bin/service call redmagic.app.manager 2 s16 "
+                + ShellCommandLine.quote(property.key) + " s16 " + ShellCommandLine.quote(value);
     }
 }

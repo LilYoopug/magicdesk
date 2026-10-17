@@ -24,10 +24,6 @@ case "$1" in
         esac ;;
     exec) shift; [ "$1" = fixture ] || exit 2; shift
         exec {suite.image} exec {store} --libc-registry {registry} "$@" ;;
-    image) shift; if [ "$1" = exec ]; then
-        shift; store=$1; shift; set -- exec "$store" --libc-registry {registry} "$@"
-        fi
-        exec {suite.image} "$@" ;;
     *) exit 2 ;;
 esac
 ''')
@@ -42,14 +38,6 @@ esac
     assert 'Shroot libc prepared:' in result, result
     assert not suite.command(['ls', registry.removesuffix('/artifacts') + '/work'], quiet=True).strip()
     suite.command(['cmp', suite.base + '/install_linux.sh', registry.removesuffix('/artifacts') + '/install_linux.sh'])
-    # Exercise the cache-miss snapshot owners without a compiler rebuild.
-    archive, copy = suite.base + '/snapshot.tar.zst', suite.base + '/snapshot'
-    suite.command([suite.image, 'backup', store, archive])
-    suite.command([suite.image, 'restore', archive, copy])
-    suite.command([suite.image, 'exec', copy, '--user', 'root', '--', '/bin/sh', '-ec', ': > /copy-only'])
-    suite.command([suite.image, 'exec', store, '--user', 'root', '--', '/bin/sh', '-ec', 'test ! -e /copy-only'])
-    suite.command([suite.image, 'remove', copy])
-    suite.command(['rm', archive])
 
 
 def main():

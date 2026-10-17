@@ -1,6 +1,6 @@
 package io.github.mekhontsev.magicdesk;
 
-/** Optional firmware-specific desktop windowing configuration. */
+/** Platform access to optional Android desktop windowing configuration. */
 public interface PlatformWindowingDriver {
     String restrictionsPropertyKey();
 

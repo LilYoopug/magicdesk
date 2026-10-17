@@ -14,7 +14,7 @@ describes how those contracts are tested.
 - [Requirements](#requirements) and [isolation boundaries](#boundaries)
 - [Installer](#linux-installer), [SteamOS](#steamos-recovery-image) and [GPU setup](#graphics-drivers)
 - [Environments and commands](#named-environments)
-- [Optional libc acceleration](#optional-libc-acceleration)
+- [Optional libc acceleration](#optional-libc-acceleration) and [Alpine containers in SteamOS](#alpine-containers-inside-steamos)
 - [Systemd, OpenRC, Docker and Podman](#services-and-containers)
 - [Guest credentials](#guest-credentials), [Landlock](#filesystem-restrictions) and [browser sandboxes](#application-filters-and-browsers)
 - [Graphics integration](#graphical-connections) and [coverage](#coverage-and-limits)
@@ -87,34 +87,57 @@ use `magicdesk download`; no Linux environment is required.
 
 Shroot can optionally use a locally built musl/glibc with direct syscall entry.
 **Shroot Base** uses the distribution's unmodified libc and remains the fallback.
-The feature is experimental and opt-in; it does not replace Android's libc or
-overwrite package-owned files in Linux.
+The installer prepares this experimental acceleration by default, reusing a
+compatible cached build or compiling on the device. It does not replace Android's
+libc or overwrite package-owned files in Linux.
 
-The same downloaded installer contains all MagicDesk source hooks and patches.
-To prepare an installed environment, or a libc for an OCI image:
+#### Enable After Installation
+
+Linux does not need to be reinstalled if you chose Base during setup. Use a
+MagicDesk **Shell** console, not a terminal inside Linux, with the same shell/root
+executor that owns the environment. Use an installer matching your MagicDesk
+version; the downloaded script contains all MagicDesk source hooks and patches.
+
+1. Run `shroot list` to find the installed environment's name. The example below
+   uses `steamos`; substitute your chosen name.
+2. Avoid other package installations or updates in that environment while libc
+   is being prepared. Its package manager may update build dependencies.
+3. Prepare libc only, without reinstalling Linux or reapplying GUI/GPU settings:
 
 ```sh
-sh ~/install_linux.sh --prepare-libc work --jobs 1
-sh ~/install_linux.sh --prepare-libc alpine:3.23 --jobs 1
+sh ~/install_linux.sh --prepare-libc steamos --jobs 2
 ```
 
-The first preparation saves the installer as the local recipe. Subsequently:
+Wait for `Shroot libc prepared: ...`. Start Linux again through its existing
+shortcut or `shroot login steamos`; new compatible programs select the build
+automatically. Already running programs are not switched. `shroot libc list`
+lists cached builds, not proof that a particular application is using one.
+
+The first preparation saves the installer as the local recipe. To prepare again,
+including after a package update changes the distribution's libc:
 
 ```sh
-shroot libc prepare work --jobs 1
-shroot libc prepare alpine:3.23 --jobs 1
-shroot libc list
-shroot libc prune
+shroot libc prepare steamos --jobs 2
 ```
 
-Preparation installs build dependencies in an isolated copy and compiles on
-the device, with progress in the console. Python/compiler tools belong to that
-copy, not Android or Termux. A compatible cached build is reused before package
-installation or copying. A cache miss needs enough temporary space for a backup
-and build copy; stop that environment's active launches before this snapshot.
-Successful temporary work is removed; failures retain its location
-and leave the original libc installed. Preparing again with a freshly downloaded
+For an OCI image, use its reference instead of an installed environment name;
+see the [Alpine container example](#alpine-containers-inside-steamos).
+
+Preparation installs build dependencies directly in the selected Linux and
+compiles there, with progress in the console. Python/compiler tools belong to
+that Linux, not Android or Termux. There is no full-environment backup or copy.
+A compatible cached build is reused before package installation. A cache miss
+needs temporary space for sources, build outputs and staged libraries. Build
+packages remain installed; package upgrades are not rolled back on failure.
+Successful temporary work is removed; failures retain its location. Shroot's
+private libc never overwrites the distribution's package-owned libc. Preparing again with a freshly downloaded
 installer updates the saved recipe; ordinary launches never fetch or compile anything.
+
+When `--libc shroot` is selected, Mesa/Turnip and KWin install their build
+dependencies first, then prepare or reuse libc for the resulting environment,
+and start compilation in a fresh accelerated launch. Compiler stages do not
+install packages that could invalidate that selection. This accelerates the
+build tools; it does not link the resulting graphics libraries to a private libc.
 
 Normal `shroot run/exec/login` commands do not change. Nested Docker/Podman
 processes can select compatible registry entries too, without rebuilding OCI
@@ -123,6 +146,13 @@ hashes and the entry ABI, not merely a distribution name or version. A package
 update that changes those files uses Base until a corresponding build is ready.
 Running processes retain their current mappings.
 
+Container support does not imply the same speedup as an unfiltered program.
+An installed application seccomp filter disables shared-memory execution;
+the integrated libc then retains the kernel-admitted syscall route. Preparing
+libc for an image therefore does not by itself establish a speedup under a
+container's normal sandbox. Compare actual container workloads with the same
+image, mounts and seccomp profile; see [sandbox behavior](../native/shroot/cooperative-entry.md#sandboxes-and-debuggers).
+
 The registry is shared within the selected executor's environment library,
 not between shell and root identities. Selected files are mounted readonly at
 `/opt/shroot/libc/KEY`; installed source images remain unchanged. New readonly
@@ -130,19 +160,93 @@ or non-root container roots may need prepared empty attachment directories;
 restricted roots which cannot admit the attachment use Base. Static executables
 and calls bypassing the integrated libc also retain Base interception.
 
-`prune` removes builds not held by active launches/mounts, including builds for
-stopped environments; their next launch may use Base. To explicitly disable
-selection in an environment without deleting shared builds:
+`shroot libc prune` removes builds not held by active launches/mounts, including
+builds for stopped environments; their next launch may use Base. To explicitly
+disable selection in a working environment without deleting shared builds or
+rerunning the installer, create its Base-selection marker:
 
 ```sh
-sh ~/install_linux.sh --yes --resume --name work --libc base
+shroot exec steamos --user root -- /bin/sh -ec 'mkdir -p /etc/shroot; : > /etc/shroot/libc-base'
 ```
 
-The installer's `--libc shroot` prepares/enables this path; `--libc keep` is the
-default and preserves existing selection. Exact matching prevents accidental
-cross-version reuse, but is not proof that an upstream rebuilt libc preserves
+Here `root` is the Linux guest account, not Android root. Restart the affected
+Linux programs to use Base. Successful `--prepare-libc steamos` preparation
+clears this marker and enables selection again. This command needs a working
+guest shell; it is not recovery for a loader that cannot start.
+
+The installer's default `--libc shroot` prepares/enables this path, including with
+`--yes` and `--resume`; explicit `--libc keep` preserves existing selection without
+building. The main interactive questions offer `shroot`, `base` and `keep` before
+choosing compiler parallelism. That one job count applies to libc, Mesa/Turnip
+and KWin. Exact matching prevents accidental cross-version reuse, but is not
+proof that an upstream rebuilt libc preserves
 every distribution-specific private ABI. See the [integration contract and
 coverage](../native/shroot/libc/README.md) before enabling it for important work.
+
+#### Alpine Containers Inside SteamOS
+
+This example assumes [Docker Engine](#docker-engine) is already configured and
+running inside a Shroot SteamOS environment. Preparation and the SteamOS launch
+must use the same MagicDesk executor and environment library. SteamOS's glibc
+build cannot substitute for Alpine's musl; prepare the container image separately.
+
+**In MagicDesk's Shell console, outside SteamOS:**
+
+```sh
+sh ~/install_linux.sh --prepare-libc alpine:3.23 --jobs 2
+```
+
+The installer downloads the ARM64 image into a temporary Shroot environment,
+identifies its original musl and prepares a matching build in the shared registry.
+Compiler packages are installed in that temporary environment, not SteamOS or
+the original Docker image. Its build targets the original image's libc even if
+the temporary environment's package manager upgrades its build dependencies.
+Wait for `Shroot libc prepared: ...`. Once the recipe is registered, the equivalent
+command is `shroot libc prepare alpine:3.23 --jobs 2`.
+
+**In a SteamOS terminal connected to that Docker daemon:**
+
+```sh
+docker pull --platform linux/arm64 alpine:3.23
+docker run --rm -it --platform linux/arm64 alpine:3.23 sh
+```
+
+The new container's compatible dynamic programs select musl from the registry.
+No Dockerfile change, extra OCI layer, manual library copy or `LD_PRELOAD` is
+needed. This example uses Alpine's default guest-root user and a writable root;
+readonly/non-root roots may need prepared attachment directories as described
+above. Existing processes keep their mapped libc until restarted.
+
+**Inside the Alpine container**, inspect the library mapped by a new process:
+
+```sh
+grep -E '/(libc/artifacts|opt/shroot/libc)/' /proc/self/maps
+```
+
+A mapping of `KEY/lib/libc.so` under the registry or attachment path identifies
+the prepared musl in that diagnostic process. `shroot libc list` in MagicDesk's
+Shell only shows available builds; it does not establish selection. No matching
+mapping, or a denied maps read, leaves selection unconfirmed. Check the exact
+image, executor/library, attachment permissions and the absence of the container's
+`/etc/shroot/libc-base` marker before assuming acceleration.
+
+**For reproducible runs**, pin the image instead of relying on a moving tag.
+After pulling it, run in SteamOS:
+
+```sh
+docker image inspect --format '{{index .RepoDigests 0}}' alpine:3.23
+```
+
+Use the printed `repository@sha256:...` reference instead of `alpine:3.23` in
+both `--prepare-libc` and `docker run`. Retain `--platform linux/arm64` for Docker.
+If an image update or `apk upgrade` replaces musl, prepare the new image's libc;
+an incompatible cached build is not reused. A modified running container is not
+the unchanged image identified by its original tag or digest.
+
+Keep Docker's normal seccomp profile. A mapped prepared musl proves selection,
+not the unfiltered direct-entry speedup: installed application filters retain
+kernel syscall admission. Compare Base and prepared-libc workloads under the
+same sandbox and storage configuration.
 
 ### Linux installer
 
@@ -299,12 +403,22 @@ and retrying, or cancellation. It retains the installed environment and all
 other choices. An unattended `--yes` run stops with the original failure code
 and a resume hint. A package error is not automatically classified as DNS failure.
 
-New installs default to system DNS. Private DNS/VPN requires an explicit
-`--dns IP[,IP...]` choice or a prepared image resolver with `--dns preserve`;
-plain guest DNS does not reproduce Android's encrypted resolver policy.
+New installs default to **Current network** (`--dns auto`, also accepted as
+`--dns system`). The additional settings offer this option alongside keeping
+the image's DNS (`preserve`) and entering custom DNS addresses. Automatic mode
+copies the DNS servers of the current shell/root executor's Android network
+once; it does not pin the network. A VPN is not a reason to reject this mode;
+Android's per-UID routing decides whether the VPN covers the executor.
+Android Private DNS still requires an explicit `--dns IP[,IP...]` choice or a
+prepared image resolver with `--dns preserve`: plain guest DNS does not
+reproduce Android's encrypted resolver policy.
 No public resolver is selected automatically. For a new environment, system or
 explicit DNS replaces the image's resolver through the existing offline DNS
-command; `preserve` leaves it alone. Resume retains existing DNS.
+command; `preserve` leaves it alone. Resume retains existing DNS. Later network
+changes can make the saved DNS addresses unreachable. Users can edit Linux's
+`/etc/resolv.conf`, use their distribution's resolver configuration, or explicitly
+refresh an inactive environment with `shroot dns NAME system --replace`.
+The installer does not run a background network monitor or overwrite later edits.
 
 #### SteamOS recovery image
 
@@ -621,8 +735,10 @@ launch ends its tree. Neither action removes the store.
 Installation accepts `--dns system` (default), `--dns preserve`, or up to three
 comma-separated numeric addresses. System DNS is a one-shot active-network
 snapshot, not an Android resolver proxy. No public resolver is chosen implicitly.
-Private DNS/VPN need an explicit policy; copying resolver addresses does not
-preserve their encrypted or per-application semantics.
+VPN networks are accepted; Android applies routing for the selected executor's
+UID. Private DNS needs an explicit policy because copying resolver addresses
+does not preserve its encrypted semantics. Saved addresses do not automatically
+follow later network changes.
 
 The manager retains nonempty or symlinked `/etc/resolv.conf`.
 `shroot dns NAME POLICY --replace` explicitly replaces it in an inactive
@@ -861,6 +977,10 @@ semantics are described in the [network contracts](../native/shroot/networking.m
 For both engines, guest root is still real Android UID 2000. Enabled cgroups
 provide logical membership and permissive settings, not enforced resource or
 device limits.
+
+Libc preparation is independent of daemon setup. See
+[Alpine containers inside SteamOS](#alpine-containers-inside-steamos) for the
+shared-registry workflow and the distinction between selection and acceleration.
 
 ## Guest Credentials
 

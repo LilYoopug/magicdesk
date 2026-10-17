@@ -1,6 +1,8 @@
 package io.github.mekhontsev.magicdesk.platform.nubia;
 
 import io.github.mekhontsev.magicdesk.BoundedProcessRunner;
+import io.github.mekhontsev.magicdesk.DesktopWindowingProperties;
+import io.github.mekhontsev.magicdesk.ShellAccess;
 
 
 import android.app.Activity;
@@ -17,14 +19,14 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 
 /**
- * Exercises narrowly scoped Nubia vendor APIs from MagicDesk's real app UID.
+ * Exercises narrowly scoped Nubia APIs, retaining each operation's production identity.
  *
  * <p>This instrumentation is debug-only. Mutating tests must always restore the
  * original value before returning.
  */
 public final class NubiaVendorProbeInstrumentation extends Instrumentation {
     private static final String DESKTOP_RESTRICTIONS_PROPERTY =
-            "persist.wm.debug.desktop_mode_enforce_device_restrictions";
+            DesktopWindowingProperties.Property.DEVICE_RESTRICTIONS.key;
     private static final String REDMAGIC_SERVICE = "redmagic.app.manager";
     private static final String SCENE_GET_TEMPERATURE_TRANSACTION = "38";
     private static final String SCENE_GET_FOREGROUND_TRANSACTION = "39";
@@ -159,9 +161,11 @@ public final class NubiaVendorProbeInstrumentation extends Instrumentation {
 
     private static String probePropertyMutation()
             throws IOException, InterruptedException {
-        final NubiaDesktopPropertyManager.Property property =
-                NubiaDesktopPropertyManager.Property.DEVICE_RESTRICTIONS;
-        final String original = NubiaDesktopPropertyManager.read(property);
+        final DesktopWindowingProperties.Property property =
+                DesktopWindowingProperties.Property.DEVICE_RESTRICTIONS;
+        final String original = DesktopWindowingProperties.read(property);
+        final NubiaWindowingDriver windowing = new NubiaWindowingDriver();
+        final String writerIdentity = ShellAccess.run("/system/bin/id").trim();
         if (!"true".equals(original) && !"false".equals(original)) {
             throw new IOException("unexpected original value: " + original);
         }
@@ -169,8 +173,8 @@ public final class NubiaVendorProbeInstrumentation extends Instrumentation {
         String observed = "";
         IOException failure = null;
         try {
-            NubiaDesktopPropertyManager.write(property, temporary);
-            observed = NubiaDesktopPropertyManager.read(property);
+            windowing.setDeviceRestrictionsEnabled("true".equals(temporary));
+            observed = DesktopWindowingProperties.read(property);
             if (!temporary.equals(observed)) {
                 throw new IOException(
                         "write did not take effect: expected=" + temporary
@@ -180,9 +184,9 @@ public final class NubiaVendorProbeInstrumentation extends Instrumentation {
             failure = error;
         } finally {
             try {
-                NubiaDesktopPropertyManager.write(property, original);
+                windowing.setDeviceRestrictionsEnabled("true".equals(original));
                 final String restored =
-                        NubiaDesktopPropertyManager.read(property);
+                        DesktopWindowingProperties.read(property);
                 if (!original.equals(restored)) {
                     throw new IOException(
                             "restore failed: expected=" + original
@@ -198,7 +202,7 @@ public final class NubiaVendorProbeInstrumentation extends Instrumentation {
         if (failure != null) {
             throw failure;
         }
-        return "changed=" + original + "->" + observed
+        return "writer=" + writerIdentity + " changed=" + original + "->" + observed
                 + " restored=" + original;
     }
 

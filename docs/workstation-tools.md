@@ -250,7 +250,11 @@ window detaches only its presentation.
 When the optional `tmux` package is installed inside Termux, **Terminal sessions**
 combines retained terminals and tmux sessions in one list, without duplicating
 a session for its attached MagicDesk client. The same picker appears in the
-control panel's Apps launcher and console toolbars. Closing or detaching a managed
+control panel's Apps launcher, Start context menu and console toolbars. Opening
+the picker creates no PTY; choose an existing session or explicitly create a new
+one. On the phone, Running includes open Console windows even though Console
+has no ordinary launcher entry, and returns to the selected existing task.
+Closing or detaching a managed
 tmux window disconnects only its client; reopening attaches to the retained session.
 Explicit termination of a tmux session affects all its windows and clients and
 asks for confirmation. Discovery is on demand, not an idle background query.

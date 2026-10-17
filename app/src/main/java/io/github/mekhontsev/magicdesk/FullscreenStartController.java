@@ -163,10 +163,14 @@ final class FullscreenStartController implements StartMenuContent.Host {
         final List<StartMenuEntry> entries = new java.util.ArrayList<>();
         if (mHome) {
             final DesktopHomeRoleLease.State lease = activeLease();
-            if (lease != null) for (final AppReference reference : HomeRecentApps.select(
-                    mRunningTasks, apps(), lease.previousHome.packageName, mDisplayId)) {
-                final AppItem app = LauncherAppRepository.find(apps(), reference);
-                if (app != null) entries.add(StartMenuEntry.app(app));
+            final var repository = new LauncherAppRepository(mActivity);
+            if (lease != null) for (final var entry : HomeRecentApps.select(
+                    mRunningTasks, apps(), lease.previousHome.packageName, mDisplayId, repository.profile())) {
+                final var reference = entry.reference();
+                final AppItem app = repository.findOrLoad(apps(), reference.application, reference.launchTarget(), false);
+                final var task = entry.task();
+                if (app != null) entries.add(StartMenuEntry.task(app, task,
+                        TaskTitle.resolve(mActivity, app, task), TaskTitle.detail(mActivity, task)));
             }
         } else {
             final LauncherAppRepository repository = new LauncherAppRepository(mActivity);

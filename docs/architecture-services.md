@@ -517,8 +517,9 @@ names, and constructs quoted attach or create commands. A selected session is
 then opened through the ordinary Termux Console path with explicit tmux identity.
 `TerminalSessions` merges local terminals and server sessions using live tmux
 client PIDs; `TerminalSessionsDialog` is shared by the control panel's header,
-Start's Terminal sessions entry and both console toolbars. The header targets
-its own screen; Start retains its selected launch destination. An empty picker
+Start's Terminal sessions entry, its context menu and both console toolbars. The
+header and context menu target their own screen; Start's application list retains
+its selected launch destination. Opening the picker does not allocate a PTY. An empty picker
 still offers creation. A console switches the single `TerminalWindowAttachment`
 in its existing task; transfer releases the former host into an empty selection state.
 Recreation restores a retained identity without replaying commands or reclaiming

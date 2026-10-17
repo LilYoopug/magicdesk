@@ -493,11 +493,18 @@ persist.wm.debug.desktop_mode_enforce_device_restrictions = false
 persist.wm.debug.desktop_use_rounded_corners = false
 ```
 
-Shell UID 2000 owns the global settings. On supported Nubia/REDMAGIC firmware, the
-two persistent properties are written through the firmware's
-`redmagic.app.manager` Binder
-from the ordinary APK UID. `NubiaDesktopPropertyManager` exposes a closed
-enum, permits only boolean/absent values, and verifies every write. Generic
+`DesktopWindowingProperties` owns these AOSP keys, boolean/absent validation,
+readback and bounded failure diagnostics. A platform writer supplies only the
+write transport; property semantics do not belong to a vendor. Reads use `getprop`
+without privilege delegation. A successful command exit is not proof of a write:
+Binder tools can return a permission exception in their reply with exit code zero.
+
+Shell UID 2000 owns the global settings. On supported Nubia/REDMAGIC firmware,
+`NubiaWindowingDriver` writes the two properties through `redmagic.app.manager`
+using the already-authorized `ShellAccess` command service, whose common runner
+bounds command duration and output. Newer firmware checks `WRITE_SECURE_SETTINGS`
+before clearing Binder identity. No app-UID write, root retry or service startup
+is attempted. Generic
 Android never reads those properties as setup requirements or writes them.
 Neither property is a Desktop prerequisite. Setup attempts them independently;
 failed writes and resets produce diagnostic warnings without blocking the

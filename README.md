@@ -484,6 +484,10 @@ applications and system drivers, with a nested Plasma desktop and automatic
 Turnip selection; see the [recovery-image recipe](docs/shroot.md#steamos-recovery-image).
 Several independent environments can coexist.
 
+The installer can build an accelerated libc locally without replacing the
+distribution's original libraries. Choosing Shroot Base does not prevent enabling
+it later: see [acceleration for an installed environment](docs/shroot.md#enable-after-installation).
+
 After installation:
 
 - **Applications:** open **Apps** in MagicDesk's control panel, press **Refresh**

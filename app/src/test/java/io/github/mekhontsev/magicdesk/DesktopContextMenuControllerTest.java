@@ -10,6 +10,15 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 public final class DesktopContextMenuControllerTest {
+    @Test public void startConsoleEntrySelectsExistingSessionsBeforeCreatingAPty() throws Exception {
+        final String menu = RuntimeSourceFixture.methods("DesktopContextMenuController", "populateStartButtonMenu");
+        assertTrue(menu.contains("R.string.terminal_sessions"));
+        assertTrue(menu.contains("TerminalSessionsDialog.show(mActivity)"));
+        assertFalse(menu.contains("openConsole("));
+        assertFalse(menu.contains("openTermuxConsole("));
+        assertFalse(menu.contains("CommandConsoleActivity.create"));
+    }
+
     @Test
     public void slowShortcutAndProviderDiscoveryUsesTheExistingRequestWorker()
             throws IOException {

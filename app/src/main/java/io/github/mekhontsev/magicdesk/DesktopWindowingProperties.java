@@ -1,23 +1,28 @@
-package io.github.mekhontsev.magicdesk.platform.nubia;
-
-import io.github.mekhontsev.magicdesk.BoundedProcessRunner;
+package io.github.mekhontsev.magicdesk;
 
 import java.io.IOException;
 
 /**
- * Applies the two reviewed RedMagic desktop properties from the application UID.
+ * Owns the allowlisted Android desktop properties and verified value changes.
  *
- * <p>The verified firmware service clears the Binder caller identity before
- * writing a system property. Keep this wrapper deliberately closed: callers
- * select a known property and a boolean value, never an arbitrary key.</p>
+ * <p>Property names and semantics are shared Android behavior. Write access is
+ * platform-specific: shell cannot set these properties on every firmware.</p>
  */
-public final class NubiaDesktopPropertyManager {
+public final class DesktopWindowingProperties {
     private static final String GETPROP = "/system/bin/getprop";
-    private static final String SERVICE = "/system/bin/service";
-    private static final String REDMAGIC_SERVICE = "redmagic.app.manager";
-    private static final String SET_PROPERTY_TRANSACTION = "2";
     private static final long COMMAND_TIMEOUT_MILLIS = 5_000L;
     private static final int MAX_OUTPUT_BYTES = 32 * 1024;
+
+    @FunctionalInterface
+    interface PropertyReader {
+        String read(Property property) throws IOException;
+    }
+
+    @FunctionalInterface
+    public interface Writer {
+        /** Writes one validated value and returns the bounded transport reply. */
+        String write(Property property, String value) throws IOException;
+    }
 
     public enum Property {
         DEVICE_RESTRICTIONS(
@@ -25,14 +30,14 @@ public final class NubiaDesktopPropertyManager {
         ROUNDED_CORNERS(
                 "persist.wm.debug.desktop_use_rounded_corners");
 
-        final String key;
+        public final String key;
 
         Property(final String key) {
             this.key = key;
         }
     }
 
-    private NubiaDesktopPropertyManager() {
+    private DesktopWindowingProperties() {
     }
 
     public static String read(final Property property) throws IOException {
@@ -45,33 +50,37 @@ public final class NubiaDesktopPropertyManager {
         return value;
     }
 
-    public static boolean write(final Property property, final String value)
+    public static boolean write(final Property property, final String value, final Writer writer)
             throws IOException {
+        return write(property, value, DesktopWindowingProperties::read, writer);
+    }
+
+    static boolean write(final Property property, final String value,
+            final PropertyReader reader, final Writer writer) throws IOException {
         requireProperty(property);
         requireBooleanOrEmpty(value);
-        if (value.equals(read(property))) {
+        if (value.equals(reader.read(property))) {
             return false;
         }
 
-        final BoundedProcessRunner.Result result = run(
-                new ProcessBuilder(
-                        SERVICE,
-                        "call",
-                        REDMAGIC_SERVICE,
-                        SET_PROPERTY_TRANSACTION,
-                        "s16",
-                        property.key,
-                        "s16",
-                        value));
-        requireSuccess("write " + property.key, result);
+        final String output = writer.write(property, value);
 
-        final String observed = read(property);
+        // service can exit successfully with a Binder exception in its reply.
+        // Only readback proves the write; retain the reply when verification fails.
+        final String observed;
+        try {
+            observed = reader.read(property);
+        } catch (IOException error) {
+            throw new IOException("could not verify desktop property " + property.key
+                    + ": " + error.getMessage() + outputSuffix(output), error);
+        }
         if (!value.equals(observed)) {
             throw new IOException(
-                    "RedMagic property verification failed for "
+                    "Desktop property verification failed for "
                             + property.key
                             + ": expected=" + printable(value)
-                            + " observed=" + printable(observed));
+                            + " observed=" + printable(observed)
+                            + outputSuffix(output));
         }
         return true;
     }
@@ -94,7 +103,7 @@ public final class NubiaDesktopPropertyManager {
                     MAX_OUTPUT_BYTES);
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt();
-            throw new IOException("RedMagic property command interrupted", error);
+            throw new IOException("Desktop property command interrupted", error);
         } finally {
             process.destroy();
         }
@@ -133,7 +142,9 @@ public final class NubiaDesktopPropertyManager {
     }
 
     private static String outputSuffix(final String output) {
-        final String oneLine = output.trim()
+        final String bounded = output.length() <= MAX_OUTPUT_BYTES
+                ? output : output.substring(0, MAX_OUTPUT_BYTES) + " [truncated]";
+        final String oneLine = bounded.trim()
                 .replace('\n', ' ')
                 .replace('\r', ' ');
         return oneLine.isEmpty() ? "" : ": " + oneLine;

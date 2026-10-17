@@ -54,14 +54,17 @@ and a shell probe. Musl 1.2.5 and glibc 2.41 have pinned source digests; other
 numeric releases use HTTPS and the same structural admission, printing their
 downloaded digest. A changed source boundary fails rather than guessing.
 
-Preparation checks for a cache hit in the original environment first. A miss
-uses the existing native backup/restore owners to create an independent build
-copy, not a COW reference to mutable files. Capturing that copy requires no
-active launches of the source environment and enough temporary disk space.
-Compiler packages and any dependency upgrades stay in the copy. The manifest
-retains the original image's hashes even if the build environment upgrades its libc.
-Successful work is removed through the image owner; failed work is retained
-with its path. Glibc exports its own `gconv` modules, but uses the distribution's
+Preparation checks for a cache hit in the selected environment first. A miss
+installs build tools and compiles directly there, using explicit work/cache
+bindings. No backup, restore or full-environment copy is needed. Named targets
+are identified again after dependency installation, including another cache
+lookup, so package upgrades cannot leave the build matched to an obsolete libc.
+A changed libc during compilation rejects publication. Build packages remain
+installed; failures do not roll back package-manager changes.
+OCI preparation uses one temporary environment from the requested image and
+pins the original image's libc identity even if build dependencies are upgraded.
+This never mutates the source image or adds an OCI layer. Successful build files
+are removed; failed work is retained with its path. Glibc exports its own `gconv` modules, but uses the distribution's
 locale and timezone data. Its private loader searches the matching runtime
 libraries before application RPATHs; the distribution libc is never overwritten.
 
@@ -73,7 +76,8 @@ ABI, family/version, recipe digest, original interpreter and libc paths/hashes,
 and the relative replacement-loader path. This is a rebuildable local cache,
 not an OCI layer or a downloadable MagicDesk runtime package. The downloaded
 installer registers its own copy as the explicit `shroot libc prepare` recipe.
-See the [user commands](../../../docs/shroot.md#optional-libc-acceleration).
+See the [user commands](../../../docs/shroot.md#optional-libc-acceleration) and
+the [Alpine-in-SteamOS walkthrough](../../../docs/shroot.md#alpine-containers-inside-steamos).
 
 `libc_registry.c` owns validated publication, discovery, hash caching and leases.
 Publication copies regular files into the existing image-publication staging
@@ -108,7 +112,8 @@ Static executables and direct SVC calls retain the Base route.
 
 This deployment remains experimental. Upstream version agreement alone does
 not preserve distribution patches, build flags or every private-library ABI.
-Full installed-environment validation is required before default enablement.
+The installer currently selects preparation by default; release acceptance must
+validate the full installed-environment path, not just source integration.
 Source-patching tests and exact input hashes do not prove every distribution
 program's private ABI compatibility. Explicit absolute library dependencies,
 preloads, custom loaders and minimal images without a shell/build tools need

@@ -1,7 +1,6 @@
 package io.github.mekhontsev.magicdesk;
 
 import android.net.ConnectivityManager;
-import android.net.NetworkCapabilities;
 import java.io.IOException;
 
 /** One-shot shell-side discovery; raw Linux DNS is not Android's Private DNS resolver. */
@@ -13,13 +12,12 @@ final class GuestAndroidNetwork {
         var manager = context.getSystemService(ConnectivityManager.class);
         var network = manager.getActiveNetwork();
         var properties = manager.getLinkProperties(network);
-        var capabilities = manager.getNetworkCapabilities(network);
         if (properties == null || properties.getDnsServers().isEmpty())
             throw new IOException("No active-network DNS servers; choose --dns preserve or explicit addresses");
         if (properties.isPrivateDnsActive())
             throw new IOException("Android Private DNS is active; copying server addresses would not preserve its encrypted DNS policy");
-        if (capabilities != null && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN))
-            throw new IOException("Android VPN is active; its DNS policy cannot be reproduced by copying server addresses");
+        // Android selects the caller's network, including any VPN covering its UID.
+        // Taking this snapshot does not bind future guest sockets to that network.
         return GuestDnsConfiguration.servers(properties.getDnsServers().stream()
                 .limit(3).map(java.net.InetAddress::getHostAddress).toList());
     }

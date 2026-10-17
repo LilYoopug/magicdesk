@@ -210,17 +210,10 @@ final class DesktopContextMenuController {
                 true,
                 view -> mActivity.openFiles());
         addAction(
-                R.string.console_title,
+                R.string.terminal_sessions,
                 UiColor.SURFACE,
                 true,
-                view -> mActivity.openConsole());
-if (RuntimeLimits.active().termux() && TermuxIntegration.isInstalled(mActivity)) {
-            addAction(
-                    R.string.console_termux_title,
-                    UiColor.SURFACE,
-                    true,
-                    view -> mActivity.openTermuxConsole());
-        }
+                view -> TerminalSessionsDialog.show(mActivity));
         addAction(
                 R.string.task_manager_title,
                 UiColor.SURFACE,

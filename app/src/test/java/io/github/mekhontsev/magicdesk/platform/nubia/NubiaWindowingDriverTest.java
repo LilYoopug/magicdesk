@@ -4,6 +4,8 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
+import io.github.mekhontsev.magicdesk.DesktopWindowingProperties;
+
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
@@ -14,7 +16,7 @@ public final class NubiaWindowingDriverTest {
     public void explicitRestrictionChangeOnlyWritesThatProperty() throws Exception {
         final List<String> values = new ArrayList<>();
         final var driver = new NubiaWindowingDriver((property, value) -> {
-            assertEquals(NubiaDesktopPropertyManager.Property.DEVICE_RESTRICTIONS, property);
+            assertEquals(DesktopWindowingProperties.Property.DEVICE_RESTRICTIONS, property);
             values.add(value);
             return true;
         }, (property, error) -> { throw new AssertionError(error); });
@@ -34,7 +36,7 @@ public final class NubiaWindowingDriverTest {
 
     @Test
     public void deniedPropertiesDoNotThrowOrRequireReboot() {
-        final List<NubiaDesktopPropertyManager.Property> warnings = new ArrayList<>();
+        final List<DesktopWindowingProperties.Property> warnings = new ArrayList<>();
         final NubiaWindowingDriver windowing = new NubiaWindowingDriver(
                 (property, value) -> {
                     assertEquals("false", value);
@@ -45,15 +47,15 @@ public final class NubiaWindowingDriverTest {
                 });
 
         assertFalse(windowing.configure(false, false));
-        assertEquals(List.of(NubiaDesktopPropertyManager.Property.values()), warnings);
+        assertEquals(List.of(DesktopWindowingProperties.Property.values()), warnings);
     }
 
     @Test
     public void eachPropertyIsIndependentAndVerifiedChangesRequireReboot() {
-        for (final NubiaDesktopPropertyManager.Property denied
-                : NubiaDesktopPropertyManager.Property.values()) {
-            final List<NubiaDesktopPropertyManager.Property> attempts = new ArrayList<>();
-            final List<NubiaDesktopPropertyManager.Property> warnings = new ArrayList<>();
+        for (final DesktopWindowingProperties.Property denied
+                : DesktopWindowingProperties.Property.values()) {
+            final List<DesktopWindowingProperties.Property> attempts = new ArrayList<>();
+            final List<DesktopWindowingProperties.Property> warnings = new ArrayList<>();
             final NubiaWindowingDriver windowing = new NubiaWindowingDriver(
                     (property, value) -> {
                         attempts.add(property);
@@ -64,7 +66,7 @@ public final class NubiaWindowingDriverTest {
                     }, (property, error) -> warnings.add(property));
 
             assertTrue(windowing.configure(false, false));
-            assertEquals(List.of(NubiaDesktopPropertyManager.Property.values()), attempts);
+            assertEquals(List.of(DesktopWindowingProperties.Property.values()), attempts);
             assertEquals(List.of(denied), warnings);
         }
     }
@@ -72,7 +74,7 @@ public final class NubiaWindowingDriverTest {
     @Test
     public void writesOnlyMissingProperties() {
         for (int mask = 0; mask < 4; mask++) {
-            final List<NubiaDesktopPropertyManager.Property> attempts = new ArrayList<>();
+            final List<DesktopWindowingProperties.Property> attempts = new ArrayList<>();
             final NubiaWindowingDriver windowing = new NubiaWindowingDriver(
                     (property, value) -> {
                         attempts.add(property);
@@ -84,9 +86,9 @@ public final class NubiaWindowingDriverTest {
 
             assertEquals(mask != 3, windowing.configure(restrictionsDisabled, cornersDisabled));
             assertEquals(!restrictionsDisabled, attempts.contains(
-                    NubiaDesktopPropertyManager.Property.DEVICE_RESTRICTIONS));
+                    DesktopWindowingProperties.Property.DEVICE_RESTRICTIONS));
             assertEquals(!cornersDisabled, attempts.contains(
-                    NubiaDesktopPropertyManager.Property.ROUNDED_CORNERS));
+                    DesktopWindowingProperties.Property.ROUNDED_CORNERS));
         }
     }
 
@@ -100,18 +102,18 @@ public final class NubiaWindowingDriverTest {
 
     @Test
     public void processSecurityDenialsRemainOptional() {
-        final List<NubiaDesktopPropertyManager.Property> warnings = new ArrayList<>();
+        final List<DesktopWindowingProperties.Property> warnings = new ArrayList<>();
         final NubiaWindowingDriver windowing = new NubiaWindowingDriver(
                 (property, value) -> { throw new SecurityException("not permitted"); },
                 (property, error) -> warnings.add(property));
         assertFalse(windowing.configure(false, false));
-        assertEquals(List.of(NubiaDesktopPropertyManager.Property.values()), warnings);
+        assertEquals(List.of(DesktopWindowingProperties.Property.values()), warnings);
     }
 
     @Test
     public void restoreContinuesAfterAPropertyDenial() {
-        final List<NubiaDesktopPropertyManager.Property> attempts = new ArrayList<>();
-        final List<NubiaDesktopPropertyManager.Property> warnings = new ArrayList<>();
+        final List<DesktopWindowingProperties.Property> attempts = new ArrayList<>();
+        final List<DesktopWindowingProperties.Property> warnings = new ArrayList<>();
         final NubiaWindowingDriver windowing = new NubiaWindowingDriver(
                 (property, value) -> {
                     attempts.add(property);
@@ -119,7 +121,27 @@ public final class NubiaWindowingDriverTest {
                     throw new IOException("permission denied");
                 }, (property, error) -> warnings.add(property));
         windowing.restoreDefaults();
-        assertEquals(List.of(NubiaDesktopPropertyManager.Property.values()), attempts);
+        assertEquals(List.of(DesktopWindowingProperties.Property.values()), attempts);
         assertEquals(attempts, warnings);
+    }
+
+    @Test public void vendorCommandPreservesEmptyRestoreAsAnArgument() {
+        for (final var property : DesktopWindowingProperties.Property.values()) {
+            for (final String value : List.of("false", "true", "")) {
+                assertEquals("/system/bin/service call redmagic.app.manager 2 s16 '"
+                                + property.key + "' s16 '" + value + "'",
+                        NubiaWindowingDriver.propertyWriteCommand(property, value));
+            }
+        }
+    }
+
+    @Test public void productionWritesUseSharedVerificationAndAuthorizedShell() throws Exception {
+        final String source = java.nio.file.Files.readString(java.nio.file.Path.of(
+                "src/main/java/io/github/mekhontsev/magicdesk/platform/nubia/NubiaWindowingDriver.java"));
+        assertTrue(source.contains("DesktopWindowingProperties.write("));
+        assertTrue(source.contains("ShellAccess.run(propertyWriteCommand(property, value))"));
+        assertFalse(source.contains("ProcessBuilder"));
+        assertFalse(source.contains("Runtime.getRuntime()"));
+        assertFalse(source.contains("su "));
     }
 }

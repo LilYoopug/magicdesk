@@ -4,6 +4,8 @@ set -eu
 case "$jobs" in [1-8]) ;; *) echo 'Invalid compiler job count' >&2; exit 1 ;; esac
 work=/run/shroot-libc-build
 cache=/run/shroot-libc-cache
+target=${SHROOT_LIBC_BUILD_TARGET:-installed}
+case "$target" in installed|image) ;; *) echo 'Invalid libc build target' >&2; exit 1 ;; esac
 
 identify_libc() {
     if [ -f /lib/ld-musl-aarch64.so.1 ]; then
@@ -15,7 +17,8 @@ identify_libc() {
     elif [ -f /lib/ld-linux-aarch64.so.1 ]; then
         kind=glibc
         interpreter=/lib/ld-linux-aarch64.so.1
-        version=$("$interpreter" --version | sed -n '1s/.* \([0-9][0-9.]*\)$/\1/p')
+        # Upstream glibc ends its version sentence with a period; some distro banners do not.
+        version=$(LC_ALL=C "$interpreter" --version | sed -n '1{s/\.$//;s/.* \([0-9][0-9.]*\)$/\1/p;}')
         original_libc=
         for library in /lib/aarch64-linux-gnu/libc.so.6 /lib64/libc.so.6 /usr/lib/libc.so.6 /lib/libc.so.6; do
             if [ -f "$library" ]; then original_libc=$library; break; fi
@@ -25,7 +28,10 @@ identify_libc() {
         echo 'No supported AArch64 musl/glibc loader; retaining Shroot Base.' >&2
         exit 1
     fi
-    case "$version" in ''|*[!0-9.]*|.*|*.) echo 'Cannot identify libc version' >&2; exit 1 ;; esac
+    case "$version" in ''|*[!0-9.]*|.*|*.|*..*)
+        printf 'Cannot identify libc version from %s (parsed: %s)\n' "$interpreter" "$version" >&2
+        exit 1 ;;
+    esac
     [ -n "$original_libc" ] || { echo 'Cannot locate the installed libc' >&2; exit 1; }
     loader_hash=$(sha256sum "$interpreter"); loader_hash=${loader_hash%% *}
     libc_hash=$(sha256sum "$original_libc"); libc_hash=${libc_hash%% *}
@@ -39,20 +45,26 @@ identify_libc() {
 identify_libc
 if [ "$mode" = identify ]; then printf '%s\n' "$manifest"; exit 0; fi
 cd "$work"
-printf '%s\n' "$manifest" > manifest
-cp manifest target-manifest
-if [ -f "$cache/$key/manifest" ] && cmp -s manifest "$cache/$key/manifest"; then
-    printf '%s\n' "$key" > result
-    printf 'Reusing Shroot %s %s: %s\n' "$kind" "$version" "$key"
-    exit 0
-fi
+reuse_libc() {
+    printf '%s\n' "$manifest" > manifest
+    if [ -f "$cache/$key/manifest" ] && cmp -s manifest "$cache/$key/manifest"; then
+        printf '%s\n' "$key" > result
+        printf 'Reusing Shroot %s %s: %s\n' "$kind" "$version" "$key"
+        return 0
+    fi
+    return 1
+}
+if reuse_libc; then exit 0; fi
 trap 'status=$?; package_cleanup; exit "$status"' 0
 trap 'exit 130' INT
 trap 'exit 143' TERM
+printf 'Installing libc build dependencies...\n'
 install_libc_tools
+# Named environments now build in place; package upgrades may change their
+# libc. An OCI preparation instead targets the unchanged source image.
+if [ "$target" = installed ]; then identify_libc; fi
+if reuse_libc; then exit 0; fi
 extract_integration
-# Build dependencies belong to an isolated copy. Match the original image,
-# not a newer libc which the package manager may install in that copy.
 case "$kind" in
     musl) source_url=https://musl.libc.org/releases/musl-$version.tar.gz ;;
     glibc) source_url=https://ftp.gnu.org/gnu/glibc/glibc-$version.tar.xz ;;
@@ -123,4 +135,12 @@ cc -O2 -Iintegration/src probe.c -ldl -o probe
 # EVENT_WAIT: probe and shell completion; timeout rejects publication.
 timeout 30 "$loader" --library-path "$work/candidate/lib:/lib:/usr/lib" "$work/probe" "$work/probe-file"
 timeout 30 "$loader" --library-path "$work/candidate/lib:/lib:/usr/lib" /bin/sh -ec 'id; printf "PASS private libc shell\n"'
+if [ "$target" = installed ]; then
+    built_manifest=$manifest
+    identify_libc
+    [ "$manifest" = "$built_manifest" ] || {
+        echo 'Installed libc changed during compilation; retry preparation. Build not published.' >&2
+        exit 1
+    }
+fi
 printf '%s\n' "$key" > result

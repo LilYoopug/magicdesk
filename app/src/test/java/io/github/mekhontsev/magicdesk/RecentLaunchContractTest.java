@@ -97,6 +97,8 @@ public final class RecentLaunchContractTest {
         assertFalse(entries.contains("ShellAccess"));
         final String host = RuntimeSourceFixture.methods("FullscreenStartController", "runningEntries");
         assertFalse(host.contains("RecentApplications"));
+        assertTrue(host.contains("StartMenuEntry.task(app, task,"));
+        assertFalse(host.contains("StartMenuEntry.app(app)"));
         final String builtIn = RuntimeSourceFixture.methods("BuiltInRecentLaunch", "describe");
         assertTrue(builtIn.contains("BuiltInDesktopAppCatalog.searchEntries()"));
         assertFalse(builtIn.contains("source.toUri"));
