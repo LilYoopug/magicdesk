@@ -62,5 +62,10 @@ self-tests do not replace protocol, installer or guest-runtime workflows.
 - [Artwork](artwork.md), [licensing](licensing.md),
   [third-party notices](../THIRD_PARTY_NOTICES.md), [security](../SECURITY.md)
 
-Files named `release-*.md` are version-specific release notes. They intentionally
-retain historical scope and are not the current feature or compatibility contract.
+Version-specific notes live in `docs/releases/VERSION.md`. Published notes retain
+their historical scope; drafts are explicitly marked as pending acceptance.
+Neither replaces the current feature or compatibility contract.
+
+Keep reproducible fixture instructions and useful rejected-design conclusions in
+their owning guides. Superseded implementation plans and step-by-step experiment
+logs belong in Git history or run artifacts, not in the current API reference.

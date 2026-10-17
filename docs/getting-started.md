@@ -102,6 +102,13 @@ inside Termux provide a separate lifetime for longer-running programs. Closing
 a managed tmux window releases only its client PTY; opening the session again
 attaches a new client without restarting its programs.
 
+Android-shell sessions use MagicDesk's bundled mksh. Up/Down recalls commands
+from earlier sessions; `fc -l` lists the shell history. It is stored separately
+for shell and root in `~/.local/state/shell_history`. This retains commands, not
+running programs or their output: APK replacement still ends local PTYs.
+Commands containing secrets can be saved; `unset HISTFILE` disables disk history
+for the current shell. Termux and Linux shells keep their own history settings.
+
 See [Workstation tools](workstation-tools.md).
 
 ## Open Linux Applications
@@ -175,8 +182,18 @@ For unreleased installer changes, use `develop` with the development APK.
 For the script shipped with a specific release, replace `main` with its tag,
 for example `v2.0.2`.
 
-Choose a distribution, environment name, GUI profile, graphics driver, language
-and optional user. Installation and package-manager output stay in the console.
+Choose a distribution, environment name, GUI profile, graphics driver, libc
+mode, compiler job count, language and optional user. Installation and
+package-manager output stay in the console.
+The experimental **Shroot** libc mode prepares a private accelerated library
+inside Linux; **Base** keeps the distribution's unmodified libc. The current
+installer selects Shroot by default. A first source build can take time; the
+same job count applies to libc, Mesa/Turnip and KWin. It does not create a second
+copy of your installed Linux or overwrite its original libc. See
+[libc preparation](shroot.md#optional-libc-acceleration), including enabling it later.
+**Current network** copies the selected Android executor's DNS addresses once.
+It does not lock the guest to that network or follow later DNS changes; see
+[network choices](shroot.md#linux-installer).
 Software graphics is the default. Turnip requires a compatible Adreno device
 and builds a private Mesa inside Linux; it does not replace Android drivers.
 GUI recipes and distro-specific limits are listed in the
@@ -187,6 +204,12 @@ Wayland launcher and probes a private Turnip build on accessible KGSL GPUs,
 with software rendering otherwise.
 See [SteamOS recovery image](shroot.md#steamos-recovery-image) for storage
 requirements and the `steamos` guest account.
+
+If setup is interrupted, do not delete the environment or start a second install.
+Use `shroot list` to confirm its name, then follow
+[Resume An Interrupted Installation](shroot.md#resume-an-interrupted-installation).
+Resume does not download or import the rootfs again. Avoid replacing the
+MagicDesk APK while the installer is running: its console PTY will end.
 
 ### Launch Installed Linux
 

@@ -251,6 +251,9 @@ optional root console running the built-in `magicdesk` CLI.*
 - **Shell integration:** clickable OSC 8 links, window titles, notifications,
   progress and shell-marked command history. Supported shell hooks let you
   revisit a command and copy its output without selecting the whole transcript.
+- **Persistent Android-shell history:** the bundled mksh recalls commands in
+  new sessions with Up/Down. Shell and root histories are separate; Termux and
+  guest Linux keep their own shells and history settings.
 - **Phone-friendly interaction:** smooth local scrollback and kinetic touch
   scrolling, selection handles, a layout that resizes for the on-screen
   keyboard, and **Copy as paragraph** to join unwanted terminal line breaks
@@ -484,9 +487,14 @@ applications and system drivers, with a nested Plasma desktop and automatic
 Turnip selection; see the [recovery-image recipe](docs/shroot.md#steamos-recovery-image).
 Several independent environments can coexist.
 
-The installer can build an accelerated libc locally without replacing the
-distribution's original libraries. Choosing Shroot Base does not prevent enabling
-it later: see [acceleration for an installed environment](docs/shroot.md#enable-after-installation).
+The installer offers on-device libc acceleration, selected by default in this
+development version. It builds a private musl/glibc with direct syscall entry
+and shares compatible builds through a local registry, without replacing the
+distribution's original libraries. **Shroot Base** runs with the unmodified
+libc; it remains available when no compatible build is prepared. This deployment
+is experimental, and a prepared library does not imply the same acceleration
+inside every application sandbox. Choosing Base does not prevent enabling it
+later: see [acceleration for an installed environment](docs/shroot.md#enable-after-installation).
 
 After installation:
 

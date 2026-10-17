@@ -129,9 +129,12 @@ that Linux, not Android or Termux. There is no full-environment backup or copy.
 A compatible cached build is reused before package installation. A cache miss
 needs temporary space for sources, build outputs and staged libraries. Build
 packages remain installed; package upgrades are not rolled back on failure.
-Successful temporary work is removed; failures retain its location. Shroot's
-private libc never overwrites the distribution's package-owned libc. Preparing again with a freshly downloaded
-installer updates the saved recipe; ordinary launches never fetch or compile anything.
+Successful temporary work is removed; failures retain its location for diagnosis.
+A retry starts a new build unless a compatible artifact was already published;
+retained partial libc work is not an incremental-build checkpoint. Shroot's
+private libc never overwrites the distribution's package-owned libc. Preparing
+again with a freshly downloaded installer updates the saved recipe; ordinary
+launches never fetch or compile anything.
 
 When `--libc shroot` is selected, Mesa/Turnip and KWin install their build
 dependencies first, then prepare or reuse libc for the resulting environment,
@@ -419,6 +422,33 @@ changes can make the saved DNS addresses unreachable. Users can edit Linux's
 `/etc/resolv.conf`, use their distribution's resolver configuration, or explicitly
 refresh an inactive environment with `shroot dns NAME system --replace`.
 The installer does not run a background network monitor or overwrite later edits.
+
+#### Resume An Interrupted Installation
+
+In a MagicDesk Shell console, using the same shell/root executor as before:
+
+```sh
+shroot list
+sh ~/install_linux.sh --resume --name steamos --gui plasma --gpu turnip --libc shroot --jobs 4 --fonts keep
+```
+
+This example continues SteamOS with Plasma and explicitly selected Turnip;
+substitute your environment name and repeat the options you intended to install.
+`--resume` detects the installed distribution and skips rootfs download/import.
+It reruns package setup and the selected preparation stages, not the interrupted
+process at its last instruction. Completed compatible libc builds can be reused;
+unfinished libc builds start in a new work directory. Mesa and KWin retain their
+own build directories. None of these steps requires a full copy of the environment.
+
+Do not pass `--dns` or `--image` with `--resume`, including `--dns preserve`:
+resume already retains both, and explicitly rejects these flags. Change DNS
+separately through `shroot dns` or Linux's resolver configuration. Package setup
+can still access repositories and download missing packages or source archives.
+
+Closing the console window retains its PTY; reopen it through **Terminal sessions**
+to continue watching the same installer. **End session**, app process death and
+APK replacement end that PTY. Afterward, use resume in a new console. A saved
+command history or retained build directory is not a surviving installer process.
 
 #### SteamOS recovery image
 
@@ -1054,6 +1084,22 @@ explicit set-ID helper route retain the application's original seccomp filters.
 Firefox has a separate headless screenshot workflow. These are execution tests,
 not a claim that every browser feature or security boundary is complete.
 
+SteamOS Flatpak Chromium has been installed through Discover and launched inside
+the Plasma Wayland session without disabling its sandbox. The GUI check loaded
+an external page; `chrome://sandbox` reported Flatpak, PID/network namespaces and
+Seccomp-BPF with TSYNC, with installed filters also observed on renderer processes.
+Bubblewrap's `--disable-userns` uses enforced per-user, ancestor-scoped namespace
+quotas, not a successful no-op. These checks do not establish kernel-equivalent
+isolation or complete Flatpak support: this run used software graphics after EGL
+initialization failed, and the document portal could not open `/dev/fuse`.
+CPU topology is now available through the shared read-only native sysfs projection,
+also checked inside Flatpak. Initial Discover setup also needed guest system
+services and a user remote not yet fully covered by the installation recipe.
+The [Flatpak browser fixture](../native/guest-exec-lab/desktop-workflows.md#flatpak-chromium)
+also checks JavaScript and repeated normal exits inside that desktop session.
+An independently activated KDE service can keep a separate supervised launch
+alive after the browser exits; that is not itself evidence of a browser hang.
+
 The supervisor preserves application signal handlers, alternate stacks,
 non-dumpable state and installed seccomp filters. ERRNO/TRAP/KILL actions remain
 effective. It prepares required descriptor interception before admitting an
@@ -1127,6 +1173,14 @@ executor-authenticated, launch-owned endpoint. Android host focus selects the
 input recipient independently of X11 or Wayland. The native input bus exposes
 evdev/joydev, sysfs/libudev discovery and guest-private uinput with asynchronous
 rumble handshakes. It never creates Android input devices or requires root.
+
+The private device inventory does not hide CPU/NUMA topology. All launches,
+including consoles without gamepad transport, and guest sysfs mounts project
+native `/sys/devices/system/cpu` and `/sys/devices/system/node` read-only, when
+available to the selected Android UID.
+Their opened files retain native IO; network and device inventories remain owned
+by their guest providers. This grants neither hardware write authority nor access
+to other Android device trees, and does not make missing GPU drivers available.
 
 ## Prepared Userspace
 
