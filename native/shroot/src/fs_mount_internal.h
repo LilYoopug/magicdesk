@@ -76,6 +76,8 @@ static inline int md_view_file_cycle(struct md_control_file file,const struct md
 int md_fs_mount_temporary(struct md_filesystem *, const struct md_fs_request *, struct md_mount_source *);
 int md_fs_mount_overlay(struct md_filesystem *, const struct md_fs_request *, struct md_mount_source *);
 int md_fs_private_mounts_parent(struct md_inode_store *);
+int md_fs_provider_mount(struct md_filesystem *,struct md_provider_tree *,const char *);
+int md_fs_sysfs_prepare(struct md_filesystem *,struct md_provider_tree **);
 
 enum { MD_VIEW_BUCKETS = 4096, MD_VIEW_OBJECT_LIMIT = 65536 };
 static inline int md_view_base(const struct md_mount_namespace *view, const struct md_view_mount *m) {
@@ -111,7 +113,7 @@ static inline struct md_view_mount *md_view_mount_node(struct md_mount_namespace
  * child placements before discarding this slot and its object-cache entries. */
 void md_view_mount_forget(struct md_fs_mounts *, struct md_view_mount *);
 struct md_view_location {
-    int parent, fd, boundary;
+    int parent, fd, boundary, implicit_devices;
     struct md_mount_namespace *view;
     struct md_view_mount *mount;
     char name[NAME_MAX+1];

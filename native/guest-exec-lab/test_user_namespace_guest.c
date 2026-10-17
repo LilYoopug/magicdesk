@@ -22,6 +22,7 @@
 #include <linux/stat.h>
 #include <sys/vfs.h>
 #include <linux/magic.h>
+#include <limits.h>
 
 static void write_map(const char *name, const char *value) {
     char path[128]; snprintf(path,sizeof(path),"/proc/self/%s",name);
@@ -34,6 +35,113 @@ static void completed(pid_t child) {
     int status;
     /* EVENT_WAIT: exact child completion; fixture alarm bounds stuck progress. */
     assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
+}
+static const char *limit_path="/proc/sys/user/max_user_namespaces";
+static unsigned read_limit(int fd) {
+    char text[32]={0};
+    assert(pread(fd,text,sizeof(text)-1,0)>0);
+    return (unsigned)strtoul(text,NULL,10);
+}
+static int quota_child(void *unused) { (void)unused; return 0; }
+static void namespace_limit_case(int mounted) {
+    assert(!unshare(CLONE_NEWUSER|CLONE_NEWNS));
+    write_map("uid_map","0 0 1\n"); write_map("setgroups","deny\n"); write_map("gid_map","0 0 1\n");
+    if (mounted) {
+        assert(!unshare(CLONE_NEWPID));
+        pid_t child=fork(); assert(child>=0);
+        if (child) { completed(child); return; }
+        assert(!mkdir("/tmp/user-limit-proc",0755));
+        int result=mount("proc","/tmp/user-limit-proc","proc",0,NULL);
+        if (result) perror("limit proc mount");
+        assert(!result);
+        limit_path="/tmp/user-limit-proc/sys/user/max_user_namespaces";
+    }
+    const char *watch_names[]={"max_user_instances","max_user_watches","max_queued_events"};
+    const unsigned watch_values[]={128,8192,16384};
+    for (unsigned i=0;i<3;++i) {
+        char path[96]; snprintf(path,sizeof(path),"%s/sys/fs/inotify/%s",
+            mounted ? "/tmp/user-limit-proc" : "/proc",watch_names[i]);
+        int watch=open(path,O_RDONLY); assert(watch>=0 && read_limit(watch)==watch_values[i]);
+        assert(!close(watch));
+        assert(open(path,O_WRONLY)<0 && errno==EACCES);
+    }
+    int fd=open(limit_path,O_RDWR|O_CLOEXEC);
+    if (fd<0) perror("user namespace limit");
+    assert(fd>=0 && read_limit(fd)==INT_MAX);
+    struct stat a,b;
+    assert(!stat(limit_path,&a) && !fstat(fd,&b) && a.st_ino==b.st_ino && a.st_dev==b.st_dev);
+    assert((a.st_mode&0777)==0644 && S_ISREG(a.st_mode));
+    assert(!access(limit_path,R_OK|W_OK));
+    assert(access(limit_path,X_OK)<0 && errno==EACCES);
+    assert(pwrite(fd,"1\n",2,0)==2 && read_limit(fd)==1);
+    assert(pwrite(fd,"8",1,1)==1 && read_limit(fd)==1);
+    const char *bad[]={"-1","2147483648","garbage","1 2"};
+    for (unsigned i=0;i<sizeof(bad)/sizeof(*bad);++i)
+        assert(pwrite(fd,bad[i],strlen(bad[i]),0)<0 && errno==EINVAL);
+    int ready[2],done[2]; assert(!pipe(ready) && !pipe(done));
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        assert(!close(ready[0]) && !close(done[1]));
+        assert(!unshare(CLONE_NEWUSER));
+        write_map("uid_map","0 0 1\n"); write_map("setgroups","deny\n"); write_map("gid_map","0 0 1\n");
+        assert(pwrite(fd,"100",3,0)<0 && errno==EACCES);
+        int inner=open(limit_path,O_RDWR); assert(inner>=0 && read_limit(inner)==INT_MAX);
+        assert(pwrite(inner,"100",3,0)==3);
+        assert(unshare(CLONE_NEWUSER)<0 && errno==ENOSPC);
+        assert(!close(inner));
+        assert(write(ready[1],"r",1)==1);
+        char byte;
+        /* EVENT_WAIT: parent pins namespace before this child exits. */
+        assert(read(done[0],&byte,1)==1); _exit(0);
+    }
+    assert(!close(ready[1]) && !close(done[0]));
+    char byte,path[64];
+    /* EVENT_WAIT: child created its namespace; alarm bounds protocol failure. */
+    assert(read(ready[0],&byte,1)==1);
+    snprintf(path,sizeof(path),"%s/%d/ns/user",mounted ? "/tmp/user-limit-proc" : "/proc",child);
+    int pin=open(path,O_RDONLY|O_CLOEXEC); assert(pin>=0);
+    assert(unshare(CLONE_NEWUSER)<0 && errno==ENOSPC);
+    void *stack=malloc(1024*1024); assert(stack);
+    assert(clone(quota_child,(char *)stack+1024*1024,CLONE_NEWUSER|SIGCHLD,NULL)<0 && errno==ENOSPC);
+    free(stack);
+    assert(write(done[1],"r",1)==1); completed(child);
+    assert(unshare(CLONE_NEWUSER)<0 && errno==ENOSPC);
+    assert(!close(pin));
+    assert(!close(ready[0]) && !close(done[1]));
+    child=fork(); assert(child>=0);
+    if (!child) {
+        int result=unshare(CLONE_NEWUSER);
+        if (result) perror("user namespace after final descriptor close");
+        assert(!result); _exit(0);
+    }
+    completed(child);
+    assert(pwrite(fd,"0",1,0)==1);
+    assert(unshare(CLONE_NEWUSER)<0 && errno==ENOSPC);
+    assert(!close(fd));
+    if (mounted) {
+        assert(!mount(NULL,"/tmp/user-limit-proc",NULL,MS_REMOUNT|MS_RDONLY,NULL));
+        assert(open(limit_path,O_WRONLY)<0 && errno==EROFS);
+        assert(!umount("/tmp/user-limit-proc") && !rmdir("/tmp/user-limit-proc"));
+    }
+}
+int test_user_namespace_limits(void) {
+    alarm(60);
+    assert(!chmod("/",0755) && !chmod("/tmp",01777));
+    for (unsigned round=0;round<16;++round) for (int mounted=0;mounted<2;++mounted) {
+        pid_t child=fork(); assert(child>=0);
+        if (!child) { namespace_limit_case(mounted); _exit(0); }
+        completed(child);
+    }
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        assert(!setgroups(0,NULL) && !setgid(1000) && !setuid(1000));
+        assert(open(limit_path,O_WRONLY)<0 && errno==EACCES);
+        int fd=open(limit_path,O_RDONLY); assert(fd>=0 && read_limit(fd)==INT_MAX); close(fd);
+        _exit(0);
+    }
+    completed(child);
+    puts("PASS guest user namespace limits: ancestor quotas, clone/unshare, retained FD lifetime, sysctl permissions and mounted proc");
+    return 0;
 }
 static void private_user(void) {
     assert(getuid()==65534 && getgid()==65534);

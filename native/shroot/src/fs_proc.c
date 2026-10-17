@@ -5,6 +5,7 @@
 #include "network_namespace.h"
 #include "proc_paths.h"
 #include "proc_sysctl.h"
+#include "user_sysctl.h"
 #include "procfs_view.h"
 #include "linux_abi.h"
 #include <errno.h>
@@ -23,6 +24,7 @@ int md_fs_proc_operation(struct md_filesystem *fs,struct md_mount_namespace *vie
     struct md_proc_path ref=md_proc_path_for(path,0,0);
     enum md_proc_file_kind kind=(enum md_proc_file_kind)(ref.kind-MD_PROC_UID_MAP);
     int sysctl=md_proc_file_sysctl(kind);
+    int user_control=ref.kind==MD_PROC_MAX_USER_NAMESPACES;
     if (q->operation==MD_FS_STATFS) {
         md_fs_statfs_result(fd,md_mount_policy_flags(&mount->policy),NULL,out,output);
         if (!out->error) ((struct md_fs_statfs *)output->data)->type=PROC_SUPER_MAGIC;
@@ -36,12 +38,12 @@ int md_fs_proc_operation(struct md_filesystem *fs,struct md_mount_namespace *vie
     }
     int network=md_network_namespace_managed(fs->actor->network);
     int network_control=network && md_proc_network_sysctl(ref.kind);
-    if (!sysctl && !network_control && (q->operation==MD_FS_OPEN || q->operation==MD_FS_REOPEN)
+    if (!sysctl && !network_control && !user_control && (q->operation==MD_FS_OPEN || q->operation==MD_FS_REOPEN)
             && (q->flags&O_NOATIME) && !(q->flags&O_PATH)) {
         r=md_procfs_noatime(fs,fd,path);
         if (r) { out->error=r; return 1; }
     }
-    if (!sysctl && !network_control && (q->operation==MD_FS_STAT || q->operation==MD_FS_FSTAT)
+    if (!sysctl && !network_control && !user_control && (q->operation==MD_FS_STAT || q->operation==MD_FS_FSTAT)
             && mount->provider) {
         int private=md_provider_tree_private(mount->provider,fd);
         if (private<0) { out->error=private; return 1; }
@@ -60,7 +62,7 @@ int md_fs_proc_operation(struct md_filesystem *fs,struct md_mount_namespace *vie
             return 1;
         }
     }
-    if (!sysctl && (!md_proc_network_sysctl(ref.kind)
+    if (!sysctl && !user_control && (!md_proc_network_sysctl(ref.kind)
             || !md_network_namespace_managed(fs->actor->network))) return 0;
     if (q->operation==MD_FS_PATH || q->operation==MD_FS_OBJECT_ID) return 0;
     /* Metadata/access do not need an open description or its carrier memfd. */
@@ -83,7 +85,9 @@ int md_fs_proc_operation(struct md_filesystem *fs,struct md_mount_namespace *vie
         r=md_view_anchor_duplicate(fs,view,mount,fd,&origin);
     struct md_control_file file={0};
     if (!r) {
-        file=sysctl ? md_proc_sysctl_new(kind,origin,fs->actor->uts) : md_network_sysctl_new(fs->actor->network,
+        file=sysctl ? md_proc_sysctl_new(kind,origin,fs->actor->uts)
+            : user_control ? md_user_sysctl_new(fs->store->identity->user_namespace,origin)
+            : md_network_sysctl_new(fs->actor->network,
             (enum md_network_parameter)(ref.kind-MD_PROC_NET_UNPRIVILEGED_PORT),ref.interface,origin);
         if (!file.ops) r=-errno;
     }

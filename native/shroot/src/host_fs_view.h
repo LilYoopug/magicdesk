@@ -1,0 +1,8 @@
+#ifndef MD_HOST_FS_VIEW_H
+#define MD_HOST_FS_VIEW_H
+struct md_provider_tree;
+enum md_host_fs_view { MD_HOST_FS_NONE, MD_HOST_FS_SYS, MD_HOST_FS_DEV };
+struct md_provider_tree *md_host_fs_new(int parent,enum md_host_fs_view);
+struct md_provider_tree *md_host_fs_import(int upper,enum md_host_fs_view);
+enum md_host_fs_view md_host_fs_kind(const struct md_provider_tree *);
+#endif

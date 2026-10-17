@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
 #include "sysfs_view.h"
-#include "temporary_directory.h"
+#include "provider_tree.h"
 #include "guest_identity.h"
 #include "file_permissions.h"
 #include "fs_anchor.h"
@@ -16,7 +16,9 @@
 
 enum attribute { DIRECTORY, LINK, IFINDEX, IFLINK, MTU, TYPE, ADDRESS, BROADCAST, FLAGS, OPERSTATE, CARRIER };
 static const struct node { const char *path; enum attribute attribute; const char *target; } nodes[]={
-    {".",DIRECTORY,NULL}, {"class",DIRECTORY,NULL}, {"class/net",DIRECTORY,NULL},
+    {".",DIRECTORY,NULL}, {"block",DIRECTORY,NULL}, {"bus",DIRECTORY,NULL},
+    {"dev",DIRECTORY,NULL}, {"dev/block",DIRECTORY,NULL}, {"dev/char",DIRECTORY,NULL},
+    {"class",DIRECTORY,NULL}, {"class/net",DIRECTORY,NULL},
     {"devices",DIRECTORY,NULL}, {"devices/virtual",DIRECTORY,NULL},
     {"devices/virtual/net",DIRECTORY,NULL}, {"devices/virtual/net/lo",DIRECTORY,NULL},
     {"class/net/lo",LINK,"../../devices/virtual/net/lo"},
@@ -31,7 +33,8 @@ static const struct node { const char *path; enum attribute attribute; const cha
 enum { NODE_COUNT=sizeof(nodes)/sizeof(*nodes) };
 struct md_sysfs {
     atomic_uint refs;
-    int storage,root;
+    int root;
+    struct md_provider_tree *tree;
     struct md_network_namespace *network;
     struct stat identities[NODE_COUNT];
 };
@@ -41,14 +44,27 @@ struct opened {
     struct md_fs_anchor *origin;
     unsigned node;
 };
+int md_sysfs_host_visible(const char *path) {
+    const char *roots[]={"/devices/system/cpu","/devices/system/node"};
+    if (!strcmp(path,"/")) return 1;
+    size_t size=strlen(path);
+    for (unsigned i=0;i<sizeof(roots)/sizeof(*roots);++i) {
+        size_t length=strlen(roots[i]);
+        if (size<=length && !strncmp(path,roots[i],size)
+                && (size==length || roots[i][size]=='/')) return 1;
+        if (size>length && !strncmp(path,roots[i],length) && path[length]=='/') return 1;
+    }
+    return 0;
+}
+static const struct md_provider_tree_ops tree_ops={.filesystem=SYSFS_MAGIC,
+    .lower_visible=md_sysfs_host_visible,.readonly=1};
 struct md_sysfs *md_sysfs_retain(struct md_sysfs *v) {
     if (v) atomic_fetch_add_explicit(&v->refs,1,memory_order_relaxed);
     return v;
 }
 void md_sysfs_release(struct md_sysfs *v) {
     if (!v || atomic_fetch_sub_explicit(&v->refs,1,memory_order_acq_rel)!=1) return;
-    if (v->root>=0) close(v->root);
-    if (v->storage>=0) md_temporary_directory_release(v->storage);
+    md_provider_tree_release(v->tree);
     md_network_namespace_release(v->network); free(v);
 }
 struct md_sysfs *md_sysfs_new(int parent,struct md_network_namespace *network,const struct md_identity *id) {
@@ -57,13 +73,13 @@ struct md_sysfs *md_sysfs_new(int parent,struct md_network_namespace *network,co
     if (r) { errno=-r; return NULL; }
     struct md_sysfs *v=calloc(1,sizeof(*v));
     if (!v) return NULL;
-    atomic_init(&v->refs,1); v->root=v->storage=-1;
+    atomic_init(&v->refs,1); v->root=-1;
     v->network=md_network_namespace_retain(network);
-    v->storage=md_temporary_directory_new(parent);
-    if (v->storage<0) { errno=-v->storage; goto failed; }
-    if (mkdirat(v->storage,"sys",0700)) goto failed;
-    v->root=openat(v->storage,"sys",O_PATH|O_DIRECTORY|O_CLOEXEC);
-    if (v->root<0) goto failed;
+    int lower=open("/sys",O_PATH|O_DIRECTORY|O_CLOEXEC);
+    v->tree=md_provider_tree_new(parent,lower,NULL,0,&tree_ops,NULL);
+    int saved=errno; if (lower>=0) close(lower); errno=saved;
+    if (!v->tree) goto failed;
+    v->root=md_provider_tree_root(v->tree);
     for (unsigned i=0;i<NODE_COUNT;++i) {
         const struct node *n=&nodes[i];
         if (n->attribute==DIRECTORY) {
@@ -88,17 +104,19 @@ failed:;
     int error=errno; md_sysfs_release(v); errno=error; return NULL;
 }
 int md_sysfs_root(const struct md_sysfs *v) { return v->root; }
-static int node_index(const struct md_sysfs *v,int fd) {
+struct md_provider_tree *md_sysfs_provider(const struct md_sysfs *v) { return v->tree; }
+int md_sysfs_node(const struct md_sysfs *v,int fd) {
     if (fd<0) return -ENOENT;
     struct stat st;
     if (fstat(fd,&st)) return -errno;
+    if (st.st_dev!=v->identities[0].st_dev) return -EXDEV;
     for (unsigned i=0;i<NODE_COUNT;++i)
         if (st.st_dev==v->identities[i].st_dev && st.st_ino==v->identities[i].st_ino) return (int)i;
-    return -ESTALE;
+    return -EXDEV;
 }
-int md_sysfs_stat(const struct md_sysfs *v,int fd,struct stat *st) {
-    int i=node_index(v,fd);
+int md_sysfs_node_stat(const struct md_sysfs *v,int i,struct stat *st) {
     if (i<0) return i;
+    if (i>=NODE_COUNT) return -EINVAL;
     *st=v->identities[i]; return 0;
 }
 static void *retain_open(void *data) {
@@ -148,10 +166,10 @@ static int access_open(void *data,const struct md_identity *id,unsigned mode) {
 }
 static const struct md_control_file_ops ops={.retain=retain_open,.release=release_open,
     .stat=stat_open,.read=read_open,.write=write_open,.access=access_open,.filesystem=SYSFS_MAGIC};
-int md_sysfs_open(struct md_sysfs *v,int fd,int flags,const struct md_identity *id,
+int md_sysfs_node_open(struct md_sysfs *v,int i,int flags,const struct md_identity *id,
         struct md_fs_anchor *origin,const struct md_control_file_ops **out,void **context) {
-    int i=node_index(v,fd);
     if (i<0) return i;
+    if (i>=NODE_COUNT) return -EINVAL;
     const struct stat *st=&v->identities[i];
     if ((flags&O_DIRECTORY) && !S_ISDIR(st->st_mode)) return -ENOTDIR;
     if (!(flags&O_PATH)) {

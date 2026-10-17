@@ -98,6 +98,9 @@ long md_proc_control_metadata(const struct md_proc_path *ref, long nr, const uns
         } else if (nr==SYS_readlinkat) {
             if (!namespace) result=kind==MD_PROC_FD ? -EXDEV : -EINVAL;
             else if (!a[3]) result=-EINVAL;
+            /* A namespace opened through a bind mount has a retained pathname,
+             * unlike an anonymous /proc/PID/ns handle. Resolve it in the VFS. */
+            else if (metadata.value.mount_id) result=-EXDEV;
             else {
                 char label[64]; md_copy(label,sizeof(label),md_proc_file_namespace_name(metadata.kind));
                 md_append(label,sizeof(label),":["); md_decimal(label+md_length(label),st.st_ino);

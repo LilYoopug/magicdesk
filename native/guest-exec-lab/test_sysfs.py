@@ -48,6 +48,7 @@ def guest():
         os.close(fd)
 
     with tempfile.TemporaryDirectory(prefix='md-sysfs-') as directory, ExitStack() as cleanup:
+        cpu_possible = os.environ['MD_TEST_CPU_POSSIBLE']
         root = Path(directory)
         a, b, alias = [root / name for name in ('a', 'b', 'alias')]
         for path in (a, b, alias):
@@ -61,6 +62,20 @@ def guest():
         call(97, 0x40000000)  # NEWNET, retaining initial logical user authority.
         first = os.open('/proc/self/ns/net', os.O_RDONLY)
         call(40, 'sysfs', a, 'sysfs', 15, 0)
+        for name in ('block', 'bus', 'dev/block', 'dev/char'):
+            assert (a / name).is_dir() and os.listdir(a / name) == [], name
+        assert set(os.listdir(a / 'devices/system')) <= {'cpu', 'node'}
+        cpu = a / 'devices/system/cpu/possible'
+        assert cpu.read_text() == cpu_possible
+        assert not (a / 'devices/system/cpux').exists()
+        assert not (a / 'devices/platform').exists()
+        assert not (a / 'class/thermal').exists()
+        cpu_fd = os.open(cpu, os.O_RDONLY)
+        cpu_duplicate = os.dup(cpu_fd)
+        assert os.read(cpu_fd, 1) + os.read(cpu_duplicate, 4096) == cpu_possible.encode()
+        assert os.pread(cpu_fd, 4096, 0) == cpu_possible.encode()
+        os.close(cpu_duplicate)
+        denied(lambda: cpu.write_text('0'), errno.EROFS)
         net = a / 'class/net'
         lo = net / 'lo'
         assert sorted(os.listdir(net)) == ['lo']
@@ -126,6 +141,10 @@ def guest():
         cleanup.callback(libc.syscall, ctypes.c_long(39), ctypes.c_char_p(str(bound).encode()), ctypes.c_long(2))
         call(40, lo / 'flags', bound, 0, 4096, 0)
         call(39, a, 2)
+        assert os.pread(cpu_fd, 4096, 0) == cpu_possible.encode()
+        with open('/proc/self/fd/' + str(cpu_fd)) as reopened_cpu:
+            assert reopened_cpu.read() == cpu_possible
+        os.close(cpu_fd)
         assert (alias / 'class/net/lo/flags').read_text() == '0x9\n'
         assert os.pread(fd, 6, 0) == b'65536\n'
         call(39, alias, 2)
@@ -145,6 +164,14 @@ def guest():
         call(39, b / 'fs/cgroup', 2)
         call(39, b, 2)
         call(40, 'sysfs', b, 'sysfs', 14, 0)
+        assert (b / 'devices/system/cpu/possible').read_text() == cpu_possible
+        denied(lambda: (b / 'devices/system/cpu/online').write_text('0'), errno.EROFS)
+        cpu = b / 'devices/system/cpu/possible'
+        denied(lambda: os.chmod(cpu, 0o444), errno.EROFS)
+        denied(lambda: os.setxattr(cpu, 'user.test', b'value'), errno.EROFS)
+        with cpu.open() as opened_cpu:
+            denied(lambda: os.fchmod(opened_cpu.fileno(), 0o444), errno.EROFS)
+            denied(lambda: os.setxattr(opened_cpu.fileno(), 'user.test', b'value'), errno.EROFS)
         value = b / 'class/net/lo/mtu'
         denied(lambda: value.write_text('1500'), errno.EOPNOTSUPP)
         denied(lambda: os.truncate(value, 0), errno.EOPNOTSUPP)
@@ -204,7 +231,9 @@ def main():
     from test_oci_services import Suite
     suite = Suite(args.build, args.build)
     target = '/tmp/md-sysfs-' + suite.report['id']
-    prefix = [suite.runner, '--store', args.store, '--user', '0:0']
+    cpu_possible = suite.command(['cat', '/sys/devices/system/cpu/possible'], quiet=True)
+    prefix = [suite.runner, '--store', args.store, '--user', '0:0',
+              '--env', 'MD_TEST_CPU_POSSIBLE=' + cpu_possible]
     try:
         suite.transport.upload(suite.client, Path(__file__), suite.base + '/test.py')
         suite.command(prefix + ['--', '/bin/mkdir', target])

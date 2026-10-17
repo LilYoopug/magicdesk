@@ -120,6 +120,9 @@ static void file_release(void *context) {
 static const struct md_namespace_reference *file_reference(void *context) {
     return &((struct namespace_file *)context)->namespace;
 }
+static struct md_fs_anchor *file_origin(void *context) {
+    return ((struct namespace_file *)context)->origin;
+}
 static int file_stat(void *context,struct stat *out) {
     md_namespace_reference_stat(file_reference(context),out); return 0;
 }
@@ -149,7 +152,7 @@ static void *file_at(void *context,struct md_fs_anchor *origin) {
 static const struct md_control_file_ops file_ops={
     .retain=file_retain,.release=file_release,.stat=file_stat,.access=file_access,
     .filesystem=NSFS_MAGIC,.nonseekable=1,.descriptor=file_descriptor,
-    .namespace_reference=file_reference,.at=file_at
+    .namespace_reference=file_reference,.at=file_at,.origin=file_origin
 };
 struct md_control_file md_namespace_file_new(const struct md_namespace_reference *ref) {
     struct namespace_file *f=calloc(1,sizeof(*f));

@@ -233,7 +233,8 @@ struct md_inode_store *md_fs_context_operation_window(const struct md_fs_context
     }
     /* Nested stores/overlay/providers retain their own locking contracts. A
      * later provider may opt in only after defining cross-store release order. */
-    if (md_mount_namespace_attached(mounts) || md_mount_namespace_managed_paths(mounts)
+    if ((md_mount_namespace_attached(mounts) && !md_mount_namespace_initial_boundary(mounts))
+            || md_mount_namespace_managed_paths(mounts)
             || (c->authenticated && md_domain_restricted(c->task.fs))) return NULL;
     return c->filesystem->store;
 }

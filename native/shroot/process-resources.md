@@ -47,6 +47,9 @@ Threads share the process limit; independent processes inherit a copy. Registry
 custody retains unreaped zombies. A quota-pressure check can release kernel-reaped
 charges without discarding identities still needed by a pending translated wait.
 Normal file/socket IO does not inspect counters or scan tasks.
+Cached accounting scopes use stable namespace identity values, including their
+generation, rather than owning namespace references. Keeping an accounting
+ceiling must not keep a dead user namespace charged against its ancestor quota.
 
 `getrlimit`, `setrlimit`, `prlimit64` and typed proc `limits` agree. Foreign target
 authorization uses guest credentials; raising the hard limit requires initial

@@ -4,6 +4,7 @@
 #include "task_resources.h"
 #include "fs_native.h"
 #include "inode_internal.h"
+#include "../shroot/src/cooperative_channel.h"
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -12,11 +13,14 @@
 #include <linux/filter.h>
 #include <linux/seccomp.h>
 #include <signal.h>
+#include <poll.h>
+#include <sched.h>
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/prctl.h>
+#include <sys/ptrace.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
@@ -306,6 +310,58 @@ static void managed_proc_reads(const char *store) {
     assert(descriptors()==before);
     puts("PASS managed proc observations: socket identity, descriptor reuse, credentials, busy table and typed provider fallback, no FD leak");
 }
+static void stopped_queued_entry(const char *store) {
+    unsigned before=descriptors();
+    pid_t pid=getpid();
+    struct md_task_registry *tasks=md_task_registry_create(); assert(tasks);
+    struct md_fs_worker *worker=NULL;
+    char endpoint[80]; snprintf(endpoint,sizeof(endpoint),"md-queued-entry-%d",pid);
+    assert(!md_fs_worker_start(store,endpoint,NULL,tasks,NULL,NULL,&worker));
+    struct md_task_resources resources={.fs=md_domain_new(),.files=md_fd_origins_new(),
+        .mounts=md_fs_worker_mounts(worker)};
+    assert(resources.fs && resources.files);
+    struct md_identity id=md_identity_new(0,0);
+    assert(!md_task_registry_publish(tasks,pid,pid,&id,&resources));
+    struct md_namespace_broker *broker=md_broker_create(worker,0,unexpected_delegate); assert(broker);
+    assert(!md_broker_task(broker,pid,MD_BROKER_COOPERATIVE,0,0));
+    struct md_entry_channel channel;
+    assert(!md_broker_cooperative_bind(broker,pid,&channel,1));
+    /* Valid but unused notification source: this case exercises direct entry. */
+    int notification=listener(SYS_reboot);
+    md_broker_listen(broker,notification);
+    struct md_fd_order owner={0};
+    assert(md_fd_order_begin(resources.files,&owner,NULL)==1 && !md_fd_order_start(&owner));
+    int fd=open("/dev/null",O_RDONLY|O_CLOEXEC); assert(fd>=0);
+    channel.sequence=1; channel.call.number=SYS_close; channel.call.args[0]=fd;
+    atomic_store_explicit(&channel.state,MD_ENTRY_REQUEST,memory_order_release);
+    md_fs_worker_wake(worker);
+    /* EVENT_WAIT: shared admission publication; the fixture alarm bounds loss. */
+    while (atomic_load_explicit(&channel.state,memory_order_acquire)==MD_ENTRY_REQUEST) sched_yield();
+    assert(atomic_load(&channel.state)==MD_ENTRY_RUNNING);
+    int status=(PTRACE_EVENT_STOP<<16)|(SIGTRAP<<8)|0x7f;
+    assert(md_broker_hold_event(broker,pid,status,NULL)==1);
+    pid_t observed=0; int returned=0;
+    while (!observed) {
+        /* EVENT_WAIT: retirement publishes the exact stop before the competing
+         * resource owner releases; timeout is a regression failure. */
+        struct pollfd ready={.fd=md_fs_worker_fd(worker),.events=POLLIN};
+        assert(poll(&ready,1,5000)==1);
+        assert(!md_fs_worker_dispatch(worker));
+        observed=md_broker_take_event(broker,&returned,NULL);
+    }
+    assert(observed==pid && returned==status);
+    assert(atomic_load(&channel.state)==MD_ENTRY_RESPONSE && channel.receipt==1
+        && channel.outcome==MD_ENTRY_DECLINED);
+    assert(md_fd_order_state(&owner)==MD_RESOURCE_ORDER_RUNNING && fcntl(fd,F_GETFD)==FD_CLOEXEC);
+    assert(!md_fd_order_complete(&owner) && !close(fd));
+    md_broker_forget(broker,pid);
+    assert(!md_fs_worker_stop(worker)); md_broker_destroy(broker);
+    assert(!close(notification));
+    md_task_registry_destroy(tasks); md_domain_release(resources.fs);
+    md_fd_origins_release(resources.files); md_identity_release(&id);
+    assert(descriptors()==before);
+    puts("PASS stopped cooperative reservation: queued close retires without waiting for the stopped table owner or executing an effect");
+}
 void md_test_namespace_broker(const char *root) {
     setbuf(stdout,NULL); alarm(60);
     extern void md_test_notification_result(void);
@@ -335,6 +391,6 @@ void md_test_namespace_broker(const char *root) {
     }
     assert(!close(directory) && !close(attached));
     completed_result(store,SYS_fstat); completed_result(store,SYS_gettid);
-    managed_proc_reads(store); alarm(0);
+    managed_proc_reads(store); stopped_queued_entry(store); alarm(0);
     puts("PASS broker directory notification ownership");
 }

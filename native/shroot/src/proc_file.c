@@ -60,8 +60,12 @@ static unsigned selectors(const struct md_fd_object *object) {
 static struct md_control_file readiness(struct md_fd_object *object) {
     return md_proc_file_control((void *)object);
 }
+static struct md_fs_anchor *origin(struct md_fd_object *object) {
+    struct md_proc_file *f=(void *)object;
+    return f->control && f->control->origin ? f->control->origin(f->control_context) : NULL;
+}
 static const struct md_fd_object_type type={.destroy=destroy,.selectors=1U<<MD_FD_SELECTOR_PROC,
-    .selector_mask=selectors,.readiness=readiness};
+    .selector_mask=selectors,.readiness=readiness,.origin=origin};
 struct md_fd_object *md_proc_file_control_object(const struct md_control_file_ops *ops,void *context,
         const struct md_identity *id,int flags,int *descriptor) {
     struct md_proc_file *file=md_proc_file_open_control(ops,context,id,flags);

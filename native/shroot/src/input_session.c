@@ -6,6 +6,7 @@
 #include "fs_mount_internal.h"
 #include "inode_internal.h"
 #include "event_wait.h"
+#include "sysfs_view.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/magic.h>
@@ -75,7 +76,6 @@ static int control(void *context,int fd,struct md_control_file *out) {
     pthread_mutex_unlock(&n->lock); return found;
 }
 static const struct md_provider_tree_ops device_ops={.retain=retain_nodes,.release=release_nodes,.control=control,.filesystem=TMPFS_MAGIC};
-static const struct md_provider_tree_ops sysfs_ops={.retain=retain_nodes,.release=release_nodes,.control=control,.filesystem=SYSFS_MAGIC};
 static void feedback(void *context,const struct md_input_rumble *effect) {
     struct md_input_session *s=context;
     pthread_mutex_lock(&s->lock);
@@ -304,14 +304,6 @@ static void *transport(void *context) {
     if (!ready && !error) error=-ENOTCONN;
     atomic_store(&s->error,error); md_event_signal(s->ready); return NULL;
 }
-static int mount_tree(struct md_filesystem *fs,struct md_provider_tree *tree,const char *path) {
-    struct md_view_location location={.fd=-1,.parent=-1};
-    int error=md_view_walk(fs,AT_FDCWD,NULL,path,1,0,MD_VIEW_MOUNT_TARGET,&location);
-    struct md_mount_source source={.fd=md_provider_tree_root(tree),.backing=MD_MOUNT_PROVIDER,.provider=tree,
-        .policy=MD_MOUNT_NOSUID|MD_MOUNT_NOEXEC};
-    if (!error) error=md_view_attach_source(fs,&source,&location,NULL);
-    md_view_location_close(&location); return error;
-}
 static int mount_devices(struct md_filesystem *fs,struct md_input_session *s) {
     /* Shared memory keeps its existing inode namespace when /dev gains a
      * device provider. No host /dev/shm directory is assumed or created. */
@@ -320,15 +312,15 @@ static int mount_devices(struct md_filesystem *fs,struct md_input_session *s) {
     if (!error && !md_view_inode(shm.mount)) error=-EOPNOTSUPP;
     struct md_mount_source source={.fd=shm.fd,.backing=MD_MOUNT_INODE,
         .storage=shm.mount && shm.mount->storage ? shm.mount->storage : md_inode_store_lifetime(fs->store)};
-    if (!error) error=mount_tree(fs,s->dev,"/dev");
+    if (!error) error=md_fs_provider_mount(fs,s->dev,"/dev");
     if (!error) error=md_view_walk(fs,-1,NULL,"/dev/shm",1,0,MD_VIEW_MOUNT_TARGET,&target);
     if (!error) error=md_view_attach_source(fs,&source,&target,NULL);
     md_view_location_close(&target); md_view_location_close(&shm); return error;
 }
 int md_input_session_start(struct md_filesystem *fs,const struct md_input_launch *launch,
-        struct md_device_events *events,struct md_input_session **out) {
+        struct md_device_events *events,struct md_provider_tree *sysfs,struct md_input_session **out) {
     if (!launch || !launch->endpoint) return 0;
-    if (!events) return -EINVAL;
+    if (!events || !sysfs) return -EINVAL;
     size_t length=strlen(launch->endpoint);
     struct sockaddr_un address={.sun_family=AF_UNIX};
     if (!length || length>=sizeof(address.sun_path)-1) return -EINVAL;
@@ -353,9 +345,7 @@ int md_input_session_start(struct md_filesystem *fs,const struct md_input_launch
     const char *dev_opaque[]={"/input"};
     s->dev=md_provider_tree_new(parent,lower,dev_opaque,1,&device_ops,s->nodes);
     if (lower>=0) close(lower);
-    /* The launch owns its device inventory. Importing Android's complete sysfs
-     * advertises devices whose attributes and drivers are not guest-accessible. */
-    s->sys=md_provider_tree_new(parent,-1,NULL,0,&sysfs_ops,s->nodes);
+    s->sys=md_provider_tree_retain(sysfs);
     s->udev=md_provider_tree_new(parent,-1,NULL,0,NULL,NULL);
     close(parent);
     if (!s->dev || !s->sys || !s->udev) { error=-errno; goto failed; }
@@ -363,8 +353,9 @@ int md_input_session_start(struct md_filesystem *fs,const struct md_input_launch
     if (!error) error=directory(md_provider_tree_root(s->dev),"shm");
     if (!error) error=directory(md_provider_tree_root(s->udev),"data");
     if (!error) error=text_file(md_provider_tree_root(s->udev),"control","");
-    const char *dirs[]={"class/input","devices/virtual/input","dev/char"};
-    for (unsigned i=0;i<3 && !error;++i) error=directory(md_provider_tree_root(s->sys),dirs[i]);
+    const char *dirs[]={"class/input","devices/virtual/input"};
+    for (unsigned i=0;i<sizeof(dirs)/sizeof(*dirs) && !error;++i)
+        error=directory(md_provider_tree_root(s->sys),dirs[i]);
     if (error) goto failed;
     struct md_uinput_publisher publisher={.context=s,.add=publish,.remove=remove_virtual};
     error=md_uinput_new(s->bus,launch->wake_fd,&publisher,&s->uinput);
@@ -385,7 +376,6 @@ int md_input_session_start(struct md_filesystem *fs,const struct md_input_launch
     if (error>=0) error=atomic_load(&s->error);
     if (error) goto failed;
     error=mount_devices(fs,s);
-    if (!error) error=mount_tree(fs,s->sys,"/sys");
     const char *guest_dirs[]={"/run","/run/udev"};
     /* Launch preparation owns this view before guest task resources exist. */
     struct md_fs_context preparation={.filesystem=fs};
@@ -394,7 +384,7 @@ int md_input_session_start(struct md_filesystem *fs,const struct md_input_launch
         struct md_fs_result result; md_fs_context_execute(&preparation,&q,&result,NULL);
         if (result.error && result.error!=-EEXIST) error=result.error;
     }
-    if (!error) error=mount_tree(fs,s->udev,"/run/udev");
+    if (!error) error=md_fs_provider_mount(fs,s->udev,"/run/udev");
     if (error) goto failed;
     *out=s; return 0;
 failed:

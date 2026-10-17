@@ -1,12 +1,21 @@
 #define _GNU_SOURCE
 #include "fs_mount_internal.h"
 #include "fs_control.h"
+#include "host_fs_view.h"
 #include "inode_internal.h"
 #include "linux_abi.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
 
+int md_fs_provider_mount(struct md_filesystem *fs,struct md_provider_tree *tree,const char *path) {
+    struct md_view_location location={.fd=-1,.parent=-1};
+    int error=md_view_walk(fs,AT_FDCWD,NULL,path,1,0,MD_VIEW_MOUNT_TARGET,&location);
+    struct md_mount_source source={.fd=md_provider_tree_root(tree),.backing=MD_MOUNT_PROVIDER,.provider=tree,
+        .policy=MD_MOUNT_NOSUID|MD_MOUNT_NOEXEC|(md_host_fs_kind(tree)==MD_HOST_FS_SYS ? MD_MOUNT_READONLY : 0)};
+    if (!error) error=md_view_attach_source(fs,&source,&location,NULL);
+    md_view_location_close(&location); return error;
+}
 int md_fs_provider_operation(struct md_filesystem *fs,struct md_mount_namespace *view,
         struct md_view_mount *mount,int fd,const struct md_fs_request *q,
         struct md_fs_result *out,const struct md_fs_output *output) {
@@ -29,11 +38,14 @@ int md_fs_provider_operation(struct md_filesystem *fs,struct md_mount_namespace 
     int managed=md_provider_tree_control(mount->provider,fd,&file);
     if (managed<0) { out->error=managed; return 1; }
     if (!managed) {
-        int private=md_provider_tree_private(mount->provider,fd);
-        if (private<0) { out->error=private; return 1; }
-        if (private && (q->operation==MD_FS_OPEN || q->operation==MD_FS_REOPEN)
-                && !(q->flags&O_PATH) && (q->flags&(O_ACCMODE|O_TRUNC))) {
-            out->error=-EROFS; return 1;
+        int write_open=(q->operation==MD_FS_OPEN || q->operation==MD_FS_REOPEN)
+            && !(q->flags&O_PATH) && (q->flags&(O_ACCMODE|O_TRUNC));
+        int write_access=q->operation==MD_FS_ACCESS && (q->mode&W_OK);
+        int write_xattr=q->operation==MD_FS_XATTR_OBJECT
+            && (q->mode==MD_FS_XATTR_SET || q->mode==MD_FS_XATTR_REMOVE);
+        if (write_open || write_access || write_xattr) {
+            int readonly=md_provider_tree_readonly(mount->provider,fd);
+            if (readonly) { out->error=readonly<0 ? readonly : -EROFS; return 1; }
         }
         return 0;
     }

@@ -332,6 +332,16 @@ int main(int argc, char **argv) {
     struct md_fs_attachment attachments[] = {{host,"/volume",0},{readonly,"/readonly",1}};
     struct md_filesystem fs = {.store=s};
     assert(!md_fs_mounts_open(&fs, attachments, 2));
+    int temporary_directory=opened(&fs,"/",O_RDONLY|O_DIRECTORY);
+    for (unsigned exclusive=0;exclusive<2;++exclusive) {
+        unsigned flags=O_TMPFILE|O_WRONLY|O_CLOEXEC|(exclusive ? O_EXCL : 0);
+        struct md_fs_result absolute=call(&fs,MD_FS_OPEN,-1,"/",flags,0600,NULL,0);
+        struct md_fs_result relative=call(&fs,MD_FS_OPEN,temporary_directory,".",flags,0600,NULL,0);
+        assert(absolute.error==-EOPNOTSUPP && relative.error==absolute.error
+            && absolute.fd==-1 && relative.fd==-1);
+    }
+    assert(!close(temporary_directory));
+    puts("PASS temporary-file admission: selected directory preserves unsupported creation errno for named-file fallback");
     fd = opened(&fs, "/link/file", O_RDWR | O_CREAT); assert(write(fd, "native", 6) == 6);
     snprintf(path, sizeof(path), "%s/file", host);
     struct stat st, native; assert(!fstat(fd, &st) && !stat(path, &native));

@@ -5,6 +5,7 @@
 #include "fs_anchor.h"
 #include "mount_policy.h"
 #include "control_event.h"
+#include "inode_watch.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/magic.h>
@@ -27,8 +28,15 @@ const char *md_proc_sysctl_name(enum md_proc_file_kind kind) {
     case MD_PROC_FILE_OVERFLOWUID: return "overflowuid";
     case MD_PROC_FILE_OVERFLOWGID: return "overflowgid";
     case MD_PROC_FILE_CAP_LAST: return "cap_last_cap";
+    case MD_PROC_FILE_INOTIFY_INSTANCES: return "max_user_instances";
+    case MD_PROC_FILE_INOTIFY_WATCHES: return "max_user_watches";
+    case MD_PROC_FILE_INOTIFY_QUEUE: return "max_queued_events";
     default: return NULL;
     }
+}
+const char *md_proc_sysctl_directory(enum md_proc_file_kind kind) {
+    return kind>=MD_PROC_FILE_INOTIFY_INSTANCES && kind<=MD_PROC_FILE_INOTIFY_QUEUE
+        ? "sys/fs/inotify" : "sys/kernel";
 }
 static char *field(struct utsname *names, enum md_proc_file_kind kind) {
     switch (kind) {
@@ -56,8 +64,16 @@ long md_proc_sysctl_read(const struct md_uts_namespace *uts, enum md_proc_file_k
     struct utsname names;
     char scalar[16];
     const char *text;
-    if (kind==MD_PROC_FILE_OVERFLOWUID || kind==MD_PROC_FILE_OVERFLOWGID || kind==MD_PROC_FILE_CAP_LAST) {
-        snprintf(scalar,sizeof(scalar),"%u",kind==MD_PROC_FILE_CAP_LAST ? MD_CAP_LAST : MD_USER_OVERFLOW_ID);
+    if (kind>=MD_PROC_FILE_OVERFLOWUID && kind<=MD_PROC_FILE_INOTIFY_QUEUE) {
+        unsigned value=MD_USER_OVERFLOW_ID;
+        switch (kind) {
+        case MD_PROC_FILE_CAP_LAST: value=MD_CAP_LAST; break;
+        case MD_PROC_FILE_INOTIFY_INSTANCES: value=MD_INOTIFY_MAX_INSTANCES; break;
+        case MD_PROC_FILE_INOTIFY_WATCHES: value=MD_INOTIFY_MAX_WATCHES; break;
+        case MD_PROC_FILE_INOTIFY_QUEUE: value=MD_INOTIFY_QUEUE_LIMIT; break;
+        default: break;
+        }
+        snprintf(scalar,sizeof(scalar),"%u",value);
         text=scalar;
     } else {
         if (!uts) return -EINVAL;

@@ -66,6 +66,10 @@ int md_broker_hold_event(struct md_namespace_broker *,pid_t,int,const struct rus
 pid_t md_broker_take_event(struct md_namespace_broker *,int *,struct rusage *);
 /* Publish before resuming a tracee; forget retires its eligibility. */
 int md_broker_task(struct md_namespace_broker *, int pid, int eligible, uintptr_t raw_gate, uintptr_t watch_gate);
+/* A barrier restored an unchanged continuation after its synthetic stop.
+ * Retain eligibility and resource ownership; wake a request published before
+ * this acknowledgement. Never use for an injected helper or held real event. */
+void md_broker_resumed(struct md_namespace_broker *,pid_t);
 void md_broker_forget(struct md_namespace_broker *, int pid);
 struct md_fd_origins;
 struct md_fd_object;

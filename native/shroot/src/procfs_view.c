@@ -82,10 +82,16 @@ struct md_provider_tree *md_procfs_new(int parent,const char *text,const struct 
     close(lower);
     if (!tree) { free(p); errno=error; return NULL; }
     int root=md_provider_tree_root(tree);
-    if (mkdirat(root,"sys",0755) || mkdirat(root,"sys/kernel",0755)) error=errno;
-    for (unsigned i=MD_PROC_FILE_HOSTNAME;!error && i<=MD_PROC_FILE_CAP_LAST;++i) {
-        char path[64]; snprintf(path,sizeof(path),"sys/kernel/%s",md_proc_sysctl_name(i));
+    if (mkdirat(root,"sys",0755) || mkdirat(root,"sys/kernel",0755)
+            || mkdirat(root,"sys/fs",0755) || mkdirat(root,"sys/fs/inotify",0755)) error=errno;
+    for (unsigned i=MD_PROC_FILE_HOSTNAME;!error && i<=MD_PROC_FILE_INOTIFY_QUEUE;++i) {
+        char path[64]; snprintf(path,sizeof(path),"%s/%s",md_proc_sysctl_directory(i),md_proc_sysctl_name(i));
         int fd=openat(root,path,O_CREAT|O_EXCL|O_WRONLY|O_CLOEXEC,0600);
+        if (fd<0) error=errno; else close(fd);
+    }
+    if (!error && mkdirat(root,"sys/user",0755)) error=errno;
+    if (!error) {
+        int fd=openat(root,"sys/user/max_user_namespaces",O_CREAT|O_EXCL|O_WRONLY|O_CLOEXEC,0600);
         if (fd<0) error=errno; else close(fd);
     }
     if (error) { md_provider_tree_release(tree); errno=error; return NULL; }
@@ -206,7 +212,8 @@ static int control(const char *path,const char *name) {
          * whole suffix would lose openat2's traversal boundary. */
         if (process_directory(parent)) return strcmp(name,".") && strcmp(name,"..");
     }
-    return !strcmp(path,"/proc/sys/kernel") || !strcmp(path,"/proc/sys/net/bridge")
+    return !strcmp(path,"/proc/sys/kernel") || !strcmp(path,"/proc/sys/user")
+        || !strcmp(path,"/proc/sys/fs/inotify") || !strcmp(path,"/proc/sys/net/bridge")
         || (!strcmp(path,"/proc/sys/net/ipv4") && strcmp(name,"conf"))
         || (!strcmp(path,"/proc") && !strcmp(name,"cgroups"));
 }
@@ -352,7 +359,8 @@ int md_procfs_step(struct md_filesystem *fs,struct md_view_mount *mount,int fd,
             int copy=fcntl(captured,F_DUPFD_CLOEXEC,3);
             return copy<0 ? -errno : copy;
         }
-        if (!link_inode && !sysctl && (!fs->actor || !md_network_namespace_managed(fs->actor->network)
+        if (!link_inode && !sysctl && kind!=MD_PROC_MAX_USER_NAMESPACES
+                && (!fs->actor || !md_network_namespace_managed(fs->actor->network)
                 || !md_proc_network_sysctl(kind))) return -EREMOTE;
     }
     if (mount->provider) return md_provider_tree_step(mount->provider,fd,name);

@@ -4,12 +4,18 @@
 #include "control_file.h"
 
 struct md_sysfs;
+struct md_provider_tree;
+/* Shared native CPU/NUMA projection; device/network inventories stay virtual. */
+int md_sysfs_host_visible(const char *path);
 /* A mount retains its network view, not the caller's current namespace. */
 struct md_sysfs *md_sysfs_new(int parent,struct md_network_namespace *,const struct md_identity *);
 struct md_sysfs *md_sysfs_retain(struct md_sysfs *);
 void md_sysfs_release(struct md_sysfs *);
 int md_sysfs_root(const struct md_sysfs *);
-int md_sysfs_stat(const struct md_sysfs *,int fd,struct stat *);
-int md_sysfs_open(struct md_sysfs *,int fd,int flags,const struct md_identity *,
+struct md_provider_tree *md_sysfs_provider(const struct md_sysfs *);
+/* Borrowed immutable node index; -EXDEV selects native lower-tree handling. */
+int md_sysfs_node(const struct md_sysfs *,int fd);
+int md_sysfs_node_stat(const struct md_sysfs *,int node,struct stat *);
+int md_sysfs_node_open(struct md_sysfs *,int node,int flags,const struct md_identity *,
     struct md_fs_anchor *,const struct md_control_file_ops **,void **);
 #endif

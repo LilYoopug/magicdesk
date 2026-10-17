@@ -6,6 +6,8 @@
 #include "inode_internal.h"
 #include "mount_stream.h"
 #include "mount_pin.h"
+#include "temporary_directory.h"
+#include "host_fs_view.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
@@ -13,8 +15,8 @@
 #include <string.h>
 #include <unistd.h>
 
-enum { MAGIC=0x4d444d47U, VERSION=13, HEADER=144 };
-enum { INODE=1, DETACHED=2, RETIRED=4, LOCKED=8, PROC=16, PARENTLESS=32, ROOT_PROVIDERS=64 };
+enum { MAGIC=0x4d444d47U, VERSION=14, HEADER=144 };
+enum { INODE=1, DETACHED=2, RETIRED=4, LOCKED=8, PROC=16, PARENTLESS=32, ROOT_PROVIDERS=64, HOST_SYSFS=128, HOST_DEVFS=256 };
 struct entry { uint32_t parent, flags; struct md_fd_identity source, target, policy;
     uint32_t storage, descriptor; uint64_t generation, proc_namespace;
     uint32_t shared, master, unbindable, reserved; };
@@ -155,6 +157,15 @@ static int path_object(int fd, struct md_fd_identity expected, struct stat *st, 
     if (directory && !S_ISDIR(st->st_mode)) return -EPROTO;
     return md_fd_identity_same(md_fd_identity(st),expected) ? 0 : -EPROTO;
 }
+static int source_object(int fd,struct md_fd_identity expected,struct stat *st,unsigned flags) {
+    if (!(flags&(HOST_SYSFS|HOST_DEVFS))) return path_object(fd,expected,st,0);
+    int mode=fcntl(fd,F_GETFL);
+    if (mode<0) return -errno;
+    if ((mode&O_PATH) || (mode&O_ACCMODE)!=O_RDONLY) return -EPROTO;
+    if (fstat(fd,st)) return -errno;
+    if (!md_fd_identity_same(md_fd_identity(st),expected)) return -EPROTO;
+    return md_temporary_directory_check(fd);
+}
 static int topology(const struct manifest *m) {
     if (m->reserved || m->unbindable>1 || (m->unbindable && (m->shared || m->master))
             || (m->shared && m->shared==m->master)) return -EPROTO;
@@ -197,9 +208,11 @@ static int read_manifest(int fd, struct manifest *out, struct md_fd_identity *id
             || out->base_target.inode) return -EPROTO;
     for (unsigned i=0;i<out->count;++i) {
         const struct entry *e=&out->entries[i];
-        if (!e->generation || e->flags&~(INODE|DETACHED|RETIRED|LOCKED|PROC|PARENTLESS|ROOT_PROVIDERS) || e->storage>out->storages
+        if (!e->generation || e->flags&~(INODE|DETACHED|RETIRED|LOCKED|PROC|PARENTLESS|ROOT_PROVIDERS|HOST_SYSFS|HOST_DEVFS) || e->storage>out->storages
                 || e->storage>owners+1 || (e->storage && !(e->flags&INODE))) return -EPROTO;
         if (!!(e->flags&PROC)!=!!e->proc_namespace || (e->flags&(INODE|PROC))==(INODE|PROC)) return -EPROTO;
+        unsigned type=e->flags&(INODE|PROC|HOST_SYSFS|HOST_DEVFS);
+        if (type && (type&(type-1))) return -EPROTO;
         if (e->flags&RETIRED) {
             struct entry empty={.flags=DETACHED|RETIRED,.generation=e->generation};
             if (memcmp(e,&empty,sizeof(empty))) return -EPROTO;
@@ -234,21 +247,37 @@ static int mount_slot(const struct md_mount_namespace *view, const struct md_vie
     return -ESTALE;
 }
 static int mount_portable(const struct md_view_mount *m) {
-    return !m->devpts && !m->cgroup && !m->sysfs && !m->provider && !m->ipc_namespace && !m->file.ops;
+    if (m->devpts || m->cgroup || m->sysfs || m->ipc_namespace || m->file.ops) return 0;
+    if (!m->provider) return 1;
+    struct stat root;
+    return md_host_fs_kind(m->provider) && !fstat(md_provider_tree_root(m->provider),&root)
+        && md_view_same(&m->native,&root);
+}
+static int layout_portable(const struct md_mount_namespace *view,const struct md_mount_layout *l) {
+    for (unsigned i=0;i<=l->count;++i) {
+        const struct md_view_mount *m=i ? &l->entries[i-1] : l->base;
+        if (!m->id) continue;
+        if (!mount_portable(m)) return 0;
+        if (!m->parent) continue;
+        int slot=mount_slot(view,m->parent,l->count);
+        if (slot<0) return 0;
+        const struct md_view_mount *parent=slot ? &l->entries[slot-1] : l->base;
+        /* Host projection carriers may open locally yet be rejected by
+         * SCM_RIGHTS. Only guest-owned attachment points are portable. */
+        if (parent->provider && md_provider_tree_private(parent->provider,m->target)!=1) return 0;
+    }
+    return 1;
 }
 int md_mount_graph_portable(const struct md_mount_namespace *view) {
     if (!view) return 1;
-    if (!mount_portable(&view->base)) return 0;
-    if (view->tree) for (unsigned i=0;i<view->tree->count;++i)
-        if (view->tree->mounts[i].id && !mount_portable(&view->tree->mounts[i])) return 0;
-    return 1;
+    struct md_mount_layout l={.base=&view->base,.root=view->root,
+        .entries=view->tree ? view->tree->mounts : NULL,.count=view->tree ? view->tree->count : 0};
+    return layout_portable(view,&l);
 }
 static int describe(struct md_mount_namespace *view, const struct md_mount_layout *l, struct manifest *out,
         int fds[MD_MOUNT_GRAPH_PLACEMENT_FDS], struct md_inode_lifetime **owners) {
     if (l->count>MD_FS_MOUNTS_MAX) return -EINVAL;
-    if (!mount_portable(l->base)) return -EOPNOTSUPP;
-    for (unsigned i=0;i<l->count;++i)
-        if (l->entries[i].id && !mount_portable(&l->entries[i])) return -EOPNOTSUPP;
+    if (!layout_portable(view,l)) return -EOPNOTSUPP;
     const struct md_view_mount *entries=l->entries;
     unsigned count=l->count;
     *out=(struct manifest){.magic=MAGIC,.version=VERSION,
@@ -306,6 +335,7 @@ static int describe(struct md_mount_namespace *view, const struct md_mount_layou
         }
         e->flags=(md_view_inode(m) ? INODE : 0) | (m->detached ? DETACHED : 0) | (m->locked ? LOCKED : 0);
         if (m->root_providers) e->flags|=ROOT_PROVIDERS;
+        if (m->provider) e->flags|=md_host_fs_kind(m->provider)==MD_HOST_FS_SYS ? HOST_SYSFS : HOST_DEVFS;
         if (!m->parent && l->root!=&view->tree->mounts[i]) e->flags|=PARENTLESS;
         if (m->backing==MD_MOUNT_PROC) {
             e->flags|=PROC; e->proc_namespace=md_pid_namespace_inode(m->pid_namespace);
@@ -316,7 +346,8 @@ static int describe(struct md_mount_namespace *view, const struct md_mount_layou
             if (j==count || !entries[j].id) return -EINVAL;
             e->parent=j+1;
         }
-        int r=path_object(m->source,md_fd_identity(&m->native),&(struct stat){0},0);
+        int source=m->provider ? md_provider_tree_root(m->provider) : m->source;
+        int r=source_object(source,md_fd_identity(&m->native),&(struct stat){0},e->flags);
         if (!r) r=path_object(m->target,md_fd_identity(&m->guest),&(struct stat){0},0);
         if (r) return r;
         e->source=md_fd_identity(&m->native); e->target=md_fd_identity(&m->guest);
@@ -328,7 +359,7 @@ static int describe(struct md_mount_namespace *view, const struct md_mount_layou
         if (policy<0) return policy;
         struct stat st; if (fstat(policy,&st)) return -errno;
         e->policy=md_fd_identity(&st);
-        fds[e->descriptor]=m->source; fds[e->descriptor+1]=m->target; fds[e->descriptor+2]=policy;
+        fds[e->descriptor]=source; fds[e->descriptor+1]=m->target; fds[e->descriptor+2]=policy;
     }
     return topology(out);
 }
@@ -482,7 +513,7 @@ static int same_objects(const struct manifest *old, const struct manifest *next)
         if (a->generation<b->generation) continue;
         if (b->flags&RETIRED) continue;
         if (a->flags&RETIRED) return -ESTALE;
-        if ((a->flags&(INODE|PROC))!=(b->flags&(INODE|PROC)) || a->proc_namespace!=b->proc_namespace
+        if ((a->flags&(INODE|PROC|HOST_SYSFS|HOST_DEVFS))!=(b->flags&(INODE|PROC|HOST_SYSFS|HOST_DEVFS)) || a->proc_namespace!=b->proc_namespace
                 || !md_fd_identity_same(a->source,b->source)
                 || !md_fd_identity_same(a->policy,b->policy)
                 || !!a->storage!=!!b->storage) return -ESTALE;
@@ -582,7 +613,7 @@ static int import(struct md_mount_graph_parcel *p, struct md_mount_namespace **o
     for (unsigned i=0;i<data.count;++i) {
         struct entry *e=&data.entries[i]; struct stat st;
         if (e->flags&RETIRED) continue;
-        r=path_object(p->fd[e->descriptor],e->source,&st,0);
+        r=source_object(p->fd[e->descriptor],e->source,&st,e->flags);
         if (!r) r=path_object(p->fd[e->descriptor+1],e->target,&st,0);
         if (!r && fstat(p->fd[e->descriptor+2],&st)) r=-errno;
         if (!r && !md_fd_identity_same(md_fd_identity(&st),e->policy)) r=-EPROTO;
@@ -631,7 +662,8 @@ static int import(struct md_mount_graph_parcel *p, struct md_mount_namespace **o
         if (e->flags&RETIRED) { m->detached=1; continue; }
         r=md_mount_links_observe(e->shared,e->master,e->unbindable,&m->links);
         if (r) break;
-        m->backing=(e->flags&INODE) ? MD_MOUNT_INODE : e->flags&PROC ? MD_MOUNT_PROC : MD_MOUNT_NATIVE;
+        m->backing=(e->flags&INODE) ? MD_MOUNT_INODE : e->flags&PROC ? MD_MOUNT_PROC
+            : e->flags&(HOST_SYSFS|HOST_DEVFS) ? MD_MOUNT_PROVIDER : MD_MOUNT_NATIVE;
         if ((e->flags&PROC) && e->proc_namespace!=md_pid_namespace_inode(NULL)) {
             m->pid_namespace=md_pid_namespace_by_inode(e->proc_namespace);
             if (!m->pid_namespace) { r=-EXDEV; break; }
@@ -643,6 +675,10 @@ static int import(struct md_mount_graph_parcel *p, struct md_mount_namespace **o
         m->root_providers=!!(e->flags&ROOT_PROVIDERS);
         m->source=take(p,e->descriptor); m->target=take(p,e->descriptor+1);
         if (fstat(m->source,&m->native) || fstat(m->target,&m->guest)) r=-errno;
+        if (!r && (e->flags&(HOST_SYSFS|HOST_DEVFS))) {
+            m->provider=md_host_fs_import(m->source,e->flags&HOST_SYSFS ? MD_HOST_FS_SYS : MD_HOST_FS_DEV);
+            if (!m->provider) r=-errno;
+        }
         if (!r) r=md_mount_policy_import(&m->policy,p->fd[e->descriptor+2]);
         if (!r) { take(p,e->descriptor+2); r=md_mount_id_allocate(&m->id); }
         m->parent=data.root==i+1 || (e->flags&PARENTLESS) ? NULL

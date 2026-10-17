@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "user_namespace.h"
+#include "user_sysctl.h"
 #include "proc_file.h"
 #include "guest_identity.h"
 #include "identity_snapshot.h"
@@ -13,6 +14,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/capability.h>
+#include <limits.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/eventfd.h>
@@ -31,6 +34,68 @@ static unsigned descriptors(void) {
     struct dirent *entry;
     while ((entry=readdir(d))) if (entry->d_name[0]!='.') ++count;
     closedir(d); return count;
+}
+struct limit_race { pthread_barrier_t *barrier; struct md_user_namespace *space; int error; };
+static void *limit_thread(void *data) {
+    struct limit_race *r=data;
+    /* EVENT_WAIT: all creators contend for one quota, then retain their charge
+     * until the main thread has checked admission. The test alarm bounds it. */
+    pthread_barrier_wait(r->barrier);
+    r->space=md_user_namespace_new(NULL,12345,12345,0); r->error=errno;
+    pthread_barrier_wait(r->barrier);
+    pthread_barrier_wait(r->barrier);
+    md_user_namespace_release(r->space); return NULL;
+}
+static void namespace_limits(void) {
+    unsigned before=descriptors();
+    assert(!md_user_namespace_set_limit(NULL,2));
+    struct md_user_namespace *a=md_user_namespace_new(NULL,0,0,1); assert(a);
+    struct md_id_extent map={0,0,10000};
+    assert(!publish(a,0,NULL,0,0,UINT64_MAX,&map,1));
+    assert(!publish(a,1,NULL,0,0,UINT64_MAX,&map,1));
+    assert(!md_user_namespace_set_limit(a,1));
+    struct md_user_namespace *b=md_user_namespace_new(a,1000,1000,1); assert(b);
+    assert(md_user_namespace_limit(b)==INT_MAX);
+    assert(!md_user_namespace_new(a,1000,1000,1) && errno==ENOSPC);
+    /* Another UID still charges the same creator of the ancestor. */
+    assert(!md_user_namespace_new(a,2000,2000,1) && errno==ENOSPC);
+    assert(!md_user_namespace_set_limit(NULL,3));
+    struct md_user_namespace *c=md_user_namespace_new(a,2000,2000,1); assert(c);
+    md_user_namespace_release(c);
+    int fds[2]; assert(md_user_namespace_export(b,fds,2)==2);
+    struct md_user_namespace *copy=NULL;
+    assert(!md_user_namespace_import(fds,2,&copy)); close(fds[0]); close(fds[1]);
+    assert(!md_user_namespace_set_limit(b,7) && md_user_namespace_limit(copy)==7);
+    assert(md_user_namespace_set_limit(copy,0)==-EPERM);
+    md_user_namespace_release(copy);
+    struct md_control_file control=md_user_sysctl_new(b,NULL); assert(control.ops);
+    md_user_namespace_release(b);
+    assert(!md_user_namespace_new(a,1000,1000,1) && errno==ENOSPC);
+    md_control_file_release(control);
+    b=md_user_namespace_new(a,1000,1000,1); assert(b);
+    md_user_namespace_release(b); md_user_namespace_release(a);
+    assert(md_user_namespace_set_limit(NULL,UINT32_MAX)==-EINVAL);
+    assert(!md_user_namespace_set_limit(NULL,4));
+    for (unsigned round=0;round<4;++round) {
+        pthread_t threads[8]; pthread_barrier_t barrier;
+        assert(!pthread_barrier_init(&barrier,NULL,9));
+        struct limit_race race[8]={0};
+        for (unsigned i=0;i<8;++i) {
+            race[i].barrier=&barrier;
+            assert(!pthread_create(threads+i,NULL,limit_thread,race+i));
+        }
+        pthread_barrier_wait(&barrier); pthread_barrier_wait(&barrier);
+        unsigned accepted=0;
+        for (unsigned i=0;i<8;++i) {
+            if (race[i].space) ++accepted; else assert(race[i].error==ENOSPC);
+        }
+        assert(accepted==4);
+        pthread_barrier_wait(&barrier);
+        for (unsigned i=0;i<8;++i) assert(!pthread_join(threads[i],NULL));
+        assert(!pthread_barrier_destroy(&barrier));
+    }
+    assert(!md_user_namespace_set_limit(NULL,INT_MAX));
+    assert(descriptors()==before);
 }
 static void credential_snapshot(void) {
     unsigned before=descriptors();
@@ -287,6 +352,7 @@ static void proc_files(void) {
     md_identity_release(&stripped); md_identity_release(&parent);
 }
 void test_user_namespace(void) {
+    namespace_limits();
     credential_snapshot();
     custody();
     selectors();

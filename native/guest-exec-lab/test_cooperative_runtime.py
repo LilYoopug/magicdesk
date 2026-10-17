@@ -47,6 +47,16 @@ def main():
         # Distribution imports carry virtual ownership; a host-directory import
         # without it deliberately retains real Android permission semantics.
         suite.command([suite.base + '/service', '--import', root, suite.base + '/store', '--preserve-ownership'])
+        output = suite.command(['timeout', '15', suite.runner, '--store', suite.base + '/store',
+                                '--user', '0:0', '--', '/bin/probe', '--initial-stack', '-silent'], quiet=True)
+        assert output.count('PASS initial stack:') == 2
+        output = suite.command(['timeout', '15', suite.runner, '--diagnostics', '--store', suite.base + '/store',
+                                '--user', '0:0', '--', '/bin/probe', '--jit-resume'], quiet=True)
+        assert 'PASS cooperative JIT resume:' in output
+        assert len(re.findall(r'PROBE memory-repair .* result=0 scope=address-space', output)) == 8
+        output = suite.command(['timeout', '30', suite.runner, '--store', suite.base + '/store',
+                                '--user', '0:0', '--', '/bin/probe', '--jit-busy'], quiet=True)
+        assert 'PASS cooperative JIT busy:' in output
         output = suite.command(['timeout', '90', suite.runner, *(['--diagnostics'] if args.diagnostics else []), '--statistics', '--store', suite.base + '/store',
                                '--user', '0:0', '--', '/bin/probe'])
         assert 'PASS cooperative entry: metadata' in output
@@ -54,6 +64,8 @@ def main():
         assert 'PASS cooperative protected copy:' in output
         assert 'PASS native FD plans: 192 live opens' in output
         assert 'PASS native FD watches: exactly one open and one close event' in output
+        assert 'PASS native signal boundaries:' in output
+        assert 'PASS cooperative JIT resume:' in output
         assert 'PASS native writable plans:' in output
         assert 'PASS native create admission:' in output
         assert 'PASS filtered close: actual syscall FD' in output

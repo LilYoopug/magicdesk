@@ -15,7 +15,6 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
-enum { MAX_INSTANCES = 128, MAX_WATCHES = 8192, QUEUE_LIMIT = 16384 };
 #define DATA_EVENTS (IN_ACCESS | IN_MODIFY | IN_ATTRIB | IN_OPEN | IN_CLOSE)
 struct subscription {
     struct subscription *next;
@@ -178,11 +177,11 @@ int md_inode_watch_create(struct md_inode_store *s, int flags) {
     int r = start(s);
     if (r) return r;
     struct md_inode_watches *w = s->watches;
-    if (w->instance_count == MAX_INSTANCES) return -EMFILE;
+    if (w->instance_count == MD_INOTIFY_MAX_INSTANCES) return -EMFILE;
     struct instance *i = calloc(1, sizeof(*i));
     if (!i) { if (!w->instances) md_inode_watch_close(s); return -ENOMEM; }
     int fd = -1;
-    r = md_watch_queue_create(QUEUE_LIMIT, flags, &i->queue, &fd);
+    r = md_watch_queue_create(MD_INOTIFY_QUEUE_LIMIT, flags, &i->queue, &fd);
     struct stat st;
     if (!r && fstat(fd, &st)) r = -errno;
     if (!r) r = epoll_add(w->epoll, md_watch_queue_lifetime(i->queue), 0);
@@ -396,8 +395,8 @@ static int drain_native(struct md_inode_watches *w, struct watch_source *source,
 int md_inode_watch_pump(struct md_inode_store *s) {
     struct md_inode_watches *w = s->watches;
     if (!w) return 0;
-    struct epoll_event events[MAX_INSTANCES+1];
-    int n = epoll_wait(w->epoll, events, MAX_INSTANCES+1, 0);
+    struct epoll_event events[MD_INOTIFY_MAX_INSTANCES+1];
+    int n = epoll_wait(w->epoll, events, MD_INOTIFY_MAX_INSTANCES+1, 0);
     if (n < 0) return errno == EINTR ? 0 : -errno;
     for (int j = 0; j < n; ++j) if (events[j].events & (EPOLLERR | EPOLLHUP)) {
         struct instance **link = &w->instances;
@@ -466,7 +465,7 @@ static int add(struct md_inode_store *owner, struct md_inode_store *selected,
         return p->wd;
     }
     struct md_inode_watches *w = owner->watches;
-    if (w->subscription_count == MAX_WATCHES) return -ENOSPC;
+    if (w->subscription_count == MD_INOTIFY_MAX_WATCHES) return -ENOSPC;
     if (i->last_wd == INT_MAX) return -ENOSPC;
     p = calloc(1, sizeof(*p));
     if (!p) return -ENOMEM;

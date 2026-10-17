@@ -1,12 +1,16 @@
 #define _GNU_SOURCE
 #include "input_session.h"
 #include "input_devices.h"
-#include "fs_mounts.h"
+#include "fs_mount_internal.h"
 #include "fs_storage.h"
 #include "event_wait.h"
 #include "task_registry.h"
 #include "device_events.h"
+#include "sysfs_view.h"
+#include "mount_graph.h"
+#include "inode_internal.h"
 #include <assert.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/joystick.h>
@@ -16,6 +20,7 @@
 #include <string.h>
 #include <sys/eventfd.h>
 #include <sys/ioctl.h>
+#include <sys/mount.h>
 #include <sys/socket.h>
 #include <sys/sysmacros.h>
 #include <sys/un.h>
@@ -53,6 +58,129 @@ static struct md_fs_result request(struct md_filesystem *fs,unsigned operation,c
     struct md_fs_output output={.control=capture,.control_context=file,.origin=anchor};
     struct md_fs_result result; md_fs_execute(fs,&q,&result,&output); return result;
 }
+static void initial_sysfs(struct md_filesystem *fs) {
+    assert(md_mount_namespace_initial_boundary(fs->mounts));
+    const char *dirs[]={"/sys/block","/sys/bus","/sys/dev/block","/sys/dev/char","/sys/fs/cgroup"};
+    for (unsigned i=0;i<sizeof(dirs)/sizeof(*dirs);++i) {
+        struct md_fs_result st=request(fs,MD_FS_STAT,dirs[i],0,NULL,NULL);
+        if (st.error) fprintf(stderr,"initial sysfs %s: %d\n",dirs[i],st.error);
+        assert(!st.error && S_ISDIR(st.info.mode));
+    }
+    assert(request(fs,MD_FS_STAT,"/sys/devices/platform",0,NULL,NULL).error==-ENOENT);
+    assert(request(fs,MD_FS_OPEN,"/sys/devices/system/cpu/possible",O_WRONLY,NULL,NULL).error==-EROFS);
+    assert(!md_inode_symlink(fs->store,"/sys/devices/system/cpu/possible",-1,"/cpu-alias"));
+    struct md_fs_result alias=request(fs,MD_FS_OPEN,"/cpu-alias",O_RDONLY,NULL,NULL);
+    assert(!alias.error && alias.fd>=0); close(alias.fd);
+    assert(!md_inode_unlink(fs->store,-1,"/cpu-alias",0));
+    struct md_fs_result ordinary=request(fs,MD_FS_CREATE,"/ordinary",0,NULL,NULL);
+    assert(!ordinary.error && ordinary.fd>=0); close(ordinary.fd);
+    struct md_inode_statistics stats={0}; md_inode_measure(fs->store,&stats);
+    struct md_fs_context context={.filesystem=fs};
+    struct md_fs_request stat={.operation=MD_FS_STAT,.directory={-1,-1},.path={"/ordinary",NULL}};
+    assert(md_fs_context_operation_window(&context,&stat,0)==fs->store);
+    for (unsigned i=0;i<32;++i) assert(!request(fs,MD_FS_STAT,"/ordinary",0,NULL,NULL).error);
+    assert(!stats.walk_components && !stats.walk_materializations);
+    md_inode_measure(fs->store,NULL);
+    assert(!request(fs,MD_FS_UNLINK,"/ordinary",0,NULL,NULL).error);
+    assert(request(fs,MD_FS_UNLINK,"/sys",AT_REMOVEDIR,NULL,NULL).error==-EROFS);
+    /* Another namespace may rename the covered dentry. Admission uses its
+     * inode identity, never the old spelling of the pathname. */
+    assert(!md_inode_rename(fs->store,-1,"/sys",-1,"/moved-sys",0));
+    alias=request(fs,MD_FS_OPEN,"/moved-sys/devices/system/cpu/possible",O_RDONLY,NULL,NULL);
+    assert(!alias.error && alias.fd>=0); close(alias.fd);
+    assert(!md_inode_rename(fs->store,-1,"/moved-sys",-1,"/sys",0));
+    struct md_mount_graph_parcel parcel={0};
+    assert(md_mount_graph_portable(fs->mounts));
+    assert(!md_mount_graph_export(fs->mounts,fs->store->lifetime->root,&parcel));
+    struct md_mount_namespace *imported=NULL;
+    assert(!md_mount_graph_import(&parcel,&imported));
+    struct md_filesystem foreign=*fs; foreign.mounts=imported;
+    alias=request(&foreign,MD_FS_OPEN,"/sys/devices/system/cpu/possible",O_RDONLY,NULL,NULL);
+    assert(!alias.error && alias.fd>=0); close(alias.fd);
+    assert(request(&foreign,MD_FS_STAT,"/sys/devices/platform",0,NULL,NULL).error==-ENOENT);
+    assert(request(&foreign,MD_FS_OPEN,"/sys/devices/system/cpu/possible",O_WRONLY,NULL,NULL).error==-EROFS);
+    md_mount_namespace_release(imported);
+    puts("PASS initial sysfs without input, inode fast path, symlink, rename and graph custody");
+}
+static void mount_request(struct md_filesystem *fs,unsigned mode,unsigned flags,
+        const char *target,const char *source) {
+    struct md_fs_request q={.operation=MD_FS_MOUNT,.mode=mode,.flags=flags,
+        .directory={-1,-1},.path={target,source}};
+    struct md_fs_result r; md_fs_execute(fs,&q,&r,NULL);
+    if (r.error) fprintf(stderr,"mount %s from %s: %d\n",target,source ? source : "-",r.error);
+    assert(!r.error);
+}
+static void shared_memory(struct md_filesystem *fs,const char *path) {
+    struct md_fs_result r=request(fs,MD_FS_OPEN,path,O_RDWR,NULL,NULL);
+    if (r.error) fprintf(stderr,"shared memory %s: %d\n",path,r.error);
+    assert(!r.error && r.fd>=0);
+    char bytes[2]; assert(read(r.fd,bytes,2)==2 && !memcmp(bytes,"ok",2)); close(r.fd);
+}
+static void initial_devices(struct md_filesystem *fs) {
+    struct md_identity identity=md_identity_new(0,0);
+    fs->store->identity=&identity;
+    const char *dirs[]={"/devices-copy","/devices-again","/devices-flat","/memory-source","/dev/shm/nested"};
+    for (unsigned i=0;i<sizeof(dirs)/sizeof(*dirs);++i)
+        assert(!md_inode_mkdir(fs->store,-1,dirs[i],0755));
+    const char *files[]={"/dev/shm/sentinel","/memory-source/sentinel"};
+    for (unsigned i=0;i<2;++i) {
+        int fd=md_inode_open(fs->store,-1,files[i],O_CREAT|O_RDWR,0600);
+        assert(fd>=0 && write(fd,"ok",2)==2); close(fd);
+    }
+    mount_request(fs,MD_FS_MOUNT_BIND,MS_BIND,"/dev/shm/nested","/memory-source");
+    mount_request(fs,MD_FS_MOUNT_BIND,MS_BIND|MS_REC,"/devices-copy","/dev");
+    shared_memory(fs,"/devices-copy/shm/sentinel");
+    shared_memory(fs,"/devices-copy/shm/nested/sentinel");
+    mount_request(fs,MD_FS_MOUNT_BIND,MS_BIND,"/devices-copy/pts","/memory-source");
+    mount_request(fs,MD_FS_MOUNT_BIND,MS_BIND|MS_REC,"/devices-again","/devices-copy");
+    shared_memory(fs,"/devices-again/shm/sentinel");
+    shared_memory(fs,"/devices-again/shm/nested/sentinel");
+    shared_memory(fs,"/devices-again/pts/sentinel");
+    struct md_fs_result r=request(fs,MD_FS_OPEN,"/devices-copy/null",O_WRONLY,NULL,NULL);
+    assert(!r.error && r.fd>=0 && write(r.fd,"ok",2)==2); close(r.fd);
+    mount_request(fs,MD_FS_MOUNT_BIND,MS_BIND,"/devices-flat","/dev");
+    assert(request(fs,MD_FS_STAT,"/devices-flat/shm/sentinel",0,NULL,NULL).error==-ENOENT);
+    assert(request(fs,MD_FS_STAT,"/devices-flat/shm/nested",0,NULL,NULL).error==-ENOENT);
+    struct md_fs_anchor *detached=NULL;
+    struct md_fs_request clone={.operation=MD_FS_OPEN_TREE,.mode=AT_RECURSIVE,
+        .directory={-1,-1},.path={"/dev",NULL}};
+    md_fs_execute(fs,&clone,&r,&(struct md_fs_output){.origin=&detached});
+    assert(!r.error && r.fd>=0 && detached);
+    assert(fcntl(r.fd,F_GETFL)&O_PATH);
+    struct md_fs_request retained={.operation=MD_FS_OPEN,.flags=O_RDONLY,
+        .directory={r.fd,-1},.origin={detached,NULL},.path={"shm/sentinel",NULL}};
+    int root=r.fd; md_fs_execute(fs,&retained,&r,NULL);
+    assert(!r.error && r.fd>=0); char bytes[2];
+    assert(read(r.fd,bytes,2)==2 && !memcmp(bytes,"ok",2)); close(r.fd);
+    close(root); md_fs_anchor_release(detached); assert(!md_view_mount_collect(fs));
+    struct md_mount_graph_parcel parcel={0};
+    assert(md_mount_graph_portable(fs->mounts));
+    assert(!md_mount_graph_export(fs->mounts,fs->store->lifetime->root,&parcel));
+    struct md_mount_namespace *imported=NULL;
+    assert(!md_mount_graph_import(&parcel,&imported));
+    struct md_filesystem foreign=*fs; foreign.mounts=imported;
+    shared_memory(&foreign,"/devices-copy/shm/sentinel");
+    shared_memory(&foreign,"/devices-copy/shm/nested/sentinel");
+    shared_memory(&foreign,"/devices-again/shm/nested/sentinel");
+    shared_memory(&foreign,"/devices-again/pts/sentinel");
+    mount_request(fs,MD_FS_MOUNT_BIND,MS_BIND,"/devices-copy/null","/memory-source/sentinel");
+    assert(!md_mount_graph_portable(fs->mounts));
+    assert(md_mount_graph_export(fs->mounts,fs->store->lifetime->root,&parcel)==-EOPNOTSUPP);
+    assert(request(&foreign,MD_FS_STAT,"/devices-copy/null",0,NULL,NULL).error==-EOPNOTSUPP);
+    shared_memory(fs,"/devices-copy/null");
+    mount_request(fs,MD_FS_MOUNT_UMOUNT,MNT_DETACH,"/devices-copy/null",NULL);
+    assert(!md_view_mount_collect(fs));
+    assert(md_mount_graph_portable(fs->mounts));
+    shared_memory(&foreign,"/devices-again/shm/sentinel");
+    md_mount_namespace_release(imported);
+    mount_request(fs,MD_FS_MOUNT_UMOUNT,MNT_DETACH,"/devices-copy",NULL);
+    mount_request(fs,MD_FS_MOUNT_UMOUNT,MNT_DETACH,"/devices-again",NULL);
+    mount_request(fs,MD_FS_MOUNT_UMOUNT,MNT_DETACH,"/devices-flat",NULL);
+    mount_request(fs,MD_FS_MOUNT_UMOUNT,MNT_DETACH,"/dev/shm/nested",NULL);
+    assert(!md_view_mount_collect(fs));
+    fs->store->identity=NULL; md_identity_release(&identity);
+    puts("PASS implicit dev recursive bind, guest shm, nested mounts and graph custody");
+}
 void md_test_input_session(const char *path) {
     alarm(30); setbuf(stdout,NULL);
     struct md_inode_store *store=NULL; assert(!md_inode_store_open(path,1,&store));
@@ -69,10 +197,14 @@ void md_test_input_session(const char *path) {
     int wake=eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK); assert(wake>=0);
     struct md_input_launch launch={.endpoint=name,.wake_fd=wake};
     struct md_input_session *session=NULL;
+    struct md_provider_tree *sysfs=NULL;
+    assert(!md_fs_sysfs_prepare(&fs,&sysfs));
+    initial_sysfs(&fs);
+    initial_devices(&fs);
     struct md_device_events *bus=md_device_events_new(); assert(bus);
-    assert(!md_input_session_start(&fs,NULL,bus,&session) && !session);
+    assert(!md_input_session_start(&fs,NULL,bus,sysfs,&session) && !session);
     fs.tasks=md_task_registry_create(); assert(fs.tasks);
-    int error=md_input_session_start(&fs,&launch,bus,&session);
+    int error=md_input_session_start(&fs,&launch,bus,sysfs,&session);
     md_task_registry_destroy(fs.tasks); fs.tasks=NULL;
     if (error) fprintf(stderr,"input startup: %d (%s)\n",error,strerror(-error));
     assert(!error); assert(!pthread_join(server.thread,NULL));
@@ -101,11 +233,40 @@ void md_test_input_session(const char *path) {
     struct md_fs_result bad=request(&fs,MD_FS_OPEN,"/sys/class/input/event0/dev",O_WRONLY,NULL,NULL);
     assert(bad.error==-EROFS);
     bad=request(&fs,MD_FS_UNLINK,"/dev/input/event0",0,NULL,NULL); assert(bad.error==-EROFS);
-    const char *host_only[]={"/sys/devices/system","/sys/bus/pci","/sys/class/drm"};
+    const char *empty_dirs[]={"/sys/block","/sys/bus","/sys/dev/block"};
+    for (unsigned i=0;i<sizeof(empty_dirs)/sizeof(*empty_dirs);++i) {
+        struct md_fs_result info=request(&fs,MD_FS_OPEN,empty_dirs[i],O_RDONLY|O_DIRECTORY,NULL,NULL);
+        assert(!info.error && info.fd>=0);
+        DIR *dir=fdopendir(info.fd); assert(dir);
+        struct dirent *entry;
+        while ((entry=readdir(dir))) assert(!strcmp(entry->d_name,".") || !strcmp(entry->d_name,".."));
+        closedir(dir);
+    }
+    const char *host_only[]={"/sys/devices/platform","/sys/bus/pci","/sys/class/drm"};
     for (unsigned i=0;i<sizeof(host_only)/sizeof(*host_only);++i) {
         struct md_fs_result hidden=request(&fs,MD_FS_STAT,host_only[i],0,NULL,NULL);
         assert(hidden.error==-ENOENT);
     }
+    assert(md_sysfs_host_visible("/devices") && md_sysfs_host_visible("/devices/system"));
+    assert(md_sysfs_host_visible("/devices/system/cpu/cpu0/topology/core_id"));
+    assert(md_sysfs_host_visible("/devices/system/node/node0/cpulist"));
+    assert(!md_sysfs_host_visible("/devices/system/cpux") && !md_sysfs_host_visible("/devices/system/memory"));
+    const char *cpu_path="/sys/devices/system/cpu/possible";
+    int native=open(cpu_path,O_RDONLY|O_CLOEXEC); assert(native>=0);
+    struct md_control_file cpu_control={0};
+    struct md_fs_result cpu=request(&fs,MD_FS_OPEN,cpu_path,O_RDONLY,&cpu_control,NULL);
+    assert(!cpu.error && cpu.fd>=0 && !cpu_control.ops);
+    char host_cpu[4096],guest_cpu[4096];
+    ssize_t host_size=read(native,host_cpu,sizeof(host_cpu));
+    assert(host_size>0 && read(cpu.fd,guest_cpu,sizeof(guest_cpu))==host_size);
+    assert(!memcmp(host_cpu,guest_cpu,(size_t)host_size));
+    struct stat host_stat,guest_stat;
+    assert(!fstat(native,&host_stat) && !fstat(cpu.fd,&guest_stat));
+    assert(host_stat.st_dev==guest_stat.st_dev && host_stat.st_ino==guest_stat.st_ino);
+    close(native); close(cpu.fd);
+    bad=request(&fs,MD_FS_OPEN,cpu_path,O_RDWR,NULL,NULL); assert(bad.error==-EROFS);
+    bad=request(&fs,MD_FS_OPEN,cpu_path,O_RDONLY|O_TRUNC,NULL,NULL); assert(bad.error==-EROFS);
+    bad=request(&fs,MD_FS_UNLINK,cpu_path,0,NULL,NULL); assert(bad.error==-EROFS);
     struct md_fs_result shared=request(&fs,MD_FS_OPEN,"/dev/shm/gamepad-test",O_CREAT|O_RDWR,NULL,NULL);
     assert(!shared.error && shared.fd>=0); assert(write(shared.fd,"ok",2)==2); close(shared.fd);
     struct md_fs_result null=request(&fs,MD_FS_OPEN,"/dev/null",O_WRONLY,NULL,NULL);
@@ -133,6 +294,7 @@ void md_test_input_session(const char *path) {
     assert(address_nl.nl_groups==2 && address_nl.nl_pid==(unsigned)getpid());
     close(server.connection); close(server.listener); close(server.ready);
     md_input_session_stop(session); close(wake);
+    md_provider_tree_release(sysfs);
     while (recv(monitor_fd,notification,sizeof(notification),MSG_DONTWAIT)>0) {}
     assert(errno==EAGAIN);
     assert(!md_device_events_publish(bus,"change","/devices/virtual/test","test",NULL,0));

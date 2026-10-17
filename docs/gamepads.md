@@ -38,7 +38,10 @@ inherit its virtual devices merely by using the same distribution store.
 Private provider mounts expose `/dev/input/eventN`, `/dev/input/jsN`, input
 sysfs attributes and `/run/udev` discovery records. The launch-private sysfs
 inventory describes the published devices, without importing Android's PCI,
-DRM or other host device trees. Host `/dev` entries outside the provider's input
+DRM or other host device inventories. Native CPU/NUMA topology is separately
+projected read-only through the shared sysfs policy, with ordinary native data
+FDs rather than copied attributes or per-read control requests.
+Host `/dev` entries outside the provider's input
 subtree retain their existing access boundaries; guest `/dev/shm` remains
 inode-backed. Device nodes are typed control files, not
 host character devices. Namespace placeholders retain path identity; per-open

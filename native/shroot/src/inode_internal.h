@@ -11,6 +11,7 @@
 #include "landlock_policy.h"
 struct md_fs_result;
 struct md_fs_output;
+struct mdi_mount_boundary { const char *object; int crossed; };
 struct md_inode_boundary {
     char *path; size_t capacity; unsigned operand;
     int mount_root, native_directory;
@@ -68,6 +69,7 @@ struct md_inode_store {
     const char *root_id;
     unsigned creation_mask;
     struct md_inode_boundary *boundary;
+    struct mdi_mount_boundary *mount_boundary;
     struct mdi_stat_location *stat_location;
     struct md_inode_watches *watches;
     struct mdi_fifo_owner *fifos;

@@ -92,6 +92,8 @@ def main():
               + root + "/store --deadline-seconds 90 -- /bin/test user-proc", "PASS guest user proc files:")
         check("guest user namespace lifecycle", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
               + root + "/store --deadline-seconds 90 -- /bin/test user-namespace", "PASS guest user namespaces:")
+        check("guest user namespace limits", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
+              + root + "/store --deadline-seconds 90 -- /bin/test user-limits", "PASS guest user namespace limits:")
         check("direct guest UTS namespace lifecycle", root + "/libmagicdesk_guest_supervisor.so --diagnostics --user 0:0 --hostname launch-name "
               + root + "/libmagicdesk_guest_bootstrap.so " + root + "/source /bin/test uts-namespace", "PASS guest UTS namespaces:")
         runner = root + "/libmagicdesk_guest_run.so --user 0:0 --hostname launch-name --diagnostics --store " + root + "/store --deadline-seconds 90 -- /bin/test "

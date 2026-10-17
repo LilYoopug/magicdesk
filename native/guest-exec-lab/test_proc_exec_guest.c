@@ -33,6 +33,21 @@ static void execute(const char *path,int base,int protected) {
 }
 static void exercise(const char *proc,const char *directory) {
     char path[256],alias[256];
+    const char *nonlinks[]={"", "/sys", "/uptime"};
+    for (unsigned i=0;i<sizeof(nonlinks)/sizeof(nonlinks[0]);++i) {
+        snprintf(path,sizeof(path),"%s%s",proc,nonlinks[i]);
+        struct stat st; assert(!lstat(path,&st) && !S_ISLNK(st.st_mode));
+        errno=0;
+        assert(readlink(path,alias,sizeof(alias))==-1 && errno==EINVAL);
+        int fd=open(path,O_PATH|O_NOFOLLOW|O_CLOEXEC); assert(fd>=0);
+        errno=0;
+        assert(readlinkat(fd,"",alias,sizeof(alias))==-1 && errno==ENOENT);
+        close(fd);
+    }
+    snprintf(path,sizeof(path),"%s/no-such-proc-entry",proc);
+    errno=0;
+    assert(readlink(path,alias,sizeof(alias))==-1 && errno==ENOENT);
+    puts("PASS proc readlink: existing non-links, empty-path descriptors and missing paths");
     snprintf(path,sizeof(path),"%s/%d/exe",proc,getpid());
     execute(path,AT_FDCWD,0);
     execute(path,AT_FDCWD,1);

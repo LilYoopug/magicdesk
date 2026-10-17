@@ -4,21 +4,23 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/capability.h>
+#include <limits.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
-enum { MAGIC=0x4d44554e, VERSION=2,
+enum { MAGIC=0x4d44554e, VERSION=3,
     SEALS=F_SEAL_GROW|F_SEAL_SHRINK|F_SEAL_FUTURE_WRITE|F_SEAL_SEAL };
-struct namespace_id { uint64_t device, inode; };
 struct id_map { atomic_uint count; struct md_id_extent ranges[MD_USER_MAP_EXTENTS]; };
 struct namespace_page {
     uint32_t magic, version, depth, owner, group, creator_setfcap;
     uint64_t inode;
-    struct namespace_id parent;
+    struct md_user_namespace_key parent;
     atomic_uint groups_allowed;
+    atomic_uint max_user_namespaces;
     struct id_map maps[2];
 };
 _Static_assert(ATOMIC_INT_LOCK_FREE==2 && sizeof(atomic_uint)==4,
@@ -26,12 +28,76 @@ _Static_assert(ATOMIC_INT_LOCK_FREE==2 && sizeof(atomic_uint)==4,
 struct md_user_namespace {
     atomic_uint references;
     struct md_user_namespace *parent;
-    struct namespace_id id;
+    struct md_user_namespace_key id;
     int fd, writer;
     struct namespace_page *page;
+    struct namespace_count *accounts, *charge;
 };
-static int same_id(struct namespace_id a, struct namespace_id b) {
-    return a.device==b.device && a.inode==b.inode;
+struct namespace_count {
+    struct namespace_count *next;
+    struct md_user_namespace *space;
+    uint32_t uid, count;
+};
+static pthread_mutex_t counts_lock=PTHREAD_MUTEX_INITIALIZER;
+static struct namespace_count *initial_accounts;
+static atomic_uint initial_max=INT_MAX;
+
+uint32_t md_user_namespace_limit(const struct md_user_namespace *n) {
+    return atomic_load_explicit(n ? &n->page->max_user_namespaces : &initial_max,memory_order_relaxed);
+}
+int md_user_namespace_set_limit(struct md_user_namespace *n,uint32_t limit) {
+    if (limit>INT_MAX) return -EINVAL;
+    if (n && !n->writer) return -EPERM;
+    atomic_store_explicit(n ? &n->page->max_user_namespaces : &initial_max,limit,memory_order_relaxed);
+    return 0;
+}
+static struct namespace_count *count_parent(struct namespace_count *c) {
+    return c->space ? c->space->charge : NULL;
+}
+static void count_remove(struct namespace_count *c) {
+    struct namespace_count **p=c->space ? &c->space->accounts : &initial_accounts;
+    while (*p!=c) p=&(*p)->next;
+    *p=c->next; free(c);
+}
+/* A namespace charges its creator in the parent and each ancestor's creator.
+ * Parent references keep this chain alive; descriptor/worker references may
+ * release the last charge outside the supervisor thread. */
+static int count_acquire(struct md_user_namespace *n) {
+    struct md_user_namespace *parent=n->parent;
+    if (parent && !parent->writer) return -EOPNOTSUPP;
+    pthread_mutex_lock(&counts_lock);
+    struct namespace_count **head=parent ? &parent->accounts : &initial_accounts;
+    struct namespace_count *c=*head;
+    while (c && c->uid!=n->page->owner) c=c->next;
+    if (!c) {
+        c=calloc(1,sizeof(*c));
+        if (!c) { pthread_mutex_unlock(&counts_lock); return -ENOMEM; }
+        c->space=parent; c->uid=n->page->owner; c->next=*head; *head=c;
+    }
+    struct namespace_count *bad=NULL;
+    for (struct namespace_count *p=c;p;p=count_parent(p)) {
+        if (p->count>=md_user_namespace_limit(p->space)) { bad=p; break; }
+        ++p->count;
+    }
+    if (bad) {
+        for (struct namespace_count *p=c;p!=bad;p=count_parent(p)) --p->count;
+        if (!c->count) count_remove(c);
+    } else n->charge=c;
+    pthread_mutex_unlock(&counts_lock);
+    return bad ? -ENOSPC : 0;
+}
+static void count_release(struct md_user_namespace *n) {
+    if (!n->charge) return;
+    pthread_mutex_lock(&counts_lock);
+    for (struct namespace_count *p=n->charge;p;p=count_parent(p)) --p->count;
+    if (!n->charge->count) count_remove(n->charge);
+    pthread_mutex_unlock(&counts_lock);
+}
+struct md_user_namespace_key md_user_namespace_key(const struct md_user_namespace *n) {
+    return n ? n->id : (struct md_user_namespace_key){0};
+}
+static int same_id(struct md_user_namespace_key a, struct md_user_namespace_key b) {
+    return a.device==b.device && a.inode==b.inode && a.generation==b.generation;
 }
 static int same(const struct md_user_namespace *a, const struct md_user_namespace *b) {
     return a==b || (a && b && same_id(a->id,b->id));
@@ -50,7 +116,7 @@ static struct md_user_namespace *allocate(int fd, int writer) {
     n->page=mmap(NULL,sizeof(*n->page),PROT_READ|(writer ? PROT_WRITE : 0),MAP_SHARED,fd,0);
     if (n->page==MAP_FAILED) { int error=errno; free(n); errno=error; return NULL; }
     atomic_init(&n->references,1); n->fd=fd; n->writer=writer;
-    n->id=(struct namespace_id){st.st_dev,st.st_ino}; return n;
+    n->id=(struct md_user_namespace_key){st.st_dev,st.st_ino,n->page->inode}; return n;
 }
 struct md_user_namespace *md_user_namespace_new(struct md_user_namespace *parent,
         uint32_t owner, uint32_t group, int creator_setfcap) {
@@ -66,15 +132,19 @@ struct md_user_namespace *md_user_namespace_new(struct md_user_namespace *parent
     if (!n) { int error=errno; close(fd); errno=error; return NULL; }
     *n->page=(struct namespace_page){.magic=MAGIC,.version=VERSION,
         .depth=parent ? parent->page->depth+1 : 1,.owner=owner,.group=group,
-        .creator_setfcap=!!creator_setfcap,.parent=parent ? parent->id : (struct namespace_id){0}};
+        .creator_setfcap=!!creator_setfcap,.parent=md_user_namespace_key(parent)};
     atomic_init(&n->page->groups_allowed,md_user_namespace_groups_allowed(parent));
+    atomic_init(&n->page->max_user_namespaces,INT_MAX);
     atomic_init(&n->page->maps[0].count,0); atomic_init(&n->page->maps[1].count,0);
     int identity_error=md_namespace_identity_new(&n->page->inode);
     if (identity_error) { md_user_namespace_release(n); errno=-identity_error; return NULL; }
+    n->id.generation=n->page->inode;
     if (fcntl(fd,F_ADD_SEALS,SEALS)) {
         int error=errno; md_user_namespace_release(n); errno=error; return NULL;
     }
     n->parent=md_user_namespace_retain(parent);
+    int error=count_acquire(n);
+    if (error) { md_user_namespace_release(n); errno=-error; return NULL; }
     return n;
 }
 struct md_user_namespace *md_user_namespace_retain(struct md_user_namespace *n) {
@@ -85,6 +155,7 @@ uint64_t md_user_namespace_inode(const struct md_user_namespace *n) { return n ?
 uint32_t md_user_namespace_creator(const struct md_user_namespace *n) { return n ? n->page->owner : 0; }
 void md_user_namespace_release(struct md_user_namespace *n) {
     if (!n || atomic_fetch_sub_explicit(&n->references,1,memory_order_acq_rel)!=1) return;
+    count_release(n);
     md_user_namespace_release(n->parent);
     munmap(n->page,sizeof(*n->page)); close(n->fd); free(n);
 }
@@ -231,7 +302,8 @@ static int valid_page(const struct md_user_namespace *n, unsigned depth,
     if (p->magic!=MAGIC || p->version!=VERSION || p->depth!=depth
             || p->owner==UINT32_MAX || p->group==UINT32_MAX || p->creator_setfcap>1
             || atomic_load_explicit(&p->groups_allowed,memory_order_acquire)>1
-            || !same_id(p->parent,parent ? parent->id : (struct namespace_id){0})) return -EPROTO;
+            || md_user_namespace_limit(n)>INT_MAX
+            || !same_id(p->parent,md_user_namespace_key(parent))) return -EPROTO;
     for (unsigned group=0;group<2;++group) {
         const struct id_map *m=&p->maps[group];
         unsigned count=map_count(m);

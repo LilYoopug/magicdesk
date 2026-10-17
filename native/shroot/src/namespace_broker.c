@@ -791,6 +791,18 @@ int md_broker_result_finish(struct md_namespace_broker *b, int pid, long *value)
     int error=t ? result_clear(b,t) : 0;
     pthread_mutex_unlock(&b->lock); return error ? error : delivered;
 }
+static int task_resumed(struct task *t) {
+    t->stopped=0;
+    return t->channel && atomic_load_explicit(&t->channel->state,memory_order_acquire)==MD_ENTRY_REQUEST;
+}
+void md_broker_resumed(struct md_namespace_broker *b,pid_t pid) {
+    if (!b) return;
+    pthread_mutex_lock(&b->lock);
+    struct task *t=find_task(b,pid);
+    int pending=t && task_resumed(t);
+    pthread_mutex_unlock(&b->lock);
+    if (pending) md_fs_worker_wake(b->worker);
+}
 int md_broker_task(struct md_namespace_broker *b, int pid, int eligible, uintptr_t raw_gate, uintptr_t watch_gate) {
     if (pid <= 0) return -EINVAL;
     pthread_mutex_lock(&b->lock);
@@ -806,10 +818,10 @@ int md_broker_task(struct md_namespace_broker *b, int pid, int eligible, uintptr
     int pending=0;
     if (t) {
         t->pid = pid; t->eligible = eligible; t->gate = raw_gate; t->watch_gate = watch_gate;
-        t->stopped=0; t->owner=b; t->event_work.complete=event_complete;
+        t->owner=b; t->event_work.complete=event_complete;
         if (t->channel) atomic_store_explicit(&t->channel->enabled,
             !!(eligible&MD_BROKER_COOPERATIVE),memory_order_release);
-        pending=t->channel && atomic_load_explicit(&t->channel->state,memory_order_acquire)==MD_ENTRY_REQUEST;
+        pending=task_resumed(t);
     }
     pthread_mutex_unlock(&b->lock);
     if (pending) md_fs_worker_wake(b->worker);
@@ -1067,14 +1079,22 @@ static int native_progress(struct md_namespace_broker *b,struct md_execution_win
             if (error) return error;
             *at=op->waiting; op->waiting=NULL;
             struct md_entry_channel *c=op->channel;
-            int notified=md_entry_native_retire(c,op->sequence,
-                state==MD_NATIVE_UNKNOWN ? MD_ENTRY_UNKNOWN : MD_ENTRY_COMPLETED,value);
+            /* A signal before the native effect is a withdrawn plan, not a
+             * syscall returning EINTR. Once its owners retire, the original
+             * caller may enter the kernel normally. Never replay DONE (even
+             * close(-EINTR), which already released its Linux descriptor). */
+            enum md_entry_outcome outcome=state==MD_NATIVE_UNKNOWN ? MD_ENTRY_UNKNOWN
+                : state==MD_NATIVE_CANCELLED ? MD_ENTRY_DECLINED : MD_ENTRY_COMPLETED;
+            int notified=md_entry_native_retire(c,op->sequence,outcome,value);
             if (notified<0) return notified;
             if (notified) {
                 if (atomic_load_explicit(&c->sleeping,memory_order_seq_cst))
                     syscall(SYS_futex,&c->state,FUTEX_WAKE,1,NULL,NULL,0);
             } else if (b->counts) ++b->native_deferred;
-            if (b->counts) ++b->cooperative_completed;
+            if (b->counts) {
+                if (outcome==MD_ENTRY_DECLINED) ++b->cooperative_declined;
+                else ++b->cooperative_completed;
+            }
             md_cost_end(b->counts ? &b->native_retire : NULL,start);
             error=recycle(b,op); if (error) return error;
             continue;
@@ -1112,6 +1132,22 @@ static int progress(struct md_namespace_broker *b,struct md_execution_window *wi
             } else {
                 int error=recycle(b,op); if (error) return error;
             }
+            continue;
+        }
+        /* A stopped caller cannot finish a queued request while its table/OFD
+         * owner is held by the same barrier. No effect has started here: retire
+         * the reservation before publishing the stop, then let entry fall back.
+         * Native effects and pending result delivery have separate owners above. */
+        int interrupted=0;
+        if (op->channel && !op->executed) {
+            pthread_mutex_lock(&b->lock);
+            interrupted=op->task->stopped;
+            pthread_mutex_unlock(&b->lock);
+        }
+        if (interrupted) {
+            *at=op->waiting; op->waiting=NULL;
+            cooperative_reply(op,MD_ENTRY_DECLINED,0);
+            int error=recycle(b,op); if (error) return error;
             continue;
         }
         int alive=valid(op);

@@ -2132,6 +2132,7 @@ int test_uts_namespace_guest(int, char **);
 void test_ipc_namespace_guest(void);
 int test_user_namespace_guest(int, char **);
 int test_user_namespace_lifecycle(void);
+int test_user_namespace_limits(void);
 int test_namespace_handles_guest(void);
 int test_namespace_mounts_pid_guest(void);
 int test_devpts_guest(int);
@@ -2162,6 +2163,7 @@ int main(int argc, char **argv) {
     }
     if (argc>=2 && !strcmp(argv[1],"user-proc")) return test_user_namespace_guest(argc,argv);
     if (argc>=2 && !strcmp(argv[1],"user-namespace")) return test_user_namespace_lifecycle();
+    if (argc>=2 && !strcmp(argv[1],"user-limits")) return test_user_namespace_limits();
     if (argc>=2 && !strcmp(argv[1],"namespace-handles")) return test_namespace_handles_guest();
     if (argc>=2 && !strcmp(argv[1],"namespace-mounts-pid")) return test_namespace_mounts_pid_guest();
     if (argc>=2 && !strcmp(argv[1],"devpts")) return test_devpts_guest(0);

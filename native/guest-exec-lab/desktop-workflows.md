@@ -5,6 +5,7 @@
 SteamOS, libc/toolkit applications and guest GPU rendering. A rendered compositor is not proof of every application, input or audio workflow.
 
 - [Holo ARM64 Userspace](#holo-arm64-userspace)
+- [Flatpak Chromium](#flatpak-chromium)
 - [Executable Private Memory](#executable-private-memory)
 - [Audio Continuity](#audio-continuity)
 - [Steam Client](#steam-client)
@@ -13,6 +14,23 @@ SteamOS, libc/toolkit applications and guest GPU rendering. A rendered composito
 - [Linux GPU Fixture](#linux-gpu-fixture)
 
 ## Holo ARM64 Userspace
+
+### Flatpak Chromium
+
+Run `sh fixtures/flatpak-chromium-smoke.sh` from a terminal in the running guest
+desktop, using its existing D-Bus session. The fixture checks the sandbox's CPU
+topology view, writable `/dev/shm`, JavaScript execution and three successful
+browser exits. Each launch uses a fresh sandbox-private profile; the user's installed browser profile
+is untouched. Logs remain in the printed temporary directory. There are no
+sandbox-disabling flags. This does not verify GPU acceleration or document portals.
+
+An independent Shroot launch that merely inherits another launch's bus address
+is not equivalent: portal authorization can depend on the requesting process's
+namespace. Nor is a new `dbus-run-session` an adequate replacement for a desktop:
+KDE activation can start `plasma_waitforname org.freedesktop.Notifications`, which
+outlives a successfully exited browser when Plasma is absent. Shroot intentionally
+retains the entire guest process tree. Record the browser's exit separately from
+the supervised launch, and do not disable descendant ownership to pass a test.
 
 ### Executable Private Memory
 

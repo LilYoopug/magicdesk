@@ -276,7 +276,8 @@ int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *
             struct md_inode_boundary *boundary=walk.scope.store->boundary;
             r = component(&walk,view,mount,&current,name,todo,0,&next);
             int placement=last && (resolve&MD_VIEW_MOUNT_TARGET);
-            if (r==-EREMOTE && view && (view->tree || placement)) {
+            int devices=last && (resolve&MD_VIEW_PROVIDER_SOURCE) && boundary && boundary->native_directory;
+            if (r==-EREMOTE && view && (view->tree || placement || devices)) {
                 /* An explicit mount covers the initial filesystem's implicit
                  * proc/dev provider. Resolve only its covered dentry here;
                  * an ordinary root bind must retain the provider fallback. */
@@ -285,7 +286,10 @@ int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *
                 if (!selected) {
                     selected=enter(view,&covered,&next_mount,resolve);
                     if (selected) r=selected;
-                    else if (next_mount!=mount || placement) { next=covered; covered.fd=-1; r=0; }
+                    else if (next_mount!=mount || placement || devices) {
+                        out->implicit_devices=devices && next_mount==mount && !placement;
+                        next=covered; covered.fd=-1; r=0;
+                    }
                 }
                 point_close(&covered);
             }

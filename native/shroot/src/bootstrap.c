@@ -221,9 +221,19 @@ void md_boot(uintptr_t *kernel_stack) {
         if (bytes>MD_EXEC_BYTES-argument_bytes) md_die("guest arguments",-E2BIG);
         argument_bytes+=bytes;
     }
+    size_t environment_bytes=0, invocation_bytes=md_length(execfn)+1;
+    for (size_t i=0;i<envc;++i) {
+        size_t bytes=md_length(env[i])+1;
+        if (bytes>MD_EXEC_BYTES-environment_bytes) md_die("guest environment",-E2BIG);
+        environment_bytes+=bytes;
+    }
     size_t words = 1 + guest_argc + 1 + envc + 1 + 2 * (auxc + 2);
-    if (words*sizeof(uintptr_t)+argument_bytes+md_page_size>stack_size) md_die("guest arguments",-E2BIG);
-    char *arguments=(char *)((uintptr_t)stack+md_page_size+stack_size-argument_bytes);
+    size_t strings=argument_bytes+environment_bytes+invocation_bytes;
+    if (words*sizeof(uintptr_t)+strings+md_page_size>stack_size) md_die("guest arguments",-E2BIG);
+    /* Linux lays out argv strings, env strings, then the exec invocation.
+     * Keeping env on the bootstrap stack instead put the final argv string
+     * against PROT_NONE, exposing bounded lookahead in existing applications. */
+    char *arguments=(char *)((uintptr_t)stack+md_page_size+stack_size-sizeof(uintptr_t)-strings);
     uintptr_t *sp = (uintptr_t *)(((uintptr_t)arguments - words * sizeof(uintptr_t)) & ~15UL);
     uintptr_t *p = sp;
     *p++ = guest_argc;
@@ -236,7 +246,13 @@ void md_boot(uintptr_t *kernel_stack) {
         *p++=(uintptr_t)destination; destination+=bytes;
     }
     *p++ = 0;
-    for (size_t i = 0; i < envc; ++i) *p++ = (uintptr_t)env[i];
+    for (size_t i=0;i<envc;++i) {
+        size_t bytes=md_length(env[i])+1;
+        memcpy(destination,env[i],bytes);
+        *p++=(uintptr_t)destination; destination+=bytes;
+    }
+    memcpy(destination,execfn,invocation_bytes);
+    execfn=destination;
     *p++ = 0;
     Elf64_auxv_t *guest_aux = (Elf64_auxv_t *)p;
     memcpy(guest_aux, aux, (auxc + 1) * sizeof(*aux));

@@ -14,6 +14,9 @@ struct md_mount_namespace {
     struct md_view_mount base;
     struct md_view_mount *root;
     struct md_fs_mounts *tree;
+    /* Cold launch admission of one implicit provider. Ordinary inode walks
+     * stop at its covered object; topology changes invalidate this proof. */
+    struct { unsigned id; dev_t device; ino_t inode; char object[33]; } initial_boundary;
     struct md_mount_identity *native_ids;
     struct md_native_mounts *native_mounts;
     struct md_mount_graph *graph;

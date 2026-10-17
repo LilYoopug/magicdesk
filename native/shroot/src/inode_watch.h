@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <sys/types.h>
 struct md_inode_store;
+enum { MD_INOTIFY_MAX_INSTANCES=128, MD_INOTIFY_MAX_WATCHES=8192, MD_INOTIFY_QUEUE_LIMIT=16384 };
 /* Namespace-worker owned. Descriptors are borrowed; identity is verified from
  * the retained kernel object, never a guest descriptor number. */
 int md_inode_watch_create(struct md_inode_store *, int flags);

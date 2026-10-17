@@ -34,7 +34,7 @@ set(origins ${src}/fs_anchor.c ${src}/fs_origin_transfer.c ${src}/inode_lifetime
 list(APPEND origins ${src}/native_mounts.c ${src}/devpts_view.c ${src}/cgroup.c ${src}/cgroup_program.c ${src}/sysfs_view.c ${src}/network_namespace.c ${src}/network_model.c ${src}/network_route.c ${src}/network_message.c ${src}/network_generic.c ${src}/network_endpoint.c ${src}/network_sysctl.c
     ${src}/ipc_namespace.c ${src}/mqueue_view.c ${src}/landlock_policy.c ${src}/landlock_file.c
     ${src}/mount_stream.c ${src}/mount_pin.c ${src}/mount_propagation.c ${src}/temporary_directory.c ${src}/private_tree.c
-    ${src}/provider_tree.c ${src}/device_events.c ${src}/identity_snapshot.c ${src}/proc_sysctl.c ${src}/uts_namespace.c ${src}/control_event.c)
+    ${src}/provider_tree.c ${src}/host_fs_view.c ${src}/device_events.c ${src}/identity_snapshot.c ${src}/proc_sysctl.c ${src}/user_sysctl.c ${src}/uts_namespace.c ${src}/control_event.c)
 list(APPEND origins ${fifo_descriptions})
 list(APPEND origins ${src}/network_filter.c ${src}/network_filter_program.c ${src}/network_nft.c ${src}/network_nft_expression.c ${src}/network_nft_objects.c)
 list(APPEND origins ${src}/network_flow.c ${src}/network_filter_ports.c ${src}/network_forward.c ${src}/network_profile.c)

@@ -32,6 +32,7 @@ static int sysfs_source(struct md_filesystem *fs,const struct md_fs_request *q,
     s.sysfs=md_sysfs_new(parent,network,fs->store->identity);
     int error=errno; close(parent); errno=error;
     if (!s.sysfs) return -errno;
+    s.provider=md_provider_tree_retain(md_sysfs_provider(s.sysfs));
     s.fd=openat(md_sysfs_root(s.sysfs),".",O_PATH|O_DIRECTORY|O_CLOEXEC);
     if (s.fd<0) { int r=-errno; md_mount_source_close(&s); return r; }
     *out=s; return 0;

@@ -5,6 +5,7 @@
 #include "mount_graph.h"
 #include "fs_storage.h"
 #include "fs_mount_propagation.h"
+#include "host_fs_view.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
@@ -258,6 +259,28 @@ static int bind(struct md_filesystem *fs, const struct md_fs_request *q,
     }
     if (!r && md_view_file_cycle(file,fs->mounts)) r=-EINVAL;
     struct md_view_mount next={.source=-1,.target=-1};
+    struct md_provider_tree *devices=NULL;
+    int shared=-1;
+    struct md_inode_lifetime *shared_store=NULL;
+    if (!r && source.implicit_devices) {
+        int parent=md_fs_private_mounts_parent(fs->store);
+        if (parent<0) r=parent;
+        else {
+            devices=md_host_fs_new(parent,MD_HOST_FS_DEV);
+            if (!devices) r=-errno;
+            close(parent);
+        }
+        if (!r && (q->flags&MS_REC)) {
+            struct md_fs_storage_scope scope;
+            r=md_fs_storage_enter(fs,source.mount,&scope);
+            if (!r) {
+                shared=md_inode_open(scope.store,source.fd,"shm",O_PATH|O_DIRECTORY|O_CLOEXEC,0);
+                if (shared<0) r=shared;
+                else shared_store=md_inode_lifetime_retain(scope.store->lifetime);
+                md_fs_storage_leave(&scope);
+            }
+        }
+    }
     if (!r && (fstat(source.fd,&next.native) || (target && fstat(target->fd,&next.guest)))) r=-errno;
     if (!r && target && !!S_ISDIR(next.native.st_mode)!=!!S_ISDIR(next.guest.st_mode)) r=-ENOTDIR;
     if (!r && !fs->mounts->tree) {
@@ -275,12 +298,16 @@ static int bind(struct md_filesystem *fs, const struct md_fs_request *q,
     }
     if (!r) {
         slots[prepared++]=(unsigned)root_slot;
-        r=prepare(&pending[root_slot],source.fd,target ? target->fd : source.fd,target ? target->mount : NULL,
-            native_source ? MD_MOUNT_NATIVE : source.mount ? source.mount->backing : MD_MOUNT_INODE,
-            source.mount ? source.mount->storage : NULL,
+        int device_fd=devices ? openat(md_provider_tree_root(devices),".",O_PATH|O_DIRECTORY|O_CLOEXEC) : -1;
+        int source_fd=devices ? device_fd : source.fd;
+        r=devices && device_fd<0 ? -errno : prepare(&pending[root_slot],source_fd,target ? target->fd : source_fd,target ? target->mount : NULL,
+            devices ? MD_MOUNT_PROVIDER : native_source ? MD_MOUNT_NATIVE : source.mount ? source.mount->backing : MD_MOUNT_INODE,
+            !devices && source.mount ? source.mount->storage : NULL,
             policy);
+        if (device_fd>=0) close(device_fd);
         pending[root_slot].detached=!target;
-        if (!r && source.mount) {
+        if (!r && devices) pending[root_slot].provider=md_provider_tree_retain(devices);
+        if (!r && source.mount && !devices) {
             if (target) pending[root_slot].links=md_mount_links_copy(&source.mount->links);
             pending[root_slot].pid_namespace=md_pid_namespace_retain(source.mount->pid_namespace);
             pending[root_slot].devpts=md_devpts_retain(source.mount->devpts);
@@ -290,6 +317,21 @@ static int bind(struct md_filesystem *fs, const struct md_fs_request *q,
             pending[root_slot].ipc_namespace=md_ipc_namespace_retain(source.mount->ipc_namespace);
         }
         if (!r) pending[root_slot].file=md_control_file_retain(file);
+    }
+    int shared_slot=-1;
+    if (!r && shared>=0) {
+        shared_slot=vacant(pending,&count);
+        if (shared_slot<0) r=shared_slot;
+        else {
+            slots[prepared++]=(unsigned)shared_slot;
+            int covered=openat(md_provider_tree_root(devices),"shm",O_PATH|O_DIRECTORY|O_CLOEXEC);
+            if (covered<0) r=-errno;
+            else {
+                r=prepare(&pending[shared_slot],shared,covered,&tree->mounts[root_slot],
+                    MD_MOUNT_INODE,shared_store,policy);
+                close(covered);
+            }
+        }
     }
     struct md_fs_mounts *original=source.view ? source.view->tree : NULL;
     if (!(q->flags&MS_REC)) for (unsigned i=0;!r && original && i<original->count;++i) {
@@ -311,6 +353,13 @@ static int bind(struct md_filesystem *fs, const struct md_fs_request *q,
             int found=beneath(fs,m->target,&source);
             if (found<0) { r=found; break; }
             if (!found) continue;
+            if (devices) {
+                struct md_view_location memory=source; memory.fd=shared;
+                found=beneath(fs,m->target,&memory);
+                if (found<0) { r=found; break; }
+                if (!found) continue;
+                parent=(unsigned)shared_slot;
+            }
         } else {
             parent=0;
             for (unsigned j=0;j<nodes;++j)
@@ -331,6 +380,9 @@ static int bind(struct md_filesystem *fs, const struct md_fs_request *q,
     if (!r) {
         if (out) *out=&tree->mounts[root_slot];
     } else for (unsigned i=0;i<prepared;++i) md_view_mount_close(&pending[slots[i]]);
+    if (shared>=0) close(shared);
+    md_inode_lifetime_release(shared_store);
+    md_provider_tree_release(devices);
     md_control_file_release(file); md_view_location_close(&source); return r;
 }
 void md_fs_open_tree(struct md_filesystem *fs,const struct md_fs_request *q,

@@ -87,6 +87,14 @@ is a terminal `EFAULT`, not a replay. A request cannot supply credentials or a
 namespace identity: the registered task selects a fresh authoritative snapshot.
 Logical chroot, mount views, credentials, DAC and Landlock remain engine policy.
 
+Temporary task barriers stop broker admission as well as native execution.
+Releasing a synthetic interrupt acknowledges the actual successful resume to the
+broker, preserving eligibility and waking any request published before that
+acknowledgement. Both JIT memory repair and remote task actions use this shared
+resume adapter. Injected helper calls and deferred real events retain their stop
+ownership; they cannot re-enable ordinary admission. This adds no work to the
+ordinary per-call entry path.
+
 The task registry retains an immutable resource generation for repeated reads.
 Each admitted read owns one reference instead of independently retaining every
 namespace and credential object. Publishing changed credentials or resource
@@ -184,6 +192,12 @@ delivering the signal/exit event. In particular, cancellation before `close` mus
 not retire a slot as if Linux had completed `close` with a late `EINTR`. Unknown
 outcomes abandon the metadata claim, never replay the effect. No allocation is
 required to publish an already-created native FD.
+
+A cancelled-before-effect plan returns explicit pre-execution handoff after its
+owners retire, not a synthetic `EINTR` to libc. If the signal handler returns,
+the caller executes its original syscall through ordinary admission. A handler
+which abandons the call has no outstanding effect or borrowed file-table turn.
+A completed native result, including a real kernel `EINTR`, is never retried.
 
 After a completed native effect the caller may return its exact result before
 worker bookkeeping finishes. A distinct `RETIRING` state lets it queue one next

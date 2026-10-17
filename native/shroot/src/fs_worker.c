@@ -1,7 +1,7 @@
 #define _GNU_SOURCE
 #include "fs_worker.h"
 #include "fs_service.h"
-#include "fs_mounts.h"
+#include "fs_mount_internal.h"
 #include "fs_storage.h"
 #include "image_catalogue.h"
 #include "event_wait.h"
@@ -138,11 +138,13 @@ static void *run(void *context) {
     }
     w->network=NULL;
     struct md_input_session *input=NULL;
+    struct md_provider_tree *sysfs=NULL;
+    if (!error) error=md_fs_sysfs_prepare(&fs,&sysfs);
     if (!error) {
         w->device_events=md_device_events_new();
         if (!w->device_events) error=-errno;
     }
-    if (!error) error=md_input_session_start(&fs,w->input,w->device_events,&input);
+    if (!error) error=md_input_session_start(&fs,w->input,w->device_events,sysfs,&input);
     w->input=NULL;
     if (!error && w->inherited && w->inherited->count) {
         struct md_ipc_credentials *authority=NULL;
@@ -174,6 +176,7 @@ static void *run(void *context) {
     }
     if (listener >= 0) close(listener);
     md_input_session_stop(input);
+    md_provider_tree_release(sysfs);
     md_device_events_stop(w->device_events);
     md_fs_mounts_close(&fs);
     md_libc_registry_close(fs.libc_registry);

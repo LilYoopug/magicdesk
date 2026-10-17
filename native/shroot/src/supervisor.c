@@ -50,6 +50,7 @@
 #include "proc_namespace.h"
 #include <linux/nsfs.h>
 #include "proc_sysctl.h"
+#include "user_sysctl.h"
 #include "proc_control.h"
 #include "launch_identity.h"
 #include "sysv_shm.h"
@@ -450,6 +451,7 @@ static struct thread *thread_index[THREAD_BUCKETS];
 static struct md_task_wait task_wait;
 static int pid_collection_pending;
 static int pid_gone(pid_t);
+static void pid_collect(void);
 static struct md_debugger *debugger;
 static pid_t leader;
 static unsigned live, total, calls, images, signals, copy_faults, fstat_failures;
@@ -759,6 +761,14 @@ static void adapter_discard(struct thread *t) {
 static long native_trace(int request, pid_t pid, void *address, void *data) {
     if (statistics) statistics->ptrace_requests++;
     return ptrace(request, pid, address, data);
+}
+static long quiesce_trace(int request,pid_t pid,void *address,void *data) {
+    long result=native_trace(request,pid,address,data);
+    /* Only barrier release restores this unchanged guest continuation.
+     * Injected helper execution must retain the broker's stopped state. */
+    if (result>=0 && (request==PTRACE_CONT || request==PTRACE_SYSCALL || request==PTRACE_SINGLESTEP))
+        md_broker_resumed(broker,pid);
+    return result;
 }
 static int tracee_request(struct thread *t, int request, void *address, void *data, const char *operation) {
     if (t->resume_lost) return 0;
@@ -1421,9 +1431,10 @@ static void proc_metadata_value(struct md_proc_metadata_result *out,const struct
 static int proc_node_metadata(struct thread *t, const struct md_proc_metadata_request *q, struct md_proc_metadata_result *out) {
     *out=(struct md_proc_metadata_result){0};
     struct stat st={0}, *value=&st;
-    if (md_proc_network_sysctl(q->kind)) {
+    if (md_proc_network_sysctl(q->kind) || q->kind==MD_PROC_MAX_USER_NAMESPACES) {
         if (!memchr(q->interface,0,sizeof(q->interface))) return -EINVAL;
-        struct md_control_file view=md_network_sysctl_new(t->resources.network,
+        struct md_control_file view=q->kind==MD_PROC_MAX_USER_NAMESPACES
+            ? md_user_sysctl_new(t->identity.user_namespace,NULL) : md_network_sysctl_new(t->resources.network,
             (enum md_network_parameter)(q->kind-MD_PROC_NET_UNPRIVILEGED_PORT),q->interface,NULL);
         if (!view.ops) return -errno;
         int error=view.ops->stat(view.context,value);
@@ -1656,7 +1667,8 @@ static void proc_file_request(struct thread *t, const struct seccomp_notif *q) {
             if (!reply.error) return;
         }
         else reply.error=-ENOTTY;
-    } else if (operation==MD_PROC_FILE_OPEN && md_proc_network_sysctl(q->data.args[3])) {
+    } else if (operation==MD_PROC_FILE_OPEN && (md_proc_network_sysctl(q->data.args[3])
+            || q->data.args[3]==MD_PROC_MAX_USER_NAMESPACES)) {
         int flags=(int)q->data.args[4];
         char interface[16]={0};
         if (md_proc_network_interface(q->data.args[3])) {
@@ -1668,7 +1680,8 @@ static void proc_file_request(struct thread *t, const struct seccomp_notif *q) {
             }
         }
         struct md_control_file view={0};
-        if (!reply.error) view=md_network_sysctl_new(t->resources.network,
+        if (!reply.error) view=q->data.args[3]==MD_PROC_MAX_USER_NAMESPACES
+            ? md_user_sysctl_new(t->identity.user_namespace,NULL) : md_network_sysctl_new(t->resources.network,
             (enum md_network_parameter)(q->data.args[3]-MD_PROC_NET_UNPRIVILEGED_PORT),interface,NULL);
         struct md_proc_file *file=NULL;
         if (!view.ops) { if (!reply.error) reply.error=-errno; }
@@ -2704,6 +2717,16 @@ static void mount_copy_complete(struct md_mount_copy_request *request, int actor
     }
     fd_native_start(t);
 }
+static int resources_unshare_prepare(struct thread *t,unsigned long flags) {
+    int error=md_resources_unshare_prepare(&t->resources,flags,&t->identity,&t->resource_change);
+    if (error==-ENOSPC && (flags&CLONE_NEWUSER) && md_task_registry_has_retired(tasks)) {
+        /* A native wait may reap after the exit-time collection. Retry only
+         * on quota pressure, preserving in-flight PID translation owners. */
+        pid_collection_pending=1; pid_collect();
+        error=md_resources_unshare_prepare(&t->resources,flags,&t->identity,&t->resource_change);
+    }
+    return error;
+}
 static void fd_start(struct thread *t) {
     retry_clear(t,RETRY_FD);
     if (md_fd_order_state(&t->fd_order)==MD_RESOURCE_ORDER_QUEUED
@@ -2782,11 +2805,9 @@ static void fd_start(struct thread *t) {
     }
     if (r->regs[8]==SYS_execve || r->regs[8]==SYS_execveat || r->regs[8]==SYS_unshare
             || (r->regs[8]==SYS_close_range && (r->regs[2]&CLOSE_RANGE_UNSHARE)))
-        error=md_resources_unshare_prepare(&t->resources,r->regs[8]==SYS_unshare ? r->regs[0] : CLONE_FILES,
-            &t->identity,&t->resource_change);
+        error=resources_unshare_prepare(t,r->regs[8]==SYS_unshare ? r->regs[0] : CLONE_FILES);
     if (r->regs[8]==SYS_clone && md_resources_namespace_flags(r->regs[0]))
-        error=md_resources_unshare_prepare(&t->resources,md_resources_namespace_flags(r->regs[0]),
-            &t->identity,&t->resource_change);
+        error=resources_unshare_prepare(t,md_resources_namespace_flags(r->regs[0]));
     if (!error && (t->resource_change.copy_mounts || t->resource_change.check_root)) {
         error=md_mount_copy_submit(mount_copy_service,t->pid,t->resources.mounts,t->resources.fs,
             t->resource_change.identity_pending ? t->resource_change.identity.user_namespace : t->identity.user_namespace,
@@ -3262,7 +3283,7 @@ static void task_action_start(struct thread *t) {
     owner->group=md_fd_selector_fork(candidate->fd_selector,1);
     task_action_execution=owner;
     if (owner->remote) {
-        if (!task_action_barrier) { task_action_barrier=md_task_quiesce_new(native_trace); CHECK(task_action_barrier); }
+        if (!task_action_barrier) { task_action_barrier=md_task_quiesce_new(quiesce_trace); CHECK(task_action_barrier); }
         CHECK(!md_task_quiesce_add(task_action_barrier,candidate->pid,candidate->kernel_stopped,candidate->kernel_resume));
         CHECK(!md_task_quiesce_stop(task_action_barrier));
     }
@@ -3317,7 +3338,7 @@ static void loan_start(struct task_action *owner) {
     }
     owner->actor=candidate; owner->remote=1;
     task_action_execution=owner;
-    if (!task_action_barrier) { task_action_barrier=md_task_quiesce_new(native_trace); CHECK(task_action_barrier); }
+    if (!task_action_barrier) { task_action_barrier=md_task_quiesce_new(quiesce_trace); CHECK(task_action_barrier); }
     CHECK(!md_task_quiesce_add(task_action_barrier,candidate->pid,stopped,candidate->kernel_resume));
     CHECK(!md_task_quiesce_stop(task_action_barrier));
     task_action_call_start(owner);
@@ -3355,7 +3376,7 @@ static int task_action_event(pid_t pid,int status,const struct rusage *usage) {
         if (t && WIFSTOPPED(status) && !event && WSTOPSIG(status)==(SIGTRAP|0x80)
                 && t->phase==OBSERVING && t->memory_action==MEMORY_KERNEL
                 && t->original.regs[8]==SYS_mprotect) {
-            if (!task_action_barrier) { task_action_barrier=md_task_quiesce_new(native_trace); CHECK(task_action_barrier); }
+            if (!task_action_barrier) { task_action_barrier=md_task_quiesce_new(quiesce_trace); CHECK(task_action_barrier); }
             CHECK(!md_task_quiesce_event(task_action_barrier,pid,status,usage)); return 1;
         }
         return 0;
@@ -6399,6 +6420,8 @@ static pid_t wait_event(int *status, struct rusage *usage) {
         event_sources(events);
         if (statistics) ++statistics->event_waits;
         long outcome = md_event_wait(events, EVENT_SOURCES, bound);
+        /* Report expiry through the transaction that owns the memory deadline. */
+        if (outcome==-ETIMEDOUT && bound==memory_deadline()) memory_progress();
         if (outcome==-ETIMEDOUT && bound==control_bound) {
             for (struct thread *t=threads;t;t=t->next) if (t->pid) control_progress(t);
             continue;
@@ -6700,7 +6723,7 @@ static int memory_repair(struct thread *t,const struct user_pt_regs *returned) {
     if (!execution) return 0;
     long error=md_buffers_take(md_memory_buffers(t->memory),&execution->buffer);
     if (error) { free(execution); return 0; }
-    if (!memory_barrier) { memory_barrier=md_task_quiesce_new(native_trace); CHECK(memory_barrier); }
+    if (!memory_barrier) { memory_barrier=md_task_quiesce_new(quiesce_trace); CHECK(memory_barrier); }
     execution->actor=t; execution->returned=*returned; execution->mapping=mapping;
     execution->global=md_memory_exposed(t->memory);
     execution->timing[0]=md_event_now();
@@ -7890,6 +7913,11 @@ int main(int argc, char **argv) {
                 }
                 TRACE("PROBE signal pid=%d signal=%d code=%d pc=%#llx nr=%llu phase=%d adapted=%llu address=%p\n",
                     pid, sig, info.si_code, regs.pc, regs.regs[8], t->phase, t->original.regs[8], info.si_addr);
+                if (diagnostics && t->process_image) {
+                    char image[PATH_MAX];
+                    ssize_t length=md_process_image_link(pid,t->process_image,image,sizeof(image));
+                    if (length>0) TRACE("PROBE signal-image pid=%d path=%.*s\n",pid,(int)length,image);
+                }
                 if (sig == SIGSYS)
                     TRACE("PROBE application SIGSYS syscall=%d cookie=%d call=%p\n", info.si_syscall, info.si_errno, info.si_call_addr);
             }

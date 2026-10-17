@@ -158,6 +158,15 @@ static void unsupported_namespaces(void) {
     close(fd);
     puts("PASS unsupported namespaces: absent capability, mount cycle and non-mountable control rejection");
 }
+static void namespace_fd_path(pid_t process,int fd,const char *expected) {
+    char path[128],link[256];
+    snprintf(path,sizeof(path),"/proc/%d/fd/%d",process,fd);
+    ssize_t length=readlink(path,link,sizeof(link));
+    if (length!=(ssize_t)strlen(expected) || (length>=0 && memcmp(link,expected,(size_t)length)))
+        fprintf(stderr,"namespace FD path %s: result=%zd errno=%d got=%.*s expected=%s\n",
+            path,length,errno,length>0 ? (int)length : 0,link,expected);
+    assert(length==(ssize_t)strlen(expected) && !memcmp(link,expected,(size_t)length));
+}
 static void namespace_mounts(void) {
     assert(!unshare(CLONE_NEWNS));
     char target[128],alias[128],source[128];
@@ -172,6 +181,7 @@ static void namespace_mounts(void) {
         && before.st_ino==after.st_ino && before.st_dev==after.st_dev);
     struct statfs fs; assert(!statfs(target,&fs) && fs.f_type==NSFS_MAGIC);
     fd=open(target,O_RDONLY|O_CLOEXEC); assert(fd>=0);
+    namespace_fd_path(getpid(),fd,target);
     assert(ioctl(fd,NS_GET_NSTYPE)==CLONE_NEWNET);
     int owner=ioctl(fd,NS_GET_USERNS); assert(owner>=0); close(owner);
     assert(!fstat(fd,&after) && before.st_ino==after.st_ino);
@@ -183,9 +193,20 @@ static void namespace_mounts(void) {
     assert(chmod(target,0600)<0 && errno==EOPNOTSUPP);
     assert(open(target,O_DIRECTORY|O_RDONLY)<0 && errno==ENOTDIR);
     int path=open(target,O_PATH|O_CLOEXEC); assert(path>=0);
+    namespace_fd_path(getpid(),path,target);
     snprintf(source,sizeof(source),"/proc/self/fd/%d",path);
     assert(!mount(source,alias,NULL,MS_BIND,NULL));
     int copy=open(source,O_RDONLY|O_CLOEXEC); assert(copy>=0);
+    namespace_fd_path(getpid(),copy,target);
+    pid_t reader=fork(); assert(reader>=0);
+    if (!reader) {
+        namespace_fd_path(getppid(),fd,target);
+        namespace_fd_path(getppid(),path,target);
+        _exit(0);
+    }
+    int reader_status;
+    /* EVENT_WAIT: foreign namespace-FD readlink completes; fixture alarm bounds failure. */
+    assert(waitpid(reader,&reader_status,0)==reader && WIFEXITED(reader_status) && !WEXITSTATUS(reader_status));
     assert(ioctl(copy,NS_GET_NSTYPE)==CLONE_NEWNET);
     assert(!unshare(CLONE_NEWNET));
     assert(!stat("/proc/self/ns/net",&after) && before.st_ino!=after.st_ino);

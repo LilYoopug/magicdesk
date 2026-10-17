@@ -89,6 +89,25 @@ parent authority and CAP_SETFCAP for mapping parent UID zero. Stat, ownership,
 ACL, SysV and Unix peer/message credential boundaries translate canonical IDs.
 Inherited mounts retain placement and readonly locks in a less privileged owner.
 
+`user_namespace` owns per-creator namespace counts across the complete ancestor
+chain. Creation reserves all charges atomically; failure rolls them back, and
+final namespace release returns them, including references retained by namespace
+FDs, mounts and sysctl files. `/proc/sys/user/max_user_namespaces` selects the
+caller's user namespace at open. `user_sysctl` retains that owner and checks
+`CAP_SYS_RESOURCE` there on both open and write; an inherited ancestor FD cannot
+be used to evade authority. Lowering a limit does not destroy existing namespaces,
+but further creation fails with `ENOSPC`. Ordinary filesystem IO does not inspect
+these counters. Read-only imported policy pages do not acquire independent quota
+charges or grant namespace creation authority.
+If a native fast wait reaps after exit-time registry collection, quota admission
+rechecks retired tasks only on `ENOSPC`. The existing PID-observation barrier
+protects in-flight wait translations. Ordinary creation and native waits gain no
+periodic scans or extra completion interception.
+
+The proc provider also publishes the implemented fixed inotify instance, watch
+and queue limits under `/proc/sys/fs/inotify`. These values share constants with
+`inode_watch`; writes fail instead of pretending to reconfigure its limits.
+
 Proc control files share descriptor ownership, offsets, copying and cancellation
 through `proc_file`. Their lazy selector is armed only in tables receiving those
 objects. Local SCM_RIGHTS custody retains the same live object, including a
@@ -281,6 +300,10 @@ pivot_root; unrelated directory aliases remain ordinary guest dentries. Nested
 Bubblewrap can therefore construct a new root with `--proc /proc` and
 `--dev-bind /dev /dev`, without borrowing host mount authority. `/dev` uses the
 selected native devices and their real permissions, not a private device manager.
+Recursive binds of the implicit `/dev` retain guest `/dev/shm` and its nested
+mounts. `host_fs_view` supplies a portable device projection with guest-owned
+`shm` and `pts` attachment points; ordinary binds omit the shared-memory child.
+Detached `open_tree` clones use the same composition and mount ownership.
 Guest device-node creation requires logical CAP_MKNOD and stores type/rdev in
 the inode provider without native mknod. Supported character numbers use explicit
 native endpoints; unknown numbers remain metadata-only and return ENXIO on data
@@ -292,6 +315,32 @@ through a retained proc-FD target. Native rdev, IO and access checks are preserv
 nodev rejects new opens without invalidating already-open descriptions.
 
 ## Logical Filesystems
+
+Sysfs uses `provider_tree` to compose guest-owned nodes with a filtered native
+lower tree. Every launch prepares the initial `/sys`, independently of gamepad
+transport. `sysfs_view` owns the shared CPU/NUMA visibility policy used by both
+guest mounts and this initial projection. Directory lookup and enumeration
+admit the CPU/node branches and their ancestors; other Android device and network
+trees are not imported. Lower attributes are read-only even on a writable guest
+sysfs mount. Opens retain native descriptors, offsets and IO; no attribute
+snapshots or per-read proxy is added. Virtual network attributes keep their typed
+provider, live namespace state and existing errors. Node classification is shared
+by metadata and open handling rather than repeated for each dispatch stage.
+
+An unchanged initial sysfs mount preserves the inode fast path and bounded
+metadata operation windows. A cold namespace proof identifies its covered
+logical inode; the inode walker falls back before crossing that boundary,
+including aliases and renamed dentries. Additional mounts or restricted roots
+retain the complete mount walker. This adds no per-operation mount scan.
+
+Host projection roots cross supervisor boundaries as typed mount graph entries
+with retained temporary-tree leases, not flattened native directories. CPU
+read-only policy survives import and publisher exit. Private device/control
+owners, projection subroot sources and attachment points in the native lower
+tree remain explicitly nonportable. Such local mounts publish an unavailable
+revision before queuing restricted Android descriptors; removing them restores
+portable publication. This prevents a locally usable but nontransferable host
+directory from corrupting the graph stream.
 
 Logical tmpfs uses a private transient inode store, not Android's kernel tmpfs.
 It supports mode/uid/gid, ordinary file operations, shared native mappings,

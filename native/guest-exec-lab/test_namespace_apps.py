@@ -69,6 +69,8 @@ def main():
                             'test -d /etc; test -d /usr; '
                             'test "$(realpath /etc)" = /etc; '
                             'test "$(readlink /bin)" = usr/bin; '
+                            'shared=$(mktemp /dev/shm/md-bwrap.XXXXXXXX); '
+                            'printf shm >"$shared"; test "$(cat "$shared")" = shm; rm "$shared"; '
                             'exec 3</tmp; printf data >/tmp/file-a; '
                             'mv /proc/self/fd/3/file-a /proc/self/fd/3/file-b; '
                             'test "$(cat /tmp/file-b)" = data; echo MD-BWRAP-SPLIT-ROOT'],
@@ -84,6 +86,8 @@ def main():
                      'test -r /proc/1/status; test -r /proc/$$/status; '
                      'test "$(awk \'/^Pid:/{print $2}\' /proc/1/status)" = 1; '
                      'test -c /dev/null; printf test >/dev/null; '
+                     'shared=$(mktemp /dev/shm/md-bwrap.XXXXXXXX); '
+                     'printf shm >"$shared"; test "$(cat "$shared")" = shm; rm "$shared"; '
                      'test "$(readlink /proc/1/ns/pid)" = "$(readlink /proc/self/ns/pid)"; '
                      'echo MD-BWRAP-PID'], 'MD-BWRAP-PID'),
             'basic': (['--bind', '/', '/', '--', '/usr/bin/id'], 'uid=2000'),

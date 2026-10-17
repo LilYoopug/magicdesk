@@ -145,7 +145,6 @@ static int location_path(struct md_filesystem *fs, int fd, struct md_view_mount 
     char root[PATH_MAX], path[PATH_MAX], target[PATH_MAX];
     struct stat st;
     if (fstat(fd, &st)) return -errno;
-    if (!st.st_nlink) return -ENOENT;
     /* A mount root is named by its covered dentry, not by the backing
      * inode's aliases. File binds need no source-name reconstruction. */
     if (md_view_same(&st,&m->native)) {
@@ -153,6 +152,7 @@ static int location_path(struct md_filesystem *fs, int fd, struct md_view_mount 
         if (size<2) return -ERANGE;
         strcpy(out,"/"); return 0;
     }
+    if (!st.st_nlink) return -ENOENT;
     int r=md_view_backing_path(fs,m->source,m,root,sizeof(root));
     if (!r) r=md_view_backing_path(fs,fd,m,path,sizeof(path));
     if (!r && !beneath(path, root)) r = -EXDEV;
@@ -457,6 +457,10 @@ int md_fs_mounts_copy(struct md_filesystem *fs, const struct md_fs_location *roo
     }
     if (!r && fs->mounts->root!=&fs->mounts->base)
         copy->root=&copy->tree->mounts[fs->mounts->root-source->mounts];
+    if (!r && md_mount_namespace_initial_boundary(fs->mounts)) {
+        copy->initial_boundary=fs->mounts->initial_boundary;
+        copy->initial_boundary.id=copy->tree->mounts[0].id;
+    }
     struct md_fs_location selected=*root;
     if (!r && origin) {
         struct md_filesystem candidate={.store=fs->store,.storage=fs->storage,.mounts=copy};

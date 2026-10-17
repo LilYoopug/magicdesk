@@ -179,3 +179,11 @@ int md_mount_namespace_attached(const struct md_mount_namespace *n) {
 int md_mount_namespace_managed_paths(const struct md_mount_namespace *n) {
     return n && atomic_load_explicit(&n->managed_paths,memory_order_acquire);
 }
+const char *md_mount_namespace_initial_boundary(const struct md_mount_namespace *n) {
+    if (!n || !n->initial_boundary.object[0] || n->root!=&n->base || n->base.source>=0
+            || !n->tree || n->tree->count!=1 || md_mount_namespace_managed_paths(n)) return NULL;
+    const struct md_view_mount *m=&n->tree->mounts[0];
+    return m->id==n->initial_boundary.id && !m->detached && m->parent==&n->base
+        && m->guest.st_dev==n->initial_boundary.device && m->guest.st_ino==n->initial_boundary.inode
+        ? n->initial_boundary.object : NULL;
+}

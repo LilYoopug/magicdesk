@@ -2,6 +2,7 @@
 #define MD_PROC_SYSCTL_H
 #include "proc_file.h"
 const char *md_proc_sysctl_name(enum md_proc_file_kind);
+const char *md_proc_sysctl_directory(enum md_proc_file_kind);
 int md_proc_sysctl_stat(enum md_proc_file_kind,struct stat *);
 struct md_control_file md_proc_sysctl_new(enum md_proc_file_kind,struct md_fs_anchor *,
     const struct md_uts_namespace *);

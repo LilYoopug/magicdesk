@@ -8,7 +8,7 @@
 enum { BUCKETS=127 };
 struct scope {
     struct scope *next;
-    struct md_user_namespace *space;
+    struct md_user_namespace_key key;
     uint64_t ceiling;
 };
 struct account {
@@ -31,19 +31,24 @@ struct md_process_member {
     int exec_check;
 };
 static struct scope *scope_get(struct accounting *owner, struct md_user_namespace *space, uint64_t ceiling) {
+    struct md_user_namespace_key key=md_user_namespace_key(space);
     for (struct scope *s=owner->scopes;s;s=s->next)
-        if (md_user_namespace_same(s->space,space)) return s;
+        if (s->key.device==key.device && s->key.inode==key.inode && s->key.generation==key.generation) return s;
     struct scope *s=calloc(1,sizeof(*s));
     if (!s) return NULL;
-    *s=(struct scope){.next=owner->scopes,.space=md_user_namespace_retain(space),
+    /* The accounting cache preserves ceilings, but must not pin namespaces
+     * after their last task/handle dies and keep namespace quotas charged. */
+    *s=(struct scope){.next=owner->scopes,.key=key,
         .ceiling=space ? ceiling : UINT64_MAX};
     owner->scopes=s; return s;
 }
 static struct account *account_get(struct accounting *owner,struct md_user_namespace *space,
         uint32_t uid,uint64_t ceiling) {
     unsigned bucket=(uid ^ md_user_namespace_inode(space))%BUCKETS;
+    struct md_user_namespace_key key=md_user_namespace_key(space);
     for (struct account *a=owner->accounts[bucket];a;a=a->next)
-        if (a->uid==uid && md_user_namespace_same(a->scope->space,space)) return a;
+        if (a->uid==uid && a->scope->key.device==key.device && a->scope->key.inode==key.inode
+                && a->scope->key.generation==key.generation) return a;
     struct scope *s=scope_get(owner,space,ceiling);
     if (!s) return NULL;
     struct account *parent=NULL;
@@ -78,7 +83,7 @@ static void accounting_release(struct accounting *owner) {
     }
     while (owner->scopes) {
         struct scope *s=owner->scopes; owner->scopes=s->next;
-        md_user_namespace_release(s->space); free(s);
+        free(s);
     }
     free(owner);
 }
@@ -106,8 +111,10 @@ void md_process_member_release(struct md_process_member *m) {
     accounting_release(m->owner); free(m);
 }
 int md_process_member_identity(struct md_process_member *m,const struct md_identity *identity) {
+    struct md_user_namespace_key key=md_user_namespace_key(identity->user_namespace);
     if (!m || (m->account && m->account->uid==identity->uid.real
-            && md_user_namespace_same(m->account->scope->space,identity->user_namespace))) return 0;
+            && m->account->scope->key.device==key.device && m->account->scope->key.inode==key.inode
+            && m->account->scope->key.generation==key.generation)) return 0;
     struct account *next=account_get(m->owner,identity->user_namespace,identity->uid.real,m->limits->nproc.rlim_cur);
     if (!next) return -ENOMEM;
     int changed=m->account && m->account->uid!=identity->uid.real;

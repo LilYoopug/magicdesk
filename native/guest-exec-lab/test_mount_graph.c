@@ -2,6 +2,7 @@
 #include "mount_graph.h"
 #include "mount_stream.h"
 #include "fs_mount_internal.h"
+#include "fs_storage.h"
 #include "fs_wire.h"
 #include "event_wait.h"
 #include "mount_topology.h"
@@ -534,10 +535,24 @@ static void retirement(const char *base, int exported) {
         exported ? "published" : "local");
 }
 int test_mount_graph_child(int argc, char **argv) {
-    if (argc!=4 || (strcmp(argv[1],"--graph-reader") && strcmp(argv[1],"--graph-writer"))) return -1;
+    if (argc!=4 || (strcmp(argv[1],"--graph-reader") && strcmp(argv[1],"--graph-writer")
+            && strcmp(argv[1],"--host-view-reader"))) return -1;
     alarm(30); int fd=atoi(argv[2]); assert(!fcntl(fd,F_SETFD,FD_CLOEXEC));
     unsigned before=descriptors();
-    if (!strcmp(argv[1],"--graph-writer")) {
+    if (!strcmp(argv[1],"--host-view-reader")) {
+        struct md_filesystem fs=filesystem(argv[3],0);
+        struct md_mount_graph_parcel p=receive_graph(fd);
+        assert(!md_mount_graph_import(&p,&fs.mounts));
+        for (unsigned pass=0;pass<2;++pass) {
+            contents(&fs,"/devices/shm/sentinel",NULL,"shared");
+            struct md_fs_result cpu=open_file(&fs,"/sys/devices/system/cpu/possible",O_RDONLY,NULL,NULL);
+            assert(!cpu.error && cpu.fd>=0); char bytes[64]; assert(read(cpu.fd,bytes,sizeof(bytes))>0); close(cpu.fd);
+            assert(open_file(&fs,"/sys/devices/system/cpu/possible",O_WRONLY,NULL,NULL).error==-EROFS);
+            assert(open_file(&fs,"/sys/devices/platform",O_PATH,NULL,NULL).error==-ENOENT);
+            if (!pass) { send_byte(fd,'r'); assert(receive_byte(fd)=='x'); }
+        }
+        close_filesystem(&fs);
+    } else if (!strcmp(argv[1],"--graph-writer")) {
         struct md_filesystem fs=filesystem(argv[3],1); struct md_mount_graph_parcel p={0};
         assert(!md_mount_graph_export(fs.mounts,fs.store->lifetime->root,&p)); send_graph(fd,&p); close_filesystem(&fs);
     } else {
@@ -558,6 +573,31 @@ int test_mount_graph_child(int argc, char **argv) {
         contents(&fs,"value",origin,"value"); md_fs_anchor_release(origin); close_filesystem(&fs);
     }
     assert(descriptors()==before); close(fd); return 0;
+}
+static void host_projections(const char *base) {
+    unsigned before=descriptors(); char directory[PATH_MAX];
+    path(directory,base,"host-views"); assert(!mkdir(directory,0700));
+    struct md_filesystem fs=filesystem(directory,1);
+    struct md_fs_storage_cache storage={0}; fs.storage=&storage;
+    assert(!md_inode_runtime_prepare(fs.store));
+    assert(!md_inode_mkdir(fs.store,-1,"/devices",0755));
+    int sentinel=md_inode_open(fs.store,-1,"/dev/shm/sentinel",O_CREAT|O_WRONLY,0600);
+    assert(sentinel>=0 && write(sentinel,"shared",6)==6); close(sentinel);
+    struct md_provider_tree *sysfs=NULL; assert(!md_fs_sysfs_prepare(&fs,&sysfs));
+    struct md_identity identity=md_identity_new(0,0); fs.store->identity=&identity;
+    struct md_fs_request q={.operation=MD_FS_MOUNT,.mode=MD_FS_MOUNT_BIND,.flags=MS_BIND|MS_REC,
+        .directory={-1,-1},.path={"/devices","/dev"}};
+    struct md_fs_result result; md_fs_execute(&fs,&q,&result,NULL); assert(!result.error);
+    fs.store->identity=NULL; md_identity_release(&identity);
+    int pair[2]; channel(pair);
+    pid_t child=start("--host-view-reader",pair[1],directory); close(pair[1]);
+    struct md_mount_graph_parcel parcel={0};
+    assert(!md_mount_graph_export(fs.mounts,fs.store->lifetime->root,&parcel)); send_graph(pair[0],&parcel);
+    assert(receive_byte(pair[0])=='r');
+    md_fs_storage_close(&storage); close_filesystem(&fs); md_provider_tree_release(sysfs);
+    send_byte(pair[0],'x'); reap(child); close(pair[0]);
+    assert(descriptors()==before);
+    puts("PASS host projection exec peer: sysfs policy, dev/shm data, publisher teardown and exact FD balance");
 }
 static void processes(const char *base) {
     unsigned before=descriptors(); char path1[PATH_MAX], path2[PATH_MAX];
@@ -875,5 +915,6 @@ void test_mount_graph(const char *base) {
     path(model,base,"graph-model"); path(peers,base,"graph-peers");
     assert(!mkdir(model,0700) && !mkdir(peers,0700));
     models(model); sizes(base); unordered(base); updates(base); private_publication(base);
-    retirement(base,0); retirement(base,1); processes(peers); initial_pivot(base); removed_points(base); propagation(base); alarm(0);
+    retirement(base,0); retirement(base,1); processes(peers); host_projections(base);
+    initial_pivot(base); removed_points(base); propagation(base); alarm(0);
 }

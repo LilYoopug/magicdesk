@@ -336,6 +336,13 @@ static void inode_selected(struct md_filesystem *fs, const struct md_fs_request 
     if (q->operation==MD_FS_OPEN || q->operation==MD_FS_CREATE || q->operation==MD_FS_OPEN_IMAGE) {
         unsigned flags=q->operation==MD_FS_CREATE ? O_RDWR|O_CREAT|O_EXCL
             : q->operation==MD_FS_OPEN_IMAGE ? O_RDONLY|O_CLOEXEC : q->flags;
+        /* O_TMPFILE creates inside the selected directory; it does not reopen
+         * that directory. Keep creation flags/mode and the provider's errno. */
+        if (!(flags&O_PATH) && (flags&__O_TMPFILE)) {
+            local.operation=MD_FS_OPEN; local.path[0]=".";
+            inode(fs,a->view,a->mount,&local,out,output);
+            return;
+        }
         if (!(flags&O_PATH) && (flags&(O_CREAT|O_EXCL))==(O_CREAT|O_EXCL)) {
             out->error=-EEXIST; return;
         }
@@ -494,7 +501,7 @@ static void native(struct md_filesystem *fs, const struct md_fs_request *q,
         if (n < 0) r=a->mount->backing==MD_MOUNT_PROC ? (int)n : -errno; else out->size = (size_t)n;
         /* This branch resolved a nonempty pathname; descriptor-only requests
          * retain the kernel's empty-path errno in descriptor(). */
-        if (r==-ENOENT && a->mount->backing!=MD_MOUNT_PROC) {
+        if (r==-ENOENT) {
             struct stat st;
             if (!fstat(a->fd,&st) && !S_ISLNK(st.st_mode)) r=-EINVAL;
         }
@@ -517,7 +524,8 @@ static void native(struct md_filesystem *fs, const struct md_fs_request *q,
     if (r) out->error = r;
 }
 static int local_inode_view(struct md_filesystem *fs, const struct md_fs_request *q) {
-    if (md_mount_namespace_attached(fs->mounts) || fs->native_root || q->resolve) return 0;
+    if ((md_mount_namespace_attached(fs->mounts) && !md_mount_namespace_initial_boundary(fs->mounts))
+            || fs->native_root || q->resolve) return 0;
     if (md_view_policy_walk(fs,q)) return 0;
     for (unsigned i=0;i<2;++i) {
         const struct md_fs_anchor *p=q->origin[i];
@@ -554,9 +562,16 @@ void md_fs_mounts_execute(struct md_filesystem *fs, const struct md_fs_request *
      * inode engine perform its one authoritative walk after origin validation. */
     int local=local_inode_view(fs,q);
     if (local) {
-        if (local<0) out->error=local;
-        else md_fs_inode_execute(fs,q,out,output);
-        return;
+        if (local<0) { out->error=local; return; }
+        struct mdi_mount_boundary guard={.object=md_mount_namespace_initial_boundary(fs->mounts)};
+        struct mdi_mount_boundary *previous=fs->store->mount_boundary;
+        fs->store->mount_boundary=guard.object ? &guard : NULL;
+        md_fs_inode_execute(fs,q,out,output);
+        fs->store->mount_boundary=previous;
+        /* The inode transaction rejected the crossing before any mutation.
+         * Only that path (or an unannotated provider FD) needs a mount walk. */
+        if (!guard.crossed && (!guard.object || out->error!=-EXDEV)) return;
+        *out=(struct md_fs_result){.fd=-1};
     }
     if (q->operation == MD_FS_OPEN_OBJECT) {
         struct md_view_object *p=md_view_object(fs,q->path[0]);
@@ -648,15 +663,15 @@ void md_fs_mounts_execute(struct md_filesystem *fs, const struct md_fs_request *
             else if (S_ISCHR(result.info.mode) || S_ISBLK(result.info.mode) || S_ISFIFO(result.info.mode)) r=0;
         }
     }
-    /* Data opens are authorized by the selected typed provider below. Only
-     * namespace mutations must be rejected before that provider dispatch. */
+    /* Data opens and typed sysfs mutations are authorized by their owner below.
+     * Generic private-tree mutations must be rejected before native dispatch. */
     if (!r && mutates(q,&a) && q->operation!=MD_FS_OPEN && q->operation!=MD_FS_REOPEN
-            && a.mount && a.mount->provider) {
-        int private=md_provider_tree_private(a.mount->provider,a.fd>=0 ? a.fd : a.parent);
-        if (private) r=private<0 ? private : -EROFS;
+            && a.mount && a.mount->provider && !a.mount->sysfs) {
+        int readonly=md_provider_tree_readonly(a.mount->provider,a.fd>=0 ? a.fd : a.parent);
+        if (readonly) r=readonly<0 ? readonly : -EROFS;
         if (!r && pair && b.mount && b.mount->provider) {
-            private=md_provider_tree_private(b.mount->provider,b.fd>=0 ? b.fd : b.parent);
-            if (private) r=private<0 ? private : -EROFS;
+            readonly=md_provider_tree_readonly(b.mount->provider,b.fd>=0 ? b.fd : b.parent);
+            if (readonly) r=readonly<0 ? readonly : -EROFS;
         }
     }
     if (!r && q->operation==MD_FS_ACCESS) r=execute_access(a.mount,a.fd,q->mode);

@@ -2,6 +2,7 @@
 #include "process_limits.h"
 #include <assert.h>
 #include <errno.h>
+#include <limits.h>
 #include <sched.h>
 #include <stdio.h>
 
@@ -61,6 +62,18 @@ int main(void) {
     assert(!md_process_member_fork(a,&nested,0,&c));
     md_process_member_release(a); md_process_member_release(b); md_process_member_release(c);
     md_identity_release(&nested);
+    /* Historical nproc scopes must not keep user-namespace quotas occupied. */
+    p=md_process_member_new(&user,&(struct rlimit){3,10}); assert(p);
+    assert(!md_user_namespace_set_limit(NULL,1));
+    for (unsigned i=0;i<8;++i) {
+        nested=md_identity_copy(&user);
+        assert(!md_identity_enter_user_namespace(&nested));
+        assert(!md_process_member_fork(p,&user,0,&a));
+        assert(!md_process_member_identity(a,&nested));
+        md_process_member_release(a); md_identity_release(&nested);
+    }
+    md_process_member_release(p);
+    assert(!md_user_namespace_set_limit(NULL,INT_MAX));
     md_identity_release(&root); md_identity_release(&user); md_identity_release(&other);
     puts("PASS process limits: reservation, zombie custody, thread sharing, fork copy, credentials and exec");
 }

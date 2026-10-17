@@ -7,6 +7,9 @@
  * guest IDs are converted only at ABI boundaries. The supervisor serializes
  * mutations; immutable maps publish once to retained concurrent readers. */
 struct md_user_namespace;
+struct md_user_namespace_key { uint64_t device, inode, generation; };
+/* Stable policy-page identity, usable as a cache key without retaining a live namespace. */
+struct md_user_namespace_key md_user_namespace_key(const struct md_user_namespace *);
 enum { MD_USER_OVERFLOW_ID=65534, MD_USER_MAP_EXTENTS=340, MD_USER_NAMESPACE_DEPTH=33 };
 struct md_id_extent { uint32_t inside, outside, count; };
 struct md_user_authority {
@@ -41,6 +44,10 @@ int md_user_namespace_extents(const struct md_user_namespace *, int group,
 unsigned md_user_namespace_depth(const struct md_user_namespace *);
 uint64_t md_user_namespace_inode(const struct md_user_namespace *);
 uint32_t md_user_namespace_creator(const struct md_user_namespace *);
+/* Per-canonical-UID limits include descendants and last-reference lifetimes.
+ * The caller authorizes sysctl writes; imported custody pages are read-only. */
+uint32_t md_user_namespace_limit(const struct md_user_namespace *);
+int md_user_namespace_set_limit(struct md_user_namespace *,uint32_t);
 int md_user_namespace_export(const struct md_user_namespace *, int *, unsigned capacity);
 int md_user_namespace_import(const int *, unsigned count, struct md_user_namespace **);
 #endif

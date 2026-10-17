@@ -59,6 +59,17 @@ struct md_proc_path md_proc_path_for(const char *path,int tid,int tgid) {
             out.kind=MD_PROC_MOUNTS; out.tail=p; out.anchor_length=(size_t)(p-path); return out;
         }
         if (word(&p,"sys")) {
+            if (word(&p,"fs")) {
+                if (!word(&p,"inotify")) return out;
+                if (word(&p,"max_user_instances")) out.kind=MD_PROC_INOTIFY_INSTANCES;
+                else if (word(&p,"max_user_watches")) out.kind=MD_PROC_INOTIFY_WATCHES;
+                else if (word(&p,"max_queued_events")) out.kind=MD_PROC_INOTIFY_QUEUE;
+                out.process=tid; out.tail=p; out.anchor_length=(size_t)(p-path); return out;
+            }
+            if (word(&p,"user")) {
+                if (word(&p,"max_user_namespaces")) out.kind=MD_PROC_MAX_USER_NAMESPACES;
+                out.process=tid; out.tail=p; out.anchor_length=(size_t)(p-path); return out;
+            }
             if (word(&p,"net")) {
                 if (word(&p,"bridge")) {
                     if (word(&p,"bridge-nf-call-iptables")) out.kind=MD_PROC_NET_BRIDGE_FILTER;

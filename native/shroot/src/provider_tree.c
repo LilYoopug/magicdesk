@@ -55,6 +55,22 @@ struct md_provider_tree *md_provider_tree_retain(struct md_provider_tree *tree) 
     if (tree) atomic_fetch_add_explicit(&tree->references,1,memory_order_relaxed);
     return tree;
 }
+struct md_provider_tree *md_provider_tree_import(int upper,int lower,const struct md_provider_tree_ops *ops) {
+    int error=md_temporary_directory_check(upper);
+    if (error) { errno=-error; return NULL; }
+    struct md_provider_tree *tree=calloc(1,sizeof(*tree));
+    if (!tree) return NULL;
+    atomic_init(&tree->references,1); tree->upper=tree->lower=-1; tree->ops=ops;
+    tree->upper=fcntl(upper,F_DUPFD_CLOEXEC,3);
+    if (tree->upper>=0 && lower>=0) tree->lower=fcntl(lower,F_DUPFD_CLOEXEC,3);
+    if (tree->upper<0 || (lower>=0 && tree->lower<0)) {
+        error=errno; md_provider_tree_release(tree); errno=error; return NULL;
+    }
+    return tree;
+}
+int md_provider_tree_matches(const struct md_provider_tree *tree,const struct md_provider_tree_ops *ops) {
+    return tree && tree->ops==ops;
+}
 void md_provider_tree_release(struct md_provider_tree *tree) {
     if (!tree || atomic_fetch_sub_explicit(&tree->references,1,memory_order_acq_rel)!=1) return;
     if (tree->ops && tree->ops->release) tree->ops->release(tree->context);
@@ -75,6 +91,9 @@ int md_provider_tree_private(struct md_provider_tree *tree,int fd) {
     return error ? error : below(path,root);
 }
 unsigned long md_provider_tree_filesystem(struct md_provider_tree *tree) { return tree->ops ? tree->ops->filesystem : 0; }
+int md_provider_tree_readonly(struct md_provider_tree *tree,int fd) {
+    return tree->ops && tree->ops->readonly ? 1 : md_provider_tree_private(tree,fd);
+}
 int md_provider_tree_path(struct md_provider_tree *tree,int fd,char *out,size_t size) {
     char path[PATH_MAX],root[PATH_MAX]; int error=fdpath(fd,path,sizeof(path));
     if (error) return error;
@@ -95,6 +114,9 @@ static int opaque(struct md_provider_tree *tree,const char *path) {
     return 0;
 }
 static const char *relative(const char *path) { return path[1] ? path+1 : "."; }
+static int lower_visible(struct md_provider_tree *tree,const char *path) {
+    return !tree->ops || !tree->ops->lower_visible || tree->ops->lower_visible(path);
+}
 static int internal(const char *directory,const char *name) {
     return !strcmp(directory,"/") && !strcmp(name,MD_TEMPORARY_DIRECTORY_MARKER);
 }
@@ -113,7 +135,8 @@ int md_provider_tree_step(struct md_provider_tree *tree,int directory,const char
     }
     int fd=openat(tree->upper,relative(path),O_PATH|O_NOFOLLOW|O_CLOEXEC);
     if (fd>=0) return fd;
-    if (errno!=ENOENT || opaque(tree,path) || tree->lower<0) return -errno;
+    if (errno!=ENOENT) return -errno;
+    if (opaque(tree,path) || tree->lower<0 || !lower_visible(tree,path)) return -ENOENT;
     fd=openat(tree->lower,relative(path),O_PATH|O_NOFOLLOW|O_CLOEXEC);
     return fd<0 ? -errno : fd;
 }
@@ -123,7 +146,7 @@ ssize_t md_provider_tree_getdents(struct md_provider_tree *tree,int fd,void *out
     if (error) return error;
     off_t position=lseek(fd,0,SEEK_CUR); if (position<0) return -errno;
     int upper=openat(tree->upper,relative(path),O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
-    int lower=opaque(tree,path) || tree->lower<0 ? -1
+    int lower=opaque(tree,path) || tree->lower<0 || !lower_visible(tree,path) ? -1
         : openat(tree->lower,relative(path),O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
     if (upper<0 && lower<0) return -errno;
     size_t used=0; off_t index=0,next=position;
@@ -137,6 +160,13 @@ ssize_t md_provider_tree_getdents(struct md_provider_tree *tree,int fd,void *out
             errno=0; struct dirent *e=readdir(dir);
             if (!e) { if (errno) error=-errno; break; }
             if (internal(path,e->d_name)) continue;
+            if (i && tree->ops && tree->ops->lower_visible
+                    && strcmp(e->d_name,".") && strcmp(e->d_name,"..")) {
+                char child[PATH_MAX];
+                int length=snprintf(child,sizeof(child),"%s%s%s",path,strcmp(path,"/") ? "/" : "",e->d_name);
+                if (length<0 || (size_t)length>=sizeof(child)) { error=-ENAMETOOLONG; break; }
+                if (!lower_visible(tree,child)) continue;
+            }
             struct stat st;
             if (i && upper>=0 && !fstatat(upper,e->d_name,&st,AT_SYMLINK_NOFOLLOW)) continue;
             if (index++<position) continue;

@@ -5,6 +5,17 @@
 Focused native and guest checks for the [process-resource model](process-resources.md). Run commands from the repository root; BUILD selects the prepared fixture directory.
 
 - [Verification](#verification)
+- [Resource Ordering And Publication](#resource-ordering-and-publication)
+- [Descriptor Custody](#descriptor-custody)
+- [Protected Export And Executable Images](#protected-export-and-executable-images)
+- [Mapped Results And Message Origins](#mapped-results-and-message-origins)
+- [Filesystem Dispatch And Cancellation](#filesystem-dispatch-and-cancellation)
+- [Mapped Transport And Open Descriptions](#mapped-transport-and-open-descriptions)
+- [Proc Custody](#proc-custody)
+- [Native Handoff Controls](#native-handoff-controls)
+- [Optional Parcel Experiments](#optional-parcel-experiments)
+- [Message-Origin Association Candidate](#message-origin-association-candidate)
+- [Root And Filesystem Checks](#root-and-filesystem-checks)
 
 ## Verification
 
@@ -20,6 +31,35 @@ Chromium automatic user/PID and explicit set-ID routes are checked separately in
 `test_resources.py BUILD --case mount-namespace` also checks PID reservations,
 nested admission, signal/wait output, zombie proc lifetime, pidfd transfer to a
 protected receiver, orphan adoption, init thread exit and nonleader debugger exec.
+Namespace-file binds also check pathname readback through ordinary and O_PATH
+descriptors, reopened aliases and another process's descriptor table, including
+a freshly mounted PID-scoped proc. Typed descriptor placement remains separate
+from the anonymous carrier and retains namespace IO and ioctl semantics.
+
+The same mount-namespace suite's `user-limits` case checks live
+`max_user_namespaces` control files in initial and freshly mounted proc views:
+ancestor quotas, child-limit escalation denial, clone/unshare rollback, retained
+namespace FDs, final-release reuse, readonly mounts and write authorization. It
+also verifies the read-only inotify limit values. Repeated quota-one creation and
+final-FD release cover kernel-reaped tasks left by native fast waits; fixtures set
+their own root/tmp permissions and remove their temporary proc mountpoints.
+Native `test_user_namespace`
+adds per-UID accounting and concurrent creation at the quota boundary;
+`test_process_limits` ensures cached NPROC scopes do not retain dead namespaces.
+
+`test_sysfs.py BUILD STORE` and the resource suite's `input-session` case check
+the standard empty `block`, `bus` and `dev/block` directories in synthetic sysfs.
+Flatpak can bind these directories without exposing Android hardware nodes.
+The same checks cover read-only native CPU/NUMA visibility, filtered directory
+entries, native inode identity, data IO/dup offsets, metadata-write denial,
+retained descriptors after unmount and proc-FD reopening. Virtual network
+attributes preserve their original mount authority and error semantics.
+The input fixture first checks sysfs without an input connection, ordinary inode
+fast-path admission, symlink/rename boundaries, recursive `/dev` composition,
+nested binds, `open_tree`, and explicit nonportable-publication recovery.
+The mount-graph suite sends the CPU and device projections to an exec peer,
+closes the publisher, then checks retained shared data, read-only policy and
+exact descriptor balance.
 
 The mount-flags fixture also transfers a noexec origin over SCM_RIGHTS to a
 nondumpable receiver with an installed application filter and an independent
@@ -34,6 +74,8 @@ watch reservations. An event deadline shorter than the service's peer timeout
 requires explicit retirement; complete teardown checks exact host FD counts.
 This checks production native-host service ownership; guest descriptor custody
 has separate intercepted checks. The fixture also runs in the complete resource suite.
+
+## Resource Ordering And Publication
 
 With `MAGICDESK_GUEST_FIXTURES=ON`, `test_task_resources` checks independent
 ownership, transaction rollback, retained-root copies and descriptor leaks.
@@ -107,6 +149,8 @@ task-affine transports.
 The RPC cwd cases install a real seccomp filter rejecting temporary O_PATH
 directory opens. Relative getcwd/create/open and mixed/two-base link/rename
 still succeed, both in ordinary and nondumpable callers.
+
+## Descriptor Custody
 
 `test_resources.py --case fd-custody` checks the production buffered O_PATH path.
 A CLONE_FILES caller opens successfully with KILL_THREAD filters on connect or
@@ -216,6 +260,8 @@ shared-table deaths during export. Native controls and the guest path require
 exact descriptor counts. The resource model rejects write/create/truncate,
 unknown flags, foreign directory anchors and non-admitted paths.
 
+## Protected Export And Executable Images
+
 `--case fs-export` exercises the production adapter with a nondumpable caller,
 socket/connect/recvmsg forbidden by real filters, cold EMFILE, repeated exports
 at a full FD table, shared directory offsets and independent opens. Sixteen
@@ -239,6 +285,9 @@ opens and shared writable mappings fail explicitly. No new proc reopen or copy
 of the image is needed, and store-backed executables retain their existing path.
 `test_anonymous_exec.py` checks ordinary/sealed memfds, nonleader exec,
 close-range, foreign executable/pipe inspection, nested fork and self re-exec.
+`--case exec-custody` also checks proc pathname `readlink` errors on directories
+and regular files, separately from empty-path descriptor calls and missing
+paths, both in the initial view and a newly mounted proc PID namespace.
 Eight production service cases also verify wrong tokens, duplicate/wrong-sized
 vectors, wrong senders, cancellation before/after queueing and a send error after
 queueing. Each checks exact FD counts and pipe EOF after owner retirement.
@@ -253,7 +302,9 @@ and channels, cancel one consumer while preserving another, and inject duplicate
 wrong-peer/count and retired-token packets. Exact pipe EOF and descriptor balance
 are required with allocations disabled.
 
-`fd_return` uses the same channel for mapped O_PATH results without a stable
+## Mapped Results And Message Origins
+
+`fd_return` uses the export channel for mapped O_PATH results without a stable
 reopen source. A channel-owned output turn spans fork-copied tables; it prevents
 one task from receiving another task's result. Destination-table ordering covers
 the nonblocking kernel receive and origin publication, not filesystem execution.
@@ -366,6 +417,8 @@ retained receiving endpoint releases them. This agrees with the kernel's
 [Unix socket release/shutdown paths](https://github.com/torvalds/linux/blob/v6.12/net/unix/af_unix.c):
 service-side close alone is not cancellation of the guest receive queue.
 
+## Filesystem Dispatch And Cancellation
+
 `--case fs-dispatch` joins scalar register control and shared request buffers to
 the production filesystem worker, request context and descriptor-origin
 publication. Under actual UID 2000, 504 cases cover files/directories/symlinks
@@ -466,6 +519,8 @@ timerfd joins the supervisor's existing event loop; a busy ptrace queue cannot
 postpone expiry. Unbounded launches allocate it only on cancellation. Internal
 supervisor failure, incomplete cleanup and outer-timeout recovery fail the test;
 every reported tracee must have left native procfs when the runner returns.
+
+## Mapped Transport And Open Descriptions
 
 The production mapped transport covers captured cwd/dirfd path identities and
 metadata, O_PATH (including stable nofollow sources), and data-FD results from
@@ -580,6 +635,8 @@ application-filter limits described above.
 Fork-inherited shared pages are not security isolation; successful mapped delivery
 does not establish general application FD-transfer support.
 
+## Proc Custody
+
 `--case proc-custody` checks snapshots and umask queries with CLONE_FILES callers
 killed by filters at the former task-local write/read points. Ordinary and
 nondumpable callers leave the peer's exact FD set unchanged. Large-argv checks
@@ -621,6 +678,8 @@ suffix opens. The native/guest kernel-contract `proc-owners` case independently
 unshares filesystem and descriptor state in a pthread, checking leader versus
 current-thread aliases and invalid proc path errors against the kernel.
 
+## Native Handoff Controls
+
 `fd_handoff` exercises native kernel publication under the selected executor,
 not Shroot emulation. A real CLONE_FILES peer replaces a slot with another open
 description of the same inode before a split notification reply and before an
@@ -656,6 +715,8 @@ Socket acknowledgements establish ordering without sleep or scheduler races;
 alarms and parent-death termination bound fixture failure. `test_resources.py`
 runs this alongside the model and intercepted guest checks; `--case fd-handoff`
 selects only these native publication boundaries.
+
+## Optional Parcel Experiments
 
 The separate `--case fd-parcel` experiment queues the original rights inside a
 private Unix socket, then transfers its endpoint in an outer message. It checks
@@ -709,7 +770,7 @@ changes application bytes, socket queues or limits in the shipped adapter.
 The experiment is outside the default regression suite, and its report lists
 limitations separately from successful assertions.
 
-### Message-Origin Association Candidate
+## Message-Origin Association Candidate
 
 `test_resources.py --case fd-messages` tests a kernel-carried origin association,
 separately from the application adapter. The native `fd_messages` owner captures an
@@ -819,7 +880,7 @@ without a socket-table dump, but gets EACCES under the tested UID 2000. This is
 recorded as unavailable, not absence of the queried socket. The pipe-lifetime
 candidate needs neither that API nor periodic diagnostics.
 
-### Root And Filesystem Checks
+## Root And Filesystem Checks
 
 `root_guest` runs the same checks with inode-backed and attached-native roots:
 nested roots, absolute symlinks, root-clamped traversal,
