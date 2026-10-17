@@ -172,8 +172,7 @@ final class ShellDisplayRecordingSession implements AutoCloseable {
                 + "; sleep 1"
                 + "; done"
                 + "; wait $recording_pid";
-        final ProcessBuilder builder = new ProcessBuilder(
-                "/system/bin/sh", "-c", command);
+        final ProcessBuilder builder = AndroidShell.command(mContext, command);
         builder.redirectErrorStream(true);
         builder.redirectOutput(new File(mVideoLogPath));
         mVideoProcess = builder.start();

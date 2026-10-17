@@ -227,10 +227,14 @@ The default backend is the Android shell identity authorized for MagicDesk:
 X-MagicDesk-ExecBackend=shell
 ```
 
-Shell commands run through `/system/bin/sh -c`. Their programs, filesystem
-access, environment, and UID are those of the active shell service, not those
-of a regular Android application and not those of Termux. With
-`Terminal=true`, the command opens in MagicDesk Console.
+Shell commands run through MagicDesk's bundled mksh with `-c`. Their programs,
+filesystem access, environment, and UID are those of the active shell service,
+not those of a regular Android application and not those of Termux. With
+`Terminal=true`, the command opens in MagicDesk Console. Background commands use
+the same interpreter without interactive history or terminal startup hooks.
+The Android tool directory's `sh` and `mksh` names select this executable;
+explicit interpreter paths and script shebangs are not rewritten. Guest Linux
+and Termux retain their own shells.
 
 The standard optional `Path` field selects an absolute working directory:
 

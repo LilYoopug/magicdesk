@@ -10,12 +10,10 @@ import java.util.Map;
 final class CommandShellEnvironment {
     static final String APK_ENV = "MAGICDESK_COMMAND_APK";
     private static volatile Values sValues;
-    static final String SCRIPT = "#!/system/bin/sh\n"
-            + "unset LD_PRELOAD LD_LIBRARY_PATH\n"
+    static final String BODY = "unset LD_PRELOAD LD_LIBRARY_PATH\n"
             + "export CLASSPATH=\"${" + APK_ENV + ":?Open a new MagicDesk console}\"\n"
             + "exec /system/bin/app_process / io.github.mekhontsev.magicdesk.MagicDeskCli \"$@\"\n";
-    static final String CONNECT_SCRIPT = "#!/system/bin/sh\n"
-            + "exec \"${MAGICDESK_COMMAND_BRIDGE:?Open a new MagicDesk console}\" \"$@\"\n";
+    static final String CONNECT_BODY = "exec \"${MAGICDESK_COMMAND_BRIDGE:?Open a new MagicDesk console}\" \"$@\"\n";
 
     private CommandShellEnvironment() { }
 
@@ -24,9 +22,11 @@ final class CommandShellEnvironment {
             throw new IllegalArgumentException("Invalid command environment");
         }
         final Path directory = Path.of(ShellExecutionEnvironment.prepareToolsDirectory());
-        install(directory.resolve("magicdesk"), SCRIPT);
-        install(directory.resolve("magicdesk-connect"), CONNECT_SCRIPT);
-        install(directory.resolve(GuestLaunchPlan.TOOL), GuestRuntimeCommand.SCRIPT);
+        final String shell = AndroidShell.path(libraries);
+        AndroidShell.installAliases(directory, shell);
+        install(directory.resolve("magicdesk"), AndroidShell.script(shell, BODY));
+        install(directory.resolve("magicdesk-connect"), AndroidShell.script(shell, CONNECT_BODY));
+        install(directory.resolve(GuestLaunchPlan.TOOL), AndroidShell.script(shell, GuestRuntimeCommand.BODY));
         Files.deleteIfExists(directory.resolve("magicdesk-guest"));
         sValues = new Values(endpoint, apk, libraries);
     }
@@ -71,12 +71,12 @@ final class CommandShellEnvironment {
                 + "export " + APK_ENV + "=" + ShellCommandLine.quote(apk) + "\n"
                 + "md_bin=\"${HOME:?}/.local/libexec/magicdesk\"\n"
                 + "mkdir -p \"$md_bin\"\n"
-                + "md_script=" + ShellCommandLine.quote(SCRIPT) + "\n"
+                + "md_script=" + ShellCommandLine.quote(AndroidShell.script(AndroidShell.path(libraries), BODY)) + "\n"
                 + "if [ ! -f \"$md_bin/magicdesk\" ] || [ \"$(cat \"$md_bin/magicdesk\")\" != \"${md_script%?}\" ]; then\n"
                 + "  md_tmp=\"$md_bin/.magicdesk.$$\"\n"
                 + "  printf '%s' \"$md_script\" > \"$md_tmp\" && chmod 700 \"$md_tmp\" && mv -f \"$md_tmp\" \"$md_bin/magicdesk\" || exit 1\n"
                 + "fi\n"
-                + "md_connect=" + ShellCommandLine.quote(CONNECT_SCRIPT) + "\n"
+                + "md_connect=" + ShellCommandLine.quote(AndroidShell.script(AndroidShell.path(libraries), CONNECT_BODY)) + "\n"
                 + "md_tmp=\"$md_bin/.connect.$$\"\n"
                 + "printf '%s' \"$md_connect\" > \"$md_tmp\" && chmod 700 \"$md_tmp\" && mv -f \"$md_tmp\" \"$md_bin/magicdesk-connect\" || exit 1\n"
                 + "export PATH=\"$md_bin:$PATH\"\n";

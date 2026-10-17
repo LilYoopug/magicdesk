@@ -273,7 +273,7 @@ while claims exist. Deadline callbacks are lifetime timers, not readiness waits.
 
 Every retained Console session owns a lifecycle-bound `TerminalTransport`, one
 native PTY relay, and one interactive shell. `ShellPtyHandle` hosts
-`/system/bin/sh` through the UserService and binds its stream to the APK
+the packaged mksh through the UserService and binds its stream to the APK
 owner's Binder token. `TermuxPtyTransport` asks Termux's documented
 `RUN_COMMAND` service to host the same relay under the Termux UID and connects
 it to the session through an authenticated loopback stream. Both transports
@@ -283,6 +283,23 @@ the process's own security domain. Ending the session, running `exit`, service
 death, or stream failure ends that PTY and its UNIX-session jobs, including
 foreground and background process groups. A failed transport is
 discarded rather than silently changing privilege or execution backend.
+
+`AndroidShell` resolves `libmagicdesk_mksh.so` from the installed APK's native
+directory. `ShellExecutionEnvironment` uses it for PTYs, non-PTY command streams,
+background Desktop Entries and one-shot commands. Helpers receive that path
+explicitly; they do not choose a shell from ambient environment variables.
+The selected identity's tool directory provides `sh` and `mksh` symlinks to this
+one executable. Generated CLI scripts have its absolute shebang. Text executables
+without a shebang re-enter mksh through `/proc/self/exe`; explicit interpreter
+paths remain authoritative. No `/system/bin/sh` fallback is used.
+`TerminalShellIntegration` configures mksh's native persistent history in the
+selected identity's state directory, without exporting history variables to
+child shells. Command storage, locking and compaction belong to mksh, not the
+PTY relay or terminal emulator. The APK includes an unmodified, pinned upstream
+build with history enabled; see [Android shell](../native/android-shell/README.md).
+Noninteractive commands do not load the interactive rc or record command history.
+No shared-startup capability probe, Termux shell replacement or guest-shell
+override is introduced; an unavailable interpreter fails the requested command.
 
 The relay handshake publishes a `PtyEndpoint` (PID, process start ticks and slave
 device) captured at PTY creation. The registry exposes that identity only while

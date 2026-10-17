@@ -52,6 +52,10 @@ final class CommandExecution {
             throw new IllegalStateException("The command service identity changed");
     }
 
+    String shell() {
+        return termux == null ? AndroidShell.path(context) : termux.homeDirectory + "/../usr/bin/bash";
+    }
+
     Closeable start(String command, String directory, String stdin, ShellCommandOutput.Sink stdout,
             DetailedCompletion completion) {
         requireCurrent();
@@ -64,8 +68,7 @@ final class CommandExecution {
             try {
                 requireCurrent();
                 String setup = termux == null ? "" : AutomationCommandRuntime.get(context).prepareTermux(termux);
-                String shell = termux == null ? "/system/bin/sh" : termux.homeDirectory + "/../usr/bin/bash";
-                var result = session.execute(setup + invocation(shell, command, stdin), stdout);
+                var result = session.execute(setup + invocation(shell(), command, stdin), stdout);
                 if (!closed.get()) completion.complete(result, null);
             } catch (IOException | RuntimeException error) {
                 if (!closed.get()) completion.complete(null, error);

@@ -35,6 +35,16 @@ public final class TerminalShellIntegrationTest {
                 + visiblePath + " $ \u0001\u001b]133;B\u0007\u0001", result);
     }
 
+    @Test public void androidHistorySettingsStayLocalToTheInteractiveShell() throws Exception {
+        final Path directory = temporary.getRoot().toPath();
+        final String result = androidPrompt(false, directory,
+                "printf 'LOCAL:%s:%s\\n' \"$HISTFILE\" \"$HISTSIZE\"\n"
+                        + "\"$MAGICDESK_TEST_SHELL\" -c 'printf \"CHILD:%s:%s\" \"${HISTFILE-unset}\" \"${HISTSIZE-unset}\"'\n");
+        assertTrue(result, result.startsWith("LOCAL:" + directory + "/state/shell_history:2000\n"));
+        assertTrue(result, result.contains("CHILD:unset:"));
+        assertFalse(result, result.contains("CHILD:unset:2000"));
+    }
+
     private static String androidPrompt(boolean root, Path directory, String commands) throws Exception {
         final Path mksh = java.util.stream.Stream.of("/system/bin/sh", "/bin/mksh", "/usr/bin/mksh")
                 .map(Path::of).filter(Files::isExecutable).findFirst().orElse(null);
@@ -43,6 +53,11 @@ public final class TerminalShellIntegrationTest {
                 TerminalShellIntegration.androidPrompt(root) + commands)
                 .directory(directory.toFile()).redirectErrorStream(true);
         builder.environment().put("PWD", directory.toString());
+        builder.environment().put("HOME", directory.toString());
+        builder.environment().put("XDG_STATE_HOME", Files.createDirectories(directory.resolve("state")).toString());
+        builder.environment().put("MAGICDESK_TEST_SHELL", mksh.toString());
+        builder.environment().put("HISTFILE", directory.resolve("foreign-history").toString());
+        builder.environment().put("HISTSIZE", "99");
         final var result = BoundedProcessRunner.run(builder.start(), 5_000, 32_768);
         assertEquals(result.output, 0, result.exitCode);
         return result.output;

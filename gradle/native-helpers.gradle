@@ -1,6 +1,8 @@
 def termuxPrefix = System.getenv('PREFIX')
 def termuxCompiler = termuxPrefix == null
         ? null : file("${termuxPrefix}/bin/clang")
+def termuxNativeHost = termuxCompiler?.isFile()
+        && termuxPrefix.startsWith('/data/data/com.termux/')
 def nativeOutputRoot = layout.buildDirectory
         .dir('generated/magicdeskNative').get().asFile
 def nativeTarget = "aarch64-linux-android${android.defaultConfig.minSdk}"
@@ -35,19 +37,18 @@ def findNdkHomes = {
 }
 
 def resolveNativeCompilerCommand = {
-    if (termuxCompiler?.isFile()
-            && termuxPrefix.startsWith('/data/data/com.termux/')) {
+    if (termuxNativeHost) {
         return [termuxCompiler.absolutePath, "--target=${nativeTarget}".toString()]
     }
 
     def osName = System.getProperty('os.name').toLowerCase(Locale.ROOT)
     def hostPrefix
     def compilerName = 'clang'
-    if (osName.contains('win')) {
+    if (osName.contains('mac') || osName.contains('darwin')) {
+        hostPrefix = 'darwin-'
+    } else if (osName.contains('win')) {
         hostPrefix = 'windows-'
         compilerName = 'clang.exe'
-    } else if (osName.contains('mac') || osName.contains('darwin')) {
-        hostPrefix = 'darwin-'
     } else if (osName.contains('linux')) {
         hostPrefix = 'linux-'
     } else {
@@ -117,7 +118,7 @@ def guestFilesTask = registerNativeHelper(
 
 def cmakeAndroidTarget = {
     def compiler = resolveNativeCompilerCommand()
-    termuxCompiler?.isFile() ? [
+    termuxNativeHost ? [
             "-DCMAKE_C_COMPILER=${compiler[0]}", "-DCMAKE_ASM_COMPILER=${compiler[0]}",
             "-DCMAKE_C_FLAGS=${compiler[1]}", "-DCMAKE_ASM_FLAGS=${compiler[1]}",
             '-DCMAKE_EXE_LINKER_FLAGS=-fno-termux-rpath'
@@ -166,6 +167,35 @@ def packageCommands = tasks.register('packageCommandClient', Copy) {
     into new File(nativeOutputRoot, 'arm64-v8a')
 }
 
+def shellBuild = layout.buildDirectory.dir('androidShell').get().asFile
+def shellLicenses = layout.buildDirectory.dir('androidShellLicenses').get().asFile
+android.sourceSets.main.assets.srcDir shellLicenses
+def configureShell = tasks.register('configureAndroidShell', Exec) {
+    inputs.files rootProject.fileTree('native/android-shell') { include '*.cmake', 'CMakeLists.txt' }
+    inputs.property 'nativeTarget', nativeTarget
+    inputs.property 'buildShell', providers.environmentVariable('MAGICDESK_BUILD_SHELL').orElse('')
+    outputs.file new File(shellBuild, 'build.ninja')
+    outputs.file new File(shellBuild, 'licenses/NOTICE.txt')
+    doFirst {
+        commandLine(['cmake', '-S', rootProject.file('native/android-shell'), '-B', shellBuild,
+                '-G', 'Ninja'] + cmakeAndroidTarget())
+    }
+}
+def buildShell = tasks.register('buildAndroidShell', Exec) {
+    dependsOn configureShell
+    commandLine 'cmake', '--build', shellBuild, '--parallel', '2'
+}
+def packageShell = tasks.register('packageAndroidShell', Copy) {
+    dependsOn buildShell
+    from new File(shellBuild, 'libmagicdesk_mksh.so')
+    into new File(nativeOutputRoot, 'arm64-v8a')
+}
+def packageShellLicenses = tasks.register('packageAndroidShellLicenses', Sync) {
+    dependsOn configureShell
+    from new File(shellBuild, 'licenses')
+    into new File(shellLicenses, 'licenses/mksh')
+}
+
 def guestLicenses = layout.buildDirectory.dir('guestRuntimeLicenses').get().asFile
 android.sourceSets.main.assets.srcDir guestLicenses
 def packageGuestLicenses = tasks.register('packageGuestRuntimeLicenses', Sync) {
@@ -203,5 +233,5 @@ def packageSettingsLicenses = tasks.register('packageLinuxSettingsLicenses', Syn
 }
 
 tasks.named('preBuild').configure {
-    dependsOn uinputTask, ptyTask, serviceTask, processSignalTask, guestFilesTask, packageGuest, packageGuestLicenses, packageSettings, packageSettingsLicenses, packageCommands
+    dependsOn uinputTask, ptyTask, serviceTask, processSignalTask, guestFilesTask, packageGuest, packageGuestLicenses, packageSettings, packageSettingsLicenses, packageCommands, packageShell, packageShellLicenses
 }

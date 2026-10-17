@@ -42,7 +42,8 @@ final class TerminalTaskLabel {
                 || "fish".equals(normalized)
                 || "dash".equals(normalized)
                 || "ksh".equals(normalized)
-                || "mksh".equals(normalized);
+                || "mksh".equals(normalized)
+                || AndroidShell.LIBRARY.equals(normalized);
     }
 
     private static String clean(

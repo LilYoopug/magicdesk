@@ -130,7 +130,8 @@ final class GuestEnvironmentOperations {
                     slot.attach(audio);
                     environment = audio.exports();
                 }
-                var result = session.execute("/system/bin/sh -c " + ShellCommandLine.quote(environment + command) + " 2>&1", this::append);
+                var result = session.execute(ShellCommandLine.quote(AndroidShell.path(MagicDeskApplication.applicationContext()))
+                        + " -c " + ShellCommandLine.quote(environment + command) + " 2>&1", this::append);
                 synchronized (this) { exitCode = result.exitCode(); }
             } catch (Exception failure) {
                 synchronized (this) { error = ShellAccess.usefulMessage(failure); }

@@ -76,12 +76,13 @@ final class ShellCommandExecutor
             if (mStream == null) {
                 if (mFactory != null) mStream = mFactory.open();
                 else {
-                    final File helper = new File(MagicDeskApplication.applicationContext()
+                    final var context = MagicDeskApplication.applicationContext();
+                    final File helper = new File(context
                             .getApplicationInfo().nativeLibraryDir, "libmagicdesk_pty_bridge.so");
                     mStream = ShellAccess.openOwnedStream((mInheritCommandChannel ? "" :
                             "unset MAGICDESK_COMMAND_ENDPOINT MAGICDESK_COMMAND_BUILD MAGICDESK_COMMAND_APK; ")
                             + "exec " + ShellCommandLine.quote(helper.getPath())
-                            + " --pipe-shell /system/bin/sh");
+                            + " --pipe-shell " + ShellCommandLine.quote(AndroidShell.path(context)));
                 }
             }
             mCommandActive = true;

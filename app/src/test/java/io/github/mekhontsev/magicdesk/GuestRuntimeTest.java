@@ -143,22 +143,22 @@ public class GuestRuntimeTest {
     }
 
     @Test public void preparationDoesNotConsumeInheritedGraphicsConnection() {
-        assertTrue(GuestRuntimeCommand.SCRIPT.contains("md_guest=$(CLASSPATH="));
-        assertTrue(GuestRuntimeCommand.SCRIPT.contains("exec \"$md_guest/libmagicdesk_guest_run.so\" --libc-registry \"$md_libc\" \"$@\""));
-        assertTrue(GuestRuntimeCommand.SCRIPT.contains("--prepare-libc"));
-        assertTrue(GuestRuntimeCommand.SCRIPT.contains("\"libc-$1\" \"$md_libc\""));
-        assertTrue(GuestRuntimeCommand.SCRIPT.contains("Optional libc registry unavailable; using Shroot Base."));
-        assertFalse(GuestRuntimeCommand.SCRIPT.contains("mkdir -p \"$md_libc\" || exit"));
-        assertFalse(GuestRuntimeCommand.SCRIPT.contains("exec /system/bin/app_process"));
-        assertTrue(GuestRuntimeCommand.SCRIPT.contains("--probe >/dev/null || exit $?"));
+        assertTrue(GuestRuntimeCommand.BODY.contains("md_guest=$(CLASSPATH="));
+        assertTrue(GuestRuntimeCommand.BODY.contains("exec \"$md_guest/libmagicdesk_guest_run.so\" --libc-registry \"$md_libc\" \"$@\""));
+        assertTrue(GuestRuntimeCommand.BODY.contains("--prepare-libc"));
+        assertTrue(GuestRuntimeCommand.BODY.contains("\"libc-$1\" \"$md_libc\""));
+        assertTrue(GuestRuntimeCommand.BODY.contains("Optional libc registry unavailable; using Shroot Base."));
+        assertFalse(GuestRuntimeCommand.BODY.contains("mkdir -p \"$md_libc\" || exit"));
+        assertFalse(GuestRuntimeCommand.BODY.contains("exec /system/bin/app_process"));
+        assertTrue(GuestRuntimeCommand.BODY.contains("--probe >/dev/null || exit $?"));
         assertTrue(GuestRuntimeArtifacts.FILES.contains("libmagicdesk_guest_supervisor.so"));
-        assertTrue(GuestRuntimeCommand.SCRIPT.contains("\"$md_guest/libmagicdesk_guest_supervisor.so\" \"$md_guest/libmagicdesk_guest_bootstrap.so\""));
-        assertFalse(GuestRuntimeCommand.SCRIPT.contains("--probe) exec \"$md_guest/libmagicdesk_guest_bootstrap.so\""));
+        assertTrue(GuestRuntimeCommand.BODY.contains("\"$md_guest/libmagicdesk_guest_supervisor.so\" \"$md_guest/libmagicdesk_guest_bootstrap.so\""));
+        assertFalse(GuestRuntimeCommand.BODY.contains("--probe) exec \"$md_guest/libmagicdesk_guest_bootstrap.so\""));
     }
 
     @Test public void imageToolIsStagedWithItsRunnerButOnlyExecutionProbesKernel() {
         assertTrue(GuestRuntimeArtifacts.FILES.contains("libmagicdesk_guest_image.so"));
-        String script = GuestRuntimeCommand.SCRIPT;
+        String script = GuestRuntimeCommand.BODY;
         int start = script.indexOf("image) shift");
         int end = script.indexOf("--import) exec", start);
         assertTrue(start > 0 && end > start);

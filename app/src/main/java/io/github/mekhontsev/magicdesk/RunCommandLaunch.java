@@ -39,8 +39,7 @@ final class RunCommandLaunch {
                 resolvedDirectory = specification.workingDirectory;
             }
         } else {
-            String shell = executor.termux == null ? "/system/bin/sh" : executor.home + "/../usr/bin/bash";
-            resolvedCommand = ShellCommandLine.quote(shell) + " -c " + ShellCommandLine.quote(script);
+            resolvedCommand = ShellCommandLine.quote(executor.shell()) + " -c " + ShellCommandLine.quote(script);
             if (!background) specification = new DesktopExecSpec(executor.backend, resolvedCommand,
                     request.mode().equals("terminal"), request.directory(),
                     graphical ? new GraphicalLaunchOptions(protocol, false, request.keyboardDirectory(), "", "") : null, false);

@@ -45,7 +45,7 @@ public final class ShellCommandLineTest {
 
         assertTrue(ShellScriptLauncher.supports(script));
         assertEquals(
-                "/system/bin/sh -- '/tmp/Dmitry'\"'\"'s script.sh'",
+                "sh -- '/tmp/Dmitry'\"'\"'s script.sh'",
                 ShellScriptLauncher.command(script));
         assertEquals(
                 "/tmp",

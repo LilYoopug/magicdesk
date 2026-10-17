@@ -168,7 +168,7 @@ window ready for another selection.
 Sessions survive Close Desktop but not MagicDesk process death or APK replacement.
 Managed tmux connections have a different close contract: only the client PTY
 ends, while tmux retains its session and programs.
-The built-in backend runs `/system/bin/sh` with the authorized
+The built-in backend runs the bundled mksh with the authorized
 shell identity; the optional Termux backend runs the user's configured Termux
 shell and installed tools. Both provide:
 
@@ -181,6 +181,18 @@ shell and installed tools. Both provide:
 - `Tab`, `Ctrl+C`, and other normal terminal keys;
 - current-directory tracking and a direct action to open that directory in
   Files.
+
+Android Console saves command history in `~/.local/state/shell_history` for
+recall in new sessions with Up/Down or `fc -l`. Shell and root histories are
+separate. The shell retains 2000 commands for recall and compacts its history
+when opening it; the file is not a fixed-size quota during an active session.
+This stores commands, not program output or answers typed into an installer.
+Secrets written directly in a command can be saved. `unset HISTFILE` disables
+disk history for that shell. Termux and guest Linux use their own shell histories.
+Background Android commands use the same mksh, without interactive history.
+Within MagicDesk's Android environment, `sh`, `mksh` and `$SHELL` select that
+bundled interpreter. Explicit paths such as `/system/bin/sh` and script shebangs
+are not rewritten. Termux and guest Linux keep their own default shells.
 
 The shared renderer also supports Nerd Font glyphs, clickable links, shell-marked
 command history, static Sixel/Kitty images and fractional local-history scrolling.

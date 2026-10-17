@@ -35,7 +35,7 @@ final class ShellScriptLauncher {
     }
 
     static String command(final String absolutePath) {
-        return "/system/bin/sh -- " + ShellCommandLine.quote(absolutePath);
+        return "sh -- " + ShellCommandLine.quote(absolutePath);
     }
 
     static String workingDirectory(final String absolutePath) {

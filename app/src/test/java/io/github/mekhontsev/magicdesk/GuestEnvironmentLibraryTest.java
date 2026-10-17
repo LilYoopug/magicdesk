@@ -229,7 +229,7 @@ public class GuestEnvironmentLibraryTest {
     }
 
     @Test public void namedLaunchRetainsArgumentsInOriginalShell() {
-        String script = GuestRuntimeCommand.SCRIPT;
+        String script = GuestRuntimeCommand.BODY;
         assertTrue(script.contains("md_store=$(md_library resolve \"${1-}\")"));
         assertTrue(script.contains("exec \"$md_guest/libmagicdesk_guest_image.so\" \"$md_action\" \"$md_store\" \"$@\""));
         assertFalse(script.contains("eval "));

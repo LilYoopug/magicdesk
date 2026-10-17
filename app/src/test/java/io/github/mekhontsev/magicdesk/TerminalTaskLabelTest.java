@@ -33,6 +33,8 @@ public final class TerminalTaskLabelTest {
                         "Termux",
                         new TerminalProcessInfo(123L, 123L, "bash"),
                         "home"));
+        assertEquals("Console - home", TerminalTaskLabel.resolve("Console",
+                new TerminalProcessInfo(123L, 123L, "/apk/lib/arm64/libmagicdesk_mksh.so"), "home"));
     }
 
     @Test

@@ -33,15 +33,23 @@ final class ShellExecutionEnvironment {
     }
 
     static ProcessBuilder processBuilder(
+            final android.content.Context context,
             final boolean interactive,
             final String... command) throws IOException {
+        final String shell = AndroidShell.requireExecutable(context.getApplicationInfo().nativeLibraryDir);
         final ProcessBuilder builder = new ProcessBuilder(command);
         final int uid = android.system.Os.getuid();
-        apply(builder.environment(), uid, interactive);
+        final RuntimePaths paths = prepareRuntime(uid);
+        AndroidShell.installAliases(Path.of(paths.bin), shell);
+        apply(builder.environment(), uid, interactive, paths, shell);
         if (interactive) {
             prepareInteractiveShell(Path.of(builder.environment().get("ENV")), uid);
         }
         return builder;
+    }
+
+    static ProcessBuilder command(android.content.Context context, String command) throws IOException {
+        return processBuilder(context, false, AndroidShell.path(context), "-c", command);
     }
 
     static String interactiveShellStartup(final int uid) {
@@ -67,31 +75,27 @@ final class ShellExecutionEnvironment {
     static void apply(
             final Map<String, String> environment,
             final int uid,
-            final boolean interactive) {
-        apply(environment, uid, interactive, prepareRuntime(uid));
-    }
-
-    static void apply(
-            final Map<String, String> environment,
-            final int uid,
             final boolean interactive,
             final String runtimeRoot,
-            final String home) {
+            final String home,
+            final String shell) {
         if (runtimeRoot == null || !runtimeRoot.startsWith("/") || home == null || !home.startsWith("/")) {
             throw new IllegalArgumentException("invalid shell runtime root");
         }
-        apply(environment, uid, interactive, new RuntimePaths(runtimeRoot, home));
+        apply(environment, uid, interactive, new RuntimePaths(runtimeRoot, home), shell);
     }
 
     private static void apply(
             final Map<String, String> environment,
             final int uid,
             final boolean interactive,
-            final RuntimePaths paths) {
+            final RuntimePaths paths,
+            final String shell) {
         if (environment == null) {
             throw new IllegalArgumentException("missing process environment");
         }
         removeHostEnvironment(environment);
+        AndroidShell.apply(environment, shell);
         environment.put("HOME", paths.home);
         environment.put("TMPDIR", paths.tmp);
         environment.put("XDG_CONFIG_HOME", paths.config);
@@ -101,7 +105,6 @@ final class ShellExecutionEnvironment {
         environment.put("MAGICDESK_RUNTIME", paths.root);
         environment.put("MAGICDESK_TOOLS", paths.bin);
         environment.put("PATH", paths.bin + ":" + SYSTEM_PATH);
-        environment.put("SHELL", "/system/bin/sh");
         environment.put("USER", uid == ShellAccess.ROOT_UID ? "root" : "shell");
         environment.put("LOGNAME", environment.get("USER"));
         environment.put("LANG", "C.UTF-8");

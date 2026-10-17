@@ -33,7 +33,7 @@ final class WaylandExecution {
 
     LinuxGamepads gamepads() { return services == null ? null : services.gamepads; }
 
-    private String shell() { return commands.termux == null ? "/system/bin/sh" : new java.io.File(commands.home).getParent() + "/usr/bin/sh"; }
+    private String shell() { return commands.termux == null ? AndroidShell.path(context) : new java.io.File(commands.home).getParent() + "/usr/bin/sh"; }
 
     WaylandExecution(Context context, DesktopExecBackend backend, String keyboardDirectory, String fileEnvironment,
             boolean desktop, GraphicalConnectionMode connectionMode) {
@@ -124,7 +124,7 @@ final class WaylandExecution {
             CommandExecution.Completion completion) {
         var info = context.getApplicationInfo();
         String identity = commands.termux == null ? "com.android.shell" : commands.termux.packageName;
-        String shell = commands.termux == null ? "/system/bin/sh" : new java.io.File(commands.home).getParent() + "/usr/bin/sh";
+        String shell = shell();
         // WAYLAND_SOCKET is assigned only after app_process hands the connection to the native helper.
         String script = services.exports() + "unset DISPLAY WAYLAND_DISPLAY\nexport XDG_SESSION_TYPE=wayland"
                 + appearance.exports() + "\n" + appearance.command(command, shell);

@@ -67,7 +67,10 @@ Extras:
 | `keyboardDirectory` | Optional absolute host XKB directory for shell/Termux graphics. Shroot obtains keyboard data from its selected environment. |
 
 Shell syntax is opt-in via an explicit shell program and `-c`. All strings must be
-NUL-free. For Shroot, paths and environment variables apply inside the selected
+NUL-free. The example explicitly selects Android's system shell; MagicDesk does
+not rewrite requested executable paths. Its own Android command wrappers and
+interactive consoles use the bundled mksh, not `/system/bin/sh`.
+For Shroot, paths and environment variables apply inside the selected
 installed environment; no implicit distribution is used. Its ordinary launch
 recipe supplies graphics, audio and file integration. Graphical Termux commands
 use the existing Termux X11/Wayland setup. Raw Android shell GUI commands still

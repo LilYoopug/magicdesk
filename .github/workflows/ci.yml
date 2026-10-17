@@ -301,12 +301,31 @@ jobs:
           cygpath -w /usr/bin >> "$GITHUB_PATH"
           # Do not resolve the Windows WSL bash launcher in JVM shell tests.
           printf 'MAGICDESK_TEST_BASH=%s\n' "$(cygpath -w /usr/bin/bash.exe)" >> "$GITHUB_ENV"
+          printf 'MAGICDESK_BUILD_SHELL=%s\n' "$(cygpath -w /usr/bin/sh.exe)" >> "$GITHUB_ENV"
+
+      - name: Python native build tools
+        shell: pwsh
+        run: |
+          python -m pip install meson==1.9.1 ninja
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify native shell build with spaces in paths
+        shell: pwsh
+        run: |
+          $build = "$env:RUNNER_TEMP/mksh build with spaces"
+          $toolchain = "$env:ANDROID_SDK_ROOT/ndk/27.3.13750724/build/cmake/android.toolchain.cmake"
+          cmake -S native/android-shell -B "$build" -G Ninja "-DCMAKE_TOOLCHAIN_FILE=$toolchain" -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-34
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build "$build" --parallel 2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path "$build/libmagicdesk_mksh.so" -PathType Leaf)) {
+            throw "Native shell build did not produce the Android executable"
+          }
 
       - name: Verify Windows build
         # libdbus is cross-built as a client library; no message-bus executable is packaged.
         shell: pwsh
         run: |
-          python -m pip install meson==1.9.1 ninja
           .\gradlew.bat --no-daemon "-PmagicDeskWaylandRuntime=$env:RUNNER_TEMP/wayland-runtime" "-PmagicDeskAudioRuntime=$env:RUNNER_TEMP/audio-runtime" verifyDevelopment
 
       - name: Verify independent X11 host

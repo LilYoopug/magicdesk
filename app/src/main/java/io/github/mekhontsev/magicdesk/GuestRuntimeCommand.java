@@ -3,8 +3,7 @@ package io.github.mekhontsev.magicdesk;
 /** Lazy CLI adapter. Preparation is a child command, never the owner of application FDs. */
 public final class GuestRuntimeCommand {
     public static final String LIBRARIES_ENV = "MAGICDESK_GUEST_LIBRARIES";
-    public static final String SCRIPT = "#!/system/bin/sh\n"
-            + "unset LD_PRELOAD LD_LIBRARY_PATH\n"
+    public static final String BODY = "unset LD_PRELOAD LD_LIBRARY_PATH\n"
             + "md_guest=$(CLASSPATH=\"${MAGICDESK_COMMAND_APK:?Open a new MagicDesk console}\" "
             + "/system/bin/app_process / io.github.mekhontsev.magicdesk.GuestRuntimeMain "
             + "\"${" + LIBRARIES_ENV + ":?Shroot is unavailable}\" "
@@ -26,7 +25,7 @@ public final class GuestRuntimeCommand {
             + "    path) [ \"$#\" = 1 ] || exit 2; printf '%s\\n' \"$md_libc\" ;;\n"
             + "    list|prune) [ \"$#\" = 1 ] || exit 2; exec \"$md_guest/libmagicdesk_guest_image.so\" \"libc-$1\" \"$md_libc\" ;;\n"
             + "    publish) [ \"$#\" = 2 ] || exit 2; exec \"$md_guest/libmagicdesk_guest_image.so\" libc-publish \"$md_libc\" \"$2\" ;;\n"
-            + "    prepare) shift; [ -f \"$md_libc_home/install_linux.sh\" ] || { printf '%s\\n' 'First run: sh ~/install_linux.sh --prepare-libc NAME_OR_IMAGE'; exit 1; }; exec /system/bin/sh \"$md_libc_home/install_linux.sh\" --prepare-libc \"$@\" ;;\n"
+            + "    prepare) shift; [ -f \"$md_libc_home/install_linux.sh\" ] || { printf '%s\\n' 'First run: sh ~/install_linux.sh --prepare-libc NAME_OR_IMAGE'; exit 1; }; exec \"${MAGICDESK_ANDROID_SHELL:?Missing bundled shell}\" \"$md_libc_home/install_linux.sh\" --prepare-libc \"$@\" ;;\n"
             + "    *) printf '%s\\n' 'Usage: shroot libc prepare NAME_OR_IMAGE [--jobs N] | list | prune | path' >&2; exit 2 ;;\n"
             + "    esac; exit $? ;;\n"
             + "  run|exec|login) md_action=$1; shift\n"

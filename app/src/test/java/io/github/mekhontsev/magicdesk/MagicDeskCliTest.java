@@ -263,10 +263,10 @@ public final class MagicDeskCliTest {
     }
 
     @Test public void installedWrapperRequiresOnlyAndroid() {
-        assertTrue(CommandShellEnvironment.SCRIPT.contains("exec /system/bin/app_process"));
-        assertTrue(CommandShellEnvironment.SCRIPT.contains("\"$@\""));
-        assertFalse(CommandShellEnvironment.SCRIPT.contains("python"));
-        assertFalse(CommandShellEnvironment.SCRIPT.contains("com.termux"));
-        assertFalse(CommandShellEnvironment.SCRIPT.contains("su "));
+        assertTrue(CommandShellEnvironment.BODY.contains("exec /system/bin/app_process"));
+        assertTrue(CommandShellEnvironment.BODY.contains("\"$@\""));
+        assertFalse(CommandShellEnvironment.BODY.contains("python"));
+        assertFalse(CommandShellEnvironment.BODY.contains("com.termux"));
+        assertFalse(CommandShellEnvironment.BODY.contains("su "));
     }
 }

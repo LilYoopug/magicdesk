@@ -1,6 +1,7 @@
 package io.github.mekhontsev.magicdesk.platform.nubia;
 
 import io.github.mekhontsev.magicdesk.BoundedProcessRunner;
+import io.github.mekhontsev.magicdesk.AndroidShell;
 import io.github.mekhontsev.magicdesk.ShellCapabilityProbe;
 
 import android.content.Context;
@@ -49,16 +50,16 @@ final class NubiaCapabilityProbe {
                 report, "vendor.color_light", "ColorfulLightService");
         ShellCapabilityProbe.appendService(
                 report, "vendor.power", "VendorPowerManagerService");
-        appendHardwareSettings(report);
+        appendHardwareSettings(report, context);
         appendHardwareNodes(report);
         appendThermalZones(report);
     }
 
-    private static void appendHardwareSettings(final StringBuilder report) {
+    private static void appendHardwareSettings(final StringBuilder report, final Context context) {
         final RedmagicHardwareSettings.Snapshot settings;
         try {
             settings = RedmagicHardwareSettings.readAll(
-                    NubiaCapabilityProbe::runCoolingSettingsRead);
+                    command -> runCoolingSettingsRead(context, command));
         } catch (IOException | RuntimeException error) {
             RedmagicHardwareSettings.appendDiagnostics(
                     report,
@@ -69,12 +70,11 @@ final class NubiaCapabilityProbe {
         RedmagicHardwareSettings.appendDiagnostics(report, settings, null);
     }
 
-    private static String runCoolingSettingsRead(final String command)
+    private static String runCoolingSettingsRead(final Context context, final String command)
             throws IOException {
         Process process = null;
         try {
-            process = new ProcessBuilder(
-                    "/system/bin/sh", "-c", command)
+            process = AndroidShell.command(context, command)
                     .redirectErrorStream(true)
                     .start();
             final BoundedProcessRunner.Result result =

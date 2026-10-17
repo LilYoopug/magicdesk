@@ -8,6 +8,9 @@ final class TerminalShellIntegration {
         // mksh's SOH/CR prefix declares zero-width prompt delimiters. It has no
         // pre-execution hook, so A/B are honest prompt marks, not inferred C/D.
         return """
+                HISTSIZE=2000
+                HISTFILE=${XDG_STATE_HOME:-$HOME/.local/state}/shell_history
+                typeset +x HISTFILE HISTSIZE
                 _magicdesk_prompt() {
                     local status=$? title=${PWD//[[:cntrl:]]/}
                     REPLY=$'\\001\\e]0;'"${title:0:1024}"$'\\a\\e]133;A\\a\\001'

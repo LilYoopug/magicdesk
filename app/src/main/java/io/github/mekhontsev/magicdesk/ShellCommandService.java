@@ -203,8 +203,7 @@ public final class ShellCommandService extends IShellCommandService.Stub {
         }
         Process process = null;
         try {
-            process = ShellExecutionEnvironment.processBuilder(
-                    false, "/system/bin/sh", "-c", command)
+            process = ShellExecutionEnvironment.command(mContext, command)
                     .redirectErrorStream(true)
                     .start();
             final BoundedProcessRunner.Result result =
@@ -479,7 +478,7 @@ public final class ShellCommandService extends IShellCommandService.Stub {
         }
     }
 
-    private static void persistHardwareKeyboardLayout(
+    private void persistHardwareKeyboardLayout(
             final HardwareKeyboardLayoutCommand.Result result)
             throws IOException {
         final String command =
@@ -494,8 +493,7 @@ public final class ShellCommandService extends IShellCommandService.Stub {
                         + " " + ShellCommandLine.quote(result.descriptor);
         Process process = null;
         try {
-            process = ShellExecutionEnvironment.processBuilder(
-                    false, "/system/bin/sh", "-c", command)
+            process = ShellExecutionEnvironment.command(mContext, command)
                     .redirectErrorStream(true)
                     .start();
             final BoundedProcessRunner.Result output =
@@ -563,13 +561,18 @@ public final class ShellCommandService extends IShellCommandService.Stub {
             final File helper = new File(
                     mContext.getApplicationInfo().nativeLibraryDir,
                     PTY_HELPER_NAME);
+            final String shell = AndroidShell.path(mContext);
             ProcessBuilder builder = ShellExecutionEnvironment.processBuilder(
+                    mContext,
                     true,
                     helper.getAbsolutePath(),
                     Integer.toString(rows),
                     Integer.toString(columns),
-                    workingDirectory);
+                    workingDirectory,
+                    shell);
             builder.environment().putAll(TerminalLaunchEnvironment.decode(environment));
+            builder.environment().put("SHELL", shell);
+            builder.environment().put(AndroidShell.PATH_ENV, shell);
             process = builder.redirectErrorStream(true).start();
             final PtyStreamSession session = new PtyStreamSession(
                     requestId, process, writeSide, ownerToken);
@@ -1480,8 +1483,7 @@ public final class ShellCommandService extends IShellCommandService.Stub {
                     ParcelFileDescriptor.createPipe();
             readSide = pipe[0];
             writeSide = pipe[1];
-            process = ShellExecutionEnvironment.processBuilder(
-                    false, "/system/bin/sh", "-c", command)
+            process = ShellExecutionEnvironment.command(mContext, command)
                     .redirectErrorStream(true)
                     .start();
             final StreamSession session = new StreamSession(

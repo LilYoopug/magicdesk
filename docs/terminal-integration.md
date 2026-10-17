@@ -329,7 +329,7 @@ cancels its notification; detaching its window does not terminate the session.
 
 ## Shell Hooks
 
-Android `sh` (mksh) reads MagicDesk's owned `ENV` file. It publishes the current
+The bundled Android Console mksh reads MagicDesk's owned `ENV` file. It publishes the current
 directory through OSC 0 and prompt/input boundaries through OSC 133 A/B. Its
 prompt includes the current path, distinguishes `$` from `#` and retains a nonzero
 exit status. Paths are inserted as text, with terminal control characters removed.
@@ -337,6 +337,11 @@ The line editor's native nonprinting delimiters exclude OSC from prompt width.
 OSC titles update the Android task and session label.
 There is no reliable pre-execution hook in this shell; MagicDesk does not infer
 execution from Enter, output timing or process polling.
+
+The same bundled executable handles noninteractive Android commands, including
+background Desktop Entries, but does not load this rc or save interactive history.
+`sh` and `mksh` in the Android runtime's tool directory refer to that executable;
+explicit interpreter paths and guest/Termux shells are not substituted.
 
 Termux's login dispatcher is resolved to its selected shell before starting the
 PTY, honoring `~/.termux/shell`. Explicit non-dispatcher shell paths are preserved.
@@ -349,6 +354,18 @@ are never modified. Other selected Termux shells retain their normal startup;
 they can emit OSC themselves but receive no speculative Bash hooks.
 
 ## Command History
+
+Android Console's shell recall is persistent and separate from the toolbar.
+Up/Down and `fc -l` use mksh's own history, saved under the selected shell/root
+HOME at `~/.local/state/shell_history` (mode 0600). New sessions load it and
+concurrent sessions use mksh's native file locking. `HISTSIZE=2000` sets recall
+and startup compaction; it is not a strict disk quota. The file survives terminal
+and app process exit, without a Java history service or reading keystrokes.
+`HISTFILE`/`HISTSIZE` remain shell-local, so guest shells cannot inherit this binary
+format as their history. `unset HISTFILE` disables disk history for the current
+shell. Commands can contain secrets; program password prompts are not shell
+commands. Shell selection applies when creating a PTY, not to a running process;
+this does not preserve active sessions across APK replacement.
 
 The toolbar history lists up to 128 shell-marked commands, newest first. Entries
 offer copying/selecting command text/output and navigation while their buffer markers

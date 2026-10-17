@@ -22,6 +22,18 @@ selection, and rendering; it does not package Termux's native `libtermux.so`.
 - License: Apache License 2.0; see
   [`third_party/termux-terminal-emulator/LICENSE`](third_party/termux-terminal-emulator/LICENSE)
 
+## Android Shell
+
+MagicDesk's Android shell commands use upstream mksh R59c, built from hash-verified,
+unmodified sources with persistent history enabled. The executable is packaged
+in the APK; it does not replace Android's system shell or Termux/guest shells.
+Copyright and license notices, including embedded Unicode notices, are collected
+from the source files into `assets/licenses/mksh/NOTICE.txt`.
+
+- Upstream: https://github.com/mirabilos/mksh-cvs2git
+- Original release archive mirror: https://deb.debian.org/debian/pool/main/m/mksh/mksh_59c.orig.tar.gz
+- Build adapter: [`native/android-shell`](native/android-shell).
+
 ## D-Bus Client Library
 
 The Linux appearance helper statically links libdbus 1.16.2 from hash-verified

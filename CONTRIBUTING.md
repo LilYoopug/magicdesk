@@ -67,8 +67,13 @@ Diagnostics.
 
 Initialize source dependencies with `git submodule update --init --recursive`.
 On Windows, the X11 host generators use MSYS2 Bison/patch and UCRT64 GCC;
-put their `usr/bin` and `ucrt64/bin` directories on `PATH`. Android native
-libraries still use the NDK, not the host compiler. Termux uses its packaged
+put their `usr/bin` and `ucrt64/bin` directories on `PATH`. The bundled mksh
+build also needs CMake 3.24+ and POSIX `sh`, `sed`, `sort` and `tr` on the host.
+Set `MAGICDESK_BUILD_SHELL` to the absolute MSYS2 `usr/bin/sh.exe` path;
+its generator wrapper puts the shell's companion tools first on `PATH`.
+Windows CI explicitly selects MSYS2 and builds mksh in a directory containing
+spaces before the complete Gradle build. Android native libraries still use
+the NDK, not the host compiler. Termux uses its packaged
 CMake, Ninja, Python, Bison, patch and Clang. The guest file helper is statically
 linked so it can run inside glibc or musl environments without their libraries;
 Termux builds also need `ndk-multilib-native-static` for the NDK's libc archive.
