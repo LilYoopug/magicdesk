@@ -57,7 +57,7 @@ def main():
     if source.exists() and not args.resume:
         raise RuntimeError('Use a fresh output; do not mix modified source generations')
     if not args.resume:
-        subprocess.run(['tar', '-xJf', str(archive), '-C', str(output)], check=True)
+        subprocess.run(['tar', '--no-same-owner', '-xJf', str(archive), '-C', str(output)], check=True)
         subprocess.run(['python', str(integration / 'integrate_glibc.py'), str(source)], check=True)
     root_archive = output / 'toolchain.tar'
     source_archive = output / 'source.tar'
@@ -83,7 +83,8 @@ def main():
             suite.command([suite.image, 'rootfs', workspace + '/toolchain.tar', workspace + '/store'], timeout=600)
             suite.command(['mkdir', workspace + '/work'])
             suite.transport.upload(suite.client, source_archive, workspace + '/source.tar')
-            suite.command(['tar', '-xf', workspace + '/source.tar', '-C', workspace + '/work'], timeout=600)
+            # Toybox's extraction-only -o ignores host archive ownership too.
+            suite.command(['tar', '-oxf', workspace + '/source.tar', '-C', workspace + '/work'], timeout=600)
         suite.command(['/system/bin/sh', '-c',
                        'if [ ! -d "$3" ]; then "$1" create "$2" "$3"; fi', 'builder',
                        suite.image, workspace + '/store', workspace + '/instance'], timeout=600)
@@ -126,7 +127,7 @@ tar -cf fixture.tar sysroot probe-static probe-dynamic configure.log build.log i
 echo 'PASS glibc fixture build'
 '''], timeout=600)
         suite.transport.download(suite.client, workspace + '/work/fixture.tar', output / 'fixture.tar', overwrite=True)
-        subprocess.run(['tar', '-xf', str(output / 'fixture.tar'), '-C', str(output)], check=True)
+        subprocess.run(['tar', '--no-same-owner', '-xf', str(output / 'fixture.tar'), '-C', str(output)], check=True)
         suite.report['passed'] = True
         if not args.keep:
             suite.command(['rm', '-rf', workspace, suite.base], timeout=600)

@@ -17,7 +17,7 @@ integration=$(sha256sum "$libc/integrate_musl.py" "$libc/source_integration.py" 
 if [ ! -f "$out/integration-stamp" ] || [ "$(cat "$out/integration-stamp")" != "$integration" ]; then
     # Added integration files must not survive a fresh source generation.
     rm -rf "$out/musl-1.2.5"
-    tar -xzf "$archive" -C "$out"
+    tar --no-same-owner -xzf "$archive" -C "$out"
     python "$libc/integrate_musl.py" "$out/musl-1.2.5"
     printf '%s\n' "$integration" > "$out/integration-stamp"
 fi

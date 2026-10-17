@@ -33,7 +33,7 @@ apt-get update
 apt-get install -y --no-install-recommends libnss3 libasound2t64 libgbm1 libgl1 libegl1 libxss1 libgtk-3-0t64 libx11-xcb1 libsecret-1-0 libxkbfile1 dbus-x11 ca-certificates
 id mdcode >/dev/null 2>&1 || useradd -m -u 2001 -s /bin/bash mdcode
 mkdir -p /opt/md-vscode
-tar -xzf /tmp/code.tar.gz --strip-components=1 -C /opt/md-vscode
+tar --no-same-owner -xzf /tmp/code.tar.gz --strip-components=1 -C /opt/md-vscode
 test -x /opt/md-vscode/code
 chown root:root /opt/md-vscode/chrome-sandbox
 chmod 4755 /opt/md-vscode/chrome-sandbox

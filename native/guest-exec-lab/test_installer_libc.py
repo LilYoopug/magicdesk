@@ -22,8 +22,8 @@ case "$1" in
         publish) exec {suite.image} libc-publish {registry} "$2" ;;
         *) exit 2 ;;
         esac ;;
-    exec) shift; [ "$1" = fixture ] || exit 2; shift
-        exec {suite.image} exec {store} --libc-registry {registry} "$@" ;;
+    exec|login) action=$1; shift; [ "$1" = fixture ] || exit 2; shift
+        exec {suite.image} "$action" {store} --libc-registry {registry} "$@" ;;
     *) exit 2 ;;
 esac
 ''')

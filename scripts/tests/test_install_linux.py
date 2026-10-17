@@ -1,6 +1,7 @@
 """Installer orchestration without modifying the host or downloading packages."""
 import errno
 import gzip
+import io
 import json
 import lzma
 import os
@@ -11,6 +12,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import unittest
@@ -89,7 +91,7 @@ if Path(sys.argv[0]).name == "magicdesk":
     sys.exit(0)
 if stage == "list":
     print(os.environ.get("TEST_ENVIRONMENTS", ""))
-if stage == "exec":
+if stage in ("exec", "login"):
     if args[1] == "unpack":
         if args[-1] == "/mnt":
             Path(os.environ["TEST_PAYLOAD"] + ".reader").write_text(sys.stdin.read())
@@ -162,7 +164,7 @@ if os.environ.get("TEST_FAIL") == stage and "MAGICDESK_BUILD_PHASE=dependencies"
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
 
     def system_setup_call(self):
-        return next(c for c in self.calls() if c[0] == 'exec' and '-s' in c)
+        return next(c for c in self.calls() if c[0] == 'login' and '-s' in c)
 
     def version_calls(self):
         return [json.loads(line) for line in self.version_log.read_text().splitlines()] if self.version_log.exists() else []
@@ -363,7 +365,7 @@ reuse_libc() {{ return 1; }}
                 self.assertEqual(0, result.returncode, result.stderr)
                 self.assertFalse(any(c[0] == 'image' for c in self.calls()))
                 build = next(c for c in self.calls() if '--bind' in c and c[-3] == 'shroot')
-                self.assertEqual(['exec', 'work'], build[:2])
+                self.assertEqual(['login', 'work'], build[:2])
                 self.assertIn('SHROOT_LIBC_BUILD_TARGET=installed', build)
 
     def test_libc_mode_and_recipe_identity_reach_guest(self):
@@ -385,7 +387,7 @@ reuse_libc() {{ return 1; }}
         self.assertEqual('alpine:3.23', install[1])
         self.assertIn(['remove', install[-1]], self.calls())
         build = next(c for c in self.calls() if '--bind' in c and c[-3] == 'shroot')
-        self.assertEqual(['exec', install[-1]], build[:2])
+        self.assertEqual(['login', install[-1]], build[:2])
         self.assertIn('SHROOT_LIBC_BUILD_TARGET=image', build)
         self.assertFalse(any(c[0] == 'image' for c in self.calls()))
 
@@ -550,6 +552,75 @@ package_cleanup() { :; }
                         self.assertEqual(0, result.returncode, result.stderr)
                         self.assertEqual(expected, result.stdout)
 
+    @unittest.skipUnless(hasattr(os, 'getuid'), 'POSIX file ownership required')
+    def test_source_extraction_ignores_archive_owners_but_preserves_build_inputs(self):
+        self.check_source_extraction(hardlinks=False)
+
+    @unittest.skipUnless(hasattr(os, 'getuid'), 'POSIX file ownership required')
+    @unittest.skipUnless(hasattr(os, 'link'), 'Native hardlink API required')
+    def test_source_extraction_preserves_hardlinks(self):
+        source = self.directory / 'hardlink-probe-source'
+        source.write_bytes(b'probe')
+        try:
+            os.link(source, self.directory / 'hardlink-probe-target')
+        except OSError as error:
+            if error.errno in (errno.EACCES, errno.EPERM, errno.EOPNOTSUPP, errno.ENOSYS):
+                self.skipTest(f'Native host hardlinks unavailable: {error}')
+            raise
+        self.check_source_extraction(hardlinks=True)
+
+    def check_source_extraction(self, *, hardlinks):
+        result = self.run_script('--yes', '--resume', '--name', 'work',
+                                 '--gui', 'plasma', '--gpu', 'turnip')
+        self.assertEqual(0, result.returncode, result.stderr)
+        recipes = {'libc': self.run_script('--print-libc-setup').stdout}
+        for name, suffix in (('mesa', '.gpu'), ('kwin', '.kwin')):
+            recipes[name] = Path(str(self.payload) + suffix).read_text()
+        archive = self.directory / 'foreign owners.tar.xz'
+        body = b'#!/bin/sh\nprintf "source fixture\\n"\n'
+        with tarfile.open(archive, 'w:xz') as output:
+            entry = tarfile.TarInfo('fixture/configure')
+            entry.size, entry.mode = len(body), 0o755
+            entry.uid, entry.gid = 123456, 123457
+            entry.uname, entry.gname = 'foreign-builder', 'foreign-builders'
+            output.addfile(entry, io.BytesIO(body))
+            links = [('link', tarfile.SYMTYPE, 'configure')]
+            if hardlinks:
+                links.append(('hardlink', tarfile.LNKTYPE, 'fixture/configure'))
+            for name, kind, target in links:
+                entry = tarfile.TarInfo('fixture/' + name)
+                entry.type, entry.linkname = kind, target
+                entry.mode = 0o755
+                entry.uid, entry.gid = 123456, 123457
+                output.addfile(entry)
+        for name, recipe in recipes.items():
+            with self.subTest(recipe=name):
+                commands = re.findall(r'^\s*(tar [^\n]+)$', recipe, re.M)
+                self.assertEqual(1, len(commands), commands)
+                command = commands[0]
+                self.assertIn('--no-same-owner', shlex.split(command))
+                work = self.directory / ('build ' + name)
+                (work / 'source').mkdir(parents=True)
+                (work / 'unpack').mkdir()
+                environment = dict(os.environ, archive=str(archive), work=str(work))
+                extracted = subprocess.run(['sh', '-ec', command], cwd=work,
+                                           env=environment, capture_output=True, text=True, timeout=10)
+                self.assertEqual(0, extracted.returncode, extracted.stderr)
+                root = work / ('source' if name == 'libc' else 'unpack/fixture')
+                self.assertEqual(body, (root / 'configure').read_bytes())
+                self.assertEqual(os.getuid(), (root / 'configure').stat().st_uid)
+                self.assertTrue(os.access(root / 'configure', os.X_OK))
+                self.assertEqual('configure', os.readlink(root / 'link'))
+                if hardlinks:
+                    self.assertTrue(os.path.samefile(root / 'configure', root / 'hardlink'))
+                # Disabling owner restoration must not hide corrupt-archive failures.
+                broken = work / 'broken.tar.xz'
+                broken.write_bytes(b'not an archive')
+                failed = subprocess.run(['sh', '-ec', command], cwd=work,
+                                        env=dict(environment, archive=str(broken)),
+                                        capture_output=True, text=True, timeout=10)
+                self.assertNotEqual(0, failed.returncode)
+
     @unittest.skipUnless(hasattr(os, 'openpty'), 'PTY required')
     def test_interactive_dns_repair_follows_configuration_and_retries_only_dns(self):
         output = self.questions(b'alpine\nwork\nxfce\nsoftware\n\n\nkeep\nkeep\nbasic\nn\nauto\ninvalid\n192.0.2.1\ny\n',
@@ -586,7 +657,7 @@ package_cleanup() { :; }
         self.assertEqual(1, output.count('Distribution ['))
         self.assertEqual(1, sum(c[0] == 'install' for c in self.calls()))
         self.assertIn(['dns', 'work', '192.0.2.1', '--replace'], self.calls())
-        setups = [c for c in self.calls() if c[0] == 'exec' and '-s' in c and c[-8] == 'xfce']
+        setups = [c for c in self.calls() if c[0] == 'login' and '-s' in c and c[-8] == 'xfce']
         self.assertEqual(2, len(setups))
         self.assertEqual(setups[0], setups[1])
 
@@ -685,7 +756,7 @@ package_cleanup() { :; }
         install = next(c for c in self.calls() if c[0] == 'install')
         self.assertEqual(['--rootfs', '--name', 'work', '--dns', 'system'], install[2:])
         self.assertIn(["dns", "work", "system", "--replace"], self.calls())
-        self.assertEqual(["exec", "work", "--user", "root", "--env", "DEBIAN_FRONTEND=noninteractive",
+        self.assertEqual(["login", "work", "--user", "root", "--env", "DEBIAN_FRONTEND=noninteractive",
                           "--env", "SYSTEMD_IN_CHROOT=1",
                           "--", "/bin/sh", "-s", "--", "apps", "both", "keep", "keep", "", "basic", "keep", ""], self.system_setup_call())
         self.assertIn("Linux is ready: work", result.stdout)
@@ -702,7 +773,7 @@ package_cleanup() { :; }
         result = self.run_script('--yes', '--distro', 'void', '--image', 'example/void:test',
                                  '--gpu', 'turnip', '--libc', 'keep', FORCE_IPV4='1')
         self.assertEqual(0, result.returncode, result.stderr)
-        stages = [call for call in self.calls() if call[0] == 'exec' and '-s' in call]
+        stages = [call for call in self.calls() if call[0] == 'login' and '-s' in call]
         self.assertEqual(3, len(stages))
         for call in stages:
             self.assertIn('FORCE_IPV4=1', call)
@@ -736,6 +807,31 @@ package_cleanup() { :; }
         packages = set(selected.stdout.splitlines())
         self.assertTrue({'libgl1-mesa-dri', 'libegl-mesa0', 'libglx-mesa0',
                          'libegl1', 'libgl1', 'libgles2'} <= packages)
+
+    def test_gui_initializes_only_missing_flatpak_repository_and_propagates_errors(self):
+        result = self.run_script('--print-system-setup')
+        self.assertEqual(0, result.returncode, result.stderr)
+        setup = result.stdout
+        start = setup.index('    # Recovery images can ship Flatpak')
+        end = setup.index('    # Scheduling policy', start)
+        self.assertTrue(setup[:start].endswith('if [ "$gui_services" = yes ]; then\n'))
+        config = self.directory / 'flatpak-config'
+        command = setup[start:end].replace('/var/lib/flatpak/repo/config', shlex.quote(str(config)))
+        for present, existing, status in ((False, False, 0), (True, False, 0),
+                                           (True, True, 0), (True, False, 23)):
+            with self.subTest(present=present, existing=existing, status=status):
+                config.unlink(missing_ok=True)
+                if existing:
+                    config.write_text('existing repository')
+                stub = f'flatpak() {{ printf "CALL:%s\\n" "$*"; return {status}; }}\n' if present else ''
+                # EVENT_WAIT: the setup fragment exits; timeout fails a stuck recipe.
+                isolated = 'PATH=' + shlex.quote(str(self.directory)) + '\n' + stub + command
+                checked = subprocess.run(['sh', '-eu', '-c', isolated], env=self.environment,
+                                         capture_output=True, text=True, timeout=5)
+                self.assertEqual(status, checked.returncode, checked.stderr)
+                self.assertEqual(int(present and not existing), checked.stdout.count('CALL:repair --system'))
+                if existing:
+                    self.assertEqual('existing repository', config.read_text())
 
     def test_audio_session_owns_graph_and_keeps_host_transport_separate(self):
         result = self.run_script('--print-audio-session')
@@ -1267,7 +1363,7 @@ package_cleanup() { :; }
         result = self.run_script('--yes', '--resume', '--name', 'steam',
                                  '--gui', 'plasma', '--gpu', 'software', TEST_DISTRO='steamos')
         self.assertEqual(0, result.returncode, result.stderr)
-        executions = [call for call in self.calls() if call[0] == 'exec']
+        executions = [call for call in self.calls() if call[0] in ('exec', 'login')]
         self.assertTrue(any('-s' in call for call in executions))
         self.assertTrue(any('-s' not in call for call in executions))
         for call in executions:
@@ -1279,6 +1375,29 @@ package_cleanup() { :; }
         setup = self.run_script('--print-system-setup').stdout
         self.assertIn('install -d -o root -g root -m 1777 /tmp/.X11-unix /tmp/.ICE-unix', setup)
 
+    def test_all_recipes_use_account_home_for_administrative_launches(self):
+        for distro in ('debian', 'ubuntu', 'alpine', 'arch', 'fedora', 'opensuse',
+                       'manjaro', 'void', 'armtix', 'openkylin', 'deepin', 'steamos'):
+            with self.subTest(distro=distro):
+                self.log.unlink(missing_ok=True)
+                result = self.run_script('--yes', '--resume', '--name', 'work',
+                                         '--gpu', 'turnip', TEST_DISTRO=distro)
+                self.assertEqual(0, result.returncode, result.stderr)
+                calls = self.calls()
+                admin = [c for c in calls if '--user' in c and c[c.index('--user') + 1] == 'root']
+                self.assertTrue(admin)
+                for call in admin:
+                    self.assertEqual(['login', 'work'], call[:2], call)
+                    self.assertFalse(any(arg.startswith('HOME=') for arg in call), call)
+                    self.assertEqual('/bin/sh', call[call.index('--') + 1], call)
+                for stage in ('identify', 'turnip'):
+                    self.assertTrue(any('-s' in c and c[-3] == stage for c in admin), stage)
+                self.assertTrue(any('-s' in c and c[-3] == 'shroot' for c in admin)
+                                or 'Reusing Shroot libc:' in result.stdout)
+                if distro == 'steamos':
+                    steam = next(c for c in calls if c[0] == 'exec' and '.steam/installer.lock' in ' '.join(c))
+                    self.assertNotIn('--user', steam)
+
     def test_steamos_resume_does_not_download_or_convert(self):
         result = self.run_script('--yes', '--resume', '--name', 'steam', TEST_DISTRO='steamos')
         self.assertEqual(0, result.returncode, result.stderr)
@@ -1288,6 +1407,7 @@ package_cleanup() { :; }
         result = self.run_script('--yes', '--resume', '--name', 'steam', TEST_DISTRO='steamos')
         self.assertEqual(0, result.returncode, result.stderr)
         command = next(c[-1] for c in self.calls() if any('steam.tar.zst' in a for a in c))
+        self.assertIn('tar --no-same-owner --zstd', command)
         command = command.replace('[ "$(id -un)" = steamos ]', ':')
         home = self.directory / 'steam-home'
         client = home / '.local/share/Steam'
@@ -1489,7 +1609,7 @@ package_cleanup() { :; }
     def test_resume_validates_without_reinstalling(self):
         result = self.run_script("--yes", "--name", "existing", "--resume", "--libc", "keep")
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual(["exec", "--probe", "exec", "exec"], [args[0] for args in self.calls()])
+        self.assertEqual(["login", "--probe", "login", "login"], [args[0] for args in self.calls()])
         self.assertEqual(["sh", "debian", "13"], self.calls()[2][-3:])
         self.assertEqual(["keep", "both", "keep", "keep", "", "keep", "keep", ""], self.calls()[-1][-8:])
         hints = result.stdout.split("Next steps:\n", 1)[1]
@@ -1853,7 +1973,7 @@ package_cleanup() { :; }
         output = self.questions(b"debian\ninteractive\nxfce\nkeep\n\n\nkeep\nkeep\nbasic\nn\ny\n")
         install = next(c for c in self.calls() if c[0] == 'install')
         self.assertEqual(['--rootfs', '--name', 'interactive', '--dns', 'system'], install[2:])
-        setup = next(c for c in self.calls() if c[0] == 'exec' and '-s' in c)
+        setup = next(c for c in self.calls() if c[0] == 'login' and '-s' in c)
         self.assertEqual("xfce", setup[-8])
         self.assertIn('Linux libc: shroot', output)
         self.assertLess(output.index('Linux libc:'), output.index('Additional settings ('))

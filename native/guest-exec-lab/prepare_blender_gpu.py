@@ -31,7 +31,7 @@ def main():
             suite.transport.upload(suite.client, source, remote)
             actual = suite.command(['sha256sum', remote], quiet=True).split()[0]
             assert actual == digest, source
-            inner = 'tar -xzf - -C /opt/md-gpu' if destination is None else 'cat > ' + shlex.quote(destination)
+            inner = 'tar --no-same-owner -xzf - -C /opt/md-gpu' if destination is None else 'cat > ' + shlex.quote(destination)
             command = 'set -o pipefail\ncat ' + shlex.quote(remote) + ' | ' + shlex.join([
                 suite.runner, '--store', args.store, '--', '/bin/sh', '-ec', inner])
             suite.command(['/system/bin/sh', '-c', command])

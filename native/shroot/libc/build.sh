@@ -81,7 +81,8 @@ if [ -n "$source_sha" ]; then printf '%s  %s\n' "$source_sha" "$archive.part" | 
 else printf 'Experimental source revision (HTTPS download): '; sha256sum "$archive.part"; fi
 mv "$archive.part" "$archive"
 mkdir source objects
-tar -xf "$archive" -C source --strip-components=1
+# Sources belong to the builder, not archive UIDs; work may be an Android bind.
+tar --no-same-owner -xf "$archive" -C source --strip-components=1
 if [ "$kind" = musl ]; then
     python3 integration/libc/integrate_musl.py source
 else

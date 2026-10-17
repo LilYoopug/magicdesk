@@ -61,12 +61,18 @@ are identified again after dependency installation, including another cache
 lookup, so package upgrades cannot leave the build matched to an obsolete libc.
 A changed libc during compilation rejects publication. Build packages remain
 installed; failures do not roll back package-manager changes.
+Source extraction uses `--no-same-owner`: archive UIDs are not part of a build,
+and guest root cannot change Android ownership on the explicit work binding.
+Rootfs/OCI imports and backups keep their separate metadata-preserving path.
 OCI preparation uses one temporary environment from the requested image and
 pins the original image's libc identity even if build dependencies are upgraded.
 This never mutates the source image or adds an OCI layer. Successful build files
-are removed; failed work is retained with its path. Glibc exports its own `gconv` modules, but uses the distribution's
-locale and timezone data. Its private loader searches the matching runtime
-libraries before application RPATHs; the distribution libc is never overwritten.
+are removed; failed work is retained with its path for inspection. Each retry
+uses a fresh work directory unless the registry already has a matching complete
+artifact; partial work is not an incremental checkpoint. Glibc exports its own
+`gconv` modules, but uses the distribution's locale and timezone data. Its private
+loader searches the matching runtime libraries before application RPATHs; the
+distribution libc is never overwritten.
 
 ## Shared Local Registry
 

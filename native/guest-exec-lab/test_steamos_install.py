@@ -34,7 +34,10 @@ def main():
         suite.report['store'] = suite.command(['shroot', 'path', args.name]).strip()
         suite.command(['shroot', 'exec', args.name, '--', '/bin/sh', '-ec',
                        'test "$(id -un)" = steamos; test -x "$HOME/.local/share/Steam/steamrtarm64/steam"; '
-                       'test -x /usr/local/bin/magicdesk-steam-game; cat /etc/os-release; id'])
+                       'test -x /usr/local/bin/magicdesk-steam-game; '
+                       'for dir in "$HOME/.config" "$HOME/.cache"; do '
+                       'if test -e "$dir"; then test -w "$dir" && test -x "$dir" || exit 1; fi; done; '
+                       'cat /etc/os-release; id'])
         suite.report['passed'] = True
     finally:
         suite.finish()
