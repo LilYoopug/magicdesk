@@ -91,6 +91,15 @@ readers from ordinary descriptors sharing a class. Selected reads retain their
 original signal context while the worker waits for records; protected readers
 use task-affine copying and a native readiness wait. Filter installation ownership is separate from
 address-space and descriptor ownership; see [filesystem watches](watches.md).
+With the all-FD selector active, ordinary regular-file read/write and vectored
+or positional IO can resume directly from `PTRACE_GET_SYSCALL_INFO`. The syscall
+number and arguments come from the kernel, not the filter cookie. Admission
+requires a running file-table turn, a sole stopped table owner and an explicit
+ordinary regular-file origin. Unknown, typed, provisional and uncertain FDs,
+shared tables and debugger execution retain the full route. No registers,
+arguments, instruction address or application filter are rewritten; the table
+turn ends before potentially blocking IO. This removes redundant capture and
+watch-adapter stops, not the seccomp stop itself. Unselected native IO is unchanged.
 Adapted calls run on guarded scratch stacks leased by `interception_memory`, the
 address-space owner. CLONE_VM shares it; fork copies private scratch-stack mapping
 metadata without sharing stack leases; exec replaces it. Completed calls return

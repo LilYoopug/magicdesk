@@ -205,6 +205,7 @@ static void killed_transaction(const char *name, enum operation op, enum md_inod
         close(ready[0]); close(resume[1]);
         struct md_inode_store *s = store(name, 0);
         struct gate g = {ready[1], resume[0], point};
+        CHECK(!md_inode_operation_window_begin(s));
         md_inode_observe(s, gate, &g); apply(s, op);
         _exit(99); /* Every selected checkpoint must be observed, not skipped. */
     }
@@ -654,6 +655,8 @@ static void scoped_paths(void) {
     CHECK(file >= 0); put(file, "scoped"); close(file);
     CHECK(md_inode_symlink(s, "/value", MD_INODE_ROOT, "d/absolute") == 0);
     CHECK(md_inode_symlink(s, "../value", MD_INODE_ROOT, "d/sub/relative") == 0);
+    CHECK(!md_inode_symlink(s,"sub/..",-1,"d/back"));
+    CHECK(!md_inode_symlink(s,"back/back",-1,"d/twice"));
     int dir = directory(s, "d");
     struct { const char *path; uint64_t resolve; int error; } cases[] = {
         {"value", RESOLVE_BENEATH, 0}, {"sub/../value", RESOLVE_BENEATH, 0},
@@ -661,6 +664,9 @@ static void scoped_paths(void) {
         {"absolute", RESOLVE_BENEATH, -EXDEV}, {"/value", RESOLVE_IN_ROOT, 0},
         {"../value", RESOLVE_IN_ROOT, 0}, {"absolute", RESOLVE_IN_ROOT, 0},
         {"sub/relative", RESOLVE_BENEATH, 0},
+        {"twice//back/./sub/../value", RESOLVE_BENEATH, 0},
+        {"twice/back/absent", 0, -ENOENT},
+        {"twice/back/value/", 0, -ENOTDIR},
         {"sub/relative", RESOLVE_NO_SYMLINKS, -ELOOP},
         {"value", RESOLVE_NO_XDEV | RESOLVE_NO_MAGICLINKS, 0},
         {"value", RESOLVE_CACHED, -EAGAIN},
@@ -709,6 +715,8 @@ static void read_admission_failure(void) {
     CHECK(sqlite3_set_authorizer(s->db,deny_version,NULL)==SQLITE_OK);
     CHECK(md_inode_stat(s,-1,"/",0,&st)<0);
     CHECK(!s->locked && !s->read_depth && !s->write_transaction && sqlite3_get_autocommit(s->db));
+    CHECK(md_inode_operation_window_begin(s)<0);
+    CHECK(!s->locked && !s->operation_window && !s->read_depth && sqlite3_get_autocommit(s->db));
     CHECK(sqlite3_set_authorizer(s->db,NULL,NULL)==SQLITE_OK);
     CHECK(!md_inode_stat(s,-1,"/",0,&st));
     CHECK(!mdi_begin(s,0) && sqlite3_get_autocommit(s->db));
@@ -716,6 +724,66 @@ static void read_admission_failure(void) {
     CHECK(mdi_finish(s,-ECANCELED)==-ECANCELED && sqlite3_get_autocommit(s->db));
     md_inode_store_close(s);
     puts("PASS lazy catalogue admission: failed version read releases the gate; write admission and rollback own the transaction");
+}
+static void operation_windows(void) {
+    struct md_inode_store *s=store("operation-window",1),*peer=store("operation-window",0);
+    struct md_identity owner=md_identity_new(0,0),user=md_identity_new(1000,1000);
+    s->identity=&owner;
+    CHECK(!md_inode_mkdir(s,-1,"work",0700));
+    struct md_inode_statistics costs={0}; md_inode_measure(s,&costs);
+    CHECK(!md_inode_operation_window_begin(s));
+    CHECK(md_inode_operation_window_begin(s)==-EDEADLK);
+    CHECK(s->locked && !s->read_depth && sqlite3_get_autocommit(s->db));
+    CHECK(flock(peer->objects,LOCK_EX|LOCK_NB)<0 && errno==EWOULDBLOCK);
+    struct stat st;
+    for (unsigned i=0;i<8;++i) {
+        struct md_inode_birth *birth=NULL;
+        struct md_open_completion plan;
+        int pin=md_inode_plan_open(s,-1,"work/cycle",O_CREAT|O_RDWR,0600,0,&plan,1,&birth);
+        CHECK(pin>=0 && birth && md_inode_birth_store(birth)==s);
+        CHECK(md_inode_stat(s,-1,"work/cycle",0,&st)==-ENOENT);
+        CHECK(!md_inode_birth_commit(&birth) && !birth);
+        CHECK(!md_inode_rename(s,-1,"work/cycle",-1,"work/renamed",0));
+        CHECK(!md_inode_unlink(s,-1,"work/renamed",0));
+        CHECK(!close(pin));
+        CHECK(!s->read_depth && !s->write_transaction && sqlite3_get_autocommit(s->db));
+    }
+    CHECK(!costs.write_admissions && costs.directory_check_misses==1);
+    CHECK(!md_inode_mkdir(s,-1,"private",0700));
+    CHECK(sqlite3_get_autocommit(s->db));
+    /* An independent SQLite reader sees each commit before window release. */
+    sqlite3_stmt *q=NULL;
+    CHECK(sqlite3_prepare_v2(peer->db,"SELECT count(*) FROM names WHERE name=CAST('private' AS BLOB)",-1,&q,NULL)==SQLITE_OK);
+    CHECK(sqlite3_step(q)==SQLITE_ROW && sqlite3_column_int(q,0)==1);
+    sqlite3_finalize(q);
+    s->identity=&user;
+    CHECK(md_inode_create(s,-1,"private/denied",0600)==-EACCES);
+    s->identity=&owner;
+    CHECK(!mdi_begin(s,0) && !mdi_write(s));
+    CHECK(md_inode_operation_window_end(s)==-EBUSY);
+    CHECK(!mdi_sql(s,"INSERT INTO properties VALUES('window-rollback',1)"));
+    CHECK(mdi_finish(s,-ECANCELED)==-ECANCELED);
+    CHECK(sqlite3_get_autocommit(s->db));
+    CHECK(sqlite3_prepare_v2(peer->db,"SELECT count(*) FROM properties WHERE key='window-rollback'",-1,&q,NULL)==SQLITE_OK);
+    CHECK(sqlite3_step(q)==SQLITE_ROW && !sqlite3_column_int(q,0)); sqlite3_finalize(q);
+    int fd=md_inode_create(s,-1,"private/file",0600); CHECK(fd>=0 && !close(fd));
+    CHECK(!md_inode_link(s,-1,"private/file",-1,"private/alias",0));
+    CHECK(!md_inode_stat(s,-1,"private/alias",0,&st) && st.st_nlink==2);
+    CHECK(!md_inode_unlink(s,-1,"private/alias",0));
+    CHECK(!md_inode_stat(s,-1,"private/file",0,&st) && st.st_nlink==1);
+    CHECK(!md_inode_operation_window_end(s));
+    CHECK(!s->locked && !s->operation_window && !s->read_depth && !s->write_transaction);
+    CHECK(!flock(peer->objects,LOCK_EX|LOCK_NB) && !flock(peer->objects,LOCK_UN));
+    CHECK(costs.lock.calls==1 && costs.version.calls==1);
+    md_inode_measure(s,NULL);
+    CHECK(!md_inode_rename(peer,-1,"private/file",-1,"private/changed",0));
+    CHECK(!md_inode_operation_window_begin(s));
+    CHECK(md_inode_stat(s,-1,"private/file",0,&st)==-ENOENT);
+    CHECK(!md_inode_stat(s,-1,"private/changed",0,&st));
+    CHECK(!md_inode_operation_window_end(s));
+    s->identity=NULL; md_identity_release(&owner); md_identity_release(&user);
+    md_inode_store_close(peer); md_inode_store_close(s);
+    puts("PASS operation windows: one gate/version, independent commits, rollback, live authority, birth, promotion and external invalidation");
 }
 static void permission_snapshot(void) {
     struct md_inode_store *s=store("permission-snapshot",1);
@@ -891,6 +959,35 @@ static void backing_cache(void) {
     md_inode_measure(s,NULL); close(replacement); close(fd);
     md_inode_store_close(writer); md_inode_store_close(s);
     puts("PASS name-to-backing cache: no duplicate FD lookup, native attributes, foreign links and open-unlinked identity");
+}
+static void recent_cache_keys(void) {
+    struct md_inode_store *s=store("recent-keys",1), *peer=store("recent-keys",0);
+    struct stat st;
+    for (unsigned i=0;i<160;++i) {
+        char name[32]; snprintf(name,sizeof(name),"v%u",i);
+        int fd=md_inode_create(s,-1,name,0600); CHECK(fd>=0);
+        CHECK(!ftruncate(fd,(off_t)i)); close(fd);
+    }
+    for (unsigned pass=0;pass<3;++pass) {
+        CHECK(!md_inode_operation_window_begin(s));
+        for (unsigned i=0;i<160;++i) {
+            unsigned n=pass==1 ? 159-i : i;
+            char name[32]; snprintf(name,sizeof(name),"v%u",n);
+            CHECK(!md_inode_stat(s,-1,name,0,&st) && st.st_size==(off_t)n);
+            CHECK(!md_inode_stat(s,-1,name,0,&st) && st.st_size==(off_t)n);
+        }
+        CHECK(!md_inode_operation_window_end(s));
+    }
+    CHECK(!md_inode_operation_window_begin(s));
+    CHECK(!md_inode_stat(s,-1,"v159",0,&st));
+    CHECK(!md_inode_rename(s,-1,"v0",-1,"v159",0));
+    CHECK(!md_inode_stat(s,-1,"v159",0,&st) && !st.st_size);
+    CHECK(md_inode_stat(s,-1,"v0",0,&st)==-ENOENT);
+    CHECK(!md_inode_operation_window_end(s));
+    CHECK(!md_inode_rename(peer,-1,"v1",-1,"v159",0));
+    CHECK(!md_inode_stat(s,-1,"v159",0,&st) && st.st_size==1);
+    md_inode_store_close(peer); md_inode_store_close(s);
+    puts("PASS hot catalogue keys: collisions, slot replacement, local mutation and foreign generation");
 }
 static void mutation_cache(void) {
     struct md_inode_store *s=store("mutation-cache",1);
@@ -1128,7 +1225,26 @@ static void native_births(void) {
     struct md_inode_birth *birth=NULL;
     struct stat st;
     s->creation_mask=0027;
-    int pin=md_inode_prepare_birth(s,-1,"work/new",O_CREAT|O_EXCL|O_RDWR,0666,0,&birth);
+    for (unsigned exclusive=0;exclusive<2;++exclusive) {
+        struct md_open_completion plan;
+        int flags=O_CREAT|O_RDWR|(exclusive ? O_EXCL : 0);
+        struct md_inode_statistics costs={0}; md_inode_measure(s,&costs);
+        int planned=md_inode_plan_open(s,-1,"work/planned",flags,0666,0,&plan,1,&birth);
+        md_inode_measure(s,NULL);
+        CHECK(costs.lock.calls==1 && costs.version.calls==1 && !costs.write_admissions);
+        CHECK(planned>=0 && birth && plan.kind==MD_OPEN_PLAN && plan.native_leaf);
+        CHECK(!s->read_depth && !s->write_transaction);
+        CHECK(md_inode_stat(s,-1,"work/planned",0,&st)==-ENOENT);
+        CHECK(!md_inode_birth_commit(&birth) && !birth);
+        CHECK(!md_inode_stat(s,-1,"work/planned",0,&st) && (st.st_mode&0777)==0640);
+        close(planned);
+        planned=md_inode_plan_open(s,-1,"work/planned",flags,0666,0,&plan,1,&birth);
+        CHECK(!birth);
+        if (exclusive) CHECK(planned==-EEXIST);
+        else { CHECK(planned>=0 && plan.kind==MD_OPEN_PLAN); close(planned); }
+        CHECK(!md_inode_unlink(s,-1,"work/planned",0));
+    }
+    int pin=md_inode_plan_open(s,-1,"work/new",O_CREAT|O_EXCL|O_RDWR,0666,0,&(struct md_open_completion){0},1,&birth);
     CHECK(pin>=0 && birth && !s->read_depth && !s->write_transaction);
     CHECK(md_inode_stat(s,-1,"work/new",0,&st)==-ENOENT);
     char proc[64]; snprintf(proc,sizeof(proc),"/proc/self/fd/%d",pin);
@@ -1136,27 +1252,34 @@ static void native_births(void) {
     CHECK(!md_inode_birth_commit(&birth) && !birth);
     CHECK(!md_inode_stat(s,-1,"work/new",0,&st) && st.st_size==4 && (st.st_mode&0777)==0640);
     close(fd); close(pin);
-    CHECK(md_inode_prepare_birth(s,-1,"work/new",O_CREAT|O_EXCL|O_RDWR,0600,0,&birth)==-EEXIST && !birth);
-    CHECK(md_inode_prepare_birth(s,-1,"work/new",O_CREAT|O_RDWR,0600,0,&birth)==-EXDEV && !birth);
-    pin=md_inode_prepare_birth(s,-1,"work/cancel",O_CREAT|O_RDWR,0000,0,&birth);
+    CHECK(md_inode_plan_open(s,-1,"work/new",O_CREAT|O_EXCL|O_RDWR,0600,0,&(struct md_open_completion){0},1,&birth)==-EEXIST && !birth);
+    pin=md_inode_plan_open(s,-1,"work/new",O_CREAT|O_RDWR,0600,0,&(struct md_open_completion){0},1,&birth);
+    CHECK(pin>=0 && !birth); close(pin);
+    pin=md_inode_plan_open(s,-1,"work/cancel",O_CREAT|O_RDWR,0000,0,&(struct md_open_completion){0},1,&birth);
     CHECK(pin>=0 && birth);
     CHECK(!md_inode_birth_discard(&birth) && !birth);
     CHECK(!fstat(pin,&st) && !st.st_nlink);
     close(pin);
     CHECK(md_inode_stat(s,-1,"work/cancel",0,&st)==-ENOENT);
-    pin=md_inode_prepare_birth(s,-1,"work/race",O_CREAT|O_EXCL|O_RDWR,0600,0,&birth);
+    pin=md_inode_plan_open(s,-1,"work/race",O_CREAT|O_EXCL|O_RDWR,0600,0,&(struct md_open_completion){0},1,&birth);
     CHECK(pin>=0 && birth);
     CHECK(!md_inode_symlink(s,"new",-1,"work/race"));
     CHECK(md_inode_birth_commit(&birth)==-EEXIST && birth);
     CHECK(!md_inode_birth_discard(&birth)); close(pin);
     CHECK(!md_inode_stat(s,-1,"work/race",AT_SYMLINK_NOFOLLOW,&st) && S_ISLNK(st.st_mode));
-    pin=md_inode_prepare_birth(s,-1,"work/moved",O_CREAT|O_RDWR,0600,0,&birth);
+    pin=md_inode_plan_open(s,-1,"work/native-race",O_CREAT|O_EXCL|O_RDWR,0600,0,&(struct md_open_completion){0},1,&birth);
+    CHECK(pin>=0 && birth);
+    fd=md_inode_create(s,-1,"work/native-race",0600); CHECK(fd>=0); put(fd,"winner");
+    CHECK(md_inode_birth_commit(&birth)==-EEXIST && birth);
+    CHECK(!md_inode_birth_discard(&birth)); close(pin);
+    content(fd,"winner"); close(fd);
+    pin=md_inode_plan_open(s,-1,"work/moved",O_CREAT|O_RDWR,0600,0,&(struct md_open_completion){0},1,&birth);
     CHECK(pin>=0 && birth);
     CHECK(!md_inode_rename(s,-1,"work",-1,"renamed",0));
     CHECK(!md_inode_birth_commit(&birth)); close(pin);
     CHECK(!md_inode_stat(s,-1,"renamed/moved",0,&st));
     CHECK(!md_inode_mkdir(s,-1,"gone",0700));
-    pin=md_inode_prepare_birth(s,-1,"gone/file",O_CREAT|O_RDWR,0600,0,&birth);
+    pin=md_inode_plan_open(s,-1,"gone/file",O_CREAT|O_RDWR,0600,0,&(struct md_open_completion){0},1,&birth);
     CHECK(pin>=0 && birth);
     CHECK(!md_inode_unlink(s,-1,"gone",AT_REMOVEDIR));
     CHECK(md_inode_birth_commit(&birth)==-ENOENT && birth);
@@ -1167,13 +1290,13 @@ static void native_births(void) {
         .directory={-1,-1},.path={"/"},.mode=0755}));
     CHECK(!md_inode_metadata(s,&(struct md_fs_request){.operation=MD_FS_CHMOD,
         .directory={-1,-1},.path={"renamed"},.mode=0777})); s->identity=&user;
-    pin=md_inode_prepare_birth(s,-1,"renamed/owned",O_CREAT|O_RDWR,0000,0,&birth);
+    pin=md_inode_plan_open(s,-1,"renamed/owned",O_CREAT|O_RDWR,0000,0,&(struct md_open_completion){0},1,&birth);
     CHECK(pin>=0 && birth);
     CHECK(!md_inode_birth_commit(&birth)); close(pin);
     CHECK(!md_inode_stat(s,-1,"renamed/owned",0,&st) && st.st_uid==1234 && st.st_gid==2345 && !(st.st_mode&07777));
-    CHECK(md_inode_prepare_birth(s,-1,"renamed/invalid",O_CREAT|O_TRUNC,0600,0,&birth)==-EINVAL && !birth);
+    CHECK(md_inode_plan_open(s,-1,"renamed/invalid",O_CREAT|O_TRUNC,0600,0,&(struct md_open_completion){0},1,&birth)==-EINVAL && !birth);
     s->identity=&root_identity;
-    pin=md_inode_prepare_birth(s,-1,"renamed/promoted",O_CREAT|O_EXCL|O_RDWR,0600,0,&birth);
+    pin=md_inode_plan_open(s,-1,"renamed/promoted",O_CREAT|O_EXCL|O_RDWR,0600,0,&(struct md_open_completion){0},1,&birth);
     CHECK(pin>=0 && birth);
     snprintf(proc,sizeof(proc),"/proc/self/fd/%d",pin);
     fd=open(proc,O_RDWR|O_CLOEXEC); CHECK(fd>=0); put(fd,"before");
@@ -1185,7 +1308,7 @@ static void native_births(void) {
     put(fd,"shared");
     int other=md_inode_open(s,-1,"renamed/alias",O_RDONLY,0); CHECK(other>=0);
     content(other,"shared"); close(other); close(fd); close(pin);
-    pin=md_inode_prepare_birth(s,-1,"renamed/sealed",O_CREAT|O_RDWR,0600,0,&birth);
+    pin=md_inode_plan_open(s,-1,"renamed/sealed",O_CREAT|O_RDWR,0600,0,&(struct md_open_completion){0},1,&birth);
     CHECK(pin>=0 && birth);
     CHECK(!md_inode_store_seal(s));
     CHECK(md_inode_birth_commit(&birth)==-EROFS && birth);
@@ -1218,7 +1341,7 @@ static void native_birth_recovery(void) {
         if (!child) {
             s=store(name,0); s->identity=&identity;
             struct md_inode_birth *birth=NULL;
-            int pin=md_inode_prepare_birth(s,-1,"work/value",O_CREAT|O_EXCL|O_RDWR,0600,0,&birth);
+            int pin=md_inode_plan_open(s,-1,"work/value",O_CREAT|O_EXCL|O_RDWR,0600,0,&(struct md_open_completion){0},1,&birth);
             CHECK(pin>=0 && birth);
             if (phase) {
                 char proc[64]; snprintf(proc,sizeof(proc),"/proc/self/fd/%d",pin);
@@ -1258,7 +1381,7 @@ static void native_birth_acl(void) {
     md_inode_acl(s,&q,&result,NULL); CHECK(!result.error);
     s->creation_mask=0077;
     struct md_inode_birth *birth=NULL;
-    int pin=md_inode_prepare_birth(s,directory,"prepared",O_CREAT|O_RDWR,0666,0,&birth);
+    int pin=md_inode_plan_open(s,directory,"prepared",O_CREAT|O_RDWR,0666,0,&(struct md_open_completion){0},1,&birth);
     CHECK(pin>=0 && birth);
     struct stat st;
     CHECK(md_inode_stat(s,directory,"prepared",0,&st)==-ENOENT);
@@ -1287,7 +1410,7 @@ static void native_birth_acl(void) {
         }
         close(fd);
     }
-    pin=md_inode_prepare_birth(s,directory,"cancelled",O_CREAT|O_RDWR,0666,0,&birth);
+    pin=md_inode_plan_open(s,directory,"cancelled",O_CREAT|O_RDWR,0666,0,&(struct md_open_completion){0},1,&birth);
     CHECK(pin>=0 && birth && !md_inode_birth_discard(&birth)); close(pin);
     CHECK(md_inode_stat(s,directory,"cancelled",0,&st)==-ENOENT);
     close(directory); md_inode_store_close(s); md_identity_release(&ids);
@@ -1302,31 +1425,31 @@ static void native_plans(void) {
     CHECK(!md_inode_symlink(s,"value",-1,"link"));
     const unsigned rejected[]={O_CREAT|O_EXCL,O_ASYNC};
     for (unsigned i=0;i<sizeof(rejected)/sizeof(*rejected);++i)
-        CHECK(md_inode_plan_open(s,-1,"missing",rejected[i],0600,0,&completion,1)==-EXDEV);
+        CHECK(md_inode_plan_open(s,-1,"missing",rejected[i],0600,0,&completion,1,NULL)==-EXDEV);
     struct stat st; CHECK(md_inode_stat(s,-1,"missing",0,&st)==-ENOENT);
-    CHECK(md_inode_plan_open(s,-1,"missing",O_CREAT|O_RDWR,0600,0,&completion,1)==-EXDEV);
+    CHECK(md_inode_plan_open(s,-1,"missing",O_CREAT|O_RDWR,0600,0,&completion,1,NULL)==-EXDEV);
     CHECK(md_inode_stat(s,-1,"missing",0,&st)==-ENOENT);
-    CHECK(md_inode_plan_open(s,-1,"value",O_TRUNC,0,0,&completion,1)==-EINVAL);
+    CHECK(md_inode_plan_open(s,-1,"value",O_TRUNC,0,0,&completion,1,NULL)==-EINVAL);
     const unsigned directories[]={O_RDONLY,O_DIRECTORY,O_PATH|O_DIRECTORY};
     for (unsigned i=0;i<sizeof(directories)/sizeof(*directories);++i) {
-        int directory=md_inode_plan_open(s,-1,"directory",directories[i],0,0,&completion,1);
+        int directory=md_inode_plan_open(s,-1,"directory",directories[i],0,0,&completion,1,NULL);
         CHECK(directory>=0 && completion.kind==MD_OPEN_PLAN);
         CHECK(!fstat(directory,&st) && S_ISDIR(st.st_mode));
         CHECK(!close(directory));
-        CHECK(md_inode_plan_open(s,-1,"missing",directories[i],0,0,&completion,1)==-ENOENT);
+        CHECK(md_inode_plan_open(s,-1,"missing",directories[i],0,0,&completion,1,NULL)==-ENOENT);
     }
-    CHECK(md_inode_plan_open(s,-1,"value",O_DIRECTORY,0,0,&completion,1)==-ENOTDIR);
-    CHECK(md_inode_plan_open(s,-1,"fifo",O_RDONLY,0,0,&completion,1)==-EXDEV);
+    CHECK(md_inode_plan_open(s,-1,"value",O_DIRECTORY,0,0,&completion,1,NULL)==-ENOTDIR);
+    CHECK(md_inode_plan_open(s,-1,"fifo",O_RDONLY,0,0,&completion,1,NULL)==-EXDEV);
     CHECK(!md_inode_read_scope_begin(s));
-    CHECK(md_inode_plan_open(s,-1,"fifo",O_RDONLY,0,0,&completion,0)==-EAGAIN);
+    CHECK(md_inode_plan_open(s,-1,"fifo",O_RDONLY,0,0,&completion,0,NULL)==-EAGAIN);
     CHECK(completion.kind==MD_OPEN_NEEDS_WRITE && s->read_depth==1 && !s->write_transaction && !s->fifos);
     CHECK(!md_inode_read_scope_end(s));
-    int fifo=md_inode_plan_open(s,-1,"fifo",O_RDONLY,0,0,&completion,0);
+    int fifo=md_inode_plan_open(s,-1,"fifo",O_RDONLY,0,0,&completion,0,NULL);
     CHECK(fifo>=0 && completion.kind==MD_OPEN_PIPE);
     CHECK(!close(completion.control) && !close(fifo));
-    CHECK(md_inode_plan_open(s,-1,"link",O_RDONLY|O_NOFOLLOW,0,0,&completion,1)==-ELOOP);
-    CHECK(md_inode_plan_open(s,-1,"missing",O_RDONLY,0,0,&completion,1)==-ENOENT);
-    int pin=md_inode_plan_open(s,-1,"link",O_RDONLY|O_CLOEXEC,0,0,&completion,1);
+    CHECK(md_inode_plan_open(s,-1,"link",O_RDONLY|O_NOFOLLOW,0,0,&completion,1,NULL)==-ELOOP);
+    CHECK(md_inode_plan_open(s,-1,"missing",O_RDONLY,0,0,&completion,1,NULL)==-ENOENT);
+    int pin=md_inode_plan_open(s,-1,"link",O_RDONLY|O_CLOEXEC,0,0,&completion,1,NULL);
     CHECK(pin>=0 && completion.kind==MD_OPEN_PLAN && (fcntl(pin,F_GETFL)&O_PATH));
     CHECK(!md_inode_rename(s,-1,"value",-1,"renamed",0));
     CHECK(!md_inode_unlink(s,-1,"renamed",0));
@@ -1335,7 +1458,7 @@ static void native_plans(void) {
     fd=open(proc,O_RDONLY|O_CLOEXEC); CHECK(fd>=0); content(fd,"old"); close(fd); close(pin);
     const unsigned writable[]={O_WRONLY,O_RDWR|O_APPEND|O_CREAT,O_WRONLY|O_TRUNC};
     for (unsigned i=0;i<sizeof(writable)/sizeof(*writable);++i) {
-        pin=md_inode_plan_open(s,-1,"value",writable[i],0,0,&completion,1);
+        pin=md_inode_plan_open(s,-1,"value",writable[i],0,0,&completion,1,NULL);
         CHECK(pin>=0 && completion.kind==MD_OPEN_PLAN && (fcntl(pin,F_GETFL)&O_PATH));
         CHECK(!md_inode_stat(s,-1,"value",0,&st) && st.st_size==11+(i==2));
         snprintf(proc,sizeof(proc),"/proc/self/fd/%d",pin);
@@ -1344,10 +1467,10 @@ static void native_plans(void) {
         CHECK(write(fd,"x",1)==1); close(fd); close(pin);
     }
     s->readonly=1;
-    CHECK(md_inode_plan_open(s,-1,"value",O_WRONLY|O_TRUNC,0,0,&completion,1)==-EROFS);
+    CHECK(md_inode_plan_open(s,-1,"value",O_WRONLY|O_TRUNC,0,0,&completion,1,NULL)==-EROFS);
     s->readonly=0;
     struct md_identity user=md_identity_new(1000,1000); s->identity=&user;
-    CHECK(md_inode_plan_open(s,-1,"value",O_RDONLY,0,0,&completion,1)==-EACCES);
+    CHECK(md_inode_plan_open(s,-1,"value",O_RDONLY,0,0,&completion,1,NULL)==-EACCES);
     s->identity=NULL; md_identity_release(&user); md_inode_store_close(s);
     struct md_inode_store *source=store("native-plan-source",1),*copy=store("native-plan-copy",1);
     fd=md_inode_create(source,-1,"shared",0600); CHECK(fd>=0); put(fd,"source"); close(fd);
@@ -1357,20 +1480,22 @@ static void native_plans(void) {
     CHECK(!md_inode_read_scope_begin(copy));
     int spare=fcntl(copy->objects,F_DUPFD_CLOEXEC,0); CHECK(spare>=0 && !close(spare));
     for (unsigned i=0;i<64;++i) {
-        CHECK(md_inode_plan_open(copy,-1,"alias",O_CREAT|O_WRONLY|O_TRUNC,0600,0,&completion,1)==-EAGAIN);
+        CHECK(md_inode_plan_open(copy,-1,"alias",O_CREAT|O_WRONLY|O_TRUNC,0600,0,&completion,1,NULL)==-EAGAIN);
         CHECK(completion.kind==MD_OPEN_NEEDS_WRITE && copy->read_depth==1 && !copy->write_transaction);
     }
     CHECK(fcntl(copy->objects,F_DUPFD_CLOEXEC,0)==spare && !close(spare));
     CHECK(!md_inode_read_scope_end(copy));
-    pin=md_inode_plan_open(copy,-1,"alias",O_CREAT|O_WRONLY|O_TRUNC,0600,0,&completion,1);
+    CHECK(!md_inode_operation_window_begin(copy));
+    pin=md_inode_plan_open(copy,-1,"alias",O_CREAT|O_WRONLY|O_TRUNC,0600,0,&completion,1,NULL);
     CHECK(pin>=0 && completion.kind==MD_OPEN_PLAN);
     CHECK(!md_inode_stat(copy,-1,"shared",0,&st) && st.st_size==6 && st.st_nlink==2);
     snprintf(proc,sizeof(proc),"/proc/self/fd/%d",pin);
     fd=open(proc,O_WRONLY|O_TRUNC|O_CLOEXEC); CHECK(fd>=0); put(fd,"new"); close(fd); close(pin);
     fd=md_inode_open(copy,-1,"shared",O_RDONLY,0); CHECK(fd>=0); content(fd,"new"); close(fd);
+    CHECK(!md_inode_operation_window_end(copy));
     fd=md_inode_open(source,-1,"shared",O_RDONLY,0); CHECK(fd>=0); content(fd,"source"); close(fd);
     CHECK(!md_inode_read_scope_begin(copy));
-    pin=md_inode_plan_open(copy,-1,"shared",O_WRONLY|O_APPEND,0,0,&completion,1);
+    pin=md_inode_plan_open(copy,-1,"shared",O_WRONLY|O_APPEND,0,0,&completion,1,NULL);
     CHECK(pin>=0 && completion.kind==MD_OPEN_PLAN && copy->read_depth==1 && !copy->write_transaction);
     close(pin); CHECK(!md_inode_read_scope_end(copy));
     md_inode_store_close(copy); md_inode_store_close(source);
@@ -1383,9 +1508,9 @@ int main(int argc, char **argv) {
     CHECK(mkdir(root, 0700) == 0);
     descriptors(); namespace(); contention(); multiple_stores(); across_exec(argv[0]);
     native_plans(); native_births(); native_birth_recovery(); native_birth_acl();
-    hierarchy(); symlinks(); permissions(); kernel_reference(); scoped_paths(); read_admission_failure();
+    hierarchy(); symlinks(); permissions(); kernel_reference(); scoped_paths(); read_admission_failure(); operation_windows();
     permission_snapshot(); reused_queries(); metadata_queries(); cached_path_names();
-    backing_cache(); mutation_cache(); directory_publication(); membership_queries(); counter_audit(); retained_journal();
+    backing_cache(); recent_cache_keys(); mutation_cache(); directory_publication(); membership_queries(); counter_audit(); retained_journal();
     unsigned serial = 0;
     recovery(CREATE, MD_OBJECT_SYNCED, serial++);
     for (enum operation op = CREATE; op <= EXCHANGE; ++op) {

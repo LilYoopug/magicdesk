@@ -130,7 +130,7 @@ struct interception_statistics {
     uint64_t ptrace_requests, unknown, native_seeks, stops;
     uint64_t event_polls, event_waits;
     uint64_t notification_rebounds, notification_readmissions_retired;
-    uint64_t direct_status, direct_open, direct_fallback, direct_admit, direct_retry, compact_close;
+    uint64_t direct_status, direct_open, direct_fallback, direct_admit, direct_retry, compact_close, native_io;
     struct md_cost rpc;
     struct { uint64_t trace, notification; } calls[512];
 };
@@ -2961,6 +2961,34 @@ static int fd_close_compact(struct thread *t,unsigned long cookie) {
     CHECK(!md_fd_mutation_prepare(t->resources.files,SYS_close,args,&t->fd_mutation));
     t->fd_cwd=t->fd_capture=0; t->fd_running=1;
     if (statistics) { ++statistics->compact_close; ++statistics->calls[SYS_close].trace; }
+    resume(t->pid,0); return 1;
+}
+static int fd_native_io(struct thread *t,const struct ptrace_syscall_info *info) {
+    if (info->arch!=AUDIT_ARCH_AARCH64
+            || (info->seccomp.ret_data!=MD_INTERCEPT_PROC && info->seccomp.ret_data!=MD_INTERCEPT_WATCH)
+            || t->fd_job || t->fd_running || t->fd_order.table || t->fs_order.fs
+            || t->debug_options || t->debug_call_active || t->debug_step_call
+            || md_debugger_traced(debugger,t->pid)) return 0;
+    unsigned long nr=info->seccomp.nr;
+    switch (nr) {
+    case SYS_read: case SYS_write: case SYS_readv: case SYS_writev:
+    case SYS_pread64: case SYS_pwrite64: case SYS_preadv: case SYS_pwritev:
+    case SYS_preadv2: case SYS_pwritev2: break;
+    default: return 0;
+    }
+    struct md_fd_order turn={0};
+    int ready=md_fd_order_begin(t->resources.files,&turn,fd_wakeup);
+    CHECK(ready>=0);
+    if (!ready) { CHECK(!md_fd_order_cancel(&turn)); return 0; }
+    CHECK(!md_fd_order_start(&turn));
+    /* The sole stopped table owner cannot replace the slot before CONT. No
+     * turn is held across blocking IO, and an absent annotation is no proof.
+     * Read actual syscall arguments, never trust an application's TRACE data. */
+    int native=md_fd_origins_exclusive(&turn)
+        && md_fd_origins_native_regular(&turn,(int)info->seccomp.args[0]);
+    CHECK(!md_fd_order_complete(&turn));
+    if (!native) return 0;
+    if (statistics) { ++statistics->native_io; ++statistics->calls[nr].trace; }
     resume(t->pid,0); return 1;
 }
 static void task_action_release(struct task_action *owner) {
@@ -7135,7 +7163,15 @@ int main(int argc, char **argv) {
         }
         else if (event == PTRACE_EVENT_SECCOMP) {
             unsigned long cookie;
-            if (!tracee_request(t,PTRACE_GETEVENTMSG,NULL,&cookie,"seccomp-event")) continue;
+            if (t->phase==IDLE && t->ready && t->resources.files
+                    && md_fd_selector_has(t->fd_selector,MD_FD_SELECTOR_PROC,-1)>0) {
+                struct ptrace_syscall_info info={0};
+                if (!tracee_request(t,PTRACE_GET_SYSCALL_INFO,(void *)sizeof(info),&info,"seccomp-call")) continue;
+                if (info.op==PTRACE_SYSCALL_INFO_SECCOMP) {
+                    cookie=info.seccomp.ret_data;
+                    if (fd_native_io(t,&info)) continue;
+                } else if (!tracee_request(t,PTRACE_GETEVENTMSG,NULL,&cookie,"seccomp-event")) continue;
+            } else if (!tracee_request(t,PTRACE_GETEVENTMSG,NULL,&cookie,"seccomp-event")) continue;
             if (fd_close_compact(t,cookie)) continue;
             if (cookie&MD_INTERCEPT_CLOSE) cookie=MD_INTERCEPT_FD;
             struct user_pt_regs regs;
@@ -7874,10 +7910,11 @@ static void report_statistics(void) {
         fprintf(stderr,"MD_NOTIFICATION rebounds=%llu readmissionsRetired=%llu\n",
             (unsigned long long)statistics->notification_rebounds,
             (unsigned long long)statistics->notification_readmissions_retired);
-        fprintf(stderr,"MD_DIRECT status=%llu open=%llu fallback=%llu admit=%llu retry=%llu compactClose=%llu\n",
+        fprintf(stderr,"MD_DIRECT status=%llu open=%llu fallback=%llu admit=%llu retry=%llu compactClose=%llu nativeIO=%llu\n",
             (unsigned long long)statistics->direct_status,(unsigned long long)statistics->direct_open,
             (unsigned long long)statistics->direct_fallback,(unsigned long long)statistics->direct_admit,
-            (unsigned long long)statistics->direct_retry,(unsigned long long)statistics->compact_close);
+            (unsigned long long)statistics->direct_retry,(unsigned long long)statistics->compact_close,
+            (unsigned long long)statistics->native_io);
         for (unsigned nr = 0; nr < 512; nr++)
             if (statistics->calls[nr].trace || statistics->calls[nr].notification)
                 fprintf(stderr, "MD_SYSCALL nr=%u trace=%llu notification=%llu\n", nr,

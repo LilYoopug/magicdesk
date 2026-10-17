@@ -18,6 +18,7 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 #include <sys/xattr.h>
 #include <time.h>
@@ -309,17 +310,26 @@ static void contracts(const char *executable) {
 }
 static void filtered_check(void) {
     struct stat st,initial;
+    int fd=open("marker",O_RDONLY); assert(fd>=0 && fd!=191);
+    assert(dup2(fd,191)==191);
     memset(&initial,0xa5,sizeof(initial)); st=initial;
-    assert(syscall(SYS_fstat,1919,&st)==-1 && errno==EACCES);
+    assert(syscall(SYS_fstat,191,&st)==-1 && errno==EACCES);
     assert(!memcmp(&initial,&st,sizeof(st)));
+    char value='x';
+    assert(read(191,&value,1)==-1 && errno==EACCES && value=='x');
+    assert(pread(191,&value,1,0)==-1 && errno==EACCES && value=='x');
+    assert(syscall(SYS_pread64,fd,(void *)1,1,0)==-1 && errno==EFAULT);
+    assert(!close(fd) && !close(191));
     assert(!stat("marker",&st) && st.st_size==7);
 }
 static void filtered_benchmark(void) {
     struct sock_filter instructions[]={
         BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
-        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_fstat,0,3),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_fstat,2,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_read,1,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_pread64,0,3),
         BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[0])),
-        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,1919,0,1),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,191,0,1),
         BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EACCES),
         BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
     };
@@ -410,6 +420,18 @@ int main(int argc,char **argv) {
             fd=open("created",flags,0600); assert(fd>=0); assert(!close(fd));
             assert(!rename("created","renamed")); assert(!unlink("renamed"));
         }
+    } else if (!strcmp(argv[2],"native-stream") || !strcmp(argv[2],"native-vector")) {
+        int writer=open("stream",O_CREAT|O_TRUNC|O_WRONLY,0600); assert(writer>=0);
+        int reader=open("stream",O_RDONLY); assert(reader>=0);
+        char value[7],expected[]="payload";
+        struct iovec input[]={{value,3},{value+3,4}},output[]={{expected,3},{expected+3,4}};
+        int vector=!strcmp(argv[2],"native-vector");
+        for (unsigned i=0;i<count;++i) {
+            assert((vector ? writev(writer,output,2) : write(writer,expected,7))==7);
+            assert((vector ? readv(reader,input,2) : read(reader,value,7))==7);
+            assert(!memcmp(value,expected,7));
+        }
+        assert(!close(reader) && !close(writer) && !unlink("stream"));
     } else if (!strcmp(argv[2],"native")) {
         fd=open("marker",O_RDWR); assert(fd>=0); char value[7];
         for (unsigned i=0;i<count;++i) {

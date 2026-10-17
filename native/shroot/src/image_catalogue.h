@@ -7,7 +7,7 @@ struct md_image_catalogue;
 int md_image_catalogue_open(struct md_inode_store *, const char *, struct md_image_catalogue **);
 void md_image_catalogue_close(struct md_image_catalogue *);
 int md_catalogue_open(struct md_image_catalogue *, struct md_inode_store *, int, const char *, int, mode_t, uint64_t,
-        struct md_open_completion *, int native_plan);
+        struct md_open_completion *, int native_plan,struct md_inode_birth **);
 int md_catalogue_open_image(struct md_image_catalogue *, struct md_inode_store *, int, const char *, int,
         struct md_image_identity *);
 int md_catalogue_open_object(struct md_image_catalogue *, struct md_inode_store *, const char *, int);

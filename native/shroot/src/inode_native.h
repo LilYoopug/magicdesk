@@ -17,6 +17,9 @@ int mdi_native_create(int directory, const char *name, int flags,
         uint32_t uid, uint32_t gid, mode_t mode);
 int mdi_native_create_in(int objects,const char *parent,const char *name,int flags,
         uint32_t uid,uint32_t gid,mode_t mode);
+/* Unpublished ordinary regular file, without a data-open effect. Returns an
+ * owned O_PATH pin; EOPNOTSUPP leaves no name and permits prepare/open fallback. */
+int mdi_native_pin_create(int directory,const char *name,uint32_t uid,uint32_t gid,mode_t mode);
 /* Prepare exceptional metadata under a private, unpublished staging name.
  * The caller publishes by rename only after this succeeds. */
 int mdi_native_prepare(int objects,const char *name,int flags,

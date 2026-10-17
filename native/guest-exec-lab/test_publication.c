@@ -70,11 +70,11 @@ static void pinned_lookup(const char *path) {
     unsigned before=descriptors();
     struct md_open_completion completion;
     for (unsigned i=0;i<64;++i) {
-        assert(md_inode_plan_open(s,-1,"work/file/",O_RDONLY,0,0,&completion,1)==-ENOTDIR);
-        assert(md_inode_plan_open(s,-1,"work/file",O_DIRECTORY,0,0,&completion,1)==-ENOTDIR);
-        assert(md_inode_plan_open(s,-1,"work/missing",O_RDONLY,0,0,&completion,1)==-ENOENT);
+        assert(md_inode_plan_open(s,-1,"work/file/",O_RDONLY,0,0,&completion,1,NULL)==-ENOTDIR);
+        assert(md_inode_plan_open(s,-1,"work/file",O_DIRECTORY,0,0,&completion,1,NULL)==-ENOTDIR);
+        assert(md_inode_plan_open(s,-1,"work/missing",O_RDONLY,0,0,&completion,1,NULL)==-ENOENT);
         s->readonly=1;
-        assert(md_inode_plan_open(s,-1,"work/file",O_WRONLY,0,0,&completion,1)==-EROFS);
+        assert(md_inode_plan_open(s,-1,"work/file",O_WRONLY,0,0,&completion,1,NULL)==-EROFS);
         s->readonly=0;
     }
     assert(descriptors()==before && md_inode_watch_bytes(s,watch)==0);
@@ -123,7 +123,7 @@ static void success(const char *path) {
     struct md_inode_store *s;
     int directory,fd=setup(path,&s,&directory);
     struct md_open_completion plan;
-    int pin=md_inode_plan_open(s,-1,"work/file",O_RDONLY,0,0,&plan,1);
+    int pin=md_inode_plan_open(s,-1,"work/file",O_RDONLY,0,0,&plan,1,NULL);
     assert(pin>=0 && plan.kind==MD_OPEN_PLAN && plan.native_leaf);
     struct stat proven;
     assert(!md_inode_fstat_origin(s,pin,&proven,1) && proven.st_uid==41 && proven.st_gid==42);

@@ -71,7 +71,8 @@ static int walk(struct md_inode_store *s,int dirfd,const char *path,
     if (*path == '/' && (resolve & RESOLVE_BENEATH)) return -EXDEV;
     size_t length = strnlen(path, PATH_MAX);
     if (length == PATH_MAX) return -ENAMETOOLONG;
-    char todo[PATH_MAX]; memcpy(todo, path, length+1);
+    char todo[PATH_MAX];
+    const char *cursor=path;
     struct mdi_node current;
     int r = (path[0] == '/' && !(resolve & RESOLVE_IN_ROOT)) || dirfd == MD_INODE_ROOT
         ? mdi_node(s, mdi_root(s), &current) : mdi_fd(s, dirfd, &current);
@@ -86,20 +87,20 @@ static int walk(struct md_inode_store *s,int dirfd,const char *path,
     unsigned links = 0;
     memset(out, 0, sizeof(*out));
     for (;;) {
-        char *start = todo; while (*start == '/') ++start;
+        const char *start = cursor; while (*start == '/') ++start;
         if (!*start) {
             out->node = out->parent = current;
             out->exists = out->special = 1;
             out->trailing = 1;
             return attributes ? mdi_stat(s,&current,attributes) : 0;
         }
-        char *end = start; while (*end && *end != '/') ++end;
+        const char *end = start; while (*end && *end != '/') ++end;
         size_t size = (size_t)(end-start);
         if (size > NAME_MAX) return -ENAMETOOLONG;
         char name[NAME_MAX+1]; memcpy(name, start, size); name[size] = 0;
         int slash = *end == '/';
-        memmove(todo, end, strlen(end)+1);
-        char *rest = todo; while (*rest == '/') ++rest;
+        cursor=end;
+        const char *rest = cursor; while (*rest == '/') ++rest;
         int last = !*rest;
         struct mdi_node next;
         int special = !strcmp(name, ".") || !strcmp(name, "..");
@@ -109,7 +110,7 @@ static int walk(struct md_inode_store *s,int dirfd,const char *path,
             if (!r && (resolve&RESOLVE_BENEATH)) r=-EXDEV;
             next=current;
             if (!r && last && attributes) r=mdi_stat(s,&next,attributes);
-        } else r=mdi_path_step(s,&current,name,todo,resolve,&next,last ? attributes : NULL,last ? pin : NULL);
+        } else r=mdi_path_step(s,&current,name,cursor,resolve,&next,last ? attributes : NULL,last ? pin : NULL);
         if (r == -ENOENT && last && missing && !special) {
             out->parent = current; strcpy(out->name, name);
             out->trailing = slash;
@@ -123,11 +124,12 @@ static int walk(struct md_inode_store *s,int dirfd,const char *path,
             char target[PATH_MAX];
             ssize_t n = readlinkat(s->objects, next.backing, target, sizeof(target));
             if (n < 0) return -errno;
-            size_t rest_length = strlen(todo);
+            size_t rest_length = strlen(cursor);
             if (!n) return -ENOENT;
             if ((size_t)n + rest_length >= sizeof(target)) return -ENAMETOOLONG;
-            memcpy(target+n, todo, rest_length+1);
+            memcpy(target+n, cursor, rest_length+1);
             strcpy(todo, target);
+            cursor=todo;
             if (target[0] == '/') {
                 if (resolve & RESOLVE_BENEATH) return -EXDEV;
                 if (resolve & RESOLVE_IN_ROOT) current = boundary;

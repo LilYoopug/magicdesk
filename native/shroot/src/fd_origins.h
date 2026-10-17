@@ -108,6 +108,10 @@ int md_fd_origins_has_loans(struct md_fd_origins *);
 /* Supervisor task ownership, queried under a running table turn. A sole
  * sleeping owner cannot create another CLONE_FILES holder or replace a slot. */
 int md_fd_origins_exclusive(const struct md_fd_order *);
+/* Positive proof of ordinary regular-file IO under a RUNNING turn. Unknown,
+ * provisional and uncertain slots, including typed objects with path origins,
+ * are not native authority. Does not capture an application data OFD. */
+int md_fd_origins_native_regular(const struct md_fd_order *,int number);
 /* No entry yields NULL/-1; ambiguous terminal mutations fail with ESTALE,
  * rather than creating another potentially orphaned infrastructure slot. */
 int md_fd_origins_channel(struct md_fd_origins *, int *number, struct md_fd_channel **);

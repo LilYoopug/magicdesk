@@ -46,7 +46,8 @@ struct mdi_stat_location {
     ino_t inode;
     int root;
 };
-/* Physical directory identity only, valid within one locked operation. Logical
+/* Physical directory identity only, valid under the store gate until write
+ * admission. Native leaf changes do not replace directory backings. Logical
  * permissions are taken from the current node and are never memoized here. */
 struct mdi_directory_check {
     dev_t device;
@@ -77,6 +78,8 @@ struct md_inode_store {
     struct mdi_read_cache *read_cache;
     int cache_checked;
     unsigned read_depth;
+    int operation_window;
+    sqlite3_int64 locked_version;
     unsigned directory_check_count;
     struct mdi_directory_check directory_checks[4];
     sqlite3_stmt *queries[MDI_QUERY_COUNT];

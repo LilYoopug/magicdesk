@@ -95,6 +95,11 @@ int mdi_leaf_prepare_birth(struct md_inode_store *s,const struct mdi_node *paren
     birth->synchronous=!!(flags&O_DSYNC);
     strcpy(birth->parent,parent->id); strcpy(birth->backing,parent->backing); strcpy(birth->name,name);
     r=mdi_random_id(birth->stage);
+    if (!r && !birth->catalogue && !(parent->acl_mask&MD_ACL_DEFAULT)) {
+        int pin=mdi_native_pin_create(s->objects,birth->stage,uid,gid,mode);
+        if (pin>=0) { *out=birth; return pin; }
+        if (pin!=-EOPNOTSUPP) { free(birth); return pin; }
+    }
     flags&=~(O_CREAT|O_EXCL|O_TRUNC|O_NOFOLLOW|O_NOCTTY);
     int fd=r ? r : prepare_backing(s,parent,birth->stage,flags,uid,gid,mode);
     if (fd<0) { free(birth); return fd; }
@@ -143,6 +148,9 @@ static int catalogue_birth(struct md_inode_birth **owner) {
     if (committed) { free(birth); *owner=NULL; }
     return r;
 }
+struct md_inode_store *md_inode_birth_store(const struct md_inode_birth *birth) {
+    return birth ? birth->store : NULL;
+}
 int md_inode_birth_commit(struct md_inode_birth **owner) {
     if (!owner || !*owner) return -EINVAL;
     struct md_inode_birth *birth=*owner;
@@ -153,7 +161,11 @@ int md_inode_birth_commit(struct md_inode_birth **owner) {
     r=mdi_readonly(s) ? -EROFS : mdi_node(s,birth->parent,&parent);
     if (!r && (!parent.attached || parent.source || strcmp(parent.backing,birth->backing))) r=-ENOENT;
     if (!r) {
-        int found=mdi_lookup(s,&parent,birth->name,&entry,NULL,NULL);
+        /* Catalogue names need explicit admission. For a native destination,
+         * RENAME_NOREPLACE itself checks physical occupancy atomically; another
+         * path stat adds no identity or publication guarantee. */
+        int found=birth->catalogue ? mdi_lookup(s,&parent,birth->name,&entry,NULL,NULL)
+            : mdi_catalogue_lookup(s,parent.id,birth->name,&entry);
         r=found==-ENOENT ? 0 : found ? found : -EEXIST;
     }
     if (!r) r=mdi_overlay_native_name(s,&parent,birth->name);

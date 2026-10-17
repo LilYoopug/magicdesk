@@ -15,7 +15,7 @@ static inline int md_entry_open(int number) {
 }
 static inline int md_entry_native_open(int number,const uint64_t args[6]) {
     /* open_how is captured by the worker, never dereferenced in the caller. */
-    return number==SYS_openat2 || (number==SYS_openat && md_open_native_plan(args[2]&~O_EXCL));
+    return number==SYS_openat2 || (number==SYS_openat && md_open_native_plan(args[2],1));
 }
 
 static inline int md_entry_native_fd(int number,const uint64_t args[6]) {

@@ -129,57 +129,94 @@ int mdi_write(struct md_inode_store *s) {
     }
     return r;
 }
+static void begin_read(struct md_inode_store *s) {
+    s->recording=0; s->event_sequence=0; s->read_depth=1;
+    s->operation_changes=sqlite3_total_changes64(s->db);
+}
 int mdi_begin(struct md_inode_store *s, int write) {
     if (write && (s->readonly || s->mount_readonly)) return -EROFS;
     if (s->read_depth) {
         if (write) return -EDEADLK;
         ++s->read_depth; return 0;
     }
-    int r = store_lock(s);
+    if (s->write_transaction) return -EDEADLK;
+    /* A retained gate already validated this catalogue. Start a fresh operation
+     * without repeating admission; promotion still owns its transaction. */
+    if (s->operation_window && !write && s->cache_checked==1
+            && (!s->lifetime->temporary || (s->super_checked && s->super_version==s->locked_version))
+            && !mdi_publication_pending(s)) {
+        begin_read(s); return 0;
+    }
+    int r = s->operation_window ? 0 : store_lock(s);
     if (r) return r;
-    s->directory_check_count=0;
+    if (!s->operation_window || write) s->directory_check_count=0;
     if (mdi_publication_pending(s)) {
         r=mdi_publication_recover(s);
-        if (r) return store_unlock(s,r);
+        if (r) return s->operation_window ? r : store_unlock(s,r);
     }
     s->recording = 0;
     s->event_sequence=0;
     s->write_transaction=!!write;
-    s->cache_checked=0;
+    if (!s->operation_window) s->cache_checked=0;
     if (write) r=watch_writes(s);
     /* The store lock serializes all catalogue owners. Read-only scopes need
      * no SQLite transaction; promotion admits one before the first write. */
     if (!r && write) r=transaction(s,MDI_BEGIN_WRITE);
     if (!r && write && s->statistics) ++s->statistics->write_admissions;
     if (!r) {
-        sqlite3_stmt *query=NULL;
-        r=mdi_query_acquire(s,MDI_DATA_VERSION,&query);
-        if (!r) {
-            int rc=mdi_step(s,query);
-            if (rc!=SQLITE_ROW) r=mdi_sql_failure(rc);
+        if (!s->operation_window) {
+            sqlite3_stmt *query=NULL;
+            r=mdi_query_acquire(s,MDI_DATA_VERSION,&query);
+            if (!r) {
+                int rc=mdi_step(s,query);
+                if (rc!=SQLITE_ROW) r=mdi_sql_failure(rc);
+            }
+            if (!r) s->locked_version=sqlite3_column_int64(query,0);
+            r=mdi_query_release(query,r);
         }
-        sqlite3_int64 version=!r ? sqlite3_column_int64(query,0) : 0;
-        if (!r) mdi_cache_snapshot(s,version);
-        r=mdi_query_release(query,r);
-        if (!r) r=mdi_super_refresh(s,version);
+        /* The gate, not an individual read call, validates cached catalogue
+         * rows. Writes and rollback still invalidate through the row hooks. */
+        if (!r && (write || s->cache_checked!=1)) mdi_cache_snapshot(s,s->locked_version);
+        if (!r) r=mdi_super_refresh(s,s->locked_version);
         if (!r && write && s->super_readonly) r=-EROFS;
         if (r) { if (!sqlite3_get_autocommit(s->db)) transaction(s,MDI_ROLLBACK); }
         else {
-            if (!write) s->read_depth=1;
-            s->operation_changes=sqlite3_total_changes64(s->db);
+            if (!write) begin_read(s);
+            else s->operation_changes=sqlite3_total_changes64(s->db);
         }
     }
     if (r) {
         s->read_depth=s->write_transaction=s->cache_checked=0;
-        return store_unlock(s,r);
+        return s->operation_window ? r : store_unlock(s,r);
     }
     return 0;
 }
 int md_inode_read_scope_begin(void *store) { return mdi_begin(store,0); }
 int md_inode_read_scope_end(void *store) { return mdi_finish(store,0); }
+int md_inode_operation_window_begin(void *store) {
+    struct md_inode_store *s=store;
+    if (s->locked || s->operation_window) return -EDEADLK;
+    int r=mdi_begin(s,0);
+    if (!r) { s->read_depth=0; s->operation_window=1; }
+    return r;
+}
+int md_inode_operation_window_end(void *store) {
+    struct md_inode_store *s=store;
+    if (!s->operation_window || !s->locked) return -EINVAL;
+    if (s->read_depth || s->write_transaction || !sqlite3_get_autocommit(s->db)) return -EBUSY;
+    s->operation_window=0; s->cache_checked=0;
+    return store_unlock(s,0);
+}
 static int finish(struct md_inode_store *s, int result, int *committed) {
-    if (s->read_depth && --s->read_depth) return result;
-    s->cache_checked=0;
+    if (s->read_depth) {
+        if (--s->read_depth) return result;
+        if (s->operation_window && !s->event_sequence && !s->sync_requested
+                && sqlite3_get_autocommit(s->db)) {
+            if (!result && committed) *committed=1;
+            return result;
+        }
+    }
+    if (!s->operation_window) s->cache_checked=0;
     if (!result && s->write_transaction && s->overlay) result=mdi_overlay_flush(s);
     if (!result && !sqlite3_get_autocommit(s->db)) result = transaction(s, MDI_COMMIT);
     if (!result && committed) *committed=1;
@@ -188,7 +225,7 @@ static int finish(struct md_inode_store *s, int result, int *committed) {
     if (!result && s->sync_requested) result=mdi_checkpoint(s);
     s->sync_requested=0;
     s->write_transaction=0;
-    return store_unlock(s, result);
+    return s->operation_window ? result : store_unlock(s, result);
 }
 int mdi_finish(struct md_inode_store *s,int result) { return finish(s,result,NULL); }
 #ifndef MD_INODE_TESTING

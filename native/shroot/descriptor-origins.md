@@ -15,6 +15,13 @@ ownership. A fork without CLONE_FILES copies annotations; shared owners see one
 table. Registry and in-flight request pins keep it alive without counting as
 task owners. An absent entry means unknown provenance, not EBADF.
 
+`md_fd_origins_native_regular` is a positive, allocation-free IO proof under a
+running table turn. It requires the actual ordinary anchor object, not a typed
+object that merely exposes a filesystem origin. Loan custody and uncertain slots
+decline. The supervisor additionally requires sole task ownership before using
+the proof to resume an untouched kernel call; shared-table reuse cannot borrow
+that shortcut. It never captures or retains the application's data OFD.
+
 The owner is small; buckets and entries are allocated only for explicit
 annotations. A prepared update reserves memory and retains its origin before a
 kernel mutation. Publication after success needs no allocation; cancellation

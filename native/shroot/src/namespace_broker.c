@@ -478,7 +478,7 @@ static int prepare_call(struct md_filesystem *fs, struct operation *op, size_t c
         if (process_vm_readv(q->pid,&local,1,&remote,1,0)!=sizeof(how)) return 0;
         int error=md_open_how_validate(&how);
         if (error) return error;
-        if (!md_open_native_plan(how.flags&~O_EXCL)) return 0;
+        if (!md_open_native_plan(how.flags,1)) return 0;
         nr=SYS_openat; arguments[2]=how.flags; arguments[3]=how.mode;
     }
     int decoded=md_fs_syscall_decode(&op->syscall,&op->request,nr,arguments,capacity);
@@ -935,8 +935,8 @@ static int perform(struct md_namespace_broker *b, struct operation *op, int prep
         if (error) return error;
     }
     if (window) {
-        struct md_inode_store *scope=prepared>0 ? md_fs_context_read_scope(&op->context,&op->request,op->native_plan) : NULL;
-        int error=md_execution_window_admit(window,scope,md_inode_read_scope_begin,md_inode_read_scope_end,
+        struct md_inode_store *scope=prepared>0 ? md_fs_context_operation_window(&op->context,&op->request,op->native_plan) : NULL;
+        int error=md_execution_window_admit(window,scope,md_inode_operation_window_begin,md_inode_operation_window_end,
             cooperative_clock(),EXECUTION_BURST_CALLS,EXECUTION_BURST_NS);
         if (error) return error;
     }
@@ -1035,10 +1035,12 @@ static int native_progress(struct md_namespace_broker *b,struct md_execution_win
                 md_fd_mutation_discard(&op->mutation);
             } else {
                 if (op->birth && value>=0) {
-                    /* A different channel may have opened a read window after
-                     * this effect was offered. Publication owns a write scope. */
-                    if (window) {
-                        error=md_execution_window_end(window);
+                    /* The birth owns its store. Reuse only that exact gate,
+                     * within the same budget as ordinary operation admission. */
+                    if (window && window->owner) {
+                        error=md_execution_window_admit(window,md_inode_birth_store(op->birth),
+                            md_inode_operation_window_begin,md_inode_operation_window_end,
+                            cooperative_clock(),EXECUTION_BURST_CALLS,EXECUTION_BURST_NS);
                         if (error) return error;
                     }
                     error=md_fs_anchor_policy(op->output_origin)&MD_MOUNT_READONLY ? -EROFS

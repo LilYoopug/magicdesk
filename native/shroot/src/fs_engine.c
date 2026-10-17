@@ -203,23 +203,33 @@ void md_fs_context_end(struct md_fs_context *context) {
     md_task_snapshot_release(&context->task);
     *context=(struct md_fs_context){0};
 }
-struct md_inode_store *md_fs_context_read_scope(const struct md_fs_context *c,const struct md_fs_request *q,int native_plan) {
-    if (q->operation==MD_FS_OPEN && (q->flags&O_CREAT)) return NULL;
-    int xattr=(q->operation==MD_FS_XATTR || q->operation==MD_FS_FXATTR)
-        && (q->mode==MD_FS_XATTR_GET || q->mode==MD_FS_XATTR_LIST);
-    if (!c->filesystem || (q->operation!=MD_FS_STAT && q->operation!=MD_FS_FSTAT && q->operation!=MD_FS_STATFS
-            && q->operation!=MD_FS_ACCESS && q->operation!=MD_FS_READLINK && !xattr
-            && !(q->operation==MD_FS_OPEN && (md_open_readonly_plan(q->flags)
-                || (native_plan && md_open_native_plan(q->flags)))))
-            || q->object[0] || q->control.ops) return NULL;
+struct md_inode_store *md_fs_context_operation_window(const struct md_fs_context *c,const struct md_fs_request *q,int native_plan) {
+    if (!c->filesystem || q->control.ops) return NULL;
+    unsigned operands=1;
+    switch (q->operation) {
+    case MD_FS_OPEN:
+        if (!md_open_readonly_plan(q->flags) && !(native_plan && md_open_native_plan(q->flags,1))) return NULL;
+        break;
+    case MD_FS_LINK: case MD_FS_RENAME: operands=2; break;
+    case MD_FS_CREATE: case MD_FS_MKDIR: case MD_FS_MKNOD: case MD_FS_SYMLINK:
+    case MD_FS_UNLINK: case MD_FS_CHMOD: case MD_FS_CHOWN: case MD_FS_UTIMENS:
+    case MD_FS_STAT: case MD_FS_FSTAT: case MD_FS_STATFS: case MD_FS_ACCESS:
+    case MD_FS_READLINK: case MD_FS_XATTR: case MD_FS_FXATTR: break;
+    default: return NULL;
+    }
     const struct md_mount_namespace *mounts=c->authenticated ? c->task.mounts : c->filesystem->mounts;
-    if (!q->path[0] || q->path[0][0]!='/' || (q->resolve&RESOLVE_IN_ROOT)) {
-        const struct md_fs_anchor *origin=q->origin[0];
+    for (unsigned i=0;i<operands;++i) {
+        if (q->object[i]) return NULL;
+        if (q->path[i] && q->path[i][0]=='/' && !(q->resolve&RESOLVE_IN_ROOT)) {
+            if (q->origin[i]) return NULL;
+            continue;
+        }
+        const struct md_fs_anchor *origin=q->origin[i];
         /* Capture under the cwd/file-table owner precedes this admission.
          * A foreign or detached anchor may enter another provider/store. */
         if (!origin || !mounts || origin->view!=mounts || origin->mount!=&mounts->base
-                || q->directory[0]!=md_fs_anchor_fd(origin)) return NULL;
-    } else if (q->origin[0]) return NULL;
+                || q->directory[i]!=md_fs_anchor_fd(origin)) return NULL;
+    }
     /* Nested stores/overlay/providers retain their own locking contracts. A
      * later provider may opt in only after defining cross-store release order. */
     if (md_mount_namespace_attached(mounts) || md_mount_namespace_managed_paths(mounts)
@@ -536,17 +546,8 @@ static void inode_execute(struct md_filesystem *fs,
     case MD_FS_CREATE: r = md_inode_create(s, first, a, q->mode); goto opened;
     case MD_FS_OPEN:
         r=md_catalogue_open(images,s,first,a,(int)q->flags,q->mode,q->resolve,
-            &out->open_completion,output && output->origin && output->native_open_plan);
-        if (r==-EXDEV && (q->flags&O_CREAT) && output && output->native_open_plan && output->birth) {
-            r=md_inode_prepare_birth(s,first,a,(int)q->flags,q->mode,q->resolve,output->birth);
-            if (r==-EOPNOTSUPP) r=-EXDEV;
-            if (r>=0) {
-                struct stat born;
-                if (fstat(r,&born)) { int error=-errno; close(r); r=error; }
-                else out->open_completion=(struct md_open_completion){.kind=MD_OPEN_PLAN,
-                    .backing_device=born.st_dev,.backing_inode=born.st_ino,.mode=S_IFREG,.native_leaf=1};
-            }
-        }
+            &out->open_completion,output && output->origin && output->native_open_plan,
+            output && output->origin && output->native_open_plan ? output->birth : NULL);
         goto opened;
     case MD_FS_MKDIR: r = md_inode_mkdir(s, first, a, q->mode); break;
     case MD_FS_MKNOD:

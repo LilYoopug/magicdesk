@@ -146,6 +146,50 @@ static void expect(struct md_fd_origins *table, int fd, struct md_fs_anchor *exp
     struct md_fs_anchor *origin=md_fd_origins_get(table,fd,&actual);
     assert(origin==expected && actual==flags); md_fs_anchor_release(origin);
 }
+struct borrowed_file { struct md_fd_object object; struct md_fs_anchor *origin; };
+static struct md_fs_anchor *borrowed_file_origin(struct md_fd_object *object) {
+    return ((struct borrowed_file *)object)->origin;
+}
+static void borrowed_file_destroy(struct md_fd_object *object) { (void)object; }
+static void native_io_proofs(struct md_mount_namespace *view,struct md_fs_anchor *directory) {
+    struct md_fs_anchor *file=capture(view,memfd_create("native-io",MFD_CLOEXEC));
+    struct md_fd_origins *files=md_fd_origins_new(); assert(files);
+    struct md_fd_order turn={0};
+    put(files,8,file,0); put(files,9,directory,0);
+    assert(!md_fd_origins_native_regular(&turn,8));
+    assert(md_fd_order_begin(files,&turn,NULL)==1);
+    assert(!md_fd_origins_native_regular(&turn,8));
+    assert(!md_fd_order_start(&turn));
+    allocation_budget=0;
+    assert(md_fd_origins_native_regular(&turn,8));
+    assert(!md_fd_origins_native_regular(&turn,9));
+    assert(!md_fd_origins_native_regular(&turn,10));
+    assert(!md_fd_origins_native_regular(&turn,-1));
+    allocation_budget=-1;
+    static const struct md_fd_object_type type={.destroy=borrowed_file_destroy,.origin=borrowed_file_origin};
+    struct borrowed_file typed={.origin=file}; md_fd_object_init(&typed.object,&type);
+    struct md_fd_origin_update update;
+    assert(!md_fd_origins_prepare_object(files,&typed.object,0,&update));
+    md_fd_origins_finish(&update,10);
+    assert(!md_fd_origins_native_regular(&turn,10));
+    struct md_fd_loan *loan=md_fd_loan_new(files); assert(loan);
+    assert(!md_fd_origins_prepare(files,file,0,&update));
+    assert(!md_fd_origins_prepare_custody(&update,loan,&turn));
+    md_fd_origins_finish(&update,11);
+    assert(!md_fd_origins_native_regular(&turn,11));
+    assert(!md_fd_origins_abandon_range(files,8,8));
+    assert(!md_fd_origins_native_regular(&turn,8));
+    put(files,8,file,FD_CLOEXEC); assert(md_fd_origins_native_regular(&turn,8));
+    struct md_fd_origins *shared=md_fd_origins_fork(files,1); assert(shared==files);
+    assert(!md_fd_origins_exclusive(&turn)); md_fd_origins_release(shared);
+    assert(md_fd_origins_exclusive(&turn));
+    assert(!md_fd_origins_close_range(files,8,8,0));
+    assert(!md_fd_origins_native_regular(&turn,8));
+    assert(!md_fd_order_complete(&turn));
+    md_fd_loan_end(loan); md_fd_loan_release(loan);
+    md_fd_origins_release(files); md_fd_object_release(&typed.object); md_fs_anchor_release(file);
+    puts("PASS native IO proof: regular origin, typed/unknown/directory rejection, custody, uncertainty, replacement and shared tables");
+}
 static void bounded_retirement(struct md_fs_anchor *anchor) {
     const unsigned ranges[][2]={{10,10},{60,63},{120,180},{120,181},{INT_MAX,INT_MAX},{UINT_MAX,UINT_MAX}};
     for (unsigned kind=0;kind<3;++kind) for (unsigned r=0;r<sizeof(ranges)/sizeof(*ranges);++r) {
@@ -1458,6 +1502,7 @@ void test_fd_origins(void) {
     assert(first && second);
     struct md_fs_anchor *a=capture(first,open("/",O_PATH|O_CLOEXEC));
     struct md_fs_anchor *b=capture(second,open("/",O_PATH|O_CLOEXEC));
+    native_io_proofs(first,a);
     provisional_custody(a);
     bounded_retirement(a);
     received_origins(a,b); vector_preparation(a,b,0); vector_preparation(a,b,1);

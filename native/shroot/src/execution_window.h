@@ -5,7 +5,8 @@
 
 /* Executor-owned bounded reuse, independent of transport and subsystem. The
  * provider retains authority; this window caches neither results nor policy.
- * End before parking, changing provider, delegating, or admitting a mutation. */
+ * End before parking, changing provider, or delegating. The provider's contract
+ * decides whether independent mutations can complete inside the window. */
 struct md_execution_window {
     void *owner;
     int (*release)(void *);

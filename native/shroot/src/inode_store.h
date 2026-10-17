@@ -19,6 +19,11 @@ struct md_inode_store;
  * and observes current native attributes. Never retain across a blocking wait. */
 int md_inode_read_scope_begin(void *store);
 int md_inode_read_scope_end(void *store);
+/* Bounded worker-owned store gate, not a transaction or a nested read scope.
+ * Every operation completes its own writes/events before returning. Release
+ * before parking, delegation or entering another store; never nest windows. */
+int md_inode_operation_window_begin(void *store);
+int md_inode_operation_window_end(void *store);
 /* Stable format family and independently evolving metadata schema revision. */
 int md_inode_store_format(void);
 int md_inode_store_revision(void);
@@ -86,17 +91,18 @@ int md_inode_open(struct md_inode_store *, int dirfd, const char *path, int flag
 int md_inode_open_resolved(struct md_inode_store *, int, const char *, int, mode_t, uint64_t);
 int md_inode_prepare_open(struct md_inode_store *, int, const char *, int, mode_t, uint64_t,
         struct md_open_completion *);
+struct md_inode_birth;
+/* Optional birth custody lets a native plan prepare a missing leaf in the same
+ * resolved scope as an existing open. NULL retains effect-free decline. */
 int md_inode_plan_open(struct md_inode_store *, int, const char *, int, mode_t, uint64_t,
-        struct md_open_completion *, int native_plan);
+        struct md_open_completion *, int native_plan,struct md_inode_birth **);
 /* Unpublished regular-file birth. The worker/store outlives this owner. The
  * returned O_PATH pin belongs to the caller; no guest name exists until commit.
  * Commit consumes the owner on success. Failure retains it for discard after
  * the caller closes any native FD it acquired. No SQLite snapshot spans the
  * caller's effect, and no retry of a completed publication is permitted. */
-struct md_inode_birth;
-int md_inode_prepare_birth(struct md_inode_store *,int,const char *,int,mode_t,uint64_t,
-        struct md_inode_birth **);
 int md_inode_birth_commit(struct md_inode_birth **);
+struct md_inode_store *md_inode_birth_store(const struct md_inode_birth *);
 int md_inode_birth_discard(struct md_inode_birth **);
 /* Terminal worker shutdown only: release memory after the store has closed.
  * The existing maintenance owner reclaims the unpublished root object. */

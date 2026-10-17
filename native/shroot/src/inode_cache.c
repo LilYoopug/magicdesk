@@ -15,6 +15,7 @@ struct mdi_read_cache {
     sqlite3_int64 version;
     uint64_t clock;
     int dirty;
+    unsigned recent[MDI_QUERY_COUNT];
     struct mdi_cache_entry entries[CACHE_SLOTS];
 };
 void mdi_cache_invalidate(struct md_inode_store *s) {
@@ -106,16 +107,31 @@ static uint64_t key_hash(const struct md_inode_store *s, const struct mdi_cache_
     if (key->name) hash=hash_bytes(hash,key->name,strlen(key->name));
     return hash^(hash>>32);
 }
-static int matches(const struct mdi_cache_entry *entry, const struct md_inode_store *s,
-        const struct mdi_cache_key *key, uint64_t hash) {
-    return entry->valid && entry->hash==hash && entry->query==key->query
+static int matches_key(const struct mdi_cache_entry *entry, const struct md_inode_store *s,
+        const struct mdi_cache_key *key) {
+    return entry->valid && entry->query==key->query
         && entry->device==key->device && entry->inode==key->inode
         && !strcmp(entry->scope,s->lifetime->scope)
         && !strcmp(entry->id,key->id ? key->id : "")
         && !strcmp(entry->name,key->name ? key->name : "");
 }
+static int matches(const struct mdi_cache_entry *entry,const struct md_inode_store *s,
+        const struct mdi_cache_key *key,uint64_t hash) {
+    return entry->hash==hash && matches_key(entry,s,key);
+}
 static struct mdi_cache_entry *get(struct md_inode_store *s, const struct mdi_cache_key *key) {
     if (!s->locked || s->cache_checked!=1) return NULL;
+    /* A hot exact key avoids hashing/scanning, not validation. Row hooks,
+     * rollback and foreign generations invalidate the same cache entries. */
+    unsigned recent=s->read_cache->recent[key->query];
+    if (recent) {
+        struct mdi_cache_entry *entry=&s->read_cache->entries[recent-1];
+        if (matches_key(entry,s,key)) {
+            if (s->statistics) ++s->statistics->metadata_cache_hits;
+            entry->used=++s->read_cache->clock;
+            return entry;
+        }
+    }
     uint64_t hash=key_hash(s,key);
     struct mdi_cache_entry *set=&s->read_cache->entries[(hash%CACHE_SETS)*CACHE_WAYS];
     for (unsigned i=0;i<CACHE_WAYS;++i) {
@@ -123,6 +139,7 @@ static struct mdi_cache_entry *get(struct md_inode_store *s, const struct mdi_ca
         if (!matches(entry,s,key,hash)) continue;
         if (s->statistics) ++s->statistics->metadata_cache_hits;
         entry->used=++s->read_cache->clock;
+        s->read_cache->recent[key->query]=(unsigned)(entry-s->read_cache->entries)+1;
         return entry;
     }
     if (s->statistics) ++s->statistics->metadata_cache_misses;
@@ -142,6 +159,7 @@ static struct mdi_cache_entry *put(struct md_inode_store *s, const struct mdi_ca
     strcpy(entry->scope,s->lifetime->scope);
     if (key->id) strcpy(entry->id,key->id);
     if (key->name) strcpy(entry->name,key->name);
+    s->read_cache->recent[key->query]=(unsigned)(entry-s->read_cache->entries)+1;
     return entry;
 }
 int mdi_cache_get(struct md_inode_store *s, const struct mdi_cache_key *key,

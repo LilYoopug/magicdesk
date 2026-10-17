@@ -18,9 +18,26 @@ int mdi_native_private_attribute(const char *name) { return !strncmp(name,"user.
 int mdi_native_eligible(uint32_t uid,uint32_t gid,mode_t mode) {
     return !uid && !gid && !(mode&~0777) && (mode&0600)==0600;
 }
+static int valid_name(const char *name) {
+    return name && *name && strcmp(name,".") && strcmp(name,"..") && !strchr(name,'/');
+}
+int mdi_native_pin_create(int directory,const char *name,uint32_t uid,uint32_t gid,mode_t mode) {
+    if (!mdi_native_eligible(uid,gid,mode)) return -EOPNOTSUPP;
+    if (!valid_name(name)) return -EINVAL;
+    if (mknodat(directory,name,S_IFREG|mode,0)) {
+        int error=errno;
+        return error==EPERM || error==EACCES || error==ENOSYS || error==EOPNOTSUPP
+            ? -EOPNOTSUPP : -error;
+    }
+    int pin=openat(directory,name,O_PATH|O_CLOEXEC|O_NOFOLLOW);
+    if (pin>=0) return pin;
+    int error=errno;
+    if (unlinkat(directory,name,0)) return -errno;
+    return -error;
+}
 int mdi_native_create_in(int directory,const char *parent,const char *name,int flags,uint32_t uid,uint32_t gid,mode_t mode) {
     if (!mdi_native_eligible(uid,gid,mode)) return -EOPNOTSUPP;
-    if (!name || !*name || !strcmp(name,".") || !strcmp(name,"..") || strchr(name,'/')) return -EINVAL;
+    if (!valid_name(name)) return -EINVAL;
     if (flags&~(O_ACCMODE|O_CLOEXEC|O_NONBLOCK|O_APPEND|O_SYNC|O_DSYNC|O_DIRECT|O_NOATIME|O_LARGEFILE)
             || (flags&O_ACCMODE)==O_ACCMODE) return -EINVAL;
     char path[NAME_MAX+34];

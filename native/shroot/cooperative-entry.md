@@ -45,7 +45,7 @@ threads run. The implementation routes offered calls as follows:
 | --- | --- |
 | Caller | Native IO, time/futex, unknown calls and original-stack operations such as clone, exec and signal return retain their ordinary syscall site. No channel registration or synchronization. Dynamic FD selectors and kernel seccomp still apply. |
 | Worker | Stat/statx/statfs, directory reads, readlink, mkdir/unlink/rename/link/symlink, access/ownership/mode/timestamp operations and path/link/FD xattrs use the existing filesystem dispatcher and checked task-memory copying. |
-| Value | Scalar UID/GID reads use current registry credentials and the same user-namespace translation as the ordinary supervisor path. They neither retain a filesystem read window nor cache caller credentials. |
+| Value | Scalar UID/GID reads use current registry credentials and the same user-namespace translation as the ordinary supervisor path. They neither retain a filesystem operation window nor cache caller credentials. |
 | FD | Existing regular-file/directory `openat` and `openat2`, including O_PATH and writable/append/truncate flags, can use a checked native plan. Known ordinary-file close, dup/dup3, lseek and supported fcntl commands share that protocol and the existing file-table owner. Other open/fsopen calls retain their exact kernel publication carrier. |
 | Task | Other FD producers, filesystem/control calls, networking, credential mutations and pointer-bearing queries, UTS, namespaces and SysV IPC enter the existing kernel-admitted dispatcher and completion owners in the original guest thread. |
 
@@ -186,7 +186,15 @@ the guest kernel open owns those effects, including `EMFILE` before truncation.
 Internal COW copying keeps its existing IO and publication contract. Nonexclusive
 `O_CREAT` may use a plan when the file already exists. Missing regular files in
 native-leaf eligible or host-permission catalogue directories use an explicit
-unpublished birth owner:
+unpublished birth owner.
+
+Existing-open resolution and optional birth preparation share one namespace
+walk and store admission. A missing native leaf does not restart resolution in
+a separate create call. Publication still revalidates catalogue occupancy; for
+native destinations `RENAME_NOREPLACE` checks physical occupancy atomically,
+without an additional pathname stat. Physical absence is not cached across
+operations.
+The owned sequence is:
 
 1. Prepare a hidden backing and O_PATH pin with the live guest identity, umask
    and parent policy. No name or CREATE event is visible, and no database
@@ -197,6 +205,14 @@ unpublished birth owner:
 3. Revalidate the parent, mount/storage write policy and destination, then
    publish with `RENAME_NOREPLACE`. Only this commit makes the FD returnable.
    The watch owner translates the hidden move to CREATE/OPEN exactly once.
+
+Ordinary implicit-metadata births use `mknodat(S_IFREG)` followed by an O_PATH
+pin. Preparation opens no data description and needs only one spare worker FD;
+the guest still owns the real data open. A denied/unsupported regular-file
+mknodat leaves no name and uses the existing prepare/open path. Exceptional
+ownership, ACLs and catalogue directories retain that path. Failure to capture
+the pin removes the hidden name before returning the original error; a cleanup
+failure is reported without retry. Conflicts never remove another creator's file.
 
 If publication fails, the existing task-action/FD-loan owner closes the exact
 provisional FD under its original table turn before the error is returned.
@@ -214,9 +230,10 @@ never acquires a catalogue identity, so queued preparation events cannot become
 application OPEN/CLOSE events. Its final move publishes CREATE/OPEN in order.
 The commit receipt transfers ownership at SQLite commit, before watch-marker,
 checkpoint or unlock retirement; a later error cannot authorize discard/replay.
-Completion ends any read window opened by another channel since preparation,
-before admitting the publication transaction. Existing-file retirement does
-not acquire that write boundary.
+Completion joins only the birth owner's exact operation gate, under the normal
+count/time budget. A window held for another store ends before publication.
+The publication transaction still commits independently before the guest's
+successful return. Existing-file retirement needs no publication transaction.
 Other ineligible providers retain their original creating carrier rather than
 claiming native-plan semantics.
 Pin-only existing-file preparation does not need an umask;
@@ -280,30 +297,42 @@ without a later worker write into abandoned memory. Reentry on a busy client
 keeps the ordinary syscall path; abandoning that client does not authorize reuse
 of an in-flight channel.
 
-`execution_window` is transport-independent bounded resource reuse. The current
-provider retains the existing inode read scope for consecutive eligible stat
-calls, FD metadata, access checks, readlink, xattr reads/lists and native-open
-preparation in a single uncomplicated store. Xattr writes do not join a read
-scope. Writable
-preparation can join only while it needs no metadata mutation. COW, image
-promotion and FIFO-channel preparation return the explicit internal
-`MD_OPEN_NEEDS_WRITE` admission result before any change; the
-executor ends its window and prepares once outside it. This is not a retry of a
-completed open and never exposes an internal `EAGAIN` to the application. An
-interrupted preflight is not an executed operation: the original signal/restart
-owner retains EINTR/SA_RESTART semantics instead of a saved cancellation errno.
-Ready operations from the resource-waiting queue share the same window admission
-as new requests; they cannot mutate metadata inside a preceding read scope.
+`execution_window` is transport-independent bounded resource reuse. The inode
+provider holds only the store gate and its validated catalogue generation, not
+a transaction or an unfinished read operation. Stat, FD metadata, access,
+readlink, xattrs, creation, rename, link/unlink and attribute changes can share
+that gate in a single uncomplicated store. Each operation resets its own
+authorization checks, watch context and transaction state; writes commit or
+roll back independently before completion. Local row invalidation remains
+active, and publication recovery runs before each operation when needed.
+An unchanged admitted read starts directly; completion with no transaction,
+event publication or pending sync does not enter the write-retirement path.
+Native attributes and policy are never cached by the window. COW and promotion
+may therefore complete without discarding the gate or replaying preparation.
+Explicit nested read scopes retain their stricter no-write contract and the
+internal pre-effect `MD_OPEN_NEEDS_WRITE` result.
+An interrupted preflight is not an executed operation: the original
+signal/restart owner retains EINTR/SA_RESTART semantics instead of a saved
+cancellation errno. Ready resource waiters use the same window admission as
+new requests, including both operands of rename/link.
 Relative requests first capture the live
 cwd or dirfd anchor under the existing FS/file-table turns. Path-only operations
 borrow that retained anchor's descriptor, as do fstat/fstatfs. Data/offset and
 descriptor mutation operations which need the actual OFD still capture it.
-A relative read scope additionally requires the exact
+A relative operation additionally requires the exact
 base-mount anchor and descriptor, never a stale pathname or cached FD number.
 Nested mounts/providers and restricted
 native roots do not opt into this scope. Count/time expiry, provider changes,
-delegation, mutations, parking and teardown end it. It caches neither stat
+delegation, parking and teardown end it. It caches neither stat
 results nor credentials/permission decisions; native attributes are read anew.
+Only the physical identity of a managed directory backing may survive between
+operations under that gate; catalogue write admission invalidates it. Logical
+permissions are projected from the current node and caller every time.
+Catalogue lookup also has a per-query recent exact-key hint within the same
+validated cache. It bypasses hashing, not row/generation validation. Local writes,
+rollback and external versions invalidate the same entries; native leaf results
+remain uncached. Path walking advances a cursor and materializes a new remaining
+path only when following a symlink, retaining the existing root/resolve policy.
 The store gate supplies the existing writer/version ordering. Kernel IO or
 descheduling can extend a scope; 100 us is not a real-time latency guarantee.
 
@@ -341,7 +370,7 @@ restrictions also select the existing kernel-admitted route.
 
 Thus the entry contract works in sandboxed programs, but **their filtered calls
 still cross kernel seccomp at the caller-supplied SVC**. Already-queued calls can
-share a bounded worker read window, but they do not acquire the direct-entry
+share a bounded worker operation window, but they do not acquire the direct-entry
 speedup. The runtime does not emulate arbitrary BPF, alter filters, or
 exempt helpers from them. Concurrent filter installation still affects any
 kernel helper calls already in flight. A client-writable flag is an optimization,
@@ -419,7 +448,12 @@ open/close events. These complement the existing shared-table thread tests.
 Writable tests check append/truncate, exact write-watch effects, pre-effect signal
 cancellation, exhausted FD capacity and bounded creating-open resampling. The
 inode fixture checks sealed-source COW and hardlink aliases, including explicit
-write admission from a read window. Another 2000 concurrent park/publication
+write admission from a read window. Operation-window checks prove one gate and
+generation read across native cycles, independent SQLite commit visibility,
+rollback, live caller permissions, physical-directory reuse, exact birth
+ownership and fresh external changes after release. Deterministic SIGKILL
+tests also kill owners while their operation window is still held.
+Another 2000 concurrent park/publication
 checks cover both requests and completed native effects.
 `--statistics` reports direct completions, declines and kernel notification wakes
 separately. `cooperativeDescriptors` counts FD-request adoptions and

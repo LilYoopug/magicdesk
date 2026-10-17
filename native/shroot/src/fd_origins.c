@@ -8,6 +8,7 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <sys/stat.h>
 
 enum { BUCKETS=61 };
 struct md_fd_loan {
@@ -158,6 +159,16 @@ int md_fd_origins_validate(const struct md_fd_order *turn,uint64_t generation) {
     pthread_mutex_lock(&t->lock);
     int error=t->generation==UINT64_MAX ? -EOVERFLOW : t->generation!=generation ? -EAGAIN : 0;
     pthread_mutex_unlock(&t->lock); return error;
+}
+int md_fd_origins_native_regular(const struct md_fd_order *turn,int fd) {
+    if (!turn || !turn->table || fd<0 || md_fd_order_state(turn)!=MD_RESOURCE_ORDER_RUNNING) return 0;
+    struct md_fd_origins *t=turn->table;
+    pthread_mutex_lock(&t->lock);
+    struct md_fd_origin_entry *e=t->buckets ? *slot(t,fd) : NULL;
+    struct md_fs_anchor *origin=e && !e->uncertain && !e->loan ? md_fs_anchor_from_object(e->object) : NULL;
+    int native=origin && md_fs_anchor_object(origin)==e->object
+        && md_fs_anchor_kind(origin)==S_IFREG && !md_fd_object_selectors(e->object);
+    pthread_mutex_unlock(&t->lock); return native;
 }
 struct md_fd_object *md_fd_origins_object(struct md_fd_origins *t, int fd, unsigned *flags) {
     if (flags) *flags=0;

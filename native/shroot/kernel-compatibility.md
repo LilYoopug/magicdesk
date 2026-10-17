@@ -21,6 +21,15 @@ kernel. `test_native_leaf`, `test_publication` and the stores
 runner cover UID-2000 operations, process interruption, error propagation and
 portable backup/restore; they do not establish physical power-cut durability.
 
+Unpublished ordinary native births may use baseline `mknodat(S_IFREG)` plus
+O_PATH instead of a temporary data-open description. This creates no device and
+requires no CAP_MKNOD. `inode_native` returns pre-effect EOPNOTSUPP on host
+EPERM/EACCES/ENOSYS/EOPNOTSUPP; `inode_leaf` retains ordinary prepare/open for
+that case and for exceptional metadata/ACLs. Other errors are not retried.
+`test_native_leaf` covers injected denials, exact native events, one-slot FD
+capacity and EMFILE cleanup; the cooperative runtime covers guest admission,
+publication, cancellation and watches. No kernel minimum or storage change.
+
 The optional gamepad bus uses baseline Unix stream/datagram socketpairs,
 eventfd, poll/epoll, SCM credentials and the existing typed descriptor transport.
 Evdev/joydev/uinput and udev discovery are guest providers; no native uinput
@@ -267,6 +276,11 @@ negative descriptors retain full capture. Ordinary close skips an entry register
 read but retains actual syscall-exit observation and table ownership. Scalar
 filesystem receipts use the existing stopped-task result publication, with no
 new seccomp flag, ioctl or post-5.15 dependency.
+Sandbox-wide ordinary-IO admission uses that same GET_SYSCALL_INFO interface
+to read the real call/arguments and resume it unchanged. It retains the installed
+selectors and application filters. `test_cooperative_libc.py --sandbox` covers
+valid-FD seccomp denial, EFAULT and ordinary scalar/vector IO; resource models
+reject typed, unknown, provisional and shared-table shortcuts.
 Production proc/watch selector installation uses this task-affine owner through
 the mapped adapter frame, without guest FDs or ptrace writes to application
 memory. Its payload uses reserved control capacity in the same mapping so IO

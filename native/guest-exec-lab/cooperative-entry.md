@@ -1678,3 +1678,263 @@ Seven-round paired musl checks and the filtered series above also run their
 static/dynamic correctness controls before timing. No test helper or browser
 process remains after final cleanup. Kernel minimum 5.15 and storage family 17
 are unchanged.
+
+### Ordered Native IO And Single-Pass Births
+
+The follow-up compares against the exact committed `8503a9fb` helpers. The phone
+was charging/heating: all following times are instrumented diagnostics, not a
+stable performance claim. Each series interleaves the same workload across
+native, kernel, entry and both reference routes; no build or second test ran
+during timing.
+
+Filtered three-round receipt `oci-services-14a963721537477899b6a5448a8b057d`
+retains argument-dependent seccomp denials before and after each workload,
+including a valid regular FD and an invalid caller buffer. Median milliseconds:
+
+| 65536 IO pairs | Native | Kernel | Entry | Previous entry | Paired entry/previous |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| pread/pwrite | 82.19 | 3086.61 | 3061.18 | 3356.20 | 0.912 |
+| read/write | 87.56 | 2611.85 | 3126.83 | 9482.27 | 0.330 |
+| readv/writev | 100.05 | 2726.55 | 3368.26 | 9155.24 | 0.337 |
+
+The first stream round falls from 1048903 to 262469 ptrace requests and from
+327781 to 131173 stops; vector counts differ only by a few requests/stops.
+All 131072 measured IO calls use compact admission (`nativeIO=131074` includes
+the two EFAULT controls outside timing). The pread/pwrite route already avoided
+the extra watch dispatch; its stop count stays at 131157, with requests reduced
+from 393488 to 262414.
+These paths remain far slower than unfiltered native IO. The all-FD selector
+is still needed for future typed/received FD after filter installation is
+denied. Neither it nor application filters are removed. Only a positively
+identified ordinary regular-file anchor in an exclusively owned FD table is
+eligible; typed objects borrowing an anchor, provisional custody, uncertain
+slots and nested debugger sessions retain the existing path.
+
+The normal open planner now optionally owns an unpublished birth, using the
+same pathname walk and permission scope. The separate birth planner is removed;
+all crash, ACL and publication models exercise the actual unified path. Native
+publication checks catalogue conflicts explicitly and physical conflicts through
+the existing atomic RENAME_NOREPLACE. Physical absence is not cached across
+operations; there is no deferred visible effect or predicted next close.
+
+Unfiltered three-round receipt `oci-services-f8b78c5bd29a44ebb3de7b94dffb7268`
+records 2048 create/close/rename/unlink cycles. Nonexclusive creation falls from
+319.91 to 295.89 ms (paired ratio 0.925); catalogue version checks fall from
+10251 to 8202, without write admissions. Exclusive creation has no established
+speed gain (320.84 vs 315.84 ms, paired ratio 1.023). Ordinary unfiltered IO is
+unchanged in mechanism (87.68 vs 87.28 ms, paired ratio 1.015). Birth publication,
+per-operation permissions and crash recovery still cost work; this is not a
+1.5x file-cycle improvement.
+
+Final rebuild and regression receipts (same supervisor hash
+`4778001bc8cabfb13b8df283930f6ce806e446640576187a7141953ac57195eb`):
+
+| Check | Result | Receipt |
+| --- | --- | --- |
+| Runtime and storage models | Pass; includes allocation-free native IO proofs, single birth admission, conflicts, crash, ACL and COW/overlay | `oci-services-5dcdb9f7014d4df9af39def7b5cc4380` |
+| Production watches | Pass; protected/filtered readers, 515 selectors, SCM_RIGHTS and independent owners | `watch-runtime-fd97525d9d2a472ca7278beff3079c2f` |
+| Proc custody | 25 checks pass | `resource-proc-custody-results.json`, staging `91eee749973747e2a0ee3388fcf931a7` |
+| Glibc static/dynamic | Pass; cancellation, FIFO, signals, fork/exec and filters | `oci-services-bad79537dc9e4bad9ed45b3c6d92f79b` |
+| Musl static/dynamic and file counters | Pass; at most four version checks per cycle and zero catalogue write admissions | `oci-services-9632f239fa6041a6ae5a6d50b89ad58f` |
+| Stock Chromium automatic sandbox | 4/4 pass | `browser-stage-results-2209d3d2db6c4091b85e8e0ec6b61ed1` |
+| Stock Chromium set-ID sandbox | 4/4 pass, including helper rejection | `browser-stage-results-2c64f4f4d68c4baf91ef0cc7f8fb1fcb` |
+
+The final single-round file run verifies the counter assertions, not speed.
+Both browser routes render JavaScript and PNG with their sandbox retained.
+Owned test profiles/staging copies are removed and no test process remains.
+No APK or installed libc is replaced; entry ABI 6, storage 17 and kernel minimum
+5.15 remain unchanged.
+
+## Independent Operation Windows (2026-10-17)
+
+Follow-up to `93d8e223`, limited to the file lifecycle and shared admission.
+The production inode provider now retains a bounded store gate, rather than an
+unfinished read operation. Each request starts and completes its own operation,
+including transaction commit/rollback, watch publication and policy checks.
+The external catalogue generation is reused only while that gate remains held.
+Local invalidation and pending-publication recovery remain active. This is not
+transaction batching, prediction of close, or deferred visible creation.
+
+The common filesystem selector covers read/attribute calls and mutations,
+validates both rename/link operands, and declines foreign mounts/providers.
+Birth retirement joins only its exact store gate and the existing count/time
+budget. Native-open flag admission is shared by offer, provider and window:
+exclusive creation requires birth custody. Managed-directory physical identity
+can survive under the gate until catalogue write admission; credentials and
+permissions are evaluated for every operation. The 32-call/100-us limits,
+filter contract, libc ABI, storage family and kernel minimum are unchanged.
+
+Final supervisor SHA-256:
+`1b6e4e016b2f929235b4a289288706d9be2be9cb42f214d74554fa2f827f85aa`.
+The preserved reference is `build/cooperative-93d8e223`. No installed libc or APK
+was replaced. All series used UID 2000 and CPU mask `3`, without concurrent
+builds/tests; the user had disconnected charging.
+
+Before the read-admission cleanup, five uninstrumented paired rounds, receipt
+`build/cooperative-musl-results/oci-services-359fcd39e6324cd89b0368f791fc2926.json`,
+gave median entry/reference ratios 0.829 for exclusive file cycles and 0.861
+without O_EXCL. Stat and open/close ratios were 0.958 and 0.961. Samples varied
+substantially: exclusive cycles ranged 109-240 ms versus 126-306 ms for HEAD.
+Native and PRoot controls are retained in that receipt; these numbers do not
+establish a universal 1.5x speedup or a stable absolute latency.
+
+Three instrumented rounds on that intermediate build (`63c1a6e4`), receipt
+`build/cooperative-musl-results/oci-services-eaa8fa11acfa4b559f088d2afeb66d46.json`:
+
+| Workload | Native median | HEAD entry | New entry |
+| --- | ---: | ---: | ---: |
+| 2048 exclusive create/rename/unlink cycles | 45.83 ms | 167.28 ms | 92.20 ms |
+| 2048 nonexclusive cycles | 47.90 ms | 135.90 ms | 88.31 ms |
+| 32768 stat calls | 25.57 ms | 112.27 ms | 112.83 ms |
+
+The mechanical reduction is repeatable: each cycle workload used 1142-1388
+version reads versus 8202-8203 at HEAD, with zero catalogue write admissions.
+The deterministic model executes eight native cycles with one lock/version
+read and one managed-directory physical check. Timing gains depend on burst
+occupancy and scheduling. Instrumented open/close results were noisy, including
+a slower series, so they are not evidence of an improvement to existing opens.
+Do not merge instrumented and uninstrumented samples into one speedup claim.
+
+Read controls exposed additional per-operation admission/retirement work. The
+final implementation retains the validated catalogue cache under the gate and
+has a short read path only when no recovery, transaction, event or sync is owed.
+Intermediate seven-round control `oci-services-6fa7f943e09846ad906813eae62c47a9`
+and instrumented control `oci-services-4637df40795147fea3ba67f649ec1eb3` retain
+the negative results rather than dropping them from the record.
+
+Seven uninstrumented rounds before balancing the harness order, receipt
+`build/cooperative-musl-results/oci-services-63720bc16a8a4f0ea5aabb1bfa6e7e71.json`:
+
+| Workload | Native median | HEAD entry | New entry | Paired new/HEAD |
+| --- | ---: | ---: | ---: | ---: |
+| 2048 exclusive cycles | 61.36 ms | 214.30 ms | 177.97 ms | 0.835 |
+| 2048 nonexclusive cycles | 53.45 ms | 215.65 ms | 183.29 ms | 0.850 |
+| 32768 stat calls | 28.53 ms | 115.32 ms | 125.39 ms | 1.060 |
+| 4096 open/close pairs | 6.17 ms | 53.65 ms | 54.87 ms | 1.119 |
+
+The file-cycle reduction persists. Read timings are not an established gain or
+proof of regression-free performance: paired controls still include slowdowns.
+Ordinary-kernel paired ratios were 0.992, 1.003, 1.010 and 1.070 respectively.
+The wide latency/scheduling variation across the recorded series prevents
+claiming a stable absolute time or a universal 1.5x improvement.
+
+The harness now alternates both directions of each rotation. Across
+`2 * number_of_modes` rounds, each mode occupies every position twice and every
+pair has equal precedence in either direction. The 2-7-mode combinatorial
+check passes. This reduces order bias but cannot eliminate device drift.
+Eight A/A rounds at scale 4, with verified identical runtime hashes, yielded
+paired ratios 1.027 for stat and 0.998 for opens:
+`build/cooperative-musl-results/oci-services-34f56a34ed074a3cad6471c046b7dcc9.json`.
+
+Final balanced comparison: 12 uninstrumented rounds, scale 2, receipt
+`build/cooperative-musl-results/oci-services-db9796e86b27430a8188230800886654.json`.
+These are actual doubled workload sizes, not extrapolated standard-size times:
+
+| Workload | Native | PRoot | Ordinary Shroot | HEAD entry | New entry | Paired new/HEAD |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4096 exclusive cycles | 82.20 ms | 612.32 ms | 695.84 ms | 252.44 ms | 191.74 ms | 0.817 |
+| 4096 nonexclusive cycles | 97.52 ms | 627.48 ms | 711.76 ms | 260.85 ms | 223.02 ms | 0.840 |
+| 65536 stat calls | 42.47 ms | 3275.01 ms | 1629.97 ms | 169.62 ms | 182.69 ms | 1.043 |
+| 8192 open/close pairs | 16.71 ms | 540.36 ms | 821.95 ms | 85.11 ms | 82.67 ms | 0.986 |
+
+Thus paired cycle time is about 16-18% lower, while opens are approximately
+unchanged. Stat still shows a small slowdown, partly comparable to the A/A
+drift; do not assert that it is all noise or that read performance is settled.
+Ordinary-kernel paired ratios are 1.029, 1.012, 0.992 and 0.982 respectively.
+PRoot's seccomp accelerator is verified and both guests run under shell UID 2000.
+
+Final validation receipts:
+
+- Full runtime, models, EMFILE, cancellation, exact native/catalogue watches,
+  concurrent births, COW, hardlinks and SIGKILL:
+  `build/cooperative-runtime/oci-services-56ab9a501ea644998c1f739cc0a84f4f.json`.
+- Production watches plus inode/import/RPC contracts:
+  `app/build/shroot/watch-runtime-6e0de8eef2304fa3b91930b9c01a361f.json`.
+- Glibc static/dynamic cancellation, signals, fork/exec and seccomp:
+  `build/cooperative-glibc-results/oci-services-025fcebbf7354388892865bdf8582bd0.json`.
+- Musl filtered file/metadata workloads and verified argument-dependent filter:
+  `build/cooperative-musl-results/oci-services-f9ffe9b8710c4775b12d7bc8ed0585ba.json`.
+- Stock Chromium automatic and set-ID routes, 4/4 each:
+  `app/build/shroot/browser-stage-results-54a016ec77e24d249225dec29dddb56b.json`,
+  `app/build/shroot/browser-stage-results-9b728e6729e74fd2ab7f0cb019d6c743.json`.
+- Protected proc/FD custody, 25 checks:
+  `app/build/shroot/resource-proc-custody-results.json`, staging ID
+  `223d7dc43a534cc7a9055eb2995ecf31`.
+
+All 16 owned browser profiles/staging runs and the failed early model fixture
+were cleaned up. No process from these test staging directories remains.
+Installed environments, their libc and the APK were not replaced.
+
+## Path Admission And Pinned Births (2026-10-17)
+
+Follow-up on the operation-window implementation above. The shared path walker
+advances a cursor and materializes the remaining path only for symlink expansion.
+The catalogue cache keeps an exact-key recent-slot hint per query: it avoids
+rehashing a repeated key, but uses the same entries, scope checks, row hooks,
+rollback and foreign-generation invalidation. Native leaf attributes and caller
+permissions are still read live. These changes also serve ordinary interception.
+
+For eligible unpublished native births, the inode provider creates a regular
+file with `mknodat`, then pins it with `O_PATH`. It no longer opens/closes a data
+descriptor solely for preparation. The caller still performs its real open,
+with publication only after success; no future close is predicted. ACL,
+exceptional metadata and catalogue-backed births keep their existing path.
+Pre-effect host policy/capability denial falls back to that path. The new route
+needs one spare worker FD, not two, and cleans the hidden birth on pin failure.
+
+The initial instrumented control reproduced the stat cost: paired ratio 1.040
+against HEAD, receipt `oci-services-32a95957279b4798bf2b108e1ac20215`.
+Eight uninstrumented path/cache-only rounds then gave ratios 0.983 for relative
+stat, 0.982 for absolute stat, 0.998 for opens and 0.836/0.826 for exclusive/
+nonexclusive file cycles, receipt `oci-services-c41f2265295c4c43ac7a75af84fe4424`.
+This preserves the negative baseline rather than attributing it all to noise.
+
+Final supervisor SHA-256:
+`342492459c6854d0bcb94a4c75a037bdaa1a98c2eeddc0f05323efc6c67e8ed7`.
+Twelve balanced uninstrumented rounds, scale 2, CPU mask `3`, Android shell UID
+2000, without concurrent builds/tests, compare the preserved `93d8e223` binaries:
+`build/cooperative-musl-results/oci-services-7b56b64cc35149ad832e718c9f81a345.json`.
+
+| Workload | Native | PRoot | Ordinary Shroot | HEAD entry | New entry | Paired new/HEAD |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4096 exclusive cycles | 92.07 ms | 800.52 ms | 942.80 ms | 453.62 ms | 345.44 ms | 0.757 |
+| 4096 nonexclusive cycles | 89.57 ms | 799.80 ms | 933.54 ms | 432.66 ms | 352.66 ms | 0.828 |
+| 65536 stat calls | 51.07 ms | 3989.53 ms | 1849.55 ms | 231.87 ms | 218.40 ms | 0.954 |
+| 8192 open/close pairs | 16.15 ms | 538.50 ms | 788.72 ms | 87.10 ms | 86.23 ms | 0.988 |
+
+File-cycle time is 17-24% lower than HEAD; a general 1.5x improvement is still
+not established. The prior stat slowdown is absent in both follow-up series;
+the small gain is not a universal throughput guarantee. Opens remain roughly
+unchanged. Ordinary-interception paired ratios are 0.994, 0.991, 1.001 and 0.981,
+respectively. Absolute latencies drift substantially between sessions, so do
+not compare their raw medians as though they were simultaneous controls.
+
+Final-build regressions:
+
+- Full runtime/models, including exact-key cache collisions/replacement,
+  multi-symlink tails, pinned birth FD exhaustion and injected mknodat denial:
+  `build/cooperative-runtime/oci-services-a034d8f1cac1431691a7562b78a3ff07.json`.
+- Production watches and inode/import/RPC contracts:
+  `app/build/shroot/watch-runtime-490781a5852c4522bbacd7f7e044f0ad.json`.
+  Native host hardlink/FIFO source-import subchecks remain unavailable under
+  the shell policy; guest hardlinks/FIFOs are exercised independently.
+- Glibc static/dynamic, cancellation, signals, fork/exec and filters:
+  `build/cooperative-glibc-results/oci-services-29685dbe34df437ca637600da624213e.json`.
+- Musl static/dynamic and argument-filtered file/metadata workloads:
+  `build/cooperative-musl-results/oci-services-aa38466c438446aca0abc08d0568ee0b.json`.
+  This single-round run checks correctness, not performance. Filtered calls
+  keep their required kernel admission; the unfiltered gains do not apply.
+- Stock Chromium automatic and forced set-ID routes, 4/4 each, including JS,
+  PNG and rejection of an unadmitted helper:
+  `app/build/shroot/browser-stage-results-268c4d4a66a24645acb41d0598937b2e.json`,
+  `app/build/shroot/browser-stage-results-563874a196f24dcdab2e8fa452298374.json`.
+- Protected proc/FD custody: 25 checks pass, including exact result capacity
+  and protected O_PATH acquisition:
+  `app/build/shroot/resource-proc-custody-results.json`, staging ID
+  `a8545980f59242c994b95bfd9facaea5`.
+
+The eight owned browser profiles, screenshots and test staging directories are
+removed; no test process remains. Kernel minimum 5.15, storage family 17 and
+entry ABI 6 are unchanged. Installed environments' libc and the APK were not
+replaced. This closes the implementation and regression checks for this stage,
+not the outstanding 1.5x performance target or end-user libc deployment.

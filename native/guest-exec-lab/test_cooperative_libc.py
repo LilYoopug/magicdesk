@@ -22,7 +22,7 @@ def main():
     parser.add_argument('--directory-mode', choices=('logical', 'imported'), default='logical')
     parser.add_argument('--workloads', nargs='+', choices=('metadata', 'metadata-absolute', 'metadata-dirfd', 'metadata-fd',
                         'files', 'files-create', 'opens', 'opens-cloexec', 'opens-write', 'opens-create', 'opens-truncate',
-                        'access', 'readlinks', 'xattrs', 'seeks', 'native'),
+                        'access', 'readlinks', 'xattrs', 'seeks', 'native', 'native-stream', 'native-vector'),
                         default=('metadata', 'metadata-absolute', 'metadata-dirfd', 'files', 'native'))
     parser.add_argument('--profile', action='store_true')
     parser.add_argument('--sample-statistics', action='store_true', help='Instrument every timed guest sample; do not mix with uninstrumented timings')
@@ -45,7 +45,8 @@ def main():
     suite = Suite(Path('build/cooperative-' + args.libc_kind + '-results'), args.build)
     suite.report['libcKind'] = args.libc_kind
     suite.report['conditions'] = dict(label=args.condition, cpuMask=args.cpu_mask,
-                                     sampleStatistics=args.sample_statistics, scale=args.scale, sandbox=args.sandbox)
+                                     sampleStatistics=args.sample_statistics, scale=args.scale, sandbox=args.sandbox,
+                                     sampleOrder='paired-reversed-rotations')
     try:
         root = suite.base + '/rootfs'
         native = suite.base + '/native'
@@ -151,12 +152,19 @@ def main():
         suite.report['samples'] = samples
         modes = ['native', *(['proot'] if proot else []), *guest_modes]
         counts = dict(metadata=32768, **{'metadata-absolute': 32768, 'metadata-dirfd': 32768, 'metadata-fd': 32768, 'opens-cloexec': 4096,
-                      'opens-write': 4096, 'opens-create': 4096, 'opens-truncate': 4096, 'files-create': 2048},
+                      'opens-write': 4096, 'opens-create': 4096, 'opens-truncate': 4096, 'files-create': 2048,
+                      'native-stream': 65536, 'native-vector': 65536},
                       files=2048, opens=4096, access=32768, readlinks=32768, xattrs=8192, seeks=32768, native=65536)
         for workload in (() if args.checks_only else args.workloads):
             count = counts[workload] * args.scale
             for round_number in range(args.rounds):
-                for mode in modes[round_number % len(modes):] + modes[:round_number % len(modes)]:
+                # Both directions at each rotation balance predecessor and
+                # position over 2*len(modes) rounds, including thermal drift.
+                rotation = (round_number // 2) % len(modes)
+                order = modes[rotation:] + modes[:rotation]
+                if round_number % 2:
+                    order.reverse()
+                for mode in order:
                     if mode == 'native':
                         command = [root + '/bin/static', native, workload, str(count)]
                     elif mode == 'proot':
@@ -169,6 +177,13 @@ def main():
                     record.update(mode=mode, round=round_number)
                     if args.sample_statistics:
                         record['statistics'] = [line for line in output.splitlines() if line.startswith('MD_')]
+                        if args.sandbox and workload.startswith('native') and mode in ('kernel', 'entry'):
+                            admitted = re.search(r'nativeIO=(\d+)', output)
+                            assert admitted and int(admitted[1]) >= count * 2, 'ordinary IO did not exercise ordered native admission'
+                        if not args.sandbox and args.directory_mode == 'logical' and mode == 'entry' and workload in ('files', 'files-create'):
+                            versions = re.search(r'MD_STORE phase=version calls=(\d+)', output)
+                            assert versions and int(versions[1]) <= count * 4 + 64, 'native births repeated their namespace admission'
+                            assert re.search(r'writeAdmissions=0(?:\n|$)', output), 'native cycles acquired catalogue writes'
                     samples.append(record)
                     print(json.dumps({k: v for k, v in record.items() if k != 'statistics'}), flush=True)
             if args.profile:

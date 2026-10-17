@@ -21,11 +21,18 @@
 #include <string.h>
 #include <sys/inotify.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/wait.h>
 #include <sys/xattr.h>
 #include <unistd.h>
 
 static int gets,sets,syncs,changes,kill_after,fail_at;
+static int mknod_error;
+int __real_mknodat(int,const char *,mode_t,dev_t);
+int __wrap_mknodat(int directory,const char *name,mode_t mode,dev_t device) {
+    if (mknod_error) { errno=mknod_error; return -1; }
+    return __real_mknodat(directory,name,mode,device);
+}
 static unsigned leaf_stats;
 static int replacement_directory=-1;
 int __real_fstatat(int,const char *,struct stat *,int);
@@ -117,6 +124,52 @@ static void ordinary(int directory) {
     assert(mdi_native_create(directory,"../escape",O_RDWR,0,0,0644)==-EINVAL);
     assert(mdi_native_create(directory,"ordinary",O_PATH,0,0,0644)==-EINVAL);
     puts("PASS 1024 native create/stat/chmod/rename/unlink cycles: zero metadata xattr calls and zero sync barriers");
+}
+static void pinned_birth(int directory) {
+    assert(mdi_native_pin_create(directory,"../escape",0,0,0600)==-EINVAL);
+    assert(mdi_native_pin_create(directory,"pinned",42,0,0600)==-EOPNOTSUPP);
+    const int denied[]={EPERM,EACCES,ENOSYS,EOPNOTSUPP,EIO};
+    struct stat st;
+    for (unsigned i=0;i<sizeof(denied)/sizeof(*denied);++i) {
+        mknod_error=denied[i];
+        assert(mdi_native_pin_create(directory,"pinned",0,0,0644)==(denied[i]==EIO ? -EIO : -EOPNOTSUPP));
+        assert(fstatat(directory,"pinned",&st,0)<0 && errno==ENOENT);
+    }
+    mknod_error=0;
+    int watch=inotify_init1(IN_NONBLOCK|IN_CLOEXEC); assert(watch>=0);
+    char proc[64]; snprintf(proc,sizeof(proc),"/proc/self/fd/%d",directory);
+    assert(inotify_add_watch(watch,proc,IN_CREATE|IN_OPEN|IN_CLOSE)>0);
+    int fd=mdi_native_pin_create(directory,"pinned",0,0,0644);
+    if (fd==-EOPNOTSUPP) {
+        close(watch);
+        puts("SKIP native pin creation: host mknodat regular-file policy; preparation fallback retained"); return;
+    }
+    assert(fd>=0 && (fcntl(fd,F_GETFL)&O_PATH) && (fcntl(fd,F_GETFD)&FD_CLOEXEC));
+    metadata(fd,0,0,0644,1);
+    assert(mdi_native_pin_create(directory,"pinned",0,0,0600)==-EEXIST);
+    close(fd);
+    union { struct inotify_event align; char bytes[1024]; } event;
+    ssize_t size=read(watch,event.bytes,sizeof(event.bytes));
+    assert(size==(ssize_t)(sizeof(event.align)+event.align.len) && event.align.mask==IN_CREATE);
+    assert(event.align.len && !strcmp(event.align.name,"pinned"));
+    assert(read(watch,event.bytes,sizeof(event.bytes))<0 && errno==EAGAIN);
+    close(watch); assert(!unlinkat(directory,"pinned",0));
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        struct rlimit limit; assert(!getrlimit(RLIMIT_NOFILE,&limit));
+        limit.rlim_cur=64; assert(!setrlimit(RLIMIT_NOFILE,&limit));
+        int last=-1,next;
+        while ((next=fcntl(directory,F_DUPFD_CLOEXEC,0))>=0) last=next;
+        assert(errno==EMFILE && last>=0);
+        assert(mdi_native_pin_create(directory,"pinned",0,0,0644)==-EMFILE);
+        assert(fstatat(directory,"pinned",&st,0)<0 && errno==ENOENT);
+        close(last);
+        fd=mdi_native_pin_create(directory,"pinned",0,0,0644);
+        assert(fd>=0 && (fcntl(fd,F_GETFL)&O_PATH));
+        close(fd); assert(!unlinkat(directory,"pinned",0)); _exit(0);
+    }
+    int status; assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
+    puts("PASS native pin creation: no data open, single-slot capacity, EMFILE cleanup and pre-effect fallback");
 }
 static void detached(int directory) {
     int fd=mdi_native_create(directory,"detached",O_RDWR,0,0,0644); assert(fd>=0);
@@ -340,6 +393,28 @@ static void creation_events(struct md_inode_store *s,int dir) {
     close(observer);
     puts("PASS CREATE precedes OPEN and CLOSE for direct-native, staged-native and catalogue allocation");
 }
+static void birth_fallback(struct md_inode_store *s,int dir) {
+    const struct md_identity *previous=s->identity;
+    struct md_identity root=md_identity_new(0,0); s->identity=&root;
+    for (unsigned denied=0;denied<2;++denied) {
+        struct md_inode_birth *birth=NULL;
+        struct stat st;
+        mknod_error=denied ? EPERM : 0;
+        int pin=md_inode_plan_open(s,dir,"pin-fallback",O_CREAT|O_EXCL|O_RDWR,0644,0,
+            &(struct md_open_completion){0},1,&birth);
+        mknod_error=0;
+        assert(pin>=0 && birth);
+        assert(md_inode_stat(s,dir,"pin-fallback",0,&st)==-ENOENT);
+        char proc[64]; snprintf(proc,sizeof(proc),"/proc/self/fd/%d",pin);
+        int fd=open(proc,O_RDWR|O_CLOEXEC); assert(fd>=0);
+        assert(!md_inode_birth_commit(&birth) && !birth);
+        assert(!md_inode_stat(s,dir,"pin-fallback",0,&st) && (st.st_mode&0777)==0644);
+        assert(!md_inode_unlink(s,dir,"pin-fallback",0));
+        close(fd); close(pin);
+    }
+    s->identity=previous; md_identity_release(&root);
+    puts("PASS native birth: denied metadata-only creation retains ordinary preparation and publication");
+}
 static void user_leaves(struct md_inode_store *s) {
     assert(!md_inode_mkdir(s,-1,"users",0777));
     int dir=md_inode_open(s,-1,"users",O_RDONLY|O_DIRECTORY,0); assert(dir>=0);
@@ -359,6 +434,7 @@ static void user_leaves(struct md_inode_store *s) {
     assert(!md_inode_unlink(cold,dir,"alias",0) && !md_inode_unlink(cold,dir,"renamed",0));
     close(fd); md_inode_store_close(cold);
     s->creation_mask=0;
+    birth_fallback(s,dir);
     creation_events(s,dir);
     s->identity=original; md_identity_release(&ids); close(dir);
     puts("PASS guest user native birth: umask, zero SQL writes, cold reopen, hardlink promotion and watch ordering");
@@ -627,7 +703,7 @@ static void catalogue_births(const char *path) {
     struct mdi_node parent; assert(!mdi_fd(s,dir,&parent) && parent.mode<0);
     for (unsigned attempt=0;attempt<3;++attempt) {
         struct md_inode_birth *birth=NULL;
-        int pin=md_inode_prepare_birth(s,dir,"prepared",O_CREAT|O_EXCL|O_RDWR,0400,0,&birth);
+        int pin=md_inode_plan_open(s,dir,"prepared",O_CREAT|O_EXCL|O_RDWR,0400,0,&(struct md_open_completion){0},1,&birth);
         assert(pin>=0 && birth);
         struct stat st; assert(md_inode_stat(s,dir,"prepared",0,&st)==-ENOENT);
         if (!attempt) { assert(!md_inode_birth_discard(&birth) && !birth); close(pin); continue; }
@@ -649,7 +725,7 @@ static void catalogue_births(const char *path) {
     int observer=md_inode_watch_create(s,IN_NONBLOCK); assert(observer>=0);
     assert(md_inode_watch_add(s,observer,dir,IN_CREATE)>0);
     struct md_inode_birth *birth=NULL;
-    int pin=md_inode_prepare_birth(s,dir,"marker-failure",O_CREAT|O_EXCL|O_RDWR,0600,0,&birth);
+    int pin=md_inode_plan_open(s,dir,"marker-failure",O_CREAT|O_EXCL|O_RDWR,0600,0,&(struct md_open_completion){0},1,&birth);
     assert(pin>=0 && birth);
     md_inode_observe(s,block_birth_marker,s);
     int result=md_inode_birth_commit(&birth);
@@ -667,7 +743,7 @@ static void catalogue_births(const char *path) {
         if (!child) {
             assert(!md_inode_store_open(path,0,&s)); s->identity=&ids;
             struct md_inode_birth *birth=NULL;
-            int pin=md_inode_prepare_birth(s,-1,"host/crash",O_CREAT|O_EXCL|O_RDWR,0640,0,&birth);
+            int pin=md_inode_plan_open(s,-1,"host/crash",O_CREAT|O_EXCL|O_RDWR,0640,0,&(struct md_open_completion){0},1,&birth);
             assert(pin>=0 && birth);
             enum md_inode_checkpoint point=points[i]; md_inode_observe(s,kill_birth,&point);
             md_inode_birth_commit(&birth); _exit(99);
@@ -714,7 +790,7 @@ static void overlay_events(struct md_inode_store *base,int upper,struct md_inode
         watches[i]=md_inode_watch_add(stores[i],observers[i],directories[i],mask); assert(watches[i]>0);
     }
     struct md_inode_birth *birth=NULL;
-    int pin=md_inode_prepare_birth(view,merged,"before",O_CREAT|O_EXCL|O_RDWR,0644,0,&birth);
+    int pin=md_inode_plan_open(view,merged,"before",O_CREAT|O_EXCL|O_RDWR,0644,0,&(struct md_open_completion){0},1,&birth);
     assert(pin>=0 && birth);
     char proc[64]; snprintf(proc,sizeof(proc),"/proc/self/fd/%d",pin);
     int fd=open(proc,O_RDWR|O_CLOEXEC); assert(fd>=0);
@@ -829,7 +905,7 @@ int main(int argc,char **argv) {
     if (argc==3 && !strcmp(argv[1],"--check-hybrid-backup")) { restored_hybrid(argv[2]); return 0; }
     assert(argc==2 && argv[1][0]=='/' && !mkdir(argv[1],0700)); umask(0);
     int directory=open(argv[1],O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(directory>=0);
-    identities(); ordinary(directory); detached(directory); staged(directory);
+    identities(); ordinary(directory); pinned_birth(directory); detached(directory); staged(directory);
     for (int point=1;point<=4;++point) for (int error=0;error<2;++error) interrupted(directory,point,error);
     puts("PASS SIGKILL and IO failures at all four metadata transition steps retain old-or-new logical permissions");
     reset(); malformed(directory); watch(directory); close(directory);
