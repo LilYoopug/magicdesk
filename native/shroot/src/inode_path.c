@@ -24,7 +24,7 @@ int mdi_host_boundary(struct md_inode_store *s, const char *parent, const char *
 }
 
 int mdi_path_step(struct md_inode_store *s, const struct mdi_node *current,
-        const char *name, const char *tail, uint64_t resolve, struct mdi_node *next,struct stat *attributes) {
+        const char *name, const char *tail, uint64_t resolve, struct mdi_node *next,struct stat *attributes,struct mdi_path_pin *pin) {
     int r=mdi_access(s,current,X_OK);
     if (!r) r=mdi_host_boundary(s,current->id,name,tail,resolve);
     if (r) return r;
@@ -33,26 +33,33 @@ int mdi_path_step(struct md_inode_store *s, const struct mdi_node *current,
     } else if (!strcmp(name,"..")) {
         r=mdi_node(s,current->parent,next);
     } else {
-        return mdi_lookup(s,current,name,next,attributes);
+        return mdi_lookup(s,current,name,next,attributes,pin);
     }
     return !r && attributes ? mdi_stat(s,next,attributes) : r;
 }
 static int walk(struct md_inode_store *,int,const char *,enum mdi_follow,int,uint64_t,
-        struct mdi_location *,struct stat *);
+        struct mdi_location *,struct stat *,struct mdi_path_pin *);
 int mdi_walk(struct md_inode_store *s, int dirfd, const char *path,
         enum mdi_follow follow, int missing, struct mdi_location *out) {
     return mdi_walk_resolved(s, dirfd, path, follow, missing, 0, out);
 }
 int mdi_walk_resolved(struct md_inode_store *s, int dirfd, const char *path,
         enum mdi_follow follow, int missing, uint64_t resolve, struct mdi_location *out) {
-    return walk(s,dirfd,path,follow,missing,resolve,out,NULL);
+    return walk(s,dirfd,path,follow,missing,resolve,out,NULL,NULL);
+}
+int mdi_walk_pinned(struct md_inode_store *s,int dirfd,const char *path,
+        enum mdi_follow follow,int missing,uint64_t resolve,struct mdi_location *out,struct mdi_path_pin *pin) {
+    *pin=(struct mdi_path_pin){.fd=-1};
+    int r=walk(s,dirfd,path,follow,missing,resolve,out,NULL,pin);
+    if (r && pin->fd>=0) { close(pin->fd); pin->fd=-1; }
+    return r;
 }
 int mdi_walk_stat(struct md_inode_store *s,int dirfd,const char *path,
         enum mdi_follow follow,struct mdi_location *out,struct stat *attributes) {
-    return walk(s,dirfd,path,follow,0,0,out,attributes);
+    return walk(s,dirfd,path,follow,0,0,out,attributes,NULL);
 }
 static int walk(struct md_inode_store *s,int dirfd,const char *path,
-        enum mdi_follow follow,int missing,uint64_t resolve,struct mdi_location *out,struct stat *attributes) {
+        enum mdi_follow follow,int missing,uint64_t resolve,struct mdi_location *out,struct stat *attributes,struct mdi_path_pin *pin) {
     if (resolve & ~(RESOLVE_BENEATH | RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS |
             RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV | RESOLVE_CACHED)) return -EINVAL;
     if ((resolve & (RESOLVE_BENEATH | RESOLVE_IN_ROOT)) == (RESOLVE_BENEATH | RESOLVE_IN_ROOT))
@@ -102,7 +109,7 @@ static int walk(struct md_inode_store *s,int dirfd,const char *path,
             if (!r && (resolve&RESOLVE_BENEATH)) r=-EXDEV;
             next=current;
             if (!r && last && attributes) r=mdi_stat(s,&next,attributes);
-        } else r=mdi_path_step(s,&current,name,todo,resolve,&next,last ? attributes : NULL);
+        } else r=mdi_path_step(s,&current,name,todo,resolve,&next,last ? attributes : NULL,last ? pin : NULL);
         if (r == -ENOENT && last && missing && !special) {
             out->parent = current; strcpy(out->name, name);
             out->trailing = slash;

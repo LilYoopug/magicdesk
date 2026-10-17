@@ -88,6 +88,19 @@ int md_inode_prepare_open(struct md_inode_store *, int, const char *, int, mode_
         struct md_open_completion *);
 int md_inode_plan_open(struct md_inode_store *, int, const char *, int, mode_t, uint64_t,
         struct md_open_completion *, int native_plan);
+/* Unpublished regular-file birth. The worker/store outlives this owner. The
+ * returned O_PATH pin belongs to the caller; no guest name exists until commit.
+ * Commit consumes the owner on success. Failure retains it for discard after
+ * the caller closes any native FD it acquired. No SQLite snapshot spans the
+ * caller's effect, and no retry of a completed publication is permitted. */
+struct md_inode_birth;
+int md_inode_prepare_birth(struct md_inode_store *,int,const char *,int,mode_t,uint64_t,
+        struct md_inode_birth **);
+int md_inode_birth_commit(struct md_inode_birth **);
+int md_inode_birth_discard(struct md_inode_birth **);
+/* Terminal worker shutdown only: release memory after the store has closed.
+ * The existing maintenance owner reclaims the unpublished root object. */
+void md_inode_birth_forget(struct md_inode_birth **);
 /* Read-only image open and identity from one namespace snapshot. */
 int md_inode_open_image(struct md_inode_store *, int, const char *, int, struct md_image_identity *);
 int md_inode_link(struct md_inode_store *, int sourcefd, const char *source,
@@ -97,6 +110,9 @@ int md_inode_rename(struct md_inode_store *, int sourcefd, const char *source,
         int targetfd, const char *target, unsigned flags);
 int md_inode_stat(struct md_inode_store *, int dirfd, const char *path, int flags, struct stat *);
 int md_inode_fstat(struct md_inode_store *, int fd, struct stat *);
+/* native_leaf is a worker-produced, retained descriptor's membership proof,
+ * not an application flag. Promotion and mutable metadata are checked anew. */
+int md_inode_fstat_origin(struct md_inode_store *, int fd, struct stat *, int native_leaf);
 struct md_fs_request;
 int md_inode_metadata(struct md_inode_store *, const struct md_fs_request *);
 int md_inode_capability(struct md_inode_store *, const struct md_fs_request *, void *, size_t);

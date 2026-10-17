@@ -88,8 +88,8 @@ void test_fd_filter_program(void) {
         assert(evaluate(&close_filter,&d)==want);
     }
     puts("PASS compact close cookies: exact low-int FD, boundary/negative fallback, other syscall accumulator preserved");
-    const struct md_fd_filter_gates gates={0x1112345678,0x2212345678,0x3312345678};
-    const uintptr_t exempt[]={gates.raw,gates.watch,gates.task};
+    const struct md_fd_filter_gates gates={0x1112345678,0x2212345678,0x3312345678,0x5512345678};
+    const uintptr_t exempt[]={gates.raw,gates.watch,gates.task,gates.native};
     const int fds[]={0,190,511,512,1024*1024,-1};
     const unsigned commands[]={0,F_GETFL,F_SETFL,F_GETFD,F_GET_SEALS,F_DUPFD,F_DUPFD_CLOEXEC};
     struct md_fd_filter_program built;
@@ -110,7 +110,7 @@ void test_fd_filter_program(void) {
                     if (nr==SYS_fcntl) d.args[1]=commands[c]|(UINT64_C(1)<<32);
                     if (nr==SYS_mmap) d.args[3]=(c&1) ? MAP_ANONYMOUS : 0;
                     assert(evaluate(&built,&d)==expected(kind,fd,&d));
-                    for (unsigned gate=0;gate<3;++gate) {
+                    for (unsigned gate=0;gate<sizeof(exempt)/sizeof(*exempt);++gate) {
                         d.instruction_pointer=exempt[gate];
                         assert(evaluate(&built,&d)==SECCOMP_RET_ALLOW);
                         d.instruction_pointer=exempt[gate]+4;
@@ -118,5 +118,30 @@ void test_fd_filter_program(void) {
                     }
                 }
         }
-    puts("PASS FD filter decisions: classes, aliases, argument positions, gates and native waits");
+    const struct md_fd_filter_gates grouped[]={
+        {0},
+        {0x2010000000,0x2010000010,0x2010000020,0x2010000030},
+        {0x2010000000,0x2010000000,0x2010000000,0x2010000000},
+        {0x2010000000,0x3010000000,0x2010000010,0}
+    };
+    for (unsigned p=0;p<sizeof(grouped)/sizeof(*grouped);++p)
+        for (unsigned kind=0;kind<MD_FD_SELECTOR_KINDS;++kind) {
+            const struct md_fd_filter_gates *g=&grouped[p];
+            const uintptr_t addresses[]={g->raw,g->watch,g->task,g->native};
+            struct md_fd_filter_program separate;
+            assert(!md_fd_filter_build(kind,190,&gates,&separate));
+            assert(!md_fd_filter_build(kind,190,g,&built));
+            assert(built.count<separate.count);
+            if (p==1) assert(built.count+9==separate.count);
+            for (unsigned nr=0;nr<512;++nr) for (unsigned i=0;i<4;++i)
+                for (unsigned adjacent=0;adjacent<2;++adjacent) {
+                    struct seccomp_data d={.nr=(int)nr,.instruction_pointer=addresses[i]+4*adjacent,
+                        .args={190,F_DUPFD,190,0,190,0}};
+                    int exempted=0;
+                    for (unsigned j=0;j<4;++j)
+                        exempted|=addresses[j] && addresses[j]==d.instruction_pointer;
+                    assert(evaluate(&built,&d)==(exempted ? SECCOMP_RET_ALLOW : expected(kind,190,&d)));
+                }
+        }
+    puts("PASS FD filter decisions: classes, aliases, argument positions, grouped/absent/duplicate gates and native waits");
 }

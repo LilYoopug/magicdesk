@@ -126,6 +126,7 @@ struct md_fs_anchor {
     int fd, mount_pin;
     dev_t device;
     ino_t inode;
+    unsigned kind, native_leaf;
     /* Optional native data endpoint of a logical device inode. The retained
      * path descriptor above remains authoritative for metadata and names. */
     struct md_fd_identity endpoint;

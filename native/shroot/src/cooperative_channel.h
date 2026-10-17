@@ -8,9 +8,24 @@
 #include <sys/syscall.h>
 #include <stddef.h>
 #include <fcntl.h>
+#include "file_open.h"
+
+static inline int md_entry_open(int number) {
+    return number==SYS_openat || number==SYS_openat2;
+}
+static inline int md_entry_native_open(int number,const uint64_t args[6]) {
+    /* open_how is captured by the worker, never dereferenced in the caller. */
+    return number==SYS_openat2 || (number==SYS_openat && md_open_native_plan(args[2]&~O_EXCL));
+}
 
 static inline int md_entry_native_fd(int number,const uint64_t args[6]) {
-    return number==SYS_close || (number==SYS_fcntl && ((unsigned)args[1]==F_SETFD || (unsigned)args[1]==F_GETFD));
+    if (number==SYS_close || number==SYS_dup || number==SYS_dup3 || number==SYS_lseek) return 1;
+    if (number!=SYS_fcntl) return 0;
+    switch ((unsigned)args[1]) {
+    case F_SETFD: case F_GETFD: case F_GETFL: case F_SETFL:
+    case F_DUPFD: case F_DUPFD_CLOEXEC: return 1;
+    default: return 0;
+    }
 }
 
 /* Bootstrap-only initialization, before any guest thread exists. */
@@ -30,18 +45,35 @@ enum md_entry_state { MD_ENTRY_IDLE, MD_ENTRY_REQUEST, MD_ENTRY_FD_REQUEST, MD_E
 enum { MD_ENTRY_WAKE = 0x434f4f50 };
 struct md_entry_channel {
     _Alignas(64) atomic_uint state;
-    atomic_uint enabled, awake, sleeping;
+    atomic_uint enabled, awake, sleeping, copying;
     int32_t owner;
     struct md_spin_policy feedback;
-    /* Caller-owned hint only; never a cached pathname or authorization. */
-    unsigned create_cooldown;
     uint64_t sequence;
-    struct md_entry_call call;
+    struct md_entry_request {
+        uint64_t args[6];
+        int32_t number;
+        uint32_t reserved;
+    } call;
     _Alignas(64) uint64_t receipt;
     enum md_entry_outcome outcome;
     int64_t result;
     struct md_entry_native native;
+    /* The native FD is provisional until the worker publishes its name. */
+    unsigned native_commit;
     char native_path[64];
+    /* Worker publishes an immutable, sequence-bound read result. No cursor or
+     * mutation may depend on this later, caller-owned copy succeeding. */
+    struct {
+        uint64_t sequence;
+        uintptr_t destination;
+        size_t size;
+        unsigned char bytes[512];
+    } output;
+    struct {
+        uint64_t sequence;
+        uintptr_t address[2];
+        char paths[2][4096];
+    } input;
 };
 enum { MD_ENTRY_PENDING_CALL=1, MD_ENTRY_PENDING_NATIVE=2 };
 /* Pair with the producer's publication/fence/awake check. Either this sees

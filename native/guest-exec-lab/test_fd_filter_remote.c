@@ -84,7 +84,7 @@ static long trace(int request,pid_t pid,void *address,void *data) {
 }
 static void install_at(pid_t pid,int fd,struct shared *shared,const struct user_pt_regs *saved,
         long expected,enum md_task_call_boundary boundary,int retry_thread) {
-    struct md_fd_filter_gates gates={(uintptr_t)remote_return,0,0};
+    struct md_fd_filter_gates gates={.raw=(uintptr_t)remote_return};
     struct md_task_filter call={0};
     assert(!md_task_filter_begin(&call,trace,pid,boundary,saved,
         (uintptr_t)remote_call,(uintptr_t)remote_return,&shared->image,(uintptr_t)&shared->image,

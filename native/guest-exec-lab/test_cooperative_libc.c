@@ -19,8 +19,13 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
+#include <sys/xattr.h>
 #include <time.h>
 #include <unistd.h>
+
+#ifndef MD_LIBC_NAME
+#define MD_LIBC_NAME "musl"
+#endif
 
 static uint64_t now(void) {
     struct timespec t; assert(!clock_gettime(CLOCK_MONOTONIC,&t));
@@ -35,6 +40,11 @@ static void *metadata_thread(void *unused) {
     return NULL;
 }
 static int channel[2];
+static unsigned cancellations_cleaned;
+static void cancelled_cleanup(void *unused) {
+    (void)unused;
+    __atomic_fetch_add(&cancellations_cleaned,1,__ATOMIC_RELAXED);
+}
 static pthread_barrier_t barrier;
 static _Thread_local sigjmp_buf escape;
 static _Thread_local volatile sig_atomic_t escape_armed;
@@ -83,10 +93,22 @@ static void *blocking_thread(void *unused) {
 }
 static void *opening_thread(void *unused) {
     (void)unused;
+    pthread_cleanup_push(cancelled_cleanup,NULL);
     int b=pthread_barrier_wait(&barrier); assert(!b || b==PTHREAD_BARRIER_SERIAL_THREAD);
     int fd=open("cancel-fifo",O_RDONLY|O_CLOEXEC);
+    fprintf(stderr,"Unexpected cancelled FIFO completion: fd=%d errno=%d\n",fd,errno);
     if (fd>=0) close(fd);
+    pthread_cleanup_pop(0);
     return NULL;
+}
+static void *cancelled_regular_open(void *disabled) {
+    if (disabled) assert(!pthread_setcancelstate(PTHREAD_CANCEL_DISABLE,NULL));
+    pthread_cleanup_push(cancelled_cleanup,NULL);
+    assert(!pthread_cancel(pthread_self()));
+    int fd=open("marker",disabled ? O_RDONLY : O_WRONLY|O_TRUNC);
+    assert(disabled && fd>=0 && !close(fd));
+    pthread_cleanup_pop(0);
+    return disabled;
 }
 static unsigned descriptor_count(void) {
     DIR *dir=opendir("/proc/self/fd"); assert(dir);
@@ -110,7 +132,10 @@ static void *fifo_signalled_open(void *context) {
         char byte; ssize_t n;
         do { n=read(fd,&byte,1); } while (n<0 && errno==EINTR);
         assert(n==1 && byte=='x' && !close(fd));
-    } else assert(fd==-1 && errno==EINTR);
+    } else {
+        if (fd!=-1 || errno!=EINTR) fprintf(stderr,"Unexpected signalled FIFO completion: fd=%d errno=%d\n",fd,errno);
+        assert(fd==-1 && errno==EINTR);
+    }
     __atomic_store_n(&fifo_finished,1,__ATOMIC_RELEASE);
     return NULL;
 }
@@ -148,7 +173,7 @@ static void fifo_signals(void) {
         assert(!pthread_barrier_destroy(&barrier)); assert(!sigaction(SIGUSR1,&old,NULL));
     }
     assert(!unlink("signal-fifo") && descriptor_count()==before);
-    puts("PASS musl FIFO signals: EINTR, SA_RESTART, completed endpoint and exact FD retirement");
+    puts("PASS " MD_LIBC_NAME " FIFO signals: EINTR, SA_RESTART, completed endpoint and exact FD retirement");
 }
 static void descriptor_contracts(void) {
     int warm=open("marker",O_RDONLY|O_CLOEXEC); assert(warm>=0); close(warm);
@@ -168,8 +193,14 @@ static void descriptor_contracts(void) {
         fd=open("marker",O_PATH|O_CLOEXEC); assert(fd>=0 && (fcntl(fd,F_GETFL)&O_PATH));
         assert(!fstat(fd,&st) && st.st_size==7); assert(!close(fd));
     }
+    /* Typed mount-context FDs retain the kernel carrier even when ordinary
+     * opens become native plans. Keep that publication path under coverage. */
+    for (unsigned i=0;i<128;++i) {
+        int fd=syscall(SYS_fsopen,"tmpfs",1);
+        assert(fd>=0 && fcntl(fd,F_GETFD)==FD_CLOEXEC && !close(fd));
+    }
     assert(descriptor_count()==before);
-    puts("PASS musl FD: exclusive creation, CLOEXEC, O_PATH and exact descriptor retirement");
+    puts("PASS " MD_LIBC_NAME " FD: exclusive creation, CLOEXEC, O_PATH and exact descriptor retirement");
 }
 static void relative_contracts(void) {
     assert(!mkdir("left",0700) && !mkdir("right",0700));
@@ -194,10 +225,33 @@ static void relative_contracts(void) {
     assert(!unlinkat(left,"leaf",0) && !unlinkat(right,"leaf",0));
     assert(!close(left) && !close(right) && !close(base));
     assert(!rmdir("moved") && !rmdir("right"));
-    puts("PASS musl paths: live dirfd replacement, cwd changes and renamed anchors");
+    puts("PASS " MD_LIBC_NAME " paths: live dirfd replacement, cwd changes and renamed anchors");
+}
+static void pending_cancel_contracts(void) {
+    unsigned descriptors=descriptor_count(),cleaned=cancellations_cleaned;
+    for (unsigned i=0;i<16;++i) for (unsigned disabled=0;disabled<2;++disabled) {
+        void *context=disabled ? &descriptors : NULL, *result=NULL;
+        pthread_t thread;
+        assert(!pthread_create(&thread,NULL,cancelled_regular_open,context));
+        assert(!pthread_join(thread,&result));
+        assert(result==(disabled ? context : PTHREAD_CANCELED));
+        struct stat intact; assert(!stat("marker",&intact) && intact.st_size==7);
+        assert(descriptor_count()==descriptors);
+    }
+    assert(cancellations_cleaned==cleaned+16);
+    puts("PASS " MD_LIBC_NAME " cancellation: pending regular open cannot truncate; disabled cancellation preserves success");
 }
 static void contracts(const char *executable) {
     descriptor_contracts(); relative_contracts();
+    int cloexec=open("marker",O_RDONLY|O_CLOEXEC), inherited=open("marker",O_RDONLY);
+    assert(cloexec>=0 && inherited>=0);
+    pid_t exec_child=fork(); assert(exec_child>=0);
+    if (!exec_child) {
+        char a[24],b[24]; snprintf(a,sizeof(a),"%d",cloexec); snprintf(b,sizeof(b),"%d",inherited);
+        execl(executable,executable,".","exec-cloexec",a,b,NULL); _exit(90);
+    }
+    reap(exec_child); assert(!close(cloexec) && !close(inherited));
+    puts("PASS " MD_LIBC_NAME " CLOEXEC: atomic open flags close only the selected FD across exec");
     pthread_t threads[4];
     for (unsigned i=0;i<4;++i) assert(!pthread_create(&threads[i],NULL,metadata_thread,NULL));
     for (unsigned i=0;i<4;++i) assert(!pthread_join(threads[i],NULL));
@@ -209,7 +263,8 @@ static void contracts(const char *executable) {
         assert(!pthread_join(threads[0],&result) && result==PTHREAD_CANCELED);
         assert(!pthread_barrier_destroy(&barrier)); close(channel[0]); close(channel[1]);
     }
-    unsigned descriptors=descriptor_count();
+    pending_cancel_contracts();
+    unsigned descriptors=descriptor_count(),cleaned=cancellations_cleaned;
     assert(!mkfifo("cancel-fifo",0600));
     for (unsigned i=0;i<16;++i) {
         assert(!pthread_barrier_init(&barrier,NULL,2));
@@ -223,7 +278,8 @@ static void contracts(const char *executable) {
     }
     assert(!unlink("cancel-fifo"));
     assert(descriptor_count()==descriptors);
-    puts("PASS musl cancellation: FIFO open retires pending descriptors without leaks");
+    assert(cancellations_cleaned==cleaned+16);
+    puts("PASS " MD_LIBC_NAME " cancellation: FIFO open retires pending descriptors without leaks");
     fifo_signals();
     signal_abandonment();
     pid_t child=fork(); assert(child>=0);
@@ -249,7 +305,28 @@ static void contracts(const char *executable) {
         _exit(0);
     }
     reap(child);
-    puts("PASS musl: real libc metadata, threads, cancellation, signal longjmp, fork/exec and seccomp");
+    puts("PASS " MD_LIBC_NAME ": real libc metadata, threads, cancellation, signal longjmp, fork/exec and seccomp");
+}
+static void filtered_check(void) {
+    struct stat st,initial;
+    memset(&initial,0xa5,sizeof(initial)); st=initial;
+    assert(syscall(SYS_fstat,1919,&st)==-1 && errno==EACCES);
+    assert(!memcmp(&initial,&st,sizeof(st)));
+    assert(!stat("marker",&st) && st.st_size==7);
+}
+static void filtered_benchmark(void) {
+    struct sock_filter instructions[]={
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_fstat,0,3),
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[0])),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,1919,0,1),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EACCES),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
+    };
+    struct sock_fprog program={sizeof(instructions)/sizeof(*instructions),instructions};
+    assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+    assert(!prctl(PR_SET_SECCOMP,SECCOMP_MODE_FILTER,&program));
+    filtered_check();
 }
 int main(int argc,char **argv) {
     alarm(90); assert(argc>=3); setbuf(stdout,NULL);
@@ -261,9 +338,16 @@ int main(int argc,char **argv) {
     char executable[4096]; assert(realpath(argv[0],executable));
     assert(!chdir(argv[1]));
     if (!strcmp(argv[2],"exec")) { metadata_thread(NULL); return 0; }
+    if (!strcmp(argv[2],"exec-cloexec")) {
+        assert(argc==5);
+        assert(fcntl(atoi(argv[3]),F_GETFD)==-1 && errno==EBADF);
+        assert(fcntl(atoi(argv[4]),F_GETFD)==0 && !close(atoi(argv[4])));
+        return 0;
+    }
     int fd=open("marker",O_CREAT|O_TRUNC|O_RDWR,0600); assert(fd>=0);
     assert(write(fd,"payload",7)==7); close(fd);
     if (!strcmp(argv[2],"abi")) {
+        pending_cancel_contracts();
         struct stat st; assert(!stat("marker",&st) && st.st_size==7);
         assert(stat("absent",&st)==-1 && errno==ENOENT);
         pthread_t thread; assert(!pthread_create(&thread,NULL,metadata_thread,NULL));
@@ -271,12 +355,17 @@ int main(int argc,char **argv) {
         pid_t child=fork(); assert(child>=0);
         if (!child) { metadata_thread(NULL); _exit(0); }
         reap(child); assert(!unlink("marker"));
-        puts("PASS musl ABI: absent provider retains metadata, native IO, threads and fork");
+        puts("PASS " MD_LIBC_NAME " ABI: absent provider retains metadata, native IO, threads and fork");
         return 0;
     }
     if (!strcmp(argv[2],"check")) { contracts(executable); assert(!unlink("marker")); return 0; }
-    assert(argc==4); unsigned count=(unsigned)strtoul(argv[3],NULL,10); assert(count);
+    assert(argc==4 || (argc==5 && !strcmp(argv[4],"filtered")));
+    unsigned count=(unsigned)strtoul(argv[3],NULL,10); assert(count);
     char absolute[4096]; assert(realpath("marker",absolute));
+    int links=!strcmp(argv[2],"readlinks"),xattrs=!strcmp(argv[2],"xattrs");
+    if (links) assert(!symlink("marker","link"));
+    if (xattrs) assert(!setxattr("marker","user.benchmark","value",5,0));
+    if (argc==5) filtered_benchmark();
     struct rusage before,after;
     assert(!getrusage(RUSAGE_SELF,&before));
     uint64_t begin=now();
@@ -287,6 +376,25 @@ int main(int argc,char **argv) {
         assert(base==AT_FDCWD || base>=0);
         for (unsigned i=0;i<count;++i) assert(!fstatat(base,name,&st,0) && st.st_size==7);
         if (base>=0) assert(!close(base));
+    } else if (!strcmp(argv[2],"access")) {
+        for (unsigned i=0;i<count;++i) assert(!access("marker",R_OK));
+    } else if (links) {
+        char value[32];
+        for (unsigned i=0;i<count;++i)
+            assert(readlink("link",value,sizeof(value))==6 && !memcmp(value,"marker",6));
+    } else if (xattrs) {
+        char value[32];
+        for (unsigned i=0;i<count;++i)
+            assert(getxattr("marker","user.benchmark",value,sizeof(value))==5 && !memcmp(value,"value",5));
+    } else if (!strcmp(argv[2],"seeks")) {
+        fd=open("marker",O_RDONLY|O_CLOEXEC); assert(fd>=0);
+        for (unsigned i=0;i<count;++i) assert(lseek(fd,i%7,SEEK_SET)==i%7);
+        assert(!close(fd));
+    } else if (!strcmp(argv[2],"metadata-fd")) {
+        fd=open("marker",O_RDONLY|O_CLOEXEC); assert(fd>=0);
+        struct stat st;
+        for (unsigned i=0;i<count;++i) assert(!fstat(fd,&st) && st.st_size==7);
+        assert(!close(fd));
     } else if (!strcmp(argv[2],"opens") || !strcmp(argv[2],"opens-cloexec")
             || !strcmp(argv[2],"opens-write") || !strcmp(argv[2],"opens-create") || !strcmp(argv[2],"opens-truncate")) {
         int flags=!strcmp(argv[2],"opens-cloexec") ? O_CLOEXEC
@@ -311,6 +419,8 @@ int main(int argc,char **argv) {
     } else abort();
     uint64_t elapsed=now()-begin;
     assert(!getrusage(RUSAGE_SELF,&after));
+    if (argc==5) filtered_check();
+    if (links) assert(!unlink("link"));
     assert(!unlink("marker"));
     long user=(after.ru_utime.tv_sec-before.ru_utime.tv_sec)*1000000L+after.ru_utime.tv_usec-before.ru_utime.tv_usec;
     long system=(after.ru_stime.tv_sec-before.ru_stime.tv_sec)*1000000L+after.ru_stime.tv_usec-before.ru_stime.tv_usec;

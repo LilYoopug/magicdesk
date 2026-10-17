@@ -3,8 +3,10 @@
 #include <sys/stat.h>
 struct md_inode_store;
 struct mdi_node;
+struct mdi_path_pin;
+struct md_inode_birth;
 int mdi_leaf_id(const struct stat *,const char scope[33],char out[33]);
-int mdi_leaf_lookup(struct md_inode_store *,const struct mdi_node *parent,const char *name,struct mdi_node *,struct stat *);
+int mdi_leaf_lookup(struct md_inode_store *,const struct mdi_node *parent,const char *name,struct mdi_node *,struct stat *,struct mdi_path_pin *);
 int mdi_leaf_descriptor(struct md_inode_store *,int,const struct stat *,struct mdi_node *);
 int mdi_leaf_promote(struct md_inode_store *,struct mdi_node *);
 ssize_t mdi_leaf_attribute(struct md_inode_store *,const struct mdi_node *,int capability,void *,size_t);
@@ -16,4 +18,6 @@ int mdi_leaf_materialize_directory(struct md_inode_store *,const struct mdi_node
 int mdi_leaf_materialize_tree(struct md_inode_store *,const struct mdi_node *);
 void mdi_leaf_admit(struct md_inode_store *);
 int mdi_leaf_create(struct md_inode_store *,const struct mdi_node *,const char *,int flags,mode_t);
+int mdi_leaf_prepare_birth(struct md_inode_store *,const struct mdi_node *,const char *,
+        int flags,mode_t,struct md_inode_birth **);
 #endif

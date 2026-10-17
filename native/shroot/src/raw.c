@@ -78,18 +78,3 @@ long md_read_struct(void *out, size_t known, const void *in, size_t supplied) {
     }
     return 0;
 }
-long md_read_string(char *out, size_t capacity, const char *in) {
-    if (!in) return -EFAULT;
-    size_t offset = 0;
-    while (offset < capacity) {
-        uintptr_t address = (uintptr_t)in + offset;
-        if (address < (uintptr_t)in) return -EFAULT;
-        size_t n = md_page_size - address % md_page_size;
-        if (n > capacity - offset) n = capacity - offset;
-        long r = md_read_memory(out + offset, (const void *)address, n);
-        if (r < 0) return r;
-        for (size_t i = 0; i < n; ++i) if (!out[offset + i]) return 0;
-        offset += n;
-    }
-    return -ENAMETOOLONG;
-}

@@ -6,6 +6,7 @@
 #include "inode_overlay.h"
 #include "inode_view.h"
 #include <assert.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -53,6 +54,47 @@ static int setup(const char *path,struct md_inode_store **s,int *directory) {
     assert(!mdi_native_metadata(fd,41,42,0640));
     return fd;
 }
+static unsigned descriptors(void) {
+    DIR *directory=opendir("/proc/self/fd"); assert(directory);
+    unsigned count=0;
+    struct dirent *entry;
+    while ((entry=readdir(directory))) if (entry->d_name[0]!='.') ++count;
+    assert(!closedir(directory)); return count;
+}
+static void pinned_lookup(const char *path) {
+    struct md_inode_store *s;
+    int directory,original=setup(path,&s,&directory);
+    struct md_identity root=md_identity_new(0,0); s->identity=&root;
+    int watch=md_inode_watch_create(s,IN_NONBLOCK); assert(watch>=0);
+    assert(md_inode_watch_add(s,watch,directory,IN_OPEN|IN_CLOSE)>0);
+    unsigned before=descriptors();
+    struct md_open_completion completion;
+    for (unsigned i=0;i<64;++i) {
+        assert(md_inode_plan_open(s,-1,"work/file/",O_RDONLY,0,0,&completion,1)==-ENOTDIR);
+        assert(md_inode_plan_open(s,-1,"work/file",O_DIRECTORY,0,0,&completion,1)==-ENOTDIR);
+        assert(md_inode_plan_open(s,-1,"work/missing",O_RDONLY,0,0,&completion,1)==-ENOENT);
+        s->readonly=1;
+        assert(md_inode_plan_open(s,-1,"work/file",O_WRONLY,0,0,&completion,1)==-EROFS);
+        s->readonly=0;
+    }
+    assert(descriptors()==before && md_inode_watch_bytes(s,watch)==0);
+    struct mdi_location location;
+    struct mdi_path_pin pin;
+    assert(!mdi_begin(s,0));
+    assert(!mdi_walk_pinned(s,-1,"work/file",MDI_FOLLOW,0,0,&location,&pin));
+    assert(pin.fd>=0 && location.node.native && location.node.descriptor==pin.fd+1);
+    assert(location.node.uid==41 && location.node.gid==42);
+    assert(!renameat(directory,"file",directory,"old"));
+    int replacement=openat(directory,"file",O_CREAT|O_EXCL|O_RDWR|O_CLOEXEC,0600); assert(replacement>=0);
+    assert(write(replacement,"replacement",11)==11 && !unlinkat(directory,"old",0));
+    int data=mdi_backing_open(s,&location.node,O_RDONLY); assert(data>=0);
+    char contents[9]={0}; assert(read(data,contents,8)==8 && !strcmp(contents,"contents"));
+    struct stat st; assert(!fstat(data,&st) && st.st_ino==pin.physical.st_ino && !st.st_nlink);
+    assert(!mdi_finish(s,0));
+    close(data); close(pin.fd); close(replacement);
+    close(watch); close(original); close(directory); md_inode_store_close(s); md_identity_release(&root);
+    puts("PASS pinned lookup: one retained identity through replacement/unlink, fresh metadata, no speculative OPEN or error-path FD leaks");
+}
 static int promote(struct md_inode_store *s,int directory,int file) {
     struct stat st; assert(!fstat(file,&st));
     int r=mdi_begin(s,0); if (r) return r;
@@ -80,19 +122,34 @@ static void check(struct md_inode_store *s,int original) {
 static void success(const char *path) {
     struct md_inode_store *s;
     int directory,fd=setup(path,&s,&directory);
+    struct md_open_completion plan;
+    int pin=md_inode_plan_open(s,-1,"work/file",O_RDONLY,0,0,&plan,1);
+    assert(pin>=0 && plan.kind==MD_OPEN_PLAN && plan.native_leaf);
+    struct stat proven;
+    assert(!md_inode_fstat_origin(s,pin,&proven,1) && proven.st_uid==41 && proven.st_gid==42);
+    assert(!mdi_native_metadata(fd,43,44,0600));
+    assert(!md_inode_fstat_origin(s,pin,&proven,1) && proven.st_uid==43 && proven.st_gid==44
+        && (proven.st_mode&07777)==0600);
+    assert(!mdi_native_metadata(fd,41,42,0640));
     char *memory=mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0); assert(memory!=MAP_FAILED);
     int watch=md_inode_watch_create(s,IN_NONBLOCK); assert(watch>=0);
     assert(md_inode_watch_add(s,watch,directory,IN_CREATE|IN_DELETE|IN_MOVED_FROM|IN_MOVED_TO)>0);
     assert(!promote(s,directory,fd)); check(s,fd);
+    assert(!md_inode_import_metadata(s,pin,73,74,0644));
+    assert(!md_inode_fstat_origin(s,pin,&proven,1) && proven.st_uid==73 && proven.st_gid==74
+        && (proven.st_mode&07777)==0644);
     assert(md_inode_watch_bytes(s,watch)==0);
     assert(!md_inode_link(s,-1,"work/file",-1,"work/alias",0));
+    assert(!md_inode_fstat_origin(s,pin,&proven,1) && proven.st_nlink==2 && proven.st_uid==73);
     int alias=md_inode_open(s,-1,"work/alias",O_RDWR,0); assert(alias>=0);
     assert(pwrite(alias,"updated!",8,0)==8 && !memcmp(memory,"updated!",8));
     assert(!md_inode_unlink(s,-1,"work/file",0));
     assert(!md_inode_unlink(s,-1,"work/alias",0));
     struct stat st; assert(!md_inode_fstat(s,fd,&st) && st.st_nlink==0);
+    assert(!md_inode_fstat_origin(s,pin,&proven,1) && proven.st_nlink==0 && proven.st_uid==73
+        && proven.st_ino==st.st_ino && proven.st_dev==st.st_dev);
     assert(!memcmp(memory,"updated!",8));
-    munmap(memory,4096); close(alias); close(fd); close(directory); close(watch); md_inode_store_close(s);
+    munmap(memory,4096); close(pin); close(alias); close(fd); close(directory); close(watch); md_inode_store_close(s);
     puts("PASS in-place promotion retains physical inode, mmap, flock and hardlink/unlinked descriptors; no namespace event for representation change");
 }
 static void killed(const char *path,int point,int cold) {
@@ -293,6 +350,7 @@ static void overlay_killed(const char *path,int point,int upper,int cold) {
 int main(int argc,char **argv) {
     assert(argc==2 && argv[1][0]=='/' && !mkdir(argv[1],0700));
     char path[PATH_MAX];
+    snprintf(path,sizeof(path),"%s/pinned",argv[1]); pinned_lookup(path);
     snprintf(path,sizeof(path),"%s/success",argv[1]); success(path);
     const int points[]={MD_PUBLICATION_INTENT,MD_PUBLICATION_MOVED,MD_PUBLICATION_STAGED,MD_PUBLICATION_CATALOGUED};
     for (unsigned i=0;i<sizeof(points)/sizeof(*points);++i) for (int cold=0;cold<2;++cold) {

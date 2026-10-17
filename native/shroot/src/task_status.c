@@ -4,30 +4,37 @@
 #include <errno.h>
 #include <fcntl.h>
 
-static long task_status(int tid,char *text,size_t capacity) {
+long md_task_status_open(int tid) {
     if (tid<=0) return -EINVAL;
     char path[64]="/proc/";
     md_decimal(path+md_length(path),(unsigned)tid);
     md_copy(path+md_length(path),sizeof(path)-md_length(path),"/status");
-    long fd=RAW4(openat,AT_FDCWD,path,O_RDONLY|O_CLOEXEC,0);
-    if (fd<0) return fd;
+    return RAW4(openat,AT_FDCWD,path,O_RDONLY|O_CLOEXEC,0);
+}
+static long read_status(int fd,char *text,size_t capacity) {
     size_t size=0;
     long error=0;
     while (size<capacity-1) {
-        long n=RAW3(read,fd,text+size,capacity-1-size);
+        long n=RAW4(pread64,fd,text+size,capacity-1-size,size);
         if (n==-EINTR) continue;
         if (n<0) { error=n; break; }
         if (!n) break;
         size+=(size_t)n;
     }
-    RAW1(close,fd);
     if (error) return error;
     text[size]=0;
     return (long)size;
 }
-long md_task_umask(int tid) {
+static long task_status(int tid,char *text,size_t capacity) {
+    long fd=md_task_status_open(tid);
+    if (fd<0) return fd;
+    long result=read_status((int)fd,text,capacity);
+    RAW1(close,fd);
+    return result;
+}
+long md_task_umask_fd(int fd) {
     char text[1024];
-    long result=task_status(tid,text,sizeof(text));
+    long result=read_status(fd,text,sizeof(text));
     if (result<0) return result;
     for (char *p=text;*p;++p) {
         if ((p!=text && p[-1]!='\n') || !md_prefix(p,"Umask:")) continue;
@@ -41,6 +48,13 @@ long md_task_umask(int tid) {
         return !digits || *p!='\n' || mask>0777 ? -EIO : (long)mask;
     }
     return -ENOTSUP;
+}
+long md_task_umask(int tid) {
+    long fd=md_task_status_open(tid);
+    if (fd<0) return fd;
+    long result=md_task_umask_fd((int)fd);
+    RAW1(close,fd);
+    return result;
 }
 long md_task_parent(int tid) {
     char text[1024];

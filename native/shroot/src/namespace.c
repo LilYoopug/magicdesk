@@ -3,6 +3,7 @@
 #include "proc_paths.h"
 #include "fs_rpc.h"
 #include "fs_path_call.h"
+#include "fs_xattr_call.h"
 #include "fd_metadata.h"
 #include "fd_client.h"
 #include "linux_abi.h"
@@ -184,26 +185,17 @@ static long descriptor_call(const struct md_fs *fs, long nr, const unsigned long
 }
 long md_namespace_xattr(const struct md_fs *fs, long nr, struct md_namespace_operand operand,
         const char *path, const unsigned long *a) {
-    int base=operand.descriptor;
-    int list=nr==SYS_listxattr || nr==SYS_llistxattr || nr==SYS_flistxattr;
-    int set=nr==SYS_setxattr || nr==SYS_lsetxattr || nr==SYS_fsetxattr;
-    int remove=nr==SYS_removexattr || nr==SYS_lremovexattr || nr==SYS_fremovexattr;
-    int descriptor=nr==SYS_fgetxattr || nr==SYS_flistxattr || nr==SYS_fsetxattr || nr==SYS_fremovexattr;
-    int nofollow=nr==SYS_lsetxattr || nr==SYS_lgetxattr || nr==SYS_llistxattr || nr==SYS_lremovexattr;
+    struct md_fs_request q;
+    int decoded=md_fs_xattr_call(&q,nr,a);
+    if (decoded<=0) return decoded ? decoded : -ENOSYS;
+    int list=q.mode==MD_FS_XATTR_LIST, set=q.mode==MD_FS_XATTR_SET, remove=q.mode==MD_FS_XATTR_REMOVE;
     char name[256]="";
     if (!list) {
         long error=md_read_string(name,sizeof(name),(const char *)a[1]);
         if (error<0) return error==-ENAMETOOLONG ? -ERANGE : error;
     }
-    unsigned long capacity=remove ? 0 : list ? a[2] : a[3];
-    if (set && (a[4]&~3UL)) return -EINVAL;
-    if (set && capacity>MD_FS_VALUE_MAX) return -E2BIG;
-    if (capacity>MD_FS_VALUE_MAX) capacity=MD_FS_VALUE_MAX;
-    struct md_fs_request q={.operation=descriptor ? MD_FS_FXATTR : MD_FS_XATTR,
-        .directory={base,-1},.capture={operand.capture},.path={path,name},.capacity=(unsigned)capacity,
-        .mode=list ? MD_FS_XATTR_LIST : set ? MD_FS_XATTR_SET : remove ? MD_FS_XATTR_REMOVE : MD_FS_XATTR_GET,
-        .flags=(nofollow ? AT_SYMLINK_NOFOLLOW : 0)|(set ? (unsigned)a[4] : 0),
-        .value=set ? (const void *)a[2] : NULL,.value_size=set ? (unsigned)capacity : 0};
+    q.directory[0]=operand.descriptor; q.capture[0]=operand.capture;
+    q.path[0]=path; q.path[1]=name;
     struct md_fs_response out;
     void *target=list ? (void *)a[1] : (void *)a[2];
     long result=namespace_request_deliver(fs,&q,&out,set || remove ? NULL : copy_directory,target);

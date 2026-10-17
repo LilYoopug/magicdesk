@@ -7,6 +7,7 @@
 
 struct md_task_registry;
 struct md_task_resources;
+struct md_task_snapshot_state;
 struct md_task_snapshot {
     pid_t tid, tgid;
     struct md_identity identity;
@@ -23,6 +24,8 @@ struct md_task_snapshot {
     struct md_ipc_namespace *ipc;
     struct md_uts_namespace *uts;
     struct md_landlock_policy *landlock;
+    /* Registry-owned immutable resource generation; cwd/root stay per-read. */
+    struct md_task_snapshot_state *owner;
 };
 struct md_task_registry *md_task_registry_create(void);
 void md_task_registry_destroy(struct md_task_registry *);
@@ -48,16 +51,21 @@ void md_task_registry_collect(struct md_task_registry *,int (*gone)(pid_t));
 void md_task_registry_collect_limits(struct md_task_registry *,int (*gone)(pid_t));
 /* peer==0 is a kernel-notification/internal caller. RPC callers must own the
  * TID's thread group; the supervisor may request on behalf of its tracee. */
-/* A successful read retains identity groups, filesystem owner, mount view, file-table handle and
- * cwd anchor until release. The file table is a live handle, not frozen entries.
+/* A successful read retains one immutable resource generation and a fresh cwd
+ * anchor until release. Resource contents, including file-table entries, stay live.
  * No registry lock is held while the filesystem resolves the request. */
 int md_task_registry_read(struct md_task_registry *, pid_t tid, pid_t peer, struct md_task_snapshot *);
 /* As read, but distinguishes a retired guest (-ESTALE) from an external PID
  * (-ESRCH). A native fast path must not expose the host state of a retired guest. */
 int md_task_registry_probe(struct md_task_registry *,pid_t tid,pid_t peer,struct md_task_snapshot *);
+/* Same live-task admission, retaining only the file table. The caller releases
+ * it with md_fd_origins_unpin; namespace/identity state is not captured. */
+int md_task_registry_files(struct md_task_registry *,pid_t tid,pid_t peer,struct md_fd_origins **);
 /* Credential-only observation, including unreaped tasks. No filesystem/file-table
  * pins or allocations; release the returned identity with md_identity_release. */
 struct md_task_credentials { pid_t group; int retired; struct md_identity identity; };
 int md_task_registry_credentials(struct md_task_registry *,pid_t,struct md_task_credentials *);
+/* Retains only the proc handle with this generation, never the observed mask. */
+long md_task_snapshot_umask(const struct md_task_snapshot *);
 void md_task_snapshot_release(struct md_task_snapshot *);
 #endif

@@ -10,24 +10,14 @@
 #include <fcntl.h>
 #include <sys/inotify.h>
 #include "namespace_internal.h"
+#include "open_request.h"
 
 static long open_extended(const struct md_fs *fs, const char *exe, const unsigned long *a) {
     struct open_how how;
     long r = md_read_struct(&how, sizeof(how), (void *)a[2], a[3]);
     if (r < 0) return r;
-    const uint64_t allowed = O_ACCMODE | O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC | O_APPEND |
-        O_NONBLOCK | O_DSYNC | O_ASYNC | O_DIRECT | O_LARGEFILE | O_DIRECTORY | O_NOFOLLOW |
-        O_NOATIME | O_CLOEXEC | O_SYNC | O_PATH | O_TMPFILE;
-    if ((how.flags & ~allowed) || (how.mode & ~07777UL)) return -EINVAL;
-    if (how.mode && !(how.flags & O_CREAT) && (how.flags & O_TMPFILE) != O_TMPFILE) return -EINVAL;
-    if ((how.flags & O_PATH) && (how.flags & ~(O_PATH | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW)))
-        return -EINVAL;
-    if ((how.flags & (O_CREAT | O_DIRECTORY)) == (O_CREAT | O_DIRECTORY)) return -EINVAL;
-    if ((how.flags & O_TMPFILE) == O_TMPFILE && !(how.flags & (O_WRONLY | O_RDWR))) return -EINVAL;
-    if (how.resolve & ~(RESOLVE_BENEATH | RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS |
-            RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV | RESOLVE_CACHED)) return -EINVAL;
-    if ((how.resolve & (RESOLVE_IN_ROOT | RESOLVE_BENEATH)) == (RESOLVE_IN_ROOT | RESOLVE_BENEATH))
-        return -EINVAL;
+    r=md_open_how_validate(&how);
+    if (r) return r;
     if (!how.resolve) {
         unsigned long args[6] = {a[0], a[1], how.flags, how.mode};
         return md_file_call(fs, exe, SYS_openat, args);

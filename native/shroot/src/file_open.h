@@ -12,13 +12,14 @@ enum md_open_kind { MD_OPEN_READY, MD_OPEN_FIFO, MD_OPEN_PIPE, MD_OPEN_CALLER, M
 static inline int md_open_readonly_plan(unsigned flags) {
     return !(flags & ~(O_CLOEXEC | O_NOFOLLOW | O_LARGEFILE));
 }
-/* Only regular-file endpoints. Exclusive creation goes straight to its
+/* Ordinary file/directory endpoints. Exclusive creation goes straight to its
  * admitted carrier; nonexclusive O_CREAT can still name an existing file. */
 static inline int md_open_native_plan(unsigned flags) {
+    if (flags&O_PATH) return 1;
     return (flags&(O_CREAT|O_EXCL))!=(O_CREAT|O_EXCL)
         && (flags&O_ACCMODE)!=O_ACCMODE && !(flags & ~(O_ACCMODE | O_CLOEXEC
         | O_NOFOLLOW | O_LARGEFILE | O_APPEND | O_TRUNC | O_NONBLOCK | O_NOCTTY
-        | O_NOATIME | O_SYNC | O_DSYNC | O_DIRECT | O_CREAT));
+        | O_NOATIME | O_SYNC | O_DSYNC | O_DIRECT | O_CREAT | O_DIRECTORY));
 }
 struct md_open_completion {
     enum md_open_kind kind;
@@ -29,6 +30,9 @@ struct md_open_completion {
     unsigned mode;
     /* MD_OPEN_PLAN only: identity verified on the returned O_PATH pin. */
     uint64_t backing_device, backing_inode;
+    /* Worker-local membership proof, retained only with the opened identity.
+     * Attributes and catalogue promotion remain live observations. */
+    unsigned native_leaf;
 };
 int md_open_device(unsigned mode, uint64_t device, int flags, struct md_open_completion *);
 int md_complete_open(int, int, struct md_open_completion);

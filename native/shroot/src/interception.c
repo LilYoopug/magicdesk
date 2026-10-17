@@ -241,7 +241,8 @@ int md_interception_install(int inherited) {
         uintptr_t admit=(uintptr_t)md_guest_buffer_admitted;
         uintptr_t native=(uintptr_t)md_cooperative_native_return;
 #define COUNT(name) + 1
-        enum { transport_instructions = 2 * (1 MD_GATE_TRANSPORT_CALLS(COUNT)) };
+        enum { transport_instructions = 2 * (1 MD_GATE_TRANSPORT_CALLS(COUNT)),
+            native_instructions = 2 * (0 MD_ENTRY_NATIVE_CALLS(COUNT)) };
 #undef COUNT
 #define TRACE(n) BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_##n, 0, 1), \
     BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRACE | MD_INTERCEPT_DISPATCH),
@@ -258,11 +259,11 @@ int md_interception_install(int inherited) {
             /* An admitted native effect retains its table turn and journal.
              * Application filters are still evaluated by the kernel. */
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)+4),
-            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)(native>>32),0,9),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)(native>>32),0,3+native_instructions),
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)),
-            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)native,0,7),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)native,0,1+native_instructions),
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
-            NATIVE(openat) NATIVE(close) NATIVE(fcntl)
+            MD_ENTRY_NATIVE_CALLS(NATIVE)
             /* Descriptor admission has no dependency on application prctl
              * policy. Its exact site still runs every application filter. */
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)+4),
@@ -423,8 +424,6 @@ int md_interception_install(int inherited) {
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRACE | MD_INTERCEPT_NATIVE),
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
             TRACE(uname) TRACE(sethostname) TRACE(setdomainname)
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_fstat, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
 #define IDENTITY(n) BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_##n, 0, 1), \
     BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRACE | MD_INTERCEPT_IDENTITY),
             IDENTITY(getuid) IDENTITY(geteuid) IDENTITY(getgid) IDENTITY(getegid)
@@ -438,23 +437,17 @@ int md_interception_install(int inherited) {
 #undef IDENTITY
             OBSERVE(unshare) OBSERVE(setns)
             OBSERVE(seccomp)
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_openat, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_newfstatat, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_getdents64, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_readlinkat, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_fsopen, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+#define NOTIFY(n) BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_##n,0,1), \
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_USER_NOTIF),
+            MD_FS_NOTIFICATION_CALLS(NOTIFY)
+#undef NOTIFY
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_prctl, 0, 5),
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, PR_SET_SECCOMP, 1, 0),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, PR_SET_DUMPABLE, 0, 1),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRACE | MD_INTERCEPT_OBSERVE),
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
-            MD_FILE_CALLS(TRACE)
+            MD_FILE_TASK_CALLS(TRACE)
             TRACE(inotify_init1) TRACE(inotify_rm_watch)
             TRACE(recvmmsg)
             MD_SOCKET_CALLS(TRACE)

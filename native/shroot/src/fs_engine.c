@@ -204,12 +204,16 @@ void md_fs_context_end(struct md_fs_context *context) {
     *context=(struct md_fs_context){0};
 }
 struct md_inode_store *md_fs_context_read_scope(const struct md_fs_context *c,const struct md_fs_request *q,int native_plan) {
-    if (!c->filesystem || (q->operation!=MD_FS_STAT
+    if (q->operation==MD_FS_OPEN && (q->flags&O_CREAT)) return NULL;
+    int xattr=(q->operation==MD_FS_XATTR || q->operation==MD_FS_FXATTR)
+        && (q->mode==MD_FS_XATTR_GET || q->mode==MD_FS_XATTR_LIST);
+    if (!c->filesystem || (q->operation!=MD_FS_STAT && q->operation!=MD_FS_FSTAT && q->operation!=MD_FS_STATFS
+            && q->operation!=MD_FS_ACCESS && q->operation!=MD_FS_READLINK && !xattr
             && !(q->operation==MD_FS_OPEN && (md_open_readonly_plan(q->flags)
-                || (native_plan && md_open_native_plan(q->flags))))) || !q->path[0] || !q->path[0][0]
+                || (native_plan && md_open_native_plan(q->flags)))))
             || q->object[0] || q->control.ops) return NULL;
     const struct md_mount_namespace *mounts=c->authenticated ? c->task.mounts : c->filesystem->mounts;
-    if (q->path[0][0]!='/') {
+    if (!q->path[0] || q->path[0][0]!='/' || (q->resolve&RESOLVE_IN_ROOT)) {
         const struct md_fs_anchor *origin=q->origin[0];
         /* Capture under the cwd/file-table owner precedes this admission.
          * A foreign or detached anchor may enter another provider/store. */
@@ -257,10 +261,10 @@ static void context_execute(struct md_fs_context *context,
     }
     struct md_fs_request captured;
     if (q->attributes.creation_mask==MD_FS_CAPTURE_UMASK) {
-        /* A native plan only pins an existing object; a missing name declines
-         * before birth. Capture the live umask only in the creating carrier. */
-        int pin_only=q->operation==MD_FS_OPEN && output && output->native_open_plan;
-        long mask=context->authenticated ? (pin_only ? 0 : md_task_umask(context->actor)) : -EPERM;
+        /* Existing-object pins have no creation mode. Every possible birth
+         * reads the caller's live mask, including a staged native creation. */
+        int pin_only=q->operation==MD_FS_OPEN && !(q->flags&O_CREAT) && output && output->native_open_plan;
+        long mask=context->authenticated ? (pin_only ? 0 : md_task_snapshot_umask(&context->task)) : -EPERM;
         if (mask<0) { *out=(struct md_fs_result){.fd=-1,.error=(int)mask}; return; }
         captured=*q; captured.attributes.creation_mask=(unsigned)mask; q=&captured;
     }
@@ -270,7 +274,7 @@ static void context_execute(struct md_fs_context *context,
         }
     }
     if (q->operation==MD_FS_UMASK) {
-        long mask=md_task_umask(context->actor);
+        long mask=context->authenticated ? md_task_snapshot_umask(&context->task) : md_task_umask(context->actor);
         *out=(struct md_fs_result){.fd=-1,.error=mask<0 ? (int)mask : 0,
             .position=mask<0 ? 0 : mask};
         return;
@@ -484,7 +488,7 @@ static void inode_execute(struct md_filesystem *fs,
     case MD_FS_CHMOD: case MD_FS_CHOWN: case MD_FS_ACCESS: case MD_FS_UTIMENS:
         r = md_inode_metadata(s, q); break;
     case MD_FS_XATTR_OBJECT:
-        md_inode_xattr(s,q,out,output); return;
+        md_inode_xattr_origin(s,q,out,output,md_fs_anchor_native_leaf(q->origin[0],s,first)); return;
     case MD_FS_REOPEN:
         r=md_catalogue_reopen(images,s,first,(int)q->flags,!!(q->mode&MD_FS_REOPEN_MUTABLE),&out->open_completion);
         if (r==-EXDEV && (q->mode&MD_FS_REOPEN_NATIVE))
@@ -530,8 +534,20 @@ static void inode_execute(struct md_filesystem *fs,
         if (!r) out->size = strlen(data) + 1;
         break;
     case MD_FS_CREATE: r = md_inode_create(s, first, a, q->mode); goto opened;
-    case MD_FS_OPEN: r = md_catalogue_open(images, s, first, a, (int)q->flags, q->mode, q->resolve,
-        &out->open_completion,output && output->origin && output->native_open_plan); goto opened;
+    case MD_FS_OPEN:
+        r=md_catalogue_open(images,s,first,a,(int)q->flags,q->mode,q->resolve,
+            &out->open_completion,output && output->origin && output->native_open_plan);
+        if (r==-EXDEV && (q->flags&O_CREAT) && output && output->native_open_plan && output->birth) {
+            r=md_inode_prepare_birth(s,first,a,(int)q->flags,q->mode,q->resolve,output->birth);
+            if (r==-EOPNOTSUPP) r=-EXDEV;
+            if (r>=0) {
+                struct stat born;
+                if (fstat(r,&born)) { int error=-errno; close(r); r=error; }
+                else out->open_completion=(struct md_open_completion){.kind=MD_OPEN_PLAN,
+                    .backing_device=born.st_dev,.backing_inode=born.st_ino,.mode=S_IFREG,.native_leaf=1};
+            }
+        }
+        goto opened;
     case MD_FS_MKDIR: r = md_inode_mkdir(s, first, a, q->mode); break;
     case MD_FS_MKNOD:
         r=md_inode_mknod(s,first,a,q->mode,(dev_t)q->offset);
@@ -548,7 +564,7 @@ static void inode_execute(struct md_filesystem *fs,
             s->stat_location=&location;
         }
         r = q->operation == MD_FS_STAT ? md_catalogue_stat(images, s, first, a, (int)q->flags, &st)
-            : md_catalogue_fstat(images, s, first, &st);
+            : md_catalogue_fstat(images, s, first, &st,md_fs_anchor_native_leaf(q->origin[0],s,first));
         s->stat_location=previous;
         if (!r) md_fs_stat_info(&st, &out->info);
         if (!r && (q->mode & MD_FS_STAT_MOUNT)) {

@@ -1767,6 +1767,57 @@ void md_test_ipc_origin_guest(const char *,const char *);
 void md_test_namespace_broker(const char *);
 void md_test_input_session(const char *);
 void md_test_mount_copy_service(const char *);
+static void read_scope(struct md_inode_store *s) {
+    int fd=md_inode_create(s,-1,"scope-data",0600); assert(fd>=0 && !close(fd));
+    assert(!md_inode_symlink(s,"scope-data",-1,"scope-link"));
+    struct md_filesystem fs={.store=s};
+    struct md_fs_context context;
+    assert(!md_fs_context_begin(&fs,0,0,&context));
+    char data[512];
+    struct md_fs_output output={.data=data,.capacity=sizeof(data)};
+    for (unsigned generation=0;generation<4;++generation) {
+        char value='a'+generation;
+        struct md_fs_request q={.operation=MD_FS_XATTR,.directory={-1,-1},
+            .path={"/scope-data","user.scope"},.mode=MD_FS_XATTR_SET,
+            .capacity=1,.value=&value,.value_size=1};
+        assert(!md_fs_context_read_scope(&context,&q,0));
+        struct md_fs_result result;
+        md_fs_context_execute(&context,&q,&result,&output); assert(!result.error);
+        assert(!md_inode_read_scope_begin(s));
+        for (unsigned i=0;i<32;++i) {
+            q=(struct md_fs_request){.operation=MD_FS_ACCESS,.directory={-1,-1},
+                .path={"/scope-data",NULL},.mode=R_OK};
+            assert(md_fs_context_read_scope(&context,&q,0)==s);
+            md_fs_context_execute(&context,&q,&result,NULL); assert(!result.error);
+            q.operation=MD_FS_READLINK; q.path[0]="/scope-link"; q.mode=0; q.capacity=sizeof(data);
+            assert(md_fs_context_read_scope(&context,&q,0)==s);
+            md_fs_context_execute(&context,&q,&result,&output);
+            assert(!result.error && result.size==10 && !memcmp(data,"scope-data",10));
+            q.operation=MD_FS_XATTR; q.path[0]="/scope-data"; q.path[1]="user.scope";
+            q.mode=MD_FS_XATTR_GET;
+            assert(md_fs_context_read_scope(&context,&q,0)==s);
+            md_fs_context_execute(&context,&q,&result,&output);
+            assert(!result.error && result.size==1 && data[0]==value);
+            q.path[1]=""; q.mode=MD_FS_XATTR_LIST;
+            assert(md_fs_context_read_scope(&context,&q,0)==s);
+            md_fs_context_execute(&context,&q,&result,&output);
+            assert(!result.error && result.size>=sizeof("user.scope"));
+            int found=0;
+            for (size_t at=0;at<result.size;at+=strlen(data+at)+1)
+                found|=!strcmp(data+at,"user.scope");
+            assert(found);
+        }
+        assert(!md_inode_read_scope_end(s));
+        q.mode=MD_FS_XATTR_REMOVE; assert(!md_fs_context_read_scope(&context,&q,0));
+        q.operation=MD_FS_CHMOD; assert(!md_fs_context_read_scope(&context,&q,0));
+        q.operation=MD_FS_OPEN; q.flags=O_CREAT; assert(!md_fs_context_read_scope(&context,&q,1));
+        q.operation=MD_FS_ACCESS; q.path[0]="scope-data"; q.flags=0;
+        assert(!md_fs_context_read_scope(&context,&q,0));
+    }
+    md_fs_context_end(&context);
+    assert(!md_inode_unlink(s,-1,"scope-link",0) && !md_inode_unlink(s,-1,"scope-data",0));
+    puts("PASS read windows: access, readlink and xattr queries, fresh attributes after writes and mutation exclusion");
+}
 int main(int argc, char **argv) {
     extern void md_test_prepare_libc_descriptors(void);
     md_test_prepare_libc_descriptors();
@@ -1788,6 +1839,7 @@ int main(int argc, char **argv) {
     setup_listener=mapping_listener();
     char store[4096]; snprintf(store,sizeof(store),"%s/store",argv[1]);
     struct md_inode_store *s=NULL; assert(!md_inode_store_open(store,1,&s));
+    read_scope(s);
     md_inode_store_close(s);
     for (int exec_image=0;exec_image<2;++exec_image) for (int shared=0;shared<2;++shared)
         for (unsigned kind=0;kind<3;++kind) for (int protected=0;protected<2;++protected) {

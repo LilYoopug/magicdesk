@@ -62,10 +62,18 @@ void test_task_registry_exit(void) {
     assert(account && !md_process_member_fork(account,&id,0,&resources.process));
     assert(!md_task_registry_publish(registry,20003,20003,&id,&resources));
     struct md_task_credentials observed;
+    struct md_task_snapshot retained,reused;
     allocation_budget=0;
+    assert(md_task_registry_read(registry,20003,0,&retained)==-ENOMEM && !retained.owner);
     assert(!md_task_registry_credentials(registry,20003,&observed));
     assert(observed.group==20003 && !observed.retired && observed.identity.uid.effective==2000);
     md_identity_release(&observed.identity);
+    allocation_budget=-1;
+    assert(!md_task_registry_read(registry,20003,0,&retained));
+    allocation_budget=0;
+    assert(!md_task_registry_read(registry,20003,0,&reused));
+    assert(retained.owner && reused.owner==retained.owner);
+    md_task_snapshot_release(&reused);
     allocation_budget=-1;
     id.uid.effective=1234;
     struct md_cgroup_member *member=resources.cgroup;
@@ -82,6 +90,8 @@ void test_task_registry_exit(void) {
     assert(!md_task_registry_credentials(registry,20003,&observed));
     assert(observed.group==20003 && observed.retired && observed.identity.uid.effective==1234);
     md_identity_release(&observed.identity);
+    assert(retained.identity.uid.effective==2000 && retained.files==resources.files);
+    md_task_snapshot_release(&retained);
     assert(!md_resources_release(&resources));
     assert(md_task_registry_has_retired(registry));
     assert(md_process_member_fork(account,&id,0,&child)==-EAGAIN);
@@ -1396,6 +1406,41 @@ static void message_worker(void) {
     assert(!close(reader.ready) && descriptors()==before);
     puts("PASS message worker: source table, mount owner and registry die before inspection; supervisor pin ends after join");
 }
+static void provisional_custody(struct md_fs_anchor *anchor) {
+    for (unsigned flags=0;flags<=FD_CLOEXEC;++flags) {
+        struct md_fd_origins *files=md_fd_origins_new(); assert(files);
+        struct md_fd_loan *loan=md_fd_loan_new(files); assert(loan);
+        struct md_fd_origin_update update;
+        struct md_fd_order turn={0};
+        assert(!md_fd_origins_prepare(files,anchor,flags,&update));
+        assert(md_fd_origins_prepare_custody(&update,loan,&turn)==-EBUSY);
+        assert(md_fd_order_begin(files,&turn,NULL)==1);
+        assert(md_fd_origins_prepare_custody(&update,loan,&turn)==-EBUSY);
+        assert(!md_fd_order_start(&turn));
+        allocation_budget=0;
+        assert(md_fd_origins_prepare_custody(&update,loan,&turn)==-ENOMEM);
+        allocation_budget=-1;
+        assert(!md_fd_origins_prepare_custody(&update,loan,&turn));
+        allocation_budget=0;
+        md_fd_origins_release_custody(&update);
+        md_fd_origins_finish(&update,10);
+        assert(!md_fd_origins_has_loans(files)); expect(files,10,anchor,flags);
+        allocation_budget=-1;
+        assert(!md_fd_origins_prepare(files,anchor,flags,&update));
+        assert(!md_fd_origins_prepare_custody(&update,loan,&turn));
+        allocation_budget=0;
+        md_fd_origins_finish(&update,11);
+        assert(md_fd_origins_loan_matches(&turn,11,loan)==1);
+        md_fd_loan_end(loan);
+        int number=-1;
+        assert(md_fd_origins_loan_next(&turn,&number)==1 && number==11);
+        assert(!md_fd_origins_close_range(files,11,11,0) && !md_fd_origins_has_loans(files));
+        assert(!md_fd_order_complete(&turn));
+        md_fd_loan_release(loan); md_fd_origins_release(files);
+        allocation_budget=-1;
+    }
+    puts("PASS provisional FD custody: table-turn admission, actual CLOEXEC flags, allocation failure, publication and exact retirement");
+}
 void test_fd_origins(void) {
     extern void test_task_receive(int *);
     extern void test_epoll_owner(int *);
@@ -1413,6 +1458,7 @@ void test_fd_origins(void) {
     assert(first && second);
     struct md_fs_anchor *a=capture(first,open("/",O_PATH|O_CLOEXEC));
     struct md_fs_anchor *b=capture(second,open("/",O_PATH|O_CLOEXEC));
+    provisional_custody(a);
     bounded_retirement(a);
     received_origins(a,b); vector_preparation(a,b,0); vector_preparation(a,b,1);
     observed_delivery(a,b); observed_return_failure(a);

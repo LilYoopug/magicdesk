@@ -124,7 +124,7 @@ static int set_name(struct md_inode_store *s,const struct mdi_node *parent,const
         const struct mdi_node *node) {
     struct md_inode_store *u=&s->overlay->upper;
     struct mdi_node old;
-    int r=mdi_lookup(u,parent,name,&old,NULL);
+    int r=mdi_lookup(u,parent,name,&old,NULL,NULL);
     if (!r && node && !strcmp(old.id,node->id)) return 0;
     if (r && r!=-ENOENT) return r;
     int permission=mdi_permission_as(u,parent,W_OK|X_OK,s->lifetime->overlay_identity);
@@ -205,7 +205,7 @@ static int sync_name(struct md_inode_store *s,const char *parent,const char *nam
     struct mdi_node up,node,base;
     int r=promote(s,parent,&up,0);
     if (!r) r=mdi_node(s,parent,&base);
-    int found=r ? r : mdi_lookup(s,&base,name,&node,NULL);
+    int found=r ? r : mdi_lookup(s,&base,name,&node,NULL,NULL);
     if (found && found!=-ENOENT) return found;
     if (!found) {
         struct mdi_node target;

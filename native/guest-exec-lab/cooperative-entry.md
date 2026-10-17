@@ -8,8 +8,12 @@ guest pointers; the `cooperative-*` modes isolate transport/engine costs with
 captured operations. Do not treat their timings as interchangeable.
 The shared-engine path, stat and directory-validation improvements also apply
 to ordinary Shroot execution.
-The [FD delivery experiments](#fd-delivery-experiments) below are separate lab
-prototypes, not accelerated open/close in the production libc entry.
+The [FD delivery experiments](#fd-delivery-experiments) below are historical lab
+prototypes, distinct from the current caller-owned open/close implementation.
+For the current ABI-6 result, see
+[final paired measurements](#final-paired-baseline-and-filtered-routes) and
+[final regression coverage](#final-regression-coverage). Earlier receipts retain
+their original build boundaries; their fastest samples are not current guarantees.
 
 ## Independent Runtime Iteration
 
@@ -1248,3 +1252,429 @@ post-build entry smoke receipt
 `build/cooperative-runtime/oci-services-1726b01b62384aedb1ee20b1d4d0a80b.json`
 passed, with 1009 native opens, 998 native closes and 576 native flag operations.
 No owned test processes remained after cleanup.
+
+### Broader Entry And Retained Membership (After baafc2a6)
+
+The reference for this phase is the exact `baafc2a6` runtime in
+`build/cooperative-baafc2a6`. An ABI-4 musl fixture is preserved in
+`build/cooperative-musl-baafc2a6`; ABI-5 comparisons use `--reference-musl`,
+not an old runtime silently declining a new libc ABI. Both static and dynamic
+correctness checks run before measurements. Installed distribution libc and
+storage format 17 are unchanged.
+
+The expanded entry admits directory/O_PATH/openat2 plans, regular lseek,
+dup/dup3, F_DUPFD/F_DUPFD_CLOEXEC, F_GETFL/F_SETFL, FD metadata, timestamps,
+statfs and all twelve xattr calls. Open_how and xattr scalar decoding are shared
+with the original adapter. FD-only requests retain only their file table;
+fstat/fstatfs borrow authenticated anchors rather than duplicating data OFDs.
+The native journal now checks 112 exact instruction stops. Full runtime receipt
+`oci-services-7def5887e4c943fe882672fab7bd8914.json` passed this coverage.
+
+Three transport experiments were discarded:
+
+- Ignoring adaptive spin cooldown while an effect was pending improved one
+  open series, but regressed file churn (paired 1.212 in
+  `oci-services-cdd0fdf56af24dadaf58c2fc4a318c72.json`). Limiting that policy to
+  opens did not fix it (`oci-services-e8aef8b58cb44456aaf88e14766b05ee.json`).
+- A second journal for a likely following close was correct under the tested
+  stops but rarely used: 147/4096 plain opens and zero CLOEXEC opens in the
+  separate profile. Receipt `oci-services-f420221f8bfb4742a1316691599a4185.json`
+  showed no reliable benefit. The entire speculative continuation was removed.
+- Coverage alone did not establish speed: the first paired open/close series
+  regressed (`oci-services-25e4c865663349ce96ed7762110267aa.json`). Neither a
+  new route nor a single fast sample is sufficient performance evidence.
+
+ABI 5 separates libc's cancellation checkpoint from its real kernel
+continuation. Native opens no longer invoke two synthetic futex calls. Ordinary
+wrappers have no checkpoint; musl cancellation wrappers use __testcancel.
+Masked/asynchronous cancellation retains the original path. The real-libc
+receipt `oci-services-789c902c731f44c8a3beae20c78d3a52.json` passed pending and
+disabled cancellation, no truncation before cancellation, FIFO signals, fork,
+exec and filters. This is an ownership cleanup, not a measured 1.5x open gain.
+
+The common inode engine now retains native-leaf membership with the existing
+O_PATH anchor. Fstat checks the live catalogue first, then projects fresh kernel
+attributes without rediscovering membership through proc paths. Promotion,
+ownership changes and unlinked hardlinks are covered in the full runtime and
+publication receipt `oci-services-aa24f23ef1dc47e9917130535942b126.json`.
+No attributes, permission verdicts or mutable pathnames are cached. Immutable
+anchor type also avoids a redundant fstat before regular-file lseek.
+
+Seven rotating rounds with native/PRoot controls, mask `3`, UID 2000 and no
+concurrent build/test produced
+`build/cooperative-musl-results/oci-services-3c414afd1ac3447c8ccff4dadd6e7a59.json`:
+
+| Workload | Native | PRoot | Kernel route | HEAD entry | New entry |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Fstat, 32768 | 10.06 ms | 1417.85 ms | 851.98 ms | 521.71 ms | 87.21 ms |
+| Lseek, 32768 | 8.17 ms | 7.52 ms | 829.75 ms | 851.48 ms | 99.06 ms |
+| Open/close, 4096 | 8.20 ms | 257.32 ms | 416.20 ms | 86.74 ms | 92.98 ms |
+| File cycle, 2048 | 50.94 ms | 401.02 ms | 548.43 ms | 263.82 ms | 252.01 ms |
+
+Median within-round new/HEAD ratios are 0.171, 0.116, 0.990 and 0.977,
+respectively. Fstat and lseek improve substantially, but remain much slower than
+native; PRoot leaves lseek native. Open/file-cycle target gains remain unproven.
+The cancellation-only predecessor (`oci-services-addc8616ee114cbf80c9e02f94018274.json`)
+also did not demonstrate the open target. The six-step plan, especially native
+birth, filtered-call acceleration and glibc rollout, remains open in tmp-notes.
+
+### Pinned Lookup And Caller-Owned Copy
+
+The final native-leaf walk now returns the exact O_PATH pin with its fresh
+attributes. Deterministic publication tests replace/unlink that pathname while
+the pin remains live, and check failure cleanup without spurious OPEN/CLOSE
+events. An unpinned encoded-metadata lookup still rechecks the opened identity;
+the replacement-race fixture rejects stale observations. Full runtime receipt
+`oci-services-5572e69277ee4500955e895fef1ce79b.json` passed both sets.
+
+The isolated musl fixture no longer repeats F_SETFD after a successful
+O_CLOEXEC open; atomic close-on-exec is part of the supported Linux baseline.
+An actual exec test verifies both preserved ordinary FDs and closed CLOEXEC
+FDs. Stock Alpine 3.23.6 BusyBox also passed shell/archive/traversal/link/metadata
+workflows with entry enabled and disabled in receipt
+`oci-services-3ee86ea68754459e8066360c1321d6c7.json`.
+
+A completion-feedback spin experiment was removed. Seven paired rounds against
+its immediate predecessor (`oci-services-18c7e175070d466b9a90dd7832c27127.json`)
+regressed CLOEXEC opens by 16% and file churn by 5%; faster seeks did not justify
+that regression. No assumed following close or new spin prerequisite remains.
+
+Caller-owned guarded output eliminates remote writes for small read-only
+results. Alone it improved metadata but regressed open/close in receipt
+`oci-services-825eb05db0f249ffa1ab203a14acc7b0.json`; this was not accepted as
+sufficient performance evidence. Adding bounded caller-side pathname capture
+and a shared exact-NUL string copier gave the following seven-round result
+against the same pre-copy runtime, with identical ABI-5 libc, mask 3 and UID 2000:
+`oci-services-ccd30a9f1b4b46ecb3a832a3504ff72b.json`.
+
+| Workload | Native | PRoot | Kernel route | Pre-copy entry | New entry |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Path stat, 32768 | 23.38 ms | 2044.17 ms | 951.42 ms | 186.73 ms | 143.02 ms |
+| Fstat, 32768 | 10.19 ms | 1569.62 ms | 846.14 ms | 101.43 ms | 80.91 ms |
+| Open/close, 4096 | 7.79 ms | 272.93 ms | 438.39 ms | 72.21 ms | 69.28 ms |
+| CLOEXEC open/close, 4096 | 6.47 ms | 275.59 ms | 428.64 ms | 81.69 ms | 66.32 ms |
+| File cycle, 2048 | 53.90 ms | 405.63 ms | 471.35 ms | 242.42 ms | 230.21 ms |
+
+Median within-round new/reference ratios are 0.766, 0.755, 0.898, 0.855 and
+0.930. Independent medians differ because scheduling varies between rounds.
+The <=52 ms open target is still unproven. Fault receipts
+`oci-services-00e66a73c5b34a2ea0a43ab535870446.json` (outputs) and
+`oci-services-8f106f9c7e884ce38881003151b20241.json` (inputs and outputs) cover
+partial/readonly writes, file-backed SIGBUS, unrelated signal delivery,
+terminal-NUL/page boundaries and receipt reuse. Directory output still commits
+its cursor only after synchronous delivery; large output retains the original
+transport. The copier has since been extracted to guest_copy.S for direct
+boundary tests and use by both entry paths.
+
+### Admitted-Effect Drain And Resource Generations
+
+The burst owner now has a bounded final drain of native effects already issued.
+It releases the store read window before that drain, admits no next operation,
+and neither waits nor reads the clock when no effect remains. This is not a
+prediction that the application will close an FD. An initial seven-round run
+(`oci-services-5025efe427064695a4dc41ce448686d4.json`) reached 56.45/55.12 ms
+for plain/CLOEXEC opens but regressed file churn and FD metadata. After removing
+the empty-drain clock, the repeat
+`oci-services-b28d88f7280e40b6ae0c8b10b73b51de.json` gave:
+
+| Workload | Native | PRoot | Kernel route | Pre-drain entry | Drain entry |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Open/close, 4096 | 6.53 ms | 273.79 ms | 422.38 ms | 74.20 ms | 45.58 ms |
+| CLOEXEC open/close, 4096 | 6.27 ms | 271.93 ms | 440.36 ms | 81.09 ms | 46.10 ms |
+| Fstat, 32768 | 9.14 ms | 1589.18 ms | 841.05 ms | 80.14 ms | 89.93 ms |
+| File cycle, 2048 | 60.02 ms | 391.74 ms | 463.03 ms | 236.94 ms | 235.64 ms |
+
+Paired new/reference ratios are 0.616, 0.619, 1.206 and 1.026. The open target
+is demonstrated in this series, not established as a stable result across all
+conditions; the metadata regression must not be omitted from acceptance.
+
+Task snapshots now retain one immutable resource generation. Changed identity
+or resource handles invalidate it at publication; root/cwd remain fresh per-read
+observations. No mutable file attributes, permissions or resource contents are
+cached. Full receipt `oci-services-48dd7f3a7cbd4efaa5885345e965dfb3.json`
+passes concurrent publication, retained old readers, TID reuse and existing
+namespace/IPC/Landlock custody. Its immediate-predecessor comparison
+`oci-services-a8b277f34c8849169e4164fc3450d4c1.json` has paired ratios 0.885
+(opens), 1.175 (CLOEXEC), 1.048 (path stat), 0.836 (fstat), 0.962 (file churn)
+and 1.000 (native IO). Open medians are 53.36/49.15 ms, with individual rounds
+35.39-73.58 ms and materially different context-switch counts. This does not
+justify claiming every workload got faster.
+
+Additional checks passed: full copy/runtime receipt
+`oci-services-036752becfd941c283f1e2675208bfd3.json`, 133 filesystem-buffer and
+46 signal checks, and the production watch suite
+`watch-runtime-58d283d4f1204c84a039f2ed1ef62e32.json`. Explicit sequence-bound
+copy assertions under nondumpable execution pass in
+`oci-services-d147cb942d444464ab80d8e4abf56301.json`, both for an existing
+channel and a newly created protected thread. A second client in the same thread
+cannot register a second channel; that is not a protected-memory failure.
+
+Separating the native journal and copy buffers onto additional cache lines was
+rejected after receipt `oci-services-cb539bc79caf452887c328a5bc3b6fd0.json`:
+seven-round paired ratios were 0.888 for opens but 1.135 for CLOEXEC opens,
+1.023 for fstat and 0.988 for file churn. Its full correctness receipt
+`oci-services-74e79865368f4cd7a8caa4404284ee36.json` also covers immutable-snapshot
+allocation failure, reuse without allocation, and retirement without allocation.
+Correctness alone does not justify retaining that layout experiment.
+
+The shared guarded copier now uses aligned machine words when both addresses
+have matching alignment, retaining exact byte prefixes/tails and the same
+recoverable fault-PC range. It never reads beyond the requested size; pathname
+capture still stops at the first NUL. The fixture checks every pair of 16-byte
+alignments and lengths 0-256, canaries, and precise page-edge fault prefixes.
+Full runtime receipts `oci-services-8f59902d584e4dae8fc7746e0a7a5ef4.json` and
+`oci-services-5a813ba5c06c4d57be48faa983aeda5b.json` pass. The latter also covers
+direct scalar credentials after ID changes and entry into a user namespace.
+No new timing claim follows from these correctness checks.
+
+The production watch suite passed again in
+`watch-runtime-7b1c91aff1a340f1ae98a0bf8467d221.json`. Real musl static/dynamic
+checks, now including cancellation cleanup handlers, passed in
+`oci-services-a0cde14dfa73401388af428cca89bf52.json`.
+
+## glibc Fixture
+
+`integrate_glibc.py` applies checked source boundaries to official glibc 2.41.
+`build_cooperative_glibc.py` builds it in a disposable Debian toolchain under
+shell Shroot, with a checksum-pinned source and `--enable-kernel=5.15`.
+It exports a separate sysroot and static/dynamic probes; it does not replace any
+installed distribution library. The shared libc runner accepts `--libc-kind
+glibc` and applies the same correctness assertions as musl. Compile cancellation
+probes with `-fexceptions` to verify cleanup, not merely eventual thread exit.
+The fixture links CRT objects in their real order: probe code must follow
+`crtbegin`, otherwise static frame registration misses its cleanup handlers.
+Native static and dynamic probes check pending-cancellation cleanup before the
+Shroot comparisons. Build receipt `oci-services-94355d6c745840559da2e8ab62d7b77c`
+exports ABI 6. Native/static/dynamic and kernel/entry checks pass in
+`oci-services-b74547c0eff74f65b5b4b521dbdbc7a1`. The isolated rootfs supplies
+`/lib64 -> lib` for glibc's configured default lookup path. No installed libc
+was changed and this receipt makes no performance claim.
+
+## Caller-Owned Actions And Birth Ownership
+
+ABI 6 moves cancellation checks and kernel/native execution into the common
+caller-compiled action driver. The freestanding runtime returns before libc may
+unwind, then resumes through an explicit continuation. Full runtime receipt
+`oci-services-2ae1b07eaff341b0945906e6ab1c232c` and static/dynamic musl receipt
+`oci-services-d663c9ad44e846c1a40b9c17cfb14ec2` pass. No timing comparison has yet
+been made for this change.
+
+Task snapshots now retain a lazily opened proc-status descriptor, not an umask
+value. Each creation reads offset zero again; CLONE_FS umask changes remain live.
+Concurrent first readers, credential generation changes, nonleader exit and
+final descriptor retirement pass in `oci-services-69119bb6ec7e4e0ea9cb4c6ab826718f`.
+
+A stronger exhaustion test exposed a carrier defect: a creating open can return
+EMFILE after publishing its file. Native-leaf eligible creation now resolves this
+with an unpublished prepare/effect/commit owner. Provisional guest slots retain
+their table turn and reuse the supervisor's exact FD-loan retirement owner when
+name publication fails. No store snapshot spans the guest effect.
+
+Runtime receipt `oci-services-72ef4186461f42edbe0be73491a0ac39` passes live umask,
+EMFILE-before-create/truncate, 24 exclusive/nonexclusive/parent-removal races,
+signals after the native effect, both CLOEXEC states, FD-count restoration and
+exact CREATE/OPEN/CLOSE events. Pre-effect cancellation leaves no name or events,
+including mode-zero files. The fixture preserves import ownership, matching
+distribution metadata; its old host-directory import used real Android modes.
+Those host-permission directories and other native-birth ineligible cases still
+use the original creating carrier and need the same exhaustion fix.
+
+Storage/resource receipt `oci-services-d348bf2ef4424063ae76c92d153e2fb6` passes
+custody allocation/retirement, catalogue conflicts, parent rename/removal,
+read-only commit rejection and SIGKILL at preparation, effect and publication.
+Exclusive maintenance removes unpublished orphans without deleting a committed
+name or its data. These are process-crash tests, not power-loss durability claims.
+
+Expanded receipt `oci-services-28c0dac6b4a0406b8300724f18a7fe99` also passes birth
+promotion to hardlinks, sealed-source snapshot/COW, upper/merged overlay watches,
+the FD filter decision matrix and protected remote filter installation.
+The explicit fsopen carrier fixture exposed a genuine native dup3 regression:
+Shroot's later selector filters did not exempt the native-effect gate. The
+common filter generator now includes it, like the existing raw/watch/task gates;
+application filters are unchanged. Full runtime receipt
+`oci-services-378689e793454776935ce7e2c6bf5d76` and glibc static/dynamic receipt
+`oci-services-4102a2f09e1d4c65a41ac19082c3f7e5` pass after this fix.
+
+Five-round paired receipt `oci-services-f1588e8639c644d98a0d58fb0e606ee6` compares
+ABI 6 with the retained pre-caller-actions ABI 5 runtime and matching libc. No
+build ran during timings. Values are median milliseconds, not best rounds:
+
+| Workload | Native | PRoot | Kernel route | Entry ABI 6 | Entry ABI 5 | Paired new/old |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4096 opens | 7.89 | 263.31 | 435.93 | 45.25 | 55.78 | 0.900 |
+| 4096 CLOEXEC opens | 5.95 | 262.72 | 445.17 | 62.20 | 59.85 | 1.024 |
+| 2048 create/close/rename/unlink | 64.34 | 407.46 | 483.69 | 236.74 | 239.33 | 0.912 |
+| 32768 fstat | 13.49 | 1515.74 | 842.97 | 81.47 | 66.36 | 1.228 |
+| 65536 native IO pairs | 71.30 | 67.46 | 87.61 | 85.55 | 87.43 | 0.978 |
+
+Ratios are medians of paired rounds, not ratios of medians. Native birth improves
+ownership/correctness but has not shown a large throughput gain. Plain opens meet
+the original 77 ms to <=52 ms target in this series; CLOEXEC does not. FD metadata
+regressed against the preceding prototype and needs investigation/repetition.
+
+### Read-Family Expansion
+
+Caller pathname capture now uses the same small argument-selector table as the
+executor. Pathless calls leave the old capture untouched; request sequence
+matching excludes it. An unadmitted carrier withdrawal invalidates its capture
+before reusing the sequence. The decoder fills one authoritative FS request
+instead of building and copying a second one. Access, readlink and read-only
+xattr requests now share bounded inode read windows; writes end the scope.
+
+Seven-round receipt `oci-services-71667426db3c4ae2bb601aec8b323ff2` compares this
+with the retained ABI 6, 32-request notification-batch build. No concurrent
+build/test ran during measurements. Values are median milliseconds:
+
+| Workload | Native | PRoot | Kernel route | Entry | Previous entry | Paired new/old |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4096 opens | 6.77 | 270.62 | 415.98 | 59.02 | 47.62 | 1.182 |
+| 4096 CLOEXEC opens | 6.82 | 269.58 | 406.13 | 52.43 | 46.65 | 1.038 |
+| 32768 fstat | 11.61 | 1584.38 | 849.24 | 68.96 | 66.78 | 0.970 |
+| 2048 file cycles | 49.74 | 394.08 | 459.83 | 208.66 | 208.54 | 1.026 |
+| 32768 access | 26.59 | 1164.72 | 4857.55 | 180.55 | 337.91 | 0.534 |
+| 32768 readlink | 22.00 | 1959.19 | 932.48 | 116.33 | 249.91 | 0.435 |
+| 8192 getxattr | 12.21 | 299.14 | 1412.42 | 237.05 | 374.10 | 0.635 |
+| 65536 native IO pairs | 73.77 | 71.27 | 82.83 | 75.44 | 82.40 | 0.976 |
+
+The read-family gain does not establish the open target: plain opens regressed
+in this series. Increasing the burst limit from 32 to 128 was rejected after
+the seven-round repeat `oci-services-87827b40e02744ec92de8423b05a122d` showed
+paired regressions of 1.109 for fstat, 1.057 for opens and 1.138 for CLOEXEC.
+The retained policy is 32 requests / 100 us, never an anticipated next close.
+
+Default ACL inheritance now prepares native metadata before name publication,
+including promotion to hardlinks. Full runtime receipt
+`oci-services-8037c67ff6544f9ba8b31e474a2768d8` passes inherited modes, EMFILE
+without name/events, exact CREATE/OPEN/CLOSE, cancellation, sequence rollback,
+and the existing race/storage/FD ownership assertions.
+
+### Ordinary Metadata Notifications
+
+The same read-only catalogue now selects kernel USER_NOTIF routing and
+interrupted-SVC restart eligibility. Removing duplicate dead TRACE entries keeps
+the base BPF program smaller despite the broader route. No application filter is
+interpreted in userspace or bypassed.
+
+Full runtime `oci-services-f65671cee5174713bf72ecd9cc336fec`, production watches
+`watch-runtime-1f7e5cb3f06745159ac5b57e8da036f7` (including 515 stacked filters),
+133 fs-buffer checks and 62 fs-signals checks pass. The latter adds all 14
+metadata calls under continuous signals, dumpability changes, SA_RESTART and an
+argument-dependent seccomp denial. An initial combined parent alarm expired
+after its child assertions passed; each mode now has a separate invocation with
+the original per-mode limit and unchanged load/assertions.
+
+Five interleaved rounds `oci-services-19b9821045874069a36597bed03892f4` use the
+same previous ABI 6 reference as above. No build or other test ran during timing:
+
+| Workload | Native | PRoot | Kernel | Entry | Previous kernel | Paired kernel new/old |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 32768 access | 22.20 | 1230.78 | 1104.64 | 240.07 | 5680.91 | 0.193 |
+| 8192 getxattr | 9.91 | 325.02 | 455.08 | 298.85 | 1676.67 | 0.270 |
+| 32768 absolute stat | 48.54 | 2021.75 | 1100.46 | 160.92 | 1072.41 | 0.995 |
+| 32768 fstat | 11.31 | 1479.58 | 917.56 | 73.40 | 968.09 | 1.030 |
+| 4096 opens | 7.46 | 276.81 | 454.56 | 51.17 | 489.43 | 0.969 |
+| 4096 CLOEXEC opens | 6.94 | 284.10 | 454.68 | 50.91 | 449.38 | 1.025 |
+| 65536 native IO pairs | 74.45 | 77.85 | 85.39 | 84.13 | 85.87 | 1.003 |
+
+The substantial access/xattr gain is available without a modified libc. Other
+kernel workloads remain near their controls. Opens meet the <=52 ms target in
+this series, not in every previous series; paired entry/reference ratios are
+0.925 and 0.927. This receipt predates the separate xattr pin experiment.
+
+### Retained Xattr Selection
+
+Path xattrs now reuse the exact O_PATH selection and its membership proof.
+Ordinary reads project live metadata/ACLs from that pin; promoted objects still
+use the catalogue, and writes still acquire their mutation/watch context.
+There is no cached permission decision or second pathname selection. Native
+leaves do not query catalogue-owned overlay attributes when listing xattrs.
+
+Five-round receipt `oci-services-ee55189583c04c8da106236788ee9c2a` compares with
+`cooperative-before-xattr-pins`, which already includes expanded metadata
+notifications. For 8192 getxattr calls, entry median falls 325.57 -> 108.43 ms
+(paired ratio 0.338), kernel 467.93 -> 348.66 ms (0.747). Native is 13.41 ms,
+PRoot 344.90 ms. Open/CLOEXEC medians 55.45/64.49 ms vary in opposite directions
+despite unchanged open code; this is not evidence of a stable open improvement.
+
+`oci-services-de805e69496c4d499ae647d6fc0d69f3` passes live ACL permission denial,
+hidden-private-attribute exclusion, hardlink promotion and an unlinked open FD.
+
+### Catalogue Birth Publication
+
+The same prepare/effect/commit owner now handles host-permission parent
+directories without converting their permissions or physical directory layout.
+Its private staging name never enters the catalogue. A final backing rename
+and catalogue commit publish the accepted creation; kernel move cookies and
+the existing CREATE journal produce exactly one CREATE/OPEN pair. The commit
+receipt transfers ownership before fallible notification/sync retirement.
+
+Full receipt `oci-services-e6f1293bdb1d411684fdbc75c10cd901` passes native and
+catalogue birth cancellation/EMFILE with no name/events, ACL and mode-zero
+creation, conflicts, retained hardlinks, SIGKILL before/after commit and a
+post-commit watch-marker failure that must not discard the published file.
+An initial standalone host test terminated on its injected SIGUSR2 because
+the handler belonged to a different fixture; handler setup now belongs to the
+common test entry, with unchanged cancellation/event assertions.
+Final entry receipt `oci-services-0d7b238e47464bda8a080556c1ac5ee8` additionally
+passes concurrent catalogue births against two independent metadata readers;
+publication closes any foreign read window before its write admission.
+Production watch receipt `watch-runtime-f15683c629924ad6b63ea6132bced618` passes
+native/logical events, signals, protected readers, 515 stacked selectors,
+SCM_RIGHTS, independent owners and writer rollback.
+
+### Final Paired Baseline And Filtered Routes
+
+Seven rounds `oci-services-af3307eec5df44f79fafa2bcc57aa35e` compare the retained
+exact `baafc2a6` runtime and its ABI-4 libc with the current ABI-6 fixture.
+Native/PRoot controls use the same workload. No concurrent build/test ran:
+
+| Workload | Native | PRoot | Kernel | Entry | HEAD entry | Paired entry/HEAD |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4096 opens | 6.28 | 285.51 | 451.39 | 53.37 | 98.05 | 0.514 |
+| 4096 CLOEXEC opens | 7.30 | 292.50 | 450.02 | 54.30 | 109.10 | 0.483 |
+| 32768 fstat | 10.48 | 1525.32 | 920.83 | 84.50 | 638.77 | 0.137 |
+| 2048 file cycles | 59.60 | 435.91 | 518.97 | 256.22 | 307.31 | 0.833 |
+| 65536 native IO pairs | 77.11 | 78.93 | 88.86 | 86.93 | 86.10 | 1.020 |
+
+This establishes the requested 1.5x open improvement against HEAD in this
+paired experiment, not a universal 48 ms latency bound. Creation cycles improve
+less, and native IO remains within a few percent of the previous entry route.
+The subsequent foreign-read-window closure fix affects birth publication,
+not these existing-open paths.
+
+Five-round filtered receipt `oci-services-125e277894c94024ac9777817db18493`
+retains a real argument-dependent kernel filter in every timed process.
+Against `cooperative-before-burst-limit`, access median is 1031.38 vs 4787.87 ms
+(paired 0.217); getxattr 311.10 vs 1437.57 ms (0.221). These are ordinary
+notification gains: installed filters revoke direct execution, as confirmed
+by entry/kernel timings and counters. Other calls do not inherit those ratios.
+In particular, the existing sandbox-wide PROC FD selector still traces ordinary
+pread/pwrite (3024.92 ms vs native 77.92 ms); its paired ratio to the old filtered
+route is 0.982, not a new regression or native-IO acceleration. It protects
+future typed/received descriptors after applications deny filter installation.
+Replacing that selector needs its own admission/custody design, not removal.
+
+### Final Regression Coverage
+
+All final checks use isolated runtime helpers under shell UID 2000. They do not
+install an APK or replace a distribution's libc. The libc integration remains
+opt-in; stock browser checks verify the ordinary syscall route, not a patched
+Chromium libc or strict security isolation.
+
+| Check | Result | Receipt |
+| --- | --- | --- |
+| Full runtime and storage models | Pass, including pre/post-commit crash and publication-error ownership | `oci-services-e6f1293bdb1d411684fdbc75c10cd901` |
+| Final entry and concurrent catalogue births | Pass, including two readers across birth completion | `oci-services-0d7b238e47464bda8a080556c1ac5ee8` |
+| Production watches | Pass, including independent owners and 515 stacked selectors | `watch-runtime-f15683c629924ad6b63ea6132bced618` |
+| Buffers and signals | 149 checks pass; includes all 14 metadata families | `resource-fs-buffer-results.json`, staging `407669c83b6f4338bf427df966319a5d` |
+| Event fairness | 16 checks pass | `resource-event-fairness-results.json`, staging `f3de8cc0ab4045fa95c98f8d034b23d4` |
+| Final glibc static/dynamic | Pass, native controls and kernel/entry routes; cancellation, unwinding, FIFO, signals, fork/exec and filters | `oci-services-3c6dd337551e428396e6fe219116fe60` |
+| Stock Chromium automatic sandbox | 4/4 pass; rendered JS and PNG | `browser-stage-results-256d91dbd1ae448ead6bc4c972d76b2f` |
+| Stock Chromium set-ID sandbox | 4/4 pass; includes expected rejection of the unadmitted helper | `browser-stage-results-4389263b51c64017b3fbc87bc17f3e55` |
+
+The final full-runtime model run precedes only the foreign-read-window closure
+at birth completion; the final entry and all subsequent regressions include it.
+Seven-round paired musl checks and the filtered series above also run their
+static/dynamic correctness controls before timing. No test helper or browser
+process remains after final cleanup. Kernel minimum 5.15 and storage family 17
+are unchanged.

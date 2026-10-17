@@ -79,6 +79,7 @@ static void execute(struct md_filesystem *fs, const struct md_fs_request *q,
     *out=(struct md_fs_result){.fd=-1};
     int descriptor=q->operation==MD_FS_FXATTR, path=q->path[0] && *q->path[0];
     int fd=q->directory[0];
+    int owned=-1;
     struct md_fs_anchor *opened=NULL;
     const struct md_fs_anchor *origin=q->origin[0];
     if (descriptor) {
@@ -89,12 +90,21 @@ static void execute(struct md_filesystem *fs, const struct md_fs_request *q,
             .path={q->path[0],NULL},.flags=O_PATH|O_CLOEXEC|((q->flags&AT_SYMLINK_NOFOLLOW) ? O_NOFOLLOW : 0)};
         struct md_fs_output capture=output ? *output : (struct md_fs_output){0};
         capture.origin=fs->mounts ? &opened : NULL;
+        capture.native_open_plan=!!capture.origin;
         md_fs_view_execute(fs,&open,out,&capture);
+        if (out->error==-EXDEV && capture.native_open_plan) {
+            /* Non-inode providers and special endpoints decline before an
+             * effect. Their ordinary O_PATH selection keeps its own policy. */
+            capture.native_open_plan=0;
+            md_fs_view_execute(fs,&open,out,&capture);
+        }
         if (out->error) return;
-        fd=out->fd; out->fd=-1; origin=opened;
+        owned=out->fd;
+        fd=owned>=0 ? owned : md_fs_anchor_fd(opened);
+        out->fd=-1; origin=opened;
     }
     selected(fs,q,fd,origin,out,output);
-    if (path) close(fd);
+    if (owned>=0) close(owned);
     md_fs_anchor_release(opened);
 }
 void md_fs_xattr(struct md_filesystem *fs, const struct md_fs_request *q,

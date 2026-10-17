@@ -153,6 +153,8 @@ struct md_fs_output {
     /* Opt-in: a checked existing regular file may return one owned O_PATH
      * anchor instead of a data FD. Completion is explicitly MD_OPEN_PLAN. */
     int native_open_plan;
+    /* Worker-owned unpublished creation. No pointer crosses a wire protocol. */
+    struct md_inode_birth **birth;
     int (*control)(void *,const struct md_control_file_ops *,void *,const struct md_identity *,int);
     void *control_context;
     struct md_landlock_policy **landlock;

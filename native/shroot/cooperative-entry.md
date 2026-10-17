@@ -3,20 +3,29 @@
 The namespace bootstrap exposes an opt-in, libc-independent entry descriptor
 through the private `MD_AT_COOPERATIVE` auxiliary vector entry. Unmodified
 programs ignore it and retain their syscall route. This is an internal versioned
-contract, not an installer option. An isolated source-built musl fixture exercises
-it without replacing the libc of any installed distribution.
+contract, not an installer option. Isolated source-built musl and glibc fixtures
+exercise it without replacing the libc of any installed distribution.
 
 ## Call Contract
 
 `cooperative_entry.h` accepts a syscall number and six original 64-bit arguments,
-with one zero-initialized opaque handle per thread. ABI version 4 supplies a
-runtime-owned syscall-offer table and accepts a caller-owned kernel continuation:
+with one zero-initialized opaque handle per thread. ABI version 6 supplies a
+runtime-owned syscall-offer table and a caller-compiled action driver,
+`md_entry_invoke`, with these terminal results:
 
 - `COMPLETED` supplies the raw Linux result, including negative errno.
 - `DECLINED` has no committed side effect; the caller may execute its original
   SVC. Unsupported numbers, nested entry and inherited clients decline before
   request publication.
 - `UNKNOWN` is a terminal protocol failure, never permission to replay.
+
+The runtime can yield a cancellation checkpoint, the original kernel call, or
+one admitted native effect to this driver. The action executes after the runtime
+C frame has returned; the driver then calls the explicit continuation. This
+keeps libc's forced cancellation unwind within caller-owned unwind metadata.
+The shared worker request contains only the syscall number and arguments, never
+libc callbacks or continuation pointers. An abandoned continuation is not
+replayed. Channel ownership and native-effect retirement remain runtime-owned.
 
 The fixed handle is three pointer-sized opaque words, not a copy of the runtime's
 transport structure. The runtime interprets its channel/owner and reentry/backoff
@@ -35,17 +44,19 @@ threads run. The implementation routes offered calls as follows:
 | Route | Ownership |
 | --- | --- |
 | Caller | Native IO, time/futex, unknown calls and original-stack operations such as clone, exec and signal return retain their ordinary syscall site. No channel registration or synchronization. Dynamic FD selectors and kernel seccomp still apply. |
-| Worker | Stat/statx, directory reads, readlink, mkdir/unlink/rename/link/symlink and path access/ownership/mode operations use the existing filesystem dispatcher and checked task-memory copying. |
-| FD | Existing regular-file `openat`, including writable/append/truncate flags, can use a checked native plan. Known ordinary-file `close` and `fcntl(F_GETFD/F_SETFD)` share that protocol and the existing file-table owner. Other `openat`/`fsopen` calls publish a request before their original kernel continuation; its exact notification admits descriptor publication. |
-| Task | Other FD producers, filesystem/control calls, networking, identity, UTS, namespaces and SysV IPC enter the existing kernel-admitted dispatcher and completion owners in the original guest thread. |
+| Worker | Stat/statx/statfs, directory reads, readlink, mkdir/unlink/rename/link/symlink, access/ownership/mode/timestamp operations and path/link/FD xattrs use the existing filesystem dispatcher and checked task-memory copying. |
+| Value | Scalar UID/GID reads use current registry credentials and the same user-namespace translation as the ordinary supervisor path. They neither retain a filesystem read window nor cache caller credentials. |
+| FD | Existing regular-file/directory `openat` and `openat2`, including O_PATH and writable/append/truncate flags, can use a checked native plan. Known ordinary-file close, dup/dup3, lseek and supported fcntl commands share that protocol and the existing file-table owner. Other open/fsopen calls retain their exact kernel publication carrier. |
+| Task | Other FD producers, filesystem/control calls, networking, credential mutations and pointer-bearing queries, UTS, namespaces and SysV IPC enter the existing kernel-admitted dispatcher and completion owners in the original guest thread. |
 
 The task route, failed registration and a worker's explicit pre-execution decline
 invoke the kernel continuation and return `COMPLETED`. The callback receives the
 original number and arguments for that continuation; the broker never calls a
-guest function pointer. An unfiltered native-open plan also uses the callback
-for a harmless zero-count futex wake before publication and before the native
-effect, entering libc's cancellation check without cancelling after a successful
-open. This is runtime-private preflight, not an application futex operation.
+guest function pointer. An unfiltered native-open plan invokes the optional
+cancellation checkpoint in the guest before publication and before the effect,
+never after a successful open. Ordinary wrappers leave it NULL; cancellation
+wrappers supply libc's own check. No synthetic futex or other kernel call is
+needed for this checkpoint. The kernel continuation receives only actual calls.
 The musl integration uses **one SVC site with entry both enabled and disabled**,
 preserving instruction-pointer-sensitive application filter policy. Callers that
 omit this callback use the adapter's ordinary SVC, not its privileged raw gate;
@@ -74,6 +85,36 @@ is a terminal `EFAULT`, not a replay. A request cannot supply credentials or a
 namespace identity: the registered task selects a fresh authoritative snapshot.
 Logical chroot, mount views, credentials, DAC and Landlock remain engine policy.
 
+The task registry retains an immutable resource generation for repeated reads.
+Each admitted read owns one reference instead of independently retaining every
+namespace and credential object. Publishing changed credentials or resource
+handles replaces that generation; old readers keep their exact snapshot until
+release. Root/cwd are captured afresh under their filesystem owner, and resource
+contents such as file-table entries and mount topology stay live. This shared
+registry path also serves ordinary kernel notifications and filesystem RPC.
+Retirement invalidates admission before releasing the registry reference; no
+allocation is required to retire or reap a task.
+
+For cooperative calls, the caller can capture two bounded path operands before
+publication, using the same string-argument selectors as the worker. Bootstrap
+compiles those selectors into a bounded per-image byte table; FD-only calls do
+not construct a filesystem request just to discover that they have no paths.
+Openat2 shares pathname capture, while the executor still reads and validates
+its open_how structure. The capture is bound
+to the request sequence and original addresses, never reused as a pathname or
+permission cache. Uncaptured operands retain checked remote copying. The shared
+`guest_copy.S` owner stops strings at the first NUL instead of copying a whole
+page first; ordinary task-affine adapters use this same implementation.
+
+Small stat/statx/statfs, readlink and xattr outputs travel in a sequence-bound
+response buffer. After the engine finishes, the caller copies them to its own
+destination. The supervisor converts only synchronous SIGSEGV/SIGBUS at the
+published copy PCs into EFAULT, with an active copy owned by that task (or its
+ordinary dispatch phase). Unrelated signals are delivered normally. A partial
+copy is terminal; it never retries the operation. Directory reads retain
+synchronous checked output because cursor advancement requires a successful
+write. Large outputs retain the existing transport.
+
 Except for admitted native plans below, FD-producing and task-affine calls reuse the existing kernel result-custody
 protocol, file-table/OFD ordering, atomic ADDFD publication and protected-caller
 transport. No second cooperative FD-delivery channel is introduced. An accepted
@@ -85,13 +126,14 @@ execute it. The listener matches task, sequence, number and all six arguments
 before adoption. A kernel denial before admission withdraws only that request;
 at admission, a receipt retires the now-copied shared request record while the original
 kernel continuation supplies the authoritative FD or errno. Interruption never
-replays creation or truncation. A new file still needs that original notification;
-accelerating opens of existing files does not remove birth publication cost.
+replays creation or truncation. Native-leaf eligible births instead use the
+unpublished prepare/effect/commit protocol below; other creating endpoints retain
+the original notification carrier.
 
 ### Native FD Plans
 
 The engine can return one owned `O_PATH` anchor instead of a readable data FD for
-an admitted existing regular file. Resolution, credentials, DAC, Landlock and
+an admitted existing regular file or directory. Resolution, credentials, DAC, Landlock and
 mount checks use the same engine. Identity is checked with `fstat` on the opened
 pin, not a preceding pathname lookup. That verified identity and owned pin become
 the existing FD-origin object without another open or stat. The guest reopens
@@ -100,14 +142,24 @@ supervisor's proc FD, so rename, unlink and pathname replacement cannot redirect
 the data open. Each open creates an independent native OFD. Only the guest owns
 the data FD; the worker reserves its origin update before any effect.
 
-A leaf assembly gate executes `openat`, ordinary-file `close` or `F_SETFD` and
+Native-leaf path resolution can retain the final O_PATH descriptor and its fresh
+fstat together, avoiding a separate pathname stat followed by reopening. The
+walk owns that descriptor until transfer or failure cleanup. Unpinned metadata
+lookups still compare identity after opening an encoded-metadata file: a prior
+pathname stat is not proof that the later descriptor names the same object.
+
+A leaf assembly gate executes `openat`, ordinary-file `close`, `dup`, `dup3`,
+regular-file `lseek` or admitted `fcntl` commands and
 publishes a native-result journal. Shroot's filter admits those numbers only at
 that exact instruction; this is still a real kernel syscall, without its ordinary
 notification/ptrace round trip. Application filters are not bypassed: their
 installation revokes eligibility as described below. Known FD flags can be read,
 or set to their current value, under the file-table turn without another kernel
-effect. Other fcntl operations, selector-owned descriptors and active FD loans
-retain existing handling.
+effect. F_GETFL/F_SETFL use the kernel's actual open description, and
+F_DUPFD/F_DUPFD_CLOEXEC use the common FD-mutation owner. Directory seeks retain
+their acknowledged cursor path. Selector-owned descriptors and active FD loans
+retain existing handling. FD-only operations pin only the authenticated live
+task's file table, not unrelated namespace resources.
 
 The original file-table turn owns the operation until result bookkeeping and pin
 retirement complete. The journal distinguishes not-started, executing, completed,
@@ -131,18 +183,51 @@ The synchronous receipt remains valid when the worker wins the publication race.
 Writable, append and truncate opens prepare any required copy-up in the normal
 engine. Preparation never performs the application's data open or truncation:
 the guest kernel open owns those effects, including `EMFILE` before truncation.
-Internal COW copying keeps its existing IO and publication contract. Nonexclusive `O_CREAT` may
-use a plan when the file already exists. A missing name declines before creating
-anything; exclusive creation goes directly to its original carrier. After a
-declined creating-open probe, the caller skips speculative plans for 128 creating
-opens, then samples again. This hint retains no pathname, errno or permission
-result, does not affect ordinary opens, and never skips the engine or an effect.
-Pin-only preparation does not read the guest umask: it cannot create a name.
-The creating carrier captures the live mask normally, including after a decline.
-New-file creation is not yet SVC-free. Directories, FIFOs,
+Internal COW copying keeps its existing IO and publication contract. Nonexclusive
+`O_CREAT` may use a plan when the file already exists. Missing regular files in
+native-leaf eligible or host-permission catalogue directories use an explicit
+unpublished birth owner:
+
+1. Prepare a hidden backing and O_PATH pin with the live guest identity, umask
+   and parent policy. No name or CREATE event is visible, and no database
+   snapshot is held across the caller's effect.
+2. The caller opens that pinned object in its own file table. `EMFILE` precedes
+   publication. The prepared FD-origin update includes provisional custody,
+   including the application's actual CLOEXEC flag.
+3. Revalidate the parent, mount/storage write policy and destination, then
+   publish with `RENAME_NOREPLACE`. Only this commit makes the FD returnable.
+   The watch owner translates the hidden move to CREATE/OPEN exactly once.
+
+If publication fails, the existing task-action/FD-loan owner closes the exact
+provisional FD under its original table turn before the error is returned.
+An exclusive loser preserves the winner and returns `EEXIST`; a nonexclusive
+loser may resolve the winning name only after its private effect is compensated.
+Cancellation before the effect removes the unpublished backing. Process death
+releases kernel FDs; exclusive store maintenance collects orphaned backings.
+There is no predicted close, deferred visible creation or cached negative name.
+Default ACLs are inherited into the private backing before publication, using
+the existing native metadata owner. They override umask exactly as ordinary
+creation does, and survive later hardlink promotion. Host-permission directories
+retain their real permissions and catalogue layout: a separate random backing
+name becomes visible only with the namespace transaction. The staging name
+never acquires a catalogue identity, so queued preparation events cannot become
+application OPEN/CLOSE events. Its final move publishes CREATE/OPEN in order.
+The commit receipt transfers ownership at SQLite commit, before watch-marker,
+checkpoint or unlock retirement; a later error cannot authorize discard/replay.
+Completion ends any read window opened by another channel since preparation,
+before admitting the publication transaction. Existing-file retirement does
+not acquire that write boundary.
+Other ineligible providers retain their original creating carrier rather than
+claiming native-plan semantics.
+Pin-only existing-file preparation does not need an umask;
+birth preparation reads it freshly through the retained proc-status descriptor.
+FIFOs,
 devices, typed providers, executable snapshots and selected-object reopens retain
 their current route before a data open. Inode-backed mount paths may produce a
 plan; nested/native providers do not inherit that capability implicitly.
+Openat2 captures and validates the exact known open_how structure, including
+BENEATH/IN_ROOT/symlink restrictions; extended sizes retain the original decoder.
+O_PATH symlink endpoints also retain their existing route.
 
 Deferred FIFO opens retain their helper and unpublished endpoint in the buffer
 service. Their guest waits in an interruptible native poll. Completion wakes the
@@ -170,6 +255,10 @@ sequentially consistent handshake: work observed during parking forces a
 nonblocking poll, which still services other sources before the next burst.
 Clock reads are batched every eight empty worker iterations and 32 guest
 iterations; the budget remains time-based, not a presumed fixed iteration cost.
+At the request/time burst limit, the worker releases the store window and may
+spend at most another 25 us retiring native effects it already admitted. It does
+not consume a new request or predict a following close. With no outstanding
+effect this final drain neither spins nor reads the clock.
 
 The bootstrap resolves `__kernel_clock_gettime@LINUX_2.6.39` from the kernel's
 `AT_SYSINFO_EHDR` once, before guest threads exist. Bounded guest spinning uses
@@ -193,17 +282,23 @@ of an in-flight channel.
 
 `execution_window` is transport-independent bounded resource reuse. The current
 provider retains the existing inode read scope for consecutive eligible stat
-calls and native-open preparation in a single uncomplicated store. Writable
-preparation can join only while it needs no metadata mutation. COW returns the
-explicit internal `MD_OPEN_NEEDS_WRITE` admission result before any change; the
+calls, FD metadata, access checks, readlink, xattr reads/lists and native-open
+preparation in a single uncomplicated store. Xattr writes do not join a read
+scope. Writable
+preparation can join only while it needs no metadata mutation. COW, image
+promotion and FIFO-channel preparation return the explicit internal
+`MD_OPEN_NEEDS_WRITE` admission result before any change; the
 executor ends its window and prepares once outside it. This is not a retry of a
-completed open and never exposes an internal `EAGAIN` to the application.
+completed open and never exposes an internal `EAGAIN` to the application. An
+interrupted preflight is not an executed operation: the original signal/restart
+owner retains EINTR/SA_RESTART semantics instead of a saved cancellation errno.
 Ready operations from the resource-waiting queue share the same window admission
 as new requests; they cannot mutate metadata inside a preceding read scope.
 Relative requests first capture the live
 cwd or dirfd anchor under the existing FS/file-table turns. Path-only operations
-borrow that retained anchor's descriptor; data and empty-path operations retain
-their actual OFD capture. A relative read scope additionally requires the exact
+borrow that retained anchor's descriptor, as do fstat/fstatfs. Data/offset and
+descriptor mutation operations which need the actual OFD still capture it.
+A relative read scope additionally requires the exact
 base-mount anchor and descriptor, never a stale pathname or cached FD number.
 Nested mounts/providers and restricted
 native roots do not opt into this scope. Count/time expiry, provider changes,
@@ -211,6 +306,27 @@ delegation, mutations, parking and teardown end it. It caches neither stat
 results nor credentials/permission decisions; native attributes are read anew.
 The store gate supplies the existing writer/version ordering. Kernel IO or
 descheduling can extend a scope; 100 us is not a real-time latency guarantee.
+
+Kernel notifications use this same bounded admission window when the listener
+already has queued work. The worker checks readiness with a zero-time poll before
+each additional receive, never spins for a future syscall, and releases the scope
+before delegation, result delivery, queued resource turns or watch service.
+The shared metadata catalogue selects stat/statx/statfs, access, readlink and
+path/link/FD xattr reads for this route, including unmodified and filtered
+programs. It also defines the read-only interrupted-SVC restart set. Cursor and
+mutation calls are not added to that set. Protected memory and restricted native
+roots retain the task-affine adapter when direct capture is unavailable.
+Exactly one owner reads the listener. A request cancelled between readiness and
+receive may return ENOENT; it does not authorize waiting for a replacement call.
+The notification-batch call counter includes such receive attempts. This reuse
+also applies to filtered programs, without moving their calls outside seccomp.
+
+An inode-produced native-leaf anchor may retain a membership proof with its
+exact O_PATH identity and store lifetime. Fstat can then skip reconstructing
+membership through proc paths. Every call still reads live native attributes
+and checks the catalogue first, so promotion to hardlinks, OCI or COW wins over
+the original native representation. This retains neither modes/owners nor a
+pathname result. Unknown/imported provenance uses the ordinary resolution path.
 
 ## Sandboxes And Debuggers
 
@@ -224,8 +340,9 @@ without first issuing helper syscalls. Debugger tracing and protected native-roo
 restrictions also select the existing kernel-admitted route.
 
 Thus the entry contract works in sandboxed programs, but **their filtered calls
-still cross kernel seccomp at the caller-supplied SVC**. This change does not accelerate
-those calls through shared memory, emulate arbitrary BPF, alter filters, or
+still cross kernel seccomp at the caller-supplied SVC**. Already-queued calls can
+share a bounded worker read window, but they do not acquire the direct-entry
+speedup. The runtime does not emulate arbitrary BPF, alter filters, or
 exempt helpers from them. Concurrent filter installation still affects any
 kernel helper calls already in flight. A client-writable flag is an optimization,
 not authority or a security boundary; shared memory is cooperative transport for
@@ -263,7 +380,8 @@ against an existing sysroot, keeping libc unchanged when adding workloads.
 Cancellation-point assembly, clone/vfork and signal-return assembly remain
 unchanged. The cancellation-point C wrapper offers FD calls through a continuation
 that invokes musl's original cancellation assembly; its post-`EINTR` check is
-unchanged. A thread with asynchronous cancellation enabled retains its native
+unchanged. The native-open checkpoint uses musl's existing __testcancel.
+A thread with asynchronous or masked cancellation retains its native
 continuation. Non-cancellation-point wrappers do not change cancellation state:
 a signal handler may `siglongjmp` past the entry frame. The supervisor's common
 stop owner retires worker memory before delivering signals. Tests cover blocked
@@ -291,8 +409,9 @@ instruction-pointer-sensitive filters, FD results and exclusive creation without
 replay, and signal-handler `siglongjmp` with reused output memory. It also
 exercises Landlock's distinction between metadata and file-data
 access, and repeated SIGKILL/exit_group while peers use active channels.
-The native journal fixture stops real `openat`, `close` and `F_SETFD` at every
-instruction around the effect (64 cases, including failed open), verifies the
+The native journal fixture stops real `openat`, `close`, `F_SETFD`, `dup`, `dup3`
+and `F_DUPFD_CLOEXEC` at every instruction around the effect (112 cases,
+including failed open), verifies the
 actual FD table and exercises restart classification. Entry tests additionally
 hold 192 live opens, replace FD flags, use dup/close_range, replace/unlink a pinned
 path, cancel a pending plan, exit before its effect and check exact inotify
@@ -306,7 +425,7 @@ checks cover both requests and completed native effects.
 separately. `cooperativeDescriptors` counts FD-request adoptions and
 `cooperativeNativeYields` counts avoided idle spins. FD receipts also contribute
 to `cooperativeCompleted`; that total is not an SVC-free syscall count.
-`nativeOpen`, `nativeClose` and `nativeFlags` count admitted native plans/flag
+`nativeOpen`, `nativeClose`, `nativeFlags`, `nativeDuplicate` and `nativeSeek` count admitted native plans/flag
 queries, not necessarily successful effects (a stop can cancel a plan).
 `nativeDeferred` counts completed effects whose caller returned before the
 worker's receipt; a concurrent 1000-iteration contract verifies that retirement
@@ -329,7 +448,16 @@ those nested values. Profiling clock samples and diagnostic counter increments a
 on ordinary launches. The fixture also reports guest CPU time and context
 switches; `--scale` lengthens short workloads. `--reference-build` interleaves
 another entry-enabled runtime against the same libc/store and records verified
-binary hashes. `--condition` records charging or other session conditions.
+binary hashes. When that runtime has an older entry ABI, `--reference-musl`
+selects its preserved matching static/dynamic libc fixture. Both routes must
+pass their correctness and direct-completion assertions before timing; an ABI
+mismatch silently falling back to syscalls is not a valid comparison.
+`--reference-kernel` also interleaves the reference runtime with entry disabled,
+so shared adapter changes are measured separately from cooperative acceleration.
+`--busybox PATH` runs an unmodified musl-linked BusyBox through both modes in the
+isolated store: shell pipelines, traversal, archive/restore, hashes, metadata,
+hardlinks and symlinks. It does not replace an installed environment's libc.
+`--condition` records charging or other session conditions.
 Reports retain both mode medians and median within-round ratios; a ratio of
 independent medians can mislead when storage latency changes during the series.
 Imported and logically created directories are

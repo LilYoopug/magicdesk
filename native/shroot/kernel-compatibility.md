@@ -103,15 +103,19 @@ checked process-memory copying and notification wake gate. It adds no post-5.15
 kernel primitive. Runtime admission failure selects the caller-owned SVC
 continuation; installed application filters do not acquire an unfiltered direct
 route. Kernel-carried `openat`/`fsopen` records retire at exact notification
-admission; new-file creation reuses the existing publication protocol.
+admission. Eligible native-leaf and host-permission catalogue births use an
+unpublished backing and baseline `renameat2(RENAME_NOREPLACE)` after the caller's
+data-open effect; catalogue publication also uses its existing SQLite commit.
+Other providers retain their original carrier. Storage format 17 is unchanged.
 Existing regular-file plans, including writable/append/truncate opens, retain
 one engine-owned O_PATH pin and use
 a native guest `openat` through `/proc/SUPERVISOR/fd/PIN`, with exact-PC admission
-in Shroot's filter. `close` and FD flags use the same file-table owner and native
-result journal. Stop recovery uses existing GET/SETREGSET on AArch64; cancellation
-preflight uses zero-count `FUTEX_WAKE_PRIVATE`. None requires a post-5.15 kernel
+in Shroot's filter. `close`, duplication, regular-file seeks and FD flags use the
+same file-table owner and native result journal. Stop recovery uses existing
+GET/SETREGSET on AArch64; cancellation preflight invokes libc's own check in the
+caller-owned action driver, without a synthetic syscall. None requires a post-5.15 kernel
 operation. Denied native reopens return their real errno; unsupported providers
-decline before a data-open effect, not after it. A 64-boundary instruction-stop
+decline before a data-open effect, not after it. A 112-boundary instruction-stop
 fixture checks actual open/close/flag results under shell UID 2000. Deferred
 FIFO completion uses the existing `ppoll`, ptrace interruption/restart and
 owned-child reaping, not a new cancellation syscall or polling timer.
@@ -120,9 +124,23 @@ fork/exec, protected pointers, namespace changes, signal-handler memory
 abandonment, argument/IP filter policy and TSYNC revocation. The isolated musl
 integration additionally checks real libc threads, cancellation and exec,
 cwd/dirfd replacement, FIFO signals/restarts and exact FD retirement.
-The version-4 libc boundary adds only a bounded userspace offer-table lookup and
-a fixed opaque handle. Runtime progress/feedback reuse the existing channel;
+The version-6 libc boundary uses a bounded userspace offer-table lookup, a fixed
+opaque handle and caller-compiled actions with ordinary unwind metadata.
+Runtime progress/feedback reuse the existing channel;
 there is no new allocation syscall, loader dependency or kernel capability.
+
+Notification read-window batching relies on the baseline listener poll and
+RECV cancellation contract, not on O_NONBLOCK (RECV does not honor that flag).
+`namespace_broker.c` is the sole receiver and checks zero-time POLLIN before each
+additional receive. On cancellation after readiness, Linux 5.15 consumes the
+pending request count and returns ENOENT when no INIT notification remains;
+it does not wait for a future guest call. The native notification-lifecycle
+fixture repeats that exact readiness/cancellation/receive ordering 32 times,
+holding the child before its next syscall, and checks readiness is then clear.
+Batch limits, provider changes and every handoff release the same bounded store
+scope as cooperative calls. No WAIT_KILLABLE_RECV or newer-kernel behavior is
+required. Full watch, buffer, signal and continuous-reader/writer fixtures cover
+the shared worker's cancellation and fairness paths.
 
 Ready open results may reuse a ptrace-stopped syscall through the existing fstat
 notification route without changing application registers or its return PC.

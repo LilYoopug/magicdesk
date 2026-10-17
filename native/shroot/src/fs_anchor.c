@@ -28,6 +28,10 @@ struct md_fs_anchor *md_fs_anchor_retain(struct md_fs_anchor *p) {
 }
 void md_fs_anchor_release(struct md_fs_anchor *p) { md_fd_object_release(md_fs_anchor_object(p)); }
 int md_fs_anchor_fd(const struct md_fs_anchor *p) { return p ? p->fd : -1; }
+unsigned md_fs_anchor_kind(const struct md_fs_anchor *p) { return p ? p->kind : 0; }
+int md_fs_anchor_native_leaf(const struct md_fs_anchor *p,const struct md_inode_store *s,int fd) {
+    return p && p->native_leaf && fd==p->fd && md_inode_lifetime_same(p->lifetime,md_inode_store_lifetime(s));
+}
 unsigned md_fs_anchor_policy(const struct md_fs_anchor *p) {
     return !p || !p->view ? 0 : md_mount_policy_flags(p->mount ? &p->mount->policy : &p->view->base.policy);
 }
@@ -107,6 +111,7 @@ void md_view_capture(struct md_filesystem *fs, struct md_mount_namespace *view,
     if (transfer) {
         st.st_dev=out->open_completion.backing_device;
         st.st_ino=out->open_completion.backing_inode;
+        st.st_mode=out->open_completion.mode;
     } else if (!r && fstat(out->fd,&st)) r=-errno;
     int fd=-1;
     if (!r && transfer) fd=out->fd;
@@ -125,6 +130,8 @@ void md_view_capture(struct md_filesystem *fs, struct md_mount_namespace *view,
         out->open_completion=(struct md_open_completion){0};
         return;
     }
+    p->kind=st.st_mode&S_IFMT;
+    p->native_leaf=out->open_completion.native_leaf;
     *output->origin=p;
     if (transfer) out->fd=-1;
 }

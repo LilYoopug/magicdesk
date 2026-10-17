@@ -13,6 +13,7 @@
 #include <string.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 void test_fd_origins(void);
@@ -224,6 +225,145 @@ static void network_resource_transaction(void) {
     assert(!md_network_namespace_managed(child.network));
     assert(!md_resources_release(&child)); md_identity_release(&identity);
 }
+static void file_table_snapshot(void) {
+    struct md_task_registry *registry=md_task_registry_create(); assert(registry);
+    struct md_identity id=md_identity_new(0,0);
+    struct md_task_resources task; assert(!md_resources_init(&task,NULL));
+    pid_t tid=getpid()+1234;
+    assert(!md_task_registry_publish(registry,tid,tid,&id,&task));
+    struct md_fd_origins *files;
+    assert(md_task_registry_files(registry,tid,tid+1,&files)==-EPERM && !files);
+    assert(md_task_registry_files(registry,tid+1,0,&files)==-ESRCH && !files);
+    assert(!md_task_registry_files(registry,tid,tid,&files) && files==task.files);
+    md_task_registry_retire(registry,tid,&id);
+    struct md_fd_origins *missing;
+    assert(md_task_registry_files(registry,tid,0,&missing)==-ESRCH && !missing);
+    md_task_registry_reap(registry,tid); md_task_registry_destroy(registry);
+    assert(!md_resources_release(&task));
+    md_fd_origins_unpin(files); md_identity_release(&id);
+    puts("PASS file-table snapshot: shared admission, retained identity, denied peer and retired task");
+}
+struct mask_reader {
+    const struct md_task_snapshot *snapshot;
+    pthread_barrier_t *start;
+};
+static void *read_mask(void *argument) {
+    struct mask_reader *reader=argument;
+    /* EVENT_WAIT: all readers race the same first proc-handle publication. */
+    int result=pthread_barrier_wait(reader->start);
+    assert(!result || result==PTHREAD_BARRIER_SERIAL_THREAD);
+    for (unsigned i=0;i<32;++i) assert(md_task_snapshot_umask(reader->snapshot)==0027);
+    return NULL;
+}
+static void live_umask_snapshot(void) {
+    int before=descriptors();
+    struct md_task_registry *registry=md_task_registry_create(); assert(registry);
+    struct md_identity id=md_identity_new(0,0);
+    struct root_thread state={.mutex=PTHREAD_MUTEX_INITIALIZER,.condition=PTHREAD_COND_INITIALIZER};
+    pthread_t owner; assert(!pthread_create(&owner,NULL,hold_thread,&state));
+    assert(!pthread_mutex_lock(&state.mutex));
+    /* EVENT_WAIT: the fixture retains this native task until proc checks finish. */
+    while (!state.tid) assert(!pthread_cond_wait(&state.condition,&state.mutex));
+    assert(!md_task_registry_publish(registry,state.tid,getpid(),&id,NULL));
+    struct md_task_snapshot first,second;
+    assert(!md_task_registry_read(registry,state.tid,0,&first));
+    mode_t saved=umask(0027);
+    pthread_barrier_t start; assert(!pthread_barrier_init(&start,NULL,8));
+    struct mask_reader reader={&first,&start}; pthread_t readers[8];
+    for (unsigned i=0;i<8;++i) assert(!pthread_create(&readers[i],NULL,read_mask,&reader));
+    /* EVENT_WAIT: join every reader before changing the shared kernel umask. */
+    for (unsigned i=0;i<8;++i) assert(!pthread_join(readers[i],NULL));
+    assert(!pthread_barrier_destroy(&start));
+    assert(descriptors()==before+1);
+    for (unsigned mask=0;mask<=0777;mask+=7) {
+        umask(mask); assert(md_task_snapshot_umask(&first)==mask);
+    }
+    umask(0071);
+    id.no_new_privs=1;
+    assert(!md_task_registry_publish(registry,state.tid,getpid(),&id,NULL));
+    assert(!md_task_registry_read(registry,state.tid,0,&second));
+    assert(first.owner!=second.owner && md_task_snapshot_umask(&second)==0071);
+    assert(descriptors()==before+2);
+    md_task_snapshot_release(&first);
+    assert(descriptors()==before+1);
+    state.release=1; assert(!pthread_cond_signal(&state.condition));
+    assert(!pthread_mutex_unlock(&state.mutex));
+    /* EVENT_WAIT: the proc descriptor must observe death, never a replacement TID. */
+    assert(!pthread_join(owner,NULL));
+    assert(md_task_snapshot_umask(&second)==-ESRCH);
+    md_task_registry_retire(registry,state.tid,&id);
+    md_task_registry_destroy(registry);
+    assert(descriptors()==before+1);
+    md_task_snapshot_release(&second);
+    assert(descriptors()==before);
+    umask(saved); md_identity_release(&id);
+    assert(!pthread_cond_destroy(&state.condition));
+    assert(!pthread_mutex_destroy(&state.mutex));
+    puts("PASS live umask: concurrent handle publication, CLONE_FS updates, generation release and task exit");
+}
+struct snapshot_reader {
+    struct md_task_registry *registry;
+    pid_t tid;
+    struct md_fd_origins *files[2];
+};
+static void *read_snapshots(void *argument) {
+    const struct snapshot_reader *reader=argument;
+    for (unsigned i=0;i<4096;++i) {
+        struct md_task_snapshot value;
+        assert(!md_task_registry_read(reader->registry,reader->tid,reader->tid,&value));
+        unsigned index=value.identity.uid.fs-101;
+        assert(index<2 && value.files==reader->files[index]);
+        assert(value.owner && value.tid==reader->tid);
+        md_task_snapshot_release(&value);
+    }
+    return NULL;
+}
+static void resource_generations(void) {
+    int before=descriptors();
+    struct md_task_registry *registry=md_task_registry_create(); assert(registry);
+    struct md_task_resources task[2];
+    struct md_identity id[2]={md_identity_new(101,101),md_identity_new(102,102)};
+    for (unsigned i=0;i<2;++i) assert(!md_resources_init(&task[i],NULL));
+    pid_t tid=getpid()+1234;
+    assert(!md_task_registry_publish(registry,tid,tid,&id[0],&task[0]));
+    struct md_task_snapshot first,second,changed,denied;
+    assert(!md_task_registry_read(registry,tid,0,&first));
+    assert(!md_task_registry_publish(registry,tid,tid,&id[0],&task[0]));
+    struct md_fs_location root={.object="0123456789abcdef0123456789abcdef"};
+    assert(!md_domain_set_root(task[0].fs,&root));
+    assert(!md_task_registry_read(registry,tid,0,&second));
+    assert(first.owner==second.owner && !first.root.object[0]);
+    assert(!strcmp(second.root.object,root.object));
+    md_task_snapshot_release(&second);
+    assert(!md_task_registry_publish(registry,tid,tid,&id[0],&task[1]));
+    assert(!md_task_registry_read(registry,tid,0,&changed));
+    assert(changed.owner!=first.owner && changed.files==task[1].files && first.files==task[0].files);
+    assert(md_task_registry_read(registry,tid,tid+1,&denied)==-EPERM && !denied.owner);
+    assert(!md_task_registry_publish(registry,tid,tid,&id[1],&task[1]));
+    assert(!md_task_registry_read(registry,tid,0,&second));
+    assert(second.owner!=changed.owner && changed.identity.uid.fs==101 && second.identity.uid.fs==102);
+    md_task_snapshot_release(&changed); md_task_snapshot_release(&second);
+    struct snapshot_reader reader={registry,tid,{task[0].files,task[1].files}};
+    pthread_t thread; assert(!pthread_create(&thread,NULL,read_snapshots,&reader));
+    for (unsigned i=0;i<4096;++i)
+        assert(!md_task_registry_publish(registry,tid,tid,&id[i%2],&task[i%2]));
+    /* EVENT_WAIT: reader completes before retiring its registry identity. */
+    assert(!pthread_join(thread,NULL));
+    md_task_registry_retire(registry,tid,&id[1]);
+    assert(md_task_registry_probe(registry,tid,0,&denied)==-ESTALE && !denied.owner);
+    md_task_registry_reap(registry,tid);
+    assert(!md_task_registry_publish(registry,tid,tid,&id[1],&task[1]));
+    assert(!md_task_registry_read(registry,tid,0,&second));
+    assert(second.owner!=first.owner && first.identity.uid.fs==101 && second.identity.uid.fs==102);
+    md_task_registry_forget(registry,tid); md_task_registry_destroy(registry);
+    for (unsigned i=0;i<2;++i) {
+        assert(!md_resources_release(&task[i])); md_identity_release(&id[i]);
+    }
+    assert(first.identity.uid.fs==101 && second.identity.uid.fs==102);
+    md_task_snapshot_release(&first); md_task_snapshot_release(&second);
+    assert(descriptors()==before);
+    puts("PASS task generations: atomic resource/identity publication, fresh roots, reuse and retained lifetime");
+}
 static void ipc_mount_lifetime(void) {
     char path[]="/data/local/tmp/md-mqueue-owner-XXXXXX";
     assert(mkdtemp(path));
@@ -345,6 +485,9 @@ int main(void) {
     assert(!md_resources_release(&r));
     int before = descriptors();
     retained_proc_query();
+    file_table_snapshot();
+    live_umask_snapshot();
+    resource_generations();
     landlock_resources();
     for (unsigned i = 0; i < 100; i++) contract();
     for (unsigned i = 0; i < 100; i++) pending_root_relocation();

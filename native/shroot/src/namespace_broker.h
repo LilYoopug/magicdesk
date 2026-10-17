@@ -6,10 +6,15 @@
 #include <sys/resource.h>
 #include <linux/seccomp.h>
 #include <sys/syscall.h>
+#include "syscall_catalog.h"
+#define MD_BROKER_CASE(n) case SYS_##n:
 static inline int md_broker_filesystem_call(int nr) {
-    return nr==SYS_openat || nr==SYS_fsopen || nr==SYS_newfstatat || nr==SYS_fstat
-        || nr==SYS_getdents64 || nr==SYS_readlinkat;
+    switch (nr) { MD_FS_NOTIFICATION_CALLS(MD_BROKER_CASE) return 1; default: return 0; }
 }
+static inline int md_broker_metadata_call(int nr) {
+    switch (nr) { MD_FS_METADATA_CALLS(MD_BROKER_CASE) return 1; default: return 0; }
+}
+#undef MD_BROKER_CASE
 struct md_broker_completion {
     struct seccomp_data call;
     unsigned operation, flags;
@@ -37,6 +42,24 @@ struct md_entry_native;
 /* Only the supervisor reads/changes stopped registers. The worker retains
  * resource ownership until the native journal has an authoritative result. */
 void md_broker_native_observer(struct md_namespace_broker *,int (*)(pid_t,struct md_entry_native *));
+struct md_fd_order;
+struct md_fd_loan;
+/* Failed publication transfers an exact provisional slot to the existing
+ * supervisor retirement owner. The worker retains the table turn and payload
+ * until complete; failures never authorize re-executing the native open. */
+struct md_broker_retirement {
+    pid_t task;
+    int number;
+    struct md_fd_order *turn;
+    struct md_fd_loan *loan;
+    void (*complete)(void *,int);
+    void *context;
+};
+void md_broker_retirement_handler(struct md_namespace_broker *,int (*)(const struct md_broker_retirement *));
+/* A cold cleanup action borrows a broker-held stop without delivering its
+ * signal/lifecycle continuation. Its injected stops bypass normal admission. */
+int md_broker_native_borrow(struct md_namespace_broker *,pid_t,int *stopped);
+void md_broker_native_return(struct md_namespace_broker *,pid_t);
 /* Retain a real kernel event while its admitted worker operation retires.
  * No synchronous worker wait or filesystem IO occurs on the supervisor. */
 int md_broker_hold_event(struct md_namespace_broker *,pid_t,int,const struct rusage *);

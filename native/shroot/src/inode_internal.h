@@ -114,6 +114,9 @@ struct mdi_location {
     char name[NAME_MAX+1];
     int exists, special, trailing;
 };
+/* Optional final native-leaf capture. The caller owns fd on success; metadata
+ * and identity come from that exact descriptor, never another pathname lookup. */
+struct mdi_path_pin { int fd; struct stat physical; };
 int mdi_overlay_native_name(struct md_inode_store *,const struct mdi_node *,const char *);
 int mdi_overlay_publish_leaf(struct md_inode_store *,const struct mdi_node *,const struct mdi_node *,const char *);
 int mdi_bind_body(struct md_inode_store *,const struct mdi_node *,struct mdi_node *);
@@ -163,13 +166,14 @@ int mdi_node(struct md_inode_store *, const char *, struct mdi_node *);
 int mdi_super_preserve_writer(struct md_inode_store *,struct mdi_node *);
 int mdi_fd(struct md_inode_store *, int, struct mdi_node *);
 int mdi_fd_membership(struct md_inode_store *, int, struct mdi_node *, int *attached);
-int mdi_lookup(struct md_inode_store *, const struct mdi_node *parent, const char *, struct mdi_node *, struct stat *);
+int mdi_lookup(struct md_inode_store *, const struct mdi_node *parent, const char *, struct mdi_node *, struct stat *, struct mdi_path_pin *);
 int mdi_catalogue_lookup(struct md_inode_store *, const char *parent, const char *, struct mdi_node *);
 int mdi_stat(struct md_inode_store *, const struct mdi_node *, struct stat *);
 void mdi_stat_project(const struct mdi_node *, struct stat *);
 int mdi_backing_stat(struct md_inode_store *, const struct mdi_node *, struct stat *);
 int mdi_backing_fstat(const struct mdi_node *, int, struct stat *);
 int mdi_fstat(struct md_inode_store *, int, struct mdi_node *, struct stat *);
+int mdi_fstat_origin(struct md_inode_store *, int, struct mdi_node *, struct stat *, int native_leaf);
 int mdi_access(struct md_inode_store *, const struct mdi_node *, int);
 int mdi_permission(struct md_inode_store *, const struct mdi_node *, int, int real);
 int mdi_permission_as(struct md_inode_store *, const struct mdi_node *, int, const struct md_identity *);
@@ -190,13 +194,16 @@ int mdi_xattr_permission(struct md_inode_store *, const struct mdi_node *, const
 int mdi_xattr_permission_as(struct md_inode_store *, const struct mdi_node *, const char *, int, const struct md_identity *);
 int mdi_setattr_permission(struct md_inode_store *, const struct mdi_node *, const struct md_fs_request *, const struct md_identity *);
 void md_inode_xattr(struct md_inode_store *, const struct md_fs_request *, struct md_fs_result *, const struct md_fs_output *);
+void md_inode_xattr_origin(struct md_inode_store *, const struct md_fs_request *, struct md_fs_result *, const struct md_fs_output *, int native_leaf);
 int mdi_walk(struct md_inode_store *, int, const char *, enum mdi_follow, int missing, struct mdi_location *);
 int mdi_walk_stat(struct md_inode_store *, int, const char *, enum mdi_follow, struct mdi_location *, struct stat *);
 int mdi_path_step(struct md_inode_store *, const struct mdi_node *, const char *,
-        const char *tail, uint64_t resolve, struct mdi_node *, struct stat *);
+        const char *tail, uint64_t resolve, struct mdi_node *, struct stat *, struct mdi_path_pin *);
 int mdi_host_boundary(struct md_inode_store *, const char *parent, const char *name, const char *tail, uint64_t resolve);
 int mdi_walk_resolved(struct md_inode_store *, int, const char *, enum mdi_follow, int missing,
         uint64_t resolve, struct mdi_location *);
+int mdi_walk_pinned(struct md_inode_store *, int, const char *, enum mdi_follow, int missing,
+        uint64_t resolve, struct mdi_location *, struct mdi_path_pin *);
 int mdi_location_path(struct md_inode_store *, const struct mdi_location *, char *, size_t);
 int mdi_node_path(struct md_inode_store *, const struct mdi_node *, char *, size_t);
 int mdi_parent_writable(struct md_inode_store *, const struct mdi_node *);
@@ -209,6 +216,10 @@ int mdi_allocate(struct md_inode_store *, mode_t kind, mode_t mode, int flags, c
         const char *parent, struct mdi_node *, int *fd);
 int mdi_allocate_root(struct md_inode_store *, struct mdi_node *);
 int mdi_commit(struct md_inode_store *, int);
+/* Publication ownership follows the SQL commit, even if event/sync retirement fails. */
+int mdi_commit_owned(struct md_inode_store *,int,int *committed);
+int mdi_register_object(struct md_inode_store *,const char *,mode_t,int,uint32_t,uint32_t,
+        const struct stat *,const char *,struct mdi_node *);
 int mdi_random_id(char [33]);
 /* Called within the namespace write transaction, before exposing any writable
  * descriptor. Native data IO remains outside the namespace after this point. */

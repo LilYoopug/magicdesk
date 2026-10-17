@@ -24,7 +24,7 @@ set_source_files_properties(${src}/storage_database.c PROPERTIES COMPILE_OPTIONS
 set(identity ${src}/guest_identity.c ${src}/user_namespace.c ${src}/namespace_identity.c ${src}/pid_namespace.c ${src}/process_limits.c)
 set(raw ${src}/raw.c ${src}/memory.c ${src}/raw.S)
 set(wire ${src}/fs_wire.c ${src}/event_wait.c)
-add_library(guest-parcels STATIC ${src}/fd_bundle.c ${src}/fs_wire.c ${src}/raw.S)
+add_library(guest-parcels STATIC ${src}/fd_bundle.c ${src}/fs_wire.c ${raw})
 target_compile_definitions(guest-parcels PRIVATE MD_NO_START MD_USE_LIBC)
 target_compile_options(guest-parcels PRIVATE -O2 -Wall -Wextra -Werror -fno-pie)
 add_library(guest-objects STATIC ${src}/fd_weak.c)
@@ -44,7 +44,7 @@ list(APPEND mounts ${src}/proc_paths.c ${src}/procfs_view.c ${src}/proc_fdinfo.c
     ${src}/fs_landlock.c ${src}/fs_provider.c ${src}/fs_control.c ${src}/fs_mount_propagation.c)
 set(inodes ${src}/inode_store.c ${src}/inode_db.c ${src}/inode_schema.c ${src}/inode_super.c ${src}/inode_cache.c ${src}/inode_events.c ${src}/inode_watch.c ${src}/watch_queue.c ${src}/inode_path.c
     ${src}/inode_directory.c ${src}/inode_import.c ${src}/inode_socket.c ${src}/inode_backing.c ${src}/inode_snapshot.c ${src}/inode_view.c ${src}/inode_maintenance.c ${src}/inode_fifo.c ${src}/inode_channel.c ${src}/file_open.c
-    ${identity} ${src}/task_registry.c ${src}/guest_domain.c ${src}/mount_namespace.c ${origins} ${src}/inode_metadata.c ${src}/inode_xattr.c ${src}/inode_capability.c ${src}/inode_acl.c ${src}/posix_acl.c
+    ${identity} ${src}/task_registry.c ${src}/task_status.c ${src}/guest_domain.c ${src}/mount_namespace.c ${origins} ${src}/inode_metadata.c ${src}/inode_xattr.c ${src}/inode_capability.c ${src}/inode_acl.c ${src}/posix_acl.c
     ${src}/inode_overlay_policy.c ${src}/inode_landlock.c ${src}/inode_transient.c ${src}/inode_overlay.c ${src}/inode_overlay_write.c
     ${src}/inode_overlay_native.c)
 list(APPEND inodes ${src}/inode_reserve.c ${src}/inode_durability.c ${src}/inode_publication.c ${src}/inode_native.c ${src}/inode_leaf.c)
@@ -74,7 +74,7 @@ guest_executable(bootstrap ${src}/bootstrap.c ${src}/elf.c ${src}/exec.c ${src}/
     ${src}/task_receive.c ${src}/fs_client.c ${src}/fs_buffer_client.c ${src}/adapter_buffer.c ${src}/file_open.c ${wire} ${src}/raw.c ${src}/raw.S)
 target_sources(bootstrap PRIVATE ${src}/descriptor_calls.c ${src}/epoll_calls.c ${src}/descriptor_capture.c)
 guest_freestanding(bootstrap)
-target_sources(bootstrap PRIVATE ${src}/arguments.c ${src}/cooperative_entry.c ${src}/cooperative_native.S ${src}/vdso.c)
+target_sources(bootstrap PRIVATE ${src}/arguments.c ${src}/guest_copy.S ${src}/cooperative_entry.c ${src}/cooperative_native.S ${src}/vdso.c)
 set_source_files_properties(${src}/cooperative_entry.c PROPERTIES COMPILE_OPTIONS -mno-outline-atomics)
 target_compile_options(bootstrap PRIVATE -mgeneral-regs-only)
 target_link_options(bootstrap PRIVATE -Wl,--image-base=0x2000000000)
@@ -181,7 +181,7 @@ if(MAGICDESK_GUEST_FIXTURES)
     target_compile_options(capabilities PRIVATE -iquote ${src} -UNDEBUG)
     guest_executable(kernel_baseline ../guest-exec-lab/test_kernel_baseline.c ${src}/task_descriptor.c ${src}/task_lifetime.c)
     target_compile_options(kernel_baseline PRIVATE -iquote ${src} -UNDEBUG)
-    guest_executable(test_task_resources ../guest-exec-lab/test_task_resources.c ../guest-exec-lab/test_fd_origins.c ../guest-exec-lab/test_task_receive.c ../guest-exec-lab/test_ofd_order.c ${src}/task_registry.c
+    guest_executable(test_task_resources ../guest-exec-lab/test_task_resources.c ../guest-exec-lab/test_fd_origins.c ../guest-exec-lab/test_task_receive.c ../guest-exec-lab/test_ofd_order.c ${src}/task_registry.c ${src}/task_status.c
         ${src}/task_resources.c ${src}/uts_namespace.c ${src}/ipc_namespace_services.c ${src}/sysv_shm.c ${src}/guest_domain.c ${src}/mount_namespace.c ${origins} ${identity} ${ipc}
         ${src}/task_receive.c ${src}/event_wait.c ${raw})
     target_compile_definitions(test_task_resources PRIVATE MD_NO_START MD_USE_LIBC)
@@ -207,6 +207,7 @@ if(MAGICDESK_GUEST_FIXTURES)
     target_sources(resource_guest PRIVATE ../guest-exec-lab/test_keyring_guest.c)
     target_sources(resource_guest PRIVATE ../guest-exec-lab/test_native_metadata_guest.c)
     target_sources(resource_guest PRIVATE ../guest-exec-lab/test_mutation_signal_guest.c)
+    target_sources(resource_guest PRIVATE ../guest-exec-lab/test_metadata_signal_guest.c)
     target_sources(resource_guest PRIVATE ../guest-exec-lab/test_shared_memory_guest.c)
     target_sources(resource_guest PRIVATE ../guest-exec-lab/test_fd_result_guest.c)
     target_sources(resource_guest PRIVATE ../guest-exec-lab/test_pid_namespace_guest.c)
@@ -323,6 +324,8 @@ if(MAGICDESK_GUEST_FIXTURES)
     target_compile_options(test_vdso PRIVATE -iquote ${src} -UNDEBUG)
     guest_executable(test_cooperative_native ../guest-exec-lab/test_cooperative_native.c ${src}/cooperative_native.S)
     target_compile_options(test_cooperative_native PRIVATE -iquote ${src} -UNDEBUG)
+    guest_executable(test_guest_copy ../guest-exec-lab/test_guest_copy.c ${src}/guest_copy.S)
+    target_compile_options(test_guest_copy PRIVATE -iquote ${src} -UNDEBUG)
     target_compile_options(cooperative_guest PRIVATE -iquote ${src} -UNDEBUG)
     guest_executable(credentials_guest ../guest-exec-lab/test_credentials_guest.c)
     guest_executable(guest_interfaces ../guest-exec-lab/test_guest_interfaces.c)

@@ -201,26 +201,4 @@ md_guest_allocate:
 md_guest_allocated:
     brk #0x5b2
 .size md_guest_allocate, .-md_guest_allocate
-.balign 4
-.global md_read_memory
-.global md_write_memory
-.type md_read_memory, %function
-.type md_write_memory, %function
-md_read_memory:
-md_write_memory:
-    cbz x2, 3f
-.global md_guest_copy_begin
-md_guest_copy_begin:
-2:
-    ldrb w9, [x1], #1
-    strb w9, [x0], #1
-    subs x2, x2, #1
-    b.ne 2b
-.global md_guest_copy_end
-md_guest_copy_end:
-3:
-    mov x0, #0
-    ret
-.size md_read_memory, .-md_read_memory
-.size md_write_memory, .-md_write_memory
 .section .note.GNU-stack,"",%progbits

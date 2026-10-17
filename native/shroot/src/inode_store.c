@@ -140,6 +140,30 @@ ssize_t md_inode_readlink(struct md_inode_store *s, int dirfd, const char *path,
 }
 static int open_resolved(struct md_inode_store *, int, const char *, int, mode_t, uint64_t,
         struct md_image_identity *, struct md_open_completion *, int);
+static int birth_permission(struct md_inode_store *s,const struct mdi_location *loc,int flags) {
+    int r=loc->trailing ? -EISDIR : mdi_readonly(s) ? -EROFS : 0;
+    if (!r) r=mdi_parent_writable(s,&loc->parent);
+    if (!r) r=mdi_landlock(s,&loc->parent,NULL,MD_LL_MAKE_REG|md_landlock_open_access(flags,S_IFREG));
+    return r;
+}
+int md_inode_prepare_birth(struct md_inode_store *s,int dirfd,const char *path,int flags,mode_t mode,
+        uint64_t resolve,struct md_inode_birth **owner) {
+    if (!owner || *owner) return -EINVAL;
+    if (!(flags&O_CREAT) || (flags&(O_PATH|O_DIRECTORY)) || (mode&~07777)
+            || !md_open_native_plan(flags&~O_EXCL)) return -EXDEV;
+    if ((flags&O_TRUNC) && !(flags&(O_WRONLY|O_RDWR))) return -EINVAL;
+    int r=mdi_begin(s,0);
+    if (r) return r;
+    struct mdi_location loc;
+    enum mdi_follow follow=flags&O_EXCL ? MDI_ENTRY : flags&O_NOFOLLOW ? MDI_NOFOLLOW : MDI_FOLLOW;
+    r=mdi_walk_resolved(s,dirfd,path,follow,1,resolve,&loc);
+    if (!r && loc.exists) r=flags&O_EXCL ? -EEXIST : -EXDEV;
+    if (!r) r=birth_permission(s,&loc,flags);
+    int pin=r ? r : mdi_leaf_prepare_birth(s,&loc.parent,loc.name,flags,mode,owner);
+    r=mdi_finish(s,pin<0 ? pin : 0);
+    if (r && pin>=0) { close(pin); int discarded=md_inode_birth_discard(owner); if (discarded) r=discarded; }
+    return r ? r : pin;
+}
 int md_inode_open_image(struct md_inode_store *s, int dirfd, const char *path, int flags,
         struct md_image_identity *image) {
     if (!image) return -EFAULT;
@@ -179,24 +203,24 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
     int r = mdi_begin(s, 0);
     if (r) return r;
     struct mdi_location loc;
-    r = mdi_walk_resolved(s, dirfd, path, create && (flags & O_EXCL) ? MDI_ENTRY
-        : flags & O_NOFOLLOW ? MDI_NOFOLLOW : MDI_FOLLOW, !!create, resolve, &loc);
-    int fd = -1;
+    enum mdi_follow follow=create && (flags&O_EXCL) ? MDI_ENTRY : flags&O_NOFOLLOW ? MDI_NOFOLLOW : MDI_FOLLOW;
+    struct mdi_path_pin pin={.fd=-1};
+    r=native_plan ? mdi_walk_pinned(s,dirfd,path,follow,!!create,resolve,&loc,&pin)
+        : mdi_walk_resolved(s,dirfd,path,follow,!!create,resolve,&loc);
+    int fd=pin.fd;
     if (!r && create && loc.trailing) r = -EISDIR;
     if (!r && create && (flags & O_EXCL) && loc.exists) r = -EEXIST;
     if (!r && !loc.exists) {
         /* No name or inode has been created. Transfer to the notification
          * owner, which retains one opened result across cancellation/restart. */
         if (native_plan) return mdi_finish(s,-EXDEV);
-        if (loc.trailing) r = -EISDIR;
-        if (!r && mdi_readonly(s)) r=-EROFS;
-        if (!r) r = mdi_parent_writable(s, &loc.parent);
-        if (!r) r=mdi_landlock(s,&loc.parent,NULL,MD_LL_MAKE_REG|md_landlock_open_access(flags,S_IFREG));
+        r=birth_permission(s,&loc,flags);
         if (!r) {
             fd=mdi_leaf_create(s,&loc.parent,loc.name,flags,mode);
             if (fd!=-EOPNOTSUPP) {
                 r=mdi_finish(s,fd<0 ? fd : 0);
                 if (r && fd>=0) close(fd);
+                if (!r) completion->native_leaf=1;
                 return r ? r : fd;
             }
             fd=-1;
@@ -222,19 +246,22 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
     if (!r && image) r = mdi_permission(s, &loc.node, X_OK, 0);
     if (!r) r=mdi_landlock(s,&loc.node,&loc.parent,image ? MD_LL_EXECUTE : md_landlock_open_access(flags,loc.node.kind));
     /* Decline special endpoints before copy-up or any data-open effect. */
-    if (!r && native_plan && loc.node.kind!=S_IFREG) r=-EXDEV;
-    if (!r && !device && (flags&(O_WRONLY|O_RDWR|O_TRUNC)) && (loc.node.shared || (s->overlay && !loc.node.native))) {
-        if (native_plan && s->read_depth>1) {
-            /* Release the outer preparation window before COW. This is a
-             * pre-effect admission result, never a completed open to replay. */
-            completion->kind=MD_OPEN_NEEDS_WRITE;
-            return mdi_finish(s,-EAGAIN);
-        }
+    if (!r && native_plan && loc.node.kind!=S_IFREG && loc.node.kind!=S_IFDIR) r=-EXDEV;
+    int copy_up=!r && !device && (flags&(O_WRONLY|O_RDWR|O_TRUNC))
+        && (loc.node.shared || (s->overlay && !loc.node.native));
+    if (!r && s->read_depth>1 && (copy_up || image || (loc.node.kind==S_IFIFO && !(flags&O_PATH)))) {
+        /* FIFO channel custody, image promotion and COW may write metadata.
+         * Leave the enclosing read scope before any such effect or retry. */
+        if (fd>=0) close(fd);
+        completion->kind=MD_OPEN_NEEDS_WRITE;
+        return mdi_finish(s,-EAGAIN);
+    }
+    if (copy_up) {
         r=mdi_write(s);
         if (!r) r=mdi_copy_up(s,&loc.node);
     }
     int plan=!r && native_plan;
-    struct stat st;
+    struct stat st=pin.physical;
     if (!r && !plan) r = mdi_backing_stat(s, &loc.node, &st);
     int directory = r ? -1 : mdi_backing_directory(s, &loc.node);
     if (!r && directory < 0) r = directory;
@@ -242,8 +269,8 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
     int native_flags = deferred || device ? O_PATH : flags & ~(O_CREAT | O_EXCL);
     if (plan) native_flags=O_PATH;
     if (!r && image) r=mdi_leaf_promote(s,&loc.node);
-    if (!r && (fd=mdi_backing_open(s,&loc.node,native_flags))<0) r=fd;
-    if (!r && plan) r=mdi_backing_fstat(&loc.node,fd,&st);
+    if (!r && fd<0 && (fd=mdi_backing_open(s,&loc.node,native_flags))<0) r=fd;
+    if (!r && plan && pin.fd<0) r=mdi_backing_fstat(&loc.node,fd,&st);
     if (!r && image) {
         struct stat opened;
         if (fstat(fd, &opened)) r = -errno;
@@ -256,7 +283,8 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
     if (r) { if (fd >= 0) close(fd); return r; }
     if (deferred) return mdi_fifo_prepare(s, fd, completion);
     if (plan) *completion=(struct md_open_completion){.kind=MD_OPEN_PLAN,
-        .backing_device=st.st_dev,.backing_inode=st.st_ino};
+        .backing_device=st.st_dev,.backing_inode=st.st_ino,.mode=st.st_mode&S_IFMT};
+    completion->native_leaf=loc.node.native;
     if (device) *completion=(struct md_open_completion){.kind=MD_OPEN_DEVICE,
         .device=loc.node.rdev,.mode=loc.node.kind};
     return fd;
@@ -409,12 +437,12 @@ int md_inode_stat(struct md_inode_store *s, int dirfd, const char *path, int fla
     }
     return mdi_finish(s, r);
 }
-int md_inode_fstat(struct md_inode_store *s, int fd, struct stat *st) {
+int md_inode_fstat_origin(struct md_inode_store *s, int fd, struct stat *st, int native_leaf) {
     if (!st) return -EFAULT;
     int r = mdi_begin(s, 0);
     if (r) return r;
     struct mdi_node node;
-    r = mdi_fstat(s, fd, &node, st);
+    r = mdi_fstat_origin(s, fd, &node, st, native_leaf && !s->stat_location);
     if (!r && s->stat_location) {
         struct mdi_stat_location *p=s->stat_location;
         p->device=node.device; p->inode=node.inode;
@@ -422,6 +450,9 @@ int md_inode_fstat(struct md_inode_store *s, int fd, struct stat *st) {
         if (mdi_node_path(s,&node,p->path,sizeof(p->path))) p->path[0]=0;
     }
     return mdi_finish(s, r);
+}
+int md_inode_fstat(struct md_inode_store *s, int fd, struct stat *st) {
+    return md_inode_fstat_origin(s,fd,st,0);
 }
 int md_inode_list(struct md_inode_store *s, int dirfd, const char *path,
         int (*visit)(const char *, void *), void *context) {

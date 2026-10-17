@@ -82,11 +82,13 @@ int mdi_native_prepare(int objects,const char *name,int flags,uint32_t uid,uint3
     if (r) { close(fd); unlinkat(objects,name,0); }
     return r ? r : fd;
 }
-static int physical(int fd,struct stat *st) {
-    if (fstat(fd,st)) return -errno;
+static int valid_physical(const struct stat *st) {
     if (!S_ISREG(st->st_mode) || st->st_nlink>1) return -EINVAL;
     mode_t mode=st->st_mode&07777;
     return mode==METADATA_MODE || mdi_native_eligible(0,0,mode) ? 0 : -EIO;
+}
+static int physical(int fd,struct stat *st) {
+    return fstat(fd,st) ? -errno : valid_physical(st);
 }
 static int load(int fd,const struct stat *st,struct metadata **out) {
     *out=NULL;
@@ -125,9 +127,9 @@ static int publish(int fd,const struct stat *st,const struct metadata *old,const
     }
     return r ? r : set(fd,next);
 }
-int mdi_native_info(int fd,struct stat *st,unsigned *acl) {
+int mdi_native_project(int fd,struct stat *st,unsigned *acl) {
     if (acl) *acl=0;
-    int r=physical(fd,st);
+    int r=valid_physical(st);
     if (r) return r;
     if (!(st->st_mode&S_ISVTX)) { st->st_uid=st->st_gid=0; return 0; }
     struct metadata *p;
@@ -138,6 +140,9 @@ int mdi_native_info(int fd,struct stat *st,unsigned *acl) {
         free(p);
     }
     return r;
+}
+int mdi_native_info(int fd,struct stat *st,unsigned *acl) {
+    return fstat(fd,st) ? -errno : mdi_native_project(fd,st,acl);
 }
 int mdi_native_stat(int fd,struct stat *st) { return mdi_native_info(fd,st,NULL); }
 static int metadata(int fd,uint32_t uid,uint32_t gid,mode_t mode,int clear_capability) {

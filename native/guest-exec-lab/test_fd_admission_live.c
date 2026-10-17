@@ -152,7 +152,7 @@ static void run(int denied,int protected) {
         struct md_task_quiesce_stop boundary;
         assert(!md_task_quiesce_borrow(barrier,pid,&boundary) && boundary.kind==MD_TASK_QUIESCE_HELD);
         struct md_task_filter call={0};
-        struct md_fd_filter_gates gates={(uintptr_t)admission_return,0,0};
+        struct md_fd_filter_gates gates={.raw=(uintptr_t)admission_return};
         assert(!md_task_filter_begin(&call,trace,pid,MD_TASK_CALL_USER,&continuations[index],
             (uintptr_t)admission_call,(uintptr_t)admission_return,&shared->image,(uintptr_t)&shared->image,
             request.kind,request.number,&gates));

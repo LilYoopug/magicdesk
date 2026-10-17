@@ -145,9 +145,9 @@ int md_catalogue_reopen(struct md_image_catalogue *c, struct md_inode_store *s, 
 int md_catalogue_path(struct md_image_catalogue *c, struct md_inode_store *s, int fd, char *out, size_t size) {
     return md_inode_path(s, original_fd(c, s, fd), out, size);
 }
-int md_catalogue_fstat(struct md_image_catalogue *c, struct md_inode_store *s, int fd, struct stat *st) {
+int md_catalogue_fstat(struct md_image_catalogue *c, struct md_inode_store *s, int fd, struct stat *st,int native_leaf) {
     int source = original_fd(c, s, fd);
-    int error = md_inode_fstat(s, source, st);
+    int error = md_inode_fstat_origin(s, source, st, native_leaf && source==fd);
     if (!error && c && source == c->entry.source) {
         nlink_t links = st->st_nlink;
         *st = c->logical; st->st_nlink = links;

@@ -917,11 +917,11 @@ static void mutation_cache(void) {
     CHECK(!mdi_begin(s,1));
     struct mdi_node root, value, absent;
     CHECK(!mdi_node(s,mdi_root(s),&root));
-    CHECK(mdi_lookup(s,&root,"alias",&absent,NULL)==-ENOENT);
+    CHECK(mdi_lookup(s,&root,"alias",&absent,NULL,NULL)==-ENOENT);
     struct mdi_location loc;
     CHECK(!mdi_walk(s,-1,"/stable/value",MDI_FOLLOW,0,&loc));
     CHECK(!mdi_add_name(s,root.id,"alias",loc.node.id));
-    CHECK(!mdi_lookup(s,&root,"alias",&value,NULL) && value.links==2);
+    CHECK(!mdi_lookup(s,&root,"alias",&value,NULL,NULL) && value.links==2);
     CHECK(!mdi_node(s,loc.node.id,&value) && value.links==2);
     CHECK(mdi_finish(s,-ECANCELED)==-ECANCELED);
     CHECK(md_inode_stat(s,-1,"/alias",0,&st)==-ENOENT);
@@ -1119,6 +1119,180 @@ static void retained_journal(void) {
     sqlite3_finalize(q); md_inode_store_close(a);
     puts("PASS WAL journal: shared connections, bounded checkpoint reuse, stable inode, non-mutating inspection and explicit journal preparation");
 }
+static void native_births(void) {
+    struct md_inode_store *s=store("native-births",1);
+    struct md_identity root_identity=md_identity_new(0,0);
+    s->identity=&root_identity;
+    CHECK(s->native_files);
+    CHECK(!md_inode_mkdir(s,-1,"work",0777));
+    struct md_inode_birth *birth=NULL;
+    struct stat st;
+    s->creation_mask=0027;
+    int pin=md_inode_prepare_birth(s,-1,"work/new",O_CREAT|O_EXCL|O_RDWR,0666,0,&birth);
+    CHECK(pin>=0 && birth && !s->read_depth && !s->write_transaction);
+    CHECK(md_inode_stat(s,-1,"work/new",0,&st)==-ENOENT);
+    char proc[64]; snprintf(proc,sizeof(proc),"/proc/self/fd/%d",pin);
+    int fd=open(proc,O_RDWR|O_CLOEXEC); CHECK(fd>=0); put(fd,"born");
+    CHECK(!md_inode_birth_commit(&birth) && !birth);
+    CHECK(!md_inode_stat(s,-1,"work/new",0,&st) && st.st_size==4 && (st.st_mode&0777)==0640);
+    close(fd); close(pin);
+    CHECK(md_inode_prepare_birth(s,-1,"work/new",O_CREAT|O_EXCL|O_RDWR,0600,0,&birth)==-EEXIST && !birth);
+    CHECK(md_inode_prepare_birth(s,-1,"work/new",O_CREAT|O_RDWR,0600,0,&birth)==-EXDEV && !birth);
+    pin=md_inode_prepare_birth(s,-1,"work/cancel",O_CREAT|O_RDWR,0000,0,&birth);
+    CHECK(pin>=0 && birth);
+    CHECK(!md_inode_birth_discard(&birth) && !birth);
+    CHECK(!fstat(pin,&st) && !st.st_nlink);
+    close(pin);
+    CHECK(md_inode_stat(s,-1,"work/cancel",0,&st)==-ENOENT);
+    pin=md_inode_prepare_birth(s,-1,"work/race",O_CREAT|O_EXCL|O_RDWR,0600,0,&birth);
+    CHECK(pin>=0 && birth);
+    CHECK(!md_inode_symlink(s,"new",-1,"work/race"));
+    CHECK(md_inode_birth_commit(&birth)==-EEXIST && birth);
+    CHECK(!md_inode_birth_discard(&birth)); close(pin);
+    CHECK(!md_inode_stat(s,-1,"work/race",AT_SYMLINK_NOFOLLOW,&st) && S_ISLNK(st.st_mode));
+    pin=md_inode_prepare_birth(s,-1,"work/moved",O_CREAT|O_RDWR,0600,0,&birth);
+    CHECK(pin>=0 && birth);
+    CHECK(!md_inode_rename(s,-1,"work",-1,"renamed",0));
+    CHECK(!md_inode_birth_commit(&birth)); close(pin);
+    CHECK(!md_inode_stat(s,-1,"renamed/moved",0,&st));
+    CHECK(!md_inode_mkdir(s,-1,"gone",0700));
+    pin=md_inode_prepare_birth(s,-1,"gone/file",O_CREAT|O_RDWR,0600,0,&birth);
+    CHECK(pin>=0 && birth);
+    CHECK(!md_inode_unlink(s,-1,"gone",AT_REMOVEDIR));
+    CHECK(md_inode_birth_commit(&birth)==-ENOENT && birth);
+    CHECK(!md_inode_birth_discard(&birth)); close(pin);
+    s->creation_mask=0;
+    struct md_identity user=md_identity_new(1234,2345);
+    CHECK(!md_inode_metadata(s,&(struct md_fs_request){.operation=MD_FS_CHMOD,
+        .directory={-1,-1},.path={"/"},.mode=0755}));
+    CHECK(!md_inode_metadata(s,&(struct md_fs_request){.operation=MD_FS_CHMOD,
+        .directory={-1,-1},.path={"renamed"},.mode=0777})); s->identity=&user;
+    pin=md_inode_prepare_birth(s,-1,"renamed/owned",O_CREAT|O_RDWR,0000,0,&birth);
+    CHECK(pin>=0 && birth);
+    CHECK(!md_inode_birth_commit(&birth)); close(pin);
+    CHECK(!md_inode_stat(s,-1,"renamed/owned",0,&st) && st.st_uid==1234 && st.st_gid==2345 && !(st.st_mode&07777));
+    CHECK(md_inode_prepare_birth(s,-1,"renamed/invalid",O_CREAT|O_TRUNC,0600,0,&birth)==-EINVAL && !birth);
+    s->identity=&root_identity;
+    pin=md_inode_prepare_birth(s,-1,"renamed/promoted",O_CREAT|O_EXCL|O_RDWR,0600,0,&birth);
+    CHECK(pin>=0 && birth);
+    snprintf(proc,sizeof(proc),"/proc/self/fd/%d",pin);
+    fd=open(proc,O_RDWR|O_CLOEXEC); CHECK(fd>=0); put(fd,"before");
+    CHECK(!md_inode_birth_commit(&birth));
+    CHECK(!md_inode_link(s,-1,"renamed/promoted",-1,"renamed/alias",0));
+    CHECK(!md_inode_fstat(s,fd,&st) && st.st_nlink==2);
+    struct stat alias;
+    CHECK(!md_inode_stat(s,-1,"renamed/alias",0,&alias) && alias.st_ino==st.st_ino);
+    put(fd,"shared");
+    int other=md_inode_open(s,-1,"renamed/alias",O_RDONLY,0); CHECK(other>=0);
+    content(other,"shared"); close(other); close(fd); close(pin);
+    pin=md_inode_prepare_birth(s,-1,"renamed/sealed",O_CREAT|O_RDWR,0600,0,&birth);
+    CHECK(pin>=0 && birth);
+    CHECK(!md_inode_store_seal(s));
+    CHECK(md_inode_birth_commit(&birth)==-EROFS && birth);
+    CHECK(!md_inode_birth_discard(&birth)); close(pin);
+    CHECK(md_inode_stat(s,-1,"renamed/sealed",0,&st)==-ENOENT);
+    struct md_inode_store *copy=store("birth-snapshot",1);
+    copy->identity=&root_identity;
+    CHECK(!md_inode_snapshot(s,copy));
+    fd=md_inode_open(copy,-1,"renamed/alias",O_RDWR|O_TRUNC,0); CHECK(fd>=0);
+    put(fd,"copy"); close(fd);
+    fd=md_inode_open(copy,-1,"renamed/promoted",O_RDONLY,0); CHECK(fd>=0);
+    content(fd,"copy"); close(fd);
+    fd=md_inode_open(s,-1,"renamed/promoted",O_RDONLY,0); CHECK(fd>=0);
+    content(fd,"shared"); close(fd);
+    md_inode_store_close(copy);
+    s->identity=NULL; md_identity_release(&user); md_identity_release(&root_identity);
+    md_inode_store_close(s);
+    puts("PASS native birth preparation: unpublished pin, explicit commit/discard, live mask/identity, catalogue conflict and parent rename/removal");
+}
+static void native_birth_recovery(void) {
+    for (unsigned phase=0;phase<3;++phase) {
+        char name[64], directory[PATH_MAX];
+        snprintf(name,sizeof(name),"birth-recovery-%u",phase); path(directory,name);
+        struct md_inode_store *s=store(name,1);
+        struct md_identity identity=md_identity_new(0,0);
+        s->identity=&identity;
+        CHECK(!md_inode_mkdir(s,-1,"work",0700));
+        md_inode_store_close(s);
+        pid_t child=fork(); CHECK(child>=0);
+        if (!child) {
+            s=store(name,0); s->identity=&identity;
+            struct md_inode_birth *birth=NULL;
+            int pin=md_inode_prepare_birth(s,-1,"work/value",O_CREAT|O_EXCL|O_RDWR,0600,0,&birth);
+            CHECK(pin>=0 && birth);
+            if (phase) {
+                char proc[64]; snprintf(proc,sizeof(proc),"/proc/self/fd/%d",pin);
+                int fd=open(proc,O_RDWR|O_CLOEXEC); CHECK(fd>=0); put(fd,"retained");
+            }
+            if (phase==2) CHECK(!md_inode_birth_commit(&birth) && !birth);
+            CHECK(!kill(getpid(),SIGKILL)); _exit(1);
+        }
+        joined(child,SIGKILL);
+        s=store(name,0);
+        struct stat st; struct md_inode_audit audit;
+        CHECK(md_inode_stat(s,-1,"work/value",0,&st)==(phase==2 ? 0 : -ENOENT));
+        if (phase==2) {
+            int fd=md_inode_open(s,-1,"work/value",O_RDONLY,0); CHECK(fd>=0);
+            content(fd,"retained"); CHECK(!close(fd));
+        }
+        CHECK(!md_inode_audit(s,&audit) && audit.untracked==(phase<2));
+        md_inode_store_close(s);
+        CHECK(!md_inode_store_open_exclusive(directory,&s));
+        CHECK(!md_inode_audit(s,&audit) && !audit.untracked);
+        CHECK(md_inode_stat(s,-1,"work/value",0,&st)==(phase==2 ? 0 : -ENOENT));
+        md_inode_store_close(s); md_identity_release(&identity);
+    }
+    puts("PASS native birth SIGKILL: preparation/effect/publication, retained contents and exclusive orphan collection");
+}
+static void native_birth_acl(void) {
+    struct md_inode_store *s=store("native-birth-acl",1);
+    struct md_identity ids=md_identity_new(0,0); s->identity=&ids;
+    CHECK(!md_inode_mkdir(s,-1,"work",0755));
+    int directory=md_inode_open(s,-1,"work",O_RDONLY|O_DIRECTORY,0); CHECK(directory>=0);
+    struct { uint32_t version; struct md_acl_entry entries[5]; } acl={.version=2,.entries={
+        {MD_ACL_USER_OBJ,7,UINT32_MAX},{MD_ACL_USER,4,1000},{MD_ACL_GROUP_OBJ,0,UINT32_MAX},
+        {MD_ACL_MASK,4,UINT32_MAX},{MD_ACL_OTHER,0,UINT32_MAX}}};
+    struct md_fs_request q={.operation=MD_FS_SETACL,.directory={directory,-1},.mode=MD_ACL_DEFAULT,
+        .value=&acl,.value_size=sizeof(acl),.capacity=sizeof(acl)};
+    struct md_fs_result result;
+    md_inode_acl(s,&q,&result,NULL); CHECK(!result.error);
+    s->creation_mask=0077;
+    struct md_inode_birth *birth=NULL;
+    int pin=md_inode_prepare_birth(s,directory,"prepared",O_CREAT|O_RDWR,0666,0,&birth);
+    CHECK(pin>=0 && birth);
+    struct stat st;
+    CHECK(md_inode_stat(s,directory,"prepared",0,&st)==-ENOENT);
+    CHECK(!md_inode_birth_commit(&birth) && !birth);
+    close(pin);
+    for (unsigned staged=0;staged<2;++staged) {
+        int fd=md_inode_open(s,directory,staged ? "prepared" : "ordinary",O_CREAT|O_RDWR,0666);
+        CHECK(fd>=0 && !md_inode_fstat(s,fd,&st) && (st.st_mode&0777)==0640);
+        CHECK(!mdi_begin(s,0));
+        struct mdi_node node;
+        CHECK(!mdi_fd(s,fd,&node) && node.native && (node.acl_mask&MD_ACL_ACCESS));
+        CHECK(!mdi_finish(s,0));
+        unsigned char bytes[sizeof(acl)];
+        struct md_fs_output output={.data=bytes,.capacity=sizeof(bytes)};
+        q=(struct md_fs_request){.operation=MD_FS_GETACL,.directory={fd,-1},
+            .mode=MD_ACL_ACCESS,.capacity=sizeof(bytes)};
+        md_inode_acl(s,&q,&result,&output);
+        CHECK(!result.error && result.size==sizeof(acl));
+        struct md_acl *actual=(void *)bytes;
+        CHECK(md_acl_mode(actual,sizeof(bytes),0)==0640 && actual->entries[1].id==1000
+            && actual->entries[1].permissions==4);
+        if (staged) {
+            CHECK(!md_inode_link(s,directory,"prepared",directory,"alias",0));
+            md_inode_acl(s,&q,&result,&output);
+            CHECK(!result.error && result.size==sizeof(acl) && actual->entries[1].permissions==4);
+        }
+        close(fd);
+    }
+    pin=md_inode_prepare_birth(s,directory,"cancelled",O_CREAT|O_RDWR,0666,0,&birth);
+    CHECK(pin>=0 && birth && !md_inode_birth_discard(&birth)); close(pin);
+    CHECK(md_inode_stat(s,directory,"cancelled",0,&st)==-ENOENT);
+    close(directory); md_inode_store_close(s); md_identity_release(&ids);
+    puts("PASS native birth ACL: default inheritance ignores umask, staged/ordinary creation, cancellation and hardlink promotion");
+}
 static void native_plans(void) {
     struct md_inode_store *s=store("native-plans",1);
     struct md_open_completion completion;
@@ -1126,15 +1300,30 @@ static void native_plans(void) {
     CHECK(!md_inode_mkdir(s,-1,"directory",0700));
     CHECK(!md_inode_mknod(s,-1,"fifo",S_IFIFO|0600,0));
     CHECK(!md_inode_symlink(s,"value",-1,"link"));
-    const unsigned rejected[]={O_CREAT|O_EXCL,O_PATH,O_DIRECTORY};
+    const unsigned rejected[]={O_CREAT|O_EXCL,O_ASYNC};
     for (unsigned i=0;i<sizeof(rejected)/sizeof(*rejected);++i)
         CHECK(md_inode_plan_open(s,-1,"missing",rejected[i],0600,0,&completion,1)==-EXDEV);
     struct stat st; CHECK(md_inode_stat(s,-1,"missing",0,&st)==-ENOENT);
     CHECK(md_inode_plan_open(s,-1,"missing",O_CREAT|O_RDWR,0600,0,&completion,1)==-EXDEV);
     CHECK(md_inode_stat(s,-1,"missing",0,&st)==-ENOENT);
     CHECK(md_inode_plan_open(s,-1,"value",O_TRUNC,0,0,&completion,1)==-EINVAL);
-    CHECK(md_inode_plan_open(s,-1,"directory",O_RDONLY,0,0,&completion,1)==-EXDEV);
+    const unsigned directories[]={O_RDONLY,O_DIRECTORY,O_PATH|O_DIRECTORY};
+    for (unsigned i=0;i<sizeof(directories)/sizeof(*directories);++i) {
+        int directory=md_inode_plan_open(s,-1,"directory",directories[i],0,0,&completion,1);
+        CHECK(directory>=0 && completion.kind==MD_OPEN_PLAN);
+        CHECK(!fstat(directory,&st) && S_ISDIR(st.st_mode));
+        CHECK(!close(directory));
+        CHECK(md_inode_plan_open(s,-1,"missing",directories[i],0,0,&completion,1)==-ENOENT);
+    }
+    CHECK(md_inode_plan_open(s,-1,"value",O_DIRECTORY,0,0,&completion,1)==-ENOTDIR);
     CHECK(md_inode_plan_open(s,-1,"fifo",O_RDONLY,0,0,&completion,1)==-EXDEV);
+    CHECK(!md_inode_read_scope_begin(s));
+    CHECK(md_inode_plan_open(s,-1,"fifo",O_RDONLY,0,0,&completion,0)==-EAGAIN);
+    CHECK(completion.kind==MD_OPEN_NEEDS_WRITE && s->read_depth==1 && !s->write_transaction && !s->fifos);
+    CHECK(!md_inode_read_scope_end(s));
+    int fifo=md_inode_plan_open(s,-1,"fifo",O_RDONLY,0,0,&completion,0);
+    CHECK(fifo>=0 && completion.kind==MD_OPEN_PIPE);
+    CHECK(!close(completion.control) && !close(fifo));
     CHECK(md_inode_plan_open(s,-1,"link",O_RDONLY|O_NOFOLLOW,0,0,&completion,1)==-ELOOP);
     CHECK(md_inode_plan_open(s,-1,"missing",O_RDONLY,0,0,&completion,1)==-ENOENT);
     int pin=md_inode_plan_open(s,-1,"link",O_RDONLY|O_CLOEXEC,0,0,&completion,1);
@@ -1166,8 +1355,12 @@ static void native_plans(void) {
     CHECK(!md_inode_store_seal(source));
     CHECK(!md_inode_snapshot(source,copy));
     CHECK(!md_inode_read_scope_begin(copy));
-    CHECK(md_inode_plan_open(copy,-1,"alias",O_CREAT|O_WRONLY|O_TRUNC,0600,0,&completion,1)==-EAGAIN);
-    CHECK(completion.kind==MD_OPEN_NEEDS_WRITE && copy->read_depth==1 && !copy->write_transaction);
+    int spare=fcntl(copy->objects,F_DUPFD_CLOEXEC,0); CHECK(spare>=0 && !close(spare));
+    for (unsigned i=0;i<64;++i) {
+        CHECK(md_inode_plan_open(copy,-1,"alias",O_CREAT|O_WRONLY|O_TRUNC,0600,0,&completion,1)==-EAGAIN);
+        CHECK(completion.kind==MD_OPEN_NEEDS_WRITE && copy->read_depth==1 && !copy->write_transaction);
+    }
+    CHECK(fcntl(copy->objects,F_DUPFD_CLOEXEC,0)==spare && !close(spare));
     CHECK(!md_inode_read_scope_end(copy));
     pin=md_inode_plan_open(copy,-1,"alias",O_CREAT|O_WRONLY|O_TRUNC,0600,0,&completion,1);
     CHECK(pin>=0 && completion.kind==MD_OPEN_PLAN);
@@ -1189,7 +1382,7 @@ int main(int argc, char **argv) {
     if (argc == 3) { CHECK(!strcmp(argv[2], "exec-child")); exec_child("exec"); return 0; }
     CHECK(mkdir(root, 0700) == 0);
     descriptors(); namespace(); contention(); multiple_stores(); across_exec(argv[0]);
-    native_plans();
+    native_plans(); native_births(); native_birth_recovery(); native_birth_acl();
     hierarchy(); symlinks(); permissions(); kernel_reference(); scoped_paths(); read_admission_failure();
     permission_snapshot(); reused_queries(); metadata_queries(); cached_path_names();
     backing_cache(); mutation_cache(); directory_publication(); membership_queries(); counter_audit(); retained_journal();

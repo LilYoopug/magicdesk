@@ -24,6 +24,9 @@ int mdi_native_prepare(int objects,const char *name,int flags,
 /* Borrow a validated leaf FD, including O_PATH and unlinked descriptions. */
 int mdi_native_stat(int fd, struct stat *);
 int mdi_native_info(int fd, struct stat *, unsigned *acl);
+/* Fresh fstat observation of the same retained FD, under the store owner.
+ * Reads mutable metadata without a second fstat or pathname resolution. */
+int mdi_native_project(int fd, struct stat *, unsigned *acl);
 int mdi_native_metadata(int fd, uint32_t uid, uint32_t gid, mode_t mode);
 int mdi_native_chown(int fd, uint32_t uid, uint32_t gid, mode_t mode);
 ssize_t mdi_native_attribute(int fd, int capability, void *, size_t);

@@ -2173,6 +2173,10 @@ int main(int argc, char **argv) {
     if (argc==2 && !strcmp(argv[1],"native-metadata")) return test_native_metadata_guest();
     if (argc==2 && !strcmp(argv[1],"ipc-namespace")) { test_ipc_namespace_guest(); return 0; }
     setbuf(stdout, NULL); alarm(40);
+    if (argc==4 && !strcmp(argv[1],"metadata-signal")) {
+        extern int test_metadata_signal_guest(int);
+        assert(!chdir(argv[2])); return test_metadata_signal_guest(atoi(argv[3]));
+    }
     if (argc==2 && !strcmp(argv[1],"mount-namespace")) { test_mount_namespace_guest(); return 0; }
     if (argc==2 && !strcmp(argv[1],"exec-custody-target")) return 0;
     if (argc>=2 && !strcmp(argv[1],"proc-exec")) {

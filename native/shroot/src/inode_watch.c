@@ -148,7 +148,7 @@ static int source_get(struct md_inode_store *owner, struct md_inode_store *store
     if (!r && (p->native=inotify_init1(IN_NONBLOCK|IN_CLOEXEC))<0) r=-errno;
     if (!r) r=epoll_add(w->epoll,p->native,EPOLLIN);
     if (!r && (p->database=watch_path(p->native,s->lifetime->root,"/namespace.db-wal",IN_MODIFY))<0) r=p->database;
-    if (!r && (p->objects=watch_path(p->native,s->objects,"",DATA_EVENTS|IN_CREATE|IN_MOVED_FROM))<0) r=p->objects;
+    if (!r && (p->objects=watch_path(p->native,s->objects,"",DATA_EVENTS|IN_CREATE|IN_MOVED_FROM|IN_MOVED_TO))<0) r=p->objects;
     if (!r && (p->control=watch_path(p->native,s->lifetime->root,"",IN_CREATE))<0) r=p->control;
     p->sources[0]=p->objects;
     for (unsigned i = 1; !r && i < MDI_SOURCES; ++i) if (s->lifetime->sources[i] >= 0) {
@@ -282,6 +282,11 @@ static int native_event(struct md_inode_watches *w, struct watch_source *backend
     int source = -1;
     for (unsigned i = 0; i < MDI_SOURCES; ++i) if (event->wd == backend->sources[i]) { source = (int)i; break; }
     if (source >= 0) {
+        unsigned mask=event->mask;
+        if (mask&IN_MOVED_TO) {
+            if (!birth || backend->publishing) return 0;
+            mask=IN_OPEN;
+        }
         if (!backend->logical_subscriptions) return 0;
         if (!event->len || strlen(event->name) != 32) return 0;
         sqlite3_stmt *object = NULL;
@@ -297,22 +302,23 @@ static int native_event(struct md_inode_watches *w, struct watch_source *backend
         }
         r = mdi_query_release(object, r);
         if (r || !*id) return r;
-        if (event->mask&IN_CREATE) {
+        if ((event->mask&IN_CREATE) || birth) {
             /* Allocation opens its backing before catalogue commit. Publish
              * the committed birth at this position, before that native OPEN,
              * without draining later mutations ahead of native names. */
-            sqlite3_stmt *birth=NULL;
-            r=mdi_query_acquire(s,MDI_EVENT_BIRTH,&birth);
-            if (!r) r=mdi_bind_id(birth,1,id);
-            if (!r) r=mdi_sql_error(sqlite3_bind_int64(birth,2,backend->cursor));
+            sqlite3_stmt *query=NULL;
+            r=mdi_query_acquire(s,MDI_EVENT_BIRTH,&query);
+            if (!r) r=mdi_bind_id(query,1,id);
+            if (!r) r=mdi_sql_error(sqlite3_bind_int64(query,2,backend->cursor));
             int64_t sequence=0;
             if (!r) {
-                int next=mdi_step(s,birth);
-                if (next==SQLITE_ROW) sequence=sqlite3_column_int64(birth,0);
+                int next=mdi_step(s,query);
+                if (next==SQLITE_ROW) sequence=sqlite3_column_int64(query,0);
                 else if (next!=SQLITE_DONE) r=mdi_sql_failure(next);
             }
-            r=mdi_query_release(birth,r);
-            return !r && sequence ? journal(w,backend,sequence) : r;
+            r=mdi_query_release(query,r);
+            if (!r && sequence) r=journal(w,backend,sequence);
+            if (r || !birth) return r;
         }
         /* Virtual subscriptions follow logical objects across copy-up. Watching
          * the retained backing directory observes the first write even before
@@ -321,7 +327,7 @@ static int native_event(struct md_inode_watches *w, struct watch_source *backend
             struct subscription **link = &i->subscriptions;
             while (*link && !r) {
                 struct subscription *p = *link;
-                if (p->source==backend && !strcmp(p->object, id)) r = publish(w, i, link, event->mask, 0, NULL);
+                if (p->source==backend && !strcmp(p->object, id)) r = publish(w, i, link, mask, 0, NULL);
                 if (*link == p) link = &p->next;
             }
         }
@@ -342,7 +348,7 @@ static int native_event(struct md_inode_watches *w, struct watch_source *backend
                 struct subscription **link = &i->subscriptions;
                 while (*link && !r) {
                     struct subscription *p = *link;
-                    if (p->source==backend && !strcmp(p->object, parent)) r = publish(w, i, link, event->mask, 0, name);
+                    if (p->source==backend && !strcmp(p->object, parent)) r = publish(w, i, link, mask, 0, name);
                     if (*link == p) link = &p->next;
                 }
             }

@@ -27,11 +27,17 @@
 
 static int gets,sets,syncs,changes,kill_after,fail_at;
 static unsigned leaf_stats;
+static int replacement_directory=-1;
 int __real_fstatat(int,const char *,struct stat *,int);
 int __wrap_fstatat(int fd,const char *path,struct stat *st,int flags) {
     const char *name=strrchr(path,'/');
     if (!strcmp(name ? name+1 : path,"stat-observed")) ++leaf_stats;
-    return __real_fstatat(fd,path,st,flags);
+    int result=__real_fstatat(fd,path,st,flags);
+    if (!result && replacement_directory>=0 && !strcmp(name ? name+1 : path,"stat-race")) {
+        assert(!renameat(replacement_directory,"race-replacement",replacement_directory,"stat-race"));
+        replacement_directory=-1;
+    }
+    return result;
 }
 static void after_change(void) {
     if (++changes==kill_after) { kill(getpid(),SIGKILL); _exit(99); }
@@ -462,6 +468,22 @@ static void stat_observation(struct md_inode_store *s,int dir,const char *path) 
     close(replacement); close(fd); md_inode_store_close(writer);
     puts("PASS stat observation: one leaf lookup, fresh data and foreign metadata/rename/replacement/promotion, symlinks and search permission");
 }
+static void stat_replacement(struct md_inode_store *s,int dir) {
+    int original=md_inode_create(s,dir,"stat-race",0644);
+    int replacement=md_inode_create(s,dir,"race-replacement",0644);
+    assert(original>=0 && replacement>=0 && native_node(s,original) && native_node(s,replacement));
+    assert(!mdi_native_metadata(original,41,42,0640));
+    assert(!mdi_native_metadata(replacement,51,52,0600));
+    replacement_directory=dir;
+    struct stat st,actual;
+    assert(md_inode_stat(s,dir,"stat-race",0,&st)==-ESTALE && replacement_directory==-1);
+    assert(!fstat(replacement,&actual));
+    assert(!md_inode_stat(s,dir,"stat-race",0,&st) && st.st_ino==actual.st_ino
+        && st.st_uid==51 && st.st_gid==52 && (st.st_mode&07777)==0600);
+    assert(!md_inode_unlink(s,dir,"stat-race",0));
+    close(original); close(replacement);
+    puts("PASS native metadata race: unpinned lookup rejects replacement between stat and private-attribute capture");
+}
 static void hybrid(const char *path) {
     struct md_inode_store *s; assert(!md_inode_store_open(path,1,&s));
     struct md_identity ids=md_identity_new(0,0); s->identity=&ids;
@@ -469,6 +491,7 @@ static void hybrid(const char *path) {
     assert(!md_inode_mkdir(s,-1,"work",0755));
     int dir=md_inode_open(s,-1,"work",O_RDONLY|O_DIRECTORY,0); assert(dir>=0);
     stat_observation(s,dir,path);
+    stat_replacement(s,dir);
     stable_source(s,dir);
     int managed=md_inode_create(s,dir,"trusted-metadata",0644); assert(managed>=0 && native_node(s,managed));
     assert(!md_inode_unlink(s,dir,"trusted-metadata",0));
@@ -586,6 +609,79 @@ static void hybrid(const char *path) {
     user_leaves(s);
     close(regular); close(observer); close(dir); md_inode_store_close(s); md_identity_release(&ids);
 }
+static void kill_birth(enum md_inode_checkpoint point,void *context) {
+    if (point==*(enum md_inode_checkpoint *)context) { kill(getpid(),SIGKILL); _exit(99); }
+}
+static void block_birth_marker(enum md_inode_checkpoint point,void *context) {
+    if (point!=MD_NAMESPACE_STAGED) return;
+    struct md_inode_store *s=context;
+    assert(s->event_sequence>0);
+    char name[64]; snprintf(name,sizeof(name),"events.%" PRId64,(int64_t)s->event_sequence);
+    assert(!mkdirat(s->lifetime->root,name,0700));
+}
+static void catalogue_births(const char *path) {
+    struct md_inode_store *s; assert(!md_inode_store_open(path,1,&s));
+    assert(!md_inode_mkdir(s,-1,"host",0700));
+    struct md_identity ids=md_identity_new(0,0); s->identity=&ids;
+    int dir=md_inode_open(s,-1,"host",O_RDONLY|O_DIRECTORY,0); assert(dir>=0);
+    struct mdi_node parent; assert(!mdi_fd(s,dir,&parent) && parent.mode<0);
+    for (unsigned attempt=0;attempt<3;++attempt) {
+        struct md_inode_birth *birth=NULL;
+        int pin=md_inode_prepare_birth(s,dir,"prepared",O_CREAT|O_EXCL|O_RDWR,0400,0,&birth);
+        assert(pin>=0 && birth);
+        struct stat st; assert(md_inode_stat(s,dir,"prepared",0,&st)==-ENOENT);
+        if (!attempt) { assert(!md_inode_birth_discard(&birth) && !birth); close(pin); continue; }
+        char proc[64]; snprintf(proc,sizeof(proc),"/proc/self/fd/%d",pin);
+        int fd=open(proc,O_RDWR|O_CLOEXEC); assert(fd>=0 && write(fd,"body",4)==4);
+        if (attempt==2) {
+            int competing=md_inode_create(s,dir,"prepared",0644); assert(competing>=0); close(competing);
+            assert(md_inode_birth_commit(&birth)==-EEXIST && birth && !md_inode_birth_discard(&birth));
+        } else {
+            assert(!md_inode_birth_commit(&birth) && !birth && !native_node(s,fd));
+            assert(!md_inode_fstat(s,fd,&st) && st.st_uid==0 && (st.st_mode&07777)==0400 && st.st_size==4);
+            assert(!md_inode_link(s,dir,"prepared",dir,"alias",0));
+            assert(!md_inode_unlink(s,dir,"alias",0));
+        }
+        assert(!md_inode_unlink(s,dir,"prepared",0));
+        close(fd); close(pin);
+    }
+    assert(!mdi_fd(s,dir,&parent) && parent.mode<0);
+    int observer=md_inode_watch_create(s,IN_NONBLOCK); assert(observer>=0);
+    assert(md_inode_watch_add(s,observer,dir,IN_CREATE)>0);
+    struct md_inode_birth *birth=NULL;
+    int pin=md_inode_prepare_birth(s,dir,"marker-failure",O_CREAT|O_EXCL|O_RDWR,0600,0,&birth);
+    assert(pin>=0 && birth);
+    md_inode_observe(s,block_birth_marker,s);
+    int result=md_inode_birth_commit(&birth);
+    assert(result<0 && !birth);
+    md_inode_observe(s,NULL,NULL);
+    char marker[64]; snprintf(marker,sizeof(marker),"events.%" PRId64,(int64_t)s->event_sequence);
+    assert(!unlinkat(s->lifetime->root,marker,AT_REMOVEDIR));
+    struct stat published; assert(!md_inode_stat(s,dir,"marker-failure",0,&published));
+    assert(!md_inode_unlink(s,dir,"marker-failure",0));
+    close(pin); close(observer);
+    close(dir); md_inode_store_close(s);
+    const enum md_inode_checkpoint points[]={MD_NAMESPACE_STAGED,MD_NAMESPACE_COMMITTED};
+    for (unsigned i=0;i<2;++i) {
+        pid_t child=fork(); assert(child>=0);
+        if (!child) {
+            assert(!md_inode_store_open(path,0,&s)); s->identity=&ids;
+            struct md_inode_birth *birth=NULL;
+            int pin=md_inode_prepare_birth(s,-1,"host/crash",O_CREAT|O_EXCL|O_RDWR,0640,0,&birth);
+            assert(pin>=0 && birth);
+            enum md_inode_checkpoint point=points[i]; md_inode_observe(s,kill_birth,&point);
+            md_inode_birth_commit(&birth); _exit(99);
+        }
+        int status; assert(waitpid(child,&status,0)==child && WIFSIGNALED(status) && WTERMSIG(status)==SIGKILL);
+        assert(!md_inode_store_open(path,0,&s)); s->identity=&ids;
+        struct stat st;
+        assert(md_inode_stat(s,-1,"host/crash",0,&st)==(i ? 0 : -ENOENT));
+        if (i) { assert(st.st_uid==0 && (st.st_mode&07777)==0640); assert(!md_inode_unlink(s,-1,"host/crash",0)); }
+        md_inode_store_close(s);
+    }
+    md_identity_release(&ids);
+    puts("PASS catalogue birth ownership: unpublished discard/conflict, unchanged host parent, hardlinks, post-commit error and crash before/after commit");
+}
 static void contents(struct md_inode_store *s,const char *path,const char *text) {
     int fd=md_inode_open(s,-1,path,O_RDONLY,0); assert(fd>=0);
     char data[32]; assert(read(fd,data,sizeof(data))==(ssize_t)strlen(text) && !memcmp(data,text,strlen(text)));
@@ -617,7 +713,12 @@ static void overlay_events(struct md_inode_store *base,int upper,struct md_inode
         observers[i]=md_inode_watch_create(stores[i],IN_NONBLOCK); assert(observers[i]>=0);
         watches[i]=md_inode_watch_add(stores[i],observers[i],directories[i],mask); assert(watches[i]>0);
     }
-    int fd=md_inode_create(view,merged,"before",0644); assert(fd>=0 && native_node(view,fd)); close(fd);
+    struct md_inode_birth *birth=NULL;
+    int pin=md_inode_prepare_birth(view,merged,"before",O_CREAT|O_EXCL|O_RDWR,0644,0,&birth);
+    assert(pin>=0 && birth);
+    char proc[64]; snprintf(proc,sizeof(proc),"/proc/self/fd/%d",pin);
+    int fd=open(proc,O_RDWR|O_CLOEXEC); assert(fd>=0);
+    assert(!md_inode_birth_commit(&birth) && native_node(view,fd)); close(pin); close(fd);
     assert(!md_inode_rename(view,merged,"before",merged,"after",0));
     assert(!md_inode_unlink(view,merged,"after",0));
     for (unsigned i=0;i<2;++i) {
@@ -734,6 +835,7 @@ int main(int argc,char **argv) {
     reset(); malformed(directory); watch(directory); close(directory);
     char store[PATH_MAX]; snprintf(store,sizeof(store),"%s/store",argv[1]); catalogue(store);
     snprintf(store,sizeof(store),"%s/hybrid",argv[1]); hybrid(store);
+    snprintf(store,sizeof(store),"%s/births",argv[1]); catalogue_births(store);
     snprintf(store,sizeof(store),"%s/sealed",argv[1]); sealing(store);
     snprintf(store,sizeof(store),"%s/overlay",argv[1]); overlays(store);
     return 0;

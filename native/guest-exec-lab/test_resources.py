@@ -225,6 +225,12 @@ def main():
                       + '; do test ! -d /proc/"$pid" || exit 1; done')
 
     def check_mutation_signals():
+        for mode in range(8):
+            check(f"native metadata signals mode={mode}", root + "/libmagicdesk_guest_resource_guest.so metadata-signal "
+                  + root + f"/native {mode}", "PASS metadata under signals:")
+            check(f"guest metadata signals mode={mode}", root + "/libmagicdesk_guest_run.so --statistics --store "
+                  + root + f"/store --deadline-seconds 90 -- /bin/test metadata-signal /tmp {mode}",
+                  "PASS metadata under signals:")
         for protected in range(2):
             for restart in range(2):
                 for guest in (False, True):

@@ -88,6 +88,11 @@ struct md_fd_loan *md_fd_loan_new(struct md_fd_origins *);
 void md_fd_loan_end(struct md_fd_loan *);
 void md_fd_loan_release(struct md_fd_loan *);
 int md_fd_origins_prepare_loan(struct md_fd_origin_update *,struct md_fd_loan *);
+/* Provisional application slot, with its real CLOEXEC flag. Its RUNNING turn
+ * must remain held until publication or verified native retirement. */
+int md_fd_origins_prepare_custody(struct md_fd_origin_update *,struct md_fd_loan *,const struct md_fd_order *);
+/* Prepared (not yet published) custody becomes an ordinary application FD. */
+void md_fd_origins_release_custody(struct md_fd_origin_update *);
 /* Under a RUNNING table turn: 1 selects an expired loan, 0 means none.
  * Keep that turn through native close and close_range metadata retirement.
  * Ambiguous terminal mutations return ESTALE, never an assumed identity. */

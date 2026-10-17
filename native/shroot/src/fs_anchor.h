@@ -13,6 +13,10 @@ struct md_fs_anchor *md_fs_anchor_retain(struct md_fs_anchor *);
 void md_fs_anchor_release(struct md_fs_anchor *);
 /* Borrowed O_PATH descriptor, suitable for cwd/path traversal, not data IO. */
 int md_fs_anchor_fd(const struct md_fs_anchor *);
+/* Immutable type when captured; zero means unknown, never a guessed type. */
+unsigned md_fs_anchor_kind(const struct md_fs_anchor *);
+struct md_inode_store;
+int md_fs_anchor_native_leaf(const struct md_fs_anchor *,const struct md_inode_store *,int fd);
 /* Live mount policy under the caller's already retained provenance. */
 unsigned md_fs_anchor_policy(const struct md_fs_anchor *);
 struct md_fs_info;

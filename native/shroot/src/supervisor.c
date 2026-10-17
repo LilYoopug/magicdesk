@@ -251,6 +251,8 @@ struct task_action {
     struct md_fd_order *loan_turn;
     struct task_action *next;
     pid_t loan_waiter;
+    struct md_broker_retirement retirement;
+    int broker_borrowed;
 };
 static struct md_task_call *task_action_call(struct task_action *action) {
     return action->loan ? &action->native : &action->filter.task;
@@ -1292,6 +1294,13 @@ static void notification_interrupted(struct thread *t) {
     if (t->metadata_restart) t->metadata_restart->stage=METADATA_ENTRY;
     TRACE("PROBE notification interrupted pid=%d\n",t->pid);
 }
+static int cooperative_copying(struct thread *t) {
+    struct md_buffer_span span;
+    if (t->phase!=IDLE || !t->cooperative_buffer.pool
+            || md_buffer_span(&t->cooperative_buffer,&span) || span.size<sizeof(struct md_entry_channel)) return 0;
+    const struct md_entry_channel *c=span.data;
+    return c->owner==t->pid && atomic_load_explicit(&c->copying,memory_order_acquire);
+}
 static void buffer_setup(struct thread *t, const struct seccomp_notif *q) {
     size_t page=(size_t)getpagesize();
     size_t size=(sizeof(union md_adapter_frame)+page-1)/page*page
@@ -1925,7 +1934,10 @@ static void handle_notification(const struct seccomp_notif *request) {
         if (t->phase != IDLE) TRACE("PROBE unexpected notification pid=%d phase=%d nr=%d pc=%#llx fd=%llu\n",
             t->pid, t->phase, q.data.nr, q.data.instruction_pointer, q.data.args[0]);
         CHECK(t->phase == IDLE);
-        if (q.data.nr==SYS_fsopen || !md_domain_restricted(t->resources.fs)) {
+        /* Retained native-root export below only understands openat/statat.
+         * Other reads keep the same task-affine adapter as their TRACE route. */
+        if ((q.data.nr!=SYS_openat && q.data.nr!=SYS_newfstatat && q.data.nr!=SYS_readlinkat)
+                || !md_domain_restricted(t->resources.fs)) {
             delegate_begin(t, &q); return;
         }
         if (q.data.nr==SYS_readlinkat) {
@@ -2029,7 +2041,7 @@ static int interrupted_metadata_event(struct thread *t,int status,const struct r
             || info.si_signo==SIGSEGV || info.si_signo==SIGBUS || info.si_signo==SIGILL || info.si_signo==SIGFPE)) return 0;
     struct user_pt_regs regs;
     if (!registers(t->pid,&regs)) return 1;
-    if (regs.regs[8]!=SYS_fstat && regs.regs[8]!=SYS_newfstatat && regs.regs[8]!=SYS_readlinkat) return 0;
+    if (!md_broker_metadata_call((int)regs.regs[8])) return 0;
     uint32_t instruction;
     struct iovec local={&instruction,sizeof(instruction)},remote={(void *)regs.pc,sizeof(instruction)};
     ssize_t copied=process_vm_readv(t->pid,&local,1,&remote,1,0);
@@ -2495,6 +2507,7 @@ static int process_limit_call(struct thread *t,struct user_pt_regs *r) {
     }
     return 0;
 }
+#include "identity_call.h"
 static int identity_call(struct thread *t, struct user_pt_regs *r, unsigned long cookie) {
     if (r->pc == RAW_GATE) return 0;
     long nr = r->regs[8], value;
@@ -2522,10 +2535,8 @@ static int identity_call(struct thread *t, struct user_pt_regs *r, unsigned long
                 || !shield(t) || !skip(t->pid)) return 1;
         identity_copy_next(t); return 1;
     case SYS_getgroups: case SYS_setgroups: identity_groups_call(t, r); return 1;
-    case SYS_getuid: value = md_identity_visible_id(&t->identity,0,t->identity.uid.real); break;
-    case SYS_geteuid: value = md_identity_visible_id(&t->identity,0,t->identity.uid.effective); break;
-    case SYS_getgid: value = md_identity_visible_id(&t->identity,1,t->identity.gid.real); break;
-    case SYS_getegid: value = md_identity_visible_id(&t->identity,1,t->identity.gid.effective); break;
+    case SYS_getuid: case SYS_geteuid: case SYS_getgid: case SYS_getegid:
+        value=md_identity_scalar_result(&t->identity,nr); break;
     case SYS_getresuid: case SYS_getresgid: {
         const struct md_identity_ids *ids = nr == SYS_getresuid ? &t->identity.uid : &t->identity.gid;
         t->original = *r;
@@ -2974,6 +2985,9 @@ static void task_action_cleanup(void) {
     if (active) {
         if (active->requester) active->requester->action=NULL;
         if (active->borrowed) CHECK(!md_task_quiesce_return(task_action_barrier,active->actor->pid));
+        if (active->broker_borrowed) {
+            md_broker_native_return(broker,active->actor->pid); active->broker_borrowed=0;
+        }
         if (task_action_barrier) CHECK(!md_task_quiesce_release(task_action_barrier));
         task_action_execution=NULL;
         task_action_release(active);
@@ -2988,9 +3002,11 @@ static void task_action_finish(struct task_action *owner,long result) {
     void (*complete)(struct thread *,long)=owner->complete;
     struct user_pt_regs r=owner->continuation;
     pid_t waiter=owner->loan_waiter;
+    struct md_broker_retirement retirement=owner->retirement;
     if (t) { retry_clear(t,RETRY_TASK_ACTION); t->action=NULL; }
     task_action_release(owner);
     if (waiter) readiness_loan_closed(waiter,result);
+    if (retirement.complete) retirement.complete(retirement.context,(int)result);
     if (t) {
         if (complete) complete(t,result);
         else {
@@ -3044,6 +3060,9 @@ static void task_action_call_complete(long result,int retry) {
         }
     } else if (!result && !retry) result=md_fd_selector_mark(owner->group,owner->kind,owner->number);
     if (owner->borrowed) CHECK(!md_task_quiesce_return(task_action_barrier,actor->pid));
+    if (owner->broker_borrowed) {
+        md_broker_native_return(broker,actor->pid); owner->broker_borrowed=0;
+    }
     if (task_action_barrier) CHECK(!md_task_quiesce_release(task_action_barrier));
     if (owner->synthetic) actor->kernel_stopped=0;
     CHECK(!md_buffer_release(&owner->buffer));
@@ -3115,7 +3134,7 @@ static void task_action_call_start(struct task_action *owner) {
     uintptr_t address=error ? 0 : md_memory_buffer_address(actor->memory,&owner->buffer);
     if (!error && (!address || span.size<sizeof(struct md_task_filter_image))) error=-EINVAL;
     if (!error) {
-        struct md_fd_filter_gates gates={RAW_GATE,abi.watch_gate,abi.task_return};
+        struct md_fd_filter_gates gates={RAW_GATE,abi.watch_gate,abi.task_return,abi.native_return};
         error=md_task_filter_begin(&owner->filter,native_trace,actor->pid,boundary,
             &saved,abi.task_call,abi.task_return,span.data,address,owner->kind,owner->number,&gates);
     }
@@ -3236,13 +3255,20 @@ static void loan_start(struct task_action *owner) {
     int exists=md_fd_origins_loan_matches(turn,owner->number,owner->loan);
     if (exists<0) { loan_failed(owner,exists); return; }
     if (!exists) { task_action_finish(owner,0); return; }
-    struct thread *candidate=owner->requester;
-    if (candidate && (!candidate->pid || candidate->terminal_stop || candidate->resume_lost)) candidate=NULL;
-    int alive=0;
+    struct thread *candidate=NULL;
+    int alive=0,stopped=0;
     for (struct thread *p=threads;!candidate && p;p=p->next) {
         if (!p->pid || p->resources.files!=owner->loan_table || p->terminal_stop || p->resume_lost) continue;
+        if (p!=owner->requester && p->pid!=owner->retirement.task && !task_action_borrowable(p)) {
+            alive=1; continue;
+        }
+        stopped=p->kernel_stopped;
+        int borrowed=md_broker_native_borrow(broker,p->pid,&stopped);
+        if (borrowed==-ESRCH) continue;
         alive=1;
-        if (task_action_borrowable(p)) candidate=p;
+        if (borrowed<0) continue;
+        owner->broker_borrowed=borrowed;
+        candidate=p;
     }
     if (!candidate) {
         /* No task can retain the kernel table. A metadata pin is not an owner. */
@@ -3252,7 +3278,7 @@ static void loan_start(struct task_action *owner) {
     owner->actor=candidate; owner->remote=1;
     task_action_execution=owner;
     if (!task_action_barrier) { task_action_barrier=md_task_quiesce_new(native_trace); CHECK(task_action_barrier); }
-    CHECK(!md_task_quiesce_add(task_action_barrier,candidate->pid,candidate->kernel_stopped,candidate->kernel_resume));
+    CHECK(!md_task_quiesce_add(task_action_barrier,candidate->pid,stopped,candidate->kernel_resume));
     CHECK(!md_task_quiesce_stop(task_action_barrier));
     task_action_call_start(owner);
 }
@@ -3264,6 +3290,19 @@ static void loan_retire(struct task_action *owner,struct thread *requester,
     if (requester) { CHECK(!requester->action); requester->action=owner; }
     if (!turn) CHECK(md_fd_order_begin(owner->loan_table,&owner->files,fd_wakeup)>=0);
     CHECK(!md_event_signal(fd_ready));
+}
+static int broker_retire(const struct md_broker_retirement *request) {
+    struct task_action *owner=calloc(1,sizeof(*owner));
+    if (!owner) return -ENOMEM;
+    int number=-1;
+    int error=md_fd_origins_loan_range(request->turn,request->number,request->number,&number,&owner->loan);
+    if (error!=1 || number!=request->number || owner->loan!=request->loan) {
+        md_fd_loan_release(owner->loan); free(owner); return error<0 ? error : -ESTALE;
+    }
+    owner->loan_table=md_fd_origins_pin(request->turn->table);
+    owner->number=number; owner->retirement=*request;
+    loan_retire(owner,NULL,request->turn,NULL);
+    return 0;
 }
 static int task_action_event(pid_t pid,int status,const struct rusage *usage) {
     struct task_action *owner=task_action_execution;
@@ -6823,6 +6862,7 @@ int main(int argc, char **argv) {
         md_broker_completion_handler(broker,completed_notification);
         md_broker_control_factory(broker,md_proc_file_control_object);
         md_broker_native_observer(broker,cooperative_native_observe);
+        md_broker_retirement_handler(broker,broker_retire);
         buffer_service=md_fs_buffer_service_new(filesystem,tasks,fd_wakeup,buffer_complete); CHECK(buffer_service);
         md_fs_buffer_admission(buffer_service,memory_available);
         md_fs_buffer_control_factory(buffer_service,md_proc_file_control_object);
@@ -7765,8 +7805,11 @@ int main(int argc, char **argv) {
             if (sig == SIGSEGV && t->phase == STORING && regs.pc == STORE) {
                 t->metadata.error = -EFAULT; store_next(t); continue;
             }
-            if (sig == SIGSEGV && t->phase == DISPATCHING) {
-                if (regs.pc >= COPY_BEGIN && regs.pc < COPY_END) {
+            if ((sig==SIGSEGV || sig==SIGBUS) && regs.pc>=COPY_BEGIN && regs.pc<COPY_END
+                    && (t->phase==DISPATCHING || cooperative_copying(t))) {
+                siginfo_t info;
+                if (!tracee_request(t,PTRACE_GETSIGINFO,NULL,&info,"guest-copy-fault")) continue;
+                if (info.si_code>0) {
                     copy_faults++;
                     regs.regs[0] = (uint64_t)-EFAULT; regs.pc = regs.regs[30];
                     if (set_registers(pid, &regs)) resume(pid, 0);

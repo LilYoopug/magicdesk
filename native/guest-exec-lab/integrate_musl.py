@@ -53,6 +53,12 @@ hidden int __shroot_try(long, long, long, long, long, long, long, long *);
     replace_once(cancel, '\tr = __syscall_cp_asm(&self->cancel, nr, u, v, w, x, y, z);',
                  '\tif (!__shroot_cp_try(nr,u,v,w,x,y,z,&r))\n'
                  '\t\tr = __syscall_cp_asm(&self->cancel, nr, u, v, w, x, y, z);')
+    # The isolated AArch64 fixture targets Shroot's Linux >= 5.15 baseline.
+    # O_CLOEXEC is atomic there; preserve it on open, remove only the legacy
+    # post-open repair (also in native/entry-disabled controls).
+    replace_once(source / 'src/fcntl/open.c',
+                 '\tif (fd>=0 && (flags & O_CLOEXEC))\n'
+                 '\t\t__syscall(SYS_fcntl, fd, F_SETFD, FD_CLOEXEC);\n', '')
     shutil.copyfile(Path(__file__).with_name('musl_entry.c'),
                     source / 'src/thread/aarch64/shroot.c')
 

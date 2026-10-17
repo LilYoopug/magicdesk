@@ -7,6 +7,7 @@
 hidden const struct md_entry_api *__shroot_entry;
 static int enabled;
 hidden long __syscall_cp_asm(volatile void *,long,long,long,long,long,long,long);
+hidden void __testcancel(void);
 
 static long cancellation_kernel(long nr,const uint64_t *args)
 {
@@ -17,9 +18,11 @@ static long cancellation_kernel(long nr,const uint64_t *args)
 hidden int __shroot_cp_try(long nr,long a,long b,long c,long d,long e,long f,long *result)
 {
     pthread_t self=__pthread_self();
-    if (!enabled || self->cancelasync || !md_entry_offered(__shroot_entry,nr,MD_ENTRY_CANCELLATION)) return 0;
-    struct md_entry_call call={.number=nr,.args={a,b,c,d,e,f},.kernel=cancellation_kernel};
-    enum md_entry_outcome outcome=__shroot_entry->try_syscall(&self->shroot_client,&call);
+    if (!enabled || self->cancelasync || self->canceldisable
+            || !md_entry_offered(__shroot_entry,nr,MD_ENTRY_CANCELLATION)) return 0;
+    struct md_entry_call call={.number=nr,.args={a,b,c,d,e,f},
+        .kernel=cancellation_kernel,.cancel=__testcancel};
+    enum md_entry_outcome outcome=md_entry_invoke(__shroot_entry,&self->shroot_client,&call);
     if (outcome==MD_ENTRY_UNKNOWN) a_crash();
     if (outcome==MD_ENTRY_DECLINED) return 0;
     *result=call.result; return 1;
@@ -59,7 +62,7 @@ hidden int __shroot_try(long nr,long a,long b,long c,long d,long e,long f,long *
     /* These are non-cancellation-point wrappers. Preserve cancellation state:
      * a signal handler may longjmp past this frame. The supervisor retires
      * worker memory ownership before delivering a signal or terminal stop. */
-    enum md_entry_outcome outcome=__shroot_entry->try_syscall(&self->shroot_client,&call);
+    enum md_entry_outcome outcome=md_entry_invoke(__shroot_entry,&self->shroot_client,&call);
     if (outcome==MD_ENTRY_UNKNOWN) a_crash();
     if (outcome==MD_ENTRY_DECLINED) call.result=kernel_call(nr,call.args);
     *result=call.result;

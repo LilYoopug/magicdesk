@@ -139,10 +139,10 @@ static int append(void *out,size_t capacity,size_t *length,const char *name) {
 ssize_t mdi_xattr_names(struct md_inode_store *s,const struct mdi_node *node,
         void *out,size_t capacity,int internal) {
     sqlite3_stmt *q=NULL;
-    int r=mdi_prepare(s,"SELECT name,value IS NOT NULL FROM overlay_attributes WHERE object=?1",&q);
-    if (!r) r=mdi_bind_id(q,1,node->id);
+    int r=node->native ? 0 : mdi_prepare(s,"SELECT name,value IS NOT NULL FROM overlay_attributes WHERE object=?1",&q);
+    if (!r && q) r=mdi_bind_id(q,1,node->id);
     unsigned replaced=0,present=0;
-    while (!r) {
+    while (!r && q) {
         int next=mdi_step(s,q);
         if (next==SQLITE_DONE) break;
         if (next!=SQLITE_ROW) { r=mdi_sql_failure(next); break; }
@@ -181,15 +181,20 @@ ssize_t mdi_xattr_names(struct md_inode_store *s,const struct mdi_node *node,
         if ((present&(1U<<i)) && visible(s,controls[i],internal)) r=append(out,capacity,&length,controls[i]);
     return r ? r : (ssize_t)length;
 }
-void md_inode_xattr(struct md_inode_store *s,const struct md_fs_request *q,
-        struct md_fs_result *out,const struct md_fs_output *output) {
+void md_inode_xattr_origin(struct md_inode_store *s,const struct md_fs_request *q,
+        struct md_fs_result *out,const struct md_fs_output *output,int native_leaf) {
     int set=q->mode==MD_FS_XATTR_SET,remove=q->mode==MD_FS_XATTR_REMOVE;
     int write=set || remove,list=q->mode==MD_FS_XATTR_LIST;
     const char *name=q->path[1] ? q->path[1] : "";
     int r=mdi_begin(s,write);
     if (r) { out->error=r; return; }
     struct mdi_node node;
-    r=mdi_fd(s,q->directory[0],&node);
+    if (!write && s->identity && !s->overlay && native_leaf) {
+        struct stat st;
+        /* Membership belongs to the retained pin; metadata and promotion are
+         * still read in this operation. Mutations need their dentry identity. */
+        r=mdi_fstat_origin(s,q->directory[0],&node,&st,1);
+    } else r=mdi_fd(s,q->directory[0],&node);
     if (!r && !list && mdi_native_private_attribute(name)) r=write ? -EPERM : -ENODATA;
     if (!r && !list && s->lifetime->filesystem_kind==MD_FILESYSTEM_OVERLAY && mdi_overlay_private_attribute(name))
         r=write ? -EPERM : -ENODATA;
@@ -236,4 +241,8 @@ void md_inode_xattr(struct md_inode_store *s,const struct md_fs_request *q,
     out->error=r;
     if (!r && !write) { out->position=result; out->size=q->capacity ? (size_t)result : 0; }
     else out->size=out->position=0;
+}
+void md_inode_xattr(struct md_inode_store *s,const struct md_fs_request *q,
+        struct md_fs_result *out,const struct md_fs_output *output) {
+    md_inode_xattr_origin(s,q,out,output,0);
 }

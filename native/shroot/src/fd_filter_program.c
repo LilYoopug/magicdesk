@@ -8,21 +8,40 @@
 #include <sys/mman.h>
 #include <sys/syscall.h>
 
+/* Runtime gates normally share one code mapping. Group their high words so
+ * every persistent selector does not spend five instructions per gate. */
+static void prefix(const struct md_fd_filter_gates *gates,struct md_fd_filter_program *out) {
+    const uintptr_t addresses[]={gates->raw,gates->watch,gates->task,gates->native};
+    unsigned seen=0;
+    for (unsigned i=0;i<sizeof(addresses)/sizeof(*addresses);++i) {
+        if (!addresses[i] || (seen&(1u<<i))) continue;
+        unsigned low[4],count=0,high=(unsigned)(addresses[i]>>32);
+        for (unsigned j=i;j<sizeof(addresses)/sizeof(*addresses);++j)
+            if (addresses[j] && (unsigned)(addresses[j]>>32)==high) {
+                seen|=1u<<j;
+                unsigned k=0;
+                while (k<count && low[k]!=(unsigned)addresses[j]) ++k;
+                if (k==count) low[count++]=(unsigned)addresses[j];
+            }
+        out->code[out->count++]=(struct sock_filter)BPF_STMT(BPF_LD|BPF_W|BPF_ABS,
+            offsetof(struct seccomp_data,instruction_pointer)+4);
+        out->code[out->count++]=(struct sock_filter)BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,high,0,1+2*count);
+        out->code[out->count++]=(struct sock_filter)BPF_STMT(BPF_LD|BPF_W|BPF_ABS,
+            offsetof(struct seccomp_data,instruction_pointer));
+        for (unsigned k=0;k<count;++k) {
+            out->code[out->count++]=(struct sock_filter)BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,low[k],0,1);
+            out->code[out->count++]=(struct sock_filter)BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW);
+        }
+    }
+    out->code[out->count++]=(struct sock_filter)BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr));
+}
 int md_fd_filter_build(enum md_fd_selector_kind kind,int fd,
         const struct md_fd_filter_gates *gates,struct md_fd_filter_program *out) {
     if (!out) return -EINVAL;
     out->count=0;
     if (!gates || fd< -1 || kind<0 || kind>=MD_FD_SELECTOR_KINDS) return -EINVAL;
     unsigned mask=fd==-1 ? 0 : MD_FD_SELECTOR_MASK;
-#define GATE(address) \
-    BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)+4), \
-    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(unsigned)((address)>>32),0,3), \
-    BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)), \
-    BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(unsigned)(address),0,1), \
-    BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
-#define PREFIX \
-    GATE(gates->raw) GATE(gates->watch) GATE(gates->task) \
-    BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+    prefix(gates,out);
 #define ADAPT(n) BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_##n,0,1), \
     BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_DISPATCH),
 #define DUPLICATES \
@@ -43,13 +62,11 @@ int md_fd_filter_build(enum md_fd_selector_kind kind,int fd,
 #define PROC(n,argument) CONTROL(n,argument,MD_INTERCEPT_PROC)
 #define COPY_PROGRAM(...) do { \
     struct sock_filter code[]={__VA_ARGS__}; \
-    _Static_assert(sizeof(code)/sizeof(*code)<=MD_FD_FILTER_INSTRUCTIONS,"FD filter capacity"); \
-    out->count=sizeof(code)/sizeof(*code); \
-    for (unsigned i=0;i<out->count;++i) out->code[i]=code[i]; \
+    _Static_assert(21+sizeof(code)/sizeof(*code)<=MD_FD_FILTER_INSTRUCTIONS,"FD filter capacity"); \
+    for (unsigned i=0;i<sizeof(code)/sizeof(*code);++i) out->code[out->count++]=code[i]; \
     return 0; \
 } while (0)
     if (kind==MD_FD_SELECTOR_WATCH) COPY_PROGRAM(
-        PREFIX
         BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_read,5,0),
         BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_readv,4,0),
         BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_ioctl,3,0),
@@ -66,7 +83,6 @@ int md_fd_filter_build(enum md_fd_selector_kind kind,int fd,
         DUPLICATES
     );
     if (kind==MD_FD_SELECTOR_PROC) COPY_PROGRAM(
-        PREFIX
         PROC(read,0) PROC(write,0) PROC(readv,0) PROC(writev,0)
         PROC(pread64,0) PROC(pwrite64,0)
         PROC(preadv,0) PROC(pwritev,0) PROC(preadv2,0) PROC(pwritev2,0)
@@ -95,19 +111,17 @@ int md_fd_filter_build(enum md_fd_selector_kind kind,int fd,
         DUPLICATES
     );
     if (kind==MD_FD_SELECTOR_EPOLL_TARGET) COPY_PROGRAM(
-        PREFIX
         CONTROL(epoll_ctl,2,MD_INTERCEPT_READINESS)
         DUPLICATES
     );
     if (kind==MD_FD_SELECTOR_EPOLL) COPY_PROGRAM(
-        PREFIX
         CONTROL(epoll_ctl,0,MD_INTERCEPT_READINESS)
         CONTROL(epoll_pwait,0,MD_INTERCEPT_READINESS)
         CONTROL(epoll_pwait2,0,MD_INTERCEPT_READINESS)
         DUPLICATES
     );
     if (kind==MD_FD_SELECTOR_POLL) COPY_PROGRAM(
-        PREFIX ADAPT(ppoll) ADAPT(pselect6)
+        ADAPT(ppoll) ADAPT(pselect6)
         BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
     );
     return -EINVAL;
@@ -116,6 +130,4 @@ int md_fd_filter_build(enum md_fd_selector_kind kind,int fd,
 #undef CONTROL
 #undef DUPLICATES
 #undef ADAPT
-#undef PREFIX
-#undef GATE
 }

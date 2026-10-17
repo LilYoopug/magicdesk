@@ -281,7 +281,7 @@ static int merge_directory(struct merge *m, const struct mdi_node *from,
         if (memchr(name,0,(size_t)length) || mdi_name_valid(name)) { r=-EIO; break; }
         struct mdi_node source, existing;
         r=mdi_node(m->source,(const char *)sqlite3_column_text(q,1),&source);
-        int found=r ? r : mdi_lookup(m->index,to,name,&existing,NULL);
+        int found=r ? r : mdi_lookup(m->index,to,name,&existing,NULL,NULL);
         if (found && found!=-ENOENT) { r=found; break; }
         int whiteout=source.kind==S_IFCHR && !source.rdev;
         struct stat st;
@@ -368,7 +368,7 @@ static int prepare_workdir(struct md_inode_store *s, const struct mdi_node *work
     sqlite3_finalize(q);
     struct mdi_node node;
     if (!r) {
-        int found=mdi_lookup(s,work,"work",&node,NULL);
+        int found=mdi_lookup(s,work,"work",&node,NULL,NULL);
         if (!found) {
             int empty=node.kind==S_IFDIR ? mdi_empty(s,&node) : 0;
             if (empty!=1) r=empty<0 ? empty : -ENOTEMPTY;

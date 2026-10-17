@@ -399,7 +399,7 @@ static struct md_cooperative_response invoke_direct(void *context,const struct m
     else if (q->syscall==SYS_mkdirat) call.args[2]=q->mode;
     else if (q->syscall==SYS_unlinkat) call.args[2]=q->flags;
     else { call.args[2]=AT_FDCWD; call.args[3]=(uintptr_t)q->path[1]; call.args[4]=q->flags; }
-    enum md_entry_outcome outcome=client->api->try_syscall(&client->client,&call);
+    enum md_entry_outcome outcome=md_entry_invoke(client->api,&client->client,&call);
     assert(outcome!=MD_ENTRY_UNKNOWN);
     if (outcome==MD_ENTRY_DECLINED) { ++client->declined; return invoke_native(NULL,q); }
     ++client->completed;

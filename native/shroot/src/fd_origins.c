@@ -249,12 +249,26 @@ int md_fd_origins_prepare_channel(struct md_fd_origins *t, struct md_fd_channel 
     if (!channel) { *out=(struct md_fd_origin_update){0}; return -EINVAL; }
     return prepare(t,NULL,channel,flags,out);
 }
-int md_fd_origins_prepare_loan(struct md_fd_origin_update *update,struct md_fd_loan *loan) {
+static int prepare_loan(struct md_fd_origin_update *update,struct md_fd_loan *loan,int temporary) {
     if (!update || !loan || update->table!=loan->home || !update->entry
-            || update->entry->loan || !(update->entry->flags&FD_CLOEXEC)
+            || update->entry->loan || (temporary && !(update->entry->flags&FD_CLOEXEC))
             || !atomic_load_explicit(&loan->active,memory_order_acquire)) return -EINVAL;
     update->entry->loan=loan_slot_new(loan);
     return update->entry->loan ? 0 : -ENOMEM;
+}
+int md_fd_origins_prepare_loan(struct md_fd_origin_update *update,struct md_fd_loan *loan) {
+    return prepare_loan(update,loan,1);
+}
+int md_fd_origins_prepare_custody(struct md_fd_origin_update *update,struct md_fd_loan *loan,
+        const struct md_fd_order *turn) {
+    if (!update || !turn || turn->table!=update->table || md_fd_order_state(turn)!=MD_RESOURCE_ORDER_RUNNING)
+        return -EBUSY;
+    return prepare_loan(update,loan,0);
+}
+void md_fd_origins_release_custody(struct md_fd_origin_update *update) {
+    if (!update || !update->entry || !update->entry->loan) return;
+    md_fd_loan_release(update->entry->loan->owner);
+    free(update->entry->loan); update->entry->loan=NULL;
 }
 int md_fd_origins_has_loans(struct md_fd_origins *t) {
     return t && atomic_load_explicit(&t->loans,memory_order_acquire)!=0;

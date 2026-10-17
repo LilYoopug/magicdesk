@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/inotify.h>
 
 void mdi_leaf_admit(struct md_inode_store *s) {
     s->native_files=0;
@@ -24,24 +25,48 @@ void mdi_leaf_admit(struct md_inode_store *s) {
     s->native_files=!r && st.st_uid==1 && st.st_gid==1 && !(st.st_mode&07777);
     close(fd);
 }
-int mdi_leaf_create(struct md_inode_store *s,const struct mdi_node *parent,const char *name,int flags,mode_t mode) {
-    if (!s->native_files || !s->identity || parent->mode<0 || !parent->attached || parent->source
-            || (parent->acl_mask&MD_ACL_DEFAULT)) return -EOPNOTSUPP;
+static int birth_attributes(struct md_inode_store *s,const struct mdi_node *parent,const char *name,
+        uint32_t *uid,uint32_t *gid,mode_t *mode) {
+    if (!s->native_files || !s->identity || !parent->attached || parent->source)
+        return -EOPNOTSUPP;
     int allowed=mdi_overlay_native_name(s,parent,name);
     if (allowed) return allowed;
-    uint32_t uid=s->identity->uid.fs,gid=s->identity->gid.fs;
-    if (parent->mode&S_ISGID) gid=parent->gid;
-    if ((mode&S_ISGID) && !md_identity_file_capable(s->identity,parent->uid,parent->gid,CAP_FSETID)
-            && !md_identity_in_group(s->identity,gid)) mode&=~S_ISGID;
-    mode&=~s->creation_mask;
+    struct stat st={.st_mode=parent->mode,.st_uid=parent->uid,.st_gid=parent->gid};
+    int r=parent->mode<0 ? mdi_stat(s,parent,&st) : 0;
+    if (r) return r;
+    *uid=s->identity->uid.fs; *gid=s->identity->gid.fs;
+    if (st.st_mode&S_ISGID) *gid=st.st_gid;
+    if ((*mode&S_ISGID) && !md_identity_file_capable(s->identity,st.st_uid,st.st_gid,CAP_FSETID)
+            && !md_identity_in_group(s->identity,*gid)) *mode&=~S_ISGID;
+    if (!(parent->acl_mask&MD_ACL_DEFAULT)) *mode&=~s->creation_mask;
+    return 0;
+}
+static int prepare_backing(struct md_inode_store *s,const struct mdi_node *parent,const char *stage,
+        int flags,uint32_t uid,uint32_t gid,mode_t mode) {
+    int fd=mdi_native_eligible(uid,gid,mode)
+        ? mdi_native_create(s->objects,stage,flags,uid,gid,mode)
+        : mdi_native_prepare(s->objects,stage,flags,uid,gid,mode);
+    if (fd<0) return fd;
+    if (parent->acl_mask&MD_ACL_DEFAULT) {
+        struct mdi_node node={.native=1,.descriptor=fd+1,.kind=S_IFREG,.mode=mode,.uid=uid,.gid=gid};
+        int r=mdi_acl_inherit(s,parent,&node,mode);
+        if (r) { close(fd); unlinkat(s->objects,stage,0); return r; }
+    }
+    return fd;
+}
+int mdi_leaf_create(struct md_inode_store *s,const struct mdi_node *parent,const char *name,int flags,mode_t mode) {
+    if (parent->mode<0) return -EOPNOTSUPP;
+    uint32_t uid,gid;
+    int r=birth_attributes(s,parent,name,&uid,&gid,&mode);
+    if (r) return r;
     flags&=~(O_CREAT|O_EXCL|O_TRUNC|O_NOFOLLOW|O_NOCTTY);
-    if (mdi_native_eligible(uid,gid,mode))
+    if (!(parent->acl_mask&MD_ACL_DEFAULT) && mdi_native_eligible(uid,gid,mode))
         return mdi_native_create_in(s->objects,parent->backing,name,flags,uid,gid,mode);
     char stage[33],target[NAME_MAX+34];
-    int r=mdi_name_valid(name);
+    r=mdi_name_valid(name);
     if (!r) r=mdi_random_id(stage);
     if (r) return r;
-    int fd=mdi_native_prepare(s->objects,stage,flags,uid,gid,mode);
+    int fd=prepare_backing(s,parent,stage,flags,uid,gid,mode);
     if (fd<0) return fd;
     snprintf(target,sizeof(target),"%s/%s",parent->backing,name);
     /* Only unpublished native births move out of the backing root. The watch
@@ -49,6 +74,99 @@ int mdi_leaf_create(struct md_inode_store *s,const struct mdi_node *parent,const
     if (renameat2(s->objects,stage,s->objects,target,RENAME_NOREPLACE)) r=-errno;
     if (r) { close(fd); unlinkat(s->objects,stage,0); }
     return r ? r : fd;
+}
+
+struct md_inode_birth {
+    struct md_inode_store *store;
+    char parent[33],backing[33],stage[33],name[NAME_MAX+1];
+    int catalogue,synchronous;
+};
+int mdi_leaf_prepare_birth(struct md_inode_store *s,const struct mdi_node *parent,const char *name,
+        int flags,mode_t mode,struct md_inode_birth **out) {
+    if (!out || *out) return -EINVAL;
+    uint32_t uid,gid;
+    int r=birth_attributes(s,parent,name,&uid,&gid,&mode);
+    if (!r) r=mdi_name_valid(name);
+    if (r) return r;
+    struct md_inode_birth *birth=calloc(1,sizeof(*birth));
+    if (!birth) return -ENOMEM;
+    birth->store=s;
+    birth->catalogue=parent->mode<0;
+    birth->synchronous=!!(flags&O_DSYNC);
+    strcpy(birth->parent,parent->id); strcpy(birth->backing,parent->backing); strcpy(birth->name,name);
+    r=mdi_random_id(birth->stage);
+    flags&=~(O_CREAT|O_EXCL|O_TRUNC|O_NOFOLLOW|O_NOCTTY);
+    int fd=r ? r : prepare_backing(s,parent,birth->stage,flags,uid,gid,mode);
+    if (fd<0) { free(birth); return fd; }
+    /* The real caller, not this metadata preparation, owns its data open and
+     * descriptor capacity. Maintenance is excluded by the store's lifetime. */
+    int pin=openat(s->objects,birth->stage,O_PATH|O_CLOEXEC|O_NOFOLLOW);
+    r=pin<0 ? -errno : 0;
+    if (!r && birth->catalogue) r=mdi_sync(s,fd);
+    close(fd);
+    if (r) { if (pin>=0) close(pin); unlinkat(s->objects,birth->stage,0); free(birth); return r; }
+    *out=birth; return pin;
+}
+int md_inode_birth_discard(struct md_inode_birth **owner) {
+    if (!owner || !*owner) return 0;
+    struct md_inode_birth *birth=*owner;
+    if (unlinkat(birth->store->objects,birth->stage,0) && errno!=ENOENT) return -errno;
+    free(birth); *owner=NULL; return 0;
+}
+void md_inode_birth_forget(struct md_inode_birth **owner) {
+    if (owner) { free(*owner); *owner=NULL; }
+}
+static int catalogue_birth(struct md_inode_birth **owner) {
+    struct md_inode_birth *birth=*owner;
+    struct md_inode_store *s=birth->store;
+    char id[33];
+    int r=mdi_random_id(id);
+    int pin=r ? r : openat(s->objects,birth->stage,O_PATH|O_CLOEXEC|O_NOFOLLOW);
+    if (pin<0 && !r) r=-errno;
+    struct stat st;
+    if (!r) r=mdi_native_stat(pin,&st);
+    if (!r) r=mdi_write(s);
+    /* Staging events never acquire a catalogue identity. Only the final move
+     * publishes CREATE/OPEN; failure before commit leaves an owned orphan. */
+    if (!r && renameat2(s->objects,birth->stage,s->objects,id,RENAME_NOREPLACE)) r=-errno;
+    if (!r) strcpy(birth->stage,id);
+    struct mdi_node node;
+    if (!r) r=mdi_register_object(s,id,S_IFREG,st.st_mode&07777,st.st_uid,st.st_gid,&st,NULL,&node);
+    if (!r) r=mdi_leaf_import_attributes(s,&node,pin);
+    if (!r) r=mdi_add_name(s,birth->parent,birth->name,id);
+    if (!r) r=mdi_event(s,birth->parent,&node,birth->name,IN_CREATE,NULL);
+    if (!r) r=mdi_sync(s,s->objects);
+    if (!r && birth->synchronous) s->sync_requested=1;
+    if (pin>=0) close(pin);
+    int committed=0;
+    r=mdi_commit_owned(s,r,&committed);
+    if (committed) { free(birth); *owner=NULL; }
+    return r;
+}
+int md_inode_birth_commit(struct md_inode_birth **owner) {
+    if (!owner || !*owner) return -EINVAL;
+    struct md_inode_birth *birth=*owner;
+    struct md_inode_store *s=birth->store;
+    int r=mdi_begin(s,0);
+    if (r) return r;
+    struct mdi_node parent,entry;
+    r=mdi_readonly(s) ? -EROFS : mdi_node(s,birth->parent,&parent);
+    if (!r && (!parent.attached || parent.source || strcmp(parent.backing,birth->backing))) r=-ENOENT;
+    if (!r) {
+        int found=mdi_lookup(s,&parent,birth->name,&entry,NULL,NULL);
+        r=found==-ENOENT ? 0 : found ? found : -EEXIST;
+    }
+    if (!r) r=mdi_overlay_native_name(s,&parent,birth->name);
+    if (!r && birth->catalogue) return catalogue_birth(owner);
+    char target[NAME_MAX+34];
+    if (!r) {
+        snprintf(target,sizeof(target),"%s/%s",birth->backing,birth->name);
+        if (renameat2(s->objects,birth->stage,s->objects,target,RENAME_NOREPLACE)) r=-errno;
+        else { free(birth); *owner=NULL; }
+    }
+    /* Consuming the owner records the accepted rename even if retirement fails.
+     * The caller must not replay or discard a committed creation. */
+    return mdi_finish(s,r);
 }
 
 int mdi_leaf_id(const struct stat *st,const char scope[33],char out[33]) {
@@ -82,7 +200,8 @@ static int leaf(struct md_inode_store *s,const struct mdi_node *parent,
     if (physical->st_mode&S_ISVTX) {
         int fd=descriptor>=0 ? descriptor : mdi_backing_open(s,&node,O_PATH);
         if (fd<0) return fd;
-        int r=mdi_native_info(fd,&logical,&node.acl_mask);
+        int r=descriptor>=0 ? mdi_native_project(fd,&logical,&node.acl_mask)
+            : mdi_native_info(fd,&logical,&node.acl_mask);
         if (descriptor<0) close(fd);
         if (r) return r;
         if (logical.st_dev!=physical->st_dev || logical.st_ino!=physical->st_ino) return -ESTALE;
@@ -96,13 +215,21 @@ static int leaf(struct md_inode_store *s,const struct mdi_node *parent,
     if (attributes) { *attributes=logical; mdi_stat_project(&node,attributes); }
     *out=node; return 0;
 }
-int mdi_leaf_lookup(struct md_inode_store *s,const struct mdi_node *parent,const char *name,struct mdi_node *out,struct stat *attributes) {
+int mdi_leaf_lookup(struct md_inode_store *s,const struct mdi_node *parent,const char *name,struct mdi_node *out,struct stat *attributes,struct mdi_path_pin *pin) {
     if (parent->kind!=S_IFDIR || parent->source || !parent->attached) return -ENOENT;
     char path[NAME_MAX+34];
     size_t prefix=strlen(parent->backing),length=strlen(name);
     if (prefix+length+1>=sizeof(path)) return -ENAMETOOLONG;
     memcpy(path,parent->backing,prefix); path[prefix]='/'; memcpy(path+prefix+1,name,length+1);
     struct stat st;
+    if (pin) {
+        int fd=openat(s->objects,path,O_PATH|O_NOFOLLOW|O_CLOEXEC);
+        if (fd<0) return -errno;
+        int r=fstat(fd,&st) ? -errno : leaf(s,parent,path,fd,&st,out,attributes);
+        if (r) close(fd);
+        else *pin=(struct mdi_path_pin){.fd=fd,.physical=st};
+        return r;
+    }
     if (fstatat(s->objects,path,&st,AT_SYMLINK_NOFOLLOW)) return -errno;
     return leaf(s,parent,path,-1,&st,out,attributes);
 }
@@ -229,7 +356,7 @@ struct materialize { struct md_inode_store *store; const struct mdi_node *parent
 static int promote_name(const char *name,void *data) {
     struct materialize *m=data;
     struct mdi_node node;
-    int r=mdi_leaf_lookup(m->store,m->parent,name,&node,NULL);
+    int r=mdi_leaf_lookup(m->store,m->parent,name,&node,NULL,NULL);
     return r ? r : mdi_leaf_promote(m->store,&node);
 }
 int mdi_leaf_materialize_directory(struct md_inode_store *s,const struct mdi_node *parent) {

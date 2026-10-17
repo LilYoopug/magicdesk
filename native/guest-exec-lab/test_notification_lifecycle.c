@@ -298,6 +298,32 @@ static void test_cancelled(void) {
     puts("PASS cancellation: EINTR, stale ID/reply/ADDFD rejected, no descriptor leak or request replay");
 }
 
+static void test_cancelled_before_receive(void) {
+    stage = "cancelled queued notification";
+    for (unsigned i = 0; i < 32; ++i) {
+        struct child c = start(cancelled_child); struct hello h;
+        int listener = receive_fd(c.channel, &h); ack(c.channel);
+        ready(listener);
+        CHECK(!kill(c.pid, SIGUSR1)); await_ack(c.channel);
+        /* The caller has returned EINTR and cannot issue another syscall until
+         * acknowledged. POLLIN followed by cancellation must consume the old
+         * admission, not wait for a future request. Alarm bounds a broken RECV;
+         * PDEATHSIG also terminates the owned child if that bound fires. */
+        struct seccomp_notif q = {0};
+        alarm(5);
+        errno = 0;
+        CHECK(ioctl(listener, SECCOMP_IOCTL_NOTIF_RECV, &q) < 0 && errno == ENOENT);
+        alarm(0);
+        struct pollfd empty = {.fd = listener, .events = POLLIN};
+        CHECK(poll(&empty, 1, 0) == 0);
+        ack(c.channel);
+        q = request(listener, SYS_openat);
+        inject_zero(listener, q.id);
+        close(listener); finish(c);
+    }
+    puts("PASS queued cancellation: 32 POLLIN/cancel/RECV races return ENOENT without waiting for the next request");
+}
+
 static char signal_stack[65536];
 static void sandbox_handler(int signal, siginfo_t *info, void *context) {
     char local;
@@ -436,6 +462,7 @@ int main(int argc, char **argv) {
     CHECK(!atexit(cleanup));
     test_protected();
     test_cancelled();
+    test_cancelled_before_receive();
     test_sandbox();
     test_exec();
     test_listener_loss();

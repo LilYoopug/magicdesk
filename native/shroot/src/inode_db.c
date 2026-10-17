@@ -7,6 +7,7 @@
 #include "inode_schema.h"
 #include "inode_publication.h"
 #include "inode_leaf.h"
+#include "inode_native.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -176,11 +177,12 @@ int mdi_begin(struct md_inode_store *s, int write) {
 }
 int md_inode_read_scope_begin(void *store) { return mdi_begin(store,0); }
 int md_inode_read_scope_end(void *store) { return mdi_finish(store,0); }
-int mdi_finish(struct md_inode_store *s, int result) {
+static int finish(struct md_inode_store *s, int result, int *committed) {
     if (s->read_depth && --s->read_depth) return result;
     s->cache_checked=0;
     if (!result && s->write_transaction && s->overlay) result=mdi_overlay_flush(s);
     if (!result && !sqlite3_get_autocommit(s->db)) result = transaction(s, MDI_COMMIT);
+    if (!result && committed) *committed=1;
     if (result) { if (!sqlite3_get_autocommit(s->db)) transaction(s, MDI_ROLLBACK); }
     else result=mdi_events_committed(s);
     if (!result && s->sync_requested) result=mdi_checkpoint(s);
@@ -188,6 +190,7 @@ int mdi_finish(struct md_inode_store *s, int result) {
     s->write_transaction=0;
     return store_unlock(s, result);
 }
+int mdi_finish(struct md_inode_store *s,int result) { return finish(s,result,NULL); }
 #ifndef MD_INODE_TESTING
 enum { MD_OBJECT_SYNCED, MD_NAMESPACE_STAGED, MD_NAMESPACE_COMMITTED };
 #endif
@@ -206,12 +209,14 @@ static int checkpoint(struct md_inode_store *s, int point) {
 #endif
     return 0;
 }
-int mdi_commit(struct md_inode_store *s, int r) {
+int mdi_commit_owned(struct md_inode_store *s,int r,int *committed) {
+    if (committed) *committed=0;
     if (!r) r = checkpoint(s, MD_NAMESPACE_STAGED);
-    r = mdi_finish(s, r);
+    r = finish(s, r, committed);
     if (!r) r = checkpoint(s, MD_NAMESPACE_COMMITTED);
     return r;
 }
+int mdi_commit(struct md_inode_store *s,int r) { return mdi_commit_owned(s,r,NULL); }
 static int read_id(sqlite3_stmt *q, int column, char out[33]) {
     const char *value = (const char *)sqlite3_column_text(q, column);
     if (!value || sqlite3_column_bytes(q, column) != 32
@@ -387,9 +392,9 @@ int mdi_catalogue_lookup(struct md_inode_store *s, const char *parent, const cha
     if (cacheable) mdi_cache_put(s,&key,node,r);
     return r;
 }
-int mdi_lookup(struct md_inode_store *s,const struct mdi_node *parent,const char *name,struct mdi_node *node,struct stat *attributes) {
+int mdi_lookup(struct md_inode_store *s,const struct mdi_node *parent,const char *name,struct mdi_node *node,struct stat *attributes,struct mdi_path_pin *pin) {
     int r=mdi_catalogue_lookup(s,parent->id,name,node);
-    if (r==-ENOENT) return mdi_leaf_lookup(s,parent,name,node,attributes);
+    if (r==-ENOENT) return mdi_leaf_lookup(s,parent,name,node,attributes,pin);
     return !r && attributes ? mdi_stat(s,node,attributes) : r;
 }
 int mdi_add_name(struct md_inode_store *s, const char *parent, const char *name, const char *object) {
@@ -455,16 +460,29 @@ int mdi_fd_membership(struct md_inode_store *s, int fd, struct mdi_node *node, i
     if (!r) *attached = node->attached;
     return r;
 }
-int mdi_fstat(struct md_inode_store *s, int fd, struct mdi_node *node, struct stat *st) {
+int mdi_fstat_origin(struct md_inode_store *s, int fd, struct mdi_node *node, struct stat *st, int native_leaf) {
     if (fstat(fd, st)) return -errno;
     if (s->statistics) s->statistics->link_count_queries++;
     int r = descriptor_node(s, st, node);
+    if (r==-EXDEV && native_leaf && S_ISREG(st->st_mode) && st->st_nlink<=1) {
+        /* The retained pin proves membership, not metadata. A catalogue entry
+         * above takes precedence after hardlink/OCI/COW promotion. */
+        unsigned acl=0;
+        r=mdi_native_project(fd,st,&acl);
+        if (!r) *node=(struct mdi_node){.native=1,.descriptor=fd+1,.kind=S_IFREG,
+            .device=st->st_dev,.inode=st->st_ino,.logical_device=st->st_dev,.logical_inode=st->st_ino,
+            .links=st->st_nlink,.attached=!!st->st_nlink,.mode=st->st_mode&07777,.uid=st->st_uid,.gid=st->st_gid,
+            .acl_mask=acl};
+    }
     if (r==-EXDEV) r=mdi_leaf_descriptor(s,fd,st,node);
     if (!r && (st->st_mode & S_IFMT) != (node->kind == S_IFSOCK ? S_IFREG : node->kind)
             && !((node->kind == S_IFIFO || node->kind == S_IFCHR || node->kind == S_IFBLK)
                 && S_ISREG(st->st_mode))) r = -EIO;
     if (!r) mdi_stat_project(node,st);
     return r;
+}
+int mdi_fstat(struct md_inode_store *s, int fd, struct mdi_node *node, struct stat *st) {
+    return mdi_fstat_origin(s,fd,node,st,0);
 }
 void mdi_stat_project(const struct mdi_node *node,struct stat *st) {
     st->st_mode = (st->st_mode & ~S_IFMT) | node->kind;
@@ -489,6 +507,23 @@ int mdi_parent_writable(struct md_inode_store *s, const struct mdi_node *node) {
     if (!r) r = mdi_permission_stat(s, node, &st);
     if (!r && !node->attached) r = -ENOENT;
     return r;
+}
+int mdi_register_object(struct md_inode_store *s,const char *id,mode_t kind,int mode,
+        uint32_t uid,uint32_t gid,const struct stat *st,const char *parent,struct mdi_node *node) {
+    sqlite3_stmt *q=NULL;
+    int r=mdi_query_acquire(s,MDI_CREATE_OBJECT,&q);
+    if (!r) r=mdi_bind_id(q,1,id);
+    if (!r) r=mdi_sql_error(sqlite3_bind_int(q,2,(int)kind));
+    if (!r) r=mdi_sql_error(sqlite3_bind_int64(q,3,(sqlite3_int64)st->st_dev));
+    if (!r) r=mdi_sql_error(sqlite3_bind_int64(q,4,(sqlite3_int64)st->st_ino));
+    if (!r) r=kind==S_IFDIR && parent ? mdi_bind_id(q,5,parent) : mdi_sql_error(sqlite3_bind_null(q,5));
+    if (!r) r=mdi_sql_error(sqlite3_bind_int(q,6,mode));
+    if (!r) r=mdi_sql_error(sqlite3_bind_int64(q,7,uid));
+    if (!r) r=mdi_sql_error(sqlite3_bind_int64(q,8,gid));
+    if (!r) r=mdi_bind_id(q,9,s->lifetime->scope);
+    if (!r) r=mdi_sql_error(mdi_step(s,q));
+    r=mdi_query_release(q,r);
+    return r ? r : mdi_node(s,id,node);
 }
 static int make_object(struct md_inode_store *s, char id[33], mode_t kind, mode_t mode, int flags,
         const char *target, const char *parent, struct mdi_node *node, int *fd) {
@@ -528,21 +563,8 @@ static int make_object(struct md_inode_store *s, char id[33], mode_t kind, mode_
     if (!r && *fd >= 0) r = mdi_sync(s,*fd);
     if (!r && !reserved) r = mdi_sync(s,s->objects);
     if (!r) r = checkpoint(s, MD_OBJECT_SYNCED);
-    sqlite3_stmt *q = NULL;
-    if (!r) r = mdi_query_acquire(s, MDI_CREATE_OBJECT, &q);
-    if (!r) r = mdi_bind_id(q, 1, id);
-    if (!r) r = mdi_sql_error(sqlite3_bind_int(q, 2, (int)kind));
-    if (!r) r = mdi_sql_error(sqlite3_bind_int64(q, 3, (sqlite3_int64)st.st_dev));
-    if (!r) r = mdi_sql_error(sqlite3_bind_int64(q, 4, (sqlite3_int64)st.st_ino));
-    if (!r) r = kind == S_IFDIR && parent ? mdi_bind_id(q, 5, parent) : mdi_sql_error(sqlite3_bind_null(q, 5));
-    if (!r) r = mdi_sql_error(sqlite3_bind_int(q, 6, s->identity || kind == S_IFIFO
-        || kind == S_IFCHR || kind == S_IFBLK ? (int)(mode & 07777) : -1));
-    if (!r) r = mdi_sql_error(sqlite3_bind_int64(q, 7, uid));
-    if (!r) r = mdi_sql_error(sqlite3_bind_int64(q, 8, gid));
-    if (!r) r = mdi_bind_id(q,9,s->lifetime->scope);
-    if (!r) r = mdi_sql_error(mdi_step(s, q));
-    r = mdi_query_release(q,r);
-    if (!r) r = mdi_node(s, id, node);
+    if (!r) r=mdi_register_object(s,id,kind,s->identity || kind==S_IFIFO || kind==S_IFCHR
+        || kind==S_IFBLK ? (int)(mode&07777) : -1,uid,gid,&st,parent,node);
     if (!r && (p.acl_mask&MD_ACL_DEFAULT) && kind!=S_IFLNK) {
         r=mdi_acl_inherit(s,&p,node,(mode&07000)|(requested&0777));
         if (!r) r=mdi_node(s,id,node);

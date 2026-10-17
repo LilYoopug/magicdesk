@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "../shroot/src/cooperative_channel.h"
+#include "../shroot/src/fs_syscall.h"
 #include <assert.h>
 #include <asm/ptrace.h>
 #include <dirent.h>
@@ -14,6 +15,44 @@
 #include <sys/uio.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+static void string_operands(void) {
+    const struct { int number; unsigned strings; } cases[]={
+        {SYS_openat,2},{SYS_openat2,2},{SYS_unlinkat,2},{SYS_mkdirat,2},
+        {SYS_newfstatat,2},{SYS_statx,2},{SYS_readlinkat,2},{SYS_faccessat,2},
+        {SYS_faccessat2,2},{SYS_fchmodat,2},{SYS_fchmodat2,2},{SYS_fchownat,2},{SYS_utimensat,2},
+        {SYS_renameat,34},{SYS_renameat2,34},{SYS_linkat,34},{SYS_symlinkat,11},
+        {SYS_statfs,1},{SYS_fsopen,1},{SYS_listxattr,1},{SYS_llistxattr,1},
+        {SYS_getxattr,17},{SYS_lgetxattr,17},{SYS_setxattr,17},{SYS_lsetxattr,17},
+        {SYS_removexattr,17},{SYS_lremovexattr,17},
+        {SYS_fgetxattr,16},{SYS_fsetxattr,16},{SYS_fremovexattr,16},
+        {SYS_flistxattr,0},{SYS_fstat,0},{SYS_fstatfs,0},{SYS_fchmod,0},
+        {SYS_fchown,0},{SYS_getdents64,0},{SYS_getuid,0},{SYS_close,0},{-1,0}
+    };
+    for (unsigned i=0;i<sizeof(cases)/sizeof(cases[0]);++i) {
+        assert(md_fs_syscall_strings(cases[i].number)==cases[i].strings);
+        /* Distinct, non-dereferenced values in every slot, then a valid set
+         * of scalar flags. Both zero and nonzero string operands are legal. */
+        uint64_t args[]={11,22,33,44,55,66};
+        int nr=cases[i].number;
+        if (nr==SYS_newfstatat || nr==SYS_utimensat || nr==SYS_fchmodat2) args[3]=0;
+        if (nr==SYS_statx) { args[2]=0; args[3]=STATX_BASIC_STATS; }
+        if (nr==SYS_fchownat) args[4]=0;
+        if (nr==SYS_faccessat2) args[3]=0;
+        if (nr==SYS_fsopen) args[1]=0;
+        if (nr==SYS_setxattr || nr==SYS_lsetxattr || nr==SYS_fsetxattr) args[4]=0;
+        struct md_fs_syscall decoded;
+        struct md_fs_request request;
+        int result=md_fs_syscall_decode(&decoded,&request,nr,args,4096);
+        if (nr!=SYS_openat2 && nr!=SYS_getuid && nr!=SYS_close && nr!=-1) assert(result>0);
+        if (result>0) {
+            unsigned selectors=cases[i].strings;
+            for (unsigned n=0;n<2;++n,selectors>>=3)
+                assert(decoded.path[n]==((selectors&7) ? args[(selectors&7)-1] : 0));
+        }
+    }
+    puts("PASS string operands: caller capture and executor decoding share exact argument selectors");
+}
 
 static unsigned descriptors(void) {
     DIR *d=opendir("/proc/self/fd"); assert(d);
@@ -36,6 +75,9 @@ static void boundary(uintptr_t pc,int kind) {
     if (kind==1) { n->number=SYS_close; n->args[0]=fd; }
     if (kind==2) { n->number=SYS_fcntl; n->args[0]=fd; n->args[1]=F_SETFD; n->args[2]=0; }
     if (kind==3) n->args[1]=(uintptr_t)"/proc/self/not-a-file";
+    if (kind==4) { n->number=SYS_dup; n->args[0]=fd; }
+    if (kind==5) { n->number=SYS_dup3; n->args[0]=fd; n->args[1]=900; n->args[2]=O_CLOEXEC; }
+    if (kind==6) { n->number=SYS_fcntl; n->args[0]=fd; n->args[1]=F_DUPFD_CLOEXEC; n->args[2]=900; }
     pid_t child=fork(); assert(child>=0);
     if (!child) {
         alarm(5);
@@ -57,7 +99,13 @@ static void boundary(uintptr_t pc,int kind) {
             assert(fcntl(fd,F_GETFD)==-1 && errno==EBADF);
         } else if (kind==2) {
             assert(!n->result && descriptors()==before && !fcntl(fd,F_GETFD));
-        } else assert(n->result==-ENOENT && descriptors()==before);
+        } else if (kind==3) assert(n->result==-ENOENT && descriptors()==before);
+        else {
+            assert(n->result>=0 && descriptors()==before+1);
+            assert(fcntl(n->result,F_GETFD)==(kind==4 ? 0 : FD_CLOEXEC));
+            if (kind!=4) assert(n->result>=900);
+            assert(!close(n->result));
+        }
         _exit(0);
     }
     stopped(child,SIGSTOP);
@@ -148,8 +196,9 @@ static void park_handoff(void) {
 }
 int main(void) {
     alarm(30); unsigned count=0;
+    string_operands();
     park_handoff();
-    for (int kind=0;kind<4;++kind)
+    for (int kind=0;kind<7;++kind)
         for (uintptr_t pc=(uintptr_t)md_cooperative_native;pc<=(uintptr_t)md_cooperative_native_end;pc+=4) {
             boundary(pc,kind); ++count;
         }

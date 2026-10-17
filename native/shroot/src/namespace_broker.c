@@ -11,10 +11,12 @@
 #include "fs_buffer.h"
 #include "fs_path_call.h"
 #include "fs_syscall.h"
+#include "open_request.h"
 #include "cooperative_channel.h"
 #include "execution_window.h"
 #include "spin_policy.h"
 #include "profile.h"
+#include "mount_policy.h"
 #include <errno.h>
 #include <fcntl.h>
 #include "linux_abi.h"
@@ -26,9 +28,13 @@
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
+#include <sys/wait.h>
+#include <sys/ptrace.h>
 #include <unistd.h>
 #include <linux/futex.h>
 #include <time.h>
+
+enum { EXECUTION_BURST_CALLS=32, EXECUTION_BURST_NS=100000 };
 
 struct operation {
     struct md_fs_work work;
@@ -39,12 +45,20 @@ struct operation {
     struct seccomp_notif notification;
     struct md_entry_channel *channel;
     uint64_t sequence;
+    uintptr_t captured_path[2];
     struct md_fs_context context;
     struct md_fd_order order;
     struct md_fs_order fs_order;
     struct md_ofd_order cursor;
     struct md_fd_origin_update update;
     struct md_fd_mutation mutation;
+    struct md_inode_birth *birth;
+    struct md_fd_loan *custody;
+    struct md_fs_work retirement_work;
+    atomic_int retirement_done;
+    int retirement_error;
+    long native_result;
+    int provisional_fd;
     int native_plan;
     int64_t native_started;
     struct md_fs_anchor *input_origin, *output_origin;
@@ -58,6 +72,7 @@ struct operation {
     int listener, directory, undelivered, owned_open, executed, recovering;
     char path[PATH_MAX];
     char second_path[PATH_MAX];
+    void *value;
     int second_directory;
     struct md_fs_anchor *second_origin;
 };
@@ -68,6 +83,7 @@ struct md_namespace_broker {
     void (*recover)(pid_t,struct md_broker_completion *);
     md_control_factory control;
     int (*native_observe)(pid_t,struct md_entry_native *);
+    int (*retire)(const struct md_broker_retirement *);
     struct md_resource_wakeup *wakeup;
     struct operation *all, *free;
     struct operation *waiting;
@@ -83,9 +99,11 @@ struct md_namespace_broker {
     atomic_uint cooperative_count;
     _Atomic uint64_t cooperative_completed, cooperative_declined, cooperative_wakes;
     _Atomic uint64_t cooperative_descriptors;
+    uint64_t carrier_paths;
     _Atomic uint64_t cooperative_native_yields;
-    uint64_t native_open, native_close, native_flags, native_deferred;
+    uint64_t native_open, native_close, native_flags, native_deferred, native_duplicate, native_seek;
     uint64_t bursts, burst_requests, burst_count_limit, burst_time_limit, burst_idle_limit;
+    uint64_t notification_batches, notification_batch_calls;
     struct md_spin_policy spin;
     struct md_cost preparation, capture, execution, reply;
     struct md_cost native_prepare, native_roundtrip, native_retire, retirement;
@@ -108,7 +126,7 @@ struct task {
     struct md_namespace_broker *owner;
     struct md_fs_work event_work;
     struct task *event_next;
-    int stopped, held, status, recovering;
+    int stopped, held, status, recovering, native_borrowed;
     struct rusage usage;
     struct {
         struct md_notification_result completion;
@@ -170,6 +188,7 @@ int md_broker_hold_event(struct md_namespace_broker *b,pid_t pid,int status,cons
     struct task *t=NULL;
     for (t=b->task_index[(unsigned)pid%TASK_BUCKETS];t && t->pid!=pid;t=t->indexed) { }
     int held=0;
+    if (t && t->native_borrowed) { pthread_mutex_unlock(&b->lock); return 0; }
     if (t) {
         t->stopped=1;
         if (t->operation) {
@@ -213,6 +232,35 @@ void md_broker_completion_handler(struct md_namespace_broker *b,void (*recover)(
 void md_broker_control_factory(struct md_namespace_broker *b,md_control_factory factory) { b->control=factory; }
 void md_broker_native_observer(struct md_namespace_broker *b,int (*observe)(pid_t,struct md_entry_native *)) {
     b->native_observe=observe;
+}
+void md_broker_retirement_handler(struct md_namespace_broker *b,int (*retire)(const struct md_broker_retirement *)) {
+    b->retire=retire;
+}
+int md_broker_native_borrow(struct md_namespace_broker *b,pid_t pid,int *stopped) {
+    if (!b) return 0;
+    pthread_mutex_lock(&b->lock);
+    struct task *t=b->task_index[(unsigned)pid%TASK_BUCKETS];
+    while (t && t->pid!=pid) t=t->indexed;
+    int result=0;
+    if (t) {
+        struct operation *op=t->operation;
+        if (t->native_borrowed) result=-EBUSY;
+        else if (t->held && (!WIFSTOPPED(t->status) || (unsigned)t->status>>16==PTRACE_EVENT_EXIT
+                || (unsigned)t->status>>16==PTRACE_EVENT_EXEC)) result=-ESRCH;
+        else if (op && op->native_plan!=3 && md_fd_order_state(&op->order)!=MD_RESOURCE_ORDER_QUEUED)
+            result=-EBUSY;
+        else { t->native_borrowed=1; *stopped|=t->held!=0; result=1; }
+    }
+    pthread_mutex_unlock(&b->lock); return result;
+}
+void md_broker_native_return(struct md_namespace_broker *b,pid_t pid) {
+    if (!b) return;
+    pthread_mutex_lock(&b->lock);
+    struct task *t=b->task_index[(unsigned)pid%TASK_BUCKETS];
+    while (t && t->pid!=pid) t=t->indexed;
+    if (!t || !t->native_borrowed) abort();
+    t->native_borrowed=0;
+    pthread_mutex_unlock(&b->lock);
 }
 /* Broker lock protects admission against supervisor cancellation. No guest
  * memory, filesystem mutation or supervisor round trip occurs here. */
@@ -274,6 +322,17 @@ static int pathname(pid_t pid, uintptr_t address, char *out, size_t capacity) {
 static int deliver_bytes(struct operation *op, uintptr_t pointer, const void *data, size_t size) {
     if (!valid(op)) return -ECANCELED;
     if (!size) return 0;
+    int detached=op->notification.data.nr==SYS_readlinkat || op->syscall.copy==MD_FS_COPY_STAT
+        || op->syscall.copy==MD_FS_COPY_STATX || op->syscall.copy==MD_FS_COPY_STATFS
+        || op->syscall.copy==MD_FS_COPY_XATTR;
+    if (op->channel && detached
+            && size<=sizeof(op->channel->output.bytes)) {
+        struct md_entry_channel *c=op->channel;
+        if (c->output.sequence==op->sequence) return -EPROTO;
+        c->output.sequence=op->sequence; c->output.destination=pointer; c->output.size=size;
+        memcpy(c->output.bytes,data,size);
+        return 0;
+    }
     struct iovec local = {(void *)data, size}, remote = {(void *)pointer, size};
     ssize_t n = process_vm_writev(op->notification.pid, &local, 1, &remote, 1, 0);
     /* Only a denied, untouched output may fall back to the task-affine path.
@@ -296,10 +355,15 @@ static void execute(struct operation *op,
         .directory_position=op->request.operation==MD_FS_GETDENTS ? &op->position : NULL,
         .origin=op->request.operation==MD_FS_OPEN ? &op->output_origin : NULL,
         .native_open_plan=op->native_plan,
+        .birth=op->native_plan && op->owner->retire ? &op->birth : NULL,
         .control=op->owned_open && op->owner->control ? control_open : NULL,.control_context=op};
     if (valid(op)) {
         op->executed=1;
         md_fs_context_execute(&op->context, &op->request, &op->result, &output);
+        /* Read-scope admission has not performed the open. A signal before
+         * its unscoped attempt must retain EINTR/restart, not a saved errno. */
+        if (op->result.error==-EAGAIN && op->result.open_completion.kind==MD_OPEN_NEEDS_WRITE)
+            op->executed=0;
         if (!op->result.error && op->result.fd>=0 && op->control_descriptor>=0) {
             close(op->result.fd); op->result.fd=op->control_descriptor; op->control_descriptor=-1;
         }
@@ -332,6 +396,9 @@ static int recycle(struct md_namespace_broker *b, struct operation *op) {
     int64_t start=md_cost_begin(b->counts ? &b->retirement : NULL);
     int cleared=md_notification_result_clear(&op->completion);
     if (cleared) return cleared;
+    cleared=md_inode_birth_discard(&op->birth);
+    if (cleared) return cleared;
+    md_fd_loan_end(op->custody); md_fd_loan_release(op->custody); op->custody=NULL;
     if (op->directory >= 0) close(op->directory);
     if (op->second_directory>=0) close(op->second_directory);
     op->second_directory=-1;
@@ -363,6 +430,7 @@ static int recycle(struct md_namespace_broker *b, struct operation *op) {
         if (!error) error=retired;
     }
     md_fs_context_end(&op->context);
+    free(op->value); op->value=NULL;
     pthread_mutex_lock(&b->lock);
     operation_retired(b,op);
     if (op->task) {
@@ -374,16 +442,26 @@ static int recycle(struct md_namespace_broker *b, struct operation *op) {
     md_cost_end(b->counts ? &b->retirement : NULL,start);
     return error;
 }
+static void capture_input_paths(struct operation *op,const struct md_entry_channel *channel) {
+    if (channel->input.sequence!=op->sequence) return;
+    for (unsigned i=0;i<2;++i) if (channel->input.address[i]) {
+        size_t size=strnlen(channel->input.paths[i],sizeof(channel->input.paths[i]));
+        if (size>=PATH_MAX || size==sizeof(channel->input.paths[i])) continue;
+        memcpy(i ? op->second_path : op->path,channel->input.paths[i],size+1);
+        op->captured_path[i]=channel->input.address[i];
+    }
+}
 static int prepare_call(struct md_filesystem *fs, struct operation *op, size_t capacity) {
     const struct seccomp_notif *q = &op->notification;
-    if (op->native_plan && q->data.nr!=SYS_openat) {
-        int error=md_fs_context_begin(fs,(int)q->pid,0,&op->context);
+    if (op->native_plan && !md_entry_open(q->data.nr)) {
+        int error=md_task_registry_files(fs->tasks,(int)q->pid,0,&op->context.task.files);
         return error ? error : 1;
     }
     if (!md_broker_filesystem_call(q->data.nr) && !op->channel) return 0;
     /* ADDFD uses fget(), which rejects O_PATH; SCM_RIGHTS preserves it. */
     if (q->data.nr==SYS_openat) {
-        if (q->data.args[2]&(__O_TMPFILE|O_PATH)) return 0;
+        if (q->data.args[2]&__O_TMPFILE) return 0;
+        if ((q->data.args[2]&O_PATH) && !op->native_plan) return 0;
         op->owned_open=op->owner->recover && (op->task->eligible&MD_BROKER_OPEN);
         if (op->native_plan) op->owned_open=0;
         if (!op->owned_open && !op->native_plan && (q->data.args[2]&(O_CREAT|O_TRUNC))) return 0;
@@ -392,27 +470,63 @@ static int prepare_call(struct md_filesystem *fs, struct operation *op, size_t c
     if (q->data.nr==SYS_readlinkat && !q->data.args[3]) return -EINVAL;
     uint64_t arguments[6];
     for (unsigned i=0;i<6;++i) arguments[i]=q->data.args[i];
-    int decoded=md_fs_syscall_decode(&op->syscall,q->data.nr,arguments,capacity);
+    struct open_how how={0};
+    int nr=q->data.nr;
+    if (nr==SYS_openat2) {
+        if (!op->native_plan || arguments[3]!=sizeof(how)) return 0;
+        struct iovec local={&how,sizeof(how)}, remote={(void *)(uintptr_t)arguments[2],sizeof(how)};
+        if (process_vm_readv(q->pid,&local,1,&remote,1,0)!=sizeof(how)) return 0;
+        int error=md_open_how_validate(&how);
+        if (error) return error;
+        if (!md_open_native_plan(how.flags&~O_EXCL)) return 0;
+        nr=SYS_openat; arguments[2]=how.flags; arguments[3]=how.mode;
+    }
+    int decoded=md_fs_syscall_decode(&op->syscall,&op->request,nr,arguments,capacity);
     if (decoded<=0) return decoded;
-    op->request=op->syscall.request; op->request.actor=(int)q->pid;
-    op->path[0]=op->second_path[0]=0;
+    op->request.actor=(int)q->pid;
+    op->request.resolve=how.resolve;
+    if (!op->captured_path[0]) op->path[0]=0;
+    if (!op->captured_path[1]) op->second_path[0]=0;
     for (unsigned i=0;i<2;++i) if (op->syscall.path[i]) {
         char *path=i ? op->second_path : op->path;
-        if (pathname(q->pid,op->syscall.path[i],path,PATH_MAX)) return 0;
+        if (op->captured_path[i]!=op->syscall.path[i]
+                && pathname(q->pid,op->syscall.path[i],path,PATH_MAX)) return 0;
         op->request.path[i]=path;
     }
     /* NULL path operands are not descriptor operations. Preserve task-affine
      * fault handling if direct capture cannot establish the complete input. */
-    if (q->data.nr!=SYS_fstat && q->data.nr!=SYS_getdents64 && !op->request.path[0]) return 0;
+    if (q->data.nr!=SYS_fstat && q->data.nr!=SYS_getdents64 && q->data.nr!=SYS_fstatfs
+            && q->data.nr!=SYS_fchmod && q->data.nr!=SYS_fchown && q->data.nr!=SYS_utimensat
+            && op->request.operation!=MD_FS_FXATTR && !op->request.path[0]) return 0;
     if ((op->syscall.operands==2 || q->data.nr==SYS_symlinkat) && !op->request.path[1]) return 0;
+    if (op->syscall.copy==MD_FS_COPY_XATTR) {
+        if (op->request.mode!=MD_FS_XATTR_LIST && !op->request.path[1]) return 0;
+        if (strlen(op->second_path)>255) return -ERANGE;
+        if (op->request.value_size) {
+            op->value=malloc(op->request.value_size);
+            if (!op->value) return -ENOMEM;
+            struct iovec local={op->value,op->request.value_size}, remote={(void *)op->request.value,op->request.value_size};
+            if (process_vm_readv(q->pid,&local,1,&remote,1,0)!=(ssize_t)op->request.value_size) return 0;
+            op->request.value=op->value;
+        }
+    }
+    if (op->syscall.times) {
+        struct timespec times[2];
+        struct iovec local={times,sizeof(times)}, remote={(void *)op->syscall.times,sizeof(times)};
+        if (process_vm_readv(q->pid,&local,1,&remote,1,0)!=sizeof(times)) return 0;
+        for (unsigned i=0;i<2;++i) {
+            op->request.attributes.seconds[i]=times[i].tv_sec;
+            op->request.attributes.nanos[i]=times[i].tv_nsec;
+        }
+    }
     if (op->request.operation==MD_FS_STAT) {
         if (!*op->path) {
             if (!(op->request.flags&AT_EMPTY_PATH)) return -ENOENT;
             op->request.operation=MD_FS_FSTAT; op->request.flags=0;
         } else op->request.flags&=AT_SYMLINK_NOFOLLOW;
     } else if (op->request.operation==MD_FS_ACCESS || op->request.operation==MD_FS_CHMOD
-            || op->request.operation==MD_FS_CHOWN) {
-        if (!*op->path && !(op->request.flags&AT_EMPTY_PATH)) return -ENOENT;
+            || op->request.operation==MD_FS_CHOWN || op->request.operation==MD_FS_UTIMENS) {
+        if (op->request.path[0] && !*op->path && !(op->request.flags&AT_EMPTY_PATH)) return -ENOENT;
         op->request.flags&=~AT_EMPTY_PATH;
     }
     if (q->data.nr==SYS_fsopen) {
@@ -434,7 +548,7 @@ static int capture(struct operation *op) {
     const struct seccomp_notif *q=&op->notification;
     for (unsigned i=0;i<op->syscall.operands;++i) {
         const char *path=op->request.path[i];
-        if (path && *path=='/') { op->request.directory[i]=-1; continue; }
+        if (path && *path=='/' && !(op->request.resolve&RESOLVE_IN_ROOT)) { op->request.directory[i]=-1; continue; }
         int base=op->request.directory[i];
         int *fd=i ? &op->second_directory : &op->directory;
         struct md_fs_anchor **origin=i ? &op->second_origin : &op->input_origin;
@@ -457,10 +571,16 @@ static int capture(struct operation *op) {
             /* The table turn authenticates the number; the retained anchor
              * pins path identity after that turn ends. Data/offset operations
              * still capture the real OFD, never the anchor's O_PATH handle. */
-            if (*origin && path && *path) borrowed=md_fs_anchor_fd(*origin);
+            if (*origin && ((path && *path) || op->request.operation==MD_FS_FSTAT
+                    || op->request.operation==MD_FS_STATFS)) borrowed=md_fs_anchor_fd(*origin);
             else *fd=duplicate(op->task,q->pid,base);
         }
         if (*fd<0 && borrowed<0) return 0;
+        if (!path && (q->data.nr==SYS_fchmod || q->data.nr==SYS_fchown || q->data.nr==SYS_utimensat)) {
+            int flags=fcntl(*fd,F_GETFL);
+            if (flags<0) return -errno;
+            if (flags&O_PATH) return -EBADF;
+        }
         op->request.directory[i]=borrowed>=0 ? borrowed : *fd;
         op->request.origin[i]=*origin;
     }
@@ -476,18 +596,29 @@ static int native_offer(struct operation *op) {
     int64_t start=md_cost_begin(op->owner->counts ? &op->owner->native_prepare : NULL);
     struct md_entry_channel *c=op->channel;
     struct md_entry_native *n=&c->native;
-    *n=(struct md_entry_native){.number=op->notification.data.nr};
+    c->native_commit=!!op->birth;
+    *n=(struct md_entry_native){.number=md_entry_open(op->notification.data.nr) ? SYS_openat : op->notification.data.nr};
     if (n->number==SYS_openat) {
         int error=md_fd_origins_prepare(op->context.task.files,op->output_origin,
             op->request.flags&O_CLOEXEC ? FD_CLOEXEC : 0,&op->update);
         if (error) return error;
+        if (op->birth) {
+            op->custody=md_fd_loan_new(op->context.task.files);
+            error=op->custody ? md_fd_origins_prepare_custody(&op->update,op->custody,&op->order) : -ENOMEM;
+            if (error) return error;
+        }
         snprintf(c->native_path,sizeof(c->native_path),"/proc/%d/fd/%d",getpid(),md_fs_anchor_fd(op->output_origin));
         n->args[0]=(uint64_t)(int64_t)AT_FDCWD;
-        n->args[2]=md_open_endpoint_flags(op->request.flags);
+        unsigned flags=op->request.flags;
+        if (flags&O_PATH) flags&=O_PATH|O_CLOEXEC|O_DIRECTORY|O_NOFOLLOW;
+        n->args[2]=md_open_endpoint_flags(flags);
     } else memcpy(n->args,op->notification.data.args,sizeof(n->args));
     if (op->owner->counts) {
         if (n->number==SYS_openat) ++op->owner->native_open;
         else if (n->number==SYS_close) ++op->owner->native_close;
+        else if (n->number==SYS_lseek) ++op->owner->native_seek;
+        else if (n->number==SYS_dup || n->number==SYS_dup3 || (n->number==SYS_fcntl
+                && ((unsigned)n->args[1]==F_DUPFD || (unsigned)n->args[1]==F_DUPFD_CLOEXEC))) ++op->owner->native_duplicate;
         else ++op->owner->native_flags;
     }
     pthread_mutex_lock(&op->owner->lock);
@@ -508,7 +639,19 @@ static int native_descriptor(struct operation *op) {
     struct md_fd_object *object=md_fd_origins_object(op->context.task.files,number,&flags);
     struct md_fs_anchor *anchor=md_fs_anchor_from_object(object);
     int allowed=anchor && !md_fd_object_selectors(object) && !md_fd_origins_has_loans(op->context.task.files);
+    if (allowed && op->notification.data.nr==SYS_lseek) {
+        /* Directory offsets belong to the acknowledged directory cursor.
+         * Only ordinary data OFDs keep their native kernel offset here. */
+        struct stat st;
+        unsigned kind=md_fs_anchor_kind(anchor);
+        allowed=kind ? kind==S_IFREG : !fstat(md_fs_anchor_fd(anchor),&st) && S_ISREG(st.st_mode);
+    }
     md_fd_object_release(object);
+    if (allowed && op->notification.data.nr==SYS_dup3) {
+        object=md_fd_origins_object(op->context.task.files,(int)op->notification.data.args[1],NULL);
+        allowed=!md_fd_object_selectors(object);
+        md_fd_object_release(object);
+    }
     if (!allowed) return 0;
     unsigned command=(unsigned)op->notification.data.args[1];
     if (op->notification.data.nr==SYS_fcntl && (command==F_GETFD
@@ -575,6 +718,14 @@ static int reply(struct operation *op, const void *data) {
             : deliver_bytes(op,op->notification.data.args[link ? 2 : 1],data,size);
         if (op->undelivered) return 0;
         if (!response.error) response.val=size;
+    } else if (!response.error && op->syscall.copy==MD_FS_COPY_XATTR) {
+        if (op->result.size) response.error=deliver_bytes(op,op->syscall.output,data,op->result.size);
+        if (op->undelivered) return 0;
+        if (!response.error) response.val=op->result.position;
+    } else if (!response.error && op->syscall.copy==MD_FS_COPY_STATFS) {
+        response.error=op->result.size!=sizeof(struct md_fs_statfs) ? -EIO
+            : deliver_bytes(op,op->syscall.output,data,op->result.size);
+        if (op->undelivered) return 0;
     } else if (!response.error && op->syscall.copy==MD_FS_COPY_STATX) {
         struct statx st;
         md_fs_info_statx(&op->result.info,&st);
@@ -674,6 +825,7 @@ int md_broker_cooperative_bind(struct md_namespace_broker *b,pid_t pid,struct md
         memset(channel,0,sizeof(*channel));
         atomic_init(&channel->state,MD_ENTRY_IDLE);
         atomic_init(&channel->enabled,0); atomic_init(&channel->awake,0); atomic_init(&channel->sleeping,0);
+        atomic_init(&channel->copying,0);
         channel->owner=pid;
         t->channel=channel; t->cooperative_gate=gate; t->sequence=0; ++b->cooperative_count;
         t->channel_next=b->channels; b->channels=t;
@@ -730,7 +882,7 @@ static int perform(struct md_namespace_broker *b, struct operation *op, int prep
             int error=md_fd_order_start(&op->order);
             if (error) return error;
         }
-        if (op->native_plan && op->notification.data.nr!=SYS_openat) {
+        if (op->native_plan && !md_entry_open(op->notification.data.nr)) {
             int result=native_descriptor(op);
             if (result==2) { op->waiting=b->waiting; b->waiting=op; return 0; }
             if (result==1) return recycle(b,op);
@@ -739,7 +891,8 @@ static int perform(struct md_namespace_broker *b, struct operation *op, int prep
         }
         int cwd=0;
         for (unsigned i=0;i<op->syscall.operands;++i)
-            cwd|=op->request.path[i] && *op->request.path[i]!='/' && op->request.directory[i]==AT_FDCWD;
+            cwd|=op->request.path[i] && (*op->request.path[i]!='/' || (op->request.resolve&RESOLVE_IN_ROOT))
+                && op->request.directory[i]==AT_FDCWD;
         if (cwd) {
             if (!op->fs_order.fs) {
                 int ready=md_fs_order_begin(op->context.task.fs,&op->fs_order,b->wakeup);
@@ -784,7 +937,7 @@ static int perform(struct md_namespace_broker *b, struct operation *op, int prep
     if (window) {
         struct md_inode_store *scope=prepared>0 ? md_fs_context_read_scope(&op->context,&op->request,op->native_plan) : NULL;
         int error=md_execution_window_admit(window,scope,md_inode_read_scope_begin,md_inode_read_scope_end,
-            cooperative_clock(),32,100000);
+            cooperative_clock(),EXECUTION_BURST_CALLS,EXECUTION_BURST_NS);
         if (error) return error;
     }
     if (prepared) {
@@ -824,34 +977,50 @@ static int perform(struct md_namespace_broker *b, struct operation *op, int prep
     /* Delegation has not committed guest-visible IO; authenticate the later
      * task-affine request independently, without holding this table's turn. */
     md_fs_context_end(&op->context);
+    int closed=window ? md_execution_window_end(window) : 0;
+    if (closed) return closed;
     if (op->channel) {
         cooperative_reply(op,MD_ENTRY_DECLINED,0);
-        int error=window ? md_execution_window_end(window) : 0;
-        int retired=recycle(b,op); return error ? error : retired;
+        return recycle(b,op);
     }
     md_fs_worker_publish(b->worker,&op->work);
     if (count) count->delegated++;
     return 0;
 }
-static int progress(struct md_namespace_broker *b,struct md_execution_window *window) {
-    pthread_mutex_lock(&b->lock);
-    int result=0;
-    struct task **pending=&b->result_waiting;
-    while (*pending) {
-        struct task *t=*pending;
-        result=result_progress(b,t);
-        if (result<0) break;
-        if (result) { pending=&t->result.next; continue; }
-        *pending=t->result.next; t->result.next=NULL; t->result.queued=0;
-    }
-    pthread_mutex_unlock(&b->lock);
-    if (result<0) return result;
+static void retirement_complete(void *context,int error) {
+    struct operation *op=context;
+    op->retirement_error=error;
+    atomic_store_explicit(&op->retirement_done,1,memory_order_release);
+    md_fs_worker_wake(op->owner->worker);
+}
+static int retirement_start(struct md_fs_work *work) {
+    struct operation *op=(void *)((char *)work - offsetof(struct operation,retirement_work));
+    struct md_broker_retirement request={.task=(pid_t)op->notification.pid,.number=op->provisional_fd,
+        .turn=&op->order,.loan=op->custody,.complete=retirement_complete,.context=op};
+    return op->owner->retire ? op->owner->retire(&request) : -ENOTSUP;
+}
+static int native_progress(struct md_namespace_broker *b,struct md_execution_window *window,unsigned *pending) {
+    if (pending) *pending=0;
     struct operation **at=&b->waiting;
     while (*at) {
         struct operation *op=*at;
+        if (op->native_plan==3) {
+            if (!atomic_load_explicit(&op->retirement_done,memory_order_acquire)) { at=&op->waiting; continue; }
+            if (op->retirement_error) return op->retirement_error;
+            *at=op->waiting; op->waiting=NULL;
+            int discarded=md_inode_birth_discard(&op->birth);
+            if (discarded) return discarded;
+            /* A nonexclusive loser has no published effect and no FD left.
+             * Resolve the winning name through the normal open owner. */
+            int retry=op->native_result==-EEXIST && !(op->request.flags&O_EXCL);
+            cooperative_reply(op,retry ? MD_ENTRY_DECLINED : MD_ENTRY_COMPLETED,op->native_result);
+            int error=recycle(b,op); if (error) return error;
+            continue;
+        }
         if (op->native_plan==2) {
             unsigned state=atomic_load_explicit(&op->channel->native.state,memory_order_acquire);
             if (state!=MD_NATIVE_DONE && state!=MD_NATIVE_UNKNOWN && state!=MD_NATIVE_CANCELLED) {
+                if (pending) ++*pending;
                 at=&op->waiting; continue;
             }
             long value=op->channel->native.result;
@@ -865,6 +1034,32 @@ static int progress(struct md_namespace_broker *b,struct md_execution_window *wi
                 md_fd_origins_finish(&op->update,-1);
                 md_fd_mutation_discard(&op->mutation);
             } else {
+                if (op->birth && value>=0) {
+                    /* A different channel may have opened a read window after
+                     * this effect was offered. Publication owns a write scope. */
+                    if (window) {
+                        error=md_execution_window_end(window);
+                        if (error) return error;
+                    }
+                    error=md_fs_anchor_policy(op->output_origin)&MD_MOUNT_READONLY ? -EROFS
+                        : md_inode_birth_commit(&op->birth);
+                    /* An accepted rename with a retirement error is terminal,
+                     * not permission to close and retry the original open. */
+                    if (error && !op->birth) return error;
+                    if (error) {
+                        md_fd_origins_finish(&op->update,(int)value);
+                        op->native_result=error; op->provisional_fd=(int)value;
+                        pthread_mutex_lock(&b->lock);
+                        op->native_plan=3;
+                        atomic_store_explicit(&op->channel->native.state,MD_NATIVE_EMPTY,memory_order_release);
+                        pthread_mutex_unlock(&b->lock);
+                        atomic_store_explicit(&op->retirement_done,0,memory_order_relaxed);
+                        op->retirement_work.complete=retirement_start;
+                        md_fs_worker_publish(b->worker,&op->retirement_work);
+                        at=&op->waiting; continue;
+                    }
+                    md_fd_origins_release_custody(&op->update);
+                }
                 md_fd_origins_finish(&op->update,value<0 ? -1 : (int)value);
                 error=md_fd_mutation_finish(&op->mutation,op->context.task.files,value);
             }
@@ -883,6 +1078,29 @@ static int progress(struct md_namespace_broker *b,struct md_execution_window *wi
             error=recycle(b,op); if (error) return error;
             continue;
         }
+        at=&op->waiting;
+    }
+    return 0;
+}
+static int progress(struct md_namespace_broker *b,struct md_execution_window *window) {
+    pthread_mutex_lock(&b->lock);
+    int result=0;
+    struct task **pending=&b->result_waiting;
+    while (*pending) {
+        struct task *t=*pending;
+        result=result_progress(b,t);
+        if (result<0) break;
+        if (result) { pending=&t->result.next; continue; }
+        *pending=t->result.next; t->result.next=NULL; t->result.queued=0;
+    }
+    pthread_mutex_unlock(&b->lock);
+    if (result<0) return result;
+    result=native_progress(b,window,NULL);
+    if (result) return result;
+    struct operation **at=&b->waiting;
+    while (*at) {
+        struct operation *op=*at;
+        if (op->native_plan==2 || op->native_plan==3) { at=&op->waiting; continue; }
         if (op->completion.active) {
             int done=md_notification_result_progress(&op->completion);
             if (done<0) return done;
@@ -944,7 +1162,7 @@ static int cooperative_progress(struct md_namespace_broker *b,struct md_filesyst
         atomic_store_explicit(&t->channel->awake,1,memory_order_seq_cst);
     pthread_mutex_unlock(&b->lock);
     uint64_t start=cooperative_clock(), idle=start;
-    const uint64_t burst_budget=100000;
+    const uint64_t burst_budget=EXECUTION_BURST_NS;
     struct md_execution_window window={0};
     unsigned completed=0, idle_checks=0;
     unsigned spin=md_spin_budget(&b->spin,25000);
@@ -999,10 +1217,14 @@ static int cooperative_progress(struct md_namespace_broker *b,struct md_filesyst
         }
         op->owner=b; op->task=t; ++t->borrowed; t->operation=op;
         op->channel=t->channel; op->sequence=t->channel->sequence;
-        struct md_entry_call call=t->channel->call;
+        op->captured_path[0]=op->captured_path[1]=0;
+        capture_input_paths(op,op->channel);
+        struct md_entry_request call=t->channel->call;
         int native=md_entry_native_fd(call.number,call.args)
-            || (call.number==SYS_openat && md_open_native_plan(call.args[2]));
-        int admitted=(t->eligible&MD_BROKER_COOPERATIVE) && (md_entry_route(call.number)==MD_ENTRY_WORKER || native)
+            || md_entry_native_open(call.number,call.args);
+        enum md_entry_route route=md_entry_route(call.number);
+        int admitted=(t->eligible&MD_BROKER_COOPERATIVE)
+            && (route==MD_ENTRY_WORKER || route==MD_ENTRY_VALUE || native)
             && !call.reserved && t->sequence!=UINT64_MAX && op->sequence==t->sequence+1;
         t->sequence=op->sequence;
         atomic_store_explicit(&t->channel->state,MD_ENTRY_RUNNING,memory_order_release);
@@ -1014,6 +1236,22 @@ static int cooperative_progress(struct md_namespace_broker *b,struct md_filesyst
         op->syscall=(struct md_fs_syscall){0}; op->request=(struct md_fs_request){0};
         op->result=(struct md_fs_result){.fd=-1};
         pthread_mutex_unlock(&b->lock);
+        if (admitted && route==MD_ENTRY_VALUE) {
+            error=md_execution_window_end(&window);
+            if (!error) {
+                struct md_task_credentials credentials;
+                long result=md_task_registry_credentials(fs->tasks,(int)op->notification.pid,&credentials);
+                if (!result) {
+                    result=credentials.retired ? -ESRCH
+                        : md_identity_scalar_result(&credentials.identity,call.number);
+                    md_identity_release(&credentials.identity);
+                }
+                cooperative_reply(op,MD_ENTRY_COMPLETED,result);
+            }
+            int retired=recycle(b,op);
+            if (!error) error=retired;
+            goto settled;
+        }
         int prepared=admitted ? prepare(fs,op,sizeof(b->output)) : 0;
         int descriptors=op->native_plan;
         for (unsigned i=0;prepared>0 && i<op->syscall.operands;++i)
@@ -1036,16 +1274,32 @@ settled:
             if (!error) error=replied;
         }
         ++completed; idle=cooperative_clock(); idle_checks=0;
-    } while (!error && completed<32 && idle-start<burst_budget);
+    } while (!error && completed<EXECUTION_BURST_CALLS && idle-start<burst_budget);
     if (b->counts) {
         ++b->bursts; b->burst_requests+=completed;
-        b->burst_count_limit+=completed==32;
+        b->burst_count_limit+=completed==EXECUTION_BURST_CALLS;
         b->burst_time_limit+=idle-start>=burst_budget;
     }
     int closed=md_execution_window_end(&window);
     if (!error) error=closed;
     int replied=cooperative_wake_reply(b,wake);
     if (!error) error=replied;
+    if (!error && (completed==EXECUTION_BURST_CALLS || idle-start>=burst_budget)) {
+        /* Finish only effects already admitted in this burst. No new request
+         * or guessed continuation is consumed, and no store window is held. */
+        unsigned pending=0;
+        error=native_progress(b,NULL,&pending);
+        uint64_t now=!error && pending ? cooperative_clock() : 0,deadline=now+25000;
+        for (unsigned checks=0;!error && now;++checks) {
+            error=native_progress(b,NULL,&pending);
+            if (error || !pending) break;
+            if (!(checks%8)) {
+                now=cooperative_clock();
+                if (!now || now>=deadline) break;
+            }
+            __asm__ volatile("yield" ::: "memory");
+        }
+    }
     return error;
 }
 static int prepare_wait(void *context) {
@@ -1063,19 +1317,8 @@ static int prepare_wait(void *context) {
     pthread_mutex_unlock(&b->lock);
     return pending;
 }
-static int receive(void *context, struct md_filesystem *fs, short events) {
-    struct md_inode_store *s = fs->store;
-    struct md_namespace_broker *b = context;
-    if (!events) {
-        int error=progress(b,NULL);
-        if (!error) error=cooperative_progress(b,fs,NULL);
-        return error ? error : b->watches ? md_watch_broker_progress(b->watches,s) : 0;
-    }
-    if (events & (POLLERR | POLLNVAL)) return -EIO;
-    if (!(events & POLLIN)) {
-        if (events & POLLHUP) md_fs_worker_notifications(b->worker, -1, b, receive, NULL);
-        return 0;
-    }
+static int receive_one(struct md_namespace_broker *b,struct md_filesystem *fs,
+        struct md_execution_window *window) {
     struct seccomp_notif q = {0};
     if (ioctl(b->listener, SECCOMP_IOCTL_NOTIF_RECV, &q)) {
         return errno == EINTR || errno == ENOENT ? 0 : -errno;
@@ -1089,7 +1332,9 @@ static int receive(void *context, struct md_filesystem *fs, short events) {
         /* A caller can already be in its next kernel syscall. Retire the
          * completed native result before selecting that syscall's route. */
         pthread_mutex_unlock(&b->lock);
-        int error=progress(b,NULL); if (error) return error;
+        int error=md_execution_window_end(window);
+        if (!error) error=progress(b,NULL);
+        if (error) return error;
         pthread_mutex_lock(&b->lock);
         task=find_task(b,(int)q.pid);
     }
@@ -1097,7 +1342,8 @@ static int receive(void *context, struct md_filesystem *fs, short events) {
             && q.data.instruction_pointer==task->cooperative_gate && q.data.args[0]==MD_ENTRY_WAKE) {
         pthread_mutex_unlock(&b->lock);
         if (b->counts) ++b->cooperative_wakes;
-        int result=cooperative_progress(b,fs,&q);
+        int result=md_execution_window_end(window);
+        if (!result) result=cooperative_progress(b,fs,&q);
         if (!result && count) ++count->handled;
         return result;
     }
@@ -1105,7 +1351,8 @@ static int receive(void *context, struct md_filesystem *fs, short events) {
     if (delivered) {
         pthread_mutex_unlock(&b->lock);
         if (count && delivered>0) count->handled++;
-        return delivered<0 ? delivered : 0;
+        int closed=md_execution_window_end(window);
+        return delivered<0 ? delivered : closed;
     }
     if (task) {
         eligible = task->eligible && !task->stopped && !task->recovering && q.data.instruction_pointer != task->gate;
@@ -1114,13 +1361,15 @@ static int receive(void *context, struct md_filesystem *fs, short events) {
     }
     if (watch) {
         pthread_mutex_unlock(&b->lock);
+        int closed=md_execution_window_end(window);
         int fd = duplicate(task, q.pid, (int)q.data.args[q.data.nr == SYS_sendfile ? 1 : 0]);
         pthread_mutex_lock(&b->lock);
         task_release(task);
         pthread_mutex_unlock(&b->lock);
+        if (closed) { if (fd>=0) close(fd); return closed; }
         if (!b->watches) b->watches = md_watch_broker_create();
         if (!b->watches) { if (fd >= 0) close(fd); return -ENOMEM; }
-        return md_watch_broker_submit(b->watches, s, b->listener, &q, fd);
+        return md_watch_broker_submit(b->watches, fs->store, b->listener, &q, fd);
     }
     struct operation *op = b->free;
     if (op) b->free = op->free;
@@ -1137,6 +1386,7 @@ static int receive(void *context, struct md_filesystem *fs, short events) {
     }
     op->notification = q; op->listener = b->listener;
     op->channel=NULL;
+    op->captured_path[0]=op->captured_path[1]=0;
     op->directory = op->second_directory = op->control_descriptor = -1; op->undelivered = 0;
     op->owned_open=op->executed=op->recovering=0;
     op->native_plan=0;
@@ -1156,6 +1406,10 @@ static int receive(void *context, struct md_filesystem *fs, short events) {
                     && task->sequence!=UINT64_MAX && c->sequence==task->sequence+1) {
                 op->sequence=c->sequence; task->sequence=c->sequence;
                 memcpy(op->notification.data.args,c->call.args,sizeof(c->call.args));
+                /* Copy before releasing the channel record. A signal or next
+                 * request cannot overwrite these worker-owned path bytes. */
+                capture_input_paths(op,c);
+                if (b->counts) b->carrier_paths+=!!op->captured_path[0]+!!op->captured_path[1];
                 /* The exact kernel notification now owns the request and all
                  * remaining guest-memory access. Retire only the copied channel
                  * record, not the syscall or descriptor. The caller must still
@@ -1178,10 +1432,41 @@ static int receive(void *context, struct md_filesystem *fs, short events) {
         if (ready<0) prepared=ready;
         else if (!ready) {
             op->waiting=b->waiting; b->waiting=op;
-            return 0;
+            return md_execution_window_end(window);
         }
     }
-    return perform(b,op,prepared,NULL);
+    return perform(b,op,prepared,window);
+}
+static int receive(void *context,struct md_filesystem *fs,short events) {
+    struct md_namespace_broker *b=context;
+    if (!events) {
+        int error=progress(b,NULL);
+        if (!error) error=cooperative_progress(b,fs,NULL);
+        return error ? error : b->watches ? md_watch_broker_progress(b->watches,fs->store) : 0;
+    }
+    if (events&(POLLERR|POLLNVAL)) return -EIO;
+    if (!(events&POLLIN)) {
+        if (events&POLLHUP) md_fs_worker_notifications(b->worker,-1,b,receive,NULL);
+        return 0;
+    }
+    struct md_execution_window window={0};
+    uint64_t start=cooperative_clock();
+    unsigned calls=0;
+    int error;
+    do {
+        error=receive_one(b,fs,&window);
+        ++calls;
+        if (error || !window.owner || calls==EXECUTION_BURST_CALLS || cooperative_clock()-start>=EXECUTION_BURST_NS) break;
+        /* Only queued kernel-admitted calls share this read scope. Never wait
+         * for a future call or carry the scope into another event-loop owner. */
+        struct pollfd ready={.fd=b->listener,.events=POLLIN};
+        int n=poll(&ready,1,0);
+        if (n<0) { error=errno==EINTR ? 0 : -errno; break; }
+        if (!n || !(ready.revents&POLLIN)) break;
+    } while (1);
+    if (b->counts) { ++b->notification_batches; b->notification_batch_calls+=calls; }
+    int closed=md_execution_window_end(&window);
+    return error ? error : closed;
 }
 void md_broker_listen(struct md_namespace_broker *b, int listener) {
     b->listener = listener;
@@ -1204,10 +1489,15 @@ void md_broker_destroy(struct md_namespace_broker *b) {
             (unsigned long long)b->cooperative_completed,(unsigned long long)b->cooperative_declined,
             (unsigned long long)b->cooperative_wakes);
         fprintf(stderr,"MD_BROKER cooperativeDescriptors=%llu\n",(unsigned long long)b->cooperative_descriptors);
+        fprintf(stderr,"MD_BROKER carrierPaths=%llu\n",(unsigned long long)b->carrier_paths);
         fprintf(stderr,"MD_BROKER cooperativeNativeYields=%llu\n",(unsigned long long)b->cooperative_native_yields);
         fprintf(stderr,"MD_BROKER nativeOpen=%llu nativeClose=%llu nativeFlags=%llu\n",
             (unsigned long long)b->native_open,(unsigned long long)b->native_close,(unsigned long long)b->native_flags);
         fprintf(stderr,"MD_BROKER nativeDeferred=%llu\n",(unsigned long long)b->native_deferred);
+        fprintf(stderr,"MD_BROKER nativeDuplicate=%llu nativeSeek=%llu\n",
+            (unsigned long long)b->native_duplicate,(unsigned long long)b->native_seek);
+        fprintf(stderr,"MD_BROKER notificationBatches=%llu notificationBatchCalls=%llu\n",
+            (unsigned long long)b->notification_batches,(unsigned long long)b->notification_batch_calls);
         fprintf(stderr,"MD_BROKER bursts=%llu requests=%llu countLimit=%llu timeLimit=%llu idleLimit=%llu\n",
             (unsigned long long)b->bursts,(unsigned long long)b->burst_requests,
             (unsigned long long)b->burst_count_limit,(unsigned long long)b->burst_time_limit,
@@ -1233,6 +1523,8 @@ void md_broker_destroy(struct md_namespace_broker *b) {
         if (op->result.fd >= 0) close(op->result.fd);
         if (op->result.open_completion.kind == MD_OPEN_PIPE) close(op->result.open_completion.control);
         md_fd_origins_finish(&op->update,-1);
+        md_fd_loan_end(op->custody); md_fd_loan_release(op->custody);
+        md_inode_birth_forget(&op->birth);
         md_fs_anchor_release(op->input_origin); md_fs_anchor_release(op->output_origin);
         if (op->cursor.owner) {
             if (md_ofd_order_cancel(&op->cursor)==1) md_ofd_order_complete(&op->cursor);

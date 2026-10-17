@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "cooperative_entry.h"
 #include "../shroot/src/cooperative_channel.h"
+#include "../shroot/src/posix_acl.h"
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -9,6 +10,7 @@
 #include <linux/landlock.h>
 #include <linux/seccomp.h>
 #include <linux/stat.h>
+#include <linux/openat2.h>
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
@@ -28,6 +30,8 @@
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/vfs.h>
+#include <sys/xattr.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -39,12 +43,12 @@ static const char *path="/tmp/cooperative-file";
 static unsigned direct_calls, fallback_calls;
 static enum md_entry_outcome stat_try(struct md_entry_client *c,struct stat *st,long *result) {
     struct md_entry_call call={.number=SYS_newfstatat,.args={AT_FDCWD,(uintptr_t)path,(uintptr_t)st,0}};
-    enum md_entry_outcome outcome=api->try_syscall(c,&call);
+    enum md_entry_outcome outcome=md_entry_invoke(api,c,&call);
     *result=call.result; return outcome;
 }
 static long call6(int nr,unsigned long a,unsigned long b,unsigned long c,unsigned long d,unsigned long e,unsigned long f) {
     struct md_entry_call call={.number=nr,.args={a,b,c,d,e,f}};
-    enum md_entry_outcome outcome=api->try_syscall(&client,&call);
+    enum md_entry_outcome outcome=md_entry_invoke(api,&client,&call);
     assert(outcome!=MD_ENTRY_UNKNOWN);
     if (outcome==MD_ENTRY_COMPLETED) { ++direct_calls; return call.result; }
     ++fallback_calls;
@@ -105,8 +109,37 @@ static void filters(void) {
 static long required_call(struct md_entry_client *local,int nr,const uint64_t args[6]) {
     struct md_entry_call call={.number=nr};
     memcpy(call.args,args,sizeof(call.args));
-    assert(api->try_syscall(local,&call)==MD_ENTRY_COMPLETED);
+    assert(md_entry_invoke(api,local,&call)==MD_ENTRY_COMPLETED);
     return call.result;
+}
+static void scalar_credentials(void) {
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        struct md_entry_client local={0};
+        const int calls[]={SYS_getuid,SYS_geteuid,SYS_getgid,SYS_getegid};
+        for (unsigned round=0;round<4;++round) {
+            if (round==1) {
+                assert(!setresgid(7,8,0));
+                assert(!setresuid(9,10,0));
+            } else if (round==2) {
+                assert(!seteuid(0));
+                assert(!setresuid(0,0,0) && !setresgid(0,0,0));
+            } else if (round==3) {
+                assert(!unshare(CLONE_NEWUSER));
+            }
+            for (unsigned i=0;i<4;++i) {
+                long result=required_call(&local,calls[i],(uint64_t[6]){0});
+                assert(result==syscall(calls[i]));
+                if (round<3) {
+                    struct md_entry_channel *channel=(void *)local.opaque[MD_ENTRY_CLIENT_CHANNEL];
+                    assert(channel && channel->sequence==(uint64_t)round*4+i+1);
+                }
+            }
+        }
+        _exit(0);
+    }
+    reap(child);
+    puts("PASS cooperative entry: scalar credentials observe live IDs and user namespace translation");
 }
 static unsigned live_descriptors(void) {
     DIR *directory=opendir("/proc/self/fd"); assert(directory);
@@ -118,21 +151,20 @@ static pthread_barrier_t native_barrier;
 static struct md_entry_client *native_client;
 static int native_action, native_checks;
 static void native_signal(int number) { (void)number; }
-static long native_checkpoint(long number,const uint64_t *args) {
+static void native_checkpoint(void) {
     struct md_entry_channel *channel=(void *)native_client->opaque[MD_ENTRY_CLIENT_CHANNEL];
-    if (number==SYS_futex && channel && atomic_load(&channel->state)==MD_ENTRY_NATIVE) {
+    if (channel && atomic_load(&channel->state)==MD_ENTRY_NATIVE) {
         assert(atomic_load(&channel->native.state)==MD_NATIVE_READY); ++native_checks;
         if (native_action==1) assert(!raise(SIGUSR2));
         else if (native_action==2) { barrier(&native_barrier); barrier(&native_barrier); }
         else if (native_action==3) _exit(0);
     }
-    long result=syscall(number,args[0],args[1],args[2],args[3],args[4],args[5]);
-    return result<0 ? -errno : result;
 }
 static void *replace_pinned_file(void *unused) {
     (void)unused;
     struct md_entry_client local={0}; struct stat st; long result;
     assert(stat_try(&local,&st,&result)==MD_ENTRY_COMPLETED && !result);
+    barrier(&native_barrier);
     barrier(&native_barrier);
     /* Absolute worker mutations do not borrow the opener's file-table turn.
      * This checkpoint deliberately holds that turn before the native effect. */
@@ -156,7 +188,21 @@ static void native_descriptors(void) {
         assert(fcntl(fd,F_GETFD)==FD_CLOEXEC);
     }
     for (unsigned i=0;i<192;++i) {
-        int fd=descriptors[i],copy=fcntl(fd,F_DUPFD_CLOEXEC,512); assert(copy>=512);
+        int fd=descriptors[i],copy=required_call(&client,SYS_fcntl,(uint64_t[]){fd,F_DUPFD_CLOEXEC,512,0,0,0});
+        assert(copy>=512 && fcntl(copy,F_GETFD)==FD_CLOEXEC);
+        int alias=required_call(&client,SYS_dup,(uint64_t[]){fd,0,0,0,0,0});
+        assert(alias>=0 && !fcntl(alias,F_GETFD));
+        assert(required_call(&client,SYS_dup3,(uint64_t[]){copy,alias,O_CLOEXEC,0,0,0})==alias);
+        assert(fcntl(alias,F_GETFD)==FD_CLOEXEC);
+        assert(required_call(&client,SYS_dup3,(uint64_t[]){alias,alias,0,0,0,0})==-EINVAL);
+        assert(!required_call(&client,SYS_fcntl,(uint64_t[]){alias,F_SETFL,O_NONBLOCK,0,0,0}));
+        assert(required_call(&client,SYS_fcntl,(uint64_t[]){fd,F_GETFL,0,0,0,0})&O_NONBLOCK);
+        assert(!required_call(&client,SYS_fcntl,(uint64_t[]){fd,F_SETFL,0,0,0,0}));
+        assert(!(fcntl(alias,F_GETFL)&O_NONBLOCK));
+        assert(required_call(&client,SYS_lseek,(uint64_t[]){alias,2,SEEK_SET,0,0,0})==2);
+        assert(lseek(fd,0,SEEK_CUR)==2);
+        assert(required_call(&client,SYS_lseek,(uint64_t[]){fd,-1,SEEK_SET,0,0,0})==-EINVAL);
+        assert(!required_call(&client,SYS_close,(uint64_t[]){alias,0,0,0,0,0}));
         struct stat st; assert(!fstat(copy,&st) && st.st_size==7);
         assert(!required_call(&client,SYS_close,(uint64_t[]){fd,0,0,0,0,0}));
         assert(required_call(&client,SYS_close,(uint64_t[]){fd,0,0,0,0,0})==-EBADF);
@@ -198,15 +244,13 @@ static void native_descriptors(void) {
     writer=required_call(&client,SYS_openat,(uint64_t[]){AT_FDCWD,(uintptr_t)writable,O_WRONLY|O_TRUNC,0,0,0});
     struct stat truncated; assert(writer>=0 && !fstat(writer,&truncated) && !truncated.st_size);
     assert(!required_call(&client,SYS_close,(uint64_t[]){writer,0,0,0,0,0}));
-    struct sigaction action={.sa_handler=native_signal}; sigemptyset(&action.sa_mask);
-    assert(!sigaction(SIGUSR2,&action,NULL));
     native_client=&client; native_action=1;
-    struct md_entry_call call={.number=SYS_openat,.args={AT_FDCWD,(uintptr_t)path,O_RDONLY|O_CLOEXEC},.kernel=native_checkpoint};
-    assert(api->try_syscall(&client,&call)==MD_ENTRY_COMPLETED && call.result==-EINTR);
+    struct md_entry_call call={.number=SYS_openat,.args={AT_FDCWD,(uintptr_t)path,O_RDONLY|O_CLOEXEC},.cancel=native_checkpoint};
+    assert(md_entry_invoke(api,&client,&call)==MD_ENTRY_COMPLETED && call.result==-EINTR);
     assert(native_checks==1 && live_descriptors()==before);
     initial=open(writable,O_WRONLY); assert(initial>=0 && write(initial,"preserved",9)==9 && !close(initial));
     call.args[1]=(uintptr_t)writable; call.args[2]=O_WRONLY|O_TRUNC;
-    assert(api->try_syscall(&client,&call)==MD_ENTRY_COMPLETED && call.result==-EINTR);
+    assert(md_entry_invoke(api,&client,&call)==MD_ENTRY_COMPLETED && call.result==-EINTR);
     assert(!stat(writable,&truncated) && truncated.st_size==9);
     assert(live_descriptors()==before && !unlink(writable));
     writer=required_call(&client,SYS_openat,(uint64_t[]){AT_FDCWD,(uintptr_t)writable,O_CREAT|O_RDWR|O_TRUNC,0600,0,0});
@@ -222,8 +266,9 @@ static void native_descriptors(void) {
     assert(write(fd,"replacement",11)==11 && !close(fd));
     assert(!pthread_barrier_init(&native_barrier,NULL,2)); pthread_t peer;
     assert(!pthread_create(&peer,NULL,replace_pinned_file,NULL));
+    barrier(&native_barrier);
     native_action=2; call.args[1]=(uintptr_t)"/tmp/entry-pinned";
-    assert(api->try_syscall(&client,&call)==MD_ENTRY_COMPLETED && call.result>=0);
+    assert(md_entry_invoke(api,&client,&call)==MD_ENTRY_COMPLETED && call.result>=0);
     fd=(int)call.result; char data[4]={0}; struct stat st;
     assert(read(fd,data,3)==3 && !strcmp(data,"old"));
     assert(!fstat(fd,&st) && st.st_size==3);
@@ -235,7 +280,7 @@ static void native_descriptors(void) {
         if (!child) {
             struct md_entry_client local={0}; native_client=&local; native_action=3;
             call.args[1]=(uintptr_t)path;
-            api->try_syscall(&local,&call); _exit(90);
+            md_entry_invoke(api,&local,&call); _exit(90);
         }
         reap(child);
     }
@@ -266,8 +311,10 @@ static void task_completion(void) {
         assert(!unlink("/tmp/entry-once"));
     }
     assert(local->opaque[MD_ENTRY_CLIENT_CHANNEL]);
-    fd=required_call(local,SYS_fsopen,(uint64_t[]){(uintptr_t)"tmpfs",1,0,0,0,0});
-    assert(fd>=0 && fcntl(fd,F_GETFD)==FD_CLOEXEC); close(fd);
+    for (unsigned i=0;i<128;++i) {
+        fd=required_call(local,SYS_fsopen,(uint64_t[]){(uintptr_t)"tmpfs",1,0,0,0,0});
+        assert(fd>=0 && fcntl(fd,F_GETFD)==FD_CLOEXEC); close(fd);
+    }
     assert(required_call(local,SYS_fsopen,(uint64_t[]){(uintptr_t)"tmpfs",2,0,0,0,0})==-EINVAL);
     puts("PASS cooperative entry: task completion shares FD, O_PATH, pipe, socket, identity and UTS owners; fsopen custody");
 }
@@ -278,44 +325,227 @@ static void create_admission(void) {
         native_client=&local; native_action=0; native_checks=0;
         const char *name="/tmp/entry-create-probe";
         struct md_entry_call call={.number=SYS_openat,
-            .args={AT_FDCWD,(uintptr_t)name,O_CREAT|O_RDWR,0600},.kernel=native_checkpoint};
-        assert(api->try_syscall(&local,&call)==MD_ENTRY_COMPLETED && call.result>=0);
-        assert(!close(call.result) && !native_checks);
+            .args={AT_FDCWD,(uintptr_t)name,O_CREAT|O_RDWR,0600},.cancel=native_checkpoint};
+        assert(md_entry_invoke(api,&local,&call)==MD_ENTRY_COMPLETED && call.result>=0);
+        assert(!close(call.result) && native_checks==1);
         struct md_entry_channel *channel=(void *)local.opaque[MD_ENTRY_CLIENT_CHANNEL];
-        assert(channel && channel->create_cooldown==128);
+        assert(channel);
         mode_t expected=0;
         call.args[3]=0666;
         for (unsigned i=0;i<128;++i) {
-            /* Alternate real births and existing names: the hint cannot return
-             * a cached ENOENT, skip creation, or suppress later discovery. */
+            /* Both branches must retain native FD allocation and live umask,
+             * without caching an absent name or predicting the next syscall. */
             mode_t mask=(i&2) ? 0077 : 0022;
             umask(mask);
             if (!(i&1)) { assert(!unlink(name)); expected=0666&~mask; }
-            assert(api->try_syscall(&local,&call)==MD_ENTRY_COMPLETED && call.result>=0);
+            assert(md_entry_invoke(api,&local,&call)==MD_ENTRY_COMPLETED && call.result>=0);
             struct stat st; assert(!fstat(call.result,&st) && (st.st_mode&0777)==expected);
             assert(write(call.result,"x",1)==1 && !close(call.result));
-            assert(channel->create_cooldown==127-i && !native_checks);
+            assert(native_checks==2+(int)i);
         }
-        assert(api->try_syscall(&local,&call)==MD_ENTRY_COMPLETED && call.result>=0);
-        assert(!close(call.result) && native_checks==1);
+        assert(md_entry_invoke(api,&local,&call)==MD_ENTRY_COMPLETED && call.result>=0);
+        assert(!close(call.result) && native_checks==130);
         assert(!unlink(name));
-        assert(api->try_syscall(&local,&call)==MD_ENTRY_COMPLETED && call.result>=0);
-        assert(!close(call.result) && channel->create_cooldown==128);
+        assert(md_entry_invoke(api,&local,&call)==MD_ENTRY_COMPLETED && call.result>=0);
+        assert(!close(call.result) && native_checks==131);
         call.args[2]=O_RDONLY;
-        assert(api->try_syscall(&local,&call)==MD_ENTRY_COMPLETED && call.result>=0);
-        assert(!close(call.result) && native_checks==2 && channel->create_cooldown==128);
+        assert(md_entry_invoke(api,&local,&call)==MD_ENTRY_COMPLETED && call.result>=0);
+        assert(!close(call.result) && native_checks==132);
         assert(!unlink(name)); _exit(0);
     }
     reap(child);
-    puts("PASS native create admission: bounded miss backoff, live umask, fresh birth/existing effects, resampling and independent readonly plans");
+    puts("PASS native create admission: live umask, native birth/existing effects and independent readonly plans");
 }
-static void native_open_exhaustion(void) {
+struct birth_race { int remove_parent; };
+/* Drive the public ABI one action at a time to inject a real signal precisely
+ * after the native effect, before the caller resumes its continuation. */
+static enum md_entry_outcome signal_after_effect(struct md_entry_call *call) {
+    enum md_entry_outcome outcome=api->try_syscall(&client,call);
+    for (;;) {
+        md_entry_step_fn next=call->next;
+        if (outcome==MD_ENTRY_CHECK_CANCEL) { assert(next && call->cancel); call->cancel(); }
+        else if (outcome==MD_ENTRY_NATIVE_EFFECT) {
+            assert(next && call->effect); call->effect(call->effect_context);
+            assert(!raise(SIGUSR2));
+        } else if (outcome==MD_ENTRY_KERNEL_CALL) {
+            assert(call->kernel); call->result=call->kernel(call->number,call->args);
+            if (!next) return MD_ENTRY_COMPLETED;
+        } else return outcome;
+        outcome=next(&client,call);
+    }
+}
+static void *race_birth(void *argument) {
+    struct birth_race *race=argument;
+    struct md_entry_client local={0};
+    struct stat st; long result;
+    assert(stat_try(&local,&st,&result)==MD_ENTRY_COMPLETED && !result);
+    barrier(&native_barrier);
+    barrier(&native_barrier);
+    if (race->remove_parent)
+        assert(!required_call(&local,SYS_unlinkat,(uint64_t[]){AT_FDCWD,
+            (uintptr_t)"/tmp/entry-birth-parent",AT_REMOVEDIR,0,0,0}));
+    else
+        assert(!required_call(&local,SYS_renameat2,(uint64_t[]){AT_FDCWD,
+            (uintptr_t)"/tmp/entry-birth-winner",AT_FDCWD,(uintptr_t)"/tmp/entry-birth-race",0,0}));
+    barrier(&native_barrier);
+    return NULL;
+}
+static void birth_retirement(void) {
+    native_client=&client; native_action=2;
+    unsigned before=live_descriptors();
+    assert(!pthread_barrier_init(&native_barrier,NULL,2));
+    for (unsigned i=0;i<24;++i) {
+        struct birth_race race={.remove_parent=i%3==2};
+        if (race.remove_parent) assert(!mkdir("/tmp/entry-birth-parent",0700));
+        else {
+            int fd=open("/tmp/entry-birth-winner",O_CREAT|O_EXCL|O_WRONLY,0600);
+            assert(fd>=0 && write(fd,"winner",6)==6 && !close(fd));
+        }
+        pthread_t peer; assert(!pthread_create(&peer,NULL,race_birth,&race));
+        barrier(&native_barrier);
+        const char *name=race.remove_parent ? "/tmp/entry-birth-parent/value" : "/tmp/entry-birth-race";
+        unsigned flags=O_CREAT|O_RDWR|((i%3)==1 ? 0 : O_EXCL)|((i&1) ? O_CLOEXEC : 0);
+        struct md_entry_call call={.number=SYS_openat,
+            .args={AT_FDCWD,(uintptr_t)name,flags,0600},.cancel=native_checkpoint};
+        assert((i&4 ? signal_after_effect(&call) : md_entry_invoke(api,&client,&call))==MD_ENTRY_COMPLETED);
+        assert(!pthread_join(peer,NULL));
+        if (race.remove_parent) assert(call.result==-ENOENT);
+        else {
+            if (flags&O_EXCL) assert(call.result==-EEXIST);
+            else {
+                char bytes[8]={0};
+                assert(call.result>=0 && read(call.result,bytes,6)==6 && !strcmp(bytes,"winner"));
+                assert(!close(call.result));
+            }
+            assert(!unlink(name));
+        }
+        assert(live_descriptors()==before);
+    }
+    assert(!pthread_barrier_destroy(&native_barrier)); native_action=0;
+    puts("PASS native birth retirement: exclusive/nonexclusive conflicts, parent removal, real CLOEXEC flags and no provisional FD leaks");
+}
+static void default_acl(const char *directory) {
+    struct { uint32_t version; struct md_acl_entry entries[5]; } acl={.version=2,.entries={
+        {MD_ACL_USER_OBJ,7,UINT32_MAX},{MD_ACL_USER,4,1000},{MD_ACL_GROUP_OBJ,0,UINT32_MAX},
+        {MD_ACL_MASK,4,UINT32_MAX},{MD_ACL_OTHER,0,UINT32_MAX}}};
+    assert(!setxattr(directory,MD_ACL_DEFAULT_NAME,&acl,sizeof(acl),0));
+}
+static int host_births;
+static atomic_int birth_readers_running,birth_reader_calls;
+static void *birth_reader(void *unused) {
+    (void)unused;
+    struct md_entry_client local={0}; struct stat st; long result;
+    while (atomic_load(&birth_readers_running)) {
+        assert(stat_try(&local,&st,&result)==MD_ENTRY_COMPLETED && !result && st.st_size==7);
+        atomic_fetch_add(&birth_reader_calls,1);
+    }
+    return NULL;
+}
+static void concurrent_births(void) {
+    pthread_t readers[2]; atomic_store(&birth_readers_running,1);
+    for (unsigned i=0;i<2;++i) assert(!pthread_create(&readers[i],NULL,birth_reader,NULL));
+    for (unsigned i=0;i<128;++i) {
+        const char *name="/tmp/entry-birth-watch-dir/concurrent";
+        int fd=required_call(&client,SYS_openat,(uint64_t[]){AT_FDCWD,(uintptr_t)name,O_CREAT|O_EXCL|O_RDWR,0600,0,0});
+        assert(fd>=0 && !close(fd) && !unlink(name));
+    }
+    atomic_store(&birth_readers_running,0);
+    for (unsigned i=0;i<2;++i) assert(!pthread_join(readers[i],NULL));
+    assert(atomic_load(&birth_reader_calls)>0);
+    puts("PASS catalogue birth concurrency: independent metadata read windows cannot enclose publication");
+}
+static void birth_watches(int acl) {
+    unsigned before=live_descriptors();
+    const char *directory="/tmp/entry-birth-watch-dir";
+    const char *name="/tmp/entry-birth-watch-dir/value";
+    if (!host_births) assert(!mkdir(directory,0700));
+    if (acl) default_acl(directory);
+    mode_t previous=umask(0077);
+    int watch=inotify_init1(IN_CLOEXEC|IN_NONBLOCK); assert(watch>=0);
+    assert(inotify_add_watch(watch,directory,IN_CREATE|IN_OPEN|IN_CLOSE_WRITE|IN_MOVED_TO)>0);
+    for (unsigned mode=0;mode<=0666;mode+=0666) {
+        int fd=required_call(&client,SYS_openat,(uint64_t[]){AT_FDCWD,(uintptr_t)name,O_CREAT|O_EXCL|O_RDWR,mode,0,0});
+        struct stat st;
+        assert(fd>=0 && !fstat(fd,&st) && (st.st_mode&0777)==(mode ? (acl ? 0640 : 0600) : 0));
+        assert(!required_call(&client,SYS_close,(uint64_t[]){fd,0,0,0,0,0}));
+        char events[1024] __attribute__((aligned(8)));
+        ssize_t bytes=read(watch,events,sizeof(events)); assert(bytes>0);
+        unsigned count=0;
+        const unsigned expected[]={IN_CREATE,IN_OPEN,IN_CLOSE_WRITE};
+        for (size_t at=0;at<(size_t)bytes;) {
+            struct inotify_event *event=(void *)(events+at);
+            assert(count<3 && event->mask==expected[count++] && event->len
+                && !strcmp(event->name,"value"));
+            at+=sizeof(*event)+event->len;
+        }
+        assert(count==3 && read(watch,events,sizeof(events))==-1 && errno==EAGAIN);
+        assert(!unlink(name));
+        native_client=&client; native_action=1;
+        struct md_entry_call call={.number=SYS_openat,
+            .args={AT_FDCWD,(uintptr_t)name,O_CREAT|O_EXCL|O_RDWR,mode},.cancel=native_checkpoint};
+        assert(md_entry_invoke(api,&client,&call)==MD_ENTRY_COMPLETED && call.result==-EINTR);
+        assert(stat(name,&st)==-1 && errno==ENOENT);
+        assert(read(watch,events,sizeof(events))==-1 && errno==EAGAIN);
+        native_action=0;
+    }
+    assert(!close(watch) && (host_births || !rmdir(directory)) && live_descriptors()==before);
+    umask(previous);
+    printf("PASS native birth watches: ACL=%d, CREATE/OPEN/CLOSE once, inherited/mode-zero metadata and no events or name on cancellation\n",acl);
+}
+static void native_xattr_pins(void) {
+    const char *directory="/tmp/entry-xattr-pins",*name="/tmp/entry-xattr-pins/value";
+    const char *alias="/tmp/entry-xattr-pins/alias",*attribute="user.pin";
+    unsigned before=live_descriptors();
+    assert(!mkdir(directory,0777) && !chmod(directory,0777));
+    default_acl(directory);
+    int fd=required_call(&client,SYS_openat,(uint64_t[]){AT_FDCWD,(uintptr_t)name,O_CREAT|O_EXCL|O_RDWR,0666,0,0});
+    assert(fd>=0 && !setxattr(name,attribute,"first",5,0));
+    for (unsigned promoted=0;promoted<2;++promoted) {
+        if (promoted) assert(!link(name,alias));
+        char list[512];
+        long size=required_call(&client,SYS_listxattr,(uint64_t[]){(uintptr_t)name,(uintptr_t)list,sizeof(list),0,0,0});
+        assert(size>0 && (size_t)size<=sizeof(list));
+        int acl=0,value=0;
+        for (size_t at=0;at<(size_t)size;at+=strlen(list+at)+1) {
+            acl|=!strcmp(list+at,MD_ACL_ACCESS_NAME); value|=!strcmp(list+at,attribute);
+            assert(strncmp(list+at,"user.shroot.",12));
+        }
+        assert(acl && value);
+        pid_t child=fork(); assert(child>=0);
+        if (!child) {
+            struct md_entry_client local={0};
+            char bytes[16];
+            for (unsigned identity=1000;identity<=1001;++identity) {
+                assert(!seteuid(identity));
+                long result=required_call(&local,SYS_getxattr,
+                    (uint64_t[]){(uintptr_t)name,(uintptr_t)attribute,(uintptr_t)bytes,sizeof(bytes),0,0});
+                assert(identity==1000 ? result==5 && !memcmp(bytes,"first",5) : result==-EACCES);
+                assert(!seteuid(0));
+            }
+            _exit(0);
+        }
+        reap(child);
+    }
+    assert(!rename(name,"/tmp/entry-xattr-pins/moved") && !unlink(alias));
+    assert(!unlink("/tmp/entry-xattr-pins/moved"));
+    char value[16];
+    assert(required_call(&client,SYS_fgetxattr,(uint64_t[]){fd,(uintptr_t)attribute,(uintptr_t)value,sizeof(value),0,0})==5
+        && !memcmp(value,"first",5));
+    assert(!close(fd) && !rmdir(directory) && live_descriptors()==before);
+    puts("PASS native xattr pins: live ACL denial, hidden attributes, hardlink promotion and unlinked descriptor");
+}
+static void native_open_exhaustion(int acl) {
     pid_t child=fork(); assert(child>=0);
     if (!child) {
         struct md_entry_client local={0};
-        const char *name="/tmp/entry-emfile";
+        const char *directory="/tmp/entry-emfile-dir";
+        const char *name="/tmp/entry-emfile-dir/existing";
+        if (!host_births) assert(!mkdir(directory,0700));
+        if (acl) default_acl(directory);
         int source=open(name,O_CREAT|O_EXCL|O_RDWR,0600);
         assert(source>=0 && write(source,"preserved",9)==9);
+        int watch=inotify_init1(IN_NONBLOCK|IN_CLOEXEC); assert(watch>=0);
+        assert(inotify_add_watch(watch,directory,IN_CREATE|IN_OPEN|IN_MOVED_TO)>0);
         struct stat st; long result;
         assert(stat_try(&local,&st,&result)==MD_ENTRY_COMPLETED && !result);
         struct rlimit limit; assert(!getrlimit(RLIMIT_NOFILE,&limit) && limit.rlim_cur>=128);
@@ -328,13 +558,24 @@ static void native_open_exhaustion(void) {
         }
         assert(required_call(&local,SYS_openat,(uint64_t[]){AT_FDCWD,(uintptr_t)name,O_WRONLY|O_TRUNC,0,0,0})==-EMFILE);
         assert(!fstat(source,&st) && st.st_size==9);
+        const char *unborn="/tmp/entry-emfile-dir/unborn";
+        assert(required_call(&local,SYS_openat,(uint64_t[]){AT_FDCWD,(uintptr_t)unborn,O_CREAT|O_EXCL|O_RDWR,0600,0,0})==-EMFILE);
+        int observed=stat(unborn,&st), observation_error=errno;
+        char events[1024] __attribute__((aligned(8)));
+        assert(read(watch,events,sizeof(events))==-1 && errno==EAGAIN);
         while (count) assert(!close(fillers[--count]));
+        int after=stat(unborn,&st), after_error=errno;
+        if (observed!=-1 || observation_error!=ENOENT || after!=-1 || after_error!=ENOENT)
+            fprintf(stderr,"EMFILE birth observation: full=%d/%d released=%d/%d\n",
+                observed,observation_error,after,after_error);
+        assert(observed==-1 && observation_error==ENOENT && after==-1 && after_error==ENOENT);
         int fd=required_call(&local,SYS_openat,(uint64_t[]){AT_FDCWD,(uintptr_t)name,O_WRONLY|O_TRUNC,0,0,0});
         assert(fd>=0 && !fstat(source,&st) && !st.st_size);
-        assert(!close(fd) && !close(source) && !unlink(name)); _exit(0);
+        assert(!close(fd) && !close(source) && !close(watch) && !unlink(name)
+            && (host_births || !rmdir(directory))); _exit(0);
     }
     reap(child);
-    puts("PASS native open exhaustion: EMFILE precedes truncate; freed descriptor capacity admits a fresh effect");
+    printf("PASS native open exhaustion: ACL=%d, EMFILE precedes birth/truncate/watch events; freed descriptor capacity admits a fresh effect\n",acl);
 }
 static void filter_arguments(void) {
     pid_t child=fork(); assert(child>=0);
@@ -388,7 +629,7 @@ static void filter_instruction(void) {
         assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
         struct md_entry_client local={0};
         struct md_entry_call call={.number=SYS_getuid,.kernel=caller_kernel};
-        assert(api->try_syscall(&local,&call)==MD_ENTRY_COMPLETED && !call.result);
+        assert(md_entry_invoke(api,&local,&call)==MD_ENTRY_COMPLETED && !call.result);
         assert(syscall(SYS_getuid)==-1 && errno==EACCES);
         _exit(0);
     }
@@ -418,6 +659,63 @@ static void capacity(void) {
         assert(atomic_load(&capacity_completed)==7 && atomic_load(&capacity_declined)==9);
     }
     puts("PASS cooperative entry: bounded channel exhaustion falls back; exited threads release all seven borrowed slots");
+}
+struct reader_burst {
+    pthread_barrier_t ready;
+    atomic_int done;
+    atomic_uint calls;
+    int filtered;
+};
+static void *burst_reader(void *argument) {
+    struct reader_burst *burst=argument;
+    if (burst->filtered) {
+        struct sock_filter code[]={
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_getppid,0,1),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EACCES),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
+        };
+        struct sock_fprog program={sizeof(code)/sizeof(*code),code};
+        assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+        assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+        assert(syscall(SYS_getppid)==-1 && errno==EACCES);
+    }
+    struct md_entry_client local={0}; struct stat st; long result;
+    assert(stat_try(&local,&st,&result)==MD_ENTRY_COMPLETED && !result);
+    assert(!!local.opaque[MD_ENTRY_CLIENT_CHANNEL]==!burst->filtered);
+    barrier(&burst->ready);
+    unsigned calls=0;
+    do {
+        assert(stat_try(&local,&st,&result)==MD_ENTRY_COMPLETED && !result);
+        assert(st.st_size==7 && ((st.st_mode&0777)==0600 || (st.st_mode&0777)==0644));
+        ++calls;
+    } while (!atomic_load_explicit(&burst->done,memory_order_acquire));
+    atomic_fetch_add(&burst->calls,calls);
+    if (burst->filtered) assert(syscall(SYS_getppid)==-1 && errno==EACCES);
+    return NULL;
+}
+static void reader_writer_bursts(void) {
+    for (int filtered=0;filtered<2;++filtered) {
+        struct reader_burst burst={.filtered=filtered};
+        pthread_t readers[3];
+        assert(!pthread_barrier_init(&burst.ready,NULL,4));
+        for (unsigned i=0;i<3;++i) assert(!pthread_create(&readers[i],NULL,burst_reader,&burst));
+        barrier(&burst.ready);
+        for (unsigned i=0;i<128;++i) {
+            unsigned mode=i&1 ? 0600 : 0644;
+            if (i&1) assert(!chmod(path,mode));
+            else assert(!required_call(&client,SYS_fchmodat,(uint64_t[6]){AT_FDCWD,(uintptr_t)path,mode}));
+            struct stat st; long result;
+            assert(stat_try(&client,&st,&result)==MD_ENTRY_COMPLETED && !result && (st.st_mode&0777)==mode);
+        }
+        atomic_store_explicit(&burst.done,1,memory_order_release);
+        /* EVENT_WAIT: every reader exits after the writer completes; the outer
+         * fixture deadline detects starvation instead of relaxing this test. */
+        for (unsigned i=0;i<3;++i) assert(!pthread_join(readers[i],NULL));
+        assert(atomic_load(&burst.calls)>=3);
+        assert(!pthread_barrier_destroy(&burst.ready));
+    }
+    puts("PASS execution bursts: continuous direct/filtered readers admit 256 worker/kernel mutations with fresh metadata");
 }
 static void *threaded(void *unused) {
     (void)unused;
@@ -639,14 +937,15 @@ static void teardown(void) {
 }
 static long direct6(int nr,unsigned long a,unsigned long b,unsigned long c,unsigned long d,unsigned long e,unsigned long f) {
     struct md_entry_call call={.number=nr,.args={a,b,c,d,e,f}};
-    assert(api->try_syscall(&client,&call)==MD_ENTRY_COMPLETED);
+    assert(md_entry_invoke(api,&client,&call)==MD_ENTRY_COMPLETED);
     ++direct_calls; return call.result;
 }
 static void filesystem_operations(void) {
     const char *directory="/tmp/cooperative-directory", *moved="/tmp/cooperative-moved";
     assert(!direct6(SYS_mkdirat,AT_FDCWD,(uintptr_t)directory,0700,0,0,0));
     assert(direct6(SYS_mkdirat,AT_FDCWD,(uintptr_t)directory,0700,0,0,0)==-EEXIST);
-    int base=open(directory,O_DIRECTORY|O_RDONLY|O_CLOEXEC); assert(base>=0);
+    int base=direct6(SYS_openat,AT_FDCWD,(uintptr_t)directory,O_DIRECTORY|O_RDONLY|O_CLOEXEC,0,0,0);
+    assert(base>=0);
     assert(!direct6(SYS_linkat,AT_FDCWD,(uintptr_t)path,base,(uintptr_t)"linked",0,0));
     assert(!direct6(SYS_symlinkat,(uintptr_t)"linked",base,(uintptr_t)"symlink",0,0,0));
     struct statx sx;
@@ -659,6 +958,50 @@ static void filesystem_operations(void) {
     assert(!direct6(SYS_fchownat,base,(uintptr_t)"linked",123,456,0,0));
     assert(!stat(path,&st) && st.st_uid==123 && st.st_gid==456);
     assert(!direct6(SYS_fchownat,base,(uintptr_t)"linked",0,0,0,0));
+    int metadata=openat(base,"linked",O_RDWR|O_CLOEXEC); assert(metadata>=0);
+    assert(!direct6(SYS_fchmod,metadata,0600,0,0,0,0));
+    assert(!direct6(SYS_fchown,metadata,321,654,0,0,0));
+    assert(!fstat(metadata,&st) && (st.st_mode&0777)==0600 && st.st_uid==321 && st.st_gid==654);
+    assert(!direct6(SYS_fchown,metadata,0,0,0,0,0));
+    const char *attribute="user.cooperative";
+    char value[64];
+    assert(!direct6(SYS_setxattr,(uintptr_t)path,(uintptr_t)attribute,(uintptr_t)"value",5,XATTR_CREATE,0));
+    assert(direct6(SYS_fgetxattr,metadata,(uintptr_t)attribute,0,0,0,0)==5);
+    assert(direct6(SYS_getxattr,(uintptr_t)path,(uintptr_t)attribute,(uintptr_t)value,4,0,0)==-ERANGE);
+    assert(direct6(SYS_fgetxattr,metadata,(uintptr_t)attribute,(uintptr_t)value,sizeof(value),0,0)==5);
+    assert(!memcmp(value,"value",5));
+    assert(direct6(SYS_listxattr,(uintptr_t)path,(uintptr_t)value,sizeof(value),0,0,0)>0);
+    assert(!direct6(SYS_fsetxattr,metadata,(uintptr_t)attribute,(uintptr_t)"replacement",11,XATTR_REPLACE,0));
+    assert(direct6(SYS_lgetxattr,(uintptr_t)path,(uintptr_t)attribute,1,11,0,0)==-EFAULT);
+    assert(!direct6(SYS_fremovexattr,metadata,(uintptr_t)attribute,0,0,0,0));
+    assert(direct6(SYS_getxattr,(uintptr_t)path,(uintptr_t)attribute,0,0,0,0)==-ENODATA);
+    struct timespec times[2]={{123456,123},{123457,456}};
+    assert(!direct6(SYS_utimensat,metadata,0,(uintptr_t)times,0,0,0));
+    assert(!fstat(metadata,&st) && st.st_atim.tv_sec==123456 && st.st_mtim.tv_nsec==456);
+    assert(!direct6(SYS_utimensat,base,(uintptr_t)"linked",0,0,0,0));
+    assert(direct6(SYS_utimensat,metadata,0,(uintptr_t)times,AT_SYMLINK_NOFOLLOW,0,0)==-EINVAL);
+    int pin=openat(base,"linked",O_PATH|O_CLOEXEC); assert(pin>=0);
+    assert(direct6(SYS_fchmod,pin,0777,0,0,0,0)==-EBADF);
+    assert(direct6(SYS_fchown,pin,1,2,0,0,0)==-EBADF);
+    assert(direct6(SYS_fgetxattr,pin,(uintptr_t)attribute,0,0,0,0)==-EBADF);
+    assert(direct6(SYS_utimensat,pin,0,(uintptr_t)times,0,0,0)==-EBADF);
+    assert(!close(pin) && !close(metadata));
+    struct statfs space,space_fd;
+    assert(!direct6(SYS_statfs,(uintptr_t)path,(uintptr_t)&space,0,0,0,0));
+    assert(!direct6(SYS_fstatfs,base,(uintptr_t)&space_fd,0,0,0,0));
+    assert(space.f_type==space_fd.f_type && space.f_bsize==space_fd.f_bsize);
+    assert(direct6(SYS_statfs,(uintptr_t)path,1,0,0,0,0)==-EFAULT);
+    struct open_how how={.flags=O_PATH|O_CLOEXEC,.resolve=RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS};
+    pin=direct6(SYS_openat2,base,(uintptr_t)"linked",(uintptr_t)&how,sizeof(how),0,0);
+    assert(pin>=0 && (fcntl(pin,F_GETFL)&O_PATH) && fcntl(pin,F_GETFD)==FD_CLOEXEC);
+    assert(!fstat(pin,&st) && st.st_size==7 && !close(pin));
+    assert(direct6(SYS_openat2,base,(uintptr_t)"symlink",(uintptr_t)&how,sizeof(how),0,0)==-ELOOP);
+    assert(direct6(SYS_openat2,base,(uintptr_t)"../cooperative-file",(uintptr_t)&how,sizeof(how),0,0)==-EXDEV);
+    how.resolve=RESOLVE_IN_ROOT;
+    pin=direct6(SYS_openat2,base,(uintptr_t)"/linked",(uintptr_t)&how,sizeof(how),0,0);
+    assert(pin>=0 && !fstat(pin,&st) && st.st_size==7 && !close(pin));
+    how.flags|=O_TRUNC;
+    assert(direct6(SYS_openat2,base,(uintptr_t)"linked",(uintptr_t)&how,sizeof(how),0,0)==-EINVAL);
     assert(!direct6(SYS_renameat,base,(uintptr_t)"linked",base,(uintptr_t)"renamed",0,0));
     assert(!direct6(SYS_unlinkat,base,(uintptr_t)"renamed",0,0,0,0));
     assert(!direct6(SYS_unlinkat,base,(uintptr_t)"symlink",0,0,0,0));
@@ -669,7 +1012,7 @@ static void filesystem_operations(void) {
     assert(!chdir("/"));
     char entries[4096];
     assert(direct6(SYS_getdents64,base,1,sizeof(entries),0,0,0)==-EFAULT);
-    assert(lseek(base,0,SEEK_CUR)==0);
+    assert(!direct6(SYS_lseek,base,0,SEEK_CUR,0,0,0));
     assert(direct6(SYS_getdents64,base,(uintptr_t)entries,sizeof(entries),0,0,0)>0);
     assert(lseek(base,0,SEEK_CUR)>0);
     assert(!direct6(SYS_getdents64,base,(uintptr_t)entries,sizeof(entries),0,0,0));
@@ -678,6 +1021,89 @@ static void filesystem_operations(void) {
     assert(!direct6(SYS_unlinkat,AT_FDCWD,(uintptr_t)moved,AT_REMOVEDIR,0,0,0));
     assert(!stat(path,&st) && st.st_nlink==1);
     puts("PASS cooperative entry: direct mutations, relative dirfds/cwd, statx, access, permissions and acknowledged directory cursor");
+}
+static volatile sig_atomic_t copy_signals;
+static void copy_signal(int signal) { copy_signals|=signal==SIGSEGV ? 1 : 2; }
+static void output_faults(int fd) {
+    struct sigaction action={.sa_handler=copy_signal},old_segv,old_bus;
+    sigemptyset(&action.sa_mask);
+    assert(!sigaction(SIGSEGV,&action,&old_segv) && !sigaction(SIGBUS,&action,&old_bus));
+    size_t page=(size_t)getpagesize();
+    char *memory=mmap(NULL,2*page,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    assert(memory!=MAP_FAILED && !mprotect(memory+page,page,PROT_NONE));
+    memset(memory+page-16,0xa5,16);
+    assert(direct6(SYS_newfstatat,AT_FDCWD,(uintptr_t)path,(uintptr_t)(memory+page-16),0,0,0)==-EFAULT);
+    struct stat st;
+    assert(!direct6(SYS_fstat,fd,(uintptr_t)&st,0,0,0,0));
+    assert(!memcmp(memory+page-16,&st,16));
+    assert(!mprotect(memory,page,PROT_READ));
+    assert(direct6(SYS_fstat,fd,(uintptr_t)memory,0,0,0,0)==-EFAULT);
+    assert(!munmap(memory,2*page));
+    memory=mmap(NULL,page,PROT_READ|PROT_WRITE,MAP_SHARED,fd,page);
+    assert(memory!=MAP_FAILED);
+    assert(direct6(SYS_fstat,fd,(uintptr_t)memory,0,0,0,0)==-EFAULT);
+    assert(!munmap(memory,page) && !copy_signals);
+    assert(!raise(SIGSEGV) && !raise(SIGBUS) && copy_signals==3);
+    assert(!sigaction(SIGSEGV,&old_segv,NULL) && !sigaction(SIGBUS,&old_bus,NULL));
+    assert(!direct6(SYS_fstat,fd,(uintptr_t)&st,0,0,0,0) && st.st_size==7);
+    puts("PASS cooperative output: partial/readonly/SIGBUS faults, reusable receipt and unrelated signal delivery");
+}
+static void input_faults(void) {
+    size_t page=(size_t)getpagesize(),length=strlen(path)+1;
+    char *memory=mmap(NULL,2*page,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    assert(memory!=MAP_FAILED && !mprotect(memory+page,page,PROT_NONE));
+    char *end=memory+page-length;
+    memcpy(end,path,length);
+    struct stat st;
+    assert(!direct6(SYS_newfstatat,AT_FDCWD,(uintptr_t)end,(uintptr_t)&st,0,0,0) && st.st_size==7);
+    long fd=direct6(SYS_openat,AT_FDCWD,(uintptr_t)end,O_RDONLY,0,0,0);
+    assert(fd>=0 && !direct6(SYS_close,fd,0,0,0,0,0));
+    assert(call6(SYS_newfstatat,AT_FDCWD,(uintptr_t)(memory+page),(uintptr_t)&st,0,0,0)==-EFAULT);
+    memory[page-1]='a';
+    assert(call6(SYS_newfstatat,AT_FDCWD,(uintptr_t)end,(uintptr_t)&st,0,0,0)==-EFAULT);
+    assert(!munmap(memory,2*page));
+    memory=mmap(NULL,page,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS,-1,0);
+    assert(memory!=MAP_FAILED);
+    memset(memory,'a',page);
+    assert(call6(SYS_newfstatat,AT_FDCWD,(uintptr_t)memory,(uintptr_t)&st,0,0,0)==-ENAMETOOLONG);
+    assert(!munmap(memory,page));
+    assert(!direct6(SYS_newfstatat,AT_FDCWD,(uintptr_t)path,(uintptr_t)&st,0,0,0));
+    puts("PASS cooperative input: terminal NUL, inaccessible continuation, bounded pathname and channel reuse");
+}
+static long reject_carrier(long nr,const uint64_t args[6]) {
+    assert(nr==SYS_fsopen && args[1]==1);
+    return -EACCES;
+}
+static void input_sequences(int fd) {
+    struct stat st;
+    assert(!direct6(SYS_newfstatat,AT_FDCWD,(uintptr_t)path,(uintptr_t)&st,0,0,0));
+    struct md_entry_channel *channel=(void *)client.opaque[MD_ENTRY_CLIENT_CHANNEL];
+    assert(channel && channel->input.sequence==channel->sequence);
+    uint64_t captured=channel->input.sequence;
+    for (unsigned i=0;i<32;++i) {
+        assert(!direct6(SYS_fstat,fd,(uintptr_t)&st,0,0,0,0) && st.st_size==7);
+        assert(!direct6(SYS_getuid,0,0,0,0,0,0));
+        assert(channel->input.sequence==captured && channel->sequence>captured);
+    }
+    struct md_entry_call rejected={.number=SYS_fsopen,
+        .args={(uintptr_t)"tmpfs",1},.kernel=reject_carrier};
+    uint64_t before=channel->sequence;
+    assert(md_entry_invoke(api,&client,&rejected)==MD_ENTRY_COMPLETED && rejected.result==-EACCES);
+    assert(channel->sequence==before && !channel->input.sequence);
+    assert(!direct6(SYS_fstat,fd,(uintptr_t)&st,0,0,0,0) && st.st_size==7);
+    assert(channel->sequence==before+1 && !channel->input.sequence);
+    assert(!direct6(SYS_newfstatat,AT_FDCWD,(uintptr_t)path,(uintptr_t)&st,0,0,0));
+    assert(channel->input.sequence==channel->sequence);
+    puts("PASS cooperative input sequences: pathless requests leave capture untouched; rejected carrier invalidates reusable sequence");
+}
+static void *protected_copy(void *unused) {
+    (void)unused;
+    struct md_entry_client local={0};
+    struct stat st; long result;
+    assert(stat_try(&local,&st,&result)==MD_ENTRY_COMPLETED && !result && st.st_size==7);
+    struct md_entry_channel *channel=(void *)local.opaque[MD_ENTRY_CLIENT_CHANNEL];
+    assert(channel && channel->input.sequence==channel->sequence && channel->output.sequence==channel->sequence);
+    return NULL;
 }
 static void contracts(const char *executable) {
     assert(sizeof(struct md_entry_client)==3*sizeof(uintptr_t));
@@ -702,13 +1128,17 @@ static void contracts(const char *executable) {
     for (int nr=-1;nr<512;++nr) {
         if (md_entry_supported(nr)) continue;
         struct md_entry_call call={.number=nr};
-        assert(api->try_syscall(&unused,&call)==MD_ENTRY_DECLINED);
+        assert(md_entry_invoke(api,&unused,&call)==MD_ENTRY_DECLINED);
         assert(!unused.opaque[0] && !unused.opaque[1] && !unused.opaque[2]);
     }
     long fd=call6(SYS_openat,AT_FDCWD,(uintptr_t)path,O_CREAT|O_RDWR|O_TRUNC,0600,0,0); assert(fd>=0);
     assert(call6(SYS_write,fd,(uintptr_t)"payload",7,0,0,0)==7);
+    scalar_credentials();
     native_descriptors();
-    task_completion(); create_admission(); native_open_exhaustion(); filter_arguments(); filter_instruction();
+    task_completion(); create_admission(); birth_retirement();
+    for (unsigned acl=0;acl<2;++acl) { native_open_exhaustion(acl); birth_watches(acl); }
+    native_xattr_pins();
+    filter_arguments(); filter_instruction();
     struct stat st,native; long result;
     enum md_entry_outcome first=stat_try(&client,&st,&result);
     assert(first==MD_ENTRY_COMPLETED && !result && st.st_size==7);
@@ -716,11 +1146,7 @@ static void contracts(const char *executable) {
     assert(call6(SYS_fstat,fd,(uintptr_t)&st,0,0,0,0)==0 && st.st_size==7);
     assert(call6(SYS_newfstatat,AT_FDCWD,(uintptr_t)path,1,0,0,0)==-EFAULT);
     assert(call6(SYS_newfstatat,AT_FDCWD,1,(uintptr_t)&st,0,0,0)==-EFAULT);
-    size_t page=(size_t)getpagesize();
-    char *memory=mmap(NULL,2*page,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
-    assert(memory!=MAP_FAILED && !mprotect(memory+page,page,PROT_NONE));
-    assert(call6(SYS_newfstatat,AT_FDCWD,(uintptr_t)path,(uintptr_t)(memory+page-16),0,0,0)==-EFAULT);
-    assert(!munmap(memory,2*page));
+    output_faults(fd); input_faults(); input_sequences(fd);
     unlink("/tmp/cooperative-link"); assert(!symlink("cooperative-file","/tmp/cooperative-link"));
     char link[64]={0};
     assert(call6(SYS_readlinkat,AT_FDCWD,(uintptr_t)"/tmp/cooperative-link",(uintptr_t)link,sizeof(link),0,0)==16);
@@ -737,7 +1163,7 @@ static void contracts(const char *executable) {
     assert(!raise(SIGUSR1) && signals==1);
     client.opaque[MD_ENTRY_CLIENT_CONTROL]=0; strict_reentry=0;
     struct md_entry_call unsupported={.number=SYS_clone};
-    assert(api->try_syscall(&client,&unsupported)==MD_ENTRY_DECLINED);
+    assert(md_entry_invoke(api,&client,&unsupported)==MD_ENTRY_DECLINED);
     pid_t child=fork(); assert(child>=0);
     if (!child) {
         assert(stat_try(&client,&st,&result)==MD_ENTRY_DECLINED);
@@ -749,20 +1175,39 @@ static void contracts(const char *executable) {
     pthread_t peers[4];
     for (unsigned i=0;i<4;++i) assert(!pthread_create(&peers[i],NULL,threaded,NULL));
     for (unsigned i=0;i<4;++i) assert(!pthread_join(peers[i],NULL));
-    capacity(); interrupted(); abandoned_memory(); context_changes(); credentials(); pid_namespace(); landlocked(); teardown();
+    reader_writer_bursts(); capacity(); interrupted(); abandoned_memory(); context_changes(); credentials(); pid_namespace(); landlocked(); teardown();
     assert(!prctl(PR_SET_DUMPABLE,0));
     assert(!call6(SYS_newfstatat,AT_FDCWD,(uintptr_t)path,(uintptr_t)&st,0,0,0) && st.st_size==7);
+    struct md_entry_channel *channel=(void *)client.opaque[MD_ENTRY_CLIENT_CHANNEL];
+    assert(channel && channel->input.sequence==channel->sequence
+        && channel->output.sequence==channel->sequence && channel->output.size==sizeof(st));
+    assert(channel->input.address[0]==(uintptr_t)path && channel->output.destination==(uintptr_t)&st);
+    pthread_t protected_thread;
+    assert(!pthread_create(&protected_thread,NULL,protected_copy,NULL));
+    /* EVENT_WAIT: the new protected thread registers, copies and releases its channel. */
+    assert(!pthread_join(protected_thread,NULL));
     assert(!prctl(PR_SET_DUMPABLE,1));
+    puts("PASS cooperative protected copy: existing/fresh channels use sequence-bound input and output without remote memory access");
     filters();
     assert(!call6(SYS_renameat2,AT_FDCWD,(uintptr_t)path,AT_FDCWD,(uintptr_t)"/tmp/cooperative-renamed",0,0));
     assert(!call6(SYS_unlinkat,AT_FDCWD,(uintptr_t)"/tmp/cooperative-renamed",0,0,0,0));
     assert(direct_calls && fallback_calls);
-    puts("PASS cooperative entry: metadata, pointers, native IO/FDs, signal reentry, fork/exec, threads and nondumpable fallback");
+    puts("PASS cooperative entry: metadata, pointers, native IO/FDs, signal reentry, fork/exec, threads and nondumpable copy");
 }
 int main(int argc,char **argv) {
     alarm(60); setbuf(stdout,NULL);
+    struct sigaction action={.sa_handler=native_signal}; sigemptyset(&action.sa_mask);
+    assert(!sigaction(SIGUSR2,&action,NULL));
     api=(void *)getauxval(MD_AT_COOPERATIVE);
     assert(md_entry_api_valid(api));
+    if (argc>1 && !strcmp(argv[1],"--host-births")) {
+        host_births=1;
+        int fd=open(path,O_CREAT|O_RDWR,0600); assert(fd>=0 && write(fd,"payload",7)==7 && !close(fd));
+        for (unsigned acl=0;acl<2;++acl) { native_open_exhaustion(acl); birth_watches(acl); }
+        concurrent_births();
+        puts("PASS catalogue births: host-permission parents preserve exact FD admission and publication");
+        return 0;
+    }
     if (argc>1 && !strcmp(argv[1],"exec")) {
         struct stat st; long result;
         assert(stat_try(&client,&st,&result)==MD_ENTRY_COMPLETED && !result);

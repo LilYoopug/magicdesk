@@ -1,14 +1,17 @@
 #ifndef MD_ENTRY_ROUTE_H
 #define MD_ENTRY_ROUTE_H
 #include "syscall_catalog.h"
+#include "identity_call.h"
 #include <sys/syscall.h>
 
-enum md_entry_route { MD_ENTRY_CALLER, MD_ENTRY_WORKER, MD_ENTRY_TASK, MD_ENTRY_FD };
+enum md_entry_route { MD_ENTRY_CALLER, MD_ENTRY_WORKER, MD_ENTRY_TASK, MD_ENTRY_FD, MD_ENTRY_VALUE };
 /* CALLER retains the original instruction, including clone/signal-return stack
  * semantics and native IO. Dynamic FD selectors still apply at that syscall.
  * TASK uses the ordinary kernel-admitted dispatcher and its completion owners. */
 static inline enum md_entry_route md_entry_route(int number) {
-    if (number==SYS_openat || number==SYS_fsopen || number==SYS_close || number==SYS_fcntl) return MD_ENTRY_FD;
+    if (md_identity_scalar_call(number)) return MD_ENTRY_VALUE;
+    if (number==SYS_openat || number==SYS_openat2 || number==SYS_fsopen || number==SYS_close || number==SYS_fcntl
+            || number==SYS_dup || number==SYS_dup3 || number==SYS_lseek) return MD_ENTRY_FD;
 #define CASE(name) case SYS_##name:
     switch (number) {
         MD_ENTRY_WORKER_CALLS(CASE) return MD_ENTRY_WORKER;
@@ -18,7 +21,6 @@ static inline enum md_entry_route md_entry_route(int number) {
         MD_SOCKET_CALLS(CASE)
         case SYS_socket: case SYS_setsockopt: case SYS_recvmmsg:
         case SYS_chroot: case SYS_unshare: case SYS_setns:
-        case SYS_getuid: case SYS_geteuid: case SYS_getgid: case SYS_getegid:
         case SYS_setuid: case SYS_setgid: case SYS_setreuid: case SYS_setregid:
         case SYS_setresuid: case SYS_setresgid: case SYS_getresuid: case SYS_getresgid:
         case SYS_setfsuid: case SYS_setfsgid: case SYS_setgroups: case SYS_getgroups:
