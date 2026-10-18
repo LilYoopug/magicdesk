@@ -18,6 +18,8 @@ import java.net.SocketException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
 
 public final class MagicDeskMcpHttpServerTest {
     @Test
@@ -89,6 +91,53 @@ public final class MagicDeskMcpHttpServerTest {
                     "HTTP/1.1 401 Unauthorized"));
         } finally {
             server.close();
+        }
+    }
+
+    @Test(timeout = 10_000)
+    public void twoLongCallsDoNotStrandSpareRequestWorkers() throws Exception {
+        final var entered = new CountDownLatch(2);
+        final var release = new CountDownLatch(1);
+        final var backend = new EmptyBackend() {
+            @Override public JSONObject callTool(String name, JSONObject arguments) {
+                entered.countDown();
+                try {
+                    // EVENT_WAIT: explicit fixture release; timeout fails the test.
+                    assertTrue(release.await(8, TimeUnit.SECONDS));
+                } catch (InterruptedException error) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError(error);
+                }
+                return new JSONObject();
+            }
+        };
+        final var server = new MagicDeskMcpHttpServer(new McpJsonRpcHandler(backend), () -> "test-token");
+        final var clients = Executors.newFixedThreadPool(3);
+        try {
+            server.start("127.0.0.1", 0);
+            final String body = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\","
+                    + "\"params\":{\"name\":\"slow\"}}";
+            final String wire = "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                    + "Authorization: Bearer test-token\r\nContent-Type: application/json\r\n"
+                    + "Content-Length: " + body.length() + "\r\n\r\n" + body;
+            final var first = clients.submit(() -> request(server.snapshot().boundPort, wire));
+            final var second = clients.submit(() -> request(server.snapshot().boundPort, wire));
+            // EVENT_WAIT: both handlers entered; expiry is not evidence of concurrency.
+            assertTrue(entered.await(2, TimeUnit.SECONDS));
+            final var observation = clients.submit(() -> ping(server, "test-token"));
+            // EVENT_WAIT: independent ping must finish before either long call.
+            assertTrue(observation.get(2, TimeUnit.SECONDS).contains("200 OK"));
+            assertFalse(first.isDone());
+            assertFalse(second.isDone());
+            release.countDown();
+            assertTrue(first.get(2, TimeUnit.SECONDS).contains("200 OK"));
+            assertTrue(second.get(2, TimeUnit.SECONDS).contains("200 OK"));
+        } finally {
+            release.countDown();
+            server.close();
+            clients.shutdownNow();
+            // EVENT_WAIT: all fixture clients terminate after listener closure.
+            assertTrue(clients.awaitTermination(2, TimeUnit.SECONDS));
         }
     }
 
@@ -238,7 +287,7 @@ public final class MagicDeskMcpHttpServerTest {
                         + "\r\n\r\n" + body);
     }
 
-    private static final class EmptyBackend implements McpBackend {
+    private static class EmptyBackend implements McpBackend {
         int closes;
 
         @Override

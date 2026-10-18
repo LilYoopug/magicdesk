@@ -40,7 +40,7 @@ final class MagicDeskMcpHttpServer implements Closeable {
     private final AtomicLong mRequests = new AtomicLong();
     private final AtomicLong mRejected = new AtomicLong();
     private final ThreadPoolExecutor mWorkers = new ThreadPoolExecutor(
-            2,
+            4,
             4,
             30L,
             TimeUnit.SECONDS,
@@ -65,6 +65,9 @@ final class MagicDeskMcpHttpServer implements Closeable {
         }
         mHandler = handler;
         mTokenSupplier = tokenSupplier;
+        // Use the full bounded capacity before queueing. Long shell calls must
+        // not strand spare workers behind a queue that has not filled yet.
+        mWorkers.allowCoreThreadTimeOut(true);
     }
 
     synchronized void start(final String host, final int port)
