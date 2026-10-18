@@ -345,6 +345,7 @@ if os.environ.get("TEST_FAIL") == stage and "MAGICDESK_BUILD_PHASE=dependencies"
             with self.subTest(status=status):
                 stubs = f'''set -eu
 target=installed
+work={shlex.quote(str(self.directory))}
 package_cleanup() {{ printf 'cleaned\\n'; }}
 install_libc_tools() {{ return {status}; }}
 identify_libc() {{ :; }}
@@ -354,6 +355,41 @@ reuse_libc() {{ return 1; }}
                                         text=True, capture_output=True)
                 self.assertEqual(status, result.returncode, result.stderr)
                 self.assertEqual('Installing libc build dependencies...\ncleaned\n', result.stdout)
+
+    def test_libc_build_uses_private_temporary_directory(self):
+        script = self.run_script('--print-libc-setup').stdout
+        start = script.index('mkdir -p "$work/tmp"')
+        end = script.index('extract_integration\n', start)
+        result = subprocess.run(['sh', '-eu', '-c', script[start:end] +
+                                 '\nprintf "%s" "$TMPDIR"'],
+                                env={**os.environ, 'work': str(self.directory),
+                                     'TMPDIR': '/not-the-build-directory'},
+                                text=True, capture_output=True)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(str(self.directory / 'tmp'), result.stdout)
+        self.assertTrue((self.directory / 'tmp').is_dir())
+
+    def test_glibc_build_disables_fortify_through_compiler_driver(self):
+        script = self.run_script('--print-libc-setup').stdout
+        self.assertIn("'no-fortify-source = -U_FORTIFY_SOURCE'", script)
+        self.assertIn("'fortify-source = -U_FORTIFY_SOURCE'", script)
+
+    def test_glibc_abi_failure_prevents_staging(self):
+        script = self.run_script('--print-libc-setup').stdout
+        start = script.index('make -j"$jobs"\n')
+        end = script.index('cd "$work"\n', start)
+        for kind, expected in (('glibc', 7), ('musl', 0)):
+            with self.subTest(kind=kind):
+                result = subprocess.run(['sh', '-eu', '-c', '''
+make() {
+    printf '%s\\n' "$*"
+    case "$*" in *check-abi*) return 7;; esac
+}
+''' + script[start:end]], env={**os.environ, 'kind': kind,
+                             'jobs': '3', 'work': str(self.directory)},
+                                        text=True, capture_output=True)
+                self.assertEqual(expected, result.returncode, result.stderr)
+                self.assertEqual(kind == 'musl', 'install' in result.stdout)
 
     def test_libc_recipe_accepts_all_installer_distributions(self):
         for distro in ('debian', 'ubuntu', 'alpine', 'fedora', 'arch', 'opensuse',
@@ -596,8 +632,11 @@ package_cleanup() { :; }
         for name, recipe in recipes.items():
             with self.subTest(recipe=name):
                 commands = re.findall(r'^\s*(tar [^\n]+)$', recipe, re.M)
-                self.assertEqual(1, len(commands), commands)
-                command = commands[0]
+                expected = 2 if name == 'mesa' else 1
+                self.assertEqual(expected, len(commands), commands)
+                for command in commands:
+                    self.assertIn('--no-same-owner', shlex.split(command))
+                command = next(command for command in commands if '"$archive"' in command)
                 self.assertIn('--no-same-owner', shlex.split(command))
                 work = self.directory / ('build ' + name)
                 (work / 'source').mkdir(parents=True)
@@ -1881,6 +1920,44 @@ package_cleanup() { :; }
         self.assertIn("GPU=turnip jobs=3", result.stderr)
         self.assertNotIn("Linux is ready", result.stdout)
         self.assertNotIn("install", [args[0] for args in self.calls()])
+
+    def test_meson_bootstrap_preserves_supported_system_tool(self):
+        result = self.run_script('--yes', '--resume', '--name', 'work', '--gpu', 'turnip')
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = Path(str(self.payload) + '.gpu').read_text()
+        helper = payload[payload.index('prepare_meson() {'):payload.index('\nautomatic=no')]
+        system_meson = self.directory / 'meson'
+        tools = self.directory / 'tools' / 'meson-1.7.2'
+        tools.mkdir(parents=True)
+        (tools / '.complete').touch()
+        for version, system in [('1.3.2', False), ('1.4.0', True), ('1.7.2', True),
+                                ('1.10.0', True), ('unknown', False)]:
+            with self.subTest(version=version):
+                system_meson.write_text('#!/bin/sh\nprintf "%s\\n" "' + version + '"\n')
+                system_meson.chmod(0o755)
+                run = subprocess.run(['sh', '-eu', '-c', helper + '\nprepare_meson\nprintf "%s" "$meson_tool"'],
+                    env=dict(self.environment, work=str(self.directory)), capture_output=True, text=True, timeout=5)
+                self.assertEqual(0, run.returncode, run.stderr)
+                self.assertEqual(str(system_meson if system else tools / 'meson.py'), run.stdout)
+                self.assertIn(version, system_meson.read_text())
+
+    def test_meson_bootstrap_rejects_invalid_archive_before_extracting(self):
+        result = self.run_script('--yes', '--resume', '--name', 'work', '--gpu', 'turnip')
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = Path(str(self.payload) + '.gpu').read_text()
+        helper = payload[payload.index('prepare_meson() {'):payload.index('\nautomatic=no')]
+        for name, body in [('meson', 'echo 1.3.2'), ('curl', 'exit 0'),
+                           ('tar', 'touch "$work/unexpected-extraction"')]:
+            tool = self.directory / name
+            tool.write_text('#!/bin/sh\n' + body + '\n')
+            tool.chmod(0o755)
+        tools = self.directory / 'tools'
+        tools.mkdir()
+        (tools / 'meson-1.7.2.tar.gz.part').write_text('invalid archive')
+        run = subprocess.run(['sh', '-eu', '-c', helper + '\nprepare_meson'],
+            env=dict(self.environment, work=str(self.directory)), capture_output=True, text=True, timeout=5)
+        self.assertNotEqual(0, run.returncode)
+        self.assertFalse((self.directory / 'unexpected-extraction').exists())
 
     def profile_recipe(self):
         result = self.run_script("--yes", "--name", "debian", "--resume", "--gpu", "turnip")

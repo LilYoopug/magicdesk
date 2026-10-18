@@ -64,6 +64,9 @@ install_libc_tools
 # libc. An OCI preparation instead targets the unchanged source image.
 if [ "$target" = installed ]; then identify_libc; fi
 if reuse_libc; then exit 0; fi
+mkdir -p "$work/tmp"
+TMPDIR=$work/tmp
+export TMPDIR
 extract_integration
 case "$kind" in
     musl) source_url=https://musl.libc.org/releases/musl-$version.tar.gz ;;
@@ -97,8 +100,16 @@ else
     # belong to the private build. Makeconfig supplies these overridable paths.
     printf '%s\n' 'complocaledir = /usr/lib/locale' 'localedir = /usr/share/locale' \
         'i18ndir = /usr/share/i18n' 'zonedir = /usr/share/zoneinfo' > configparms
+    # glibc BZ 31928: -Wp bypasses GCC driver defaults on e.g. Ubuntu.
+    # Preserve configure's default (no fortification of libc itself), using
+    # driver-level flags. This does not change flags for guest applications.
+    printf '%s\n' 'no-fortify-source = -U_FORTIFY_SOURCE' \
+        'fortify-source = -U_FORTIFY_SOURCE' >> configparms
 fi
 make -j"$jobs"
+# Check exported symbols before staging: a runnable shell alone does not prove
+# that compiler defaults preserved glibc's public ABI.
+if [ "$kind" = glibc ]; then make -j"$jobs" check-abi; fi
 if [ "$kind" = musl ]; then make install DESTDIR="$work/stage"
 else make install install_root="$work/stage"; fi
 cd "$work"

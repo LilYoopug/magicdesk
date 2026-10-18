@@ -50,7 +50,9 @@ dependencies, not Android or Termux prerequisites.
 original interpreter/libc bytes. It reuses a matching registry entry before
 installing build tools. Otherwise it downloads the corresponding upstream source
 release, applies the shared adapter, builds and runs an entry-ABI/file-IO probe
-and a shell probe. Musl 1.2.5 and glibc 2.41 have pinned source digests; other
+and a shell probe. Glibc's upstream `check-abi` additionally verifies its public
+exports before staging; a failure prevents publication. Musl 1.2.5 and glibc
+2.41 have pinned source digests; other
 numeric releases use HTTPS and the same structural admission, printing their
 downloaded digest. A changed source boundary fails rather than guessing.
 
@@ -63,6 +65,10 @@ A changed libc during compilation rejects publication. Build packages remain
 installed; failures do not roll back package-manager changes.
 Source extraction uses `--no-same-owner`: archive UIDs are not part of a build,
 and guest root cannot change Android ownership on the explicit work binding.
+Compiler temporaries use the bound work directory, not another session's `/tmp`.
+Glibc builds explicitly undefine `_FORTIFY_SOURCE` at the compiler-driver level:
+this preserves configure's unfortified libc build on compilers with distribution
+defaults, without changing flags for applications.
 Rootfs/OCI imports and backups keep their separate metadata-preserving path.
 OCI preparation uses one temporary environment from the requested image and
 pins the original image's libc identity even if build dependencies are upgraded.
