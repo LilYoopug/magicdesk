@@ -1090,8 +1090,17 @@ an external page; `chrome://sandbox` reported Flatpak, PID/network namespaces an
 Seccomp-BPF with TSYNC, with installed filters also observed on renderer processes.
 Bubblewrap's `--disable-userns` uses enforced per-user, ancestor-scoped namespace
 quotas, not a successful no-op. These checks do not establish kernel-equivalent
-isolation or complete Flatpak support: this run used software graphics after EGL
-initialization failed, and the document portal could not open `/dev/fuse`.
+isolation or complete Flatpak support. The initial run used software graphics;
+a subsequent local Flatpak GL extension with the installer's patched Mesa passed
+three hardware Zink/Turnip WebGL pixel checks without GPU-process crashes, plus
+Wayland GUI presentation, pointer input and normal closure. Sandbox and watchdog
+remained enabled. The Turnip recipe now prepares the local GL.host extension
+automatically, with runtime ABI admission and install/update triggers; see
+[Flatpak GPU drivers](graphics.md#flatpak-gpu-drivers). Ordinary Flatpak launches
+also pass the GPU checks without test-only driver selection or environment flags.
+The document portal remains unsupported: the host denies `/dev/fuse` to UID 2000
+and Shroot does not yet implement FUSE mounts. A successful browser/GPU test does
+not establish document export or file-chooser interoperability.
 CPU topology is now available through the shared read-only native sysfs projection,
 also checked inside Flatpak. Initial Discover setup also needed guest system
 services and a user remote not yet fully covered by the installation recipe.

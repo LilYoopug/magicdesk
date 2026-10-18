@@ -145,6 +145,43 @@ Use `MESA_LOADER_DRIVER_OVERRIDE=zink`, the intended Vulkan ICD and no
 `WAYLAND_DEBUG=client` buffer submissions. A renderer string alone is not proof
 that the client presented a frame.
 
+### Flatpak GPU Drivers
+
+Flatpak clients need a GL extension inside their runtime; host driver paths and
+environment variables alone are insufficient. The Turnip recipe installs
+`magicdesk-flatpak-gl`, which reuses the selected Mesa build without compiling
+another copy or downloading a driver extension. It reads installed ARM64 runtime
+metadata, relocates the EGL/Vulkan manifests, and publishes Flatpak's automatically
+selected local `org.freedesktop.Platform.GL.host` extension. The helper runs after
+graphics setup, on desktop-session startup and through a Flatpak install/update
+trigger. It can also be run manually inside the guest:
+
+```sh
+magicdesk-flatpak-gl
+```
+
+Each runtime sharing a GL branch must pass a sandboxed loader/dlopen check before
+publication. A runtime commit change repeats admission without copying unchanged
+Mesa libraries. This detects missing dependencies/symbols, not every possible
+driver/runtime incompatibility. Admission failure is reported and withdraws the
+owned extension; independently installed `GL.host` directories are not replaced.
+New Mesa builds replace the extension atomically. Old bundles remain under the
+installation's `.magicdesk-gl/retired-*` directory because running sandboxes can
+still use them; they are not automatically reclaimed.
+
+The helper adds Flatpak global `unset-environment` entries for inherited host
+`VK_DRIVER_FILES`, `VK_ICD_FILENAMES`, `__EGL_VENDOR_LIBRARY_FILENAMES` and
+`LIBGL_DRIVERS_PATH`. Runtime loader discovery then selects the extension's
+libraries, not inaccessible `/opt` paths. Existing explicit global driver choices,
+per-app overrides and filesystem permissions remain intact. These unsets also
+remain useful if the selected host GPU profile later changes.
+
+SteamOS/Freedesktop 25.08 passed the actual install trigger, three ordinary
+sandboxed Chromium Zink/Turnip WebGL pixel/normal-exit cycles, and a Wayland window
+check with frames, pointer input and normal closure. Sandbox and GPU watchdog
+stayed enabled. This checks Zink/OpenGL, not Chromium's separate ANGLE/Vulkan
+Wayland output path, other runtime ABIs or document-portal support.
+
 ### Server Composition
 
 The installer's optional KWin 6.3.6 patch is a Linux client-side nested-compositor

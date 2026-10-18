@@ -1111,7 +1111,8 @@ package_cleanup() { :; }
         release = root / 'os-release'
         payload = payload.replace('/etc/os-release', str(release))
         for original, name in (('/etc/profile.d', 'profiles'), ('/var/lib/magicdesk', 'state'),
-                               ('/var/cache/magicdesk', 'cache')):
+                               ('/var/cache/magicdesk', 'cache'), ('/etc/magicdesk', 'config'),
+                               ('/usr/local', 'local'), ('/usr/share/flatpak/triggers', 'triggers')):
             payload = payload.replace(original, str(root / name))
         package_log = root / 'packages'
         for name, body in {
@@ -1885,7 +1886,11 @@ package_cleanup() { :; }
         result = self.run_script("--yes", "--name", "debian", "--resume", "--gpu", "turnip")
         self.assertEqual(0, result.returncode, result.stderr)
         payload = Path(str(self.payload) + ".gpu").read_text()
-        return payload[payload.index("# Remove only our previously exported library directory"):]
+        recipe = payload[payload.index("# Remove only our previously exported library directory"):]
+        # Keep profile activation tests confined to their temporary filesystem.
+        (self.directory / 'etc-magicdesk').mkdir(exist_ok=True)
+        return recipe.replace('/etc/magicdesk/', str(self.directory / 'etc-magicdesk') + '/') \
+            .replace('/usr/share/flatpak/triggers', str(self.directory / 'triggers'))
 
     def test_profile_activation_requires_successful_turnip_probe(self):
         recipe = self.profile_recipe()

@@ -54,6 +54,7 @@ defaults to automatic Turnip detection and a Wayland Plasma desktop.
   --print-graphics-setup  Print the guest graphics setup script without running it
   --print-libc-setup  Print the guest libc setup script without running it
   --print-mesa-patch  Print the embedded patch without running the installer
+  --print-flatpak-gl-helper  Print the embedded Flatpak GL publisher
   --print-kwin-patch [6.3.6|6.2.5]  Print the matching embedded KWin patch
   --print-recovery-reader  Print the embedded SteamOS image converter
 
@@ -2070,6 +2071,283 @@ mv "$candidate" /etc/magicdesk/plasma-kwin.sh
 KWIN_BODY
 }
 
+flatpak_gl_helper() {
+    cat <<'FLATPAK_GL_PY'
+#!/usr/bin/env python3
+"""Publish the selected Mesa build through Flatpak's local GL.host extension."""
+import configparser
+import ctypes
+import errno
+import fcntl
+import io
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+
+CONFIG = Path('/etc/magicdesk/flatpak-mesa-prefix')
+PROBE = Path('/usr/local/libexec/magicdesk-flatpak-gl-probe')
+EXTENSION = 'org.freedesktop.Platform.GL.host'
+FORMAT = '1'
+
+
+def public_directory(path):
+    try:
+        path.mkdir()
+    except FileExistsError:
+        if not path.is_dir() or path.is_symlink():
+            raise ValueError('Not a local Flatpak directory: ' + str(path))
+    else:
+        path.chmod(0o755)
+
+
+def prepare_environment(base):
+    # Host absolute driver paths are not valid inside a runtime. Use Flatpak's
+    # normal loader discovery, without overriding explicit per-app settings.
+    path = base / 'overrides/global'
+    data = configparser.ConfigParser(interpolation=None, strict=False)
+    data.optionxform = str
+    original = path.read_text() if path.exists() else ''
+    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o644
+    data.read_string(original)
+    unset = data.get('Context', 'unset-environment', fallback='').split(';')
+    unset = [key for key in unset if key]
+    changed = False
+    for key in ('VK_DRIVER_FILES', 'VK_ICD_FILENAMES',
+                '__EGL_VENDOR_LIBRARY_FILENAMES', 'LIBGL_DRIVERS_PATH'):
+        if key not in unset and not data.has_option('Environment', key):
+            unset.append(key)
+            changed = True
+    if not changed:
+        return
+    if not data.has_section('Context'):
+        data.add_section('Context')
+    data.set('Context', 'unset-environment', ';'.join(unset) + ';')
+    output = io.StringIO()
+    data.write(output, space_around_delimiters=False)
+    public_directory(path.parent)
+    fd, name = tempfile.mkstemp(prefix='.magicdesk-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            stream.write(output.getvalue())
+            os.fchmod(stream.fileno(), mode)
+        if (path.read_text() if path.exists() else '') != original:
+            raise ValueError('Flatpak overrides changed during GPU preparation; retry')
+        os.replace(name, path)
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+def runtime_groups(base):
+    groups = {}
+    for metadata in sorted((base / 'runtime').glob('*/aarch64/*/active/metadata')):
+        data = configparser.ConfigParser(interpolation=None, strict=False)
+        data.read(metadata)
+        section = 'Extension org.freedesktop.Platform.GL'
+        if not data.has_section(section):
+            continue
+        layout = data.get(section, 'directory', fallback='')
+        if not layout.startswith('lib/') or '..' in layout.split('/'):
+            raise ValueError('Invalid GL extension directory: ' + layout)
+        versions = data.get(section, 'versions', fallback=data.get(section, 'version',
+                           fallback=metadata.parents[1].name)).split(';')
+        # 1.4 is the unversioned NVIDIA ABI, not a Mesa compatibility promise.
+        branch = next((v for v in versions if re.fullmatch(r'\d{2}\.\d{2}', v)), None)
+        if branch and data.getboolean(section, 'subdirectories', fallback=False):
+            groups.setdefault(branch, []).append((metadata.resolve(), layout))
+    return groups
+
+
+def relocate_json(source, target, root):
+    data = json.loads(source.read_text())
+    name = Path(data['ICD']['library_path']).name
+    if not (target.parents[2] / 'lib' / name).is_file():
+        raise ValueError('Missing Mesa ICD library: ' + name)
+    data['ICD']['library_path'] = root + '/lib/' + name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(data) + '\n')
+
+
+def stage_bundle(prefix, directory, layout):
+    shutil.copytree(prefix / 'lib', directory / 'lib', symlinks=True)
+    # Development files are not part of a runtime extension.
+    shutil.rmtree(directory / 'lib/pkgconfig', ignore_errors=True)
+    root = '/usr/' + layout + '/host'
+    relocate_json(prefix / 'share/vulkan/icd.d/freedreno_icd.aarch64.json',
+                  directory / 'vulkan/icd.d/magicdesk.json', root)
+    relocate_json(prefix / 'share/glvnd/egl_vendor.d/50_mesa.json',
+                  directory / 'glvnd/egl_vendor.d/50_magicdesk.json', root)
+
+
+def verify_runtime(metadata, bundle):
+    files = metadata.parent / 'files'
+    loaders = list(files.glob('lib/ld-linux-aarch64.so.1'))
+    loaders += list(files.glob('lib/*/ld-linux-aarch64.so.1'))
+    if not loaders:
+        raise ValueError('No ARM64 glibc loader in ' + str(metadata))
+    loader = '/usr/' + str(loaders[0].relative_to(files))
+    libraries = [str(p.relative_to(bundle)) for p in sorted((bundle / 'lib').glob('*.so*'))
+                 if p.is_file() and not p.is_symlink()]
+    if not libraries:
+        raise ValueError('Empty Mesa library set')
+    command = ['bwrap', '--unshare-pid', '--unshare-net', '--unshare-ipc',
+               '--ro-bind', str(files), '/usr', '--symlink', 'usr/lib', '/lib',
+               '--symlink', 'usr/bin', '/bin', '--dev', '/dev', '--proc', '/proc',
+               '--ro-bind', str(bundle), '/mdgl', '--ro-bind', str(PROBE), '/probe',
+               '--chdir', '/', '--', loader, '--library-path',
+               '/mdgl/lib:/usr/lib/aarch64-linux-gnu:/usr/lib', '/probe']
+    command += ['/mdgl/' + name for name in libraries]
+    # EVENT_WAIT: the runtime loader/dlopen probe exits; timeout rejects admission.
+    result = subprocess.run(command, env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'},
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, timeout=30)
+    if result.returncode:
+        raise ValueError('Mesa cannot load in ' + str(metadata) + ':\n' + result.stdout)
+
+
+def owned(link):
+    return not link.is_symlink() and (link / '.magicdesk-gl').is_file()
+
+
+def publish(candidate, destination):
+    if not destination.exists():
+        os.rename(candidate, destination)
+        return False
+    # Exchange whole directories: relative symlinks inside an extension remain
+    # valid after Flatpak mounts it; live sandboxes retain the old directory.
+    rename = getattr(ctypes.CDLL(None, use_errno=True), 'renameat2', None)
+    if rename is None:
+        raise OSError(errno.ENOSYS, 'libc does not provide renameat2 for atomic GL replacement')
+    rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    rename.restype = ctypes.c_int
+    if rename(-100, os.fsencode(candidate), -100, os.fsencode(destination), 2):
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    return True
+
+
+def retire(link, bundles):
+    if owned(link):
+        unused = Path(tempfile.mkdtemp(prefix='retired-', dir=bundles))
+        os.replace(link, unused)
+
+
+def write_receipt(directory, receipt):
+    fd, name = tempfile.mkstemp(prefix='.receipt-', dir=directory)
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            stream.write(json.dumps(receipt) + '\n')
+            os.fchmod(stream.fileno(), 0o644)
+        os.replace(name, directory / '.magicdesk-gl')
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+def extension_directory(base):
+    destination = base
+    for name in ('extension', EXTENSION, 'aarch64'):
+        destination = destination / name
+        public_directory(destination)
+    return destination
+
+
+def prepare(base, prefix):
+    base = base.resolve()
+    if not (base / 'runtime').is_dir():
+        return
+    bundles = base / '.magicdesk-gl'
+    bundles.mkdir(exist_ok=True)
+    with (bundles / 'lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        destination = base / 'extension' / EXTENSION / 'aarch64'
+        groups = runtime_groups(base) if prefix else {}
+        failed = []
+        if prefix:
+            identity = (prefix / '.complete').read_text().strip()
+            if not identity:
+                raise ValueError('Incomplete Mesa build')
+        for branch, runtimes in groups.items():
+            link = destination / branch
+            if os.path.lexists(link) and not owned(link):
+                failed.append('Not replacing an independently installed GL.host: ' + str(link))
+                continue
+            layouts = {layout for _, layout in runtimes}
+            if len(layouts) != 1:
+                failed.append('Conflicting GL paths for runtime branch ' + branch)
+                retire(link, bundles)
+                continue
+            layout = next(iter(layouts))
+            receipt = [FORMAT, str(prefix), identity, layout,
+                       [str(path) for path, _ in runtimes]]
+            temporary = None
+            try:
+                previous = json.loads((link / '.magicdesk-gl').read_text()) if owned(link) else None
+                if previous == receipt:
+                    continue
+                if isinstance(previous, list) and previous[:4] == receipt[:4]:
+                    for metadata, _ in runtimes:
+                        verify_runtime(metadata, link)
+                    write_receipt(link, receipt)
+                    continue
+                temporary = Path(tempfile.mkdtemp(prefix='.prepare-', dir=bundles))
+                stage_bundle(prefix, temporary, layout)
+                for metadata, _ in runtimes:
+                    verify_runtime(metadata, temporary)
+                write_receipt(temporary, receipt)
+                temporary.chmod(0o755)
+                extension_directory(base)
+                if publish(temporary, link):
+                    previous_bundle, temporary = temporary, None
+                    os.rename(previous_bundle, previous_bundle.with_name(
+                        'retired-' + previous_bundle.name.removeprefix('.prepare-')))
+                temporary = None
+                print('Flatpak Mesa ready: ' + branch)
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                # An old build is not silently reused after ABI admission failed.
+                retire(link, bundles)
+                failed.append(str(error))
+            finally:
+                if temporary:
+                    shutil.rmtree(temporary)
+        for link in destination.glob('*'):
+            if link.name not in groups and owned(link):
+                retire(link, bundles)
+        if any(owned(destination / branch) for branch in groups):
+            prepare_environment(base)
+        # Old immutable bundles can still be mounted by running applications.
+        # Keep them; never mutate a library beneath an existing sandbox.
+        if failed:
+            raise ValueError('\n'.join(failed))
+
+
+def main():
+    prefix = Path(CONFIG.read_text().strip()) if CONFIG.is_file() else None
+    if prefix and not prefix.is_absolute():
+        raise ValueError('Mesa prefix must be absolute')
+    if len(sys.argv) > 1:
+        bases = [Path(arg) for arg in sys.argv[1:]]
+    else:
+        bases = [Path(os.environ.get('XDG_DATA_HOME', str(Path.home() / '.local/share'))) / 'flatpak']
+        if os.geteuid() == 0:
+            bases.append(Path('/var/lib/flatpak'))
+    for base in bases:
+        prepare(base, prefix)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, ValueError, configparser.Error, subprocess.SubprocessError) as error:
+        print('Flatpak Mesa not activated: ' + str(error), file=sys.stderr)
+        sys.exit(1)
+FLATPAK_GL_PY
+}
+
 # One payload is both fingerprinted and executed; the lab exports the same patch.
 graphics_setup() {
     distribution_support
@@ -2090,6 +2368,14 @@ candidate=$profile.new
 trap 'status=$?; rm -f "$candidate"; package_cleanup; exit "$status"' 0
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+mkdir -p /usr/local/libexec /usr/local/bin /etc/magicdesk
+cat > /usr/local/bin/magicdesk-flatpak-gl <<'FLATPAK_GL_HELPER'
+GPU_HEAD
+    flatpak_gl_helper
+    cat <<'GPU_HEAD'
+FLATPAK_GL_HELPER
+chmod 755 /usr/local/bin/magicdesk-flatpak-gl
 
 automatic=no
 if [ "$gpu" = auto ]; then
@@ -2191,6 +2477,20 @@ MESA_PATCH
         mv "$work/stage$prefix" "$prefix"
     fi
     [ "$(cat "$prefix/.complete")" = "$recipe" ] || { echo 'Mesa build identity mismatch.' >&2; exit 1; }
+    cat > "$work/flatpak-gl-probe.c" <<'PROBE'
+#include <dlfcn.h>
+#include <stdio.h>
+int main(int argc, char **argv) {
+    for (int i = 1; i < argc; ++i) {
+        void *library = dlopen(argv[i], RTLD_NOW | RTLD_LOCAL);
+        if (!library) { fprintf(stderr, "%s: %s\n", argv[i], dlerror()); return 1; }
+        dlclose(library);
+    }
+    return 0;
+}
+PROBE
+    cc -O2 "$work/flatpak-gl-probe.c" -ldl -o "$work/flatpak-gl-probe"
+    install -m 755 "$work/flatpak-gl-probe" /usr/local/libexec/magicdesk-flatpak-gl-probe
 fi
 
 # Remove only our previously exported library directory when re-sourcing a login profile.
@@ -2291,6 +2591,21 @@ PROFILE
 fi
 chmod 644 "$candidate"
 mv -f "$candidate" "$profile"
+if [ "$gpu" = turnip ]; then
+    printf '%s\n' "$prefix" > /etc/magicdesk/flatpak-mesa-prefix.new
+    mv /etc/magicdesk/flatpak-mesa-prefix.new /etc/magicdesk/flatpak-mesa-prefix
+    mkdir -p /usr/share/flatpak/triggers
+    cat > /usr/share/flatpak/triggers/magicdesk-gl.trigger <<'TRIGGER'
+#!/bin/sh
+exec /usr/local/bin/magicdesk-flatpak-gl "$1"
+TRIGGER
+    chmod 755 /usr/share/flatpak/triggers/magicdesk-gl.trigger
+else
+    rm -f /etc/magicdesk/flatpak-mesa-prefix
+fi
+if command -v python3 >/dev/null 2>&1; then
+    magicdesk-flatpak-gl || echo 'Flatpak GPU preparation failed; see the diagnostic above.' >&2
+fi
 printf 'Graphics profile activated for new launches: %s\n' "$gpu"
 GPU_BODY
 }
@@ -2303,6 +2618,9 @@ desktop=${1:?Expected xfce, weston, gnome, plasma-x11 or plasma-wayland}
 shift
 [ ! -r /etc/profile.d/magicdesk-graphics.sh ] || . /etc/profile.d/magicdesk-graphics.sh
 [ ! -r /etc/profile.d/magicdesk-applications.sh ] || . /etc/profile.d/magicdesk-applications.sh
+if command -v magicdesk-flatpak-gl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+    magicdesk-flatpak-gl || echo 'Flatpak GPU preparation failed; see the diagnostic above.' >&2
+fi
 # Root needs no authentication agent. Keep packaged and user autostart files
 # intact; this profile applies only to explicitly launched root desktops.
 if [ "$(id -u)" = 0 ]; then
@@ -3405,6 +3723,7 @@ prepare_libc_command() (
 )
 if [ "${1:-}" = --prepare-libc ]; then shift; prepare_libc_command "$@"; exit $?; fi
 if [ "$#" = 1 ] && [ "$1" = --print-mesa-patch ]; then mesa_patch; exit 0; fi
+if [ "$#" = 1 ] && [ "$1" = --print-flatpak-gl-helper ]; then flatpak_gl_helper; exit 0; fi
 if [ "$#" = 1 ] && [ "$1" = --print-system-setup ]; then system_setup; exit 0; fi
 if [ "$#" = 1 ] && [ "$1" = --print-graphics-setup ]; then graphics_setup; exit 0; fi
 if [ "$#" = 1 ] && [ "$1" = --print-libc-setup ]; then libc_setup; exit 0; fi

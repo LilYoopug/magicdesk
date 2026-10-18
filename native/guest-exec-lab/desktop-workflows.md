@@ -24,6 +24,26 @@ browser exits. Each launch uses a fresh sandbox-private profile; the user's inst
 is untouched. Logs remain in the printed temporary directory. There are no
 sandbox-disabling flags. This does not verify GPU acceleration or document portals.
 
+With the Turnip recipe and a compatible local GL.host extension prepared, run
+`sh fixtures/flatpak-chromium-zink.sh` in the same desktop terminal. Do not set
+`FLATPAK_GL_DRIVERS` or pass environment-cleanup flags for the automatic-path
+check. It requires three fresh-profile WebGL2 runs with a
+Zink/Turnip renderer, exact pixel readback, no GL errors, normal exit and no
+GPU-process crash. Neither the sandbox nor watchdog is disabled. A successful
+DOM result alone is insufficient: Chromium can restart a crashed GPU process.
+This headless fixture does not establish window presentation; separately verify
+a Wayland window's changing frames, pointer input and normal closure. Wake both
+the Android output and the guest compositor; an Android wake lease does not
+override KDE's own DPMS. The install/update trigger and ordinary GL.host selection
+have been checked on SteamOS with Freedesktop 25.08. Other runtimes need their own
+admission and rendering checks; see [the publisher](../../docs/graphics.md#flatpak-gpu-drivers).
+
+`sh fixtures/flatpak-document-portal.sh` separately requires temporary document
+export, read/write through the exported path inside Flatpak, and revocation. It
+does not alter browser permissions or disable the portal. The current SteamOS
+run fails at export because the document portal cannot open `/dev/fuse`; this is
+an outstanding runtime limitation, not a skipped or passing test.
+
 An independent Shroot launch that merely inherits another launch's bus address
 is not equivalent: portal authorization can depend on the requesting process's
 namespace. Nor is a new `dbus-run-session` an adequate replacement for a desktop:
