@@ -27,8 +27,12 @@ int md_fs_cgroup_operation(struct md_filesystem *fs,struct md_mount_namespace *v
     case MD_FS_UNLINK:
         r=md_view_readonly(mount) ? -EROFS : q->flags==AT_REMOVEDIR
             ? md_cgroup_rmdir(groups,parent,name,id) : -EPERM; break;
+    case MD_FS_CHMOD:
+        r=md_view_readonly(mount) ? -EROFS : md_cgroup_chmod(groups,fd,q->mode,id); break;
+    case MD_FS_CHOWN:
+        r=md_view_readonly(mount) ? -EROFS : md_cgroup_chown(groups,fd,q->attributes.uid,q->attributes.gid,id); break;
     case MD_FS_CREATE: case MD_FS_MKNOD: case MD_FS_SYMLINK: case MD_FS_LINK:
-    case MD_FS_RENAME: case MD_FS_CHMOD: case MD_FS_CHOWN: case MD_FS_UTIMENS:
+    case MD_FS_RENAME: case MD_FS_UTIMENS:
     case MD_FS_OPEN_IMAGE: case MD_FS_SOCKET_BIND: case MD_FS_SOCKET_ADDRESS:
     case MD_FS_SETCAP: case MD_FS_REMOVECAP: case MD_FS_SETACL: case MD_FS_REMOVEACL:
         r=-EOPNOTSUPP; break;

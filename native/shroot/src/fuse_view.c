@@ -60,6 +60,7 @@ void md_fuse_view_release(void *context) {
     for (unsigned i=0;i<NODE_BUCKETS;++i) while (v->by_id[i]) {
         struct fuse_node *n=v->by_id[i]; v->by_id[i]=n->id_next;
         if (n->writes) { md_resource_queue_destroy(n->writes); free(n->writes); }
+        md_fuse_mapping_destroy(n->mapping);
         free(n);
     }
     for (unsigned i=0;i<NODE_BUCKETS;++i) while (v->names[i]) {
@@ -220,8 +221,11 @@ static int view_notification(void *context,unsigned code,const void *data,size_t
         pthread_mutex_lock(&v->lock);
         struct fuse_node *n=v->by_id[bucket(in.ino)];
         while (n && n->id!=in.ino) n=n->id_next;
+        /* Existing shared pages cannot be discarded without a guest fault
+         * service. Do not acknowledge a data invalidation we cannot honor. */
+        int error=n && n->mapping && in.off>=0 ? -EOPNOTSUPP : 0;
         if (n) { ++n->changes; ++v->name_epoch; }
-        pthread_mutex_unlock(&v->lock); return n ? 0 : -ENOENT;
+        pthread_mutex_unlock(&v->lock); return n ? error : -ENOENT;
     }
     if (code==FUSE_NOTIFY_INVAL_ENTRY) {
         struct fuse_notify_inval_entry_out in;
@@ -649,6 +653,7 @@ static void operation_abandoned(void *context,int error,const void *data,size_t 
             if ((p->open_flags&O_TRUNC) && !p->truncated) {
                 pthread_mutex_lock(&p->view->lock);
                 p->node->attributes.st_size=0; ++p->node->changes;
+                (void)md_fuse_mapping_resize(p->node->mapping,0);
                 node_event(p->view,p->node,IN_MODIFY,0,NULL,0);
                 named_event(p->view,p->node,p->parent,p->name,IN_MODIFY,0,0);
                 pthread_mutex_unlock(&p->view->lock);
@@ -668,6 +673,7 @@ static void operation_abandoned(void *context,int error,const void *data,size_t 
             if (!md_fuse_view_attributes(p->view,&attr.attr,&st)) {
                 pthread_mutex_lock(&p->view->lock);
                 p->node->attributes=st; ++p->node->changes;
+                (void)md_fuse_mapping_resize(p->node->mapping,st.st_size);
                 node_event(p->view,p->node,IN_MODIFY,0,NULL,0);
                 named_event(p->view,p->node,p->parent,p->name,IN_MODIFY,0,0);
                 pthread_mutex_unlock(&p->view->lock);
@@ -1098,7 +1104,10 @@ static void operation_resume(struct md_fs_continuation *base,struct md_filesyste
                 p->started,response.attr.attr_valid,response.attr.attr_valid_nsec);
             if (p->opcode==FUSE_SETATTR) {
                 p->completed=1;
-                pthread_mutex_lock(&p->view->lock); ++p->node->changes; pthread_mutex_unlock(&p->view->lock);
+                pthread_mutex_lock(&p->view->lock);
+                ++p->node->changes;
+                out->error=md_fuse_mapping_resize(p->node->mapping,st.st_size);
+                pthread_mutex_unlock(&p->view->lock);
                 struct fuse_name *name=md_fuse_name_retain(p->view,p->node,p->parent,p->name);
                 md_fuse_file_event(p->view,p->node,name,IN_MODIFY);
                 md_fuse_name_release(p->view,name);
@@ -1111,11 +1120,12 @@ static void operation_resume(struct md_fs_continuation *base,struct md_filesyste
         else if (p->opcode==FUSE_OPEN && (p->open_flags&O_TRUNC) && !p->truncated) {
             pthread_mutex_lock(&p->view->lock);
             p->node->attributes.st_size=0; ++p->node->changes;
+            out->error=md_fuse_mapping_resize(p->node->mapping,0);
             node_event(p->view,p->node,IN_MODIFY,0,NULL,0);
             named_event(p->view,p->node,p->parent,p->name,IN_MODIFY,0,0);
             pthread_mutex_unlock(&p->view->lock);
             md_fuse_node_write_end(&p->write_turn);
-            out->error=publish_file(p,out,output,&response.open);
+            if (!out->error) out->error=publish_file(p,out,output,&response.open);
         }
         else if (p->executable) {
             p->image_handle=response.open.fh; p->image_opened=1; p->opcode=0;

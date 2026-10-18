@@ -11,7 +11,8 @@ graphics services remain independent when guest execution is unavailable.
 Guest FUSE advertises protocol 7.31, with older daemon negotiation, through a
 typed guest `/dev/fuse` and the existing descriptor transport. It does not open
 the host FUSE device, mount a kernel filesystem or require CONFIG_FUSE_FS.
-Requests use baseline event notification and private sealed memfd snapshots;
+Requests use baseline event notification, private sealed memfd snapshots and
+O_TMPFILE-backed read-only shared mappings with ordinary pwrite/ftruncate;
 there is no post-5.15 host dependency. `test_fuse_transport`, `test_fuse_device`,
 `test_fuse_filesystem` and the stock rofiles/portal/squashfuse fixtures cover
 protocol, cancellation, publication and teardown. See [FUSE limits](fuse.md).

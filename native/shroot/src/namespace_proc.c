@@ -15,9 +15,59 @@
 #include <sys/stat.h>
 #include <sys/inotify.h>
 #include <linux/stat.h>
+#include <linux/openat2.h>
 #ifndef STATX_MNT_ID_UNIQUE
 #define STATX_MNT_ID_UNIQUE 0x4000U
 #endif
+
+long md_namespace_host_open_resolved(const struct md_fs *fs,int base,const char *path,
+        const char *identity,const struct open_how *how,uint64_t proc_namespace) {
+    /* Identity selects the virtual proc object; the original dirfd/path pair
+     * retains the kernel's relative openat2 scope and symlink checks. */
+    struct md_proc_path ref=md_proc_path(identity);
+    enum md_proc_kind kind=ref.kind==MD_PROC_FOREIGN ? ref.foreign_kind : ref.kind;
+    if (kind==MD_PROC_MEMORY) {
+        if (*ref.tail) return -ENOTDIR;
+        long admitted=md_guest_buffer_control(MD_BUFFER_MEMORY_EXPOSE,(unsigned)ref.process,0);
+        if (admitted<0) return admitted;
+        return RAW4(openat2,base,path,how,sizeof(*how));
+    }
+    if (md_proc_control_kind(kind)) {
+        if (*ref.tail) return -ENOTDIR;
+        if (kind==MD_PROC_NS_UNSUPPORTED) return -ENOENT;
+        if (kind>=MD_PROC_NS_USER && kind<=MD_PROC_NS_CGROUP
+                && (how->resolve&(RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS))) return -ELOOP;
+        char probe_path[PATH_MAX];
+        long error=md_copy(probe_path,sizeof(probe_path),path);
+        if (error<0) return error;
+        size_t length=md_length(probe_path);
+        while (length && probe_path[length-1]!='/') --length;
+        const char *leaf=kind<=MD_PROC_SETGROUPS ? "status" : ".";
+        error=md_copy(probe_path+length,sizeof(probe_path)-length,leaf);
+        if (error<0) return error;
+        struct open_how probe=*how; probe.flags=O_PATH|O_CLOEXEC; probe.mode=0;
+        long checked=RAW4(openat2,base,probe_path,&probe,sizeof(probe));
+        if (checked<0) return checked;
+        RAW1(close,checked);
+        long result=md_proc_control_open(&ref,(int)how->flags,proc_namespace);
+        return result==-EXDEV && md_proc_network_sysctl(kind)
+            ? RAW4(openat2,base,path,how,sizeof(*how)) : result;
+    }
+    if (ref.kind==MD_PROC_FOREIGN) return -ENOTSUP;
+    if (ref.kind==MD_PROC_CMDLINE || ref.kind==MD_PROC_AUXV) {
+        long checked=RAW4(openat2,base,path,how,sizeof(*how));
+        if (checked<0) return checked;
+        RAW1(close,checked);
+        return *ref.tail ? -ENOTDIR : md_proc_image_open(fs,ref.kind,(int)how->flags);
+    }
+    if (ref.kind && (how->resolve&(RESOLVE_NO_MAGICLINKS|RESOLVE_NO_SYMLINKS))) {
+        if ((how->flags&(O_PATH|O_NOFOLLOW))==(O_PATH|O_NOFOLLOW) && !*ref.tail)
+            return RAW4(openat2,base,path,how,sizeof(*how));
+        return -ELOOP;
+    }
+    if (ref.kind==MD_PROC_EXE || ref.kind==MD_PROC_ROOT) return -ENOTSUP;
+    return RAW4(openat2,base,path,how,sizeof(*how));
+}
 
 long md_namespace_proc_link_metadata(long nr,const unsigned long *a,const char *path,uint64_t mount) {
     /* The worker supplies a fully resolved no-follow proc dentry and its

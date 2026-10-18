@@ -3,6 +3,7 @@
 #include "inode_internal.h"
 #include "fs_storage.h"
 #include "procfs_view.h"
+#include "file_permissions.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/openat2.h>
@@ -168,6 +169,12 @@ static int component(struct path_walk *w,struct md_mount_namespace *view,
         const struct md_control_actor actor={.identity=w->fs->store->identity,.wakeup=w->fs->wakeup,
             .pid=w->fs->actor ? w->fs->actor->tid : 0};
         return point_native(next,md_provider_tree_lookup(mount->provider,current->fd,name,&actor,w->pending));
+    }
+    if (mount && mount->cgroup) {
+        struct stat st;
+        r=md_cgroup_stat(mount->cgroup,current->fd,&st);
+        if (!r) r=md_file_permissions(&st,X_OK,w->fs->store->identity);
+        if (r) return r;
     }
     int fd=openat(current->fd,name,O_PATH|O_NOFOLLOW|O_CLOEXEC);
     return point_native(next,fd<0 ? -errno : fd);
@@ -350,8 +357,6 @@ static int walk_path(struct md_filesystem *fs, int base, const struct md_fs_anch
             if (r==-EREMOTE && ((resolve&RESOLVE_NO_XDEV)
                     || ((!boundary || (!boundary->mount_root && !boundary->native_directory))
                         && (resolve&(RESOLVE_IN_ROOT|RESOLVE_BENEATH))))) r=-EXDEV;
-            if (r==-EREMOTE && (!boundary || (!boundary->mount_root && !boundary->native_directory))
-                    && (resolve&(RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS))) r=-ENOTSUP;
             if (r==-EREMOTE && md_view_nosymfollow(mount)) r=-EOPNOTSUPP;
         }
         else {

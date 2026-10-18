@@ -11,6 +11,35 @@ long md_task_status_open(int tid) {
     md_copy(path+md_length(path),sizeof(path)-md_length(path),"/status");
     return RAW4(openat,AT_FDCWD,path,O_RDONLY|O_CLOEXEC,0);
 }
+static long read_status(int fd,char *text,size_t capacity);
+long md_task_nofile(int tid,uint64_t *soft) {
+    if (tid<=0 || !soft) return -EINVAL;
+    char path[64]="/proc/";
+    md_decimal(path+md_length(path),(unsigned)tid);
+    md_copy(path+md_length(path),sizeof(path)-md_length(path),"/limits");
+    long fd=RAW4(openat,AT_FDCWD,path,O_RDONLY|O_CLOEXEC,0);
+    if (fd<0) return fd;
+    char text[4096];
+    long size=read_status((int)fd,text,sizeof(text));
+    RAW1(close,fd);
+    if (size<0) return size;
+    for (char *p=text;*p;++p) {
+        if ((p!=text && p[-1]!='\n') || !md_prefix(p,"Max open files")) continue;
+        p+=sizeof("Max open files")-1;
+        if (*p!=' ' && *p!='\t') return -EIO;
+        while (*p==' ' || *p=='\t') ++p;
+        if (md_prefix(p,"unlimited") && (p[9]==' ' || p[9]=='\t')) { *soft=UINT64_MAX; return 0; }
+        uint64_t value=0; unsigned digits=0;
+        while (*p>='0' && *p<='9') {
+            unsigned digit=(unsigned)(*p++-'0');
+            if (value>(UINT64_MAX-digit)/10) return -EIO;
+            value=value*10+digit; ++digits;
+        }
+        if (!digits || (*p!=' ' && *p!='\t')) return -EIO;
+        *soft=value; return 0;
+    }
+    return -ENOTSUP;
+}
 static long read_status(int fd,char *text,size_t capacity) {
     size_t size=0;
     long error=0;

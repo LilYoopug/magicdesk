@@ -6,6 +6,7 @@ SteamOS, libc/toolkit applications and guest GPU rendering. A rendered composito
 
 - [Holo ARM64 Userspace](#holo-arm64-userspace)
 - [Flatpak Chromium](#flatpak-chromium)
+- [Ubuntu Firefox Snap](#ubuntu-firefox-snap)
 - [Executable Private Memory](#executable-private-memory)
 - [Audio Continuity](#audio-continuity)
 - [Steam Client](#steam-client)
@@ -63,6 +64,66 @@ KDE activation can start `plasma_waitforname org.freedesktop.Notifications`, whi
 outlives a successfully exited browser when Plasma is absent. Shroot intentionally
 retains the entire guest process tree. Record the browser's exit separately from
 the supervised launch, and do not disable descendant ownership to pass a test.
+
+### Ubuntu Firefox Snap
+
+The Ubuntu recipe environment has been checked with its prepared libc, stock
+systemd/snapd, a Weston Wayland session and Zink/Turnip on Adreno 840. Weston
+renders; the stock user manager, session bus and root-owned document portal
+start. Firefox 158.0, Snap revision 9056, renders a local test page, accepts
+keyboard input and pointer clicks, downloads a known file and reads the same
+bytes back through the portal file chooser. Its support report confirms Wayland
+and effective content sandbox level 6. Application seccomp remains installed.
+
+Browser GPU acceleration is not yet working: its report says WebRender
+(Software), FEATURE_FAILURE_GLXTEST_FAILED, and WebGL context creation fails.
+The selected host Mesa prefix under `/opt/magicdesk/mesa` is absent inside the
+Snap mount namespace, while absolute EGL/Vulkan overrides still refer to it.
+The connected `mesa-2404:gpu-2404` content provider is separate from the prepared
+host Turnip build. A Snap GPU provider/integration is still needed; accelerated
+Weston alone is not browser GPU proof.
+
+Use the real user manager's bus (`/run/user/UID/bus`) for this scenario, and
+import the compositor environment into its activation services. An unrelated
+`dbus-run-session` bus cannot activate an already-running systemd user manager.
+The focused init regression is:
+
+```sh
+python3 test_snap.py --build BUILD --store STORE --snap firefox \
+    --libc-registry REGISTRY --user-session --namespace-only
+```
+
+With the content snap mounted in the same running guest, check its XKB mappings
+independently of the browser:
+
+```sh
+python3 fixtures/fuse-mapping-probe.py \
+    /snap/gnome-46-2404/current/usr/share/X11/xkb/rules/evdev
+```
+
+The probe checks initial read visibility; native FUSE fixtures separately cover
+shared write/truncate visibility and lifetime. See
+[mapping limits](../shroot/fuse.md#mapping-limits). The GUI run also exposed an
+adapter-internal prlimit call trapped by Firefox's SIGSYS handler. Poll limit
+validation now belongs to supervisor buffer admission; `test_epoll_runtime.py`
+checks this with and without PR_SET_DUMPABLE, preserves application SIGSYS and
+verifies simultaneous native and virtual readiness.
+
+`fixtures/snap-browser-gui.py` retains a fresh profile and receipt/report files
+for the interactive workflow. Inside that already prepared Wayland/user-bus
+session, with the fixture directory bound into the guest:
+
+```sh
+python3 fixtures/snap-browser-gui.py --output /tmp/snap-gui-results
+```
+
+Type `shroot`, click the button, download the test file, and choose the printed
+download path through Browse. Close Firefox normally. A successful report
+requires all four receipts, exact downloaded bytes and exit status zero.
+`--require-webgl` additionally requires the known WebGL pixel, but not a
+particular hardware renderer; inspect the returned renderer separately. The
+ordinary GUI report retains failed WebGL observations without claiming GPU
+success. No browser sandbox preference or command-line bypass is applied.
 
 ### Executable Private Memory
 

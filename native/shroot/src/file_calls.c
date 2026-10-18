@@ -34,53 +34,8 @@ static long open_extended(const struct md_fs *fs, const char *exe, const unsigne
     md_copy(mounted, sizeof(mounted), path);
     r = md_namespace_relative_mount(fs, (int)a[0], mounted);
     if (r < 0) return r;
-    if (md_fs_host_path(fs, mounted) && !(how.resolve & RESOLVE_IN_ROOT)) {
-        struct md_proc_path ref = md_proc_path(mounted);
-        enum md_proc_kind kind=ref.kind==MD_PROC_FOREIGN ? ref.foreign_kind : ref.kind;
-        if (kind==MD_PROC_MEMORY) {
-            if (*ref.tail) return -ENOTDIR;
-            long admitted=md_guest_buffer_control(MD_BUFFER_MEMORY_EXPOSE,(unsigned)ref.process,0);
-            if (admitted<0) return admitted;
-            return RAW4(openat2,a[0],path,&how,sizeof(how));
-        }
-        if (md_proc_control_kind(kind)) {
-            if (*ref.tail) return -ENOTDIR;
-            if (kind==MD_PROC_NS_UNSUPPORTED) return -ENOENT;
-            if (kind>=MD_PROC_NS_USER && kind<=MD_PROC_NS_CGROUP
-                    && (how.resolve&(RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS))) return -ELOOP;
-            /* Validate the same parent walk, without requiring host userns
-             * support or permission to access Android's unrelated sysctl. */
-            size_t length=md_length(path);
-            while (length && path[length-1]!='/') --length;
-            if (kind<=MD_PROC_SETGROUPS) {
-                if (length+sizeof("status")>sizeof(path)) return -ENAMETOOLONG;
-                memcpy(path+length,"status",sizeof("status"));
-            } else memcpy(path+length,".",2);
-            struct open_how probe=how; probe.flags=O_PATH|O_CLOEXEC; probe.mode=0;
-            long checked=RAW4(openat2,a[0],path,&probe,sizeof(probe));
-            if (checked<0) return checked;
-            RAW1(close,checked);
-            long result=md_proc_control_open(&ref,(int)how.flags,0);
-            return result==-EXDEV && md_proc_network_sysctl(kind)
-                ? RAW4(openat2,a[0],a[1],&how,sizeof(how)) : result;
-        }
-        if (ref.kind == MD_PROC_FOREIGN) return -ENOTSUP;
-        if (ref.kind == MD_PROC_CMDLINE || ref.kind == MD_PROC_AUXV) {
-            /* Let the real proc walk validate relative scoping/symlinks before
-             * supplying guest image bytes. These entries are not magic links. */
-            long checked = RAW4(openat2, a[0], path, &how, sizeof(how));
-            if (checked < 0) return checked;
-            RAW1(close, checked);
-            return *ref.tail ? -ENOTDIR : md_proc_image_open(fs, ref.kind, (int)how.flags);
-        }
-        if (ref.kind && (how.resolve & (RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS))) {
-            if ((how.flags & (O_PATH | O_NOFOLLOW)) == (O_PATH | O_NOFOLLOW) && !*ref.tail)
-                return RAW4(openat2, a[0], path, &how, sizeof(how));
-            return -ELOOP;
-        }
-        if (ref.kind == MD_PROC_EXE || ref.kind == MD_PROC_ROOT) return -ENOTSUP;
-        return RAW4(openat2, a[0], path, &how, sizeof(how));
-    }
+    if (md_fs_host_path(fs, mounted) && !(how.resolve & RESOLVE_IN_ROOT))
+        return md_namespace_host_open_resolved(fs,(int)a[0],path,mounted,&how,0);
     return !fs->endpoint[0] ? -ENOTSUP : md_namespace_open_resolved(fs, (int)a[0], path, &how);
 }
 
@@ -118,8 +73,11 @@ long md_file_call(const struct md_fs *fs, const char *exe, long nr, const unsign
         long known=md_descriptor_kind((int)a[0]);
         if (known<0) return known;
         if (known==MD_DESCRIPTOR_ANONYMOUS) return md_descriptor_metadata((int)a[0],nr,a);
-        if (known && (known!=MD_DESCRIPTOR_FILESYSTEM || nr==SYS_getdents64)) return nr==SYS_getdents64 ? md_proc_control_call(nr,a)
-            : md_proc_control_metadata(&(struct md_proc_path){.process=(int)RAW0(gettid),.descriptor=(int)a[0]},nr,a);
+        if (known && (known!=MD_DESCRIPTOR_FILESYSTEM || nr==SYS_getdents64)) {
+            long result=nr==SYS_getdents64 ? md_proc_control_call(nr,a)
+                : md_proc_control_metadata(&(struct md_proc_path){.process=(int)RAW0(gettid),.descriptor=(int)a[0]},nr,a);
+            if (result!=-EXDEV) return result;
+        }
     }
     if (fs->endpoint[0]) return md_namespace_call(fs,exe,nr,a);
     char first[PATH_MAX], second[PATH_MAX];

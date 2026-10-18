@@ -79,6 +79,8 @@ def main():
                         help='Trace only cold namespace launches, not installation hooks; invalidates timing comparisons')
     parser.add_argument('--timeout', type=int, default=600)
     parser.add_argument('--libc-registry', help='Use and verify a prepared accelerated libc registry')
+    parser.add_argument('--user-session', action='store_true',
+                        help='Start the stock user manager and use its D-Bus session, including Snap scope placement')
     parser.add_argument('--snap', choices=['hello-world', 'firefox'], default='hello-world')
     parser.add_argument('--snap-file', help='Guest path to an official cached snap; signature checks remain enabled')
     parser.add_argument('--reinstall', action='store_true',
@@ -128,6 +130,15 @@ attempt=$((attempt + 1))
 done
 '''.replace('@ID@', suite.report['id']).replace('@LAUNCHES@', str(args.app_launches))
         prepare = PREPARE.replace('@SNAP@', args.snap).replace('@RUN@', program)
+        if args.user_session:
+            prepare = prepare.replace('snap version\n', '''systemctl start user@0.service
+export XDG_RUNTIME_DIR=/run/user/0
+export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
+systemctl --user is-active default.target
+systemd-run --user --wait --pipe /usr/bin/true
+snap version
+''')
+            suite.report['userSession'] = True
         if args.snap_file:
             prepare = prepare.replace('snap install ' + args.snap,
                 'if ! snap list ' + args.snap + ' >/dev/null 2>&1; then\n'

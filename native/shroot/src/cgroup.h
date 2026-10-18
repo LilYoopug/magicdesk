@@ -39,6 +39,8 @@ int md_cgroup_open_root(struct md_cgroup_view *,const struct md_cgroup_namespace
 int md_cgroup_devices(const struct md_cgroup_view *);
 unsigned long md_cgroup_filesystem(struct md_cgroup_view *);
 int md_cgroup_stat(struct md_cgroup_view *,int,struct stat *);
+int md_cgroup_chmod(struct md_cgroup_view *,int,mode_t,const struct md_identity *);
+int md_cgroup_chown(struct md_cgroup_view *,int,uint32_t,uint32_t,const struct md_identity *);
 int md_cgroup_mkdir(struct md_cgroup_view *,int,const char *,const struct md_identity *);
 int md_cgroup_rmdir(struct md_cgroup_view *,int,const char *,const struct md_identity *);
 int md_cgroup_open(struct md_cgroup_view *,int,int,const struct md_identity *,struct md_fs_anchor *,

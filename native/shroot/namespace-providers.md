@@ -63,6 +63,13 @@ host collector; it does not yet have equivalent caller-context signal coverage.
 An interrupted caller-context wait collects already-ready virtual events before
 returning EINTR. Collected events are delivered once; if none exist, signal
 delivery retains the kernel-owned temporary mask without a ptrace mask rewrite.
+Mixed poll preserves consumed virtual events across the native readiness probe,
+so simultaneous native readiness cannot erase a provider notification. Its
+nofile check runs during existing buffer admission, outside the application's
+seccomp domain: an internal prlimit must not invoke a guest SIGSYS handler
+inside an unfinished poll adapter. The supervisor queries the current real
+limit, falling back to native proc limits when cross-task prlimit is denied;
+the limit is not cached and application prlimit calls retain their own filter.
 The [FIFO contract](fifos.md) covers initial hangup suppression and transfer.
 
 `ipc_namespace` independently owns lazy SysV semaphore/message and shared-memory
@@ -497,6 +504,16 @@ daemon or periodic task scan is involved. Removal rejects populated groups and
 releases backing directory descriptors; retired logical metadata remains until
 the launch world is released, allowing open controls to return ENODEV.
 
+Directories and individual controls retain logical owner/group/mode metadata.
+Changing a directory's owner does not change all its controls implicitly.
+Path, FD and followed `/proc/self/fd` attribute operations use the same VFS owner,
+including readonly mount checks. Directory traversal, creation and removal use
+the logical DAC permissions; opening a control checks its own attributes.
+Retained controls see attribute changes and keep their last metadata after
+removal or controller replacement. The regression covers unprivileged guest
+ownership, denied changes, readonly views and retired FDs. This allows stock
+`user@UID.service` to prepare its delegated subtree without host cgroup access.
+
 `cgroup.events` publishes recursive `populated` transitions through the shared
 typed watch source. Inotify receives IN_MODIFY; poll/epoll receive POLLPRI and
 POLLERR until the open description rereads the state. Membership, task birth and
@@ -519,8 +536,9 @@ freezing remain unavailable. The v1
 devices list is always `a *:* rwm`; all-device allowance is accepted, restrictive
 rules are rejected. Unsupported controller enabling, freezes and release agents
 return EOPNOTSUPP. This interface never accesses Android's cgroup hierarchy or
-provides a resource/security boundary. Administrative delegation and
-independent-supervisor hierarchy transfer are not implemented.
+provides a resource/security boundary. Ownership delegation is supported, but
+full kernel cgroup delegation containment and independent-supervisor hierarchy
+transfer are not implemented.
 
 `cgroup_program` owns launch-local logical BPF program IDs, descriptors and
 cgroup2 device attachments. `namespace_bpf` captures the bounded syscall ABI;

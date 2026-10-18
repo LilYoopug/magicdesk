@@ -122,6 +122,12 @@ long md_proc_control_metadata(const struct md_proc_path *ref, long nr, const uns
             result=RAW1(chdir,path);
         }
         else if (nr==SYS_getdents64 || nr==SYS_chdir || nr==SYS_fchdir) result=-ENOTDIR;
+        /* Mounted controls own their attributes in the VFS. Proc links and
+         * descriptor operations must retain that mount instead of mutating
+         * the native carrier or treating it as an immutable proc entry. */
+        else if (metadata.kind==MD_PROC_FILE_CONTROL && metadata.value.mount_id
+                && (nr==SYS_fchmod || nr==SYS_fchmodat || nr==SYS_fchmodat2
+                    || nr==SYS_fchown || nr==SYS_fchownat || nr==SYS_utimensat)) result=-EXDEV;
         else result=-EPERM;
     }
     long released=md_adapter_buffer_release();

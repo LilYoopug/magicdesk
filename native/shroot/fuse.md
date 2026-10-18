@@ -18,7 +18,8 @@ remain authoritative. This adds no persistent store format or APK dependency.
 - `fuse_view` owns node IDs/generations, names, attributes and mount operations.
   Carrier names do not consume one retained host FD per node.
 - `fuse_file` owns each open handle, IO and release. `fuse_image` prepares sealed
-  private images for mmap and executable admission.
+  private images for mmap and executable admission. `fuse_mapping` owns the
+  lazy per-inode backing for read-only shared mappings.
 - `watch_source` supplies bounded provider events to the existing `inode_watch`
   owner. No listener, event descriptor or event record is allocated until a
   guest watches that provider. Native and journal-backed watches retain their
@@ -55,7 +56,8 @@ creation, rename, links, removal, xattrs, data IO, directory iteration, truncate
 sync and statfs. Daemon errors propagate. Mounts enforce owner/allow_other and
 default_permissions, and are always nodev/nosuid. Private executable mappings
 and execution still enforce noexec; guest FUSE cannot create a host set-ID path.
-INVAL_INODE, INVAL_ENTRY and DELETE notifications invalidate relevant state.
+INVAL_INODE, INVAL_ENTRY and DELETE notifications invalidate relevant state,
+subject to the shared-mapping limits below.
 Positive names and attributes honor the daemon's independent protocol TTLs.
 Names are indexed by parent/name; per-node links retain path and open-description
 identity through rename/unlink. Deadlines start at request submission, and a
@@ -65,7 +67,8 @@ malformed TTLs do not enable caching. No timer thread or persistent index is use
 Cached metadata never caches an authorization decision: every access uses the
 current credentials, mount policy and daemon connection state. Mutation checks,
 append size queries and executable/private-image validation still fetch fresh
-attributes. Ordinary reads still reach the daemon; no content cache is added.
+attributes. Ordinary reads still reach the daemon; mapping backings do not
+become a read cache.
 
 ## Append and Notifications
 
@@ -117,7 +120,27 @@ Safe sealed snapshots use the common task-local mapping/FD-loan path described
 in [shared memory](shared-memory.md#read-only-anonymous-views). They need no new
 helper thread inside an application's seccomp sandbox.
 
-MAP_SHARED remains unsupported and returns an error.
+Read-only MAP_SHARED and MAP_SHARED_VALIDATE use one native backing inode per
+FUSE node, shared across independent opens and fork. Publication revalidates the
+snapshot and mutation epoch. Confirmed guest writes and truncations update the
+same backing, including abandoned operations whose daemon reply arrives later.
+Existing mappings therefore observe these writes, truncate faults and zero-filled
+regrowth. Only independently opened O_RDONLY descriptions leave this owner;
+shared PROT_WRITE and later writable mprotect fail. FOPEN_DIRECT_IO shared
+mappings remain unsupported. This is not a MAP_PRIVATE substitution.
+
+The backing uses O_TMPFILE in the provider's private directory, not a memfd
+whose read-only reopening may be denied by shell policy. Its two retained FDs
+and file bytes are allocated only for mapped nodes and retained until provider
+teardown; munmap does not yet reclaim them early. Ordinary files and unmapped
+FUSE nodes allocate no shared backing. A backing-update failure is reported and
+invalidates its contents by truncation rather than silently exposing stale data.
+
+There is no general shared-page writeback or daemon-driven page-fault service.
+Data INVAL_INODE on a node with shared backing returns EOPNOTSUPP; attribute-only
+invalidation remains supported. Independent changes to the daemon's backing
+data are not guaranteed coherent. These limits do not block read-only Snap
+images, including libxkbcommon's shared XKB rules mapping in Firefox.
 INTERRUPT and DESTROY protocol requests are not yet implemented; closing
 the connection is the final cancellation boundary. Node metadata is bounded at
 65,536 entries per view, retained until provider teardown rather than managed
@@ -150,8 +173,9 @@ terminal requests through reply or connection teardown.
 Native fixtures cover wire validation, queue bounds, device closure, deferred
 worker progress, metadata/mutations, failed publication, cancellation, snapshot
 invalidation, independent metadata TTLs, late replies, indexed-name collisions,
-rename exchange, cancelled-write cursor ownership, bounded watch overflow and
-carrier FD limits. `test_fuse.py` exercises installed stock
+rename exchange, cancelled-write cursor ownership, bounded watch overflow,
+shared-mapping write/truncate visibility across opens and fork, write protection
+and carrier FD limits. `test_fuse.py` exercises installed stock
 clients in a private runtime under Android UID 2000:
 
 - `rofiles`: mutations, concurrent append, `F_SETFL`, positional IO, inotify
@@ -202,6 +226,17 @@ The Snap fixture's `--libc-registry PATH` selects prepared replacements and
 requires a dynamic entry-ABI/IO probe under the booted init. This checks the
 Ubuntu userland, not every snap's private libc. Snap images select their own
 matching libc, and unprepared or static binaries retain Base.
+
+`--user-session` starts stock `user@0.service`, uses its session bus and requires
+a successful transient user unit before invoking Snap. It also works with
+`--namespace-only` for a focused boot/delegation/scope check that retains the
+installed image. The guest identity is root; the Android executor remains shell.
+This is distinct from GUI verification and from the explicit set-ID admission
+needed by fusermount in non-root guest portal tests.
+The [Firefox Snap GUI fixture](../guest-exec-lab/desktop-workflows.md#ubuntu-firefox-snap)
+checks keyboard/pointer input and download/chooser readback under Wayland.
+Its browser rendering remains software; the host Turnip build is not yet
+published through Snap's separate GPU content interface.
 
 Testing Snap is not evidence of AppArmor confinement: the tested Android kernel lacks
 AppArmor, and snapd reports its own reduced confinement capabilities. No

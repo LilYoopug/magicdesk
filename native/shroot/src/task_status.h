@@ -8,4 +8,5 @@ long md_task_umask_fd(int fd);
 long md_task_umask(int tid);
 long md_task_signal_handlers(int tid, uint64_t *caught);
 long md_task_parent(int tid);
+long md_task_nofile(int tid,uint64_t *soft);
 #endif

@@ -4,6 +4,7 @@
 #include "fs_mount_internal.h"
 #include "watch_source.h"
 #include "resource_order.h"
+#include "fuse_mapping.h"
 #include <pthread.h>
 #include <stdatomic.h>
 
@@ -20,6 +21,7 @@ struct fuse_node {
     char carrier_name[32];
     struct stat carrier,attributes;
     struct md_resource_queue *writes;
+    struct md_fuse_mapping *mapping;
     unsigned opened;
     int deleted;
 };

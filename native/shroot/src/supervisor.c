@@ -5015,6 +5015,19 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
         break;
     case MD_BUFFER_TAKE:
         if (t->buffer.pool || r->regs[2]) break;
+        if (t->phase==DISPATCHING && t->original.regs[8]==SYS_ppoll) {
+            /* Validate before allocating, in the existing buffer admission.
+             * Guest-side prlimit can enter an application's SIGSYS handler
+             * while the outer poll still owns adapter state. */
+            struct rlimit limit;
+            uint64_t soft=0;
+            result=prlimit(t->pid,RLIMIT_NOFILE,NULL,&limit) ? -errno : 0;
+            if (!result) soft=limit.rlim_cur;
+            /* Shell policy can allow proc limits but deny cross-task prlimit. */
+            else if (result==-EACCES || result==-EPERM) result=md_task_nofile(t->pid,&soft);
+            if (!result && t->original.regs[1]>soft) result=-EINVAL;
+            if (result) break;
+        }
         t->buffer_waiting=1; buffer_take(t);
         /* EVENT_WAIT: a task or worker releases a mapped slot. Owned process
          * cancellation ends the wait; no polling or guest retry is required. */
@@ -7738,7 +7751,7 @@ int main(int argc, char **argv) {
             }
             if (cookie==MD_INTERCEPT_READINESS) cookie=MD_INTERCEPT_DISPATCH;
             if (cookie != MD_INTERCEPT_DISPATCH || !t->ready || t->phase != IDLE)
-                TRACE("PROBE unexpected TRACE pid=%d cookie=%lu ready=%d phase=%d pc=%#llx nr=%llu adapted=%llu\n",
+                fprintf(stderr,"guest-runtime: unexpected TRACE pid=%d cookie=%lu ready=%d phase=%d pc=%#llx nr=%llu adapted=%llu\n",
                     pid, cookie, t->ready, t->phase, regs.pc, regs.regs[8], t->original.regs[8]);
             CHECK(cookie == MD_INTERCEPT_DISPATCH && t->ready && t->phase == IDLE);
             t->original = regs; calls++; t->calls++;

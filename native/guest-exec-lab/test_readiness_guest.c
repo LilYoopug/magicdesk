@@ -21,6 +21,57 @@
 #include <sys/wait.h>
 #include <sys/mount.h>
 #include <time.h>
+#include <poll.h>
+#include <sys/resource.h>
+#include <sys/socket.h>
+#include <ucontext.h>
+
+static volatile sig_atomic_t limit_traps;
+static int trap_socket;
+static void limit_trap(int signal,siginfo_t *info,void *context) {
+    assert(signal==SIGSYS && info->si_syscall==SYS_prlimit64);
+    char byte='x';
+    struct iovec part={&byte,1};
+    struct msghdr message={.msg_iov=&part,.msg_iovlen=1};
+    assert(sendmsg(trap_socket,&message,0)==1);
+    ++limit_traps;
+    ((ucontext_t *)context)->uc_mcontext.regs[0]=(unsigned long)-EPERM;
+}
+static void poll_sandbox(int protected) {
+    assert(!unshare(CLONE_NEWUTS));
+    int fd=open("/proc/sys/kernel/hostname",O_RDONLY|O_CLOEXEC);
+    int event=eventfd(1,EFD_CLOEXEC),sockets[2];
+    assert(fd>=0 && event>=0 && !socketpair(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC,0,sockets));
+    trap_socket=sockets[0];
+    struct rlimit limit; assert(!getrlimit(RLIMIT_NOFILE,&limit));
+    limit.rlim_cur=64; assert(!setrlimit(RLIMIT_NOFILE,&limit));
+    struct sigaction action={.sa_sigaction=limit_trap,.sa_flags=SA_SIGINFO};
+    sigemptyset(&action.sa_mask); assert(!sigaction(SIGSYS,&action,NULL));
+    struct sock_filter code[]={
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_prlimit64,0,1),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRAP),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
+    };
+    struct sock_fprog policy={sizeof(code)/sizeof(*code),code};
+    assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+    if (protected) assert(!prctl(PR_SET_DUMPABLE,0,0,0,0));
+    assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&policy));
+    struct timespec zero={0};
+    long empty=syscall(SYS_ppoll,NULL,0,&zero,NULL,8);
+    if (empty) fprintf(stderr,"poll sandbox empty=%ld errno=%d\n",empty,errno);
+    assert(!empty);
+    assert(syscall(SYS_ppoll,NULL,65,&zero,NULL,8)==-1 && errno==EINVAL);
+    assert(!sethostname("poll-sandbox",12));
+    struct pollfd polls[]={{fd,0,0},{event,POLLIN,0}};
+    assert(syscall(SYS_ppoll,polls,2,&zero,NULL,8)==2);
+    assert((polls[0].revents&POLLERR) && (polls[1].revents&POLLIN) && !limit_traps);
+    assert(syscall(SYS_prlimit64,0,RLIMIT_NOFILE,NULL,&limit)==-1 && errno==EPERM);
+    assert(limit_traps==1);
+    char byte; assert(read(sockets[1],&byte,1)==1 && byte=='x');
+    close(fd); close(event); close(sockets[0]); close(sockets[1]);
+    puts("PASS poll sandbox: native/virtual readiness, caller nofile limit and application SIGSYS preserved");
+}
 
 static void byte_read(int fd) {
     char c;
@@ -356,6 +407,8 @@ static int filter_probe(void) {
 }
 int main(int argc,char **argv) {
     setbuf(stdout,NULL);
+    if (argc==2 && !strcmp(argv[1],"--poll-sandbox")) { poll_sandbox(0); return 0; }
+    if (argc==2 && !strcmp(argv[1],"--poll-sandbox-protected")) { poll_sandbox(1); return 0; }
     if (argc==2 && !strcmp(argv[1],"--mixed")) { mixed(0,0); return 0; }
     if (argc==2 && !strcmp(argv[1],"--filtered")) { mixed(1,0); return 0; }
     if (argc==2 && !strcmp(argv[1],"--shared")) { mixed(0,1); return 0; }

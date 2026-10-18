@@ -81,7 +81,10 @@ int md_poll_wait_task(struct md_poll_wait *p,struct md_epoll_wait *wait,struct m
             long mask=provider.ops->poll(provider.context);
             if (mask<0) { *result=mask; return 0; }
             if (!provider.ops->poll_native || !provider.ops->poll_native(provider.context)) {
-                item->poll.revents=(short)mask&(item->poll.events|POLLERR|POLLHUP);
+                /* A native probe must not erase an already consumed virtual
+                 * event (for example a proc-sysctl generation notification). */
+                short pending=completed ? item->poll.revents : 0;
+                item->poll.revents=pending|((short)mask&(item->poll.events|POLLERR|POLLHUP));
                 int fd=-1,error=provider.ops->poll_descriptor ? provider.ops->poll_descriptor(provider.context,&fd) : 0;
                 if (error) { *result=error; return 0; }
                 p->sources[i]=(struct pollfd){fd,POLLIN,0};

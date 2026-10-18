@@ -23,6 +23,50 @@
 #include <sys/ptrace.h>
 
 static const char *membership_proc="/proc";
+static void delegation_metadata(void) {
+    const char *directory="/tmp/cgv2/delegated";
+    const char *path="/tmp/cgv2/delegated/cgroup.procs";
+    struct stat root,tmp;
+    assert(!stat("/",&root) && !stat("/tmp",&tmp));
+    assert(!chmod("/",0755) && !chmod("/tmp",0755));
+    assert(!mkdir(directory,0755));
+    int retained=open(path,O_RDONLY|O_CLOEXEC); assert(retained>=0);
+    assert(!chown(directory,1000,1000) && !chown(path,1000,1000));
+    assert(!fchmod(retained,0600) && !fchown(retained,1000,1000));
+    int anchor=open(path,O_PATH|O_CLOEXEC); assert(anchor>=0);
+    char link[64]; snprintf(link,sizeof(link),"/proc/self/fd/%d",anchor);
+    assert(!chown(link,1000,1000) && !chmod(link,0600));
+    close(anchor);
+    struct stat st;
+    assert(!fstat(retained,&st) && st.st_uid==1000 && st.st_gid==1000 && (st.st_mode&0777)==0600);
+    assert(!stat("/tmp/cgv2/delegated/cgroup.events",&st) && st.st_uid==0);
+    assert(!mount(NULL,"/tmp/cgv2",NULL,MS_BIND|MS_REMOUNT|MS_RDONLY,NULL));
+    assert(chmod(path,0666)<0 && errno==EROFS);
+    assert(fchown(retained,0,0)<0 && errno==EROFS);
+    assert(!mount(NULL,"/tmp/cgv2",NULL,MS_BIND|MS_REMOUNT,NULL));
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        assert(!setgid(1000) && !setuid(1000));
+        assert(chown(path,1001,(gid_t)-1)<0 && errno==EPERM);
+        assert(!chmod(path,0640));
+        int fd=open(path,O_WRONLY); assert(fd>=0 && write(fd,"0",1)==1); close(fd);
+        assert(open("/tmp/cgv2/cgroup.procs",O_WRONLY)<0 && errno==EACCES);
+        assert(!mkdir("/tmp/cgv2/delegated/child",0755));
+        assert(!rmdir("/tmp/cgv2/delegated/child"));
+        assert(!chmod(directory,0600));
+        assert(stat(path,&st)<0 && errno==EACCES);
+        assert(!chmod(directory,0755));
+        _exit(0);
+    }
+    int status;
+    /* EVENT_WAIT: child validates delegated access and denial before cleanup. */
+    assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
+    assert(!fstat(retained,&st) && (st.st_mode&0777)==0640);
+    assert(!rmdir(directory));
+    assert(!fstat(retained,&st) && st.st_uid==1000 && (st.st_mode&0777)==0640 && !st.st_nlink);
+    close(retained);
+    assert(!chmod("/tmp",tmp.st_mode&07777) && !chmod("/",root.st_mode&07777));
+}
 static void read_text(const char *path,char *text,size_t size) {
     int fd=open(path,O_RDONLY|O_CLOEXEC|O_NOCTTY);
     if (fd<0) fprintf(stderr,"cgroup open %s: %s\n",path,strerror(errno));
@@ -169,6 +213,7 @@ int test_cgroup_guest(int pid_namespace) {
     assert(!mount("none","/tmp/cgv1","cgroup",MS_NOSUID|MS_NOEXEC|MS_NODEV,"devices"));
     population_events();
     stopped_newborn_membership();
+    delegation_metadata();
     struct statfs st; assert(!statfs("/tmp/cgv2",&st) && st.f_type==CGROUP2_SUPER_MAGIC);
     assert(!statfs("/tmp/cgv1",&st) && st.f_type==CGROUP_SUPER_MAGIC);
     char text[8192]; read_text("/tmp/cgv2/cgroup.controllers",text,sizeof(text)); assert(!strcmp(text,"pids\n"));
@@ -236,10 +281,14 @@ int test_cgroup_guest(int pid_namespace) {
     assert(writing("/tmp/cgv2/child/nested/pids.max","123")==3);
     read_text("/tmp/cgv2/child/nested/pids.max",text,sizeof(text)); assert(!strcmp(text,"123\n"));
     int retired_pids=open("/tmp/cgv2/child/nested/pids.max",O_RDONLY); assert(retired_pids>=0);
+    struct stat retired_before,retired_after;
+    assert(!fstat(retired_pids,&retired_before));
     assert(writing("/tmp/cgv2/child/cgroup.subtree_control","-pids")==5);
     assert(read(retired_pids,text,sizeof(text))<0 && errno==ENODEV);
     assert(access("/tmp/cgv2/child/nested/pids.max",F_OK)<0 && errno==ENOENT);
     assert(writing("/tmp/cgv2/child/cgroup.subtree_control","+pids")==5);
+    assert(!fstat(retired_pids,&retired_after) && !retired_after.st_nlink
+        && retired_after.st_ino==retired_before.st_ino && retired_after.st_mode==retired_before.st_mode);
     assert(read(retired_pids,text,sizeof(text))<0 && errno==ENODEV); close(retired_pids);
     read_text("/tmp/cgv2/child/nested/pids.max",text,sizeof(text)); assert(!strcmp(text,"max\n"));
     assert(!rmdir("/tmp/cgv2/child/nested"));

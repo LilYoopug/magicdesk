@@ -78,6 +78,13 @@ int md_reopen_file(int fd, int flags, struct md_open_completion *completion) {
     long error=C(fstat,fd,&st,0,0,0,0);
     if (error) return (int)error;
     if ((flags&O_DIRECTORY) && !S_ISDIR(st.st_mode)) return -ENOTDIR;
+    if (!(flags&O_PATH) && S_ISCHR(st.st_mode) && major(st.st_rdev)==5 && minor(st.st_rdev)==0) {
+        /* /dev/tty resolves the opener's controlling terminal, even with
+         * O_NOCTTY. Provider/bind aliases must not open it in the worker. */
+        long pin=C(fcntl,fd,F_DUPFD_CLOEXEC,3,0,0,0);
+        if (pin>=0) completion->kind=MD_OPEN_CALLER;
+        return (int)pin;
+    }
     if (S_ISFIFO(st.st_mode) && !(flags&O_PATH)) {
         long pin=C(fcntl,fd,F_DUPFD_CLOEXEC,3,0,0,0);
         if (pin>=0) completion->kind=MD_OPEN_FIFO;

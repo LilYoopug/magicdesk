@@ -4,7 +4,8 @@ import argparse
 from pathlib import Path
 from test_oci_services import Suite
 
-MODES = ('mixed', 'filtered', 'shared', 'shared-filtered', 'close-filtered', 'retire-filtered')
+MODES = ('mixed', 'filtered', 'shared', 'shared-filtered', 'close-filtered', 'retire-filtered',
+         'poll-sandbox', 'poll-sandbox-protected')
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -36,7 +37,7 @@ def main():
                     assert 'Operation not permitted' in output
                     assert 'launch deadline expired' not in output
                 else:
-                    assert 'PASS mixed epoll' in output
+                    assert ('PASS poll sandbox' if mode.startswith('poll-sandbox') else 'PASS mixed epoll') in output
         suite.report['passed'] = True
     finally:
         try:

@@ -3,7 +3,6 @@
 #include "raw.h"
 #include <errno.h>
 #include <limits.h>
-#include <sys/resource.h>
 
 static long clock_now(void) {
     struct timespec time;
@@ -60,12 +59,6 @@ long md_poll_call(long nr,const unsigned long *a) {
     unsigned long count=select ? a[0] : a[1];
     if (count>INT_MAX) return -EINVAL;
     long result=0;
-    if (!select) {
-        struct rlimit limit;
-        result=RAW4(prlimit64,0,RLIMIT_NOFILE,0,&limit);
-        if (result<0) return result;
-        if (count>limit.rlim_cur) return -EINVAL;
-    }
     long memory=md_guest_buffer_control(MD_BUFFER_TAKE,md_poll_bytes(count),0);
     if (memory<0) return memory;
     struct md_poll_frame *f=(void *)memory;

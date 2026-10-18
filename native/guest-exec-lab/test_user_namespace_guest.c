@@ -338,8 +338,10 @@ int test_user_namespace_guest(int argc, char **argv) {
     char exact[128]; snprintf(exact,sizeof(exact),"/proc/%d/uid_map",getpid());
     struct open_how how={.flags=O_RDONLY|O_CLOEXEC,.resolve=RESOLVE_NO_SYMLINKS};
     int resolved=(int)syscall(SYS_openat2,AT_FDCWD,exact,&how,sizeof(how));
+    if (resolved<0) perror("openat2 numeric proc uid_map");
     assert(resolved>=0 && !close(resolved));
     assert(syscall(SYS_openat2,AT_FDCWD,"/proc/self/uid_map",&how,sizeof(how))<0 && errno==ELOOP);
+    assert(syscall(SYS_openat2,AT_FDCWD,"/proc/../system/bin/sh",&how,sizeof(how))<0 && errno==EOPNOTSUPP);
     int directory=open("/proc/self",O_PATH|O_DIRECTORY|O_CLOEXEC); assert(directory>=0);
     resolved=openat(directory,"uid_map",O_RDONLY|O_CLOEXEC); assert(resolved>=0);
     assert(!fstat(resolved,&path_st) && path_st.st_ino==st.st_ino);

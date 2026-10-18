@@ -16,6 +16,8 @@
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/inotify.h>
+#include <sys/wait.h>
+#include <signal.h>
 #include <unistd.h>
 
 static unsigned requests;
@@ -295,12 +297,11 @@ static void command(struct md_proc_file *file,struct md_fs_context *context,
     assert(!md_proc_file_io_offer(&io) && !md_proc_file_io_finish(&io,0));
     assert(position(file)==before);
 }
-static int mapping(struct md_proc_file *file,struct md_fs_context *context,struct md_fuse_connection *connection) {
+static int mapping_flags(struct md_proc_file *file,struct md_fs_context *context,struct md_fuse_connection *connection,unsigned flags) {
     struct md_control_file control=md_proc_file_control(file);
     struct md_control_actor actor={.identity=&context->task.identity};
     struct md_control_pending *pending=NULL;
-    assert(control.ops->mapping(control.context,&actor,PROT_READ,MAP_SHARED,&pending)==-EOPNOTSUPP && !pending);
-    assert(control.ops->mapping(control.context,&actor,PROT_READ,MAP_PRIVATE,&pending)==-EINPROGRESS && pending);
+    assert(control.ops->mapping(control.context,&actor,PROT_READ,flags,&pending)==-EINPROGRESS && pending);
     assert(pending->retry_preparation);
     long result;
     for (;;) {
@@ -309,7 +310,61 @@ static int mapping(struct md_proc_file *file,struct md_fs_context *context,struc
         if (result!=-EINPROGRESS) break;
     }
     pending->dispose(pending);
+    if (result<0) fprintf(stderr,"FUSE mapping flags=%u: %ld\n",flags,result);
     assert(result>=0); return (int)result;
+}
+static int mapping(struct md_proc_file *file,struct md_fs_context *context,struct md_fuse_connection *connection) {
+    return mapping_flags(file,context,connection,MAP_PRIVATE);
+}
+static void shared_mappings(struct md_fs_context *context,struct md_fuse_connection *connection) {
+    struct md_proc_file *files[2]={0};
+    struct md_fs_request q={.operation=MD_FS_OPEN,.directory={-1,-1},.path={"/fuse/file",NULL},.flags=O_RDWR};
+    for (unsigned i=0;i<2;++i) {
+        struct md_fs_result r=run_request(context,connection,&q,(struct md_fs_output){.control=capture_file,.control_context=&files[i]});
+        assert(!r.error && r.fd>=0 && files[i]); close(r.fd);
+    }
+    long page=sysconf(_SC_PAGESIZE); assert(page>0 && page*2<=(long)sizeof(contents));
+    command(files[0],context,connection,MD_CONTROL_TRUNCATE,page*2);
+    int a=mapping_flags(files[0],context,connection,MAP_SHARED);
+    int b=mapping_flags(files[1],context,connection,MAP_SHARED_VALIDATE);
+    struct stat first,second;
+    assert(!fstat(a,&first) && !fstat(b,&second) && first.st_dev==second.st_dev && first.st_ino==second.st_ino);
+    assert((fcntl(a,F_GETFL)&O_ACCMODE)==O_RDONLY);
+    char *mapped=mmap(NULL,page*2,PROT_READ,MAP_SHARED,a,0); assert(mapped!=MAP_FAILED);
+    assert(mprotect(mapped,page,PROT_READ|PROT_WRITE)<0 && errno==EACCES);
+    assert(pwrite(a,"!",1,0)<0 && errno==EBADF);
+    close(a); close(b);
+    int channel[2]; assert(!pipe(channel));
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        close(channel[1]); char byte;
+        assert(read(channel[0],&byte,1)==1 && !memcmp(mapped,"shared",6));
+        _exit(0);
+    }
+    close(channel[0]);
+    assert(io(files[1],context,connection,MD_PROC_FILE_WRITE,"shared",6,0)==6);
+    assert(!memcmp(mapped,"shared",6));
+    assert(write(channel[1],"!",1)==1); close(channel[1]);
+    int status; assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
+    struct md_control_file control=md_proc_file_control(files[0]);
+    struct md_control_actor actor={.identity=&context->task.identity};
+    struct md_control_pending *pending=NULL;
+    assert(control.ops->mapping(control.context,&actor,PROT_READ|PROT_WRITE,MAP_SHARED,&pending)==-EACCES && !pending);
+    struct { struct fuse_out_header header; struct fuse_notify_inval_inode_out inode; } notification={
+        .header={.len=sizeof(notification),.error=FUSE_NOTIFY_INVAL_INODE},.inode={.ino=2,.off=0,.len=0}};
+    assert(md_fuse_connection_write(connection,&notification,sizeof(notification))==-EOPNOTSUPP);
+    notification.inode.off=-1;
+    assert(md_fuse_connection_write(connection,&notification,sizeof(notification))==sizeof(notification));
+    command(files[0],context,connection,MD_CONTROL_TRUNCATE,page);
+    child=fork(); assert(child>=0);
+    if (!child) { volatile char byte=mapped[page]; (void)byte; _exit(1); }
+    assert(waitpid(child,&status,0)==child && WIFSIGNALED(status) && WTERMSIG(status)==SIGBUS);
+    command(files[0],context,connection,MD_CONTROL_TRUNCATE,page*2);
+    assert(mapped[page]==0);
+    md_proc_file_release(files[0]); md_proc_file_release(files[1]);
+    while (serve(connection)) {}
+    assert(!memcmp(mapped,"shared",6) && !munmap(mapped,page*2));
+    puts("PASS FUSE shared read mappings: common inode, confirmed writes, fork/close lifetime, truncate and write protection");
 }
 static void files(struct md_fs_context *context,struct md_fuse_connection *connection) {
     char link[PATH_MAX];
@@ -990,6 +1045,7 @@ void md_test_fuse_filesystem(struct md_filesystem *fs) {
     name_leases(&context,connection);
     attribute_leases(&context,connection);
     lease_permissions(&context);
+    shared_mappings(&context,connection);
     q=(struct md_fs_request){.operation=MD_FS_STAT,.directory={-1,-1},.path={"/fuse/file",NULL}};
     struct md_fs_continuation *pending=NULL; output=(struct md_fs_output){.continuation=&pending};
     md_fs_context_execute(&context,&q,&r,&output); assert(r.error==-EINPROGRESS && pending);

@@ -101,6 +101,17 @@ static long open_operand(const struct md_fs *fs, struct md_namespace_operand ope
         if (r==-EREMOTE) return -EACCES;
     }
     if (r==-EREMOTE) {
+        if (how->resolve) {
+            /* The native suffix has no guest dirfd. Do not reinterpret a
+             * scoped walk or let '..' leave the admitted proc/dev provider. */
+            if (how->resolve&(RESOLVE_IN_ROOT|RESOLVE_BENEATH)) return -EXDEV;
+            for (const char *p=out.data;*p;) {
+                while (*p=='/') ++p;
+                if (p[0]=='.' && p[1]=='.' && (!p[2] || p[2]=='/')) return -EOPNOTSUPP;
+                while (*p && *p!='/') ++p;
+            }
+            return md_namespace_host_open_resolved(fs,AT_FDCWD,out.data,out.data,how,out.result.proc_namespace);
+        }
         unsigned long args[6]={(unsigned long)AT_FDCWD,(unsigned long)out.data,(unsigned)flags,mode,0,0};
         return md_namespace_host_call(fs,fs->image ? fs->image->executable_path : "",SYS_openat,args,1,out.data,out.result.proc_namespace);
     }

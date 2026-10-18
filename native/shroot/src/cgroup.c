@@ -39,6 +39,7 @@ struct group {
     struct group *next,*parent;
     int fd,removed;
     struct stat identity,files[FILES];
+    struct opened *opened;
     uid_t uid; gid_t gid;
     char name[256];
     struct md_cgroup_program **programs;
@@ -82,6 +83,7 @@ struct md_cgroup_namespace {
 struct opened {
     atomic_uint refs;
     struct md_cgroup_view *view;
+    struct opened *next;
     struct group *group;
     unsigned file;
     struct stat stat;
@@ -214,6 +216,11 @@ static int control_create(struct group *g,unsigned i) {
     int fd=openat(g->fd,controls[i].name,O_CREAT|O_EXCL|O_RDWR|O_CLOEXEC,0600);
     if (fd<0) return -errno;
     int error=fstat(fd,&g->files[i]) ? -errno : 0; close(fd);
+    if (!error) {
+        g->files[i].st_mode=S_IFREG|controls[i].mode;
+        g->files[i].st_uid=g->uid; g->files[i].st_gid=g->gid;
+        g->files[i].st_size=g->files[i].st_blocks=0;
+    }
     if (error) unlinkat(g->fd,controls[i].name,0);
     return error;
 }
@@ -225,7 +232,11 @@ static int populate(struct md_cgroup_view *v,struct group *g) {
         if ((i==RELEASE && g->parent) || !enabled(g,i)) continue;
         int error=control_create(g,i); if (error) return error;
     }
-    return fstat(g->fd,&g->identity) ? -errno : 0;
+    if (fstat(g->fd,&g->identity)) return -errno;
+    g->identity.st_mode=S_IFDIR|0755;
+    g->identity.st_uid=g->uid; g->identity.st_gid=g->gid;
+    g->identity.st_size=g->identity.st_blocks=0;
+    return 0;
 }
 static void depopulate(struct group *g) {
     for (unsigned i=0;i<FILES;++i) if (g->files[i].st_ino) unlinkat(g->fd,controls[i].name,0);
@@ -285,10 +296,58 @@ int md_cgroup_stat(struct md_cgroup_view *v,int fd,struct stat *st) {
     pthread_mutex_lock(&v->world->lock); unsigned file;
     struct group *g=lookup(v,st,&file);
     if (g) {
-        st->st_mode=file==FILES ? S_IFDIR|0755 : S_IFREG|controls[file].mode;
-        st->st_uid=g->uid; st->st_gid=g->gid; st->st_size=0; st->st_blocks=0;
+        *st=file==FILES ? g->identity : g->files[file];
+        if (g->removed) st->st_nlink=0;
+    } else {
+        /* Disabled controllers can replace a control inode while an old FD
+         * still exists. Its last attributes belong to that retired inode. */
+        for (struct group *at=v->groups;at && !g;at=at->next)
+            for (struct opened *o=at->opened;o;o=o->next)
+                if (st->st_dev==o->stat.st_dev && st->st_ino==o->stat.st_ino) {
+                    *st=o->stat; st->st_nlink=0; g=at; break;
+                }
     }
     pthread_mutex_unlock(&v->world->lock); return g ? 0 : -ENOENT;
+}
+static int attributes(struct md_cgroup_view *v,int fd,const struct md_identity *id,
+        int ownership,mode_t mode,uint32_t uid,uint32_t gid) {
+    struct stat physical;
+    if (fstat(fd,&physical)) return -errno;
+    pthread_mutex_lock(&v->world->lock); unsigned file;
+    struct group *g=lookup(v,&physical,&file);
+    int r=!g || g->removed ? -ENOENT : 0;
+    struct stat *st=!r ? (file==FILES ? &g->identity : &g->files[file]) : NULL;
+    if (!r && ownership) {
+        if (uid==UINT32_MAX) uid=st->st_uid;
+        if (gid==UINT32_MAX) gid=st->st_gid;
+        if (!md_identity_file_capable(id,st->st_uid,st->st_gid,CAP_CHOWN)
+                && !(id->uid.fs==st->st_uid && uid==st->st_uid
+                    && (gid==st->st_gid || md_identity_in_group(id,gid)))) r=-EPERM;
+        if (!r) {
+            st->st_uid=uid; st->st_gid=gid;
+            if (!S_ISDIR(st->st_mode)) st->st_mode&=~(S_ISUID|S_ISGID);
+            if (file==FILES) { g->uid=uid; g->gid=gid; }
+        }
+    } else if (!r) {
+        if (id->uid.fs!=st->st_uid && !md_identity_file_capable(id,st->st_uid,st->st_gid,CAP_FOWNER)) r=-EPERM;
+        if (!r) {
+            st->st_mode=(st->st_mode&S_IFMT)|(mode&07777);
+            if (!md_identity_in_group(id,st->st_gid)
+                    && !md_identity_file_capable(id,st->st_uid,st->st_gid,CAP_FSETID)) st->st_mode&=~S_ISGID;
+        }
+    }
+    if (!r) {
+        clock_gettime(CLOCK_REALTIME,&st->st_ctim);
+        for (struct opened *o=g->opened;o;o=o->next)
+            if (o->stat.st_ino==st->st_ino) o->stat=*st;
+    }
+    pthread_mutex_unlock(&v->world->lock); return r;
+}
+int md_cgroup_chmod(struct md_cgroup_view *v,int fd,mode_t mode,const struct md_identity *id) {
+    return attributes(v,fd,id,0,mode,0,0);
+}
+int md_cgroup_chown(struct md_cgroup_view *v,int fd,uint32_t uid,uint32_t gid,const struct md_identity *id) {
+    return attributes(v,fd,id,1,0,uid,gid);
 }
 static int capable(const struct md_identity *id,struct group *g) {
     return id->uid.fs==g->uid || md_identity_file_capable(id,g->uid,g->gid,CAP_DAC_OVERRIDE);
@@ -350,7 +409,8 @@ int md_cgroup_mkdir(struct md_cgroup_view *v,int parent,const char *name,const s
     if (strchr(name,'/') || strlen(name)>=256 || !*name || !strcmp(name,".") || !strcmp(name,"..")) return -EINVAL;
     pthread_mutex_lock(&v->world->lock); unsigned file;
     struct group *base=lookup(v,&st,&file);
-    int r=!base || base->removed ? -ENOENT : file!=FILES ? -ENOTDIR : !capable(id,base) ? -EACCES : 0;
+    int r=!base || base->removed ? -ENOENT : file!=FILES ? -ENOTDIR
+        : md_file_permissions(&base->identity,W_OK|X_OK,id);
     struct group *g=NULL;
     if (!r && !(g=calloc(1,sizeof(*g)))) r=-ENOMEM;
     int created=0;
@@ -370,7 +430,8 @@ int md_cgroup_rmdir(struct md_cgroup_view *v,int fd,const char *name,const struc
     struct stat st; if (fstatat(fd,name,&st,AT_SYMLINK_NOFOLLOW)) return -errno;
     pthread_mutex_lock(&v->world->lock); unsigned file;
     struct group *g=lookup(v,&st,&file);
-    int r=!g || g->removed ? -ENOENT : file!=FILES ? -ENOTDIR : !g->parent ? -EBUSY : !capable(id,g->parent) ? -EACCES : 0;
+    int r=!g || g->removed ? -ENOENT : file!=FILES ? -ENOTDIR : !g->parent ? -EBUSY
+        : md_file_permissions(&g->parent->identity,W_OK|X_OK,id);
     for (struct group *child=v->groups; !r && child; child=child->next)
         if (!child->removed && child->parent==g) r=-EBUSY;
     for (struct md_cgroup_member *m=v->world->members; !r && m; m=m->next)
@@ -393,6 +454,11 @@ static void *opened_retain(void *ctx) { struct opened *o=ctx; atomic_fetch_add(&
 static void opened_release(void *ctx) {
     struct opened *o=ctx;
     if (atomic_fetch_sub(&o->refs,1)==1) {
+        pthread_mutex_lock(&o->view->world->lock);
+        struct opened **link=&o->group->opened;
+        while (*link!=o) link=&(*link)->next;
+        *link=o->next;
+        pthread_mutex_unlock(&o->view->world->lock);
         md_watch_source_unsubscribe(o->listener);
         md_fs_anchor_release(o->origin); md_cgroup_release(o->view); free(o);
     }
@@ -402,8 +468,7 @@ static int retired(const struct opened *o) {
 }
 static int opened_stat(void *ctx,struct stat *st) {
     struct opened *o=ctx; struct world *w=o->view->world; pthread_mutex_lock(&w->lock);
-    *st=o->stat; st->st_mode=S_IFREG|controls[o->file].mode;
-    st->st_uid=o->group->uid; st->st_gid=o->group->gid; st->st_size=0; st->st_blocks=0;
+    *st=o->stat;
     if (retired(o)) st->st_nlink=0;
     pthread_mutex_unlock(&w->lock); return 0;
 }
@@ -530,7 +595,7 @@ static long control_write(void *ctx,const struct md_control_actor *actor,const v
     if (memchr(text,0,size)) return -EINVAL;
     size_t n=size; while (n && (text[n-1]==' ' || text[n-1]=='\n' || text[n-1]=='\t')) text[--n]=0;
     pthread_mutex_lock(&v->world->lock);
-    int r=retired(o) ? -ENODEV : !capable(actor->identity,o->group) ? -EACCES : 0;
+    int r=retired(o) ? -ENODEV : md_file_permissions(&o->group->files[o->file],W_OK,actor->identity);
     if (!r) switch (o->file) {
     case PROCS: case THREADS: case TASKS: {
         if (!n || strspn(text,"0123456789")!=n) { r=-EINVAL; break; }
@@ -609,13 +674,14 @@ int md_cgroup_watch(struct md_cgroup_view *v,struct md_inode_store *store,
     if (!r) r=md_inode_watch_add_provider(store,instance,v->events,g->event_id,S_IFREG,flags);
     pthread_mutex_unlock(&v->world->lock); return r;
 }
+static struct md_fs_anchor *opened_origin(void *ctx) { return ((struct opened *)ctx)->origin; }
 static const struct md_control_file_ops ops[3]={
     {.retain=opened_retain,.release=opened_release,.stat=opened_stat,.read=control_read,
-        .write=control_write,.filesystem=CGROUP2_SUPER_MAGIC,.access=opened_access},
+        .write=control_write,.filesystem=CGROUP2_SUPER_MAGIC,.access=opened_access,.origin=opened_origin},
     {.retain=opened_retain,.release=opened_release,.stat=opened_stat,.read=control_read,
-        .write=control_write,.filesystem=CGROUP_SUPER_MAGIC,.access=opened_access},
+        .write=control_write,.filesystem=CGROUP_SUPER_MAGIC,.access=opened_access,.origin=opened_origin},
     {.retain=opened_retain,.release=opened_release,.stat=opened_stat,.read=control_read,
-        .filesystem=CGROUP2_SUPER_MAGIC,.access=opened_access,
+        .filesystem=CGROUP2_SUPER_MAGIC,.access=opened_access,.origin=opened_origin,
         .poll_descriptor=events_poll_descriptor,.poll=events_poll}
 };
 int md_cgroup_open(struct md_cgroup_view *v,int fd,int flags,const struct md_identity *id,struct md_fs_anchor *origin,
@@ -627,18 +693,21 @@ int md_cgroup_open(struct md_cgroup_view *v,int fd,int flags,const struct md_ide
     int r=!g || g->removed ? -ENOENT : 0;
     if (!r && file==FILES) {
         if (!(flags&O_PATH) && (flags&O_ACCMODE)!=O_RDONLY) r=-EISDIR;
+        else if (!(flags&O_PATH)) r=md_file_permissions(&g->identity,R_OK,id);
     } else if (!r) {
         int access=flags&O_ACCMODE;
         if (flags&O_DIRECTORY) r=-ENOTDIR;
         else if (!(flags&O_PATH) && ((access!=O_RDONLY && !(controls[file].mode&0200))
-                || (access!=O_WRONLY && !(controls[file].mode&0444))
-                || (access!=O_RDONLY && !capable(id,g)))) r=-EACCES;
+                || (access!=O_WRONLY && !(controls[file].mode&0444)))) r=-EACCES;
+        if (!r && !(flags&O_PATH)) r=md_file_permissions(&g->files[file],
+            (access!=O_WRONLY ? R_OK : 0)|(access!=O_RDONLY ? W_OK : 0),id);
         if (!r) {
             struct opened *o=calloc(1,sizeof(*o));
             if (!o) r=-ENOMEM;
             else {
                 atomic_init(&o->refs,1); o->view=md_cgroup_retain(v); o->group=g; o->file=file;
-                o->stat=st; o->observed=g->generation;
+                o->stat=g->files[file]; o->observed=g->generation;
+                o->next=g->opened; g->opened=o;
                 o->origin=md_fs_anchor_retain(origin); *out=&ops[file==EVENTS ? 2 : v->devices]; *context=o;
             }
         }

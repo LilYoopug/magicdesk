@@ -58,7 +58,9 @@ int test_devpts_guest(int pid_namespace) {
         int terminal=open(path,O_RDWR|O_CLOEXEC); assert(terminal>=0);
         pid_t foreground=0; assert(!ioctl(terminal,TIOCGPGRP,&foreground) && foreground==getpgrp());
         assert(!ioctl(terminal,TIOCSPGRP,&foreground));
-        int controlling=open("/dev/tty",O_RDWR|O_CLOEXEC); assert(controlling>=0);
+        int controlling=open("/dev/tty",O_RDWR|O_CLOEXEC);
+        if (controlling<0) perror("open controlling tty");
+        assert(controlling>=0);
         assert(!ioctl(controlling,TIOCGPGRP,&foreground) && foreground==getpgrp());
         close(controlling); close(terminal); _exit(0);
     }

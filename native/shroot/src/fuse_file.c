@@ -175,8 +175,9 @@ static long io_resume(struct md_control_pending *base,void *data,size_t capacity
         io->file->node->attributes=st;
         io->file->node->attributes_until=0;
         ++io->file->node->changes;
+        error=md_fuse_mapping_resize(io->file->node->mapping,st.st_size);
         pthread_mutex_unlock(&io->file->view->lock);
-        md_fuse_file_event(io->file->view,io->file->node,io->file->name,IN_MODIFY); return 0;
+        md_fuse_file_event(io->file->view,io->file->node,io->file->name,IN_MODIFY); return error;
     }
     if (!io->operation) {
         struct fuse_attr_out result; struct stat st;
@@ -203,10 +204,12 @@ static long io_resume(struct md_control_pending *base,void *data,size_t capacity
         if (result.size) ++io->file->node->changes;
         if (result.size && io->file->node->attributes.st_size<io->offset+(int64_t)result.size)
             io->file->node->attributes.st_size=io->offset+result.size;
+        int error=result.size ? md_fuse_mapping_write(io->file->node->mapping,
+            io->bytes+sizeof(struct fuse_write_in),result.size,io->offset) : 0;
         pthread_mutex_unlock(&v->lock);
         if (result.size) md_fuse_file_event(v,io->file->node,io->file->name,IN_MODIFY);
         io->base.position=io->offset+result.size; io->base.position_valid=1;
-        return result.size;
+        return error ? error : (long)result.size;
     }
     if (io->operation==MD_CONTROL_READ) {
         return md_fuse_request_result(io->request,data,capacity);
@@ -370,7 +373,17 @@ struct file_mapping {
     struct md_fuse_image *image;
     uint32_t pid;
     uint64_t changes;
+    int shared;
 };
+static long mapping_publish(struct file_mapping *p,int fd) {
+    struct fuse_file *f=p->file;
+    pthread_mutex_lock(&f->view->lock);
+    int result=p->changes!=f->node->changes ? -EAGAIN
+        : p->shared ? md_fuse_mapping_publish(&f->node->mapping,f->view->root,fd) : fd;
+    pthread_mutex_unlock(&f->view->lock);
+    if (result!=fd) close(fd);
+    return result;
+}
 static long mapping_resume(struct md_control_pending *base,void *data,size_t size) {
     (void)data; (void)size;
     struct file_mapping *p=(void *)base;
@@ -388,7 +401,7 @@ static long mapping_resume(struct md_control_pending *base,void *data,size_t siz
         int fd=cached ? fcntl(f->snapshot,F_DUPFD_CLOEXEC,3) : -1;
         int error=cached && fd<0 ? -errno : 0;
         pthread_mutex_unlock(&f->view->lock);
-        if (cached) return error ? error : fd;
+        if (cached) return error ? error : mapping_publish(p,fd);
         error=md_fuse_image_new(f->view->session,&p->identity,p->pid,f->node->id,f->handle,&p->attr,&p->image);
         if (error) return error;
     }
@@ -406,7 +419,7 @@ static long mapping_resume(struct md_control_pending *base,void *data,size_t siz
         pthread_mutex_unlock(&f->view->lock);
         if (old>=0) close(old);
     }
-    return fd;
+    return mapping_publish(p,fd);
 }
 static void mapping_destroy(struct md_control_pending *base) {
     struct file_mapping *p=(void *)base;
@@ -418,7 +431,10 @@ static long file_mapping(void *context,const struct md_control_actor *actor,unsi
         struct md_control_pending **out) {
     struct fuse_file *f=context;
     if (!actor || !actor->identity || !f->opened) return -EBADF;
-    if ((flags&MAP_TYPE)!=MAP_PRIVATE) return -EOPNOTSUPP;
+    unsigned type=flags&MAP_TYPE;
+    if (type!=MAP_PRIVATE && type!=MAP_SHARED && type!=MAP_SHARED_VALIDATE) return -EOPNOTSUPP;
+    if (type!=MAP_PRIVATE && (protection&PROT_WRITE)) return -EACCES;
+    if (type!=MAP_PRIVATE && (f->open_flags&FOPEN_DIRECT_IO)) return -ENODEV;
     if (!S_ISREG(f->node->type)) return -ENODEV;
     if ((protection&PROT_EXEC) && (md_fs_anchor_policy(f->origin)&MD_MOUNT_NOEXEC)) return -EPERM;
     int error=md_fuse_session_access(f->view->session,actor->identity);
@@ -427,6 +443,7 @@ static long file_mapping(void *context,const struct md_control_actor *actor,unsi
     p->base=(struct md_control_pending){.resume=mapping_resume,.dispose=mapping_destroy,
         .deadline=INT64_MAX,.retry_preparation=1};
     p->file=file_retain(f); p->identity=md_identity_copy(actor->identity);
+    p->shared=type!=MAP_PRIVATE;
     pthread_mutex_lock(&f->view->lock); p->changes=f->node->changes; pthread_mutex_unlock(&f->view->lock);
     p->pid=md_fuse_view_pid(f->view,actor->pid); p->wake=md_resource_wakeup_retain(actor->wakeup);
     struct fuse_getattr_in in={.getattr_flags=FUSE_GETATTR_FH,.fh=f->handle};
@@ -442,7 +459,7 @@ static void file_read_commit(void *context,size_t copied) {
 static const struct md_control_file_ops file_ops={.retain=file_retain,.release=file_release,.stat=file_stat,
     .access=file_access,.descriptor=file_descriptor,.origin=file_origin,.filesystem_paths=1,
     .io=file_io,.read_size=file_read_size,.seek=file_seek,.command=file_command,.flush=file_flush,.mapping=file_mapping,.read_commit=file_read_commit,
-    .splice=1,.filesystem=FUSE_SUPER_MAGIC};
+    .splice=1,.mapping_readonly=1,.filesystem=FUSE_SUPER_MAGIC};
 
 int md_fuse_file_publish(struct fuse_view *view,struct fuse_node *node,struct md_fs_anchor *origin,
         struct fuse_node *parent,const char *name,const struct md_identity *identity,unsigned flags,const struct fuse_open_out *opened,
