@@ -2,17 +2,28 @@
 #define MD_PROC_CONTROL_H
 #include "proc_paths.h"
 #include "file_metadata.h"
+#include "control_file.h"
 #include <errno.h>
 #include <stdint.h>
 #include <sys/syscall.h>
 #include <sys/stat.h>
-struct md_proc_io_spec { int writing, vector, seek, directory, positional; int64_t offset; int whence; };
+struct md_proc_io_spec { int writing, vector, seek, directory, positional, splice, command; int64_t offset; int whence; };
 static inline int md_proc_io_decode(long nr, const unsigned long *a, struct md_proc_io_spec *out) {
     *out=(struct md_proc_io_spec){0};
+    if (nr==SYS_fsync || nr==SYS_fdatasync || nr==SYS_ftruncate) {
+        out->command=nr==SYS_fsync ? MD_CONTROL_SYNC : nr==SYS_fdatasync ? MD_CONTROL_DATASYNC : MD_CONTROL_TRUNCATE;
+        out->offset=nr==SYS_ftruncate ? (int64_t)a[1] : 0;
+        out->whence=out->command; return 0;
+    }
     if (nr==SYS_lseek) {
         out->seek=1; out->offset=(int64_t)a[1]; out->whence=(int)a[2]; return 0;
     }
     if (nr==SYS_getdents64) { out->directory=1; return 0; }
+    if (nr==SYS_splice) {
+        if (a[1] || a[3]) return -ESPIPE;
+        if (a[5]&~15UL) return -EINVAL;
+        out->splice=1; return 0;
+    }
     switch (nr) {
     case SYS_write: case SYS_writev: case SYS_pwrite64: case SYS_pwritev: case SYS_pwritev2:
         out->writing=1; break;

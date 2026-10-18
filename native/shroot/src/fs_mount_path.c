@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <linux/openat2.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -70,7 +71,31 @@ struct path_walk {
     struct md_mount_namespace *view;
     struct md_view_mount *mount;
     uint64_t resolve;
+    struct md_provider_lookup **pending;
 };
+struct md_view_walk_pending {
+    struct md_provider_lookup *lookup;
+    struct path_point current;
+    struct md_mount_namespace *view,*boundary_view;
+    struct md_view_mount *mount,*next_mount,*boundary_mount;
+    struct md_fs_anchor *pins[3];
+    struct stat boundary;
+    int boundary_fd,follow,missing,trailing,last;
+    uint64_t resolve;
+    unsigned links;
+    char todo[PATH_MAX],name[NAME_MAX+1];
+};
+void md_view_walk_destroy(struct md_view_walk_pending *p) {
+    if (!p) return;
+    if (p->lookup) p->lookup->destroy(p->lookup);
+    if (p->current.fd>=0) close(p->current.fd);
+    if (p->boundary_fd>=0) close(p->boundary_fd);
+    for (unsigned i=0;i<3;++i) md_fs_anchor_release(p->pins[i]);
+    free(p);
+}
+int md_view_walk_ready(struct md_view_walk_pending *p) {
+    return p && p->lookup ? p->lookup->ready(p->lookup) : -EINVAL;
+}
 static void point_close(struct path_point *p) {
     if (p->fd>=0) close(p->fd);
     *p=(struct path_point){.fd=-1};
@@ -139,8 +164,11 @@ static int component(struct path_walk *w,struct md_mount_namespace *view,
         }
         return r;
     }
-    if (mount && mount->provider)
-        return point_native(next,md_provider_tree_step(mount->provider,current->fd,name));
+    if (mount && mount->provider) {
+        const struct md_control_actor actor={.identity=w->fs->store->identity,.wakeup=w->fs->wakeup,
+            .pid=w->fs->actor ? w->fs->actor->tid : 0};
+        return point_native(next,md_provider_tree_lookup(mount->provider,current->fd,name,&actor,w->pending));
+    }
     int fd=openat(current->fd,name,O_PATH|O_NOFOLLOW|O_CLOEXEC);
     return point_native(next,fd<0 ? -errno : fd);
 }
@@ -195,17 +223,44 @@ static int parent(struct path_walk *w, struct md_mount_namespace *view,
     else if (!r) r=component(w,view,*mount,&target,"..","",0,next);
     point_close(&target); return r;
 }
-int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *origin,
+static int walk_path(struct md_filesystem *fs, int base, const struct md_fs_anchor *origin,
         const char *path, int follow, int missing,
-        uint64_t resolve, struct md_view_location *out) {
+        uint64_t resolve, struct md_view_location *out,struct md_view_walk_pending **pending,
+        struct md_view_walk_pending *resume) {
     *out = (struct md_view_location){.parent=-1,.fd=-1};
+    struct md_provider_lookup *lookup=NULL;
+    struct path_walk walk={.fs=fs,.resolve=resolve,.pending=pending ? &lookup : NULL};
+    struct path_point current={.fd=-1},next={.fd=-1};
+    struct md_mount_namespace *view=NULL,*boundary_view=NULL;
+    struct md_view_mount *mount=NULL,*next_mount=NULL,*boundary_mount=NULL;
+    struct stat boundary={0};
+    char todo[PATH_MAX],name[NAME_MAX+1];
+    int r=0,boundary_fd=-1,trailing=0,last=0;
+    unsigned links=0;
+    if (resume) {
+        if (!resume->lookup) return -EINVAL;
+        int ready=md_view_walk_ready(resume);
+        if (!ready) return -EINPROGRESS;
+        int completed=resume->lookup->complete(resume->lookup);
+        if (completed==-EINPROGRESS) return completed;
+        current=resume->current; resume->current.fd=-1;
+        view=resume->view; mount=resume->mount; next_mount=resume->next_mount;
+        boundary_view=resume->boundary_view; boundary_mount=resume->boundary_mount;
+        boundary=resume->boundary; boundary_fd=resume->boundary_fd; resume->boundary_fd=-1;
+        follow=resume->follow; missing=resume->missing; resolve=resume->resolve;
+        walk.resolve=resolve; links=resume->links; trailing=resume->trailing; last=resume->last;
+        strcpy(todo,resume->todo); strcpy(name,resume->name);
+        r=point_native(&next,completed);
+        resume->lookup->destroy(resume->lookup); resume->lookup=NULL;
+        goto component_complete;
+    }
     if (!path || !*path) return -ENOENT;
     if (resolve & ~(RESOLVE_BENEATH | RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV | RESOLVE_CACHED | MD_VIEW_TASK_PATH | MD_VIEW_PROVIDER_SOURCE | MD_VIEW_MOUNT_TARGET)) return -EINVAL;
     if ((resolve & (RESOLVE_BENEATH | RESOLVE_IN_ROOT)) == (RESOLVE_BENEATH | RESOLVE_IN_ROOT)) return -EINVAL;
     if (resolve & RESOLVE_CACHED) return -EAGAIN;
     if (path[0] == '/' && (resolve & RESOLVE_BENEATH)) return -EXDEV;
     if (strlen(path) >= PATH_MAX) return -ENAMETOOLONG;
-    char todo[PATH_MAX]; strcpy(todo, path);
+    strcpy(todo, path);
     int from_root = base == MD_INODE_ROOT || (path[0] == '/' && !(resolve & RESOLVE_IN_ROOT));
     /* A native proc descriptor predates or bypasses logical mounts. Its kernel
      * inode cannot select one of several proc mounts with different PID views.
@@ -214,14 +269,12 @@ int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *
         int native=md_view_task_path(fs,base,path,"",resolve,0);
         if (native) return native;
     }
-    int r = !from_root && origin ? md_view_anchor_check(fs,base,origin) : 0;
+    r = !from_root && origin ? md_view_anchor_check(fs,base,origin) : 0;
     if (r) return r;
-    struct path_walk walk={.fs=fs,.resolve=resolve};
-    struct path_point current={.fd=-1};
     r=point_native(&current,from_root ? md_view_root_fd(fs) : duplicate(base));
     if (r) { point_close(&current); return r; }
-    struct md_mount_namespace *view = !from_root && origin ? origin->view : fs->mounts;
-    struct md_view_mount *mount = view ? &view->base : NULL;
+    view = !from_root && origin ? origin->view : fs->mounts;
+    mount = view ? &view->base : NULL;
     if (from_root) mount=md_view_root_mount(fs);
     else if (origin) mount=origin->mount;
     else {
@@ -232,12 +285,11 @@ int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *
     }
     if (!r && from_root && !fs->native_root) r = enter(view, &current, &mount, resolve);
     int scoped=resolve&(RESOLVE_BENEATH|RESOLVE_IN_ROOT);
-    int boundary_fd = !r && scoped ? duplicate(current.fd) : -1;
-    struct md_view_mount *boundary_mount = mount;
-    struct md_mount_namespace *boundary_view = view;
+    boundary_fd = !r && scoped ? duplicate(current.fd) : -1;
+    boundary_mount = mount;
+    boundary_view = view;
     if (!r && scoped && boundary_fd < 0) r = boundary_fd;
-    struct stat boundary=current.identity;
-    unsigned links = 0;
+    boundary=current.identity;
     while (!r) {
         r=walk_select(&walk,view,mount);
         if (r) break;
@@ -255,13 +307,13 @@ int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *
         char *end = start; while (*end && *end != '/') ++end;
         size_t length = (size_t)(end-start);
         if (length > NAME_MAX) { r = -ENAMETOOLONG; break; }
-        char name[NAME_MAX+1]; memcpy(name, start, length); name[length] = 0;
-        int trailing = *end == '/';
+        memcpy(name, start, length); name[length] = 0;
+        trailing = *end == '/';
         memmove(todo, end, strlen(end)+1);
         char *rest = todo; while (*rest == '/') ++rest;
-        int last = !*rest;
-        struct path_point next={.fd=-1};
-        struct md_view_mount *next_mount = mount;
+        last = !*rest;
+        next=(struct path_point){.fd=-1};
+        next_mount = mount;
         if (!strcmp(name, "..") && (resolve & (RESOLVE_BENEATH | RESOLVE_IN_ROOT)) && view == boundary_view && mount == boundary_mount && md_view_same(&current.identity, &boundary)) {
             if (resolve & RESOLVE_BENEATH) { r = -EXDEV; break; }
             r=component(&walk,view,mount,&current,".",todo,0,&next);
@@ -315,6 +367,29 @@ int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *
                 if (!r) r=component(&walk,view,mount,&current,name,todo,0,&next);
             }
         }
+        if (r==-EINPROGRESS && lookup && pending) {
+            r=walk_leave(&walk,0);
+            struct md_fs_anchor *pins[3]={0};
+            if (!r) r=md_view_anchor_duplicate(fs,view,mount,current.fd,&pins[0]);
+            if (!r && boundary_fd>=0)
+                r=md_view_anchor_duplicate(fs,boundary_view,boundary_mount,boundary_fd,&pins[1]);
+            if (!r && next_mount!=mount && next_mount && next_mount->source>=0)
+                r=md_view_anchor_duplicate(fs,view,next_mount,next_mount->source,&pins[2]);
+            struct md_view_walk_pending *p=resume;
+            if (!r && !p) { p=calloc(1,sizeof(*p)); if (!p) r=-ENOMEM; }
+            if (!r) {
+                for (unsigned i=0;i<3;++i) { md_fs_anchor_release(p->pins[i]); p->pins[i]=pins[i]; }
+                p->lookup=lookup; p->current=current; p->boundary_fd=boundary_fd;
+                p->view=view; p->mount=mount; p->next_mount=next_mount;
+                p->boundary_view=boundary_view; p->boundary_mount=boundary_mount; p->boundary=boundary;
+                p->follow=follow; p->missing=missing; p->resolve=resolve; p->links=links;
+                p->trailing=trailing; p->last=last; strcpy(p->todo,todo); strcpy(p->name,name);
+                *pending=p; return -EINPROGRESS;
+            }
+            for (unsigned i=0;i<3;++i) md_fs_anchor_release(pins[i]);
+            lookup->destroy(lookup); lookup=NULL;
+        }
+component_complete:
         if (r == -ENOENT && last && missing && (!trailing || missing > 1)) {
             r=point_fd(&walk,&current);
             if (!r) { out->parent=current.fd; current.fd=-1; out->view=view; out->mount=mount; strcpy(out->name,name); }
@@ -380,4 +455,17 @@ int md_view_walk(struct md_filesystem *fs, int base, const struct md_fs_anchor *
     if (boundary_fd >= 0) close(boundary_fd);
     if (r) md_view_location_close(out);
     return r;
+}
+int md_view_walk(struct md_filesystem *fs,int base,const struct md_fs_anchor *origin,
+        const char *path,int follow,int missing,uint64_t resolve,struct md_view_location *out) {
+    return walk_path(fs,base,origin,path,follow,missing,resolve,out,NULL,NULL);
+}
+int md_view_walk_async(struct md_filesystem *fs,int base,const struct md_fs_anchor *origin,
+        const char *path,int follow,int missing,uint64_t resolve,struct md_view_location *out,
+        struct md_view_walk_pending **pending) {
+    *pending=NULL;
+    return walk_path(fs,base,origin,path,follow,missing,resolve,out,pending,NULL);
+}
+int md_view_walk_resume(struct md_filesystem *fs,struct md_view_walk_pending *p,struct md_view_location *out) {
+    return walk_path(fs,-1,NULL,NULL,0,0,0,out,&p,p);
 }

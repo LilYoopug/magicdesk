@@ -57,48 +57,54 @@ int md_command_images_prepare(struct md_command_recipe *recipe, struct md_comman
     long r=readable(first->fd);
     if (r<0) return (int)r;
     current.fd=(int)r;
+    enum md_command_file kind=MD_COMMAND_EXECUTABLE;
     for (;;) {
-        images->program=current.fd;
-        r=current.mount_flags&MD_MOUNT_NOEXEC ? -EACCES
-            : RAW4(faccessat2,current.fd,"",X_OK,AT_EMPTY_PATH|MD_AT_EACCESS);
+        char next[MD_INTERPRETER_MAX];
+        r=md_command_images_step(recipe,images,&current,kind,inaccessible,next);
+        if (r<=0) return (int)r;
+        kind=(enum md_command_file)(r-1);
+        r=acquire(context,next,&current,kind);
+        if (r<0) { md_command_images_close(images); return (int)r; }
+    }
+}
+int md_command_images_step(struct md_command_recipe *recipe,struct md_command_images *images,
+        struct md_program *current,enum md_command_file kind,int inaccessible,char next[MD_INTERPRETER_MAX]) {
+    int fd=current->fd; current->fd=-1;
+    if (kind==MD_COMMAND_INTERPRETER) images->loader=fd;
+    else {
+        if (images->program>=0) RAW1(close,images->program);
+        images->program=fd;
+    }
+    long r=current->mount_flags&MD_MOUNT_NOEXEC ? -EACCES
+        : RAW4(faccessat2,fd,"",X_OK,AT_EMPTY_PATH|MD_AT_EACCESS);
+    if (kind==MD_COMMAND_INTERPRETER) {
+        if (!r) r=md_elf_validate(fd,1);
+        if (!r) { recipe->loader=1; return 0; }
+    } else {
         struct stat st;
-        if (!r) r=RAW2(fstat,current.fd,&st);
+        if (!r) r=RAW2(fstat,fd,&st);
         if (!r && (!S_ISREG(st.st_mode) || (st.st_mode&(S_ISUID|S_ISGID)))) r=-EACCES;
         char header[MD_SCRIPT_HEADER]={0};
-        if (!r) r=RAW4(pread64,current.fd,header,sizeof(header),0);
-        if (r<0) break;
-        if (r<2 || header[0]!='#' || header[1]!='!') {
-            char interpreter[MD_INTERPRETER_MAX];
-            r=md_elf_interpreter(current.fd,interpreter);
-            if (!r && *interpreter) {
-                struct md_program loader;
-                r=acquire(context,interpreter,&loader,MD_COMMAND_INTERPRETER);
-                if (!r) {
-                    images->loader=loader.fd;
-                    r=loader.mount_flags&MD_MOUNT_NOEXEC ? -EACCES
-                        : RAW4(faccessat2,loader.fd,"",X_OK,AT_EMPTY_PATH|MD_AT_EACCESS);
-                    if (!r) r=md_elf_validate(loader.fd,1);
-                }
-            }
+        if (!r) r=RAW4(pread64,fd,header,sizeof(header),0);
+        if (r>=0 && (r<2 || header[0]!='#' || header[1]!='!')) {
+            r=md_elf_interpreter(fd,next);
             if (!r) {
-                md_copy(recipe->image.path,sizeof(recipe->image.path),current.identity.path);
-                memcpy(recipe->image.object,current.identity.object,sizeof(recipe->image.object));
-                recipe->loader=images->loader>=0;
-                images->mount_flags=current.mount_flags;
-                images->anonymous=!current.identity.object[0];
-                return 0;
+                recipe->image=current->identity;
+                images->mount_flags=current->mount_flags;
+                images->anonymous=!current->identity.object[0];
+                return *next ? MD_COMMAND_INTERPRETER+1 : 0;
             }
-            break;
+        } else if (r>=0) {
+            if (!recipe->scripts && inaccessible) r=-ENOENT;
+            else if (recipe->scripts==MD_SCRIPT_DEPTH) r=-ELOOP;
+            else {
+                memcpy(recipe->lines[recipe->scripts++],header,sizeof(header));
+                char *name,*option;
+                r=md_command_script(header,&name,&option);
+                if (!r) r=md_copy(next,MD_INTERPRETER_MAX,name);
+                if (!r) return MD_COMMAND_EXECUTABLE+1;
+            }
         }
-        if (!recipe->scripts && inaccessible) { r=-ENOENT; break; }
-        if (recipe->scripts==MD_SCRIPT_DEPTH) { r=-ELOOP; break; }
-        memcpy(recipe->lines[recipe->scripts++],header,sizeof(header));
-        char *name, *option;
-        r=md_command_script(header,&name,&option);
-        if (r<0) break;
-        RAW1(close,images->program); images->program=-1;
-        r=acquire(context,name,&current,MD_COMMAND_EXECUTABLE);
-        if (r<0) break;
     }
     md_command_images_close(images);
     return (int)r;

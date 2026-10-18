@@ -69,6 +69,11 @@ void md_ipc_credentials_close(struct md_ipc_credentials *);
 /* Worker-owned, event-driven retirement of process-local typed FD custody. */
 int md_ipc_credentials_pollfd(const struct md_ipc_credentials *);
 int md_ipc_credentials_dispatch(struct md_ipc_credentials *);
+/* A bound pathname belongs to the live socket, not the caller's current mount
+ * tree. Record its private kernel endpoint once; lookup survives namespace
+ * changes, unlink and socket activation without retaining a socket FD. */
+int md_ipc_socket_path_publish(struct md_ipc_credentials *,int socket,const char *path);
+int md_ipc_socket_path(struct md_ipc_credentials *,const char *endpoint,char *,size_t);
 void md_ipc_credentials_execute(struct md_ipc_credentials *, const struct md_identity *, const struct md_pid_identity *,
     const struct md_fs_request *, struct md_fs_result *, const struct md_fs_output *);
 #endif

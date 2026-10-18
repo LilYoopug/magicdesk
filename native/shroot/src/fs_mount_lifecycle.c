@@ -25,12 +25,14 @@ static int detach(struct md_filesystem *fs, const unsigned *removed) {
      * cannot publish topology, and never gain authority over the owner graph. */
     int r=md_mount_graph_foreign(view) ? 0 : md_mount_graph_update(view,&layout);
     if (!r) {
+        atomic_store_explicit(&view->detached_mounts,1,memory_order_release);
         view->base.detached=base.detached;
         if (removed[0]) md_mount_links_release(&view->base.links);
         for (unsigned i=0;i<count;++i) {
             tree->mounts[i].detached=next[i].detached;
             if (removed[i+1]) md_mount_links_release(&tree->mounts[i].links);
         }
+        md_mount_family_retire(view);
     }
     return r;
 }

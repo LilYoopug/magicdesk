@@ -1,5 +1,6 @@
 #include "namespace_internal.h"
 #include "raw.h"
+#include "fuse_options.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/mount.h>
@@ -60,9 +61,16 @@ long md_namespace_mount(const struct md_fs *fs, long nr, const unsigned long *a)
             else if (md_equal(type,"cgroup2")) q.mode=MD_FS_MOUNT_CGROUP2;
             else if (md_equal(type,"sysfs")) q.mode=MD_FS_MOUNT_SYSFS;
             else if (md_equal(type,"mqueue")) q.mode=MD_FS_MOUNT_MQUEUE;
+            else if (md_equal(type,"fuse") || (type[0]=='f' && type[1]=='u' && type[2]=='s'
+                    && type[3]=='e' && type[4]=='.' && type[5])) q.mode=MD_FS_MOUNT_FUSE;
             else return -ENODEV;
             if (a[4]) r=md_read_string(data,sizeof(data),(const char *)a[4]);
             if (r>=0 && a[4]) { q.value=data; q.value_size=(uint32_t)md_length(data)+1; }
+            if (r>=0 && q.mode==MD_FS_MOUNT_FUSE) {
+                struct md_fuse_options options;
+                r=md_fuse_options_parse(q.value,&options);
+                if (r>=0) { q.directory[1]=options.descriptor; q.path[1]=""; }
+            }
         }
     }
     if (r<0) return r;

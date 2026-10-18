@@ -2,6 +2,7 @@
 #include "fs_mount_internal.h"
 #include "inode_internal.h"
 #include "procfs_view.h"
+#include "fuse_view.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
@@ -62,6 +63,7 @@ int md_mount_source_create(struct md_filesystem *fs,const struct md_fs_request *
     if (q->mode==MD_FS_MOUNT_OVERLAY) return md_fs_mount_overlay(fs,q,out);
     if (q->mode==MD_FS_MOUNT_SYSFS) return sysfs_source(fs,q,out);
     if (q->mode==MD_FS_MOUNT_MQUEUE) return mqueue_source(fs,q,out);
+    if (q->mode==MD_FS_MOUNT_FUSE) return md_fuse_view_source(fs,q,out);
     int devpts=q->mode==MD_FS_MOUNT_DEVPTS;
     int cgroup=q->mode==MD_FS_MOUNT_CGROUP || q->mode==MD_FS_MOUNT_CGROUP2;
     if (!devpts && !cgroup && q->mode!=MD_FS_MOUNT_PROC) return -ENODEV;

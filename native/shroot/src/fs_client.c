@@ -119,17 +119,35 @@ int md_fs_result_valid(const struct md_fs_request *request, const struct md_fs_r
     return 1;
 }
 #ifdef MD_USE_LIBC
-static long receive_reply(int socket, int64_t deadline, const struct md_fs_request *request, struct md_fs_response *out,
+static long receive_reply(int socket, int64_t *delivery_deadline, unsigned timeout_ms,
+                          const struct md_fs_request *request, struct md_fs_response *out,
                           struct md_fs_reply *reply, uint64_t exchange,
                           int (*deliver)(void *, const void *, size_t), void *context) {
     struct md_fs_rights rights = {0};
-    long r;
+    long r; int deferred=0;
+    int64_t deadline=*delivery_deadline;
     for (;;) {
         r = md_fs_receive(socket, reply, sizeof(*reply), &rights);
+        if (r==sizeof(struct md_fs_deferred)) {
+            struct md_fs_deferred admission;
+            memcpy(&admission,reply,sizeof(admission));
+            unsigned count=rights.count; md_fs_close_rights(&rights);
+            if (deferred || count || admission.magic!=MD_FS_MAGIC || admission.version!=MD_FS_VERSION
+                    || admission.error!=-EINPROGRESS) return -EPROTO;
+            deferred=1; deadline=INT64_MAX;
+            continue;
+        }
         if (r != -EAGAIN && r != -EINTR) break;
+        /* EVENT_WAIT: admitted operation completion or peer shutdown; the
+         * handshake timeout must not become a filesystem operation timeout. */
         r = md_event_wait_fd(socket, POLLIN, deadline); if (r < 0) return r;
     }
     if (r < 0) return r;
+    if (deferred) {
+        long now=md_event_now();
+        if (now<0) { md_fs_close_rights(&rights); return now; }
+        *delivery_deadline=deadline=now+(int64_t)timeout_ms*1000000;
+    }
     if (r<(long)offsetof(struct md_fs_reply,data)) { md_fs_close_rights(&rights); return -EPROTO; }
     if (r>=(long)offsetof(struct md_fs_reply,data) && reply->receipt) {
         if (reply->magic!=MD_FS_MAGIC || reply->version!=MD_FS_VERSION || reply->receipt!=1
@@ -284,7 +302,8 @@ long md_fs_call_deliver(const char *name, unsigned timeout_ms,
             r = md_event_wait_fd((int)socket, POLLOUT, deadline); continue;
         }
         if (r >= 0) {
-            r = (size_t)r == length ? receive_reply((int)socket, deadline, request, out, &wire.reply, exchange,deliver,context) : -EIO;
+            r = (size_t)r == length ? receive_reply((int)socket, &deadline, timeout_ms,
+                request, out, &wire.reply, exchange,deliver,context) : -EIO;
         }
         break;
     }

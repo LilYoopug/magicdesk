@@ -6,6 +6,29 @@
 #include <fcntl.h>
 #include <linux/magic.h>
 #include <unistd.h>
+#include <string.h>
+
+int md_fs_initial_boundaries_capture(struct md_filesystem *fs) {
+    struct md_mount_namespace *n=fs->mounts;
+    if (!n || n->root!=&n->base || n->base.source>=0 || !n->tree
+            || n->tree->count>MD_INODE_INITIAL_BOUNDARIES) return -EINVAL;
+    memset(&n->initial_boundary,0,sizeof(n->initial_boundary));
+    for (unsigned i=0;i<n->tree->count;++i) {
+        const struct md_view_mount *m=&n->tree->mounts[i];
+        if (!m->id || m->detached) return -EINVAL;
+        n->initial_boundary.mounts[i].id=m->id;
+        n->initial_boundary.mounts[i].device=m->guest.st_dev;
+        n->initial_boundary.mounts[i].inode=m->guest.st_ino;
+        n->initial_boundary.mounts[i].parent=m->parent;
+        if (m->parent!=&n->base) continue;
+        struct md_inode_mount_boundaries *b=&n->initial_boundary.boundaries;
+        int error=md_inode_object_id(fs->store,m->target,b->objects[b->count]);
+        if (error) return error;
+        b->filter|=md_inode_mount_bit(b->objects[b->count++]);
+    }
+    n->initial_boundary.count=n->tree->count;
+    return 0;
+}
 
 int md_fs_sysfs_prepare(struct md_filesystem *fs,struct md_provider_tree **out) {
     *out=NULL;
@@ -17,12 +40,8 @@ int md_fs_sysfs_prepare(struct md_filesystem *fs,struct md_provider_tree **out) 
     close(parent);
     if (!error) error=md_fs_provider_mount(fs,tree,"/sys");
     if (!error && initial) {
-        struct md_view_mount *mount=&fs->mounts->tree->mounts[0];
-        error=md_inode_object_id(fs->store,mount->target,fs->mounts->initial_boundary.object);
+        error=md_fs_initial_boundaries_capture(fs);
         if (!error) {
-            fs->mounts->initial_boundary.id=mount->id;
-            fs->mounts->initial_boundary.device=mount->guest.st_dev;
-            fs->mounts->initial_boundary.inode=mount->guest.st_ino;
             /* /sys never used proc/dev's native passthrough. Preparing only
              * this provider must not disable that existing launch contract. */
             atomic_store_explicit(&fs->mounts->managed_paths,0,memory_order_release);

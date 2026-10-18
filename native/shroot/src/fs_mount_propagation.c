@@ -283,6 +283,10 @@ int md_view_mount_propagate_detach(struct md_filesystem *fs,struct md_view_mount
             struct md_view_mount *m=md_view_mount_node(view,i);
             m->detached=1; md_mount_links_release(&m->links); any=1;
         }
+        if (any) {
+            atomic_store_explicit(&view->detached_mounts,1,memory_order_release);
+            md_mount_family_retire(view);
+        }
         if (any && view!=fs->mounts) {
             struct md_filesystem selected=*fs; selected.mounts=view;
             md_fs_mount_table_changed(&selected);

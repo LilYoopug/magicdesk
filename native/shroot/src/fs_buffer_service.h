@@ -112,7 +112,7 @@ int md_fs_buffer_snapshot_advance(struct md_fs_buffer_request *, int finish);
  * acknowledgement, not ambiguous terminal registers. Only its original
  * descriptor may enter this continuation. A pre-entry denial can also finish. */
 int md_fs_buffer_task_pending(const struct md_fs_buffer_request *);
-int md_fs_buffer_task_start(struct md_fs_buffer_request *, int descriptor);
+int md_fs_buffer_task_start(struct md_fs_buffer_request *);
 int md_fs_buffer_task_finish(struct md_fs_buffer_request **, long result);
 int md_fs_buffer_progress(struct md_fs_buffer_service *);
 /* Deferred opens are owned children, reaped by the supervisor's SIGCHLD loop.

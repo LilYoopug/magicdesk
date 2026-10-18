@@ -8,6 +8,14 @@ Android 14 / API 34 and managed Desktop remains Android 15 / API 35; neither
 acquires Shroot's kernel requirements. Shell tools, Termux, prepared chroot and
 graphics services remain independent when guest execution is unavailable.
 
+Guest FUSE advertises protocol 7.31, with older daemon negotiation, through a
+typed guest `/dev/fuse` and the existing descriptor transport. It does not open
+the host FUSE device, mount a kernel filesystem or require CONFIG_FUSE_FS.
+Requests use baseline event notification and private sealed memfd snapshots;
+there is no post-5.15 host dependency. `test_fuse_transport`, `test_fuse_device`,
+`test_fuse_filesystem` and the stock rofiles/portal/squashfuse fixtures cover
+protocol, cancellation, publication and teardown. See [FUSE limits](fuse.md).
+
 Native-leaf storage uses baseline openat/fstat/fchmod, user xattrs, proc FD magic
 links and fsync. `inode_native.c` uses the retained proc alias for O_PATH metadata,
 not fchmodat2/AT_EMPTY_PATH. `inode_publication.c` uses renameat2 with

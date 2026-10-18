@@ -31,6 +31,8 @@ int md_resource_wakeup_create(int eventfd, struct md_resource_wakeup **);
 int md_resource_wakeup_create_pipe(int reader, int writer, struct md_resource_wakeup **);
 struct md_resource_wakeup *md_resource_wakeup_retain(struct md_resource_wakeup *);
 void md_resource_wakeup_release(struct md_resource_wakeup *);
+/* Publication must precede the signal. Safe even after the original loop exits. */
+int md_resource_wakeup_signal(struct md_resource_wakeup *);
 /* No allocation, blocking wait or event-loop callback. Returns 1 ready, 0 queued.
  * NULL wakeup is only for synchronous callers that explicitly inspect state. */
 int md_resource_order_begin(struct md_resource_queue *, struct md_resource_order *, struct md_resource_wakeup *);

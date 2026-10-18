@@ -6,9 +6,12 @@
 #include <sys/un.h>
 
 #define MD_FS_MAGIC 0x4d444653U
-#define MD_FS_VERSION 21U
+#define MD_FS_VERSION 22U
 #define MD_FS_MAX_FDS 2
 enum { MD_FS_REPLY_CHUNK=65536 };
+/* One admission record only for a parked operation. It is not a result and
+ * never authorizes replay; daemon completion or socket closure ends the wait. */
+struct md_fs_deferred { uint32_t magic,version; int32_t error; };
 struct md_fs_packet {
     /* Base-slot masks: cwd slots use the authenticated exchange's captured
      * directory. Other descriptor slots travel as SCM_RIGHTS, in slot order. */

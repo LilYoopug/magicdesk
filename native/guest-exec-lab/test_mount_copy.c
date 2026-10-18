@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "fs_mount_internal.h"
 #include "inode_internal.h"
+#include "resource_order.h"
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -8,6 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/file.h>
+#include <sys/eventfd.h>
 #include <sys/resource.h>
 #include <unistd.h>
 
@@ -51,6 +53,41 @@ static void rollback(struct md_filesystem *fs, const struct md_fs_location *root
         assert(!setrlimit(RLIMIT_NOFILE,&original));
         assert(descriptors()==before);
     }
+}
+static void detached_copy(struct md_inode_store *store,const char *source) {
+    struct md_filesystem fs={.store=store},copy={.store=store};
+    struct md_fs_attachment entry={source,"/tree",0};
+    assert(!md_fs_mounts_open(&fs,&entry,1));
+    int event=eventfd(0,EFD_NONBLOCK|EFD_CLOEXEC); assert(event>=0);
+    struct md_resource_wakeup *wake=NULL;
+    assert(!md_resource_wakeup_create(event,&wake));
+    md_mount_family_wakeup(fs.mounts,wake);
+    struct md_view_mount *mount=&fs.mounts->tree->mounts[0];
+    struct md_fs_anchor *held=NULL,*copied=NULL;
+    assert(!md_view_anchor_duplicate(&fs,fs.mounts,mount,mount->source,&held));
+    assert(!md_view_mount_detach(&fs,mount));
+    struct md_fs_location root={0},selected;
+    assert(!md_fs_mounts_copy(&fs,&root,&copy.mounts,&selected));
+    assert(!md_fs_mounts_copy_cwd(fs.mounts,copy.mounts,held,&copied));
+    uint64_t signals=0;
+    assert(read(event,&signals,sizeof(signals))==sizeof(signals) && signals==1);
+    assert(!md_mount_family_collect(&fs));
+    assert(mount->id && copy.mounts->tree->mounts[0].id);
+    md_fs_anchor_release(held);
+    assert(read(event,&signals,sizeof(signals))==sizeof(signals) && signals==1);
+    assert(!md_mount_family_collect(&fs));
+    assert(!mount->id && copy.mounts->tree->mounts[0].id);
+    md_fs_anchor_release(copied);
+    assert(read(event,&signals,sizeof(signals))==sizeof(signals) && signals==1);
+    assert(!md_mount_family_collect(&fs));
+    assert(!copy.mounts->tree->mounts[0].id);
+    assert(!atomic_load(&fs.mounts->detached_mounts) && !atomic_load(&copy.mounts->detached_mounts));
+    assert(!md_mount_family_collect(&fs));
+    assert(read(event,&signals,sizeof(signals))<0 && errno==EAGAIN);
+    md_mount_family_wakeup(fs.mounts,NULL);
+    md_resource_wakeup_release(wake); close(event);
+    md_fs_mounts_close(&copy); md_fs_mounts_close(&fs);
+    puts("PASS detached namespace copy: retained cwd, coalesced retirement and last-anchor wakeup");
 }
 void test_mount_copy(const char *base) {
     unsigned before=descriptors();
@@ -158,6 +195,8 @@ void test_mount_copy(const char *base) {
     assert(strstr(bytes," / ro - none attachment rw") && strstr(bytes," /child rw - none attachment rw"));
     assert(!strstr(bytes,"/tree") && !strstr(bytes,base));
     md_fs_mounts_close(&copy);
+
+    detached_copy(store_owner,source[0]);
 
     /* Empty views and inode roots need no attachment tree or descriptor cache. */
     assert(!md_fs_mounts_open(&fs,NULL,0));

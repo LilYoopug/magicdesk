@@ -67,6 +67,7 @@ struct md_mount_namespace *md_mount_namespace_new(void) {
         if (r) { pthread_mutex_destroy(&n->domains_lock); free(n); errno=-r; return NULL; }
         atomic_init(&n->refs,1);
         atomic_init(&n->managed_paths,0);
+        atomic_init(&n->detached_mounts,0);
         r=md_mount_family_new(n);
         if (r) { md_mount_namespace_release(n); errno=-r; return NULL; }
     }
@@ -179,11 +180,15 @@ int md_mount_namespace_attached(const struct md_mount_namespace *n) {
 int md_mount_namespace_managed_paths(const struct md_mount_namespace *n) {
     return n && atomic_load_explicit(&n->managed_paths,memory_order_acquire);
 }
-const char *md_mount_namespace_initial_boundary(const struct md_mount_namespace *n) {
-    if (!n || !n->initial_boundary.object[0] || n->root!=&n->base || n->base.source>=0
-            || !n->tree || n->tree->count!=1 || md_mount_namespace_managed_paths(n)) return NULL;
-    const struct md_view_mount *m=&n->tree->mounts[0];
-    return m->id==n->initial_boundary.id && !m->detached && m->parent==&n->base
-        && m->guest.st_dev==n->initial_boundary.device && m->guest.st_ino==n->initial_boundary.inode
-        ? n->initial_boundary.object : NULL;
+const struct md_inode_mount_boundaries *md_mount_namespace_initial_boundary(const struct md_mount_namespace *n) {
+    if (!n || !n->initial_boundary.count || n->root!=&n->base || n->base.source>=0
+            || !n->tree || n->tree->count!=n->initial_boundary.count) return NULL;
+    for (unsigned i=0;i<n->initial_boundary.count;++i) {
+        const struct md_view_mount *m=&n->tree->mounts[i];
+        if (m->id!=n->initial_boundary.mounts[i].id || m->detached
+                || m->parent!=n->initial_boundary.mounts[i].parent
+                || m->guest.st_dev!=n->initial_boundary.mounts[i].device
+                || m->guest.st_ino!=n->initial_boundary.mounts[i].inode) return NULL;
+    }
+    return &n->initial_boundary.boundaries;
 }

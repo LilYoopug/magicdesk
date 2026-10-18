@@ -23,6 +23,13 @@ struct md_fs_work {
     /* Supervisor-only admission. A held completion retains its owner and is
      * retried by dispatch after the owner releases its barrier. */
     int (*ready)(struct md_fs_work *);
+    /* Worker-only continuation admission. run may install this after sending
+     * an asynchronous request. No borrowed filesystem state or store window
+     * may survive run's return. The producer publishes before signaling the
+     * worker wake owner. Cancellation must also wake it. A nonzero probe result
+     * resumes run exactly once; negative results are passed as its error.
+     * Cleared before resumption; a later stage may install another wait. */
+    int (*await)(struct md_fs_work *);
 };
 /* Supervisor-owned token, retained until end or worker_stop returns. Begin is
  * only a request: state==1 proves the worker has stopped all namespace work,

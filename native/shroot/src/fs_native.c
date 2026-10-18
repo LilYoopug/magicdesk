@@ -104,7 +104,8 @@ static void native_link(struct md_filesystem *fs, const char *path, int fd, mode
          * does; socket/pipe identities need no target open or namespace query. */
         int target=open(path,O_PATH|O_CLOEXEC);
         if (target<0) { out->error=-errno; return; }
-        struct md_fs_request query={.operation=MD_FS_PATH,.directory={target,-1},.origin={origin,NULL}};
+        struct md_fs_request query={.operation=MD_FS_PATH,.mode=MD_FS_PATH_DISPLAY,
+            .directory={target,-1},.origin={origin,NULL}};
         struct md_fs_output name={.data=output->data,.capacity=output->capacity};
         md_fs_view_execute(fs,&query,out,&name);
         close(target);
@@ -161,6 +162,9 @@ void md_fs_native_boundary(struct md_filesystem *fs, const struct md_inode_bound
     }
     close(fd);
 finished:
+    /* Proc access is caller-affine: a protected task can inspect itself even
+     * when this worker cannot. Retry under that task's unchanged credentials. */
+    if (out->error==-EACCES || out->error==-EPERM) out->error=-EREMOTE;
     md_fs_anchor_release(origin);
     if (order.table) {
         int error=md_fd_order_cancel(&order);

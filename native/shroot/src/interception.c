@@ -104,7 +104,8 @@ static long dispatch_files(const struct md_fs *fs, long nr, unsigned long a0, un
         return md_pid_terminal(args);
     if (nr==SYS_read || nr==SYS_write || nr==SYS_readv || nr==SYS_writev
             || nr==SYS_pread64 || nr==SYS_pwrite64 || nr==SYS_preadv || nr==SYS_pwritev
-            || nr==SYS_preadv2 || nr==SYS_pwritev2 || nr==SYS_lseek || nr==SYS_ioctl) {
+            || nr==SYS_preadv2 || nr==SYS_pwritev2 || nr==SYS_lseek || nr==SYS_ioctl || nr==SYS_splice
+            || nr==SYS_ftruncate || nr==SYS_fsync || nr==SYS_fdatasync || nr==SYS_mmap) {
         long result=md_proc_control_call(nr,args);
         if (result!=MD_WATCH_NATIVE) return result;
     }

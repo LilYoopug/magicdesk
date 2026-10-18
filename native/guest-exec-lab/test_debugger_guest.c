@@ -352,7 +352,7 @@ static void *exec_worker(void *unused) {
     (void)unused;
     execl("/bin/true","true",(char *)0); _exit(99);
 }
-static void exec_thread_test(void) {
+static void exec_thread_test(int syscalls) {
     pid_t child=fork(); assert(child>=0);
     if (!child) {
         assert(!ptrace(PTRACE_TRACEME,0,0,0)); raise(SIGSTOP);
@@ -360,9 +360,13 @@ static void exec_thread_test(void) {
         for (;;) pause();
     }
     stop(child);
-    assert(!ptrace(PTRACE_SETOPTIONS,child,0,PTRACE_O_TRACECLONE|PTRACE_O_TRACEEXEC));
-    assert(!ptrace(PTRACE_CONT,child,0,0));
-    int execs=0, status;
+    assert(!ptrace(PTRACE_SETOPTIONS,child,0,PTRACE_O_TRACECLONE|PTRACE_O_TRACEEXEC
+        |(syscalls ? PTRACE_O_TRACESYSGOOD : 0)));
+    int request=syscalls ? PTRACE_SYSCALL : PTRACE_CONT;
+    assert(!ptrace(request,child,0,0));
+    int execs=0, status, active=0, entries=0, exits=0;
+    uint64_t nr=0;
+    pid_t executing=0;
     for (;;) {
         pid_t pid=waitpid(-1,&status,__WALL);
         assert(pid>0);
@@ -373,10 +377,24 @@ static void exec_thread_test(void) {
         if ((unsigned)status>>16==PTRACE_EVENT_EXEC) {
             unsigned long former; assert(!ptrace(PTRACE_GETEVENTMSG,pid,0,&former));
             assert(pid==child && former!=(unsigned long)pid); execs++;
+            if (syscalls) { assert(former==(unsigned long)executing); active=1; nr=SYS_execve; }
+        } else if (syscalls && WSTOPSIG(status)==(SIGTRAP|0x80)) {
+            struct ptrace_syscall_info info={0};
+            assert(ptrace(PTRACE_GET_SYSCALL_INFO,pid,sizeof(info),&info)>0);
+            if (!execs) {
+                if (info.op==PTRACE_SYSCALL_INFO_ENTRY && info.entry.nr==SYS_execve) executing=pid;
+            } else if (info.op==PTRACE_SYSCALL_INFO_ENTRY) {
+                assert(!active); active=1; nr=info.entry.nr; ++entries;
+            } else {
+                assert(info.op==PTRACE_SYSCALL_INFO_EXIT && active);
+                if (nr==SYS_execve) assert(!info.exit.rval && !info.exit.is_error);
+                active=0; ++exits;
+            }
         }
-        assert(!ptrace(PTRACE_CONT,pid,0,0));
+        assert(!ptrace(request,pid,0,0));
     }
     assert(execs==1);
+    if (syscalls) assert(active && nr==SYS_exit_group && entries==exits);
 }
 static int perf_test(void) {
     struct perf_event_attr attr={.type=PERF_TYPE_SOFTWARE,.size=sizeof(attr),
@@ -518,7 +536,8 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "kill-stopped")) kill_stopped_test();
     else if (!strcmp(argv[1], "owner-exit")) owner_test(0);
     else if (!strcmp(argv[1], "exitkill")) owner_test(1);
-    else if (!strcmp(argv[1], "thread-exec")) exec_thread_test();
+    else if (!strcmp(argv[1], "thread-exec")) exec_thread_test(0);
+    else if (!strcmp(argv[1], "syscall-thread-exec")) exec_thread_test(1);
     else if (!strcmp(argv[1], "clone-untraced")) untraced_clone_test();
     else if (!strcmp(argv[1], "perf-event")) { if (!perf_test()) return 0; }
     else if (!strcmp(argv[1], "gdb-target")) gdb_target(0);

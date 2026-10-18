@@ -3,6 +3,7 @@
 #include "fs_buffer.h"
 #include "fs_worker.h"
 #include "fs_engine.h"
+#include "fs_continuation.h"
 #include "task_resources.h"
 #include "task_descriptor.h"
 #include "fd_channel.h"
@@ -23,6 +24,7 @@
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -57,6 +59,8 @@ struct md_fs_buffer_request {
     int adopted;
     int64_t position;
     struct md_fs_context context;
+    struct md_fs_continuation *continuation;
+    struct md_exec_preparation *execution;
     struct md_fs_buffer_frame *output;
     struct md_fs_request request;
     struct md_fs_buffer_open opened;
@@ -90,13 +94,15 @@ struct md_fs_buffer_request {
     int capturing;
     int export_number, exporting;
     pid_t actor;
-    int submitted, cancelled, error, executable;
+    int submitted, error, executable;
+    atomic_int cancelled;
     int reserved, delivering, finishing, delivered;
-    int task_pending, task_started, task_descriptor;
+    int task_pending, task_started;
     char path[];
 };
 static int retains_context(const struct md_fs_buffer_request *r) {
-    return r->request.operation==MD_FS_CHROOT || r->request.operation==MD_FS_MOUNT || (r->request.operation==MD_FS_TASK_PATH
+    return r->request.operation==MD_FS_CHROOT
+        || (r->request.operation==MD_FS_MOUNT && r->request.mode==MD_FS_MOUNT_PIVOT) || (r->request.operation==MD_FS_TASK_PATH
         && r->request.mode==MD_FS_TASK_FCHDIR);
 }
 void md_fs_buffer_open_release(struct md_fs_buffer_open *o) {
@@ -116,6 +122,8 @@ int md_fs_buffer_open_take(struct md_fs_buffer_request *r, struct md_fs_buffer_o
     *out=r->opened; r->opened=(struct md_fs_buffer_open){.fd=-1}; return 1;
 }
 static void dispose(struct md_fs_buffer_request *r) {
+    if (r->continuation) r->continuation->destroy(r->continuation);
+    md_exec_preparation_destroy(r->execution);
     if (r->fifo_control>=0) close(r->fifo_control);
     if (r->control_descriptor>=0) close(r->control_descriptor);
     md_landlock_release(r->landlock);
@@ -158,9 +166,8 @@ static void dispose(struct md_fs_buffer_request *r) {
 int md_fs_buffer_task_pending(const struct md_fs_buffer_request *r) {
     return r && r->task_pending;
 }
-int md_fs_buffer_task_start(struct md_fs_buffer_request *r, int descriptor) {
-    if (!md_fs_buffer_task_pending(r) || r->task_started || descriptor!=r->task_descriptor
-            || md_fd_order_state(&r->files)!=MD_RESOURCE_ORDER_RUNNING
+int md_fs_buffer_task_start(struct md_fs_buffer_request *r) {
+    if (!md_fs_buffer_task_pending(r) || r->task_started
             || md_fs_order_state(&r->order)!=MD_RESOURCE_ORDER_RUNNING) return -EINVAL;
     r->task_started=1; return 0;
 }
@@ -316,7 +323,7 @@ int md_fs_buffer_child(struct md_fs_buffer_service *s, pid_t pid, int status) {
     return 1;
 }
 static void submit(struct md_fs_buffer_request *r, int error) {
-    if (r->files.table && !retains_context(r)) {
+    if (r->files.table) {
         int released=md_fd_order_complete(&r->files);
         if (!error) error=released;
     }
@@ -514,10 +521,43 @@ static int resolve_proc_objects(struct md_fs_buffer_request *r) {
     return 0;
 }
 static void prepare_open(struct md_fs_buffer_request *,struct md_filesystem *);
+static int continuation_ready(struct md_fs_work *work) {
+    struct md_fs_buffer_request *r=(void *)work;
+    int ready=atomic_load(&r->cancelled) ? -ECANCELED : r->execution ? md_exec_preparation_ready(r->execution)
+        : r->continuation->ready(r->continuation);
+    if (ready<=0 || !retains_context(r)) return ready;
+    /* The worker owns the request until publication. Reacquire only after the
+     * daemon's reply; a daemon sharing CLONE_FS must be free to answer first. */
+    if (!r->order.fs) {
+        int error=md_fs_order_begin(r->context.task.fs,&r->order,md_fs_worker_wakeup(r->service->worker));
+        if (error<=0) return error;
+    }
+    if (md_fs_order_state(&r->order)!=MD_RESOURCE_ORDER_READY) return 0;
+    int error=md_fs_order_start(&r->order);
+    return error ? error : ready;
+}
+static int execute_context(struct md_fs_buffer_request *r,struct md_fs_result *result,struct md_fs_output *output) {
+    struct md_fs_continuation *previous=r->continuation;
+    output->continuation=&r->continuation;
+    if (previous) md_fs_context_resume(&r->context,previous,result,output);
+    else md_fs_context_execute(&r->context,&r->request,result,output);
+    if (md_fs_continuation_pending(previous,&r->continuation,result)) {
+        if (r->order.fs) {
+            int error=md_fs_order_complete(&r->order);
+            if (error) { r->error=error; return 0; }
+        }
+        r->work.await=continuation_ready; return 0;
+    }
+    return 1;
+}
 static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
     struct md_fs_buffer_request *r=(void *)work;
     r->error=error;
-    if (error) return;
+    if (error) {
+        if (r->continuation) { r->continuation->destroy(r->continuation); r->continuation=NULL; }
+        md_exec_preparation_destroy(r->execution); r->execution=NULL;
+        return;
+    }
     if (r->adopted) {
         r->adopted=0;
         prepare_open(r,fs); return;
@@ -539,12 +579,13 @@ static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
          * provider boundary. Only its delegation marker leaves this worker. */
         char boundary[PATH_MAX];
         struct md_fs_output output={.data=boundary,.capacity=sizeof(boundary)};
-        md_fs_context_execute(&r->context,&r->request,&r->status_result,&output);
+        execute_context(r,&r->status_result,&output);
         return;
     }
     if (r->executable) {
         r->error=md_fs_command_prepare(&r->context,&r->request,&r->proc_image,&r->output->command,&r->images,
-            &r->image_origin);
+            &r->image_origin,&r->execution);
+        if (r->error==-EINPROGRESS) { r->error=0; r->work.await=continuation_ready; }
         return;
     }
     struct md_fs_response *reply=&r->output->reply;
@@ -579,7 +620,7 @@ static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
         reply->result.fd=fd;
         md_fs_context_capture_result(&r->context,&reply->result,&r->opened.origin);
         r->request.flags=r->snapshot.flags;
-    } else md_fs_context_execute(&r->context,&r->request,&reply->result,&output);
+    } else if (!execute_context(r,&reply->result,&output)) return;
     r->reserved=(output.reserve_watch || output.directory_position)
         && !reply->result.error && !reply->result.host_path;
     r->opened.fd=reply->result.fd; reply->result.fd=-1;
@@ -664,6 +705,7 @@ void md_fs_buffer_service_destroy(struct md_fs_buffer_service *s) {
 static struct md_fs_buffer_request *request_new(struct md_fs_buffer_service *s,pid_t actor,size_t extra) {
     struct md_fs_buffer_request *r=calloc(1,sizeof(*r)+extra);
     if (!r) return NULL;
+    atomic_init(&r->cancelled,0);
     r->service=s; r->actor=actor; r->opened.fd=r->control_descriptor=r->fifo_control=-1;
     r->images=(struct md_command_images){.program=-1,.loader=-1};
     r->snapshot.fd=-1; r->captured[0]=r->captured[1]=-1;
@@ -766,7 +808,6 @@ static int begin(struct md_fs_buffer_service *s, pid_t actor, struct md_guest_do
     r->snapshot=(struct md_file_snapshot){.fd=-1,.flags=snapshot_flags};
     r->snapshot_phase=snapshot ? SNAPSHOT_BEGIN : SNAPSHOT_NONE;
     r->request=q;
-    r->task_descriptor=q.directory[0];
     error=md_buffer_pin(buffer,&r->buffer);
     if (!error) {
         r->output=span.data;
@@ -820,12 +861,9 @@ int md_fs_buffer_adopt(struct md_fs_buffer_service *s,pid_t actor,struct md_gues
     int error=md_buffer_span(buffer,&span);
     if (error) return error;
     if (span.size<sizeof(struct md_fs_buffer_frame)) return -EINVAL;
-    struct md_fs_buffer_request *r=calloc(1,sizeof(*r));
+    struct md_fs_buffer_request *r=request_new(s,actor,0);
     if (!r) return -ENOMEM;
-    r->service=s; r->actor=actor; r->output=span.data;
-    r->opened.fd=r->control_descriptor=r->fifo_control=r->snapshot.fd=-1;
-    r->images=(struct md_command_images){.program=-1,.loader=-1};
-    r->captured[0]=r->captured[1]=-1;
+    r->output=span.data;
     r->request=(struct md_fs_request){.actor=actor,.operation=operation,.flags=flags,.directory={-1,-1}};
     error=md_buffer_pin(buffer,&r->buffer);
     if (!error) error=md_task_registry_read(s->tasks,actor,0,&r->context.task);
@@ -854,11 +892,9 @@ int md_fs_buffer_inspect_begin(struct md_fs_buffer_service *s, pid_t actor, stru
     struct md_fs_buffer_frame *frame=span.data;
     unsigned count=frame->rights.count;
     if (!count || count>253) return -EINVAL;
-    struct md_fs_buffer_request *r=calloc(1,sizeof(*r)+count*sizeof(int));
+    struct md_fs_buffer_request *r=request_new(s,actor,count*sizeof(int));
     if (!r) return -ENOMEM;
-    r->service=s; r->actor=actor; r->output=frame; r->opened.fd=r->control_descriptor=r->fifo_control=-1;
-    r->images=(struct md_command_images){.program=-1,.loader=-1};
-    r->snapshot.fd=-1; r->captured[0]=r->captured[1]=-1;
+    r->output=frame;
     r->received=md_received_fds_retain(sources); r->received_count=count;
     memcpy(r->path,frame->rights.index,count*sizeof(int));
     for (unsigned i=0;i<count && !error;++i) {
@@ -1018,6 +1054,7 @@ int md_fs_buffer_progress(struct md_fs_buffer_service *s) {
             if (base>=0 && ((!i && (r->request.operation==MD_FS_FSCONFIG || r->request.operation==MD_FS_FSMOUNT
                         || r->request.operation==MD_FS_BPF || r->request.operation==MD_FS_LANDLOCK))
                     || (i==1 && r->request.operation==MD_FS_FDINFO)
+                    || (i==1 && r->request.operation==MD_FS_MOUNT && r->request.mode==MD_FS_MOUNT_FUSE)
                     || (bind_source
                         && r->request.path[i] && !*r->request.path[i]))
                     && s->control_query) {
@@ -1093,7 +1130,7 @@ void md_fs_buffer_cancel(struct md_fs_buffer_request **owner) {
         md_open_job_cancel(&r->opening);
         return;
     }
-    if (r->submitted) return;
+    if (r->submitted) { md_fs_worker_wake(r->service->worker); return; }
     /* Once offered, a lost acknowledgement cannot prove that bytes were not
      * copied. Retire the reservation instead of duplicating delivered events. */
     if (r->reserved && !finish(r,r->delivering)) return;

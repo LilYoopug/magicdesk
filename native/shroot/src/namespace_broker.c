@@ -34,6 +34,7 @@
 #include <unistd.h>
 #include <linux/futex.h>
 #include <time.h>
+#include "fs_continuation.h"
 
 enum { EXECUTION_BURST_CALLS=32, EXECUTION_BURST_NS=100000 };
 
@@ -48,6 +49,7 @@ struct operation {
     uint64_t sequence;
     uintptr_t captured_path[2];
     struct md_fs_context context;
+    struct md_fs_continuation *continuation;
     struct md_fd_order order;
     struct md_fs_order fs_order;
     struct md_ofd_order cursor;
@@ -358,10 +360,14 @@ static void execute(struct operation *op,
         .origin=op->request.operation==MD_FS_OPEN ? &op->output_origin : NULL,
         .native_open_plan=op->native_plan,
         .birth=op->native_plan && op->owner->retire ? &op->birth : NULL,
-        .control=op->owned_open && op->owner->control ? control_open : NULL,.control_context=op};
+        .control=op->owned_open && op->owner->control ? control_open : NULL,.control_context=op,
+        .continuation=&op->continuation};
     if (valid(op)) {
         op->executed=1;
-        md_fs_context_execute(&op->context, &op->request, &op->result, &output);
+        struct md_fs_continuation *previous=op->continuation;
+        if (previous) md_fs_context_resume(&op->context,previous,&op->result,&output);
+        else md_fs_context_execute(&op->context, &op->request, &op->result, &output);
+        md_fs_continuation_pending(previous,&op->continuation,&op->result);
         /* Read-scope admission has not performed the open. A signal before
          * its unscoped attempt must retain EINTR/restart, not a saved errno. */
         if (op->result.error==-EAGAIN && op->result.open_completion.kind==MD_OPEN_NEEDS_WRITE)
@@ -401,6 +407,7 @@ static int recycle(struct md_namespace_broker *b, struct operation *op) {
     if (cleared) return cleared;
     cleared=md_inode_birth_discard(&op->birth);
     if (cleared) return cleared;
+    if (op->continuation) { op->continuation->destroy(op->continuation); op->continuation=NULL; }
     md_fd_loan_end(op->custody); md_fd_loan_release(op->custody); op->custody=NULL;
     if (op->directory >= 0) close(op->directory);
     if (op->second_directory>=0) close(op->second_directory);
@@ -568,7 +575,10 @@ static int capture(struct operation *op) {
         } else {
             struct md_fd_object *object=md_fd_origins_object(op->context.task.files,base,NULL);
             *origin=md_fs_anchor_retain(md_fs_anchor_from_object(object));
-            int unsupported=object && !*origin;
+            /* A retained path identifies metadata, not an ordinary directory
+             * stream. Typed IO must keep the descriptor owner's cursor. */
+            int unsupported=object && (!*origin || (op->request.operation==MD_FS_GETDENTS
+                && (md_fd_object_selectors(object)&(1U<<MD_FD_SELECTOR_PROC))));
             md_fd_object_release(object);
             if (unsupported) return 0;
             /* The table turn authenticates the number; the retained anchor
@@ -888,7 +898,7 @@ static int perform(struct md_namespace_broker *b, struct operation *op, int prep
         struct md_execution_window *window) {
     struct counters *count=!op->channel && b->counts && (unsigned)op->notification.data.nr<512
         ? &b->counts[op->notification.data.nr] : NULL;
-    if (prepared>0 && !op->cursor.owner) {
+    if (prepared>0 && !op->cursor.owner && !op->continuation) {
         if (op->order.table && md_fd_order_state(&op->order)==MD_RESOURCE_ORDER_READY) {
             int error=md_fd_order_start(&op->order);
             if (error) return error;
@@ -937,7 +947,7 @@ static int perform(struct md_namespace_broker *b, struct operation *op, int prep
             }
         }
     }
-    if (prepared>0 && op->cursor.owner) {
+    if (prepared>0 && op->cursor.owner && !op->continuation) {
         int error=md_ofd_order_start(&op->cursor);
         if (error) return error;
     }
@@ -962,6 +972,16 @@ static int perform(struct md_namespace_broker *b, struct operation *op, int prep
                 execute(op,b->output,sizeof(b->output));
             }
             md_cost_end(cost,start);
+            if (op->continuation) {
+                if (op->order.table) {
+                    int error=md_fd_order_complete(&op->order); if (error) return error;
+                }
+                /* EVENT_WAIT: provider reply or exact caller cancellation.
+                 * Captured operands survive, but shared table/store turns do
+                 * not block the daemon that must answer this request. */
+                op->waiting=b->waiting; b->waiting=op;
+                return window ? md_execution_window_end(window) : 0;
+            }
         }
         else op->result.error=prepared;
         struct md_cost *cost=b->counts ? &b->reply : NULL;
@@ -1151,7 +1171,9 @@ static int progress(struct md_namespace_broker *b,struct md_execution_window *wi
             continue;
         }
         int alive=valid(op);
-        if (alive && (op->cursor.owner
+        if (op->continuation) {
+            if (alive && !op->continuation->ready(op->continuation)) { at=&op->waiting; continue; }
+        } else if (alive && (op->cursor.owner
                 ? md_ofd_order_state(&op->cursor)!=MD_RESOURCE_ORDER_READY
                 : md_fd_order_state(&op->order)!=MD_RESOURCE_ORDER_READY
                     && md_fs_order_state(&op->fs_order)!=MD_RESOURCE_ORDER_READY)) { at=&op->waiting; continue; }

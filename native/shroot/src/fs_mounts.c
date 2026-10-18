@@ -443,6 +443,7 @@ int md_fs_mounts_copy(struct md_filesystem *fs, const struct md_fs_location *roo
                 ? &copy->tree->mounts[a->parent-source->mounts] : &copy->base};
         /* Count partially built entries so rollback closes every acquired FD. */
         ++copy->tree->count;
+        if (b->detached) atomic_store_explicit(&copy->detached_mounts,1,memory_order_relaxed);
         r=md_mount_id_allocate(&b->id);
         if (!r && (b->source=fcntl(a->source,F_DUPFD_CLOEXEC,3))<0) r=-errno;
         if (!r && (b->target=fcntl(a->target,F_DUPFD_CLOEXEC,3))<0) r=-errno;
@@ -459,7 +460,10 @@ int md_fs_mounts_copy(struct md_filesystem *fs, const struct md_fs_location *roo
         copy->root=&copy->tree->mounts[fs->mounts->root-source->mounts];
     if (!r && md_mount_namespace_initial_boundary(fs->mounts)) {
         copy->initial_boundary=fs->mounts->initial_boundary;
-        copy->initial_boundary.id=copy->tree->mounts[0].id;
+        for (unsigned i=0;i<copy->initial_boundary.count;++i) {
+            copy->initial_boundary.mounts[i].id=copy->tree->mounts[i].id;
+            copy->initial_boundary.mounts[i].parent=copy->tree->mounts[i].parent;
+        }
     }
     struct md_fs_location selected=*root;
     if (!r && origin) {
@@ -474,6 +478,10 @@ int md_fs_mounts_copy(struct md_filesystem *fs, const struct md_fs_location *roo
         }
     }
     if (r) md_mount_namespace_release(copy);
-    else { md_mount_family_join(copy,fs->mounts); *out=copy; *copied_root=selected; }
+    else {
+        md_mount_family_join(copy,fs->mounts);
+        md_mount_family_retire(copy);
+        *out=copy; *copied_root=selected;
+    }
     return r;
 }

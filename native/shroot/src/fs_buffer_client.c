@@ -63,7 +63,7 @@ static long receive_result(struct md_fs_buffer_frame *frame, const struct md_fs_
                 || !md_prefix(frame->source,"/proc/")) result=-EPROTO;
         else if (q->mode==MD_FS_TASK_CHDIR) out->result.error=(int)RAW1(chdir,frame->source);
         else if (q->mode==MD_FS_TASK_FCHDIR) {
-            long changed=RAW1(fchdir,q->directory[0]);
+            long changed=RAW1(chdir,frame->source);
             long completed=md_guest_buffer_control(MD_FS_BUFFER_TASK_DONE,(unsigned long)changed,0);
             out->result.error=(int)(completed ? completed : changed);
         }

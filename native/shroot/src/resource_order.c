@@ -45,7 +45,7 @@ void md_resource_wakeup_release(struct md_resource_wakeup *wake) {
     if (wake->reader>=0) close(wake->reader);
     free(wake);
 }
-static int signal_ready(struct md_resource_wakeup *wake) {
+int md_resource_wakeup_signal(struct md_resource_wakeup *wake) {
     return wake ? md_event_signal(wake->fd) : 0;
 }
 int md_resource_order_begin(struct md_resource_queue *q, struct md_resource_order *op, struct md_resource_wakeup *wake) {
@@ -87,7 +87,7 @@ static int retire(struct md_resource_order *op) {
         next=md_resource_wakeup_retain(q->first->wakeup);
     }
     pthread_mutex_unlock(&q->lock);
-    int error=signal_ready(next);
+    int error=md_resource_wakeup_signal(next);
     md_resource_wakeup_release(next); md_resource_wakeup_release(owner);
     return error;
 }

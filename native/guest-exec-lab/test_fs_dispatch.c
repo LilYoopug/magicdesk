@@ -1082,12 +1082,16 @@ static void buffer_cwd_delivery(struct md_fs_buffer_service *service, struct md_
         assert(md_fs_buffer_task_pending(request) && !frame->reply.result.error
             && buffered_open.fd==-1 && frame->transfer==MD_FS_BUFFER_TASK_PATH);
         struct md_fd_order files={0}; struct md_fs_order fs={0};
-        assert(!md_fd_order_begin(resources->files,&files,wake));
+        assert(md_fd_order_begin(resources->files,&files,wake)==1);
         assert(!md_fs_order_begin(resources->fs,&fs,wake));
-        assert(md_fs_buffer_task_start(request,fd+1)==-EINVAL);
+        /* Input capture no longer leases the caller's descriptor number. */
+        int replacement=open("/",O_PATH|O_DIRECTORY|O_CLOEXEC); assert(replacement>=0);
+        assert(dup3(replacement,fd,O_CLOEXEC)==fd && !close(replacement));
+        struct stat captured; assert(!stat(frame->source,&captured));
+        assert(captured.st_dev==expected.st_dev && captured.st_ino==expected.st_ino);
         if (scenario!=2 && scenario!=4) {
-            assert(!md_fs_buffer_task_start(request,fd));
-            assert(md_fs_buffer_task_start(request,fd)==-EINVAL);
+            assert(!md_fs_buffer_task_start(request));
+            assert(md_fs_buffer_task_start(request)==-EINVAL);
         }
         if (scenario<2 || scenario==4) assert(!md_fs_buffer_task_finish(&request,scenario ? -EACCES : 0));
         else md_fs_buffer_cancel(&request);
@@ -1107,10 +1111,12 @@ static void buffer_cwd_delivery(struct md_fs_buffer_service *service, struct md_
         md_fs_anchor_release(cwd);
         assert(!md_fs_order_complete(&fs) && !md_fd_order_complete(&files));
         assert(!md_domain_set_cwd(resources->fs,base));
+        replacement=open("/data/local/tmp",O_PATH|O_DIRECTORY|O_CLOEXEC); assert(replacement>=0);
+        assert(dup3(replacement,fd,O_CLOEXEC)==fd && !close(replacement));
         assert(fcntl(fd,F_GETFD)==FD_CLOEXEC && all_fds()==before+1);
     }
     assert(!close(fd) && all_fds()==before);
-    puts("PASS task-affine cwd: exact descriptor, ordered FS/files publication, native error, pre-entry denial, pre-call and terminal cancellation");
+    puts("PASS task-affine cwd: captured object despite FD reuse, ordered FS publication, native error, pre-call and terminal cancellation");
 }
 static void buffer_cwd_capture(struct md_fs_buffer_service *service, struct md_fs_worker *worker,
         const struct md_task_resources *resources, const struct md_interception_buffer *buffer,
@@ -1766,6 +1772,7 @@ void md_test_ipc_origin_child(const char *,int,unsigned);
 void md_test_ipc_origin_guest(const char *,const char *);
 void md_test_namespace_broker(const char *);
 void md_test_input_session(const char *);
+void md_test_fuse_device(const char *);
 void md_test_mount_copy_service(const char *);
 static void operation_window(struct md_inode_store *s) {
     int fd=md_inode_create(s,-1,"scope-data",0600); assert(fd>=0 && !close(fd));
@@ -1830,13 +1837,16 @@ static void operation_window(struct md_inode_store *s) {
     puts("PASS operation windows: access, readlink, metadata, mutations and both operand authorities");
 }
 int main(int argc, char **argv) {
+    extern void md_test_fs_deferred(const char *);
     extern void md_test_prepare_libc_descriptors(void);
     md_test_prepare_libc_descriptors();
     if (argc==3 && !strcmp(argv[1],"--input")) { md_test_input_session(argv[2]); return 0; }
+    if (argc==3 && !strcmp(argv[1],"--fuse-device")) { md_test_fuse_device(argv[2]); return 0; }
     if (argc==3 && !strcmp(argv[1],"--worker-pause")) {
         alarm(30); setbuf(stdout,NULL);
         struct md_inode_store *store=NULL; assert(!md_inode_store_open(argv[2],1,&store));
-        md_inode_store_close(store); worker_pause(argv[2]); md_test_mount_copy_service(argv[2]); return 0;
+        md_inode_store_close(store); worker_pause(argv[2]); md_test_mount_copy_service(argv[2]);
+        md_test_fs_deferred(argv[2]); return 0;
     }
     if (argc==3 && !strcmp(argv[1],"--broker-directory")) { md_test_namespace_broker(argv[2]); return 0; }
     if (argc==3 && !strcmp(argv[1],"--ipc-peer")) { md_test_ipc_peer_worker(argv[2]); return 0; }
@@ -1863,6 +1873,7 @@ int main(int argc, char **argv) {
     }
     queue_failure(store);
     worker_pause(store);
+    md_test_fs_deferred(store);
     md_test_mount_copy_service(store);
     buffer_service_lifetime(store,MD_FS_OPEN);
     buffer_service_lifetime(store,MD_FS_TEMPORARY);

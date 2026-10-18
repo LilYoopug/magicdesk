@@ -11,6 +11,7 @@
 #include "ofd_order.h"
 #include "input_session.h"
 #include "device_events.h"
+#include "device_tree.h"
 #include "network_resolver.h"
 #include "libc_registry.h"
 #include <errno.h>
@@ -43,6 +44,7 @@ struct md_fs_worker {
     struct md_device_events *device_events;
     struct md_fs_work *completed, **completed_tail;
     struct md_fs_work *submitted, **submitted_tail;
+    struct md_fs_work *waiting, **waiting_tail; /* worker-only continuations */
     int stopping;
     int notification_fd, exited;
     void *notification_context;
@@ -64,9 +66,40 @@ static struct md_fs_work *take_submitted(struct md_fs_worker *w, int *stopping) 
     pthread_mutex_unlock(&w->lock);
     return work;
 }
+static int paused(void *);
+static void execute_work(struct md_fs_worker *w,struct md_filesystem *fs,
+        struct md_fs_work *work,int error) {
+    int64_t start=md_cost_begin(w->statistics ? &w->execution : NULL);
+    work->await=NULL;
+    work->run(work,error ? NULL : fs,error);
+    if (w->statistics) md_cost_end(&w->execution,start);
+    if (work->await && !error) {
+        work->next=NULL;
+        *w->waiting_tail=work; w->waiting_tail=&work->next;
+    } else {
+        work->await=NULL;
+        md_fs_worker_publish(w,work);
+    }
+}
+static void resume_ready(struct md_fs_worker *w,struct md_filesystem *fs) {
+    /* Detach this pass so a multi-stage continuation is not resumed twice in
+     * the same pass. No wait exists on ordinary synchronous workloads. */
+    struct md_fs_work *list=w->waiting;
+    w->waiting=NULL; w->waiting_tail=&w->waiting;
+    unsigned resumed=0;
+    while (list) {
+        struct md_fs_work *work=list; list=work->next; work->next=NULL;
+        int state=0;
+        if (resumed<32 && !paused(w)) state=work->await(work);
+        if (state) { ++resumed; execute_work(w,fs,work,state<0 ? state : 0); }
+        else { *w->waiting_tail=work; w->waiting_tail=&work->next; }
+    }
+    if (resumed==32) md_queue_signal_send(&w->wake);
+}
 static void run_ready(void *context, struct md_filesystem *fs) {
     struct md_fs_worker *w = context;
     md_queue_signal_acknowledge(&w->wake);
+    if (w->waiting) resume_ready(w,fs);
     /* Bound a producer burst without starving socket requests, notifications
      * or stop readiness. No queue lock covers execution or publication. */
     for (unsigned i=0;i<32;++i) {
@@ -74,10 +107,7 @@ static void run_ready(void *context, struct md_filesystem *fs) {
         struct md_fs_work *work=take_submitted(w,&stopping);
         if (!work) return;
         if (w->statistics) md_cost_end(&w->queued,work->queued_at);
-        int64_t start=md_cost_begin(w->statistics ? &w->execution : NULL);
-        work->run(work,stopping ? NULL : fs,stopping ? -ESHUTDOWN : 0);
-        if (w->statistics) md_cost_end(&w->execution,start);
-        md_fs_worker_publish(w,work);
+        execute_work(w,fs,work,stopping ? -ESHUTDOWN : 0);
     }
     pthread_mutex_lock(&w->lock); int more=w->submitted && !w->pause; pthread_mutex_unlock(&w->lock);
     if (more) md_queue_signal_send(&w->wake);
@@ -138,8 +168,10 @@ static void *run(void *context) {
     }
     w->network=NULL;
     struct md_input_session *input=NULL;
-    struct md_provider_tree *sysfs=NULL;
+    struct md_provider_tree *sysfs=NULL,*devices=NULL;
     if (!error) error=md_fs_sysfs_prepare(&fs,&sysfs);
+    if (!error) error=md_fs_devices_prepare(&fs,w->input && w->input->endpoint,&devices);
+    fs.devices=devices;
     if (!error) {
         w->device_events=md_device_events_new();
         if (!w->device_events) error=-errno;
@@ -167,16 +199,21 @@ static void *run(void *context) {
         error = md_fs_serve(&fs, listener, w->stop, 5000, w->statistics ? &rpc : NULL, &source);
     }
     pthread_mutex_lock(&w->lock); w->stopping=1; pthread_mutex_unlock(&w->lock);
+    while (w->waiting) {
+        struct md_fs_work *work=w->waiting; w->waiting=work->next; work->next=NULL;
+        execute_work(w,NULL,work,error ? error : -ESHUTDOWN);
+    }
+    w->waiting_tail=&w->waiting;
     for (;;) {
         int stopping;
         struct md_fs_work *work=take_submitted(w,&stopping);
         if (!work) break;
-        work->run(work,NULL,error ? error : -ESHUTDOWN);
-        md_fs_worker_publish(w,work);
+        execute_work(w,NULL,work,error ? error : -ESHUTDOWN);
     }
     if (listener >= 0) close(listener);
     md_input_session_stop(input);
     md_provider_tree_release(sysfs);
+    md_provider_tree_release(devices);
     md_device_events_stop(w->device_events);
     md_fs_mounts_close(&fs);
     md_libc_registry_close(fs.libc_registry);
@@ -230,6 +267,7 @@ int md_fs_worker_start(const char *store, const char *endpoint, const char *admi
     }
     w->completed_tail = &w->completed;
     w->submitted_tail = &w->submitted;
+    w->waiting_tail = &w->waiting;
     int *fds[] = {&w->stop, &w->ready};
     int error = pthread_mutex_init(&w->lock, NULL);
     if (error) { free(w); return -error; }

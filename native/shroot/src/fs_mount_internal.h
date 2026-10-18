@@ -78,6 +78,7 @@ int md_fs_mount_overlay(struct md_filesystem *, const struct md_fs_request *, st
 int md_fs_private_mounts_parent(struct md_inode_store *);
 int md_fs_provider_mount(struct md_filesystem *,struct md_provider_tree *,const char *);
 int md_fs_sysfs_prepare(struct md_filesystem *,struct md_provider_tree **);
+int md_fs_initial_boundaries_capture(struct md_filesystem *);
 
 enum { MD_VIEW_BUCKETS = 4096, MD_VIEW_OBJECT_LIMIT = 65536 };
 static inline int md_view_base(const struct md_mount_namespace *view, const struct md_view_mount *m) {
@@ -166,6 +167,12 @@ int md_view_location_mountpoint(struct md_view_location *);
 int md_view_task_path(struct md_filesystem *, int, const char *, const char *, uint64_t, int native_devices);
 int md_view_walk(struct md_filesystem *, int base, const struct md_fs_anchor *, const char *path, int follow, int missing,
         uint64_t resolve, struct md_view_location *);
+struct md_view_walk_pending;
+int md_view_walk_async(struct md_filesystem *,int base,const struct md_fs_anchor *,const char *,int follow,int missing,
+    uint64_t resolve,struct md_view_location *,struct md_view_walk_pending **);
+int md_view_walk_ready(struct md_view_walk_pending *);
+int md_view_walk_resume(struct md_filesystem *,struct md_view_walk_pending *,struct md_view_location *);
+void md_view_walk_destroy(struct md_view_walk_pending *);
 void md_view_location_close(struct md_view_location *);
 int md_view_fdpath(int fd, char *, size_t);
 int md_mount_id_allocate(unsigned *);

@@ -34,7 +34,7 @@ enum { MD_LL_CREATE=1, MD_LL_ADD, MD_LL_RESTRICT };
 enum md_fs_mount_operation { MD_FS_MOUNT_BIND=1, MD_FS_MOUNT_REMOUNT,
     MD_FS_MOUNT_PROPAGATION, MD_FS_MOUNT_UMOUNT, MD_FS_MOUNT_TMPFS, MD_FS_MOUNT_OVERLAY, MD_FS_MOUNT_PIVOT,
     MD_FS_MOUNT_MOVE, MD_FS_MOUNT_PROC, MD_FS_MOUNT_DEVPTS, MD_FS_MOUNT_CGROUP, MD_FS_MOUNT_CGROUP2,
-    MD_FS_MOUNT_SYSFS, MD_FS_MOUNT_MQUEUE, MD_FS_MOUNT_MOVE_FD, MD_FS_MOUNT_SETATTR };
+    MD_FS_MOUNT_SYSFS, MD_FS_MOUNT_MQUEUE, MD_FS_MOUNT_MOVE_FD, MD_FS_MOUNT_SETATTR, MD_FS_MOUNT_FUSE };
 enum { MD_FS_VALUE_MAX=65536, MD_FS_OUTPUT_MAX=MD_IPC_IDENTITY_MAX };
 enum md_fs_xattr { MD_FS_XATTR_GET=1, MD_FS_XATTR_SET, MD_FS_XATTR_LIST, MD_FS_XATTR_REMOVE };
 static inline int md_fs_operation_value(unsigned operation) {
@@ -159,5 +159,7 @@ struct md_fs_output {
     int (*control)(void *,const struct md_control_file_ops *,void *,const struct md_identity *,int);
     void *control_context;
     struct md_landlock_policy **landlock;
+    /* Optional owned continuation, only with result.error == -EINPROGRESS. */
+    struct md_fs_continuation **continuation;
 };
 #endif

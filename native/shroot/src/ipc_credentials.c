@@ -85,7 +85,7 @@ int md_ipc_credentials_open(const char *store, enum md_ipc_ancillary_transport o
     if (!r && !first && errno != EWOULDBLOCK) r = -errno;
     s->directory=dir;
     if (!r) r=md_database_open(dir,"credentials.db",1,&s->db);
-    if (!r && first) r = execute(s, "DROP TABLE IF EXISTS endpoints;DROP TABLE IF EXISTS connections;DROP TABLE IF EXISTS messages;DROP TABLE IF EXISTS native_sockets;DROP TABLE IF EXISTS datagrams;");
+    if (!r && first) r = execute(s, "DROP TABLE IF EXISTS endpoints;DROP TABLE IF EXISTS connections;DROP TABLE IF EXISTS messages;DROP TABLE IF EXISTS native_sockets;DROP TABLE IF EXISTS datagrams;DROP TABLE IF EXISTS socket_paths;");
     if (!r && first && unlinkat(dir,"auth",0) && errno!=ENOENT) r=-errno;
     if (!r && first && unlinkat(dir,"auth.pending",0) && errno!=ENOENT) r=-errno;
     if (!r) r = execute(s, "PRAGMA journal_mode=WAL;PRAGMA synchronous=NORMAL;"
@@ -96,6 +96,7 @@ int md_ipc_credentials_open(const char *store, enum md_ipc_ancillary_transport o
         "CREATE INDEX IF NOT EXISTS endpoint_cookie ON endpoints(cookie);"
         "CREATE TABLE IF NOT EXISTS datagrams(name BLOB PRIMARY KEY,cookie INTEGER UNIQUE,device INTEGER,inode INTEGER,link BLOB,transport INTEGER NOT NULL);"
         "CREATE TABLE IF NOT EXISTS native_sockets(cookie INTEGER PRIMARY KEY);"
+        "CREATE TABLE IF NOT EXISTS socket_paths(endpoint TEXT PRIMARY KEY,path TEXT NOT NULL);"
         "CREATE TABLE IF NOT EXISTS messages(nonce BLOB PRIMARY KEY,link BLOB,device INTEGER,inode INTEGER,pid INTEGER,uid INTEGER,gid INTEGER,side INTEGER,process BLOB);");
     /* The first live owner discards stale metadata, including cookies from an
      * earlier boot. This directory is not part of OCI/image inode metadata. */
@@ -114,6 +115,46 @@ static int socket_key(int fd, uint64_t *cookie) {
     if (type != SOCK_STREAM && type != SOCK_SEQPACKET && type != SOCK_DGRAM) return -EPROTOTYPE;
     n = sizeof(*cookie);
     return getsockopt(fd, SOL_SOCKET, SO_COOKIE, cookie, &n) ? -errno : 0;
+}
+static int private_path_endpoint(const char *name) {
+    static const char prefix[]="md-guest-inode-";
+    return !strncmp(name,prefix,sizeof(prefix)-1) && strlen(name+sizeof(prefix)-1)==32
+        && strspn(name+sizeof(prefix)-1,"0123456789abcdef")==32;
+}
+int md_ipc_socket_path_publish(struct md_ipc_credentials *s,int fd,const char *path) {
+    struct sockaddr_un address={0}; socklen_t size=sizeof(address);
+    if (!s || !path || !*path || strlen(path)>sizeof(address.sun_path)) return -EINVAL;
+    if (getsockname(fd,(void *)&address,&size)) return -errno;
+    size_t head=offsetof(struct sockaddr_un,sun_path);
+    if (address.sun_family!=AF_UNIX || size<=head+1 || size>=sizeof(address) || address.sun_path[0]) return -EINVAL;
+    address.sun_path[size-head]=0;
+    const char *endpoint=address.sun_path+1;
+    if (!private_path_endpoint(endpoint)) return -EINVAL;
+    sqlite3_stmt *q=NULL;
+    int r=statement(s,"INSERT INTO socket_paths(endpoint,path) VALUES(?1,?2)",&q);
+    if (!r) r=sql(sqlite3_bind_text(q,1,endpoint,-1,SQLITE_STATIC));
+    if (!r) r=sql(sqlite3_bind_text(q,2,path,-1,SQLITE_STATIC));
+    if (!r) r=sql(sqlite3_step(q));
+    sqlite3_finalize(q); return r;
+}
+int md_ipc_socket_path(struct md_ipc_credentials *s,const char *endpoint,char *out,size_t size) {
+    if (!s || !endpoint || !out) return -EINVAL;
+    if (!private_path_endpoint(endpoint)) return -ENOENT;
+    sqlite3_stmt *q=NULL;
+    int r=statement(s,"SELECT path FROM socket_paths WHERE endpoint=?1",&q);
+    if (!r) r=sql(sqlite3_bind_text(q,1,endpoint,-1,SQLITE_STATIC));
+    if (!r) {
+        int rc=sqlite3_step(q);
+        if (rc!=SQLITE_ROW) r=rc==SQLITE_DONE ? -ENOENT : sql(rc);
+        else {
+            const char *path=(const char *)sqlite3_column_text(q,0);
+            int bytes=sqlite3_column_bytes(q,0);
+            if (!path || bytes<=0 || (size_t)bytes!=strlen(path)) r=-EIO;
+            else if ((size_t)bytes>=size) r=-ERANGE;
+            else memcpy(out,path,(size_t)bytes+1);
+        }
+    }
+    sqlite3_finalize(q); return r;
 }
 static int optional_socket_key(int fd, uint64_t *cookie) {
     struct stat st;

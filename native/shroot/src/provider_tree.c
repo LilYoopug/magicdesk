@@ -56,11 +56,15 @@ struct md_provider_tree *md_provider_tree_retain(struct md_provider_tree *tree) 
     return tree;
 }
 struct md_provider_tree *md_provider_tree_import(int upper,int lower,const struct md_provider_tree_ops *ops) {
+    return md_provider_tree_import_context(upper,lower,ops,NULL);
+}
+struct md_provider_tree *md_provider_tree_import_context(int upper,int lower,const struct md_provider_tree_ops *ops,void *context) {
     int error=md_temporary_directory_check(upper);
     if (error) { errno=-error; return NULL; }
     struct md_provider_tree *tree=calloc(1,sizeof(*tree));
     if (!tree) return NULL;
     atomic_init(&tree->references,1); tree->upper=tree->lower=-1; tree->ops=ops;
+    tree->context=ops && ops->retain ? ops->retain(context) : context;
     tree->upper=fcntl(upper,F_DUPFD_CLOEXEC,3);
     if (tree->upper>=0 && lower>=0) tree->lower=fcntl(lower,F_DUPFD_CLOEXEC,3);
     if (tree->upper<0 || (lower>=0 && tree->lower<0)) {
@@ -92,9 +96,11 @@ int md_provider_tree_private(struct md_provider_tree *tree,int fd) {
 }
 unsigned long md_provider_tree_filesystem(struct md_provider_tree *tree) { return tree->ops ? tree->ops->filesystem : 0; }
 int md_provider_tree_readonly(struct md_provider_tree *tree,int fd) {
+    if (tree->ops && tree->ops->readonly_node) return tree->ops->readonly_node(tree->context,fd);
     return tree->ops && tree->ops->readonly ? 1 : md_provider_tree_private(tree,fd);
 }
 int md_provider_tree_path(struct md_provider_tree *tree,int fd,char *out,size_t size) {
+    if (tree->ops && tree->ops->path) return tree->ops->path(tree->context,fd,out,size);
     char path[PATH_MAX],root[PATH_MAX]; int error=fdpath(fd,path,sizeof(path));
     if (error) return error;
     int roots[]={tree->upper,tree->lower};
@@ -121,6 +127,7 @@ static int internal(const char *directory,const char *name) {
     return !strcmp(directory,"/") && !strcmp(name,MD_TEMPORARY_DIRECTORY_MARKER);
 }
 int md_provider_tree_step(struct md_provider_tree *tree,int directory,const char *name) {
+    if (tree->ops && tree->ops->lookup) return -EOPNOTSUPP;
     char path[PATH_MAX]; int error=md_provider_tree_path(tree,directory,path,sizeof(path));
     if (error) return error;
     if (internal(path,name)) return -ENOENT;
@@ -139,6 +146,12 @@ int md_provider_tree_step(struct md_provider_tree *tree,int directory,const char
     if (opaque(tree,path) || tree->lower<0 || !lower_visible(tree,path)) return -ENOENT;
     fd=openat(tree->lower,relative(path),O_PATH|O_NOFOLLOW|O_CLOEXEC);
     return fd<0 ? -errno : fd;
+}
+int md_provider_tree_lookup(struct md_provider_tree *tree,int directory,const char *name,
+        const struct md_control_actor *actor,struct md_provider_lookup **pending) {
+    if (tree->ops && tree->ops->lookup)
+        return pending ? tree->ops->lookup(tree->context,directory,name,actor,pending) : -EOPNOTSUPP;
+    return md_provider_tree_step(tree,directory,name);
 }
 struct entry { uint64_t ino; int64_t offset; uint16_t size; uint8_t type; char name[]; };
 ssize_t md_provider_tree_getdents(struct md_provider_tree *tree,int fd,void *out,size_t capacity) {

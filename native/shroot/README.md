@@ -64,6 +64,8 @@ Android kernel: actual task lifetime, descriptors, data IO and native checks
 | `supervisor.c` and task owners | Kernel tracing, continuations, guest identity, cancellation and terminal cleanup | Android windows or a second kernel scheduler |
 | `fs_worker.c`, `namespace_broker.c`, `fs_engine.c` | Captured filesystem requests and provider dispatch | Application IO through ordinary open data descriptions |
 | Inode/image owners | SQLite namespace, metadata, shared bodies, overlays, import and maintenance | Android mount privileges or kernel hardlinks |
+| `fs_continuation.c`, provider continuations | Captured asynchronous filesystem stages and cancellation | Blocking the filesystem worker while a guest daemon runs |
+| `fuse_device.c`, `fuse_session.c`, `fuse_view.c`, `fuse_file.c` | Guest FUSE transport, mount protocol, names and open descriptions | Native Android FUSE permission or a coherent shared page cache |
 | Guest adapter | Task-affine operations and protected-memory copying | SQLite, a libc dependency or app-side services |
 
 `GuestEnvironmentLibrary` and `GuestOciRegistry` are app-side management, not
@@ -123,6 +125,11 @@ use retained sources and confirmed kernel publication; cancellation releases
 unpublished resources without closing an application's installed or reused FD.
 No SQLite transaction or file-table turn may span an application readiness wait.
 Mixed poll/epoll keeps native waiting in the calling guest's signal context.
+
+[FUSE](fuse.md) uses that same descriptor and mount model. A daemon request
+suspends only its owning operation; ordinary inode/native operations do not
+enter the FUSE protocol. Detached mounts retire on last-anchor release through
+the filesystem event loop, not a periodic task or directory scan.
 
 The [inode store](inode-store.md), [filesystem service](filesystem-service.md),
 [descriptor contracts](descriptor-origins.md#descriptor-and-cwd-annotations) and

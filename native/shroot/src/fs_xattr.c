@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "fs_engine.h"
+#include "fs_continuation.h"
 #include "posix_acl.h"
 #include "inode_internal.h"
 #include <errno.h>
@@ -74,38 +75,60 @@ static void selected(struct md_filesystem *fs, const struct md_fs_request *q,
         else { out->position=result; out->size=q->capacity ? result : 0; }
     }
 }
+static void opened(struct md_filesystem *fs,const struct md_fs_request *q,
+        struct md_fs_result *open,struct md_fs_anchor **origin,struct md_fs_result *out,
+        const struct md_fs_output *output) {
+    *out=*open; out->fd=-1;
+    if (out->error) return;
+    int fd=open->fd>=0 ? open->fd : md_fs_anchor_fd(*origin);
+    selected(fs,q,fd,*origin,out,output);
+}
+static struct md_fs_request open_request(const struct md_fs_request *q) {
+    return (struct md_fs_request){.operation=MD_FS_OPEN,.directory={q->directory[0],-1},
+        .origin={q->origin[0],NULL},.path={q->path[0],NULL},
+        .flags=O_PATH|O_CLOEXEC|((q->flags&AT_SYMLINK_NOFOLLOW) ? O_NOFOLLOW : 0)};
+}
+static void planned(struct md_filesystem *fs,const struct md_fs_request *q,
+        struct md_fs_result *open,struct md_fs_anchor **origin,struct md_fs_result *out,
+        const struct md_fs_output *output) {
+    if (open->error!=-EXDEV) { opened(fs,q,open,origin,out,output); return; }
+    /* A declined native plan has no effect. Resolve the same operand through
+     * its provider, preserving a possible asynchronous path walk. */
+    struct md_fs_request request=open_request(q);
+    struct md_fs_output capture=output ? *output : (struct md_fs_output){0};
+    capture.native_open_plan=0;
+    md_fs_view_then(fs,q,&request,out,&capture,opened);
+}
 static void execute(struct md_filesystem *fs, const struct md_fs_request *q,
         struct md_fs_result *out, const struct md_fs_output *output) {
     *out=(struct md_fs_result){.fd=-1};
     int descriptor=q->operation==MD_FS_FXATTR, path=q->path[0] && *q->path[0];
     int fd=q->directory[0];
-    int owned=-1;
-    struct md_fs_anchor *opened=NULL;
     const struct md_fs_anchor *origin=q->origin[0];
     if (descriptor) {
         int flags=fcntl(fd,F_GETFL);
         if (flags<0 || (flags&O_PATH)) { out->error=flags<0 ? -errno : -EBADF; return; }
     } else if (path) {
-        struct md_fs_request open={.operation=MD_FS_OPEN,.directory={fd,-1},.origin={origin,NULL},
-            .path={q->path[0],NULL},.flags=O_PATH|O_CLOEXEC|((q->flags&AT_SYMLINK_NOFOLLOW) ? O_NOFOLLOW : 0)};
+        struct md_fs_request open=open_request(q);
         struct md_fs_output capture=output ? *output : (struct md_fs_output){0};
-        capture.origin=fs->mounts ? &opened : NULL;
-        capture.native_open_plan=!!capture.origin;
-        md_fs_view_execute(fs,&open,out,&capture);
-        if (out->error==-EXDEV && capture.native_open_plan) {
-            /* Non-inode providers and special endpoints decline before an
-             * effect. Their ordinary O_PATH selection keeps its own policy. */
-            capture.native_open_plan=0;
-            md_fs_view_execute(fs,&open,out,&capture);
-        }
-        if (out->error) return;
-        owned=out->fd;
-        fd=owned>=0 ? owned : md_fs_anchor_fd(opened);
-        out->fd=-1; origin=opened;
+        capture.native_open_plan=!!fs->mounts;
+        md_fs_view_then(fs,q,&open,out,&capture,planned); return;
     }
     selected(fs,q,fd,origin,out,output);
-    if (owned>=0) close(owned);
-    md_fs_anchor_release(opened);
+}
+static void mapped_result(struct md_filesystem *fs,const struct md_fs_request *q,
+        struct md_fs_result *result,struct md_fs_anchor **origin,struct md_fs_result *out,
+        const struct md_fs_output *output) {
+    (void)origin;
+    *out=*result; result->fd=-1;
+    const struct md_identity *id=fs->store->identity;
+    const char *name=q->path[1] ? q->path[1] : "";
+    if (!out->error && id && id->user_namespace && q->mode==MD_FS_XATTR_GET && out->size
+            && (!strcmp(name,MD_ACL_ACCESS_NAME) || !strcmp(name,MD_ACL_DEFAULT_NAME))) {
+        if (!output || !md_acl_valid(output->data,out->size)) out->error=-EIO;
+        else out->error=md_acl_map(output->data,out->size,id,0);
+        if (out->error) out->size=out->position=0;
+    }
 }
 void md_fs_xattr(struct md_filesystem *fs, const struct md_fs_request *q,
         struct md_fs_result *out, const struct md_fs_output *output) {
@@ -129,11 +152,6 @@ void md_fs_xattr(struct md_filesystem *fs, const struct md_fs_request *q,
         if (out->error) { free(value); return; }
         local=*q; local.value=value; q=&local;
     }
-    execute(fs,q,out,output);
+    md_fs_then(fs,q,q,execute,out,output,mapped_result);
     free(value);
-    if (!out->error && mapped_acl && q->mode==MD_FS_XATTR_GET && out->size) {
-        if (!output || !md_acl_valid(output->data,out->size)) out->error=-EIO;
-        else out->error=md_acl_map(output->data,out->size,id,0);
-        if (out->error) out->size=out->position=0;
-    }
 }

@@ -3,6 +3,7 @@
 #include "input_devices.h"
 #include "input_uinput.h"
 #include "device_events.h"
+#include "device_tree.h"
 #include "fs_mount_internal.h"
 #include "inode_internal.h"
 #include "event_wait.h"
@@ -26,18 +27,10 @@ enum { MAGIC=0x4d444750, VERSION=1, ADD=1, REMOVE=2, FRAME=3, NEUTRAL=4, READY=5
     MAX_PAYLOAD=4096, FEEDBACK_QUEUE=128 };
 struct header { uint32_t magic,version,type,slot,size; };
 struct feedback { struct header header; uint32_t effect,strong,weak,duration,delay,repeats; };
-struct device_nodes {
-    atomic_uint references;
-    pthread_mutex_t lock;
-    struct { struct stat identity; struct md_control_file file; } nodes[MD_INPUT_DEVICES][2];
-    struct stat uinput_identity;
-    struct md_control_file uinput;
-};
 struct md_input_session {
     struct md_input_bus *bus;
     struct md_uinput *uinput;
     struct md_device_events *events;
-    struct device_nodes *nodes;
     struct md_provider_tree *dev,*sys,*udev;
     int socket,wake,ready;
     atomic_int stopping,error;
@@ -48,34 +41,6 @@ struct md_input_session {
     unsigned head,count;
 };
 _Static_assert(sizeof(struct md_input_description)==1780,"gamepad description wire ABI");
-static void *retain_nodes(void *context) {
-    struct device_nodes *n=context;
-    atomic_fetch_add_explicit(&n->references,1,memory_order_relaxed); return n;
-}
-static void release_nodes(void *context) {
-    struct device_nodes *n=context;
-    if (atomic_fetch_sub_explicit(&n->references,1,memory_order_acq_rel)!=1) return;
-    for (unsigned i=0;i<MD_INPUT_DEVICES;++i)
-        for (unsigned j=0;j<2;++j) md_control_file_release(n->nodes[i][j].file);
-    md_control_file_release(n->uinput);
-    pthread_mutex_destroy(&n->lock); free(n);
-}
-static int control(void *context,int fd,struct md_control_file *out) {
-    struct device_nodes *n=context;
-    struct stat st;
-    if (fstat(fd,&st)) return -errno;
-    int found=0;
-    pthread_mutex_lock(&n->lock);
-    if (n->uinput.ops && md_view_same(&n->uinput_identity,&st)) {
-        *out=md_control_file_retain(n->uinput); found=1;
-    }
-    for (unsigned i=0;i<MD_INPUT_DEVICES && !found;++i) for (unsigned j=0;j<2;++j) {
-        if (!n->nodes[i][j].file.ops || !md_view_same(&n->nodes[i][j].identity,&st)) continue;
-        *out=md_control_file_retain(n->nodes[i][j].file); found=1; break;
-    }
-    pthread_mutex_unlock(&n->lock); return found;
-}
-static const struct md_provider_tree_ops device_ops={.retain=retain_nodes,.release=release_nodes,.control=control,.filesystem=TMPFS_MAGIC};
 static void feedback(void *context,const struct md_input_rumble *effect) {
     struct md_input_session *s=context;
     pthread_mutex_lock(&s->lock);
@@ -141,7 +106,7 @@ static int emit(struct md_input_session *s,unsigned slot,unsigned joy,const char
 }
 static int publish_nodes(struct md_input_session *s,unsigned slot,const struct md_input_description *d,const struct md_input_backend *backend) {
     int error=0;
-    int dev=md_provider_tree_root(s->dev),sys=md_provider_tree_root(s->sys),udev=md_provider_tree_root(s->udev);
+    int sys=md_provider_tree_root(s->sys),udev=md_provider_tree_root(s->udev);
     char base[128],path[256],target[256];
     snprintf(base,sizeof(base),"devices/virtual/input/input%u",slot);
     if ((error=directory(sys,base))) return error;
@@ -193,36 +158,28 @@ static int publish_nodes(struct md_input_session *s,unsigned slot,const struct m
         snprintf(path,sizeof(path),"data/c13:%u",minor);
         if ((error=text_file(udev,path,"I:1\nE:ID_INPUT=1\nE:ID_INPUT_JOYSTICK=1\nE:ID_BUS=virtual\nE:ID_VENDOR_ID=%04x\nE:ID_MODEL_ID=%04x\nG:seat\nG:uaccess\n",d->id.vendor,d->id.product))) return error;
         snprintf(path,sizeof(path),"input/%s",node);
-        int fd=openat(dev,path,O_CREAT|O_EXCL|O_RDONLY|O_CLOEXEC,0600);
-        if (fd<0) return -errno;
-        struct stat st; error=fstat(fd,&st) ? -errno : 0; close(fd);
-        struct md_control_file file={0}; if (!error) error=md_input_node(s->bus,slot,(int)j,&file);
+        struct md_control_file file={0}; error=md_input_node(s->bus,slot,(int)j,&file);
+        if (!error) error=md_device_tree_publish(s->dev,path,file);
+        md_control_file_release(file);
         if (error) return error;
-        pthread_mutex_lock(&s->nodes->lock);
-        s->nodes->nodes[slot][j].identity=st; s->nodes->nodes[slot][j].file=file;
-        pthread_mutex_unlock(&s->nodes->lock);
     }
     for (unsigned j=0;j<2;++j) if ((error=emit(s,slot,j,"add"))) return error;
     return 0;
 }
 static void unpublish(struct md_input_session *s,unsigned slot) {
     md_input_remove(s->bus,slot);
-    int dev=md_provider_tree_root(s->dev),sys=md_provider_tree_root(s->sys),udev=md_provider_tree_root(s->udev);
+    int sys=md_provider_tree_root(s->sys),udev=md_provider_tree_root(s->udev);
     char base[128],path[256]; snprintf(base,sizeof(base),"devices/virtual/input/input%u",slot);
     for (unsigned j=0;j<2;++j) {
         char node[32]; snprintf(node,sizeof(node),"%s%u",j ? "js" : "event",slot);
-        snprintf(path,sizeof(path),"input/%s",node); unlinkat(dev,path,0);
+        snprintf(path,sizeof(path),"input/%s",node); int removed=md_device_tree_remove(s->dev,path);
         snprintf(path,sizeof(path),"class/input/%s",node); unlinkat(sys,path,0);
         snprintf(path,sizeof(path),"dev/char/13:%u",md_input_minor(slot,(int)j)); unlinkat(sys,path,0);
         snprintf(path,sizeof(path),"data/c13:%u",md_input_minor(slot,(int)j)); unlinkat(udev,path,0);
         const char *files[]={"dev","uevent","device","subsystem"};
         for (unsigned i=0;i<4;++i) { snprintf(path,sizeof(path),"%s/%s/%s",base,node,files[i]); unlinkat(sys,path,0); }
         snprintf(path,sizeof(path),"%s/%s",base,node); unlinkat(sys,path,AT_REMOVEDIR);
-        pthread_mutex_lock(&s->nodes->lock);
-        struct md_control_file file=s->nodes->nodes[slot][j].file;
-        s->nodes->nodes[slot][j].file=(struct md_control_file){0};
-        pthread_mutex_unlock(&s->nodes->lock); md_control_file_release(file);
-        if (file.ops) emit(s,slot,j,"remove");
+        if (removed>0) emit(s,slot,j,"remove");
     }
     const char *files[]={"id/bustype","id/vendor","id/product","id/version","name","phys","uniq","uevent","properties","subsystem",
         "capabilities/ev","capabilities/key","capabilities/abs","capabilities/ff","capabilities/rel",
@@ -304,19 +261,6 @@ static void *transport(void *context) {
     if (!ready && !error) error=-ENOTCONN;
     atomic_store(&s->error,error); md_event_signal(s->ready); return NULL;
 }
-static int mount_devices(struct md_filesystem *fs,struct md_input_session *s) {
-    /* Shared memory keeps its existing inode namespace when /dev gains a
-     * device provider. No host /dev/shm directory is assumed or created. */
-    struct md_view_location shm={.fd=-1,.parent=-1},target={.fd=-1,.parent=-1};
-    int error=md_view_walk(fs,-1,NULL,"/dev/shm",1,0,0,&shm);
-    if (!error && !md_view_inode(shm.mount)) error=-EOPNOTSUPP;
-    struct md_mount_source source={.fd=shm.fd,.backing=MD_MOUNT_INODE,
-        .storage=shm.mount && shm.mount->storage ? shm.mount->storage : md_inode_store_lifetime(fs->store)};
-    if (!error) error=md_fs_provider_mount(fs,s->dev,"/dev");
-    if (!error) error=md_view_walk(fs,-1,NULL,"/dev/shm",1,0,MD_VIEW_MOUNT_TARGET,&target);
-    if (!error) error=md_view_attach_source(fs,&source,&target,NULL);
-    md_view_location_close(&target); md_view_location_close(&shm); return error;
-}
 int md_input_session_start(struct md_filesystem *fs,const struct md_input_launch *launch,
         struct md_device_events *events,struct md_provider_tree *sysfs,struct md_input_session **out) {
     if (!launch || !launch->endpoint) return 0;
@@ -330,27 +274,20 @@ int md_input_session_start(struct md_filesystem *fs,const struct md_input_launch
     int error=pthread_mutex_init(&s->lock,NULL);
     if (error) { free(s); return -error; }
     atomic_init(&s->stopping,0); atomic_init(&s->error,0);
-    s->nodes=calloc(1,sizeof(*s->nodes));
-    if (!s->nodes) { error=-ENOMEM; goto failed; }
-    atomic_init(&s->nodes->references,1);
-    error=pthread_mutex_init(&s->nodes->lock,NULL);
-    if (error) { free(s->nodes); s->nodes=NULL; error=-error; goto failed; }
     s->wake=eventfd(0,EFD_NONBLOCK|EFD_CLOEXEC); s->ready=eventfd(0,EFD_NONBLOCK|EFD_CLOEXEC);
     if (s->wake<0 || s->ready<0) { error=-errno; goto failed; }
     error=md_input_bus_new(launch->wake_fd,feedback,s,&s->bus); if (error) goto failed;
     s->events=md_device_events_retain(events);
     int parent=md_fs_private_mounts_parent(fs->store);
     if (parent<0) { error=parent; goto failed; }
-    int lower=open("/dev",O_PATH|O_DIRECTORY|O_CLOEXEC);
-    const char *dev_opaque[]={"/input"};
-    s->dev=md_provider_tree_new(parent,lower,dev_opaque,1,&device_ops,s->nodes);
-    if (lower>=0) close(lower);
+    if (fs->devices) s->dev=md_provider_tree_retain(fs->devices);
+    else error=md_fs_devices_prepare(fs,1,&s->dev);
     s->sys=md_provider_tree_retain(sysfs);
     s->udev=md_provider_tree_new(parent,-1,NULL,0,NULL,NULL);
     close(parent);
+    if (error) goto failed;
     if (!s->dev || !s->sys || !s->udev) { error=-errno; goto failed; }
     error=directory(md_provider_tree_root(s->dev),"input");
-    if (!error) error=directory(md_provider_tree_root(s->dev),"shm");
     if (!error) error=directory(md_provider_tree_root(s->udev),"data");
     if (!error) error=text_file(md_provider_tree_root(s->udev),"control","");
     const char *dirs[]={"class/input","devices/virtual/input"};
@@ -359,9 +296,10 @@ int md_input_session_start(struct md_filesystem *fs,const struct md_input_launch
     if (error) goto failed;
     struct md_uinput_publisher publisher={.context=s,.add=publish,.remove=remove_virtual};
     error=md_uinput_new(s->bus,launch->wake_fd,&publisher,&s->uinput);
-    if (!error) error=text_file(md_provider_tree_root(s->dev),"uinput","");
-    if (!error && fstatat(md_provider_tree_root(s->dev),"uinput",&s->nodes->uinput_identity,0)) error=-errno;
-    if (!error) error=md_uinput_node(s->uinput,&s->nodes->uinput);
+    struct md_control_file uinput={0};
+    if (!error) error=md_uinput_node(s->uinput,&uinput);
+    if (!error) error=md_device_tree_publish(s->dev,"uinput",uinput);
+    md_control_file_release(uinput);
     if (!error) error=link_file(md_provider_tree_root(s->dev),"../uinput","input/uinput");
     if (error) goto failed;
     s->socket=socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK,0);
@@ -375,7 +313,6 @@ int md_input_session_start(struct md_filesystem *fs,const struct md_input_launch
     error=(int)md_event_wait_fd(s->ready,POLLIN,md_event_now()+10000000000LL);
     if (error>=0) error=atomic_load(&s->error);
     if (error) goto failed;
-    error=mount_devices(fs,s);
     const char *guest_dirs[]={"/run","/run/udev"};
     /* Launch preparation owns this view before guest task resources exist. */
     struct md_fs_context preparation={.filesystem=fs};
@@ -398,7 +335,6 @@ void md_input_session_stop(struct md_input_session *s) {
     md_uinput_stop(s->uinput);
     md_input_disconnect(s->bus);
     md_provider_tree_release(s->dev); md_provider_tree_release(s->sys); md_provider_tree_release(s->udev);
-    if (s->nodes) release_nodes(s->nodes);
     md_uinput_release(s->uinput);
     md_input_bus_release(s->bus);
     md_device_events_release(s->events);

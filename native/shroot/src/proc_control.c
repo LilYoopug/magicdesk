@@ -5,6 +5,7 @@
 #include "fd_filter.h"
 #include "descriptor_calls.h"
 #include "adapter_buffer.h"
+#include "fs_buffer.h"
 #include "interception.h"
 #include "linux_abi.h"
 #include "raw.h"
@@ -24,6 +25,7 @@ long md_proc_control_known(int fd) {
     (void)fd; return 0;
 #else
     long kind=md_descriptor_kind(fd);
+    if (kind==MD_DESCRIPTOR_FILESYSTEM) return MD_PROC_FILE_CONTROL+1;
     return kind==MD_DESCRIPTOR_ANONYMOUS ? 0 : kind;
 #endif
 }
@@ -129,6 +131,17 @@ long md_proc_control_call(long nr, const unsigned long *a) {
 #else
     long active=md_guest_buffer_control(MD_BUFFER_PROC_CHECK,0,0);
     if (active<=0) return active<0 ? active : MD_WATCH_NATIVE;
+    if (nr==SYS_mmap) {
+        long memory=md_adapter_buffer_take();
+        if (memory<0) return memory;
+        long result=md_guest_buffer_control(MD_BUFFER_CONTROL_MAP,0,0);
+        if (!result) {
+            extern long md_guest_task_control(void);
+            result=md_guest_task_control();
+        }
+        long released=md_adapter_buffer_release();
+        return result<0 ? result : released<0 ? released : result;
+    }
     if (nr==SYS_ioctl) {
         if (!md_proc_file_namespace((enum md_proc_file_kind)(active-1))) {
             long packed=md_guest_buffer_control(MD_BUFFER_CONTROL_IOCTL_SPEC,0,0);
@@ -164,12 +177,56 @@ long md_proc_control_call(long nr, const unsigned long *a) {
         return value;
     }
     int sysctl=md_proc_file_sysctl((enum md_proc_file_kind)(active-1));
+    int control=active==MD_PROC_FILE_CONTROL+1;
     struct md_proc_io_spec spec;
     long decoded=md_proc_io_decode(nr,a,&spec);
     if (decoded) return decoded;
     int writing=spec.writing, vector=spec.vector;
+    if (spec.splice) {
+        long source=md_proc_control_known((int)a[0]);
+        if (source<0) return source;
+        long target=md_proc_control_known((int)a[2]);
+        if (target<0) return target;
+        if (source && target) return -EXDEV;
+        writing=!source;
+        int pipe=(int)a[writing ? 0 : 2]; struct stat st;
+        long result=RAW2(fstat,pipe,&st);
+        if (result<0) return result;
+        if (!S_ISFIFO(st.st_mode)) return -EINVAL;
+        if (!a[4]) return 0;
+        long memory=md_adapter_buffer_take(); if (memory<0) return memory;
+        /* The caller performs pipe waits in the kernel, not in the filesystem
+         * worker. A private staging OFD lets splice retain NONBLOCK semantics. */
+        long staging=RAW2(memfd_create,"shroot-splice",1);
+        size_t length=a[4]<MD_CONTROL_IO_MAX ? a[4] : MD_CONTROL_IO_MAX;
+        result=staging<0 ? staging : 0;
+        if (!result && writing) {
+            result=RAW6(splice,pipe,0,staging,0,length,a[5]);
+            if (result>0) {
+                length=(size_t)result;
+                result=RAW3(lseek,staging,0,SEEK_SET);
+                if (!result) { result=RAW3(read,staging,memory,length); if (result==(long)length) result=0; else if (result>=0) result=-EIO; }
+            } else if (!result) length=0;
+        }
+        long offered=-1;
+        if (!result && length) offered=result=md_guest_buffer_control(MD_BUFFER_PROC_IO,length,0);
+        if (offered>0 && !writing) {
+            result=RAW3(write,staging,memory,(size_t)offered);
+            if (result==offered) {
+                result=RAW3(lseek,staging,0,SEEK_SET);
+                if (!result) result=RAW6(splice,staging,0,pipe,0,(size_t)offered,a[5]);
+            } else if (result>=0) result=-EIO;
+        }
+        if (offered>=0) {
+            long acknowledged=md_guest_buffer_control(MD_BUFFER_PROC_ACK,writing ? 0 : result,0);
+            if (acknowledged) result=acknowledged;
+        }
+        if (staging>=0) RAW1(close,staging);
+        long released=md_adapter_buffer_release();
+        return result<0 ? result : released<0 ? released : result;
+    }
     struct iovec vectors[1024]; unsigned count=1;
-    if (nr==SYS_lseek) count=0;
+    if (spec.seek || spec.command) count=0;
     else if (!vector) vectors[0]=(struct iovec){(void *)a[1],a[2]};
     else {
         if (a[2]>1024) return -EINVAL;
@@ -186,20 +243,24 @@ long md_proc_control_call(long nr, const unsigned long *a) {
     /* Legacy proc writev calls the write method for each vector. A successful
      * map write consumes its one publication; another vector cannot be joined
      * into the same map or replay that publication. */
-    if (writing && vector && total && !sysctl) {
+    if (writing && vector && total && !sysctl && !control) {
         unsigned first=0;
         while (first<count && !vectors[first].iov_len) ++first;
         vectors[0]=vectors[first]; count=1; total=vectors[0].iov_len;
     }
-    if (writing && !sysctl && total>=md_page_size) return -EINVAL;
+    _Static_assert(sizeof(struct md_fs_buffer_frame)>=MD_CONTROL_IO_MAX,"control IO fits adapter buffer");
+    if (writing && !sysctl && !control && total>md_page_size-1) return -EINVAL;
     long memory=md_adapter_buffer_take();
     if (memory<0) return memory;
     long result=0; size_t copied=0;
     if (writing) for (unsigned i=0;i<count;++i) {
         if (!sysctl) {
-            result=md_read_memory((char *)memory+copied,vectors[i].iov_base,vectors[i].iov_len);
+            size_t length=vectors[i].iov_len;
+            if (control && length>MD_CONTROL_IO_MAX-copied) length=MD_CONTROL_IO_MAX-copied;
+            result=md_read_memory((char *)memory+copied,vectors[i].iov_base,length);
             if (result) break;
-            copied+=vectors[i].iov_len;
+            copied+=length;
+            if (control && copied==MD_CONTROL_IO_MAX) break;
         } else {
             /* The string handler uses at most 64 bytes, but Linux validates
              * every input vector before publishing a truncated sysctl value. */
@@ -220,7 +281,7 @@ long md_proc_control_call(long nr, const unsigned long *a) {
     if (!result) result=md_guest_buffer_control(MD_BUFFER_PROC_IO,total,0);
     long offered=result;
     copied=0;
-    if (!writing && nr!=SYS_lseek && result>0) {
+    if (!writing && !spec.seek && !spec.command && result>0) {
         size_t remaining=(size_t)result;
         for (unsigned i=0;i<count && remaining;++i) {
             size_t n=vectors[i].iov_len<remaining ? vectors[i].iov_len : remaining;
@@ -231,7 +292,7 @@ long md_proc_control_call(long nr, const unsigned long *a) {
     }
     if (offered>=0) {
         long finished=md_guest_buffer_control(MD_BUFFER_PROC_ACK,
-            writing || nr==SYS_lseek ? 0 : (unsigned long)result,0);
+            writing || spec.seek || spec.command ? 0 : (unsigned long)result,0);
         if (finished) result=finished;
     }
     long released=md_adapter_buffer_release();

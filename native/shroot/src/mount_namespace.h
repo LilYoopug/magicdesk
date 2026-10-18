@@ -12,7 +12,8 @@ struct md_mount_namespace *md_mount_namespace_retain(struct md_mount_namespace *
 void md_mount_namespace_release(struct md_mount_namespace *);
 int md_mount_namespace_attached(const struct md_mount_namespace *);
 int md_mount_namespace_managed_paths(const struct md_mount_namespace *);
-const char *md_mount_namespace_initial_boundary(const struct md_mount_namespace *);
+struct md_inode_mount_boundaries;
+const struct md_inode_mount_boundaries *md_mount_namespace_initial_boundary(const struct md_mount_namespace *);
 struct md_user_namespace *md_mount_namespace_owner(const struct md_mount_namespace *);
 /* Only an unpublished namespace candidate may change its owner. */
 void md_mount_namespace_set_owner(struct md_mount_namespace *, struct md_user_namespace *);

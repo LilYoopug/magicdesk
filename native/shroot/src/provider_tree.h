@@ -3,6 +3,13 @@
 #include "control_file.h"
 #include <sys/types.h>
 struct md_provider_tree;
+/* One admitted lookup. Completion transfers an O_PATH descriptor; destroying
+ * a pending lookup cancels it. No borrowed actor or output survives admission. */
+struct md_provider_lookup {
+    int (*ready)(struct md_provider_lookup *);
+    int (*complete)(struct md_provider_lookup *);
+    void (*destroy)(struct md_provider_lookup *);
+};
 struct md_provider_tree_ops {
     void *(*retain)(void *);
     void (*release)(void *);
@@ -14,6 +21,10 @@ struct md_provider_tree_ops {
     int (*lower_visible)(const char *path);
     /* Ordinary nodes only; typed control files retain their own IO policy. */
     int readonly;
+    int (*lookup)(void *,int directory,const char *,const struct md_control_actor *,
+        struct md_provider_lookup **);
+    int (*path)(void *,int fd,char *,size_t);
+    int (*readonly_node)(void *,int fd);
 };
 /* A retained private provider over a read-through host tree. Opaque subtrees
  * and the optional visibility policy hide lower entries. Admitted lookup stays
@@ -23,11 +34,14 @@ struct md_provider_tree *md_provider_tree_new(int parent,int lower,const char *c
 /* Retain a validated transient-root capability and its kernel lease. The
  * caller selects the exact projection; process-local controls are not imported. */
 struct md_provider_tree *md_provider_tree_import(int upper,int lower,const struct md_provider_tree_ops *);
+struct md_provider_tree *md_provider_tree_import_context(int upper,int lower,const struct md_provider_tree_ops *,void *);
 int md_provider_tree_matches(const struct md_provider_tree *,const struct md_provider_tree_ops *);
 struct md_provider_tree *md_provider_tree_retain(struct md_provider_tree *);
 void md_provider_tree_release(struct md_provider_tree *);
 int md_provider_tree_root(struct md_provider_tree *);
 int md_provider_tree_step(struct md_provider_tree *,int directory,const char *);
+int md_provider_tree_lookup(struct md_provider_tree *,int directory,const char *,
+    const struct md_control_actor *,struct md_provider_lookup **);
 int md_provider_tree_path(struct md_provider_tree *,int fd,char *,size_t);
 ssize_t md_provider_tree_getdents(struct md_provider_tree *,int fd,void *,size_t);
 int md_provider_tree_control(struct md_provider_tree *,int fd,struct md_control_file *);

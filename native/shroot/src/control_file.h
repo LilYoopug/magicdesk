@@ -7,10 +7,13 @@ struct md_identity;
 struct md_task_resources;
 struct md_namespace_reference;
 struct md_fs_anchor;
+struct md_resource_wakeup;
 struct md_control_actor {
     int pid;
     const struct md_identity *identity;
     const struct md_task_resources *resources;
+    /* Borrowed event-loop owner; providers retain it only for future wakeups. */
+    struct md_resource_wakeup *wakeup;
 };
 struct md_control_file {
     const struct md_control_file_ops *ops;
@@ -19,6 +22,7 @@ struct md_control_file {
 /* Typed ioctl marshalling. Providers never dereference guest addresses. Some
  * Linux requests (notably EVIOCSFF) return data despite an _IOW encoding. */
 enum { MD_CONTROL_IN=1, MD_CONTROL_OUT=2, MD_CONTROL_STRING=4, MD_CONTROL_IOCTL_MAX=16384 };
+enum { MD_CONTROL_IO_MAX=65536 };
 struct md_control_ioctl { unsigned size, direction; };
 /* Provider-owned asynchronous request. resume never blocks: EINPROGRESS means
  * an external completion will signal the descriptor wakeup. dispose cancels
@@ -27,7 +31,11 @@ struct md_control_pending {
     long (*resume)(struct md_control_pending *,void *data,size_t);
     void (*dispose)(struct md_control_pending *);
     int64_t deadline;
+    /* Directory cookie after the returned complete records, not a byte count. */
+    int64_t position;
 };
+enum { MD_CONTROL_READ=1, MD_CONTROL_WRITE, MD_CONTROL_GETDENTS };
+enum { MD_CONTROL_SYNC=1, MD_CONTROL_DATASYNC, MD_CONTROL_TRUNCATE };
 /* A virtual inode supplies typed semantics, not a second IO/cursor manager.
  * The descriptor host serializes each open description and owns copy/commit. */
 struct md_control_file_ops {
@@ -36,6 +44,16 @@ struct md_control_file_ops {
     int (*stat)(void *,struct stat *);
     long (*read)(void *,const struct md_control_actor *,void *,size_t,int64_t);
     long (*write)(void *,const struct md_control_actor *,const void *,size_t,int64_t);
+    /* Packet-independent IO. Inputs are captured before returning EINPROGRESS;
+     * only the exact OFD turn spans the wait, never a descriptor-table turn. */
+    long (*io)(void *,const struct md_control_actor *,unsigned operation,void *,size_t,int64_t,
+        struct md_control_pending **);
+    /* Optional metadata-dependent seek; the descriptor host still owns the
+     * cursor and its OFD turn. SET/CUR remain local when no query is needed. */
+    long (*seek)(void *,const struct md_control_actor *,int64_t,int,struct md_control_pending **);
+    /* Scalar descriptor commands share asynchronous lifetime and OFD ordering
+     * with IO, but never consume or advance the file cursor. */
+    long (*command)(void *,const struct md_control_actor *,unsigned,int64_t,struct md_control_pending **);
     unsigned long filesystem;
     int (*access)(void *,const struct md_identity *,unsigned);
     int nonseekable;
@@ -44,6 +62,12 @@ struct md_control_file_ops {
     int (*descriptor)(void *,int flags);
     int (*seals)(void *);
     int mappable;
+    /* Optional private mapping backing, distinct from the inert carrier.
+     * Returns an owned FD, or EINPROGRESS with an owned request whose resume
+     * returns that FD. Neither the file table nor address space is locked
+     * while a userspace provider prepares it. */
+    long (*mapping)(void *,const struct md_control_actor *,unsigned protection,unsigned flags,
+        struct md_control_pending **);
     /* Typed single-file mounts retain their authority, not the carrier inode.
      * at() returns an owned context at the supplied placement; NULL detaches
      * any previous placement before the mount itself retains the provider. */
@@ -51,6 +75,11 @@ struct md_control_file_ops {
     void *(*at)(void *,struct md_fs_anchor *);
     /* Borrowed placement, distinct from the native descriptor carrier. */
     struct md_fs_anchor *(*origin)(void *);
+    /* IO is controlled, but metadata, reopen and bind retain filesystem
+     * authority through origin. Never substitute the descriptor carrier. */
+    int filesystem_paths;
+    /* Kernel-pipe transfers may use the same IO/copy acknowledgement owner. */
+    int splice;
     /* Optional independent per-open state; dup/fork retain the same context. */
     void *(*open)(void *,int flags);
     int (*ioctl_spec)(void *,unsigned command,struct md_control_ioctl *);

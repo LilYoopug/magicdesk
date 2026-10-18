@@ -35,12 +35,12 @@ int mdi_path_step(struct md_inode_store *s, const struct mdi_node *current,
     } else {
         r=mdi_lookup(s,current,name,next,attributes,pin);
         if (r) return r;
-        if (s->mount_boundary && !strcmp(next->id,s->mount_boundary->object)) {
+        if (s->mount_boundary && md_inode_mount_contains(s->mount_boundary->objects,next->id)) {
             s->mount_boundary->crossed=1; return -EXDEV;
         }
         return 0;
     }
-    if (!r && s->mount_boundary && !strcmp(next->id,s->mount_boundary->object)) {
+    if (!r && s->mount_boundary && md_inode_mount_contains(s->mount_boundary->objects,next->id)) {
         s->mount_boundary->crossed=1; return -EXDEV;
     }
     return !r && attributes ? mdi_stat(s,next,attributes) : r;

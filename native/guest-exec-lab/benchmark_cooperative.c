@@ -660,6 +660,10 @@ static void assert_private_store(const char *store) {
         if (!strcmp(entry->d_name,".") || !strcmp(entry->d_name,"..")) continue;
         char target[PATH_MAX];
         ssize_t size=readlinkat(dirfd(directory),entry->d_name,target,sizeof(target)-1);
+        /* The CLONE_FILES sidecar may close its actor pipe after readdir.
+         * Disappearance is not a retained FD; permission failures still fail. */
+        if (size<0 && errno==ENOENT) continue;
+        if (size<0) fprintf(stderr,"private-store FD %s: %s\n",entry->d_name,strerror(errno));
         assert(size>=0); target[size]=0;
         assert(!strstr(target,store));
     }

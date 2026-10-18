@@ -5,6 +5,7 @@
 #include "fs_control.h"
 #include "fs_storage.h"
 #include "procfs_view.h"
+#include "fuse_view.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/magic.h>
@@ -124,13 +125,18 @@ static const char *filesystem_type(const struct md_view_mount *mount) {
     if (mount && mount->backing==MD_MOUNT_PROC) return "proc";
     if (mount && mount->backing==MD_MOUNT_DEVPTS) return "devpts";
     if (mount && mount->backing==MD_MOUNT_SYSFS) return "sysfs";
-    if (mount && mount->provider) return md_provider_tree_filesystem(mount->provider)==SYSFS_MAGIC ? "sysfs" : "tmpfs";
+    if (mount && mount->provider) {
+        unsigned long type=md_provider_tree_filesystem(mount->provider);
+        return type==FUSE_SUPER_MAGIC ? "fuse" : type==SYSFS_MAGIC ? "sysfs" : "tmpfs";
+    }
     if (mount && mount->backing==MD_MOUNT_MQUEUE) return "mqueue";
     if (mount && mount->cgroup) return md_cgroup_devices(mount->cgroup) ? "cgroup" : "cgroup2";
     return !md_view_inode(mount) ? "none" : md_filesystem_name(mount->storage ? mount->storage->filesystem_kind : MD_FILESYSTEM_INODE);
 }
 static int filesystem_options(struct md_filesystem *fs,const struct md_view_mount *mount,char *out,size_t size) {
     if (mount && mount->backing==MD_MOUNT_PROC) return md_procfs_options(mount,fs->store->identity,out,size);
+    if (mount && md_fuse_view_matches(mount->provider))
+        return md_fuse_view_options(mount->provider,fs->store->identity,out,size);
     snprintf(out,size,"%s",mount && mount->cgroup && md_cgroup_devices(mount->cgroup) ? ",devices" : "");
     return 0;
 }
@@ -159,7 +165,7 @@ int md_fs_mount_table(struct md_filesystem *fs, unsigned info, unsigned flags) {
             const struct md_view_mount *m=selected;
             char options[128]; r=filesystem_options(fs,m,options,sizeof(options));
             if (!r) entry(stream,info,m->id,m->parent ? m->parent->id : m->id,
-                root.st_dev,"/",filesystem_type(m),
+                md_fuse_view_matches(m->provider) ? md_fuse_view_device(m->provider) : root.st_dev,"/",filesystem_type(m),
                 md_view_inode(m) ? "guest" : "attachment",md_mount_policy_flags(&m->policy),readonly,options,&m->links,&members);
         } else entry(stream,info,fs->mounts->base.id,fs->mounts->base.id,root.st_dev,"/","guestfs","guest",
             md_mount_policy_flags(&fs->mounts->base.policy),readonly,"",&fs->mounts->base.links,&members);
@@ -175,6 +181,7 @@ int md_fs_mount_table(struct md_filesystem *fs, unsigned info, unsigned flags) {
         char path[PATH_MAX]; r=md_view_path(fs,m->target,m->parent,path,sizeof(path));
         if (r == -ENOENT && (fs->store->root_id || fs->native_root)) { r=0; continue; }
         struct stat st=m->native;
+        if (md_fuse_view_matches(m->provider)) st.st_dev=md_fuse_view_device(m->provider);
         if (!r && m->file.ops) r=m->file.ops->stat(m->file.context,&st);
         if (!r) { readonly=super_readonly(fs,m); if (readonly<0) r=readonly; }
         char options[128];

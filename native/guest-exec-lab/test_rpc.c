@@ -25,6 +25,7 @@
 #include <sys/inotify.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/timerfd.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -655,6 +656,48 @@ static void faulty_reply(enum reply_fault fault) {
     CHECK(out.delivery == MD_FS_UNCONFIRMED && out.result.fd == -1 && fd_count(getpid()) == before);
     event(received[0]); if (timeout) byte(stop[1]); close(stop[1]); close(received[0]); joined(child, 0);
 }
+static void deferred_reply(void) {
+    for (unsigned fault=0;fault<4;++fault) {
+        char endpoint[96]; snprintf(endpoint,sizeof(endpoint),"md-fs-deferred-rpc-%d-%u",getpid(),fault);
+        int listener=md_fs_listen(endpoint); CHECK(listener>=0);
+        pid_t child=fork(); CHECK(child>=0);
+        if (!child) {
+            CHECK(!md_event_wait_fd(listener,POLLIN,md_event_now()+5000000000LL));
+            int socket=accept4(listener,NULL,NULL,SOCK_CLOEXEC); CHECK(socket>=0);
+            struct md_fs_packet q; struct md_fs_rights rights={0};
+            /* EVENT_WAIT: connection acceptance does not imply request data;
+             * the transport deliberately uses nonblocking receives. */
+            CHECK(!md_event_wait_fd(socket,POLLIN,md_event_now()+5000000000LL));
+            CHECK(md_fs_receive(socket,&q,sizeof(q),&rights)>0); md_fs_close_rights(&rights);
+            struct md_fs_deferred admission={MD_FS_MAGIC,MD_FS_VERSION,-EINPROGRESS};
+            int fd=open("/dev/null",O_RDONLY|O_CLOEXEC); CHECK(fd>=0);
+            if (fault==2) rights=(struct md_fs_rights){.count=1,.fd={fd}};
+            if (fault==3) admission.error=0;
+            CHECK(md_fs_send(socket,&admission,sizeof(admission),&rights)==sizeof(admission));
+            if (fault==1) CHECK(md_fs_send(socket,&admission,sizeof(admission),&rights)==sizeof(admission));
+            if (!fault) {
+                int timer=timerfd_create(CLOCK_MONOTONIC,TFD_CLOEXEC); CHECK(timer>=0);
+                struct itimerspec at={.it_value={1,500000000}};
+                CHECK(!timerfd_settime(timer,0,&at,NULL));
+                /* EVENT_WAIT: intentionally delayed provider completion past
+                 * the 500 ms transport budget; timer expiration releases it. */
+                uint64_t expirations; CHECK(read(timer,&expirations,sizeof(expirations))==sizeof(expirations));
+                close(timer);
+                struct md_fs_reply reply={.magic=MD_FS_MAGIC,.version=MD_FS_VERSION,.error=-ENOENT};
+                CHECK(md_fs_send(socket,&reply,offsetof(struct md_fs_reply,data),&rights)>0);
+            }
+            close(fd); close(socket); close(listener); _exit(0);
+        }
+        close(listener);
+        struct md_fs_request q={.operation=MD_FS_STAT,.directory={-1,-1},.path={"/",NULL}};
+        struct md_fs_response out; int before=fd_count(getpid());
+        CHECK(md_fs_call(endpoint,500,&q,&out)==(fault ? -EPROTO : 0));
+        CHECK(out.result.fd<0 && fd_count(getpid())==before);
+        CHECK(fault ? out.delivery==MD_FS_UNCONFIRMED : out.delivery==MD_FS_REPLIED && out.result.error==-ENOENT);
+        joined(child,0);
+    }
+    puts("PASS deferred RPC admission: provider wait, duplicate/malformed admission and FD cleanup");
+}
 static struct md_fs_response directory_call(const char *endpoint, int fd, uint32_t op,
         unsigned capacity, int64_t offset, int whence, int error) {
     struct md_fs_request q = {.operation=op, .directory={fd,-1}, .capacity=capacity,
@@ -1063,7 +1106,7 @@ int main(int argc, char **argv) {
     CHECK(argc == 2 && argv[1][0] == '/' && strlen(argv[1]) < sizeof(root)); strcpy(root, argv[1]);
     CHECK(mkdir(root, 0700) == 0);
     request_contract(); result_contract(); engine_buffers(); value_transport(); peer_transport();
-    captured_authentication(); exchange_retirement();
+    captured_authentication(); exchange_retirement(); deferred_reply();
     semantics(argv[0]); directories(argv[0]); lost_directory_reply(); concurrent(); contention(); reentrant(); malformed(); idle(); lost_reply();
     reply_lifetime(); watch_delivery(); descriptor_stress(10000);
     for (enum reply_fault fault = UNEXPECTED_FD; fault < REPLY_FAULT_COUNT; fault++) faulty_reply(fault);

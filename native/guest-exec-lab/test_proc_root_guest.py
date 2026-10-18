@@ -261,12 +261,20 @@ def main():
         try:
             os.close(ready)
             os.close(done)
+            proc_fds = os.open('/proc/self/fd', os.O_PATH | os.O_DIRECTORY)
+            previous_root = os.open('/', os.O_PATH | os.O_DIRECTORY)
             native(libc.unshare, 0x00020000)  # CLONE_NEWNS
+            assert os.readlink(str(previous_root), dir_fd=proc_fds) == '/'
+            current_root = os.open('/', os.O_PATH | os.O_DIRECTORY)
             native(libc.mount, b'tmpfs', os.fsencode(root + '/mounted'), b'tmpfs', 0, b'mode=755')
             with open(root + '/mounted/private', 'wb') as stream:
                 stream.write(b'private mount')
             os.chroot(root)
             os.chdir('/')
+            for retained_root in (previous_root, current_root):
+                assert os.readlink(str(retained_root), dir_fd=proc_fds) == '/'
+                os.close(retained_root)
+            os.close(proc_fds)
             os.write(notify, b'R')
             # EVENT_WAIT: parent owns inspection; the harness deadline cancels failure.
             assert os.read(release, 1) == b'Q'

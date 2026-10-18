@@ -15,8 +15,9 @@
 #include <string.h>
 #include <unistd.h>
 
-enum { MAGIC=0x4d444d47U, VERSION=14, HEADER=144 };
-enum { INODE=1, DETACHED=2, RETIRED=4, LOCKED=8, PROC=16, PARENTLESS=32, ROOT_PROVIDERS=64, HOST_SYSFS=128, HOST_DEVFS=256 };
+enum { MAGIC=0x4d444d47U, VERSION=15, HEADER=144 };
+enum { INODE=1, DETACHED=2, RETIRED=4, LOCKED=8, PROC=16, PARENTLESS=32, ROOT_PROVIDERS=64, HOST_SYSFS=128, HOST_DEVFS=256, HOST_DEVICES=512 };
+#define HOST_PROVIDERS (HOST_SYSFS|HOST_DEVFS|HOST_DEVICES)
 struct entry { uint32_t parent, flags; struct md_fd_identity source, target, policy;
     uint32_t storage, descriptor; uint64_t generation, proc_namespace;
     uint32_t shared, master, unbindable, reserved; };
@@ -158,7 +159,7 @@ static int path_object(int fd, struct md_fd_identity expected, struct stat *st, 
     return md_fd_identity_same(md_fd_identity(st),expected) ? 0 : -EPROTO;
 }
 static int source_object(int fd,struct md_fd_identity expected,struct stat *st,unsigned flags) {
-    if (!(flags&(HOST_SYSFS|HOST_DEVFS))) return path_object(fd,expected,st,0);
+    if (!(flags&HOST_PROVIDERS)) return path_object(fd,expected,st,0);
     int mode=fcntl(fd,F_GETFL);
     if (mode<0) return -errno;
     if ((mode&O_PATH) || (mode&O_ACCMODE)!=O_RDONLY) return -EPROTO;
@@ -208,10 +209,10 @@ static int read_manifest(int fd, struct manifest *out, struct md_fd_identity *id
             || out->base_target.inode) return -EPROTO;
     for (unsigned i=0;i<out->count;++i) {
         const struct entry *e=&out->entries[i];
-        if (!e->generation || e->flags&~(INODE|DETACHED|RETIRED|LOCKED|PROC|PARENTLESS|ROOT_PROVIDERS|HOST_SYSFS|HOST_DEVFS) || e->storage>out->storages
+        if (!e->generation || e->flags&~(INODE|DETACHED|RETIRED|LOCKED|PROC|PARENTLESS|ROOT_PROVIDERS|HOST_PROVIDERS) || e->storage>out->storages
                 || e->storage>owners+1 || (e->storage && !(e->flags&INODE))) return -EPROTO;
         if (!!(e->flags&PROC)!=!!e->proc_namespace || (e->flags&(INODE|PROC))==(INODE|PROC)) return -EPROTO;
-        unsigned type=e->flags&(INODE|PROC|HOST_SYSFS|HOST_DEVFS);
+        unsigned type=e->flags&(INODE|PROC|HOST_PROVIDERS);
         if (type && (type&(type-1))) return -EPROTO;
         if (e->flags&RETIRED) {
             struct entry empty={.flags=DETACHED|RETIRED,.generation=e->generation};
@@ -335,7 +336,10 @@ static int describe(struct md_mount_namespace *view, const struct md_mount_layou
         }
         e->flags=(md_view_inode(m) ? INODE : 0) | (m->detached ? DETACHED : 0) | (m->locked ? LOCKED : 0);
         if (m->root_providers) e->flags|=ROOT_PROVIDERS;
-        if (m->provider) e->flags|=md_host_fs_kind(m->provider)==MD_HOST_FS_SYS ? HOST_SYSFS : HOST_DEVFS;
+        if (m->provider) {
+            enum md_host_fs_view kind=md_host_fs_kind(m->provider);
+            e->flags|=kind==MD_HOST_FS_SYS ? HOST_SYSFS : kind==MD_HOST_FS_DEVICES ? HOST_DEVICES : HOST_DEVFS;
+        }
         if (!m->parent && l->root!=&view->tree->mounts[i]) e->flags|=PARENTLESS;
         if (m->backing==MD_MOUNT_PROC) {
             e->flags|=PROC; e->proc_namespace=md_pid_namespace_inode(m->pid_namespace);
@@ -513,7 +517,7 @@ static int same_objects(const struct manifest *old, const struct manifest *next)
         if (a->generation<b->generation) continue;
         if (b->flags&RETIRED) continue;
         if (a->flags&RETIRED) return -ESTALE;
-        if ((a->flags&(INODE|PROC|HOST_SYSFS|HOST_DEVFS))!=(b->flags&(INODE|PROC|HOST_SYSFS|HOST_DEVFS)) || a->proc_namespace!=b->proc_namespace
+        if ((a->flags&(INODE|PROC|HOST_PROVIDERS))!=(b->flags&(INODE|PROC|HOST_PROVIDERS)) || a->proc_namespace!=b->proc_namespace
                 || !md_fd_identity_same(a->source,b->source)
                 || !md_fd_identity_same(a->policy,b->policy)
                 || !!a->storage!=!!b->storage) return -ESTALE;
@@ -663,7 +667,7 @@ static int import(struct md_mount_graph_parcel *p, struct md_mount_namespace **o
         r=md_mount_links_observe(e->shared,e->master,e->unbindable,&m->links);
         if (r) break;
         m->backing=(e->flags&INODE) ? MD_MOUNT_INODE : e->flags&PROC ? MD_MOUNT_PROC
-            : e->flags&(HOST_SYSFS|HOST_DEVFS) ? MD_MOUNT_PROVIDER : MD_MOUNT_NATIVE;
+            : e->flags&HOST_PROVIDERS ? MD_MOUNT_PROVIDER : MD_MOUNT_NATIVE;
         if ((e->flags&PROC) && e->proc_namespace!=md_pid_namespace_inode(NULL)) {
             m->pid_namespace=md_pid_namespace_by_inode(e->proc_namespace);
             if (!m->pid_namespace) { r=-EXDEV; break; }
@@ -675,8 +679,9 @@ static int import(struct md_mount_graph_parcel *p, struct md_mount_namespace **o
         m->root_providers=!!(e->flags&ROOT_PROVIDERS);
         m->source=take(p,e->descriptor); m->target=take(p,e->descriptor+1);
         if (fstat(m->source,&m->native) || fstat(m->target,&m->guest)) r=-errno;
-        if (!r && (e->flags&(HOST_SYSFS|HOST_DEVFS))) {
-            m->provider=md_host_fs_import(m->source,e->flags&HOST_SYSFS ? MD_HOST_FS_SYS : MD_HOST_FS_DEV);
+        if (!r && (e->flags&HOST_PROVIDERS)) {
+            m->provider=md_host_fs_import(m->source,e->flags&HOST_SYSFS ? MD_HOST_FS_SYS
+                : e->flags&HOST_DEVICES ? MD_HOST_FS_DEVICES : MD_HOST_FS_DEV);
             if (!m->provider) r=-errno;
         }
         if (!r) r=md_mount_policy_import(&m->policy,p->fd[e->descriptor+2]);

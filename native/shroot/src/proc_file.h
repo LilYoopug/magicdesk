@@ -80,6 +80,7 @@ struct md_proc_file_node { uint64_t device, inode; int process; };
 void md_proc_file_node(struct md_proc_file *, struct md_proc_file_node);
 struct md_proc_file_node md_proc_file_get_node(const struct md_proc_file *);
 enum md_proc_file_kind md_proc_file_kind(const struct md_proc_file *);
+int md_proc_file_filesystem_paths(const struct md_proc_file *);
 struct md_proc_file *md_proc_file_reopen(const struct md_proc_file *,
     const struct md_identity *, int flags);
 struct md_fd_object *md_proc_file_object(struct md_proc_file *);
@@ -102,7 +103,7 @@ long md_proc_file_write_at(struct md_proc_file *, const struct md_identity *writ
     const void *, size_t size, int64_t offset, size_t page_size);
 
 enum md_proc_file_operation { MD_PROC_FILE_READ, MD_PROC_FILE_WRITE, MD_PROC_FILE_SEEK,
-    MD_PROC_FILE_GETDENTS };
+    MD_PROC_FILE_GETDENTS, MD_PROC_FILE_COMMAND };
 int md_proc_file_access(const struct md_proc_file *, enum md_proc_file_operation);
 struct md_proc_file_io {
     struct md_resource_order turn;
@@ -113,6 +114,7 @@ struct md_proc_file_io {
     size_t length;
     long result;
     struct md_control_actor actor;
+    struct md_control_pending *pending;
 };
 /* Caller owns zero-initialized operation storage until finish/cancel. The turn
  * pins the open description, never a descriptor number or a task lifetime. */

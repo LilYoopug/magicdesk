@@ -26,6 +26,8 @@ struct md_filesystem {
     struct md_ipc_credentials *ipc;
     struct md_shm_bridge *shm_bridge;
     struct md_libc_registry *libc_registry;
+    struct md_provider_tree *devices; /* borrowed launch-owned /dev projection */
+    struct md_resource_wakeup *wakeup; /* borrowed filesystem event-loop owner */
     const char *ipc_store;
     struct md_fs_statistics *statistics;
     const struct md_task_snapshot *actor;
@@ -48,6 +50,10 @@ void md_fs_context_end(struct md_fs_context *);
 struct md_inode_store *md_fs_context_operation_window(const struct md_fs_context *,const struct md_fs_request *,int native_plan);
 void md_fs_context_execute(struct md_fs_context *,
         const struct md_fs_request *, struct md_fs_result *, const struct md_fs_output *);
+/* Reinstates the admitted task scope, then advances the provider's exact stage.
+ * The caller destroys the old continuation unless it is returned again. */
+void md_fs_context_resume(struct md_fs_context *,struct md_fs_continuation *,
+    struct md_fs_result *,const struct md_fs_output *);
 /* Worker-created snapshots use the same retained path provenance as opens.
  * A failed capture closes result.fd; the returned anchor is caller-owned. */
 void md_fs_context_capture_result(struct md_fs_context *, struct md_fs_result *, struct md_fs_anchor **);

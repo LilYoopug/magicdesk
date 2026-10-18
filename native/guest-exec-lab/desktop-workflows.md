@@ -40,9 +40,16 @@ admission and rendering checks; see [the publisher](../../docs/graphics.md#flatp
 
 `sh fixtures/flatpak-document-portal.sh` separately requires temporary document
 export, read/write through the exported path inside Flatpak, and revocation. It
-does not alter browser permissions or disable the portal. The current SteamOS
-run fails at export because the document portal cannot open `/dev/fuse`; this is
-an outstanding runtime limitation, not a skipped or passing test.
+does not alter browser permissions or disable the portal. The SteamOS fixture
+passes with the guest FUSE provider, including live permission revocation. This
+is not a substitute for checking a desktop file chooser's UI.
+
+`test_fuse.py --build BUILD --store STORE --case portal|rofiles|squashfs` stages a
+private native runtime under UID 2000. Each invocation selects one case. The
+rofiles case exercises mutations, cancellation and retained directory FDs; the
+SquashFS case checks ELF/script execution, dynamic loading, private mappings,
+noexec, concurrent readers and a file retained through lazy unmount. See
+[FUSE contracts](../shroot/fuse.md) for unsupported operations.
 
 An independent Shroot launch that merely inherits another launch's bus address
 is not equivalent: portal authorization can depend on the requesting process's

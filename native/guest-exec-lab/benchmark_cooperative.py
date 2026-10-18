@@ -23,6 +23,8 @@ def main():
     parser.add_argument('--rounds', type=int, default=5)
     parser.add_argument('--profile', action='store_true', help='separate instrumented engine invocation')
     parser.add_argument('--reference', type=Path, help='previous fixture for interleaved engine comparison')
+    parser.add_argument('--runtime-reference', type=Path,
+                        help='previous native build for interleaved production Base/entry comparison')
     parser.add_argument('--proot-prefix', type=Path, help='stage installed Termux PRoot and its dependencies for the same shell UID control')
     parser.add_argument('--contracts', action='store_true', help='run inode, native leaf, credentials and mount contracts')
     parser.add_argument('--spin-ns', type=int, default=10000, help='bounded handoff budget, 0..100000 ns')
@@ -52,6 +54,8 @@ def main():
     allowed.update({'cooperative-guest-pin', 'cooperative-guest-queued', 'cooperative-guest-window'})
     if args.reference:
         allowed.update({'engine-reference', 'bounded-reference', 'adaptive-reference'})
+    if args.runtime_reference:
+        allowed.update({'shroot-reference', 'shroot-entry-reference'})
     proot_assets = proot_fixture.ASSETS
     if args.proot_prefix:
         for name in proot_assets:
@@ -197,6 +201,16 @@ def main():
         }
         if proot_command:
             commands['proot'] = proot_command
+        if args.runtime_reference:
+            directory = suite.base + '/runtime-reference'
+            suite.command(['mkdir', directory])
+            suite.report['runtimeReference'] = {
+                'build': str(args.runtime_reference),
+                'hashes': suite.stage_runtime(args.runtime_reference, directory),
+            }
+            for mode in ('shroot', 'shroot-entry'):
+                commands[mode + '-reference'] = [directory + '/libmagicdesk_guest_run.so',
+                                                  *commands[mode][1:]]
         if not args.modes or 'cooperative-fd-pidfd' not in args.modes:
             commands.pop('cooperative-fd-pidfd')
         if not args.modes or 'cooperative-fd-local-close' not in args.modes:
@@ -247,6 +261,8 @@ def main():
         medians = {mode: statistics.median(s['seconds'] for s in samples if s['mode'] == mode)
                    for mode in modes}
         ratios = {
+            'baseOverRuntimeReference': ('shroot', 'shroot-reference'),
+            'entryOverRuntimeReference': ('shroot-entry', 'shroot-entry-reference'),
             'entryOverNative': ('shroot-entry', 'native'),
             'entrySpeedupVsShroot': ('shroot', 'shroot-entry'),
             'cooperativeSpeedupVsShroot': ('shroot', 'cooperative'),

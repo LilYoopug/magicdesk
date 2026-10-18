@@ -6,7 +6,12 @@ set -eu
 app=${1:-org.chromium.Chromium}
 work=$(mktemp -d "${TMPDIR:-/tmp}/md-document-portal.XXXXXXXX")
 document_id=
+sandbox=
 cleanup() {
+    if [ -n "$sandbox" ]; then
+        kill "$sandbox" 2>/dev/null || :
+        wait "$sandbox" 2>/dev/null || :
+    fi
     if [ -n "$document_id" ]; then
         timeout 30 flatpak document-unexport --doc-id "$document_id" || :
     fi
@@ -26,13 +31,35 @@ esac
 document_id=${document#"$XDG_RUNTIME_DIR/doc/"}
 document_id=${document_id%%/*}
 test -f "$document"
+mkfifo "$work/input" "$work/output"
 timeout 45 flatpak run --command=sh "$app" -ec '
-    test "$(cat "$1")" = document-before
-    printf "document-after\n" > "$1"
-    test "$(cat "$1")" = document-after
-' sh "$document"
+    document="$XDG_RUNTIME_DIR/doc/$1/source.txt"
+    test "$(cat "$document")" = document-before
+    printf "document-after\n" > "$document"
+    test "$(cat "$document")" = document-after
+    printf "READY\n"
+    read -r command
+    test "$command" = REVOKE
+    if cat "$document" >/dev/null 2>&1; then
+        echo "Revoked document remains readable" >&2
+        exit 1
+    fi
+    printf "REVOKED\n"
+' sh "$document_id" < "$work/input" > "$work/output" &
+sandbox=$!
+exec 3> "$work/input" 4< "$work/output"
+# EVENT_WAIT: the live sandbox acknowledges IO, then checks host revocation;
+# the timeout owns its lifetime and closes the pipe on failure.
+read -r state <&4
+test "$state" = READY
 test "$(cat "$work/source.txt")" = document-after
 timeout 30 flatpak document-unexport --doc-id "$document_id"
 document_id=
+printf 'REVOKE\n' >&3
+read -r state <&4
+test "$state" = REVOKED
+wait "$sandbox"
+sandbox=
+exec 3>&- 4<&-
 test ! -e "$document"
-echo 'PASS document export, sandbox read/write and revocation'
+echo 'PASS document export, sandbox read/write and revocation in the live sandbox'

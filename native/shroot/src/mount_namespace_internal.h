@@ -2,21 +2,26 @@
 #define MD_MOUNT_NAMESPACE_INTERNAL_H
 #include "mount_namespace.h"
 #include "mount_instance.h"
+#include "inode_mount_boundary.h"
 #include <pthread.h>
 #include <stdatomic.h>
 
 struct md_mount_namespace {
     atomic_uint refs;
     atomic_int managed_paths;
+    atomic_int detached_mounts;
     uint64_t inode;
     struct md_user_namespace *owner;
     unsigned shm_id;
     struct md_view_mount base;
     struct md_view_mount *root;
     struct md_fs_mounts *tree;
-    /* Cold launch admission of one implicit provider. Ordinary inode walks
-     * stop at its covered object; topology changes invalidate this proof. */
-    struct { unsigned id; dev_t device; ino_t inode; char object[33]; } initial_boundary;
+    /* Complete cold launch topology. Guest topology changes invalidate it. */
+    struct {
+        unsigned count;
+        struct { unsigned id; dev_t device; ino_t inode; struct md_view_mount *parent; } mounts[MD_INODE_INITIAL_BOUNDARIES];
+        struct md_inode_mount_boundaries boundaries;
+    } initial_boundary;
     struct md_mount_identity *native_ids;
     struct md_native_mounts *native_mounts;
     struct md_mount_graph *graph;

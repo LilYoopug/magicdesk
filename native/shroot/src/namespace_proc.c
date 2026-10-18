@@ -195,7 +195,7 @@ static long host_readlink(const struct md_fs *fs, const struct md_proc_path *ref
     int borrowed=md_namespace_proc_borrow(ref,&fd);
     char selected[PATH_MAX];
     if (!borrowed && (n=md_proc_task_path(path,selected,sizeof(selected)))<0) return n;
-    struct md_fs_request q = {.operation = MD_FS_PATH, .directory = {fd, -1},
+    struct md_fs_request q = {.operation = MD_FS_PATH, .mode=MD_FS_PATH_DISPLAY, .directory = {fd, -1},
         .capture={{borrowed ? NULL : selected,borrowed ? 0 : O_PATH}}};
     struct md_fs_response out;
     long r = md_namespace_request(fs, &q, &out);
@@ -372,6 +372,7 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
     if (!native && ref.kind==MD_PROC_FD && ref.process==(int)RAW0(gettid)) {
         long known=md_descriptor_kind(ref.descriptor);
         if (known<0) return known;
+        if (known==MD_DESCRIPTOR_FILESYSTEM) known=0;
         if (known==MD_DESCRIPTOR_ANONYMOUS) {
             if (tail) return -ENOTDIR;
             if (nr==SYS_openat) return md_namespace_proc_reopen(fs,ref.descriptor,(int)a[2]&~(O_CREAT|O_EXCL));

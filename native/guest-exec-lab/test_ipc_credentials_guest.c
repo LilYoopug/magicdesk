@@ -15,6 +15,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/mman.h>
+#include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
@@ -32,7 +33,9 @@ static void peer(int fd, pid_t pid, uid_t uid, gid_t gid) {
 static void done(pid_t pid) {
     int s;
     /* EVENT_WAIT: child exit; the guest launch deadline bounds a stuck fixture. */
-    CHECK(waitpid(pid,&s,0)==pid && WIFEXITED(s) && WEXITSTATUS(s)==0);
+    CHECK(waitpid(pid,&s,0)==pid);
+    if (!WIFEXITED(s) || WEXITSTATUS(s)) fprintf(stderr,"child %d status=%#x\n",pid,s);
+    CHECK(WIFEXITED(s) && WEXITSTATUS(s)==0);
 }
 static void stream(int abstract) {
     int server=socket(AF_UNIX,SOCK_STREAM,0); CHECK(server>=0);
@@ -104,6 +107,42 @@ static void socket_paths(void) {
     CHECK(bind(server,(void *)&a,sizeof(a))<0 && (errno==ENOTDIR || errno==ENOENT || errno==EBADF));
     CHECK(!close(server) && !rmdir("/tmp/socket-moved"));
     puts("PASS socket paths: retained and foreign proc-FD directories, rename, original names and closed/reused descriptors");
+}
+static void socket_mount_paths(const char *self) {
+    CHECK(!unshare(CLONE_NEWNS));
+    char directory[64]; snprintf(directory,sizeof(directory),"/tmp/md-socket-mount-%d",getpid());
+    CHECK(!mkdir(directory,0700));
+    CHECK(!mount("none",directory,"tmpfs",0,"mode=0700"));
+    struct sockaddr_un address={.sun_family=AF_UNIX};
+    snprintf(address.sun_path,sizeof(address.sun_path),"%s/socket",directory);
+    socklen_t size=offsetof(struct sockaddr_un,sun_path)+strlen(address.sun_path)+1;
+    for (unsigned i=0;i<3;++i) {
+        int types[]={SOCK_STREAM,SOCK_SEQPACKET,SOCK_DGRAM};
+        int fd=socket(AF_UNIX,types[i],0); CHECK(fd>=0);
+        CHECK(!bind(fd,(void *)&address,size));
+        int client=socket(AF_UNIX,types[i],0); CHECK(client>=0);
+        if (types[i]!=SOCK_DGRAM) CHECK(!listen(fd,1));
+        CHECK(!connect(client,(void *)&address,size));
+        CHECK(!unlink(address.sun_path));
+        pid_t child=fork(); CHECK(child>=0);
+        if (!child) {
+            CHECK(!unshare(CLONE_NEWNS));
+            CHECK(!umount2(directory,MNT_DETACH));
+            for (unsigned peer=0;peer<2;++peer) {
+                struct sockaddr_un observed={0}; socklen_t n=sizeof(observed);
+                CHECK(!(peer ? getpeername(client,(void *)&observed,&n) : getsockname(fd,(void *)&observed,&n)));
+                CHECK(n==size && !memcmp(&observed,&address,size));
+            }
+            CHECK(!fcntl(fd,F_SETFD,0));
+            char number[32]; snprintf(number,sizeof(number),"%d",fd);
+            execl(self,"ipc-credentials","--socket-name",number,address.sun_path,(char *)NULL);
+            perror("socket-name exec");
+            _exit(99);
+        }
+        done(child); close(client); close(fd);
+    }
+    CHECK(!umount(directory) && !rmdir(directory));
+    puts("PASS socket names: tmpfs, unlink, detached mounts, inherited/exec descriptors and peer addresses");
 }
 static void send_identity(int fd, uid_t uid, int right, int success) {
     char data='m'; struct iovec io={&data,1};
@@ -1128,6 +1167,13 @@ int main(int argc,char **argv) {
         custody(!strcmp(argv[1],"--custody"),atoi(argv[2]),atoi(argv[3])); return 0;
     }
     CHECK(getuid()==0);
+    if (argc==4 && !strcmp(argv[1],"--socket-name")) {
+        struct sockaddr_un observed={0}; socklen_t n=sizeof(observed);
+        CHECK(!getsockname(atoi(argv[2]),(void *)&observed,&n));
+        CHECK(n==offsetof(struct sockaddr_un,sun_path)+strlen(argv[3])+1 && !strcmp(observed.sun_path,argv[3]));
+        return 0;
+    }
+    if (argc==2 && !strcmp(argv[1],"--socket-mounts")) { alarm(30); socket_mount_paths(argv[0]); return 0; }
     if (argc==2 && !strcmp(argv[1],"--socket-paths")) { alarm(30); socket_paths(); return 0; }
     if (argc==4 && !strcmp(argv[1],"--boundary")) { boundary_guest(atoi(argv[2]),atoi(argv[3])); return 0; }
     if (argc==4 && !strcmp(argv[1],"--origin-receive")) { origin_receive((unsigned)atoi(argv[2]),atoi(argv[3])); return 0; }
@@ -1141,6 +1187,9 @@ int main(int argc,char **argv) {
     }
     CHECK(argc==1);
     socket_paths();
+    pid_t mounted=fork(); CHECK(mounted>=0);
+    if (!mounted) { socket_mount_paths(argv[0]); _exit(0); }
+    done(mounted);
     send_contract();
     for (int protected=0;protected<2;++protected) for (int cancel=0;cancel<2;++cancel)
         receive_lifetime(protected,cancel);

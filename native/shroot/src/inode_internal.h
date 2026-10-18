@@ -9,9 +9,10 @@
 #include <stdatomic.h>
 #include "filesystem_kind.h"
 #include "landlock_policy.h"
+#include "inode_mount_boundary.h"
 struct md_fs_result;
 struct md_fs_output;
-struct mdi_mount_boundary { const char *object; int crossed; };
+struct mdi_mount_boundary { const struct md_inode_mount_boundaries *objects; int crossed; };
 struct md_inode_boundary {
     char *path; size_t capacity; unsigned operand;
     int mount_root, native_directory;

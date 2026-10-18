@@ -38,6 +38,8 @@ void md_fs_mount_table_changed(struct md_filesystem *);
 int md_fs_native_mount(struct md_filesystem *, uint64_t native, uint64_t *guest);
 int md_fs_base_mount(struct md_filesystem *, int shared_memory, uint64_t *guest);
 int md_fs_mount_change(struct md_filesystem *, struct md_guest_domain *, const struct md_fs_request *);
+void md_fs_mount_execute(struct md_filesystem *,const struct md_fs_request *,
+    struct md_fs_result *,const struct md_fs_output *);
 void md_fs_open_tree(struct md_filesystem *,const struct md_fs_request *,
         struct md_fs_result *,const struct md_fs_output *);
 /* Dispatches the composed view; the ordinary inode engine remains the backend. */

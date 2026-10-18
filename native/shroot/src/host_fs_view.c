@@ -2,6 +2,7 @@
 #include "host_fs_view.h"
 #include "provider_tree.h"
 #include "sysfs_view.h"
+#include "device_tree.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/magic.h>
@@ -12,7 +13,8 @@ static const struct md_provider_tree_ops sys_ops={.filesystem=SYSFS_MAGIC,
 static const struct md_provider_tree_ops dev_ops={.filesystem=TMPFS_MAGIC};
 enum md_host_fs_view md_host_fs_kind(const struct md_provider_tree *tree) {
     return md_provider_tree_matches(tree,&sys_ops) ? MD_HOST_FS_SYS
-        : md_provider_tree_matches(tree,&dev_ops) ? MD_HOST_FS_DEV : MD_HOST_FS_NONE;
+        : md_provider_tree_matches(tree,&dev_ops) ? MD_HOST_FS_DEV
+        : md_device_tree_portable(tree) ? MD_HOST_FS_DEVICES : MD_HOST_FS_NONE;
 }
 static struct md_provider_tree *create(int parent,int upper,enum md_host_fs_view kind) {
     if (kind!=MD_HOST_FS_SYS && kind!=MD_HOST_FS_DEV) { errno=EINVAL; return NULL; }
@@ -24,6 +26,7 @@ static struct md_provider_tree *create(int parent,int upper,enum md_host_fs_view
     return tree;
 }
 struct md_provider_tree *md_host_fs_import(int upper,enum md_host_fs_view kind) {
+    if (kind==MD_HOST_FS_DEVICES) return md_device_tree_import(upper);
     return create(-1,upper,kind);
 }
 struct md_provider_tree *md_host_fs_new(int parent,enum md_host_fs_view kind) {

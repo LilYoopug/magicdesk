@@ -2,7 +2,9 @@
 #include "fd_exchange.h"
 #include "event_wait.h"
 #include "fs_service.h"
+#include "mount_propagation.h"
 #include "fs_engine.h"
+#include "fs_continuation.h"
 #include "image_catalogue.h"
 #include "inode_watch.h"
 #include "ipc_credentials.h"
@@ -59,9 +61,17 @@ static int valid(const struct md_fs_packet *q, size_t size, const struct md_fs_r
     if (q->cwd & md_fs_operation_data_inputs(q->operation)) return -EINVAL;
     return md_fs_request_validate(&request);
 }
+static int capture_result(const struct md_fs_result *result,struct md_fs_reply *out,struct md_fs_rights *output) {
+    out->info=result->info; out->size=result->size; out->position=result->position;
+    out->host_path=result->host_path; out->proc_namespace=result->proc_namespace;
+    out->open_completion=result->open_completion.kind;
+    if (result->fd>=0) output->fd[output->count++]=result->fd;
+    if (result->open_completion.kind==MD_OPEN_PIPE) output->fd[output->count++]=result->open_completion.control;
+    return result->error;
+}
 static int dispatch(struct md_fs_context *context, const struct md_fs_packet *q,
         const struct md_fs_rights *input, struct md_fs_reply *out, struct md_fs_rights *output,
-        struct md_fd_exchange *exchange, struct md_fs_anchor **origin) {
+        struct md_fd_exchange *exchange, struct md_fs_anchor **origin,struct md_fs_continuation **continuation) {
     struct md_fs_request request = {.actor = q->actor, .peer = context->peer, .operation = q->operation, .flags = q->flags, .mode = q->mode,
         .capacity = q->capacity, .offset = q->offset, .resolve = q->resolve, .attributes = q->attributes,
         .directory = {MD_INODE_ROOT, MD_INODE_ROOT}, .path = {q->data, q->data + q->length[0]},
@@ -78,25 +88,24 @@ static int dispatch(struct md_fs_context *context, const struct md_fs_packet *q,
         .capacity = md_fs_operation_value(q->operation) ? sizeof(out->data)
             : q->operation==MD_FS_OPEN_IMAGE ? sizeof(struct md_image_identity) : PATH_MAX,
         .reserve_watch=q->operation==MD_FS_WATCH_READ,
-        .origin=exchange && md_fs_operation_has_origin(q->operation) ? origin : NULL};
+        .origin=exchange && md_fs_operation_has_origin(q->operation) ? origin : NULL,
+        .continuation=continuation};
     md_fs_context_execute(context, &request, &result, &buffer);
-    out->info = result.info; out->size = result.size; out->position = result.position;
-    out->host_path=result.host_path;
-    out->proc_namespace=result.proc_namespace;
-    out->open_completion=result.open_completion.kind;
-    if (result.fd >= 0) output->fd[output->count++] = result.fd;
-    if (result.open_completion.kind == MD_OPEN_PIPE) output->fd[output->count++] = result.open_completion.control;
-    return result.error;
+    md_fs_continuation_pending(NULL,continuation,&result);
+    return capture_result(&result,out,output);
 }
-enum peer_phase { REQUEST, DIRECTORY, REPLY, VALUE, RIGHTS, ACKNOWLEDGE, CONFIRM, RELEASE };
+enum peer_phase { REQUEST, DIRECTORY, DEFERRED, REPLY, VALUE, RIGHTS, ACKNOWLEDGE, CONFIRM, RELEASE };
 struct peer {
     pid_t process;
     enum peer_phase phase;
     int64_t deadline;
+    int64_t timeout_ns;
+    int admitted_wait;
     struct md_fs_reply reply;
     size_t reply_position;
     struct md_fs_rights output;
     struct md_fs_context context;
+    struct md_fs_continuation *continuation;
     struct md_fd_exchange *exchange;
     int watch_reader;
     struct md_fs_request directory;
@@ -126,9 +135,11 @@ static int directory_progress(struct peer *peer) {
     }
     if (!peer->reply.error) {
         struct md_fs_output output={.data=peer->reply.data,.capacity=PATH_MAX,
-            .directory_position=peer->directory.operation==MD_FS_GETDENTS ? &peer->directory_position : NULL};
+            .directory_position=peer->directory.operation==MD_FS_GETDENTS ? &peer->directory_position : NULL,
+            .continuation=&peer->continuation};
         struct md_fs_result result;
         md_fs_context_execute(&peer->context,&peer->directory,&result,&output);
+        if (md_fs_continuation_pending(NULL,&peer->continuation,&result)) { peer->phase=DEFERRED; return 0; }
         peer->reply.error=result.error; peer->reply.size=result.size; peer->reply.position=result.position;
         peer->reply.host_path=result.host_path; peer->reply.proc_namespace=result.proc_namespace;
         peer->directory_reserved=output.directory_position && !result.error && !result.host_path;
@@ -141,6 +152,49 @@ static int directory_progress(struct peer *peer) {
         if (!peer->reply.error) peer->reply.error=error;
     }
     peer->phase=REPLY; return 1;
+}
+static void reply_finish(struct peer *peer) {
+    struct md_fs_reply *reply=&peer->reply;
+    if (reply->error) {
+        md_fs_close_rights(&peer->output);
+        reply->size=reply->host_path=reply->open_completion=0;
+        reply->proc_namespace=0; reply->position=0;
+    }
+    reply->descriptors=peer->output.count;
+    reply->receipt=peer->output.count && md_fd_exchange_receipt(peer->exchange)>=0;
+}
+static int continuation_progress(struct peer *peer) {
+    struct md_fs_continuation *previous=peer->continuation;
+    int ready=previous->ready(previous);
+    if (!ready) return 0;
+    unsigned operation=previous->request.operation;
+    struct md_fs_anchor *origin=NULL;
+    struct md_fs_output output={.data=peer->reply.data,
+        .capacity=md_fs_operation_value(operation) ? sizeof(peer->reply.data)
+            : operation==MD_FS_OPEN_IMAGE ? sizeof(struct md_image_identity) : PATH_MAX,
+        .origin=peer->exchange && md_fs_operation_has_origin(operation) ? &origin : NULL,
+        .directory_position=operation==MD_FS_GETDENTS ? &peer->directory_position : NULL,
+        .continuation=&peer->continuation};
+    struct md_fs_result result={.fd=-1,.error=ready<0 ? ready : 0};
+    peer->continuation=NULL;
+    if (ready>0) md_fs_context_resume(&peer->context,previous,&result,&output);
+    if (md_fs_continuation_pending(previous,&peer->continuation,&result)) {
+        md_fs_anchor_release(origin); return 0;
+    }
+    peer->reply.error=capture_result(&result,&peer->reply,&peer->output);
+    peer->directory_reserved=output.directory_position && !result.error && !result.host_path;
+    if (peer->directory_fd>=0 && !peer->directory_reserved) {
+        int error=directory_finish(peer,0); if (!peer->reply.error) peer->reply.error=error;
+    }
+    /* Directory requests offered their FD-free exchange at admission. */
+    if (peer->exchange && operation!=MD_FS_GETDENTS && operation!=MD_FS_SEEKDIR) {
+        int error=md_fd_exchange_offer(peer->exchange,origin,peer->output.count);
+        if (error) peer->reply.error=error;
+    }
+    md_fs_anchor_release(origin); reply_finish(peer); peer->phase=REPLY;
+    const struct md_fs_packet observed={.operation=operation};
+    OBSERVE(MD_FS_AFTER_DISPATCH,&observed); (void)observed;
+    return 1;
 }
 static int service_request(struct md_filesystem *fs, int socket,
         struct peer *peer, struct md_resource_wakeup *wake) {
@@ -172,29 +226,37 @@ static int service_request(struct md_filesystem *fs, int socket,
                     &peer->cursor,wake);
                 if (ready<0) reply->error=ready;
                 else peer->phase=DIRECTORY;
-            } else reply->error = dispatch(&peer->context, &packet, &input, reply, &peer->output,peer->exchange,&origin);
+            } else {
+                reply->error=dispatch(&peer->context,&packet,&input,reply,&peer->output,peer->exchange,&origin,&peer->continuation);
+                if (peer->continuation && reply->error==-EINPROGRESS) peer->phase=DEFERRED;
+            }
             if (!reply->error && packet.operation==MD_FS_WATCH_READ) {
                 peer->watch_reader=input.fd[0]; input.count=0;
             }
-            if (peer->exchange) {
+            if (peer->exchange && peer->phase!=DEFERRED) {
                 int error=md_fd_exchange_offer(peer->exchange,origin,peer->output.count);
                 if (error) { md_fs_close_rights(&peer->output); reply->error=error; }
             }
             md_fs_anchor_release(origin);
-            if (peer->phase!=DIRECTORY) OBSERVE(MD_FS_AFTER_DISPATCH, &packet);
+            if (peer->phase!=DIRECTORY && peer->phase!=DEFERRED) OBSERVE(MD_FS_AFTER_DISPATCH, &packet);
         }
     } else reply->error = -EPROTO;
     md_fs_close_rights(&input);
-    if (reply->error) {
-        md_fs_close_rights(&peer->output);
-        reply->size=reply->host_path=reply->open_completion=0;
-        reply->proc_namespace=0;
-        reply->position=0;
-    }
-    reply->descriptors = peer->output.count;
-    reply->receipt=peer->output.count && md_fd_exchange_receipt(peer->exchange)>=0;
+    if (peer->phase==DEFERRED) return 0;
+    reply_finish(peer);
     if (reply->error || peer->phase!=DIRECTORY) peer->phase = REPLY;
     return 0;
+}
+static int admit_wait(struct pollfd *fd,struct peer *peer) {
+    if (!peer->admitted_wait) {
+        const struct md_fs_deferred admission={MD_FS_MAGIC,MD_FS_VERSION,-EINPROGRESS};
+        const struct md_fs_rights none={0};
+        long sent=md_fs_send(fd->fd,&admission,sizeof(admission),&none);
+        if (sent==-EAGAIN || sent==-EINTR) { fd->events=POLLOUT; return 0; }
+        if (sent!=sizeof(admission)) return 1;
+        peer->admitted_wait=1; peer->deadline=INT64_MAX;
+    }
+    fd->events=0; return !!(fd->revents&(POLLHUP|POLLERR));
 }
 static int service_peer(struct md_filesystem *fs,
         struct pollfd *fd, struct peer *peer, struct md_resource_wakeup *wake) {
@@ -226,9 +288,14 @@ static int service_peer(struct md_filesystem *fs,
         peer->phase = RELEASE; fd->events = POLLIN; return 0;
     }
     if (peer->phase == REQUEST && service_request(fs, fd->fd, peer,wake)) return 1;
-    if (peer->phase==DIRECTORY && !directory_progress(peer)) { fd->events=0; return !!(fd->revents&POLLHUP); }
+    if (peer->phase==DIRECTORY && !directory_progress(peer)) return admit_wait(fd,peer);
+    if (peer->phase==DEFERRED && !continuation_progress(peer)) return admit_wait(fd,peer);
     if (md_fd_exchange_closed(peer->exchange)) return 1;
     if (peer->phase==REPLY) {
+        if (peer->admitted_wait) {
+            long now=md_event_now(); if (now<0) return 1;
+            peer->admitted_wait=0; peer->deadline=now+peer->timeout_ns;
+        }
         size_t bytes=peer->reply.size<MD_FS_REPLY_CHUNK ? peer->reply.size : MD_FS_REPLY_CHUNK;
         size_t size=offsetof(struct md_fs_reply,data)+bytes;
         struct md_fs_rights receipt={.count=1,.fd={md_fd_exchange_receipt(peer->exchange)}};
@@ -264,6 +331,7 @@ static int service_peer(struct md_filesystem *fs,
     return 0;
 }
 static void close_peer(struct md_inode_store *s, struct pollfd *fd, struct peer *peer) {
+    if (peer->continuation) { peer->continuation->destroy(peer->continuation); peer->continuation=NULL; }
     directory_finish(peer,peer->phase==ACKNOWLEDGE);
     if (peer->watch_reader >= 0) {
         md_inode_watch_complete(s, peer->watch_reader, peer->phase == ACKNOWLEDGE);
@@ -305,6 +373,9 @@ int md_fs_serve(struct md_filesystem *fs, int listener, int stop_fd,
         free(peers); return error;
     }
     struct md_fs_statistics *previous=fs->statistics;
+    struct md_resource_wakeup *previous_wakeup=fs->wakeup;
+    fs->wakeup=cursor_wake;
+    md_mount_family_wakeup(fs->mounts,cursor_wake);
     fs->statistics=statistics;
     for (unsigned i = BASE; i < BASE+SLOTS; ++i) fds[i].fd = -1;
     for (;;) {
@@ -320,6 +391,8 @@ int md_fs_serve(struct md_filesystem *fs, int listener, int stop_fd,
             if (control[1].revents) work->ready(work->context,fs);
             continue;
         }
+        error=md_mount_family_collect(fs);
+        if (error) break;
         long now = md_event_now(); if (now < 0) { error = (int)now; break; }
         int64_t nearest = INT64_MAX;
         int expired_watch = 0;
@@ -329,8 +402,8 @@ int md_fs_serve(struct md_filesystem *fs, int listener, int stop_fd,
                 close_peer(s, &fds[BASE+i], &peers[i]);
             }
             else {
-                if (peers[i].phase==DIRECTORY && (!peers[i].cursor.owner
-                        || md_ofd_order_state(&peers[i].cursor)==MD_RESOURCE_ORDER_READY)) {
+                if (peers[i].phase==DEFERRED || (peers[i].phase==DIRECTORY && (!peers[i].cursor.owner
+                        || md_ofd_order_state(&peers[i].cursor)==MD_RESOURCE_ORDER_READY))) {
                     if (service_peer(fs,&fds[BASE+i],&peers[i],cursor_wake))
                         close_peer(s,&fds[BASE+i],&peers[i]);
                 }
@@ -406,7 +479,9 @@ int md_fs_serve(struct md_filesystem *fs, int listener, int stop_fd,
                 peers[slot].process = identity.pid;
                 peers[slot].watch_reader = -1;
                 peers[slot].directory_fd=-1;
-                peers[slot].deadline = now + (int64_t)timeout_ms * 1000000;
+                peers[slot].admitted_wait=0;
+                peers[slot].timeout_ns=(int64_t)timeout_ms*1000000;
+                peers[slot].deadline = now + peers[slot].timeout_ns;
             }
             if (error) break;
         }
@@ -423,9 +498,11 @@ int md_fs_serve(struct md_filesystem *fs, int listener, int stop_fd,
         if (fds[i].fd >= 0) close_peer(s, &fds[i], &peers[i-BASE]);
     md_shm_bridge_close(fs->shm_bridge); fs->shm_bridge=NULL;
     free(peers);
+    md_mount_family_wakeup(fs->mounts,NULL);
     md_resource_wakeup_release(cursor_wake);
     if (fds[6].fd>=0) close(fds[6].fd);
     if (owned) { fs->cursors=NULL; md_ofd_orders_release(owned); }
     fs->statistics=previous;
+    fs->wakeup=previous_wakeup;
     return error;
 }

@@ -14,7 +14,8 @@ static void destroy(struct md_fd_object *object) {
     close(p->fd);
     if (p->mount_pin>=0) close(p->mount_pin);
     md_inode_fifo_release(p->fifo_custody);
-    if (p->mount) atomic_fetch_sub_explicit(&p->mount->anchors,1,memory_order_relaxed);
+    if (p->mount && atomic_fetch_sub_explicit(&p->mount->anchors,1,memory_order_acq_rel)==1)
+        md_mount_family_retire(p->view);
     md_mount_namespace_release(p->view);
     md_inode_lifetime_release(p->lifetime); free(p);
 }

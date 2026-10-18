@@ -6,12 +6,15 @@
 #include "linux_abi.h"
 #include "procfs_view.h"
 #include "filesystem_ioctl.h"
+#include "fs_continuation.h"
+#include "fuse_view.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/openat2.h>
 #include <linux/magic.h>
 #include <sys/sysmacros.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -135,7 +138,10 @@ static ssize_t directory_entries(void *context, int fd, void *data, size_t count
 static int virtual_operation(struct md_filesystem *fs,struct md_mount_namespace *view,
         struct md_view_mount *mount,int fd,int parent,const char *name,
         const struct md_fs_request *q,struct md_fs_result *out,const struct md_fs_output *output) {
-    return md_fs_mount_file_operation(fs,view,mount,fd,q,out,output)
+    struct md_view_location location={.fd=fd,.parent=parent,.view=view,.mount=mount};
+    if (name) snprintf(location.name,sizeof(location.name),"%s",name);
+    return md_fs_fuse_operation(fs,q,&location,NULL,out,output)
+        || md_fs_mount_file_operation(fs,view,mount,fd,q,out,output)
         || md_fs_proc_operation(fs,view,mount,fd,q,out,output)
         || devpts_operation(fs,view,mount,fd,q,out,output)
         || md_fs_cgroup_operation(fs,view,mount,fd,parent,name,q,out,output)
@@ -540,14 +546,77 @@ static int local_inode_view(struct md_filesystem *fs, const struct md_fs_request
     }
     return 1;
 }
-void md_fs_mounts_execute(struct md_filesystem *fs, const struct md_fs_request *q,
-        struct md_fs_result *out, const struct md_fs_output *output) {
+struct path_operation {
+    struct md_fs_continuation base;
+    struct md_view_walk_pending *walk;
+    struct md_view_location a,b;
+    struct md_fs_anchor *pins[2];
+    unsigned operand;
+};
+static void mounts_execute(struct md_filesystem *,const struct md_fs_request *,
+    struct md_fs_result *,const struct md_fs_output *,struct path_operation *);
+static int path_ready(struct md_fs_continuation *base) {
+    return md_view_walk_ready(((struct path_operation *)base)->walk);
+}
+static void path_destroy(struct md_fs_continuation *base) {
+    struct path_operation *p=(void *)base;
+    md_view_walk_destroy(p->walk);
+    md_view_location_close(&p->a); md_view_location_close(&p->b);
+    for (unsigned i=0;i<2;++i) md_fs_anchor_release(p->pins[i]);
+    md_fs_continuation_clear(base); free(p);
+}
+static void path_resume(struct md_fs_continuation *base,struct md_filesystem *fs,
+        struct md_fs_result *out,const struct md_fs_output *output) {
+    mounts_execute(fs,&base->request,out,output,(void *)base);
+}
+static int path_suspend(struct md_filesystem *fs,const struct md_fs_request *q,
+        const struct md_fs_output *output,struct path_operation *p,struct md_view_walk_pending *walk,
+        struct md_view_location *a,struct md_view_location *b,unsigned operand) {
+    int error=0;
+    struct md_fs_anchor *pins[2]={0};
+    struct md_view_location *locations[]={a,b};
+    for (unsigned i=0;i<2 && !error;++i) if (locations[i]->fd>=0)
+        error=md_view_anchor_duplicate(fs,locations[i]->view,locations[i]->mount,locations[i]->fd,&pins[i]);
+    if (!error && !p) {
+        p=calloc(1,sizeof(*p));
+        if (!p) error=-ENOMEM;
+        else {
+            p->a=p->b=(struct md_view_location){.fd=-1,.parent=-1};
+            error=md_fs_continuation_capture(&p->base,q);
+            if (error) { free(p); p=NULL; }
+            else {
+                p->base.ready=path_ready; p->base.resume=path_resume; p->base.destroy=path_destroy;
+            }
+        }
+    }
+    if (error) {
+        for (unsigned i=0;i<2;++i) md_fs_anchor_release(pins[i]);
+        md_view_walk_destroy(walk); return error;
+    }
+    for (unsigned i=0;i<2;++i) { md_fs_anchor_release(p->pins[i]); p->pins[i]=pins[i]; }
+    p->a=*a; p->b=*b; p->walk=walk; p->operand=operand;
+    *a=*b=(struct md_view_location){.fd=-1,.parent=-1};
+    *output->continuation=&p->base;
+    return -EINPROGRESS;
+}
+static void mounts_execute(struct md_filesystem *fs, const struct md_fs_request *q,
+        struct md_fs_result *out, const struct md_fs_output *output,struct path_operation *resume) {
     *out = (struct md_fs_result){.fd=-1};
+    if (resume) goto paths;
     if (q->operation==MD_FS_PATH && q->mode==MD_FS_PATH_DISPLAY && q->origin[0]
-            && q->origin[0]->view && q->origin[0]->view!=fs->mounts) {
+            && q->origin[0]->view) {
         out->error=md_view_anchor_check(fs,q->directory[0],q->origin[0]);
         if (!out->error && (!output || !output->data)) out->error=-EINVAL;
         if (!out->error) {
+            if (q->origin[0]->view==fs->mounts) {
+                out->error=md_view_path(fs,q->directory[0],q->origin[0]->mount,output->data,output->capacity);
+                if (out->error!=-ENOENT) {
+                    if (!out->error) out->size=strlen(output->data)+1;
+                    return;
+                }
+            }
+            /* proc magic-link text is descriptive, not a path lookup grant.
+             * Retained objects outside the new root still have a guest name. */
             struct md_filesystem owner=*fs;
             owner.mounts=q->origin[0]->view; owner.native_root=NULL;
             const char *root=fs->store->root_id;
@@ -563,19 +632,21 @@ void md_fs_mounts_execute(struct md_filesystem *fs, const struct md_fs_request *
     int local=local_inode_view(fs,q);
     if (local) {
         if (local<0) { out->error=local; return; }
-        struct mdi_mount_boundary guard={.object=md_mount_namespace_initial_boundary(fs->mounts)};
+        struct mdi_mount_boundary guard={.objects=md_mount_namespace_initial_boundary(fs->mounts)};
         struct mdi_mount_boundary *previous=fs->store->mount_boundary;
-        fs->store->mount_boundary=guard.object ? &guard : NULL;
+        fs->store->mount_boundary=guard.objects ? &guard : NULL;
         md_fs_inode_execute(fs,q,out,output);
         fs->store->mount_boundary=previous;
         /* The inode transaction rejected the crossing before any mutation.
          * Only that path (or an unannotated provider FD) needs a mount walk. */
-        if (!guard.crossed && (!guard.object || out->error!=-EXDEV)) return;
+        if (!guard.crossed && (!guard.objects || (out->error!=-EXDEV
+                && !(out->error==-EREMOTE && md_mount_namespace_managed_paths(fs->mounts))))) return;
         *out=(struct md_fs_result){.fd=-1};
     }
     if (q->operation == MD_FS_OPEN_OBJECT) {
         struct md_view_object *p=md_view_object(fs,q->path[0]);
         if (p) {
+            if (md_fuse_view_matches(p->mount->provider)) { out->error=-EOPNOTSUPP; return; }
             if (writable(q->flags)) { out->error = -EACCES; return; }
             if (md_view_inode(p->mount)) {
                 struct md_fs_request local={.operation=MD_FS_REOPEN,.directory={p->fd,-1},.flags=q->flags};
@@ -635,17 +706,38 @@ void md_fs_mounts_execute(struct md_filesystem *fs, const struct md_fs_request *
         }
         return;
     }
+paths:;
     struct md_view_location a = {.parent=-1,.fd=-1}, b = {.parent=-1,.fd=-1};
+    struct md_view_walk_pending *pending=NULL;
+    unsigned operand=0;
+    if (resume) {
+        a=resume->a; b=resume->b; pending=resume->walk; operand=resume->operand;
+        resume->a=resume->b=(struct md_view_location){.fd=-1,.parent=-1}; resume->walk=NULL;
+    }
     int pair = q->operation == MD_FS_LINK || q->operation == MD_FS_RENAME;
     /* A proc alias is task-owned for metadata and mutation as well as opens.
      * Never resolve self/fd against the filesystem worker's descriptor table. */
     uint64_t resolve=q->resolve|MD_VIEW_TASK_PATH;
-    int r = md_view_walk(fs, q->directory[0], q->origin[0], q->path[0], follow(q), missing(q), resolve, &a);
+    int r=0;
+    if (!operand) {
+        r=pending ? md_view_walk_resume(fs,pending,&a)
+            : output && output->continuation ? md_view_walk_async(fs,q->directory[0],q->origin[0],q->path[0],
+                follow(q),missing(q),resolve,&a,&pending)
+            : md_view_walk(fs,q->directory[0],q->origin[0],q->path[0],follow(q),missing(q),resolve,&a);
+        if (r==-EINPROGRESS) goto suspended;
+        md_view_walk_destroy(pending); pending=NULL;
+    }
     /* Only the inode provider currently produces a side-effect-free open plan.
      * Do not open a device/control endpoint and then decline its result. */
     if (!r && output && output->native_open_plan && !md_view_inode(a.mount)) r=-EXDEV;
     if (!r && pair) {
-        r = md_view_walk(fs, q->directory[1], q->origin[1], q->path[1], -1, 1, MD_VIEW_TASK_PATH, &b);
+        operand=1;
+        r=pending ? md_view_walk_resume(fs,pending,&b)
+            : output && output->continuation ? md_view_walk_async(fs,q->directory[1],q->origin[1],q->path[1],
+                -1,1,MD_VIEW_TASK_PATH,&b,&pending)
+            : md_view_walk(fs,q->directory[1],q->origin[1],q->path[1],-1,1,MD_VIEW_TASK_PATH,&b);
+        if (r==-EINPROGRESS) goto suspended;
+        md_view_walk_destroy(pending); pending=NULL;
         if (r==-EREMOTE && fs->store->boundary) fs->store->boundary->operand=1;
     }
     if (!r && pair && (a.view != b.view || a.mount != b.mount)) r = -EXDEV;
@@ -681,6 +773,8 @@ void md_fs_mounts_execute(struct md_filesystem *fs, const struct md_fs_request *
         out->error=!output || !output->data ? -EINVAL
             : a.view!=fs->mounts ? -ENOENT : md_view_path(fs,a.fd,a.mount,output->data,output->capacity);
         if (!out->error) out->size=strlen(output->data)+1;
+    } else if (!r && md_fs_fuse_operation(fs,q,&a,pair ? &b : NULL,out,output)) {
+        /* The provider retains the exact resolved objects before suspension. */
     } else if (!r && !md_view_inode(a.mount)) native(fs, q, &a, &b, out, output);
     else if (!r && ((q->operation==MD_FS_OPEN_IMAGE && !md_view_base(a.view,a.mount))
             || (a.fd>=0 && !strcmp(a.name,".") && selected_operation(q->operation)))) {
@@ -693,4 +787,12 @@ void md_fs_mounts_execute(struct md_filesystem *fs, const struct md_fs_request *
     } else out->error = r;
     mount_metadata(a.mount,a.fd,q,out);
     md_view_location_close(&a); md_view_location_close(&b);
+    return;
+suspended:
+    out->error=path_suspend(fs,q,output,resume,pending,&a,&b,operand);
+    md_view_location_close(&a); md_view_location_close(&b);
+}
+void md_fs_mounts_execute(struct md_filesystem *fs,const struct md_fs_request *q,
+        struct md_fs_result *out,const struct md_fs_output *output) {
+    mounts_execute(fs,q,out,output,NULL);
 }

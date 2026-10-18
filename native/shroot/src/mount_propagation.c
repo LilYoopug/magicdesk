@@ -1,5 +1,7 @@
 #include "mount_propagation.h"
 #include "fs_mount_internal.h"
+#include "resource_order.h"
+#include "mount_graph.h"
 #include <errno.h>
 #include <stdlib.h>
 
@@ -7,6 +9,8 @@ struct md_mount_family {
     pthread_mutex_t lock;
     unsigned count;
     struct md_mount_namespace *first;
+    struct md_resource_wakeup *wakeup;
+    atomic_int collect;
 };
 struct md_mount_group {
     atomic_uint references;
@@ -18,6 +22,7 @@ int md_mount_family_new(struct md_mount_namespace *view) {
     if (!f) return -ENOMEM;
     int error=pthread_mutex_init(&f->lock,NULL);
     if (error) { free(f); return -error; }
+    atomic_init(&f->collect,0);
     f->first=view; f->count=1; view->family=f; return 0;
 }
 void md_mount_family_leave(struct md_mount_namespace *view) {
@@ -30,7 +35,7 @@ void md_mount_family_leave(struct md_mount_namespace *view) {
     int empty=!f->count;
     view->family=NULL; view->family_next=NULL;
     pthread_mutex_unlock(&f->lock);
-    if (empty) { pthread_mutex_destroy(&f->lock); free(f); }
+    if (empty) { md_resource_wakeup_release(f->wakeup); pthread_mutex_destroy(&f->lock); free(f); }
 }
 void md_mount_family_join(struct md_mount_namespace *view,struct md_mount_namespace *source) {
     if (view->family==source->family) return;
@@ -59,6 +64,40 @@ int md_mount_family_capture(struct md_mount_namespace *view,struct md_mount_memb
 void md_mount_members_release(struct md_mount_members *members) {
     for (unsigned i=0;i<members->count;++i) md_mount_namespace_release(members->views[i]);
     free(members->views); *members=(struct md_mount_members){0};
+}
+void md_mount_family_wakeup(struct md_mount_namespace *view,struct md_resource_wakeup *wake) {
+    if (!view || !view->family) return;
+    struct md_mount_family *f=view->family;
+    pthread_mutex_lock(&f->lock);
+    struct md_resource_wakeup *old=f->wakeup;
+    f->wakeup=md_resource_wakeup_retain(wake);
+    pthread_mutex_unlock(&f->lock);
+    md_resource_wakeup_release(old);
+}
+void md_mount_family_retire(struct md_mount_namespace *view) {
+    if (!view || !view->family || !atomic_load_explicit(&view->detached_mounts,memory_order_acquire)) return;
+    struct md_mount_family *f=view->family;
+    if (atomic_exchange_explicit(&f->collect,1,memory_order_acq_rel)) return;
+    pthread_mutex_lock(&f->lock);
+    md_resource_wakeup_signal(f->wakeup);
+    pthread_mutex_unlock(&f->lock);
+}
+int md_mount_family_collect(struct md_filesystem *fs) {
+    if (!fs->mounts || !fs->mounts->family) return 0;
+    struct md_mount_family *f=fs->mounts->family;
+    if (!atomic_load_explicit(&f->collect,memory_order_acquire)
+            || !atomic_exchange_explicit(&f->collect,0,memory_order_acq_rel)) return 0;
+    struct md_mount_members members={0};
+    int error=md_mount_family_capture(fs->mounts,&members);
+    for (unsigned i=0;!error && i<members.count;++i) {
+        struct md_mount_namespace *view=members.views[i];
+        if (!atomic_load_explicit(&view->detached_mounts,memory_order_acquire)
+                || md_mount_graph_foreign(view)) continue;
+        struct md_filesystem selected=*fs; selected.mounts=view;
+        if (view!=fs->mounts) selected.native_root=NULL;
+        error=md_view_mount_collect(&selected);
+    }
+    md_mount_members_release(&members); return error;
 }
 struct md_mount_group *md_mount_group_retain(struct md_mount_group *g) {
     if (g) atomic_fetch_add_explicit(&g->references,1,memory_order_relaxed);

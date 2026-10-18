@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "exec_prepare.h"
 #include "fs_engine.h"
+#include "fs_continuation.h"
 #include "proc_paths.h"
 #include "raw.h"
 #include <errno.h>
@@ -11,9 +12,17 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+static void execute(struct md_fs_context *context,const struct md_fs_request *q,
+        struct md_fs_result *result,struct md_fs_output *output,struct md_fs_continuation **pending) {
+    struct md_fs_continuation *previous=*pending;
+    output->continuation=pending;
+    if (previous) md_fs_context_resume(context,previous,result,output);
+    else md_fs_context_execute(context,q,result,output);
+    md_fs_continuation_pending(previous,pending,result);
+}
 static long acquire_at(struct md_fs_context *context, int base, const struct md_fs_anchor *origin,
         const char *path, unsigned flags, const char *object, struct md_program *program,
-        struct md_fs_anchor **image_origin) {
+        struct md_fs_anchor **image_origin,struct md_fs_continuation **pending) {
     memset(program,0,sizeof(*program)); program->fd=-1;
     struct md_fs_request q={.actor=context->actor,.peer=context->peer,
         .operation=object ? MD_FS_OPEN_OBJECT : MD_FS_OPEN_IMAGE,
@@ -23,7 +32,7 @@ static long acquire_at(struct md_fs_context *context, int base, const struct md_
     struct md_fs_result result;
     struct md_fs_anchor *resolved=NULL;
     struct md_fs_output output={.data=&program->identity,.capacity=sizeof(program->identity),.origin=&resolved};
-    md_fs_context_execute(context,&q,&result,&output);
+    execute(context,&q,&result,&output,pending);
     program->mount_flags=md_fs_anchor_policy(resolved);
     if (image_origin && !result.error) *image_origin=resolved;
     else md_fs_anchor_release(resolved);
@@ -69,7 +78,8 @@ static long acquire_at(struct md_fs_context *context, int base, const struct md_
     return 0;
 }
 static int acquire_fd(struct md_fs_context *context,int fd,const struct md_fs_anchor *origin,
-        const char *path,struct md_program *program,struct md_fs_anchor **image_origin) {
+        const char *path,struct md_program *program,struct md_fs_anchor **image_origin,
+        struct md_fs_continuation **pending) {
     *program=(struct md_program){.fd=-1};
     struct stat st;
     if (fstat(fd,&st)) return -errno;
@@ -80,7 +90,7 @@ static int acquire_fd(struct md_fs_context *context,int fd,const struct md_fs_an
         .mode=MD_FS_REOPEN_EXECUTE};
     struct md_fs_result result;
     struct md_fs_output output={.origin=image_origin};
-    md_fs_context_execute(context,&q,&result,&output);
+    execute(context,&q,&result,&output,pending);
     int error=result.error;
     if (error==-EXDEV && !origin) {
         /* Only anonymous kernel images may bypass the managed filesystem.
@@ -107,24 +117,39 @@ static int acquire_fd(struct md_fs_context *context,int fd,const struct md_fs_an
     program->mount_flags=md_fs_anchor_policy(*image_origin);
     return 0;
 }
-struct image_selection {
-    struct md_fs_context *context;
-    struct { struct md_fs_anchor *origin; char object[33]; } entries[MD_SCRIPT_DEPTH+2];
-    unsigned count;
+struct md_exec_preparation {
+    struct md_fs_continuation *pending;
+    struct md_fs_anchor *origin;
+    struct md_command_recipe recipe;
+    struct md_command_images images;
+    enum md_command_file kind;
+    int first;
+    char path[MD_INTERPRETER_MAX];
 };
-static long acquire(void *owner, const char *path, struct md_program *program, enum md_command_file kind) {
-    struct image_selection *selection=owner;
-    struct md_fs_context *context=selection->context;
+static void preparation_clear(struct md_exec_preparation *p) {
+    if (p->pending) p->pending->destroy(p->pending);
+    md_fs_anchor_release(p->origin);
+    md_command_images_close(&p->images);
+}
+void md_exec_preparation_destroy(struct md_exec_preparation *p) {
+    if (p) { preparation_clear(p); free(p); }
+}
+int md_exec_preparation_ready(struct md_exec_preparation *p) {
+    return p && p->pending ? p->pending->ready(p->pending) : -EINVAL;
+}
+static long acquire(struct md_exec_preparation *p,struct md_fs_context *context,
+        struct md_program *program,struct md_fs_anchor **image_origin) {
+    const char *path=p->path;
     const struct md_fs_anchor *cwd=context->task.cwd;
     if (*path!='/' && !cwd) return -ENODATA;
-    if (kind==MD_COMMAND_INTERPRETER) {
+    if (p->kind==MD_COMMAND_INTERPRETER) {
         struct md_fs_request q={.actor=context->actor,.peer=context->peer,.operation=MD_FS_OPEN_IMAGE,
             .directory={-1,-1},.path={path,NULL},.mode=MD_FS_IMAGE_INTERPRETER};
         struct md_fs_anchor *origin=NULL;
         struct md_fs_output output={.data=&program->identity,.capacity=sizeof(program->identity),.origin=&origin};
         struct md_fs_result result;
         *program=(struct md_program){.fd=-1};
-        md_fs_context_execute(context,&q,&result,&output);
+        execute(context,&q,&result,&output,&p->pending);
         program->mount_flags=md_fs_anchor_policy(origin);
         md_fs_anchor_release(origin);
         if (result.error || result.host_path || result.open_completion.kind || result.fd<0) {
@@ -133,62 +158,75 @@ static long acquire(void *owner, const char *path, struct md_program *program, e
         }
         program->fd=result.fd; return 0;
     }
-    if (selection->count==MD_SCRIPT_DEPTH+2) return -ELOOP;
-    unsigned index=selection->count++;
-    long result=acquire_at(context,*path=='/' ? -1 : md_fs_anchor_fd(cwd),
-        *path=='/' ? NULL : cwd,path,0,NULL,program,&selection->entries[index].origin);
-    memcpy(selection->entries[index].object,program->identity.object,33);
-    return result;
+    return acquire_at(context,*path=='/' ? -1 : md_fs_anchor_fd(cwd),
+        *path=='/' ? NULL : cwd,path,0,NULL,program,image_origin,&p->pending);
 }
-int md_fs_command_prepare(struct md_fs_context *context, const struct md_fs_request *q,
-        struct md_program **proc_image, struct md_command_recipe *recipe, struct md_command_images *images,
-        struct md_fs_anchor **image_origin) {
-    *images=(struct md_command_images){.program=-1,.loader=-1};
-    *image_origin=NULL;
-    struct image_selection selection={.context=context,.count=1};
-    struct md_program first={.fd=-1};
+static int acquire_first(struct md_exec_preparation *p,struct md_fs_context *context,
+        const struct md_fs_request *q,struct md_program **proc_image,struct md_program *first,
+        struct md_fs_anchor **origin) {
     int error;
-    int owned=0;
     if (*proc_image) {
         if ((*proc_image)->fd>=0) {
             error=acquire_fd(context,(*proc_image)->fd,(*proc_image)->origin,
-                (*proc_image)->identity.path,&first,&selection.entries[0].origin);
-            owned=1;
+                (*proc_image)->identity.path,first,origin,&p->pending);
         }
         else if ((*proc_image)->identity.object[0]) {
             error=(int)acquire_at(context,-1,NULL,(*proc_image)->identity.path,0,
-                (*proc_image)->identity.object,&first,&selection.entries[0].origin);
-            owned=1;
+                (*proc_image)->identity.object,first,origin,&p->pending);
         } else error=-EPROTO;
     } else if (!*q->path[0]) {
         char path[64]; snprintf(path,sizeof(path),"/dev/fd/%lld",(long long)q->offset);
-        error=acquire_fd(context,q->directory[0],q->origin[0],path,&first,&selection.entries[0].origin);
-        owned=1;
+        error=acquire_fd(context,q->directory[0],q->origin[0],path,first,origin,&p->pending);
     } else {
         error=(int)acquire_at(context,q->directory[0],q->origin[0],q->path[0],q->flags,
-            q->mode&MD_EXEC_OBJECT ? q->path[1] : NULL,&first,&selection.entries[0].origin);
-        owned=1;
+            q->mode&MD_EXEC_OBJECT ? q->path[1] : NULL,first,origin,&p->pending);
         if (error==-EREMOTE) {
-            md_fs_anchor_release(selection.entries[0].origin);
             *proc_image=malloc(sizeof(**proc_image));
             if (!*proc_image) return -ENOMEM;
-            **proc_image=first;
+            **proc_image=*first; first->fd=-1;
             return error;
         }
     }
-    memcpy(selection.entries[0].object,first.identity.object,33);
-    if (!error) error=md_command_images_prepare(recipe,images,&first,
-        q->mode&MD_EXEC_INACCESSIBLE,acquire,&selection);
-    /* FD images need no catalogue key: their origin pins the exact inode and
-     * mount across CLOEXEC/unlink. Keep the image, not shebang intermediates. */
-    for (unsigned i=0;i<selection.count;++i) {
-        if (!error && !*image_origin
-                && !strcmp(selection.entries[i].object,recipe->image.object)) {
-            *image_origin=selection.entries[i].origin;
-            selection.entries[i].origin=NULL;
+    return error;
+}
+int md_fs_command_prepare(struct md_fs_context *context, const struct md_fs_request *q,
+        struct md_program **proc_image,struct md_command_recipe *recipe,struct md_command_images *images,
+        struct md_fs_anchor **image_origin,struct md_exec_preparation **owner) {
+    struct md_exec_preparation local={.first=1,.images={.program=-1,.loader=-1}};
+    struct md_exec_preparation *p=*owner ? *owner : &local;
+    int error;
+    for (;;) {
+        struct md_program current={.fd=-1};
+        struct md_fs_anchor *origin=NULL;
+        error=p->first ? acquire_first(p,context,q,proc_image,&current,&origin)
+            : (int)acquire(p,context,&current,&origin);
+        if (!error) {
+            if (p->kind==MD_COMMAND_EXECUTABLE) {
+                md_fs_anchor_release(p->origin); p->origin=origin; origin=NULL;
+            }
+            p->first=0;
+            error=md_command_images_step(&p->recipe,&p->images,&current,p->kind,
+                q->mode&MD_EXEC_INACCESSIBLE,p->path);
         }
-        md_fs_anchor_release(selection.entries[i].origin);
+        md_fs_anchor_release(origin);
+        if (current.fd>=0) close(current.fd);
+        if (error<=0) break;
+        p->kind=(enum md_command_file)(error-1);
     }
-    if (owned && first.fd>=0) close(first.fd);
+    if (error==-EINPROGRESS) {
+        if (p==&local) {
+            *owner=malloc(sizeof(**owner));
+            if (*owner) **owner=local;
+            else { preparation_clear(&local); return -ENOMEM; }
+        }
+        return error;
+    }
+    if (!error) {
+        *recipe=p->recipe; *images=p->images;
+        p->images=(struct md_command_images){.program=-1,.loader=-1};
+        *image_origin=p->origin; p->origin=NULL;
+    }
+    if (p==&local) preparation_clear(p); else md_exec_preparation_destroy(p);
+    *owner=NULL;
     return error;
 }

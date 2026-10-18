@@ -1,6 +1,7 @@
 #ifndef MD_COMMAND_IMAGE_H
 #define MD_COMMAND_IMAGE_H
 #include "program_files.h"
+#include "elf.h"
 
 enum { MD_SCRIPT_DEPTH=4, MD_SCRIPT_HEADER=256 };
 /* Pointer-free recipe; argv is assembled only in the caller's address space. */
@@ -12,6 +13,11 @@ struct md_command_recipe {
 struct md_command_images { int program, loader, anonymous; unsigned mount_flags; };
 enum md_command_file { MD_COMMAND_EXECUTABLE, MD_COMMAND_INTERPRETER };
 typedef long (*md_command_acquire)(void *, const char *, struct md_program *, enum md_command_file);
+/* Consume one already acquired readable image. Returns zero on completion,
+ * kind+1 and the next path on acquisition, or a negative error. Pure image
+ * inspection is separate from filesystem IO, which may suspend. */
+int md_command_images_step(struct md_command_recipe *,struct md_command_images *,
+    struct md_program *,enum md_command_file,int inaccessible,char next[MD_INTERPRETER_MAX]);
 /* Borrows first; owns output images on success, none on failure. */
 int md_command_images_prepare(struct md_command_recipe *, struct md_command_images *,
     const struct md_program *first, int inaccessible, md_command_acquire, void *);

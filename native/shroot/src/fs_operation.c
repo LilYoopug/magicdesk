@@ -139,13 +139,14 @@ int md_fs_request_validate(const struct md_fs_request *q) {
     if (q->operation==MD_FS_MOUNT) {
         int pair=q->mode==MD_FS_MOUNT_BIND || q->mode==MD_FS_MOUNT_PIVOT || q->mode==MD_FS_MOUNT_MOVE
             || q->mode==MD_FS_MOUNT_MOVE_FD;
-        if ((!*a && !(descriptors&1)) || q->mode<MD_FS_MOUNT_BIND || q->mode>MD_FS_MOUNT_SETATTR
+        int fuse=q->mode==MD_FS_MOUNT_FUSE;
+        if ((!*a && !(descriptors&1)) || q->mode<MD_FS_MOUNT_BIND || q->mode>MD_FS_MOUNT_FUSE
                 || q->capacity || q->offset || q->value_size>PATH_MAX
-                || (pair ? (!*b && !(descriptors&2)) : *b || (descriptors&2))
+                || (pair ? (!*b && !(descriptors&2)) : fuse ? *b || !(descriptors&2) : *b || (descriptors&2))
                 || (q->mode!=MD_FS_MOUNT_TMPFS && q->mode!=MD_FS_MOUNT_OVERLAY && q->mode!=MD_FS_MOUNT_PROC
                     && q->mode!=MD_FS_MOUNT_DEVPTS && q->mode!=MD_FS_MOUNT_CGROUP
                     && q->mode!=MD_FS_MOUNT_CGROUP2 && q->mode!=MD_FS_MOUNT_SYSFS && q->mode!=MD_FS_MOUNT_MQUEUE
-                    && q->mode!=MD_FS_MOUNT_REMOUNT && q->mode!=MD_FS_MOUNT_SETATTR && q->value_size)) return -EINVAL;
+                    && q->mode!=MD_FS_MOUNT_REMOUNT && q->mode!=MD_FS_MOUNT_SETATTR && !fuse && q->value_size)) return -EINVAL;
         if (q->mode==MD_FS_MOUNT_SETATTR)
             return q->value_size!=sizeof(struct mount_attr)
                 || (q->flags&~(AT_EMPTY_PATH|AT_RECURSIVE|AT_SYMLINK_NOFOLLOW|AT_NO_AUTOMOUNT)) ? -EINVAL : 0;
