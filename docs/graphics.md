@@ -121,12 +121,13 @@ private Linux client stack for `--gpu turnip` and retains a software alternative
 Its `--print-mesa-patch` export is also the lab's patch source.
 
 The GLX patch advertises callbacks from the effective loader backend, including
-when an application sets `LIBGL_KOPPER_DISABLE`. The Turnip profile selects Zink
-through `MESA_LOADER_DRIVER_OVERRIDE`, without forcing `GALLIUM_DRIVER` into the
-software loader. Applications explicitly disabling Kopper retain Mesa's software
-presentation; ordinary GLX and Wayland EGL clients retain the hardware path.
-The GLX fixture checks both GPU readback and actual X11 pixels, not just the
-renderer string or successful context creation.
+when an application sets `LIBGL_KOPPER_DISABLE`. The Turnip profile explicitly
+selects Zink for both Kopper and the software-presentation frontend. Disabling
+Kopper does not disable GPU rendering: the frontend can present a readback of
+the GPU image. That fallback requires an actual presentation callback. Kopper's
+loader-less DRI winsys advertises none, so flushing its offscreen images remains
+a no-op instead of dereferencing absent loader functions. The GLX fixture checks
+both GPU readback and actual X11 pixels, not just the renderer string.
 
 The same patch implements Turnip KGSL calibrated timestamps with
 `IOCTL_KGSL_READ_CALIBRATED_TIMESTAMPS`. Extension discovery probes the selected

@@ -563,6 +563,8 @@ unsupported kernels do not advertise that extension. Queue queries are unchanged
 GLX loader capabilities follow the effective backend when Kopper is disabled.
 Zink retains GPU rendering with sw_winsys readback presentation when the client
 disables Kopper or the X server lacks DRI3. Direct Vulkan presentation is unchanged.
+Readback requires a presenting winsys; Kopper's loader-less DRI winsys does not
+advertise that callback, so offscreen flushes retain their original no-op behavior.
 
 --- a/src/glx/drisw_glx.c
 +++ b/src/glx/drisw_glx.c
@@ -737,7 +739,7 @@ disables Kopper or the X server lacks DRI3. Direct Vulkan presentation is unchan
 +{
 +   struct sw_winsys *ws = screen->winsys;
 +   struct zink_resource *res = zink_resource(pres);
-+   if (!ws || !(pres->bind & PIPE_BIND_DISPLAY_TARGET))
++   if (!ws || !ws->displaytarget_display || !(pres->bind & PIPE_BIND_DISPLAY_TARGET))
 +      return;
 +
 +   if (res->sw_dt && res->sw_level != level) {
@@ -843,6 +845,18 @@ disables Kopper or the X server lacks DRI3. Direct Vulkan presentation is unchan
 
  #ifdef HAVE_LIBDRM
     if (res->ro_scanout)
+--- a/src/gallium/winsys/sw/dri/dri_sw_winsys.c
++++ b/src/gallium/winsys/sw/dri/dri_sw_winsys.c
+@@ -428,7 +428,8 @@
+    ws->base.displaytarget_map = dri_sw_displaytarget_map;
+    ws->base.displaytarget_unmap = dri_sw_displaytarget_unmap;
+
+-   ws->base.displaytarget_display = dri_sw_displaytarget_display;
++   /* Kopper supplies no readback loader; its offscreen flushes cannot present. */
++   ws->base.displaytarget_display = lf ? dri_sw_displaytarget_display : NULL;
+
+    return &ws->base;
+ }
 PATCH
 }
 

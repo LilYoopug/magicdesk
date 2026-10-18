@@ -1842,6 +1842,8 @@ package_cleanup() { :; }
         self.assertIn("+   if (!psc->kopper)", result.stdout)
         self.assertIn('XQueryExtension(priv->dpy, "DRI3"', result.stdout)
         self.assertIn("zink_present_readback(screen, pctx, pres, level, layer,", result.stdout)
+        self.assertIn("!ws || !ws->displaytarget_display", result.stdout)
+        self.assertIn("displaytarget_display = lf ? dri_sw_displaytarget_display : NULL", result.stdout)
         self.assertIn("pipe_texture_map(pipe, pres, level, layer, PIPE_MAP_READ,", result.stdout)
         self.assertIn("displaytarget_destroy(screen->winsys, res->sw_dt)", result.stdout)
         self.assertIn("IOCTL_KGSL_READ_CALIBRATED_TIMESTAMPS", result.stdout)
