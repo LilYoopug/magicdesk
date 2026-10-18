@@ -6,6 +6,7 @@ import shlex
 import subprocess
 import tempfile
 from test_oci_services import Suite
+from graphical_recipe import compile_recipe
 
 
 def main():
@@ -21,7 +22,6 @@ def main():
     target = '/tmp/md-mitshm-' + suite.report['id']
     prefix = [suite.runner, '--store', args.store, '--user', '0:0']
     log, receipt = suite.base + '/test.log', suite.base + '/exit'
-    repo = Path(__file__).resolve().parents[2]
     try:
         before = client.call('get_state')
         suite.command(prefix + ['--', '/bin/mkdir', target])
@@ -36,12 +36,7 @@ def main():
             suite.transport.upload(client, wrapper, suite.base + '/shroot')
         suite.command(['chmod', '700', suite.base + '/shroot', suite.base + '/await'])
         classes = args.build / 'recipe-classes'
-        classes.mkdir(parents=True, exist_ok=True)
-        names = ['LinuxGraphicalEnvironment', 'GuestGraphicalConnection', 'GuestLaunchPlan',
-                 'GuestEnvironment', 'GraphicalProtocol', 'ShellCommandLine']
-        sources = [repo / 'native/guest-exec-lab/GraphicalRecipe.java',
-                   *(repo / ('app/src/main/java/io/github/mekhontsev/magicdesk/' + n + '.java') for n in names)]
-        subprocess.run(['javac', '-d', str(classes), *map(str, sources)], check=True, timeout=30)
+        suite.report['connectionSourceHashes'] = compile_recipe(classes)
         session = client.call('graphics.start', dict(protocol='x11', backend='shell', connection='routed',
             name='MIT-SHM contract', keyboardDirectory=suite.base + '/xkb'))['sessionId']
         suite.report['sessionId'] = session

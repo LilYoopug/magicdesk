@@ -8,13 +8,13 @@ Run test_installer_setup.py with xfce and weston first. No Mesa build is needed.
 import argparse
 import base64
 import configparser
-import hashlib
 from pathlib import Path
 import shlex
 import subprocess
 import time
 
 from test_oci_services import Suite
+from graphical_recipe import compile_recipe
 
 
 def main():
@@ -27,16 +27,8 @@ def main():
     parser.add_argument('--lease', help='Renew an existing phone wake lease without releasing it')
     parser.add_argument('--output', type=Path, default=Path('build/recipe-graphics-results'))
     args = parser.parse_args()
-    repo = Path(__file__).resolve().parents[2]
     classes = args.output / 'recipe-classes'
-    classes.mkdir(parents=True, exist_ok=True)
-    sources = ['LinuxGraphicalEnvironment', 'GuestGraphicalConnection', 'GuestLaunchPlan',
-               'GuestEnvironment', 'GraphicalProtocol', 'ShellCommandLine']
-    paths = [repo / 'native/guest-exec-lab/GraphicalRecipe.java',
-             *(repo / ('app/src/main/java/io/github/mekhontsev/magicdesk/' + name + '.java') for name in sources)]
-    hashes = {str(path.relative_to(repo)): hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
-    # EVENT_WAIT: build-host recipe compiler exits; timeout fails fixture preparation.
-    subprocess.run(['javac', '-d', str(classes), *map(str, paths)], check=True, timeout=30)
+    hashes = compile_recipe(classes)
     suite = Suite(args.output, args.build)
     client = suite.client
     suite.report['store'] = args.store

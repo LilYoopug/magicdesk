@@ -23,11 +23,8 @@ def main():
     assert args.tag.isalnum() and len(args.tag) <= 32
     repo = Path(__file__).resolve().parents[2]
     if args.stage in ('graphics', 'backup', 'all'):
-        sources = ['LinuxGraphicalEnvironment', 'GuestGraphicalConnection', 'GuestLaunchPlan',
-                   'GuestEnvironment', 'GraphicalProtocol', 'ShellCommandLine']
-        subprocess.run(['javac', '-d', str(repo / 'build/guest-workflow-recipes'),
-                        str(repo / 'native/guest-exec-lab/GraphicalRecipe.java'),
-                        *(str(repo / ('app/src/main/java/io/github/mekhontsev/magicdesk/' + name + '.java')) for name in sources)], check=True)
+        from graphical_recipe import compile_recipe
+        compile_recipe(repo / 'build/guest-workflow-recipes')
     spec = importlib.util.spec_from_file_location('transport', repo / 'scripts/mcp-client.py')
     transport = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(transport)

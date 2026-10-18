@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Installed SteamOS clients using their recipe identity and graphics profile."""
+"""Installed Linux clients using their recipe identity and graphics profile."""
 import argparse
 import base64
 from pathlib import Path
@@ -10,6 +10,7 @@ import tempfile
 import time
 
 from test_oci_services import Suite
+from graphical_recipe import compile_recipe
 
 
 def main():
@@ -21,6 +22,7 @@ def main():
     parser.add_argument('--diagnostics', action='store_true', help='Enable verbose native diagnostics')
     parser.add_argument('--require-shm', action='store_true', help='Reject a profile disabling MIT-SHM')
     parser.add_argument('--installed', action='store_true', help='Use the installed APK runtime and shell launcher')
+    parser.add_argument('--libc-registry', help='Select prepared replacements for the native test runtime')
     parser.add_argument('--renderer', choices=['turnip', 'lavapipe'], default='turnip',
                         help='Require this installed graphics profile, never inject driver overrides')
     parser.add_argument('--timeout', type=int, default=180, help='Owned launch deadline, including client downloads')
@@ -33,11 +35,14 @@ def main():
     suite = Suite(args.build, None if args.installed else args.build)
     client = suite.client
     protocol = 'x11' if args.client in ('steam', 'glx') else 'wayland'
-    session = display = None
+    session = display = display_lease = None
+    launch_attempted = False
     owned_executable = suite.runner
     log, receipt, pidfile = [suite.base + '/' + n for n in ('client.log', 'exit', 'pid')]
     suite.report.update(store=args.store, probe='steamos-' + args.client,
                         protocol=protocol, renderer=args.renderer, sandboxFlagsDisabled=False)
+    if args.libc_registry:
+        suite.report['libcRegistry'] = args.libc_registry
     print('Fixture:', suite.base, flush=True)
 
     def wait(condition, **selection):
@@ -66,24 +71,22 @@ def main():
                 '"$MAGICDESK_RUNTIME/guest-runtime"'], quiet=True).strip()
             owned_executable = runtime + '/libmagicdesk_guest_run.so'
         classes = args.build / 'recipe-classes'
-        classes.mkdir(parents=True, exist_ok=True)
-        repo = Path(__file__).resolve().parents[2]
-        names = ['LinuxGraphicalEnvironment', 'GuestGraphicalConnection', 'GuestLaunchPlan',
-                 'GuestEnvironment', 'GraphicalProtocol', 'ShellCommandLine']
-        sources = [repo / 'native/guest-exec-lab/GraphicalRecipe.java',
-                   *(repo / ('app/src/main/java/io/github/mekhontsev/magicdesk/' + name + '.java') for name in names)]
-        subprocess.run(['javac', '-d', str(classes), *map(str, sources)], check=True, timeout=30)
+        suite.report['connectionSourceHashes'] = compile_recipe(classes)
         suite.command(suite.image_command('export-tree', args.store, '/usr/share/X11/xkb', suite.base + '/xkb'))
         with tempfile.TemporaryDirectory() as temporary:
             wrapper = Path(temporary) / 'shroot'
             wrapper.write_text('#!/system/bin/sh\nprintf "%s\\n" "$$" > ' + shlex.quote(pidfile)
                                + '\nexec ' + shlex.quote(suite.runner)
                                + (' --diagnostics' if args.diagnostics else '')
+                               + (' --libc-registry ' + shlex.quote(args.libc_registry)
+                                  if args.libc_registry else '')
                                + ' --deadline-seconds ' + str(args.timeout) + ' "$@"\n')
             suite.transport.upload(client, wrapper, suite.base + '/shroot')
         suite.transport.upload(client, args.build / 'md-await-exit', suite.base + '/md-await-exit')
         suite.command(['chmod', '700', suite.base + '/shroot', suite.base + '/md-await-exit'])
         display = client.call('create_display', dict(type='virtual', width=1280, height=800, densityDpi=160))
+        display_lease = client.call('device.keep_awake',
+            dict(displayId=display['id'], durationMillis=1800000))['leaseId']
         session = client.call('graphics.start', dict(protocol=protocol, backend='shell', connection='routed',
             name='SteamOS ARM64 ' + args.client, keyboardDirectory=suite.base + '/xkb'))['sessionId']
         suite.report['sessionId'] = session
@@ -92,7 +95,10 @@ def main():
         programs = {
             'steam': 'exec /usr/bin/steam',
             'glx': 'glxinfo -B; exec glxgears -info',
-            'vulkan': 'vulkaninfo --summary; exec vkcube --wsi wayland --width 640 --height 480 --c 1800',
+            'vulkan': 'vulkaninfo --summary; '
+                      'if command -v vkcube-wayland >/dev/null; then '
+                      'exec vkcube-wayland --width 640 --height 480 --c 1800; '
+                      'else exec vkcube --wsi wayland --width 640 --height 480 --c 1800; fi',
             'gles': 'eglinfo -B -p wayland; exec es2gears_wayland -info',
         }
         program = programs[args.client]
@@ -108,6 +114,7 @@ def main():
                   + '; r=$?; printf "%s\\n" "$r" > ' + shlex.quote(receipt)
                   + '; } > ' + shlex.quote(log) + ' 2>&1')
         suite.report['launch'] = launch
+        launch_attempted = True
         client.call('graphics.execute', dict(sessionId=session, command=launch))
         selection = dict(windowTitle=args.window_title) if args.window_title else {}
         mapped = wait('graphics_window_present', sessionId=session, **selection)['session']
@@ -173,18 +180,21 @@ if test -f "$1"; then
     timeout 200 "$3" "$4" || test -s "$4"
 fi
 ''', 'fixture', pidfile, owned_executable, suite.base + '/md-await-exit', receipt], timeout=210)
-            local_log = args.build / ('steamos-' + args.client + '-' + suite.report['id'] + '.log')
-            suite.transport.download(client, log, local_log, overwrite=True)
-            suite.report['logFile'] = str(local_log)
-            suite.report['logTail'] = '\n'.join(local_log.read_text(errors='replace').splitlines()[-200:])
-            suite.report['exit'] = suite.command(['cat', receipt], quiet=True).strip()
-            if args.trace:
+            if launch_attempted:
+                local_log = args.build / ('steamos-' + args.client + '-' + suite.report['id'] + '.log')
+                suite.transport.download(client, log, local_log, overwrite=True)
+                suite.report['logFile'] = str(local_log)
+                suite.report['logTail'] = '\n'.join(local_log.read_text(errors='replace').splitlines()[-200:])
+                suite.report['exit'] = suite.command(['cat', receipt], quiet=True).strip()
+            if args.trace and launch_attempted:
                 suite.report['trace'] = suite.command([suite.runner, '--store', args.store,
                     '--user', '0:0', '--deadline-seconds', '20', '--', '/usr/bin/tail', '-400', '/tmp/md-steamos.trace'], quiet=True)
         except Exception as error:
             errors.append(str(error))
         for action in ([lambda: client.call('graphics.stop', dict(sessionId=session)),
                         lambda: wait('graphics_session_absent', sessionId=session)] if session else []) + (
+                       [lambda: client.call('device.release_awake', dict(leaseId=display_lease))]
+                       if display_lease else []) + (
                        [lambda: client.call('remove_display', dict(displayId=display['id'], uniqueId=display['uniqueId'])),
                         lambda: wait('display_absent', displayId=display['id'])] if display else []):
             try:
