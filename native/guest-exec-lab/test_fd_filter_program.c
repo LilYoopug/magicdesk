@@ -47,6 +47,7 @@ static unsigned expected(unsigned kind,int fd,const struct seccomp_data *d) {
         }
     } else if (kind==MD_FD_SELECTOR_PROC) {
         switch (d->nr) {
+        case SYS_mprotect: return d->args[2]&PROT_WRITE ? SECCOMP_RET_TRACE|MD_INTERCEPT_MEMORY : SECCOMP_RET_ALLOW;
         case SYS_read: case SYS_write: case SYS_readv: case SYS_writev:
         case SYS_pread64: case SYS_pwrite64: case SYS_preadv: case SYS_pwritev:
         case SYS_preadv2: case SYS_pwritev2: case SYS_lseek: case SYS_ioctl:
@@ -57,7 +58,7 @@ static unsigned expected(unsigned kind,int fd,const struct seccomp_data *d) {
         case SYS_mmap: if (!(d->args[3]&MAP_ANONYMOUS)) selected=1u<<4; break;
         case SYS_fcntl:
             if ((unsigned)d->args[1]==F_GETFL || (unsigned)d->args[1]==F_SETFL
-                    || (unsigned)d->args[1]==F_GET_SEALS) selected=1;
+                    || (unsigned)d->args[1]==F_GET_SEALS || (unsigned)d->args[1]==F_ADD_SEALS) selected=1;
             break;
         }
     } else if (kind==MD_FD_SELECTOR_EPOLL_TARGET) {
@@ -91,7 +92,7 @@ void test_fd_filter_program(void) {
     const struct md_fd_filter_gates gates={0x1112345678,0x2212345678,0x3312345678,0x5512345678};
     const uintptr_t exempt[]={gates.raw,gates.watch,gates.task,gates.native};
     const int fds[]={0,190,511,512,1024*1024,-1};
-    const unsigned commands[]={0,F_GETFL,F_SETFL,F_GETFD,F_GET_SEALS,F_DUPFD,F_DUPFD_CLOEXEC};
+    const unsigned commands[]={0,F_GETFL,F_SETFL,F_GETFD,F_GET_SEALS,F_ADD_SEALS,F_DUPFD,F_DUPFD_CLOEXEC};
     struct md_fd_filter_program built;
     assert(md_fd_filter_build(MD_FD_SELECTOR_PROC,0,&gates,NULL)==-EINVAL);
     assert(md_fd_filter_build(MD_FD_SELECTOR_PROC,0,NULL,&built)==-EINVAL && !built.count);

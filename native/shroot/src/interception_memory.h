@@ -37,27 +37,28 @@ int md_memory_private_access_set(struct md_interception_memory *, const struct m
  * optional capability loss, never a reason to change dumpability or identity. */
 int md_memory_private_access_capture(struct md_interception_memory *, pid_t);
 const struct md_private_memory_access *md_memory_private_access(const struct md_interception_memory *);
-/* File provenance and VM_MAYEXEC policy belong to the address space, not its
+/* File provenance and VMA protection limits belong to the address space, not its
  * threads' descriptor tables. Prepare reserves storage before execution;
  * finish allocates nothing. All calls below require the address-space turn. */
 struct md_memory_backing;
 struct md_memory_file_range;
 enum md_mapping_operation { MD_MAPPING_MAP, MD_MAPPING_UNMAP, MD_MAPPING_REMAP };
+enum { MD_MAPPING_NOEXEC=1, MD_MAPPING_NOWRITE=2 };
 struct md_mapping_change {
     enum md_mapping_operation operation;
     uintptr_t address;
     size_t length, new_length;
     unsigned flags;
-    int noexec, prepared;
+    int restrictions, prepared;
     struct md_memory_backing *backing;
     uint64_t offset;
     struct md_memory_file_range *moving;
     size_t moving_count;
 };
 int md_memory_has_policy(const struct md_interception_memory *);
-int md_memory_exec_check(const struct md_interception_memory *, uintptr_t, size_t);
+int md_memory_protect_check(const struct md_interception_memory *, uintptr_t, size_t, unsigned protection);
 int md_memory_mapping_prepare(struct md_interception_memory *, struct md_mapping_change *,
-    enum md_mapping_operation, uintptr_t, size_t, size_t new_length, unsigned flags, int noexec);
+    enum md_mapping_operation, uintptr_t, size_t, size_t new_length, unsigned flags, int restrictions);
 /* Borrows a regular-file description and retains a shared CLOEXEC backing.
  * Independent address spaces share only file identity, not private bytes/offsets.
  * A failed syscall never publishes it. Native devices remain kernel-owned. */

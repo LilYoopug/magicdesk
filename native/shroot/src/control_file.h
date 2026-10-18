@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/stat.h>
+#include "resource_order.h"
 struct md_identity;
 struct md_task_resources;
 struct md_namespace_reference;
@@ -14,6 +15,8 @@ struct md_control_actor {
     const struct md_task_resources *resources;
     /* Borrowed event-loop owner; providers retain it only for future wakeups. */
     struct md_resource_wakeup *wakeup;
+    /* Current OFD status flags, captured when its ordered operation starts. */
+    unsigned status_flags;
 };
 struct md_control_file {
     const struct md_control_file_ops *ops;
@@ -31,8 +34,22 @@ struct md_control_pending {
     long (*resume)(struct md_control_pending *,void *data,size_t);
     void (*dispose)(struct md_control_pending *);
     int64_t deadline;
-    /* Directory cookie after the returned complete records, not a byte count. */
+    /* Directory cookie, or an explicit cursor after an append write. */
     int64_t position;
+    int position_valid;
+    /* Internal preparation has no application-visible mutation and must not
+     * expose its wait as an interruptible application operation. Signals run
+     * normally; preparation is retried even without SA_RESTART. */
+    int retry_preparation;
+    /* Optional terminal ownership for effects already admitted by a provider.
+     * abandon consumes this request, calling retired exactly once with the
+     * final result before disposal. No caller buffer or task is retained. */
+    void (*abandon)(struct md_control_pending *);
+    void (*retired)(struct md_control_pending *,long);
+    struct md_resource_order retirement;
+    void *retirement_context;
+    int64_t retirement_offset;
+    int retirement_advance;
 };
 enum { MD_CONTROL_READ=1, MD_CONTROL_WRITE, MD_CONTROL_GETDENTS };
 enum { MD_CONTROL_SYNC=1, MD_CONTROL_DATASYNC, MD_CONTROL_TRUNCATE };
@@ -48,12 +65,19 @@ struct md_control_file_ops {
      * only the exact OFD turn spans the wait, never a descriptor-table turn. */
     long (*io)(void *,const struct md_control_actor *,unsigned operation,void *,size_t,int64_t,
         struct md_control_pending **);
+    /* Regular byte files may bound transport pages without exposing that
+     * bound as EOF. Zero retains single-operation/packet semantics. The host
+     * retains one OFD turn until all pages are copied, EOF or an error. */
+    size_t (*read_size)(void *);
     /* Optional metadata-dependent seek; the descriptor host still owns the
      * cursor and its OFD turn. SET/CUR remain local when no query is needed. */
     long (*seek)(void *,const struct md_control_actor *,int64_t,int,struct md_control_pending **);
     /* Scalar descriptor commands share asynchronous lifetime and OFD ordering
      * with IO, but never consume or advance the file cursor. */
     long (*command)(void *,const struct md_control_actor *,unsigned,int64_t,struct md_control_pending **);
+    /* One confirmed descriptor close, distinct from final OFD release. The
+     * caller no longer owns its FD-table turn; pending work owns its lifetime. */
+    long (*flush)(void *,const struct md_control_actor *,struct md_control_pending **);
     unsigned long filesystem;
     int (*access)(void *,const struct md_identity *,unsigned);
     int nonseekable;
@@ -62,6 +86,9 @@ struct md_control_file_ops {
     int (*descriptor)(void *,int flags);
     int (*seals)(void *);
     int mappable;
+    /* Shared mappings retain VM_MAYWRITE restrictions even though preparation
+     * may borrow a writable backing descriptor. Private COW is unaffected. */
+    int mapping_readonly;
     /* Optional private mapping backing, distinct from the inert carrier.
      * Returns an owned FD, or EINPROGRESS with an owned request whose resume
      * returns that FD. Neither the file table nor address space is locked

@@ -497,13 +497,24 @@ daemon or periodic task scan is involved. Removal rejects populated groups and
 releases backing directory descriptors; retired logical metadata remains until
 the launch world is released, allowing open controls to return ENODEV.
 
+`cgroup.events` publishes recursive `populated` transitions through the shared
+typed watch source. Inotify receives IN_MODIFY; poll/epoll receive POLLPRI and
+POLLERR until the open description rereads the state. Membership, task birth and
+exit update only affected ancestor branches. Moving between sibling groups does
+not publish a false empty parent. Birth publishes the child before the parent
+resumes, including children held at their first stop by a debugger. Removed
+controls emit deletion and retire their watches; reused directory names get
+independent event identities. Poll listeners
+are allocated only for observed controls. Ordinary file IO does not consult this
+accounting. This lets systemd retire completed scopes without a periodic scan.
+
 The v2 hierarchy advertises pids. Subtree control enables child pids files,
 respects the no-internal-process rule and refuses disabling a controller still
 enabled below. Removed controls invalidate retained FDs even after re-enabling.
 `pids.max` retains a nonnegative integer or max; `pids.current` counts live threads
 recursively on read; `pids.events` reports max 0. These values are permissive
-compatibility state, not enforced limits. Fork/exit retain the existing membership
-bookkeeping without a second counter or periodic scan. CPU/memory/IO limits and
+compatibility state, not enforced limits. Population accounting tracks lifecycle,
+not quota enforcement. CPU/memory/IO limits and
 freezing remain unavailable. The v1
 devices list is always `a *:* rwm`; all-device allowance is accepted, restrictive
 rules are rejected. Unsupported controller enabling, freezes and release agents

@@ -58,13 +58,18 @@ int md_resources_fork(const struct md_task_resources *r, unsigned long flags,
     }
     md_resources_release(out); return -ENOMEM;
 }
-int md_resources_exec(struct md_task_resources *r) {
+int md_resources_exec_closed(struct md_task_resources *r,struct md_fd_closed *closed) {
     if (!r->files) return 0;
     struct md_fd_origins *next=md_fd_origins_unshare_prepare(r->files);
     if (!next) return -ENOMEM;
-    md_fd_origins_exec(next);
+    md_fd_origins_exec_collect(next,closed);
     struct md_fd_origins *old=r->files; r->files=next; md_fd_origins_release(old);
     return 0;
+}
+int md_resources_exec(struct md_task_resources *r) { return md_resources_exec_closed(r,NULL); }
+void md_resources_exit_files(struct md_task_resources *r,struct md_fd_closed *closed) {
+    md_fd_origins_exit_collect(r->files,closed);
+    md_fd_origins_release(r->files); r->files=NULL;
 }
 int md_resources_clone_supported(unsigned long flags) {
     return (!(flags&CLONE_NEWUSER) || !(flags&(CLONE_FS|CLONE_THREAD)))

@@ -19,6 +19,8 @@ md_raw:
     mov x3, x4
     mov x4, x5
     mov x5, x6
+.global md_raw_syscall
+md_raw_syscall:
     svc #0
 .global md_raw_return
 md_raw_return:

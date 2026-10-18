@@ -17,6 +17,10 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <poll.h>
+#include <sys/epoll.h>
+#include <sys/inotify.h>
+#include <sys/ptrace.h>
 
 static const char *membership_proc="/proc";
 static void read_text(const char *path,char *text,size_t size) {
@@ -30,6 +34,101 @@ static int writing(const char *path,const char *text) {
     int fd=open(path,O_WRONLY|O_CLOEXEC|O_NOCTTY); assert(fd>=0);
     ssize_t n=write(fd,text,strlen(text)); int error=errno; close(fd); errno=error;
     return (int)n;
+}
+static unsigned events_read(int fd,int first,int second) {
+    union { struct inotify_event event; char data[1024]; } buffer;
+    ssize_t n=read(fd,buffer.data,sizeof(buffer.data));
+    if (n<0) { assert(errno==EAGAIN); return 0; }
+    unsigned found=0;
+    for (size_t at=0;at<(size_t)n;) {
+        struct inotify_event *event=(void *)(buffer.data+at);
+        assert(event->wd==first || event->wd==second);
+        if (event->mask&IN_MODIFY) found|=event->wd==first ? 1 : 2;
+        if (event->mask&IN_DELETE_SELF) found|=4;
+        if (event->mask&IN_IGNORED) found|=8;
+        at+=sizeof(*event)+event->len;
+    }
+    return found;
+}
+static void event_state(int fd,int populated) {
+    char data[128]; assert(!lseek(fd,0,SEEK_SET));
+    ssize_t n=read(fd,data,sizeof(data)-1); assert(n>0); data[n]=0;
+    assert(strstr(data,populated ? "populated 1\n" : "populated 0\n"));
+    struct pollfd p={.fd=fd,.events=POLLPRI}; assert(!poll(&p,1,0));
+}
+static void population_events(void) {
+    const char *base="/tmp/cgv2/events",*leaf="/tmp/cgv2/events/leaf";
+    assert(!mkdir(base,0700) && !mkdir(leaf,0700));
+    assert(!mkdir("/tmp/cgv2/events/sibling",0700));
+    int watch=inotify_init1(IN_NONBLOCK|IN_CLOEXEC); assert(watch>=0);
+    int first=inotify_add_watch(watch,"/tmp/cgv2/events/cgroup.events",IN_MODIFY|IN_DELETE_SELF|IN_EXCL_UNLINK);
+    int second=inotify_add_watch(watch,"/tmp/cgv2/events/leaf/cgroup.events",IN_MODIFY|IN_DELETE_SELF);
+    assert(first>0 && second>0 && first!=second);
+    int fd=open("/tmp/cgv2/events/cgroup.events",O_RDONLY|O_CLOEXEC); assert(fd>=0);
+    int ep=epoll_create1(EPOLL_CLOEXEC); assert(ep>=0);
+    struct epoll_event event={.events=EPOLLPRI,.data.fd=fd};
+    assert(!epoll_ctl(ep,EPOLL_CTL_ADD,fd,&event)); event_state(fd,0);
+    assert(!epoll_wait(ep,&event,1,0));
+    assert(writing("/tmp/cgv2/events/leaf/cgroup.procs","0")==1);
+    assert(events_read(watch,first,second)==3);
+    assert(epoll_wait(ep,&event,1,0)==1 && (event.events&(EPOLLPRI|EPOLLERR))==(EPOLLPRI|EPOLLERR));
+    event_state(fd,1);
+    assert(writing("/tmp/cgv2/events/sibling/cgroup.procs","0")==1);
+    assert(events_read(watch,first,second)==2); event_state(fd,1);
+    assert(writing("/tmp/cgv2/cgroup.procs","0")==1);
+    assert(events_read(watch,first,second)==1); event_state(fd,0);
+    int ready[2],finish[2]; assert(!pipe(ready) && !pipe(finish));
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        close(ready[0]); close(finish[1]);
+        assert(writing("/tmp/cgv2/events/leaf/cgroup.procs","0")==1);
+        assert(write(ready[1],"x",1)==1);
+        char byte; assert(read(finish[0],&byte,1)==1); _exit(0);
+    }
+    close(ready[1]); close(finish[0]);
+    char byte; assert(read(ready[0],&byte,1)==1);
+    assert(events_read(watch,first,second)==3); event_state(fd,1);
+    assert(write(finish[1],"x",1)==1); close(finish[1]); close(ready[0]);
+    /* EVENT_WAIT: actual provider wake, not just a synchronous readiness query. */
+    assert(epoll_wait(ep,&event,1,5000)==1 && (event.events&EPOLLPRI));
+    /* EVENT_WAIT: process exit must publish the empty subtree before reaping. */
+    int status; assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
+    assert(events_read(watch,first,second)==3);
+    assert(epoll_wait(ep,&event,1,0)==1 && (event.events&EPOLLPRI)); event_state(fd,0);
+    assert(!rmdir(leaf)); assert(events_read(watch,first,second)==12);
+    assert(!rmdir("/tmp/cgv2/events/sibling") && !rmdir(base));
+    assert(events_read(watch,first,second)==12);
+    close(ep); close(fd); close(watch);
+}
+static void stopped_newborn_membership(void) {
+    const char *group="/tmp/cgv2/newborn";
+    assert(!mkdir(group,0700));
+    pid_t parent=fork(); assert(parent>=0);
+    if (!parent) {
+        assert(writing("/tmp/cgv2/newborn/cgroup.procs","0")==1);
+        assert(!ptrace(PTRACE_TRACEME,0,NULL,NULL));
+        raise(SIGSTOP);
+        pid_t child=fork(); assert(child>=0); _exit(0);
+    }
+    int status;
+    /* EVENT_WAIT: debugger owns the initial and fork stops; alarm bounds failure. */
+    assert(waitpid(parent,&status,0)==parent && WIFSTOPPED(status));
+    assert(!ptrace(PTRACE_SETOPTIONS,parent,NULL,(void *)PTRACE_O_TRACEFORK));
+    assert(!ptrace(PTRACE_CONT,parent,NULL,NULL));
+    assert(waitpid(parent,&status,0)==parent && (unsigned)status>>16==PTRACE_EVENT_FORK);
+    unsigned long child=0;
+    assert(!ptrace(PTRACE_GETEVENTMSG,parent,NULL,&child) && child);
+    assert(waitpid((pid_t)child,&status,__WALL)==(pid_t)child && WIFSTOPPED(status));
+    assert(!ptrace(PTRACE_CONT,parent,NULL,NULL));
+    assert(waitpid(parent,&status,0)==parent && WIFEXITED(status) && !WEXITSTATUS(status));
+    int fd=open("/tmp/cgv2/newborn/cgroup.events",O_RDONLY); assert(fd>=0);
+    event_state(fd,1);
+    char text[256],pid[32]; snprintf(pid,sizeof(pid),"%lu\n",child);
+    read_text("/tmp/cgv2/newborn/cgroup.procs",text,sizeof(text)); assert(strstr(text,pid));
+    assert(rmdir(group)<0 && errno==EBUSY);
+    assert(!ptrace(PTRACE_CONT,(pid_t)child,NULL,NULL));
+    assert(waitpid((pid_t)child,&status,__WALL)==(pid_t)child && WIFEXITED(status) && !WEXITSTATUS(status));
+    event_state(fd,0); close(fd); assert(!rmdir(group));
 }
 static void *thread_membership(void *unused) {
     (void)unused;
@@ -68,6 +167,8 @@ int test_cgroup_guest(int pid_namespace) {
     assert(!umount2("/tmp/cgv2",0));
     assert(!mount("none","/tmp/cgv2","cgroup2",MS_NOSUID|MS_NOEXEC|MS_NODEV|MS_REC|MS_RELATIME,NULL));
     assert(!mount("none","/tmp/cgv1","cgroup",MS_NOSUID|MS_NOEXEC|MS_NODEV,"devices"));
+    population_events();
+    stopped_newborn_membership();
     struct statfs st; assert(!statfs("/tmp/cgv2",&st) && st.f_type==CGROUP2_SUPER_MAGIC);
     assert(!statfs("/tmp/cgv1",&st) && st.f_type==CGROUP_SUPER_MAGIC);
     char text[8192]; read_text("/tmp/cgv2/cgroup.controllers",text,sizeof(text)); assert(!strcmp(text,"pids\n"));

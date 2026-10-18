@@ -18,6 +18,7 @@ int md_fd_mutation_loan(const struct md_fd_order *,long nr,const unsigned long a
 int md_fd_mutation_prepare(struct md_fd_origins *, long nr,
         const unsigned long args[6], struct md_fd_mutation *);
 int md_fd_mutation_finish(struct md_fd_mutation *, struct md_fd_origins *, long result);
+int md_fd_mutation_finish_closed(struct md_fd_mutation *,struct md_fd_origins *,long result,struct md_fd_closed *);
 void md_fd_mutation_discard(struct md_fd_mutation *);
 /* Decode only the terminal register at an observed openat return gate. The
  * caller must establish that PC/syscall identity and retain the file-table

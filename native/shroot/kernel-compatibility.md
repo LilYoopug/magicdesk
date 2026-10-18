@@ -409,6 +409,11 @@ permission to service kernel accesses to missing pages. The experiment does not
 use newer userfaultfd move/poison ioctls or change SELinux/sysctl policy.
 Anonymous ELF custody uses baseline `F_GET_SEALS`, CLOEXEC duplication, pread
 and backed mappings. It does not require `MFD_EXEC` or `MFD_NOEXEC_SEAL`.
+Read-only anonymous views and task-local controlled mappings use the same 5.15
+primitives, including `F_SEAL_FUTURE_WRITE` and atomic ADDFD+SEND. The optional
+`MFD_NOEXEC_SEAL` variant in `test_memfd_views.py` requires Linux 6.3 and skips
+that variant on EINVAL; its ordinary memfd tests and production path remain
+independent of this flag.
 `test_anonymous_exec.py` checks ordinary/sealed images and process-image lifetime;
 firmware execution-policy rejection remains an error, not an implicit elevation.
 Portable backing custody uses the same sealed-manifest primitive and transfers
@@ -650,6 +655,7 @@ retain native errors; arbitrary new guest syscalls are not runtime requirements.
 | `STATX_MNT_ID_UNIQUE` | 6.8 | `namespace_proc.c`: distinguishes globally unique mount IDs from the runtime's ordinary mount-ID namespace. | The adapter strips the UNIQUE request and asks for `STATX_MNT_ID` (5.8); returned masks do not claim UNIQUE support. |
 | `PROCMAP_QUERY` | 6.11 | `test_mapping_task.c`: optional binary mapping-observation experiment. | Production `mapping_observation.c` reads a retained maps file. The fixture records unavailable ioctl access separately and verifies the text path. |
 | `MFD_EXEC` | 6.3 | `test_exec_policy.c`: explicit executable-memfd policy experiment. | This experiment reports failure; production image admission does not require this flag. |
+| `MFD_NOEXEC_SEAL` | 6.3 | `test_memfd_views.py`: optional sealed non-executable memfd variant. | EINVAL skips only this variant; ordinary memfd coverage and production mapping remain available. |
 | `AT_EXECVE_CHECK` | 6.14 | Execution-policy boundary, not an enabled host dependency. | The adapter rejects unsupported execveat flags rather than treating an X_OK check as equivalent. |
 
 Version references: [pidfd_open flags](https://man7.org/linux/man-pages/man2/pidfd_open.2.html),

@@ -176,18 +176,17 @@ static int enter(struct md_mount_namespace *view,
         struct path_point *p,struct md_view_mount **mount,uint64_t resolve) {
     struct md_fs_mounts *tree = view ? view->tree : NULL;
     if (!tree) return 0;
-    for (unsigned i = 0; i <= tree->count; ++i) {
-        struct md_view_mount *m = i ? &tree->mounts[i-1] : &view->base;
-        if (m->source<0) continue;
-        if (m->detached || m->parent != *mount || !md_view_same(&p->identity, &m->guest)) continue;
+    for (unsigned depth=0;;++depth) {
+        struct md_view_mount *m=md_view_mount_lookup(view,*mount,&p->identity);
+        if (!m) return 0;
+        if (depth>tree->count) return -ELOOP;
         if (resolve & RESOLVE_NO_XDEV) return -EXDEV;
         int copy = duplicate(m->source);
         if (copy < 0) return copy;
         point_close(p); *mount=m;
         int r=point_native(p,copy);
-        return r ? r : enter(view,p,mount,resolve);
+        if (r) return r;
     }
-    return 0;
 }
 int md_view_location_mountpoint(struct md_view_location *location) {
     struct path_point point={.fd=-1};

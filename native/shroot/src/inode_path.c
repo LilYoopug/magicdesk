@@ -230,6 +230,26 @@ static int directory_path(struct md_inode_store *s, struct mdi_node node, char *
     }
     return r;
 }
+int md_inode_contains(struct md_inode_store *s,int root,int object) {
+    int r=mdi_begin(s,0);
+    if (r) return r;
+    struct mdi_node parent,child;
+    r=root==MD_INODE_ROOT ? mdi_node(s,mdi_root(s),&parent) : mdi_fd(s,root,&parent);
+    if (!r) r=mdi_fd(s,object,&child);
+    if (r==-EXDEV) r=0;
+    else if (!r) {
+        if (!strcmp(parent.id,child.id)) r=1;
+        else if (parent.kind!=S_IFDIR) r=0;
+        else if (child.kind==S_IFDIR) r=mdi_ancestor(s,parent.id,child.id);
+        else {
+            struct mdi_path_name name;
+            r=path_name(s,&child,&name);
+            if (!r) r=name.ambiguous ? -ENOTSUP : mdi_ancestor(s,parent.id,name.parent);
+        }
+    }
+    int error=mdi_finish(s,r<0 ? r : 0);
+    return error ? error : r;
+}
 int md_inode_path(struct md_inode_store *s, int dirfd, char *out, size_t size) {
     if (!out) return -EFAULT;
     if (!size) return -ERANGE;

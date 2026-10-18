@@ -22,7 +22,9 @@
 #include <unistd.h>
 
 static int fail_memfd, fail_map, fail_map_after=-1;
+static int fail_reservation;
 void test_mount_policy_map_failure_after(int count) { fail_map_after=count; }
+void test_mount_reservation_failure(int enabled) { fail_reservation=enabled; }
 int __real_memfd_create(const char *, unsigned);
 int __wrap_memfd_create(const char *name, unsigned flags) {
     if (fail_memfd) { errno=ENOSYS; return -1; }
@@ -30,6 +32,10 @@ int __wrap_memfd_create(const char *name, unsigned flags) {
 }
 void *__real_mmap(void *, size_t, int, int, int, off_t);
 void *__wrap_mmap(void *address, size_t size, int prot, int flags, int fd, off_t offset) {
+    if (fail_reservation && size==MD_FS_MOUNTS_MAX*sizeof(struct md_view_mount)
+            && flags==(MAP_PRIVATE|MAP_ANONYMOUS) && fd==-1 && !offset) {
+        errno=ENOMEM; return MAP_FAILED;
+    }
     /* Inject only the policy mapping, not allocator/diagnostic mappings that
      * libc may need while releasing a partially imported graph. */
     if (size==4*sizeof(uint32_t) && flags==MAP_SHARED && fd>=0 && !offset) {

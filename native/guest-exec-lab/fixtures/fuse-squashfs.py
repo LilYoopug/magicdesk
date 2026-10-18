@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """Exercise a stock read-only FUSE filesystem, including concurrent readers."""
 from concurrent.futures import ThreadPoolExecutor
+from collections import deque
 import errno
 import ctypes
 import mmap
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import tempfile
+import threading
+import queue
 import time
+import traceback
 
 work = Path(tempfile.mkdtemp(prefix='md-fuse-squashfs-'))
 source, mount = work / 'source', work / 'mount'
@@ -26,6 +31,8 @@ shutil.copy2('/usr/bin/true', source / 'program')
 shutil.copy2('/usr/lib/libm.so.6', source / 'library.so')
 (source / 'script').write_text('#!/bin/sh\nprintf "fuse-script-ok\\n"\n')
 (source / 'script').chmod(0o755)
+(source / 'sourced').write_text('if :; then\n' + '# padding to span transport pages\n' * 8192
+                              + 'printf "fuse-source-ok\\n"\nfi\n')
 subprocess.run(['mksquashfs', str(source), str(work / 'image'), '-noappend',
                 '-processors', '1', '-no-progress'], check=True)
 log = open(work / 'daemon.log', 'w+')
@@ -39,7 +46,7 @@ try:
         # Bounded mount-state observation, never a readiness settling delay.
         time.sleep(0.02)
     assert mount.stat().st_dev != source.stat().st_dev
-    assert sorted(p.name for p in mount.iterdir()) == ['directory', 'file', 'library.so', 'link', 'program', 'script']
+    assert sorted(p.name for p in mount.iterdir()) == ['directory', 'file', 'library.so', 'link', 'program', 'script', 'sourced']
     assert (mount / 'directory' / 'small').read_text() == 'nested\n'
     assert os.readlink(mount / 'link') == 'file'
     print('FUSE exec source', (mount / 'program').stat(), flush=True)
@@ -47,10 +54,127 @@ try:
           if line.split()[4] == str(mount)), flush=True)
     subprocess.run([str(mount / 'program')], check=True)
     assert subprocess.check_output([str(mount / 'script')]) == b'fuse-script-ok\n'
+    assert subprocess.check_output(['/bin/bash', '-c', '. "$1"', 'fuse-source',
+                                    str(mount / 'sourced')]) == b'fuse-source-ok\n'
+    fd = os.open(mount / 'file', os.O_RDONLY)
+    try:
+        assert os.read(fd, len(content)) == content
+        assert os.read(fd, 1) == b''
+        assert os.pread(fd, len(content), 0) == content
+        assert os.lseek(fd, 0, os.SEEK_CUR) == len(content)
+        # Large seek results must never be decoded as transport control bits.
+        assert os.lseek(fd, (1 << 32) + 17, os.SEEK_SET) == (1 << 32) + 17
+        assert os.read(fd, 1) == b''
+        os.lseek(fd, 0, os.SEEK_SET)
+        vectors = [bytearray(0), bytearray(3001), bytearray(32768),
+                   bytearray(0), bytearray(len(content) - 35769)]
+        assert os.readv(fd, vectors) == len(content)
+        assert b''.join(vectors) == content
+        class Iovec(ctypes.Structure):
+            _fields_ = [('base', ctypes.c_void_p), ('length', ctypes.c_size_t)]
+        first = ctypes.create_string_buffer(16384)
+        bad = (Iovec * 2)(Iovec(ctypes.addressof(first), 16384), Iovec(None, 16384))
+        libc_io = ctypes.CDLL(None, use_errno=True)
+        libc_io.readv.argtypes = [ctypes.c_int, ctypes.POINTER(Iovec), ctypes.c_int]
+        libc_io.readv.restype = ctypes.c_ssize_t
+        os.lseek(fd, 0, os.SEEK_SET)
+        assert libc_io.readv(fd, bad, 2) == 16384
+        assert first.raw == content[:16384]
+        assert os.lseek(fd, 0, os.SEEK_CUR) == 16384
+    finally:
+        os.close(fd)
     library = ctypes.CDLL(str(mount / 'library.so'))
     library.cos.argtypes = [ctypes.c_double]
     library.cos.restype = ctypes.c_double
     assert library.cos(0.0) == 1.0
+    signal.signal(signal.SIGUSR1, lambda *_: None)
+    # A synthetic provider wait is not an interruptible application mmap.
+    # In particular a loader must not fail when a non-SA_RESTART handler runs.
+    signal.siginterrupt(signal.SIGUSR1, True)
+    fd = os.open(mount / 'file', os.O_RDONLY)
+    daemon.send_signal(signal.SIGSTOP)
+    stopped, status = os.waitpid(daemon.pid, os.WUNTRACED)
+    assert stopped == daemon.pid and os.WIFSTOPPED(status)
+    thread = queue.Queue()
+    def interrupted_mapping():
+        thread.put(threading.get_ident())
+        with mmap.mmap(fd, len(content), flags=mmap.MAP_PRIVATE, prot=mmap.PROT_READ) as mapped:
+            return mapped[:]
+    pool = ThreadPoolExecutor(max_workers=1)
+    pending = pool.submit(interrupted_mapping)
+    try:
+        ident = thread.get(timeout=5)
+        for attempt in range(3):
+            try:
+                # EVENT_WAIT: no response is possible while the daemon is
+                # stopped. A signal must not turn preparation into short IO.
+                pending.result(timeout=.2)
+                raise AssertionError('stopped daemon completed a mapping')
+            except TimeoutError:
+                pass
+            signal.pthread_kill(ident, signal.SIGUSR1)
+        daemon.send_signal(signal.SIGCONT)
+        assert pending.result(timeout=10) == content
+        print('PASS FUSE mapping preparation survives non-SA_RESTART signals', flush=True)
+    finally:
+        daemon.send_signal(signal.SIGCONT)
+        pool.shutdown(wait=True)
+        os.close(fd)
+    def racing_mapping():
+        thread.put(threading.get_ident())
+        for attempt in range(64):
+            descriptor = os.open(mount / 'file', os.O_RDONLY)
+            try:
+                with mmap.mmap(descriptor, len(content), flags=mmap.MAP_PRIVATE,
+                               prot=mmap.PROT_READ) as mapped:
+                    assert mapped[:] == content
+            finally:
+                os.close(descriptor)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(racing_mapping)
+        ident = thread.get(timeout=5)
+        for attempt in range(200):
+            if pending.done():
+                break
+            signal.pthread_kill(ident, signal.SIGUSR1)
+            # EVENT_WAIT: bound signal cadence while racing real completions.
+            try:
+                pending.result(timeout=.002)
+                break
+            except TimeoutError:
+                pass
+        pending.result(timeout=30)
+    print('PASS FUSE mapping completion/signal race over 64 independent opens', flush=True)
+    def confined_mapping_completion():
+        class Filter(ctypes.Structure):
+            _fields_ = [('code', ctypes.c_ushort), ('jt', ctypes.c_ubyte),
+                        ('jf', ctypes.c_ubyte), ('value', ctypes.c_uint)]
+        class Program(ctypes.Structure):
+            _fields_ = [('length', ctypes.c_ushort), ('filter', ctypes.POINTER(Filter))]
+        instructions = (Filter * 4)(Filter(0x20, 0, 0, 0),
+            Filter(0x15, 0, 1, 0xffffffff),
+            Filter(0x06, 0, 0, 0x50000 | errno.EPERM),
+            Filter(0x06, 0, 0, 0x7fff0000))
+        program = Program(len(instructions), instructions)
+        assert libc_io.prctl(38, 1, 0, 0, 0) == 0
+        assert libc_io.syscall(277, 1, 0, ctypes.byref(program)) == 0
+        fd = os.open(mount / 'file', os.O_RDONLY)
+        for attempt in range(2048):
+            with mmap.mmap(fd, len(content), flags=mmap.MAP_PRIVATE,
+                           prot=mmap.PROT_READ) as mapped:
+                assert mapped[0] == content[0]
+        os.close(fd)
+    child = os.fork()
+    if not child:
+        try:
+            confined_mapping_completion()
+        except BaseException:
+            traceback.print_exc()
+            os._exit(1)
+        os._exit(0)
+    waited, status = os.waitpid(child, 0)
+    assert waited == child and status == 0, status
+    print('PASS FUSE mapping early completion with seccomp rejecting invalid syscalls', flush=True)
     with open(mount / 'file', 'rb') as stream:
         with mmap.mmap(stream.fileno(), len(content), flags=mmap.MAP_PRIVATE,
                        prot=mmap.PROT_READ | mmap.PROT_WRITE) as mapped:
@@ -119,6 +243,6 @@ finally:
             daemon.wait(timeout=10)
     log.flush()
     log.seek(0)
-    print(log.read(), flush=True)
+    print(''.join(deque(log, maxlen=100)), flush=True)
     log.close()
     shutil.rmtree(work)

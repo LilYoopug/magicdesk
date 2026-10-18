@@ -83,6 +83,13 @@ int md_fd_filter_build(enum md_fd_selector_kind kind,int fd,
         DUPLICATES
     );
     if (kind==MD_FD_SELECTOR_PROC) COPY_PROGRAM(
+        /* Controlled shared mappings may have a writable provider backing.
+         * Only tasks admitting controlled descriptors acquire this check. */
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_mprotect,0,4),
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[2])),
+        BPF_JUMP(BPF_JMP|BPF_JSET|BPF_K,PROT_WRITE,0,1),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_MEMORY),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
         PROC(read,0) PROC(write,0) PROC(readv,0) PROC(writev,0)
         PROC(pread64,0) PROC(pwrite64,0)
         PROC(preadv,0) PROC(pwritev,0) PROC(preadv2,0) PROC(pwritev2,0)
@@ -94,11 +101,12 @@ int md_fd_filter_build(enum md_fd_selector_kind kind,int fd,
         BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
         BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
         PROC(mmap,4) PROC(getdents64,0) PROC(fstatfs,0)
-        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_fcntl,0,9),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_fcntl,0,10),
         BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[1])),
-        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,F_GETFL,2,0),
-        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,F_SETFL,1,0),
-        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,F_GET_SEALS,0,5),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,F_GETFL,3,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,F_SETFL,2,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,F_GET_SEALS,1,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,F_ADD_SEALS,0,5),
         BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[0])),
         BPF_STMT(BPF_ALU|BPF_AND|BPF_K,mask),
         BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(unsigned)fd&mask,0,1),

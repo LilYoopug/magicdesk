@@ -12,6 +12,9 @@
 #include "temporary_directory.h"
 #include "resource_order.h"
 #include "linux_abi.h"
+#include "inode_watch.h"
+#include "event_wait.h"
+#include <sys/inotify.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/magic.h>
@@ -25,6 +28,7 @@
 #include <unistd.h>
 
 static const struct md_provider_tree_ops view_ops;
+static void name_remove(struct fuse_view *,struct fuse_node *,const char *);
 int md_fuse_view_matches(struct md_provider_tree *p) { return md_provider_tree_matches(p,&view_ops); }
 dev_t md_fuse_view_device(struct md_provider_tree *tree) {
     struct fuse_view *v=md_provider_tree_context(tree,&view_ops);
@@ -51,16 +55,46 @@ void md_fuse_view_release(void *context) {
         md_fuse_connection_notifications(v->notifications,NULL,NULL);
         md_fuse_connection_release(v->notifications);
     }
+    md_watch_source_emit(v->events,0,IN_UNMOUNT,0,NULL,0);
+    md_watch_source_release(v->events);
     for (unsigned i=0;i<NODE_BUCKETS;++i) while (v->by_id[i]) {
-        struct fuse_node *n=v->by_id[i]; v->by_id[i]=n->id_next; free(n);
+        struct fuse_node *n=v->by_id[i]; v->by_id[i]=n->id_next;
+        if (n->writes) { md_resource_queue_destroy(n->writes); free(n->writes); }
+        free(n);
     }
-    while (v->names) { struct fuse_name *n=v->names; v->names=n->next; free(n); }
+    for (unsigned i=0;i<NODE_BUCKETS;++i) while (v->names[i]) {
+        struct fuse_name *n=v->names[i]; v->names[i]=n->next; free(n);
+    }
     md_fuse_session_release(v->session);
     md_user_namespace_release(v->user_namespace); md_pid_namespace_release(v->pid_namespace);
     if (v->root>=0) md_temporary_directory_release(v->root);
     pthread_mutex_destroy(&v->lock); free(v);
 }
 static unsigned bucket(uint64_t n) { return (unsigned)(n^(n>>32))%NODE_BUCKETS; }
+static int64_t lease_deadline(int64_t started,uint64_t seconds,uint32_t nanos) {
+    if (started<=0 || nanos>=1000000000) return 0;
+    uint64_t remaining=(uint64_t)(INT64_MAX-started);
+    if (seconds>remaining/1000000000 || seconds*1000000000+nanos>remaining) return INT64_MAX;
+    return started+(int64_t)(seconds*1000000000+nanos);
+}
+static void attributes_store(struct fuse_view *v,struct fuse_node *node,const struct stat *st,
+        uint64_t epoch,int64_t started,uint64_t seconds,uint32_t nanos) {
+    pthread_mutex_lock(&v->lock);
+    node->attributes=*st; node->attributes_epoch=epoch;
+    node->attributes_until=epoch==v->name_epoch ? lease_deadline(started,seconds,nanos) : 0;
+    pthread_mutex_unlock(&v->lock);
+}
+static int attributes_cached(struct fuse_view *v,struct fuse_node *node,struct stat *out) {
+    pthread_mutex_lock(&v->lock);
+    int valid=node->attributes_epoch==v->name_epoch && node->attributes_until>0;
+    if (valid) { int64_t now=md_event_now(); valid=now>0 && now<node->attributes_until; }
+    if (valid) *out=node->attributes;
+    pthread_mutex_unlock(&v->lock); return valid;
+}
+static void lease_begin(struct fuse_view *v,uint64_t *epoch,int64_t *started) {
+    pthread_mutex_lock(&v->lock); *epoch=v->name_epoch; pthread_mutex_unlock(&v->lock);
+    *started=md_event_now();
+}
 static struct fuse_node *node_fd(struct fuse_view *v,int fd) {
     struct stat st;
     if (fstat(fd,&st)) return NULL;
@@ -72,6 +106,107 @@ static struct fuse_node *node_id(struct fuse_view *v,uint64_t id,uint64_t genera
     for (struct fuse_node *n=v->by_id[bucket(id)];n;n=n->id_next)
         if (n->id==id && n->generation==generation) return n;
     return NULL;
+}
+static unsigned name_bucket(struct fuse_node *parent,const char *name) {
+    uint64_t hash=parent->id;
+    for (const unsigned char *p=(const unsigned char *)name;*p;++p) hash=(hash^*p)*1099511628211ULL;
+    return bucket(hash);
+}
+static struct fuse_name *name_find(struct fuse_view *v,struct fuse_node *parent,const char *name) {
+    for (struct fuse_name *d=v->names[name_bucket(parent,name)];d;d=d->next)
+        if (d->parent==parent && !strcmp(d->name,name)) return d;
+    return NULL;
+}
+static void name_insert(struct fuse_view *v,struct fuse_name *d) {
+    unsigned b=name_bucket(d->parent,d->name);
+    d->next=v->names[b]; v->names[b]=d;
+    d->node_next=d->node->names; d->node->names=d;
+}
+static void name_unindex(struct fuse_view *v,struct fuse_name *d) {
+    struct fuse_name **at=&v->names[name_bucket(d->parent,d->name)];
+    while (*at!=d) at=&(*at)->next;
+    *at=d->next; d->next=NULL;
+    at=&d->node->names;
+    while (*at!=d) at=&(*at)->node_next;
+    *at=d->node_next; d->node_next=NULL;
+}
+static void name_move(struct fuse_view *v,struct fuse_name *d,struct fuse_node *parent,const char *name) {
+    name_unindex(v,d); d->parent=parent; strcpy(d->name,name); name_insert(v,d);
+}
+int md_fuse_view_watch(struct md_provider_tree *tree,struct md_inode_store *store,
+        int instance,int object,unsigned flags) {
+    struct fuse_view *v=md_provider_tree_context(tree,&view_ops);
+    if (!v) return -EINVAL;
+    pthread_mutex_lock(&v->lock);
+    struct fuse_node *node=node_fd(v,object);
+    int error=node ? md_fuse_session_access(v->session,store->identity) : -ESTALE;
+    if (!error) error=md_file_permissions(&node->attributes,R_OK,store->identity);
+    uint64_t key=node ? node->carrier.st_ino : 0;
+    unsigned mode=node ? node->type : 0;
+    if (!error && !v->events) error=md_watch_source_new(&v->events);
+    struct md_watch_source *events=v->events;
+    pthread_mutex_unlock(&v->lock);
+    return error ? error : md_inode_watch_add_provider(store,instance,events,key,mode,flags);
+}
+struct fuse_name *md_fuse_name_retain(struct fuse_view *v,struct fuse_node *node,
+        struct fuse_node *parent,const char *name) {
+    pthread_mutex_lock(&v->lock);
+    struct fuse_name *d=parent ? name_find(v,parent,name) : node->names;
+    if (d && d->node!=node) d=NULL;
+    if (d) ++d->references;
+    pthread_mutex_unlock(&v->lock); return d;
+}
+void md_fuse_name_release(struct fuse_view *v,struct fuse_name *d) {
+    if (!d) return;
+    pthread_mutex_lock(&v->lock);
+    if (!--d->references && d->detached) free(d);
+    pthread_mutex_unlock(&v->lock);
+}
+static void node_event(struct fuse_view *v,struct fuse_node *node,unsigned mask,unsigned cookie,
+        const char *name,int unlinked) {
+    if (mask&(IN_MODIFY|IN_ATTRIB|IN_CREATE|IN_DELETE|IN_MOVED_FROM|IN_MOVED_TO)) ++v->name_epoch;
+    if (node) md_watch_source_emit(v->events,node->carrier.st_ino,mask,cookie,name,unlinked);
+}
+static void named_event(struct fuse_view *v,struct fuse_node *node,struct fuse_node *parent,
+        const char *name,unsigned mask,unsigned cookie,int unlinked) {
+    unsigned directory=node && S_ISDIR(node->type) ? IN_ISDIR : 0;
+    node_event(v,parent,mask|directory,cookie,name,unlinked);
+}
+static void node_deleted(struct fuse_view *v,struct fuse_node *node) {
+    node->deleted=1;
+    if (!node->opened) node_event(v,node,IN_DELETE_SELF|(S_ISDIR(node->type) ? IN_ISDIR : 0),0,NULL,0);
+}
+void md_fuse_node_closed(struct fuse_view *v,struct fuse_node *node) {
+    pthread_mutex_lock(&v->lock);
+    if (!--node->opened && node->deleted) node_deleted(v,node);
+    pthread_mutex_unlock(&v->lock);
+}
+int md_fuse_node_write_begin(struct fuse_view *v,struct fuse_node *node,
+        struct md_resource_order *turn,struct md_resource_wakeup *wakeup) {
+    if (!turn->queue) {
+        pthread_mutex_lock(&v->lock);
+        int error=0;
+        if (!node->writes) {
+            struct md_resource_queue *queue=malloc(sizeof(*queue));
+            error=queue ? md_resource_queue_init(queue) : -ENOMEM;
+            if (error) free(queue); else node->writes=queue;
+        }
+        if (!error) error=md_resource_order_begin(node->writes,turn,wakeup);
+        pthread_mutex_unlock(&v->lock);
+        if (error<0) return error;
+    }
+    enum md_resource_order_state state=md_resource_order_state(turn);
+    return state==MD_RESOURCE_ORDER_QUEUED ? -EINPROGRESS
+        : state==MD_RESOURCE_ORDER_RUNNING ? 0 : md_resource_order_start(turn);
+}
+void md_fuse_node_write_end(struct md_resource_order *turn) {
+    if (turn->queue && md_resource_order_cancel(turn)==1) md_resource_order_complete(turn);
+}
+void md_fuse_file_event(struct fuse_view *v,struct fuse_node *node,struct fuse_name *name,unsigned mask) {
+    pthread_mutex_lock(&v->lock);
+    node_event(v,node,mask|(S_ISDIR(node->type) ? IN_ISDIR : 0),0,NULL,0);
+    if (name) named_event(v,node,name->parent,name->name,mask,0,name->detached);
+    pthread_mutex_unlock(&v->lock);
 }
 static int view_notification(void *context,unsigned code,const void *data,size_t size) {
     struct fuse_view *v=context;
@@ -85,7 +220,7 @@ static int view_notification(void *context,unsigned code,const void *data,size_t
         pthread_mutex_lock(&v->lock);
         struct fuse_node *n=v->by_id[bucket(in.ino)];
         while (n && n->id!=in.ino) n=n->id_next;
-        if (n) ++n->changes;
+        if (n) { ++n->changes; ++v->name_epoch; }
         pthread_mutex_unlock(&v->lock); return n ? 0 : -ENOENT;
     }
     if (code==FUSE_NOTIFY_INVAL_ENTRY) {
@@ -106,13 +241,18 @@ static int view_notification(void *context,unsigned code,const void *data,size_t
     while (n && n->id!=parent) n=n->id_next;
     int error=!n ? -ENOENT : !S_ISDIR(n->type) ? -ENOTDIR : 0;
     if (!error) {
-        struct fuse_name **at=&v->names;
-        while (*at) {
-            struct fuse_name *d=*at;
-            if (d->parent==n && !strcmp(d->name,name) && (!child || d->node->id==child)) {
-                *at=d->next; free(d); break;
+        ++v->name_epoch;
+        struct fuse_name *d=name_find(v,n,name);
+        if (d && (!child || d->node->id==child)) {
+            if (code==FUSE_NOTIFY_DELETE) {
+                named_event(v,d->node,n,name,IN_DELETE,0,0);
+                if (d->node->attributes.st_nlink) --d->node->attributes.st_nlink;
+                node_event(v,d->node,IN_ATTRIB,0,NULL,0);
+                if (!d->node->attributes.st_nlink || S_ISDIR(d->node->type)) node_deleted(v,d->node);
+                name_remove(v,n,name);
             }
-            at=&d->next;
+            /* Invalidation alone is not unlink:
+             * open descriptions must retain their parent/name events. */
         }
     }
     pthread_mutex_unlock(&v->lock); return error;
@@ -140,7 +280,7 @@ int md_fuse_node_open(struct fuse_view *v,struct fuse_node *n,int flags) {
     return fd<0 ? -errno : fd;
 }
 static int node_publish(struct fuse_view *v,struct fuse_node *parent,const char *name,
-        const struct fuse_entry_out *entry,const char *link,struct fuse_node **out) {
+        const struct fuse_entry_out *entry,const char *link,uint64_t epoch,int64_t started,struct fuse_node **out) {
     struct stat st;
     int error=md_fuse_view_attributes(v,&entry->attr,&st);
     if (error) return error;
@@ -149,11 +289,11 @@ static int node_publish(struct fuse_view *v,struct fuse_node *parent,const char 
     struct fuse_node *n=node_id(v,entry->nodeid,entry->generation);
     if (n && n->type!=(st.st_mode&S_IFMT)) error=-EIO;
     if (!error && !n && v->count>=NODE_LIMIT) error=-ENOSPC;
-    struct fuse_name *d=NULL;
-    for (d=v->names;d;d=d->next) if (d->parent==parent && !strcmp(d->name,name)) break;
+    struct fuse_name *d=name_find(v,parent,name);
+    if (d && d->node!=n) { name_remove(v,parent,name); d=NULL; }
     int fresh_name=!d;
     if (!error && !d) {
-        d=calloc(1,sizeof(*d)+strlen(name)+1);
+        d=calloc(1,sizeof(*d));
         if (!d) error=-ENOMEM; else { d->parent=parent; strcpy(d->name,name); }
     }
     if (!error && !n) {
@@ -178,7 +318,16 @@ static int node_publish(struct fuse_view *v,struct fuse_node *parent,const char 
     if (!error && n->lookups==UINT64_MAX) error=-EOVERFLOW;
     if (!error) {
         ++n->lookups; n->attributes=st; d->node=n;
-        if (fresh_name) { d->next=v->names; v->names=d; }
+        d->epoch=epoch; d->valid_until=0;
+        /* Start each independent lease at submission: an invalidated or slow
+         * reply cannot revive it. Symlink targets are never leased. */
+        if (epoch==v->name_epoch && !S_ISLNK(st.st_mode))
+            d->valid_until=lease_deadline(started,entry->entry_valid,entry->entry_valid_nsec);
+        n->attributes_epoch=epoch;
+        n->attributes_until=epoch==v->name_epoch
+            ? lease_deadline(started,entry->attr_valid,entry->attr_valid_nsec) : 0;
+        if (st.st_nlink) n->deleted=0;
+        if (fresh_name) name_insert(v,d);
         *out=n;
     } else if (fresh_name) free(d);
     pthread_mutex_unlock(&v->lock); return error;
@@ -190,8 +339,7 @@ static int view_path(void *context,int fd,char *out,size_t capacity) {
     struct fuse_node *n=node_fd(v,fd); int error=n ? 0 : -ESTALE;
     for (unsigned depth=0;!error && n!=v->root_node;++depth) {
         if (depth==PATH_MAX/2) { error=-ELOOP; break; }
-        struct fuse_name *d=v->names;
-        while (d && d->node!=n) d=d->next;
+        struct fuse_name *d=n->names;
         if (!d) { error=-ENOENT; break; }
         size_t length=strlen(d->name);
         if (length+1>at) { error=-ENAMETOOLONG; break; }
@@ -225,6 +373,8 @@ struct view_lookup {
     struct fuse_entry_out entry;
     uint32_t pid;
     unsigned stage;
+    uint64_t epoch;
+    int64_t started;
     int error,delivered;
     char name[NAME_MAX+1];
 };
@@ -257,6 +407,16 @@ static int lookup_ready(struct md_provider_lookup *base) {
     struct view_lookup *p=(void *)base;
     return p->error ? 1 : p->request ? md_fuse_request_ready(p->request) : md_fuse_session_ready(p->view->session);
 }
+static struct fuse_node *lookup_cached(struct fuse_view *v,struct fuse_node *parent,const char *name) {
+    struct fuse_node *node=NULL;
+    pthread_mutex_lock(&v->lock);
+    struct fuse_name *d=name_find(v,parent,name);
+    if (d && d->epoch==v->name_epoch && d->valid_until>0) {
+        int64_t now=md_event_now();
+        if (now>0 && now<d->valid_until) node=d->node;
+    }
+    pthread_mutex_unlock(&v->lock); return node;
+}
 static int lookup_complete(struct md_provider_lookup *base) {
     struct view_lookup *p=(void *)base;
     if (p->error) return p->error;
@@ -270,8 +430,7 @@ static int lookup_complete(struct md_provider_lookup *base) {
         if (!error && !S_ISDIR(st.st_mode)) error=-ENOTDIR;
         if (!error) error=md_file_permissions(&st,X_OK,&p->identity);
         if (error) return error;
-        pthread_mutex_lock(&v->lock);
-        p->parent->attributes=st; pthread_mutex_unlock(&v->lock);
+        attributes_store(v,p->parent,&st,p->epoch,p->started,response.attr_valid,response.attr_valid_nsec);
         md_fuse_request_release(p->request); p->request=NULL; p->stage=5;
     }
     if (p->stage==5 && p->selected) {
@@ -281,15 +440,25 @@ static int lookup_complete(struct md_provider_lookup *base) {
         int ready=md_fuse_session_ready(v->session);
         if (ready<=0) return ready ? ready : -EINPROGRESS;
         if (!p->stage && md_fuse_session_options(v->session)->default_permissions) {
-            struct fuse_getattr_in in={0};
-            p->error=md_fuse_session_request(v->session,&p->identity,p->pid,FUSE_GETATTR,p->parent->id,
-                &in,sizeof(in),sizeof(struct fuse_attr_out),0,p->wakeup,&p->request);
-            if (p->error) return p->error;
-            p->stage=4; return -EINPROGRESS;
+            struct stat st;
+            if (attributes_cached(v,p->parent,&st)) {
+                int error=md_file_permissions(&st,X_OK,&p->identity);
+                if (error) return error;
+            } else {
+                struct fuse_getattr_in in={0};
+                lease_begin(v,&p->epoch,&p->started);
+                p->error=md_fuse_session_request(v->session,&p->identity,p->pid,FUSE_GETATTR,p->parent->id,
+                    &in,sizeof(in),sizeof(struct fuse_attr_out),0,p->wakeup,&p->request);
+                if (p->error) return p->error;
+                p->stage=4; return -EINPROGRESS;
+            }
         }
         if (p->selected) {
             return md_fuse_node_open(v,p->selected,O_PATH);
         }
+        struct fuse_node *cached=lookup_cached(v,p->parent,p->name);
+        if (cached) return md_fuse_node_open(v,cached,O_PATH);
+        lease_begin(v,&p->epoch,&p->started);
         p->error=md_fuse_session_request(v->session,&p->identity,p->pid,FUSE_LOOKUP,p->parent->id,
             p->name,strlen(p->name)+1,sizeof(p->entry),0,p->wakeup,&p->request);
         if (p->error) return p->error;
@@ -298,6 +467,10 @@ static int lookup_complete(struct md_provider_lookup *base) {
     char link[PATH_MAX];
     if (p->stage==1) {
         long n=md_fuse_request_result(p->request,&p->entry,sizeof(p->entry));
+        if (n==-ENOENT || (!n && !p->entry.nodeid)
+                || (n==sizeof(p->entry) && !p->entry.nodeid)) {
+            pthread_mutex_lock(&v->lock); name_remove(v,p->parent,p->name); pthread_mutex_unlock(&v->lock);
+        }
         if (n<0) return n;
         if (n!=sizeof(p->entry)) return -EPROTO;
         if (!p->entry.nodeid) return -ENOENT;
@@ -317,7 +490,7 @@ static int lookup_complete(struct md_provider_lookup *base) {
         link[n]=0;
     }
     struct fuse_node *node=NULL;
-    int error=node_publish(v,p->parent,p->name,&p->entry,p->stage==2 ? link : NULL,&node);
+    int error=node_publish(v,p->parent,p->name,&p->entry,p->stage==2 ? link : NULL,p->epoch,p->started,&node);
     if (!error) {
         p->delivered=1;
         return md_fuse_node_open(v,node,O_PATH);
@@ -336,11 +509,17 @@ static int view_lookup(void *context,int directory,const char *name,const struct
     if (parent && !strcmp(name,".")) selected=parent;
     if (parent && !strcmp(name,"..")) {
         if (parent==v->root_node) selected=parent;
-        else for (struct fuse_name *d=v->names;d;d=d->next) if (d->node==parent) { selected=d->parent; break; }
+        else if (parent->names) selected=parent->names->parent;
     }
     int error=!parent ? -ESTALE : !S_ISDIR(parent->type) ? -ENOTDIR : 0;
     pthread_mutex_unlock(&v->lock);
     if (error) return error;
+    int ready=md_fuse_session_ready(v->session);
+    if (ready<0) return ready;
+    if (ready && !md_fuse_session_options(v->session)->default_permissions) {
+        struct fuse_node *cached=selected ? selected : lookup_cached(v,parent,name);
+        if (cached) return md_fuse_node_open(v,cached,O_PATH);
+    }
     struct view_lookup *p=calloc(1,sizeof(*p)); if (!p) return -ENOMEM;
     p->base=(struct md_provider_lookup){lookup_ready,lookup_complete,lookup_destroy};
     p->view=md_fuse_view_retain(v); p->parent=parent; p->selected=selected; p->identity=md_identity_copy(actor->identity);
@@ -361,7 +540,7 @@ int md_fuse_view_source(struct md_filesystem *fs,const struct md_fs_request *q,s
     if (error) return error;
     struct fuse_view *v=calloc(1,sizeof(*v)); if (!v) return -ENOMEM;
     error=pthread_mutex_init(&v->lock,NULL); if (error) { free(v); return -error; }
-    atomic_init(&v->references,1); v->root=-1;
+    atomic_init(&v->references,1); atomic_init(&v->no_flush,0); v->root=-1; v->name_epoch=1;
     /* A superblock has its own public device identity. Carriers only locate
      * private nodes; bind mounts retain this identity across namespaces. */
     unsigned device;
@@ -417,10 +596,13 @@ struct view_operation {
     struct md_identity identity;
     unsigned opcode;
     unsigned open_flags;
-    int metadata_checked,truncated,mutation,checking,entry_registered;
+    int metadata_checked,truncated,mutation,checking,entry_registered,completed,xattr_sent;
     unsigned checked;
+    uint64_t epoch;
+    int64_t started;
     char name[NAME_MAX+1],target[NAME_MAX+1];
     struct fuse_name *renamed;
+    struct md_resource_order write_turn;
 };
 static int opening(const struct view_operation *p) {
     return p->base.request.operation==MD_FS_OPEN || p->base.request.operation==MD_FS_REOPEN
@@ -428,7 +610,9 @@ static int opening(const struct view_operation *p) {
 }
 static int publish_file(struct view_operation *p,struct md_fs_result *out,const struct md_fs_output *output,
         const struct fuse_open_out *opened) {
-    if (p->open_flags&O_PATH) {
+    /* Internal path captures only need an anchor. Published O_PATH descriptions
+     * retain a typed owner too, so their final close retires inode watches. */
+    if ((p->open_flags&O_PATH) && !output->control) {
         int fd=md_fuse_node_open(p->view,p->node,p->open_flags&(O_PATH|O_DIRECTORY));
         if (fd<0) return fd;
         out->fd=fd;
@@ -436,50 +620,83 @@ static int publish_file(struct view_operation *p,struct md_fs_result *out,const 
         return 0;
     }
     p->opcode=0; /* The file owner takes the remote handle, including failure. */
-    return md_fuse_file_publish(p->view,p->node,p->origin,&p->identity,p->open_flags,opened,out,output);
+    return md_fuse_file_publish(p->view,p->node,p->origin,p->parent,p->name,
+        &p->identity,p->open_flags,opened,out,output);
 }
 static int operation_ready(struct md_fs_continuation *base) {
     struct view_operation *p=(void *)base;
+    if (md_resource_order_state(&p->write_turn)==MD_RESOURCE_ORDER_QUEUED) return 0;
     if (p->image) return md_fuse_image_ready(p->image);
     return p->request ? md_fuse_request_ready(p->request) : md_fuse_session_ready(p->view->session);
 }
 static void operation_destroy(struct md_fs_continuation *);
+static void mutation_resume(struct view_operation *,struct md_filesystem *,struct md_fs_result *,const struct md_fs_output *);
 static void operation_abandoned(void *context,int error,const void *data,size_t size) {
     struct view_operation *p=context;
+    if (p->mutation && !p->completed && !error) {
+        struct md_fs_result result={.fd=-1};
+        mutation_resume(p,NULL,&result,NULL);
+    }
     if (!error) {
+        if (p->xattr_sent && !p->completed) {
+            pthread_mutex_lock(&p->view->lock);
+            node_event(p->view,p->node,IN_ATTRIB,0,NULL,0);
+            named_event(p->view,p->node,p->parent,p->name,IN_ATTRIB,0,0);
+            pthread_mutex_unlock(&p->view->lock);
+        }
         if ((p->opcode==FUSE_OPEN || p->opcode==FUSE_OPENDIR) && size==sizeof(struct fuse_open_out)) {
             struct fuse_open_out open; memcpy(&open,data,sizeof(open));
+            if ((p->open_flags&O_TRUNC) && !p->truncated) {
+                pthread_mutex_lock(&p->view->lock);
+                p->node->attributes.st_size=0; ++p->node->changes;
+                node_event(p->view,p->node,IN_MODIFY,0,NULL,0);
+                named_event(p->view,p->node,p->parent,p->name,IN_MODIFY,0,0);
+                pthread_mutex_unlock(&p->view->lock);
+            }
             md_fuse_file_release_handle(p->view,p->node,&p->identity,open.fh,p->open_flags);
-        } else if (size==sizeof(struct fuse_entry_out)+(p->opcode==FUSE_CREATE ? sizeof(struct fuse_open_out) : 0)) {
+        } else if ((p->opcode==FUSE_CREATE || p->opcode==FUSE_MKDIR || p->opcode==FUSE_SYMLINK
+                || p->opcode==FUSE_MKNOD || p->opcode==FUSE_LINK)
+                && size==sizeof(struct fuse_entry_out)+(p->opcode==FUSE_CREATE ? sizeof(struct fuse_open_out) : 0)) {
             struct fuse_entry_out entry; memcpy(&entry,data,sizeof(entry));
             if (p->opcode==FUSE_CREATE) {
                 struct fuse_open_out open; memcpy(&open,(const char *)data+sizeof(entry),sizeof(open));
                 md_fuse_file_release_remote(p->view,entry.nodeid,0,&p->identity,open.fh,p->open_flags);
             }
             if (!p->entry_registered) forget_node(p->view,&p->identity,0,entry.nodeid,NULL);
+        } else if (!p->mutation && p->opcode==FUSE_SETATTR && size==sizeof(struct fuse_attr_out)) {
+            struct fuse_attr_out attr; struct stat st; memcpy(&attr,data,size);
+            if (!md_fuse_view_attributes(p->view,&attr.attr,&st)) {
+                pthread_mutex_lock(&p->view->lock);
+                p->node->attributes=st; ++p->node->changes;
+                node_event(p->view,p->node,IN_MODIFY,0,NULL,0);
+                named_event(p->view,p->node,p->parent,p->name,IN_MODIFY,0,0);
+                pthread_mutex_unlock(&p->view->lock);
+            }
         }
     }
     p->opcode=0; operation_destroy(&p->base);
 }
 static void operation_destroy(struct md_fs_continuation *base) {
     struct view_operation *p=(void *)base;
-    if (p->request && (p->opcode==FUSE_OPEN || p->opcode==FUSE_OPENDIR || p->opcode==FUSE_CREATE
-            || p->opcode==FUSE_MKDIR || p->opcode==FUSE_SYMLINK || p->opcode==FUSE_MKNOD || p->opcode==FUSE_LINK)) {
+    if (p->request && (p->opcode==FUSE_OPEN || p->opcode==FUSE_OPENDIR
+            || p->opcode==FUSE_CREATE || p->opcode==FUSE_MKDIR || p->opcode==FUSE_SYMLINK
+            || p->opcode==FUSE_MKNOD || p->opcode==FUSE_LINK
+            || (p->opcode && p->mutation && !p->checking && !p->completed)
+            || ((p->opcode==FUSE_SETATTR || p->xattr_sent) && !p->completed))) {
         md_fuse_request_abandon(p->request,operation_abandoned,p); return;
     }
     md_fuse_request_cancel(p->request); md_fuse_request_release(p->request);
+    md_fuse_node_write_end(&p->write_turn);
     md_fuse_image_destroy(p->image);
     if (p->image_opened) md_fuse_file_release_handle(p->view,p->node,&p->identity,p->image_handle,O_RDONLY);
     md_fs_anchor_release(p->origin); md_identity_release(&p->identity);
     free(p->renamed); md_fuse_view_release(p->view); md_fs_continuation_clear(base); free(p);
 }
 static void name_remove(struct fuse_view *v,struct fuse_node *parent,const char *name) {
-    struct fuse_name **at=&v->names;
-    while (*at) {
-        struct fuse_name *d=*at;
-        if (d->parent==parent && !strcmp(d->name,name)) { *at=d->next; free(d); return; }
-        at=&d->next;
-    }
+    struct fuse_name *d=name_find(v,parent,name);
+    if (!d) return;
+    name_unindex(v,d); d->detached=1;
+    if (!d->references) free(d);
 }
 static int sticky(const struct stat *directory,const struct stat *node,const struct md_identity *id) {
     return !(directory->st_mode&S_ISVTX) || id->uid.fs==directory->st_uid || id->uid.fs==node->st_uid
@@ -623,7 +840,7 @@ static void mutation_resume(struct view_operation *p,struct md_filesystem *fs,
         out->error=n!=sizeof(result) ? -EPROTO : md_fuse_view_attributes(v,&result.attr,&st);
         if (out->error) return;
         if ((st.st_mode&S_IFMT)!=node->type) { out->error=-EIO; return; }
-        pthread_mutex_lock(&v->lock); node->attributes=st; pthread_mutex_unlock(&v->lock);
+        attributes_store(v,node,&st,0,0,0,0);
         p->checked|=1U<<(p->checking-1); p->checking=0;
         md_fuse_request_release(p->request); p->request=NULL;
     }
@@ -649,6 +866,7 @@ static void mutation_resume(struct view_operation *p,struct md_filesystem *fs,
     long n=md_fuse_request_result(p->request,&result,sizeof(result));
     if (n==-EINPROGRESS) goto pending;
     if (n<0) { out->error=n; return; }
+    p->completed=1;
     unsigned opcode=p->opcode;
     if (opcode==FUSE_SETATTR) {
         struct fuse_attr_out attr; struct stat st;
@@ -656,13 +874,27 @@ static void mutation_resume(struct view_operation *p,struct md_filesystem *fs,
         out->error=n!=sizeof(attr) ? -EPROTO : md_fuse_view_attributes(v,&attr.attr,&st);
         if (!out->error && (st.st_mode&S_IFMT)!=p->node->type) out->error=-EIO;
         if (!out->error) { pthread_mutex_lock(&v->lock);
-            p->node->attributes=st; ++p->node->changes; pthread_mutex_unlock(&v->lock); }
+            p->node->attributes=st; ++p->node->changes;
+            node_event(v,p->node,IN_ATTRIB|(S_ISDIR(p->node->type) ? IN_ISDIR : 0),0,NULL,0);
+            named_event(v,p->node,p->parent,p->name,IN_ATTRIB,0,0);
+            pthread_mutex_unlock(&v->lock); }
     } else if (opcode==FUSE_CREATE || opcode==FUSE_MKDIR || opcode==FUSE_MKNOD || opcode==FUSE_SYMLINK || opcode==FUSE_LINK) {
         if (n!=(long)(sizeof(result.entry)+(opcode==FUSE_CREATE ? sizeof(result.opened) : 0))) { out->error=-EPROTO; return; }
         out->error=node_publish(v,opcode==FUSE_LINK ? p->destination : p->parent,
-            opcode==FUSE_LINK ? p->target : p->name,&result.entry,opcode==FUSE_SYMLINK ? q->path[1] : NULL,&p->node);
+            opcode==FUSE_LINK ? p->target : p->name,&result.entry,opcode==FUSE_SYMLINK ? q->path[1] : NULL,0,0,&p->node);
+        if (!out->error) {
+            pthread_mutex_lock(&v->lock);
+            named_event(v,p->node,opcode==FUSE_LINK ? p->destination : p->parent,
+                opcode==FUSE_LINK ? p->target : p->name,IN_CREATE,0,0);
+            if (opcode==FUSE_LINK) node_event(v,p->node,IN_ATTRIB,0,NULL,0);
+            pthread_mutex_unlock(&v->lock);
+        }
         if (!out->error) { p->entry_registered=1; if (opcode!=FUSE_CREATE) p->opcode=0; }
         if (!out->error && opcode==FUSE_CREATE) {
+            if (!fs) {
+                md_fuse_file_release_handle(v,p->node,&p->identity,result.opened.fh,p->open_flags);
+                p->opcode=0; return;
+            }
             struct md_fs_anchor *origin=NULL;
             int fd=md_fuse_node_open(v,p->node,O_PATH);
             out->error=fd<0 ? fd : md_view_anchor_duplicate(fs,p->origin->view,p->origin->mount,fd,&origin);
@@ -673,15 +905,41 @@ static void mutation_resume(struct view_operation *p,struct md_filesystem *fs,
     } else if (n) out->error=-EPROTO;
     else {
         pthread_mutex_lock(&v->lock);
-        if (opcode==FUSE_UNLINK || opcode==FUSE_RMDIR) name_remove(v,p->parent,p->name);
+        if (opcode==FUSE_UNLINK || opcode==FUSE_RMDIR) {
+            named_event(v,p->node,p->parent,p->name,IN_DELETE,0,0);
+            if (p->node) {
+                if (p->node->attributes.st_nlink) --p->node->attributes.st_nlink;
+                node_event(v,p->node,IN_ATTRIB,0,NULL,0);
+                if (!p->node->attributes.st_nlink || opcode==FUSE_RMDIR)
+                    node_deleted(v,p->node);
+            }
+            name_remove(v,p->parent,p->name);
+        }
         else if (opcode==FUSE_RENAME || opcode==FUSE_RENAME2) {
             if (!(p->node==p->replaced && !(q->flags&RENAME_EXCHANGE))) {
+                unsigned cookie=++v->rename_cookie; if (!cookie) cookie=++v->rename_cookie;
+                named_event(v,p->node,p->parent,p->name,IN_MOVED_FROM,cookie,0);
+                named_event(v,p->node,p->destination,p->target,IN_MOVED_TO,cookie,0);
+                node_event(v,p->node,IN_MOVE_SELF,0,NULL,0);
+                struct fuse_name *old=name_find(v,p->parent,p->name);
+                struct fuse_name *replacement=name_find(v,p->destination,p->target);
                 if (q->flags&RENAME_EXCHANGE) {
-                    for (struct fuse_name *d=v->names;d;d=d->next)
-                        if (d->parent==p->parent && !strcmp(d->name,p->name)) d->node=p->replaced;
-                } else name_remove(v,p->parent,p->name);
-                name_remove(v,p->destination,p->target);
-                p->renamed->next=v->names; v->names=p->renamed; p->renamed=NULL;
+                    cookie=++v->rename_cookie; if (!cookie) cookie=++v->rename_cookie;
+                    named_event(v,p->replaced,p->destination,p->target,IN_MOVED_FROM,cookie,0);
+                    named_event(v,p->replaced,p->parent,p->name,IN_MOVED_TO,cookie,0);
+                    node_event(v,p->replaced,IN_MOVE_SELF,0,NULL,0);
+                    if (replacement) name_move(v,replacement,p->parent,p->name);
+                } else {
+                    if (p->replaced) {
+                        if (p->replaced->attributes.st_nlink) --p->replaced->attributes.st_nlink;
+                        node_event(v,p->replaced,IN_ATTRIB,0,NULL,0);
+                        if (!p->replaced->attributes.st_nlink || S_ISDIR(p->replaced->type))
+                            node_deleted(v,p->replaced);
+                    }
+                    name_remove(v,p->destination,p->target);
+                }
+                if (old) name_move(v,old,p->destination,p->target);
+                else { name_insert(v,p->renamed); p->renamed=NULL; }
             }
         }
         pthread_mutex_unlock(&v->lock);
@@ -689,6 +947,43 @@ static void mutation_resume(struct view_operation *p,struct md_filesystem *fs,
     return;
 pending:
     out->error=-EINPROGRESS; *output->continuation=&p->base;
+}
+static void operation_resume(struct md_fs_continuation *,struct md_filesystem *,
+        struct md_fs_result *,const struct md_fs_output *);
+static void operation_attributes(struct view_operation *p,struct md_filesystem *fs,
+        struct md_fs_result *out,const struct md_fs_output *output,const struct stat *st,const struct fuse_attr *raw) {
+    const struct md_fs_request *q=&p->base.request;
+    if (q->operation==MD_FS_XATTR_OBJECT) {
+        p->metadata_checked=1; md_fuse_request_release(p->request); p->request=NULL;
+        operation_resume(&p->base,fs,out,output); return;
+    }
+    if (opening(p)) {
+        if (p->executable) {
+            p->attributes=*raw;
+            if (!S_ISREG(st->st_mode) || (md_fs_anchor_policy(p->origin)&MD_MOUNT_NOEXEC)) out->error=-EACCES;
+            else out->error=md_file_permissions(st,X_OK,&p->identity);
+        }
+        if ((p->open_flags&O_DIRECTORY) && !S_ISDIR(st->st_mode)) out->error=-ENOTDIR;
+        else if (!(p->open_flags&O_PATH) && S_ISLNK(st->st_mode)) out->error=-ELOOP;
+        else if (!(p->open_flags&O_PATH) && (p->open_flags&(O_ACCMODE|O_TRUNC)) && S_ISDIR(st->st_mode)) out->error=-EISDIR;
+        if (!out->error && !(p->open_flags&O_PATH) && md_fuse_session_options(p->view->session)->default_permissions) {
+            unsigned mode=(p->open_flags&O_ACCMODE)==O_RDWR ? R_OK|W_OK
+                : (p->open_flags&O_ACCMODE)==O_WRONLY ? W_OK : R_OK;
+            if (p->open_flags&O_TRUNC) mode|=W_OK;
+            out->error=md_file_permissions(st,mode,&p->identity);
+        }
+        if (!out->error && (p->open_flags&O_NOATIME)) out->error=md_file_noatime(st,&p->identity);
+        if (!out->error) {
+            p->metadata_checked=1; if (p->opcode==FUSE_SETATTR) p->truncated=1;
+            md_fuse_request_release(p->request); p->request=NULL;
+            operation_resume(&p->base,fs,out,output);
+        }
+    } else if (q->operation==MD_FS_ACCESS) {
+        struct md_identity identity=md_identity_access(fs->store->identity,!!(q->flags&MD_AT_EACCESS));
+        out->error=md_file_permissions(st,q->mode,&identity);
+    } else {
+        md_fs_stat_info(st,&out->info); out->info.mount_id=p->origin->mount->id;
+    }
 }
 static void operation_resume(struct md_fs_continuation *base,struct md_filesystem *fs,
         struct md_fs_result *out,const struct md_fs_output *output) {
@@ -724,7 +1019,10 @@ static void operation_resume(struct md_fs_continuation *base,struct md_filesyste
                 pthread_mutex_lock(&p->view->lock); st=p->node->attributes; pthread_mutex_unlock(&p->view->lock);
                 out->error=md_fuse_xattr_request(p->view->session,&p->identity,md_fuse_view_pid(p->view,q->actor),
                     p->node->id,&st,q,fs->wakeup,&p->request);
-                if (!out->error) { out->error=-EINPROGRESS; *output->continuation=base; }
+                if (!out->error) {
+                    p->xattr_sent=q->mode==MD_FS_XATTR_SET || q->mode==MD_FS_XATTR_REMOVE;
+                    out->error=-EINPROGRESS; *output->continuation=base;
+                }
                 return;
             }
             size_t size=0,capacity=0; void *input=NULL;
@@ -743,12 +1041,26 @@ static void operation_resume(struct md_fs_continuation *base,struct md_filesyste
                     : S_ISDIR(p->node->type) ? FUSE_OPENDIR : FUSE_OPEN;
                 if (p->executable) access.mask=X_OK;
             }
-            if (p->opcode==FUSE_GETATTR) { input=&getattr; size=sizeof(getattr); capacity=sizeof(struct fuse_attr_out); }
+            if (p->opcode==FUSE_GETATTR) {
+                struct stat st;
+                if (!p->executable && attributes_cached(p->view,p->node,&st)) {
+                    operation_attributes(p,fs,out,output,&st,NULL); return;
+                }
+                lease_begin(p->view,&p->epoch,&p->started);
+                input=&getattr; size=sizeof(getattr); capacity=sizeof(struct fuse_attr_out);
+            }
             if (p->opcode==FUSE_ACCESS) { input=&access; size=sizeof(access); }
             if (p->opcode==FUSE_STATFS) capacity=sizeof(struct fuse_statfs_out);
             if (p->opcode==FUSE_READLINK) capacity=PATH_MAX-1;
             if (p->opcode==FUSE_OPEN || p->opcode==FUSE_OPENDIR) { input=&open; size=sizeof(open); capacity=sizeof(struct fuse_open_out); }
             if (p->opcode==FUSE_SETATTR) { input=&truncate; size=sizeof(truncate); capacity=sizeof(struct fuse_attr_out); }
+            if (p->opcode==FUSE_SETATTR || ((p->opcode==FUSE_OPEN) && (open.flags&O_TRUNC))) {
+                out->error=md_fuse_node_write_begin(p->view,p->node,&p->write_turn,fs->wakeup);
+                if (out->error) {
+                    if (out->error==-EINPROGRESS) *output->continuation=base;
+                    return;
+                }
+            }
             struct md_identity identity=md_identity_access(fs->store->identity,
                 q->operation!=MD_FS_ACCESS || !!(q->flags&MD_AT_EACCESS));
             out->error=md_fuse_session_request(p->view->session,&identity,md_fuse_view_pid(p->view,q->actor),
@@ -759,7 +1071,14 @@ static void operation_resume(struct md_fs_continuation *base,struct md_filesyste
     }
     if (q->operation==MD_FS_XATTR_OBJECT && p->metadata_checked) {
         md_fuse_xattr_result(p->request,q,out,output);
+        if (out->error!=-EINPROGRESS) p->completed=1;
         if (out->error==-EINPROGRESS) *output->continuation=base;
+        else if (!out->error && (q->mode==MD_FS_XATTR_SET || q->mode==MD_FS_XATTR_REMOVE)) {
+            pthread_mutex_lock(&p->view->lock);
+            node_event(p->view,p->node,IN_ATTRIB,0,NULL,0);
+            named_event(p->view,p->node,p->parent,p->name,IN_ATTRIB,0,0);
+            pthread_mutex_unlock(&p->view->lock);
+        }
         return;
     }
     union { struct fuse_attr_out attr; struct fuse_statfs_out statfs; struct fuse_open_out open; char link[PATH_MAX]; } response;
@@ -775,41 +1094,29 @@ static void operation_resume(struct md_fs_continuation *base,struct md_filesyste
         out->error=n!=sizeof(response.attr) ? -EPROTO : md_fuse_view_attributes(p->view,&response.attr.attr,&st);
         if (!out->error && (st.st_mode&S_IFMT)!=p->node->type) out->error=-EIO;
         if (!out->error) {
-            pthread_mutex_lock(&p->view->lock); p->node->attributes=st; pthread_mutex_unlock(&p->view->lock);
-            if (q->operation==MD_FS_XATTR_OBJECT) {
-                p->metadata_checked=1; md_fuse_request_release(p->request); p->request=NULL;
-                operation_resume(base,fs,out,output); return;
+            attributes_store(p->view,p->node,&st,p->opcode==FUSE_GETATTR ? p->epoch : 0,
+                p->started,response.attr.attr_valid,response.attr.attr_valid_nsec);
+            if (p->opcode==FUSE_SETATTR) {
+                p->completed=1;
+                pthread_mutex_lock(&p->view->lock); ++p->node->changes; pthread_mutex_unlock(&p->view->lock);
+                struct fuse_name *name=md_fuse_name_retain(p->view,p->node,p->parent,p->name);
+                md_fuse_file_event(p->view,p->node,name,IN_MODIFY);
+                md_fuse_name_release(p->view,name);
+                md_fuse_node_write_end(&p->write_turn);
             }
-            if (opening(p)) {
-                if (p->executable) {
-                    p->attributes=response.attr.attr;
-                    if (!S_ISREG(st.st_mode) || (md_fs_anchor_policy(p->origin)&MD_MOUNT_NOEXEC)) out->error=-EACCES;
-                    else out->error=md_file_permissions(&st,X_OK,&p->identity);
-                }
-                if ((p->open_flags&O_DIRECTORY) && !S_ISDIR(st.st_mode)) out->error=-ENOTDIR;
-                else if (!(p->open_flags&O_PATH) && S_ISLNK(st.st_mode)) out->error=-ELOOP;
-                else if (!(p->open_flags&O_PATH) && (p->open_flags&(O_ACCMODE|O_TRUNC)) && S_ISDIR(st.st_mode)) out->error=-EISDIR;
-                if (!out->error && !(p->open_flags&O_PATH) && md_fuse_session_options(p->view->session)->default_permissions) {
-                    unsigned mode=(p->open_flags&O_ACCMODE)==O_RDWR ? R_OK|W_OK
-                        : (p->open_flags&O_ACCMODE)==O_WRONLY ? W_OK : R_OK;
-                    if (p->open_flags&O_TRUNC) mode|=W_OK;
-                    out->error=md_file_permissions(&st,mode,&p->identity);
-                }
-                if (!out->error && (p->open_flags&O_NOATIME)) out->error=md_file_noatime(&st,&p->identity);
-                if (!out->error) {
-                    p->metadata_checked=1; if (p->opcode==FUSE_SETATTR) p->truncated=1;
-                    md_fuse_request_release(p->request); p->request=NULL;
-                    operation_resume(base,fs,out,output); return;
-                }
-            } else if (q->operation==MD_FS_ACCESS) {
-                struct md_identity identity=md_identity_access(fs->store->identity,!!(q->flags&MD_AT_EACCESS));
-                out->error=md_file_permissions(&st,q->mode,&identity);
-            } else {
-                md_fs_stat_info(&st,&out->info); out->info.mount_id=p->origin->mount->id;
-            }
+            operation_attributes(p,fs,out,output,&st,&response.attr.attr);
         }
     } else if (p->opcode==FUSE_OPEN || p->opcode==FUSE_OPENDIR) {
         if (n!=sizeof(response.open)) out->error=-EPROTO;
+        else if (p->opcode==FUSE_OPEN && (p->open_flags&O_TRUNC) && !p->truncated) {
+            pthread_mutex_lock(&p->view->lock);
+            p->node->attributes.st_size=0; ++p->node->changes;
+            node_event(p->view,p->node,IN_MODIFY,0,NULL,0);
+            named_event(p->view,p->node,p->parent,p->name,IN_MODIFY,0,0);
+            pthread_mutex_unlock(&p->view->lock);
+            md_fuse_node_write_end(&p->write_turn);
+            out->error=publish_file(p,out,output,&response.open);
+        }
         else if (p->executable) {
             p->image_handle=response.open.fh; p->image_opened=1; p->opcode=0;
             md_fuse_request_release(p->request); p->request=NULL;
@@ -824,7 +1131,8 @@ static void operation_resume(struct md_fs_continuation *base,struct md_filesyste
             struct fuse_kstatfs *s=&response.statfs.st;
             *(struct md_fs_statfs *)output->data=(struct md_fs_statfs){.type=FUSE_SUPER_MAGIC,
                 .block_size=s->bsize,.blocks=s->blocks,.free_blocks=s->bfree,.available_blocks=s->bavail,
-                .files=s->files,.free_files=s->ffree,.name_length=s->namelen,.fragment_size=s->frsize};
+                .files=s->files,.free_files=s->ffree,.name_length=s->namelen,.fragment_size=s->frsize,
+                .flags=md_fs_statfs_policy(md_fs_anchor_policy(p->origin))};
             out->size=sizeof(struct md_fs_statfs);
         }
     } else if (p->opcode==FUSE_READLINK) {
@@ -857,7 +1165,7 @@ int md_fs_fuse_operation(struct md_filesystem *fs,const struct md_fs_request *q,
         }
         if (!executable && !(q->flags&O_PATH) && !output->control) { out->requires_control=1; out->error=-EOPNOTSUPP; return 1; }
         unsigned known=O_ACCMODE|O_CLOEXEC|O_PATH|O_NOFOLLOW|O_DIRECTORY|O_CREAT|O_EXCL|O_TRUNC
-            |O_NONBLOCK|O_NOCTTY|O_LARGEFILE|O_NOATIME|O_SYNC|O_DSYNC;
+            |O_NONBLOCK|O_NOCTTY|O_LARGEFILE|O_NOATIME|O_SYNC|O_DSYNC|O_APPEND;
         if (q->flags&~known) { out->error=-EOPNOTSUPP; return 1; }
         if ((q->flags&O_ACCMODE)==O_ACCMODE) { out->error=-EINVAL; return 1; }
     }
@@ -890,7 +1198,7 @@ int md_fs_fuse_operation(struct md_filesystem *fs,const struct md_fs_request *q,
     snprintf(p->name,sizeof(p->name),"%s",a->name);
     if (b) snprintf(p->target,sizeof(p->target),"%s",b->name);
     if (q->operation==MD_FS_RENAME) {
-        p->renamed=calloc(1,sizeof(*p->renamed)+strlen(p->target)+1);
+        p->renamed=calloc(1,sizeof(*p->renamed));
         if (!p->renamed) out->error=-ENOMEM;
         else { p->renamed->parent=destination; p->renamed->node=n; strcpy(p->renamed->name,p->target); }
     }

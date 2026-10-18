@@ -9,6 +9,8 @@ export container=shroot SYSTEMD_LOG_TARGET=console SYSTEMD_LOG_LEVEL=info
 export SYSTEMD_LOG_COLOR=0 SYSTEMD_PAGER=cat LANG=C.UTF-8
 test "$$" = 1
 mount -t tmpfs -o mode=755 tmpfs /run
+mount -t tmpfs -o mode=1777 tmpfs /tmp
+mount -t tmpfs -o mode=1777 tmpfs /var/tmp
 mount -t sysfs -o ro sysfs /sys
 mount -t cgroup2 none /sys/fs/cgroup
 console=$(tty)

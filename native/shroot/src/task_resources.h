@@ -51,6 +51,10 @@ int md_resources_fork(const struct md_task_resources *, unsigned long flags,
 int md_resources_release(struct md_task_resources *);
 /* Confirmed kernel exec only, after any nonleader task-resource transfer. */
 int md_resources_exec(struct md_task_resources *);
+int md_resources_exec_closed(struct md_task_resources *,struct md_fd_closed *);
+/* Terminal kernel stop: relinquish this task's table ownership. The last
+ * owner retires its aliases before the task can become waitable. */
+void md_resources_exit_files(struct md_task_resources *,struct md_fd_closed *);
 /* Prepare before letting the kernel change ownership. Commit only on its
  * successful syscall-exit stop; failure/exit discards the unused candidate. */
 int md_resources_unshare_prepare(const struct md_task_resources *, unsigned long flags,

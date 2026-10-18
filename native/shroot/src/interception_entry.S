@@ -177,14 +177,14 @@ md_guest_allocate:
     mov x4, #-1
     mov x5, #0
     mov x8, #__NR_mmap
-    svc #0
+    bl md_raw_syscall
     tbnz x0, #63, md_guest_allocated
     mov x19, x0
     add x0, x0, x20
     mov x1, #0x80000
     mov x2, #3
     mov x8, #__NR_mprotect
-    svc #0
+    bl md_raw_syscall
     tbnz x0, #63, 1f
     add x0, x19, #0x80000
     add x0, x0, x20
@@ -195,7 +195,7 @@ md_guest_allocate:
     mov x1, #0x80000
     add x1, x1, x20, lsl #1
     mov x8, #__NR_munmap
-    svc #0
+    bl md_raw_syscall
     mov x0, x21
 .global md_guest_allocated
 md_guest_allocated:

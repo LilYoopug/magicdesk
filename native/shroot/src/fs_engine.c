@@ -1,4 +1,6 @@
 #define _GNU_SOURCE
+#include "readonly_file.h"
+#include "fs_control.h"
 #include "fs_engine.h"
 #include "fs_continuation.h"
 #include "fuse_view.h"
@@ -34,6 +36,11 @@ void md_fs_statistics_report(int fd,const struct md_fs_statistics *stats) {
         dprintf(fd,"MD_FS operation=%u calls=%llu ns=%llu name=%s\n",i,
             (unsigned long long)stats->operation[i].calls,
             (unsigned long long)stats->operation[i].nanoseconds,md_fs_operation_name(i));
+    const char *names[]={"reconcile","attach"};
+    const struct md_cost *costs[]={&stats->mount_reconcile,&stats->mount_attach};
+    for (unsigned i=0;i<sizeof(costs)/sizeof(*costs);++i) if (costs[i]->calls)
+        dprintf(fd,"MD_MOUNT phase=%s calls=%llu ns=%llu\n",names[i],
+            (unsigned long long)costs[i]->calls,(unsigned long long)costs[i]->nanoseconds);
 }
 
 void md_fs_view_execute(struct md_filesystem *fs, const struct md_fs_request *q,
@@ -98,7 +105,12 @@ static int watch_add(struct md_filesystem *fs, int instance, int object,
         if (r && r!=-EXDEV) return r;
         if (!r) mount=entry->mount;
     }
-    if (mount && md_fuse_view_matches(mount->provider)) return -EOPNOTSUPP;
+    if (mount && md_fuse_view_matches(mount->provider))
+        return md_fuse_view_watch(mount->provider,fs->store,instance,object,flags);
+    if (mount && mount->cgroup) {
+        int r=md_cgroup_watch(mount->cgroup,fs->store,instance,object,flags);
+        if (r!=-EOPNOTSUPP) return r;
+    }
     if (!md_view_inode(mount)) return md_inode_watch_add(fs->store,instance,object,flags);
     struct md_fs_storage_scope scope;
     int r=md_fs_storage_enter(fs,mount,&scope);
@@ -181,6 +193,12 @@ static void task_path(struct md_filesystem *fs, const struct md_fs_request *q,
     md_fs_view_then(fs,q,&open,out,output,task_opened);
 }
 
+uint64_t md_fs_statfs_policy(unsigned policy) {
+    return ((policy&MD_MOUNT_READONLY) ? MS_RDONLY : 0)
+        | ((policy&MD_MOUNT_NOSUID) ? MS_NOSUID : 0) | ((policy&MD_MOUNT_NODEV) ? MS_NODEV : 0)
+        | ((policy&MD_MOUNT_NOEXEC) ? MS_NOEXEC : 0)
+        | ((policy&MD_MOUNT_NOSYMFOLLOW) ? ST_NOSYMFOLLOW : 0);
+}
 void md_fs_statfs_result(int fd, unsigned policy, const struct md_inode_lifetime *storage,
         struct md_fs_result *out, const struct md_fs_output *output) {
     if (!output || !output->data || output->capacity<sizeof(struct md_fs_statfs)) {
@@ -195,10 +213,7 @@ void md_fs_statfs_result(int fd, unsigned policy, const struct md_inode_lifetime
     _Static_assert(sizeof(value.fsid)==sizeof(native.f_fsid),"statfs filesystem identity");
     memcpy(value.fsid,&native.f_fsid,sizeof(value.fsid));
     if (storage) value.flags&=~(uint64_t)(MS_RDONLY|MS_NOSUID|MS_NODEV);
-    value.flags|=((policy&MD_MOUNT_READONLY) ? MS_RDONLY : 0)
-        | ((policy&MD_MOUNT_NOSUID) ? MS_NOSUID : 0) | ((policy&MD_MOUNT_NODEV) ? MS_NODEV : 0)
-        | ((policy&MD_MOUNT_NOEXEC) ? MS_NOEXEC : 0)
-        | ((policy&MD_MOUNT_NOSYMFOLLOW) ? ST_NOSYMFOLLOW : 0);
+    value.flags|=md_fs_statfs_policy(policy);
     if (storage && storage->filesystem_kind) {
         value.type=md_filesystem_magic(storage->filesystem_kind);
         uint64_t id=(uint64_t)storage->inode;
@@ -540,8 +555,18 @@ static void inode_execute(struct md_filesystem *fs,
         md_inode_xattr_origin(s,q,out,output,md_fs_anchor_native_leaf(q->origin[0],s,first)); return;
     case MD_FS_REOPEN:
         r=md_catalogue_reopen(images,s,first,(int)q->flags,!!(q->mode&MD_FS_REOPEN_MUTABLE),&out->open_completion);
-        if (r==-EXDEV && (q->mode&MD_FS_REOPEN_NATIVE))
+        if (r==-EXDEV && (q->mode&MD_FS_REOPEN_NATIVE)) {
             r=md_reopen_file(first,(int)q->flags,&out->open_completion);
+            if ((r==-EACCES || r==-EPERM) && !(q->flags&(O_ACCMODE|O_PATH|O_TRUNC|O_DIRECTORY
+                    |O_DIRECT|O_ASYNC|O_NOFOLLOW|O_CREAT|O_EXCL))) {
+                struct md_control_file file=md_readonly_file_new(first);
+                if (file.ops) {
+                    int carrier=file.ops->descriptor(file.context,(int)q->flags);
+                    out->error=md_fs_control_publish(carrier,file,NULL,s->identity,(int)q->flags,out,output);
+                    md_control_file_release(file); return;
+                }
+            }
+        }
         goto opened;
     case MD_FS_WATCH_CREATE: r = md_inode_watch_create(s, (int)q->flags); goto opened;
     case MD_FS_WATCH_ADD:

@@ -111,7 +111,7 @@ struct md_proc_file_io {
     enum md_proc_file_operation operation;
     int positional, whence, executed, offered;
     int64_t offset, next_position;
-    size_t length;
+    size_t length, read_page, transferred;
     long result;
     struct md_control_actor actor;
     struct md_control_pending *pending;
@@ -125,6 +125,10 @@ long md_proc_file_io_execute(struct md_proc_file_io *, const struct md_identity 
     struct md_uts_namespace *,
     void *bytes, size_t capacity, size_t page_size);
 int md_proc_file_io_offer(struct md_proc_file_io *);
+int md_proc_file_io_more(const struct md_proc_file_io *);
+/* A complete read-page acknowledgement advances its cursor but retains the
+ * OFD turn. The next execute uses the remaining count and position. */
+int md_proc_file_io_advance(struct md_proc_file_io *, long copied);
 /* A failed/partial read copy preserves/advances only the confirmed prefix.
  * Writes and seeks have already committed and must never replay. */
 int md_proc_file_io_finish(struct md_proc_file_io *, long copied);

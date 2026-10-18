@@ -32,7 +32,7 @@ long md_proc_control_known(int fd) {
 static long control_open(unsigned operation, int process, int selector, int flags, uint64_t view,const char *interface) {
     long memory=0;
 #ifndef MD_USE_LIBC
-    if ((flags&O_PATH) || interface) {
+    if (interface) {
         memory=md_adapter_buffer_take();
         if (memory<0) return memory;
         if (interface) memcpy((void *)memory,interface,16);
@@ -40,8 +40,11 @@ static long control_open(unsigned operation, int process, int selector, int flag
 #endif
     long fd=RAW6(prctl,MD_GUEST_PROC_FILE,operation,process,selector,flags,view);
 #ifndef MD_USE_LIBC
-    if (memory) {
-        if (fd>=0 && (flags&O_PATH)) fd=md_adapter_receive_fd((void *)memory,(unsigned)flags,MD_BUFFER_PROC_RIGHTS);
+    if (fd==MD_PROC_OPEN_RIGHTS) {
+        if (!memory) memory=md_adapter_buffer_take();
+        fd=memory<0 ? memory : md_adapter_receive_fd((void *)memory,(unsigned)flags,MD_BUFFER_PROC_RIGHTS);
+    }
+    if (memory>0) {
         long released=md_adapter_buffer_release();
         if (released<0) { if (fd>=0) RAW1(close,fd); return released; }
     }
@@ -278,23 +281,38 @@ long md_proc_control_call(long nr, const unsigned long *a) {
             if (result) break;
         }
     }
-    if (!result) result=md_guest_buffer_control(MD_BUFFER_PROC_IO,total,0);
-    long offered=result;
-    copied=0;
-    if (!writing && !spec.seek && !spec.command && result>0) {
-        size_t remaining=(size_t)result;
-        for (unsigned i=0;i<count && remaining;++i) {
-            size_t n=vectors[i].iov_len<remaining ? vectors[i].iov_len : remaining;
-            long error=md_write_memory(vectors[i].iov_base,(char *)memory+copied,n);
-            if (error) { result=copied ? (long)copied : error; break; }
-            copied+=n; remaining-=n;
+    size_t delivered=0, vector_offset=0;
+    unsigned at=0;
+    int more=0;
+    do {
+        if (!result) result=md_guest_buffer_control(MD_BUFFER_PROC_IO,total-delivered,0);
+        more=!writing && !spec.seek && !spec.command && !spec.directory
+            && result>=0 && (result&MD_BUFFER_PROC_MORE);
+        if (more) result&=~MD_BUFFER_PROC_MORE;
+        long offered=result;
+        copied=0;
+        if (!writing && !spec.seek && !spec.command && result>0) {
+            size_t remaining=(size_t)result;
+            while (at<count && remaining) {
+                size_t n=vectors[at].iov_len-vector_offset;
+                if (n>remaining) n=remaining;
+                long error=md_write_memory((char *)vectors[at].iov_base+vector_offset,
+                    (char *)memory+copied,n);
+                if (error) { result=copied ? (long)copied : error; break; }
+                copied+=n; remaining-=n; vector_offset+=n;
+                if (vector_offset==vectors[at].iov_len) { ++at; vector_offset=0; }
+            }
+            delivered+=copied;
         }
-    }
-    if (offered>=0) {
-        long finished=md_guest_buffer_control(MD_BUFFER_PROC_ACK,
-            writing || spec.seek || spec.command ? 0 : (unsigned long)result,0);
-        if (finished) result=finished;
-    }
+        more=more && result==offered && result>0;
+        if (offered>=0) {
+            long finished=md_guest_buffer_control(MD_BUFFER_PROC_ACK,
+                writing || spec.seek || spec.command ? 0 : (unsigned long)result,more);
+            if (finished) { result=finished; more=0; }
+        }
+        if (more) result=0;
+    } while (more);
+    if (delivered) result=(long)delivered;
     long released=md_adapter_buffer_release();
     return result<0 ? result : released<0 ? released : result;
 #endif

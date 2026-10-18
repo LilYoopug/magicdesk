@@ -1104,7 +1104,9 @@ read/write from Flatpak and live permission revocation on SteamOS. This is
 separate from the browser/GPU check and does not establish every desktop file
 chooser workflow. Stock `rofiles-fuse` and `squashfuse_ll` are also covered;
 ELF/script execution, dynamic loading and private mappings work from the tested
-SquashFS image. Shared mmap, FUSE inotify and append IO remain unsupported.
+SquashFS image. Concurrent append and inotify are supported, including changes
+to append flags, rename cookies and open-but-unlinked watch lifetimes. Shared
+mmap remains unsupported.
 See [FUSE ownership and limits](../native/shroot/fuse.md).
 
 Stock snapd has a separate Debian/systemd fixture covering hello-world install,

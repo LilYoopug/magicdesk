@@ -117,6 +117,24 @@ static void late_reply(void) {
     assert(result.calls==4 && result.error==-ECONNABORTED);
     md_fuse_connection_release(c);
 }
+static void terminal_reply(void) {
+    for (unsigned state=0;state<4;++state) {
+        struct md_fuse_connection *c=NULL; assert(!md_fuse_connection_new(&c));
+        struct abandoned result={0};
+        struct md_fuse_request *r=submit(c,0,NULL);
+        uint64_t id=state ? receive(c,1) : 0;
+        if (state==2) assert(reply(c,id,0)>0);
+        md_fuse_request_retire(r,abandoned_reply,&result); md_fuse_request_release(r);
+        assert(result.calls==(state==2));
+        if (!state) id=receive(c,1); /* Caller exit does not cancel queued terminal work. */
+        if (state==3) md_fuse_connection_abort(c,-ENODEV);
+        else if (state!=2) assert(reply(c,id,0)>0);
+        assert(result.calls==1 && result.error==(state==3 ? -ENODEV : 0));
+        if (state!=3) assert(reply(c,id,0)==-ENOENT);
+        md_fuse_connection_abort(c,-ENODEV);
+        assert(result.calls==1); md_fuse_connection_release(c);
+    }
+}
 static void bounds(void) {
     struct md_fuse_connection *c=NULL; assert(!md_fuse_connection_new(&c));
     struct md_fuse_request *r[MD_FUSE_REQUEST_MAX],*extra=NULL;
@@ -171,7 +189,7 @@ static void concurrency(void) {
     md_resource_wakeup_release(wake); close(fd);
 }
 int main(void) {
-    basics(); cancellation(); late_reply(); bounds(); concurrency();
+    basics(); cancellation(); late_reply(); terminal_reply(); bounds(); concurrency();
     puts("FUSE transport: replies, copy acknowledgement, cancellation, bounds, disconnect and concurrency OK");
     return 0;
 }

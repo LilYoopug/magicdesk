@@ -46,9 +46,14 @@ is not a substitute for checking a desktop file chooser's UI.
 
 `test_fuse.py --build BUILD --store STORE --case portal|rofiles|squashfs` stages a
 private native runtime under UID 2000. Each invocation selects one case. The
-rofiles case exercises mutations, cancellation and retained directory FDs; the
+rofiles case exercises concurrent append, watch events/lifetimes, cancellation
+and retained directory FDs; the
 SquashFS case checks ELF/script execution, dynamic loading, private mappings,
-noexec, concurrent readers and a file retained through lazy unmount. See
+noexec, concurrent readers and a file retained through lazy unmount. Add
+`--libc-registry PATH` to select prepared libc artifacts and require a matching
+direct-entry ABI before the workflow. All three cases also pass with the
+SteamOS replacement libc; this does not imply that every nested Flatpak runtime
+has a prepared replacement. See
 [FUSE contracts](../shroot/fuse.md) for unsupported operations.
 
 An independent Shroot launch that merely inherits another launch's bus address

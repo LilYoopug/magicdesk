@@ -2,13 +2,163 @@
 """Exercise stock libfuse through the guest syscall and descriptor adapters."""
 import os
 import errno
+import ctypes
+import fcntl
 import concurrent.futures
 from pathlib import Path
 import shutil
 import signal
+import select
+import struct
 import subprocess
 import tempfile
 import time
+
+
+def watch_events(watch):
+    events = []
+    while True:
+        try:
+            packet = os.read(watch, 65536)
+        except BlockingIOError:
+            return events
+        at = 0
+        while at < len(packet):
+            descriptor, mask, cookie, length = struct.unpack_from('iIII', packet, at)
+            name = packet[at + 16:at + 16 + length].rstrip(b'\0')
+            events.append((descriptor, mask, cookie, name))
+            at += 16 + length
+
+
+def append_and_watches(mount, source):
+    def append(worker):
+        fd = os.open(mount / 'append', os.O_WRONLY | os.O_APPEND)
+        try:
+            for index in range(40):
+                record = f'{worker:02}:{index:04}\n'.encode()
+                assert os.write(fd, record) == len(record)
+            assert os.lseek(fd, 0, os.SEEK_CUR) > 0
+        finally:
+            os.close(fd)
+
+    (mount / 'append').write_bytes(b'')
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(append, range(4)))
+    assert sorted((source / 'append').read_bytes().splitlines()) == sorted(
+        f'{worker:02}:{index:04}'.encode() for worker in range(4) for index in range(40))
+    fd = os.open(mount / 'append', os.O_RDWR)
+    try:
+        end = os.fstat(fd).st_size
+        fcntl.fcntl(fd, fcntl.F_SETFL, os.O_APPEND)
+        assert os.write(fd, b'tail') == 4
+        assert os.lseek(fd, 0, os.SEEK_CUR) == end + 4
+        assert os.pwrite(fd, b'positional', 0) == 10
+        assert os.lseek(fd, 0, os.SEEK_CUR) == end + 4
+        fcntl.fcntl(fd, fcntl.F_SETFL, 0)
+        assert os.pwrite(fd, b'HEAD', 0) == 4
+        assert (source / 'append').read_bytes().endswith(b'tailpositional')
+        assert (source / 'append').read_bytes().startswith(b'HEAD')
+    finally:
+        os.close(fd)
+    (mount / 'append').unlink()
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+    watch = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
+    assert watch >= 0, ctypes.get_errno()
+    try:
+        wd = libc.inotify_add_watch(watch, os.fsencode(mount), 0xfff)
+        assert wd > 0, ctypes.get_errno()
+        os.close(os.open(mount, os.O_PATH | os.O_DIRECTORY))
+        assert not watch_events(watch), 'O_PATH is not an open/close data event'
+        list(mount.iterdir())
+        events = watch_events(watch)
+        assert any(d == wd and m & 0x1 and m & 0x40000000 and not n
+                   for d, m, c, n in events), events
+        fd = os.open(mount / 'watched', os.O_CREAT | os.O_RDWR, 0o600)
+        os.write(fd, b'first')
+        os.rename(mount / 'watched', mount / 'moved')
+        os.write(fd, b'second')
+        os.chmod(mount / 'moved', 0o640)
+        os.close(fd)
+        (mount / 'moved').unlink()
+        poller = select.poll()
+        poller.register(watch, select.POLLIN)
+        # EVENT_WAIT: the watch queue must become readable; timeout is failure.
+        assert poller.poll(5000), 'FUSE inotify queue was not signalled'
+        events = watch_events(watch)
+        def contains(mask, name):
+            return any(d == wd and m & mask and n == name for d, m, c, n in events)
+        assert contains(0x100, b'watched') and contains(0x20, b'watched'), events
+        assert contains(0x2, b'moved') and contains(0x4, b'moved'), events
+        assert contains(0x8, b'moved') and contains(0x200, b'moved'), events
+        before = [c for d, m, c, n in events if m & 0x40 and n == b'watched']
+        after = [c for d, m, c, n in events if m & 0x80 and n == b'moved']
+        assert before == after and len(before) == 1 and before[0], events
+        assert libc.inotify_rm_watch(watch, wd) == 0
+        watch_events(watch)
+        # A one-shot subscription is retired only by a matching event.
+        wd = libc.inotify_add_watch(watch, os.fsencode(mount), 0x80000000 | 0x100)
+        assert wd > 0
+        (mount / 'one-shot').write_bytes(b'once')
+        events = watch_events(watch)
+        assert [m for d, m, c, n in events if d == wd] == [0x100, 0x8000], events
+        (mount / 'one-shot').unlink()
+        assert not watch_events(watch)
+        # Parent EXCL_UNLINK must not retire the still-open inode watch.
+        wd = libc.inotify_add_watch(watch, os.fsencode(mount), 0x04000000 | 0xfff)
+        assert wd > 0
+        fd = os.open(mount / 'retained', os.O_CREAT | os.O_RDWR, 0o600)
+        child = libc.inotify_add_watch(watch, os.fsencode(mount / 'retained'), 0xfff)
+        assert child > 0
+        assert libc.inotify_add_watch(watch, os.fsencode(mount / 'retained'), 0x10000000 | 0x2) == -1
+        assert ctypes.get_errno() == errno.EEXIST
+        watch_events(watch)
+        (mount / 'retained').unlink()
+        events = watch_events(watch)
+        assert not any(d == child and m & (0x400 | 0x8000) for d, m, c, n in events), events
+        assert os.write(fd, b'unlinked') == 8
+        os.close(fd)
+        # Final file release is asynchronous; wait on its actual watch event.
+        deadline = time.monotonic() + 5
+        while not any(d == child and m & 0x8000 for d, m, c, n in events):
+            assert time.monotonic() < deadline, events
+            assert poller.poll(max(1, int((deadline - time.monotonic()) * 1000))), events
+            events.extend(watch_events(watch))
+        assert any(d == child and m & 0x2 for d, m, c, n in events), events
+        assert any(d == child and m & 0x8 for d, m, c, n in events), events
+        assert any(d == child and m & 0x400 for d, m, c, n in events), events
+        assert not any(d == wd and m & (0x2 | 0x8) for d, m, c, n in events), events
+        assert libc.inotify_rm_watch(watch, wd) == 0
+        watch_events(watch)
+        # O_PATH does not emit open/close but still retains the watched inode.
+        (mount / 'path-only').write_bytes(b'path')
+        fd = os.open(mount / 'path-only', os.O_PATH)
+        child = libc.inotify_add_watch(watch, os.fsencode(mount / 'path-only'), 0xfff)
+        assert child > 0
+        (mount / 'path-only').unlink()
+        events = watch_events(watch)
+        assert not any(m & (0x400 | 0x8000) for d, m, c, n in events), events
+        os.close(fd)
+        deadline = time.monotonic() + 5
+        while not any(d == child and m & 0x8000 for d, m, c, n in events):
+            assert time.monotonic() < deadline, events
+            assert poller.poll(max(1, int((deadline - time.monotonic()) * 1000))), events
+            events.extend(watch_events(watch))
+        assert any(m & 0x400 for d, m, c, n in events), events
+        assert not any(m & (0x8 | 0x10 | 0x20) for d, m, c, n in events), events
+    finally:
+        os.close(watch)
+    print('PASS FUSE concurrent append, F_SETFL, positional IO and live inotify rename events', flush=True)
+
+
+def mount_ready(daemon, mount):
+    deadline = time.monotonic() + 15
+    while str(mount) not in Path('/proc/self/mountinfo').read_text():
+        assert daemon.poll() is None, 'daemon exited before mounting'
+        assert time.monotonic() < deadline, 'FUSE mount not observed'
+        # Bounded mount-state observation, never a readiness settling delay.
+        time.sleep(0.02)
 
 
 def stopped_request(daemon, mount, source, crash=False, cwd=False):
@@ -77,12 +227,7 @@ log = open(work / 'daemon.log', 'w+')
 daemon = subprocess.Popen(['rofiles-fuse', '-f', '-d', '-o', 'default_permissions', str(source), str(mount)],
                           stdout=log, stderr=log)
 try:
-    deadline = time.monotonic() + 15
-    while str(mount) not in Path('/proc/self/mountinfo').read_text():
-        assert daemon.poll() is None, 'daemon exited before mounting'
-        assert time.monotonic() < deadline, 'FUSE mount not observed'
-        # Bounded mount-state observation, never a readiness settling delay.
-        time.sleep(0.02)
+    mount_ready(daemon, mount)
     assert (mount / 'file').read_bytes() == b'original'
     device = mount.stat().st_dev
     assert device != source.stat().st_dev
@@ -141,10 +286,36 @@ try:
     assert (bound / 'nested').stat().st_dev == device
     (bound / 'nested').write_bytes(b'bind-updated')
     assert (source / 'directory' / 'nested').read_bytes() == b'bind-updated'
+    fd = os.open(bound, os.O_PATH | os.O_DIRECTORY)
+    try:
+        subprocess.run(['mount', '-o', 'remount,bind,ro,nosuid,nodev,noexec', str(bound)], check=True)
+        required = os.ST_RDONLY | os.ST_NOSUID | os.ST_NODEV | os.ST_NOEXEC
+        assert os.statvfs(bound).f_flag & required == required
+        assert os.fstatvfs(fd).f_flag & required == required
+        assert not os.statvfs(mount).f_flag & os.ST_RDONLY
+        try:
+            (bound / 'nested').write_bytes(b'rejected')
+        except OSError as error:
+            assert error.errno == errno.EROFS, error
+        else:
+            raise AssertionError('read-only bind accepted a write')
+        assert (source / 'directory' / 'nested').read_bytes() == b'bind-updated'
+    finally:
+        os.close(fd)
     subprocess.run(['umount', str(bound)], check=True)
     (mount / 'directory' / 'nested').unlink()
     (mount / 'directory').rmdir()
+    append_and_watches(mount, source)
     print('FUSE filesystem operations passed', flush=True)
+    subprocess.run(['umount', str(mount)], check=True)
+    assert daemon.wait(timeout=10) == 0
+    # The wait tests require an actual daemon request. A valid attribute lease
+    # can legally satisfy stat/fchdir while the daemon is stopped. Keep normal
+    # TTLs above, and explicitly request uncached metadata for these cases.
+    daemon = subprocess.Popen(['rofiles-fuse', '-f', '-d', '-o',
+        'default_permissions,attr_timeout=0,entry_timeout=0', str(source), str(mount)],
+        stdout=log, stderr=log)
+    mount_ready(daemon, mount)
     stopped_request(daemon, mount, source)
     stopped_request(daemon, mount, source, cwd=True)
     stopped_request(daemon, mount, source, crash=True)

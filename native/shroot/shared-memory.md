@@ -5,6 +5,45 @@ Execution preparation creates missing `/dev` and `/dev/shm` directories in the
 writable instance, retaining existing permissions and sealed-image contents.
 Already-open descriptors, mmap and descriptor passing use native data IO.
 
+## Read-Only Anonymous Views
+
+Some host policies deny reopening a readable memfd through `/proc/self/fd`.
+After such a denial, `readonly_file` can retain that exact readable, unlinked,
+sealable regular file as a read-only controlled description. It is not a copy:
+reads, stat, seals and shared mappings observe the original backing. Each reopen
+has an independent offset, while dup and same-tree SCM_RIGHTS retain the same
+description. Independent-supervisor transfer is not provided by this view.
+The guest carrier is O_PATH; unadapted writes cannot acquire provider write access.
+Unsupported open modes do not silently enter this fallback.
+
+`task_mapping` maps eligible controlled backings in the stopped requesting task,
+without creating a helper thread that an application sandbox may prohibit. Only
+native read-only regular descriptors, or memfds protected by size seals and
+WRITE/FUTURE_WRITE seals, can enter its temporary application-table loan. The
+existing FD-turn and loan retirement owners serialize installation, mapping and
+verified native close. Errors and caller death retire the exact loan, not a
+guessed descriptor number. An uncertain mapping result invalidates its optional
+provenance and retains conservative protection checks for surviving CLONE_VM users.
+Mutable backing and a full application FD table retain the private-helper path;
+application seccomp denials remain errors in both paths.
+
+Mapping policy shares one range owner for noexec and read-only restrictions.
+Shared read-only views cannot gain PROT_WRITE through mprotect; MAP_PRIVATE keeps
+normal COW behavior. Splits, remap, fork and exec preserve or retire the same
+policy. Descriptor and readiness selectors are prepared before application
+seccomp activation, so receiving a new controlled FD does not require installing
+another filter inside that sandbox. Ordinary native descriptors keep their data
+path; this is not coherent FUSE shared-mapping support.
+
+`test_memfd_views.py` exercises protected callers, live backing, seals, COW,
+native FD balance, failed mappings, a full descriptor table, repeated death of a
+mapping caller sharing another process's FD table, and SCM_RIGHTS to a
+receiver denying clone and further seccomp installation, in Base and accelerated
+execution. `test_task_mapping.c` checks backing admission; FD-origin tests cover
+metadata-free loan allocation failure and retirement.
+
+## System V
+
 System V shared memory has a separate namespace authority in `sysv_shm.c`.
 The supervisor opens it lazily through `ipc_namespace` on the first request. `shm_calls.c` adapts the
 ARM64 Linux ABI in the calling task. `task_helper` owns a short-lived same-TGID

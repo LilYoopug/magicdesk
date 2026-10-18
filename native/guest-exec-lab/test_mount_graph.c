@@ -27,6 +27,7 @@
 static int fail_allocation=-1;
 void test_mount_allocation_failure_after(int count) { fail_allocation=count; }
 void test_mount_policy_map_failure_after(int count);
+void test_mount_reservation_failure(int enabled);
 void *__real_calloc(size_t, size_t);
 void *__wrap_calloc(size_t n, size_t size) {
     if (fail_allocation==0) { errno=ENOMEM; return NULL; }
@@ -165,6 +166,19 @@ static void failures(struct md_filesystem *source) {
     struct md_mount_graph_parcel p={0};
     assert(!md_mount_graph_export(source->mounts,source->store->lifetime->root,&p)); md_mount_graph_parcel_close(&p);
     unsigned before=descriptors();
+    test_mount_reservation_failure(1);
+    errno=0; assert(!md_view_tree_new() && errno==ENOMEM);
+    struct md_mount_namespace *failed_copy=NULL;
+    struct md_fs_location copied_root={0},root={0};
+    assert(md_fs_mounts_copy(source,&root,&failed_copy,&copied_root)==-ENOMEM && !failed_copy);
+    test_mount_reservation_failure(0);
+    assert(descriptors()==before);
+    assert(!md_mount_graph_export(source->mounts,source->store->lifetime->root,&p));
+    struct md_mount_namespace *failed_view=NULL;
+    test_mount_reservation_failure(1);
+    int failed_result=md_mount_graph_import(&p,&failed_view);
+    test_mount_reservation_failure(0);
+    assert(failed_result==-ENOMEM && !failed_view && !p.count && descriptors()==before);
     for (unsigned i=0;i<14;++i) {
         assert(!md_mount_graph_export(source->mounts,source->store->lifetime->root,&p));
         int seals=F_SEAL_WRITE|F_SEAL_GROW|F_SEAL_SHRINK|F_SEAL_SEAL;
@@ -232,6 +246,42 @@ static void failures(struct md_filesystem *source) {
     alias->parent=&source->mounts->base; assert(descriptors()==before);
     puts("PASS mount graph rollback: malformed graph/rights, allocation and FD exhaustion, unpublished mutation rejection");
 }
+static int scan_order(unsigned count,const unsigned *parents,unsigned *order) {
+    unsigned done[count+1], used=0;
+    memset(done,0,sizeof(done));
+    for (unsigned i=0;i<count;++i) if (parents[i]>count || parents[i]==i+1) return -EINVAL;
+    while (used<count) {
+        unsigned before=used;
+        for (unsigned i=0;i<count;++i) if (!done[i] && (!parents[i] || done[parents[i]-1])) {
+            done[i]=1; order[used++]=i;
+        }
+        if (used==before) return -ELOOP;
+    }
+    return 0;
+}
+static void topology_order(void) {
+    assert(!md_mount_topology_order(0,NULL,NULL));
+    assert(md_mount_topology_order(MD_FS_MOUNTS_MAX+2,NULL,NULL)==-EINVAL);
+    assert(md_mount_topology_order(1,NULL,NULL)==-EINVAL);
+    for (unsigned count=1;count<=5;++count) {
+        unsigned parents[5]={0}, expected[5], actual[5];
+        for (;;) {
+            int result=scan_order(count,parents,expected);
+            assert(md_mount_topology_order(count,parents,actual)==result);
+            if (!result) assert(!memcmp(expected,actual,count*sizeof(*actual)));
+            unsigned i=0;
+            while (i<count && ++parents[i]>count+1) parents[i++]=0;
+            if (i==count) break;
+        }
+    }
+    unsigned count=MD_FS_MOUNTS_MAX+1, parents[count], order[count];
+    for (unsigned i=0;i<count;++i) parents[i]=i+1<count ? i+2 : 0;
+    assert(!md_mount_topology_order(count,parents,order));
+    for (unsigned i=0;i<count;++i) assert(order[i]==count-1-i);
+    parents[count-1]=1;
+    assert(md_mount_topology_order(count,parents,order)==-ELOOP);
+    puts("PASS linear mount topology: exhaustive small graphs preserve scan order/errors; full-limit reversed chain and cycle");
+}
 static void unordered(const char *base) {
     char directory[PATH_MAX]; path(directory,base,"unordered"); assert(!mkdir(directory,0700));
     unsigned before=descriptors(); struct md_filesystem fs=filesystem(directory,1);
@@ -255,6 +305,45 @@ static void unordered(const char *base) {
     assert(descriptors()==before);
     puts("PASS mount topology: child-before-parent placement, portable graph/copy and cycle rejection");
 }
+static void placement_lookup(void) {
+    struct md_mount_namespace view={.base={.source=0}};
+    view.tree=md_view_tree_new(); assert(view.tree);
+    const unsigned counts[]={0,1,8,9,MD_FS_MOUNTS_MAX};
+    for (unsigned c=0;c<sizeof(counts)/sizeof(*counts);++c) {
+        view.tree->count=counts[c];
+        for (unsigned i=1;i<=counts[c];++i) {
+            struct md_view_mount *m=md_view_mount_node(&view,i);
+            *m=(struct md_view_mount){.source=i%11 ? 0 : -1,
+                .parent=i%7 ? &view.base : NULL,.detached=!(i%13),
+                .guest={.st_dev=i%3,.st_ino=i%37}};
+        }
+        for (unsigned round=0;round<2;++round) {
+            if (round && counts[c]) {
+                /* Same slot/count, changed parent/target and attachment state. */
+                view.tree->mounts[0].parent=md_view_mount_node(&view,counts[c]);
+                view.tree->mounts[0].guest.st_ino=77;
+                view.tree->mounts[counts[c]-1].detached^=1;
+            }
+            md_view_mount_lookup_changed(&view);
+            for (unsigned p=0;p<3;++p) for (unsigned dev=0;dev<4;++dev)
+                for (unsigned ino=0;ino<80;++ino) {
+                    struct md_view_mount *parent=p==0 ? NULL : p==1 ? &view.base
+                        : md_view_mount_node(&view,counts[c]);
+                    struct stat st={.st_dev=dev,.st_ino=ino};
+                    struct md_view_mount *expected=NULL;
+                    for (unsigned i=0;i<=counts[c];++i) {
+                        struct md_view_mount *m=md_view_mount_node(&view,i);
+                        if (m->source>=0 && !m->detached && m->parent==parent && md_view_same(&m->guest,&st)) {
+                            expected=m; break;
+                        }
+                    }
+                    assert(md_view_mount_lookup(&view,parent,&st)==expected);
+                }
+        }
+    }
+    md_view_tree_free(view.tree);
+    puts("PASS mount placement index: exact scan order, collisions, base, missing keys and same-count invalidation");
+}
 static void sizes(const char *base) {
     unsigned before=descriptors();
     struct md_mount_namespace *empty=md_mount_namespace_new(), *received=NULL; assert(empty);
@@ -265,27 +354,49 @@ static void sizes(const char *base) {
     assert(!md_mount_graph_import(&p,&received) && !received->tree);
     assert(received->base.locked);
     md_mount_namespace_release(empty); md_mount_namespace_release(received);
-    char store[PATH_MAX], host[MD_FS_MOUNTS_MAX][PATH_MAX], target[MD_FS_MOUNTS_MAX][32];
+    char store[PATH_MAX];
+    char (*host)[PATH_MAX]=calloc(MD_FS_MOUNTS_MAX,sizeof(*host));
+    char (*target)[32]=calloc(MD_FS_MOUNTS_MAX,sizeof(*target));
+    struct md_fs_attachment *entries=calloc(MD_FS_MOUNTS_MAX,sizeof(*entries));
+    assert(host && target && entries);
     path(store,base,"max-store"); struct md_filesystem fs={0};
     assert(!md_inode_store_open(store,1,&fs.store));
-    struct md_fs_attachment entries[MD_FS_MOUNTS_MAX];
     for (unsigned i=0;i<MD_FS_MOUNTS_MAX;++i) {
         char leaf[32]; snprintf(leaf,sizeof(leaf),"max-host-%u",i); path(host[i],base,leaf);
         snprintf(target[i],sizeof(target[i]),"/volume-%u",i);
         assert(!mkdir(host[i],0700) && !md_inode_mkdir(fs.store,-1,target[i],0700));
         entries[i]=(struct md_fs_attachment){host[i],target[i],i&1};
     }
+    puts("CHECK maximum mount graph: create full topology");
     assert(!md_fs_mounts_open(&fs,entries,MD_FS_MOUNTS_MAX));
+    struct md_inode_statistics stats={0};
+    md_inode_measure(fs.store,&stats);
+    assert(!md_view_mount_reconcile(&fs));
+    md_inode_measure(fs.store,NULL);
+    assert(stats.lock.calls==1 && !fs.store->read_depth);
+    for (unsigned i=0;i<MD_FS_MOUNTS_MAX;++i) {
+        struct md_view_mount *m=&fs.mounts->tree->mounts[i];
+        assert(md_view_mount_lookup(fs.mounts,m->parent,&m->guest)==m);
+    }
+    fail_allocation=0;
+    int collected=md_view_mount_collect(&fs);
+    fail_allocation=-1;
+    assert(!collected);
+    puts("PASS mount reconciliation: 4096 targets share one fresh store snapshot; unchanged collection allocates no candidate");
     fs.mounts->base.root_providers=1;
     fs.mounts->tree->mounts[MD_FS_MOUNTS_MAX-1].root_providers=1;
+    puts("CHECK maximum mount graph: export all descriptors");
     assert(!md_mount_graph_export(fs.mounts,fs.store->lifetime->root,&p) && p.count==4+3*MD_FS_MOUNTS_MAX);
     assert(p.count>253); /* Exercises the transport beyond one SCM_RIGHTS message. */
+    puts("CHECK maximum mount graph: import full topology");
     received=NULL; assert(!md_mount_graph_import(&p,&received));
     assert(received->tree->count==MD_FS_MOUNTS_MAX);
     assert(received->base.root_providers && received->tree->mounts[MD_FS_MOUNTS_MAX-1].root_providers);
     for (unsigned i=0;i<MD_FS_MOUNTS_MAX;++i) {
         assert(md_view_readonly(&received->tree->mounts[i])==(int)(i&1));
         assert(md_view_same(&received->tree->mounts[i].native,&fs.mounts->tree->mounts[i].native));
+        struct md_view_mount *m=&received->tree->mounts[i];
+        assert(md_view_mount_lookup(received,m->parent,&m->guest)==m);
     }
     struct md_identity actor=md_identity_new(0,0);
     fs.store->identity=&actor;
@@ -294,14 +405,20 @@ static void sizes(const char *base) {
     assert(md_fs_mount_change(&fs,NULL,&extra)==-ENOSPC);
     assert(fs.mounts->tree->count==MD_FS_MOUNTS_MAX);
     fs.store->identity=NULL; md_identity_release(&actor);
+    md_mount_namespace_release(received); received=NULL;
     struct md_mount_namespace *copy=NULL; struct md_fs_location copied_root;
+    puts("CHECK maximum mount graph: copy full topology");
     assert(!md_fs_mounts_copy(&fs,&(struct md_fs_location){0},&copy,&copied_root));
     assert(copy->tree->count==MD_FS_MOUNTS_MAX && copy->tree!=fs.mounts->tree);
     assert(copy->base.root_providers && copy->tree->mounts[MD_FS_MOUNTS_MAX-1].root_providers);
-    for (unsigned i=0;i<MD_FS_MOUNTS_MAX;++i)
+    for (unsigned i=0;i<MD_FS_MOUNTS_MAX;++i) {
         assert(md_view_same(&copy->tree->mounts[i].native,&fs.mounts->tree->mounts[i].native));
+        struct md_view_mount *entry=&copy->tree->mounts[i];
+        assert(md_view_mount_lookup(copy,entry->parent,&entry->guest)==entry);
+    }
     md_mount_namespace_release(copy);
     md_mount_namespace_release(received); close_filesystem(&fs); assert(descriptors()==before);
+    free(entries); free(target); free(host);
     puts("PASS mount graph bounds: empty and maximum topology, exact rights count and cleanup");
 }
 static void models(const char *base) {
@@ -361,6 +478,47 @@ static int mutation(struct md_filesystem *fs, unsigned operation, unsigned flags
     md_fs_execute(fs,&q,&out,NULL);
     fs->store->identity=NULL; md_identity_release(&identity);
     return out.error;
+}
+static void indexed_updates(const char *base) {
+    unsigned before=descriptors();
+    char dir[PATH_MAX]; path(dir,base,"indexed-updates"); assert(!mkdir(dir,0700));
+    struct md_filesystem fs=filesystem(dir,1),foreign={.store=fs.store};
+    for (unsigned i=0;i<16;++i) {
+        char point[32]; snprintf(point,sizeof(point),"/point-%u",i);
+        assert(!md_inode_mkdir(fs.store,-1,point,0700));
+        assert(!mutation(&fs,MD_FS_MOUNT_BIND,MS_BIND,"/alias",point));
+    }
+    assert(!md_inode_mkdir(fs.store,-1,"/relocated",0700));
+    struct md_mount_graph_parcel parcel={0};
+    assert(!md_mount_graph_export(fs.mounts,fs.store->lifetime->root,&parcel));
+    assert(!md_mount_graph_import(&parcel,&foreign.mounts));
+    unsigned last=fs.mounts->tree->count-1;
+    struct md_view_mount *m=&fs.mounts->tree->mounts[last];
+    struct stat covered=m->guest;
+    contents(&fs,"/point-15/value",NULL,"value");
+    contents(&foreign,"/point-15/value",NULL,"value");
+    assert(fs.mounts->tree->lookup.valid && foreign.mounts->tree->lookup.valid);
+    fail_allocation=0;
+    assert(mutation(&fs,MD_FS_MOUNT_MOVE,MS_MOVE,"/point-15","/relocated")==-ENOMEM);
+    fail_allocation=-1;
+    assert(md_view_mount_lookup(fs.mounts,&fs.mounts->base,&covered)==m);
+    assert(!mutation(&fs,MD_FS_MOUNT_MOVE,MS_MOVE,"/point-15","/relocated"));
+    assert(!md_view_mount_lookup(fs.mounts,&fs.mounts->base,&covered));
+    contents(&fs,"/relocated/value",NULL,"value");
+    contents(&foreign,"/relocated/value",NULL,"value");
+    assert(!md_view_mount_lookup(foreign.mounts,&foreign.mounts->base,&covered));
+    covered=m->guest;
+    assert(!mutation(&fs,MD_FS_MOUNT_UMOUNT,0,NULL,"/relocated"));
+    assert(!md_view_mount_lookup(fs.mounts,&fs.mounts->base,&covered));
+    assert(!md_mount_graph_sync(foreign.mounts));
+    assert(!md_view_mount_lookup(foreign.mounts,&foreign.mounts->base,&covered));
+    assert(!mutation(&fs,MD_FS_MOUNT_BIND,MS_BIND,"/alias","/point-15"));
+    assert(m->source>=0 && !m->detached && md_view_mount_lookup(fs.mounts,m->parent,&m->guest)==m);
+    contents(&foreign,"/point-15/value",NULL,"value");
+    assert(md_view_mount_lookup(foreign.mounts,&foreign.mounts->base,&m->guest)==&foreign.mounts->tree->mounts[last]);
+    md_fs_mounts_close(&foreign); close_filesystem(&fs);
+    assert(descriptors()==before);
+    puts("PASS indexed mount placement: live move, detach, slot reuse, rollback and foreign graph synchronization");
 }
 static void live_move(struct md_filesystem *fs) {
     assert(!mutation(fs,MD_FS_MOUNT_MOVE,MS_MOVE,"/outer/nested","/outer"));
@@ -429,7 +587,8 @@ static void private_publication(const char *base) {
     assert(!md_mount_graph_export(fs.mounts,fs.store->lifetime->root,&p));
     assert(!md_mount_graph_import(&p,&peer.mounts));
     unsigned id=peer.mounts->tree->mounts[0].id;
-    struct md_view_mount next[MD_FS_MOUNTS_MAX];
+    struct md_view_mount next[3];
+    assert(fs.mounts->tree->count==3);
     memcpy(next,fs.mounts->tree->mounts,fs.mounts->tree->count*sizeof(*next));
     next[2].file=md_proc_sysctl_new(MD_PROC_FILE_HOSTNAME,NULL,NULL); assert(next[2].file.ops);
     struct md_mount_layout layout={.base=&fs.mounts->base,.root=fs.mounts->root,
@@ -789,6 +948,70 @@ static void removed_points(const char *base) {
     assert(descriptors()==before);
     puts("PASS removed mountpoints: native/logical targets, rename, foreign views, retained origins and cleanup");
 }
+static void branch_reconciliation(const char *base) {
+    unsigned before=descriptors();
+    char fixture[PATH_MAX],covered[PATH_MAX],renamed[PATH_MAX];
+    path(fixture,base,"branch-reconcile"); assert(!mkdir(fixture,0700));
+    struct md_filesystem fs=filesystem(fixture,1),peer=filesystem(fixture,0);
+    struct md_mount_graph_parcel parcel={0};
+    assert(!md_mount_graph_export(fs.mounts,fs.store->lifetime->root,&parcel));
+    assert(!md_mount_graph_import(&parcel,&peer.mounts));
+    struct md_fs_anchor *held=NULL;
+    struct md_fs_result opened=open_file(&peer,"/outer/nested",O_PATH|O_DIRECTORY,NULL,&held);
+    assert(!opened.error && held); close(opened.fd);
+    path(covered,fixture,"host0/nested"); path(renamed,fixture,"host0/moved");
+    assert(!rename(covered,renamed));
+    assert(!md_view_mount_reconcile_branch(&peer,held->mount) && !held->mount->detached);
+    contents(&peer,"/outer/moved/value",NULL,"value");
+    assert(!rmdir(renamed));
+    /* A sibling operation does not visit unrelated placement targets. */
+    assert(!mutation(&fs,MD_FS_MOUNT_REMOUNT,MS_REMOUNT|MS_BIND,NULL,"/alias"));
+    assert(!fs.mounts->tree->mounts[1].detached);
+    assert(!md_view_mount_reconcile_branch(&peer,held->mount));
+    assert(held->mount->detached && !peer.mounts->tree->mounts[2].detached);
+    contents(&peer,"value",held,"value");
+    /* Unmount still reconciles children before its EBUSY decision. */
+    assert(!mutation(&fs,MD_FS_MOUNT_UMOUNT,0,NULL,"/outer"));
+    assert(!md_mount_graph_sync(peer.mounts));
+    contents(&peer,"value",held,"value");
+    md_fs_anchor_release(held);
+    assert(!md_inode_unlink(fs.store,-1,"/alias",AT_REMOVEDIR));
+    assert(!md_view_mount_reconcile_branch(&peer,&peer.mounts->tree->mounts[2]));
+    assert(peer.mounts->tree->mounts[2].detached);
+    assert(!md_view_mount_collect(&fs));
+    close_filesystem(&peer); close_filesystem(&fs);
+    assert(descriptors()==before);
+    puts("PASS branch reconciliation: live rename, unrelated sibling, foreign deletion, retained origin and child retirement");
+}
+static void unlinked_propagation(const char *base) {
+    unsigned before=descriptors();
+    char fixture[PATH_MAX]; path(fixture,base,"unlinked-propagation"); assert(!mkdir(fixture,0700));
+    struct md_filesystem fs=filesystem(fixture,1);
+    assert(!md_inode_mkdir(fs.store,-1,"/source",0700));
+    assert(!md_inode_mkdir(fs.store,-1,"/copy",0700));
+    assert(!md_inode_mkdir(fs.store,-1,"/fresh",0700));
+    assert(!mutation(&fs,MD_FS_MOUNT_PROPAGATION,MS_SHARED,NULL,"/"));
+    assert(!mutation(&fs,MD_FS_MOUNT_BIND,MS_BIND,"/source","/copy"));
+    struct md_fs_anchor *held=NULL;
+    struct md_fs_result opened=open_file(&fs,"/copy",O_PATH|O_DIRECTORY,NULL,&held);
+    assert(!opened.error && held); close(opened.fd);
+    int child=md_inode_open(fs.store,-1,"/source/file",O_CREAT|O_RDWR,0600); assert(child>=0);
+    int fresh=md_inode_open(fs.store,-1,"/fresh",O_PATH|O_DIRECTORY,0); assert(fresh>=0);
+    assert(md_inode_contains(fs.store,held->fd,child)==1);
+    assert(md_inode_contains(fs.store,child,child)==1);
+    assert(md_inode_contains(fs.store,child,held->fd)==0);
+    assert(md_inode_contains(fs.store,fresh,child)==0);
+    assert(!md_inode_unlink(fs.store,-1,"/source/file",0)); close(child);
+    assert(!md_inode_unlink(fs.store,-1,"/source",AT_REMOVEDIR));
+    assert(md_inode_contains(fs.store,held->fd,held->fd)==1);
+    assert(md_inode_contains(fs.store,held->fd,fresh)==0); close(fresh);
+    int result=mutation(&fs,MD_FS_MOUNT_BIND,MS_BIND,"/fresh","/fresh");
+    if (result) fprintf(stderr,"unlinked propagation: %d\n",result);
+    assert(!result && !held->mount->detached);
+    md_fs_anchor_release(held); close_filesystem(&fs);
+    assert(descriptors()==before);
+    puts("PASS shared propagation: unlinked bind source does not reject unrelated mounts");
+}
 static void stream_value(int reader,uint64_t expected,int value) {
     uint64_t revision=0; int *rights=NULL,settled=0; unsigned count=0;
     assert(!md_mount_stream_read(reader,&revision,&rights,&count,&settled)
@@ -910,11 +1133,13 @@ static void propagation(const char *base) {
     puts("PASS mount propagation: peer/slave attach and detach, private isolation, graph publication and allocation rollback");
 }
 void test_mount_graph(const char *base) {
-    stream_transactions();
-    alarm(60); char model[PATH_MAX], peers[PATH_MAX];
+    stream_transactions(); topology_order(); placement_lookup();
+    /* EVENT_WAIT: full-limit graph transfer/copy plus failure injection. The
+     * capacity stress case now exercises 4096 real mounts, not 512. */
+    alarm(300); char model[PATH_MAX], peers[PATH_MAX];
     path(model,base,"graph-model"); path(peers,base,"graph-peers");
     assert(!mkdir(model,0700) && !mkdir(peers,0700));
-    models(model); sizes(base); unordered(base); updates(base); private_publication(base);
+    models(model); sizes(base); unordered(base); indexed_updates(base); updates(base); private_publication(base);
     retirement(base,0); retirement(base,1); processes(peers); host_projections(base);
-    initial_pivot(base); removed_points(base); propagation(base); alarm(0);
+    initial_pivot(base); removed_points(base); branch_reconciliation(base); unlinked_propagation(base); propagation(base); alarm(0);
 }

@@ -30,8 +30,9 @@ struct manifest {
     struct md_fd_identity base_source, base_target;
     uint32_t root, base_parent, base_flags, base_descriptor;
     uint32_t shared, master, unbindable, reserved;
-    struct entry entries[MD_FS_MOUNTS_MAX];
-    struct storage storage[MD_FS_MOUNTS_MAX];
+    struct entry *entries;
+    struct storage *storage;
+    void *allocation;
 };
 struct md_mount_graph {
     int fd, reader, writer, pin;
@@ -39,7 +40,11 @@ struct md_mount_graph {
     struct md_fd_identity identity;
 };
 _Static_assert(sizeof(struct entry)==96 && sizeof(struct storage)==24,"mount graph entry layout");
-_Static_assert(sizeof(struct manifest)==HEADER+120*MD_FS_MOUNTS_MAX,"mount graph layout");
+_Static_assert(offsetof(struct manifest,entries)==HEADER,"mount graph header layout");
+
+static void manifest_release(struct manifest *m) {
+    free(m->allocation); *m=(struct manifest){0};
+}
 
 static struct md_mount_graph *create(void) {
     struct md_mount_graph *g=calloc(1,sizeof(*g));
@@ -51,10 +56,7 @@ int md_mount_graph_foreign(const struct md_mount_namespace *view) {
     return view && view->graph && view->graph->writer<0;
 }
 static int slot(const struct md_mount_namespace *view, const struct md_view_mount *m) {
-    if (view && view->graph && m==&view->base) return 0;
-    if (view && view->graph && view->tree) for (unsigned i=0;i<view->tree->count;++i)
-        if (m==&view->tree->mounts[i]) return (int)i+1;
-    return -ESTALE;
+    return view && view->graph && m ? md_view_mount_slot(view,m,view->tree ? view->tree->count : 0) : -ESTALE;
 }
 int md_mount_graph_acquire_pin(struct md_mount_namespace *view, const struct md_view_mount *m) {
     int index=slot(view,m);
@@ -88,13 +90,16 @@ static size_t manifest_size(const struct manifest *m) {
 }
 static size_t manifest_bytes(const struct manifest *m, unsigned char *bytes) {
     size_t n=HEADER+m->count*sizeof(struct entry);
-    memcpy(bytes,m,n); memcpy(bytes+n,m->storage,m->storages*sizeof(struct storage));
+    memcpy(bytes,m,HEADER);
+    if (m->count) memcpy(bytes+HEADER,m->entries,m->count*sizeof(struct entry));
+    if (m->storages) memcpy(bytes+n,m->storage,m->storages*sizeof(struct storage));
     return manifest_size(m);
 }
 static int manifest_same(const struct manifest *a, const struct manifest *b) {
     return a->count==b->count && a->storages==b->storages
-        && !memcmp(a,b,HEADER+a->count*sizeof(struct entry))
-        && !memcmp(a->storage,b->storage,a->storages*sizeof(struct storage));
+        && !memcmp(a,b,HEADER)
+        && (!a->count || !memcmp(a->entries,b->entries,a->count*sizeof(struct entry)))
+        && (!a->storages || !memcmp(a->storage,b->storage,a->storages*sizeof(struct storage)));
 }
 static unsigned stores(const struct md_view_mount *entries, unsigned size, struct md_inode_lifetime **owners) {
     unsigned count=0;
@@ -109,7 +114,7 @@ static unsigned stores(const struct md_view_mount *entries, unsigned size, struc
 unsigned md_mount_graph_rights(struct md_mount_namespace *view) {
     if (!view || (view->tree && view->tree->count>MD_FS_MOUNTS_MAX)) return 0;
     if (md_mount_graph_sync(view)) return 0;
-    struct md_inode_lifetime *owners[MD_FS_MOUNTS_MAX];
+    struct md_inode_lifetime *owners[(view->tree ? view->tree->count : 0)+1];
     unsigned count=stores(view->tree ? view->tree->mounts : NULL,view->tree ? view->tree->count : 0,owners), rights=4;
     for (unsigned i=0;view->tree && i<view->tree->count;++i)
         if (view->tree->mounts[i].id) rights+=3;
@@ -174,7 +179,8 @@ static int topology(const struct manifest *m) {
     if (m->root ? (!m->base_descriptor || !m->base_parent) : (m->base_parent || (m->base_flags&DETACHED))) return -EPROTO;
     if (m->base_parent && (m->entries[m->base_parent-1].flags&RETIRED)) return -EPROTO;
     if (m->root && (m->entries[m->root-1].parent || (m->entries[m->root-1].flags&(DETACHED|RETIRED)))) return -EPROTO;
-    unsigned parents[MD_FS_MOUNTS_MAX+1]={0}, order[MD_FS_MOUNTS_MAX+1];
+    unsigned parents[m->count+1], order[m->count+1];
+    memset(parents,0,sizeof(parents));
     parents[0]=m->root ? m->base_parent+1 : 0;
     for (unsigned i=0;i<m->count;++i) {
         const struct entry *e=&m->entries[i];
@@ -185,12 +191,9 @@ static int topology(const struct manifest *m) {
     }
     return md_mount_topology_order(m->count+1,parents,order);
 }
-static int read_manifest(int fd, struct manifest *out, struct md_fd_identity *id) {
-    size_t n; unsigned char bytes[sizeof(*out)];
-    int r=md_sealed_manifest_read(fd,bytes,sizeof(bytes),&n,id);
-    if (r) return r;
+static int parse_manifest(unsigned char *bytes,size_t n,struct manifest *out) {
     if (n<HEADER) return -EPROTO;
-    memset(out,0,sizeof(*out)); memcpy(out,bytes,HEADER);
+    memcpy(out,bytes,HEADER);
     if (out->magic!=MAGIC || out->version!=VERSION || out->storages>out->count
             || out->count>MD_FS_MOUNTS_MAX || manifest_size(out)!=n
             || !out->revision) return -EPROTO;
@@ -199,8 +202,8 @@ static int read_manifest(int fd, struct manifest *out, struct md_fd_identity *id
             .stream=out->stream,.revision=out->revision,.unavailable=EOPNOTSUPP};
         return n!=HEADER || memcmp(out,&expected,HEADER) ? -EPROTO : 0;
     }
-    memcpy(out->entries,bytes+HEADER,out->count*sizeof(struct entry));
-    memcpy(out->storage,bytes+HEADER+out->count*sizeof(struct entry),out->storages*sizeof(struct storage));
+    out->entries=(struct entry *)(bytes+HEADER);
+    out->storage=(struct storage *)(bytes+HEADER+out->count*sizeof(struct entry));
     unsigned owners=0, next=3;
     if (out->base_descriptor) {
         if (out->base_descriptor!=next) return -EPROTO;
@@ -238,14 +241,26 @@ static int read_manifest(int fd, struct manifest *out, struct md_fd_identity *id
     }
     return topology(out) ? -EPROTO : 0;
 }
+static int read_manifest(int fd,struct manifest *out,struct md_fd_identity *id) {
+    struct stat st;
+    if (fstat(fd,&st)) return -errno;
+    if (st.st_size<HEADER || (uint64_t)st.st_size>HEADER+(sizeof(struct entry)+sizeof(struct storage))*MD_FS_MOUNTS_MAX)
+        return -EPROTO;
+    unsigned char *bytes=malloc((size_t)st.st_size);
+    if (!bytes) return -ENOMEM;
+    size_t n=0;
+    int r=md_sealed_manifest_read(fd,bytes,(size_t)st.st_size,&n,id);
+    if (!r) r=parse_manifest(bytes,n,out);
+    if (r) { free(bytes); *out=(struct manifest){0}; }
+    else out->allocation=bytes;
+    return r;
+}
 static struct md_mount_layout layout(struct md_mount_namespace *view) {
     return (struct md_mount_layout){.base=&view->base,.root=view->root,
         .entries=view->tree ? view->tree->mounts : NULL,.count=view->tree ? view->tree->count : 0};
 }
 static int mount_slot(const struct md_mount_namespace *view, const struct md_view_mount *m, unsigned count) {
-    if (md_view_base(view,m)) return 0;
-    for (unsigned i=0;i<count;++i) if (view->tree && m==&view->tree->mounts[i]) return (int)i+1;
-    return -ESTALE;
+    return md_view_mount_slot(view,m,count);
 }
 static int mount_portable(const struct md_view_mount *m) {
     if (m->devpts || m->cgroup || m->sysfs || m->ipc_namespace || m->file.ops) return 0;
@@ -283,6 +298,10 @@ static int describe(struct md_mount_namespace *view, const struct md_mount_layou
     unsigned count=l->count;
     *out=(struct manifest){.magic=MAGIC,.version=VERSION,
         .stream=view->graph->identity,.revision=view->graph->revision};
+    out->allocation=calloc(count ? count : 1,sizeof(struct entry)+sizeof(struct storage));
+    if (!out->allocation) return -ENOMEM;
+    out->entries=out->allocation;
+    out->storage=(struct storage *)(out->entries+count);
     int root=md_mount_policy_share(&view->base.policy);
     if (root<0) return root;
     struct stat root_stat;
@@ -401,29 +420,35 @@ static int prepare_update(struct md_mount_namespace *view,const struct md_mount_
     struct md_mount_graph *g=view->graph;
     if (g->writer<0) return -EPERM;
     if (g->revision==UINT64_MAX) return -EOVERFLOW;
-    struct manifest data; int fds[MD_MOUNT_GRAPH_PLACEMENT_FDS];
-    struct md_inode_lifetime *owners[MD_FS_MOUNTS_MAX];
+    if (l->count>MD_FS_MOUNTS_MAX) return -EINVAL;
+    struct manifest data={0}; int fds[6+3*l->count];
+    struct md_inode_lifetime *owners[l->count+1];
     int r=describe(view,l,&data,fds,owners);
     /* Exportability is not mount authority. A local typed provider publishes
      * an unavailable revision so foreign views cannot use stale topology or
      * mistake its Android carrier for the logical provider. */
     if (r==-EOPNOTSUPP) {
+        manifest_release(&data);
         data=(struct manifest){.magic=MAGIC,.version=VERSION,
             .stream=g->identity,.unavailable=EOPNOTSUPP};
         r=0;
     }
-    if (r) return r;
+    if (r) { manifest_release(&data); return r; }
     data.revision=g->revision+1;
-    unsigned char bytes[sizeof(data)]; size_t size=manifest_bytes(&data,bytes);
+    size_t size=manifest_size(&data);
+    unsigned char *bytes=malloc(size);
+    if (!bytes) { manifest_release(&data); return -ENOMEM; }
+    manifest_bytes(&data,bytes);
     struct md_fd_identity id;
     int fd=md_sealed_manifest_create("shroot-mount-graph",bytes,size,&id);
-    if (fd<0) return fd;
+    free(bytes);
+    if (fd<0) { manifest_release(&data); return fd; }
     fds[0]=fd;
     out->manifest=fd;
     if (!data.unavailable) r=parcel(&data,fds,owners,&out->parcel);
     if (!r) out->stream=(struct md_mount_stream_change){g->reader,g->writer,g->revision,
         data.unavailable ? &out->manifest : out->parcel.fd,data.unavailable ? 1 : out->parcel.count};
-    return r;
+    manifest_release(&data); return r;
 }
 int md_mount_graph_update_many(const struct md_mount_graph_change *changes,unsigned count) {
     if (count && !changes) return -EINVAL;
@@ -479,16 +504,17 @@ int md_mount_graph_export(struct md_mount_namespace *view, int root, struct md_m
         }
         if (r) { view->graph=NULL; md_mount_graph_close(g); return r; }
     }
-    struct manifest data, known; int fds[MD_MOUNT_GRAPH_PLACEMENT_FDS];
-    struct md_inode_lifetime *owners[MD_FS_MOUNTS_MAX]; struct md_fd_identity id;
+    struct manifest data={0},known={0};
     struct md_mount_layout l=layout(view);
+    int fds[6+3*l.count]; struct md_inode_lifetime *owners[l.count+1]; struct md_fd_identity id;
     r=describe(view,&l,&data,fds,owners);
     if (!r) r=read_manifest(view->graph->fd,&known,&id);
     if (!r && !manifest_same(&known,&data)) r=-ESTALE;
-    if (r) return r;
+    if (r) { manifest_release(&known); manifest_release(&data); return r; }
     fds[0]=view->graph->fd;
     struct md_mount_graph_parcel p={0};
     r=parcel(&data,fds,owners,&p);
+    manifest_release(&known); manifest_release(&data);
     if (!r) {
         int *grown=realloc(p.fd,(p.count+1)*sizeof(int));
         if (!grown) r=-ENOMEM;
@@ -526,11 +552,9 @@ static int same_objects(const struct manifest *old, const struct manifest *next)
     }
     return 0;
 }
-static int merge(struct md_mount_namespace *view, struct md_mount_namespace *next) {
-    struct manifest before, after; struct md_fd_identity id;
-    int r=read_manifest(view->graph->fd,&before,&id);
-    if (!r) r=read_manifest(next->graph->fd,&after,&id);
-    if (!r) r=same_objects(&before,&after);
+static int merge_known(struct md_mount_namespace *view,struct md_mount_namespace *next,
+        struct manifest before,struct manifest after) {
+    int r=same_objects(&before,&after);
     if (!r && before.count>after.count) r=-ESTALE;
     for (unsigned i=0;!r && i<before.count;++i) {
         const struct entry *a=&before.entries[i], *b=&after.entries[i];
@@ -539,11 +563,12 @@ static int merge(struct md_mount_namespace *view, struct md_mount_namespace *nex
     }
     if (r) return r;
     if (!view->tree && after.count) {
-        view->tree=calloc(1,sizeof(*view->tree));
+        view->tree=md_view_tree_new();
         if (!view->tree) return -ENOMEM;
     }
     /* Existing slots and cached object IDs remain stable. Only prepared
      * placement descriptors change; no fallible operation follows publication. */
+    md_view_mount_lookup_changed(view);
     for (unsigned i=0;i<after.count;++i) {
         struct md_view_mount *a=&view->tree->mounts[i], *b=&next->tree->mounts[i];
         unsigned parent=after.entries[i].parent;
@@ -579,12 +604,15 @@ static int merge(struct md_mount_namespace *view, struct md_mount_namespace *nex
     view->graph->revision=next->graph->revision;
     return 0;
 }
-static int import(struct md_mount_graph_parcel *p, struct md_mount_namespace **out) {
-    if (!out || !p->fd || !p->count || p->count>MD_MOUNT_GRAPH_FDS) return -EINVAL;
-    int r=validate_rights(p); if (r) return r;
-    struct manifest data; struct md_fd_identity id;
-    r=read_manifest(p->fd[0],&data,&id);
-    if (r) return r;
+static int merge(struct md_mount_namespace *view,struct md_mount_namespace *next) {
+    struct manifest before={0},after={0}; struct md_fd_identity id;
+    int r=read_manifest(view->graph->fd,&before,&id);
+    if (!r) r=read_manifest(next->graph->fd,&after,&id);
+    if (!r) r=merge_known(view,next,before,after);
+    manifest_release(&before); manifest_release(&after); return r;
+}
+static int import_known(struct md_mount_graph_parcel *p,struct md_mount_namespace **out,struct manifest data) {
+    int r=0;
     if (data.unavailable) {
         if (p->count!=2) return -EPROTO;
         struct stat stream;
@@ -623,7 +651,8 @@ static int import(struct md_mount_graph_parcel *p, struct md_mount_namespace **o
         if (!r && !md_fd_identity_same(md_fd_identity(&st),e->policy)) r=-EPROTO;
         if (r) return r;
     }
-    struct md_inode_lifetime *owners[MD_FS_MOUNTS_MAX]={0};
+    struct md_inode_lifetime *owners[data.storages+1];
+    memset(owners,0,sizeof(owners));
     for (unsigned i=0;!r && i<data.storages;++i) {
         const struct storage *s=&data.storage[i]; struct stat st;
         if (fstat(p->fd[s->start+1],&st)) { r=-errno; break; }
@@ -633,14 +662,16 @@ static int import(struct md_mount_graph_parcel *p, struct md_mount_namespace **o
         r=md_inode_custody_import(&custody,custody.fd[1],&owners[i]);
     }
     if (!r && *out) {
-        struct manifest known; int borrowed[MD_MOUNT_GRAPH_PLACEMENT_FDS];
-        struct md_inode_lifetime *existing[MD_FS_MOUNTS_MAX];
+        struct manifest known={0};
         struct md_mount_layout l=layout(*out);
+        int borrowed[6+3*l.count]; struct md_inode_lifetime *existing[l.count+1];
         r=describe(*out,&l,&known,borrowed,existing);
         if (!r && known.revision==data.revision && !manifest_same(&known,&data)) r=-ESTALE;
         if (!r) r=same_objects(&known,&data);
         if (!r && known.revision<data.revision && (*out)->graph->writer>=0) r=-ESTALE;
-        if (r || known.revision>=data.revision) goto done;
+        int complete=r || known.revision>=data.revision;
+        manifest_release(&known);
+        if (complete) goto done;
     }
     if (r) goto done;
     struct md_mount_namespace *view=md_mount_namespace_new();
@@ -655,7 +686,7 @@ static int import(struct md_mount_graph_parcel *p, struct md_mount_namespace **o
     if (!r) take(p,1);
     if (!r) r=md_mount_links_observe(data.shared,data.master,data.unbindable,&view->base.links);
     if (data.count) {
-        view->tree=calloc(1,sizeof(*view->tree));
+        view->tree=md_view_tree_new();
         if (!view->tree) r=-ENOMEM;
     }
     for (unsigned i=0;!r && i<data.count;++i) {
@@ -706,6 +737,14 @@ static int import(struct md_mount_graph_parcel *p, struct md_mount_namespace **o
 done:
     for (unsigned i=0;i<data.storages;++i) md_inode_lifetime_release(owners[i]);
     return r;
+}
+static int import(struct md_mount_graph_parcel *p,struct md_mount_namespace **out) {
+    if (!out || !p->fd || !p->count || p->count>MD_MOUNT_GRAPH_FDS) return -EINVAL;
+    int r=validate_rights(p);
+    struct manifest data={0}; struct md_fd_identity id;
+    if (!r) r=read_manifest(p->fd[0],&data,&id);
+    if (!r) r=import_known(p,out,data);
+    manifest_release(&data); return r;
 }
 int md_mount_graph_import(struct md_mount_graph_parcel *p, struct md_mount_namespace **out) {
     if (!p) return -EINVAL;

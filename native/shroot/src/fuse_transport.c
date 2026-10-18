@@ -184,18 +184,26 @@ void md_fuse_request_cancel(struct md_fuse_request *r) {
     pthread_mutex_unlock(&c->lock);
     if (retire) md_fuse_request_release(r);
 }
-void md_fuse_request_abandon(struct md_fuse_request *r,
-        void (*callback)(void *,int,const void *,size_t),void *context) {
+static void observe_completion(struct md_fuse_request *r,
+        void (*callback)(void *,int,const void *,size_t),void *context,int cancel_queued) {
     struct md_fuse_connection *c=r->connection;
     atomic_fetch_add_explicit(&r->references,1,memory_order_relaxed);
     pthread_mutex_lock(&c->lock);
     r->abandoned=callback; r->abandoned_context=context;
-    int retire=!r->done && r->queued && c->offered!=r;
+    int retire=cancel_queued && !r->done && r->queued && c->offered!=r;
     if (retire) { finish(r,-ECANCELED); dequeue(c,r); detach(c,r); }
     pthread_mutex_unlock(&c->lock);
     complete_abandoned(r);
     if (retire) md_fuse_request_release(r);
     md_fuse_request_release(r);
+}
+void md_fuse_request_abandon(struct md_fuse_request *r,
+        void (*callback)(void *,int,const void *,size_t),void *context) {
+    observe_completion(r,callback,context,1);
+}
+void md_fuse_request_retire(struct md_fuse_request *r,
+        void (*callback)(void *,int,const void *,size_t),void *context) {
+    observe_completion(r,callback,context,0);
 }
 long md_fuse_connection_read(struct md_fuse_connection *c,void *data,size_t size) {
     pthread_mutex_lock(&c->lock);

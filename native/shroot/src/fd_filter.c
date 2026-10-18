@@ -40,8 +40,14 @@ long md_fd_filter_arm(enum md_fd_selector_kind kind, int fd) {
     return fd<0 ? -EINVAL : arm(kind,fd);
 }
 long md_fd_filter_prepare_sandbox(void) {
-    /* One filter admits future received/duplicated typed FDs before an
+    /* Prepare descriptor and readiness selectors for future typed FDs before an
      * application can deny seccomp. Its ERRNO/TRAP/KILL decisions still win.
      * Unsandboxed workloads keep the selective per-number path. */
-    return arm(MD_FD_SELECTOR_PROC,-1);
+    const enum md_fd_selector_kind kinds[]={MD_FD_SELECTOR_PROC,MD_FD_SELECTOR_EPOLL_TARGET,
+        MD_FD_SELECTOR_EPOLL,MD_FD_SELECTOR_POLL};
+    for (unsigned i=0;i<sizeof(kinds)/sizeof(*kinds);++i) {
+        long result=arm(kinds[i],-1);
+        if (result) return result;
+    }
+    return 0;
 }

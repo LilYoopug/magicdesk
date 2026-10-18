@@ -38,6 +38,10 @@ void md_fuse_request_cancel(struct md_fuse_request *);
  * state outside the connection lock. The callback owns its context. */
 void md_fuse_request_abandon(struct md_fuse_request *,
     void (*complete)(void *,int,const void *,size_t),void *);
+/* Terminal descriptor work must reach the daemon even after the task exits.
+ * Unlike abandon, this retains queued work as well as delivered work. */
+void md_fuse_request_retire(struct md_fuse_request *,
+    void (*complete)(void *,int,const void *,size_t),void *);
 void md_fuse_request_release(struct md_fuse_request *);
 /* Reads offer one indivisible packet. Commit follows successful guest copy;
  * failed copies leave the packet available. Descriptor ownership serializes

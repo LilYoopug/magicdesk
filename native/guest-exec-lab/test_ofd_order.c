@@ -25,9 +25,13 @@ static void queue_signals(void) {
     struct md_resource_wakeup *wake=NULL;
     assert(!md_resource_wakeup_create_pipe(signal.reader,signal.writer,&wake));
     struct md_resource_queue queue; assert(!md_resource_queue_init(&queue));
-    struct md_resource_order first={0}, second={0};
+    struct md_resource_order first={0}, second={0},retained={0};
     assert(md_resource_order_begin(&queue,&first,wake)==1 && !md_resource_order_start(&first));
     assert(!md_resource_order_begin(&queue,&second,wake));
+    assert(!md_resource_order_move(&first,&retained));
+    assert(!first.queue && md_resource_order_state(&retained)==MD_RESOURCE_ORDER_RUNNING);
+    assert(md_resource_order_move(&second,&retained)==-EBUSY);
+    assert(md_resource_order_state(&second)==MD_RESOURCE_ORDER_QUEUED);
     md_resource_wakeup_release(wake);
     int reader=signal.reader, writer=signal.writer;
     md_queue_signal_close(&signal);
@@ -35,7 +39,7 @@ static void queue_signals(void) {
     assert(dup2(unrelated,reader)==reader && dup2(unrelated,writer)==writer);
     /* Retained readiness neither reaches a reused number nor loses its reader
      * after the loop exits. In particular, no SIGPIPE can be generated. */
-    assert(!md_resource_order_complete(&first));
+    assert(!md_resource_order_complete(&retained));
     assert(md_resource_order_state(&second)==MD_RESOURCE_ORDER_READY);
     uint64_t value; assert(read(unrelated,&value,sizeof(value))<0 && errno==EAGAIN);
     assert(!md_resource_order_cancel(&second));

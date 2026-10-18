@@ -67,6 +67,13 @@ uses stable slots and a validated acyclic parent graph, independently of slot
 allocation order. Recursive preparation acquires the complete subtree before
 publication. Move preserves mount IDs and open anchors. Lazy detach removes
 lookup visibility while retained descriptors still address the old objects.
+Path crossings use a worker-owned index keyed by parent mount and covered
+device/inode once a tree exceeds eight attachments. Tiny trees retain the short
+scan. Index construction preserves slot precedence, allocates no descriptors,
+and is invalidated by placement, detachment, retirement and foreign graph merge.
+Copies/imports rebuild it from their own rebased pointers; failed topology
+publication leaves the old lookup authoritative. Mounted-root stacks are walked
+iteratively with the graph's node bound, not recursively on the C stack.
 Normal unmount rejects retained anchors, child mounts or roots belonging to
 any FS context in the namespace, including prepared fork/unshare candidates.
 Exported origins hold shared OFD range locks through queued rights, import and
@@ -77,15 +84,31 @@ existing references. Detached entries are collected during later mount admission
 when no origin, selected root or child placement retains them. Collection drops
 their object-cache records, policies and backing custody before slot reuse.
 A slot generation prevents stale snapshots from referring to its replacement.
-Before topology changes, copying or table construction, covered objects are
-checked for removal through other namespaces. Logical link membership, or native
+Nonrecursive topology changes check the selected operands' ancestry, not every
+unrelated attachment. Recursive operations, copying and table construction
+reconcile the complete graph. Logical link membership, or native
 link count for native targets, determines disconnection; rename retains the
 same target identity. A disconnected placement and its descendants use the
 common detach transaction without releasing live origins. Graph readers may
 derive that disconnection from retained backing custody but cannot publish an
 owner's graph or request an unmount. Ordinary file IO has no whole-tree scan.
+Consecutive targets in one inode store share a fresh read snapshot; its gate is
+released before entering another provider or publishing a topology change.
+Known-detached collection is independent of removal discovery and returns
+immediately when no detached objects exist. Admission at capacity performs a
+full reconciliation before reporting ENOSPC; overlay admission also discovers
+deleted placements before reserving shared upper/work storage. Detached
+construction roots participate in the same retirement scheduling. Collection
+with no retired slots does not allocate a candidate mount array.
 Cross-namespace deletion does not yet push notifications to already-open mount
 tables; reconciliation occurs at these topology observation boundaries.
+
+Recursive bind and shared propagation use one backing-containment operation.
+Inode-backed directories compare object ancestry in one read snapshot rather
+than reconstructing names. A live bind of a removed source directory therefore
+does not make an unrelated mount fail with ENOENT. Selected file identity and
+ambiguous hardlink ancestry remain distinct; ordinary file IO does not perform
+these topology checks.
 
 `pivot_root` accepts the initial base root or an attached selected root and an
 attached new root below it. The base is a stable mount instance, not a missing
@@ -99,8 +122,10 @@ root relocation without holding a lock across guest execution. Root placement
 is part of the same validated revision as attachment placement; prepared roots
 and covered dentries are released on failed publication. Namespace copies retain
 the relocated base and remap its parents. Recursive bind, child-busy checks and
-retirement traverse the base and attachments in one topological order. Returning
-to the base preserves its explicit root identity for subsequent pivots; mountinfo
+retirement traverse the base and attachments in one topological order. Computing
+that order takes linear time, including child-before-parent slot layouts: a
+stable pass-number sort preserves the former scan order and rejects cycles.
+Returning to the base preserves its explicit root identity for subsequent pivots; mountinfo
 publishes the selected root once and the relocated base at its covered path.
 Ephemeral and layered mounts use the filesystem backends described below.
 

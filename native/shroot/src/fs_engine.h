@@ -8,7 +8,10 @@ struct md_image_catalogue;
 struct md_fd_exchanges;
 struct md_ofd_orders;
 struct md_fs_storage_cache;
-struct md_fs_statistics { struct md_cost operation[MD_FS_LAST + 1]; };
+struct md_fs_statistics {
+    struct md_cost operation[MD_FS_LAST + 1];
+    struct md_cost mount_reconcile, mount_attach;
+};
 void md_fs_statistics_report(int fd, const struct md_fs_statistics *);
 /* The worker borrows its store/images and retains an initial mount view.
  * Authenticated task requests borrow their own retained view for dispatch. */
@@ -64,6 +67,7 @@ void md_fs_execute(struct md_filesystem *,
         const struct md_fs_request *, struct md_fs_result *, const struct md_fs_output *);
 void md_fs_statfs_result(int fd, unsigned policy, const struct md_inode_lifetime *,
         struct md_fs_result *, const struct md_fs_output *);
+uint64_t md_fs_statfs_policy(unsigned policy);
 /* Compound operations reuse the already selected worker identity and mount view. */
 void md_fs_view_execute(struct md_filesystem *, const struct md_fs_request *,
         struct md_fs_result *, const struct md_fs_output *);

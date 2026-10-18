@@ -42,6 +42,8 @@ static inline int md_proc_io_decode(long nr, const unsigned long *a, struct md_p
     return out->positional && out->offset<0 ? -EINVAL : 0;
 }
 enum { MD_PROC_FILE_OPEN=1, MD_PROC_FILE_REOPEN, MD_PROC_FILE_NAMESPACE_QUERY, MD_PROC_FILE_PIDFD_NAMESPACE };
+/* A prepared carrier needs SCM_RIGHTS instead of SECCOMP_ADDFD. Not an FD. */
+#define MD_PROC_OPEN_RIGHTS (INT64_C(1)<<32)
 struct md_proc_metadata_request { int32_t process, descriptor; uint32_t kind, access, effective, nofollow; char interface[16]; };
 struct md_proc_metadata_result { struct md_fs_info value; uint32_t kind; unsigned long filesystem; };
 static inline int md_proc_control_kind(enum md_proc_kind kind) {

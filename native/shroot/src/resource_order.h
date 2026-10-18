@@ -38,6 +38,9 @@ int md_resource_wakeup_signal(struct md_resource_wakeup *);
 int md_resource_order_begin(struct md_resource_queue *, struct md_resource_order *, struct md_resource_wakeup *);
 enum md_resource_order_state md_resource_order_state(const struct md_resource_order *);
 int md_resource_order_start(struct md_resource_order *);
+/* Transfer a live turn into zero-initialized storage without waking its next
+ * owner. The caller serializes both records; the queue retains their order. */
+int md_resource_order_move(struct md_resource_order *from,struct md_resource_order *to);
 /* Running cancellation returns 1 and retains the turn until the exact kernel
  * completion/terminal event. Retirement signals the next owner without exposing
  * its record pointer. Publication precedes completion. */

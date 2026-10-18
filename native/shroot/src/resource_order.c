@@ -91,6 +91,17 @@ static int retire(struct md_resource_order *op) {
     md_resource_wakeup_release(next); md_resource_wakeup_release(owner);
     return error;
 }
+int md_resource_order_move(struct md_resource_order *from,struct md_resource_order *to) {
+    if (!from || !from->queue || !to || from==to) return -EINVAL;
+    if (to->queue || to->state!=MD_RESOURCE_ORDER_IDLE || to->wakeup || to->previous || to->next) return -EBUSY;
+    struct md_resource_queue *q=from->queue;
+    pthread_mutex_lock(&q->lock);
+    *to=*from;
+    if (to->previous) to->previous->next=to; else q->first=to;
+    if (to->next) to->next->previous=to; else q->last=to;
+    *from=(struct md_resource_order){0};
+    pthread_mutex_unlock(&q->lock); return 0;
+}
 int md_resource_order_cancel(struct md_resource_order *op) {
     if (!op || !op->queue) return -EINVAL;
     struct md_resource_queue *q=op->queue;

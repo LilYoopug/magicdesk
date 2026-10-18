@@ -40,19 +40,23 @@ int md_fd_mutation_prepare(struct md_fd_origins *files, long nr,
         || (nr==SYS_fcntl && command==F_DUPFD_CLOEXEC) ? FD_CLOEXEC : 0;
     return md_fd_origins_prepare_copy(files,(int)a[0],flags,&out->update);
 }
-int md_fd_mutation_finish(struct md_fd_mutation *op, struct md_fd_origins *files, long result) {
+int md_fd_mutation_finish_closed(struct md_fd_mutation *op,struct md_fd_origins *files,long result,struct md_fd_closed *closed) {
     int error=0;
-    if (op->update.table) md_fd_origins_finish(&op->update,result<0 ? -1 : (int)result);
+    if (op->update.table) md_fd_origins_finish_closed(&op->update,result<0 ? -1 : (int)result,
+        op->nr==SYS_dup3 ? closed : NULL);
     else if (op->nr==SYS_close && (!result || result==-EINTR || result==-EIO || result==-ENOSPC || result==-EDQUOT)) {
         /* Linux releases a valid slot before reporting close's late IO errors. */
         if ((int)op->args[0]>=0)
-            error=md_fd_origins_close_range(files,(unsigned)op->args[0],(unsigned)op->args[0],0);
+            error=md_fd_origins_close_collect(files,(unsigned)op->args[0],(unsigned)op->args[0],0,closed);
     } else if (!result && op->nr==SYS_close_range)
-        error=md_fd_origins_close_range(files,(unsigned)op->args[0],(unsigned)op->args[1],
-            !!(op->args[2]&CLOSE_RANGE_CLOEXEC));
+        error=md_fd_origins_close_collect(files,(unsigned)op->args[0],(unsigned)op->args[1],
+            !!(op->args[2]&CLOSE_RANGE_CLOEXEC),closed);
     else if (!result && op->nr==SYS_fcntl && op->args[1]==F_SETFD)
         error=md_fd_origins_set_flags(files,(int)op->args[0],(unsigned)op->args[2]&FD_CLOEXEC);
     *op=(struct md_fd_mutation){0}; return error;
+}
+int md_fd_mutation_finish(struct md_fd_mutation *op,struct md_fd_origins *files,long result) {
+    return md_fd_mutation_finish_closed(op,files,result,NULL);
 }
 void md_fd_mutation_discard(struct md_fd_mutation *op) {
     md_fd_origins_finish(&op->update,-1);

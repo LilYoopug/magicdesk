@@ -1,8 +1,10 @@
 #ifndef MD_INODE_WATCH_H
 #define MD_INODE_WATCH_H
 #include <stddef.h>
+#include <stdint.h>
 #include <sys/types.h>
 struct md_inode_store;
+struct md_watch_source;
 enum { MD_INOTIFY_MAX_INSTANCES=128, MD_INOTIFY_MAX_WATCHES=8192, MD_INOTIFY_QUEUE_LIMIT=16384 };
 /* Namespace-worker owned. Descriptors are borrowed; identity is verified from
  * the retained kernel object, never a guest descriptor number. */
@@ -10,6 +12,8 @@ int md_inode_watch_create(struct md_inode_store *, int flags);
 int md_inode_watch_add(struct md_inode_store *, int instance, int object, unsigned mask);
 int md_inode_watch_add_from(struct md_inode_store *owner, struct md_inode_store *source,
         int instance, int object, unsigned mask);
+int md_inode_watch_add_provider(struct md_inode_store *,int instance,struct md_watch_source *,
+        uint64_t object,unsigned mode,unsigned mask);
 int md_inode_watch_remove(struct md_inode_store *, int instance, int wd);
 int md_inode_watch_contains(struct md_inode_store *, int instance);
 ssize_t md_inode_watch_bytes(struct md_inode_store *, int instance);

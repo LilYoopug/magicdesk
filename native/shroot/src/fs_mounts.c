@@ -14,9 +14,6 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
-int md_view_same(const struct stat *a, const struct stat *b) {
-    return a->st_dev == b->st_dev && a->st_ino == b->st_ino;
-}
 struct md_view_mount *md_view_root_mount(struct md_filesystem *fs) {
     return fs->native_root ? fs->native_root->mount : !fs->mounts ? NULL
         : fs->store->root_id ? &fs->mounts->base : fs->mounts->root;
@@ -137,6 +134,23 @@ int md_view_backing_path(struct md_filesystem *fs, int fd, const struct md_view_
     scope.store->root_id=NULL;
     r=md_inode_path(scope.store,fd,out,size);
     md_fs_storage_leave(&scope); return r;
+}
+int md_view_backing_contains(struct md_filesystem *fs,const struct md_view_mount *mount,int root,int object) {
+    if (md_view_inode(mount)) {
+        struct md_fs_storage_scope scope;
+        int r=md_fs_storage_enter(fs,mount,&scope);
+        if (r) return r;
+        r=md_inode_contains(scope.store,root,object);
+        md_fs_storage_leave(&scope); return r;
+    }
+    struct stat a,b;
+    if (fstat(root,&a) || fstat(object,&b)) return -errno;
+    if (md_view_same(&a,&b)) return 1;
+    if (!S_ISDIR(a.st_mode)) return 0;
+    char parent[PATH_MAX],child[PATH_MAX];
+    int r=md_view_backing_path(fs,root,mount,parent,sizeof(parent));
+    if (!r) r=md_view_backing_path(fs,object,mount,child,sizeof(child));
+    return r ? r : beneath(child,parent);
 }
 static int location_path(struct md_filesystem *fs, int fd, struct md_view_mount *m, char *out, size_t size) {
     if (!m) m=&fs->mounts->base;
@@ -317,9 +331,14 @@ int md_fs_mounts_open(struct md_filesystem *fs, const struct md_fs_attachment *e
     fs->mounts = md_mount_namespace_new();
     if (!fs->mounts) return -errno;
     if (!count) return 0;
-    struct md_fs_mounts *tree = calloc(1,sizeof(*tree));
+    struct md_fs_mounts *tree = md_view_tree_new();
     if (!tree) { md_fs_mounts_close(fs); return -ENOMEM; }
     fs->mounts->tree = tree;
+    /* A startup layout is built by one owner. Resolve each retained path once
+     * for overlap checks, rather than rewalking all previous entries per bind. */
+    struct attachment_path { char *source, *target; };
+    struct attachment_path *paths=calloc(count,sizeof(*paths));
+    if (!paths) { md_fs_mounts_close(fs); return -ENOMEM; }
     int r = 0;
     for (unsigned i = 0; i < count && !r; ++i) {
         const struct md_fs_attachment *entry = &entries[i];
@@ -345,14 +364,14 @@ int md_fs_mounts_open(struct md_filesystem *fs, const struct md_fs_attachment *e
         if (!r) r = md_view_path(fs, m->target, m->parent, target, sizeof(target));
         if (!r && (!strcmp(target, "/") || beneath(target, "/dev") || beneath(target, "/proc") || beneath(target, "/sys"))) r = -EINVAL;
         for (unsigned j = 0; j < i && !r; ++j) {
-            char other[PATH_MAX];
-            r = md_view_fdpath(tree->mounts[j].source, other, sizeof(other));
-            if (!r && (beneath(source, other) || beneath(other, source))) r = -EXDEV;
-            struct md_view_mount *prior = &tree->mounts[j];
-            if (!r) r = md_view_path(fs, prior->target, prior->parent, other, sizeof(other));
+            if (beneath(source,paths[j].source) || beneath(paths[j].source,source)) r=-EXDEV;
             /* Covering an existing subtree requires explicit mount-stack and
              * open-description ownership; never silently hide earlier entries. */
-            if (!r && beneath(other, target)) r = -EBUSY;
+            if (!r && beneath(paths[j].target,target)) r=-EBUSY;
+        }
+        if (!r) {
+            paths[i].source=strdup(source); paths[i].target=strdup(target);
+            if (!paths[i].source || !paths[i].target) r=-ENOMEM;
         }
         if (!r) ++tree->count;
     }
@@ -361,6 +380,8 @@ int md_fs_mounts_open(struct md_filesystem *fs, const struct md_fs_attachment *e
         if (pending->source >= 0) close(pending->source);
         if (pending->target >= 0) close(pending->target);
     }
+    for (unsigned i=0;i<count;++i) { free(paths[i].source); free(paths[i].target); }
+    free(paths);
     if (r) md_fs_mounts_close(fs);
     return r;
 }
@@ -387,7 +408,7 @@ int md_fs_mounts_copy_cwd(struct md_mount_namespace *source, struct md_mount_nam
 int md_fs_mounts_copy(struct md_filesystem *fs, const struct md_fs_location *root,
         struct md_mount_namespace **out, struct md_fs_location *copied_root) {
     if (!fs->mounts || !root || !out || !copied_root) return -EINVAL;
-    unsigned order[MD_FS_MOUNTS_MAX+1];
+    unsigned order[(fs->mounts->tree ? fs->mounts->tree->count : 0)+1];
     int valid=md_view_mount_reconcile(fs);
     if (!valid) valid=md_view_topology_order(fs->mounts,order);
     if (valid) return valid;
@@ -409,7 +430,7 @@ int md_fs_mounts_copy(struct md_filesystem *fs, const struct md_fs_location *roo
     struct md_fs_mounts *source=fs->mounts->tree;
     int r=0;
     if (source && source->count) {
-        copy->tree=calloc(1,sizeof(*copy->tree));
+        copy->tree=md_view_tree_new();
         if (!copy->tree) r=-ENOMEM;
     }
     for (unsigned i=0; !r && source && i<source->count; ++i) {

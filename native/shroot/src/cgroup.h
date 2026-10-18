@@ -8,6 +8,9 @@ struct md_cgroup_view;
 struct md_cgroup_namespace;
 struct md_cgroup_programs;
 struct md_cgroup_program;
+struct md_inode_store;
+/* EOPNOTSUPP selects native watches for controls without typed events. */
+int md_cgroup_watch(struct md_cgroup_view *,struct md_inode_store *,int,int,unsigned);
 struct md_cgroup_programs *md_cgroup_program_registry(struct md_cgroup_member *,int create);
 int md_cgroup_program_query(struct md_cgroup_view *,int,struct md_cgroup_member *,
     const struct md_identity *,unsigned,uint32_t *,unsigned,unsigned *,unsigned *);

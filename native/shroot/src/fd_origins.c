@@ -86,6 +86,24 @@ static void dispose(struct md_fd_origin_entry *entry) {
         free(entry); entry=next;
     }
 }
+static void collect_closed(struct md_fd_origin_entry *entry,struct md_fd_closed *closed) {
+    while (entry) {
+        struct md_fd_origin_entry *next=entry->next;
+        if (closed && entry->object && entry->object->type->close) {
+            entry->next=closed->first; closed->first=entry;
+        } else { entry->next=NULL; dispose(entry); }
+        entry=next;
+    }
+}
+long md_fd_closed_next(struct md_fd_closed *closed,const struct md_control_actor *actor,
+        struct md_control_pending **pending) {
+    if (!closed || !actor || !pending || *pending) return -EINVAL;
+    struct md_fd_origin_entry *entry=closed->first;
+    if (!entry) return 0;
+    closed->first=entry->next; entry->next=NULL;
+    long result=entry->object->type->close(entry->object,actor,pending);
+    dispose(entry); return result;
+}
 struct md_fd_origins *md_fd_origins_new(void) {
     struct md_fd_origins *t=calloc(1,sizeof(*t));
     if (!t) return NULL;
@@ -266,9 +284,21 @@ int md_fd_origins_prepare_channel(struct md_fd_origins *t, struct md_fd_channel 
     return prepare(t,NULL,channel,flags,out);
 }
 static int prepare_loan(struct md_fd_origin_update *update,struct md_fd_loan *loan,int temporary) {
-    if (!update || !loan || update->table!=loan->home || !update->entry
-            || update->entry->loan || (temporary && !(update->entry->flags&FD_CLOEXEC))
+    if (!update || !loan || update->table!=loan->home
             || !atomic_load_explicit(&loan->active,memory_order_acquire)) return -EINVAL;
+    if (temporary && !update->entry) {
+        struct md_fd_origin_entry *entry=calloc(1,sizeof(*entry));
+        if (!entry) return -ENOMEM;
+        struct md_fd_origins *table=update->table;
+        pthread_mutex_lock(&table->lock);
+        if (!table->buckets) table->buckets=calloc(BUCKETS,sizeof(*table->buckets));
+        int ready=!!table->buckets;
+        pthread_mutex_unlock(&table->lock);
+        if (!ready) { free(entry); return -ENOMEM; }
+        entry->flags=FD_CLOEXEC; update->entry=entry;
+    }
+    if (!update->entry || update->entry->loan
+            || (temporary && !(update->entry->flags&FD_CLOEXEC))) return -EINVAL;
     update->entry->loan=loan_slot_new(loan);
     return update->entry->loan ? 0 : -ENOMEM;
 }
@@ -394,7 +424,7 @@ int md_fd_origins_channel_resolve(struct md_fd_origins *t, int number, struct md
     }
     pthread_mutex_unlock(&t->lock); dispose(retired); return error;
 }
-void md_fd_origins_finish(struct md_fd_origin_update *update, int result_fd) {
+void md_fd_origins_finish_closed(struct md_fd_origin_update *update,int result_fd,struct md_fd_closed *closed) {
     struct md_fd_origins *t=update->table;
     struct md_fd_origin_entry *retired=update->entry;
     if (t && result_fd>=0) {
@@ -403,7 +433,10 @@ void md_fd_origins_finish(struct md_fd_origin_update *update, int result_fd) {
         pthread_mutex_unlock(&t->lock);
     }
     *update=(struct md_fd_origin_update){0};
-    dispose(retired); md_fd_origins_unpin(t);
+    collect_closed(retired,result_fd>=0 ? closed : NULL); md_fd_origins_unpin(t);
+}
+void md_fd_origins_finish(struct md_fd_origin_update *update,int result_fd) {
+    md_fd_origins_finish_closed(update,result_fd,NULL);
 }
 void md_fd_origins_abandon(struct md_fd_origin_update *update) {
     if (update->table) {
@@ -460,7 +493,8 @@ int md_fd_origins_set_flags(struct md_fd_origins *t, int fd, unsigned flags) {
     pthread_mutex_unlock(&t->lock); return 0;
 }
 enum retirement { RETIRE_CLOSE, RETIRE_CLOEXEC, RETIRE_UNCERTAIN };
-static void remove_entries(struct md_fd_origins *t, unsigned first, unsigned last, enum retirement action, int exec) {
+static void remove_entries(struct md_fd_origins *t,unsigned first,unsigned last,enum retirement action,int exec,
+        struct md_fd_closed *closed) {
     if (!t) return;
     struct md_fd_origin_entry *retired=NULL;
     pthread_mutex_lock(&t->lock);
@@ -485,17 +519,26 @@ static void remove_entries(struct md_fd_origins *t, unsigned first, unsigned las
     pthread_mutex_unlock(&t->lock);
     if (action==RETIRE_UNCERTAIN) for (struct md_fd_origin_entry *e=retired;e;e=e->next)
         if (e->object && e->object->type->alias_lost) e->object->type->alias_lost(e->object);
-    dispose(retired);
+    collect_closed(retired,action==RETIRE_CLOSE ? closed : NULL);
 }
-int md_fd_origins_close_range(struct md_fd_origins *t, unsigned first, unsigned last, int cloexec) {
+int md_fd_origins_close_collect(struct md_fd_origins *t,unsigned first,unsigned last,int cloexec,struct md_fd_closed *closed) {
     if (!t || first>last) return -EINVAL;
-    remove_entries(t,first,last,cloexec ? RETIRE_CLOEXEC : RETIRE_CLOSE,0); return 0;
+    remove_entries(t,first,last,cloexec ? RETIRE_CLOEXEC : RETIRE_CLOSE,0,closed); return 0;
+}
+int md_fd_origins_close_range(struct md_fd_origins *t,unsigned first,unsigned last,int cloexec) {
+    return md_fd_origins_close_collect(t,first,last,cloexec,NULL);
 }
 int md_fd_origins_abandon_range(struct md_fd_origins *t, unsigned first, unsigned last) {
     if (!t || first>last) return -EINVAL;
-    remove_entries(t,first,last,RETIRE_UNCERTAIN,0); return 0;
+    remove_entries(t,first,last,RETIRE_UNCERTAIN,0,NULL); return 0;
 }
-void md_fd_origins_exec(struct md_fd_origins *t) { remove_entries(t,0,0,RETIRE_CLOSE,1); }
+void md_fd_origins_exec_collect(struct md_fd_origins *t,struct md_fd_closed *closed) {
+    remove_entries(t,0,0,RETIRE_CLOSE,1,closed);
+}
+void md_fd_origins_exec(struct md_fd_origins *t) { md_fd_origins_exec_collect(t,NULL); }
+void md_fd_origins_exit_collect(struct md_fd_origins *t,struct md_fd_closed *closed) {
+    if (t && t->owners==1) remove_entries(t,0,UINT_MAX,RETIRE_CLOSE,0,closed);
+}
 
 int md_fd_order_begin(struct md_fd_origins *t, struct md_fd_order *op, struct md_resource_wakeup *wake) {
     if (!t || !op) return -EINVAL;

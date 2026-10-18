@@ -56,7 +56,7 @@ static void destroy(struct md_fd_object *object) {
 static unsigned selectors(const struct md_fd_object *object) {
     const struct md_proc_file *f=(const void *)object;
     return f->control && f->control->poll && !(atomic_load_explicit(&f->flags,memory_order_relaxed)&O_PATH)
-        ? 1U<<MD_FD_SELECTOR_EPOLL_TARGET : 0;
+        ? (1U<<MD_FD_SELECTOR_EPOLL_TARGET)|(1U<<MD_FD_SELECTOR_POLL) : 0;
 }
 static struct md_control_file readiness(struct md_fd_object *object) {
     return md_proc_file_control((void *)object);
@@ -65,8 +65,13 @@ static struct md_fs_anchor *origin(struct md_fd_object *object) {
     struct md_proc_file *f=(void *)object;
     return f->control && f->control->origin ? f->control->origin(f->control_context) : NULL;
 }
+static long closed(struct md_fd_object *object,const struct md_control_actor *actor,struct md_control_pending **pending) {
+    struct md_proc_file *f=(void *)object;
+    return f->control && f->control->flush && !(md_proc_file_flags(f)&O_PATH)
+        ? f->control->flush(f->control_context,actor,pending) : 0;
+}
 static const struct md_fd_object_type type={.destroy=destroy,.selectors=1U<<MD_FD_SELECTOR_PROC,
-    .selector_mask=selectors,.readiness=readiness,.origin=origin};
+    .selector_mask=selectors,.readiness=readiness,.origin=origin,.close=closed};
 struct md_fd_object *md_proc_file_control_object(const struct md_control_file_ops *ops,void *context,
         const struct md_identity *id,int flags,int *descriptor) {
     struct md_proc_file *file=md_proc_file_open_control(ops,context,id,flags);
@@ -166,6 +171,7 @@ int md_proc_file_fcntl(struct md_proc_file *f,int command,unsigned long argument
     if (command==F_GETFL) *out=flags&~(O_CLOEXEC|O_CREAT|O_EXCL|O_TRUNC);
     else if (flags&O_PATH) *out=-EBADF;
     else if (command==F_GET_SEALS) *out=f->control && f->control->seals ? f->control->seals(f->control_context) : -EINVAL;
+    else if (command==F_ADD_SEALS && (flags&O_ACCMODE)==O_RDONLY) *out=-EPERM;
     else if (command==F_SETFL) {
         unsigned mutable=O_APPEND|O_NONBLOCK|O_NOATIME;
         if (argument&(O_DIRECT|O_ASYNC)) *out=-EOPNOTSUPP;
@@ -607,20 +613,29 @@ static long directory_entries(struct md_proc_file_io *io, void *bytes, size_t ca
 long md_proc_file_io_execute(struct md_proc_file_io *io, const struct md_identity *writer, struct md_uts_namespace *uts,
         void *bytes, size_t capacity, size_t page_size) {
     if (!io || !io->file || (io->executed && !io->pending)) return -EINVAL;
+    /* A reusable transport buffer is not the application's requested count.
+     * Preserve that bound on every continuation, including directory pages. */
+    if ((io->operation==MD_PROC_FILE_READ || io->operation==MD_PROC_FILE_WRITE
+            || io->operation==MD_PROC_FILE_GETDENTS) && capacity>io->length)
+        capacity=io->length;
     if (io->pending) {
+        if (capacity>MD_CONTROL_IO_MAX) capacity=MD_CONTROL_IO_MAX;
         io->result=io->pending->resume(io->pending,bytes,capacity);
         if (io->result==-EINPROGRESS) return io->result;
         io->next_position=io->pending->position;
+        int position_valid=io->pending->position_valid;
         io->pending->dispose(io->pending); io->pending=NULL;
         if (io->operation==MD_PROC_FILE_WRITE && io->result>0 && !io->positional)
-            io->file->position=io->offset+io->result;
+            io->file->position=position_valid ? io->next_position : io->offset+io->result;
         if (io->operation==MD_PROC_FILE_SEEK && io->result>=0) io->file->position=io->result;
         return io->result;
     }
-    int error=md_resource_order_start(&io->turn);
+    int error=md_resource_order_state(&io->turn)==MD_RESOURCE_ORDER_RUNNING
+        ? 0 : md_resource_order_start(&io->turn);
     if (error) return error;
     io->executed=1;
     struct md_proc_file *f=io->file;
+    io->actor.status_flags=atomic_load_explicit(&f->flags,memory_order_relaxed);
     error=md_proc_file_access(f,io->operation);
     if (error) return io->result=error;
     if (io->positional && f->control && f->control->nonseekable) return io->result=-ESPIPE;
@@ -664,6 +679,13 @@ long md_proc_file_io_execute(struct md_proc_file_io *io, const struct md_identit
     if (f->control && f->control->io) {
         size_t length=io->length<capacity ? io->length : capacity;
         if (length>MD_CONTROL_IO_MAX) length=MD_CONTROL_IO_MAX;
+        if (io->operation==MD_PROC_FILE_READ && f->control->read_size) {
+            size_t page=f->control->read_size(f->control_context);
+            if (page) {
+                if (length>page) length=page;
+                io->read_page=length;
+            }
+        }
         if (length && !bytes) return io->result=-EFAULT;
         io->actor.wakeup=io->turn.wakeup;
         io->result=f->control->io(f->control_context,&io->actor,
@@ -673,6 +695,8 @@ long md_proc_file_io_execute(struct md_proc_file_io *io, const struct md_identit
         if (io->pending) {
             if (io->result==-EINPROGRESS) return io->result;
             io->next_position=io->pending->position;
+            if (io->operation==MD_PROC_FILE_WRITE && io->result>0 && !io->positional
+                    && io->pending->position_valid) io->offset=io->next_position-io->result;
             io->pending->dispose(io->pending); io->pending=NULL;
         } else if (io->result==-EINPROGRESS) io->result=-EPROTO;
         if (io->operation==MD_PROC_FILE_WRITE && io->result>0 && !io->positional)
@@ -718,18 +742,58 @@ int md_proc_file_io_offer(struct md_proc_file_io *io) {
             || md_resource_order_state(&io->turn)!=MD_RESOURCE_ORDER_RUNNING) return -EINVAL;
     io->offered=1; return 0;
 }
+int md_proc_file_io_more(const struct md_proc_file_io *io) {
+    return io && io->file && io->operation==MD_PROC_FILE_READ && io->executed && !io->pending
+        && io->read_page && io->result==(long)io->read_page && io->read_page<io->length;
+}
+static int read_acknowledge(struct md_proc_file_io *io,long copied) {
+    if (copied>io->result || (copied>0 && !io->offered)) return -EINVAL;
+    if (copied>0) {
+        if (io->offset>INT64_MAX-copied) return -EOVERFLOW;
+        if (!io->positional) io->file->position=io->offset+copied;
+    }
+    return 0;
+}
+int md_proc_file_io_advance(struct md_proc_file_io *io,long copied) {
+    if (!md_proc_file_io_more(io) || copied!=io->result || !io->offered) return -EINVAL;
+    int error=read_acknowledge(io,copied);
+    if (error) return error;
+    io->offset+=copied; io->length-=(size_t)copied; io->transferred+=(size_t)copied;
+    io->result=0; io->executed=io->offered=0; io->read_page=0;
+    return 0;
+}
+static void retired_io(struct md_control_pending *pending,long result) {
+    struct md_proc_file *file=pending->retirement_context;
+    if (pending->retirement_advance && result>0)
+        file->position=pending->position_valid ? pending->position : pending->retirement_offset+result;
+    md_resource_order_complete(&pending->retirement);
+    md_proc_file_release(file);
+}
 int md_proc_file_io_finish(struct md_proc_file_io *io, long copied) {
-    if (!io || !io->file || !io->executed) return -EINVAL;
+    if (!io || !io->file || (!io->executed && !io->transferred)) return -EINVAL;
+    if (io->pending && io->pending->abandon) {
+        struct md_control_pending *pending=io->pending;
+        int error=md_resource_order_move(&io->turn,&pending->retirement);
+        if (error) return error;
+        pending->retirement_context=io->file;
+        pending->retirement_offset=io->offset;
+        pending->retirement_advance=io->operation==MD_PROC_FILE_WRITE && !io->positional;
+        pending->retired=retired_io;
+        *io=(struct md_proc_file_io){0};
+        pending->abandon(pending); return 0;
+    }
     if (io->operation==MD_PROC_FILE_READ && io->result>=0) {
-        if (copied>io->result || (copied>0 && !io->offered)) return -EINVAL;
-        if (io->file->control && io->file->control->read_commit)
-            io->file->control->read_commit(io->file->control_context,copied>0 ? (size_t)copied : 0);
-        if (copied>0 && !io->positional) io->file->position=io->offset+copied;
+        int error=read_acknowledge(io,copied);
+        if (error) return error;
     }
     if (io->operation==MD_PROC_FILE_GETDENTS && io->result>=0) {
         if (copied>0 && (!io->offered || copied!=io->result)) return -EINVAL;
         if (copied>0) io->file->position=io->next_position;
     }
+    if ((io->operation==MD_PROC_FILE_READ || io->operation==MD_PROC_FILE_GETDENTS)
+            && (io->result>=0 || io->transferred) && io->file->control && io->file->control->read_commit)
+        io->file->control->read_commit(io->file->control_context,
+            io->transferred+(copied>0 ? (size_t)copied : 0));
     if (io->pending) { io->pending->dispose(io->pending); io->pending=NULL; }
     int error=md_resource_order_complete(&io->turn);
     if (io->turn.queue) return error;

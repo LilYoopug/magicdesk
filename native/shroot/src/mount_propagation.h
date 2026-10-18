@@ -22,6 +22,7 @@ void md_mount_members_release(struct md_mount_members *);
  * collection; topology mutation stays on the owning event loop. */
 void md_mount_family_wakeup(struct md_mount_namespace *,struct md_resource_wakeup *);
 void md_mount_family_retire(struct md_mount_namespace *);
+int md_mount_family_take_collection(struct md_mount_namespace *);
 int md_mount_family_collect(struct md_filesystem *);
 struct md_mount_links md_mount_links_copy(const struct md_mount_links *);
 void md_mount_links_release(struct md_mount_links *);

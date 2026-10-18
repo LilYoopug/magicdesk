@@ -9,6 +9,13 @@
 struct md_fd_origins;
 struct md_fd_channel;
 struct md_fd_origin_entry;
+struct md_control_actor;
+struct md_control_pending;
+struct md_fd_closed { struct md_fd_origin_entry *first; };
+/* Allocation-free retirement of confirmed kernel closures. Progress consumes
+ * one retained authority outside the table turn, returning its provider result.
+ * Empty batches return zero without invoking a provider. */
+long md_fd_closed_next(struct md_fd_closed *,const struct md_control_actor *,struct md_control_pending **);
 struct md_fd_observation;
 struct md_fd_loan;
 struct md_fd_origin_update {
@@ -87,6 +94,7 @@ int md_fd_origins_prepare_channel(struct md_fd_origins *, struct md_fd_channel *
 struct md_fd_loan *md_fd_loan_new(struct md_fd_origins *);
 void md_fd_loan_end(struct md_fd_loan *);
 void md_fd_loan_release(struct md_fd_loan *);
+/* A metadata-free prepared update becomes a native CLOEXEC loan. */
 int md_fd_origins_prepare_loan(struct md_fd_origin_update *,struct md_fd_loan *);
 /* Provisional application slot, with its real CLOEXEC flag. Its RUNNING turn
  * must remain held until publication or verified native retirement. */
@@ -124,6 +132,7 @@ int md_fd_origins_channel_candidate(struct md_fd_origins *, int *number, struct 
 /* same==0 retires metadata only, never the guest slot. No allocations. */
 int md_fd_origins_channel_resolve(struct md_fd_origins *, int number, struct md_fd_channel *, int same, unsigned flags);
 void md_fd_origins_finish(struct md_fd_origin_update *, int result_fd);
+void md_fd_origins_finish_closed(struct md_fd_origin_update *,int result_fd,struct md_fd_closed *);
 /* Terminal mutation with no trustworthy result may have installed an alias.
  * Notify inventory-dependent owners before discarding unpublished metadata. */
 void md_fd_origins_abandon(struct md_fd_origin_update *);
@@ -141,6 +150,11 @@ int md_fd_origins_finish_batch(struct md_fd_origin_update *, unsigned count,
         const int *received_fds, unsigned received);
 int md_fd_origins_set_flags(struct md_fd_origins *, int fd, unsigned flags);
 int md_fd_origins_close_range(struct md_fd_origins *, unsigned first, unsigned last, int cloexec);
+int md_fd_origins_close_collect(struct md_fd_origins *,unsigned first,unsigned last,int cloexec,struct md_fd_closed *);
 int md_fd_origins_abandon_range(struct md_fd_origins *, unsigned first, unsigned last);
 void md_fd_origins_exec(struct md_fd_origins *);
+void md_fd_origins_exec_collect(struct md_fd_origins *,struct md_fd_closed *);
+/* Only the last real task owner closes a shared table. Aborted copies and pins
+ * are released normally and must never manufacture descriptor-close events. */
+void md_fd_origins_exit_collect(struct md_fd_origins *,struct md_fd_closed *);
 #endif

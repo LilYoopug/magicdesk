@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include "fs_mount_internal.h"
 #include "mount_graph.h"
 #include "mount_topology.h"
@@ -8,22 +9,104 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 /* IDs belong to mount instances, not array positions or native inode numbers.
  * Never recycle an ID while retained locations may still name an older view. */
 static atomic_uint next_mount_id = 1;
+struct md_view_mount *md_view_mount_array_new(void) {
+    void *p=mmap(NULL,MD_FS_MOUNTS_MAX*sizeof(struct md_view_mount),PROT_READ|PROT_WRITE,
+        MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    return p==MAP_FAILED ? NULL : p;
+}
+void md_view_mount_array_free(struct md_view_mount *entries) {
+    if (entries) munmap(entries,MD_FS_MOUNTS_MAX*sizeof(*entries));
+}
+struct md_fs_mounts *md_view_tree_new(void) {
+    struct md_fs_mounts *tree=calloc(1,sizeof(*tree));
+    if (!tree) return NULL;
+    tree->mounts=md_view_mount_array_new();
+    if (!tree->mounts) { int error=errno; free(tree); errno=error; return NULL; }
+    return tree;
+}
+void md_view_tree_free(struct md_fs_mounts *tree) {
+    if (!tree) return;
+    md_view_mount_array_free(tree->mounts); free(tree);
+}
+void md_view_mount_lookup_changed(struct md_mount_namespace *view) {
+    if (view && view->tree) view->tree->lookup.valid=0;
+}
+static unsigned placement_hash(const struct md_view_mount *parent,const struct stat *st) {
+    uint64_t key=(uint64_t)st->st_ino ^ ((uint64_t)st->st_dev*UINT64_C(0x9e3779b97f4a7c15))
+        ^ (uint64_t)(uintptr_t)parent;
+    key^=key>>33; key*=UINT64_C(0xff51afd7ed558ccd); key^=key>>33;
+    return (unsigned)key&1023;
+}
+struct md_view_mount *md_view_mount_lookup(struct md_mount_namespace *view,
+        const struct md_view_mount *parent,const struct stat *st) {
+    struct md_fs_mounts *tree=view ? view->tree : NULL;
+    if (!tree) return NULL;
+    if (tree->count<=8) {
+        for (unsigned i=0;i<=tree->count;++i) {
+            struct md_view_mount *m=md_view_mount_node(view,i);
+            if (m->source>=0 && !m->detached && m->parent==parent && md_view_same(st,&m->guest)) return m;
+        }
+        return NULL;
+    }
+    if (!tree->lookup.valid || tree->lookup.count!=tree->count) {
+        memset(tree->lookup.buckets,0,sizeof(tree->lookup.buckets));
+        /* Reverse insertion retains ascending slot precedence on collisions,
+         * including stacked roots. Topology owners invalidate before reuse. */
+        for (unsigned end=tree->count+1;end;--end) {
+            unsigned i=end-1;
+            struct md_view_mount *m=md_view_mount_node(view,i);
+            if (m->source<0 || m->detached) continue;
+            unsigned hash=placement_hash(m->parent,&m->guest);
+            tree->lookup.next[i]=tree->lookup.buckets[hash];
+            tree->lookup.buckets[hash]=(uint16_t)(i+1);
+        }
+        tree->lookup.count=tree->count; tree->lookup.valid=1;
+    }
+    for (unsigned link=tree->lookup.buckets[placement_hash(parent,st)];link;link=tree->lookup.next[link-1]) {
+        struct md_view_mount *m=md_view_mount_node(view,link-1);
+        if (m->parent==parent && md_view_same(st,&m->guest)) return m;
+    }
+    return NULL;
+}
+int md_view_mount_vacant(struct md_view_mount *entries,unsigned *count) {
+    for (unsigned i=0;i<*count;++i)
+        if (!entries[i].id && entries[i].generation<UINT64_MAX) return (int)i;
+    if (*count>=MD_FS_MOUNTS_MAX) return -ENOSPC;
+    unsigned i=(*count)++;
+    entries[i]=(struct md_view_mount){.source=-1,.target=-1}; return (int)i;
+}
 int md_mount_topology_order(unsigned count, const unsigned *parents, unsigned *order) {
     if (count>MD_FS_MOUNTS_MAX+1 || (count && (!parents || !order))) return -EINVAL;
-    unsigned done[MD_FS_MOUNTS_MAX+1]={0}, used=0;
+    unsigned pass[count+1], chain[count+1], offsets[count+1];
+    for (unsigned i=0;i<count;++i) pass[i]=UINT_MAX;
+    memset(offsets,0,sizeof(offsets));
     for (unsigned i=0;i<count;++i) if (parents[i]>count || parents[i]==i+1) return -EINVAL;
-    while (used<count) {
-        unsigned before=used;
-        for (unsigned i=0;i<count;++i) if (!done[i] && (!parents[i] || done[parents[i]-1])) {
-            done[i]=1; order[used++]=i;
+    /* Preserve ascending scan-pass order without rescanning an entire tree
+     * for each reversed edge. A child preceding its parent needs one more
+     * pass; the forest is visited once, then stably bucketed by pass number. */
+    for (unsigned i=0;i<count;++i) if (pass[i]==UINT_MAX) {
+        unsigned next=i, depth=0;
+        while (pass[next]==UINT_MAX) {
+            pass[next]=UINT_MAX-1; chain[depth++]=next;
+            if (!parents[next]) break;
+            next=parents[next]-1;
         }
-        if (used==before) return -ELOOP;
+        while (depth) {
+            unsigned node=chain[--depth], p=parents[node];
+            if (p && pass[p-1]==UINT_MAX-1) return -ELOOP;
+            pass[node]=p ? pass[p-1]+(node<p-1) : 0;
+            ++offsets[pass[node]+1];
+        }
     }
+    for (unsigned i=1;i<count;++i) offsets[i]+=offsets[i-1];
+    for (unsigned i=0;i<count;++i) order[offsets[pass[i]]++]=i;
     return 0;
 }
 int md_view_topology_order(const struct md_mount_namespace *view, unsigned *order) {
@@ -31,17 +114,17 @@ int md_view_topology_order(const struct md_mount_namespace *view, unsigned *orde
     if (!view || !order) return -EINVAL;
     unsigned count=tree ? tree->count : 0;
     if (count>MD_FS_MOUNTS_MAX) return -EINVAL;
-    unsigned parents[MD_FS_MOUNTS_MAX+1]={0};
+    unsigned parents[count+1];
+    memset(parents,0,sizeof(parents));
     for (unsigned i=0;i<=count;++i) {
         const struct md_view_mount *m=i ? &tree->mounts[i-1] : &view->base;
         if (!m->id) continue;
         if (!m->parent) { if (m!=view->root && !m->detached) return -EINVAL; continue; }
         if (m==view->root) return -EINVAL;
         if (m->parent==&view->base) { parents[i]=1; continue; }
-        unsigned j=0;
-        while (j<count && m->parent!=&tree->mounts[j]) ++j;
-        if (j==count || !tree->mounts[j].id) return -EINVAL;
-        parents[i]=j+2;
+        int slot=md_view_mount_slot(view,m->parent,count);
+        if (slot<=0 || !tree->mounts[slot-1].id) return -EINVAL;
+        parents[i]=(unsigned)slot+1;
     }
     return md_mount_topology_order(count+1,parents,order);
 }
@@ -137,6 +220,7 @@ int md_view_mount_clone(struct md_view_mount *out,const struct md_view_mount *so
     return r;
 }
 void md_view_mount_forget(struct md_fs_mounts *tree, struct md_view_mount *mount) {
+    tree->lookup.valid=0;
     for (unsigned i=0;i<MD_VIEW_BUCKETS;++i) {
         struct md_view_object **p=&tree->by_id[i];
         while (*p) {
@@ -164,7 +248,7 @@ void md_mount_namespace_release(struct md_mount_namespace *n) {
             while (p) { struct md_view_object *next=p->next; close(p->fd); free(p); p=next; }
         }
         for (unsigned i=0;i<m->count;++i) md_view_mount_close(&m->mounts[i]);
-        free(m);
+        md_view_tree_free(m);
     }
     md_mount_graph_close(n->graph);
     md_user_namespace_release(n->owner);

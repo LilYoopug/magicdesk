@@ -82,22 +82,11 @@ void md_mount_family_retire(struct md_mount_namespace *view) {
     md_resource_wakeup_signal(f->wakeup);
     pthread_mutex_unlock(&f->lock);
 }
-int md_mount_family_collect(struct md_filesystem *fs) {
-    if (!fs->mounts || !fs->mounts->family) return 0;
-    struct md_mount_family *f=fs->mounts->family;
-    if (!atomic_load_explicit(&f->collect,memory_order_acquire)
-            || !atomic_exchange_explicit(&f->collect,0,memory_order_acq_rel)) return 0;
-    struct md_mount_members members={0};
-    int error=md_mount_family_capture(fs->mounts,&members);
-    for (unsigned i=0;!error && i<members.count;++i) {
-        struct md_mount_namespace *view=members.views[i];
-        if (!atomic_load_explicit(&view->detached_mounts,memory_order_acquire)
-                || md_mount_graph_foreign(view)) continue;
-        struct md_filesystem selected=*fs; selected.mounts=view;
-        if (view!=fs->mounts) selected.native_root=NULL;
-        error=md_view_mount_collect(&selected);
-    }
-    md_mount_members_release(&members); return error;
+int md_mount_family_take_collection(struct md_mount_namespace *view) {
+    if (!view || !view->family) return 0;
+    struct md_mount_family *f=view->family;
+    return atomic_load_explicit(&f->collect,memory_order_acquire)
+        && atomic_exchange_explicit(&f->collect,0,memory_order_acq_rel);
 }
 struct md_mount_group *md_mount_group_retain(struct md_mount_group *g) {
     if (g) atomic_fetch_add_explicit(&g->references,1,memory_order_relaxed);

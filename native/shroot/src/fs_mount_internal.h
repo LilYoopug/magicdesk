@@ -14,6 +14,7 @@
 #include "proc_namespace.h"
 #include "sealed_manifest.h"
 #include <limits.h>
+#include <errno.h>
 #include <stdatomic.h>
 #include <sys/mount.h>
 #include <linux/mount.h>
@@ -103,10 +104,36 @@ struct md_view_object {
 };
 struct md_fs_mounts {
     unsigned count, objects;
-    struct md_view_mount mounts[MD_FS_MOUNTS_MAX];
+    struct md_view_mount *mounts;
     struct md_view_object *table[MD_VIEW_BUCKETS];
     struct md_view_object *by_id[MD_VIEW_BUCKETS];
+    /* Worker-owned, rebuildable placement index. Zero links mean no node;
+     * slot+1 includes the base mount. No persistent or imported pointers. */
+    struct {
+        unsigned count;
+        int valid;
+        uint16_t buckets[1024], next[MD_FS_MOUNTS_MAX+1];
+    } lookup;
 };
+_Static_assert(MD_FS_MOUNTS_MAX+1<=UINT16_MAX,"mount lookup slots");
+void md_view_mount_lookup_changed(struct md_mount_namespace *);
+struct md_view_mount *md_view_mount_lookup(struct md_mount_namespace *,
+    const struct md_view_mount *parent,const struct stat *);
+/* Stable addresses for retained origins; untouched slots consume no physical
+ * pages. Allocation belongs only to mount topology, never ordinary file IO. */
+struct md_fs_mounts *md_view_tree_new(void);
+void md_view_tree_free(struct md_fs_mounts *);
+struct md_view_mount *md_view_mount_array_new(void);
+void md_view_mount_array_free(struct md_view_mount *);
+/* Candidate layouts can include reserved slots not yet published in count. */
+static inline int md_view_mount_slot(const struct md_mount_namespace *view,const struct md_view_mount *m,unsigned count) {
+    if (md_view_base(view,m)) return 0;
+    if (!view || !view->tree || count>MD_FS_MOUNTS_MAX) return -ESTALE;
+    uintptr_t first=(uintptr_t)view->tree->mounts, address=(uintptr_t)m;
+    if (address<first || (address-first)%sizeof(*m) || (address-first)/sizeof(*m)>=count) return -ESTALE;
+    return (int)((address-first)/sizeof(*m))+1;
+}
+int md_view_mount_vacant(struct md_view_mount *,unsigned *count);
 static inline struct md_view_mount *md_view_mount_node(struct md_mount_namespace *view, unsigned node) {
     return node ? &view->tree->mounts[node-1] : &view->base;
 }
@@ -135,10 +162,13 @@ struct md_fs_anchor {
     struct md_fd_identity endpoint;
     struct mdi_fifo_owner *fifo_custody;
 };
-int md_view_same(const struct stat *, const struct stat *);
+static inline int md_view_same(const struct stat *a,const struct stat *b) {
+    return a->st_dev==b->st_dev && a->st_ino==b->st_ino;
+}
 struct md_view_mount *md_view_root_mount(struct md_filesystem *);
 int md_view_root_fd(struct md_filesystem *);
 int md_view_record(struct md_filesystem *, int fd, struct md_view_mount *, struct md_view_object **);
+int md_view_backing_contains(struct md_filesystem *,const struct md_view_mount *,int root,int object);
 int md_view_identity(struct md_filesystem *, int fd, struct md_view_object **);
 int md_view_path(struct md_filesystem *, int fd, struct md_view_mount *, char *, size_t);
 int md_view_backing_path(struct md_filesystem *, int fd, const struct md_view_mount *, char *, size_t);
@@ -147,10 +177,14 @@ int md_view_backing_path(struct md_filesystem *, int fd, const struct md_view_mo
 int md_view_attach_source(struct md_filesystem *, const struct md_mount_source *,
         const struct md_view_location *target, struct md_view_mount **);
 int md_view_mount_collect(struct md_filesystem *);
+int md_view_mount_collect_detached(struct md_filesystem *);
 /* Cold topology boundaries reconcile targets removed in another namespace.
  * Detachment preserves mount identities and retained origins until collection;
  * ordinary file data IO does not scan or reconstruct the mount tree. */
 int md_view_mount_reconcile(struct md_filesystem *);
+/* Revalidate only the selected placement's ancestry. A missing ancestor
+ * detaches its complete subtree, including retained foreign origins. */
+int md_view_mount_reconcile_branch(struct md_filesystem *,struct md_view_mount *);
 int md_view_mount_detach(struct md_filesystem *, const struct md_view_mount *);
 struct md_view_object *md_view_object(struct md_filesystem *, const char *id);
 /* Internal lookup opt-in: report task-owned proc traversal to the adapter

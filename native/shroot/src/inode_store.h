@@ -128,6 +128,9 @@ int md_inode_import_metadata(struct md_inode_store *, int fd, uint32_t uid, uint
  * return ENOTSUP, never an arbitrary alias. Unlinked files retain a deleted
  * suffix while their parent path is available. No per-open path cache. */
 int md_inode_path(struct md_inode_store *, int fd, char *, size_t);
+/* Backing identity ancestry, independent of names and the selected root.
+ * Returns 1/0; an object from a different store is not contained. */
+int md_inode_contains(struct md_inode_store *, int root, int object);
 int md_inode_realpath(struct md_inode_store *, int dirfd, const char *, char *, size_t);
 /* Unlinked native storage, outside the logical namespace and its metadata. */
 int md_inode_temporary(struct md_inode_store *);

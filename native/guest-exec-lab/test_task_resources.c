@@ -433,8 +433,10 @@ void test_network_endpoint(void);
 void test_network_nft(void);
 void test_network_launch(void);
 void test_task_registry_exit(void);
+void test_task_mapping(void);
 int main(void) {
     alarm(60);
+    test_task_mapping();
     test_ipc_database();
     test_task_registry_exit();
     test_network_model();

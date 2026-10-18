@@ -29,6 +29,9 @@ struct md_fd_object_type {
      * open description may retain an ordinary filesystem anchor. */
     struct md_fs_anchor *(*origin)(struct md_fd_object *);
     struct md_control_file (*readiness)(struct md_fd_object *);
+    /* A confirmed descriptor close, not a reference drop or failed publication.
+     * The table turn has ended. A pending result owns its independent lifetime. */
+    long (*close)(struct md_fd_object *,const struct md_control_actor *,struct md_control_pending **);
 };
 struct md_fd_object {
     atomic_uint references;

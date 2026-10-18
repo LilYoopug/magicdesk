@@ -12,6 +12,7 @@
 #include "fd_return.h"
 #include "received_fds.h"
 #include "fd_messages.h"
+#include "control_file.h"
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -151,6 +152,74 @@ static struct md_fs_anchor *borrowed_file_origin(struct md_fd_object *object) {
     return ((struct borrowed_file *)object)->origin;
 }
 static void borrowed_file_destroy(struct md_fd_object *object) { (void)object; }
+struct closing_file { struct md_fd_object object; unsigned closes,destroyed; };
+static void closing_destroy(struct md_fd_object *object) { ++((struct closing_file *)object)->destroyed; }
+static long closing_close(struct md_fd_object *object,const struct md_control_actor *actor,
+        struct md_control_pending **pending) {
+    assert(actor && !*pending); ++((struct closing_file *)object)->closes; return -EIO;
+}
+static void put_closing(struct md_fd_origins *files,int fd,struct closing_file *file) {
+    struct md_fd_origin_update update;
+    assert(!md_fd_origins_prepare_object(files,&file->object,0,&update));
+    md_fd_origins_finish(&update,fd);
+}
+static unsigned drain_closed(struct md_fd_closed *closed) {
+    unsigned count=0;
+    while (closed->first) {
+        struct md_control_pending *pending=NULL;
+        assert(md_fd_closed_next(closed,&(struct md_control_actor){0},&pending)==-EIO && !pending);
+        ++count;
+    }
+    return count;
+}
+static void close_lifecycle(void) {
+    static const struct md_fd_object_type type={.destroy=closing_destroy,.close=closing_close};
+    struct closing_file file={0}; md_fd_object_init(&file.object,&type);
+    struct md_fd_origins *files=md_fd_origins_new(); assert(files);
+    struct md_fd_closed closed={0}; struct md_fd_mutation op;
+    put_closing(files,10,&file);
+    unsigned long args[6]={10};
+    assert(!md_fd_mutation_prepare(files,SYS_close,args,&op));
+    assert(!md_fd_mutation_finish_closed(&op,files,-EBADF,&closed) && !closed.first && !file.closes);
+    assert(!md_fd_mutation_prepare(files,SYS_close,args,&op));
+    allocation_budget=0;
+    assert(!md_fd_mutation_finish_closed(&op,files,-EINTR,&closed) && closed.first);
+    allocation_budget=-1;
+    struct md_fd_order turn={0};
+    assert(md_fd_order_begin(files,&turn,NULL)==1 && !md_fd_order_start(&turn));
+    put_closing(files,10,&file); /* Reuse the released slot before provider completion. */
+    assert(!md_fd_order_complete(&turn));
+    assert(!file.closes && drain_closed(&closed)==1 && file.closes==1);
+    put_closing(files,11,&file);
+    args[1]=11; args[2]=O_CLOEXEC;
+    assert(!md_fd_mutation_prepare(files,SYS_dup3,args,&op));
+    assert(!md_fd_mutation_finish_closed(&op,files,-EINVAL,&closed) && !closed.first);
+    assert(!md_fd_mutation_prepare(files,SYS_dup3,args,&op));
+    allocation_budget=0;
+    assert(!md_fd_mutation_finish_closed(&op,files,11,&closed));
+    allocation_budget=-1;
+    assert(drain_closed(&closed)==1 && file.closes==2);
+    assert(!md_fd_origins_close_collect(files,10,10,1,&closed) && !closed.first);
+    allocation_budget=0; md_fd_origins_exec_collect(files,&closed); allocation_budget=-1;
+    assert(drain_closed(&closed)==2 && file.closes==4);
+    put_closing(files,12,&file);
+    struct md_fd_origins *copy=md_fd_origins_fork(files,0); assert(copy);
+    md_fd_origins_release(copy); /* Failed clone: no guest descriptors were closed. */
+    struct md_fd_origin_update unpublished;
+    assert(!md_fd_origins_prepare_object(files,&file.object,0,&unpublished));
+    md_fd_origins_finish_closed(&unpublished,-ENOMEM,&closed);
+    assert(!closed.first && file.closes==4);
+    copy=md_fd_origins_fork(files,1); assert(copy==files);
+    struct md_task_resources sibling={.files=copy},last={.files=files};
+    md_resources_exit_files(&sibling,&closed); assert(!sibling.files && !closed.first);
+    md_resources_exit_files(&sibling,&closed); assert(!closed.first);
+    md_fd_object_release(&file.object); assert(!file.destroyed);
+    allocation_budget=0; md_resources_exit_files(&last,&closed); allocation_budget=-1;
+    assert(!last.files && !file.destroyed);
+    assert(!md_resources_release(&sibling) && !md_resources_release(&last));
+    assert(drain_closed(&closed)==1 && file.closes==5 && file.destroyed==1);
+    puts("PASS confirmed FD closes: allocation-free retirement, reuse, dup replacement, exec, last owner and cancelled publication");
+}
 static void native_io_proofs(struct md_mount_namespace *view,struct md_fs_anchor *directory) {
     struct md_fs_anchor *file=capture(view,memfd_create("native-io",MFD_CLOEXEC));
     struct md_fd_origins *files=md_fd_origins_new(); assert(files);
@@ -1492,7 +1561,35 @@ static void provisional_custody(struct md_fs_anchor *anchor) {
     }
     puts("PASS provisional FD custody: table-turn admission, actual CLOEXEC flags, allocation failure, publication and exact retirement");
 }
+static void native_loans(void) {
+    for (int budget=0;budget<=3;++budget) {
+        struct md_fd_origins *files=md_fd_origins_new(); assert(files);
+        struct md_fd_loan *loan=md_fd_loan_new(files); assert(loan);
+        struct md_fd_order turn={0};
+        assert(md_fd_order_begin(files,&turn,NULL)==1 && !md_fd_order_start(&turn));
+        struct md_fd_origin_update update={0};
+        assert(!md_fd_origins_prepare(files,NULL,FD_CLOEXEC,&update));
+        allocation_budget=budget;
+        int result=md_fd_origins_prepare_loan(&update,loan);
+        allocation_budget=-1;
+        assert(result==(budget<3 ? -ENOMEM : 0));
+        md_fd_origins_finish(&update,result ? result : 14);
+        if (!result) {
+            assert(md_fd_origins_loan_matches(&turn,14,loan)==1);
+            md_fd_loan_end(loan);
+            int number=-1;
+            assert(md_fd_origins_loan_next(&turn,&number)==1 && number==14);
+            assert(!md_fd_origins_close_range(files,14,14,0));
+        }
+        assert(!md_fd_origins_has_loans(files));
+        md_fd_loan_end(loan); md_fd_loan_release(loan);
+        assert(!md_fd_order_complete(&turn)); md_fd_origins_release(files);
+    }
+    puts("PASS metadata-free native FD loans: allocation failures, publication and exact retirement");
+}
 void test_fd_origins(void) {
+    native_loans();
+    close_lifecycle();
     extern void test_task_receive(int *);
     extern void test_epoll_owner(int *);
     test_epoll_owner(&allocation_budget);

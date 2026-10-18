@@ -7,6 +7,21 @@
 #include <string.h>
 #include <unistd.h>
 
+int md_mount_family_collect(struct md_filesystem *fs) {
+    if (!md_mount_family_take_collection(fs->mounts)) return 0;
+    struct md_mount_members members={0};
+    int error=md_mount_family_capture(fs->mounts,&members);
+    for (unsigned i=0;!error && i<members.count;++i) {
+        struct md_mount_namespace *view=members.views[i];
+        if (!atomic_load_explicit(&view->detached_mounts,memory_order_acquire)
+                || md_mount_graph_foreign(view)) continue;
+        struct md_filesystem selected=*fs; selected.mounts=view;
+        if (view!=fs->mounts) selected.native_root=NULL;
+        error=md_view_mount_collect_detached(&selected);
+    }
+    md_mount_members_release(&members); return error;
+}
+
 struct draft {
     struct md_mount_namespace *view;
     struct md_view_mount *base;
@@ -23,11 +38,7 @@ struct mapping {
     struct mapping *next;
 };
 static int vacant(struct draft *d) {
-    for (unsigned i=0;i<d->count;++i)
-        if (!d->entries[i].id && d->entries[i].generation<UINT64_MAX) return (int)i;
-    if (d->count==MD_FS_MOUNTS_MAX) return -ENOSPC;
-    unsigned n=d->count++;
-    d->entries[n]=(struct md_view_mount){.source=-1,.target=-1}; return (int)n;
+    return md_view_mount_vacant(d->entries,&d->count);
 }
 static int group(struct mapping **map,struct md_mount_group *parent,unsigned source,
         struct md_mount_group **out) {
@@ -45,17 +56,12 @@ static int group(struct mapping **map,struct md_mount_group *parent,unsigned sou
 }
 static int covered(struct md_filesystem *fs,const struct md_view_mount *parent,int target) {
     if (parent->source<0) return 1;
-    char root[PATH_MAX],path[PATH_MAX];
-    int r=md_view_backing_path(fs,parent->source,parent,root,sizeof(root));
-    if (!r) r=md_view_backing_path(fs,target,parent,path,sizeof(path));
-    if (r) return r;
-    size_t n=strlen(root);
-    return !strncmp(root,path,n) && (n==1 || !path[n] || path[n]=='/');
+    return md_view_backing_contains(fs,parent,parent->source,target);
 }
 static int replica(struct md_filesystem *fs,struct draft *d,struct md_view_mount *parent,
         struct md_mount_namespace *source_view,const struct md_view_mount *entries,
         const struct md_view_mount *base,const unsigned *slots,unsigned created,unsigned root,struct mapping **map) {
-    unsigned copied[MD_FS_MOUNTS_MAX+1];
+    unsigned copied[created+1];
     for (unsigned i=0;i<created;++i) {
         unsigned source=slots[i];
         const struct md_view_mount *a=source ? &entries[source-1] : base;
@@ -87,6 +93,8 @@ static int replica(struct md_filesystem *fs,struct draft *d,struct md_view_mount
 }
 static int attach(struct md_filesystem *fs,struct md_view_mount *base,struct md_view_mount *entries,unsigned count,
         const unsigned *slots,unsigned created,unsigned root,int replacing) {
+    struct md_cost *cost=fs->statistics ? &fs->statistics->mount_attach : NULL;
+    int64_t start=md_cost_begin(cost);
     struct md_view_mount *source=node(base,entries,root),*parent=source->parent;
     struct md_mount_group *shared=parent ? parent->links.shared : NULL;
     struct md_mount_members members={0};
@@ -94,7 +102,10 @@ static int attach(struct md_filesystem *fs,struct md_view_mount *base,struct md_
     unsigned capacity=members.count+1,used=1;
     struct draft *drafts=calloc(capacity,sizeof(*drafts));
     struct md_mount_graph_change *changes=calloc(capacity,sizeof(*changes));
-    if (!drafts || !changes) { free(drafts); free(changes); md_mount_members_release(&members); return -ENOMEM; }
+    if (!drafts || !changes) {
+        free(drafts); free(changes); md_mount_members_release(&members);
+        md_cost_end(cost,start); return -ENOMEM;
+    }
     drafts[0]=(struct draft){fs->mounts,base,entries,count,{0}};
     struct mapping *map=NULL;
     for (unsigned i=0;!r && shared && i<created;++i) {
@@ -122,10 +133,10 @@ static int attach(struct md_filesystem *fs,struct md_view_mount *base,struct md_
             unsigned d=0; while (d<used && drafts[d].view!=view) ++d;
             if (d==used) {
                 if (!view->tree) {
-                    view->tree=calloc(1,sizeof(*view->tree));
+                    view->tree=md_view_tree_new();
                     if (!view->tree) { r=-ENOMEM; break; }
                 }
-                struct md_view_mount *copy=calloc(MD_FS_MOUNTS_MAX,sizeof(*copy));
+                struct md_view_mount *copy=md_view_mount_array_new();
                 if (!copy) { r=-ENOMEM; break; }
                 memcpy(copy,view->tree->mounts,original*sizeof(*copy));
                 drafts[used++]=(struct draft){view,&view->base,copy,original,{0}};
@@ -147,6 +158,7 @@ static int attach(struct md_filesystem *fs,struct md_view_mount *base,struct md_
     for (unsigned i=0;i<used;++i) {
         struct draft *d=&drafts[i];
         if (!r) {
+            md_view_mount_lookup_changed(d->view);
             for (unsigned j=0;j<d->count;++j)
                 if (d->created[j]) d->view->tree->mounts[j]=d->entries[j];
             if (!i) for (unsigned j=0;j<created;++j) {
@@ -158,6 +170,7 @@ static int attach(struct md_filesystem *fs,struct md_view_mount *base,struct md_
                     old->guest=next->guest; old->detached=next->detached;
                     md_mount_links_release(&old->links); old->links=next->links;
                 }
+                if (old->detached) atomic_store_explicit(&d->view->detached_mounts,1,memory_order_release);
             }
             d->view->tree->count=d->count;
             atomic_store_explicit(&d->view->managed_paths,1,memory_order_release);
@@ -168,13 +181,14 @@ static int attach(struct md_filesystem *fs,struct md_view_mount *base,struct md_
         md_fs_mount_table_changed(&selected);
     }
     while (map) { struct mapping *next=map->next; md_mount_group_release(map->child); free(map); map=next; }
-    for (unsigned i=1;i<used;++i) free(drafts[i].entries);
-    free(changes); free(drafts); md_mount_members_release(&members); return r;
+    for (unsigned i=1;i<used;++i) md_view_mount_array_free(drafts[i].entries);
+    free(changes); free(drafts); md_mount_members_release(&members);
+    md_cost_end(cost,start); return r;
 }
 int md_view_mount_attach(struct md_filesystem *fs,struct md_view_mount *entries,unsigned count,
         const unsigned *slots,unsigned created,unsigned root) {
-    unsigned nodes[MD_FS_MOUNTS_MAX];
     if (created>MD_FS_MOUNTS_MAX) return -EINVAL;
+    unsigned nodes[created+1];
     for (unsigned i=0;i<created;++i) nodes[i]=slots[i]+1;
     return attach(fs,&fs->mounts->base,entries,count,nodes,created,root+1,0);
 }
@@ -187,11 +201,14 @@ int md_view_mount_propagation(struct md_filesystem *fs,struct md_view_mount *roo
     struct md_mount_namespace *view=fs->mounts;
     if (md_mount_graph_foreign(view)) return -EPERM;
     struct md_mount_members members={0};
-    int r=md_mount_family_capture(view,&members);
-    struct md_view_mount base=view->base,entries[MD_FS_MOUNTS_MAX];
+    struct md_view_mount base=view->base;
     unsigned count=view->tree ? view->tree->count : 0;
+    struct md_view_mount *entries=calloc(count ? count : 1,sizeof(*entries));
+    if (!entries) return -ENOMEM;
+    int r=md_mount_family_capture(view,&members);
     if (count) memcpy(entries,view->tree->mounts,count*sizeof(*entries));
-    unsigned char changed[MD_FS_MOUNTS_MAX+1]={0};
+    unsigned char changed[count+1];
+    memset(changed,0,sizeof(changed));
     for (unsigned i=0;!r && i<=count;++i) {
         struct md_view_mount *m=md_view_mount_node(view,i),*next=i ? &entries[i-1] : &base;
         if (!m->id || (m->detached && m!=root)) continue;
@@ -210,7 +227,7 @@ int md_view_mount_propagation(struct md_filesystem *fs,struct md_view_mount *roo
             md_mount_links_release(&m->links); m->links=*links;
         } else md_mount_links_release(links);
     }
-    md_mount_members_release(&members); return r;
+    free(entries); md_mount_members_release(&members); return r;
 }
 
 struct removal {
@@ -284,6 +301,7 @@ int md_view_mount_propagate_detach(struct md_filesystem *fs,struct md_view_mount
             m->detached=1; md_mount_links_release(&m->links); any=1;
         }
         if (any) {
+            md_view_mount_lookup_changed(view);
             atomic_store_explicit(&view->detached_mounts,1,memory_order_release);
             md_mount_family_retire(view);
         }
