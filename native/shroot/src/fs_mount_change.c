@@ -71,7 +71,10 @@ static int operand(struct md_filesystem *fs, const struct md_fs_request *q, unsi
     int recursive=q->operation==MD_FS_OPEN_TREE ? !!(q->mode&AT_RECURSIVE)
         : q->mode==MD_FS_MOUNT_SETATTR ? !!(q->flags&AT_RECURSIVE)
         : q->mode==MD_FS_MOUNT_UMOUNT || q->mode==MD_FS_MOUNT_MOVE
-            || q->mode==MD_FS_MOUNT_MOVE_FD || q->mode==MD_FS_MOUNT_PIVOT || !!(q->flags&MS_REC);
+            || q->mode==MD_FS_MOUNT_MOVE_FD || q->mode==MD_FS_MOUNT_PIVOT
+            || ((q->flags&MS_REC) && (q->mode!=MD_FS_MOUNT_BIND || index==1));
+    /* Recursive bind copies the source subtree. Its target is only an
+     * attachment point; unrelated target-view mounts need no reconciliation. */
     r=recursive ? md_view_mount_reconcile(&selected)
         : md_view_mount_reconcile_branch(&selected,out->mount);
     if (r) md_view_location_close(out);
@@ -283,13 +286,7 @@ static int bind(struct md_filesystem *fs, const struct md_fs_request *q,
             source.fd=fcntl(q->directory[input],F_DUPFD_CLOEXEC,3);
             if (source.fd<0) r=-errno;
             else native_source=1;
-            struct statvfs info;
-            if (!r && fstatvfs(source.fd,&info)) r=-errno;
-            if (!r) policy=((info.f_flag&ST_RDONLY) ? MD_MOUNT_READONLY : 0)
-                | ((info.f_flag&ST_NOSUID) ? MD_MOUNT_NOSUID : 0)
-                | ((info.f_flag&ST_NODEV) ? MD_MOUNT_NODEV : 0)
-                | ((info.f_flag&ST_NOEXEC) ? MD_MOUNT_NOEXEC : 0)
-                | ((info.f_flag&ST_NOSYMFOLLOW) ? MD_MOUNT_NOSYMFOLLOW : 0);
+            if (!r) r=md_mount_native_policy(source.fd,&policy);
         } else if (found) r=found;
     }
     if (!r && !native_source) {

@@ -67,7 +67,8 @@ public final class LinuxLaunchRecipeTest {
                     + (mode == LinuxLaunchRecipe.Presentation.APPLICATION ? "/tmp/magicdesk-linux-settings -- " : "")
                     + "/bin/sh -lc 'xfce4-session'"));
             assertTrue(guest.contains("mktemp -d /tmp/magicdesk-runtime.XXXXXX"));
-            assertTrue(guest.contains("trap 'rm -rf -- \"$XDG_RUNTIME_DIR\"' EXIT"));
+            assertTrue(guest.contains("trap md_session_exit EXIT"));
+            assertTrue(guest.contains("find \"$XDG_RUNTIME_DIR\" -xdev -depth -delete"));
             var parsed = DesktopEntryFile.parseTermuxApplication(DesktopEntryFile.encodeApplication(shortcut));
             assertNotNull(parsed);
             assertEquals(shortcut.exec, parsed.exec);

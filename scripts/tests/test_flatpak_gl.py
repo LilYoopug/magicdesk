@@ -101,6 +101,7 @@ class FlatpakGLTest(unittest.TestCase):
         unset = data['Context']['unset-environment'].split(';')
         self.assertIn('OTHER', unset)
         self.assertIn('__EGL_VENDOR_LIBRARY_FILENAMES', unset)
+        self.assertIn('GBM_BACKENDS_PATH', unset)
         self.assertNotIn('VK_DRIVER_FILES', unset)
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         before = path.read_bytes()
@@ -113,6 +114,24 @@ class FlatpakGLTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.helper.prepare(self.base, self.prefix)
         self.assertFalse((self.base / 'overrides/global').exists())
+
+    def test_admission_loads_gbm_backend_as_well_as_top_level_libraries(self):
+        runtime = self.runtime()
+        loader = runtime / 'files/lib/ld-linux-aarch64.so.1'
+        loader.parent.mkdir()
+        loader.touch()
+        backend = self.prefix / 'lib/gbm/dri_gbm.so'
+        backend.parent.mkdir()
+        backend.touch()
+        backend.with_name('alias_gbm.so').symlink_to(backend.name)
+        self.verifier.stop()
+        with patch.object(self.helper.subprocess, 'run') as run:
+            run.return_value.returncode = 0
+            self.helper.verify_runtime(runtime / 'metadata', self.prefix)
+        command = run.call_args.args[0]
+        self.assertIn('/mdgl/lib/gbm/dri_gbm.so', command)
+        self.assertIn('/mdgl/lib/libgallium.so', command)
+        self.assertNotIn('/mdgl/lib/gbm/alias_gbm.so', command)
 
     def test_update_is_atomic_and_retains_running_sandbox_bundle(self):
         self.runtime()

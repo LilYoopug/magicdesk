@@ -1166,6 +1166,8 @@ package_cleanup() { :; }
         payload = payload.replace('/etc/os-release', str(release))
         for original, name in (('/etc/profile.d', 'profiles'), ('/var/lib/magicdesk', 'state'),
                                ('/var/cache/magicdesk', 'cache'), ('/etc/magicdesk', 'config'),
+                               ('/etc/shroot', 'shroot'),
+                               ('/etc/vulkan', 'vulkan'), ('/etc/glvnd', 'glvnd'),
                                ('/usr/local', 'local'), ('/usr/share/flatpak/triggers', 'triggers')):
             payload = payload.replace(original, str(root / name))
         package_log = root / 'packages'
@@ -1189,6 +1191,9 @@ package_cleanup() { :; }
                 release.write_text('ID=' + distro + '\n')
                 profile.parent.mkdir(exist_ok=True)
                 profile.write_text('original profile\n')
+                selection = root / 'shroot/render-node'
+                selection.parent.mkdir(exist_ok=True)
+                selection.write_text('turnip\n')
                 package_log.write_text('')
                 result = subprocess.run(['sh', '-c', payload, 'graphics', 'software', '1', 'fixture'],
                                         env=dict(self.environment, TEST_PROBE=outcome),
@@ -1196,9 +1201,11 @@ package_cleanup() { :; }
                 if outcome != 'pass':
                     self.assertNotEqual(0, result.returncode, result.stdout)
                     self.assertEqual('original profile\n', profile.read_text())
+                    self.assertEqual('turnip\n', selection.read_text())
                     self.assertIn('profile is unchanged', result.stderr)
                 else:
                     self.assertEqual(0, result.returncode, result.stderr)
+                    self.assertFalse(selection.exists())
                     self.assertIn('GALLIUM_DRIVER=' + ('zink' if distro == 'steamos' else 'llvmpipe'),
                                   profile.read_text())
                 self.assertEqual(distro == 'steamos', 'vulkan-swrast llvm17-libs' in package_log.read_text())
@@ -2007,6 +2014,9 @@ package_cleanup() { :; }
         self.assertIn('_eglFindNonDrmDevice', expected)
         self.assertIn('/usr/local/bin/magicdesk-snap-gpu', expected)
         self.assertIn('/usr/local/bin/magicdesk-flatpak-gl', expected)
+        for language in ('c', 'cpp'):
+            self.assertIn(f'"-D{language}_link_args=-Wl,-rpath,\\$ORIGIN:\\$ORIGIN/..:$prefix/lib"', expected)
+        self.assertIn("'-Dgbm-backends-path=$ORIGIN/gbm'", expected)
 
     def test_gpu_failure_preserves_environment_and_reports_exact_resume_command(self):
         result = self.run_script("--yes", "--resume", "--name", "gpu-work", "--gpu", "turnip",
@@ -2062,11 +2072,26 @@ package_cleanup() { :; }
         recipe = payload[payload.index("# Remove only our previously exported library directory"):]
         # Keep profile activation tests confined to their temporary filesystem.
         (self.directory / 'etc-magicdesk').mkdir(exist_ok=True)
-        return recipe.replace('/etc/magicdesk/', str(self.directory / 'etc-magicdesk') + '/') \
+        return recipe.replace('/etc/shroot', str(self.directory / 'etc-shroot')) \
+            .replace('/etc/vulkan', str(self.directory / 'etc-vulkan')) \
+            .replace('/etc/glvnd', str(self.directory / 'etc-glvnd')) \
+            .replace('/etc/magicdesk/', str(self.directory / 'etc-magicdesk') + '/') \
             .replace('/usr/share/flatpak/triggers', str(self.directory / 'triggers'))
+
+    def private_mesa_prefix(self):
+        prefix = self.directory / 'mesa'
+        (prefix / 'lib').mkdir(parents=True, exist_ok=True)
+        for relative, name in (('vulkan/icd.d/freedreno_icd.aarch64.json', 'libvulkan_freedreno.so'),
+                               ('glvnd/egl_vendor.d/50_mesa.json', 'libEGL_mesa.so.0')):
+            (prefix / 'lib' / name).touch()
+            path = prefix / 'share' / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({'file_format_version': '1.0.0', 'ICD': {'library_path': name}}))
+        return prefix
 
     def test_profile_activation_requires_successful_turnip_probe(self):
         recipe = self.profile_recipe()
+        prefix = self.private_mesa_prefix()
         profile = self.directory / "graphics.sh"
         probe = self.directory / "vulkaninfo"
         for body, accepted in [("exit 1", False), ("echo driverID = DRIVER_ID_MESA_LLVMPIPE", False),
@@ -2076,13 +2101,20 @@ package_cleanup() { :; }
                 probe.chmod(0o755)
                 profile.write_text("previous profile\n")
                 environment = dict(self.environment, gpu="turnip", ID="debian", automatic="no",
-                                   prefix="/opt/magicdesk/mesa/test",
+                                   prefix=str(prefix),
                                    candidate=str(profile) + ".new", profile=str(profile), work=str(self.directory))
                 result = subprocess.run(["sh", "-eu", "-c", recipe], env=environment,
                                         capture_output=True, text=True, timeout=5)
                 self.assertEqual(accepted, result.returncode == 0, result.stderr)
                 if accepted:
                     self.assertIn("MESA_LOADER_DRIVER_OVERRIDE=zink", profile.read_text())
+                    self.assertEqual('turnip\n', (self.directory / 'etc-shroot/render-node').read_text())
+                    for path, name in (('etc-vulkan/icd.d/magicdesk-turnip.aarch64.json', 'libvulkan_freedreno.so'),
+                                       ('etc-glvnd/egl_vendor.d/10_magicdesk.json', 'libEGL_mesa.so.0')):
+                        manifest = self.directory / path
+                        self.assertEqual(str(prefix / 'lib' / name),
+                                         json.loads(manifest.read_text())['ICD']['library_path'])
+                        self.assertEqual(0o644, manifest.stat().st_mode & 0o777)
                     activated = subprocess.run(
                         ["sh", "-eu", "-c", '. "$1"; printf "%s|%s" '
                          '"$MESA_LOADER_DRIVER_OVERRIDE" "${GALLIUM_DRIVER-unset}"',
@@ -2094,13 +2126,73 @@ package_cleanup() { :; }
                 else:
                     self.assertEqual("previous profile\n", profile.read_text())
 
+    def test_profile_missing_driver_preserves_previous_selection(self):
+        recipe = self.profile_recipe()
+        prefix = self.private_mesa_prefix()
+        profile = self.directory / 'graphics.sh'
+        profile.write_text('previous profile\n')
+        marker = self.directory / 'etc-shroot/render-node'
+        marker.parent.mkdir()
+        marker.write_text('turnip\n')
+        manifests = [self.directory / 'etc-vulkan/icd.d/magicdesk-turnip.aarch64.json',
+                     self.directory / 'etc-glvnd/egl_vendor.d/10_magicdesk.json']
+        for path in manifests:
+            path.parent.mkdir(parents=True)
+            path.write_text('previous manifest\n')
+        probe = self.directory / 'vulkaninfo'
+        probe.write_text('#!/bin/sh\necho driverID = DRIVER_ID_MESA_TURNIP\n')
+        probe.chmod(0o755)
+        environment = dict(self.environment, gpu='turnip', ID='debian', automatic='no',
+                           prefix=str(prefix), candidate=str(profile) + '.new',
+                           profile=str(profile), work=str(self.directory))
+        for missing in ('lib/libEGL_mesa.so.0', 'share/glvnd/egl_vendor.d/50_mesa.json'):
+            with self.subTest(missing=missing):
+                path = prefix / missing
+                saved = path.read_bytes()
+                path.unlink()
+                try:
+                    result = subprocess.run(['sh', '-eu', '-c', recipe], env=environment,
+                                            capture_output=True, text=True, timeout=5)
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertEqual('previous profile\n', profile.read_text())
+                    self.assertEqual('turnip\n', marker.read_text())
+                    for manifest in manifests:
+                        self.assertEqual('previous manifest\n', manifest.read_text())
+                        self.assertFalse(Path(str(manifest) + '.new').exists())
+                finally:
+                    path.write_bytes(saved)
+
+    def test_staged_egl_manifest_uses_installed_private_library(self):
+        result = self.run_script('--yes', '--name', 'debian', '--resume', '--gpu', 'turnip')
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = Path(str(self.payload) + '.gpu').read_text()
+        script = payload.split("<<'EGL_MANIFEST'\n", 1)[1].split('\nEGL_MANIFEST', 1)[0]
+        manifest = self.private_mesa_prefix() / 'share/glvnd/egl_vendor.d/50_mesa.json'
+        library = '/opt/magicdesk/mesa/test/lib/libEGL_mesa.so.0'
+        subprocess.run([sys.executable, '-', str(manifest), library], input=script,
+                       capture_output=True, text=True, check=True, timeout=5)
+        data = json.loads(manifest.read_text())
+        self.assertEqual(library, data['ICD']['library_path'])
+        self.assertEqual('1.0.0', data['file_format_version'])
+
     def test_software_profile_removes_only_previous_mesa_library_path(self):
         recipe = self.profile_recipe()
+        owned = [self.directory / 'etc-vulkan/icd.d/magicdesk-turnip.aarch64.json',
+                 self.directory / 'etc-glvnd/egl_vendor.d/10_magicdesk.json']
+        others = []
+        for path in owned:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('owned')
+            other = path.with_name('distribution.json')
+            other.write_text('distribution')
+            others.append(other)
         profile = self.directory / "software.sh"
         environment = dict(self.environment, gpu="software", ID="debian",
                            candidate=str(profile) + ".new", profile=str(profile))
         subprocess.run(["sh", "-eu", "-c", recipe], env=environment, check=True,
                        capture_output=True, timeout=5)
+        self.assertTrue(all(not path.exists() for path in owned))
+        self.assertTrue(all(path.read_text() == 'distribution' for path in others))
         environment.update(MAGICDESK_MESA_PREFIX="/opt/old", LD_LIBRARY_PATH="/custom:/opt/old/lib:/other",
                            VK_DRIVER_FILES="/old/icd.json", MESA_LOADER_DRIVER_OVERRIDE="zink",
                            MESA_VK_WSI_DEBUG="noshm")
@@ -2114,6 +2206,7 @@ package_cleanup() { :; }
 
     def test_fex_graphics_defaults_preserve_overrides_and_follow_profile(self):
         recipe = self.profile_recipe()
+        prefix = str(self.private_mesa_prefix())
         config = self.directory / 'fex-thunks.json'
         config.write_text('{"ThunksDB":{"GL":"1","Vulkan":"1"}}')
         recipe = recipe.replace('/opt/magicdesk/fex-thunks.json', str(config))
@@ -2124,7 +2217,7 @@ package_cleanup() { :; }
         for gpu in ('turnip', 'software'):
             profile = self.directory / (gpu + '.sh')
             env = dict(self.environment, gpu=gpu, ID='debian', automatic='no',
-                       prefix='/opt/magicdesk/mesa/test',
+                       prefix=prefix,
                        candidate=str(profile) + '.new', profile=str(profile), work=str(self.directory))
             subprocess.run(['sh', '-eu', '-c', recipe], env=env, capture_output=True,
                            check=True, timeout=5)
@@ -2134,7 +2227,6 @@ package_cleanup() { :; }
                  '. "$2"; printf "%s|%s|%s|%s\\n" ' \
                  '"${FEX_THUNKCONFIG-unset}" "${FEX_HOSTENV-unset}" ' \
                  '"$PRESSURE_VESSEL_FILESYSTEMS_RO" "$FEX_APP_CONFIG"'
-        prefix = '/opt/magicdesk/mesa/test'
         for custom in (False, True):
             env = dict(self.environment, FEX_APP_CONFIG='/user/game.json',
                        PRESSURE_VESSEL_FILESYSTEMS_RO='/user/files')

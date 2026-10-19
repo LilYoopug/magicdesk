@@ -19,6 +19,11 @@ There are two adapters, not one adapter per distribution:
   when its modern syscall boundary is present. Older async-cancellation wrappers
   are checked and retained; calls while async cancellation is enabled take the
   native route. Build-list insertions are checked structural transformations.
+- Glibc's per-thread entry state is appended after existing `struct pthread`
+  members. The adapter updates its end-padding marker without moving the TID,
+  robust-list or other existing fields. A compile-time assertion preserves the
+  AArch64 TID offset used by Chromium/Electron's namespace sandbox. Musl keeps
+  its existing beginning-relative and end-relative ABI regions intact.
 - `musl_entry.c`, `glibc_entry.c`, `glibc_entry_asm.S` and the common
   `../src/cooperative_entry.h` are copied as complete files, not duplicated in
   the patches.
@@ -49,8 +54,10 @@ dependencies, not Android or Termux prerequisites.
 `build.sh` identifies the installed AArch64 musl/glibc version and the exact
 original interpreter/libc bytes. It reuses a matching registry entry before
 installing build tools. Otherwise it downloads the corresponding upstream source
-release, applies the shared adapter, builds and runs an entry-ABI/file-IO probe
-and a shell probe. Glibc's upstream `check-abi` additionally verifies its public
+release, applies the shared adapter, builds and runs an entry-ABI/file-IO probe,
+a main/created-thread pthread ABI probe and a shell probe. The glibc probe
+compares its cached TID and recursive-mutex owner with the caller's actual TID.
+Glibc's upstream `check-abi` additionally verifies its public
 exports before staging; a failure prevents publication. Musl 1.2.5 and glibc
 2.41 have pinned source digests; other
 numeric releases use HTTPS and the same structural admission, printing their

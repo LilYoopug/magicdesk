@@ -2,6 +2,7 @@
 #include "fs_mount_internal.h"
 #include "fs_control.h"
 #include "host_fs_view.h"
+#include "render_device.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/magic.h>
@@ -38,6 +39,7 @@ int md_fs_sysfs_prepare(struct md_filesystem *fs,struct md_provider_tree **out) 
     struct md_provider_tree *tree=md_host_fs_new(parent,MD_HOST_FS_SYS);
     int error=tree ? 0 : -errno;
     close(parent);
+    if (!error && fs->render_device.ops) error=md_render_device_sysfs(fs->render_device,md_provider_tree_root(tree));
     if (!error) error=md_fs_provider_mount(fs,tree,"/sys");
     if (!error && initial) {
         error=md_fs_initial_boundaries_capture(fs);

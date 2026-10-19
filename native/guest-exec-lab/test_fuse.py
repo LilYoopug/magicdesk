@@ -2,15 +2,17 @@
 """Run stock FUSE clients in a private runtime, retaining per-command receipts."""
 import argparse
 from pathlib import Path
+import subprocess
 
 from test_oci_services import Suite
+from graphical_recipe import compile_recipe
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--build', type=Path, required=True)
     parser.add_argument('--store', required=True)
-    parser.add_argument('--case', choices=('rofiles', 'portal', 'squashfs', 'close'), required=True)
+    parser.add_argument('--case', choices=('rofiles', 'portal', 'session', 'squashfs', 'close'), required=True)
     parser.add_argument('--output', type=Path, default=Path('build/fuse-results'))
     parser.add_argument('--portal-user', default='1000:1000')
     parser.add_argument('--portal-home', default='/home/steamos')
@@ -21,6 +23,7 @@ def main():
     try:
         fixtures = Path(__file__).resolve().parent / 'fixtures'
         name = ('flatpak-document-portal.sh' if args.case == 'portal' else
+                'graphical-session-cleanup.py' if args.case == 'session' else
                 'fuse-close.c' if args.case == 'close' else f'fuse-{args.case}.py')
         suite.transport.upload(suite.client, fixtures / name, suite.base + '/fixture')
         registry = ['--libc-registry', args.libc_registry] if args.libc_registry else []
@@ -42,18 +45,22 @@ print('PASS FUSE fixture accelerated libc selection')
                 'trap \'rm -rf "$work"\' EXIT; '
                 'cc -x c -Wall -Wextra -Werror -O2 -pthread /mnt/fixture -o "$work/close"; '
                 '"$work/close"; "$work/close" --filtered')
-        elif args.case == 'portal':
+        elif args.case in ('portal', 'session'):
+            classes = args.output / 'recipe-classes'
+            suite.report['recipeSources'] = compile_recipe(classes)
+            session = args.output / 'session.sh'
+            session.write_text(subprocess.check_output(['java', '-cp', str(classes),
+                'io.github.mekhontsev.magicdesk.GraphicalRecipe',
+                '/usr/bin/python3 /mnt/fixture child' if args.case == 'session' else '/bin/sh /mnt/fixture'],
+                text=True, timeout=30))
+            suite.transport.upload(suite.client, session, suite.base + '/session')
             command = [suite.runner, '--store', args.store, '--bind-ro', suite.base, '/mnt',
                        *registry,
                        '--user', args.portal_user,
                        '--env', 'HOME=' + args.portal_home, '--env', 'PATH=/usr/bin:/bin',
                        *(['--env', 'G_MESSAGES_DEBUG=xdg-desktop-portal'] if args.debug else []),
-                       '--', '/bin/sh', '-ec',
-                       'XDG_RUNTIME_DIR=$(mktemp -d /tmp/md-fuse-portal.XXXXXXXX); '
-                       'export XDG_RUNTIME_DIR; '
-                       'trap \'fusermount3 -u -z "$XDG_RUNTIME_DIR/doc" 2>/dev/null || :; '
-                       'rm -rf "$XDG_RUNTIME_DIR"\' EXIT; '
-                       'dbus-run-session -- /bin/sh /mnt/fixture']
+                       '--', *(['/usr/bin/python3', '/mnt/fixture'] if args.case == 'session'
+                                else ['/bin/sh', '/mnt/session'])]
         else:
             command = suite.run(args.store, *registry, '--bind-ro', suite.base, '/mnt',
                                 '--user', '0:0', '--entrypoint', '/usr/bin/python3', '--', '/mnt/fixture')

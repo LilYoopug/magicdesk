@@ -102,6 +102,14 @@ static long open_operand(const struct md_fs *fs, struct md_namespace_operand ope
     }
     if (r==-EREMOTE) {
         if (how->resolve) {
+            /* A retained native proc/dev dirfd is already the kernel scope.
+             * Preserve that pair, including BENEATH/IN_ROOT, instead of
+             * turning a relative lookup into a new absolute lookup. */
+            if (*path!='/' && base>=0 && !operand.capture.path) {
+                long native=md_namespace_native_descriptor(base);
+                if (native<0) return native;
+                if (native) return md_namespace_host_open_resolved(fs,base,path,out.data,how,out.result.proc_namespace);
+            }
             /* The native suffix has no guest dirfd. Do not reinterpret a
              * scoped walk or let '..' leave the admitted proc/dev provider. */
             if (how->resolve&(RESOLVE_IN_ROOT|RESOLVE_BENEATH)) return -EXDEV;
@@ -350,7 +358,7 @@ long md_namespace_path_call(const struct md_fs *fs, long nr, const unsigned long
     case SYS_chroot: {
         struct md_fs_request q = {.operation=MD_FS_CHROOT, .directory={base,-1}, .capture={operand.capture}, .path={first,NULL}};
         struct md_fs_response out;
-        return md_namespace_request(fs, &q, &out);
+        return md_namespace_paths_resolve(fs, &q, &out);
     }
     case SYS_openat: {
         struct open_how how={.flags=(unsigned)a[2],

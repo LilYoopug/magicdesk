@@ -86,7 +86,9 @@ their object-cache records, policies and backing custody before slot reuse.
 A slot generation prevents stale snapshots from referring to its replacement.
 Nonrecursive topology changes check the selected operands' ancestry, not every
 unrelated attachment. Recursive operations, copying and table construction
-reconcile the complete graph. Logical link membership, or native
+reconcile the complete graph. Recursive bind reconciles its source recursively,
+but only the target's ancestry: target admission does not copy its descendants.
+Logical link membership, or native
 link count for native targets, determines disconnection; rename retains the
 same target identity. A disconnected placement and its descendants use the
 common detach transaction without releasing live origins. Graph readers may

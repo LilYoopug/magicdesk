@@ -34,23 +34,26 @@ static int execute_access(const struct md_view_mount *mount, int fd, unsigned mo
     if (fstat(fd,&st)) return -errno;
     return S_ISREG(st.st_mode) ? -EACCES : 0;
 }
+static int reopen_admitted(int fd, struct md_view_mount *mount, int flags,
+        struct md_open_completion *completion) {
+    int opened=md_reopen_file(fd,flags,completion);
+    if ((opened==-EACCES || opened==-EPERM) && mount->backing==MD_MOUNT_PROC) {
+        /* Proc access depends on the caller's task and dumpability. Retain
+         * the admitted object and mount; complete the kernel open in that
+         * caller, through the same ownership path as controlling terminals. */
+        opened=fcntl(fd,F_DUPFD_CLOEXEC,3);
+        if (opened<0) return -errno;
+        completion->kind=MD_OPEN_CALLER;
+    }
+    return opened;
+}
 static int reopen(struct md_view_object *p, int flags, int mutable,
         struct md_open_completion *completion) {
     if (md_view_readonly(p->mount) && (mutable || writable(flags))) return -EROFS;
     struct stat st;
     if (fstat(p->fd,&st)) return -errno;
     int error=device_open(p->mount,flags,st.st_mode);
-    if (error) return error;
-    int opened=md_reopen_file(p->fd,flags,completion);
-    if ((opened==-EACCES || opened==-EPERM) && p->mount->backing==MD_MOUNT_PROC) {
-        /* Proc access depends on the caller's task and dumpability. Retain
-         * the admitted object and mount; complete the kernel open in that
-         * caller, through the same ownership path as controlling terminals. */
-        opened=fcntl(p->fd,F_DUPFD_CLOEXEC,3);
-        if (opened<0) return -errno;
-        completion->kind=MD_OPEN_CALLER;
-    }
-    return opened;
+    return error ? error : reopen_admitted(p->fd,p->mount,flags,completion);
 }
 static void result_stat(struct md_fs_result *out, int fd, const struct md_view_mount *mount) {
     struct stat st;
@@ -464,7 +467,7 @@ static void native(struct md_filesystem *fs, const struct md_fs_request *q,
         int selected=a->fd>=0 && (!strcmp(a->name,".") || a->mount->backing==MD_MOUNT_PROC || a->mount->provider);
         if (selected && !(flags&O_PATH) && (flags&(O_CREAT|O_EXCL))==(O_CREAT|O_EXCL)) { r=-EEXIST; break; }
         if (selected && !(flags&O_PATH) && (flags&O_CREAT) && S_ISDIR(existing.st_mode)) { r=-EISDIR; break; }
-        int fd=selected ? md_reopen_file(a->fd,(flags&~(O_CREAT|O_EXCL))|O_CLOEXEC,&out->open_completion)
+        int fd=selected ? reopen_admitted(a->fd,a->mount,(flags&~(O_CREAT|O_EXCL))|O_CLOEXEC,&out->open_completion)
             : deferred ? fcntl(a->fd, F_DUPFD_CLOEXEC, 3)
             : openat(a->parent, a->name, flags | O_NOFOLLOW | O_CLOEXEC, q->mode&~q->attributes.creation_mask);
         /* Captured opens retain mount identity in their lifetime-bound anchor.

@@ -251,7 +251,7 @@ print('PASS gdb-jit')
 
 def commands(*, proot=False):
     cases = [(name, [TARGET, name]) for name in ('attach', 'seize', 'trace-exit', 'syscall', 'syscall-edit-close', 'syscall-exec', 'credential-transition', 'mixed',
-                                               'kill-stopped', 'owner-exit', 'exitkill', 'thread-exec', 'syscall-thread-exec', 'clone-untraced', 'perf-event')]
+                                               'kill-stopped', 'owner-exit', 'exitkill', 'thread-exec', 'syscall-thread-exec', 'clone-untraced', 'shared-files-debugger', 'perf-event')]
     cases.append(('strace-detach', ['python3', '-c', STRACE_DETACH]))
     cases.append(('gdb-attach', ['python3', '-c', GDB_ATTACH]))
     cases.append(('gdb-attach-threads', ['python3', '-c', GDB_ATTACH, 'gdb-thread-target']))

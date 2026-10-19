@@ -266,7 +266,8 @@ static void managed_proc_reads(const char *store) {
             assert(md_fd_order_begin(resources.files,&busy,NULL)==1);
             assert(!md_fd_order_start(&busy));
         }
-        if (scenario==2) actor.identity.uid.effective=1001;
+        /* Proc path inspection uses FSCREDS, not the effective UID alone. */
+        if (scenario==2) actor.identity.uid.fs=1001;
         if (scenario==3) {
             struct md_fd_origin_update update;
             assert(!md_fd_origins_prepare_object(resources.files,&typed,0,&update));
@@ -283,7 +284,7 @@ static void managed_proc_reads(const char *store) {
             /* A native service owner is authenticated in this registry but has
              * no guest file table. Its proc observations retain kernel policy. */
             assert(!md_task_registry_publish(tasks,getpid(),getpid(),&id,NULL));
-            actor.identity.uid.effective=1001;
+            actor.identity.uid.fs=1001;
         }
         if (scenario==6) assert(!prctl(PR_SET_DUMPABLE,0));
         for (unsigned op=0;op<3;++op) {
@@ -291,14 +292,18 @@ static void managed_proc_reads(const char *store) {
                 .flags=op==1 ? AT_SYMLINK_NOFOLLOW : 0};
             struct md_fs_result out={.fd=-1,.error=-EREMOTE};
             md_fs_native_boundary(&fs,&boundary,&q,&out,&output);
-            if ((scenario>=1 && scenario<=3) || scenario==6) { assert(out.error==-EREMOTE); continue; }
+            if ((scenario>=1 && scenario<=3) || scenario==6) {
+                if (out.error!=-EREMOTE)
+                    fprintf(stderr,"proc boundary scenario=%u operation=%u result=%d\n",scenario,op,out.error);
+                assert(out.error==-EREMOTE); continue;
+            }
             assert(!out.error && !out.host_path && out.fd==-1);
             if (op==2) assert(out.size==(size_t)length && !memcmp(data,expected,out.size));
             else if (op==1) assert(S_ISLNK(out.info.mode));
             else assert(out.info.inode==native.st_ino && out.info.mode==native.st_mode);
         }
         if (scenario==1) assert(!md_fd_order_complete(&busy));
-        if (scenario==2) actor.identity.uid.effective=1000;
+        if (scenario==2) actor.identity.uid.fs=1000;
         if (scenario==3) assert(!md_fd_origins_close_range(resources.files,sockets[0],sockets[0],0));
     }
     assert(!prctl(PR_SET_DUMPABLE,dumpable));

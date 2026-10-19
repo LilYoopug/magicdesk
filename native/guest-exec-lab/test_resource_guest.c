@@ -1138,7 +1138,8 @@ static void retained_proc_filter(int proc) {
     /* EVENT_WAIT: exact filtered child exit; the fixture alarm bounds failure. */
     reap(child);
 }
-static void metadata_export(int guest) {
+static void metadata_export(int guest, int managed) {
+    unsigned extra=guest && !managed;
     int file=open("metadata-export",O_RDWR|O_CREAT|O_CLOEXEC,0600);
     int proc=open("/proc",O_RDONLY|O_DIRECTORY|O_CLOEXEC);
     assert(file>=0 && proc>=0);
@@ -1153,12 +1154,22 @@ static void metadata_export(int guest) {
     assert(errno==EMFILE);
     struct stat st;
     int result=fstat(file,&st);
-    if (guest) assert(result==-1 && errno==EMFILE);
+    if (extra) assert(result==-1 && errno==EMFILE);
     else assert(!result);
     for (int i=0;i<count;++i) assert(!close(filled[i]));
     unsigned char before[256]; unsigned baseline=export_fds(before);
     assert(!fstat(file,&st) && st.st_size==1);
-    assert(export_fds(NULL)==baseline+(unsigned)guest);
+    assert(export_fds(NULL)==baseline+extra);
+    if (managed) {
+        /* Managed file metadata needs no export channel. Admit the native
+         * proc input explicitly before testing reuse at the FD limit. */
+        fd=openat(proc,"self/fd/",O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(fd>=0);
+        char name[32]; snprintf(name,sizeof(name),"%d",file);
+        assert(!fstatat(fd,name,&st,0) && st.st_size==1);
+        assert(!close(fd));
+        extra=1;
+        assert(export_fds(NULL)==baseline+extra);
+    }
     /* Admission consumes one infrastructure slot; all subsequent metadata
      * calls and proc directory opens use only their actual result slots. */
     count=0;
@@ -1197,9 +1208,9 @@ static void metadata_export(int guest) {
         assert(pid>0);
         /* EVENT_WAIT: exporter terminal event; alarm bounds a missing exit. */
         int status; assert(waitpid(pid,&status,0)==pid);
-        if (guest) assert(WIFSIGNALED(status) && WTERMSIG(status)==SIGSYS);
+        if (guest && !managed) assert(WIFSIGNALED(status) && WTERMSIG(status)==SIGSYS);
         else assert(WIFEXITED(status) && !WEXITSTATUS(status));
-        assert(export_fds(NULL)==baseline+(unsigned)guest);
+        assert(export_fds(NULL)==baseline+extra);
         assert(!fstat(file,&st) && st.st_size==1);
     }
     free(stack);
@@ -2240,8 +2251,10 @@ int main(int argc, char **argv) {
     if (!strcmp(argv[1],"buffer-export") || !strcmp(argv[1],"buffer-export-native")) {
         buffer_export(!strcmp(argv[1],"buffer-export")); return 0;
     }
-    if (!strcmp(argv[1],"metadata-export") || !strcmp(argv[1],"metadata-export-native")) {
-        metadata_export(!strcmp(argv[1],"metadata-export")); return 0;
+    if (!strcmp(argv[1],"metadata-export") || !strcmp(argv[1],"metadata-export-native")
+            || !strcmp(argv[1],"metadata-export-managed")) {
+        metadata_export(strcmp(argv[1],"metadata-export-native")!=0,
+            !strcmp(argv[1],"metadata-export-managed")); return 0;
     }
     if (!strcmp(argv[1],"buffer-return") || !strcmp(argv[1],"buffer-return-native")) {
         buffer_return(!strcmp(argv[1],"buffer-return")); return 0;

@@ -30,6 +30,7 @@ struct md_filesystem {
     struct md_shm_bridge *shm_bridge;
     struct md_libc_registry *libc_registry;
     struct md_provider_tree *devices; /* borrowed launch-owned /dev projection */
+    struct md_control_file render_device; /* launch-admitted optional KGSL discovery */
     struct md_resource_wakeup *wakeup; /* borrowed filesystem event-loop owner */
     const char *ipc_store;
     struct md_fs_statistics *statistics;
@@ -38,6 +39,7 @@ struct md_filesystem {
 /* Worker-only lazy authority admission, shared by guest IPC and private peer
  * setup. No connection/database ownership crosses into the supervisor. */
 int md_fs_ipc_authority(struct md_filesystem *, struct md_ipc_credentials **);
+void md_fs_render_prepare(struct md_filesystem *);
 /* Request-local authentication, independent of transport. Keep this context
  * until delivery/cancellation finishes; the borrowed filesystem outlives it.
  * No registry lookup is repeated at execution or publication. */

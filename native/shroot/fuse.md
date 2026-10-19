@@ -186,6 +186,10 @@ clients in a private runtime under Android UID 2000:
   TTLs; a separate zero-TTL mount verifies actual daemon waits across
   SIGSTOP/SIGCONT, descriptor reuse and daemon death.
 - `portal`: stock document export, Flatpak read/write and live revocation.
+- `session`: production graphical-wrapper cleanup with live document exports,
+  an unrelated FUSE provider, daemon death and a foreign mount that must remain
+  attached. Checks source-file preservation and command exit status. The portal
+  case uses this same wrapper instead of a test-only unmount trap.
 - `squashfs`: concurrent reads, ELF/script execution, provider-source set-ID
   metadata and nosuid suppression, shared-library loading, read-only shared mmap
   with writable shared-mapping rejection,

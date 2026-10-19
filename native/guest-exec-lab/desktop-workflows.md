@@ -47,7 +47,7 @@ uses the packaged `fusermount3` and ordinary stored set-ID semantics; no
 per-helper launch admission is needed. It is not a substitute for checking a
 desktop file chooser's UI.
 
-`test_fuse.py --build BUILD --store STORE --case portal|rofiles|squashfs` stages a
+`test_fuse.py --build BUILD --store STORE --case portal|session|rofiles|squashfs` stages a
 private native runtime under UID 2000. Each invocation selects one case. The
 rofiles case exercises concurrent append, watch events/lifetimes, cancellation
 and retained directory FDs; the
@@ -58,6 +58,14 @@ direct-entry ABI before the workflow. All three cases also pass with the
 SteamOS replacement libc; this does not imply that every nested Flatpak runtime
 has a prepared replacement. See
 [FUSE contracts](../shroot/fuse.md) for unsupported operations.
+
+The portal and session cases compile the production `LinuxGraphicalEnvironment`
+wrapper; they do not substitute a fixture-only unmount trap. `session` retains
+a writable, deletable document export and a second FUSE mount until command
+exit, with both live and terminated daemons. It requires runtime-directory
+removal, intact source contents, an unrelated mount remaining usable, and the
+original application exit status. These checks pass on the installed SteamOS
+with both base execution and accelerated libc, under the ordinary guest user.
 
 An independent Shroot launch that merely inherits another launch's bus address
 is not equivalent: portal authorization can depend on the requesting process's
@@ -192,9 +200,10 @@ The shared workflow passes for SteamOS Flatpak Firefox under Plasma Wayland
 and Ubuntu Snap Chromium under Weston, both as the installed ordinary user.
 Each run verifies input, download, chooser upload, exact file contents, the
 WebGL pixel and normal exit. Firefox's support report confirms hardware
-WebRender. Chromium reports ANGLE/Zink/Turnip on Adreno 840 for WebGL, but
-window composition remains software: its Wayland GBM path cannot find a DRM
-render node on this KGSL device. A WebGL pass is not a composition pass.
+WebRender. Without the optional discovery node, Chromium reports
+ANGLE/Zink/Turnip on Adreno 840 for WebGL but uses software window composition.
+With Shroot's [GBM discovery node](#gbm-discovery), the unchanged Chromium Snap
+also reports hardware composition. A WebGL pass alone is not a composition pass.
 Chromium's sandbox page reports namespace and seccomp-BPF/TSYNC support;
 renderer status also retains no_new_privs and seccomp filters. These checks
 do not establish kernel-equivalent isolation. Stock snapd detects absent
@@ -650,6 +659,162 @@ checked after a bounded fence wait, without `glFinish`. The DMA heap is opened r
 allocated buffer FD is read/write. Run with an outer process timeout to bound a
 driver hang. This fixture verifies backend building blocks, not a nested KWin
 desktop or frame-presentation timing.
+
+### GBM Discovery
+
+The Turnip recipe writes `/etc/shroot/render-node` only after its GPU probe
+succeeds; software selection removes it. `fs_render.c` admits the optional
+typed device once per launch after real KGSL/DMA-heap/fence capability checks.
+`render_sysfs.c` projects its matching identity. Existing DRM nodes are retained.
+The device implements DRM_VERSION through bounded nested-pointer ioctl
+marshalling shared with other typed controls. It does not claim unrelated DRM
+operations. No preload, extra browser flags or separate Mesa build is installed.
+
+Run `python native/guest-exec-lab/test_render.py BUILD STORE` from the repository
+root with a prepared Turnip test environment.
+The unit/guest fixtures cover capability admission, disabled profiles, device
+and sysfs identity, FD duplication/transfer, namespaces, invalid ioctl buffers
+and unsupported operations. On NX809J, UID 2000, kernel 6.12.23, the admitted
+node is renderD129 alongside Android's renderD128. The following EGL fixture
+also passes all 64 frames on `/dev/dri/renderD129`. Ordinary Ubuntu Snap Chromium
+155.0.8059.79 reports hardware Canvas/Compositing/Rasterization/WebGL/WebGPU and
+zero GPU crashes. These observations do not establish hardware video decode
+or kernel-equivalent sandbox isolation.
+After the common recursive-bind target fix, two cold Chromium namespaces took
+22.6 and 22.2 seconds with VS Code running alongside, within Snap's unchanged
+30-second helper limit. Before that fix, concurrent GUI launches reproduced
+the helper timeout. These are device observations, not an arbitrary-load timing
+guarantee; repeated cold setup remains part of the acceptance checks.
+
+#### VS Code / Electron
+
+Include the distribution's installed VS Code in the same Wayland/Turnip checks
+as the browsers. Run as the ordinary desktop user through the recipe's login
+environment, with no preload, GPU override or sandbox-disabling arguments:
+
+```sh
+code --new-window
+code --status
+```
+
+Verify the actual editor, not just CLI exit status:
+
+- Enter text in a new document, save through the native file chooser and read
+  the resulting file independently.
+- Modify that saved file from another process; the editor must display the
+  external change without reopening it.
+- Open the integrated terminal, run a command and inspect its output.
+- Record `code --status`: `gpu_compositing` must be enabled and the renderer
+  must identify Zink/Turnip, not software rendering.
+- Inspect a renderer's `/proc/PID/status` for `NoNewPrivs: 1` and `Seccomp: 2`.
+  These verify installed restrictions, not complete kernel-equivalent isolation.
+- Close and relaunch normally; reject renderer/GPU crashes even if a recovered
+  window looks correct. Keep GDB/extension testing as a separate workflow.
+
+Ubuntu's stock Code 1.142.0 (Electron), accelerated glibc 2.39, recipe Mesa 26.2.3
+and the production discovery node passed editor/save, external file change,
+integrated PTY and hardware-compositing checks on NX809J. Renderer seccomp
+remained installed. Its initial SIGTRAP exposed a common libc ABI defect:
+Shroot's thread storage had moved glibc's `pthread.tid`. The integration now
+appends storage after upstream fields and probes both main/created threads and
+recursive-mutex ownership. No Electron-specific bypass was added.
+Code 1.142.0's CLI process-memory table is not an acceptance metric: its bundled
+`mainImpl.js` converts `%MEM` to bytes in `Xp` and applies the percentage
+conversion again in `formatProcessItem`. `/proc`, `ps` and `free` remain the
+independent memory checks; do not compensate for that application conversion
+inside Shroot.
+
+SteamOS 0.3.0 also passed ordinary Code 1.142.0 editor/save, external-change,
+integrated-PTY and hardware-compositing checks under Plasma Wayland with the
+corrected accelerated glibc 2.39 (entry ABI 6). Renderer `NoNewPrivs: 1` and
+`Seccomp: 2` remained present. KWin retained `cap_sys_nice=ep` and reported
+OpenGL 4.6, Zink/Turnip and Mesa 26.2.3 after private-driver system discovery was
+repaired. Previously protected KWin lost `LD_LIBRARY_PATH`, selected the wrong
+driver and fell back to QPainter despite working WebGL in ordinary clients.
+
+In the same installation, Flatpak Chromium 155.0.8059.39 initially used software
+composition because the copied GBM library searched the host's private `/opt`
+path for `dri_gbm.so`. The common Mesa recipe now uses `$ORIGIN/gbm` and the
+Flatpak helper admits nested backend libraries too. A normal browser launch,
+without extra GPU or sandbox switches, then reported hardware composition,
+Canvas, rasterization, WebGL and WebGPU with zero GPU-process crashes. The
+device experiment incrementally rebuilt GBM and repaired existing library
+search paths; it was not a complete clean Mesa build or a new SteamOS install.
+
+A subsequent session exposed a debugger/descriptor-table deadlock in Steam's
+crash collectors: each collector stopped its parent threads while sharing their
+FD table, then waited for a virtual proc descriptor's selector to be installed in
+those same stopped threads. The common [debugger ownership fix](../shroot/debugging.md#waits-and-process-identity)
+allows only that exact parked debugger request to borrow its acknowledged
+inferior stops. The regression reproduces a timeout before the fix and passes
+afterward; it is not a Steam-specific launch workaround.
+With the fix, three Chromium Zink pixel-readback/lifecycle cycles pass with the
+sandbox and GPU watchdog enabled. Ordinary Chromium and Code relaunches retain
+hardware composition. Flatpak Firefox 157.0.1 reports Wayland, hardware WebRender,
+one accelerated window and content sandbox level 6 through Zink/Turnip. Its
+VA-API/DMABuf video path remains unavailable; this does not claim hardware video
+decode or a complete Steam game workflow.
+Plasma's logout request closes its windows and compositor. Its former
+runtime-directory trap traversed the document portal's FUSE mount and reported
+EPERM/ECONNABORTED; the shared wrapper now detaches owned mounts first, verified
+by the `session` workflow above. Baloo and the lab's controller also outlived the
+observed session command and required explicit cleanup. Their process lifetime
+is separate from mount cleanup and from the debugger deadlock; this fixture does
+not claim that every Plasma background service exits on logout.
+
+`test_egl_gbm.c` checks the installed Mesa's GBM allocation, EGL import, native
+GPU fences and 64 exact alternating frames. It accepts a node path; on the
+tested KGSL system even `/dev/dma_heap/system` suffices for the existing
+DRI/Zink fallback. No additional Mesa patch is needed for this experiment.
+Use the recipe's graphics environment and compile inside the guest:
+
+```sh
+. /etc/profile.d/magicdesk-graphics.sh
+p=$(cat /etc/magicdesk/mesa-prefix)
+cc -O2 -Wall -Wextra -Werror -I"$p/include" -I/usr/include/libdrm \
+    test_egl_gbm.c -L"$p/lib" -Wl,-rpath,"$p/lib" \
+    -lgbm -lEGL -lGLESv2 -o gbm-probe
+timeout 60 ./gbm-probe /dev/dma_heap/system
+```
+
+`fixtures/gbm_discovery_probe.c` isolates device discovery for an unchanged
+browser. It redirects one render-node identity and its minimal sysfs tree to
+the real DMA heap FD, and answers only DRM_VERSION; other DRM ioctls fail.
+GBM allocation, buffer export, GPU execution and synchronization remain real.
+The interposer observes GBM calls without replacing their results. Interposing
+only libdrm entry points is insufficient: the tested Chromium links libdrm
+statically, while Mesa uses its shared copy.
+
+For a disposable Ubuntu Snap account with the prepared GPU content provider,
+compile the interposer with `-shared -fPIC -Wall -Wextra -Werror`, the same
+include paths and `-ldl`, to
+`$HOME/snap/chromium/common/libgbm-discovery-probe.so`. Run
+`sh fixtures/gbm_probe_setup.sh "$HOME/snap/chromium/common/gbm-probe-root"`.
+Only if `~/.chromium-browser.init` does not exist, copy
+`fixtures/gbm_probe_init.sh` there. Launch ordinary `snap run chromium`, then
+visit `chrome://gpu` and the copied `fixtures/gbm_probe.html`.
+No added Chromium flags, rebuilt browser, changed sandbox setting or global
+`ld.so.preload` is involved. Close the browser normally; remove the temporary
+init file before the control launch, then remove the probe library/tree/page.
+Never install this interposer in recipes or shared login settings.
+
+On NX809J, UID 2000, kernel 6.12.23, Ubuntu's stock Chromium Snap
+155.0.8059.79 (3560) with recipe Mesa 26.2.3, the probe enables **hardware
+composition**, not just WebGL. GBM logs record real allocation/export, including
+window-sized buffers. The page completes 600 frames with zero pixel errors in
+windowed and fullscreen modes; captured output also has exact green/blue pixels.
+The GPU report records Adreno 840 through ANGLE/Zink/Turnip and zero GPU crashes.
+Both baseline and prototype report GPU `Sandboxed: false`; observed inherited
+seccomp filters must not be presented as proof of Chromium's GPU sandbox.
+
+The interposer is retained only as the original diagnostic experiment, not as
+the installed implementation. Neither it nor the production checks prove
+general DRM support, strict confinement, performance or another GPU/distribution.
+Zink can log an unsuccessful DRM-device match before its working fallback.
+The fence fixture requires the post-5.15 sync-file bridge recorded in
+[kernel compatibility](../shroot/kernel-compatibility.md#newer-interfaces).
+
+### Allocator Rejection And Desktop Presentation
 
 `fixtures/dma_heap_unavailable.c` is a test-only `LD_PRELOAD` control for the
 nested KWin allocator. Build it with `cc -shared -fPIC -Wall -Wextra -Werror

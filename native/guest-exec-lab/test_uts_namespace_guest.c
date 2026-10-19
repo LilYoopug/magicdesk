@@ -74,8 +74,12 @@ static void proc_files(void) {
     assert((a.st_mode&0777)==0644 && !a.st_uid && !a.st_gid);
     int directory=open("/proc/sys/kernel",O_PATH|O_DIRECTORY); assert(directory>=0);
     struct open_how how={.flags=O_RDONLY|O_CLOEXEC,.resolve=RESOLVE_BENEATH};
-    int relative=syscall(SYS_openat2,directory,"hostname",&how,sizeof(how)); assert(relative>=0);
-    content(relative,"parent\n"); close(directory); close(relative);
+    int relative=syscall(SYS_openat2,directory,"hostname",&how,sizeof(how));
+    if (relative<0) perror("openat2 relative UTS sysctl");
+    assert(relative>=0);
+    content(relative,"parent\n"); close(relative);
+    assert(syscall(SYS_openat2,directory,"../kernel/hostname",&how,sizeof(how))<0 && errno==EXDEV);
+    close(directory);
     int readonly=open("/proc/sys/kernel/ostype",O_RDONLY); assert(readonly>=0);
     struct utsname names; assert(!uname(&names));
     char value[256]; snprintf(value,sizeof(value),"%s\n",names.sysname); content(readonly,value); close(readonly);

@@ -11,6 +11,21 @@ FILES = (ARCH + 'sysdep.h', ARCH + 'syscall.S', ARCH + 'Makefile',
          'sysdeps/nptl/_Fork.c', 'csu/libc-start.c')
 
 
+def thread_storage(tree):
+    # Chromium and libthread_db observe existing pthread member offsets.
+    # Extend only the tail, updating glibc's definition of its last member.
+    path = 'nptl/descr.h'
+    if re.search(r'\bshroot_client\b', tree.files[path]):
+        raise IntegrationError('pthread already has Shroot storage')
+    tree.regex(path, r'^  /\* Amount of end padding, if any, in this structure\.\n'
+               r'     This definition relies on (\w+) being last\.  \*/\n'
+               r'#define PTHREAD_STRUCT_END_PADDING \\\n'
+               r'  \(sizeof \(struct pthread\) - offsetof \(struct pthread, \1\) \\\n'
+               r'   \+ sizeof \(\(struct pthread\) \{\}\.\1\)\)',
+               lambda match: '  struct md_entry_client shroot_client;\n\n'
+               + match[0].replace(match[1], 'shroot_client'))
+
+
 def build_hooks(tree):
     tree.regex('elf/Makefile', r'^rtld-stubbed-symbols = \\\n',
                lambda match: match[0] + '  __shroot_entry \\\n  __shroot_syscall \\\n  __shroot_syscall_asm \\\n')
@@ -70,6 +85,7 @@ def integrate(source, library_path=None):
         tree = SourceIntegration(source, (*paths, 'sysdeps/unix/sysdep.h'))
     redirect_syscalls(tree)
     build_hooks(tree)
+    thread_storage(tree)
     here = Path(__file__).resolve().parent
     patches = [here / 'glibc.patch']
     if modern:

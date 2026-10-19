@@ -13,6 +13,8 @@ enum { MD_MOUNT_READONLY=1U, MD_MOUNT_NOSUID=2U, MD_MOUNT_NODEV=4U, MD_MOUNT_NOE
     MD_MOUNT_LOCKS=MD_MOUNT_LOCKABLE<<MD_MOUNT_LOCK_SHIFT,
     MD_MOUNT_POLICY_MASK=MD_MOUNT_FLAGS|MD_MOUNT_LOCKS };
 struct md_mount_policy_page;
+/* Capture native constraints before adopting an already admitted descriptor. */
+int md_mount_native_policy(int fd, unsigned *flags);
 /* Owned by one mount. Local until explicitly shared; imported mappings are
  * read-only observers, not authority to remount. Never copy this by assignment. */
 struct md_mount_policy {

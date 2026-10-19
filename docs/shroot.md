@@ -559,6 +559,19 @@ Turnip, Zink, EGL,
 GLX and GBM come from that same build. Zink also supports GPU rendering with
 CPU readback when Kopper is disabled or the X server lacks DRI3. That path has
 a frame copy, not zero-copy presentation.
+For the verified Turnip profile, the recipe enables Shroot's optional GBM
+discovery node through `/etc/shroot/render-node`. At guest startup, access to
+KGSL and the system DMA heap, allocation and sync-file export/import are probed
+once. Failure leaves the node absent and ordinary graphics paths unchanged;
+kernel version alone is not admission. The bridge requires the optional
+post-5.15 DMA-BUF interfaces listed in
+[kernel compatibility](../native/shroot/kernel-compatibility.md#newer-interfaces).
+Shroot chooses an unused `/dev/dri/renderD*` identity and projects matching
+sysfs entries without replacing Android devices. This is a discovery adapter,
+not an emulated DRM GPU: Mesa still allocates real buffers and submits work
+through Turnip/KGSL. Unsupported DRM operations fail explicitly. Stock Ubuntu
+Snap Chromium has hardware composition coverage on Adreno 840 with this path,
+without browser overrides; that does not establish video-decoding support.
 Steam's CEF interface and animated GLX output have coverage in nested Xwayland
 on Adreno 840. `--jobs N` controls compiler parallelism
 (1-8, default 2). Allow several GB of space for sources, build files and libraries.
@@ -1254,6 +1267,14 @@ PRoot and chroot recipes. The distribution supplies `dbus-run-session` and
 `dbus-daemon`, with its standard session configuration, listen address,
 credential authentication, activation and limits. `dbus-run-session` owns
 readiness and shutdown; the wrapper owns a private `XDG_RUNTIME_DIR`.
+On exit it detaches mounts only at or below that exact private directory,
+children before parents, using the distribution's FUSE unmount helper when
+appropriate. It verifies that the mounts disappeared before deleting local
+entries without crossing filesystem boundaries. A failed unmount retains the
+directory and reports cleanup failure; an application's existing nonzero exit
+status is preserved. This also handles a dead document-portal daemon without
+walking into exported user documents. It adds no syscall-path work or background
+mount polling, and never elevates the selected executor.
 MagicDesk ships no D-Bus daemon and does not reuse Android's or Termux's bus.
 
 ## Coverage And Limits

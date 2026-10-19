@@ -127,6 +127,18 @@ dependencies differ. Its `--print-mesa-patch` export is also the lab's patch
 source. Existing environments need `--resume --gpu turnip` with the updated
 installer; installing an APK alone does not rebuild their private Mesa.
 
+Private Mesa libraries carry loader search paths for their own directory and
+the installed prefix. GBM locates its backend through `$ORIGIN/gbm`, so moving
+the stack into a Flatpak extension does not leave an inaccessible host path in
+the allocator. These are build options, not an additional Mesa source patch.
+Successful Turnip activation also publishes owned Vulkan and EGL manifests in
+`/etc/vulkan/icd.d` and `/etc/glvnd/egl_vendor.d`, with absolute library paths.
+The private EGL manifest uses an absolute path too. This lets capability-bearing
+executables, including KWin with `cap_sys_nice`, discover the same stack even
+when the loader removes `LD_LIBRARY_PATH` and Vulkan ignores environment
+overrides. Distribution manifests and system libraries remain untouched;
+software selection removes only MagicDesk's two manifests.
+
 The GLX patch advertises callbacks from the effective loader backend, including
 when an application sets `LIBGL_KOPPER_DISABLE`. The Turnip profile explicitly
 selects Zink for both Kopper and the software-presentation frontend. Disabling
@@ -167,7 +179,8 @@ trigger. It can also be run manually inside the guest:
 magicdesk-flatpak-gl
 ```
 
-Each runtime sharing a GL branch must pass a sandboxed loader/dlopen check before
+Each runtime sharing a GL branch must pass a sandboxed loader/dlopen check,
+including nested GBM backends, before
 publication. A runtime commit change repeats admission without copying unchanged
 Mesa libraries. This detects missing dependencies/symbols, not every possible
 driver/runtime incompatibility. Admission failure is reported and withdraws the
@@ -178,7 +191,7 @@ still use them; they are not automatically reclaimed.
 
 The helper adds Flatpak global `unset-environment` entries for inherited host
 `VK_DRIVER_FILES`, `VK_ICD_FILENAMES`, `__EGL_VENDOR_LIBRARY_FILENAMES` and
-`LIBGL_DRIVERS_PATH`. Runtime loader discovery then selects the extension's
+`LIBGL_DRIVERS_PATH` and `GBM_BACKENDS_PATH`. Runtime loader discovery then selects the extension's
 libraries, not inaccessible `/opt` paths. Existing explicit global driver choices,
 per-app overrides and filesystem permissions remain intact. These unsets also
 remain useful if the selected host GPU profile later changes.

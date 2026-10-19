@@ -311,8 +311,11 @@ def main():
     def check_exports():
         check("native metadata export control", root + "/libmagicdesk_guest_resource_guest.so metadata-export-native "
               + root + "/native", "PASS metadata export custody")
-        check("guest protected metadata export", root + "/libmagicdesk_guest_run.so --diagnostics --store " + root
-              + "/store --deadline-seconds 90 -- /bin/test metadata-export /tmp", "PASS metadata export custody")
+        check("direct guest protected metadata export", root + "/libmagicdesk_guest_supervisor.so --diagnostics "
+              + root + "/libmagicdesk_guest_bootstrap.so " + root + "/source /bin/test metadata-export /tmp",
+              "PASS metadata export custody")
+        check("managed guest protected metadata export", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store " + root
+              + "/store --deadline-seconds 90 -- /bin/test metadata-export-managed /tmp", "PASS metadata export custody")
         check("native protected export control", root + "/libmagicdesk_guest_resource_guest.so buffer-export-native "
               + root + "/native", "PASS protected export")
         check("guest protected export", root + "/libmagicdesk_guest_run.so --diagnostics --store " + root

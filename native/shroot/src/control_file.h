@@ -24,9 +24,18 @@ struct md_control_file {
 };
 /* Typed ioctl marshalling. Providers never dereference guest addresses. Some
  * Linux requests (notably EVIOCSFF) return data despite an _IOW encoding. */
-enum { MD_CONTROL_IN=1, MD_CONTROL_OUT=2, MD_CONTROL_STRING=4, MD_CONTROL_IOCTL_MAX=16384 };
+enum { MD_CONTROL_IN=1, MD_CONTROL_OUT=2, MD_CONTROL_STRING=4, MD_CONTROL_INDIRECT=8, MD_CONTROL_IOCTL_MAX=16384 };
 enum { MD_CONTROL_IO_MAX=65536 };
-struct md_control_ioctl { unsigned size, direction; };
+/* Bounded pointed-to byte arrays, following the fixed argument in transport.
+ * Offsets address native-width pointer/size_t fields in that argument. The
+ * adapter captures addresses before dispatch; providers only see byte arrays. */
+enum { MD_CONTROL_IOCTL_FIELDS=4 };
+struct md_control_ioctl_field { unsigned pointer, length, capacity, direction; };
+struct md_control_ioctl {
+    unsigned size, direction;
+    unsigned fields;
+    struct md_control_ioctl_field field[MD_CONTROL_IOCTL_FIELDS];
+};
 /* Provider-owned asynchronous request. resume never blocks: EINPROGRESS means
  * an external completion will signal the descriptor wakeup. dispose cancels
  * an unfinished request and releases it exactly once. deadline is monotonic. */

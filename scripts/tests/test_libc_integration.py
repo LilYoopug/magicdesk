@@ -195,6 +195,30 @@ class SourceIntegrationTest(unittest.TestCase):
             with self.subTest(path=path), self.assertRaises(IntegrationError):
                 glibc.integrate(self.root / 'missing', path)
 
+    def test_glibc_thread_extension_preserves_existing_offsets(self):
+        for last in ('rseq_area', 'getrandom_buf'):
+            with self.subTest(last=last):
+                prefix = 'struct pthread {\n  list_t list;\n  pid_t tid;\n  void *' + last + ';\n'
+                text = (prefix + '  /* Amount of end padding, if any, in this structure.\n'
+                        f'     This definition relies on {last} being last.  */\n'
+                        '#define PTHREAD_STRUCT_END_PADDING \\\n'
+                        f'  (sizeof (struct pthread) - offsetof (struct pthread, {last}) \\\n'
+                        f'   + sizeof ((struct pthread) {{}}.{last}))\n}};\n')
+                self.write('nptl/descr.h', text)
+                tree = SourceIntegration(self.root, ['nptl/descr.h'])
+                glibc.thread_storage(tree)
+                result = tree.files['nptl/descr.h']
+                self.assertTrue(result.startswith(prefix + '  struct md_entry_client shroot_client;'))
+                self.assertIn('offsetof (struct pthread, shroot_client)', result)
+                with self.assertRaises(IntegrationError):
+                    glibc.thread_storage(tree)
+
+    def test_glibc_unknown_thread_tail_rejected(self):
+        self.write('nptl/descr.h', 'struct pthread { int tid; };\n')
+        tree = SourceIntegration(self.root, ['nptl/descr.h'])
+        with self.assertRaises(IntegrationError):
+            glibc.thread_storage(tree)
+
     def test_glibc_build_hooks_do_not_depend_on_neighbouring_symbols_or_tests(self):
         self.write('elf/Makefile', 'rtld-stubbed-symbols = \\\n  old_symbol \\\n  malloc\n')
         self.write(glibc.ARCH + 'Makefile', 'ifeq ($(subdir),misc)\nsysdep_headers += sys/elf.h\nendif\n')

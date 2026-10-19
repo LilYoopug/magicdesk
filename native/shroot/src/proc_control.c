@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "proc_control.h"
+#include "control_ioctl.h"
 #include "file_metadata.h"
 #include "proc_file.h"
 #include "fd_filter.h"
@@ -157,16 +158,50 @@ long md_proc_control_call(long nr, const unsigned long *a) {
             if (packed<0) return packed;
             size_t size=(uint32_t)packed;
             unsigned direction=(unsigned)((uint64_t)packed>>32);
-            if (size>MD_CONTROL_IOCTL_MAX || direction&~(MD_CONTROL_IN|MD_CONTROL_OUT|MD_CONTROL_STRING)) return -EPROTO;
+            if (size>MD_CONTROL_IOCTL_MAX || direction&~(MD_CONTROL_IN|MD_CONTROL_OUT|MD_CONTROL_STRING|MD_CONTROL_INDIRECT)) return -EPROTO;
             long memory=md_adapter_buffer_take();
             if (memory<0) return memory;
-            memset((void *)memory,0,size);
-            long result=(direction&MD_CONTROL_IN) ? md_read_memory((void *)memory,(void *)a[2],size) : 0;
-            if (direction&MD_CONTROL_STRING) {
+            struct md_control_ioctl layout={.size=(unsigned)size,.direction=direction};
+            long result=0;
+            if (direction&MD_CONTROL_INDIRECT) {
+                result=md_guest_buffer_control(MD_BUFFER_CONTROL_IOCTL_LAYOUT,0,0);
+                if (!result) {
+                    memcpy(&layout,(void *)memory,sizeof(layout));
+                    result=md_control_ioctl_size(&layout);
+                    if (result>=0) result=layout.size!=size || layout.direction!=direction ? -EPROTO : 0;
+                }
+            }
+            uintptr_t addresses[MD_CONTROL_IOCTL_FIELDS]={0};
+            size_t lengths[MD_CONTROL_IOCTL_FIELDS]={0};
+            if (!result) {
+                memset((void *)memory,0,(size_t)md_control_ioctl_size(&layout));
+                if (direction&MD_CONTROL_IN) result=md_read_memory((void *)memory,(void *)a[2],size);
+            }
+            if (!result && (direction&MD_CONTROL_STRING)) {
                 result=md_read_string((void *)memory,size,(void *)a[2]);
                 if (result>=0) result=0;
             }
+            size_t offset=size;
+            for (unsigned i=0;!result && i<layout.fields;++i) {
+                const struct md_control_ioctl_field *f=&layout.field[i];
+                memcpy(&addresses[i],(char *)memory+f->pointer,sizeof(addresses[i]));
+                lengths[i]=addresses[i] ? md_control_ioctl_field_size(&layout,i,(void *)memory) : 0;
+                if (lengths[i] && (f->direction&MD_CONTROL_IN))
+                    result=md_read_memory((char *)memory+offset,(void *)addresses[i],lengths[i]);
+                offset+=f->capacity;
+            }
             if (!result) result=md_guest_buffer_control(MD_BUFFER_CONTROL_IOCTL,0,0);
+            offset=size;
+            for (unsigned i=0;result>=0 && i<layout.fields;++i) {
+                const struct md_control_ioctl_field *f=&layout.field[i];
+                if (lengths[i] && (f->direction&MD_CONTROL_OUT)) {
+                    size_t count=md_control_ioctl_field_size(&layout,i,(void *)memory);
+                    if (count>lengths[i]) count=lengths[i];
+                    long error=md_write_memory((void *)addresses[i],(char *)memory+offset,count);
+                    if (error) result=error;
+                }
+                offset+=f->capacity;
+            }
             if (result>=0 && (direction&MD_CONTROL_OUT)) {
                 long error=md_write_memory((void *)a[2],(void *)memory,size);
                 if (error) result=error;

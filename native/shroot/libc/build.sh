@@ -124,13 +124,27 @@ fi
 cp manifest candidate/manifest
 loader=$work/candidate/$runtime_loader
 cat > probe.c <<'PROBE'
+#define _GNU_SOURCE
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <sys/auxv.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include "cooperative_entry.h"
+static void *thread_probe(void *unused) {
+    (void)unused;
+#ifdef __GLIBC__
+    struct thread_prefix { void *header[24]; void *list[2]; int tid; };
+    int tid=((struct thread_prefix *)pthread_self())->tid;
+    pthread_mutex_t lock=PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+    if (tid!=gettid() || pthread_mutex_lock(&lock)) return (void *)1;
+    int owner=lock.__data.__owner;
+    if (pthread_mutex_unlock(&lock) || pthread_mutex_destroy(&lock) || owner!=tid) return (void *)1;
+#endif
+    return NULL;
+}
 int main(int argc,char **argv) {
     unsigned (*abi)(void)=dlsym(RTLD_DEFAULT,"shroot_libc_entry_abi");
     if (!abi || abi()!=MD_ENTRY_VERSION || argc!=2) return 1;
@@ -140,10 +154,13 @@ int main(int argc,char **argv) {
     struct stat st;
     int fd=open(argv[1],O_CREAT|O_EXCL|O_RDWR|O_CLOEXEC,0600);
     if (fd<0 || write(fd,"ok",2)!=2 || fstat(fd,&st) || st.st_size!=2 || close(fd) || unlink(argv[1])) return 2;
-    puts("PASS private libc: entry ABI and file lifecycle"); return 0;
+    pthread_t thread; void *result;
+    if (thread_probe(NULL) || pthread_create(&thread,NULL,thread_probe,NULL)
+        || pthread_join(thread,&result) || result) return 4;
+    puts("PASS private libc: entry ABI, file lifecycle and pthread ABI"); return 0;
 }
 PROBE
-cc -O2 -Iintegration/src probe.c -ldl -o probe
+cc -O2 -Iintegration/src probe.c -pthread -ldl -o probe
 # EVENT_WAIT: probe and shell completion; timeout rejects publication.
 timeout 30 "$loader" --library-path "$work/candidate/lib:/lib:/usr/lib" "$work/probe" "$work/probe-file"
 timeout 30 "$loader" --library-path "$work/candidate/lib:/lib:/usr/lib" /bin/sh -ec 'id; printf "PASS private libc shell\n"'

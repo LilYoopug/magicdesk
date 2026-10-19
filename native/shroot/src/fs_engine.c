@@ -67,7 +67,9 @@ void md_fs_view_execute(struct md_filesystem *fs, const struct md_fs_request *q,
      * to the caller's proc provider, never resolve self on this worker. */
     if (out->error==-EXDEV && (!q->origin[0] || native) && q->directory[0]>=0
             && q->path[0] && *q->path[0] && q->path[0][0]!='/') {
-        int error=md_view_task_path(fs,q->directory[0],q->path[0],"",q->resolve,1);
+        /* The entire original dirfd/path pair is still available to the task.
+         * It applies openat2 constraints in the kernel, without a new root. */
+        int error=md_view_task_path(fs,q->directory[0],q->path[0],"",0,1);
         if (error) out->error=error;
     }
 }
@@ -86,9 +88,15 @@ static void change_root(struct md_filesystem *fs, struct md_guest_domain *contex
         const struct md_fs_request *q, struct md_fs_result *out,const struct md_fs_output *output) {
     *out = (struct md_fs_result){.fd = -1};
     if (!context) { out->error = -ENOTSUP; return; }
-    if (q->origin[0] && q->origin[0]->view!=fs->mounts && q->directory[0]!=MD_INODE_ROOT
+    if (q->origin[0] && q->origin[0]->view && q->origin[0]->view!=fs->mounts && q->directory[0]!=MD_INODE_ROOT
             && (!q->path[0] || q->path[0][0]!='/')) { out->error=-ENOTSUP; return; }
     if (!md_identity_may_chroot(fs->store->identity)) { out->error = -EPERM; return; }
+    if (q->directory[0]>=0 && q->path[0] && !*q->path[0]) {
+        struct md_fs_location root;
+        out->error=md_fs_root_capture(fs,q->directory[0],q->origin[0],&root);
+        if (!out->error) out->error=md_domain_set_root(context,&root);
+        return;
+    }
     struct md_fs_request open = *q;
     open.operation = MD_FS_OPEN; open.flags = O_PATH | O_DIRECTORY | O_CLOEXEC;
     md_fs_view_then(fs,q,&open,out,output,root_opened);
@@ -438,8 +446,7 @@ static void context_execute(struct md_fs_context *context,
         }
     }
     if (out->error==-EREMOTE) {
-        if (q->operation==MD_FS_CHROOT) out->error=-ENOTSUP;
-        else if (boundary.path && boundary.capacity) {
+        if (boundary.path && boundary.capacity) {
             out->error=0; out->host_path=boundary.operand+1; out->size=strlen(boundary.path)+1;
             out->proc_namespace=boundary.proc_namespace;
             if (proc_link_delegated) out->info.mount_id=boundary.proc_link_mount;

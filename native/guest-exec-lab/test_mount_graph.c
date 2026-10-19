@@ -970,6 +970,24 @@ static void branch_reconciliation(const char *base) {
     assert(!md_view_mount_reconcile_branch(&peer,held->mount));
     assert(held->mount->detached && !peer.mounts->tree->mounts[2].detached);
     contents(&peer,"value",held,"value");
+    /* A recursive source in another view must not turn target admission into
+     * a full reconciliation of unrelated target-view placements. */
+    assert(!md_inode_mkdir(fs.store,-1,"/copy",0700));
+    struct md_fs_anchor *source=NULL;
+    struct md_fs_result input=open_file(&peer,"/alias",O_PATH|O_DIRECTORY,NULL,&source);
+    assert(!input.error && source);
+    struct md_fs_request bind={.operation=MD_FS_MOUNT,.mode=MD_FS_MOUNT_BIND,
+        .flags=MS_BIND|MS_REC,.directory={-1,input.fd},.origin={NULL,source},.path={"/copy","."}};
+    struct md_fs_result result;
+    struct md_identity identity=md_identity_new(0,0); fs.store->identity=&identity;
+    md_fs_execute(&fs,&bind,&result,NULL);
+    fs.store->identity=NULL; md_identity_release(&identity);
+    if (result.error || fs.mounts->tree->mounts[1].detached)
+        fprintf(stderr,"recursive bind target: error=%d unrelatedDetached=%d\n",
+            result.error,fs.mounts->tree->mounts[1].detached);
+    assert(!result.error && !fs.mounts->tree->mounts[1].detached);
+    close(input.fd); md_fs_anchor_release(source);
+    contents(&fs,"/copy/value",NULL,"value");
     /* Unmount still reconciles children before its EBUSY decision. */
     assert(!mutation(&fs,MD_FS_MOUNT_UMOUNT,0,NULL,"/outer"));
     assert(!md_mount_graph_sync(peer.mounts));
@@ -981,7 +999,7 @@ static void branch_reconciliation(const char *base) {
     assert(!md_view_mount_collect(&fs));
     close_filesystem(&peer); close_filesystem(&fs);
     assert(descriptors()==before);
-    puts("PASS branch reconciliation: live rename, unrelated sibling, foreign deletion, retained origin and child retirement");
+    puts("PASS branch reconciliation: live rename, unrelated sibling, recursive bind target, foreign deletion, retained origin and child retirement");
 }
 static void unlinked_propagation(const char *base) {
     unsigned before=descriptors();

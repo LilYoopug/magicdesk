@@ -11,10 +11,12 @@
 #include <linux/rtnetlink.h>
 #include <sched.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -137,6 +139,57 @@ static void retained_proc(void) {
     /* EVENT_WAIT: retained-proc child exits; fixture alarm bounds a stuck lookup. */
     assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
     puts("PASS retained proc dirfd: scoped root, namespace directory, UID map and metadata");
+}
+static int proc_root_child(void *path) {
+    assert(!chroot(path) && !chdir("/"));
+    return 0;
+}
+static void retained_proc_chroot(void) {
+    for (unsigned mode=0;mode<8;++mode) {
+        pid_t child=fork(); assert(child>=0);
+        if (!child) {
+            assert(!unshare(CLONE_NEWNS));
+            const char *path=mode&1 ? "/tmp/chroot-proc" : "/proc";
+            if (mode&1) {
+                assert(!mkdir(path,0755) || errno==EEXIST);
+                assert(!mount("proc",path,"proc",0,NULL));
+            }
+            assert(!unshare(CLONE_NEWUSER));
+            int proc=open(path,O_PATH|O_DIRECTORY|O_CLOEXEC); assert(proc>=0);
+            char root[128]; snprintf(root,sizeof(root),"%s/self/%s",path,mode&2 ? "fd" : "fdinfo");
+            if (mode&4) {
+                void *stack=malloc(65536); assert(stack);
+                pid_t helper=clone(proc_root_child,(char *)stack+65536,
+                    CLONE_VM|CLONE_FS|CLONE_VFORK|SIGCHLD,(void *)root);
+                assert(helper>0);
+                int status;
+                /* EVENT_WAIT: shared-root helper exit; fixture alarm bounds failure. */
+                assert(waitpid(helper,&status,0)==helper && WIFEXITED(status) && !WEXITSTATUS(status));
+                free(stack);
+            } else proc_root_child((void *)root);
+            int ns=openat(proc,"self/ns",O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(ns>=0); close(ns);
+            assert(!prctl(PR_SET_DUMPABLE,0));
+            assert(open("/proc",O_PATH|O_DIRECTORY)<0 && errno==ENOENT);
+            const char *paths[]={"self","self/fd/","thread-self/fdinfo"};
+            for (unsigned i=0;i<sizeof(paths)/sizeof(*paths);++i) {
+                int fd=openat(proc,paths[i],O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+                if (fd<0) fprintf(stderr,"proc chroot mode=%u path=%s errno=%d\n",mode,paths[i],errno);
+                assert(fd>=0);
+                struct stat st; assert(!fstat(fd,&st) && S_ISDIR(st.st_mode));
+                char bytes[4096]; assert(syscall(SYS_getdents64,fd,bytes,sizeof(bytes))>0);
+                close(fd);
+            }
+            assert(openat(proc,"self/ns",O_RDONLY|O_DIRECTORY)<0 && errno==EACCES);
+            int fd=openat(proc,"self/status",O_RDONLY|O_CLOEXEC); assert(fd>=0);
+            char bytes[128]; assert(read(fd,bytes,sizeof(bytes))>0); close(fd);
+            close(proc); _exit(0);
+        }
+        int status;
+        /* EVENT_WAIT: isolated root case exits; fixture alarm bounds failure. */
+        assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
+    }
+    assert(!rmdir("/tmp/chroot-proc"));
+    puts("PASS retained proc chroot: implicit/mounted proc, fd/fdinfo roots, CLONE_FS helper and protected task");
 }
 static void unsupported_namespaces(void) {
     assert(access("/proc/thread-self/ns/time",F_OK)<0 && errno==ENOENT);
@@ -671,6 +724,7 @@ int test_namespace_handles_guest(void) {
     directory_handles();
     process_directory();
     retained_proc();
+    retained_proc_chroot();
     unsupported_namespaces();
     namespace_mounts();
     namespace_mount_lifetime(0);

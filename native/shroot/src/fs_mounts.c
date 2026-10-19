@@ -214,7 +214,7 @@ int md_fs_root_capture(struct md_filesystem *fs, int fd, const struct md_fs_anch
     if (origin) {
         int error=md_view_anchor_check(fs,fd,origin);
         if (error) return error;
-        if (origin->view!=fs->mounts) return -ESTALE;
+        if (origin->view && origin->view!=fs->mounts) return -ESTALE;
     }
     struct stat st;
     if (fstat(fd,&st)) return -errno;
@@ -222,7 +222,7 @@ int md_fs_root_capture(struct md_filesystem *fs, int fd, const struct md_fs_anch
     struct md_view_object *p = NULL;
     /* Once materialized, the base keeps explicit location identities even if
      * it becomes root again. Empty initial roots must not depend on cache hits. */
-    int r = origin ? (!md_view_base(fs->mounts,origin->mount) || fs->mounts->base.source>=0
+    int r = origin ? (origin->view && (!md_view_base(fs->mounts,origin->mount) || fs->mounts->base.source>=0)
         ? md_view_record(fs,fd,origin->mount,&p) : -EXDEV)
         : fs->mounts ? md_view_identity(fs,fd,&p) : -EXDEV;
     if (!r && md_view_base(fs->mounts,p->mount) && fs->mounts->base.source<0) r=-EXDEV;
@@ -242,6 +242,17 @@ int md_fs_root_capture(struct md_filesystem *fs, int fd, const struct md_fs_anch
     r=md_inode_metadata(fs->store,&access);
     if (!r) r=md_inode_object_id(fs->store,fd,out->object);
     if (!r && !strcmp(out->object,MDI_ROOT)) out->object[0]=0;
+    if (r==-EXDEV && fs->mounts) {
+        /* A caller-captured native directory is already an admitted authority.
+         * Retain it as a detached root, not a second filesystem path policy. */
+        if (syscall(SYS_faccessat2,fd,"",X_OK,AT_EMPTY_PATH|MD_AT_EACCESS)) return -errno;
+        struct md_mount_source source={.fd=fd,.backing=MD_MOUNT_NATIVE};
+        r=md_mount_native_policy(fd,&source.policy);
+        struct md_view_mount *mount=NULL;
+        if (!r) r=md_view_attach_source(fs,&source,NULL,&mount);
+        if (!r) r=md_view_record(fs,fd,mount,&p);
+        if (!r) { out->mount=mount->id; memcpy(out->object,p->id,sizeof(out->object)); }
+    }
     return r;
 }
 int md_fs_root_select(struct md_filesystem *fs, const struct md_fs_location *root) {

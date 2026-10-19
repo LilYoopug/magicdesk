@@ -272,7 +272,8 @@ static int walk_path(struct md_filesystem *fs, int base, const struct md_fs_anch
      * inode cannot select one of several proc mounts with different PID views.
      * Logical opens retain an origin; only those enter a mounted proc view. */
     if (!from_root && !origin && (resolve&MD_VIEW_TASK_PATH)) {
-        int native=md_view_task_path(fs,base,path,"",resolve,0);
+        /* No walk has occurred: caller completion retains the original scope. */
+        int native=md_view_task_path(fs,base,path,"",0,0);
         if (native) return native;
     }
     r = !from_root && origin ? md_view_anchor_check(fs,base,origin) : 0;

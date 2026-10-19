@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include <stdatomic.h>
 #include <sys/ioctl.h>
+#include <sys/inotify.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/shm.h>
@@ -112,6 +113,53 @@ static void attach_test(int seize, int trace_exit) {
         assert(write(release[1], "x", 1) == 1);
     }
     close(release[1]); exited(child, 7);
+}
+static int shared_files_target(void *argument) {
+    int *fds=argument;
+    assert(write(fds[1],"r",1)==1);
+    char byte;
+    assert(read(fds[2],&byte,1)==1 && byte=='x');
+    return 7;
+}
+static void shared_files_debugger_test(void) {
+    int fds[4]; assert(!pipe(fds) && !pipe(fds+2));
+    enum { COUNT=2, STACK=1024*1024 };
+    pid_t children[COUNT]; char *stacks[COUNT];
+    struct user_pt_regs before[COUNT],after;
+    siginfo_t signals[COUNT],signal;
+    uint64_t masks[COUNT],mask;
+    for (int i=0;i<COUNT;++i) {
+        stacks[i]=malloc(STACK); assert(stacks[i]);
+        children[i]=clone(shared_files_target,stacks[i]+STACK,CLONE_FILES|SIGCHLD,fds);
+        assert(children[i]>0);
+        char byte; assert(read(fds[0],&byte,1)==1);
+        assert(!ptrace(PTRACE_ATTACH,children[i],0,0));
+        assert(WSTOPSIG(stop(children[i]))==SIGSTOP);
+        struct iovec io={&before[i],sizeof(before[i])};
+        assert(!ptrace(PTRACE_GETREGSET,children[i],NT_PRSTATUS,&io));
+        assert(!ptrace(PTRACE_GETSIGINFO,children[i],0,&signals[i]));
+        assert(!ptrace(PTRACE_GETSIGMASK,children[i],sizeof(mask),&masks[i]));
+    }
+    /* Publishing a virtual FD must cover every CLONE_FILES holder, even when
+     * this exact debugger owns all of their stops. No inferior may run user code. */
+    int file=open("/proc/self/status",O_RDONLY); assert(file>=0);
+    char data[256]; assert(read(file,data,sizeof(data))>0);
+    int watch=inotify_init1(IN_CLOEXEC|IN_NONBLOCK); assert(watch>=0);
+    assert(inotify_add_watch(watch,".",IN_CREATE)>=0);
+    assert(!close(watch) && !close(file));
+    for (int i=0;i<COUNT;++i) {
+        struct iovec io={&after,sizeof(after)};
+        assert(!ptrace(PTRACE_GETREGSET,children[i],NT_PRSTATUS,&io));
+        assert(!memcmp(&before[i],&after,sizeof(after)));
+        assert(!ptrace(PTRACE_GETSIGINFO,children[i],0,&signal));
+        assert(!memcmp(&signals[i],&signal,sizeof(signal)));
+        assert(!ptrace(PTRACE_GETSIGMASK,children[i],sizeof(mask),&mask) && mask==masks[i]);
+        int status; assert(waitpid(children[i],&status,__WALL|WNOHANG)==0);
+        assert(!ptrace(PTRACE_DETACH,children[i],0,0));
+        assert(write(fds[3],"x",1)==1);
+        exited(children[i],7); free(stacks[i]);
+    }
+    for (int i=0;i<4;++i) assert(!close(fds[i]));
 }
 static long stat_with_x7(const char *path, struct stat *st, unsigned long scratch) {
     register long x0 __asm__("x0")=AT_FDCWD;
@@ -547,6 +595,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "thread-exec")) exec_thread_test(0);
     else if (!strcmp(argv[1], "syscall-thread-exec")) exec_thread_test(1);
     else if (!strcmp(argv[1], "clone-untraced")) untraced_clone_test();
+    else if (!strcmp(argv[1], "shared-files-debugger")) shared_files_debugger_test();
     else if (!strcmp(argv[1], "perf-event")) { if (!perf_test()) return 0; }
     else if (!strcmp(argv[1], "gdb-target")) gdb_target(0, 0);
     else if (!strcmp(argv[1], "gdb-thread-target")) gdb_target(1, 0);

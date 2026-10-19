@@ -94,6 +94,17 @@ not a settling delay. Nonleader thread termination belongs to the virtual trace
 relationship: the native parent cannot reap it as an ordinary child of the
 debugger while the supervisor remains the kernel ptracer. Only a process leader
 with actual parenthood can use native child reaping.
+
+A debugger may share a descriptor table with its inferior through `CLONE_FILES`,
+as crash collectors do. Publishing a virtual descriptor must install its selector
+in every holder, including stopped inferiors. The existing task-call machinery
+may borrow an acknowledged guest-boundary stop only for a parked request from
+that inferior's exact debugger TID. It restores the native continuation and signal
+mask before completing the request; the guest debugger retains its original stop,
+registers and siginfo. This neither runs inferior user code nor publishes internal
+stops. Unrelated debugger ownership, pending stop delivery and active adapter work
+remain ineligible. Ordinary launches gain no additional interception or polling.
+
 Native-only poll/select/epoll fallback also leaves the adapter before waiting.
 An inherited readiness selector can still intercept these calls after its last
 virtual descriptor has closed. `MD_CALL_NATIVE` uses the existing continuation
@@ -174,6 +185,14 @@ file and resumes only descriptor delivery, including a restart overtaking an
 expired queued admission. They also cover
 LLDB source stepping, GDB through gdbserver, strace following a child, gprof
 function output and Callgrind instruction counts.
+The `shared-files-debugger` case stops two `CLONE_FILES` children, then opens
+virtual proc and inotify descriptors in their debugger. It requires unchanged
+registers, siginfo and masks, no extra wait events, successful detach and normal
+child exits. The pre-fix supervisor timed out on this case; both base execution
+and accelerated libc in a PID namespace pass with owner-scoped stop borrowing.
+The same fixture also passes natively under Android's shell identity. The
+`task_quiesce` and `fd_filter_remote` fixtures cover the underlying borrowed-stop
+restoration, protected targets, restart boundaries and rejected seccomp operations.
 The `syscall-exec` case requires paired entry/exit stops with the exec event
 between them and a successful exec result. The strace workflow checks decoded
 open arguments and child creation, and rejects stray exec-event recovery.

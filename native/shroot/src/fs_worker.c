@@ -169,6 +169,7 @@ static void *run(void *context) {
     w->network=NULL;
     struct md_input_session *input=NULL;
     struct md_provider_tree *sysfs=NULL,*devices=NULL;
+    if (!error) md_fs_render_prepare(&fs);
     if (!error) error=md_fs_sysfs_prepare(&fs,&sysfs);
     if (!error) error=md_fs_devices_prepare(&fs,w->input && w->input->endpoint,&devices);
     fs.devices=devices;
@@ -214,6 +215,7 @@ static void *run(void *context) {
     md_input_session_stop(input);
     md_provider_tree_release(sysfs);
     md_provider_tree_release(devices);
+    md_control_file_release(fs.render_device);
     md_device_events_stop(w->device_events);
     md_fs_mounts_close(&fs);
     md_libc_registry_close(fs.libc_registry);

@@ -1,11 +1,13 @@
 #define _GNU_SOURCE
 #include "mount_policy.h"
+#include "linux_abi.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 enum { MAGIC=0x4d444d50U, VERSION=5U,
@@ -14,6 +16,17 @@ struct md_mount_policy_page { uint32_t magic, version, reserved; atomic_uint fla
 _Static_assert(ATOMIC_INT_LOCK_FREE==2 && sizeof(atomic_uint)==4,
     "mount policy requires process-shared lock-free flags");
 _Static_assert(sizeof(struct md_mount_policy_page)==16,"mount policy wire layout");
+
+int md_mount_native_policy(int fd, unsigned *flags) {
+    struct statvfs info;
+    if (fstatvfs(fd,&info)) return -errno;
+    *flags=((info.f_flag&ST_RDONLY) ? MD_MOUNT_READONLY : 0)
+        | ((info.f_flag&ST_NOSUID) ? MD_MOUNT_NOSUID : 0)
+        | ((info.f_flag&ST_NODEV) ? MD_MOUNT_NODEV : 0)
+        | ((info.f_flag&ST_NOEXEC) ? MD_MOUNT_NOEXEC : 0)
+        | ((info.f_flag&ST_NOSYMFOLLOW) ? MD_MOUNT_NOSYMFOLLOW : 0);
+    return 0;
+}
 
 unsigned md_mount_policy_shared_flags(const struct md_mount_policy *p) {
     return atomic_load_explicit(&p->page->flags,memory_order_acquire);

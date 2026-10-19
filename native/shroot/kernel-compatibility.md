@@ -647,6 +647,7 @@ retain native errors; arbitrary new guest syscalls are not runtime requirements.
 
 | Interface | First upstream kernel | Owner and purpose | Behavior without it |
 | --- | --- | --- | --- |
+| `DMA_BUF_IOCTL_EXPORT_SYNC_FILE` / `DMA_BUF_IOCTL_IMPORT_SYNC_FILE` | 6.0 | Graphics DMA-BUF fence bridge; `render_device.c` probes allocation/export/poll/import once for a Turnip-enabled launch. `test_render.py` checks admission and typed descriptor behavior; `test_egl_dmabuf.c` and `test_egl_gbm.c` verify GPU completion and exact pixels. Hosted-runtime DMA-BUF tests cover consumption. | A failed probe leaves the optional discovery node absent; the graphics importer rejects unsupported synchronization. Existing SHM paths remain independent. No Shroot startup requirement or raised 5.15 baseline. Kernel version alone does not admit the node. |
 | `PIDFD_THREAD` | 6.9 | `task_descriptor.c` owns descriptor capture; `task_lifetime.c` owns exact-thread liveness for restricted proc roots. | Try flags zero for the same task. A non-leader rejected with EINVAL is reported as ENOTSUP and uses task-affine SCM_RIGHTS export. Liveness retains `/proc/<tid>/stat` instead: a flags-zero pidfd observes group death, not exact-thread death. Never substitute the leader's file table. |
 | `SECCOMP_IOCTL_NOTIF_SET_FLAGS` / `SECCOMP_USER_NOTIF_FD_SYNC_WAKE_UP` | 6.6 | `namespace_broker.c`: optional notification scheduling hint. | Failed ioctl leaves normal notification wakeups enabled; no permission or affinity change. Success does not guarantee CPU co-location: the scheduler still owns placement, and not every FD-install completion uses this hint. |
 | `fchmodat2` | 6.5; `AT_EMPTY_PATH` in 6.6 | `namespace.c` translates store metadata through the worker. `file_calls.c` also has a native direct-backend path. | Logical store metadata does not require this host syscall. Native passthrough retains ENOSYS/flag errors; no fake success or unconditional startup requirement. |
@@ -660,6 +661,7 @@ retain native errors; arbitrary new guest syscalls are not runtime requirements.
 | `AT_EXECVE_CHECK` | 6.14 | Execution-policy boundary, not an enabled host dependency. | The adapter rejects unsupported execveat flags rather than treating an X_OK check as equivalent. |
 
 Version references: [pidfd_open flags](https://man7.org/linux/man-pages/man2/pidfd_open.2.html),
+[Linux 6.0 DMA-BUF ABI](https://github.com/torvalds/linux/blob/v6.0/include/uapi/linux/dma-buf.h),
 [Linux 6.6 seccomp ABI](https://github.com/torvalds/linux/blob/v6.6/include/uapi/linux/seccomp.h),
 [Linux 6.5 socket options](https://github.com/torvalds/linux/blob/v6.5/include/uapi/asm-generic/socket.h),
 [chmod flags](https://man7.org/linux/man-pages/man2/chmod.2.html),

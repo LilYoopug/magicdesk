@@ -53,6 +53,7 @@
 #include "proc_sysctl.h"
 #include "user_sysctl.h"
 #include "proc_control.h"
+#include "control_ioctl.h"
 #include "launch_identity.h"
 #include "sysv_shm.h"
 #include "sysv_ipc.h"
@@ -463,6 +464,7 @@ static void loan_start(struct task_action *);
 static void task_action_schedule(void);
 static void task_action_discard(struct thread *);
 static void task_action_cleanup(void);
+static int debugger_at_boundary(const struct thread *);
 static void cancel_tree(int);
 static struct md_pending_queue retry_queues[2];
 static void retry_clear(struct thread *t, enum retry_kind kind) {
@@ -2645,10 +2647,8 @@ static int identity_call(struct thread *t, struct user_pt_regs *r, unsigned long
     return_value(t, r, value); return 1;
 }
 static void dispatch_with_stack(struct thread *);
-static int guest_root_path(struct thread *t, long nr, const char *path) {
-    return nr == SYS_chroot && t->endpoint[0] && !md_domain_restricted(t->resources.fs)
-        && (md_domain_scoped(t->resources.fs)
-            || !md_domain_proc_root_name(path));
+static int guest_root_path(struct thread *t, long nr) {
+    return nr == SYS_chroot && t->endpoint[0] && !md_domain_restricted(t->resources.fs);
 }
 static int domain_path_apply(struct thread *t, long nr, const char *path) {
     if (nr == SYS_chdir)
@@ -2667,7 +2667,7 @@ static int domain_path_apply(struct thread *t, long nr, const char *path) {
 }
 static void domain_path_finish(struct thread *t, int error) {
     struct user_pt_regs r = t->original;
-    if (!error && guest_root_path(t, r.regs[8], t->metadata.path)) {
+    if (!error && guest_root_path(t, r.regs[8])) {
         dispatch_with_stack(t); return;
     }
     if (!error) error = domain_path_apply(t, r.regs[8], t->metadata.path);
@@ -2688,7 +2688,7 @@ static void domain_path_call(struct thread *t, struct user_pt_regs *r) {
     char path[4096];
     int error = read_string(t->pid, r->regs[0], path, sizeof(path));
     if (error != -EPERM && error != -EACCES) {
-        if (!error && guest_root_path(t, r->regs[8], path)) {
+        if (!error && guest_root_path(t, r->regs[8])) {
             CHECK(t->ready && t->phase == IDLE);
             t->original = *r;
             if (!tracee_request(t, PTRACE_GETSIGMASK, (void *)sizeof(t->mask), &t->mask, "get-mask")
@@ -2705,6 +2705,13 @@ static void domain_path_call(struct thread *t, struct user_pt_regs *r) {
     domain_path_load(t);
 }
 static void fd_discard(struct thread *t) {
+    /* Fork owns the address-space turn even before kernel admission. Early
+     * quota/allocation failure must retire it just like a completed clone. */
+    if (t->memory_action==MEMORY_FORK) {
+        if (md_resource_order_cancel(&t->memory_order)==1)
+            CHECK(!md_resource_order_complete(&t->memory_order));
+        t->memory_action=0;
+    }
     md_process_member_release(t->process_reservation); t->process_reservation=NULL;
     retry_clear(t,RETRY_FD);
     md_fd_selector_release(t->fork_selector); t->fork_selector=NULL;
@@ -3287,17 +3294,24 @@ static int selector_has(struct thread *t,unsigned kind,int number) {
         }
     return 1;
 }
-static int task_action_borrowable(struct thread *p) {
+static int task_action_borrowable(struct thread *p,struct thread *requester) {
     /* A queued table user is stopped before its operation. Other candidates
      * retain their exact kernel continuation. Never borrow an active worker,
-     * debugger, mutation or newborn awaiting its first stop. */
+     * mutation or newborn awaiting its first stop. */
     int waiter=p->kernel_stopped && (p->retries[1].mask==RETRY_FD
         || (p->phase==PROC_LOOKUP && md_fd_order_state(&p->proc_lookup)==MD_RESOURCE_ORDER_QUEUED)
         || (p->action && !task_action_call(p->action)->stage));
+    int traced=md_debugger_traced(debugger,p->pid);
+    /* A debugger can share files with its stopped inferior (crash collectors
+     * commonly do). Its own parked request is the only control owner, so the
+     * exact held continuation can install selectors without exposing adapter
+     * registers or resuming guest code. Unrelated debuggers remain excluded. */
+    int debug_held=traced && requester && p->kernel_stopped && debugger_at_boundary(p)
+        && md_debugger_stopped_by(debugger,p->pid,requester->pid);
     return p->ready && !birth_stop_pending(p) && !p->resume_lost && !p->terminal_stop
         && !p->listening && !p->vfork_child && !p->interrupt_pending
-        && !p->mapping && !p->memory_capture && !p->fd_running && !md_debugger_traced(debugger,p->pid)
-        && (waiter || (!p->kernel_stopped && (p->phase==IDLE || p->phase==DISPATCHING
+        && !p->mapping && !p->memory_capture && !p->fd_running && (!traced || debug_held)
+        && (waiter || debug_held || (!p->kernel_stopped && (p->phase==IDLE || p->phase==DISPATCHING
             || p->phase==WATCH_READ || p->phase==EPOLL_WAIT || p->phase==PROCESS_OBSERVING)));
 }
 static void task_action_start(struct thread *t) {
@@ -3343,7 +3357,7 @@ static void task_action_start(struct thread *t) {
             if (ready<0) { task_action_finish(owner,ready); return; }
             if (ready) continue;
             pending=1;
-            if (task_action_borrowable(peer)) candidate=peer;
+            if (task_action_borrowable(peer,t)) candidate=peer;
         }
     if (!candidate) {
         if (pending) retry_wait(t,RETRY_TASK_ACTION);
@@ -3377,7 +3391,7 @@ static void task_action_schedule(void) {
 }
 static int loan_borrow(struct task_action *owner,struct thread *p,int *alive,int *stopped) {
     if (!p || !p->pid || p->resources.files!=owner->loan_table || p->terminal_stop || p->resume_lost) return 0;
-    if (p!=owner->requester && p->pid!=owner->retirement.task && !task_action_borrowable(p)) {
+    if (p!=owner->requester && p->pid!=owner->retirement.task && !task_action_borrowable(p,owner->requester)) {
         *alive=1; return 0;
     }
     *stopped=p->kernel_stopped;
@@ -4870,7 +4884,7 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
             && r->regs[0]!=MD_FS_BUFFER_RIGHTS_DONE && r->regs[0]!=MD_FS_BUFFER_CHANNEL_OBSERVED
             && r->regs[0]!=MD_BUFFER_PID_NUMBER && r->regs[0]!=MD_BUFFER_DESCRIPTOR_META && r->regs[0]!=MD_BUFFER_PIDFD_NAMESPACE
             && r->regs[0]!=MD_BUFFER_CONTROL_IOCTL_SPEC && r->regs[0]!=MD_BUFFER_CONTROL_IOCTL
-            && r->regs[0]!=MD_BUFFER_CONTROL_MAP
+            && r->regs[0]!=MD_BUFFER_CONTROL_MAP && r->regs[0]!=MD_BUFFER_CONTROL_IOCTL_LAYOUT
             && r->regs[0]!=MD_BUFFER_NETWORK_OPEN && r->regs[0]!=MD_BUFFER_NETWORK_CALL && r->regs[0]!=MD_BUFFER_NETWORK_DATA
             && r->regs[0]!=MD_BUFFER_NETWORK_CREDENTIALS
             && !(r->regs[0]>=MD_BUFFER_EPOLL_BEGIN && r->regs[0]<=MD_BUFFER_POLL_COPY)
@@ -5243,7 +5257,7 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
         } else if (result==-EINPROGRESS) result=-EPROTO;
         control_reply(t,result); return;
     }
-    case MD_BUFFER_CONTROL_IOCTL_SPEC: case MD_BUFFER_CONTROL_IOCTL: {
+    case MD_BUFFER_CONTROL_IOCTL_SPEC: case MD_BUFFER_CONTROL_IOCTL_LAYOUT: case MD_BUFFER_CONTROL_IOCTL: {
         if (t->phase!=DISPATCHING || !t->proc_file || t->original.regs[8]!=SYS_ioctl
                 || r->regs[1] || r->regs[2]) break;
         struct md_control_file file=md_proc_file_control(t->proc_file);
@@ -5252,22 +5266,28 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
         unsigned command=(unsigned)t->original.regs[1];
         result=file.ops->ioctl_spec(file.context,command,&spec);
         if (result) break;
-        if (spec.size>MD_CONTROL_IOCTL_MAX || spec.direction&~(MD_CONTROL_IN|MD_CONTROL_OUT|MD_CONTROL_STRING)) { result=-EOVERFLOW; break; }
+        long size=md_control_ioctl_size(&spec);
+        if (size<0) { result=size; break; }
         if (r->regs[0]==MD_BUFFER_CONTROL_IOCTL_SPEC) {
             result=(long)((uint64_t)spec.size|((uint64_t)spec.direction<<32)); break;
         }
         struct md_buffer_span span;
         result=md_buffer_span(&t->buffer,&span);
-        if (!result && spec.size>span.size) result=-EOVERFLOW;
+        if (!result && (size_t)size>span.size) result=-EOVERFLOW;
+        if (r->regs[0]==MD_BUFFER_CONTROL_IOCTL_LAYOUT) {
+            if (!result && (!(spec.direction&MD_CONTROL_INDIRECT) || span.size<sizeof(spec))) result=-EINVAL;
+            if (!result) memcpy(span.data,&spec,sizeof(spec));
+            break;
+        }
         struct md_control_actor actor={.pid=t->pid,.identity=&t->identity,.resources=&t->resources};
         if (!result) result=file.ops->ioctl_async
-            ? file.ops->ioctl_async(file.context,&actor,command,t->original.regs[2],span.data,spec.size,&t->control_pending)
-            : file.ops->ioctl(file.context,&actor,command,t->original.regs[2],span.data,spec.size);
+            ? file.ops->ioctl_async(file.context,&actor,command,t->original.regs[2],span.data,(size_t)size,&t->control_pending)
+            : file.ops->ioctl(file.context,&actor,command,t->original.regs[2],span.data,(size_t)size);
         if (t->control_pending) {
             if (result==-EINPROGRESS) {
                 /* EVENT_WAIT: device-provider completion or request deadline;
                  * no file-table/OFD turn is held across a userspace reply. */
-                t->control_size=spec.size; retry_wait(t,RETRY_CONTROL); control_park(t); return;
+                t->control_size=(size_t)size; retry_wait(t,RETRY_CONTROL); control_park(t); return;
             }
             t->control_pending->dispose(t->control_pending); t->control_pending=NULL;
         }

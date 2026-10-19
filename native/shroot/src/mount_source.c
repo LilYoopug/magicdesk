@@ -3,6 +3,7 @@
 #include "inode_internal.h"
 #include "procfs_view.h"
 #include "fuse_view.h"
+#include "render_device.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
@@ -33,6 +34,10 @@ static int sysfs_source(struct md_filesystem *fs,const struct md_fs_request *q,
     s.sysfs=md_sysfs_new(parent,network,fs->store->identity);
     int error=errno; close(parent); errno=error;
     if (!s.sysfs) return -errno;
+    if (fs->render_device.ops) {
+        int r=md_render_device_sysfs(fs->render_device,md_sysfs_root(s.sysfs));
+        if (r) { md_mount_source_close(&s); return r; }
+    }
     s.provider=md_provider_tree_retain(md_sysfs_provider(s.sysfs));
     s.fd=openat(md_sysfs_root(s.sysfs),".",O_PATH|O_DIRECTORY|O_CLOEXEC);
     if (s.fd<0) { int r=-errno; md_mount_source_close(&s); return r; }

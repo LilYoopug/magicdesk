@@ -1,9 +1,11 @@
 #define _GNU_SOURCE
 #include "device_tree.h"
 #include "fuse_device.h"
+#include "render_device.h"
 #include "fs_mount_internal.h"
 #include "inode_lifetime.h"
 #include <errno.h>
+#include <stdio.h>
 #include <unistd.h>
 
 int md_fs_devices_prepare(struct md_filesystem *fs,int hide_native_input,struct md_provider_tree **out) {
@@ -17,6 +19,11 @@ int md_fs_devices_prepare(struct md_filesystem *fs,int hide_native_input,struct 
     if (!error) error=md_fuse_device_node(&fuse);
     if (!error) error=md_device_tree_publish(dev,"fuse",fuse);
     md_control_file_release(fuse);
+    if (!error && fs->render_device.ops) {
+        char path[32]; snprintf(path,sizeof(path),"dri/renderD%u",md_render_device_minor(fs->render_device));
+        if (mkdirat(md_provider_tree_root(dev),"dri",0755)) error=-errno;
+        if (!error) error=md_device_tree_publish(dev,path,fs->render_device);
+    }
     /* /dev/shm keeps its inode namespace, independently of device discovery. */
     struct md_view_location shm={.fd=-1,.parent=-1},target={.fd=-1,.parent=-1};
     if (!error) error=md_view_walk(fs,-1,NULL,"/dev/shm",1,0,0,&shm);

@@ -9,6 +9,7 @@
 
 _Static_assert(offsetof(struct md_entry_api, offers) == 16, "assembly offer offset");
 _Static_assert(offsetof(struct md_entry_api, syscall_count) == 24, "assembly count offset");
+_Static_assert(offsetof(struct pthread, tid) == 208, "AArch64 pthread TID prefix ABI");
 
 const struct md_entry_api *__shroot_entry attribute_hidden;
 static int enabled;
