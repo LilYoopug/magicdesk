@@ -107,7 +107,7 @@ static long dispatch_files(const struct md_fs *fs, long nr, unsigned long a0, un
             || nr==SYS_preadv2 || nr==SYS_pwritev2 || nr==SYS_lseek || nr==SYS_ioctl || nr==SYS_splice
             || nr==SYS_ftruncate || nr==SYS_fsync || nr==SYS_fdatasync || nr==SYS_mmap) {
         long result=md_proc_control_call(nr,args);
-        if (result!=MD_WATCH_NATIVE) return result;
+        if (result!=MD_CALL_NATIVE) return result;
     }
     if (nr==SYS_ioctl && md_terminal_attributes_command((unsigned)a1))
         return md_terminal_attributes(args);

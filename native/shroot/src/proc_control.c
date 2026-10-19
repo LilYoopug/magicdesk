@@ -136,10 +136,10 @@ long md_proc_control_metadata(const struct md_proc_path *ref, long nr, const uns
 }
 long md_proc_control_call(long nr, const unsigned long *a) {
 #ifdef MD_USE_LIBC
-    (void)nr; (void)a; return MD_WATCH_NATIVE;
+    (void)nr; (void)a; return MD_CALL_NATIVE;
 #else
     long active=md_guest_buffer_control(MD_BUFFER_PROC_CHECK,0,0);
-    if (active<=0) return active<0 ? active : MD_WATCH_NATIVE;
+    if (active<=0) return active<0 ? active : MD_CALL_NATIVE;
     if (nr==SYS_mmap) {
         long memory=md_adapter_buffer_take();
         if (memory<0) return memory;

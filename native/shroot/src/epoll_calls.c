@@ -50,6 +50,6 @@ long md_epoll_call(long nr,const unsigned long *a) {
         else if (md_write_memory((void *)a[1],f->events,(size_t)result*sizeof(*f->events))) result=-EFAULT;
     }
     long released=md_adapter_buffer_release();
-    if (result==MD_EPOLL_NATIVE) return md_raw(nr,a[0],a[1],a[2],a[3],a[4],a[5]);
+    if (result==MD_EPOLL_NATIVE) return released ? released : MD_CALL_NATIVE;
     return result ? result : released;
 }

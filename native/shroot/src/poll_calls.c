@@ -1,6 +1,7 @@
 #include "poll_calls.h"
 #include "adapter_buffer.h"
 #include "raw.h"
+#include "interception.h"
 #include <errno.h>
 #include <limits.h>
 
@@ -107,6 +108,6 @@ long md_poll_call(long nr,const unsigned long *a) {
         md_write_memory((void *)timeout,&remaining,sizeof(remaining));
     }
     long released=md_adapter_buffer_release();
-    if (result==MD_EPOLL_NATIVE) return md_raw(nr,a[0],a[1],a[2],a[3],a[4],a[5]);
+    if (result==MD_EPOLL_NATIVE) return released ? released : MD_CALL_NATIVE;
     return result ? result : released;
 }

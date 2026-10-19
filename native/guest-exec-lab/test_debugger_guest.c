@@ -425,7 +425,7 @@ static void *gdb_worker(void *unused) {
     assert(!pthread_mutex_unlock(&workers_lock));
     return NULL;
 }
-static void gdb_target(int threaded) {
+static void gdb_target(int threaded, int forks) {
     pthread_t workers[40];
     if (threaded) {
         assert(!pthread_barrier_init(&ready_barrier, NULL, 41));
@@ -435,6 +435,14 @@ static void gdb_target(int threaded) {
     }
     puts("READY"); fflush(stdout); char c;
     assert(read(0, &c, 1) == 1); assert(magic_value == 43);
+    for (unsigned i = 0; i < (forks ? 4u : 0u); ++i) {
+        pid_t child = fork(); assert(child >= 0);
+        if (!child) {
+            execl("/bin/true", "true", NULL);
+            _exit(127);
+        }
+        exited(child, 0);
+    }
     if (threaded) {
         assert(!pthread_mutex_lock(&workers_lock));
         workers_exit = 1;
@@ -540,9 +548,10 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "syscall-thread-exec")) exec_thread_test(1);
     else if (!strcmp(argv[1], "clone-untraced")) untraced_clone_test();
     else if (!strcmp(argv[1], "perf-event")) { if (!perf_test()) return 0; }
-    else if (!strcmp(argv[1], "gdb-target")) gdb_target(0);
-    else if (!strcmp(argv[1], "gdb-thread-target")) gdb_target(1);
-    else if (!strcmp(argv[1], "strace-target")) { magic_value=43; gdb_target(1); }
+    else if (!strcmp(argv[1], "gdb-target")) gdb_target(0, 0);
+    else if (!strcmp(argv[1], "gdb-thread-target")) gdb_target(1, 0);
+    else if (!strcmp(argv[1], "gdb-fork-target")) gdb_target(1, 1);
+    else if (!strcmp(argv[1], "strace-target")) { magic_value=43; gdb_target(1, 0); }
     else if (!strcmp(argv[1], "gdb-io-target")) gdb_io_target();
     else if (!strcmp(argv[1], "shm-target")) shm_target();
     else if (!strcmp(argv[1], "jit-target")) jit_target();

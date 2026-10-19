@@ -108,8 +108,12 @@ Consequently, installing a working Vulkan driver does not by itself make EGL's
 default Zink path work. Software GL remains independent of this limitation.
 
 The optional [Mesa 26.2.3 patch in the Linux installer](../scripts/install_linux.sh)
-routes explicitly selected Zink through Kopper and uses Mesa's existing non-DRM
-EGLDevice convention. On RM11/API 36, Termux Mesa/Turnip with this client patch
+routes explicitly selected Zink through Kopper. A non-DRM EGLDevice uses the
+Gallium driver's acceleration capability and physical-device UUID rather than
+assuming that a swrast loader means software rendering. Hardware devices do not
+advertise nonexistent DRM nodes; CPU drivers retain the software device. The
+same admission path handles Wayland, X11 and surfaceless contexts. On RM11/API 36,
+Termux Mesa/Turnip with this client patch
 reports OpenGL 4.6 and GLES 3.2 on Adreno 840; GTK4's GL renderer and GLArea present
 linear DMA-BUFs and respond to pointer input. The unmodified loader fails before
 that path; forcing only `GALLIUM_DRIVER=zink` can instead produce empty SHM frames.
@@ -118,7 +122,10 @@ claim. Different GPUs and distribution builds require their own checks.
 
 The [Linux installer](shroot.md#linux-installer) builds a complete,
 private Linux client stack for `--gpu turnip` and retains a software alternative.
-Its `--print-mesa-patch` export is also the lab's patch source.
+All distribution recipes share this patch and build identity; only package
+dependencies differ. Its `--print-mesa-patch` export is also the lab's patch
+source. Existing environments need `--resume --gpu turnip` with the updated
+installer; installing an APK alone does not rebuild their private Mesa.
 
 The GLX patch advertises callbacks from the effective loader backend, including
 when an application sets `LIBGL_KOPPER_DISABLE`. The Turnip profile explicitly
@@ -181,6 +188,52 @@ sandboxed Chromium Zink/Turnip WebGL pixel/normal-exit cycles, and a Wayland win
 check with frames, pointer input and normal closure. Sandbox and GPU watchdog
 stayed enabled. This checks Zink/OpenGL, not Chromium's separate ANGLE/Vulkan
 Wayland output path, other runtime ABIs or document-portal support.
+
+### Snap GPU Drivers
+
+Every Turnip recipe also installs `magicdesk-snap-gpu`. This installs the helper,
+not snapd or the content snap: preparation runs explicitly once the selected
+Linux has the prerequisites. It is not an application-launch hook. Run it as root **inside the
+selected Linux**, with systemd/snapd running, `core24` and `mesa-2404` installed
+and mounted, and `python3`, `bubblewrap` and `squashfs-tools` available. Close GPU
+Snap applications before preparation or changing the selected Mesa build:
+
+```sh
+sudo magicdesk-snap-gpu --jobs 2
+```
+
+The helper reuses the selected Mesa prefix from `/etc/magicdesk/mesa-prefix`.
+It checks the libraries against the actual core24 loader and mesa-2404 libraries,
+then packs a local `magicdesk-gpu-2404` content snap. No Mesa or browser rebuild
+is performed. `--build-only` verifies and packages without installing or changing
+connections; `--prefix PATH` selects another completed recipe build explicitly.
+
+The local snap connects to `mesa-2404:kernel-gpu-2404`. The official provider's
+component monitor publishes it, and applications retain their usual
+`mesa-2404:gpu-2404` connection. This follows the provider's
+[kernel GPU content contract](https://github.com/canonical/mesa-2404), not a
+Firefox-specific mount or runtime exception. Absolute host driver paths are
+replaced with paths inside the mounted content. The helper will not replace an
+already connected third-party provider. A bounded inotify wait checks the
+monitor's publication marker; starting its service alone is not success.
+
+`snap install --dangerous` here admits the locally built unsigned driver package;
+it does not request classic/devmode or disable the application's seccomp sandbox.
+Shroot's existing AppArmor limitations still apply. Re-run preparation after
+changing Mesa or the base/provider revision. Unchanged verified bundles are
+reused; old package files remain cached. Remove the override with
+`sudo snap disconnect mesa-2404:kernel-gpu-2404 magicdesk-gpu-2404:kernel-gpu-2404`
+and restart the applications.
+
+Ubuntu 24.04/core24 on Adreno 840 passed Vulkan enumeration, Wayland EGL
+OpenGL 4.6 through Zink/Turnip, and Firefox Snap WebGL2 pixel rendering with
+keyboard/pointer input, download, portal file selection and normal exit. With
+the corrected non-DRM EGLDevice, Firefox 158 also reports hardware `WebRender`,
+one accelerated window and effective content sandbox level 6, without forced
+graphics preferences. This does not enable DRM-dependent video decoding or
+Firefox's separately gated native compositor.
+Other Mesa/base combinations must pass ABI admission; a newer host glibc is
+not made compatible merely by copying its driver libraries.
 
 ### Server Composition
 

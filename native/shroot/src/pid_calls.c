@@ -57,7 +57,7 @@ long md_pidfd_signal(const unsigned long *a) {
 }
 long md_pidfd_namespace(const unsigned long *a) {
     long result=md_guest_buffer_control(MD_BUFFER_PIDFD_NAMESPACE,a[0],a[1]);
-    if (result==MD_WATCH_NATIVE) return RAW3(ioctl,a[0],a[1],a[2]);
+    if (result==MD_CALL_NATIVE) return RAW3(ioctl,a[0],a[1],a[2]);
     if (result) return result;
     result=RAW5(prctl,MD_GUEST_PROC_FILE,MD_PROC_FILE_PIDFD_NAMESPACE,a[0],a[1],0);
     if (result>=0) {

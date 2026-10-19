@@ -24,6 +24,7 @@
 #include <poll.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <ucontext.h>
 
 static volatile sig_atomic_t limit_traps;
@@ -83,6 +84,44 @@ static void byte_read(int fd) {
 static void byte_write(int fd) { assert(write(fd,"x",1)==1); }
 static volatile sig_atomic_t signalled;
 static void on_signal(int number) { assert(number==SIGUSR1); signalled=1; }
+static void native_wait_signals(void) {
+    struct sigaction action={.sa_handler=on_signal}; sigemptyset(&action.sa_mask);
+    assert(!sigaction(SIGUSR1,&action,NULL));
+    sigset_t before,after;
+    assert(!sigprocmask(SIG_SETMASK,NULL,&before) && !sigismember(&before,SIGUSR1));
+    int ep=epoll_create1(EPOLL_CLOEXEC),fd=eventfd(0,EFD_CLOEXEC);
+    assert(ep>=0 && fd>=0);
+    struct epoll_event event={.events=EPOLLIN,.data.fd=fd};
+    assert(!epoll_ctl(ep,EPOLL_CTL_ADD,fd,&event));
+    timer_t timer;
+    struct sigevent notification={.sigev_notify=SIGEV_SIGNAL,.sigev_signo=SIGUSR1};
+    assert(!timer_create(CLOCK_MONOTONIC,&notification,&timer));
+    for (unsigned mode=0;mode<4;++mode) {
+        signalled=0;
+        struct itimerspec fire={.it_value={0,50000000},.it_interval={0,50000000}};
+        assert(!timer_settime(timer,0,&fire,NULL));
+        struct timespec limit={1,0};
+        struct pollfd poll={fd,POLLIN,0};
+        fd_set set; FD_ZERO(&set); FD_SET(fd,&set);
+        /* EVENT_WAIT: timer interrupts a native-only wait after selector admission;
+         * the one-second syscall deadline must not replace signal delivery. */
+        long result=mode==0 ? syscall(SYS_ppoll,&poll,1,&limit,NULL,8)
+            : mode==1 ? syscall(SYS_pselect6,fd+1,&set,NULL,NULL,&limit,NULL)
+            : mode==2 ? syscall(SYS_epoll_pwait,ep,&event,1,1000,NULL,8)
+            : syscall(SYS_epoll_pwait2,ep,&event,1,&limit,NULL,8);
+        int error=errno;
+        struct itimerspec stopped={0};
+        assert(!timer_settime(timer,0,&stopped,NULL));
+        if (result!=-1 || error!=EINTR || !signalled)
+            fprintf(stderr,"native wait mode=%u result=%ld errno=%d signal=%d\n",mode,result,error,signalled);
+        assert(result==-1 && error==EINTR && signalled);
+        assert(!sigprocmask(SIG_SETMASK,NULL,&after));
+        for (int signal=1;signal<NSIG;++signal)
+            assert(sigismember(&before,signal)==sigismember(&after,signal));
+    }
+    assert(!timer_delete(timer)); close(fd); close(ep);
+    puts("PASS mixed epoll: native-only poll/select/epoll preserve asynchronous signals");
+}
 static void signal_wait(int ep) {
     struct sigaction action={.sa_handler=on_signal}; sigemptyset(&action.sa_mask);
     assert(!sigaction(SIGUSR1,&action,NULL));
@@ -329,6 +368,7 @@ static void mixed(int filtered,int shared) {
     signal_wait(ep);
     signal_ready(ep);
     signal_descriptor(ep);
+    native_wait_signals();
     if (shared) {
         byte_write(holder_pipe[1]);
         assert(waitpid(holder,&status,0)==holder && WIFEXITED(status) && !WEXITSTATUS(status));

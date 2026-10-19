@@ -52,9 +52,11 @@ defaults to automatic Turnip detection and a Wayland Plasma desktop.
   --list        Show available distribution/profile combinations
   --print-system-setup  Print the guest setup script without running it
   --print-graphics-setup  Print the guest graphics setup script without running it
+  --print-weston-setup  Print the guest Weston compatibility recipe
   --print-libc-setup  Print the guest libc setup script without running it
   --print-mesa-patch  Print the embedded patch without running the installer
   --print-flatpak-gl-helper  Print the embedded Flatpak GL publisher
+  --print-snap-gpu-helper  Print the embedded Snap GPU publisher
   --print-kwin-patch [6.3.6|6.2.5]  Print the matching embedded KWin patch
   --print-recovery-reader  Print the embedded SteamOS image converter
 
@@ -573,7 +575,8 @@ DISTRO
 mesa_patch() {
     cat <<'PATCH'
 Mesa 26.2.3: explicitly selected Zink uses Kopper without a DRM render node.
-The EGLDevice convention matches platform_x11_finalize(force_zink).
+Non-DRM EGL devices follow the actual Gallium renderer's acceleration and UUID,
+including surfaceless contexts. Software drivers remain software devices.
 KGSL calibrated timestamps use the kernel timestamp ioctl when available;
 unsupported kernels do not advertise that extension. Queue queries are unchanged.
 GLX loader capabilities follow the effective backend when Kopper is disabled.
@@ -626,15 +629,6 @@ advertise that callback, so offscreen flushes retain their original no-op behavi
     if (psc->kopper) {
 --- a/src/egl/drivers/dri2/platform_wayland.c
 +++ b/src/egl/drivers/dri2/platform_wayland.c
-@@ -3262,7 +3262,7 @@ dri2_initialize_wayland_swrast(_EGLDisplay *disp)
-    if (!dri2_create_screen(disp))
-       goto cleanup;
-
--   if (!dri2_setup_device(disp, disp->Options.ForceSoftware)) {
-+   if (!dri2_setup_device(disp, disp->Options.ForceSoftware || disp->Options.Zink)) {
-       _eglError(EGL_NOT_INITIALIZED, "DRI2: failed to setup EGLDevice");
-       goto cleanup;
-    }
 @@ -3297,7 +3297,7 @@ dri2_initialize_wayland_swrast(_EGLDisplay *disp)
  EGLBoolean
  dri2_initialize_wayland(_EGLDisplay *disp)
@@ -644,6 +638,168 @@ advertise that callback, so offscreen flushes retain their original no-op behavi
        return dri2_initialize_wayland_swrast(disp);
     else
        return dri2_initialize_wayland_drm(disp);
+--- a/src/egl/main/egldevice.h
++++ b/src/egl/main/egldevice.h
+@@ -60,6 +60,9 @@
+ _EGLDevice *
+ _eglFindDevice(int fd, bool software);
+
++_EGLDevice *
++_eglFindNonDrmDevice(const unsigned char uuid[16]);
++
+ enum _egl_device_extension {
+    _EGL_DEVICE_SOFTWARE,
+    _EGL_DEVICE_DRM,
+--- a/src/egl/main/egldevice.c
++++ b/src/egl/main/egldevice.c
+@@ -78,8 +78,8 @@
+       dev_list = dev_list->Next;
+
+ #ifdef HAVE_LIBDRM
+-      assert(_eglDeviceSupports(dev, _EGL_DEVICE_DRM));
+-      drmFreeDevice(&dev->device);
++      if (dev->device)
++         drmFreeDevice(&dev->device);
+ #endif
+       free(dev->device_info.vendor_name);
+       free(dev->device_info.renderer_name);
+@@ -113,6 +113,32 @@
+    .EXT_device_drm_render_node = EGL_TRUE,
+ };
+
++/* A render-capable driver can have a physical device without a DRM node.
++ * Retain its real UUID for identity; do not advertise unavailable DRM APIs.
++ */
++_EGLDevice *
++_eglFindNonDrmDevice(const unsigned char uuid[16])
++{
++   simple_mtx_lock(_eglGlobal.Mutex);
++   _EGLDevice *dev = _eglGlobal.DeviceList;
++   while (dev->Next) {
++      dev = dev->Next;
++      if (!dev->MESA_device_software && !dev->EXT_device_drm &&
++          !memcmp(dev->device_info.device_uuid, uuid, EGL_UUID_SIZE)) {
++         simple_mtx_unlock(_eglGlobal.Mutex);
++         return dev;
++      }
++   }
++   dev->Next = calloc(1, sizeof(*dev));
++   dev = dev->Next;
++   if (dev) {
++      memcpy(dev->device_info.device_uuid, uuid, EGL_UUID_SIZE);
++      dev->extensions = "";
++   }
++   simple_mtx_unlock(_eglGlobal.Mutex);
++   return dev;
++}
++
+ #ifdef HAVE_LIBDRM
+ extern const _EGLDriver _eglDriver;
+ /*
+@@ -143,8 +169,8 @@
+    while (dev->Next) {
+       dev = dev->Next;
+
+-      assert(_eglDeviceSupports(dev, _EGL_DEVICE_DRM));
+-      if (drmDevicesEqual(device, dev->device) != 0)
++      if (_eglDeviceSupports(dev, _EGL_DEVICE_DRM) &&
++          drmDevicesEqual(device, dev->device) != 0)
+          return 1;
+    }
+
+@@ -328,10 +354,8 @@
+ {
+ #ifdef HAVE_LIBDRM
+    drmDevicePtr device = _eglDeviceDrm(dev);
+-   /* Software device does not have render node. */
+-   const char *render_node =
+-      _eglDeviceSupports(dev, _EGL_DEVICE_SOFTWARE) ?
+-      "" : device->nodes[DRM_NODE_RENDER];
++   /* Software and non-DRM devices do not have a render node. */
++   const char *render_node = device ? device->nodes[DRM_NODE_RENDER] : "";
+ #endif
+
+    switch (name) {
+@@ -434,6 +458,11 @@
+    assert(_eglDeviceSupports(dev, _EGL_DEVICE_SOFTWARE));
+    count++;
+
++   for (_EGLDevice *other = dev->Next; other; other = other->Next) {
++      if (!_eglDeviceSupports(other, _EGL_DEVICE_DRM))
++         count++;
++   }
++
+ #ifdef HAVE_LIBDRM
+    drmDevicePtr devices[64];
+    int num_devs, ret;
+--- a/src/egl/drivers/dri2/egl_dri2.c
++++ b/src/egl/drivers/dri2/egl_dri2.c
+@@ -47,6 +47,7 @@
+ #include <sys/stat.h>
+ #include <sys/types.h>
+ #include "dri_screen.h"
++#include "pipe/p_screen.h"
+
+ #ifdef HAVE_WAYLAND_PLATFORM
+ #include "linux-dmabuf-unstable-v1-client-protocol.h"
+@@ -831,6 +832,21 @@
+    _EGLDevice *dev;
+    int render_fd;
+
++   /* A Gallium screen can use a non-DRM device even with a swrast loader. */
++   if (dri2_dpy->fd_render_gpu < 0 && dri2_dpy->dri_screen_render_gpu) {
++      struct pipe_screen *screen = dri2_dpy->dri_screen_render_gpu->base.screen;
++      dev = NULL;
++      if (!screen->caps.accelerated) {
++         dev = _eglFindDevice(-1, true);
++      } else if (screen->get_device_uuid) {
++         unsigned char uuid[16];
++         screen->get_device_uuid(screen, (char *)uuid);
++         dev = _eglFindNonDrmDevice(uuid);
++      }
++      disp->Device = dev;
++      return dev != NULL;
++   }
++
+    /* If we're not software, we need a DRM node FD */
+    assert(software || dri2_dpy->fd_render_gpu >= 0);
+
+--- a/src/egl/drivers/dri2/platform_surfaceless.c
++++ b/src/egl/drivers/dri2/platform_surfaceless.c
+@@ -343,17 +343,10 @@
+ surfaceless_probe_device_sw(_EGLDisplay *disp)
+ {
+    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
+-   struct _egl_device *device = _eglFindDevice(dri2_dpy->fd_render_gpu, true);
++   _EGLDevice *requested_device = disp->Device;
+
+    dri2_dpy->fd_render_gpu = -1;
+
+-   if (_eglHasAttrib(disp, EGL_DEVICE_EXT) && disp->Device != device) {
+-      return false;
+-   }
+-
+-   disp->Device = device;
+-   assert(disp->Device);
+-
+    dri2_dpy->driver_name = strdup(disp->Options.Zink ? "zink" : "swrast");
+    if (!dri2_dpy->driver_name)
+       return false;
+@@ -374,6 +367,14 @@
+       return false;
+    }
+
++   if (!dri2_setup_device(disp, true))
++      return false;
++
++   if (_eglHasAttrib(disp, EGL_DEVICE_EXT) && disp->Device != requested_device) {
++      disp->Device = requested_device;
++      return false;
++   }
++
+    return true;
+ }
+
 --- a/src/freedreno/vulkan/tu_knl.h
 +++ b/src/freedreno/vulkan/tu_knl.h
 @@ -128,6 +128,7 @@
@@ -1978,6 +2134,105 @@ esac
 BUILD_SUPPORT
 }
 
+weston_setup() {
+    distribution_support
+    build_support
+    cat <<'WESTON'
+jobs=$1
+recipe=$2
+[ -f /usr/local/share/applications/magicdesk-weston.desktop ] || exit 0
+# 13.0.0 dereferences popup shell data during focus handoff. Use the official
+# maintenance release, not a compositor fork or a browser-specific workaround.
+case "$(/usr/bin/weston --version)" in
+    'weston 13.0.'[0-3]) ;;
+    *) rm -f /etc/magicdesk/weston.sh; exit 0 ;;
+esac
+version=13.0.4
+archive_sha=66252c9c5bbc45ab402e2518b76e6d824f09ebc1d0040ee2f51b096a1bc585b1
+prefix=/opt/magicdesk/weston/$version-$recipe
+work=/var/cache/magicdesk/weston/$version-$recipe
+mkdir -p /var/lib/magicdesk /etc/magicdesk "$work"
+exec 9>/var/lib/magicdesk/installer.lock
+flock -n 9 || { echo 'Another graphics setup is running in this environment.' >&2; exit 1; }
+candidate=/etc/magicdesk/weston.sh.new
+trap 'status=$?; rm -f "$candidate"; package_cleanup; exit "$status"' 0
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [ ! -f "$prefix/.complete" ]; then
+    if [ "$build_phase" != build ]; then
+        case "$family" in
+            apt) packages build-essential meson ninja-build pkg-config curl xz-utils \
+                libwayland-dev wayland-protocols libxkbcommon-dev libpixman-1-dev \
+                libinput-dev libevdev-dev libudev-dev libdrm-dev libcairo2-dev \
+                libpango1.0-dev libpng-dev libegl-dev libgles-dev libxcb-composite0-dev \
+                libxcb-shape0-dev libxcb-xfixes0-dev libxcb-cursor-dev libxcursor-dev ;;
+            apk) packages build-base meson ninja pkgconf curl xz wayland-dev wayland-protocols \
+                libxkbcommon-dev pixman-dev libinput-dev libevdev-dev eudev-dev libdrm-dev \
+                cairo-dev pango-dev libpng-dev libglvnd-dev libxcb-dev xcb-util-cursor-dev libxcursor-dev ;;
+            dnf) packages gcc gcc-c++ meson ninja-build pkgconf-pkg-config curl xz \
+                wayland-devel wayland-protocols-devel libxkbcommon-devel pixman-devel \
+                libinput-devel libevdev-devel systemd-devel libdrm-devel cairo-devel \
+                pango-devel libpng-devel libglvnd-devel libxcb-devel xcb-util-cursor-devel libXcursor-devel ;;
+            pacman|recovery) packages base-devel meson ninja pkgconf curl xz wayland wayland-protocols \
+                libxkbcommon pixman libinput libevdev libdrm cairo pango libpng libglvnd libxcb xcb-util-cursor libxcursor ;;
+            zypper) packages gcc gcc-c++ make meson ninja pkgconf-pkg-config curl xz \
+                wayland-devel wayland-protocols-devel libxkbcommon-devel pixman-devel \
+                libinput-devel libevdev-devel libudev-devel libdrm-devel cairo-devel \
+                pango-devel libpng-devel libglvnd-devel libxcb-devel xcb-util-cursor-devel libXcursor-devel ;;
+            xbps) packages base-devel meson ninja pkg-config curl xz wayland-devel wayland-protocols \
+                libxkbcommon-devel pixman-devel libinput-devel libevdev-devel eudev-libudev-devel \
+                libdrm-devel cairo-devel pango-devel libpng-devel libglvnd-devel libxcb-devel xcb-util-cursor-devel libXcursor-devel ;;
+        esac
+    fi
+    [ "$build_phase" != dependencies ] || exit 0
+    mkdir -p /var/cache/magicdesk/weston/downloads
+    archive=/var/cache/magicdesk/weston/downloads/weston-$version.tar.xz
+    if ! printf '%s  %s\n' "$archive_sha" "$archive" | sha256sum -c - >/dev/null 2>&1; then
+        # EVENT_WAIT: download progress; a stalled connection fails and curl retries it.
+        curl --fail --location --proto '=https' --proto-redir '=https' \
+            --connect-timeout 30 --speed-limit 1 --speed-time 60 --retry 3 --output "$archive.part" \
+            "https://gitlab.freedesktop.org/wayland/weston/-/releases/$version/downloads/weston-$version.tar.xz"
+        printf '%s  %s\n' "$archive_sha" "$archive.part" | sha256sum -c -
+        mv "$archive.part" "$archive"
+    fi
+    source=$work/weston-$version
+    if [ ! -f "$source/.extracted" ]; then
+        rm -rf "$source" "$work/build" "$work/unpack"
+        mkdir "$work/unpack"
+        tar --no-same-owner -xJf "$archive" -C "$work/unpack"
+        touch "$work/unpack/weston-$version/.extracted"
+        mv "$work/unpack/weston-$version" "$source"
+        rmdir "$work/unpack"
+    fi
+    set -- --prefix="$prefix" --libdir=lib --buildtype=release --wrap-mode=nodownload \
+        -Dbackend-default=wayland -Dbackend-drm=false -Dbackend-drm-screencast-vaapi=false \
+        -Dbackend-pipewire=false -Dbackend-rdp=false -Dbackend-vnc=false -Dbackend-x11=false \
+        -Dbackend-wayland=true -Dbackend-headless=true -Drenderer-gl=true -Dxwayland=true \
+        -Dsystemd=false -Dscreenshare=false -Dremoting=false -Dpipewire=false \
+        -Dshell-fullscreen=false -Dshell-ivi=false -Dshell-kiosk=false \
+        -Dcolor-management-lcms=false -Dimage-jpeg=false -Dimage-webp=false \
+        -Ddemo-clients=false -Dsimple-clients= -Dtools=terminal -Dwcap-decode=false -Dtest-junit-xml=false
+    if [ -f "$work/build/build.ninja" ]; then
+        meson setup --reconfigure "$work/build" "$source" "$@" </dev/null
+    else
+        meson setup "$work/build" "$source" "$@" </dev/null
+    fi
+    ninja -C "$work/build" -j "$jobs" </dev/null
+    rm -rf "$work/stage"
+    meson install -C "$work/build" --no-rebuild --destdir "$work/stage" </dev/null
+    [ -x "$work/stage$prefix/bin/weston" ] || exit 1
+    mkdir -p /opt/magicdesk/weston
+    [ ! -e "$prefix" ] || { echo "Incomplete prefix exists: $prefix" >&2; exit 1; }
+    printf '%s\n' "$recipe" > "$work/stage$prefix/.complete"
+    mv "$work/stage$prefix" "$prefix"
+fi
+[ "$build_phase" != dependencies ] || exit 0
+[ "$(cat "$prefix/.complete")" = "$recipe" ] || { echo 'Weston build identity mismatch.' >&2; exit 1; }
+printf "weston_prefix='%s'\n" "$prefix" > "$candidate"
+mv "$candidate" /etc/magicdesk/weston.sh
+WESTON
+}
+
 plasma_setup() {
     case "$distro" in steamos) kwin_version=6.2.5 ;; *) kwin_version=6.3.6 ;; esac
     distribution_support
@@ -2105,8 +2360,8 @@ import subprocess
 import sys
 import tempfile
 
-CONFIG = Path('/etc/magicdesk/flatpak-mesa-prefix')
-PROBE = Path('/usr/local/libexec/magicdesk-flatpak-gl-probe')
+CONFIG = Path('/etc/magicdesk/mesa-prefix')
+PROBE = Path('/usr/local/libexec/magicdesk-mesa-probe')
 EXTENSION = 'org.freedesktop.Platform.GL.host'
 FORMAT = '1'
 
@@ -2363,6 +2618,243 @@ if __name__ == '__main__':
 FLATPAK_GL_PY
 }
 
+snap_gpu_helper() {
+    cat <<'SNAP_GPU_PY'
+#!/usr/bin/env python3
+"""Publish prepared Mesa through mesa-2404's kernel-gpu-2404 content plug."""
+import argparse
+import ctypes
+import errno
+import fcntl
+import hashlib
+import http.client
+import json
+import os
+from pathlib import Path
+import select
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+
+CONFIG = Path('/etc/magicdesk/mesa-prefix')
+PROBE = Path('/usr/local/libexec/magicdesk-mesa-probe')
+CACHE = Path('/var/cache/magicdesk/snap-gpu')
+SNAP_DATA = Path('/var/snap/mesa-2404')
+NAME = 'magicdesk-gpu-2404'
+FORMAT = '2'
+MANGLER = '''# Sourced by the official gpu-2404 provider, not an app wrapper.
+md_gpu=$COMPONENT_PATH
+export LD_LIBRARY_PATH="$md_gpu/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LIBGL_DRIVERS_PATH="$md_gpu/lib/dri" GBM_BACKENDS_PATH="$md_gpu/lib/gbm"
+export __EGL_VENDOR_LIBRARY_FILENAMES="$md_gpu/share/glvnd/egl_vendor.d/50_mesa.json"
+export VK_DRIVER_FILES="$md_gpu/share/vulkan/icd.d/freedreno_icd.aarch64.json"
+export VK_ICD_FILENAMES="$VK_DRIVER_FILES"
+export MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink LIBGL_KOPPER_DRI2=true
+unset LIBGL_ALWAYS_SOFTWARE md_gpu
+'''
+
+
+def run(argv, **kwargs):
+    # EVENT_WAIT: the bounded preparation command exits; expiry rejects it.
+    return subprocess.run(argv, check=True, timeout=300, **kwargs)
+
+
+def check_connection():
+    connection = http.client.HTTPConnection('localhost', timeout=30)
+    connection.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    connection.sock.settimeout(30)
+    try:
+        connection.sock.connect('/run/snapd.socket')
+        connection.request('GET', '/v2/connections?select=all')
+        response = connection.getresponse()
+        data = json.load(response)
+        if response.status != 200:
+            raise ValueError('Cannot inspect Snap GPU connections: ' + str(data))
+    finally:
+        connection.close()
+    for entry in data['result']['established']:
+        if entry['plug'] == {'snap': 'mesa-2404', 'plug': 'kernel-gpu-2404'}:
+            if entry['slot'] != {'snap': NAME, 'slot': 'kernel-gpu-2404'}:
+                raise ValueError('mesa-2404 already uses another GPU provider; disconnect it explicitly')
+
+
+def wait_for_component(provider, identity):
+    directory = SNAP_DATA / provider.name / 'kernel-gpu-2404'
+    marker = directory / 'kernel-gpu-2404-sentinel'
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.inotify_init1.argtypes = [ctypes.c_int]
+    libc.inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+    fd = libc.inotify_init1(os.O_CLOEXEC | os.O_NONBLOCK)
+    if fd < 0:
+        raise OSError(ctypes.get_errno(), 'Cannot observe GPU component publication')
+    try:
+        events = 0x8 | 0x80 | 0x100 | 0x200 | 0x400 | 0x800
+        if libc.inotify_add_watch(fd, os.fsencode(directory.parent), events) < 0:
+            raise OSError(ctypes.get_errno(), 'Cannot watch GPU provider data directory')
+        deadline = time.monotonic() + 60
+        while True:
+            # The monitor can create or replace its publication directory. Keep
+            # its parent watched and arm the current directory before reading.
+            if libc.inotify_add_watch(fd, os.fsencode(directory), events) < 0:
+                error = ctypes.get_errno()
+                if error != errno.ENOENT:
+                    raise OSError(error, 'Cannot watch GPU component directory')
+            try:
+                if marker.read_text().strip() == identity:
+                    return
+            except FileNotFoundError:
+                pass
+            remaining = deadline - time.monotonic()
+            # EVENT_WAIT: component-monitor publishes the sentinel last. Timeout
+            # is failure, not proof that the new driver is ready for applications.
+            if remaining <= 0 or not select.select([fd], [], [], remaining)[0]:
+                raise ValueError('Timed out waiting for mesa-2404.component-monitor')
+            os.read(fd, 65536)
+    finally:
+        os.close(fd)
+
+
+def stage_bundle(prefix, root, identity):
+    shutil.copytree(prefix / 'lib', root / 'lib', symlinks=True)
+    shutil.rmtree(root / 'lib/pkgconfig', ignore_errors=True)
+    for path in (root / 'lib').rglob('*'):
+        if path.is_symlink() and not path.resolve().is_relative_to((root / 'lib').resolve()):
+            raise ValueError('Mesa library link escapes its bundle: ' + str(path))
+    for name in ('vulkan/icd.d/freedreno_icd.aarch64.json', 'glvnd/egl_vendor.d/50_mesa.json'):
+        data = json.loads((prefix / 'share' / name).read_text())
+        library = Path(data['ICD']['library_path']).name
+        if not (root / 'lib' / library).is_file():
+            raise ValueError('Missing Mesa library: ' + library)
+        # The provider prepends its library directory; no host absolute paths.
+        data['ICD']['library_path'] = library
+        target = root / 'share' / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(data) + '\n')
+    (root / 'kernel-gpu-2404-provider-mangler').write_text(MANGLER)
+    (root / 'kernel-gpu-2404-sentinel').write_text(identity + '\n')
+    (root / 'meta').mkdir()
+    (root / 'meta/snap.yaml').write_text('''name: ''' + NAME + '''
+version: 'md-''' + identity[:24] + ''''
+summary: Locally prepared MagicDesk Mesa
+description: Turnip and Zink for the mesa-2404 GPU content provider.
+architectures: [arm64]
+base: core24
+confinement: strict
+grade: devel
+slots:
+  kernel-gpu-2404:
+    interface: content
+    content: kernel-gpu-2404
+    read: [$SNAP]
+''')
+    # The caller's private umask must not make a content snap root-only.
+    root.chmod(0o755)
+    for path in root.rglob('*'):
+        if not path.is_symlink():
+            path.chmod(0o755 if path.is_dir() else 0o644)
+
+
+def provider_libraries(provider):
+    # Both published mesa-2404 layouts retain the same content contract.
+    for path in ('mesa-2404/usr/lib/aarch64-linux-gnu', 'usr/lib/aarch64-linux-gnu'):
+        if (provider / path / 'libvulkan.so.1').is_file():
+            return path
+    raise ValueError('Unsupported mesa-2404 library layout')
+
+
+def verify_runtime(root, base, provider):
+    libraries = provider_libraries(provider)
+    targets = [str(p.relative_to(root)) for p in sorted((root / 'lib').rglob('*.so*'))
+               if p.is_file() and not p.is_symlink()]
+    if not targets:
+        raise ValueError('Empty Mesa library bundle')
+    argv = ['bwrap', '--unshare-pid', '--unshare-net', '--unshare-ipc',
+            '--ro-bind', str(base / 'usr'), '/usr', '--symlink', 'usr/lib', '/lib',
+            '--symlink', 'usr/bin', '/bin', '--dev', '/dev', '--proc', '/proc',
+            '--ro-bind', str(root), '/mdgl', '--ro-bind', str(provider), '/mdprovider',
+            '--ro-bind', str(PROBE), '/probe', '--chdir', '/', '--',
+            '/lib/ld-linux-aarch64.so.1', '--library-path',
+            '/mdgl/lib:/mdprovider/' + libraries + ':/usr/lib/aarch64-linux-gnu',
+            '/probe']
+    run(argv + ['/mdgl/' + name for name in targets],
+        env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'})
+
+
+def prepare(prefix, base, provider, jobs):
+    marker = (prefix / '.complete').read_text().strip()
+    if not marker:
+        raise ValueError('Incomplete Mesa build')
+    identity = hashlib.sha256((FORMAT + '\n' + str(prefix) + '\n' + marker + '\n' +
+                               MANGLER + str(base) + '\n' + str(provider)).encode()).hexdigest()
+    CACHE.mkdir(parents=True, exist_ok=True)
+    image = CACHE / (NAME + '-' + identity + '.snap')
+    if not image.is_file():
+        with tempfile.TemporaryDirectory(prefix='.prepare-', dir=CACHE) as temporary:
+            root = Path(temporary) / 'root'
+            root.mkdir()
+            stage_bundle(prefix, root, identity)
+            verify_runtime(root, base, provider)
+            candidate = Path(temporary) / 'gpu.snap'
+            run(['mksquashfs', str(root), str(candidate), '-noappend', '-all-root',
+                 '-comp', 'xz', '-processors', str(jobs), '-no-progress'])
+            os.replace(candidate, image)
+    return image, identity
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--prefix', type=Path, help='Prepared Mesa prefix; defaults to recipe selection')
+    parser.add_argument('--jobs', type=int, default=2, help='Compression workers')
+    parser.add_argument('--build-only', action='store_true', help='Build and verify without changing Snap connections')
+    args = parser.parse_args()
+    if os.geteuid() != 0:
+        raise ValueError('Run as root inside the selected Linux environment')
+    if args.jobs < 1:
+        raise ValueError('--jobs must be positive')
+    prefix = (args.prefix or Path(CONFIG.read_text().strip())).resolve(strict=True)
+    base = Path('/snap/core24/current').resolve(strict=True)
+    provider = Path('/snap/mesa-2404/current').resolve(strict=True)
+    wrapper = (provider / 'bin/gpu-2404-provider-wrapper').read_text()
+    if 'kernel-gpu-2404-provider-mangler' not in wrapper:
+        raise ValueError('mesa-2404 does not support the kernel-gpu-2404 provider contract')
+    for name in ('bwrap', 'mksquashfs', 'snap'):
+        if not shutil.which(name):
+            raise ValueError('Required command is not installed: ' + name)
+    if not PROBE.is_file():
+        raise ValueError('Reapply the graphics recipe to install the Mesa ABI probe')
+    CACHE.mkdir(parents=True, exist_ok=True)
+    with (CACHE / 'lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if not args.build_only:
+            check_connection()
+        image, identity = prepare(prefix, base, provider, args.jobs)
+        print('Snap GPU bundle: ' + str(image), flush=True)
+        if args.build_only:
+            return
+        marker = Path('/snap') / NAME / 'current/kernel-gpu-2404-sentinel'
+        if marker.parent.exists() and not marker.is_file():
+            raise ValueError('Not replacing an independently installed ' + NAME)
+        if not marker.is_file() or marker.read_text().strip() != identity:
+            # Locally built content is unsigned; this does not disable confinement.
+            run(['snap', 'install', '--dangerous', str(image)])
+        run(['snap', 'connect', 'mesa-2404:kernel-gpu-2404', NAME + ':kernel-gpu-2404'])
+        run(['snap', 'start', '--enable', 'mesa-2404.component-monitor'])
+        wait_for_component(provider, identity)
+        print('Snap GPU connected. Applications keep their mesa-2404:gpu-2404 connection.')
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        print('Snap GPU preparation failed: ' + str(error), file=sys.stderr)
+        sys.exit(1)
+SNAP_GPU_PY
+}
+
 # One payload is both fingerprinted and executed; the lab exports the same patch.
 graphics_setup() {
     distribution_support
@@ -2391,6 +2883,12 @@ GPU_HEAD
     cat <<'GPU_HEAD'
 FLATPAK_GL_HELPER
 chmod 755 /usr/local/bin/magicdesk-flatpak-gl
+cat > /usr/local/bin/magicdesk-snap-gpu <<'SNAP_GPU_HELPER'
+GPU_HEAD
+    snap_gpu_helper
+    cat <<'GPU_HEAD'
+SNAP_GPU_HELPER
+chmod 755 /usr/local/bin/magicdesk-snap-gpu
 
 prepare_meson() {
     meson_tool=$(command -v meson || :)
@@ -2536,7 +3034,7 @@ int main(int argc, char **argv) {
 }
 PROBE
     cc -O2 "$work/flatpak-gl-probe.c" -ldl -o "$work/flatpak-gl-probe"
-    install -m 755 "$work/flatpak-gl-probe" /usr/local/libexec/magicdesk-flatpak-gl-probe
+    install -m 755 "$work/flatpak-gl-probe" /usr/local/libexec/magicdesk-mesa-probe
 fi
 
 # Remove only our previously exported library directory when re-sourcing a login profile.
@@ -2638,8 +3136,8 @@ fi
 chmod 644 "$candidate"
 mv -f "$candidate" "$profile"
 if [ "$gpu" = turnip ]; then
-    printf '%s\n' "$prefix" > /etc/magicdesk/flatpak-mesa-prefix.new
-    mv /etc/magicdesk/flatpak-mesa-prefix.new /etc/magicdesk/flatpak-mesa-prefix
+    printf '%s\n' "$prefix" > /etc/magicdesk/mesa-prefix.new
+    mv /etc/magicdesk/mesa-prefix.new /etc/magicdesk/mesa-prefix
     mkdir -p /usr/share/flatpak/triggers
     cat > /usr/share/flatpak/triggers/magicdesk-gl.trigger <<'TRIGGER'
 #!/bin/sh
@@ -2647,7 +3145,7 @@ exec /usr/local/bin/magicdesk-flatpak-gl "$1"
 TRIGGER
     chmod 755 /usr/share/flatpak/triggers/magicdesk-gl.trigger
 else
-    rm -f /etc/magicdesk/flatpak-mesa-prefix
+    rm -f /etc/magicdesk/mesa-prefix
 fi
 if command -v python3 >/dev/null 2>&1; then
     magicdesk-flatpak-gl || echo 'Flatpak GPU preparation failed; see the diagnostic above.' >&2
@@ -2679,6 +3177,17 @@ case "$desktop" in
         set -- xfce4-session "$@" ;;
     weston)
         export XDG_SESSION_TYPE=wayland
+        # Package upgrades can retire the compatibility build without rebuilding.
+        case "$(/usr/bin/weston --version)" in
+            'weston 13.0.'[0-3])
+                [ -r /etc/magicdesk/weston.sh ] || {
+                    echo 'Complete Weston compatibility setup before launching this desktop.' >&2; exit 1;
+                }
+                . /etc/magicdesk/weston.sh
+                [ -x "$weston_prefix/bin/weston" ] || exit 1
+                export PATH="$weston_prefix/bin:$PATH"
+                export LD_LIBRARY_PATH="$weston_prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
+        esac
         renderer=pixman
         [ -z "${MAGICDESK_MESA_PREFIX:-}" ] || renderer=gl
         mkdir -p -m 1777 /tmp/.X11-unix
@@ -3770,8 +4279,10 @@ prepare_libc_command() (
 if [ "${1:-}" = --prepare-libc ]; then shift; prepare_libc_command "$@"; exit $?; fi
 if [ "$#" = 1 ] && [ "$1" = --print-mesa-patch ]; then mesa_patch; exit 0; fi
 if [ "$#" = 1 ] && [ "$1" = --print-flatpak-gl-helper ]; then flatpak_gl_helper; exit 0; fi
+if [ "$#" = 1 ] && [ "$1" = --print-snap-gpu-helper ]; then snap_gpu_helper; exit 0; fi
 if [ "$#" = 1 ] && [ "$1" = --print-system-setup ]; then system_setup; exit 0; fi
 if [ "$#" = 1 ] && [ "$1" = --print-graphics-setup ]; then graphics_setup; exit 0; fi
+if [ "$#" = 1 ] && [ "$1" = --print-weston-setup ]; then weston_setup; exit 0; fi
 if [ "$#" = 1 ] && [ "$1" = --print-libc-setup ]; then libc_setup; exit 0; fi
 if [ "$#" = 1 ] && [ "$1" = --print-desktop-session ]; then desktop_session; exit 0; fi
 if [ "$#" = 1 ] && [ "$1" = --print-audio-session ]; then audio_session; exit 0; fi
@@ -4114,7 +4625,9 @@ fi
 
 # Source builds prepare libc after their dependencies; without a source-build
 # stage, apply the selected runtime here. Base must precede any build launch.
-if [ "$libc" != shroot ] || { [ "$gpu" = keep ] && [ "$gui" != plasma ]; }; then
+if [ "$libc" != shroot ] || {
+    [ "$gpu" = keep ] && [ "$gui" != plasma ] && [ "$gui" != weston ] && [ "$gui" != keep ]
+}; then
     setup_libc
 fi
 
@@ -4124,6 +4637,10 @@ fi
 
 if [ "$gui" = plasma ] || [ "$gpu" != keep ]; then
     setup_build 'nested Plasma compositor' plasma_setup "$jobs"
+fi
+
+if [ "$gui" = weston ] || [ "$gui" = keep ]; then
+    setup_build 'Weston compatibility' weston_setup "$jobs"
 fi
 
 stage=complete

@@ -86,6 +86,12 @@ not a settling delay. Nonleader thread termination belongs to the virtual trace
 relationship: the native parent cannot reap it as an ordinary child of the
 debugger while the supervisor remains the kernel ptracer. Only a process leader
 with actual parenthood can use native child reaping.
+Native-only poll/select/epoll fallback also leaves the adapter before waiting.
+An inherited readiness selector can still intercept these calls after its last
+virtual descriptor has closed. `MD_CALL_NATIVE` uses the existing continuation
+owner to restore the caller's signal mask before entering the kernel; waiting
+inside the shielded adapter would defer SIGCHLD indefinitely and strand GDB on
+an inferior's fork. Ordinary unselected native waits retain their original path.
 EXITKILL and stopped-inferior release belong to debugger
 lifetime. Records are released when consumed or their owner exits.
 Invalid wait flags are rejected before consuming an event. waitid siginfo includes
@@ -166,6 +172,12 @@ open arguments and child creation, and rejects stray exec-event recovery.
 The `strace-detach` case attaches to 41 idle threads, observes a stable wait,
 sends SIGINT and requires prompt tracer exit without killing the target. The
 target must then accept input, release its workers and exit normally.
+`gdb-attach-fork` inherits an admitted readiness selector, attaches to 41 threads,
+waits for GDB's idle native poll, then requires four fork/exec detachments and
+normal target/debugger exit. `--libc-registry PATH --pid-namespace` checks the
+same workflow through direct-entry libc inside a guest PID namespace. The
+readiness fixture independently checks unmasked signal interruption of all four
+native wait variants after selector admission, including filtered launches.
 The perf capability check opens a task-clock event and requires a positive
 counter; a kernel permission denial is recorded as unavailable, not a successful
 profile or a runtime workaround.

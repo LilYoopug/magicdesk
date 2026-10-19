@@ -75,13 +75,66 @@ keyboard input and pointer clicks, downloads a known file and reads the same
 bytes back through the portal file chooser. Its support report confirms Wayland
 and effective content sandbox level 6. Application seccomp remains installed.
 
-Browser GPU acceleration is not yet working: its report says WebRender
-(Software), FEATURE_FAILURE_GLXTEST_FAILED, and WebGL context creation fails.
-The selected host Mesa prefix under `/opt/magicdesk/mesa` is absent inside the
-Snap mount namespace, while absolute EGL/Vulkan overrides still refer to it.
-The connected `mesa-2404:gpu-2404` content provider is separate from the prepared
-host Turnip build. A Snap GPU provider/integration is still needed; accelerated
-Weston alone is not browser GPU proof.
+The original GPU failure came from inherited host EGL/Vulkan paths absent in
+Snap's mount namespace. `magicdesk-snap-gpu` now publishes the prepared driver
+through `mesa-2404:kernel-gpu-2404`; Firefox retains its official `gpu-2404`
+connection. The prototype passed Vulkan/Turnip enumeration and Wayland EGL;
+the recipe helper then passed ABI admission, package installation, repeated
+preparation without rebuilding, and Firefox WebGL2 green pixel readback.
+The WebGL renderer string is privacy-masked by Firefox; glxtest identifies
+Zink/Adreno 840. The shared Mesa patch now distinguishes hardware non-DRM
+devices from software devices using Gallium capabilities and physical UUIDs.
+Firefox's support report confirms `WebRender`, one accelerated window and
+content sandbox level 6 without forcing blocklist/sandbox preferences. Its
+DRM-dependent native compositor and video decoding remain unavailable.
+
+Preparation runs inside the booted guest after the graphics recipe:
+
+```sh
+magicdesk-snap-gpu --jobs 2
+```
+
+`fixtures/egl-device.c`, compiled with `-lEGL -lGLESv2`, checks actual green
+pixel readback, device enumeration, stable handles across terminate/reinitialize
+and explicit rejection of unsupported DRM-node queries. Run it as
+`egl-device hardware wayland`, `egl-device hardware x11` and
+`egl-device hardware surfaceless` with the prepared Turnip profile, then repeat
+with `software` and softpipe selected. All six cases, plus X11 hardware with
+`LIBGL_KOPPER_DISABLE=1`, passed on Ubuntu/Adreno 840. The same shared patch was
+also built in the existing SteamOS installation: all six platform/renderer
+combinations passed three initialization/render/termination cycles each. Other
+recipe toolchains still need device build coverage; the installer test verifies
+identical GPU payloads for all twelve distribution choices.
+SteamOS Plasma was restarted through its ordinary installed launcher; KWin's
+live support report confirms Wayland backend, active OpenGL 4.6 compositing and
+Mesa 26.2.3 Zink/Turnip on Adreno 840. Konsole accepts keyboard commands in that
+session. This tests the existing installation, not a separate SteamOS image.
+
+See [Snap GPU preparation](../../docs/graphics.md#snap-gpu-drivers) for
+prerequisites and ABI limits. The full GPU GUI cycle passes keyboard/pointer
+input, download, portal file selection, byte comparison and normal browser exit.
+The final Weston 13.0.4 cycle also ended through guest `systemctl poweroff`, with
+supervisor exit zero; systemd had no failed units before shutdown. Kernel-module
+and snapd-generator warnings are not evidence of strict Snap confinement.
+Shutdown still reported `umount` exit 32 for the fixture's host bind and the
+replacement-libc bind, before final namespace teardown completed. Both binds
+unmount successfully in an independent launch; the shutdown-specific cause is
+not yet established. Exit zero does not certify a warning-free shutdown.
+
+The earlier Weston 13.0.0 crash is reproducible by opening Firefox's hamburger
+popup, then launching `weston-terminal` while that popup owns focus. GDB stops in
+`desktop-shell.so` through `weston_desktop_surface_foreach_child`: the callback
+dereferences shell data absent on a popup. Official 13.0.4 skips children without
+desktop user data. The recipe builds that maintenance release only for older
+13.0.x packages. The same popup/focus sequence passed under GDB and again after
+detach, followed by the complete GUI/exit workflow above.
+
+The separate GDB hang came from native-only poll fallback waiting with the
+adapter's signal shield, including SIGCHLD. The shared native continuation now
+restores the caller mask before waiting. The old runtime fails both the targeted
+signal regression and the real 41-thread GDB fork workflow; the corrected runtime
+passes them, plus attachment, active IO, SHM, JIT and strace-detach cases. See
+[guest debugging](../shroot/debugging.md) for ownership and coverage.
 
 Use the real user manager's bus (`/run/user/UID/bus`) for this scenario, and
 import the compositor environment into its activation services. An unrelated

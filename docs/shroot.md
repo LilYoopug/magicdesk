@@ -136,9 +136,9 @@ private libc never overwrites the distribution's package-owned libc. Preparing
 again with a freshly downloaded installer updates the saved recipe; ordinary
 launches never fetch or compile anything.
 
-When `--libc shroot` is selected, Mesa/Turnip and KWin install their build
-dependencies first, then prepare or reuse libc for the resulting environment,
-and start compilation in a fresh accelerated launch. Compiler stages do not
+When `--libc shroot` is selected, Mesa/Turnip, KWin and the Weston maintenance
+build install their dependencies first, then prepare or reuse libc for the
+resulting environment, and start compilation in a fresh accelerated launch. Compiler stages do not
 install packages that could invalidate that selection. This accelerates the
 build tools; it does not link the resulting graphics libraries to a private libc.
 
@@ -551,7 +551,11 @@ sh ~/install_linux.sh --name debian --resume --gpu software
 Turnip setup installs distribution-specific build dependencies and compiles Mesa
 26.2.3 inside the guest. The HTTPS source archive has a pinned SHA-256; the
 non-DRM Wayland/Zink and capability-probed KGSL timestamp changes are embedded
-in the installer and applied without fuzz. Turnip, Zink, EGL,
+in the installer and applied without fuzz. All distribution recipes share this
+patch, including non-DRM EGLDevice identification from the real driver's
+acceleration capability and UUID. An APK update does not rebuild installed
+Mesa: use the resume command above, then restart the affected applications.
+Turnip, Zink, EGL,
 GLX and GBM come from that same build. Zink also supports GPU rendering with
 CPU readback when Kopper is disabled or the X server lacks DRI3. That path has
 a frame copy, not zero-copy presentation.
@@ -613,6 +617,14 @@ and acquires the guest audio graph without replacing the launch's gamepad
 capability. The same helper can run in a prepared graphical console. Software
 Weston uses Pixman and software Plasma Wayland uses QPainter; the Turnip profile
 selects OpenGL Weston and the private KWin adapter.
+
+The Weston recipe upgrades package versions 13.0.0 through 13.0.3 to the official
+13.0.4 maintenance source, built privately inside that Linux. This avoids the
+13.0.0 popup-focus crash reproduced with Firefox. The same version check applies
+to every distribution, including software rendering; newer packaged versions
+remain in use. `--resume --gui keep` prepares an existing recipe-installed Weston
+desktop without replacing its package files. `--jobs` and libc build selection
+apply just as they do to Mesa and KWin. No compositor binary is added to the APK.
 
 Plasma launches its classic session inside the selected graphical connection,
 without booting systemd or a system bus. Hardware-related KDE services may remain
@@ -1106,7 +1118,9 @@ chooser workflow. Stock `rofiles-fuse` and `squashfuse_ll` are also covered;
 ELF/script execution, dynamic loading and private mappings work from the tested
 SquashFS image. Concurrent append and inotify are supported, including changes
 to append flags, rename cookies and open-but-unlinked watch lifetimes. Shared
-mmap remains unsupported.
+mmap supports read-only shared views with daemon-confirmed write/truncate
+updates; writable shared mappings and general external-data invalidation remain
+unsupported.
 See [FUSE ownership and limits](../native/shroot/fuse.md).
 
 Stock snapd has a separate Debian/systemd fixture covering hello-world install,
@@ -1115,6 +1129,11 @@ sets `mount --make-rshared /` inside the private guest mount namespace before
 snapd creates image mounts. This is not a change to Android's mount topology.
 The tested kernel has no AppArmor; this verifies execution with snapd's reported
 reduced confinement, not strict Snap isolation or arbitrary snap compatibility.
+Ubuntu's stock Firefox Snap also passes Wayland GUI checks with its content
+sandbox enabled. Prepared Turnip/Zink can be supplied through the official
+`mesa-2404` GPU content provider, without rebuilding Firefox or copying host
+paths into its namespace. See [Snap GPU drivers](graphics.md#snap-gpu-drivers)
+for preparation and the distinction between WebGL and browser composition.
 
 CPU topology is now available through the shared read-only native sysfs projection,
 also checked inside Flatpak. Initial Discover setup also needed guest system

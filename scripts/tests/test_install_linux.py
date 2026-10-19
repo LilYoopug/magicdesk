@@ -116,9 +116,11 @@ if stage in ("exec", "login"):
             stage = "graphics"
         if "version=6.3.6" in payload:
             stage = "kwin"
+        if "version=13.0.4" in payload:
+            stage = "weston"
         if args[-3] in ("shroot", "base"):
             stage = "libc"
-        suffix = {"graphics": ".gpu", "kwin": ".kwin", "libc": ".libc"}.get(stage, "")
+        suffix = {"graphics": ".gpu", "kwin": ".kwin", "weston": ".weston", "libc": ".libc"}.get(stage, "")
         Path(os.environ["TEST_PAYLOAD"] + suffix).write_text(payload)
         if "MAGICDESK_BUILD_PHASE=dependencies" in args:
             if os.environ.get("TEST_FAIL_DEPENDENCIES") == stage:
@@ -769,7 +771,7 @@ package_cleanup() { :; }
         self.assertEqual(1, result.returncode, result.stderr)
         self.assertIn("magicdesk is unavailable", result.stderr)
         for option in ("--help", "--list", "--print-mesa-patch", "--print-kwin-patch",
-                       "--print-system-setup", "--print-graphics-setup", "--print-libc-setup",
+                       "--print-system-setup", "--print-graphics-setup", "--print-libc-setup", "--print-weston-setup",
                        "--print-recovery-reader", "--print-desktop-session", "--print-audio-session", "--print-steam-game"):
             with self.subTest(option=option):
                 result = self.run_script(option, TEST_UID="10001", TEST_VERSION_STATUS="3")
@@ -1649,14 +1651,71 @@ package_cleanup() { :; }
     def test_resume_validates_without_reinstalling(self):
         result = self.run_script("--yes", "--name", "existing", "--resume", "--libc", "keep")
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual(["login", "--probe", "login", "login"], [args[0] for args in self.calls()])
+        self.assertEqual(["login", "--probe", "login", "login", "login"], [args[0] for args in self.calls()])
         self.assertEqual(["sh", "debian", "13"], self.calls()[2][-3:])
-        self.assertEqual(["keep", "both", "keep", "keep", "", "keep", "keep", ""], self.calls()[-1][-8:])
+        self.assertEqual(["keep", "both", "keep", "keep", "", "keep", "keep", ""], self.calls()[-2][-8:])
+        self.assertTrue(Path(str(self.payload) + '.weston').is_file())
         hints = result.stdout.split("Next steps:\n", 1)[1]
         self.assertIn("Existing GUI entries were preserved", hints)
         self.assertNotIn("Individual apps:", hints)
         self.assertNotIn("Whole desktop:", hints)
         self.assertIn("Console: shroot login existing\n", hints)
+
+    def test_weston_maintenance_recipe_is_shared_and_prepares_libc_after_dependencies(self):
+        result = self.run_script('--yes', '--resume', '--name', 'work', '--gui', 'weston',
+                                 '--libc', 'shroot', '--jobs', '3')
+        self.assertEqual(0, result.returncode, result.stderr)
+        calls = self.calls()
+        phases = [(i, c) for i, c in enumerate(calls)
+                  if any(a.startswith('MAGICDESK_BUILD_PHASE=') for a in c)]
+        self.assertEqual(2, len(phases))
+        dep_index, dependencies = phases[0]
+        build_index, build = phases[1]
+        self.assertIn('MAGICDESK_BUILD_PHASE=dependencies', dependencies)
+        self.assertIn('MAGICDESK_BUILD_PHASE=build', build)
+        self.assertEqual('3', build[-2])
+        self.assertEqual(dependencies[-1], build[-1])
+        self.assertTrue(any(c[-3] == 'identify' for c in calls[dep_index+1:build_index] if len(c) >= 3))
+        self.assertFalse(any(c[-3] == 'identify' for c in calls[:dep_index] if len(c) >= 3))
+        recipe = Path(str(self.payload) + '.weston').read_text()
+        self.assertEqual(0, subprocess.run(['sh', '-n'], input=recipe, text=True).returncode)
+        self.assertIn('66252c9c5bbc45ab402e2518b76e6d824f09ebc1d0040ee2f51b096a1bc585b1', recipe)
+        self.assertIn('gitlab.freedesktop.org/wayland/weston/-/releases/', recipe)
+        self.assertIn('mv "$work/stage$prefix" "$prefix"', recipe)
+        self.assertNotIn('LD_PRELOAD', recipe)
+
+    def test_weston_maintenance_only_selects_installed_older_13_0(self):
+        recipe = self.run_script('--print-weston-setup').stdout
+        gate = recipe.split('[ -f /usr/local/share/applications/', 1)[1].split('version=13.0.4', 1)[0]
+        gate = '[ -f /usr/local/share/applications/' + gate
+        entry = self.directory / 'magicdesk-weston.desktop'
+        selection = self.directory / 'weston.sh'
+        version = self.directory / 'weston-version'
+        executable = self.directory / 'weston'
+        executable.write_text('#!/bin/sh\ncat ' + shlex.quote(str(version)) + '\n')
+        executable.chmod(0o755)
+        gate = gate.replace('/usr/local/share/applications/magicdesk-weston.desktop', str(entry))
+        gate = gate.replace('/etc/magicdesk/weston.sh', str(selection)).replace('/usr/bin/weston', str(executable))
+        for installed in (False, True):
+            if installed: entry.touch()
+            for release in ('13.0.0', '13.0.3', '13.0.4', '12.0.0', '14.0.0'):
+                with self.subTest(installed=installed, release=release):
+                    selection.touch()
+                    version.write_text('weston ' + release + '\n')
+                    result = subprocess.run(['sh', '-c', gate + '\nprintf build'],
+                                            text=True, capture_output=True, timeout=5)
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    selected = installed and release in ('13.0.0', '13.0.3')
+                    self.assertEqual('build' if selected else '', result.stdout)
+                    self.assertEqual(not installed or selected, selection.exists())
+
+    def test_weston_build_failure_retains_environment_and_resume(self):
+        result = self.run_script('--yes', '--resume', '--name', 'work', '--gui', 'weston',
+                                 TEST_FAIL='weston')
+        self.assertEqual(23, result.returncode, result.stderr)
+        self.assertIn('Environment retained', result.stderr)
+        self.assertIn('--resume', result.stderr)
+        self.assertFalse(any(c[0] in ('install', 'remove') for c in self.calls()))
 
     def test_distribution_profiles_share_setup_and_selected_image(self):
         images = {"fedora": "registry.fedoraproject.org/fedora:44", "openkylin": "openkylin/openkylin:latest",
@@ -1876,7 +1935,17 @@ package_cleanup() { :; }
     def test_patch_export_needs_no_executor_and_includes_egl_and_kgsl_capabilities(self):
         result = self.run_script("--print-mesa-patch", TEST_UID="10001")
         self.assertEqual(0, result.returncode, result.stderr)
+        parsed = subprocess.run(['git', 'apply', '--numstat'], input=result.stdout,
+                                text=True, capture_output=True)
+        self.assertEqual(0, parsed.returncode, parsed.stderr)
         self.assertIn("disp->Options.ForceSoftware || disp->Options.Zink", result.stdout)
+        self.assertNotIn("+   if (!dri2_setup_device(disp, disp->Options.ForceSoftware ||", result.stdout)
+        self.assertIn("screen->caps.accelerated", result.stdout)
+        self.assertIn("screen->get_device_uuid(screen, (char *)uuid)", result.stdout)
+        self.assertIn("_eglFindNonDrmDevice(uuid)", result.stdout)
+        self.assertIn("dev->extensions = \"\"", result.stdout)
+        self.assertIn("+   if (!dri2_setup_device(disp, true))", result.stdout)
+        self.assertIn("disp->Device != requested_device", result.stdout)
         self.assertIn("+   priv->driver = psc->kopper ? GLX_DRIVER_ZINK_YES : GLX_DRIVER_SW;", result.stdout)
         self.assertIn("+   if (psc->kopper)", result.stdout)
         self.assertIn("+   if (!psc->kopper)", result.stdout)
@@ -1911,6 +1980,20 @@ package_cleanup() { :; }
                 self.assertIn("--fuzz=0", payload.read_text())
                 self.assertLess(payload.read_text().index("vulkaninfo --summary"),
                                 payload.read_text().index('mv -f "$candidate" "$profile"'))
+
+    def test_all_distributions_share_gpu_patch_and_publishers(self):
+        expected = self.run_script('--print-graphics-setup').stdout
+        for distro in ('debian', 'ubuntu', 'alpine', 'fedora', 'arch', 'opensuse',
+                       'openkylin', 'deepin', 'manjaro', 'void', 'armtix', 'steamos'):
+            with self.subTest(distro=distro):
+                self.log.unlink(missing_ok=True)
+                result = self.run_script('--yes', '--resume', '--distro', distro,
+                                         '--name', 'work', '--gpu', 'turnip', TEST_DISTRO=distro)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual(expected, Path(str(self.payload) + '.gpu').read_text())
+        self.assertIn('_eglFindNonDrmDevice', expected)
+        self.assertIn('/usr/local/bin/magicdesk-snap-gpu', expected)
+        self.assertIn('/usr/local/bin/magicdesk-flatpak-gl', expected)
 
     def test_gpu_failure_preserves_environment_and_reports_exact_resume_command(self):
         result = self.run_script("--yes", "--resume", "--name", "gpu-work", "--gpu", "turnip",

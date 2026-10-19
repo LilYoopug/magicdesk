@@ -4755,7 +4755,7 @@ static void buffer_descriptor_start(struct thread *t) {
         struct md_pid_identity *identity=md_pid_descriptor_identity(object);
         struct thread *target=identity ? find_thread(md_pid_identity_native(identity)) : NULL;
         unsigned command=(unsigned)t->original.regs[1];
-        if (!identity) result=MD_WATCH_NATIVE;
+        if (!identity) result=MD_CALL_NATIVE;
         else if (t->original.regs[2]) result=-EINVAL;
         else if (!target || target->resources.pid_group!=identity || !target->born) result=-ESRCH;
         else if (target!=t && !debugger_allowed(t->pid,target->pid)) result=-EACCES;
@@ -8239,7 +8239,7 @@ int main(int argc, char **argv) {
                      * the guest IPC operation. The supervisor stays runnable. */
                     t->phase=IPC_WAIT_ENTRY; resume(pid,0); continue;
                 }
-                if (value == MD_WATCH_WAIT || value == MD_WATCH_NATIVE) {
+                if (value == MD_WATCH_WAIT || value == MD_CALL_NATIVE) {
                     regs = t->original; regs.pc = RAW_GATE - 4;
                     t->watch_wait = value == MD_WATCH_WAIT ? 1 : 2;
                     if (t->watch_wait == 1) {

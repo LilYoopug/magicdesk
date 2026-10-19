@@ -151,6 +151,65 @@ finally:
     if child.poll() is None: child.kill()
     child.wait(timeout=10)
 '''
+GDB_FORK = r'''
+import os
+from pathlib import Path
+import select
+import signal
+import subprocess
+import sys
+import time
+# A retired virtual source leaves the selector installed, as inherited from init.
+# PRoot compares the same target lifecycle without Shroot's virtual source.
+if '--selector' in sys.argv[1:]:
+    fd = os.open('/proc/sys/kernel/hostname', os.O_RDONLY)
+    with select.epoll() as queue:
+        queue.register(fd, select.EPOLLIN | select.EPOLLERR)
+    os.close(fd)
+child = subprocess.Popen(['/tmp/md-debugger-tests', 'gdb-fork-target'],
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+debugger = None
+try:
+    assert child.stdout.readline().strip() == 'READY'
+    debugger = subprocess.Popen(['gdb', '--batch', '-nx',
+        '-ex', 'set debuginfod enabled off', '-ex', 'attach '+str(child.pid),
+        '-ex', 'python assert len(gdb.selected_inferior().threads()) == 41',
+        '-ex', 'set var magic_value=43', '-ex', 'echo MD_ATTACHED\\n',
+        '-ex', 'continue'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    output = []
+    # EVENT_WAIT: attachment releases target; fixture alarm and launch bound failures.
+    for line in debugger.stdout:
+        print(line, end='', flush=True)
+        output.append(line)
+        if line.strip() == 'MD_ATTACHED':
+            deadline = time.monotonic() + 5
+            # Bounded observation: release only after GDB enters its idle native poll.
+            while True:
+                call = Path('/proc/'+str(debugger.pid)+'/syscall').read_text().split()
+                if call and call[0] == '73' and int(call[2], 16):
+                    status = Path('/proc/'+str(debugger.pid)+'/status').read_text()
+                    mask = int(next(line.split()[1] for line in status.splitlines()
+                                    if line.startswith('SigBlk:')), 16)
+                    assert not mask & (1 << (signal.SIGCHLD-1)), hex(mask)
+                    break
+                assert time.monotonic() < deadline, call
+                time.sleep(.001)
+            child.stdin.write('x')
+            child.stdin.flush()
+    assert debugger.wait(timeout=10) == 0
+    remaining, _ = child.communicate(timeout=10)
+    print(remaining)
+    assert child.returncode == 0 and 'PASS gdb-fork-target' in remaining
+    output = ''.join(output)
+    assert output.count('Detaching after fork') == 4 and 'exited normally' in output
+    assert 'Error while executing Python code' not in output
+    print('PASS gdb-attach-fork')
+finally:
+    for process in (debugger, child):
+        if process is not None:
+            if process.poll() is None: process.kill()
+            process.wait(timeout=10)
+'''
 GDB_SHM = r'''
 import subprocess
 commands = ['gdb', '--batch', '-nx', '/tmp/md-debugger-tests',
@@ -190,13 +249,14 @@ print('PASS gdb-jit')
 '''
 
 
-def commands():
+def commands(*, proot=False):
     cases = [(name, [TARGET, name]) for name in ('attach', 'seize', 'trace-exit', 'syscall', 'syscall-edit-close', 'syscall-exec', 'credential-transition', 'mixed',
                                                'kill-stopped', 'owner-exit', 'exitkill', 'thread-exec', 'syscall-thread-exec', 'clone-untraced', 'perf-event')]
     cases.append(('strace-detach', ['python3', '-c', STRACE_DETACH]))
     cases.append(('gdb-attach', ['python3', '-c', GDB_ATTACH]))
     cases.append(('gdb-attach-threads', ['python3', '-c', GDB_ATTACH, 'gdb-thread-target']))
     cases.append(('gdb-active-io', ['python3', '-c', GDB_IO]))
+    cases.append(('gdb-attach-fork', ['python3', '-c', GDB_FORK, *([] if proot else ['--selector'])]))
     cases.append(('gdb-shm', ['python3', '-c', GDB_SHM]))
     cases.append(('gdb-jit', ['python3', '-c', GDB_JIT]))
     cases.append(('lldb', ['python3', '-c', LLDB]))
@@ -249,11 +309,13 @@ def main():
     parser.add_argument('--build', type=Path)
     parser.add_argument('--case', action='append', choices=[name for name, _ in commands()])
     parser.add_argument('--diagnostics', action='store_true')
+    parser.add_argument('--libc-registry', help='Exercise the installed direct-entry libc')
+    parser.add_argument('--pid-namespace', action='store_true')
     parser.add_argument('--gdbserver-binary', type=Path,
                         help='Optional standalone guest binary; never replaces the installed package')
     args = parser.parse_args()
-    if args.proot and (args.build or args.diagnostics):
-        parser.error('--build and --diagnostics apply only to Shroot')
+    if args.proot and (args.build or args.diagnostics or args.libc_registry or args.pid_namespace):
+        parser.error('runtime and namespace options apply only to Shroot')
     args.output.mkdir(parents=True, exist_ok=True)
     source = Path(__file__).with_name('test_debugger_guest.c')
     sources = development_sources()
@@ -263,7 +325,7 @@ def main():
     if args.gdbserver_binary:
         remote = remote.replace('| gdbserver ', '| /tmp/md-gdbserver ')
     remote += 'echo PASS gdbserver\\n\n'
-    cases = [(n, a) for n, a in commands() if not args.case or n in args.case]
+    cases = [(n, a) for n, a in commands(proot=bool(args.proot)) if not args.case or n in args.case]
     assert cases
     if args.proot:
         env = os.environ.copy()
@@ -304,10 +366,18 @@ def main():
             for name, argv in cases:
                 case = {'name': name, 'passed': False}; suite.report['cases'].append(case)
                 try:
-                    command = ([suite.runner, '--diagnostics', '--store', args.instance,
-                                '--user', '0:0', '--', '/bin/sh', '-c', 'exec "$@"', 'debugger-test', *argv] if args.diagnostics
-                               else suite.run(args.instance, *(['--user', '0:0']
-                                   if name == 'credential-transition' else []), '--', *argv))
+                    options = ['--diagnostics'] if args.diagnostics else []
+                    if args.libc_registry:
+                        options += ['--libc-registry', args.libc_registry]
+                    child = (['unshare', '--mount', '--pid', '--fork', '--mount-proc']
+                             if args.pid_namespace else []) + argv
+                    if args.diagnostics or args.libc_registry or args.pid_namespace:
+                        command = [suite.runner, *options, '--store', args.instance,
+                                   '--user', '0:0', '--', '/bin/sh', '-c', 'exec "$@"',
+                                   'debugger-test', *child]
+                    else:
+                        command = suite.run(args.instance, *(['--user', '0:0']
+                            if name == 'credential-transition' else []), '--', *argv)
                     output = suite.command(command, timeout=35)
                     case.update(outcome(name, output))
                     assert case['passed'] is not False, output

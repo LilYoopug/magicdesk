@@ -26,7 +26,8 @@ enum md_export_control { MD_EXPORT_BEGIN=1, MD_EXPORT_READY, MD_EXPORT_OBSERVED 
 struct md_export_reply { long endpoint; uint64_t token; };
 #define MD_WATCH_TASK_AFFINE (-INT64_C(0x4000000000000000))
 #define MD_WATCH_WAIT (MD_WATCH_TASK_AFFINE + 1)
-#define MD_WATCH_NATIVE (MD_WATCH_TASK_AFFINE + 2)
+/* Finish adapter ownership before a native call can block or deliver signals. */
+#define MD_CALL_NATIVE (MD_WATCH_TASK_AFFINE + 2)
 #define MD_IPC_WAIT (MD_WATCH_TASK_AFFINE + 3)
 
 enum md_interception_kind {
