@@ -77,8 +77,9 @@ public final class WaylandActivity extends Activity implements WaylandSessions.L
         if (session == null || session.presentation.isClosed() && !session.state().equals("FAILED")) {
             finishAndRemoveTask(); return;
         }
+        var windows = session.windows();
         if (pendingLaunch) {
-            window = session.windows().stream().filter(WaylandSession.Window::mapped)
+            window = windows.stream().filter(WaylandSession.Window::mapped)
                     .mapToLong(WaylandSession.Window::id).findFirst().orElse(0);
             if (window == 0) {
                 status.setVisibility(View.VISIBLE);
@@ -95,8 +96,8 @@ public final class WaylandActivity extends Activity implements WaylandSessions.L
             application = GraphicalApplicationLaunch.reference(this, currentRecipe);
             DesktopRuntimeBridge.refreshTaskPresentations();
         }
-        if (session.stopped() || window <= 0 || !session.containsWindow(window)) { finishAndRemoveTask(); return; }
-        var current = session.windows().stream().filter(item -> item.id() == window).findFirst().orElseThrow();
+        var current = windows.stream().filter(item -> item.id() == window).findFirst().orElse(null);
+        if (session.stopped() || current == null) { finishAndRemoveTask(); return; }
         if (HostedStartupWindow.temporary(this) && !current.mapped()) { detachHostedWindow(); return; }
         content.constraints(current.constraints(), session.unitScale(this));
         String title = current.title().isBlank() ? session.name : current.title();
