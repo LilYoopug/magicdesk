@@ -190,13 +190,18 @@ The file-table turn covers native installation and origin publication, not the
 worker operation. Syscall completion or terminal observation publishes an
 installed result without an adapter acknowledgement. Release or task loss closes
 only the provider reference; no private service FD is left in the guest table.
-For O_NOFOLLOW, directories use `/proc/PID/fd/N/.`; inode-backed objects use their
+When the retained descriptor carries O_NOFOLLOW, directories use `/proc/PID/fd/N/.`; inode-backed objects use their
 immutable physical basename below a retained objects directory. The provider
 checks device/inode identity, not a logical path that copy-up or rename can change.
 An attached native-name file is promoted without copying to obtain that stable
 source, preserving nofollow flags even when the application forbids socket RPC.
 Store/source leases retain that name through delivery. The adapter passes the
-actual flag to the kernel; fcntl is not emulated. Other native non-directory and
+actual flag to the kernel; fcntl is not emulated. If the provider already
+normalized NOFOLLOW on a resolved non-link, delivery uses the retained proc FD
+with matching internal flags, checked against supervisor-owned custody. This
+avoids SCM_RIGHTS for devices whose metadata is accessible but whose native
+socket receipt Android denies, including `/dev/full` under shell policy.
+Other native non-directory and
 anonymous nofollow sources return the retained result through SCM_RIGHTS on the
 table-owned channel, without repeating the filesystem lookup.
 
@@ -491,7 +496,15 @@ authorization boundary for every broker request or in-process syscall gate.
 
 ## Image Admission And Logical Credentials
 
-`--admit-elf /absolute/guest/path` explicitly selects one ordinary ELF for a
+The common exec preparation owner acquires the final ELF and interpreter once,
+for both initial entry and reexec. It reads logical ownership/mode through the
+exact provider FD and mount provenance. Set-ID files receive a sealed execution
+snapshot with physical and logical metadata checks around capture; ordinary
+files are not copied. Preparation retains that admission outside writable guest
+request buffers until image entry or cancellation. Script modes and ELF loader
+modes cannot substitute for the final program's credentials.
+
+`--admit-elf /absolute/guest/path` can explicitly select one ordinary ELF for a
 launch-local sealed snapshot and logical set-ID metadata. The filesystem service
 owns the catalogue: path lookup, object reopening, hardlinks and FD metadata agree
 on that admitted object. It does not chmod or replace the stored source.
@@ -499,9 +512,11 @@ on that admitted object. It does not chmod or replace the stored source.
 Initial launch and exec use the same admission contract. The supervisor tracks
 logical IDs, irreversible drops and no_new_privs, publishes auxv/AT_SECURE, and
 applies the corresponding nondumpable state before loader entry. Real kernel
-credentials remain those of the executor. Ordinary stored files retain their
-logical ownership/mode without acquiring automatic set-ID admission; actual
-set-ID backing executables remain rejected.
+credentials remain those of the executor. Stored set-ID files need no explicit
+admission option. `nosuid`, no_new_privs, guest tracing and unmapped user-namespace
+IDs suppress set-ID changes. Actual set-ID backing executables remain rejected.
+This does not complete native-write privilege-bit clearing or file-capability
+execution; see [storage limits](inode-store.md#limits).
 
 `--user` and OCI User share `guest_accounts` resolution and `guest_identity` with
 image admission. Each task retains real/effective/saved/filesystem UID/GID and

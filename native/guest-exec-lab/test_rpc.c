@@ -994,6 +994,17 @@ static void request_contract(void) {
         q.resolve=1;
         CHECK(md_fs_request_validate(&q)==-EINVAL);
     }
+    struct md_fs_request table={.operation=MD_FS_MOUNT_TABLE,.directory={-1,-1},.mode=1,
+        .capture={{"/proc/123/mountinfo",O_CLOEXEC}}};
+    CHECK(!md_fs_request_validate(&table));
+    table.mode=0; CHECK(md_fs_request_validate(&table)==-EINVAL);
+    table.capture[0].path="/proc/123/mounts"; CHECK(!md_fs_request_validate(&table));
+    table.capture[0].path="/proc/123/mem"; CHECK(md_fs_request_validate(&table)==-EINVAL);
+    table.capture[0]=(struct md_fs_task_capture){0};
+    table.directory[0]=3; CHECK(!md_fs_request_validate(&table));
+    table.directory[1]=4; CHECK(md_fs_request_validate(&table)==-EINVAL);
+    table.directory[1]=-1; table.directory[0]=AT_FDCWD;
+    CHECK(md_fs_request_validate(&table)==-EINVAL);
     struct md_fs_request open={.operation=MD_FS_OPEN,.directory={-1,-1},
         .path={"/",NULL},.flags=O_PATH,.resolve=1};
     CHECK(!md_fs_request_validate(&open));

@@ -315,7 +315,8 @@ int md_identity_prepare_exec(const struct md_identity *current, const struct md_
     if (!image) return -EACCES;
     unsigned permission = current->uid.fs == image->uid ? S_IXUSR
         : md_identity_in_group(current, image->gid) ? S_IXGRP : S_IXOTH;
-    if (md_identity_capable_in(current, NULL, CAP_DAC_OVERRIDE)) permission = S_IXUSR | S_IXGRP | S_IXOTH;
+    if (md_identity_file_capable(current, image->uid, image->gid, CAP_DAC_OVERRIDE))
+        permission = S_IXUSR | S_IXGRP | S_IXOTH;
     if (!(image->mode & permission)) return -EACCES;
     struct md_identity next = *current;
     if (!current->no_new_privs && !nosuid

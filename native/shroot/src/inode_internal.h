@@ -58,6 +58,7 @@ struct mdi_directory_check {
     char backing[33];
 };
 struct md_inode_store {
+    unsigned refs;
     sqlite3 *db;
     int objects, watch_presence, locked, recording, readonly, reflink_unavailable;
     int mount_readonly, super_readonly, super_checked, nodev;

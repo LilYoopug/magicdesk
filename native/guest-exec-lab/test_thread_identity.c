@@ -1,10 +1,13 @@
 #define _GNU_SOURCE
 #include <assert.h>
+#include <errno.h>
+#include <linux/futex.h>
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <grp.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>
@@ -76,7 +79,47 @@ static void threads(void) {
     }
     free(stack);
 }
-int main(void) {
+static void priority_inheritance(int virtual) {
+    int word=0, other=0;
+    const int operations[]={FUTEX_LOCK_PI,FUTEX_UNLOCK_PI,FUTEX_TRYLOCK_PI,
+        FUTEX_WAIT_REQUEUE_PI,FUTEX_CMP_REQUEUE_PI,FUTEX_LOCK_PI2};
+    if (virtual) for (unsigned i=0;i<sizeof(operations)/sizeof(*operations);++i)
+        for (unsigned flags=0;flags<4;++flags) {
+            errno=0;
+            assert(syscall(SYS_futex,&word,operations[i]
+                |(flags&1 ? FUTEX_PRIVATE_FLAG : 0)|(flags&2 ? FUTEX_CLOCK_REALTIME : 0),
+                1,NULL,&other,0)==-1 && errno==ENOSYS);
+            assert(!word && !other);
+        }
+    pthread_mutexattr_t attr;
+    assert(!pthread_mutexattr_init(&attr));
+    assert(!pthread_mutexattr_settype(&attr,PTHREAD_MUTEX_RECURSIVE));
+    assert(!pthread_mutexattr_setprotocol(&attr,PTHREAD_PRIO_INHERIT));
+    int error=pthread_mutex_init(&mutex,&attr);
+    if (virtual) {
+        assert(error==ENOTSUP);
+        assert(!pthread_mutexattr_setprotocol(&attr,PTHREAD_PRIO_NONE));
+        assert(!pthread_mutex_init(&mutex,&attr));
+    } else assert(!error);
+    assert(!pthread_mutexattr_destroy(&attr));
+    for (unsigned i=0;i<16;++i) {
+        assert(!pthread_mutex_lock(&mutex));
+        pthread_t thread; assert(!pthread_create(&thread,NULL,worker,NULL));
+        assert(!pthread_mutex_unlock(&mutex));
+        assert(!pthread_join(thread,NULL));
+    }
+    assert(!pthread_mutex_destroy(&mutex));
+    puts("PASS PI futex admission and ordinary mutex fallback");
+}
+int main(int argc,char **argv) {
+    if (argc==2) {
+        assert(!strcmp(argv[1],"--pid-futex"));
+        priority_inheritance(getpid()==1);
+        assert(!prctl(PR_SET_DUMPABLE,0));
+        priority_inheritance(getpid()==1);
+        return 0;
+    }
+    assert(argc==1);
     credentials();
     threads();
     assert(!prctl(PR_SET_DUMPABLE,0));

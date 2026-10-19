@@ -72,10 +72,35 @@ int mdi_overlay_attribute_set(struct md_inode_store *s,const struct mdi_node *no
     if (!r) r=mdi_sql_error(mdi_step(s,q));
     sqlite3_finalize(q); return r;
 }
+int mdi_xattr_host_private(const char *name) {
+    return !strcmp(name,"security.selinux") || mdi_native_private_attribute(name);
+}
+ssize_t mdi_xattr_native_names(const char *path,int follow,char **out) {
+    *out=NULL;
+    ssize_t size=follow ? listxattr(path,NULL,0) : llistxattr(path,NULL,0);
+    if (size<0) return -errno;
+    if (size>MD_FS_VALUE_MAX) return -E2BIG;
+    if (!size) return 0;
+    char *names=malloc((size_t)size);
+    if (!names) return -ENOMEM;
+    size=follow ? listxattr(path,names,(size_t)size) : llistxattr(path,names,(size_t)size);
+    int error=size<0 ? -errno : 0;
+    size_t length=0;
+    for (size_t at=0;!error && at<(size_t)size;) {
+        size_t n=strnlen(names+at,(size_t)size-at);
+        if (n==(size_t)size-at) { error=-EIO; break; }
+        if (!mdi_xattr_host_private(names+at)) {
+            memmove(names+length,names+at,n+1); length+=n+1;
+        }
+        at+=n+1;
+    }
+    if (error) { free(names); return error; }
+    *out=names; return (ssize_t)length;
+}
 ssize_t mdi_xattr_get(struct md_inode_store *s,const struct mdi_node *node,
         const char *name,void *out,size_t capacity) {
     /* Android labels protect the physical backing, not the guest inode. */
-    if (!strcmp(name,"security.selinux") || mdi_native_private_attribute(name)) return -ENODATA;
+    if (mdi_xattr_host_private(name)) return -ENODATA;
     int key=mdi_overlay_attribute(name);
     if (key) {
         ssize_t r=control_get(s,node,key,out,capacity);
@@ -121,7 +146,7 @@ int mdi_overlay_attributes_copy(struct md_inode_store *target,const struct mdi_n
     sqlite3_finalize(q); return r;
 }
 static int visible(struct md_inode_store *s,const char *name,int internal) {
-    if (mdi_native_private_attribute(name) || !strcmp(name,"security.selinux") || !strcmp(name,MD_FILE_CAPABILITY_NAME) || !strcmp(name,MD_ACL_ACCESS_NAME)
+    if (mdi_xattr_host_private(name) || !strcmp(name,MD_FILE_CAPABILITY_NAME) || !strcmp(name,MD_ACL_ACCESS_NAME)
             || !strcmp(name,MD_ACL_DEFAULT_NAME)) return 0;
     if (internal) return 1;
     if (s->lifetime->filesystem_kind==MD_FILESYSTEM_OVERLAY && mdi_overlay_private_attribute(name)) return 0;
@@ -158,16 +183,9 @@ ssize_t mdi_xattr_names(struct md_inode_store *s,const struct mdi_node *node,
         else if (n!=-ENODATA) { r=(int)n; break; }
     }
     char target[NAME_MAX+96]; if (!r) r=mdi_backing_path(s,node,target,sizeof(target));
-    ssize_t bytes=r ? 0 : node->descriptor ? listxattr(target,NULL,0) : llistxattr(target,NULL,0);
-    if (bytes<0) r=-errno;
-    else if (bytes>MD_FS_VALUE_MAX) r=-E2BIG;
     char *names=NULL;
-    if (!r && bytes) {
-        names=malloc((size_t)bytes);
-        if (!names) r=-ENOMEM;
-        else if ((bytes=node->descriptor ? listxattr(target,names,(size_t)bytes)
-                : llistxattr(target,names,(size_t)bytes))<0) r=-errno;
-    }
+    ssize_t bytes=r ? 0 : mdi_xattr_native_names(target,!!node->descriptor,&names);
+    if (bytes<0) r=(int)bytes;
     size_t length=0;
     for (size_t at=0;!r && at<(size_t)bytes;) {
         const char *name=names+at; size_t n=strnlen(name,(size_t)bytes-at);

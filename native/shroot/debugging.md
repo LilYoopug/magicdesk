@@ -25,6 +25,14 @@ inspection, continuation and detach check the existing owner, not new-attach
 permission. Memory peek/poke retains its independent permission check and
 native kernel access ceiling.
 
+Exec admission selects the distribution's original `PT_INTERP` for a traced
+inferior instead of a replacement libc from the acceleration registry. Its
+stock `libthread_db` then matches libc's private thread layout and realtime
+signal handling. The debugger and other untraced processes keep normal registry
+selection. This policy is shared by all distributions; it does not require a
+GDB wrapper or disable sandboxing. Attaching to an already-running process does
+not replace its loaded libc.
+
 The supervisor retains interception, image admission and process lifetime.
 Guest stops and kernel stops are distinct: bootstrap setup and adapter instructions
 are not presented as application breakpoints. The image-entry event publishes the

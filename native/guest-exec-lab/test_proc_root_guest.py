@@ -5,6 +5,7 @@ import errno
 import os
 import shutil
 import signal
+import select
 import socket
 import stat
 import struct
@@ -277,6 +278,10 @@ def main():
             os.close(proc_fds)
             os.write(notify, b'R')
             # EVENT_WAIT: parent owns inspection; the harness deadline cancels failure.
+            assert os.read(release, 1) == b'M'
+            os.mkdir('/extra')
+            native(libc.mount, b'tmpfs', b'/extra', b'tmpfs', 0, b'mode=755')
+            os.write(notify, b'M')
             assert os.read(release, 1) == b'Q'
         except BaseException:
             import traceback
@@ -285,7 +290,7 @@ def main():
         os._exit(0)
     os.close(notify)
     os.close(release)
-    fd = duplicate = -1
+    fd = duplicate = table = -1
     try:
         assert os.read(ready, 1) == b'R'
         status_identity(pid, 0, 0)
@@ -335,17 +340,48 @@ def main():
                 os._exit(1)
             os._exit(0)
         assert os.waitpid(protected, 0)[1] == 0
+        table_path = f'/proc/{pid}/mountinfo'
+        table = os.open(table_path, os.O_RDONLY | os.O_CLOEXEC)
+        initial = os.read(table, 65536)
+        assert b' /mounted ' in initial and os.fsencode(root) not in initial, initial
+        assert b' /extra ' not in initial
+        assert b' /mounted ' not in open('/proc/self/mountinfo', 'rb').read()
+        mounts = open(f'/proc/{pid}/mounts', 'rb').read()
+        assert b' /mounted ' in mounts and os.fsencode(root) not in mounts, mounts
+        path_fd = os.open(table_path, os.O_PATH | os.O_CLOEXEC)
+        assert stat.S_ISREG(os.fstat(path_fd).st_mode)
+        rejects(errno.EBADF, os.read, path_fd, 1)
+        os.close(path_fd)
+        how = ctypes.create_string_buffer(struct.pack('QQQ', os.O_CLOEXEC, 0, 4))
+        opened = native(libc.syscall, 437, -100, os.fsencode(table_path), how, 24)
+        assert os.read(opened, 65536) == initial
+        os.close(opened)
+        rejects(errno.EACCES, os.open, table_path, os.O_WRONLY)
+        rejects(errno.ENOTDIR, os.open, table_path, os.O_DIRECTORY)
+        rejects(errno.ENOTDIR, os.open, table_path + '/suffix', os.O_RDONLY)
+        poller = select.poll()
+        poller.register(table, select.POLLPRI)
+        os.write(done, b'M')
+        assert os.read(ready, 1) == b'M'
+        # EVENT_WAIT: mount publication must wake the foreign table descriptor.
+        assert any(events & select.POLLPRI for _, events in poller.poll(2000))
+        os.lseek(table, 0, os.SEEK_SET)
+        updated = os.read(table, 65536)
+        assert b' /extra ' in updated, updated
         os.write(done, b'Q')
         assert os.waitpid(pid, 0)[1] == 0
         pid = None
         rejects(errno.ENOENT, os.open, path, os.O_RDONLY | os.O_DIRECTORY)
         assert readat(duplicate, 'mounted/private') == b'private mount'
+        os.lseek(table, 0, os.SEEK_SET)
+        assert os.read(table, 65536) == updated
+        print('PASS foreign mount tables: target namespace/root, openat2, poll changes and retained lifetime', flush=True)
         print('PASS foreign proc root: namespace, chroot, suffix, retained FD, protected reader, exit and denied identity', flush=True)
     finally:
         if pid is not None:
             os.kill(pid, 9)
             os.waitpid(pid, 0)
-        for number in (fd, duplicate, ready, done):
+        for number in (fd, duplicate, table, ready, done):
             if number >= 0:
                 os.close(number)
         shutil.rmtree(root)

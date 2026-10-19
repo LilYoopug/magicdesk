@@ -68,6 +68,7 @@ struct md_fs_buffer_request {
     int opening_wait;
     int fifo_control;
     struct md_command_images images;
+    struct md_exec_image *setid;
     struct md_fs_anchor *image_origin;
     struct md_program *proc_image;
     struct md_file_snapshot snapshot;
@@ -153,6 +154,7 @@ static void dispose(struct md_fs_buffer_request *r) {
     md_fd_channel_release(r->export);
     md_fs_buffer_open_release(&r->opened);
     md_command_images_close(&r->images);
+    md_exec_image_release(r->setid);
     md_fs_anchor_release(r->image_origin);
     if (r->proc_image) {
         if (r->proc_image->fd>=0) close(r->proc_image->fd);
@@ -584,7 +586,7 @@ static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
     }
     if (r->executable) {
         r->error=md_fs_command_prepare(&r->context,&r->request,&r->proc_image,&r->output->command,&r->images,
-            &r->image_origin,&r->execution);
+            &r->image_origin,&r->setid,&r->execution);
         if (r->error==-EINPROGRESS) { r->error=0; r->work.await=continuation_ready; }
         return;
     }
@@ -671,7 +673,13 @@ static void prepare_open(struct md_fs_buffer_request *r,struct md_filesystem *fs
             reply->delivery=MD_FS_REPLIED;
             return;
         }
-        if (r->request.flags&O_NOFOLLOW) {
+        /* Path admission has already applied NOFOLLOW. Native providers may
+         * normalize it while reopening a non-symlink pin; retain those flags
+         * instead of forcing an SCM_RIGHTS transfer of that O_PATH result.
+         * Android can permit metadata opens but deny file_receive for them. */
+        if (!(flags&O_NOFOLLOW)) r->opened.flags&=~O_NOFOLLOW;
+        r->output->source_flags=O_PATH|(r->opened.flags&(O_CLOEXEC|O_DIRECTORY|O_NOFOLLOW));
+        if (r->opened.flags&O_NOFOLLOW) {
             struct stat st;
             if (fstat(r->opened.fd,&st)) { r->error=-errno; return; }
             if (S_ISDIR(st.st_mode)) {
@@ -808,6 +816,9 @@ static int begin(struct md_fs_buffer_service *s, pid_t actor, struct md_guest_do
     r->snapshot=(struct md_file_snapshot){.fd=-1,.flags=snapshot_flags};
     r->snapshot_phase=snapshot ? SNAPSHOT_BEGIN : SNAPSHOT_NONE;
     r->request=q;
+    /* This flag comes from debugger admission, never the writable request.
+     * Tracers resolve the initial loader's symbols using the ELF PT_INTERP. */
+    if (executable==2) r->request.mode|=MD_EXEC_TRACED;
     error=md_buffer_pin(buffer,&r->buffer);
     if (!error) {
         r->output=span.data;
@@ -914,8 +925,8 @@ int md_fs_buffer_inspect_begin(struct md_fs_buffer_service *s, pid_t actor, stru
     r->submitted=1; *out=r; return 0;
 }
 int md_fs_buffer_exec_begin(struct md_fs_buffer_service *s, pid_t actor, struct md_guest_domain *fs,
-        const struct md_interception_buffer *buffer, struct md_fs_buffer_request **out) {
-    return begin(s,actor,fs,MD_FS_OPEN_IMAGE,buffer,out,1,0,0);
+        const struct md_interception_buffer *buffer, struct md_fs_buffer_request **out,int traced) {
+    return begin(s,actor,fs,MD_FS_OPEN_IMAGE,buffer,out,traced ? 2 : 1,0,0);
 }
 int md_fs_buffer_snapshot_begin(struct md_fs_buffer_service *s, pid_t actor, struct md_guest_domain *fs,
         const struct md_interception_buffer *buffer, unsigned flags, struct md_fs_buffer_request **out) {
@@ -927,14 +938,16 @@ struct md_landlock_policy *md_fs_buffer_landlock_take(struct md_fs_buffer_reques
     r->landlock=NULL; return policy;
 }
 int md_fs_buffer_exec_take(struct md_fs_buffer_request *r, int out[2], unsigned *mount_flags, int *anonymous,
-        struct md_fs_anchor **origin) {
-    if (!r || !out || !mount_flags || !anonymous || !origin || *origin) return -EINVAL;
+        struct md_fs_anchor **origin, struct md_exec_image **setid) {
+    if (!r) return -EINVAL;
     if (!r->executable) return 0;
+    if (!out || !mount_flags || !anonymous || !origin || *origin || !setid || *setid) return -EINVAL;
     if (r->error || r->images.program<0 || out[0]>=0 || out[1]>=0) return -EINVAL;
     out[0]=r->images.program; out[1]=r->images.loader;
     *mount_flags=r->images.mount_flags;
     *anonymous=r->images.anonymous;
     *origin=r->image_origin; r->image_origin=NULL;
+    *setid=r->setid; r->setid=NULL;
     r->images=(struct md_command_images){.program=-1,.loader=-1}; return 1;
 }
 static struct md_fs_anchor *capture_origin(struct md_fs_buffer_request *r,unsigned index) {

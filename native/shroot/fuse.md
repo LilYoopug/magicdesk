@@ -54,8 +54,11 @@ checked against fresh daemon attributes rather than a stale cached size, while
 The adapter implements lookup/attributes, regular files/directories/symlinks,
 creation, rename, links, removal, xattrs, data IO, directory iteration, truncate,
 sync and statfs. Daemon errors propagate. Mounts enforce owner/allow_other and
-default_permissions, and are always nodev/nosuid. Private executable mappings
-and execution still enforce noexec; guest FUSE cannot create a host set-ID path.
+default_permissions, and start nodev/nosuid. Explicit privileged guest remounts
+use the common mount-policy owner. Executable admission reads identity from the
+retained provider object, not its separately materialized loader image; set-ID
+and nosuid remain guest policies and never grant host credentials. Private
+executable mappings and execution still enforce noexec.
 INVAL_INODE, INVAL_ENTRY and DELETE notifications invalidate relevant state,
 subject to the shared-mapping limits below.
 Positive names and attributes honor the daemon's independent protocol TTLs.
@@ -183,7 +186,9 @@ clients in a private runtime under Android UID 2000:
   TTLs; a separate zero-TTL mount verifies actual daemon waits across
   SIGSTOP/SIGCONT, descriptor reuse and daemon death.
 - `portal`: stock document export, Flatpak read/write and live revocation.
-- `squashfs`: concurrent reads, ELF/script execution, shared-library loading,
+- `squashfs`: concurrent reads, ELF/script execution, provider-source set-ID
+  metadata and nosuid suppression, shared-library loading, read-only shared mmap
+  with writable shared-mapping rejection,
   private mmap interrupted by non-SA_RESTART signals with a stopped daemon,
   completion/signal races across independent opens, 2048 repeated mappings under
   a seccomp filter rejecting invalid syscalls, noexec and a file retained through
@@ -231,12 +236,13 @@ matching libc, and unprepared or static binaries retain Base.
 a successful transient user unit before invoking Snap. It also works with
 `--namespace-only` for a focused boot/delegation/scope check that retains the
 installed image. The guest identity is root; the Android executor remains shell.
-This is distinct from GUI verification and from the explicit set-ID admission
-needed by fusermount in non-root guest portal tests.
+This is distinct from GUI verification. Non-root guest portal tests use the
+packaged fusermount set-ID metadata through ordinary execution, with no
+`--admit-elf` override.
 The [Firefox Snap GUI fixture](../guest-exec-lab/desktop-workflows.md#ubuntu-firefox-snap)
 checks keyboard/pointer input and download/chooser readback under Wayland.
-Its browser rendering remains software; the host Turnip build is not yet
-published through Snap's separate GPU content interface.
+Its hardware WebRender and WebGL checks use the installer's local GPU content
+provider; see [Snap GPU drivers](../../docs/graphics.md#snap-gpu-drivers).
 
 Testing Snap is not evidence of AppArmor confinement: the tested Android kernel lacks
 AppArmor, and snapd reports its own reduced confinement capabilities. No

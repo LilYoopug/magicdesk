@@ -180,7 +180,8 @@ struct mapping_owner {
     struct md_fd_order files;
     struct md_fd_origin_update delivery;
     struct task_action *loan;
-    int started, file, noexec, readonly;
+    int started, file, noexec, readonly, guarded, borrowed, retiring;
+    int64_t deadline;
 };
 struct capture_owner {
     pid_t caller;
@@ -261,6 +262,9 @@ struct task_action {
     pid_t loan_waiter;
     struct md_broker_retirement retirement;
     int broker_borrowed;
+    struct md_task_quiesce *outer_barrier;
+    void (*retired)(void *,long);
+    void *retired_context;
 };
 static struct md_task_call *task_action_call(struct task_action *action) {
     return action->loan ? &action->native : &action->filter.task;
@@ -390,6 +394,7 @@ struct thread {
     struct md_fs_anchor *executable_origin, *prepared_executable_origin;
     int exec_images_ready;
     unsigned exec_mount_flags;
+    struct md_exec_image *exec_setid;
     int mapped_image, entered;
     int debug_step_call, debug_birth;
     pid_t debug_exec_old;
@@ -441,6 +446,8 @@ static unsigned task_action_calls;
 static struct task_action *task_action_execution;
 static struct task_action *loan_retirements;
 static struct md_task_quiesce *task_action_barrier;
+static struct md_task_quiesce *mapping_barrier;
+static struct mapping_owner *mapping_execution;
 static int task_action_releasing;
 static struct readiness_owner *readiness_activation;
 static void readiness_start(struct thread *);
@@ -528,6 +535,7 @@ static int debug_syscall_exit(struct thread *,const struct user_pt_regs *);
 static void adapter_progress(void);
 static void mapping_complete(void *, struct md_task_helper_result);
 static void mapping_discard(struct mapping_owner *);
+static void mapping_progress(void);
 static int mapping_notification(struct thread *,const struct seccomp_notif *);
 static void mapping_start(struct thread *);
 static void memory_start(struct thread *);
@@ -551,6 +559,7 @@ static const unsigned long trace_options = PTRACE_O_TRACESECCOMP | PTRACE_O_TRAC
 static void release_operation(struct thread *t);
 static void metadata_restart_return(struct thread *t,long value);
 static void exec_images_release(struct thread *t) {
+    md_exec_image_release(t->exec_setid); t->exec_setid=NULL;
     md_process_executable_release(t->prepared_executable); t->prepared_executable=NULL;
     md_fs_anchor_release(t->prepared_executable_origin); t->prepared_executable_origin=NULL;
     for (unsigned i=0;i<2;++i) {
@@ -559,6 +568,13 @@ static void exec_images_release(struct thread *t) {
     }
     t->exec_images_ready=0;
     t->exec_mount_flags=0;
+}
+static void exec_images_activate(struct thread *t) {
+    t->exec_images_ready=t->exec_images[0]>=0;
+    md_process_executable_release(t->executable);
+    t->executable=t->prepared_executable; t->prepared_executable=NULL;
+    md_fs_anchor_release(t->executable_origin);
+    t->executable_origin=t->prepared_executable_origin; t->prepared_executable_origin=NULL;
 }
 static void adapter_discard(struct thread *);
 static int describe_filter(pid_t pid, const struct user_pt_regs *regs) {
@@ -659,6 +675,7 @@ static void cleanup(void) {
     md_broker_destroy(broker); broker = NULL;
     md_task_quiesce_destroy(memory_barrier); memory_barrier=NULL;
     md_task_quiesce_destroy(task_action_barrier); task_action_barrier=NULL;
+    md_task_quiesce_destroy(mapping_barrier); mapping_barrier=NULL;
     md_task_registry_destroy(tasks); tasks = NULL;
     md_fd_exchanges_destroy(fd_exchanges); fd_exchanges=NULL;
     md_identity_release(&launch_identity);
@@ -1171,7 +1188,8 @@ static void image_request(struct thread *t, const struct seccomp_notif *q) {
                 next.value.gid.saved = next.value.gid.fs = next.value.gid.effective;
                 next.secure = next.value.uid.real != next.value.uid.effective
                     || next.value.gid.real != next.value.gid.effective;
-                if (matched) reply.error = md_identity_prepare_exec(&t->identity, admission.image,
+                const struct md_exec_image *setid=matched ? admission.image : t->exec_setid;
+                if (setid) reply.error = md_identity_prepare_exec(&t->identity, setid,
                     md_debugger_traced(debugger,t->pid) || (t->exec_mount_flags&MD_MOUNT_NOSUID), &next);
                 else md_identity_exec(&t->identity, &next.value);
                 if (!reply.error && matched) {
@@ -1193,7 +1211,11 @@ static void image_request(struct thread *t, const struct seccomp_notif *q) {
                         reply.error = -error;
                     }
                 }
-                if (!reply.error) { t->pending_identity = next; t->mapped_image = 1; }
+                if (!reply.error) {
+                    t->pending_identity = next; t->mapped_image = 1;
+                    if (setid) TRACE("PROBE stored-setid-image pid=%d euid=%u egid=%u secure=%d\n",
+                        t->pid,next.value.uid.effective,next.value.gid.effective,next.secure);
+                }
             }
         }
     } else if (q->data.args[0] == MD_GUEST_ENTER_IMAGE) {
@@ -1222,6 +1244,7 @@ static void image_request(struct thread *t, const struct seccomp_notif *q) {
                 CHECK(!md_task_registry_publish(tasks, t->pid, t->tgid, &next->value, &t->resources));
                 if (!ioctl(listener, SECCOMP_IOCTL_NOTIF_SEND, &reply)) {
                     t->identity = next->value; t->mapped_image = 0; t->entered = 1;
+                    md_exec_image_release(t->exec_setid); t->exec_setid=NULL;
                     TRACE("PROBE entered-image pid=%d uid=%u euid=%u secure=%d\n", t->pid,
                         t->identity.uid.real, t->identity.uid.effective, next->secure);
                     if (diagnostics) {
@@ -3071,6 +3094,7 @@ static void task_action_release(struct task_action *owner) {
         md_fd_loan_release(owner->loan);
         md_fd_origins_unpin(owner->loan_table);
     }
+    if (owner->retired) owner->retired(owner->retired_context,-ECANCELED);
     CHECK(task_action_calls); --task_action_calls; free(owner);
 }
 static void task_action_cleanup(void) {
@@ -3078,7 +3102,8 @@ static void task_action_cleanup(void) {
     struct task_action *active=task_action_execution;
     if (active) {
         if (active->requester) active->requester->action=NULL;
-        if (active->borrowed) CHECK(!md_task_quiesce_return(task_action_barrier,active->actor->pid));
+        if (active->borrowed) CHECK(!md_task_quiesce_return(
+            active->outer_barrier ? active->outer_barrier : task_action_barrier,active->actor->pid));
         if (active->broker_borrowed) {
             md_broker_native_return(broker,active->actor->pid); active->broker_borrowed=0;
         }
@@ -3097,11 +3122,15 @@ static void task_action_finish(struct task_action *owner,long result) {
     struct user_pt_regs r=owner->continuation;
     pid_t waiter=owner->loan_waiter;
     struct md_broker_retirement retirement=owner->retirement;
+    void (*retired)(void *,long)=owner->retired;
+    void *retired_context=owner->retired_context;
+    owner->retired=NULL;
     if (t) { retry_clear(t,RETRY_TASK_ACTION); t->action=NULL; }
     task_action_release(owner);
     if (waiter) readiness_loan_closed(waiter,result);
     if (retirement.complete) retirement.complete(retirement.context,(int)result);
-    if (t) {
+    if (retired) retired(retired_context,result);
+    if (t && !retired) {
         if (complete) complete(t,result);
         else {
             r.regs[0]=result;
@@ -3114,7 +3143,7 @@ static void task_action_discard(struct thread *t) {
     struct task_action *owner=t->action;
     if (!owner) return;
     t->action=NULL; owner->requester=NULL;
-    if (owner->loan) { owner->loan_turn=NULL; return; }
+    if (owner->loan) { if (!owner->retired) owner->loan_turn=NULL; return; }
     /* A foreign actor can still be using this payload. Its exact completion
      * retires the detached request, independently of requester death. */
     if (owner!=task_action_execution) task_action_release(owner);
@@ -3153,12 +3182,13 @@ static void task_action_call_complete(long result,int retry) {
                 result=md_fd_origins_close_range(owner->loan_table,owner->number,owner->number,0);
         }
     } else if (!result && !retry) result=md_fd_selector_mark(owner->group,owner->kind,owner->number);
-    if (owner->borrowed) CHECK(!md_task_quiesce_return(task_action_barrier,actor->pid));
+    if (owner->borrowed) CHECK(!md_task_quiesce_return(
+        owner->outer_barrier ? owner->outer_barrier : task_action_barrier,actor->pid));
     if (owner->broker_borrowed) {
         md_broker_native_return(broker,actor->pid); owner->broker_borrowed=0;
     }
     if (task_action_barrier) CHECK(!md_task_quiesce_release(task_action_barrier));
-    if (owner->synthetic) actor->kernel_stopped=0;
+    if (owner->synthetic && !owner->outer_barrier) actor->kernel_stopped=0;
     CHECK(!md_buffer_release(&owner->buffer));
     md_fd_selector_release(owner->group); owner->group=NULL;
     owner->actor=NULL; owner->borrowed=owner->synthetic=0; owner->filter=(struct md_task_filter){0};
@@ -3189,9 +3219,10 @@ static void task_action_call_start(struct task_action *owner) {
     struct user_pt_regs saved=owner->continuation;
     enum md_task_call_boundary boundary=MD_TASK_CALL_USER;
     if (owner->remote) {
-        if (!md_task_quiesce_ready(task_action_barrier)) return;
+        struct md_task_quiesce *barrier=owner->outer_barrier ? owner->outer_barrier : task_action_barrier;
+        if (!md_task_quiesce_ready(barrier)) return;
         struct md_task_quiesce_stop stop;
-        int error=md_task_quiesce_borrow(task_action_barrier,actor->pid,&stop);
+        int error=md_task_quiesce_borrow(barrier,actor->pid,&stop);
         if (error) { task_action_call_complete(error,error==-ESRCH); return; }
         owner->borrowed=1;
         owner->synthetic=stop.kind==MD_TASK_QUIESCE_SYNTHETIC;
@@ -3267,7 +3298,7 @@ static void task_action_start(struct thread *t) {
     struct task_action *owner=t->action;
     CHECK(owner && !task_action_call(owner)->stage);
     if (owner->loan) { loan_start(owner); return; }
-    if (task_action_execution || task_action_releasing || memory_execution) { retry_wait(t,RETRY_TASK_ACTION); return; }
+    if (task_action_execution || task_action_releasing || memory_execution || mapping_execution) { retry_wait(t,RETRY_TASK_ACTION); return; }
     if (owner->rejected_task) {
         if (md_task_helper_retiring(helpers,owner->rejected_group,owner->rejected_task)) {
             retry_wait(t,RETRY_TASK_ACTION); return;
@@ -3337,8 +3368,22 @@ static void task_action_schedule(void) {
         if (task_action_execution) return;
     }
 }
+static int loan_borrow(struct task_action *owner,struct thread *p,int *alive,int *stopped) {
+    if (!p || !p->pid || p->resources.files!=owner->loan_table || p->terminal_stop || p->resume_lost) return 0;
+    if (p!=owner->requester && p->pid!=owner->retirement.task && !task_action_borrowable(p)) {
+        *alive=1; return 0;
+    }
+    *stopped=p->kernel_stopped;
+    int borrowed=md_broker_native_borrow(broker,p->pid,stopped);
+    if (borrowed==-ESRCH) return 0;
+    *alive=1;
+    if (borrowed<0) return 0;
+    owner->broker_borrowed=borrowed;
+    return 1;
+}
 static void loan_start(struct task_action *owner) {
     if (cancelling || task_action_execution || task_action_releasing || memory_execution) return;
+    if (mapping_execution && owner->retired_context!=mapping_execution) return;
     struct md_fd_order *turn=owner->loan_turn ? owner->loan_turn : &owner->files;
     if (!turn->table) {
         int error=md_fd_order_begin(owner->loan_table,turn,fd_wakeup);
@@ -3351,18 +3396,12 @@ static void loan_start(struct task_action *owner) {
     if (!exists) { task_action_finish(owner,0); return; }
     struct thread *candidate=NULL;
     int alive=0,stopped=0;
+    /* The requester already owns an exact stopped continuation. A peer can
+     * instead have a deferred signal/lifecycle event which must not be replayed
+     * while an outer mapping barrier still protects the borrowed descriptor. */
+    if (loan_borrow(owner,owner->requester,&alive,&stopped)) candidate=owner->requester;
     for (struct thread *p=threads;!candidate && p;p=p->next) {
-        if (!p->pid || p->resources.files!=owner->loan_table || p->terminal_stop || p->resume_lost) continue;
-        if (p!=owner->requester && p->pid!=owner->retirement.task && !task_action_borrowable(p)) {
-            alive=1; continue;
-        }
-        stopped=p->kernel_stopped;
-        int borrowed=md_broker_native_borrow(broker,p->pid,&stopped);
-        if (borrowed==-ESRCH) continue;
-        alive=1;
-        if (borrowed<0) continue;
-        owner->broker_borrowed=borrowed;
-        candidate=p;
+        if (p!=owner->requester && loan_borrow(owner,p,&alive,&stopped)) candidate=p;
     }
     if (!candidate) {
         /* No task can retain the kernel table. A metadata pin is not an owner. */
@@ -3371,9 +3410,12 @@ static void loan_start(struct task_action *owner) {
     }
     owner->actor=candidate; owner->remote=1;
     task_action_execution=owner;
-    if (!task_action_barrier) { task_action_barrier=md_task_quiesce_new(quiesce_trace); CHECK(task_action_barrier); }
-    CHECK(!md_task_quiesce_add(task_action_barrier,candidate->pid,stopped,candidate->kernel_resume));
-    CHECK(!md_task_quiesce_stop(task_action_barrier));
+    owner->outer_barrier=mapping_execution ? mapping_barrier : NULL;
+    if (!owner->outer_barrier) {
+        if (!task_action_barrier) { task_action_barrier=md_task_quiesce_new(quiesce_trace); CHECK(task_action_barrier); }
+        CHECK(!md_task_quiesce_add(task_action_barrier,candidate->pid,stopped,candidate->kernel_resume));
+        CHECK(!md_task_quiesce_stop(task_action_barrier));
+    }
     task_action_call_start(owner);
 }
 static void loan_retire(struct task_action *owner,struct thread *requester,
@@ -4574,12 +4616,13 @@ static void buffer_complete(struct md_fs_buffer_request *request, pid_t pid, int
         }
         int anonymous=0;
         CHECK(md_fs_buffer_exec_take(request,t->exec_images,&t->exec_mount_flags,&anonymous,
-            &t->prepared_executable_origin)>=0);
+            &t->prepared_executable_origin,&t->exec_setid)>=0);
         if (anonymous) {
             CHECK(!t->prepared_executable);
             t->prepared_executable=md_process_executable_new(t->exec_images[0]);
             if (!t->prepared_executable) { error=-errno; exec_images_release(t); }
         }
+        if (!error && !t->entered && t->exec_images[0]>=0) exec_images_activate(t);
         if (!md_fs_buffer_task_pending(request)) CHECK(md_fs_buffer_open_take(request,&t->buffer_open)>=0);
     }
     if (!error && t->buffer_open.fd>=0 && !t->buffer_open.task_path) {
@@ -5055,13 +5098,16 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
     }
     case MD_FS_BUFFER_EXEC_PREPARE:
         if (!t->buffer.pool || t->buffer_open.fd>=0 || r->regs[1]!=MD_FS_OPEN_IMAGE || r->regs[2]
-                || t->phase!=DISPATCHING || t->exec_images[0]>=0 || t->exec_images[1]>=0
-                || (t->original.regs[8]!=SYS_execve && t->original.regs[8]!=SYS_execveat)) break;
-        result=md_fs_buffer_exec_begin(buffer_service,t->pid,t->resources.fs,&t->buffer,&t->buffer_call);
+                || t->exec_images[0]>=0 || t->exec_images[1]>=0
+                || !((t->phase==IDLE && !t->entered && !t->mapped_image)
+                    || (t->phase==DISPATCHING
+                        && (t->original.regs[8]==SYS_execve || t->original.regs[8]==SYS_execveat)))) break;
+        result=md_fs_buffer_exec_begin(buffer_service,t->pid,t->resources.fs,&t->buffer,&t->buffer_call,
+            md_debugger_traced(debugger,t->pid));
         if (!result) { adapter_progress(); return; }
         break;
     case MD_FS_BUFFER_EXEC_CANCEL:
-        if (r->regs[1] || r->regs[2] || t->phase!=DISPATCHING) break;
+        if (r->regs[1] || r->regs[2] || (t->phase!=DISPATCHING && (t->phase!=IDLE || t->entered))) break;
         exec_images_release(t); result=0; break;
     case MD_FS_BUFFER_SNAPSHOT_BEGIN:
         if (!t->buffer.pool || t->buffer_open.fd>=0 || r->regs[1]>UINT_MAX || r->regs[2]) break;
@@ -5446,6 +5492,12 @@ static int process_call(struct thread *t,struct user_pt_regs *r,unsigned long *c
         return 1;
     }
     if (!t->resources.pid) return 0;
+    if (nr==SYS_futex) {
+        /* The PID selector intercepts only PI operations. Passing a logical
+         * owner TID to the native PI state can deadlock even after unlock.
+         * ENOSYS also lets libc's capability probe reject PI mutex creation. */
+        return_value(t,r,-ENOSYS); return 1;
+    }
     if (nr==SYS_ioctl) {
         t->original=*r;
         if (tracee_request(t,PTRACE_GETSIGMASK,(void *)sizeof(t->mask),&t->mask,"pid-terminal-mask")
@@ -5735,7 +5787,8 @@ static void resume(pid_t pid, int sig) {
     if (!memory_available(pid)) {
         CHECK(!t->memory_resume || !sig || sig==t->memory_signal);
         t->memory_resume=1; if (sig) t->memory_signal=sig;
-        struct md_task_quiesce *barrier=memory_execution ? memory_barrier : task_action_barrier;
+        struct md_task_quiesce *barrier=memory_execution ? memory_barrier
+            : mapping_execution ? mapping_barrier : task_action_barrier;
         /* A lent actor has a separate resume owner until its registers return. */
         if (!task_action_execution || task_action_execution->actor!=t || !task_action_execution->borrowed)
             CHECK(!md_task_quiesce_add(barrier,pid,1,0));
@@ -6031,10 +6084,21 @@ static void mapping_delivery_release(struct mapping_owner *owner) {
     if (owner->files.table && md_fd_order_cancel(&owner->files)==1)
         CHECK(!md_fd_order_complete(&owner->files));
 }
+static void mapping_guard_release(struct mapping_owner *owner) {
+    if (owner!=mapping_execution) return;
+    if (owner->borrowed) {
+        CHECK(!md_task_quiesce_return(mapping_barrier,owner->direct.call.actor));
+        owner->borrowed=0;
+    }
+    CHECK(!md_task_quiesce_release(mapping_barrier));
+    mapping_execution=NULL;
+}
 static void mapping_complete(void *context, struct md_task_helper_result result) {
     long value=result.value;
     CHECK(result.descriptor==-1);
     struct mapping_owner *owner=context;
+    int guarded=owner==mapping_execution;
+    mapping_guard_release(owner);
     mapping_delivery_release(owner);
     if (owner->file) {
         md_memory_mapping_finish(owner->memory,&owner->change,value);
@@ -6057,20 +6121,33 @@ static void mapping_complete(void *context, struct md_task_helper_result result)
         if (set_registers(t->pid,&regs)) resume(t->pid,0);
     }
     free(owner);
+    if (guarded) task_action_unpark();
+}
+static void mapping_retired(void *context,long error) {
+    struct mapping_owner *owner=context;
+    CHECK(!error || error==-ECANCELED);
+    mapping_complete(owner,(struct md_task_helper_result){
+        .value=error ? error : owner->direct.result,.descriptor=-1});
+}
+static void mapping_retire(struct mapping_owner *owner,struct thread *t) {
+    if (owner->borrowed) {
+        CHECK(!md_task_quiesce_return(mapping_barrier,owner->direct.call.actor));
+        owner->borrowed=0;
+    }
+    owner->retiring=1;
+    owner->loan->retired=mapping_retired; owner->loan->retired_context=owner;
+    loan_retire(owner->loan,t,&owner->files,NULL); owner->loan=NULL;
 }
 static void mapping_discard(struct mapping_owner *owner) {
+    if (owner->retiring) return;
     if (owner->direct.stage==MD_TASK_MAPPING_MAP)
         md_memory_mapping_abandon(owner->memory,&owner->change);
     if (owner->loan && owner->loan->number>=0) {
-        loan_retire(owner->loan,NULL,NULL,NULL); owner->loan=NULL;
+        owner->direct.result=-ECANCELED;
+        mapping_retire(owner,NULL); return;
     }
     long value=owner->direct.stage==MD_TASK_MAPPING_DONE ? owner->direct.result : -ECANCELED;
     mapping_complete(owner,(struct md_task_helper_result){.value=value,.descriptor=-1});
-}
-static void mapping_retired(struct thread *t,long error) {
-    struct mapping_owner *owner=t->mapping;
-    CHECK(owner && !error);
-    mapping_complete(owner,(struct md_task_helper_result){.value=owner->direct.result,.descriptor=-1});
 }
 static int mapping_helper_start(struct thread *t) {
     struct mapping_owner *owner=t->mapping;
@@ -6124,13 +6201,15 @@ static int mapping_event(pid_t pid,int status) {
         if (owner->direct.result==-EMFILE && owner->direct.descriptor<0) {
             /* Mapping needs no application FD. Retain the private-table path
              * when the optional loan cannot fit; its native errors still apply. */
+            mapping_guard_release(owner);
             mapping_delivery_release(owner);
             owner->direct=(struct md_task_mapping){0};
             int error=mapping_helper_start(t);
             if (error) mapping_complete(owner,(struct md_task_helper_result){.value=error,.descriptor=-1});
+            task_action_unpark();
         } else if (owner->loan->number>=0) {
-            loan_retire(owner->loan,t,&owner->files,mapping_retired); owner->loan=NULL;
-        } else mapping_retired(t,0);
+            mapping_retire(owner,t);
+        } else mapping_retired(owner,0);
     } else t->kernel_stopped=0;
     adapter_progress();
     return 1;
@@ -6144,7 +6223,33 @@ static int mapping_direct_start(struct thread *t) {
     if (md_fd_order_state(&owner->files)==MD_RESOURCE_ORDER_QUEUED) {
         retry_wait(t,RETRY_MAPPING); return 0;
     }
-    CHECK(!md_fd_order_start(&owner->files));
+    if (md_fd_order_state(&owner->files)==MD_RESOURCE_ORDER_READY)
+        CHECK(!md_fd_order_start(&owner->files));
+    if (owner->guarded) {
+        if (!mapping_execution) {
+            if (memory_execution || task_action_execution || task_action_releasing) {
+                retry_wait(t,RETRY_MAPPING); return 0;
+            }
+            if (!mapping_barrier) mapping_barrier=md_task_quiesce_new(quiesce_trace);
+            if (!mapping_barrier) return -ENOMEM;
+            mapping_execution=owner;
+            /* EVENT_WAIT: exact shared-table holders stop before a writable
+             * backing loan is published. Expiry fails closed; ordinary native
+             * and sealed mappings never enter this cold barrier. */
+            owner->deadline=md_event_now()+5000000000LL;
+            for (struct thread *p=threads;p;p=p->next) if (p->pid && p->resources.files==owner->files.table)
+                CHECK(!md_task_quiesce_add(mapping_barrier,p->pid,
+                    p==t || p->kernel_stopped || p->listening || p->vfork_child,
+                    p->interrupt_pending || birth_stop_pending(p) ? 0 : p->kernel_resume));
+            CHECK(!md_task_quiesce_stop(mapping_barrier));
+        }
+        if (mapping_execution!=owner) { retry_wait(t,RETRY_MAPPING); return 0; }
+        if (!md_task_quiesce_ready(mapping_barrier)) return 0;
+        struct md_task_quiesce_stop stop;
+        CHECK(!md_task_quiesce_borrow(mapping_barrier,t->pid,&stop));
+        CHECK(stop.kind==MD_TASK_QUIESCE_HELD);
+        owner->borrowed=1;
+    }
     struct task_action *loan=calloc(1,sizeof(*loan));
     if (!loan) return -ENOMEM;
     owner->loan=loan; loan->number=-1;
@@ -6178,13 +6283,49 @@ static void mapping_start(struct thread *t) {
     }
     t->terminal_observation=1; t->trace_options_dirty=1;
     if (!error) error=debugger_options(t->pid,t->debug_options);
-    if (!error && owner->file && md_task_mapping_safe(owner->request.source)) {
+    if (!error && owner->file) {
+        owner->guarded=!md_task_mapping_safe(owner->request.source);
         error=mapping_direct_start(t);
         if (error) mapping_complete(owner,(struct md_task_helper_result){.value=error,.descriptor=-1});
         return;
     }
     if (!error) error=mapping_helper_start(t);
     if (error) mapping_complete(owner,(struct md_task_helper_result){.value=error,.descriptor=-1});
+}
+static void mapping_progress(void) {
+    struct mapping_owner *owner=mapping_execution;
+    if (!owner) return;
+    if (md_event_now()>=owner->deadline) {
+        fprintf(stderr,"Shroot: mapping timeout caller=%d stage=%d retiring=%d actor=%d\n",
+            owner->caller,owner->direct.stage,owner->retiring,
+            task_action_execution && task_action_execution->actor ? task_action_execution->actor->pid : 0);
+        md_task_quiesce_describe(mapping_barrier,STDERR_FILENO);
+        for (struct thread *p=threads;p;p=p->next) if (p->pid && p->resources.files==owner->files.table)
+            fprintf(stderr,"Shroot: mapping peer pid=%d born=%d initial=%d stopped=%d phase=%d resume=%d terminal=%d\n",
+                p->pid,p->born,p->initial_stop,p->kernel_stopped,p->phase,p->kernel_resume,p->terminal_stop);
+        errno=ETIMEDOUT; CHECK(0);
+    }
+    if (!owner->direct.stage && md_task_quiesce_ready(mapping_barrier)) {
+        struct thread *t=find_thread(owner->caller);
+        CHECK(t && t->mapping==owner);
+        int error=mapping_direct_start(t);
+        if (error) mapping_complete(owner,(struct md_task_helper_result){.value=error,.descriptor=-1});
+    }
+}
+static int mapping_guard_event(pid_t pid,int status,const struct rusage *usage) {
+    if (!mapping_execution || pid==mapping_execution->caller) return 0;
+    struct thread *t=find_thread(pid);
+    int repair=t && WIFSTOPPED(status) && !((unsigned)status>>16) && WSTOPSIG(status)==(SIGTRAP|0x80)
+        && t->phase==OBSERVING && t->memory_action==MEMORY_KERNEL && t->original.regs[8]==SYS_mprotect;
+    if (!repair && !md_task_quiesce_contains(mapping_barrier,pid)) return 0;
+    int error=md_task_quiesce_event(mapping_barrier,pid,status,usage);
+    if (error) {
+        fprintf(stderr,"Shroot: mapping barrier event pid=%d status=%x caller=%d retiring=%d actor=%d error=%d\n",
+            pid,status,mapping_execution->caller,mapping_execution->retiring,
+            task_action_execution && task_action_execution->actor ? task_action_execution->actor->pid : 0,error);
+        errno=-error; CHECK(0);
+    }
+    return 1;
 }
 static void mapping_begin(struct thread *t, struct user_pt_regs *regs) {
     struct md_shm *shm=NULL;
@@ -6766,13 +6907,16 @@ static pid_t deferred_event(int *status,struct rusage *usage) {
     pid_t broker_event=md_broker_take_event(broker,status,usage);
     if (broker_event) return broker_event;
     pid_t pid=memory_execution ? 0 : md_task_quiesce_take(memory_barrier,status,usage);
-    return pid ? pid : task_action_execution ? 0 : md_task_quiesce_take(task_action_barrier,status,usage);
+    if (pid) return pid;
+    pid=task_action_execution ? 0 : md_task_quiesce_take(task_action_barrier,status,usage);
+    return pid ? pid : mapping_execution ? 0 : md_task_quiesce_take(mapping_barrier,status,usage);
 }
 static pid_t wait_event(int *status, struct rusage *usage) {
     enum { PROGRESS_BATCH=8 };
     static unsigned progress_budget;
     for (;;) {
         memory_progress();
+        mapping_progress();
         task_action_schedule();
         if (memory_completions_pending && !memory_execution) {
             memory_completions_pending=0;
@@ -6811,6 +6955,7 @@ static pid_t wait_event(int *status, struct rusage *usage) {
             if (t->control_pending->deadline<control_bound) control_bound=t->control_pending->deadline;
         if (control_bound<bound) bound=control_bound;
         if (memory_deadline()<bound) bound=memory_deadline();
+        if (mapping_execution && mapping_execution->deadline<bound) bound=mapping_execution->deadline;
         /* Dispatch may retire a source, notably bootstrap's listener on HUP.
          * A readiness snapshot cannot outlive its callbacks' descriptor owners. */
         event_sources(events);
@@ -6818,6 +6963,7 @@ static pid_t wait_event(int *status, struct rusage *usage) {
         long outcome = md_event_wait(events, EVENT_SOURCES, bound);
         /* Report expiry through the transaction that owns the memory deadline. */
         if (outcome==-ETIMEDOUT && bound==memory_deadline()) memory_progress();
+        if (outcome==-ETIMEDOUT && mapping_execution && bound==mapping_execution->deadline) mapping_progress();
         if (outcome==-ETIMEDOUT && bound==control_bound) {
             for (struct thread *t=threads;t;t=t->next) if (t->pid) control_progress(t);
             continue;
@@ -6876,6 +7022,7 @@ static void memory_discard(void) {
 }
 static int memory_available(pid_t pid) {
     return (!memory_execution || !md_task_quiesce_contains(memory_barrier,pid))
+        && (!mapping_execution || !md_task_quiesce_contains(mapping_barrier,pid))
         && (!task_action_execution || !md_task_quiesce_contains(task_action_barrier,pid));
 }
 static int memory_runnable(void) {
@@ -7363,6 +7510,7 @@ int main(int argc, char **argv) {
         if (memory_event(pid,status,&usage)) continue;
         if (task_action_event(pid,status,&usage)) continue;
         if (mapping_event(pid,status)) continue;
+        if (mapping_guard_event(pid,status,&usage)) continue;
         int opened=md_fs_buffer_child(buffer_service,pid,status);
         CHECK(opened>=0);
         if (opened) continue;
@@ -7477,6 +7625,7 @@ int main(int argc, char **argv) {
                     t->prepared_executable_origin=former->prepared_executable_origin;
                     former->prepared_executable_origin=NULL;
                     t->exec_mount_flags=former->exec_mount_flags;
+                    t->exec_setid=former->exec_setid; former->exec_setid=NULL;
                     former->exec_images[0]=former->exec_images[1]=-1;
                     md_identity_release(&t->identity);
                     t->identity = md_identity_copy(&former->identity);
@@ -7488,11 +7637,7 @@ int main(int argc, char **argv) {
             }
             fd_discard(t);
             adapter_discard(t);
-            t->exec_images_ready=t->exec_images[0]>=0;
-            md_process_executable_release(t->executable);
-            t->executable=t->prepared_executable; t->prepared_executable=NULL;
-            md_fs_anchor_release(t->executable_origin);
-            t->executable_origin=t->prepared_executable_origin; t->prepared_executable_origin=NULL;
+            exec_images_activate(t);
             md_memory_stack_return(t->memory, t->stack);
             CHECK(!md_shm_space_release(t->shm_space));
             t->shm_space = md_shm_space_new(); CHECK(t->shm_space);

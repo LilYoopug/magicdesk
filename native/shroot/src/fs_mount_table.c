@@ -6,6 +6,8 @@
 #include "fs_storage.h"
 #include "procfs_view.h"
 #include "fuse_view.h"
+#include "proc_paths.h"
+#include "mount_graph.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/magic.h>
@@ -296,8 +298,8 @@ static int table_signal(struct md_mount_table_file *f) {
     return n==2 ? 0 : n<0 ? -errno : -EIO;
 }
 
-void md_fs_mount_table_open(struct md_filesystem *fs,const struct md_fs_request *q,
-        struct md_fs_result *out,const struct md_fs_output *output) {
+static void table_open(struct md_filesystem *fs,const struct md_fs_request *q,
+        struct md_fs_result *out,const struct md_fs_output *output,const struct stat *metadata) {
     int fd=md_fs_mount_table(fs,q->mode,q->flags);
     if (fd<0) { out->error=fd; return; }
     if ((q->flags&O_PATH) || !output || !output->control) {
@@ -313,7 +315,8 @@ void md_fs_mount_table_open(struct md_filesystem *fs,const struct md_fs_request 
     error=root<0 ? root : md_view_anchor_duplicate(fs,fs->mounts,md_view_root_mount(fs),root,&f->root_anchor);
     if (!error) error=md_fs_root_capture(fs,root,f->root_anchor,&f->root);
     if (root>=0) close(root);
-    if (!error && stat(q->mode ? "/proc/self/mountinfo" : "/proc/self/mounts",&f->metadata)) error=-errno;
+    if (metadata) f->metadata=*metadata;
+    else if (!error && stat(q->mode ? "/proc/self/mountinfo" : "/proc/self/mounts",&f->metadata)) error=-errno;
     if (!error) {
         error=table_socket(f);
         /* Optional AF_UNIX_OOB support. Without it, reads remain live but
@@ -328,6 +331,34 @@ void md_fs_mount_table_open(struct md_filesystem *fs,const struct md_fs_request 
             (struct md_control_file){&table_ops,f},NULL,fs->store->identity,(int)q->flags,out,output);
     }
     table_release(f); if (error) out->error=error;
+}
+void md_fs_mount_table_open(struct md_filesystem *fs,const struct md_fs_request *q,
+        struct md_fs_result *out,const struct md_fs_output *output) {
+    if (q->directory[0]<0) { table_open(fs,q,out,output,NULL); return; }
+    /* The caller opens this proc inode before delegation. Never substitute
+     * the caller's mount view for another task, or read Android's mount table. */
+    char path[PATH_MAX];
+    int error=md_view_fdpath(q->directory[0],path,sizeof(path));
+    struct md_proc_path proc=md_proc_path_for(error ? "" : path,0,0);
+    if (!error && (proc.kind!=MD_PROC_FOREIGN || *proc.tail
+            || proc.foreign_kind!=(q->mode ? MD_PROC_MOUNTINFO : MD_PROC_MOUNTS))) error=-EINVAL;
+    struct stat captured,current;
+    if (!error && fstat(q->directory[0],&captured)) error=-errno;
+    struct md_task_snapshot target={0};
+    if (!error) error=md_task_registry_probe(fs->tasks,proc.process,0,&target);
+    if (!error && stat(path,&current)) error=-errno;
+    if (!error && (captured.st_dev!=current.st_dev || captured.st_ino!=current.st_ino)) error=-ESTALE;
+    struct md_filesystem selected=*fs;
+    const char *root=fs->store->root_id;
+    if (!error) {
+        selected.mounts=target.mounts;
+        error=md_mount_graph_sync(selected.mounts);
+        if (!error) error=md_fs_root_select(&selected,&target.root);
+        if (!error) table_open(&selected,q,out,output,&captured);
+    }
+    fs->store->root_id=root;
+    md_task_snapshot_release(&target);
+    if (error) out->error=error;
 }
 void md_fs_mount_table_changed(struct md_filesystem *fs) {
     struct md_mount_namespace *view=fs->mounts;

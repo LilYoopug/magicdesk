@@ -20,6 +20,24 @@
 #define STATX_MNT_ID_UNIQUE 0x4000U
 #endif
 
+static long mount_table_open(const struct md_fs *fs,const struct md_proc_path *ref,
+        const char *path,int flags) {
+    if (*ref->tail) return -ENOTDIR;
+    if (flags&O_DIRECTORY) return -ENOTDIR;
+    if (!(flags&O_PATH) && ((flags&O_ACCMODE)!=O_RDONLY || (flags&O_TRUNC))) return -EACCES;
+    if ((flags&(O_CREAT|O_EXCL))==(O_CREAT|O_EXCL)) return -EEXIST;
+    enum md_proc_kind kind=ref->kind==MD_PROC_FOREIGN ? ref->foreign_kind : ref->kind;
+    struct md_fs_request q={.operation=MD_FS_MOUNT_TABLE,.directory={-1,-1},
+        .mode=kind==MD_PROC_MOUNTINFO,.flags=(unsigned)flags&(O_PATH|O_CLOEXEC)};
+    if (ref->kind==MD_PROC_FOREIGN)
+        q.capture[0]=(struct md_fs_task_capture){path,(flags&O_PATH)|O_CLOEXEC};
+    struct md_fs_response response;
+    long error=md_fs_call(fs->endpoint,5000,&q,&response);
+    if (!error) error=response.result.error;
+    if (error) return error;
+    return md_namespace_open_result(&response.result,(unsigned)flags);
+}
+
 long md_namespace_host_open_resolved(const struct md_fs *fs,int base,const char *path,
         const char *identity,const struct open_how *how,uint64_t proc_namespace) {
     /* Identity selects the virtual proc object; the original dirfd/path pair
@@ -52,6 +70,12 @@ long md_namespace_host_open_resolved(const struct md_fs *fs,int base,const char 
         long result=md_proc_control_open(&ref,(int)how->flags,proc_namespace);
         return result==-EXDEV && md_proc_network_sysctl(kind)
             ? RAW4(openat2,base,path,how,sizeof(*how)) : result;
+    }
+    if (kind==MD_PROC_MOUNTS || kind==MD_PROC_MOUNTINFO) {
+        long checked=RAW4(openat2,base,path,how,sizeof(*how));
+        if (checked<0) return checked;
+        RAW1(close,checked);
+        return mount_table_open(fs,&ref,identity,(int)how->flags);
     }
     if (ref.kind==MD_PROC_FOREIGN) return -ENOTSUP;
     if (ref.kind==MD_PROC_CMDLINE || ref.kind==MD_PROC_AUXV) {
@@ -343,23 +367,9 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
                 && control!=MD_PROC_STAT && control!=MD_PROC_LIMITS && !md_proc_network_sysctl(control))) return result;
         ref.kind=MD_PROC_NONE;
     }
-    if (ref.kind==MD_PROC_MOUNTS || ref.kind==MD_PROC_MOUNTINFO) {
+    if (control==MD_PROC_MOUNTS || control==MD_PROC_MOUNTINFO) {
         if (*ref.tail) return -ENOTDIR;
-        if (nr==SYS_openat) {
-            int flags=(int)a[2];
-            if (flags&O_DIRECTORY) return -ENOTDIR;
-            if (!(flags&O_PATH) && ((flags&O_ACCMODE)!=O_RDONLY || (flags&O_TRUNC))) return -EACCES;
-            if ((flags&(O_CREAT|O_EXCL))==(O_CREAT|O_EXCL)) return -EEXIST;
-            struct md_fs_request q={.operation=MD_FS_MOUNT_TABLE,.directory={-1,-1},
-                .mode=ref.kind==MD_PROC_MOUNTINFO,.flags=(unsigned)flags&(O_PATH|O_CLOEXEC)};
-            struct md_fs_response response;
-            long error=md_fs_call(fs->endpoint,5000,&q,&response);
-            if (!error) error=response.result.error;
-            if (error) return error;
-            int fd=response.result.fd;
-            if (!(flags&O_CLOEXEC) && (error=RAW3(fcntl,fd,F_SETFD,0))<0) { RAW1(close,fd); return error; }
-            return fd;
-        }
+        if (nr==SYS_openat) return mount_table_open(fs,&ref,path,(int)a[2]);
         ref.kind=MD_PROC_NONE;
     }
     if (ref.kind == MD_PROC_FOREIGN) {

@@ -178,7 +178,8 @@ void md_boot(uintptr_t *kernel_stack) {
         memset(command.object, 0, sizeof(command.object));
         md_copy(command.object, sizeof(command.object), object);
         command.fd = program_fd; command.interpreter_fd = interpreter_fd;
-    } else r = md_command_prepare(&md_files, &command, argv[root_arg + 1], argv + root_arg + 1, NULL, 0);
+    } else if (namespace) r=md_command_initial(&md_files,&command,argv[root_arg+1],argv+root_arg+1);
+    else r = md_command_prepare(&md_files, &command, argv[root_arg + 1], argv + root_arg + 1, NULL, 0);
     if (r < 0) md_die("prepare guest program", r);
     r = md_copy(md_executable, sizeof(md_executable), command.path);
     if (r < 0) md_die("guest identity", r);

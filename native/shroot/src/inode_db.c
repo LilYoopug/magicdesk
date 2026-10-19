@@ -197,7 +197,7 @@ int md_inode_operation_window_begin(void *store) {
     struct md_inode_store *s=store;
     if (s->locked || s->operation_window) return -EDEADLK;
     int r=mdi_begin(s,0);
-    if (!r) { s->read_depth=0; s->operation_window=1; }
+    if (!r) { s->read_depth=0; s->operation_window=1; md_inode_store_retain(s); }
     return r;
 }
 int md_inode_operation_window_end(void *store) {
@@ -205,7 +205,9 @@ int md_inode_operation_window_end(void *store) {
     if (!s->operation_window || !s->locked) return -EINVAL;
     if (s->read_depth || s->write_transaction || !sqlite3_get_autocommit(s->db)) return -EBUSY;
     s->operation_window=0; s->cache_checked=0;
-    return store_unlock(s,0);
+    int r=store_unlock(s,0);
+    md_inode_store_close(s);
+    return r;
 }
 static int finish(struct md_inode_store *s, int result, int *committed) {
     if (s->read_depth) {
@@ -652,6 +654,7 @@ static int store_open(const char *directory, int create, int exclusive, int prep
     int r = create && mkdirat(root, "objects", 0700) ? -errno : 0;
     struct md_inode_store *s = calloc(1, sizeof(*s));
     if (!s) { close(root); return -ENOMEM; }
+    s->refs=1;
     s->lifetime = retained ? md_inode_lifetime_retain(retained) : mdi_lifetime_new(root, &opened);
     if (!s->lifetime) { close(root); free(s); return -ENOMEM; }
     if (retained) { close(root); root=retained->root; }
@@ -712,8 +715,12 @@ int md_inode_store_initialize(struct md_inode_lifetime *owner, struct md_inode_s
     if (!owner) return -EINVAL;
     return store_open(NULL,1,0,1,owner,out);
 }
+struct md_inode_store *md_inode_store_retain(struct md_inode_store *s) {
+    if (s) ++s->refs;
+    return s;
+}
 void md_inode_store_close(struct md_inode_store *s) {
-    if (!s) return;
+    if (!s || --s->refs) return;
     mdi_overlay_writer_close(s);
     md_inode_watch_close(s);
     mdi_fifo_close(s);

@@ -235,7 +235,9 @@ Fixed images use `MAP_FIXED_NOREPLACE` and returned-address validation; conflict
 fail before replacement. Hardened policies may still deny RW-to-RX transitions.
 
 Program admission checks X_OK and rejects actual host set-ID executables.
-Explicit sealed-image admission controls logical guest set-ID separately.
+Logical guest set-ID uses the selected file's metadata and a sealed execution
+snapshot, with `nosuid`, no_new_privs, tracing and user-namespace checks.
+Initial entry and reexec share preparation; no helper-specific option is needed.
 X_OK is not every kernel/LSM execution check. `AT_EXECVE_CHECK` is rejected, not
 stripped or reported as successful. Helper bundles are immutable; exec carries
 configuration explicitly and retains exact images rather than reopening names.

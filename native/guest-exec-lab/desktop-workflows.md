@@ -43,7 +43,9 @@ admission and rendering checks; see [the publisher](../../docs/graphics.md#flatp
 export, read/write through the exported path inside Flatpak, and revocation. It
 does not alter browser permissions or disable the portal. The SteamOS fixture
 passes with the guest FUSE provider, including live permission revocation. This
-is not a substitute for checking a desktop file chooser's UI.
+uses the packaged `fusermount3` and ordinary stored set-ID semantics; no
+per-helper launch admission is needed. It is not a substitute for checking a
+desktop file chooser's UI.
 
 `test_fuse.py --build BUILD --store STORE --case portal|rofiles|squashfs` stages a
 private native runtime under UID 2000. Each invocation selects one case. The
@@ -113,13 +115,16 @@ session. This tests the existing installation, not a separate SteamOS image.
 See [Snap GPU preparation](../../docs/graphics.md#snap-gpu-drivers) for
 prerequisites and ABI limits. The full GPU GUI cycle passes keyboard/pointer
 input, download, portal file selection, byte comparison and normal browser exit.
-The final Weston 13.0.4 cycle also ended through guest `systemctl poweroff`, with
-supervisor exit zero; systemd had no failed units before shutdown. Kernel-module
-and snapd-generator warnings are not evidence of strict Snap confinement.
-Shutdown still reported `umount` exit 32 for the fixture's host bind and the
-replacement-libc bind, before final namespace teardown completed. Both binds
-unmount successfully in an independent launch; the shutdown-specific cause is
-not yet established. Exit zero does not certify a warning-free shutdown.
+The Weston 13.0.4 cycle also ended through guest `systemctl poweroff`, with
+supervisor exit zero; systemd had no failed units before shutdown. A subsequent
+focused real-init shutdown test covers the formerly failing host bind, 32 tmpfs
+mounts, preserved `/run/udev`, snapd-generator success and private-libc lifetime.
+Deferred native births now retain their store connection across cache eviction;
+the runtime bind stays available until its consumers exit. The test also rejects
+device-submount remount warnings: metadata-only `/dev/full` pins no longer use
+Android's denied socket descriptor receipt. Native device data-access denial
+remains unchanged. Kernel-module warnings are not evidence of strict Snap
+confinement; exit zero alone does not certify a warning-free shutdown.
 
 The earlier Weston 13.0.0 crash is reproducible by opening Firefox's hamburger
 popup, then launching `weston-terminal` while that popup owns focus. GDB stops in

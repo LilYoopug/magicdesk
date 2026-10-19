@@ -10,6 +10,7 @@
 #include "fs_buffer.h"
 #include "command_image.h"
 #include "exec_prepare.h"
+#include "interception.h"
 #include "namespace_internal.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -60,6 +61,23 @@ static long prepare_retained(const struct md_fs *fs, int base, const char *path,
     if (*routed=='/') q.directory[0]=-1;
     error=md_fs_buffer_exec_prepare(&q,recipe);
     if (owned>=0) RAW1(close,owned);
+    return error;
+}
+int md_command_initial(const struct md_fs *fs, struct md_command *c, const char *path, char *const argv[]) {
+    int error=md_command_arguments(c,path,argv);
+    if (error) return error;
+    struct md_command_recipe recipe;
+    error=(int)prepare_retained(fs,AT_FDCWD,path,0,0,&recipe);
+    if (!error) error=md_command_apply_recipe(c,&recipe);
+    if (!error) {
+        long fd=RAW3(prctl,MD_GUEST_MAP_IMAGE,0,MD_IMAGE_TAKE_PROGRAM);
+        if (fd<0) error=(int)fd; else c->fd=(int)fd;
+    }
+    if (!error && recipe.loader) {
+        long fd=RAW3(prctl,MD_GUEST_MAP_IMAGE,0,MD_IMAGE_TAKE_LOADER);
+        if (fd<0) error=(int)fd; else c->interpreter_fd=(int)fd;
+    }
+    if (error) { md_fs_buffer_exec_cancel(); md_command_close(c); }
     return error;
 }
 long md_guest_execat(const struct md_fs *fs, int base, const char *program, char *const argv[], char *const env[], int flags) {

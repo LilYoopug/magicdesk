@@ -45,7 +45,7 @@ print('PASS FUSE fixture accelerated libc selection')
         elif args.case == 'portal':
             command = [suite.runner, '--store', args.store, '--bind-ro', suite.base, '/mnt',
                        *registry,
-                       '--user', args.portal_user, '--admit-elf', '/usr/bin/fusermount3',
+                       '--user', args.portal_user,
                        '--env', 'HOME=' + args.portal_home, '--env', 'PATH=/usr/bin:/bin',
                        *(['--env', 'G_MESSAGES_DEBUG=xdg-desktop-portal'] if args.debug else []),
                        '--', '/bin/sh', '-ec',

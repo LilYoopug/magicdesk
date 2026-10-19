@@ -14,6 +14,7 @@
 #include <string.h>
 #include <sys/inotify.h>
 #include <sys/vfs.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 
 void test_mount_copy(const char *base);
@@ -281,7 +282,52 @@ static void task_mount_views(const char *base) {
     assert(descriptors()==before);
     puts("PASS task-selected mount views, readonly policy, authenticated snapshots, stale roots and retained lifetime");
 }
+static void native_attributes(const char *base) {
+    char host[PATH_MAX],path[PATH_MAX],store[PATH_MAX],data[512],before[512],after[512];
+    snprintf(host,sizeof(host),"%s/xattr-host",base); assert(!mkdir(host,0700));
+    snprintf(path,sizeof(path),"%s/value",host);
+    int fd=open(path,O_CREAT|O_RDWR|O_CLOEXEC,0600); assert(fd>=0);
+    assert(!fsetxattr(fd,"user.fixture","value",5,0));
+    ssize_t label=fgetxattr(fd,"security.selinux",before,sizeof(before));
+    assert(label>=0 || errno==ENODATA || errno==ENOTSUP);
+    struct md_inode_store *s=NULL;
+    snprintf(store,sizeof(store),"%s/xattr-store",base); assert(!md_inode_store_open(store,1,&s));
+    assert(!md_inode_mkdir(s,-1,"/attached",0700));
+    struct md_filesystem fs={.store=s};
+    struct md_fs_attachment attachment={host,"/attached",0};
+    assert(!md_fs_mounts_open(&fs,&attachment,1));
+    struct md_fs_output output={.data=data,.capacity=sizeof(data)};
+    struct md_fs_result out;
+    for (unsigned descriptor=0;descriptor<2;++descriptor) {
+        struct md_fs_request q={.operation=descriptor ? MD_FS_FXATTR : MD_FS_XATTR,
+            .directory={descriptor ? fd : -1,-1},.path={descriptor ? NULL : "/attached/value",NULL},
+            .mode=MD_FS_XATTR_LIST};
+        md_fs_xattr(&fs,&q,&out,NULL);
+        assert(!out.error && out.position==sizeof("user.fixture") && !out.size);
+        q.capacity=(unsigned)out.position;
+        md_fs_xattr(&fs,&q,&out,&output);
+        assert(!out.error && out.size==sizeof("user.fixture") && !strcmp(data,"user.fixture"));
+        --q.capacity; md_fs_xattr(&fs,&q,&out,&output);
+        assert(out.error==-ERANGE && !out.size && !out.position);
+        q.capacity=sizeof(data); q.mode=MD_FS_XATTR_GET; q.path[1]="security.selinux";
+        md_fs_xattr(&fs,&q,&out,&output); assert(out.error==-ENODATA);
+        q.mode=MD_FS_XATTR_SET; q.value="label"; q.value_size=q.capacity=5;
+        md_fs_xattr(&fs,&q,&out,NULL); assert(out.error==-EOPNOTSUPP);
+        q.mode=MD_FS_XATTR_REMOVE; q.value=NULL; q.value_size=q.capacity=0;
+        md_fs_xattr(&fs,&q,&out,NULL); assert(out.error==-ENODATA);
+        q.mode=MD_FS_XATTR_GET; q.path[1]="user.fixture"; q.capacity=sizeof(data);
+        md_fs_xattr(&fs,&q,&out,&output);
+        assert(!out.error && out.size==5 && !memcmp(data,"value",5));
+    }
+    if (label>=0) assert(fgetxattr(fd,"security.selinux",after,sizeof(after))==label
+        && !memcmp(before,after,(size_t)label));
+    close(fd); md_fs_mounts_close(&fs); md_inode_store_close(s);
+    puts("PASS host bind attributes: filtered size, exact buffer, path/FD parity and untouched host labels");
+}
 int main(int argc, char **argv) {
+    if (argc==3 && !strcmp(argv[1],"--native-attributes")) {
+        assert(!mkdir(argv[2],0700)); native_attributes(argv[2]); return 0;
+    }
     if (argc==3 && !strcmp(argv[1],"--libc-registry")) {
         assert(!mkdir(argv[2],0700)); test_libc_registry(argv[2]); return 0;
     }
@@ -518,6 +564,7 @@ int main(int argc, char **argv) {
     nested_mounts(argv[1]);
     test_path_walk(argv[1]);
     task_mount_views(argv[1]);
+    native_attributes(argv[1]);
     test_mount_copy(argv[1]);
     test_network_resolver(argv[1]);
     test_fs_control(argv[1]);

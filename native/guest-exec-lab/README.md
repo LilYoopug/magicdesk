@@ -125,6 +125,18 @@ both inside and outside a PID namespace. The store must contain strace and GDB.
 Signal information remains native while stopped and is translated separately
 for debugger observation and delivery to the target.
 
+`test_setid.py BUILD STORE [--libc-registry PATH]` builds a small ELF and two
+competing shared libraries inside a disposable store with Python and a C
+compiler. It checks stored setuid/setgid metadata through initial entry, path
+exec, descriptor exec and an unlinked executable, without `--admit-elf`.
+Assertions cover real/effective/saved/filesystem IDs, auxv, `AT_SECURE`, actual
+loader rejection of an untrusted `LD_LIBRARY_PATH`, `no_new_privs`, ptrace,
+unmapped user-namespace owners, `nosuid`, ignored script bits and failed exec.
+It passes on Ubuntu with Base and on SteamOS/glibc and Alpine/musl with the
+prepared libc. This is guest credential behavior, not Android privilege or
+complete kernel-equivalent isolation. The browser fixture separately verifies
+stock Chromium's set-ID sandbox and its no-new-privileges rejection.
+
 `test_nproc.py BUILD STORE` verifies per-real-UID process/thread quotas, shared
 thread limits, fork copies, unreaped children, UID-change/exec admission,
 protected memory, seccomp denial and `/proc/*/limits`, both directly and in a

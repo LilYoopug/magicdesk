@@ -47,6 +47,8 @@ struct md_fs_buffer_frame {
         struct { size_t size; char data[8192]; } snapshot;
     };
     unsigned transfer;
+    /* Internal O_PATH reopen flags, validated against supervisor-owned custody. */
+    unsigned source_flags;
     struct { uint64_t request; unsigned mask; int number; } export;
     char source[96];
     struct { uint64_t token; int number; unsigned mapped; } receive;

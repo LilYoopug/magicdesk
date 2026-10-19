@@ -25,25 +25,28 @@ def guest():
         return sum(libc.syscall(25, number, fcntl.F_GETFD, 0) >= 0
                    for number in range(512))
 
-    def confine():
+    def confine(trap_clone=False):
         class Filter(ctypes.Structure):
             _fields_ = [('code', ctypes.c_ushort), ('jt', ctypes.c_ubyte),
                         ('jf', ctypes.c_ubyte), ('value', ctypes.c_uint)]
         class Program(ctypes.Structure):
             _fields_ = [('length', ctypes.c_ushort), ('filter', ctypes.POINTER(Filter))]
-        instructions = (Filter * 9)(
-            Filter(0x20, 0, 0, 0), Filter(0x15, 5, 0, 277),
-            Filter(0x15, 4, 0, 220), Filter(0x15, 3, 0, 435),
-            Filter(0x15, 0, 3, 167), Filter(0x20, 0, 0, 16),
-            Filter(0x15, 0, 1, 22), Filter(0x06, 0, 0, 0x50000 | errno.EPERM),
+        instructions = (Filter * 11)(
+            Filter(0x20, 0, 0, 0), Filter(0x15, 6, 0, 220),
+            Filter(0x15, 5, 0, 435), Filter(0x15, 5, 0, 277),
+            Filter(0x15, 0, 5, 167), Filter(0x20, 0, 0, 16),
+            Filter(0x15, 2, 3, 22), Filter(0x06, 0, 0, 0x7fff0000),
+            Filter(0x06, 0, 0, 0x30000 if trap_clone else 0x50000 | errno.EPERM),
+            Filter(0x06, 0, 0, 0x50000 | errno.EPERM),
             Filter(0x06, 0, 0, 0x7fff0000))
         program = Program(len(instructions), instructions)
         assert libc.prctl(38, 1, 0, 0, 0) == 0
         assert libc.syscall(277, 1, 0, ctypes.byref(program)) == 0
         assert libc.syscall(277, 1, 0, ctypes.byref(program)) == -1
         assert ctypes.get_errno() == errno.EPERM
-        assert libc.syscall(220, 0, 0, 0, 0, 0) == -1
-        assert ctypes.get_errno() == errno.EPERM
+        if not trap_clone:
+            assert libc.syscall(220, 0, 0, 0, 0, 0) == -1
+            assert ctypes.get_errno() == errno.EPERM
 
     def denied(operation, expected):
         try:
@@ -99,6 +102,28 @@ def guest():
                 os.close(written)
             assert fd_count() == before, 'dead mapping caller left an FD in the shared table'
 
+    def shared_table_mappers(fd):
+        before = fd_count()
+        children = []
+        for _ in range(4):
+            pid = libc.syscall(220, 0x400 | signal.SIGCHLD, 0, 0, 0, 0)
+            assert pid >= 0, ctypes.get_errno()
+            if not pid:
+                try:
+                    assert libc.prctl(4, 0, 0, 0, 0) == 0
+                    confine(trap_clone=True)
+                    for _ in range(128):
+                        check_mapping(fd, private_copy=False)
+                    os._exit(0)
+                except BaseException:
+                    import traceback
+                    traceback.print_exc()
+                    os._exit(1)
+            children.append(pid)
+        for pid in children:
+            assert os.waitpid(pid, 0)[1] == 0
+        assert fd_count() == before, 'concurrent mappings leaked a backing FD'
+
     for protected in (False, True):
         assert libc.prctl(4, int(not protected), 0, 0, 0) == 0
         for flags in (3, 11):  # MFD_CLOEXEC | ALLOW_SEALING, optionally NOEXEC_SEAL.
@@ -128,6 +153,25 @@ def guest():
             denied(lambda: os.pwrite(ro, b'x', 0), errno.EBADF)
             denied(lambda: fcntl.fcntl(ro, fcntl.F_ADD_SEALS, fcntl.F_SEAL_SHRINK), errno.EPERM)
             check_mapping(ro, fd)
+            # Mutable backing must remain live even if a sandbox forbids any
+            # helper birth. Neither seals nor a copied snapshot can satisfy it.
+            pid = os.fork()
+            if not pid:
+                try:
+                    confine(trap_clone=True)
+                    before = fd_count()
+                    for _ in range(12):
+                        check_mapping(ro, fd)
+                    assert fd_count() == before, 'mutable mapping leaked a backing FD'
+                    os._exit(0)
+                except BaseException:
+                    import traceback
+                    traceback.print_exc()
+                    os._exit(1)
+            assert os.waitpid(pid, 0)[1] == 0
+            if not protected and flags == 3:
+                shared_table_cancellation(ro)
+                shared_table_mappers(ro)
             fcntl.fcntl(fd, fcntl.F_ADD_SEALS, fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | 16)
             assert fcntl.fcntl(ro, fcntl.F_GET_SEALS) & 6 == 6
             limits = resource.getrlimit(resource.RLIMIT_NOFILE)

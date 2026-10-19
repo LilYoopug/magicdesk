@@ -40,6 +40,16 @@ cancellation owners. The task remains stopped until the supervisor writes the
 completed result. Missing capture authority delegates before execution; accepted
 mutations are never replayed after cancellation or signals.
 
+Metadata-only descriptor delivery uses the already admitted object's native
+flags, not a second interpretation of the original pathname flags. Native
+providers can normalize `O_NOFOLLOW` when reopening a non-link pin. Such results
+reopen the exact retained `/proc/<supervisor>/fd/<n>` object instead of requiring
+`SCM_RIGHTS`: Android may allow an `O_PATH` metadata open while denying receipt
+of that device through a socket. The buffer publishes internal reopen flags;
+the supervisor validates them against its own result custody. Symlink pins keep
+their no-follow delivery, and neither device data permissions nor mount policy
+are relaxed. This adds no work to ordinary data IO or direct regular-file opens.
+
 `file_metadata.h` owns conversion between native stat, fixed-width metadata and
 guest stat/statx, including device identity, allocated blocks and timestamps.
 Only known mount IDs are advertised. Access checks use a borrowed
@@ -138,7 +148,12 @@ descriptor and its logical identity. A sealed catalogue image retains its origin
 namespace object ID; admission and executable access checks remain separate.
 Xattrs use bounded captured values through the shared filesystem operation
 contract. Inode-backed attributes retain guest metadata and permissions; native
-attachments retain their real xattrs and kernel access checks.
+attachments retain their real xattrs and kernel access checks. Both paths hide
+Android's `security.selinux` label and Shroot's private backing attributes.
+List size queries and data reads use the same filtered names; explicit reads
+return ENODATA, and writes to host-private attributes return EOPNOTSUPP without
+changing the backing label. Ordinary user attributes remain accessible. This
+keeps guest copy/patch tools from trying to reproduce Android labels in Linux.
 
 Directory reads return bounded Linux getdents64 records. Explicit capacity and
 offset fields are validated, as are returned record boundaries, cookies and names.

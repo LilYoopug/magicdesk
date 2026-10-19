@@ -12,6 +12,8 @@ struct md_command {
 };
 int md_command_arguments(struct md_command *, const char *, char *const []);
 int md_command_apply_recipe(struct md_command *, const struct md_command_recipe *);
+/* Initial managed entry uses the same worker preparation as guest exec. */
+int md_command_initial(const struct md_fs *, struct md_command *, const char *, char *const []);
 /* Borrows input (NULL selects the path); success owns both prepared images. */
 int md_command_prepare(const struct md_fs *, struct md_command *, const char *, char *const [],
     const struct md_program *input, int inaccessible);

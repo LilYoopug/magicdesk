@@ -4,6 +4,7 @@ import argparse
 from contextlib import ExitStack
 import ctypes
 import errno
+import fcntl
 import os
 from pathlib import Path
 import stat
@@ -67,6 +68,27 @@ def guest():
             bound = target.stat()
             assert stat.S_ISCHR(bound.st_mode) and bound.st_rdev == native.st_rdev
             print('PASS bind', name, flush=True)
+            for flags in (os.O_PATH, os.O_PATH | os.O_NOFOLLOW):
+                pin = os.open(target, flags | os.O_CLOEXEC)
+                try:
+                    metadata = os.fstat(pin)
+                    assert stat.S_ISCHR(metadata.st_mode) and metadata.st_rdev == native.st_rdev
+                    assert fcntl.fcntl(pin, fcntl.F_GETFL) & os.O_PATH
+                    assert fcntl.fcntl(pin, fcntl.F_GETFD) & fcntl.FD_CLOEXEC
+                    # systemd pins each device before remounting its sandbox.
+                    call(40, 0, '/proc/self/fd/' + str(pin), 0, 4096 | 32 | 1, 0)
+                    call(40, 0, '/proc/self/fd/' + str(pin), 0, 4096 | 32, 0)
+                finally:
+                    os.close(pin)
+            link = root / (name + '-link')
+            link.symlink_to(target)
+            with ExitStack() as pins:
+                fd = os.open(link, os.O_PATH | os.O_NOFOLLOW)
+                pins.callback(os.close, fd)
+                assert stat.S_ISLNK(os.fstat(fd).st_mode)
+                assert os.readlink('', dir_fd=fd) == str(target)
+            link.unlink()
+            print('PASS metadata-only device pins, nofollow and proc-FD remount', name, flush=True)
             if read_denied:
                 denied(lambda: os.open(target, os.O_RDWR | os.O_NOCTTY), errno.EACCES)
                 print('PASS bound device retains native data-access denial', flush=True)
@@ -126,11 +148,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('build', type=Path)
     parser.add_argument('store')
+    parser.add_argument('--libc-registry')
     args = parser.parse_args()
     from test_oci_services import Suite
     suite = Suite(args.build, args.build)
     target = '/tmp/md-devices-' + suite.report['id']
     prefix = [suite.runner, '--store', args.store, '--user', '0:0']
+    if args.libc_registry:
+        prefix += ['--libc-registry', args.libc_registry]
     try:
         suite.transport.upload(suite.client, Path(__file__), suite.base + '/test.py')
         suite.command(prefix + ['--', '/bin/mkdir', target])

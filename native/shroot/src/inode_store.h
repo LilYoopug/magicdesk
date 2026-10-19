@@ -9,7 +9,7 @@
 #include "file_open.h"
 
 /* Experimental inode namespace, not a syscall adapter. Each connection
- * has one owner; never use it from SIGSYS, a signal handler, or after fork.
+ * belongs to one worker; never use it from SIGSYS, a signal handler, or after fork.
  * Errors are negative errno. Store operations serialize before their transaction.
  * EAGAIN still reports an external SQLite writer bypassing that gate; no replay.
  * EIO during commit has an unknown outcome; reopen and inspect before replay.
@@ -21,7 +21,8 @@ int md_inode_read_scope_begin(void *store);
 int md_inode_read_scope_end(void *store);
 /* Bounded worker-owned store gate, not a transaction or a nested read scope.
  * Every operation completes its own writes/events before returning. Release
- * before parking, delegation or entering another store; never nest windows. */
+ * before parking, delegation or entering another store; never nest windows.
+ * A successful begin retains the connection until successful end. */
 int md_inode_operation_window_begin(void *store);
 int md_inode_operation_window_end(void *store);
 /* Stable format family and independently evolving metadata schema revision. */
@@ -48,7 +49,7 @@ int md_inode_store_open(const char *directory, int create, struct md_inode_store
  * before namespace queries; callers must not treat that as an empty store. */
 int md_inode_store_open_inspect(const char *directory, struct md_inode_store **out);
 /* Offline maintenance fails with EBUSY while a connection or path origin retains
- * the store. Store close releases SQLite and transaction resources immediately;
+ * the store. Final connection close releases SQLite and transaction resources;
  * retained origins keep the existing backing/source maintenance leases. */
 int md_inode_store_open_exclusive(const char *directory, struct md_inode_store **out);
 struct md_inode_lifetime;
@@ -63,6 +64,9 @@ int md_inode_store_initialize(struct md_inode_lifetime *, struct md_inode_store 
  * backing. Final retained custody retires it, including imported owners. */
 struct md_user_namespace;
 int md_inode_store_transient(int parent, struct md_user_namespace *, struct md_inode_store **out);
+/* Worker-local connection custody, distinct from shareable backing lifetime.
+ * Retaining does not permit concurrent access or retain request policy. */
+struct md_inode_store *md_inode_store_retain(struct md_inode_store *);
 void md_inode_store_close(struct md_inode_store *);
 enum md_inode_sync_mode { MD_INODE_SYNC_FILE, MD_INODE_SYNC_DATA, MD_INODE_SYNC_FILESYSTEM };
 /* Native data first, then all committed namespace metadata under the same gate.
@@ -96,7 +100,7 @@ struct md_inode_birth;
  * resolved scope as an existing open. NULL retains effect-free decline. */
 int md_inode_plan_open(struct md_inode_store *, int, const char *, int, mode_t, uint64_t,
         struct md_open_completion *, int native_plan,struct md_inode_birth **);
-/* Unpublished regular-file birth. The worker/store outlives this owner. The
+/* Unpublished regular-file birth. Retains its worker-local connection. The
  * returned O_PATH pin belongs to the caller; no guest name exists until commit.
  * Commit consumes the owner on success. Failure retains it for discard after
  * the caller closes any native FD it acquired. No SQLite snapshot spans the
@@ -104,7 +108,7 @@ int md_inode_plan_open(struct md_inode_store *, int, const char *, int, mode_t, 
 int md_inode_birth_commit(struct md_inode_birth **);
 struct md_inode_store *md_inode_birth_store(const struct md_inode_birth *);
 int md_inode_birth_discard(struct md_inode_birth **);
-/* Terminal worker shutdown only: release memory after the store has closed.
+/* Terminal worker shutdown only: release custody without publishing or unlinking.
  * The existing maintenance owner reclaims the unpublished root object. */
 void md_inode_birth_forget(struct md_inode_birth **);
 /* Read-only image open and identity from one namespace snapshot. */

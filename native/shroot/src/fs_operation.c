@@ -44,10 +44,14 @@ int md_fs_request_validate(const struct md_fs_request *q) {
             int fdinfo=q->operation==MD_FS_FDINFO && !i
                 && proc.kind==MD_PROC_FOREIGN && proc.foreign_kind==MD_PROC_FDINFO
                 && !*proc.tail && q->capture[i].flags==O_CLOEXEC;
+            int mounts=q->operation==MD_FS_MOUNT_TABLE && !i
+                && proc.kind==MD_PROC_FOREIGN
+                && proc.foreign_kind==(q->mode ? MD_PROC_MOUNTINFO : MD_PROC_MOUNTS)
+                && !*proc.tail && q->capture[i].flags==O_CLOEXEC;
             if (q->directory[i]!=-1 || q->object[i] || q->origin[i]
                     || (md_fs_operation_data_inputs(q->operation)&(1U<<i))
                     || !*q->capture[i].path || strnlen(q->capture[i].path,PATH_MAX)==PATH_MAX
-                    || (!(q->capture[i].flags&O_PATH) && !fdinfo)
+                    || (!(q->capture[i].flags&O_PATH) && !fdinfo && !mounts)
                     || q->capture[i].flags&~(O_PATH|O_CLOEXEC|O_DIRECTORY|O_NOFOLLOW)) return -EINVAL;
             descriptors|=1U<<i;
         } else if (q->capture[i].flags) return -EINVAL;
@@ -181,7 +185,7 @@ int md_fs_request_validate(const struct md_fs_request *q) {
             || ((q->mode&S_IFMT)!=S_IFREG && (q->mode&S_IFMT)!=S_IFIFO
                 && (q->mode&S_IFMT)!=S_IFCHR && (q->mode&S_IFMT)!=S_IFBLK) ? -EINVAL : 0;
     if (q->operation==MD_FS_MOUNT_TABLE)
-        return descriptors || *a || *b || (q->flags&~(O_PATH|O_CLOEXEC)) || q->mode>1
+        return (descriptors&2) || q->directory[0]==AT_FDCWD || *a || *b || (q->flags&~(O_PATH|O_CLOEXEC)) || q->mode>1
             || q->capacity || q->offset || q->resolve ? -EINVAL : 0;
     if (q->operation==MD_FS_NATIVE_MOUNT)
         return descriptors || *a || *b || q->flags || q->mode || q->capacity || q->offset<=0 || q->resolve ? -EINVAL : 0;

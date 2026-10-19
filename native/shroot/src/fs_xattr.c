@@ -3,6 +3,7 @@
 #include "fs_continuation.h"
 #include "posix_acl.h"
 #include "inode_internal.h"
+#include "inode_xattr.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -61,12 +62,18 @@ static void selected(struct md_filesystem *fs, const struct md_fs_request *q,
     if (list) {
         if (q->capacity && (!data || capacity<q->capacity)) out->error=-ERANGE;
         else {
-            result=listxattr(path,q->capacity ? data : NULL,q->capacity);
-            if (result<0) out->error=-errno;
-            else if (result>MD_FS_VALUE_MAX) out->error=-E2BIG;
-            else { out->position=result; out->size=q->capacity ? result : 0; }
+            char *names=NULL;
+            result=mdi_xattr_native_names(path,1,&names);
+            if (result<0) out->error=(int)result;
+            else if (q->capacity && result>q->capacity) out->error=-ERANGE;
+            else {
+                if (q->capacity && result) memcpy(data,names,(size_t)result);
+                out->position=result; out->size=q->capacity ? result : 0;
+            }
+            free(names);
         }
-    } else if (set) out->error=setxattr(path,name,q->value,q->value_size,q->flags&3U) ? -errno : 0;
+    } else if (mdi_xattr_host_private(name)) out->error=set ? -EOPNOTSUPP : -ENODATA;
+    else if (set) out->error=setxattr(path,name,q->value,q->value_size,q->flags&3U) ? -errno : 0;
     else if (remove) out->error=removexattr(path,name) ? -errno : 0;
     else if (q->capacity && (!data || capacity<q->capacity)) out->error=-ERANGE;
     else {

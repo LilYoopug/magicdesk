@@ -1,0 +1,77 @@
+#define _GNU_SOURCE
+#include <assert.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
+
+static double now(void) {
+    struct timespec t; assert(!clock_gettime(CLOCK_MONOTONIC,&t));
+    return t.tv_sec+t.tv_nsec*1e-9;
+}
+static double cpu(const struct rusage *r) {
+    return r->ru_utime.tv_sec+r->ru_stime.tv_sec
+        +(r->ru_utime.tv_usec+r->ru_stime.tv_usec)*1e-6;
+}
+int main(int argc,char **argv) {
+    assert(argc==3);
+    unsigned count=(unsigned)strtoul(argv[2],NULL,10);
+    assert(count && count<=1000000);
+    int idle=!strcmp(argv[1],"idle"),epoll=!strcmp(argv[1],"epoll");
+    int cycle=!strcmp(argv[1],"file-cycle"),opening=!strcmp(argv[1],"file-open");
+    int files=cycle || opening || !strcmp(argv[1],"file-stat");
+    assert(files || idle || epoll || !strcmp(argv[1],"poll"));
+    char directory[]="/tmp/md-readiness-XXXXXX";
+    int dir=-1;
+    if (files) {
+        assert(mkdtemp(directory));
+        dir=open(directory,O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(dir>=0);
+        if (!cycle) {
+            int file=openat(dir,"file",O_CREAT|O_EXCL|O_RDWR|O_CLOEXEC,0600);
+            assert(file>=0 && !close(file));
+        }
+    }
+    int fd=eventfd(idle ? 0 : 1,EFD_CLOEXEC|EFD_NONBLOCK); assert(fd>=0);
+    int queue=epoll_create1(EPOLL_CLOEXEC); assert(queue>=0);
+    struct epoll_event event={.events=EPOLLIN,.data.u64=42},received;
+    assert(!epoll_ctl(queue,EPOLL_CTL_ADD,fd,&event));
+    struct pollfd p={.fd=fd,.events=POLLIN};
+    struct rusage before,after; assert(!getrusage(RUSAGE_SELF,&before));
+    double start=now();
+    for (unsigned i=0;i<count;++i) {
+        if (files) {
+            if (cycle || opening) {
+                int file=openat(dir,"file",O_RDONLY|O_CLOEXEC|(cycle ? O_CREAT|O_EXCL : 0),0600);
+                assert(file>=0 && !close(file));
+                if (cycle) assert(!renameat(dir,"file",dir,"renamed") && !unlinkat(dir,"renamed",0));
+            } else {
+                struct stat st; assert(!fstatat(dir,"file",&st,0) && S_ISREG(st.st_mode));
+            }
+        } else if (epoll) {
+            assert(epoll_wait(queue,&received,1,0)==1);
+            assert(received.events==EPOLLIN && received.data.u64==42);
+        } else {
+            struct timespec timeout={.tv_sec=idle ? 2 : 0};
+            assert(ppoll(&p,1,&timeout,NULL)==(idle ? 0 : 1));
+            assert(p.revents==(idle ? 0 : POLLIN));
+        }
+    }
+    double elapsed=now()-start;
+    assert(!getrusage(RUSAGE_SELF,&after));
+    printf("READINESS_BENCH {\"workload\":\"%s\",\"iterations\":%u,\"seconds\":%.9f,\"callerCpuSeconds\":%.9f}\n",
+        argv[1],count,elapsed,cpu(&after)-cpu(&before));
+    assert(!close(queue) && !close(fd));
+    if (files) {
+        if (!cycle) assert(!unlinkat(dir,"file",0));
+        assert(!close(dir) && !rmdir(directory));
+    }
+    return 0;
+}

@@ -303,6 +303,10 @@ stat/statx/readlink cover sockets, pipes, deleted files, namespace handles,
 close/reuse and target exit; cwd and executable metadata select guest objects.
 It runs with
 implicit proc and with stock `unshare --pid --fork --mount-proc`.
+Foreign mount-table checks use a different root and mount namespace, verify
+openat2 constraints, O_PATH/error behavior, POLLPRI changes and retained reads
+after target exit. `--libc-registry PATH` repeats the workflow with compatible
+prepared libc selection.
 Its selector fixture checks proc/watch/native reuse in both filter orders,
 fork/exec retention, and typed netlink duplication through dup, dup3 and both
 fcntl commands. Independent child cases check flags, source closure, inherited
@@ -313,6 +317,10 @@ aliases, native-width command decoding and actual netlink response readiness.
 nondumpable callers exercise recursive pthread mutexes, shared-memory clone
 parent/child TID fields and kernel child clearing. Optional installed strace/GDB
 must observe normal completion inside a PID namespace.
+The fixture also checks explicit PI-futex rejection in a logical PID namespace,
+libc's PI-mutex admission and ordinary-mutex fallback, with private/shared and
+clock flags and nondumpable callers. The native PID view retains working PI
+mutexes. `--libc-registry PATH` selects the prepared libc for these workflows.
 
 `test_desktop_services_runtime.py BUILD STORE` checks a stock system D-Bus daemon,
 authentication from the `developer` account and PipeWire's real `pw-cli info 0`

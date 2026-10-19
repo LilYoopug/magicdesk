@@ -1328,6 +1328,38 @@ static void native_births(void) {
     md_inode_store_close(s);
     puts("PASS native birth preparation: unpublished pin, explicit commit/discard, live mask/identity, catalogue conflict and parent rename/removal");
 }
+static void native_birth_custody(void) {
+    struct md_identity ids=md_identity_new(0,0);
+    for (unsigned operation=0;operation<3;++operation) for (unsigned window=0;window<2;++window) {
+        char name[64]; snprintf(name,sizeof(name),"birth-custody-%u-%u",operation,window);
+        struct md_inode_store *s=store(name,1);
+        s->identity=&ids;
+        int objects=s->objects;
+        struct md_inode_birth *birth=NULL;
+        int pin=md_inode_plan_open(s,-1,"/born",O_CREAT|O_RDWR,0600,0,
+            &(struct md_open_completion){0},1,&birth);
+        CHECK(pin>=0 && birth);
+        if (window) CHECK(!md_inode_operation_window_begin(s));
+        md_inode_store_close(s);
+        CHECK(fcntl(objects,F_GETFD)>=0);
+        if (!operation) CHECK(!md_inode_birth_commit(&birth));
+        else if (operation==1) CHECK(!md_inode_birth_discard(&birth));
+        else md_inode_birth_forget(&birth);
+        CHECK(!birth);
+        if (window) {
+            CHECK(fcntl(objects,F_GETFD)>=0);
+            CHECK(!md_inode_operation_window_end(s));
+        }
+        CHECK(fcntl(objects,F_GETFD)==-1 && errno==EBADF);
+        close(pin);
+        s=store(name,0);
+        struct stat st;
+        CHECK(md_inode_stat(s,-1,"/born",0,&st)==(operation ? -ENOENT : 0));
+        md_inode_store_close(s);
+    }
+    md_identity_release(&ids);
+    puts("PASS birth custody: commit/discard/forget outlive connection owner, bounded window retains final connection and releases FD");
+}
 static void native_birth_recovery(void) {
     for (unsigned phase=0;phase<3;++phase) {
         char name[64], directory[PATH_MAX];
@@ -1507,7 +1539,7 @@ int main(int argc, char **argv) {
     if (argc == 3) { CHECK(!strcmp(argv[2], "exec-child")); exec_child("exec"); return 0; }
     CHECK(mkdir(root, 0700) == 0);
     descriptors(); namespace(); contention(); multiple_stores(); across_exec(argv[0]);
-    native_plans(); native_births(); native_birth_recovery(); native_birth_acl();
+    native_plans(); native_births(); native_birth_custody(); native_birth_recovery(); native_birth_acl();
     hierarchy(); symlinks(); permissions(); kernel_reference(); scoped_paths(); read_admission_failure(); operation_windows();
     permission_snapshot(); reused_queries(); metadata_queries(); cached_path_names();
     backing_cache(); recent_cache_keys(); mutation_cache(); directory_publication(); membership_queries(); counter_audit(); retained_journal();

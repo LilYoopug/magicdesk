@@ -17,6 +17,7 @@ import time
 import traceback
 
 work = Path(tempfile.mkdtemp(prefix='md-fuse-squashfs-'))
+work.chmod(0o755)
 source, mount = work / 'source', work / 'mount'
 blocked = work / 'noexec'
 source.mkdir()
@@ -28,6 +29,8 @@ content = bytes(range(256)) * 1024
 (source / 'directory').mkdir()
 (source / 'directory' / 'small').write_text('nested\n')
 shutil.copy2('/usr/bin/true', source / 'program')
+shutil.copy2('/usr/bin/id', source / 'identity')
+(source / 'identity').chmod(0o4755)
 shutil.copy2('/usr/lib/libm.so.6', source / 'library.so')
 (source / 'script').write_text('#!/bin/sh\nprintf "fuse-script-ok\\n"\n')
 (source / 'script').chmod(0o755)
@@ -36,7 +39,7 @@ shutil.copy2('/usr/lib/libm.so.6', source / 'library.so')
 subprocess.run(['mksquashfs', str(source), str(work / 'image'), '-noappend',
                 '-processors', '1', '-no-progress'], check=True)
 log = open(work / 'daemon.log', 'w+')
-daemon = subprocess.Popen(['squashfuse_ll', '-f', '-d', '-o', 'ro', str(work / 'image'), str(mount)],
+daemon = subprocess.Popen(['squashfuse_ll', '-f', '-d', '-o', 'ro,allow_other', str(work / 'image'), str(mount)],
                           stdout=log, stderr=log)
 try:
     deadline = time.monotonic() + 15
@@ -46,13 +49,21 @@ try:
         # Bounded mount-state observation, never a readiness settling delay.
         time.sleep(0.02)
     assert mount.stat().st_dev != source.stat().st_dev
-    assert sorted(p.name for p in mount.iterdir()) == ['directory', 'file', 'library.so', 'link', 'program', 'script', 'sourced']
+    assert sorted(p.name for p in mount.iterdir()) == ['directory', 'file', 'identity', 'library.so', 'link', 'program', 'script', 'sourced']
     assert (mount / 'directory' / 'small').read_text() == 'nested\n'
     assert os.readlink(mount / 'link') == 'file'
     print('FUSE exec source', (mount / 'program').stat(), flush=True)
     print('FUSE exec mount', next(line for line in Path('/proc/self/mountinfo').read_text().splitlines()
           if line.split()[4] == str(mount)), flush=True)
     subprocess.run([str(mount / 'program')], check=True)
+    # Admission reads provider metadata, not the sealed executable snapshot's
+    # carrier. Exercise it with and without a logical set-ID transition.
+    subprocess.run(['mount', '-i', '-o', 'remount,bind,ro,suid', str(mount)], check=True)
+    subprocess.run([str(mount / 'program')], check=True)
+    assert subprocess.check_output([str(mount / 'identity'), '-u'], user=1000, group=1000) == b'0\n'
+    subprocess.run(['mount', '-i', '-o', 'remount,bind,ro,nosuid', str(mount)], check=True)
+    assert subprocess.check_output([str(mount / 'identity'), '-u'], user=1000, group=1000) == b'1000\n'
+    print('PASS FUSE executable source identity, set-ID and nosuid', flush=True)
     assert subprocess.check_output([str(mount / 'script')]) == b'fuse-script-ok\n'
     assert subprocess.check_output(['/bin/bash', '-c', '. "$1"', 'fuse-source',
                                     str(mount / 'sourced')]) == b'fuse-source-ok\n'
@@ -184,12 +195,16 @@ try:
         with mmap.mmap(stream.fileno(), mmap.PAGESIZE, flags=mmap.MAP_PRIVATE,
                        prot=mmap.PROT_READ, offset=mmap.PAGESIZE) as mapped:
             assert mapped[:] == content[mmap.PAGESIZE:2*mmap.PAGESIZE]
+        with mmap.mmap(stream.fileno(), mmap.PAGESIZE, flags=mmap.MAP_SHARED,
+                       prot=mmap.PROT_READ) as mapped:
+            assert mapped[:] == content[:mmap.PAGESIZE]
         try:
-            mmap.mmap(stream.fileno(), mmap.PAGESIZE, flags=mmap.MAP_SHARED, prot=mmap.PROT_READ)
+            mmap.mmap(stream.fileno(), mmap.PAGESIZE, flags=mmap.MAP_SHARED,
+                      prot=mmap.PROT_READ | mmap.PROT_WRITE)
         except OSError as error:
-            assert error.errno == errno.EOPNOTSUPP, error
+            assert error.errno == errno.EACCES, error
         else:
-            raise AssertionError('unimplemented shared mapping was accepted')
+            raise AssertionError('writable shared mapping was accepted')
     subprocess.run(['mount', '--bind', str(mount), str(blocked)], check=True)
     subprocess.run(['mount', '-o', 'remount,bind,ro,noexec', str(blocked)], check=True)
     with open(blocked / 'file', 'rb') as stream:

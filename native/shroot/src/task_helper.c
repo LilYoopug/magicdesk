@@ -508,7 +508,10 @@ int md_task_helper_begin(struct md_task_helpers *manager, pid_t owner, pid_t gro
     if (request->kind==MD_TASK_HELPER_CAPTURE) {
         struct md_proc_path proc=md_proc_path_for(path,owner,group);
         int fdinfo=proc.kind==MD_PROC_FDINFO && !*proc.tail && request->flags==O_CLOEXEC;
-        if ((!(request->flags&O_PATH) && !fdinfo)
+        enum md_proc_kind kind=proc.kind==MD_PROC_FOREIGN ? proc.foreign_kind : proc.kind;
+        int mounts=(kind==MD_PROC_MOUNTS || kind==MD_PROC_MOUNTINFO)
+            && !*proc.tail && request->flags==O_CLOEXEC;
+        if ((!(request->flags&O_PATH) && !fdinfo && !mounts)
                 || request->flags&~(O_PATH|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW)) return -EINVAL;
     }
     for (struct helper *m=manager->first;m;m=m->next) if (m->owner==owner) return -EBUSY;
@@ -674,6 +677,17 @@ int md_task_helper_event(struct md_task_helpers *manager, pid_t pid, int status)
     unsigned event=(unsigned)status>>16;
     int sig=WSTOPSIG(status), error=0;
     if (!child && (event==PTRACE_EVENT_EXIT || event==PTRACE_EVENT_EXEC)) return 0;
+    if (!child && !event && sig==SIGSYS && !m->child && m->parent_operation==CLONE) {
+        siginfo_t info;
+        error=(int)trace(m,PTRACE_GETSIGINFO,pid,NULL,&info);
+        if (error) return error;
+        if (info.si_code==SYS_SECCOMP && info.si_syscall==SYS_clone
+                && (uintptr_t)info.si_call_addr==m->abi.task_return) {
+            /* This denied syscall belongs to our private helper, not to the
+             * application's continuation or SIGSYS handler. No child exists. */
+            m->result=-EOPNOTSUPP; complete(m); return 1;
+        }
+    }
     if (!child && event==PTRACE_EVENT_STOP && sig==SIGTRAP) {
         /* An interrupt can lose to an ordinary stop and arrive after the
          * caller lent us its registers. Continue the current gate, not the

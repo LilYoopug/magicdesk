@@ -44,7 +44,6 @@ def main():
     try:
         for index in range(4):
             rejected = index == 3 and args.setuid_route
-            admitted = index != 3
             token = uuid.uuid4().hex
             expected = "MD-JS-" + str(sum(range(50000 + index)))
             page = ('<body style="background:white;color:black;font:28px sans-serif">'
@@ -61,13 +60,13 @@ def main():
             if index == 2:
                 program.append("--screenshot=" + artifact)
             program.append("data:text/html," + quote(page))
+            if rejected:
+                program = ["/usr/bin/env", "setpriv", "--no-new-privs", "--", *program]
             command = [sys.executable, str(Path(__file__).with_name("run.py")),
                        "--build", str(args.build), "--store", args.store,
                        "--user", "2000:2000", "--deadline-seconds", "60", "--quiet",
                        "--expect-output", "The setuid sandbox is not running as root."
                        if rejected else ">" + expected + "</h1>"]
-            if admitted:
-                command += ["--admit-elf", args.helper]
             if index == 2:
                 command += ["--expect-artifact", artifact]
             if args.installed:
@@ -80,7 +79,7 @@ def main():
             paths = re.findall(r"^Report: (.+)$", result.stdout, re.MULTILINE)
             assert len(paths) == 1, "missing exact run report"
             run = json.loads(Path(paths[0]).read_text())
-            entry = {"case": "helper-rejected" if rejected else f"javascript-{index}",
+            entry = {"case": "helper-no-new-privs" if rejected else f"javascript-{index}",
                      "report": paths[0], "verified": False, "noSandbox": False,
                      "selectedSandboxRoute": "setuid" if args.setuid_route else "automatic"}
             report["runs"].append(entry)
@@ -98,10 +97,10 @@ def main():
                 assert "PROBE installed-filter" not in output
                 assert not re.search(r"^<html>", output, re.MULTILINE)
                 entry["verified"] = True
-                print("PASS stock Chromium rejects unadmitted helper with the same guest identity", flush=True)
+                print("PASS stock Chromium cannot elevate its helper under no_new_privs", flush=True)
                 continue
             assert result.returncode == run["exitCode"] == 0 and run["workloadCompleted"]
-            assert run["admittedElf"] == (args.helper if admitted else None)
+            assert run["admittedElf"] is None
             assert "The setuid sandbox is not running as root" not in output
             html = re.search(r"^<html>.*</html>$", output, re.MULTILINE)
             assert html, "no rendered DOM"
@@ -110,7 +109,8 @@ def main():
             assert rendered.values == [expected], rendered.values
             assert re.search(r"PROBE proc-root domain=1 changes=[1-9]\d*", output)
             if args.setuid_route:
-                assert re.search(r"PROBE identity admittedImages=[1-9]\d* changes=[1-9]\d* hostUid=2000", output)
+                assert re.search(r"PROBE stored-setid-image pid=\d+ euid=0 egid=\d+ secure=1", output)
+                assert re.search(r"PROBE identity admittedImages=0 changes=[1-9]\d* hostUid=2000", output)
             else:
                 assert re.search(r"PROBE pid-namespace init=\d+ visible=1 depth=1", output)
                 assert re.search(r"PROBE identity admittedImages=0 changes=\d+ hostUid=2000", output)

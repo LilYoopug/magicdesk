@@ -40,7 +40,7 @@ __asm__(".text\n.global helper_call\nhelper_call:\nsvc #0\n"
     ".global caller_stop\ncaller_stop:\n.global caller_ready\ncaller_ready:\nbrk #0\nret\n"
     ".global helper_store\nhelper_store:\nstr w3,[x0]\n.global helper_stored\nhelper_stored:\nbrk #0\n");
 enum scenario { NORMAL, FULL, DENIED, KILLED_OPEN, CANCEL_CHANNEL, CANCEL_EXPORT,
-    CANCEL_SECOND, NO_SLOT, INVALID_INPUT, REPLACE_CAPTURED, CLONE_DENIED,
+    CANCEL_SECOND, NO_SLOT, INVALID_INPUT, REPLACE_CAPTURED, CLONE_TRAPPED, CLONE_DENIED,
     ONE_SLOT, CANCEL_RIGHT, FILTER_EPIPE, PEER_CLOSED, SIGNAL_PIPE, CANCEL_IMPORT, PREFIX_SLOTS,
     EXACT_SLOTS, IMPORT_DENIED, CLOSE_DENIED, CONTROL_FAULT, ANCHOR_REJECT, ANCHOR_CANCEL, ANCHOR_DELIVER,
     CANCEL_CAPTURE, REPLACE_PATH, INTERRUPT_OWNER, QUIESCE_NEWBORN };
@@ -178,14 +178,14 @@ static void actor(int socket, int writer, int file, int path, int replacement, i
         limit.rlim_cur=scenario==EXACT_SLOTS ? sending+1 : scenario==PREFIX_SLOTS ? sending : scenario==ONE_SLOT ? 1 : 0;
         assert(!setrlimit(RLIMIT_NOFILE,&limit));
     }
-    if (scenario==DENIED || scenario==KILLED_OPEN || scenario==CLONE_DENIED || scenario==FILTER_EPIPE
+    if (scenario==DENIED || scenario==KILLED_OPEN || scenario==CLONE_DENIED || scenario==CLONE_TRAPPED || scenario==FILTER_EPIPE
             || scenario==IMPORT_DENIED || scenario==CLOSE_DENIED) {
         struct sock_filter denied[]={
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
-            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,scenario==CLONE_DENIED ? SYS_clone
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,scenario==CLONE_DENIED || scenario==CLONE_TRAPPED ? SYS_clone
                 : scenario==IMPORT_DENIED ? SYS_recvmsg : scenario==CLOSE_DENIED ? SYS_close
                 : file<0 && !sending ? SYS_openat : SYS_sendmsg,0,1),
-            BPF_STMT(BPF_RET|BPF_K,scenario==KILLED_OPEN ? SECCOMP_RET_KILL_THREAD
+            BPF_STMT(BPF_RET|BPF_K,scenario==CLONE_TRAPPED ? SECCOMP_RET_TRAP : scenario==KILLED_OPEN ? SECCOMP_RET_KILL_THREAD
                 : SECCOMP_RET_ERRNO|(scenario==CLONE_DENIED ? EPERM : scenario==FILTER_EPIPE ? EPIPE : EACCES)),
             BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
         };
@@ -506,9 +506,9 @@ static void exercise_request(int protected, enum scenario scenario, unsigned exp
         }
         assert(c.called==1 && !md_task_helpers_count(helpers) && !early_child);
         assert(scenario!=INTERRUPT_OWNER || owner_interrupted==1);
-        assert(c.captured==(exported && scenario!=CLONE_DENIED ? 1 : 0));
+        assert(c.captured==(exported && scenario!=CLONE_DENIED && scenario!=CLONE_TRAPPED ? 1 : 0));
         if (c.files) {
-            assert(scenario==CLONE_DENIED && md_fd_order_cancel(&c.turn)==1
+            assert((scenario==CLONE_DENIED || scenario==CLONE_TRAPPED) && md_fd_order_cancel(&c.turn)==1
                 && !md_fd_order_complete(&c.turn));
             md_fd_origins_release(c.files); c.files=NULL;
         }
@@ -526,6 +526,7 @@ static void exercise_request(int protected, enum scenario scenario, unsigned exp
         else if (scenario==CONTROL_FAULT) assert(c.result.value==-EMFILE && c.result.descriptor==-1);
         else if (scenario==ANCHOR_REJECT) assert(c.result.value==-EISCONN && c.result.descriptor==-1);
         else if (scenario==CLONE_DENIED) assert(c.result.value==-EPERM && c.result.descriptor==-1);
+        else if (scenario==CLONE_TRAPPED) assert(c.result.value==-EOPNOTSUPP && c.result.descriptor==-1);
         else if (scenario==FILTER_EPIPE || scenario==PEER_CLOSED || scenario==SIGNAL_PIPE)
             assert(c.result.value==-EPIPE && c.result.descriptor==-1);
         else if (sending) {

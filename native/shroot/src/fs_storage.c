@@ -3,27 +3,35 @@
 #include "fs_mount_internal.h"
 #include "inode_internal.h"
 #include <errno.h>
-#include <stdio.h>
 #include <stdlib.h>
 
 struct md_fs_storage_connections {
     struct md_fs_storage_connections *next;
     struct md_inode_store *store;
-    unsigned users;
 };
 static void release(struct md_fs_storage_cache *cache, struct md_fs_storage_connections **at) {
     struct md_fs_storage_connections *p=*at;
     *at=p->next; --cache->count;
     md_inode_store_close(p->store); free(p);
 }
+static void trim(struct md_fs_storage_cache *cache,unsigned limit) {
+    while (cache->count>limit) {
+        struct md_fs_storage_connections **oldest=NULL;
+        for (struct md_fs_storage_connections **at=&cache->connections; *at; at=&(*at)->next)
+            if ((*at)->store->refs==1) oldest=at;
+        if (!oldest) break;
+        release(cache,oldest);
+    }
+}
 void md_fs_storage_prune(struct md_fs_storage_cache *cache) {
     if (!cache) return;
     for (struct md_fs_storage_connections **at=&cache->connections; *at;) {
         struct md_fs_storage_connections *p=*at;
-        if (!p->users && atomic_load_explicit(&p->store->lifetime->refs,memory_order_acquire)==1)
+        if (p->store->refs==1 && atomic_load_explicit(&p->store->lifetime->refs,memory_order_acquire)==1)
             release(cache,at);
         else at=&p->next;
     }
+    trim(cache,MD_FS_STORAGE_CACHE_LIMIT);
 }
 int md_fs_storage_get(struct md_filesystem *fs, const struct md_view_mount *mount,
         struct md_inode_store **out) {
@@ -41,13 +49,7 @@ int md_fs_storage_get(struct md_filesystem *fs, const struct md_view_mount *moun
         }
     }
     md_fs_storage_prune(fs->storage);
-    if (fs->storage->count==MD_FS_STORAGE_CACHE_LIMIT) {
-        struct md_fs_storage_connections **oldest=NULL;
-        for (struct md_fs_storage_connections **at=&fs->storage->connections; *at; at=&(*at)->next)
-            if (!(*at)->users) oldest=at;
-        if (!oldest) return -EMFILE;
-        release(fs->storage,oldest);
-    }
+    trim(fs->storage,MD_FS_STORAGE_CACHE_LIMIT-1);
     struct md_fs_storage_connections *p=calloc(1,sizeof(*p));
     if (!p) return -ENOMEM;
     int r=md_inode_store_reconnect(storage,&p->store);
@@ -66,13 +68,9 @@ int md_fs_storage_enter(struct md_filesystem *fs, const struct md_view_mount *mo
     struct md_inode_store *store;
     int r=md_fs_storage_get(fs,mount,&store);
     if (r) return r;
-    *scope=(struct md_fs_storage_scope){.store=store,.identity=store->identity,
+    *scope=(struct md_fs_storage_scope){.store=md_inode_store_retain(store),.identity=store->identity,
         .root=store->root_id,.boundary=store->boundary,.mask=store->creation_mask,
         .landlock=store->landlock,.landlock_execute=store->landlock_execute};
-    if (store!=fs->store) {
-        scope->connection=fs->storage->connections;
-        ++scope->connection->users;
-    }
     store->identity=fs->store->identity; store->creation_mask=fs->store->creation_mask;
     store->landlock=fs->store->landlock;
     store->landlock_execute=fs->store->landlock_execute;
@@ -89,6 +87,6 @@ void md_fs_storage_leave(struct md_fs_storage_scope *scope) {
     scope->store->boundary=scope->boundary; scope->store->creation_mask=scope->mask;
     scope->store->landlock=scope->landlock;
     scope->store->landlock_execute=scope->landlock_execute;
-    if (scope->connection) --scope->connection->users;
-    scope->store=NULL; scope->connection=NULL;
+    md_inode_store_close(scope->store);
+    scope->store=NULL;
 }

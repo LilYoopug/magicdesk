@@ -31,6 +31,8 @@ EOF
 cat > /run/systemd/system/md-snap.service <<EOF
 [Unit]
 DefaultDependencies=no
+Conflicts=shutdown.target
+Before=shutdown.target
 [Service]
 Type=simple
 ExecStart=/bin/sh $1/driver.sh $1

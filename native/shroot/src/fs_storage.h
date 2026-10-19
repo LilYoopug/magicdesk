@@ -5,7 +5,8 @@ struct md_view_mount;
 struct md_fs_storage_connections;
 enum { MD_FS_STORAGE_CACHE_LIMIT = 16 };
 /* Worker-owned connections, separate from mount placement and retained backing
- * custody. Borrowed filesystem contexts share this owner, never copy its list. */
+ * custody. Borrowed filesystem contexts share this owner, never copy its list.
+ * Capacity bounds idle caching; active scopes and deferred effects are pinned. */
 struct md_fs_storage_cache {
     struct md_fs_storage_connections *connections;
     unsigned count;
@@ -24,7 +25,6 @@ struct md_fs_storage_scope {
     const char *root;
     struct md_inode_boundary *boundary;
     unsigned mask;
-    struct md_fs_storage_connections *connection;
 };
 int md_fs_storage_enter(struct md_filesystem *, const struct md_view_mount *,
         struct md_fs_storage_scope *);

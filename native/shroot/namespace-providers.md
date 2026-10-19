@@ -202,6 +202,15 @@ Admission fails explicitly if the required native operation is denied. The last
 live thread of PID 1 closes the namespace and terminates its descendants;
 another child cannot silently recreate PID 1 in that namespace.
 
+PI futex commands are explicitly unavailable (ENOSYS) inside a logical PID
+namespace: their userspace owner words contain guest TIDs, which cannot safely
+be passed to the kernel's priority-inheritance state. This includes PI lock,
+unlock, trylock and PI requeue variants. Libc can reject PI mutex creation with
+ENOTSUP, allowing applications to choose ordinary mutexes. Already initialized
+PI mutexes do not become supported by entering a namespace. Native PID views
+retain kernel PI behavior, including a parent which only selected a namespace
+for future children. Ordinary futex waits, wakes and requeues are not trapped.
+
 Init signal policy preserves caught and blocked signals while ignoring ordinary
 default-action signals. Same-namespace SIGKILL/SIGSTOP cannot terminate init;
 an ancestor can. Group delivery runs in the actual sender, preserving kernel
@@ -272,6 +281,14 @@ caller's credentials; no temporary root FD enters the guest table. Opened roots
 survive target exit and retain their view rather than resolving a reused PID.
 Status/stat snapshots also apply to supervised processes in the implicit proc
 provider, without requiring an explicit proc mount.
+
+Foreign `mounts` and `mountinfo` capture the caller-opened native proc inode
+before delegation, then select the target's retained guest root and mount view.
+The inode is checked against PID reuse; Android's mount contents are never
+returned as a substitute. The existing live mount-table provider owns reads,
+poll notifications and lifetime after target exit. Self observations retain
+their direct path without another process capture. Constrained openat2 first
+checks the original dirfd/path/resolve request in the caller.
 
 Foreign FD/cwd metadata and readlink use the same process-access policy. Native
 magic-link capture retains the selected object across worker execution; socket

@@ -37,13 +37,23 @@ from arbitrary guest code
 would require complete mediation of every filesystem entry point; Shroot does
 not provide that security boundary.
 
-Each connection has one owner and is reopened after fork/exec. SQLite is linked
+Each connection belongs to one worker and is reopened after fork/exec. SQLite is linked
 only into native namespace owners and fixtures, not the freestanding bootstrap
 or in-guest syscall adapter. Its heap use and locks belong to the worker. The separate
 [filesystem service](filesystem-service.md) supplies explicit RPC,
 native FD transfer and bounded reentrant client waits. The explicit
 [namespace executor](namespace-execution.md) routes selected guest syscalls here;
 a timeout is not cancellation of a committed operation.
+
+Connection references belong to the cache, synchronous policy scopes, unpublished
+native births and bounded operation windows. Deferred completion therefore cannot
+use a connection already evicted by another task's mount traversal. The last
+reference releases SQLite and native descriptors only after transaction/gate
+retirement. These worker-local references do not retain caller policy or permit
+concurrent database access; shareable backing custody remains a separate owner.
+The mounted-store LRU targets 16 connections, skipping active references. Nested
+scopes and in-flight births can temporarily exceed that target; pruning/cache
+misses trim idle excess. Cache capacity is not a guest `EMFILE` condition.
 
 `inode_db.c` owns transactions, allocation, identities and metadata queries;
 `inode_schema.c` owns creation, format/revision admission, metadata upgrades,

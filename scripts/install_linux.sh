@@ -4248,7 +4248,14 @@ prepare_libc() (
     [ -f "$libc_registry/$key/manifest" ] || fail 'Cached build was removed; retry libc preparation.'
     printf 'Enabling libc selection for new launches of %s...\n' "$libc_name"
     admin_exec "$libc_name" -- /bin/sh -ec \
-        'mkdir -p "/opt/shroot/libc/$1"; rm -f /etc/shroot/libc-base' sh "$key" || exit $?
+        'mkdir -p "/opt/shroot/libc/$1"
+        # Shutdown helpers use this libc too. Retain its mounts until the final
+        # namespace teardown, like the root filesystem, not umount.target.
+        dropin=/etc/systemd/system/opt-shroot-libc-.mount.d
+        mkdir -p "$dropin"
+        printf "%s\n" "[Unit]" "DefaultDependencies=no" > "$dropin/50-shroot-runtime.conf"
+        chmod 644 "$dropin/50-shroot-runtime.conf"
+        rm -f /etc/shroot/libc-base' sh "$key" || exit $?
     printf 'Removing temporary libc build files...\n'
     rm -rf "$work" || exit $?
     printf 'Shroot libc prepared: %s. New launches select it when compatible.\n' "$key"

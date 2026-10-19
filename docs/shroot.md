@@ -1050,9 +1050,9 @@ Authenticated Unix IPC uses captured guest credentials within the supported
 transport; external peers see actual Android credentials. Session D-Bus works
 as guest root and across independent clients without disabling authentication.
 See [Unix credentials](../native/shroot/ipc-credentials.md) for implicit-message
-and cross-launch limits. General set-ID metadata or stored file capabilities
-do not automatically grant executable admission; sealed helpers use the explicit
-[browser/image admission contract](#application-filters-and-browsers).
+and cross-launch limits. Stored set-ID ELF metadata is applied by the common
+[execution owner](#application-filters-and-browsers), without per-program launch
+options. Stored file capabilities do not yet grant executable capabilities.
 
 ## Filesystem Restrictions
 
@@ -1149,13 +1149,22 @@ effective. It prepares required descriptor interception before admitting an
 application filter, rather than removing that filter when later IO needs it.
 Guest namespace support does not require native unprivileged user namespaces.
 
-`--admit-elf /absolute/guest/path` explicitly selects a sealed ELF snapshot with
-logical set-ID metadata for one launch. Initial entry and reexec use that same
-admission; actual Android credentials do not change. General stored set-ID
-metadata is insufficient, and actual host set-ID executables are rejected.
-Chromium's explicit helper test selects `--disable-namespace-sandbox` to choose
-that route; its automatic namespace test needs no helper admission. The negative
-control rejects an unadmitted helper before rendering.
+Stored guest setuid/setgid ELF files work through ordinary launches, including
+desktop shortcuts. Initial entry, path exec and descriptor exec use one worker
+preparation path. The filesystem supplies ownership and mode for the exact
+selected image; a set-ID image is sealed before loading. `nosuid`,
+`no_new_privs`, guest ptrace and user-namespace ID mappings restrict elevation;
+script set-ID bits are ignored. Auxv IDs and `AT_SECURE` reflect the resulting
+guest identity. Android credentials do not change; host set-ID executables
+remain rejected. No distribution-specific helper list is required.
+
+`--admit-elf /absolute/guest/path` remains an explicit launch-local sealed-image
+override, not a prerequisite for packaged helpers. Chromium's set-ID test
+selects `--disable-namespace-sandbox` to choose that route; its negative control
+sets `no_new_privs`. Neither route uses `--no-sandbox`.
+The execution checks do not close the separate filesystem limitation of complete
+set-ID/file-capability clearing on native data writes; see
+[storage limits](../native/shroot/inode-store.md#limits).
 
 Execution does not establish native-Linux sandbox equivalence. Interpreter and
 library admission, mapped-code protection, complete descriptor/root confinement

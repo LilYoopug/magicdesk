@@ -237,6 +237,59 @@ static void storage_cache(struct md_inode_store *main, const char *base) {
     assert(descriptors()==before);
     puts("PASS mounted-store cache: bounded LRU, active scopes, reconnect and maintenance-lease release");
 }
+static void deferred_storage(struct md_inode_store *main,const char *base) {
+    enum { COUNT=MD_FS_STORAGE_CACHE_LIMIT*2+3 };
+    unsigned before=descriptors();
+    struct md_fs_storage_cache cache={0};
+    struct md_filesystem fs={.store=main,.storage=&cache};
+    struct md_inode_lifetime *leases[COUNT];
+    struct md_inode_birth *births[COUNT]={0};
+    struct md_fs_storage_scope scopes[COUNT];
+    int pins[COUNT];
+    char path[PATH_MAX];
+    for (unsigned i=0;i<COUNT;++i) {
+        snprintf(path,sizeof(path),"%s/deferred-%u",base,i);
+        struct md_inode_store *s=NULL;
+        assert(!md_inode_store_open(path,1,&s));
+        assert(!md_inode_mkdir(s,-1,"/parent",0755));
+        leases[i]=md_inode_lifetime_retain(md_inode_store_lifetime(s));
+        md_inode_store_close(s);
+        struct md_view_mount mount={.backing=MD_MOUNT_INODE,.storage=leases[i]};
+        assert(!md_fs_storage_enter(&fs,&mount,&scopes[i]));
+        pins[i]=md_inode_plan_open(scopes[i].store,-1,"/parent/born",O_CREAT|O_RDWR,0600,0,
+            &(struct md_open_completion){0},1,&births[i]);
+        assert(pins[i]>=0 && births[i]);
+        md_fs_storage_leave(&scopes[i]);
+    }
+    /* Deferred native opens must survive arbitrary intervening cache misses. */
+    for (unsigned i=0;i<COUNT;++i) {
+        struct md_view_mount mount={.backing=MD_MOUNT_INODE,.storage=leases[i]};
+        struct md_inode_store *s=NULL;
+        assert(!md_fs_storage_get(&fs,&mount,&s));
+        if (i%3==0) assert(!md_inode_birth_commit(&births[i]));
+        else if (i%3==1) assert(!md_inode_birth_discard(&births[i]));
+        else md_inode_birth_forget(&births[i]);
+        assert(!births[i]);
+        struct stat st;
+        assert(md_inode_stat(s,-1,"/parent/born",0,&st)==(i%3 ? -ENOENT : 0));
+        assert(!fstat(pins[i],&st));
+        if (i%3==1) assert(!st.st_nlink);
+        close(pins[i]);
+    }
+    /* Nested scopes may temporarily exceed idle-cache capacity as well. */
+    for (unsigned i=0;i<COUNT;++i) {
+        struct md_view_mount mount={.backing=MD_MOUNT_INODE,.storage=leases[i]};
+        assert(!md_fs_storage_enter(&fs,&mount,&scopes[i]));
+    }
+    for (unsigned i=COUNT;i--;) md_fs_storage_leave(&scopes[i]);
+    md_fs_storage_prune(&cache);
+    assert(cache.count==MD_FS_STORAGE_CACHE_LIMIT);
+    for (unsigned i=0;i<COUNT;++i) md_inode_lifetime_release(leases[i]);
+    md_fs_storage_prune(&cache);
+    assert(!cache.count && !cache.connections);
+    assert(descriptors()==before);
+    puts("PASS deferred storage: births and nested scopes exceed idle-cache capacity, publish/cancel/forget and release all connections");
+}
 void test_mount_storage(const char *base) {
     file_binds(base);
     socket_binds(base);
@@ -388,6 +441,7 @@ void test_mount_storage(const char *base) {
     assert(!md_inode_store_reconnect(lease,&check));
     md_inode_store_close(check); md_inode_lifetime_release(lease);
     storage_cache(main,base);
+    deferred_storage(main,base);
     main->identity=NULL; md_identity_release(&root); md_inode_store_close(main);
     assert(descriptors()==before);
     puts("PASS mounted inode storage: identity, symlinks, bind/copy, policy, portable custody and old dirfd");

@@ -2,6 +2,7 @@
 #include "raw.h"
 #include <errno.h>
 #include <linux/filter.h>
+#include <linux/futex.h>
 #include <linux/seccomp.h>
 #include <sys/prctl.h>
 #include <sys/ioctl.h>
@@ -18,6 +19,20 @@ long md_pid_filter_install(void) {
         BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)),
         BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(unsigned)gate,0,1),
         BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        /* PI words contain TIDs interpreted by the host kernel. Ordinary
+         * wait/wake/requeue operations never leave their native fast path. */
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_futex,0,10),
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[1])),
+        BPF_STMT(BPF_ALU|BPF_AND|BPF_K,FUTEX_CMD_MASK),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,FUTEX_LOCK_PI,6,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,FUTEX_UNLOCK_PI,5,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,FUTEX_TRYLOCK_PI,4,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,FUTEX_WAIT_REQUEUE_PI,3,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,FUTEX_CMP_REQUEUE_PI,2,0),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,FUTEX_LOCK_PI2,1,0),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_PROCESS),
         BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
         PROCESS(getpid) PROCESS(gettid) PROCESS(getppid) PROCESS(set_tid_address)
         PROCESS(kill) PROCESS(tkill) PROCESS(tgkill) PROCESS(wait4) PROCESS(waitid)

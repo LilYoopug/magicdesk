@@ -1005,6 +1005,11 @@ static void buffer_reopen_delivery(struct md_fs_buffer_service *service,
         struct stat before,after;
         assert(!fstat(source.fd,&before) && !fstat(buffered_open.fd,&after));
         assert(before.st_dev==after.st_dev && before.st_ino==after.st_ino);
+        int delivered=open(frame->source,frame->source_flags);
+        assert(delivered>=0 && !fstat(delivered,&after));
+        assert(before.st_dev==after.st_dev && before.st_ino==after.st_ino);
+        assert(frame->source_flags==(O_PATH|(buffered_open.flags&(O_CLOEXEC|O_DIRECTORY|O_NOFOLLOW))));
+        assert(!close(delivered));
         md_fs_buffer_open_release(&buffered_open);
     }
     for (unsigned path=0;path<2;++path) {
@@ -1067,6 +1072,38 @@ static void buffer_reopen_delivery(struct md_fs_buffer_service *service,
     assert(md_fs_buffer_begin(service,getpid(),fs,MD_FS_FSTAT,buffer,&invalid)==-EINVAL && !invalid);
     assert(all_fds()==before);
     puts("PASS mapped reopen and object access: immutable/mutable origins, nofollow, data/O_PATH results, captured identity and queued cancellation");
+}
+static void buffer_native_path_delivery(struct md_fs_buffer_service *service,
+        struct md_fs_worker *worker,struct md_guest_domain *fs,
+        const struct md_interception_buffer *buffer,struct md_fs_buffer_frame *frame) {
+    unsigned before=all_fds();
+    const char *paths[]={"/dev/null","/dev/full"};
+    for (unsigned i=0;i<sizeof(paths)/sizeof(*paths);++i) {
+        /* Native providers reopen admitted non-links through a retained pin,
+         * normalizing NOFOLLOW before delivery to the caller. */
+        struct md_fs_buffer_open opened={.fd=open(paths[i],O_PATH|O_CLOEXEC)};
+        assert(opened.fd>=0);
+        struct stat expected,actual;
+        assert(!fstat(opened.fd,&expected));
+        struct md_fs_result result={.fd=-1};
+        struct md_fs_buffer_request *request=NULL;
+        *frame=(struct md_fs_buffer_frame){0};
+        int callbacks=buffer_callbacks;
+        assert(!md_fs_buffer_adopt(service,getpid(),fs,MD_FS_OPEN,O_PATH|O_NOFOLLOW|O_CLOEXEC,
+            buffer,&result,&opened,&request) && opened.fd==-1);
+        while (buffer_callbacks==callbacks) worker_event(worker);
+        assert(!buffer_error && !buffer_pending && buffered_open.fd>=0);
+        assert(frame->transfer==MD_FS_BUFFER_ANCHOR && frame->source_flags==(O_PATH|O_CLOEXEC));
+        assert(buffered_open.flags==frame->source_flags);
+        int delivered=open(frame->source,frame->source_flags);
+        assert(delivered>=0 && !fstat(delivered,&actual));
+        assert(actual.st_dev==expected.st_dev && actual.st_ino==expected.st_ino
+            && actual.st_rdev==expected.st_rdev && actual.st_mode==expected.st_mode);
+        assert(!close(delivered));
+        md_fs_buffer_open_release(&buffered_open);
+        assert(all_fds()==before);
+    }
+    puts("PASS native O_PATH delivery: exact retained object, normalized flags, no SCM_RIGHTS or descriptor leak");
 }
 static void buffer_cwd_delivery(struct md_fs_buffer_service *service, struct md_fs_worker *worker,
         const struct md_task_resources *resources, const struct md_interception_buffer *buffer,
@@ -1594,6 +1631,7 @@ static void buffer_service_lifetime(const char *store, unsigned cancelled_operat
         assert(blocked.completed && !close(fd) && !close(gate) && !close(started));
     }
     buffer_reopen_delivery(service,worker,resources.fs,&task,frame);
+    buffer_native_path_delivery(service,worker,resources.fs,&task,frame);
     status_delivery(service,worker,&resources,token);
     buffer_cwd_delivery(service,worker,&resources,&task,frame,base,token);
     buffer_cwd_capture(service,worker,&resources,&task,frame,base,token);

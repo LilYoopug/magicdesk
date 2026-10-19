@@ -26,17 +26,15 @@ The full-browser fixture defaults to Debian's packaged helper at
 `/usr/lib/chromium/chrome-sandbox`; `--helper` selects another guest path. It must
 match the helper actually used by Chromium: the browser prefers a sibling
 `chrome-sandbox`, while `CHROME_DEVEL_SANDBOX` is a fallback for eligible
-user-managed builds, not an override of that sibling. See Chromium's
+user-managed builds, not an override of that sibling. The negative set-ID
+control requires the distribution's `setpriv` on `PATH`. See Chromium's
 [helper selection](https://chromium.googlesource.com/chromium/src/+/main/sandbox/linux/suid/client/setuid_sandbox_host.cc).
-The test explicitly admits that ELF with `--admit-elf`. Guest set-ID metadata
-does not turn its backing into a host set-ID executable or grant Android root.
-All four runs explicitly select the same guest user, `2000:2000`: three admit
-the helper and the fourth does not. With the automatic user/PID route, all four
-must render; no helper is executed or elevated. With the explicit set-ID route,
-the fourth must reject the unadmitted helper before rendering, installing
-application filters or changing its proc root. Omitting both `--user` and
-`--admit-elf` would omit the explicit guest-credential check and is not an
-equivalent admission control.
+The test uses the packaged ELF's stored guest set-ID metadata without
+`--admit-elf`. This does not turn its backing into a host set-ID executable or
+grant Android root. All four runs select the same guest user, `2000:2000`.
+With the automatic user/PID route, all four must render. With the explicit
+set-ID route, the fourth sets `no_new_privs` and must reject helper elevation
+before rendering, installing application filters or changing its proc root.
 
 `--setuid-route` explicitly selects Chromium's set-ID sandbox using
 `--disable-namespace-sandbox`, while retaining its seccomp filters and helper
@@ -47,7 +45,7 @@ namespace-sandbox pass.
 
 The separate credential and retained-resource fixtures use an ordinary mode-0755
 copy at `/tmp/md-chrome-helper-ordinary`, invoked directly for helper IPC and
-renderer controls. Full-browser helper selection and admission rejection belong
+renderer controls. Full-browser helper selection and no-new-privileges rejection belong
 to `test_browser.py`.
 
 Each run stages an immutable helper bundle and records device/build identity,
@@ -67,7 +65,7 @@ requires a successful exit and expectations. `sandboxSupportEstablished` and
 - `test_browser.py`: three stock Chromium launches with fresh profiles, computed
   JavaScript/DOM values, real installed filters, PNG output and zero exit. The
   selected route is recorded independently of sandbox admission. A fourth run
-  verifies helper-independent automatic startup or rejection of the unadmitted
+  verifies helper-independent automatic startup or no_new_privs rejection of the
   set-ID helper under the same guest identity. Child signal exits and diagnostics remain
   in reports.
 - `test_credentials.py`: explicit sealed-image catalogue, first-entry and exec

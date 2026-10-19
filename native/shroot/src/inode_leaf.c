@@ -81,6 +81,11 @@ struct md_inode_birth {
     char parent[33],backing[33],stage[33],name[NAME_MAX+1];
     int catalogue,synchronous;
 };
+static void birth_release(struct md_inode_birth *birth) {
+    if (!birth) return;
+    md_inode_store_close(birth->store);
+    free(birth);
+}
 int mdi_leaf_prepare_birth(struct md_inode_store *s,const struct mdi_node *parent,const char *name,
         int flags,mode_t mode,struct md_inode_birth **out) {
     if (!out || *out) return -EINVAL;
@@ -90,7 +95,7 @@ int mdi_leaf_prepare_birth(struct md_inode_store *s,const struct mdi_node *paren
     if (r) return r;
     struct md_inode_birth *birth=calloc(1,sizeof(*birth));
     if (!birth) return -ENOMEM;
-    birth->store=s;
+    birth->store=md_inode_store_retain(s);
     birth->catalogue=parent->mode<0;
     birth->synchronous=!!(flags&O_DSYNC);
     strcpy(birth->parent,parent->id); strcpy(birth->backing,parent->backing); strcpy(birth->name,name);
@@ -98,28 +103,28 @@ int mdi_leaf_prepare_birth(struct md_inode_store *s,const struct mdi_node *paren
     if (!r && !birth->catalogue && !(parent->acl_mask&MD_ACL_DEFAULT)) {
         int pin=mdi_native_pin_create(s->objects,birth->stage,uid,gid,mode);
         if (pin>=0) { *out=birth; return pin; }
-        if (pin!=-EOPNOTSUPP) { free(birth); return pin; }
+        if (pin!=-EOPNOTSUPP) { birth_release(birth); return pin; }
     }
     flags&=~(O_CREAT|O_EXCL|O_TRUNC|O_NOFOLLOW|O_NOCTTY);
     int fd=r ? r : prepare_backing(s,parent,birth->stage,flags,uid,gid,mode);
-    if (fd<0) { free(birth); return fd; }
+    if (fd<0) { birth_release(birth); return fd; }
     /* The real caller, not this metadata preparation, owns its data open and
      * descriptor capacity. Maintenance is excluded by the store's lifetime. */
     int pin=openat(s->objects,birth->stage,O_PATH|O_CLOEXEC|O_NOFOLLOW);
     r=pin<0 ? -errno : 0;
     if (!r && birth->catalogue) r=mdi_sync(s,fd);
     close(fd);
-    if (r) { if (pin>=0) close(pin); unlinkat(s->objects,birth->stage,0); free(birth); return r; }
+    if (r) { if (pin>=0) close(pin); unlinkat(s->objects,birth->stage,0); birth_release(birth); return r; }
     *out=birth; return pin;
 }
 int md_inode_birth_discard(struct md_inode_birth **owner) {
     if (!owner || !*owner) return 0;
     struct md_inode_birth *birth=*owner;
     if (unlinkat(birth->store->objects,birth->stage,0) && errno!=ENOENT) return -errno;
-    free(birth); *owner=NULL; return 0;
+    md_inode_birth_forget(owner); return 0;
 }
 void md_inode_birth_forget(struct md_inode_birth **owner) {
-    if (owner) { free(*owner); *owner=NULL; }
+    if (owner) { birth_release(*owner); *owner=NULL; }
 }
 static int catalogue_birth(struct md_inode_birth **owner) {
     struct md_inode_birth *birth=*owner;
@@ -145,7 +150,7 @@ static int catalogue_birth(struct md_inode_birth **owner) {
     if (pin>=0) close(pin);
     int committed=0;
     r=mdi_commit_owned(s,r,&committed);
-    if (committed) { free(birth); *owner=NULL; }
+    if (committed) md_inode_birth_forget(owner);
     return r;
 }
 struct md_inode_store *md_inode_birth_store(const struct md_inode_birth *birth) {
@@ -171,14 +176,17 @@ int md_inode_birth_commit(struct md_inode_birth **owner) {
     if (!r) r=mdi_overlay_native_name(s,&parent,birth->name);
     if (!r && birth->catalogue) return catalogue_birth(owner);
     char target[NAME_MAX+34];
+    int committed=0;
     if (!r) {
         snprintf(target,sizeof(target),"%s/%s",birth->backing,birth->name);
         if (renameat2(s->objects,birth->stage,s->objects,target,RENAME_NOREPLACE)) r=-errno;
-        else { free(birth); *owner=NULL; }
+        else committed=1;
     }
     /* Consuming the owner records the accepted rename even if retirement fails.
      * The caller must not replay or discard a committed creation. */
-    return mdi_finish(s,r);
+    r=mdi_finish(s,r);
+    if (committed) md_inode_birth_forget(owner);
+    return r;
 }
 
 int mdi_leaf_id(const struct stat *st,const char scope[33],char out[33]) {

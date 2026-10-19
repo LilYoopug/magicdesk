@@ -17,15 +17,20 @@ The guest carrier is O_PATH; unadapted writes cannot acquire provider write acce
 Unsupported open modes do not silently enter this fallback.
 
 `task_mapping` maps eligible controlled backings in the stopped requesting task,
-without creating a helper thread that an application sandbox may prohibit. Only
-native read-only regular descriptors, or memfds protected by size seals and
-WRITE/FUTURE_WRITE seals, can enter its temporary application-table loan. The
+without creating a helper thread that an application sandbox may prohibit.
+Native read-only regular descriptors and memfds protected by size seals and
+WRITE/FUTURE_WRITE seals need no shared-table stop. Mutable writable backing
+uses a cold barrier over the exact CLONE_FILES holders before publishing its
+temporary descriptor; that barrier remains held through verified retirement. The
 existing FD-turn and loan retirement owners serialize installation, mapping and
 verified native close. Errors and caller death retire the exact loan, not a
 guessed descriptor number. An uncertain mapping result invalidates its optional
 provenance and retains conservative protection checks for surviving CLONE_VM users.
-Mutable backing and a full application FD table retain the private-helper path;
-application seccomp denials remain errors in both paths.
+Retirement first borrows the requester's already stopped continuation. Selecting
+a peer first can deadlock when that peer's deferred lifecycle or signal event
+cannot be replayed until the mapping barrier is released. Surviving table holders
+remain eligible after caller death. A full application FD table retains the
+private-helper fallback; application seccomp denials remain errors in both paths.
 
 Mapping policy shares one range owner for noexec and read-only restrictions.
 Shared read-only views cannot gain PROT_WRITE through mprotect; MAP_PRIVATE keeps
@@ -37,7 +42,8 @@ path; this is not coherent FUSE shared-mapping support.
 
 `test_memfd_views.py` exercises protected callers, live backing, seals, COW,
 native FD balance, failed mappings, a full descriptor table, repeated death of a
-mapping caller sharing another process's FD table, and SCM_RIGHTS to a
+mapping caller sharing another process's FD table, concurrent mutable mappings
+by four protected CLONE_FILES processes with helper creation denied, and SCM_RIGHTS to a
 receiver denying clone and further seccomp installation, in Base and accelerated
 execution. `test_task_mapping.c` checks backing admission; FD-origin tests cover
 metadata-free loan allocation failure and retirement.

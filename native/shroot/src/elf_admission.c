@@ -33,18 +33,25 @@ int md_admission_open(struct md_admission *a, const char *endpoint, const char *
     return error;
 }
 int md_admission_snapshot(struct md_admission *a, int source) {
-    int error = 0;
     a->source = source;
-    if (fstat(a->source, &a->source_stat)) error = -errno;
-    if (!error && (!S_ISREG(a->source_stat.st_mode) || a->source_stat.st_size <= 0
-            || a->source_stat.st_size > 8 * 1024 * 1024)) error = -EFBIG;
+    int error = fstat(source, &a->source_stat) ? -errno : 0;
+    if (!error) error = md_exec_image_snapshot(source, 0, 0, S_IFREG | 04755, &a->image);
+    if (error) md_admission_close(a);
+    return error;
+}
+int md_exec_image_snapshot(int source, uint32_t uid, uint32_t gid, mode_t mode,
+        struct md_exec_image **out) {
+    *out = NULL;
+    struct stat before;
+    int error = fstat(source, &before) ? -errno : 0;
+    if (!error && (!S_ISREG(before.st_mode) || before.st_size <= 0)) error = -ENOEXEC;
     int copy = !error ? syscall(SYS_memfd_create, "md-admitted-elf", MFD_CLOEXEC | MFD_ALLOW_SEALING) : -1;
     if (!error && copy < 0) error = -errno;
     char buffer[65536];
-    for (off_t offset = 0; !error && offset < a->source_stat.st_size;) {
-        size_t n = a->source_stat.st_size - offset;
+    for (off_t offset = 0; !error && offset < before.st_size;) {
+        size_t n = before.st_size - offset;
         if (n > sizeof(buffer)) n = sizeof(buffer);
-        ssize_t got = pread(a->source, buffer, n, offset);
+        ssize_t got = pread(source, buffer, n, offset);
         if (got < 0 && errno == EINTR) continue;
         if (got != (ssize_t)n) { error = got < 0 ? -errno : -EIO; break; }
         for (size_t written = 0; written < n;) {
@@ -56,21 +63,20 @@ int md_admission_snapshot(struct md_admission *a, int source) {
         offset += n;
     }
     struct stat after;
-    if (!error && fstat(a->source, &after)) error = -errno;
-    if (!error && (after.st_size != a->source_stat.st_size
-            || after.st_mtim.tv_sec != a->source_stat.st_mtim.tv_sec
-            || after.st_mtim.tv_nsec != a->source_stat.st_mtim.tv_nsec
-            || after.st_ctim.tv_sec != a->source_stat.st_ctim.tv_sec
-            || after.st_ctim.tv_nsec != a->source_stat.st_ctim.tv_nsec)) error = -ESTALE;
+    if (!error && fstat(source, &after)) error = -errno;
+    if (!error && (after.st_size != before.st_size
+            || after.st_mtim.tv_sec != before.st_mtim.tv_sec
+            || after.st_mtim.tv_nsec != before.st_mtim.tv_nsec
+            || after.st_ctim.tv_sec != before.st_ctim.tv_sec
+            || after.st_ctim.tv_nsec != before.st_ctim.tv_nsec)) error = -ESTALE;
     if (error) fprintf(stderr, "PROBE admission snapshot error=%d\n", error);
     if (!error && fcntl(copy, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)) {
         error = -errno; fprintf(stderr, "PROBE admission seal error=%d\n", error);
     }
     if (!error) { error = md_elf_validate(copy, 0); if (error) fprintf(stderr, "PROBE admission ELF error=%d\n", error); }
-    if (!error) { error = md_exec_image_admit(copy, 0, 0, S_IFREG | 04755, &a->image);
+    if (!error) { error = md_exec_image_admit(copy, uid, gid, mode, out);
         if (error) fprintf(stderr, "PROBE admission identity error=%d\n", error); }
     if (copy >= 0) close(copy);
-    if (error) md_admission_close(a);
     return error;
 }
 int md_admission_match(const struct md_admission *a, const char *endpoint, int fd) {

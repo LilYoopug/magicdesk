@@ -80,10 +80,13 @@ static long receive_result(struct md_fs_buffer_frame *frame, const struct md_fs_
         else out->result.fd=(int)fd;
     } else if (transfer==MD_FS_BUFFER_ANCHOR || transfer==MD_FS_BUFFER_CALLER_OPEN) {
         if (frame->source[sizeof(frame->source)-1] || !md_prefix(frame->source,"/proc/")) result=-EPROTO;
+        else if (transfer==MD_FS_BUFFER_ANCHOR
+                && (!(frame->source_flags&O_PATH)
+                    || (frame->source_flags&~(O_PATH|O_CLOEXEC|O_DIRECTORY|O_NOFOLLOW)))) result=-EPROTO;
         else {
             long fd=md_guest_open_anchor(AT_FDCWD,frame->source,
                 transfer==MD_FS_BUFFER_CALLER_OPEN ? md_open_endpoint_flags(q->flags)
-                    : O_PATH|(q->flags&(O_CLOEXEC|O_DIRECTORY|O_NOFOLLOW)),0,MD_FS_BUFFER_SOURCE);
+                    : frame->source_flags,0,MD_FS_BUFFER_SOURCE);
             if (fd<0) out->result.error=(int)fd;
             else out->result.fd=(int)fd;
         }

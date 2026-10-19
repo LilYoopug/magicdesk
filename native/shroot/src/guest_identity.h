@@ -63,11 +63,11 @@ int md_identity_capset(struct md_identity *, uint64_t, uint64_t, uint64_t);
 long md_identity_cap_prctl(struct md_identity *, unsigned long, const unsigned long *);
 void md_identity_exec(const struct md_identity *, struct md_identity *);
 
-/* Only a trusted importer/launcher supplies the logical owner and mode.
+/* Only the filesystem execution owner or explicit launcher supplies the logical owner and mode.
  * The retained image must already be sealed against write, shrink and growth;
- * an ELF pathname, guest stat result or guest-owned FD is not admission.
- * Copying/validating package contents and authenticating that importer are
- * integration requirements, not performed by this narrow contract. */
+ * an ELF pathname, guest-supplied stat result or guest-owned FD is not admission.
+ * The filesystem owner captures metadata under the task's provider/mount context;
+ * exec preparation binds it to the selected image, never to a second pathname. */
 int md_exec_image_admit(int sealed_fd, uint32_t uid, uint32_t gid, mode_t mode,
     struct md_exec_image **out);
 void md_exec_image_release(struct md_exec_image *);

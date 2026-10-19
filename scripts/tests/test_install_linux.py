@@ -447,6 +447,19 @@ make() {
         self.assertFalse(any(c[0] == 'image' for c in self.calls()))
         self.assertTrue(any('rm -f /etc/shroot/libc-base' in arg for c in self.calls() for arg in c))
 
+    def test_libc_activation_retains_runtime_mounts_during_systemd_shutdown(self):
+        for cached in ('0', '1'):
+            with self.subTest(cached=cached):
+                self.log.unlink(missing_ok=True)
+                result = self.run_script('--prepare-libc', 'work', TEST_LIBC_CACHED=cached)
+                self.assertEqual(0, result.returncode, result.stderr)
+                activation = next(arg for call in self.calls() for arg in call
+                                  if 'rm -f /etc/shroot/libc-base' in arg)
+                self.assertIn('/etc/systemd/system/opt-shroot-libc-.mount.d', activation)
+                self.assertIn('DefaultDependencies=no', activation)
+                self.assertIn('50-shroot-runtime.conf', activation)
+                self.assertNotIn('systemctl', activation)
+
     def test_libc_preparation_reports_build_and_enable_in_order(self):
         result = self.run_script('--prepare-libc', 'work', '--jobs', '3')
         self.assertEqual(0, result.returncode, result.stderr)
