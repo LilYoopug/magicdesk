@@ -547,6 +547,7 @@ static void direct_status_complete(struct thread *,const struct md_fs_result *,i
 static int buffer_cleanup(struct thread *);
 static void report_statistics(void);
 static int debugger_allowed(pid_t, pid_t);
+static int proc_allowed(pid_t, pid_t);
 static pid_t visible_pid(struct thread *,pid_t);
 static pid_t native_pid(struct thread *,pid_t);
 static void ipc_unwatch(struct thread *);
@@ -1514,7 +1515,7 @@ static int proc_node_metadata(struct thread *t, const struct md_proc_metadata_re
          * native capture enforces Android access, just like status/stat. */
         if (!owner) return -EXDEV;
         if (!owner->born) return -ENOENT;
-        if (owner!=t && !debugger_allowed(t->pid,owner->pid)) return -EACCES;
+        if (owner!=t && !proc_allowed(t->pid,owner->pid)) return -EACCES;
         /* Authorization precedes native capture. Typed descriptors retain their
          * provider metadata; their carrier must never become the stat result. */
         if (q->kind!=MD_PROC_FD || q->nofollow) return -EXDEV;
@@ -1559,7 +1560,7 @@ static int proc_node_metadata(struct thread *t, const struct md_proc_metadata_re
     int namespace=md_proc_file_namespace(kind);
     out->kind=(unsigned)kind;
     if (namespace && file) md_namespace_reference_stat(md_proc_file_namespace_reference(file),value);
-    else if (namespace && target.pid!=t->pid && !debugger_allowed(t->pid,target.pid)) error=-EACCES;
+    else if (namespace && target.pid!=t->pid && !proc_allowed(t->pid,target.pid)) error=-EACCES;
     else if (sysctl || target.identity) error=proc_node_stat(target,kind,&current,value);
     if (!namespace && !sysctl && file && (!target.identity || error==-ENOENT || current.inode!=node.inode || current.device!=node.device)) {
         *value=(struct stat){.st_dev=node.device,
@@ -1638,11 +1639,11 @@ static int control_file_capture(pid_t actor,const char *path,struct md_fd_object
     if (kind==MD_PROC_FD) {
         file=proc_file_capture(target,selected.descriptor);
         if (!file) return 0;
-        if (target!=t && !debugger_allowed(t->pid,target->pid)) { md_proc_file_release(file); return -EACCES; }
+        if (target!=t && !proc_allowed(t->pid,target->pid)) { md_proc_file_release(file); return -EACCES; }
         if (md_proc_file_filesystem_paths(file)) { md_proc_file_release(file); return 0; }
         if (*selected.tail) { md_proc_file_release(file); return -ENOTDIR; }
     } else {
-        if (target!=t && !debugger_allowed(t->pid,target->pid)) return -EACCES;
+        if (target!=t && !proc_allowed(t->pid,target->pid)) return -EACCES;
         enum md_proc_file_kind type=(enum md_proc_file_kind)(kind-MD_PROC_UID_MAP);
         if (kind==MD_PROC_NS_UNSUPPORTED) return -ENOENT;
         if (!md_proc_file_namespace(type) && !md_proc_file_sysctl(type)) return -EOPNOTSUPP;
@@ -1674,7 +1675,7 @@ static int executable_capture(pid_t actor,struct md_program *image) {
     if (kind!=MD_PROC_EXE || *selected.tail || image->fd>=0) return -EINVAL;
     struct thread *target=find_thread(selected.process);
     if (!target || !target->born) return -ENOENT;
-    if (target!=t && !debugger_allowed(t->pid,target->pid)) return -EACCES;
+    if (target!=t && !proc_allowed(t->pid,target->pid)) return -EACCES;
     int error=md_process_image_identity(target->pid,target->process_image,&image->identity);
     if (error) return error;
     if (target->executable) {
@@ -1694,7 +1695,7 @@ static int executable_capture(pid_t actor,struct md_program *image) {
 static int root_capture(pid_t actor,pid_t process,struct md_task_snapshot *snapshot) {
     struct thread *t=find_thread(actor), *target=find_thread(process);
     if (!t || !target || !target->born) return -ENOENT;
-    if (target!=t && !debugger_allowed(actor,process)) return -EACCES;
+    if (target!=t && !proc_allowed(actor,process)) return -EACCES;
     char path[64],link[PATH_MAX];
     snprintf(path,sizeof(path),"/proc/%d/root",process);
     if (readlink(path,link,sizeof(link))<0) return -errno;
@@ -1765,7 +1766,7 @@ static void proc_file_request(struct thread *t, const struct seccomp_notif *q) {
         struct thread *target=find_thread((pid_t)q->data.args[2]);
         int flags=(int)q->data.args[4];
         struct md_proc_file *file=NULL;
-        if (!target || (target!=t && !debugger_allowed(t->pid,target->pid))) reply.error=-EACCES;
+        if (!target || (target!=t && !proc_allowed(t->pid,target->pid))) reply.error=-EACCES;
         else if (t->proc_image_fd>=0 || q->data.args[5]) reply.error=-EINVAL;
         else if (!target->executable) reply.error=-EXDEV;
         else {
@@ -1791,7 +1792,7 @@ static void proc_file_request(struct thread *t, const struct seccomp_notif *q) {
         else if (operation==MD_PROC_FILE_REOPEN && !source) reply.error=-EBADF;
         else if (!source && kind==MD_PROC_NS_UNSUPPORTED) reply.error=-ENOENT;
         else if ((!source && !md_proc_control_kind(kind)) || t->proc_image_fd>=0) reply.error=-EINVAL;
-        else if (source && target!=t && !debugger_allowed(t->pid,target->pid)) reply.error=-EACCES;
+        else if (source && target!=t && !proc_allowed(t->pid,target->pid)) reply.error=-EACCES;
         else if (md_proc_file_filesystem_paths(source)) reply.error=-EXDEV;
         else {
             struct md_proc_file_node node={0}; struct stat st;
@@ -1808,7 +1809,7 @@ static void proc_file_request(struct thread *t, const struct seccomp_notif *q) {
             if (namespace && source) {
                 node=previous; md_namespace_reference_stat(md_proc_file_namespace_reference(source),&st);
             }
-            if (!error && namespace && !source && target!=t && !debugger_allowed(t->pid,target->pid)) error=-EACCES;
+            if (!error && namespace && !source && target!=t && !proc_allowed(t->pid,target->pid)) error=-EACCES;
             if (!error && source && !control && (node.device!=previous.device || node.inode!=previous.inode)) error=-ESRCH;
             unsigned mode=(flags&O_ACCMODE)!=O_RDONLY || (flags&O_TRUNC) ? W_OK : R_OK;
             if (!error && namespace && (flags&O_NOFOLLOW) && !(flags&O_PATH)) error=-ELOOP;
@@ -1940,7 +1941,7 @@ static void handle_notification(const struct seccomp_notif *request) {
         else if (q.data.args[0] == MD_GUEST_PROC_IMAGE) {
             struct seccomp_notif_resp reply={.id=q.id};
             struct thread *target=find_thread((pid_t)q.data.args[1]);
-            int fd=!target || !debugger_allowed(t->pid,target->pid) ? -EACCES
+            int fd=!target || !proc_allowed(t->pid,target->pid) ? -EACCES
                 : q.data.instruction_pointer!=RAW_GATE || t->phase!=DISPATCHING
                     || t->proc_image_fd>=0 || q.data.args[4] || q.data.args[5] ? -EPERM
                 : md_process_image_view(target->pid,target->process_image,(unsigned)q.data.args[2],
@@ -2316,10 +2317,16 @@ static pid_t debugger_native_pid(pid_t observer,pid_t visible) {
     struct thread *t=find_thread(observer);
     return t ? native_pid(t,visible) : 0;
 }
-static int debugger_allowed(pid_t caller, pid_t pid) {
+static int inspect_allowed(pid_t caller, pid_t pid, int filesystem) {
     struct thread *from=find_thread(caller), *to=find_thread(pid);
     if (!from || !to || md_domain_restricted(from->resources.fs)) return 0;
-    return md_identity_may_inspect(&from->identity,&to->identity);
+    return from->tgid==to->tgid || md_identity_may_inspect(&from->identity,&to->identity,filesystem);
+}
+static int debugger_allowed(pid_t caller, pid_t pid) {
+    return inspect_allowed(caller,pid,0);
+}
+static int proc_allowed(pid_t caller, pid_t pid) {
+    return inspect_allowed(caller,pid,1);
 }
 static void debugger_complete(pid_t pid, struct user_pt_regs *regs, long value) {
     struct thread *t=find_thread(pid);
@@ -4801,7 +4808,7 @@ static void buffer_descriptor_start(struct thread *t) {
         if (!identity) result=MD_CALL_NATIVE;
         else if (t->original.regs[2]) result=-EINVAL;
         else if (!target || target->resources.pid_group!=identity || !target->born) result=-ESRCH;
-        else if (target!=t && !debugger_allowed(t->pid,target->pid)) result=-EACCES;
+        else if (target!=t && !proc_allowed(t->pid,target->pid)) result=-EACCES;
         else if (command==0xff07 || command==0xff08) result=-EOPNOTSUPP;
         else {
             static const enum md_namespace_kind kinds[]={MD_NAMESPACE_CGROUP,MD_NAMESPACE_IPC,
@@ -5088,7 +5095,7 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
         if (!t->buffer.pool || t->buffer_open.fd>=0 || t->phase!=DISPATCHING
                 || !r->regs[1] || r->regs[1]>INT_MAX || r->regs[2]) break;
         struct thread *target=find_thread((pid_t)r->regs[1]);
-        if (!target || !debugger_allowed(t->pid,target->pid)) { result=-EACCES; break; }
+        if (!target || !proc_allowed(t->pid,target->pid)) { result=-EACCES; break; }
         struct md_buffer_span span;
         result=md_buffer_span(&t->buffer,&span);
         if (result) break;

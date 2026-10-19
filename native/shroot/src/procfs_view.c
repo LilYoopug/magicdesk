@@ -134,11 +134,7 @@ static int inspect(struct md_filesystem *fs,pid_t native) {
     const struct md_identity *from=fs->store->identity;
     int same=task.group==fs->actor->tgid;
     int privileged=md_identity_capable_in(from,target.user_namespace,CAP_SYS_PTRACE);
-    int allowed=same || privileged || (from->uid.fs==target.uid.real
-        && from->uid.fs==target.uid.effective && from->uid.fs==target.uid.saved
-        && from->gid.fs==target.gid.real && from->gid.fs==target.gid.effective
-        && from->gid.fs==target.gid.saved && from->user_namespace==target.user_namespace
-        && !(target.caps.permitted&~from->caps.effective));
+    int allowed=same || md_identity_may_inspect(from,&target,1);
     md_identity_release(&task.identity);
     if (!allowed || same || privileged || task.retired) return allowed;
     /* proc io performs READ_FSCREDS at read time, including dumpability and

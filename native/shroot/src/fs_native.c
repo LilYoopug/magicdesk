@@ -70,7 +70,7 @@ static int task_relative(struct md_filesystem *fs, const char *path,
     if (!error && task.files && kind==MD_PROC_FD && ref.tail && !*ref.tail
             && (q->operation==MD_FS_STAT || q->operation==MD_FS_READLINK)
             && (task.tid==fs->actor->tid || (!md_domain_restricted(fs->actor->fs)
-                && md_identity_may_inspect(&fs->actor->identity,&task.identity)))) {
+                && md_identity_may_inspect(&fs->actor->identity,&task.identity,1)))) {
         /* Capture metadata and the kernel target under the same table turn.
          * Never wait in the worker: an occupied table uses task-affine admission.
          * Typed proc/control carriers must still go through their provider. */

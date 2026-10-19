@@ -4,6 +4,7 @@
 #include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/securebits.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -28,11 +29,11 @@ static int image_fd(void) {
 static void immutable_admission(void) {
     int fd = image_fd();
     struct md_exec_image *image = NULL;
-    assert(md_exec_image_admit(fd, 0, 0, S_IFREG | 04755, &image) == -EPERM && !image);
+    assert(md_exec_image_admit(fd, 0, 0, S_IFREG | 04755, NULL, &image) == -EPERM && !image);
     assert(!fcntl(fd, F_ADD_SEALS, F_SEAL_FUTURE_WRITE | F_SEAL_SHRINK | F_SEAL_GROW));
-    assert(md_exec_image_admit(fd, 0, 0, S_IFREG | 04755, &image) == -EPERM && !image);
+    assert(md_exec_image_admit(fd, 0, 0, S_IFREG | 04755, NULL, &image) == -EPERM && !image);
     assert(!fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_SEAL));
-    assert(!md_exec_image_admit(fd, 0, 0, S_IFREG | 04755, &image));
+    assert(!md_exec_image_admit(fd, 0, 0, S_IFREG | 04755, NULL, &image));
     int retained = md_exec_image_dup(image); assert(retained >= 0 && !close(fd));
     struct stat st;
     assert(!fstat(retained, &st) && st.st_uid == 2000 && st.st_gid == 2000);
@@ -47,26 +48,114 @@ static void immutable_admission(void) {
 }
 static void rejected_images(void) {
     struct md_exec_image *image = NULL;
-    assert(md_exec_image_admit(-1, 0, 0, S_IFREG | 04755, &image) == -EBADF && !image);
+    assert(md_exec_image_admit(-1, 0, 0, S_IFREG | 04755, NULL, &image) == -EBADF && !image);
     int fd = image_fd();
     assert(pwrite(fd, "#!", 2, 0) == 2);
     assert(!fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK));
-    assert(md_exec_image_admit(fd, 0, 0, S_IFREG | 04755, &image) == -ENOEXEC && !image);
+    assert(md_exec_image_admit(fd, 0, 0, S_IFREG | 04755, NULL, &image) == -ENOEXEC && !image);
     close(fd); fd = image_fd();
     assert(!fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK));
-    assert(md_exec_image_admit(fd, UINT32_MAX, 0, S_IFREG | 04755, &image) == -EINVAL && !image);
-    assert(md_exec_image_admit(fd, 0, UINT32_MAX, S_IFREG | 04755, &image) == -EINVAL && !image);
-    assert(md_exec_image_admit(fd, 0, 0, S_IFDIR | 04755, &image) == -EINVAL && !image);
-    assert(md_exec_image_admit(fd, 0, 0, S_IFREG | 010000000, &image) == -EINVAL && !image);
+    assert(md_exec_image_admit(fd, UINT32_MAX, 0, S_IFREG | 04755, NULL, &image) == -EINVAL && !image);
+    assert(md_exec_image_admit(fd, 0, UINT32_MAX, S_IFREG | 04755, NULL, &image) == -EINVAL && !image);
+    assert(md_exec_image_admit(fd, 0, 0, S_IFDIR | 04755, NULL, &image) == -EINVAL && !image);
+    assert(md_exec_image_admit(fd, 0, 0, S_IFREG | 010000000, NULL, &image) == -EINVAL && !image);
     close(fd);
     puts("PASS image admission rejects invalid descriptor, script header, owner and mode");
 }
-static struct md_exec_image *admit(uint32_t uid, uint32_t gid, mode_t mode) {
+static struct md_exec_image *admit_caps(uint32_t uid, uint32_t gid, mode_t mode,
+        const struct md_file_capabilities *caps) {
     int fd = image_fd();
     assert(!fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL));
     struct md_exec_image *image;
-    assert(!md_exec_image_admit(fd, uid, gid, S_IFREG | mode, &image)); close(fd);
+    assert(!md_exec_image_admit(fd, uid, gid, S_IFREG | mode, caps, &image)); close(fd);
     return image;
+}
+static struct md_exec_image *admit(uint32_t uid, uint32_t gid, mode_t mode) {
+    return admit_caps(uid,gid,mode,NULL);
+}
+static void file_capabilities(void) {
+    uint64_t bit=UINT64_C(1)<<CAP_DAC_OVERRIDE, inherited=UINT64_C(1)<<CAP_CHECKPOINT_RESTORE;
+    struct md_file_capabilities caps={.present=1,.permitted=bit,.inheritable=inherited};
+    struct md_exec_image *permitted=admit_caps(0,0,0755,&caps);
+    caps.effective=1;
+    struct md_exec_image *effective=admit_caps(0,0,0755,&caps), *both=admit_caps(0,0,04755,&caps);
+    struct md_identity user=md_identity_new(1000,1000), before=user;
+    struct md_exec_identity next;
+    assert(!md_identity_prepare_exec(&user,permitted,0,&next));
+    assert(next.secure && next.value.caps.permitted==bit && !next.value.caps.effective);
+    assert(!memcmp(&user,&before,sizeof(user)));
+    assert(!md_identity_prepare_exec(&user,effective,0,&next));
+    assert(next.secure && next.value.caps.effective==bit && next.value.uid.effective==1000);
+    user.caps.bounding &= ~bit;
+    assert(md_identity_prepare_exec(&user,effective,0,&next)==-EPERM);
+    assert(!md_identity_prepare_exec(&user,permitted,0,&next) && !next.value.caps.permitted);
+    user=before; user.caps.inheritable=inherited;
+    assert(!md_identity_prepare_exec(&user,effective,0,&next));
+    assert(next.value.caps.permitted==(bit|inherited) && next.value.caps.effective==(bit|inherited));
+    user.caps.permitted=user.caps.ambient=inherited;
+    assert(!md_identity_prepare_exec(&user,permitted,0,&next));
+    assert(!next.value.caps.ambient && !next.value.caps.effective);
+    assert(!md_identity_prepare_exec(&user,permitted,1,&next));
+    assert(next.value.caps.ambient==inherited && next.value.caps.permitted==inherited && !next.secure);
+    user=before; user.no_new_privs=1;
+    assert(!md_identity_prepare_exec(&user,permitted,0,&next));
+    assert(!next.value.caps.permitted && !next.secure);
+    assert(!md_identity_prepare_exec(&user,effective,0,&next));
+    assert(!next.value.caps.permitted && next.secure);
+    user=before;
+    assert(!md_identity_prepare_exec(&user,both,0,&next));
+    assert(next.value.uid.effective==0 && next.value.caps.permitted==bit && next.value.caps.effective==bit);
+    user=md_identity_new(0,0);
+    assert(!md_identity_prepare_exec(&user,permitted,0,&next));
+    assert(next.value.caps.permitted==MD_CAP_VALID && next.value.caps.effective==MD_CAP_VALID);
+    user.caps.securebits=SECBIT_NOROOT;
+    assert(!md_identity_prepare_exec(&user,permitted,0,&next));
+    assert(next.value.caps.permitted==bit && !next.value.caps.effective);
+    caps.rootid=2000;
+    struct md_exec_image *scoped=admit_caps(2000,2000,0755,&caps);
+    assert(!md_identity_prepare_exec(&before,scoped,0,&next) && !next.value.caps.permitted && !next.secure);
+    user=md_identity_new(2001,2001);
+    user.user_namespace=md_user_namespace_new(NULL,2000,2000,1); assert(user.user_namespace);
+    struct md_id_extent map={0,2000,10};
+    struct md_user_authority root={.caps=MD_CAP_VALID};
+    assert(!md_user_namespace_map(user.user_namespace,0,&root,&root,&map,1));
+    assert(!md_user_namespace_map(user.user_namespace,1,&root,&root,&map,1));
+    assert(!md_identity_prepare_exec(&user,scoped,0,&next) && next.value.caps.effective==bit && next.secure);
+    assert(!md_identity_prepare_exec(&user,effective,0,&next) && next.value.caps.effective==bit);
+    md_identity_release(&user);
+    md_exec_image_release(scoped); md_exec_image_release(permitted);
+    md_exec_image_release(effective); md_exec_image_release(both);
+    unsigned char raw[24]={1,0,0,3,2,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0xd0,7,0,0};
+    assert(md_file_capability_decode(raw,sizeof(raw),&caps));
+    assert(caps.present && caps.effective && caps.rootid==2000 && caps.permitted==bit && caps.inheritable==inherited);
+    assert(!md_file_capability_decode(raw,20,&caps));
+    raw[3]=2; assert(md_file_capability_decode(raw,20,&caps) && !caps.rootid);
+    raw[3]=1; assert(md_file_capability_decode(raw,12,&caps) && !caps.inheritable);
+    raw[0]=3; assert(!md_file_capability_decode(raw,12,&caps));
+    puts("PASS file capabilities: revisions, permitted/effective/inheritable, bounding, ambient, root, NNP, nosuid and namespace scope");
+}
+static void inspection(void) {
+    struct md_identity from=md_identity_new(1000,1000), to=from;
+    assert(md_identity_may_inspect(&from,&to,0) && md_identity_may_inspect(&from,&to,1));
+    from.uid.real=from.gid.real=2000;
+    assert(!md_identity_may_inspect(&from,&to,0) && md_identity_may_inspect(&from,&to,1));
+    from=to; from.uid.fs=from.gid.fs=2000;
+    assert(md_identity_may_inspect(&from,&to,0) && !md_identity_may_inspect(&from,&to,1));
+    from=to; to.caps.permitted=UINT64_C(1)<<CAP_CHOWN;
+    assert(!md_identity_may_inspect(&from,&to,0) && !md_identity_may_inspect(&from,&to,1));
+    from.caps.permitted=to.caps.permitted;
+    assert(md_identity_may_inspect(&from,&to,0) && !md_identity_may_inspect(&from,&to,1));
+    from.caps.effective=from.caps.permitted;
+    assert(md_identity_may_inspect(&from,&to,1));
+    to=md_identity_new(0,0);
+    from.caps.permitted=UINT64_C(1)<<CAP_SYS_PTRACE; from.caps.effective=0;
+    assert(!md_identity_may_inspect(&from,&to,0) && !md_identity_may_inspect(&from,&to,1));
+    from.caps.effective=from.caps.permitted;
+    assert(md_identity_may_inspect(&from,&to,0) && md_identity_may_inspect(&from,&to,1));
+    from.user_namespace=md_user_namespace_new(NULL,1000,1000,1); assert(from.user_namespace);
+    assert(!md_identity_may_inspect(&from,&to,0) && !md_identity_may_inspect(&from,&to,1));
+    md_identity_release(&from);
+    puts("PASS process inspection: real/fs credentials, capability subset and scoped CAP_SYS_PTRACE");
 }
 static void transitions(void) {
     struct md_exec_image *suid = admit(0, 0, 04755), *plain = admit(0, 0, 0755);
@@ -143,7 +232,7 @@ static void native_comparison(void) {
 }
 int main(void) {
     assert(getuid() == 2000 && geteuid() == 2000 && getgid() == 2000 && getegid() == 2000);
-    immutable_admission(); rejected_images(); transitions(); native_comparison();
+    immutable_admission(); rejected_images(); transitions(); file_capabilities(); inspection(); native_comparison();
     assert(getuid() == 2000 && geteuid() == 2000);
     puts("PASS external identity contract; browser integration and sandbox support NOT established");
     return 0;

@@ -36,6 +36,27 @@ shutil.copy2('/usr/lib/libm.so.6', source / 'library.so')
 (source / 'script').chmod(0o755)
 (source / 'sourced').write_text('if :; then\n' + '# padding to span transport pages\n' * 8192
                               + 'printf "fuse-source-ok\\n"\nfi\n')
+(work / 'origin-library.c').write_text('int origin_value(void) { return 42; }\n')
+(work / 'origin-program.c').write_text(r'''
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+extern int origin_value(void);
+int main(int argc, char **argv) {
+    assert(origin_value()==42);
+    if (argc==2) { execl("/proc/self/exe",argv[0],"--done",argv[1],(char *)0); return 1; }
+    assert(argc==3 && !strcmp(argv[1],"--done"));
+    char path[4096]; ssize_t n=readlink("/proc/self/exe",path,sizeof(path)-1);
+    assert(n>0); path[n]=0; assert(!strcmp(path,argv[2]));
+    puts("PASS FUSE proc-exe reexec preserves image identity and ORIGIN library");
+    return 0;
+}
+''')
+subprocess.run(['cc', '-shared', '-fPIC', str(work / 'origin-library.c'),
+                '-o', str(source / 'liborigin.so')], check=True)
+subprocess.run(['cc', str(work / 'origin-program.c'), '-L' + str(source), '-lorigin',
+                '-Wl,-rpath,$ORIGIN', '-o', str(source / 'origin-program')], check=True)
 subprocess.run(['mksquashfs', str(source), str(work / 'image'), '-noappend',
                 '-processors', '1', '-no-progress'], check=True)
 log = open(work / 'daemon.log', 'w+')
@@ -49,13 +70,17 @@ try:
         # Bounded mount-state observation, never a readiness settling delay.
         time.sleep(0.02)
     assert mount.stat().st_dev != source.stat().st_dev
-    assert sorted(p.name for p in mount.iterdir()) == ['directory', 'file', 'identity', 'library.so', 'link', 'program', 'script', 'sourced']
+    assert sorted(p.name for p in mount.iterdir()) == ['directory', 'file', 'identity', 'liborigin.so', 'library.so', 'link', 'origin-program', 'program', 'script', 'sourced']
     assert (mount / 'directory' / 'small').read_text() == 'nested\n'
     assert os.readlink(mount / 'link') == 'file'
     print('FUSE exec source', (mount / 'program').stat(), flush=True)
     print('FUSE exec mount', next(line for line in Path('/proc/self/mountinfo').read_text().splitlines()
           if line.split()[4] == str(mount)), flush=True)
     subprocess.run([str(mount / 'program')], check=True)
+    clean_env = dict(os.environ)
+    clean_env.pop('LD_LIBRARY_PATH', None)
+    subprocess.run([str(mount / 'origin-program'), str(mount / 'origin-program')],
+                   env=clean_env, check=True)
     # Admission reads provider metadata, not the sealed executable snapshot's
     # carrier. Exercise it with and without a logical set-ID transition.
     subprocess.run(['mount', '-i', '-o', 'remount,bind,ro,suid', str(mount)], check=True)

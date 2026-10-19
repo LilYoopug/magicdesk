@@ -327,6 +327,30 @@ def main():
                 os._exit(1)
             os._exit(0)
         assert os.waitpid(denied, 0)[1] == 0
+        capable = os.fork()
+        if capable == 0:
+            try:
+                native(libc.prctl, 8, 1, 0, 0, 0)  # PR_SET_KEEPCAPS
+                os.setgid(1234)
+                os.setuid(1234)
+                header = ctypes.create_string_buffer(struct.pack('Ii', 0x20080522, 0))
+                mask = (1 << 19) | (1 << 1)  # SYS_PTRACE and DAC_OVERRIDE
+                data = ctypes.create_string_buffer(struct.pack('IIIIII', mask, mask, 0, 0, 0, 0))
+                native(libc.capset, header, data)
+                assert stat.S_ISREG(os.stat(path + '/identity').st_mode)
+                capable_fd = os.open(path, os.O_PATH | os.O_DIRECTORY)
+                assert readat(capable_fd, 'mounted/private') == b'private mount'
+                os.close(capable_fd)
+                data = ctypes.create_string_buffer(struct.pack('IIIIII', 2, 2, 0, 0, 0, 0))
+                native(libc.capset, header, data)
+                rejects(errno.EACCES, os.open, path, os.O_PATH | os.O_DIRECTORY)
+            except BaseException:
+                import traceback
+                traceback.print_exc()
+                os._exit(1)
+            os._exit(0)
+        assert os.waitpid(capable, 0)[1] == 0
+        print('PASS foreign proc root: non-root capabilities authorize access; dropping SYS_PTRACE revokes it', flush=True)
         protected = os.fork()
         if protected == 0:
             try:

@@ -497,12 +497,17 @@ authorization boundary for every broker request or in-process syscall gate.
 ## Image Admission And Logical Credentials
 
 The common exec preparation owner acquires the final ELF and interpreter once,
-for both initial entry and reexec. It reads logical ownership/mode through the
-exact provider FD and mount provenance. Set-ID files receive a sealed execution
-snapshot with physical and logical metadata checks around capture; ordinary
+for both initial entry and reexec. It reads canonical ownership/mode and file
+capabilities through the exact provider FD and mount provenance. Privileged files
+receive a sealed execution snapshot with physical and logical metadata checks
+around capture; capabilities are rechecked as well. Ordinary
 files are not copied. Preparation retains that admission outside writable guest
 request buffers until image entry or cancellation. Script modes and ELF loader
 modes cannot substitute for the final program's credentials.
+Reexec through `/proc/self/exe` retains both the captured image and its logical
+executable identity, including for FUSE-backed programs. An anonymous sealed
+carrier must not replace the path used by the loader for `$ORIGIN`; the retained
+image is not reopened by pathname.
 
 `--admit-elf /absolute/guest/path` can explicitly select one ordinary ELF for a
 launch-local sealed snapshot and logical set-ID metadata. The filesystem service
@@ -513,10 +518,21 @@ Initial launch and exec use the same admission contract. The supervisor tracks
 logical IDs, irreversible drops and no_new_privs, publishes auxv/AT_SECURE, and
 applies the corresponding nondumpable state before loader entry. Real kernel
 credentials remain those of the executor. Stored set-ID files need no explicit
-admission option. `nosuid`, no_new_privs, guest tracing and unmapped user-namespace
+admission option. File-capability revisions 1-3 use the same owner and admission,
+including permitted/inheritable/bounding masks, effective and ambient transitions,
+root-ID namespace scope and secure loader entry. Missing mandatory capabilities
+are rejected before replacing the old image; admission revalidates the candidate.
+`nosuid`, no_new_privs, guest tracing and unmapped user-namespace
 IDs suppress set-ID changes. Actual set-ID backing executables remain rejected.
-This does not complete native-write privilege-bit clearing or file-capability
-execution; see [storage limits](inode-store.md#limits).
+This does not complete native-write privilege-bit clearing;
+see [storage limits](inode-store.md#limits).
+
+Process inspection shares one guest credential check. Debugger access uses
+real IDs and permitted capabilities; proc filesystem access uses filesystem
+IDs and effective capabilities. Both honor scoped `CAP_SYS_PTRACE` and the
+target capability subset. Callers retain their namespace, restricted-root,
+dumpability and native-access checks; guest capabilities grant no Android
+process access.
 
 `--user` and OCI User share `guest_accounts` resolution and `guest_identity` with
 image admission. Each task retains real/effective/saved/filesystem UID/GID and

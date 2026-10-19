@@ -38,7 +38,7 @@ static void selected(struct md_filesystem *fs, const struct md_fs_request *q,
             if (q->value_size) memcpy(local.attributes.capability,q->value,q->value_size);
         }
         md_fs_view_execute(fs,&local,out,output);
-        if (out->error!=-EXDEV) {
+        if (out->error!=-EXDEV && !(out->error==-EOPNOTSUPP && !set && !remove)) {
             if (!out->error && !set && !remove) {
                 out->position=out->size;
                 if (!q->capacity) out->size=0;

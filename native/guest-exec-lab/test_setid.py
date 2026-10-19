@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stored set-ID semantics without per-program launch admission."""
+"""Stored executable privileges without per-program launch admission."""
 import argparse
 import ctypes
 import errno
@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import struct
 import sys
 
 
@@ -24,7 +25,8 @@ def guest(directory):
         os.chmod(path, mode)
         paths[name] = path
 
-    def check(name, euid, egid, *, fd=False, nnp=False, path=None, unlink=False, traced=False, userns=False):
+    def check(name, euid, egid, *, fd=False, nnp=False, path=None, unlink=False, traced=False,
+              userns=False, capabilities=None, secure=None, drop=None, error=None):
         path = path or paths[name]
         descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC) if fd else None
         if unlink:
@@ -38,6 +40,8 @@ def guest(directory):
                 os.close(writer)
                 if traced:
                     assert libc.ptrace(0, 0, 0, 0) == 0, ctypes.get_errno()
+                if drop is not None:
+                    assert libc.prctl(24, drop, 0, 0, 0) == 0
                 os.setgroups([])
                 os.setgid(1000)
                 os.setuid(1000)
@@ -48,8 +52,14 @@ def guest(directory):
                     Path('/proc/self/uid_map').write_text('0 1000 1\n')
                     Path('/proc/self/setgroups').write_text('deny\n')
                     Path('/proc/self/gid_map').write_text('0 1000 1\n')
-                os.execve(descriptor if fd else path, [path],
-                          dict(os.environ, LD_LIBRARY_PATH=directory + '/untrusted'))
+                try:
+                    os.execve(descriptor if fd else path, [path],
+                              dict(os.environ, LD_LIBRARY_PATH=directory + '/untrusted'))
+                except OSError as failure:
+                    if error is None or failure.errno != error:
+                        raise
+                    assert os.getresuid() == (1000, 1000, 1000)
+                    os._exit(0)
             except BaseException:
                 import traceback
                 traceback.print_exc()
@@ -71,9 +81,17 @@ def guest(directory):
         if descriptor is not None:
             os.close(descriptor)
         assert status == 0, (name, status, output)
+        if error is not None:
+            assert not output, (name, 'exec unexpectedly succeeded', output)
+            print('PASS executable privileges rejected', name, error, flush=True)
+            return
         result = json.loads(output)
+        observed_caps = result.pop('caps')
+        if capabilities is not None:
+            assert observed_caps == capabilities, (name, observed_caps, capabilities)
         real = 0 if userns else 1000
-        secure = int(euid != real or egid != real)
+        if secure is None:
+            secure = int(euid != real or egid != real)
         expected = dict(uid=[real, euid, euid, euid], gid=[real, egid, egid, egid],
                         aux=[real, euid, real, egid], secure=secure, env=1-secure,
                         library=7 if secure else 99)
@@ -89,6 +107,26 @@ def guest(directory):
     check('both', 1000, 1000, nnp=True, fd=True)
     check('both', 1000, 1000, traced=True)
     check('both', 0, 0, userns=True)
+    for name, effective in [('cap-p', False), ('cap-ep', True)]:
+        path = directory + '/' + name
+        shutil.copyfile(source, path)
+        os.chmod(path, 0o755)
+        os.setxattr(path, 'security.capability', struct.pack('<IIIII', 0x02000000 | effective, 2, 0, 0, 0))
+        paths[name] = path
+        for descriptor in (False, True):
+            check(name, 1000, 1000, fd=descriptor, capabilities=[2, 2 if effective else 0], secure=1)
+            check(name, 1000, 1000, fd=descriptor, nnp=True, capabilities=[0, 0], secure=int(effective))
+        check(name, 1000, 1000, traced=True, capabilities=[0, 0], secure=0)
+        check(name, 1000, 1000, drop=1, error=errno.EPERM if effective else None,
+              capabilities=[0, 0], secure=0)
+    scoped = directory + '/scoped'
+    shutil.copyfile(source, scoped)
+    os.chmod(scoped, 0o755)
+    os.setxattr(scoped, 'security.capability', struct.pack('<IIIIII', 0x03000001, 2, 0, 0, 0, 2000))
+    check('scoped', 1000, 1000, path=scoped, capabilities=[0, 0], secure=0)
+    os.chown(paths['cap-p'], 1000, 1000)
+    check('cap-p', 1000, 1000, capabilities=[0, 0], secure=0)
+    os.chown(paths['cap-p'], 0, 0)
     script = directory + '/script'
     Path(script).write_text('#!' + paths['plain'] + '\n')
     os.chmod(script, 0o6755)
@@ -100,11 +138,14 @@ def guest(directory):
         assert libc.mount(None, os.fsencode(alias), None, 4096 | 32 | 2, None) == 0
         check('both', 1000, 1000, path=alias + '/both')
         check('both', 1000, 1000, path=alias + '/both', fd=True)
+        check('cap-ep', 1000, 1000, path=alias + '/cap-ep', capabilities=[0, 0], secure=0)
+        check('cap-ep', 1000, 1000, path=alias + '/cap-ep', fd=True, capabilities=[0, 0], secure=0)
         check('both', 0, 2345)
     finally:
         assert libc.umount2(os.fsencode(alias), 0) == 0
         os.rmdir(alias)
     check('other', 1234, 2345, fd=True, unlink=True)
+    check('cap-ep', 1000, 1000, fd=True, unlink=True, capabilities=[2, 2], secure=1)
     broken = directory + '/invalid'
     Path(broken).write_text('not an executable')
     os.chmod(broken, 0o4755)

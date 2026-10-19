@@ -17,7 +17,7 @@ int md_admission_snapshot(struct md_admission *, int source);
 /* Borrow the exact filesystem-selected ELF; retain an immutable execution
  * image with its logical ownership. Does not grant Android credentials. */
 int md_exec_image_snapshot(int source, uint32_t uid, uint32_t gid, mode_t mode,
-    struct md_exec_image **out);
+    const struct md_file_capabilities *, struct md_exec_image **out);
 int md_admission_match(const struct md_admission *, const char *endpoint, int fd);
 void md_admission_close(struct md_admission *);
 #endif

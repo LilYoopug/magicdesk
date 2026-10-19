@@ -42,7 +42,7 @@ static inline int md_fs_operation_value(unsigned operation) {
         || operation==MD_FS_GETACL || operation==MD_FS_SETACL || operation==MD_FS_IPC_PEER
         || operation==MD_FS_MOUNT || operation==MD_FS_FSCONFIG || operation==MD_FS_BPF || operation==MD_FS_LANDLOCK;
 }
-enum { MD_FS_STAT_MOUNT = 1 };
+enum { MD_FS_STAT_MOUNT = 1, MD_FS_STAT_CANONICAL = 2 };
 /* A proc magic-link description may name another mount tree. It is display
  * text, not an executable identity or a path known to resolve in the caller. */
 enum { MD_FS_PATH_DISPLAY = 1 };

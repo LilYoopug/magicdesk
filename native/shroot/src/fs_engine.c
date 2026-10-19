@@ -514,7 +514,7 @@ void md_fs_context_execute(struct md_fs_context *context,
     else context_execute(context,q,out,output,NULL);
     /* Internal opens and executable admission keep canonical owners. Only
      * the caller-facing metadata result belongs to the current user namespace. */
-    if (!out->error && !out->host_path && id && id->user_namespace
+    if (!out->error && !out->host_path && id && id->user_namespace && !(q->mode&MD_FS_STAT_CANONICAL)
             && (q->operation==MD_FS_STAT || q->operation==MD_FS_FSTAT)) {
         out->info.uid=md_identity_visible_id(id,0,out->info.uid);
         out->info.gid=md_identity_visible_id(id,1,out->info.gid);
@@ -526,7 +526,7 @@ void md_fs_context_resume(struct md_fs_context *context,struct md_fs_continuatio
     const struct md_fs_request *q=&continuation->request;
     context_execute(context,q,out,output,continuation);
     const struct md_identity *id=context->has_identity ? &context->task.identity : NULL;
-    if (!out->error && !out->host_path && id && id->user_namespace
+    if (!out->error && !out->host_path && id && id->user_namespace && !(q->mode&MD_FS_STAT_CANONICAL)
             && (q->operation==MD_FS_STAT || q->operation==MD_FS_FSTAT)) {
         out->info.uid=md_identity_visible_id(id,0,out->info.uid);
         out->info.gid=md_identity_visible_id(id,1,out->info.gid);
@@ -643,7 +643,7 @@ static void inode_execute(struct md_filesystem *fs,
     case MD_FS_UNLINK: r = md_inode_unlink(s, first, a, (int)q->flags); break;
     case MD_FS_RENAME: r = md_inode_rename(s, first, a, second, b, q->flags); break;
     case MD_FS_STAT: case MD_FS_FSTAT: {
-        if (q->mode & ~MD_FS_STAT_MOUNT) { r=-EINVAL; break; }
+        if (q->mode & ~(MD_FS_STAT_MOUNT|MD_FS_STAT_CANONICAL)) { r=-EINVAL; break; }
         struct mdi_stat_location location, *previous=s->stat_location;
         if (q->mode & MD_FS_STAT_MOUNT) {
             location.path[0]=0; location.device=0; location.inode=0; location.root=0;

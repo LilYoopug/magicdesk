@@ -137,10 +137,10 @@ FIFO entries retain their namespace metadata and hardlinks; live streams are
 created lazily per instance, never copied from an image. Their declared archive
 payload must be empty. See [named pipes](fifos.md) for execution limits.
 ACL/capability-bearing inputs require preserved ownership.
-Preserved set-ID ELF metadata is consumed by the common execution owner, subject
+Preserved set-ID and file-capability ELF metadata is consumed by the common execution owner, subject
 to `nosuid`, no_new_privs, tracing and user-namespace mapping checks. No helper
-names are registered by an image recipe. Stored file capabilities remain metadata,
-not automatic executable capability grants.
+names are registered by an image recipe. Capability grants obey the guest
+bounding/inheritable sets and namespace root-ID scope; Android credentials do not change.
 
 Character/block-device entries retain logical type, major/minor, owners, modes
 and hardlinks in regular metadata carriers. They create no native device and

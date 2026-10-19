@@ -4,6 +4,7 @@
 #include <sys/types.h>
 #include <linux/capability.h>
 #include "user_namespace.h"
+#include "file_capability.h"
 
 /* Guest credentials confer no Android/kernel authority. Copies retain the
  * immutable supplementary-group set; release each owning copy. */
@@ -36,7 +37,8 @@ const uint32_t *md_identity_group_data(const struct md_identity *);
 int md_identity_in_group(const struct md_identity *, uint32_t);
 /* Credential portion of process inspection. Namespace/root policy and native
  * proc access remain the caller's responsibility; this grants no host rights. */
-int md_identity_may_inspect(const struct md_identity *observer, const struct md_identity *target);
+int md_identity_may_inspect(const struct md_identity *observer, const struct md_identity *target,
+    int filesystem_credentials);
 /* set-ID operations accept IDs as seen in the caller's user namespace. */
 int md_identity_setuid(struct md_identity *, uint32_t);
 int md_identity_setgid(struct md_identity *, uint32_t);
@@ -69,14 +71,14 @@ void md_identity_exec(const struct md_identity *, struct md_identity *);
  * The filesystem owner captures metadata under the task's provider/mount context;
  * exec preparation binds it to the selected image, never to a second pathname. */
 int md_exec_image_admit(int sealed_fd, uint32_t uid, uint32_t gid, mode_t mode,
-    struct md_exec_image **out);
+    const struct md_file_capabilities *, struct md_exec_image **out);
 void md_exec_image_release(struct md_exec_image *);
 int md_exec_image_dup(const struct md_exec_image *);
 
 /* Prepare is side-effect free. The supervisor may publish the candidate only
  * after successful guest image admission, before entering the guest loader.
  * A failed exec leaves the old identity intact. secure supplies AT_SECURE;
- * value.uid/gid supply all four ID auxv entries. nosuid suppresses set-ID.
+ * value.uid/gid supply all four ID auxv entries. nosuid suppresses file privileges.
  * The candidate borrows current's groups until commit; it is not an owning copy. */
 int md_identity_prepare_exec(const struct md_identity *, const struct md_exec_image *,
     int nosuid, struct md_exec_identity *);

@@ -167,21 +167,47 @@ validation now belongs to supervisor buffer admission; `test_epoll_runtime.py`
 checks this with and without PR_SET_DUMPABLE, preserves application SIGSYS and
 verifies simultaneous native and virtual readiness.
 
-`fixtures/snap-browser-gui.py` retains a fresh profile and receipt/report files
+`fixtures/sandbox-browser-gui.py` retains a fresh profile and receipt/report files
 for the interactive workflow. Inside that already prepared Wayland/user-bus
 session, with the fixture directory bound into the guest:
 
 ```sh
-python3 fixtures/snap-browser-gui.py --output /tmp/snap-gui-results
+python3 fixtures/sandbox-browser-gui.py --output /tmp/snap-gui-results
+# Other packaged-browser combinations use the same assertions:
+python3 fixtures/sandbox-browser-gui.py --browser chromium --package snap \
+    --output /tmp/chromium-snap-gui --require-webgl
+python3 fixtures/sandbox-browser-gui.py --browser firefox --package flatpak \
+    --output /tmp/firefox-flatpak-gui --require-webgl
 ```
 
 Type `shroot`, click the button, download the test file, and choose the printed
-download path through Browse. Close Firefox normally. A successful report
+download path through Browse. Close the browser normally. A successful report
 requires all four receipts, exact downloaded bytes and exit status zero.
 `--require-webgl` additionally requires the known WebGL pixel, but not a
 particular hardware renderer; inspect the returned renderer separately. The
 ordinary GUI report retains failed WebGL observations without claiming GPU
 success. No browser sandbox preference or command-line bypass is applied.
+
+The shared workflow passes for SteamOS Flatpak Firefox under Plasma Wayland
+and Ubuntu Snap Chromium under Weston, both as the installed ordinary user.
+Each run verifies input, download, chooser upload, exact file contents, the
+WebGL pixel and normal exit. Firefox's support report confirms hardware
+WebRender. Chromium reports ANGLE/Zink/Turnip on Adreno 840 for WebGL, but
+window composition remains software: its Wayland GBM path cannot find a DRM
+render node on this KGSL device. A WebGL pass is not a composition pass.
+Chromium's sandbox page reports namespace and seccomp-BPF/TSYNC support;
+renderer status also retains no_new_privs and seccomp filters. These checks
+do not establish kernel-equivalent isolation. Stock snapd detects absent
+AppArmor support and reports partial confinement, without a recipe-specific
+AppArmor disable switch.
+
+The Chromium launch regression required common file-capability admission and
+process-inspection credentials, not a snap-confine exception. Its reexec from
+FUSE also exposed lost executable naming: `/proc/self/exe` must retain the
+selected image's logical path so the loader can resolve `$ORIGIN/libffmpeg.so`.
+`fixtures/fuse-squashfs.py` checks this with a small executable and sibling
+library, independently of Chromium. See
+[image admission](../shroot/interception.md#image-admission-and-logical-credentials).
 
 ### Executable Private Memory
 

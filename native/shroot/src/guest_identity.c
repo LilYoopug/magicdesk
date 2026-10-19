@@ -11,7 +11,10 @@
 #include <linux/securebits.h>
 #include <unistd.h>
 
-struct md_exec_image { int fd; uint32_t uid, gid; mode_t mode; };
+struct md_exec_image {
+    int fd; uint32_t uid, gid; mode_t mode;
+    struct md_file_capabilities capabilities;
+};
 struct md_identity_groups { atomic_uint references; unsigned count; uint32_t ids[]; };
 static int compare_gid(const void *a, const void *b) {
     uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
@@ -51,10 +54,14 @@ int md_identity_in_group(const struct md_identity *v, uint32_t gid) {
     return v->groups && bsearch(&gid, v->groups->ids, v->groups->count,
         sizeof(gid), compare_gid) != NULL;
 }
-int md_identity_may_inspect(const struct md_identity *from, const struct md_identity *to) {
-    return from->uid.effective==to->uid.real && from->uid.effective==to->uid.effective
-        && from->uid.effective==to->uid.saved && from->gid.effective==to->gid.real
-        && from->gid.effective==to->gid.effective && from->gid.effective==to->gid.saved;
+int md_identity_may_inspect(const struct md_identity *from, const struct md_identity *to, int filesystem) {
+    if (md_identity_capable_in(from,to->user_namespace,CAP_SYS_PTRACE)) return 1;
+    uint32_t uid=filesystem ? from->uid.fs : from->uid.real;
+    uint32_t gid=filesystem ? from->gid.fs : from->gid.real;
+    uint64_t caps=filesystem ? from->caps.effective : from->caps.permitted;
+    return uid==to->uid.real && uid==to->uid.effective && uid==to->uid.saved
+        && gid==to->gid.real && gid==to->gid.effective && gid==to->gid.saved
+        && from->user_namespace==to->user_namespace && !(to->caps.permitted&~caps);
 }
 int md_identity_setgroups(struct md_identity *v, uint32_t *ids, unsigned count) {
     if (!md_identity_capable(v,CAP_SETGID) || !md_user_namespace_may_setgroups(v->user_namespace)) return -EPERM;
@@ -168,18 +175,44 @@ long md_identity_cap_prctl(struct md_identity *v, unsigned long op, const unsign
     default: return -ENOTSUP;
     }
 }
-void md_identity_exec(const struct md_identity *old, struct md_identity *next) {
+static int file_capabilities_apply(const struct md_identity *id, const struct md_file_capabilities *file) {
+    if (!file || !file->present || file->rootid==UINT32_MAX) return 0;
+    const struct md_user_namespace *ns=id->user_namespace;
+    for (;;) {
+        if (md_user_namespace_from(ns,0,file->rootid)==0) return 1;
+        if (!ns) return 0;
+        ns=md_user_namespace_parent(ns);
+    }
+}
+static int exec_capabilities(const struct md_identity *old, struct md_identity *next,
+        const struct md_file_capabilities *file, int *secure) {
+    int has_file=file_capabilities_apply(next,file);
+    int effective=has_file && file->effective;
+    uint64_t permitted=has_file ? (next->caps.bounding & file->permitted)
+        | (next->caps.inheritable & file->inheritable) : 0;
+    permitted &= MD_CAP_VALID;
+    /* Capability-dumb programs must not silently run with only part of fP. */
+    if (effective && (file->permitted & MD_CAP_VALID & ~permitted)) return -EPERM;
     int privileged = old->uid.effective != next->uid.effective || old->gid.effective != next->gid.effective;
-    if (privileged) next->caps.ambient = 0;
-    uint64_t permitted = next->caps.ambient;
     uint32_t root=md_identity_root(next);
-    if (!(next->caps.securebits & SECBIT_NOROOT) && (next->uid.real==root || next->uid.effective==root))
-        permitted |= next->caps.bounding | next->caps.inheritable;
+    if (!(next->caps.securebits & SECBIT_NOROOT)
+            && !(has_file && next->uid.real!=root && next->uid.effective==root)) {
+        if (next->uid.real==root || next->uid.effective==root)
+            permitted = next->caps.bounding | next->caps.inheritable;
+        if (next->uid.effective==root) effective=1;
+    }
     if (old->no_new_privs) permitted &= old->caps.permitted;
+    if (privileged || has_file) next->caps.ambient = 0;
+    permitted |= next->caps.ambient;
     next->caps.permitted = permitted;
-    next->caps.effective = next->uid.effective==root && !(next->caps.securebits & SECBIT_NOROOT)
-        ? permitted : next->caps.ambient;
+    next->caps.effective = effective ? permitted : next->caps.ambient;
     next->caps.securebits &= ~SECBIT_KEEP_CAPS;
+    if (secure) *secure = next->uid.real!=next->uid.effective || next->gid.real!=next->gid.effective
+        || (next->uid.real!=root && (effective || (permitted & ~next->caps.ambient)));
+    return 0;
+}
+void md_identity_exec(const struct md_identity *old, struct md_identity *next) {
+    exec_capabilities(old,next,NULL,NULL);
 }
 static int existing(const struct md_identity_ids *ids, uint32_t id) {
     return id == UINT32_MAX || id == ids->real || id == ids->effective || id == ids->saved;
@@ -273,7 +306,8 @@ int md_identity_file_capable(const struct md_identity *id, uint32_t uid, uint32_
         && (cap==CAP_FOWNER || md_user_namespace_from(id->user_namespace,1,gid)!=UINT32_MAX);
 }
 
-int md_exec_image_admit(int fd, uint32_t uid, uint32_t gid, mode_t mode, struct md_exec_image **out) {
+int md_exec_image_admit(int fd, uint32_t uid, uint32_t gid, mode_t mode,
+        const struct md_file_capabilities *capabilities, struct md_exec_image **out) {
     *out = NULL;
     if (uid == UINT32_MAX || gid == UINT32_MAX || !S_ISREG(mode) || (mode & ~(S_IFREG | 07777)))
         return -EINVAL;
@@ -299,7 +333,8 @@ int md_exec_image_admit(int fd, uint32_t uid, uint32_t gid, mode_t mode, struct 
     struct md_exec_image *image = !error ? malloc(sizeof(*image)) : NULL;
     if (!error && !image) error = -ENOMEM;
     if (error) { close(retained); return error; }
-    *image = (struct md_exec_image){retained, uid, gid, mode};
+    *image = (struct md_exec_image){.fd=retained, .uid=uid, .gid=gid, .mode=mode};
+    if (capabilities) image->capabilities=*capabilities;
     *out = image;
     return 0;
 }
@@ -327,9 +362,10 @@ int md_identity_prepare_exec(const struct md_identity *current, const struct md_
     }
     next.uid.saved = next.uid.fs = next.uid.effective;
     next.gid.saved = next.gid.fs = next.gid.effective;
-    md_identity_exec(current, &next);
-    *out = (struct md_exec_identity){.value = next,
-        .secure = next.uid.real != next.uid.effective || next.gid.real != next.gid.effective};
+    int secure=0;
+    int error=exec_capabilities(current,&next,nosuid ? NULL : &image->capabilities,&secure);
+    if (error) return error;
+    *out = (struct md_exec_identity){.value = next, .secure = secure};
     return 0;
 }
 struct md_identity md_identity_access(const struct md_identity *id,int effective) {

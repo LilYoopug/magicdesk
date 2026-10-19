@@ -1052,7 +1052,8 @@ as guest root and across independent clients without disabling authentication.
 See [Unix credentials](../native/shroot/ipc-credentials.md) for implicit-message
 and cross-launch limits. Stored set-ID ELF metadata is applied by the common
 [execution owner](#application-filters-and-browsers), without per-program launch
-options. Stored file capabilities do not yet grant executable capabilities.
+options. Stored file capabilities use that same execution owner and remain
+guest authority only, never Android credentials.
 
 ## Filesystem Restrictions
 
@@ -1149,14 +1150,19 @@ effective. It prepares required descriptor interception before admitting an
 application filter, rather than removing that filter when later IO needs it.
 Guest namespace support does not require native unprivileged user namespaces.
 
-Stored guest setuid/setgid ELF files work through ordinary launches, including
+Stored guest setuid/setgid and file-capability ELF files work through ordinary launches, including
 desktop shortcuts. Initial entry, path exec and descriptor exec use one worker
-preparation path. The filesystem supplies ownership and mode for the exact
-selected image; a set-ID image is sealed before loading. `nosuid`,
+preparation path. The filesystem supplies canonical ownership, mode and capabilities
+for the exact selected image; a privileged image is sealed before loading. `nosuid`,
 `no_new_privs`, guest ptrace and user-namespace ID mappings restrict elevation;
 script set-ID bits are ignored. Auxv IDs and `AT_SECURE` reflect the resulting
 guest identity. Android credentials do not change; host set-ID executables
 remain rejected. No distribution-specific helper list is required.
+Linux file-capability revisions 1-3 share the credential owner: permitted and
+inheritable masks, the effective flag, bounding set, ambient clearing and
+namespace root-ID scope are evaluated before committing exec. A capability-dumb
+program missing required permitted bits fails with `EPERM` in the original
+caller. Capability-derived secure execution also supplies `AT_SECURE`.
 
 `--admit-elf /absolute/guest/path` remains an explicit launch-local sealed-image
 override, not a prerequisite for packaged helpers. Chromium's set-ID test

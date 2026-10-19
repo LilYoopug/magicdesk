@@ -35,12 +35,12 @@ int md_admission_open(struct md_admission *a, const char *endpoint, const char *
 int md_admission_snapshot(struct md_admission *a, int source) {
     a->source = source;
     int error = fstat(source, &a->source_stat) ? -errno : 0;
-    if (!error) error = md_exec_image_snapshot(source, 0, 0, S_IFREG | 04755, &a->image);
+    if (!error) error = md_exec_image_snapshot(source, 0, 0, S_IFREG | 04755, NULL, &a->image);
     if (error) md_admission_close(a);
     return error;
 }
 int md_exec_image_snapshot(int source, uint32_t uid, uint32_t gid, mode_t mode,
-        struct md_exec_image **out) {
+        const struct md_file_capabilities *capabilities, struct md_exec_image **out) {
     *out = NULL;
     struct stat before;
     int error = fstat(source, &before) ? -errno : 0;
@@ -74,7 +74,7 @@ int md_exec_image_snapshot(int source, uint32_t uid, uint32_t gid, mode_t mode,
         error = -errno; fprintf(stderr, "PROBE admission seal error=%d\n", error);
     }
     if (!error) { error = md_elf_validate(copy, 0); if (error) fprintf(stderr, "PROBE admission ELF error=%d\n", error); }
-    if (!error) { error = md_exec_image_admit(copy, uid, gid, mode, out);
+    if (!error) { error = md_exec_image_admit(copy, uid, gid, mode, capabilities, out);
         if (error) fprintf(stderr, "PROBE admission identity error=%d\n", error); }
     if (copy >= 0) close(copy);
     return error;

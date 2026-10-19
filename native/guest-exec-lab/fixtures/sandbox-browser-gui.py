@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Interactive Firefox Snap receipt server; run inside a prepared GUI session."""
+"""Interactive packaged-browser receipts inside a prepared desktop/user session."""
 import argparse
 import hashlib
 import http.server
@@ -9,11 +9,11 @@ import subprocess
 import tempfile
 import threading
 
-DATA = b'Shroot Snap file round trip\n'
-PAGE = b'''<!doctype html><title>Shroot Snap GUI</title>
+DATA = b'Shroot browser file round trip\n'
+PAGE = b'''<!doctype html><title>Shroot Browser GUI</title>
 <style>body{font:22px sans-serif;margin:30px}input,button,a{font:22px sans-serif;margin:12px}
 canvas{display:block;border:1px solid black}</style>
-<h1>Shroot Snap GUI</h1>
+<h1>Shroot Browser GUI</h1>
 <input placeholder="Keyboard input" oninput="report('input',this.value)">
 <button onclick="report('click','ok')">Click</button><br>
 <a href="/download" download="shroot-snap.txt">Download test file</a><br>
@@ -34,20 +34,36 @@ else report('gpu',null);
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--common', type=Path, default=Path.home() / 'snap/firefox/common')
+    parser.add_argument('--browser', choices=('firefox', 'chromium'), default='firefox')
+    parser.add_argument('--package', choices=('snap', 'flatpak'), default='snap')
+    parser.add_argument('--common', type=Path)
     parser.add_argument('--port', type=int, default=18080)
     parser.add_argument('--require-webgl', action='store_true')
     args = parser.parse_args()
+    app_id = {'firefox': 'org.mozilla.firefox', 'chromium': 'org.chromium.Chromium'}[args.browser]
+    if args.common is None:
+        args.common = (Path.home() / 'snap' / args.browser / 'common' if args.package == 'snap'
+                       else Path.home() / '.var/app' / app_id / 'cache')
     args.output.mkdir(parents=True, exist_ok=True)
     args.common.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix='shroot-gui-', dir=args.common))
     profile = work / 'profile'
     profile.mkdir()
-    (profile / 'user.js').write_text(
-        'user_pref("browser.shell.checkDefaultBrowser", false);\n'
-        'user_pref("browser.startup.homepage_override.mstone", "ignore");\n'
-        'user_pref("browser.download.folderList", 2);\n'
-        'user_pref("browser.download.dir", ' + json.dumps(str(work)) + ');\n')
+    if args.browser == 'firefox':
+        (profile / 'user.js').write_text(
+            'user_pref("browser.shell.checkDefaultBrowser", false);\n'
+            'user_pref("browser.startup.homepage_override.mstone", "ignore");\n'
+            'user_pref("browser.download.folderList", 2);\n'
+            'user_pref("browser.download.dir", ' + json.dumps(str(work)) + ');\n')
+        options = ['--no-remote', '--profile', str(profile)]
+    else:
+        (profile / 'Default').mkdir()
+        (profile / 'Default/Preferences').write_text(json.dumps({
+            'download': {'default_directory': str(work), 'prompt_for_download': False}}))
+        options = ['--user-data-dir=' + str(profile), '--no-first-run', '--no-default-browser-check',
+                   '--ozone-platform=wayland']
+    launcher = (['snap', 'run', args.browser] if args.package == 'snap'
+                else ['flatpak', 'run', app_id])
     receipts = []
     downloads = []
     lock = threading.Lock()
@@ -88,9 +104,10 @@ def main():
     worker.start()
     try:
         print('Type shroot, click Click, download, then select: ' + str(work / 'shroot-snap.txt'), flush=True)
-        print('Close Firefox normally to finish. Profile: ' + str(profile), flush=True)
-        result = subprocess.run(['snap', 'run', 'firefox', '--no-remote', '--profile', str(profile),
-                                 'http://127.0.0.1:' + str(args.port) + '/'])
+        print('Close the browser normally to finish. Profile: ' + str(profile), flush=True)
+        command = launcher + options + ['http://127.0.0.1:' + str(args.port) + '/']
+        print('Command: ' + json.dumps(command), flush=True)
+        result = subprocess.run(command)
     finally:
         server.shutdown()
         worker.join()
@@ -106,7 +123,8 @@ def main():
     gpu = [r['value'] for r in receipts if r.get('type') == 'gpu']
     if args.require_webgl:
         checks['webgl'] = any(v and v.get('pixel') == [0, 255, 0, 255] for v in gpu)
-    report = dict(passed=all(checks.values()), checks=checks, gpu=gpu, work=str(work),
+    report = dict(passed=all(checks.values()), browser=args.browser, package=args.package,
+                  command=command, checks=checks, gpu=gpu, work=str(work),
                   sha256=hashlib.sha256(DATA).hexdigest())
     (args.output / 'gui-report.json').write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps(report), flush=True)

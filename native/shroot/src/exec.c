@@ -31,17 +31,12 @@ static long prepare_retained(const struct md_fs *fs, int base, const char *path,
         .flags=flags&AT_SYMLINK_NOFOLLOW ? O_NOFOLLOW : 0,
         .mode=inaccessible ? MD_EXEC_INACCESSIBLE : 0,.offset=base>=0 ? base : 0};
     struct md_proc_path ref=md_proc_path(routed);
-    int owned=-1;
     if (ref.kind && !*ref.tail && (flags&AT_SYMLINK_NOFOLLOW)) return -ELOOP;
     if (ref.kind==MD_PROC_EXE && !*ref.tail && fs->image) {
         if (*fs->image->executable_object) {
             q.path[1]=fs->image->executable_object;
             q.mode|=MD_EXEC_OBJECT;
             error=md_copy(routed,sizeof(routed),fs->image->executable_path);
-        } else {
-            long fd=md_proc_executable_open(fs,fs->image->executable_path,O_RDONLY|O_CLOEXEC);
-            if (fd<0) return fd;
-            owned=q.directory[0]=(int)fd; q.offset=fd; routed[0]=0;
         }
     } else if (ref.kind==MD_PROC_FD && ref.process==(int)RAW0(gettid)) {
         const char *tail=ref.tail;
@@ -60,7 +55,6 @@ static long prepare_retained(const struct md_fs *fs, int base, const char *path,
     if (error) return error;
     if (*routed=='/') q.directory[0]=-1;
     error=md_fs_buffer_exec_prepare(&q,recipe);
-    if (owned>=0) RAW1(close,owned);
     return error;
 }
 int md_command_initial(const struct md_fs *fs, struct md_command *c, const char *path, char *const argv[]) {

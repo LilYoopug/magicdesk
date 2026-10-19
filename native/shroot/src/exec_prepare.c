@@ -126,6 +126,9 @@ struct md_exec_preparation {
     struct md_command_images images;
     struct md_exec_image *setid;
     struct md_fs_info attributes;
+    unsigned identity_step;
+    size_t capability_size;
+    unsigned char capability[MD_FILE_CAPABILITY_MAX];
     enum md_command_file kind;
     int first, prepared;
     char path[MD_INTERPRETER_MAX];
@@ -138,33 +141,54 @@ static void preparation_clear(struct md_exec_preparation *p) {
 }
 static int prepare_identity(struct md_exec_preparation *p, struct md_fs_context *context, unsigned mode) {
     /* Only the provider can authorize stored identity. Anonymous/host-only
-     * images and suppressed set-ID execs retain their ordinary loading path. */
-    if (!p->origin || context->task.identity.no_new_privs
+     * images and nosuid/traced execs retain their ordinary loading path. */
+    if (!p->origin
             || (mode&MD_EXEC_TRACED) || (p->images.mount_flags&MD_MOUNT_NOSUID)) return 0;
     /* Providers may materialize a separate loader image. Stored authority
      * belongs to the retained source object, never that image's backing FD. */
-    struct md_fs_request q={.actor=context->actor,.peer=context->peer,.operation=MD_FS_FSTAT,
-        .directory={md_fs_anchor_fd(p->origin),-1},.origin={p->origin,NULL}};
-    struct md_fs_result result;
-    struct md_fs_output output={0};
-    execute(context,&q,&result,&output,&p->pending);
-    if (result.error) return result.error;
-    if (result.host_path) return 0;
-    const struct md_fs_info *info=&result.info;
-    if (p->setid) {
-        const struct md_fs_info *before=&p->attributes;
-        if (info->uid!=before->uid || info->gid!=before->gid || info->mode!=before->mode
+    while (p->identity_step<4) {
+        int capability=p->identity_step==1 || p->identity_step==2;
+        unsigned char value[MD_FILE_CAPABILITY_MAX]={0};
+        struct md_fs_request q={.actor=context->actor,.peer=context->peer,
+            .operation=capability ? MD_FS_XATTR : MD_FS_FSTAT,
+            .directory={md_fs_anchor_fd(p->origin),-1},.origin={p->origin,NULL},
+            .mode=capability ? MD_FS_XATTR_GET : MD_FS_STAT_CANONICAL,
+            .path={NULL,capability ? MD_FILE_CAPABILITY_NAME : NULL},
+            .capacity=capability ? sizeof(value) : 0};
+        struct md_fs_result result;
+        struct md_fs_output output={.data=value,.capacity=sizeof(value)};
+        execute(context,&q,&result,&output,&p->pending);
+        if (capability && (result.error==-ENODATA || result.error==-EOPNOTSUPP))
+            result.error=0, result.size=0;
+        if (result.error) return result.error;
+        if (result.host_path) return 0;
+        const struct md_fs_info *info=&result.info, *before=&p->attributes;
+        if (!p->identity_step) p->attributes=*info;
+        else if (p->identity_step==1) {
+            struct md_file_capabilities caps={0};
+            if (result.size && !md_file_capability_decode(value,result.size,&caps)) return -EINVAL;
+            int setid=!context->task.identity.no_new_privs && ((before->mode&S_ISUID)
+                || (before->mode&(S_ISGID|S_IXGRP))==(S_ISGID|S_IXGRP));
+            if (!setid && !caps.present) return 0;
+            p->capability_size=result.size;
+            memcpy(p->capability,value,sizeof(value));
+            int error=md_exec_image_snapshot(p->images.program,before->uid,before->gid,
+                before->mode,&caps,&p->setid);
+            if (error) return error;
+        } else if (p->identity_step==2) {
+            if (result.size!=p->capability_size || memcmp(value,p->capability,result.size)) return -ESTALE;
+        } else if (info->uid!=before->uid || info->gid!=before->gid || info->mode!=before->mode
                 || info->size!=before->size || info->change_seconds!=before->change_seconds
                 || info->change_nanos!=before->change_nanos) return -ESTALE;
-    } else {
-        if (!(info->mode&S_ISUID) && (info->mode&(S_ISGID|S_IXGRP))!=(S_ISGID|S_IXGRP)) return 0;
-        int error=md_exec_image_snapshot(p->images.program,info->uid,info->gid,info->mode,&p->setid);
-        if (error) return error;
-        p->attributes=*info;
-        /* Recheck logical metadata around the content snapshot as well as the
-         * physical checks inside it. A concurrent chmod/chown cannot lend stale authority. */
-        return prepare_identity(p,context,mode);
+        /* Each stage retains its own continuation. Revalidate capabilities and
+         * canonical metadata around the sealed content snapshot before admission. */
+        ++p->identity_step;
     }
+    /* Reject missing mandatory capabilities before the caller commits exec.
+     * Admission repeats the calculation, but cannot return to the old image. */
+    struct md_exec_identity candidate;
+    int error=md_identity_prepare_exec(&context->task.identity,p->setid,0,&candidate);
+    if (error) return error;
     int fd=md_exec_image_dup(p->setid);
     if (fd<0) return fd;
     close(p->images.program); p->images.program=fd;
@@ -209,6 +233,9 @@ static int acquire_first(struct md_exec_preparation *p,struct md_fs_context *con
         if ((*proc_image)->fd>=0) {
             error=acquire_fd(context,(*proc_image)->fd,(*proc_image)->origin,
                 (*proc_image)->identity.path,first,origin,&p->pending);
+            /* Proc exec retains the admitted image's logical name. Its sealed
+             * carrier is not a pathname for the loader's $ORIGIN lookup. */
+            if (!error) first->identity=(*proc_image)->identity;
         }
         else if ((*proc_image)->identity.object[0]) {
             error=(int)acquire_at(context,-1,NULL,(*proc_image)->identity.path,0,
