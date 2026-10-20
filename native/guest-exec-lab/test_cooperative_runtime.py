@@ -11,14 +11,18 @@ def main():
     parser.add_argument('build', type=Path)
     parser.add_argument('--entry-only', action='store_true')
     parser.add_argument('--diagnostics', action='store_true')
+    parser.add_argument('--machine-entry', action='store_true')
+    parser.add_argument('--case', choices=('all', 'birth-retirement', 'bursts'), default='all')
     args = parser.parse_args()
     suite = Suite(Path('build/cooperative-runtime'), args.build)
+    runner = [suite.runner, *(['--env', 'SHROOT_MACHINE_ENTRY=1'] if args.machine_entry else [])]
     try:
         root = suite.base + '/rootfs'
         suite.command(['mkdir', '-p', root + '/bin', root + '/tmp'])
         for name, destination in (('service', suite.base + '/service'),
                                   ('cooperative_guest', root + '/bin/probe'),
                                   ('test_vdso', suite.base + '/vdso'),
+                                  ('test_signal_delivery', suite.base + '/signals'),
                                   ('test_cooperative_native', suite.base + '/native-journal'),
                                   ('test_guest_copy', suite.base + '/guest-copy'),
                                   ('test_task_resources', suite.base + '/task-resources'),
@@ -31,6 +35,7 @@ def main():
             suite.transport.upload(suite.client, args.build / ('libmagicdesk_guest_' + name + '.so'), destination)
             suite.command(['chmod', '700', destination])
         if not args.entry_only:
+            suite.command(['timeout', '20', suite.base + '/signals'])
             suite.command(['timeout', '15', suite.base + '/guest-copy'])
             suite.command(['timeout', '45', suite.base + '/native-journal'])
             suite.command(['timeout', '90', suite.base + '/task-resources'])
@@ -47,17 +52,28 @@ def main():
         # Distribution imports carry virtual ownership; a host-directory import
         # without it deliberately retains real Android permission semantics.
         suite.command([suite.base + '/service', '--import', root, suite.base + '/store', '--preserve-ownership'])
-        output = suite.command(['timeout', '15', suite.runner, '--store', suite.base + '/store',
+        if args.case != 'all':
+            output = suite.command(['timeout', '90', *runner,
+                                    *(['--diagnostics'] if args.diagnostics else []),
+                                    '--statistics', '--store', suite.base + '/store',
+                                    '--user', '0:0', '--', '/bin/probe', '--' + args.case])
+            assert ('PASS native birth retirement:' if args.case == 'birth-retirement'
+                    else 'PASS execution bursts:') in output
+            suite.report['passed'] = True
+            suite.command(['rm', '-rf', suite.base])
+            return
+        output = suite.command(['timeout', '15', *runner, '--store', suite.base + '/store',
                                 '--user', '0:0', '--', '/bin/probe', '--initial-stack', '-silent'], quiet=True)
         assert output.count('PASS initial stack:') == 2
-        output = suite.command(['timeout', '15', suite.runner, '--diagnostics', '--store', suite.base + '/store',
+        output = suite.command(['timeout', '15', *runner, '--diagnostics', '--store', suite.base + '/store',
                                 '--user', '0:0', '--', '/bin/probe', '--jit-resume'], quiet=True)
         assert 'PASS cooperative JIT resume:' in output
+        assert 'PASS JIT internal wait:' in output
         assert len(re.findall(r'PROBE memory-repair .* result=0 scope=address-space', output)) == 8
-        output = suite.command(['timeout', '30', suite.runner, '--store', suite.base + '/store',
+        output = suite.command(['timeout', '30', *runner, '--store', suite.base + '/store',
                                 '--user', '0:0', '--', '/bin/probe', '--jit-busy'], quiet=True)
         assert 'PASS cooperative JIT busy:' in output
-        output = suite.command(['timeout', '90', suite.runner, *(['--diagnostics'] if args.diagnostics else []), '--statistics', '--store', suite.base + '/store',
+        output = suite.command(['timeout', '90', *runner, *(['--diagnostics'] if args.diagnostics else []), '--statistics', '--store', suite.base + '/store',
                                '--user', '0:0', '--', '/bin/probe'])
         assert 'PASS cooperative entry: metadata' in output
         assert 'PASS cooperative ABI: runtime-owned offers' in output
@@ -79,7 +95,7 @@ def main():
         assert descriptors and int(descriptors[1]) >= 128, 'FD checks did not exercise cooperative admission'
         suite.command(['mkdir', '-p', root + '/tmp/entry-emfile-dir', root + '/tmp/entry-birth-watch-dir'])
         suite.command([suite.base + '/service', '--import', root, suite.base + '/host-store'])
-        output = suite.command(['timeout', '90', suite.runner, '--store', suite.base + '/host-store',
+        output = suite.command(['timeout', '90', *runner, '--store', suite.base + '/host-store',
                                '--user', '0:0', '--', '/bin/probe', '--host-births'])
         assert 'PASS catalogue births:' in output
         suite.report['passed'] = True

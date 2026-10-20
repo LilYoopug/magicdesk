@@ -11,9 +11,10 @@ import configparser
 from pathlib import Path
 import shlex
 import subprocess
+import tempfile
 import time
 
-from test_oci_services import Suite
+from test_oci_services import Suite, add_machine_entry_argument
 from graphical_recipe import compile_recipe
 
 
@@ -26,16 +27,18 @@ def main():
     parser.add_argument('--home', default='/root')
     parser.add_argument('--lease', help='Renew an existing phone wake lease without releasing it')
     parser.add_argument('--output', type=Path, default=Path('build/recipe-graphics-results'))
+    add_machine_entry_argument(parser)
     args = parser.parse_args()
     classes = args.output / 'recipe-classes'
     hashes = compile_recipe(classes)
-    suite = Suite(args.output, args.build)
+    suite = Suite(args.output, args.build, machine_entry=args.machine_entry)
     client = suite.client
     suite.report['store'] = args.store
     suite.report['connectionSourceHashes'] = hashes
     display = session = lease = None
     owned = False
     document = '/tmp/md-gui-' + suite.report['id'] + '.txt'
+    probe_script = document + '.probe'
     run = [suite.runner, '--store', args.store, '--user', args.user, '--home', args.home, '--']
 
     def wait(condition, **selection):
@@ -81,7 +84,12 @@ def main():
         suite.command(run + ['/bin/sh', '-ec', 'command -v pidof; command -v timeout'])
         lease = client.call('device.keep_awake', {'durationMillis': 1800000,
                             **({'leaseId': args.lease} if args.lease else {})})['leaseId']
-        suite.command(['ln', '-s', 'libmagicdesk_guest_run.so', suite.base + '/shroot'])
+        with tempfile.TemporaryDirectory() as temporary:
+            wrapper = Path(temporary) / 'shroot'
+            wrapper.write_text('#!/system/bin/sh\nexec '
+                               + shlex.join([suite.runner, *suite.entry_options]) + ' "$@"\n')
+            suite.transport.upload(client, wrapper, suite.base + '/shroot')
+        suite.command(['chmod', '700', suite.base + '/shroot'])
         keyboard = suite.base + '/xkb'
         suite.command(suite.image_command('export-tree', args.store, '/usr/share/X11/xkb', keyboard))
         display = client.call('create_display', {'type': 'virtual', 'width': 1200, 'height': 800, 'densityDpi': 160})
@@ -112,13 +120,20 @@ def main():
                                 'weston': ['weston'], 'plasma-x11': ['kwin_x11', 'plasmashell'],
                                 'plasma-wayland': ['kwin_wayland', 'plasmashell']}[entry_name]
                     # Observe processes within their launch, not a peer launch's proc view.
-                    probe = ('for program do until pidof "$program"; do '
+                    probe = ('for program do printf "Waiting for %s\\n" "$program" >&2; '
+                             'until pidof "$program"; do '
                              'kill -0 "$MD_DESKTOP_PID" || exit 1; sleep 0.1; done; done')
+                    if entry_name.startswith('plasma-'):
+                        # A rendered splash is not a ready desktop.
+                        probe += ('; while pidof ksplashqml >/dev/null; do '
+                                  'kill -0 "$MD_DESKTOP_PID" || exit 1; sleep 0.1; done')
+                    suite.command(run + ['/bin/sh', '-ec', 'printf "%s\\n" "$2" > "$1"',
+                                         'sh', probe_script, probe], quiet=True)
                     guest_command += (' & MD_DESKTOP_PID=$!; export MD_DESKTOP_PID; '
-                        + shlex.join(['timeout', '30', '/bin/sh', '-ec', probe, 'sh', *programs])
+                        + shlex.join(['timeout', '30', '/bin/sh', '-e', probe_script, *programs])
                         + ' > ' + shlex.quote(ready_file + '.tmp')
                         + ' && mv ' + shlex.quote(ready_file + '.tmp') + ' ' + shlex.quote(ready_file)
-                        + ' || exit 1; wait "$MD_DESKTOP_PID"')
+                        + ' || { ps -eo pid,comm,args >&2; exit 1; }; wait "$MD_DESKTOP_PID"')
                 recipe = subprocess.check_output(['java', '-cp', str(classes),
                     'io.github.mekhontsev.magicdesk.GraphicalRecipe', 'routed', protocol, args.store,
                     args.home, guest_command, args.user], text=True, timeout=20)
@@ -184,14 +199,16 @@ def main():
                 check['error'] = repr(error)
                 print(check['error'], flush=True)
             finally:
+                close_case()
                 check['log'] = suite.command(['/system/bin/sh', '-c', 'test ! -f "$1" || cat "$1"', 'sh', log], quiet=True)
                 if 'Authorization required, but no authorization protocol specified' in check['log']:
                     check.update(passed=False, error='A client or activated service lost X11 authorization')
                 if "assertion 'POLKIT_IS_SUBJECT (subject)' failed" in check['log']:
                     check.update(passed=False, error='PolicyKit agent cannot identify its session')
-                close_case()
+                if 'guest-runtime: supervisor failure' in check['log']:
+                    check.update(passed=False, error='Shroot supervisor failure')
             print(('PASS ' if check['passed'] else 'FAIL ') + entry_name, flush=True)
-        suite.command(run + ['/bin/rm', '-f', document,
+        suite.command(run + ['/bin/rm', '-f', document, probe_script,
             *(document + '.' + entry + suffix for entry in ('xfce', 'weston', 'plasma-x11', 'plasma-wayland')
               for suffix in ('.ready', '.ready.tmp'))])
         after = client.call('get_state')

@@ -156,7 +156,7 @@ static void run(const char *store,const char *native,int directory,int cancel) {
     struct md_identity identity=md_identity_new(0,0);
     assert(!md_task_registry_publish(tasks,child,child,&identity,&resources));
     struct md_namespace_broker *broker=md_broker_create(worker,1,unexpected_delegate); assert(broker);
-    assert(!md_broker_task(broker,child,1,0,0));
+    assert(!md_broker_task(broker,child,1,0,0,NULL));
     atomic_store(&cancel_pid,cancel ? child : 0);
     md_broker_listen(broker,fd);
     assert(write(channel[0],"r",1)==1);
@@ -213,7 +213,7 @@ static void completed_result(const char *store,int nr) {
     assert(!md_fs_worker_start(store,endpoint,NULL,tasks,NULL,NULL,&worker));
     struct md_fd_origins *files=md_fd_origins_new(); assert(files);
     struct md_namespace_broker *broker=md_broker_create(worker,1,unexpected_delegate); assert(broker);
-    assert(!md_broker_task(broker,child,0,0,0));
+    assert(!md_broker_task(broker,child,0,0,0,NULL));
     long value=-123;
     assert(!md_broker_result_finish(broker,child,&value) && value==-123);
     assert(!md_broker_result_begin(broker,child,&call,files,source,NULL,O_CLOEXEC));
@@ -328,7 +328,7 @@ static void stopped_queued_entry(const char *store) {
     struct md_identity id=md_identity_new(0,0);
     assert(!md_task_registry_publish(tasks,pid,pid,&id,&resources));
     struct md_namespace_broker *broker=md_broker_create(worker,0,unexpected_delegate); assert(broker);
-    assert(!md_broker_task(broker,pid,MD_BROKER_COOPERATIVE,0,0));
+    assert(!md_broker_task(broker,pid,MD_BROKER_COOPERATIVE,0,0,NULL));
     struct md_entry_channel channel;
     assert(!md_broker_cooperative_bind(broker,pid,&channel,1));
     /* Valid but unused notification source: this case exercises direct entry. */
@@ -352,6 +352,12 @@ static void stopped_queued_entry(const char *store) {
         struct pollfd ready={.fd=md_fs_worker_fd(worker),.events=POLLIN};
         assert(poll(&ready,1,5000)==1);
         assert(!md_fs_worker_dispatch(worker));
+        int stopped=0;
+        assert(md_broker_native_borrow(broker,pid,&stopped)==1 && stopped);
+        /* Injection owns the held boundary until its registers are restored.
+         * Publishing it early replays the old stop as an injected-call event. */
+        assert(!md_broker_take_event(broker,&returned,NULL));
+        md_broker_native_return(broker,pid);
         observed=md_broker_take_event(broker,&returned,NULL);
     }
     assert(observed==pid && returned==status);

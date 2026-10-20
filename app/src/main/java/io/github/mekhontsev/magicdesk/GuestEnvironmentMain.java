@@ -59,7 +59,8 @@ public final class GuestEnvironmentMain {
                     dns --check validates the policy without creating or changing an environment; it does not test reachability.
                     Bind directories must exist; access is limited by the actual shell/root identity.
                     libc prepare explicitly compiles a private runtime using the locally registered installer.
-                    Launches never compile or download libc. Compatible cached builds are optional.
+                    Launches use distribution libc and never compile or download it.
+                    SHROOT_LIBC=compiled shroot ... explicitly selects compatible cached builds for comparison.
                     libc prune removes builds not leased by a running Shroot launch.
                     prune removes unused library resources and the download cache; busy resources fail.
                     MAGICDESK_GUEST_HOME selects a separate library. Only public HTTPS registries are supported.

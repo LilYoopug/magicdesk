@@ -80,6 +80,7 @@ extern void md_guest_load_groups(void), md_guest_loaded_groups(void);
 extern void md_guest_store_groups(void), md_guest_stored_groups(void);
 extern char md_guest_copy_begin[], md_guest_copy_end[];
 extern char md_guest_watch_gate[], md_guest_watch_return[];
+extern char md_guest_signal_step[];
 extern char md_guest_ipc_wait[];
 extern struct md_fd_observation md_guest_fd_control(unsigned, uint64_t, long, long);
 extern char md_guest_anchor_return[];
@@ -189,7 +190,10 @@ long md_guest_dispatch(long nr, unsigned long a0, unsigned long a1, unsigned lon
         : dispatch_files(&md_files,nr,a0,a1,a2,a3,a4,a5);
 }
 #include "cooperative_native.h"
+#include "svc_runtime.h"
 static const struct md_interception_abi abi = {
+    .svc_runtime=(uintptr_t)&md_svc_runtime,
+    .signal_step=(uintptr_t)md_guest_signal_step,
     .native_begin=(uintptr_t)md_cooperative_native,
     .native_call=(uintptr_t)md_cooperative_native_call,
     .native_return=(uintptr_t)md_cooperative_native_return,
@@ -356,12 +360,21 @@ int md_interception_install(int inherited) {
             BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_MEMORY),
             BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_mremap,0,1),
             BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_MEMORY),
+#ifdef MD_SVC_SIGNAL_PROOF
+            /* Only the isolated code-lifetime experiment observes removal of
+             * execute permission and anonymous executable-page discard. */
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_mprotect,0,1),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_MEMORY),
+            OBSERVE(madvise)
+#else
             BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_mprotect,0,4),
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[2])),
             BPF_JUMP(BPF_JMP|BPF_JSET|BPF_K,PROT_EXEC,0,1),
             BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_MEMORY),
             BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
-            NATIVE(madvise) NATIVE(brk)
+            NATIVE(madvise)
+#endif
+            NATIVE(brk)
             NATIVE(rt_sigaction) NATIVE(rt_sigprocmask) NATIVE(rt_sigreturn) NATIVE(sigaltstack)
             NATIVE(getpid) NATIVE(getppid) NATIVE(gettid)
             NATIVE(getrandom) NATIVE(clock_gettime)

@@ -35,6 +35,14 @@ int md_fd_selector_has(struct md_fd_selector *a, unsigned kind, int fd) {
     if (!a->bits[kind] && !(a->bits[kind] = calloc(1, BYTES))) return -ENOMEM;
     return !!(a->bits[kind][fd / 8] & (1U << (fd % 8)));
 }
+int md_fd_selector_has_mask(struct md_fd_selector *a,unsigned kinds,int fd) {
+    if (!a || fd< -1 || kinds&~((1U<<MD_FD_SELECTOR_KINDS)-1)) return -EINVAL;
+    for (unsigned kind=0;kind<MD_FD_SELECTOR_KINDS;++kind) if (kinds&(1U<<kind)) {
+        int result=md_fd_selector_has(a,kind,fd);
+        if (result<=0) return result;
+    }
+    return 1;
+}
 int md_fd_selector_mark(struct md_fd_selector *a, unsigned kind, int fd) {
     if (!a || kind>=MD_FD_SELECTOR_KINDS || fd< -1) return -EINVAL;
     if (kind==MD_FD_SELECTOR_POLL) fd=-1;

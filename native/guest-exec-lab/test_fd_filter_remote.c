@@ -47,11 +47,14 @@ static int stop(pid_t pid) {
     do { got=waitpid(pid,&status,__WALL); } while (got<0 && errno==EINTR);
     assert(got==pid); return status;
 }
+static void unexpected_trap(int number) { (void)number; _exit(92); }
 static void child(int start,int reader,int ep,struct shared *shared,int denied,int reading,int protected) {
     assert(!prctl(PR_SET_PDEATHSIG,SIGKILL));
     char byte; assert(read(start,&byte,1)==1);
     if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
-    sigset_t mask; sigemptyset(&mask); sigaddset(&mask,SIGUSR1);
+    struct sigaction trap={.sa_handler=unexpected_trap},observed;
+    sigemptyset(&trap.sa_mask); assert(!sigaction(SIGTRAP,&trap,NULL));
+    sigset_t mask; sigemptyset(&mask); sigaddset(&mask,SIGUSR1); sigaddset(&mask,SIGTRAP);
     assert(!sigprocmask(SIG_SETMASK,&mask,NULL));
     assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
     struct sock_filter code[]={
@@ -75,7 +78,8 @@ static void child(int start,int reader,int ep,struct shared *shared,int denied,i
     }
     assert(n==1 && byte=='q');
     assert(!sigprocmask(SIG_SETMASK,NULL,&mask) && sigismember(&mask,SIGUSR1)==1
-        && sigismember(&mask,SIGUSR2)==0);
+        && sigismember(&mask,SIGUSR2)==0 && sigismember(&mask,SIGTRAP)==1);
+    assert(!sigaction(SIGTRAP,NULL,&observed) && observed.sa_handler==unexpected_trap);
     assert(syscall(SYS_getpgid,0)==-1 && errno==ENOKEY);
     shared->completed=1; _exit(0);
 }

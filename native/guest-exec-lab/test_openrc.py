@@ -7,7 +7,7 @@ dedicated runlevel tree, not the distribution's hardware/boot/shutdown services.
 import argparse
 from pathlib import Path
 
-from test_oci_services import Suite
+from test_oci_services import Suite, add_machine_entry_argument
 
 
 SCRIPT = r'''set -eux
@@ -77,15 +77,16 @@ def main():
     parser.add_argument('--store', required=True)
     parser.add_argument('--build', type=Path)
     parser.add_argument('--output', type=Path, default=Path('build/openrc-results'))
+    add_machine_entry_argument(parser)
     args = parser.parse_args()
-    suite = Suite(args.output, args.build)
+    suite = Suite(args.output, args.build, machine_entry=args.machine_entry)
     try:
         # EVENT_WAIT: synchronous OpenRC lifecycle, bounded by the supervisor's
         # launch deadline. Missing service readiness is a failure, not a delay.
-        output = suite.command([suite.runner, '--store', args.store, '--user', '0:0',
+        output = suite.command(suite.guest(args.store, '--user', '0:0',
                                '--network', 'routed', '--deadline-seconds', '90', '--',
                                '/usr/bin/unshare', '--mount', '--pid', '--fork', '--mount-proc',
-                               '--uts', '--ipc', '--cgroup', '/bin/sh', '-ec', SCRIPT], timeout=110)
+                               '--uts', '--ipc', '--cgroup', '/bin/sh', '-ec', SCRIPT), timeout=110)
         assert 'PASS OpenRC init, dependencies' in output
         suite.report['passed'] = True
     finally:

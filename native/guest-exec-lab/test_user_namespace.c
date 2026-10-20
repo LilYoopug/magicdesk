@@ -8,7 +8,7 @@
 #include "uts_namespace.h"
 #include "ipc_permissions.h"
 #include "fd_messages.h"
-#include "fd_selector.h"
+#include "fd_filter.h"
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -195,6 +195,14 @@ static void selectors(void) {
     struct md_fd_selector *prepared=md_fd_selector_fork(a,0); assert(prepared);
     assert(md_fd_selector_has(prepared,MD_FD_SELECTOR_PROC,-1)==1);
     assert(md_fd_selector_has(prepared,MD_FD_SELECTOR_WATCH,98765)==1);
+    assert(!md_fd_selector_has_mask(prepared,MD_FD_SANDBOX_SELECTORS,-1));
+    assert(!md_fd_selector_mark(prepared,MD_FD_SELECTOR_EPOLL_TARGET,-1));
+    assert(!md_fd_selector_mark(prepared,MD_FD_SELECTOR_EPOLL,-1));
+    assert(!md_fd_selector_has_mask(prepared,MD_FD_SANDBOX_SELECTORS,-1));
+    assert(!md_fd_selector_mark(prepared,MD_FD_SELECTOR_POLL,-1));
+    assert(md_fd_selector_has_mask(prepared,MD_FD_SANDBOX_SELECTORS,-1)==1);
+    assert(!md_fd_selector_has_mask(a,MD_FD_SANDBOX_SELECTORS,-1));
+    assert(md_fd_selector_has_mask(prepared,1U<<MD_FD_SELECTOR_KINDS,-1)==-EINVAL);
     md_fd_selector_release(prepared);
     md_fd_selector_release(a); md_fd_selector_release(copy); md_fd_selector_release(shared);
 }

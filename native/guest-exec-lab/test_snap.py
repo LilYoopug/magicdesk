@@ -7,7 +7,7 @@ import shlex
 import subprocess
 
 from init_fixture import PREPARE as INIT_PREPARE
-from test_oci_services import Suite
+from test_oci_services import Suite, add_machine_entry_argument
 
 
 PREPARE = INIT_PREPARE.replace('for device in null zero full random urandom tty;',
@@ -89,15 +89,18 @@ def main():
                         help='Remove an existing test snap before the install phase')
     parser.add_argument('--app-launches', type=int, choices=range(1, 11), default=1,
                         help='Run Firefox repeatedly with a fresh profile and verify every rendered image')
+    add_machine_entry_argument(parser)
     args = parser.parse_args()
+    if args.machine_entry and args.libc_registry:
+        parser.error('--machine-entry requires stock libc, not --libc-registry')
     if args.namespace_only:
         args.cold_launch_checks = 1
-    suite = Suite(args.output, args.build)
+    suite = Suite(args.output, args.build, machine_entry=args.machine_entry)
     suite.report['store'] = args.store
     suite.report['snap'] = args.snap
     target = '/opt/md-snap-' + suite.report['id']
-    prefix = [suite.runner, '--store', args.store, '--user', '0:0', '--network', 'routed']
-    if args.statistics:
+    prefix = suite.guest(args.store, '--user', '0:0', '--network', 'routed')
+    if args.statistics and not args.machine_entry:
         prefix += ['--statistics']
     if args.libc_registry:
         prefix += ['--libc-registry', args.libc_registry]

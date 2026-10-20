@@ -87,9 +87,18 @@ use `magicdesk download`; no Linux environment is required.
 
 Shroot can optionally use a locally built musl/glibc with direct syscall entry.
 **Shroot Base** uses the distribution's unmodified libc and remains the fallback.
-The installer prepares this experimental acceleration by default, reusing a
-compatible cached build or compiling on the device. It does not replace Android's
-libc or overwrite package-owned files in Linux.
+During the machine-code entry transition, source-built libc remains available
+for explicit comparisons but is neither built nor selected by default.
+Preparation reuses a compatible cached build or compiles on the device.
+It does not replace Android's libc or overwrite package-owned files in Linux.
+
+The native runtime also has an experimental lazy single-SVC entry, which uses
+unmodified programs and the same syscall engine. It is opt-in, not the default
+of this installer. Native runner tests select `--env SHROOT_MACHINE_ENTRY=1`;
+this is separate from selecting a cached libc with `SHROOT_LIBC=compiled`.
+Its [integration status and measurements](../native/guest-exec-lab/svc-rewriting.md#product-boundary)
+distinguish accelerated calls from Base fallback, including seccomp revocation
+and protected (`dumpable=0`) processes.
 
 #### Enable After Installation
 
@@ -108,9 +117,10 @@ version; the downloaded script contains all MagicDesk source hooks and patches.
 sh ~/install_linux.sh --prepare-libc steamos --jobs 2
 ```
 
-Wait for `Shroot libc prepared: ...`. Start Linux again through its existing
-shortcut or `shroot login steamos`; new compatible programs select the build
-automatically. Already running programs are not switched. `shroot libc list`
+Wait for `Shroot libc prepared: ...`. Select the compiled path explicitly with
+`SHROOT_LIBC=compiled shroot login steamos`; compatible programs in that launch
+can select the build. Ordinary launches use distribution libc during the
+machine-code entry transition. Already running programs are not switched. `shroot libc list`
 lists cached builds, not proof that a particular application is using one.
 
 The first preparation saves the installer as the local recipe. To prepare again,
@@ -142,7 +152,7 @@ resulting environment, and start compilation in a fresh accelerated launch. Comp
 install packages that could invalidate that selection. This accelerates the
 build tools; it does not link the resulting graphics libraries to a private libc.
 
-Normal `shroot run/exec/login` commands do not change. Nested Docker/Podman
+The opt-in applies to `shroot run/exec/login` and low-level launches. Nested Docker/Podman
 processes can select compatible registry entries too, without rebuilding OCI
 layers or wrapping `docker run`. Matching uses exact original interpreter/libc
 hashes and the entry ABI, not merely a distribution name or version. A package
@@ -177,10 +187,11 @@ Linux programs to use Base. Successful `--prepare-libc steamos` preparation
 clears this marker and enables selection again. This command needs a working
 guest shell; it is not recovery for a loader that cannot start.
 
-The installer's default `--libc shroot` prepares/enables this path, including with
-`--yes` and `--resume`; explicit `--libc keep` preserves existing selection without
-building. The main interactive questions offer `shroot`, `base` and `keep` before
-choosing compiler parallelism. That one job count applies to libc, Mesa/Turnip
+The installer defaults to `--libc keep`, including with `--yes` and `--resume`.
+Explicit `--libc shroot` still prepares the compiled path and selects it for
+subsequent build stages; `--prepare-libc` and `shroot libc prepare` remain
+available for comparisons. No build or cached selection is implicit in a normal
+launch. The compiler job count applies to libc, Mesa/Turnip
 and KWin. Exact matching prevents accidental cross-version reuse, but is not
 proof that an upstream rebuilt libc preserves
 every distribution-specific private ABI. See the [integration contract and
@@ -206,6 +217,8 @@ the original Docker image. Its build targets the original image's libc even if
 the temporary environment's package manager upgrades its build dependencies.
 Wait for `Shroot libc prepared: ...`. Once the recipe is registered, the equivalent
 command is `shroot libc prepare alpine:3.23 --jobs 2`.
+Start SteamOS and its Docker daemon through `SHROOT_LIBC=compiled shroot ...`
+to make that registry available to nested launches.
 
 **In a SteamOS terminal connected to that Docker daemon:**
 

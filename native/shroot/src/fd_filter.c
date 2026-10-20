@@ -43,10 +43,8 @@ long md_fd_filter_prepare_sandbox(void) {
     /* Prepare descriptor and readiness selectors for future typed FDs before an
      * application can deny seccomp. Its ERRNO/TRAP/KILL decisions still win.
      * Unsandboxed workloads keep the selective per-number path. */
-    const enum md_fd_selector_kind kinds[]={MD_FD_SELECTOR_PROC,MD_FD_SELECTOR_EPOLL_TARGET,
-        MD_FD_SELECTOR_EPOLL,MD_FD_SELECTOR_POLL};
-    for (unsigned i=0;i<sizeof(kinds)/sizeof(*kinds);++i) {
-        long result=arm(kinds[i],-1);
+    for (unsigned kind=0;kind<MD_FD_SELECTOR_KINDS;++kind) if (MD_FD_SANDBOX_SELECTORS&(1U<<kind)) {
+        long result=arm((enum md_fd_selector_kind)kind,-1);
         if (result) return result;
     }
     return 0;

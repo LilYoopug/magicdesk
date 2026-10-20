@@ -115,6 +115,7 @@ static void native_control_fault(void) {
     close(pair[0]); close(pair[1]); assert(descriptors()==before);
 }
 struct mutation { int socket, file, replacement; pid_t parent; };
+static void unexpected_trap(int number) { (void)number; _exit(92); }
 static int mutate(void *context) {
     struct mutation *m=context;
     assert(!prctl(PR_SET_PDEATHSIG,SIGKILL) && getppid()==m->parent);
@@ -193,7 +194,10 @@ static void actor(int socket, int writer, int file, int path, int replacement, i
         assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&deny));
     }
     for (unsigned i=0;i<sizeof(snapshot->present);++i) snapshot->present[i]=fcntl((int)i,F_GETFD)>=0;
+    struct sigaction trap={.sa_handler=unexpected_trap},observed;
+    sigemptyset(&trap.sa_mask); assert(!sigaction(SIGTRAP,&trap,NULL));
     caller_stop();
+    assert(!sigaction(SIGTRAP,NULL,&observed) && observed.sa_handler==unexpected_trap);
     for (unsigned i=0;i<sizeof(snapshot->present);++i) assert(snapshot->present[i]==(fcntl((int)i,F_GETFD)>=0));
     if (sibling>0) {
         /* EVENT_WAIT: the exact mutation sibling must exit before fixture

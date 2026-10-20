@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import time
 
-from test_oci_services import Suite
+from test_oci_services import Suite, add_machine_entry_argument
 from graphical_recipe import compile_recipe
 
 
@@ -29,10 +29,13 @@ def main():
     parser.add_argument('--window-title', help='Exact expected client window, rather than an updater or splash')
     parser.add_argument('--user', default='steamos')
     parser.add_argument('--home', default='/home/steamos')
+    add_machine_entry_argument(parser)
     args = parser.parse_args()
     if not 1 <= args.timeout <= 1800:
         parser.error('--timeout must be between 1 and 1800 seconds')
-    suite = Suite(args.build, None if args.installed else args.build)
+    if args.machine_entry and (args.installed or args.libc_registry):
+        parser.error('--machine-entry requires the native build without compiled libc selection')
+    suite = Suite(args.build, None if args.installed else args.build, machine_entry=args.machine_entry)
     client = suite.client
     protocol = 'x11' if args.client in ('steam', 'glx') else 'wayland'
     session = display = display_lease = None
@@ -77,6 +80,7 @@ def main():
             wrapper = Path(temporary) / 'shroot'
             wrapper.write_text('#!/system/bin/sh\nprintf "%s\\n" "$$" > ' + shlex.quote(pidfile)
                                + '\nexec ' + shlex.quote(suite.runner)
+                               + (' ' + shlex.join(suite.entry_options) if suite.entry_options else '')
                                + (' --diagnostics' if args.diagnostics else '')
                                + (' --libc-registry ' + shlex.quote(args.libc_registry)
                                   if args.libc_registry else '')
@@ -185,6 +189,7 @@ fi
                 suite.transport.download(client, log, local_log, overwrite=True)
                 suite.report['logFile'] = str(local_log)
                 suite.report['logTail'] = '\n'.join(local_log.read_text(errors='replace').splitlines()[-200:])
+                suite.record_entry(local_log.read_text(errors='replace'))
                 suite.report['exit'] = suite.command(['cat', receipt], quiet=True).strip()
             if args.trace and launch_attempted:
                 suite.report['trace'] = suite.command([suite.runner, '--store', args.store,

@@ -3,7 +3,7 @@
 import argparse
 from pathlib import Path
 
-from test_oci_services import Suite
+from test_oci_services import Suite, add_machine_entry_argument
 
 
 def main():
@@ -14,8 +14,9 @@ def main():
     parser.add_argument('--user', default='steamos')
     parser.add_argument('--socket-owner', action='store_true',
                         help='Also require Python/lsof TCP owner discovery used by Steam UI authentication')
+    add_machine_entry_argument(parser)
     args = parser.parse_args()
-    suite = Suite(args.build, args.build)
+    suite = Suite(args.build, args.build, machine_entry=args.machine_entry)
     suite.report.update(store=args.store, probe='steamos-userspace', user=args.user,
                         fullOsBoot=False)
     try:
@@ -23,8 +24,8 @@ def main():
             suite.report['archiveSha256'] = suite.command(['sha256sum', args.archive], quiet=True).split()[0]
             suite.command([suite.image, 'rootfs', args.archive, args.store + '-image'], timeout=600)
             suite.command([suite.image, 'create', args.store + '-image', args.store])
-        root = [suite.runner, '--store', args.store, '--user', '0:0', '--deadline-seconds', '60', '--']
-        user = [suite.runner, '--store', args.store, '--user', args.user, '--deadline-seconds', '60', '--']
+        root = suite.guest(args.store, '--user', '0:0', '--deadline-seconds', '60', '--')
+        user = suite.guest(args.store, '--user', args.user, '--deadline-seconds', '60', '--')
         suite.report['distribution'] = suite.command(root + ['/bin/sh', '-ec', '''
 cat /etc/os-release
 getconf GNU_LIBC_VERSION

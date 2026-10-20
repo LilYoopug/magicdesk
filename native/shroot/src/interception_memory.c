@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "interception_memory.h"
+#include "svc_registry.h"
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -9,6 +10,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 
 struct slot { uintptr_t top; int used; struct slot *next; };
@@ -46,6 +48,7 @@ struct md_interception_memory {
     int access_ready;
     int exposed;
     struct backing_pool *backings;
+    struct md_svc_registry *svc;
 };
 static unsigned backing_bucket(dev_t device, ino_t inode) {
     return ((uint64_t)device ^ (uint64_t)inode) % BACKING_BUCKETS;
@@ -98,6 +101,11 @@ static struct md_interception_memory *memory_new(struct backing_pool *pool) {
     return s;
 }
 struct md_interception_memory *md_memory_new(void) { return memory_new(NULL); }
+struct md_svc_registry *md_memory_svc(const struct md_interception_memory *s) { return s ? s->svc : NULL; }
+int md_memory_svc_set(struct md_interception_memory *s,struct md_svc_registry *registry) {
+    if (!s || s->svc) return -EBUSY;
+    s->svc=registry; return 0;
+}
 void md_memory_expose(struct md_interception_memory *s) { s->exposed=1; }
 int md_memory_exposed(const struct md_interception_memory *s) { return s && s->exposed; }
 struct md_interception_memory *md_memory_new_image(struct md_interception_memory *s) {
@@ -123,6 +131,7 @@ struct md_interception_memory *md_memory_fork(struct md_interception_memory *s, 
         copy->ranges=copy->capacity=s->ranges;
     }
     copy->policy_unknown=s->policy_unknown;
+    if (s->svc && !(copy->svc=md_svc_registry_copy(s->svc))) { md_memory_release(copy); return NULL; }
     if (s->file_count) {
         copy->files=malloc(s->file_count*sizeof(*copy->files));
         if (copy->files) {
@@ -138,7 +147,7 @@ void md_memory_release(struct md_interception_memory *s) {
     while (s->slots) { struct slot *next = s->slots->next; free(s->slots); s->slots = next; }
     md_buffers_release(s->buffers); md_resource_queue_destroy(&s->mappings); free(s->restrictions);
     if (s->access_ready) { close(s->access.maps); close(s->access.memory); close(s->access.pagemap); }
-    file_ranges_release(s->files,s->file_count); pool_release(s->backings); free(s);
+    file_ranges_release(s->files,s->file_count); pool_release(s->backings); free(s->svc); free(s);
 }
 uintptr_t md_memory_stack_take(struct md_interception_memory *s) {
     for (struct slot *p = s->slots; p; p = p->next)
@@ -364,6 +373,31 @@ int md_memory_file_view(const struct md_interception_memory *s, uintptr_t first,
     }
     if (cursor!=end) return 0;
     *fd=backing->fd; *offset=position; return 1;
+}
+int md_memory_image_backing(struct md_interception_memory *s,pid_t pid,int fd) {
+    struct stat st;
+    if (fstat(fd,&st)) return -errno;
+    if (!S_ISREG(st.st_mode)) return -EINVAL;
+    char path[64]; snprintf(path,sizeof(path),"/proc/%d/maps",pid);
+    FILE *maps=fopen(path,"re");
+    if (!maps) return -errno;
+    char *line=NULL; size_t capacity=0;
+    int error=0, captured=0;
+    while (!error && getline(&line,&capacity,maps)>0) {
+        unsigned long first,end,offset,inode;
+        unsigned major_id,minor_id; char permissions[5];
+        if (sscanf(line,"%lx-%lx %4s %lx %x:%x %lu",&first,&end,permissions,
+                &offset,&major_id,&minor_id,&inode)!=7 || permissions[3]!='p'
+                || inode!=st.st_ino || makedev(major_id,minor_id)!=st.st_dev) continue;
+        struct md_mapping_change change={0};
+        error=md_memory_mapping_prepare(s,&change,MD_MAPPING_MAP,first,end-first,0,MAP_PRIVATE,0);
+        if (!error) error=md_memory_mapping_backing(s,&change,fd,offset);
+        if (!error && !change.backing) error=-EACCES;
+        md_memory_mapping_finish(s,&change,error ? error : (long)first);
+        if (!error) ++captured;
+    }
+    if (!error && ferror(maps)) error=-EIO;
+    free(line); fclose(maps); return error ? error : captured ? 0 : -ENOENT;
 }
 static void change_release(struct md_mapping_change *c) {
     backing_release(c->backing); file_ranges_release(c->moving,c->moving_count);

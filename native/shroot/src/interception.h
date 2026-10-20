@@ -73,6 +73,8 @@ struct md_interception_abi {
     uintptr_t buffer_result;
     uintptr_t buffer_enter;
     uintptr_t native_begin, native_call, native_return, native_end;
+    uintptr_t signal_step;
+    uintptr_t svc_runtime;
 };
 long md_guest_buffer_admit(unsigned purpose);
 

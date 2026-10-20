@@ -34,6 +34,9 @@ int md_task_call_begin(struct md_task_call *,long (*trace)(int,pid_t,void *,void
  * A restored restart exit has a pending synthetic interrupt, owned by the
  * enclosing dispatcher after completion or consumed by again(). */
 int md_task_call_event(struct md_task_call *,int status);
+/* Resume the same internal boundary after the owner retained an unrelated
+ * signal. Does not consume the signal or change the saved application state. */
+int md_task_call_continue(struct md_task_call *);
 /* Run another syscall from a completed, restored boundary. */
 int md_task_call_again(struct md_task_call *,const struct md_task_call_arguments *);
 #endif

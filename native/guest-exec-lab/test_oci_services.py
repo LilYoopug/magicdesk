@@ -105,8 +105,13 @@ class Server:
         assert not self.process.is_alive() and not self.reader.is_alive(), 'fixture owner still active'
 
 
+def add_machine_entry_argument(parser):
+    parser.add_argument('--machine-entry', action='store_true',
+                        help='Use stock binaries with lazy SVC entry and require completed accelerated calls')
+
+
 class Suite:
-    def __init__(self, output, build=None):
+    def __init__(self, output, build=None, machine_entry=False):
         output.mkdir(parents=True, exist_ok=True)
         repo = Path(__file__).resolve().parents[2]
         spec = importlib.util.spec_from_file_location('transport', repo / 'scripts/mcp-client.py')
@@ -121,6 +126,10 @@ class Suite:
         self.output = output / ('oci-services-' + tag + '.json')
         self.report = {'id': tag, 'directory': self.base, 'app': state['app'], 'device': state['device'],
                        'uid': 2000, 'images': [], 'commands': [], 'servers': [], 'cases': [], 'passed': False}
+        self.entry_options = (['--env', 'SHROOT_MACHINE_ENTRY=1', '--statistics']
+                              if machine_entry else [])
+        if machine_entry:
+            self.report['machineEntry'] = {'processes': [], 'completed': 0}
         self.console = self.client.call('console.open', {'directory': '/data/local/tmp'})['sessionId']
         self.report['consoleId'] = self.console
         self.command(['mkdir', self.base])
@@ -161,6 +170,7 @@ class Suite:
         result = self.client.call('console.execute', {'sessionId': self.console, 'command': text},
                                   deadline=time.monotonic() + timeout + 30)
         self.report['commands'].append({'command': text, **result})
+        self.record_entry(result['output'])
         if not quiet:
             print(result['output'], end='', flush=True)
         assert result['exitCode'] == expected, result
@@ -184,18 +194,43 @@ class Suite:
         return base + '/instance'
 
     def run(self, store, *options):
-        return self.image_command('run', store, *options)
+        return self.image_command('run', store, *self.entry_options, *options)
+
+    def guest(self, store, *options):
+        return [self.runner, '--store', store, *self.entry_options, *options]
+
+    def record_entry(self, output):
+        evidence = self.report.get('machineEntry')
+        if evidence is None:
+            return
+        for line in output.splitlines():
+            if line.startswith('SVC_RUNTIME_STATS '):
+                record = json.loads(line.removeprefix('SVC_RUNTIME_STATS '))
+                evidence['processes'].append(record)
+                evidence['completed'] += record['completed']
 
     def finish(self):
+        coverage_error = None
         try:
             self.client.request_timeout = 30
             self.client.call('console.close', {'sessionId': self.console})
         except Exception as error:
+            self.report['passed'] = False
             self.report['cleanupFailure'] = repr(error)
             raise
         finally:
+            evidence = self.report.get('machineEntry')
+            if self.report['passed'] and evidence is not None:
+                if not evidence['completed']:
+                    coverage_error = 'No completed lazy SVC calls; Base-only execution is not a pass'
+                elif any(item['unknown'] for item in evidence['processes']):
+                    coverage_error = 'Lazy SVC entry reported an unknown outcome'
+                if coverage_error:
+                    self.report.update(passed=False, coverageFailure=coverage_error)
             self.output.write_text(json.dumps(self.report, indent=2) + '\n')
             print('Report:', self.output, flush=True)
+        if coverage_error:
+            raise AssertionError(coverage_error)
 
 
 def port():

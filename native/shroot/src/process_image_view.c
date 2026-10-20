@@ -67,20 +67,21 @@ static const struct md_control_file_ops image_ops={.retain=image_retain,.release
 struct md_control_file md_process_executable_view(struct md_process_executable *image) {
     return (struct md_control_file){image ? &image_ops : NULL,image};
 }
-static int copy(pid_t pid, uintptr_t address, void *data, size_t size) {
+static int copy(pid_t pid, uintptr_t address, void *data, size_t size,int memory) {
     if (address>UINTPTR_MAX-size) return -EFAULT;
     struct iovec local={data,size}, remote={(void *)address,size};
-    return process_vm_readv(pid,&local,1,&remote,1,0)==(ssize_t)size ? 0 : -EFAULT;
+    if (process_vm_readv(pid,&local,1,&remote,1,0)==(ssize_t)size) return 0;
+    return memory>=0 && address<=INT64_MAX && pread(memory,data,size,(off_t)address)==(ssize_t)size ? 0 : -EFAULT;
 }
 ssize_t md_process_image_link(pid_t pid, uintptr_t image, char *out, size_t capacity) {
     if (!image) return -ENOENT;
     if (!out || !capacity || image>UINTPTR_MAX-sizeof(struct md_process_image)) return -EINVAL;
     uintptr_t path=0;
-    int error=copy(pid,image+offsetof(struct md_process_image,executable_path),&path,sizeof(path));
+    int error=copy(pid,image+offsetof(struct md_process_image,executable_path),&path,sizeof(path),-1);
     if (error) return error;
     for (size_t size=0;size<capacity;++size) {
         if (path>UINTPTR_MAX-size) return -EFAULT;
-        error=copy(pid,path+size,out+size,1);
+        error=copy(pid,path+size,out+size,1,-1);
         if (error) return error;
         if (!out[size]) return (ssize_t)size;
     }
@@ -90,11 +91,11 @@ int md_process_image_identity(pid_t pid,uintptr_t image,struct md_image_identity
     memset(out,0,sizeof(*out));
     ssize_t result=md_process_image_link(pid,image,out->path,sizeof(out->path));
     if (result<0) return (int)result;
-    int error=copy(pid,image+offsetof(struct md_process_image,executable_object),out->object,sizeof(out->object));
+    int error=copy(pid,image+offsetof(struct md_process_image,executable_object),out->object,sizeof(out->object),-1);
     if (!error && out->object[sizeof(out->object)-1]) error=-EPROTO;
     return error;
 }
-int md_process_image_view(pid_t pid, uintptr_t image, unsigned kind, unsigned flags, const char *endpoint, pid_t caller) {
+int md_process_image_view(pid_t pid, uintptr_t image, int memory, unsigned kind, unsigned flags, const char *endpoint, pid_t caller) {
     if (!image) return -ENOENT;
     if (kind!=MD_PROC_AUXV && kind!=MD_PROC_CMDLINE && kind!=MD_PROC_EXE) return -ENOTSUP;
     if (flags&O_DIRECTORY) return -ENOTDIR;
@@ -102,7 +103,10 @@ int md_process_image_view(pid_t pid, uintptr_t image, unsigned kind, unsigned fl
     if ((flags&(O_CREAT|O_EXCL))==(O_CREAT|O_EXCL)) return -EEXIST;
     struct md_process_image *view=malloc(sizeof(*view));
     if (!view) return -ENOMEM;
-    int r=copy(pid,image,view,sizeof(*view));
+    /* Cmdline is public even when ptrace access has been revoked. Never lend
+     * this retained authority to auxv or executable inspection. */
+    if (kind!=MD_PROC_CMDLINE) memory=-1;
+    int r=copy(pid,image,view,sizeof(*view),memory);
     if (!r && (view->argument_bytes>MD_EXEC_BYTES || view->auxv_bytes>sizeof(view->auxv) || view->executable_object[32])) r=-EPROTO;
     struct md_fs_request q={.actor=caller,.operation=kind==MD_PROC_EXE ? MD_FS_OPEN_OBJECT : MD_FS_TEMPORARY,
         .directory={-1,-1},.path={view->executable_object,NULL}};
@@ -122,7 +126,7 @@ int md_process_image_view(pid_t pid, uintptr_t image, unsigned kind, unsigned fl
                 if (count>sizeof(bytes)) count=sizeof(bytes);
                 uintptr_t address=(uintptr_t)view->arguments;
                 if (address>UINTPTR_MAX-offset) { r=-EFAULT; break; }
-                r=copy(pid,address+offset,bytes,count);
+                r=copy(pid,address+offset,bytes,count,memory);
                 if (!r && write(fd,bytes,count)!=(ssize_t)count) r=-EIO;
                 offset+=count;
             }

@@ -6,6 +6,7 @@
 #include "received_fds.h"
 #include "socket_control.h"
 #include "proc_paths.h"
+#include "signal_protocol.h"
 #include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -222,7 +223,7 @@ static int export_next(struct helper *m) {
 static int child_begin(struct helper *m) {
     unsigned long options=PTRACE_O_TRACESECCOMP|PTRACE_O_TRACEEXIT|PTRACE_O_EXITKILL|PTRACE_O_TRACESYSGOOD;
     int error=(int)trace(m,PTRACE_SETOPTIONS,m->child,NULL,(void *)options);
-    uint64_t mask=UINT64_MAX;
+    uint64_t mask=md_signal_protocol_mask();
     if (!error) error=(int)trace(m,PTRACE_SETSIGMASK,m->child,(void *)sizeof(mask),&mask);
     if (error) return error==-ESRCH ? 0 : error;
     if (m->cancelled) return abort_child(m);
@@ -729,6 +730,15 @@ int md_task_helper_event(struct md_task_helpers *manager, pid_t pid, int status)
             error=resume(m,pid);
         }
     } else if (!event && sig==SIGTRAP) {
+        siginfo_t info;
+        error=(int)trace(m,PTRACE_GETSIGINFO,pid,NULL,&info);
+        if (error) return error==-ESRCH ? 1 : error;
+        if (info.si_code<=0) {
+            if (!child) return 0; /* The caller's signal owner retains it. */
+            m->result=-EINTR;
+            error=abort_child(m);
+            return error && error!=-ESRCH ? error : 1;
+        }
         struct user_pt_regs r;
         error=registers(m,pid,&r,0);
         if (!error && !child && m->parent_operation==ALLOCATE && r.pc==m->abi.allocated) {

@@ -23,7 +23,7 @@ struct md_broker_completion {
     struct md_fs_buffer_open opened;
 };
 struct md_namespace_broker;
-enum { MD_BROKER_READ=1, MD_BROKER_OPEN=2, MD_BROKER_COOPERATIVE=4 };
+enum { MD_BROKER_READ=1, MD_BROKER_OPEN=2, MD_BROKER_COOPERATIVE=4, MD_BROKER_DISCOVERY=8 };
 struct md_entry_channel;
 /* Mapping lifetime belongs to the stopped task. Forget precedes its release. */
 int md_broker_cooperative_bind(struct md_namespace_broker *,pid_t,struct md_entry_channel *,uintptr_t wake_gate);
@@ -57,7 +57,8 @@ struct md_broker_retirement {
 };
 void md_broker_retirement_handler(struct md_namespace_broker *,int (*)(const struct md_broker_retirement *));
 /* A cold cleanup action borrows a broker-held stop without delivering its
- * signal/lifecycle continuation. Its injected stops bypass normal admission. */
+ * signal/lifecycle continuation. Its injected stops bypass normal admission;
+ * take_event retains the original stop until native_return after restoration. */
 int md_broker_native_borrow(struct md_namespace_broker *,pid_t,int *stopped);
 void md_broker_native_return(struct md_namespace_broker *,pid_t);
 /* Retain a real kernel event while its admitted worker operation retires.
@@ -65,7 +66,9 @@ void md_broker_native_return(struct md_namespace_broker *,pid_t);
 int md_broker_hold_event(struct md_namespace_broker *,pid_t,int,const struct rusage *);
 pid_t md_broker_take_event(struct md_namespace_broker *,int *,struct rusage *);
 /* Publish before resuming a tracee; forget retires its eligibility. */
-int md_broker_task(struct md_namespace_broker *, int pid, int eligible, uintptr_t raw_gate, uintptr_t watch_gate);
+struct md_broker_code_ranges { uintptr_t starts[8]; size_t size; unsigned count; };
+int md_broker_task(struct md_namespace_broker *, int pid, int eligible, uintptr_t raw_gate, uintptr_t watch_gate,
+    const struct md_broker_code_ranges *);
 /* A barrier restored an unchanged continuation after its synthetic stop.
  * Retain eligibility and resource ownership; wake a request published before
  * this acknowledgement. Never use for an injected helper or held real event. */

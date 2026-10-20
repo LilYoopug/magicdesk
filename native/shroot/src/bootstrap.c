@@ -10,6 +10,7 @@
 #include "interception.h"
 #include "adapter_buffer.h"
 #include "cooperative_channel.h"
+#include "svc_runtime.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -40,9 +41,11 @@ void md_boot(uintptr_t *kernel_stack) {
     Elf64_auxv_t *aux = (Elf64_auxv_t *)(env + envc + 1);
     size_t auxc = 0;
     const void *vdso=NULL;
+    unsigned long capabilities=0;
     while (aux[auxc].a_type) {
         if (aux[auxc].a_type == AT_PAGESZ) md_page_size = aux[auxc].a_un.a_val;
         if (aux[auxc].a_type == AT_SYSINFO_EHDR) vdso=(const void *)aux[auxc].a_un.a_val;
+        if (aux[auxc].a_type == AT_HWCAP) capabilities=aux[auxc].a_un.a_val;
         ++auxc;
     }
     if (md_page_size < 4096 || md_page_size > 65536 || (md_page_size & (md_page_size - 1)))
@@ -192,9 +195,15 @@ void md_boot(uintptr_t *kernel_stack) {
     md_files.connections = &connections;
     memcpy(process_image.executable_object, command.object, sizeof(command.object));
     process_image.executable_path = md_executable;
+    int machine_entry=0;
+    for (size_t i=0;namespace && i<envc;++i)
+        if (md_equal(env[i],"SHROOT_MACHINE_ENTRY=1"))
+            machine_entry=md_guest_buffer_control(MD_BUFFER_MACHINE_ADMIT,0,0)==1;
     struct md_image program;
     r = md_interception_map_image((int)fd, 0);
     if (!r) r = md_elf_load((int)fd, 0, &program);
+    if (!r && machine_entry && md_guest_buffer_control(MD_BUFFER_IMAGE_BACKING,fd,0)<0)
+        machine_entry=0;
     RAW1(close, fd);
     command.fd=-1;
     if (r < 0) md_die("map guest program", r);
@@ -203,6 +212,8 @@ void md_boot(uintptr_t *kernel_stack) {
         fd = command.interpreter_fd;
         r = md_interception_map_image((int)fd, 1);
         if (!r) r = md_elf_load((int)fd, 1, &image);
+        if (!r && machine_entry && md_guest_buffer_control(MD_BUFFER_IMAGE_BACKING,fd,0)<0)
+            machine_entry=0;
         RAW1(close, fd);
         command.interpreter_fd=-1;
         if (r < 0) md_die("map stock loader", r);
@@ -269,6 +280,7 @@ void md_boot(uintptr_t *kernel_stack) {
         case AT_EXECFN: guest_aux[i].a_un.a_val = (uintptr_t)execfn; break;
         }
     }
+    if (machine_entry) md_svc_runtime_prepare(program.entry,image.entry,capabilities);
     r = md_interception_enter_image(guest_aux, (unsigned)auxc);
     if (r < 0) md_die("enter guest image", r);
     md_proc_image_init(&process_image, arguments, argument_bytes, guest_aux, (auxc + 1) * sizeof(*guest_aux));

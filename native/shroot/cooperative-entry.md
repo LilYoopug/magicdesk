@@ -21,6 +21,13 @@ runtime-owned syscall-offer table and a caller-compiled action driver,
   request publication.
 - `UNKNOWN` is a terminal protocol failure, never permission to replay.
 
+The size-checked descriptor also supplies `thread_identity` for callers without
+libc TLS. It returns the runtime's native thread key, not a guest PID namespace
+number. It must not run after helper admission has been revoked by a filter.
+The existing v6 action/table prefix is unchanged; source hooks do not need to
+use this callback. The lazy machine-entry prototype uses it to avoid collisions
+between separate PID-1 processes.
+
 The runtime can yield a cancellation checkpoint, the original kernel call, or
 one admitted native effect to this driver. The action executes after the runtime
 C frame has returned; the driver then calls the explicit continuation. This
@@ -94,6 +101,17 @@ acknowledgement. Both JIT memory repair and remote task actions use this shared
 resume adapter. Injected helper calls and deferred real events retain their stop
 ownership; they cannot re-enable ordinary admission. This adds no work to the
 ordinary per-call entry path.
+
+An interrupted internal IPC/readiness/debugger poll is marked as a service wake
+and rechecks its retained operation. Quiescence must not manufacture application
+EINTR. The JIT repair fixture includes a semop waiter whose pending operation
+survives memory repair without retrying in the application.
+
+Internal signal scopes save and restore masks through one supervisor boundary.
+An experimental machine-entry shield is an overlay, not application state;
+nested adapters retain the logical mask below it. Retained asynchronous signals
+are released only after all internal owners restore the guest boundary. The
+ordinary no-retained-signal route adds no signal-delivery round trip.
 
 The task registry retains an immutable resource generation for repeated reads.
 Each admitted read owns one reference instead of independently retaining every

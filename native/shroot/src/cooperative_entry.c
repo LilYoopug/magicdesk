@@ -62,6 +62,8 @@ static struct md_entry_channel *continuation(struct md_entry_client *client,stru
 static enum md_entry_outcome finish(struct md_entry_client *client,struct md_entry_call *call,
         enum md_entry_outcome outcome) {
     call->next=NULL;
+    struct md_entry_channel *c=(void *)call->continuation[CONT_CHANNEL];
+    if (c) atomic_store_explicit(&c->caller,0,memory_order_release);
     __atomic_store_n(&client->opaque[MD_ENTRY_CLIENT_CONTROL],call->continuation[CONT_CONTROL],__ATOMIC_RELEASE);
     return outcome;
 }
@@ -113,6 +115,7 @@ static enum md_entry_outcome invoke(struct md_entry_client *client,struct md_ent
     uintptr_t control=__atomic_fetch_or(&client->opaque[MD_ENTRY_CLIENT_CONTROL],MD_ENTRY_CLIENT_BUSY,__ATOMIC_ACQUIRE);
     if (control&MD_ENTRY_CLIENT_BUSY) return MD_ENTRY_DECLINED;
     call->continuation[CONT_CONTROL]=control;
+    call->continuation[CONT_CHANNEL]=0;
     struct md_entry_channel *c=(void *)client->opaque[MD_ENTRY_CLIENT_CHANNEL];
     enum md_entry_outcome outcome=MD_ENTRY_DECLINED;
     if (md_entry_route(call->number)==MD_ENTRY_TASK) goto kernel;
@@ -134,6 +137,13 @@ static enum md_entry_outcome invoke(struct md_entry_client *client,struct md_ent
         client->opaque[MD_ENTRY_CLIENT_CHANNEL]=(uintptr_t)c;
         client->opaque[MD_ENTRY_CLIENT_OWNER]=(uintptr_t)c->owner;
     } else if ((uintptr_t)RAW0(gettid)!=client->opaque[MD_ENTRY_CLIENT_OWNER]) goto done;
+    if (!atomic_load_explicit(&c->enabled,memory_order_acquire)) goto kernel;
+    /* Different entry adapters in one thread share the channel. The client
+     * guard alone cannot exclude a signal handler using another adapter. */
+    unsigned idle=0;
+    if (!atomic_compare_exchange_strong_explicit(&c->caller,&idle,1,
+            memory_order_acquire,memory_order_relaxed)) goto kernel;
+    call->continuation[CONT_CHANNEL]=(uintptr_t)c;
     unsigned available=atomic_load_explicit(&c->state,memory_order_acquire);
     if (!atomic_load_explicit(&c->enabled,memory_order_acquire)
             || (available!=MD_ENTRY_IDLE && available!=MD_ENTRY_RETIRING)
@@ -258,7 +268,8 @@ static enum md_entry_outcome progress(struct md_entry_client *client,struct md_e
     }
     return finish(client,call,outcome);
 }
+static long thread_identity(void) { return RAW0(gettid); }
 const struct md_entry_api md_cooperative_entry={
     .version=MD_ENTRY_VERSION,.size=sizeof(struct md_entry_api),.try_syscall=invoke,
-    .offers=offers,.syscall_count=sizeof(offers)
+    .offers=offers,.syscall_count=sizeof(offers),.thread_identity=thread_identity
 };

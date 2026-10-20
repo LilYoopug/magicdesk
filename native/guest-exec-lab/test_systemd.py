@@ -10,7 +10,7 @@ import shlex
 import socket
 
 from init_fixture import PREPARE as INIT_PREPARE, TRACE_SYSCALLS
-from test_oci_services import Suite
+from test_oci_services import Suite, add_machine_entry_argument
 
 
 PREPARE = INIT_PREPARE + r'''
@@ -183,12 +183,14 @@ def main():
     parser.add_argument('--trace', action='store_true', help='Requires strace in the guest')
     parser.add_argument('--property', action='append', default=[],
                         help='Additional service property for the hardened oneshot')
+    add_machine_entry_argument(parser)
     args = parser.parse_args()
-    suite = Suite(args.output, args.build)
+    suite = Suite(args.output, args.build, machine_entry=args.machine_entry)
     suite.report['store'] = args.store
     suite.report['serviceProperties'] = args.property
-    target = '/tmp/md-systemd-' + suite.report['id']
-    prefix = [suite.runner, '--store', args.store, '--user', '0:0', '--network', 'routed']
+    # INIT_PREPARE replaces /run, /tmp and /var/tmp with private mounts.
+    target = '/opt/md-systemd-' + suite.report['id']
+    prefix = suite.guest(args.store, '--user', '0:0', '--network', 'routed')
     created = False
     try:
         build = args.build or Path('app/build/shroot')

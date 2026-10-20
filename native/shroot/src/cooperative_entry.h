@@ -44,10 +44,13 @@ struct md_entry_api {
      * engine routes or authority. Unlisted calls retain their original SVC. */
     const unsigned char *offers;
     uint32_t syscall_count, reserved;
+    /* Runtime identity, not the guest-visible PID namespace number. Call only
+     * while helper syscalls are admitted; filtered callers retain their SVC. */
+    long (*thread_identity)(void);
 };
 static inline int md_entry_api_valid(const struct md_entry_api *api) {
     return api && api->version==MD_ENTRY_VERSION && api->size>=sizeof(*api)
-        && api->try_syscall && api->offers && !api->reserved;
+        && api->try_syscall && api->offers && !api->reserved && api->thread_identity;
 }
 static inline int md_entry_offered(const struct md_entry_api *api,long number,unsigned kind) {
     return api && (unsigned long)number<api->syscall_count && (api->offers[number]&kind);

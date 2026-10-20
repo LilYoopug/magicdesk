@@ -45,7 +45,7 @@ enum md_entry_state { MD_ENTRY_IDLE, MD_ENTRY_REQUEST, MD_ENTRY_FD_REQUEST, MD_E
 enum { MD_ENTRY_WAKE = 0x434f4f50 };
 struct md_entry_channel {
     _Alignas(64) atomic_uint state;
-    atomic_uint enabled, awake, sleeping, copying;
+    atomic_uint enabled, awake, sleeping, copying, caller;
     int32_t owner;
     struct md_spin_policy feedback;
     uint64_t sequence;

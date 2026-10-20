@@ -17,6 +17,7 @@ fixtures do not define a separate runtime or installation interface.
 | Init systems and distribution boot | [Init matrix](init-matrix.md) |
 | Browser workload and sandbox evidence | [Browser fixtures](browser/README.md) |
 | Kernel seccomp/ptrace controls | [Sandbox controls](sandbox-research.md) |
+| Lazy machine-code entry, opcode witnesses and Go stress | [SVC rewriting experiments](svc-rewriting.md) |
 | Native namespace admission and restricted brokers | [Isolation controls](chromium-isolation.md) |
 | Descriptor custody, publication and resource teardown | [Resource verification](../shroot/resource-tests.md) |
 

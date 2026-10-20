@@ -50,6 +50,7 @@ def main():
     allowed = {'native', 'shroot', 'shroot-entry', 'cooperative', 'cooperative-bounded', 'cooperative-adaptive', 'cooperative-leased', 'cooperative-leased-recheck', 'cooperative-shared-files', 'cooperative-shared-tracked', 'cooperative-fd-executor', 'cooperative-fd-executor-parked', 'cooperative-fd-sidecar', 'cooperative-fd-sidecar-parked', 'engine'}
     if args.workload == 'metadata':
         allowed.add('engine-read-lease')
+    allowed.add('shroot-machine')
     allowed.update({'cooperative-fd-pipeline', 'cooperative-fd-reopen', 'cooperative-fd-pidfd', 'cooperative-fd-local-close', 'cooperative-fd-plan', 'cooperative-guest-plan'})
     allowed.update({'cooperative-guest-pin', 'cooperative-guest-queued', 'cooperative-guest-window'})
     if args.reference:
@@ -85,6 +86,7 @@ def main():
             'transport': {
                 'shroot-entry': 'production auxv entry, authenticated task, original guest pointers, shared worker',
                 'shroot': 'production kernel syscall entry',
+                'shroot-machine': 'production supervisor, stock instructions, lazy SVC entry; no source-built libc',
                 'cooperative-*': 'lab captured absolute paths; shared mmap and futex; one fixed actor',
                 'cooperative-shared-files': 'lab CLONE_FILES, separate address spaces; direct FD ownership transfer; no production FD provenance/lifecycle',
                 'cooperative-shared-tracked': 'lab CLONE_FILES with production mount anchors, FD origins and table turns; worker executes close; no production lifecycle',
@@ -160,6 +162,9 @@ def main():
             'shroot-entry': [suite.runner, '--store', store, '--user', '0:0',
                             '--deadline-seconds', '120',
                             '--', '/fixture/benchmark', 'syscalls-entry', '/bench'],
+            'shroot-machine': [suite.runner, '--env', 'SHROOT_MACHINE_ENTRY=1',
+                               '--store', store, '--user', '0:0', '--deadline-seconds', '120',
+                               '--', '/fixture/benchmark', 'syscalls', '/bench'],
             'cooperative': [executable, 'cooperative', store],
             'cooperative-bounded': ['env', 'MD_LAB_SPIN_NS=' + str(args.spin_ns),
                                     executable, 'cooperative-bounded', store],
@@ -241,6 +246,15 @@ def main():
             suite.report['referenceHash'] = suite.command(['sha256sum', target], quiet=True).split()[0]
         suite.report['samples'] = samples = []
         modes = args.modes or list(commands)
+        if 'shroot-machine' in modes:
+            # Keep instrumentation out of timed runs, but require actual engine
+            # completions rather than inferring acceleration from elapsed time.
+            command = commands['shroot-machine']
+            output = suite.command([command[0], '--statistics', *command[1:], '16', args.workload], quiet=True)
+            evidence = records(output, 'SVC_RUNTIME_STATS ')
+            assert evidence and all(item['unknown'] == 0 for item in evidence), output
+            assert sum(item['completed'] for item in evidence) >= 16, output
+            suite.report['machineEntryEvidence'] = evidence
         for round_number in range(args.rounds):
             offset = round_number % len(modes)
             for mode in modes[offset:] + modes[:offset]:
@@ -265,6 +279,10 @@ def main():
             'entryOverRuntimeReference': ('shroot-entry', 'shroot-entry-reference'),
             'entryOverNative': ('shroot-entry', 'native'),
             'entrySpeedupVsShroot': ('shroot', 'shroot-entry'),
+            'machineOverNative': ('shroot-machine', 'native'),
+            'machineOverEntry': ('shroot-machine', 'shroot-entry'),
+            'machineSpeedupVsShroot': ('shroot', 'shroot-machine'),
+            'machineSpeedupVsProot': ('proot', 'shroot-machine'),
             'cooperativeSpeedupVsShroot': ('shroot', 'cooperative'),
             'cooperativeOverNative': ('cooperative', 'native'),
             'engineOverNative': ('engine', 'native'),

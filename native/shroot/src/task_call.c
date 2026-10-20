@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "task_call.h"
 #include "interception.h"
+#include "signal_protocol.h"
 #include <elf.h>
 #include <errno.h>
 #include <signal.h>
@@ -61,7 +62,7 @@ int md_task_call_begin(struct md_task_call *f,long (*operation)(int,pid_t,void *
     }
     if (!error) error=trace(f,PTRACE_GETSIGMASK,(void *)sizeof(f->mask),&f->mask);
     if (error) { *f=(struct md_task_call){0}; return error; }
-    uint64_t blocked=~UINT64_C(0);
+    uint64_t blocked=md_signal_protocol_mask();
     error=trace(f,PTRACE_SETSIGMASK,(void *)sizeof(blocked),&blocked);
     if (error) { *f=(struct md_task_call){0}; return error; }
     f->stage=SKIPPING;
@@ -94,7 +95,7 @@ static int finish(struct md_task_call *f,int restore) {
 }
 int md_task_call_again(struct md_task_call *f,const struct md_task_call_arguments *arguments) {
     if (!f || f->stage!=COMPLETE || !arguments) return -EINVAL;
-    uint64_t blocked=~UINT64_C(0);
+    uint64_t blocked=md_signal_protocol_mask();
     int error=trace(f,PTRACE_SETSIGMASK,(void *)sizeof(blocked),&blocked);
     if (error) return error;
     f->arguments=*arguments; f->stage=SKIPPING;
@@ -105,6 +106,10 @@ int md_task_call_again(struct md_task_call *f,const struct md_task_call_argument
     }
     return invoke(f);
 }
+int md_task_call_continue(struct md_task_call *f) {
+    if (!f || !f->stage || f->stage==COMPLETE) return -EINVAL;
+    return trace(f,f->stage==CALLING || f->stage==RESTORING ? PTRACE_CONT : PTRACE_SYSCALL,NULL,NULL);
+}
 int md_task_call_event(struct md_task_call *f,int status) {
     if (!f || !f->stage || f->stage==COMPLETE) return -EINVAL;
     if (WIFEXITED(status) || WIFSIGNALED(status)) return -ESRCH;
@@ -113,7 +118,7 @@ int md_task_call_event(struct md_task_call *f,int status) {
     int signal=WSTOPSIG(status);
     if (f->restart_pending && event==PTRACE_EVENT_STOP && signal==SIGTRAP) {
         f->restart_pending=0;
-        return trace(f,f->stage==CALLING || f->stage==RESTORING ? PTRACE_CONT : PTRACE_SYSCALL,NULL,NULL);
+        return md_task_call_continue(f);
     }
     struct user_pt_regs current;
     int error=regs(f,PTRACE_GETREGSET,&current);

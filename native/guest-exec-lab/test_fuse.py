@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 import subprocess
 
-from test_oci_services import Suite
+from test_oci_services import Suite, add_machine_entry_argument
 from graphical_recipe import compile_recipe
 
 
@@ -18,8 +18,11 @@ def main():
     parser.add_argument('--portal-home', default='/home/steamos')
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--libc-registry', help='Use and verify a prepared accelerated libc registry')
+    add_machine_entry_argument(parser)
     args = parser.parse_args()
-    suite = Suite(args.output, args.build)
+    if args.machine_entry and args.libc_registry:
+        parser.error('--machine-entry requires stock libc, not --libc-registry')
+    suite = Suite(args.output, args.build, machine_entry=args.machine_entry)
     try:
         fixtures = Path(__file__).resolve().parent / 'fixtures'
         name = ('flatpak-document-portal.sh' if args.case == 'portal' else
@@ -54,13 +57,13 @@ print('PASS FUSE fixture accelerated libc selection')
                 '/usr/bin/python3 /mnt/fixture child' if args.case == 'session' else '/bin/sh /mnt/fixture'],
                 text=True, timeout=30))
             suite.transport.upload(suite.client, session, suite.base + '/session')
-            command = [suite.runner, '--store', args.store, '--bind-ro', suite.base, '/mnt',
+            command = suite.guest(args.store, '--bind-ro', suite.base, '/mnt',
                        *registry,
                        '--user', args.portal_user,
                        '--env', 'HOME=' + args.portal_home, '--env', 'PATH=/usr/bin:/bin',
                        *(['--env', 'G_MESSAGES_DEBUG=xdg-desktop-portal'] if args.debug else []),
                        '--', *(['/usr/bin/python3', '/mnt/fixture'] if args.case == 'session'
-                                else ['/bin/sh', '/mnt/session'])]
+                                else ['/bin/sh', '/mnt/session']))
         else:
             command = suite.run(args.store, *registry, '--bind-ro', suite.base, '/mnt',
                                 '--user', '0:0', '--entrypoint', '/usr/bin/python3', '--', '/mnt/fixture')

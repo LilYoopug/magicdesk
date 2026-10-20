@@ -23,6 +23,7 @@
 #include <sys/xattr.h>
 #include <time.h>
 #include <unistd.h>
+#include <ucontext.h>
 
 #ifndef MD_LIBC_NAME
 #define MD_LIBC_NAME "musl"
@@ -39,6 +40,67 @@ static void *metadata_thread(void *unused) {
     (void)unused;
     for (unsigned i=0;i<1000;++i) { struct stat st; assert(!stat("marker",&st) && st.st_size==7); }
     return NULL;
+}
+static void *threaded_start(void *unused) { return unused; }
+static void *churn_thread(void *unused) {
+    for (unsigned i=0;i<32;++i) {
+        int fd=open("marker",O_RDONLY);
+        if (fd<0) fprintf(stderr,"churn open failed: errno=%d (%s)\n",errno,strerror(errno));
+        assert(fd>=0);
+        int closed=close(fd);
+        if (closed) fprintf(stderr,"churn close failed: fd=%d errno=%d (%s)\n",fd,errno,strerror(errno));
+        assert(!closed);
+        struct stat st; assert(!stat("marker",&st) && st.st_size==7);
+    }
+    return unused;
+}
+static pthread_t storm_target;
+static int storm_done;
+static unsigned storm_realtime_sent;
+static volatile sig_atomic_t storm_signals[3];
+static void storm_handler(int number,siginfo_t *info,void *context) {
+    ucontext_t *uc=context;
+    /* The lazy-entry laboratory reserves this private stack range. A signal
+     * handler must never observe it in place of the interrupted guest stack. */
+    uintptr_t sp=uc->uc_mcontext.sp;
+    if (sp>=UINT64_C(0x2100000000) && sp<UINT64_C(0x2100400000)) _exit(88);
+    if (info->si_code!=SI_TKILL || (number!=SIGUSR1 && number!=SIGTRAP && number!=SIGRTMAX)) _exit(89);
+    ++storm_signals[number==SIGRTMAX ? 2 : number==SIGTRAP];
+}
+static void *storm_sender(void *unused) {
+    for (unsigned i=0;i<8192 && !__atomic_load_n(&storm_done,__ATOMIC_ACQUIRE);++i) {
+        assert(!pthread_kill(storm_target,SIGUSR1));
+        assert(!pthread_kill(storm_target,SIGTRAP));
+        assert(!pthread_kill(storm_target,SIGRTMAX));
+        ++storm_realtime_sent;
+        sched_yield();
+    }
+    return unused;
+}
+static void signal_storm(int blocked_trap) {
+    struct sigaction action={.sa_sigaction=storm_handler,.sa_flags=SA_SIGINFO|SA_RESTART};
+    sigemptyset(&action.sa_mask); sigaddset(&action.sa_mask,SIGUSR1); sigaddset(&action.sa_mask,SIGTRAP);
+    sigaddset(&action.sa_mask,SIGRTMAX);
+    assert(!sigaction(SIGUSR1,&action,NULL) && !sigaction(SIGTRAP,&action,NULL)
+        && !sigaction(SIGRTMAX,&action,NULL));
+    churn_thread(NULL);
+    sigset_t trap,previous;
+    sigemptyset(&trap); sigaddset(&trap,SIGTRAP);
+    if (blocked_trap) assert(!pthread_sigmask(SIG_BLOCK,&trap,&previous));
+    storm_target=pthread_self();
+    pthread_t sender; assert(!pthread_create(&sender,NULL,storm_sender,NULL));
+    for (unsigned i=0;i<256;++i) churn_thread(NULL);
+    __atomic_store_n(&storm_done,1,__ATOMIC_RELEASE);
+    assert(!pthread_join(sender,NULL));
+    if (blocked_trap) {
+        sigset_t pending;
+        assert(!storm_signals[1] && !sigpending(&pending) && sigismember(&pending,SIGTRAP));
+        assert(!pthread_sigmask(SIG_SETMASK,&previous,NULL));
+    }
+    assert(storm_signals[0] && storm_signals[1] && storm_realtime_sent
+        && (unsigned)storm_signals[2]==storm_realtime_sent);
+    printf("PASS " MD_LIBC_NAME " signal storm: USR1=%d TRAP=%d RT=%d blocked=%d, original stack and siginfo\n",
+        (int)storm_signals[0],(int)storm_signals[1],(int)storm_signals[2],blocked_trap);
 }
 static int channel[2];
 static unsigned cancellations_cleaned;
@@ -354,6 +416,10 @@ int main(int argc,char **argv) {
         assert(fcntl(atoi(argv[4]),F_GETFD)==0 && !close(atoi(argv[4])));
         return 0;
     }
+    if (getenv("MD_LIBC_THREADED")) {
+        pthread_t thread; assert(!pthread_create(&thread,NULL,threaded_start,NULL));
+        assert(!pthread_join(thread,NULL));
+    }
     int fd=open("marker",O_CREAT|O_TRUNC|O_RDWR,0600); assert(fd>=0);
     assert(write(fd,"payload",7)==7); close(fd);
     if (!strcmp(argv[2],"abi")) {
@@ -369,12 +435,35 @@ int main(int argc,char **argv) {
         return 0;
     }
     if (!strcmp(argv[2],"check")) { contracts(executable); assert(!unlink("marker")); return 0; }
+    if (!strcmp(argv[2],"signal-storm") || !strcmp(argv[2],"signal-blocked")) {
+        signal_storm(!strcmp(argv[2],"signal-blocked")); assert(!unlink("marker")); return 0;
+    }
+    if (!strcmp(argv[2],"thread-churn")) {
+        churn_thread(NULL);
+        for (unsigned i=0;i<256;++i) {
+            pthread_t thread; assert(!pthread_create(&thread,NULL,churn_thread,NULL));
+            assert(!pthread_join(thread,NULL));
+        }
+        assert(!unlink("marker"));
+        puts("PASS " MD_LIBC_NAME " thread churn: 256 retired owners, 8192 opens and metadata calls");
+        return 0;
+    }
     assert(argc==4 || (argc==5 && !strcmp(argv[4],"filtered")));
     unsigned count=(unsigned)strtoul(argv[3],NULL,10); assert(count);
     char absolute[4096]; assert(realpath("marker",absolute));
     int links=!strcmp(argv[2],"readlinks"),xattrs=!strcmp(argv[2],"xattrs");
     if (links) assert(!symlink("marker","link"));
     if (xattrs) assert(!setxattr("marker","user.benchmark","value",5,0));
+    if (getenv("MD_BENCH_WARMUP")) {
+        struct stat st;
+        for (unsigned i=0;i<128;++i) {
+            if (!strncmp(argv[2],"opens",5)) {
+                int warm=open("marker",O_RDONLY); assert(warm>=0 && !close(warm));
+            } else assert(!fstatat(AT_FDCWD,"marker",&st,0) && st.st_size==7);
+        }
+    }
+    /* Install after warmup to exercise revocation of an already live entry,
+     * not just absence of admission at process startup. */
     if (argc==5) filtered_benchmark();
     struct rusage before,after;
     assert(!getrusage(RUSAGE_SELF,&before));

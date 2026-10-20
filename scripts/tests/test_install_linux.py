@@ -223,17 +223,17 @@ if os.environ.get("TEST_FAIL") == stage and "MAGICDESK_BUILD_PHASE=dependencies"
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertFalse(Path(str(self.payload) + '.libc').exists())
 
-    def test_default_libc_prepares_shared_build_for_install_and_resume(self):
+    def test_default_libc_keeps_distribution_for_install_and_resume(self):
         for args in (('--image', 'alpine:3.23'), ('--resume',)):
             with self.subTest(args=args):
                 self.log.unlink(missing_ok=True)
                 result = self.run_script('--yes', '--name', 'work', *args)
                 self.assertEqual(0, result.returncode, result.stderr)
-                self.assertIn('Linux libc: shroot', result.stdout)
-                self.assertTrue(any(c[:2] == ['libc', 'path'] for c in self.calls()))
-                self.assertTrue(any('rm -f /etc/shroot/libc-base' in a
+                self.assertIn('Linux libc: keep', result.stdout)
+                self.assertFalse(any(c[:2] == ['libc', 'path'] for c in self.calls()))
+                self.assertFalse(any('rm -f /etc/shroot/libc-base' in a
                                     for c in self.calls() for a in c))
-        self.assertTrue(Path(str(self.payload) + '.libc').exists())
+        self.assertFalse(Path(str(self.payload) + '.libc').exists())
 
     def test_libc_recipe_is_exported_without_android_access(self):
         result = self.run_script('--print-libc-setup', TEST_UID='10001', TEST_VERSION_STATUS='3')
@@ -677,7 +677,7 @@ package_cleanup() { :; }
 
     @unittest.skipUnless(hasattr(os, 'openpty'), 'PTY required')
     def test_interactive_dns_repair_follows_configuration_and_retries_only_dns(self):
-        output = self.questions(b'alpine\nwork\nxfce\nsoftware\n\n\nkeep\nkeep\nbasic\nn\nauto\ninvalid\n192.0.2.1\ny\n',
+        output = self.questions(b'alpine\nwork\nxfce\nsoftware\n\nkeep\nkeep\nbasic\nn\nauto\ninvalid\n192.0.2.1\ny\n',
                                 TEST_DNS_ERROR='No active-network DNS servers')
         self.assertGreater(output.index('Cannot prepare guest DNS'), output.index('Additional settings ('))
         self.assertEqual(1, output.count('Distribution ['))
@@ -688,7 +688,7 @@ package_cleanup() { :; }
 
     @unittest.skipUnless(hasattr(os, 'openpty'), 'PTY required')
     def test_unavailable_dns_can_be_cancelled_without_installing(self):
-        output = self.questions(b'alpine\nwork\nxfce\nsoftware\n\n\nkeep\nkeep\nbasic\nn\n\n',
+        output = self.questions(b'alpine\nwork\nxfce\nsoftware\n\nkeep\nkeep\nbasic\nn\n\n',
                                 TEST_DNS_ERROR='Android Private DNS is active')
         self.assertIn('Cancelled.', output)
         self.assertIn('Distribution [', output)
@@ -704,7 +704,7 @@ package_cleanup() { :; }
 
     @unittest.skipUnless(hasattr(os, 'openpty'), 'PTY required')
     def test_package_failure_can_change_dns_without_reinstalling_or_repeating_answers(self):
-        output = self.questions(b'alpine\nwork\nxfce\nsoftware\n\n\nkeep\nkeep\nbasic\nn\ny\ndns\ninvalid\n192.0.2.1\n',
+        output = self.questions(b'alpine\nwork\nxfce\nsoftware\n\nkeep\nkeep\nbasic\nn\ny\ndns\ninvalid\n192.0.2.1\n',
                                 TEST_SETUP_FAILURES='1')
         self.assertIn('test package download failure', output)
         self.assertIn('Linux is ready: work', output)
@@ -726,7 +726,7 @@ package_cleanup() { :; }
 
     @unittest.skipUnless(hasattr(os, 'openpty'), 'PTY required')
     def test_package_retry_and_cancel_keep_the_environment(self):
-        output = self.questions(b'alpine\nwork\nxfce\nsoftware\n\n\nkeep\nkeep\nbasic\nn\ny\ninvalid\nretry\n\n',
+        output = self.questions(b'alpine\nwork\nxfce\nsoftware\n\nkeep\nkeep\nbasic\nn\ny\ninvalid\nretry\n\n',
                                 expected_exit=23, TEST_SETUP_FAILURES='2')
         self.assertIn('Environment retained.', output)
         self.assertEqual(1, sum(c[0] == 'install' for c in self.calls()))
@@ -1443,7 +1443,7 @@ package_cleanup() { :; }
             with self.subTest(distro=distro):
                 self.log.unlink(missing_ok=True)
                 result = self.run_script('--yes', '--resume', '--name', 'work',
-                                         '--gpu', 'turnip', TEST_DISTRO=distro)
+                                         '--gpu', 'turnip', '--libc', 'shroot', TEST_DISTRO=distro)
                 self.assertEqual(0, result.returncode, result.stderr)
                 calls = self.calls()
                 admin = [c for c in calls if '--user' in c and c[c.index('--user') + 1] == 'root']
@@ -1987,7 +1987,8 @@ package_cleanup() { :; }
         for gpu, jobs in [("turnip", "2"), ("turnip", "4"), ("software", "2")]:
             with self.subTest(gpu=gpu, jobs=jobs):
                 self.log.unlink(missing_ok=True)
-                result = self.run_script("--yes", "--name", "debian", "--resume", "--gpu", gpu, "--jobs", jobs)
+                result = self.run_script("--yes", "--name", "debian", "--resume", "--gpu", gpu, "--jobs", jobs,
+                                         "--libc", "shroot")
                 self.assertEqual(0, result.returncode, result.stderr)
                 payload = Path(str(self.payload) + ".gpu")
                 digest = hashlib.sha256(payload.read_bytes()).hexdigest()
@@ -2242,14 +2243,14 @@ package_cleanup() { :; }
 
     @unittest.skipUnless(hasattr(os, "openpty"), "PTY required")
     def test_questions_use_saved_script_stdin(self):
-        output = self.questions(b"debian\ninteractive\nxfce\nkeep\n\n\nkeep\nkeep\nbasic\nn\ny\n")
+        output = self.questions(b"debian\ninteractive\nxfce\nkeep\nshroot\n\nkeep\nkeep\nbasic\nn\ny\n")
         install = next(c for c in self.calls() if c[0] == 'install')
         self.assertEqual(['--rootfs', '--name', 'interactive', '--dns', 'system'], install[2:])
         setup = next(c for c in self.calls() if c[0] == 'login' and '-s' in c)
         self.assertEqual("xfce", setup[-8])
         self.assertIn('Linux libc: shroot', output)
         self.assertLess(output.index('Linux libc:'), output.index('Additional settings ('))
-        self.assertEqual(1, output.count('Linux libc: shroot (build/reuse accelerated libc)/base/keep [shroot]'))
+        self.assertEqual(1, output.count('Linux libc: keep (distribution libc)/shroot (compiled comparison)/base [keep]'))
         self.assertIn('Compiler jobs for libc/Mesa/KWin (1-8) [2]', output)
         self.assertTrue(Path(str(self.payload) + '.libc').exists())
 
@@ -2274,7 +2275,7 @@ package_cleanup() { :; }
 
     @unittest.skipUnless(hasattr(os, 'openpty'), 'PTY required')
     def test_steamos_main_jobs_apply_to_libc_mesa_and_kwin(self):
-        output = self.questions(b'steamos\n\n\nturnip\n\n4\nkeep\nkeep\nn\ny\n',
+        output = self.questions(b'steamos\n\n\nturnip\nshroot\n4\nkeep\nkeep\nn\ny\n',
                                 TEST_DISTRO='steamos')
         self.assertIn('Linux libc: shroot', output)
         self.assertEqual(1, output.count('Compiler jobs for libc/Mesa/KWin (1-8) [2]'))

@@ -13,6 +13,10 @@ uses ordinary interception. Neither replaces package-owned libc files.
 Captured-request laboratory modes isolate costs and are not substitutes for a
 real libc or application test. ABI 6 is the current caller boundary.
 
+[Lazy SVC rewriting](svc-rewriting.md) investigates a different entry frontend.
+Its opcode/Go forwarding census and actual cooperative-entry cost controls are
+separate proofs; it is not yet a replacement for prepared libc.
+
 ## Runtime And Libc Iteration
 
 Configure the native build with `MAGICDESK_GUEST_FIXTURES=ON` as described in the

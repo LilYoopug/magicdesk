@@ -1,5 +1,10 @@
 #include <asm/unistd.h>
 .text
+.balign 4
+.global md_guest_signal_step
+md_guest_signal_step:
+    nop
+    brk #0
 .global md_guest_entry_kernel
 .type md_guest_entry_kernel, %function
 md_guest_entry_kernel:

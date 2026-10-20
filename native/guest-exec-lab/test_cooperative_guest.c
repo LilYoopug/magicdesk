@@ -18,6 +18,7 @@
 #include <signal.h>
 #include <setjmp.h>
 #include <sys/socket.h>
+#include <sys/sem.h>
 #include <sys/inotify.h>
 #include <sys/utsname.h>
 #include <stdatomic.h>
@@ -84,6 +85,20 @@ static void *jit_entry_waiter(void *context) {
     assert(stat_try(&local,&st,&result)==MD_ENTRY_COMPLETED && !result && st.st_size==7);
     return NULL;
 }
+struct jit_internal_peer {
+    int semaphore;
+    struct jit_entry_peer completed;
+};
+static void *jit_internal_waiter(void *context) {
+    struct jit_internal_peer *peer=context;
+    struct sembuf take={.sem_op=-1};
+    long result=syscall(SYS_semop,peer->semaphore,&take,1);
+    if (result) fprintf(stderr,"JIT internal wait result=%ld errno=%d\n",result,errno);
+    assert(!result);
+    jit_stage(&peer->completed,1);
+    assert(syscall(SYS_semop,peer->semaphore,&take,1)==-1 && errno==EINTR);
+    return NULL;
+}
 static void jit_entry_resume(void) {
     size_t page=(size_t)sysconf(_SC_PAGESIZE);
     for (unsigned i=0;i<8;++i) {
@@ -95,12 +110,32 @@ static void jit_entry_resume(void) {
         __builtin___clear_cache((char *)code,(char *)(code+2));
         struct jit_entry_peer peer={0}; pthread_t thread;
         assert(!pthread_create(&thread,NULL,jit_entry_waiter,&peer)); jit_wait(&peer,1);
+        int semaphore=(int)syscall(SYS_semget,IPC_PRIVATE,1,IPC_CREAT|0600);
+        assert(semaphore>=0 && !syscall(SYS_semctl,semaphore,0,SETVAL,0));
+        struct jit_internal_peer waiter={.semaphore=semaphore};
+        pthread_t internal;
+        assert(!pthread_create(&internal,NULL,jit_internal_waiter,&waiter));
+        long waiting;
+        do { waiting=syscall(SYS_semctl,semaphore,0,GETNCNT,0); assert(waiting>=0); }
+        while (!waiting);
         assert(!mprotect(code,page,PROT_READ|PROT_EXEC));
         int (*run)(void)=(void *)code; assert(run()==37);
+        assert(syscall(SYS_semctl,semaphore,0,GETNCNT,0)==1);
+        struct sembuf give={.sem_op=1};
+        assert(!syscall(SYS_semop,semaphore,&give,1));
+        jit_wait(&waiter.completed,1);
+        /* EVENT_WAIT: the same repaired task is waiting again before the real
+         * signal; the fixture alarm bounds a missing interruption. */
+        do { waiting=syscall(SYS_semctl,semaphore,0,GETNCNT,0); assert(waiting>=0); }
+        while (!waiting);
+        assert(!pthread_kill(internal,SIGUSR2));
+        assert(!pthread_join(internal,NULL) && !syscall(SYS_semctl,semaphore,0,IPC_RMID,0));
         jit_stage(&peer,2);
         assert(!pthread_join(thread,NULL) && !munmap(code,page));
     }
     puts("PASS cooperative JIT resume: interrupted peers retain direct entry after private-memory repair");
+    puts("PASS JIT internal wait: memory repair does not manufacture application EINTR");
+    puts("PASS JIT application signal: the repaired waiter still returns EINTR for a real signal");
 }
 static void *jit_busy_peer(void *context) {
     atomic_int *stop=context;
@@ -201,6 +236,9 @@ static void scalar_credentials(void) {
     if (!child) {
         struct md_entry_client local={0};
         const int calls[]={SYS_getuid,SYS_geteuid,SYS_getgid,SYS_getegid};
+        assert(required_call(&local,SYS_getuid,(uint64_t[6]){0})==getuid());
+        struct md_entry_channel *channel=(void *)local.opaque[MD_ENTRY_CLIENT_CHANNEL];
+        assert(channel);
         for (unsigned round=0;round<4;++round) {
             if (round==1) {
                 assert(!setresgid(7,8,0));
@@ -212,12 +250,12 @@ static void scalar_credentials(void) {
                 assert(!unshare(CLONE_NEWUSER));
             }
             for (unsigned i=0;i<4;++i) {
+                uint64_t sequence=channel->sequence;
                 long result=required_call(&local,calls[i],(uint64_t[6]){0});
+                if (round<3) assert(channel->sequence==sequence+1);
+                /* Native comparison can itself use lazy machine entry and
+                 * the same thread channel. Check this call's increment first. */
                 assert(result==syscall(calls[i]));
-                if (round<3) {
-                    struct md_entry_channel *channel=(void *)local.opaque[MD_ENTRY_CLIENT_CHANNEL];
-                    assert(channel && channel->sequence==(uint64_t)round*4+i+1);
-                }
             }
         }
         _exit(0);
@@ -802,7 +840,9 @@ static void *burst_reader(void *argument) {
         };
         struct sock_fprog program={sizeof(code)/sizeof(*code),code};
         assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
-        assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+        long installed=syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program);
+        if (installed) fprintf(stderr,"burst filter failed: result=%ld errno=%d\n",installed,errno);
+        assert(!installed);
         assert(syscall(SYS_getppid)==-1 && errno==EACCES);
     }
     struct md_entry_client local={0}; struct stat st; long result;
@@ -995,6 +1035,7 @@ static void pid_namespace(void) {
         pid_t init=fork(); assert(init>=0);
         if (!init) {
             assert(getpid()==1 && syscall(SYS_gettid)==1);
+            assert(api->thread_identity()>1);
             struct md_entry_client fresh={0}; struct stat st; long result;
             for (unsigned i=0;i<100;++i)
                 assert(stat_try(&fresh,&st,&result)==MD_ENTRY_COMPLETED && !result && st.st_size==7);
@@ -1266,6 +1307,7 @@ static void contracts(const char *executable) {
     invalid.size=sizeof(invalid)-1; assert(!md_entry_api_valid(&invalid)); invalid=*api;
     invalid.try_syscall=NULL; assert(!md_entry_api_valid(&invalid)); invalid=*api;
     invalid.offers=NULL; assert(!md_entry_api_valid(&invalid)); invalid=*api;
+    invalid.thread_identity=NULL; assert(!md_entry_api_valid(&invalid)); invalid=*api;
     invalid.reserved=1; assert(!md_entry_api_valid(&invalid)); invalid=*api;
     invalid.size+=16; assert(md_entry_api_valid(&invalid));
     assert(!md_entry_api_valid(NULL) && !md_entry_offered(NULL,SYS_openat,MD_ENTRY_ORDINARY));
@@ -1392,6 +1434,12 @@ int main(int argc,char **argv) {
     if (argc>1 && !strcmp(argv[1],"--native-signals")) {
         int fd=open(path,O_CREAT|O_RDWR,0600); assert(fd>=0 && write(fd,"payload",7)==7 && !close(fd));
         native_interruptions(); return 0;
+    }
+    if (argc>1 && (!strcmp(argv[1],"--birth-retirement") || !strcmp(argv[1],"--bursts"))) {
+        int fd=open(path,O_CREAT|O_RDWR,0600); assert(fd>=0 && write(fd,"payload",7)==7 && !close(fd));
+        if (!strcmp(argv[1],"--birth-retirement")) birth_retirement();
+        else reader_writer_bursts();
+        return 0;
     }
     if (argc>1 && !strcmp(argv[1],"--host-births")) {
         host_births=1;

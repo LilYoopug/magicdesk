@@ -124,6 +124,8 @@ struct task {
     int pid, eligible, process, borrowed;
     uintptr_t gate, watch_gate;
     uintptr_t cooperative_gate;
+    struct { uintptr_t pc; unsigned seen; } discovery[16];
+    struct md_broker_code_ranges machine;
     struct md_entry_channel *channel;
     uint64_t sequence;
     struct operation *operation;
@@ -222,9 +224,14 @@ pid_t md_broker_take_event(struct md_namespace_broker *b,int *status,struct rusa
     if (!b) return 0;
     pthread_mutex_lock(&b->lock);
     pid_t pid=0;
-    while (b->event_ready && !pid) {
-        struct task *t=b->event_ready;
-        b->event_ready=t->event_next; t->event_next=NULL; t->held=0;
+    struct task **at=&b->event_ready;
+    while (*at && !pid) {
+        struct task *t=*at;
+        /* Injection temporarily owns this exact stopped continuation. Keep its
+         * original event until native_return restores the guest boundary, but
+         * let unrelated tasks make progress. */
+        if (t->native_borrowed) { at=&t->event_next; continue; }
+        *at=t->event_next; t->event_next=NULL; t->held=0;
         task_release(t);
         pid=t->pid; *status=t->status; if (usage) *usage=t->usage;
     }
@@ -813,7 +820,8 @@ void md_broker_resumed(struct md_namespace_broker *b,pid_t pid) {
     pthread_mutex_unlock(&b->lock);
     if (pending) md_fs_worker_wake(b->worker);
 }
-int md_broker_task(struct md_namespace_broker *b, int pid, int eligible, uintptr_t raw_gate, uintptr_t watch_gate) {
+int md_broker_task(struct md_namespace_broker *b, int pid, int eligible, uintptr_t raw_gate, uintptr_t watch_gate,
+        const struct md_broker_code_ranges *machine) {
     if (pid <= 0) return -EINVAL;
     pthread_mutex_lock(&b->lock);
     struct task *t = find_task(b, pid);
@@ -828,6 +836,7 @@ int md_broker_task(struct md_namespace_broker *b, int pid, int eligible, uintptr
     int pending=0;
     if (t) {
         t->pid = pid; t->eligible = eligible; t->gate = raw_gate; t->watch_gate = watch_gate;
+        t->machine=machine ? *machine : (struct md_broker_code_ranges){0};
         t->owner=b; t->event_work.complete=event_complete;
         if (t->channel) atomic_store_explicit(&t->channel->enabled,
             !!(eligible&MD_BROKER_COOPERATIVE),memory_order_release);
@@ -1210,6 +1219,11 @@ static int cooperative_wake_reply(struct md_namespace_broker *b,const struct sec
     struct seccomp_notif_resp response={.id=wake->id,.val=wake->pid};
     return ioctl(b->listener,SECCOMP_IOCTL_NOTIF_SEND,&response) && errno!=ENOENT ? -errno : 0;
 }
+/* Caller holds the broker lock. Service includes declining a request: a
+ * restarted SVC may enter shared memory while its kernel result is retained. */
+static int channel_available(const struct task *t) {
+    return !t->operation && !t->stopped;
+}
 /* The existing worker owns execution. A bounded burst cannot starve ordinary
  * notifications, resource turns, RPC peers, watches or shutdown. */
 static int cooperative_progress(struct md_namespace_broker *b,struct md_filesystem *fs,
@@ -1236,7 +1250,7 @@ static int cooperative_progress(struct md_namespace_broker *b,struct md_filesyst
         if (!t) t=b->channels;
         unsigned left=b->cooperative_count;
         int native_pending=0, effect_pending=0;
-        while (t && left && (t->operation || t->stopped || t->recovering
+        while (t && left && (!channel_available(t)
                 || atomic_load_explicit(&t->channel->state,memory_order_acquire)!=MD_ENTRY_REQUEST)) {
             native_pending|=atomic_load_explicit(&t->channel->state,memory_order_acquire)==MD_ENTRY_FD_REQUEST;
             effect_pending|=t->operation && t->operation->native_plan==2;
@@ -1282,7 +1296,9 @@ static int cooperative_progress(struct md_namespace_broker *b,struct md_filesyst
         int native=md_entry_native_fd(call.number,call.args)
             || md_entry_native_open(call.number,call.args);
         enum md_entry_route route=md_entry_route(call.number);
-        int admitted=(t->eligible&MD_BROKER_COOPERATIVE)
+        /* A retained result owns the interrupted syscall. Decline the
+         * unexecuted entry so its original kernel route can take that result. */
+        int admitted=!t->recovering && (t->eligible&MD_BROKER_COOPERATIVE)
             && (route==MD_ENTRY_WORKER || route==MD_ENTRY_VALUE || native)
             && !call.reserved && t->sequence!=UINT64_MAX && op->sequence==t->sequence+1;
         t->sequence=op->sequence;
@@ -1368,7 +1384,7 @@ static int prepare_wait(void *context) {
     int pending=0;
     for (struct task *t=b->channels;t;t=t->channel_next) {
         unsigned ready=md_entry_prepare_wait(t->channel);
-        pending|=!t->stopped && !t->operation
+        pending|=channel_available(t)
             && (ready&MD_ENTRY_PENDING_CALL);
         pending|=t->operation && t->operation->native_plan==2
             && (ready&MD_ENTRY_PENDING_NATIVE);
@@ -1415,6 +1431,18 @@ static int receive_one(struct md_namespace_broker *b,struct md_filesystem *fs,
     }
     if (task) {
         eligible = task->eligible && !task->stopped && !task->recovering && q.data.instruction_pointer != task->gate;
+        for (unsigned i=0;eligible && i<task->machine.count;++i)
+            if (q.data.instruction_pointer-task->machine.starts[i]<task->machine.size) eligible=0;
+        if (eligible && (task->eligible&MD_BROKER_DISCOVERY) && md_entry_supported(q.data.nr)) {
+            /* Bounded cold sampling delegates an unexecuted request through the
+             * normal stop owner. The worker never installs code or reads registers. */
+            for (unsigned i=0;i<16;++i) {
+                if (!task->discovery[i].pc) task->discovery[i].pc=q.data.instruction_pointer;
+                if (task->discovery[i].pc!=q.data.instruction_pointer) continue;
+                if (!task->discovery[i].seen) { ++task->discovery[i].seen; eligible=0; }
+                break;
+            }
+        }
         watch = q.data.instruction_pointer == task->watch_gate;
         task->borrowed++;
     }

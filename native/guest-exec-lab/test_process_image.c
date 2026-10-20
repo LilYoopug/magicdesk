@@ -7,13 +7,15 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/auxv.h>
+#include <sys/prctl.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
-struct open_how { uint64_t flags, mode, resolve; };
+struct image_open_how { uint64_t flags, mode, resolve; };
 enum { NO_XDEV = 1, NO_MAGICLINKS = 2, NO_SYMLINKS = 4, BENEATH = 8, IN_ROOT = 16, CACHED = 32 };
 static int extended(int fd, const char *path, uint64_t flags, uint64_t resolve) {
-    struct open_how how = {flags, 0, resolve};
+    struct image_open_how how = {flags, 0, resolve};
     return (int)syscall(SYS_openat2, fd, path, &how, sizeof(how));
 }
 static void image(int base, const char *name, int argc, char **argv) {
@@ -32,7 +34,33 @@ static void image(int base, const char *name, int argc, char **argv) {
     assert(lseek(fd, 0, SEEK_SET) == 0);
     close(fd);
 }
+static void protected_image(int argc,char **argv,int other_user) {
+    int ready[2],finish[2]; assert(!pipe(ready) && !pipe(finish));
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        assert(!prctl(PR_SET_DUMPABLE,0,0,0,0));
+        argv[0][0]='X';
+        assert(write(ready[1],"!",1)==1);
+        char byte; assert(read(finish[0],&byte,1)==1);
+        _exit(0);
+    }
+    char byte; assert(read(ready[0],&byte,1)==1);
+    if (other_user) assert(!seteuid(1000));
+    char path[128]; snprintf(path,sizeof(path),"/proc/%d/cmdline",child);
+    char first=argv[0][0]; argv[0][0]='X';
+    image(AT_FDCWD,path,argc,argv); argv[0][0]=first;
+    snprintf(path,sizeof(path),"/proc/%d/auxv",child);
+    int fd=open(path,O_RDONLY); assert(fd==-1 && errno==EACCES);
+    if (other_user) assert(!seteuid(0));
+    assert(write(finish[1],"!",1)==1);
+    int status; assert(waitpid(child,&status,0)==child && status==0);
+    close(ready[0]); close(ready[1]); close(finish[0]); close(finish[1]);
+    puts("PASS protected process image: live cmdline remains readable, auxv stays denied");
+}
 int main(int argc, char **argv) {
+    if (argc==2 && (!strcmp(argv[1],"protected") || !strcmp(argv[1],"protected-other-user"))) {
+        protected_image(argc,argv,!strcmp(argv[1],"protected-other-user")); return 0;
+    }
     image(AT_FDCWD, "/proc/self/cmdline", argc, argv);
     char *original[16]; assert(argc > 0 && argc < 16);
     memcpy(original, argv, (size_t)argc * sizeof(*argv));
@@ -73,7 +101,7 @@ int main(int argc, char **argv) {
     fd = extended(root, "/passwd", O_RDONLY, IN_ROOT); assert(fd >= 0); close(fd);
     assert(extended(root, "passwd", O_RDONLY, CACHED) == -1 && errno == EAGAIN);
     assert(extended(root, "passwd", O_RDONLY, BENEATH | IN_ROOT) == -1 && errno == EINVAL);
-    struct { struct open_how how; unsigned char tail[73]; } larger = {{O_RDONLY, 0, BENEATH}, {0}};
+    struct { struct image_open_how how; unsigned char tail[73]; } larger = {{O_RDONLY, 0, BENEATH}, {0}};
     fd = syscall(SYS_openat2, root, "passwd", &larger, sizeof(larger));
     assert(fd >= 0); close(fd);
     larger.tail[72] = 1;
@@ -82,5 +110,6 @@ int main(int argc, char **argv) {
     assert(syscall(SYS_openat2, root, "passwd", &larger, getauxval(AT_PAGESZ) + 1) == -1 && errno == E2BIG);
     close(root);
     puts("PASS process image: guest argv/auxv aliases and native seek; openat2 scoped resolution");
+    protected_image(argc,argv,0);
     return 0;
 }

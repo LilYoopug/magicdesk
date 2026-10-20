@@ -10,14 +10,14 @@ public final class GuestRuntimeCommand {
             + "\"${MAGICDESK_RUNTIME:?Missing shell runtime}/guest-runtime\") || exit $?\n"
             + "md_libc_home=${MAGICDESK_GUEST_HOME:-$MAGICDESK_RUNTIME/guest-environments}/libc\n"
             + "md_libc=$md_libc_home/artifacts\n"
+            + "case \"${SHROOT_LIBC:-stock}\" in stock|compiled) ;; *) printf '%s\\n' 'SHROOT_LIBC must be stock or compiled' >&2; exit 2 ;; esac\n"
             + "md_libc_init() { mkdir -p \"$md_libc\" || printf '%s\\n' 'Optional libc registry unavailable; using Shroot Base.' >&2; }\n"
             + "md_library() { CLASSPATH=\"$MAGICDESK_COMMAND_APK\" /system/bin/app_process / "
             + "io.github.mekhontsev.magicdesk.GuestEnvironmentMain \"$md_guest\" "
             + "\"${MAGICDESK_GUEST_HOME:-$MAGICDESK_RUNTIME/guest-environments}\" \"$@\"; }\n"
             + "md_image() { md_action=$1; md_store=$2; shift 2\n"
             + "case \"$md_action\" in run|exec|login)\n"
-            + "md_libc_init\n"
-            + "set -- --libc-registry \"$md_libc\" \"$@\"\n"
+            + "if [ \"${SHROOT_LIBC:-stock}\" = compiled ]; then md_libc_init; set -- --libc-registry \"$md_libc\" \"$@\"; fi\n"
             + LinuxAudioEnvironment.shrootArguments() + GamepadWire.shrootArguments() + ";; esac\n"
             + "exec \"$md_guest/libmagicdesk_guest_image.so\" \"$md_action\" \"$md_store\" \"$@\"; }\n"
             + "case \"${1-}\" in\n"
@@ -46,8 +46,8 @@ public final class GuestRuntimeCommand {
             + "  *) \"$md_guest/libmagicdesk_guest_supervisor.so\" \"$md_guest/libmagicdesk_guest_bootstrap.so\" --probe >/dev/null || exit $?\n"
             + LinuxAudioEnvironment.shrootArguments()
             + GamepadWire.shrootArguments()
-            + "     md_libc_init\n"
-            + "     exec \"$md_guest/libmagicdesk_guest_run.so\" --libc-registry \"$md_libc\" \"$@\" ;;\n"
+            + "     if [ \"${SHROOT_LIBC:-stock}\" = compiled ]; then md_libc_init; set -- --libc-registry \"$md_libc\" \"$@\"; fi\n"
+            + "     exec \"$md_guest/libmagicdesk_guest_run.so\" \"$@\" ;;\n"
             + "esac\n";
     private GuestRuntimeCommand() { }
 }

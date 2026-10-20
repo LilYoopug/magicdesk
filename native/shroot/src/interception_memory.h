@@ -10,6 +10,9 @@
  * owner; fork copies stack metadata and retains the shared buffer allocator.
  * Exec creates an empty owner. Worker pins may outlive every mapping owner. */
 struct md_interception_memory;
+struct md_svc_registry;
+struct md_svc_registry *md_memory_svc(const struct md_interception_memory *);
+int md_memory_svc_set(struct md_interception_memory *,struct md_svc_registry *);
 struct md_interception_memory *md_memory_new(void);
 /* Empty post-exec address space, sharing only retained file backing ownership
  * with its launch family. No mappings, private-memory authority or buffers survive. */
@@ -63,6 +66,9 @@ int md_memory_mapping_prepare(struct md_interception_memory *, struct md_mapping
  * Independent address spaces share only file identity, not private bytes/offsets.
  * A failed syscall never publishes it. Native devices remain kernel-owned. */
 int md_memory_mapping_backing(struct md_interception_memory *, struct md_mapping_change *, int fd, uint64_t offset);
+/* Bootstrap-only import of existing private mappings of this exact open file.
+ * The caller has not entered application code or published any patch yet. */
+int md_memory_image_backing(struct md_interception_memory *, pid_t, int fd);
 /* Borrowed under the address-space turn. No pathname lookup or FD-number reuse.
  * Returns 1 for continuous provenance, 0 for an untracked/mixed range. */
 int md_memory_file_view(const struct md_interception_memory *, uintptr_t, size_t,
