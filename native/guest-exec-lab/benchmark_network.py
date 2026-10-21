@@ -14,6 +14,7 @@ import subprocess
 
 from docker_network_fixture import Observer
 from test_oci_services import Suite
+from benchmark_cpu import observe_suite_cpu
 
 
 def main():
@@ -69,11 +70,13 @@ def main():
                     script += 'exec ' + shlex.join(command)
                     command = prefix + ['--network', 'host' if mode == 'host' else 'routed',
                         '--bind-ro', suite.base, target, '--deadline-seconds', '90', '--', '/bin/sh', '-ec', script]
-                output = suite.command([suite.base + '/bench', '--time', *command], timeout=110)
+                with observe_suite_cpu(suite) as cpu_conditions:
+                    output = suite.command([suite.base + '/bench', '--time', *command], timeout=110)
                 result = json.loads(next(line.removeprefix('NETWORK_BENCH ') for line in output.splitlines()
                                          if line.startswith('NETWORK_BENCH ')))
                 cpu = next(line.split()[1:] for line in output.splitlines() if line.startswith('NETWORK_CPU '))
                 result['lifecycleCpuSeconds'] = sum(map(float, cpu))
+                result['cpu'] = cpu_conditions
                 samples[mode].append(result)
         suite.report['samples'] = samples
         suite.report['medians'] = {mode: {

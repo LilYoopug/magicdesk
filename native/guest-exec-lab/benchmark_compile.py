@@ -20,6 +20,7 @@ import tarfile
 import time
 import tomllib
 import uuid
+from benchmark_cpu import observe_cpu
 
 
 def digest(path):
@@ -106,15 +107,6 @@ def main():
     def save():
         output.write_text(json.dumps(report, indent=2) + "\n")
 
-    def frequencies():
-        values = {}
-        for path in sorted(Path("/sys/devices/system/cpu/cpufreq").glob("policy*/scaling_*_freq")):
-            try:
-                values[str(path)] = int(path.read_text().strip())
-            except (OSError, ValueError):
-                pass
-        return values
-
     def shell(command):
         result = client.call("console.execute", {"sessionId": console, "command": command})
         if result["exitCode"]:
@@ -190,14 +182,14 @@ def main():
                           "startedUtc": datetime.now(timezone.utc).isoformat()}
                 report["samples"].append(sample)
                 sample["thermalBefore"] = shell("cat /sys/class/thermal/thermal_zone0/temp")
-                sample["frequenciesBefore"] = frequencies()
                 sample["batteryBefore"] = shell("dumpsys battery")
                 report.setdefault("powerSources", power_sources(sample["batteryBefore"]))
                 save()
-                text = launch(mode, "build" if args.workload == "compile" else args.workload)
+                with observe_cpu(shell) as cpu:
+                    sample['cpu'] = cpu
+                    text = launch(mode, "build" if args.workload == "compile" else args.workload)
                 sample["outerSeconds"] = time.monotonic() - started
                 sample["thermalAfter"] = shell("cat /sys/class/thermal/thermal_zone0/temp")
-                sample["frequenciesAfter"] = frequencies()
                 sample["batteryAfter"] = shell("dumpsys battery")
                 sample["output"] = text
                 sample["finishedUtc"] = datetime.now(timezone.utc).isoformat()

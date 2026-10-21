@@ -7,6 +7,7 @@ import re
 import statistics
 
 from test_oci_services import Suite
+from benchmark_cpu import observe_suite_cpu
 
 
 def main():
@@ -63,10 +64,11 @@ def main():
             offset = round_number % len(order)
             for name in order[offset:] + order[:offset]:
                 for workload, command in workloads.items():
-                    output = suite.command(['/system/bin/time', '-p', *modes[name], '--', *command])
+                    with observe_suite_cpu(suite) as cpu:
+                        output = suite.command(['/system/bin/time', '-p', *modes[name], '--', *command])
                     measurement = dict(re.findall(r'^(real|user|sys)\s+(\d+\.\d+)\s*$', output, re.M))
                     assert len(measurement) == 3, output
-                    row = dict(mode=name, workload=workload, round=round_number,
+                    row = dict(mode=name, workload=workload, round=round_number, cpu=cpu,
                                launchSeconds=float(measurement['real']),
                                totalCpuSeconds=float(measurement['user']) + float(measurement['sys']))
                     records = [json.loads(line.removeprefix('READINESS_BENCH '))

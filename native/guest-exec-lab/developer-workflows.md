@@ -111,6 +111,27 @@ and scheduling groups can differ between these executor
 identities even without changing the power source; retain the individual samples
 and ranges rather than attributing every wall-time difference to interception.
 
+The libc, compilation, watch, readiness and network benchmark runners retain a
+`cpu` record for each timed command through `benchmark_cpu.py`. It contains host
+cpufreq policy membership, current/minimum/maximum/hardware-maximum frequencies
+in kHz, governor, and `time_in_state` counters before and after the command.
+Counter deltas and `residencyWeightedKhz` describe the whole policy over that
+command envelope, including launch, warmup, teardown, transport, idle time and
+other tasks. They are not the exact execution frequency of a benchmark thread
+or of a shorter loop timed inside the command. The checkpoint protocol fixture
+has one such envelope for its complete process, not for each internal sample.
+Missing counters, resets and changed frequency tables remain explicitly unknown;
+endpoint snapshots never substitute for residency. Differing endpoint limits
+are recorded, but equal endpoints do not prove the limit stayed fixed throughout.
+
+Collect these records for future ad hoc comparisons too, using
+`observe_suite_cpu(suite)` or `observe_cpu(host_shell)` around each command and
+attaching the returned evidence to its result. The collector runs outside the
+timed workload and uses shell builtins; it starts no periodic sampling worker and
+changes no system settings. Use a separate scheduler trace when per-thread
+execution frequency is needed. Keep the CPU context alongside published timing
+tables; do not silently combine series taken under different limits.
+
 Affinity is a diagnostic control, not the default execution policy. Compare the
 whole guest/helper chain with the same allowed CPUs; pinning only its helpers
 is a different experiment. A serial request chain distributed across CPUs can

@@ -5,6 +5,7 @@ import hashlib
 import json
 import statistics
 from pathlib import Path
+from benchmark_cpu import observe_suite_cpu
 from test_oci_services import Suite
 from test_svc_patch import records
 from audit_svc_payload import audit
@@ -14,7 +15,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('build', type=Path)
     parser.add_argument('stock', type=Path)
+    parser.add_argument('--baseline-build', type=Path, help='Interleave the same workloads with a second runtime build')
     parser.add_argument('--rounds', type=int, default=8)
+    parser.add_argument('--cpu-mask', default='3')
     parser.add_argument('--checks-only', action='store_true')
     parser.add_argument('--workload', default='metadata', choices=['metadata', 'opens'])
     parser.add_argument('--threaded', action='store_true', help='enter libc threaded mode before first open')
@@ -29,6 +32,8 @@ def main():
     args = parser.parse_args()
     if args.signal_rounds<1:
         parser.error('--signal-rounds must be positive')
+    if args.rounds<1:
+        parser.error('--rounds must be positive')
     suite = Suite(Path('build/svc-libc-results'), args.build)
     suite.report['hashes'] = {}
     suite.report['samples'] = []
@@ -36,7 +41,7 @@ def main():
     suite.report['payloadAudit'] = audit(args.build)
     suite.report['condition'] = args.condition
     suite.report['sandbox'] = args.sandbox
-    suite.report['cpuMask'] = '3'
+    suite.report['cpuMask'] = args.cpu_mask
     try:
         suite.report['kernel'] = suite.command(['uname', '-a'], quiet=True).strip()
         root, native = suite.base + '/root', suite.base + '/native'
@@ -66,6 +71,13 @@ def main():
             'base': [*guest[:-1], '--env', 'SHROOT_MACHINE_ENTRY=0', '--', '/bin/stock', '/tmp'],
             'machine': [*guest[:-1], '--statistics', '--', '/bin/stock', '/tmp'],
         }
+        if args.baseline_build:
+            baseline = suite.base + '/baseline'
+            suite.command(['mkdir', baseline])
+            suite.report['baselineBuild'] = str(args.baseline_build)
+            suite.report['baselineHashes'] = suite.stage_runtime(args.baseline_build, baseline)
+            for mode in ('base', 'machine'):
+                launches['baseline-' + mode] = [baseline + '/libmagicdesk_guest_run.so', *launches[mode][1:]]
         def machine_evidence(output):
             items = records(output, 'SVC_RUNTIME_STATS ')
             assert items and not any(item['unknown'] for item in items), output
@@ -102,10 +114,11 @@ def main():
         timed_launches = dict(launches)
         # Counter collection includes clocks in the engine's hot path.
         # Verify real completions separately, then time every mode without it.
-        timed_launches['machine'] = [arg for arg in launches['machine'] if arg != '--statistics']
+        for mode, command in launches.items():
+            timed_launches[mode] = [arg for arg in command if arg != '--statistics']
         suite.report['timedRuntimeStatistics'] = False
         if not args.checks_only:
-            output = suite.command(['taskset', '3', *launches['machine'], *workload], quiet=True)
+            output = suite.command(['taskset', args.cpu_mask, *launches['machine'], *workload], quiet=True)
             evidence = machine_evidence(output)
             if args.sandbox:
                 assert evidence['revoked'] and 0 < evidence['completed'] < count
@@ -117,15 +130,21 @@ def main():
             order = modes[rotation:] + modes[:rotation]
             if round_number % 2: order = order[::-1]
             for mode in order:
-                output = suite.command(['taskset', '3', *timed_launches[mode], *workload], quiet=True)
+                with observe_suite_cpu(suite) as cpu:
+                    output = suite.command(['taskset', args.cpu_mask, *timed_launches[mode], *workload], quiet=True)
                 sample, = [json.loads(line) for line in output.splitlines() if line.startswith('{"workload"')]
-                sample.update(mode=mode, round=round_number)
+                sample.update(mode=mode, round=round_number, cpu=cpu)
                 suite.report['samples'].append(sample)
                 print('libc', args.workload, round_number, mode, sample['nanoseconds']/1e6, 'ms', flush=True)
         if not args.checks_only:
             series = {mode: [s['nanoseconds'] for s in suite.report['samples'] if s['mode'] == mode] for mode in modes}
             suite.report['mediansMs'] = {mode: statistics.median(values)/1e6 for mode, values in series.items()}
             suite.report['machineToBasePaired'] = statistics.median(a/b for a, b in zip(series['machine'], series['base']))
+            if args.baseline_build:
+                suite.report['baselinePaired'] = {
+                    mode: statistics.median(a/b for a, b in zip(series[mode], series['baseline-' + mode]))
+                    for mode in ('base', 'machine')
+                }
             print(suite.report['mediansMs'], flush=True)
         suite.report['passed'] = True
         suite.command(['rm', '-rf', suite.base])

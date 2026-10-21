@@ -6,6 +6,7 @@ import json
 import re
 import statistics
 from pathlib import Path
+from benchmark_cpu import observe_suite_cpu
 from test_oci_services import Suite
 import proot_fixture
 
@@ -168,9 +169,10 @@ def main():
                     else:
                         command = [*launch(mode), *(['--statistics'] if args.sample_statistics else []),
                                    '--', *executable(mode), '/bench', workload, str(count)]
-                    output = suite.command(['taskset', args.cpu_mask, *command, *(['filtered'] if args.sandbox else [])], quiet=True)
+                    with observe_suite_cpu(suite) as cpu:
+                        output = suite.command(['taskset', args.cpu_mask, *command, *(['filtered'] if args.sandbox else [])], quiet=True)
                     record = next(json.loads(line) for line in output.splitlines() if line.startswith('{"workload"'))
-                    record.update(mode=mode, round=round_number)
+                    record.update(mode=mode, round=round_number, cpu=cpu)
                     if args.sample_statistics:
                         record['statistics'] = [line for line in output.splitlines() if line.startswith('MD_')]
                         if args.sandbox and workload in ('opens', 'files', 'files-create') and mode in ('kernel', 'entry'):
@@ -184,7 +186,7 @@ def main():
                             assert versions and int(versions[1]) <= count * 4 + 64, 'native births repeated their namespace admission'
                             assert re.search(r'writeAdmissions=0(?:\n|$)', output), 'native cycles acquired catalogue writes'
                     samples.append(record)
-                    print(json.dumps({k: v for k, v in record.items() if k != 'statistics'}), flush=True)
+                    print(json.dumps({k: v for k, v in record.items() if k not in ('statistics', 'cpu')}), flush=True)
             if args.profile:
                 for mode in guest_modes:
                     suite.command(['taskset', args.cpu_mask, *launch(mode), '--statistics', '--',

@@ -9,6 +9,7 @@ import shlex
 import statistics
 import tomllib
 import uuid
+from benchmark_cpu import observe_cpu
 
 
 def main():
@@ -58,11 +59,12 @@ def main():
         for round_number in range(args.rounds + 1):
             order = cases if not round_number % 2 else list(reversed(cases))
             for workload, watch, label, runtime in order:
-                result = launch(runtime, workload, watch)
+                with observe_cpu(shell) as cpu:
+                    result = launch(runtime, workload, watch)
                 match = re.search(r"MD_ELAPSED workload=" + workload + " watch=" + watch + r" ns=(\d+)", result)
                 assert match and "MD_WORKLOAD_OK " + workload in result, result
                 sample = {"round": round_number, "warmup": not round_number, "runtime": label,
-                          "workload": workload, "watch": watch, "ns": int(match[1]), "output": result}
+                          "workload": workload, "watch": watch, "ns": int(match[1]), "output": result, "cpu": cpu}
                 report["samples"].append(sample)
                 output.write_text(json.dumps(report, indent=2) + "\n")
                 print(f"{round_number} {label} {workload}/{watch}: {int(match[1]) / 1e6:.2f} ms", flush=True)
