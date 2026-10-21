@@ -204,6 +204,9 @@ public final class HostScriptsTest {
         Files.writeString(project.resolve("vendor/magicdesk-x11/scripts/verify-native.sh"), "exit 0\n");
         Files.copy(Path.of("..", "scripts", "verify-native.sh"),
                 project.resolve("scripts/verify-native.sh"));
+        Files.createDirectories(project.resolve("native"));
+        for (String name : List.of("embed-guest-session.cmake", "magicdesk_guest_session.sh"))
+            Files.copy(Path.of("..", "native", name), project.resolve("native/" + name));
         final Path compiler = project.resolve("fake cc");
         Files.writeString(compiler, "#!" + shell + "\n"
                 + "if [ \"$NATIVE_COMPILE_FAIL\" = true ]; then exit 17; fi\n"

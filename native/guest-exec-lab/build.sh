@@ -46,7 +46,9 @@ cmake --build "$work/native-runtime" --target test_interception_memory --paralle
 "$work/test-socket-routes"
 javac -d "$work/recipe-classes" "$src/GraphicalRecipe.java" "$app/LinuxGraphicalEnvironment.java" \
     "$app/GuestGraphicalConnection.java" "$app/GuestLaunchPlan.java" "$app/GuestEnvironment.java" \
-    "$app/GraphicalProtocol.java" "$app/ShellCommandLine.java"
+    "$app/GraphicalProtocol.java" "$app/ShellCommandLine.java" "$app/GuestNetworkProfile.java" \
+    "$app/LinuxAudioEnvironment.java" "$app/GamepadWire.java"
+cp "$src/../magicdesk_guest_session.sh" "$work/recipe-classes/"
 "$cc" --target=aarch64-linux-android34 -fno-termux-rpath -static \
     -iquote "$runtime" -std=c17 -O2 -Wall -Wextra -Werror -DMD_NO_START -DMD_USE_LIBC \
     "$src/test_completion.c" "$runtime/event_wait.c" "$runtime/raw.c" "$runtime/memory.c" "$runtime/raw.S" -o "$work/bundle/md-await-exit"

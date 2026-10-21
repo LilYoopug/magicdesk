@@ -19,6 +19,7 @@ public class GuestApplicationRecordsTest {
         for (String id : new String[]{A, B}) records.put(entry(id, "linux", "/usr/share/applications/editor.desktop",
                 "Name=Editor\nExec=editor --title \"two words\" %U\nIcon=editor\nPath=/work\n"));
         var result = GuestApplicationRecords.parse(records.toString());
+        assertEquals("", result.error());
         assertEquals(2, result.entries().size());
         for (int i = 0; i < 2; ++i) {
             var shortcut = result.entries().get(i).shortcut;
@@ -26,6 +27,8 @@ public class GuestApplicationRecordsTest {
             assertTrue(shortcut.exec.contains(i == 0 ? A : B));
             assertEquals(GraphicalProtocol.X11, shortcut.graphics.protocol());
             assertFalse(shortcut.exec.contains("%U"));
+            assertTrue(shortcut.exec.length() < 2048);
+            assertFalse(shortcut.exec.contains("md_session_cleanup"));
             assertEquals("editor --title \"two words\" %U", StartMenuEntry.desktopApplication(result.entries().get(i)).detail);
         }
         assertNotEquals(result.entries().get(0).desktopFilePath, result.entries().get(1).desktopFilePath);
@@ -67,8 +70,35 @@ public class GuestApplicationRecordsTest {
     }
 
     @Test public void catalogRejectsHostPathTraversal() throws Exception {
-        var records = new JSONArray().put(entry(A, "work", "/applications/../bad.desktop", "Name=Bad\nExec=true\n"));
-        assertThrows(IllegalArgumentException.class, () -> GuestApplicationRecords.parse(records.toString()));
+        var records = new JSONArray().put(entry(A, "work", "/applications/../bad.desktop", "Name=Bad\nExec=true\n"))
+                .put(entry(A, "work", "/usr/share/applications/good.desktop", "Name=Good\nExec=true\n"));
+        var result = GuestApplicationRecords.parse(records.toString());
+        assertEquals(1, result.entries().size());
+        assertEquals("Good (work)", result.entries().get(0).shortcut.name);
+        assertFalse(result.error().isEmpty());
+    }
+
+    @Test public void brokenRecordsAndOversizedRecipesDoNotHideHealthyNeighbors() throws Exception {
+        var records = new JSONArray()
+                .put(entry(A, "work", "/usr/share/applications/first.desktop", "Name=First\nExec=true\n"))
+                .put("not an object")
+                .put(new JSONObject())
+                .put(entry("0-0-0-0-1", "bad-identity", "/usr/share/applications/bad.desktop", "Name=Bad\nExec=true\n"))
+                .put(entry(A, "work", "/root/.local/share/applications/bad.desktop", "Name=Bad\nExec=program " + "x".repeat(3500) + "\n"))
+                .put(entry(A, "work", "/usr/share/applications/bad.desktop", "Name=Masked\nExec=true\n"))
+                .put(entry(B, "other", "/usr/share/applications/last.desktop", "Name=Last\nExec=true\n"));
+        var result = GuestApplicationRecords.parse(records.toString());
+        assertEquals(java.util.List.of("First (work)", "Last (other)"),
+                result.entries().stream().map(e -> e.shortcut.name).toList());
+        assertTrue(result.error(), result.error().contains("Guest record 2:"));
+        assertTrue(result.error(), result.error().contains("Guest record 3:"));
+        assertTrue(result.error(), result.error().contains("Guest record 4: Invalid guest identity"));
+        assertTrue(result.error(), result.error().contains("work: bad.desktop:"));
+    }
+
+    @Test public void invalidCatalogEnvelopeStillFails() {
+        assertThrows(Exception.class, () -> GuestApplicationRecords.parse("{"));
+        assertThrows(IllegalArgumentException.class, () -> GuestApplicationRecords.parse("[" + "{},".repeat(1024) + "{}]"));
     }
 
     @Test public void desktopPresentationIsRetainedWithoutTrustingGuestHostPaths() throws Exception {

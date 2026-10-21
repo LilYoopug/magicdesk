@@ -60,15 +60,11 @@ public final class LinuxLaunchRecipeTest {
                     "--bind", "/apk/helper:/tmp/magicdesk-guest-files",
                     "--env", "MAGICDESK_GUEST_FILES_SOCKET=channel", "--env", "MAGICDESK_GUEST_FILES_TOKEN=secret"));
             if (mode == LinuxLaunchRecipe.Presentation.APPLICATION) expected.addAll(appearanceArguments());
-            expected.addAll(List.of("ubuntu", "--", "/tmp/magicdesk-guest-files", "--", "/bin/sh", "-lc"));
-            assertEquals(expected, args.subList(0, args.size() - 1));
-            String guest = args.get(args.size() - 1);
-            assertTrue(guest.contains("dbus-run-session -- "
-                    + (mode == LinuxLaunchRecipe.Presentation.APPLICATION ? "/tmp/magicdesk-linux-settings -- " : "")
-                    + "/bin/sh -lc 'xfce4-session'"));
-            assertTrue(guest.contains("mktemp -d /tmp/magicdesk-runtime.XXXXXX"));
-            assertTrue(guest.contains("trap md_session_exit EXIT"));
-            assertTrue(guest.contains("find \"$XDG_RUNTIME_DIR\" -xdev -depth -delete"));
+            expected.addAll(List.of("ubuntu", "--", "/tmp/magicdesk-guest-files", "--session", "x11", "--files", "--"));
+            if (mode == LinuxLaunchRecipe.Presentation.APPLICATION) expected.addAll(List.of("/tmp/magicdesk-linux-settings", "--"));
+            expected.addAll(List.of("/bin/sh", "-lc", "xfce4-session"));
+            assertEquals(expected, args);
+            assertFalse(shortcut.exec.contains("md_session_cleanup"));
             var parsed = DesktopEntryFile.parseTermuxApplication(DesktopEntryFile.encodeApplication(shortcut));
             assertNotNull(parsed);
             assertEquals(shortcut.exec, parsed.exec);
@@ -93,9 +89,10 @@ public final class LinuxLaunchRecipeTest {
                     "--bind", "/apk/helper:/tmp/magicdesk-guest-files", "--env", "MAGICDESK_GUEST_FILES_SOCKET=channel",
                     "--env", "MAGICDESK_GUEST_FILES_TOKEN=secret"));
             if (mode == LinuxLaunchRecipe.Presentation.APPLICATION) expected.addAll(appearanceArguments());
-            expected.addAll(List.of("ubuntu", "--", "/tmp/magicdesk-guest-files", "--", "/bin/sh", "-lc"));
-            assertEquals(expected, args.subList(0, args.size() - 1));
-            assertTrue(args.get(args.size() - 1).contains("XDG_SESSION_TYPE=wayland"));
+            expected.addAll(List.of("ubuntu", "--", "/tmp/magicdesk-guest-files", "--session", "wayland", "--files", "--"));
+            if (mode == LinuxLaunchRecipe.Presentation.APPLICATION) expected.addAll(List.of("/tmp/magicdesk-linux-settings", "--"));
+            expected.addAll(List.of("/bin/sh", "-lc", "weston --backend=wayland --renderer=pixman"));
+            assertEquals(expected, args);
             assertFalse(shortcut.exec.contains("XAUTHORITY"));
             assertFalse(shortcut.exec.contains("MAGICDESK_X11"));
             assertEquals(GraphicalProtocol.WAYLAND, shortcut.graphics.protocol());
@@ -151,14 +148,17 @@ public final class LinuxLaunchRecipeTest {
             var shortcut = LinuxLaunchRecipe.build("Linux", environment, "printf '%s' \"$HOME\"", "/home/a ' b", "alice", mode);
             var args = arguments(shortcut, launcher);
             var expected = new java.util.ArrayList<>(List.of("--user", "alice", "--work-dir", "/home/a ' b", "--"));
-            if (mode != LinuxLaunchRecipe.Presentation.TERMINAL) expected.addAll(List.of("/tmp/magicdesk-guest-files", "--"));
+            if (mode != LinuxLaunchRecipe.Presentation.TERMINAL) {
+                expected.addAll(List.of("/tmp/magicdesk-guest-files", "--session", "x11", "--files", "--"));
+                if (mode == LinuxLaunchRecipe.Presentation.APPLICATION) expected.addAll(List.of("/tmp/magicdesk-linux-settings", "--"));
+            }
             expected.addAll(List.of("/bin/sh", "-lc"));
             assertEquals(expected, args.subList(0, args.size() - 1));
             assertFalse(shortcut.exec.contains("proot-distro"));
             assertFalse(shortcut.exec.contains("su -c"));
             assertEquals(mode == LinuxLaunchRecipe.Presentation.TERMINAL, shortcut.terminal);
             assertEquals(mode == LinuxLaunchRecipe.Presentation.DESKTOP, shortcut.graphics != null && shortcut.graphics.desktop());
-            if (!shortcut.terminal) assertTrue(args.get(args.size() - 1).contains("dbus-run-session"));
+            assertEquals("printf '%s' \"$HOME\"", args.get(args.size() - 1));
             assertEquals(shortcut.exec, DesktopEntryFile.parseTermuxApplication(DesktopEntryFile.encodeApplication(shortcut)).exec);
         }
     }
@@ -218,7 +218,7 @@ public final class LinuxLaunchRecipeTest {
             assertEquals(DesktopExecBackend.SHELL, app.execBackend);
             assertEquals(mode == LinuxLaunchRecipe.Presentation.TERMINAL, app.terminal);
             assertFalse(app.exec.contains("proot"));
-            assertEquals(!app.terminal, app.exec.contains("dbus-run-session"));
+            assertEquals(!app.terminal, app.exec.contains("--session"));
             assertFalse(app.exec.contains("unix:abstract="));
             assertTrue(app.exec.contains("shroot"));
             var parsed = (DesktopApplicationShortcut) DesktopEntryFile.parse(DesktopEntryFile.encodeApplication(app));

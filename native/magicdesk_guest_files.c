@@ -16,6 +16,24 @@
 #include <sys/un.h>
 #include <unistd.h>
 #include <limits.h>
+#include "magicdesk_guest_session.inc"
+
+static int exec_session(const char *protocol, int count, char **command) {
+    char **args = calloc((size_t)count + 6, sizeof(*args));
+    if (!args) return -1;
+    args[0] = "sh";
+    // Load the guest profile before D-Bus so activated services inherit its graphics policy.
+    args[1] = "-lc";
+    args[2] = (char *)md_guest_session;
+    args[3] = "magicdesk-session";
+    args[4] = (char *)protocol;
+    for (int i = 0; i < count; ++i) args[i + 5] = command[i];
+    execvp(args[0], args);
+    int error = errno;
+    free(args);
+    errno = error;
+    return -1;
+}
 
 /* Runs in the client's filesystem and credentials, not the X server's. */
 static int transfer(int fd, void *data, size_t size, int writing) {
@@ -169,9 +187,28 @@ static int run_worker(int socket, pid_t parent) {
 }
 
 int main(int argc, char **argv) {
+    int at = 1;
+    const char *protocol = NULL;
+    int files = 1;
+    if (at < argc && !strcmp(argv[at], "--session")) {
+        if (++at == argc) return 2;
+        protocol = argv[at++];
+        if (strcmp(protocol, "x11") && strcmp(protocol, "x11-routed") && strcmp(protocol, "wayland")) return 2;
+        files = at < argc && !strcmp(argv[at], "--files");
+        if (files) ++at;
+    }
+    if (at >= argc || strcmp(argv[at++], "--") || at == argc) {
+        fprintf(stderr, "Usage: guest helper [--session x11|x11-routed|wayland [--files]] -- PROGRAM ARG...\n");
+        return 2;
+    }
+    if (!files) {
+        exec_session(protocol, argc - at, argv + at);
+        perror("Guest session");
+        return 127;
+    }
     const char *endpoint = getenv("MAGICDESK_GUEST_FILES_SOCKET");
     const char *token = getenv("MAGICDESK_GUEST_FILES_TOKEN");
-    if (argc < 3 || strcmp(argv[1], "--") || !endpoint || !token || strlen(token) != 64) {
+    if (!endpoint || !token || strlen(token) != 64) {
         fprintf(stderr, "Guest file bridge requires its session environment and -- PROGRAM ARG...\n");
         return 2;
     }
@@ -206,7 +243,8 @@ int main(int argc, char **argv) {
         _exit(run_worker(socketFd, parent));
     }
     close(socketFd);
-    execvp(argv[2], argv + 2);
+    if (protocol) exec_session(protocol, argc - at, argv + at);
+    else execvp(argv[at], argv + at);
     perror("Guest command");
     kill(worker, SIGTERM);
     return 127;

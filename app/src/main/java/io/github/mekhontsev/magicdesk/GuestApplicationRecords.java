@@ -17,30 +17,37 @@ final class GuestApplicationRecords {
         var errors = new ArrayList<String>();
         var ids = new HashSet<String>();
         for (int i = 0; i < records.length(); ++i) {
-            var record = records.getJSONObject(i);
-            var environment = GuestEnvironmentCatalog.parse(new JSONArray().put(record.getJSONObject("environment")).toString()).get(0);
-            if (record.has("error")) {
-                errors.add(environment.name() + ": " + record.getString("error"));
-                continue;
+            String context = "Guest record " + (i + 1);
+            try {
+                var record = records.getJSONObject(i);
+                var environment = GuestEnvironmentCatalog.parse(new JSONArray().put(record.getJSONObject("environment")).toString()).get(0);
+                context = environment.name();
+                if (record.has("error")) {
+                    errors.add(environment.name() + ": " + record.getString("error"));
+                    continue;
+                }
+                String path = record.getString("path");
+                String desktopId = ApplicationIconKey.desktopId(path);
+                context += ": " + desktopId;
+                String id = "guest:" + environment.id() + ":" + desktopId;
+                if (!ids.add(id)) continue;
+                var linux = DesktopEntryFile.parseGuestApplication(record.getString("text"));
+                if (linux == null) continue;
+                String command = DesktopExecTemplate.expandArguments(linux.exec, DesktopLaunchArguments.empty(), linux.name, linux.icon, path);
+                var recipe = LinuxLaunchRecipe.build(linux.name + " (" + environment.name() + ")",
+                        new LinuxLaunchRecipe.Environment(LinuxLaunchRecipe.Kind.MANAGED_GUEST, environment.store(), DesktopExecBackend.SHELL, ""),
+                        "exec " + command, linux.workingDirectory, "", linux.terminal ? LinuxLaunchRecipe.Presentation.TERMINAL
+                                : linux.graphics != null && linux.graphics.desktop() ? LinuxLaunchRecipe.Presentation.DESKTOP
+                                : LinuxLaunchRecipe.Presentation.APPLICATION, linux.graphics == null ? GraphicalProtocol.X11 : linux.graphics.protocol());
+                var shortcut = new DesktopApplicationShortcut(recipe.name, id, recipe.exec, null, "", recipe.launchMode,
+                        false, recipe.execBackend, recipe.terminal).withLiteralExec(true).withGraphics(recipe.graphics == null ? null
+                                : new GraphicalLaunchOptions(recipe.graphics.protocol(), recipe.graphics.desktop(), recipe.graphics.keyboardDirectory(),
+                                        linux.graphics == null ? "" : linux.graphics.startupClass(), recipe.graphics.fileEnvironment(), recipe.graphics.connectionMode()));
+                entries.add(new DesktopApplicationRepository.Entry(shortcut, "/magicdesk-guest/" + environment.id() + "/applications/"
+                        + desktopId, null, false, linux.exec));
+            } catch (org.json.JSONException | java.io.IOException | IllegalArgumentException failure) {
+                errors.add(context + ": " + failure.getMessage());
             }
-            String path = record.getString("path");
-            String desktopId = ApplicationIconKey.desktopId(path);
-            String id = "guest:" + environment.id() + ":" + desktopId;
-            if (!ids.add(id)) continue;
-            var linux = DesktopEntryFile.parseGuestApplication(record.getString("text"));
-            if (linux == null) continue;
-            String command = DesktopExecTemplate.expandArguments(linux.exec, DesktopLaunchArguments.empty(), linux.name, linux.icon, path);
-            var recipe = LinuxLaunchRecipe.build(linux.name + " (" + environment.name() + ")",
-                    new LinuxLaunchRecipe.Environment(LinuxLaunchRecipe.Kind.MANAGED_GUEST, environment.store(), DesktopExecBackend.SHELL, ""),
-                    "exec " + command, linux.workingDirectory, "", linux.terminal ? LinuxLaunchRecipe.Presentation.TERMINAL
-                            : linux.graphics != null && linux.graphics.desktop() ? LinuxLaunchRecipe.Presentation.DESKTOP
-                            : LinuxLaunchRecipe.Presentation.APPLICATION, linux.graphics == null ? GraphicalProtocol.X11 : linux.graphics.protocol());
-            var shortcut = new DesktopApplicationShortcut(recipe.name, id, recipe.exec, null, "", recipe.launchMode,
-                    false, recipe.execBackend, recipe.terminal).withLiteralExec(true).withGraphics(recipe.graphics == null ? null
-                            : new GraphicalLaunchOptions(recipe.graphics.protocol(), recipe.graphics.desktop(), recipe.graphics.keyboardDirectory(),
-                                    linux.graphics == null ? "" : linux.graphics.startupClass(), recipe.graphics.fileEnvironment(), recipe.graphics.connectionMode()));
-            entries.add(new DesktopApplicationRepository.Entry(shortcut, "/magicdesk-guest/" + environment.id() + "/applications/"
-                    + desktopId, null, false, linux.exec));
         }
         return new Snapshot(List.copyOf(entries), String.join("; ", errors));
     }

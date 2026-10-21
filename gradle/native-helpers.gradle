@@ -75,7 +75,7 @@ def resolveNativeCompilerCommand = {
 }
 
 def registerNativeHelper = { String taskName, String sourceName,
-        String outputName, boolean staticExecutable = false ->
+        String outputName, boolean staticExecutable = false, List includeDirs = [] ->
     def source = rootProject.file("native/${sourceName}")
     def output = new File(nativeOutputRoot, "arm64-v8a/${outputName}")
     tasks.register(taskName, Exec) {
@@ -89,7 +89,8 @@ def registerNativeHelper = { String taskName, String sourceName,
             commandLine resolveNativeCompilerCommand() + [
                     '-std=c17', '-O2', '-Wall', '-Wextra', '-Werror',
                     '-Wl,-z,noexecstack', '-o', output.absolutePath] +
-                    (staticExecutable ? ['-static', '-fno-pie'] : ['-fPIE', '-pie']) + sources
+                    (staticExecutable ? ['-static', '-fno-pie'] : ['-fPIE', '-pie']) +
+                    includeDirs.collectMany { ['-I', it.absolutePath] } + sources
         }
     }
 }
@@ -113,8 +114,24 @@ def processSignalTask = registerNativeHelper(
         'buildMagicDeskProcessSignal',
         'magicdesk_process_signal.c',
         'libmagicdesk_process_signal.so')
+def guestSessionInclude = layout.buildDirectory.dir('generated/guestSession').get().asFile
 def guestFilesTask = registerNativeHelper(
-        'buildMagicDeskGuestFiles', 'magicdesk_guest_files.c', 'libmagicdesk_guest_files.so', true)
+        'buildMagicDeskGuestFiles', 'magicdesk_guest_files.c', 'libmagicdesk_guest_files.so', true, [guestSessionInclude])
+def embedGuestSession = tasks.register('embedGuestSession', Exec) {
+    def source = rootProject.file('native/magicdesk_guest_session.sh')
+    def generator = rootProject.file('native/embed-guest-session.cmake')
+    def output = new File(guestSessionInclude, 'magicdesk_guest_session.inc')
+    inputs.files(source, generator)
+    outputs.file(output)
+    doFirst {
+        output.parentFile.mkdirs()
+        commandLine 'cmake', "-DINPUT=${source.absolutePath}", "-DOUTPUT=${output.absolutePath}", '-P', generator.absolutePath
+    }
+}
+guestFilesTask.configure {
+    dependsOn embedGuestSession
+    inputs.file(new File(guestSessionInclude, 'magicdesk_guest_session.inc'))
+}
 
 def cmakeAndroidTarget = {
     def compiler = resolveNativeCompilerCommand()

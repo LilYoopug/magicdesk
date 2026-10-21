@@ -94,14 +94,13 @@ final class LinuxLaunchRecipe {
         }
         if (proot) host.append(' ').append(q(environment.target()));
         if (!command.isEmpty()) {
-            String guest = command;
+            List<String> guest = List.of("/bin/sh", "-lc", command);
             if (graphical) {
-                // Each graphical launch owns its D-Bus session and private runtime directory.
-                guest = LinuxGraphicalEnvironment.wrap(protocol,
-                        (presentation == Presentation.APPLICATION ? "/tmp/magicdesk-linux-settings -- " : "")
-                        + "/bin/sh -lc " + q(command));
+                if (presentation == Presentation.APPLICATION)
+                    guest = List.of("/tmp/magicdesk-linux-settings", "--", "/bin/sh", "-lc", command);
+                guest = LinuxGraphicalEnvironment.arguments("/tmp/magicdesk-guest-files", protocol, false, true, guest);
             }
-            host.append(graphical ? " -- /tmp/magicdesk-guest-files -- /bin/sh -lc " : " -- /bin/sh -lc ").append(q(guest));
+            host.append(" -- ").append(String.join(" ", guest.stream().map(LinuxLaunchRecipe::q).toList()));
         }
         if (graphical && environment.backend() == DesktopExecBackend.SHELL && environment.keyboardDirectory().isEmpty())
             throw new IllegalArgumentException("Enter the XKB data directory in the prepared Linux environment");

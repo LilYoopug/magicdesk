@@ -1155,8 +1155,14 @@ for the selected guest UID in the prepared system. Network clients need its
 resolver configuration and CA trust store. GUI toolkits need fonts, icons and
 their normal GSettings/GdkPixbuf/MIME caches.
 
-`LinuxGraphicalEnvironment` owns one graphical-session wrapper for guest,
-PRoot and chroot recipes. The distribution supplies `dbus-run-session` and
+`LinuxGraphicalEnvironment` produces argument vectors for the existing static
+guest helper. Its embedded `native/magicdesk_guest_session.sh` owns the shared
+session setup and cleanup for Shroot, PRoot and chroot recipes. No extra binary
+or installed guest script is required; `.desktop` Exec lines contain the mode
+and application arguments, not nested copies of the session script. Invalid
+catalog entries report their environment and launcher without hiding healthy
+entries; the Exec size limit and hidden-entry precedence remain unchanged.
+The distribution supplies `dbus-run-session` and
 `dbus-daemon`, with its standard session configuration, listen address,
 credential authentication, activation and limits. `dbus-run-session` owns
 readiness and shutdown; the wrapper owns a private `XDG_RUNTIME_DIR`.

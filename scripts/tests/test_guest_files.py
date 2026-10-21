@@ -1,5 +1,6 @@
 """The real guest helper over an abstract Unix socket; no Android or root needed."""
 import array
+import json
 import os
 from pathlib import Path
 import selectors
@@ -21,13 +22,17 @@ class GuestFilesTest(unittest.TestCase):
         cc = shutil.which(os.environ.get("CC", "clang")) or shutil.which("cc")
         if not cc:
             raise unittest.SkipTest("C compiler required")
-        cls.work = tempfile.TemporaryDirectory(prefix="magicdesk-guest-test-")
+        cls.work = tempfile.TemporaryDirectory(prefix="magicdesk guest test ")
         cls.addClassCleanup(cls.work.cleanup)
         cls.helper = Path(cls.work.name) / "guest-files"
         source = Path(__file__).resolve().parents[2] / "native/magicdesk_guest_files.c"
-        subprocess.run([cc, "-std=c17", "-Wall", "-Wextra", "-Werror", str(source), "-o", str(cls.helper)], check=True)
+        subprocess.run(['cmake', '-DINPUT=' + str(source.with_name('magicdesk_guest_session.sh')),
+                        '-DOUTPUT=' + str(Path(cls.work.name) / 'magicdesk_guest_session.inc'),
+                        '-P', str(source.with_name('embed-guest-session.cmake'))], check=True, timeout=20)
+        subprocess.run([cc, "-std=c17", "-Wall", "-Wextra", "-Werror", '-I', cls.work.name,
+                        str(source), "-o", str(cls.helper)], check=True, timeout=30)
 
-    def launch(self, argv=None):
+    def launch(self, argv=None, extra_environment=None):
         endpoint = "magicdesk-test-" + uuid.uuid4().hex
         listener = socket.socket(socket.AF_UNIX)
         listener.bind("\0" + endpoint)
@@ -36,6 +41,7 @@ class GuestFilesTest(unittest.TestCase):
         self.addCleanup(listener.close)
         token = uuid.uuid4().hex + uuid.uuid4().hex
         environment = dict(os.environ, MAGICDESK_GUEST_FILES_SOCKET=endpoint, MAGICDESK_GUEST_FILES_TOKEN=token)
+        environment.update(extra_environment or {})
         if argv and argv[0] == "proot-distro":
             argv = argv[:2] + ["--env", "MAGICDESK_GUEST_FILES_SOCKET=" + endpoint,
                               "--env", "MAGICDESK_GUEST_FILES_TOKEN=" + token] + argv[2:]
@@ -134,6 +140,71 @@ class GuestFilesTest(unittest.TestCase):
         output, _ = process.communicate(timeout=5)
         self.assertNotEqual(0, process.returncode)
         self.assertEqual(b"", output)
+
+    def test_graphical_sessions_keep_literal_arguments_authority_and_worker_lifetime(self):
+        for protocol in ('x11', 'x11-routed', 'wayland'):
+            for files in (False, True):
+                with self.subTest(protocol=protocol, files=files), tempfile.TemporaryDirectory(dir=self.work.name) as work:
+                    root = Path(work)
+                    runtime = root / "runtime ' space"
+                    runtime.mkdir()
+                    shell = shutil.which('sh')
+                    # Assert the login-shell contract without sourcing the build host's profile.
+                    (root / 'sh').write_text('#!' + shell + '\nset -eu\ntest "$1" = -lc\nshift\n'
+                                            'export MD_PROFILE_LOADED=1\nexec ' + shell + ' -c "$@"\n')
+                    (root / 'mktemp').write_text('#!' + shell + '\nprintf "%s\\n" "$MD_DIRECTORY"\n')
+                    (root / 'dbus-run-session').write_text('#!' + shell + '\nset -eu\ntest "$MD_PROFILE_LOADED" = 1\n'
+                                                          'test "$1" = --\nshift\nexec "$@"\n')
+                    for name in ('sh', 'mktemp', 'dbus-run-session'):
+                        (root / name).chmod(0o700)
+                    environment = dict(os.environ, PATH=str(root) + ':' + os.environ['PATH'],
+                                       MD_DIRECTORY=str(runtime), MAGICDESK_X11_AUTHORITY='Y29va2ll',
+                                       XAUTHORITY="/original ' authority")
+                    environment.pop('MAGICDESK_GUEST_FILES_SOCKET', None)
+                    environment.pop('MAGICDESK_GUEST_FILES_TOKEN', None)
+                    arguments = ["two words", "'quoted'", "$literal; `false`", "", "line\nbreak", "100%"]
+                    program = ('import json, os, pathlib, sys; '
+                               'assert "MAGICDESK_GUEST_FILES_TOKEN" not in os.environ; '
+                               'assert "MAGICDESK_GUEST_FILES_SOCKET" not in os.environ; '
+                               'print(json.dumps([sys.argv[1:], os.environ["XDG_RUNTIME_DIR"], '
+                               'os.environ["XDG_SESSION_TYPE"], os.environ["XAUTHORITY"], '
+                               '(pathlib.Path(os.environ["XAUTHORITY"]).read_text() '
+                               'if os.environ["XAUTHORITY"].endswith("/Xauthority") else ""), '
+                               'os.environ.get("MAGICDESK_X11_AUTHORITY")])); sys.exit(23)')
+                    command = [str(self.helper), '--session', protocol, *(['--files'] if files else []),
+                               '--', sys.executable, '-c', program, *arguments]
+                    if files:
+                        # Let launch() supply the session-owned credentials, not the ambient environment.
+                        process, peer = self.launch(command, environment)
+                        peer.sendall(b'\0')
+                    else:
+                        process = subprocess.Popen(command, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    stdout, stderr = process.communicate(timeout=5)
+                    self.assertEqual(23, process.returncode, stderr)
+                    self.assertEqual(b'', stderr)
+                    self.assertEqual([arguments, str(runtime), 'wayland' if protocol == 'wayland' else 'x11',
+                                      str(runtime / 'Xauthority') if protocol == 'x11-routed' else "/original ' authority",
+                                      'cookie' if protocol == 'x11-routed' else '',
+                                      None if protocol == 'x11-routed' else 'Y29va2ll'], json.loads(stdout))
+                    self.assertFalse(runtime.exists())
+                    if files:
+                        self.assertEqual(b'', peer.recv(1))
+
+    def test_session_rejects_invalid_arguments_before_running_command(self):
+        for args in (['--session'], ['--session', 'unknown', '--', 'true'],
+                     ['--session', 'wayland', '--'], ['--session', 'wayland', 'true']):
+            with self.subTest(args=args):
+                result = subprocess.run([str(self.helper), *args], capture_output=True, timeout=5)
+                self.assertEqual(2, result.returncode)
+
+    def test_embedded_script_is_stable_across_windows_checkout_line_endings(self):
+        native = Path(__file__).resolve().parents[2] / 'native'
+        source = Path(self.work.name) / 'session with spaces.sh'
+        source.write_bytes((native / 'magicdesk_guest_session.sh').read_bytes().replace(b'\r\n', b'\n').replace(b'\n', b'\r\n'))
+        output = source.with_suffix('.inc')
+        subprocess.run(['cmake', '-DINPUT=' + str(source), '-DOUTPUT=' + str(output),
+                        '-P', str(native / 'embed-guest-session.cmake')], check=True, timeout=20)
+        self.assertEqual((Path(self.work.name) / 'magicdesk_guest_session.inc').read_bytes(), output.read_bytes())
 
     def test_malformed_path_ends_only_its_connection(self):
         process, peer = self.launch()

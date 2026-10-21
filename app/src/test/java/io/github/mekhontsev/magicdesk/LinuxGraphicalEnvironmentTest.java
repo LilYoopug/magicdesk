@@ -99,12 +99,12 @@ public final class LinuxGraphicalEnvironmentTest {
                 + "printf '%s\\0' \"$3\" >> \"$MD_CALLS\"\n"
                 + (retain ? "" : "cp \"$MD_ROOT/after-parent\" \"$MD_MOUNTS\"\n")
                 + "exit " + helperExit + "\n");
-        String wrapped = LinuxGraphicalEnvironment.wrap(GraphicalProtocol.WAYLAND,
-                ShellCommandLine.quote(shell) + " -c 'exit " + applicationExit + "'")
+        String wrapped = sessionScript()
                 .replace("/proc/self/mounts", ShellCommandLine.quote(mounts.toString()));
         // Keep the legacy-helper case independent of the build host's packages.
         if (legacy) wrapped = wrapped.replace("fusermount3", "md_missing_fusermount3");
-        ProcessBuilder builder = new ProcessBuilder(shell, "-c", wrapped).redirectErrorStream(true);
+        ProcessBuilder builder = new ProcessBuilder(shell, "-c", wrapped,
+                "magicdesk-session", "wayland", shell, "-c", "exit " + applicationExit).redirectErrorStream(true);
         builder.environment().put("PATH", bin + ":" + System.getenv("PATH"));
         builder.environment().put("MD_DIRECTORY", runtime.toString());
         builder.environment().put("MD_ROOT", root.toString());
@@ -156,10 +156,9 @@ public final class LinuxGraphicalEnvironmentTest {
                 + "test \"$1\" = --\nshift\nexec \"$@\"\n");
         String command = "set -eu; test \"$(( $(umask) ))\" = 23; "
                 + checkAuthority + "printf '%s' \"literal ' $value\"; exit 23";
-        String invocation = ShellCommandLine.quote(shell) + " -c " + ShellCommandLine.quote(command);
-        String wrapped = guest ? GuestGraphicalConnection.session(protocol, invocation)
-                : LinuxGraphicalEnvironment.wrap(protocol, invocation);
-        ProcessBuilder builder = new ProcessBuilder(shell, "-c", "umask 027; " + wrapped);
+        ProcessBuilder builder = new ProcessBuilder(shell, "-c", "umask 027; " + sessionScript(),
+                "magicdesk-session", guest && protocol == GraphicalProtocol.X11 ? "x11-routed" : protocol.wireName,
+                shell, "-c", command);
         builder.environment().put("PATH", bin + ":" + System.getenv("PATH"));
         builder.environment().put("MD_DIRECTORY", runtime.toString());
         builder.environment().put("MD_CAPTURE", capture.toString());
@@ -182,5 +181,9 @@ public final class LinuxGraphicalEnvironmentTest {
     private static void script(Path bin, String name, String shell, String body) throws Exception {
         Path file = Files.writeString(bin.resolve(name), "#!" + shell + "\nset -eu\n" + body);
         assertTrue(file.toFile().setExecutable(true));
+    }
+
+    private static String sessionScript() throws Exception {
+        return Files.readString(Path.of("../native/magicdesk_guest_session.sh")).replace("\r\n", "\n");
     }
 }

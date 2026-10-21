@@ -37,10 +37,13 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+cmake "-DINPUT=$project_dir/native/magicdesk_guest_session.sh" \
+    "-DOUTPUT=$work/magicdesk_guest_session.inc" -P "$project_dir/native/embed-guest-session.cmake"
+
 for fixture in magicdesk_hosted_keycodes_test magicdesk_guest_files_test magicdesk_process_signal_test magicdesk_pty_working_directory_test magicdesk_pty_lifecycle_test magicdesk_pty_peer_output_test magicdesk_pipe_shell_test magicdesk_virtual_mouse_test magicdesk_virtual_mouse_setup_test; do
     printf 'Compile: %s (%s)\n' "$fixture" "$compiler"
     "$compiler" -std=c17 -D_GNU_SOURCE -O2 -Wall -Wextra -UNDEBUG \
-        "$project_dir/native/tests/$fixture.c" -o "$work/$fixture"
+        -I"$work" "$project_dir/native/tests/$fixture.c" -o "$work/$fixture"
 done
 
 "$compiler" -std=c17 -O2 -Wall -Wextra -UNDEBUG \

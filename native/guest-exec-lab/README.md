@@ -317,6 +317,15 @@ Graphical checks use a private virtual display and clean up their own sessions.
 Results retain exact device/build identities, commands, failures and known limits.
 Prepared shell-owned test stores remain at the recorded path for inspection.
 
+`test_graphical_session.py --helper APK_BUILD/libmagicdesk_guest_files.so --store STORE`
+checks the packaged session launcher without a viewer or Desktop. Repeat `--store`
+for multiple distributions; `--user` selects an existing guest account (default
+`root`, never Android root). It uses real session D-Bus, verifies literal arguments,
+X11 authority setup before bus startup, private-directory permissions, exit status
+and cleanup for direct X11, routed X11 and Wayland. Temporary helper files are
+removed. Host tests additionally cover the authenticated file worker and failed
+bus/unmount paths. This is session-launch coverage, not rendered GUI acceptance.
+
 Capability fault injection checks that missing kernel calls reject only guest
 execution. Process fixtures cover concurrent distinct stores, cancellation and
 orphan ownership. These checks do not emulate an old kernel or prove compatibility
