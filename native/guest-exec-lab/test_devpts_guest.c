@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/inotify.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
@@ -62,6 +63,19 @@ int test_devpts_guest(int pid_namespace) {
         if (controlling<0) perror("open controlling tty");
         assert(controlling>=0);
         assert(!ioctl(controlling,TIOCGPGRP,&foreground) && foreground==getpgrp());
+        /* Persistent FD selectors survive close/reuse and must not hide PID
+         * translation when this descriptor later names a terminal. */
+        for (int kind=0;kind<2;++kind) {
+            int reused=kind ? open("/proc/self/status",O_RDONLY|O_CLOEXEC)
+                : inotify_init1(IN_CLOEXEC);
+            assert(reused>=0);
+            assert(dup3(controlling,reused,O_CLOEXEC)==reused);
+            assert(!ioctl(reused,TIOCGPGRP,&foreground) && foreground==getpgrp());
+            assert(!ioctl(reused,TIOCSPGRP,&foreground));
+            pid_t session=0;
+            assert(!ioctl(reused,TIOCGSID,&session) && session==getsid(0));
+            close(reused);
+        }
         close(controlling); close(terminal); _exit(0);
     }
     int status;

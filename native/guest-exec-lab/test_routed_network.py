@@ -6,10 +6,73 @@ import json
 import os
 from pathlib import Path
 import select
+import shutil
 import socket
 import struct
 import subprocess
 import sys
+
+def socket_table(name, process='self'):
+    with open(f'/proc/{process}/net/{name}') as source:
+        return {int(parts[9]): parts for line in source if len(parts := line.split()) >= 10 and parts[0] != 'sl'}
+
+
+def check_socket_table(sock, name, connected=False):
+    inode = os.fstat(sock.fileno()).st_ino
+    def address(pair):
+        return f'{int.from_bytes(socket.inet_aton(pair[0]), sys.byteorder):08X}:{pair[1]:04X}'
+    row = socket_table(name)[inode]
+    assert row[1] == address(sock.getsockname()), row
+    assert row[2] == (address(sock.getpeername()) if connected else '00000000:0000'), row
+    assert int(row[7]) == os.geteuid(), row
+    assert socket_table(name, os.getpid())[inode] == row
+    return inode
+
+
+def socket_tables():
+    for path in ('/proc/self', f'/proc/{os.getpid()}', f'/proc/self/task/{os.getpid()}'):
+        info = os.stat(path)
+        assert (info.st_uid, info.st_gid) == (os.geteuid(), os.getegid()), (path, info)
+        fd = os.open(path, os.O_PATH | os.O_DIRECTORY)
+        try:
+            info = os.fstat(fd)
+            assert (info.st_uid, info.st_gid) == (os.geteuid(), os.getegid()), (path, info)
+        finally:
+            os.close(fd)
+    with socket.socket() as listener, socket.socket() as client:
+        listener.bind(('127.0.0.1', 0))
+        listener.listen(1)
+        client.connect(listener.getsockname())
+        accepted, _ = listener.accept()
+        with accepted:
+            inode = check_socket_table(listener, 'tcp')
+            check_socket_table(client, 'tcp', True)
+            check_socket_table(accepted, 'tcp', True)
+            if shutil.which('lsof'):
+                # Steam uses exactly this owner/parent lookup to admit its IPC peer.
+                result = subprocess.run(['lsof', '-nP', '-F', 'upnR', '-a', '-p', str(os.getpid()),
+                    '-i', f'TCP@127.0.0.1:{client.getsockname()[1]}'],
+                    capture_output=True, text=True, timeout=30)
+                assert result.returncode == 0, result
+                assert f'p{os.getpid()}\n' in result.stdout and f'u{os.geteuid()}\n' in result.stdout, result.stdout
+            result = subprocess.run(['unshare', '-n', 'cat', '/proc/net/tcp'],
+                                    capture_output=True, text=True, timeout=15)
+            assert result.returncode == 0 and len(result.stdout.splitlines()) == 1, result
+        with open('/proc/net/tcp') as table:
+            first = table.readlines()
+            table.seek(0)
+            second = table.readlines()
+            assert first[0] == second[0]
+            # TCP timers and closing peers may advance between snapshots.
+            for lines in (first, second):
+                row = next(line.split() for line in lines[1:] if int(line.split()[9]) == inode)
+                assert row[1] == f'0100007F:{listener.getsockname()[1]:04X}' and row[3] == '0A', row
+    assert inode not in socket_table('tcp')
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+        udp.bind(('127.0.0.1', 0))
+        check_socket_table(udp, 'udp')
+    assert not socket_table('tcp6') and not socket_table('udp6')
+    print('PASS proc socket tables: logical ports, peers, UID/inode, lsof, rewind, close and private namespace', flush=True)
 
 def send_batch(udp, address):
     class Vector(ctypes.Structure):
@@ -45,6 +108,9 @@ def receive_info_without_name(udp, capacity):
     message = Header(None, 0, ctypes.pointer(vector), 1, ctypes.addressof(control), capacity, 0)
     libc = ctypes.CDLL(None, use_errno=True)
     libc.recvmsg.argtypes = [ctypes.c_int, ctypes.POINTER(Header), ctypes.c_int]
+    # EVENT_WAIT: settimeout makes the FD nonblocking. A direct libc call does
+    # not execute Python socket's readiness wait; fail if no datagram arrives.
+    assert select.select([udp], [], [], udp.gettimeout())[0], 'No pktinfo datagram'
     result = libc.recvmsg(udp.fileno(), ctypes.byref(message), 0)
     assert result == 7 and data.raw[:result] == b'NONAME!', (result, ctypes.get_errno())
     assert message.namelen == 0
@@ -100,6 +166,7 @@ def guest():
     lookup = json.loads(run('ip', '-j', 'route', 'get', '1.1.1.1'))
     assert lookup[0]['dev'] == 'eth0' and lookup[0]['gateway'] == '10.0.2.2', lookup
     datagram_lifetime()
+    socket_tables()
     # glibc resolves the address and dumps interfaces to order its candidates.
     if '--internet' in sys.argv:
         run('timeout', '20', 'getent', 'ahostsv4', 'example.com')
@@ -138,6 +205,8 @@ def guest():
                 connection, peer = listener.accept()
                 with connection:
                     connection.settimeout(15)
+                    check_socket_table(listener, 'tcp')
+                    check_socket_table(connection, 'tcp', True)
                     assert connection.recv(4) == b'PING'
                     connection.sendall(b'PONG')
                     print('TCP child peer', peer, flush=True)
@@ -203,6 +272,9 @@ def guest():
         os.write(to_child, b'M')
         assert select.select([to_parent], [], [], 20)[0], 'Moved interface setup stalled'
         assert os.read(to_parent, 1) == b'D'
+        child_sockets = socket_table('tcp', child)
+        assert any(row[1] == '00000000:46A0' for row in child_sockets.values()), child_sockets
+        assert not set(child_sockets) & set(socket_table('tcp')), child_sockets
         with socket.create_connection(('172.18.0.2', 18080), timeout=15) as connection:
             assert connection.getpeername() == ('172.18.0.2', 18080)
             connection.sendall(b'PING')
@@ -250,15 +322,18 @@ def guest():
 def main():
     from test_oci_services import Suite
     build, store = Path(sys.argv[1]), sys.argv[2]
-    suite = Suite(build, build)
+    suite = Suite(build, build, machine_entry='--machine-entry' in sys.argv)
     target = '/tmp/md-network-' + suite.report['id']
     prefix = [suite.runner, '--store', store, '--user', '0:0']
     try:
         suite.transport.upload(suite.client, Path(__file__), suite.base + '/test.py')
         suite.command(prefix + ['--', '/bin/mkdir', target])
-        suite.command(prefix + ['--network', 'routed', '--bind-ro', suite.base, target,
+        suite.command(prefix + suite.entry_options + ['--network', 'routed', '--bind-ro', suite.base, target,
                                 '--deadline-seconds', '120', '--', '/usr/bin/python3', target + '/test.py', '--guest']
                       + (['--internet'] if '--internet' in sys.argv else []))
+        suite.command(prefix + suite.entry_options + ['--network', 'routed', '--bind-ro', suite.base, target,
+            '--deadline-seconds', '120', '--', '/usr/bin/unshare', '--mount', '--pid', '--fork', '--mount-proc',
+            '/usr/bin/python3', target + '/test.py', '--tables'])
         suite.report['passed'] = True
     finally:
         try:
@@ -268,4 +343,4 @@ def main():
 
 
 if __name__ == '__main__':
-    guest() if '--guest' in sys.argv else main()
+    socket_tables() if '--tables' in sys.argv else guest() if '--guest' in sys.argv else main()

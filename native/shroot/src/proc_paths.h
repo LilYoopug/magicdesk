@@ -20,12 +20,29 @@ enum md_proc_kind { MD_PROC_NONE, MD_PROC_FD, MD_PROC_FDINFO, MD_PROC_CWD, MD_PR
                     MD_PROC_NET_UNPRIVILEGED_PORT, MD_PROC_NET_PING_GROUPS, MD_PROC_NET_LOCAL_PORTS,
                     MD_PROC_NET_IPV4_FORWARD, MD_PROC_NET_ROUTE_LOCALNET, MD_PROC_NET_RP_FILTER, MD_PROC_NET_ARP_NOTIFY,
                     MD_PROC_NET_BRIDGE_FILTER,
-                    MD_PROC_MEMORY, MD_PROC_MAX_USER_NAMESPACES };
+                    MD_PROC_MEMORY, MD_PROC_MAX_USER_NAMESPACES,
+                    MD_PROC_NET_TCP, MD_PROC_NET_TCP6, MD_PROC_NET_UDP, MD_PROC_NET_UDP6 };
+static inline int md_proc_network_table(enum md_proc_kind kind) {
+    return kind>=MD_PROC_NET_TCP && kind<=MD_PROC_NET_UDP6;
+}
+static inline int md_proc_network_control(enum md_proc_kind kind) {
+    return (kind>=MD_PROC_NET_UNPRIVILEGED_PORT && kind<=MD_PROC_NET_BRIDGE_FILTER)
+        || md_proc_network_table(kind);
+}
 static inline int md_proc_network_sysctl(enum md_proc_kind kind) {
     return kind>=MD_PROC_NET_UNPRIVILEGED_PORT && kind<=MD_PROC_NET_BRIDGE_FILTER;
 }
 static inline int md_proc_network_interface(enum md_proc_kind kind) {
     return kind>=MD_PROC_NET_ROUTE_LOCALNET && kind<=MD_PROC_NET_ARP_NOTIFY;
+}
+/* Terminal proc objects, never directories or magic links. A mounted proc
+ * walker resolves their entire path; a remaining suffix is always ENOTDIR. */
+static inline int md_proc_regular(enum md_proc_kind kind) {
+    return (kind>=MD_PROC_UID_MAP && kind<=MD_PROC_INOTIFY_QUEUE)
+        || (kind>=MD_PROC_STATUS && kind<=MD_PROC_CGROUPS)
+        || md_proc_network_control(kind) || kind==MD_PROC_MAX_USER_NAMESPACES
+        || kind==MD_PROC_FDINFO || kind==MD_PROC_CMDLINE || kind==MD_PROC_AUXV
+        || kind==MD_PROC_MOUNTS || kind==MD_PROC_MOUNTINFO;
 }
 struct md_proc_path {
     enum md_proc_kind kind;

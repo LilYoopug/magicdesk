@@ -272,12 +272,13 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
             with (base / 'network.log').open(errors='replace') as stream:
                 report['networkTrace'] = list(collections.deque((line for line in stream
                     if not any(marker in line for marker in ('--- SIGURG ', '--- SIGCHLD ', '+++ exited with'))), maxlen=180))
-        print(json.dumps(report), flush=True)
+        print('DOCKER_REPORT ' + json.dumps(report), flush=True)
         if reader.is_alive():
             os._exit(2)
 
 
 def main():
+    from test_oci_services import Suite, add_machine_entry_argument
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('build', type=Path)
     parser.add_argument('store')
@@ -301,16 +302,16 @@ def main():
     parser.add_argument('--cgroupns', choices=('private', 'host'), default='private')
     parser.add_argument('--exercise-ports', action='store_true',
                         help='Verify TCP/UDP publication from outside Shroot; use a Python image')
+    add_machine_entry_argument(parser)
     args = parser.parse_args()
     if args.exercise_ports and args.profile not in NETWORK_PROFILES:
         parser.error('--exercise-ports requires --profile routed or nftables')
     if args.image is None:
         args.image = 'python:3.14-alpine' if args.exercise_ports else 'busybox:1.37.0'
-    from test_oci_services import Suite
-    suite = Suite(args.build, args.build)
+    suite = Suite(args.build, args.build, machine_entry=args.machine_entry)
     suite.report.update(store=args.store, probe=True, profile=args.profile, cgroup=args.cgroup)
     target = '/tmp/md-docker-probe-' + suite.report['id']
-    prefix = [suite.runner, '--store', args.store, '--user', '0:0']
+    prefix = suite.guest(args.store, '--user', '0:0')
     observer = None
     created = False
     try:
@@ -343,7 +344,10 @@ def main():
                                         args.storage_driver, args.data_root,
                                         str(int(args.userland_proxy)), str(int(args.internet))],
                                quiet=True, timeout=deadline + 30)
-        suite.report['probeResult'] = json.loads(output)
+        reports = [line.removeprefix('DOCKER_REPORT ') for line in output.splitlines()
+                   if line.startswith('DOCKER_REPORT ')]
+        assert len(reports) == 1, output[-2000:]
+        suite.report['probeResult'] = json.loads(reports[0])
         print(json.dumps({key: value for key, value in suite.report['probeResult'].items()
                           if key != 'log'}, indent=2), flush=True)
         if observer:

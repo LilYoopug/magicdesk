@@ -81,7 +81,9 @@ struct md_fd_object;
  * and origin, and admits only the exact task and seccomp call snapshot. The
  * stopped-call carrier uses fstat's existing notification route with unchanged
  * user registers; task-affine delivery uses gettid at the admission gate. Neither
- * carrier executes its native syscall when it matches the pending result. */
+ * carrier executes its native syscall when it matches the pending result.
+ * Filtered task-affine delivery can instead re-admit the original filesystem
+ * syscall with its complete original IP/argument context. */
 int md_broker_result_begin(struct md_namespace_broker *, int pid, const struct seccomp_data *,
         struct md_fd_origins *, int source, struct md_fd_object *, unsigned flags);
 /* Retire one pending result. Returns 1 with the kernel-confirmed response, 0

@@ -148,6 +148,21 @@ guest namespaces can be published.
 
 ### Publication Ordering
 
+Inherited descriptors 0-2 may retain O_PATH identity pins through
+`fd_native_pin`. They provide metadata for a protected, filtered caller without
+exporting an extra data description through a forbidden helper syscall. Pins
+do not hold a pipe writer/reader open, retain a data offset or create guest
+filesystem provenance. Capture failure leaves ordinary fallback available.
+Close/dup/fork use the same file-table publication rules as other origins.
+
+After an application filter is installed, a completed filesystem result may
+require task-affine FD delivery. The result owner retains that completion while
+the supervisor admits the original syscall PC and six arguments through the
+kernel filter. A permitted replay publishes the existing result exactly once;
+it does not execute open/create again. A denied replay retains the filter's
+action. Optional mapping-backing capture is omitted when its clone/sendmsg
+helpers would introduce additional calls after filter installation.
+
 `resource_order` provides an intrusive queue embedded independently in each
 file-table and filesystem-context owner. Typed adapters pin their resource through
 completion, including after its last task owner exits. The supervisor and
@@ -174,6 +189,16 @@ only records intent. It continues to own its turn until the kernel operation
 is confirmed complete. Cancellation or a timeout does not prove that a descriptor
 was never installed. Requests perform no queue allocation, callbacks or blocking
 waits, and unrelated resource owners can progress independently.
+
+Retirement can outlive its requester. Its task-affine close may borrow a peer
+at an exact kernel boundary, including a readiness waiter queued behind that
+same table turn. A guest debugger's running inferior remains eligible through
+the common task-call/quiescence owner; tracing alone is not a published stop.
+Debugger-held stops and pending interrupts remain excluded, except for the
+existing stopped inferior explicitly owned by the requesting debugger. The
+borrow restores the exact continuation without executing application code or
+consuming a guest debugger event. Excluding all traced peers would let orphan
+retirement retain a table turn while every peer waits for it.
 
 Both filesystem transports and the observed native mutations use this ordering.
 A blocking receive or FIFO rendezvous waits outside the queue; only its short

@@ -22,4 +22,10 @@ void md_fd_selector_release(struct md_fd_selector *);
 int md_fd_selector_has(struct md_fd_selector *, unsigned kind, int fd);
 int md_fd_selector_has_mask(struct md_fd_selector *, unsigned kinds, int fd);
 int md_fd_selector_mark(struct md_fd_selector *, unsigned kind, int fd);
+/* Bound our irreversible filters to half of Linux's 32768-instruction path
+ * limit, leaving room for the base adapter and application filters. Promotion
+ * uses the existing all-FD dispatch of this kind, not a policy bypass. */
+enum { MD_FD_SELECTOR_BUDGET = 16384 };
+int md_fd_selector_target(const struct md_fd_selector *, int fd, unsigned instructions);
+int md_fd_selector_installed(struct md_fd_selector *, unsigned kind, int fd, unsigned instructions);
 #endif

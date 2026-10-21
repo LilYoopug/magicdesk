@@ -12,6 +12,9 @@ def main():
     parser.add_argument('--build', type=Path, required=True)
     parser.add_argument('--store', required=True)
     parser.add_argument('--repetitions', type=int, default=1)
+    parser.add_argument('--trace', action='store_true', help='Exercise guest strace across readiness and signals')
+    parser.add_argument('--machine-entry', action='store_true')
+    parser.add_argument('--diagnostics', action='store_true')
     parser.add_argument('--mode', choices=MODES,
                         action='append', help='Select focused cases; default runs all modes')
     args = parser.parse_args()
@@ -20,6 +23,10 @@ def main():
     suite = Suite(args.build, args.build)
     target = '/md-epoll-' + suite.report['id']
     prefix = [suite.runner, '--store', args.store, '--user', '0:0']
+    if args.machine_entry:
+        prefix += ['--env', 'SHROOT_MACHINE_ENTRY=1']
+    if args.diagnostics:
+        prefix += ['--diagnostics']
     created = False
     try:
         suite.transport.upload(suite.client, args.build / 'libmagicdesk_guest_readiness_guest.so', suite.base + '/readiness')
@@ -29,8 +36,11 @@ def main():
         for _ in range(args.repetitions):
             for mode in args.mode or MODES:
                 denied = mode == 'retire-filtered'
-                output = suite.command(prefix + ['--diagnostics', '--bind', suite.base, target, '--deadline-seconds', '20',
-                                                 '--', target + '/readiness', '--' + mode], timeout=35,
+                command = [target + '/readiness', '--' + mode]
+                if args.trace:
+                    command = ['/usr/bin/strace', '-f', '-qq', '-o', target + '/trace-' + mode + '.log'] + command
+                output = suite.command(prefix + ['--bind', suite.base, target, '--deadline-seconds', '20',
+                                                 '--'] + command, timeout=35,
                                        expected=125 if denied else 0)
                 if denied:
                     assert 'Shroot: cannot retire temporary FD ' in output

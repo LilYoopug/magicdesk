@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 enum { BYTES = (MD_FD_SELECTOR_MASK + 1) / 8 };
-struct md_fd_selector { unsigned references, all; unsigned char *bits[MD_FD_SELECTOR_KINDS]; };
+struct md_fd_selector { unsigned references, all, instructions; unsigned char *bits[MD_FD_SELECTOR_KINDS]; };
 struct md_fd_selector *md_fd_selector_new(void) {
     struct md_fd_selector *a = calloc(1, sizeof(*a));
     if (a) a->references = 1;
@@ -12,7 +12,7 @@ struct md_fd_selector *md_fd_selector_new(void) {
 struct md_fd_selector *md_fd_selector_fork(struct md_fd_selector *a, int shared) {
     if (shared) { a->references++; return a; }
     struct md_fd_selector *copy = md_fd_selector_new();
-    if (copy) copy->all=a->all;
+    if (copy) { copy->all=a->all; copy->instructions=a->instructions; }
     for (unsigned i=0;copy && i<MD_FD_SELECTOR_KINDS;++i) if (a->bits[i]) {
         copy->bits[i] = malloc(BYTES);
         if (!copy->bits[i]) { md_fd_selector_release(copy); return NULL; }
@@ -54,4 +54,16 @@ int md_fd_selector_mark(struct md_fd_selector *a, unsigned kind, int fd) {
     fd &= MD_FD_SELECTOR_MASK;
     if (!a->bits[kind]) return -EINVAL;
     a->bits[kind][fd / 8] |= (1U << (fd % 8)); return 0;
+}
+int md_fd_selector_target(const struct md_fd_selector *a,int fd,unsigned instructions) {
+    if (!a || fd< -1 || !instructions || instructions>4096) return -EINVAL;
+    return a->instructions+instructions+4>MD_FD_SELECTOR_BUDGET ? -1 : fd;
+}
+int md_fd_selector_installed(struct md_fd_selector *a,unsigned kind,int fd,unsigned instructions) {
+    if (!instructions || instructions>4096) return -EINVAL;
+    int error=md_fd_selector_mark(a,kind,fd);
+    /* Linux charges four extra instructions for each ancestor filter. Count
+     * only completed installations, never queries or a failed TSYNC attempt. */
+    if (!error) a->instructions+=instructions+4;
+    return error;
 }

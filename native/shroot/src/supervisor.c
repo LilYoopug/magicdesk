@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "fd_native_pin.h"
 #include "file_permissions.h"
 #include "host_identity.h"
 #include "network_launch.h"
@@ -61,6 +62,8 @@
 #include <linux/nsfs.h>
 #include "proc_sysctl.h"
 #include "user_sysctl.h"
+#include "network_proc.h"
+#include "socket_calls.h"
 #include "proc_control.h"
 #include "control_ioctl.h"
 #include "launch_identity.h"
@@ -79,6 +82,7 @@
 #include <fcntl.h>
 #include <linux/audit.h>
 #include <linux/filter.h>
+#include <linux/ioprio.h>
 #include <linux/close_range.h>
 #include "linux_abi.h"
 #include "task_descriptor.h"
@@ -170,7 +174,7 @@ enum phase { IDLE, ALLOCATING, DISPATCHING, EXECUTING, OBSERVING,
     FILE_WAIT_ENTRY, FILE_WAITING, CONTROL_WAIT_ENTRY, CONTROL_WAITING, CLOSE_WAIT_ENTRY, CLOSE_WAITING,
     WAIT_CANCEL_EXIT, EPOLL_CALL, EPOLL_WAIT,
     IDENTITY_COPY, DEBUG_WAIT_ENTRY, DEBUG_WAIT_EXIT, DEBUG_PARK_ENTRY, DEBUG_PARK_EXIT,
-    MEMORY_WAIT, PROCESS_OBSERVING, PROCESS_TID_STORE,
+    MEMORY_WAIT, RESULT_REPLAY_ENTRY, RESULT_REPLAY_EXIT, PROCESS_OBSERVING, PROCESS_TID_STORE,
     PROCESS_INFO_LOAD, PROCESS_INFO_STORE, PROCESS_VALUE_STORE, PROCESS_INIT_ENTRY, PROCESS_INIT_EXIT, PROC_LOOKUP };
 enum memory_action { MEMORY_NONE, MEMORY_KERNEL, MEMORY_DETACH, MEMORY_FORK };
 enum call_restart { RESTART_SIGNAL=-4105, RESTART_PREPARATION=-4106 };
@@ -270,6 +274,8 @@ struct task_action {
     struct md_interception_buffer buffer;
     struct user_pt_regs continuation;
     enum md_fd_selector_kind kind;
+    int selector_number;
+    unsigned selector_instructions;
     int number;
     struct thread *requester, *actor;
     struct md_fd_selector *group;
@@ -359,6 +365,7 @@ struct thread {
     struct outgoing_owner *outgoing;
     struct receive_owner *receive;
     struct md_fs_buffer_open buffer_open;
+    int result_replay;
     struct user_pt_regs buffer_registers;
     struct md_fd_install proc_delivery;
     int proc_image_fd;
@@ -1567,14 +1574,24 @@ static void proc_metadata_value(struct md_proc_metadata_result *out,const struct
     if (control.ops && control.ops->origin)
         md_fs_anchor_mount_info(control.ops->origin(control.context),&out->value);
 }
+static struct md_control_file proc_control_view(struct thread *t,enum md_proc_kind kind,
+        pid_t process,const char *interface) {
+    if (md_proc_network_table(kind)) {
+        struct thread *target=find_thread(process);
+        if (!target) { errno=EXDEV; return (struct md_control_file){0}; }
+        if (!target->born) { errno=ENOENT; return (struct md_control_file){0}; }
+        return md_network_proc_new(target->resources.network,(enum md_network_table)(kind-MD_PROC_NET_TCP));
+    }
+    if (kind==MD_PROC_MAX_USER_NAMESPACES) return md_user_sysctl_new(t->identity.user_namespace,NULL);
+    return md_network_sysctl_new(t->resources.network,
+        (enum md_network_parameter)(kind-MD_PROC_NET_UNPRIVILEGED_PORT),interface,NULL);
+}
 static int proc_node_metadata(struct thread *t, const struct md_proc_metadata_request *q, struct md_proc_metadata_result *out) {
     *out=(struct md_proc_metadata_result){0};
     struct stat st={0}, *value=&st;
-    if (md_proc_network_sysctl(q->kind) || q->kind==MD_PROC_MAX_USER_NAMESPACES) {
+    if (md_proc_network_control(q->kind) || q->kind==MD_PROC_MAX_USER_NAMESPACES) {
         if (!memchr(q->interface,0,sizeof(q->interface))) return -EINVAL;
-        struct md_control_file view=q->kind==MD_PROC_MAX_USER_NAMESPACES
-            ? md_user_sysctl_new(t->identity.user_namespace,NULL) : md_network_sysctl_new(t->resources.network,
-            (enum md_network_parameter)(q->kind-MD_PROC_NET_UNPRIVILEGED_PORT),q->interface,NULL);
+        struct md_control_file view=proc_control_view(t,q->kind,q->process,q->interface);
         if (!view.ops) return -errno;
         int error=view.ops->stat(view.context,value);
         struct md_identity actor=md_identity_access(&t->identity,q->effective);
@@ -1760,18 +1777,19 @@ static int executable_capture(pid_t actor,struct md_program *image) {
     if (target!=t && !proc_allowed(t->pid,target->pid)) return -EACCES;
     int error=md_process_image_identity(target->pid,target->process_image,&image->identity);
     if (error) return error;
-    if (target->executable) {
-        struct md_control_file view=md_process_executable_view(target->executable);
-        int fd=view.ops->descriptor(view.context,O_RDONLY|O_CLOEXEC);
-        if (fd<0) return fd;
-        image->fd=fd;
-    } else if (!image->identity.object[0]) {
-        if (!target->executable_origin) return -ENOENT;
+    if (target->executable_origin) {
+        /* A proc executable retains the selected mount, including a detached
+         * readonly bind. The loader's carrier does not own that authority. */
         int fd=fcntl(md_fs_anchor_fd(target->executable_origin),F_DUPFD_CLOEXEC,0);
         if (fd<0) return -errno;
         image->fd=fd;
         image->origin=md_fs_anchor_retain(target->executable_origin);
-    }
+    } else if (target->executable) {
+        struct md_control_file view=md_process_executable_view(target->executable);
+        int fd=view.ops->descriptor(view.context,O_RDONLY|O_CLOEXEC);
+        if (fd<0) return fd;
+        image->fd=fd;
+    } else if (!image->identity.object[0]) return -ENOENT;
     return 0;
 }
 static int root_capture(pid_t actor,pid_t process,struct md_task_snapshot *snapshot) {
@@ -1819,7 +1837,7 @@ static void proc_file_request(struct thread *t, const struct seccomp_notif *q) {
             if (!reply.error) return;
         }
         else reply.error=-ENOTTY;
-    } else if (operation==MD_PROC_FILE_OPEN && (md_proc_network_sysctl(q->data.args[3])
+    } else if (operation==MD_PROC_FILE_OPEN && (md_proc_network_control(q->data.args[3])
             || q->data.args[3]==MD_PROC_MAX_USER_NAMESPACES)) {
         int flags=(int)q->data.args[4];
         char interface[16]={0};
@@ -1832,9 +1850,8 @@ static void proc_file_request(struct thread *t, const struct seccomp_notif *q) {
             }
         }
         struct md_control_file view={0};
-        if (!reply.error) view=q->data.args[3]==MD_PROC_MAX_USER_NAMESPACES
-            ? md_user_sysctl_new(t->identity.user_namespace,NULL) : md_network_sysctl_new(t->resources.network,
-            (enum md_network_parameter)(q->data.args[3]-MD_PROC_NET_UNPRIVILEGED_PORT),interface,NULL);
+        if (!reply.error) view=proc_control_view(t,(enum md_proc_kind)q->data.args[3],
+            (pid_t)q->data.args[2],interface);
         struct md_proc_file *file=NULL;
         if (!view.ops) { if (!reply.error) reply.error=-errno; }
         else {
@@ -1850,7 +1867,7 @@ static void proc_file_request(struct thread *t, const struct seccomp_notif *q) {
         struct md_proc_file *file=NULL;
         if (!target || (target!=t && !proc_allowed(t->pid,target->pid))) reply.error=-EACCES;
         else if (t->proc_image_fd>=0 || q->data.args[5]) reply.error=-EINVAL;
-        else if (!target->executable) reply.error=-EXDEV;
+        else if (target->executable_origin || !target->executable) reply.error=-EXDEV;
         else {
             struct md_control_file view=md_process_executable_view(target->executable);
             file=md_proc_file_open_control(view.ops,view.context,&t->identity,flags);
@@ -3324,7 +3341,8 @@ static void task_action_call_complete(long result,int retry) {
             else if (result==-EBADF)
                 result=md_fd_origins_close_range(owner->loan_table,owner->number,owner->number,0);
         }
-    } else if (!result && !retry) result=md_fd_selector_mark(owner->group,owner->kind,owner->number);
+    } else if (!result && !retry) result=md_fd_selector_installed(owner->group,owner->kind,
+        owner->selector_number,owner->selector_instructions);
     if (owner->borrowed) CHECK(!md_task_quiesce_return(
         owner->outer_barrier ? owner->outer_barrier : task_action_barrier,actor->pid));
     if (owner->broker_borrowed) {
@@ -3403,8 +3421,15 @@ static void task_action_call_start(struct task_action *owner) {
     if (!error && (!address || span.size<sizeof(struct md_task_filter_image))) error=-EINVAL;
     if (!error) {
         struct md_fd_filter_gates gates={RAW_GATE,abi.watch_gate,abi.task_return,abi.native_return};
-        error=md_task_filter_begin(&owner->filter,native_trace,actor->pid,boundary,
-            &saved,abi.task_call,abi.task_return,span.data,address,owner->kind,owner->number,&gates);
+        struct md_task_filter_image *image=span.data;
+        error=md_fd_filter_build(owner->kind,owner->number,&gates,&image->code);
+        if (!error) {
+            owner->selector_instructions=image->code.count;
+            owner->selector_number=md_fd_selector_target(owner->group,owner->number,image->code.count);
+            if (owner->selector_number< -1) error=owner->selector_number;
+        }
+        if (!error) error=md_task_filter_begin(&owner->filter,native_trace,actor->pid,boundary,
+            &saved,abi.task_call,abi.task_return,span.data,address,owner->kind,owner->selector_number,&gates);
     }
     if (error && owner->filter.task.stage) {
         CHECK(error==-ESRCH); actor->resume_lost=1; return;
@@ -3429,6 +3454,7 @@ static int task_action_borrowable(struct thread *p,struct thread *requester) {
      * mutation or newborn awaiting its first stop. */
     int waiter=p->kernel_stopped && (p->retries[1].mask==RETRY_FD
         || (p->phase==PROC_LOOKUP && md_fd_order_state(&p->proc_lookup)==MD_RESOURCE_ORDER_QUEUED)
+        || (p->readiness && md_fd_order_state(&p->readiness->files)==MD_RESOURCE_ORDER_QUEUED)
         || (p->action && !task_action_call(p->action)->stage));
     int traced=md_debugger_traced(debugger,p->pid);
     /* A debugger can share files with its stopped inferior (crash collectors
@@ -3437,9 +3463,14 @@ static int task_action_borrowable(struct thread *p,struct thread *requester) {
      * registers or resuming guest code. Unrelated debuggers remain excluded. */
     int debug_held=traced && requester && p->kernel_stopped && debugger_at_boundary(p)
         && md_debugger_stopped_by(debugger,p->pid,requester->pid);
+    /* Tracing does not own a running task. Borrow its exact kernel boundary
+     * while preserving debugger state, just as for an untraced task. Excluding
+     * it could strand a temporary FD behind the table turn needed by every
+     * peer. Published debugger stops and pending interrupts remain excluded. */
+    int debug_running=traced && md_debugger_running(debugger,p->pid);
     return p->ready && !birth_stop_pending(p) && !p->resume_lost && !p->terminal_stop
         && !p->listening && !p->vfork_child && !p->interrupt_pending
-        && !p->mapping && !p->memory_capture && !p->fd_running && (!traced || debug_held)
+        && !p->mapping && !p->memory_capture && !p->fd_running && (!traced || debug_held || debug_running)
         && (waiter || debug_held || (!p->kernel_stopped && (p->phase==IDLE || p->phase==DISPATCHING
             || p->phase==WATCH_READ || p->phase==EPOLL_WAIT || p->phase==PROCESS_OBSERVING)));
 }
@@ -3963,7 +3994,9 @@ static void readiness_start(struct thread *t) {
     retry_clear(t,RETRY_READINESS);
     struct readiness_owner *o=t->readiness;
     if (o->delivery.files.table) { readiness_deliver(t); return; }
-    TRACE("PROBE readiness-start pid=%d classified=%d admission=%d sealed=%d\n",t->pid,o->classified,o->admission!=NULL,o->sealed);
+    TRACE("PROBE readiness-start pid=%d classified=%d admission=%d sealed=%d files=%d activation=%d\n",
+        t->pid,o->classified,o->admission!=NULL,o->sealed,md_fd_order_state(&o->files),
+        readiness_activation && readiness_activation!=o);
     if (readiness_activation && readiness_activation!=o) { retry_wait(t,RETRY_READINESS); return; }
     int error=0;
     struct md_control_epoll *queue;
@@ -4727,7 +4760,17 @@ static int direct_addfd(const struct thread *t, const struct md_fs_buffer_frame 
 static void buffer_result_begin(struct thread *t,int direct) {
     struct seccomp_data call={.nr=direct ? SYS_fstat : SYS_gettid,.arch=AUDIT_ARCH_AARCH64,
         .instruction_pointer=direct ? t->original.pc : abi.buffer_admit};
-    if (direct) for (unsigned i=0;i<6;++i) call.args[i]=t->original.regs[i];
+    /* A restrictive filter need not allow our gettid carrier. Re-admit the
+     * original operation instead; the retained result prevents replaying IO. */
+    int replay=!direct && t->application_filter && md_broker_filesystem_call(t->original.regs[8]);
+    t->result_replay=replay;
+    if (replay) {
+        struct md_buffer_span span;
+        CHECK(!md_buffer_span(&t->buffer,&span));
+        ((struct md_fs_buffer_frame *)span.data)->transfer=MD_FS_BUFFER_REPLAY_ADDFD;
+        call.nr=t->original.regs[8]; call.instruction_pointer=t->original.pc;
+    }
+    if (direct || replay) for (unsigned i=0;i<6;++i) call.args[i]=t->original.regs[i];
     else call.args[0]=MD_FS_BUFFER_RESULT_ADMIT;
     unsigned flags=direct ? t->original.regs[2] : t->buffer_open.flags;
     CHECK(!md_broker_result_begin(broker,t->pid,&call,t->resources.files,
@@ -4808,6 +4851,7 @@ static int buffer_cleanup(struct thread *t) {
     md_fs_buffer_cancel(&t->buffer_call);
     CHECK(md_broker_result_finish(broker,t->pid,NULL)>=0);
     md_fs_buffer_open_release(&t->buffer_open);
+    t->result_replay=0;
     md_ipc_transport_close(&t->ipc_transport);
     if (t->proc_image_fd>=0) { close(t->proc_image_fd); t->proc_image_fd=-1; }
     if (t->control_mapping_fd>=0) { close(t->control_mapping_fd); t->control_mapping_fd=-1; }
@@ -5055,6 +5099,17 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
         buffer_reply(t,-EBUSY); return;
     }
     switch (r->regs[0]) {
+    case MD_FS_BUFFER_RESULT_REPLAY: {
+        if (!t->result_replay || t->phase!=DISPATCHING || t->buffer_open.fd<0
+                || r->regs[1] || r->regs[2]) { result=-EPERM; break; }
+        t->result_replay=0;
+        struct user_pt_regs regs=t->original;
+        regs.pc=RAW_GATE-4;
+        if (set_registers(t->pid,&regs)) {
+            t->phase=RESULT_REPLAY_ENTRY; resume(t->pid,0);
+        }
+        return;
+    }
     case MD_BUFFER_MACHINE_ADMIT:
         result=broker && t->phase==IDLE && !t->entered && !t->application_filter
             && !t->cooperative_blocked && !t->debug_options && !md_memory_exposed(t->memory);
@@ -5331,7 +5386,7 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
         struct md_device_events *events=md_fs_worker_device_events(filesystem);
         result=events && t->original.regs[0]==AF_NETLINK && t->original.regs[2]==NETLINK_KOBJECT_UEVENT
             ? md_device_events_socket(events,(int)t->original.regs[1],&t->buffer_open.object,&t->buffer_open.fd)
-            : md_network_socket_open(t->resources.network,(int)t->original.regs[0],
+            : md_network_socket_open(t->resources.network,t->identity.uid.fs,(int)t->original.regs[0],
                 (int)t->original.regs[1],(int)t->original.regs[2],&t->buffer_open.object,&t->buffer_open.fd);
         if (!result) {
             t->buffer_open.flags=t->original.regs[1]&SOCK_CLOEXEC;
@@ -5670,7 +5725,11 @@ static long signal_process_next(struct thread *from,pid_t selector,int signal,pi
         : found ? -EPERM : after ? 0 : -ESRCH;
 }
 static int process_call(struct thread *t,struct user_pt_regs *r,unsigned long *cookie) {
-    if (*cookie!=MD_INTERCEPT_PROCESS) return 0;
+    /* A later FD selector can replace the PID selector's cookie, including
+     * after close/reuse. Terminal IDs still belong to the caller's PID view. */
+    int terminal=t->resources.pid && t->phase==IDLE && r->pc!=RAW_GATE
+        && r->regs[8]==SYS_ioctl && md_terminal_identity_command((unsigned)r->regs[1]);
+    if (*cookie!=MD_INTERCEPT_PROCESS && !terminal) return 0;
     *cookie=MD_INTERCEPT_NATIVE;
     if (t->phase!=IDLE) return 0;
     long nr=r->regs[8];
@@ -5712,6 +5771,20 @@ static int process_call(struct thread *t,struct user_pt_regs *r,unsigned long *c
         return 1;
     }
     struct user_pt_regs native=*r;
+    if (nr==SYS_ioprio_get || nr==SYS_ioprio_set) {
+        /* User-wide selection needs guest credential enumeration; never pass
+         * it through to unrelated processes sharing the Android executor UID. */
+        unsigned which=(unsigned)r->regs[0];
+        if (which==IOPRIO_WHO_USER) { return_value(t,r,-EOPNOTSUPP); return 1; }
+        if (which==IOPRIO_WHO_PROCESS || which==IOPRIO_WHO_PGRP) {
+            pid_t target=(pid_t)r->regs[1];
+            if (target) {
+                pid_t mapped=target>0 ? native_pid(t,target) : 0;
+                if (!mapped) { return_value(t,r,-ESRCH); return 1; }
+                native.regs[1]=mapped;
+            }
+        }
+    }
     if (nr==SYS_prctl) {
         int init=md_pid_identity_number(t->resources.pid_group,md_pid_identity_namespace(t->resources.pid))==1;
         if (init && r->regs[0]==PR_SET_CHILD_SUBREAPER) {
@@ -5848,7 +5921,13 @@ static int domain_call(struct thread *t, struct user_pt_regs *r, unsigned long c
             ? md_fd_origins_object(t->resources.files,(int)r->regs[0],NULL) : NULL;
         int control=md_network_socket_control(object) || md_network_endpoint_is(object) || md_device_events_is(object)
             || (nr==SYS_ioctl && md_network_interface_ioctl(r->regs[1]) && md_network_socket_namespace(object));
+        int native_payload=md_socket_payload_native(nr,r->regs[4])
+            && !md_network_socket_control(object) && !md_device_events_is(object);
         md_fd_object_release(object);
+        /* No pathname, peer address or ancillary result needs adaptation.
+         * Keep blocking IO at its original PC/mask so signals and a debugger
+         * interrupt do not wait for an internal adapter to finish reading. */
+        if (native_payload) { resume(t->pid,0); return 1; }
         int devices=nr==SYS_socket && r->regs[0]==AF_NETLINK && r->regs[2]==NETLINK_KOBJECT_UEVENT
             && md_fs_worker_device_events(filesystem);
         if (control || devices || (nr==SYS_socket && md_network_namespace_managed(t->resources.network))) {
@@ -6126,6 +6205,7 @@ static void resume(pid_t pid, int sig) {
             || phase==FILE_WAIT_ENTRY || phase==FILE_WAITING
             || phase==CONTROL_WAIT_ENTRY || phase==CONTROL_WAITING || phase==CLOSE_WAIT_ENTRY || phase==CLOSE_WAITING
             || phase==WAIT_CANCEL_EXIT
+            || phase==RESULT_REPLAY_ENTRY || phase==RESULT_REPLAY_EXIT
             || (phase==IDLE && t->entered && t->process_image
                 && (md_debugger_syscall_mode(debugger,pid) || md_debugger_observing(debugger,pid))) ? PTRACE_SYSCALL
                 : phase==IDLE && t->entered && md_debugger_step(debugger,pid) ? PTRACE_SINGLESTEP : PTRACE_CONT;
@@ -6849,7 +6929,11 @@ static void memory_captured(void *context) {
     if (t && t->memory_files.table) CHECK(!md_fd_order_complete(&t->memory_files));
 }
 static int memory_capture_begin(struct thread *t,const struct user_pt_regs *returned) {
-    if (!t->memory_backing_pending || (long)returned->regs[0]<0 || t->memory_change.backing || t->memory_change.restrictions
+    /* Optional backing capture must not add clone/sendmsg requirements to an
+     * already successful mmap. A filter can kill, not merely reject, the
+     * helper's creation. Retain the ordinary memory path in that domain. */
+    if (t->application_filter || !t->memory_backing_pending || (long)returned->regs[0]<0
+            || t->memory_change.backing || t->memory_change.restrictions
             || t->original.regs[8]!=SYS_mmap || (t->original.regs[3]&MAP_ANONYMOUS)
             || (t->original.regs[3]&MAP_TYPE)!=MAP_PRIVATE || !md_memory_private_access(t->memory)) return 0;
     struct memory_capture *capture=calloc(1,sizeof(*capture));
@@ -7893,6 +7977,22 @@ int main(int argc, char **argv) {
         }
         CHECK(!md_launch_register(&registration, store, program, cwd, launch_identity.uid.effective));
     } else CHECK(!md_resources_init(&thread(leader)->resources,NULL));
+    /* The launcher's standard streams are already shared with the stopped
+     * child. Pin only their identity, so later dumpability/filter changes do
+     * not require exporting them merely to inspect metadata. */
+    for (int fd=0;fd<3;++fd) {
+        int flags=fcntl(fd,F_GETFD);
+        if (flags<0) { CHECK(errno==EBADF); continue; }
+        struct md_fd_object *pin=md_fd_native_pin_new(fd);
+        if (!pin) {
+            TRACE("PROBE inherited-fd pin=%d error=%d\n",fd,errno);
+            continue;
+        }
+        struct md_fd_origin_update update={0};
+        CHECK(!md_fd_origins_prepare_object(thread(leader)->resources.files,pin,(unsigned)flags,&update));
+        md_fd_origins_finish(&update,fd);
+        md_fd_object_release(pin);
+    }
     struct rlimit nproc;
     CHECK(!getrlimit(RLIMIT_NPROC,&nproc));
     thread(leader)->resources.process=md_process_member_new(&thread(leader)->identity,&nproc);
@@ -8036,6 +8136,13 @@ int main(int argc, char **argv) {
             unsigned long message;
             if (!tracee_request(t,PTRACE_GETEVENTMSG,NULL,&message,"debug-exit")) continue;
             TRACE("PROBE terminal-stop pid=%d lost=%d status=%#lx\n",pid,resume_lost,message);
+            if (diagnostics && (message&0x7f)==SIGSYS) {
+                struct user_pt_regs terminal;
+                if (registers(pid,&terminal))
+                    TRACE("PROBE filter-death pid=%d nr=%lu pc=%lx arg0=%lx adapted=%lu\n",
+                        pid,(unsigned long)terminal.regs[8],(unsigned long)terminal.pc,
+                        (unsigned long)terminal.regs[0],(unsigned long)t->original.regs[8]);
+            }
             /* Linux exposes the exit stop before retiring files. The virtual
              * debugger may service FUSE itself, so FLUSH starts only after its
              * continuation, never before delivery of PTRACE_EVENT_EXIT. */
@@ -8435,6 +8542,24 @@ int main(int argc, char **argv) {
             }
             if (t->phase==WAIT_CANCEL_EXIT) {
                 t->phase=t->wait_resume; t->wait_resume=IDLE;
+            }
+            if (t->phase==RESULT_REPLAY_ENTRY) {
+                /* The gate supplies SVC, never an instruction from a patched
+                 * application page. Restore the original context before kernel
+                 * seccomp so IP- and argument-dependent rules see that call. */
+                if (!set_registers(pid,&t->original)) continue;
+                t->phase=RESULT_REPLAY_EXIT; resume(pid,0); continue;
+            }
+            if (t->phase==RESULT_REPLAY_EXIT) {
+                long value;
+                int delivered=md_broker_result_finish(broker,pid,&value);
+                CHECK(delivered>=0);
+                if (!delivered) {
+                    struct user_pt_regs regs;
+                    if (!registers(pid,&regs)) continue;
+                    value=(long)regs.regs[0];
+                }
+                t->phase=DISPATCHING; buffer_reply(t,value); continue;
             }
             if (t->direct==DIRECT_ADMIT) {
                 long value;

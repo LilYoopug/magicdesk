@@ -101,7 +101,7 @@ static long dispatch_files(const struct md_fs *fs, long nr, unsigned long a0, un
     if (nr==SYS_kill && (int)a0<=0) return md_pid_signal_group((int)a0,(int)a1);
     if (nr==SYS_pidfd_send_signal) return md_pidfd_signal(args);
     if (nr==SYS_ioctl && md_pidfd_namespace_command((unsigned)a1)) return md_pidfd_namespace(args);
-    if (nr==SYS_ioctl && ((unsigned)a1==TIOCGPGRP || (unsigned)a1==TIOCSPGRP || (unsigned)a1==TIOCGSID))
+    if (nr==SYS_ioctl && md_terminal_identity_command((unsigned)a1))
         return md_pid_terminal(args);
     if (nr==SYS_read || nr==SYS_write || nr==SYS_readv || nr==SYS_writev
             || nr==SYS_pread64 || nr==SYS_pwrite64 || nr==SYS_preadv || nr==SYS_pwritev

@@ -7,7 +7,8 @@ import subprocess
 def compile_recipe(classes):
     repo = Path(__file__).resolve().parents[2]
     names = ('LinuxGraphicalEnvironment', 'GuestGraphicalConnection', 'GuestLaunchPlan',
-             'GuestEnvironment', 'GuestNetworkProfile', 'GraphicalProtocol', 'ShellCommandLine')
+             'GuestEnvironment', 'GuestNetworkProfile', 'GraphicalProtocol', 'ShellCommandLine',
+             'LinuxAudioEnvironment', 'GamepadWire')
     sources = [Path(__file__).with_name('GraphicalRecipe.java'),
                *(repo / 'app/src/main/java/io/github/mekhontsev/magicdesk' / (name + '.java')
                  for name in names)]

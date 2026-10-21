@@ -6,12 +6,21 @@
 #include <linux/netfilter/nf_nat.h>
 #include <linux/netfilter/nf_tables_compat.h>
 #include <linux/netfilter/xt_tcpudp.h>
+#include <linux/netfilter/xt_comment.h>
+#include <linux/netfilter/xt_conntrack.h>
+#include <linux/netfilter/xt_mark.h>
+#include <linux/netfilter/xt_addrtype.h>
 #include <stdlib.h>
 
 int md_nft_compat_supported(unsigned family,const char *name,unsigned revision,unsigned target) {
-    if (family!=NFPROTO_IPV4 || !name || revision) return 0;
-    return target==1 ? !strcmp(name,"DNAT") || !strcmp(name,"SNAT")
-        : target==0 && (!strcmp(name,"tcp") || !strcmp(name,"udp"));
+    if (family!=NFPROTO_IPV4 || !name) return 0;
+    if (target==1 && !strcmp(name,"MARK")) return revision==2;
+    if (target==0 && !strcmp(name,"mark")) return revision==1;
+    if (target==0 && !strcmp(name,"addrtype")) return revision==1;
+    if (!target && !strcmp(name,"conntrack")) return revision==3;
+    if (revision) return 0;
+    return target==1 ? !strcmp(name,"DNAT") || !strcmp(name,"SNAT") || !strcmp(name,"MASQUERADE")
+        : target==0 && (!strcmp(name,"tcp") || !strcmp(name,"udp") || !strcmp(name,"comment"));
 }
 static unsigned table_family(const struct md_network_filter *f,uint64_t table) {
     for (size_t i=0;i<f->count;++i) if (f->tables[i].handle==table) return f->tables[i].family;
@@ -26,12 +35,26 @@ static int target(struct md_network_filter *f,uint64_t table,const struct attrib
     if (!error) error=required_number(&a[NFTA_TARGET_REV],&revision);
     if (error) return error;
     if (!md_nft_compat_supported(table_family(f,table),name,revision,1)) return -EOPNOTSUPP;
+    const struct attribute *wire=&a[NFTA_TARGET_INFO];
+    if (!strcmp(name,"MARK")) {
+        struct xt_mark_tginfo2 info;
+        if (!wire->data || wire->flags || wire->size!=sizeof(info)) return -EINVAL;
+        memcpy(&info,wire->data,sizeof(info));
+        e->code=MD_FILTER_META_SET; e->key=NFT_META_MARK; e->constant=1;
+        memcpy(e->value,&info.mark,4); memcpy(e->mask,&info.mask,4);
+        return 0;
+    }
     struct nf_nat_ipv4_multi_range_compat info;
     /* xt_align pads the revision-zero structure to the guest's 8-byte ABI. */
-    const struct attribute *wire=&a[NFTA_TARGET_INFO];
     if (!wire->data || wire->flags || wire->size!=((sizeof(info)+7)&~(size_t)7)) return -EINVAL;
     memcpy(&info,wire->data,sizeof(info));
     const struct nf_nat_ipv4_range *r=&info.range[0];
+    if (!strcmp(name,"MASQUERADE")) {
+        if (info.rangesize!=1 || r->flags || r->min_ip || r->max_ip
+                || r->min.all || r->max.all) return -EOPNOTSUPP;
+        e->code=MD_FILTER_MASQUERADE;
+        return 0;
+    }
     if (info.rangesize!=1 || (r->flags&~(NF_NAT_RANGE_MAP_IPS|NF_NAT_RANGE_PROTO_SPECIFIED))) return -EOPNOTSUPP;
     if (((r->flags&NF_NAT_RANGE_MAP_IPS) && r->min_ip!=r->max_ip)
             || ((r->flags&NF_NAT_RANGE_PROTO_SPECIFIED) && r->min.all!=r->max.all)) return -EOPNOTSUPP;
@@ -41,7 +64,7 @@ static int target(struct md_network_filter *f,uint64_t table,const struct attrib
     memcpy(e->value,&r->min_ip,4); memcpy(e->value+4,&r->min.all,2);
     return 0;
 }
-static int transport_match(struct md_network_filter *f,uint64_t table,const struct attribute *data,
+static int compat_match(struct md_network_filter *f,uint64_t table,const struct attribute *data,
         struct md_filter_expression *e) {
     struct attribute a[NFTA_MATCH_MAX+1];
     int error=nested(data,BIT(NFTA_MATCH_NAME)|BIT(NFTA_MATCH_REV)|BIT(NFTA_MATCH_INFO),a,NFTA_MATCH_MAX+1);
@@ -51,6 +74,43 @@ static int transport_match(struct md_network_filter *f,uint64_t table,const stru
     if (error) return error;
     if (!md_nft_compat_supported(table_family(f,table),name,revision,0)) return -EOPNOTSUPP;
     const struct attribute *wire=&a[NFTA_MATCH_INFO];
+    if (!strcmp(name,"addrtype")) {
+        struct xt_addrtype_info_v1 info;
+        if (!wire->data || wire->flags || wire->size!=sizeof(info)) return -EINVAL;
+        memcpy(&info,wire->data,sizeof(info));
+        if ((info.flags&~(XT_ADDRTYPE_INVERT_SOURCE|XT_ADDRTYPE_INVERT_DEST))
+                || ((info.source|info.dest)&~(XT_ADDRTYPE_LOCAL|XT_ADDRTYPE_UNICAST))) return -EOPNOTSUPP;
+        e->code=MD_FILTER_ADDRESS_TYPE; e->key=info.source; e->aux=info.dest;
+        e->operation=(info.flags&XT_ADDRTYPE_INVERT_SOURCE ? MD_FILTER_INVERT_SOURCE : 0)
+            |(info.flags&XT_ADDRTYPE_INVERT_DEST ? MD_FILTER_INVERT_DESTINATION : 0);
+        return 0;
+    }
+    if (!strcmp(name,"mark")) {
+        struct xt_mark_mtinfo1 info;
+        if (!wire->data || wire->flags || wire->size!=((sizeof(info)+7)&~(size_t)7)) return -EINVAL;
+        memcpy(&info,wire->data,sizeof(info));
+        if (info.invert>1) return -EINVAL;
+        e->code=MD_FILTER_MARK_MATCH; e->key=info.mark; e->aux=info.mask; e->operation=info.invert;
+        return 0;
+    }
+    if (!strcmp(name,"comment")) {
+        if (!wire->data || wire->flags || wire->size!=sizeof(struct xt_comment_info)) return -EINVAL;
+        /* Comments always match; their bytes remain in the rule's wire view. */
+        e->code=MD_FILTER_VERDICT; e->operation=NFT_CONTINUE;
+        return 0;
+    }
+    if (!strcmp(name,"conntrack")) {
+        struct xt_conntrack_mtinfo3 info;
+        if (!wire->data || wire->flags || wire->size!=((sizeof(info)+7)&~(size_t)7)) return -EINVAL;
+        memcpy(&info,wire->data,sizeof(info));
+        /* The ordinary state bits share nft's conntrack-state encoding.
+         * Tuple, status, timeout and NAT aliases need separate semantics. */
+        if (info.match_flags!=XT_CONNTRACK_STATE || (info.invert_flags&~XT_CONNTRACK_STATE)
+                || (info.state_mask&~15U)) return -EOPNOTSUPP;
+        e->code=MD_FILTER_STATE_MATCH; e->key=info.state_mask;
+        e->operation=!!(info.invert_flags&XT_CONNTRACK_STATE);
+        return 0;
+    }
     int tcp=!strcmp(name,"tcp");
     size_t size=tcp ? sizeof(struct xt_tcp) : sizeof(struct xt_udp);
     if (!wire->data || wire->flags || wire->size!=((size+7)&~(size_t)7)) return -EINVAL;
@@ -285,7 +345,7 @@ int md_nft_expressions(struct md_network_filter *f,uint64_t table,struct md_filt
         if (!name || r->count==64) return -E2BIG;
         struct md_filter_expression *e=&r->expressions[r->count];
         error=!strcmp(name,"target") ? target(f,table,&a[NFTA_EXPR_DATA],e)
-            : !strcmp(name,"match") ? transport_match(f,table,&a[NFTA_EXPR_DATA],e)
+            : !strcmp(name,"match") ? compat_match(f,table,&a[NFTA_EXPR_DATA],e)
             : expression(f,table,name,&a[NFTA_EXPR_DATA],e,&initialized);
         if (error) return error;
         ++r->count; offset+=NLA_ALIGN(item->nla_len);

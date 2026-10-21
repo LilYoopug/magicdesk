@@ -3,6 +3,10 @@ package io.github.mekhontsev.magicdesk;
 /** Build-host fixture uses the actual app-side session policy, not a copied shell template. */
 public final class GraphicalRecipe {
     public static void main(String[] args) {
+        if (args.length == 1 && args[0].equals("connections")) {
+            System.out.print(LinuxAudioEnvironment.shrootArguments() + GamepadWire.shrootArguments());
+            return;
+        }
         if ((args.length == 4 || args.length == 5) && args[0].equals("managed")) {
             var protocol = GraphicalProtocol.parse(args[1]);
             var environment = new GuestEnvironment(args[2], "", args.length == 5 ? args[4] : "", true);

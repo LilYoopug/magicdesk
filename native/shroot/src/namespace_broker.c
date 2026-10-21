@@ -791,7 +791,8 @@ void md_broker_completion_taken(struct md_namespace_broker *b,pid_t pid) {
 }
 int md_broker_result_begin(struct md_namespace_broker *b, int pid, const struct seccomp_data *call,
         struct md_fd_origins *files, int source, struct md_fd_object *origin, unsigned flags) {
-    if (!b || !call || !call->instruction_pointer || (call->nr!=SYS_fstat && call->nr!=SYS_gettid)
+    if (!b || !call || !call->instruction_pointer
+            || (!md_broker_filesystem_call(call->nr) && call->nr!=SYS_gettid)
             || !files || source<0 || flags&~O_CLOEXEC) return -EINVAL;
     pthread_mutex_lock(&b->lock);
     struct task *t=find_task(b,pid);

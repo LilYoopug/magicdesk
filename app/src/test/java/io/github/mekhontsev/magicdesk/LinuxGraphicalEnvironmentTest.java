@@ -88,7 +88,7 @@ public final class LinuxGraphicalEnvironmentTest {
                 outside + mountRecord(outer, "tmpfs") + mountRecord(nested, "fuse.portal"));
         Files.writeString(root.resolve("after-child"), outside + mountRecord(outer, "tmpfs"));
         Files.writeString(root.resolve("after-parent"), outside);
-        script(bin, "mktemp", shell, "printf '%s\\n' \"$MD_DIRECTORY\"\n");
+        script(bin, "mktemp", shell, "test \"$(( $(umask) ))\" = 63\nprintf '%s\\n' \"$MD_DIRECTORY\"\n");
         script(bin, "dbus-run-session", shell, "shift\nexec \"$@\"\n");
         script(bin, legacy ? "fusermount" : "fusermount3", shell,
                 "test \"$1 $2 $3\" = '-u -z --'\n"
@@ -145,19 +145,21 @@ public final class LinuxGraphicalEnvironmentTest {
                 ? "test \"$XAUTHORITY\" = \"$XDG_RUNTIME_DIR/Xauthority\"\n"
                     + "test \"$(cat \"$XAUTHORITY\")\" = cookie\n"
                     + "test -z \"${MAGICDESK_X11_AUTHORITY+x}\"\n" : "";
-        script(bin, "mktemp", shell, "printf '%s\\n' \"$MD_DIRECTORY\"\n");
+        script(bin, "mktemp", shell, "test \"$(( $(umask) ))\" = 63\nprintf '%s\\n' \"$MD_DIRECTORY\"\n");
         script(bin, "dbus-run-session", shell,
-                "printf '%s\\0' \"$@\" > \"$MD_CAPTURE\"\n"
+                "test \"$(( $(umask) ))\" = 23\n"
+                + "printf '%s\\0' \"$@\" > \"$MD_CAPTURE\"\n"
                 + "test \"$XDG_SESSION_TYPE\" = " + protocol.wireName + "\n"
                 + "test \"$XDG_RUNTIME_DIR\" = \"$MD_DIRECTORY\"\n"
                 + checkAuthority
                 + (busExit == 0 ? "" : "exit " + busExit + "\n")
                 + "test \"$1\" = --\nshift\nexec \"$@\"\n");
-        String command = "set -eu; " + checkAuthority + "printf '%s' \"literal ' $value\"; exit 23";
+        String command = "set -eu; test \"$(( $(umask) ))\" = 23; "
+                + checkAuthority + "printf '%s' \"literal ' $value\"; exit 23";
         String invocation = ShellCommandLine.quote(shell) + " -c " + ShellCommandLine.quote(command);
         String wrapped = guest ? GuestGraphicalConnection.session(protocol, invocation)
                 : LinuxGraphicalEnvironment.wrap(protocol, invocation);
-        ProcessBuilder builder = new ProcessBuilder(shell, "-c", wrapped);
+        ProcessBuilder builder = new ProcessBuilder(shell, "-c", "umask 027; " + wrapped);
         builder.environment().put("PATH", bin + ":" + System.getenv("PATH"));
         builder.environment().put("MD_DIRECTORY", runtime.toString());
         builder.environment().put("MD_CAPTURE", capture.toString());

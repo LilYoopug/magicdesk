@@ -44,7 +44,7 @@ int md_network_socket_offline(const struct md_fd_object *);
 int md_network_socket_control(const struct md_fd_object *);
 struct md_network_namespace *md_network_socket_namespace(const struct md_fd_object *);
 int md_network_interface_ioctl(unsigned long);
-int md_network_socket_open(struct md_network_namespace *, int family, int type, int protocol,
+int md_network_socket_open(struct md_network_namespace *, uint32_t uid, int family, int type, int protocol,
     struct md_fd_object **, int *fd);
 long md_network_socket_call(struct md_fd_object *, const struct md_identity *, long nr,
     const unsigned long *, void *data, size_t capacity, size_t size, pid_t pid,uint32_t groups,

@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 struct direct_path { struct direct_path *next; struct md_network_flow_path path; };
 struct md_network_endpoint {
@@ -20,6 +21,8 @@ struct md_network_endpoint {
     struct sockaddr_in local, native, peer;
     struct direct_path *direct;
     unsigned direct_count;
+    uint64_t inode;
+    uint32_t uid;
 };
 static void destroy(struct md_fd_object *object) {
     struct md_network_endpoint *e=(void *)object;
@@ -69,7 +72,7 @@ static struct md_network_endpoint *create(struct md_network_namespace *n,int typ
     e->next=n->fabric->endpoints; n->fabric->endpoints=e;
     pthread_mutex_unlock(&n->fabric->lock); return e;
 }
-int md_network_endpoint_open(struct md_network_namespace *n,int family,int type,int protocol,
+int md_network_endpoint_open(struct md_network_namespace *n,uint32_t uid,int family,int type,int protocol,
         struct md_fd_object **out,int *fd) {
     if (!md_network_endpoint_enabled(n)) return -EOPNOTSUPP;
     if (family!=AF_INET) return -EAFNOSUPPORT;
@@ -81,6 +84,11 @@ int md_network_endpoint_open(struct md_network_namespace *n,int family,int type,
     if (!e) return -ENOMEM;
     int native=socket(family,type|SOCK_CLOEXEC,protocol);
     if (native<0) { int error=-errno; md_fd_object_release(&e->object); return error; }
+    struct stat st;
+    if (fstat(native,&st)) { int error=-errno; close(native); md_fd_object_release(&e->object); return error; }
+    pthread_mutex_lock(&n->fabric->lock);
+    e->inode=st.st_ino; e->uid=uid;
+    pthread_mutex_unlock(&n->fabric->lock);
     *out=&e->object; *fd=native; return 0;
 }
 static int address(const struct sockaddr *a,socklen_t length,struct sockaddr_in *out) {
@@ -328,11 +336,14 @@ int md_network_endpoint_accept(struct md_fd_object *o,int fd,struct md_fd_object
     struct md_network_endpoint *parent=(void *)o;
     struct sockaddr_storage peer; socklen_t length=sizeof(peer);
     if (getpeername(fd,(void *)&peer,&length)) return -errno;
+    struct stat st;
+    if (fstat(fd,&st)) return -errno;
     int error=md_network_endpoint_source(o,&peer,&length); if (error) return error;
     struct md_network_endpoint *e=create(parent->space,parent->type,parent->protocol);
     if (!e) return -ENOMEM;
     pthread_mutex_lock(&parent->space->fabric->lock);
     e->local=parent->local; e->native=parent->native; e->bound=e->connected=e->accepted=1;
+    e->inode=st.st_ino; e->uid=parent->uid;
     memcpy(&e->peer,&peer,sizeof(e->peer));
     for (struct md_network_endpoint *client=parent->space->fabric->endpoints;client && !error;client=client->next)
         if (client!=e && client->type==SOCK_STREAM)
@@ -343,4 +354,27 @@ int md_network_endpoint_accept(struct md_fd_object *o,int fd,struct md_fd_object
     pthread_mutex_unlock(&parent->space->fabric->lock);
     if (error) { md_fd_object_release(&e->object); return error; }
     *out=&e->object; return 0;
+}
+static int inode_order(const void *left,const void *right) {
+    uint64_t a=((const struct md_network_endpoint_info *)left)->inode;
+    uint64_t b=((const struct md_network_endpoint_info *)right)->inode;
+    return (a>b)-(a<b);
+}
+int md_network_endpoint_snapshot(struct md_network_namespace *n,int protocol,
+        struct md_network_endpoint_info **out,size_t *count) {
+    *out=NULL; *count=0;
+    if (!md_network_namespace_managed(n)) return -EXDEV;
+    pthread_mutex_lock(&n->fabric->lock);
+    size_t size=0;
+    for (struct md_network_endpoint *e=n->fabric->endpoints;e;e=e->next)
+        if (e->space==n && e->protocol==protocol && e->inode && e->bound) ++size;
+    struct md_network_endpoint_info *items=size ? calloc(size,sizeof(*items)) : NULL;
+    if (size && !items) { pthread_mutex_unlock(&n->fabric->lock); return -ENOMEM; }
+    for (struct md_network_endpoint *e=n->fabric->endpoints;e;e=e->next)
+        if (e->space==n && e->protocol==protocol && e->inode && e->bound)
+            items[(*count)++]=(struct md_network_endpoint_info){
+                .inode=e->inode,.uid=e->uid,.local=e->local,.peer=e->peer};
+    pthread_mutex_unlock(&n->fabric->lock);
+    if (size) qsort(items,size,sizeof(*items),inode_order);
+    *out=items; return 0;
 }

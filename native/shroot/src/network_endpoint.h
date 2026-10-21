@@ -8,7 +8,7 @@
 int md_network_endpoint_is(const struct md_fd_object *);
 struct md_network_namespace *md_network_endpoint_namespace(const struct md_fd_object *);
 int md_network_endpoint_enabled(const struct md_network_namespace *);
-int md_network_endpoint_open(struct md_network_namespace *,int,int,int,struct md_fd_object **,int *);
+int md_network_endpoint_open(struct md_network_namespace *,uint32_t,int,int,int,struct md_fd_object **,int *);
 int md_network_endpoint_bind(struct md_fd_object *,int,const struct md_identity *,const struct sockaddr *,socklen_t);
 int md_network_endpoint_listen(struct md_fd_object *,int,int);
 int md_network_endpoint_destination(struct md_fd_object *,const struct sockaddr *,socklen_t,
@@ -21,6 +21,14 @@ int md_network_endpoint_autobind(struct md_fd_object *,int,const struct md_ident
 int md_network_endpoint_source(struct md_fd_object *,struct sockaddr_storage *,socklen_t *);
 int md_network_endpoint_source_info(struct md_fd_object *,struct sockaddr_storage *,socklen_t *,struct in_pktinfo *);
 int md_network_endpoint_accept(struct md_fd_object *,int,struct md_fd_object **);
+struct md_network_endpoint_info {
+    uint64_t inode;
+    uint32_t uid;
+    struct sockaddr_in local, peer;
+};
+/* An owned, namespace-scoped snapshot, sorted by native socket inode. */
+int md_network_endpoint_snapshot(struct md_network_namespace *,int,
+    struct md_network_endpoint_info **,size_t *);
 struct md_network_filter;
 int md_network_endpoint_filter_update(struct md_network_namespace *,struct md_network_filter *);
 #endif

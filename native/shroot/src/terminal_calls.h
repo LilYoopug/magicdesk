@@ -3,6 +3,9 @@
 #include <asm/termbits.h>
 #include <asm/ioctls.h>
 #include <sys/ioctl.h>
+static inline int md_terminal_identity_command(unsigned command) {
+    return command==TIOCGPGRP || command==TIOCSPGRP || command==TIOCGSID;
+}
 static inline int md_terminal_attributes_command(unsigned command) {
     return command==TCGETS2 || command==TCSETS2 || command==TCSETSW2 || command==TCSETSF2;
 }

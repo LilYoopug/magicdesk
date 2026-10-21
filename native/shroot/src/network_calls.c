@@ -6,6 +6,7 @@
 #include "fd_filter.h"
 #include "interception.h"
 #include "socket_ancillary.h"
+#include "socket_calls.h"
 #include "socket_payload.h"
 #include "task_receive.h"
 #include "raw.h"
@@ -108,7 +109,7 @@ static long data_send_batch(const unsigned long *a) {
 }
 long md_network_data_call(long nr,const unsigned long *a) {
     if (nr==SYS_read || nr==SYS_write || nr==SYS_readv || nr==SYS_writev
-            || (nr==SYS_sendto && !a[4]) || (nr==SYS_recvfrom && !a[4])
+            || md_socket_payload_native(nr,a[4])
             || nr==SYS_getsockopt || (nr==SYS_ioctl && (a[1]==FIONBIO || a[1]==FIONREAD || a[1]==TIOCOUTQ)))
         return md_raw(nr,a[0],a[1],a[2],a[3],a[4],a[5]);
     if (nr==SYS_setsockopt) {

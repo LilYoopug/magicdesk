@@ -112,14 +112,15 @@ def guest():
 
 
 def main():
+    from test_oci_services import Suite, add_machine_entry_argument
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('build', type=Path)
     parser.add_argument('store')
+    add_machine_entry_argument(parser)
     args = parser.parse_args()
-    from test_oci_services import Suite
-    suite = Suite(args.build, args.build)
+    suite = Suite(args.build, args.build, machine_entry=args.machine_entry)
     target = '/tmp/md-anonymous-exec-' + suite.report['id']
-    prefix = [suite.runner, '--store', args.store, '--user', '0:0']
+    prefix = suite.guest(args.store, '--user', '0:0')
     try:
         suite.transport.upload(suite.client, Path(__file__), suite.base + '/test.py')
         suite.command(prefix + ['--', '/bin/mkdir', target])

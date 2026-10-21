@@ -163,15 +163,16 @@ def guest(directory):
 
 
 def main():
+    from test_oci_services import Suite, add_machine_entry_argument
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('build', type=Path)
     parser.add_argument('store')
     parser.add_argument('--libc-registry')
+    add_machine_entry_argument(parser)
     args = parser.parse_args()
-    from test_oci_services import Suite
-    suite = Suite(args.build, args.build)
+    suite = Suite(args.build, args.build, machine_entry=args.machine_entry)
     target = '/tmp/md-setid-' + suite.report['id']
-    prefix = [suite.runner, '--store', args.store, '--user', '0:0']
+    prefix = suite.guest(args.store, '--user', '0:0')
     if args.libc_registry:
         prefix += ['--libc-registry', args.libc_registry]
     try:
@@ -190,11 +191,11 @@ def main():
                                 '-Wl,-rpath,' + target + '/trusted', '-o', target + '/probe'])
         suite.command(prefix + ['--bind-ro', suite.base, '/mnt', '--deadline-seconds', '90', '--',
                                 '/usr/bin/python3', '/mnt/test.py', '--guest', target], timeout=110)
-        user = [suite.runner, '--store', args.store, '--user', '1000:1000']
+        user = suite.guest(args.store, '--user', '1000:1000')
         if args.libc_registry:
             user += ['--libc-registry', args.libc_registry]
         output = suite.command(user + ['--', target + '/both'])
-        result = json.loads(output)
+        result, = [json.loads(line) for line in output.splitlines() if line.startswith('{"uid":')]
         assert result['uid'] == [1000, 0, 0, 0] and result['gid'] == [1000, 2345, 2345, 2345], result
         assert result['secure'] == 1
         print('PASS initial stored set-ID entry', flush=True)

@@ -214,6 +214,10 @@ int md_debugger_stopped_by(struct md_debugger *d,pid_t target,pid_t owner) {
     struct inferior *p=d ? find(d,target) : NULL;
     return p && p->owner==owner && p->stopped && !p->terminal && !p->pending;
 }
+int md_debugger_running(struct md_debugger *d,pid_t target) {
+    struct inferior *p=d ? find(d,target) : NULL;
+    return p && !p->terminal && !p->stopped && !p->pending;
+}
 int md_debugger_active(struct md_debugger *d) { return d->inferiors!=NULL || d->waiters!=NULL; }
 int md_debugger_newborn(struct md_debugger *d, pid_t pid) {
     struct inferior *p=find(d,pid);

@@ -38,6 +38,14 @@ int md_fs_proc_operation(struct md_filesystem *fs,struct md_mount_namespace *vie
     }
     int network=md_network_namespace_managed(fs->actor->network);
     int network_control=network && md_proc_network_sysctl(ref.kind);
+    enum md_proc_kind selected=ref.kind==MD_PROC_FOREIGN ? ref.foreign_kind : ref.kind;
+    if (selected==MD_PROC_PROCESS_DIRECTORY && (q->operation==MD_FS_STAT || q->operation==MD_FS_FSTAT)) {
+        struct stat st;
+        r=fstat(fd,&st) ? -errno : md_procfs_ownership(fs,path,&st);
+        if (!r) { md_fs_stat_info(&st,&out->info); out->info.mount_id=mount->id; }
+        else out->error=r;
+        return 1;
+    }
     if (!sysctl && !network_control && !user_control && (q->operation==MD_FS_OPEN || q->operation==MD_FS_REOPEN)
             && (q->flags&O_NOATIME) && !(q->flags&O_PATH)) {
         r=md_procfs_noatime(fs,fd,path);

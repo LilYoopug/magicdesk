@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "fd_native_pin.h"
 #include "fs_buffer_service.h"
 #include "fs_buffer.h"
 #include "fs_worker.h"
@@ -1100,7 +1101,13 @@ int md_fs_buffer_progress(struct md_fs_buffer_service *s) {
                 } else if (r->captured_only) {
                     error=MD_FS_BUFFER_NEEDS_TASK;
                 } else if (base>=0) {
-                    int fd=md_task_descriptor_copy(r->actor,base,&process);
+                    struct md_fd_object *object=!(data&(1U<<i))
+                        ? md_fd_origins_object(r->files.table,base,NULL) : NULL;
+                    int pin=md_fd_native_pin_descriptor(object);
+                    int fd=pin<0 ? md_task_descriptor_copy(r->actor,base,&process)
+                        : fcntl(pin,F_DUPFD_CLOEXEC,3);
+                    if (pin>=0 && fd<0) fd=-errno;
+                    md_fd_object_release(object);
                     if (fd>=0) r->request.directory[i]=r->captured[i]=fd;
                     else if (md_task_descriptor_needs_export(fd))
                         r->export_mask|=1U<<i;

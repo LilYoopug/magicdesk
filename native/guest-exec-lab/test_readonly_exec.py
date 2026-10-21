@@ -26,6 +26,7 @@ def child(path, device, inode, repeat):
     assert (info.st_dev, info.st_ino) == (device, inode), (info, device, inode)
     with open('/proc/self/exe', 'rb') as image:
         assert image.read(4) == b'\x7fELF'
+        assert os.fstatvfs(image.fileno()).f_flag & os.ST_RDONLY
     if repeat:
         os.execve('/proc/self/exe', ['python3', __file__, '--child', path,
                                     str(device), str(inode), '0'], os.environ)
@@ -83,22 +84,60 @@ def guest():
             status = os.waitpid(pid, 0)[1]
             assert status == 0, (kind, status)
             print('PASS readonly mount:', kind, flush=True)
+        image = root + '/detached'
+        Path(image).touch()
+        pid = os.fork()
+        if not pid:
+            try:
+                assert not libc.unshare(0x20000), ctypes.get_errno()
+                mount('/proc/self/exe', image, flags=MS_BIND)
+                mount(None, image, flags=MS_BIND | MS_REMOUNT | MS_RDONLY)
+                fd = os.open(image, os.O_PATH | os.O_CLOEXEC)
+                assert not libc.umount2(os.fsencode(image), 2), ctypes.get_errno()
+                os.unlink(image)
+                os.execve(fd, ['python3', __file__, '--detached'], os.environ)
+            except BaseException:
+                import traceback
+                traceback.print_exc()
+                os._exit(90)
+        status = os.waitpid(pid, 0)[1]
+        assert status == 0, ('detached', status)
+
+
+def detached():
+    for path in ('/proc/self/exe', '/proc/%d/exe' % os.getpid()):
+        with open(path, 'rb') as image:
+            assert image.read(4) == b'\x7fELF'
+            assert os.fstatvfs(image.fileno()).f_flag & os.ST_RDONLY
+        try:
+            os.open(path, os.O_WRONLY)
+        except OSError as error:
+            assert error.errno in (errno.EROFS, errno.ETXTBSY), error
+        else:
+            raise AssertionError('writable executable from detached readonly mount')
+    if not os.environ.get('MD_READONLY_REEXEC'):
+        os.execve('/proc/self/exe', ['python3', __file__, '--detached'],
+                  dict(os.environ, MD_READONLY_REEXEC='1'))
+    print('PASS detached readonly image: fd exec, self/foreign proc and reexec', flush=True)
 
 
 def main():
+    from test_oci_services import add_machine_entry_argument
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('build', type=Path)
     parser.add_argument('store')
+    add_machine_entry_argument(parser)
     args = parser.parse_args()
     from test_oci_services import Suite
-    suite = Suite(args.build, args.build)
+    suite = Suite(args.build, args.build, machine_entry=args.machine_entry)
     target = '/tmp/md-readonly-exec-' + suite.report['id']
     prefix = [suite.runner, '--store', args.store, '--user', '0:0']
     try:
         suite.transport.upload(suite.client, Path(__file__), suite.base + '/test.py')
         suite.command(prefix + ['--', '/bin/mkdir', target])
-        suite.command(prefix + ['--bind-ro', suite.base, target, '--deadline-seconds', '90', '--',
-                                '/usr/bin/python3', target + '/test.py', '--guest'], timeout=110)
+        suite.command(suite.guest(args.store, '--user', '0:0', '--bind-ro', suite.base,
+                                  target, '--deadline-seconds', '90', '--',
+                                  '/usr/bin/python3', target + '/test.py', '--guest'), timeout=110)
         suite.report['passed'] = True
     finally:
         try:
@@ -112,5 +151,7 @@ if __name__ == '__main__':
         guest()
     elif sys.argv[1:2] == ['--child']:
         child(sys.argv[2], *map(int, sys.argv[3:]))
+    elif sys.argv[1:] == ['--detached']:
+        detached()
     else:
         main()

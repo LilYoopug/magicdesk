@@ -129,6 +129,7 @@ static long send_batch(const struct md_fs *fs, const char *exe, const unsigned l
     return count;
 }
 long md_socket_address_call(const struct md_fs *fs, const char *exe, long nr, const unsigned long *a) {
+    if (md_socket_payload_native(nr,a[4])) return invoke(nr,a);
     /* recvmsg's ancillary adapter owns the complete receive/publication order,
      * including names. Its native fallback must not add a getsockopt syscall. */
     if (nr == SYS_recvmsg) return invoke(nr,a);
@@ -148,7 +149,6 @@ long md_socket_address_call(const struct md_fs *fs, const char *exe, long nr, co
     if (nr == SYS_getsockname || nr == SYS_getpeername || nr == SYS_accept || nr == SYS_accept4
             || nr == SYS_recvfrom) {
         if ((nr == SYS_accept || nr == SYS_accept4) && !a[1]) return invoke(nr, a);
-        else if (nr == SYS_recvfrom && !a[4]) return invoke(nr, a);
         long family = domain((int)a[0]);
         if (family < 0) return family;
         return fs->endpoint[0] && family == AF_UNIX ? md_namespace_socket_output(fs, nr, a) : invoke(nr, a);

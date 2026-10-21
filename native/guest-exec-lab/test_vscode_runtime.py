@@ -48,6 +48,7 @@ def main():
         write_script(suite, args.store, project + '/main.c', '#include <stdio.h>\nint main(void) {\n'
                      '    volatile int value = 40;\n    puts("GDB fixture");\n    value += 2;\n'
                      '    printf("value=%d\\n", value);\n    return value == 42 ? 0 : 1;\n}\n')
+        write_script(suite, args.store, project + '/editor.txt', '')
         write_script(suite, args.store, extension + '/package.json', json.dumps({
             'name': 'guest-debug-fixture', 'publisher': 'magicdesk-fixture', 'version': '1.0.0',
             'engines': {'vscode': '^1.90.0'}, 'main': './extension.js',

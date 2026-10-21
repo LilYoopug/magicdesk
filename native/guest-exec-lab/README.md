@@ -161,6 +161,27 @@ XFCE authentication agent. Packaged files and user overrides remain intact;
 ordinary-user sessions retain their distribution configuration. GUI checks reject
 the known empty PolicyKit error dialog as well as lost X11 authorization.
 
+`test_filtered_fd.py BUILD STORE` compiles a small fixture with the guest's own
+compiler and runs Base/lazy controls. Its application filter kills gettid,
+clone and sendmsg, and constrains openat's original PC and flags. It checks
+protected stdio metadata, CLOEXEC, read/mmap/close and single-effect O_EXCL.
+The optional installed `file` utility is reported separately when unavailable.
+
+`test_epoll_runtime.py --build BUILD --store STORE --trace --machine-entry`
+runs mixed/native readiness, signal masks, shared-table races and denied
+retirement through guest strace. `test_debugger_runtime.py` also accepts
+`--machine-entry`; `--case strace-detach-socket` verifies that detaching does not
+need data to arrive on a blocked socket. These regressions cover common Base
+owners, not just SVC publication.
+
+The GUI extension fixture `fixtures/vscode-gui.py` drives
+`fixtures/vscode-debug.js` through an existing recipe desktop: editor/save and
+watcher changes, window reload, integrated terminal, GDB variable update and
+normal close. Browser GUI acceptance additionally requires rendered pixels,
+actual keyboard/pointer input, download and portal selection, not only a
+healthy browser process. The current desktop/container receipts and explicit
+limits are in [SVC integration evidence](svc-rewriting.md#desktop-and-container-acceptance).
+
 ## Named Environment Workflows
 
 `test_environment_workflows.py --tag NAME --stage all` installs fresh public

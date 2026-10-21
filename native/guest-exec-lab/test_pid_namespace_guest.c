@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <linux/ioprio.h>
 #include <sched.h>
 #include <pthread.h>
 #include <poll.h>
@@ -119,6 +120,26 @@ static void wait_cases(void) {
     assert(!pthread_create(&thread,NULL,worker,NULL));
     assert(!pthread_join(thread,&value) && value==(void *)42);
     puts("PASS PID waitid WNOWAIT, pidfd wait, protected output and thread join");
+}
+static void io_priority_cases(void) {
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        assert(!setpgid(0,0));
+        int value=IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE,7);
+        assert(!syscall(SYS_ioprio_set,IOPRIO_WHO_PROCESS,getpid(),value));
+        assert(syscall(SYS_ioprio_get,IOPRIO_WHO_PROCESS,0)==value);
+        assert(syscall(SYS_ioprio_get,IOPRIO_WHO_PROCESS,getpid())==value);
+        value=IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE,6);
+        assert(!syscall(SYS_ioprio_set,IOPRIO_WHO_PGRP,getpgrp(),value));
+        assert(syscall(SYS_ioprio_get,IOPRIO_WHO_PGRP,getpgrp())==value);
+        errno=0;
+        assert(syscall(SYS_ioprio_get,IOPRIO_WHO_PROCESS,0x7fffffff)==-1 && errno==ESRCH);
+        errno=0;
+        assert(syscall(SYS_ioprio_set,IOPRIO_WHO_USER,0,value)==-1 && errno==EOPNOTSUPP);
+        _exit(0);
+    }
+    reap(child);
+    puts("PASS I/O priority translates process/group IDs and rejects native user-wide selection");
 }
 static void orphan_cases(void) {
     int value=-1;
@@ -324,6 +345,7 @@ static int init(void *inherited) {
     assert(child==2); reap(child);
     proc_cases();
     wait_cases();
+    io_priority_cases();
     orphan_cases();
     autoreap_case();
     signal_cases();

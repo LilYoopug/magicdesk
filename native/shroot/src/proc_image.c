@@ -27,7 +27,7 @@ long md_proc_executable_capture(const struct md_fs *fs,int process,int flags) {
     return error<0 ? error : md_namespace_open_result(&out.result,q.flags);
 }
 long md_proc_executable_open(const struct md_fs *fs, const char *path, int flags) {
-    if (fs->image && fs->endpoint[0] && !fs->image->executable_object[0])
+    if (fs->image && fs->endpoint[0])
         return md_proc_executable_capture(fs,(int)RAW0(gettid),flags);
     if (!fs->image || !fs->image->executable_object[0])
         return md_namespace_open(fs, AT_FDCWD, path, flags, 0);

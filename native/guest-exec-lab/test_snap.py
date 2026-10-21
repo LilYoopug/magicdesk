@@ -83,7 +83,7 @@ def main():
     parser.add_argument('--libc-registry', help='Use and verify a prepared accelerated libc registry')
     parser.add_argument('--user-session', action='store_true',
                         help='Start the stock user manager and use its D-Bus session, including Snap scope placement')
-    parser.add_argument('--snap', choices=['hello-world', 'firefox'], default='hello-world')
+    parser.add_argument('--snap', choices=['hello-world', 'firefox', 'chromium'], default='hello-world')
     parser.add_argument('--snap-file', help='Guest path to an official cached snap; signature checks remain enabled')
     parser.add_argument('--reinstall', action='store_true',
                         help='Remove an existing test snap before the install phase')
@@ -93,8 +93,10 @@ def main():
     args = parser.parse_args()
     if args.machine_entry and args.libc_registry:
         parser.error('--machine-entry requires stock libc, not --libc-registry')
+    if args.snap == 'chromium' and not args.namespace_only:
+        parser.error('--snap chromium requires --namespace-only; GUI coverage uses the desktop fixture')
     if args.namespace_only:
-        args.cold_launch_checks = 1
+        args.cold_launch_checks = max(1, args.cold_launch_checks)
     suite = Suite(args.output, args.build, machine_entry=args.machine_entry)
     suite.report['store'] = args.store
     suite.report['snap'] = args.snap

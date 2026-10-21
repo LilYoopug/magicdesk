@@ -35,6 +35,13 @@ static long number(const char **p) {
     *p = s;
     return (long)n;
 }
+static enum md_proc_kind network_table(const char **p) {
+    if (word(p,"tcp")) return MD_PROC_NET_TCP;
+    if (word(p,"tcp6")) return MD_PROC_NET_TCP6;
+    if (word(p,"udp")) return MD_PROC_NET_UDP;
+    if (word(p,"udp6")) return MD_PROC_NET_UDP6;
+    return MD_PROC_NONE;
+}
 struct md_proc_path md_proc_path_for(const char *path,int tid,int tgid) {
     struct md_proc_path out = {.descriptor=-1};
     if (*path != '/') return out;
@@ -51,6 +58,10 @@ struct md_proc_path md_proc_path_for(const char *path,int tid,int tgid) {
         out.process=tgid;
         out.kind = MD_PROC_FD;
     } else if (word(&p, "proc")) {
+        if (word(&p,"net")) {
+            out.kind=network_table(&p); out.process=tid;
+            out.tail=p; out.anchor_length=(size_t)(p-path); return out;
+        }
         if (word(&p,"cgroups")) {
             out.kind=MD_PROC_CGROUPS; out.process=tid;
             out.tail=p; out.anchor_length=(size_t)(p-path); return out;
@@ -144,6 +155,7 @@ struct md_proc_path md_proc_path_for(const char *path,int tid,int tgid) {
         else if (word(&p,"stat")) out.kind=MD_PROC_STAT;
         else if (word(&p,"limits")) out.kind=MD_PROC_LIMITS;
         else if (word(&p,"cgroup")) out.kind=MD_PROC_CGROUP;
+        else if (word(&p,"net")) out.kind=network_table(&p);
         else if (word(&p, "mounts")) out.kind = MD_PROC_MOUNTS;
         else if (word(&p, "mountinfo")) out.kind = MD_PROC_MOUNTINFO;
         else if (word(&p, "uid_map")) out.kind = MD_PROC_UID_MAP;

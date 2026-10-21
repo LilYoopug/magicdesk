@@ -33,11 +33,11 @@ add_library(guest-objects STATIC ${src}/fd_weak.c)
 target_compile_options(guest-objects PRIVATE -std=c17 -O2 -Wall -Wextra -Werror -fno-pie)
 set(fifo_descriptions ${src}/fifo_description.c ${src}/fifo_readiness.c)
 set(origins ${src}/fs_anchor.c ${src}/fs_origin_transfer.c ${src}/inode_lifetime.c ${src}/inode_custody.c ${src}/sealed_manifest.c ${src}/ipc_scope.c ${src}/mount_policy.c ${src}/mount_graph.c ${src}/resource_order.c ${src}/ofd_order.c ${src}/fd_origins.c ${src}/fd_channel.c ${src}/fd_mutation.c ${src}/fd_delivery.c ${src}/fd_table_observation.c ${src}/fd_return.c ${src}/fd_exchange.c ${src}/received_fds.c ${src}/fd_messages.c ${src}/task_descriptor.c ${src}/task_lifetime.c)
-list(APPEND origins ${src}/native_mounts.c ${src}/devpts_view.c ${src}/cgroup.c ${src}/cgroup_program.c ${src}/sysfs_view.c ${src}/network_namespace.c ${src}/network_model.c ${src}/network_route.c ${src}/network_message.c ${src}/network_generic.c ${src}/network_endpoint.c ${src}/network_sysctl.c
+list(APPEND origins ${src}/native_mounts.c ${src}/devpts_view.c ${src}/cgroup.c ${src}/cgroup_program.c ${src}/sysfs_view.c ${src}/network_namespace.c ${src}/network_model.c ${src}/network_route.c ${src}/network_message.c ${src}/network_generic.c ${src}/network_endpoint.c ${src}/network_sysctl.c ${src}/network_proc.c
     ${src}/ipc_namespace.c ${src}/mqueue_view.c ${src}/landlock_policy.c ${src}/landlock_file.c
     ${src}/mount_stream.c ${src}/mount_pin.c ${src}/mount_propagation.c ${src}/temporary_directory.c ${src}/private_tree.c
     ${src}/provider_tree.c ${src}/host_fs_view.c ${src}/device_events.c ${src}/identity_snapshot.c ${src}/proc_sysctl.c ${src}/user_sysctl.c ${src}/uts_namespace.c ${src}/control_event.c)
-list(APPEND origins ${fifo_descriptions})
+list(APPEND origins ${fifo_descriptions} ${src}/fd_native_pin.c)
 list(APPEND origins ${src}/device_tree.c ${src}/fuse_device.c ${src}/fuse_transport.c ${src}/fuse_session.c)
 list(APPEND origins ${src}/render_device.c ${src}/render_sysfs.c)
 list(APPEND origins ${src}/network_filter.c ${src}/network_filter_program.c ${src}/network_nft.c ${src}/network_nft_expression.c ${src}/network_nft_objects.c)

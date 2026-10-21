@@ -175,20 +175,25 @@ static int process_directory(const char *path) {
     if (!*end) return 1;
     return !strncmp(end,"/task/",6) && decimal(end+6,&end) && !*end;
 }
-int md_procfs_noatime(struct md_filesystem *fs,int fd,const char *path) {
-    struct stat st;
-    if (fstat(fd,&st)) return -errno;
+int md_procfs_ownership(struct md_filesystem *fs,const char *path,struct stat *st) {
     if (process_directory(path)) {
         struct md_task_credentials task;
         struct md_proc_path ref=md_proc_path_for(path,0,0);
         int error=md_task_registry_credentials(fs->tasks,ref.process,&task);
         if (error && error!=-ESRCH) return error;
         if (!error) {
-            st.st_uid=task.identity.uid.effective;
-            st.st_gid=task.identity.gid.effective;
+            st->st_uid=task.identity.uid.effective;
+            st->st_gid=task.identity.gid.effective;
             md_identity_release(&task.identity);
         }
     }
+    return 0;
+}
+int md_procfs_noatime(struct md_filesystem *fs,int fd,const char *path) {
+    struct stat st;
+    if (fstat(fd,&st)) return -errno;
+    int error=md_procfs_ownership(fs,path,&st);
+    if (error) return error;
     return md_file_noatime(&st,fs->store->identity);
 }
 static int control(const char *path,const char *name) {
@@ -199,14 +204,18 @@ static int control(const char *path,const char *name) {
             || !strcmp(name,"root") || !strcmp(name,"cwd") || !strcmp(name,"mounts")
             || !strcmp(name,"mountinfo") || !strcmp(name,"cgroup");
     const char *last=strrchr(path,'/');
-    if (last && (!strcmp(last,"/fd") || !strcmp(last,"/fdinfo") || !strcmp(last,"/ns"))) {
+    if (last && (!strcmp(last,"/fd") || !strcmp(last,"/fdinfo") || !strcmp(last,"/ns") || !strcmp(last,"/net"))) {
         char parent[PATH_MAX];
         size_t size=(size_t)(last-path);
         memcpy(parent,path,size); parent[size]=0;
         /* Walk these directories inside the selected proc mount. Only their
          * entries need caller-side FD/control resolution; delegating the
          * whole suffix would lose openat2's traversal boundary. */
-        if (process_directory(parent)) return strcmp(name,".") && strcmp(name,"..");
+        if (process_directory(parent)) {
+            if (!strcmp(last,"/net")) return !strcmp(name,"tcp") || !strcmp(name,"tcp6")
+                || !strcmp(name,"udp") || !strcmp(name,"udp6");
+            return strcmp(name,".") && strcmp(name,"..");
+        }
     }
     return !strcmp(path,"/proc/sys/kernel") || !strcmp(path,"/proc/sys/user")
         || !strcmp(path,"/proc/sys/fs/inotify") || !strcmp(path,"/proc/sys/net/bridge")

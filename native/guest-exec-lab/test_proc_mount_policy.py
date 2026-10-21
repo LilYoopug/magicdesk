@@ -11,8 +11,45 @@ import tempfile
 
 def guest():
     libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall.restype = ctypes.c_long
     libc.mount.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
                            ctypes.c_ulong, ctypes.c_void_p]
+
+    def call(nr, *args, error=None):
+        values = [ctypes.c_char_p(arg.encode()) if isinstance(arg, str)
+                  else ctypes.c_long(arg) for arg in args]
+        result = libc.syscall(ctypes.c_long(nr), *values)
+        assert (ctypes.get_errno() if result < 0 else 0) == (error or 0), (
+            nr, args, result, ctypes.get_errno(), error)
+        return result
+
+    def scoped_controls(root):
+        def opened(path, resolve=0xb, error=None):
+            how = (ctypes.c_uint64 * 3)(os.O_RDONLY | os.O_CLOEXEC, 0, resolve)
+            fd = call(437, root, path, ctypes.addressof(how), ctypes.sizeof(how), error=error)
+            if fd >= 0:
+                os.read(fd, 4096)
+                os.close(fd)
+
+        for name in ('setgroups', 'uid_map', 'gid_map', 'status', 'stat',
+                     'limits', 'cgroup', 'mounts', 'mountinfo', 'cmdline', 'auxv'):
+            opened('self/' + name)
+            opened('self/' + name, resolve=0x13)  # IN_ROOT | NO_XDEV | NO_MAGICLINKS
+            opened('self/' + name, resolve=0xf, error=errno.ELOOP)
+            opened('self/' + name + '/..', error=errno.ENOTDIR)
+        opened('../self/setgroups', error=errno.EXDEV)
+        for name in ('exe', 'root', 'cwd', 'ns/mnt', 'fd/0'):
+            opened('self/' + name, error=errno.ELOOP)
+
+    context = call(430, 'proc', 1)
+    call(431, context, 6, 0, 0, 0)
+    detached = call(432, context, 1, 0)
+    os.close(context)
+    try:
+        scoped_controls(detached)
+    finally:
+        os.close(detached)
+    print('PASS detached proc scoped controls and traversal restrictions', flush=True)
 
     def mount(source, target, kind, flags):
         args = [os.fsencode(value) if value is not None else None
@@ -23,6 +60,11 @@ def guest():
     with tempfile.TemporaryDirectory(prefix='md-proc-policy-') as directory:
         mount('proc', directory, 'proc', 2 | 4 | 8)
         try:
+            root = os.open(directory, os.O_PATH | os.O_DIRECTORY)
+            try:
+                scoped_controls(root)
+            finally:
+                os.close(root)
             entries = os.listdir(directory)
             for name in ('sysrq-trigger', 'kcore', 'kmsg', 'keys', 'asound', 'kallsyms'):
                 assert name not in entries, name
@@ -66,11 +108,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('build', type=Path)
     parser.add_argument('store')
+    from test_oci_services import Suite, add_machine_entry_argument
+    add_machine_entry_argument(parser)
     args = parser.parse_args()
-    from test_oci_services import Suite
-    suite = Suite(args.build, args.build)
+    suite = Suite(args.build, args.build, machine_entry=args.machine_entry)
     target = '/tmp/md-proc-policy-' + suite.report['id']
-    prefix = [suite.runner, '--store', args.store, '--user', '0:0']
+    prefix = suite.guest(args.store, '--user', '0:0')
     try:
         suite.transport.upload(suite.client, Path(__file__), suite.base + '/test.py')
         suite.command(prefix + ['--', '/bin/mkdir', target])

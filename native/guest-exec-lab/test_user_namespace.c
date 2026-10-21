@@ -205,6 +205,28 @@ static void selectors(void) {
     assert(md_fd_selector_has_mask(prepared,1U<<MD_FD_SELECTOR_KINDS,-1)==-EINVAL);
     md_fd_selector_release(prepared);
     md_fd_selector_release(a); md_fd_selector_release(copy); md_fd_selector_release(shared);
+
+    a=md_fd_selector_new(); assert(a);
+    const unsigned instructions=252, cost=instructions+4;
+    for (unsigned i=0;i<MD_FD_SELECTOR_BUDGET/cost;++i) {
+        assert(!md_fd_selector_has(a,MD_FD_SELECTOR_PROC,(int)i));
+        assert(md_fd_selector_target(a,(int)i,instructions)==(int)i);
+        assert(!md_fd_selector_installed(a,MD_FD_SELECTOR_PROC,(int)i,instructions));
+    }
+    assert(md_fd_selector_target(a,200,instructions)==-1);
+    copy=md_fd_selector_fork(a,0); shared=md_fd_selector_fork(a,1);
+    assert(copy && shared);
+    assert(md_fd_selector_target(copy,200,instructions)==-1);
+    assert(md_fd_selector_target(shared,200,instructions)==-1);
+    assert(!md_fd_selector_installed(copy,MD_FD_SELECTOR_PROC,-1,instructions));
+    assert(md_fd_selector_has(copy,MD_FD_SELECTOR_PROC,200)==1);
+    assert(md_fd_selector_has(copy,MD_FD_SELECTOR_WATCH,200)==1);
+    assert(!md_fd_selector_has(a,MD_FD_SELECTOR_PROC,200));
+    assert(!md_fd_selector_installed(shared,MD_FD_SELECTOR_WATCH,-1,40));
+    assert(md_fd_selector_has(a,MD_FD_SELECTOR_WATCH,200)==1);
+    assert(md_fd_selector_target(a,3,0)==-EINVAL);
+    assert(md_fd_selector_target(a,3,4097)==-EINVAL);
+    md_fd_selector_release(a); md_fd_selector_release(copy); md_fd_selector_release(shared);
 }
 static void ordered_io(void) {
     struct md_identity id=md_identity_new(2000,2000);

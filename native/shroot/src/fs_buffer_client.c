@@ -56,7 +56,7 @@ static long receive_result(struct md_fs_buffer_frame *frame, const struct md_fs_
     unsigned transfer=frame->transfer;
     unsigned descriptors=transfer!=MD_FS_BUFFER_NO_FD;
     if (out->delivery!=MD_FS_REPLIED || out->result.fd!=-1 || out->result.open_completion.kind
-            || transfer>MD_FS_BUFFER_CALLER_OPEN
+            || transfer>MD_FS_BUFFER_REPLAY_ADDFD
             || !md_fs_result_valid(q,&out->result,data,capacity,descriptors)) result=-EPROTO;
     else if (transfer==MD_FS_BUFFER_TASK_PATH) {
         if (q->operation!=MD_FS_TASK_PATH || frame->source[sizeof(frame->source)-1]
@@ -70,8 +70,10 @@ static long receive_result(struct md_fs_buffer_frame *frame, const struct md_fs_
         else if (q->mode==MD_FS_TASK_TRUNCATE) out->result.error=(int)RAW2(truncate,frame->source,q->offset);
         else result=-EPROTO;
     }
-    else if (transfer==MD_FS_BUFFER_ADDFD) {
-        long fd=md_guest_buffer_admit(MD_FS_BUFFER_RESULT_ADMIT);
+    else if (transfer==MD_FS_BUFFER_ADDFD || transfer==MD_FS_BUFFER_REPLAY_ADDFD) {
+        long fd=transfer==MD_FS_BUFFER_REPLAY_ADDFD
+            ? md_guest_buffer_control(MD_FS_BUFFER_RESULT_REPLAY,0,0)
+            : md_guest_buffer_admit(MD_FS_BUFFER_RESULT_ADMIT);
         if (fd<0) out->result.error=(int)fd;
         else out->result.fd=(int)fd;
     } else if (transfer==MD_FS_BUFFER_RIGHTS) {

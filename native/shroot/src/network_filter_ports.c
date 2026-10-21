@@ -59,6 +59,12 @@ static int may_translate(struct md_network_filter *f,const struct md_filter_chai
             case MD_FILTER_CT:
                 if (e->key==NFT_CT_STATE) { number=8; memcpy(value,&number,4); memset(k,1,4); }
                 break;
+            case MD_FILTER_STATE_MATCH: possible=!!(8U&e->key)!=!!e->operation; break;
+            case MD_FILTER_MARK_MATCH: uncertain=1; break;
+            case MD_FILTER_ADDRESS_TYPE:
+                possible=!e->aux || (!!(e->aux&(1U<<RTN_LOCAL))!=!!(e->operation&MD_FILTER_INVERT_DESTINATION));
+                uncertain|=!!e->key;
+                break;
             case MD_FILTER_FIB:
                 if (e->operation!=NFTA_FIB_F_SADDR) { number=RTN_LOCAL; memcpy(value,&number,4); memset(k,1,4); }
                 break;

@@ -675,11 +675,94 @@ Stock-distribution verification additionally covered:
 These use unmodified distribution libc and require actual machine-entry
 completions. They are correctness checks, not performance measurements.
 Fork-inherited counters are not a census of distinct syscalls across the tree.
-SteamOS KWin/Plasma process discovery now passes, but system-bus/PolicyKit
-setup and full desktop readiness remain under investigation. The capture in
+The earlier capture in
 `svc-steamos-plasma/oci-services-23b14e392b384c8ba66317c80abdced6.json`
-still shows a splash and is not a passing desktop receipt. The GUI fixture now
-also waits for the Plasma splash process to exit, within the existing bound.
+shows a splash and is not a passing desktop receipt. It is superseded by the
+interactive checks below, not reclassified as success.
+
+### Desktop and Container Acceptance
+
+The extended matrix uses the current native build, stock distribution libc,
+shell UID 2000 and virtual displays. SteamOS enters its installed
+`magicdesk-desktop-session plasma-wayland` recipe as user 1000. Ubuntu uses its
+systemd user session and recipe Weston. These are ordinary application launches;
+no browser `--no-sandbox` or private browser build is used.
+
+| Workflow | Receipt in `build/` |
+| --- | --- |
+| SteamOS Plasma, Dolphin, terminal, Steam login window and normal logout | `steamos-gui-final-start.log`, `steamos-gui-final-stop.log`, `svc-matrix-steamos-gui/` captures |
+| SteamOS Flatpak Chromium: input, pointer, download, portal file chooser, WebGL and normal close | `svc-matrix-steamos-gui/flatpak-chromium-final/gui-report.json` |
+| SteamOS Flatpak Firefox: same interactive checks | `svc-matrix-steamos-gui/flatpak-firefox-final/gui-report.json` |
+| SteamOS VS Code: reload, editor/save, watcher, terminal, GDB variable update and normal close | `svc-matrix-steamos-gui/vscode-final/gui-report.json` |
+| Ubuntu Snap Chromium and Firefox: same interactive browser checks | `svc-matrix-ubuntu-gui/snap-chromium-final/gui-report.json`, `snap-firefox-final/gui-report.json` |
+| Ubuntu VS Code: same editor/debugger workflow | `svc-matrix-ubuntu-gui/vscode-final/gui-report.json` |
+| Docker bridge/ports on SteamOS and Ubuntu; final Ubuntu repeat includes external DNS/HTTP | `shroot-image-tests/oci-services-f08966a923a1416e882253df7db1d531.json`, `oci-services-2fd5e4cd98684f669cb3ad352aa7ae37.json` |
+| Podman bridge/ports on SteamOS | `podman-results/oci-services-121c15c877d147cba3816cb590ba331b.json` |
+| Ubuntu Podman: bridge/ports, external DNS/HTTP, traced resolver and detach | `podman-results/oci-services-b642d64ca9394ae8a42b083be1608a21.json` |
+| Ubuntu Podman: 40 sequential local outbound execs and full port lifecycle, repeated after final fixes | `podman-results/oci-services-07a56ec61ed7450a91c3b0e681bf9419.json`, `oci-services-d4dd0140dc8c44d8aff8b9e3b97c329b.json` |
+| Eight mixed epoll modes under strace and machine entry | `shroot-image-tests/oci-services-cd47f6f7cd6946009cc6ac1abc2f32c4.json` |
+| Three repetitions of all eight epoll modes under strace with Base | `shroot-image-tests/oci-services-8c51f26b6d3344eda4c3456ac55e5c42.json` |
+| Nine debugger/strace workflows, including idle socket detach, machine entry and Base | `debugger-final/oci-services-f7d93f14d2154409919b1ab475a196c2.json`, `debugger-base-final/oci-services-e64757812018467d83dd14877908b71d.json` |
+| Alpine musl/OpenRC boot, service lifecycle and cleanup | `svc-matrix-alpine-openrc/oci-services-f3ce7e0d48cf4a5e8253b76e0098f98d.json` |
+| Original-PC/argument seccomp admission, killed helper calls, protected stdio and one-shot O_EXCL | `shroot-image-tests/oci-services-1b9864754c26450e8394c8b158ee32d5.json`, `oci-services-235ff9161c914ea4a6c21aef2f05c207.json` |
+| Integrated planner, mapping/TSYNC/protected races, proc views and stock Go | `svc-patch-results/oci-services-250880b194c24e7b900fa3a748af4af9.json` |
+
+Chromium's rendered WebGL check reports ANGLE/Zink/Turnip on Adreno 840.
+Firefox's privacy-masked renderer string is not a GPU identification; its
+pixel assertion verifies rendered output. These checks do not measure frame
+rate. Steam reached its connected login window, not authenticated gameplay.
+SteamOS recovery-image boot as an unmodified hardware OS is not certified by
+its desktop recipe.
+
+PipeWire playback reached Android on both desktops. The receipts
+`svc-matrix-steamos-gui/audio-receipt.json` and
+`svc-matrix-ubuntu-gui/audio-connected-receipt.json` contain nonzero received
+and rendered PCM counters without reported overruns/errors/xruns. The test PCM
+was silent, so it does not establish audible quality or absence of stutter.
+The first Ubuntu fixture had lost the recipe's audio connection environment
+across its private systemd intermediary; its zero-frame receipt is not a pass.
+
+Docker checks use nftables, overlay2 and cgroup v2 with userland proxy disabled.
+Both engines exercise TCP/UDP publications, named peers, DNS, local outbound IO,
+binds, exec, conflict rejection and port release. External internet checks are
+separate from deterministic local traffic. SteamOS Podman requires explicit
+inherited host limits: its default nofile request exceeds Android's real hard
+ceiling. The fixture records that configuration rather than pretending to raise
+the native limit. Snap still uses snapd's degraded mode without AppArmor.
+SteamOS container tools include test-installed Docker 29.1.3 and the signed
+Arch Linux ARM aardvark-dns package; this is not a claim that the recovery
+image includes those versions. Ubuntu uses its installed Podman/netavark/
+aardvark packages and the separately installed Docker Engine.
+
+Real applications exposed shared Base defects as well as accelerated-entry
+coverage gaps: proc socket/owner views, PID translation for terminal/io-priority
+calls, readonly reexec provenance, descriptor-selector filter budget, nftables
+compat expressions, restrictive-filter FD delivery and inherited stdio metadata.
+Their fixes live in the common owners and retain focused Base controls.
+Application filter installation still revokes shared-memory acceleration;
+successful sandbox startup does not imply accelerated execution inside every
+filtered process. This matrix is correctness evidence, not a new speed benchmark
+or authorization to delete the source-built comparison path.
+
+The traced Podman workflow exposed two further shared-engine defects:
+
+- Cancelled readiness could leave temporary-FD retirement owning the file-table
+  turn while every eligible peer was excluded merely because it had a debugger.
+  The common borrow policy now admits running inferiors and queued readiness
+  peers at exact kernel boundaries, preserving debugger-held stops. The existing
+  shared-table epoll fixture reproduced the timeout before this correction.
+- Addressless native `recvfrom` could block inside the adapter, postponing a
+  pending debugger detach until data arrived. Native payload IO now resumes at
+  the original call boundary. The socket-detach fixture failed before the fix;
+  both Base and machine-entry debugger suites pass afterwards.
+
+The full traced Podman matrix then passed through resolver detach, subsequent
+external DNS/HTTP, container removal and port release. Earlier intermittent
+untraced exec timeouts remain recorded; their identical root cause is not
+established merely by the later stress pass. The GUI matrix preceded these two
+final fixes, while the focused debugger and container checks cover them.
+
+### Earlier Shared-Engine Regression Controls
 
 Two shared-engine races reproduced without machine-code entry:
 

@@ -101,7 +101,7 @@ long md_file_call(const struct md_fs *fs, const char *exe, long nr, const unsign
         }
         if (md_proc_control_kind(control)) {
             long result=*image.tail ? -ENOTDIR : md_proc_control_open(&image,flags,0);
-            if (result!=-EXDEV || !md_proc_network_sysctl(control)) return result;
+            if (result!=-EXDEV || !md_proc_network_control(control)) return result;
         }
         if (image.kind == MD_PROC_CMDLINE || image.kind == MD_PROC_AUXV)
             return *image.tail ? -ENOTDIR : md_proc_image_open(fs, image.kind, flags);
@@ -118,7 +118,7 @@ long md_file_call(const struct md_fs *fs, const char *exe, long nr, const unsign
             enum md_proc_kind kind=ref.kind==MD_PROC_FOREIGN ? ref.foreign_kind : ref.kind;
             if (md_proc_control_kind(kind)) {
                 long result=*ref.tail ? -ENOTDIR : md_proc_control_metadata(&ref,nr,a);
-                if (result!=-EXDEV || !md_proc_network_sysctl(kind)) return result;
+                if (result!=-EXDEV || !md_proc_network_control(kind)) return result;
             }
         }
         return r < 0 ? r : md_raw(nr, first[0] ? AT_FDCWD : a[0], (long)first, a[2], a[3], a[4], 0);

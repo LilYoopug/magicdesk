@@ -4,6 +4,11 @@ const assert = require('node:assert/strict');
 const net = require('node:net');
 
 exports.activate = async function (context) {
+    if (process.env.MD_VSCODE_RELOAD === '1' && !context.globalState.get('reloaded')) {
+        await context.globalState.update('reloaded', true);
+        await vscode.commands.executeCommand('workbench.action.reloadWindow');
+        return;
+    }
     const socket = net.createConnection({host: '127.0.0.1', port: Number(process.env.MD_VSCODE_PORT)});
     const send = (stage, data = {}) => socket.write(JSON.stringify({token: process.env.MD_VSCODE_TOKEN, stage, ...data}) + '\n');
     // EVENT_WAIT: test-controller acknowledgement; disconnect/timeout fails the fixture.
@@ -30,8 +35,64 @@ exports.activate = async function (context) {
         check();
     });
     try {
+        assert(Object.keys(require('node:os').networkInterfaces()).length > 0);
         send('activated', {version: vscode.version, versions: process.versions, uid: process.getuid()});
         const folder = vscode.workspace.workspaceFolders[0];
+        const note = vscode.Uri.joinPath(folder.uri, 'editor.txt');
+        const document = await vscode.workspace.openTextDocument(note);
+        const editor = await vscode.window.showTextDocument(document);
+        assert(await editor.edit(edit => edit.insert(new vscode.Position(0, 0), 'shroot editor\n')));
+        assert(await document.save());
+        assert.equal(Buffer.from(await vscode.workspace.fs.readFile(note)).toString(), 'shroot editor\n');
+        const marker = vscode.Uri.joinPath(folder.uri, 'terminal.txt');
+        const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(folder, '*.txt'));
+        // EVENT_WAIT: VS Code starts recursive watchers asynchronously. Observe
+        // a real external event before testing a single terminal mutation.
+        const probe = vscode.Uri.joinPath(folder.uri, 'watch-ready.txt');
+        await new Promise((resolve, reject) => {
+            const fs = require('node:fs');
+            const changed = uri => {if (uri.toString() === probe.toString()) finish();};
+            const created = watcher.onDidCreate(changed);
+            const modified = watcher.onDidChange(changed);
+            const finish = error => {
+                clearInterval(retry);
+                clearTimeout(deadline);
+                created.dispose();
+                modified.dispose();
+                try {fs.unlinkSync(probe.fsPath);} catch {}
+                if (error) reject(error); else resolve();
+            };
+            // Protocol stimulus, not a settling delay or a readiness assumption.
+            const retry = setInterval(() => {
+                try {fs.appendFileSync(probe.fsPath, 'r');} catch (error) {finish(error);}
+            }, 100);
+            const deadline = setTimeout(() => finish(new Error('Filesystem watcher readiness timed out')), 30000);
+        });
+        const terminal = vscode.window.createTerminal({name: 'Shroot fixture', cwd: folder.uri.fsPath});
+        // EVENT_WAIT: terminal-created file notification; deadline fails the fixture.
+        try {
+            await new Promise((resolve, reject) => {
+                const timer = setTimeout(() => reject(new Error('Terminal filesystem event timed out')), 30000);
+                const read = async () => {
+                    try {
+                        if (Buffer.from(await vscode.workspace.fs.readFile(marker)).toString() === 'shroot terminal\n') {
+                            clearTimeout(timer);
+                            resolve();
+                        }
+                    } catch (error) {
+                        if (error.code !== 'FileNotFound') {clearTimeout(timer); reject(error);}
+                    }
+                };
+                watcher.onDidCreate(read);
+                watcher.onDidChange(read);
+                terminal.show();
+                terminal.sendText("printf 'shroot terminal\\n' > terminal.txt");
+            });
+        } finally {
+            watcher.dispose();
+            terminal.dispose();
+        }
+        send('workspace', {editorSaved: true, terminal: true, fileNotification: true});
         const uri = vscode.Uri.joinPath(folder.uri, 'main.c');
         await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri));
         vscode.debug.addBreakpoints([new vscode.SourceBreakpoint(new vscode.Location(uri, new vscode.Position(4, 0)))]);
@@ -71,7 +132,12 @@ exports.activate = async function (context) {
         const exited = await event('exited');
         assert.equal(exited.exitCode, 0);
         await event('terminated');
+        const close = process.env.MD_VSCODE_CLOSE === '1' ? ack() : null;
         send('passed', {step, value: nextValue, exited});
+        if (close) {
+            await close;
+            await vscode.commands.executeCommand('workbench.action.closeWindow');
+        }
     } catch (error) {
         send('failed', {error: error.stack, messages});
     }

@@ -9,6 +9,7 @@
 #include "fd_delivery.h"
 #include "fd_receipt.h"
 #include "fd_channel.h"
+#include "fd_native_pin.h"
 #include "fd_return.h"
 #include "received_fds.h"
 #include "fd_messages.h"
@@ -1587,7 +1588,29 @@ static void native_loans(void) {
     }
     puts("PASS metadata-free native FD loans: allocation failures, publication and exact retirement");
 }
+static void native_input_pin(void) {
+    unsigned pin_before=descriptors();
+    int pipe_fds[2];
+    assert(!pipe2(pipe_fds,O_NONBLOCK|O_CLOEXEC));
+    struct md_fd_object *pin=md_fd_native_pin_new(pipe_fds[1]);
+    assert(pin);
+    struct stat pinned, original;
+    assert(!fstat(pipe_fds[1],&original));
+    assert(!fstat(md_fd_native_pin_descriptor(pin),&pinned));
+    assert(original.st_dev==pinned.st_dev && original.st_ino==pinned.st_ino);
+    assert(!md_fs_anchor_from_object(pin));
+    close(pipe_fds[1]);
+    char byte;
+    assert(read(pipe_fds[0],&byte,1)==0);
+    md_fd_object_release(pin);
+    allocation_budget=0;
+    assert(!md_fd_native_pin_new(pipe_fds[0]) && errno==ENOMEM);
+    allocation_budget=-1;
+    close(pipe_fds[0]);
+    assert(descriptors()==pin_before);
+}
 void test_fd_origins(void) {
+    native_input_pin();
     native_loans();
     close_lifecycle();
     extern void test_task_receive(int *);

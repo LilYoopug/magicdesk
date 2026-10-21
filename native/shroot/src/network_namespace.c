@@ -153,7 +153,7 @@ struct md_network_namespace *md_network_socket_namespace(const struct md_fd_obje
 int md_network_interface_ioctl(unsigned long command) {
     return command==SIOCGIFNAME || command==SIOCGIFINDEX || command==SIOCGIFFLAGS || command==SIOCGIFMTU;
 }
-int md_network_socket_open(struct md_network_namespace *n, int family, int type, int protocol,
+int md_network_socket_open(struct md_network_namespace *n, uint32_t uid, int family, int type, int protocol,
         struct md_fd_object **out, int *fd) {
     if (!md_network_namespace_managed(n)) return -EINVAL;
     if (type&~(SOCK_CLOEXEC|SOCK_NONBLOCK|15)) return -EINVAL;
@@ -165,7 +165,7 @@ int md_network_socket_open(struct md_network_namespace *n, int family, int type,
         *out=object; *fd=native; return 0;
     }
     if ((family==AF_INET || family==AF_INET6) && md_network_endpoint_enabled(n))
-        return md_network_endpoint_open(n,family,type,protocol,out,fd);
+        return md_network_endpoint_open(n,uid,family,type,protocol,out,fd);
     int base=type&15;
     if (family==AF_NETLINK) {
         if (protocol!=NETLINK_ROUTE && protocol!=NETLINK_GENERIC && protocol!=NETLINK_NETFILTER) return -EPROTONOSUPPORT;

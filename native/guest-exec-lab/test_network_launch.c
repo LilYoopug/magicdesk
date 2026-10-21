@@ -77,8 +77,8 @@ static void routes(void) {
     struct md_fd_object *sa=NULL,*sb=NULL; int fa=-1,fb=-1;
     struct md_identity identity=md_identity_new(0,0);
     struct sockaddr_in local={.sin_family=AF_INET,.sin_port=htons(80)};
-    assert(!md_network_endpoint_open(a.space,AF_INET,SOCK_STREAM,0,&sa,&fa));
-    assert(!md_network_endpoint_open(b.space,AF_INET,SOCK_STREAM,0,&sb,&fb));
+    assert(!md_network_endpoint_open(a.space,0,AF_INET,SOCK_STREAM,0,&sa,&fa));
+    assert(!md_network_endpoint_open(b.space,0,AF_INET,SOCK_STREAM,0,&sb,&fb));
     assert(!md_network_endpoint_bind(sa,fa,&identity,(void *)&local,sizeof(local)));
     assert(!md_network_endpoint_bind(sb,fb,&identity,(void *)&local,sizeof(local)));
     close(fa); close(fb); md_fd_object_release(sa); md_fd_object_release(sb);

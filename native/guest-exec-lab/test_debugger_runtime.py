@@ -16,10 +16,19 @@ STRACE_DETACH = r'''
 import selectors
 from pathlib import Path
 import signal
+import socket
 import subprocess
+import sys
 import time
-child = subprocess.Popen(['/tmp/md-debugger-tests', 'strace-target'], stdin=subprocess.PIPE,
+socket_mode = len(sys.argv) > 1 and sys.argv[1] == '--socket'
+pair = socket.socketpair() if socket_mode else None
+program = ['python3', '-u', '-c',
+    'import socket; s=socket.socket(fileno=0); print("READY"); '
+    'assert s.recv(1)==b"x"; print("PASS strace-target")'] if socket_mode else ['/tmp/md-debugger-tests', 'strace-target']
+child = subprocess.Popen(program, stdin=pair[1] if pair else subprocess.PIPE,
                          stdout=subprocess.PIPE, text=True)
+if pair:
+    pair[1].close()
 tracer = None
 try:
     assert child.stdout.readline().strip() == 'READY'
@@ -54,14 +63,18 @@ try:
     _, errors = tracer.communicate(timeout=10)
     print(errors.decode(), end='', flush=True)
     assert tracer.returncode in (0, -signal.SIGINT), tracer.returncode
-    output, _ = child.communicate('x', timeout=10)
+    if pair:
+        pair[0].sendall(b'x')
+    output, _ = child.communicate(None if pair else 'x', timeout=10)
     assert child.returncode == 0 and 'PASS strace-target' in output, output
-    print('PASS strace-detach')
+    print('PASS strace-detach' + ('-socket' if pair else ''))
 finally:
     for process in (tracer, child):
         if process is not None:
             if process.poll() is None: process.kill()
             process.wait(timeout=10)
+    if pair:
+        pair[0].close()
 '''
 GDB_ATTACH = r'''
 import subprocess
@@ -253,6 +266,7 @@ def commands(*, proot=False):
     cases = [(name, [TARGET, name]) for name in ('attach', 'seize', 'trace-exit', 'syscall', 'syscall-edit-close', 'syscall-exec', 'credential-transition', 'mixed',
                                                'kill-stopped', 'owner-exit', 'exitkill', 'thread-exec', 'syscall-thread-exec', 'clone-untraced', 'shared-files-debugger', 'perf-event')]
     cases.append(('strace-detach', ['python3', '-c', STRACE_DETACH]))
+    cases.append(('strace-detach-socket', ['python3', '-c', STRACE_DETACH, '--socket']))
     cases.append(('gdb-attach', ['python3', '-c', GDB_ATTACH]))
     cases.append(('gdb-attach-threads', ['python3', '-c', GDB_ATTACH, 'gdb-thread-target']))
     cases.append(('gdb-active-io', ['python3', '-c', GDB_IO]))
@@ -310,11 +324,12 @@ def main():
     parser.add_argument('--case', action='append', choices=[name for name, _ in commands()])
     parser.add_argument('--diagnostics', action='store_true')
     parser.add_argument('--libc-registry', help='Exercise the installed direct-entry libc')
+    parser.add_argument('--machine-entry', action='store_true')
     parser.add_argument('--pid-namespace', action='store_true')
     parser.add_argument('--gdbserver-binary', type=Path,
                         help='Optional standalone guest binary; never replaces the installed package')
     args = parser.parse_args()
-    if args.proot and (args.build or args.diagnostics or args.libc_registry or args.pid_namespace):
+    if args.proot and (args.build or args.diagnostics or args.libc_registry or args.pid_namespace or args.machine_entry):
         parser.error('runtime and namespace options apply only to Shroot')
     args.output.mkdir(parents=True, exist_ok=True)
     source = Path(__file__).with_name('test_debugger_guest.c')
@@ -369,9 +384,11 @@ def main():
                     options = ['--diagnostics'] if args.diagnostics else []
                     if args.libc_registry:
                         options += ['--libc-registry', args.libc_registry]
+                    if args.machine_entry:
+                        options += ['--env', 'SHROOT_MACHINE_ENTRY=1']
                     child = (['unshare', '--mount', '--pid', '--fork', '--mount-proc']
                              if args.pid_namespace else []) + argv
-                    if args.diagnostics or args.libc_registry or args.pid_namespace:
+                    if args.diagnostics or args.libc_registry or args.pid_namespace or args.machine_entry:
                         command = [suite.runner, *options, '--store', args.instance,
                                    '--user', '0:0', '--', '/bin/sh', '-c', 'exec "$@"',
                                    'debugger-test', *child]

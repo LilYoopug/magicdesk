@@ -66,7 +66,7 @@ final class LinuxGraphicalEnvironment {
     }
 
     static String wrap(GraphicalProtocol protocol, String prepare, String command) {
-        String setup = "set -eu; umask 077; XDG_RUNTIME_DIR=$(mktemp -d /tmp/magicdesk-runtime.XXXXXX); "
+        String setup = "set -eu; XDG_RUNTIME_DIR=$(umask 077; mktemp -d /tmp/magicdesk-runtime.XXXXXX); "
                 + "export XDG_RUNTIME_DIR XDG_SESSION_TYPE=" + protocol.wireName + "; "
                 + CLEANUP;
         return setup + prepare + "dbus-run-session -- " + command;

@@ -166,6 +166,23 @@ def typed_duplicates():
         duplicates(source, netlink, 'route')
 
 
+def selector_budget():
+    source = os.open('/proc/self/stat', os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        expected = str(os.getpid()).encode() + b' ('
+        for slot in range(512, 1024):
+            alias = checked(libc.dup3(source, slot, os.O_CLOEXEC))
+            try:
+                assert os.pread(alias, 4096, 0).startswith(expected)
+            finally:
+                os.close(alias)
+        watch()
+        child(lambda: proc())
+    finally:
+        os.close(source)
+    print('PASS selector instruction budget: all FD buckets, watch and fork', flush=True)
+
+
 def duplicate_errors():
     class Filter(ctypes.Structure):
         _fields_ = [('code', ctypes.c_ushort), ('jt', ctypes.c_ubyte),
@@ -299,7 +316,10 @@ if __name__ == '__main__':
         proc(int(sys.argv[2]))
         watch(int(sys.argv[2]))
         ordinary(int(sys.argv[2]))
+    elif sys.argv[1:2] == ['--budget']:
+        selector_budget()
     else:
+        child(selector_budget)
         child(lambda: shared_table_groups(False))
         child(lambda: shared_table_groups(True))
         child(duplicate_errors)

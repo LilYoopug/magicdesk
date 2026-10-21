@@ -1,12 +1,14 @@
 #define _GNU_SOURCE
 #include "network_endpoint.h"
 #include "network_internal.h"
+#include "network_proc.h"
 #include "guest_identity.h"
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <net/if.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -18,11 +20,11 @@ void test_network_endpoint(void) {
     struct md_identity identity=md_identity_new(0,0),user=md_identity_new(1000,1000);
     struct md_fd_object *first=NULL,*second=NULL,*conflict=NULL;
     int f=-1,s=-1,c=-1;
-    assert(md_network_endpoint_open(offline,AF_INET,SOCK_STREAM,0,&first,&f)==-EOPNOTSUPP);
-    assert(md_network_endpoint_open(a,AF_INET6,SOCK_STREAM,0,&first,&f)==-EAFNOSUPPORT);
-    assert(!md_network_endpoint_open(a,AF_INET,SOCK_STREAM,0,&first,&f));
-    assert(!md_network_endpoint_open(b,AF_INET,SOCK_STREAM,0,&second,&s));
-    assert(!md_network_endpoint_open(a,AF_INET,SOCK_STREAM,0,&conflict,&c));
+    assert(md_network_endpoint_open(offline,0,AF_INET,SOCK_STREAM,0,&first,&f)==-EOPNOTSUPP);
+    assert(md_network_endpoint_open(a,0,AF_INET6,SOCK_STREAM,0,&first,&f)==-EAFNOSUPPORT);
+    assert(!md_network_endpoint_open(a,1000,AF_INET,SOCK_STREAM,0,&first,&f));
+    assert(!md_network_endpoint_open(b,0,AF_INET,SOCK_STREAM,0,&second,&s));
+    assert(!md_network_endpoint_open(a,0,AF_INET,SOCK_STREAM,0,&conflict,&c));
     struct sockaddr_in local={.sin_family=AF_INET,.sin_port=htons(80)};
     assert(md_network_endpoint_bind(first,f,&user,(void *)&local,sizeof(local))==-EACCES);
     assert(!md_network_endpoint_bind(first,f,&identity,(void *)&local,sizeof(local)));
@@ -31,6 +33,37 @@ void test_network_endpoint(void) {
     struct sockaddr_in real_a,real_b; socklen_t length=sizeof(real_a);
     assert(!getsockname(f,(void *)&real_a,&length)); length=sizeof(real_b);
     assert(!getsockname(s,(void *)&real_b,&length) && real_a.sin_port!=real_b.sin_port);
+    assert(!md_network_endpoint_listen(first,f,1));
+    assert(!md_network_endpoint_listen(second,s,1));
+    struct md_network_endpoint_info *entries=NULL;
+    size_t count=0;
+    assert(!md_network_endpoint_snapshot(a,IPPROTO_TCP,&entries,&count));
+    struct stat st,other;
+    assert(!fstat(f,&st) && !fstat(s,&other));
+    assert(count==1 && entries[0].inode==st.st_ino && entries[0].uid==1000
+        && entries[0].local.sin_port==htons(80));
+    free(entries);
+    struct md_control_file table=md_network_proc_new(a,MD_NET_TABLE_TCP);
+    assert(table.ops);
+    struct md_control_actor actor={.identity=&identity};
+    char text[4096]={0},needle[64];
+    long bytes=table.ops->read(table.context,&actor,text,sizeof(text)-1,0);
+    assert(bytes>0 && strstr(text,"00000000:0050"));
+    snprintf(needle,sizeof(needle)," %llu ",(unsigned long long)st.st_ino);
+    assert(strstr(text,needle));
+    snprintf(needle,sizeof(needle)," %llu ",(unsigned long long)other.st_ino);
+    assert(!strstr(text,needle));
+    assert(table.ops->read(table.context,&actor,text,sizeof(text),bytes)==0);
+    assert(table.ops->access(table.context,&identity,W_OK)==-EACCES);
+    void *reopened=table.ops->open(table.context,O_RDONLY);
+    assert(reopened && reopened!=table.context);
+    table.ops->release(reopened); md_control_file_release(table);
+    table=md_network_proc_new(offline,MD_NET_TABLE_TCP6);
+    assert(table.ops);
+    bytes=table.ops->read(table.context,&actor,text,sizeof(text)-1,0);
+    assert(bytes>0); text[bytes]=0;
+    assert(strchr(text,'\n')==text+bytes-1);
+    md_control_file_release(table);
     struct sockaddr_storage logical;
     assert(!md_network_endpoint_name(first,f,0,&logical,&length));
     assert(((struct sockaddr_in *)&logical)->sin_port==htons(80));
@@ -76,7 +109,7 @@ void test_network_endpoint(void) {
     assert(!md_network_parameter_write(root,MD_NET_IPV4_FORWARD,0,forward));
     assert(md_network_endpoint_destination(first,(void *)&remote,sizeof(remote),&logical,&length)==-ENETUNREACH);
     struct md_fd_object *host=NULL; int hostfd=-1;
-    assert(!md_network_endpoint_open(root,AF_INET,SOCK_STREAM,0,&host,&hostfd));
+    assert(!md_network_endpoint_open(root,0,AF_INET,SOCK_STREAM,0,&host,&hostfd));
     assert(!md_network_endpoint_destination(host,(void *)&remote,sizeof(remote),&logical,&length));
     close(hostfd); md_fd_object_release(host);
     forward[0]=1;
@@ -89,9 +122,9 @@ void test_network_endpoint(void) {
     assert(!root->fabric->endpoints);
     uint32_t ports[2]={49100,49101};
     assert(!md_network_parameter_write(a,MD_NET_LOCAL_PORTS,0,ports));
-    assert(!md_network_endpoint_open(a,AF_INET,SOCK_STREAM,0,&first,&f));
-    assert(!md_network_endpoint_open(a,AF_INET,SOCK_STREAM,0,&second,&s));
-    assert(!md_network_endpoint_open(a,AF_INET,SOCK_STREAM,0,&conflict,&c));
+    assert(!md_network_endpoint_open(a,0,AF_INET,SOCK_STREAM,0,&first,&f));
+    assert(!md_network_endpoint_open(a,0,AF_INET,SOCK_STREAM,0,&second,&s));
+    assert(!md_network_endpoint_open(a,0,AF_INET,SOCK_STREAM,0,&conflict,&c));
     local.sin_port=0;
     assert(!md_network_endpoint_bind(first,f,&identity,(void *)&local,sizeof(local)));
     assert(!md_network_endpoint_bind(second,s,&identity,(void *)&local,sizeof(local)));

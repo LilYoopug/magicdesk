@@ -154,11 +154,23 @@ static int evaluate_chain(struct md_network_filter *f,const struct md_filter_cha
                 }
                 if (e->size<=4) memcpy(dst,&value,4);
                 break;
-            case MD_FILTER_META_SET: memcpy(&p->mark,src,4); break;
+            case MD_FILTER_META_SET:
+                if (e->constant) {
+                    uint32_t mask;
+                    memcpy(&value,e->value,4); memcpy(&mask,e->mask,4);
+                    p->mark=(p->mark&~mask)^value;
+                } else memcpy(&p->mark,src,4);
+                break;
             case MD_FILTER_CT:
                 value=e->key==NFT_CT_STATE ? p->state : e->key==NFT_CT_MARK ? p->ctmark : p->status;
                 memcpy(dst,&value,4); break;
             case MD_FILTER_CT_SET: memcpy(&p->ctmark,src,4); break;
+            case MD_FILTER_STATE_MATCH: match=!!(p->state&e->key)!=!!e->operation; break;
+            case MD_FILTER_MARK_MATCH: match=((p->mark&e->aux)==e->key)!=!!e->operation; break;
+            case MD_FILTER_ADDRESS_TYPE:
+                match=(!e->key || (!!(e->key&(1U<<p->source_fib_type))!=!!(e->operation&MD_FILTER_INVERT_SOURCE)))
+                    && (!e->aux || (!!(e->aux&(1U<<p->fib_type))!=!!(e->operation&MD_FILTER_INVERT_DESTINATION)));
+                break;
             case MD_FILTER_FIB:
                 value=e->operation==NFTA_FIB_F_SADDR ? p->source_fib_type : p->fib_type;
                 memcpy(dst,&value,4); break;

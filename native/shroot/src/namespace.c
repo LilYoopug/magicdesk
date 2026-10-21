@@ -101,7 +101,15 @@ static long open_operand(const struct md_fs *fs, struct md_namespace_operand ope
         if (r==-EREMOTE) return -EACCES;
     }
     if (r==-EREMOTE) {
-        if (how->resolve) {
+        struct md_proc_path proc=md_proc_path(out.data);
+        enum md_proc_kind kind=proc.kind==MD_PROC_FOREIGN ? proc.foreign_kind : proc.kind;
+        /* A selected proc namespace plus a terminal object means the logical
+         * walker already checked the complete traversal. Rechecking an
+         * absolute host /proc path would cross a different mount (or escape
+         * the original dirfd). Keep caller-side content/credential handling,
+         * but do not replace the resolved guest scope with that host scope. */
+        int resolved=out.result.proc_namespace && md_proc_regular(kind);
+        if (how->resolve && !resolved) {
             /* A retained native proc/dev dirfd is already the kernel scope.
              * Preserve that pair, including BENEATH/IN_ROOT, instead of
              * turning a relative lookup into a new absolute lookup. */

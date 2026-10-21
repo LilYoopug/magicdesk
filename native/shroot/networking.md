@@ -107,6 +107,14 @@ accepted FD. Ordinary stream IO remains native. Shared payload/vector helpers
 serve both Unix ancillary transport and routed message IO; native networking
 does not allocate these routed owners.
 
+`sendto`/`recvfrom` without a peer-address operand also retain the original
+kernel call, PC and signal mask, including on routed data endpoints. The
+supervisor and both socket adapters share that classification. Netlink and
+device-event carriers remain adapted; this shortcut neither translates an
+address nor handles ancillary data. Keeping a blocking payload receive outside
+the adapter lets a guest debugger interrupt and detach without waiting for
+application data.
+
 IPv4 `IP_PKTINFO` uses logical interface and destination addresses on receive,
 including a missing `msg_name` and truncated ancillary buffers. Send accepts
 local source/interface selection consistent with the supported route; unknown
@@ -269,6 +277,17 @@ including after lazy detach. Ordinary proc spelling uses the same typed provider
 without a logical mount anchor. The common descriptor host supplies dup/fork,
 offsets and positional IO; numeric writes at a nonzero offset consume bytes without
 changing the value. No additional service thread or per-IO FD is created.
+
+`network_proc` supplies `tcp`, `tcp6`, `udp` and `udp6` through that same proc
+descriptor contract. It snapshots only live tracked endpoints belonging to the
+selected logical network namespace. Logical addresses, ports and guest owner IDs
+come from the endpoint model; the matching native socket inode supplies kernel
+state and queue counters. This is not a dump of Android's host sockets. The
+current routed transport is IPv4, so IPv6 tables contain only their header.
+Unowned terminal entries such as TIME_WAIT sockets are not synthesized.
+An open retains its selected namespace across setns; dup shares the offset,
+and reading from offset zero refreshes the snapshot. Unmanaged host networking
+keeps the native proc path and its permission failures.
 
 ## Namespace-Owned Sysfs
 

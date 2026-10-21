@@ -25,6 +25,14 @@ Absent or inadmissible artifacts keep the stock loader. Builds are offline,
 explicit installer work; neither the syscall path nor Android startup builds
 or downloads them.
 
+The opt-in lazy machine-code entry (`SHROOT_MACHINE_ENTRY=1`) admits observed
+AArch64 SVC sites in unmodified programs, including stock libc and Go. It shares
+the cooperative channel and syscall owners, not a second implementation.
+Application filters, protected-state transitions and debugger ownership revoke
+that entry through the common admission boundary. Source-built libc is retained
+as an explicit comparison path during this transition; see
+[integration evidence](../guest-exec-lab/svc-rewriting.md#product-boundary).
+
 One supervisor owns each process tree. Selective seccomp TRACE/USER_NOTIF directs
 operations needing adaptation to either a task-affine adapter or a filesystem
 worker. The supervisor is the sole kernel ptracer. Ordinary unselected data IO,
@@ -125,6 +133,10 @@ use retained sources and confirmed kernel publication; cancellation releases
 unpublished resources without closing an application's installed or reused FD.
 No SQLite transaction or file-table turn may span an application readiness wait.
 Mixed poll/epoll keeps native waiting in the calling guest's signal context.
+Inherited stdio can retain metadata-only O_PATH identity pins; these neither
+keep pipes open for data IO nor supply filesystem authority. Filtered result
+publication replays the original syscall admission and consumes the retained
+result once, rather than introducing a helper syscall forbidden by the guest.
 
 [FUSE](fuse.md) uses that same descriptor and mount model. A daemon request
 suspends only its owning operation; ordinary inode/native operations do not
