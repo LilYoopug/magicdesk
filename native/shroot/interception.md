@@ -108,6 +108,19 @@ without a fixed thread-count ceiling. Stack leases and ordering records are reus
 Origin-bearing opens and RPC exchanges allocate their own retained state; ordinary
 data IO does not allocate runtime bookkeeping.
 
+Cold stop-owning transactions share one admission check: entry revocation,
+private-memory repair, task-affine injection and guarded mapping cannot borrow
+each other's stopped tasks. The sole nesting exception is retirement of a
+mapping's own temporary FD inside that mapping's barrier. A competing `mprotect`
+exit is retained by the active owner, including one from an unrelated address
+space, and replayed with its original status and accounting after release.
+This defers that repair, not all work in the unrelated process. Ordinary events
+remain runnable. Entry revocation's subsequent drain phase permits progress
+again; it is not another stop-the-world interval.
+Kernel events without debugger accounting explicitly carry zero `rusage`.
+Deferred events retain their captured accounting across debugger attachment
+changes; replay neither queries it again nor inherits another event's values.
+
 The same address-space owner retains shared adapter buffers. Namespace
 bootstrap obtains a size-sealed memfd through ADDFD_SEND, maps it and closes the
 setup FD before entering the guest image. Setup occurs once per fresh exec, not
@@ -225,6 +238,10 @@ which precedes provider release on acknowledgement, cancellation and exec.
 Interrupted admissions retry delivery of that same result, never the filesystem
 operation. Nondumpable and application-filtered callers use the same contract;
 O_PATH/SCM_RIGHTS and task-affine results retain their respective transport.
+For a completed open observed at a signal-delivery stop, signal custody transfers
+to the retained queue only after buffer/result admission succeeds. If admission
+fails, the original kernel stop remains the sole delivery owner, including for
+queued realtime signals.
 
 Mapped watch reads use the same engine reservation as RPC. The supervisor offers
 the shared reply, then queues commit/rejection on the filesystem worker after the

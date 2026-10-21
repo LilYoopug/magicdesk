@@ -102,6 +102,15 @@ retained cross-owner wakeups after both original descriptor numbers are reused.
 `watch_store` checks native-only zero-SQL pumping, mixed/independent observers,
 last-reader and oneshot retirement, late journal cursors and hardlink wakeups.
 
+`test_resources.py BUILD --case supervisor-state` exercises the actual supervisor
+coordinator with fault injection at buffer adoption and kernel-accounting
+boundaries, without production test switches. It checks exclusive cold admission,
+the exact mapping-retirement exception, competing repair-event retention and
+replay, unrelated progress, and accounting across debugger changes. Real ptraced
+children verify single standard/realtime signal delivery after exhausted buffers,
+failed result adoption and successful adoption. The private-memory suite includes
+this fixture alongside its concurrent guest workloads.
+
 `test_resources.py BUILD --case fs-results` additionally exercises ready-result
 custody with four concurrent threads and 32 killed children, both natively and
 under Shroot. Each runs normally, nondumpable, with an installed application

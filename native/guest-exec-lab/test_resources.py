@@ -18,7 +18,7 @@ def main():
     parser.add_argument("--server", default="magicdesk")
     parser.add_argument("--keep", action="store_true")
     parser.add_argument("--diagnostics", action="store_true")
-    parser.add_argument("--case", choices=("all", "control-event", "launch-cancel", "event-fairness", "kernel-baseline", "mapping-task", "private-memory", "pidfd-table", "fd-observation", "proc-custody", "exec-custody", "open-job", "ofd-order", "fd-handoff", "fd-parcel", "fd-messages", "ipc-peer", "ipc-origins", "ipc-origin-guest", "ipc-paths", "ipc-ancillary", "mount-policy", "mount-graph", "mount-namespace", "inode-custody", "origin-transfer", "transient-store", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fd-lifecycle", "restricted-descriptors", "fs-dispatch", "fs-buffer", "fs-signals", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture", "input-session", "rpc", "stores", "durability"), default="all",
+    parser.add_argument("--case", choices=("all", "supervisor-state", "control-event", "launch-cancel", "event-fairness", "kernel-baseline", "mapping-task", "private-memory", "pidfd-table", "fd-observation", "proc-custody", "exec-custody", "open-job", "ofd-order", "fd-handoff", "fd-parcel", "fd-messages", "ipc-peer", "ipc-origins", "ipc-origin-guest", "ipc-paths", "ipc-ancillary", "mount-policy", "mount-graph", "mount-namespace", "inode-custody", "origin-transfer", "transient-store", "fd-custody", "fd-custody-dirfd", "fd-custody-nofollow", "fd-lifecycle", "restricted-descriptors", "fs-dispatch", "fs-buffer", "fs-signals", "fs-results", "fs-export", "fs-return", "fs-directory", "fs-capture", "input-session", "rpc", "stores", "durability"), default="all",
                         help="Run resource regressions, FD handoff/parcel, terminal RPC custody, native FD lifecycle, or worker transport")
     parser.add_argument("--compare-installed", action="store_true",
                         help="Compare identical metadata/spawn fixtures with the installed runtime")
@@ -455,10 +455,20 @@ def main():
             names = ("bootstrap", "supervisor", "run", "service")
         if args.case in ("all", "event-fairness"):
             names += ("event_fairness", "task_wait", "task_wait_live", "pending")
+        if args.case == "supervisor-state":
+            names = ()
+        if args.case in ("all", "supervisor-state", "private-memory"):
+            names += ("supervisor_state",)
         for name in names:
             file = "libmagicdesk_guest_" + name + ".so"
             transport.upload(client, args.build / file, root + "/" + file)
         check("prepare fixtures", "chmod 700 " + root + "/*.so")
+        if args.case in ("all", "supervisor-state", "private-memory"):
+            check("supervisor state ownership", root + "/libmagicdesk_guest_supervisor_state.so",
+                  "PASS supervisor completed open:", patterns=(r"PASS supervisor admission:",
+                  r"PASS supervisor repair deferral:", r"PASS supervisor accounting:"))
+            if args.case == "supervisor-state":
+                return
         if args.case in ("all", "stores"):
             check("storage schema", root + "/libmagicdesk_guest_test_schema.so " + root + "/schema-unit",
                   "PASS concurrent preparation fails busy")

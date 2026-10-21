@@ -141,6 +141,15 @@ install(TARGETS bootstrap supervisor run service image RUNTIME DESTINATION lib)
 
 option(MAGICDESK_GUEST_FIXTURES "Build standalone native fixtures" OFF)
 if(MAGICDESK_GUEST_FIXTURES)
+    # Exercise the coordinator's private transitions without exporting test APIs.
+    get_target_property(supervisor_state_sources supervisor SOURCES)
+    list(REMOVE_ITEM supervisor_state_sources ${src}/supervisor.c)
+    guest_executable(supervisor_state ../guest-exec-lab/test_supervisor_state.c ${supervisor_state_sources})
+    target_compile_definitions(supervisor_state PRIVATE MD_NO_START MD_USE_LIBC)
+    target_compile_options(supervisor_state PRIVATE -iquote ${src} -UNDEBUG)
+    target_link_libraries(supervisor_state PRIVATE guest-sqlite guest-sha256 m)
+    target_link_options(supervisor_state PRIVATE -Wl,--wrap=md_fs_buffer_adopt
+        -Wl,--wrap=md_task_wait_ready -Wl,--wrap=md_debugger_active)
     guest_executable(test_svc_direct_signal ../guest-exec-lab/test_svc_direct_signal.c
         ../guest-exec-lab/test_svc_context.S ../guest-exec-lab/svc_text.c)
     target_compile_options(test_svc_direct_signal PRIVATE -iquote ${src} -UNDEBUG $<$<COMPILE_LANGUAGE:C>:-mgeneral-regs-only> -fno-stack-protector)

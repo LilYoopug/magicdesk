@@ -728,6 +728,12 @@ _Noreturn static void fail(const char *what, int line) {
     exit(125);
 }
 #define CHECK(x) do { if (!(x)) fail(#x, __LINE__); } while (0)
+/* Cold transactions share stop ownership. Only retirement of a mapping's own
+ * temporary FD may nest inside its barrier; unrelated guest work stays runnable. */
+static int quiescence_busy(const struct mapping_owner *parent) {
+    return ENTRY_QUIESCING || memory_execution || task_action_execution || task_action_releasing
+        || (mapping_execution && mapping_execution!=parent);
+}
 static void release_operation(struct thread *t) {
     retry_clear(t,RETRY_EXPORT);
     struct metadata_operation *op=&t->metadata;
@@ -2404,15 +2410,18 @@ static int completed_notification_event(struct thread *t,int status,const struct
             t->broker_event.held=1; t->broker_event.status=status;
             t->broker_event.usage=usage ? *usage : (struct rusage){0};
             t->broker_event.has_info=!event && signal!=(SIGTRAP|0x80);
-            if (t->broker_event.has_info) {
-                if (!tracee_request(t,PTRACE_GETSIGINFO,NULL,&t->broker_event.info,"completed-signal")) return 1;
-                t->retained_signal=md_signal_delivery_retain(&t->signal_delivery,t->pid,&t->broker_event.info);
-                CHECK(t->retained_signal>=0);
-            }
+            if (t->broker_event.has_info
+                    && !tracee_request(t,PTRACE_GETSIGINFO,NULL,&t->broker_event.info,"completed-signal")) return 1;
             int error=md_buffers_take(md_memory_buffers(t->memory),&t->buffer);
             if (!error) error=md_fs_buffer_adopt(buffer_service,t->pid,t->resources.fs,result->operation,result->flags,
                 &t->buffer,&result->result,&result->opened,&t->buffer_call);
             if (!error) {
+                /* Transfer signal custody only after result admission. On
+                 * failure the original delivery stop still owns the signal. */
+                if (t->broker_event.has_info) {
+                    t->retained_signal=md_signal_delivery_retain(&t->signal_delivery,t->pid,&t->broker_event.info);
+                    CHECK(t->retained_signal>=0);
+                }
                 t->direct=DIRECT_OPEN; t->phase=DISPATCHING;
                 t->direct_flags=result->flags; t->direct_mode=0;
                 t->buffer_registers=t->original; t->buffer_registers.regs[1]=result->operation;
@@ -3536,7 +3545,7 @@ static void task_action_start(struct thread *t) {
     struct task_action *owner=t->action;
     CHECK(owner && !task_action_call(owner)->stage);
     if (owner->loan) { loan_start(owner); return; }
-    if (task_action_execution || task_action_releasing || memory_execution || mapping_execution || ENTRY_QUIESCING) { retry_wait(t,RETRY_TASK_ACTION); return; }
+    if (quiescence_busy(NULL)) { retry_wait(t,RETRY_TASK_ACTION); return; }
     if (owner->rejected_task) {
         if (md_task_helper_retiring(helpers,owner->rejected_group,owner->rejected_task)) {
             retry_wait(t,RETRY_TASK_ACTION); return;
@@ -3620,8 +3629,7 @@ static int loan_borrow(struct task_action *owner,struct thread *p,int *alive,int
     return 1;
 }
 static void loan_start(struct task_action *owner) {
-    if (cancelling || task_action_execution || task_action_releasing || memory_execution) return;
-    if (mapping_execution && owner->retired_context!=mapping_execution) return;
+    if (cancelling || quiescence_busy(owner->retired_context)) return;
     struct md_fd_order *turn=owner->loan_turn ? owner->loan_turn : &owner->files;
     if (!turn->table) {
         int error=md_fd_order_begin(owner->loan_table,turn,fd_wakeup);
@@ -3704,17 +3712,7 @@ static int task_action_event(pid_t pid,int status,const struct rusage *usage) {
     if (!owner) return 0;
     struct thread *t=find_thread(pid);
     unsigned event=(unsigned)status>>16;
-    if (t!=owner->actor) {
-        /* Memory repair and task injection cannot borrow each other's actor.
-         * Retain its original exit event until this short call completes. */
-        if (t && WIFSTOPPED(status) && !event && WSTOPSIG(status)==(SIGTRAP|0x80)
-                && t->phase==OBSERVING && t->memory_action==MEMORY_KERNEL
-                && t->original.regs[8]==SYS_mprotect) {
-            if (!task_action_barrier) { task_action_barrier=md_task_quiesce_new(quiesce_trace); CHECK(task_action_barrier); }
-            CHECK(!md_task_quiesce_event(task_action_barrier,pid,status,usage)); return 1;
-        }
-        return 0;
-    }
+    if (t!=owner->actor) return 0;
     struct md_task_call *call=task_action_call(owner);
     if (!call->stage) {
         TRACE("PROBE selector-stop pid=%d status=%x\n",pid,status);
@@ -6603,7 +6601,7 @@ static int mapping_direct_start(struct thread *t) {
     if (owner->guarded && md_fd_origins_exclusive(&owner->files)) owner->guarded=0;
     if (owner->guarded) {
         if (!mapping_execution) {
-            if (memory_execution || task_action_execution || task_action_releasing || ENTRY_QUIESCING) {
+            if (quiescence_busy(NULL)) {
                 retry_wait(t,RETRY_MAPPING); return 0;
             }
             if (!mapping_barrier) mapping_barrier=md_task_quiesce_new(quiesce_trace);
@@ -6690,10 +6688,7 @@ static void mapping_progress(void) {
 }
 static int mapping_guard_event(pid_t pid,int status,const struct rusage *usage) {
     if (!mapping_execution || pid==mapping_execution->caller) return 0;
-    struct thread *t=find_thread(pid);
-    int repair=t && WIFSTOPPED(status) && !((unsigned)status>>16) && WSTOPSIG(status)==(SIGTRAP|0x80)
-        && t->phase==OBSERVING && t->memory_action==MEMORY_KERNEL && t->original.regs[8]==SYS_mprotect;
-    if (!repair && !md_task_quiesce_contains(mapping_barrier,pid)) return 0;
+    if (!md_task_quiesce_contains(mapping_barrier,pid)) return 0;
     int error=md_task_quiesce_event(mapping_barrier,pid,status,usage);
     if (error) {
         fprintf(stderr,"Shroot: mapping barrier event pid=%d status=%x caller=%d retiring=%d actor=%d error=%d\n",
@@ -7331,7 +7326,7 @@ static int entry_fence_admission(struct thread *t,const struct user_pt_regs *r,i
 }
 static void entry_fence_progress(void) {
     if (!entry_fence_memory) {
-        if (memory_execution || mapping_execution || task_action_execution || task_action_releasing) return;
+        if (quiescence_busy(NULL)) return;
         struct thread *caller=threads;
         while (caller && (!caller->pid || !caller->entry_fence_waiting)) caller=caller->next;
         if (!caller) return;
@@ -7419,6 +7414,14 @@ static pid_t deferred_event(int *status,struct rusage *usage) {
     pid=task_action_execution ? 0 : md_task_quiesce_take(task_action_barrier,status,usage);
     return pid ? pid : mapping_execution ? 0 : md_task_quiesce_take(mapping_barrier,status,usage);
 }
+static pid_t kernel_event(int *status,struct rusage *usage) {
+    int accounting=md_debugger_active(debugger);
+    pid_t pid=md_task_wait_ready(&task_wait,status,accounting ? usage : NULL);
+    /* Deferred events may outlive a debugger attachment. Absent accounting
+     * must be explicit, not a previous event's or uninitialized stack data. */
+    if (pid>0 && usage && !accounting) *usage=(struct rusage){0};
+    return pid;
+}
 static pid_t wait_event(int *status, struct rusage *usage) {
     enum { PROGRESS_BATCH=8 };
     static unsigned progress_budget;
@@ -7448,7 +7451,7 @@ static pid_t wait_event(int *status, struct rusage *usage) {
          * Drain that local event before trusting the kernel's empty queue. */
         pid_t held=deferred_event(status,usage);
         if (held) return held;
-        pid_t pid = md_task_wait_ready(&task_wait, status, md_debugger_active(debugger) ? usage : NULL);
+        pid_t pid = kernel_event(status,usage);
         if (pid > 0) {
             int checkpoint=md_task_checkpoint_event(&checkpoints,pid,status);
             if (checkpoint==-ESRCH) continue;
@@ -7711,6 +7714,26 @@ static void memory_progress(void) {
         memory_finish(execution);
     }
 }
+static int quiescence_repair_event(pid_t pid,int status,const struct rusage *usage) {
+    if (!quiescence_busy(NULL) || !WIFSTOPPED(status) || (unsigned)status>>16
+            || WSTOPSIG(status)!=(SIGTRAP|0x80)) return 0;
+    struct thread *t=find_thread(pid);
+    if (!t || t->phase!=OBSERVING || t->memory_action!=MEMORY_KERNEL
+            || t->original.regs[8]!=SYS_mprotect) return 0;
+    if ((memory_execution && memory_execution->actor==t)
+            || (task_action_execution && task_action_execution->actor==t)
+            || (mapping_execution && mapping_execution->caller==pid)) return 0;
+    struct md_task_quiesce **barrier=ENTRY_QUIESCING ? &entry_fence_barrier
+        : memory_execution ? &memory_barrier : mapping_execution ? &mapping_barrier
+        : task_action_execution ? &task_action_barrier : NULL;
+    if (!barrier) return 0;
+    if (!*barrier) { *barrier=md_task_quiesce_new(quiesce_trace); CHECK(*barrier); }
+    /* EVENT_WAIT: replay this exact mprotect exit after the active transaction
+     * releases its stops. Only competing repair is deferred, not the process's
+     * whole address space. Never start a second owner behind another barrier. */
+    CHECK(!md_task_quiesce_event(*barrier,pid,status,usage));
+    return 1;
+}
 /* Repair consumes only its participants' events; helper and replacement
  * continuations return to the same outer event loop as ordinary guest work. */
 static int memory_event(pid_t pid,int status,const struct rusage *usage) {
@@ -7764,11 +7787,6 @@ static int memory_event(pid_t pid,int status,const struct rusage *usage) {
                 struct thread *remote=find_thread(target);
                 hold=remote && remote->memory==execution->actor->memory;
             }
-            /* Repairs are serialized, not all guest work. Preserve the second
-             * caller's observed result until the active transaction retires. */
-            if (!event && WSTOPSIG(status)==(SIGTRAP|0x80)
-                    && t->phase==OBSERVING && t->memory_action==MEMORY_KERNEL
-                    && t->original.regs[8]==SYS_mprotect) hold=1;
         }
         if (!hold) { ++execution->other_events; return 0; }
         CHECK(!md_task_quiesce_add(memory_barrier,pid,1,0));
@@ -7785,7 +7803,7 @@ static int memory_repair(struct thread *t,const struct user_pt_regs *returned) {
     mapping.length=(mapping.length+md_page_size-1)&~(md_page_size-1);
     if (!md_memory_file_view(t->memory,mapping.address,mapping.length,&mapping.source,&mapping.offset)) return 0;
     if (md_private_memory_validate(&mapping)) return 0;
-    CHECK(!memory_execution);
+    CHECK(!quiescence_busy(NULL));
     struct memory_execution *execution=calloc(1,sizeof(*execution)+MD_PRIVATE_MEMORY_COPY_BYTES);
     if (!execution) return 0;
     long error=md_buffers_take(md_memory_buffers(t->memory),&execution->buffer);
@@ -8047,6 +8065,7 @@ int main(int argc, char **argv) {
             CHECK(!md_task_quiesce_event(entry_fence_barrier,pid,status,&usage));
             continue;
         }
+        if (quiescence_repair_event(pid,status,&usage)) continue;
         if (memory_event(pid,status,&usage)) continue;
         if (task_action_event(pid,status,&usage)) continue;
         if (mapping_event(pid,status)) continue;
