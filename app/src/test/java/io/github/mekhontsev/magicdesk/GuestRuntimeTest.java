@@ -29,6 +29,8 @@ public class GuestRuntimeTest {
         assertTrue(help.contains("shroot login "));
         assertTrue(help.contains("shroot exec "));
         assertTrue(help.contains("shroot backup "));
+        assertTrue(help.contains("SHROOT_MACHINE_ENTRY=0"));
+        assertFalse(help.contains("shroot libc"));
         assertFalse(help.contains("magicdesk-guest"));
     }
 
@@ -145,16 +147,14 @@ public class GuestRuntimeTest {
     @Test public void preparationDoesNotConsumeInheritedGraphicsConnection() {
         assertTrue(GuestRuntimeCommand.BODY.contains("md_guest=$(CLASSPATH="));
         assertTrue(GuestRuntimeCommand.BODY.contains("exec \"$md_guest/libmagicdesk_guest_run.so\" \"$@\""));
-        assertTrue(GuestRuntimeCommand.BODY.contains("if [ \"${SHROOT_LIBC:-stock}\" = compiled ]; then md_libc_init; set -- --libc-registry \"$md_libc\" \"$@\"; fi"));
-        assertTrue(GuestRuntimeCommand.BODY.contains("--prepare-libc"));
-        assertTrue(GuestRuntimeCommand.BODY.contains("\"libc-$1\" \"$md_libc\""));
-        assertTrue(GuestRuntimeCommand.BODY.contains("Optional libc registry unavailable; using Shroot Base."));
-        assertFalse(GuestRuntimeCommand.BODY.contains("mkdir -p \"$md_libc\" || exit"));
         assertFalse(GuestRuntimeCommand.BODY.contains("exec /system/bin/app_process"));
         assertTrue(GuestRuntimeCommand.BODY.contains("--probe >/dev/null || exit $?"));
         assertTrue(GuestRuntimeArtifacts.FILES.contains("libmagicdesk_guest_supervisor.so"));
         assertTrue(GuestRuntimeCommand.BODY.contains("\"$md_guest/libmagicdesk_guest_supervisor.so\" \"$md_guest/libmagicdesk_guest_bootstrap.so\""));
         assertFalse(GuestRuntimeCommand.BODY.contains("--probe) exec \"$md_guest/libmagicdesk_guest_bootstrap.so\""));
+        assertFalse(GuestRuntimeCommand.BODY.contains("--libc-registry"));
+        assertFalse(GuestRuntimeCommand.BODY.contains("SHROOT_LIBC"));
+        assertFalse(GuestRuntimeCommand.BODY.contains("SHROOT_MACHINE_ENTRY"));
     }
 
     @Test public void imageToolIsStagedWithItsRunnerButOnlyExecutionProbesKernel() {

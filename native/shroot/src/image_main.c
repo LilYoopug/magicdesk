@@ -1,5 +1,4 @@
 #define _GNU_SOURCE
-#include "libc_registry.h"
 #include "image_io.h"
 #include "image_json.h"
 #include "image_layer.h"
@@ -149,9 +148,6 @@ int main(int argc, char **argv) {
     /* Import semantics, not the SQLite layout or runtime build. Keep this key
      * stable across metadata upgrades so installed sources retain identity. */
     else if (argc == 2 && !strcmp(argv[1], "import-version")) { puts("1"); r = 0; }
-    else if (argc==3 && !strcmp(argv[1],"libc-list")) r=md_libc_registry_list(argv[2]);
-    else if (argc==3 && !strcmp(argv[1],"libc-prune")) r=md_libc_registry_prune(argv[2]);
-    else if (argc==4 && !strcmp(argv[1],"libc-publish")) r=md_libc_registry_publish(argv[2],argv[3]);
     else if (argc == 3 && !strcmp(argv[1], "prepare")) {
         struct md_inode_store *store=NULL;
         r=md_inode_store_open(argv[2],0,&store);

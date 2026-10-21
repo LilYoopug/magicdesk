@@ -3,10 +3,10 @@
 [Fixture guide](README.md) | [Cooperative entry](cooperative-entry.md) |
 [Runtime contract](../shroot/cooperative-entry.md)
 
-The normal native runtime now includes an opt-in single-SVC entry owner; see
+The normal native runtime uses a default single-SVC entry owner; see
 [Product Boundary](#product-boundary) for its admission, commands and coverage.
-Source-built libc remains selectable for comparisons. Neither mechanism is
-selected by default during this transition.
+The source-built libc mechanism has been removed. Its measurements below are
+historical controls, not a supported deployment mode.
 
 The earlier laboratory approaches below remain controls, not prerequisites of
 the single-SVC runtime. Forwarding coverage, real engine completions, correctness
@@ -167,7 +167,7 @@ python native/guest-exec-lab/test_svc_lifecycle.py BUILD
 python native/guest-exec-lab/test_svc_patch.py BUILD build/svc-go --checks-only --entry-only
 python native/guest-exec-lab/test_svc_patch.py BUILD build/svc-go --edge-only --signal-proof --rounds 4
 python native/guest-exec-lab/test_svc_patch.py BUILD build/svc-cgo --edge-only --signal-proof --rounds 4
-python native/guest-exec-lab/test_svc_libc.py BUILD STOCK_MUSL_PROBE SOURCE_MUSL_PROBE \
+python native/guest-exec-lab/test_svc_libc.py BUILD STOCK_MUSL_PROBE \
   --syscall 56 --threaded --workload opens --rounds 8 --signal-storm
 ```
 
@@ -186,8 +186,8 @@ enabled build do not substitute for this check.
 `build_svc_go.py` accepts the SHA-256-pinned official Go 1.27.2 Linux/arm64
 archive; `--cgo-environment` selects a prepared GCC environment for the cgo
 fixture. No Go runtime assembly or preemption option is changed.
-`build_svc_glibc.py` builds small workload fixtures against existing stock and
-source-hook sysroots; it does not rebuild glibc.
+`build_svc_glibc.py` builds small workload fixtures against a stock sysroot;
+it does not rebuild glibc. Source-hook measurements below are historical.
 
 `trace_svc_patch` modes observe/forward/count measure discovery and forwarding,
 never direct acceleration. Edge mode publishes one selected hot site and
@@ -539,8 +539,8 @@ or evidence of a change caused by the SVC writer.
 
 ## Product Boundary
 
-The ordinary bootstrap/supervisor now contains an opt-in owner, selected with
-`--env SHROOT_MACHINE_ENTRY=1`. It does not launch a discovery debugger or need
+The ordinary bootstrap/supervisor enables lazy entry by default for inode-store
+launches. `--env SHROOT_MACHINE_ENTRY=0` selects Base. It does not launch a discovery debugger or need
 the proof build option. Bootstrap allocates private frames and near-code pools;
 `interception_memory` owns the registry across CLONE_VM, fork and exec.
 First observed execution can publish a single SVC replacement without a peer
@@ -550,8 +550,9 @@ one instruction share a chain of immutable guarded entries.
 `svc_machine.c` owns logical signal contexts, deferred siginfo, checkpoint return
 and cold replay at the original instruction. It uses the existing interception
 filter, not a filter per pool or exec. Broker notifications from resident gates
-return to this owner rather than being sampled as guest code. Source entry and
-machine entry share the same per-thread channel and channel reentry guard.
+return to this owner rather than being sampled as guest code. Machine entry
+uses the common per-thread channel and channel reentry guard; explicit API
+fixtures exercise the same transport independently of patch discovery.
 Memory changes retire overlapping entry points; resident continuations remain
 until address-space teardown. Debugger ownership disables machine admission.
 
@@ -560,9 +561,10 @@ contract. `test_svc_patch.py --integrated` and `test_svc_libc.py --integrated`
 run the stock assembly/Go/libc fixtures directly, without the laboratory tracer.
 `benchmark_cooperative.py --modes native proot shroot shroot-entry shroot-machine`
 compares the same workload; `shroot-entry` is an explicit API caller, not a
-measurement of rebuilt libc. Use the libc fixture for that separate control.
+measurement of rebuilt libc. Historical rebuilt-libc controls are retained below,
+not as a supported launch mode.
 
-This remains opt-in. The normal writer uses ptrace against private RX mappings;
+The normal writer uses ptrace against private RX mappings;
 the mirror-loader experiment is not its production mapping owner. Bootstrap
 registers the initial program and interpreter mappings with `interception_memory`
 while it still owns their exact source descriptors. Device/inode and offsets,
@@ -580,9 +582,7 @@ and their syscall-exit continuations have drained. This barrier is for these
 kernel transitions, not patch publication or ordinary accelerated calls. The
 dumpability transition restores source instructions before the kernel removes
 remote-memory access; it does not falsify the application's protected state.
-Source-built entry does not depend on code-patch access and keeps its existing
-protected path. Cooperative
-channel revocation uses the same owner as source entry: one caller for a local
+Cooperative channel revocation remains in the common owner: one caller for a local
 filter, its thread group for TSYNC. A blocked callback which does not drain in
 five seconds rejects the transition with EBUSY; it is not applied and
 entry remains revoked. Failure to establish the initial task barrier retains
@@ -604,7 +604,8 @@ installation. Signal-boundary and full cooperative tests remain separate checks.
 The protected-state race repeats the same live callers across 24 dumpability
 transitions and verifies the state and syscall results in the parent and child.
 Arbitrary externally mutable backing is not certified by this coverage.
-Source-built libc remains selectable for comparison and is not removed.
+Source-built libc and its loader registry are removed; current fixtures compare
+stock programs under native execution, Base and default lazy entry.
 
 An interrupted kernel notification can restart at a newly published SVC gate.
 Only a registered gate's exact post-SVC PC is normalized to the original call;
@@ -860,5 +861,5 @@ simultaneous debugger ownership,
 64 KiB pages and SVE/SME/MTE/PAC/BTI are not certified by these tests. Guard layout
 is compatible with 4/16 KiB pages, but this device covers only 4 KiB.
 No claim of transparent arbitrary instruction rewriting or general unwind
-metadata is made. Existing libc compilation stays available until deployment
-admission and representative application coverage meet the same contract.
+metadata is made. Unsupported sites retain Base; removing source-built libc
+does not relax these admission boundaries.

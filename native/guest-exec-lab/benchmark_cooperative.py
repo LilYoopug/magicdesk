@@ -156,13 +156,13 @@ def main():
                 suite.command(['timeout', '120', target, suite.base + '/contract-' + name])
         commands = {
             'native': [executable, 'syscalls', native],
-            'shroot': [suite.runner, '--store', store, '--user', '0:0',
+            'shroot': [suite.runner, '--env', 'SHROOT_MACHINE_ENTRY=0', '--store', store, '--user', '0:0',
                        '--deadline-seconds', '120',
                        '--', '/fixture/benchmark', 'syscalls', '/bench'],
-            'shroot-entry': [suite.runner, '--store', store, '--user', '0:0',
+            'shroot-entry': [suite.runner, '--env', 'SHROOT_MACHINE_ENTRY=0', '--store', store, '--user', '0:0',
                             '--deadline-seconds', '120',
                             '--', '/fixture/benchmark', 'syscalls-entry', '/bench'],
-            'shroot-machine': [suite.runner, '--env', 'SHROOT_MACHINE_ENTRY=1',
+            'shroot-machine': [suite.runner,
                                '--store', store, '--user', '0:0', '--deadline-seconds', '120',
                                '--', '/fixture/benchmark', 'syscalls', '/bench'],
             'cooperative': [executable, 'cooperative', store],

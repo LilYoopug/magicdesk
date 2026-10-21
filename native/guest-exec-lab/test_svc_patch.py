@@ -134,13 +134,21 @@ def main():
         guest = [suite.runner, '--store', suite.base + '/store', '--user', '0:0']
         if args.integrated:
             suite.command([suite.base + '/planner'])
+            rejected = suite.command([*guest, '--env', 'SHROOT_MACHINE_ENTRY=invalid',
+                                      '--', '/bin/raw'], quiet=True, expected=126)
+            assert 'SHROOT_MACHINE_ENTRY must be 0 or 1' in rejected
+            base_output = suite.command([*guest, '--env', 'SHROOT_MACHINE_ENTRY=0',
+                                         '--statistics', '--', '/bin/raw', '/tmp'], quiet=True)
+            assert 'PASS raw assembly:' in base_output
+            assert not records(base_output, 'SVC_RUNTIME_STATS ')
+            assert re.search(r'cooperativeCompleted=0\b', base_output), base_output
             suite.report['runtimeRuns'] = []
             native_filter = suite.command([root + '/bin/mapping', 'filter-race'], quiet=True, timeout=180)
             assert 'PASS SVC filter race:' in native_filter
-            for command in ([root + '/bin/mapping'], [*guest, '--', '/bin/mapping']):
+            for command in ([root + '/bin/mapping'], [*guest, '--env', 'SHROOT_MACHINE_ENTRY=0', '--', '/bin/mapping']):
                 output = suite.command(command, quiet=True, timeout=60)
                 assert 'PASS SVC mapping: ELF protection' in output
-            filter_output = suite.command([*guest, '--env', 'SHROOT_MACHINE_ENTRY=1', '--statistics',
+            filter_output = suite.command([*guest, '--statistics',
                                            '--deadline-seconds', '150', '--', '/bin/mapping', 'filter-race'],
                                           quiet=True, timeout=180)
             assert 'PASS SVC filter race:' in filter_output
@@ -150,8 +158,8 @@ def main():
             suite.report['filterRace'] = records(filter_output, 'SVC_RUNTIME_STATS ')
             assert any(item['completed'] > 128 and item['revoked'] for item in suite.report['filterRace'])
             print('Integrated filter race PASS', flush=True)
-            for command in ([root + '/bin/mapping'], [*guest, '--'],
-                            [*guest, '--env', 'SHROOT_MACHINE_ENTRY=1', '--statistics', '--']):
+            for command in ([root + '/bin/mapping'], [*guest, '--env', 'SHROOT_MACHINE_ENTRY=0', '--'],
+                            [*guest, '--statistics', '--']):
                 if command[-1] == '--':
                     command += ['/bin/mapping']
                 output = suite.command([*command, 'protected-race'], quiet=True, timeout=180)
@@ -164,8 +172,8 @@ def main():
                     evidence = records(output, 'SVC_RUNTIME_STATS ')
                     assert any(item['completed'] > 128 and item['revoked'] for item in evidence)
             print('Integrated protected race PASS', flush=True)
-            for command in ([root + '/bin/process-image'], [*guest, '--', '/bin/process-image'],
-                            [*guest, '--env', 'SHROOT_MACHINE_ENTRY=1', '--statistics', '--', '/bin/process-image']):
+            for command in ([root + '/bin/process-image'], [*guest, '--env', 'SHROOT_MACHINE_ENTRY=0', '--', '/bin/process-image'],
+                            [*guest, '--statistics', '--', '/bin/process-image']):
                 for mode in (['protected'] if len(command)==1 else ['protected', 'protected-other-user']):
                     output = suite.command([*command, mode], quiet=True, timeout=60)
                     assert 'PASS protected process image:' in output
@@ -173,7 +181,7 @@ def main():
             runs = [('raw', False), ('mapping', False)]
             runs += [('go-stress', sandbox) for _ in range(args.rounds) for sandbox in (False, True)]
             for program, sandbox in runs:
-                output = suite.command([*guest, '--env', 'SHROOT_MACHINE_ENTRY=1', '--statistics',
+                output = suite.command([*guest, '--statistics',
                                         '--deadline-seconds', '150', '--', '/bin/' + program, '/tmp',
                                         *(['sandbox'] if sandbox else [])], quiet=True, timeout=180)
                 marker = {'raw': 'PASS raw assembly:', 'mapping': 'PASS SVC mapping:',
@@ -194,6 +202,8 @@ def main():
             suite.report['passed'] = True
             suite.command(['rm', '-rf', suite.base])
             return
+        # The experimental tracer owns patching; do not enable a second owner.
+        guest += ['--env', 'SHROOT_MACHINE_ENTRY=0']
         if args.signal_proof:
             guest += ['--env', 'MD_SVC_SIGNAL_PROOF=1']
         if args.edge_only:

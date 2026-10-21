@@ -182,15 +182,13 @@ For unreleased installer changes, use `develop` with the development APK.
 For the script shipped with a specific release, replace `main` with its tag,
 for example `v2.0.2`.
 
-Choose a distribution, environment name, GUI profile, graphics driver, libc
-mode, compiler job count, language and optional user. Installation and
+Choose a distribution, environment name, GUI profile, graphics driver,
+compiler job count, language and optional user. Installation and
 package-manager output stay in the console.
-The experimental **Shroot** libc mode prepares a private accelerated library
-inside Linux; **Base** keeps the distribution's unmodified libc. The current
-installer selects Shroot by default. A first source build can take time; the
-same job count applies to libc, Mesa/Turnip and KWin. It does not create a second
-copy of your installed Linux or overwrite its original libc. See
-[libc preparation](shroot.md#optional-libc-acceleration), including enabling it later.
+Shroot accelerates eligible syscall sites in stock programs by default; no libc
+compilation or library replacement is needed. **Shroot Base** remains the
+fallback and explicit diagnostic mode. The compiler job count applies to
+Mesa/Turnip, KWin and Weston. See [syscall acceleration](shroot.md#syscall-acceleration).
 **Current network** copies the selected Android executor's DNS addresses once.
 It does not lock the guest to that network or follow later DNS changes; see
 [network choices](shroot.md#linux-installer).

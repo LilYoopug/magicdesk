@@ -38,7 +38,7 @@ def main():
             suite.transport.upload(suite.client, service, suite.base + '/service')
             suite.command(['chmod', '700', suite.base + '/service'])
             suite.command([suite.base + '/service', '--import', root, suite.base + '/store', '--preserve-ownership'])
-            commands.append(('guest', [suite.runner, '--statistics', '--store', suite.base + '/store', '--user', '0:0',
+            commands.append(('guest', [suite.runner, '--env', 'SHROOT_MACHINE_ENTRY=0', '--statistics', '--store', suite.base + '/store', '--user', '0:0',
                                        *(['--env', 'MD_SVC_SIGNAL_PROOF=1'] if args.signal_proof else []),
                                        '--', '/bin/live', '/tmp']))
         for round_number in range(args.rounds):

@@ -14,7 +14,7 @@ describes how those contracts are tested.
 - [Requirements](#requirements) and [isolation boundaries](#boundaries)
 - [Installer](#linux-installer), [SteamOS](#steamos-recovery-image) and [GPU setup](#graphics-drivers)
 - [Environments and commands](#named-environments)
-- [Optional libc acceleration](#optional-libc-acceleration) and [Alpine containers in SteamOS](#alpine-containers-inside-steamos)
+- [Syscall acceleration](#syscall-acceleration) and [Alpine containers in SteamOS](#alpine-containers-inside-steamos)
 - [Systemd, OpenRC, Docker and Podman](#services-and-containers)
 - [Guest credentials](#guest-credentials), [Landlock](#filesystem-restrictions) and [browser sandboxes](#application-filters-and-browsers)
 - [Graphics integration](#graphical-connections) and [coverage](#coverage-and-limits)
@@ -83,186 +83,63 @@ Android permissions and SELinux remain the host ceiling.
 `shroot` manages Linux environments and launches programs. Standalone downloads
 use `magicdesk download`; no Linux environment is required.
 
-### Optional Libc Acceleration
+### Syscall Acceleration
 
-Shroot can optionally use a locally built musl/glibc with direct syscall entry.
-**Shroot Base** uses the distribution's unmodified libc and remains the fallback.
-During the machine-code entry transition, source-built libc remains available
-for explicit comparisons but is neither built nor selected by default.
-Preparation reuses a compatible cached build or compiles on the device.
-It does not replace Android's libc or overwrite package-owned files in Linux.
+Shroot uses lazy AArch64 syscall entry by default in named environments and
+inode-store launches. It recognizes executed SVC sites in unmodified programs
+and routes eligible calls to the common syscall engine. This includes stock
+glibc, musl, static executables and Go binaries; no libc build, preload, private
+loader or additional OCI layer is required. Package-owned files are unchanged.
 
-The native runtime also has an experimental lazy single-SVC entry, which uses
-unmodified programs and the same syscall engine. It is opt-in, not the default
-of this installer. Native runner tests select `--env SHROOT_MACHINE_ENTRY=1`;
-this is separate from selecting a cached libc with `SHROOT_LIBC=compiled`.
-Its [integration status and measurements](../native/guest-exec-lab/svc-rewriting.md#product-boundary)
-distinguish accelerated calls from Base fallback, including seccomp revocation
-and protected (`dumpable=0`) processes.
-
-#### Enable After Installation
-
-Linux does not need to be reinstalled if you chose Base during setup. Use a
-MagicDesk **Shell** console, not a terminal inside Linux, with the same shell/root
-executor that owns the environment. Use an installer matching your MagicDesk
-version; the downloaded script contains all MagicDesk source hooks and patches.
-
-1. Run `shroot list` to find the installed environment's name. The example below
-   uses `steamos`; substitute your chosen name.
-2. Avoid other package installations or updates in that environment while libc
-   is being prepared. Its package manager may update build dependencies.
-3. Prepare libc only, without reinstalling Linux or reapplying GUI/GPU settings:
+**Shroot Base** is the ordinary seccomp/ptrace interception path. Unsupported
+sites and unavailable entry capabilities retain Base automatically. To select
+Base explicitly for diagnosis, pass the guest environment option:
 
 ```sh
-sh ~/install_linux.sh --prepare-libc steamos --jobs 2
+shroot login steamos --env SHROOT_MACHINE_ENTRY=0
+shroot exec steamos --env SHROOT_MACHINE_ENTRY=0 -- /usr/bin/true
 ```
 
-Wait for `Shroot libc prepared: ...`. Select the compiled path explicitly with
-`SHROOT_LIBC=compiled shroot login steamos`; compatible programs in that launch
-can select the build. Ordinary launches use distribution libc during the
-machine-code entry transition. Already running programs are not switched. `shroot libc list`
-lists cached builds, not proof that a particular application is using one.
+Omit that option for the default, or use `--env SHROOT_MACHINE_ENTRY=1` to request
+lazy entry explicitly. This is a process environment setting, not a persistent
+distribution setting; programs that replace their environment must retain it
+when a Base-only comparison is intended. Already running processes are unchanged.
 
-The first preparation saves the installer as the local recipe. To prepare again,
-including after a package update changes the distribution's libc:
+Application seccomp filters revoke accelerated entry and retain kernel admission.
+Protected processes and debugger ownership also use the common fallback rules.
+A successful sandboxed launch therefore does not prove an unfiltered speedup.
+See [entry contracts](../native/shroot/cooperative-entry.md#sandboxes-and-debuggers)
+and [integration evidence](../native/guest-exec-lab/svc-rewriting.md#product-boundary).
+Native `--statistics` reports `SVC_RUNTIME_STATS` and completed calls; ordinary
+launches do not enable timing instrumentation.
 
-```sh
-shroot libc prepare steamos --jobs 2
-```
-
-For an OCI image, use its reference instead of an installed environment name;
-see the [Alpine container example](#alpine-containers-inside-steamos).
-
-Preparation installs build dependencies directly in the selected Linux and
-compiles there, with progress in the console. Python/compiler tools belong to
-that Linux, not Android or Termux. There is no full-environment backup or copy.
-A compatible cached build is reused before package installation. A cache miss
-needs temporary space for sources, build outputs and staged libraries. Build
-packages remain installed; package upgrades are not rolled back on failure.
-Successful temporary work is removed; failures retain its location for diagnosis.
-A retry starts a new build unless a compatible artifact was already published;
-retained partial libc work is not an incremental-build checkpoint. Shroot's
-private libc never overwrites the distribution's package-owned libc. Preparing
-again with a freshly downloaded installer updates the saved recipe; ordinary
-launches never fetch or compile anything.
-
-When `--libc shroot` is selected, Mesa/Turnip, KWin and the Weston maintenance
-build install their dependencies first, then prepare or reuse libc for the
-resulting environment, and start compilation in a fresh accelerated launch. Compiler stages do not
-install packages that could invalidate that selection. This accelerates the
-build tools; it does not link the resulting graphics libraries to a private libc.
-
-The opt-in applies to `shroot run/exec/login` and low-level launches. Nested Docker/Podman
-processes can select compatible registry entries too, without rebuilding OCI
-layers or wrapping `docker run`. Matching uses exact original interpreter/libc
-hashes and the entry ABI, not merely a distribution name or version. A package
-update that changes those files uses Base until a corresponding build is ready.
-Running processes retain their current mappings.
-
-Container support does not imply the same speedup as an unfiltered program.
-An installed application seccomp filter disables shared-memory execution;
-the integrated libc then retains the kernel-admitted syscall route. Preparing
-libc for an image therefore does not by itself establish a speedup under a
-container's normal sandbox. Compare actual container workloads with the same
-image, mounts and seccomp profile; see [sandbox behavior](../native/shroot/cooperative-entry.md#sandboxes-and-debuggers).
-
-The registry is shared within the selected executor's environment library,
-not between shell and root identities. Selected files are mounted readonly at
-`/opt/shroot/libc/KEY`; installed source images remain unchanged. New readonly
-or non-root container roots may need prepared empty attachment directories;
-restricted roots which cannot admit the attachment use Base. Static executables
-and calls bypassing the integrated libc also retain Base interception.
-
-`shroot libc prune` removes builds not held by active launches/mounts, including
-builds for stopped environments; their next launch may use Base. To explicitly
-disable selection in a working environment without deleting shared builds or
-rerunning the installer, create its Base-selection marker:
-
-```sh
-shroot exec steamos --user root -- /bin/sh -ec 'mkdir -p /etc/shroot; : > /etc/shroot/libc-base'
-```
-
-Here `root` is the Linux guest account, not Android root. Restart the affected
-Linux programs to use Base. Successful `--prepare-libc steamos` preparation
-clears this marker and enables selection again. This command needs a working
-guest shell; it is not recovery for a loader that cannot start.
-
-The installer defaults to `--libc keep`, including with `--yes` and `--resume`.
-Explicit `--libc shroot` still prepares the compiled path and selects it for
-subsequent build stages; `--prepare-libc` and `shroot libc prepare` remain
-available for comparisons. No build or cached selection is implicit in a normal
-launch. The compiler job count applies to libc, Mesa/Turnip
-and KWin. Exact matching prevents accidental cross-version reuse, but is not
-proof that an upstream rebuilt libc preserves
-every distribution-specific private ABI. See the [integration contract and
-coverage](../native/shroot/libc/README.md) before enabling it for important work.
+The former source-built libc registry, loader substitution, `shroot libc`
+commands and installer libc options have been removed. Existing Linux stores
+do not require recreation or a package reinstall. Previously cached private
+builds are not selected; this change does not delete their files or user data.
+Mesa/Turnip, KWin and Weston builds remain recipe-owned and use the same default
+entry as other programs. Their `--jobs` setting is independent of syscall entry.
 
 #### Alpine Containers Inside SteamOS
 
-This example assumes [Docker Engine](#docker-engine) is already configured and
-running inside a Shroot SteamOS environment. Preparation and the SteamOS launch
-must use the same MagicDesk executor and environment library. SteamOS's glibc
-build cannot substitute for Alpine's musl; prepare the container image separately.
-
-**In MagicDesk's Shell console, outside SteamOS:**
-
-```sh
-sh ~/install_linux.sh --prepare-libc alpine:3.23 --jobs 2
-```
-
-The installer downloads the ARM64 image into a temporary Shroot environment,
-identifies its original musl and prepares a matching build in the shared registry.
-Compiler packages are installed in that temporary environment, not SteamOS or
-the original Docker image. Its build targets the original image's libc even if
-the temporary environment's package manager upgrades its build dependencies.
-Wait for `Shroot libc prepared: ...`. Once the recipe is registered, the equivalent
-command is `shroot libc prepare alpine:3.23 --jobs 2`.
-Start SteamOS and its Docker daemon through `SHROOT_LIBC=compiled shroot ...`
-to make that registry available to nested launches.
-
-**In a SteamOS terminal connected to that Docker daemon:**
+With [Docker Engine](#docker-engine) running inside the Shroot SteamOS environment:
 
 ```sh
 docker pull --platform linux/arm64 alpine:3.23
 docker run --rm -it --platform linux/arm64 alpine:3.23 sh
 ```
 
-The new container's compatible dynamic programs select musl from the registry.
-No Dockerfile change, extra OCI layer, manual library copy or `LD_PRELOAD` is
-needed. This example uses Alpine's default guest-root user and a writable root;
-readonly/non-root roots may need prepared attachment directories as described
-above. Existing processes keep their mapped libc until restarted.
+Alpine uses its own stock musl. No preparation in SteamOS or MagicDesk's Shell,
+library copy, Dockerfile change or extra layer is needed. The same mechanism
+applies to nested Podman processes and survives package updates without rebuilding
+libc. Keep the engine's normal seccomp policy: when it installs a filter, the
+container uses Base admission. Do not disable that policy merely to claim a
+higher benchmark result.
 
-**Inside the Alpine container**, inspect the library mapped by a new process:
-
-```sh
-grep -E '/(libc/artifacts|opt/shroot/libc)/' /proc/self/maps
-```
-
-A mapping of `KEY/lib/libc.so` under the registry or attachment path identifies
-the prepared musl in that diagnostic process. `shroot libc list` in MagicDesk's
-Shell only shows available builds; it does not establish selection. No matching
-mapping, or a denied maps read, leaves selection unconfirmed. Check the exact
-image, executor/library, attachment permissions and the absence of the container's
-`/etc/shroot/libc-base` marker before assuming acceleration.
-
-**For reproducible runs**, pin the image instead of relying on a moving tag.
-After pulling it, run in SteamOS:
-
-```sh
-docker image inspect --format '{{index .RepoDigests 0}}' alpine:3.23
-```
-
-Use the printed `repository@sha256:...` reference instead of `alpine:3.23` in
-both `--prepare-libc` and `docker run`. Retain `--platform linux/arm64` for Docker.
-If an image update or `apk upgrade` replaces musl, prepare the new image's libc;
-an incompatible cached build is not reused. A modified running container is not
-the unchanged image identified by its original tag or digest.
-
-Keep Docker's normal seccomp profile. A mapped prepared musl proves selection,
-not the unfiltered direct-entry speedup: installed application filters retain
-kernel syscall admission. Compare Base and prepared-libc workloads under the
-same sandbox and storage configuration.
+For reproducible comparisons, pin the image digest and retain identical mounts,
+sandbox policy and storage. Report actual entry completions separately from
+elapsed time; seeing the stock libc in `/proc/self/maps` is expected and is not
+an acceleration measurement.
 
 ### Linux installer
 
@@ -442,15 +319,14 @@ In a MagicDesk Shell console, using the same shell/root executor as before:
 
 ```sh
 shroot list
-sh ~/install_linux.sh --resume --name steamos --gui plasma --gpu turnip --libc shroot --jobs 4 --fonts keep
+sh ~/install_linux.sh --resume --name steamos --gui plasma --gpu turnip --jobs 4 --fonts keep
 ```
 
 This example continues SteamOS with Plasma and explicitly selected Turnip;
 substitute your environment name and repeat the options you intended to install.
 `--resume` detects the installed distribution and skips rootfs download/import.
 It reruns package setup and the selected preparation stages, not the interrupted
-process at its last instruction. Completed compatible libc builds can be reused;
-unfinished libc builds start in a new work directory. Mesa and KWin retain their
+process at its last instruction. Mesa and KWin retain their
 own build directories. None of these steps requires a full copy of the environment.
 
 Do not pass `--dns` or `--image` with `--resume`, including `--dns preserve`:
@@ -649,7 +525,7 @@ The Weston recipe upgrades package versions 13.0.0 through 13.0.3 to the officia
 13.0.0 popup-focus crash reproduced with Firefox. The same version check applies
 to every distribution, including software rendering; newer packaged versions
 remain in use. `--resume --gui keep` prepares an existing recipe-installed Weston
-desktop without replacing its package files. `--jobs` and libc build selection
+desktop without replacing its package files. `--jobs`
 apply just as they do to Mesa and KWin. No compositor binary is added to the APK.
 
 Plasma launches its classic session inside the selected graphical connection,

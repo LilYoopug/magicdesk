@@ -142,7 +142,7 @@ fork/exec, protected pointers, namespace changes, signal-handler memory
 abandonment, argument/IP filter policy and TSYNC revocation. The isolated musl
 integration additionally checks real libc threads, cancellation and exec,
 cwd/dirfd replacement, FIFO signals/restarts and exact FD retirement.
-The version-6 libc boundary uses a bounded userspace offer-table lookup, a fixed
+The version-6 internal entry boundary uses a bounded userspace offer-table lookup, a fixed
 opaque handle and caller-compiled actions with ordinary unwind metadata.
 Runtime progress/feedback reuse the existing channel;
 there is no new allocation syscall, loader dependency or kernel capability.
@@ -847,7 +847,7 @@ preexisting and concurrent SIGURG/TRAP, and RLIMIT_SIGPENDING exhaustion.
 Exhaustion can discard standard-signal metadata in the native kernel too.
 This path does not allocate hardware breakpoint slots or add a post-5.15 API.
 
-The normal, opt-in `SHROOT_MACHINE_ENTRY=1` owner is separate from the earlier
+The default lazy-entry owner (`SHROOT_MACHINE_ENTRY=0` selects Base) is separate from the earlier
 breakpoint proof. `svc_runtime.c` prepares private frames and nearby RX pools;
 `svc_registry.c` publishes a single SVC replacement through baseline
 PTRACE_POKETEXT after actual syscall execution. It requires HWCAP_ATOMICS,
@@ -890,4 +890,4 @@ transition; acceleration stays revoked. The protected-state race also verifies
 fork inheritance. The initial quiescence failure retains
 fail-closed cancellation. These operations are all within the 5.15 baseline.
 Arbitrary externally mutable backing and untested architectures remain outside
-this coverage; the owner is still opt-in, independently of source-built libc.
+this coverage. Entry admission fails back to Base; no libc build is required.

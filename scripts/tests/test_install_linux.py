@@ -71,13 +71,8 @@ with open(os.environ["TEST_LOG"], "a") as log:
     log.write(json.dumps(args) + "\n")
 stage = args[0]
 if stage == "--probe":
-    print(os.environ.get("TEST_RUNTIME_FEATURES", "libc-registry=1"))
-if args[:2] == ["libc", "path"]:
-    print(str(Path(os.environ["HOME"]) / "libc/artifacts"))
-    sys.exit(0)
+    print(os.environ.get("TEST_RUNTIME_FEATURES", "machine-entry=1"))
 if stage == "path":
-    if os.environ.get("TEST_IMAGE_ONLY") and not args[1].startswith("libc-build-"):
-        sys.exit(1)
     print(str(Path(os.environ["HOME"]) / "source-store"))
     sys.exit(0)
 if args[:2] == ["image", "exec"]:
@@ -101,41 +96,17 @@ if stage in ("exec", "login"):
         print(os.environ.get("TEST_DISTRO", "debian"))
     if stage == "setup":
         payload = sys.stdin.read()
-        if args[-3] == "identify":
-            changed = Path(os.environ["TEST_PAYLOAD"] + ".libc-changed").exists()
-            manifest = "fixture updated manifest\n" if changed else "fixture target manifest\n"
-            print(manifest, end="")
-            if os.environ.get("TEST_LIBC_CACHED"):
-                import hashlib
-                key = hashlib.sha256(manifest.encode()).hexdigest()
-                artifact = Path(os.environ["HOME"]) / "libc/artifacts" / key
-                artifact.mkdir(parents=True, exist_ok=True)
-                (artifact / "manifest").write_text(manifest)
-            sys.exit(0)
         if args[-3] in ("turnip", "software", "auto"):
             stage = "graphics"
         if "version=6.3.6" in payload:
             stage = "kwin"
         if "version=13.0.4" in payload:
             stage = "weston"
-        if args[-3] in ("shroot", "base"):
-            stage = "libc"
-        suffix = {"graphics": ".gpu", "kwin": ".kwin", "weston": ".weston", "libc": ".libc"}.get(stage, "")
+        suffix = {"graphics": ".gpu", "kwin": ".kwin", "weston": ".weston"}.get(stage, "")
         Path(os.environ["TEST_PAYLOAD"] + suffix).write_text(payload)
         if "MAGICDESK_BUILD_PHASE=dependencies" in args:
             if os.environ.get("TEST_FAIL_DEPENDENCIES") == stage:
                 sys.exit(23)
-            if stage == "kwin" and os.environ.get("TEST_LIBC_CHANGE_ON_KWIN_DEPS"):
-                Path(os.environ["TEST_PAYLOAD"] + ".libc-changed").touch()
-        if stage == "libc" and "--bind" in args and os.environ.get("TEST_FAIL") != "libc":
-            import hashlib
-            work = Path(args[args.index("--bind") + 1])
-            manifest = (work / "manifest").read_text()
-            key = hashlib.sha256(manifest.encode()).hexdigest()
-            (work / "result").write_text(key + "\n")
-            artifact = Path(os.environ["HOME"]) / "libc/artifacts" / key
-            artifact.mkdir(parents=True, exist_ok=True)
-            (artifact / "manifest").write_text(manifest)
         if stage == "setup" and os.environ.get("TEST_SETUP_FAILURES"):
             attempts = Path(os.environ["TEST_PAYLOAD"] + ".attempts")
             count = int(attempts.read_text()) + 1 if attempts.exists() else 1
@@ -199,7 +170,7 @@ if os.environ.get("TEST_FAIL") == stage and "MAGICDESK_BUILD_PHASE=dependencies"
 
     @unittest.skipUnless(hasattr(os, 'openpty'), 'PTY required')
     def test_current_network_is_the_default_advanced_choice(self):
-        output = self.questions(b'alpine\nwork\nnone\nkeep\nkeep\nkeep\nkeep\nkeep\ny\n\nboth\n\n\nkeep\ny\n')
+        output = self.questions(b'alpine\nwork\nnone\nkeep\nkeep\nkeep\nkeep\ny\n\nboth\n\n\nkeep\ny\n')
         self.assertIn('auto      Current network (recommended)', output)
         self.assertIn('preserve  Keep the Linux image/current Linux DNS settings', output)
         self.assertIn('Network [auto]', output)
@@ -218,324 +189,28 @@ if os.environ.get("TEST_FAIL") == stage and "MAGICDESK_BUILD_PHASE=dependencies"
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual([], self.dns_checks())
 
-    def test_libc_keep_does_not_run_the_build_recipe(self):
-        result = self.run_script('--yes', '--resume', '--name', 'work', '--libc', 'keep')
-        self.assertEqual(0, result.returncode, result.stderr)
-        self.assertFalse(Path(str(self.payload) + '.libc').exists())
+    def test_installer_keeps_stock_libc_and_rejects_retired_controls(self):
+        for resume in (False, True):
+            self.log.unlink(missing_ok=True)
+            result = self.run_script('--yes', '--distro', 'alpine', '--name', 'work',
+                                     *(['--resume'] if resume else []), TEST_DISTRO='alpine')
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertFalse(any(c[0] == 'libc' for c in self.calls()))
+            self.assertFalse((self.directory / 'libc').exists())
+        for options in (('--libc', 'shroot'), ('--prepare-libc', 'work'),
+                        ('--print-libc-setup',)):
+            self.log.unlink(missing_ok=True)
+            result = self.run_script(*options)
+            self.assertNotEqual(0, result.returncode)
+            self.assertEqual([], self.calls())
 
-    def test_default_libc_keeps_distribution_for_install_and_resume(self):
-        for args in (('--image', 'alpine:3.23'), ('--resume',)):
-            with self.subTest(args=args):
-                self.log.unlink(missing_ok=True)
-                result = self.run_script('--yes', '--name', 'work', *args)
-                self.assertEqual(0, result.returncode, result.stderr)
-                self.assertIn('Linux libc: keep', result.stdout)
-                self.assertFalse(any(c[:2] == ['libc', 'path'] for c in self.calls()))
-                self.assertFalse(any('rm -f /etc/shroot/libc-base' in a
-                                    for c in self.calls() for a in c))
-        self.assertFalse(Path(str(self.payload) + '.libc').exists())
-
-    def test_libc_recipe_is_exported_without_android_access(self):
-        result = self.run_script('--print-libc-setup', TEST_UID='10001', TEST_VERSION_STATUS='3')
-        self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn('integrate_musl.py', result.stdout)
-        self.assertIn('integrate_glibc.py', result.stdout)
-        self.assertEqual([], self.calls())
-        self.assertEqual([], self.version_calls())
-        subprocess.run(['sh', '-n'], input=result.stdout, text=True, check=True)
-
-    def test_libc_missing_runtime_capability_precedes_environment_mutation(self):
-        result = self.run_script('--yes', '--distro', 'alpine', '--libc', 'shroot',
-                                 TEST_RUNTIME_FEATURES='')
-        self.assertEqual(1, result.returncode)
-        self.assertIn('shared libc registry is unavailable', result.stderr)
-        self.assertEqual([['--probe']], self.calls())
-        self.assertFalse(self.payload.exists())
-
-    def test_private_glibc_keeps_locale_data_and_exports_its_own_iconv_modules(self):
-        script = self.run_script('--print-libc-setup').stdout
-        self.assertIn('complocaledir = /usr/lib/locale', script)
-        self.assertIn('zonedir = /usr/share/zoneinfo', script)
-        self.assertIn('cp -RL "$work/stage$prefix/lib/gconv" candidate/lib/', script)
-        self.assertNotIn('getconf GNU_LIBC_VERSION', script)
-
-    def test_libc_identity_accepts_loader_banner_punctuation(self):
-        script = self.run_script('--print-libc-setup').stdout
-        identify = re.search(r'^identify_libc\(\) \{\n.*?^\}', script,
-                             re.M | re.S).group(0)
-        cases = (
-            ('glibc', 'ld.so (GNU libc) stable release version 2.39.\nCopyright (C) 2024', '2.39'),
-            ('glibc', 'ld.so (Debian GLIBC 2.41-12) 2.41\nCopyright (C) 2025', '2.41'),
-            ('glibc', 'ld.so (Ubuntu GLIBC 2.39-0ubuntu8.6) 2.39', '2.39'),
-            ('glibc', 'ld.so (GNU libc) stable release version 2.39..', None),
-            ('glibc', 'ld.so (GNU libc) stable release version 2..39.', None),
-            ('glibc', 'unrecognized loader output', None),
-            ('musl', 'musl libc (aarch64)\nVersion 1.2.5\nDynamic Program Loader', '1.2.5'),
-            ('musl', 'musl libc (aarch64)\nVersion 1..2.5\nDynamic Program Loader', None),
-        )
-        for index, (kind, banner, version) in enumerate(cases):
-            with self.subTest(kind=kind, banner=banner):
-                root = self.directory / ('libc-root-' + str(index))
-                (root / 'lib').mkdir(parents=True)
-                loader = root / 'lib' / ('ld-musl-aarch64.so.1' if kind == 'musl'
-                                         else 'ld-linux-aarch64.so.1')
-                loader.write_text('#!' + shutil.which('sh') +
-                                  '\nprintf \'%s\\n\' "$TEST_LIBC_BANNER"\n'
-                                  'exit "$TEST_LIBC_STATUS"\n')
-                loader.chmod(0o755)
-                (root / 'lib/libc.so.6').write_bytes(b'original libc')
-                function = re.sub(r'/(?:usr/lib|lib64|lib)(?=[/ ])',
-                                  lambda match: str(root) + match[0], identify)
-                result = subprocess.run(['sh', '-ec', function +
-                                         '\nabi=fixture; recipe=fixture; identify_libc; '
-                                         'printf \'%s\\n\' "$manifest"'],
-                                        env={**os.environ, 'TEST_LIBC_BANNER': banner,
-                                             'TEST_LIBC_STATUS': '1' if kind == 'musl' else '0'},
-                                        text=True, capture_output=True)
-                if version is None:
-                    self.assertEqual(1, result.returncode, result.stdout)
-                    self.assertIn('Cannot identify libc version', result.stderr)
-                else:
-                    self.assertEqual(0, result.returncode, result.stderr)
-                    manifest = result.stdout.splitlines()
-                    self.assertEqual(['shroot-libc-1', 'fixture', kind, version], manifest[:4])
-                    self.assertEqual(str(loader), manifest[5])
-
-    def test_libc_build_dependencies_use_shared_repository_preparation(self):
-        script = self.run_script('--print-libc-setup').stdout
-        functions = '\n'.join(re.search(r'^' + name + r'\(\) \{\n.*?^\}', script,
-                                         re.M | re.S).group(0)
-                              for name in ('refresh_packages', 'install_libc_tools'))
-        stubs = 'packages() { printf \'packages %s\\n\' "$*"; }\n'
-        command = self.directory / 'package-command'
-        command.write_text('#!' + shutil.which('sh') + '\nprintf \'%s %s\\n\' "${0##*/}" "$*"\n')
-        command.chmod(0o755)
-        for name in ('apt-get', 'apk', 'pacman', 'pacman-key', 'xbps-install', 'zypper'):
-            (self.directory / name).symlink_to(command)
-        for family, distro, expected in (
-                ('apt', 'debian', ['apt-get update']),
-                ('apk', 'alpine', ['apk update']),
-                ('dnf', 'fedora', []),
-                ('zypper', 'opensuse-tumbleweed', ['zypper --non-interactive refresh']),
-                ('xbps', 'void', ['xbps-install -Suy xbps', 'xbps-install -uy']),
-                ('pacman', 'arch', ['pacman-key --init', 'pacman-key --populate archlinuxarm',
-                                    'pacman -Syu --noconfirm']),
-                ('pacman', 'manjaro', ['pacman-key --init',
-                                       'pacman-key --populate archlinuxarm manjaro manjaro-arm',
-                                       'pacman -Syu --noconfirm']),
-                ('pacman', 'artix', ['pacman-key --init', 'pacman-key --populate artix',
-                                     'pacman -Syu --noconfirm']),
-                ('pacman', 'custom', ['pacman -Syu --noconfirm']),
-                ('recovery', 'steamos', ['pacman -Syu --noconfirm'])):
-            with self.subTest(family=family, distro=distro):
-                result = subprocess.run(['sh', '-ec', stubs + functions + '\ninstall_libc_tools'],
-                                        env={**os.environ, 'family': family, 'ID': distro,
-                                             'PATH': str(self.directory) + os.pathsep + os.environ['PATH']},
-                                        text=True, capture_output=True)
-                self.assertEqual(0, result.returncode, result.stderr)
-                lines = result.stdout.splitlines()
-                commands = [line for line in lines if line.startswith(('apt-get ', 'apk ',
-                            'zypper ', 'xbps-install ', 'pacman ', 'pacman-key '))]
-                self.assertEqual(expected, commands)
-                self.assertTrue(lines[-1].startswith('packages ca-certificates '), lines)
-
-    def test_libc_build_package_cleanup_retains_failure_status(self):
-        script = self.run_script('--print-libc-setup').stdout
-        start = script.index("trap 'status=$?; package_cleanup;")
-        end = script.index('extract_integration\n', start)
-        for status in (0, 23):
-            with self.subTest(status=status):
-                stubs = f'''set -eu
-target=installed
-work={shlex.quote(str(self.directory))}
-package_cleanup() {{ printf 'cleaned\\n'; }}
-install_libc_tools() {{ return {status}; }}
-identify_libc() {{ :; }}
-reuse_libc() {{ return 1; }}
-'''
-                result = subprocess.run(['sh', '-c', stubs + script[start:end]],
-                                        text=True, capture_output=True)
-                self.assertEqual(status, result.returncode, result.stderr)
-                self.assertEqual('Installing libc build dependencies...\ncleaned\n', result.stdout)
-
-    def test_libc_build_uses_private_temporary_directory(self):
-        script = self.run_script('--print-libc-setup').stdout
-        start = script.index('mkdir -p "$work/tmp"')
-        end = script.index('extract_integration\n', start)
-        result = subprocess.run(['sh', '-eu', '-c', script[start:end] +
-                                 '\nprintf "%s" "$TMPDIR"'],
-                                env={**os.environ, 'work': str(self.directory),
-                                     'TMPDIR': '/not-the-build-directory'},
-                                text=True, capture_output=True)
-        self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual(str(self.directory / 'tmp'), result.stdout)
-        self.assertTrue((self.directory / 'tmp').is_dir())
-
-    def test_glibc_build_disables_fortify_through_compiler_driver(self):
-        script = self.run_script('--print-libc-setup').stdout
-        self.assertIn("'no-fortify-source = -U_FORTIFY_SOURCE'", script)
-        self.assertIn("'fortify-source = -U_FORTIFY_SOURCE'", script)
-
-    def test_glibc_abi_failure_prevents_staging(self):
-        script = self.run_script('--print-libc-setup').stdout
-        start = script.index('make -j"$jobs"\n')
-        end = script.index('cd "$work"\n', start)
-        for kind, expected in (('glibc', 7), ('musl', 0)):
-            with self.subTest(kind=kind):
-                result = subprocess.run(['sh', '-eu', '-c', '''
-make() {
-    printf '%s\\n' "$*"
-    case "$*" in *check-abi*) return 7;; esac
-}
-''' + script[start:end]], env={**os.environ, 'kind': kind,
-                             'jobs': '3', 'work': str(self.directory)},
-                                        text=True, capture_output=True)
-                self.assertEqual(expected, result.returncode, result.stderr)
-                self.assertEqual(kind == 'musl', 'install' in result.stdout)
-
-    def test_libc_recipe_accepts_all_installer_distributions(self):
-        for distro in ('debian', 'ubuntu', 'alpine', 'fedora', 'arch', 'opensuse',
-                       'openkylin', 'deepin', 'manjaro', 'void', 'armtix', 'steamos'):
-            with self.subTest(distro=distro):
-                self.log.unlink(missing_ok=True)
-                shutil.rmtree(self.directory / 'libc', ignore_errors=True)
-                result = self.run_script('--yes', '--resume', '--distro', distro, '--name', 'work', '--libc', 'shroot', TEST_DISTRO=distro)
-                self.assertEqual(0, result.returncode, result.stderr)
-                self.assertFalse(any(c[0] == 'image' for c in self.calls()))
-                build = next(c for c in self.calls() if '--bind' in c and c[-3] == 'shroot')
-                self.assertEqual(['login', 'work'], build[:2])
-                self.assertIn('SHROOT_LIBC_BUILD_TARGET=installed', build)
-
-    def test_libc_mode_and_recipe_identity_reach_guest(self):
-        import hashlib
-        script = self.run_script('--print-libc-setup').stdout
-        digest = hashlib.sha256(script.encode()).hexdigest()
-        for mode in ('shroot', 'base'):
-            with self.subTest(mode=mode):
-                result = self.run_script('--yes', '--resume', '--name', 'work', '--libc', mode, '--jobs', '3')
-                self.assertEqual(0, result.returncode, result.stderr)
-                self.assertTrue(any(c[-3:] == [mode, '3', digest] for c in self.calls()))
-                self.assertEqual(script, Path(str(self.payload) + '.libc').read_text())
-                self.assertFalse(any(c[0] in ('install', 'remove') for c in self.calls()))
-
-    def test_libc_prepare_oci_uses_temporary_environment_and_retains_original_image(self):
-        result = self.run_script('--prepare-libc', 'alpine:3.23', '--jobs', '1', TEST_IMAGE_ONLY='1')
-        self.assertEqual(0, result.returncode, result.stderr)
-        install = next(c for c in self.calls() if c[0] == 'install')
-        self.assertEqual('alpine:3.23', install[1])
-        self.assertIn(['remove', install[-1]], self.calls())
-        build = next(c for c in self.calls() if '--bind' in c and c[-3] == 'shroot')
-        self.assertEqual(['login', install[-1]], build[:2])
-        self.assertIn('SHROOT_LIBC_BUILD_TARGET=image', build)
-        self.assertFalse(any(c[0] == 'image' for c in self.calls()))
-
-    def test_libc_build_failure_keeps_work_and_does_not_enable_target(self):
-        result = self.run_script('--prepare-libc', 'work', TEST_FAIL='libc')
-        self.assertEqual(1, result.returncode)
-        self.assertIn('distribution libc was not replaced by Shroot', result.stderr)
-        self.assertIn('Build packages are retained', result.stderr)
-        self.assertEqual(1, len(list((self.directory / 'libc/work').glob('build.*'))))
-        self.assertFalse(any(c[0] == 'image' for c in self.calls()))
-        self.assertFalse(any('rm -f /etc/shroot/libc-base' in arg for c in self.calls() for arg in c))
-
-    def test_libc_cache_hit_skips_build(self):
-        result = self.run_script('--prepare-libc', 'work', TEST_LIBC_CACHED='1')
-        self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn('Reusing Shroot libc:', result.stdout)
-        self.assertNotIn('Preparing libc directly', result.stdout)
-        self.assertFalse(any('--bind' in c for c in self.calls()))
-        self.assertFalse(any(c[0] == 'image' for c in self.calls()))
-        self.assertTrue(any('rm -f /etc/shroot/libc-base' in arg for c in self.calls() for arg in c))
-
-    def test_libc_activation_retains_runtime_mounts_during_systemd_shutdown(self):
-        for cached in ('0', '1'):
-            with self.subTest(cached=cached):
-                self.log.unlink(missing_ok=True)
-                result = self.run_script('--prepare-libc', 'work', TEST_LIBC_CACHED=cached)
-                self.assertEqual(0, result.returncode, result.stderr)
-                activation = next(arg for call in self.calls() for arg in call
-                                  if 'rm -f /etc/shroot/libc-base' in arg)
-                self.assertIn('/etc/systemd/system/opt-shroot-libc-.mount.d', activation)
-                self.assertIn('DefaultDependencies=no', activation)
-                self.assertIn('50-shroot-runtime.conf', activation)
-                self.assertNotIn('systemctl', activation)
-
-    def test_libc_preparation_reports_build_and_enable_in_order(self):
-        result = self.run_script('--prepare-libc', 'work', '--jobs', '3')
-        self.assertEqual(0, result.returncode, result.stderr)
-        stages = ['Checking installed libc', 'Preparing libc directly in work',
-                  'Enabling libc selection', 'Shroot libc prepared:']
-        positions = [result.stdout.index(stage) for stage in stages]
-        self.assertEqual(sorted(positions), positions)
-        self.assertIn('(jobs: 3)', result.stdout)
-        self.assertIn('no environment copy', result.stdout)
-        self.assertEqual([], list((self.directory / 'libc/work').glob('build.*')))
-
-    def test_libc_build_reidentifies_installed_target_after_dependencies_but_pins_images(self):
-        source = SCRIPT.parents[1] / 'native/shroot/libc/build.sh'
-        preparation = 'identify_libc\n' + source.read_text().split('\nidentify_libc\n', 1)[1]
-        preparation = preparation.split('\nextract_integration\n', 1)[0]
-        cache = self.directory / 'cache'
-        (cache / 'new').mkdir(parents=True)
-        (cache / 'new/manifest').write_text('fixture new\n')
-        for target in ('installed', 'image'):
-            with self.subTest(target=target):
-                work = self.directory / target
-                work.mkdir()
-                setup = r'''
-set -eu
-version=old
-mode=shroot
-identify_libc() { manifest="fixture $version"; key=$version; kind=musl; }
-install_libc_tools() { version=new; printf 'tools installed\n'; }
-package_cleanup() { :; }
-'''
-                result = subprocess.run(['sh', '-c', setup + preparation + '\necho compile-required'],
-                                        env={**os.environ, 'target': target, 'work': str(work),
-                                             'cache': str(cache)}, text=True, capture_output=True)
-                self.assertEqual(0, result.returncode, result.stderr)
-                self.assertIn('tools installed', result.stdout)
-                if target == 'installed':
-                    self.assertEqual('fixture new\n', (work / 'manifest').read_text())
-                    self.assertEqual('new\n', (work / 'result').read_text())
-                    self.assertNotIn('compile-required', result.stdout)
-                else:
-                    self.assertEqual('fixture old\n', (work / 'manifest').read_text())
-                    self.assertFalse((work / 'result').exists())
-                    self.assertIn('compile-required', result.stdout)
-
-    def test_libc_changed_during_build_does_not_report_a_publishable_result(self):
-        source = (SCRIPT.parents[1] / 'native/shroot/libc/build.sh').read_text()
-        final_check = source[source.rindex('\nif [ "$target" = installed ]; then'):]
-        work = self.directory / 'work'
-        work.mkdir()
-        result = subprocess.run(['sh', '-c', 'set -eu; target=installed; manifest=old; key=old; '
-                                 'identify_libc() { manifest=new; key=new; };\n' + final_check],
-                                cwd=work, text=True, capture_output=True)
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn('Installed libc changed', result.stderr)
-        self.assertFalse((work / 'result').exists())
-
-    def test_libc_failure_preserves_environment_and_reports_mode(self):
-        result = self.run_script('--yes', '--resume', '--name', 'work', '--libc', 'shroot', TEST_FAIL='libc')
-        self.assertEqual(23, result.returncode)
-        self.assertIn('Environment retained', result.stderr)
-        self.assertIn('--resume', result.stderr)
-        self.assertIn('libc=shroot', result.stderr)
-        self.assertFalse(any(c[0] in ('install', 'remove') for c in self.calls()))
-
-    def test_libc_invalid_mode_does_not_reach_guest(self):
-        result = self.run_script('--yes', '--libc', 'automatic')
-        self.assertEqual(1, result.returncode)
-        self.assertEqual([], self.calls())
-
-    def test_source_builds_prepare_libc_after_dependencies_and_reuse_it(self):
+    def test_source_builds_run_dependencies_before_compilers(self):
         for distro, gpu in (('steamos', 'auto'), ('debian', 'turnip')):
             with self.subTest(distro=distro, gpu=gpu):
                 self.log.unlink(missing_ok=True)
                 result = self.run_script('--yes', '--resume', '--distro', distro,
                                          '--name', 'work', '--gui', 'plasma', '--gpu', gpu,
-                                         '--libc', 'shroot', TEST_DISTRO=distro)
+                                         TEST_DISTRO=distro)
                 self.assertEqual(0, result.returncode, result.stderr)
                 calls = self.calls()
                 phases = [(i, c) for i, c in enumerate(calls)
@@ -547,41 +222,16 @@ package_cleanup() { :; }
                     self.assertIn('MAGICDESK_BUILD_PHASE=dependencies', dependencies)
                     self.assertIn('MAGICDESK_BUILD_PHASE=build', build)
                     self.assertEqual(dependencies[-1], build[-1])
-                    self.assertTrue(any(c[-3] == 'identify' for c in calls[dep_index + 1:build_index]
-                                        if len(c) >= 3))
-                    self.assertTrue(any('rm -f /etc/shroot/libc-base' in a
-                                        for c in calls[dep_index + 1:build_index] for a in c))
-                self.assertFalse(any(c[-3] == 'identify' for c in calls[:phases[0][0]] if len(c) >= 3))
+                    self.assertEqual(dep_index + 1, build_index)
                 self.assertFalse(any(c[0] == 'image' for c in calls))
-                self.assertIn('Reusing Shroot libc:', result.stdout)
 
-    def test_kwin_dependencies_changing_libc_prepare_the_new_identity_before_build(self):
-        result = self.run_script('--yes', '--resume', '--name', 'work', '--gui', 'plasma',
-                                 '--gpu', 'turnip', '--libc', 'shroot',
-                                 TEST_LIBC_CHANGE_ON_KWIN_DEPS='1')
-        self.assertEqual(0, result.returncode, result.stderr)
-        calls = self.calls()
-        self.assertEqual(2, sum('--bind' in c and c[-3] == 'shroot' for c in calls))
-        self.assertFalse(any(c[0] == 'image' for c in calls))
-        enable = [c[-1] for c in calls if any('rm -f /etc/shroot/libc-base' in a for a in c)]
-        self.assertEqual(2, len(set(enable)))
-        self.assertIn('MAGICDESK_BUILD_PHASE=build', calls[-1])
-
-    def test_failed_build_dependencies_do_not_prepare_libc_or_start_compilers(self):
+    def test_failed_build_dependencies_do_not_start_compilers(self):
         result = self.run_script('--yes', '--resume', '--name', 'work', '--gpu', 'turnip',
-                                 '--libc', 'shroot', TEST_FAIL_DEPENDENCIES='graphics')
+                                 TEST_FAIL_DEPENDENCIES='graphics')
         self.assertEqual(23, result.returncode, result.stderr)
         self.assertIn('installing build dependencies', result.stderr)
         self.assertFalse(any(c[:2] == ['image', 'backup'] for c in self.calls()))
         self.assertFalse(any('MAGICDESK_BUILD_PHASE=build' in c for c in self.calls()))
-
-    def test_failed_libc_preparation_does_not_start_source_builds(self):
-        result = self.run_script('--yes', '--resume', '--name', 'work', '--gpu', 'turnip',
-                                 '--libc', 'shroot', TEST_FAIL='libc')
-        self.assertEqual(23, result.returncode, result.stderr)
-        self.assertTrue(any('MAGICDESK_BUILD_PHASE=dependencies' in c for c in self.calls()))
-        self.assertFalse(any('MAGICDESK_BUILD_PHASE=build' in c for c in self.calls()))
-        self.assertNotIn('Linux is ready', result.stdout)
 
     def test_source_build_phases_separate_packages_from_compilers(self):
         result = self.run_script('--yes', '--resume', '--name', 'work', '--gui', 'plasma', '--gpu', 'turnip')
@@ -624,7 +274,7 @@ package_cleanup() { :; }
         result = self.run_script('--yes', '--resume', '--name', 'work',
                                  '--gui', 'plasma', '--gpu', 'turnip')
         self.assertEqual(0, result.returncode, result.stderr)
-        recipes = {'libc': self.run_script('--print-libc-setup').stdout}
+        recipes = {}
         for name, suffix in (('mesa', '.gpu'), ('kwin', '.kwin')):
             recipes[name] = Path(str(self.payload) + suffix).read_text()
         archive = self.directory / 'foreign owners.tar.xz'
@@ -660,7 +310,7 @@ package_cleanup() { :; }
                 extracted = subprocess.run(['sh', '-ec', command], cwd=work,
                                            env=environment, capture_output=True, text=True, timeout=10)
                 self.assertEqual(0, extracted.returncode, extracted.stderr)
-                root = work / ('source' if name == 'libc' else 'unpack/fixture')
+                root = work / 'unpack/fixture'
                 self.assertEqual(body, (root / 'configure').read_bytes())
                 self.assertEqual(os.getuid(), (root / 'configure').stat().st_uid)
                 self.assertTrue(os.access(root / 'configure', os.X_OK))
@@ -677,7 +327,7 @@ package_cleanup() { :; }
 
     @unittest.skipUnless(hasattr(os, 'openpty'), 'PTY required')
     def test_interactive_dns_repair_follows_configuration_and_retries_only_dns(self):
-        output = self.questions(b'alpine\nwork\nxfce\nsoftware\n\nkeep\nkeep\nbasic\nn\nauto\ninvalid\n192.0.2.1\ny\n',
+        output = self.questions(b'alpine\nwork\nxfce\nsoftware\nkeep\nkeep\nbasic\nn\nauto\ninvalid\n192.0.2.1\ny\n',
                                 TEST_DNS_ERROR='No active-network DNS servers')
         self.assertGreater(output.index('Cannot prepare guest DNS'), output.index('Additional settings ('))
         self.assertEqual(1, output.count('Distribution ['))
@@ -688,7 +338,7 @@ package_cleanup() { :; }
 
     @unittest.skipUnless(hasattr(os, 'openpty'), 'PTY required')
     def test_unavailable_dns_can_be_cancelled_without_installing(self):
-        output = self.questions(b'alpine\nwork\nxfce\nsoftware\n\nkeep\nkeep\nbasic\nn\n\n',
+        output = self.questions(b'alpine\nwork\nxfce\nsoftware\nkeep\nkeep\nbasic\nn\n\n',
                                 TEST_DNS_ERROR='Android Private DNS is active')
         self.assertIn('Cancelled.', output)
         self.assertIn('Distribution [', output)
@@ -696,7 +346,7 @@ package_cleanup() { :; }
 
     @unittest.skipUnless(hasattr(os, 'openpty'), 'PTY required')
     def test_advanced_invalid_dns_retains_other_answers(self):
-        output = self.questions(b'alpine\nwork\nxfce\nsoftware\nkeep\nkeep\nkeep\nbasic\ny\n\nboth\n\ninvalid\nkeep\npreserve\ny\n')
+        output = self.questions(b'alpine\nwork\nxfce\nsoftware\nkeep\nkeep\nbasic\ny\n\nboth\n\ninvalid\nkeep\npreserve\ny\n')
         self.assertEqual([['dns', '--check', value] for value in ('invalid', 'preserve')], self.dns_checks())
         self.assertEqual(1, output.count('Distribution ['))
         install = next(c for c in self.calls() if c[0] == 'install')
@@ -704,7 +354,7 @@ package_cleanup() { :; }
 
     @unittest.skipUnless(hasattr(os, 'openpty'), 'PTY required')
     def test_package_failure_can_change_dns_without_reinstalling_or_repeating_answers(self):
-        output = self.questions(b'alpine\nwork\nxfce\nsoftware\n\nkeep\nkeep\nbasic\nn\ny\ndns\ninvalid\n192.0.2.1\n',
+        output = self.questions(b'alpine\nwork\nxfce\nsoftware\nkeep\nkeep\nbasic\nn\ny\ndns\ninvalid\n192.0.2.1\n',
                                 TEST_SETUP_FAILURES='1')
         self.assertIn('test package download failure', output)
         self.assertIn('Linux is ready: work', output)
@@ -717,7 +367,7 @@ package_cleanup() { :; }
 
     @unittest.skipUnless(hasattr(os, 'openpty'), 'PTY required')
     def test_package_retry_can_switch_to_current_network(self):
-        output = self.questions(b'alpine\nwork\nnone\nkeep\nkeep\nkeep\nkeep\nkeep\ny\n\nboth\n\n192.0.2.1\nkeep\ny\ndns\nauto\n',
+        output = self.questions(b'alpine\nwork\nnone\nkeep\nkeep\nkeep\nkeep\ny\n\nboth\n\n192.0.2.1\nkeep\ny\ndns\nauto\n',
                                 TEST_SETUP_FAILURES='1')
         self.assertEqual([['dns', '--check', p] for p in ('192.0.2.1', 'system')], self.dns_checks())
         self.assertIn(['dns', 'work', 'system', '--replace'], self.calls())
@@ -726,7 +376,7 @@ package_cleanup() { :; }
 
     @unittest.skipUnless(hasattr(os, 'openpty'), 'PTY required')
     def test_package_retry_and_cancel_keep_the_environment(self):
-        output = self.questions(b'alpine\nwork\nxfce\nsoftware\n\nkeep\nkeep\nbasic\nn\ny\ninvalid\nretry\n\n',
+        output = self.questions(b'alpine\nwork\nxfce\nsoftware\nkeep\nkeep\nbasic\nn\ny\ninvalid\nretry\n\n',
                                 expected_exit=23, TEST_SETUP_FAILURES='2')
         self.assertIn('Environment retained.', output)
         self.assertEqual(1, sum(c[0] == 'install' for c in self.calls()))
@@ -784,7 +434,7 @@ package_cleanup() { :; }
         self.assertEqual(1, result.returncode, result.stderr)
         self.assertIn("magicdesk is unavailable", result.stderr)
         for option in ("--help", "--list", "--print-mesa-patch", "--print-kwin-patch",
-                       "--print-system-setup", "--print-graphics-setup", "--print-libc-setup", "--print-weston-setup",
+                       "--print-system-setup", "--print-graphics-setup", "--print-weston-setup",
                        "--print-recovery-reader", "--print-desktop-session", "--print-audio-session", "--print-steam-game"):
             with self.subTest(option=option):
                 result = self.run_script(option, TEST_UID="10001", TEST_VERSION_STATUS="3")
@@ -825,10 +475,10 @@ package_cleanup() { :; }
 
     def test_explicit_xbps_network_preference_reaches_each_setup_stage(self):
         result = self.run_script('--yes', '--distro', 'void', '--image', 'example/void:test',
-                                 '--gpu', 'turnip', '--libc', 'keep', FORCE_IPV4='1')
+                                 '--gpu', 'turnip', FORCE_IPV4='1')
         self.assertEqual(0, result.returncode, result.stderr)
         stages = [call for call in self.calls() if call[0] == 'login' and '-s' in call]
-        self.assertEqual(3, len(stages))
+        self.assertEqual(5, len(stages))
         for call in stages:
             self.assertIn('FORCE_IPV4=1', call)
         self.assertNotIn('FORCE_IPV4=1', next(call for call in self.calls() if call[0] == 'install'))
@@ -1429,7 +1079,7 @@ package_cleanup() { :; }
         self.assertTrue(any('-s' in call for call in executions))
         self.assertTrue(any('-s' not in call for call in executions))
         for call in executions:
-            package_setup = '-s' in call and call[-3] != 'identify'
+            package_setup = '-s' in call
             self.assertEqual(package_setup, 'SYSTEMD_IN_CHROOT=1' in call)
         for export in ('--print-system-setup', '--print-graphics-setup',
                        '--print-desktop-session', '--print-audio-session'):
@@ -1443,7 +1093,7 @@ package_cleanup() { :; }
             with self.subTest(distro=distro):
                 self.log.unlink(missing_ok=True)
                 result = self.run_script('--yes', '--resume', '--name', 'work',
-                                         '--gpu', 'turnip', '--libc', 'shroot', TEST_DISTRO=distro)
+                                         '--gpu', 'turnip', TEST_DISTRO=distro)
                 self.assertEqual(0, result.returncode, result.stderr)
                 calls = self.calls()
                 admin = [c for c in calls if '--user' in c and c[c.index('--user') + 1] == 'root']
@@ -1452,10 +1102,7 @@ package_cleanup() { :; }
                     self.assertEqual(['login', 'work'], call[:2], call)
                     self.assertFalse(any(arg.startswith('HOME=') for arg in call), call)
                     self.assertEqual('/bin/sh', call[call.index('--') + 1], call)
-                for stage in ('identify', 'turnip'):
-                    self.assertTrue(any('-s' in c and c[-3] == stage for c in admin), stage)
-                self.assertTrue(any('-s' in c and c[-3] == 'shroot' for c in admin)
-                                or 'Reusing Shroot libc:' in result.stdout)
+                self.assertTrue(any('-s' in c and c[-3] == 'turnip' for c in admin))
                 if distro == 'steamos':
                     steam = next(c for c in calls if c[0] == 'exec' and '.steam/installer.lock' in ' '.join(c))
                     self.assertNotIn('--user', steam)
@@ -1669,11 +1316,11 @@ package_cleanup() { :; }
         self.assertNotIn('glFinish(', result.stdout)
 
     def test_resume_validates_without_reinstalling(self):
-        result = self.run_script("--yes", "--name", "existing", "--resume", "--libc", "keep")
+        result = self.run_script("--yes", "--name", "existing", "--resume")
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual(["login", "--probe", "login", "login", "login"], [args[0] for args in self.calls()])
+        self.assertEqual(["login", "--probe", "login", "login", "login", "login"], [args[0] for args in self.calls()])
         self.assertEqual(["sh", "debian", "13"], self.calls()[2][-3:])
-        self.assertEqual(["keep", "both", "keep", "keep", "", "keep", "keep", ""], self.calls()[-2][-8:])
+        self.assertEqual(["keep", "both", "keep", "keep", "", "keep", "keep", ""], self.system_setup_call()[-8:])
         self.assertTrue(Path(str(self.payload) + '.weston').is_file())
         hints = result.stdout.split("Next steps:\n", 1)[1]
         self.assertIn("Existing GUI entries were preserved", hints)
@@ -1681,9 +1328,9 @@ package_cleanup() { :; }
         self.assertNotIn("Whole desktop:", hints)
         self.assertIn("Console: shroot login existing\n", hints)
 
-    def test_weston_maintenance_recipe_is_shared_and_prepares_libc_after_dependencies(self):
+    def test_weston_maintenance_recipe_is_shared_and_installs_dependencies_first(self):
         result = self.run_script('--yes', '--resume', '--name', 'work', '--gui', 'weston',
-                                 '--libc', 'shroot', '--jobs', '3')
+                                 '--jobs', '3')
         self.assertEqual(0, result.returncode, result.stderr)
         calls = self.calls()
         phases = [(i, c) for i, c in enumerate(calls)
@@ -1695,8 +1342,7 @@ package_cleanup() { :; }
         self.assertIn('MAGICDESK_BUILD_PHASE=build', build)
         self.assertEqual('3', build[-2])
         self.assertEqual(dependencies[-1], build[-1])
-        self.assertTrue(any(c[-3] == 'identify' for c in calls[dep_index+1:build_index] if len(c) >= 3))
-        self.assertFalse(any(c[-3] == 'identify' for c in calls[:dep_index] if len(c) >= 3))
+        self.assertEqual(dep_index + 1, build_index)
         recipe = Path(str(self.payload) + '.weston').read_text()
         self.assertEqual(0, subprocess.run(['sh', '-n'], input=recipe, text=True).returncode)
         self.assertIn('66252c9c5bbc45ab402e2518b76e6d824f09ebc1d0040ee2f51b096a1bc585b1', recipe)
@@ -1987,8 +1633,7 @@ package_cleanup() { :; }
         for gpu, jobs in [("turnip", "2"), ("turnip", "4"), ("software", "2")]:
             with self.subTest(gpu=gpu, jobs=jobs):
                 self.log.unlink(missing_ok=True)
-                result = self.run_script("--yes", "--name", "debian", "--resume", "--gpu", gpu, "--jobs", jobs,
-                                         "--libc", "shroot")
+                result = self.run_script("--yes", "--name", "debian", "--resume", "--gpu", gpu, "--jobs", jobs)
                 self.assertEqual(0, result.returncode, result.stderr)
                 payload = Path(str(self.payload) + ".gpu")
                 digest = hashlib.sha256(payload.read_bytes()).hexdigest()
@@ -2243,46 +1888,32 @@ package_cleanup() { :; }
 
     @unittest.skipUnless(hasattr(os, "openpty"), "PTY required")
     def test_questions_use_saved_script_stdin(self):
-        output = self.questions(b"debian\ninteractive\nxfce\nkeep\nshroot\n\nkeep\nkeep\nbasic\nn\ny\n")
+        output = self.questions(b"debian\ninteractive\nxfce\nkeep\nkeep\nkeep\nbasic\nn\ny\n")
         install = next(c for c in self.calls() if c[0] == 'install')
         self.assertEqual(['--rootfs', '--name', 'interactive', '--dns', 'system'], install[2:])
         setup = next(c for c in self.calls() if c[0] == 'login' and '-s' in c)
         self.assertEqual("xfce", setup[-8])
-        self.assertIn('Linux libc: shroot', output)
-        self.assertLess(output.index('Linux libc:'), output.index('Additional settings ('))
-        self.assertEqual(1, output.count('Linux libc: keep (distribution libc)/shroot (compiled comparison)/base [keep]'))
-        self.assertIn('Compiler jobs for libc/Mesa/KWin (1-8) [2]', output)
-        self.assertTrue(Path(str(self.payload) + '.libc').exists())
+        self.assertNotIn('Linux libc:', output)
+        self.assertNotIn('Compiler jobs', output)
 
     @unittest.skipUnless(hasattr(os, "openpty"), "PTY required")
     def test_advanced_questions_select_real_options_without_command_flags(self):
-        output = self.questions(b"ubuntu\ninteractive\napps\nsoftware\nkeep\nru_RU.UTF-8\nAsia/Krasnoyarsk\ncjk\ny\n"
+        output = self.questions(b"ubuntu\ninteractive\napps\nsoftware\nru_RU.UTF-8\nAsia/Krasnoyarsk\ncjk\ny\n"
                             b"developer\nwayland\ngit gdb\n192.0.2.1\nclean\ny\n")
         install = next(c for c in self.calls() if c[0] == 'install')
         self.assertEqual(['--rootfs', '--name', 'interactive', '--dns', '192.0.2.1'], install[2:])
         self.assertEqual(["apps", "wayland", "ru_RU.UTF-8", "Asia/Krasnoyarsk", "developer", "cjk", "clean", "git gdb"],
-                         self.calls()[-3][-8:])
+                         self.system_setup_call()[-8:])
         self.assertIn("Guest account=developer | extra packages=git gdb", output)
-        self.assertFalse(Path(str(self.payload) + '.libc').exists())
 
     @unittest.skipUnless(hasattr(os, 'openpty'), 'PTY required')
-    def test_main_questions_select_base_without_building_libc(self):
-        output = self.questions(b'alpine\nwork\nnone\nkeep\nbase\nkeep\nkeep\nkeep\nn\ny\n')
-        self.assertIn('Linux libc: base', output)
-        self.assertNotIn('Compiler jobs for libc/Mesa/KWin', output)
-        self.assertFalse(any(c[:2] == ['image', 'backup'] for c in self.calls()))
-        self.assertTrue(any('-s' in c and c[-3] == 'base' for c in self.calls()))
-
-    @unittest.skipUnless(hasattr(os, 'openpty'), 'PTY required')
-    def test_steamos_main_jobs_apply_to_libc_mesa_and_kwin(self):
-        output = self.questions(b'steamos\n\n\nturnip\nshroot\n4\nkeep\nkeep\nn\ny\n',
+    def test_steamos_main_jobs_apply_to_mesa_and_kwin(self):
+        output = self.questions(b'steamos\n\n\nturnip\n4\nkeep\nkeep\nn\ny\n',
                                 TEST_DISTRO='steamos')
-        self.assertIn('Linux libc: shroot', output)
-        self.assertEqual(1, output.count('Compiler jobs for libc/Mesa/KWin (1-8) [2]'))
-        self.assertIn('Compiler jobs for libc/Mesa/KWin: 4', output)
-        builds = [c for c in self.calls() if '-s' in c and (
-            ('--bind' in c and c[-3] == 'shroot') or 'MAGICDESK_BUILD_PHASE=build' in c)]
-        self.assertEqual(3, len(builds))
+        self.assertEqual(1, output.count('Compiler jobs for Mesa/KWin/Weston (1-8) [2]'))
+        self.assertIn('Compiler jobs for Mesa/KWin/Weston: 4', output)
+        builds = [c for c in self.calls() if 'MAGICDESK_BUILD_PHASE=build' in c]
+        self.assertEqual(2, len(builds))
         self.assertTrue(all(c[-2] == '4' for c in builds))
 
     def questions(self, answers, expected_exit=0, **environment):

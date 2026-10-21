@@ -15,22 +15,17 @@ and evidence, rather than installation recipes.
 
 The bootstrap maps an ARM64 ELF and its optional interpreter, constructs its
 initial stack/auxv, and enters the distribution's stock glibc/musl loader. Static
-ELF and raw SVC programs use the same Base path. No preload library, patched libc,
+ELF and raw SVC programs use the same entry admission. No preload library, patched libc,
 PRoot process, external container manager or SELinux change is required.
 
-An explicitly prepared [local libc registry](libc/README.md) can substitute a
-matching source-built interpreter at ordinary exec, including inside nested
-roots. Its libc enters the common [cooperative protocol](cooperative-entry.md).
-Absent or inadmissible artifacts keep the stock loader. Builds are offline,
-explicit installer work; neither the syscall path nor Android startup builds
-or downloads them.
-
-The opt-in lazy machine-code entry (`SHROOT_MACHINE_ENTRY=1`) admits observed
-AArch64 SVC sites in unmodified programs, including stock libc and Go. It shares
-the cooperative channel and syscall owners, not a second implementation.
+Lazy machine-code entry admits observed AArch64 SVC sites in unmodified programs,
+including stock libc and Go, by default for inode-store launches. It shares the
+[cooperative channel](cooperative-entry.md) and syscall owners, not a second
+implementation. No source-built libc registry or interpreter substitution remains.
 Application filters, protected-state transitions and debugger ownership revoke
-that entry through the common admission boundary. Source-built libc is retained
-as an explicit comparison path during this transition; see
+entry through the common admission boundary. Unavailable capabilities and
+unsupported sites retain Base interception; `--env SHROOT_MACHINE_ENTRY=0`
+selects Base explicitly. See
 [integration evidence](../guest-exec-lab/svc-rewriting.md#product-boundary).
 
 One supervisor owns each process tree. Selective seccomp TRACE/USER_NOTIF directs
@@ -68,7 +63,6 @@ Android kernel: actual task lifetime, descriptors, data IO and native checks
 | Application services | Authorization, catalog/registry downloads, launch recipes, immutable helper staging, PTY, graphics/audio/input connections | Guest syscall policy or native resource lifetime |
 | `namespace_run.c` | Explicit launch configuration and native process owner | Global current distribution or automatic privilege switching |
 | `bootstrap.c`, `elf.c`, `exec.c` | ELF admission/mapping, stack and exec reentry | Distribution-specific loader or libc policy |
-| `libc_registry.c`, `libc_selection.c` | Local artifact publication/leases and interpreter selection in the captured guest filesystem context | Package installation, OCI rewriting or a separate permission model |
 | `supervisor.c` and task owners | Kernel tracing, continuations, guest identity, cancellation and terminal cleanup | Android windows or a second kernel scheduler |
 | `fs_worker.c`, `namespace_broker.c`, `fs_engine.c` | Captured filesystem requests and provider dispatch | Application IO through ordinary open data descriptions |
 | Inode/image owners | SQLite namespace, metadata, shared bodies, overlays, import and maintenance | Android mount privileges or kernel hardlinks |
@@ -220,7 +214,7 @@ adaptation.
 | Contract | Responsibility |
 | --- | --- |
 | [Interception](interception.md) | Selectors, task-affine calls, protected processes, exec, application filters and private-memory repair |
-| [Cooperative entry](cooperative-entry.md) | Optional libc entry, shared worker ownership, bounded operation windows, fallback and filter limits |
+| [Cooperative entry](cooperative-entry.md) | Shared direct entry, worker ownership, bounded operation windows, fallback and filter limits |
 | [Process lifetime](process-lifetime.md) | Launch ownership, cancellation, reaping and teardown |
 | [Process resources](process-resources.md) | Sharing, mounts, namespace providers, descriptor custody, network, terminals and cgroups |
 | [Namespace execution](namespace-execution.md) | Path/FD dispatch, cwd, metadata and proc object identity |

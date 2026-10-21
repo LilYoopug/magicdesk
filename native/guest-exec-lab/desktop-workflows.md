@@ -52,11 +52,9 @@ private native runtime under UID 2000. Each invocation selects one case. The
 rofiles case exercises concurrent append, watch events/lifetimes, cancellation
 and retained directory FDs; the
 SquashFS case checks ELF/script execution, dynamic loading, private mappings,
-noexec, concurrent readers and a file retained through lazy unmount. Add
-`--libc-registry PATH` to select prepared libc artifacts and require a matching
-direct-entry ABI before the workflow. All three cases also pass with the
-SteamOS replacement libc; this does not imply that every nested Flatpak runtime
-has a prepared replacement. See
+noexec, concurrent readers and a file retained through lazy unmount. Default
+launches use stock libraries and lazy entry; `--base` selects ordinary interception
+and `--machine-entry` requires actual accelerated completions. See
 [FUSE contracts](../shroot/fuse.md) for unsupported operations.
 
 The portal and session cases compile the production `LinuxGraphicalEnvironment`
@@ -65,7 +63,7 @@ a writable, deletable document export and a second FUSE mount until command
 exit, with both live and terminated daemons. It requires runtime-directory
 removal, intact source contents, an unrelated mount remaining usable, and the
 original application exit status. These checks pass on the installed SteamOS
-with both base execution and accelerated libc, under the ordinary guest user.
+with both Base and lazy entry, under the ordinary guest user.
 
 An independent Shroot launch that merely inherits another launch's bus address
 is not equivalent: portal authorization can depend on the requesting process's
@@ -77,7 +75,7 @@ the supervised launch, and do not disable descendant ownership to pass a test.
 
 ### Ubuntu Firefox Snap
 
-The Ubuntu recipe environment has been checked with its prepared libc, stock
+The earlier Ubuntu recipe acceptance used a prepared libc, stock
 systemd/snapd, a Weston Wayland session and Zink/Turnip on Adreno 840. Weston
 renders; the stock user manager, session bus and root-owned document portal
 start. Firefox 158.0, Snap revision 9056, renders a local test page, accepts
@@ -126,7 +124,7 @@ input, download, portal file selection, byte comparison and normal browser exit.
 The Weston 13.0.4 cycle also ended through guest `systemctl poweroff`, with
 supervisor exit zero; systemd had no failed units before shutdown. A subsequent
 focused real-init shutdown test covers the formerly failing host bind, 32 tmpfs
-mounts, preserved `/run/udev`, snapd-generator success and private-libc lifetime.
+mounts, preserved `/run/udev` and snapd-generator success.
 Deferred native births now retain their store connection across cache eviction;
 the runtime bind stays available until its consumers exit. The test also rejects
 device-submount remount warnings: metadata-only `/dev/full` pins no longer use
@@ -156,7 +154,7 @@ The focused init regression is:
 
 ```sh
 python3 test_snap.py --build BUILD --store STORE --snap firefox \
-    --libc-registry REGISTRY --user-session --namespace-only
+    --machine-entry --user-session --namespace-only
 ```
 
 With the content snap mounted in the same running guest, check its XKB mappings
@@ -711,13 +709,15 @@ Verify the actual editor, not just CLI exit status:
 - Close and relaunch normally; reject renderer/GPU crashes even if a recovered
   window looks correct. Keep GDB/extension testing as a separate workflow.
 
-Ubuntu's stock Code 1.142.0 (Electron), accelerated glibc 2.39, recipe Mesa 26.2.3
+Historical source-integration acceptance: Ubuntu's stock Code 1.142.0 (Electron),
+accelerated glibc 2.39, recipe Mesa 26.2.3
 and the production discovery node passed editor/save, external file change,
 integrated PTY and hardware-compositing checks on NX809J. Renderer seccomp
 remained installed. Its initial SIGTRAP exposed a common libc ABI defect:
-Shroot's thread storage had moved glibc's `pthread.tid`. The integration now
-appends storage after upstream fields and probes both main/created threads and
-recursive-mutex ownership. No Electron-specific bypass was added.
+Shroot's thread storage had moved glibc's `pthread.tid`. That integration was
+corrected before these checks and has since been removed. Lazy entry leaves
+glibc's thread layout untouched. No Electron-specific bypass was added. Current
+stock-libc acceptance is in the [SVC matrix](svc-rewriting.md#product-boundary).
 Code 1.142.0's CLI process-memory table is not an acceptance metric: its bundled
 `mainImpl.js` converts `%MEM` to bytes in `Xp` and applies the percentage
 conversion again in `formatProcessItem`. `/proc`, `ps` and `free` remain the

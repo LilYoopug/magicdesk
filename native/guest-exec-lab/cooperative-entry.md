@@ -1,61 +1,39 @@
 # Cooperative Entry Fixtures
 
 [Fixture guide](README.md) | [Runtime contract](../shroot/cooperative-entry.md) |
-[Libc source integration](../shroot/libc/README.md)
+[Lazy SVC entry](svc-rewriting.md)
 
 This guide covers reproduction, measurement boundaries and retained experiment
 conclusions. The runtime contract owns routing, FD publication, cancellation and
-sandbox semantics; it is not repeated here. The source integration guide owns
-installer deployment and the shared libc registry.
+sandbox semantics; it is not repeated here.
 
-Accelerated Shroot uses a prepared libc and the production entry. Shroot Base
-uses ordinary interception. Neither replaces package-owned libc files.
-Captured-request laboratory modes isolate costs and are not substitutes for a
-real libc or application test. ABI 6 is the current caller boundary.
-
-[Lazy SVC rewriting](svc-rewriting.md) investigates a different entry frontend.
-Its opcode/Go forwarding census and actual cooperative-entry cost controls are
-separate proofs; it is not yet a replacement for prepared libc.
+Shroot uses lazy entry in stock programs by default. Shroot Base uses ordinary
+interception. Neither replaces package-owned libc files. Captured-request
+laboratory modes isolate costs and are not substitutes for real application
+checks. ABI 6 is the internal caller boundary.
 
 ## Runtime And Libc Iteration
 
-Configure the native build with `MAGICDESK_GUEST_FIXTURES=ON` as described in the
-[fixture guide](README.md). Build an isolated musl fixture:
+Configure `MAGICDESK_GUEST_FIXTURES=ON` as described in the fixture guide.
+`test_cooperative_libc.c` is an ordinary workload, not a libc patch.
+For stock glibc, compile it against an existing distribution sysroot:
 
 ```sh
-JOBS=2 sh native/guest-exec-lab/build-cooperative-musl.sh build/cooperative-musl
-cmake --build app/build/shroot --target bootstrap supervisor -j2
-python native/guest-exec-lab/test_cooperative_libc.py \
-  app/build/shroot build/cooperative-musl --checks-only
+python native/guest-exec-lab/build_svc_glibc.py STOCK_SYSROOT OUTPUT --environment ubuntu
+python native/guest-exec-lab/test_svc_libc.py BUILD OUTPUT/probe-stock --integrated --checks-only
 ```
 
-For runtime-only changes, reuse that libc and rebuild the native targets. The
-entry provider is part of bootstrap and stays mapped for the process image;
-there is no guest dlopen or hot-swapping protocol. ABI or libc-hook changes
-require a matching libc rebuild. New workloads need only the probes relinked:
+The builder compiles and links only the probe, not libc. Its dynamic probe can
+be tested with `--dynamic-loader`, `--dynamic-libc` and `--dynamic-extra` from
+the same sysroot. Stock musl fixtures likewise need only the workload compiled
+against musl. `test_cooperative_libc.py BUILD STOCK_FIXTURE` accepts the
+static/dynamic probe pair and stock `sysroot/lib` layout for the broader
+workload matrix. Do not reuse a fixture containing the retired source hooks.
 
-```sh
-sh native/guest-exec-lab/build-cooperative-probes.sh build/cooperative-musl
-```
-
-The runner hashes staged artifacts and checks that they remain unchanged during
-execution. Static/dynamic native controls exercise the absent-provider path;
-guest controls use the same binaries with entry enabled and disabled.
+Runtime changes rebuild the native targets. The provider stays in bootstrap;
+there is no guest dlopen or hot-swapping protocol. Tests hash staged artifacts
+and compare the same stock binary under native, explicit Base and lazy entry.
 `--checks-only` omits timed workloads.
-
-The glibc builder takes a native build, prepared toolchain and output directory:
-
-```sh
-python native/guest-exec-lab/build_cooperative_glibc.py \
-  BUILD TOOLCHAIN OUTPUT --jobs 4
-python native/guest-exec-lab/test_cooperative_libc.py \
-  BUILD OUTPUT --libc-kind glibc --checks-only
-```
-
-Use `--keep` to retain its builder, `--resume EXACT_DIRECTORY` for that failed
-build, or `--probes-only` to update probes in a retained installed fixture.
-These isolated builders are development tools, not the end-user installer.
-They do not prove compatibility with every distribution's libc ABI.
 
 Run the entry/runtime model and guest checks separately:
 
@@ -83,8 +61,8 @@ a production median.
 
 The real-libc runner supports:
 - `--rounds N --scale N --workloads ...` for selected workload families.
-- `--reference-build BUILD --reference-musl FIXTURE --reference-kernel` for
-  interleaved comparison against preserved binaries and their matching ABI.
+- `--reference-build BUILD --reference-kernel` for
+  interleaved comparison against preserved runtimes with the same stock fixture.
 - `--proot-prefix PREFIX` for a PRoot control under the same shell UID.
 - `--sandbox` for actual argument-dependent kernel filters around timed calls.
 - `--directory-mode logical|imported` to distinguish directory ownership.
@@ -133,8 +111,8 @@ Physical-permission imports, watched files and overlays need separate results.
 
 ## Retained Performance Evidence
 
-These series document specific stages, not the performance of every subsequent
-build. Raw receipts are local artifacts under `build/cooperative-musl-results`;
+These historical series used source-integrated libc before its removal. They
+document specific stages, not the performance of the current lazy frontend. Raw receipts are local artifacts under `build/cooperative-musl-results`;
 they are not shipped assets or required files in a clean checkout.
 
 ### Path Admission And Native Births

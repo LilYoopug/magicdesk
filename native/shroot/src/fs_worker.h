@@ -42,7 +42,6 @@ int md_fs_worker_pause_end(struct md_fs_worker_pause *);
 /* One worker owns the namespace, image catalogue and both request transports.
  * Published work transfers to the supervisor. Queue locks never cover IO. */
 struct md_fs_worker_launch {
-    const char *libc_registry;
     const struct md_fs_attachment *attachments;
     unsigned attachment_count;
     int statistics;

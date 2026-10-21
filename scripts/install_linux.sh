@@ -32,10 +32,7 @@ defaults to automatic Turnip detection and a Wayland Plasma desktop.
   --gpu auto    Try Turnip when KGSL is accessible, otherwise use software
   --gpu software  Use the distribution's software renderer
   --gpu turnip  Build private Mesa/Zink/Turnip for a supported Adreno KGSL GPU
-  --libc MODE   keep (default), shroot (prepare compiled libc), base (disable selection)
-                On-device musl/glibc source build; original libc stays installed
-  --prepare-libc NAME_OR_IMAGE [--jobs N]  Prepare compiled libc for explicit comparison
-  --jobs N      libc/Mesa/KWin compiler jobs, 1-8 (default: 2)
+  --jobs N      Mesa/KWin/Weston compiler jobs, 1-8 (default: 2)
   --locale L    UTF-8 locale, e.g. ru_RU.UTF-8, or keep (default)
   --timezone Z  IANA zone, system (Android zone), or keep (default)
   --create-user USER  Create an optional guest account, with a locked password
@@ -53,7 +50,6 @@ defaults to automatic Turnip detection and a Wayland Plasma desktop.
   --print-system-setup  Print the guest setup script without running it
   --print-graphics-setup  Print the guest graphics setup script without running it
   --print-weston-setup  Print the guest Weston compatibility recipe
-  --print-libc-setup  Print the guest libc setup script without running it
   --print-mesa-patch  Print the embedded patch without running the installer
   --print-flatpak-gl-helper  Print the embedded Flatpak GL publisher
   --print-snap-gpu-helper  Print the embedded Snap GPU publisher
@@ -98,424 +94,6 @@ configurations() {
         'GNOME devkit requires a Linux system bus.'
 }
 
-# BEGIN GENERATED LIBC INTEGRATION
-libc_entry_abi() { printf "%s\n" "6"; }
-libc_build() {
-    cat <<'LIBC_BUILD'
-# Emitted by the guest recipe with its package-manager and payload helpers.
-# The writable work directory and read-only cache are explicit launch bindings.
-set -eu
-case "$jobs" in [1-8]) ;; *) echo 'Invalid compiler job count' >&2; exit 1 ;; esac
-work=/run/shroot-libc-build
-cache=/run/shroot-libc-cache
-target=${SHROOT_LIBC_BUILD_TARGET:-installed}
-case "$target" in installed|image) ;; *) echo 'Invalid libc build target' >&2; exit 1 ;; esac
-
-identify_libc() {
-    if [ -f /lib/ld-musl-aarch64.so.1 ]; then
-        kind=musl
-        interpreter=/lib/ld-musl-aarch64.so.1
-        original_libc=$interpreter
-        version=$("$interpreter" 2>&1 | sed -n 's/^Version \([0-9.]*\)$/\1/p')
-        runtime_loader=lib/libc.so
-    elif [ -f /lib/ld-linux-aarch64.so.1 ]; then
-        kind=glibc
-        interpreter=/lib/ld-linux-aarch64.so.1
-        # Upstream glibc ends its version sentence with a period; some distro banners do not.
-        version=$(LC_ALL=C "$interpreter" --version | sed -n '1{s/\.$//;s/.* \([0-9][0-9.]*\)$/\1/p;}')
-        original_libc=
-        for library in /lib/aarch64-linux-gnu/libc.so.6 /lib64/libc.so.6 /usr/lib/libc.so.6 /lib/libc.so.6; do
-            if [ -f "$library" ]; then original_libc=$library; break; fi
-        done
-        runtime_loader=lib/ld-linux-aarch64.so.1
-    else
-        echo 'No supported AArch64 musl/glibc loader; retaining Shroot Base.' >&2
-        exit 1
-    fi
-    case "$version" in ''|*[!0-9.]*|.*|*.|*..*)
-        printf 'Cannot identify libc version from %s (parsed: %s)\n' "$interpreter" "$version" >&2
-        exit 1 ;;
-    esac
-    [ -n "$original_libc" ] || { echo 'Cannot locate the installed libc' >&2; exit 1; }
-    loader_hash=$(sha256sum "$interpreter"); loader_hash=${loader_hash%% *}
-    libc_hash=$(sha256sum "$original_libc"); libc_hash=${libc_hash%% *}
-    manifest=$(printf 'shroot-libc-1\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
-        "$abi" "$kind" "$version" "$recipe" "$interpreter" "$original_libc" \
-        "$loader_hash" "$libc_hash" "$runtime_loader")
-    key=$(printf '%s\n' "$manifest" | sha256sum); key=${key%% *}
-    prefix=/opt/shroot/libc/$key
-}
-
-identify_libc
-if [ "$mode" = identify ]; then printf '%s\n' "$manifest"; exit 0; fi
-cd "$work"
-reuse_libc() {
-    printf '%s\n' "$manifest" > manifest
-    if [ -f "$cache/$key/manifest" ] && cmp -s manifest "$cache/$key/manifest"; then
-        printf '%s\n' "$key" > result
-        printf 'Reusing Shroot %s %s: %s\n' "$kind" "$version" "$key"
-        return 0
-    fi
-    return 1
-}
-if reuse_libc; then exit 0; fi
-trap 'status=$?; package_cleanup; exit "$status"' 0
-trap 'exit 130' INT
-trap 'exit 143' TERM
-printf 'Installing libc build dependencies...\n'
-install_libc_tools
-# Named environments now build in place; package upgrades may change their
-# libc. An OCI preparation instead targets the unchanged source image.
-if [ "$target" = installed ]; then identify_libc; fi
-if reuse_libc; then exit 0; fi
-mkdir -p "$work/tmp"
-TMPDIR=$work/tmp
-export TMPDIR
-extract_integration
-case "$kind" in
-    musl) source_url=https://musl.libc.org/releases/musl-$version.tar.gz ;;
-    glibc) source_url=https://ftp.gnu.org/gnu/glibc/glibc-$version.tar.xz ;;
-esac
-source_sha=
-case "$kind:$version" in
-    musl:1.2.5) source_sha=a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4 ;;
-    glibc:2.41) source_sha=a5a26b22f545d6b7d7b3dd828e11e428f24f4fac43c934fb071b6a7d0828e901 ;;
-esac
-printf 'Building private %s %s from upstream sources; distribution libc stays installed.\n' "$kind" "$version"
-archive=$work/${source_url##*/}
-curl --proto '=https' --proto-redir '=https' -fL --retry 3 --connect-timeout 30 -o "$archive.part" "$source_url"
-if [ -n "$source_sha" ]; then printf '%s  %s\n' "$source_sha" "$archive.part" | sha256sum -c -
-else printf 'Experimental source revision (HTTPS download): '; sha256sum "$archive.part"; fi
-mv "$archive.part" "$archive"
-mkdir source objects
-# Sources belong to the builder, not archive UIDs; work may be an Android bind.
-tar --no-same-owner -xf "$archive" -C source --strip-components=1
-if [ "$kind" = musl ]; then
-    python3 integration/libc/integrate_musl.py source
-else
-    python3 integration/libc/integrate_glibc.py source --library-path "$prefix/lib"
-fi
-cd objects
-if [ "$kind" = musl ]; then
-    CFLAGS='-O2 -mno-outline-atomics' ../source/configure --prefix="$prefix" --syslibdir="$prefix/lib"
-else
-    ../source/configure --prefix="$prefix" --libdir="$prefix/lib" --sysconfdir=/etc --disable-werror --enable-kernel=5.15
-    # Keep user data in the distribution; only ABI-coupled runtime modules
-    # belong to the private build. Makeconfig supplies these overridable paths.
-    printf '%s\n' 'complocaledir = /usr/lib/locale' 'localedir = /usr/share/locale' \
-        'i18ndir = /usr/share/i18n' 'zonedir = /usr/share/zoneinfo' > configparms
-    # glibc BZ 31928: -Wp bypasses GCC driver defaults on e.g. Ubuntu.
-    # Preserve configure's default (no fortification of libc itself), using
-    # driver-level flags. This does not change flags for guest applications.
-    printf '%s\n' 'no-fortify-source = -U_FORTIFY_SOURCE' \
-        'fortify-source = -U_FORTIFY_SOURCE' >> configparms
-fi
-make -j"$jobs"
-# Check exported symbols before staging: a runnable shell alone does not prove
-# that compiler defaults preserved glibc's public ABI.
-if [ "$kind" = glibc ]; then make -j"$jobs" check-abi; fi
-if [ "$kind" = musl ]; then make install DESTDIR="$work/stage"
-else make install install_root="$work/stage"; fi
-cd "$work"
-mkdir -p candidate/lib
-for library in "$work/stage$prefix/lib/"*.so*; do
-    [ ! -f "$library" ] || cp -L "$library" candidate/lib/
-done
-if [ "$kind" = glibc ]; then
-    # iconv modules use glibc-private symbols and cannot be borrowed from the OS.
-    cp -RL "$work/stage$prefix/lib/gconv" candidate/lib/
-fi
-cp manifest candidate/manifest
-loader=$work/candidate/$runtime_loader
-cat > probe.c <<'PROBE'
-#define _GNU_SOURCE
-#include <dlfcn.h>
-#include <fcntl.h>
-#include <pthread.h>
-#include <stdio.h>
-#include <sys/auxv.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#include "cooperative_entry.h"
-static void *thread_probe(void *unused) {
-    (void)unused;
-#ifdef __GLIBC__
-    struct thread_prefix { void *header[24]; void *list[2]; int tid; };
-    int tid=((struct thread_prefix *)pthread_self())->tid;
-    pthread_mutex_t lock=PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
-    if (tid!=gettid() || pthread_mutex_lock(&lock)) return (void *)1;
-    int owner=lock.__data.__owner;
-    if (pthread_mutex_unlock(&lock) || pthread_mutex_destroy(&lock) || owner!=tid) return (void *)1;
-#endif
-    return NULL;
-}
-int main(int argc,char **argv) {
-    unsigned (*abi)(void)=dlsym(RTLD_DEFAULT,"shroot_libc_entry_abi");
-    if (!abi || abi()!=MD_ENTRY_VERSION || argc!=2) return 1;
-    if (!md_entry_api_valid((const void *)getauxval(MD_AT_COOPERATIVE))) {
-        fputs("No compatible Shroot direct-entry runtime\n",stderr); return 3;
-    }
-    struct stat st;
-    int fd=open(argv[1],O_CREAT|O_EXCL|O_RDWR|O_CLOEXEC,0600);
-    if (fd<0 || write(fd,"ok",2)!=2 || fstat(fd,&st) || st.st_size!=2 || close(fd) || unlink(argv[1])) return 2;
-    pthread_t thread; void *result;
-    if (thread_probe(NULL) || pthread_create(&thread,NULL,thread_probe,NULL)
-        || pthread_join(thread,&result) || result) return 4;
-    puts("PASS private libc: entry ABI, file lifecycle and pthread ABI"); return 0;
-}
-PROBE
-cc -O2 -Iintegration/src probe.c -pthread -ldl -o probe
-# EVENT_WAIT: probe and shell completion; timeout rejects publication.
-timeout 30 "$loader" --library-path "$work/candidate/lib:/lib:/usr/lib" "$work/probe" "$work/probe-file"
-timeout 30 "$loader" --library-path "$work/candidate/lib:/lib:/usr/lib" /bin/sh -ec 'id; printf "PASS private libc shell\n"'
-if [ "$target" = installed ]; then
-    built_manifest=$manifest
-    identify_libc
-    [ "$manifest" = "$built_manifest" ] || {
-        echo 'Installed libc changed during compilation; retry preparation. Build not published.' >&2
-        exit 1
-    }
-fi
-printf '%s\n' "$key" > result
-LIBC_BUILD
-}
-libc_integration() {
-    cat <<'LIBC_INTEGRATION'
-import base64, json, sys, zlib
-from pathlib import Path
-root = Path(sys.argv[1])
-sources = json.loads(zlib.decompress(base64.b64decode('''
-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
-R/t1goMj8v53epMbCybdGYEyd4oYipIXBQqwQAcFv3Ns6uXyRQJodTUjN0cljVYt1qCi8VZyY+xxknXkL5g+jxygfA6PCWHVrbkP
-wM4CyoNRypKR58R4isqfk4Faq8E3GivFmAMDZiDv9EmK/g5v2v9Ysoby5qpQSC6SWMw8Y8viapW1u+JqJI9nULm0LZ7KpfDUFdqm
-LASSsKtcPifyUg4ClW1AJRtQuQZUqgGVaaCaI+IbjA3HzXeF+WPCHy5/ePzh88e03XTvVs9WjBMYNkitPNWAdj9X32wUjlctlDuw
-7CZ5zsVemNKzrvU+cRN9qO6hDwEY3RwfPjjtSdtte22/PX3UFkZeUR82XbqVl9WHOmGpTOtP3kEf/pUb6NoF9NIV9OGwfgHdsd3E
-Sa+Np6ura+c1xEkaGOo3zyv3iJ+ZWEXU86oQ4r+5m/hKMcO42wbihs1kY8rHu+3xijlkKIPG2j29Nma3GMrd1Vy9r1fv59X7S6qv
-69XX8+rrS6pv6NU38uobS6pv6tU38+qbS6q/0au/yau/UdXlU6GYJ1TjK4krYgfEw1oyXjHueib9oO/bZlt+6+ff1vNvG/m3zfzb
-G24982cxvvUCil23SEwvieauV2FYT5jbZOvmlMB0Ii0OZhkevj/Aj26MpnQmRdeSGQ1fGKodKgfqO5DDcNjqtfjmpSrknILqDN6g
-5CY3SDn0ZQ1T50vj+4YA1POZPD+RyVCz/28KcvvO9CXD5clLHjXOvCR5ybD3lCD5T0qRv86LFQfWOMljg9BB5ULxrUqyoCI/iMbF
-FHqeL95qIu2vdslJA1N+XXkUR6Vwmg4l+c2Pyy3tvUl6ODLy2DySZ1U4fPoVqjTW9NY0XInfZ3Mxx5s/FFpOyRYsyruQLgD8TZAC
-ncMAgyRPErlKr11DELSlOdVgeh3M1RuIPD/Ely9RHmLVLWYp5HzcId7jmVsq++L/MkGoSbwnlnS5lCy/qZQ3V24x1EMTZGAFhz3s
-yaAImVUvS5wozfPh4juswpBe7jPBtOjCv3PcDN9GiGcSYhEF08D3OKCpGkYRp88MoJBf0+sFCIvi52IiHR95UebP5uzJp8xvmFy4
-fj51ygk/6Edx+IFQika106ad4lRcukpt2nhtUY5D3NGPeMOplb94i06d5FlGceZUqZ3f/Riyp1h/ho7ItPJAv3RB/VdOduVNOn0k
-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
-''')))
-for name, content in sources.items():
-    target = root / name
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content)
-LIBC_INTEGRATION
-}
-# END GENERATED LIBC INTEGRATION
-
-libc_setup() {
-    printf 'abi=%s\n' "$(libc_entry_abi)"
-    cat <<'LIBC_SETUP'
-set -eu
-mode=$1
-jobs=$2
-recipe=$3
-case "$mode" in shroot|base|identify) ;; *) echo 'Invalid libc mode' >&2; exit 1 ;; esac
-case "$recipe" in ''|*[!a-f0-9]*) exit 1 ;; esac
-[ "${#recipe}" = 64 ] || exit 1
-if [ "$mode" = base ]; then
-    mkdir -p /etc/shroot
-    : > /etc/shroot/libc-base
-    echo 'Shroot Base selected for new launches; shared builds retained.'
-    exit 0
-fi
-LIBC_SETUP
-    distribution_support libc
-    cat <<'LIBC_SETUP'
-install_libc_tools() {
-    refresh_packages
-    case "$family" in
-        apk) packages ca-certificates build-base python3 curl linux-headers patch tar ;;
-        apt) packages ca-certificates build-essential python3 curl gawk bison texinfo linux-libc-dev patch xz-utils ;;
-        dnf) packages ca-certificates gcc gcc-c++ make python3 curl gawk bison texinfo kernel-headers glibc-devel patch tar xz ;;
-        zypper) packages ca-certificates gcc gcc-c++ make python3 curl gawk bison texinfo linux-glibc-devel glibc-devel patch tar xz ;;
-        pacman|recovery) packages ca-certificates base-devel python curl linux-api-headers ;;
-        xbps) packages ca-certificates base-devel python3 curl linux-headers patch ;;
-        *)
-            for tool in cc make python3 curl patch tar; do
-                command -v "$tool" >/dev/null 2>&1 || {
-                    echo "Missing $tool: install build tools in this image first." >&2; exit 1;
-                }
-            done ;;
-    esac
-}
-extract_integration() {
-    python3 - "$work/integration" <<'LIBC_PAYLOAD'
-LIBC_SETUP
-    libc_integration
-    cat <<'LIBC_SETUP'
-LIBC_PAYLOAD
-}
-LIBC_SETUP
-    libc_build
-}
-
 # Package-manager differences stay here; setup and the Mesa recipe share them.
 distribution_support() {
     cat <<'DISTRO'
@@ -532,17 +110,7 @@ case "$ID" in
     void) family=xbps ;;
     steamos) family=recovery ;;
 DISTRO
-    if [ "${1:-}" = libc ]; then
-        cat <<'DISTRO'
-    *)
-        family=unknown
-        for pair in 'apt-get:apt' 'apk:apk' 'dnf:dnf' 'zypper:zypper' 'xbps-install:xbps' 'pacman:pacman'; do
-            if command -v "${pair%:*}" >/dev/null 2>&1; then family=${pair#*:}; break; fi
-        done ;;
-DISTRO
-    else
-        printf '%s\n' '    *) echo "Unsupported distribution: $ID" >&2; exit 1 ;;'
-    fi
+    printf '%s\n' '    *) echo "Unsupported distribution: $ID" >&2; exit 1 ;;'
     cat <<'DISTRO'
 esac
 packages() {
@@ -4270,102 +3838,12 @@ package_exec() (
     [ "${FORCE_IPV4:-}" != 1 ] || set -- --env FORCE_IPV4=1 "$@"
     admin_exec "$package_target" --env DEBIAN_FRONTEND=noninteractive --env SYSTEMD_IN_CHROOT=1 "$@"
 )
-register_libc_recipe() {
-    libc_registry=$(shroot libc path) || fail 'Update MagicDesk: shared libc registry is unavailable.'
-    case "$libc_registry" in /*/artifacts) ;; *) fail 'Invalid libc registry path.' ;; esac
-    libc_home=${libc_registry%/artifacts}
-    mkdir -p "$libc_home" "$libc_registry" "$libc_home/work" || fail 'Cannot create the libc build directory.'
-    # Save only this downloaded script, never fetch a second MagicDesk artifact.
-    saved_recipe=$(mktemp "$libc_home/.installer.XXXXXX") || fail 'Cannot stage the libc recipe.'
-    cp "$0" "$saved_recipe" && chmod 600 "$saved_recipe" && mv -f "$saved_recipe" "$libc_home/install_linux.sh" \
-        || { rm -f "$saved_recipe"; fail 'Cannot register the libc recipe.'; }
-}
-prepare_libc() (
-    libc_name=$1
-    libc_mode=$2
-    libc_jobs=$3
-    libc_target=${4:-installed}
-    recipe=$(libc_setup | sha256sum); recipe=${recipe%% *}
-    if [ "$libc_mode" = base ]; then
-        libc_setup | admin_exec "$libc_name" -- /bin/sh -s -- base "$libc_jobs" "$recipe"
-        exit $?
-    fi
-    register_libc_recipe
-    work=$(mktemp -d "$libc_home/work/build.XXXXXX") || exit 1
-    printf 'Libc build work: %s\n' "$work"
-    printf 'Checking installed libc and the shared build cache...\n'
-    libc_setup | admin_exec "$libc_name" -- /bin/sh -s -- identify "$libc_jobs" "$recipe" > "$work/manifest" || exit $?
-    key=$(sha256sum "$work/manifest"); key=${key%% *}
-    if [ -f "$libc_registry/$key/manifest" ] && cmp -s "$work/manifest" "$libc_registry/$key/manifest"; then
-        printf 'Reusing Shroot libc: %s\n' "$key"
-    else
-        printf 'Preparing libc directly in %s (jobs: %s); no environment copy. Build packages are installed in this Linux.\n' "$libc_name" "$libc_jobs"
-        # Targets must exist before the explicit bindings are admitted.
-        admin_exec "$libc_name" -- /bin/sh -ec 'mkdir -p /run/shroot-libc-build /run/shroot-libc-cache' || exit $?
-        if libc_setup | package_exec "$libc_name" --env "SHROOT_LIBC_BUILD_TARGET=$libc_target" \
-                --bind "$work" /run/shroot-libc-build --bind-ro "$libc_registry" /run/shroot-libc-cache \
-                -- /bin/sh -s -- shroot "$libc_jobs" "$recipe"; then :; else
-            status=$?
-            printf 'Libc preparation failed; distribution libc was not replaced by Shroot. Build packages are retained. Work: %s\n' "$work" >&2
-            exit "$status"
-        fi
-        key=$(cat "$work/result") || fail 'Libc preparation returned no result.'
-    fi
-    case "$key" in ''|*[!a-f0-9]*) fail 'Invalid libc build result.' ;; esac
-    [ "${#key}" = 64 ] || fail 'Invalid libc build result.'
-    if [ -d "$work/candidate" ]; then
-        printf 'Publishing the verified libc build to the shared cache...\n'
-        shroot libc publish "$work/candidate" || {
-            [ -f "$libc_registry/$key/manifest" ] && cmp -s "$work/candidate/manifest" "$libc_registry/$key/manifest" \
-                || fail 'Could not publish the verified libc build.'
-        }
-    fi
-    [ -f "$libc_registry/$key/manifest" ] || fail 'Cached build was removed; retry libc preparation.'
-    printf 'Enabling libc selection for new launches of %s...\n' "$libc_name"
-    admin_exec "$libc_name" -- /bin/sh -ec \
-        'mkdir -p "/opt/shroot/libc/$1"
-        # Shutdown helpers use this libc too. Retain its mounts until the final
-        # namespace teardown, like the root filesystem, not umount.target.
-        dropin=/etc/systemd/system/opt-shroot-libc-.mount.d
-        mkdir -p "$dropin"
-        printf "%s\n" "[Unit]" "DefaultDependencies=no" > "$dropin/50-shroot-runtime.conf"
-        chmod 644 "$dropin/50-shroot-runtime.conf"
-        rm -f /etc/shroot/libc-base' sh "$key" || exit $?
-    printf 'Removing temporary libc build files...\n'
-    rm -rf "$work" || exit $?
-    printf 'Shroot libc prepared: %s. Select it explicitly with SHROOT_LIBC=compiled shroot ...\n' "$key"
-)
-prepare_libc_command() (
-    [ "$#" = 1 ] || { [ "$#" = 3 ] && [ "$2" = --jobs ]; } || fail 'Expected NAME_OR_IMAGE [--jobs N].'
-    target=$1
-    jobs=${3:-2}
-    case "$jobs" in [1-8]) ;; *) fail 'Compiler jobs must be 1-8.' ;; esac
-    require_magicdesk_version
-    shroot --probe | grep -q '^libc-registry=1$' || fail 'Update MagicDesk: shared libc registry is unavailable.'
-    register_libc_recipe
-    temporary=
-    target_kind=installed
-    if ! shroot path "$target" >/dev/null 2>&1; then
-        temporary=libc-build-$$-$(date +%s)
-        shroot install "$target" --name "$temporary"
-        target=$temporary
-        target_kind=image
-    fi
-    if prepare_libc "$target" shroot "$jobs" "$target_kind"; then
-        [ -z "$temporary" ] || shroot remove "$temporary"
-    else
-        [ -z "$temporary" ] || printf 'Build environment retained: %s\n' "$temporary" >&2
-        exit 1
-    fi
-)
-if [ "${1:-}" = --prepare-libc ]; then shift; prepare_libc_command "$@"; exit $?; fi
 if [ "$#" = 1 ] && [ "$1" = --print-mesa-patch ]; then mesa_patch; exit 0; fi
 if [ "$#" = 1 ] && [ "$1" = --print-flatpak-gl-helper ]; then flatpak_gl_helper; exit 0; fi
 if [ "$#" = 1 ] && [ "$1" = --print-snap-gpu-helper ]; then snap_gpu_helper; exit 0; fi
 if [ "$#" = 1 ] && [ "$1" = --print-system-setup ]; then system_setup; exit 0; fi
 if [ "$#" = 1 ] && [ "$1" = --print-graphics-setup ]; then graphics_setup; exit 0; fi
 if [ "$#" = 1 ] && [ "$1" = --print-weston-setup ]; then weston_setup; exit 0; fi
-if [ "$#" = 1 ] && [ "$1" = --print-libc-setup ]; then libc_setup; exit 0; fi
 if [ "$#" = 1 ] && [ "$1" = --print-desktop-session ]; then desktop_session; exit 0; fi
 if [ "$#" = 1 ] && [ "$1" = --print-audio-session ]; then audio_session; exit 0; fi
 if [ "$#" = 1 ] && [ "$1" = --print-steam-game ]; then steam_game; exit 0; fi
@@ -4381,7 +3859,6 @@ image=
 gui=
 protocol=both
 gpu=
-libc=
 jobs=2
 locale_name=
 zone=
@@ -4396,7 +3873,7 @@ downloads=
 import_work=
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --distro|--name|--image|--downloads|--gui|--protocol|--gpu|--libc|--jobs|--locale|--timezone|--create-user|--fonts|--cache|--package|--dns)
+        --distro|--name|--image|--downloads|--gui|--protocol|--gpu|--jobs|--locale|--timezone|--create-user|--fonts|--cache|--package|--dns)
             [ "$#" -ge 2 ] && [ -n "$2" ] || fail "Missing value for $1"
             case "$1" in
                 --distro) distro=$2 ;; --name) name=$2 ;; --image) image=$2 ;; --gui) gui=$2 ;;
@@ -4405,7 +3882,6 @@ while [ "$#" -gt 0 ]; do
                 --cache) cache=$2 ;;
                 --package) extras="${extras:+$extras }$2" ;; --dns) dns=$2 ;;
                 --downloads) downloads=$2 ;;
-                --libc) libc=$2 ;;
             esac
             shift 2 ;;
         --yes) yes=yes; shift ;;
@@ -4444,11 +3920,8 @@ if [ "$yes" = no ]; then
         if [ "$distro" = steamos ] && [ "$resume" = no ]; then default_gpu=auto; fi
         ask 'Graphics: keep/software/auto/turnip (Adreno KGSL; builds Mesa)' "$default_gpu"; gpu=$answer
     fi
-    if [ -z "$libc" ]; then
-        ask 'Linux libc: keep (distribution libc)/shroot (compiled comparison)/base' keep; libc=$answer
-    fi
-    if { [ "$libc" = shroot ] || [ "$gpu" = turnip ] || [ "$gpu" = auto ] || [ "$gui" = plasma ]; } && [ "$jobs" = 2 ]; then
-        ask 'Compiler jobs for libc/Mesa/KWin (1-8)' 2; jobs=$answer
+    if { [ "$gpu" = turnip ] || [ "$gpu" = auto ] || [ "$gui" = plasma ] || [ "$gui" = weston ]; } && [ "$jobs" = 2 ]; then
+        ask 'Compiler jobs for Mesa/KWin/Weston (1-8)' 2; jobs=$answer
     fi
     if [ -z "$locale_name" ]; then ask 'Locale, e.g. ru_RU.UTF-8; keep leaves it unchanged' keep; locale_name=$answer; fi
     if [ -z "$zone" ]; then ask 'Timezone: system, IANA zone, or keep' keep; zone=$answer; fi
@@ -4479,7 +3952,6 @@ elif [ "$distro" = steamos ]; then
     gui=${gui:-plasma}; gpu=${gpu:-auto}; fonts=${fonts:-keep}
 else gui=${gui:-apps}; fonts=${fonts:-basic}; fi
 gpu=${gpu:-keep}
-libc=${libc:-keep}
 locale_name=${locale_name:-keep}
 zone=${zone:-keep}
 dns=${dns:-system}
@@ -4489,8 +3961,6 @@ case "$gui" in none|apps|xfce|weston|plasma|gnome|keep) ;; *) fail 'Invalid GUI 
 case "$protocol" in both|x11|wayland) ;; *) fail 'Protocol must be both, x11 or wayland.' ;; esac
 case "$gpu" in keep|software|turnip|auto) ;; *) fail 'GPU must be keep, software, auto or turnip.' ;; esac
 case "$jobs" in [1-8]) ;; *) fail 'Jobs must be between 1 and 8.' ;; esac
-case "$libc" in keep|shroot|base) ;; *) fail 'Libc must be keep, shroot or base.' ;; esac
-if [ "$libc" = shroot ]; then export SHROOT_LIBC=compiled; fi
 case "$locale_name" in
     keep|C.UTF-8) ;;
     *) printf '%s\n' "$locale_name" | grep -Eq '^[a-z]{2,3}_[A-Z]{2}\.UTF-8$' || fail 'Expected a UTF-8 locale such as en_US.UTF-8.' ;;
@@ -4535,9 +4005,8 @@ if [ -n "$image" ]; then source_kind=oci; else image=$source; fi
 printf '\n%s %s ARM64 | %s | GUI=%s | graphics=%s\n' "$distro" "$version" "$name" "$gui" "$gpu"
 printf 'Locale=%s | timezone=%s | fonts=%s | application entries=%s\n' "$locale_name" "$zone" "$fonts" "$protocol"
 printf 'Guest account=%s | extra packages=%s | package cache=%s\n' "${new_user:-unchanged}" "${extras:-none}" "$cache"
-printf 'Linux libc: %s\n' "$libc"
-if [ "$libc" = shroot ] || [ "$gpu" = turnip ] || [ "$gpu" = auto ] || [ "$gui" = plasma ]; then
-    printf 'Compiler jobs for libc/Mesa/KWin: %s\n' "$jobs"
+if [ "$gpu" = turnip ] || [ "$gpu" = auto ] || [ "$gui" = plasma ] || [ "$gui" = weston ]; then
+    printf 'Compiler jobs for Mesa/KWin/Weston: %s\n' "$jobs"
 fi
 if [ "$resume" = yes ]; then printf 'Continue the existing environment without replacing user data.\n'
 else printf 'Source: %s\nNetwork: %s\n' "$image" "$(dns_description)"; fi
@@ -4568,8 +4037,8 @@ finish() {
         printf '\nInstallation stopped while %s (exit %s).\n' "$stage" "$status" >&2
         if [ "$ready" = yes ]; then
             printf 'Environment retained. Repeat your options with --name %s --resume (do not reinstall).\n' "$name" >&2
-            printf 'GUI=%s GPU=%s jobs=%s locale=%s timezone=%s fonts=%s libc=%s\n' \
-                "$gui" "$gpu" "$jobs" "$locale_name" "$zone" "$fonts" "$libc" >&2
+            printf 'GUI=%s GPU=%s jobs=%s locale=%s timezone=%s fonts=%s\n' \
+                "$gui" "$gpu" "$jobs" "$locale_name" "$zone" "$fonts" >&2
         else
             printf 'Inspect shroot list before retrying an interrupted installation.\n' >&2
         fi
@@ -4580,9 +4049,6 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 runtime_features=$(shroot --probe)
 printf '%s\n' "$runtime_features"
-if [ "$libc" != keep ]; then
-    printf '%s\n' "$runtime_features" | grep -q '^libc-registry=1$' || fail 'Update MagicDesk: shared libc registry is unavailable.'
-fi
 if [ "$resume" = no ]; then
     case "$source_kind" in
         recovery) prepare_recovery ;;
@@ -4621,12 +4087,6 @@ setup_exec() {
     [ -z "${setup_phase:-}" ] || set -- --env MAGICDESK_BUILD_PHASE="$setup_phase" "$@"
     package_exec "$name" "$@"
 }
-setup_libc() {
-    if [ "$libc" != keep ]; then
-        stage="preparing the $libc libc runtime"
-        prepare_libc "$name" "$libc" "$jobs"
-    fi
-}
 setup_build() {
     build_label=$1
     build_payload=$2
@@ -4634,15 +4094,10 @@ setup_build() {
     unset setup_phase
     build_recipe=$("$build_payload" | sha256sum)
     build_recipe=${build_recipe%% *}
-    if [ "$libc" = shroot ]; then
-        stage="installing build dependencies for $build_label"
-        setup_phase=dependencies
-        "$build_payload" | setup_exec "$@" "$build_recipe"
-        # Package dependencies can replace libc. Match the final bytes before
-        # starting compiler processes, without changing their link-time ABI.
-        setup_libc
-        setup_phase=build
-    fi
+    stage="installing build dependencies for $build_label"
+    setup_phase=dependencies
+    "$build_payload" | setup_exec "$@" "$build_recipe"
+    setup_phase=build
     stage="preparing the $build_label"
     "$build_payload" | setup_exec "$@" "$build_recipe"
     unset setup_phase
@@ -4704,14 +4159,6 @@ if [ "$distro" = steamos ]; then
             fi
         done
     '
-fi
-
-# Source builds prepare libc after their dependencies; without a source-build
-# stage, apply the selected runtime here. Base must precede any build launch.
-if [ "$libc" != shroot ] || {
-    [ "$gpu" = keep ] && [ "$gui" != plasma ] && [ "$gui" != weston ] && [ "$gui" != keep ]
-}; then
-    setup_libc
 fi
 
 if [ "$gpu" != keep ]; then

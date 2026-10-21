@@ -28,7 +28,6 @@ struct md_filesystem {
     struct md_ofd_orders *cursors;
     struct md_ipc_credentials *ipc;
     struct md_shm_bridge *shm_bridge;
-    struct md_libc_registry *libc_registry;
     struct md_provider_tree *devices; /* borrowed launch-owned /dev projection */
     struct md_control_file render_device; /* launch-admitted optional KGSL discovery */
     struct md_resource_wakeup *wakeup; /* borrowed filesystem event-loop owner */

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare stock libc machine entry against the existing source-built control."""
+"""Verify stock libc contracts and compare native, Base and lazy entry."""
 import argparse
 import hashlib
 import json
@@ -14,7 +14,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('build', type=Path)
     parser.add_argument('stock', type=Path)
-    parser.add_argument('source', type=Path)
     parser.add_argument('--rounds', type=int, default=8)
     parser.add_argument('--checks-only', action='store_true')
     parser.add_argument('--syscall', type=int, default=79, help='AArch64 discovery syscall, not an ABI rule')
@@ -44,7 +43,7 @@ def main():
         suite.report['kernel'] = suite.command(['uname', '-a'], quiet=True).strip()
         root, native = suite.base + '/root', suite.base + '/native'
         suite.command(['mkdir', '-p', root + '/bin', root + '/tmp', root + '/lib', native])
-        files = [(args.stock, root + '/bin/stock'), (args.source, root + '/bin/source'),
+        files = [(args.stock, root + '/bin/stock'),
                  (args.build / 'libmagicdesk_guest_trace_svc_patch.so', root + '/bin/tracer'),
                  (args.build / 'libmagicdesk_guest_service.so', suite.base + '/service'),
                  (args.build / 'libmagicdesk_guest_test_signal_delivery.so', suite.base + '/signals')]
@@ -64,18 +63,16 @@ def main():
         guest = [suite.runner, '--store', suite.base + '/store', '--user', '0:0',
                  '--env', 'MD_BENCH_WARMUP=1',
                  '--env', 'MD_SVC_NUMBER=' + str(args.syscall)]
-        if not args.integrated: guest += ['--env', 'MD_SVC_SIGNAL_PROOF=1']
+        if not args.integrated: guest += ['--env', 'MD_SVC_SIGNAL_PROOF=1', '--env', 'SHROOT_MACHINE_ENTRY=0']
         if args.threaded: guest += ['--env', 'MD_LIBC_THREADED=1']
         guest += ['--']
         launches = {
             'native': ['env', 'MD_BENCH_WARMUP=1', *(['MD_LIBC_THREADED=1'] if args.threaded else []), root + '/bin/stock', native],
-            'base': [*guest, '/bin/stock', '/tmp'],
-            'source': [*guest, '/bin/source', '/tmp'],
+            'base': [*guest[:-1], '--env', 'SHROOT_MACHINE_ENTRY=0', '--', '/bin/stock', '/tmp'],
             'machine': [*guest, '/bin/tracer', 'edge', '/bin/stock', '/tmp'],
         }
         if args.integrated:
-            launches['machine'] = [*guest[:-1], '--env', 'SHROOT_MACHINE_ENTRY=1',
-                                   '--statistics', '--', '/bin/stock', '/tmp']
+            launches['machine'] = [*guest[:-1], '--statistics', '--', '/bin/stock', '/tmp']
         evidence_prefix = 'SVC_RUNTIME_STATS ' if args.integrated else 'SVC_EDGE_STATS '
         def machine_evidence(output):
             items = records(output, evidence_prefix)
@@ -147,7 +144,7 @@ def main():
         if not args.checks_only:
             series = {mode: [s['nanoseconds'] for s in suite.report['samples'] if s['mode'] == mode] for mode in modes}
             suite.report['mediansMs'] = {mode: statistics.median(values)/1e6 for mode, values in series.items()}
-            suite.report['machineToSourcePaired'] = statistics.median(a/b for a, b in zip(series['machine'], series['source']))
+            suite.report['machineToBasePaired'] = statistics.median(a/b for a, b in zip(series['machine'], series['base']))
             print(suite.report['mediansMs'], flush=True)
         suite.report['passed'] = True
         suite.command(['rm', '-rf', suite.base])

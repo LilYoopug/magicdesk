@@ -233,14 +233,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--build', type=Path, required=True)
     parser.add_argument('--store', required=True)
-    parser.add_argument('--libc-registry')
     args = parser.parse_args()
     from test_oci_services import Suite
     suite = Suite(Path('build/memfd-view-results'), args.build)
     target = '/tmp/md-memfd-' + suite.report['id']
     prefix = [suite.runner, '--store', args.store, '--user', '0:0']
-    if args.libc_registry:
-        prefix += ['--libc-registry', args.libc_registry]
     try:
         suite.transport.upload(suite.client, Path(__file__), suite.base + '/test.py')
         suite.command(prefix + ['--', '/bin/mkdir', target])

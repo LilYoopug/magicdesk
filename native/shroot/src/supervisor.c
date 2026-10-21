@@ -7843,12 +7843,8 @@ int main(int argc, char **argv) {
     if (network_error) { errno=-network_error; perror("Shroot network profile"); return 125; }
     unsigned attachment_count = 0;
     const char *gamepad_endpoint=NULL;
-    const char *libc_registry=NULL;
     if (argument<argc && !strcmp(argv[argument],"--gamepad-endpoint")) {
         CHECK(argument+2<argc && *argv[argument+1]); gamepad_endpoint=argv[argument+1]; argument+=2;
-    }
-    if (argument<argc && !strcmp(argv[argument],"--libc-registry")) {
-        CHECK(argument+2<argc && argv[argument+1][0]=='/'); libc_registry=argv[argument+1]; argument+=2;
     }
     while (argument < argc && (!strcmp(argv[argument], "--bind") || !strcmp(argv[argument], "--bind-ro"))) {
         CHECK(argument+2 < argc && attachment_count < MD_FS_MOUNTS_MAX);
@@ -7946,7 +7942,6 @@ int main(int argc, char **argv) {
         struct md_input_launch input={.endpoint=gamepad_endpoint,.wake_fd=fd_ready};
         struct md_fs_worker_launch fs_launch={.attachments=attachments,.attachment_count=attachment_count,
             .statistics=statistics!=NULL,.inherited=&inherited_ipc,.input=&input,.network=&network_profile};
-        fs_launch.libc_registry=libc_registry;
         int startup = md_fs_worker_start(store, endpoint, admitted_path, tasks, fd_exchanges, &fs_launch, &filesystem);
         md_ipc_inherited_release(&inherited_ipc);
         if (startup) errno = -startup;

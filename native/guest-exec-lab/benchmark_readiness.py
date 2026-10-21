@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Interleave Base/libc filesystem, readiness, idle and startup against a reference."""
+"""Interleave Base/lazy entry filesystem, readiness, idle and startup against a reference."""
 import argparse
 import json
 from pathlib import Path
@@ -14,7 +14,6 @@ def main():
     parser.add_argument('--build', required=True, type=Path)
     parser.add_argument('--reference', required=True, type=Path)
     parser.add_argument('--store', required=True)
-    parser.add_argument('--libc-registry', required=True)
     parser.add_argument('--rounds', type=int, default=5)
     parser.add_argument('--iterations', type=int, default=10000)
     parser.add_argument('--workload', action='append', choices=(
@@ -33,24 +32,21 @@ def main():
                                suite.base + '/benchmark.c')
         suite.command([suite.runner, *base, '--', '/usr/bin/cc', '-O2', '-Wall', '-Wextra',
                        target + '/benchmark.c', '-o', target + '/benchmark'])
-        for source in (Path(__file__).with_name('test_libc_selection_guest.c'),
-                       Path(__file__).resolve().parents[1] / 'shroot/src/cooperative_entry.h'):
-            suite.transport.upload(suite.client, source, suite.base + '/' + source.name)
-        suite.command([suite.runner, *base, '--', '/usr/bin/cc', '-O2', '-I' + target,
-                       target + '/test_libc_selection_guest.c', '-ldl', '-o', target + '/libc-probe'])
         reference = suite.base + '/reference'
         suite.command(['mkdir', reference])
         suite.report['referenceHashes'] = suite.stage_runtime(args.reference, reference)
-        suite.report['scope'] = dict(store=args.store, registry=args.libc_registry,
+        suite.report['scope'] = dict(store=args.store,
             fixture='same guest binary and installed userspace; no diagnostics or affinity',
             timing='loop wall/caller CPU; time -p covers full launch and reaped descendants')
         modes = {}
         for name, runner in [('current', suite.runner), ('reference', reference + '/libmagicdesk_guest_run.so')]:
-            modes[name + '-base'] = [runner, *base]
-            modes[name + '-libc'] = [runner, *base, '--libc-registry', args.libc_registry]
+            modes[name + '-base'] = [runner, *base, '--env', 'SHROOT_MACHINE_ENTRY=0']
+            modes[name + '-lazy'] = [runner, *base, '--env', 'SHROOT_MACHINE_ENTRY=1']
         for name, prefix in modes.items():
-            suite.command([*prefix, '--', target + '/libc-probe',
-                           'shroot' if name.endswith('-libc') else 'base'])
+            output = suite.command([*prefix, '--statistics', '--', target + '/benchmark', 'file-stat', '1024'])
+            counts = re.findall(r'cooperativeCompleted=(\d+)', output)
+            assert counts and (sum(map(int, counts)) > 0 if name.endswith('-lazy')
+                               else sum(map(int, counts)) == 0), (name, output)
         workloads = {'poll': [target + '/benchmark', 'poll', str(args.iterations)],
                      'epoll': [target + '/benchmark', 'epoll', str(args.iterations)],
                      'idle': [target + '/benchmark', 'idle', '1'],

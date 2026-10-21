@@ -13,7 +13,6 @@
 #include "device_events.h"
 #include "device_tree.h"
 #include "network_resolver.h"
-#include "libc_registry.h"
 #include <errno.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -31,7 +30,6 @@ struct md_fs_worker {
     struct md_resource_wakeup *wakeup;
     int stop, ready, error, statistics;
     const char *store, *endpoint, *admit;
-    const char *libc_registry;
     struct md_task_registry *tasks;
     struct md_fd_exchanges *exchanges;
     struct md_mount_namespace *mounts;
@@ -159,10 +157,6 @@ static void *run(void *context) {
         .cursors=w->cursors,.ipc_store=w->store};
     if (!error) error = md_fs_mounts_open(&fs, w->attachments, w->attachment_count);
     if (!error) {
-        int optional=md_libc_registry_open(w->libc_registry,&fs.libc_registry);
-        if (optional) fprintf(stderr,"Shroot Base: libc registry unavailable: %s\n",strerror(-optional));
-    }
-    if (!error) {
         error=md_network_resolver_prepare(&fs,w->network);
         if (error) fprintf(stderr,"Shroot resolver: %s; supply --dns IPv4 or prepare /etc/resolv.conf\n",strerror(-error));
     }
@@ -218,7 +212,6 @@ static void *run(void *context) {
     md_control_file_release(fs.render_device);
     md_device_events_stop(w->device_events);
     md_fs_mounts_close(&fs);
-    md_libc_registry_close(fs.libc_registry);
     md_fs_storage_close(&storage);
     md_ipc_credentials_close(fs.ipc);
     md_image_catalogue_close(images); md_inode_store_close(store);
@@ -262,7 +255,6 @@ int md_fs_worker_start(const char *store, const char *endpoint, const char *admi
     w->tasks = tasks;
     w->exchanges=exchanges;
     if (launch) {
-        w->libc_registry=launch->libc_registry;
         w->statistics=launch->statistics;
         w->attachments=launch->attachments; w->attachment_count=launch->attachment_count;
         w->inherited=launch->inherited; w->input=launch->input; w->network=launch->network;

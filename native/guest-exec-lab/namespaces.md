@@ -305,8 +305,7 @@ It runs with
 implicit proc and with stock `unshare --pid --fork --mount-proc`.
 Foreign mount-table checks use a different root and mount namespace, verify
 openat2 constraints, O_PATH/error behavior, POLLPRI changes and retained reads
-after target exit. `--libc-registry PATH` repeats the workflow with compatible
-prepared libc selection.
+after target exit. The workflow uses stock libraries and the default lazy entry.
 Its selector fixture checks proc/watch/native reuse in both filter orders,
 fork/exec retention, and typed netlink duplication through dup, dup3 and both
 fcntl commands. Independent child cases check flags, source closure, inherited
@@ -320,7 +319,7 @@ must observe normal completion inside a PID namespace.
 The fixture also checks explicit PI-futex rejection in a logical PID namespace,
 libc's PI-mutex admission and ordinary-mutex fallback, with private/shared and
 clock flags and nondumpable callers. The native PID view retains working PI
-mutexes. `--libc-registry PATH` selects the prepared libc for these workflows.
+mutexes. Both workflows use stock libc, without a separate preparation stage.
 
 `test_desktop_services_runtime.py BUILD STORE` checks a stock system D-Bus daemon,
 authentication from the `developer` account and PipeWire's real `pw-cli info 0`

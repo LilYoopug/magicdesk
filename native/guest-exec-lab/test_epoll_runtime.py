@@ -2,7 +2,7 @@
 """Mixed native/control epoll through the production shell runtime."""
 import argparse
 from pathlib import Path
-from test_oci_services import Suite
+from test_oci_services import Suite, add_machine_entry_argument
 
 MODES = ('mixed', 'filtered', 'shared', 'shared-filtered', 'close-filtered', 'retire-filtered',
          'poll-sandbox', 'poll-sandbox-protected')
@@ -13,18 +13,16 @@ def main():
     parser.add_argument('--store', required=True)
     parser.add_argument('--repetitions', type=int, default=1)
     parser.add_argument('--trace', action='store_true', help='Exercise guest strace across readiness and signals')
-    parser.add_argument('--machine-entry', action='store_true')
+    add_machine_entry_argument(parser)
     parser.add_argument('--diagnostics', action='store_true')
     parser.add_argument('--mode', choices=MODES,
                         action='append', help='Select focused cases; default runs all modes')
     args = parser.parse_args()
     if args.repetitions < 1:
         parser.error('--repetitions must be positive')
-    suite = Suite(args.build, args.build)
+    suite = Suite(args.build, args.build, machine_entry=args.machine_entry)
     target = '/md-epoll-' + suite.report['id']
-    prefix = [suite.runner, '--store', args.store, '--user', '0:0']
-    if args.machine_entry:
-        prefix += ['--env', 'SHROOT_MACHINE_ENTRY=1']
+    prefix = suite.guest(args.store, '--user', '0:0')
     if args.diagnostics:
         prefix += ['--diagnostics']
     created = False

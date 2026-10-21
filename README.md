@@ -487,14 +487,11 @@ applications and system drivers, with a nested Plasma desktop and automatic
 Turnip selection; see the [recovery-image recipe](docs/shroot.md#steamos-recovery-image).
 Several independent environments can coexist.
 
-The installer offers on-device libc acceleration, selected by default in this
-development version. It builds a private musl/glibc with direct syscall entry
-and shares compatible builds through a local registry, without replacing the
-distribution's original libraries. **Shroot Base** runs with the unmodified
-libc; it remains available when no compatible build is prepared. This deployment
-is experimental, and a prepared library does not imply the same acceleration
-inside every application sandbox. Choosing Base does not prevent enabling it
-later: see [acceleration for an installed environment](docs/shroot.md#enable-after-installation).
+Shroot uses lazy syscall entry in unmodified ARM64 programs by default, including
+stock glibc/musl and Go. It needs no libc compilation or loader replacement.
+**Shroot Base** remains the ordinary interception path for unsupported sites,
+application filters and explicit `--env SHROOT_MACHINE_ENTRY=0` diagnosis.
+See [acceleration and limits](docs/shroot.md#syscall-acceleration).
 
 After installation:
 

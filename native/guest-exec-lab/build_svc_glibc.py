@@ -10,7 +10,6 @@ from test_oci_services import Suite
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('stock', type=Path, help='stock toolchain sysroot')
-    parser.add_argument('source', type=Path, help='prepared libc sysroot')
     parser.add_argument('output', type=Path)
     parser.add_argument('--environment', default='ubuntu-fuse')
     args = parser.parse_args()
@@ -22,20 +21,17 @@ def main():
             archive = Path(temporary) / 'inputs.tar'
             with tarfile.open(archive, 'w') as out:
                 out.add(args.stock / 'usr/include', arcname='include')
-                for kind, directory in (('stock', args.stock / 'usr/lib/aarch64-linux-gnu'),
-                                        ('source', args.source / 'usr/lib64')):
-                    for name in ('libc.a', 'crt1.o', 'crti.o', 'crtn.o'):
-                        out.add(directory / name, arcname=kind + '/' + name)
-                    if kind == 'stock':
-                        for name in ('Scrt1.o', 'libc.so.6', 'libc_nonshared.a', 'ld-linux-aarch64.so.1', 'libgcc_s.so.1'):
-                            out.add(directory / name, arcname=kind + '/' + name)
+                directory = args.stock / 'usr/lib/aarch64-linux-gnu'
+                for name in ('libc.a', 'crt1.o', 'crti.o', 'crtn.o', 'Scrt1.o', 'libc.so.6',
+                             'libc_nonshared.a', 'ld-linux-aarch64.so.1', 'libgcc_s.so.1'):
+                    out.add(directory / name, arcname='stock/' + name)
                 out.add(lab / 'test_cooperative_libc.c', arcname='probe.c')
                 out.add(lab / 'build-svc-glibc-probes.sh', arcname='build.sh')
             suite.transport.upload(suite.client, archive, suite.base + '/inputs.tar')
         suite.command(['tar', '-oxf', suite.base + '/inputs.tar', '-C', suite.base])
         suite.command(['shroot', 'exec', args.environment, '--user', 'root',
                        '--bind', suite.base, '/tmp', '--', '/bin/sh', '/tmp/build.sh'], timeout=120)
-        for kind in ('stock', 'source', 'stock-dynamic'):
+        for kind in ('stock', 'stock-dynamic'):
             suite.transport.download(suite.client, suite.base + '/probe-' + kind,
                                      args.output / ('probe-' + kind), overwrite=True)
         suite.command(['rm', '-rf', suite.base])

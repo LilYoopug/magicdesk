@@ -34,7 +34,7 @@ def main():
                                  'debugger', 'pid-namespace', 'writable', 'shared'):
             output = suite.command([suite.runner, *(['--diagnostics'] if args.diagnostics else []),
                                     '--store', suite.base + '/store', '--user', '0:0',
-                                    '--env', 'MD_SVC_SIGNAL_PROOF=1', '--',
+                                    '--env', 'SHROOT_MACHINE_ENTRY=0', '--env', 'MD_SVC_SIGNAL_PROOF=1', '--',
                                     '/bin/tracer', 'edge', '/bin/lifecycle', '/tmp', mode], timeout=90, quiet=True)
             assert 'PASS SVC lifecycle:' in output
             totals = [json.loads(s[len('SVC_EDGE_STATS '):]) for s in output.splitlines() if s.startswith('SVC_EDGE_STATS ')]

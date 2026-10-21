@@ -83,7 +83,7 @@ void md_boot(uintptr_t *kernel_stack) {
         long released=md_adapter_buffer_release();
         if (check<0) md_die("probe private-table helper",check);
         if (released<0) md_die("probe mapped request release",released);
-        const char message[] = "guest-runtime: aarch64 shell syscall adapter ready\nlibc-registry=1\n";
+        const char message[] = "guest-runtime: aarch64 shell syscall adapter ready\nmachine-entry=1\n";
         RAW3(write, 1, message, sizeof(message) - 1);
         RAW1(exit_group, 0);
     }
@@ -195,10 +195,15 @@ void md_boot(uintptr_t *kernel_stack) {
     md_files.connections = &connections;
     memcpy(process_image.executable_object, command.object, sizeof(command.object));
     process_image.executable_path = md_executable;
-    int machine_entry=0;
-    for (size_t i=0;namespace && i<envc;++i)
-        if (md_equal(env[i],"SHROOT_MACHINE_ENTRY=1"))
-            machine_entry=md_guest_buffer_control(MD_BUFFER_MACHINE_ADMIT,0,0)==1;
+    int machine_entry=1;
+    for (size_t i=0;i<envc;++i) {
+        if (!md_prefix(env[i],"SHROOT_MACHINE_ENTRY=")) continue;
+        if (md_equal(env[i],"SHROOT_MACHINE_ENTRY=0")) machine_entry=0;
+        else if (md_equal(env[i],"SHROOT_MACHINE_ENTRY=1")) machine_entry=1;
+        else md_die("SHROOT_MACHINE_ENTRY must be 0 or 1",-EINVAL);
+    }
+    machine_entry=namespace && machine_entry
+        && md_guest_buffer_control(MD_BUFFER_MACHINE_ADMIT,0,0)==1;
     struct md_image program;
     r = md_interception_map_image((int)fd, 0);
     if (!r) r = md_elf_load((int)fd, 0, &program);

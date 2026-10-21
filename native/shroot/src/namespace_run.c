@@ -30,7 +30,6 @@ void md_boot(uintptr_t *stack) {
     const char *user = NULL;
     const char *groups = NULL;
     const char *hostname = NULL;
-    const char *libc_registry = NULL;
     struct md_network_profile network = {0};
     const char *gamepad_endpoint = NULL;
     char *overrides[128]; unsigned override_count = 0;
@@ -57,8 +56,6 @@ void md_boot(uintptr_t *stack) {
         if (md_equal(argv[program], "--store") && !store) store = argv[program + 1];
         else if (md_equal(argv[program], "--cwd")) cwd = argv[program + 1];
         else if (md_equal(argv[program], "--home")) home = argv[program + 1];
-        else if (md_equal(argv[program], "--libc-registry") && !libc_registry && argv[program+1][0]=='/')
-            libc_registry=argv[program+1];
         else if (md_equal(argv[program], "--gamepad-endpoint") && !gamepad_endpoint) gamepad_endpoint=argv[program+1];
         else if (md_network_profile_option(argv[program])) {
             int error=md_network_profile_add(&network,argv[program],argv[program+1]);
@@ -144,7 +141,6 @@ void md_boot(uintptr_t *stack) {
         if (hostname) { args[n++]="--hostname"; args[n++]=(char *)hostname; }
         n+=md_network_profile_arguments(&network,args+n);
         if (gamepad_endpoint) { args[n++]="--gamepad-endpoint"; args[n++]=(char *)gamepad_endpoint; }
-        if (libc_registry) { args[n++]="--libc-registry"; args[n++]=(char *)libc_registry; }
         for (unsigned i = 0; i < attachment_count; ++i) {
             args[n++] = attachments[i].readonly ? "--bind-ro" : "--bind";
             args[n++] = (char *)attachments[i].source; args[n++] = (char *)attachments[i].target;

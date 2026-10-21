@@ -228,13 +228,12 @@ the mount-cleanup assertions succeed; this is not advertised as freezer support.
 
 Init fixtures mount private `/tmp` and `/var/tmp`, as well as `/run`, before
 booting systemd. Its tmpfiles cleanup must not remove another launch's compiler
-files. The libc builder additionally exports a temporary directory under its
-own explicitly bound work directory.
+files.
 
-The Snap fixture's `--libc-registry PATH` selects prepared replacements and
-requires a dynamic entry-ABI/IO probe under the booted init. This checks the
-Ubuntu userland, not every snap's private libc. Snap images select their own
-matching libc, and unprepared or static binaries retain Base.
+The Snap fixture uses stock Ubuntu and snap-owned libraries. Default lazy entry
+and explicit `--base` share the same filesystem and FUSE owners;
+`--machine-entry` additionally requires measured accelerated completions.
+Application filters retain Base admission, regardless of the caller's libc.
 
 `--user-session` starts stock `user@0.service`, uses its session bus and requires
 a successful transient user unit before invoking Snap. It also works with

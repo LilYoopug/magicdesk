@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import tempfile
 
-from test_oci_services import Suite, write_script
+from test_oci_services import Suite, add_machine_entry_argument, write_script
 from test_proot_debugger import run
 from test_development_runtime import development_sources
 
@@ -323,13 +323,12 @@ def main():
     parser.add_argument('--build', type=Path)
     parser.add_argument('--case', action='append', choices=[name for name, _ in commands()])
     parser.add_argument('--diagnostics', action='store_true')
-    parser.add_argument('--libc-registry', help='Exercise the installed direct-entry libc')
-    parser.add_argument('--machine-entry', action='store_true')
+    add_machine_entry_argument(parser)
     parser.add_argument('--pid-namespace', action='store_true')
     parser.add_argument('--gdbserver-binary', type=Path,
                         help='Optional standalone guest binary; never replaces the installed package')
     args = parser.parse_args()
-    if args.proot and (args.build or args.diagnostics or args.libc_registry or args.pid_namespace or args.machine_entry):
+    if args.proot and (args.build or args.diagnostics or args.pid_namespace or args.machine_entry is not None):
         parser.error('runtime and namespace options apply only to Shroot')
     args.output.mkdir(parents=True, exist_ok=True)
     source = Path(__file__).with_name('test_debugger_guest.c')
@@ -367,7 +366,7 @@ def main():
         report['passed'] = all(c['passed'] is not False for c in report['cases'])
         (args.output / 'proot.json').write_text(json.dumps(report, indent=2)+'\n')
     else:
-        suite = Suite(args.output, args.build)
+        suite = Suite(args.output, args.build, machine_entry=args.machine_entry)
         try:
             if args.gdbserver_binary:
                 suite.transport.upload(suite.client, args.gdbserver_binary, suite.base+'/md-gdbserver')
@@ -382,14 +381,10 @@ def main():
                 case = {'name': name, 'passed': False}; suite.report['cases'].append(case)
                 try:
                     options = ['--diagnostics'] if args.diagnostics else []
-                    if args.libc_registry:
-                        options += ['--libc-registry', args.libc_registry]
-                    if args.machine_entry:
-                        options += ['--env', 'SHROOT_MACHINE_ENTRY=1']
                     child = (['unshare', '--mount', '--pid', '--fork', '--mount-proc']
                              if args.pid_namespace else []) + argv
-                    if args.diagnostics or args.libc_registry or args.pid_namespace or args.machine_entry:
-                        command = [suite.runner, *options, '--store', args.instance,
+                    if args.diagnostics or args.pid_namespace:
+                        command = [suite.runner, *suite.entry_options, *options, '--store', args.instance,
                                    '--user', '0:0', '--', '/bin/sh', '-c', 'exec "$@"',
                                    'debugger-test', *child]
                     else:

@@ -25,13 +25,12 @@ inspection, continuation and detach check the existing owner, not new-attach
 permission. Memory peek/poke retains its independent permission check and
 native kernel access ceiling.
 
-Exec admission selects the distribution's original `PT_INTERP` for a traced
-inferior instead of a replacement libc from the acceleration registry. Its
-stock `libthread_db` then matches libc's private thread layout and realtime
-signal handling. The debugger and other untraced processes keep normal registry
-selection. This policy is shared by all distributions; it does not require a
-GDB wrapper or disable sandboxing. Attaching to an already-running process does
-not replace its loaded libc.
+Exec admission always selects the distribution's original `PT_INTERP`.
+Stock `libthread_db` matches libc's private thread layout and realtime signal
+handling. Debugger ownership revokes lazy SVC entry in the inferior; other
+untraced processes retain their normal admission. This is shared by all
+distributions and needs no GDB wrapper or sandbox override. Attaching to an
+already-running process does not replace its loaded libc.
 
 The supervisor retains interception, image admission and process lifetime.
 Guest stops and kernel stops are distinct: bootstrap setup and adapter instructions
@@ -201,8 +200,9 @@ sends SIGINT and requires prompt tracer exit without killing the target. The
 target must then accept input, release its workers and exit normally.
 `gdb-attach-fork` inherits an admitted readiness selector, attaches to 41 threads,
 waits for GDB's idle native poll, then requires four fork/exec detachments and
-normal target/debugger exit. `--libc-registry PATH --pid-namespace` checks the
-same workflow through direct-entry libc inside a guest PID namespace. The
+normal target/debugger exit. `--machine-entry --pid-namespace` checks the
+same workflow through lazy entry inside a guest PID namespace; `--base` is the
+explicit control. The
 readiness fixture independently checks unmasked signal interruption of all four
 native wait variants after selector admission, including filtered launches.
 The perf capability check opens a task-clock event and requires a positive

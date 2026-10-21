@@ -22,7 +22,6 @@ def main():
     parser.add_argument('--diagnostics', action='store_true', help='Enable verbose native diagnostics')
     parser.add_argument('--require-shm', action='store_true', help='Reject a profile disabling MIT-SHM')
     parser.add_argument('--installed', action='store_true', help='Use the installed APK runtime and shell launcher')
-    parser.add_argument('--libc-registry', help='Select prepared replacements for the native test runtime')
     parser.add_argument('--renderer', choices=['turnip', 'lavapipe'], default='turnip',
                         help='Require this installed graphics profile, never inject driver overrides')
     parser.add_argument('--timeout', type=int, default=180, help='Owned launch deadline, including client downloads')
@@ -33,8 +32,8 @@ def main():
     args = parser.parse_args()
     if not 1 <= args.timeout <= 1800:
         parser.error('--timeout must be between 1 and 1800 seconds')
-    if args.machine_entry and (args.installed or args.libc_registry):
-        parser.error('--machine-entry requires the native build without compiled libc selection')
+    if args.machine_entry is not None and args.installed:
+        parser.error('--machine-entry/--base require the native build')
     suite = Suite(args.build, None if args.installed else args.build, machine_entry=args.machine_entry)
     client = suite.client
     protocol = 'x11' if args.client in ('steam', 'glx') else 'wayland'
@@ -44,8 +43,6 @@ def main():
     log, receipt, pidfile = [suite.base + '/' + n for n in ('client.log', 'exit', 'pid')]
     suite.report.update(store=args.store, probe='steamos-' + args.client,
                         protocol=protocol, renderer=args.renderer, sandboxFlagsDisabled=False)
-    if args.libc_registry:
-        suite.report['libcRegistry'] = args.libc_registry
     print('Fixture:', suite.base, flush=True)
 
     def wait(condition, **selection):
@@ -82,8 +79,6 @@ def main():
                                + '\nexec ' + shlex.quote(suite.runner)
                                + (' ' + shlex.join(suite.entry_options) if suite.entry_options else '')
                                + (' --diagnostics' if args.diagnostics else '')
-                               + (' --libc-registry ' + shlex.quote(args.libc_registry)
-                                  if args.libc_registry else '')
                                + ' --deadline-seconds ' + str(args.timeout) + ' "$@"\n')
             suite.transport.upload(client, wrapper, suite.base + '/shroot')
         suite.transport.upload(client, args.build / 'md-await-exit', suite.base + '/md-await-exit')

@@ -24,7 +24,6 @@ void test_path_walk(const char *base);
 void test_mount_storage(const char *base);
 void test_transient_store(const char *base);
 void test_fs_context(const char *base);
-void test_libc_registry(const char *base);
 void test_inode_view(const char *base);
 int test_transient_store_child(int argc, char **argv);
 void test_fs_anchor(const char *base);
@@ -328,9 +327,6 @@ int main(int argc, char **argv) {
     if (argc==3 && !strcmp(argv[1],"--native-attributes")) {
         assert(!mkdir(argv[2],0700)); native_attributes(argv[2]); return 0;
     }
-    if (argc==3 && !strcmp(argv[1],"--libc-registry")) {
-        assert(!mkdir(argv[2],0700)); test_libc_registry(argv[2]); return 0;
-    }
     int transient=test_transient_store_child(argc,argv);
     if (transient>=0) return transient;
     if (argc==3 && !strcmp(argv[1],"--transient-store")) {
@@ -579,7 +575,5 @@ int main(int argc, char **argv) {
     test_mount_graph(argv[1]);
     test_inode_custody(argv[1]);
     test_origin_transfer(argv[1]);
-    snprintf(path,sizeof(path),"%s/libc-test",argv[1]);
-    assert(!mkdir(path,0700)); test_libc_registry(path);
     return 0;
 }

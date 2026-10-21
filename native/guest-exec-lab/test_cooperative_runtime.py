@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Opt-in direct entry through the production bootstrap and syscall engine."""
+"""Shared direct-entry contracts through the production bootstrap and syscall engine."""
 import argparse
 import re
 from pathlib import Path
-from test_oci_services import Suite
+from test_oci_services import Suite, add_machine_entry_argument
 
 
 def main():
@@ -11,11 +11,11 @@ def main():
     parser.add_argument('build', type=Path)
     parser.add_argument('--entry-only', action='store_true')
     parser.add_argument('--diagnostics', action='store_true')
-    parser.add_argument('--machine-entry', action='store_true')
+    add_machine_entry_argument(parser)
     parser.add_argument('--case', choices=('all', 'birth-retirement', 'bursts'), default='all')
     args = parser.parse_args()
-    suite = Suite(Path('build/cooperative-runtime'), args.build)
-    runner = [suite.runner, *(['--env', 'SHROOT_MACHINE_ENTRY=1'] if args.machine_entry else [])]
+    suite = Suite(Path('build/cooperative-runtime'), args.build, machine_entry=args.machine_entry)
+    runner = [suite.runner, *suite.entry_options]
     try:
         root = suite.base + '/rootfs'
         suite.command(['mkdir', '-p', root + '/bin', root + '/tmp'])

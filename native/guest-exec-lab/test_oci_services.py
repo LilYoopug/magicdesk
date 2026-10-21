@@ -106,12 +106,15 @@ class Server:
 
 
 def add_machine_entry_argument(parser):
-    parser.add_argument('--machine-entry', action='store_true',
-                        help='Use stock binaries with lazy SVC entry and require completed accelerated calls')
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument('--machine-entry', dest='machine_entry', action='store_const', const=True,
+                       default=None, help='Require measured lazy SVC completions')
+    modes.add_argument('--base', dest='machine_entry', action='store_const', const=False,
+                       help='Disable lazy SVC entry; otherwise use the production default')
 
 
 class Suite:
-    def __init__(self, output, build=None, machine_entry=False):
+    def __init__(self, output, build=None, machine_entry=None):
         output.mkdir(parents=True, exist_ok=True)
         repo = Path(__file__).resolve().parents[2]
         spec = importlib.util.spec_from_file_location('transport', repo / 'scripts/mcp-client.py')
@@ -126,23 +129,30 @@ class Suite:
         self.output = output / ('oci-services-' + tag + '.json')
         self.report = {'id': tag, 'directory': self.base, 'app': state['app'], 'device': state['device'],
                        'uid': 2000, 'images': [], 'commands': [], 'servers': [], 'cases': [], 'passed': False}
-        self.entry_options = (['--env', 'SHROOT_MACHINE_ENTRY=1', '--statistics']
-                              if machine_entry else [])
+        self.entry_options = ([] if machine_entry is None else
+                              ['--env', 'SHROOT_MACHINE_ENTRY=' + ('1' if machine_entry else '0')])
+        self.report['entryMode'] = 'default' if machine_entry is None else ('lazy' if machine_entry else 'base')
         if machine_entry:
+            self.entry_options.append('--statistics')
             self.report['machineEntry'] = {'processes': [], 'completed': 0}
         self.console = self.client.call('console.open', {'directory': '/data/local/tmp'})['sessionId']
         self.report['consoleId'] = self.console
-        self.command(['mkdir', self.base])
         self.runner = None
         self.image = None
-        if build:
-            hashes = self.stage_runtime(build, self.base)
-            self.runner = self.base + '/libmagicdesk_guest_run.so'
-            self.image = self.base + '/libmagicdesk_guest_image.so'
-            self.report['nativeBuild'] = str(build)
-            self.report['nativeHashes'] = hashes
-        else:
-            self.runner = self.command(['/system/bin/sh', '-c', 'command -v shroot']).strip()
+        try:
+            self.command(['mkdir', self.base])
+            if build:
+                hashes = self.stage_runtime(build, self.base)
+                self.runner = self.base + '/libmagicdesk_guest_run.so'
+                self.image = self.base + '/libmagicdesk_guest_image.so'
+                self.report['nativeBuild'] = str(build)
+                self.report['nativeHashes'] = hashes
+            else:
+                self.runner = self.command(['/system/bin/sh', '-c', 'command -v shroot']).strip()
+        except Exception as error:
+            self.report['preparationFailure'] = repr(error)
+            self.finish()
+            raise
 
     def stage_runtime(self, build, directory):
         hashes = {}

@@ -42,7 +42,6 @@ EOF
 cat > "$1/driver.sh" <<'EOF'
 set -eux
 trap 'code=$?; journalctl --no-pager -u snapd.service -n 100 > "$1/journal.log" || :; systemctl exit "$code"' EXIT
-if test -x "$1/libc-probe"; then "$1/libc-probe" shroot; fi
 systemctl start dbus.socket snapd.socket
 systemctl start snapd.service
 snap version
@@ -80,7 +79,6 @@ def main():
     parser.add_argument('--trace-cold', action='store_true',
                         help='Trace only cold namespace launches, not installation hooks; invalidates timing comparisons')
     parser.add_argument('--timeout', type=int, default=600)
-    parser.add_argument('--libc-registry', help='Use and verify a prepared accelerated libc registry')
     parser.add_argument('--user-session', action='store_true',
                         help='Start the stock user manager and use its D-Bus session, including Snap scope placement')
     parser.add_argument('--snap', choices=['hello-world', 'firefox', 'chromium'], default='hello-world')
@@ -91,8 +89,6 @@ def main():
                         help='Run Firefox repeatedly with a fresh profile and verify every rendered image')
     add_machine_entry_argument(parser)
     args = parser.parse_args()
-    if args.machine_entry and args.libc_registry:
-        parser.error('--machine-entry requires stock libc, not --libc-registry')
     if args.snap == 'chromium' and not args.namespace_only:
         parser.error('--snap chromium requires --namespace-only; GUI coverage uses the desktop fixture')
     if args.namespace_only:
@@ -104,22 +100,10 @@ def main():
     prefix = suite.guest(args.store, '--user', '0:0', '--network', 'routed')
     if args.statistics and not args.machine_entry:
         prefix += ['--statistics']
-    if args.libc_registry:
-        prefix += ['--libc-registry', args.libc_registry]
-        suite.report['libcRegistry'] = args.libc_registry
     created = False
     try:
         suite.command(prefix + ['--', '/bin/mkdir', target])
         created = True
-        if args.libc_registry:
-            root = Path(__file__).resolve().parents[2]
-            for source in ('native/guest-exec-lab/test_libc_selection_guest.c',
-                           'native/shroot/src/cooperative_entry.h'):
-                suite.transport.upload(suite.client, root / source,
-                                       suite.base + '/' + Path(source).name)
-            suite.command(prefix + ['--bind', suite.base, target, '--', '/usr/bin/cc',
-                '-O2', '-I' + target, target + '/test_libc_selection_guest.c',
-                '-ldl', '-o', target + '/libc-probe'])
         program = 'snap run hello-world'
         if args.snap == 'firefox':
             program = r'''

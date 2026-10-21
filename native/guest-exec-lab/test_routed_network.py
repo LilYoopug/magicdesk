@@ -322,7 +322,7 @@ def guest():
 def main():
     from test_oci_services import Suite
     build, store = Path(sys.argv[1]), sys.argv[2]
-    suite = Suite(build, build, machine_entry='--machine-entry' in sys.argv)
+    suite = Suite(build, build, machine_entry=True if '--machine-entry' in sys.argv else False if '--base' in sys.argv else None)
     target = '/tmp/md-network-' + suite.report['id']
     prefix = [suite.runner, '--store', store, '--user', '0:0']
     try:

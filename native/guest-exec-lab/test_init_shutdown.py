@@ -61,14 +61,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--build', required=True, type=Path)
     parser.add_argument('--store', required=True)
-    parser.add_argument('--libc-registry')
     parser.add_argument('--output', type=Path, default=Path('build/init-shutdown-results'))
     args = parser.parse_args()
     suite = Suite(args.output, args.build)
     target = '/opt/md-shutdown-' + suite.report['id']
     prefix = [suite.runner, '--store', args.store, '--user', '0:0', '--network', 'routed']
-    if args.libc_registry:
-        prefix += ['--libc-registry', args.libc_registry]
     try:
         suite.command(prefix + ['--', '/bin/mkdir', target])
         boot = ['/usr/bin/unshare', '--mount', '--pid', '--fork', '--mount-proc',
@@ -92,9 +89,6 @@ def main():
         assert not re.search(r'\.mount: (?:Failed with result|Mount process exited, code=exited, status=[1-9])', log), log
         if '/system-generators/snapd-generator' in log:
             assert '/system-generators/snapd-generator succeeded.' in log, log
-        if args.libc_registry:
-            assert 'PASS shutdown-runtime-retained opt-shroot-libc-' in service_log, service_log
-            assert not re.search(r'opt-shroot-libc-\w+\.mount: Unmounting', log), log
         assert len(re.findall(r'mnt-md\\x2dshutdown-\d+\.mount: Deactivated successfully\.', log)) == 32, log
         assert 'Exiting container.' in log, log
         suite.report['passed'] = True

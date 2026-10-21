@@ -40,8 +40,6 @@ public final class GuestEnvironmentMain {
                     shroot backup NAME ARCHIVE.tar.zst
                     shroot restore ARCHIVE --name NAME
                     shroot remove NAME | prune
-                    shroot libc prepare NAME_OR_IMAGE [--jobs N]
-                    shroot libc list | prune
                     shroot dns NAME system|preserve|IP[,IP...] [--replace]
                     shroot dns --check system|preserve|IP[,IP...]
 
@@ -58,10 +56,8 @@ public final class GuestEnvironmentMain {
                     dns changes an inactive environment; --replace explicitly replaces existing configuration.
                     dns --check validates the policy without creating or changing an environment; it does not test reachability.
                     Bind directories must exist; access is limited by the actual shell/root identity.
-                    libc prepare explicitly compiles a private runtime using the locally registered installer.
                     Launches use distribution libc and never compile or download it.
-                    SHROOT_LIBC=compiled shroot ... explicitly selects compatible cached builds for comparison.
-                    libc prune removes builds not leased by a running Shroot launch.
+                    Lazy syscall entry is automatic; --env SHROOT_MACHINE_ENTRY=0 selects Shroot Base.
                     prune removes unused library resources and the download cache; busy resources fail.
                     MAGICDESK_GUEST_HOME selects a separate library. Only public HTTPS registries are supported.
                     Low-level image and --store commands remain available.

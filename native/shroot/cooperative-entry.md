@@ -1,12 +1,11 @@
 # Cooperative Syscall Entry
 
-The namespace bootstrap exposes an opt-in, libc-independent entry descriptor
-through the private `MD_AT_COOPERATIVE` auxiliary vector entry. Unmodified
-programs ignore it and retain their Base syscall route. This is an internal
-versioned contract. The optional [source integration and local registry](libc/README.md)
-deploy matching builds through ordinary interpreter admission, without replacing
-package-owned libc files. Isolated musl/glibc fixtures test the entry protocol
-independently of that deployment mechanism.
+The namespace bootstrap exposes a libc-independent entry descriptor through the
+private `MD_AT_COOPERATIVE` auxiliary vector. The default lazy SVC frontend and
+focused protocol fixtures use this internal versioned contract. Stock programs
+need no hooks: observed, eligible syscall sites enter the same provider.
+Source-built libc integration and its deployment registry have been removed.
+`--env SHROOT_MACHINE_ENTRY=0` selects Base without removing the shared handler.
 
 ## Call Contract
 
@@ -24,8 +23,7 @@ runtime-owned syscall-offer table and a caller-compiled action driver,
 The size-checked descriptor also supplies `thread_identity` for callers without
 libc TLS. It returns the runtime's native thread key, not a guest PID namespace
 number. It must not run after helper admission has been revoked by a filter.
-The existing v6 action/table prefix is unchanged; source hooks do not need to
-use this callback. The lazy machine-entry prototype uses it to avoid collisions
+The lazy machine-entry frontend uses this callback to avoid collisions
 between separate PID-1 processes.
 
 The runtime can yield a cancellation checkpoint, the original kernel call, or
@@ -44,7 +42,7 @@ does not change libc's thread layout. An active handle must not be copied or
 shared across threads; fork resets the child handle before reuse.
 
 `syscall_catalog.h` and `entry_route.h` remain runtime-private. Bootstrap builds
-the per-image offer table before guest execution. Libc checks a bounded byte flag
+the per-image offer table before guest execution. The caller checks a bounded byte flag
 for ordinary or cancellation-point entry, without embedding syscall numbers or
 engine routes. An unlisted syscall stays at its original SVC, without an indirect
 handler call. The table is fixed for the image lifetime, not hot-swapped while
@@ -66,10 +64,11 @@ cancellation checkpoint in the guest before publication and before the effect,
 never after a successful open. Ordinary wrappers leave it NULL; cancellation
 wrappers supply libc's own check. No synthetic futex or other kernel call is
 needed for this checkpoint. The kernel continuation receives only actual calls.
-The musl integration uses **one SVC site with entry both enabled and disabled**,
-preserving instruction-pointer-sensitive application filter policy. Callers that
-omit this callback use the adapter's ordinary SVC, not its privileged raw gate;
-such callers must not assume their own instruction address is preserved.
+The lazy frontend falls back to the original SVC and revokes entry before an
+application filter is installed, preserving instruction-pointer-sensitive policy.
+Protocol fixtures may supply an explicit continuation; callers that omit it use
+the adapter's ordinary SVC, not its privileged raw gate, and must not assume
+their own instruction address is preserved.
 
 Thus every syscall has a route, but only worker operations and admitted native
 plans avoid ordinary syscall interception. A common entry is not an accelerated
@@ -431,62 +430,24 @@ application-controlled TRACE cookie. The existing table turn and observed exit
 result still own retirement. Filter denials do not retire a slot; debugger,
 pending-loan and conflicting-owner cases retain the full path.
 
-## Source-Level Libc Integration
+## Machine-Code Frontend
 
-`native/guest-exec-lab/build-cooperative-musl.sh OUTPUT` downloads checksum-pinned
-official musl 1.2.5 sources and builds an isolated AArch64 sysroot, static probe
-and dynamic probe. The canonical adapters, hooks and patches now live in
-[`libc/`](libc/README.md), shared with the installer's embedded source payload.
-Checked structural transformations handle repeated syscall wrappers; ordinary
-zero-fuzz patches handle lifecycle and build boundaries. The complete change is
-validated in staging before source publication. This is not a semantic parser
-or a patch assumed to apply to arbitrary future releases.
+`svc_runtime.c` owns per-image preparation; `svc_registry.c` admits observed
+single-SVC sites. Publication does not stop neighboring threads. Signal,
+mapping, fork/exec, debugger and filter transitions use the existing task and
+memory owners. The frontend supplies original registers and arguments to this
+protocol rather than a second syscall implementation.
 
-The seven ordinary AArch64 syscall wrappers check runtime offers before binding
-syscall registers. Native operations do not enter the handler or register a
-channel. Unlike the old compiled catalogue, this is a table lookup rather than a
-compile-time route decision. Initialization discovers the auxiliary-vector
-descriptor after TLS setup and validates its ABI version, minimum size, callback,
-table and reserved flags. A missing/incompatible descriptor retains the ordinary
-syscall path. The per-thread handle starts zeroed, and `_Fork` resets the child's
-inherited handle. No Bionic/ART dependency is added.
-
-Only `cooperative_entry.h` and the small libc hook are imported into musl. Build
-musl once for that caller ABI; subsequent transport, spin, channel-state and
-syscall-catalogue experiments rebuild the native runtime, not libc. The current
-provider stays in the existing freestanding bootstrap, whose pointer is supplied
-through auxv. A separately mapped module can implement the same contract later;
-libc needs neither a new `dlopen` dependency nor loader reentry to call it. The
-provider remains mapped for the whole process image, including static binaries.
-Changing the caller ABI or the libc cancellation integration still requires a
-new libc fixture. There is no distribution-wide ABI rollout in this experiment.
-`build-cooperative-probes.sh OUTPUT` rebuilds only the static/dynamic test programs
-against an existing sysroot, keeping libc unchanged when adding workloads.
-
-Cancellation-point assembly, clone/vfork and signal-return assembly remain
-unchanged. The cancellation-point C wrapper offers FD calls through a continuation
-that invokes musl's original cancellation assembly; its post-`EINTR` check is
-unchanged. The native-open checkpoint uses musl's existing __testcancel.
-A thread with asynchronous or masked cancellation retains its native
-continuation. Non-cancellation-point wrappers do not change cancellation state:
-a signal handler may `siglongjmp` past the entry frame. The supervisor's common
-stop owner retires worker memory before delivering signals. Tests cover blocked
-cancellation, signal abandonment without changing cancellation state, threads,
-fork/exec, static/dynamic linking and real seccomp denial. FIFO tests cover pending
-open cancellation, `EINTR`, `SA_RESTART`, actual data and exact FD counts, also
-under a guest filter. Relative-path tests replace dirfd numbers, change cwd and
-rename an anchored directory between calls.
-
-`SHROOT_COOPERATIVE=0` disables handler invocation while retaining the same
-compiled libc, offer table and kernel continuation. Keeping the table also keeps
-the SVC site of offered calls identical in enabled/disabled controls. Pass it with the runner's `--env` option;
-arbitrary Android shell environment variables are not inherited by a guest.
-This fixture is not distribution-wide libc rollout or a patched Chromium build.
+The stock musl/glibc fixtures exercise cancellation, signal abandonment,
+FIFO restart, FD counts and static/dynamic linking. They compile only the small
+test workload against distribution libraries. Entry changes rebuild Shroot,
+not libc. The [SVC guide](../guest-exec-lab/svc-rewriting.md#product-boundary)
+documents publication and signal semantics and retained experimental evidence.
 
 ## Verification And Performance
 
 `test_cooperative_runtime.py BUILD` runs buffer/execution-window contracts, the
-filesystem dispatcher and an opt-in guest through the actual bootstrap and
+filesystem dispatcher and a protocol guest through the actual bootstrap and
 supervisor as Android UID 2000. The guest checks pointer/partial-write faults,
 native FD operations, signals and reentry, fork/exec, thread/slot churn,
 dumpability, credentials, mounts/chroot, private PID namespaces, debugger fallback
@@ -521,7 +482,7 @@ queries, not necessarily successful effects (a stop can cancel a plan).
 `nativeDeferred` counts completed effects whose caller returned before the
 worker's receipt; a concurrent 1000-iteration contract verifies that retirement
 cannot erase the following shared-memory or kernel-carried request.
-`test_cooperative_libc.py BUILD MUSL_BUILD --rounds 7` uses real libc calls, verifies
+`test_cooperative_libc.py BUILD STOCK_FIXTURE --rounds 7` uses real libc calls, verifies
 that enabled/disabled modes have different direct-completion counters, and compares
 relative/absolute/dirfd stat, create/rename/unlink, readonly opens with/without
 CLOEXEC, writable opens, existing-file `O_CREAT`, truncation and native IO with
@@ -538,9 +499,8 @@ descheduling; execution includes the engine's nested store costs. Do not sum
 those nested values. Profiling clock samples and diagnostic counter increments are off
 on ordinary launches. The fixture also reports guest CPU time and context
 switches; `--scale` lengthens short workloads. `--reference-build` interleaves
-another entry-enabled runtime against the same libc/store and records verified
-binary hashes. When that runtime has an older entry ABI, `--reference-musl`
-selects its preserved matching static/dynamic libc fixture. Both routes must
+another entry-enabled runtime against the same stock libc/store and records verified
+binary hashes. Both routes must
 pass their correctness and direct-completion assertions before timing; an ABI
 mismatch silently falling back to syscalls is not a valid comparison.
 `--reference-kernel` also interleaves the reference runtime with entry disabled,
