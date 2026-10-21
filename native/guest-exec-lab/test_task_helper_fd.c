@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "task_helper.h"
+#include "task_checkpoint.h"
 #include "task_quiesce.h"
 #include "adapter_frame.h"
 #include "fd_table_observation.h"
@@ -35,10 +36,11 @@ extern char helper_call[],helper_return[],helper_abort[],caller_ready[];
 extern char helper_store[],helper_stored[];
 extern void caller_stop(void);
 __asm__(".text\n.global helper_call\nhelper_call:\nsvc #0\n"
-    ".global helper_return\nhelper_return:\nbrk #0\n"
+    ".global helper_return\nhelper_return:\nsvc #0\n"
     ".global helper_abort\nhelper_abort:\nmov x0,#0\nmov x8,#93\nsvc #0\nbrk #0\n"
-    ".global caller_stop\ncaller_stop:\n.global caller_ready\ncaller_ready:\nbrk #0\nret\n"
-    ".global helper_store\nhelper_store:\nstr w3,[x0]\n.global helper_stored\nhelper_stored:\nbrk #0\n");
+    ".global helper_store\nhelper_store:\nstr w3,[x0]\n.global helper_stored\nhelper_stored:\nsvc #0\n"
+    ".global caller_stop\ncaller_stop:\nmov x8,#178\nsvc #0\nmov x1,#19\nmov x8,#130\nsvc #0\n"
+    ".global caller_ready\ncaller_ready:\nret\n");
 enum scenario { NORMAL, FULL, DENIED, KILLED_OPEN, CANCEL_CHANNEL, CANCEL_EXPORT,
     CANCEL_SECOND, NO_SLOT, INVALID_INPUT, REPLACE_CAPTURED, CLONE_TRAPPED, CLONE_DENIED,
     ONE_SLOT, CANCEL_RIGHT, FILTER_EPIPE, PEER_CLOSED, SIGNAL_PIPE, CANCEL_IMPORT, PREFIX_SLOTS,
@@ -53,8 +55,16 @@ struct completed {
 };
 static pid_t early_child;
 static const char *directory_path;
-static long trace(int request, pid_t pid, void *address, void *data) {
+static long native_trace(int request, pid_t pid, void *address, void *data) {
     return ptrace(request,pid,address,data);
+}
+static int restricted(pid_t pid) { (void)pid; return 1; }
+static int marker(uintptr_t pc) {
+    return pc==(uintptr_t)helper_return+4 || pc==(uintptr_t)helper_stored+4;
+}
+static struct md_task_checkpoints checkpoints={.trace=native_trace,.restricted=restricted,.marker=marker};
+static long trace(int request,pid_t pid,void *address,void *data) {
+    return md_task_checkpoint_trace(&checkpoints,request,pid,address,data);
 }
 static int newborn(pid_t pid) {
     if (!early_child) return 0;
@@ -115,7 +125,6 @@ static void native_control_fault(void) {
     close(pair[0]); close(pair[1]); assert(descriptors()==before);
 }
 struct mutation { int socket, file, replacement; pid_t parent; };
-static void unexpected_trap(int number) { (void)number; _exit(92); }
 static int mutate(void *context) {
     struct mutation *m=context;
     assert(!prctl(PR_SET_PDEATHSIG,SIGKILL) && getppid()==m->parent);
@@ -194,10 +203,10 @@ static void actor(int socket, int writer, int file, int path, int replacement, i
         assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&deny));
     }
     for (unsigned i=0;i<sizeof(snapshot->present);++i) snapshot->present[i]=fcntl((int)i,F_GETFD)>=0;
-    struct sigaction trap={.sa_handler=unexpected_trap},observed;
+    struct sigaction trap={.sa_handler=SIG_IGN},observed;
     sigemptyset(&trap.sa_mask); assert(!sigaction(SIGTRAP,&trap,NULL));
     caller_stop();
-    assert(!sigaction(SIGTRAP,NULL,&observed) && observed.sa_handler==unexpected_trap);
+    assert(!sigaction(SIGTRAP,NULL,&observed) && observed.sa_handler==SIG_IGN);
     for (unsigned i=0;i<sizeof(snapshot->present);++i) assert(snapshot->present[i]==(fcntl((int)i,F_GETFD)>=0));
     if (sibling>0) {
         /* EVENT_WAIT: the exact mutation sibling must exit before fixture
@@ -214,7 +223,12 @@ static struct user_pt_regs registers(pid_t pid) {
 static int wait_child(pid_t pid) {
     /* EVENT_WAIT: exact stop/exit, with fixture alarm as the failure bound. */
     int status; pid_t got;
-    do { got=waitpid(pid,&status,__WALL); } while (got<0 && errno==EINTR);
+    for (;;) {
+        do { got=waitpid(pid,&status,__WALL); } while (got<0 && errno==EINTR);
+        assert(got==pid);
+        int owned=md_task_checkpoint_event(&checkpoints,pid,&status); assert(owned>=0);
+        if (!owned) break;
+    }
     assert(got==pid); return status;
 }
 static void check_directory(int fd, const struct snapshot *snapshot) {
@@ -265,6 +279,8 @@ static void quiesce_newborn(struct md_task_helpers *helpers,pid_t owner) {
     while (!md_task_quiesce_ready(q)) {
         /* EVENT_WAIT: both writers must stop; the fixture alarm bounds failure. */
         pid_t pid=waitpid(-1,&status,__WALL); assert(pid>0);
+        int checkpoint=md_task_checkpoint_event(&checkpoints,pid,&status); assert(checkpoint>=0);
+        if (checkpoint) continue;
         assert(!md_task_quiesce_event(q,pid,status,NULL));
     }
     assert(!md_task_quiesce_release(q));
@@ -290,6 +306,7 @@ struct send_frame {
 static void exercise_request(int protected, enum scenario scenario, unsigned exported, int sending,
         const struct md_task_helper_request *capture) {
     unsigned before=descriptors(); early_child=0;
+    checkpoints.begin=(uintptr_t)helper_call; checkpoints.end=(uintptr_t)helper_stored+4;
     int reference=capture ? open(capture->path,capture->flags|O_CLOEXEC) : -1;
     assert(!capture || reference>=0);
     sigset_t signals,previous; sigemptyset(&signals); sigaddset(&signals,SIGCHLD);
@@ -328,11 +345,11 @@ static void exercise_request(int protected, enum scenario scenario, unsigned exp
     struct md_interception_buffer buffer={0}; assert(!md_buffers_take(pool,&buffer));
     pid_t child=fork(); assert(child>=0);
     if (!child) actor(sockets[1],pipes[1],file,path,replacement,protected,scenario,snapshot,sending);
-    assert(!ptrace(PTRACE_SEIZE,child,0,PTRACE_O_TRACECLONE|PTRACE_O_TRACEEXIT|PTRACE_O_EXITKILL));
+    assert(!ptrace(PTRACE_SEIZE,child,0,PTRACE_O_TRACECLONE|PTRACE_O_TRACEEXIT|PTRACE_O_EXITKILL|PTRACE_O_TRACESYSGOOD|PTRACE_O_TRACESECCOMP));
     assert(write(sockets[0],"S",1)==1);
     int listener=accept_listener(sockets[0]);
-    int status=wait_child(child); assert(WIFSTOPPED(status) && WSTOPSIG(status)==SIGTRAP && !(status>>16));
-    struct user_pt_regs saved=registers(child); assert(saved.pc==(uintptr_t)caller_ready); saved.pc+=4;
+    int status=wait_child(child); assert(WIFSTOPPED(status) && WSTOPSIG(status)==SIGSTOP && !(status>>16));
+    struct user_pt_regs saved=registers(child); assert(saved.pc==(uintptr_t)caller_ready);
     struct md_task_helper_callbacks callbacks={trace,newborn};
     struct md_task_helpers *helpers=md_task_helpers_new(&callbacks); assert(helpers);
     struct md_interception_abi abi={.task_call=(uintptr_t)helper_call,.task_return=(uintptr_t)helper_return,
@@ -436,11 +453,13 @@ static void exercise_request(int protected, enum scenario scenario, unsigned exp
         while (!c.called) {
             pid_t pid;
             while ((pid=waitpid(-1,&status,__WALL|WNOHANG))>0) {
+                int checkpoint=md_task_checkpoint_event(&checkpoints,pid,&status); assert(checkpoint>=0);
+                if (checkpoint) continue;
                 unsigned event=(unsigned)status>>16;
                 if (pid==child && event==PTRACE_EVENT_STOP && WSTOPSIG(status)==SIGTRAP)
                     ++owner_interrupted;
                 if (capture && (scenario==CANCEL_CAPTURE || scenario==REPLACE_PATH)
-                        && pid!=child && WIFSTOPPED(status) && !event && WSTOPSIG(status)==SIGTRAP) {
+                        && pid!=child && WIFSTOPPED(status) && event==MD_TASK_CHECKPOINT_EVENT) {
                     struct user_pt_regs r=registers(pid);
                     if (r.pc==(uintptr_t)helper_return && r.regs[8]==SYS_openat && (long)r.regs[0]>=0) {
                         if (scenario==CANCEL_CAPTURE) {
@@ -453,7 +472,7 @@ static void exercise_request(int protected, enum scenario scenario, unsigned exp
                     }
                 }
                 if ((scenario==CANCEL_EXPORT || scenario==CANCEL_SECOND) && !cancelled && pid!=child && WIFSTOPPED(status)
-                        && !event && WSTOPSIG(status)==SIGTRAP) {
+                        && event==MD_TASK_CHECKPOINT_EVENT) {
                     struct user_pt_regs r=registers(pid);
                     if (r.pc==(uintptr_t)helper_return && r.regs[8]==SYS_sendmsg) {
                         ++sent;
@@ -463,7 +482,7 @@ static void exercise_request(int protected, enum scenario scenario, unsigned exp
                     }
                 }
                 if ((scenario==CANCEL_IMPORT || scenario==ANCHOR_CANCEL) && !cancelled && pid!=child && WIFSTOPPED(status)
-                        && !event && WSTOPSIG(status)==SIGTRAP) {
+                        && event==MD_TASK_CHECKPOINT_EVENT) {
                     struct user_pt_regs r=registers(pid);
                     if (r.pc==(uintptr_t)helper_return && r.regs[8]==SYS_recvmsg) {
                         assert((long)r.regs[0]==sizeof(uint64_t));
@@ -606,8 +625,8 @@ static void exercise_request(int protected, enum scenario scenario, unsigned exp
     }
     if (cancelled) assert(!kill(child,SIGKILL));
     else {
-        struct iovec io={&saved,sizeof(saved)}; assert(!ptrace(PTRACE_SETREGSET,child,(void *)NT_PRSTATUS,&io));
-        assert(!ptrace(PTRACE_CONT,child,0,0));
+        struct iovec io={&saved,sizeof(saved)}; assert(!trace(PTRACE_SETREGSET,child,(void *)NT_PRSTATUS,&io));
+        assert(!trace(PTRACE_CONT,child,0,0));
     }
     status=wait_child(child);
     if (!cancelled && scenario==QUIESCE_NEWBORN && WIFSTOPPED(status)
@@ -643,6 +662,7 @@ static void exercise_request(int protected, enum scenario scenario, unsigned exp
     }
     if (reference>=0) close(reference);
     md_task_helpers_destroy(helpers); assert(!md_buffer_release(&buffer)); md_memory_release(memory);
+    assert(!checkpoints.count);
     assert(!munmap(mapping,size) && !munmap(stack,65536) && !munmap(snapshot,sizeof(*snapshot)));
     close(pipes[0]); close(listener); close(sockets[0]); close(sockets[1]); close(signal_fd);
     assert(!sigprocmask(SIG_SETMASK,&previous,NULL));

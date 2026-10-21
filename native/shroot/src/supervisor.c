@@ -16,6 +16,7 @@
 #include "namespace_broker.h"
 #include "notification_result.h"
 #include "signal_delivery.h"
+#include "task_checkpoint.h"
 #include "signal_protocol.h"
 #include "cooperative_channel.h"
 #include "entry_route.h"
@@ -333,6 +334,7 @@ struct thread {
     struct seccomp_notif *memory_notification;
     struct md_broker_completion *broker_completion;
     struct { int held, status, has_info; struct rusage usage; siginfo_t info; } broker_event;
+    int retained_signal;
     struct metadata_restart *metadata_restart;
     int metadata_signal_restored;
     struct md_signal_delivery signal_delivery;
@@ -640,6 +642,7 @@ static void describe_process(pid_t pid, uint64_t pc) {
     }
 }
 static struct md_network_launch launch_network;
+static struct md_task_checkpoints checkpoints;
 static void cleanup(void) {
     report_statistics();
     if (cancellation_timer>=0) { close(cancellation_timer); cancellation_timer=-1; }
@@ -661,6 +664,7 @@ static void cleanup(void) {
         }
     }
     md_task_helpers_destroy(helpers); helpers=NULL;
+    md_task_checkpoints_clear(&checkpoints);
     memory_discard();
     task_action_cleanup();
     while (threads) {
@@ -840,9 +844,24 @@ static void adapter_discard(struct thread *t) {
     t->buffer_rights_delivered=0;
     t->direct=DIRECT_NONE;
 }
-static long native_trace(int request, pid_t pid, void *address, void *data) {
+static long checkpoint_native_trace(int request, pid_t pid, void *address, void *data) {
     if (statistics) statistics->ptrace_requests++;
     return ptrace(request, pid, address, data);
+}
+static int checkpoint_restricted(pid_t pid) {
+    struct thread *t=find_thread(pid);
+    return !t || t->application_filter;
+}
+static int checkpoint_marker(uintptr_t pc) {
+#define MATCH_MARKER(field,symbol) if (abi.field && pc==abi.field+4) return 1;
+    MD_CHECKPOINT_SITES(MATCH_MARKER)
+#undef MATCH_MARKER
+    return 0;
+}
+static struct md_task_checkpoints checkpoints={.trace=checkpoint_native_trace,
+    .restricted=checkpoint_restricted,.marker=checkpoint_marker};
+static long native_trace(int request,pid_t pid,void *address,void *data) {
+    return md_task_checkpoint_trace(&checkpoints,request,pid,address,data);
 }
 static long quiesce_trace(int request,pid_t pid,void *address,void *data) {
     long result=native_trace(request,pid,address,data);
@@ -2204,9 +2223,15 @@ static int completed_event_resume(struct thread *t) {
     if (t->metadata_restart) {
         if (!signal_mask(t,t->metadata_restart->mask,"metadata-restart-mask")) return 1;
         free(t->metadata_restart); t->metadata_restart=NULL;
-        t->metadata_signal_restored=1;
     }
-    if (t->broker_event.has_info && !tracee_request(t,PTRACE_SETSIGINFO,NULL,&t->broker_event.info,"completed-signal-restore")) return 1;
+    if (t->broker_event.has_info) {
+        /* A completed adapter owns an interrupt checkpoint, not the original
+         * signal-delivery stop. Publish through a real delivery stop instead
+         * of injecting a signal at a ptrace event (which the kernel ignores). */
+        t->broker_event.held=0; t->phase=IDLE;
+        resume(t->pid,0); return 1;
+    }
+    t->metadata_signal_restored=1;
     t->phase=IDLE; t->broker_next=broker_events; broker_events=t;
     return 1;
 }
@@ -2242,7 +2267,8 @@ static int interrupted_metadata_event(struct thread *t,int status,const struct r
     if (WIFSTOPPED(status) && !((unsigned)status>>16) && WSTOPSIG(status)!=(SIGTRAP|0x80))
         notification_interrupted(t);
     if (t->phase!=IDLE || t->broker_event.held || !WIFSTOPPED(status)
-            || !t->ready || !t->entered || (unsigned)status>>16 || WSTOPSIG(status)==(SIGTRAP|0x80)) return 0;
+            || !t->ready || !t->entered || (unsigned)status>>16 || WSTOPSIG(status)==(SIGTRAP|0x80)
+            || WSTOPSIG(status)==SIGSTOP) return 0;
     siginfo_t info;
     if (!tracee_request(t,PTRACE_GETSIGINFO,NULL,&info,"metadata-signal")) return 1;
     if (info.si_code>0 && (info.si_signo==SIGTRAP || info.si_signo==SIGSYS
@@ -2268,6 +2294,8 @@ static int interrupted_metadata_event(struct thread *t,int status,const struct r
     t->broker_event.has_info=1; t->broker_event.info=info;
     if (!save_signal_mask(t,&restart->mask,"metadata-signal-mask")
             || !shield(t)) return 1;
+    t->retained_signal=md_signal_delivery_retain(&t->signal_delivery,t->pid,&info);
+    CHECK(t->retained_signal>=0);
     if (restart->stage==METADATA_CHECK) {
         regs.regs[0]=regs.pc; regs.regs[1]=1; regs.pc=abi.load_groups;
         if (set_registers(t->pid,&regs)) resume(t->pid,0);
@@ -2276,15 +2304,16 @@ static int interrupted_metadata_event(struct thread *t,int status,const struct r
 }
 static int metadata_restart_event(struct thread *t,int status) {
     struct metadata_restart *r=t->metadata_restart;
-    if (!r || !WIFSTOPPED(status) || (unsigned)status>>16) return 0;
+    if (!r || !WIFSTOPPED(status)
+            || ((unsigned)status>>16 && (unsigned)status>>16!=MD_TASK_CHECKPOINT_EVENT)) return 0;
     int sig=WSTOPSIG(status);
-    if (sig!=(SIGTRAP|0x80) && sig!=SIGSTOP) {
+    if (!((unsigned)status>>16) && sig!=(SIGTRAP|0x80) && sig!=SIGSTOP) {
         siginfo_t info;
         if (!tracee_request(t,PTRACE_GETSIGINFO,NULL,&info,"metadata-deferred-signal")) return 1;
         if (info.si_code<=0) {
-            CHECK(!md_signal_delivery_hold(&t->signal_delivery,&info));
+            int retained=md_signal_delivery_retain(&t->signal_delivery,t->pid,&info); CHECK(retained>=0);
             notification_interrupted(t);
-            resume(t->pid,0); return 1;
+            resume(t->pid,retained); return 1;
         }
     }
     if (t->phase!=IDLE) return 0;
@@ -2292,7 +2321,7 @@ static int metadata_restart_event(struct thread *t,int status) {
     if (!registers(t->pid,&regs)) return 1;
     t->kernel_stopped=1; t->interrupt_pending=0;
     if (r->stage==METADATA_CHECK) {
-        int loaded=sig==SIGTRAP && regs.pc==abi.loaded_groups;
+        int loaded=(unsigned)status>>16==MD_TASK_CHECKPOINT_EVENT && regs.pc==abi.loaded_groups;
         int fault=(sig==SIGSEGV || sig==SIGBUS) && regs.pc>=abi.load_groups && regs.pc<abi.loaded_groups;
         if (!loaded && !fault) return 0;
         if (!set_registers(t->pid,&r->saved)) return 1;
@@ -2328,7 +2357,7 @@ static int metadata_restart_event(struct thread *t,int status) {
         metadata_restart_return(t,(long)regs.regs[0]);
         return 1;
     }
-    if (r->stage==METADATA_RETURN && sig==SIGTRAP && regs.pc==DONE) {
+    if (r->stage==METADATA_RETURN && (unsigned)status>>16==MD_TASK_CHECKPOINT_EVENT && regs.pc==DONE) {
         if (!set_registers(t->pid,&r->saved)) return 1;
         return completed_event_resume(t);
     }
@@ -2341,6 +2370,7 @@ static int completed_notification_event(struct thread *t,int status,const struct
     unsigned event=(unsigned)status>>16;
     if (WIFSTOPPED(status) && event!=PTRACE_EVENT_EXIT && event!=PTRACE_EVENT_EXEC) {
         int signal=WSTOPSIG(status);
+        if (!event && signal==SIGSTOP) return 0;
         /* A group stop retains the result until SIGCONT; its LISTEN boundary
          * cannot be replaced by an internal adapter trap. */
         if (event==PTRACE_EVENT_STOP && signal!=SIGTRAP) return 0;
@@ -2372,7 +2402,11 @@ static int completed_notification_event(struct thread *t,int status,const struct
             t->broker_event.held=1; t->broker_event.status=status;
             t->broker_event.usage=usage ? *usage : (struct rusage){0};
             t->broker_event.has_info=!event && signal!=(SIGTRAP|0x80);
-            if (t->broker_event.has_info && !tracee_request(t,PTRACE_GETSIGINFO,NULL,&t->broker_event.info,"completed-signal")) return 1;
+            if (t->broker_event.has_info) {
+                if (!tracee_request(t,PTRACE_GETSIGINFO,NULL,&t->broker_event.info,"completed-signal")) return 1;
+                t->retained_signal=md_signal_delivery_retain(&t->signal_delivery,t->pid,&t->broker_event.info);
+                CHECK(t->retained_signal>=0);
+            }
             int error=md_buffers_take(md_memory_buffers(t->memory),&t->buffer);
             if (!error) error=md_fs_buffer_adopt(buffer_service,t->pid,t->resources.fs,result->operation,result->flags,
                 &t->buffer,&result->result,&result->opened,&t->buffer_call);
@@ -3642,15 +3676,25 @@ static int broker_retire(const struct md_broker_retirement *request) {
     loan_retire(owner,NULL,request->turn,NULL);
     return 0;
 }
+static void task_call_resume(struct thread *t,struct md_task_call *call,int signal) {
+    int error=md_task_call_resume(call,signal);
+    if (error) { CHECK(error==-ESRCH); t->resume_lost=1; }
+    else t->kernel_stopped=0;
+}
 static int task_call_signal(struct thread *t,struct md_task_call *call,int status) {
+    if (WIFSTOPPED(status) && !((unsigned)status>>16) && WSTOPSIG(status)==SIGSTOP) {
+        task_call_resume(t,call,SIGSTOP); return 1;
+    }
+    if (WIFSTOPPED(status) && (unsigned)status>>16==PTRACE_EVENT_STOP && WSTOPSIG(status)==SIGTRAP) {
+        t->interrupt_pending=0;
+        if (t->listening) { t->listening=0; group_wakes++; }
+    }
     if (!WIFSTOPPED(status) || (unsigned)status>>16 || WSTOPSIG(status)!=SIGTRAP) return 0;
     siginfo_t info;
     if (!tracee_request(t,PTRACE_GETSIGINFO,NULL,&info,"task-call-signal")) return 1;
     if (info.si_code>0) return 0;
-    CHECK(!md_signal_delivery_hold(&t->signal_delivery,&info));
-    int error=md_task_call_continue(call);
-    if (error) { CHECK(error==-ESRCH); t->resume_lost=1; }
-    else t->kernel_stopped=0;
+    int retained=md_signal_delivery_retain(&t->signal_delivery,t->pid,&info); CHECK(retained>=0);
+    task_call_resume(t,call,retained);
     return 1;
 }
 static int task_action_event(pid_t pid,int status,const struct rusage *usage) {
@@ -3679,15 +3723,14 @@ static int task_action_event(pid_t pid,int status,const struct rusage *usage) {
         task_action_call_complete(-ESRCH,0); return 0;
     }
     if (task_call_signal(t,call,status)) return 1;
-    if (event==PTRACE_EVENT_STOP && WSTOPSIG(status)==SIGTRAP && !call->restart_pending) {
+    int owned_interrupt=md_task_call_expects_interrupt(call);
+    if (event==PTRACE_EVENT_STOP && WSTOPSIG(status)==SIGTRAP && !owned_interrupt) {
         if (statistics) ++statistics->stops;
-        if (tracee_request(t,PTRACE_CONT,NULL,NULL,"selector-interrupt")) {
-            t->kernel_stopped=0; t->interrupt_pending=0;
-        }
+        task_call_resume(t,call,0);
         return 1;
     }
-    if (event!=PTRACE_EVENT_SECCOMP && !(event==PTRACE_EVENT_STOP && call->restart_pending)
-            && (event || (WSTOPSIG(status)!=SIGTRAP && WSTOPSIG(status)!=(SIGTRAP|0x80)))) return 0;
+    if (event!=PTRACE_EVENT_SECCOMP && !(event==PTRACE_EVENT_STOP && owned_interrupt)
+            && (event || WSTOPSIG(status)!=(SIGTRAP|0x80))) return 0;
     if (statistics) ++statistics->stops;
     int result=md_task_call_event(call,status);
     TRACE("PROBE task-action pid=%d status=%x stage=%u boundary=%d loan=%d ready=%d result=%ld\n",
@@ -3840,8 +3883,8 @@ static void fd_control(struct thread *t, struct user_pt_regs *r) {
 static void buffer_reply_signal(struct thread *t, long result, const siginfo_t *signal) {
     struct user_pt_regs r=t->buffer_registers;
     r.regs[0]=result; r.pc+=4;
-    if (signal && !tracee_request(t,PTRACE_SETSIGINFO,NULL,(void *)signal,"helper-signal")) return;
-    if (set_registers(t->pid,&r)) resume(t->pid,signal ? signal->si_signo : 0);
+    if (signal) CHECK(!md_signal_delivery_hold(&t->signal_delivery,signal));
+    if (set_registers(t->pid,&r)) resume(t->pid,0);
 }
 static void buffer_reply(struct thread *t, long result) {
     buffer_reply_signal(t,result,NULL);
@@ -5671,15 +5714,15 @@ static int namespace_init(const struct thread *t) {
 static void resume_signal(pid_t pid,int sig) {
     struct thread *t=thread(pid);
     if (sig && sig!=SIGSTOP && !t->signal_delivery.active
-            && (t->signal_delivery.first || t->signal_shielded || t->metadata_restart)) {
+            && (md_signal_delivery_pending(&t->signal_delivery) || t->signal_shielded || t->metadata_restart)) {
         /* A lower-level owner can finish at an architectural boundary while
          * a higher-level restart still owns that boundary. Retain its signal
          * until every internal owner has restored the application context. */
         siginfo_t info;
         if (!tracee_request(t,PTRACE_GETSIGINFO,NULL,&info,"retained-signal-info")) return;
         if (info.si_code<=0 && info.si_signo<32) {
-            CHECK(!md_signal_delivery_hold(&t->signal_delivery,&info));
-            resume(pid,0); return;
+            int retained=md_signal_delivery_retain(&t->signal_delivery,pid,&info); CHECK(retained>=0);
+            resume(pid,retained); return;
         }
     }
     if (sig && t->resources.pid) {
@@ -6058,7 +6101,7 @@ static int debug_syscall_exit(struct thread *t, const struct user_pt_regs *regs)
 }
 static int debugger_at_boundary(const struct thread *t) {
     return t->phase==IDLE && !t->metadata_restart && !t->fd_running && !t->fd_order.table && !t->fs_order.fs
-        && !t->signal_delivery.active && !t->signal_delivery.preparing;
+        && !t->signal_delivery.active;
 }
 static void memory_access_capture(struct thread *t) {
     int error=md_memory_private_access_capture(t->memory,t->pid);
@@ -6067,6 +6110,10 @@ static void memory_access_capture(struct thread *t) {
 static void resume(pid_t pid, int sig) {
     struct thread *t = thread(pid);
     if (t->resume_lost) return;
+    if (t->retained_signal) {
+        CHECK(!sig || sig==t->retained_signal);
+        sig=t->retained_signal;
+    }
     if (!memory_available(pid)) {
         CHECK(!t->memory_resume || !sig || sig==t->memory_signal);
         t->memory_resume=1; if (sig) t->memory_signal=sig;
@@ -6171,17 +6218,16 @@ static void resume(pid_t pid, int sig) {
             |(opens && !t->cooperative_blocked ? MD_BROKER_COOPERATIVE : 0) : 0,
             RAW_GATE,abi.watch_gate+4,&ranges));
     }
-    if (!sig && t->signal_delivery.first && !t->signal_delivery.active && !t->signal_delivery.preparing
+    if (!sig && md_signal_delivery_pending(&t->signal_delivery) && !t->signal_delivery.active
             && !t->signal_shielded && debugger_at_boundary(t)
             ) {
         int deferred=md_svc_machine_flush(md_memory_svc(t->memory),&t->machine,pid);
         int error=deferred ? (deferred<0 ? deferred : 0)
-            : md_signal_delivery_publish(&t->signal_delivery,pid,abi.signal_step);
+            : md_signal_delivery_publish(&t->signal_delivery,pid);
         if (error==-ESRCH) { t->resume_lost=1; return; }
         CHECK(!error);
     }
-    t->kernel_resume=t->signal_delivery.active ? PTRACE_SINGLESTEP : t->signal_delivery.preparing
-            || (t->metadata_restart && phase==IDLE
+    t->kernel_resume=t->signal_delivery.active ? PTRACE_CONT : (t->metadata_restart && phase==IDLE
             && (t->metadata_restart->stage==METADATA_ENTRY || t->metadata_restart->stage==METADATA_WAIT))
             || t->machine.syscall_exit || (phase==IDLE && t->machine.retry_svc)
             || t->direct==DIRECT_ADMIT || t->fd_running || phase == OBSERVING || phase==PROCESS_OBSERVING
@@ -6199,7 +6245,7 @@ static void resume(pid_t pid, int sig) {
                 && (md_debugger_syscall_mode(debugger,pid) || md_debugger_observing(debugger,pid))) ? PTRACE_SYSCALL
                 : phase==IDLE && t->entered && md_debugger_step(debugger,pid) ? PTRACE_SINGLESTEP : PTRACE_CONT;
     if (!native_trace(t->kernel_resume,
-            pid, NULL, (void *)(uintptr_t)sig)) { t->kernel_stopped=0; return; }
+            pid, NULL, (void *)(uintptr_t)sig)) { t->kernel_stopped=0; t->retained_signal=0; return; }
     CHECK(errno == ESRCH);
     /* EVENT_WAIT: thread-group exit or exec may win a stopped-thread resume.
      * A terminal stop may still precede reaping. Only the exact exit/exec event
@@ -6208,7 +6254,7 @@ static void resume(pid_t pid, int sig) {
 }
 static int shield(struct thread *t) {
     uint64_t mask = UINT64_MAX;
-    int sync[] = {SIGKILL, SIGSTOP, SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP, SIGSYS};
+    int sync[] = {SIGKILL, SIGSTOP, SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGSYS};
     for (unsigned i = 0; i < sizeof(sync) / sizeof(*sync); i++) mask &= ~(UINT64_C(1) << (sync[i] - 1));
     if (!signal_mask(t,mask,"shield-signals")) return 0;
     t->signal_shielded=1; return 1;
@@ -6504,14 +6550,13 @@ static int mapping_event(pid_t pid,int status) {
     unsigned event=(unsigned)status>>16;
     if (!WIFSTOPPED(status) || event==PTRACE_EVENT_EXIT || event==PTRACE_EVENT_EXEC) return 0;
     if (task_call_signal(t,&owner->direct.call,status)) return 1;
-    if (event==PTRACE_EVENT_STOP && WSTOPSIG(status)==SIGTRAP && !owner->direct.call.restart_pending) {
-        if (tracee_request(t,PTRACE_CONT,NULL,NULL,"mapping-interrupt")) {
-            t->kernel_stopped=0; t->interrupt_pending=0;
-        }
+    int owned_interrupt=md_task_call_expects_interrupt(&owner->direct.call);
+    if (event==PTRACE_EVENT_STOP && WSTOPSIG(status)==SIGTRAP && !owned_interrupt) {
+        task_call_resume(t,&owner->direct.call,0);
         return 1;
     }
-    if (event!=PTRACE_EVENT_SECCOMP && !(event==PTRACE_EVENT_STOP && owner->direct.call.restart_pending)
-            && (event || (WSTOPSIG(status)!=SIGTRAP && WSTOPSIG(status)!=(SIGTRAP|0x80)))) return 0;
+    if (event!=PTRACE_EVENT_SECCOMP && !(event==PTRACE_EVENT_STOP && owned_interrupt)
+            && (event || WSTOPSIG(status)!=(SIGTRAP|0x80))) return 0;
     if (statistics) ++statistics->stops;
     int result=md_task_mapping_event(&owner->direct,status);
     if (result<0) { CHECK(result==-ESRCH); t->resume_lost=1; return 1; }
@@ -7030,7 +7075,7 @@ static int readiness_native_event(struct thread *t,int status) {
         if (restore_mask(t)) { t->phase=EPOLL_WAIT; resume(t->pid,0); }
         return 1;
     }
-    if (!((!event && (signal==(SIGTRAP|0x80) || (signal==SIGTRAP && t->phase==EPOLL_CALL)))
+    if (!(event==MD_TASK_CHECKPOINT_EVENT || (!event && signal==(SIGTRAP|0x80))
             || (event==PTRACE_EVENT_STOP && signal==SIGTRAP && t->socket_waking))) return 0;
     if (!registers(t->pid,&regs)) return 1;
     CHECK(regs.pc==abi.task_return);
@@ -7389,6 +7434,11 @@ static pid_t wait_event(int *status, struct rusage *usage) {
         if (held) return held;
         pid_t pid = md_task_wait_ready(&task_wait, status, md_debugger_active(debugger) ? usage : NULL);
         if (pid > 0) {
+            int checkpoint=md_task_checkpoint_event(&checkpoints,pid,status);
+            if (checkpoint==-ESRCH) continue;
+            if (checkpoint<0) fprintf(stderr,"Shroot: checkpoint pid=%d status=%x error=%d\n",pid,*status,checkpoint);
+            CHECK(checkpoint>=0);
+            if (checkpoint) continue;
             int held=md_broker_hold_event(broker,pid,*status,usage); CHECK(held>=0);
             if (held) continue;
             return pid;
@@ -7670,7 +7720,7 @@ static int memory_event(pid_t pid,int status,const struct rusage *usage) {
             for (unsigned i=0;i<6;++i) CHECK(regs.regs[i]==execution->call.args[i]);
             CHECK(!native_trace(PTRACE_CONT,pid,NULL,NULL));
         } else {
-            CHECK(!event && WSTOPSIG(status)==SIGTRAP && regs.pc==abi.task_return);
+            CHECK(event==MD_TASK_CHECKPOINT_EVENT && regs.pc==abi.task_return);
             execution->calling=0;
             if (execution->stage==MEMORY_ADVICE) execution->error=(long)regs.regs[0];
             else CHECK(!md_memory_replace_observed(&execution->replacement,(long)regs.regs[0]));
@@ -7685,7 +7735,7 @@ static int memory_event(pid_t pid,int status,const struct rusage *usage) {
             || t->remote_memory==execution->actor->memory;
         if (!hold && WIFSTOPPED(status)) {
             unsigned event=(unsigned)status>>16;
-            if (event==PTRACE_EVENT_SECCOMP || (!event && WSTOPSIG(status)==SIGTRAP)) {
+            if (event==PTRACE_EVENT_SECCOMP || event==MD_TASK_CHECKPOINT_EVENT) {
                 struct user_pt_regs regs;
                 CHECK(registers(pid,&regs));
                 pid_t target=0;
@@ -7992,7 +8042,7 @@ int main(int argc, char **argv) {
         CHECK(mapped>=0);
         if (mapped) { adapter_progress(); continue; }
         struct thread *t = thread(pid);
-        if ((t->signal_delivery.active || t->signal_delivery.preparing)
+        if (t->signal_delivery.active
                 && WIFSTOPPED(status) && !((unsigned)status>>16)) {
             int deliver=0;
             int owned=md_signal_delivery_event(&t->signal_delivery,pid,WSTOPSIG(status),&deliver);
@@ -8006,9 +8056,9 @@ int main(int argc, char **argv) {
             siginfo_t info;
             if (!tracee_request(t,PTRACE_GETSIGINFO,NULL,&info,"shielded-signal")) continue;
             if (info.si_code<=0) {
-                CHECK(!md_signal_delivery_hold(&t->signal_delivery,&info));
+                int retained=md_signal_delivery_retain(&t->signal_delivery,pid,&info); CHECK(retained>=0);
                 notification_interrupted(t);
-                resume(pid,0); continue;
+                resume(pid,retained); continue;
             }
         }
         if (interrupted_metadata_event(t,status,&usage)) continue;
@@ -8803,7 +8853,7 @@ int main(int argc, char **argv) {
             CHECK(t->phase == EXECUTING);
             if (!shield(t)) continue;
             t->phase = DISPATCHING; resume(pid, 0);
-        } else if (!event && sig == SIGTRAP) {
+        } else if (event==MD_TASK_CHECKPOINT_EVENT) {
             struct user_pt_regs regs;
             if (!registers(pid, &regs)) continue;
             if (abi.export_control && regs.pc==abi.export_control && t->ready) {
@@ -8839,6 +8889,7 @@ int main(int argc, char **argv) {
                     && received.ready == regs.pc && received.copy_end > received.copy_begin);
                 CHECK(!abi.magic || !memcmp(&abi, &received, sizeof(abi)));
                 abi = received;
+                checkpoints.begin=abi.code_begin; checkpoints.end=abi.code_end;
             }
             if (regs.pc == LOADED_BYTE && t->phase == DOMAIN_PATH) {
                 t->metadata.path[t->metadata.path_size++] = (char)regs.regs[2];
@@ -8996,26 +9047,16 @@ int main(int argc, char **argv) {
                 if (completed_event_resume(t)) continue;
                 int deliver=t->socket_sigpipe ? SIGPIPE : 0;
                 if (deliver) {
-                    /* DONE is a signal-delivery stop, unlike a ppoll exit. Inject
-                     * there so blocked SIGPIPE retains native siginfo even when
-                     * consumed by sigwaitinfo rather than a signal handler. */
+                    /* A checkpoint is not a signal-delivery stop. Publish the
+                     * application SIGPIPE through the common delivery owner. */
                     siginfo_t info={.si_signo=SIGPIPE,.si_code=SI_USER,.si_pid=t->tgid,.si_uid=getuid()};
-                    if (!tracee_request(t,PTRACE_SETSIGINFO,NULL,&info,"socket-sigpipe")) continue;
+                    CHECK(!md_signal_delivery_hold(&t->signal_delivery,&info));
                     t->socket_sigpipe=0;
                 }
-                t->phase = IDLE; resume(pid, deliver);
+                t->phase = IDLE; resume(pid, 0);
             } else {
-                siginfo_t info;
-                if (debugger_at_boundary(t) && !native_trace(PTRACE_GETSIGINFO,pid,NULL,&info)
-                        && md_debugger_stop(debugger,pid,status,&info,0)) continue;
-                if (diagnostics || statistics) {
-                    int code=native_trace(PTRACE_GETSIGINFO,pid,NULL,&info) ? 0 : info.si_code;
-                    if (diagnostics || code>0)
-                        fprintf(stderr,"PROBE guest SIGTRAP pid=%d pc=%#llx lr=%#llx sp=%#llx phase=%d code=%d\n",
-                            pid,regs.pc,regs.regs[30],regs.sp,t->phase,code);
-                }
-                describe_process(pid, regs.pc);
-                resume(pid, SIGTRAP);
+                fprintf(stderr,"Shroot: unexpected checkpoint pid=%d pc=%#llx phase=%d\n",pid,regs.pc,t->phase);
+                CHECK(0);
             }
         } else {
             siginfo_t debug_info;

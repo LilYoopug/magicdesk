@@ -80,7 +80,6 @@ extern void md_guest_load_groups(void), md_guest_loaded_groups(void);
 extern void md_guest_store_groups(void), md_guest_stored_groups(void);
 extern char md_guest_copy_begin[], md_guest_copy_end[];
 extern char md_guest_watch_gate[], md_guest_watch_return[];
-extern char md_guest_signal_step[];
 extern char md_guest_ipc_wait[];
 extern struct md_fd_observation md_guest_fd_control(unsigned, uint64_t, long, long);
 extern char md_guest_anchor_return[];
@@ -194,9 +193,11 @@ long md_guest_dispatch(long nr, unsigned long a0, unsigned long a1, unsigned lon
 }
 #include "cooperative_native.h"
 #include "svc_runtime.h"
+#include "task_checkpoint.h"
+extern char __executable_start[],_etext[];
 static const struct md_interception_abi abi = {
+    .code_begin=(uintptr_t)__executable_start,.code_end=(uintptr_t)_etext,
     .svc_runtime=(uintptr_t)&md_svc_runtime,
-    .signal_step=(uintptr_t)md_guest_signal_step,
     .native_begin=(uintptr_t)md_cooperative_native,
     .native_call=(uintptr_t)md_cooperative_native_call,
     .native_return=(uintptr_t)md_cooperative_native_return,
@@ -223,6 +224,7 @@ static const struct md_interception_abi abi = {
     .raw_gate = (uintptr_t)md_raw_return,
     .copy_begin = (uintptr_t)md_guest_copy_begin, .copy_end = (uintptr_t)md_guest_copy_end,
     .watch_gate = (uintptr_t)md_guest_watch_gate,
+    .watch_return = (uintptr_t)md_guest_watch_return,
     .load_groups = (uintptr_t)md_guest_load_groups, .loaded_groups = (uintptr_t)md_guest_loaded_groups,
     .store_groups = (uintptr_t)md_guest_store_groups, .stored_groups = (uintptr_t)md_guest_stored_groups,
     .enter = (uintptr_t)md_enter
@@ -264,6 +266,19 @@ int md_interception_install(int inherited) {
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_AARCH64, 1, 0),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
+            /* All service markers live in the fixed bootstrap text image.
+             * Ordinary guest code skips this table with one high-IP check. */
+#define COUNT_MARKER(field,symbol) +2
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)+4),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)((uintptr_t)md_guest_ready>>32),0,
+                1 MD_CHECKPOINT_SITES(COUNT_MARKER)),
+#undef COUNT_MARKER
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)),
+#define MARKER(field,symbol) \
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)((uintptr_t)symbol+4),0,1), \
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_CHECKPOINT),
+            MD_CHECKPOINT_SITES(MARKER)
+#undef MARKER
             /* An admitted native effect retains its table turn and journal.
              * Application filters are still evaluated by the kernel. */
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)+4),

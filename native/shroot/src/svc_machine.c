@@ -154,8 +154,8 @@ int md_svc_machine_drain(struct md_svc_registry *r,struct md_svc_machine_thread 
 }
 int md_svc_machine_flush(struct md_svc_registry *r,struct md_svc_machine_thread *s,pid_t pid) {
     if (!r) return 0;
-    /* The checkpoint's cancelled syscall must exit before installing the
-     * reconstructed continuation or the signal queue's userspace NOP. */
+    /* Finish the checkpoint before restoring the guest continuation and
+     * returning retained signals to their original kernel delivery context. */
     if (s->syscall_exit) return 1;
     struct user_pt_regs registers;
     int error=regs(pid,PTRACE_GETREGSET,&registers);
@@ -190,9 +190,9 @@ int md_svc_machine_signal(struct md_svc_registry *r,struct md_svc_machine_thread
     int recovery=recover(r,s,pid,&registers);
     if (recovery<0) return recovery;
     if (recovery==2) {
-        error=signal>=SIGRTMIN ? hold(s,&info,1) : md_signal_delivery_hold(queue,&info);
-        if (!error) *deliver=0;
-        return error ? error : 1;
+        error=signal>=SIGRTMIN ? hold(s,&info,1) : md_signal_delivery_retain(queue,pid,&info);
+        if (error<0) return error;
+        *deliver=error; return 1;
     }
     if (recovery==1 && (error=regs(pid,PTRACE_SETREGSET,&registers))) return error;
     if (queued && ptrace(PTRACE_SETSIGINFO,pid,NULL,&info)<0) return -errno;

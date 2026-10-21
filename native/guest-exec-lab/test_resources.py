@@ -260,7 +260,7 @@ def main():
                           "timeout -k 5 105 " + command + f" {protected} {restart}",
                           "PASS mutation under signals:")
         for protected in range(2):
-            for restart in (0, 1, 2, 3, 4, 6, 8, 14):
+            for restart in (0, 1, 2, 3, 4, 6, 8, 14, 16, 18, 22):
                 for guest in (False, True):
                     command = (root + "/libmagicdesk_guest_run.so --statistics --store " + root
                                + "/store --deadline-seconds 90 -- /bin/test shared-memory /tmp"

@@ -279,6 +279,22 @@ recover the private original argument, then rearm baseline PTRACE_INTERRUPT when
 restoring the exit. This preserves restart processing without a pending real
 signal. Native UID-2000 fixtures cover both dumpable and protected tasks,
 signal-induced and synthetic-interrupt restarts, and IP-scoped TRACE filters.
+Native-call completion uses SYSCALL exit rather than executing a return BRK.
+A baseline PTRACE_INTERRUPT yields a non-syscall boundary before restoring USER
+registers, including ARM64's hidden-at-syscall-stop x7. The executor owns these
+interrupts and its resume mode across foreign interrupts and group-stop wakes.
+Injected ERESTART results wait for the kernel's restarted entry, including
+restart_block via restart_syscall; they are not completed results or userspace
+retries. Tests retain blocked SIGTRAP/SIG_IGN, masks, pending signalfd readiness,
+original event types and STOP/LISTEN/CONT across read, ppoll and timer restarts.
+EXIT reconstruction uses baseline ARM64 PTRACE_SYSEMU to recreate the original
+entry/exit without executing a synthetic syscall through the filter. The
+combined fixture retains KILL(-1) at every boundary. Injected native calls
+remain subject to the filter. A forced SIGSYS unblock at their exit retains
+native KILL_THREAD termination rather than restoring a saved blocking mask
+over it; a syscall-exit stop alone does not establish successful admission.
+These calls do not lend the signal-mask syscalls themselves. See the common
+checkpoint owner below for SYSEMU admission and device coverage.
 The bootstrap's classic seccomp program can encode an ordinary close's low-int
 FD in TRACE's 16-bit data, read through baseline PTRACE_GETEVENTMSG. Large and
 negative descriptors retain full capture. Ordinary close skips an entry register
@@ -728,23 +744,36 @@ Superseded private-engine FD relays and whole-loop read-lease experiments are
 removed. Their historical measurements do not establish sandbox admission or
 authorize reopening an ordinary proc FD link as generic descriptor transfer.
 
-The shared deferred-standard-signal owner uses baseline PTRACE_SINGLESTEP and
-ptrace register/siginfo/mask operations. A bootstrap-owned NOP supplies the stop;
-no application instruction executes and no synthetic application signal is sent.
-TRAP is temporarily unblocked for the owned debug exception, with its original
-disposition, mask and registers retained. Native and traced tests cover
-sigwait/signalfd, original sender data, retained coalescing, blocked SIGTRAP,
-preexisting and concurrent SIGURG/TRAP, and RLIMIT_SIGPENDING exhaustion.
-Exhaustion can discard standard-signal metadata in the native kernel too.
-PTRACE_GET_SYSCALL_INFO (5.3) identifies syscall boundaries before the NOP.
-At an entry/seccomp stop, delivery first cancels the unexecuted call and waits
-for its exit; restoration then replays the original instruction. At an exit
-stop the completed result is retained without replay. The standalone delivery
-fixture covers all three boundaries. arm64 may report an extra senderless
-step stop without executing the NOP. This
-owned boundary must not be delivered as SIGTRAP; an indistinguishable pending
-standard signal outside that boundary still retains native delivery semantics.
-This path does not allocate hardware breakpoint slots or add a post-5.15 API.
+The shared deferred-standard-signal owner uses baseline tkill and ptrace
+siginfo/mask operations, not service single-step. It queues the retained signal's
+own number and restores its original metadata at a real delivery stop. Chained
+stops remain inside kernel signal processing, preserving native EINTR/SA_RESTART
+and exactly-once IO. Job-control signals instead remain in kernel custody with
+temporary mask ownership: requeueing the original delivery does not repeat
+generation-time STOP/CONT effects. Realtime signals retain kernel queue order.
+Fixtures cover sigwait/signalfd, ignored/blocked SIGTRAP, original metadata,
+private/shared pending signals, altstack, interrupted calls, group stops and
+RLIMIT_SIGPENDING exhaustion. The kernel can lose metadata under exhaustion;
+the runtime does not claim otherwise.
+
+`task_checkpoint` owns exact bootstrap SVC sites and emits an internal typed
+event. Unfiltered service markers use selective seccomp TRACE; with application
+filters the owner scopes PTRACE_SYSEMU to lent bootstrap execution. It skips
+only registered markers before filter evaluation. Ordinary calls in that scope
+re-enter natively with their original IP and arguments and remain subject to
+seccomp. A synthetic PTRACE_INTERRUPT exposes the real x7 before publishing a
+marker, because ARM64 syscall stops borrow that register. Application handlers
+and guest debugger execution never inherit this service scope.
+
+ARM64 PTRACE_SYSEMU and its pre-seccomp ordering exist in Android common 5.15;
+PTRACE_INTERRUPT/SEIZE and GET_SYSCALL_INFO predate the minimum. There is no
+newer-than-5.15 dependency. The guest-only startup private-helper probe exercises
+the restricted owner; rejection is a native runtime failure, never a reason to
+disable another MagicDesk service or silently fall back to signal-forcing BRKs.
+UID-2000 device coverage is Linux 6.12 on 4 KiB pages. A 5.15 device and 16 KiB
+pages are not covered by these results. Strict IP/number KILL, TSYNC, protected
+tasks, full register payloads, clone/exec, cancellation and actual GDB/strace
+workflows have focused fixtures.
 
 Channel registration uses the existing `gettid` USER_NOTIF gate instead of BRK,
 preserving blocked SIGTRAP and its handler. A per-image hint revokes fresh
@@ -756,12 +785,14 @@ receives inherited policy through its register handshake. Protected forks do
 not require PTRACE_POKEDATA or a retained writable memory descriptor for this
 step. The direct and managed `fs-export` fixtures cover this boundary.
 
-Known separate limitation: internal Base BRK stops can reset an application's
-explicit `SIG_IGN` disposition for SIGTRAP even while it is unblocked. This also
-reproduces without lazy entry. `resource_guest shared-memory DIRECTORY 0 16`
-retains the failing regression; ordinary modes check a blocked installed handler
-and its mask. Fixing ignored dispositions needs shared-sighand ownership or a
-signal-free Base control protocol, not a temporary per-thread handler override.
+The former Base SIGTRAP-disposition failure now passes in the filesystem-signal
+suite, including ignored, blocked, seccomp and protected variants. Actual guest
+debugger single-step remains native; terminal BRKs after impossible bootstrap
+or exit returns are not normal protocol markers. A separate invalid-pointer
+limitation remains: fallback userspace LDR/STR faults can reset ignored/blocked
+SIGSEGV before the tracer receives the fault. The checkpoint fixture retains
+explicit negative controls against native EFAULT behavior; replacing completion
+markers is not a fix for faulting memory access.
 
 The default [lazy-entry owner](../guest-exec-lab/svc-rewriting.md)
 (`SHROOT_MACHINE_ENTRY=0` selects Base) uses no hardware-breakpoint experiment. `svc_runtime.c` prepares private frames and nearby RX pools;

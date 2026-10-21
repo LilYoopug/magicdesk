@@ -18,8 +18,6 @@
 #include <sys/wait.h>
 #include <asm/ptrace.h>
 #include <unistd.h>
-extern char delivery_step[];
-__asm__(".text\n.balign 4\n.global delivery_step\ndelivery_step:\nnop\nbrk #0\n");
 
 static siginfo_t original(int signal) {
     siginfo_t info={.si_signo=signal,.si_code=SI_TKILL};
@@ -128,42 +126,33 @@ int main(void) {
             assert(waitpid(pid,&status,0)==pid && (unsigned)status>>16==PTRACE_EVENT_SECCOMP);
         }
         uintptr_t stopped=pc(pid);
-        if (round>=5) stopped-=4;
         struct md_signal_delivery q={0};
         siginfo_t info=original(SIGUSR1);
         assert(!md_signal_delivery_hold(&q,&info));
         info.si_pid=11111; assert(!md_signal_delivery_hold(&q,&info));
         info=original(SIGTRAP); assert(!md_signal_delivery_hold(&q,&info));
-        assert(!md_signal_delivery_publish(&q,pid,(uintptr_t)delivery_step));
-        assert(!md_signal_delivery_publish(&q,pid,(uintptr_t)delivery_step));
+        assert(!md_signal_delivery_publish(&q,pid));
+        assert(!md_signal_delivery_publish(&q,pid));
         if (round==3) {
             assert(!syscall(SYS_tgkill,pid,pid,SIGURG));
             assert(!syscall(SYS_tgkill,pid,pid,SIGTRAP));
         }
-        assert(!ptrace(q.preparing ? PTRACE_SYSCALL : PTRACE_SINGLESTEP,pid,NULL,NULL));
-        unsigned stops=0,boundaries=0,preparations=0;
+        assert(!ptrace(PTRACE_CONT,pid,NULL,NULL));
+        unsigned stops=0;
         while (waitpid(pid,&status,0)==pid && WIFSTOPPED(status)) {
             /* The replayed guest call still follows its original seccomp policy. */
             if (round==6 && (unsigned)status>>16==PTRACE_EVENT_SECCOMP) {
-                assert(!q.active && !q.preparing && !q.first);
                 assert(!ptrace(PTRACE_CONT,pid,NULL,NULL)); continue;
             }
-            assert((q.active || q.preparing) && ++stops<=5);
-            siginfo_t observed; assert(!ptrace(PTRACE_GETSIGINFO,pid,NULL,&observed));
-            if (q.preparing && WSTOPSIG(status)==(SIGTRAP|0x80)) ++preparations;
-            if (q.syscall_boundary && observed.si_code==SI_USER && !observed.si_pid && !observed.si_uid
-                    && pc(pid)==(uintptr_t)delivery_step) ++boundaries;
-            if (q.active && observed.si_code>0) assert(pc(pid)==(uintptr_t)delivery_step+4);
+            assert(q.active && ++stops<=2);
             int deliver=0;
             assert(md_signal_delivery_event(&q,pid,WSTOPSIG(status),&deliver)==1);
-            if (!q.active && !q.preparing) assert(pc(pid)==stopped);
-            assert(!ptrace(q.active ? PTRACE_SINGLESTEP : q.preparing ? PTRACE_SYSCALL : PTRACE_CONT,
-                pid,NULL,(void *)(intptr_t)deliver));
+            assert(pc(pid)==stopped);
+            assert(!ptrace(PTRACE_CONT,pid,NULL,(void *)(intptr_t)deliver));
         }
-        if (!WIFEXITED(status) || WEXITSTATUS(status) || stops-boundaries-preparations!=(round==3 ? 3u : 2u))
-            fprintf(stderr,"signal round=%u status=%#x stops=%u boundaries=%u\n",round,status,stops,boundaries);
-        assert(WIFEXITED(status) && !WEXITSTATUS(status) && boundaries<=1
-            && preparations==(round>=5 ? 1u : 0u) && stops-boundaries-preparations==(round==3 ? 3u : 2u));
+        if (!WIFEXITED(status) || WEXITSTATUS(status) || stops!=2)
+            fprintf(stderr,"signal round=%u status=%#x stops=%u\n",round,status,stops);
+        assert(WIFEXITED(status) && !WEXITSTATUS(status) && stops==2);
         assert(!q.first && !q.last && !q.active);
         md_signal_delivery_clear(&q);
     }
@@ -176,6 +165,8 @@ int main(void) {
     assert(md_signal_delivery_hold(&q,&info)==-EINVAL);
     info.si_code=SI_KERNEL; assert(md_signal_delivery_hold(&q,&info)==-EINVAL);
     info=original(SIGALRM); info.si_code=SI_KERNEL;
+    assert(!md_signal_delivery_hold(&q,&info));
+    info=original(SIGCHLD); info.si_code=CLD_EXITED; info.si_status=42;
     assert(!md_signal_delivery_hold(&q,&info));
     info=original(SIGUSR1); assert(!md_signal_delivery_hold(&q,&info));
     md_signal_delivery_clear(&q); assert(!q.first && !q.last && !q.active);

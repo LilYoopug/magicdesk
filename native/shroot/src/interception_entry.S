@@ -1,10 +1,6 @@
 #include <asm/unistd.h>
 .text
 .balign 4
-.global md_guest_signal_step
-md_guest_signal_step:
-    nop
-    brk #0
 .global md_guest_entry_kernel
 .type md_guest_entry_kernel, %function
 md_guest_entry_kernel:
@@ -29,7 +25,7 @@ md_guest_dispatch_entry:
 .global md_guest_task_control
 .type md_guest_task_control, %function
 md_guest_task_control:
-    brk #0x5bd
+    svc #0
     ret
 .size md_guest_task_control, .-md_guest_task_control
 .global md_guest_task_call
@@ -38,12 +34,12 @@ md_guest_task_collect:
     bl md_task_receive_collect
 .global md_guest_task_collected
 md_guest_task_collected:
-    brk #0
+    svc #0
 md_guest_task_call:
     svc #0
 .global md_guest_task_return
 md_guest_task_return:
-    brk #0x5be
+    svc #0
 .global md_guest_task_abort
 md_guest_task_abort:
     mov x0, #0
@@ -55,13 +51,13 @@ md_guest_task_abort_return:
 .global md_guest_export_control
 .type md_guest_export_control, %function
 md_guest_export_control:
-    brk #0x5bc
+    svc #0
     ret
 .size md_guest_export_control, .-md_guest_export_control
 .global md_guest_buffer_control
 .type md_guest_buffer_control, %function
 md_guest_buffer_control:
-    brk #0x5bb
+    svc #0
     ret
 .size md_guest_buffer_control, .-md_guest_buffer_control
 .global md_guest_buffer_admit
@@ -92,7 +88,7 @@ md_guest_anchor_return:
 .global md_guest_fd_control
 .type md_guest_fd_control, %function
 md_guest_fd_control:
-    brk #0x5ba
+    svc #0
     ret
 .size md_guest_fd_control, .-md_guest_fd_control
 .global md_guest_ipc_wait
@@ -114,31 +110,31 @@ md_guest_watch_gate:
     svc #0
 .global md_guest_watch_return
 md_guest_watch_return:
-    brk #0x5b7
+    svc #0
 .global md_guest_ready
 .type md_guest_ready, %function
 md_guest_ready:
-    brk #0x5b0
+    svc #0
     ret
 .size md_guest_ready, .-md_guest_ready
 .global md_guest_done
 md_guest_done:
-    brk #0x5b1
+    svc #0
 .global md_guest_exported
 md_guest_exported:
-    brk #0x5b3
+    svc #0
 .global md_guest_store
 md_guest_store:
     stp x2, x3, [x0]
 .global md_guest_stored
 md_guest_stored:
-    brk #0x5b4
+    svc #0
 .global md_guest_load_byte
 md_guest_load_byte:
     ldrb w2, [x0]
 .global md_guest_loaded_byte
 md_guest_loaded_byte:
-    brk #0x5b5
+    svc #0
 .global md_guest_store_ids
 md_guest_store_ids:
     str w3, [x0]
@@ -146,7 +142,7 @@ md_guest_store_ids:
     str w5, [x2]
 .global md_guest_stored_ids
 md_guest_stored_ids:
-    brk #0x5b6
+    svc #0
 /* Bounded task-affine credential transfer, including nondumpable programs.
  * x0 points at 1..16 gids, x1 is their count, w3..w18 carry their values. */
 .global md_guest_load_groups
@@ -158,7 +154,7 @@ md_guest_load_groups:
 .endr
 .global md_guest_loaded_groups
 md_guest_loaded_groups:
-    brk #0x5b8
+    svc #0
 .global md_guest_store_groups
 md_guest_store_groups:
 .irp reg,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18
@@ -168,7 +164,7 @@ md_guest_store_groups:
 .endr
 .global md_guest_stored_groups
 md_guest_stored_groups:
-    brk #0x5b9
+    svc #0
 .global md_guest_allocate
 .type md_guest_allocate, %function
 md_guest_allocate:
@@ -204,6 +200,6 @@ md_guest_allocate:
     mov x0, x21
 .global md_guest_allocated
 md_guest_allocated:
-    brk #0x5b2
+    svc #0
 .size md_guest_allocate, .-md_guest_allocate
 .section .note.GNU-stack,"",%progbits

@@ -114,12 +114,28 @@ survives memory repair without retrying in the application.
 Internal signal scopes save and restore masks through one supervisor boundary.
 Nested adapters retain the logical application mask below their internal
 protocol masks. Retained asynchronous signals are released only after all
-internal owners restore the guest boundary. `signal_delivery` identifies that
-boundary with `PTRACE_GET_SYSCALL_INFO`: at entry/seccomp it first cancels the
-unexecuted syscall, waits for its exit, then delivers and replays the original
-instruction. A completed syscall is never replayed. This prevents a signal
-handler from receiving an untouched argument instead of its syscall result.
-The ordinary no-retained-signal route adds no signal-delivery round trip.
+internal owners restore the guest boundary. `signal_delivery` chains real
+delivery stops without executing service instructions between them. The final
+stop restores the application mask; kernel admission and the original
+EINTR/SA_RESTART decision remain native. A completed syscall is never replayed.
+Job-control signals remain kernel-pending so STOP can cancel CONT without a
+later replay waking the group. The no-retained-signal path adds no delivery trip.
+
+`task_checkpoint` owns all normal bootstrap control markers: selective TRACE
+outside application filters, scoped SYSEMU inside them, and a synthetic
+interrupt to recover ARM64's hidden x7 before publishing one typed event.
+Native calls inside that scope still pass their original filter with their
+original IP and arguments. Register copies, C adapter returns, helper custody,
+memory repair and readiness use this same event; actual SIGTRAP and guest
+debugger steps are not service completions. `task_call` separately owns native
+call entry/exit and exact continuation restoration without a return BRK.
+See [protocol coverage](../guest-exec-lab/sandbox-research.md#signal-neutral-checkpoints).
+
+Known separate limitation: a fault in a fallback userspace memory copy can
+reset an ignored/blocked SIGSEGV disposition before ptrace observes it. A
+signal-neutral completion marker does not make that access kernel-mediated.
+The fault control remains explicit; this protocol does not claim transparent
+invalid-pointer handling under every protected-memory and seccomp combination.
 
 The task registry retains an immutable resource generation for repeated reads.
 Each admitted read owns one reference instead of independently retaining every

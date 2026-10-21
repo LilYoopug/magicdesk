@@ -7,6 +7,7 @@
 #include "socket_control.h"
 #include "proc_paths.h"
 #include "signal_protocol.h"
+#include "task_checkpoint.h"
 #include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -729,16 +730,7 @@ int md_task_helper_event(struct md_task_helpers *manager, pid_t pid, int status)
             if (child && m->operation==MAP) m->started=1;
             error=resume(m,pid);
         }
-    } else if (!event && sig==SIGTRAP) {
-        siginfo_t info;
-        error=(int)trace(m,PTRACE_GETSIGINFO,pid,NULL,&info);
-        if (error) return error==-ESRCH ? 1 : error;
-        if (info.si_code<=0) {
-            if (!child) return 0; /* The caller's signal owner retains it. */
-            m->result=-EINTR;
-            error=abort_child(m);
-            return error && error!=-ESRCH ? error : 1;
-        }
+    } else if (event==MD_TASK_CHECKPOINT_EVENT) {
         struct user_pt_regs r;
         error=registers(m,pid,&r,0);
         if (!error && !child && m->parent_operation==ALLOCATE && r.pc==m->abi.allocated) {

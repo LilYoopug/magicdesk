@@ -4,6 +4,14 @@
 
 #define MD_INTERCEPTION_MAGIC UINT64_C(0x4d44494e54455231)
 #define MD_GUEST_MAP_IMAGE 0x4d440101
+#define MD_CHECKPOINT_SITES(X) \
+    X(ready,md_guest_ready) X(done,md_guest_done) X(allocated,md_guest_allocated) \
+    X(exported,md_guest_exported) X(export_control,md_guest_export_control) \
+    X(stored,md_guest_stored) X(loaded_byte,md_guest_loaded_byte) X(stored_ids,md_guest_stored_ids) \
+    X(loaded_groups,md_guest_loaded_groups) X(stored_groups,md_guest_stored_groups) \
+    X(fd_control,md_guest_fd_control) X(buffer_control,md_guest_buffer_control) \
+    X(task_control,md_guest_task_control) X(task_return,md_guest_task_return) \
+    X(task_collected,md_guest_task_collected) X(watch_return,md_guest_watch_return) X(enter,md_enter)
 enum { MD_IMAGE_PROGRAM=0, MD_IMAGE_LOADER=1, MD_IMAGE_TAKE_PROGRAM=2, MD_IMAGE_TAKE_LOADER=3 };
 #define MD_GUEST_ENTER_IMAGE 0x4d440102
 #define MD_GUEST_SHM 0x4d440104
@@ -60,7 +68,7 @@ struct md_interception_abi {
     uintptr_t export_control, store, stored, load_byte, loaded_byte;
     uintptr_t proc_open, proc_open_path;
     uintptr_t store_ids, stored_ids, raw_gate, copy_begin, copy_end;
-    uintptr_t watch_gate;
+    uintptr_t watch_gate,watch_return;
     uintptr_t load_groups, loaded_groups, store_groups, stored_groups;
     uintptr_t enter;
     uintptr_t ipc_wait;
@@ -73,8 +81,8 @@ struct md_interception_abi {
     uintptr_t buffer_result;
     uintptr_t buffer_enter;
     uintptr_t native_begin, native_call, native_return, native_end;
-    uintptr_t signal_step;
     uintptr_t svc_runtime;
+    uintptr_t code_begin,code_end;
 };
 long md_guest_buffer_admit(unsigned purpose);
 void md_cooperative_revoke(void);
