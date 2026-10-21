@@ -44,7 +44,8 @@ def main():
 
     try:
         command("mkdir -p " + directory + "/rootfs/bin " + directory + "/rootfs/tmp")
-        binaries = ["bootstrap", "supervisor", "run", "service", "watch_guest", "watch_launch", "watch_store"]
+        controls = ("watch_queue", "watch_read", "watch_activation")
+        binaries = ["bootstrap", "supervisor", "run", "service", "watch_guest", "watch_launch", "watch_store", *controls]
         if args.contracts:
             binaries.extend(("test_inodes", "test_import", "test_rpc"))
         for name in binaries:
@@ -62,6 +63,8 @@ def main():
             assert args.userspace, "--gio requires --userspace"
             report["uploads"].append(transport.upload(client, args.gio, directory + "/rootfs/bin/watch-gio"))
             command("chmod 700 " + directory + "/rootfs/bin/watch-gio")
+        for name in controls:
+            command("timeout 60 " + directory + "/libmagicdesk_guest_" + name + ".so")
         command("timeout 30 " + directory + "/libmagicdesk_guest_service.so --import "
                 + directory + "/rootfs " + directory + "/store")
         output = command("timeout 60 " + runner + " --statistics --store "
@@ -101,6 +104,7 @@ def main():
             report["limits"] = limit.findall(output)
             checked = limit.sub("", output)
             assert "Unable to" not in checked and "Failed to" not in checked, output
+        command("rm -rf " + directory)
         report["passed"] = True
     except Exception as error:
         report["failure"] = str(error)

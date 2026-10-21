@@ -1,7 +1,7 @@
-#ifndef MD_LAB_SVC_BORROWED_H
-#define MD_LAB_SVC_BORROWED_H
+#ifndef MD_SVC_FRAME_H
+#define MD_SVC_FRAME_H
 
-/* Optional LSE experiment. SP distributes contention; it is NOT task identity.
+/* SVC private frames. SP distributes contention; it is NOT task identity.
  * Each 64K slot has a metadata page, a guard, and a private 32K stack. */
 #define MD_SVC_POOL_HIGH 0x21
 #define MD_SVC_POOL_BASE 0x2100000000UL
@@ -11,5 +11,12 @@
 #define MD_SVC_FRAME_OFFSET 64
 #define MD_SVC_OWNER_OFFSET 384
 #define MD_SVC_SAVED_SP 864
+
+#ifndef __ASSEMBLER__
+#include <stddef.h>
+#include <stdint.h>
+int md_svc_frame_relocate(unsigned char *,size_t,uintptr_t);
+size_t md_svc_single_size(void);
+#endif
 
 #endif

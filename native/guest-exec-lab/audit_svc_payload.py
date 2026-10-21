@@ -17,7 +17,7 @@ def sections(path):
 
 
 def audit(build):
-    objects = [path for path in (build / 'CMakeFiles/trace_svc_patch.dir').rglob('svc_payload.c.o')
+    objects = [path for path in (build / 'CMakeFiles/bootstrap.dir').rglob('svc_payload.c.o')
                if path.parent.name == 'src']
     assert len(objects) == 1, objects
     obj, = objects
@@ -26,7 +26,7 @@ def audit(build):
     assert 0 < payload['Size'] < 16384
     assert not any(s['Type']['Name'] in ('SHT_REL', 'SHT_RELA') and s['Size']
                    and s['Info'] == payload['Index'] for s in table), 'copied driver has relocations'
-    binary = build / 'libmagicdesk_guest_trace_svc_patch.so'
+    binary = build / 'libmagicdesk_guest_bootstrap.so'
     linked, = [s for s in sections(binary) if s['Name']['Name'] == 'md_svc_payload']
     original = obj.read_bytes()[payload['Offset']:payload['Offset'] + payload['Size']]
     final = binary.read_bytes()[linked['Offset']:linked['Offset'] + linked['Size']]

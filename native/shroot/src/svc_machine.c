@@ -81,10 +81,10 @@ static int recover(struct md_svc_registry *r,struct md_svc_machine_thread *s,pid
         struct user_pt_regs *registers) {
     struct md_svc_site *site=md_svc_registry_direct_at(r,pid,registers->pc,registers->sp);
     if (!site) return 0;
-    if (registers->pc==site->window.kernel_alias) {
+    if (registers->pc==site->kernel_alias) {
         registers->pc+=4;
         return md_svc_machine_return(r,s,pid,registers);
-    } else if (registers->pc==site->window.kernel_alias+4) {
+    } else if (registers->pc==site->kernel_alias+4) {
         registers->pc=site->direct.svc+4;
         s->draining=0;
         return 1;
@@ -175,7 +175,7 @@ int md_svc_machine_return(struct md_svc_registry *r,struct md_svc_machine_thread
     int error=0;
     struct md_svc_site *site=md_svc_registry_direct_at(r,pid,registers->pc,registers->sp);
     if (!site) return 0;
-    if (registers->pc==site->window.kernel_alias+4) {
+    if (registers->pc==site->kernel_alias+4) {
         /* Intercepted cold misses retry at the original SVC. The ordinary
          * syscall owner, not the gate's synthetic PC, then owns execution. */
         error=md_svc_registry_suspend(r,pid,site->direct.svc);

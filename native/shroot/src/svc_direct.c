@@ -1,7 +1,6 @@
 #include "svc_direct.h"
-#include "svc_edge.h"
 #include "svc_patch.h"
-#include "svc_borrowed.h"
+#include "svc_frame.h"
 #include <errno.h>
 #include <string.h>
 #include <sys/syscall.h>
@@ -38,7 +37,7 @@ int md_svc_direct_plan(uintptr_t svc,uint64_t number,uintptr_t destination,
     uintptr_t body_pc=destination+GUARD_BYTES;
     /* The ordinary x8 template needs no guest stack, TLS, or spare register.
      * Its replay slots load the value established by the read-only guard. */
-    memcpy(body,md_svc_single_begin+7*body_size,body_size);
+    memcpy(body,md_svc_single_begin,body_size);
     error=md_svc_frame_relocate(body,body_size,frames);
     if (error) return error;
     memcpy(body+at(md_svc_single_dispatch),&dispatch,8);

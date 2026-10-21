@@ -1,7 +1,7 @@
 #define _GNU_SOURCE
 #include "svc_direct.h"
 #include "svc_text.h"
-#include "svc_borrowed.h"
+#include "svc_frame.h"
 #include <assert.h>
 #include <elf.h>
 #include <errno.h>
@@ -65,7 +65,6 @@ static int callback(uint64_t *r,void *unused) {
     r[0]=0x4321;
     return 1;
 }
-int md_svc_lab_dispatch(void *unused) { (void)unused; abort(); }
 static void unexpected(int number) { (void)number; _exit(81); }
 static void received(int number,siginfo_t *info,void *context) {
     ucontext_t *u=context;

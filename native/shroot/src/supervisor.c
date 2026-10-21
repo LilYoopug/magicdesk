@@ -20,11 +20,6 @@
 #include "cooperative_channel.h"
 #include "entry_route.h"
 #include "svc_machine.h"
-#ifdef MD_SVC_SIGNAL_PROOF
-#include "svc_signal.h"
-#include "svc_lifecycle.h"
-#include "svc_discovery.h"
-#endif
 #include "guest_domain.h"
 #include "task_resources.h"
 #include "network_route.h"
@@ -130,14 +125,6 @@ static struct md_interception_memory *entry_fence_memory;
 static int entry_fence_stage, entry_fence_error;
 static int64_t entry_fence_deadline;
 #define ENTRY_QUIESCING (entry_fence_stage==1)
-#ifdef MD_SVC_SIGNAL_PROOF
-static struct md_svc_lifecycle *svc_retirement;
-static struct md_task_quiesce *svc_deferred;
-static struct md_interception_memory *svc_memory;
-#define SVC_QUIESCING (md_svc_lifecycle_barrier(svc_retirement)!=NULL)
-#else
-#define SVC_QUIESCING 0
-#endif
 #define READY abi.ready
 #define DONE abi.done
 #define ALLOCATE abi.allocate
@@ -342,10 +329,6 @@ struct thread {
     struct md_svc_machine_thread machine;
     int entry_fence_waiting, entry_fence_status, entry_fence_result;
     struct rusage entry_fence_usage;
-#ifdef MD_SVC_SIGNAL_PROOF
-    int svc_retire_replayed;
-    struct md_svc_witness svc_witness;
-#endif
     struct seccomp_notif *memory_notification;
     struct md_broker_completion *broker_completion;
     struct { int held, status, has_info; struct rusage usage; siginfo_t info; } broker_event;
@@ -704,9 +687,6 @@ static void cleanup(void) {
         md_identity_release(&threads->identity);
         free(threads->identity_buffer);
         md_signal_delivery_clear(&threads->signal_delivery);
-#ifdef MD_SVC_SIGNAL_PROOF
-        md_svc_signal_forget(threads->pid);
-#endif
         free(threads); threads = next;
     }
     task_action_cleanup();
@@ -729,11 +709,6 @@ static void cleanup(void) {
     md_task_quiesce_destroy(mapping_barrier); mapping_barrier=NULL;
     md_task_quiesce_destroy(entry_fence_barrier); entry_fence_barrier=NULL;
     md_memory_release(entry_fence_memory); entry_fence_memory=NULL; entry_fence_stage=0;
-#ifdef MD_SVC_SIGNAL_PROOF
-    md_svc_lifecycle_destroy(svc_retirement); svc_retirement=NULL;
-    md_task_quiesce_destroy(svc_deferred); svc_deferred=NULL;
-    md_memory_release(svc_memory); svc_memory=NULL;
-#endif
     md_task_registry_destroy(tasks); tasks = NULL;
     md_fd_exchanges_destroy(fd_exchanges); fd_exchanges=NULL;
     md_identity_release(&launch_identity);
@@ -946,9 +921,6 @@ static void pid_store_add(struct thread *t, uintptr_t address, pid_t value) {
 static void release_thread(struct thread *t) {
     md_svc_machine_forget(&t->machine);
     md_signal_delivery_clear(&t->signal_delivery);
-#ifdef MD_SVC_SIGNAL_PROOF
-    md_svc_signal_forget(t->pid);
-#endif
     pid_birth_release(t);
     if (t->pid_birth_child) {
         t->pid_birth_child->pid_birth_parent=NULL;
@@ -3479,7 +3451,7 @@ static void task_action_start(struct thread *t) {
     struct task_action *owner=t->action;
     CHECK(owner && !task_action_call(owner)->stage);
     if (owner->loan) { loan_start(owner); return; }
-    if (task_action_execution || task_action_releasing || memory_execution || mapping_execution || SVC_QUIESCING || ENTRY_QUIESCING) { retry_wait(t,RETRY_TASK_ACTION); return; }
+    if (task_action_execution || task_action_releasing || memory_execution || mapping_execution || ENTRY_QUIESCING) { retry_wait(t,RETRY_TASK_ACTION); return; }
     if (owner->rejected_task) {
         if (md_task_helper_retiring(helpers,owner->rejected_group,owner->rejected_task)) {
             retry_wait(t,RETRY_TASK_ACTION); return;
@@ -5884,9 +5856,6 @@ static int domain_call(struct thread *t, struct user_pt_regs *r, unsigned long c
          * already admitted may finish, exactly like in-flight kernel syscalls.
          * A failed installation conservatively leaves direct entry disabled. */
         filter_revoke_entry(t,r);
-#ifdef MD_SVC_SIGNAL_PROOF
-        CHECK(!md_svc_signal_revoke(t->pid));
-#endif
     }
     if (t->ready && t->phase==IDLE && cookie==MD_INTERCEPT_OBSERVE && r->pc!=RAW_GATE
             && ((nr==SYS_seccomp && (unsigned)r->regs[0]==SECCOMP_SET_MODE_FILTER)
@@ -6073,9 +6042,6 @@ static void resume(pid_t pid, int sig) {
         struct md_task_quiesce *barrier=memory_execution ? memory_barrier
             : mapping_execution ? mapping_barrier : task_action_barrier;
         if (ENTRY_QUIESCING) barrier=entry_fence_barrier;
-#ifdef MD_SVC_SIGNAL_PROOF
-        if (SVC_QUIESCING) barrier=md_svc_lifecycle_barrier(svc_retirement);
-#endif
         /* A lent actor has a separate resume owner until its registers return. */
         if (!task_action_execution || task_action_execution->actor!=t || !task_action_execution->borrowed)
             CHECK(!md_task_quiesce_add(barrier,pid,1,0));
@@ -6176,18 +6142,8 @@ static void resume(pid_t pid, int sig) {
     }
     if (!sig && t->signal_delivery.first && !t->signal_delivery.active
             && !t->signal_shielded && debugger_at_boundary(t)
-#ifdef MD_SVC_SIGNAL_PROOF
-            && !md_svc_signal_pending(pid)
-#endif
             ) {
         int deferred=md_svc_machine_flush(md_memory_svc(t->memory),&t->machine,pid,t->tgid,&t->signal_delivery);
-#ifdef MD_SVC_SIGNAL_PROOF
-        /* Finishing a Base adapter can still return into a private entry
-         * frame. Queued signals need the same architectural exit as signals
-         * observed directly in that frame. */
-        struct md_svc_signal_window window;
-        if (!deferred && md_svc_signal_window(pid,&window)) deferred=md_svc_signal_drain(pid,&window,0);
-#endif
         int error=deferred ? (deferred<0 ? deferred : 0)
             : md_signal_delivery_publish(&t->signal_delivery,pid,abi.signal_step);
         if (error==-ESRCH) { t->resume_lost=1; return; }
@@ -6226,16 +6182,9 @@ static int shield(struct thread *t) {
 }
 static int save_signal_mask(struct thread *t,uint64_t *mask,const char *reason) {
     if (!tracee_request(t,PTRACE_GETSIGMASK,(void *)sizeof(*mask),mask,reason)) return 0;
-#ifdef MD_SVC_SIGNAL_PROOF
-    /* Snapshot the next owner's logical mask, not the outer entry's overlay. */
-    *mask=md_svc_signal_saved_mask(t->pid,*mask);
-#endif
     return 1;
 }
 static int signal_mask(struct thread *t,uint64_t mask,const char *reason) {
-#ifdef MD_SVC_SIGNAL_PROOF
-    mask=md_svc_signal_mask(t->pid,mask);
-#endif
     if (!tracee_request(t,PTRACE_SETSIGMASK,(void *)sizeof(mask),&mask,reason)) return 0;
     t->signal_shielded=0; return 1;
 }
@@ -6564,7 +6513,7 @@ static int mapping_direct_start(struct thread *t) {
         CHECK(!md_fd_order_start(&owner->files));
     if (owner->guarded) {
         if (!mapping_execution) {
-            if (memory_execution || task_action_execution || task_action_releasing || SVC_QUIESCING || ENTRY_QUIESCING) {
+            if (memory_execution || task_action_execution || task_action_releasing || ENTRY_QUIESCING) {
                 retry_wait(t,RETRY_MAPPING); return 0;
             }
             if (!mapping_barrier) mapping_barrier=md_task_quiesce_new(quiesce_trace);
@@ -7273,8 +7222,7 @@ static int entry_fence_admission(struct thread *t,const struct user_pt_regs *r,i
 }
 static void entry_fence_progress(void) {
     if (!entry_fence_memory) {
-        if (memory_execution || mapping_execution || task_action_execution || task_action_releasing
-                || SVC_QUIESCING) return;
+        if (memory_execution || mapping_execution || task_action_execution || task_action_releasing) return;
         struct thread *caller=threads;
         while (caller && (!caller->pid || !caller->entry_fence_waiting)) caller=caller->next;
         if (!caller) return;
@@ -7349,16 +7297,6 @@ static pid_t entry_fence_take(int *status,struct rusage *usage) {
 static pid_t deferred_event(int *status,struct rusage *usage) {
     pid_t filtered=entry_fence_take(status,usage);
     if (filtered) return filtered;
-#ifdef MD_SVC_SIGNAL_PROOF
-    pid_t retired=md_svc_lifecycle_take(svc_retirement,status,usage);
-    if (md_svc_lifecycle_done(svc_retirement)) {
-        if (retired) thread(retired)->svc_retire_replayed=md_svc_lifecycle_publication(svc_retirement) ? 2 : 1;
-        md_svc_lifecycle_destroy(svc_retirement); svc_retirement=NULL;
-        md_memory_release(svc_memory); svc_memory=NULL;
-    }
-    if (retired) return retired;
-    if (!svc_retirement && (retired=md_task_quiesce_take(svc_deferred,status,usage))) return retired;
-#endif
     if (broker_events) {
         struct thread *t=broker_events; broker_events=t->broker_next; t->broker_next=NULL;
         *status=t->broker_event.status; if (usage) *usage=t->broker_event.usage;
@@ -7377,19 +7315,6 @@ static pid_t wait_event(int *status, struct rusage *usage) {
     static unsigned progress_budget;
     for (;;) {
         entry_fence_progress();
-#ifdef MD_SVC_SIGNAL_PROOF
-        if (md_svc_lifecycle_starting(svc_retirement) && !memory_execution
-                && !mapping_execution && !task_action_execution && !task_action_releasing && !ENTRY_QUIESCING) {
-            for (struct thread *p=threads;p;p=p->next) if (p->pid)
-                CHECK(!md_svc_lifecycle_add(svc_retirement,p->pid,p->kernel_stopped || p->listening || p->vfork_child,
-                    p->interrupt_pending || birth_stop_pending(p) ? 0 : p->kernel_resume,
-                    p->memory==svc_memory ? 1+(p->phase!=IDLE) : 0,p->original.pc,p->original.sp));
-            CHECK(!md_svc_lifecycle_stop(svc_retirement));
-        }
-        int svc_was_quiescing=SVC_QUIESCING;
-        CHECK(!md_svc_lifecycle_progress(svc_retirement));
-        if (svc_was_quiescing && !SVC_QUIESCING) task_action_unpark();
-#endif
         memory_progress();
         mapping_progress();
         task_action_schedule();
@@ -7501,11 +7426,8 @@ static void memory_discard(void) {
     free(execution);
 }
 static int memory_available(pid_t pid) {
-    return (!ENTRY_QUIESCING || !md_task_quiesce_contains(entry_fence_barrier,pid)) && (!SVC_QUIESCING
-#ifdef MD_SVC_SIGNAL_PROOF
-            || !md_task_quiesce_contains(md_svc_lifecycle_barrier(svc_retirement),pid)
-#endif
-            ) && (!memory_execution || !md_task_quiesce_contains(memory_barrier,pid))
+    return (!ENTRY_QUIESCING || !md_task_quiesce_contains(entry_fence_barrier,pid))
+        && (!memory_execution || !md_task_quiesce_contains(memory_barrier,pid))
         && (!mapping_execution || !md_task_quiesce_contains(mapping_barrier,pid))
         && (!task_action_execution || !md_task_quiesce_contains(task_action_barrier,pid));
 }
@@ -8006,11 +7928,6 @@ int main(int argc, char **argv) {
     while (live || md_fs_buffer_children(buffer_service) || md_task_helpers_count(helpers)) {
         pid_collect();
         int status; struct rusage usage; pid_t pid = wait_event(&status, &usage);
-#ifdef MD_SVC_SIGNAL_PROOF
-        int retired=md_svc_lifecycle_event(svc_retirement,pid,status,&usage);
-        CHECK(retired>=0);
-        if (retired) continue;
-#endif
         if (ENTRY_QUIESCING && md_task_quiesce_contains(entry_fence_barrier,pid)) {
             CHECK(!md_task_quiesce_event(entry_fence_barrier,pid,status,&usage));
             continue;
@@ -8088,15 +8005,6 @@ int main(int argc, char **argv) {
             CHECK(owned>=0);
             if (owned) { resume_signal(pid,deliver); continue; }
         }
-#ifdef MD_SVC_SIGNAL_PROOF
-        if (t->phase==IDLE && !md_debugger_traced(debugger,pid)) {
-            int deliver=0;
-            int owned=md_svc_signal_event(pid,status,&deliver,&t->signal_delivery);
-            if (owned<0) errno=-owned;
-            CHECK(owned>=0);
-            if (owned) { resume_signal(pid,deliver); continue; }
-        }
-#endif
         if (!event && sig!=(SIGTRAP|0x80)) notification_interrupted(t);
         if (event==PTRACE_EVENT_EXIT) {
             struct md_svc_registry *machine=md_memory_svc(t->memory);
@@ -8110,9 +8018,6 @@ int main(int argc, char **argv) {
                         (unsigned long long)state.retired_clients,machine->disabled);
             }
             if (machine) CHECK(!md_svc_registry_retire_client(pid,machine->frames+MD_SVC_POOL_SIZE));
-#ifdef MD_SVC_SIGNAL_PROOF
-            CHECK(!md_svc_signal_retire(pid));
-#endif
             /* ESRCH invalidates the preceding stop, not this newly observed
              * terminal stop. Registers may be inspected here, never fabricated. */
             int resume_lost=t->resume_lost;
@@ -8151,10 +8056,6 @@ int main(int argc, char **argv) {
             if (!md_debugger_event(debugger,pid,event,child)) resume(pid,0);
         } else if (event == PTRACE_EVENT_EXEC) {
             md_svc_machine_forget(&t->machine);
-#ifdef MD_SVC_SIGNAL_PROOF
-            md_svc_signal_forget(pid);
-            t->svc_retire_replayed=0;
-#endif
             /* A non-leader exec replaces the task behind the leader's PID. */
             md_broker_forget(broker, pid);
             CHECK(!md_buffer_release(&t->cooperative_buffer));
@@ -8344,9 +8245,6 @@ int main(int argc, char **argv) {
                 if (skip(pid)) resume(pid,0);
                 continue;
             }
-#ifdef MD_SVC_SIGNAL_PROOF
-            if (t->phase==IDLE) CHECK(md_svc_signal_syscall(pid)>=0);
-#endif
             unsigned long cookie;
             struct ptrace_syscall_info info={0};
             const struct ptrace_syscall_info *observed=NULL;
@@ -8370,33 +8268,6 @@ int main(int argc, char **argv) {
             if (cookie==MD_INTERCEPT_TASK) { return_value(t,&regs,-EPERM); continue; }
             if (cookie==MD_INTERCEPT_OBSERVE && entry_fence_admission(t,&regs,status,&usage)) continue;
             if (t->phase==IDLE) machine_observe(t,&regs);
-#ifdef MD_SVC_SIGNAL_PROOF
-            int svc_replayed=t->svc_retire_replayed;
-            t->svc_retire_replayed=0;
-            if (!svc_replayed && t->phase==IDLE && regs.pc!=RAW_GATE) {
-                long nr=regs.regs[8];
-                int attaching=nr==SYS_ptrace && (regs.regs[0]==PTRACE_ATTACH
-                    || regs.regs[0]==PTRACE_SEIZE || regs.regs[0]==PTRACE_TRACEME);
-                int mapping=nr==SYS_mmap || nr==SYS_mprotect || nr==SYS_munmap
-                    || nr==SYS_mremap || nr==SYS_madvise;
-                struct thread *target=attaching && regs.regs[0]!=PTRACE_TRACEME
-                    ? find_thread(native_pid(t,(pid_t)regs.regs[1])) : t;
-                struct md_svc_signal_window window;
-                if ((mapping || attaching) && target && md_svc_signal_window(target->pid,&window)
-                        && (attaching || md_svc_lifecycle_overlap(&window,nr,(const uint64_t *)regs.regs))
-                        && md_svc_lifecycle_patched(target->pid,&window)!=0) {
-                    if (svc_retirement) {
-                        if (!svc_deferred) svc_deferred=md_task_quiesce_new(quiesce_trace);
-                        CHECK(svc_deferred && !md_task_quiesce_event(svc_deferred,pid,status,&usage));
-                    } else {
-                        svc_retirement=md_svc_lifecycle_new(pid,target->pid,status,&usage,&window,quiesce_trace);
-                        CHECK(svc_retirement);
-                        svc_memory=md_memory_fork(target->memory,1); CHECK(svc_memory);
-                    }
-                    continue;
-                }
-            }
-#endif
             if (regs.regs[8]==SYS_ptrace && t->phase==IDLE)
                 TRACE("PROBE guest debugger caller=%d request=%llu target=%llu address=%#llx data=%#llx traced=%d\n",
                     pid,regs.regs[0],regs.regs[1],regs.regs[2],regs.regs[3],
@@ -9185,9 +9056,6 @@ int main(int argc, char **argv) {
     close(signal_fd); return result;
 }
 static void report_statistics(void) {
-#ifdef MD_SVC_SIGNAL_PROOF
-    md_svc_signal_report();
-#endif
     if (statistics) {
         struct rusage usage;
         if (!getrusage(RUSAGE_SELF, &usage)) fprintf(stderr, "MD_CPU supervisor userUs=%llu systemUs=%llu\n",

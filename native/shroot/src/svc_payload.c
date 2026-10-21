@@ -30,8 +30,6 @@ int md_svc_payload_dispatch(uint64_t *r,struct md_svc_payload_state *s) {
         md_entry_step_fn next=call.next;
         if (outcome==MD_ENTRY_COMPLETED) {
             r[0]=(uint64_t)call.result;
-            if ((uint64_t)call.number==s->selected_number)
-                __atomic_fetch_add(&s->selected_completed,1,__ATOMIC_RELAXED);
             __atomic_fetch_add(&s->completed,1,__ATOMIC_RELAXED); return 1;
         }
         if (outcome==MD_ENTRY_DECLINED || (outcome==MD_ENTRY_KERNEL_CALL && !next)) {
