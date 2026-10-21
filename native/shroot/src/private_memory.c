@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "private_memory.h"
+#include "mapping_reader.h"
 #include "raw.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -10,60 +11,13 @@
 #include <sys/sysmacros.h>
 
 enum { DONTFORK=1, DONTDUMP=2, SEQUENTIAL=4, RANDOM=8, HUGE=16, NOHUGE=32, MERGEABLE=64, SOFT_DIRTY=128 };
-struct vma { uintptr_t first, end; uint64_t offset, inode; unsigned major, minor; int private; };
-struct lines { int fd; size_t cursor, size; char bytes[16384]; };
 struct md_private_memory_scan {
     struct md_private_memory *mapping;
     struct stat backing;
-    struct lines input;
+    struct md_mapping_reader input;
     int selected;
 };
-static int line(struct lines *r, char *out, size_t capacity) {
-    size_t used=0; int truncated=0;
-    for (;;) {
-        if (r->cursor==r->size) {
-            long n=RAW3(read,r->fd,r->bytes,sizeof(r->bytes));
-            if (n==-EINTR) continue;
-            if (n<0) return (int)n;
-            if (!n) return used || truncated ? -EPROTO : 0;
-            r->cursor=0; r->size=(size_t)n;
-        }
-        const char *begin=r->bytes+r->cursor;
-        const char *end=memchr(begin,'\n',r->size-r->cursor);
-        size_t count=end ? (size_t)(end-begin) : r->size-r->cursor;
-        size_t copy=count;
-        if (copy>capacity-used-1) { copy=capacity-used-1; truncated=1; }
-        memcpy(out+used,begin,copy); used+=copy; r->cursor+=count;
-        if (end) { ++r->cursor; out[used]=0; return truncated ? 2 : 1; }
-    }
-}
-static int number(const char **text, unsigned base, uint64_t *out) {
-    const char *p=*text; uint64_t value=0; unsigned count=0;
-    for (;;) {
-        unsigned digit=*p>='0' && *p<='9' ? (unsigned)(*p-'0')
-            : *p>='a' && *p<='f' ? (unsigned)(*p-'a'+10) : base;
-        if (digit>=base) break;
-        if (value>(UINT64_MAX-digit)/base) return 0;
-        value=value*base+digit; ++p; ++count;
-    }
-    if (!count) return 0;
-    *text=p; *out=value; return 1;
-}
 static void spaces(const char **p) { while (**p==' ') ++*p; }
-static int header(const char *text, struct vma *v) {
-    uint64_t first,end,offset,major,minor,inode;
-    if (!number(&text,16,&first) || *text++!='-' || !number(&text,16,&end) || *text++!=' ') return 0;
-    char permissions[4];
-    for (unsigned i=0;i<4;++i) { if (!*text) return 0; permissions[i]=*text++; }
-    if (*text++!=' ') return 0;
-    if (!number(&text,16,&offset) || *text++!=' ' || !number(&text,16,&major)
-            || *text++!=':' || !number(&text,16,&minor) || *text++!=' ') return 0;
-    spaces(&text);
-    if (!number(&text,10,&inode) || (*text && *text!=' ') || first>=end
-            || first>UINTPTR_MAX || end>UINTPTR_MAX || major>UINT32_MAX || minor>UINT32_MAX) return 0;
-    *v=(struct vma){first,end,offset,inode,(unsigned)major,(unsigned)minor,permissions[3]=='p'};
-    return 1;
-}
 static int flags(const char *text, int protection, unsigned *advice, int *mapping_flags) {
     unsigned may=0;
     *advice=0; *mapping_flags=MAP_PRIVATE;
@@ -97,15 +51,15 @@ static int flags(const char *text, int protection, unsigned *advice, int *mappin
 }
 long md_private_memory_scan_step(struct md_private_memory_scan *scan,struct md_private_memory_plan *plan) {
     struct md_private_memory *m=scan->mapping;
-    char text[512]; struct vma v;
+    char text[512]; struct md_mapping_record v;
     for (unsigned i=0;i<128;++i) {
-        int read=line(&scan->input,text,sizeof(text));
+        int read=md_mapping_line(&scan->input,text,sizeof(text));
         if (read<=0) return read<0 ? read : -EFAULT;
-        if (header(text,&v)) {
+        if (md_mapping_parse(text,read==2,&v)) {
             if (v.first>m->address || scan->selected) return -EFAULT;
             if (v.end<=m->address) continue;
             if (v.end<m->address+m->length) return -EOPNOTSUPP;
-            if (!v.private || v.inode!=scan->backing.st_ino || makedev(v.major,v.minor)!=scan->backing.st_dev
+            if (v.shared || v.inode!=scan->backing.st_ino || makedev(v.major,v.minor)!=scan->backing.st_dev
                     || v.offset>UINT64_MAX-(m->address-v.first)
                     || v.offset+m->address-v.first!=m->offset) return -ESTALE;
             scan->selected=1;

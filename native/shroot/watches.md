@@ -47,6 +47,10 @@ events without a SQLite transaction or backing-object lookup. The first new
 logical subscription resumes at its registration snapshot, not the skipped
 journal interval. Mixed subscriptions retain journal/alias resolution and normal
 overflow reporting. Presence locking and persistent storage are unchanged.
+Native and provider sources also count total subscriptions in memory through one
+registration/retirement path. Collection checks these counts rather than scanning
+every instance for every source. Failed admission never increments them;
+remove, oneshot, unmount and instance teardown release the same ownership.
 
 Subscriptions identify logical objects, independently of current backing names.
 Owners observe local and retained immutable-source directories. Copy-up prepares

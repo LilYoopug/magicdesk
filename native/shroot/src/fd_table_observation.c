@@ -1,17 +1,12 @@
 #define _GNU_SOURCE
 #include "fd_table_observation.h"
-#include <dirent.h>
+#include "directory_record.h"
 #include <limits.h>
 #include <stddef.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
-_Static_assert(offsetof(struct dirent64,d_name)==19,"Linux getdents64 ABI");
-
-static int entry_number(const struct dirent64 *entry) {
-    const char *name=entry->d_name;
-    size_t size=entry->d_reclen, header=offsetof(struct dirent64,d_name);
-    if (size<=header || !memchr(name,0,size-header)) return -EPROTO;
+static int entry_number(const char *name) {
     if (!strcmp(name,".") || !strcmp(name,"..")) return -1;
     unsigned value=0;
     if (!*name) return -EPROTO;
@@ -26,7 +21,7 @@ static int entry_number(const struct dirent64 *entry) {
  * only a prefix. Bounded storage depends on parcel size, not RLIMIT_NOFILE. */
 static int scan(const struct md_fd_table_observation *o, int *candidates) {
     if (lseek(o->directory,0,SEEK_SET)<0) return -errno;
-    _Alignas(struct dirent64) char buffer[4096];
+    char buffer[4096];
     unsigned index=0, installed=0;
     long next=0, previous=-1;
     for (;;) {
@@ -35,12 +30,11 @@ static int scan(const struct md_fd_table_observation *o, int *candidates) {
         if (size<0) return -errno;
         if (!size) break;
         for (size_t at=0;at<(size_t)size;) {
-            struct dirent64 *entry=(void *)(buffer+at);
-            if ((size_t)size-at<=offsetof(struct dirent64,d_name)
-                    || !entry->d_reclen || entry->d_reclen>(size_t)size-at) return -EPROTO;
-            int number=entry_number(entry);
+            struct md_directory_entry entry;
+            if (!md_directory_record_read(buffer+at,(size_t)size-at,&entry)) return -EPROTO;
+            int number=entry_number(buffer+at+offsetof(struct md_directory_entry,name));
             if (number<0 && number!=-1) return number;
-            at+=entry->d_reclen;
+            at+=entry.size;
             if (number<0) continue;
             if (number<=previous) return -EPROTO;
             previous=number;

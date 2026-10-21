@@ -385,15 +385,14 @@ static int elements(struct md_network_filter *f,const struct nlmsghdr *h,uint32_
     if (list->flags&~NLA_F_NESTED) return -EINVAL;
     if (!list->data && operation==NFT_MSG_DELSETELEM) { s->count=0; return 0; }
     if (!list->data) return -EINVAL;
-    for (size_t offset=0;offset<list->size;) {
-        if (list->size-offset<sizeof(struct nlattr)) return -EINVAL;
-        const struct nlattr *item=(const void *)((const char *)list->data+offset);
+    struct md_netlink_cursor cursor={list->data,list->size};
+    struct md_netlink_attribute item; int result;
+    while ((result=md_netlink_attribute_next(&cursor,&item))>0) {
         /* Set elements are a nested sequence, not an attribute map. libnftnl
          * uses ordinal types here; the kernel ignores that ordinal too. */
-        if (item->nla_len<sizeof(*item) || NLA_ALIGN(item->nla_len)>list->size-offset
-                || (item->nla_type&~(NLA_TYPE_MASK|NLA_F_NESTED))) return -EINVAL;
+        if (item.flags&~NLA_F_NESTED) return -EINVAL;
         struct attribute b[NFTA_SET_ELEM_MAX+1],key[NFTA_DATA_MAX+1]; uint64_t flags=0;
-        error=fields(item+1,item->nla_len-sizeof(*item),BIT(NFTA_SET_ELEM_KEY)|BIT(NFTA_SET_ELEM_FLAGS)|BIT(NFTA_SET_ELEM_DATA),b,NFTA_SET_ELEM_MAX+1);
+        error=fields(item.data,item.size,BIT(NFTA_SET_ELEM_KEY)|BIT(NFTA_SET_ELEM_FLAGS)|BIT(NFTA_SET_ELEM_DATA),b,NFTA_SET_ELEM_MAX+1);
         if (!error) error=number(&b[NFTA_SET_ELEM_FLAGS],&flags,0);
         if (!error) error=nested(&b[NFTA_SET_ELEM_KEY],BIT(NFTA_DATA_VALUE),key,NFTA_DATA_MAX+1);
         if (error) return error;
@@ -418,9 +417,8 @@ static int elements(struct md_network_filter *f,const struct nlmsghdr *h,uint32_
             if (error) return error;
             s->elements[s->count++]=element;
         }
-        offset+=NLA_ALIGN(item->nla_len);
     }
-    return 0;
+    return result;
 }
 int md_nft_objects(struct md_network_filter *f,const struct nlmsghdr *h,uint32_t port,struct md_network_message *o) {
     switch (NFNL_MSG_TYPE(h->nlmsg_type)) {

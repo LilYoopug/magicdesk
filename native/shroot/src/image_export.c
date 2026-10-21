@@ -18,7 +18,7 @@ static int tree(struct md_inode_store *s, int source, int target, unsigned depth
         ssize_t n = md_inode_getdents(s, source, entries, sizeof(entries));
         if (n <= 0) return (int)n;
         for (size_t at = 0; at < (size_t)n;) {
-            struct md_inode_dirent *entry = (void *)(entries + at);
+            struct md_directory_entry *entry = (void *)(entries + at);
             if (!entry->size || entry->size > (size_t)n - at) return -EIO;
             at += entry->size;
             if (!strcmp(entry->name, ".") || !strcmp(entry->name, "..")) continue;

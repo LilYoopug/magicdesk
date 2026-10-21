@@ -12,11 +12,13 @@ struct md_received_fds {
 };
 int md_received_fds_reserve(struct md_received_fds **, unsigned capacity);
 /* Join two exclusively owned custody vectors, including annotations. Success
- * consumes the tail; failure changes neither vector nor descriptor ownership. */
+ * consumes the tail; failure changes neither vector nor descriptor ownership.
+ * Exclusive accumulation reuses geometric capacity, including annotations. */
 int md_received_fds_join(struct md_received_fds **, struct md_received_fds **);
 /* Bind a complete, authenticated vector before sharing. NULL entries remain
- * unknown. Known origins freeze growth and are retained independently of their
- * importer; an all-unknown vector allocates nothing. */
+ * unknown. Known origins reject raw reserve (exclusive join transfers them)
+ * and are retained independently of their importer; an all-unknown vector
+ * allocates nothing. */
 int md_received_fds_annotate(struct md_received_fds *, struct md_fd_object *const *, unsigned count);
 /* Borrow a selected, ordered vector until custody release. The caller owns an
  * immutable index array. Validate it completely before writing output.

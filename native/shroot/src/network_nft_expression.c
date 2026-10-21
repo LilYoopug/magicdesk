@@ -332,13 +332,12 @@ static int expression(struct md_network_filter *f,uint64_t table,
 }
 int md_nft_expressions(struct md_network_filter *f,uint64_t table,struct md_filter_rule *r,const void *data,size_t size) {
     uint64_t initialized=0;
-    for (size_t offset=0;offset<size;) {
-        if (size-offset<sizeof(struct nlattr)) return -EINVAL;
-        const struct nlattr *item=(const void *)((const char *)data+offset);
-        if (item->nla_len<sizeof(*item) || NLA_ALIGN(item->nla_len)>size-offset
-                || (item->nla_type&NLA_TYPE_MASK)!=NFTA_LIST_ELEM || (item->nla_type&~(NLA_TYPE_MASK|NLA_F_NESTED))) return -EINVAL;
+    struct md_netlink_cursor cursor={data,size};
+    struct md_netlink_attribute item; int result;
+    while ((result=md_netlink_attribute_next(&cursor,&item))>0) {
+        if (item.type!=NFTA_LIST_ELEM || (item.flags&~NLA_F_NESTED)) return -EINVAL;
         struct attribute a[NFTA_EXPR_MAX+1];
-        int error=fields(item+1,item->nla_len-sizeof(*item),BIT(NFTA_EXPR_NAME)|BIT(NFTA_EXPR_DATA),a,NFTA_EXPR_MAX+1);
+        int error=fields(item.data,item.size,BIT(NFTA_EXPR_NAME)|BIT(NFTA_EXPR_DATA),a,NFTA_EXPR_MAX+1);
         const char *name=NULL;
         if (!error) error=string(&a[NFTA_EXPR_NAME],&name);
         if (error) return error;
@@ -348,8 +347,9 @@ int md_nft_expressions(struct md_network_filter *f,uint64_t table,struct md_filt
             : !strcmp(name,"match") ? compat_match(f,table,&a[NFTA_EXPR_DATA],e)
             : expression(f,table,name,&a[NFTA_EXPR_DATA],e,&initialized);
         if (error) return error;
-        ++r->count; offset+=NLA_ALIGN(item->nla_len);
+        ++r->count;
     }
+    if (result<0) return result;
     if (size) {
         r->wire=malloc(size); if (!r->wire) return -ENOMEM;
         memcpy(r->wire,data,size); r->wire_size=size;

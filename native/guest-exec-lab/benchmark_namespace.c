@@ -32,7 +32,7 @@ int main(int argc, char **argv) {
                 md_fs_execute(&(struct md_filesystem){.store=store}, &q, &entries, &output); assert(!entries.error);
                 if (!entries.size) break;
                 for (unsigned offset = 0; offset < entries.size;) {
-                    struct md_inode_dirent *e = (void *)(data + offset);
+                    struct md_directory_entry *e = (void *)(data + offset);
                     assert(e->size && e->size <= entries.size - offset); offset += e->size;
                     if (!strcmp(e->name, ".") || !strcmp(e->name, "..")) continue;
                     q = (struct md_fs_request){.operation = MD_FS_STAT, .directory = {dir.fd, -1},

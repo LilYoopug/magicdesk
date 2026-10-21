@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "mapping_reader.h"
 #include "interception_memory.h"
 #include "svc_registry.h"
 #include <assert.h>
@@ -379,25 +380,21 @@ int md_memory_image_backing(struct md_interception_memory *s,pid_t pid,int fd) {
     if (fstat(fd,&st)) return -errno;
     if (!S_ISREG(st.st_mode)) return -EINVAL;
     char path[64]; snprintf(path,sizeof(path),"/proc/%d/maps",pid);
-    FILE *maps=fopen(path,"re");
-    if (!maps) return -errno;
-    char *line=NULL; size_t capacity=0;
-    int error=0, captured=0;
-    while (!error && getline(&line,&capacity,maps)>0) {
-        unsigned long first,end,offset,inode;
-        unsigned major_id,minor_id; char permissions[5];
-        if (sscanf(line,"%lx-%lx %4s %lx %x:%x %lu",&first,&end,permissions,
-                &offset,&major_id,&minor_id,&inode)!=7 || permissions[3]!='p'
-                || inode!=st.st_ino || makedev(major_id,minor_id)!=st.st_dev) continue;
+    int maps=open(path,O_RDONLY|O_CLOEXEC);
+    if (maps<0) return -errno;
+    struct md_mapping_reader reader={.fd=maps}; struct md_mapping_record v;
+    int error=0, captured=0, result=0;
+    while (!error && (result=md_mapping_next(&reader,&v))>0) {
+        if (v.shared || v.inode!=st.st_ino || makedev(v.major,v.minor)!=st.st_dev) continue;
         struct md_mapping_change change={0};
-        error=md_memory_mapping_prepare(s,&change,MD_MAPPING_MAP,first,end-first,0,MAP_PRIVATE,0);
-        if (!error) error=md_memory_mapping_backing(s,&change,fd,offset);
+        error=md_memory_mapping_prepare(s,&change,MD_MAPPING_MAP,v.first,v.end-v.first,0,MAP_PRIVATE,0);
+        if (!error) error=md_memory_mapping_backing(s,&change,fd,v.offset);
         if (!error && !change.backing) error=-EACCES;
-        md_memory_mapping_finish(s,&change,error ? error : (long)first);
+        md_memory_mapping_finish(s,&change,error ? error : (long)v.first);
         if (!error) ++captured;
     }
-    if (!error && ferror(maps)) error=-EIO;
-    free(line); fclose(maps); return error ? error : captured ? 0 : -ENOENT;
+    if (!error && result<0) error=result;
+    close(maps); return error ? error : captured ? 0 : -ENOENT;
 }
 static void change_release(struct md_mapping_change *c) {
     backing_release(c->backing); file_ranges_release(c->moving,c->moving_count);

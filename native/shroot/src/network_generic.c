@@ -1,4 +1,5 @@
 #include "network_generic.h"
+#include "netlink_attributes.h"
 #include <errno.h>
 #include <linux/genetlink.h>
 #include <linux/rtnetlink.h>
@@ -8,29 +9,28 @@ static int lookup(const struct nlmsghdr *h,int dump) {
     const struct genlmsghdr *g=NLMSG_DATA(h);
     if (g->cmd!=CTRL_CMD_GETFAMILY) return -EOPNOTSUPP;
     if (dump) return 0;
-    size_t left=h->nlmsg_len-NLMSG_LENGTH(GENL_HDRLEN);
-    const struct rtattr *a=(void *)((const char *)g+GENL_HDRLEN);
+    struct md_netlink_cursor cursor={(const char *)g+GENL_HDRLEN,h->nlmsg_len-NLMSG_LENGTH(GENL_HDRLEN)};
+    struct md_netlink_attribute a; int result;
     int id=-EINVAL,name=-EINVAL;
     unsigned seen=0;
-    while (left) {
-        if (!RTA_OK(a,left) || RTA_ALIGN(a->rta_len)>left) return -EINVAL;
-        unsigned type=a->rta_type&NLA_TYPE_MASK;
+    while ((result=md_netlink_attribute_next(&cursor,&a))>0) {
+        unsigned type=a.type;
         if (type!=CTRL_ATTR_FAMILY_ID && type!=CTRL_ATTR_FAMILY_NAME) return -EOPNOTSUPP;
         if (seen&(1U<<type)) return -EINVAL;
         seen|=1U<<type;
         if (type==CTRL_ATTR_FAMILY_ID) {
             uint16_t value;
-            if (RTA_PAYLOAD(a)!=sizeof(value)) return -EINVAL;
-            memcpy(&value,RTA_DATA(a),sizeof(value));
+            if (a.size!=sizeof(value)) return -EINVAL;
+            memcpy(&value,a.data,sizeof(value));
             id=value==GENL_ID_CTRL ? 0 : -ENOENT;
         } else {
-            size_t size=RTA_PAYLOAD(a);
-            const char *value=RTA_DATA(a);
+            size_t size=a.size;
+            const char *value=a.data;
             if (!size || size>GENL_NAMSIZ || value[size-1] || strnlen(value,size)!=size-1) return -EINVAL;
             name=!strcmp(value,"nlctrl") ? 0 : -ENOENT;
         }
-        a=RTA_NEXT(a,left);
     }
+    if (result<0) return result;
     return seen&(1U<<CTRL_ATTR_FAMILY_NAME) ? name : id;
 }
 static int describe(struct md_network_message *out,const struct nlmsghdr *h,uint32_t port,int dump) {

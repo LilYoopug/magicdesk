@@ -706,11 +706,11 @@ static struct md_fs_response directory_call(const char *endpoint, int fd, uint32
     CHECK(md_fs_call(endpoint, 5000, &q, &out) == 0 && out.delivery == MD_FS_REPLIED && out.result.error == error);
     return out;
 }
-static struct md_inode_dirent entry(const struct md_fs_response *r, const char *name, int type) {
-    struct md_inode_dirent d;
-    CHECK(r->result.size >= offsetof(struct md_inode_dirent, name));
-    memcpy(&d, r->data, offsetof(struct md_inode_dirent, name));
-    CHECK(d.size == r->result.size && d.type == type && !strcmp(r->data+offsetof(struct md_inode_dirent, name), name));
+static struct md_directory_entry entry(const struct md_fs_response *r, const char *name, int type) {
+    struct md_directory_entry d;
+    CHECK(r->result.size >= offsetof(struct md_directory_entry, name));
+    memcpy(&d, r->data, offsetof(struct md_directory_entry, name));
+    CHECK(d.size == r->result.size && d.type == type && !strcmp(r->data+offsetof(struct md_directory_entry, name), name));
     return d;
 }
 struct reader { const char *endpoint; int fd; uint64_t mask; };
@@ -719,7 +719,7 @@ static void *directory_reader(void *context) {
     for (;;) {
         struct md_fs_response r = directory_call(reader->endpoint, reader->fd, MD_FS_GETDENTS, 24, 0, 0, 0);
         if (!r.result.size) break;
-        const char *name = r.data+offsetof(struct md_inode_dirent, name);
+        const char *name = r.data+offsetof(struct md_directory_entry, name);
         unsigned index;
         if (!strcmp(name,".")) index=48;
         else if (!strcmp(name,"..")) index=49;
@@ -828,7 +828,7 @@ struct publication { int fd, calls, error; };
 static int engine_publish(void *context, const void *data, size_t size) {
     struct publication *p = context;
     CHECK(lseek(p->fd, 0, SEEK_CUR) == 0 && size > PATH_MAX);
-    CHECK(!strcmp(((const struct md_inode_dirent *)data)->name, "."));
+    CHECK(!strcmp(((const struct md_directory_entry *)data)->name, "."));
     p->calls++;
     return p->error;
 }
@@ -859,7 +859,7 @@ static void engine_buffers(void) {
     for (size_t i = output.capacity; i < sizeof(data); i++) CHECK(data[i] == 0x5a);
     unsigned records = 0, aliases = 0; unsigned char seen[512] = {0};
     for (size_t offset = 0; offset < r.size;) {
-        struct md_inode_dirent *e = (void *)(data + offset);
+        struct md_directory_entry *e = (void *)(data + offset);
         CHECK(e->size && offset + e->size <= r.size); offset += e->size; records++;
         if (e->name[0] == '.') continue;
         if (!strcmp(e->name, "source")) continue;

@@ -47,7 +47,7 @@ static int scan(struct md_inode_store *s, const char *path, unsigned depth, unsi
         ssize_t n = md_inode_getdents(s, fd, buffer, sizeof(buffer));
         if (n <= 0) { r = (int)n; break; }
         for (size_t at = 0; !r && at < (size_t)n;) {
-            struct md_inode_dirent *e = (void *)(buffer+at);
+            struct md_directory_entry *e = (void *)(buffer+at);
             if (!e->size || e->size > (size_t)n-at) { r = -EIO; break; }
             at += e->size;
             if (!strcmp(e->name, ".") || !strcmp(e->name, "..")) continue;

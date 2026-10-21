@@ -878,7 +878,7 @@ struct directory_delivery { int fd, error, calls; off_t offset; };
 static int deliver_entries(void *data, const void *entries, size_t size) {
     struct directory_delivery *delivery = data;
     CHECK(lseek(delivery->fd, 0, SEEK_CUR) == delivery->offset);
-    CHECK(size == 24 && !strcmp(((const struct md_inode_dirent *)entries)->name, "."));
+    CHECK(size == 24 && !strcmp(((const struct md_directory_entry *)entries)->name, "."));
     delivery->calls++;
     return delivery->error;
 }
@@ -896,7 +896,7 @@ static void directory_publication(void) {
     CHECK(md_inode_getdents_deliver(s, dir, entries, sizeof(entries), deliver_entries, &delivery) == 24);
     CHECK(lseek(dir, 0, SEEK_CUR) == 1 && delivery.calls == 3);
     CHECK(md_inode_getdents(s, dir, entries, sizeof(entries)) == 24);
-    CHECK(!strcmp(((struct md_inode_dirent *)entries)->name, ".."));
+    CHECK(!strcmp(((struct md_directory_entry *)entries)->name, ".."));
     close(dir); md_inode_store_close(s);
     puts("PASS directory publication: rejected/cancelled output preserves the shared cursor");
 }
@@ -927,7 +927,7 @@ static void metadata_queries(void) {
     CHECK(md_inode_getdents(s, dir, entries, sizeof(entries)) == 0);
     int next = md_inode_create(writer, MD_INODE_ROOT, "later", 0600); CHECK(next >= 0);
     CHECK(md_inode_getdents(s, dir, entries, sizeof(entries)) > 0);
-    CHECK(!strcmp(((struct md_inode_dirent *)entries)->name, "later"));
+    CHECK(!strcmp(((struct md_directory_entry *)entries)->name, "later"));
     CHECK(statistics.link_count_queries == links && statistics.membership_queries == 3);
     CHECK(!md_inode_mkdir(writer, MD_INODE_ROOT, "child", 0700));
     CHECK(!md_inode_fstat(s, dir, &st) && st.st_nlink == 3);

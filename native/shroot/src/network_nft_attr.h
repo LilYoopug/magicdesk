@@ -1,5 +1,6 @@
 #ifndef MD_NETWORK_NFT_ATTR_H
 #define MD_NETWORK_NFT_ATTR_H
+#include "netlink_attributes.h"
 #include <errno.h>
 #include <endian.h>
 #include <linux/netfilter/nfnetlink.h>
@@ -12,19 +13,15 @@ struct attribute { const void *data; size_t size; unsigned flags; };
 #define BIT(n) (UINT64_C(1)<<(n))
 static inline int fields(const void *data,size_t size,uint64_t allowed,struct attribute *out,size_t count) {
     memset(out,0,count*sizeof(*out));
-    for (size_t offset=0;offset<size;) {
-        if (size-offset<sizeof(struct nlattr)) return -EINVAL;
-        const struct nlattr *a=(const void *)((const char *)data+offset);
-        if (a->nla_len<sizeof(*a) || a->nla_len>size-offset) return -EINVAL;
-        unsigned type=a->nla_type&NLA_TYPE_MASK;
+    struct md_netlink_cursor cursor={data,size};
+    struct md_netlink_attribute a; int result;
+    while ((result=md_netlink_attribute_next(&cursor,&a))>0) {
+        unsigned type=a.type;
         if (type>=count || type>=64 || !(allowed&BIT(type))) return -EOPNOTSUPP;
         if (out[type].data) return -EINVAL;
-        out[type]=(struct attribute){.data=a+1,.size=a->nla_len-sizeof(*a),.flags=a->nla_type&~NLA_TYPE_MASK};
-        size_t step=NLA_ALIGN(a->nla_len);
-        if (step>size-offset) return -EINVAL;
-        offset+=step;
+        out[type]=(struct attribute){.data=a.data,.size=a.size,.flags=a.flags};
     }
-    return 0;
+    return result;
 }
 static inline int attributes(const struct nlmsghdr *h,uint64_t allowed,struct attribute *out,size_t count) {
     size_t offset=NLMSG_LENGTH(sizeof(struct nfgenmsg));

@@ -7,6 +7,7 @@
 #include "profile.h"
 #include "image_identity.h"
 #include "file_open.h"
+#include "directory_record.h"
 
 /* Experimental inode namespace, not a syscall adapter. Each connection
  * belongs to one worker; never use it from SIGSYS, a signal handler, or after fork.
@@ -155,7 +156,6 @@ int md_inode_socket_name(struct md_inode_store *, const char *endpoint, char *, 
 /* Linux getdents64 records. Directory offsets belong to the native open file
  * description, shared by dup/fork/SCM_RIGHTS. Serialize directory read/seek
  * through one service; direct kernel getdents/lseek are outside this model. */
-struct md_inode_dirent { uint64_t inode; int64_t next; uint16_t size; uint8_t type; char name[]; };
 ssize_t md_inode_getdents(struct md_inode_store *, int fd, void *, size_t);
 /* Optional synchronous delivery before cursor commit. A rejected delivery leaves
  * the offset unchanged. The callback must not reenter the namespace owner. */

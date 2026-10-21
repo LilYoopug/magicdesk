@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "devpts_view.h"
+#include "directory_record.h"
 #include "file_permissions.h"
 #include "temporary_directory.h"
 #include <stdatomic.h>
@@ -177,15 +178,16 @@ ssize_t md_devpts_getdents(struct md_devpts *p,int fd,void *data,size_t capacity
         ssize_t n=syscall(SYS_getdents64,fd,data,capacity); if (n<=0) return n<0 ? -errno : 0;
         size_t read=0,written=0;
         while (read<(size_t)n) {
-            struct dirent *e=(void *)((char *)data+read);
-            if (e->d_reclen<offsetof(struct dirent,d_name)+2 || e->d_reclen>(size_t)n-read) return -EIO;
-            size_t size=e->d_reclen;
-            int next=md_devpts_step(p,fd,e->d_name);
+            struct md_directory_entry entry;
+            if (!md_directory_record_read((char *)data+read,(size_t)n-read,&entry)) return -EIO;
+            size_t size=entry.size;
+            int next=md_devpts_step(p,fd,(char *)data+read+offsetof(struct md_directory_entry,name));
             if (next>=0) {
                 struct stat st;
                 if (fstat(next,&st)) { int error=-errno; close(next); return error; }
-                close(next); e->d_ino=st.st_ino; e->d_type=S_ISDIR(st.st_mode) ? DT_DIR : DT_CHR;
-                memmove((char *)data+written,e,size); written+=size;
+                close(next); entry.inode=st.st_ino; entry.type=S_ISDIR(st.st_mode) ? DT_DIR : DT_CHR;
+                memcpy((char *)data+read,&entry,offsetof(struct md_directory_entry,name));
+                memmove((char *)data+written,(char *)data+read,size); written+=size;
             }
             else if (next!=-ENOENT) return next;
             read+=size;

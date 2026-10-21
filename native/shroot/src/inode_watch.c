@@ -44,7 +44,7 @@ struct watch_source {
     int owned, native, presence, database, objects, control, publishing;
     int sources[MDI_SOURCES];
     int64_t cursor;
-    unsigned logical_subscriptions;
+    unsigned subscriptions, logical_subscriptions;
     unsigned birth_cookie;
 };
 struct md_inode_watches {
@@ -58,6 +58,7 @@ struct provider_source {
     struct provider_source *next;
     struct md_watch_source *source;
     struct md_watch_listener *listener;
+    unsigned subscriptions;
 };
 static int epoll_add(int epoll, int fd, unsigned events) {
     struct epoll_event event = {.events = events, .data.fd = fd};
@@ -96,17 +97,45 @@ static void retire_native(struct md_inode_watches *w, struct watch_source *sourc
     for (unsigned n = 0; n < MDI_SOURCES; ++n) if (source->sources[n] == wd) return;
     if (wd >= 0 && wd != source->database && wd != source->control) inotify_rm_watch(source->native, wd);
 }
-static void free_instance(struct md_inode_watches *w, struct instance *i) {
-    while (i->subscriptions) {
-        struct subscription *next = i->subscriptions->next;
-        int wd = i->subscriptions->native;
-        struct watch_source *source=i->subscriptions->source;
-        if (*i->subscriptions->object) --source->logical_subscriptions;
-        if (i->subscriptions->provider)
-            md_watch_listener_forget(i->subscriptions->provider->listener,i->subscriptions->interest);
-        free(i->subscriptions); i->subscriptions = next; --w->subscription_count;
-        retire_native(w, source, wd);
+static int valid_mask(unsigned mask) {
+    unsigned valid=IN_ALL_EVENTS|IN_UNMOUNT|IN_IGNORED|IN_Q_OVERFLOW|IN_ISDIR
+        |IN_ONESHOT|IN_ONLYDIR|IN_DONT_FOLLOW|IN_EXCL_UNLINK|IN_MASK_ADD|IN_MASK_CREATE;
+    return (mask&IN_ALL_EVENTS) && !(mask&~valid)
+        && !((mask&IN_MASK_ADD) && (mask&IN_MASK_CREATE));
+}
+static int link_subscription(struct md_inode_watches *w,struct instance *i,struct subscription *p) {
+    if (p->source) {
+        ++p->source->subscriptions;
+        if (*p->object) {
+            /* The first logical subscriber starts at its registration snapshot,
+             * not history accumulated while only native watches existed. */
+            if (!p->source->logical_subscriptions) p->source->cursor=p->after;
+            ++p->source->logical_subscriptions;
+        }
     }
+    if (p->provider) ++p->provider->subscriptions;
+    p->wd=++i->last_wd;
+    p->next=i->subscriptions; i->subscriptions=p; ++w->subscription_count;
+    return p->wd;
+}
+static void unlink_subscription(struct md_inode_watches *w,struct subscription **link) {
+    struct subscription *p=*link;
+    struct watch_source *source=p->source;
+    int native=p->native;
+    *link=p->next;
+    if (source) {
+        --source->subscriptions;
+        if (*p->object) --source->logical_subscriptions;
+    }
+    if (p->provider) {
+        --p->provider->subscriptions;
+        md_watch_listener_forget(p->provider->listener,p->interest);
+    }
+    free(p); --w->subscription_count;
+    retire_native(w,source,native);
+}
+static void free_instance(struct md_inode_watches *w, struct instance *i) {
+    while (i->subscriptions) unlink_subscription(w,&i->subscriptions);
     epoll_ctl(w->epoll, EPOLL_CTL_DEL, md_watch_queue_lifetime(i->queue), NULL);
     md_watch_queue_destroy(i->queue);
     free(i); --w->instance_count;
@@ -121,18 +150,13 @@ static void source_collect(struct md_inode_watches *w) {
     struct watch_source **link=&w->sources;
     while (*link) {
         struct watch_source *p=*link;
-        int used=!p->owned;
-        for (struct instance *i=w->instances;i && !used;i=i->next)
-            for (struct subscription *s=i->subscriptions;s && !used;s=s->next) used=s->source==p;
-        if (used) link=&p->next;
+        if (!p->owned || p->subscriptions) link=&p->next;
         else { *link=p->next; source_close(p); }
     }
     struct provider_source **provider=&w->providers;
     while (*provider) {
-        struct provider_source *p=*provider; int used=0;
-        for (struct instance *i=w->instances;i && !used;i=i->next)
-            for (struct subscription *s=i->subscriptions;s && !used;s=s->next) used=s->provider==p;
-        if (used) provider=&p->next;
+        struct provider_source *p=*provider;
+        if (p->subscriptions) provider=&p->next;
         else { *provider=p->next; md_watch_source_unsubscribe(p->listener); free(p); }
     }
 }
@@ -223,12 +247,7 @@ int md_inode_watch_create(struct md_inode_store *s, int flags) {
 static int remove_subscription(struct md_inode_watches *w, struct instance *i, struct subscription **link) {
     struct subscription *p = *link;
     int r = md_watch_queue_emit(i->queue, p->wd, IN_IGNORED, 0, NULL);
-    int native = p->native;
-    struct watch_source *source=p->source;
-    if (*p->object) --source->logical_subscriptions;
-    if (p->provider) md_watch_listener_forget(p->provider->listener,p->interest);
-    *link = p->next; free(p); --w->subscription_count;
-    retire_native(w, source, native);
+    unlink_subscription(w,link);
     return r == -EPIPE ? 0 : r;
 }
 static int publish(struct md_inode_watches *w, struct instance *i, struct subscription **link,
@@ -482,9 +501,7 @@ int md_inode_watch_pump(struct md_inode_store *s) {
 int md_inode_watch_pollfd(struct md_inode_store *s) { return s->watches ? s->watches->epoll : -1; }
 static int add(struct md_inode_store *owner, struct md_inode_store *selected,
         int fd, int object, unsigned mask) {
-    unsigned valid = IN_ALL_EVENTS | IN_UNMOUNT | IN_IGNORED | IN_Q_OVERFLOW | IN_ISDIR
-        | IN_ONESHOT | IN_ONLYDIR | IN_DONT_FOLLOW | IN_EXCL_UNLINK | IN_MASK_ADD | IN_MASK_CREATE;
-    if (!(mask & IN_ALL_EVENTS) || (mask & ~valid) || ((mask & IN_MASK_ADD) && (mask & IN_MASK_CREATE))) return -EINVAL;
+    if (!valid_mask(mask)) return -EINVAL;
     int r = md_inode_watch_pump(owner);
     if (r) return r;
     struct instance *i = find(owner, fd);
@@ -545,16 +562,8 @@ static int add(struct md_inode_store *owner, struct md_inode_store *selected,
     }
     r = mdi_finish(s, r);
     if (r) { free(p); return r; }
-    if (*p->object) {
-        /* No logical subscriber could consume the skipped journal interval.
-         * Admit the first one at its registration snapshot, not old history. */
-        if (!source->logical_subscriptions) source->cursor=p->after;
-        ++source->logical_subscriptions;
-    }
     p->mask = mask; p->device = st.st_dev; p->inode = st.st_ino; p->source=source;
-    p->wd = ++i->last_wd;
-    p->next = i->subscriptions; i->subscriptions = p; ++w->subscription_count;
-    return p->wd;
+    return link_subscription(w,i,p);
 }
 int md_inode_watch_add_from(struct md_inode_store *owner, struct md_inode_store *selected,
         int fd, int object, unsigned mask) {
@@ -567,10 +576,7 @@ int md_inode_watch_add(struct md_inode_store *s, int fd, int object, unsigned ma
 }
 int md_inode_watch_add_provider(struct md_inode_store *owner,int fd,struct md_watch_source *source,
         uint64_t object,unsigned mode,unsigned mask) {
-    unsigned valid=IN_ALL_EVENTS|IN_UNMOUNT|IN_IGNORED|IN_Q_OVERFLOW|IN_ISDIR
-        |IN_ONESHOT|IN_ONLYDIR|IN_DONT_FOLLOW|IN_EXCL_UNLINK|IN_MASK_ADD|IN_MASK_CREATE;
-    if (!source || !(mask&IN_ALL_EVENTS) || (mask&~valid)
-            || ((mask&IN_MASK_ADD) && (mask&IN_MASK_CREATE))) return -EINVAL;
+    if (!source || !valid_mask(mask)) return -EINVAL;
     if ((mask&IN_ONLYDIR) && !S_ISDIR(mode)) return -ENOTDIR;
     int error=md_inode_watch_pump(owner);
     if (error) return error;
@@ -600,9 +606,8 @@ int md_inode_watch_add_provider(struct md_inode_store *owner,int fd,struct md_wa
     error=md_watch_listener_admit(p->listener,object,mask,&sub->interest,&sub->provider_after);
     if (error) { free(sub); source_collect(w); return error; }
     sub->provider=p; sub->provider_object=object;
-    sub->native=-1; sub->mask=mask; sub->wd=++i->last_wd;
-    sub->next=i->subscriptions; i->subscriptions=sub; ++w->subscription_count;
-    return sub->wd;
+    sub->native=-1; sub->mask=mask;
+    return link_subscription(w,i,sub);
 }
 int md_inode_watch_remove(struct md_inode_store *s, int fd, int wd) {
     int r = md_inode_watch_pump(s);

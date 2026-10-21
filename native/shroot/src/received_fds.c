@@ -1,5 +1,5 @@
 #include "received_fds.h"
-#include "fs_anchor.h"
+#include "fd_object.h"
 #include "socket_control.h"
 #include <errno.h>
 #include <stdlib.h>
@@ -25,7 +25,7 @@ int md_received_fds_annotate(struct md_received_fds *p, struct md_fd_object *con
     unsigned known=0;
     for (unsigned i=0;i<count;++i) known+=origins[i]!=NULL;
     if (!known) return 0;
-    struct md_fd_object **next=calloc(count,sizeof(*next));
+    struct md_fd_object **next=calloc(p->capacity,sizeof(*next));
     if (!next) return -ENOMEM;
     for (unsigned i=0;i<count;++i) next[i]=md_fd_object_retain(origins[i]);
     p->origins=next;
@@ -38,19 +38,27 @@ int md_received_fds_join(struct md_received_fds **owner,struct md_received_fds *
     if (!a) { *owner=b; *tail=NULL; return 0; }
     unsigned count=a->count+b->count;
     if (count<a->count || count>MD_SOCKET_RECEIVED_FDS*1024U+1) return -EOVERFLOW;
-    struct md_received_fds *next=malloc(sizeof(*next)+count*sizeof(int));
-    if (!next) return -ENOMEM;
-    *next=(struct md_received_fds){.references=1,.count=count,.capacity=count};
-    if (a->origins || b->origins) {
-        next->origins=calloc(count,sizeof(*next->origins));
-        if (!next->origins) { free(next); return -ENOMEM; }
-        if (a->origins) memcpy(next->origins,a->origins,a->count*sizeof(*a->origins));
-        if (b->origins) memcpy(next->origins+a->count,b->origins,b->count*sizeof(*b->origins));
+    unsigned capacity=count>a->capacity ? count*2 : a->capacity;
+    struct md_fd_object **origins=a->origins;
+    int replace=(a->origins || b->origins) && (!a->origins || capacity!=a->capacity);
+    if (replace) {
+        origins=calloc(capacity,sizeof(*origins));
+        if (!origins) return -ENOMEM;
+        if (a->origins) memcpy(origins,a->origins,a->count*sizeof(*origins));
     }
-    memcpy(next->fds,a->fds,a->count*sizeof(int));
-    memcpy(next->fds+a->count,b->fds,b->count*sizeof(int));
-    free(a->origins); free(a); free(b->origins); free(b);
-    *owner=next; *tail=NULL; return 0;
+    /* Prepare annotations before realloc: a failed growth leaves both input
+     * vectors and every retained authority unchanged. Neither FD is duplicated. */
+    if (capacity!=a->capacity) {
+        struct md_received_fds *grown=realloc(a,sizeof(*a)+capacity*sizeof(int));
+        if (!grown) { if (replace) free(origins); return -ENOMEM; }
+        a=grown; a->capacity=capacity;
+    }
+    if (replace) { free(a->origins); a->origins=origins; }
+    if (b->origins) memcpy(origins+a->count,b->origins,b->count*sizeof(*origins));
+    memcpy(a->fds+a->count,b->fds,b->count*sizeof(int));
+    a->count=count;
+    free(b->origins); free(b);
+    *owner=a; *tail=NULL; return 0;
 }
 int md_received_fds_select(const struct md_received_fds *p, const int *indices, unsigned count,
         int *fds, struct md_fd_object **origins) {

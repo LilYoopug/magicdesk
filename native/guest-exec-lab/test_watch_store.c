@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "inode_internal.h"
 #include "inode_watch.h"
+#include "watch_source.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -91,6 +92,40 @@ static void native_transitions(const char *base) {
     close(root); close(native); md_inode_store_close(writer); md_inode_store_close(s);
     puts("PASS native/logical transitions, mixed observers, remove/close/oneshot, late cursor, independent hardlink wakeup");
 }
+static void provider_lifetime(struct md_inode_store *s) {
+    struct md_watch_source *source;
+    CHECK(!md_watch_source_new(&source));
+    int a=md_inode_watch_create(s,IN_NONBLOCK),b=md_inode_watch_create(s,IN_NONBLOCK);
+    CHECK(a>=0 && b>=0);
+    int wa=md_inode_watch_add_provider(s,a,source,7,S_IFREG,IN_MODIFY);
+    int wb=md_inode_watch_add_provider(s,b,source,7,S_IFREG,IN_MODIFY);
+    CHECK(wa>0 && wb>0);
+    CHECK(md_inode_watch_add_provider(s,a,source,7,S_IFREG,IN_MODIFY|IN_MASK_ADD)==wa);
+    CHECK(md_inode_watch_add_provider(s,a,source,7,S_IFREG,IN_MODIFY|IN_MASK_CREATE)==-EEXIST);
+    close(a); CHECK(!md_inode_watch_pump(s));
+    md_watch_source_emit(source,7,IN_MODIFY,0,NULL,0);
+    expect_record(b,s,wb,IN_MODIFY,NULL);
+    CHECK(!md_inode_watch_remove(s,b,wb));
+    expect_record(b,s,wb,IN_IGNORED,NULL);
+    /* No subscriber remains, but the instance can acquire a fresh listener. */
+    wb=md_inode_watch_add_provider(s,b,source,7,S_IFREG,IN_MODIFY|IN_ONESHOT);
+    CHECK(wb>0);
+    md_watch_source_emit(source,7,IN_MODIFY,0,NULL,0);
+    struct inotify_event events[2];
+    CHECK(md_inode_watch_read(s,b,events,sizeof(events),NULL,NULL)==sizeof(events));
+    CHECK(events[0].wd==wb && events[0].mask==IN_MODIFY);
+    CHECK(events[1].wd==wb && events[1].mask==IN_IGNORED);
+    wb=md_inode_watch_add_provider(s,b,source,7,S_IFREG,IN_MODIFY);
+    CHECK(wb>0);
+    md_watch_source_emit(source,0,IN_UNMOUNT,0,NULL,0);
+    CHECK(md_inode_watch_read(s,b,events,sizeof(events),NULL,NULL)==sizeof(events));
+    CHECK(events[0].wd==wb && events[0].mask==IN_UNMOUNT);
+    CHECK(events[1].wd==wb && events[1].mask==IN_IGNORED);
+    CHECK(md_inode_watch_add_provider(s,b,source,7,S_IFREG,IN_MODIFY)==-ENODEV);
+    md_watch_source_release(source);
+    close(b); CHECK(!md_inode_watch_pump(s) && md_inode_watch_pollfd(s)==-1);
+    puts("PASS shared provider lifetime: mask updates, last close/remove/oneshot, re-registration and unmount");
+}
 int main(int argc, char **argv) {
     CHECK(argc == 2);
     sigset_t mask; sigemptyset(&mask); sigaddset(&mask, SIGPIPE); CHECK(!sigprocmask(SIG_BLOCK, &mask, NULL));
@@ -150,6 +185,8 @@ int main(int argc, char **argv) {
     CHECK(e->wd == -1 && e->mask == IN_Q_OVERFLOW);
     puts("PASS a missing journal range publishes IN_Q_OVERFLOW");
     close(reader); close(root);
+    CHECK(!md_inode_watch_pump(s));
+    provider_lifetime(s);
     md_inode_store_close(writer); md_inode_store_close(s);
     native_transitions(argv[1]);
     return 0;

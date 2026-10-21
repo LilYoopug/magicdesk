@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "provider_tree.h"
 #include "temporary_directory.h"
+#include "directory_record.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -153,7 +154,6 @@ int md_provider_tree_lookup(struct md_provider_tree *tree,int directory,const ch
         return pending ? tree->ops->lookup(tree->context,directory,name,actor,pending) : -EOPNOTSUPP;
     return md_provider_tree_step(tree,directory,name);
 }
-struct entry { uint64_t ino; int64_t offset; uint16_t size; uint8_t type; char name[]; };
 ssize_t md_provider_tree_getdents(struct md_provider_tree *tree,int fd,void *out,size_t capacity) {
     char path[PATH_MAX]; int error=md_provider_tree_path(tree,fd,path,sizeof(path));
     if (error) return error;
@@ -183,12 +183,10 @@ ssize_t md_provider_tree_getdents(struct md_provider_tree *tree,int fd,void *out
             struct stat st;
             if (i && upper>=0 && !fstatat(upper,e->d_name,&st,AT_SYMLINK_NOFOLLOW)) continue;
             if (index++<position) continue;
-            size_t n=strlen(e->d_name)+1;
-            size_t size=(offsetof(struct entry,name)+n+7)&~(size_t)7;
-            if (size>capacity-used) { if (!used) error=-EINVAL; stop=1; break; }
-            struct entry *entry=(void *)((char *)out+used);
-            memset(entry,0,size); entry->ino=e->d_ino; entry->offset=index;
-            entry->size=(uint16_t)size; entry->type=e->d_type; memcpy(entry->name,e->d_name,n);
+            size_t size=md_directory_record_write((char *)out+used,capacity-used,
+                e->d_name,strlen(e->d_name),e->d_ino,index,e->d_type);
+            if (!size) { if (!used) error=-EINVAL; stop=1; break; }
+            struct md_directory_entry *entry=(void *)((char *)out+used);
             int node=tree->ops && tree->ops->control
                 ? openat(roots[i],e->d_name,O_PATH|O_NOFOLLOW|O_CLOEXEC) : -1;
             if (node>=0) {
@@ -196,7 +194,7 @@ ssize_t md_provider_tree_getdents(struct md_provider_tree *tree,int fd,void *out
                 int managed=md_provider_tree_control(tree,node,&control);
                 if (managed>0) {
                     if (!control.ops->stat(control.context,&st)) {
-                        entry->type=S_ISCHR(st.st_mode) ? DT_CHR : entry->type; entry->ino=st.st_ino;
+                        entry->type=S_ISCHR(st.st_mode) ? DT_CHR : entry->type; entry->inode=st.st_ino;
                     }
                     md_control_file_release(control);
                 }

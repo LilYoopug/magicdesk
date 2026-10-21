@@ -15,17 +15,9 @@
 static int valid_entries(const char *data, size_t size) {
     int64_t previous = 0;
     while (size) {
-        struct md_inode_dirent entry;
-        size_t header = offsetof(struct md_inode_dirent, name);
-        if (size < header) return 0;
-        memcpy(&entry, data, header);
-        if (entry.size <= header || entry.size > size || entry.size % 8
-                || entry.next <= previous) return 0;
-        size_t n = 0;
-        while (n < entry.size-header && data[header+n]) {
-            if (data[header+n] == '/' || ++n > NAME_MAX) return 0;
-        }
-        if (!n || n == entry.size-header) return 0;
+        struct md_directory_entry entry;
+        size_t length=md_directory_record_read(data,size,&entry);
+        if (!length || length>NAME_MAX || entry.next<=previous) return 0;
         previous = entry.next; data += entry.size; size -= entry.size;
     }
     return 1;

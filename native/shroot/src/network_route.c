@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "network_route.h"
 #include "network_message.h"
+#include "netlink_attributes.h"
 #include "network_internal.h"
 #include "network_forward.h"
 #include "guest_identity.h"
@@ -20,16 +21,15 @@
 struct attrs { const struct rtattr *v[IFLA_MAX+1]; };
 static int attributes(const void *data,size_t size,struct attrs *out,unsigned max) {
     memset(out,0,sizeof(*out));
-    while (size) {
-        if (size<sizeof(struct rtattr)) return -EINVAL;
-        const struct rtattr *a=data;
-        unsigned type=a->rta_type&NLA_TYPE_MASK;
-        if (a->rta_len<sizeof(*a) || a->rta_len>size || RTA_ALIGN(a->rta_len)>size) return -EINVAL;
+    struct md_netlink_cursor cursor={data,size};
+    struct md_netlink_attribute a; int result;
+    while ((result=md_netlink_attribute_next(&cursor,&a))>0) {
+        unsigned type=a.type;
         if (type>max || type>=sizeof(out->v)/sizeof(*out->v) || !type) return -EOPNOTSUPP;
         if (out->v[type]) return -EINVAL;
-        out->v[type]=a; size-=RTA_ALIGN(a->rta_len); data=(const char *)data+RTA_ALIGN(a->rta_len);
+        out->v[type]=a.wire;
     }
-    return 0;
+    return result;
 }
 static int number(const struct rtattr *a,uint32_t *out) {
     if (RTA_PAYLOAD(a)!=sizeof(*out)) return -EINVAL;

@@ -654,7 +654,7 @@ static void hybrid(const char *path) {
     unsigned found=0;
     while ((count=md_inode_getdents(cold,duplicate,data,sizeof(data)))>0) {
         for (size_t at=0;at<(size_t)count;) {
-            struct md_inode_dirent *e=(void *)(data+at); at+=e->size;
+            struct md_directory_entry *e=(void *)(data+at); at+=e->size;
             unsigned bit=!strcmp(e->name,".") ? 1 : !strcmp(e->name,"..") ? 2 : !strcmp(e->name,"link") ? 4
                 : !strcmp(e->name,"regular") ? 8 : !strcmp(e->name,"moved (deleted)") ? 16 : 0;
             assert(bit && !(found&bit)); found|=bit;

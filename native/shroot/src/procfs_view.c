@@ -452,11 +452,11 @@ ssize_t md_procfs_getdents(struct md_filesystem *fs,const struct md_view_mount *
         if (!n) return n;
         size_t read=0,written=0;
         while (read<(size_t)n) {
-            struct dirent *entry=(struct dirent *)(input+read);
-            if (entry->d_reclen<offsetof(struct dirent,d_name)+2 || entry->d_reclen>(size_t)n-read) return -EIO;
-            size_t length=entry->d_reclen;
-            char mapped[32]; const char *name=entry->d_name;
-            pid_t native=decimal(entry->d_name,NULL), number=native;
+            struct md_directory_entry entry;
+            if (!md_directory_record_read(input+read,(size_t)n-read,&entry)) return -EIO;
+            size_t length=entry.size;
+            char mapped[32]; const char *name=input+read+offsetof(struct md_directory_entry,name);
+            pid_t native=decimal(name,NULL), number=native;
             if (!net && native && mount->pid_namespace) {
                 number=0;
                 struct md_pid_identity *id=md_pid_namespace_find(mount->pid_namespace,native);
@@ -470,19 +470,15 @@ ssize_t md_procfs_getdents(struct md_filesystem *fs,const struct md_view_mount *
             int allowed=net ? network_entry(fs,path,name) : native && number ? permitted(fs,p,native,2) : 1;
             if (allowed<0) return allowed;
             if (allowed && (!native || number) && !(group==-1 && omitted(p,name))) {
-                size_t bytes=strlen(name)+1;
-                size_t record=(offsetof(struct dirent,d_name)+bytes+7)&~(size_t)7;
-                if (record>capacity-written) {
+                size_t record=md_directory_record_write((char *)data+written,capacity-written,
+                    name,strlen(name),entry.inode,entry.next,entry.type);
+                if (!record) {
                     if (lseek(fd,cursor,SEEK_SET)<0) return -errno;
                     return written ? (ssize_t)written : -EINVAL;
                 }
-                struct dirent *out=(struct dirent *)((char *)data+written);
-                memset(out,0,record);
-                out->d_ino=entry->d_ino; out->d_off=entry->d_off;
-                out->d_reclen=(unsigned short)record; out->d_type=entry->d_type;
-                memcpy(out->d_name,name,bytes); written+=record;
+                written+=record;
             }
-            cursor=entry->d_off;
+            cursor=entry.next;
             read+=length;
         }
         if (written) return (ssize_t)written;

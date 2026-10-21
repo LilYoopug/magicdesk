@@ -3,6 +3,7 @@
 #include "fuse_image.h"
 #include "fs_control.h"
 #include "resource_order.h"
+#include "directory_record.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/magic.h>
@@ -217,7 +218,6 @@ static long io_resume(struct md_control_pending *base,void *data,size_t capacity
     union { uint64_t alignment; unsigned char bytes[MD_FUSE_IO_SIZE]; } input;
     long n=md_fuse_request_result(io->request,input.bytes,sizeof(input.bytes));
     if (n<0) return n;
-    struct directory_entry { uint64_t ino; int64_t off; uint16_t length; unsigned char type; char name[]; };
     size_t used=0;
     io->base.position=io->offset;
     for (size_t at=0;at<(size_t)n;) {
@@ -226,11 +226,10 @@ static long io_resume(struct md_control_pending *base,void *data,size_t capacity
         if (remaining<offsetof(struct fuse_dirent,name) || !e->namelen || e->namelen>NAME_MAX
                 || FUSE_DIRENT_SIZE(e)>remaining || e->off>INT64_MAX || e->type>15
                 || memchr(e->name,0,e->namelen) || memchr(e->name,'/',e->namelen)) return -EPROTO;
-        size_t size=(offsetof(struct directory_entry,name)+e->namelen+1+7)&~(size_t)7;
-        if (size>capacity-used) return used ? (long)used : -EINVAL;
-        struct directory_entry *out=(void *)((char *)data+used);
-        memset(out,0,size); out->ino=e->ino; out->off=e->off; out->length=size; out->type=e->type;
-        memcpy(out->name,e->name,e->namelen); used+=size; io->base.position=e->off;
+        size_t size=md_directory_record_write((char *)data+used,capacity-used,
+            e->name,e->namelen,e->ino,(int64_t)e->off,(uint8_t)e->type);
+        if (!size) return used ? (long)used : -EINVAL;
+        used+=size; io->base.position=e->off;
         at+=FUSE_DIRENT_SIZE(e);
     }
     return used;

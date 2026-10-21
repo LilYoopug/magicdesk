@@ -7,7 +7,6 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
-_Static_assert(offsetof(struct md_inode_dirent, name) == 19, "Linux getdents64 ABI");
 /* Cookies remain in the shared directory OFD, including across cold SCM
  * transfer. Small native cookies encode directly; large opaque filesystem
  * cookies use a store-wide mapping, never a process-local cursor. Keep the
@@ -58,16 +57,6 @@ static int directory(struct md_inode_store *s, int fd, struct mdi_node *node, in
     int r = require_attached ? mdi_fd_membership(s, fd, node, &attached) : mdi_fd(s, fd, node);
     return r ? r : node->kind != S_IFDIR ? -ENOTDIR : attached ? 0 : -ENOENT;
 }
-static size_t record(void *out, size_t space, const char *name, size_t length,
-        uint64_t inode, int64_t next, uint8_t type) {
-    size_t size = (offsetof(struct md_inode_dirent, name) + length + 1 + 7) & ~(size_t)7;
-    if (space < size) return 0;
-    struct md_inode_dirent header = {.inode = inode, .next = next, .size = (uint16_t)size, .type = type};
-    memset(out, 0, size);
-    memcpy(out, &header, offsetof(struct md_inode_dirent, name));
-    memcpy((char *)out + offsetof(struct md_inode_dirent, name), name, length);
-    return size;
-}
 static int native_entries(struct md_inode_store *s,const struct mdi_node *node,void *out,
         size_t capacity,size_t *used,int64_t *offset) {
     if (node->mode<0) return 0;
@@ -82,29 +71,28 @@ static int native_entries(struct md_inode_store *s,const struct mdi_node *node,v
         if (count<0) { r=-errno; break; }
         if (!count) break;
         for (size_t at=0;!r && at<(size_t)count;) {
-            const struct md_inode_dirent *entry=(const void *)(buffer+at);
-            size_t header=offsetof(struct md_inode_dirent,name);
-            if ((size_t)count-at<header+1 || entry->size<header+1 || entry->size>(size_t)count-at) { r=-EIO; break; }
-            size_t length=strnlen(entry->name,entry->size-header);
-            if (!length || length>NAME_MAX || length==entry->size-header || strchr(entry->name,'/')) { r=-EIO; break; }
-            at+=entry->size;
-            if (!strcmp(entry->name,".") || !strcmp(entry->name,"..")) continue;
-            int regular=entry->type==DT_REG;
-            if (entry->type==DT_UNKNOWN) {
+            struct md_directory_entry entry;
+            size_t length=md_directory_record_read(buffer+at,(size_t)count-at,&entry);
+            if (!length || length>NAME_MAX) { r=-EIO; break; }
+            const char *name=(const char *)buffer+at+offsetof(struct md_directory_entry,name);
+            at+=entry.size;
+            if (!strcmp(name,".") || !strcmp(name,"..")) continue;
+            int regular=entry.type==DT_REG;
+            if (entry.type==DT_UNKNOWN) {
                 struct stat st;
-                if (fstatat(fd,entry->name,&st,AT_SYMLINK_NOFOLLOW)) { r=-errno; break; }
+                if (fstatat(fd,name,&st,AT_SYMLINK_NOFOLLOW)) { r=-errno; break; }
                 regular=S_ISREG(st.st_mode);
             }
             if (!regular) { r=-EIO; break; }
-            size_t size=(header+length+1+7)&~(size_t)7;
+            size_t size=md_directory_record_size(length);
             if (capacity-*used<size) {
                 if (!*used) r=-EINVAL;
                 goto done;
             }
             int64_t next;
-            r=cookie(s,node->id,entry->next,1,&next);
+            r=cookie(s,node->id,entry.next,1,&next);
             if (!r) {
-                *used+=record((char *)out+*used,capacity-*used,entry->name,length,entry->inode,next,DT_REG);
+                *used+=md_directory_record_write((char *)out+*used,capacity-*used,name,length,entry.inode,next,DT_REG);
                 *offset=next;
             }
         }
@@ -136,7 +124,7 @@ static ssize_t getdents(struct md_inode_store *s, int fd, void *out, size_t capa
         struct mdi_node entry = node;
         if (offset == 1) r = mdi_node(s, !strcmp(node.id, mdi_root(s)) ? node.id : node.parent, &entry);
         if (r) break;
-        size_t n = record((char *)out + used, capacity-used, offset ? ".." : ".",
+        size_t n = md_directory_record_write((char *)out + used, capacity-used, offset ? ".." : ".",
             offset ? 2 : 1, entry.logical_inode, offset+1, DT_DIR);
         if (!n) { if (!used) r = -EINVAL; break; }
         used += n; ++offset;
@@ -155,7 +143,7 @@ static ssize_t getdents(struct md_inode_store *s, int fd, void *out, size_t capa
                 || memchr(name, '/', (size_t)length)) { r = -EIO; break; }
         int64_t next = sqlite3_column_int64(q, 0) + 2;
         if (next <= offset || next>=NATIVE_BASE) { r = -EOVERFLOW; break; }
-        size_t n = record((char *)out + used, capacity-used, name, (size_t)length,
+        size_t n = md_directory_record_write((char *)out + used, capacity-used, name, (size_t)length,
             (uint64_t)sqlite3_column_int64(q, 2), next, (uint8_t)(sqlite3_column_int(q, 3) >> 12));
         if (!n) { if (!used) r = -EINVAL; break; }
         used += n; offset = next;

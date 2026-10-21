@@ -2,6 +2,7 @@
 #include "process_owner.h"
 #include "event_wait.h"
 #include "raw.h"
+#include "directory_record.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -57,19 +58,18 @@ int md_process_status(int status) {
 long md_process_close_fds(const int *keep, unsigned count) {
     long dir = RAW4(openat, AT_FDCWD, "/proc/self/fd", O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
     if (dir < 0) return dir;
-    struct entry { uint64_t ino; int64_t offset; unsigned short size; unsigned char type; char name[]; };
     char buffer[4096];
     long n;
     while ((n = RAW3(getdents64, dir, buffer, sizeof(buffer))) > 0) {
         for (long offset = 0; offset < n;) {
-            struct entry *entry = (void *)(buffer + offset);
-            if (entry->size < offsetof(struct entry, name) + 1 || entry->size > n - offset) {
+            struct md_directory_entry entry;
+            if (!md_directory_record_read(buffer+offset,(size_t)(n-offset),&entry)) {
                 RAW1(close, dir);
                 return -EIO;
             }
-            offset += entry->size;
+            const char *name=buffer+offset+offsetof(struct md_directory_entry,name);
+            offset += entry.size;
             unsigned long fd = 0;
-            const char *name = entry->name;
             while (*name >= '0' && *name <= '9' && fd <= INT_MAX) fd = fd * 10 + (*name++ - '0');
             if (*name || fd < 3 || fd > INT_MAX || fd == (unsigned long)dir) continue;
             int retained = 0;
@@ -86,19 +86,18 @@ long md_process_close_fds(const int *keep, unsigned count) {
 long md_process_signal_children(int signal) {
     long dir = RAW4(openat, AT_FDCWD, "/proc", O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
     if (dir < 0) return dir;
-    struct entry { uint64_t ino; int64_t offset; unsigned short size; unsigned char type; char name[]; };
     char buffer[4096];
     long result = 0, n;
     while ((n = RAW3(getdents64, dir, buffer, sizeof(buffer))) > 0) {
         for (long offset = 0; offset < n;) {
-            struct entry *entry = (void *)(buffer + offset);
-            if (entry->size < offsetof(struct entry, name) + 1 || entry->size > n - offset) {
+            struct md_directory_entry entry;
+            if (!md_directory_record_read(buffer+offset,(size_t)(n-offset),&entry)) {
                 result = -EIO;
                 goto done;
             }
-            offset += entry->size;
+            const char *name=buffer+offset+offsetof(struct md_directory_entry,name);
+            offset += entry.size;
             unsigned long pid = 0;
-            const char *name = entry->name;
             while (*name >= '0' && *name <= '9' && pid <= INT_MAX) pid = pid * 10 + (*name++ - '0');
             if (*name || !pid || pid > INT_MAX) continue;
             long fd = RAW2(pidfd_open, pid, 0);

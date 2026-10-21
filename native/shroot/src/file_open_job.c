@@ -2,6 +2,7 @@
 #include "file_open_job.h"
 #include "fs_wire.h"
 #include "raw.h"
+#include "directory_record.h"
 #include <errno.h>
 #include <limits.h>
 #include <signal.h>
@@ -14,29 +15,28 @@ struct open_result { int error; struct md_open_observation observation; };
 static int isolate_proc(const unsigned *keep, unsigned count) {
     long directory=RAW4(openat,AT_FDCWD,"/proc/self/fd",O_RDONLY|O_DIRECTORY|O_CLOEXEC,0);
     if (directory<0) return (int)directory;
-    struct entry { uint64_t inode; int64_t offset; unsigned short size; unsigned char type; char name[]; };
-    _Alignas(struct entry) char bytes[4096];
+    char bytes[4096];
     int error=0;
     for (;;) {
         long size=RAW3(getdents64,directory,bytes,sizeof(bytes));
         if (size<=0) { error=(int)size; break; }
         for (long at=0;at<size;) {
-            const struct entry *e=(void *)(bytes+at);
-            if (size-at<(long)offsetof(struct entry,name)+2 || e->size<offsetof(struct entry,name)+2
-                    || e->size>size-at) { error=-EIO; break; }
-            if (e->name[0]>='0' && e->name[0]<='9') {
+            struct md_directory_entry e;
+            if (!md_directory_record_read(bytes+at,(size_t)(size-at),&e)) { error=-EIO; break; }
+            const char *name=bytes+at+offsetof(struct md_directory_entry,name);
+            if (name[0]>='0' && name[0]<='9') {
                 unsigned number=0;
-                size_t n=0,limit=e->size - offsetof(struct entry,name);
-                while (n<limit && e->name[n]>='0' && e->name[n]<='9') {
+                size_t n=0;
+                while (name[n]>='0' && name[n]<='9') {
                     if (number>((unsigned)INT_MAX-9)/10) { error=-EIO; break; }
-                    number=number*10+(unsigned)(e->name[n++]-'0');
+                    number=number*10+(unsigned)(name[n++]-'0');
                 }
-                if (error || n==limit || e->name[n]) { error=-EIO; break; }
+                if (error || name[n]) { error=-EIO; break; }
                 int retained=number==(unsigned)directory;
                 for (unsigned i=0;i<count;++i) retained|=number==keep[i];
                 if (!retained) RAW1(close,number);
             }
-            at+=e->size;
+            at+=e.size;
         }
         if (error) break;
     }

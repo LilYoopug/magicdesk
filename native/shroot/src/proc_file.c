@@ -7,6 +7,7 @@
 #include "cgroup.h"
 #include "task_resources.h"
 #include "file_permissions.h"
+#include "directory_record.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -520,11 +521,10 @@ int md_proc_file_io_begin(struct md_proc_file_io *io, struct md_proc_file *file,
     io->positional=!!positional; io->offset=offset; io->whence=whence; io->length=length;
     return ready;
 }
-struct directory_entry { uint64_t inode; int64_t next; uint16_t length; unsigned char type; char name[]; };
 static int directory_append(struct md_proc_file *f,const char *name,unsigned char type,uint64_t inode) {
-    size_t length=strlen(name)+1;
-    size_t record=(offsetof(struct directory_entry,name)+length+7)&~(size_t)7;
-    if (record>65536 || f->directory_size>65536-record) return -EOVERFLOW;
+    size_t length=strlen(name);
+    size_t record=md_directory_record_size(length);
+    if (!record || f->directory_size>65536-record) return -EOVERFLOW;
     if (f->directory_size+record>f->directory_capacity) {
         size_t capacity=f->directory_capacity ? f->directory_capacity*2 : 4096;
         while (capacity<f->directory_size+record) capacity*=2;
@@ -532,10 +532,9 @@ static int directory_append(struct md_proc_file *f,const char *name,unsigned cha
         if (!data) return -ENOMEM;
         f->directory=data; f->directory_capacity=capacity;
     }
-    struct directory_entry *e=(void *)((char *)f->directory+f->directory_size);
-    memset(e,0,record); e->inode=inode; e->type=type; e->length=(uint16_t)record;
-    f->directory_size+=record; e->next=(int64_t)f->directory_size;
-    memcpy(e->name,name,length); return 0;
+    md_directory_record_write((char *)f->directory+f->directory_size,record,
+        name,length,inode,(int64_t)(f->directory_size+record),type);
+    f->directory_size+=record; return 0;
 }
 static int process_directory(struct md_proc_file *f,const char *path) {
     if (f->directory) return 0;
@@ -550,15 +549,13 @@ static int process_directory(struct md_proc_file *f,const char *path) {
         if (size<0) { r=-errno; break; }
         if (!size) break;
         for (size_t at=0; !r && at<(size_t)size;) {
-            const struct directory_entry *e=(const void *)(data+at);
-            size_t remaining=(size_t)size-at;
-            if (remaining<=offsetof(struct directory_entry,name) || e->length>remaining
-                    || e->length<=offsetof(struct directory_entry,name)
-                    || !memchr(e->name,0,e->length- offsetof(struct directory_entry,name))) { r=-EIO; break; }
+            struct md_directory_entry entry;
+            if (!md_directory_record_read(data+at,(size_t)size-at,&entry)) { r=-EIO; break; }
+            const char *name=data+at+offsetof(struct md_directory_entry,name);
             int mapped=0;
-            for (unsigned i=0;i<3;++i) mapped|=!strcmp(e->name,names[i]);
-            if (!mapped) r=directory_append(f,e->name,e->type,e->inode);
-            at+=e->length;
+            for (unsigned i=0;i<3;++i) mapped|=!strcmp(name,names[i]);
+            if (!mapped) r=directory_append(f,name,entry.type,entry.inode);
+            at+=entry.size;
         }
     }
     if (!r && fstatat(fd,"status",&st,0)) r=-errno;
@@ -584,28 +581,22 @@ static long directory_entries(struct md_proc_file_io *io, void *bytes, size_t ca
         if (r) return r;
         size_t at=0;
         while (at<f->directory_size && at<(uint64_t)io->offset) {
-            const struct directory_entry *e=(const void *)((const char *)f->directory+at);
-            at+=e->length;
+            const struct md_directory_entry *e=(const void *)((const char *)f->directory+at);
+            at+=e->size;
         }
         if (at<f->directory_size && at!=(uint64_t)io->offset) return -EINVAL;
         while (at<f->directory_size) {
-            const struct directory_entry *e=(const void *)((const char *)f->directory+at);
-            if (e->length>capacity-size) return size ? (long)size : -EINVAL;
-            memcpy((char *)bytes+size,e,e->length);
-            size+=e->length; at+=e->length; io->next_position=(int64_t)at;
+            const struct md_directory_entry *e=(const void *)((const char *)f->directory+at);
+            if (e->size>capacity-size) return size ? (long)size : -EINVAL;
+            memcpy((char *)bytes+size,e,e->size);
+            size+=e->size; at+=e->size; io->next_position=(int64_t)at;
         }
         return (long)size;
     }
     for (int64_t i=io->offset; i<(int64_t)(sizeof(names)/sizeof(*names)); ++i) {
-        struct entry { uint64_t inode; int64_t next; uint16_t length; unsigned char type; char name[]; };
-        size_t length=strlen(names[i])+1;
-        size_t record=(offsetof(struct entry,name)+length+7)&~(size_t)7;
-        if (record>capacity-size) return size ? (long)size : -EINVAL;
-        struct entry *e=(void *)((char *)bytes+size);
-        memset(e,0,record);
-        e->inode=i ? (f->node.inode<<4)|(uint64_t)i : f->node.inode;
-        e->next=i+1; e->length=(uint16_t)record; e->type=i<2 ? DT_DIR : DT_LNK;
-        memcpy(e->name,names[i],length);
+        size_t record=md_directory_record_write((char *)bytes+size,capacity-size,names[i],strlen(names[i]),
+            i ? (f->node.inode<<4)|(uint64_t)i : f->node.inode,i+1,i<2 ? DT_DIR : DT_LNK);
+        if (!record) return size ? (long)size : -EINVAL;
         size+=record; io->next_position=i+1;
     }
     return (long)size;
