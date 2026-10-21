@@ -25,6 +25,53 @@ static siginfo_t original(int signal) {
     return info;
 }
 static void unexpected(int signal) { (void)signal; _exit(90); }
+static volatile sig_atomic_t realtime_count;
+static void realtime_handler(int signal,siginfo_t *info,void *context) {
+    (void)context;
+    if (signal!=SIGRTMAX || info->si_code!=SI_QUEUE
+            || info->si_value.sival_int!=realtime_count+1) _exit(91);
+    ++realtime_count;
+}
+static void realtime_order(int retain_again) {
+    pid_t pid=fork(); assert(pid>=0);
+    if (!pid) {
+        struct sigaction action={.sa_sigaction=realtime_handler,.sa_flags=SA_SIGINFO};
+        sigemptyset(&action.sa_mask); assert(!sigaction(SIGRTMAX,&action,NULL));
+        assert(!ptrace(PTRACE_TRACEME,0,NULL,NULL));
+        assert(!raise(SIGSTOP));
+        while (realtime_count<3) pause();
+        _exit(0);
+    }
+    int status;
+    assert(waitpid(pid,&status,0)==pid && WIFSTOPPED(status) && WSTOPSIG(status)==SIGSTOP);
+    union sigval value={.sival_int=1}; assert(!sigqueue(pid,SIGRTMAX,value));
+    assert(!ptrace(PTRACE_CONT,pid,NULL,NULL));
+    assert(waitpid(pid,&status,0)==pid && WIFSTOPPED(status) && WSTOPSIG(status)==SIGRTMAX);
+    siginfo_t info; assert(!ptrace(PTRACE_GETSIGINFO,pid,NULL,&info));
+    struct md_signal_delivery admission={0};
+    assert(!md_signal_delivery_retain(&admission,pid,&info));
+    for (int n=2;n<=3;++n) { value.sival_int=n; assert(!sigqueue(pid,SIGRTMAX,value)); }
+    assert(!md_signal_delivery_publish(&admission,pid,pid));
+    struct md_signal_delivery q=admission;
+    admission=(struct md_signal_delivery){0};
+    assert(!ptrace(PTRACE_CONT,pid,NULL,NULL));
+    unsigned stops=0;
+    while (waitpid(pid,&status,0)==pid && WIFSTOPPED(status)) {
+        assert(WSTOPSIG(status)==SIGRTMAX && ++stops<=4);
+        int deliver=SIGRTMAX;
+        assert(!md_signal_delivery_event(&q,pid,SIGRTMAX,&deliver));
+        if (retain_again && stops==1) {
+            assert(!ptrace(PTRACE_GETSIGINFO,pid,NULL,&info) && info.si_value.sival_int==1);
+            assert(!md_signal_delivery_retain(&q,pid,&info));
+            assert(!md_signal_delivery_publish(&q,pid,pid));
+            deliver=0;
+        }
+        assert(!ptrace(PTRACE_CONT,pid,NULL,(void *)(intptr_t)deliver));
+    }
+    assert(WIFEXITED(status) && !WEXITSTATUS(status) && stops==3u+(unsigned)retain_again);
+    assert(!q.realtime && !q.carriers[SIGRTMAX] && !md_signal_delivery_pending(&q));
+    md_signal_delivery_clear(&q);
+}
 static uintptr_t pc(pid_t pid) {
     struct user_pt_regs regs;
     struct iovec io={&regs,sizeof(regs)};
@@ -97,6 +144,7 @@ static void child(unsigned round,int traced) {
 }
 int main(void) {
     alarm(15);
+    realtime_order(0); realtime_order(1);
     for (long value=-4095;value<=4095;++value)
         assert(md_syscall_restarting(value)==(value==-512 || value==-513 || value==-514 || value==-516));
     assert(!md_syscall_restarting(-EINTR));
@@ -131,8 +179,8 @@ int main(void) {
         assert(!md_signal_delivery_hold(&q,&info));
         info.si_pid=11111; assert(!md_signal_delivery_hold(&q,&info));
         info=original(SIGTRAP); assert(!md_signal_delivery_hold(&q,&info));
-        assert(!md_signal_delivery_publish(&q,pid));
-        assert(!md_signal_delivery_publish(&q,pid));
+        assert(!md_signal_delivery_publish(&q,pid,pid));
+        assert(!md_signal_delivery_publish(&q,pid,pid));
         if (round==3) {
             assert(!syscall(SYS_tgkill,pid,pid,SIGURG));
             assert(!syscall(SYS_tgkill,pid,pid,SIGTRAP));
@@ -170,5 +218,5 @@ int main(void) {
     assert(!md_signal_delivery_hold(&q,&info));
     info=original(SIGUSR1); assert(!md_signal_delivery_hold(&q,&info));
     md_signal_delivery_clear(&q); assert(!q.first && !q.last && !q.active);
-    puts("PASS signal delivery: exact kernel info, coalescing, sigwait/signalfd, no guest execution, exhausted queue");
+    puts("PASS signal delivery: exact kernel info, coalescing, sigwait/signalfd, no guest execution, exhausted queue, realtime FIFO, owner transfer and repeated custody");
 }

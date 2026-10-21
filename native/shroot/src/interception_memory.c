@@ -48,6 +48,7 @@ struct md_interception_memory {
     struct md_private_memory_access access;
     int access_ready;
     int exposed;
+    unsigned exposures;
     struct backing_pool *backings;
     struct md_svc_registry *svc;
 };
@@ -107,8 +108,24 @@ int md_memory_svc_set(struct md_interception_memory *s,struct md_svc_registry *r
     if (!s || s->svc) return -EBUSY;
     s->svc=registry; return 0;
 }
-void md_memory_expose(struct md_interception_memory *s) { s->exposed=1; }
-int md_memory_exposed(const struct md_interception_memory *s) { return s && s->exposed; }
+int md_memory_exposure_begin(struct md_interception_memory *s,struct md_interception_memory **lease) {
+    if (!lease || *lease) return -EINVAL;
+    if (!s) return 0;
+    if (s->exposures==UINT_MAX) return -EOVERFLOW;
+    *lease=md_memory_fork(s,1);
+    if (!*lease) return -ENOMEM;
+    ++s->exposures;
+    return 0;
+}
+void md_memory_exposure_end(struct md_interception_memory **lease,int published) {
+    struct md_interception_memory *s=*lease;
+    if (!s) return;
+    *lease=NULL;
+    assert(s->exposures); --s->exposures;
+    if (published) s->exposed=1;
+    md_memory_release(s);
+}
+int md_memory_exposed(const struct md_interception_memory *s) { return s && (s->exposed || s->exposures); }
 struct md_interception_memory *md_memory_new_image(struct md_interception_memory *s) {
     return memory_new(s->backings);
 }

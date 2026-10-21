@@ -120,6 +120,10 @@ stop restores the application mask; kernel admission and the original
 EINTR/SA_RESTART decision remain native. A completed syscall is never replayed.
 Job-control signals remain kernel-pending so STOP can cancel CONT without a
 later replay waking the group. The no-retained-signal path adds no delivery trip.
+Realtime signals use the same delivery owner in Base and accelerated entry,
+including a signal interrupting metadata notification cancellation. Ordered
+replay preserves original siginfo ahead of later kernel arrivals; a queue
+handoff during non-leader exec retains its carrier identity.
 
 `task_checkpoint` owns all normal bootstrap control markers: selective TRACE
 outside application filters, scoped SYSEMU inside them, and a synthetic
@@ -129,6 +133,9 @@ original IP and arguments. Register copies, C adapter returns, helper custody,
 memory repair and readiness use this same event; actual SIGTRAP and guest
 debugger steps are not service completions. `task_call` separately owns native
 call entry/exit and exact continuation restoration without a return BRK.
+The C-facing gates in `checkpoint_entry.S` set x8 explicitly before the marker:
+ARM64 otherwise replaces x0 with ENOSYS before tracing syscall(-1). Entry and
+marker addresses are distinct; this adds one instruction, not another stop.
 See [protocol coverage](../guest-exec-lab/sandbox-research.md#signal-neutral-checkpoints).
 
 Known separate limitation: a fault in a fallback userspace memory copy can

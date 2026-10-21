@@ -230,14 +230,15 @@ def guest():
 
 
 def main():
+    from test_oci_services import Suite, add_machine_entry_argument
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--build', type=Path, required=True)
     parser.add_argument('--store', required=True)
+    add_machine_entry_argument(parser)
     args = parser.parse_args()
-    from test_oci_services import Suite
-    suite = Suite(Path('build/memfd-view-results'), args.build)
+    suite = Suite(Path('build/memfd-view-results'), args.build, machine_entry=args.machine_entry)
     target = '/tmp/md-memfd-' + suite.report['id']
-    prefix = [suite.runner, '--store', args.store, '--user', '0:0']
+    prefix = [suite.runner, *suite.entry_options, '--store', args.store, '--user', '0:0']
     try:
         suite.transport.upload(suite.client, Path(__file__), suite.base + '/test.py')
         suite.command(prefix + ['--', '/bin/mkdir', target])

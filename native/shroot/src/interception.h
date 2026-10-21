@@ -5,13 +5,13 @@
 #define MD_INTERCEPTION_MAGIC UINT64_C(0x4d44494e54455231)
 #define MD_GUEST_MAP_IMAGE 0x4d440101
 #define MD_CHECKPOINT_SITES(X) \
-    X(ready,md_guest_ready) X(done,md_guest_done) X(allocated,md_guest_allocated) \
-    X(exported,md_guest_exported) X(export_control,md_guest_export_control) \
+    X(ready,md_guest_ready_checkpoint) X(done,md_guest_done_checkpoint) X(allocated,md_guest_allocated) \
+    X(exported,md_guest_exported_checkpoint) X(export_control,md_guest_export_control_checkpoint) \
     X(stored,md_guest_stored) X(loaded_byte,md_guest_loaded_byte) X(stored_ids,md_guest_stored_ids) \
     X(loaded_groups,md_guest_loaded_groups) X(stored_groups,md_guest_stored_groups) \
-    X(fd_control,md_guest_fd_control) X(buffer_control,md_guest_buffer_control) \
-    X(task_control,md_guest_task_control) X(task_return,md_guest_task_return) \
-    X(task_collected,md_guest_task_collected) X(watch_return,md_guest_watch_return) X(enter,md_enter)
+    X(fd_control,md_guest_fd_control_checkpoint) X(buffer_control,md_guest_buffer_control_checkpoint) \
+    X(task_control,md_guest_task_control_checkpoint) X(task_return,md_guest_task_return) \
+    X(task_collected,md_guest_task_collected) X(watch_return,md_guest_watch_return) X(enter,md_enter_checkpoint)
 enum { MD_IMAGE_PROGRAM=0, MD_IMAGE_LOADER=1, MD_IMAGE_TAKE_PROGRAM=2, MD_IMAGE_TAKE_LOADER=3 };
 #define MD_GUEST_ENTER_IMAGE 0x4d440102
 #define MD_GUEST_SHM 0x4d440104
@@ -65,6 +65,7 @@ struct md_interception_abi {
     /* dispatch: x0 syscall, x1..x6 arguments, x9 md_dispatch_policy.
      * x7 is reserved by the kernel at ARM64 syscall stops. */
     uintptr_t ready, done, allocate, allocated, dispatch, export_fd, exported;
+    uintptr_t done_entry, exported_entry;
     uintptr_t export_control, store, stored, load_byte, loaded_byte;
     uintptr_t proc_open, proc_open_path;
     uintptr_t store_ids, stored_ids, raw_gate, copy_begin, copy_end;

@@ -22,16 +22,11 @@ md_guest_dispatch_entry:
     mov x7, x9
     b md_guest_dispatch
 .size md_guest_dispatch_entry, .-md_guest_dispatch_entry
-.global md_guest_task_control
-.type md_guest_task_control, %function
-md_guest_task_control:
-    svc #0
-    ret
-.size md_guest_task_control, .-md_guest_task_control
 .global md_guest_task_call
 .global md_guest_task_collect
 md_guest_task_collect:
     bl md_task_receive_collect
+    mov x8, #__NR_gettid
 .global md_guest_task_collected
 md_guest_task_collected:
     svc #0
@@ -48,18 +43,6 @@ md_guest_task_abort:
 .global md_guest_task_abort_return
 md_guest_task_abort_return:
     brk #0x5bf
-.global md_guest_export_control
-.type md_guest_export_control, %function
-md_guest_export_control:
-    svc #0
-    ret
-.size md_guest_export_control, .-md_guest_export_control
-.global md_guest_buffer_control
-.type md_guest_buffer_control, %function
-md_guest_buffer_control:
-    svc #0
-    ret
-.size md_guest_buffer_control, .-md_guest_buffer_control
 .global md_guest_buffer_admit
 .type md_guest_buffer_admit, %function
 md_guest_buffer_admit:
@@ -85,12 +68,6 @@ md_guest_open_anchor:
 md_guest_anchor_return:
     ret
 .size md_guest_open_anchor, .-md_guest_open_anchor
-.global md_guest_fd_control
-.type md_guest_fd_control, %function
-md_guest_fd_control:
-    svc #0
-    ret
-.size md_guest_fd_control, .-md_guest_fd_control
 .global md_guest_ipc_wait
 md_guest_ipc_wait:
     sub sp, sp, #16
@@ -110,18 +87,6 @@ md_guest_watch_gate:
     svc #0
 .global md_guest_watch_return
 md_guest_watch_return:
-    svc #0
-.global md_guest_ready
-.type md_guest_ready, %function
-md_guest_ready:
-    svc #0
-    ret
-.size md_guest_ready, .-md_guest_ready
-.global md_guest_done
-md_guest_done:
-    svc #0
-.global md_guest_exported
-md_guest_exported:
     svc #0
 .global md_guest_store
 md_guest_store:

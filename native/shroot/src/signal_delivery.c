@@ -12,6 +12,47 @@ struct md_signal_delivery_node {
     struct md_signal_delivery_node *next;
     siginfo_t info;
 };
+static struct md_signal_delivery_node **realtime_first(struct md_signal_delivery *q,int signal) {
+    struct md_signal_delivery_node **at=&q->realtime;
+    while (*at && (*at)->info.si_signo!=signal) at=&(*at)->next;
+    return at;
+}
+static int realtime_hold(struct md_signal_delivery *q,const siginfo_t *info,int front) {
+    struct md_signal_delivery_node **at=realtime_first(q,info->si_signo);
+    struct md_signal_delivery_node *node=malloc(sizeof(*node));
+    if (!node) return -ENOMEM;
+    if (!front) while (*at) at=&(*at)->next;
+    *node=(struct md_signal_delivery_node){.next=*at,.info=*info}; *at=node;
+    return 0;
+}
+static int realtime_publish(struct md_signal_delivery *q,pid_t tid,pid_t group) {
+    /* A non-leader exec moves this queue to the surviving task owner. */
+    if (!q->carrier_cookie) q->carrier_cookie=(uintptr_t)q;
+    unsigned counts[NSIG]={0};
+    for (struct md_signal_delivery_node *n=q->realtime;n;n=n->next) ++counts[n->info.si_signo];
+    for (int n=SIGRTMIN;n<NSIG;++n) while (q->carriers[n]<counts[n]) {
+        siginfo_t info={.si_signo=n,.si_code=SI_QUEUE};
+        info.si_pid=getpid(); info.si_uid=getuid(); info.si_value.sival_ptr=(void *)q->carrier_cookie;
+        if (syscall(SYS_rt_tgsigqueueinfo,group,tid,n,&info)<0) return -errno;
+        ++q->carriers[n];
+    }
+    return 0;
+}
+static int realtime_event(struct md_signal_delivery *q,pid_t tid,int signal,int *deliver) {
+    siginfo_t info;
+    if (ptrace(PTRACE_GETSIGINFO,tid,NULL,&info)<0) return -errno;
+    int carrier=info.si_code==SI_QUEUE && info.si_pid==getpid()
+        && (uintptr_t)info.si_value.sival_ptr==q->carrier_cookie && q->carriers[signal];
+    struct md_signal_delivery_node **at=realtime_first(q,signal);
+    if (carrier) --q->carriers[signal];
+    if (*at) {
+        if (!carrier) { int error=realtime_hold(q,&info,0); if (error) return error; }
+        struct md_signal_delivery_node *node=*at;
+        info=node->info; *at=node->next; free(node);
+        if (ptrace(PTRACE_SETSIGINFO,tid,NULL,&info)<0) return -errno;
+    } else if (carrier) { *deliver=0; return 1; }
+    return 0;
+}
 static int job_control(int signal) {
     return signal==SIGCONT || signal==SIGTSTP || signal==SIGTTIN || signal==SIGTTOU;
 }
@@ -30,6 +71,7 @@ int md_signal_delivery_hold(struct md_signal_delivery *q,const siginfo_t *info) 
     q->last=n; return 0;
 }
 int md_signal_delivery_retain(struct md_signal_delivery *q,pid_t tid,const siginfo_t *info) {
+    if (info->si_signo>=SIGRTMIN && info->si_signo<NSIG) return realtime_hold(q,info,1);
     if (!job_control(info->si_signo)) return md_signal_delivery_hold(q,info);
     uint64_t mask;
     if (ptrace(PTRACE_GETSIGMASK,tid,(void *)sizeof(mask),&mask)<0) return -errno;
@@ -50,8 +92,10 @@ static int arm(struct md_signal_delivery *q,pid_t tid) {
     if (ptrace(PTRACE_SETSIGMASK,tid,(void *)sizeof(mask),&mask)<0) return -errno;
     return syscall(SYS_tkill,tid,signal)<0 ? -errno : 0;
 }
-int md_signal_delivery_publish(struct md_signal_delivery *q,pid_t tid) {
+int md_signal_delivery_publish(struct md_signal_delivery *q,pid_t tid,pid_t group) {
     if (q->active || !md_signal_delivery_pending(q)) return 0;
+    if (q->realtime) { int error=realtime_publish(q,tid,group); if (error) return error; }
+    if (!q->first && !q->kernel_mask) return 0;
     if (ptrace(PTRACE_GETSIGMASK,tid,(void *)sizeof(q->mask),&q->mask)<0) return -errno;
     q->mask&=~q->kernel_mask;
     if (!q->first) {
@@ -66,6 +110,8 @@ int md_signal_delivery_publish(struct md_signal_delivery *q,pid_t tid) {
     q->kernel_mask=0; q->active=1; return 0;
 }
 int md_signal_delivery_event(struct md_signal_delivery *q,pid_t tid,int signal,int *deliver) {
+    if (signal>=SIGRTMIN && signal<NSIG && (q->realtime || q->carriers[signal]))
+        return realtime_event(q,tid,signal,deliver);
     if (!q->active || signal!=q->first->info.si_signo) return 0;
     siginfo_t observed;
     if (ptrace(PTRACE_GETSIGINFO,tid,NULL,&observed)<0) return -errno;
@@ -88,6 +134,9 @@ int md_signal_delivery_event(struct md_signal_delivery *q,pid_t tid,int signal,i
 void md_signal_delivery_clear(struct md_signal_delivery *q) {
     while (q->first) {
         struct md_signal_delivery_node *n=q->first; q->first=n->next; free(n);
+    }
+    while (q->realtime) {
+        struct md_signal_delivery_node *n=q->realtime; q->realtime=n->next; free(n);
     }
     *q=(struct md_signal_delivery){0};
 }

@@ -417,6 +417,13 @@ until the baseline PTRACE_EVENT_VFORK_DONE stop; child exit/exec and concurrent
 JIT compilation exercise this ordering without waiting for another interrupt.
 Concurrent ordinary/protected JIT writers
 with namespace IO and stock SteamOS Plasma QML exercise the integrated path.
+Repair validates request geometry before acquiring a barrier. Its default
+scope is the exact address space and retained remote-memory users. An admitted
+`/proc/PID/mem` open temporarily widens the scope to launch-owned tasks;
+confirmed failure releases that reservation. Success or lost completion keeps
+the conservative scope, including O_PATH descriptors that can be reopened after
+transfer. The lease pins the target mm across exit/exec. Failed openat/openat2
+and transferred O_PATH/read-write descriptors have live regression coverage.
 The opt-in `test_jit_memory.c` experiment uses ordinary mmap/mprotect,
 `MREMAP_FIXED`, memfds and fork; these fit the baseline. Its optional
 userfaultfd probe separately tests full kernel-fault handling and
@@ -764,6 +771,12 @@ re-enter natively with their original IP and arguments and remain subject to
 seccomp. A synthetic PTRACE_INTERRUPT exposes the real x7 before publishing a
 marker, because ARM64 syscall stops borrow that register. Application handlers
 and guest debugger execution never inherit this service scope.
+The shared C-facing assembly gates explicitly supply gettid as the skipped
+number. An inherited x8=-1 would overwrite x0 before tracing even on 5.15;
+saving registers after that stop cannot recover the argument. Gate entry and
+marker addresses are published separately. The production-gate fixture checks
+invalid incoming x8, positive/negative x0, protected tasks and strict filters;
+the live memfd poll/epoll/mmap sequence covers adapter cleanup after native IO.
 
 ARM64 PTRACE_SYSEMU and its pre-seccomp ordering exist in Android common 5.15;
 PTRACE_INTERRUPT/SEIZE and GET_SYSCALL_INFO predate the minimum. There is no
@@ -805,10 +818,12 @@ hardware breakpoints or stop peer threads; no extra filter is installed per
 pool or exec.
 
 `svc_machine.c` uses the existing seccomp TRACE/USER_NOTIF routing and baseline
-register/siginfo APIs to recover logical contexts. Deferred standard signals
-use the same `signal_delivery` owner as shielded Base operations. Realtime
+register/siginfo APIs to recover logical contexts. Deferred standard and realtime
+signals use the same `signal_delivery` owner as shielded Base operations. Realtime
 signals use rt_tgsigqueueinfo (2.6.31) with supervisor-authenticated carriers and
 restored original siginfo to preserve FIFO against later kernel arrivals.
+Carrier identity survives a queue handoff to the leader during exec; deterministic
+tests also cover repeated custody of the oldest event before delivery.
 A caller-owned getuid checkpoint handles pending signals; its syscall must exit
 before delivery installs the recovered guest registers. It is not a service
 SIGTRAP. This mechanism adds no post-5.15 dependency.
@@ -827,7 +842,9 @@ restoration and fork inheritance.
 Application filter installation and `PR_SET_DUMPABLE(0)` use `task_quiesce`
 to recover or drain resident machine entries before replaying the original
 syscall, including TSYNC. These kernel transitions acquire the address-space
-cold barrier; publication still does not stop peers. Dumpability clears
+cold barrier only when resident gates exist, including retired gates that a
+peer can still be leaving. An empty registry needs no stop; publication still
+does not stop peers. Dumpability clears
 remote-memory authority, so source
 instructions are restored and resident gates drained before committing it.
 The requested protected state is retained, not emulated as dumpable.

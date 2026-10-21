@@ -84,7 +84,7 @@ function(guest_freestanding name)
 endfunction()
 
 guest_executable(bootstrap ${src}/bootstrap.c ${src}/elf.c ${src}/exec.c ${src}/command.c ${src}/command_image.c
-    ${src}/interception.c ${src}/interception_entry.S ${src}/fd_client.c ${src}/watch_calls.c ${src}/fd_filter.c ${src}/shm_calls.c ${src}/ipc_calls.c ${src}/pid_filter.c ${src}/pid_calls.c ${src}/terminal_calls.c
+    ${src}/interception.c ${src}/interception_entry.S ${src}/checkpoint_entry.S ${src}/fd_client.c ${src}/watch_calls.c ${src}/fd_filter.c ${src}/shm_calls.c ${src}/ipc_calls.c ${src}/pid_filter.c ${src}/pid_calls.c ${src}/terminal_calls.c
     ${src}/file_calls.c ${src}/fs.c ${src}/proc_paths.c ${src}/proc_image.c ${src}/proc_control.c ${src}/program_files.c ${src}/task_status.c
     ${src}/namespace.c ${src}/namespace_proc.c ${src}/namespace_mount.c ${src}/namespace_mount_fd.c ${src}/namespace_bpf.c ${src}/namespace_landlock.c ${src}/socket_calls.c ${src}/socket_namespace.c ${src}/socket_identity.c ${src}/socket_ancillary.c ${src}/socket_routes.c ${src}/fd_metadata.c
     ${src}/task_receive.c ${src}/fs_client.c ${src}/fs_buffer_client.c ${src}/adapter_buffer.c ${src}/file_open.c ${wire} ${src}/raw.c ${src}/raw.S)
@@ -146,7 +146,7 @@ if(MAGICDESK_GUEST_FIXTURES)
     target_compile_options(test_svc_direct_signal PRIVATE -iquote ${src} -UNDEBUG $<$<COMPILE_LANGUAGE:C>:-mgeneral-regs-only> -fno-stack-protector)
     guest_executable(test_signal_delivery ../guest-exec-lab/test_signal_delivery.c ${src}/signal_delivery.c)
     target_compile_options(test_signal_delivery PRIVATE -iquote ${src} -UNDEBUG)
-    guest_executable(test_signal_checkpoint ../guest-exec-lab/test_signal_checkpoint.c ${src}/task_call.c ${src}/task_checkpoint.c ${src}/signal_delivery.c ${src}/guest_copy.S)
+    guest_executable(test_signal_checkpoint ../guest-exec-lab/test_signal_checkpoint.c ${src}/task_call.c ${src}/task_checkpoint.c ${src}/checkpoint_entry.S ${src}/signal_delivery.c ${src}/guest_copy.S)
     target_compile_options(test_signal_checkpoint PRIVATE -iquote ${src} -UNDEBUG)
     guest_executable(test_svc_patch ../guest-exec-lab/test_svc_patch.c)
     target_compile_options(test_svc_patch PRIVATE -iquote ${src} -UNDEBUG)

@@ -96,8 +96,8 @@ long md_file_call(const struct md_fs *fs, const char *exe, long nr, const unsign
         struct md_proc_path image = md_proc_path(first);
         enum md_proc_kind control=image.kind==MD_PROC_FOREIGN ? image.foreign_kind : image.kind;
         if (control==MD_PROC_MEMORY) {
-            r=md_guest_buffer_control(MD_BUFFER_MEMORY_EXPOSE,(unsigned)image.process,0);
-            if (r<0) return r;
+            unsigned long args[6]={(unsigned long)AT_FDCWD,(uintptr_t)first,(unsigned)flags,a[3]};
+            return md_namespace_memory_open(image.process,SYS_openat,args);
         }
         if (md_proc_control_kind(control)) {
             long result=*image.tail ? -ENOTDIR : md_proc_control_open(&image,flags,0);

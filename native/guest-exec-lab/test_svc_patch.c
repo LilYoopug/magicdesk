@@ -5,11 +5,17 @@
 #include <stdio.h>
 
 int main(void) {
+    struct md_svc_registry empty={.count=2,.disabled=1};
+    assert(!md_svc_registry_resident(NULL) && !md_svc_registry_resident(&empty));
     struct md_svc_registry registry={.pool_count=1,.count=2,
         .pools={{.address=0x40000,.used=0x1000}},
         .sites={{.direct={.svc=0x10000,.gate=0x40000},.kernel_alias=0x40100},
                 {.state=MD_SVC_RETIRED,.direct={.svc=0x20000,.gate=0x40200},
                  .kernel_alias=0x40300}}};
+    assert(md_svc_registry_resident(&registry));
+    empty.sites[1].direct.gate=0x40000;
+    empty.sites[1].state=MD_SVC_RETIRED;
+    assert(md_svc_registry_resident(&empty));
     assert(md_svc_registry_call_origin(NULL,0x40104)==0x40104);
     assert(md_svc_registry_call_origin(&registry,0x10004)==0x10004);
     assert(md_svc_registry_call_origin(&registry,0x40100)==0x40100);

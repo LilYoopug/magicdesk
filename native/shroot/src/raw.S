@@ -1,3 +1,4 @@
+#include <asm/unistd.h>
 .text
 #ifndef MD_NO_START
 .global _start
@@ -30,6 +31,9 @@ md_raw_return:
 .global md_enter
 .type md_enter, %function
 md_enter:
+    mov x8, #__NR_gettid
+.global md_enter_checkpoint
+md_enter_checkpoint:
     svc #0
     mov x9, x0
     mov sp, x1

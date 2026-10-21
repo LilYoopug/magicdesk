@@ -181,6 +181,10 @@ int md_svc_registry_retire(struct md_svc_registry *r,struct md_svc_site *s,pid_t
     if (!error) s->state=MD_SVC_RETIRED;
     return error;
 }
+int md_svc_registry_resident(const struct md_svc_registry *r) {
+    if (r) for (unsigned i=0;i<r->count;++i) if (r->sites[i].direct.gate) return 1;
+    return 0;
+}
 int md_svc_registry_revoke(struct md_svc_registry *r,pid_t pid) {
     if (!r || r->disabled) return 0;
     r->disabled=1;

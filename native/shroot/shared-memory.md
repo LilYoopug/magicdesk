@@ -19,7 +19,9 @@ Unsupported open modes do not silently enter this fallback.
 `task_mapping` maps eligible controlled backings in the stopped requesting task,
 without creating a helper thread that an application sandbox may prohibit.
 Native read-only regular descriptors and memfds protected by size seals and
-WRITE/FUTURE_WRITE seals need no shared-table stop. Mutable writable backing
+WRITE/FUTURE_WRITE seals need no shared-table stop. A sole stopped table owner
+also needs no barrier: its running FD turn excludes clone/dup publication until
+the temporary descriptor is retired. Shared mutable writable backing
 uses a cold barrier over the exact CLONE_FILES holders before publishing its
 temporary descriptor; that barrier remains held through verified retirement. The
 existing FD-turn and loan retirement owners serialize installation, mapping and

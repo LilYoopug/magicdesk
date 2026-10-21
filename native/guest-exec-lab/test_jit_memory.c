@@ -575,6 +575,15 @@ struct jit_peer {
     atomic_int stop;
     atomic_ulong completed;
 };
+static void failed_memory_opens(void) {
+    char path[64]; snprintf(path,sizeof(path),"/proc/%d/mem",getpid());
+    errno=0;
+    assert(open(path,O_RDONLY|O_DIRECTORY|O_CLOEXEC)==-1 && errno==ENOTDIR);
+    struct open_how how={.flags=O_RDONLY|O_DIRECTORY|O_CLOEXEC,.resolve=RESOLVE_NO_SYMLINKS};
+    errno=0;
+    assert(syscall(SYS_openat2,AT_FDCWD,path,&how,sizeof(how))==-1 && errno==ENOTDIR);
+    puts("PASS failed proc-memory opens: native openat/openat2 errors preserved");
+}
 static void automatic_process(int writer) {
     struct jit_peer *state=mmap(NULL,page,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS,-1,0);
     assert(state!=MAP_FAILED);
@@ -648,6 +657,9 @@ int main(int argc, char **argv) {
     assert(fd>=0 && !ftruncate(fd,page));
     if (!strcmp(argv[1],"--automatic-process")) {
         close(fd); automatic_process(0); return 0;
+    }
+    if (!strcmp(argv[1],"--automatic-failed-mem")) {
+        close(fd); failed_memory_opens(); automatic_process(0); return 0;
     }
     if (!strcmp(argv[1],"--automatic-remote")) {
         close(fd); automatic_process(1); return 0;

@@ -36,6 +36,8 @@ uintptr_t md_svc_registry_call_origin(const struct md_svc_registry *,uintptr_t p
 uint32_t md_svc_registry_instruction(const struct md_svc_registry *,uintptr_t pc,uint32_t word);
 int md_svc_registry_retire(struct md_svc_registry *,struct md_svc_site *,pid_t);
 int md_svc_registry_revoke(struct md_svc_registry *,pid_t);
+/* Retired source instructions can still have peers inside resident gates. */
+int md_svc_registry_resident(const struct md_svc_registry *);
 int md_svc_registry_unpatch(struct md_svc_registry *,pid_t,uintptr_t,size_t);
 int md_svc_registry_retire_client(pid_t,uintptr_t state);
 int md_svc_registry_suspend(struct md_svc_registry *,pid_t,uintptr_t svc);

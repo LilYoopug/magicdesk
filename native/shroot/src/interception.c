@@ -72,6 +72,9 @@ static long md_guest_open_proc_fds(int directory, unsigned long flags) {
 
 extern int md_guest_ready(int, const char *, uint64_t, const struct md_interception_abi *);
 extern void md_guest_done(void), md_guest_allocate(void), md_guest_allocated(void);
+extern char md_guest_ready_checkpoint[],md_guest_done_checkpoint[],md_guest_export_control_checkpoint[];
+extern char md_guest_fd_control_checkpoint[],md_guest_buffer_control_checkpoint[],md_guest_task_control_checkpoint[];
+extern char md_guest_exported_checkpoint[],md_enter_checkpoint[];
 extern void md_guest_dispatch_entry(void);
 extern void md_guest_exported(void), md_guest_store(void), md_guest_stored(void);
 extern void md_guest_load_byte(void), md_guest_loaded_byte(void);
@@ -202,21 +205,23 @@ static const struct md_interception_abi abi = {
     .native_call=(uintptr_t)md_cooperative_native_call,
     .native_return=(uintptr_t)md_cooperative_native_return,
     .native_end=(uintptr_t)md_cooperative_native_end,
-    .task_control=(uintptr_t)md_guest_task_control, .task_call=(uintptr_t)md_guest_task_call,
+    .task_control=(uintptr_t)md_guest_task_control_checkpoint, .task_call=(uintptr_t)md_guest_task_call,
     .task_return=(uintptr_t)md_guest_task_return, .task_abort=(uintptr_t)md_guest_task_abort,
     .task_collect=(uintptr_t)md_guest_task_collect, .task_collected=(uintptr_t)md_guest_task_collected,
-    .buffer_control=(uintptr_t)md_guest_buffer_control,
+    .buffer_control=(uintptr_t)md_guest_buffer_control_checkpoint,
     .buffer_admit=(uintptr_t)md_guest_buffer_admitted,
     .buffer_result=(uintptr_t)md_guest_buffer_result,
     .buffer_enter=(uintptr_t)md_guest_buffer_admit,
-    .fd_control=(uintptr_t)md_guest_fd_control,
+    .fd_control=(uintptr_t)md_guest_fd_control_checkpoint,
     .capture_gate=(uintptr_t)md_guest_anchor_return,
     .ipc_wait = (uintptr_t)md_guest_ipc_wait,
     .magic = MD_INTERCEPTION_MAGIC, .size = sizeof(struct md_interception_abi),
-    .ready = (uintptr_t)md_guest_ready, .done = (uintptr_t)md_guest_done,
+    .ready = (uintptr_t)md_guest_ready_checkpoint, .done = (uintptr_t)md_guest_done_checkpoint,
+    .done_entry = (uintptr_t)md_guest_done,
+    .exported_entry = (uintptr_t)md_guest_exported,
     .allocate = (uintptr_t)md_guest_allocate, .allocated = (uintptr_t)md_guest_allocated,
     .dispatch = (uintptr_t)md_guest_dispatch_entry, .export_fd = (uintptr_t)md_guest_export,
-    .exported = (uintptr_t)md_guest_exported, .export_control = (uintptr_t)md_guest_export_control,
+    .exported = (uintptr_t)md_guest_exported_checkpoint, .export_control = (uintptr_t)md_guest_export_control_checkpoint,
     .proc_open=(uintptr_t)md_guest_open_proc_fds, .proc_open_path=(uintptr_t)proc_fds_path,
     .store = (uintptr_t)md_guest_store, .stored = (uintptr_t)md_guest_stored,
     .load_byte = (uintptr_t)md_guest_load_byte, .loaded_byte = (uintptr_t)md_guest_loaded_byte,
@@ -227,7 +232,7 @@ static const struct md_interception_abi abi = {
     .watch_return = (uintptr_t)md_guest_watch_return,
     .load_groups = (uintptr_t)md_guest_load_groups, .loaded_groups = (uintptr_t)md_guest_loaded_groups,
     .store_groups = (uintptr_t)md_guest_store_groups, .stored_groups = (uintptr_t)md_guest_stored_groups,
-    .enter = (uintptr_t)md_enter
+    .enter = (uintptr_t)md_enter_checkpoint
 };
 
 int md_interception_map_image(int fd, int loader) {

@@ -22,6 +22,8 @@ struct md_private_memory_access { int maps, memory, pagemap; };
 struct md_private_memory_plan { unsigned advice; int flags; };
 struct md_private_memory_scan;
 enum { MD_PRIVATE_MEMORY_COPY_BYTES=65536 };
+/* Pure request admission, before stopping writers or inspecting their VMAs. */
+long md_private_memory_validate(const struct md_private_memory *);
 /* Incremental preparation bounds supervisor work per event-loop turn. A step
  * returns 0 for more work, 1 for completion, or a negative errno. */
 long md_private_memory_scan_begin(struct md_private_memory *, const struct md_private_memory_access *,

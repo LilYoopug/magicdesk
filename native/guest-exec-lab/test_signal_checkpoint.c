@@ -1031,8 +1031,11 @@ static long task_trace(int request,pid_t pid,void *address,void *data) {
 }
 static int checkpoint_restricted;
 static int checkpoint_policy(pid_t pid) { (void)pid; return checkpoint_restricted; }
-static int checkpoint_site(uintptr_t pc) { return pc==(uintptr_t)sysemu_native_return+4; }
-static void unified_checkpoint(int protected,int restricted,int denied) {
+extern char unified_native[],md_guest_buffer_control_checkpoint[];
+__asm__(".text\n.balign 4\n.global unified_native\nunified_native:\nsvc #0\n"
+    "str x0,[x23]\nmov x8,x25\nb md_guest_buffer_control\n");
+static int checkpoint_site(uintptr_t pc) { return pc==(uintptr_t)md_guest_buffer_control_checkpoint+4; }
+static void unified_checkpoint(int protected,int restricted,int denied,int invalid_number) {
     volatile long *output=mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS,-1,0);
     assert(output!=MAP_FAILED);
     int start[2],data[2]; assert(!pipe(start) && !pipe2(data,O_NONBLOCK));
@@ -1044,7 +1047,7 @@ static void unified_checkpoint(int protected,int restricted,int denied) {
         sigset_t set; sigemptyset(&set); sigaddset(&set,SIGTRAP);
         assert(!sigprocmask(SIG_SETMASK,&set,NULL));
         assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
-        uintptr_t ip=(uintptr_t)sysemu_native_return+4;
+        uintptr_t ip=(uintptr_t)md_guest_buffer_control_checkpoint+4;
         struct sock_filter code[]={
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)+4),
             BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(unsigned)(ip>>32),0,3),
@@ -1069,13 +1072,14 @@ static void unified_checkpoint(int protected,int restricted,int denied) {
     assert(!ptrace(PTRACE_SEIZE,pid,NULL,(void *)(PTRACE_O_TRACESYSGOOD|PTRACE_O_TRACESECCOMP|PTRACE_O_EXITKILL)));
     assert(write(start[1],"s",1)==1 && stopped(pid)==SIGSTOP);
     struct user_pt_regs saved=registers(pid),gate=saved;
-    gate.pc=(uintptr_t)sysemu_native;
+    gate.pc=(uintptr_t)unified_native;
     gate.regs[8]=denied ? SYS_getpgid : SYS_write;
     gate.regs[0]=denied ? 0 : data[1]; gate.regs[1]=(uintptr_t)"q"; gate.regs[2]=1;
     gate.regs[23]=(uintptr_t)output; gate.regs[24]=(uintptr_t)(output+1);
+    gate.regs[25]=invalid_number ? UINT64_MAX : SYS_gettid;
     checkpoint_restricted=restricted;
     struct md_task_checkpoints runtime={.trace=task_trace,.restricted=checkpoint_policy,.marker=checkpoint_site,
-        .begin=(uintptr_t)sysemu_native,.end=(uintptr_t)sysemu_native_return+12};
+        .begin=(uintptr_t)unified_native,.end=(uintptr_t)unified_native+16};
     struct iovec io={&gate,sizeof(gate)};
     assert(!md_task_checkpoint_trace(&runtime,PTRACE_SETREGSET,pid,(void *)NT_PRSTATUS,&io));
     assert(!md_task_checkpoint_trace(&runtime,PTRACE_CONT,pid,NULL,NULL));
@@ -1088,7 +1092,9 @@ static void unified_checkpoint(int protected,int restricted,int denied) {
         assert((unsigned)status>>16==MD_TASK_CHECKPOINT_EVENT); break;
     }
     struct user_pt_regs observed=registers(pid);
-    assert(observed.pc==(uintptr_t)sysemu_native_return && observed.regs[7]==saved.regs[7]);
+    assert(observed.pc==(uintptr_t)md_guest_buffer_control_checkpoint && observed.regs[7]==saved.regs[7]);
+    assert(observed.regs[8]==SYS_gettid);
+    assert((long)observed.regs[0]==(denied ? -ENOKEY : 1));
     assert(output[0]==(denied ? -ENOKEY : 1) && !output[1]);
     char bytes[2];
     if (!denied) assert(read(data[0],bytes,2)==1 && bytes[0]=='q');
@@ -1458,7 +1464,7 @@ static void retained_continue(int protected,int process) {
     siginfo_t pending[64]; args.nr=64;
     long count=ptrace(PTRACE_PEEKSIGINFO,pid,&args,pending); assert(count>=0);
     for (long i=0;i<count;++i) assert(pending[i].si_signo!=SIGCONT);
-    assert(!md_signal_delivery_publish(&queue,pid) && !md_signal_delivery_pending(&queue));
+    assert(!md_signal_delivery_publish(&queue,pid,pid) && !md_signal_delivery_pending(&queue));
     resume(pid,PTRACE_CONT,0);
     assert(waitpid(pid,&status,0)==pid && WIFSTOPPED(status) && WSTOPSIG(status)==SIGSTOP);
     resume(pid,PTRACE_CONT,SIGSTOP);
@@ -1501,8 +1507,9 @@ int main(int argc,char **argv) {
     }
     for (int protected=0;protected<2;++protected)
         for (int restricted=0;restricted<2;++restricted)
-            for (int denied=0;denied<2;++denied) unified_checkpoint(protected,restricted,denied);
-    puts("PASS unified checkpoint owner: 8 cases; TRACE/SYSEMU, protected tasks, denied calls, exact-once IO, x7, SIG_IGN and blocked SIGTRAP");
+            for (int denied=0;denied<2;++denied) for (int invalid=0;invalid<2;++invalid)
+                unified_checkpoint(protected,restricted,denied,invalid);
+    puts("PASS unified checkpoint owner: 16 cases; TRACE/SYSEMU, protected tasks, denied calls, exact-once IO, x0/x7, invalid incoming x8, SIG_IGN and blocked SIGTRAP");
     unsigned cases=0;
     for (int mode=BREAKPOINT;mode<=SYSEMU_CONTEXT;++mode)
         for (unsigned flags=0;flags<16;++flags) {

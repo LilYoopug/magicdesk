@@ -38,6 +38,18 @@ static long mount_table_open(const struct md_fs *fs,const struct md_proc_path *r
     return md_namespace_open_result(&response.result,(unsigned)flags);
 }
 
+long md_namespace_memory_open(pid_t process,long nr,const unsigned long *a) {
+    long admitted=md_guest_buffer_control(MD_BUFFER_MEMORY_OPEN,(unsigned)process,0);
+    if (admitted<0) return admitted;
+    long result=md_raw(nr,a[0],a[1],a[2],a[3],a[4],a[5]);
+    long completed=md_guest_buffer_control(MD_BUFFER_MEMORY_OPEN_RESULT,(unsigned long)result,0);
+    if (completed<0) {
+        if (result>=0) RAW1(close,result);
+        return completed;
+    }
+    return result;
+}
+
 long md_namespace_host_open_resolved(const struct md_fs *fs,int base,const char *path,
         const char *identity,const struct open_how *how,uint64_t proc_namespace) {
     /* Identity selects the virtual proc object; the original dirfd/path pair
@@ -46,9 +58,8 @@ long md_namespace_host_open_resolved(const struct md_fs *fs,int base,const char 
     enum md_proc_kind kind=ref.kind==MD_PROC_FOREIGN ? ref.foreign_kind : ref.kind;
     if (kind==MD_PROC_MEMORY) {
         if (*ref.tail) return -ENOTDIR;
-        long admitted=md_guest_buffer_control(MD_BUFFER_MEMORY_EXPOSE,(unsigned)ref.process,0);
-        if (admitted<0) return admitted;
-        return RAW4(openat2,base,path,how,sizeof(*how));
+        unsigned long args[6]={(unsigned long)base,(uintptr_t)path,(uintptr_t)how,sizeof(*how)};
+        return md_namespace_memory_open(ref.process,SYS_openat2,args);
     }
     if (md_proc_control_kind(kind)) {
         if (*ref.tail) return -ENOTDIR;
@@ -327,11 +338,8 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
     enum md_proc_kind control=ref.kind==MD_PROC_FOREIGN ? ref.foreign_kind : ref.kind;
     if (control==MD_PROC_MEMORY) {
         if (*ref.tail) return -ENOTDIR;
-        if (nr==SYS_openat) {
-            long admitted=md_guest_buffer_control(MD_BUFFER_MEMORY_EXPOSE,(unsigned)ref.process,0);
-            if (admitted<0) return admitted;
-        }
         unsigned long args[6]; memcpy(args,a,sizeof(args)); args[path_index]=(unsigned long)path;
+        if (nr==SYS_openat) return md_namespace_memory_open(ref.process,nr,args);
         return native_call(fs,nr,args);
     }
     if (control==MD_PROC_FDINFO && (proc_namespace || ref.kind!=MD_PROC_FOREIGN) && nr==SYS_openat) {

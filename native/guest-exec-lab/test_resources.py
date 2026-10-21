@@ -426,7 +426,7 @@ def main():
         if args.case == "mapping-task":
             names = ("mapping_task",)
         if args.case == "private-memory":
-            names = ("bootstrap", "supervisor", "run", "service", "jit_memory", "task_quiesce", "test_interception_buffers", "fs_dispatch")
+            names = ("bootstrap", "supervisor", "run", "service", "jit_memory", "task_quiesce", "test_interception_buffers", "test_svc_patch", "fs_dispatch")
         if args.case == "fs-dispatch":
             names = ("fs_dispatch", "test_interception_buffers")
         if args.case == "input-session":
@@ -554,6 +554,7 @@ def main():
                 return
         if args.case == "private-memory":
             check("task quiescence", root + "/libmagicdesk_guest_task_quiesce.so", "PASS task quiescence")
+            check("resident entry admission", root + "/libmagicdesk_guest_test_svc_patch.so", "PASS SVC planner")
             check("private mapping ownership", root + "/libmagicdesk_guest_test_interception_buffers.so",
                   "PASS shared request buffer ownership")
             check("namespace worker quiescence", root + "/libmagicdesk_guest_fs_dispatch.so --worker-pause " + root + "/worker-pause",
@@ -594,6 +595,14 @@ def main():
                       + root + "/store --deadline-seconds 60 -- /bin/test --automatic-" + name,
                       f"PASS automatic private-file JIT with independent process: writer={writer}",
                       patterns=tuple(patterns))
+            check("failed proc-memory opens do not widen JIT quiescence",
+                  root + "/libmagicdesk_guest_run.so --diagnostics --user 1000:1000 --store "
+                  + root + "/store --deadline-seconds 60 -- /bin/test --automatic-failed-mem",
+                  "PASS failed proc-memory opens:",
+                  patterns=(r"PROBE memory-repair .* result=0 scope=address-space",
+                            r"PROBE memory-open-result .* result=-20 tracked=1",
+                            r"PASS automatic private-file JIT with independent process: writer=0"),
+                  absent_patterns=(r"scope=launch",))
             return
         if args.case in ("all", "fs-dispatch", "fs-directory"):
             check("broker directory notification ownership", root + "/libmagicdesk_guest_fs_dispatch.so --broker-directory "

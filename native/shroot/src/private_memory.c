@@ -94,13 +94,19 @@ long md_private_memory_access_open(struct md_private_memory_access *access) {
     if (error>=0) { next.pagemap=(int)error; *access=next; return 0; }
     md_private_memory_access_close(&next); return error;
 }
-long md_private_memory_scan_begin(struct md_private_memory *m,const struct md_private_memory_access *access,
-        struct md_private_memory_scan **out) {
+long md_private_memory_validate(const struct md_private_memory *m) {
+    if (!m) return -EINVAL;
     size_t page=m->page_size;
     if (m->candidate || !page || (page&(page-1)) || !m->length || m->length%page
             || m->address%page || m->address>UINTPTR_MAX-m->length || m->offset%page
             || m->length>INT64_MAX || m->offset>(uint64_t)INT64_MAX-m->length
             || !(m->protection&PROT_EXEC) || (m->protection&~(PROT_READ|PROT_WRITE|PROT_EXEC))) return -EINVAL;
+    return 0;
+}
+long md_private_memory_scan_begin(struct md_private_memory *m,const struct md_private_memory_access *access,
+        struct md_private_memory_scan **out) {
+    long invalid=md_private_memory_validate(m);
+    if (invalid) return invalid;
     struct md_private_memory_scan *scan=calloc(1,sizeof(*scan));
     if (!scan) return -ENOMEM;
     long error=RAW2(fstat,m->source,&scan->backing);

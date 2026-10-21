@@ -4,10 +4,7 @@
 #include <signal.h>
 #include "signal_delivery.h"
 
-struct md_svc_held_signal;
 struct md_svc_machine_thread {
-    struct md_svc_held_signal *signals;
-    unsigned carriers[NSIG];
     int syscall_exit, draining;
     uintptr_t retry_svc;
     uint64_t retry_number;
@@ -22,7 +19,7 @@ void md_svc_machine_forget(struct md_svc_machine_thread *);
 /* The supervisor retains resume ownership. A handled checkpoint requests one
  * syscall-exit stop; the common signal queue owns subsequent delivery. */
 int md_svc_machine_syscall(struct md_svc_registry *,struct md_svc_machine_thread *,pid_t);
-int md_svc_machine_exit(struct md_svc_machine_thread *,pid_t,pid_t group);
+int md_svc_machine_exit(struct md_svc_machine_thread *,pid_t);
 int md_svc_machine_signal(struct md_svc_registry *,struct md_svc_machine_thread *,pid_t,
     struct md_signal_delivery *,int *deliver);
 /* Reconstruct the guest continuation before publishing queued signals.

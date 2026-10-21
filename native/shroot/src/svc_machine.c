@@ -14,12 +14,6 @@
 #include <sys/uio.h>
 #include <unistd.h>
 
-/* Realtime instances must stay ahead of later kernel arrivals. Standard
- * signals use the common queue; they must never acquire replay carriers. */
-struct md_svc_held_signal {
-    struct md_svc_held_signal *next;
-    siginfo_t info;
-};
 static int regs(pid_t pid,int operation,struct user_pt_regs *r) {
     struct iovec io={r,sizeof(*r)};
     return ptrace(operation,pid,(void *)NT_PRSTATUS,&io)<0 ? -errno : 0;
@@ -64,36 +58,7 @@ struct md_svc_registry *md_svc_machine_admit(pid_t pid,uintptr_t descriptor) {
     return r;
 }
 void md_svc_machine_forget(struct md_svc_machine_thread *s) {
-    while (s->signals) {
-        struct md_svc_held_signal *next=s->signals->next;
-        free(s->signals); s->signals=next;
-    }
     *s=(struct md_svc_machine_thread){0};
-}
-static struct md_svc_held_signal **first(struct md_svc_machine_thread *s,int signal) {
-    struct md_svc_held_signal **at=&s->signals;
-    while (*at && (*at)->info.si_signo!=signal) at=&(*at)->next;
-    return at;
-}
-static int hold(struct md_svc_machine_thread *s,const siginfo_t *info,int front) {
-    if (info->si_signo<SIGRTMIN || info->si_signo>=NSIG) return -EINVAL;
-    struct md_svc_held_signal **at=first(s,info->si_signo);
-    struct md_svc_held_signal *node=malloc(sizeof(*node));
-    if (!node) return -ENOMEM;
-    if (!front) while (*at) at=&(*at)->next;
-    *node=(struct md_svc_held_signal){.next=*at,.info=*info}; *at=node;
-    return 0;
-}
-static int publish(struct md_svc_machine_thread *s,pid_t pid,pid_t group) {
-    unsigned counts[NSIG]={0};
-    for (struct md_svc_held_signal *node=s->signals;node;node=node->next) ++counts[node->info.si_signo];
-    for (int n=SIGRTMIN;n<NSIG;++n) while (s->carriers[n]<counts[n]) {
-        siginfo_t info={.si_signo=n,.si_code=SI_QUEUE};
-        info.si_pid=getpid(); info.si_uid=getuid(); info.si_value.sival_ptr=s;
-        if (syscall(SYS_rt_tgsigqueueinfo,group,pid,n,&info)<0) return -errno;
-        ++s->carriers[n];
-    }
-    return 0;
 }
 static int retry(struct md_svc_registry *r,struct md_svc_machine_thread *s,pid_t pid,
         const struct user_pt_regs *registers) {
@@ -169,19 +134,8 @@ int md_svc_machine_signal(struct md_svc_registry *r,struct md_svc_machine_thread
         struct md_signal_delivery *queue,int *deliver) {
     siginfo_t info;
     if (ptrace(PTRACE_GETSIGINFO,pid,NULL,&info)<0) return errno==EINVAL ? 0 : -errno;
-    int signal=info.si_signo,queued=0;
+    int signal=info.si_signo;
     if (signal<=0 || signal>=NSIG) return 0;
-    if (signal>=SIGRTMIN) {
-        int carrier=info.si_code==SI_QUEUE && info.si_pid==getpid()
-            && info.si_value.sival_ptr==s && s->carriers[signal];
-        struct md_svc_held_signal **at=first(s,signal);
-        if (carrier) --s->carriers[signal];
-        if (*at) {
-            if (!carrier) { int error=hold(s,&info,0); if (error) return error; }
-            struct md_svc_held_signal *node=*at;
-            info=node->info; *at=node->next; free(node); queued=1;
-        } else if (carrier) { *deliver=0; return 1; }
-    }
     if (signal==SIGSTOP || signal==SIGKILL || (info.si_code>0 && info.si_code!=SI_KERNEL))
         return 0;
     struct user_pt_regs registers;
@@ -190,13 +144,12 @@ int md_svc_machine_signal(struct md_svc_registry *r,struct md_svc_machine_thread
     int recovery=recover(r,s,pid,&registers);
     if (recovery<0) return recovery;
     if (recovery==2) {
-        error=signal>=SIGRTMIN ? hold(s,&info,1) : md_signal_delivery_retain(queue,pid,&info);
+        error=md_signal_delivery_retain(queue,pid,&info);
         if (error<0) return error;
         *deliver=error; return 1;
     }
     if (recovery==1 && (error=regs(pid,PTRACE_SETREGSET,&registers))) return error;
-    if (queued && ptrace(PTRACE_SETSIGINFO,pid,NULL,&info)<0) return -errno;
-    if (recovery || queued) { *deliver=signal; return 1; }
+    if (recovery) { *deliver=signal; return 1; }
     return 0;
 }
 int md_svc_machine_return(struct md_svc_registry *r,struct md_svc_machine_thread *s,
@@ -231,10 +184,9 @@ int md_svc_machine_syscall(struct md_svc_registry *r,struct md_svc_machine_threa
     s->restored=registers; s->syscall_exit=1;
     return 1;
 }
-int md_svc_machine_exit(struct md_svc_machine_thread *s,pid_t pid,pid_t group) {
+int md_svc_machine_exit(struct md_svc_machine_thread *s,pid_t pid) {
     if (!s->syscall_exit) return 0;
     int error=regs(pid,PTRACE_SETREGSET,&s->restored);
-    if (!error) error=publish(s,pid,group);
     if (error) return error;
     s->syscall_exit=0; s->draining=0; return 1;
 }

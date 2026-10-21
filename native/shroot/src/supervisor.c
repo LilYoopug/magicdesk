@@ -327,6 +327,7 @@ struct thread {
     struct retry_owner retries[2];
     struct md_interception_memory *memory;
     struct md_interception_memory *remote_memory;
+    struct md_interception_memory *memory_exposure;
     int memory_resume, memory_signal;
     struct md_svc_machine_thread machine;
     int entry_fence_waiting, entry_fence_status, entry_fence_result;
@@ -778,6 +779,7 @@ static void outgoing_release(struct outgoing_owner *owner) {
     md_received_fds_release(owner->prepared); free(owner);
 }
 static void adapter_discard(struct thread *t) {
+    md_memory_exposure_end(&t->memory_exposure,1);
     for (unsigned i=0;i<2;i++) {
         md_pending_cancel(&t->retries[i].node);
         t->retries[i].mask=0;
@@ -1044,7 +1046,7 @@ static void export_start(struct thread *t) {
     if (!save_signal_mask(t,&op->mask,"get-mask")
             || !shield(t)) return;
     struct user_pt_regs regs = op->saved;
-    regs.pc = EXPORT; regs.regs[30] = EXPORTED;
+    regs.pc = EXPORT; regs.regs[30] = abi.exported_entry;
     regs.regs[0] = op->request.data.args[0];
     if (!set_registers(t->pid, &regs)) return;
     t->phase = EXPORTING; resume(t->pid, 0);
@@ -1187,7 +1189,7 @@ static void proc_query_start(struct thread *t) {
     struct metadata_operation *op = &t->metadata;
     CHECK(ioctl(listener, SECCOMP_IOCTL_NOTIF_ID_VALID, &op->request.id) == -1 && errno == ENOENT);
     struct user_pt_regs regs = op->saved;
-    regs.pc = op->task_open ? abi.proc_open : EXPORT; regs.regs[30] = EXPORTED;
+    regs.pc = op->task_open ? abi.proc_open : EXPORT; regs.regs[30] = abi.exported_entry;
     regs.regs[0] = op->proc_directory;
     if (op->task_open) regs.regs[1] = op->request.data.args[2];
     if (!set_registers(t->pid, &regs)) return;
@@ -2242,7 +2244,7 @@ static void metadata_restart_return(struct thread *t,long value) {
      * Only x0 is the result; retain the original registers, NZCV and args. */
     r->saved.pc+=4; r->saved.regs[0]=(unsigned long)value;
     r->stage=METADATA_RETURN;
-    struct user_pt_regs regs=r->saved; regs.pc=DONE;
+    struct user_pt_regs regs=r->saved; regs.pc=abi.done_entry;
     /* A newer filter can queue SIGSYS. Keep it pending until the original
      * register context is restored at the owned return trap. */
     uint64_t mask=md_signal_protocol_mask();
@@ -5144,6 +5146,7 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
             && r->regs[0]!=MD_BUFFER_CONTROL_MAP && r->regs[0]!=MD_BUFFER_CONTROL_IOCTL_LAYOUT
             && r->regs[0]!=MD_BUFFER_NETWORK_OPEN && r->regs[0]!=MD_BUFFER_NETWORK_CALL && r->regs[0]!=MD_BUFFER_NETWORK_DATA
             && r->regs[0]!=MD_BUFFER_NETWORK_CREDENTIALS
+            && r->regs[0]!=MD_BUFFER_MEMORY_OPEN && r->regs[0]!=MD_BUFFER_MEMORY_OPEN_RESULT
             && !(r->regs[0]>=MD_BUFFER_EPOLL_BEGIN && r->regs[0]<=MD_BUFFER_POLL_COPY)
             && r->regs[0]!=MD_FS_BUFFER_RIGHTS_BEGIN) {
         buffer_reply(t,-ENOTSUP); return;
@@ -5491,12 +5494,18 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
     case MD_BUFFER_PID_NUMBER:
         if (t->phase!=DISPATCHING || r->regs[2]>1) break;
         result=r->regs[2] ? native_pid(t,(pid_t)r->regs[1]) : visible_pid(t,(pid_t)r->regs[1]); break;
-    case MD_BUFFER_MEMORY_EXPOSE: {
+    case MD_BUFFER_MEMORY_OPEN: {
         if (t->phase!=DISPATCHING || r->regs[2]) break;
         struct thread *target=find_thread((pid_t)r->regs[1]);
-        if (target) md_memory_expose(target->memory);
-        result=0; break;
+        result=md_memory_exposure_begin(target ? target->memory : NULL,&t->memory_exposure);
+        break;
     }
+    case MD_BUFFER_MEMORY_OPEN_RESULT:
+        if (t->phase!=DISPATCHING || r->regs[2]) break;
+        TRACE("PROBE memory-open-result pid=%d result=%ld tracked=%d\n",
+            t->pid,(long)r->regs[1],t->memory_exposure!=NULL);
+        md_memory_exposure_end(&t->memory_exposure,(long)r->regs[1]>=0);
+        result=0; break;
     case MD_BUFFER_PROC_CHECK:
         if (t->phase!=DISPATCHING || r->regs[1] || r->regs[2]) break;
         result=t->proc_file ? md_proc_file_kind(t->proc_file)+1 : 0; break;
@@ -6223,7 +6232,7 @@ static void resume(pid_t pid, int sig) {
             ) {
         int deferred=md_svc_machine_flush(md_memory_svc(t->memory),&t->machine,pid);
         int error=deferred ? (deferred<0 ? deferred : 0)
-            : md_signal_delivery_publish(&t->signal_delivery,pid);
+            : md_signal_delivery_publish(&t->signal_delivery,pid,t->tgid);
         if (error==-ESRCH) { t->resume_lost=1; return; }
         CHECK(!error);
     }
@@ -6383,7 +6392,7 @@ static void dispatch(struct thread *t) {
         struct md_buffer_span span;
         CHECK(!md_buffer_span(&t->buffer,&span));
         struct user_pt_regs regs=t->original;
-        regs.pc=abi.buffer_result; regs.sp=t->stack; regs.regs[30]=DONE;
+        regs.pc=abi.buffer_result; regs.sp=t->stack; regs.regs[30]=abi.done_entry;
         regs.regs[0]=t->direct_flags; regs.regs[1]=t->direct_mode;
         regs.regs[2]=md_memory_buffer_address(t->memory,&t->buffer);
         CHECK(regs.regs[2]);
@@ -6395,7 +6404,7 @@ static void dispatch(struct thread *t) {
         return;
     }
     struct user_pt_regs regs = t->original;
-    regs.pc = DISPATCH; regs.sp = t->stack; regs.regs[30] = DONE;
+    regs.pc = DISPATCH; regs.sp = t->stack; regs.regs[30] = abi.done_entry;
     regs.regs[0] = t->original.regs[8];
     for (unsigned i = 0; i < 6; i++) regs.regs[i + 1] = t->original.regs[i];
     unsigned policy = md_domain_scoped(t->resources.fs) || md_mount_namespace_managed_paths(t->resources.mounts)
@@ -6589,6 +6598,9 @@ static int mapping_direct_start(struct thread *t) {
     }
     if (md_fd_order_state(&owner->files)==MD_RESOURCE_ORDER_READY)
         CHECK(!md_fd_order_start(&owner->files));
+    /* The running table turn excludes clone/dup publication. A sole stopped
+     * owner cannot expose the loan to a peer, even for mutable backing. */
+    if (owner->guarded && md_fd_origins_exclusive(&owner->files)) owner->guarded=0;
     if (owner->guarded) {
         if (!mapping_execution) {
             if (memory_execution || task_action_execution || task_action_releasing || ENTRY_QUIESCING) {
@@ -7309,6 +7321,10 @@ static int entry_fence_admission(struct thread *t,const struct user_pt_regs *r,i
      * clients do not require patch ownership and retain their protected path. */
     if (filter) filter_revoke_entry(t,r);
     else CHECK(!md_svc_registry_revoke(registry,t->pid));
+    if (!md_svc_registry_resident(registry)) {
+        registry->entry_fence_drained=1;
+        return 0;
+    }
     t->entry_fence_waiting=1; t->entry_fence_status=status;
     if (usage) t->entry_fence_usage=*usage;
     return 1;
@@ -7743,7 +7759,7 @@ static int memory_event(pid_t pid,int status,const struct rusage *usage) {
                     if (regs.regs[8]==SYS_ptrace) target=native_pid(t,(pid_t)regs.regs[1]);
                     else if (regs.regs[8]==SYS_process_vm_readv || regs.regs[8]==SYS_process_vm_writev)
                         target=native_pid(t,(pid_t)regs.regs[0]);
-                } else if (regs.pc==abi.buffer_control && regs.regs[0]==MD_BUFFER_MEMORY_EXPOSE)
+                } else if (regs.pc==abi.buffer_control && regs.regs[0]==MD_BUFFER_MEMORY_OPEN)
                     target=(pid_t)regs.regs[1];
                 struct thread *remote=find_thread(target);
                 hold=remote && remote->memory==execution->actor->memory;
@@ -7768,6 +7784,7 @@ static int memory_repair(struct thread *t,const struct user_pt_regs *returned) {
     if (mapping.length>SIZE_MAX-(md_page_size-1)) return 0;
     mapping.length=(mapping.length+md_page_size-1)&~(md_page_size-1);
     if (!md_memory_file_view(t->memory,mapping.address,mapping.length,&mapping.source,&mapping.offset)) return 0;
+    if (md_private_memory_validate(&mapping)) return 0;
     CHECK(!memory_execution);
     struct memory_execution *execution=calloc(1,sizeof(*execution)+MD_PRIVATE_MEMORY_COPY_BYTES);
     if (!execution) return 0;
@@ -8042,8 +8059,7 @@ int main(int argc, char **argv) {
         CHECK(mapped>=0);
         if (mapped) { adapter_progress(); continue; }
         struct thread *t = thread(pid);
-        if (t->signal_delivery.active
-                && WIFSTOPPED(status) && !((unsigned)status>>16)) {
+        if (WIFSTOPPED(status) && !((unsigned)status>>16)) {
             int deliver=0;
             int owned=md_signal_delivery_event(&t->signal_delivery,pid,WSTOPSIG(status),&deliver);
             CHECK(owned>=0);
@@ -8096,7 +8112,7 @@ int main(int argc, char **argv) {
         int sig = WSTOPSIG(status);
         if (readiness_native_event(t,status)) continue;
         if (!event && sig!=(SIGTRAP|0x80) && t->phase==IDLE
-                && (md_memory_svc(t->memory) || t->machine.signals)) {
+                && md_memory_svc(t->memory)) {
             int deliver=0;
             int owned=md_svc_machine_signal(md_memory_svc(t->memory),&t->machine,pid,&t->signal_delivery,&deliver);
             if (owned==-ESRCH) { t->resume_lost=1; continue; }
@@ -8498,7 +8514,7 @@ int main(int argc, char **argv) {
             dispatch_with_stack(t);
         } else if (!event && sig == (SIGTRAP | 0x80)) {
             if (t->machine.syscall_exit) {
-                int owned=md_svc_machine_exit(&t->machine,pid,t->tgid);
+                int owned=md_svc_machine_exit(&t->machine,pid);
                 if (owned==-ESRCH) { t->resume_lost=1; continue; }
                 if (owned<0) errno=-owned;
                 CHECK(owned==1);
@@ -9014,7 +9030,7 @@ int main(int argc, char **argv) {
                         remaining=deadline>now ? deadline-now : 0;
                     }
                     regs=t->original; regs.pc=abi.ipc_wait; regs.sp=t->stack;
-                    regs.regs[30]=DONE;
+                    regs.regs[30]=abi.done_entry;
                     regs.regs[1]=remaining/1000000000LL; regs.regs[2]=remaining%1000000000LL;
                     regs.regs[3]=deadline!=INT64_MAX;
                     if (!set_registers(pid,&regs)) continue;

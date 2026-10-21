@@ -19,8 +19,11 @@ struct md_interception_memory *md_memory_new(void);
 struct md_interception_memory *md_memory_new_image(struct md_interception_memory *);
 struct md_interception_memory *md_memory_fork(struct md_interception_memory *, int shared);
 void md_memory_release(struct md_interception_memory *);
-/* Raw proc-memory authority may escape its opener's descriptor table. */
-void md_memory_expose(struct md_interception_memory *);
+/* An in-flight proc open can already publish a native FD to CLONE_FILES peers.
+ * Reserve before opening, commit success or unknown completion, cancel only a
+ * confirmed failure. Successful authority can escape its opener's FD table. */
+int md_memory_exposure_begin(struct md_interception_memory *,struct md_interception_memory **lease);
+void md_memory_exposure_end(struct md_interception_memory **lease,int published);
 int md_memory_exposed(const struct md_interception_memory *);
 uintptr_t md_memory_stack_take(struct md_interception_memory *);
 int md_memory_stack_add(struct md_interception_memory *, uintptr_t);
