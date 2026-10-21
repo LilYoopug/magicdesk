@@ -116,6 +116,12 @@ Upgrade SQL cannot control transactions, journal pragmas or attached databases.
 Never include native backing IO in a step. Changes requiring backing
 transformation need a separately reviewed recovery protocol, not an unsafe SQL
 callback. Keep fixtures for every supported revision from this baseline onward.
+The revision admits the complete persistent interpretation, not just SQL DDL:
+changing a native metadata encoding or source-reference meaning also requires
+explicit admission. Do not add independent feature flags or version counters
+for runtime optimizations. Frozen SQL and native-metadata literals live in
+`guest-exec-lab/fixtures/storage/format17.h`; they are not generated from the
+current writer. New revisions append fixtures instead of changing old ones.
 
 Ordinary cold admission prepares supported revisions before exposing the store.
 An update converts the root lifetime lease to exclusive, nonblocking admission;
@@ -142,10 +148,43 @@ Lookup indexes are rebuildable and do not require a schema bump. Connection-loca
 query/metadata caches and checkpoint thresholds are runtime details. Image import
 identity is independent as documented in [images](images.md#commands).
 
+Native leaves are persistent data too. Their names and contents live inside the
+catalogued parent backing. Ordinary eligible root-owned leaves use native mode;
+exceptional ownership, mode, ACL or capability metadata uses physical mode
+`01700` and `user.shroot.metadata`. Its `SLF2` header is six little-endian uint32
+fields: magic `0x32464c53`, UID, GID, mode, ACL byte count, capability byte count,
+followed by the ACL and capability payloads. It is not a native C ABI dump.
+Private overlay xattrs are also authoritative until materialized into the
+catalogue. Copying only SQLite or stripping these xattrs loses guest state;
+use the portable backup owner for transfer between devices.
+
+Recovery records such as `native_publication` must survive interruption.
+`publication-v1.state` is a shared pending-work hint reconstructed from the
+journal, not an alternative source of truth. Locks, live owners and descriptor
+caches are runtime state; do not delete their files under active participants.
+These distinctions do not introduce additional checks on ordinary syscalls.
+
 An upgrade must retain root/source directory identities, guest contents and
 existing instance paths. Forward upgrades are the supported direction; an older
 runtime rejects a newer revision rather than guessing compatibility. Storage
 compatibility does not require preserving obsolete internal APIs or wire formats.
+
+### Future Offline Snapshots
+
+The existing immutable-source/COW mechanism is the storage foundation, not a
+user snapshot feature. Object IDs and logical hardlinks are independent of native
+bodies. Cloning a sealed store retains direct source references, including when
+the source was itself a clone; a read never walks a history chain. Each view still
+has at most 255 external source directories. This is not unlimited history.
+
+The named-environment catalog separates stable environment identity from its
+working-store key. A future offline restore can publish a prepared working store
+and atomically replace that reference without renaming shared source directories
+or changing application identities. It must first establish exclusive ownership,
+keep both old and new dependencies until publication is resolved, and refresh
+cached launch plans. Existing launches retain their captured store; changing a
+catalog record cannot retarget them. No switching command, snapshot catalog,
+process checkpoint or cross-store transaction engine is implemented now.
 
 Each retained view selects its own root and physical-to-logical inode mapping.
 Different views can share a native body without aliasing their logical metadata;

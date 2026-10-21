@@ -35,7 +35,8 @@ shroot image restore /host/backup.tar.zst /host/restored-instance
 
 Destinations must not exist. `--reference TAG` selects an index annotation;
 ambiguous or incompatible selections fail. `inspect` returns the image config,
-instance/image kind and retained immutable source directory identities.
+instance/image kind and distinct immutable source directory identities across
+all persistent scopes, including retained projections outside the root view.
 `format` returns the stable namespace family (17); `inspect` also publishes its
 independent `schemaRevision`. `import-version` identifies import semantics (1),
 not SQLite schema, journal policy or the APK build. The named-environment manager
@@ -52,6 +53,16 @@ block launch-time preparation or the control of an older running launch.
 Formats before 17 and
 unknown future revisions are rejected without deletion. See
 [storage evolution](inode-store.md#storage-evolution).
+
+Named environments use catalog record format 2: `id` is the stable environment
+UUID and `store` is an independent UUID key under `instances/`. Existing format-1
+records resolve `store=id` without rewriting records or moving installed data.
+New installs and restores allocate independent keys. Both are resource identities,
+not native storage revisions. Catalog publication uses the existing synced
+temporary-file/atomic-rename protocol; an error after publication does not
+authorize deleting the committed store. Older managers reject format 2 instead
+of silently selecting a different path. No working-store switch is exposed yet.
+
 `run` combines Entrypoint and Cmd; arguments after `--` replace Cmd.
 `exec` requires an explicit command and ignores Entrypoint/Cmd. `login` uses the
 selected account's home directory and login shell, or the explicit command after
@@ -222,6 +233,16 @@ launches stop does not remove its image or attached directories. The caller
 must not edit sealed backing files outside the runtime. Sharing is not a security
 boundary: lower descriptors can share kernel locks and native observation effects.
 
+The library refuses explicit removal of a store selected by another environment
+or referenced by another managed store, even when every launch has stopped.
+Prune reads all managed instance/image dependencies before planning any new
+store deletion, retains the transitive closure of catalog roots, and removes
+unreferenced dependents before their sources. An unreadable dependency or a cycle
+in the proposed removals aborts planning; a busy native removal aborts execution.
+Only then can unused layer pools be removed. Completed-removal tombstones and
+abandoned staging retain their separate recovery protocol. External unmanaged
+dependents are not discoverable by the library and remain the caller's responsibility.
+
 Each open store retains a shared lifetime lock on its root, separately from the
 short namespace transaction lock. Source directories retain their own parent-root
 leases. Exclusive offline maintenance fails with EBUSY while an owner retains the
@@ -249,6 +270,10 @@ access/default ACLs, file capabilities, user xattrs and file atime/mtime are
 retained. The format carries guest mode independently of libarchive's ACL mode
 representation. Native Android SELinux labels are not exported; unsupported
 native xattrs fail rather than being silently lost.
+The portable archive has its own version-1 manifest (`magicdesk-backup.json`),
+independent of native family/revision and catalog-record versions. Tests read a
+fixed v1 archive input without invoking the current exporter, and separately
+export/restore frozen native revisions with their sparse metadata.
 
 Backup is filesystem data, not a process checkpoint. Sockets are omitted with
 their paths reported; running processes, FIFO streams, open descriptors and

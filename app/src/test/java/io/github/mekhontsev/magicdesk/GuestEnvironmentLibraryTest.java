@@ -83,6 +83,7 @@ public class GuestEnvironmentLibraryTest {
         var a = library.install(archive.toString(), GuestEnvironmentLibrary.SourceKind.ROOTFS, "work");
         var b = library.install(archive.toString(), GuestEnvironmentLibrary.SourceKind.ROOTFS, "other");
         assertEquals(a.image(), b.image()); assertNotEquals(a.store(), b.store());
+        assertNotEquals(a.id(), a.store().getFileName().toString());
         assertEquals(1, images.commands.stream().filter(c -> c.get(0).equals("rootfs")).count());
         assertEquals(2, library.list().size());
         library.remove("work");
@@ -112,6 +113,141 @@ public class GuestEnvironmentLibraryTest {
         assertEquals(1, images.commands.stream().filter(c -> c.get(0).equals("rootfs")).count());
         assertFalse(images.commands.stream().anyMatch(c -> c.get(0).startsWith("remove")));
         assertFalse(images.commands.stream().anyMatch(c -> c.contains(legacy.toString())));
+    }
+
+    @Test public void environmentIdentityIsIndependentOfSelectedStorage() throws Exception {
+        Path root = temporary.newFolder().toPath(), archive = temporary.newFile().toPath();
+        Images images = new Images(); var library = library(root, images);
+        var a = library.restore(archive, "work");
+        var b = library.restore(archive, "prepared");
+        Path path = root.resolve("names/work.json");
+        JSONObject record = new JSONObject(Files.readString(path));
+        assertEquals(2, record.getInt("format"));
+        assertEquals(a.store().getFileName().toString(), record.getString("store"));
+        // Exercise the record contract, not a public snapshot/switch operation.
+        GuestImageFiles.write(path, record.put("store", b.store().getFileName().toString()).toString(),
+                GuestImageFilesTest::assertDirectorySync);
+        Files.delete(root.resolve("names/prepared.json"));
+        var selected = library.resolve("work");
+        assertEquals(a.id(), selected.id());
+        assertEquals(a.name(), selected.name());
+        assertEquals(b.store(), selected.store());
+        assertEquals(a.id(), library.catalog().getJSONObject(0).getString("id"));
+        library.prune();
+        assertFalse(Files.exists(a.store()));
+        assertTrue(Files.isDirectory(b.store()));
+        library.remove("work");
+        assertFalse(Files.exists(b.store()));
+    }
+
+    @Test public void legacyRecordKeepsIdentityAndPathWithoutRewritingOrNativeAdmission() throws Exception {
+        Path root = temporary.newFolder().toPath();
+        Images images = new Images(); var library = library(root, images);
+        String id = "3f18c2be-79cb-4dda-92da-2d4d0f8fc7ab";
+        Path store = Files.createDirectory(root.resolve("instances").resolve(id));
+        Path record = root.resolve("names/old.json");
+        String json = "{\"format\":1,\"name\":\"old\",\"id\":\"" + id
+                + "\",\"image\":\"\",\"source\":\"archive\"}";
+        Files.writeString(record, json);
+        var old = library.resolve("old");
+        assertEquals(id, old.id()); assertEquals(store, old.store());
+        assertEquals(List.of(old), library.list());
+        assertEquals(json, Files.readString(record));
+        assertTrue(images.commands.isEmpty());
+    }
+
+    @Test public void storageReferenceIsRequiredAndCannotEscapeTheLibrary() throws Exception {
+        Path root = temporary.newFolder().toPath(), archive = temporary.newFile().toPath();
+        Images images = new Images(); var library = library(root, images);
+        var environment = library.restore(archive, "work");
+        Path path = root.resolve("names/work.json");
+        JSONObject record = new JSONObject(Files.readString(path));
+        images.commands.clear();
+        for (String key : List.of("", "..", "../outside", environment.store().toString(),
+                "3F18C2BE-79CB-4DDA-92DA-2D4D0F8FC7AB", "1-1-1-1-1")) {
+            Files.writeString(path, record.put("store", key).toString());
+            assertThrows(IOException.class, () -> library.resolve("work"));
+        }
+        record.remove("store"); Files.writeString(path, record.toString());
+        assertThrows(org.json.JSONException.class, () -> library.resolve("work"));
+        record.put("format", 3); Files.writeString(path, record.toString());
+        assertThrows(IOException.class, () -> library.resolve("work"));
+        assertTrue(images.commands.isEmpty());
+        assertTrue(Files.isDirectory(environment.store()));
+    }
+
+    private static void references(Images images, Path owner, Path... sources) throws Exception {
+        JSONArray values = new JSONArray();
+        for (Path source : sources) values.put(new JSONObject().put("path", source.resolve("objects").toString()));
+        images.stores.get(owner).put("sources", values);
+    }
+
+    @Test public void closedDependentStoresProtectSourcesAndPruneRemovesDependentsFirst() throws Exception {
+        Path root = temporary.newFolder().toPath(), archive = temporary.newFile().toPath();
+        Images images = new Images(); var library = library(root, images);
+        var base = library.restore(archive, "base");
+        var middle = library.restore(archive, "middle");
+        var work = library.restore(archive, "work");
+        references(images, middle.store(), base.store());
+        references(images, work.store(), middle.store());
+        assertThrows(IOException.class, () -> library.remove("base"));
+        assertThrows(IOException.class, () -> library.remove("middle"));
+        Files.delete(root.resolve("names/base.json"));
+        Files.delete(root.resolve("names/middle.json"));
+        library.prune();
+        assertTrue(Files.exists(base.store())); assertTrue(Files.exists(middle.store()));
+        Files.delete(root.resolve("names/work.json"));
+        images.commands.clear();
+        library.prune();
+        assertEquals(List.of(work.store().toString(), middle.store().toString(), base.store().toString()),
+                images.commands.stream().filter(c -> c.get(0).equals("remove")).map(c -> c.get(1)).toList());
+        assertTrue(images.stores.isEmpty());
+    }
+
+    @Test public void pruneRejectsUnknownOrCyclicDependenciesBeforeAnyStoreRemoval() throws Exception {
+        Path root = temporary.newFolder().toPath(), archive = temporary.newFile().toPath();
+        Images images = new Images(); var library = library(root, images);
+        var a = library.restore(archive, "a"); var b = library.restore(archive, "b");
+        Files.delete(root.resolve("names/a.json")); Files.delete(root.resolve("names/b.json"));
+        JSONObject saved = images.stores.remove(b.store());
+        images.commands.clear();
+        assertThrows(IOException.class, library::prune);
+        assertFalse(images.commands.stream().anyMatch(c -> c.get(0).equals("remove")));
+        images.stores.put(b.store(), saved);
+        references(images, a.store(), b.store()); references(images, b.store(), a.store());
+        images.commands.clear();
+        assertThrows(IOException.class, library::prune);
+        assertFalse(images.commands.stream().anyMatch(c -> c.get(0).equals("remove")));
+        assertTrue(Files.isDirectory(a.store()) && Files.isDirectory(b.store()));
+    }
+
+    @Test public void localProjectionReferencesDoNotPreventPruneAndBusyDependentKeepsItsSources() throws Exception {
+        Path root = temporary.newFolder().toPath(), archive = temporary.newFile().toPath();
+        Images images = new Images(); var library = library(root, images);
+        var base = library.restore(archive, "base"); var work = library.restore(archive, "work");
+        references(images, base.store(), base.store());
+        references(images, work.store(), work.store(), base.store());
+        Files.delete(root.resolve("names/base.json")); Files.delete(root.resolve("names/work.json"));
+        images.commands.clear(); images.busy = true;
+        assertThrows(IOException.class, library::prune);
+        assertEquals(List.of(List.of("remove", work.store().toString())),
+                images.commands.stream().filter(c -> c.get(0).equals("remove")).toList());
+        assertTrue(Files.isDirectory(base.store()) && Files.isDirectory(work.store()));
+        images.busy = false; library.prune();
+        assertTrue(images.stores.isEmpty());
+    }
+
+    @Test public void removalRefusesAnotherNameSelectingTheSameStore() throws Exception {
+        Path root = temporary.newFolder().toPath(), archive = temporary.newFile().toPath();
+        Images images = new Images(); var library = library(root, images);
+        var a = library.restore(archive, "a"); library.restore(archive, "b");
+        Path record = root.resolve("names/b.json");
+        Files.writeString(record, new JSONObject(Files.readString(record))
+                .put("store", a.store().getFileName().toString()).toString());
+        images.commands.clear();
+        assertThrows(IOException.class, () -> library.remove("a"));
+        assertEquals(a.store(), library.resolve("b").store());
+        assertFalse(images.commands.stream().anyMatch(c -> c.get(0).equals("remove")));
     }
 
     @Test public void importerChangeAffectsOnlyNewImagesAndBusyUpgradeDoesNotPublishAnInstance() throws Exception {

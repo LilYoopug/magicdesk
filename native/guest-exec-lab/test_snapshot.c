@@ -18,6 +18,10 @@ static struct md_inode_store *store(const char *base, const char *name) {
     char path[4096]; assert(snprintf(path, sizeof(path), "%s/%s", base, name) < (int)sizeof(path));
     struct md_inode_store *s = NULL; assert(md_inode_store_open(path, 1, &s) == 0); return s;
 }
+static struct md_inode_store *reopen(const char *base, const char *name) {
+    char path[4096]; assert(snprintf(path,sizeof(path),"%s/%s",base,name)<(int)sizeof(path));
+    struct md_inode_store *s=NULL; assert(!md_inode_store_open(path,0,&s)); return s;
+}
 static int open_file(struct md_inode_store *s, const char *path, int flags) {
     int fd = md_inode_open(s, MD_INODE_ROOT, path, flags, 0600);
     if (fd < 0) fprintf(stderr, "open %s flags=%x errno=%d\n", path, flags, -fd);
@@ -36,6 +40,48 @@ static void source_object(struct md_inode_store *s, int retained, const struct s
     assert(actual.st_dev==expected->st_dev && actual.st_ino==expected->st_ino
         && actual.st_mode==expected->st_mode && fcntl(reopened,F_GETFL)==(flags&~O_CLOEXEC));
     close(reopened);
+}
+static void generations(const char *path) {
+    struct md_inode_store *base=store(path,"generation-base"), *child=store(path,"generation-child");
+    const char *names[]={"/unchanged","/changed"};
+    struct stat original[2],logical;
+    for (int i=0;i<2;++i) {
+        int fd=open_file(base,names[i],O_CREAT|O_RDWR);
+        assert(write(fd,"lower",5)==5); close(fd);
+    }
+    assert(!md_inode_link(base,MD_INODE_ROOT,"/changed",MD_INODE_ROOT,"/alias",0));
+    assert(!md_inode_store_seal(base));
+    for (int i=0;i<2;++i) {
+        int fd=open_file(base,names[i],O_RDONLY);
+        assert(!fstat(fd,&original[i])); close(fd);
+    }
+    assert(!md_inode_snapshot(base,child));
+    int fd=open_file(child,"/alias",O_RDWR);
+    struct stat copied;
+    assert(pwrite(fd,"upper",5,0)==5 && !fstat(fd,&copied) && !md_inode_fstat(child,fd,&logical)); close(fd);
+    assert(copied.st_ino!=original[1].st_ino);
+    assert(!md_inode_store_seal(child));
+    struct md_inode_store *next=store(path,"generation-next");
+    assert(!md_inode_snapshot(child,next));
+    md_inode_store_close(next); md_inode_store_close(child); md_inode_store_close(base);
+    next=reopen(path,"generation-next");
+    for (int i=0;i<2;++i) {
+        struct stat actual;
+        fd=open_file(next,names[i],O_RDONLY);
+        assert(!fstat(fd,&actual));
+        const struct stat *expected=i ? &copied : &original[0];
+        assert(actual.st_dev==expected->st_dev && actual.st_ino==expected->st_ino);
+        source_object(next,fd,expected); close(fd);
+    }
+    struct stat alias;
+    assert(!md_inode_stat(next,MD_INODE_ROOT,"/alias",0,&alias));
+    assert(alias.st_dev==logical.st_dev && alias.st_ino==logical.st_ino && alias.st_nlink==2);
+    fd=open_file(next,"/changed",O_RDWR); assert(pwrite(fd,"third",5,0)==5); close(fd);
+    value(next,"/alias","third"); value(next,"/unchanged","lower");
+    child=reopen(path,"generation-child"); base=reopen(path,"generation-base");
+    value(child,"/alias","upper"); value(base,"/alias","lower");
+    md_inode_store_close(base); md_inode_store_close(child); md_inode_store_close(next);
+    puts("PASS reopened COW generations retain direct source bodies, hardlink identity and independent writes");
 }
 int main(int argc, char **argv) {
     if (argc == 4 && !strcmp(argv[1], "--imported")) {
@@ -135,6 +181,7 @@ int main(int argc, char **argv) {
     value(b, "/data/alias", "mmaps"); value(base, "/data/file", "lower");
     close(watch); close(lower); close(image);
     md_inode_store_close(b); md_inode_store_close(a); md_inode_store_close(base);
+    generations(argv[1]);
     puts("PASS backing-source lease retains the exact lower object across copy-up, rename and unlink");
     puts("PASS shared snapshots, copy-up, hardlinks, stable identity, retained FDs, file watches and native mmap");
     return 0;

@@ -73,6 +73,18 @@ def tar(entries):
     return stream.getvalue()
 
 
+def frozen_backup_v1():
+    # Fixed wire-format input, independent of the current exporter.
+    header = b'{"format":1,"guestUsers":1,"imageConfig":{"config":{"Cmd":["/bin/sh"]}}}'
+    return tar([
+        ('magicdesk-backup.json', 'file', header),
+        ('rootfs/.', 'dir', '', 0o755, 0, 0, {'magicdesk.backup.mode': b'\xed\x01'}),
+        ('rootfs/file', 'file', b'contents', 0o640, 0, 0, {'magicdesk.backup.mode': b'\xa0\x01'}),
+        ('rootfs/alias', 'hard', 'rootfs/file'),
+        ('rootfs/native', 'file', b'native', 0o6750, 42, 43,
+         {'magicdesk.backup.mode': b'\xe8\x0d'})])
+
+
 class Layout:
     def __init__(self, path, layers, compression='gzip', config=None):
         self.path = path
@@ -947,6 +959,21 @@ sys.stdin.read()
         info = json.loads(self.command('inspect', self.destination).stdout)
         self.assertEqual(info['kind'], 'instance')
         self.assertEqual(info['config'], layout.config)
+
+    def test_frozen_portable_backup_v1(self):
+        archive = self.root / 'historical.tar'
+        archive.write_bytes(frozen_backup_v1())
+        self.command('restore', archive, self.destination)
+        self.assertEqual(self.body('file').read_bytes(), b'contents')
+        self.assertEqual(self.body('file'), self.body('alias'))
+        self.assertEqual(self.body('native').read_bytes(), b'native')
+        with database(self.destination / 'namespace.db') as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM sources').fetchone(), (0,))
+            self.assertEqual(db.execute('SELECT uid,gid,mode FROM objects WHERE uid=42').fetchone(),
+                             (42, 43, 0o6750))
+        info = json.loads(self.command('inspect', self.destination).stdout)
+        self.assertEqual(info['guestUsers'], 1)
+        self.assertEqual(info['config'], {'config': {'Cmd': ['/bin/sh']}})
 
     def test_backup_rejects_live_store_and_existing_output(self):
         self.run_import(self.layout())

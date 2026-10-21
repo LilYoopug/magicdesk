@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "inode_internal.h"
 #include "inode_schema.h"
+#include "fixtures/storage/format17.h"
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -10,6 +11,7 @@
 #include <string.h>
 #include <sys/file.h>
 #include <sys/wait.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 
 /* Prospective revisions exercise the production admission path without
@@ -96,25 +98,88 @@ static void check(struct md_inode_store *s) {
     char text[9]={0}; assert(read(fd,text,8)==8 && !strcmp(text,"contents")); close(fd);
     struct md_inode_audit audit; assert(!md_inode_audit(s,&audit));
 }
-static void baseline(const char *path) {
-    initialize(path);
+static void historical(const char *path,int revision,struct stat *file) {
+    static const char root_id[]="00000000000000000000000000000000";
+    static const char file_id[]="11111111111111111111111111111111";
+    assert(!mkdir(path,0700));
+    int root=open(path,O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(root>=0);
+    assert(!mkdirat(root,"objects",0700));
+    int objects=openat(root,"objects",O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(objects>=0);
+    assert(!mkdirat(objects,root_id,0700));
+    int fd=openat(objects,file_id,O_RDWR|O_CREAT|O_EXCL|O_CLOEXEC,0600); assert(fd>=0);
+    assert(write(fd,"contents",8)==8 && !fstat(fd,file)); close(fd);
+    struct stat directory; assert(!fstatat(objects,root_id,&directory,0));
+    if (revision==2) {
+        int parent=openat(objects,root_id,O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(parent>=0);
+        fd=openat(parent,"native",O_RDWR|O_CREAT|O_EXCL|O_CLOEXEC,0600); assert(fd>=0);
+        assert(write(fd,"native",6)==6 && !fchmod(fd,01700));
+        assert(!fsetxattr(fd,"user.shroot.metadata",format17_native_metadata,sizeof(format17_native_metadata),0));
+        close(fd); close(parent);
+    }
+    fd=openat(root,"watch.lock",O_RDWR|O_CREAT|O_EXCL|O_CLOEXEC,0600); assert(fd>=0); close(fd);
+    char database[PATH_MAX]; assert(snprintf(database,sizeof(database),"%s/namespace.db",path)<(int)sizeof(database));
+    sqlite3 *db=NULL; assert(sqlite3_open(database,&db)==SQLITE_OK);
+    assert(sqlite3_exec(db,"PRAGMA journal_mode=WAL; BEGIN",NULL,NULL,NULL)==SQLITE_OK);
+    assert(sqlite3_exec(db,format17_revision1,NULL,NULL,NULL)==SQLITE_OK);
+    if (revision==2) assert(sqlite3_exec(db,format17_revision2,NULL,NULL,NULL)==SQLITE_OK);
+    sqlite3_stmt *q=NULL;
+    assert(sqlite3_prepare_v2(db,"INSERT INTO objects(object,kind,device,inode,parent,backing,logical_inode,logical_device,scope,mode) "
+        "VALUES(?1,?2,?3,?4,?5,?1,?4,?3,?6,?7)",-1,&q,NULL)==SQLITE_OK);
+    for (int i=0;i<2;++i) {
+        const struct stat *st=i ? file : &directory;
+        assert(sqlite3_bind_text(q,1,i ? file_id : root_id,-1,SQLITE_STATIC)==SQLITE_OK);
+        assert(sqlite3_bind_int(q,2,i ? 32768 : 16384)==SQLITE_OK);
+        assert(sqlite3_bind_int64(q,3,st->st_dev)==SQLITE_OK);
+        assert(sqlite3_bind_int64(q,4,st->st_ino)==SQLITE_OK);
+        if (!i) assert(sqlite3_bind_text(q,5,root_id,-1,SQLITE_STATIC)==SQLITE_OK);
+        assert(sqlite3_bind_text(q,6,root_id,-1,SQLITE_STATIC)==SQLITE_OK);
+        assert(sqlite3_bind_int(q,7,i ? 0640 : 0700)==SQLITE_OK);
+        assert(sqlite3_step(q)==SQLITE_DONE && sqlite3_reset(q)==SQLITE_OK);
+        assert(sqlite3_clear_bindings(q)==SQLITE_OK);
+    }
+    assert(sqlite3_finalize(q)==SQLITE_OK);
+    assert(sqlite3_exec(db,"INSERT INTO inode_views(scope,kind) VALUES('00000000000000000000000000000000',0);"
+        "INSERT INTO names(parent,name,object) VALUES('00000000000000000000000000000000',x'66696c65','11111111111111111111111111111111'),"
+        "('00000000000000000000000000000000',x'616c696173','11111111111111111111111111111111');COMMIT",NULL,NULL,NULL)==SQLITE_OK);
+    assert(sqlite3_close(db)==SQLITE_OK); close(objects); close(root);
+}
+static void native_value(struct md_inode_store *s) {
+    struct stat st;
+    assert(!md_inode_stat(s,-1,"native",0,&st));
+    assert(st.st_uid==42 && st.st_gid==43 && (st.st_mode&07777)==06750 && st.st_size==6);
+    int fd=md_inode_open(s,-1,"native",O_RDONLY,0); assert(fd>=0);
+    char value[6]; assert(read(fd,value,sizeof(value))==sizeof(value) && !memcmp(value,"native",6)); close(fd);
+}
+static void same_schema(sqlite3 *a,sqlite3 *b) {
+    const char *sql="SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name";
+    sqlite3_stmt *left=NULL,*right=NULL;
+    assert(sqlite3_prepare_v2(a,sql,-1,&left,NULL)==SQLITE_OK && sqlite3_prepare_v2(b,sql,-1,&right,NULL)==SQLITE_OK);
+    for (;;) {
+        int x=sqlite3_step(left),y=sqlite3_step(right); assert(x==y);
+        if (x==SQLITE_DONE) break;
+        assert(x==SQLITE_ROW);
+        for (int i=0;i<4;++i) assert(!strcmp((const char *)sqlite3_column_text(left,i),(const char *)sqlite3_column_text(right,i)));
+    }
+    assert(sqlite3_finalize(left)==SQLITE_OK && sqlite3_finalize(right)==SQLITE_OK);
+}
+static void baseline(const char *path,int revision,struct md_inode_store *fresh) {
+    struct stat before,after; historical(path,revision,&before);
     struct md_inode_store *s=NULL,*other=NULL;
-    assert(!md_inode_store_open(path,0,&s));
-    struct stat before,after; assert(!md_inode_stat(s,-1,"file",0,&before));
-    /* Revision 2 adds only this table. Remove that exact DDL addition, not just
-     * its version marker, to reconstruct the supported revision-1 schema. */
-    assert(sqlite3_exec(s->db,"DROP TABLE native_publication;DROP TABLE native_cookies;"
-        "UPDATE properties SET value=1 WHERE key='schema-revision'",NULL,NULL,NULL)==SQLITE_OK);
-    assert(md_inode_store_open_inspect(path,&other)==-EPROTONOSUPPORT && !other);
-    assert(md_inode_store_open(path,0,&other)==-EBUSY && !other);
-    md_inode_store_close(s);
+    int lease=open(path,O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(lease>=0 && !flock(lease,LOCK_SH));
+    if (revision<md_inode_store_revision()) {
+        assert(md_inode_store_open_inspect(path,&other)==-EPROTONOSUPPORT && !other);
+        assert(md_inode_store_open(path,0,&other)==-EBUSY && !other);
+    }
+    close(lease);
     assert(!md_inode_store_open(path,0,&s)); check(s);
     assert(!md_inode_stat(s,-1,"file",0,&after));
     assert(before.st_dev==after.st_dev && before.st_ino==after.st_ino);
     assert(scalar(s,"SELECT value FROM properties WHERE key='schema-revision'")==md_inode_store_revision());
     assert(scalar(s,"SELECT count(*) FROM native_publication")==0);
+    same_schema(fresh->db,s->db);
+    if (revision==2) native_value(s);
     md_inode_store_close(s);
-    puts("PASS format-17 revision-1 admission preserves installed contents and identities");
+    printf("PASS frozen format-17 revision-%d: contents, identities and fresh/upgraded schema equivalence\n",revision);
 }
 static void lightweight(const char *path) {
     initialize(path);
@@ -272,14 +337,42 @@ static void shared_source(const char *path,const char *instance) {
     check(base); md_inode_store_close(base); md_inode_store_close(copy);
     puts("PASS dependent source lease blocks upgrade; independent revisions preserve shared bodies and COW");
 }
+static void inspection(const char *root) {
+    char path[PATH_MAX]; snprintf(path,sizeof(path),"%s/inspection",root); initialize(path);
+    struct md_inode_store *s=NULL; assert(!md_inode_store_open(path,0,&s));
+    int config=openat(s->lifetime->root,"image-config.json",O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);
+    assert(config>=0 && write(config,"{}",2)==2); close(config);
+    assert(!mdi_begin(s,1));
+    const char *names[]={"fresh","revision-1"};
+    for (int i=0;i<2;++i) {
+        snprintf(path,sizeof(path),"%s/%s/objects",root,names[i]);
+        int fd=open(path,O_RDONLY|O_DIRECTORY|O_CLOEXEC), source=0; assert(fd>=0);
+        assert(!mdi_source_register(s,fd,&source) && source==i+1); close(fd);
+    }
+    /* Source IDs are scope-local. The second dependency belongs only to a
+     * retained projection; the first occurs in both scopes. */
+    assert(!mdi_sql(s,"INSERT INTO sources SELECT id,path,device,inode,'11111111111111111111111111111111' FROM sources;"
+        "DELETE FROM sources WHERE scope='00000000000000000000000000000000' AND id=2"));
+    assert(!mdi_finish(s,0)); md_inode_store_close(s);
+}
 int main(int argc,char **argv) {
+    if (argc==3 && !strcmp(argv[1],"--check-history-backup")) {
+        struct md_inode_store *s=NULL; assert(!md_inode_store_open(argv[2],0,&s));
+        check(s); native_value(s); assert(!scalar(s,"SELECT count(*) FROM sources")); md_inode_store_close(s);
+        puts("PASS historical metadata survives portable backup without shared sources"); return 0;
+    }
     assert(argc==2 && !mkdir(argv[1],0700));
     assert(mdi_schema_current.count+2<sizeof(future_steps)/sizeof(*future_steps));
     memcpy(future_steps,mdi_schema_current.steps,mdi_schema_current.count*sizeof(*future_steps));
     memcpy(future_steps+mdi_schema_current.count,upgrades,sizeof(upgrades));
     future=(struct mdi_schema_plan){future_steps,mdi_schema_current.count+2};
     char path[PATH_MAX];
-    snprintf(path,sizeof(path),"%s/baseline",argv[1]); baseline(path);
+    snprintf(path,sizeof(path),"%s/fresh",argv[1]); initialize(path);
+    struct md_inode_store *fresh=NULL; assert(!md_inode_store_open(path,0,&fresh));
+    for (int revision=1;revision<=2;++revision) {
+        snprintf(path,sizeof(path),"%s/revision-%d",argv[1],revision); baseline(path,revision,fresh);
+    }
+    md_inode_store_close(fresh);
     snprintf(path,sizeof(path),"%s/lightweight",argv[1]); lightweight(path);
     snprintf(path,sizeof(path),"%s/update",argv[1]); update(path);
     snprintf(path,sizeof(path),"%s/full",argv[1]); full(path);
@@ -290,5 +383,6 @@ int main(int argc,char **argv) {
     snprintf(path,sizeof(path),"%s/invalid",argv[1]); invalid_steps(path);
     char instance[PATH_MAX]; snprintf(instance,sizeof(instance),"%s/instance",argv[1]);
     snprintf(path,sizeof(path),"%s/base",argv[1]); shared_source(path,instance);
+    inspection(argv[1]);
     return 0;
 }

@@ -12,7 +12,10 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
@@ -89,10 +92,10 @@ final class GuestEnvironmentLibrary {
                     requireKind(base, "image");
                 }
                 String id = UUID.randomUUID().toString();
-                Path store = root.resolve("instances").resolve(id);
+                Path store = newStore();
                 images.invoke("create", base.toString(), store.toString());
                 if (resolver != null) progress.accept(images.invoke("resolver", store.toString(), resolver).trim());
-                return publish(name, id, image, source);
+                return publish(name, id, store, image, source);
             } finally { discardWork(work); }
         }
     }
@@ -199,8 +202,9 @@ final class GuestEnvironmentLibrary {
         try (Lock ignored = lock()) {
             requireNew(name);
             String id = UUID.randomUUID().toString();
-            images.invoke("restore", archive.toAbsolutePath().toString(), root.resolve("instances").resolve(id).toString());
-            return publish(name, id, "", archive.toString());
+            Path store = newStore();
+            images.invoke("restore", archive.toAbsolutePath().toString(), store.toString());
+            return publish(name, id, store, "", archive.toString());
         }
     }
 
@@ -215,6 +219,17 @@ final class GuestEnvironmentLibrary {
         try (Lock ignored = lock()) {
             Environment environment = read(name);
             Path store = environment.store();
+            for (Environment other : list()) {
+                if (!other.name().equals(name) && other.store().equals(store))
+                    throw new IOException("Environment storage is also selected by " + other.name());
+            }
+            // A closed dependent retains no kernel lease. Check its persistent
+            // references before asking the native owner to arbitrate live use.
+            List<Path> owners = stores();
+            owners.remove(store);
+            owners.remove(store.resolveSibling(".md-remove-" + store.getFileName()));
+            if (dependencies(owners).contains(store))
+                throw new IOException("Environment storage is referenced by another store: " + store);
             if (Files.exists(store, LinkOption.NOFOLLOW_LINKS) || Files.exists(store.resolveSibling(".md-remove-" + store.getFileName()),
                     LinkOption.NOFOLLOW_LINKS)) images.invoke("remove", store.toString());
             Files.delete(recordPath(name));
@@ -289,17 +304,9 @@ final class GuestEnvironmentLibrary {
                 keptStores.add(environment.store());
                 if (!environment.image().isEmpty()) keptImages.add(root.resolve("images").resolve(environment.image()));
             }
-            for (Path store : directories("instances")) {
-                if (!keptStores.contains(store)) removeCandidate(store, false);
-            }
-            // Read every remaining dependency before removing any lower data. Unknown/corrupt stores abort GC.
-            Set<Path> dependencies = dependencies(directories("instances"));
-            for (Path base : directories("images")) {
-                if (!keptImages.contains(base) && !dependencies.contains(base)) removeCandidate(base, false);
-            }
-            List<Path> owners = new ArrayList<>(directories("instances"));
-            owners.addAll(directories("images"));
-            dependencies = dependencies(owners);
+            keptStores.addAll(keptImages);
+            for (Path store : unusedStores(keptStores)) removeCandidate(store, false);
+            Set<Path> dependencies = dependencies(stores());
             for (Path layer : directories("layers")) {
                 if (!dependencies.contains(layer)) removeCandidate(layer, true);
             }
@@ -345,6 +352,47 @@ final class GuestEnvironmentLibrary {
         return result;
     }
 
+    private List<Path> stores() throws IOException {
+        List<Path> result = new ArrayList<>(directories("instances"));
+        result.addAll(directories("images"));
+        return result;
+    }
+
+    private List<Path> unusedStores(Set<Path> roots) throws Exception {
+        // Plan all removals before mutating anything. Unknown stores and cycles
+        // are failures, not permission to discard possibly shared data.
+        Map<Path, Set<Path>> sources = new LinkedHashMap<>();
+        for (Path store : stores()) {
+            Set<Path> dependencies = dependencies(List.of(store));
+            // A retained projection can use bodies from its own store.
+            dependencies.remove(store);
+            sources.put(store, dependencies);
+        }
+        Set<Path> kept = new HashSet<>();
+        var pending = new java.util.ArrayDeque<>(roots);
+        while (!pending.isEmpty()) {
+            Path store = pending.removeFirst();
+            if (kept.add(store)) pending.addAll(sources.getOrDefault(store, Set.of()));
+        }
+        Set<Path> unused = new LinkedHashSet<>(sources.keySet());
+        unused.removeAll(kept);
+        Map<Path, Integer> references = new LinkedHashMap<>();
+        for (Path store : unused) references.put(store, 0);
+        for (Path store : unused) for (Path source : sources.get(store))
+            if (unused.contains(source)) references.merge(source, 1, Integer::sum);
+        for (Path store : unused) if (references.get(store) == 0) pending.add(store);
+        List<Path> result = new ArrayList<>();
+        while (!pending.isEmpty()) {
+            Path store = pending.removeFirst();
+            result.add(store);
+            for (Path source : sources.get(store)) {
+                if (unused.contains(source) && references.merge(source, -1, Integer::sum) == 0) pending.add(source);
+            }
+        }
+        if (result.size() != unused.size()) throw new IOException("Cyclic storage dependencies; nothing was pruned");
+        return result;
+    }
+
     private List<Path> directories(String group) throws IOException {
         try (var paths = Files.list(root.resolve(group))) {
             List<Path> result = paths.filter(path -> !path.getFileName().toString().matches("\\.md-image-[0-9a-f]{32}")).sorted().toList();
@@ -354,23 +402,34 @@ final class GuestEnvironmentLibrary {
         }
     }
 
-    private Environment publish(String name, String id, String image, String source) throws Exception {
-        JSONObject record = new JSONObject().put("format", 1).put("name", name).put("id", id)
-                .put("image", image).put("source", source);
+    private Path newStore() { return root.resolve("instances").resolve(UUID.randomUUID().toString()); }
+
+    private Environment publish(String name, String id, Path store, String image, String source) throws Exception {
+        JSONObject record = new JSONObject().put("format", 2).put("name", name).put("id", id)
+                .put("store", store.getFileName().toString()).put("image", image).put("source", source);
         GuestImageFiles.write(recordPath(name), record.toString(), directories);
         return read(name);
     }
 
     private Environment read(String name) throws Exception {
         JSONObject record = new JSONObject(GuestImageFiles.read(recordPath(name)));
-        if (record.getInt("format") != 1 || !name.equals(record.getString("name"))) throw new IOException("Invalid environment record");
+        int format = record.getInt("format");
+        if ((format != 1 && format != 2) || !name.equals(record.getString("name"))) throw new IOException("Invalid environment record");
         String id = record.getString("id"), image = record.getString("image");
+        // Version 1 used the environment ID as its store key. Decode it here,
+        // without moving installed data or rewriting records during listing.
+        String store = format == 1 ? id : record.getString("store");
         // An opaque resource key, not a schema/version selector. Its contents
         // are admitted by the native store; records retain their exact paths.
-        if (!UUID.fromString(id).toString().equals(id) || !(image.isEmpty()
+        if (!validId(id) || !validId(store) || !(image.isEmpty()
                 || image.matches("[a-z0-9][a-z0-9-]{0,127}")))
             throw new IOException("Invalid environment storage identity");
-        return new Environment(name, id, image, record.getString("source"), root.resolve("instances").resolve(id));
+        return new Environment(name, id, image, record.getString("source"), root.resolve("instances").resolve(store));
+    }
+
+    private static boolean validId(String value) {
+        try { return UUID.fromString(value).toString().equals(value); }
+        catch (IllegalArgumentException error) { return false; }
     }
 
     private JSONObject requireKind(Path store, String expected) throws Exception {

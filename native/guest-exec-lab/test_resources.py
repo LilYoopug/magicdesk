@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import shlex
 import statistics
+import tempfile
 import tomllib
 import uuid
 
@@ -472,6 +473,28 @@ def main():
         if args.case in ("all", "stores"):
             check("storage schema", root + "/libmagicdesk_guest_test_schema.so " + root + "/schema-unit",
                   "PASS concurrent preparation fails busy")
+            inspection = check("all-scope source inspection", root + "/libmagicdesk_guest_image.so inspect "
+                               + root + "/schema-unit/inspection")
+            sources = json.loads(inspection["output"])["sources"]
+            assert len(sources) == 2 and {item["path"] for item in sources} == {
+                root + "/schema-unit/fresh/objects", root + "/schema-unit/revision-1/objects"}
+            spec = importlib.util.spec_from_file_location("oci_fixtures", Path(__file__).with_name("test_oci.py"))
+            fixtures = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(fixtures)
+            with tempfile.TemporaryDirectory(prefix="md-backup-fixture-") as staging:
+                archive = Path(staging) / "frozen.tar"
+                archive.write_bytes(fixtures.frozen_backup_v1())
+                transport.upload(client, archive, root + "/frozen.tar")
+            check("frozen backup v1 restore", root + "/libmagicdesk_guest_image.so restore "
+                  + root + "/frozen.tar " + root + "/frozen-restored")
+            check("frozen backup v1 contents", root + "/libmagicdesk_guest_test_schema.so --check-history-backup "
+                  + root + "/frozen-restored", "PASS historical metadata survives portable backup")
+            check("historical storage backup", root + "/libmagicdesk_guest_image.so backup "
+                  + root + "/schema-unit/revision-2 " + root + "/historical.tar.zst")
+            check("historical storage restore", root + "/libmagicdesk_guest_image.so restore "
+                  + root + "/historical.tar.zst " + root + "/historical-restored")
+            check("historical portable metadata", root + "/libmagicdesk_guest_test_schema.so --check-history-backup "
+                  + root + "/historical-restored", "PASS historical metadata survives portable backup")
             check("native inode publication", "timeout -k 5 90 " + root
                   + "/libmagicdesk_guest_test_publication.so " + root + "/publication-unit",
                   "PASS promoted body enters existing shared-source snapshots and COW")

@@ -644,6 +644,10 @@ retains the storage; stop those launches and retry. Listing and application
 catalog inspection do not initiate schema updates. `shroot image prepare STORE`
 explicitly prepares a store without launching it. A newer, unknown revision is
 rejected; downgrading an APK does not downgrade its storage.
+New catalog records separate the environment UUID from its working-store key;
+existing records remain readable without moving data. Removing or pruning stores
+also respects persistent dependencies from stopped environments. This prepares
+for future offline snapshots, but snapshot/rollback commands are not available.
 See [storage evolution](../native/shroot/inode-store.md#storage-evolution).
 
 #### Launches and directory attachments

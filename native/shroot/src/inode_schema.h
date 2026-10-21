@@ -3,7 +3,9 @@
 #include <stddef.h>
 
 struct md_inode_store;
-/* Append metadata-only SQL upgrades: steps[0] advances revision 1 to 2.
+/* Revision admits the complete persistent contract, including native metadata
+ * encodings. Runtime tuning and rebuildable indexes do not advance it.
+ * Append metadata-only SQL upgrades: steps[0] advances revision 1 to 2.
  * Each step and its revision marker commit together. Never delete old steps or
  * put backing-file IO, transaction control or journal pragmas in a step. */
 struct mdi_schema_plan { const char *const *steps; size_t count; };
