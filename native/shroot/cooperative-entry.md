@@ -136,6 +136,9 @@ reset an ignored/blocked SIGSEGV disposition before ptrace observes it. A
 signal-neutral completion marker does not make that access kernel-mediated.
 The fault control remains explicit; this protocol does not claim transparent
 invalid-pointer handling under every protected-memory and seccomp combination.
+The [kernel-copy controls](../guest-exec-lab/sandbox-research.md#invalid-pointer-copy-controls)
+record safe-copy behavior, filter restrictions and isolated cost; they do not
+change the ordinary copy path.
 
 The task registry retains an immutable resource generation for repeated reads.
 Each admitted read owns one reference instead of independently retaining every

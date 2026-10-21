@@ -161,6 +161,40 @@ control returns EFAULT without changing the same signal disposition. These
 faulting fallback copies need kernel-mediated access, not just replacement of
 their final BRK or a racy VMA precheck.
 
+### Invalid-Pointer Copy Controls
+
+Run the bounded copy investigation without the complete checkpoint matrix:
+
+```sh
+python native/guest-exec-lab/test_signal_checkpoint.py BUILD --copy-fault
+```
+
+It retains the six negative LDR controls and adds 72 native self-`process_vm`
+read/write controls: installed, ignored and blocked SIGSEGV/SIGBUS; dumpable=0;
+valid, inaccessible, unmapped, truncated-file and read-only mappings; and an
+exact partial prefix at a protection boundary. On the tested Linux 6.12 device,
+kernel copies preserve both dispositions and masks. Six filter scenarios then
+deny `process_vm_readv/writev` and subsequently pipe `read/write`: neither is a
+universal replacement inside application seccomp. These are native controls,
+not integrated Shroot copy implementations or coverage of every kernel.
+
+The same mode compares the production `guest_copy.S` with self-`process_vm` and
+a pipe round trip, rotating five rounds of 32768 copies of 128 bytes. Reports
+retain raw timings, medians and CPU-frequency context over the command envelope,
+not per-thread execution frequency. The first measured medians were 0.19 ms for
+userspace, 6.8 ms for either `process_vm` direction and 8.4 ms for the pipe.
+The roughly 0.2 microsecond extra cost per kernel copy excludes PID lookup and
+adapter integration; it is not a measured whole-application slowdown.
+
+No production path is changed by this experiment. The normal supervisor shield
+already unblocks synchronous faults, but cannot protect an ignored disposition
+or the caller-mask cooperative path. Existing task helpers share `CLONE_SIGHAND`,
+so moving a load there does not isolate the damage. A reliable conditional path
+would have to account for native mask/action changes and concurrent peers;
+checking VMAs before a load or repairing a handler after the fault is insufficient.
+Keep this limitation explicit rather than adding a per-copy kernel trip or a
+separate helper lifecycle solely for this case.
+
 ### Combined Replay Protocol
 
 The retained-signal experiment now chains real delivery stops inside the same

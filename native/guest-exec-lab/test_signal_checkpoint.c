@@ -832,6 +832,119 @@ static void sysemu_register_copy(int protected,int fault,int negative) {
     assert(!munmap(source,4096) && !munmap(output,4096));
     close(start[0]); close(start[1]); close(data[0]); close(data[1]);
 }
+static ssize_t kernel_copy(pid_t self,int writing,void *guest,void *trusted,size_t size) {
+    struct iovec local={trusted,size},remote={guest,size};
+    return syscall(writing ? SYS_process_vm_writev : SYS_process_vm_readv,
+        self,&local,1,&remote,1,0);
+}
+static void copy_signal_state(int disposition) {
+    const int signals[]={SIGSEGV,SIGBUS};
+    sigset_t mask; assert(!sigprocmask(SIG_SETMASK,NULL,&mask));
+    for (unsigned i=0;i<2;++i) {
+        struct sigaction action; assert(!sigaction(signals[i],NULL,&action));
+        assert(action.sa_handler==(disposition==1 ? SIG_IGN : unexpected));
+        assert(sigismember(&mask,signals[i])==(disposition==2));
+    }
+}
+static void deny_copy_calls(int first,int second) {
+    struct sock_filter code[]={
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,first,0,1),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EPERM),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,second,0,1),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EPERM),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
+    };
+    struct sock_fprog program={sizeof(code)/sizeof(code[0]),code};
+    assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+    assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+}
+static void kernel_copy_faults(int protected,int disposition) {
+    pid_t pid=fork(); assert(pid>=0);
+    if (!pid) {
+        if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
+        struct sigaction action={.sa_handler=disposition==1 ? SIG_IGN : unexpected};
+        assert(!sigaction(SIGSEGV,&action,NULL) && !sigaction(SIGBUS,&action,NULL));
+        sigset_t mask; sigemptyset(&mask);
+        if (disposition==2) { sigaddset(&mask,SIGSEGV); sigaddset(&mask,SIGBUS); }
+        assert(!sigprocmask(SIG_SETMASK,&mask,NULL));
+        size_t page=(size_t)sysconf(_SC_PAGESIZE);
+        pid_t self=getpid();
+        /* Valid, inaccessible, unmapped, truncated file, read-only, and a
+         * valid prefix ending at a protection boundary. No signal repair. */
+        for (int kind=0;kind<6;++kind) for (int writing=0;writing<2;++writing) {
+            int fd=-1;
+            if (kind==3) {
+                fd=memfd_create("copy-fault",MFD_CLOEXEC);
+                assert(fd>=0 && !ftruncate(fd,(off_t)(2*page)));
+            }
+            unsigned char *mapping=mmap(NULL,2*page,PROT_READ|PROT_WRITE,
+                MAP_SHARED|(fd<0 ? MAP_ANONYMOUS : 0),fd,0);
+            assert(mapping!=MAP_FAILED); memset(mapping,0x5a,2*page);
+            unsigned char *guest=kind==5 ? mapping+page-8 : mapping;
+            if (kind==1) assert(!mprotect(mapping,2*page,PROT_NONE));
+            if (kind==2) assert(!munmap(mapping,2*page));
+            if (kind==3) assert(!ftruncate(fd,0));
+            if (kind==4) assert(!mprotect(mapping,2*page,PROT_READ));
+            if (kind==5) assert(!mprotect(mapping+page,page,PROT_NONE));
+            unsigned char trusted[16]; memset(trusted,0x33,sizeof(trusted));
+            ssize_t result=kernel_copy(self,writing,guest,trusted,sizeof(trusted));
+            if (!kind || (kind==4 && !writing)) assert(result==sizeof(trusted));
+            else if (kind==5) assert(result==8);
+            else assert(result==-1 && errno==EFAULT);
+            copy_signal_state(disposition);
+            if (result>0) {
+                const unsigned char *copied=writing ? guest : trusted;
+                for (ssize_t i=0;i<result;++i) assert(copied[i]==(writing ? 0x33 : 0x5a));
+                if (!writing && kind==5)
+                    for (size_t i=8;i<sizeof(trusted);++i) assert(trusted[i]==0x33);
+            }
+            if (kind!=2) assert(!munmap(mapping,2*page));
+            if (fd>=0) close(fd);
+        }
+        int pipes[2]; assert(!pipe(pipes));
+        unsigned char trusted[16]={0},guest[16]={0};
+        deny_copy_calls(SYS_process_vm_readv,SYS_process_vm_writev);
+        for (int writing=0;writing<2;++writing)
+            assert(kernel_copy(self,writing,guest,trusted,sizeof(trusted))==-1 && errno==EPERM);
+        assert(write(pipes[1],guest,sizeof(guest))==sizeof(guest));
+        assert(read(pipes[0],trusted,sizeof(trusted))==sizeof(trusted));
+        deny_copy_calls(SYS_read,SYS_write);
+        assert(write(pipes[1],guest,sizeof(guest))==-1 && errno==EPERM);
+        assert(read(pipes[0],trusted,sizeof(trusted))==-1 && errno==EPERM);
+        copy_signal_state(disposition);
+        _exit(0);
+    }
+    int status;
+    /* EVENT_WAIT: exact copy-control child exit; the fixture alarm bounds failure. */
+    assert(waitpid(pid,&status,0)==pid && WIFEXITED(status) && !WEXITSTATUS(status));
+}
+extern long md_read_memory(void *,const void *,size_t);
+static void copy_costs(void) {
+    unsigned char source[128],output[128]; memset(source,0x5a,sizeof(source));
+    pid_t self=getpid(); int pipes[2]; assert(!pipe(pipes));
+    const char *names[]={"userspace","process-vm-read","process-vm-write","pipe-roundtrip"};
+    for (unsigned round=0;round<5;++round) for (unsigned i=0;i<4;++i) {
+        unsigned mode=(i+round)%4;
+        memset(output,0,sizeof(output));
+        struct timespec start,end; assert(!clock_gettime(CLOCK_MONOTONIC,&start));
+        for (unsigned n=0;n<32768;++n) {
+            if (!mode) assert(!md_read_memory(output,source,sizeof(source)));
+            else if (mode<3) {
+                assert(kernel_copy(self,mode==2,mode==2 ? output : source,
+                    mode==2 ? source : output,sizeof(source))==sizeof(source));
+            } else {
+                assert(write(pipes[1],source,sizeof(source))==sizeof(source));
+                assert(read(pipes[0],output,sizeof(output))==sizeof(output));
+            }
+        }
+        assert(!clock_gettime(CLOCK_MONOTONIC,&end));
+        assert(!memcmp(source,output,sizeof(source)));
+        double ms=(end.tv_sec-start.tv_sec)*1000.0+(end.tv_nsec-start.tv_nsec)/1e6;
+        printf("copy round=%u mode=%s 32768_copies_128_bytes_ms=%.3f\n",round,names[mode],ms);
+    }
+    close(pipes[0]); close(pipes[1]);
+}
 static void replay_at_native_entry(int protected,int restart,int writing,int seccomp) {
     struct signal_observation *out=mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS,-1,0);
     assert(out!=MAP_FAILED);
@@ -1367,6 +1480,19 @@ static void retained_continue(int protected,int process) {
 int main(int argc,char **argv) {
     setvbuf(stdout,NULL,_IOLBF,0);
     alarm(60);
+    if (argc==2 && !strcmp(argv[1],"--copy-fault")) {
+        for (int protected=0;protected<2;++protected) {
+            for (int fault=1;fault<4;++fault) sysemu_register_copy(protected,fault,0);
+            for (int disposition=0;disposition<3;++disposition)
+                kernel_copy_faults(protected,disposition);
+        }
+        puts("LIMIT service copy fault: 6 controls; ignored/blocked SIGSEGV still resets before ptrace; native copy returns EFAULT unchanged");
+        puts("PASS kernel copy: 72 controls; read/write, dumpable=0, ignored/blocked SEGV/BUS, partial copy, protection, unmap and truncated file");
+        puts("LIMIT kernel copy seccomp: 6 policies; self process_vm and pipe copy can both be denied");
+        printf("PASS copy fault controls: uid=%u\n",getuid());
+        copy_costs();
+        return 0;
+    }
     if (argc==2 && !strcmp(argv[1],"--job-control")) {
         for (int protected=0;protected<2;++protected)
             for (int process=0;process<2;++process) retained_continue(protected,process);
